@@ -5,6 +5,7 @@
   "deck": "dg50",
   "objective": "template",
   "wall_ring": "excluded",
+  "training_precision": "fp64",
   "network": {
     "hidden_channels": 16,
     "hidden_layers": 4,

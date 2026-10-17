@@ -92,6 +92,7 @@ def test_committed_configs_are_the_three_candidates_of_the_template_procedure():
     assert len({config["experiment"] for config in loaded.values()}) == 3
     for name, config in loaded.items():
         assert config["objective"] in name and config["wall_ring"] in name
+        assert config["training_precision"] == "fp64"
         assert config["experiment"] == "swgonl_exp1_" + name[5:-5]
         assert config["curriculum"] == {
             "window_days": [1, 2, 4, 8], "epochs_per_window": 5,
@@ -231,6 +232,10 @@ def test_gpu_control_configs_name_the_frozen_control_choices_exactly():
     (lambda c: c.update(extra=1), "exactly the keys"),
     (lambda c: c.update(objective="auto"), "objective"),
     (lambda c: c.update(wall_ring=None), "wall_ring"),
+    (lambda c: c.pop("training_precision"), "exactly the keys"),
+    (lambda c: c.update(training_precision="fp16"), "training_precision"),
+    (lambda c: c.update(training_precision="FP32"), "training_precision"),
+    (lambda c: c.update(training_precision=32), "training_precision"),
     (lambda c: c["optimiser"].pop("adam_epsilon_convention"), "exactly"),
     (lambda c: c["optimiser"].update(schedule="warmup_cosine"), "constant"),
     (lambda c: c["optimiser"].update(gradient_clipping="global_norm"), "none"),
@@ -1444,3 +1449,258 @@ def test_without_initial_checkpoint_the_seed_initialises_as_before(
         == log["epochs"][0]["train_loss_per_batch"]
     assert seeded_log["epochs"][0]["checkpoint"]["sha256"] \
         == log["epochs"][0]["checkpoint"]["sha256"]
+
+
+# ------------------------------------------------------- training precision
+
+EXP3_FP32 = _ROOT / "config/swg_online/exp3_symmetric_ring_weighted_fp32.json"
+EXP1_SYMMETRIC = _ROOT / "config/swg_online/exp1_symmetric_ring_weighted.json"
+
+
+def test_every_committed_training_config_states_its_training_precision():
+    trained_configs = [
+        path for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
+        if "network" in json.loads(path.read_text())]
+    assert len(trained_configs) >= 17
+    precisions = {path.name: driver.load_config(path)["training_precision"]
+                  for path in trained_configs}
+    assert precisions.pop(EXP3_FP32.name) == "fp32"
+    assert set(precisions.values()) == {"fp64"}
+
+
+def test_exp3_is_the_symmetric_candidate_in_single_precision_on_the_gpu():
+    exp3 = driver.load_config(EXP3_FP32)
+    symmetric = driver.load_config(EXP1_SYMMETRIC)
+    template = driver.load_config(EXP1_WEIGHTED)
+    assert exp3["experiment"] == "swgonl_exp3_symmetric_ring_weighted_fp32"
+    assert exp3["description"] == (
+        "Next run after the 2026-10-17 decision (user: symmetric objective "
+        "next, single-precision training, GPU free runs): "
+        + symmetric["description"])
+    assert exp3 == symmetric | {
+        "experiment": exp3["experiment"], "description": exp3["description"],
+        "training_precision": "fp32",
+        "free_run": symmetric["free_run"] | {
+            "device": "cuda", "math_library": "native"}}
+    assert exp3["network"]["wall_margin_rings"] == 0
+    assert exp3 | {key: template[key] for key in (
+        "experiment", "description", "objective", "training_precision")} \
+        == template
+
+
+def _parent_batch_functions(card, geometry, *, window_days, objective,
+                            wall_ring):
+    """``build_batch_functions`` as it was before ``training_precision``."""
+    raw, _ = build_segment_fn(
+        card, geometry, window_days=window_days, checkpoint=True)
+    n_steps = (window_days * driver.HOURS_PER_DAY
+               * int(driver.SECONDS_PER_HOUR / card.dt_s))
+    template = card.recipe.initial_state
+    namelist = card.resolved_namelist
+    shape = tuple(geometry.tmask.shape)
+
+    def batch_loss(network, initial, target, key):
+        noise = jnp.zeros((n_steps, 3) + shape, dtype=jnp.float64)
+
+        def rollout(ssh, u, v):
+            state = coarse_state_from_native(template, ssh, u, v)
+            return raw(network, state, noise, key, jnp.asarray(0.0))[1]
+
+        predicted = jax.vmap(rollout)(*initial)
+        return deterministic_trajectory_loss(
+            predicted, target, geometry, objective=objective,
+            beta_m1_s1=namelist.rn_beta_m_s,
+            basin_length_m=namelist.rn_domsiz_m, wall_ring=wall_ring)
+
+    return (eqx.filter_jit(eqx.filter_value_and_grad(batch_loss)),
+            eqx.filter_jit(batch_loss))
+
+
+@pytest.fixture(scope="module")
+def precision_steps(small_card):
+    """One optimiser step of ten random one-day windows, three ways: the
+    parent code path, ``"fp64"`` and ``"fp32"`` (built with a spy on the
+    jitted functions that records their arguments and traced bodies)."""
+    card = small_card
+    geometry = build_closure_geometry(card)
+    config = driver.load_config(EXP1_SYMMETRIC)
+    spec, _ = driver.network_spec(config, card, geometry)
+    key = jax.random.PRNGKey(11)
+    network = SWGScalarPotentialCNN(spec, key=key)
+    optimizer = create_swg_optimizer(SWGOptimizerSettings(**config["optimiser"]))
+    shape = tuple(geometry.tmask.shape)
+    rng = np.random.default_rng(3)
+    batch = driver.WindowBatch(
+        tuple(1.0e-3 * rng.normal(size=(10,) + shape) for _ in range(3)),
+        tuple(1.0e-3 * rng.normal(size=(10, 24) + shape) for _ in range(3)),
+        np.arange(10), "train", 1)
+    options = {"window_days": 1, "objective": config["objective"],
+               "wall_ring": config["wall_ring"]}
+    update = driver._update_function(optimizer)
+
+    def step(functions):
+        loss, grads = driver.batch_value_and_grad(
+            functions[0], network, batch, key, 10)
+        opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))
+        stepped, _ = update(network, grads, opt_state)
+        return {"loss": loss, "grads": grads, "network": stepped}
+
+    traced, calls = [], []
+    real_filter_jit = eqx.filter_jit
+
+    def spy(function):
+        jitted = real_filter_jit(function)
+        traced.append(function)
+
+        def call(*args):
+            calls.append(sorted({
+                str(leaf.dtype) for leaf in jax.tree.leaves(
+                    eqx.filter(args, eqx.is_inexact_array))}))
+            return jitted(*args)
+        return call
+
+    eqx.filter_jit = spy
+    try:
+        functions32 = driver.build_batch_functions(
+            card, geometry, training_precision="fp32", **options)
+    finally:
+        eqx.filter_jit = real_filter_jit
+    return {
+        "parent": step(_parent_batch_functions(card, geometry, **options)),
+        "fp64": step(driver.build_batch_functions(
+            card, geometry, training_precision="fp64", **options)),
+        "fp32": step(functions32), "traced": traced[-1], "calls": calls,
+        "network": network, "batch": batch, "key": key, "card": card,
+        "geometry": geometry}
+
+
+def test_fp64_training_precision_reproduces_the_parent_step_bit_for_bit(
+        precision_steps):
+    parent, fp64 = precision_steps["parent"], precision_steps["fp64"]
+    assert float(fp64["loss"]) == float(parent["loss"]) > 0.0
+    for name in ("grads", "network"):
+        for new, old in zip(
+                jax.tree.leaves(eqx.filter(fp64[name], eqx.is_inexact_array)),
+                jax.tree.leaves(eqx.filter(parent[name], eqx.is_inexact_array)),
+                strict=True):
+            assert new.dtype == jnp.float64
+            assert np.array_equal(np.asarray(new), np.asarray(old))
+
+
+def test_fp32_step_keeps_float64_masters_and_matches_float64_closely(
+        precision_steps):
+    fp32, fp64 = precision_steps["fp32"], precision_steps["fp64"]
+    assert fp32["loss"].dtype == jnp.float64
+    for tree in (fp32["grads"], fp32["network"]):
+        assert {leaf.dtype for leaf in jax.tree.leaves(
+            eqx.filter(tree, eqx.is_inexact_array))} == {jnp.dtype("float64")}
+    assert float(fp32["loss"]) != float(fp64["loss"])
+    assert float(fp32["loss"]) == pytest.approx(float(fp64["loss"]), rel=1.0e-5)
+    new = np.concatenate([np.ravel(leaf) for leaf in jax.tree.leaves(
+        eqx.filter(fp32["grads"], eqx.is_inexact_array))])
+    old = np.concatenate([np.ravel(leaf) for leaf in jax.tree.leaves(
+        eqx.filter(fp64["grads"], eqx.is_inexact_array))])
+    assert np.max(np.abs(new - old)) < 1.0e-4 * np.max(np.abs(old))
+
+
+def _jaxpr_float64_use(jaxpr):
+    """Walk ``jaxpr`` and every jaxpr nested in its equations (scan bodies,
+    calls): ``(produced, carried, consumed, primitives)`` are the primitives
+    with a float64 result, the dtypes of every scan's carry, the primitives
+    without a nested jaxpr that read a float64 value, and all primitives."""
+    produced, carried, consumed, primitives = set(), set(), set(), set()
+
+    def is64(var):
+        return str(var.aval.dtype) == "float64"
+
+    def visit(inner):
+        inner = getattr(inner, "jaxpr", inner)
+        for equation in inner.eqns:
+            name = equation.primitive.name
+            nested = [item for param in equation.params.values()
+                      for item in (param if isinstance(param, (list, tuple))
+                                   else (param,))
+                      if hasattr(getattr(item, "jaxpr", item), "eqns")]
+            primitives.add(name)
+            if any(is64(var) for var in equation.outvars):
+                produced.add(name)
+            if not nested and any(is64(var) for var in equation.invars
+                                  if hasattr(var, "aval")):
+                consumed.add(name)
+            if name == "scan":
+                first = equation.params["num_consts"]
+                carried.update(
+                    str(var.aval.dtype) for var in
+                    equation.invars[first:first + equation.params["num_carry"]])
+            for item in nested:
+                visit(item)
+
+    visit(jaxpr)
+    return produced, carried, consumed, primitives
+
+
+def test_fp32_trace_holds_loss_state_scan_and_network_in_float32(
+        precision_steps):
+    assert precision_steps["calls"] == [["float32"]]
+    batch, traced = precision_steps["batch"], precision_steps["traced"]
+
+    with driver._single_precision_trace():
+        arguments = (driver._single(precision_steps["network"]),
+                     driver._single(tuple(map(jnp.asarray, batch.initial))),
+                     driver._single(tuple(map(jnp.asarray, batch.target))),
+                     precision_steps["key"])
+        loss = jax.make_jaxpr(traced)(*arguments)
+        gradient = jax.make_jaxpr(eqx.filter_value_and_grad(traced))(*arguments)
+    # The card's float64 constants (grid metrics, layer thicknesses) enter the
+    # trace as closed-over values read only by a conversion to float32: no
+    # operation produces a float64 value and every scan carries float32.
+    for jaxpr in (loss, gradient):
+        produced, carried, consumed, primitives = _jaxpr_float64_use(jaxpr)
+        assert produced == set()
+        assert carried == {"float32"}
+        assert consumed <= {"convert_element_type"}
+        assert {"scan", "dot_general"} <= primitives
+    assert jax.config.jax_enable_x64
+
+
+def test_free_runs_stay_float64_after_single_precision_training(
+        precision_steps):
+    card, geometry = precision_steps["card"], precision_steps["geometry"]
+    assert jax.config.jax_enable_x64
+    network = precision_steps["fp32"]["network"]
+    forcing, one_day = driver.free_run_day(
+        network, card, geometry, key=jax.random.PRNGKey(11))
+    state = driver._double_gyre_driver().seed_steady_forcing_carry(
+        card.recipe.initial_state, forcing)
+    state, means = one_day(state)
+    assert {str(array.dtype) for array in (
+        state.eta.data, state.u.data, state.v.data, *means)} == {"float64"}
+    assert {leaf.dtype for leaf in jax.tree.leaves(eqx.filter(
+        network, eqx.is_inexact_array))} == {jnp.dtype("float64")}
+
+
+def test_a_changed_training_precision_is_a_changed_run(one_window, small_card):
+    manifest = json.loads(
+        (one_window["folder"] / "run/run_manifest.json").read_text())
+    assert manifest["config"]["training_precision"] == "fp64"
+    config = copy.deepcopy(one_window["config"])
+    config["training_precision"] = "fp32"
+    path = _write_config(one_window["folder"] / "single.json", config)
+    with pytest.raises(RuntimeError, match="differs in"):
+        driver.train(config, path, card=small_card, seed=11,
+                     run_dir=one_window["folder"] / "run", device=CPU,
+                     windows_per_call=10, commit="0" * 40)
+    with pytest.raises(ValueError, match="not this configuration"):
+        driver.run_free_run(
+            config, path, card=small_card, seed=11,
+            run_dir=one_window["folder"] / "run", window_days=1, device=CPU,
+            commit="0" * 40)
+
+
+def test_build_batch_functions_refuses_an_unknown_training_precision(
+        small_card):
+    with pytest.raises(ValueError, match="training_precision"):
+        driver.build_batch_functions(
+            small_card, build_closure_geometry(small_card), window_days=1,
+            objective="template", wall_ring="weighted",
+            training_precision="bf16")

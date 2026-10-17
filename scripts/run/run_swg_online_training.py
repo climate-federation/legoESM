@@ -19,6 +19,13 @@ stage, the optimiser starting fresh; the file's SHA-256 is recorded in the
 run manifest and the training log, and a missing, structurally different or
 later changed file refuses the run.
 
+``training_precision`` (``"fp64"`` or ``"fp32"``, required) fixes the
+arithmetic of every training and validation loss and gradient.  With
+``"fp32"`` the float64 master weights are cast to float32 for each call, the
+trajectory, loss and gradient are computed in float32, and the gradient is
+cast back to float64 before the float64 optimiser update; checkpoints, resume
+and the float64 free runs are unchanged.
+
 ``free-run`` integrates the coarse card from rest with the closure of one
 trained window length (its last checkpoint) on the device and math policy
 the configuration states, writing every day's end-of-day snapshot beside its
@@ -37,6 +44,7 @@ and the run manifest records them.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import datetime
 import functools
@@ -52,6 +60,7 @@ import sys
 import tempfile
 import time
 import types
+import warnings
 from pathlib import Path
 
 import equinox as eqx
@@ -118,6 +127,7 @@ DECKS = {"dg50": SWG_DG50_NAMELIST, "dg50-nu80": SWG_DG50_NU80_NAMELIST}
 TRAINING_DECKS = ("dg50",)
 CONTROL_DECKS = {"nu10": "dg50", "nu80": "dg50-nu80"}
 FREE_RUN_SAMPLING = "end_of_day_snapshot_and_daily_mean"
+TRAINING_PRECISIONS = ("fp64", "fp32")
 SECONDS_PER_DAY = 86_400
 _OPERATOR_FIELDS = {"symmetric": "box", "template": "filtered"}
 
@@ -220,8 +230,8 @@ def load_config(path: Path) -> dict:
 
     _require_keys(config, (
         "schema", "experiment", "description", "deck", "objective",
-        "wall_ring", "network", "seeds", "dataset", "curriculum", "optimiser",
-        "free_run"), "configuration")
+        "wall_ring", "training_precision", "network", "seeds", "dataset",
+        "curriculum", "optimiser", "free_run"), "configuration")
     if config["schema"] != CONFIG_SCHEMA:
         raise ValueError(f"configuration schema must be {CONFIG_SCHEMA!r}")
     if not isinstance(config["experiment"], str) \
@@ -235,6 +245,9 @@ def load_config(path: Path) -> dict:
         raise ValueError(f"objective must be one of {OBJECTIVE_OPERATORS}")
     if config["wall_ring"] not in WALL_RING_OPTIONS:
         raise ValueError(f"wall_ring must be one of {WALL_RING_OPTIONS}")
+    if config["training_precision"] not in TRAINING_PRECISIONS:
+        raise ValueError(
+            f"training_precision must be one of {TRAINING_PRECISIONS}")
 
     network = config["network"]
     _require_keys({key: value for key, value in network.items()
@@ -519,24 +532,69 @@ def check_data(config: dict, *, card) -> dict:
 
 # ------------------------------------------------------------ batch programs
 
+@contextlib.contextmanager
+def _single_precision_trace():
+    """Trace and run with x64 off: every float64 the card, the segment and
+    the network request becomes float32 (the card is built in float64)."""
+    with jax.enable_x64(False), warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*Explicitly requested dtype.*")
+        yield
+
+
+def _single(tree):
+    return jax.tree.map(
+        lambda leaf: leaf.astype(jnp.float32)
+        if eqx.is_inexact_array(leaf) else leaf, tree)
+
+
+def _in_single_precision(function):
+    """``function`` on float32 copies of the weights and the batch, traced
+    with x64 off; its outputs (loss, gradient) come back as float64."""
+    def run(network, initial, target, key):
+        with _single_precision_trace():
+            result = function(_single(network), _single(initial),
+                              _single(target), key)
+        return jax.tree.map(lambda leaf: leaf.astype(jnp.float64), result)
+
+    return run
+
+
 def build_batch_functions(card, geometry, *, window_days: int,
-                          objective: str, wall_ring: str):
+                          objective: str, wall_ring: str,
+                          training_precision: str):
     """Jitted (value-and-grad, value) of the Eq. 7 loss of a window batch.
 
     Every window starts from its (rebalanced) stored state and runs the
     certified segment with the closure at every RK3 stage, zero stage noise
     and zero noise scale; the batch loss is ``deterministic_trajectory_loss``
     over all windows and hourly endpoints (Eq. 7's mean).
+
+    ``training_precision`` ``"fp32"`` makes both functions take the float64
+    master weights and batch, compute the trajectory, loss and gradient in
+    float32 (x64 off for the build, trace and call only) and return them in
+    float64; ``"fp64"`` computes in float64 throughout.
     """
-    raw, _ = build_segment_fn(
-        card, geometry, window_days=window_days, checkpoint=True)
+    if training_precision not in TRAINING_PRECISIONS:
+        raise ValueError(
+            f"training_precision must be one of {TRAINING_PRECISIONS}")
+    single = training_precision == "fp32"
+    with _single_precision_trace() if single else contextlib.nullcontext():
+        if single:
+            card = card._replace(recipe=card.recipe._replace(
+                grid=_single(card.recipe.grid),
+                land_mask=_single(card.recipe.land_mask),
+                initial_state=_single(card.recipe.initial_state)))
+            geometry = _single(geometry)
+        raw, _ = build_segment_fn(
+            card, geometry, window_days=window_days, checkpoint=True)
     n_steps = window_days * HOURS_PER_DAY * int(SECONDS_PER_HOUR / card.dt_s)
     template = card.recipe.initial_state
     namelist = card.resolved_namelist
     shape = tuple(geometry.tmask.shape)
+    noise_dtype = jnp.float32 if single else jnp.float64
 
     def batch_loss(network, initial, target, key):
-        noise = jnp.zeros((n_steps, 3) + shape, dtype=jnp.float64)
+        noise = jnp.zeros((n_steps, 3) + shape, dtype=noise_dtype)
 
         def rollout(ssh, u, v):
             state = coarse_state_from_native(template, ssh, u, v)
@@ -548,8 +606,11 @@ def build_batch_functions(card, geometry, *, window_days: int,
             beta_m1_s1=namelist.rn_beta_m_s,
             basin_length_m=namelist.rn_domsiz_m, wall_ring=wall_ring)
 
-    return (eqx.filter_jit(eqx.filter_value_and_grad(batch_loss)),
-            eqx.filter_jit(batch_loss))
+    value_and_grad = eqx.filter_jit(eqx.filter_value_and_grad(batch_loss))
+    loss_fn = eqx.filter_jit(batch_loss)
+    if single:
+        return _in_single_precision(value_and_grad), _in_single_precision(loss_fn)
+    return value_and_grad, loss_fn
 
 
 def _parts(batch, windows_per_call: int):
@@ -996,7 +1057,8 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
                 value_and_grad, loss_fn = build_batch_functions(
                     card, geometry, window_days=window_days,
                     objective=config["objective"],
-                    wall_ring=config["wall_ring"])
+                    wall_ring=config["wall_ring"],
+                    training_precision=config["training_precision"])
                 update = _update_function(optimizer)
             if epoch == 1:
                 opt_state = optimizer.init(
@@ -1207,7 +1269,8 @@ def profile(config: dict, *, card, device: dict, windows_per_call: int) -> dict:
     for window_days in config["curriculum"]["window_days"]:
         value_and_grad, loss_fn = build_batch_functions(
             card, geometry, window_days=window_days,
-            objective=config["objective"], wall_ring=config["wall_ring"])
+            objective=config["objective"], wall_ring=config["wall_ring"],
+            training_precision=config["training_precision"])
         target = np.zeros((TEMPLATE_BATCH_SIZE, HOURS_PER_DAY * window_days)
                           + shape)
         batch = WindowBatch((rest,) * 3, (target,) * 3,
