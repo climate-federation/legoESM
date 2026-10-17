@@ -1735,7 +1735,7 @@ FILES = {
        for f in ("trazdf.f90", "stprk3_stg.f90", "zdfevd.f90", "zdfphy.f90",
                  "stprk3.f90")},
     **{f"ORCA2_OMIP_L4/BLD/ppsrc/nemo/{f}": _ORCA2_COMPILED / f for f in (
-        "zdfsh2.f90", "lbcnfd.f90", "sshwzv.f90", "domhgr.f90")},
+        "zdfsh2.f90", "lbcnfd.f90", "sshwzv.f90", "domhgr.f90", "eosbn2.f90")},
     "tke.py": REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py",
 }
 
@@ -8131,6 +8131,23 @@ CITATION_MAP = {
     'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:177': 'CALL bn2    ( ts(:,:,:,:,Nbb), rab_b, rn2b, Nbb )',
     'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:180': 'rn2   = rn2b',
     'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:185': ('CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 1),
+    # --- GRIDLADDER-VMIX round 13 (V3 = V2 + ORCA2's double diffusion) ---
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:393-395': [
+        ('ln_zdfddm   = .true.', 1), ('rn_avts  =    1.e-4', 1),
+        ('rn_hsbfr =    1.6', 1), 3,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90:59': 'SUBROUTINE zdf_ddm( kt, Kmm, p_avm, p_avt, p_avs )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90:170': 'p_avs(ji,jj,jk) = p_avt(ji,jj,jk) + zavfs + zavds',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90:171': 'p_avt(ji,jj,jk) = p_avt(ji,jj,jk) + zavft + zavdt',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:175': "( jn == jp_sal .AND. ln_zdfddm )",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/eosbn2.f90:1632-1636': [
+        ('zrw =   ( ((gdepw_1d(jk  ) ) *(1._wp+r3t(ji,jj,Kmm)))', 1),
+        ('&  / ( ((gdept_1d(jk-1) ) *(1._wp+r3t(ji,jj,Kmm)))', 1),
+        ('zaw = pab(ji,jj,jk,jp_tem) * (1. - zrw) + pab(ji,jj,jk-1,jp_tem) * zrw', 1),
+        ('zbw = pab(ji,jj,jk,jp_sal) * (1. - zrw) + pab(ji,jj,jk-1,jp_sal) * zrw', 1),
+        5,
+    ],
+    'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:186': 'IF( kstp == nit000 )   CALL l2_dump_zdf( kstp, Nbb )',
 }
 
 
