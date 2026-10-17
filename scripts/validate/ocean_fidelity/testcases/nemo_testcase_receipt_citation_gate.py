@@ -1733,7 +1733,7 @@ FILES = {
         "domqco.f90", "domhgr.f90")},
     **{f"ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/{f}": _ORCA2V1 / f
        for f in ("trazdf.f90", "stprk3_stg.f90", "zdfevd.f90", "zdfphy.f90",
-                 "stprk3.f90", "zdfddm.f90")},
+                 "stprk3.f90", "zdfddm.f90", "zdfiwm.f90")},
     **{f"ORCA2_OMIP_L4/BLD/ppsrc/nemo/{f}": _ORCA2_COMPILED / f for f in (
         "zdfsh2.f90", "lbcnfd.f90", "sshwzv.f90", "domhgr.f90", "eosbn2.f90")},
     "tke.py": REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py",
@@ -8171,6 +8171,20 @@ CITATION_MAP = {
         ('! part independent of the level', 1),
         ('p_avm(ji,jj,jk) = p_avm(ji,jj,jk) + zav_wave(ji,jj)', 1),
         84,
+    ],
+    # --- GRIDLADDER-VMIX round 14 resume (V4 scored) ---
+    'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfiwm.f90:140': 'SUBROUTINE zdf_iwm( kt, Kmm, p_avm, p_avt, p_avs )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domain.f90:198': 'ht_0(:,:) = ht_0(:,:) + e3t_3d(:,:,jk) * tmask(:,:,jk)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domain.f90:128': 'SUBROUTINE dom_init( Kbb, Kmm, Kaa )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:485': 'hcri_iwm(ji,jj) = 1._wp / sf_iwm(6)%fnow(ji,jj,1)',
+    'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfiwm.f90:485': 'hcri_iwm(ji,jj) = 1._wp / sf_iwm(6)%fnow(ji,jj,1)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:267-268': [
+        ('+ zfact2(ji,jj) * ( 1._wp / ( 1._wp + ( (ht_0(ji,jj)', 1),
+        ('-1._wp / ( 1._wp + ( (ht_0(ji,jj)', 1), 2,
+    ],
+    'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfiwm.f90:267-268': [
+        ('+ zfact2(ji,jj) * ( 1._wp / ( 1._wp + ( (ht_0(ji,jj)', 1),
+        ('-1._wp / ( 1._wp + ( (ht_0(ji,jj)', 1), 2,
     ],
 }
 

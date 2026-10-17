@@ -128,7 +128,7 @@ V1-V3, so their runs are unchanged).
 - The card's statement alone equals the scalar transcription eagerly and under jit with the maps as arguments
   (0 unequal). Under jit with the maps as closure constants, as the model step builds it, it reproduces the card's
   41,546 cells exactly.
-- Owner: `zdfiwm.f90:267-268` divide by `hbot_iwm`
+- Owner: the two divisions by `hbot_iwm`
   (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:267-268`, the same lines in
   `ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfiwm.f90:267-268`). With the map a constant, XLA rewrote both
   divisions as a multiply by a folded reciprocal (compiled HLO: 8 divides; 10 after the fix).
@@ -153,7 +153,7 @@ Preregistration:
 - **P1 CONFIRMED** (acquisition passed; switches and banners per the acquisition's log checks).
 - **P2 CONFIRMED**: (a) 414,119 kt-1 avt cells differ from V3's frame; (b) 430,552 T cells differ at kt 2.
 - **P3 REFUTED as listed**: none of the four named owners. The owner was the `hbot_iwm` divisions
-  (`zdfiwm.f90:267-268`), an XLA rewrite, not a transcription error.
+  (section 5's walk), an XLA rewrite, not a transcription error.
 - **P4 CONFIRMED** at `6ff844d6d`: full ORCA2 (138,746 lines) and DINO (123,234) one-step jaxprs identical to base
   `0b9443cef279`; V2 (178,423) and V3 (174,349) one-step jaxprs identical too. V4 one step: 176,180 lines (was
   176,175; the guard).
