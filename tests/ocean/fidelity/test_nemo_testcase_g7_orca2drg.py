@@ -226,3 +226,46 @@ def test_substeps_receive_nemos_bottom_tfield(vortex, monkeypatch):
         got = np.asarray(got)
         np.testing.assert_array_equal(got, want)
         assert np.array_equal(np.signbit(got), np.signbit(want))
+
+
+def test_residual_increment_is_nemos_statement():
+    # dynspg_ts.f90:1462: pu_RHSi + (r1_hu_0/(1+r3u)) * r1_2*(pair) * zu_i
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import nemo_drg_residual_increment
+    rng = np.random.default_rng(3)
+    r1h, cdu, uk, ub = (rng.random((5, 7)) for _ in range(4))
+    got = np.asarray(nemo_drg_residual_increment(
+        jnp.asarray(r1h), jnp.asarray(-4e-4 * cdu), jnp.asarray(uk), jnp.asarray(ub)))
+    np.testing.assert_array_equal(got, (r1h * (-4e-4 * cdu)) * (uk - ub))
+
+
+def test_bottom_residual_reads_carried_barotropic_velocity(vortex, monkeypatch):
+    # dynspg_ts.f90:1447-1450: zu_i = puu(mbku,Kmm) - puu_b(Kmm), the CARRIED
+    # barotropic velocity, never a depth mean rebuilt from the 3-D field.
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.state import OceanSurfaceForcing
+    real, seen = pe.nemo_drg_residual_increment, []
+
+    def spy(r1_h, cdu, u_k, u_b):
+        jax.debug.callback(lambda c, b: seen.append((np.asarray(c), np.asarray(b))),
+                           cdu, u_b)
+        return real(r1_h, cdu, u_k, u_b)
+
+    monkeypatch.setattr(pe, "nemo_drg_residual_increment", spy)
+    cfg = recipe._nemo_linear_bottom_drag(vortex.recipe.model_config)._replace(
+        implicit_ice_ocean_top_drag=True)
+    model = LatLonCGridOceanModel(vortex.recipe.grid, vortex.recipe.z_coord, cfg)
+    s0 = vortex.recipe.initial_state
+    rng = np.random.default_rng(11)
+    ub = jnp.asarray(0.01 * rng.random(s0.uu_b.data.shape))
+    vb = jnp.asarray(0.01 * rng.random(s0.vv_b.data.shape))
+    st = s0._replace(uu_b=s0.uu_b.replace(data=ub), vv_b=s0.vv_b.replace(data=vb))
+    zero = jnp.zeros_like(s0.eta.data)
+    model.step(st, dt=vortex.dt_s, surface_forcing=OceanSurfaceForcing(
+        tau_x=zero, tau_y=zero, ice_ocean_top_drag_rCdu=zero))
+    rate = -(recipe._SMT2_RN_CD0 * recipe._SMT2_RN_UC0)
+    bottom = [(c, b) for c, b in seen if np.any(c == rate)]
+    assert len(bottom) == 2, "the bottom residual did not run NEMO's statement"
+    by_shape = {b.shape: b for _, b in bottom}
+    np.testing.assert_array_equal(by_shape[ub.shape], np.asarray(ub))
+    np.testing.assert_array_equal(by_shape[vb.shape], np.asarray(vb))

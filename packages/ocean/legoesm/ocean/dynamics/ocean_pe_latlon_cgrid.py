@@ -4121,6 +4121,15 @@ def nemo_ice_ocean_top_drag_coeff_faces(rCdU_ice, grid, *, dtype=None,
     return coeff_u, coeff_v, sum_u, sum_v, r_cdu
 
 
+def nemo_drg_residual_increment(r1_h, cdu, u_k, u_b):
+    """dyn_drg_init's increment (dynspg_ts.f90:1462-1463, :1487-1488):
+    ``(r1_hu_0/(1+r3u)) * r1_2*(pair) * (puu(k,Kmm) - puu_b(Kmm))`` with
+    NEMO's statement roundings; ``cdu`` is the halved pair, ``u_b`` the
+    carried barotropic velocity."""
+    return nemo_source_round(
+        nemo_source_round(r1_h * cdu) * nemo_source_round(u_k - u_b))
+
+
 def nemo_bottom_drag_rate_faces(
     u, v, h_k, z_coord, config, grid, *, return_cell_rate=False,
 ):

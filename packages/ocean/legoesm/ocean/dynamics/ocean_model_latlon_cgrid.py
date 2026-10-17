@@ -6703,7 +6703,51 @@ class LatLonCGridOceanModel:
         # thickness scaling stay at NOW (h_k_pre/H_u_pre, matching NEMO's
         # r1_hu(Kmm) at :1642 — only the velocity residual is Kbb-gated, not
         # the geometry/rate). Default False -> the NOW form (bit-identical).
-        if getattr(_cfg_b, "barotropic_drag_substep", False):
+        def _nemo_drg_r1_h():
+            # r1_hu_0/(1+r3u(Kmm)) of dynspg_ts.f90:1462/:1487 (G5's top-drag form)
+            r1u = nemo_source_round(1.0 / H_u_pre)
+            r1v = nemo_source_round(1.0 / H_v_pre)
+            if getattr(_cfg_b, "barotropic_wind_nemo_stored_depth", False):
+                from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+                    nemo_een_ratio_fold_exchange,
+                )
+                _r1u, _r1v = _nemo_ws_qco_stage_faces(
+                    state.eta.data, _ws_h_ref, _ws_u_live_mask,
+                    _ws_v_live_mask, _grid, z_coord=_zc,
+                    include_reciprocals=True)[4:]
+                _r1u_n, _r1v_n, _ = nemo_een_ratio_fold_exchange(
+                    _r1u[:, 1:], _r1v[1:], _r1v[1:], _grid,
+                    _cfg_b.barotropic.barotropic_een_ratio_fold_exchange)
+                r1u = _r1u.at[:, 1:].set(_r1u_n)
+                r1v = _r1v.at[1:].set(_r1v_n)
+            return r1u, r1v
+
+        if (getattr(_cfg_b, "barotropic_drag_substep", False)
+                and _ice_drag_before_wind):
+            # G7 (ln_drgice_imp, ln_lin): dynspg_ts.f90:1446-1450 + :1461-1463,
+            # zu_i = puu(mbku,Kmm) - puu_b(Kmm) (carried uu_b, not a rebuilt
+            # depth mean), pu_RHSi += (r1_hu_0/(1+r3u)) * r1_2*(rCdU_bot pair)
+            # * zu_i, rCdU_bot = -(rn_Cd0*ssmask)*rn_Uc0 <= 0 (zdfdrg.f90:276).
+            # No mask multiply here; the top residual below applies it.
+            from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+                nemo_bottom_drag_rate_faces, nemo_drg_residual_increment,
+                nemo_ice_ocean_top_drag_coeff_faces,
+            )
+            _, _, _isb_u, _isb_v, _r_t = nemo_bottom_drag_rate_faces(
+                state.u.data, state.v.data, h_k_pre, _zc, _cfg_b, _grid,
+                return_cell_rate=True)
+            _bot_rcdu_t = jnp.where(_zc.bottom_level >= 0, -_r_t, -0.0)
+            _bot_cdu_u, _bot_cdu_v = nemo_ice_ocean_top_drag_coeff_faces(
+                jnp.zeros_like(_bot_rcdu_t), _grid, dtype=F_slow_u.dtype,
+                rCdU_bot=_bot_rcdu_t)[:2]
+            _bot_r1_hu, _bot_r1_hv = _nemo_drg_r1_h()
+            F_slow_u = nemo_source_round(F_slow_u + nemo_drg_residual_increment(
+                _bot_r1_hu, _bot_cdu_u,
+                jnp.sum(state.u.data * _isb_u, axis=-1), state.uu_b.data))
+            F_slow_v = nemo_source_round(F_slow_v + nemo_drg_residual_increment(
+                _bot_r1_hv, _bot_cdu_v,
+                jnp.sum(state.v.data * _isb_v, axis=-1), state.vv_b.data))
+        elif getattr(_cfg_b, "barotropic_drag_substep", False):
             from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
                 nemo_bottom_drag_rate_faces,
             )
@@ -6746,7 +6790,7 @@ class LatLonCGridOceanModel:
             # dyn_drg_init.f90:1468-1488, ln_bt_fw=T: use the NOW top-cell
             # baroclinic residual and the carried NOW barotropic velocity.
             from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-                nemo_ice_ocean_top_drag_coeff_faces,
+                nemo_drg_residual_increment, nemo_ice_ocean_top_drag_coeff_faces,
             )
             _top_cdu_u, _top_cdu_v, _, _, _ = nemo_ice_ocean_top_drag_coeff_faces(
                 _top_drag_rCdu, _grid, dtype=F_slow_u.dtype)
@@ -6754,31 +6798,11 @@ class LatLonCGridOceanModel:
                 raise ValueError(
                     "ice-ocean top drag requires carried uu_b/vv_b for "
                     "dyn_drg_init's top baroclinic residual")
-            _top_r1_hu = nemo_source_round(1.0 / H_u_pre)
-            _top_r1_hv = nemo_source_round(1.0 / H_v_pre)
-            if getattr(_cfg_b, "barotropic_wind_nemo_stored_depth", False):
-                from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-                    nemo_een_ratio_fold_exchange,
-                )
-                _r1u, _r1v = _nemo_ws_qco_stage_faces(
-                    state.eta.data, _ws_h_ref, _ws_u_live_mask,
-                    _ws_v_live_mask, _grid, z_coord=_zc,
-                    include_reciprocals=True)[4:]
-                _r1u_n, _r1v_n, _ = nemo_een_ratio_fold_exchange(
-                    _r1u[:, 1:], _r1v[1:], _r1v[1:], _grid,
-                    _cfg_b.barotropic.barotropic_een_ratio_fold_exchange)
-                _top_r1_hu = _r1u.at[:, 1:].set(_r1u_n)
-                _top_r1_hv = _r1v.at[1:].set(_r1v_n)
-            _top_u_resid = nemo_source_round(
-                state.u.data[..., 0] - state.uu_b.data)
-            _top_v_resid = nemo_source_round(
-                state.v.data[..., 0] - state.vv_b.data)
-            _top_inc_u = nemo_source_round(
-                nemo_source_round(_top_r1_hu * _top_cdu_u)
-                * _top_u_resid)
-            _top_inc_v = nemo_source_round(
-                nemo_source_round(_top_r1_hv * _top_cdu_v)
-                * _top_v_resid)
+            _top_r1_hu, _top_r1_hv = _nemo_drg_r1_h()
+            _top_inc_u = nemo_drg_residual_increment(
+                _top_r1_hu, _top_cdu_u, state.u.data[..., 0], state.uu_b.data)
+            _top_inc_v = nemo_drg_residual_increment(
+                _top_r1_hv, _top_cdu_v, state.v.data[..., 0], state.vv_b.data)
             _dragged_slow_u = nemo_source_round(F_slow_u + _top_inc_u)
             _dragged_slow_v = nemo_source_round(F_slow_v + _top_inc_v)
             F_slow_u = _dragged_slow_u * _slow_surface_u_mask
