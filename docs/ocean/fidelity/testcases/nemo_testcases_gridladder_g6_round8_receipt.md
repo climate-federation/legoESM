@@ -165,7 +165,7 @@ All CPU fp64, `JAX_ENABLE_X64=1`, PYTHONPATH as in `claude_rounds/land.sh`.
   after-VOR write planted out.
 - Receipt citation gate on THIS receipt (from its title): 6 citations,
   failures 0, unmapped 0, map audit 0; a planted shift of the G5-build
-  `stprk3_stg.f90:221` citation FAILS it (`SYMBOL-NOT-AT-LINE`).  Five
+  stage-2 `r3t(Kaa)` citation (line 221) FAILS it (`SYMBOL-NOT-AT-LINE`).  Five
   round-44 map entries added; 73 gate pins and 21 lines of the GYRE
   phase-3 round-8 receipt re-anchored by the repo's tool (mechanical, from
   `eab4efd114`); one round-160 span the landing lengthened widened by hand.
