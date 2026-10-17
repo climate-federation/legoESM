@@ -1867,13 +1867,6 @@ CITATION_MAP = {
         'anchors': 'zFv(ji,jj,jk) = e1v(ji,jj)*(e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk)))',
         'routine': 'stp_RK3_stg',
     },
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:795-796': {
-        'anchors': [
-            ("CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:,:       ,Kaa), 'V', -1._wp   &", 2),
-            "&                       , ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp, ldfull=.TRUE. )",
-            2],
-        'routine': 'stp_RK3_stg',
-    },
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90:211': {
         'anchors': 'vmask(ji,jj,jk) = tmask(ji,jj  ,jk) * tmask(ji  ,jj+1,jk)',
         'routine': 'dom_msk',

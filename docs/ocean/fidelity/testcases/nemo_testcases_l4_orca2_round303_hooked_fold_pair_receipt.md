@@ -6,7 +6,7 @@ Status: **HELD** (no model or card change; citation-map entries and one
 committed arm driver).
 
 Correction (2026-10-16, after the independent Claude review, HOLD): the
-exchange first cited here (`:584` / `:570`) sits inside `IF( ln_shuman )` and
+exchange first cited here (the Shuman `lbc_lnk`) sits inside `IF( ln_shuman )` and
 does not run (ocean.output:220 `ln_shuman = F`).  The exchange that runs is
 after the tracer update; the citations, order, history and fold-unit
 statements below are corrected in place.
@@ -39,7 +39,7 @@ statements below are corrected in place.
      `stp_RK3_stg`).  It is the `ELSE` (non-Shuman) branch's inner `ELSE`:
      `ln_shuman = F` (ocean.output:220) and `ln_zdfcst = T`
      (ocean.output:557) makes `l_zdfsh2 = .FALSE.` in `zdf_phy_init`, so
-     neither `:822` / `:791` (the `avm_k` form) nor the Shuman call runs.
+     neither the `avm_k` form just above it nor the Shuman call runs.
      It runs AFTER the tracer update, so it sets the next stage's V, not
      this stage's tracer transport.  It writes row 147's V as the fold
      image of row 146; the card leaves 0.  Measured on NEMO's own frames:
@@ -87,7 +87,7 @@ statements below are corrected in place.
   stage-transport function, at all three stages.  Inside that function the
   mask feeds the qco V face thickness, the corrected stage V, the 3-D V mass
   flux and the continuity W: the whole stage transport, not only the `zFv`
-  line at `:291` / `:283`.
+  line cited in the headline.
 - Round-286 stage-update mask = commit `a1dc5d235d`'s hunk on scratch
   commit `f4166a28f` in a separate clone (not committed; one arm row only).
 - Evidence: `orca2_rounds/round303/`.
