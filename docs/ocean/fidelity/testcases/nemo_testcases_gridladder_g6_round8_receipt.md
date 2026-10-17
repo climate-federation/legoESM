@@ -183,3 +183,34 @@ UNVERIFIED: XLA's rewrite at the stage-2 momentum wzv is not read from
 HLO (the statement is an algebraic-only difference, fixed by transcription);
 "other cards unchanged" is by construction, not a jaxpr diff; the
 acquisition script has not been run (dry-applied patches only).
+
+## Resume: acquisition attempt 1 refused at admission (writer defect)
+
+The operator ran `run_r44_stage_terms.sh --run` at `3d9fbf8a42`: build
+additive, 6 steps, restarts 2/4/6 passive (27 variables), then admission
+refused every stage-term file (9 of 11 3-D fields + 8 2-D).  From the
+files: each holds the header, `ww` + 8 2-D fields, and FOUR `Krhs` pairs.
+Against the same run's stage-2 term record (wet cells, kt 1 stage 2) they
+are before-HPG, after-HPG (0 differing), after-VOR (0), after-ZAD (0);
+the after-KEG pair is absent.  Cause: the copied `dynadv.F90` wrote only
+when its unit was `>= 0`, and `OPEN(NEWUNIT=)` returns a negative unit, so
+the write never fired.  The checker was right; the record cannot split KEG
+from ZAD, so `--admit-existing` does not apply.
+
+Tool fix: the after-KEG write is gated by a public logical, set and
+cleared around the dump's `dyn_adv` call; new config
+`ORCA2G6_OMIP_L4_R44STGTRM2`, new evidence `round44/oracle_g6_r44b`.  The
+failed build `ORCA2G6_OMIP_L4_R44STGTRM` and `round44/oracle_g6_r44` are
+left untouched as evidence.  The patch test now requires the logical gate
+and refuses a sign test on the unit; planting the old `>= 0` guard back
+FAILS it (restored with `cp -f`, `git diff` shows only the fix).
+
+ACQUISITION_NEEDED: `run_r44_stage_terms.sh --run` (preflight first).
+codex review: paused (quota).
+
+ASKED: diagnose the refusal from the files, fix the tool, new config and
+evidence names.  UNASKED: none.
+
+UNVERIFIED: the patched Fortran is not compiled here (the operator's
+build is the check); the logical's visibility in `stprk3_stg` follows the
+same module chain that already exposed the unit in attempt 1.

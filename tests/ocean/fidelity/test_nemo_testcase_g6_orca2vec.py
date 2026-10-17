@@ -382,8 +382,12 @@ def test_r44_stage_term_acquisition_patch_is_additive(tmp_path):
         assert not [d for d in diff if d.startswith("- ")]
     s = stg.read_text()
     assert s.count("IF( ll_g6s ) WRITE(g6s_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)") == 3
-    assert s.count("g6_keg_unit = ") == 2
-    assert "IF( g6_keg_unit >= 0 )   WRITE(g6_keg_unit)" in adv.read_text()
+    assert s.count("g6_keg_unit = g6s_unit") == 1
+    assert s.count("ll_g6_keg = .TRUE.") == 1 and s.count("ll_g6_keg = .FALSE.") == 1
+    # NEWUNIT units are negative: a sign test on the unit never fires (attempt 1)
+    assert "IF( ll_g6_keg )   WRITE(g6_keg_unit) puu(:,:,:,Krhs), pvv(:,:,:,Krhs)" in adv.read_text()
+    assert "g6_keg_unit >=" not in adv.read_text() + s
+    assert "R44STGTRM2" in text and "oracle_g6_r44b" in text
     # a second application refuses (anchors no longer unique)
     again = subprocess.run(["bash", "-c", funcs + f'\npatch_stage "{stg}" "{adv}"'],
                            capture_output=True, text=True)

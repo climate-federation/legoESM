@@ -18,7 +18,10 @@
 # record binary, pinned by SHA-256) with its MY_SRC and cpp keys copied
 # verbatim; MY_SRC/stprk3_stg.F90 is patched (additive) and NEMO's own
 # src/OCE/DYN/dynadv.F90 is copied into MY_SRC with one additive write after
-# dyn_keg (a public unit, -1 = off, set only around the dump's dyn_adv call).
+# dyn_keg (a public on/off flag + unit, set only around the dump's dyn_adv call).
+# Attempt 1 (ORCA2G6_OMIP_L4_R44STGTRM, round44/oracle_g6_r44, kept as evidence)
+# guarded that write with 'unit >= 0'; OPEN(NEWUNIT=) units are negative, so
+# the after-KEG pair never fired (9 of 11 3-D fields).  Hence the flag.
 # Arrays are NATIVE (jpi, jpj, jpk incl. nn_hls=2 halo), Fortran order.
 # Passivity: every FIX1 record file kt 1..6 equals round 36's twin_a byte for
 # byte, and restarts 2, 4, 6 equal round 36's writer-free reference.
@@ -35,7 +38,7 @@ export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly BASE_NAME=ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1
-readonly NAME=ORCA2G6_OMIP_L4_R44STGTRM
+readonly NAME=ORCA2G6_OMIP_L4_R44STGTRM2
 readonly BASE=$NEMO_ROOT/cfgs/$BASE_NAME TARGET=$NEMO_ROOT/cfgs/$NAME
 readonly BASE_BIN_SHA=41cd9a63844218e7c37e75708813649603b80df0366102b8ce3e340f89a60275
 readonly G6_DECK_SHA=243fb53106deb926b454a7fdec984432c905252010953c7403bacbbbbe3b482b
@@ -44,7 +47,7 @@ readonly WANT_KEYS='key_RK3 key_qco key_si3 key_vco_1d3d'
 readonly ROUNDS=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds
 readonly INPUT_ROOT=$ROUNDS/round21/oracle_g4_r21/p6_a
 readonly R36=$ROUNDS/round36/oracle_g6_r36
-readonly EVIDENCE=${EVIDENCE:-$ROUNDS/round44/oracle_g6_r44}
+readonly EVIDENCE=${EVIDENCE:-$ROUNDS/round44/oracle_g6_r44b}
 readonly DYNADV_SRC=$NEMO_ROOT/src/OCE/DYN/dynadv.F90
 readonly RUN=$EVIDENCE/twin_s
 readonly STEPS=6
@@ -128,9 +131,10 @@ edit(sys.argv[1], [
   "            CALL    dyn_vor( kstp,      Kmm, uu, vv, Krhs )\n            " + G + REC),
  ("               CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)\n",
   "               " + G + "g6_keg_unit = g6s_unit\n"
+  "               " + G + "ll_g6_keg = .TRUE.\n"
   "               CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)\n"
   "               IF( ll_g6s ) THEN\n"
-  "                  g6_keg_unit = -1\n"
+  "                  ll_g6_keg = .FALSE.\n"
   "                  " + REC +
   "                  CLOSE(g6s_unit)\n"
   "                  WRITE(numout,*) 'G6_STAGE_TERMS_DUMP ', kstp, kstg, TRIM(g6s_filename)\n"
@@ -139,10 +143,11 @@ edit(sys.argv[1], [
 edit(sys.argv[2], [
  ("   REAL(wp), PUBLIC            ::   r_stb_cstra_dyn  ! stability constraint for dynamic advection\n",
   "   REAL(wp), PUBLIC            ::   r_stb_cstra_dyn  ! stability constraint for dynamic advection\n"
-  "   INTEGER , PUBLIC            ::   g6_keg_unit = -1 ! G6 r44: WRITE-only after-KEG dump unit (-1 = off)\n"),
+  "   LOGICAL , PUBLIC            ::   ll_g6_keg = .FALSE. ! G6 r44: WRITE-only after-KEG dump on/off\n"
+  "   INTEGER , PUBLIC            ::   g6_keg_unit         ! its unit (NEWUNIT: negative)\n"),
  ("         CALL dyn_keg     ( kt, nn_dynkeg     , Kmm, puu, pvv, Krhs )\n",
   "         CALL dyn_keg     ( kt, nn_dynkeg     , Kmm, puu, pvv, Krhs )\n"
-  "         IF( g6_keg_unit >= 0 )   WRITE(g6_keg_unit) puu(:,:,:,Krhs), pvv(:,:,:,Krhs)\n"),
+  "         IF( ll_g6_keg )   WRITE(g6_keg_unit) puu(:,:,:,Krhs), pvv(:,:,:,Krhs)\n"),
 ])
 PY
 }
