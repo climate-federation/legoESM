@@ -2710,7 +2710,7 @@ CITATION_MAP = {
     'advection.py:1873-1874': [
         ('if return_nemo_beta_trace:', 6),
         'return alpha_u_full, alpha_v, alpha_vert_face, beta_trace', 2],
-    'ocean_model_latlon_cgrid.py:14275-14290': [
+    'ocean_model_latlon_cgrid.py:14284-14299': [
         'if self._nemo_ws_test_hooks.expose_stage3_fct_inputs:',
         'return state_after._replace(mass_flux_w=diagnostic)', 16],
     # --- ORCA2 round 136: passive literal tracer-ZDF source walk --------
@@ -2740,7 +2740,7 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:11103-11110': [
         'if _return_tracer_zdf_trace:',
         ('solve=_nemo_ws_vertical_solve_trace,', 2), 8],
-    'ocean_model_latlon_cgrid.py:14262-14274': [
+    'ocean_model_latlon_cgrid.py:14271-14283': [
         ('if self._nemo_ws_test_hooks.tracer_zdf_trace:', 1),
         ('return result._replace(state_after=state_after)', 4), 13],
     # --- ORCA2 round 129: split-explicit boundary association walk -------
@@ -5577,10 +5577,10 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:10725-10848': [
         'T=state_new.T.replace(data=_adv_content_T)',
         ('z_coord=z_coord, config=config, iwm_fields=iwm_fields)', 2), 124],
-    'ocean_model_latlon_cgrid.py:13140-13146': [
+    'ocean_model_latlon_cgrid.py:13149-13155': [
         'K_v_cell = K_v_cell.astype(state.T.data.dtype)',
         'K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)', 7],
-    'ocean_model_latlon_cgrid.py:13730-13760': [
+    'ocean_model_latlon_cgrid.py:13739-13769': [
         ('if do_tracers:', 2),
         'rounded_thickness=_zdf_tracer_rounded))', 31],
     # --- parallel LDF step-3 re-proof: current private arm and execution ---
@@ -5853,12 +5853,12 @@ CITATION_MAP = {
     'nemo_testcase_recipe.py:442-444': [
         'tke_shear_production="nemo_face_native_now2"',
         ('tke_shear_metric_source="nemo_qco_live_face"', 2), 3],
-    'ocean_model_latlon_cgrid.py:11860-11877': [
+    'ocean_model_latlon_cgrid.py:11861-11878': [
         'if shear_disc not in ("nemo_face_native", "nemo_face_native_now2"):',
         '_u_before, _v_before = _u_now, _v_now', 18],
-    'ocean_model_latlon_cgrid.py:11917-11995': [
+    'ocean_model_latlon_cgrid.py:11923-12004': [
         'if metric_source == "nemo_qco_live_face":',
-        'ref_v * (1.0 + r3vb[..., None]),', 79],
+        'ref_v * (1.0 + r3vb[..., None]),', 82],
     'packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py:387-460': [
         ('wumask = u_mask[..., :-1] * u_mask[..., 1:]', 2),
         ('+ (zsh2v[:-1, :, :] + zsh2v[1:, :, :]) * coast_v', 2), 74],
@@ -5888,10 +5888,10 @@ CITATION_MAP = {
     'nemo_testcase_l2_gyre_round54_tke_operands.py:225-239': [
         'header = struct.unpack("=13i", take(13 * 4))',
         'f"Kbb={head[\'Kbb\']}/Kmm={head[\'Kmm\']}",', 15],
-    'ocean_model_latlon_cgrid.py:13993-13998': [
+    'ocean_model_latlon_cgrid.py:14002-14007': [
         'if _tke_coeff_new is not None:',
         'tke_avt=Field(data=_tke_coeff_new.K_H', 6],
-    'ocean_model_latlon_cgrid.py:14199-14214': [
+    'ocean_model_latlon_cgrid.py:14208-14223': [
         '# ``step`` is the production-compiled entry point even when a caller',
         ('_nemo_stage1_zad_eta_after_override))', 1), 16],
     'state.py:614-618': [
@@ -6845,8 +6845,8 @@ CITATION_MAP = {
         '_nemo_ws_pre_implicit_state = (',
         'if self._nemo_ws_test_hooks.expose_pre_implicit_state else None)',
         3],
-    'ocean_model_latlon_cgrid.py:13458': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
-    'ocean_model_latlon_cgrid.py:13626': ('u_solve_in = u_solve_in - (', 1),
+    'ocean_model_latlon_cgrid.py:13467': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
+    'ocean_model_latlon_cgrid.py:13635': ('u_solve_in = u_solve_in - (', 1),
     # ORCA2 round 61: private post-dyn_zdf/pre-barotropic raw-Kaa observer.
     'ocean_model_latlon_cgrid.py:1510': (
         'expose_stage3_raw_momentum: bool = False', 1),
@@ -6869,24 +6869,24 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:3248-3252': [
         '_zdf_momentum_observer = (',
         'raise ValueError("zdf_momentum_observer must be callable or None")', 5],
-    'ocean_model_latlon_cgrid.py:12612-12614': [
+    'ocean_model_latlon_cgrid.py:12621-12623': [
         ('_zc = self.z_coord if z_coord is None else z_coord', 11),
         '_iwm = (self._iwm_forcing if iwm_fields is None else iwm_fields)', 3],
-    'ocean_model_latlon_cgrid.py:12623-12624': [
+    'ocean_model_latlon_cgrid.py:12632-12633': [
         '_zdf_momentum_observer = self._nemo_ws_test_hooks.zdf_momentum_observer',
         '# Argument validation at ENTRY, not inside the drag branch below:', 2],
-    'ocean_model_latlon_cgrid.py:13211-13215': [
+    'ocean_model_latlon_cgrid.py:13220-13224': [
         'u_new, v_new = state.u.data, state.v.data',
         'if do_momentum and getattr(_cfg_b, "surface_stress_implicit",', 5],
-    'ocean_model_latlon_cgrid.py:13458-13461': [
+    'ocean_model_latlon_cgrid.py:13467-13470': [
         'u_solve_in = u_solve_in - _u_bt_mean',
         'u_solve_in, v_solve_in)', 4],
-    'ocean_model_latlon_cgrid.py:13626-13631': [
+    'ocean_model_latlon_cgrid.py:13635-13640': [
         'u_solve_in = u_solve_in - (',
         '/ jnp.maximum(_drg_e3v, 1e-10) * _is_bot_v * _v_bt_mean)', 6],
-    'ocean_model_latlon_cgrid.py:13668':
+    'ocean_model_latlon_cgrid.py:13677':
         '_zdf_baro_drag_u, _zdf_baro_drag_v = u_solve_in, v_solve_in',
-    'ocean_model_latlon_cgrid.py:13856-13863': [
+    'ocean_model_latlon_cgrid.py:13865-13872': [
         'if _zdf_momentum_observer is not None:',
         'ordered=True,', 8],
     'nemo_testcase_l1_overflow_round63_dynzdf_walk_gate.py:171-230': [
