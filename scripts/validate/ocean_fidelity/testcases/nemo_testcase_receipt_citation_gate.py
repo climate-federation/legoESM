@@ -298,6 +298,8 @@ FILES = {
         _ORCA2_R299W7_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/zdfevd.f90": (
         _ORCA2_R299W7_COMPILED / "zdfevd.f90"),
+    "ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/dommsk.f90": (
+        _ORCA2_R299W7_COMPILED / "dommsk.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_R210OMT1_COMPILED / "traadv.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_cen.f90": (
@@ -1857,6 +1859,35 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stp2d.f90:303': {
         'anchors': 'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs',
         'routine': 'stp_2D',
+    },
+    # --- ORCA2 round 303: fold-band stage-1 V transport mask + top-V exchange ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:283': {
+        'anchors': 'zFv(ji,jj,jk) = e1v(ji,jj)*(e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk)))',
+        'routine': 'stp_RK3_stg',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:570': {
+        'anchors': "CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,Kaa), 'U', -1._wp, vv(:,:,:,Kaa), 'V', -1._wp",
+        'routine': 'stp_RK3_stg',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90:211': {
+        'anchors': 'vmask(ji,jj,jk) = tmask(ji,jj  ,jk) * tmask(ji  ,jj+1,jk)',
+        'routine': 'dom_msk',
+    },
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:291': {
+        'anchors': 'zFv(ji,jj,jk) = e1v(ji,jj)*(e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk)))',
+        'routine': 'stp_RK3_stg',
+    },
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:584': {
+        'anchors': "CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,Kaa), 'U', -1._wp, vv(:,:,:,Kaa), 'V', -1._wp",
+        'routine': 'stp_RK3_stg',
+    },
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/dommsk.f90:211': {
+        'anchors': 'vmask(ji,jj,jk) = tmask(ji,jj  ,jk) * tmask(ji  ,jj+1,jk)',
+        'routine': 'dom_msk',
+    },
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/dommsk.f90:232': {
+        'anchors': "CALL lbc_lnk( 'dommsk', umask, 'U', 1.0_wp, vmask, 'V', 1.0_wp, fmask, 'F', 1.0_wp )",
+        'routine': 'dom_msk',
     },
     # --- ORCA2 round 302: tracer-only EVD (nn_evdm = 0) ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:121': {
