@@ -1,5 +1,88 @@
 # Vertical-mixing lane — V1 round 10 (vmix_r10)
 
+## Correction (resume after the independent review's HOLD, 2026-10-17)
+
+**Withdrawn:** "the (116,45) residue is a compiler last-bit effect, irreducible" (section 3, and the status
+lines below). It was walked downstream of the real site.
+
+**Owner (reviewer MEASURED, reproduced here):** the step-entry shear's sea-level ratio. The card forms
+`r3v = num*r1_hv0/e1e2v` and feeds `e3w*(1 + r3v)`. NEMO stores `pr3u`/`pr3v` as arrays first
+(`domqco.f90:266-269`) and only then adds 1 (`zdfsh2.f90:104-108`). Under compilation XLA rewrites the
+division by the constant face area into a multiply by its reciprocal, then fuses that multiply with the
+"1 +" into one FMA. That is the miss.
+
+Reviewer's measurements:
+- kt 2 with FMA disabled globally: every field bit-for-bit.
+- Guarding only the `r3v` quotient: every field bit-for-bit, in both columns ((116,45) and (26,133)).
+- Guarding every other product or quotient outside the vertical-coordinate module, or the `r3u` quotient
+  alone: no change. Not libm, not subnormal flushing, not the Prandtl tail.
+- On a scratch copy, `r3u` and `r3v` in the existing rounding guard: INDEPENDENT kt 1-3 bit-for-bit on every
+  field (kt-3 sea level 189 cells -> 0); GIVEN-NEMO-ENTRY kt 1-3 exact.
+
+Section 3's own finding stands as measured (the Prandtl tail equals NEMO when evaluated outside the step);
+its conclusion does not. The (26,133) column was the same owner, not a separate one (section 5).
+
+### Landed
+
+- `066f5c712`: `TKEConfig.nemo_sh2_r3_source_rounded` (V1-selected, default False) rounds the step-entry
+  `r3u`/`r3v` quotients before the "1 +". It refuses the in-solve shear and any other metric source.
+- `1c5c3fe66`: map entries the guard shifted, re-anchored (+9 below it). `a28038597`: rounds 8-9 receipts
+  mapped. This receipt's own entries land with this correction.
+- The `066f5c712` message names `dom_qco_r3c`. The step-entry ratio at kt >= 2 is the previous step's
+  stage-3 `dom_qco_r3c_RK3`; `dom_qco_r3c` builds only the kt-1 entry. Both have the same statement (table).
+
+Evidence: `gridladder_vmix_rounds/round10b/` (`manifest.sha256`, 24 files).
+
+| measurement | result |
+|---|---|
+| INDEPENDENT kt 1-3, guard on, before commit (`indep1_3_guard.log`) | 39 rows, 0 unequal cells |
+| flag-off step jaxprs, ORCA2 and DINO, base `991cad2ba` vs `066f5c712` (`jaxpr_all.log`) | identical (138,747-line ORCA2) |
+| new record test, V1 kt 1-2 every row and level | passes; flag off in the V1 recipe: red (kt-2 v, T, S; levels u, v, T, S, en, avm, avt, dissl) |
+| the shear builder compiled alone (toy grid, and the real card at its kt-1 state) | guard on = guard off; the FMA forms only inside the full step |
+
+So the unit test covers wiring only; the record test carries the claim.
+
+PLAUSIBLE, not measured separately: NEMO multiplies by a stored reciprocal (`r1_e1e2u = 1/e1e2u`,
+`domhgr.f90:170`), so the compiled card's reciprocal multiply, once stored, is NEMO's own form.
+
+### Re-score at `066f5c712` (clean worktree), both labels kt 1..10
+
+- **INDEPENDENT:** kt 1-3 bit-for-bit on every field and level. kt 4: surface exact; levels S/en/avt/dissl
+  differ in 1-4 cells, at the bar. **First over the bar: kt-6 T, 3.64e-14 in 2 cells (1.21e-15
+  normalised)**, with level rows T/avm/avt/dissl (6-14 cells). Worst row: kt-10 u, 1.65e-14 normalised.
+  18 rows over the bar, all kt 6-10.
+- **GIVEN-NEMO-ENTRY (kt 1/3/5/7/9):** every one-step row at the bar; kt-2 and kt-4 two-step now exact
+  (round 10 had v/T/S at kt 2, u at kt 4). **Only row over the bar: two-step kt-6 T, 3.64e-14 in 2 cells
+  (1.21e-15 normalised)** — the round-10 debt, unchanged.
+
+**V1 is NOT certified.** Next over-bar row, both labels: kt-6 T (2 cells), with avm/avt/dissl level rows.
+Its first trace is the kt-4 level residue (S/en/avt/dissl, 1-4 cells), which both labels show.
+
+| statement | ORCA2_OMIP_L4 line | SUBROUTINE |
+|---|---|---|
+| `pr3u`/`pr3v` stored (stage 3, the next step's entry) | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:266-269` | `dom_qco_r3c_RK3` (:237), called at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:167` in `stp_RK3_stg` (:78) |
+| `pr3u`/`pr3v` stored (kt-1 entry) | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:214-217` | `dom_qco_r3c` (:188), called at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:177` in `dom_qco_zgr` (:160) |
+| `e3w_1d*(1+r3u)` and `e3w_1d*(1+r3v)` | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfsh2.f90:98-108` | `zdf_sh2` (:56) |
+| `r1_e1e2u = 1/e1e2u` | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/domhgr.f90:170` | `dom_hgr` (:58) |
+
+V1 build (`ORCA2V1_OMIP_L4_R1FULLENTRY`) and `ORCA2_OMIP_L4`: `domqco.f90` (`9a3b302cd3f8868f`), `zdfsh2.f90`
+(`e8bb2398700d0d3d`) and `stprk3_stg.f90` byte-identical. The full ORCA2 and DINO cards run this statement
+too; it stays off there (D130), and their flag-off programs are unchanged.
+
+Choices made this resume — ASKED (brief): land the guard on both quotients, V1-selected; correct this
+receipt; re-score; map rounds 8-10. UNASKED, offered for revert:
+- the guard test is a record test (2.5 min, skips without the V1 record), because no isolated compile shows
+  the FMA; the unit file keeps only the default and the two refusals;
+- the flag refuses non-`nemo_qco_live_face` metric sources and the in-solve shear (round-9 pattern);
+- evidence for this resume is under `round10b/`, not `round10/`;
+- in the round-8 and round-10 receipts, the bare `stprk3_stg.f90`/`trazdf.f90` citations are now written with
+  the V1 build path (the bare names resolve to a GYRE build), and round 8's in-solve shear citation in the TKE module moved from line 3368 to 3385.
+
+UNVERIFIED: why INDEPENDENT kt 5 has more unequal surface-velocity cells than GIVEN kt 5 (3/4 vs 2/2) when
+kt 4 is bit-for-bit (a carried field outside the restart, PLAUSIBLE); the kt-4 level residue's owner.
+
+---
+
 Status: **HELD. V1 is not certified. Nothing landed in model code.**
 - The kt-3 attribution is now MEASURED by a committed probe. kt-3 sea level comes from the kt-2 T/S residue.
 - The kt-2 T/S residue comes entirely from the kt-2 diffusivity (`avt`), and only that.
@@ -63,7 +146,7 @@ CLOSURE substitution at kt 2 (NEMO's kt-2 `avm_k`/`avt_k` swapped in where the s
 | NEMO's `avt_k` | 1 | 2 | **0** | **0** |
 | both | 0 | 0 | 0 | 0 |
 
-So `tra_zdf` (`trazdf.f90:67`, `tra_zdf_imp` :134, `avt` read at :185-194) is bit-for-bit on V1 at kt 2. The T/S
+So `tra_zdf` (`ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/trazdf.f90:67`, `tra_zdf_imp` :134, `avt` read at :185-194) is bit-for-bit on V1 at kt 2. The T/S
 residue is inherited from the diffusivity alone.
 
 The diffusivity residue sits in two separate columns:
@@ -91,7 +174,7 @@ None landed (`candidates_not_landed.diff`; tree verified clean with `git status 
 Offline ulp search: with NEMO's chain, a +1-ulp shear or a -1-ulp N2 operand reproduces the card's published value at
 both cells. A viscosity change is excluded, because the published viscosity is exact there.
 
-**Classification (PLAUSIBLE):** last-bit association introduced when XLA compiles the production step. One Prandtl
+**Classification (PLAUSIBLE; WITHDRAWN, see Correction):** last-bit association introduced when XLA compiles the production step. One Prandtl
 operand reaches that statement one ulp off, in a fused copy that cannot be observed without changing the compile. It is
 not a transcription difference: the source, evaluated outside that fusion, equals NEMO in every cell. Under the brief,
 nothing lands.

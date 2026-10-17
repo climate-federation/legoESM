@@ -8080,6 +8080,25 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:192-201,338': ['zzwi = - zDt_2 * ( avm(ji+1,jj,jk  )     +  avm(ji,jj,jk  )     ) &', 'zzws = - zDt_2 * ( avm(ji+1,jj,2)     +  avm(ji,jj,2)     ) &', 'puu(ji,jj,1,Kaa) = puu(ji,jj,1,Kaa) + rDt * utauU(ji,jj)   &', 11],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:188-234': ['SUBROUTINE dom_qco_r3c( pssh, pr3t, pr3u, pr3v, pr3f )', ('END SUBROUTINE dom_qco_r3c', 1), 47],
     'zdftke.f90:419': 'zd_lw(ji,jk) = zzd_lw',
+    # --- GRIDLADDER-VMIX V1 round 10 receipt ---
+    'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/trazdf.f90:67': 'SUBROUTINE tra_zdf( kt, Kbb, Kmm, Krhs, pts, Kaa )',
+    'zdftke.f90:390-405': ['IF (rn2b(ji,jj,jk) <= 0.0_wp) then', 'p_pdlr(ji,jj,jk) = MAX(  0.1_wp,  ri_cri / MAX( ri_cri , zri )  )', 16],
+    'zdftke.f90:709-717': ['p_avm(ji,jj,jk) = MAX( zav,                  avmb(jk) ) * wmask(ji,jj,jk)', 'p_avt(ji,jj,jk)   = MAX( p_pdlr(ji,jj,jk) * p_avt(ji,jj,jk), avtb_2d(ji,jj) * avtb(jk) ) * wmask(ji,jj,jk)', 9],
+    'zdftke.f90:397': 'zdiv = p_sh2(ji,jj,jk) + rn_bshear',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:397-401': ['zdiv = p_sh2(ji,jj,jk) + rn_bshear', 'zri = rn2b(ji,jj,jk) * p_avm(ji,jj,jk) / zdiv', 5],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:405': 'p_pdlr(ji,jj,jk) = MAX(  0.1_wp,  ri_cri / MAX( ri_cri , zri )  )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:710': 'p_avt(ji,jj,jk) = MAX( zav, avtb_2d(ji,jj) * avtb(jk) ) * wmask(ji,jj,jk)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:717': 'p_avt(ji,jj,jk)   = MAX( p_pdlr(ji,jj,jk) * p_avt(ji,jj,jk), avtb_2d(ji,jj) * avtb(jk) ) * wmask(ji,jj,jk)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:185-194': ['zwt(ji,jk) = avt(ji,jj,jk) + akz(ji,jj,jk)', ('zwt(ji,jk) = avt(ji,jj,jk)', 3), 10],
+    # --- GRIDLADDER-VMIX V1 round 10 receipt: correction after the review HOLD ---
+    'domqco.f90:266-269': [('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 2), ('&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 2), 4],
+    'zdfsh2.f90:104-108': ['zsh2v(ji,jj) = ( p_avm(ji,jj+1,jk) + p_avm(ji,jj,jk) ) &', '&         * wvmask(ji,jj,jk)', 5],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:266-269': [('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 2), ('&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 2), 4],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:167': 'CALL dom_qco_r3c_RK3( ssha, r3ta, r3ua, r3va, r3fa )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:214-217': [('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 1), ('&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 1), 4],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:177': 'CALL dom_qco_r3c( ssh(:,:,Kbb), r3t(:,:,Kbb), r3u(:,:,Kbb), r3v(:,:,Kbb), r3f(:,:) )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfsh2.f90:98-108': ['DO jj = ntsj-( 1), ntej+(  0 ) ; DO ji = ntsi-( 1), ntei+(  0)     !* 2 x shear production at uw- and vw-points (energy conserving form)', '&         * wvmask(ji,jj,jk)', 11],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domhgr.f90:170': 'r1_e1e2u(:,:) = 1._wp / e1e2u(:,:)     ! compute their invert in any cases',
 }
 
 
