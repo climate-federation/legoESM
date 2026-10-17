@@ -172,12 +172,12 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
            if "zdf_momentum_stage_r3u_nemo_literal=" in line]
     assert [name for name, _ in r3u] == ["nemo_testcase_recipe.py"]
     assert "_ORCA2G_ZDF_STAGE_R3U[case]" in r3u[0][1]
-    assert LatLonCGridOceanConfig._fields[-19:-11] == (
+    assert LatLonCGridOceanConfig._fields[-20:-12] == (
         "zdf_tracer_nemo_rounded_thickness", "barotropic_rhs_ascending_level_sum",
         "zdf_momentum_stage_r3u_nemo_literal", "barotropic_wind_nemo_stored_depth",
         "surface_stress_nemo_fold_vector_sign", "zdf_surface_stress_nemo_face_thickness",
         "een_nemo_relative_vorticity", "rk3_stage_tracer_written_order")
-    assert LatLonCGridOceanConfig._fields[-11:-3] == (
+    assert LatLonCGridOceanConfig._fields[-12:-4] == (
         "rk3_vector_rhs_nemo_order", "rk3_stage3_heat_nemo_written",
         "rk3_stage3_tracer_nemo_stored_thickness",
         "implicit_ice_ocean_top_drag",
@@ -186,14 +186,16 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
         # G6 (9f8316fab): appended last, default off, G6-selected only
         "nemo_hpg_sco_fold_geometry", "rk3_vector_raw_vmask")
     # G6 round 7: appended last, default off, G6-selected only
-    assert LatLonCGridOceanConfig._fields[-3:-1] == (
+    assert LatLonCGridOceanConfig._fields[-4:-2] == (
         "nemo_wzv_stored_r3_ratios", "nemo_zad_written_association")
     # G6 round 8: appended last, default off, G6-selected only
-    assert LatLonCGridOceanConfig._fields[-1] == "nemo_stage2_momentum_wzv_half_step"
+    assert LatLonCGridOceanConfig._fields[-2] == "nemo_stage2_momentum_wzv_half_step"
+    # G6 round 8 resume: appended last, default off, G6-selected only
+    assert LatLonCGridOceanConfig._fields[-1] == "nemo_stage_momentum_wzv_stored_kmm_ratios"
     assert not any(LatLonCGridOceanConfig._field_defaults[f] for f in (
         "nemo_hpg_sco_fold_geometry", "rk3_vector_raw_vmask",
         "nemo_wzv_stored_r3_ratios", "nemo_zad_written_association",
-        "nemo_stage2_momentum_wzv_half_step"))
+        "nemo_stage2_momentum_wzv_half_step", "nemo_stage_momentum_wzv_stored_kmm_ratios"))
     assert "_ORCA2G_ZDF_FACES[case]" in (
         CASES.parents[3] / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py"
     ).read_text().splitlines()[hits[0][1] - 1]

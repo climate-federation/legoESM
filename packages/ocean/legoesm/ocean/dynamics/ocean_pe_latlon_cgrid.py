@@ -1728,7 +1728,7 @@ def nemo_qco_wzv_operands(
     if stored_kmm_level:
         # RK3 stages 2/3: Kmm's r3u/r3v are the ratios STORED by the previous
         # stage, r2_3*r3u(Kbb) + r1_3*r3ua (N+1/3) or r1_2*(r3u(Kbb) + r3ua)
-        # (N+1/2), stprk3_stg.f90:172-173 / :216-217 -- not the ratio of the
+        # (N+1/2), stprk3_stg.f90:178-179 / :222-223 -- not the ratio of the
         # interpolated stage sea level (last place on rare faces).
         if eta_after_override is None or not stored_r3_ratios:
             raise ValueError("stored_kmm_level needs eta_after_override and "
@@ -1784,7 +1784,7 @@ def nemo_qco_wzv_operands(
     r1_h0 = jax.lax.optimization_barrier(1.0 / h0_safe)
     r3_now = jax.lax.optimization_barrier(eta_now * r1_h0)
     if stored_kmm_level:
-        # r3t(Kmm), the same stored blend (stprk3_stg.f90:171 / :215)
+        # r3t(Kmm), the same stored blend (stprk3_stg.f90:177 / :221)
         _eta_a = jnp.asarray(eta_after_override, dtype=eta_now.dtype) * tmask[..., 0]
         r3_now = nemo_stage_ratio(stored_kmm_level,
                                   nemo_source_round(eta_before * r1_h0),

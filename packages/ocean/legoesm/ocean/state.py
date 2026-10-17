@@ -3311,7 +3311,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     # measured cards.
     nemo_stage2_momentum_wzv_half_step: bool = False
     # NEMO's stage-2/3 momentum wzv reads the Kmm ratios r3t/r3u/r3v STORED
-    # by the previous stage (stprk3_stg.f90:171-173, :215-217), not ratios of
+    # by the previous stage (stprk3_stg.f90:177-179, :221-223), not ratios of
     # the stage sea level.  Equal only algebraically.  False preserves
     # previously measured cards.
     nemo_stage_momentum_wzv_stored_kmm_ratios: bool = False

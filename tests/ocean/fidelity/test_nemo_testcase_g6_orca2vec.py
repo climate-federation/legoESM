@@ -370,7 +370,7 @@ def test_kt1_stage2_momentum_wzv_reads_stored_kmm_ratios():
     """kt 1 from rest through the ordinary jitted step: the stage-2 momentum
     wzv's ww (stprk3_stg.f90:327) and the dyn_zad that reads it are
     BIT-EXACT against NEMO's r44b stage-term record, because the Kmm ratios
-    are the stage-1 stored blends (:171-173), not ratios of the stage ssh."""
+    are the stage-1 stored blends (:177-179), not ratios of the stage ssh."""
     sys.path.insert(0, str(CASES))
     spec = importlib.util.spec_from_file_location(
         "g2_ladder_g6_r44", CASES / "nemo_testcase_g2_orca2bathy_ladder.py")
