@@ -101,7 +101,7 @@ def run(card, record_root: Path, arm: str, kts: int) -> dict[str, object]:
                                               surface_forcing=forcing[1]))
                         for m in models]
             except Exception as error:  # noqa: BLE001 - the refusal is the result
-                refusal = {"kt": kt, "error": str(error).splitlines()[-1][:300]}
+                refusal = {"kt": kt, "error": str(error)[:4000]}
                 break
             for stage, out in enumerate(outs, start=1):
                 history.append({"kt": kt, "stage": stage, "fields": r302.score_stage(
