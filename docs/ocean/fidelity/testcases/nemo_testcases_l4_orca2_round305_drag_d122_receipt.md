@@ -190,6 +190,13 @@ Decision 122 (c)+(d): PASS over all seven (`decide.json`, commit
 - Test: `test_orca2_round305_d133_selection.py` (8 tests) fails 6 of 8 when
   the recipe and OMT-2 selection are reverted to `a6c925444` (tree restored).
   The import test now asserts the shipped card selects bottom only.
+- Gates: this receipt's citation gate PASS (20 citations, 0 failures);
+  default citation gate + private-import ratchet 23 passed (9 recipe
+  anchors re-anchored +6 mechanically). Battery: landing set 133 + 2
+  (stage face mask) passed; prognostic barotropic, ORCA2 parallel receipt,
+  round-92/305 card tests 42 passed; OMT-0..4 card tests 65 passed, 1
+  failed (OMT-1 "only the vector module moved", trips on a barotropic flag;
+  pre-existing: OMT-0 and OMT-1 configs are unchanged in every row).
 
 Choices, resume: ASKED (round prompt) the selection above. UNASKED, offered
 for revert: OMT-0/OMT-1 now state the legacy scheme and the bottom selector
