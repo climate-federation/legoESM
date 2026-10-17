@@ -131,7 +131,7 @@ Gates before the final commit (`JAX_ENABLE_X64=1`, `land.sh` PYTHONPATH):
 | gate | result |
 |---|---|
 | this receipt's citation gate | `PASS`: 9 citations, 0 failures, 0 unmapped (`receipt_citation_gate.json`) |
-| its shift plant on `stp2d.f90:144` | exits 1, `FAIL` |
+| its shift plant on the stage-1 call line | exits 1, `FAIL` |
 | default citation-gate test + private-import ratchet + G8 file | 35 passed (`final_gates.log`) |
 
 ## 6. Acquisition (ACQUISITION_NEEDED)
