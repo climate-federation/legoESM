@@ -6,6 +6,7 @@ dyn_zdf/tra_zdf read.
 """
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -122,13 +123,16 @@ def _htau_lat_at_call_site(evaluation, monkeypatch):
 
 
 GPHIT = jnp.asarray([[28.0]])
+x64 = pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
 
 
+@x64
 @pytest.mark.parametrize("evaluation", ["nemo_literal", "nemo_scalar_libm"])
 def test_production_htau_arms_read_native_gphit(evaluation, monkeypatch):
     assert _htau_lat_at_call_site(evaluation, monkeypatch) is GPHIT
 
 
+@x64
 def test_default_htau_keeps_degrees_of_lat_t(monkeypatch):
     lat = _htau_lat_at_call_site("jax_expression", monkeypatch)
     assert lat is not GPHIT and float(lat[0, 0]) == float(jnp.degrees(0.5))

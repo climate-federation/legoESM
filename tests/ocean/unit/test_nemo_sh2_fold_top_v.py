@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -17,6 +18,9 @@ import pytest
 from legoesm.core.field import Field
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
+
+pytestmark = pytest.mark.skipif(not jax.config.x64_enabled,
+                                reason="binary64 receipt")
 
 NY, NX, NZ = 3, 6, 3
 PERM = np.asarray([(NX - i) % NX for i in range(NX)])      # card fold_convention
@@ -65,13 +69,6 @@ def _case(flag, fold=True, stage="step_entry"):
     v = rng.uniform(-1, 1, (NY + 1, NX, NZ))
     v[-1] = -v[-2][PERM]                                   # stored fold image row
     d3, d2 = ("lat", "lon", "level"), ("lat", "lon")
-    state = SimpleNamespace(
-        T=Field(jnp.zeros((NY, NX, NZ)), "T", d3, "degC"),
-        H_bathy=Field(jnp.full((NY, NX), raw.H_max), "H_bathy", d2, "m"),
-        eta=Field(jnp.asarray(eta), "eta", d2, "m"),
-        u=Field(jnp.asarray(u), "u", d3, "m/s"),
-        v=Field(jnp.asarray(v), "v", d3, "m/s"),
-        tke_avm=Field(jnp.asarray(avm), "tke_avm", d3, "m2/s"))
     tke = TKEConfig(tke_shear_evaluation_stage=stage,
                     tke_shear_production="nemo_face_native_nbb2",
                     tke_shear_avm_weighting="nemo_face",
@@ -82,7 +79,19 @@ def _case(flag, fold=True, stage="step_entry"):
     grid = SimpleNamespace(fold=SimpleNamespace(
         is_active=True, perm_T=jnp.asarray(PERM)) if fold else None)
     model = SimpleNamespace(config=cfg, z_coord=z, grid=grid)
-    return np.asarray(LatLonCGridOceanModel._tke_step_entry_p_sh2(model, state))
+
+    def p_sh2(eta, u, v, avm):
+        state = SimpleNamespace(
+            T=Field(jnp.zeros((NY, NX, NZ)), "T", d3, "degC"),
+            H_bathy=Field(jnp.full((NY, NX), raw.H_max), "H_bathy", d2, "m"),
+            eta=Field(eta, "eta", d2, "m"), u=Field(u, "u", d3, "m/s"),
+            v=Field(v, "v", d3, "m/s"), tke_avm=Field(avm, "tke_avm", d3, "m2/s"))
+        return LatLonCGridOceanModel._tke_step_entry_p_sh2(model, state)
+
+    args = tuple(jnp.asarray(a) for a in (eta, u, v, avm))
+    traced = np.asarray(jax.jit(p_sh2)(*args))
+    np.testing.assert_array_equal(np.asarray(p_sh2(*args)), traced)  # eager == jit
+    return traced
 
 
 def test_selected_pivot_row_shear_is_mirror_symmetric():

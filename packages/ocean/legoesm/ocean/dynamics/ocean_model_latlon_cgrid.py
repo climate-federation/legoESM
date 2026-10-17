@@ -11895,7 +11895,7 @@ class LatLonCGridOceanModel:
             # T-pivot fold (lbcnfd.f90:584-720): the pivot row's north V face
             # is wet in NEMO's raw vmask and its north T/W neighbour is the
             # mirror of the row below the pivot (avm_k 'W' +1,
-            # stprk3_stg.f90:785-793; ssh 'T' +1).
+            # stprk3_stg.f90:785-793; ssh 'T' +1, sshwzv.f90:140 ssh_nxt).
             _fold = getattr(self.grid if grid is None else grid, "fold", None)
             _raw = getattr(_zc, "nemo_een_barotropic", None)
             if (_fold is None or not bool(_fold.is_active)
@@ -11953,10 +11953,13 @@ class LatLonCGridOceanModel:
             def _qco_r3(eta):
                 num_u = 0.5 * (
                     a_t * eta + jnp.roll(a_t * eta, -1, axis=1))
-                _north_t = jnp.roll(a_t * eta, -1, axis=0)
                 if fold_top_v:
+                    _north_t = jnp.roll(a_t * eta, -1, axis=0)
                     _north_t = _north_t.at[-1].set((a_t * eta)[-2][_perm_t])
-                num_v = 0.5 * (a_t * eta + _north_t)
+                    num_v = 0.5 * (a_t * eta + _north_t)
+                else:
+                    num_v = 0.5 * (
+                        a_t * eta + jnp.roll(a_t * eta, -1, axis=0))
                 wet_u = hu0 > 0.0
                 wet_v = hv0 > 0.0
                 wet_u_f = wet_u.astype(dtype)
