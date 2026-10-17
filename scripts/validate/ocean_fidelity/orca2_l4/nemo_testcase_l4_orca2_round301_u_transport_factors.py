@@ -54,7 +54,8 @@ def require(condition: bool, message: str) -> None:
         raise GateError(message)
 
 
-def read_mesh(record_root: Path) -> dict[str, np.ndarray]:
+def read_mesh(record_root: Path, names: tuple[str, ...] = (
+        "e3u_0", "umask", "e2u", "e1u", "e1t", "e2t")) -> dict[str, np.ndarray]:
     """Owned 148x180 mesh fields from the two self-placing rank files."""
     import netCDF4
 
@@ -65,7 +66,7 @@ def read_mesh(record_root: Path) -> dict[str, np.ndarray]:
                     and list(ds.getncattr("DOMAIN_size_global")) == [180, 148]
                     and list(ds.getncattr("DOMAIN_halo_size_start")) == [0, 0],
                     f"mesh rank {rank}: placement moved")
-            for name in ("e3u_0", "umask", "e2u", "e1u", "e1t", "e2t"):
+            for name in names:
                 value = np.asarray(ds[name][0], np.float64)
                 if value.ndim == 3:
                     value = np.moveaxis(value, 0, -1)[..., :NZ]
