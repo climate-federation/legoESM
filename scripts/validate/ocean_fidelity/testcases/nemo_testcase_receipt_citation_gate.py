@@ -5591,7 +5591,7 @@ CITATION_MAP = {
         'pt(ji,jj,jk,jn,Kaa) = zrhs - zwi(ji,jk)', 19],
     'ocean_model_latlon_cgrid.py:10755-10878': [
         'T=state_new.T.replace(data=_adv_content_T)',
-        ('z_coord=z_coord, config=config, iwm_fields=iwm_fields)', 2), 122],
+        ('z_coord=z_coord, config=config, iwm_fields=iwm_fields)', 2), 124],
     'ocean_model_latlon_cgrid.py:13208-13214': [
         'K_v_cell = K_v_cell.astype(state.T.data.dtype)',
         'K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)', 7],
@@ -5868,10 +5868,10 @@ CITATION_MAP = {
         '_u_before, _v_before = _u_now, _v_now', 18],
     'ocean_model_latlon_cgrid.py:11964-12063': [
         'if metric_source == "nemo_qco_live_face":',
-        'ref_v * (1.0 + r3vb[..., None]),', 74],
+        'ref_v * (1.0 + r3vb[..., None]),', 100],
     'packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py:387-460': [
         ('wumask = u_mask[..., :-1] * u_mask[..., 1:]', 2),
-        ('+ (zsh2v[:-1, :, :] + zsh2v[1:, :, :]) * coast_v', 2), 71],
+        ('+ (zsh2v[:-1, :, :] + zsh2v[1:, :, :]) * coast_v', 2), 74],
     'nemo_testcase_l2_gyre_round54_tke_operands.py:514-552': [
         'def _model_substitution_walk(',
         'require(jax.config.x64_enabled, "model substitution walk requires JAX fp64")',
