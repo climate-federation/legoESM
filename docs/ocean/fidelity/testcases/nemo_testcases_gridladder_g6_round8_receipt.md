@@ -1,5 +1,8 @@
 # Grid ladder rung G6 — round 8 receipt (gridladder_r44)
 
+**Superseded by "Resume 2" at the end: G6 CERTIFIED (every field at the
+bar under both labels, kt 1..6).**
+
 Status: **LANDED (one G6-selected statement); G6 NOT CERTIFIED;
 STOPPED FOR RECORD.**  The given-entry label is now at the bar on every
 row kt 1..6 (worst 1.5e-16 normalised; round 7: kt-6 v 1.023e-15).  The
@@ -224,3 +227,172 @@ gate files (TKE terms, freshwater closure, stage face-mask rank,
 barotropic state, NEMO recipe) each exceeded 10 minutes inside XLA
 compilation under machine load 35-55; this resume changes no model code
 (a shell script, one test, this receipt), and they passed at `180f88919`.
+
+## Resume 2: record admitted, first departure walked, G6 CERTIFIED
+
+Status: **LANDED (one G6-selected statement); G6 CERTIFIED.**  Every field
+is at the bar under both labels, kt 1..6.  Independent kt 1..5 and
+given-entry kt 3..5 are bit-identical on every level-1 and 2-D row; the
+worst row anywhere is 3.65e-18 normalised.
+
+Record: operator run of `run_r44_stage_terms.sh --run` at `b8436bb464`,
+`G6R44_ACQUISITION_PASS steps=1..6 stage_terms=kt1..6,s2-3`, evidence
+`gridladder_rounds/round44/oracle_g6_r44b` (build
+`ORCA2G6_OMIP_L4_R44STGTRM2`, nemo.exe SHA-256 prefix `b3c3dc0f58d402bd`;
+log `acquisition_r44_stage_terms_b.log`).  Attempt 1 (`oracle_g6_r44`)
+stays as evidence.  Preregistration: none (DEVIATION, as in round 8).
+Evidence of this resume: `round44/walk_b`, `round44/final_b`,
+`round44/jaxpr`, `round44/probe_b`, `round44/resume2`.
+
+### 1. Admission
+
+- Passivity: compiled sources additive (both patched files), every other
+  compiled file identical; every FIX1 record file kt 1..6 byte-identical to
+  round 36; restarts 2, 4, 6 equal the writer-free reference on all 27
+  variables.
+- Headers: 12 files, kt 1..6 x stages 2-3, `NEMO_G6_STGTRM_1`, version 1,
+  64-bit reals, 2-cell halo, 184 x 152 x 31; payload 11 3-D + 8 2-D fields,
+  finite.  The five Krhs pairs are present (attempt 1 had four).
+- Matched time levels: stage 2 slots (Kbb, Kmm, Kaa = Krhs) are (1, 3, 2)
+  at odd kt and (3, 1, 2) at even kt; stage 3 (1, 2, 3) / (3, 2, 1).  These
+  are NEMO's slot swaps around
+  `ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3.f90:222` /
+  `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:218`.
+- Cross-record check: after HPG, after VOR and after ZAD equal the older
+  stage-2 term record bit for bit on wet cells.  The raw dump also holds
+  NEMO's dry-point and halo values; the older record is wet-canonicalised.
+
+### 2. Walk: kt 1, RK3 stage 2 (from rest, both labels)
+
+| boundary, in compiled order | u | v |
+|---|---|---|
+| stage momentum `ww` (T cells, all levels) | 137 of 430,552 differ, 16 columns, max 5.3e-20 (2.3e-17 normalised) | |
+| Krhs after HPG | 0 | 0 |
+| Krhs after VOR | 0 | 0 |
+| Krhs after KEG | 0 | 0 |
+| Krhs after ZAD | 3 (4.2e-22) | 0 |
+
+The `ww` is computed first (the stage momentum `wzv` precedes HPG), so it is
+the first non-bit operand.  KEG is exact, so the 3 after-ZAD cells come from
+`ww`.  NEMO's statement: `ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/sshwzv.f90:297` /
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/sshwzv.f90:297` (same text).  Inside it, the
+card's stage face thickness e3u(Kmm) differed from NEMO's
+e3u_0*(1+r3u(Kmm)) on 21 u faces, each next to one of the 16 columns.
+
+Cause (transcription, not an XLA reciprocal or FMA rewrite): at stage 2,
+NEMO's Kmm ratios are not rebuilt from the stage sea level.  They are the
+blends stage 1 stored,
+`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3_stg.f90:177-179` /
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:177-179`
+(r2_3 x ratio at Kbb + r1_3 x ratio of the after level), whose after-level
+ratios come from
+`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3_stg.f90:167` /
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:167` and
+`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domqco.f90:266` /
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:266`.  Stage 3 reads the half
+blends `ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3_stg.f90:221-223` /
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:221-223` as its Kmm.
+The card took the ratio of the blended sea level: equal as real numbers,
+different in the last place on rare faces.
+
+Instrument defect found and fixed on the way: the stage `dyn_zad` operand
+observer published `w` BEFORE the production substitution of the stage
+transport's `ww`, so it showed a stale field (2.3x NEMO's).  It now also
+publishes the operands `dyn_zad` consumes; the old keys are unchanged.
+
+An offline numpy replay of NEMO's `ww` from the record's own operands did
+NOT reproduce NEMO's `ww` (4,649 cells differ, mostly on the southernmost
+wet row, PLAUSIBLE: the runoff term is missing from the replay).  It is not
+used as evidence; the attribution rests on the card arm below (137 -> 0).
+
+### 3. Landed (`4054231a7a`)
+
+New config bool `nemo_stage_momentum_wzv_stored_kmm_ratios` (default False;
+G6 card True; deck check "stage momentum wzv stored Kmm ratios").  The ONE
+shared `wzv` operand builder gains `stored_kmm_level` (1 = N+1/3, 2 =
+N+1/2): Kmm's T, U and V ratios are the stored blends of the step-entry and
+after-level ratios.  It raises unless the after level is handed in and the
+stored-ratio option is on.  The blend helper moved into the shared module
+(public name; the model module keeps its old name by import), so no second
+copy exists.  Search: grepped `r2_3`, `_nemo_stage_ratio`, `stage_pair`,
+`r3_native` under `packages/`; found the blend helper and the face-geometry
+`r3_native` input, both reused.
+
+Both stage-2 and stage-3 momentum `wzv` calls select it.  The stage-2 arm is
+measured (137 -> 0, after-ZAD 3 -> 0); the stage-3 arm is carried by the
+step-end rows below, not by its own stage-3 term row.
+
+Other cards: jaxprs of one ordinary step for G5 and G7 are identical to
+`1593038d2d` after stripping callback addresses (SHA-256 prefixes G5
+`052f740ff7baa019`, G7 `327d43b08c23911b`, both trees); G6's changes.
+Caller grep of the field: the G6 branch of the card file and the stage
+helper only.
+
+### 4. Both labels, kt 1..6 (level 1 + 2-D; normalised max / differing cells)
+
+| kt | label | ssh | uu_b | vv_b | u | v | T | S |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 1-3 | independent (kt 1-2 = given) | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+| 4 | independent | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+| 5 | independent | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+| 6 | independent | 0/0 | 0/0 | 0/0 | 8.4e-19/2 | 3.65e-18/3 | 0/0 | 0/0 |
+| 3 | given (restart 2) | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+| 4 | given two-step | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+| 5 | given (restart 4) | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 | 0/0 |
+| 6 | given two-step | 0/0 | 0/0 | 0/0 | 8.4e-19/2 | 9.1e-19/2 | 0/0 | 0/0 |
+
+All levels (full / partial cells): kt 4 v 1.29e-18 (6) / 0 under both
+labels; kt 6 independent u 1.34e-17 (47) / 3.34e-18 (1), v 9.65e-18 (54) /
+4.83e-18 (4); kt 6 given u 6.69e-18 (33) / 3.34e-18 (1), v 9.65e-18 (39) /
+2.41e-18 (3); T, S exact.  Flushed subnormals (Decision 127): 0 on every
+row.  The kt-6 independent meridional barotropic velocity (round 8:
+2.75e-15, 7,973 cells) is exact; so is round 8's first over-bar row (kt-4
+ssh 2.15e-15).  Re-score stamped `4054231a7a` (clean tree; later commits
+change comments, tests and the citation map only).  SHA-256 prefixes:
+independent kt 1-3 `e099f70d62d72dbb`, kt 4-6 `5599fb33b7997911`, given
+kt 3-6 `8c3a3ad96d1fb001`.
+
+**Certification: CERTIFIED.**  Residual last-place cells at kt 4 and 6 are
+AT-BAR and recorded above.
+
+### D122 pointer (ORCA2 lane)
+
+The landed statement runs on ORCA2 at the ORCA2_OMIP_L4 lines in §2
+(same text, same lines as the G5 round-31 build).  G6 is now certified, so
+its D122 import is open to the ORCA2 lane.
+
+### Tests and review
+
+All CPU fp64, `JAX_ENABLE_X64=1`, PYTHONPATH as in `claude_rounds/land.sh`.
+- New test: kt-1 stage-2 momentum `ww` and after-ZAD bit-exact on the r44b
+  record through the ordinary jitted step.  With the wiring removed it FAILS
+  `137 == 0` (log `round44/nonvacuity_e_kmm_ratios.log`; restored with
+  `git checkout --`, tree clean).  Card test pins the new field.
+- Default gate (land.sh list): NEMO recipe 25 passed; stage face-mask rank +
+  barotropic state 10 passed; TKE terms + freshwater closure + private
+  imports + citation-gate test: see final gate line below.
+- G2-G5, G5 top drag, G7 cards: 85 passed.  G6 card + G2/G6 ladder: 27
+  passed, 1 failed (the config field-order pin; moved by one for the
+  appended field, then 1 passed).  G1/G1b cards passed; G1 tools 31 passed;
+  G1 ladder 86 passed (re-run with 8 workers after an XLA compile abort under
+  machine load in the shared battery).
+- Pre-existing, not touched: 3 failures in the `zad` qco-coupled unit file,
+  identical at `1593038d2d`.
+- Citation pins: 84 gate pins and 23 lines of the GYRE phase-3 round-8
+  receipt re-anchored by the repo's tool from `1593038d2d` (mechanical); the
+  momentum `wzv` span the landing lengthened (8 -> 12 lines) widened by hand.
+- codex review: paused (quota).  The operator runs an independent Claude
+  review of this diff before landing.
+
+ASKED: admit the record, walk the kt-1 stage-2 departure, land the
+transcription defect G6-selected, failing-when-removed test, jaxprs of other
+cards, re-score both labels kt 1..6, gates, receipt.
+
+UNASKED, offered for revert: the observer's extra consumed-operand keys
+(needed to measure the stage `ww`); moving the blend helper into the shared
+module; selecting the stage-3 call under the same switch (same statement
+form, not separately measured); the mechanical citation re-anchor.
+
+UNVERIFIED: the stage-3 arm has no stage-3 term row of its own; the numpy
+replay of NEMO's `ww` is not validated; XLA's HLO at the changed call was not
+read (the defect is an association choice, fixed by transcription).
