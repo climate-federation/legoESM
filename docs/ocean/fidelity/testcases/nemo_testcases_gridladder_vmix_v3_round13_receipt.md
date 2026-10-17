@@ -6,6 +6,11 @@ Status: **STOPPED_FOR_RECORD.** V3 = certified V2 + ORCA2's double-diffusive mix
 Decisions in force: D128-D130. Codex review: paused (quota). Evidence: `gridladder_vmix_rounds/round13/`.
 Preregistration: `PREREG_nemo_testcases_gridladder_vmix_v3_round13.md`, committed `5ce2a0cb9` before any V3 code.
 
+Commits: `5ce2a0cb9` prereg; `71b40a158` V3 statement, card, deck, acquisition, tests; `790eb4501` dispatch-baseline
+entry; `1e7b7a6eb` this receipt; `d25a1a24d`, `85bbcb75c`, `397489eea`, `ffe02e136` citation map (7 new entries;
+72 pins re-anchored by mechanical offsets, no anchor text changed); `35ee4f626` the default receipt's 9 model
+citations re-anchored (+14); this update (final numbers).
+
 Own error, stated first: a plant loop restored the double-diffusion module with `git checkout --` while it was
 uncommitted, which reverted it; four plants ran on the reverted file and are void. The edit was re-applied, staged,
 and every plant re-run (section 4).
@@ -85,13 +90,31 @@ checkout (default is read-only preflight, `V3_PREFLIGHT_OK`).
 - Salt matrix: salt solved with K_2 equals salt solved alone on K_2; temperature unchanged; K_2 = None identical.
 - Card/deck/selector/run-script tests (V3) + V2's file incl. its kt 1-2 record test: **17 passed** (183 s).
   Frame plant: V3's frame check on V2's record **refuses** (exit 66, `unequal_avs_avt=0 of 825840`).
-- **Flag-off jaxprs**, base `e1b56d6004c6` vs `71b40a158`: full ORCA2 138,747 lines and DINO 123,235 lines
-  **IDENTICAL**; V2 one-step 178,423 lines **IDENTICAL**. V3 one step traces: 178,721 lines, libm callbacks 135 → 137
-  (the two EXPs). Structure only, forcing frames borrowed from V2's record, no number taken.
+- **Flag-off jaxprs**, base `e1b56d6004c6` vs final tip `35ee4f626` (clean): full ORCA2 138,747 lines and DINO
+  123,235 lines **IDENTICAL**; V2 one-step 178,423 lines **IDENTICAL**. V3 one step traces: 178,721 lines, libm
+  callbacks 135 → 137 (the two EXPs). Structure only, forcing frames borrowed from V2's record, no number taken.
+  (Same result at `71b40a158`.)
 - Ratchets (dispatch, strict-validate, param specs, inline coeffs, constants, contracts, existing DDM tests,
   reachability, bounds, private imports): **6,372 passed, 4 failed** — the same 4 fail on base (land slab-land guard,
   shortwave spec, land restart coefficient, a JRA55 test constant), none in this diff. The new form guard is locked in
   the dispatch baseline.
+- **Default gate at the final tip** (`land.sh` list): citation-gate tests + private-import ratchet + TKE terms +
+  recipe + freshwater + prognostic barotropic + V3 + unit files **150 passed, 1 failed** (the default receipt's 9
+  model citations, shifted by this diff) → re-anchored → citation-gate file + ratchet **23 passed**. Face-mask file,
+  two processes: **1 passed** (596 s), **1 passed** (60 s). V2 + V3 + unit files **17 passed** (169 s); V1 file
+  **14 passed** (default `not slow`).
+- **Per-receipt citation gate** on this receipt (`--from-heading` this title): **PASS, failures 0**, 10 citations,
+  unmapped 0, map entries failing audit 0.
+- Acquisition preflight at `35ee4f626`: `V3_PREFLIGHT_OK` (nothing built).
+
+| evidence (`round13/`) | sha256 prefix |
+|---|---|
+| `jaxpr_all_final.log` / `jaxpr_orca2_fix.txt` / `jaxpr_dino_fix.txt` | 2af5627e14ac2473 / 7484b3c5d84cadd9 / a241c2926df7a006 |
+| `vtrace_final.log` / `jaxpr_v2_fix.txt` / `jaxpr_v3_fix.txt` / `vtrace.py` | 7c7b9604c2cb52e3 / 8547d7e248cf2b76 / a5bec0ede95b82c9 / fa11edf5c2117111 |
+| `unit.log` / `unit_plants.log` / `t1.log` / `ratchets.log` / `ratchets_base.log` | 84a62be660accfa1 / c126dce32835e8c6 / 2ad538921206c4dc / 65319b8c537d6601 / aeda013a23d0edf5 |
+| `gate1.log` / `gate2.log` / `gate3.log` / `gate4.log` / `gate_fm1.log` / `gate_fm2.log` / `receipt_gate.log` | 45285acd934232b8 / dc0afcd736099b23 / 02acf18a4db47c29 / 0fea8fd1fbcaa6db / 01740623ef8dd364 / a2494d24cec5c6f4 / bf37493338f8f5d8 |
+
+`jaxpr_all_final.log`'s hash equals round 12's: both logs read "orca2 IDENTICAL / dino IDENTICAL"; the jaxprs differ.
 
 ## Choices made
 
@@ -100,7 +123,8 @@ UNASKED, offered for revert:
 - the literal form requires the scalar-libm policy (raises under native);
 - the salt diffusivity leaves through a new opt-in return value rather than a carried field;
 - four new refusals (literal DDM with IWM, isoneutral fold, K test overrides, physics-provided-K path);
-- the acquisition adds the kt-1 avs ≠ avt check as an admission condition.
+- the acquisition adds the kt-1 avs ≠ avt check as an admission condition;
+- the default (gyre round 8) receipt's 9 model citations were re-anchored to keep its gate green.
 
 UNVERIFIED:
 - the card's double diffusion on real ORCA2 fields: no V3 step was run (no record); wiring shown only by the trace;
