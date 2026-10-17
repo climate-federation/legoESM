@@ -13,9 +13,11 @@ seven card/label pairs.  Arms (same tree, all relative to the shipped card):
             pivot face and stage-ratio fold exchange: one compiled switch).
   HPGF      hpg_sco fold geometry.        WZVR   wzv stored r3 ratios.
   ZADA      dyn_zad written association.  CLOCK  stage-2 clock pair (+WZVR,
-            which it requires).           KMM    stage wzv stored Kmm ratios.
+            which it requires).           KMM    stage wzv stored Kmm ratios (+WZVR,
+            which it requires).
   CARRY     Decision 132's carried after-SSH slot.
   FOLD      FOLDUNIT+TOPV+RAWV+HPGF.      ALL    every statement above.
+  SEL       the arms that pass on all seven pairs, together (see below).
   D122      the card as shipped after this round's selection.
 """
 
@@ -54,13 +56,22 @@ STATEMENTS = {
     "ZADA": {"nemo_zad_written_association": True},
     "CLOCK": {"nemo_wzv_stored_r3_ratios": True,
               "nemo_stage2_momentum_wzv_half_step": True},
-    "KMM": {"nemo_stage_momentum_wzv_stored_kmm_ratios": True},
+    "KMM": {"nemo_wzv_stored_r3_ratios": True,
+            "nemo_stage_momentum_wzv_stored_kmm_ratios": True},
     "CARRY": {"nemo_first_wzv_after_ssh": "rk3_extrapolated_carried"},
 }
 STATEMENTS["FOLD"] = {**STATEMENTS["FOLDUNIT"], **STATEMENTS["TOPV"],
                       **STATEMENTS["RAWV"], **STATEMENTS["HPGF"]}
 STATEMENTS["ALL"] = {k: v for arm in tuple(STATEMENTS) for k, v in
                      STATEMENTS[arm].items()}
+# The arms that passed (c)+(d) on all seven pairs, together.  VECORD's
+# stage-1 deselect is left out: on vector cards its one consumer is already
+# forced by the vector stage update.  TOPV (Decision 125) and HPGF (moved no
+# row anywhere) stay out.
+STATEMENTS["SEL"] = {**{"rk3_vector_rhs_nemo_order": True},
+                     **STATEMENTS["EENORD"], **STATEMENTS["TOPF"],
+                     **STATEMENTS["CLOCK"], **STATEMENTS["KMM"],
+                     **STATEMENTS["ZADA"], **STATEMENTS["CARRY"]}
 RUNGS = ("rung0", "omt1", "omt2", "omt3", "omt4", "rung10")
 ARMS = ("control", "D122", *STATEMENTS)
 # This round's selection; filled from the measurement before it is applied.
