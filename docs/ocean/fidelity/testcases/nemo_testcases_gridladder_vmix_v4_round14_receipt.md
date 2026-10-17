@@ -1,9 +1,10 @@
-# Vertical-mixing lane — round 14 (vmix_r14): V4 = V3 + ORCA2's internal-wave mixing BUILT, record needed
+# Vertical-mixing lane — round 14 (vmix_r14): V4 = V3 + ORCA2's internal-wave mixing CERTIFIED
 
-Status: **V4 BUILT, NOT SCORED.** V4 = certified V3 + ORCA2's internal-wave mixing exactly as ORCA2 sets it
-(`ORCA2_OMIP_L4/EXP00/namelist_cfg:396` `ln_zdfiwm = .true.`; `&namzdf_iwm` at
-`ORCA2_OMIP_L4/EXP00/namelist_cfg:421-435`). No new data source and no new model state. The NEMO record does not
-exist yet; nothing is scored this round.
+Status: **V4 CERTIFIED** (resume, 2026-10-17). V4 = certified V3 + ORCA2's internal-wave mixing exactly as ORCA2 sets
+it (`ORCA2_OMIP_L4/EXP00/namelist_cfg:396` `ln_zdfiwm = .true.`; `&namzdf_iwm` at
+`ORCA2_OMIP_L4/EXP00/namelist_cfg:421-435`). After one association fix, every field, every level, kt 1..10,
+bit-for-bit with NEMO's admitted record under both labels; worst row under each label: 0 (exact). Sections 1-4 are
+the pre-record half; section 5 scores V4.
 
 Decisions in force: D128-D130. Codex review: paused (quota). Evidence: `gridladder_vmix_rounds/round14/`.
 Preregistration: `PREREG_nemo_testcases_gridladder_vmix_v4_round14.md`, committed `4eb17a2a0` before any V4 code.
@@ -97,6 +98,80 @@ is read-only preflight, `V4_PREFLIGHT_OK`).
   unmapped 0, map entries failing audit 0 (first run: 4 range/anchor pins failed; fixed by pinning unique endpoints).
 - Acquisition preflight at `e5ef6981e`: `V4_PREFLIGHT_OK` (nothing built).
 
+## 5. V4 scored (resume after the record)
+
+Record: `gridladder_vmix_rounds/round14/oracle_v4_r14` (operator: `V4_PREFLIGHT_OK` at `f7945d134`, nothing built;
+`V4_ACQUISITION_PASS steps=1..10 restarts=2..10`; `V4_IWM_FRAME unequal_avt_vs_v3=414119 of 825840`). CPU, x64,
+`land.sh` PYTHONPATH. Commits: `4315dc485` ladder; `6ff844d6d` hbot division fix; MAP_COMMIT map entries; this update.
+
+**First run: the ladder refused.** It built the model without the card's forcing maps, and the literal statement
+refuses to run without them. Fixed in the ladder only: every model it builds now takes the card's maps (none on
+V1-V3, so their runs are unchanged).
+
+**First score, V4 as built (`f7945d134` model code): not at the bar.**
+- kt 1: the avt/avs/avm the solves consume vs NEMO's post-`zdf_phy` frame: 41,546 / 41,825 / 31,459 wet W cells
+  unequal (max 1.6e-16 / 1.6e-16 / 1.7e-16 absolute; normalised 1.6e-18 / 1.6e-18 / 1.1e-16); T and S unequal in
+  41 / 36 cells.
+- First over-bar row: kt 2, both labels (sea level 4.8e-15, u 2.0e-14, T 3.7e-12, S 1.0e-11 absolute; DEBT).
+
+**Walk, kt 1, `zdf_iwm` first** (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:140`;
+`ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfiwm.f90:140`; byte-identical, sha prefix `13ba29ab568a4592`).
+- Pre-IWM K = the V4 card's own consumed K at kt 1 with IWM switched off (IWM is the last statement of `zdf_phy`,
+  `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:372`).
+- NEMO's statements in scalar doubles with glibc `exp`/`tanh`/`log10`, on the card's operands: equal to NEMO's
+  frame in **every** wet W cell, avt, avs and avm (0 unequal of 414,119). So the operands are NEMO's:
+  - column depth: the card's equals NEMO's `ht_0`, the level-ordered sum of `e3t_0*tmask`
+    (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/domain.f90:198`, in `dom_init` at
+    `ORCA2_OMIP_L4/BLD/ppsrc/nemo/domain.f90:128`), in every wet column (P3's first suspect: not it);
+  - the 1-D depth ladders equal NEMO's mesh record's; the stored `hcri = 1/scale_cri`
+    (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:485`) agrees.
+- The card's statement alone equals the scalar transcription eagerly and under jit with the maps as arguments
+  (0 unequal). Under jit with the maps as closure constants, as the model step builds it, it reproduces the card's
+  41,546 cells exactly.
+- Owner: `zdfiwm.f90:267-268` divide by `hbot_iwm`
+  (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:267-268`, the same lines in
+  `ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfiwm.f90:267-268`). With the map a constant, XLA rewrote both
+  divisions as a multiply by a folded reciprocal (compiled HLO: 8 divides; 10 after the fix).
+- Fix (statement used by V4 alone): `hbot` passes through the existing source-rounding guard, keeping a true
+  division (round 13's DDM fix, same class). After it: kt-1 avt/avs/avm 0 unequal; the constant-maps jit 0.
+
+**Final score (`6ff844d6d` model code; packages tree `8c365061`).**
+- **INDEPENDENT kt 1-10:** 149 rows (surface sea level, barotropic transports, u, v, T, S each kt; all-level u, v, T,
+  S, en, avm_k, avt_k, dissl and surface avm at kt 2-10): every row max 0, unequal 0.
+- **GIVEN-NEMO-ENTRY (entries kt 1/3/5/7/9, one- and two-step):** 113 rows, every row max 0, unequal 0.
+- **kt-1 frame, consumed coefficients:** avt, avs, avm each 0 unequal of 414,119 wet W cells, 0 dry.
+- No flushed-subnormal cells (D127 census empty: no unequal cell). Bar 1e-15 normalised; nothing needed it.
+
+**Internal-wave mixing is active.**
+- kt-1 frame vs V3's certified frame: NEMO's V4 avt, avs and avm differ in all 414,119 wet W cells; the card's in
+  the same 414,119 cells (same cell set, each field).
+- avs > avt at 41,612 cells and avs < avt at 372,507, NEMO and card alike (V3: 145,986 / 266,311).
+- NEMO's V4 vs V3 restarts, unequal cells: T and S 430,552 at kt 2, 5, 10; u 413,030; en 414,119 (kt 2) →
+  430,483 (kt 10); avt_k 414,122 → 430,544.
+
+Preregistration:
+- **P1 CONFIRMED** (acquisition passed; switches and banners per the acquisition's log checks).
+- **P2 CONFIRMED**: (a) 414,119 kt-1 avt cells differ from V3's frame; (b) 430,552 T cells differ at kt 2.
+- **P3 REFUTED as listed**: none of the four named owners. The owner was the `hbot_iwm` divisions
+  (`zdfiwm.f90:267-268`), an XLA rewrite, not a transcription error.
+- **P4 CONFIRMED** at `6ff844d6d`: full ORCA2 (138,746 lines) and DINO (123,234) one-step jaxprs identical to base
+  `0b9443cef279`; V2 (178,423) and V3 (174,349) one-step jaxprs identical too. V4 one step: 176,180 lines (was
+  176,175; the guard).
+
+Tests (CPU, x64):
+- Statement test gains a jit case with the maps as constants: 5 passed. Fix removed: **1 failed** (that case),
+  4 passed. Tree verified clean after.
+- V4 card/deck/selector tests + IWM unit file: CARDS_RESUME.
+
+**Decision 122.** `zdfiwm.f90` is byte-identical in V1's build and ORCA2_OMIP_L4.
+
+| statement | ORCA2_OMIP_L4 line | V1 build line | SUBROUTINE |
+|---|---|---|---|
+| `... / hbot_iwm(ji,jj)` (twice) | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:267-268` | `ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfiwm.f90:267-268` | `zdf_iwm` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:140`) |
+| `hcri_iwm = 1._wp / sf_iwm(6)%fnow` | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:485` | `ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfiwm.f90:485` | `zdf_iwm_init` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:373`) |
+
+GATES_RESUME
+
 ## Choices made
 
 ASKED: survey; V4 = ORCA2's IWM exactly as its deck sets it; card; acquisition; off on other cards (D130); IWM's
@@ -109,14 +184,21 @@ UNASKED, offered for revert:
 - the acquisition adds "kt-1 avt differs from V3's frame" as an admission condition;
 - the default (gyre round 8) receipt's citations were re-anchored to keep its gate green.
 
+ASKED (resume): score V4 both labels; show IWM active; walk the first over-bar row; land V4-selected fixes.
+UNASKED (resume), offered for revert:
+- the ladder passes the card's maps to every model it builds (None on V1-V3);
+- the ladder's kt-1 frame arm takes V4 and adds the IWM-active census against V3's admitted frame (fixed path);
+- the `hbot` guard (the only way found to keep XLA's true division, as in round 13).
+
 UNVERIFIED:
-- nothing about V4 against NEMO is measured: no record exists;
-- the full ORCA2/DINO jaxpr identity was measured at `e5ef6981e`; `1e38cc6ba` is read off the diff (one literal in a
-  function no other card calls).
+- beyond kt 1, avs is not in NEMO's records; it is certified through T and S (bit-for-bit kt 1-10);
+- beyond kt 10: nothing scored;
+- other divisions by a constant elsewhere in V4's step were not audited one by one; every score row is exact, so
+  none moved a bit in these ten steps.
 
 ## Machine lines
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r14/repo
-ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/testcases/nemo_testcase_v4_orca2iwm/run.sh --run (nothing built: V1 record binary + G5 writer-free binary; deck = V3's + ln_zdfiwm and ORCA2's &namzdf_iwm; inputs = V3's + zdfiwm_forcing_orca2.nc from the on-disk ORCA2_ICE_v5.0.0 tarball, sha-pinned; records = V3's set + kt-1 zdf frame whose avt must differ from V3's; smoke → boundary → twins A/B/C to ≤10 steps) into gridladder_vmix_rounds/round14/oracle_v4_r14
+ACQUISITION_NEEDED: NONE
 DECISION_NEEDED: NONE (V2's step-entry EVD trigger decision from round 13 still pending; untouched here)
-ROUND_STATUS: V4_BUILT_AWAITING_RECORD — V3 + ORCA2's internal-wave mixing (ln_zdfiwm T, ln_mevar F, ln_tsdiff T, six zdfiwm_forcing_orca2 maps, NEMO's forced TKE floors); no new data source, no new state; flag-off jaxprs of every other card identical to base; not scored; codex review: paused (quota).
+ROUND_STATUS: V4_CERTIFIED — V3 + ORCA2's internal-wave mixing (ln_zdfiwm T, ln_mevar F, ln_tsdiff T, six zdfiwm_forcing_orca2 maps, NEMO's forced TKE floors) bit-for-bit with NEMO kt 1..10 under both labels, every field incl. kt-1 avt/avs/avm and en/avm_k/avt_k/dissl (worst row 0 under each), after one V4-selected association fix (zdf_iwm's hbot_iwm divisions kept true under jit); IWM active in all 414,119 wet W cells, same cells on the card; codex review: paused (quota).
