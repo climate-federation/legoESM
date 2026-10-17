@@ -1970,6 +1970,19 @@ def _nemo_stage_corrected_velocity(
     return corrected
 
 
+def _nemo_ddm_literal(config) -> bool:
+    """Static: the card selects NEMO-literal double diffusion (zdfddm)."""
+    ddm = getattr(getattr(getattr(config, "physics", None),
+                          "vertical_mixing", None), "ddm", None)
+    if ddm is None or not ddm.enabled:
+        return False
+    if ddm.form not in ("hybrid", "nemo_literal"):
+        raise ValueError(
+            "Unknown DoubleDiffusionConfig.form: expected 'hybrid' or "
+            f"'nemo_literal', got {ddm.form!r}")
+    return ddm.form == "nemo_literal"
+
+
 def nemo_stage_momentum_wzv_resolved(config) -> bool:
     """Does this card's configuration SELECT NEMO's two-solve stage program?
 
@@ -11744,11 +11757,17 @@ class LatLonCGridOceanModel:
         )
         _bn2_selector = self._nemo_ws_test_hooks.bn2_intermediate
         _bn2_override = self._nemo_ws_test_hooks.bn2_alpha_beta_override
+        _ddm_literal = _nemo_ddm_literal(_cfg_b)
         _rn2_result = compute_buoyancy_frequency_nemo_bn2(
             T_now, S_now, gdept, gdepw, **_n2_kwargs,
+            return_ddm_operands=_ddm_literal,
             _alpha_beta_override=_bn2_override,
             _return_intermediate=_bn2_selector)
-        if _bn2_selector:
+        _ddm_operands = None
+        if _ddm_literal:
+            rn2, _ddm_operands = _rn2_result
+            _bn2_intermediate = None
+        elif _bn2_selector:
             rn2, _bn2_intermediate = _rn2_result
         else:
             rn2, _bn2_intermediate = _rn2_result, None
@@ -11793,7 +11812,8 @@ class LatLonCGridOceanModel:
         return TKEEntryN2Bundle(
             rn2=rn2, rn2b=rn2b, gdepw_Kmm=gdepw, e3w_Kmm=e3w,
             e3t_Kmm=e3t, e3w_surface_Kmm=e3w_surface,
-            bn2_intermediate=_bn2_intermediate, e3t_jpk=e3t_jpk)
+            bn2_intermediate=_bn2_intermediate, e3t_jpk=e3t_jpk,
+            ddm_operands=_ddm_operands)
 
     def _tke_step_entry_p_sh2(
         self, state, *, eta_now=None, u_now=None, v_now=None,
@@ -12733,6 +12753,14 @@ class LatLonCGridOceanModel:
             K_v_phys = None
             A_v_phys = None
 
+        # NEMO-literal zdf_ddm's avs (zdfddm.f90:170); None on every other card.
+        K_s_literal = None
+        _ddm_literal_here = _nemo_ddm_literal(_cfg_b)
+        if _ddm_literal_here and K_v_phys is not None and A_v_phys is not None:
+            raise ValueError(
+                "DoubleDiffusionConfig.form='nemo_literal' is composed in the "
+                "K-profile fallback (after EVD); the physics-provided-K fast "
+                "path cannot carry avs")
         if K_v_phys is not None and A_v_phys is not None:
             # Fast path: use K profiles already computed by the physics
             # function, just add the config background floors.
@@ -12906,7 +12934,7 @@ class LatLonCGridOceanModel:
                         _tke_p_sh2_result)
                 else:
                     _tke_p_sh2 = _tke_p_sh2_result
-                K_v_cell, A_v_cell, tke_new = compute_vertical_K_profiles(
+                _kprof = compute_vertical_K_profiles(
                     cc_state, _zc, surface_forcing, physics_config,
                     A_v_background=float(_cfg_b.A_v),
                     K_v_background=float(_cfg_b.K_v),
@@ -12942,7 +12970,12 @@ class LatLonCGridOceanModel:
                     tke_rhs_intermediate=(
                         self._nemo_ws_test_hooks.tke_rhs_intermediate),
                     seos_cfg=_cfg_b.eos_nemo_seos,
+                    return_salt_K=_ddm_literal_here,
                 )
+                if _ddm_literal_here:
+                    K_v_cell, A_v_cell, tke_new, K_s_literal = _kprof
+                else:
+                    K_v_cell, A_v_cell, tke_new = _kprof
                 if (tke_new is not None
                         and hasattr(tke_new, "K_M")
                         and hasattr(tke_new, "tke_new")):
@@ -13019,6 +13052,11 @@ class LatLonCGridOceanModel:
                 _tracer_e3t_test_override = effective_K_test_override[4]
             if len(effective_K_test_override) == 6:
                 _tracer_content_t_test_override = effective_K_test_override[5]
+
+        if K_s_literal is not None and effective_K_test_override is not None:
+            raise ValueError(
+                "vertical K test overrides replace avt but not the literal "
+                "double-diffusion avs; not defined together")
 
         # DIAGNOSTIC CAPTURE (return_K_profiles): the interface diffusivity
         # K_v_cell (heat, NEMO avt) and viscosity A_v_cell (momentum, avm) at
@@ -13193,7 +13231,8 @@ class LatLonCGridOceanModel:
             _ddm_cfg = getattr(
                 getattr(getattr(_cfg_b, "physics", None),
                         "vertical_mixing", None), "ddm", None)
-            if _ddm_cfg is not None and _ddm_cfg.enabled:
+            if (_ddm_cfg is not None and _ddm_cfg.enabled
+                    and not _ddm_literal_here):
                 from legoesm.ocean.physics.vertical_mixing.k_profiles import (
                     ddm_K_profile,
                 )
@@ -13741,6 +13780,13 @@ class LatLonCGridOceanModel:
         # ``dK_ddm_salt is None`` (ddm off) ⇒ K_s_cell IS K_v_cell (same
         # object) ⇒ the shared-K pair fast path stays BYTE-IDENTICAL.
         K_s_cell = K_v_cell if dK_ddm_salt is None else (K_v_cell + dK_ddm_salt)
+        if K_s_literal is not None:
+            # zdf_ddm's avs itself (zdfddm.f90:170), never avt + (avs - avt).
+            if K33_iso is not None:
+                raise ValueError(
+                    "literal double diffusion with an isoneutral K33 fold is "
+                    "not built (trazdf.f90:200-208 adds it to avs too)")
+            K_s_cell = K_s_literal.astype(K_v_cell.dtype)
         if _fixed_solve_test_input is not None:
             _tracer_e3w = jnp.where(
                 _fixed_solve_replace[3],
@@ -13794,6 +13840,7 @@ class LatLonCGridOceanModel:
                             K_v_cell, _tracer_e3t, _tracer_e3w, dt,
                             _tracer_wet,
                             evaluation="nemo_literal",
+                            K_2=(None if K_s_literal is None else K_s_cell),
                             implicit_w=nemo_aimp_tracer_w, return_matrix_trace=return_tracer_solve_trace,
                             rounded_thickness=_zdf_tracer_rounded))
                     if return_tracer_solve_trace:
@@ -13831,7 +13878,7 @@ class LatLonCGridOceanModel:
                 # field-batching ADDED it).  LEGOESM_VMIX_TSPAIR=0
                 # restores the two separate solves (trace-time switch,
                 # same caveat as above).
-                elif (dK_ddm_salt is None
+                elif (dK_ddm_salt is None and K_s_literal is None
                         and os.environ.get("LEGOESM_VMIX_TSPAIR", "1") != "0"):
                     T_new, S_new = implicit_vertical_diffusion_ocean_pair(
                         T_solve_in, S_solve_in,

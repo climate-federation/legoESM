@@ -3582,7 +3582,8 @@ def read_orca2g1_deck(
         "namsbc.nn_ice": 2 if case in _ORCA2G_SI3_CASES else 0,
         "namzdf.ln_zdfcst": case not in _ORCA2V_CASES,
         "namzdf.ln_zdftke": case in _ORCA2V_CASES,
-        **(_ORCA2V2_EVD_FIELDS if case == "ORCA2V2-evd" else {}),
+        **(_ORCA2V2_EVD_FIELDS if case in _ORCA2V_EVD_CASES else {}),
+        **(_ORCA2V3_DDM_FIELDS if case == "ORCA2V3-ddm" else {}),
     }
     tke_lines = {k: v for k, v in values.items() if k.startswith("namzdf_tke.")}
     if tke_lines != (_ORCA2V1_TKE_FIELDS if case in _ORCA2V_CASES else {}):
@@ -3811,6 +3812,8 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
     )
     if case in _ORCA2V_CASES:
         vertical = _orca2v1_tke_vertical(vertical, deck)
+    if case == "ORCA2V3-ddm":
+        vertical = vertical._replace(ddm=_orca2v3_ddm(vertical.ddm))
     physics = base.physics._replace(
         vertical_mixing=vertical,
         shortwave_penetration=_orca2g_qsr(case, deck.rn_Dt_s),    # ln_traqsr (G4: ORCA2's RGB)
@@ -3819,7 +3822,7 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         # vertical diffusion, which this deck switches off; V2 keeps it
         # with ORCA2's nn_evdm = 0.
         convection=(_orca2v2_evd_convection(base.physics.convection)
-                    if case == "ORCA2V2-evd" else
+                    if case in _ORCA2V_EVD_CASES else
                     base.physics.convection._replace(scheme="none")),
     )
     if _ORCA2G_DYNADV_VEC[case]:
@@ -3942,8 +3945,11 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
             (vm.scheme == "constant" and not vm.constant.lat_dependent
              and not vm.iwm.enabled and not vm.ddm.enabled)),
         "ln_zad_Aimp=F": not cfg.adaptive_implicit_vertadv,
-        ("ln_zdfevd" if card.case == "ORCA2V2-evd" else "ln_zdfevd=F"): (
-            _orca2v2_evd_selected(cfg.physics.convection) if card.case == "ORCA2V2-evd" else cfg.physics.convection.scheme == "none"),
+        ("ln_zdfevd" if card.case in _ORCA2V_EVD_CASES else "ln_zdfevd=F"): (
+            _orca2v2_evd_selected(cfg.physics.convection) if card.case in _ORCA2V_EVD_CASES else cfg.physics.convection.scheme == "none"),
+        ("ln_zdfddm" if card.case == "ORCA2V3-ddm" else "ln_zdfddm=F"): (
+            _orca2v3_ddm_selected(vm.ddm) if card.case == "ORCA2V3-ddm"
+            else not vm.ddm.enabled),
         "nn_e3f_typ=0": cfg.een_e3f_scheme == "nemo_avg4",
         "lateral_mixing_none": cfg.physics.lateral_mixing.scheme == "none",
         "ln_trabbl=F": (cfg.bbl_adv_option, cfg.bbl_diffusive_option) == (0, 0),
@@ -4351,8 +4357,9 @@ def build_orca2g5_ice_card(deck_root: str | Path) -> NEMOTestcaseCard:
 # switch, ORCA2's TKE closure.  The deck is G5's plus ln_zdftke=T,
 # ln_zdfcst=F and ORCA2's four &namzdf_tke lines (namelist_cfg:404-419);
 # every other key, ln_zdfiwm=F and ln_drg_OFF=T included, is G5's.
-_ORCA2G_SI3_CASES = ("ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd")
-_ORCA2V_CASES = ("ORCA2V1-tke", "ORCA2V2-evd")
+_ORCA2G_SI3_CASES = ("ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm")
+_ORCA2V_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm")
+_ORCA2V_EVD_CASES = ("ORCA2V2-evd", "ORCA2V3-ddm")
 _ORCA2V1_TKE_FIELDS: dict[str, object] = {
     "namzdf_tke.nn_mxl": 3, "namzdf_tke.nn_etau": 1,
     "namzdf_tke.ln_mxhsw": False, "namzdf_tke.nn_mxlice": 2,
@@ -4378,8 +4385,10 @@ for _rung_table in (_ORCA2G_JPK, _ORCA2G_ZDF_FACES, _ORCA2G_TRA_ZDF_ROUNDED,
                     _ORCA2G_SBC):
     _rung_table["ORCA2V1-tke"] = _rung_table["ORCA2G5-ice"]
     _rung_table["ORCA2V2-evd"] = _rung_table["ORCA2G5-ice"]
+    _rung_table["ORCA2V3-ddm"] = _rung_table["ORCA2G5-ice"]
 _ORCA2G_UNMEASURED["ORCA2V1-tke"] = ORCA2V1_UNMEASURED
 _ORCA2G_UNMEASURED["ORCA2V2-evd"] = ORCA2V1_UNMEASURED
+_ORCA2G_UNMEASURED["ORCA2V3-ddm"] = ORCA2V1_UNMEASURED
 
 
 def _orca2v1_tke_vertical(g5_vm, deck: ORCA2G1Deck):
@@ -4422,7 +4431,7 @@ def _orca2v1_tke_vertical(g5_vm, deck: ORCA2G1Deck):
 
 def _orca2v1_tke_selected(vm) -> bool:
     t = vm.tke
-    return (vm.scheme == "tke" and not vm.iwm.enabled and not vm.ddm.enabled
+    return (vm.scheme == "tke" and not vm.iwm.enabled
             and vm.vmix_background_mode == "nemo_max_floor"
             and (t.tke_mxl_choice, t.tke_background, t.tke_surface_min,
                  t.nemo_derived_mxl_min, t.nemo_mxl0_rmxl_min_overwrite, t.lc,
@@ -4505,6 +4514,33 @@ def build_orca2v2_evd_card(deck_root: str | Path) -> NEMOTestcaseCard:
     return build_orca2g1_flat_card(deck_root, "ORCA2V2-evd")
 
 
+# ORCA2V3: certified V2 plus ORCA2's double-diffusive mixing, verbatim
+# ORCA2_OMIP_L4/EXP00/namelist_cfg:393-395 (zdf_ddm, zdfddm.f90:59; called at
+# zdfphy.f90:362-363 after zdf_evd, writing avs that trazdf uses for salt).
+_ORCA2V3_DDM_FIELDS: dict[str, object] = {
+    "namzdf.ln_zdfddm": True, "namzdf.rn_avts": 1.0e-4, "namzdf.rn_hsbfr": 1.6,
+}
+
+
+def _orca2v3_ddm(ddm):
+    return ddm._replace(
+        enabled=True, form="nemo_literal",
+        rn_avts=_ORCA2V3_DDM_FIELDS["namzdf.rn_avts"],
+        rn_hsbfr=_ORCA2V3_DDM_FIELDS["namzdf.rn_hsbfr"])
+
+
+def _orca2v3_ddm_selected(ddm) -> bool:
+    return (ddm.enabled, ddm.form, ddm.rn_avts, ddm.rn_hsbfr) == (
+        True, "nemo_literal", _ORCA2V3_DDM_FIELDS["namzdf.rn_avts"],
+        _ORCA2V3_DDM_FIELDS["namzdf.rn_hsbfr"])
+
+
+def build_orca2v3_ddm_card(deck_root: str | Path) -> NEMOTestcaseCard:
+    """V3: certified V2 plus ORCA2's double-diffusive mixing (ln_zdfddm)."""
+
+    return build_orca2g1_flat_card(deck_root, "ORCA2V3-ddm")
+
+
 __all__ = (
     "NEMOTestcaseCard",
     "GYRESurfaceBoundaryCondition",
@@ -4522,6 +4558,7 @@ __all__ = (
     "build_orca2g5_ice_card",
     "build_orca2v1_tke_card",
     "build_orca2v2_evd_card",
+    "build_orca2v3_ddm_card",
     "ORCA2V1_UNMEASURED",
     "orca2g_forcing_failures",
     "orca2g_ice_failures",

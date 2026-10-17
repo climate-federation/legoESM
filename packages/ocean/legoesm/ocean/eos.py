@@ -684,6 +684,7 @@ def compute_buoyancy_frequency_nemo_bn2(
     zrw_gdepw_0: jnp.ndarray | None = None,
     zrw_stretch: jnp.ndarray | None = None,
     source_rounded: bool = False,
+    return_ddm_operands: bool = False,
     _alpha_beta_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     _return_intermediate: str = "",
 ) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
@@ -830,6 +831,15 @@ def compute_buoyancy_frequency_nemo_bn2(
         temperature_contribution - salinity_contribution)
     gravity_product = r(g * contribution_difference)
     thickness_division = r(gravity_product / e3w)
+    if return_ddm_operands:
+        # zdfddm.f90:118-128 re-forms bn2_t's zrw/zaw/zbw (same 1-D depths,
+        # same rab_n = rab_b at Kmm = Nbb, stprk3.f90:170-174) and multiplies
+        # by dk[T], dk[S]: on wet interfaces its zdt/zds ARE these products.
+        if _return_intermediate:
+            raise ValueError(
+                "return_ddm_operands and a private intermediate are exclusive")
+        return thickness_division, (temperature_contribution,
+                                    salinity_contribution)
     if not _return_intermediate:
         return thickness_division
     intermediates = {

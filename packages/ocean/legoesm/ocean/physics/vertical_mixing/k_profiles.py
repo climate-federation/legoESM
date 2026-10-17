@@ -139,6 +139,7 @@ def compute_vertical_K_profiles(
     return_tke_statement_trace: bool = False,
     tke_rhs_materialization: str = "",
     tke_rhs_intermediate: str = "",
+    return_salt_K: bool = False,
 ) -> (
     tuple[jnp.ndarray, jnp.ndarray]
     | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -467,6 +468,39 @@ def compute_vertical_K_profiles(
             else:
                 A_v_total = A_v_total + A_conv
 
+    # NEMO-literal double diffusion (zdfddm), zdfphy.f90:362-363: after
+    # zdf_evd (:359), before zdf_iwm (:372); it writes avs and adds to
+    # avt/avm.  Off (every card but V3) => K_s_total stays None, no ops.
+    K_s_total = None
+    _ddm_cfg = getattr(vmix, "ddm", None)
+    if _ddm_cfg is not None and _ddm_cfg.enabled:
+        if _ddm_cfg.form not in ("hybrid", "nemo_literal"):
+            raise ValueError(
+                "Unknown DoubleDiffusionConfig.form: expected 'hybrid' or "
+                f"'nemo_literal', got {_ddm_cfg.form!r}")
+        if _ddm_cfg.form == "nemo_literal":
+            if not return_salt_K:
+                raise ValueError(
+                    "DoubleDiffusionConfig.form='nemo_literal' writes a "
+                    "separate salt diffusivity; the caller must request it "
+                    "with return_salt_K=True")
+            if (tke_n2_bundle is None
+                    or getattr(tke_n2_bundle, "ddm_operands", None) is None):
+                raise ValueError(
+                    "DoubleDiffusionConfig.form='nemo_literal' needs the "
+                    "step-entry bn2 bundle's zdt/zds (zdfddm.f90:127-128)")
+            if _wet_if is None:
+                raise ValueError(
+                    "DoubleDiffusionConfig.form='nemo_literal' needs the "
+                    "partial-cell wet W mask (zdfddm.f90:136 wmask)")
+            from legoesm.ocean.physics.vertical_mixing.double_diffusion import (
+                nemo_zdf_ddm,
+            )
+            _zdt, _zds = tke_n2_bundle.ddm_operands
+            K_v_total, K_s_total, A_v_total = nemo_zdf_ddm(
+                K_v_total, A_v_total, _zdt, _zds, tke_n2_bundle.rn2,
+                _wet_if, _ddm_cfg)
+
     # Clip to KPP K_max when KPP is the vertical mixing scheme, matching
     # the explicit path's saturation behavior.  Otherwise leave the sum
     # uncapped (the schemes' own configs already include sensible
@@ -496,6 +530,12 @@ def compute_vertical_K_profiles(
                 "IWMConfig.tsdiff=True (differential T/S wave-driven "
                 "mixing) is not supported on the shared-K implicit tracer "
                 "solve; set tsdiff=False (the ORCA1 oracle value).")
+        if K_s_total is not None:
+            # zdf_iwm also writes avs (zdfiwm); not transcribed for the
+            # literal salt channel yet -- refuse rather than drop it.
+            raise ValueError(
+                "IWMConfig.enabled with DoubleDiffusionConfig.form="
+                "'nemo_literal' is not built: zdf_iwm's avs update is missing")
         K_iwm = iwm_K_profile(
             state, z_coord, physics_config, iwm_cfg,
             eos_fn=eos_fn, iwm_fields=iwm_fields)
@@ -525,8 +565,14 @@ def compute_vertical_K_profiles(
                              tke_new.K_M_surface * state.land_mask.data),
             )
 
+    if K_s_total is not None:
+        K_s_total = K_s_total * _wet_if
     if return_tke:
+        if return_salt_K:
+            return K_v_total, A_v_total, tke_new, K_s_total
         return K_v_total, A_v_total, tke_new
+    if return_salt_K:
+        return K_v_total, A_v_total, K_s_total
     return K_v_total, A_v_total
 
 
