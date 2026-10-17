@@ -111,7 +111,7 @@ ulp off and the independent label is DEBT at kt 7..10 (section 1); with it,
 | after the fix: G8 file + G2 ladder file | 24 passed, 9 deselected |
 | plant: G8 card drops `nemo_ldf_stage_r3f` | G8 file 2 failed, restored, `git status` clean |
 | plants: scorer `--plant score` / `--plant level` | both exit 1, DEBT |
-| this receipt's citation gate | see section 7 |
+| this receipt's citation gate | PASS, 0 failures (section 7) |
 
 The face-mask and G1 runs first hit the 10-minute cap under machine load
 (load average 43); they were re-run with workers.  No test failed in the
@@ -143,6 +143,12 @@ Run on this receipt before the final commit:
 `nemo_testcase_receipt_citation_gate.py --receipt <this file> --from-heading
 "# Grid ladder rung G8 — round 1 resume receipt (gridladder_r45, scoring)"`.
 Result in `gridladder_rounds/round45/score/final/receipt_citation_gate.json`.
+
+- At `4c616df63`: `PASS`, 8 citations, 0 failures, 0 unmapped, 0 map entries
+  failing the audit.
+- Its shift plant on the stage-3 F-ratio line exits 1.
+- Default citation-gate test + private-import ratchet + G8 file: 36 passed
+  (`final/final_gates.log`).
 
 ## Choices
 
