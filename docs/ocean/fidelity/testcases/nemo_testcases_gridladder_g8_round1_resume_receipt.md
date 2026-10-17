@@ -164,3 +164,33 @@ UNASKED, offered for revert:
 
 UNVERIFIED: the independent label past kt 10 (no record); the full ORCA2
 card's response to the four statements.
+
+## 8. Second resume: value test for the four wirings (review HOLD)
+
+The independent Claude review reproduced the certification and held on
+tests only: removing any one of the four wirings (stage-1 order, stage-3
+r3f read, stored F area, fold rows) left all 13 G8 tests green.
+
+New test `test_g8_kt3_step_from_nemo_entry_is_bit_identical_on_every_level`:
+NEMO's restart of kt 2 enters the card's jitted step (state traced, x64),
+kt 3 and kt 4 are run, and every surface row and every level of u, v, T, S
+(wet and dry cells) must be bit-identical to NEMO's after-step restarts.
+No arithmetic changed.
+
+Plants, each a scratch worktree at `eb2e59174` with ONE wiring line
+disabled (the card still selects the switch), evidence in
+`gridladder_rounds/round45/plants_r2/` (`*.diff`, `*.log`):
+
+| copy | result | first rows named |
+|---|---|---|
+| restored (no plant) | 1 passed | — |
+| stage-1 order off | 1 failed | kt-3 ssh, uu_b, vv_b, u, v, T, ... |
+| stage-3 r3f read off | 1 failed | v level 10 only (the kt-3 one-ulp V cell) |
+| stored F area off | 1 failed | kt-3 ssh, uu_b, vv_b, u, v, T, ... |
+| fold rows off | 1 failed | kt-3 ssh, uu_b, vv_b, u, v, T, ... |
+
+Log SHA-256 (first 16): base `092657bf057194e7`, order `3cdad2b330b768e5`,
+r3f `4dd4352c301e39eb`, area `57c721f8d91de17f`, fold `fec1e7b46ca0218b`.
+Cost: ~100 s per run on CPU; skipped when the round-45 record is absent.
+
+codex review: paused (quota).

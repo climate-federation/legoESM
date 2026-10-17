@@ -303,3 +303,34 @@ def test_g8_dyn_ldf_lev_matches_nemo_statement_with_stored_f_area_and_fold_rows(
     assert min(err(False, True)) > 1e-3           # grid area_q: the next F point's area
     eu, ev = err(True, False)
     assert eu > 1e-3 and ev > 1e-3                # fold rows: u row 147, v row 146
+
+
+R45 = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round45/oracle_g8_r45")
+
+
+@pytest.mark.skipif(not (R45 / "twin_a/oracle_step_entry_kt00000003.bin").is_file(),
+                    reason="no round-45 G8 record")
+def test_g8_kt3_step_from_nemo_entry_is_bit_identical_on_every_level():
+    """kt 3 and kt 4 from NEMO's restart of kt 2, through the card's jitted
+    step (state traced, x64), against NEMO's after-step restarts.
+
+    Each of the four G8 wirings moves bits here and fails this test alone:
+    stage-1 hpg->ldf->vor order (stp2d.f90:141-147), the stage-3 r3f read
+    (stprk3_stg.f90:245, the kt-3 V cell (125, 98, 9) one ulp off without
+    it), the stored F area (domhgr.f90:156) and the fold rows
+    (dynldf_lev.f90:121-140)."""
+    sys.path.insert(0, str(CASES))
+    import nemo_testcase_g2_orca2bathy_ladder as ladder
+    out = ladder.run(R45 / "twin_a", arm="given_entry", entries=(3,), case="ORCA2G8-ldf",
+                     restart_roots=(R45 / "twin_b", R45 / "twin_c"), allow_dirty=True)
+    (kt,) = out["per_kt"]
+    assert kt["two_step_kt"] == 4
+    for rows, levels in ((kt["rows"], kt["all_levels"]),
+                         (kt["two_step_rows"], kt["two_step_all_levels"])):
+        assert len(rows) == 7 and len(levels) == 4
+        bad = [r["name"] for r in rows if not r["bit_identical"]]
+        for f, field in levels.items():
+            for lev in field["levels"]:
+                if lev["dry_n_unequal"] or lev["full"]["n_unequal"] or lev["partial"]["n_unequal"]:
+                    bad.append(f"{f} level {lev['level']}")
+        assert not bad, bad
