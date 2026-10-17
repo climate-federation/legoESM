@@ -247,6 +247,14 @@ Evidence `gridladder_rounds/round43/resume/`, SHA-256 prefixes: given kt
 
 Next: unchanged (walk the given-entry kt-3 stages after `stp_2D`).
 
+Tests (CPU fp64, `JAX_ENABLE_X64=1`, PYTHONPATH as in `land.sh`): default
+gate 91 + 26 passed, recipe + G6 + dyn_zad unit 42 passed (incl. the five
+new tests), G2-G5, G5 top drag, G7 85 passed, G1/G1b cards, tools and
+ladder 191 passed, G2 ladder 11 passed.  Citation gate on this receipt:
+21 citations, failures 0, unmapped 0.  Pins shifted by this resume were
+re-anchored by the repo's tool (16 gate pins, 5 lines of the GYRE phase-3
+round-8 receipt).
+
 ASKED: items 1-3, re-score, gates.  UNASKED, offered for revert: the
-walk's new level-2+ ww row (needed to read item 1 inside the step).
-codex review: paused (quota).
+walk's new level-2+ ww row (needed to read item 1 inside the step); the
+mechanical re-anchor.  codex review: paused (quota).
