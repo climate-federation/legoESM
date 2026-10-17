@@ -1733,7 +1733,7 @@ FILES = {
         "domqco.f90", "domhgr.f90")},
     **{f"ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/{f}": _ORCA2V1 / f
        for f in ("trazdf.f90", "stprk3_stg.f90", "zdfevd.f90", "zdfphy.f90",
-                 "stprk3.f90")},
+                 "stprk3.f90", "zdfddm.f90")},
     **{f"ORCA2_OMIP_L4/BLD/ppsrc/nemo/{f}": _ORCA2_COMPILED / f for f in (
         "zdfsh2.f90", "lbcnfd.f90", "sshwzv.f90", "domhgr.f90", "eosbn2.f90")},
     "tke.py": REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py",
@@ -8145,6 +8145,11 @@ CITATION_MAP = {
         5,
     ],
     'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:186': 'IF( kstp == nit000 )   CALL l2_dump_zdf( kstp, Nbb )',
+    # --- GRIDLADDER-VMIX round 13 resume (V3 scored) ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90:161': 'zrr = zrau / rn_hsbfr',
+    'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfddm.f90:161': 'zrr = zrau / rn_hsbfr',
+    'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfddm.f90:59': 'SUBROUTINE zdf_ddm( kt, Kmm, p_avm, p_avt, p_avs )',
+    'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfphy.f90:363': 'CALL zdf_ddm( kt, Kmm,  avm, avt, avs )',
 }
 
 

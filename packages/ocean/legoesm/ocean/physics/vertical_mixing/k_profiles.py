@@ -426,7 +426,7 @@ def compute_vertical_K_profiles(
         else:
             _evd_state, _evd_before = state, n2_tracers
         if getattr(_ed, "trigger_step_entry_bn2", False):
-            # zdfevd.f90:107-108 on the step-entry rn2/rn2b (stprk3.f90:171-174)
+            # zdfevd.f90:108-109 on the step-entry rn2/rn2b (stprk3.f90:171-174)
             if (_evd_tl != "nemo_now_before" or _ed.smooth_transition
                     or tke_n2_bundle is None or _wet_if is None):
                 raise ValueError(
