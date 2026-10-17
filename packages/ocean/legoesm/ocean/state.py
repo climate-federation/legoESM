@@ -3304,6 +3304,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # optimization_barrier and contracts these products into the adds.
     # False preserves previously measured cards.
     nemo_zad_written_association: bool = False
+    # NEMO's stage-2 momentum wzv (stprk3_stg.f90:327) runs on the stage
+    # clock rDt = rn_Dt/2 (:188-189) with the stored half-sum
+    # r3t(Kaa) = r1_2*(r3t(Kbb) + r3ta) (np_HYB, :221).  The full-step pair
+    # (rn_Dt, r3ta) is equal only algebraically.  False preserves previously
+    # measured cards.
+    nemo_stage2_momentum_wzv_half_step: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

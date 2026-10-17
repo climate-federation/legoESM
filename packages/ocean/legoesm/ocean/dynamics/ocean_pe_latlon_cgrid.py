@@ -1680,7 +1680,7 @@ def nemo_qco_wzv_operands(
     transport_after_override=None, barotropic_velocity_override=None,
     volume_transport_override=None, runoff_mass_flux=None,
     after_ssh_form="", eta_after_carried=None, fold_exchange_ratios=False,
-    stored_r3_ratios=False,
+    stored_r3_ratios=False, half_step_after_ratio=False,
 ):
     """Coupled QCO ``ww`` + live Kmm face thickness for either WZV call.
 
@@ -1851,6 +1851,12 @@ def nemo_qco_wzv_operands(
         # without this XLA computes (eta_after - eta_before)*r1_h0 instead.
         r3_after = nemo_source_round(r3_after)
         r3_before = nemo_source_round(r3_before)
+    if half_step_after_ratio:
+        # stage 2: r3t(Kaa) = r1_2*(r3t(Kbb) + r3ta), stored
+        # (stprk3_stg.f90:221); the caller passes rDt = rn_Dt/2.
+        if not stored_r3_ratios:
+            raise ValueError("half_step_after_ratio needs stored_r3_ratios")
+        r3_after = nemo_source_round(0.5 * (r3_before + r3_after))
     ww = nemo_qco_wzv_recurrence(
         flux_div, e3t0, r3_before, r3_after, tmask, dt,
         stored_r3_ratios=stored_r3_ratios)

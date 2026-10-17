@@ -2159,13 +2159,16 @@ def _nemo_ws_stage_transport(
             _w_dt, _w_eta_after = (
                 (dt, eta_after) if momentum_wzv_clock is None
                 else momentum_wzv_clock)
+            _w_half = (stage_index == 1 and momentum_wzv_clock is None
+                       and bool(config.nemo_stage2_momentum_wzv_half_step))
             w_momentum, _, _ = nemo_qco_wzv_operands(
                 eta_stage, eta_before, u_stage, v_stage, grid, z_coord,
-                u_mask_3d, v_mask_3d, _tmask3, _w_dt,
+                u_mask_3d, v_mask_3d, _tmask3, _w_dt / 2.0 if _w_half else _w_dt,
                 eta_after_override=_w_eta_after,
                 volume_transport_override=None,
                 fold_exchange_ratios=bool(config.rk3_vector_raw_vmask), runoff_mass_flux=runoff_mass_flux,
-                stored_r3_ratios=bool(config.nemo_wzv_stored_r3_ratios))
+                stored_r3_ratios=bool(config.nemo_wzv_stored_r3_ratios),
+                half_step_after_ratio=_w_half)
     else:
         w_stage = diagnose_w_from_flux_div(
             stage_div, z_coord, thickness_weighted=True)

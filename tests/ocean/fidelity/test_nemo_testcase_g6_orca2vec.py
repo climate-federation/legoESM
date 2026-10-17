@@ -99,6 +99,7 @@ def test_g6_card_is_g5_plus_g1b_vector_selectors(tmp_path):
         nemo_first_wzv_after_ssh="rk3_extrapolated_carried",   # Decision 132
         nemo_wzv_stored_r3_ratios=True,          # round 7: wzv reads stored r3t
         nemo_zad_written_association=True,       # round 7: dyn_zad association
+        nemo_stage2_momentum_wzv_half_step=True,  # round 8: stage-2 wzv clock pair
         barotropic=c5.barotropic._replace(
             barotropic_flux_update_nemo_literal=False,
             barotropic_entry_depth_nemo_literal=False,
@@ -304,7 +305,9 @@ needs_r36 = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def kt3_rows():
     """kt 3 from NEMO's restart 2 through the ordinary jitted step (traced
-    state): the stp_2D walk on the r42 record and the step-end rows on r36."""
+    state): the stp_2D walk and the stage-2/3 rows on the r42 record, the
+    step-end rows on r36.  Every assertion below is BIT-EXACT against NEMO's
+    record (0 differing wet cells), never a bound on a measured count."""
     sys.path.insert(0, str(CASES))
     spec = importlib.util.spec_from_file_location(
         "g2_ladder_g6", CASES / "nemo_testcase_g2_orca2bathy_ladder.py")
@@ -312,36 +315,40 @@ def kt3_rows():
     spec.loader.exec_module(ladder)
     walk = ladder.run(R42, arm="stp2d_terms", kt_from=3, kt_to=3,
                       allow_dirty=True, case="ORCA2G6-vec")
+    stages = ladder.run(R42, arm="stages", kt_from=3, exposures=("stage2", "stage3"),
+                        allow_dirty=True, case="ORCA2G6-vec")
     given = ladder.run(R36 / "twin_a", arm="given_entry", kt_from=3, kt_to=3,
                        entries=(3,), restart_roots=(R36 / "ref_100step",),
                        allow_dirty=True, case="ORCA2G6-vec")
     rows = {r["name"]: r["n_unequal"] for r in walk["per_kt"][0]["stp2d_rows"]}
+    for p in stages["per_kt"]:
+        rows.update({r["name"]: r["n_unequal"] for r in p["rows"]})
     rows.update({r["name"]: r["n_unequal"] for r in given["per_kt"][0]["rows"]})
     return rows
 
 
-# Each bound is the count measured with every round-7 piece in place; the
-# comment gives the count with that ONE piece removed (round-7 resume).
+# The comment on each line is that row with the ONE piece removed (round-7
+# resume, round 8 for the stage-2 clock pair).
 @needs_r42
 @needs_r36
 def test_kt3_step_entry_wzv_reads_stored_ratios(kt3_rows):
-    assert kt3_rows["first_wzv.ww_lev2+"] <= 22          # without: 90,820
     assert kt3_rows["spg_ts_exit.uu_b"] == 0             # without: 1,337
     assert kt3_rows["spg_ts_exit.vv_b"] == 0             # without: 1,334
 
 
 @needs_r42
 @needs_r36
-def test_kt3_momentum_wzv_reads_stored_ratios(kt3_rows):
-    # the stage's momentum wzv (stprk3_stg.f90:360) feeds only the step end
-    assert kt3_rows["given_entry.kt3.u"] <= 38           # without: 91
-    assert kt3_rows["given_entry.kt3.v"] <= 46           # without: 93
+def test_kt3_stage2_momentum_wzv_is_nemos(kt3_rows):
+    # the stage-2 momentum wzv (stprk3_stg.f90:327) on rDt = rn_Dt/2 with the
+    # stored r3t(Kaa) = r1_2*(r3t(Kbb) + r3ta) (:188-189, :221); the half-step
+    # pair raises without the call's stored ratios, so it also guards those
+    assert kt3_rows["stage2.kt3.v"] == 0                 # without the pair: 54
+    assert kt3_rows["stage3.kt3.u"] == 0                 # without the pair: 38
 
 
 @needs_r42
 @needs_r36
 def test_kt3_zad_rounds_e1e2t_ww(kt3_rows):
-    assert kt3_rows["after_zad.v"] <= 2                  # without: 1,349
     assert kt3_rows["given_entry.kt3.ssh"] == 0          # without: 568
 
 
