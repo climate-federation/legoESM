@@ -447,6 +447,10 @@ FILES = {
         _ORCA2_COMPILED / "dynadv.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfdyn.f90": (
         _ORCA2_COMPILED / "ldfdyn.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynldf.f90": (
+        _ORCA2_COMPILED / "dynldf.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynldf_lev.f90": (
+        _ORCA2_COMPILED / "dynldf_lev.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_COMPILED / "traadv.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90": (
@@ -1816,6 +1820,26 @@ CITATION_MAP = {
     'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stp2d.f90:156': 'CALL wzv    ( kt, Kbb, Kbb, Kaa , uu(:,:,:,Kbb), vv(:,:,:,Kbb), ww, np_velocity )',
     'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90:367': "CALL iom_get( numror, jpdom_auto, 'ssha'   , ssh(:,:,Kaa) )",
     'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90:184': "CALL iom_rstput( kt, nitrst, numrow, 'ssha', ssh(:,:,Kaa) )",
+    # Round 45 (gridladder G8 round 1): ORCA2's lateral momentum diffusion.
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:371-373': [
+        'ln_dynldf_lap =  .true.', 'nn_ahm_ijk_t  = -30', 3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfdyn.f90:177-179': [
+        'NAMELIST/namdyn_ldf/ ln_dynldf_OFF', '&                 nn_ahm_ijk_t , rn_Uv', 3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfdyn.f90:248-250': [
+        'IF( ln_dynldf_lap ) THEN         ! laplacian operator',
+        ('IF( ln_dynldf_lev )   nldf_dyn = np_lap ', 1), 3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfdyn.f90:348-353': [
+        'CASE( -30  )', ('CALL iom_close( inum )', 2), 6],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfdyn.f90:387-390': [
+        'IF( .NOT.l_ldfdyn_time ) THEN',
+        'ahmf(:,:,1:jpkm1) =       ahmf(:,:,1:jpkm1)   * fmask(:,:,1:jpkm1)', 4],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynldf.f90:83-85': [
+        'CASE ( np_lap   )', 'CALL dynldf_lev_lap( kt, Kbb, Kmm, puu, pvv, Krhs )', 3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynldf_lev.f90:121-140': [
+        ('DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)', 1),
+        ('+ ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 1), 20],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:144': 'CALL dyn_ldf( kt, Kbb, Kbb, uu, vv, Krhs )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:493': 'CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:152': 'r3t(ji,jj,Kaa) =  ssh(ji,jj,Kaa) * r1_ht_0(ji,jj)',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:156': 'CALL wzv    ( kt, Kbb, Kbb, Kaa , uu(:,:,:,Kbb), vv(:,:,:,Kbb), ww, np_velocity )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:367': "CALL iom_get( numror, jpdom_auto, 'ssha'   , ssh(:,:,Kaa) )",
