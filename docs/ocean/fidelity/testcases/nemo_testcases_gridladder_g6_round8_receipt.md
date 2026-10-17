@@ -369,8 +369,8 @@ All CPU fp64, `JAX_ENABLE_X64=1`, PYTHONPATH as in `claude_rounds/land.sh`.
   `137 == 0` (log `round44/nonvacuity_e_kmm_ratios.log`; restored with
   `git checkout --`, tree clean).  Card test pins the new field.
 - Default gate (land.sh list): NEMO recipe 25 passed; stage face-mask rank +
-  barotropic state 10 passed; TKE terms + freshwater closure + private
-  imports + citation-gate test: see final gate line below.
+  barotropic state 10 passed; citation-gate test + private-import ratchet +
+  TKE terms + freshwater closure 107 passed (at `ebbfeabd21`).
 - G2-G5, G5 top drag, G7 cards: 85 passed.  G6 card + G2/G6 ladder: 27
   passed, 1 failed (the config field-order pin; moved by one for the
   appended field, then 1 passed).  G1/G1b cards passed; G1 tools 31 passed;
@@ -381,6 +381,10 @@ All CPU fp64, `JAX_ENABLE_X64=1`, PYTHONPATH as in `claude_rounds/land.sh`.
 - Citation pins: 84 gate pins and 23 lines of the GYRE phase-3 round-8
   receipt re-anchored by the repo's tool from `1593038d2d` (mechanical); the
   momentum `wzv` span the landing lengthened (8 -> 12 lines) widened by hand.
+- Receipt citation gate on THIS receipt (from its title): 18 citations,
+  failures 0, unmapped 0, map audit 0, self-test fired; a planted shift of
+  the G5-build `:177-179` blend citation FAILS it (`SYMBOL-NOT-AT-LINE`).
+  Twelve map entries added for this resume.
 - codex review: paused (quota).  The operator runs an independent Claude
   review of this diff before landing.
 
