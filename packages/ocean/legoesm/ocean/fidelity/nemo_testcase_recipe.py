@@ -1811,6 +1811,14 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     # Decision 133: namelist_cfg's &namdrg ln_lin = T with ln_drgimp = T
     # replaces the quadratic law inherited from the GYRE base.
     model_config = _nemo_linear_bottom_drag(model_config)
+    # V3 round 13 / ORCA2 round 309 (Decision 122): zdf_evd's trigger
+    # MIN(rn2, rn2b) <= -1e-12 (zdfevd.f90:108-109) reads the step-entry bn2
+    # on Nbb (stprk3.f90:171/174), not N2 rebuilt on the stage-3 sea level.
+    _ph = model_config.physics
+    model_config = model_config._replace(physics=_ph._replace(
+        convection=_ph.convection._replace(
+            enhanced_diffusion=_ph.convection.enhanced_diffusion._replace(
+                trigger_step_entry_bn2=True))))
     # zdfphy.F90:146-173 initializes the pre-closure coefficient memory
     # before zdf_tke_init.  This deck resolves nn_avb=0, nn_havtb=1, so avm_k
     # is constant rn_avm0=1.2e-4 while avt_k is rn_avt0=1.2e-5 times the

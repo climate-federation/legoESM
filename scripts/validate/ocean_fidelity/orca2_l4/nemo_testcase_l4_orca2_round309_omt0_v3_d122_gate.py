@@ -3,7 +3,7 @@
 
 OMT-0 (independent label, its admitted round-203 kt 1..10 frame record):
   control  round 308's eight selections off (after-SSH 'rk3_extrapolated').
-  D122     the card as shipped (round 308's eight on).
+  D122     the card as shipped (after this round: LINDYN's two).
   NOADV    D122 minus the two statements NEMO's np_LIN_dyn never reaches
            (vector Krhs/KEG order, dyn_zad association).
   LINDYN   only the statements whose cited compiled line np_LIN_dyn runs:
@@ -56,9 +56,13 @@ R308_OFF = {k: (False if v is True else "rk3_extrapolated")
             for k, v in R308_ON.items()}
 NOT_ON_LIN_DYN = ("rk3_vector_rhs_nemo_order", "nemo_zad_written_association")
 LIN_DYN_RUNS = ("nemo_wzv_stored_r3_ratios", "nemo_first_wzv_after_ssh")
-OMT0_ARMS = {"control": R308_OFF, "D122": R308_ON,
+OMT0_ARMS = {"control": R308_OFF,
              "NOADV": {**R308_ON, **{k: R308_OFF[k] for k in NOT_ON_LIN_DYN}},
              "LINDYN": {**R308_OFF, **{k: R308_ON[k] for k in LIN_DYN_RUNS}}}
+# Round 308 shipped OMT-0 with all eight (it refused at trace); round 309
+# ships LINDYN's two.
+OMT0_SHIPPED = OMT0_ARMS["LINDYN"]
+OMT0_ARMS["D122"] = OMT0_SHIPPED
 
 # ORCA2_OMIP_L4/EXP00 namelist_cfg &namzdf (the rung-10 deck): ln_zdfddm,
 # rn_avts, rn_hsbfr.  Rung 0 and OMT-0..4 set ln_zdfddm = .false.
@@ -70,6 +74,7 @@ ARMS["rung10"] = ("control", "D122", *V3_STATEMENTS)
 ARMS["omt0"] = tuple(OMT0_ARMS)
 # This round's selection, per card (filled in after the measurements).
 D122_SELECTED: dict[str, tuple[str, ...]] = {rung: () for rung in RUNGS[1:]}
+D122_SELECTED["rung10"] = ("EVDSE",)
 
 
 def _v3_on(cfg) -> set[str]:
@@ -103,7 +108,7 @@ def selected_card(card, *, arm: str, rung: str, plant: str = "none"):
     cfg = card.recipe.model_config
     if rung == "omt0":
         shipped = {k: getattr(cfg, k) for k in R308_ON}
-        require(shipped == R308_ON, f"omt0: shipped card carries {shipped}")
+        require(shipped == OMT0_SHIPPED, f"omt0: shipped card carries {shipped}")
         want = dict(OMT0_ARMS[arm])
         if plant == "retained-selector" and arm == "control":
             want["een_vorticity_written_order"] = True

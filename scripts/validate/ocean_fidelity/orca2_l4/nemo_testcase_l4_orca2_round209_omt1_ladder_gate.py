@@ -54,6 +54,8 @@ def build_omt1_card(deck_root: Path, *, plant: str = "none"):
         momentum_flux_scheme=rung_cfg.momentum_flux_scheme,
         vertical_momentum_scheme=rung_cfg.vertical_momentum_scheme,
         vorticity_scheme=rung_cfg.vorticity_scheme,
+        # Round 309: OMT-0 turns these off (np_LIN_dyn); vector form restores them.
+        **{name: getattr(rung_cfg, name) for name in omt0.OMT0_VECTOR_ONLY},
         barotropic=cfg.barotropic._replace(
             barotropic_flux_update_nemo_literal=False,
             barotropic_entry_depth_nemo_literal=False,

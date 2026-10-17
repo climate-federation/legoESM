@@ -38,6 +38,14 @@ def require(condition: bool, message: str) -> None:
         raise GateError(message)
 
 
+OMT0_VECTOR_ONLY = (
+    "rk3_vector_rhs_nemo_order", "een_vorticity_written_order",
+    "een_nemo_top_f_u_halo", "nemo_zad_written_association",
+    "nemo_stage2_momentum_wzv_half_step",
+    "nemo_stage_momentum_wzv_stored_kmm_ratios",
+)
+
+
 def build_omt0_card(deck_root: Path, *, plant: str = "none"):
     """Apply exactly Decision 103's five OFF module selections to rung 0."""
 
@@ -74,6 +82,12 @@ def build_omt0_card(deck_root: Path, *, plant: str = "none"):
             barotropic_flux_update_nemo_literal=True,
             barotropic_entry_depth_nemo_literal=True,
         ),
+        # Round 309: G6's vector-form statements whose compiled lines
+        # np_LIN_dyn never runs (no dyn_keg/dyn_zad, stp2d.f90:160-166;
+        # vor_een on ncor, dynvor.f90:202, not np_CRV :762-766; the flux-form
+        # stage wzv is stprk3_stg.f90:334, not :327).  The stored-ratio wzv
+        # and the carried after-SSH slot stay (their lines run here).
+        **{name: False for name in OMT0_VECTOR_ONLY},
     )
     recipe = card.recipe._replace(model_config=cfg)
     return card._replace(
@@ -110,6 +124,8 @@ def validate_omt0_card(card) -> dict[str, object]:
             and cfg.barotropic.barotropic_entry_depth_nemo_literal
         ),
         "no_unmeasured": tuple(card.unmeasured_features) == (),
+        "vector_only_statements_off": not any(
+            getattr(cfg, name) for name in OMT0_VECTOR_ONLY),
     }
     require(all(selectors.values()), f"OMT-0 selector moved: {selectors}")
     return selectors

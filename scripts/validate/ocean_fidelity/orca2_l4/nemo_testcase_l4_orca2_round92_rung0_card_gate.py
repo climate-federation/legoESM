@@ -69,6 +69,11 @@ def build_rung0_card(deck_root: Path):
     )
     physics = model.physics._replace(
         vertical_mixing=vertical,
+        # Round 309: the step-entry EVD trigger needs the step-entry bn2
+        # bundle, which a constant-mixing card does not build (refuses).
+        convection=model.physics.convection._replace(
+            enhanced_diffusion=model.physics.convection.enhanced_diffusion._replace(
+                trigger_step_entry_bn2=False)),
         shortwave_penetration=None,
         mle=None,
     )
