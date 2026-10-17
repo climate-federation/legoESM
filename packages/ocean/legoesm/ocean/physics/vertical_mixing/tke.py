@@ -1730,6 +1730,16 @@ def _solve_tke_backward_euler(
                 "tke_matrix_evaluation='nemo_literal' requires "
                 "dissipation_discretization='nemo_1p5_split'.")
         dissl = jnp.asarray(dissl_old, dtype=e_old.dtype)
+    if literal_matrix and getattr(cfg, "nemo_tke_matrix_rhs_source_rounded", False):
+        # zdftke.f90:419 one rounding per operation (no FMA in NEMO's build).
+        r = nemo_source_round
+        # zfact2 = 1.5*rn_Dt*rn_ediss (:247) = 11340 on V1; unrounded, XLA
+        # reassociates it to dt*(1.5*0.7) = 11339.999999999998.
+        zfact2 = r(r(1.5 * dt) * cfg.c_eps)  # coeff-ok: NEMO zfact2 split weight
+        diag = r(r(1.0 - literal_lw) - literal_up) + r(
+            r(zfact2 * dissl[..., :N])
+            * jnp.asarray(w_active[..., :N], dtype=e_old.dtype))
+    elif literal_matrix:
         diag = (1.0 - literal_lw - literal_up
                 # NEMO's literal zfact2 = 1.5 * rn_Dt * rn_ediss.
                 + ((1.5 * dt) * cfg.c_eps)  # coeff-ok: NEMO zfact2 split weight
@@ -1759,10 +1769,12 @@ def _solve_tke_backward_euler(
             rhs, rhs_intermediate_value = _nemo_literal_rhs_materialized(
                 rhs_base, dt, P_s, K_H_old, N2, diss_rate, dissl_old,
                 cfg.c_eps, w_active, "", intermediate=rhs_intermediate)
-        elif rhs_materialization:
+        elif rhs_materialization or getattr(
+                cfg, "nemo_tke_matrix_rhs_source_rounded", False):
+            # zdftke.f90:423-426 in written order, every operation rounded.
             rhs = _nemo_literal_rhs_materialized(
                 rhs_base, dt, P_s, K_H_old, N2, diss_rate, dissl_old,
-                cfg.c_eps, w_active, rhs_materialization)
+                cfg.c_eps, w_active, rhs_materialization or "all")
         else:
             rhs = rhs_base + dt * (
                 P_s + buoy_source + 0.5 * diss_rate * rhs_base
