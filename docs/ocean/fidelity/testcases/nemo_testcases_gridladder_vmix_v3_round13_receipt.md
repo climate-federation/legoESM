@@ -178,7 +178,7 @@ differed.
 Preregistration:
 - **P1 CONFIRMED** (acquisition passed; DDM lines and banner in every log, per the acquisition).
 - **P2 CONFIRMED**: (a) 412,297 kt-1 cells with avs ≠ avt; (b) 430,552 T cells differ from V2's record at kt 2.
-- **P3 CONFIRMED for the first owner** (`zdfddm.f90:161`, inside the predicted :159-172; not the EXP). Not
+- **P3 CONFIRMED for the first owner** (the division at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90:161`, inside the predicted :159-172; not the EXP). Not
   predicted: the second owner, the EVD trigger's geometry, outside `zdf_ddm`.
 - **P4 CONFIRMED**: full ORCA2 (138,748 lines) and DINO (123,236) one-step jaxprs identical to base `e1b56d6004c6`;
   V2's one step (178,423 lines) identical too.
