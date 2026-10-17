@@ -20,6 +20,12 @@ NEMO's restart of step k.
                   card's chain state; the pickle then supplies only the
                   state's structure.
 
+  --kind trace    one step from NEMO's restart of step k - 1 (entry source
+                  nemo) with the TKE statement trace exposed; the traced
+                  step must be bit-identical to the plain one (else exit 3).
+                  Writes the trace, the published closure and NEMO's step-k
+                  closure to <output>.npz for offline statement replays.
+
 The probe prints no verdict; it writes counts, maxima and unequal cells.
 """
 
@@ -75,7 +81,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--root", type=Path, required=True, help="the V1 twin_a deck")
     ap.add_argument("--restart-root", type=Path, action="append", required=True)
-    ap.add_argument("--kind", choices=("entry", "closure"), required=True)
+    ap.add_argument("--kind", choices=("entry", "closure", "trace"), required=True)
     ap.add_argument("--kt", type=int, required=True)
     ap.add_argument("--state-in", type=Path, required=True)
     ap.add_argument("--arms", required=True)
@@ -83,11 +89,13 @@ def main(argv=None) -> int:
     ap.add_argument("--output", type=Path, required=True)
     a = ap.parse_args(argv)
     arms = a.arms.split(",")
-    allowed = ENTRY_ARMS if a.kind == "entry" else CLOSURE_ARMS
+    allowed = {"entry": ENTRY_ARMS, "closure": CLOSURE_ARMS, "trace": ("plain",)}[a.kind]
     if arms[0] != "plain" or any(x not in allowed for x in arms):
         raise SystemExit(f"arms must start with plain and lie in {allowed}")
-    if a.entry_source == "nemo" and a.kind != "closure":
+    if a.entry_source == "nemo" and a.kind == "entry":
         raise SystemExit("--entry-source nemo is a closure-kind option")
+    if a.kind == "trace" and a.entry_source != "nemo":
+        raise SystemExit("--kind trace starts from NEMO's entry (--entry-source nemo)")
 
     import nemo_testcase_g2_orca2bathy_ladder as L
     L.g1._fp64()
@@ -174,6 +182,9 @@ def main(argv=None) -> int:
     if a.entry_source == "nemo":
         entry = substitute(entry, ARM_FIELDS["nemo_all"], before)
 
+    if a.kind == "trace":
+        return trace(a, card, entry, after, fw, sf, git_sha())
+
     report = {"legoesm_git_sha": git_sha(), "kind": a.kind, "kt": a.kt,
               "entry_source": a.entry_source,
               "state_in": str(a.state_in), "restart": str(after["path"]),
@@ -225,6 +236,32 @@ def main(argv=None) -> int:
               "identical_to_plain" if report["bit_identical_to_plain"].get(arm) else "", flush=True)
     a.output.write_text(json.dumps(report, indent=1))
     return 0
+
+
+def trace(a, card, entry, after, fw, sf, sha) -> int:
+    import jax
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    grid, z, cfg = card.recipe.grid, card.recipe.z_coord, card.recipe.model_config
+    kw = dict(dt=card.dt_s, freshwater=fw, surface_forcing=sf)
+    plain = jax.device_get(LatLonCGridOceanModel(grid, z, cfg).step(entry, **kw))
+    tr = jax.device_get(LatLonCGridOceanModel(grid, z, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+        expose_live_stage_operands=True)).step(entry, **kw))
+    passive = all(np.array_equal(np.asarray(x), np.asarray(y)) for x, y in zip(
+        jax.tree_util.tree_leaves(plain), jax.tree_util.tree_leaves(tr.state_after), strict=True))
+    t = tr.tke_statement_trace
+    arrays = {f"trace_{f}": np.asarray(getattr(t, f), np.float64) for f in t._fields
+              if getattr(t, f) is not None and not isinstance(getattr(t, f), tuple)}
+    for f in ("tke", "tke_avm", "tke_avt", "tke_dissl"):
+        arrays[f"entry_{f}"] = np.asarray(getattr(entry, f).data, np.float64)
+        arrays[f"card_{f}"] = np.asarray(getattr(plain, f).data, np.float64)
+        arrays[f"nemo_{f}"] = np.asarray(after[f], np.float64)
+    np.savez_compressed(a.output.with_suffix(".npz"), passive=passive, **arrays)
+    a.output.write_text(json.dumps({"legoesm_git_sha": sha, "kind": "trace", "kt": a.kt,
+                                    "restart": str(after["path"]), "passive": passive,
+                                    "shapes": {k: list(v.shape) for k, v in arrays.items()}}, indent=1))
+    print("passive", passive, flush=True)
+    return 0 if passive else 3
 
 
 if __name__ == "__main__":

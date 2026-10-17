@@ -50,3 +50,10 @@ def test_nemo_entry_source_is_closure_only():
             "--output", "x", "--entry-source", "nemo", "--arms", "plain"]
     with pytest.raises(SystemExit, match="closure-kind option"):
         probe.main(base + ["--kind", "entry"])
+
+
+def test_trace_kind_requires_nemo_entry():
+    base = ["--root", "x", "--restart-root", "x", "--kt", "5", "--state-in", "x",
+            "--output", "x", "--kind", "trace", "--arms", "plain"]
+    with pytest.raises(SystemExit, match="starts from NEMO's entry"):
+        probe.main(base)
