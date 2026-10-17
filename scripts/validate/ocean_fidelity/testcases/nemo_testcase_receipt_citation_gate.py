@@ -1703,6 +1703,13 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 309: OMT-0's np_LIN_dyn lines; V3's EVD trigger and DDM ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:171': 'CALL bn2    ( ts(:,:,:,:,Nbb), rab_b, rn2b, Nbb ) ! before Brunt-Vaisala frequency',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:174': 'rn2   = rn2b',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90:161': 'zrr = zrau / rn_hsbfr',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:202': 'CASE( np_EEN )           ;   CALL vor_een( kt, Kmm, ncor, puu(:,:,:,Kmm)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:334': 'CALL wzv( kstp, Kbb, Kmm, Kaa, zFu, zFv, ww, np_transport )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:160-166': ['SELECT CASE( n_dynadv )', 'CALL dyn_zad( kt, Kbb, uu, vv, Krhs )', 7],
     # --- ORCA2 round 307: V1 vertical-mixing statements on rung 10 ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:266': 'IF( ln_zdftke ) THEN   ;   ioptio = ioptio + 1   ;    nzdf_phy = np_TKE   ;   CALL zdf_tke_init          ;   ENDIF',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:318': 'CALL zdf_sh2( Kbb, Kmm, avm_k,   &     ! <<== in',
