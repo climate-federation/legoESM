@@ -393,6 +393,7 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # defence — a typo would silently pick a different composition or run
         # the trigger on the post-explicit Kaa state.
         ("packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py", "compute_vertical_K_profiles"),
+        ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_nemo_ddm_literal"),
         # TKE surface-BC dispatch (surface_bc: veros_flux | nemo_dirichlet;
         # hardened 2026-07-16 with the NEMO nn_bc_surf=1 Dirichlet option — a
         # typo would silently run the Veros flux BC, a ~60x different surface

@@ -1978,7 +1978,8 @@ def _nemo_ddm_literal(config) -> bool:
         return False
     if ddm.form not in ("hybrid", "nemo_literal"):
         raise ValueError(
-            "Unknown DoubleDiffusionConfig.form: expected 'hybrid' or "
+            "Unknown DoubleDiffusionConfig.form (double-diffusion scheme "
+            "variant): expected 'hybrid' or "
             f"'nemo_literal', got {ddm.form!r}")
     return ddm.form == "nemo_literal"
 
