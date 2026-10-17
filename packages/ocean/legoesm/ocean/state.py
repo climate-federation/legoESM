@@ -3332,6 +3332,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # the vorticity term before the lateral diffusion.  True selects NEMO's
     # order for the step-entry RHS; False preserves previously measured cards.
     rk3_stage1_ldf_source_order: bool = False
+    # Stage 3's dyn_ldf_lev reads r3f = r1_2*(r3fb + r3fa), the mean of the
+    # two stored F ratios (stprk3_stg.f90:245, read at dynldf_lev.f90:123),
+    # not the ratio of the stage sea level.  Equal only algebraically.
+    # True hands rk3_stage_r3f_nemo_literal's ratio to the stage-3 lateral
+    # diffusion; False preserves previously measured cards.
+    nemo_ldf_stage_r3f: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

@@ -7130,7 +7130,9 @@ class LatLonCGridOceanModel:
                         nemo_qco_live_vorticity_e3f_cgrid(
                             st.eta.data, _zc, st.eta.data.dtype, grid=_grid,
                             e3t_0=_ws_h_ref, tmask=_ws_t_live_mask,
-                            reference_e3f=nemo_ldf_reference_e3f(_zc)),
+                            reference_e3f=nemo_ldf_reference_e3f(_zc),
+                            r3f_native=(_nemo_ws_stage_r3f(_cfg_b, stage_index, lambda: _ws_eta_pair, _zc, _grid)
+                                        if _cfg_b.nemo_ldf_stage_r3f else None)),
                         stage_face_thickness[0], stage_face_thickness[1])
                 td_result = self.tendencies(
                                      st, surface_forcing, sponge=sponge, dt=dt,

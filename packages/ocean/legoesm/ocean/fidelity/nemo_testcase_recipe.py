@@ -3862,6 +3862,8 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         nemo_ldf_fold_rows=_ORCA2G_LDF[case],
         # stp_2D's Krhs order with the diffusion inside it.
         rk3_stage1_ldf_source_order=_ORCA2G_LDF[case],
+        # and stage 3's F ratio as the mean of the two stored ones.
+        nemo_ldf_stage_r3f=_ORCA2G_LDF[case],
         # G6 round 7: the first wzv's ww reads NEMO's STORED r3t(Kaa) and
         # r3t(Kbb) (stp2d.f90:152, domqco.f90:257 -> sshwzv.f90:297-298).
         nemo_wzv_stored_r3_ratios=case == "ORCA2G6-vec",
@@ -3957,6 +3959,8 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
         "ldf fold rows": cfg.nemo_ldf_fold_rows is (
             card.case == "ORCA2G8-ldf"),
         "stage-1 ldf source order": cfg.rk3_stage1_ldf_source_order is (
+            card.case == "ORCA2G8-ldf"),
+        "stage-3 ldf r3f": cfg.nemo_ldf_stage_r3f is (
             card.case == "ORCA2G8-ldf"),
         "wzv stored r3 ratios": cfg.nemo_wzv_stored_r3_ratios is (
             card.case == "ORCA2G6-vec"),

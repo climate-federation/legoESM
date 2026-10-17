@@ -34,7 +34,7 @@ SWITCH = {"namdyn_ldf.ln_dynldf_off": (True, False),
           "namdyn_ldf.ln_dynldf_lev": (None, True),
           "namdyn_ldf.nn_ahm_ijk_t": (None, -30)}
 G8_LDF_STATEMENTS = ("nemo_ldf_stored_f_area", "nemo_ldf_fold_rows",
-                     "rk3_stage1_ldf_source_order")
+                     "rk3_stage1_ldf_source_order", "nemo_ldf_stage_r3f")
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -110,7 +110,7 @@ def test_g8_card_is_g5_plus_the_read_coefficient_laplacian(tmp_path):
     g5 = recipe.build_orca2g5_ice_card(g5_root)
     g8 = recipe.build_nemo_testcase_card("ORCA2G8-ldf", deck_root=g8_root)
     c5, c8 = g5.recipe.model_config, g8.recipe.model_config
-    # A_h (OMT-3's edge) plus the three dyn_ldf statements of round 1
+    # A_h (OMT-3's edge) plus the four dyn_ldf statements of round 1
     assert [f for f in c5._fields if getattr(c5, f) != getattr(c8, f)] == [
         "lateral_viscosity", *G8_LDF_STATEMENTS]
     assert all(getattr(c8, f) is True and getattr(c5, f) is False for f in G8_LDF_STATEMENTS)
@@ -147,7 +147,8 @@ def test_g8_card_is_g5_plus_the_read_coefficient_laplacian(tmp_path):
         lateral_viscosity=c5.lateral_viscosity)))
     assert recipe._orca2g1_selector_failures(planted) == ["ln_dynldf_lap"]
     for field, row in zip(G8_LDF_STATEMENTS, ("ldf stored F area", "ldf fold rows",
-                                              "stage-1 ldf source order")):
+                                              "stage-1 ldf source order",
+                                              "stage-3 ldf r3f")):
         planted = g8._replace(recipe=g8.recipe._replace(model_config=c8._replace(**{field: False})))
         assert recipe._orca2g1_selector_failures(planted) == [row]
 
