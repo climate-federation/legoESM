@@ -111,6 +111,16 @@ Size of the effect, kt-10 stage-3 RMS error (m/s), u / v:
   plus the bottom-only selector's guard and a behaviour test. That test goes red
   when either of its two gate sites is disabled (checked, tree restored).
 - Plants: the arm driver exits 2 on a fired plant and 3 on a green one.
+- Citation gate on THIS receipt: PASS (20 citations, 0 failures); a planted
+  2-line shift of the bottom-residual citation exits 1. Default gate: PASS
+  (274 citations, map audit 0 failures). The import shifted 88 map entries
+  citing our own model files: re-anchored mechanically (same tool as round
+  304); three spans the import restructured were re-pinned by hand, one grew
+  7 -> 43 lines (the G7 dyn_zdf branch now sits inside it).
+- Tests: citation gate + private-import ratchet + rounds 304/305 import tests
+  43 passed; TKE, recipe, freshwater 109 passed; stage face mask, prognostic
+  barotropic, ORCA2 parallel receipt gate 12 passed. Round 304's test asserted
+  the top drag was absent; it now asserts the default is off.
 
 ## Choices
 
