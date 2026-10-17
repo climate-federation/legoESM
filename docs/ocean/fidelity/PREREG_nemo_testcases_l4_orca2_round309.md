@@ -20,3 +20,19 @@ Resolved before measuring (read off the configs and the decks):
 | R309-P4 | EVDSE runs on rung 10, both labels, and passes (c)+(d). | refusal, exact loss, or first over-bar away. |
 | R309-P5 | DDM and V3 refuse on rung 10 (it runs internal-wave mixing; the imported literal DDM refuses with IWM on). | either runs. |
 | R309-P6 | The default-off import leaves GYRE (ten-step residuals, day 30), DINO and VORTEX step jaxprs identical. | any difference. |
+
+## Addendum (frozen before the LINDYN and rung-10 EVDSE runs)
+
+First batch: the shipped OMT-0 card (round 308's set) refuses at trace
+(vector Krhs order on a flux-form card) — R309-P1 is REFUTED as written; OMT-0
+has not run since round 308.  NOADV ran.  EVDSE refused on rung 0/OMT-1..4
+(P3); DDM and V3 refused on rung 10 (P5).  Rung-10 EVDSE hit the batch
+timeout and is rerun.  Read off the ORCA2_OMIP_L4 ppsrc: on OMT-0 NEMO runs
+vor_een with ncor (dynvor.f90:202), not the np_CRV lines :762-766; the stage
+wzv at stprk3_stg.f90:327 is the vector branch, OMT-0 takes :334; dyn_keg and
+dyn_zad are not called.  So under D122 (b) only the stored-ratio wzv form and
+the carried after-SSH slot are candidates on OMT-0 (arm LINDYN).
+
+| ID | Prediction | Falsifier |
+|---|---|---|
+| R309-P7 | OMT-0 LINDYN vs control: 0 exact rows lost, first over-bar not away. | either fails. |

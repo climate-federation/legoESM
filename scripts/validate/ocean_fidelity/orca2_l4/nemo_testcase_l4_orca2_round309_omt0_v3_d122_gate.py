@@ -6,6 +6,10 @@ OMT-0 (independent label, its admitted round-203 kt 1..10 frame record):
   D122     the card as shipped (round 308's eight on).
   NOADV    D122 minus the two statements NEMO's np_LIN_dyn never reaches
            (vector Krhs/KEG order, dyn_zad association).
+  LINDYN   only the statements whose cited compiled line np_LIN_dyn runs:
+           wzv's stored r3 ratios (sshwzv.f90:297-298, reached from
+           stp2d.f90:156 and the flux-form stage call stprk3_stg.f90:334)
+           and the carried after-SSH slot (stprk3.f90:237).
 Seven D122 pairs (rung 0, OMT-1..4, rung 10 both labels):
   control  V3's selectors off (the shipped card before this round).
   EVDSE    zdf_evd's trigger on the step-entry rn2/rn2b.
@@ -51,8 +55,10 @@ R308_ON = {
 R308_OFF = {k: (False if v is True else "rk3_extrapolated")
             for k, v in R308_ON.items()}
 NOT_ON_LIN_DYN = ("rk3_vector_rhs_nemo_order", "nemo_zad_written_association")
+LIN_DYN_RUNS = ("nemo_wzv_stored_r3_ratios", "nemo_first_wzv_after_ssh")
 OMT0_ARMS = {"control": R308_OFF, "D122": R308_ON,
-             "NOADV": {**R308_ON, **{k: R308_OFF[k] for k in NOT_ON_LIN_DYN}}}
+             "NOADV": {**R308_ON, **{k: R308_OFF[k] for k in NOT_ON_LIN_DYN}},
+             "LINDYN": {**R308_OFF, **{k: R308_ON[k] for k in LIN_DYN_RUNS}}}
 
 # ORCA2_OMIP_L4/EXP00 namelist_cfg &namzdf (the rung-10 deck): ln_zdfddm,
 # rn_avts, rn_hsbfr.  Rung 0 and OMT-0..4 set ln_zdfddm = .false.
