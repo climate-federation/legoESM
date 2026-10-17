@@ -1753,6 +1753,22 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- GRIDLADDER round 43 (G6 round 7 receipt) ---
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domqco.f90:257': 'pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sshwzv.f90:297-298': ['pww(ji,jj,jk) = pww(ji,jj,jk+1) - (  ze3div(ji,jj,jk)', '&                               + r1_Dt * e3t_3d(ji,jj,jk) * ( r3t(ji,jj,Kaa) - r3t(ji,jj,Kbb) )  ) * tmask(ji,jj,jk)', 2],
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynzad.f90:112': 'zWf  = e1e2t(ji  ,jj  ) *   ww(ji  ,jj  ,jk+1)',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynzad.f90:119': 'zzWdzU = zzWfu * ( puu(ji,jj,jk,Kmm) - puu(ji,jj,jk+1,Kmm) )',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynzad.f90:123': 'puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - 0.25_wp * r1_e1e2u(ji,jj) / (e3u_3d(ji,jj,jk) *(1._wp+r3u(ji,jj,Kmm)*umask(ji,jj,jk)))',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynzad.f90:134': 'puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - 0.25_wp * r1_e1e2u(ji,jj) / (e3u_3d(ji,jj,jk) *(1._wp+r3u(ji,jj,Kmm)*umask(ji,jj,jk)))',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domhgr.f90:159': 'e1e2u (:,:) = e1u(:,:) * e2u(:,:)',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domhgr.f90:170': 'r1_e1e2u(:,:) = 1._wp / e1e2u(:,:)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzad.f90:112': 'zWf  = e1e2t(ji  ,jj  ) *   ww(ji  ,jj  ,jk+1)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzad.f90:119': 'zzWdzU = zzWfu * ( puu(ji,jj,jk,Kmm) - puu(ji,jj,jk+1,Kmm) )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzad.f90:123': 'puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - 0.25_wp * r1_e1e2u(ji,jj) / (e3u_3d(ji,jj,jk) *(1._wp+r3u(ji,jj,Kmm)*umask(ji,jj,jk)))',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzad.f90:134': 'puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - 0.25_wp * r1_e1e2u(ji,jj) / (e3u_3d(ji,jj,jk) *(1._wp+r3u(ji,jj,Kmm)*umask(ji,jj,jk)))',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domhgr.f90:159': 'e1e2u (:,:) = e1u(:,:) * e2u(:,:)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domhgr.f90:170': 'r1_e1e2u(:,:) = 1._wp / e1e2u(:,:)',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/divhor.f90:142': 'IF( ln_rnf )   CALL sbc_rnf_div( hdiv, Kmm )',
     # --- GRIDLADDER round 42 (G6 round 6 receipt) ---
     'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3.f90:241': 'ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:237': 'ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)',
