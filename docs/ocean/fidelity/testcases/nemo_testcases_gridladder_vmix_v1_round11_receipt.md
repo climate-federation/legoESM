@@ -12,7 +12,8 @@ measurement. Record: `gridladder_vmix_rounds/round1/oracle_v1_r1` (admitted roun
 `gridladder_vmix_rounds/round11/` (`manifest.sha256`, 40 files; state pickles excluded).
 
 Commits: `959769e7e` prereg; `df7931442`, `6b164e180`, `3b19a7221` probe (closure from NEMO's entry, trace kind,
-shear builder evaluated alone) with direct tests; `9a7487ac3` fix; `152db9f5a` citation re-anchors; this receipt.
+shear builder evaluated alone) with direct tests; `9a7487ac3` fix; `152db9f5a` citation re-anchors; `c3ad03a45` V1 card selection test; this receipt
+and its citation map entries.
 
 | file | sha256 prefix |
 |---|---|
@@ -118,15 +119,18 @@ switch takes the toy from 31 unequal cells to 0. In the full V1 step this has no
 The full ORCA2 card runs this statement too. It stays off there (D130) until ORCA2 measures and selects it
 (D96/D122). Pointer only: the full ORCA2 card was not measured this round.
 
-## 7. Tests (synchronous, CPU, fp64, `land.sh` PYTHONPATH)
+## 7. Tests (synchronous, CPU, fp64, `land.sh` PYTHONPATH, clean tree at `c3ad03a45`)
 
-- Default receipt citation gate after re-anchoring: 17 passed.
-- Receipt citation gate on this receipt: section 8.
-- Focused battery: section 8.
-
-## 8. Gate lines
-
-(filled before the final commit)
+- `land.sh` gate list without the face-mask file, plus the new and V1 test files: **165 passed**
+  (`gate_final.log`). This covers the receipt citation gate, private cross-imports, TKE terms, NEMO recipe,
+  freshwater closure, prognostic barotropic state, the r3 unit test, the probe test, the V1 card test and the
+  V1 r3 record test.
+- `test_nemo_ws_stage_face_mask_rank.py`, its 2 tests run as separate processes: 1 passed (484 s) and 1 passed
+  (56 s).
+- Per-receipt citation gate on this receipt (`--from-heading` this title): **PASS, failures 0**, unmapped 0, map
+  entries failing audit 0.
+- V1 card selection test updated for the new flag. Its plant `{nemo_sh2_r3_stored_reciprocal: False}` drops
+  the `ln_zdftke` selector.
 
 ## Choices made
 
