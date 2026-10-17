@@ -107,7 +107,9 @@ toward/away/equal.
 
 - Step jaxprs identical: DINO (123,236 lines), VORTEX zco flux/vector,
   VORTEX seamount flux/vector.
-- GYRE: see Gates and tests.
+- GYRE ten-step residual archive identical (210 arrays, `np.array_equal`;
+  sha256 `3b3d865cf5c82d38` both, as rounds 307-308); day-30: 30/30
+  snapshots byte-identical (manifest excluded).
 
 ## Predictions
 
@@ -118,7 +120,7 @@ toward/away/equal.
 | R309-P3 | **CONFIRMED** | EVDSE refuses on rung 0 and OMT-1..4. |
 | R309-P4 | **CONFIRMED** | EVDSE runs on rung 10, both labels, 0 rows moved, passes (c)+(d). |
 | R309-P5 | **CONFIRMED** | DDM and V3 refuse on rung 10 (IWM). |
-| R309-P6 | see Gates | DINO/VORTEX identical; GYRE below. |
+| R309-P6 | **CONFIRMED** | GYRE ten-step and day-30, DINO and VORTEX identical. |
 | R309-P7 | **CONFIRMED** | LINDYN vs control: 0 rows moved. |
 
 ## Gates and tests
@@ -132,6 +134,14 @@ toward/away/equal.
 - Imported unit test `test_ddm_nemo_literal.py` passes; dispatch-hardening
   baseline gains the double-diffusion form guard (its one red, a land-model
   guard in a file this round does not touch, is pre-existing).
+- Receipt citation gate on this receipt: PASS, 12 citations, failures 0,
+  0 map entries failing (65 entries shifted by the import were re-anchored,
+  one range extent 32 -> 33 lines).
+- Default gate (land.sh set, JAX_ENABLE_X64=1, run in pieces under the
+  10-minute cap): citation gate + private-import ratchet + recipe + ORCA2
+  parallel receipt + round-309 selection 68 passed; TKE terms 69;
+  freshwater 16; face-mask rank 2; DDM unit 4; barotropic state + ORCA2
+  selection/transfer tests 51 — all passed.
 - codex review: paused (quota).  The operator runs an independent Claude
   review before landing.
 
