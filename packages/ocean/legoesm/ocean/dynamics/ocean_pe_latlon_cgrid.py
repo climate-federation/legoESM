@@ -99,6 +99,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     nemo_lateral_viscosity_coefficients,
     nemo_ldf_lap_viscosity_cgrid,
     nemo_ldf_lap_viscosity_e3_cgrid,
+    nemo_smagorinsky_bilaplacian_coefficients_cgrid,
+    nemo_smagorinsky_bilaplacian_tendency_e3_cgrid,
     flux_divergence_viscosity_cgrid,
     no_slip_sidedrag_cgrid,
     interp_cell_to_uface,
@@ -260,7 +262,7 @@ VALID_LATERAL_VISCOSITY_E3_WEIGHTING = frozenset({"off", "nemo_e3"})
 # "nemo_ahm_3d_file" is nn_ahm_ijk_t=-30, the whole 3-D field READ from
 # eddy_viscosity_3D.nc and carried by the card (ldfdyn.f90:311-322,348-353).
 VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE = frozenset(
-    {"nemo_ldf_c2d", "nemo_constant", "nemo_ahm_3d_file"})
+    {"nemo_ldf_c2d", "nemo_constant", "nemo_ahm_3d_file", "nemo_smag_blp"})
 # Lateral side BC (config.lateral_side_bc): free-slip (default; viscous flux zeroed
 # at walls) or MITgcm no_slip_sides (adds the -(2/Δ)·A_h·u_tangential wall side-drag).
 VALID_LATERAL_SIDE_BC = frozenset({"free_slip", "no_slip"})
@@ -3326,6 +3328,7 @@ def _bc_horizontal_viscosity(
     du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy, dt,
     rho_prime=None, h_k=None, ldf_thickness_operands=None,
     ldf_metric_reciprocal_operands=None,
+    nemo_smagorinsky_coefficient_override=None,
     vertex_mask=None,
 ):
     """Stages 10 + 10b: horizontal viscosity (A_h Laplacian + B_h biharmonic +
@@ -3489,6 +3492,11 @@ def _bc_horizontal_viscosity(
             f"operator's ahmt/ahmf come from); got "
             f"lateral_viscosity_operator={_visc_op!r}"
         )
+    if (nemo_smagorinsky_coefficient_override is not None
+            and _ahm_source != "nemo_smag_blp"):
+        raise ValueError(
+            "NEMO Smagorinsky coefficient override requires "
+            "lateral_viscosity_coefficient_source='nemo_smag_blp'")
     _use_flux_div = _visc_op == "flux_divergence"
     _use_nemo_div_curl = _visc_op == "nemo_div_curl"
     _kdiss_fluxdiv_cell = None  # set by the flux-div A_h branch when _want_kdiss_flux
@@ -3508,7 +3516,65 @@ def _bc_horizontal_viscosity(
             uu, vv, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
             vertex_mask=vertex_mask)
 
-    if _use_nemo_div_curl and config.lateral_viscosity.A_h > 0:
+    if _use_nemo_div_curl and _ahm_source == "nemo_smag_blp":
+        lv = config.lateral_viscosity
+        if (lv.A_h != 0.0 or lv.B_h != 0.0 or lv.C_smag <= 0.0
+                or lv.C_smag_lap != 0.0 or lv.C_leith != 0.0):
+            raise ValueError(
+                "lateral_viscosity_coefficient_source='nemo_smag_blp' "
+                "requires A_h=B_h=C_smag_lap=C_leith=0 and C_smag>0")
+        if _e3_weighting != "nemo_e3":
+            raise ValueError(
+                "lateral_viscosity_coefficient_source='nemo_smag_blp' "
+                "requires lateral_viscosity_e3_weighting='nemo_e3'")
+        if h_k is None:
+            raise ValueError("NEMO Smagorinsky bilaplacian requires h_k")
+        if _want_kdiss_flux:
+            raise ValueError(
+                "NEMO Smagorinsky bilaplacian K_diss_h is not implemented")
+        _cell3 = getattr(z_coord, "is_active", None)
+        if _cell3 is None:
+            _cell3 = mask
+        elif mask is not None:
+            _cell3 = _cell3.astype(u.dtype) * mask[..., jnp.newaxis]
+        _visc_vmask = vertex_mask
+        if _cell3 is not None and _cell3.ndim == 3:
+            _visc_vmask = jax.vmap(
+                lambda m2: compute_vertex_mask(m2, grid=grid),
+                in_axes=-1, out_axes=-1)(_cell3)
+            if vertex_mask is not None:
+                _visc_vmask = _visc_vmask * vertex_mask[..., jnp.newaxis]
+        if nemo_smagorinsky_coefficient_override is None:
+            _ahmt, _ahmf = nemo_smagorinsky_bilaplacian_coefficients_cgrid(
+                u, v, grid, lv.C_smag, dt,
+                minfac=1.0, maxfac=1.0, mask=mask, cell_mask=_cell3,
+                u_mask=u_mask, v_mask=v_mask, vertex_mask=_visc_vmask)
+        else:
+            if (not isinstance(nemo_smagorinsky_coefficient_override, tuple)
+                    or len(nemo_smagorinsky_coefficient_override) != 2):
+                raise ValueError(
+                    "NEMO Smagorinsky coefficient override must be an "
+                    "(ahmt, ahmf) tuple")
+            _ahmt, _ahmf = (
+                jnp.asarray(value)
+                for value in nemo_smagorinsky_coefficient_override)
+            expected = (_cell3.shape, _visc_vmask.shape)
+            if (_ahmt.shape, _ahmf.shape) != expected:
+                raise ValueError(
+                    "NEMO Smagorinsky coefficient override shapes differ: "
+                    f"{(_ahmt.shape, _ahmf.shape)} != {expected}")
+        diag_Cs_smag_u, diag_Cs_smag_v = (
+            nemo_smagorinsky_bilaplacian_tendency_e3_cgrid(
+                u, v, grid, _ahmt, _ahmf, h_k,
+                mask=mask, u_mask=u_mask, v_mask=v_mask,
+                vertex_mask=_visc_vmask,
+                thickness_operands=ldf_thickness_operands,
+                metric_reciprocal_operands=ldf_metric_reciprocal_operands))
+        diag_Cs_smag_u, diag_Cs_smag_v = _apply_slope_foot(
+            diag_Cs_smag_u, diag_Cs_smag_v)
+        du_dt = du_dt + diag_Cs_smag_u
+        dv_dt = dv_dt + diag_Cs_smag_v
+    elif _use_nemo_div_curl and config.lateral_viscosity.A_h > 0:
         # NEMO dyn_ldf_lev_lap: coefficient ahmt(T)/ahmf(F) = ½·rn_Uv·MAX(e1,e2)
         # EMBEDDED inside div/curl (node 14). ``A_h`` here is NEMO's A_h_base =
         # ½·rn_Uv·R·Δλ (the DINO builder), so ½·rn_Uv = A_h / (R·Δλ). This branch
@@ -3907,7 +3973,8 @@ def _bc_horizontal_viscosity(
         du_dt = du_dt + du_drag
         dv_dt = dv_dt + dv_drag
 
-    if config.lateral_viscosity.C_smag > 0:
+    if (config.lateral_viscosity.C_smag > 0
+            and _ahm_source != "nemo_smag_blp"):
         smag_u, smag_v = smagorinsky_biharmonic_tendency_cgrid(
             u, v, grid, config.lateral_viscosity.C_smag,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
@@ -5112,6 +5179,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     momentum_flux_face_thickness=None,
     ldf_thickness_operands=None,
     ldf_metric_reciprocal_operands=None,
+    nemo_smagorinsky_coefficient_override=None,
     ene_metric_reciprocals=None,
     ene_generic_f_vtx=False,
     legacy_hpg_algebraic=False,
@@ -5682,6 +5750,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             rho_prime=rho_prime, h_k=h_k,
             ldf_thickness_operands=ldf_thickness_operands,
             ldf_metric_reciprocal_operands=ldf_metric_reciprocal_operands,
+            nemo_smagorinsky_coefficient_override=(
+                nemo_smagorinsky_coefficient_override),
             vertex_mask=vertex_mask,
         )
     _nemo_after_ldf_u = du_dt

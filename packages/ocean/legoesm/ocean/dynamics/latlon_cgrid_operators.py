@@ -29,6 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
+from legoesm.core.profile_metrics import safe_sqrt
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid  # noqa: F401 — kept for type compat
 from legoesm.grids.halo_latlon import (
@@ -1925,6 +1926,225 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     if v_mask is not None:
         visc_v = visc_v * _bm(v_mask)
     return visc_u, visc_v
+
+
+def nemo_smagorinsky_bilaplacian_coefficients_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    c_smag: float,
+    dt_s: float,
+    *,
+    minfac: float = 1.0,
+    maxfac: float = 1.0,
+    mask: jnp.ndarray | None = None,
+    cell_mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+    vertex_mask: jnp.ndarray | None = None,
+    return_diagnostics: bool = False,
+) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[
+    jnp.ndarray, jnp.ndarray, dict[str, jnp.ndarray]
+]:
+    r"""NEMO mode-32 Smagorinsky bilaplacian ``ahmt``/``ahmf``.
+
+    This is the compiled GYRE arm of NEMO 5.0.2 ``ldfdyn.f90``: the grid
+    scales are ``(2 e1 e2 / (e1+e2))**2`` (:378-380), the T/F deformation
+    invariants and velocity lower limit are evaluated from the before velocity
+    (:462-513), and the Laplacian coefficient is converted to the square-root
+    coefficient consumed by each bilaplacian pass (:521-529).  The ``16/9``
+    correction on the lower stability limit is the bilaplacian branch (:469).
+
+    GYRE is an isotropic Cartesian metric represented by the lat-lon C-grid
+    geometry.  T metrics are read explicitly; the F metric is therefore the
+    square root of the stored F area.  This function rejects tripolar and
+    anisotropic grids: no unmeasured general-curvilinear interpolation is
+    substituted.  Reciprocals are formed on the host before tracing, matching
+    NEMO's stored ``r1_e*`` operands rather than replacing their multiplication
+    by an algebraically equivalent in-graph division.
+    """
+    if is_tripolar(grid):
+        raise ValueError("NEMO Smagorinsky mode 32 is not implemented on tripolar grids")
+    for point, e1, e2 in (
+        ("T", grid.dx_T, grid.dy_T),
+        ("U", grid.dx_u, grid.dy_u),
+        ("V", grid.dx_v, grid.dy_v),
+    ):
+        if not np.array_equal(np.asarray(e1), np.asarray(e2)):
+            raise ValueError(
+                "NEMO Smagorinsky mode 32 currently requires exact isotropic "
+                f"e1=e2 metrics at {point} points"
+            )
+    if c_smag <= 0.0:
+        raise ValueError("NEMO Smagorinsky requires positive rn_csmc")
+    if minfac < 0.0 or maxfac <= 0.0:
+        raise ValueError("NEMO Smagorinsky requires rn_minfac>=0 and rn_maxfac>0")
+    is_3d = u.ndim == 3
+    if v.ndim != u.ndim or u.ndim not in (2, 3):
+        raise ValueError("NEMO Smagorinsky requires matching 2-D or 3-D u/v")
+
+    def _b(m):
+        return m[..., jnp.newaxis] if is_3d and m.ndim == 2 else m
+
+    sr = nemo_source_round
+    sb = jax.lax.optimization_barrier
+
+    def r(value):
+        return sb(sr(value))
+
+    u_live = u if u_mask is None else r(u * _b(u_mask))
+    v_live = v if v_mask is None else r(v * _b(v_mask))
+    e1t = jnp.asarray(grid.dx_T)
+    e2t = jnp.asarray(grid.dy_T)
+    e1u = jnp.asarray(grid.dx_u)
+    e2u = jnp.asarray(grid.dy_u)
+    e1v = jnp.asarray(grid.dx_v)
+    e2v = jnp.asarray(grid.dy_v)
+    # NEMO stores these reciprocal arrays during domain initialisation and the
+    # compiled mode-32 statements multiply by them.  Host construction keeps
+    # that program visible to XLA; the barriers below prevent reassociation.
+    def _host_reciprocal(metric):
+        return jnp.asarray(np.float64(1.0) / np.asarray(metric, dtype=np.float64))
+
+    r1_e1t = _host_reciprocal(grid.dx_T)
+    r1_e2t = _host_reciprocal(grid.dy_T)
+    r1_e1u = _host_reciprocal(grid.dx_u)
+    r1_e2u = _host_reciprocal(grid.dy_u)
+    r1_e1v = _host_reciprocal(grid.dx_v)
+    r1_e2v = _host_reciprocal(grid.dy_v)
+    # ldfdyn.f90:474-482, retaining the source's reciprocal-multiply order.
+    t_u = r(r(u_live[:, 1:] * _b(r1_e2u[:, 1:]))
+            - r(u_live[:, :-1] * _b(r1_e2u[:, :-1])))
+    t_u = r(r(t_u * _b(r1_e1t)) * _b(e2t))
+    t_v = r(r(v_live[1:] * _b(r1_e1v[1:]))
+            - r(v_live[:-1] * _b(r1_e1v[:-1])))
+    t_v = r(r(t_v * _b(r1_e2t)) * _b(e1t))
+    tension = r(t_u - t_v)
+    tmask_source = cell_mask if cell_mask is not None else mask
+    tmask = 1.0 if tmask_source is None else _b(tmask_source)
+    dtensq = r(r(tension * tension) * tmask)
+
+    # GYRE's e1f=e2f.  Use the stored F area and replace dry wall zeros only
+    # for safe division; the F mask removes those values immediately after.
+    area_f = jnp.asarray(grid.area_q)
+    fallback = jnp.mean(e1t)
+    ef = safe_sqrt(jnp.where(area_f > 0.0, area_f, fallback * fallback))
+    r1_ef = _host_reciprocal(
+        np.sqrt(np.where(np.asarray(grid.area_q) > 0.0,
+                         np.asarray(grid.area_q),
+                         float(np.mean(np.asarray(grid.dx_T))) ** 2)))
+    du_f_int = r(r(u_live[1:] * _b(r1_e1u[1:]))
+                 - r(u_live[:-1] * _b(r1_e1u[:-1])))
+    du_f = pad_ns_zero(du_f_int)
+    dv_f_core = r(r(v_live * _b(r1_e2v))
+                  - r(jnp.roll(v_live, 1, axis=1)
+                      * _b(jnp.roll(r1_e2v, 1, axis=1))))
+    dv_f = jnp.concatenate([dv_f_core, dv_f_core[:, :1]], axis=1)
+    shear = r(r(du_f * _b(r1_ef)) * _b(ef)
+              + r(dv_f * _b(r1_ef)) * _b(ef))
+    fmask = (vertex_mask if vertex_mask is not None else
+             (compute_vertex_mask(mask, grid=grid) if mask is not None else
+              jnp.ones_like(area_f)))
+    dshesq = r(r(shear * shear) * _b(fmask))
+
+    esqt = r((r(r(2.0 * e1t) * e2t) / r(e1t + e2t)) ** 2)
+    esqf = r(ef * ef)
+    zcmsmag = r((c_smag / np.pi) ** 2)
+    zstab_lo = r(
+        (16.0 / 9.0)
+        * minfac * minfac / (2.0 * 12.0 * 12.0 * zcmsmag))
+    zstab_up = r(maxfac / (4.0 * zcmsmag * 2.0 * dt_s))
+
+    dsh_t = r(0.25 * r(
+        r(dshesq[:-1, :-1] + dshesq[1:, :-1])
+        + r(dshesq[:-1, 1:] + dshesq[1:, 1:])))
+    deform_t = safe_sqrt(r(dtensq + dsh_t))
+    zdelta_t = r(zcmsmag * esqt)
+    ahmt_unclamped = r(_b(zdelta_t) * deform_t)
+    speed_t = r(
+        r(r(u_live[:, 1:] * u_live[:, 1:])
+          + r(v_live[1:] * v_live[1:]))
+        + r(r(u_live[:, :-1] * u_live[:, :-1])
+            + r(v_live[:-1] * v_live[:-1])))
+    lower_t = safe_sqrt(r(speed_t * _b(zdelta_t) * zstab_lo))
+    upper_t = _b(r(zdelta_t * zstab_up))
+    ahmt_after_lower = jnp.maximum(ahmt_unclamped, lower_t)
+    ahmt_lap = jnp.minimum(ahmt_after_lower, upper_t)
+
+    dt_w = jnp.roll(dtensq, 1, axis=1)
+    dt_pad = pad_ns_zero(dtensq)
+    dt_w_pad = pad_ns_zero(dt_w)
+    dt_f_core = r(0.25 * r(
+        r(dt_pad[:-1] + dt_pad[1:])
+        + r(dt_w_pad[:-1] + dt_w_pad[1:])))
+    dt_f = jnp.concatenate([dt_f_core, dt_f_core[:, :1]], axis=1)
+    deform_f = safe_sqrt(r(dshesq + dt_f))
+    zdelta_f = r(zcmsmag * esqf)
+    ahmf_unclamped = r(_b(zdelta_f) * deform_f)
+
+    u_pad = pad_ns_zero(u_live)
+    u_south, u_north = u_pad[:-1], u_pad[1:]
+    v_west_core = jnp.roll(v_live, 1, axis=1)
+    v_west = jnp.concatenate([v_west_core, v_west_core[:, :1]], axis=1)
+    v_east = jnp.concatenate([v_live, v_live[:, :1]], axis=1)
+    speed_f = r(
+        r(r(u_south * u_south) + r(v_west * v_west))
+        + r(r(u_north * u_north) + r(v_east * v_east)))
+    lower_f = safe_sqrt(r(speed_f * _b(zdelta_f) * zstab_lo))
+    upper_f = _b(r(zdelta_f * zstab_up))
+    ahmf_after_lower = jnp.maximum(ahmf_unclamped, lower_f)
+    ahmf_lap = jnp.minimum(ahmf_after_lower, upper_f)
+
+    # ldfdyn.f90:521-534 applies neither completed-point mask after the
+    # square-root conversion.  The deformation terms were masked at :473-483,
+    # while the independent velocity lower limits at :489-513 can repopulate
+    # free-slip boundary points before both coefficients are halo-filled.
+    ahmt = safe_sqrt(r(0.125 * _b(esqt) * ahmt_lap))
+    ahmf = safe_sqrt(r(0.125 * _b(esqf) * ahmf_lap))
+    if return_diagnostics:
+        return ahmt, ahmf, {
+            "t_lower_clamped": ahmt_unclamped < lower_t,
+            "t_upper_clamped": ahmt_after_lower > upper_t,
+            "f_lower_clamped": ahmf_unclamped < lower_f,
+            "f_upper_clamped": ahmf_after_lower > upper_f,
+        }
+    return ahmt, ahmf
+
+
+def nemo_smagorinsky_bilaplacian_tendency_e3_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    ahmt: jnp.ndarray,
+    ahmf: jnp.ndarray,
+    h_k: jnp.ndarray,
+    *,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+    vertex_mask: jnp.ndarray | None = None,
+    thickness_operands=None,
+    metric_reciprocal_operands=None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """NEMO level bilaplacian: two e3 div/curl passes, then minus sign.
+
+    ``dynldf_lev.f90:218-330`` computes first-pass values over an extended
+    halo range, consumes them directly in the second pass, and subtracts that
+    pass.  On this unpartitioned closed GYRE grid, re-entering the shared NEMO
+    Laplacian supplies the same wall/periodic halo before the second
+    differencing and gives that composition.
+    """
+    common = dict(
+        mask=mask, u_mask=u_mask, v_mask=v_mask, vertex_mask=vertex_mask,
+        coefficient_fmask_already_applied=True,
+        thickness_operands=thickness_operands,
+        metric_reciprocal_operands=metric_reciprocal_operands,
+    )
+    lap_u, lap_v = nemo_ldf_lap_viscosity_e3_cgrid(
+        u, v, grid, ahmt, ahmf, h_k, **common)
+    bilap_u, bilap_v = nemo_ldf_lap_viscosity_e3_cgrid(
+        lap_u, lap_v, grid, ahmt, ahmf, h_k, **common)
+    return -bilap_u, -bilap_v
 
 
 def flux_divergence_bilaplacian_cgrid(

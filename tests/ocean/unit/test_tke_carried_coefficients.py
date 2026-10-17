@@ -752,6 +752,53 @@ def test_live_qco_step_entry_helper_exposes_consumed_face_metrics():
         state.v.data.shape[-1] - 1,)
 
 
+def test_gyre_ws_step_routes_step_entry_ssh_to_tke_shear():
+    """The production step must implement zdf_phy(Nbb,Nbb), not Kmm/Nbb."""
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card,
+        gyre_surface_forcings,
+    )
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    card = build_nemo_testcase_card("GYRE-zco")
+    state = card.recipe.initial_state
+    freshwater, surface = gyre_surface_forcings(card, state, 1)
+    model = LatLonCGridOceanModel(
+        card.recipe.grid,
+        card.recipe.z_coord,
+        card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_live_stage_operands=True),
+    )
+    trace = jax.device_get(model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    observed = trace.tke_statement_trace.shear_face_metrics
+    entry_state = model._seed_tke_preclosure_carry(state)
+    expected = model._tke_step_entry_p_sh2(
+        entry_state,
+        eta_now=entry_state.eta.data,
+        u_now=entry_state.u.data,
+        v_now=entry_state.v.data,
+        return_face_metrics=True,
+    )[1]
+    half_step = model._tke_step_entry_p_sh2(
+        entry_state,
+        eta_now=trace.stage_outputs[1][4],
+        u_now=entry_state.u.data,
+        v_now=entry_state.v.data,
+        return_face_metrics=True,
+    )[1]
+
+    assert all(np.array_equal(np.asarray(got), np.asarray(want))
+               for got, want in zip(observed, expected, strict=True))
+    assert any(not np.array_equal(np.asarray(got), np.asarray(wrong))
+               for got, wrong in zip(observed, half_step, strict=True))
+
+
 def test_now2_shear_metric_changes_when_routed_eta_changes():
     """GYRE's step-entry ssh and half-step solver ssh are distinct inputs."""
     tke_cfg = dino_mod._dino_vertical_mixing_config(

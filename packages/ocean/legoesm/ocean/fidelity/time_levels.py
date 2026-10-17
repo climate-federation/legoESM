@@ -928,6 +928,14 @@ for _stage, _kaa, _kmm in ((1, 3, 1), (2, 2, 3), (3, 3, 2)):
         f"writes stage-{_stage} Kmm={_kmm} ww after the executed "
         "tra_adv_trp wzv(np_transport) call at src/OCE/TRA/traadv.F90:220-235",
     )
+    _DUMP_TIME_LEVEL[f"oracle_stage_kt00000002_s{_stage}.bin"] = (
+        "after",
+        "scripts/validate/ocean_fidelity/testcases/"
+        "nemo_testcase_l2_gyre_hires/gyre_p3_scalar_step2_writer.patch:6-14 "
+        f"widens the stage-{_stage} l1_dump_stage call to kt=2; compiled "
+        "GYRE_OMIP_L2_P3_SMW_R7STEP2 stprk3.f90:202-216 passes Naa and "
+        ":313-330 writes ts/uu/vv/ssh(...,klevel)",
+    )
 _DUMP_TIME_LEVEL["oracle_rhs_kt00000001.bin"] = (
     "now",
     "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"

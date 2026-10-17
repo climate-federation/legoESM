@@ -1043,7 +1043,7 @@ def _ssp_rk3_tracer_pair_step(
 class _NEMOVerticalSolveTestInput(NamedTuple):
     """Fixed-shape private input for production-compiled solve probes.
 
-    ``replace`` is a dynamic six-element boolean array.  Disabled, identity,
+    ``replace`` is a dynamic seven-element boolean array.  Disabled, identity,
     directed, and planted probes therefore share one JIT input structure and
     one traced graph; only leaf values differ.  No model configuration can
     construct or select this diagnostic input.
@@ -1055,6 +1055,7 @@ class _NEMOVerticalSolveTestInput(NamedTuple):
     tracer_e3w: object
     tracer_e3t: object
     temperature_content: object
+    salinity_content: object
     replace: object
 
 
@@ -1395,6 +1396,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # of the stage-3 divergence.  The ordinary step still completes before
     # either array is substituted into the returned diagnostic state.
     expose_stage3_momentum_rhs: str = ""
+    # Private Rule-12 discriminator: replace mode-32's completed ahmt/ahmf
+    # pair at the dyn_ldf call boundary.  This is not a model configuration
+    # selector; the r4_smag ladder uses it only with NEMO's recorded pair to
+    # split coefficient ownership from the two-pass bilaplacian operator.
+    smagorinsky_coefficient_override: object = None
     # WRITE-only stage-3 raw-Kaa gauge.  Publish the completed implicit
     # vertical-mixing result immediately before the deferred barotropic
     # replacement (stprk3_stg.F90:430-448).  The ordinary step and replacement
@@ -4868,6 +4874,19 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "NEMO rk3_ws is one coupled momentum/tracer stage program; "
                 "select rk3_ws for both integrators or for neither")
+        # NEMO calls tra_qsr once per step, inside stage 3, with Kmm
+        # (compiled stprk3_stg.f90:691-704).  Only this rk3_ws stage program
+        # replaces the shared pipeline's entry field with that Kmm call.
+        _sw_pen_cfg = getattr(
+            getattr(config, "physics", None), "shortwave_penetration", None)
+        if (getattr(_sw_pen_cfg, "scheme", None) == "nemo_qsr_2bd"
+                and config.tracer_time_integrator != "rk3_ws"):
+            raise ValueError(
+                "physics.shortwave_penetration.scheme='nemo_qsr_2bd' is "
+                "NEMO's stage-3 Kmm tra_qsr and is wired only into rk3_ws; "
+                f"tracer_time_integrator={config.tracer_time_integrator!r} "
+                "would retain a step-entry field. Select rk3_ws or another "
+                "shortwave scheme")
         if config.tracer_time_integrator == "rk3_ws":
             if config.tracer_advection not in ("fct2", "none"):
                 raise ValueError(
@@ -5437,6 +5456,7 @@ class LatLonCGridOceanModel:
                    momentum_flux_face_thickness=None,
                    ldf_thickness_operands=None,
                    ldf_metric_reciprocal_operands=None,
+                   nemo_smagorinsky_coefficient_override=None,
                    ene_metric_reciprocals=None,
                    ene_generic_f_vtx=False,
                    legacy_hpg_algebraic=False,
@@ -5499,6 +5519,8 @@ class LatLonCGridOceanModel:
             momentum_flux_face_thickness=momentum_flux_face_thickness,
             ldf_thickness_operands=ldf_thickness_operands,
             ldf_metric_reciprocal_operands=ldf_metric_reciprocal_operands,
+            nemo_smagorinsky_coefficient_override=(
+                nemo_smagorinsky_coefficient_override),
             ene_metric_reciprocals=ene_metric_reciprocals,
             ene_generic_f_vtx=ene_generic_f_vtx,
             legacy_hpg_algebraic=legacy_hpg_algebraic,
@@ -6599,6 +6621,9 @@ class LatLonCGridOceanModel:
                                          ) else stage_face_thickness),
                                      ldf_thickness_operands=(
                                          _stage_ldf_thickness),
+                                     nemo_smagorinsky_coefficient_override=(
+                                         self._nemo_ws_test_hooks
+                                         .smagorinsky_coefficient_override),
                                      ene_generic_f_vtx=(
                                          self._nemo_ws_test_hooks
                                          .legacy_ene_vertex_coriolis),
@@ -7492,6 +7517,7 @@ class LatLonCGridOceanModel:
             _qu_aa, _qv_aa = _qco_ratios(state_new.eta.data)
             from legoesm.ocean.eos import (
                 nemo_r3t_rk3_stage1_stretch,
+                nemo_r3t_rk3_stage2_stretch,
                 nemo_r3t_stretch,
             )
 
@@ -7715,10 +7741,28 @@ class LatLonCGridOceanModel:
                 from legoesm.ocean.physics.shortwave_penetration import (
                     shortwave_penetration_tendency,
                 )
-                _r3t_b = h_k_old[..., 0] / jnp.maximum(
-                    _h_ref_ws[..., 0], 1.0e-10)
-                _r3t_m = _h_live_one_half[..., 0] / jnp.maximum(
-                    _h_ref_ws[..., 0], 1.0e-10)
+                # Reuse the exact Kbb expression used by the shared physics
+                # pipeline above.  The ratio of live/reference top thickness
+                # is algebraically the same value, but not necessarily the
+                # same fp64 word; subtracting a separately rounded qsr field
+                # from ``tend.dT_dt`` leaves a false source in Krhs.
+                _r3t_b = compute_ocean_jacobian(
+                    state.eta.data, state.H_bathy.data, _zc)
+                # Compiled stprk3_stg.f90:215-221 forms Kmm by averaging the
+                # two already-rounded endpoint ratios.  Both the live-
+                # thickness quotient and _qt_12's ratio-of-mean SSH are the
+                # same real number but not the same fp64 composition.
+                _nemo_qsr_kmm_stretch = nemo_r3t_rk3_stage2_stretch(
+                    _zc,
+                    state.eta.data,
+                    state_new.eta.data,
+                    state.H_bathy.data,
+                )
+                _r3t_m = jnp.where(
+                    _h_ref_ws[..., 0] > 0.0,
+                    _nemo_qsr_kmm_stretch,
+                    0.0,
+                )
                 _qsr_stretch_override = (
                     self._nemo_ws_test_hooks.stage3_qsr_stretch_override)
                 if _qsr_stretch_override is not None:
@@ -10039,6 +10083,13 @@ class LatLonCGridOceanModel:
                         _nemo_ws_zdf_eta_kmm
                         if _nemo_ws_zdf_eta_kmm is not None
                         else state.eta.data),
+                    # Compiled stprk3.f90:168 calls zdf_phy(Nbb,Nbb), and
+                    # zdfsh2.f90:99-103 uses both step-entry levels in its
+                    # shear divisors.  The implicit tracer solve still needs
+                    # Kmm geometry, so route these two users separately.
+                    tke_shear_eta_now=(
+                        state.eta.data
+                        if _nemo_ws_zdf_eta_kmm is not None else None),
                     u_now=state.u.data, v_now=state.v.data,
                     effective_K_test_override=_vertical_K_test_override,
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
@@ -11656,6 +11707,7 @@ class LatLonCGridOceanModel:
         n2_tracers_before=None,
         tke_n2_bundle=None,
         eta_now=None,
+        tke_shear_eta_now=None,
         u_now=None,
         v_now=None,
         nemo_tracer_content_rhs=None,
@@ -11966,7 +12018,13 @@ class LatLonCGridOceanModel:
                 _tke_lat_deg = jnp.degrees(_grid.lat_T)
             if _tke_prognostic:
                 _tke_p_sh2_result = self._tke_step_entry_p_sh2(
-                    state, eta_now=eta_now, u_now=u_now, v_now=v_now,
+                    state,
+                    eta_now=(
+                        eta_now
+                        if tke_shear_eta_now is None
+                        else tke_shear_eta_now
+                    ),
+                    u_now=u_now, v_now=v_now,
                     z_coord=_zc, config=_cfg_b, grid=_grid,
                     return_face_metrics=return_tke_entry)
                 if return_tke_entry:
@@ -12053,7 +12111,8 @@ class LatLonCGridOceanModel:
         # Private causal seam: two arrays replace the post-closure heat and
         # viscosity profiles; later arrays optionally replace formed tracer
         # K, the tracer e3w(Kmm) divisor, the tracer e3t(Kaa) matrix weight,
-        # and the already-formed temperature content, in that order.
+        # and the already-formed temperature and salinity contents, in that
+        # order.
         _formed_effective_K_override = None
         _tracer_e3w_test_override = None
         _tracer_e3t_test_override = None
@@ -12065,9 +12124,9 @@ class LatLonCGridOceanModel:
             _fixed_solve_test_input = effective_K_test_override
             _fixed_solve_replace = jnp.asarray(
                 effective_K_test_override.replace, dtype=bool)
-            if _fixed_solve_replace.shape != (6,):
+            if _fixed_solve_replace.shape != (7,):
                 raise ValueError(
-                    "fixed vertical-solve test input requires six selectors")
+                    "fixed vertical-solve test input requires seven selectors")
             K_v_cell = jnp.where(
                 _fixed_solve_replace[0],
                 effective_K_test_override.heat_K, K_v_cell)
@@ -12730,6 +12789,10 @@ class LatLonCGridOceanModel:
                             _fixed_solve_replace[5],
                             _fixed_solve_test_input.temperature_content,
                             _content_t)
+                        _content_s = jnp.where(
+                            _fixed_solve_replace[6],
+                            _fixed_solve_test_input.salinity_content,
+                            _content_s)
                     elif _tracer_content_t_test_override is not None:
                         _content_t = _tracer_content_t_test_override
                     _tracer_wet = _literal_t_wet
@@ -12756,6 +12819,7 @@ class LatLonCGridOceanModel:
                             e3w_now=_tracer_e3w,
                             wet=_tracer_wet,
                             content_T=_content_t,
+                            content_S=_content_s,
                             lower=_trace_lower,
                             diagonal=_trace_diagonal,
                             upper=_trace_upper,
@@ -15992,6 +16056,7 @@ class _NEMOWSTracerSolveTrace(NamedTuple):
     e3w_now: object
     wet: object
     content_T: object
+    content_S: object
     lower: object
     diagonal: object
     upper: object

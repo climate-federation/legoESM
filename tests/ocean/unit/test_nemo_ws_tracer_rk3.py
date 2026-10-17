@@ -93,6 +93,43 @@ def test_nemo_r3t_stage1_interpolates_endpoint_ratios_in_source_order():
     assert "_qt_13 = nemo_r3t_rk3_stage1_stretch(" in source
 
 
+def test_nemo_r3t_stage2_averages_endpoint_ratios_in_source_order():
+    set_policy(PrecisionPolicy.fp64())
+    depth = jnp.asarray([[0.8399433435364629]], dtype=jnp.float64)
+    before = jnp.asarray([[-1.6251504175017768]], dtype=jnp.float64)
+    after = jnp.asarray([[1.0774671157751738]], dtype=jnp.float64)
+    z_coord = SimpleNamespace(linear_free_surface=False)
+
+    def evaluate(a, b):
+        return eos_module.nemo_r3t_rk3_stage2_stretch(
+            z_coord, a, b, depth)
+
+    eager = evaluate(before, after)
+    compiled = jax.jit(evaluate)(before, after)
+    np.testing.assert_array_equal(np.asarray(compiled), np.asarray(eager))
+
+    r1_depth = np.float64(1.0) / np.asarray(depth)
+    r3_before = np.asarray(before) * r1_depth
+    r3_after = np.asarray(after) * r1_depth
+    expected = np.float64(1.0) + np.float64(0.5) * (
+        r3_before + r3_after)
+    np.testing.assert_array_equal(np.asarray(compiled), expected)
+
+    ratio_of_mean = np.float64(1.0) + (
+        np.float64(0.5) * (np.asarray(before) + np.asarray(after))
+    ) * r1_depth
+    assert not np.array_equal(np.asarray(compiled), ratio_of_mean)
+
+    gradients = jax.grad(
+        lambda a, b: jnp.sum(evaluate(a, b)), argnums=(0, 1))(
+            before, after)
+    assert all(np.isfinite(np.asarray(value)).all() for value in gradients)
+    assert all(np.any(np.asarray(value) != 0.0) for value in gradients)
+
+    source = inspect.getsource(model_module.LatLonCGridOceanModel._step_impl)
+    assert "_nemo_qsr_kmm_stretch = nemo_r3t_rk3_stage2_stretch(" in source
+
+
 def test_nemo_qco_live_t_thickness_matches_literal_source_bits():
     """Pin domain/domqco/e3t macro association on awkward partial cells."""
     set_policy(PrecisionPolicy.fp64())

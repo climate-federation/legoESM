@@ -759,9 +759,12 @@ def nemo_gyre_initial_T_S(depth_pos_m):
 def nemo_gyre_seasonal_cosines(t_seconds: float = 0.0):
     """NEMO GYRE seasonal phase factors ``(zcos_sais1, zcos_sais2)``.
 
-    Reproduces ``usrdef_sbc`` (nn_leapy=30, 360-day year).  ``t_seconds`` is model
-    time since start; the solar (qsr) uses ``zcos_sais1`` and the restoring
-    target (T*) uses ``zcos_sais2``.
+    Reproduces ``usrdef_sbc`` (nn_leapy=30, 360-day year).  NEMO subtracts
+    completed calendar years before evaluating the seasonal phase
+    (compiled ``usrdef_sbc.f90:92,105-106``); the first/last step of a year
+    therefore uses hours 1/8640.  ``t_seconds`` is model time since start; the
+    solar (qsr) uses ``zcos_sais1`` and the restoring target (T*) uses
+    ``zcos_sais2``.
     """
     import jax.numpy as jnp
     from legoesm.core.source_rounding import nemo_source_round as sr
@@ -769,6 +772,15 @@ def nemo_gyre_seasonal_cosines(t_seconds: float = 0.0):
     value = jnp.asarray(t_seconds, dtype=jnp.float64)
     rpi = jnp.asarray(np.pi, dtype=value.dtype)
     ztime = sr(value / sr(jnp.asarray(60.0, value.dtype) * 60.0))
+    year_hours = sr(
+        jnp.asarray(24.0, value.dtype)
+        * jnp.asarray(_NEMO_GYRE_YEAR_DAYS, value.dtype)
+    )
+    completed_years = jnp.maximum(
+        jnp.ceil(sr(ztime / year_hours)) - jnp.asarray(1.0, value.dtype),
+        jnp.asarray(0.0, value.dtype),
+    )
+    ztime = sr(ztime - sr(completed_years * year_hours))
     ztimemax1 = sr(sr(sr(5.0 * 30.0) + 21.0) * 24.0)
     ztimemin1 = sr(
         ztimemax1 + sr(sr(24.0 * _NEMO_GYRE_YEAR_DAYS) / 2.0)

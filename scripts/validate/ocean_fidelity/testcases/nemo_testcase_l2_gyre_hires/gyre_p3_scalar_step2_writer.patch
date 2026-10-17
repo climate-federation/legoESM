@@ -1,0 +1,67 @@
+--- a/stprk3.F90
++++ b/stprk3.F90
+@@ -184 +184 @@
+-      IF( kstp == nit000 )   CALL l2_dump_zdf( kstp, Nbb )
++      IF( kstp <= nit000 + 1 )   CALL l2_dump_zdf( kstp, Nbb )
+@@ -217 +217 @@
+-      IF( kstp == nit000 )   CALL l1_dump_stage( kstp, 1, Naa )
++      IF( kstp <= nit000 + 1 )   CALL l1_dump_stage( kstp, 1, Naa )
+@@ -223 +223 @@
+-      IF( kstp == nit000 )   CALL l1_dump_stage( kstp, 2, Naa )
++      IF( kstp <= nit000 + 1 )   CALL l1_dump_stage( kstp, 2, Naa )
+@@ -231 +231 @@
+-      IF( kstp == nit000 )   CALL l1_dump_stage( kstp, 3, Naa )
++      IF( kstp <= nit000 + 1 )   CALL l1_dump_stage( kstp, 3, Naa )
+@@ -399,0 +400 @@
++      CHARACTER(LEN=96) :: filename
+@@ -402 +403,2 @@
+-      OPEN( NEWUNIT=iunit, FILE='oracle_zdf_entry_kt00000001.bin', ACCESS='STREAM', &
++      WRITE(filename,'("oracle_zdf_entry_kt",I8.8,".bin")') kstp
++      OPEN( NEWUNIT=iunit, FILE=TRIM(filename), ACCESS='STREAM', &
+--- a/stprk3_stg.F90
++++ b/stprk3_stg.F90
+@@ -617,2 +617,2 @@
+-      IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) THEN
+-         l1_filename = 'oracle_tracer_transport_kt00000001_s3.bin'
++      IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg == 3 ) THEN
++         WRITE(l1_filename,'("oracle_tracer_transport_kt",I8.8,"_s3.bin")') kstp
+@@ -640,2 +640,2 @@
+-      IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) THEN
+-         l1_filename = 'oracle_rktracer_stage3_kt00000001.bin'
++      IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg == 3 ) THEN
++         WRITE(l1_filename,'("oracle_rktracer_stage3_kt",I8.8,".bin")') kstp
+@@ -652 +652 @@
+-      IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg <= 2 ) THEN
++      IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg <= 2 ) THEN
+@@ -670 +670 @@
+-         IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
++         IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg == 3 ) &
+@@ -672 +672 @@
+-         IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg <= 2 ) &
++         IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg <= 2 ) &
+@@ -676 +676 @@
+-         IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
++         IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg == 3 ) &
+@@ -678 +678 @@
+-         IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg <= 2 ) &
++         IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg <= 2 ) &
+@@ -724 +724 @@
+-         IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg <= 2 ) THEN
++         IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg <= 2 ) THEN
+@@ -752 +752 @@
+-               IF( lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
++               IF( lwp .AND. kstp <= nit000 + 1 .AND. kstg == 3 ) THEN
+@@ -757,2 +757,2 @@
+-               IF( lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
+-                  l1_filename = 'oracle_qsr_stage3_kt00000001.bin'
++               IF( lwp .AND. kstp <= nit000 + 1 .AND. kstg == 3 ) THEN
++                  WRITE(l1_filename,'("oracle_qsr_stage3_kt",I8.8,".bin")') kstp
+@@ -769 +769 @@
+-            IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
++            IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg == 3 ) &
+@@ -772 +772 @@
+-            IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
++            IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg == 3 ) &
+@@ -786 +786 @@
+-            IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) THEN
++            IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg == 3 ) THEN
