@@ -173,12 +173,30 @@ compiled files).  Import waits for G6 certification.
 
 ## Tests and review
 
-(filled at the final commit, below)
+All CPU fp64, `JAX_ENABLE_X64=1`, PYTHONPATH as in `claude_rounds/land.sh`.
+- Default gate (land.sh list), in three chunks: citation gate + private
+  imports + TKE terms 91 passed; freshwater closure + stage face-mask rank
+  + prognostic barotropic state 26 passed; NEMO recipe 25 passed.
+- G2-G7 cards, the G2/G6 ladder and the new `dyn_zad` unit test: 108
+  passed (one field-order pin updated for the two fields appended last;
+  it failed before the update, as a pin should).
+- G1 card, G1b card, G1 tools, G1 ladder: 191 passed.
+- Card constructibility, opt-in defaults, after-SSH carry: 57 passed.
+- Receipt citation gate on THIS receipt (from its title): 21 citations,
+  failures 0, unmapped 0, map audit 0; a planted shift of the
+  `dynzad.f90:119` citation FAILS it (`SYMBOL-NOT-AT-LINE`).  Round-43
+  entries added to the gate's maps; 78 pins and 21 lines of the GYRE
+  phase-3 round-8 receipt re-anchored by the repo's re-anchor tool
+  (mechanical, from `6f01650a57`); three spans the landing lengthened
+  widened by hand.
+- codex review: paused (quota).  The operator runs an independent Claude
+  review of this diff before landing.
 
 ASKED: the stp_2D walk; land the first non-bit statements G6-selected;
 revert-failing tests; traced-jit last-bit asserts; both labels kt 1..6.
 
-UNASKED, offered for revert: the new ladder arm (needed for the walk); the
+UNASKED, offered for revert: the citation re-anchor of the GYRE round-8
+receipt (mechanical, tool-applied); the new ladder arm (needed for the walk); the
 `levels` argument on the shared slow-forcing reader (needed to read kt 2/3);
 the second statement (`dyn_zad`) landed in the same round as the first.
 
