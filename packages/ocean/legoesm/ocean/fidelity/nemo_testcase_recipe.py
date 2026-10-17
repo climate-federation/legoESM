@@ -4151,8 +4151,6 @@ ORCA2G7_UNMEASURED: tuple[str, ...] = (
 # G8 = certified G5 + ORCA2's lateral momentum diffusion (Decision 128, lane A).
 ORCA2G8_UNMEASURED: tuple[str, ...] = (
     "nemo_post_si3_surface_records",   # G5's input route, inherited unchanged
-    "g8_record_not_admitted",
-    "lateral_momentum_diffusion_multilevel_step",   # dynldf_lev_lap, read ahm, 31 levels
 )
 # G1b = G1 + ORCA2's vector-form momentum advection (user, 2026-10-14).
 ORCA2G1B_UNMEASURED: tuple[str, ...] = (

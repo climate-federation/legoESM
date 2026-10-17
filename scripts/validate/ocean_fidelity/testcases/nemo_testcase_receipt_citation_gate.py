@@ -1958,7 +1958,7 @@ CITATION_MAP = {
         ('resume=(', 3),
         'else (2, *_nemo_ws_stage_tracers)),', 6],
     'state.py:3245': ('rk3_stage_tracer_written_order: bool = False', 1),
-    'nemo_testcase_recipe.py:4204-4209': [
+    'nemo_testcase_recipe.py:4202-4207': [
         "# NEMO's written stage-1/2 tracer update (stprk3_stg.f90:503-505; G4 round",
         ('"ORCA2G4-sbc": True', 6), 6],
     'nemo_testcase_recipe.py:3849': (
