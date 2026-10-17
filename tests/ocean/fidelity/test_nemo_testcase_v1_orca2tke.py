@@ -141,7 +141,8 @@ def test_v1_card_is_g5_plus_the_tke_selection(cards):
                      "physics.vertical_mixing.tke.tke_htau_evaluation",
                      "physics.vertical_mixing.tke.tke_etau_exponential_evaluation",
                      "physics.vertical_mixing.tke.nemo_sh2_fold_top_v",
-                     "physics.vertical_mixing.tke.nemo_tke_matrix_rhs_source_rounded"}
+                     "physics.vertical_mixing.tke.nemo_tke_matrix_rhs_source_rounded",
+                     "physics.vertical_mixing.tke.nemo_sh2_r3_source_rounded"}
     vm = v1.recipe.model_config.physics.vertical_mixing
     t = vm.tke
     # Rule 10: the numbers the closure will use, as instantiated.
@@ -178,6 +179,9 @@ def test_v1_card_is_g5_plus_the_tke_selection(cards):
     # zdftke.f90:247 zfact2, :419 zdiag, :423-426 RHS without FMA/reassociation
     assert (t.nemo_tke_matrix_rhs_source_rounded,
             g5_tke.nemo_tke_matrix_rhs_source_rounded) == (True, False)
+    # domqco.f90:266-269 r3u/r3v stored before zdfsh2.f90:104-108 adds 1
+    assert (t.nemo_sh2_r3_source_rounded,
+            g5_tke.nemo_sh2_r3_source_rounded) == (True, False)
     assert g5.recipe.grid.native_lat_T_deg is None
     assert g5.recipe.z_coord.nemo_e3t_jpk is None
     dom = recipe._orca2g1_domain(INPUTS / CARD_FILES[0], 31)
@@ -227,7 +231,8 @@ def test_v1_selector_check_fires_on_each_planted_tke_line(cards):
                   {"tke_htau_evaluation": "jax_expression"},
                   {"tke_etau_exponential_evaluation": "jax_expression"},
                   {"nemo_sh2_fold_top_v": False},
-                  {"nemo_tke_matrix_rhs_source_rounded": False}):
+                  {"nemo_tke_matrix_rhs_source_rounded": False},
+                  {"nemo_sh2_r3_source_rounded": False}):
         bad = vm._replace(tke=vm.tke._replace(**plant))
         card = v1._replace(recipe=v1.recipe._replace(model_config=cfg._replace(
             physics=cfg.physics._replace(vertical_mixing=bad))))

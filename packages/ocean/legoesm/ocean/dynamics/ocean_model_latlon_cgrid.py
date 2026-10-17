@@ -11810,10 +11810,11 @@ class LatLonCGridOceanModel:
         stage = getattr(
             tke_cfg, "tke_shear_evaluation_stage", "implicit_solve_state")
         if stage == "implicit_solve_state":
-            if getattr(tke_cfg, "nemo_sh2_fold_top_v", False):
-                raise ValueError(
-                    "nemo_sh2_fold_top_v=True is read only by the step-entry "
-                    "shear (tke_shear_evaluation_stage='step_entry')")
+            for _flag in ("nemo_sh2_fold_top_v", "nemo_sh2_r3_source_rounded"):
+                if getattr(tke_cfg, _flag, False):
+                    raise ValueError(
+                        f"{_flag}=True is read only by the step-entry "
+                        "shear (tke_shear_evaluation_stage='step_entry')")
             return None
         if stage != "step_entry":
             raise ValueError(
@@ -11913,6 +11914,11 @@ class LatLonCGridOceanModel:
                 "Unknown TKEConfig.tke_shear_metric_source: expected "
                 "'tpoint_jacobian' or 'nemo_qco_live_face', got "
                 f"{metric_source!r}.")
+        r3_rounded = bool(getattr(tke_cfg, "nemo_sh2_r3_source_rounded", False))
+        if r3_rounded and metric_source != "nemo_qco_live_face":
+            raise ValueError(
+                "nemo_sh2_r3_source_rounded=True requires "
+                "tke_shear_metric_source='nemo_qco_live_face'")
         face_metrics = None
         if metric_source == "nemo_qco_live_face":
             if shear_disc == "nemo_face_native_now2":
@@ -11972,6 +11978,9 @@ class LatLonCGridOceanModel:
                 r1_hv0 = wet_v_f / (hv0 + 1.0 - wet_v_f)
                 r3u_nemo = num_u * r1_hu0 / a_u
                 r3v_nemo = num_v * r1_hv0 / a_v
+                if r3_rounded:
+                    r3u_nemo = nemo_source_round(r3u_nemo)
+                    r3v_nemo = nemo_source_round(r3v_nemo)
                 # NEMO arrays name the east/north face of T(i,j); legoESM
                 # arrays name the west/south face.  Prefix the periodic/wall
                 # face to convert without changing arithmetic in r3 itself.
