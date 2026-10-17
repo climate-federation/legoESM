@@ -175,8 +175,9 @@ def test_orca2_and_omt_cards_select_executed_transferred_statements():
             "barotropic_een_ratio_written_order",
         ):
             assert getattr(config.barotropic, name) is True, name
-        # np_COR-certified (ORCA2 runs np_CRV) and the held top-V exchange.
-        assert config.een_vorticity_written_order is False
+        # vor_een's written order: G6-certified on np_CRV (round 308); OMT-0
+        # runs np_COR and leaves it off (round 309).  Top-V stays held.
+        assert config.een_vorticity_written_order is (card is not omt0_card)
         assert config.rk3_fold_exchange_top_v_row is False
     assert omt0_card.recipe.model_config.barotropic.barotropic_flux_update_nemo_literal
     assert omt0_card.recipe.model_config.barotropic.barotropic_entry_depth_nemo_literal

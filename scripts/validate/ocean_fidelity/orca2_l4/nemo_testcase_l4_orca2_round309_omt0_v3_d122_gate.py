@@ -129,7 +129,7 @@ def selected_card(card, *, arm: str, rung: str, plant: str = "none"):
         new = _with_v3(cfg, want)
         require(_v3_on(new) == set(V3_STATEMENTS.get(arm, ())),
                 f"{rung}: arm {arm} carries {sorted(_v3_on(new))}")
-        if arm == "control":
+        if arm == "control" and not D122_SELECTED[rung]:
             require(new == cfg, f"{rung}: control arm moved the card")
     return card._replace(recipe=card.recipe._replace(model_config=new))
 

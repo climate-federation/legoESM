@@ -90,9 +90,12 @@ def test_omt1_card_restores_only_vector_module() -> None:
         if repr(getattr(before, name)) != repr(getattr(after, name))
     }
     assert all(selectors.values())
+    # barotropic: OMT-0's flux-form-only literals; the rest: round 309's
+    # vector-only G6 statements OMT-0 turns off.
     assert moved == {
         "momentum_advection", "momentum_flux_scheme",
-        "vertical_momentum_scheme", "vorticity_scheme",
+        "vertical_momentum_scheme", "vorticity_scheme", "barotropic",
+        *ladder_gate.omt0.OMT0_VECTOR_ONLY,
     }
 
 
