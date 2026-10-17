@@ -3277,6 +3277,47 @@ class LatLonCGridOceanConfig(NamedTuple):
     # the dyn_zdf bottom RHS (dynzdf.f90:166-169).  implicit_ice_ocean_top_drag
     # already selects both.  Needs the linear bundle.  Default False.
     nemo_bottom_drag_written_statements: bool = False
+    # NEMO hpg_sco's northern V-pivot statement reads the north-row operands
+    # rhd, r3t and ssh from the T-point fold ghost; e3w_1d and gdept_1d are
+    # one-dimensional in this compiled build
+    # (dynhpg.f90:391-398, :417-424).  The shared literal kernel already
+    # folds density; this card-selected extension supplies the r3t/ssh fold
+    # geometry through the assembled live e3w/gdept fields.  False preserves
+    # previously measured cards.
+    nemo_hpg_sco_fold_geometry: bool = False
+    # NEMO's vector RK3 program applies the raw 3-D ``vmask`` on its
+    # northern V-pivot row to the completed Krhs and the velocity update
+    # (stprk3_stg.f90:366-370).  The compact T-derived face mask calls that
+    # row dry.  G6 selects the raw mask for the vector RHS and stage update;
+    # False preserves the certified flux/linear cards.
+    rk3_vector_raw_vmask: bool = False
+    # NEMO stores r3t(Kaa) (stp2d.f90:152) and r3t(Kbb) (domqco.f90:257) as
+    # arrays and wzv differences the stored values (sshwzv.f90:297-298).
+    # XLA strips optimization_barrier and can factor the two ssh*r1_ht_0
+    # products into one, which moves the last bit of ww.  True materialises
+    # both ratios; False preserves previously measured cards.
+    nemo_wzv_stored_r3_ratios: bool = False
+    # NEMO dyn_zad's written association (dynzad.f90:112-126, :134-136):
+    # e1e2t*ww materialised, the two interface terms summed, then
+    # (0.25*r1_e1e2u)/e3u times that sum subtracted from Krhs.  XLA strips
+    # optimization_barrier and contracts these products into the adds.
+    # False preserves previously measured cards.
+    nemo_zad_written_association: bool = False
+    # NEMO's stage-2 momentum wzv (stprk3_stg.f90:327) runs on the stage
+    # clock rDt = rn_Dt/2 (:188-189) with the stored half-sum
+    # r3t(Kaa) = r1_2*(r3t(Kbb) + r3ta) (np_HYB, :221).  The full-step pair
+    # (rn_Dt, r3ta) is equal only algebraically.  False preserves previously
+    # measured cards.
+    nemo_stage2_momentum_wzv_half_step: bool = False
+    # NEMO's stage-2/3 momentum wzv reads the Kmm ratios r3t/r3u/r3v STORED
+    # by the previous stage (stprk3_stg.f90:171-173, :215-217), not ratios of
+    # the stage sea level.  Equal only algebraically.  False preserves
+    # previously measured cards.
+    nemo_stage_momentum_wzv_stored_kmm_ratios: bool = False
+    # Vector form: Krhs accumulates dyn_hpg, dyn_vor, then dyn_keg in that
+    # order (stp2d.f90:138/:144/:161; stprk3_stg.f90 stages 2-3).  False sums
+    # the fused KE-plus-pressure term with the vorticity term.
+    rk3_vector_rhs_nemo_order: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

@@ -61,6 +61,7 @@ from legoesm.ocean.state import (
     LatLonCGridOceanConfig,
     constants_equal,
 )
+from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import nemo_stage_ratio as _nemo_stage_ratio  # noqa: E501
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
     compute_frozen_geom_density,
@@ -1778,12 +1779,20 @@ def rk3_stage_velocity_update(
             f"{velocity_before.shape}")
     if vector_form:
         # dynzdf.F90:121-122 and stprk3_stg.F90:367-368, in NEMO's own
-        # association order: add, then mask.
+        # association order: multiply, add, then mask.  ``written_order`` is
+        # selected by the ORCA2 cards; on G1b it applies to this vector arm
+        # (record build :366-370; ORCA2_OMIP_L4 :467-471).  Materialize each
+        # source operation because an optimization barrier is stripped from
+        # optimized HLO and otherwise XLA contracts the multiply-add.
         if face_mask.shape not in (velocity_before.shape,
                                    velocity_before.shape[:-1] + (1,)):
             raise ValueError(
                 f"face_mask {face_mask.shape} must match velocity_before "
                 f"{velocity_before.shape} or be its level-broadcast form")
+        if written_order:
+            increment = nemo_source_round(dt_stage * rhs)
+            updated = nemo_source_round(velocity_before + increment)
+            return nemo_source_round(updated * face_mask)
         return (velocity_before + dt_stage * rhs) * face_mask
     # dynzdf.F90:127-132 and stprk3_stg.F90:373-378, key_qco form.
     return (_rk3_stage_update_written_order(velocity_before, rhs, dt_stage, qco_before, qco_now, qco_after, face_mask) if written_order  # noqa: E501
@@ -1792,7 +1801,7 @@ def rk3_stage_velocity_update(
 
 def _nemo_ws_qco_stage_faces(
     eta, h_ref, u_mask_3d, v_mask_3d, grid, *, z_coord=None,
-    include_reciprocals=False, nemo_stage_pair=None,
+    include_reciprocals=False, nemo_stage_pair=None, fold_grid=None,
 ):
     """NEMO ``e3u/e3v(Kmm)`` and ``1 + r3u/r3v`` for one WS-RK3 stage ssh.
 
@@ -1851,7 +1860,7 @@ def _nemo_ws_qco_stage_faces(
     return nemo_qco_live_face_geometry_cgrid(
         jnp.asarray(eta, dtype=dtype), ops.e3u_0, ops.e3v_0, ops.umask3,
         ops.vmask3, ops.hu_0, ops.hv_0, ops.area_t, ops.area_u, ops.area_v,
-        include_reciprocals=include_reciprocals, r3_native=_nemo_ws_stage_r3uv(nemo_stage_pair, ops, dtype),
+        include_reciprocals=include_reciprocals, r3_native=_nemo_ws_stage_r3uv(nemo_stage_pair, ops, dtype), fold_grid=fold_grid,
     )
 
 
@@ -2075,7 +2084,7 @@ def _nemo_ws_stage_transport(
          r1_hv_stage) = _nemo_ws_qco_stage_faces(
             eta_stage, h_ref, u_mask_3d, v_mask_3d, grid,
             z_coord=z_coord,
-            include_reciprocals=True)
+            include_reciprocals=True, fold_grid=grid if config.rk3_vector_raw_vmask else None)
     Hu_stage_depth = jnp.sum(hu_stage, axis=-1)
     Hv_stage_depth = jnp.sum(hv_stage, axis=-1)
     if barotropic_velocity is None:
@@ -2135,7 +2144,8 @@ def _nemo_ws_stage_transport(
                 # indicator) differences the already corrected zFu/zFv.
                 None if (legacy_wzv_rederived_transport or velocity_form_wzv)
                 else (zfu_stage, zfv_stage)),
-            runoff_mass_flux=runoff_mass_flux)
+            fold_exchange_ratios=bool(config.rk3_vector_raw_vmask), runoff_mass_flux=runoff_mass_flux,
+            stored_r3_ratios=bool(config.nemo_wzv_stored_r3_ratios))
         if momentum_velocity_form_w:
             # THE SECOND SOLVE.  stprk3_stg.f90:360 hands wzv the raw stage
             # velocity under the velocity indicator and the momentum vertical
@@ -2150,12 +2160,20 @@ def _nemo_ws_stage_transport(
             _w_dt, _w_eta_after = (
                 (dt, eta_after) if momentum_wzv_clock is None
                 else momentum_wzv_clock)
+            _w_half = (stage_index == 1 and momentum_wzv_clock is None
+                       and bool(config.nemo_stage2_momentum_wzv_half_step))
             w_momentum, _, _ = nemo_qco_wzv_operands(
                 eta_stage, eta_before, u_stage, v_stage, grid, z_coord,
-                u_mask_3d, v_mask_3d, _tmask3, _w_dt,
+                u_mask_3d, v_mask_3d, _tmask3, _w_dt / 2.0 if _w_half else _w_dt,
                 eta_after_override=_w_eta_after,
                 volume_transport_override=None,
-                runoff_mass_flux=runoff_mass_flux)
+                fold_exchange_ratios=bool(config.rk3_vector_raw_vmask), runoff_mass_flux=runoff_mass_flux,
+                stored_r3_ratios=bool(config.nemo_wzv_stored_r3_ratios),
+                half_step_after_ratio=_w_half,
+                stored_kmm_level=(
+                    stage_index if (momentum_wzv_clock is None and stage_index in (1, 2)
+                                    and bool(config.nemo_stage_momentum_wzv_stored_kmm_ratios))
+                    else 0))
     else:
         w_stage = diagnose_w_from_flux_div(
             stage_div, z_coord, thickness_weighted=True)
@@ -4140,6 +4158,12 @@ class LatLonCGridOceanModel:
                 f"{sorted(VALID_MOMENTUM_ADVECTION)}, "
                 f"got {config.momentum_advection!r}",
             )
+        if (config.rk3_vector_rhs_nemo_order
+                and config.momentum_advection == "flux_form"):
+            raise ValueError(
+                "rk3_vector_rhs_nemo_order=True requires vector-form "
+                "momentum advection; flux_form has no separate dyn_keg "
+                "Krhs accumulation to order")
         if config.weno_smoothness not in VALID_WENO_SMOOTHNESS:
             raise ValueError(
                 f"weno_smoothness must be one of "
@@ -6183,6 +6207,12 @@ class LatLonCGridOceanModel:
                 _ws_literal_hpg_vmask = jnp.zeros_like(_card_v_mask)
                 _ws_literal_hpg_vmask = _ws_literal_hpg_vmask.at[1:].set(
                     _raw_ops.vmask3)
+                if bool(_cfg_b.rk3_vector_raw_vmask):
+                    # stprk3_stg.f90:366-370: vector velocity updates retain
+                    # NEMO's raw V-pivot support.  This is the same resolved
+                    # mesh operand already handed to the literal HPG path,
+                    # never a second mask reconstruction.
+                    _ws_stage_v_mask = _ws_literal_hpg_vmask
             if not self._nemo_ws_test_hooks.legacy_hadv_min_face_thickness:
                 _ws_face_thickness_kbb = _nemo_ws_qco_stage_faces(
                     state.eta.data, _ws_h_ref, _ws_u_live_mask,
@@ -6236,7 +6266,8 @@ class LatLonCGridOceanModel:
                                up3_upwind_selector=_up3_selector_override,
                                momentum_flux_face_thickness=_ws_face_thickness_kbb,
                                ldf_thickness_operands=_ws_ldf_thickness_kbb,
-                               nemo_operator_association=self._nemo_ws_test_hooks.nemo_stage_rhs_accumulation_order_arm,
+                               nemo_operator_association=(self._nemo_ws_test_hooks.nemo_stage_rhs_accumulation_order_arm
+                                                          or bool(_cfg_b.rk3_vector_rhs_nemo_order)),
                                nemo_stage_zad_operands=(
                                    (self._nemo_ws_test_hooks.stage1_zad_w_override, None, None)
                                    if self._nemo_ws_test_hooks.stage1_zad_w_override is not None else None),
@@ -7006,9 +7037,13 @@ class LatLonCGridOceanModel:
                 stage_face_thickness=None, stage_index=0,
                 stage_zad_operands=None,
             ):
+                # vor_een np_CRV reads vv(Kmm) on the pivot row, NEMO's fold
+                # image (dynvor.f90:762-766); the compact mask zeroes it.
                 st = state._replace(
                     u=state.u.replace(data=u_in * u_mask_3d),
-                    v=state.v.replace(data=v_in * v_mask_3d),
+                    v=state.v.replace(data=v_in * (
+                        _ws_stage_v_mask if _cfg_b.rk3_vector_raw_vmask
+                        else v_mask_3d)),
                 )
                 stage_geom_density = _geom_density
                 if stage_tracers_eta is not None:
@@ -7158,7 +7193,8 @@ class LatLonCGridOceanModel:
                                          .legacy_hpg_algebraic_association),
                                      nemo_operator_association=(
                                          self._nemo_ws_test_hooks
-                                         .nemo_stage_rhs_accumulation_order_arm is True),
+                                         .nemo_stage_rhs_accumulation_order_arm is True
+                                         or bool(_cfg_b.rk3_vector_rhs_nemo_order)),
                                      nemo_stage_zad_operands=stage_zad_operands,
                                      nemo_stage_zad_operand_observer=(
                                          _zad_observers[stage_index - 1]),
@@ -17249,21 +17285,6 @@ def _nemo_ws_stage_r3t_stretch(cfg, stage_index, eta_pair, z_coord, H_bathy):
     from legoesm.ocean.eos import nemo_r3t_rk3_stage1_stretch
     return nemo_r3t_rk3_stage1_stretch(
         z_coord, *eta_pair(), H_bathy, half=stage_index == 3)
-
-
-def _nemo_stage_ratio(kmm, before, after):
-    """NEMO's stored thickness ratio at N+1/3 (``kmm`` 1) or N+1/2 (2).
-
-    ``r2_3 * r3(Kbb) + r1_3 * r3a`` (stprk3_stg.f90:171-173, :218) and
-    ``r1_2 * ( r3(Kbb) + r3a )`` (:215-217, :239): each product and sum
-    rounded once, in the written order.
-    """
-    sr = nemo_source_round
-    if kmm == 1:
-        return sr(sr((2.0 / 3.0) * before) + sr((1.0 / 3.0) * after))
-    if kmm == 2:
-        return sr(0.5 * sr(before + after))
-    raise ValueError(f"stage ratio level must be 1 or 2, got {kmm!r}")
 
 
 def _nemo_ws_stage_pair(cfg, kmm, eta_pair):
