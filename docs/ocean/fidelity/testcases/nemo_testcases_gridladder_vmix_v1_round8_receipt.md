@@ -67,9 +67,9 @@ NEMO's fold treatment of each shear operand on the pivot row's north V face:
 
 | operand | NEMO | card (before) |
 |---|---|---|
-| `v` on that face | `lbc_lnk 'V' -1` image (`stprk3_stg.f90:785-793`) | the image (already stored) |
+| `v` on that face | `lbc_lnk 'V' -1` image (`ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:785-793`) | the image (already stored) |
 | `vmask` / `wvmask` there | wet (raw mesh mask; 1,319 wet faces) | wall (0), so coast factor 2 |
-| `avm_k(ji,jj+1)` | `lbc_lnk 'W' +1` image of row 146 (`stprk3_stg.f90:785-793`) | edge-repeat of row 147 |
+| `avm_k(ji,jj+1)` | `lbc_lnk 'W' +1` image of row 146 (`ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:785-793`) | edge-repeat of row 147 |
 | `ssh(ji,jj+1)` in `r3v` | `'T' +1` image of row 146 | wrapped to the south row |
 
 Fold routine: `lbc_nfd_dp`, T-pivot, `lbcnfd.f90:584-720` (SUBROUTINE :561).
@@ -168,7 +168,7 @@ Pointer only: the full ORCA2 card was not measured with this selection.
   The V1 config-delta test names it. G1-G5, the full ORCA2 card, DINO, GYRE
   and every library default are unchanged.
 - `avm_weighted_shear_production` callers: the step-entry builder (passes
-  the new argument), `tke.py:3368` (in-solve shear; the flag refuses that
+  the new argument), `tke.py:3385` (in-solve shear; the flag refuses that
   path) and the GYRE round-54 script (default `None`, unchanged).
 - **RULE 3:** the fix defaults off on other cards. D130 already answers
   this, so there is no new question.

@@ -122,6 +122,7 @@ _OVERFLOW_R56UP3_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo")
 _OVERFLOW_R62ZDF_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo")
+_ORCA2V1 = NEMO / "cfgs/ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo"
 FILES = {
     # --- GRIDLADDER round 32 (G5 record build) ---
     "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynspg_ts.f90": (
@@ -1725,6 +1726,16 @@ FILES = {
         NEMO / "tests/VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/domhgr.f90"),
     "VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/vortex_r23_ldf_terms.f90": (
         NEMO / "tests/VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/vortex_r23_ldf_terms.f90"),
+    # --- GRIDLADDER-VMIX V1 rounds 8-10: bare names are the V1 record build
+    # (trazdf/stprk3_stg bare keys are GYRE's, so V1 cites those qualified) ---
+    **{f: _ORCA2V1 / f for f in (
+        "zdftke.f90", "zdfsh2.f90", "lbcnfd.f90", "sshwzv.f90", "dynzdf.f90",
+        "domqco.f90", "domhgr.f90")},
+    **{f"ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/{f}": _ORCA2V1 / f
+       for f in ("trazdf.f90", "stprk3_stg.f90")},
+    **{f"ORCA2_OMIP_L4/BLD/ppsrc/nemo/{f}": _ORCA2_COMPILED / f for f in (
+        "zdfsh2.f90", "lbcnfd.f90", "sshwzv.f90", "domhgr.f90")},
+    "tke.py": REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py",
 }
 
 # citation -> the anchors that IDENTIFY its first and last line, plus the
@@ -8041,6 +8052,34 @@ CITATION_MAP = {
     'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-138': [
         'SELECT CASE( n_dynadv )    !==  compute advection trend and add it to general trend  ==!',
         'CALL dyn_zad     ( kt                , Kmm, puu, pvv, Krhs )                  !* vertical advection', 5],
+    # --- GRIDLADDER-VMIX V1 round 8 receipt ---
+    'zdftke.f90:199': 'SUBROUTINE tke_tke( Kbb, Kmm, p_sh2, p_avm, p_avt, p_pdlr )',
+    'zdfsh2.f90:98-113': ['DO jj = ntsj-( 1), ntej+(  0 ) ; DO ji = ntsi-( 1), ntei+(  0)     !* 2 x shear production at uw- and vw-points (energy conserving form)', '&                       + ( zsh2v(ji,jj-1) + zsh2v(ji,jj) ) * ( 2. - vmask(ji,jj-1,jk) * vmask(ji,jj,jk) )   )', 16],
+    'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:785-793': [("&                       , avm_k(:,:,:)        , 'W',  1._wp, ldfull=.TRUE. ) !  lbc_lnk needed for zdf_sh2, moved here to allow tiling in zdf_phy", 1), ("&                       , avm_k(:,:,:)        , 'W',  1._wp, ldfull=.TRUE. ) !  lbc_lnk needed for zdf_sh2, moved here to allow tiling in zdf_phy", 2), 9],
+    'lbcnfd.f90:584-720': [("CASE ( 'T' , 'W' )                         ! T-, W-point", 5), ('!', 373), 137],
+    'zdftke.f90:423-426': ['en(ji,jj,jk) = en(ji,jj,jk) + rn_Dt * (  p_sh2(ji,jj,jk)                          &   ! shear', '&                                  ) * wmask(ji,jj,jk)', 4],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfsh2.f90:112': 'p_sh2(ji,jj,jk) = 0.25 * (   ( zsh2u(ji-1,jj) + zsh2u(ji,jj) ) * ( 2. - umask(ji-1,jj,jk) * umask(ji,jj,jk) )   &',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfsh2.f90:104-108': ['zsh2v(ji,jj) = ( p_avm(ji,jj+1,jk) + p_avm(ji,jj,jk) ) &', '&         * wvmask(ji,jj,jk)', 5],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:785,793': [("&                       , avm_k(:,:,:)        , 'W',  1._wp, ldfull=.TRUE. ) !  lbc_lnk needed for zdf_sh2, moved here to allow tiling in zdf_phy", 1), ("&                       , avm_k(:,:,:)        , 'W',  1._wp, ldfull=.TRUE. ) !  lbc_lnk needed for zdf_sh2, moved here to allow tiling in zdf_phy", 2), 2],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:584-720': [("CASE ( 'T' , 'W' )                         ! T-, W-point", 5), ('!', 373), 137],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sshwzv.f90:140': "CALL lbc_lnk( 'sshwzv', pssh(:,:,Kaa), 'T', 1.0_wp, ldfull=.TRUE. )",
+    'tke.py:3385': 'return _avm_weighted_shear_production(',
+    'sshwzv.f90:140': "CALL lbc_lnk( 'sshwzv', pssh(:,:,Kaa), 'T', 1.0_wp, ldfull=.TRUE. )",
+    # --- GRIDLADDER-VMIX V1 round 9 receipt ---
+    'dynzdf.f90:67': 'SUBROUTINE dyn_zdf( kt, Kbb, Kmm, Krhs, puu, pvv, Kaa )',
+    'dynzdf.f90:338': 'puu(ji,jj,1,Kaa) = puu(ji,jj,1,Kaa) + rDt * utauU(ji,jj)   &',
+    'domqco.f90:188-234': ['SUBROUTINE dom_qco_r3c( pssh, pr3t, pr3u, pr3v, pr3f )', ('END SUBROUTINE dom_qco_r3c', 1), 47],
+    'domhgr.f90:170': 'r1_e1e2u(:,:) = 1._wp / e1e2u(:,:)     ! compute their invert in any cases',
+    'zdftke.f90:420': 'zdiag(ji,jk) = 1._wp - zzd_lw - zzd_up + zfact2 * dissl(ji,jj,jk) * wmask(ji,jj,jk)',
+    'zdftke.f90:247': 'zfact2  = 1.5_wp * rn_Dt * rn_ediss',
+    'zdftke.f90:717': 'p_avt(ji,jj,jk)   = MAX( p_pdlr(ji,jj,jk) * p_avt(ji,jj,jk), avtb_2d(ji,jj) * avtb(jk) ) * wmask(ji,jj,jk)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:247': 'zfact2  = 1.5_wp * rn_Dt * rn_ediss',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:420': 'zdiag(ji,jk) = 1._wp - zzd_lw - zzd_up + zfact2 * dissl(ji,jj,jk) * wmask(ji,jj,jk)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:423-426': ['en(ji,jj,jk) = en(ji,jj,jk) + rn_Dt * (  p_sh2(ji,jj,jk)                          &   ! shear', '&                                  ) * wmask(ji,jj,jk)', 4],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:709': 'p_avm(ji,jj,jk) = MAX( zav,                  avmb(jk) ) * wmask(ji,jj,jk)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:192-201,338': ['zzwi = - zDt_2 * ( avm(ji+1,jj,jk  )     +  avm(ji,jj,jk  )     ) &', 'zzws = - zDt_2 * ( avm(ji+1,jj,2)     +  avm(ji,jj,2)     ) &', 'puu(ji,jj,1,Kaa) = puu(ji,jj,1,Kaa) + rDt * utauU(ji,jj)   &', 11],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:188-234': ['SUBROUTINE dom_qco_r3c( pssh, pr3t, pr3u, pr3v, pr3f )', ('END SUBROUTINE dom_qco_r3c', 1), 47],
+    'zdftke.f90:419': 'zd_lw(ji,jk) = zzd_lw',
 }
 
 
