@@ -4078,11 +4078,9 @@ ORCA2G6_UNMEASURED: tuple[str, ...] = (
     "vector_form_multilevel_step",     # np_CRV EEN + KEG + ZAD on 31 levels
 )
 # G7 = certified G5 + ORCA2's linear bottom drag (Decision 128, lane A).
-# Transcribed, not measured: no G7 record exists yet.
+# Round 41: bit-identical under both labels kt 1..10 (record round41/oracle_g7_r41).
 ORCA2G7_UNMEASURED: tuple[str, ...] = (
     "nemo_post_si3_surface_records",   # G5's input route, inherited unchanged
-    "g7_record_not_admitted",
-    "linear_bottom_drag_multilevel_step",   # zdfdrg np_lin + ice top drag, 31 levels
 )
 # G1b = G1 + ORCA2's vector-form momentum advection (user, 2026-10-14).
 ORCA2G1B_UNMEASURED: tuple[str, ...] = (
