@@ -20,6 +20,7 @@ where:
     r = (T_j - T_{j-1}) / (T_{j+1} - T_j)  (smoothness ratio)
 """
 
+import jax
 import jax.numpy as jnp
 from legoesm.core.weno import weno5_z, weno7_z, weno_upwind
 from legoesm.grids.latlon import LatLonGrid
@@ -830,6 +831,22 @@ NEMO_FCT_TRACE_FIELDS = (
     "coef_u", "coef_v", "coef_w", "anti_post_u", "anti_post_v",
     "anti_post_w", "final_div", "divisor", "rhs_final",
 )
+NEMO_FCT_BETA_TRACE_FIELDS = (
+    "zup", "zdo", "zpos", "zneg", "zbt",
+    "zbetup_literal", "zbetdo_literal", "r_in", "r_out",
+    "coef_u", "coef_v", "coef_w",
+)
+NEMO_FCT_STENCIL_TRACE_FIELDS = (
+    "zbup_center", "zbup_west", "zbup_east", "zbup_south",
+    "zbup_north", "zbup_above", "zbup_below",
+    "pbef", "paft", "wet", "zup",
+)
+NEMO_FCT_UP1_TRACE_FIELDS = (
+    "first_u_raw", "first_v_raw", "first_w_raw", "first_div",
+    "midpoint", "average_u_raw", "average_v_raw", "average_w_raw",
+    "explicit_ztra", "implicit_ztra", "total_ztra", "base_content",
+    "dt_ztra", "numerator", "after_thickness", "paft",
+)
 
 
 def fct_tracer_advection(
@@ -850,6 +867,9 @@ def fct_tracer_advection(
     implicit_w: jnp.ndarray | None = None,
     return_nemo_split: bool = False,
     return_nemo_trace: bool = False,
+    return_nemo_beta_trace: bool = False,
+    return_nemo_stencil_trace: bool = False,
+    return_nemo_up1_trace: bool = False,
     return_limiter_activity: bool = False,
 ) -> tuple:
     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
@@ -927,6 +947,15 @@ def fct_tracer_advection(
         NEMO's compiled two-step FCT stores.  This requires
         ``low_order_predictor="nemo_rk3_two_step"`` and cannot be combined
         with another diagnostic return.  False preserves the ordinary return.
+    return_nemo_beta_trace : bool
+        Private write-only readout of the source-aligned limiter-cell operands
+        and the live face coefficients.  Its duplicated arithmetic is kept
+        behind an XLA optimization barrier; the ordinary limiter graph remains
+        the one that supplies the two production outputs.
+    return_nemo_stencil_trace : bool
+        Private write-only readout of the seven source-ordered ``zbup`` inputs,
+        their ``pbef``/``paft`` sources, wet mask, and resulting ``zup``.  False
+        preserves the ordinary return.
 
     Returns
     -------
@@ -946,14 +975,21 @@ def fct_tracer_advection(
         raise ValueError(
             f"Unknown FCT low_order_predictor {low_order_predictor!r}; "
             "expected 'one_step' or 'nemo_rk3_two_step'")
-    if return_nemo_trace:
+    trace_returns = (
+        return_nemo_trace, return_nemo_beta_trace, return_nemo_stencil_trace,
+        return_nemo_up1_trace)
+    if any(trace_returns):
         if return_nemo_split or return_limiter_activity:
             raise ValueError(
-                "return_nemo_trace cannot be combined with another "
+                "NEMO trace returns cannot be combined with another "
                 "diagnostic return")
+        if sum(trace_returns) > 1:
+            raise ValueError("NEMO trace returns are mutually exclusive")
         if low_order_predictor != "nemo_rk3_two_step":
             raise ValueError(
-                "return_nemo_trace requires the NEMO RK3 two-step predictor")
+                "NEMO trace returns require the NEMO RK3 two-step predictor")
+    if return_nemo_stencil_trace and active_mask is None:
+        raise ValueError("NEMO stencil trace requires the compiled wet mask")
 
     eps = 1e-30
 
@@ -1027,6 +1063,11 @@ def fct_tracer_advection(
     pad_axes_v = ((0, 0),) * (F_vert_low_int.ndim - 1)
     F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
     vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
+    if return_nemo_up1_trace:
+        up1_first_u = flux_u_low
+        up1_first_v = flux_v_low
+        up1_first_w = F_vert_low
+        up1_first_div = -(div_h_low + vert_div_low)
     if return_nemo_trace:
         trace_first_w = F_vert_low * jnp.asarray(grid.area_T)[..., None]
         trace_first_div = -(div_h_low + vert_div_low)
@@ -1068,6 +1109,14 @@ def fct_tracer_advection(
             F_vert_low_int + w_int * qmid_face)
         F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
         vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
+
+    if return_nemo_up1_trace:
+        up1_explicit_ztra = -(div_h_low + vert_div_low)
+        up1_implicit_ztra = -implicit_mass_div
+        up1_total_ztra = up1_explicit_ztra + up1_implicit_ztra
+        up1_base_content = h_base * base
+        up1_dt_ztra = dt * up1_total_ztra
+        up1_numerator = up1_base_content + up1_dt_ztra
 
     if return_nemo_trace:
         trace_average_u = flux_u_low * jnp.asarray(grid.dy_u)[..., None]
@@ -1134,6 +1183,13 @@ def fct_tracer_advection(
         jnp.maximum(h_new, eps),
         h_new > t_grad_h,
     )
+    if return_nemo_up1_trace:
+        up1_trace = jax.lax.optimization_barrier((
+            up1_first_u, up1_first_v, up1_first_w, up1_first_div,
+            q_mid, flux_u_low, flux_v_low, F_vert_low,
+            up1_explicit_ztra, up1_implicit_ztra, up1_total_ztra,
+            up1_base_content, up1_dt_ztra, up1_numerator, h_new, q_td,
+        ))
 
     # Local min / max over the (cell + 6 neighbours) stencil.  For non-
     # cyclic latitude the boundary cell is its own south/north neighbour
@@ -1154,7 +1210,8 @@ def fct_tracer_advection(
     # legoESM limiter deviates from a faithful nonosc transcription.
     bnd_up = jnp.maximum(base, q_td)
     bnd_do = jnp.minimum(base, q_td)
-    if active_mask is not None:
+    wet = None if active_mask is None else active_mask > 0.5
+    if wet is not None:
         # #1226 item 8: faithful dry-cell mask (traadv_fct.F90:911-915
         # ``MERGE(..., -zbig/+zbig, tmask==1)``) BEFORE the neighbourhood
         # max/min — a dry cell's ``q_td`` is an unconstrained ``h_k→0``
@@ -1162,7 +1219,6 @@ def fct_tracer_advection(
         # tracer update masks the cell out anyway) and must not widen a
         # WET neighbour's box.  ``zbig`` finite-sentineled to the dtype's
         # max (not ``inf``) so float32 callers stay finite under AD.
-        wet = active_mask > 0.5
         zbig = jnp.asarray(0.5, dtype=bnd_up.dtype) * jnp.finfo(bnd_up.dtype).max
         bnd_up = jnp.where(wet, bnd_up, -zbig)
         bnd_do = jnp.where(wet, bnd_do, zbig)
@@ -1176,6 +1232,14 @@ def fct_tracer_advection(
         jnp.maximum(jnp.maximum(bnd_up, tr_west), jnp.maximum(tr_east, tr_south)),
         jnp.maximum(jnp.maximum(tr_north, tr_above), tr_below),
     )
+    if return_nemo_stencil_trace:
+        # Materialise the observer after an optimization barrier.  Returning
+        # the raw intermediates lets XLA fuse their consumers back into the
+        # ordinary divergence graph and changes the bits being observed.
+        stencil_trace = jax.lax.optimization_barrier((
+            bnd_up, tr_west, tr_east, tr_south, tr_north, tr_above, tr_below,
+            base, q_td, wet, q_max,
+        ))
     tr_west_do = jnp.roll(bnd_do, 1, axis=1)
     tr_east_do = jnp.roll(bnd_do, -1, axis=1)
     tr_south_do = jnp.concatenate([bnd_do[:1, :, :], bnd_do[:-1, :, :]], axis=0)
@@ -1193,6 +1257,19 @@ def fct_tracer_advection(
         ad_flux_u, ad_flux_v, ad_vert_int,
         q_td, q_min, q_max, h_new, dt, grid, eps,
     )
+    if return_nemo_beta_trace:
+        # Keep the observer out of the production limiter graph.  Without this
+        # explicit barrier XLA can fuse the extra source-aligned readouts back
+        # into the live alpha computation and move the bits being observed.
+        diagnostic_inputs = jax.lax.optimization_barrier((
+            ad_flux_u, ad_flux_v, ad_vert_int, q_td, q_min, q_max, h_new,
+        ))
+        _, _, _, beta_trace = _zalesak_signsplit_face_alphas(
+            *diagnostic_inputs[:3],
+            diagnostic_inputs[3], diagnostic_inputs[4], diagnostic_inputs[5],
+            diagnostic_inputs[6], dt, grid, eps,
+            return_nemo_beta_trace=True,
+        )
     limited_u, limited_v = alpha_u_full * ad_flux_u, alpha_v * ad_flux_v
     div_h_fct = divergence_cgrid(flux_u_low + limited_u, flux_v_low + limited_v, grid)
     div_h_anti = divergence_cgrid(limited_u, limited_v, grid)
@@ -1223,6 +1300,17 @@ def fct_tracer_advection(
             trace_final_div, h_k, trace_rhs_final,
         )
         return div_h_fct, vert_div_fct, trace
+    if return_nemo_beta_trace:
+        return div_h_fct, vert_div_fct, beta_trace + (
+            alpha_u_full,
+            alpha_v,
+            jnp.pad(alpha_vert_face, (*pad_axes_v, (1, 1)),
+                    constant_values=1.0),
+        )
+    if return_nemo_stencil_trace:
+        return div_h_fct, vert_div_fct, stencil_trace
+    if return_nemo_up1_trace:
+        return div_h_fct, vert_div_fct, up1_trace
     if return_limiter_activity:
         # WRITE-only branch census for the developed-state fidelity walk.
         # A cell is active when a non-zero antidiffusive flux on any incident
@@ -1528,7 +1616,9 @@ def _zalesak_signsplit_face_alphas(
     dt: float,
     grid: "LatLonGrid",
     eps: float = 1e-30,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    *,
+    return_nemo_beta_trace: bool = False,
+) -> tuple:
     """Zalesak (1979) sign-split FCT face-flux limiter.
 
     Replaces the conservation-preserving ``alpha_face = min(alpha_left,
@@ -1636,9 +1726,15 @@ def _zalesak_signsplit_face_alphas(
     if _is_2d_dy:
         P_in_h = (in_u_w + in_v_w) / area
         P_out_h = (out_u_w + out_v_w) / area
+        if return_nemo_beta_trace:
+            zpos_h = in_u_w + in_v_w
+            zneg_h = out_u_w + out_v_w
     else:
         P_in_h = (in_u * face_dy + in_v_w) / area
         P_out_h = (out_u * face_dy + out_v_w) / area
+        if return_nemo_beta_trace:
+            zpos_h = in_u * face_dy + in_v_w
+            zneg_h = out_u * face_dy + out_v_w
 
     # Vertical: pad with zeros at the top / bottom (rigid lid + floor) so
     # cell-c indexing is uniform.  ad_vert_int has shape (n_lat, n_lon,
@@ -1696,6 +1792,32 @@ def _zalesak_signsplit_face_alphas(
     R_in = jnp.where(h_ok, R_in, 1.0)
     R_out = jnp.where(h_ok, R_out, 1.0)
 
+    if return_nemo_beta_trace:
+        # Private source-aligned readout of compiled traadv_fct.f90:849-878.
+        # ``zpos``/``zneg`` retain integrated-face units; ``zbt`` restores the
+        # area*thickness/time factor before the NEMO-literal division order.
+        # The live production ratios remain ``R_in``/``R_out`` below, so this
+        # diagnostic cannot alter the limiter arithmetic it observes.
+        zpos = zpos_h + P_in_w * area
+        zneg = zneg_h + P_out_w * area
+        zbt = area * h_k / dt
+        zbig_beta = (
+            jnp.asarray(0.5, dtype=q_td.dtype) * jnp.finfo(q_td.dtype).max)
+        zbetup_literal = jnp.where(
+            (q_max != -zbig_beta) & (zpos != 0.0),
+            (q_max - q_td) / zpos * zbt,
+            zbig_beta,
+        )
+        zbetdo_literal = jnp.where(
+            (q_min != zbig_beta) & (zneg != 0.0),
+            (q_td - q_min) / zneg * zbt,
+            zbig_beta,
+        )
+        beta_trace = (
+            q_max, q_min, zpos, zneg, zbt,
+            zbetup_literal, zbetdo_literal, R_in, R_out,
+        )
+
     # ---- Per-face alpha selection ----
     # u-face j: cell L = (j-1)%n_lon (west), cell R = j (east).
     # F > 0  → flow east, into R, out of L  → α = min(R+_R, R-_L).
@@ -1748,6 +1870,8 @@ def _zalesak_signsplit_face_alphas(
         ad_vert_int > 0.0, alpha_w_pos,
         jnp.where(ad_vert_int < 0.0, alpha_w_neg, 1.0),
     )
+    if return_nemo_beta_trace:
+        return alpha_u_full, alpha_v, alpha_vert_face, beta_trace
     return alpha_u_full, alpha_v, alpha_vert_face
 
 

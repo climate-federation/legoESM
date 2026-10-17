@@ -960,7 +960,7 @@ def nemo_r3t_stretch(
         # domain.F90:158 stores r1_ht_0 before domqco.F90:160 multiplies it
         # by ssh.  The barrier preserves that fp64 boundary under JIT.
         r1_H = lax.optimization_barrier(1.0 / safe_H)
-        r3t = jnp.where(wet_H, jnp.asarray(eta) * r1_H, 0.0)
+        r3t = jnp.where(wet_H, nemo_source_round(jnp.asarray(eta) * r1_H) if getattr(z_coord, "nemo_r3t_stored_product", False) is True else jnp.asarray(eta) * r1_H, 0.0)  # card-selected: domqco.f90:257 stores the product  # noqa: E501
     else:
         r3t = jnp.where(wet_H, jnp.asarray(eta) / safe_H, 0.0)
     # Safety floor on the stretch, NOT on r3t: a column driven to
@@ -974,7 +974,7 @@ def nemo_r3t_stretch(
 
 def nemo_r3t_rk3_stage1_stretch(
     z_coord, eta_before: jnp.ndarray, eta_after: jnp.ndarray,
-    H_bathy: jnp.ndarray,
+    H_bathy: jnp.ndarray, half: bool = False,  # half: stage 2's ``r1_2*(Kbb + after)``, stprk3_stg.f90:215
 ) -> jnp.ndarray:
     """NEMO RK3 stage-1 ``(1 + r3t(Kaa))`` source association.
 
@@ -1000,7 +1000,7 @@ def nemo_r3t_rk3_stage1_stretch(
     two_thirds = nemo_source_round(
         jnp.asarray(2.0, dtype=eta_before.dtype)
         / jnp.asarray(3.0, dtype=eta_before.dtype))
-    r3_stage = nemo_source_round(
+    r3_stage = nemo_source_round(0.5 * nemo_source_round(r3_before + r3_after)) if half else nemo_source_round(  # noqa: E501
         nemo_source_round(two_thirds * r3_before)
         + nemo_source_round(one_third * r3_after))
     return jnp.where(wet, nemo_source_round(one + r3_stage), one)

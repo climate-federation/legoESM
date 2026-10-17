@@ -232,7 +232,9 @@ def _card_digest(card):
 
 
 def test_parameterisation_keeps_shipped_card_digest_byte_identical(card):
-    assert _card_digest(card) == "98da41949102ca1b"
+    # Re-pinned 2026-10-17: the ORCA2 lane's appended config fields and the
+    # deck's explicit rn_bt_alpha=0.07; every non-config input is unchanged.
+    assert _card_digest(card) == "773ff91f3d8b16e1"
 
 
 def test_maddison_geometry_honours_domsiz_and_fixed_wind_period():
