@@ -15,7 +15,8 @@ def test_g5_import_defaults_are_fail_closed():
     assert all(LatLonCGridOceanConfig._field_defaults[name] is False
                for name in FIELDS)
     assert OceanSurfaceForcing._field_defaults["salt_flux_sfx"] is None
-    assert "implicit_ice_ocean_top_drag" not in LatLonCGridOceanConfig._fields
+    # Round 305 imported the top drag default-off; no card selects it yet.
+    assert LatLonCGridOceanConfig._field_defaults["implicit_ice_ocean_top_drag"] is False
 
 
 def test_orca2_selects_g5_set_and_unforced_rung_scopes_salt_off():
