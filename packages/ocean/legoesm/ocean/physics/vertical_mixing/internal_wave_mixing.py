@@ -118,6 +118,8 @@ _TSDIFF_REB_PREFAC = 5.0 / 6.0   # zdfiwm.F90: zReb * 5 * r1_6
 _EPS_DENOM = 1.0e-20
 # zdfiwm.f90 module variable r1_6 = 1._wp / 6._wp (constant efficiency 1/6)
 _NEMO_IWM_R1_6 = 1.0 / 6.0
+# zdfiwm.f90:304 forms zReb * 5._wp * r1_6 left to right (not zReb * 5/6)
+_NEMO_IWM_TSDIFF_FIVE = 5.0
 
 __param_spec__ = {
     "IWMConfig": {
@@ -470,7 +472,7 @@ def nemo_zdf_iwm(avt, avs, avm, forcing: IWMForcing, rn2, stretch, ht_0,
                  * wm)                                      # :294
     if cfg.tsdiff:                                          # :301-306
         zlog = precision_log10(jnp.maximum(
-            _EPS_DENOM, r(r(zreb * 5.0) * _NEMO_IWM_R1_6)))
+            _EPS_DENOM, r(r(zreb * _NEMO_IWM_TSDIFF_FIVE) * _NEMO_IWM_R1_6)))
         ztanh = precision_tanh(r(_TSDIFF_TANH_SLOPE
                                  * r(zlog - _TSDIFF_LOG10_OFFSET)))
         zav_ratio = r(r(_TSDIFF_BASE + r(_TSDIFF_AMP * ztanh)) * wm)
