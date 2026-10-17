@@ -88,7 +88,7 @@ during kt 1, so the earliest over-the-bar departure is a kt-1 stage.
 
 | run | region | first over the bar | what |
 |---|---|---|---|
-| card | fold + interior | kt 1 stage 1, every field | sea level 195% fold / 5.5% interior; every departing cell of stages 1-2 lies in rows 121-147 (fold error spread by the barotropic substeps) |
+| card | fold + interior | kt 1 stage 1, every field | sea level 195% fold / 5.5% interior; every departing cell of stages 1-2 lies in rows 118-147, with the large values from row 121 (fold error spread by the barotropic substeps; row range corrected by the independent review) |
 | unit | fold | kt 1 stage 1, V and T | 1,319 V faces = the stage-1 V mask (rounds 258/283; resolved-mask route held, round 286) |
 | unit | interior | kt 1 stage 2 at rounding (U 4.7e-16 m/s), then stage 3 | stage 3: U 6.64e-2 m/s, V 2.61e-2 m/s, sea level exact, T 1.4e-12 K |
 
