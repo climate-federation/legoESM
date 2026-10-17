@@ -1846,6 +1846,20 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         # MAX(zav, avmb) / MAX(zav, avtb_2d*avtb) (zdftke.f90:709-710).
         kappaM_min=_ORCA2_IWM_AVMB,
         kappaH_min=_ORCA2_IWM_AVTB,
+        # Decision 122 / round 307: vertical-mixing rung V1's certified
+        # statements (gridladder-vmix rounds 6-11), each measured on this
+        # card under both labels.  The compiled routines are byte-identical
+        # to the V1 build: eosbn2.f90 rab_3d_t/bn2_t; zdf_sh2 at the
+        # step-entry level (stprk3.f90:179 zdf_phy(kstp,Nbb,Nbb,Nrhs)),
+        # pivot-row V face and stored r3u/r3v (zdfsh2.f90:98-108,
+        # domqco.f90:266-269); zdftke.f90:420,423-426 and :466,472.
+        nemo_bn2_source_rounded=True,
+        nemo_sh2_step_entry_ssh=True,
+        nemo_tke_solve_source_rounded=True,
+        nemo_sh2_fold_top_v=True,
+        nemo_tke_matrix_rhs_source_rounded=True,
+        nemo_sh2_r3_source_rounded=True,
+        nemo_sh2_r3_stored_reciprocal=True,
     )
     # namelist_cfg's namzdf_iwm: ln_mevar=.false. (constant mixing efficiency)
     # and ln_tsdiff=.true. (salt and heat get different wave diffusivities).

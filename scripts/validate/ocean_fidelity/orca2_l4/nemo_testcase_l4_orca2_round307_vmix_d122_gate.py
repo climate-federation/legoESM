@@ -5,7 +5,8 @@ Rung 10 is the only ORCA2 card that runs TKE.  Arms (same tree):
   control  every V1 selector off (the card before round 307's selection).
   N2 SH2E SOLVE FOLD RHS R3  one statement (R3 = the r3u/r3v pair).
   ALL      all six.
-Non-TKE cards (rung 0, OMT-1..4) have only ``shipped``.
+  D122     the card as shipped after the round-307 selection (rung 10: ALL;
+           rung 0, OMT-1..4: none).  Every card also has ``control``.
 """
 
 from __future__ import annotations
@@ -40,18 +41,23 @@ STATEMENTS = {
 }
 STATEMENTS["ALL"] = tuple(f for flags in STATEMENTS.values() for f in flags)
 V1_FLAGS = STATEMENTS["ALL"]
-ARMS = {"rung10": ("control", *STATEMENTS)}
-ARMS.update({rung: ("shipped",) for rung in
+ARMS = {"rung10": ("control", "D122", *STATEMENTS)}
+ARMS.update({rung: ("control", "D122", "shipped") for rung in
              ("rung0", "omt1", "omt2", "omt3", "omt4")})
+D122_SELECTED = {"rung10": set(V1_FLAGS)}
 
 
 def selected_card(card, *, arm: str, rung: str, plant: str = "none"):
     require(arm in ARMS[rung], f"{rung}: arm {arm} is not defined")
     cfg = card.recipe.model_config
     vm = cfg.physics.vertical_mixing
-    if arm == "shipped":
+    if arm in ("shipped", "D122"):
+        on = {f for f in V1_FLAGS if getattr(vm.tke, f)}
+        require(arm == "shipped" or on == D122_SELECTED.get(rung, set()),
+                f"{rung}: shipped card carries {sorted(on)}, not round 307's")
         return card
-    require(vm.scheme == "tke", f"{rung}: arm {arm} needs a TKE card")
+    require(vm.scheme == "tke" or arm == "control",
+            f"{rung}: arm {arm} needs a TKE card")
     want = set(STATEMENTS.get(arm, ()))
     if plant == "retained-selector" and arm == "control":
         want = {V1_FLAGS[0]}
@@ -110,8 +116,10 @@ def main() -> int:
                 r285.selected_card = original
             result.update(format="nemo-testcase-l4-orca2-round307-vmix-v1",
                           arm=args.measure,
-                          selected_statements=list(
-                              STATEMENTS.get(args.measure, ())))
+                          selected_statements=sorted(
+                              D122_SELECTED.get(args.rung, set())
+                              if args.measure == "D122"
+                              else STATEMENTS.get(args.measure, ())))
         elif args.classify:
             result = r276.classify(*args.classify, plant=args.plant)
         else:

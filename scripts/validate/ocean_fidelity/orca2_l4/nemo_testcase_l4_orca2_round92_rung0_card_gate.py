@@ -55,6 +55,17 @@ def build_rung0_card(deck_root: Path):
         iwm=vertical.iwm._replace(enabled=False, require_forcing_maps=False),
         ddm=vertical.ddm._replace(enabled=False),
         vmix_background_mode="additive",
+        # Decision 130: the shipped card's V1 TKE statements stay off on a
+        # card that does not run TKE (stated, not inherited).
+        tke=vertical.tke._replace(
+            nemo_bn2_source_rounded=False,
+            nemo_sh2_step_entry_ssh=False,
+            nemo_tke_solve_source_rounded=False,
+            nemo_sh2_fold_top_v=False,
+            nemo_tke_matrix_rhs_source_rounded=False,
+            nemo_sh2_r3_source_rounded=False,
+            nemo_sh2_r3_stored_reciprocal=False,
+        ),
     )
     physics = model.physics._replace(
         vertical_mixing=vertical,
