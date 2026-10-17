@@ -83,7 +83,7 @@ The product rounding was added because, in the unit toy, an FMA also forms in th
 switch takes the toy from 31 unequal cells to 0. In the full V1 step this has not been measured separately.
 
 - Unit test: the builder under `jit` with traced sea level equals a numpy NEMO-order replay of
-  `domqco.f90:266-267` + `zdfsh2.f90:104`, bit for bit. Without the flag, 77 of 2,460 face values differ (test
+  `domqco.f90:266-269` + `zdfsh2.f90:104-108`, bit for bit. Without the flag, 77 of 2,460 face values differ (test
   pinned). Plants: removing the `num*r1_hu_0` rounding, or the product rounding, each gives `1 failed, 3 passed`.
 - After the fix, one step from NEMO's kt-4 state: **every field and level 0 unequal at kt 5**, in all three
   arms (plain, self, NEMO's `avt`).
@@ -113,7 +113,7 @@ switch takes the toy from 31 unequal cells to 0. In the full V1 step this has no
 | `e3w_1d*(1+r3u)` in the shear | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfsh2.f90:98-108` | `zdf_sh2` (:56) |
 | `CALL zdf_sh2( Kbb, Kmm, avm_k, sh2 )` | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:318` | `zdf_phy` (:296) |
 | `CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )` | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:179` | `stp_RK3` (:62) |
-| `zri`, `p_pdlr`; `p_avt = MAX(p_pdlr*p_avt, ...)` | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:397-405`, `:717` | `tke_tke` (:199), `tke_avn` (:531) |
+| `zri`, `p_pdlr`; `p_avt = MAX(p_pdlr*p_avt, ...)` | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:397-401`, `:405`, `:717` | `tke_tke` (:199), `tke_avn` (:531) |
 
 The full ORCA2 card runs this statement too. It stays off there (D130) until ORCA2 measures and selects it
 (D96/D122). Pointer only: the full ORCA2 card was not measured this round.

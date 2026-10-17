@@ -8099,6 +8099,9 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:177': 'CALL dom_qco_r3c( ssh(:,:,Kbb), r3t(:,:,Kbb), r3u(:,:,Kbb), r3v(:,:,Kbb), r3f(:,:) )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfsh2.f90:98-108': ['DO jj = ntsj-( 1), ntej+(  0 ) ; DO ji = ntsi-( 1), ntei+(  0)     !* 2 x shear production at uw- and vw-points (energy conserving form)', '&         * wvmask(ji,jj,jk)', 11],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domhgr.f90:170': 'r1_e1e2u(:,:) = 1._wp / e1e2u(:,:)     ! compute their invert in any cases',
+    # --- GRIDLADDER-VMIX V1 round 11 receipt ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:318': 'CALL zdf_sh2( Kbb, Kmm, avm_k,   &     ! <<== in',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:179': ('CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 1),
 }
 
 
