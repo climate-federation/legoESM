@@ -13,8 +13,8 @@ level; this script reuses its readers, regions and row scorer and adds what
                resumable (--state-in/--state-out): one step costs about a
                minute, so 100 steps are run in chunks.
   given_entry  NEMO's restart of step kt - 1 as the entry of step kt (all
-               prognostics on all levels and the six barotropic histories),
-               then one step (level 1 and 2-D rows) and a second step
+               prognostics on all levels, the six barotropic histories and,
+               on G6, the carried after-ssh slot 'ssha'), then one step (level 1 and 2-D rows) and a second step
                (all-level rows against NEMO's next restart: TWO-STEP rows).
   substeps     step 1: the split-explicit solver's loop, every recorded
                operand in compiled order against the model's write-only
@@ -546,7 +546,13 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     )
     model = LatLonCGridOceanModel(
         card.recipe.grid, z, cfg, _nemo_ws_test_hooks=consumer_hooks)
-    require(s0.eta_rk3_after is None, "the card carries an after-ssh slot")
+    # from rest NEMO's after-ssh slot is the initial height (restart.f90:406):
+    # the model's unseeded slot
+    require(s0.eta_rk3_after is None, "the card's initial after-ssh slot is seeded")
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import nemo_rk3_after_ssh_is_carried
+    carries_after_ssh = nemo_rk3_after_ssh_is_carried(cfg)
+    require(carries_after_ssh is (case == "ORCA2G6-vec"),
+            "only the G6 card carries NEMO's after-ssh slot (Decision 132)")
     if case == "ORCA2G4-sbc":
         sys.path.insert(0, str(HERE / "nemo_testcase_g4_orca2sbc"))
         import g4_forcing_steps as g4  # noqa: E402
@@ -650,7 +656,10 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 eta=s0.eta.replace(data=jnp.asarray(var("sshn"))),
                 uu_b=s0.uu_b.replace(data=jnp.asarray(g1.pad_u(var("uu_n")))),
                 vv_b=s0.vv_b.replace(data=jnp.asarray(g1.pad_v(var("vv_n")))),
-                bt_hist=g1.nemo_histories(path.parent, kt))
+                bt_hist=g1.nemo_histories(path.parent, kt),
+                # rst_read_ssh reads 'ssha' into ssh(Kaa) (restart.f90:367)
+                eta_rk3_after=(s0.eta.replace(data=jnp.asarray(var("ssha")))
+                               if carries_after_ssh else None))
 
     def step(state, kt):
         t0 = time.time()

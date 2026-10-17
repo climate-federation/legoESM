@@ -96,6 +96,7 @@ def test_g6_card_is_g5_plus_g1b_vector_selectors(tmp_path):
         rk3_vector_rhs_nemo_order=True,
         nemo_hpg_sco_fold_geometry=True,
         rk3_vector_raw_vmask=True,
+        nemo_first_wzv_after_ssh="rk3_extrapolated_carried",   # Decision 132
         barotropic=c5.barotropic._replace(
             barotropic_flux_update_nemo_literal=False,
             barotropic_entry_depth_nemo_literal=False,

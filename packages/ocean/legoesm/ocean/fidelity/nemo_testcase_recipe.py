@@ -3842,6 +3842,12 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         # selected only on the record that measured it.
         nemo_hpg_sco_fold_geometry=case == "ORCA2G6-vec",
         rk3_vector_raw_vmask=case == "ORCA2G6-vec")
+    if case == "ORCA2G6-vec":
+        # Decision 132: the first vector-form wzv (stp2d.f90:152/:156) reads
+        # NEMO's carried slot ssh(Naa) = 2*ssh(Nbb) - ssh(Naa) (stprk3.f90:241,
+        # G5 r31 build).  From rest it holds the initial height (restart.f90:406).
+        model_config = with_first_wzv_after_ssh(
+            model_config, "rk3_extrapolated_carried")
     if case in _ORCA2G_ICE:
         # ORCA2 resolves ln_drgice_imp=T.  SI3 supplies rCdU_ice through the
         # post-SI3 record; all other rungs retain the appended default False.
