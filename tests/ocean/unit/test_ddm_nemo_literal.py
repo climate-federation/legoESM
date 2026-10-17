@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -75,9 +76,14 @@ def _cases():
     return avt, avm, zdt, zds, rn2, wmask
 
 
-def test_literal_ddm_matches_scalar_fortran_bit_for_bit():
+@pytest.mark.parametrize("compiled", [False, True], ids=["eager", "jit"])
+def test_literal_ddm_matches_scalar_fortran_bit_for_bit(compiled):
     avt, avm, zdt, zds, rn2, wmask = _cases()
-    got = nemo_zdf_ddm(*(jnp.asarray(x) for x in (avt, avm, zdt, zds, rn2, wmask)), CFG)
+    # jit: rn_hsbfr is a compile-time constant there, which XLA would fold
+    # into a reciprocal multiply (V3 kt 1: 9,735 fingering cells off by an ulp)
+    fn = jax.jit(lambda *a: nemo_zdf_ddm(*a, CFG)) if compiled else (
+        lambda *a: nemo_zdf_ddm(*a, CFG))
+    got = fn(*(jnp.asarray(x) for x in (avt, avm, zdt, zds, rn2, wmask)))
     want = np.array([_fortran(*args) for args in zip(avt, avm, zdt, zds, rn2, wmask)]).T
     for name, g, w in zip(("avt", "avs", "avm"), got, want):
         assert np.array_equal(np.asarray(g), w), (name, int(np.sum(np.asarray(g) != w)))

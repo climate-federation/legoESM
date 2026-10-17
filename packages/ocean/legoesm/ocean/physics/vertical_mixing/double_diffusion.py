@@ -341,7 +341,9 @@ def nemo_zdf_ddm(avt, avm, zdt, zds, rn2, wmask, cfg: DoubleDiffusionConfig):
     zmskd2 = jnp.where(zrau >= 0.5, zero, one)                          # :148-150
     zmskd3 = jnp.where((zrau <= 0.5) | (zrau >= 1.0), zero, one)        # :152-154
     zinr = r(one / zrau)                                                # :159
-    zrr = r(zrau / cfg.rn_hsbfr)                                        # :161
+    # rn_hsbfr is a runtime namelist value in NEMO: keep it opaque so XLA
+    # cannot fold 1/1.6 into a reciprocal multiply (0.625; off by an ulp).
+    zrr = r(zrau / r(jnp.asarray(cfg.rn_hsbfr, dtype)))                 # :161
     zrr = r(zrr * zrr)                                                  # :162
     zavfs = r(r(r(cfg.rn_avts / r(1.0 + r(r(zrr * zrr) * zrr)))
                 * zmsks) * zmskf)                                       # :163
