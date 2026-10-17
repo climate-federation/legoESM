@@ -326,6 +326,9 @@ def stp2d_terms(out, root, kt_from, kt_to, *, card, cfg, z, s0, nk, cls, reg,
                 f"card w {w.shape} vs NEMO ww {terms['ww'].shape}")
         # ww(:,:,1) is the surface face; level k of both is the top of cell k
         rows.append(bit_rows("first_wzv.ww", terms["ww"], w[..., :nk], wet["t"]))
+        # level 1 carries NEMO's runoff divergence (registered); 2..nk alone
+        rows.append(bit_rows("first_wzv.ww_lev2+", terms["ww"][..., 1:],
+                             w[..., 1:nk], wet["t"][..., 1:]))
         for f in "uv":
             for b, card_key in (("after_hpg", "after_hpg"), ("after_vor", "after_vor"),
                                 ("after_keg", "after_keg"), ("after_zad", "after_adv")):

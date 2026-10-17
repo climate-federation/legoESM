@@ -264,3 +264,89 @@ def test_slow_forcing_reader_takes_the_records_time_levels():
     assert (rec["header"]["kt"], rec["header"]["Kbb"], rec["header"]["Krhs"]) == (2, 3, 1)
     with pytest.raises(Exception, match="bad header"):
         read_slow_forcing(path, dims=(184, 152, 31))      # default (1, 1, 3)
+
+
+def test_wzv_stretch_product_is_rounded_under_traced_jit():
+    """sshwzv.f90:297-298 rounds r1_Dt*e3t_3d*(r3t(Kaa)-r3t(Kbb)) before the
+    add; with every input traced XLA contracts it unless it is materialised."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import nemo_qco_wzv_recurrence
+    rng = np.random.default_rng(3)
+    shape = (148, 180, 30)
+    div = rng.normal(size=shape) * 1e-4
+    e3 = rng.uniform(10.0, 500.0, size=shape)
+    rb = rng.normal(size=shape[:2]) * 1e-3
+    ra = rb + rng.normal(size=shape[:2]) * 1e-5
+    tm = (rng.uniform(size=shape) > 0.1).astype(np.float64)
+    dt = 10800.0
+    ref = np.zeros(shape[:2] + (shape[2] + 1,))
+    for jk in range(shape[2] - 1, -1, -1):
+        ref[..., jk] = ref[..., jk + 1] - (
+            div[..., jk] + (1.0 / dt) * e3[..., jk] * (ra - rb)) * tm[..., jk]
+
+    def unequal(stored):
+        f = jax.jit(lambda *a: nemo_qco_wzv_recurrence(*a, stored_r3_ratios=stored))
+        got = np.asarray(f(*(jnp.asarray(x) for x in (div, e3, rb, ra, tm, dt))))
+        return int(np.count_nonzero(got != ref))
+
+    assert unequal(True) == 0
+    assert unequal(False) > 0                # round 7 resume measured 1,425
+
+
+R36 = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
+           "round36/oracle_g6_r36")
+needs_r36 = pytest.mark.skipif(
+    not (R36 / "ref_100step/ORCA2G1_00000002_restart.nc").is_file(),
+    reason="the operator's G6 r36 record is not on this machine")
+
+
+@pytest.fixture(scope="module")
+def kt3_rows():
+    """kt 3 from NEMO's restart 2 through the ordinary jitted step (traced
+    state): the stp_2D walk on the r42 record and the step-end rows on r36."""
+    sys.path.insert(0, str(CASES))
+    spec = importlib.util.spec_from_file_location(
+        "g2_ladder_g6", CASES / "nemo_testcase_g2_orca2bathy_ladder.py")
+    ladder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ladder)
+    walk = ladder.run(R42, arm="stp2d_terms", kt_from=3, kt_to=3,
+                      allow_dirty=True, case="ORCA2G6-vec")
+    given = ladder.run(R36 / "twin_a", arm="given_entry", kt_from=3, kt_to=3,
+                       entries=(3,), restart_roots=(R36 / "ref_100step",),
+                       allow_dirty=True, case="ORCA2G6-vec")
+    rows = {r["name"]: r["n_unequal"] for r in walk["per_kt"][0]["stp2d_rows"]}
+    rows.update({r["name"]: r["n_unequal"] for r in given["per_kt"][0]["rows"]})
+    return rows
+
+
+# Each bound is the count measured with every round-7 piece in place; the
+# comment gives the count with that ONE piece removed (round-7 resume).
+@needs_r42
+@needs_r36
+def test_kt3_step_entry_wzv_reads_stored_ratios(kt3_rows):
+    assert kt3_rows["first_wzv.ww_lev2+"] <= 22          # without: 90,820
+    assert kt3_rows["spg_ts_exit.uu_b"] == 0             # without: 1,337
+    assert kt3_rows["spg_ts_exit.vv_b"] == 0             # without: 1,334
+
+
+@needs_r42
+@needs_r36
+def test_kt3_momentum_wzv_reads_stored_ratios(kt3_rows):
+    # the stage's momentum wzv (stprk3_stg.f90:360) feeds only the step end
+    assert kt3_rows["given_entry.kt3.u"] <= 38           # without: 91
+    assert kt3_rows["given_entry.kt3.v"] <= 46           # without: 93
+
+
+@needs_r42
+@needs_r36
+def test_kt3_zad_rounds_e1e2t_ww(kt3_rows):
+    assert kt3_rows["after_zad.v"] <= 2                  # without: 1,349
+    assert kt3_rows["given_entry.kt3.ssh"] == 0          # without: 568
+
+
+@needs_r42
+@needs_r36
+def test_kt3_zad_written_association_on_u(kt3_rows):
+    assert kt3_rows["after_zad.u"] == 0                  # without: 2,399
+    assert kt3_rows["given_entry.kt3.uu_b"] == 0         # without: 216

@@ -1617,7 +1617,7 @@ def nemo_transport_wzv_divergence_level(
 
 
 def nemo_qco_wzv_recurrence(
-    flux_div, e3t0, r3_before, r3_after, tmask, dt,
+    flux_div, e3t0, r3_before, r3_after, tmask, dt, stored_r3_ratios=False,
 ):
     """NEMO QCO bottom-up W recurrence (``sshwzv.F90:330-336``)."""
     r3_delta = jax.lax.optimization_barrier(r3_after - r3_before)
@@ -1625,6 +1625,10 @@ def nemo_qco_wzv_recurrence(
         jnp.asarray(1.0, dtype=flux_div.dtype) / dt)
     stretch_rate = jax.lax.optimization_barrier(
         (r1_dt * e3t0) * r3_delta[..., None])
+    if stored_r3_ratios:
+        # r1_Dt*e3t_3d*(r3t(Kaa)-r3t(Kbb)) is rounded before the add
+        # (sshwzv.f90:297-298); the barrier alone lets XLA contract it.
+        stretch_rate = nemo_source_round(stretch_rate)
     carry = jnp.zeros_like(r3_before)
     levels = [None] * flux_div.shape[-1]
     for jk in range(flux_div.shape[-1] - 1, -1, -1):
@@ -1848,7 +1852,8 @@ def nemo_qco_wzv_operands(
         r3_after = nemo_source_round(r3_after)
         r3_before = nemo_source_round(r3_before)
     ww = nemo_qco_wzv_recurrence(
-        flux_div, e3t0, r3_before, r3_after, tmask, dt)
+        flux_div, e3t0, r3_before, r3_after, tmask, dt,
+        stored_r3_ratios=stored_r3_ratios)
     return ww, live_u, live_v
 
 
