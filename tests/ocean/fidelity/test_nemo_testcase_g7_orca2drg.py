@@ -238,6 +238,52 @@ def test_residual_increment_is_nemos_statement():
     np.testing.assert_array_equal(got, (r1h * (-4e-4 * cdu)) * (uk - ub))
 
 
+def test_residual_add_rounds_the_increment_under_jit():
+    # dynspg_ts.f90:1462 rounds the product before pu_RHSi adds it; under jit
+    # with traced inputs XLA may otherwise contract F + a*b into one FMA.
+    from legoesm.core.source_rounding import nemo_source_round
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import nemo_drg_residual_increment
+    rng = np.random.default_rng(13)
+    r1h, uk, ub = (rng.standard_normal((64, 64)) for _ in range(3))
+    cdu, f = -4e-4 * rng.random((64, 64)), 4e-4 * rng.standard_normal((64, 64))
+    got = jax.jit(lambda f, *a: nemo_source_round(f + nemo_drg_residual_increment(*a)))(
+        *map(jnp.asarray, (f, r1h, cdu, uk, ub)))
+    np.testing.assert_array_equal(np.asarray(got), f + (r1h * cdu) * (uk - ub))
+
+
+def test_bottom_residual_reads_the_stored_reciprocal_depth(vortex, monkeypatch):
+    # dynspg_ts.f90:1462: the bottom residual divides by the STORED
+    # r1_hu_0/(1+r3u(Kmm)), the same factor as G5's certified top residual
+    # (:1487), never the live column depth; sea level is off rest so they differ.
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.state import OceanSurfaceForcing
+    real, seen = pe.nemo_drg_residual_increment, []
+
+    def spy(r1_h, cdu, u_k, u_b):
+        jax.debug.callback(lambda r, c: seen.append((np.asarray(r), np.asarray(c))),
+                           r1_h, cdu)
+        return real(r1_h, cdu, u_k, u_b)
+
+    monkeypatch.setattr(pe, "nemo_drg_residual_increment", spy)
+    cfg = recipe._nemo_linear_bottom_drag(vortex.recipe.model_config)._replace(
+        implicit_ice_ocean_top_drag=True, barotropic_wind_nemo_stored_depth=True)
+    model = LatLonCGridOceanModel(vortex.recipe.grid, vortex.recipe.z_coord, cfg)
+    s0 = vortex.recipe.initial_state
+    eta = s0.eta.data + 0.5 * jnp.asarray(np.random.default_rng(17).random(
+        s0.eta.data.shape)) * (s0.H_bathy.data > 0)
+    zero = jnp.zeros_like(s0.eta.data)
+    model.step(s0._replace(eta=s0.eta.replace(data=eta)), dt=vortex.dt_s,
+               surface_forcing=OceanSurfaceForcing(
+                   tau_x=zero, tau_y=zero, ice_ocean_top_drag_rCdu=_field(vortex, 1.5e-3, 5)))
+    rate = -(recipe._SMT2_RN_CD0 * recipe._SMT2_RN_UC0)
+    bottom = {r.shape: r for r, c in seen if np.any(c == rate)}
+    top = {r.shape: r for r, c in seen if not np.any(c == rate)}
+    assert len(bottom) == len(top) == 2, (len(bottom), len(top))
+    for shape, r in bottom.items():
+        np.testing.assert_array_equal(r, top[shape])
+
+
 def test_bottom_residual_reads_carried_barotropic_velocity(vortex, monkeypatch):
     # dynspg_ts.f90:1447-1450: zu_i = puu(mbku,Kmm) - puu_b(Kmm), the CARRIED
     # barotropic velocity, never a depth mean rebuilt from the 3-D field.
