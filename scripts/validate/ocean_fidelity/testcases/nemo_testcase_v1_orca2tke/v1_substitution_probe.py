@@ -24,7 +24,9 @@ NEMO's restart of step k.
                   nemo) with the TKE statement trace exposed; the traced
                   step must be bit-identical to the plain one (else exit 3).
                   Writes the trace, the published closure and NEMO's step-k
-                  closure to <output>.npz for offline statement replays.
+                  closure, and the step-entry shear builder evaluated alone
+                  (eager; jit with the state traced) to <output>.npz for
+                  offline statement replays.
 
 The probe prints no verdict; it writes counts, maxima and unequal cells.
 """
@@ -256,6 +258,9 @@ def trace(a, card, entry, after, fw, sf, sha) -> int:
         arrays[f"entry_{f}"] = np.asarray(getattr(entry, f).data, np.float64)
         arrays[f"card_{f}"] = np.asarray(getattr(plain, f).data, np.float64)
         arrays[f"nemo_{f}"] = np.asarray(after[f], np.float64)
+    model = LatLonCGridOceanModel(grid, z, cfg)
+    arrays["builder_eager_p_sh2"] = np.asarray(model._tke_step_entry_p_sh2(entry), np.float64)
+    arrays["builder_jit_p_sh2"] = np.asarray(jax.jit(model._tke_step_entry_p_sh2)(entry), np.float64)
     np.savez_compressed(a.output.with_suffix(".npz"), passive=passive, **arrays)
     a.output.write_text(json.dumps({"legoesm_git_sha": sha, "kind": "trace", "kt": a.kt,
                                     "restart": str(after["path"]), "passive": passive,
