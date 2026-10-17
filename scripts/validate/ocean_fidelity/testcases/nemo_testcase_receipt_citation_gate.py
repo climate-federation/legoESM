@@ -250,6 +250,11 @@ FILES = {
         _ORCA2_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2_COMPILED / "stp2d.f90"),
+    # ORCA2 round 308 cites G6's wzv/zad statements in the shipped build.
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sshwzv.f90": (
+        _ORCA2_COMPILED / "sshwzv.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzad.f90": (
+        _ORCA2_COMPILED / "dynzad.f90"),
     # ORCA2 round 305 cites the G5/G7 drag statements in the shipped build.
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2_COMPILED / "dynspg_ts.f90"),
@@ -1884,6 +1889,48 @@ CITATION_MAP = {
     # --- ORCA2 round 303: fold-band stage-1 V transport mask + top-V exchange ---
     # ln_shuman=F and ln_zdfcst=T (l_zdfsh2=F) on this run: the exchange that
     # runs is the ELSE/ELSE lbc_lnk after the tracer update, not the Shuman one.
+    # ORCA2 round 308: G6's vector Krhs order and wzv/zad statements.
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:164': {
+        'anchors': 'CALL dyn_keg( kt, nn_dynkeg, Kbb, uu, vv, Krhs )',
+        'routine': 'stp_2D',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:152': {
+        'anchors': 'r3t(ji,jj,Kaa) =  ssh(ji,jj,Kaa) * r1_ht_0(ji,jj)',
+        'routine': 'stp_2D',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:156': {
+        'anchors': 'CALL wzv    ( kt, Kbb, Kbb, Kaa , uu(:,:,:,Kbb), vv(:,:,:,Kbb), ww, np_velocity )',
+        'routine': 'stp_2D',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sshwzv.f90:297-298': {
+        'anchors': ['pww(ji,jj,jk) = pww(ji,jj,jk+1) - (  ze3div(ji,jj,jk)',
+                    '&                               + r1_Dt * e3t_3d(ji,jj,jk) * ( r3t(ji,jj,Kaa) - r3t(ji,jj,Kbb) )',
+                    2],
+        'routine': 'wzv_RK3_t',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzad.f90:112-126': {
+        'anchors': ['zWf  = e1e2t(ji  ,jj  ) *   ww(ji  ,jj  ,jk+1)',
+                    '&                                            * ( zWdzV(ji,jj) + zzWdzV )',
+                    15],
+        'routine': 'dyn_zad',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:188-189': {
+        'anchors': ['rDt = r1_2 * rn_Dt            ! set time-step : rn_Dt/2',
+                    'r1_Dt = 1._wp / rDt', 2],
+        'routine': 'stp_RK3_stg',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:221': {
+        'anchors': 'r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )   ! at N+1/2 (Kaa)',
+        'routine': 'stp_RK3_stg',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:327': {
+        'anchors': 'CALL wzv( kstp, Kbb, Kmm, Kaa, uu(:,:,:,Kmm), vv(:,:,:,Kmm), ww, np_velocity )',
+        'routine': 'stp_RK3_stg',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:237': {
+        'anchors': 'ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)',
+        'routine': 'stp_RK3',
+    },
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:283': {
         'anchors': 'zFv(ji,jj,jk) = e1v(ji,jj)*(e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk)))',
         'routine': 'stp_RK3_stg',
