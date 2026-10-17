@@ -43,3 +43,10 @@ def test_arms_must_start_plain_and_match_the_kind():
                        ("closure", "plain,nemo_ts")):
         with pytest.raises(SystemExit, match="arms must start with plain"):
             probe.main(base + ["--kind", kind, "--arms", arms])
+
+
+def test_nemo_entry_source_is_closure_only():
+    base = ["--root", "x", "--restart-root", "x", "--kt", "5", "--state-in", "x",
+            "--output", "x", "--entry-source", "nemo", "--arms", "plain"]
+    with pytest.raises(SystemExit, match="closure-kind option"):
+        probe.main(base + ["--kind", "entry"])

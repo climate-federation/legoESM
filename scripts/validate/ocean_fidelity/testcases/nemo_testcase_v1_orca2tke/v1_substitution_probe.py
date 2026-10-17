@@ -15,6 +15,10 @@ NEMO's restart of step k.
   --kind closure  NEMO's restart avm_k / avt_k of step k replaces the
                   vertical-mixing closure's output where the solves read it:
                   arms plain | self | nemo_avm | nemo_avt | nemo_both.
+                  --entry-source nemo starts every closure arm from NEMO's
+                  restart of step k - 1 (all prognostics) instead of the
+                  card's chain state; the pickle then supplies only the
+                  state's structure.
 
 The probe prints no verdict; it writes counts, maxima and unequal cells.
 """
@@ -75,12 +79,15 @@ def main(argv=None) -> int:
     ap.add_argument("--kt", type=int, required=True)
     ap.add_argument("--state-in", type=Path, required=True)
     ap.add_argument("--arms", required=True)
+    ap.add_argument("--entry-source", choices=("card", "nemo"), default="card")
     ap.add_argument("--output", type=Path, required=True)
     a = ap.parse_args(argv)
     arms = a.arms.split(",")
     allowed = ENTRY_ARMS if a.kind == "entry" else CLOSURE_ARMS
     if arms[0] != "plain" or any(x not in allowed for x in arms):
         raise SystemExit(f"arms must start with plain and lie in {allowed}")
+    if a.entry_source == "nemo" and a.kind != "closure":
+        raise SystemExit("--entry-source nemo is a closure-kind option")
 
     import nemo_testcase_g2_orca2bathy_ladder as L
     L.g1._fp64()
@@ -123,7 +130,7 @@ def main(argv=None) -> int:
         return out
 
     after = restart(a.kt)
-    before = restart(a.kt - 1) if a.kind == "entry" else None
+    before = restart(a.kt - 1) if a.kind == "entry" or a.entry_source == "nemo" else None
 
     def substitute(state, fields, src):
         rep = {}
@@ -164,7 +171,11 @@ def main(argv=None) -> int:
             o[leaf] = unequal(after[leaf], np.asarray(getattr(st, leaf).data))
         return o
 
+    if a.entry_source == "nemo":
+        entry = substitute(entry, ARM_FIELDS["nemo_all"], before)
+
     report = {"legoesm_git_sha": git_sha(), "kind": a.kind, "kt": a.kt,
+              "entry_source": a.entry_source,
               "state_in": str(a.state_in), "restart": str(after["path"]),
               "arms": {}, "bit_identical_to_plain": {}}
     if a.kind == "entry":
