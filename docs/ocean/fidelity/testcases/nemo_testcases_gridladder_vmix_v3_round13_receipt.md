@@ -123,7 +123,7 @@ checkout (default is read-only preflight, `V3_PREFLIGHT_OK`).
 Record: `gridladder_vmix_rounds/round13/oracle_v3_r13` (operator: `V3_PREFLIGHT_OK` at `8fedda974`, nothing built;
 `V3_ACQUISITION_PASS steps=1..10 restarts=2..10`; `V3_DDM_FRAME unequal_avs_avt=412297 of 825840`). CPU, x64, `land.sh`
 PYTHONPATH. Commits: `568c70c42` ladder; `5e5c3c645` DDM division fix; `cae45eeee` EVD trigger fix; `dd00283a6` map
-entries and two comment line numbers; this update.
+entries and two comment line numbers; `68ba80bdf` receipt draft; `1517758c5` citation re-anchor; this update.
 
 Own error, stated first: my round-13 statement test ran only eagerly; the jitted statement was never compared, and it
 differed.
@@ -206,7 +206,31 @@ Tests (CPU, x64):
 way as V3 did before this fix. In V2's ten certified steps no interface flipped, so V2's numbers stand; the trigger is
 still not NEMO's statement there.
 
-GATES_PLACEHOLDER
+Resume gates (CPU, x64, `land.sh` PYTHONPATH):
+- `land.sh` list (without the face-mask file) plus the V1, V2, V3, statement, r3-guard and ladder test files, at
+  `dd00283a6`: **186 passed, 3 failed, 9 deselected** (the repo's default `not slow`). The 3 are citation-gate map
+  pins shifted by this resume's edits → re-anchored (10 pins, mechanical offsets from the files' own diffs; no anchor
+  text changed) → citation-gate file + private-import ratchet: **23 passed**.
+- Face-mask file, two processes: **1 passed** (471 s), **1 passed** (53 s).
+- Ratchets (dispatch, strict-validate, param specs, inline coeffs, constants, contracts, reachability, bounds,
+  private imports, existing DDM/EVD tests): **6,362 passed, 4 failed** — the same 4 that fail on base (section 4).
+- Per-receipt citation gate on this receipt (`--from-heading` this title): **PASS, failures 0**, 26 citations,
+  unmapped 0, map entries failing audit 0.
+- Flag-off jaxprs at the final model code (`dd00283a6`): full ORCA2 138,748 lines, DINO 123,236, V2 one step 178,423:
+  all **IDENTICAL** to base.
+
+| evidence (`round13/`) | sha256 prefix |
+|---|---|
+| `indep1_10.json` (as built) / `indep1_10_fix.json` (DDM fix) / `indep1_10_fix2.json` / `indep1_10_fix2.log` | cd2e8b0cb423077f / 98c6bcb726556d12 / 277c9f79628b6368 / cb1b289d93206dbb |
+| `given_all_fix2.json` / `given_all_fix2.log` / `score_v3_fix2.sh` | 8ef0f97c9408b7b4 / 5e69dd6bb4ff3b43 / 07e07497961c7317 |
+| `ddm_kt1.json` / `ddm_kt1_fix.json` / `ddm_walk.py` / `ddm_walk.json` / `ddm_walk_fix.json` | 1e97c9c11df1aa22 / ed8bac2e53c5587b / 30b131029de42c32 / f2e14c0197814364 / 2e8bc17e5d12b8f3 |
+| `kt3_evd.py` / `kt3_evd.json` / `kt3_n2.py` / `kt3_n2.log` | c6ea6a8f35d0f8e3 / de4230828073bd71 / 8f60384b335c9b3b / dce5d92410ca1fe6 |
+| `v3test_real.log` / `v3test_plantA.log` / `v3test_plantB.log` / `resume_unit.log` / `resume_unit_plant.log` | d33f68177af991e1 / 0c54245bc677594f / 4dfd289c7084c3fb / 68990868b1682922 / 30c5b06ec9b61d64 |
+| `gate_resume.log` / `gate_resume_cite.log` / `ratchets_resume.log` / `gate_resume_fm1.log` / `gate_resume_fm2.log` | 8b2ed1b3a81f868a / 536991d1c6ea4996 / 2f5028d05644bbd5 / ea02289e1f19f102 / 478c3790a1e9dbc9 |
+| `receipt_gate_resume.log` / `jaxpr_resume_final.log` / `jaxpr_orca2_resume.txt` / `jaxpr_dino_resume.txt` / `jaxpr_v2_resume.txt` | 0ec9110ae4da8522 / 6dd8bd1ddc80f73b / 663832c195f70e0d / 41c263bd8f5f727d / 8547d7e248cf2b76 |
+| `acquisition_v3.log` (operator) | 826bc35c9d0bd505 |
+
+`given_all_fix2.log`'s hash equals round 12's: its row names carry no case and every row is 0; the JSONs differ.
 
 ## Choices made
 
