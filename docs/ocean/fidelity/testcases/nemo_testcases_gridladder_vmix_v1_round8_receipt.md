@@ -16,6 +16,8 @@ Commits:
 - `3bc875b3f` preregistration;
 - `587ebd30e` landing: pivot-row shear reads NEMO's north-fold images;
 - `e091e9234` citation re-anchor (mechanical: nine model pins shifted, two pinned spans grew).
+- `8181893215` review fixes: flag-off purity, jit-pinned tests, `sshwzv` citation (section 7);
+- `fa072e5e50` citation re-anchor (mechanical: sixteen pins +3, one pinned span 76 -> 79 lines).
 
 Record: `gridladder_vmix_rounds/round1/oracle_v1_r1` (admitted round 3).
 Evidence: `gridladder_vmix_rounds/round8/` (`manifest.sha256`, 20 files).
@@ -155,6 +157,7 @@ byte-identical between the V1 build and `ORCA2_OMIP_L4` (SHA-256 prefixes
 | `zsh2v` with `p_avm(ji,jj+1)` and `r3v` | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfsh2.f90:104-108` | `zdf_sh2` (:56) |
 | `lbc_lnk(... avm_k, 'W', 1.)` before `zdf_sh2` | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:785,793` | `stp_RK3_stg` (:78) |
 | T-pivot fold of T/W and V rows | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:584-720` | `lbc_nfd_dp` (:561) |
+| `lbc_lnk(... pssh(:,:,Kaa), 'T', 1.0)`: the sea level read by `r3v` carries the T fold | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/sshwzv.f90:140` | `ssh_nxt` (:90) |
 
 Pointer only: the full ORCA2 card was not measured with this selection.
 
@@ -179,10 +182,14 @@ All runs synchronous, CPU, fp64:
 | new fold + sh2/htau + V1 card + TKE carried/identity/terms + V1 kt-1 statements | 221 passed |
 | `test_nemo_sh2_fold_top_v.py` after the in-solve refusal | 4 passed |
 | citation gate + private imports, clean tree at `e091e9234` | 23 passed |
+| review fixes: fold/sh2/htau + V1 card + TKE carried/terms + V1 kt-1 + recipe + freshwater, at `fa072e5e5` | 197 passed |
+| push-gate rest: face-mask rank, prognostic barotropic, ORCA2 parallel receipt, at `fa072e5e5` | 12 passed |
+| citation gate + private imports, clean tree at `fa072e5e5` | 23 passed |
 
-Review: **codex review: paused (quota)**. GLM unavailable. No independent
-review has run on this diff; the operator's Claude review is pending.
-**UNREVIEWED until then.**
+Review: **codex review: paused (quota)**. GLM unavailable. The operator's
+independent Claude review returned HOLD on two mechanical items (physics
+CONFIRMED); both are fixed in section 7. The fixes themselves are
+**UNREVIEWED** until the operator re-reviews them.
 
 ## Choices made
 
@@ -200,3 +207,57 @@ UNVERIFIED:
 - NEMO's own kt-2 `p_sh2` was not dumped. The fold arm is checked by its
   symmetry, by its kt-2 en result, and by the wall-form control;
 - the full ORCA2 card's response to this selection.
+
+## 7. Review fixes (independent Claude review, HOLD -> fixed)
+
+Reviewer's kt-2/3 rerun, recorded as given (not re-measured here):
+- kt 2 INDEPENDENT, first over the bar: surface u, 5,048 cells, max 2.22e-15
+  at (102,43), open interior;
+- kt 3 INDEPENDENT: ssh, 14,148 cells, max 1.17e-14 at (123,138);
+- kt 3 GIVEN-ENTRY: u, 5,261 cells, max 1.78e-15.
+
+**Flag-off purity (must).** `587ebd30e` reordered the step-entry `r3v`
+north-neighbour expression for every card, flag on or off. The flag-off
+branch now keeps the base expression verbatim; the fold image is built only
+under the flag (`8181893215`). Instrument `probe_jaxpr.py`: `make_jaxpr` of
+one `model.step` from each card's initial state (full ORCA2 card with its IWM
+maps; DINO through `run_dino.py` with the month gate's card, recipe, dt and
+grid), callback object addresses masked, body hashed after the 2-line stamp.
+
+| card | base `6e45bf5a4` | round 8 `601d05b47` (control) | fixed `fa072e5e5` |
+|---|---|---|---|
+| full ORCA2 | `e0351d089a027297` | `18914db414e607a0` (12 lines differ) | `e0351d089a027297` **identical** |
+| DINO | `89418f6a0b2eabae` | `4ebaa1ad2b737305` (12 lines differ) | `89418f6a0b2eabae` **identical** |
+
+Both cards run the step-entry shear with the flag off (logged). The control
+column shows the probe sees the defect.
+
+**Tests (must).** `test_nemo_sh2_fold_top_v.py`: x64 guard
+(`skipif(not x64_enabled)`, the lane's convention); the shear is now built
+from traced `eta, u, v, avm` under `jax.jit`, and every call asserts eager ==
+jit bit for bit before the fold asserts read the jit result. The refusals
+fire at trace time under jit. The two htau call-site tests carry the same
+guard. Plants (`plant_r8b.py`, `plants_r8b.log`), one statement reverted each,
+restored by copy and `cmp`-clean:
+
+| reverted statement | result |
+|---|---|
+| raw `vmask` on the pivot face | 1 failed (symmetry) |
+| viscosity fold image | 1 failed (symmetry) |
+| `r3v` sea-level fold image | 1 failed (symmetry) |
+| tracer-only perturbation of the viscosity image | 2 failed, eager == jit assert fired |
+| no-fold refusal | 1 failed |
+| in-solve refusal | 1 failed |
+| htau call site back to `== "nemo_literal"` | 1 failed (`nemo_scalar_libm`) |
+
+**Citation (should).** The `r3v` sea-level fold is NEMO's `ssh_nxt`
+`lbc_lnk(pssh(:,:,Kaa),'T',1.0)`, `sshwzv.f90:140` (SUBROUTINE `ssh_nxt`
+:90); `sshwzv.f90` SHA-256 prefix `9d0225953304ecbd`, the same in all four
+`ORCA2_OMIP_L4` trees on disk. Added to the model comment and section 5.
+
+Evidence added to `round8/`: `probe_jaxpr.py` (`26ad88a6fac73af1`),
+`jaxpr_{orca2,dino}_{base,r8head,fix}.txt`, `plant_r8b.py`, `plants_r8b.log`,
+`reanchor_r8b.py`, `focused_r8b.log`, `landgate_r8b.log`; `manifest.sha256` regenerated.
+
+UNASKED, offered for revert: the x64 guard is a skip (lane convention), not a
+module-level `jax_enable_x64` update.
