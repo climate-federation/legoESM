@@ -187,15 +187,18 @@ the 35 added fields is inert on LOCK_EXCHANGE and OVERFLOW is not measured
 ## Gates
 
 - No `packages/` change: GYRE trajectory and day-30 gates not required.
-- Citation gate (receipt commit `d59cc819c`): this receipt PASS (8
-  citations, each pinned to its subroutine, 0 unmapped); default receipt
-  PASS (274).  Line plant on
+- Citation gate (corrected receipt, commit `28544e56f`): this receipt PASS (8
+  citations, 0 unmapped); default receipt PASS (274).  The ORCA2_OMIP_L4
+  exchange citation reuses the map's existing `:795-796` entry (same two
+  anchored lines, no routine pin); the R299W7 `:826-827` entry is pinned to
+  `stp_RK3_stg`.  Line plant on
   `ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:826-827` fails
-  (`SYMBOL-NOT-AT-LINE`, exit 1); routine plant on
-  `ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90:211` fails
-  (`ROUTINE-CONTEXT-MISMATCH`, exit 1).
-- Tests: citation-gate tests, private-import ratchet, round-302 probe test:
-  `26 passed`.
+  (`SYMBOL-NOT-AT-LINE`, exit 1); routine plant on the same citation fails
+  (`ROUTINE-CONTEXT-MISMATCH`, exit 1).  Logs in
+  `orca2_rounds/round303/committed/`.
+- Tests (JAX_ENABLE_X64=1): citation-gate tests, private-import ratchet,
+  round-302 probe test, round-303 arm-driver test: `30 passed`.  The new
+  driver test fails if the mirror check ignores a 1-ulp change or the sign.
 - codex review: paused (quota).  The operator runs an independent Claude
   review before landing.
 
