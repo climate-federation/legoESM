@@ -1861,12 +1861,17 @@ CITATION_MAP = {
         'routine': 'stp_2D',
     },
     # --- ORCA2 round 303: fold-band stage-1 V transport mask + top-V exchange ---
+    # ln_shuman=F and ln_zdfcst=T (l_zdfsh2=F) on this run: the exchange that
+    # runs is the ELSE/ELSE lbc_lnk after the tracer update, not the Shuman one.
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:283': {
         'anchors': 'zFv(ji,jj,jk) = e1v(ji,jj)*(e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk)))',
         'routine': 'stp_RK3_stg',
     },
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:570': {
-        'anchors': "CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,Kaa), 'U', -1._wp, vv(:,:,:,Kaa), 'V', -1._wp",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:795-796': {
+        'anchors': [
+            ("CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:,:       ,Kaa), 'V', -1._wp   &", 2),
+            "&                       , ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp, ldfull=.TRUE. )",
+            2],
         'routine': 'stp_RK3_stg',
     },
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90:211': {
@@ -1877,8 +1882,11 @@ CITATION_MAP = {
         'anchors': 'zFv(ji,jj,jk) = e1v(ji,jj)*(e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk)))',
         'routine': 'stp_RK3_stg',
     },
-    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:584': {
-        'anchors': "CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,Kaa), 'U', -1._wp, vv(:,:,:,Kaa), 'V', -1._wp",
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:826-827': {
+        'anchors': [
+            ("CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:,:       ,Kaa), 'V', -1._wp   &", 2),
+            "&                       , ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp, ldfull=.TRUE. )",
+            2],
         'routine': 'stp_RK3_stg',
     },
     'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/dommsk.f90:211': {

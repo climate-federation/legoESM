@@ -2,7 +2,14 @@
 
 Date: 2026-10-16 (Claude round; codex review: paused (quota)).
 
-Status: **HELD** (no model or card change; one citation-map addition).
+Status: **HELD** (no model or card change; citation-map entries and one
+committed arm driver).
+
+Correction (2026-10-16, after the independent Claude review, HOLD): the
+exchange first cited here (`:584` / `:570`) sits inside `IF( ln_shuman )` and
+does not run (ocean.output:220 `ln_shuman = F`).  The exchange that runs is
+after the tracer update; the citations, order, history and fold-unit
+statements below are corrected in place.
 
 ## Headline
 
@@ -27,18 +34,30 @@ Status: **HELD** (no model or card change; one citation-map addition).
      The card's compact mask keeps the pivot-row V faces dry, so the
      tracer update on row 147 misses its north-face transport;
   2. the end-of-stage sign-minus V exchange
-     (`ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:584`,
-     `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:570`, SUBROUTINE
-     `stp_RK3_stg`) writes row 147's V as the fold image of row 146
-     (measured: NEMO V(147) = -V(146) mirrored, bit for bit); the card
-     leaves 0.
+     (`ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:826-827`,
+     `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:795-796`, SUBROUTINE
+     `stp_RK3_stg`).  It is the `ELSE` (non-Shuman) branch's inner `ELSE`:
+     `ln_shuman = F` (ocean.output:220) and `ln_zdfcst = T`
+     (ocean.output:557) makes `l_zdfsh2 = .FALSE.` in `zdf_phy_init`, so
+     neither `:822` / `:791` (the `avm_k` form) nor the Shuman call runs.
+     It runs AFTER the tracer update, so it sets the next stage's V, not
+     this stage's tracer transport.  It writes row 147's V as the fold
+     image of row 146; the card leaves 0.  Measured on NEMO's own frames:
+     the top row equals sign x permuted row 146 in value in all 40 OMT-4
+     frames (kt 1-10, stages 0-3, 0 value differences); the 5,400 bit
+     differences are all signed zeros.
 - With BOTH added to the hooked run, kt-1 stage 1 is exact in every field
   and the run completes kt 1-10 with no refusal: kt-10 entry fold U 4.56%,
-  interior 0.78% (hooked alone: refuses in kt 8).  Either one alone is worse
-  than neither (transport mask alone refuses in kt 5; top-V alone in kt 7).
-- No landing: both statements need the private fold unit underneath them
-  (round 288 measured the same pair on the shipped card: explosive).  The
-  holder is the fold unit (see "What keeps it private").
+  interior 0.78% (hooked alone: refuses in kt 8).  Each alone refuses
+  earlier than neither (transport mask alone in kt 5; top-V alone in kt 7).
+- This shows only that the pair beats either statement alone on the hooked
+  run.  It does NOT explain the top-V growth Decision 125 held: that was
+  measured on the shipped card, where this pair has never been run.
+- History: round 288 did NOT measure this pair.  It paired top-V with round
+  286's STAGE-UPDATE mask, on rung 0.  The pair here (stage-TRANSPORT mask
+  + top-V) has never been run on the shipped card.
+- No landing: both statements are measured only on the private fold unit.
+  The holder is the fold unit (see "What keeps it private").
 
 ## Provenance
 
@@ -50,12 +69,27 @@ Status: **HELD** (no model or card change; one citation-map addition).
   RMS(NEMO) on NEMO's wet support.
 - The probe discards history on a refusal, so the kt-10 request was re-run
   at `--kts 7` (`measure_unit_kt10_refusal.log` keeps the refusal).
-- Arms (scratch, not landed; `topv_scratch.py` keeps history on refusal):
-  top-V = `rk3_fold_exchange_top_v_row=True` on the card config (existing
-  selector, Decision 125 held); transport mask = round 258's
-  `_resolved_stage_vmask_arm` (stage transport's V mask -> D114 resolved
-  source); round-286 stage-update mask = commit `a1dc5d235d`'s hunk on a
-  scratch commit `f4166a28f` in a separate clone.
+- Arms: committed driver
+  `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round303_fold_pair_arms.py`
+  (arms `hooked`, `topv`, `tmask`, `pair`, plus `--mirror`; history kept on
+  refusal; test
+  `tests/ocean/fidelity/test_nemo_testcase_l4_orca2_round303_fold_pair_arms.py`).
+  Re-measured at clean commits: `hooked`/`topv`/`tmask` at `15cb400a2`,
+  `pair` and `--mirror` at `e03e5b314` (the two differ only in how the
+  refusal text is stored).  Every stage row is identical to the first
+  (scratch) measurement; refusals kt 8 / 7 / 5 / none, all
+  `raw-mesh e3w_int must contain only finite values > 0`.  Evidence
+  `orca2_rounds/round303/committed/` (`evidence.sha256`).
+- top-V = `rk3_fold_exchange_top_v_row=True` on the card config (existing
+  selector, Decision 125 held).
+- Transport mask = round 258's `_resolved_stage_vmask_arm` with the D114
+  resolved V mask.  It replaces the V-mask argument of EVERY call of the
+  stage-transport function, at all three stages.  Inside that function the
+  mask feeds the qco V face thickness, the corrected stage V, the 3-D V mass
+  flux and the continuity W: the whole stage transport, not only the `zFv`
+  line at `:291` / `:283`.
+- Round-286 stage-update mask = commit `a1dc5d235d`'s hunk on scratch
+  commit `f4166a28f` in a separate clone (not committed; one arm row only).
 - Evidence: `orca2_rounds/round303/`.
 
 ## 1. Hooked run, per kt (step entry, relative RMS %, fold / interior)
@@ -83,9 +117,10 @@ every field and region (EVD acts at stage 3 only).
 | S | 1,319 | 147 only | 3.283688696376231 PSU | <= 7.1e-15 (rounding, 49 cells) |
 | U, sea level | 0 | — | 0 | exact |
 
-- Compiled order inside `stp_RK3_stg`: transport (:291) -> V update (:480)
-  -> correction (:549) -> exchange (:584) -> tracer update (:707).  Row 146
-  V is exact, so the exchange's source row is clean in the hooked run
+- Compiled order inside `stp_RK3_stg` (R299W7): transport (:291) -> V
+  update (:480) -> correction (:549) -> tracer update (:707) -> exchange
+  (:826).  Row 146 V is exact, so the exchange's source row is clean in the
+  hooked run
   (rounds 289-290 held the exchange because that row carried barotropic
   debt on the shipped card; the fold unit removes that debt).
 - NEMO's row-147 T is self-mirrored (pivot row); the card's is not, and 668
@@ -111,9 +146,22 @@ Hooked + pair, kt 6-10 entry U: 3.48 / 0.73, 2.71 / 0.65, 5.37 / 1.10,
 - It exists only as test hooks (`_NEMOWSRK3TestHooks`: external-mode
   association, reference-face-depth override, unmasked + materialised
   barotropic V transport, atomic fold unit, literal HPG V mask) plus round
-  245's monkeypatched surface-mask context.  No card selector reaches it, so
-  no card can run it; rounds 249-259 held it because it refused on live W
-  thickness (kt 4-8) and failed Decision 96 as a partial unit.
+  245's monkeypatched surface-mask context.  Rounds 249-259 held it because
+  it refused on live W thickness (kt 4-8) and failed Decision 96 as a
+  partial unit.
+- Correction: card selectors DO reach parts of it.  Ladder map:
+  - Matches: its barotropic core is the same code the public card setting
+    `barotropic_literal_fold_unit_vector_form` switches on (the hook and the
+    setting enter the same literal-fold-unit branch of the external mode);
+    G1b and G6 set it on, OMT-4 sets it off.  Top-V is the same setting and
+    function (`rk3_fold_exchange_top_v_row`) as on G1 and G6.
+  - Gaps: this round's stage-transport V mask has no ladder counterpart (G6
+    keeps the compact mask in the transport).  G6's raw RHS / stage-update V
+    mask, HPG fold geometry, vorticity fold halo, ZAD pivot face and
+    stage-ratio exchange do not exist in this lane.
+  - Source: the barotropic-core match is read off the code here; the G6
+    entries are the independent review's map, not re-measured in this
+    clone.
 - Measured now: with the pair above it runs OMT-4 kt 1-10 for the first
   time.  To land: promote the hook set + the two stage statements to cited
   card selectors as ONE atomic unit, then score Decision 96 on all seven
@@ -142,7 +190,7 @@ the 35 added fields is inert on LOCK_EXCHANGE and OVERFLOW is not measured
 - Citation gate (receipt commit `d59cc819c`): this receipt PASS (8
   citations, each pinned to its subroutine, 0 unmapped); default receipt
   PASS (274).  Line plant on
-  `ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:584` fails
+  `ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:826-827` fails
   (`SYMBOL-NOT-AT-LINE`, exit 1); routine plant on
   `ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90:211` fails
   (`ROUTINE-CONTEXT-MISMATCH`, exit 1).
