@@ -11,7 +11,8 @@ Preregistration: `PREREG_nemo_testcases_gridladder_vmix_v4_round14.md`, committe
 Commits: `4eb17a2a0` prereg; `d62474cd0` statement, card, deck, unit test; `e5ef6981e` acquisition and card tests;
 `cf5a75855` citation map (69 pins re-anchored by mechanical offsets from this round's own hunks; no anchor text
 changed; the default receipt's citations follow); `1e38cc6ba` the tsdiff factor 5 named at module level (inline-
-coefficient ratchet; same value, same association); this receipt and its map entries.
+coefficient ratchet; same value, same association); `00cfb3e1c`, `e8b3d72cb` this receipt and its 10 map entries;
+this update (final numbers).
 
 Own note, stated first: this round was interrupted by the account's weekly limit after `1e38cc6ba`; the resume
 re-ran every gate at the final tip rather than reuse logs taken before that commit.
@@ -81,7 +82,7 @@ is read-only preflight, `V4_PREFLIGHT_OK`).
 - **Statement vs an independent scalar transcription** (Python floats, glibc libm), eager and jit: **bit-for-bit**
   (4 passed). Plants, each fails ≥ 1 arm: tree-reduced sum; native TANH; divide by ρ₀ reassociated; ratio
   reassociated (`unit_plants.log`).
-- Card/deck/selector/run-script tests (V4) + V3, V2 card files + IWM unit files: see `cards_final.log`.
+- Card/deck/selector/run-script tests (V4) + V3, V2 card files + IWM unit files: **35 passed** (333 s).
 - Frame plant: V4's frame check on V3's record **refuses** (exit 66, `unequal_avt_vs_v3=0 of 825840`).
 - **Flag-off jaxprs**, base `0b9443cef279` vs `e5ef6981e` (clean): full ORCA2 138,746 lines and DINO 123,234 lines
   **IDENTICAL**; V2 one-step 178,423 lines and V3 one-step 174,349 lines **IDENTICAL**. V4 one step: 176,175 lines,
@@ -90,8 +91,10 @@ is read-only preflight, `V4_PREFLIGHT_OK`).
 - Ratchets (dispatch, inline coeffs, constants, param specs, MPAS IWM): tip and base **5 failed** each, the same 5
   (land slab-land guard, land restart coefficient, JRA55 test constant, shortwave spec, MPAS IWM splice); none in
   this diff. The new form guard sits in a function already in the dispatch baseline.
-- **Default gate** (`land.sh` list): see `gate_default_final.log`.
-- **Per-receipt citation gate** on this receipt: see `receipt_gate.log`.
+- **Default gate** (`land.sh` list, at `1e38cc6ba`): **143 passed** (1,129 s). After this receipt's map entries:
+  citation-gate tests + private-import ratchet **23 passed**.
+- **Per-receipt citation gate** on this receipt (`--from-heading` this title): **PASS, failures 0**, 14 citations,
+  unmapped 0, map entries failing audit 0 (first run: 4 range/anchor pins failed; fixed by pinning unique endpoints).
 - Acquisition preflight at `e5ef6981e`: `V4_PREFLIGHT_OK` (nothing built).
 
 ## Choices made
