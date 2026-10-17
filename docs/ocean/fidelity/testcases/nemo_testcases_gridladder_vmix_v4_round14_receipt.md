@@ -2,7 +2,7 @@
 
 Status: **V4 BUILT, NOT SCORED.** V4 = certified V3 + ORCA2's internal-wave mixing exactly as ORCA2 sets it
 (`ORCA2_OMIP_L4/EXP00/namelist_cfg:396` `ln_zdfiwm = .true.`; `&namzdf_iwm` at
-`ORCA2_OMIP_L4/EXP00/namelist_cfg:421-436`). No new data source and no new model state. The NEMO record does not
+`ORCA2_OMIP_L4/EXP00/namelist_cfg:421-435`). No new data source and no new model state. The NEMO record does not
 exist yet; nothing is scored this round.
 
 Decisions in force: D128-D130. Codex review: paused (quota). Evidence: `gridladder_vmix_rounds/round14/`.
@@ -46,7 +46,7 @@ NEMO (all routines in `ORCA2_OMIP_L4/BLD/ppsrc/nemo`):
 ## 2. V4 built (V4-selected; nothing else moves)
 
 - **Statement**: `nemo_zdf_iwm` in the existing IWM module, selected by `IWMConfig.form = "nemo_literal"` (default
-  `"generic"`, unchanged), transcribing `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:233-317` in source order: depths
+  `"generic"`, unchanged), transcribing `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:233-316` in source order: depths
   stretched by `(1+r3t)`, sequential level sums, raw N² in the buoyancy Reynolds number, constant efficiency,
   T/S-differential ratio, clamp, then adds onto avt, avs and avm. Every operation rounded; EXP/TANH/LOG10 through the
   scalar-libm policy (refuses native).
