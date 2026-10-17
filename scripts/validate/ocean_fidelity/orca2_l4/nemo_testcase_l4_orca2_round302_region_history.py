@@ -114,9 +114,12 @@ def run(card, record_root: Path, arm: str, kts: int = 7,
     entry = frame(record_root, 1, 0)
     if plant == "entry-bit":
         entry["u"][147, 47, 0] = np.nextafter(entry["u"][147, 47, 0], np.inf)
+    # Bit identity on NEMO's wet cells; dry cells differ only by signed zero.
     for name, value in fields(state).items():
-        require(np.array_equal(np.asarray(value, np.float64).view(np.uint64),
-                               entry[name].view(np.uint64)),
+        value = np.asarray(value, np.float64)
+        require(np.array_equal(value[masks[name]].view(np.uint64),
+                               entry[name][masks[name]].view(np.uint64))
+                and np.array_equal(value, entry[name]),
                 f"kt-1 entry {name} is not NEMO's: the labels are not one run")
     forcing = r300.omt0.rung0_ladder._zero_forcing((148, 180))
     models = _models(card, arm)
