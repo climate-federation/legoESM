@@ -56,13 +56,17 @@ from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
 
 CASE = "ORCA2G2-zps"
 CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke",
-         "ORCA2V2-evd", "ORCA2V3-ddm")
+         "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm")
 FORCED = ("ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd",
-          "ORCA2V3-ddm")   # NEMO-supplied surface fields each kt (D123)
+          "ORCA2V3-ddm", "ORCA2V4-iwm")   # NEMO-supplied surface fields each kt (D123)
 # G5's record build (ORCA2-lane frames); V1 = that build + one hm_i writer;
-# V2/V3 = V1's record binary with ORCA2's EVD (+ DDM) namelist lines
-SI3 = ("ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm")
-TKE_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm")
+# V2/V3/V4 = V1's record binary with ORCA2's EVD (+ DDM, + IWM) namelist lines
+SI3 = ("ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm")
+TKE_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm")
+# V4's IWM-active check compares with V3's admitted (certified) kt-1 frame
+V3_ZDF_FRAME = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round13/"
+    "oracle_v3_r13/twin_a/oracle_zdf_entry_kt00000001.bin")
 # V1: NEMO restart TKE fields -> carried card leaves (w levels 2..nk; the
 # card carries no surface en and no bottom w level)
 TKE_RESTART = {"tke": "en", "tke_avm": "avm_k", "tke_avt": "avt_k", "tke_dissl": "dissl"}
@@ -281,10 +285,10 @@ def ddm_kt1_rows(root: Path, model, grid, z_coord, cfg, s0, dt, forcing1, nk: in
     import jax
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
-    require(case == "ORCA2V3-ddm" and kt_from == kt_to == 1,
-            "the kt-1 double-diffusion frame is registered only for V3 at kt 1")
+    require(case in ("ORCA2V3-ddm", "ORCA2V4-iwm") and kt_from == kt_to == 1,
+            "the kt-1 double-diffusion frame is registered only for V3/V4 at kt 1")
     traced = jax.device_get(LatLonCGridOceanModel(
-        grid, z_coord, cfg,
+        grid, z_coord, cfg, iwm_forcing=model._iwm_forcing,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(tracer_zdf_trace=True)).step(
             s0, dt, **forcing1))
     solve = traced.solve
@@ -326,6 +330,16 @@ def ddm_kt1_rows(root: Path, model, grid, z_coord, cfg, s0, dt, forcing1, nk: in
             "diffusive_zrau_lt_0p5": int(np.count_nonzero(on & (zrau < 0.5))),
             "single_signed_floor_zrau_1e-20": int(np.count_nonzero(
                 on & (zrau == 1e-20)))}}
+    if case == "ORCA2V4-iwm":   # IWM active: V4 vs V3's certified frame, both sides
+        v3 = read_zdf_kt1(V3_ZDF_FRAME, nk)
+        iwm = {}
+        for name in ("avt", "avs", "avm"):
+            ref3 = v3[name][..., 1:nk]
+            nemo = (z[name][..., 1:nk] != ref3) & wet
+            mine = (np.asarray(card[name], np.float64) != ref3) & wet
+            iwm[name] = {"nemo_v4_ne_v3": int(nemo.sum()), "card_v4_ne_v3": int(mine.sum()),
+                         "same_cells": bool(np.array_equal(nemo, mine))}
+        out["iwm_active"] = iwm
     return out
 
 
@@ -606,7 +620,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 or (arm in ("stages", "barotropic_exit", "carried")
                     and case in SI3)
                 or (arm == "tke_mixing_length" and case == "ORCA2V1-tke")
-                or (arm == "ddm_kt1" and case == "ORCA2V3-ddm"),
+                or (arm == "ddm_kt1" and case in ("ORCA2V3-ddm", "ORCA2V4-iwm")),
                 "G4/G5's NEMO-supplied per-step forcing is registered only for "
                 "the independent and given-entry ladders")
         require(cfg.rk3_stage_tracer_written_order is True,
@@ -668,7 +682,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         omit_ice_top_drag_zdf=without_top_drag_consumer == "dyn_zdf",
     )
     model = LatLonCGridOceanModel(
-        card.recipe.grid, z, cfg, _nemo_ws_test_hooks=consumer_hooks)
+        card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
+        _nemo_ws_test_hooks=consumer_hooks)
     require(s0.eta_rk3_after is None, "the card carries an after-ssh slot")
     if case == "ORCA2G4-sbc":
         sys.path.insert(0, str(HERE / "nemo_testcase_g4_orca2sbc"))
@@ -812,7 +827,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
 
         plain, seconds = step(s0, 1)
         trace_model = LatLonCGridOceanModel(
-            card.recipe.grid, z, cfg,
+            card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
             _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 expose_live_stage_operands=True))
         trace = jax.device_get(trace_model.step(
@@ -1026,7 +1041,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             hooks, frame = EXPOSURES[name]
             kwargs = forcing(kt)
             st = jax.device_get(LatLonCGridOceanModel(
-                card.recipe.grid, z, cfg,
+                card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
                 _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hooks)).step(
                     entry, dt=card.dt_s, **kwargs))
             cand = card_surface(st)
@@ -1103,7 +1118,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 "--state-in is not this model code's chain after step kt - 1")
         fw, sf = g5.nemo_supplied_forcing(card, root, kt_from)
         result = jax.device_get(LatLonCGridOceanModel(
-            card.recipe.grid, z, cfg,
+            card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
             _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 expose_barotropic_substeps=True)).step(
                     saved["state"], dt=card.dt_s, freshwater=fw,
@@ -1133,7 +1148,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         require(n_sub == int(cfg.barotropic.n_barotropic_substeps),
                 "NEMO and the card ran different substep counts")
         res = jax.device_get(LatLonCGridOceanModel(
-            card.recipe.grid, z, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 expose_barotropic_substeps=True)).step(s0, dt=card.dt_s))
         trace = {k: np.asarray(v) for k, v in res.substeps.items()}
         raw = z.nemo_een_barotropic
@@ -1143,7 +1159,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         table = g1.substep_table(sub, trace, n_sub, wet, reg, plant)
         # passive: the traced loop's exit is the ordinary stage-1 handoff
         plain = card_surface(jax.device_get(LatLonCGridOceanModel(
-            card.recipe.grid, z, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 expose_momentum_stage=1, expose_tracer_stage=1)).step(
                     s0, dt=card.dt_s)))
         traced = card_surface(res.state_after_barotropic)
@@ -1165,7 +1182,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         out["label"] = "INDEPENDENT = GIVEN-NEMO-ENTRY at step 1 (3-D RHS after stp_2D)"
         g = read_step(1)
         res = jax.device_get(LatLonCGridOceanModel(
-            card.recipe.grid, z, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 expose_barotropic_substeps=True)).step(s0, dt=card.dt_s))
         ops = {k: np.asarray(v) for k, v in res.slow_forcing_operands.items()}
         rows = {}
@@ -1233,7 +1251,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                                               else "GIVEN-NEMO-ENTRY"))
         g, entry = read_step(kt), s0 if kt == 1 else nemo_entry(kt)
         st = jax.device_get(LatLonCGridOceanModel(
-            card.recipe.grid, z, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 zdf_momentum_observer=lambda *a: seen.append(
                     [np.array(x) for x in a]))).step(entry, dt=card.dt_s))
         require(len(seen) == 1, f"the observer fired {len(seen)} times, not once")
@@ -1479,6 +1498,8 @@ def main(argv=None) -> int:
                   f"({s['full']['n_unequal']}) partial {s['partial']['relative']:.2e} "
                   f"({s['partial']['n_unequal']}) dry unequal {s['dry_n_unequal']}")
         print("CENSUS", json.dumps(out["census"], sort_keys=True))
+        if "iwm_active" in out:
+            print("IWM_ACTIVE", json.dumps(out["iwm_active"], sort_keys=True))
         return 1 if bad else 0
     if a.arm == "tke_mixing_length":
         for row in out["rows"].values():
