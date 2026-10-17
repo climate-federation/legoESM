@@ -188,7 +188,7 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
             "rung-0 month did not complete 240 steps")
     require(report.get("first_nonfinite") is None,
             "rung-0 month contains a non-finite state")
-    require(report.get("unmeasured_features") == ["linear_implicit_bottom_drag"],
+    require(report.get("unmeasured_features") == [],
             "rung-0 unmeasured-feature registry changed")
     require(report["record_admission"].get("status") == "PASS_RUNG0_RECORD",
             "rung-0 record admission is not PASS")

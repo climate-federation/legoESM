@@ -17,7 +17,7 @@ def _report() -> dict[str, object]:
         "initial_mode": "card_own_state",
         "decision52_bridge": None,
         "execution": "production-jit-cpu-fp64-x64-libm",
-        "unmeasured_features": ["linear_implicit_bottom_drag"],
+        "unmeasured_features": [],
         "initial_entry": {
             name: {"bit_exact": True, "unequal": 0}
             for name in ("T", "S", "u", "v", "ssh")

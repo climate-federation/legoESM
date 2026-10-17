@@ -11,6 +11,7 @@ from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     build_orca2_initial_ts,
     build_orca2_zps_card,
+    validate_nemo_testcase_card_for_execution,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round92_rung0_card_gate as gate,
@@ -45,7 +46,7 @@ def test_rung0_card_states_every_hierarchy_exclusion(cards) -> None:
     assert not vmix.iwm.enabled and not vmix.ddm.enabled
     assert cfg.physics.convection.scheme == "enhanced_diffusion"
     assert (cfg.bbl_adv_option, cfg.bbl_diffusive_option) == (0, 0)
-    assert rung0.unmeasured_features == ("linear_implicit_bottom_drag",)
+    assert rung0.unmeasured_features == ()
     assert rung0.surface_input_operator == "nemo_fld_read_no_tsd_dmp"
     assert shipped.unmeasured_features[-1] == "si3_jpl5_layered_prather_state"
 
@@ -77,10 +78,42 @@ def test_rung0_validator_rejects_live_tsd_damping_metadata(cards) -> None:
         gate.validate_rung0_card(changed)
 
 
-def test_rung0_execution_refuses_only_declared_drag(cards) -> None:
+def test_rung0_execution_ready_once_drag_is_measured(cards) -> None:
     _, rung0 = cards
-    with pytest.raises(ValueError, match="linear_implicit_bottom_drag$"):
-        gate.validate_rung0_card(rung0, execution=True)
+    gate.validate_rung0_card(rung0, execution=True)
+
+
+@pytest.mark.parametrize("label", ("staged_gm_eiv", "freshwater_budget_carry"))
+def test_rung0_execution_refuses_a_remaining_label(cards, label) -> None:
+    shipped, rung0 = cards
+    assert label in shipped.unmeasured_features
+    with pytest.raises(ValueError, match=f"unresolved selected arms: {label}$"):
+        gate.validate_rung0_card(
+            rung0._replace(unmeasured_features=(label,)), execution=True)
+
+
+def test_shipped_card_execution_refuses_exactly_six_remaining_labels(cards):
+    shipped, _ = cards
+    remaining = (
+        "staged_gm_eiv",
+        "internal_wave_salt_heat_differential",
+        "double_diffusive_salt_heat_split",
+        "spatial_lateral_viscosity",
+        "freshwater_budget_carry",
+        "si3_jpl5_layered_prather_state",
+    )
+    assert shipped.unmeasured_features == remaining
+    with pytest.raises(ValueError) as refusal:
+        validate_nemo_testcase_card_for_execution(shipped)
+    assert str(refusal.value).endswith(
+        "unresolved selected arms: " + ", ".join(remaining))
+
+
+def test_rung0_execution_still_checks_selectors(cards) -> None:
+    _, rung0 = cards
+    changed = rung0._replace(surface_input_operator="nemo_fld_read")
+    with pytest.raises(gate.GateError, match="module exclusion"):
+        gate.validate_rung0_card(changed, execution=True)
 
 
 def test_rung0_validator_rejects_live_excluded_module(cards) -> None:

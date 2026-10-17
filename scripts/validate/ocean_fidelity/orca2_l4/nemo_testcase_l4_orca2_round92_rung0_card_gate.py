@@ -126,7 +126,9 @@ def build_rung0_card(deck_root: Path):
         # ln_tsd_dmp=.false. input path from the shipped card's live damping
         # arm; it is card metadata, not a production model selector.
         surface_input_operator="nemo_fld_read_no_tsd_dmp",
-        unmeasured_features=("linear_implicit_bottom_drag",),
+        # NEMO's linear implicit drag is selected and measured (D133, round
+        # 305); without ice it is D122-measured, not ladder-certified.
+        unmeasured_features=(),
         icebergs_enabled=False,
         iceberg_inputs=(),
     )
@@ -135,6 +137,10 @@ def build_rung0_card(deck_root: Path):
 def validate_rung0_card(card, *, execution: bool = False) -> None:
     """Fail closed on every rung-0 hierarchy selector used by this probe."""
 
+    if execution and card.unmeasured_features:
+        raise ValueError(
+            "ORCA2-rung0-zps is not execution-ready; unresolved selected "
+            "arms: " + ", ".join(card.unmeasured_features))
     cfg = card.recipe.model_config
     vmix = cfg.physics.vertical_mixing
     selectors = (
@@ -155,7 +161,7 @@ def validate_rung0_card(card, *, execution: bool = False) -> None:
         cfg.runoff_depth_spread_map is None,
         card.surface_boundary_condition == "nemo_flx_zero",
         card.surface_input_operator == "nemo_fld_read_no_tsd_dmp",
-        card.unmeasured_features == ("linear_implicit_bottom_drag",),
+        card.unmeasured_features == (),
         cfg.bottom_drag.bottom_drag_scheme == "nemo_linear",
         (cfg.bottom_drag.bottom_drag_cd0, cfg.bottom_drag.bottom_drag_uc0)
         == (1.0e-3, 0.4),
@@ -173,10 +179,6 @@ def validate_rung0_card(card, *, execution: bool = False) -> None:
             "rung-0 card carries inactive TKE state")
     require(not np.any(np.asarray(card.recipe.initial_state.eta.data)),
             "rung-0 independent no-ice SSH is not zero")
-    if execution:
-        raise ValueError(
-            "ORCA2-rung0-zps is not execution-ready; unresolved selected "
-            "arms: linear_implicit_bottom_drag")
 
 
 def _payload(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
@@ -334,13 +336,7 @@ def run(deck_root: Path, record_root: Path, plant: str = "none") -> dict:
     validate_rung0_card(card)
     require(shipped.unmeasured_features[-1] == "si3_jpl5_layered_prather_state",
             "shipped ORCA2 sea-ice debt tuple moved")
-    try:
-        validate_rung0_card(card, execution=True)
-    except ValueError as error:
-        require(str(error).endswith("linear_implicit_bottom_drag"),
-                f"unexpected execution refusal: {error}")
-    else:  # pragma: no cover - the declared gap must remain fail-closed
-        raise GateError("rung-0 card no longer refuses its unbuilt drag")
+    validate_rung0_card(card, execution=True)
 
     entry = assemble_frame(
         record_root, 1, 0, plant_layout=plant == "frame-layout")

@@ -60,7 +60,7 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
             "month used a recorded-entry bridge")
     require(report.get("execution") == "production-jit-cpu-fp64-x64-libm",
             "execution policy moved")
-    require(report.get("unmeasured_features") == ["linear_implicit_bottom_drag"],
+    require(report.get("unmeasured_features") == [],
             "rung-0 unmeasured-feature registry moved")
     initial = report.get("initial_entry", {})
     require(tuple(initial) == month.FIELDS

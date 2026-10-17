@@ -39,7 +39,7 @@ def _report() -> dict[str, object]:
         "execution": "production-jit-cpu-fp64-x64-libm",
         "steps_completed": 240,
         "first_nonfinite": None,
-        "unmeasured_features": ["linear_implicit_bottom_drag"],
+        "unmeasured_features": [],
         "record_admission": {"status": "PASS_RUNG0_RECORD"},
         "terminal_restart": {
             "status": "BIT_EXACT_ORIENTATION",

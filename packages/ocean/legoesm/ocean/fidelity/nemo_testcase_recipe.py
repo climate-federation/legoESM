@@ -1890,7 +1890,6 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         surface_input_operator="nemo_fld_read",
         unmeasured_features=(
             "staged_gm_eiv",
-            "linear_implicit_bottom_drag",
             # The deck's ln_tsdiff: NEMO gives salt a different wave-driven
             # diffusivity from heat, and the shared-K implicit tracer solve
             # cannot carry two.  The deck's second salt/heat differential,

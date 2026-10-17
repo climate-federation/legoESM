@@ -108,7 +108,7 @@ def measure_boundary(deck_root: Path, record_root: Path, admission: Path,
     record, census = growth.assemble_record(record_root, 1)
     card = growth.shared.rung0.build_rung0_card(deck_root)
     growth.shared.rung0.validate_rung0_card(card)
-    require(card.unmeasured_features == ("linear_implicit_bottom_drag",),
+    require(card.unmeasured_features == (),
             "rung-0 unmeasured-feature registry changed")
     freshwater, surface = rung103._zero_forcing(
         tuple(np.asarray(card.recipe.initial_state.eta.data).shape))

@@ -133,7 +133,7 @@ def run(
         rung0.ladder.build_reference_depth_override(card)
         if raw_reference_depth else None
     )
-    require(card.unmeasured_features == ("linear_implicit_bottom_drag",),
+    require(card.unmeasured_features == (),
             "rung-0 exact-input debt changed")
 
     entry = rung0.assemble_frame(record_root, 1, 0)
