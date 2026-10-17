@@ -3,9 +3,11 @@
 Status: **LANDED (Decision 132, G6-selected); G6 NOT CERTIFIED.**  The
 kt 2..6 whole-domain debt (sea level 4.461e-3 m at kt 2) is gone.  Under
 GIVEN-NEMO-ENTRY every field is at the bar kt 1..6 on level 1 and the 2-D
-fields; one all-level row (kt-4 two-step, partial-cell u/v, 1.86e-15) is
-just over.  INDEPENDENT is at the bar kt 1..2 and over it from kt 3
-(worst 6.8e-14, v at kt 5-6).  The residual is a last-place difference
+fields; TWO all-level rows are just over, both kt-4 two-step on partial
+cells: u (1.86e-15, 8,937 cells, level 18) and v (1.38e-15, 8,764 cells).
+INDEPENDENT is at the bar kt 1..2; its first over-bar row is kt 3 ssh
+(3.57e-15 normalised, 8,728 cells, interior open ocean); worst 6.8e-14,
+v at kt 5-6.  The residual is a last-place difference
 that starts INSIDE `stp_2D` at kt 2; NEMO records nothing there after
 kt 1, so the walk stops at `stp_2D`'s exit.  ACQUISITION_NEEDED.
 
@@ -25,16 +27,20 @@ The G6 card selects `nemo_first_wzv_after_ssh='rk3_extrapolated_carried'`
 the slot at step end and reads it at the first `wzv` (the GYRE/VORTEX
 vector cards use it); no model code changed.
 
-| NEMO statement | G5 r31 build | ORCA2_OMIP_L4 | SUBROUTINE |
-|---|---|---|---|
-| write `ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)` | `stprk3.f90:241` | `:237` | `stp_RK3` :62 |
-| read `r3t(:,:,Kaa) = ssh(:,:,Kaa)*r1_ht_0`, then `CALL wzv` | `stp2d.f90:152`, `:156` | same file | `stp_2D` |
-| kt-1 fill from rest (`ln_rstart=.false.`): `ssh(:,:,Kaa) = ssh(:,:,Kbb)` | `restart.f90:406` | `:405` | `rst_read_ssh` :321 |
-| restart entry: `iom_get(...,'ssha', ssh(:,:,Kaa))` | `restart.f90:367` | `:367` | `rst_read_ssh` :321 |
-| restart write `'ssha'` (after the :241 extrapolation) | `restart.f90:184` | `:184` | `rst_write` :153 |
+| NEMO statement (SUBROUTINE) | G5 r31 build / ORCA2_OMIP_L4 |
+|---|---|
+| write ssh(Naa) = 2*ssh(Nbb) - ssh(Naa) (stp_RK3) | `ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3.f90:241` / `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:237` |
+| read r3t(Kaa) = ssh(Kaa)*r1_ht_0 (stp_2D) | `ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stp2d.f90:152` / `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:152` |
+| then the first wzv call (stp_2D) | `ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stp2d.f90:156` / `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:156` |
+| kt-1 fill from rest, ssh(Kaa) = ssh(Kbb) (rst_read_ssh) | `ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90:406` / `ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:405` |
+| restart entry, iom_get 'ssha' into ssh(Kaa) (rst_read_ssh) | `ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90:367` / `ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:367` |
+| restart write 'ssha', after the extrapolation (rst_write) | `ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90:184` / `ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:184` |
+
+Paths are relative to `cfgs/` of the NEMO 5.0.2 tree; "G5 r31 build" is
+G6's record build (G5 round-31 FIX1).
 
 - kt 1: the card's unseeded slot is the step-entry height, which is NEMO's
-  from-rest fill (`:406`).  kt 1 is identical to round 40 (below).
+  from-rest fill (restart.f90 line 406).  kt 1 is identical to round 40 (below).
 - GIVEN-NEMO-ENTRY: the G2/G6 ladder's NEMO entry now seeds the slot from the
   restart's `ssha`, as `rst_read_ssh` does; the ladder refuses unless only G6
   carries it.  Round 36's restarts hold `ssha` (checked at kt 2, 4, 6).
@@ -79,16 +85,18 @@ minus round 40).
 | 6 | given two-step | 1.6e-15/10321 | 2.2e-16/11264 | 4.4e-16/11334 | 2.8e-15/7984 | 2.6e-15/8365 | 7.1e-15/5 | 7.1e-15/5 |
 
 Absolute differences; the scorer's verdict uses the normalised error.  Bold =
-DEBT (normalised > 1e-15); everything else AT-BAR.  Every given-entry row is
-AT-BAR.  All-level rows (normalised, full / partial cells): given kt-4
-two-step u 7.3e-16 / **1.86e-15**, v 5.2e-16 / **1.38e-15** (DEBT); given
+DEBT (normalised > 1e-15); everything else AT-BAR.  Every given-entry row
+above (level 1 + 2-D) is AT-BAR.  Independent kt 3 ssh is 3.57e-15
+normalised.  All-level rows (normalised, full / partial cells): given kt-4
+two-step u 7.3e-16 / **1.86e-15** (8,937 cells, level 18), v 5.2e-16 /
+**1.38e-15** (8,764 cells) — TWO DEBT rows; given
 kt 6 AT-BAR; independent kt 4 and 6 u, v DEBT (≤2.7e-14); T, S AT-BAR
 everywhere.  Flushed subnormals (Decision 127): 0 in every run.  The kt-1
 and kt-2 given rows equal the independent rows: NEMO restarts exist only at
 even steps, so both start from the card's initial state.
 
 **Certification: NOT certified.**  Independent is over the bar from kt 3;
-given-entry is over it at one all-level row.
+given-entry is over it at two all-level rows (kt-4 u and v).
 
 ## 4. Walk of the kt-2 residual
 
@@ -102,7 +110,7 @@ given-entry is over it at one all-level row.
 The cells are scattered interior (fold 0, south 0, seam 49 of 1997),
 one-ulp-scale.  **The first non-bit boundary NEMO records is `stp_2D`'s
 exit (`stp2d.f90`, SUBROUTINE `stp_2D`; frame written by
-`l1_dump_bt_frames`, `stprk3.f90:206`).**  The statement inside it is not
+`l1_dump_bt_frames`, `ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3.f90:206`).**  The statement inside it is not
 named.
 
 Why it first shows at kt 2: G6 starts from rest, so at kt 1 every
@@ -112,13 +120,14 @@ Why it first shows at kt 2: G6 starts from rest, so at kt 1 every
 `dyn_zad`, `Ue_rhs` depth sum, drag/wind, the solver.  Ruled out by
 measurement or reading:
 
-- `r1_ht_0`: NEMO `ssmask/(ht_0+1-ssmask)` (`domain.f90:212`) vs the
+- `r1_ht_0`: NEMO `ssmask/(ht_0+1-ssmask)` (`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domain.f90:212`) vs the
   `wzv` builder's `1/ht_0`: 0 of 16 433 wet columns differ (probe above).
 - `wzv` qco recurrence: the card's form is NEMO's written association
-  (`sshwzv.f90:297-298`): `(r1_Dt*e3t_3d)*(r3a-r3b)`, then
+  (`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/sshwzv.f90:297-298`): `(r1_Dt*e3t_3d)*(r3a-r3b)`, then
   `pww(k+1) - (ze3div + .)*tmask`.  Read, not measured.
 - `r3u/r3v(Kbb)`: NEMO carries the previous stage-3 `dom_qco_r3c_RK3`
-  ratio (`stprk3_stg.f90:242-244`; `domqco.f90:266-269`); the card's builder
+  ratio (`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3_stg.f90:242-244`;
+  `ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domqco.f90:266-269`); the card's builder
   has the same operation order.  Read, not measured.
 
 NEMO writes no `stp_2D` operand after kt 1: the slow-forcing dump
@@ -148,8 +157,8 @@ statement G6-selected, re-score kt 1..6.
 
 ## D122 pointer (ORCA2 lane)
 
-The selected statements run on ORCA2: `stprk3.f90:237`, `stp2d.f90:152/156`,
-`restart.f90:367/405` in `ORCA2_OMIP_L4/BLD/ppsrc/nemo/`.  Import waits for
+The selected statements run on ORCA2 at the ORCA2_OMIP_L4 lines in the §1
+table (stprk3 237, stp2d 152/156, restart 367/405/184).  Import waits for
 G6 certification.
 
 ## Tests and review
@@ -160,6 +169,13 @@ G6 certification.
 - Receipt-citation gate + private-import ratchet: 23 passed, after a
   mechanical re-anchor of three gate pins (`5c0b23703`: recipe 4126-4131 ->
   4132-4137, 3971 -> 3977; ladder 655-663 -> 664-672).
+- Receipt citation gate on THIS receipt (from its title): 17 citations,
+  unmapped 0, failures 0, map audit 0; a planted 2-line shift of the
+  ORCA2 restart.f90 405 citation FAILS it.  Round-42 entries added to the
+  gate's map (all paths now name the build).
+- Corrected after the independent Claude review (HOLD): two given-entry
+  all-level rows are over the bar, not one; independent's first over-bar
+  row is kt 3 ssh.  The review CONFIRMED the implementation.
 - codex review: paused (quota).  The operator runs an independent Claude
   review of this diff before landing.
 

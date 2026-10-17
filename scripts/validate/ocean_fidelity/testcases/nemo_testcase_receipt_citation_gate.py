@@ -123,6 +123,17 @@ _OVERFLOW_R56UP3_COMPILED = (
 _OVERFLOW_R62ZDF_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo")
 FILES = {
+    # --- GRIDLADDER round 42 (G6 round 6 receipt) ---
+    "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90": (
+        _ORCA2G5_R31 / "ppsrc/nemo/restart.f90"),
+    "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domain.f90": (
+        _ORCA2G5_R31 / "ppsrc/nemo/domain.f90"),
+    "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/sshwzv.f90": (
+        _ORCA2G5_R31 / "ppsrc/nemo/sshwzv.f90"),
+    "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _ORCA2G5_R31 / "ppsrc/nemo/stprk3_stg.f90"),
+    "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domqco.f90": (
+        _ORCA2G5_R31 / "ppsrc/nemo/domqco.f90"),
     # --- GRIDLADDER round 32 (G5 record build) ---
     "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2G5_R31 / "ppsrc/nemo/dynspg_ts.f90"),
@@ -1742,6 +1753,24 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- GRIDLADDER round 42 (G6 round 6 receipt) ---
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3.f90:241': 'ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:237': 'ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stp2d.f90:152': 'r3t(ji,jj,Kaa) =  ssh(ji,jj,Kaa) * r1_ht_0(ji,jj)',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stp2d.f90:156': 'CALL wzv    ( kt, Kbb, Kbb, Kaa , uu(:,:,:,Kbb), vv(:,:,:,Kbb), ww, np_velocity )',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90:367': "CALL iom_get( numror, jpdom_auto, 'ssha'   , ssh(:,:,Kaa) )",
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90:184': "CALL iom_rstput( kt, nitrst, numrow, 'ssha', ssh(:,:,Kaa) )",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:152': 'r3t(ji,jj,Kaa) =  ssh(ji,jj,Kaa) * r1_ht_0(ji,jj)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:156': 'CALL wzv    ( kt, Kbb, Kbb, Kaa , uu(:,:,:,Kbb), vv(:,:,:,Kbb), ww, np_velocity )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:367': "CALL iom_get( numror, jpdom_auto, 'ssha'   , ssh(:,:,Kaa) )",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:184': "CALL iom_rstput( kt, nitrst, numrow, 'ssha', ssh(:,:,Kaa) )",
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90:406': 'ssh(:,:,Kaa) = ssh(:,:,Kbb)           !*  set ssh at Kaa',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:405': 'ssh(:,:,Kaa) = ssh(:,:,Kbb)           !*  set ssh at Kaa',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3.f90:206': 'CALL l1_dump_bt_frames( kstp, Naa )',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domain.f90:212': 'r1_ht_0(:,:) = ssmask (:,:) / ( ht_0(:,:) + 1._wp -  ssmask (:,:) )',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/sshwzv.f90:297-298': ['pww(ji,jj,jk) = pww(ji,jj,jk+1) - (  ze3div(ji,jj,jk)', '&                               + r1_Dt * e3t_3d(ji,jj,jk) * ( r3t(ji,jj,Kaa) - r3t(ji,jj,Kbb) )  ) * tmask(ji,jj,jk)', 2],
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3_stg.f90:242-244': ['r3t(:,:,Kaa) = r3ta(:,:)                          ! at N+1   (Kaa)', ('r3v(:,:,Kaa) = r3va(:,:)', 3), 3],
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domqco.f90:266-269': [('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 2), ('&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 2), 4],
     # --- GRIDLADDER round 32 (G5 round 2 receipt) ---
     'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynspg_ts.f90:1431-1432': [
         'pCdU_u(ji,jj) = r1_2*( ( rCdU_bot(ji+1,jj) + rCdU_bot(ji,jj) ) + ( rCdU_top(ji+1,jj) + rCdU_top(ji,jj) ) )',
