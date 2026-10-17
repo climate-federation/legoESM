@@ -189,9 +189,8 @@ the 35 added fields is inert on LOCK_EXCHANGE and OVERFLOW is not measured
 - No `packages/` change: GYRE trajectory and day-30 gates not required.
 - Citation gate (corrected receipt, commit `28544e56f`): this receipt PASS (8
   citations, 0 unmapped); default receipt PASS (274).  The ORCA2_OMIP_L4
-  exchange citation reuses the map's existing `:795-796` entry (same two
-  anchored lines, no routine pin); the R299W7 `:826-827` entry is pinned to
-  `stp_RK3_stg`.  Line plant on
+  exchange citation reuses the map's existing entry for those two lines (no
+  routine pin); the new R299W7 exchange entry is pinned to `stp_RK3_stg`.  Line plant on
   `ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:826-827` fails
   (`SYMBOL-NOT-AT-LINE`, exit 1); routine plant on the same citation fails
   (`ROUTINE-CONTEXT-MISMATCH`, exit 1).  Logs in
