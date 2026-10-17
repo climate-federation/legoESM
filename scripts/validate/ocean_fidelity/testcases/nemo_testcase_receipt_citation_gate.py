@@ -240,6 +240,8 @@ FILES = {
         _ORCA2_COMPILED / "domqco.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/eosbn2.f90": (
         _ORCA2_COMPILED / "eosbn2.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfsh2.f90": (
+        _ORCA2_COMPILED / "zdfsh2.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90": (
         _ORCA2_COMPILED / "dynvor.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90": (
