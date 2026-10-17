@@ -3580,14 +3580,15 @@ def read_orca2g1_deck(
         **_orca2g_sbc_switch_set(values),
         **_orca2g_dynadv_switch_set(values),
         "namsbc.nn_ice": 2 if case in _ORCA2G_SI3_CASES else 0,
-        "namzdf.ln_zdfcst": case != "ORCA2V1-tke",
-        "namzdf.ln_zdftke": case == "ORCA2V1-tke",
+        "namzdf.ln_zdfcst": case not in _ORCA2V_CASES,
+        "namzdf.ln_zdftke": case in _ORCA2V_CASES,
+        **(_ORCA2V2_EVD_FIELDS if case == "ORCA2V2-evd" else {}),
     }
     tke_lines = {k: v for k, v in values.items() if k.startswith("namzdf_tke.")}
-    if tke_lines != (_ORCA2V1_TKE_FIELDS if case == "ORCA2V1-tke" else {}):
+    if tke_lines != (_ORCA2V1_TKE_FIELDS if case in _ORCA2V_CASES else {}):
         raise ValueError(
             f"ORCA2G1 deck states &namzdf_tke {tke_lines!r}; the card "
-            "transcribes only ORCA2's four lines, and only on V1")
+            "transcribes only ORCA2's four lines, and only on the V rungs")
     for name, want in required.items():
         if name not in values:
             raise ValueError(f"ORCA2G1 deck does not state {name}")
@@ -3713,7 +3714,7 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         fold_convention="(n_lon-i)%n_lon",     # jperio = 4: T-pivot fold
         use_mesh_coriolis=True,                # ff_f/ff_t are in the file
     )
-    if case == "ORCA2V1-tke":                  # htau reads gphit, zdftke.f90:864
+    if case in _ORCA2V_CASES:                  # htau reads gphit, zdftke.f90:864
         grid = grid._replace(
             native_lat_T_deg=jnp.asarray(dom["gphit"], dtype=jnp.float64))
     # dommsk.f90:289 applies strait_shlat only when the file holds it (G1's: none).
@@ -3764,7 +3765,7 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         nemo_bbl_e3u_0=jnp.asarray(dom["e3u_0"], dtype=jnp.float64),
         nemo_bbl_e3v_0=jnp.asarray(dom["e3v_0"], dtype=jnp.float64),
         nemo_e3t_jpk=(jnp.asarray(dom["e3t_jpk"], dtype=jnp.float64)
-                      if case == "ORCA2V1-tke" else None),
+                      if case in _ORCA2V_CASES else None),
     )
 
     surface_wet = tmask[..., 0]
@@ -3787,7 +3788,7 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         S=state.S.replace(data=jnp.asarray(s_init, dtype=jnp.float64)),
         eta=state.eta.replace(data=jnp.asarray(ssh, dtype=jnp.float64)),
     )
-    if case == "ORCA2V1-tke":
+    if case in _ORCA2V_CASES:
         state = _orca2v1_tke_initial_state(state, tmask, deck)
 
     base = _model_config(
@@ -3808,15 +3809,18 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         ddm=vertical.ddm._replace(enabled=False),
         vmix_background_mode="additive",
     )
-    if case == "ORCA2V1-tke":
+    if case in _ORCA2V_CASES:
         vertical = _orca2v1_tke_vertical(vertical, deck)
     physics = base.physics._replace(
         vertical_mixing=vertical,
         shortwave_penetration=_orca2g_qsr(case, deck.rn_Dt_s),    # ln_traqsr (G4: ORCA2's RGB)
         mle=None,                                       # ln_mle = F
         # ln_zdfevd = F: the ORCA2 identity carries ORCA2's enhanced
-        # vertical diffusion, which this deck switches off.
-        convection=base.physics.convection._replace(scheme="none"),
+        # vertical diffusion, which this deck switches off; V2 keeps it
+        # with ORCA2's nn_evdm = 0.
+        convection=(_orca2v2_evd_convection(base.physics.convection)
+                    if case == "ORCA2V2-evd" else
+                    base.physics.convection._replace(scheme="none")),
     )
     if _ORCA2G_DYNADV_VEC[case]:
         # ln_dynadv_vec -> np_VEC_c2 (dynadv.f90:186): the ORCA2 identity's own
@@ -3933,12 +3937,13 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
             card.case in _ORCA2G_SI3_CASES),
         "stage-3 salt Krhs": cfg.rk3_stage3_salt_nemo_written is (
             card.case in _ORCA2G_SI3_CASES),
-        ("ln_zdftke" if card.case == "ORCA2V1-tke" else "ln_zdfcst"): (
-            _orca2v1_tke_selected(vm) if card.case == "ORCA2V1-tke" else
+        ("ln_zdftke" if card.case in _ORCA2V_CASES else "ln_zdfcst"): (
+            _orca2v1_tke_selected(vm) if card.case in _ORCA2V_CASES else
             (vm.scheme == "constant" and not vm.constant.lat_dependent
              and not vm.iwm.enabled and not vm.ddm.enabled)),
         "ln_zad_Aimp=F": not cfg.adaptive_implicit_vertadv,
-        "ln_zdfevd=F": cfg.physics.convection.scheme == "none",
+        ("ln_zdfevd" if card.case == "ORCA2V2-evd" else "ln_zdfevd=F"): (
+            _orca2v2_evd_selected(cfg.physics.convection) if card.case == "ORCA2V2-evd" else cfg.physics.convection.scheme == "none"),
         "nn_e3f_typ=0": cfg.een_e3f_scheme == "nemo_avg4",
         "lateral_mixing_none": cfg.physics.lateral_mixing.scheme == "none",
         "ln_trabbl=F": (cfg.bbl_adv_option, cfg.bbl_diffusive_option) == (0, 0),
@@ -4346,7 +4351,8 @@ def build_orca2g5_ice_card(deck_root: str | Path) -> NEMOTestcaseCard:
 # switch, ORCA2's TKE closure.  The deck is G5's plus ln_zdftke=T,
 # ln_zdfcst=F and ORCA2's four &namzdf_tke lines (namelist_cfg:404-419);
 # every other key, ln_zdfiwm=F and ln_drg_OFF=T included, is G5's.
-_ORCA2G_SI3_CASES = ("ORCA2G5-ice", "ORCA2V1-tke")
+_ORCA2G_SI3_CASES = ("ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd")
+_ORCA2V_CASES = ("ORCA2V1-tke", "ORCA2V2-evd")
 _ORCA2V1_TKE_FIELDS: dict[str, object] = {
     "namzdf_tke.nn_mxl": 3, "namzdf_tke.nn_etau": 1,
     "namzdf_tke.ln_mxhsw": False, "namzdf_tke.nn_mxlice": 2,
@@ -4371,7 +4377,9 @@ for _rung_table in (_ORCA2G_JPK, _ORCA2G_ZDF_FACES, _ORCA2G_TRA_ZDF_ROUNDED,
                     _ORCA2G_DYNADV_VEC, _ORCA2G_TSD_INIT, _ORCA2G_TSD_DMP,
                     _ORCA2G_SBC):
     _rung_table["ORCA2V1-tke"] = _rung_table["ORCA2G5-ice"]
+    _rung_table["ORCA2V2-evd"] = _rung_table["ORCA2G5-ice"]
 _ORCA2G_UNMEASURED["ORCA2V1-tke"] = ORCA2V1_UNMEASURED
+_ORCA2G_UNMEASURED["ORCA2V2-evd"] = ORCA2V1_UNMEASURED
 
 
 def _orca2v1_tke_vertical(g5_vm, deck: ORCA2G1Deck):
@@ -4462,6 +4470,41 @@ def build_orca2v1_tke_card(deck_root: str | Path) -> NEMOTestcaseCard:
     return build_orca2g1_flat_card(deck_root, "ORCA2V1-tke")
 
 
+# ORCA2V2: certified V1 plus ORCA2's enhanced vertical diffusion, verbatim
+# ORCA2_OMIP_L4/EXP00/namelist_cfg:390-392 (zdf_evd, zdfevd.f90:56; called
+# at zdfphy.f90:359 after the avt_k copy).
+_ORCA2V2_EVD_FIELDS: dict[str, object] = {
+    "namzdf.ln_zdfevd": True, "namzdf.nn_evdm": 0, "namzdf.rn_evd": 100.0,
+}
+
+
+def _orca2v2_evd_convection(identity_convection):
+    """The ORCA2 identity's EVD arm (nemo_bn2 trigger MIN(rn2,rn2b) <= -1e-12,
+    avt replaced by rn_evd, zdfevd.f90:107-110) with nn_evdm = 0: avm is left
+    untouched (zdfevd.f90:121), so no convective viscosity."""
+
+    ed = identity_convection.enhanced_diffusion._replace(
+        K_conv=_ORCA2V2_EVD_FIELDS["namzdf.rn_evd"], nu_conv=0.0)
+    return identity_convection._replace(scheme="enhanced_diffusion",
+                                        enhanced_diffusion=ed)
+
+
+def _orca2v2_evd_selected(conv) -> bool:
+    ed = conv.enhanced_diffusion
+    return conv.scheme == "enhanced_diffusion" and (
+        ed.K_conv, ed.nu_conv, ed.K_bg, ed.nu_bg, ed.smooth_transition,
+        ed.n2_mode, ed.n2_eos_form, ed.n2_threshold, ed.two_level_trigger,
+        ed.evd_n2_time_level, ed.evd_composition) == (
+        _ORCA2V2_EVD_FIELDS["namzdf.rn_evd"], 0.0, 0.0, 0.0, False,
+        "nemo_bn2", "eos80", -1.0e-12, True, "nemo_now_before", "nemo_replace")
+
+
+def build_orca2v2_evd_card(deck_root: str | Path) -> NEMOTestcaseCard:
+    """V2: certified V1 plus ORCA2's enhanced vertical diffusion (ln_zdfevd)."""
+
+    return build_orca2g1_flat_card(deck_root, "ORCA2V2-evd")
+
+
 __all__ = (
     "NEMOTestcaseCard",
     "GYRESurfaceBoundaryCondition",
@@ -4478,6 +4521,7 @@ __all__ = (
     "build_orca2g4_sbc_card",
     "build_orca2g5_ice_card",
     "build_orca2v1_tke_card",
+    "build_orca2v2_evd_card",
     "ORCA2V1_UNMEASURED",
     "orca2g_forcing_failures",
     "orca2g_ice_failures",
