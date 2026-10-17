@@ -55,10 +55,13 @@ import nemo_testcase_g1_orca2grid_ladder as g1  # noqa: E402
 from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
 
 CASE = "ORCA2G2-zps"
-CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke")
-FORCED = ("ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke")   # NEMO-supplied surface fields each kt (D123)
-# G5's record build (ORCA2-lane frames); V1 = that build + one hm_i writer
-SI3 = ("ORCA2G5-ice", "ORCA2V1-tke")
+CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke",
+         "ORCA2V2-evd")
+FORCED = ("ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd")   # NEMO-supplied surface fields each kt (D123)
+# G5's record build (ORCA2-lane frames); V1 = that build + one hm_i writer;
+# V2 = V1's record binary with ORCA2's three EVD namelist lines
+SI3 = ("ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd")
+TKE_CASES = ("ORCA2V1-tke", "ORCA2V2-evd")
 # V1: NEMO restart TKE fields -> carried card leaves (w levels 2..nk; the
 # card carries no surface en and no bottom w level)
 TKE_RESTART = {"tke": "en", "tke_avm": "avm_k", "tke_avt": "avt_k", "tke_dissl": "dissl"}
@@ -686,7 +689,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 rows[f] = {"summary": class_summary(by_level), "levels": by_level,
                            "ref_max_abs": float(np.max(np.abs(ref))),
                            "restart": str(path)}
-            if case == "ORCA2V1-tke":
+            if case in TKE_CASES:
                 for leaf, var in TKE_RESTART.items():
                     ref = levels_last(h.variables[var][0], nk + 1)[..., 1:nk]
                     by_level = level_rows(ref, np.asarray(getattr(state, leaf).data), wcls)
@@ -717,16 +720,16 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 bt_hist=g1.nemo_histories(path.parent, kt),
                 **({leaf: getattr(s0, leaf).replace(data=jnp.asarray(
                     levels_last(var(n), nk + 1)[..., 1:nk]))
-                    for leaf, n in TKE_RESTART.items()} if case == "ORCA2V1-tke" else {}),
+                    for leaf, n in TKE_RESTART.items()} if case in TKE_CASES else {}),
                 **({"tke_avm_surface": s0.tke_avm_surface.replace(
-                    data=jnp.asarray(var("avm_k")[0]))} if case == "ORCA2V1-tke" else {}))
+                    data=jnp.asarray(var("avm_k")[0]))} if case in TKE_CASES else {}))
 
     def forcing(kt):
         if case not in FORCED:
             return {}
         freshwater, surface = (g4 if case == "ORCA2G4-sbc" else g5).nemo_supplied_forcing(
             card, root, kt)
-        if case == "ORCA2V1-tke":    # nn_mxlice=2 reads SI3's hm_i (D123 route)
+        if case in TKE_CASES:    # nn_mxlice=2 reads SI3's hm_i (D123 route)
             surface = surface._replace(ice_mean_thickness_hm_i=g5.read_v1_hm_i(root, kt))
         return {"freshwater": freshwater, "surface_forcing": surface}
 

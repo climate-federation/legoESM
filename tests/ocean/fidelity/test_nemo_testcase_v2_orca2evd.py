@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.util
 import subprocess
+import sys
+from pathlib import Path
 
+import jax
 import pytest
 
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -126,3 +130,44 @@ def test_run_script_reuses_v1_binaries_unbuilt_and_is_fail_closed():
     assert "ln_zdfevd = +T" in text and "nn_evdm += +0" in text
     out = subprocess.run(["bash", str(RUN), "--bogus"], capture_output=True)
     assert out.returncode == 64
+
+
+V2_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                 "gridladder_vmix_rounds/round12/oracle_v2_r12")
+V1_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                 "gridladder_vmix_rounds/round1/oracle_v1_r1")
+V2_TWINS = [V2_RECORD / t for t in ("twin_a", "twin_b", "twin_c")]
+
+
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+@pytest.mark.skipif(not all(t.is_dir() for t in V2_TWINS)
+                    or not (V1_RECORD / "twin_b").is_dir(),
+                    reason="the operator's V1/V2 records are not on this machine")
+def test_v2_independent_kt1_2_every_field_bit_for_bit_and_evd_is_not_inert():
+    import netCDF4
+    import numpy as np
+
+    # control: EVD moves NEMO's kt-2 T, so matching V2's record is not matching V1's
+    kt2 = "ORCA2G1_00000002_restart.nc"
+    with netCDF4.Dataset(V1_RECORD / "twin_b" / kt2) as a, \
+            netCDF4.Dataset(V2_RECORD / "twin_b" / kt2) as b:
+        assert np.count_nonzero(np.asarray(a["tn"][:]) != np.asarray(b["tn"][:]))
+    sys.path.insert(0, str(CASES))
+    spec = importlib.util.spec_from_file_location(
+        "v2_ladder", CASES / "nemo_testcase_g2_orca2bathy_ladder.py")
+    ladder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ladder)
+    out = ladder.run(V2_TWINS[0], arm="independent", kt_from=1, kt_to=2,
+                     restart_roots=V2_TWINS, allow_dirty=True, case="ORCA2V2-evd")
+    assert [k["kt"] for k in out["per_kt"]] == [1, 2]
+    levels = out["per_kt"][1]["all_levels"]
+    assert {"en", "avm_k", "avt_k", "dissl", "avm_k_surface"} <= set(levels or {})
+    for k in out["per_kt"]:
+        bad = [r["name"] for r in k["rows"] if r["n_unequal"]]
+        for name, lv in (k["all_levels"] or {}).items():
+            s = lv.get("summary")
+            if (lv["n_unequal"] if s is None else
+                    s["full"]["n_unequal"] or s["partial"]["n_unequal"]
+                    or s["dry_n_unequal"]):
+                bad.append(name)
+        assert not bad, f"kt {k['kt']} unequal: {bad}"
