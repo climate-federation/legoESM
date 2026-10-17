@@ -8150,6 +8150,27 @@ CITATION_MAP = {
     'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfddm.f90:161': 'zrr = zrau / rn_hsbfr',
     'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfddm.f90:59': 'SUBROUTINE zdf_ddm( kt, Kmm, p_avm, p_avt, p_avs )',
     'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfphy.f90:363': 'CALL zdf_ddm( kt, Kmm,  avm, avt, avs )',
+    # --- GRIDLADDER-VMIX round 14 (V4 = V3 + ORCA2's internal-wave mixing) ---
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:396': 'ln_zdfiwm   = .true.       ! internal wave-induced mixing',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:421-436': [
+        ('ln_tsdiff   = .true.', 1), ("sn_dsc      = 'zdfiwm_forcing_orca2'", 1), 16,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:140': 'SUBROUTINE zdf_iwm( kt, Kmm, p_avm, p_avt, p_avs )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:373': 'SUBROUTINE zdf_iwm_init',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:283': 'IF( ln_zdfiwm )   CALL zdf_iwm_init       ! internal wave-driven mixing',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:476': 'CALL fld_read( nit000, 1, sf_iwm )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:835-838': [
+        ('rn_emin  = 1.e-10_wp', 1), ('rmxl_min = 1.e-03_wp', 1), 4,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:441-443': [
+        ('avmb(:) = rnu', 1), ('avtb_2d(:,:) = 1._wp', 1), 3,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:227': 'avt_k(:,:,jk)    = avtb_2d(:,:) * avtb(jk) * wmask(',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:233-317': [
+        ('! part independent of the level', 1),
+        ('p_avs(ji,jj,jk) = p_avs(ji,jj,jk) + zav_wave(ji,jj) * zav_ratio(ji,jj)', 1),
+        85,
+    ],
 }
 
 
