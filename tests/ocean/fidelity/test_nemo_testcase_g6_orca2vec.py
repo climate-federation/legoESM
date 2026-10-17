@@ -357,3 +357,34 @@ def test_kt3_zad_rounds_e1e2t_ww(kt3_rows):
 def test_kt3_zad_written_association_on_u(kt3_rows):
     assert kt3_rows["after_zad.u"] == 0                  # without: 2,399
     assert kt3_rows["given_entry.kt3.uu_b"] == 0         # without: 216
+
+
+NEMO_ROOT = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
+FIX1_STG = NEMO_ROOT / "cfgs/ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/MY_SRC/stprk3_stg.F90"
+
+
+@pytest.mark.skipif(not FIX1_STG.is_file(), reason="no G5 r31 FIX1 build")
+def test_r44_stage_term_acquisition_patch_is_additive(tmp_path):
+    """run_r44_stage_terms.sh: both patches apply once, remove no line, write
+    after the stage momentum wzv, around HPG/VOR and after dyn_keg/dyn_zad."""
+    script = G6 / "run_r44_stage_terms.sh"
+    text = script.read_text()
+    pin = re.search(r"G6_DECK_SHA=(\w+)", text).group(1)
+    assert hashlib.sha256((G6 / "namelist_cfg").read_bytes()).hexdigest() == pin
+    funcs = re.search(r"^patch_stage\(\) \{.*?^\}\n", text, re.S | re.M).group(0)
+    stg, adv = tmp_path / "stprk3_stg.F90", tmp_path / "dynadv.F90"
+    shutil.copy(FIX1_STG, stg)
+    shutil.copy(NEMO_ROOT / "src/OCE/DYN/dynadv.F90", adv)
+    subprocess.run(["bash", "-c", funcs + f'\npatch_stage "{stg}" "{adv}"'], check=True)
+    import difflib
+    for new, old in ((stg, FIX1_STG), (adv, NEMO_ROOT / "src/OCE/DYN/dynadv.F90")):
+        diff = list(difflib.ndiff(old.read_text().splitlines(), new.read_text().splitlines()))
+        assert not [d for d in diff if d.startswith("- ")]
+    s = stg.read_text()
+    assert s.count("IF( ll_g6s ) WRITE(g6s_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)") == 3
+    assert s.count("g6_keg_unit = ") == 2
+    assert "IF( g6_keg_unit >= 0 )   WRITE(g6_keg_unit)" in adv.read_text()
+    # a second application refuses (anchors no longer unique)
+    again = subprocess.run(["bash", "-c", funcs + f'\npatch_stage "{stg}" "{adv}"'],
+                           capture_output=True, text=True)
+    assert again.returncode != 0 and "anchor not unique" in again.stderr
