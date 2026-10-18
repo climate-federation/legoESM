@@ -164,11 +164,21 @@ diff touches only the ORCA2 builders and the ORCA2/GYRE Langmuir check
   reverted 6/10 fail; tree restored, `git status` clean.
 - Updated: round 307's selection test (the card now runs the penetration),
   one recipe unit test (its synthetic ORCA2 card now carries the literal
-  Langmuir form the validator requires).
-- Neighbouring ORCA2 selection (rounds 305-312), recipe, rung-0 card and
-  card-default tests: see the battery line below.  One failure there is
-  pre-existing: the after-SSH form test expects the pre-D132 value (round
-  308 moved it; the field is not in this round's config diff).
+  Langmuir form the validator requires), the card-constructibility
+  Langmuir pin.
+- Neighbouring battery (ORCA2 selection rounds 305-312, recipe, rung-0
+  card, card defaults, constructibility, IWM maps, G5/drag imports,
+  ORCA2G1 card, round-281 split): 261 passed, 2 failed before the
+  constructibility pin was updated.  Both remaining failures are the same
+  pre-existing check: they expect the pre-D132 after-SSH form (round 308
+  moved it; the field is not in this round's config diff).
+- Default gate (land.sh set, JAX_ENABLE_X64=1): citation gate + private-
+  import ratchet + TKE + recipe + freshwater + barotropic state + ORCA2
+  parallel receipt 143 passed; face-mask rank 2 passed.
+- This receipt's citation gate: PASS, 21 citations, 0 failures, 0 map
+  entries failing (19 new entries); a planted 2-line shift of the
+  terminal-step citation exits 1.  16 citations of the ORCA2 builder
+  shifted by the selection were re-anchored (round-311 tool).
 - The frozen round-279 runoff audit pins the then-shipped 150 m and would
   now refuse; it is a historical gate, no test runs that audit.
 - codex review: paused (quota).  The operator runs an independent Claude
