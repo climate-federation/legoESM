@@ -204,9 +204,23 @@ UNVERIFIED:
 - other divisions by a constant elsewhere in V4's step were not audited one by one; every score row is exact, so
   none moved a bit in these ten steps.
 
+## 6. Second resume: V4 record test (review HOLD)
+
+Independent Claude review reproduced the certification and held on one gap: removing the internal-wave call from the
+K-profile builder left every V4 test green (no record test, unlike V2 and V3).
+- **Added** (`f08d48983`): V4 record test, kt 1-2, against `round14/oracle_v4_r14` (skipped when absent): control
+  (IWM moves NEMO's kt-2 T vs V3's record), kt-1 consumed avt/avs/avm wet and dry, every independent-arm field kt 1-2,
+  IWM active in the same cells on both sides. V3's record-test body moved into two shared helpers; both tests call
+  them (no copy). No arithmetic changes.
+- **Plant** (scratch clone, internal-wave call replaced by a pass-through): **1 failed**, avt unequal in 414,119 wet
+  W cells. **Restored**: V3 + V4 test files **15 passed**, 0 skipped (612 s). Evidence: `round14/resume2/`.
+- Gates at this update: default gate __DEFAULT__; per-receipt citation gate __CITE__.
+
+UNASKED (second resume), offered for revert: V3's record test now calls the shared helpers (same assertions).
+
 ## Machine lines
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r14/repo
 ACQUISITION_NEEDED: NONE
-DECISION_NEEDED: NONE (V2's step-entry EVD trigger decision from round 13 still pending; untouched here)
-ROUND_STATUS: V4_CERTIFIED — V3 + ORCA2's internal-wave mixing (ln_zdfiwm T, ln_mevar F, ln_tsdiff T, six zdfiwm_forcing_orca2 maps, NEMO's forced TKE floors) bit-for-bit with NEMO kt 1..10 under both labels, every field incl. kt-1 avt/avs/avm and en/avm_k/avt_k/dissl (worst row 0 under each), after one V4-selected association fix (zdf_iwm's hbot_iwm divisions kept true under jit); IWM active in all 414,119 wet W cells, same cells on the card; codex review: paused (quota).
+DECISION_NEEDED: NONE (round 13's V2 EVD-trigger question was taken as D136; untouched here)
+ROUND_STATUS: V4_CERTIFIED — V4 record test added (kt 1-2 every field + kt-1 avt/avs/avm; fails with IWM removed); V3 + ORCA2's internal-wave mixing (ln_zdfiwm T, ln_mevar F, ln_tsdiff T, six zdfiwm_forcing_orca2 maps, NEMO's forced TKE floors) bit-for-bit with NEMO kt 1..10 under both labels, every field incl. kt-1 avt/avs/avm and en/avm_k/avt_k/dissl (worst row 0 under each), after one V4-selected association fix (zdf_iwm's hbot_iwm divisions kept true under jit); IWM active in all 414,119 wet W cells, same cells on the card; codex review: paused (quota).
