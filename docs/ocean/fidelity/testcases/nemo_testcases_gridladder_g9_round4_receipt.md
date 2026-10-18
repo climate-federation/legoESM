@@ -12,7 +12,7 @@ statement is earlier, inside the FCT's upstream pass, and is not landed.
   re-anchor and test follow-ups `4d675a4c6`, `cd6f3ed73`.
 - codex review: operator.
 - Evidence: `gridladder_rounds/round49/` (manifest `manifest.sha256`, first 16
-  `6645c412a9444730`; pickles and arrays excluded).
+  `342213cbf602129b`; pickles and arrays excluded).
 - NEMO lines are cited in ORCA2_OMIP_L4.  `stprk3_stg.f90`, `trazdf.f90`,
   `traadv_fct.f90`, `trasbc.f90` are byte-identical to the record build
   ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1 (`cmp`).
