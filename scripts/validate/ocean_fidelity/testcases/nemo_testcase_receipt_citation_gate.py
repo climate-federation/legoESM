@@ -2858,7 +2858,7 @@ CITATION_MAP = {
         'NEMO_FCT_STENCIL_TRACE_FIELDS = (',
         'return_limiter_activity: bool = False,', 35],
     'advection.py:1250-1269': [
-        'tr_west = jnp.roll(bnd_up, 1, axis=1)', ('))', 30), 18],
+        'tr_west = jnp.roll(bnd_up, 1, axis=1)', ('))', 30), 20],
     'advection.py:1341-1342': [
         ('if return_nemo_stencil_trace:', 2),
         'return div_h_fct, vert_div_fct, stencil_trace', 2],

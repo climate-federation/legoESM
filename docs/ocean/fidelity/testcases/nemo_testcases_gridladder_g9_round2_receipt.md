@@ -131,7 +131,7 @@ removed (`round47/plants/*.log`):
 | model wiring off | failed 5.3e-6 |
 | step-1 upstream image off | failed 7.0e-9 |
 | averaged upstream image off | failed 5.9e-5 |
-| antidiffusive image off (`:311`) | failed 5.3e-6 |
+| antidiffusive image off (statement 5) | failed 5.3e-6 |
 | bound north neighbour off | failed 5.3e-6 |
 | face coefficient image off | failed 7.1e-7 |
 
