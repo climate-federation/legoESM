@@ -73,12 +73,18 @@ def locate(rung: str, leaf: str, mode: str) -> dict:
     out = {"rung": rung, "leaf": leaf, "mode": mode, "traced_scales": sorted(ones),
            "worktree": probe_stamp(), "nonfinite_leaves_jit": bad,
            "nonfinite_count_jit": len(bad)}
+    # The debug flag must be on BEFORE a computation is dispatched: a cached
+    # executable's fast path skips the check (round 315's first locator run
+    # returned raised=False on an all-NaN gradient for exactly this reason).
+    # No outer jit: the inner jitted forward and its transpose are checked
+    # separately, and the failing one is re-run op by op.
+    jax.clear_caches()
     jax.config.update(f"jax_debug_{mode}", True)
     try:
-        grad(arg)
+        jax.grad(loss_of, allow_int=True)(arg)
         out["raised"] = False
     except FloatingPointError as error:
-        out.update(raised=True, message=str(error).splitlines()[0][:400],
+        out.update(raised=True, message=str(error)[:2000],
                    frames=repo_frames(error))
     finally:
         jax.config.update(f"jax_debug_{mode}", False)
