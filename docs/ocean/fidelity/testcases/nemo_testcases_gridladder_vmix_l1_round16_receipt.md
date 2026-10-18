@@ -299,7 +299,7 @@ the end-of-stage fold (1 failed, image half not mirrored). That test carries the
 Gates (clean tree, commit after `3cfd91d07`): see the gate lines below. 58 citation pins re-anchored by the edit's
 own offsets (none inside an edited hunk); the external-mode association extent 55 -> 49 lines, the same edit as
 lane A's `5380a9f8e`; nine default-receipt citations re-anchored by the same offsets; one new map entry
-(`lbcnfd.f90:665-672`).
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:665-672`).
 
 ASKED (third resume): lane A's helper and end-of-stage fold, lane A arithmetic byte-identical; G9 FCT and clock-pair
 parts left out; select on L1; delete own helper and setting; re-score; purity; plant; gates.
