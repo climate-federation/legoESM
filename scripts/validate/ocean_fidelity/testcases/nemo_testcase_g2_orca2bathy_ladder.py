@@ -910,11 +910,14 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             }
             bt = g5.read_bt_frame(
                 root / f"oracle_bt_frames_kt{kt:08d}.bin", expect_step=kt)
-            stage1 = g5.read_stage(
-                root / f"oracle_stage_kt{kt:08d}_s1.bin",
-                expect_step=kt, expect_stage=1)
+            # stprk3_stg.f90:137 saves the external solver's N+1 ``ssha``;
+            # stage 1 exposes its N+1/3 interpolation, while stage 3 restores
+            # the saved N+1 value (:235).  The hook takes that saved handoff.
+            stage3 = g5.read_stage(
+                root / f"oracle_stage_kt{kt:08d}_s3.bin",
+                expect_step=kt, expect_stage=3)
             recorded_external = (
-                jnp.asarray(stage1["ssh"]),
+                jnp.asarray(stage3["ssh"]),
                 jnp.asarray(g1.pad_u(bt["uu_b"])),
                 jnp.asarray(g1.pad_v(bt["vv_b"])),
                 jnp.asarray(g1.pad_u(bt["un_adv"])),
