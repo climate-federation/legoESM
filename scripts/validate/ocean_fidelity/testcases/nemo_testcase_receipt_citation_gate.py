@@ -1713,6 +1713,32 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # ORCA2 round 312: surface-only runoff (D126) and V1's TKE forms (D135).
+    'ORCA2_OMIP_L4/EXP00/namelist_ref:474': 'ln_rnf_depth = .false.',
+    'ORCA2_OMIP_L4/EXP00/namelist_ref:478': 'ln_rnf_depth_ini = .false.',
+    'ORCA2_OMIP_L4/EXP00/namelist_ref:480': 'rn_dep_max  = 150.',
+    'ORCA2_OMIP_L4/EXP00/namelist_ref:1236': 'ln_mxl0     = .true.',
+    'ORCA2_OMIP_L4/EXP00/namelist_ref:1243': 'rn_mxl0     =   0.04',
+    'ORCA2_OMIP_L4/EXP00/namelist_ref:1245-1246': [
+        'ln_lc       = .true.', 'rn_lc       =   0.15', 2],
+    'ORCA2_OMIP_L4/EXP00/namelist_ref:1252': 'nn_htau     =   1',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:406': 'nn_mxl      =   3',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:410': 'nn_etau     =   1',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:415': 'nn_mxlice = 2',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:238': 'SUBROUTINE sbc_rnf_div( phdivn, Kmm )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:289': 'SUBROUTINE sbc_rnf_init( Kmm )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:486-489': [
+        'ELSE                                            ! runoffs applied at the surface',
+        'h_rnf (ji,jj) = (e3t_3d(ji,jj,1) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,1)))', 4],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:199': 'SUBROUTINE tke_tke( Kbb, Kmm, p_sh2, p_avm, p_avt, p_pdlr )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:531': 'SUBROUTINE tke_avn( Kbb, Kmm, p_avm, p_avt, p_pdlr )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:644-645': [
+        'zrn2 = MAX( rn2(ji,jj,jk), rsmall )',
+        'zmxlm(ji,jk) = MAX(  rmxl_min,  SQRT( 2._wp * en(ji,jj,jk) / zrn2 )  )', 2],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:690-692': [
+        'DO jk =  jpkm1,  2,  -1  ; DO ji = ntsi-( 0), ntei+(  0)   ! from the bottom to the surface : ldown',
+        '&    MIN( zmxlm(ji,jk+1) + (e3t_3d(ji,jj,jk+1)', 3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:354': 'imlc(:) = mbkt(ntsi-(0):ntei+(0),jj) + 1',
     # ORCA2 round 311: stage-1 order and dyn_keg in the ORCA2, G1b and G8 builds.
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynkeg.f90:61': 'SUBROUTINE dyn_keg(',
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90:63': 'SUBROUTINE stp_2D(',
@@ -2397,12 +2423,12 @@ CITATION_MAP = {
     'vertical.py:883': ('class NemoEENBarotropicOperands(NamedTuple):', 1),
     'vertical.py:673': ('def nemo_qco_resolved_mesh_operands(', 1),
     'ocean_model_latlon_cgrid.py:4494': ('_nemo_filter_alpha = config.barotropic.nemo_barotropic_filter_alpha', 1),
-    'nemo_testcase_recipe.py:3790': ('def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:', 1),
-    'nemo_testcase_recipe.py:3691': ('def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:', 1),
-    'nemo_testcase_recipe.py:3739': ('def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:', 1),
-    'nemo_testcase_recipe.py:4003': ('def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:', 1),
+    'nemo_testcase_recipe.py:3814': ('def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:', 1),
+    'nemo_testcase_recipe.py:3715': ('def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:', 1),
+    'nemo_testcase_recipe.py:3763': ('def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:', 1),
+    'nemo_testcase_recipe.py:4027': ('def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:', 1),
     'vertical.py:1088': ('nemo_e3w_source="mesh_reference", allow_single_level: bool = False,', 1),
-    'nemo_testcase_recipe.py:3853': ('allow_single_level=True,               # jpk = 2: one wet level', 1),
+    'nemo_testcase_recipe.py:3877': ('allow_single_level=True,               # jpk = 2: one wet level', 1),
     # --- GRIDLADDER round 1 (G1 survey) END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
@@ -2599,7 +2625,7 @@ CITATION_MAP = {
     'nemo_testcase_recipe.py:1426-1466': [
         'def apply_orca2_hand_alterations(temperature, salinity):',
         'is what NEMO executes.', 41],
-    'nemo_testcase_recipe.py:1663-1664': [
+    'nemo_testcase_recipe.py:1668-1669': [
         'temperature, salinity = build_orca2_initial_ts(',
         'temperature_path, salinity_path, tmask)', 2],
     'ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/dtatsd.f90:218-254': [
@@ -3793,12 +3819,12 @@ CITATION_MAP = {
     'OVERFLOW_OMIP_L1/EXP00/namelist_cfg:89': 'ln_dynvor_ens = .true.',
     'overflow_kt1_10/namelist_cfg:86': 'ln_dynadv_up3 = .true.',
     'overflow_kt1_10/namelist_cfg:92': 'ln_dynvor_ens = .true.',
-    'nemo_testcase_recipe.py:3160':
+    'nemo_testcase_recipe.py:3188':
         'if (cfg.momentum_advection != "vector_invariant"',
     'ocean_pe_latlon_cgrid.py:5589': ('if _mom_adv == "flux_form":', 2),
     'ocean_pe_latlon_cgrid.py:5607': (
         '_bc_horizontal_momentum_advection_flux_form(', 2),
-    'nemo_testcase_recipe.py:3163':
+    'nemo_testcase_recipe.py:3191':
         'requires ln_dynadv_vec=.true. with nn_dynkeg=0',
     # --- ORCA2 round 57: acquired OVERFLOW UP3 source-order walk ---
     'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:157-166': [
@@ -7138,7 +7164,7 @@ CITATION_MAP = {
     # inserted the initial-state helper above the THIRD anchor only, moving it
     # 1411 -> 1493; later card additions moved all three to their current
     # merged locations without changing the anchor text.
-    'nemo_testcase_recipe.py:378,634,3144': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    'nemo_testcase_recipe.py:378,634,3172': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',

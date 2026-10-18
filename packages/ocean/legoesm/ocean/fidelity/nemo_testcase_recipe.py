@@ -1916,7 +1916,7 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         nemo_etau_wmask=True,
         tke_htau_evaluation="nemo_scalar_libm",
         tke_etau_exponential_evaluation="nemo_scalar_libm",
-        # nn_mxl=3: the literal raw length (:643-645) and the dummy-bottom
+        # nn_mxl=3: the literal raw length (:644-645) and the dummy-bottom
         # e3t(jpk) step of the bottom-up scan (:690-692).
         tke_mxl_raw_evaluation="nemo_literal",
         nemo_mxl_terminal_e3t=True,
@@ -1944,8 +1944,8 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
                 tke=tke_config, iwm=iwm_config)),
         # Decision 126: runoff at the surface only.  namelist_ref sets
         # ln_rnf_depth = ln_rnf_depth_ini = .false., so sbc_rnf_init takes
-        # nk_rnf = 1 (sbcrnf.f90:486-490) and sbc_rnf_div the surface branch
-        # (sbcrnf.f90:277-282); rn_dep_max = 150 is never read.
+        # nk_rnf = 1 (sbcrnf.f90:486-489) and sbc_rnf_div the surface branch
+        # (sbcrnf.f90:279-282); rn_dep_max = 150 is never read.
         runoff_depth_spread_m=0.0, runoff_depth_spread_map=None)
     recipe = NEMORecipe(
         model_config=model_config,
