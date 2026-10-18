@@ -163,3 +163,74 @@ def test_scaled_parts_is_bit_identical_at_one_and_scales_only_its_field(scheme):
         probe.scaled_parts(cfg._replace(physics=cfg.physics._replace(
             vertical_mixing=cfg.physics.vertical_mixing._replace(scheme="kpp"))),
             z, {})
+
+
+# --- backward non-finite walker (nan_locate --backward) ----------------------
+
+from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
+    nemo_testcase_l4_orca2_round315_nan_locate as locate,
+)
+
+_H = jnp.asarray([1.0, 0.0, 2.0, 0.0])  # two "dry" lanes of zero thickness
+_WET = _H > 0
+
+
+def _masked_div_step(st):
+    # the T update divides by a thickness that is 0 on dry lanes, then masks
+    t_new = jnp.where(_WET, st["T"] / _H, 0.0)
+    eta_new = st["eta"] + jnp.sum(st["T"])  # the SSH path never divides
+    return {"T": t_new, "eta": eta_new}
+
+
+def _state():
+    return {"T": jnp.asarray([0.5, 0.0, 1.5, 0.0]), "eta": jnp.asarray(0.25)}
+
+
+def test_walker_names_the_backward_division_and_sanitized_gradient_is_the_guarded_one():
+    out, pb = jax.vjp(jax.jit(_masked_div_step), _state())
+    ct = {"T": jnp.ones(4) * _WET, "eta": jnp.asarray(1.0)}
+    assert not np.all(np.isfinite(np.asarray(pb(ct)[0]["T"])))  # the defect is real
+    (g_raw,), ev_raw = locate.walk_pullback(pb, ct)
+    assert not np.all(np.isfinite(np.asarray(g_raw["T"])))
+    first = ev_raw[0]
+    assert first["primitive"] == "div" and first["class"] == "generated"
+    (g,), ev = locate.walk_pullback(pb, ct, sanitize=True)
+    guarded = jnp.where(_WET, 1.0 / jnp.where(_WET, _H, 1.0), 0.0) + 1.0
+    np.testing.assert_allclose(np.asarray(g["T"]), np.asarray(guarded), rtol=1e-15)
+
+
+def test_symbolic_zero_cotangent_reproduces_the_fused_gradient():
+    # SSH-only loss: fused grad is finite, the hand-chained dense-zero T
+    # cotangent hits 0/0 on the dry lanes
+    fused = jax.grad(lambda st: _masked_div_step(st)["eta"])(_state())
+    assert np.all(np.isfinite(np.asarray(fused["T"])))
+    _, pb = jax.vjp(jax.jit(_masked_div_step), _state())
+    ct = {"T": jnp.zeros(4), "eta": jnp.asarray(1.0)}
+    (dense,), ev_dense = locate.walk_pullback(pb, ct)
+    assert not np.all(np.isfinite(np.asarray(dense["T"]))) and ev_dense
+    (sym,), ev_sym = locate.walk_pullback(pb, ct, symbolic_zero_paths=("['T']",))
+    np.testing.assert_array_equal(np.asarray(sym["T"]), np.asarray(fused["T"]))
+    assert ev_sym == []
+
+
+def test_walker_finds_a_residual_nan_inside_a_scan_and_reproduces_finite_pullbacks():
+    def f(x):
+        def body(c, xi):
+            return c + jnp.sqrt(xi), c  # sqrt'(0) = inf: residual meets cotangent
+        c, ys = jax.lax.scan(body, 0.0, x)
+        return c + jnp.sum(ys)
+
+    x = jnp.asarray([4.0, 0.0, 1.0])
+    _, pb = jax.vjp(f, x)
+    (g,), ev = locate.walk_pullback(pb, jnp.asarray(1.0))
+    assert ev and not np.all(np.isfinite(np.asarray(g)))
+    # a finite pullback (no zero) is reproduced to rounding by the walker
+    _, pb2 = jax.vjp(f, jnp.asarray([4.0, 2.0, 1.0]))
+    (g2,), ev2 = locate.walk_pullback(pb2, jnp.asarray(1.0))
+    assert ev2 == []
+    np.testing.assert_allclose(np.asarray(g2), np.asarray(pb2(jnp.asarray(1.0))[0]), rtol=1e-14)
+
+
+def test_fd_sweep_defaults_reach_the_reviewed_epsilons():
+    # the review measured agreement only below 1e-6 K; the sweep must reach it
+    assert min(probe.SWEEP_EPS) <= 1e-7 and max(probe.SWEEP_EPS) >= 1e-3

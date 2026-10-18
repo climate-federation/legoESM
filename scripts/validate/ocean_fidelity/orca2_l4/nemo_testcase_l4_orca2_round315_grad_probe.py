@@ -545,6 +545,49 @@ def measure(rung: str, n_dirs: int, full_sweep: bool, output: Path | None = None
     return result
 
 
+SWEEP_EPS = (1e-3, 1e-4, 1e-5, 1e-6, 1e-7, 1e-8)  # K, along T_dir0
+
+
+def fd_sweep(rung: str, output: Path, eps_list=SWEEP_EPS) -> dict:
+    """Central FD of both losses along the probe's T_dir0 at every eps and N,
+    against the forward-mode derivative of the same traced step (the exact
+    derivative of the branch the unperturbed run takes)."""
+
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    card, state0, forcing = build(rung)
+    model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
+                                  card.recipe.model_config,
+                                  iwm_forcing=card.recipe.iwm_forcing)
+    losses, tmask = make_losses(model, card.recipe.z_coord)
+    n_list = tuple(n for n in N_LIST if n <= len(forcing))
+    step = traced_step(model)
+    trace = traceability(model, state0, forcing, card.dt_s)
+    ones = {k: jnp.float64(1.0) for k in SCALARS if trace[k]["traceable"]}
+    wet = np.asarray(tmask) > 0.5
+    d = np.random.default_rng(315).standard_normal(np.shape(state0.T.data)) * np.asarray(tmask)
+    d = jnp.asarray(d / np.sqrt(np.mean(d[wet] ** 2)))
+    t0 = state0.T.data
+    jvp = chain_forward(step, state0, ones, forcing, n_list, losses, card.dt_s,
+                        tangent_state=_with_t(_zero_tangent(state0), d))
+    out = {"rung": rung, "worktree": worktree_stamp(allow_dirty=True), "n_list": list(n_list),
+           "eps": list(eps_list), "direction": "T_dir0 (default_rng(315), unit RMS wet)",
+           "forward_mode": {f"{k}@{n}": v[1] for (k, n), v in jvp.items()}, "rel_err": {}}
+    for eps in eps_list:
+        p = chain_forward(step, _with_t(state0, t0 + eps * d), ones, forcing, n_list,
+                          losses, card.dt_s)
+        m = chain_forward(step, _with_t(state0, t0 - eps * d), ones, forcing, n_list,
+                          losses, card.dt_s)
+        out["rel_err"][f"{eps:g}"] = {
+            f"{k}@{n}": rel_err(jvp[(k, n)][1], (p[(k, n)] - m[(k, n)]) / (2 * eps))
+            for (k, n) in p}
+        output.write_text(json.dumps(out, indent=1, sort_keys=True) + "\n")
+        print(f"eps {eps:g}: {out['rel_err'][f'{eps:g}']}", flush=True)
+    return out
+
+
 def _rebuilt_fd(key, cfg, z, new_model, state0, forcing, n_list, losses, dt, eps):
     """Central FD of a model REBUILT with the scaled config (production step)."""
 
@@ -606,7 +649,13 @@ def main() -> int:
     parser.add_argument("--remat", action="store_true",
                         help="jax.checkpoint each step in the reverse pass")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--fd-sweep", action="store_true",
+                        help="only the T_dir0 epsilon sweep against forward mode")
     args = parser.parse_args()
+    if args.fd_sweep:
+        fd_sweep(args.rung, args.output)
+        print(f"STATUS SWEPT {args.rung}")
+        return 0
     try:
         result = measure(args.rung, args.directions, not args.short_sweep, args.output,
                          remat=args.remat)

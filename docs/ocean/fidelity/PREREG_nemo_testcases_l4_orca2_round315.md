@@ -49,3 +49,26 @@ reverse-vs-forward-mode relative error <= 1e-10.
   grows ~linearly in N.
 
 Failed predictions are recorded REFUTED and kept.
+
+## Resume addendum (2026-10-18, after the two HOLD reviews) — frozen before measuring
+Instruments: `nan_locate.py --backward` (walks one step's pullback equation by
+equation; records every source of a non-finite cotangent; raw and sanitized;
+dense "chained" cotangent and symbolic-zero "fused" cotangent) and
+`grad_probe.py --fd-sweep` (T_dir0, eps 1e-3..1e-8 K, against forward mode).
+Cards: rung 0 and OMT-1 for the walker (rung 10 if memory allows); rung 0 and
+OMT-1..4 for the sweep.
+- R1 control: walker raw/chained reproduces the compiled pullback (same
+  finite mask on every leaf; finite entries to <= 1e-10 relative).
+  Falsifier: any mismatch -> walker numbers not quoted.
+- R2 control: rung 0 fused SSH (raw) is finite with |dT0| = 6.86e-4 (the
+  review's compiled jit(grad)). Falsifier: NaN or a different norm.
+- R3 prediction: rung 0 chained T (raw) first source is in the stage-1/2
+  tracer path and is class "generated" (finite 0 cotangent / 0 thickness),
+  not the forward `neg`; more than one independent source exists.
+- R4 completeness: rung 0 sanitized dT0 . T_dir0 equals forward mode
+  (-4.2080326157568834e-2 T loss, 4.4076248944997483e-4 SSH, N = 1) to <= 1e-10.
+  Falsifier: a miss -> the source list is incomplete or zeroing is wrong.
+- R5: OMT-1 chained non-finite mask cotangents come from sources that the
+  fused run does not reach (fused: none).
+- R6 sweep: FD error falls ~linearly with eps until the rounding floor; at
+  N = 1 every card reaches <= 1e-6 at some eps; at N >= 2 PLAUSIBLE either way.
