@@ -91,7 +91,15 @@ read-only preflight; measured `L1_PREFLIGHT_OK` at `ff628988a`).
 
 ## 4. Gates (CPU, x64, `land.sh` PYTHONPATH)
 
-GATES_PLACEHOLDER
+- **Default gate** (`land.sh` orca2 list, incl. the citation-gate tests and the private-import ratchet) at `d6f3bda3c`:
+  **145 passed** (run in three chunks, 92 + 2 + 51, because one test alone takes 484 s).
+- **Per-receipt citation gate** on this receipt (`--from-heading` this title): **PASS, failures 0**, 32 citations,
+  unmapped 0, map entries failing audit 0; a planted shifted citation exits 1. First runs: 32 unmapped (added) and five
+  ORCA2 files unknown to the gate (registered); before that, eight pins shifted by the card edit (re-anchored).
+- **L1 + V1-V5 + G2-G5 card files and both G1 card unit files**: **190 passed, 1 failed** (417 s, 24 workers). The
+  failure (G1 stand-in expects `no_ice`, the card says `no_internal_ice_model`) fails identically at base
+  `f8b546f1a6`: pre-existing, not touched here.
+- Acquisition dry checks: `bash -n` clean; `L1_PREFLIGHT_OK`; the acting check refuses G5's own record (exit 66).
 
 **Decision 122.** `trabbl.f90` is byte-identical in G5's builds and ORCA2_OMIP_L4; the L1 statements are the ones the
 full ORCA2 card already selects.
