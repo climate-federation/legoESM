@@ -201,9 +201,50 @@ Findings, one line each (no action taken):
 
 UNVERIFIED (resume): beyond kt 10 nothing scored; the full ORCA2 card's BBL not re-measured.
 
+## 6. Second resume: review items (codex HOLD; Claude reproduced)
+
+Record and protocol as section 5. Evidence: `round16/score/` (`*_l1ghost*`, `l1test_plant412.log`,
+`ghost_unit_plant.log`, `l1test_restored2.log`). Commit `53624609d`.
+
+**Item 1 — fold ghost transcribed.** NEMO's T-point fold fills the ghost north of the stored pivot row from the
+row below it (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:588-590`, in `lbc_nfd_dp`,
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:561`); the BBL read the pivot row's own mirror. New switch
+`bbl_nemo_pivot_ghost` (default off, L1 only, selector-checked) routes the BBL's init geometry, face gate and trend
+through the existing shared fold-ghost helper. Section 5's first finding is closed by this.
+
+**Item 2 — `trabbl.f90:412` now covered.** The record test's independent arm runs kt 1-4 (jitted step, traced state,
+x64). Plant (scratch worktree, the `ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:412` depth replaced by the old thickness
+ratio): **1 failed**, kt 4 T and S unequal. Restored: L1 file **11 passed**. New record-free fold-ghost test: fails
+with the old mirror, passes restored.
+
+**Re-score (both labels, kt 1-10):** independent 68 + 36 all-level rows, 4,162 entries, 0 nonzero; given-NEMO-entry
+68 + 20, 2,608 entries, 0 nonzero; dry included; D127 census empty. **L1 stays CERTIFIED** after the transcription.
+Purity: full ORCA2, DINO, G5, V1-V5 one-step jaxprs IDENTICAL to base; L1's changes (169,643 -> 169,659 lines).
+
+**Item 3 — NOT DONE: lane A's commits do not cherry-pick cleanly.** My own pivot-row helper stays in place.
+- FCT fold commit (lane A `2cdf9d2afd`): the shared helper and its external-mode use apply cleanly; three hunks in the
+  tracer-advection module conflict (they sit inside lane A's G9 FCT fold block, absent here), and the G9 test file
+  does not exist here.
+- End-of-stage fold commit (lane A `d2d43d493e`): the three end-of-stage fold calls apply cleanly, but the same commit
+  carries a second statement (G9's stage vertical-velocity clock pair) whose hunks conflict in four files (the
+  vertical-velocity routine, the state config, the recipe, the G2 ladder test) because they build on lane A's G6-G9
+  stored-ratio and card code; plus the G9 test file again.
+- Resolving would mean dropping or editing lane A hunks by hand, so per the instruction I stopped. Scratch branch
+  deleted; tree verified clean.
+
+Gates (CPU, x64, `land.sh` PYTHONPATH): see the lines below this section's choices.
+
+ASKED (second resume): items 1-3 as instructed; re-score; plants; gates.
+UNASKED, offered for revert:
+- one more config switch for item 1 (rather than folding it into the existing BBL switch);
+- the record-free fold-ghost test.
+
+UNVERIFIED (second resume): whether the fold-ghost change moves any value on this record was not isolated (both
+before and after match it); the record-free test carries the claim.
+
 ## Machine lines
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r16/repo
 ACQUISITION_NEEDED: NONE
-DECISION_NEEDED: NONE
-ROUND_STATUS: L1_CERTIFIED — G5 + ORCA2's diffusive BBL bit-for-bit with NEMO kt 1..10 under both labels (4,162 + 2,608 entries, every one 0, dry included) after three L1-selected NEMO statements (BBL trend into stage-3 Krhs, trabbl.f90:258; BBL depth gdept_1d*(1+r3t(Kmm)), trabbl.f90:412; T/S north-fold exchange of the pivot row, stprk3_stg.f90:795-796); the BBL acts at stage 3 only, T/S only, inside the footprint; every other card's jaxpr identical; L1 record test fails with the BBL wiring removed; codex review: operator.
+DECISION_NEEDED: lane A's pivot fold — (1) take only the helper and the end-of-stage fold, lane A arithmetic unchanged, the G9 FCT and clock-pair parts left out (one call argument removed) [my pick]; (2) wait until lane A merges into this branch; (3) keep this lane's own helper.
+ROUND_STATUS: L1_CERTIFIED_ITEM3_BLOCKED — fold ghost now NEMO's (lbcnfd.f90:588-590), L1 re-scored kt 1..10 both labels every entry 0 (dry, D127 included); record test to kt 4 fails with trabbl.f90:412 removed; lane A's pivot-fold commits conflict (G9 FCT and wzv clock-pair hunks on code absent here), own helper kept; codex review: operator.
