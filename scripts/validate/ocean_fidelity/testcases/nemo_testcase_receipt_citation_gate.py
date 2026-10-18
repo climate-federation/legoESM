@@ -8255,6 +8255,10 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:620-627': [
         ('DO jj = 1, 1', 5),
         ('ptab(jf)%pt4d(ii1,ij1,jk,jl) = psgn(jf) * ptab(jf)%pt4d(ii2,ij2,jk,jl)', 46), 8],
+    # --- lane B round 16 third resume: lane A's end-of-stage fold, U pivot half-row ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:665-672': [
+        ('DO jj = 1, 1', 5),
+        ('ptab(jf)%pt4d(ii1,ij1,jk,jl) = psgn(jf) * ptab(jf)%pt4d(ii2,ij2,jk,jl)', 46), 8],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:258': 'pt_rhs(ji,jj,ik,jn) = pt_rhs(ji,jj,ik,jn)',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:357': 'SUBROUTINE bbl( kt, kit000, Kbb, Kmm )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:412': 'zdep(ji,jj) = ((gdept_1d(ik) ) *(1._wp+r3t(ji,jj,Kmm)))            ! bottom T-level refere',

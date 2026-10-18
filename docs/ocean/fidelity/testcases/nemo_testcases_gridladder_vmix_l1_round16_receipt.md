@@ -248,9 +248,72 @@ UNASKED, offered for revert:
 UNVERIFIED (second resume): whether the fold-ghost change moves any value on this record was not isolated (both
 before and after match it); the record-free test carries the claim.
 
+## 7. Third resume: lane A's pivot fold replaces this lane's own
+
+Operator decision on section 6's question: option (1). Commit `3cfd91d07`. Evidence: `round16/score/r3/`,
+`round16/score/*_l1laneA*`, `*_l1foldoff*`, `round16/jaxpr_r16_laneA.out`. CPU, x64, `land.sh` PYTHONPATH.
+
+**Taken from lane A** (branch `fidelity/nemo-testcases-orca2-gridladder`, tip `2ae9b677491f`):
+- the pivot half-row helper `fold_pivot_half_row` and its external-mode U use, from lane A commit `2cdf9d2afd`
+  (left out: its FCT hunks in the tracer-advection module and the G9 test file);
+- the end-of-stage fold, setting `rk3_end_of_stage_pivot_fold`, its wrapper and its three stage calls, from lane A
+  commit `d2d43d493e` (left out: the stage wzv clock pair — its setting, the new keyword of the wzv-operands routine,
+  the recipe and test lines).
+- **The one call argument that differs, for the merge:** in `_nemo_ws_stage_transport` lane A calls
+  `nemo_qco_wzv_operands` with the stage time step (`rn_Dt/3`, `rn_Dt/2`) and `stage_after_level=stage_index + 1`
+  under its clock-pair setting; here the call keeps `dt` and passes no `stage_after_level`, as before.
+- The state-config field sits where this lane's deleted field was (lane A puts it after its FCT fold field); comment
+  text is lane A's.
+
+**Bodies identical** (each function extracted by its syntax tree from lane A's tip and from this tree, then `diff`):
+
+```
+== fold_pivot_half_row
+IDENTICAL (18 lines, sha 93c935a77b24)
+== _rk3_end_of_stage_pivot_fold
+IDENTICAL (18 lines, sha d400e1010d49)
+barotropic uses identical
+```
+
+**Selected on L1; own helper deleted.** L1 now folds u, T and S after every stage (v was already folded), as
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:795-796` does: T and S by `ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:620-627`,
+u by `ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:665-672` (both in `lbc_nfd_dp`,
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:561`). The setting `rk3_fold_exchange_tracer_pivot_row`, its helper and its
+stage-3 call are deleted; the selector checks the new setting in their place. Lane A's stage-3 call sits inside the
+stage-3 correction branch; measured: tracing one L1 step calls the fold 3 times, once from each stage call.
+
+**Re-score, both labels, kt 1-10:** independent 4,162 entries, given-NEMO-entry 2,608 entries: **every entry 0**, dry
+included; D127 census empty. **L1 stays CERTIFIED.**
+
+**Purity** (base `f8b546f1a6`): one-step jaxprs of the full ORCA2 (138,746 lines), DINO (123,234), G5 (168,423),
+V1 (174,013), V2 (174,046), V3 (174,349), V4 and V5 (176,180) **IDENTICAL**, so lane A's external-mode refactor moves
+no card; L1's changes (169,659 -> 169,959).
+
+**Finding: the L1 record test does NOT fail with the fold removed.** Plant (scratch worktree, the wrapper returning
+u, T, S unchanged): record test kt 1-4 **passed**; full re-score kt 1-10 both labels also every entry 0 (same counts).
+On this record the fold no longer changes any value. Before section 6's fold-ghost fix the missing tracer fold cost
+7 T + 6 S cells at kt 1 (section 5), so the BBL with NEMO's ghost now leaves the pivot row symmetric to the bit
+(PLAUSIBLE: not isolated by a ghost-off plant). What does fail with the fold removed: the record-free unit test of
+the end-of-stage fold (1 failed, image half not mirrored). That test carries the non-vacuity of the fold on L1.
+
+Gates (clean tree, commit after `3cfd91d07`): see the gate lines below. 58 citation pins re-anchored by the edit's
+own offsets (none inside an edited hunk); the external-mode association extent 55 -> 49 lines, the same edit as
+lane A's `5380a9f8e`; nine default-receipt citations re-anchored by the same offsets; one new map entry
+(`lbcnfd.f90:665-672`).
+
+ASKED (third resume): lane A's helper and end-of-stage fold, lane A arithmetic byte-identical; G9 FCT and clock-pair
+parts left out; select on L1; delete own helper and setting; re-score; purity; plant; gates.
+UNASKED, offered for revert:
+- lane A's external-mode refactor taken with the helper (same commit; purity above shows no card moves);
+- the record-free tracer-fold test repointed at lane A's wrapper (T and S) rather than deleted;
+- the external-mode citation extent edit (copied from lane A).
+
+UNVERIFIED (third resume): why the fold is inert on this record (ghost-off plant not run); u's fold is checked only
+by the record (inert there too) and by lane A's own G9 test, which is not on this branch.
+
 ## Machine lines
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r16/repo
 ACQUISITION_NEEDED: NONE
-DECISION_NEEDED: lane A's pivot fold — (1) take only the helper and the end-of-stage fold, lane A arithmetic unchanged, the G9 FCT and clock-pair parts left out (one call argument removed) [my pick]; (2) wait until lane A merges into this branch; (3) keep this lane's own helper.
-ROUND_STATUS: L1_CERTIFIED_ITEM3_BLOCKED — fold ghost now NEMO's (lbcnfd.f90:588-590), L1 re-scored kt 1..10 both labels every entry 0 (dry, D127 included); record test to kt 4 fails with trabbl.f90:412 removed; lane A's pivot-fold commits conflict (G9 FCT and wzv clock-pair hunks on code absent here), own helper kept; codex review: operator.
+DECISION_NEEDED: the L1 record test cannot fail with the end-of-stage fold removed (the fold is inert on this record); the record-free unit test carries it — (1) accept that [my pick]; (2) add a ghost-off plant to confirm why; (3) build an asymmetric-row record-free step test.
+ROUND_STATUS: L1_CERTIFIED — lane A's pivot fold (helper from lane A 2cdf9d2afd, end-of-stage fold from d2d43d493e; bodies byte-identical to 2ae9b6774; differing call argument: the stage wzv operands call keeps dt, no stage_after_level) selected on L1, own helper and setting deleted; L1 kt 1..10 both labels every entry 0; other cards' jaxprs identical; record test does NOT fail with the fold removed (unit test does); codex review: operator.
