@@ -523,3 +523,56 @@ def test_g9_stage_transport_wzv_reads_nemos_stage_clock_pair(tmp_path):
         assert dirty.mean() < 0.01, (stage, int(dirty.sum()))  # support is the domain
         off_w = (got["zFw"] != ref["zFw"]) & ~dirty[..., None]
         assert not off_w.any(), (stage, int(off_w.sum()))
+
+
+@needs_inputs
+@pytest.mark.skipif(not (G9_RECORD / "oracle_rktracer_stage3_kt00000001.bin").is_file(),
+                    reason="no round-46 G9 record")
+def test_g9_stage3_tracer_content_is_nemos_trazdf_zrhs(tmp_path):
+    """trazdf.f90:284-289: zrhs = e3t(Kbb)*T(Kbb) + (p2dt*e3t(Kmm))*Krhs, Krhs the
+    FCT rate plus sbc, runoff, qsr in call order (stprk3_stg.f90:604-717).  kt 1,
+    jitted step, state and forcing traced, x64: on every wet cell the card's
+    pre-implicit T and S content is at the bar against NEMO's literal zrhs
+    (evaluated from the record's Kbb, after-qsr Krhs, r3t and e3t_0) and equal
+    to it on all but the measured residual cells."""
+    import jax
+    import netCDF4
+    sys.path[:0] = [str(CASES), str(CASES / "nemo_testcase_g5_orca2ice")]
+    import g5_records as g5
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    card = recipe.build_nemo_testcase_card("ORCA2G9-tadv", deck_root=G9_RECORD)
+    cfg, zc, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
+    assert cfg.rk3_stage3_tracer_krhs_nemo_order is True
+    fw, sf = g5.nemo_supplied_forcing(card, G9_RECORD, 1)
+    nk = int(zc.n_levels)
+    wet = np.asarray(zc.is_active, bool)
+    # RKTR3: 16 3-D fields (zero, adv, sbc, qsr, ldf, Kbb, Kmm, Kaa; T then S), r3t x3
+    with open(G9_RECORD / "oracle_rktracer_stage3_kt00000001.bin", "rb") as h:
+        assert h.read(16).decode().strip() == "NEMO_L2_RKTR3_1"
+        hd = struct.unpack("=11i", h.read(44))
+        v = np.fromfile(h, np.float64)
+    nx, ny, nz = hd[7:10]
+    n3, n2 = nx * ny * nz, nx * ny
+    f3 = lambda i: v[i * n3:(i + 1) * n3].reshape((nx, ny, nz), order="F").transpose(1, 0, 2)[2:-2, 2:-2, :nk]  # noqa: E731
+    f2 = lambda i: v[16 * n3 + i * n2:16 * n3 + (i + 1) * n2].reshape((nx, ny), order="F").T[2:-2, 2:-2, None]  # noqa: E731
+    mesh = netCDF4.Dataset(G9_RECORD / "mesh_mask.nc")
+    e3t0 = np.asarray(mesh["e3t_0"][0]).transpose(1, 2, 0)[..., :nk]
+    tmask = np.asarray(mesh["tmask"][0]).transpose(1, 2, 0)[..., :nk].astype(float)
+    mesh.close()
+    e3bb, e3mm = e3t0 * (1.0 + f2(0) * tmask), e3t0 * (1.0 + f2(1) * tmask)
+    dt = float(card.dt_s)
+
+    model = LatLonCGridOceanModel(card.recipe.grid, zc, cfg, _nemo_ws_test_hooks=(
+        _NEMOWSRK3TestHooks(expose_pre_implicit_content=True)))
+    content = jax.device_get(jax.jit(lambda s, f, g: model.step(
+        s, dt=card.dt_s, freshwater=f, surface_forcing=g))(s0, fw, sf))
+    for name, i in (("T", 0), ("S", 1)):
+        zrhs = e3bb * f3(10 + i) + (dt * e3mm) * f3(6 + i)   # Kbb, after-qsr (= after-ldf) Krhs
+        got = np.asarray(getattr(content, name).data)
+        err = np.abs(np.where(wet, got - zrhs, 0.0)).max() / np.abs(np.where(wet, zrhs, 0.0)).max()
+        assert err <= 1e-15, (name, err)
+        # measured 1,226 T / 762 S cells off (owner unwalked: G9 round-4 receipt);
+        # the former content form missed 68,045 / 1,738
+        off = int(((got != zrhs) & wet).sum())
+        assert off <= {"T": 1_300, "S": 800}[name], (name, off)
