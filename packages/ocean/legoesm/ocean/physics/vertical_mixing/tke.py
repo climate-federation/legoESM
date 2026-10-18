@@ -109,6 +109,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.profile_metrics import safe_sqrt
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.core.transcendentals import exp as precision_exp
 from legoesm.core.transcendentals import sin as precision_sin
@@ -1078,7 +1079,7 @@ def _tke_raw_mixing_length(
         rsmall = 0.5 * jnp.finfo(e.dtype).eps
         zrn2 = jnp.maximum(n2, rsmall)
         return jnp.maximum(
-            jnp.sqrt((jnp.asarray(2.0, e.dtype) * e) / zrn2),
+            safe_sqrt((jnp.asarray(2.0, e.dtype) * e) / zrn2),
             mxl_min)
     raise ValueError(
         "Unknown TKEConfig.tke_mxl_raw_evaluation: expected "
@@ -3643,7 +3644,7 @@ def tke_vertical_mixing(
     if _matrix_eval == "nemo_literal":
         # Post-solve tke_avn overwrite, MY_SRC/zdftke.F90:832-837.  Keep the
         # source association: zsqen=SQRT(en), then dissl=zsqen/zmxld.
-        dissl_new = jnp.sqrt(tke_curr) / l_eps_final
+        dissl_new = safe_sqrt(tke_curr) / l_eps_final
     _statement_trace = None
     if return_statement_trace:
         if any(value is None for value in (

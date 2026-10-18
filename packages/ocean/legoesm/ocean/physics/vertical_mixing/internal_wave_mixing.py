@@ -55,6 +55,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.profile_metrics import safe_sqrt
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.core.transcendentals import exp as precision_exp
 from legoesm.core.transcendentals import log10 as precision_log10
@@ -440,7 +441,7 @@ def nemo_zdf_iwm(avt, avs, avm, forcing: IWMForcing, rn2, stretch, ht_0,
     zfact2 = jnp.where(wet, r(r(forcing.ebot * r(one + r(hbot / hz_safe)))
                               * r1_rho0), zero)                       # :241
     n2_pos = jnp.maximum(zero, rn2)
-    n_pos = jnp.sqrt(n2_pos)
+    n_pos = safe_sqrt(n2_pos)  # finite gradient where N^2 is clipped to 0
     zfact3 = jnp.zeros_like(hz)
     zfact4 = jnp.zeros_like(hz)
     for k in range(nif):                                    # :248-251, jk order
