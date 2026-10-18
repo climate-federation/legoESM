@@ -148,6 +148,45 @@ def test_ddm_frame_check_refuses_v2s_record():
     assert "V3_DDM_FRAME unequal_avs_avt=0 of 825840" in out.stdout
 
 
+def kt2_restarts_differ(before: Path, after: Path) -> bool:
+    """Control: the rung moves NEMO's kt-2 T, so its record is not the last rung's."""
+    import netCDF4
+    import numpy as np
+
+    kt2 = "twin_b/ORCA2G1_00000002_restart.nc"
+    with netCDF4.Dataset(before / kt2) as a, netCDF4.Dataset(after / kt2) as b:
+        return bool(np.count_nonzero(np.asarray(a["tn"][:]) != np.asarray(b["tn"][:])))
+
+
+def assert_record_bit_for_bit(twins, case: str, *, kt_to: int) -> dict:
+    """kt-1 consumed avt/avs/avm (wet and dry) and every independent-arm field
+    kt 1..kt_to equal NEMO's record; returns the kt-1 frame for the caller's
+    rung-specific checks."""
+    sys.path.insert(0, str(CASES))
+    spec = importlib.util.spec_from_file_location(
+        "orca2_ladder", CASES / "nemo_testcase_g2_orca2bathy_ladder.py")
+    ladder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ladder)
+    frame = ladder.run(twins[0], arm="ddm_kt1", kt_from=1, kt_to=1,
+                       restart_roots=twins, allow_dirty=True, case=case)
+    for f in ("avt", "avs", "avm"):
+        assert frame["rows"][f]["n_unequal_wet"] == 0, f
+        assert frame["rows"][f]["summary"]["dry_n_unequal"] == 0, f
+    out = ladder.run(twins[0], arm="independent", kt_from=1, kt_to=kt_to,
+                     restart_roots=twins, allow_dirty=True, case=case)
+    assert [k["kt"] for k in out["per_kt"]] == list(range(1, kt_to + 1))
+    for k in out["per_kt"]:
+        bad = [r["name"] for r in k["rows"] if r["n_unequal"]]
+        for name, lv in (k["all_levels"] or {}).items():
+            s = lv.get("summary")
+            if (lv["n_unequal"] if s is None else
+                    s["full"]["n_unequal"] or s["partial"]["n_unequal"]
+                    or s["dry_n_unequal"]):
+                bad.append(name)
+        assert not bad, f"kt {k['kt']} unequal: {bad}"
+    return frame
+
+
 V3_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
                  "gridladder_vmix_rounds/round13/oracle_v3_r13")
 V3_TWINS = [V3_RECORD / t for t in ("twin_a", "twin_b", "twin_c")]
@@ -160,36 +199,7 @@ V3_TWINS = [V3_RECORD / t for t in ("twin_a", "twin_b", "twin_c")]
 def test_v3_kt1_3_every_field_and_kt1_avt_avs_avm_bit_for_bit():
     """kt 2 needs zdf_ddm's true division by rn_hsbfr under jit; kt 3 (one
     column) needs EVD's trigger on the step-entry rn2/rn2b."""
-    import netCDF4
-    import numpy as np
-
-    # control: DDM moves NEMO's kt-2 T, so matching V3's record is not matching V2's
-    kt2 = "ORCA2G1_00000002_restart.nc"
-    with netCDF4.Dataset(V2_FRAME.parent / "twin_b" / kt2) as a, \
-            netCDF4.Dataset(V3_RECORD / "twin_b" / kt2) as b:
-        assert np.count_nonzero(np.asarray(a["tn"][:]) != np.asarray(b["tn"][:]))
-    sys.path.insert(0, str(CASES))
-    spec = importlib.util.spec_from_file_location(
-        "v3_ladder", CASES / "nemo_testcase_g2_orca2bathy_ladder.py")
-    ladder = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ladder)
-    frame = ladder.run(V3_TWINS[0], arm="ddm_kt1", kt_from=1, kt_to=1,
-                       restart_roots=V3_TWINS, allow_dirty=True, case="ORCA2V3-ddm")
-    for f in ("avt", "avs", "avm"):
-        assert frame["rows"][f]["n_unequal_wet"] == 0, f
-        assert frame["rows"][f]["summary"]["dry_n_unequal"] == 0, f
-    census = frame["census"]
+    assert kt2_restarts_differ(V2_FRAME.parent, V3_RECORD)   # DDM moves kt-2 T
+    census = assert_record_bit_for_bit(V3_TWINS, "ORCA2V3-ddm", kt_to=3)["census"]
     assert census["nemo"] == census["card"]
     assert census["nemo"]["avs_gt_avt"] > 0 and census["nemo"]["avs_lt_avt"] > 0
-    out = ladder.run(V3_TWINS[0], arm="independent", kt_from=1, kt_to=3,
-                     restart_roots=V3_TWINS, allow_dirty=True, case="ORCA2V3-ddm")
-    assert [k["kt"] for k in out["per_kt"]] == [1, 2, 3]
-    for k in out["per_kt"]:
-        bad = [r["name"] for r in k["rows"] if r["n_unequal"]]
-        for name, lv in (k["all_levels"] or {}).items():
-            s = lv.get("summary")
-            if (lv["n_unequal"] if s is None else
-                    s["full"]["n_unequal"] or s["partial"]["n_unequal"]
-                    or s["dry_n_unequal"]):
-                bad.append(name)
-        assert not bad, f"kt {k['kt']} unequal: {bad}"

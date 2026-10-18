@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
+import jax
 import numpy as np
 import pytest
 
@@ -11,6 +13,9 @@ from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
 from tests.ocean.fidelity.test_nemo_testcase_v1_orca2tke import (
     CARD_FILES, CASES, INPUTS, ORCA2_DECK, _differs, _flat, _root, _values,
+)
+from tests.ocean.fidelity.test_nemo_testcase_v3_orca2ddm import (
+    V3_RECORD, V3_TWINS, assert_record_bit_for_bit, kt2_restarts_differ,
 )
 
 V3 = CASES / "nemo_testcase_v3_orca2ddm"
@@ -149,3 +154,19 @@ def test_run_script_reuses_v1_binaries_unbuilt_and_is_fail_closed():
                  "force   rn_emin = 1.e-10 and rmxl_min = 1.e-3",
                  'check_iwm_frame "$TWIN_A"', '--check-ddm-frame "$TWIN_A"'):
         assert name in text, name
+
+
+V4_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                 "gridladder_vmix_rounds/round14/oracle_v4_r14")
+V4_TWINS = [V4_RECORD / t for t in ("twin_a", "twin_b", "twin_c")]
+
+
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+@pytest.mark.skipif(not all(t.is_dir() for t in (*V3_TWINS, *V4_TWINS)),
+                    reason="the operator's V3/V4 records are not on this machine")
+def test_v4_kt1_2_every_field_and_kt1_avt_avs_avm_bit_for_bit_and_iwm_acts():
+    """kt 1 needs zdf_iwm's true divisions by hbot_iwm under jit."""
+    assert kt2_restarts_differ(V3_RECORD, V4_RECORD)   # IWM moves kt-2 T
+    iwm = assert_record_bit_for_bit(V4_TWINS, "ORCA2V4-iwm", kt_to=2)["iwm_active"]
+    for f in ("avt", "avs", "avm"):
+        assert iwm[f]["nemo_v4_ne_v3"] > 0 and iwm[f]["same_cells"], (f, iwm[f])
