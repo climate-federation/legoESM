@@ -70,8 +70,8 @@ def test_rigid_lid_decks_resolve_and_refuse_the_explicit_surface():
     assert fine.nn_itend == 2 * 48 and fine.nn_write == fine.nn_stock == 48
     coarse = driver.resolved_daily_namelist(
         2, deck="dg50-rl", surface="rigid_lid")
-    assert coarse.nn_SWG == 2 and coarse.rn_Dt_s == 3600.0
-    assert coarse.nn_itend == 2 * 24 and coarse.nn_write == coarse.nn_stock == 24
+    assert coarse.nn_SWG == 2 and coarse.rn_Dt_s == 10800.0
+    assert coarse.nn_itend == 2 * 8 and coarse.nn_write == coarse.nn_stock == 8
     for deck in ("maddison-rl", "dg50-rl"):
         for surface in ("explicit", None):
             with pytest.raises(ValueError, match="requires surface='rigid_lid'"):
