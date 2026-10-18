@@ -102,7 +102,8 @@ is read-only preflight, `V4_PREFLIGHT_OK`).
 
 Record: `gridladder_vmix_rounds/round14/oracle_v4_r14` (operator: `V4_PREFLIGHT_OK` at `f7945d134`, nothing built;
 `V4_ACQUISITION_PASS steps=1..10 restarts=2..10`; `V4_IWM_FRAME unequal_avt_vs_v3=414119 of 825840`). CPU, x64,
-`land.sh` PYTHONPATH. Commits: `4315dc485` ladder; `6ff844d6d` hbot division fix; MAP_COMMIT map entries; this update.
+`land.sh` PYTHONPATH. Commits: `4315dc485` ladder; `6ff844d6d` hbot division fix; `b2500fd0b` this receipt; `9ad669e78` map entries for its citations; `9e7c93520`
+one ladder pin re-anchored (+15 lines, anchor unchanged); this update (gate numbers).
 
 **First run: the ladder refused.** It built the model without the card's forcing maps, and the literal statement
 refuses to run without them. Fixed in the ladder only: every model it builds now takes the card's maps (none on
@@ -161,7 +162,7 @@ Preregistration:
 Tests (CPU, x64):
 - Statement test gains a jit case with the maps as constants: 5 passed. Fix removed: **1 failed** (that case),
   4 passed. Tree verified clean after.
-- V4 card/deck/selector tests + IWM unit file: CARDS_RESUME.
+- V4 card/deck/selector tests + IWM unit file: **11 passed** (at `6ff844d6d`).
 
 **Decision 122.** `zdfiwm.f90` is byte-identical in V1's build and ORCA2_OMIP_L4.
 
@@ -170,7 +171,14 @@ Tests (CPU, x64):
 | `... / hbot_iwm(ji,jj)` (twice) | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:267-268` | `ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfiwm.f90:267-268` | `zdf_iwm` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:140`) |
 | `hcri_iwm = 1._wp / sf_iwm(6)%fnow` | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:485` | `ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfiwm.f90:485` | `zdf_iwm_init` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:373`) |
 
-GATES_RESUME
+Gates (resume):
+- **Default gate** (`land.sh` list, incl. the citation-gate tests and the private-import ratchet) at `9e7c93520`:
+  **145 passed** (1,006 s).
+- **Per-receipt citation gate** on this receipt (`--from-heading` this title): **PASS, failures 0**, 21 citations,
+  unmapped 0, map entries failing audit 0 (first run: 8 unmapped and one ladder pin shifted by this round's ladder
+  edit; fixed by the two commits above).
+- Ratchets (dispatch, inline coeffs, constants, param specs, MPAS IWM) at `6ff844d6d`: **5 failed**, the same 5 as
+  base; none in this diff.
 
 ## Choices made
 
