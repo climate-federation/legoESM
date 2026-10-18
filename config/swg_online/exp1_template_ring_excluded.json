@@ -3,6 +3,7 @@
   "experiment": "swgonl_exp1_template_ring_excluded",
   "description": "Experiment one, candidate template+excluded: fine-filtered start and target, unfiltered model vorticity in Eq. 7, first interior F ring next to the walls given zero weight. One of three candidates; the owner has not chosen the objective or the wall-ring treatment.",
   "deck": "dg50",
+  "surface": "explicit",
   "objective": "template",
   "wall_ring": "excluded",
   "training_precision": "fp64",

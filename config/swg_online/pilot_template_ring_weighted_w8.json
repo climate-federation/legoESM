@@ -3,6 +3,7 @@
   "experiment": "swgonl_pilot_template_ring_weighted",
   "description": "Second pilot continued to a four-day window (reviewer's next experiment, round 10 'what may be missing' rank 2): the finished weighted pilot's final network (windows [1, 2], five epochs each) carried into one otherwise identical w=4 stage of five epochs, optimiser reinitialised as the curriculum rule says, nothing else changed.  Applied by the train command as a curriculum extension of the finished pilot run (same experiment name, seed and run root). Free runs of twenty years from rest. Extended to the 8-day window (user decision 2026-10-15), the lane's last window length.",
   "deck": "dg50",
+  "surface": "explicit",
   "objective": "template",
   "wall_ring": "weighted",
   "training_precision": "fp64",

@@ -4283,11 +4283,22 @@ def _swg_coriolis_arrays(
 
 
 def build_swg_card(
-        namelist: SwgResolvedNamelist | None = None,
+        namelist: SwgResolvedNamelist | None = None, *,
+        surface: str = "explicit",
 ) -> NEMOTestcaseCard:
-    """One SWG card parameterised by its resolved namelist."""
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
+    """One SWG card parameterised by its resolved namelist.
 
+    ``surface`` selects the SWE RK3 free-surface treatment: ``"explicit"``
+    is the NEMO-certified card; ``"rigid_lid"`` projects every stage onto
+    the non-divergent subspace and carries the diagnostic pressure
+    potential on ``initial_state.rigid_lid_phi``.
+    """
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
+    from legoesm.ocean.dynamics.swe_rk3 import SWE_SURFACE_MODES
+
+    if surface not in SWE_SURFACE_MODES:
+        raise ValueError(
+            f"SWG surface must be one of {SWE_SURFACE_MODES}; got {surface!r}")
     nl = SWG_NAMELIST if namelist is None else namelist
     validate_swg_namelist(nl)
     src = swg_horizontal_coordinates(nl)
@@ -4381,8 +4392,8 @@ def build_swg_card(
     config = base._replace(
         constants=cc, physics=physics, tracer_advection="none", K_h=0.0,
         implicit_vertical_mixing=False, A_v=0.0, K_v=0.0, gm_redi=None,
-        outer_integrator="swe_rk3", zdf_drag_in_matrix=False,
-        barotropic_drag_substep=False,
+        outer_integrator="swe_rk3", swe_surface=surface,
+        zdf_drag_in_matrix=False, barotropic_drag_substep=False,
         vorticity_scheme=ENSVorticityConfig(
             scheme="ens_total", ln_dynvor_msk=nl.ln_dynvor_msk),
         coriolis_scheme="explicit_ab2",
@@ -4396,6 +4407,9 @@ def build_swg_card(
         bottom_drag=base.bottom_drag._replace(bottom_drag_r=nl.rn_rfr_s),
         meridionally_periodic=False,
     )
+    if surface == "rigid_lid":
+        state = state._replace(
+            rigid_lid_phi=jnp.zeros_like(state.eta.data))
     recipe = NEMORecipe(config, config.physics, grid, z_coord, wet, state)
     card = NEMOTestcaseCard(
         "SWG-zco", recipe, nl.rn_Dt_s, nl.nn_itend, 1, 0, 0, 0.0, 0.0,
@@ -4435,6 +4449,8 @@ def _validate_swg_card(
         raise ValueError("SWG-zco dynamics and physics gravity constants differ")
     if card.recipe.model_config.outer_integrator != "swe_rk3":
         raise ValueError("SWG-zco must select the SWE RK3 stage dispatcher")
+    if card.recipe.model_config.swe_surface not in ("explicit", "rigid_lid"):
+        raise ValueError("SWG-zco must state its SWE free-surface treatment")
     vor = card.recipe.model_config.vorticity_scheme
     if (not isinstance(vor, ENSVorticityConfig)
             or vor.scheme != "ens_total"

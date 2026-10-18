@@ -29,6 +29,7 @@ from legoesm.ocean.dynamics.swe_rk3 import (
     _entry_from_state,
     swe_rk3_step,
     swe_rotated_potential_forcing,
+    wet_rectangle_bounds,
 )
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_MADDISON_NAMELIST,
@@ -1120,19 +1121,6 @@ def load_content_pinned_initial_state(
     return coarse_state_from_native(state, ssh, u_native, v_native)
 
 
-def _wet_rectangle(mask: np.ndarray) -> tuple[int, int, int, int]:
-    wet = np.asarray(mask, dtype=bool)
-    jj, ii = np.where(wet)
-    if wet.ndim != 2 or jj.size == 0:
-        raise ValueError("projection mask must be a nonempty 2-D rectangle")
-    bounds = int(jj.min()), int(jj.max()), int(ii.min()), int(ii.max())
-    expected = np.zeros_like(wet)
-    expected[bounds[0]:bounds[1] + 1, bounds[2]:bounds[3] + 1] = True
-    if not np.array_equal(wet, expected):
-        raise ValueError("projection mask is not one rectangle")
-    return bounds
-
-
 def closed_wall_divergent_part(
         u: np.ndarray, v: np.ndarray, mask: np.ndarray, spacing_m: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1151,7 +1139,7 @@ def closed_wall_divergent_part(
         raise ValueError("native U/V and T mask shapes differ")
     if not np.isfinite(spacing_m) or spacing_m <= 0.0:
         raise ValueError("projection spacing must be positive finite")
-    j0, j1, i0, i1 = _wet_rectangle(wet)
+    j0, j1, i0, i1 = wet_rectangle_bounds(wet)
     divergence = (
         u - np.roll(u, 1, axis=1)
         + v - np.roll(v, 1, axis=0)

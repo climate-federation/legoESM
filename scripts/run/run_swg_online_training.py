@@ -71,6 +71,7 @@ import optax
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
 from legoesm.ml.training import save_checkpoint
+from legoesm.ocean.dynamics.swe_rk3 import SWE_SURFACE_MODES
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_DG50_NAMELIST,
     build_swg_card,
@@ -170,6 +171,11 @@ def _require_keys(mapping, expected, where: str) -> None:
             f"found {found}")
 
 
+def _validate_surface(surface) -> None:
+    if surface not in SWE_SURFACE_MODES:
+        raise ValueError(f"surface must be one of {SWE_SURFACE_MODES}")
+
+
 def _require_int(value, where: str, *, minimum: int) -> int:
     if type(value) is not int or value < minimum:
         raise ValueError(f"{where} must be an integer >= {minimum}")
@@ -211,7 +217,7 @@ def load_config(path: Path) -> dict:
     if config.get("schema") == CONTROL_CONFIG_SCHEMA:
         _require_keys(config, (
             "schema", "experiment", "description", "control", "deck",
-            "closure", "free_run"), "control configuration")
+            "surface", "closure", "free_run"), "control configuration")
         if not isinstance(config["experiment"], str) \
                 or re.fullmatch(r"[a-z0-9_]+", config["experiment"]) is None:
             raise ValueError("experiment must be a lowercase [a-z0-9_] name")
@@ -223,13 +229,14 @@ def load_config(path: Path) -> dict:
             raise ValueError(
                 f"control {config['control']} requires deck "
                 f"{CONTROL_DECKS[config['control']]!r}")
+        _validate_surface(config["surface"])
         if config["closure"] != "none":
             raise ValueError("control free runs require closure='none'")
         _validate_free_run(config["free_run"])
         return config
 
     _require_keys(config, (
-        "schema", "experiment", "description", "deck", "objective",
+        "schema", "experiment", "description", "deck", "surface", "objective",
         "wall_ring", "training_precision", "network", "seeds", "dataset",
         "curriculum", "optimiser", "free_run"), "configuration")
     if config["schema"] != CONFIG_SCHEMA:
@@ -241,6 +248,7 @@ def load_config(path: Path) -> dict:
         raise ValueError("description must be a non-empty string")
     if config["deck"] not in TRAINING_DECKS:
         raise ValueError(f"training deck must be one of {TRAINING_DECKS}")
+    _validate_surface(config["surface"])
     if config["objective"] not in OBJECTIVE_OPERATORS:
         raise ValueError(f"objective must be one of {OBJECTIVE_OPERATORS}")
     if config["wall_ring"] not in WALL_RING_OPTIONS:
@@ -412,11 +420,12 @@ def select_device(device: str, math_library: str, physical_gpu: int | None, *,
     }
 
 
-def build_deck_card(deck: str):
+def build_deck_card(deck: str, surface: str):
     """The coarse card of one named deck (after ``select_device``)."""
     if deck not in DECKS:
         raise ValueError(f"deck must be one of {sorted(DECKS)}")
-    return build_swg_card(DECKS[deck])
+    _validate_surface(surface)
+    return build_swg_card(DECKS[deck], surface=surface)
 
 
 def steps_per_day(card) -> int:
@@ -1380,7 +1389,7 @@ def main(argv=None) -> int:
         else:
             math_library = "native" if args.device == "cuda" else "libm"
             device = select_device(args.device, math_library, args.physical_gpu)
-        card = build_deck_card(config["deck"])
+        card = build_deck_card(config["deck"], config["surface"])
         if args.command == "free-run":
             if config["schema"] == CONTROL_CONFIG_SCHEMA:
                 if args.seed is not None or args.window_days is not None \

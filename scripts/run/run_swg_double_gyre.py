@@ -525,7 +525,7 @@ def validate_operator_device(mode: str, physical_gpu: int | None, *, environ=Non
 
 def run_long(
         namelist, output: Path, *, days: int, mode: str, commit: str,
-        physical_gpu: int | None,
+        physical_gpu: int | None, surface: str,
         profile_steps: int = 0, compare_days: int = 0,
         daily_means: bool = False,
         restart: Path | None = None,
@@ -600,7 +600,7 @@ def run_long(
     if output.exists():
         raise FileExistsError(f"refusing to overwrite output directory {output}")
 
-    card = build_swg_card(namelist)
+    card = build_swg_card(namelist, surface=surface)
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
     tau_u, tau_v = swg_surface_wind(namelist)
@@ -716,6 +716,7 @@ def run_long(
             if daily_means else "legoesm-swg-double-gyre-daily-v1"),
         "legoesm_git_sha": commit,
         "mode": mode,
+        "surface": surface,
         "certified_policy": certified_policy,
         "deck_certification": "NEMO ladder measured; see fidelity receipts",
         "backend": jax.default_backend(),
@@ -928,6 +929,9 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--deck", choices=("maddison", "dg50", "dg50-nu80", "dg3125"),
                         default="maddison")
+    parser.add_argument(
+        "--surface", choices=("explicit", "rigid_lid"), required=True,
+        help="SWE RK3 free-surface treatment; the certified card is explicit")
     parser.add_argument("--restart", type=Path)
     parser.add_argument("--perturb", type=float,
                         help="perturbation amplitude: m for white SSH, s^-1 for balanced")
@@ -966,6 +970,7 @@ def main(argv=None) -> int:
         manifest = run_long(
             namelist, args.output, days=args.days, mode=args.mode,
             commit=git_sha(), physical_gpu=args.physical_gpu,
+            surface=args.surface,
             profile_steps=args.profile_steps,
             compare_days=args.compare_days, daily_means=args.daily_means,
             restart=args.restart, perturb_amplitude_m=args.perturb,

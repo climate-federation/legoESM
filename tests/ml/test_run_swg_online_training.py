@@ -212,6 +212,7 @@ def test_gpu_control_configs_name_the_frozen_control_choices_exactly():
             "description": config["description"],
             "control": name,
             "deck": "dg50" if name == "nu10" else "dg50-nu80",
+            "surface": "explicit",
             "closure": "none",
             "free_run": {
                 "days": 7300, "start": "rest",
@@ -256,6 +257,8 @@ def test_gpu_control_configs_name_the_frozen_control_choices_exactly():
     (lambda c: c["free_run"].update(device="tpu"), r"cpu\+libm"),
     (lambda c: c["free_run"].update(math_library="fast"), r"cpu\+libm"),
     (lambda c: c.update(deck="maddison"), "deck"),
+    (lambda c: c.update(surface="free"), "surface"),
+    (lambda c: c.pop("surface"), "exactly the keys"),
 ])
 def test_config_refuses_missing_extra_and_unknown_choices(tmp_path, edit, match):
     config = json.loads(CONFIGS[0].read_text())

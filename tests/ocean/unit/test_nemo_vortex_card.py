@@ -621,10 +621,20 @@ _CERTIFIED_CARD_DIGESTS_ROUND5 = {          # 85607c118588 + rounds 4 and 5
 # against the GYRE lane tip reports added=1 removed=0 changed=0 on GYRE, both
 # tanks and both VORTEX cards, and the companion test below asserts the added
 # field's value on each certified card.
-_CERTIFIED_CARD_DIGESTS = {                 # ORCA2 fold-in, 2026-09-30
+_CERTIFIED_CARD_DIGESTS_ORCA2_FOLD_IN = {   # ORCA2 fold-in, 2026-09-30
     "GYRE-zco": "5850bbcfcd351c29",
     "LOCK_EXCHANGE-zco": "4ec82201f0fae7bf",
     "OVERFLOW-zps": "7f1ec89b3e6578f5",
+}
+# The SWG rigid-lid option (2026-10-18) adds one field to the shared model
+# configuration, ``swe_surface``, read only by the SWE RK3 program
+# (outer_integrator="swe_rk3", which none of these cards select).  It is
+# None on all three; the companion test below asserts that, and nothing they
+# execute changed.
+_CERTIFIED_CARD_DIGESTS = {                 # SWG rigid-lid field, 2026-10-18
+    "GYRE-zco": "9a4b75b3f82538f9",
+    "LOCK_EXCHANGE-zco": "3498681f6ad24a0d",
+    "OVERFLOW-zps": "91209a2566aad483",
 }
 
 
@@ -645,6 +655,8 @@ def test_the_only_config_change_to_a_certified_card_is_the_added_eos_field(case)
     # certified card must keep the metric formula it already ran.
     assert cfg.lateral_viscosity_coefficient_source == "nemo_ldf_c2d"
     assert cfg.eos == "nemo_teos10"
+    # ... and the SWE free-surface selector, inert off the SWE RK3 program.
+    assert cfg.swe_surface is None
 
 
 def _card_digest(card):

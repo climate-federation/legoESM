@@ -3,6 +3,7 @@
   "experiment": "swgonl_pilot_template_ring_excluded",
   "description": "Round-10 diagnosis free runs of the pilot's stage-final networks: the pilot configuration unchanged except the free-run block, which starts from the stored filtered coarse truth state at the end of day 4265 (the first day of the validation split, outside the training years), sea level rebalanced exactly as every training window start, for three years on CUDA/native. Operator's choice (2026-10-15).",
   "deck": "dg50",
+  "surface": "explicit",
   "objective": "template",
   "wall_ring": "excluded",
   "training_precision": "fp64",
