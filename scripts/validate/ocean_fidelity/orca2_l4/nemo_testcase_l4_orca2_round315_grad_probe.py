@@ -266,7 +266,8 @@ def _maps() -> int:
         return -1
 
 
-def chain_reverse(step, state0, scales, forcing, n_list, losses, dt, log=print):
+def chain_reverse(step, state0, scales, forcing, n_list, losses, dt, log=print,
+                  remat=False):
     """Gradients of every loss at every N in ``n_list`` w.r.t. state0 and scales.
 
     One forward per step with its pullback kept; each loss cotangent is pulled
@@ -286,7 +287,11 @@ def chain_reverse(step, state0, scales, forcing, n_list, losses, dt, log=print):
     for n in range(1, max(n_list) + 1):
         fw, sf = forcing[n - 1]
         t0 = time.perf_counter()
-        state, pb = jax.vjp(lambda st, sc: step(st, sc, dt, fw, sf), state, scales)
+        def one(st, sc, fw=fw, sf=sf):
+            return step(st, sc, dt, fw, sf)
+
+        # remat: keep only the step input; the backward recomputes the step
+        state, pb = jax.vjp(jax.checkpoint(one) if remat else one, state, scales)
         jax.block_until_ready(state)
         pullbacks.append(pb)
         log(f"vjp forward step {n}: {time.perf_counter() - t0:.1f}s maps={_maps()}")
@@ -372,7 +377,8 @@ def _with_t(state, t_data):
 
 # --- measurement ----------------------------------------------------------
 
-def measure(rung: str, n_dirs: int, full_sweep: bool, output: Path | None = None) -> dict:
+def measure(rung: str, n_dirs: int, full_sweep: bool, output: Path | None = None,
+            remat: bool = False) -> dict:
     import jax
     import jax.numpy as jnp
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
@@ -452,7 +458,8 @@ def measure(rung: str, n_dirs: int, full_sweep: bool, output: Path | None = None
             if (np.shape(x), jnp.asarray(x).dtype) != (np.shape(y), jnp.asarray(y).dtype)][:20]
     del prod
     rev = chain_reverse(step, state0, ones, forcing, n_list, losses, dt,
-                        log=lambda msg: print(f"  {msg}", flush=True))
+                        log=lambda msg: print(f"  {msg}", flush=True), remat=remat)
+    result["remat"] = remat
     jax.clear_caches()
     wet = np.asarray(tmask) > 0.5
     grads = {}
@@ -584,10 +591,13 @@ def main() -> int:
     parser.add_argument("--directions", type=int, default=3)
     parser.add_argument("--short-sweep", action="store_true",
                         help="two epsilons per input instead of six")
+    parser.add_argument("--remat", action="store_true",
+                        help="jax.checkpoint each step in the reverse pass")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
-        result = measure(args.rung, args.directions, not args.short_sweep, args.output)
+        result = measure(args.rung, args.directions, not args.short_sweep, args.output,
+                         remat=args.remat)
     except GateError as error:
         print(f"STATUS REFUSE: {error}")
         return 2

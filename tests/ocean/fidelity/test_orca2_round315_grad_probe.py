@@ -42,12 +42,13 @@ def _setup():
     return t0, state, forcing
 
 
-def test_chain_reverse_matches_analytic_and_forward_mode():
+@pytest.mark.parametrize("remat", [False, True])
+def test_chain_reverse_matches_analytic_and_forward_mode(remat):
     t0, state, forcing = _setup()
     a = 0.7
     step = jax.jit(_toy_step)
     rev = probe.chain_reverse(step, state, {"a": jnp.float64(a)}, forcing,
-                              N_LIST, _losses(), DT)
+                              N_LIST, _losses(), DT, remat=remat)
     for n in N_LIST:
         d_t0, d_a = _analytic(np.asarray(t0), a, 0.05, n)
         got = rev[("T", n)]
