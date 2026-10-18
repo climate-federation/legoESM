@@ -475,9 +475,11 @@ def test_g9_every_stage_ends_with_a_self_mirrored_pivot_row(tmp_path):
 def test_g9_stage_transport_wzv_reads_nemos_stage_clock_pair(tmp_path):
     """sshwzv.f90:297-298 at stages 1 and 2 reads that stage's rDt (rn_Dt/3, rn_Dt/2;
     stprk3_stg.f90:134-135, :188-189) and r3t(Kaa) as the stored blend of r3t(Kbb)
-    and r3ta (:177, :221).  kt 1, jitted step, state traced, x64: the card's stage-1
-    zFw equals NEMO's recorded zFw on every cell (the N+1 ratio over rn_Dt misses
-    355,104), and stage 2 misses at most 100 cells (73 measured; 165,986 without)."""
+    and r3ta (:177, :221).  kt 1, jitted step, state and forcing traced, x64,
+    against NEMO's recorded zFu, zFv, zFw: stage-1 zFw equals NEMO's on every cell;
+    stage-2 zFw equals NEMO's on every column whose own and neighbouring stage-2
+    zFu/zFv equal NEMO's (those horizontal transports differ upstream of wzv), and
+    every stage-2 zFu, zFv, zFw cell is at the bar (|card - NEMO| / max|NEMO| <= 1e-15)."""
     import jax
     sys.path[:0] = [str(CASES), str(CASES / "nemo_testcase_g5_orca2ice")]
     import g5_records as g5
@@ -488,19 +490,36 @@ def test_g9_stage_transport_wzv_reads_nemos_stage_clock_pair(tmp_path):
     assert cfg.rk3_stage_wzv_nemo_clock_pair is True
     fw, sf = g5.nemo_supplied_forcing(card, G9_RECORD, 1)
     nk = int(zc.n_levels)
-    for stage, budget in ((1, 0), (2, 100)):
-        # record fields: T_rhs0, S_rhs0, zFu, zFv, zFw, ... (zFw is the fifth)
+    for stage in (1, 2):
+        # record fields: T_rhs0, S_rhs0, zFu, zFv, zFw, ...
         with open(G9_RECORD / f"oracle_rktracer_operands_kt00000001_s{stage}.bin", "rb") as h:
             h.read(16)
             hd = struct.unpack("=11i", h.read(44))
             v = np.fromfile(h, np.float64)
         nx, ny, nz = hd[7:10]
         n3 = nx * ny * nz
-        ref = v[4 * n3:5 * n3].reshape((nx, ny, nz), order="F").transpose(1, 0, 2)[2:-2, 2:-2, :nk]
-        out = jax.device_get(LatLonCGridOceanModel(
+        ref = {name: v[i * n3:(i + 1) * n3].reshape((nx, ny, nz), order="F")
+               .transpose(1, 0, 2)[2:-2, 2:-2, :nk]
+               for i, name in ((2, "zFu"), (3, "zFv"), (4, "zFw"))}
+        model = LatLonCGridOceanModel(
             card.recipe.grid, zc, cfg,
-            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_tracer_transport_stage=stage)).step(
-                s0, dt=card.dt_s, freshwater=fw, surface_forcing=sf))
-        got = np.asarray(out.T.data)
-        assert got.shape == ref.shape
-        assert int((got != ref).sum()) <= budget, (stage, int((got != ref).sum()))
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_tracer_transport_stage=stage))
+        out = jax.device_get(jax.jit(lambda s, f, g: model.step(
+            s, dt=card.dt_s, freshwater=f, surface_forcing=g))(s0, fw, sf))
+        # the card carries one extra west U face / south V face
+        got = {"zFu": np.asarray(out.u.data)[:, 1:], "zFv": np.asarray(out.v.data)[1:],
+               "zFw": np.asarray(out.T.data)}
+        for name in got:
+            assert got[name].shape == ref[name].shape, name
+            err = np.abs(got[name] - ref[name]).max() / np.abs(ref[name]).max()
+            assert err <= 1e-15, (stage, name, err)
+        off_u = (got["zFu"] != ref["zFu"]).any(-1)
+        off_v = (got["zFv"] != ref["zFv"]).any(-1)
+        if stage == 1:
+            assert not off_u.any() and not off_v.any()
+        dirty = off_u | np.roll(off_u, 1, 1) | off_v | np.roll(off_v, 1, 0)
+        dirty = (dirty | np.roll(dirty, 1, 0) | np.roll(dirty, -1, 0)
+                 | np.roll(dirty, 1, 1) | np.roll(dirty, -1, 1))
+        assert dirty.mean() < 0.01, (stage, int(dirty.sum()))  # support is the domain
+        off_w = (got["zFw"] != ref["zFw"]) & ~dirty[..., None]
+        assert not off_w.any(), (stage, int(off_w.sum()))
