@@ -11,7 +11,13 @@ CPU, fp64, x64, production JIT, libm policy.
   (NaN payloads and signed zeros included).
 - Seven ORCA2 pairs: all 1,360 ladder rows identical to the shipped rows.
   GYRE ten-step archive and day-30 snapshots byte-identical.
-- Gradient results: see "Gradients" (filled as the runs finish).
+- Rung 0 / OMT-4 / OMT-1: the one-step reverse gradient has 0 NaN sources
+  in every mode; a fused 10-step `jit(grad)` on rung 0 is finite and equals
+  forward mode to 3.5e-15.
+- Rung 10: one source survived group C (shortwave divisor on dry levels
+  above the blue level); fixed in C2, nothing hides behind it.
+- FD misses on the T loss track the convective-adjustment (EVD) on/off
+  switch: CONFIRMED on OMT-2.
 
 ## What changed (one commit per group)
 | group | commit | statement | guard |
@@ -72,9 +78,60 @@ Not unit-tested (closures inside the step): the `q_after` combine, the
 surface-stress division, the dissipation-length root, the shortwave divisor;
 those are checked by the one-step walker below.
 
-## Gradients
-PENDING — filled from `jobs/` when the walker, probe, fused and flip runs
-finish.
+## C2 (`2f1b26df90a2`)
+The walker found group C's shortwave guard incomplete: 12,518 rung-10 dry
+levels above the blue level still divide by a zero thickness. C2 also
+divides by 1 there. Forward bits re-proven: 13/13 cards BIT-IDENTICAL vs base
+(jaxpr changed on rung 10 only); rung-10 ladder at C2 identical on both
+labels (200/200 each); GYRE ten-step archive `3b3d865cf5c82d38` again.
+
+## Gradients (one-step walker = round 315's, `jobs/walk_*.json`)
+| card | loss / mode | sources | dT0 . T_dir0 |
+|---|---|---|---|
+| rung 0 (tip `7a1825f4d6f2`) | T chained, fused, raw and sanitized | 0 | -4.2080326158e-2 (round 315 forward mode -4.2080326157569e-2) |
+| rung 0 | SSH chained raw/sanitized, fused raw | 0 | 4.4076248945e-4 |
+| OMT-1 | all 8 modes | 0 | T -4.2176898682e-2; SSH 4.4051036285e-4 |
+| rung 10 (before C2) | T chained raw | 2 (shortwave div + its mul) | NaN |
+| rung 10 (before C2) | T chained sanitized | the same 2 only | -4.1788247936e-2, 0 non-finite leaves |
+
+The walker's control (raw walk vs compiled pullback): same finite pattern,
+max relative difference 6.3e-11 (rung 0 T), 4.8e-13 (OMT-1 T). The rung-0
+walker was stopped after 7 of 8 modes and the rung-10 walker was OOM-killed
+after 3 T modes (each held ~300 GB).
+
+Fused multi-step (`nemo_testcase_l4_orca2_round316_fused_grad.py`, one
+`jit(grad)`: step 1 + checkpointed scan over steps 2..10): rung 0, T loss,
+N = 10: finite on every cell, |dL/dT0| = 1.9340e-2, reverse . T_dir0 =
+-4.200802232317228e-2 vs forward mode -4.200802232317213e-2 (3.5e-15).
+Compile+run: reverse 2,300 s, forward 939 s.
+
+PENDING at commit time (detached, results land in `jobs/`): round 315's
+full probe on rung 0 and OMT-1..4 (tip `7a1825f4d6f2`; the C2 line does not
+run on these cards) and rung 10 (C2); the fused rung-0 SSH loss; fused rung
+10 at C2 (its forward-mode value answers whether rung 10's forward-mode NaN
+was these sources).
+
+## Branch flips (OMT-2, N = 1, `jobs/flips_omt2_*.json`)
+Lockstep interpreter over one step, both sides of x +- eps T_dir0. Control:
+interpreter vs compiled step, max abs difference <= 5.5e-14.
+
+| eps | T FD miss | EVD trigger flips | face-min thickness flips | other |
+|---|---|---|---|---|
+| 1e-3 | 1.17e-2 | 6,474 + 432 coefficient | 3,188 | 0 |
+| 1e-4 | 1.53e-3 | 1,065 + 71 coefficient | 114 | 0 |
+| 1e-5 | 1.96e-4 | 120 + 8 | 0 | 0 |
+| 1e-6 | 3.15e-5 | 30 + 2 | 0 | 0 |
+| 1e-7 | 7.79e-7 | 0 | 0 | 0 |
+
+- CONFIRMED: the miss falls with the flip count and passes 1e-6 at the
+  first eps with no flips. The flips are the convective-adjustment trigger
+  (N^2 below threshold switches the diffusivity to its convective value,
+  three comparisons per interface) and its coefficient composition.
+- Excluded: zero crossings inside the source-rounding helper's IEEE
+  identity (529,568 .. 91 lanes); they are not a branch of the function.
+- SSH misses (2.8e-8 at 1e-3, 1.6e-6 / 2.5e-6 at 1e-6 / 1e-7) are the
+  rounding floor, not flips.
+- OMT-1 and OMT-3 not measured (the first counter ran out of memory).
 
 ## Infrastructure
 The first branch-flip counter stored every predicate and every intermediate:
@@ -83,7 +140,18 @@ OOM-killed and I stopped the rest (my own PIDs). Rewritten to
 evaluate both sides in lockstep and free values after last use; re-run on
 OMT-2 only.
 
-## Gates
-PENDING.
+## Gates (x64, CPU)
+- Citation gate on this receipt: PASS (`citation_gate_receipt.json`).
+- Default citation-gate test after the re-anchor: 17 passed.
+- Private-import ratchet: 6 passed.
+- land.sh T4 files + round-315/316 instrument tests + the four extended
+  test files, run file by file (machine load): citation gate 17, ratchet 6,
+  TKE terms 70, recipe 25, freshwater 16, barotropic state 8, ORCA2
+  parallel receipt 2, round-315 probe 10, round-316 instruments 3, IWM 6,
+  implicit literal 14, dynzdf composition 21 — all passed, 0 failed
+  (`gates/`). Two files exceeded the 10-minute foreground limit under load
+  with 0 failures so far (stage face-mask rank; WS tracer RK3, 18 passed
+  before the cut); full runs detached to `gates/*_full.log`. land.sh runs
+  both again at landing.
 
 codex review: operator
