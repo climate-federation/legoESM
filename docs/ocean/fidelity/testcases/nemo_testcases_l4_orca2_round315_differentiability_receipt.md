@@ -8,9 +8,9 @@ before the first measurement). Evidence:
 carries its worktree stamp, clean, at the probe commit named in it).
 
 ## Verdict (corrected on resume, after two HOLD reviews)
-- **Rung 0 and OMT-4 (every card running tracer advection): the reverse-mode
+- **Rung 0 and OMT-4 (every card running tracer advection): the reverse-mode T-loss
   gradient with respect to the initial state is NaN at every point already at
-  N = 1.** Cause, located on resume (section "Backward NaN sources"): three
+  N = 1 (SSH loss: NaN only when hand-chained; fused it is finite, 6.859e-4).** Cause, located on resume (section "Backward NaN sources"): three
   divisions by a thickness that is exactly zero on dry cells in the stage-1/2
   tracer update. Their forward 0/0 is masked out, but the reverse pass
   multiplies or divides a zero cotangent by it. Zeroing those sources (and
@@ -79,7 +79,7 @@ Infrastructure findings (each cost a relaunch; none is a model defect):
 
 ## Rung 0 and OMT-4 — NaN at N = 1
 
-| card | N | dL_T/dT0 | dL_ssh/dT0 | d/d(visc) | d/d(Kv bg), T loss | backward |
+| card | N | dL_T/dT0 | dL_ssh/dT0 (hand-chained probe; fused N=1 is finite) | d/d(visc) | d/d(Kv bg), T loss | backward |
 |---|---|---|---|---|---|---|
 | rung 0 | 1 | all NaN | all NaN | NaN | -4.512e-5 | 7 s |
 | rung 0 | 2, 5, 10 | all NaN | all NaN | NaN | NaN | 14 / 43 / 72 s |
