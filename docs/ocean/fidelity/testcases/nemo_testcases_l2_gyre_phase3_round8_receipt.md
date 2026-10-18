@@ -4124,7 +4124,7 @@ Round 25 landed two source associations inside NEMO's hydrostatic pressure
 gradient and showed the changed operator bit-exact given NEMO's inputs on GYRE
 only.  Rule 12 asks for that row on every card that executes it, and the
 testcase recipe pins `pgf_scheme="nemo_sco"` on all of them
-(`nemo_testcase_recipe.py:375,631,3017`).
+(`nemo_testcase_recipe.py:375,631,3031`).
 
 The lane-1 tanks have no HPG-literal dump and do not need one.  NEMO
 accumulates `dyn_hpg`, `dyn_vor` and `dyn_adv` into a zeroed `puu(Krhs)`
@@ -9562,8 +9562,8 @@ packages/ocean/legoesm/ocean/state.py:2188       tracer_combine: str = "concentr
 packages/ocean/legoesm/ocean/experiments/dino.py:1016    tracer_combine: str = "concentration"
 packages/ocean/legoesm/ocean/experiments/dino.py:1769    "tracer_combine": "thickness_weighted",
 packages/ocean/legoesm/ocean/experiments/dino.py:3988        tracer_combine=cfg.tracer_combine,
-packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13573  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
-packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13999  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
+packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13578  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
+packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:14004  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
 ```
 
 The two readers are `_leapfrog_step` and `_nemo_mlf_step`.  The three NEMO
