@@ -278,7 +278,13 @@ record and then plants one kt-1 `uu_b` mismatch; the plant reports one unequal
 value and fails. No score was run.
 
 Focused L2 file after the resumed correction: **11 passed** in 12.83 s (CPU,
-x64, landing-script `PYTHONPATH`).
+x64, landing-script `PYTHONPATH`). The exact default ORCA2 landing list,
+including the citation tests, private-import ratchet, and parallel-receipt
+guard: **145 passed in 1206.76 s**. This receipt's citation gate: **PASS**, 55
+citations, 0 unmapped, 0 failures, and 0 map entries failing audit; a planted
+shift of the new kt-2 density/HPG citation exits 1. Clean-tree acquisition
+preflight: `L2_PREFLIGHT_OK`, default evidence root
+`gridladder_vmix_rounds/round17/oracle_l2_r17`; nothing built.
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r17/repo
 ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_orca2iso/run.sh --run
