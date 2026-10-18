@@ -245,7 +245,7 @@ def test_rigid_lid_namelists_keep_every_physical_duration():
 
 
 def test_rigid_lid_only_decks_refuse_the_explicit_surface():
-    assert RIGID_LID_ONLY_DECKS == ("maddison-rl", "dg50-rl")
+    assert RIGID_LID_ONLY_DECKS == ("maddison-rl", "dg50-rl", "dg50-nu80-rl")
     for deck in RIGID_LID_ONLY_DECKS:
         require_surface_for_deck(deck, "rigid_lid")
         for surface in ("explicit", None):

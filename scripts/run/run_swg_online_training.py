@@ -96,6 +96,7 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
 )
 from legoesm.ocean.fidelity.swg_online_decks import (
     SWG_DG50_NU80_NAMELIST,
+    SWG_DG50_NU80_RL_NAMELIST,
     require_surface_for_deck,
 )
 from legoesm.ocean.state import OceanSurfaceForcing
@@ -150,9 +151,13 @@ PROFILE_SCHEMA = "legoesm-swg-online-training-profile-v1"
 DATASET_SCHEMA = "legoesm-swg-online-dataset-v1"
 SCALE_RULE = "maddison_eq6_shallow_water_grid_analogue"
 DECKS = {"dg50": SWG_DG50_NAMELIST, "dg50-nu80": SWG_DG50_NU80_NAMELIST,
-         "dg50-rl": SWG_DG50_RL_NAMELIST}
+         "dg50-rl": SWG_DG50_RL_NAMELIST,
+         "dg50-nu80-rl": SWG_DG50_NU80_RL_NAMELIST}
 TRAINING_DECKS = ("dg50", "dg50-rl")
-CONTROL_DECKS = {"nu10": "dg50", "nu80": "dg50-nu80"}
+# (control, surface) -> deck: the no-closure control of each surface's scorer.
+CONTROL_DECKS = {("nu10", "explicit"): "dg50", ("nu80", "explicit"): "dg50-nu80",
+                 ("nu10", "rigid_lid"): "dg50-rl",
+                 ("nu80", "rigid_lid"): "dg50-nu80-rl"}
 FREE_RUN_SAMPLING = "end_of_day_snapshot_and_daily_mean"
 TRAINING_PRECISIONS = ("fp64", "fp32")
 DATASET_CACHES = ("none", "memory")
@@ -250,13 +255,15 @@ def load_config(path: Path) -> dict:
             raise ValueError("experiment must be a lowercase [a-z0-9_] name")
         if not isinstance(config["description"], str) or not config["description"]:
             raise ValueError("description must be a non-empty string")
-        if config["control"] not in CONTROL_DECKS:
-            raise ValueError(f"control must be one of {sorted(CONTROL_DECKS)}")
-        if config["deck"] != CONTROL_DECKS[config["control"]]:
-            raise ValueError(
-                f"control {config['control']} requires deck "
-                f"{CONTROL_DECKS[config['control']]!r}")
         _validate_surface(config["surface"])
+        key = (config["control"], config["surface"])
+        if key not in CONTROL_DECKS:
+            raise ValueError(
+                f"(control, surface) must be one of {sorted(CONTROL_DECKS)}")
+        if config["deck"] != CONTROL_DECKS[key]:
+            raise ValueError(
+                f"control {config['control']} on the {config['surface']} "
+                f"surface requires deck {CONTROL_DECKS[key]!r}")
         if config["closure"] != "none":
             raise ValueError("control free runs require closure='none'")
         _validate_free_run(config["free_run"])

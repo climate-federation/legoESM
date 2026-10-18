@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_DG50_NAMELIST,
+    SWG_DG50_RL_NAMELIST,
     SWG_MADDISON_NAMELIST,
 )
 
 # Rigid-lid decks (SWG_MADDISON_RL_NAMELIST, SWG_DG50_RL_NAMELIST): their
 # steps (1800 s, 3600 s) exceed the explicit free-surface CFL, so they run
 # under the lid only.  The explicit decks under the lid stay legal physics.
-RIGID_LID_ONLY_DECKS = ("maddison-rl", "dg50-rl")
+RIGID_LID_ONLY_DECKS = ("maddison-rl", "dg50-rl", "dg50-nu80-rl")
 
 
 def require_surface_for_deck(deck: str, surface) -> None:
@@ -23,6 +24,8 @@ def require_surface_for_deck(deck: str, surface) -> None:
 # Resolution-control viscosity.  This is an experiment control, not the
 # NEMO-certified dg50 training model.
 SWG_DG50_NU80_NAMELIST = SWG_DG50_NAMELIST._replace(rn_Lv_m=80.0)
+# The same control on the rigid-lid clock (the rigid-lid scorer's nu=80 control).
+SWG_DG50_NU80_RL_NAMELIST = SWG_DG50_RL_NAMELIST._replace(rn_Lv_m=80.0)
 
 # Reference-adequacy sensitivity: double the fine deck's resolution and halve
 # its clock so the gravity-wave Courant number is unchanged.
@@ -35,6 +38,7 @@ SWG_DG3125_NAMELIST = SWG_MADDISON_NAMELIST._replace(
 )
 
 __all__ = [
-    "RIGID_LID_ONLY_DECKS", "SWG_DG50_NU80_NAMELIST", "SWG_DG3125_NAMELIST",
+    "RIGID_LID_ONLY_DECKS", "SWG_DG50_NU80_NAMELIST", "SWG_DG50_NU80_RL_NAMELIST",
+    "SWG_DG3125_NAMELIST",
     "require_surface_for_deck",
 ]

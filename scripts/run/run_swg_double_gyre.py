@@ -47,6 +47,7 @@ def resolved_daily_namelist(days: int, *, deck: str = "maddison",
     )
     from legoesm.ocean.fidelity.swg_online_decks import (
         SWG_DG50_NU80_NAMELIST,
+        SWG_DG50_NU80_RL_NAMELIST,
         SWG_DG3125_NAMELIST,
         require_surface_for_deck,
     )
@@ -60,6 +61,7 @@ def resolved_daily_namelist(days: int, *, deck: str = "maddison",
         "dg3125": SWG_DG3125_NAMELIST,
         "maddison-rl": SWG_MADDISON_RL_NAMELIST,
         "dg50-rl": SWG_DG50_RL_NAMELIST,
+        "dg50-nu80-rl": SWG_DG50_NU80_RL_NAMELIST,
     }
     if deck not in decks:
         raise ValueError(f"unsupported double-gyre deck {deck!r}")
@@ -1006,7 +1008,7 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--deck", choices=("maddison", "dg50", "dg50-nu80", "dg3125",
-                           "maddison-rl", "dg50-rl"),
+                           "maddison-rl", "dg50-rl", "dg50-nu80-rl"),
         default="maddison")
     parser.add_argument(
         "--surface", choices=("explicit", "rigid_lid"), required=True,

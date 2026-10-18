@@ -229,6 +229,39 @@ def test_gpu_control_configs_name_the_frozen_control_choices_exactly():
         "device": "cuda", "math_library": "native"}
 
 
+def test_rigid_lid_gpu_control_configs_name_the_lid_controls_exactly():
+    for name, deck in (("nu10", "dg50-rl"), ("nu80", "dg50-nu80-rl")):
+        config = driver.load_config(
+            _ROOT / f"config/swg_online/control_{name}_rl_gpu.json")
+        assert config == {
+            "schema": driver.CONTROL_CONFIG_SCHEMA,
+            "experiment": f"swgonl_control_{name}_rl_gpu",
+            "description": config["description"],
+            "control": name, "deck": deck, "surface": "rigid_lid",
+            "closure": "none",
+            "free_run": {
+                "days": 7300, "start": "rest",
+                "sampling": "end_of_day_snapshot_and_daily_mean",
+                "device": "cuda", "math_library": "native"},
+        }
+        # Only the viscosity differs from the lid clock; a control never mixes
+        # its surface with the other surface's deck.
+        assert driver.DECKS[deck].rn_Dt_s == 10_800.0
+        assert driver.DECKS[deck].rn_Lv_m == (10.0 if name == "nu10" else 80.0)
+        for edit in ({"surface": "explicit"},
+                     {"deck": "dg50" if name == "nu10" else "dg50-nu80"}):
+            with pytest.raises(ValueError):
+                _refuse(config | edit)
+
+
+def _refuse(config):
+    import tempfile
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "control.json"
+        path.write_text(json.dumps(config))
+        driver.load_config(path)
+
+
 @pytest.mark.parametrize("edit,match", [
     (lambda c: c.pop("objective"), "exactly the keys"),
     (lambda c: c.pop("wall_ring"), "exactly the keys"),
