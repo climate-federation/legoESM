@@ -8614,8 +8614,8 @@ class LatLonCGridOceanModel:
 
             if _cfg_b.rk3_stage3_tracer_krhs_nemo_order:
                 # The same stage-3 terms, kept apart so they add onto the FCT
-                # Krhs one at a time: trasbc.f90:297-298 (qns, sfx at level
-                # 1), :313-314 (runoff), then tra_qsr (stprk3_stg.f90:717).
+                # Krhs one at a time: trasbc.f90:307-308 (qns, sfx at level
+                # 1), :323-324 (runoff), then tra_qsr (stprk3_stg.f90:717).
                 if _stage3_T_written is None or _stage3_S_written is None:
                     raise ValueError(
                         "rk3_stage3_tracer_krhs_nemo_order needs "
