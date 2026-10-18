@@ -896,15 +896,27 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             recorded = g5.read_entry(
                 root / f"oracle_step_entry_kt{kt:08d}.bin", "ORCA2G5-ice")
             entry = _seed_from_record(s0, recorded, nk)
+            previous_bt = g5.read_bt_frame(
+                root / f"oracle_bt_frames_kt{kt - 1:08d}.bin",
+                expect_step=kt - 1)
+            entry = entry._replace(
+                uu_b=entry.uu_b.replace(
+                    data=jnp.asarray(g1.pad_u(previous_bt["uu_b"]))),
+                vv_b=entry.vv_b.replace(
+                    data=jnp.asarray(g1.pad_v(previous_bt["vv_b"]))),
+            )
             identity = {
                 "ssh": np.asarray(entry.eta.data),
                 "u": np.asarray(entry.u.data)[:, 1:],
                 "v": np.asarray(entry.v.data)[1:],
                 "T": np.asarray(entry.T.data),
                 "S": np.asarray(entry.S.data),
+                "uu_b": np.asarray(entry.uu_b.data)[:, 1:],
+                "vv_b": np.asarray(entry.vv_b.data)[1:],
             }
             out["entry_identity"] = {
                 name: int(np.count_nonzero(identity[name] != np.asarray(
+                    previous_bt[name] if name in ("uu_b", "vv_b") else
                     recorded[name] if name == "ssh" else recorded[name][..., :nk])))
                 for name in identity
             }
