@@ -2,7 +2,7 @@
 
 Status: **LANDED; G9 NOT CERTIFIED.**  G9 now selects a literal arithmetic
 form of the shared FCT pipeline.  The kt-1 stage-3 FCT rate moves from
-404,775 T / 415,895 S unequal wet cells to 28 / 17 and is at the bar, but the
+404,775 T / 415,895 S unequal wet cells to 21 / 17 and is at the bar, but the
 exact-closure preregistration is refuted.  The independent and two-step score
 still first exceeds the `1e-15` bar at kt 2.
 
@@ -36,9 +36,48 @@ limiter, fold and correction pipeline.  G9's existing
 FCT implementation and no new card field were added.  Rounds 47-48's fold
 operations remain in the shared path.
 
-Blast radius: masked-address step jaxprs are unchanged from round 49 for G5
-`339a8016d262c4f6` (length 7,867,009) and G8 `03ccdb94113eab61` (length
-8,074,511).  G9 alone reaches the new static branch.
+Within that G9-selected literal arm, `nonosc` accumulates each signed face
+term left to right, matching the compiled `zpos` and `zneg` statements
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:863-869`).  The generic arm is
+left in its pre-round-5 construction order so this source-order repair does
+not alter any non-G9 trace.
+
+Blast radius: masked-address full-step jaxprs for all 26 comparison cards are
+byte-identical to base `075369b2e737`.  Hashes are SHA-256 first 16 followed
+by text length:
+
+| card | base and current jaxpr |
+|---|---:|
+| LOCK_EXCHANGE-zco | `9d1bb5a164a79453 / 3225672` |
+| OVERFLOW-zps | `4dfd2a6ea2c7c011 / 11572130` |
+| GYRE-zco | `2c51e9f16df25389 / 5801297` |
+| VORTEX-zco | `33f906e8f3ff4c25 / 2449836` |
+| VORTEX_VEC-zco | `ab65f27a32336517 / 2054683` |
+| VORTEX-15km-zco | `1b2eee41c4c8ea33 / 2527082` |
+| VORTEX_VEC-15km-zco | `5f32fed7b5c22f42 / 2120762` |
+| VORTEX-10km-zco | `a8549213fd55519c / 2527095` |
+| VORTEX_VEC-10km-zco | `5c283eed90fc6a78 / 2120764` |
+| VORTEX_SMT-zps | `33f906e8f3ff4c25 / 2449836` |
+| VORTEX_SMT_VEC-zps | `ab65f27a32336517 / 2054683` |
+| DINO legoesm_default | `b03b10c84a25150f / 665139` |
+| DINO nemo_paper | `5b8a71cd309a1d4c / 683728` |
+| DINO faithful nemo_dino_kamm | `da38bdcea0451a8c / 2700443` |
+| DINO faithful nemo_dino_kamm_mlf | `83eff0ff6da73754 / 5458044` |
+| ORCA2G1-flat | `56999ae279846e60 / 2165433` |
+| ORCA2G1b-vec | `869af615e9cb713c / 1599374` |
+| ORCA2G2-zps | `1a6579db61977ccd / 7131718` |
+| ORCA2G3-ts | `71d45eb0c5353a6a / 7147854` |
+| ORCA2G4-sbc | `c20dc2186a15c71f / 7732537` |
+| ORCA2G5-ice | `a8fbbc6d662ecad1 / 7795928` |
+| ORCA2G6-vec | `4e8f685ab1123a19 / 5228510` |
+| ORCA2G7-drg | `d31bd449c4e240f0 / 7874555` |
+| ORCA2G8-ldf | `a270e41c7189c9de / 8003427` |
+| ORCA2-zps | `8df7992f2516250a / 6652909` |
+| DINO veros | `44ee7541ac1d55eb / 703132` |
+
+Result: **26 / 26 identical; 0 different.**  The complete comparison is in
+`gridladder_rounds/round50/resume/jaxpr_26_summary.log`.  G9 alone reaches the
+new static branch.
 
 ## 2. Preregistered kt-1 verdicts
 
@@ -47,7 +86,7 @@ literal operands.
 
 | preregistered quantity | before | prediction | observed | verdict |
 |---|---:|---:|---:|---|
-| after-`tra_adv` Krhs T / S unequal wet cells | 404,775 / 415,895 | 0 / 0; 1 refutes | 28 / 17 | REFUTED |
+| after-`tra_adv` Krhs T / S unequal wet cells | 404,775 / 415,895 | 0 / 0; 1 refutes | 21 / 17 | REFUTED |
 | pre-implicit content T / S | 1,226 / 762 | 0 / 0 | 613 / 248 | REFUTED |
 | step-end all-level T / S | 1,076 / 587 | 0 / 0 | 533 / 202 | REFUTED |
 | G5 / G8 jaxpr hash | `339a8016d262c4f6` / `03ccdb94113eab61` | unchanged | unchanged | CONFIRMED |
@@ -55,8 +94,8 @@ literal operands.
 Before `tra_adv`, the card's stage-3 Kmm and Kbb T/S inputs are bit-identical
 to the round-46 record: 0 / 0 unequal wet cells for each tracer.  The record's
 pre-advection Krhs is zero and the card initializes the same zero accumulator.
-After `tra_adv`, the remaining 28 T / 17 S unequal rates have normalized
-maxima `9.44e-18` / `1.26e-17`, both at the bar.  Thus the source statement is
+After `tra_adv`, the remaining 21 T / 17 S unequal rates have normalized
+maxima `2.95e-19` / `1.26e-17`, both at the bar.  Thus the source statement is
 faithfully selected but the preregistered exact result is not claimed.
 
 The post-advection content comparison has 107,773 T / 107,458 S unequal wet
@@ -93,9 +132,11 @@ AT-BAR / DEBT; the last column is the worst normalized row.
 | given-entry two-step | 8 | 0 / 2 / 5 | ssh `1.772e-14` |
 | given-entry two-step | 10 | 0 / 3 / 4 | v `1.844e-14` |
 
-Score SHA-256 (first 16): independent kt 1-5 `3d4a3b84a46c41a6`,
-independent kt 6-10 `b38606994f8bdd3d`, given entries 1/3/5
-`d55c664955176de9`, and given entries 7/9 `f84ff040e064b692`.
+Fresh score SHA-256: independent kt 1-10
+`11207bd7dbcc438506a51595bd702c2757586b545dad5c7370a1746ff7eb3b7a` and
+given-entry kt 1-10
+`48a3c306cedc4cd5c9627c997e3e6c817711807e0ce41efd61496a9e3c2f2484`.
+The reports and transcripts are in `gridladder_rounds/round50/resume/`.
 
 **G9 is not certified.**  Therefore this round certifies none of the proposed
 ORCA2 fold import: the stage-1 V transport mask, round 46's exchanges,
@@ -104,20 +145,26 @@ pair all remain pending G9 certification.
 
 ## 4. Tests, controls and gates
 
-The new literal-source value test is jitted with traced tracer and metric
-transports in x64.  Removing the `nemo_literal_transports` wiring makes its
-first-divergence check fail on 766 / 768 values (max relative difference
-`1.75e-12`); restoring it passes.  The G9 content test is value-based.
+The literal-source tests are jitted with traced tracer and metric transports
+in x64.  The first-divergence assertion is exact against a NumPy transcription
+of NEMO's subtract, reciprocal-area, multiply and negate form.  Removing the
+`nemo_literal_transports` wiring makes it fail on 766 / 768 values (max
+relative difference `1.745e-12`).  The limiter assertion exactly compares
+`zpos` and `zneg` against NumPy left-to-right accumulation; restoring the old
+paired expression makes `zpos` fail on 31 / 768 values.  Both plants exited 1,
+and both restored tests pass.  Their transcripts are
+`gridladder_rounds/round50/resume/plant_first_div_wiring_removed.log` and
+`gridladder_rounds/round50/resume/plant_nonosc_pairing_restored.log`.
 
 Focused results:
 
 - G9 part 1: 16 passed; stage-fold test: 1 passed; remaining G9 tests:
   3 passed in 266.28 s after the synthetic fixture was supplied the required
   stage transport geometry;
-- full shared FCT unit file: 32 passed;
-- literal wiring plant: failed as required; the final restored test passed in
-  3.81 s;
-- G5/G8 jaxpr hashes: unchanged as reported in section 1.
+- full shared FCT unit file after review closure: 33 passed in 40.43 s;
+- review-closure exact tests alone: 2 passed; both wiring plants failed as
+  required;
+- 26-card jaxpr comparison: 26 byte-identical, 0 different.
 
 The exact `land.sh` default battery, including the default citation gate,
 private-import ratchet, TKE, recipe, freshwater, face-mask, prognostic-state
@@ -136,11 +183,14 @@ kt 1..10 score; certification verdict.
 
 UNASKED, offered for revert: the direct literal-source unit regression only.
 
-UNVERIFIED: the owner of the residual 28 T / 17 S after-advection rate cells;
+UNVERIFIED: the owner of the residual 21 T / 17 S after-advection rate cells;
 the owner of the 613 / 248 pre-implicit-content cells; the first kt-2 DEBT
-statement.  No G9 or ORCA2 fold-import certification is claimed.
+statement.  The next walk is independent kt 2 stage 1, where review already
+places ssh at `4.1e-15`, v at `2.3e-15`, and u at `1.2e-15`; it must continue
+to the first responsible statement.  No G9 or ORCA2 fold-import certification
+is claimed.
 
-COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/gridladder_r50-872514284
+COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/gridladder_r50/repo
 ACQUISITION_NEEDED: NONE
 DECISION_NEEDED: NONE
 ROUND_STATUS: LANDED — literal FCT is selected and at-bar at kt 1; G9 remains uncertified because kt 2 has DEBT rows.

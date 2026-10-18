@@ -2878,10 +2878,10 @@ CITATION_MAP = {
     'advection.py:840-874': [
         'NEMO_FCT_STENCIL_TRACE_FIELDS = (',
         'return_limiter_activity: bool = False,', 35],
-    'advection.py:1383-1401': [
+    'advection.py:1392-1410': [
         'tr_west = jnp.roll(bnd_up, 1, axis=1)',
         'base, q_td, wet, q_max,', 19],
-    'advection.py:1564-1565': [
+    'advection.py:1576-1577': [
         ('if return_nemo_stencil_trace:', 2),
         'return div_h_fct, vert_div_fct, stencil_trace', 2],
     # --- ORCA2 round 138: passive FCT beta-operand walk ------------
@@ -2896,16 +2896,16 @@ CITATION_MAP = {
     'advection.py:995-1010': [
         ('raise ValueError(', 2),
         '"NEMO trace returns require the NEMO RK3 two-step predictor")', 16],
-    'advection.py:1475-1490': [
+    'advection.py:1487-1502': [
         'alpha_u_full, alpha_v, alpha_vert_face = _zalesak_signsplit_face_alphas(',
         'return_nemo_beta_trace=True,', 16],
-    'advection.py:1517-1524': [
+    'advection.py:1529-1536': [
         'limited_u, limited_v = alpha_u_full * ad_flux_u, alpha_v * ad_flux_v',
         'vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]', 8],
-    'advection.py:2049-2072': [
+    'advection.py:2061-2084': [
         ('if return_nemo_beta_trace:', 4),
         'zbetup_literal, zbetdo_literal, R_in, R_out,', 24],
-    'advection.py:2127-2128': [
+    'advection.py:2139-2140': [
         ('if return_nemo_beta_trace:', 5),
         'return alpha_u_full, alpha_v, alpha_vert_face, beta_trace', 2],
     'ocean_model_latlon_cgrid.py:14433-14448': [
@@ -7825,6 +7825,11 @@ CITATION_MAP = {
         ('SUBROUTINE nonosc(', 1),
         ('END SUBROUTINE nonosc', 2),
         197,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:863-869': [
+        ('zpos = MAX( 0.,', 1),
+        ('& + MAX( 0., pcc(ji  ,jj  ,jk  ) ) - MIN( 0., pcc(ji  ,jj  ,jk+1) )', 1),
+        7,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:320-329': [
         ('! -- Final trend with corrected fluxes', 1),

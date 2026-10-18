@@ -210,12 +210,91 @@ class TestConservation:
         np.testing.assert_array_equal(first_u, expected)
         first_div = np.asarray(
             trace[NEMO_FCT_TRACE_FIELDS.index("first_div")])
-        expected_div = -(
-            expected[:, 1:] - expected[:, :-1]
-        ) / np.asarray(grid.area_T)[..., None]
-        np.testing.assert_allclose(
-            first_div, expected_div, rtol=4.0 * np.finfo(np.float64).eps,
-            atol=0.0)
+        du = np.subtract(expected[:, 1:], expected[:, :-1])
+        r1_e1e2t = np.divide(
+            np.float64(1.0), np.asarray(grid.area_T)[..., None])
+        expected_div = np.negative(np.multiply(du, r1_e1e2t))
+        np.testing.assert_array_equal(first_div, expected_div)
+
+    def test_nemo_literal_nonosc_flux_sums_are_left_to_right(
+        self, grid_small, smooth_state,
+    ):
+        """traadv_fct.f90:863-869 sums each signed face term in order."""
+        from legoesm.grids.latlon import create_latlon_geometry
+
+        tracer, mu, mv, w_half, h_k, dt = smooth_state
+        grid = create_latlon_geometry(
+            grid_small.n_lat, grid_small.n_lon, radius=grid_small.radius)
+        wet = jnp.ones_like(tracer)
+        rng = np.random.default_rng(50863)
+
+        def transport(shape):
+            values = rng.standard_normal(shape)
+            scales = np.power(10.0, rng.uniform(-4.0, 4.0, shape))
+            return jnp.asarray(values * scales)
+
+        p_u = transport(mu.shape)
+        p_v = transport(mv.shape)
+        p_w = transport(w_half.shape)
+
+        def run(field, transport_u, transport_v, transport_w, beta):
+            return fct_tracer_advection(
+                field, mu, mv, w_half, h_k, grid, dt,
+                high_order="centred2", tracer_before=field,
+                active_mask=wet,
+                low_order_predictor="nemo_rk3_two_step",
+                base_thickness=h_k, after_thickness=h_k,
+                return_nemo_trace=not beta,
+                return_nemo_beta_trace=beta,
+                nemo_literal_transports=(
+                    transport_u, transport_v, transport_w),
+            )[2]
+
+        flux_trace = jax.jit(lambda *args: run(*args, False))(
+            tracer, p_u, p_v, p_w)
+        beta_trace = jax.jit(lambda *args: run(*args, True))(
+            tracer, p_u, p_v, p_w)
+        anti_u = np.asarray(
+            flux_trace[NEMO_FCT_TRACE_FIELDS.index("anti_pre_u")])
+        anti_v = np.asarray(
+            flux_trace[NEMO_FCT_TRACE_FIELDS.index("anti_pre_v")])
+        anti_w = np.asarray(
+            flux_trace[NEMO_FCT_TRACE_FIELDS.index("anti_pre_w")])
+        west_u, east_u = anti_u[:, :-1], anti_u[:, 1:]
+        south_v, north_v = anti_v[:-1], anti_v[1:]
+        top_w, bottom_w = anti_w[..., :-1], anti_w[..., 1:]
+        zero = np.float64(0.0)
+
+        zpos = np.subtract(
+            np.maximum(zero, west_u), np.minimum(zero, east_u))
+        zpos = np.add(zpos, np.maximum(zero, south_v))
+        zpos = np.subtract(zpos, np.minimum(zero, north_v))
+        zpos = np.add(zpos, np.maximum(zero, bottom_w))
+        zpos = np.subtract(zpos, np.minimum(zero, top_w))
+        zneg = np.subtract(
+            np.maximum(zero, east_u), np.minimum(zero, west_u))
+        zneg = np.add(zneg, np.maximum(zero, north_v))
+        zneg = np.subtract(zneg, np.minimum(zero, south_v))
+        zneg = np.add(zneg, np.maximum(zero, top_w))
+        zneg = np.subtract(zneg, np.minimum(zero, bottom_w))
+
+        got_zpos = np.asarray(
+            beta_trace[NEMO_FCT_BETA_TRACE_FIELDS.index("zpos")])
+        got_zneg = np.asarray(
+            beta_trace[NEMO_FCT_BETA_TRACE_FIELDS.index("zneg")])
+        np.testing.assert_array_equal(got_zpos, zpos)
+        np.testing.assert_array_equal(got_zneg, zneg)
+
+        paired_zpos = (
+            (np.maximum(zero, west_u) - np.minimum(zero, east_u))
+            + (np.maximum(zero, south_v) - np.minimum(zero, north_v))
+            + (np.maximum(zero, bottom_w) - np.minimum(zero, top_w)))
+        paired_zneg = (
+            (np.maximum(zero, east_u) - np.minimum(zero, west_u))
+            + (np.maximum(zero, north_v) - np.minimum(zero, south_v))
+            + (np.maximum(zero, top_w) - np.minimum(zero, bottom_w)))
+        assert not np.array_equal(paired_zpos, zpos)
+        assert not np.array_equal(paired_zneg, zneg)
 
     def test_write_only_nemo_beta_trace_preserves_outputs_and_is_live(
         self, grid_small, smooth_state,

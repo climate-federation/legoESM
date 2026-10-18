@@ -1057,16 +1057,16 @@ def fct_tracer_advection(
     base = tracer if tracer_before is None else tracer_before
 
     # --- Steps 1-2: low- and high-order face fluxes ---
-    nlev = tracer.shape[-1]
-    w_int = w_half[..., 1:nlev]  # interior interfaces (..., nlev-1)
-    T_below = tracer[..., 1:]    # (..., nlev-1) NOW level (Kmm), high-order
-    T_above = tracer[..., :-1]   # (..., nlev-1)
-    h_base = h_k if base_thickness is None else base_thickness
-    pad_axes_v = ((0, 0),) * (tracer.ndim - 1)
     literal_low_rhs = None
     if literal:
         # One pipeline, alternate arithmetic form.  These are the array-store
         # boundaries of compiled fct_up1_2stp (traadv_fct.f90:501-609).
+        nlev = tracer.shape[-1]
+        w_int = w_half[..., 1:nlev]
+        T_below = tracer[..., 1:]
+        T_above = tracer[..., :-1]
+        h_base = h_k if base_thickness is None else base_thickness
+        pad_axes_v = ((0, 0),) * (tracer.ndim - 1)
         sr = nemo_source_round
         p_u, p_v, p_w = (jnp.asarray(value) for value in nemo_literal_transports)
         if (p_u.shape != mass_flux_u.shape or p_v.shape != mass_flux_v.shape
@@ -1144,6 +1144,8 @@ def fct_tracer_advection(
                 _literal_w_upwind(base))
             trace_first_div = first_rate
     else:
+        # Keep this generic arm in its established operation order.  Its
+        # traced graph is a compatibility contract for every non-G9 card.
         tr_u_low = upwind_to_u_points(base, mass_flux_u)
         tr_v_low = upwind_to_v_points(base, mass_flux_v)
         flux_u_low = mass_flux_u * tr_u_low
@@ -1162,6 +1164,10 @@ def fct_tracer_advection(
         flux_u_hi = mass_flux_u * tr_u_hi
         flux_v_hi = mass_flux_v * tr_v_hi
 
+        nlev = tracer.shape[-1]
+        w_int = w_half[..., 1:nlev]
+        T_below = tracer[..., 1:]
+        T_above = tracer[..., :-1]
         Tb_below = base[..., 1:]
         Tb_above = base[..., :-1]
         T_face_low = jnp.where(w_int > 0.0, Tb_below, Tb_above)
@@ -1189,6 +1195,7 @@ def fct_tracer_advection(
         else:
             T_face_hi = 0.5 * (T_above + T_below)
         F_vert_hi_int = w_int * T_face_hi
+        pad_axes_v = ((0, 0),) * (F_vert_low_int.ndim - 1)
         F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
         vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
         if return_nemo_up1_trace:
@@ -1201,6 +1208,8 @@ def fct_tracer_advection(
             trace_first_div = -(div_h_low + vert_div_low)
 
     # NEMO key_RK3 does not use the ordinary one-step upstream predictor.
+    if not literal:
+        h_base = h_k if base_thickness is None else base_thickness
     if low_order_predictor == "nemo_rk3_two_step" and not literal:
         implicit_mass_div = 0.0
         if implicit_w is not None:
@@ -1421,14 +1430,17 @@ def fct_tracer_advection(
         west_u, east_u = ad_flux_u[:, :-1], ad_flux_u[:, 1:]
         south_v, north_v = ad_flux_v[:-1], ad_flux_v[1:]
         top_w, bottom_w = anti_w[..., :-1], anti_w[..., 1:]
-        zpos = sr(
-            sr(sr(jnp.maximum(zero, west_u) - jnp.minimum(zero, east_u))
-               + sr(jnp.maximum(zero, south_v) - jnp.minimum(zero, north_v)))
-            + sr(jnp.maximum(zero, bottom_w) - jnp.minimum(zero, top_w)))
-        zneg = sr(
-            sr(sr(jnp.maximum(zero, east_u) - jnp.minimum(zero, west_u))
-               + sr(jnp.maximum(zero, north_v) - jnp.minimum(zero, south_v)))
-            + sr(jnp.maximum(zero, top_w) - jnp.minimum(zero, bottom_w)))
+        # traadv_fct.f90:863-869 evaluates each +/- term left to right.
+        zpos = sr(jnp.maximum(zero, west_u) - jnp.minimum(zero, east_u))
+        zpos = sr(zpos + jnp.maximum(zero, south_v))
+        zpos = sr(zpos - jnp.minimum(zero, north_v))
+        zpos = sr(zpos + jnp.maximum(zero, bottom_w))
+        zpos = sr(zpos - jnp.minimum(zero, top_w))
+        zneg = sr(jnp.maximum(zero, east_u) - jnp.minimum(zero, west_u))
+        zneg = sr(zneg + jnp.maximum(zero, north_v))
+        zneg = sr(zneg - jnp.minimum(zero, south_v))
+        zneg = sr(zneg + jnp.maximum(zero, top_w))
+        zneg = sr(zneg - jnp.minimum(zero, bottom_w))
         inv_dt = sr(one / dt_value)
         zbt = sr(sr(area * h_new) * inv_dt)
         beta_up_valid = (q_max != -zbig) & (zpos != zero)
