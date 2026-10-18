@@ -6,7 +6,8 @@ Status: **V2 still CERTIFIED** on the step-entry EVD trigger (Decision 136). **V
 committed `8d0a4fc7a` before any V5 code.
 
 Commits: `b0f3a74af` D136 (V2 on the step-entry trigger); `8d0a4fc7a` V5 prereg; `5951ae22e` V5 card, deck,
-acquisition, tests; this receipt and its citation-map entries.
+acquisition, tests; `3e9e61e24` this receipt and its citation-map entries; `7aa15be50` 11 shifted pins
+re-anchored; this update (gate numbers).
 
 ## 1. Decision 136: V2 on EVD's step-entry N² trigger
 
@@ -84,7 +85,16 @@ acquisition, tests; this receipt and its citation-map entries.
 
 ## 5. Gates (CPU, x64, `land.sh` PYTHONPATH)
 
-GATES_PLACEHOLDER
+- **Default gate** (`land.sh` list, incl. the citation-gate tests and the private-import ratchet) at `7aa15be50`:
+  **143 passed** (1,110 s).
+- **Per-receipt citation gate** on this receipt (`--from-heading` this title): **PASS, failures 0**, 16 citations,
+  unmapped 0, map entries failing audit 0. First runs: 7 unmapped (added), then 11 recipe pins shifted by this
+  round's edits (re-anchored by mechanical offsets from this round's own hunks, `7aa15be50`; no anchor text changed;
+  the default receipt's citations follow).
+- **V1-V5 card files (incl. the V2 kt 1-2, V3 kt 1-3 and V4 kt 1-2 record tests) + G1 card unit file**:
+  **93 passed, 1 failed** (788 s). The failure (G1 stand-in card expects `no_ice`, the card says
+  `no_internal_ice_model`) fails identically at base `1fc44b9b98a2`: pre-existing, not touched here.
+- Acquisition dry checks: `bash -n` clean; `--check-havtb-frame` refuses V4's and V3's frames (exit 66).
 
 **Decision 122.** `zdfphy.f90` is byte-identical in V1's build and ORCA2_OMIP_L4.
 
@@ -100,7 +110,8 @@ sets it; survey; card; acquisition; off on other cards (D130).
 UNASKED, offered for revert:
 - the full ORCA2 card's three statements moved into the shared helper (bit-identical state, identical jaxpr);
 - the card validator now checks the `avt_k` seed on every V rung (passes on V1-V4 as built);
-- the acquisition adds "kt-1 frame differs from V4's in en, only inside the band" as an admission condition.
+- the acquisition adds "kt-1 frame differs from V4's in en, only inside the band" as an admission condition;
+- 11 recipe citation pins (and the default receipt's matching citations) re-anchored to keep the gate green.
 
 UNVERIFIED:
 - V5 not scored (no record). P3 (bit-for-bit as built) is PLAUSIBLE only.
