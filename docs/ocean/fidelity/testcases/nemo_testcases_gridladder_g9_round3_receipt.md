@@ -204,3 +204,14 @@ UNASKED, offered for revert:
 UNVERIFIED: the stage-3 tracer statement owning the remaining kt-1 T/S
 last place; the 73 residual stage-2 zFw cells (stage-2 transports zFu 28 /
 zFv 9 cells were already off in round 46, not walked).
+
+## 7. Receipt citation gate
+
+`--from-heading` this title, at `b08ef9373`: `PASS`, 9 citations, 0 failures,
+0 unmapped, 0 map entries failing the audit (`round48/final/`).  Its shift
+plant on the rn_Dt/3 citation exits 1.  Two map entries added (the stage
+rDt lines).  Citation-gate test, private-import ratchet, TKE re-run after
+them: 91 passed.
+
+Evidence manifest `gridladder_rounds/round48/manifest.sha256` (pickles and
+arrays excluded).
