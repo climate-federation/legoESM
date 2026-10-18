@@ -197,6 +197,12 @@ refused without the raw-length arm.
   imported statement test, selection rounds 30x-31x, recipe,
   constructibility, rung-0 card, double diffusion) 236 passed.  The check
   shifted 49 gate pins and 16 round-8 receipt pins (same re-anchor tool).
+- Gates at `8c9b3b324` (JAX_ENABLE_X64=1): this receipt's citation gate
+  PASS, 10 citations, 0 failures; citation-gate tests + private-import
+  ratchet 23 passed; TKE + recipe + freshwater + barotropic state + ORCA2
+  parallel receipt 120 passed.  Face-mask rank: NOT RUN — one of its two
+  tests alone exceeded the 10-minute foreground limit on the loaded
+  machine (load ~40-50); land.sh runs it.
 - The frozen phase-2 and round-66 gates still list the two labels; they
   read historical artifacts and no test runs them against the new card.
 - codex review: paused (quota).  The operator runs an independent Claude
