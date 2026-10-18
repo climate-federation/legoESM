@@ -34,6 +34,13 @@ training holds every stored hour its batches can read in host memory
 (``SWGDatasetContract.preload_memory``, loaded once through the same
 digest-pinned sources) or reads the day files for every batch; batches are
 identical.
+``dataset.target_filter_sigma_cells`` (a number >= 1, required) is the width
+of the template objective's Gaussian target filter in coarse cells.  1 is the
+stored state (the recorder's sigma-one-cell filter) unchanged; a larger value
+filters the stored target and window-start states once more on the coarse grid
+with the recorder's own filter, sigma ``sqrt(value**2 - 1)`` cells, and under
+the rigid lid projects the start velocities non-divergent.  The symmetric
+objective refuses a value above 1.
 
 ``free-run`` integrates the coarse card from rest with the closure of one
 trained window length (its last checkpoint) on the device and math policy
@@ -127,6 +134,7 @@ from legoesm.training.swg_online import (
     network_parameter_count,
     record_start_state,
     require_rigid_lid_zero_ssh,
+    require_target_filter_sigma_cells,
     rigid_lid_start_state,
     start_state_from_native,
     steps_per_target_interval,
@@ -312,8 +320,10 @@ def load_config(path: Path) -> dict:
         raise ValueError("seeds must list one or more distinct seeds")
 
     dataset = config["dataset"]
-    _require_keys(dataset, ("records", "splits_days", "batch_size", "cache"),
-                  "dataset")
+    _require_keys(dataset, ("records", "splits_days", "batch_size", "cache",
+                            "target_filter_sigma_cells"), "dataset")
+    require_target_filter_sigma_cells(
+        dataset["target_filter_sigma_cells"], config["objective"])
     if dataset["cache"] not in DATASET_CACHES:
         raise ValueError(f"dataset cache must be one of {DATASET_CACHES}")
     if dataset["batch_size"] != TEMPLATE_BATCH_SIZE:
@@ -532,6 +542,8 @@ def write_dataset_contract(config: dict, path: Path) -> dict:
     payload = {
         "schema": DATASET_SCHEMA, "objective": config["objective"],
         "batch_size": config["dataset"]["batch_size"],
+        "target_filter_sigma_cells":
+            float(config["dataset"]["target_filter_sigma_cells"]),
         "window_days": list(ADMITTED_WINDOWS_DAYS),
         "splits": {name: [HOURS_PER_DAY * start, HOURS_PER_DAY * end]
                    for name, (start, end) in splits.items()},
@@ -936,6 +948,8 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
             "splits_hours": contract["splits"],
             "source_count": len(contract["sources"]),
             "operator": _OPERATOR_FIELDS[config["objective"]],
+            "target_filter_sigma_cells":
+                config["dataset"]["target_filter_sigma_cells"],
             "start_state": {
                 "rule": "stored state at the start hour, sea level "
                         "rebalanced (build_start_rebalancer)",

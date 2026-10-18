@@ -28,6 +28,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
 from legoesm.ocean.dynamics.swe_rk3 import (
     SWE_SURFACE_MODES,
     _entry_from_state,
+    swe_rigid_lid_geometry,
+    swe_rigid_lid_projection,
     swe_rigid_lid_stage1_phi,
     swe_rk3_step,
     swe_rotated_potential_forcing,
@@ -38,7 +40,11 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_MADDISON_RL_NAMELIST,
     swg_surface_wind,
 )
-from legoesm.ocean.fidelity.swg_coarse_graining import shifted_weighted_sum
+from legoesm.ocean.fidelity.swg_coarse_graining import (
+    build_jax_filtered_restrictor,
+    cgrid_geometry,
+    shifted_weighted_sum,
+)
 from legoesm.ocean.state import OceanSurfaceForcing
 from legoesm.training.inert_params import assert_no_inert
 from scipy.fft import dctn, idctn
@@ -880,6 +886,79 @@ def record_start_state(card, chunk_roots, *, objective: str,
             "report": report}}
 
 
+# The recorder's template filter is a Gaussian of one coarse cell (its sigma
+# is the target spacing over the source spacing, in source cells).
+STORED_TARGET_FILTER_SIGMA_CELLS = 1.0
+
+
+def require_target_filter_sigma_cells(sigma_cells, objective: str) -> float:
+    """Validate ``dataset.target_filter_sigma_cells``: a number >= 1.
+
+    Only the ``template`` objective may widen the stored sigma-one filter.
+    """
+    if type(sigma_cells) not in (int, float) or not math.isfinite(sigma_cells) \
+            or sigma_cells < STORED_TARGET_FILTER_SIGMA_CELLS:
+        raise ValueError(
+            "target_filter_sigma_cells must be a finite number >= "
+            f"{STORED_TARGET_FILTER_SIGMA_CELLS}, got {sigma_cells!r}")
+    if sigma_cells > STORED_TARGET_FILTER_SIGMA_CELLS \
+            and objective != "template":
+        raise ValueError(
+            "target_filter_sigma_cells > 1 is defined for the template "
+            f"objective only, not {objective!r}")
+    return float(sigma_cells)
+
+
+def build_target_filter(card, *, sigma_cells: float):
+    """Widen the stored sigma-one-cell template state to ``sigma_cells``.
+
+    Gaussians compose in variance, so the stored state (sigma one coarse
+    cell) gets one more pass of ``sqrt(sigma_cells**2 - 1)`` coarse cells.
+    The pass is the recorder's own filter (the in-scan filtered restrictor
+    of ``swg_coarse_graining``: volume and face-transport extensives, even
+    scalar/tangential and odd normal wall parity, 6-sigma kernel) run with
+    the coarse grid as both source and target (nesting factor one), so no
+    wall rule is re-implemented.  Returns ``filter(ssh, u, v)`` on native
+    float64 arrays; under the rigid lid sea level is returned exactly zero,
+    as the recorder returns it.
+    """
+    if not bool(jax.config.jax_enable_x64):
+        raise RuntimeError(
+            "the target filter requires JAX_ENABLE_X64=1; refusing a silent "
+            "float64 downcast")
+    if not math.isfinite(sigma_cells) \
+            or sigma_cells <= STORED_TARGET_FILTER_SIGMA_CELLS:
+        raise ValueError("the extra target filter needs sigma_cells > 1")
+    extra = math.sqrt(sigma_cells**2 - STORED_TARGET_FILTER_SIGMA_CELLS**2)
+    coarse = cgrid_geometry(card.resolved_namelist)
+    restrict = jax.jit(build_jax_filtered_restrictor(
+        coarse, coarse, sigma_source_cells=extra))
+    lid = _is_rigid_lid(card)
+
+    def widen(ssh, u, v):
+        ssh_f, u_f, v_f = (np.asarray(value, dtype=np.float64) for value in
+                           restrict(jnp.asarray(ssh), jnp.asarray(u),
+                                    jnp.asarray(v)))
+        return (np.zeros_like(ssh_f) if lid else ssh_f), u_f, v_f
+
+    return widen
+
+
+def build_lid_start_projection(card):
+    """Non-divergent projection of native start velocities (rigid lid).
+
+    The stepper's own ``swe_rigid_lid_projection``; ``project(u, v)``.
+    """
+    lid = swe_rigid_lid_geometry(card.recipe.grid, card.recipe.z_coord)
+    project = jax.jit(lambda u, v: swe_rigid_lid_projection(u, v, lid)[:2])
+
+    def apply(u, v):
+        return tuple(np.asarray(value, dtype=np.float64)
+                     for value in project(jnp.asarray(u), jnp.asarray(v)))
+
+    return apply
+
+
 @dataclass(frozen=True)
 class SWGDatasetContract:
     """Validated, split-safe view of content-pinned hourly state records.
@@ -888,6 +967,13 @@ class SWGDatasetContract:
     same validation (``__post_init__``).  Every window starts from the stored
     state at its start hour with its sea level rebalanced by the registered
     rule; its targets are the stored right endpoints of the same operator.
+
+    ``target_filter_sigma_cells`` (>= 1) widens the template state: 1 serves
+    the stored sigma-one-cell state unchanged (a contract file with no key
+    means 1); a larger value filters every served hour once more on the
+    coarse grid (``build_target_filter``, once at ``preload_memory`` when
+    cached, else per read) and, under the rigid lid, projects window-start
+    velocities non-divergent.  Only the template objective may widen.
     """
 
     objective: str
@@ -897,7 +983,12 @@ class SWGDatasetContract:
     contract_sha256: str
     batch_size: int
     card: object = field(repr=False, compare=False)
+    target_filter_sigma_cells: float
     _rebalance: object = field(
+        init=False, repr=False, compare=False, default=None)
+    _target_filter: object = field(
+        init=False, repr=False, compare=False, default=None)
+    _start_projection: object = field(
         init=False, repr=False, compare=False, default=None)
     _issued: dict = field(
         init=False, repr=False, compare=False, default_factory=dict)
@@ -907,6 +998,8 @@ class SWGDatasetContract:
     def __post_init__(self):
         if self.objective not in OBJECTIVE_OPERATORS:
             raise ValueError("dataset objective must be symmetric or template")
+        require_target_filter_sigma_cells(
+            self.target_filter_sigma_cells, self.objective)
         if self.batch_size != TEMPLATE_BATCH_SIZE:
             raise ValueError("dataset contract must use batch size 10")
         if tuple(name for name, _, _ in self.splits) \
@@ -944,6 +1037,13 @@ class SWGDatasetContract:
         if self._stored_state(self.splits[0][1])[0].shape != grid:
             raise ValueError("dataset grid differs from the coarse card")
         object.__setattr__(self, "_rebalance", start_rebalancer(self.card))
+        if self.target_filter_sigma_cells > STORED_TARGET_FILTER_SIGMA_CELLS:
+            object.__setattr__(self, "_target_filter", build_target_filter(
+                self.card, sigma_cells=self.target_filter_sigma_cells))
+            if _is_rigid_lid(self.card):
+                object.__setattr__(
+                    self, "_start_projection",
+                    build_lid_start_projection(self.card))
 
     @staticmethod
     def from_json(path: Path, *, card) -> SWGDatasetContract:
@@ -975,7 +1075,11 @@ class SWGDatasetContract:
             objective=payload.get("objective"), splits=tuple(splits),
             sources=tuple(pins), contract_path=str(path.resolve()),
             contract_sha256=_sha256(path),
-            batch_size=payload.get("batch_size"), card=card)
+            batch_size=payload.get("batch_size"), card=card,
+            # Contracts written before the widened filter carry no key; their
+            # targets are the stored sigma-one-cell state.
+            target_filter_sigma_cells=payload.get(
+                "target_filter_sigma_cells", STORED_TARGET_FILTER_SIGMA_CELLS))
 
     def _validate_coverage(self) -> None:
         ordered = sorted(self.sources, key=lambda source: source.first_absolute_hour)
@@ -1017,9 +1121,16 @@ class SWGDatasetContract:
     def _initial(self, source: PinnedHourlySource):
         return _pinned_day(source, self.objective, 0)[1]
 
+    def _served_state(self, hour: int):
+        """The stored state at ``hour``, widened when the contract says so."""
+        state = stored_state_at(self.sources, self.objective, hour)[0]
+        if self._target_filter is None:
+            return state
+        return self._target_filter(*state)
+
     def _stored_state(self, hour: int):
         if self._memory is None:
-            return stored_state_at(self.sources, self.objective, hour)[0]
+            return self._served_state(hour)
         if hour not in self._memory:
             raise ValueError(
                 f"absolute hour {hour} was not preloaded into memory; "
@@ -1057,8 +1168,7 @@ class SWGDatasetContract:
         memory = {}
         for hour in np.unique(np.concatenate(wanted)):
             state = tuple(np.array(value) for value in
-                          stored_state_at(self.sources, self.objective,
-                                          int(hour))[0])
+                          self._served_state(int(hour)))
             for value in state:
                 value.flags.writeable = False
             memory[int(hour)] = state
@@ -1070,6 +1180,8 @@ class SWGDatasetContract:
         """One window start: the stored state at ``absolute_hour`` with its
         sea level rebalanced by the registered rule; ``((ssh, u, v), report)``."""
         ssh, u, v = self._stored_state(absolute_hour)
+        if self._start_projection is not None:
+            u, v = self._start_projection(u, v)
         ssh, report = self._rebalance(ssh, u, v)
         return (ssh, u, v), report
 

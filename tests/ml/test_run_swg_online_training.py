@@ -245,6 +245,19 @@ def test_gpu_control_configs_name_the_frozen_control_choices_exactly():
     (lambda c: c["dataset"].pop("cache"), "exactly the keys"),
     (lambda c: c["dataset"].update(cache="disk"), "cache"),
     (lambda c: c["dataset"].update(cache=True), "cache"),
+    (lambda c: c["dataset"].pop("target_filter_sigma_cells"),
+     "exactly the keys"),
+    (lambda c: c["dataset"].update(target_filter_sigma_cells=0.5),
+     "target_filter_sigma_cells"),
+    (lambda c: c["dataset"].update(target_filter_sigma_cells=True),
+     "target_filter_sigma_cells"),
+    (lambda c: c["dataset"].update(target_filter_sigma_cells="2"),
+     "target_filter_sigma_cells"),
+    (lambda c: c["dataset"].update(target_filter_sigma_cells=float("nan")),
+     "target_filter_sigma_cells"),
+    # CONFIGS[0] is the symmetric candidate: it may not widen the filter.
+    (lambda c: c["dataset"].update(target_filter_sigma_cells=1.5),
+     "template objective only"),
     (lambda c: c["optimiser"].pop("adam_epsilon_convention"), "exactly"),
     (lambda c: c["optimiser"].update(schedule="warmup_cosine"), "constant"),
     (lambda c: c["optimiser"].update(gradient_clipping="global_norm"), "none"),
@@ -1507,11 +1520,15 @@ def test_every_committed_training_config_states_its_training_precision():
     assert precisions.pop(EXP4_SYMMETRIC.name) == "fp32"
     assert precisions.pop(EXP5_TEMPLATE.name) == "fp32"
     assert precisions.pop(EXP5_SYMMETRIC.name) == "fp32"
+    for path in EXP6:
+        assert precisions.pop(path.name) == "fp32"
     assert set(precisions.values()) == {"fp64"}
 
 
 EXP5_SYMMETRIC = _ROOT / "config/swg_online/exp5_rigidlid_symmetric_fast.json"
 EXP5_TEMPLATE = _ROOT / "config/swg_online/exp5_rigidlid_template_fast.json"
+EXP6 = tuple(_ROOT / f"config/swg_online/exp6_rigidlid_template_{tag}.json"
+             for tag in ("sigma1p5", "sigma2"))
 EXP4_TEMPLATE = _ROOT / "config/swg_online/exp4_rigidlid_template_ring_weighted_fp32.json"
 EXP4_SYMMETRIC = _ROOT / "config/swg_online/exp4_rigidlid_symmetric_ring_weighted_fp32.json"
 RIGID_LID_TRUTH = ("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
@@ -1528,6 +1545,8 @@ def test_every_committed_training_config_states_its_target_interval():
     assert intervals.pop(EXP4_SYMMETRIC.name) == 3
     assert intervals.pop(EXP5_TEMPLATE.name) == 3
     assert intervals.pop(EXP5_SYMMETRIC.name) == 3
+    for path in EXP6:
+        assert intervals.pop(path.name) == 3
     assert len(intervals) >= 17 and set(intervals.values()) == {1}
 
 
@@ -1918,6 +1937,8 @@ def test_every_committed_training_config_states_checkpointing_and_cache():
                              config["dataset"]["cache"])
     assert states.pop(EXP5_SYMMETRIC.name) == (False, "memory")
     assert states.pop(EXP5_TEMPLATE.name) == (False, "memory")
+    for path in EXP6:
+        assert states.pop(path.name) == (False, "memory")
     assert len(states) >= 17 and set(states.values()) == {(True, "none")}
 
 
@@ -2015,3 +2036,55 @@ def test_memory_cache_training_reproduces_the_file_reading_run_bit_for_bit(
         name = entry["checkpoint"]["path"]
         assert driver._sha256(tmp_path / "run" / name) \
             == driver._sha256(one_window["folder"] / "run" / name)
+
+
+# ------------------------------------------------ widened template target filter
+
+def test_every_committed_training_config_states_its_target_filter_width():
+    widths = {path.name: driver.load_config(path)["dataset"][
+        "target_filter_sigma_cells"]
+        for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
+        if "network" in json.loads(path.read_text())}
+    assert widths.pop(EXP6[0].name) == 1.5
+    assert widths.pop(EXP6[1].name) == 2.0
+    assert len(widths) >= 17 and set(widths.values()) == {1.0}
+
+
+@pytest.mark.parametrize("path,experiment,sigma,shown", [
+    (EXP6[0], "swgonl_exp6_rigidlid_template_sigma1p5", 1.5, "1.5"),
+    (EXP6[1], "swgonl_exp6_rigidlid_template_sigma2", 2.0, "2")])
+def test_exp6_configs_differ_from_exp5_template_only_in_the_filter_width(
+        path, experiment, sigma, shown):
+    base, new = driver.load_config(EXP5_TEMPLATE), driver.load_config(path)
+    prefix = (f"Wider target filter (user 2026-10-18): template objective "
+              f"with the Gaussian target smoothed to sigma = {shown} coarse "
+              "cells by a second coarse-grid pass; otherwise exp5 template. ")
+    stale = " The dataset roots below are PLACEHOLDERS"
+    assert "PLACEHOLDERS" in base["description"]
+    assert new["description"].startswith(prefix + "Speed-up of exp4")
+    assert "PLACEHOLDERS" not in new["description"]
+    assert new["description"] == prefix + base["description"].split(stale)[0]
+    assert new == base | {
+        "experiment": experiment, "description": new["description"],
+        "dataset": base["dataset"] | {"target_filter_sigma_cells": sigma}}
+    assert new["objective"] == "template" and new["surface"] == "rigid_lid"
+
+
+def test_contract_names_the_target_filter_width_and_check_data_reads_it(
+        tmp_path, small_card, record):
+    for sigma in (1.0, 1.5):
+        config = _config(record)
+        config["dataset"]["target_filter_sigma_cells"] = sigma
+        payload = driver.write_dataset_contract(
+            config, tmp_path / f"contract_{sigma}.json")
+        assert payload["target_filter_sigma_cells"] == sigma
+        contract = driver.SWGDatasetContract.from_json(
+            tmp_path / f"contract_{sigma}.json", card=small_card)
+        assert contract.target_filter_sigma_cells == sigma
+        assert (contract._target_filter is None) == (sigma == 1.0)
+    # a wider filter is a different contract, hence a different run identity
+    assert driver._sha256(tmp_path / "contract_1.0.json") \
+        != driver._sha256(tmp_path / "contract_1.5.json")
+    config["dataset"]["target_filter_sigma_cells"] = 1.5
+    report = driver.check_data(config, card=small_card)
+    assert len(report["batches"]) == 6

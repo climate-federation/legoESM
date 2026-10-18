@@ -34,7 +34,8 @@
       "test": [5141, 5506]
     },
     "batch_size": 10,
-    "cache": "memory"
+    "cache": "memory",
+    "target_filter_sigma_cells": 1.0
   },
   "curriculum": {
     "window_days": [1, 2, 4, 8],

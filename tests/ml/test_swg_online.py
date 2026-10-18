@@ -4,6 +4,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import math
 import types
 from pathlib import Path
 
@@ -27,6 +28,10 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_MADDISON_RL_NAMELIST,
     build_swg_card,
     swg_surface_wind,
+)
+from legoesm.ocean.fidelity.swg_coarse_graining import (
+    cgrid_geometry,
+    filtered_restrict_cgrid,
 )
 from legoesm.ocean.state import OceanSurfaceForcing
 from legoesm.training import swg_online
@@ -59,8 +64,10 @@ from legoesm.training.swg_online import (
     load_content_pinned_initial_state,
     maddison_eq6_network_scales,
     network_parameter_count,
+    require_target_filter_sigma_cells,
     require_target_interval_hours,
     steps_per_target_interval,
+    stored_state_at,
     swg_online_step,
     wall_margin_mask,
 )
@@ -675,14 +682,17 @@ _CHUNKS = (("train_a", 0, 11), ("train_b", 11, 11),
 
 
 def _write_contract(path: Path, sources, *, objective="template",
-                    splits=None) -> Path:
-    path.write_text(json.dumps({
+                    splits=None, target_filter_sigma_cells=None) -> Path:
+    payload = {
         "schema": "legoesm-swg-online-dataset-v1", "objective": objective,
         "batch_size": 10, "window_days": [1, 2, 4, 8],
         "splits": splits or _SPLITS,
         "sources": [{"root": str(root), "manifest_sha256": digest}
                     for root, digest in sources],
-    }, sort_keys=True))
+    }
+    if target_filter_sigma_cells is not None:
+        payload["target_filter_sigma_cells"] = target_filter_sigma_cells
+    path.write_text(json.dumps(payload, sort_keys=True))
     return path
 
 
@@ -1747,3 +1757,313 @@ def test_memory_preload_refuses_unregistered_windows(dataset, windows):
         contract.preload_memory(window_days=windows, target_interval_hours=1)
     with pytest.raises(ValueError, match="target_interval_hours"):
         contract.preload_memory(window_days=(1,), target_interval_hours=5)
+
+
+# ------------------------------------------------- widened template target filter
+
+def _wave(shape, hour, phase):
+    """A 7-cell-wavelength diagonal wave that depends on the absolute hour."""
+    j, i = np.indices(shape)
+    return np.cos(2.0 * np.pi * (i + 2.0 * j) / 7.0 + 0.1 * hour + phase)
+
+
+def _wave_edit(masks, tmask, *, with_ssh):
+    """``_write_chunk`` day edit: hour-dependent wave velocities (divergent,
+    nonzero next to the walls) and, on an explicit card, sea level."""
+    umask, vmask = masks
+
+    def edit(day, arrays):
+        hours = arrays["absolute_hour"]
+        for prefix, scale in _OPERATOR_SCALE.items():
+            def make(hour):
+                return (1.0e-3 * scale * _wave(umask.shape, hour, 0.0) * umask,
+                        1.0e-3 * scale * _wave(umask.shape, hour, 1.3) * vmask,
+                        (1.0e-3 * scale * _wave(umask.shape, hour, 2.1) * tmask
+                         if with_ssh else np.zeros(umask.shape)))
+            hourly = [make(int(hour)) for hour in hours]
+            for index, name in enumerate(("u_hourly_m_s", "v_hourly_m_s",
+                                          "ssh_hourly_m")):
+                arrays[f"{prefix}{name}"] = np.stack(
+                    [state[index] for state in hourly])
+            if f"{prefix}u_initial_m_s" in arrays:
+                start = make(int(hours[0]) - 1)
+                for index, name in enumerate(("u_initial_m_s", "v_initial_m_s",
+                                              "ssh_initial_m")):
+                    arrays[f"{prefix}{name}"] = start[index]
+    return edit
+
+
+def _wave_sources(root: Path, card, *, lid=False):
+    geometry = build_closure_geometry(card)
+    masks = (np.asarray(geometry.umask), np.asarray(geometry.vmask))
+    edit = _wave_edit(masks, np.asarray(geometry.tmask), with_ssh=not lid)
+    return [(root / name, _write_chunk(
+        root / name, source_day=day, days=days, masks=masks,
+        truth_run=root / "truth", day_edit=edit,
+        manifest_edit=_lid_stream if lid else None))
+        for name, day, days in _CHUNKS]
+
+
+def _wave_contract(root: Path, card, *, sigma, lid=False):
+    """The synthetic wave record under a contract naming ``sigma`` (``None``:
+    a contract file with no filter key, as before the key existed)."""
+    sources = _wave_sources(root, card, lid=lid)
+    return SWGDatasetContract.from_json(_write_contract(
+        root / "contract.json", sources, target_filter_sigma_cells=sigma),
+        card=card)
+
+
+@pytest.fixture(scope="module")
+def wave_record(tmp_path_factory, small_card):
+    """One wave record, read under a contract with no key, 1.0 and 2.0."""
+    root = tmp_path_factory.mktemp("swg_wave")
+    sources = _wave_sources(root, small_card)
+    return {key: SWGDatasetContract.from_json(_write_contract(
+        root / f"contract_{key}.json", sources,
+        target_filter_sigma_cells=None if key == "unkeyed" else key),
+        card=small_card) for key in ("unkeyed", 1.0, 2.0)}
+
+
+def _batch(contract, **changes):
+    arguments = dict(split="train", window_days=1,
+                     target_interval_hours=1) | changes
+    if arguments["split"] == "train":
+        arguments = dict(epoch=0, seed=12) | arguments
+    return next(contract.batches(**arguments))
+
+
+def test_target_filter_one_is_the_stored_state_bit_for_bit(wave_record):
+    stored, one = wave_record["unkeyed"], wave_record[1.0]
+    assert stored.target_filter_sigma_cells == one.target_filter_sigma_cells \
+        == 1.0
+    assert stored._target_filter is None and one._target_filter is None
+    for window in (1, 2):
+        _same_batch(_batch(one, window_days=window),
+                    _batch(stored, window_days=window))
+    _same_batch(_batch(one, split="validation"),
+                _batch(stored, split="validation"))
+    # the record is non-trivial: the wave is what the batch carries
+    assert np.abs(_batch(one).target[1]).max() > 1.0e-3
+
+
+def test_target_filter_two_is_the_recorder_filter_then_sigma_sqrt_three(
+        wave_record, small_card):
+    contract, narrow_contract = wave_record[2.0], wave_record[1.0]
+    coarse = cgrid_geometry(small_card.resolved_namelist)
+    batch, narrow = _batch(contract), _batch(narrow_contract)
+    assert np.array_equal(batch.start_absolute_hour, narrow.start_absolute_hour)
+    checked = 0
+    for k, start in enumerate(np.asarray(batch.start_absolute_hour)[:3]):
+        for lead in (1, 12, 24):
+            ssh, u, v = (np.asarray(x) for x in stored_state_at(
+                contract.sources, "template", int(start) + lead)[0])
+            expected = filtered_restrict_cgrid(
+                {"T": ssh, "U": u, "V": v}, coarse, coarse,
+                sigma_source_cells=math.sqrt(2.0**2 - 1.0))
+            for index, key in enumerate("TUV"):
+                served = batch.target[index][k, lead - 1]
+                scale = np.abs(expected[key]).max()
+                assert scale > 1.0e-5
+                # eta is rebuilt from volume / area - depth (4 km), so its
+                # round-off is 1e-10 of this wave; velocities are at 1e-13
+                assert np.abs(served - expected[key]).max() <= 1.0e-9 * scale
+                # and it is not the stored sigma-one state
+                assert np.abs(served - narrow.target[index][k, lead - 1]).max() \
+                    > 0.1 * scale
+            checked += 1
+    assert checked == 9
+    # wall parity: wall-normal velocity stays exactly zero on the wall faces
+    umask = np.asarray(build_closure_geometry(small_card).umask)
+    assert np.all(batch.target[1][..., ~umask] == 0.0)
+
+
+def test_target_filter_runs_once_at_preload_and_batches_do_not_change(
+        wave_record):
+    plain = wave_record[2.0]
+    cached = dataclasses.replace(plain)
+    cached.preload_memory(window_days=(1,), target_interval_hours=1)
+    for split, kwargs in (("train", {"epoch": 1, "seed": 7}),
+                          ("validation", {}), ("test", {})):
+        _same_batch(_batch(cached, split=split, **kwargs),
+                    _batch(plain, split=split, **kwargs))
+
+
+@pytest.mark.parametrize("sigma", [0.5, 0.0, -1.5, float("nan"),
+                                   float("inf"), True, "2", None])
+def test_target_filter_refuses_values_below_one_and_non_numbers(sigma):
+    with pytest.raises(ValueError, match="target_filter_sigma_cells"):
+        require_target_filter_sigma_cells(sigma, "template")
+
+
+def test_target_filter_above_one_is_refused_under_the_symmetric_objective(
+        wave_record):
+    assert require_target_filter_sigma_cells(1.0, "symmetric") == 1.0
+    with pytest.raises(ValueError, match="template objective only"):
+        require_target_filter_sigma_cells(1.5, "symmetric")
+    with pytest.raises(ValueError, match="template objective only"):
+        dataclasses.replace(wave_record[2.0], objective="symmetric")
+    with pytest.raises(ValueError, match="target_filter_sigma_cells"):
+        dataclasses.replace(wave_record[2.0], target_filter_sigma_cells=0.9)
+
+
+@pytest.fixture(scope="module")
+def fine_and_coarse():
+    return (cgrid_geometry(SWG_MADDISON_NAMELIST),
+            cgrid_geometry(SWG_DG50_NAMELIST))
+
+
+def _two_pass_and_single(fields, fine, coarse, sigma_total):
+    stored = filtered_restrict_cgrid(
+        fields, fine, coarse, sigma_source_cells=8.0)
+    two = filtered_restrict_cgrid(
+        stored, coarse, coarse,
+        sigma_source_cells=math.sqrt(sigma_total**2 - 1.0))
+    single = filtered_restrict_cgrid(
+        fields, fine, coarse, sigma_source_cells=8.0 * sigma_total)
+    return stored, two, single
+
+
+def _interior(array, sigma_total):
+    # the 80 x 80 wet rectangle starts at index 1; keep the kernel radius + 2
+    margin = int(math.ceil(6.0 * sigma_total)) + 2
+    return array[1 + margin:81 - margin, 1 + margin:81 - margin]
+
+
+def _relative_rms_difference(two, single, sigma_total):
+    return {key: float(
+        np.sqrt(np.mean((_interior(two[key], sigma_total)
+                         - _interior(single[key], sigma_total))**2))
+        / np.sqrt(np.mean(_interior(single[key], sigma_total)**2)))
+        for key in "TUV"}
+
+
+@pytest.mark.parametrize("sigma_total", [1.5, 2.0])
+def test_second_coarse_pass_composes_with_the_sigma_one_filter_on_smooth_fields(
+        fine_and_coarse, sigma_total):
+    """Relative rms difference, away from the walls, between the two-stage
+    field (fine sigma 8 cells, then the coarse pass) and one fine pass of
+    sigma_total, for plane waves of 4..32 coarse cells.  Measured (CPU, x64):
+    at most 2.3e-7."""
+    fine, coarse = fine_and_coarse
+    yy, xx = np.meshgrid(np.arange(644) + 0.5, np.arange(644) + 0.5,
+                         indexing="ij")
+    worst = 0.0
+    for wavelength in (4, 6, 8, 16, 32):
+        wave = np.cos(2.0 * np.pi * (xx + yy)
+                      / (8.0 * wavelength * math.sqrt(2.0)))
+        fields = {"T": 1.0e-3 * wave * fine["mask"]["T"],
+                  "U": 1.0e-2 * wave * fine["mask"]["U"],
+                  "V": 1.0e-2 * np.roll(wave, 3, 0) * fine["mask"]["V"]}
+        stored, two, single = _two_pass_and_single(
+            fields, fine, coarse, sigma_total)
+        errors = _relative_rms_difference(two, single, sigma_total)
+        print(f"smooth sigma={sigma_total} lambda={wavelength}: {errors}")
+        worst = max(worst, *errors.values())
+        # the sigma-one state alone is a different field (non-vacuous)
+        narrow = _relative_rms_difference(stored, single, sigma_total)
+        assert max(narrow.values()) > 1.0e3 * max(errors.values())
+    assert worst < 1.0e-6
+
+
+@pytest.mark.parametrize("sigma_total", [1.5, 2.0])
+def test_second_coarse_pass_gives_white_noise_the_single_pass_spectrum(
+        fine_and_coarse, sigma_total):
+    """White noise filtered at sigma one, then at sqrt(sigma_total**2 - 1),
+    has the power of one fine pass of sigma_total in every radial band of the
+    interior.  Measured band-power ratios (8 seeds, CPU, x64): within 1.4e-4
+    at 1.5 and 3.8e-6 at 2; the sigma-one state alone is 1.07 to 157 times
+    (1.5) too powerful."""
+    fine, coarse = fine_and_coarse
+    margin = int(math.ceil(6.0 * sigma_total)) + 2
+    taper = np.hanning(80 - 2 * margin)
+    window = np.outer(taper, taper)
+    edges = [0.0, 0.05, 0.1, 0.2, 0.3, 0.5]            # cycles per coarse cell
+    frequency = np.fft.fftfreq(80 - 2 * margin)
+    radial = np.hypot(*np.meshgrid(frequency, frequency, indexing="ij"))
+
+    def bands(array):
+        power = np.abs(np.fft.fft2(_interior(array, sigma_total) * window))**2
+        return np.array([power[(radial >= lo) & (radial < hi)].sum()
+                         for lo, hi in zip(edges[:-1], edges[1:])])
+
+    rng = np.random.default_rng(1)
+    total = {"stored": 0.0, "two": 0.0, "single": 0.0}
+    errors = []
+    for _ in range(8):
+        fields = {"T": 1.0e-3 * rng.normal(size=(644, 644)) * fine["mask"]["T"],
+                  "U": 1.0e-2 * rng.normal(size=(644, 644)) * fine["mask"]["U"],
+                  "V": 1.0e-2 * rng.normal(size=(644, 644)) * fine["mask"]["V"]}
+        stored, two, single = _two_pass_and_single(
+            fields, fine, coarse, sigma_total)
+        errors.append(max(_relative_rms_difference(
+            two, single, sigma_total).values()))
+        for name, out in (("stored", stored), ("two", two), ("single", single)):
+            total[name] = total[name] + bands(out["T"])
+    ratio = total["two"] / total["single"]
+    print(f"white sigma={sigma_total}: band ratios {ratio}, "
+          f"stored/single {total['stored'] / total['single']}, "
+          f"pointwise relative rms {max(errors):.3e}")
+    assert np.max(np.abs(ratio - 1.0)) < 1.0e-3
+    assert max(errors) < 1.0e-3
+    assert (total["stored"] / total["single"]).max() > 1.05    # non-vacuous
+
+
+def _lid_divergence(card, u, v):
+    """Native-face divergence over the wet rectangle, the projection's own."""
+    geometry = build_closure_geometry(card)
+    j0, j1, i0, i1 = geometry.wet_bounds
+    u, v = np.asarray(u), np.asarray(v)
+    divergence = (u - np.roll(u, 1, axis=1) + v - np.roll(v, 1, axis=0)) \
+        / geometry.spacing_m
+    return divergence[j0:j1 + 1, i0:i1 + 1]
+
+
+def test_rigid_lid_window_starts_are_non_divergent_after_the_wider_filter(
+        tmp_path, lid_card):
+    contract = _wave_contract(tmp_path / "wide", lid_card, sigma=2.0, lid=True)
+    hour = int(_batch(contract, target_interval_hours=3).start_absolute_hour[0])
+    (ssh, u, v), _ = contract.start_state(hour)
+    served = contract._stored_state(hour)
+    # the filtered wave stays divergent; the projection removes the divergence
+    unprojected = _lid_divergence(lid_card, served[1], served[2])
+    assert np.abs(unprojected).max() > 1.0e-9
+    assert np.abs(_lid_divergence(lid_card, u, v)).max() \
+        < 1.0e-9 * np.abs(unprojected).max()
+    assert np.all(ssh == 0.0)
+    geometry = build_closure_geometry(lid_card)
+    assert np.abs(u - served[1]).max() > 0.0
+    assert np.all(u[~np.asarray(geometry.umask)] == 0.0)
+    # a contract at sigma one does not project: its starts are stored as is
+    plain = _wave_contract(tmp_path / "plain", lid_card, sigma=1.0, lid=True)
+    assert plain._start_projection is None
+    assert np.abs(_lid_divergence(
+        lid_card, *plain._stored_state(hour)[1:])).max() > 1.0e-9
+
+
+def test_rigid_lid_targets_are_filtered_but_not_projected(tmp_path, lid_card):
+    contract = _wave_contract(tmp_path, lid_card, sigma=2.0, lid=True)
+    batch = _batch(contract, target_interval_hours=3)
+    assert np.all(batch.target[0] == 0.0)               # lid: exactly zero ssh
+    assert np.abs(_lid_divergence(
+        lid_card, batch.target[1][0, 0], batch.target[2][0, 0])).max() > 1.0e-9
+
+
+def test_rigid_lid_filter_keeps_a_nondivergent_state_nondivergent(lid_card):
+    """Gaussians commute with the divergence, so the widened start needs the
+    projection only as a round-off guard: a non-divergent stored flow comes
+    out at ~1e-22 1/s and the projection moves it by ~1e-18 m/s (measured on
+    the 80 x 80 dg50 lid card; this test uses the 20 x 20 card)."""
+    geometry = build_closure_geometry(lid_card)
+    u, v = _streamfunction_flow(geometry, 3.0e5)
+    scale = max(np.abs(u).max(), np.abs(v).max())
+    assert np.abs(_lid_divergence(lid_card, u, v)).max() < 1.0e-12 * scale
+    for sigma in (1.5, 2.0):
+        ssh, u_wide, v_wide = swg_online.build_target_filter(
+            lid_card, sigma_cells=sigma)(np.zeros(u.shape), u, v)
+        assert np.all(ssh == 0.0)
+        assert np.abs(u_wide - u).max() > 1.0e-2 * scale     # it did smooth
+        assert np.abs(_lid_divergence(lid_card, u_wide, v_wide)).max() \
+            < 1.0e-12 * scale
+        u_proj, _ = swg_online.build_lid_start_projection(lid_card)(
+            u_wide, v_wide)
+        assert np.abs(u_proj - u_wide).max() < 1.0e-12 * scale

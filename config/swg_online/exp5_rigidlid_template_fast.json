@@ -47,7 +47,8 @@
       ]
     },
     "batch_size": 10,
-    "cache": "memory"
+    "cache": "memory",
+    "target_filter_sigma_cells": 1.0
   },
   "curriculum": {
     "window_days": [
