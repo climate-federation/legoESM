@@ -3193,10 +3193,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # (stprk3_stg.f90:572-573).  False keeps the row at the compact mask's
     # zero.  T-pivot fold grids only.
     rk3_fold_exchange_top_v_row: bool = False
-    # After the stage-3 tracer update the image half of the stored T-pivot
-    # row is the mirror of its source half (stprk3_stg.f90:795-796 ->
-    # lbcnfd.f90:620-628).  False leaves both halves as computed.
-    rk3_fold_exchange_tracer_pivot_row: bool = False
+    # NEMO's end-of-stage exchange (stprk3_stg.f90:795-796) also re-mirrors
+    # the stored T-pivot row of uu, T and S (lbcnfd.f90:624-628, :669-673).
+    # True applies that pivot half-row after every stage; False preserves
+    # previously measured cards.  T-pivot fold grids only.
+    rk3_end_of_stage_pivot_fold: bool = False
     # The F-point thickness ratio the vorticity term of stages 2 and 3
     # reads is NEMO's interpolation of the entry and after ratios
     # (stprk3_stg.f90:218, :239).  False takes the ratio of the stage's

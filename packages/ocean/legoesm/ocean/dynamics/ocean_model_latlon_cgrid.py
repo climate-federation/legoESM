@@ -8931,6 +8931,9 @@ class LatLonCGridOceanModel:
                         _T_stage1_after_sbc, _S_stage1_after_sbc)
             else:
                 _T_stage1, _S_stage1 = _stage1_tracer_result
+            if _cfg_b.rk3_end_of_stage_pivot_fold:  # stprk3_stg.f90:795-796
+                u1_corr, _T_stage1, _S_stage1 = _rk3_end_of_stage_pivot_fold(
+                    u1_corr, _T_stage1, _S_stage1, _grid)
             if (_stage_entry_override is not None
                     and _stage_entry_override[0] == 2):
                 (_, u1_corr, v1_corr, _T_stage1, _S_stage1,
@@ -8995,6 +8998,9 @@ class LatLonCGridOceanModel:
             _T_stage2, _S_stage2 = _stage_tracers(
                 2, (_g0, _g1_tracer, _g1),
                 resume=(1, _T_stage1, _S_stage1))
+            if _cfg_b.rk3_end_of_stage_pivot_fold:  # stprk3_stg.f90:795-796
+                u2_corr, _T_stage2, _S_stage2 = _rk3_end_of_stage_pivot_fold(
+                    u2_corr, _T_stage2, _S_stage2, _grid)
             if (_stage_entry_override is not None
                     and _stage_entry_override[0] == 3):
                 (_, u2_corr, v2_corr, _T_stage2, _S_stage2,
@@ -10958,6 +10964,14 @@ class LatLonCGridOceanModel:
                 u=state_new.u.replace(data=_u_after),
                 v=state_new.v.replace(data=_v_after),
             )
+            if _cfg_b.rk3_end_of_stage_pivot_fold:  # stprk3_stg.f90:795-796
+                _u_f, _T_f, _S_f = _rk3_end_of_stage_pivot_fold(
+                    state_new.u.data, state_new.T.data, state_new.S.data,
+                    _grid)
+                state_new = state_new._replace(
+                    u=state_new.u.replace(data=_u_f),
+                    T=state_new.T.replace(data=_T_f),
+                    S=state_new.S.replace(data=_S_f))
         elif _impose_mean:
             # NEMO stprk3_stg.F90:440: uu += (uu_b(Kaa) − Σ e3u_0·uu·r1_hu_0)
             # ·umask — the 3D velocity's depth mean is REPLACED by the
@@ -10974,11 +10988,6 @@ class LatLonCGridOceanModel:
                 u=state_new.u.replace(data=state_new.u.data + _du * _um),
                 v=state_new.v.replace(data=state_new.v.data + _dv * _vm),
             )
-
-        if _cfg_b.rk3_fold_exchange_tracer_pivot_row:   # after tra_zdf
-            state_new = state_new._replace(**{
-                n: getattr(state_new, n).replace(data=_rk3_fold_exchange_tracer_pivot_row(
-                    getattr(state_new, n).data, _grid)) for n in ("T", "S")})
 
         # 9. Conservation fixers
         if _cfg_b.use_conservation_fixer and _apply_implicit_vmix:
@@ -17234,24 +17243,6 @@ def _zdf_residual_nemo_literal(cfg) -> bool:
     return True
 
 
-def _rk3_fold_exchange_tracer_pivot_row(tracer, grid):
-    """NEMO's end-of-step T-point exchange on a stored T-pivot row.
-
-    ``lbc_lnk( 'stp_RK3_stg', ts(Kaa), 'T', 1. )`` (stprk3_stg.f90:795-796)
-    sets the image half of the pivot row from its mirror, sign +1
-    (lbcnfd.f90:620-628: points ipi/2+2..ipi-ihls from ipi/2..ihls+2).
-    """
-    fold = getattr(grid, "fold", None)
-    if (fold is None or not bool(fold.is_active)
-            or not bool(getattr(fold, "pivot_row_stored", False))):
-        raise ValueError(
-            "rk3_fold_exchange_tracer_pivot_row=True needs a grid that stores "
-            "the T-pivot row of an active north fold")
-    perm = np.asarray(fold.perm_T)
-    image = np.arange(perm.shape[0] // 2 + 1, perm.shape[0])
-    return tracer.at[-1, image].set(tracer[-1, perm[image]])
-
-
 def _rk3_fold_exchange_top_v(v, grid, v_mask_3d):
     """NEMO's end-of-stage exchange of the 3-D V velocity on a T-pivot fold.
 
@@ -17275,6 +17266,26 @@ def _rk3_fold_exchange_top_v(v, grid, v_mask_3d):
     return v.at[-1].set(
         fold.vector_sign_v * v[-2][perm] * v_mask_3d[-2][perm].astype(v.dtype))
 
+
+
+def _rk3_end_of_stage_pivot_fold(u, T, S, grid):
+    """NEMO's end-of-stage exchange of uu, T and S on the stored T-pivot row.
+
+    ``lbc_lnk( 'stp_RK3_stg', uu(Kaa) 'U' -1, vv(Kaa) 'V' -1, ts(T) 'T' +1,
+    ts(S) 'T' +1, ldfull )`` (stprk3_stg.f90:795-796) rewrites the right half
+    of the pivot row from its left half (lbcnfd.f90:624-628 for T,
+    :669-673 for U).  ``vv`` is ``_rk3_fold_exchange_top_v``.
+    """
+    from legoesm.grids.operators_latlon_cgrid import fold_pivot_half_row
+    fold = getattr(grid, "fold", None)
+    if (fold is None or not bool(fold.is_active)
+            or not bool(getattr(fold, "pivot_row_stored", False))):
+        raise ValueError(
+            "rk3_end_of_stage_pivot_fold=True needs a grid with an active "
+            "T-pivot fold whose pivot row is stored")
+    return (fold_pivot_half_row(u, fold, "U"),
+            fold_pivot_half_row(T, fold, "T"),
+            fold_pivot_half_row(S, fold, "T"))
 
 def _nemo_ws_stage_r3f(cfg, stage_index, eta_pair, z_coord, grid):
     """NEMO's F-point thickness ratio for the vorticity term of stage 2 or 3.

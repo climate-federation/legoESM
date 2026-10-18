@@ -96,7 +96,7 @@ def test_l1_card_is_g5_plus_the_diffusive_bbl_selection_only(cards):
     assert changed == {"bbl_diffusive_option": (0, 1), "bbl_aht_m2_s": (0.0, 1000.0),
                        "bbl_gamma_s": (0.0, 10.0), "bbl_nemo_stage3_krhs": (False, True),
                        "bbl_nemo_pivot_ghost": (False, True),
-                       "rk3_fold_exchange_tracer_pivot_row": (False, True)}
+                       "rk3_end_of_stage_pivot_fold": (False, True)}
     assert l1.recipe.model_config.bbl_adv_option == 0
     s5, s1 = g5.recipe.initial_state, l1.recipe.initial_state
     assert [n for n in s5._fields if _differs(
@@ -116,7 +116,7 @@ def test_selector_refuses_l1_without_bbl_and_g5_with_it(cards):
     assert "ln_trabbl" in recipe._orca2g1_selector_failures(
         l1._replace(recipe=l1.recipe._replace(model_config=off)))
     for flag in ("bbl_nemo_stage3_krhs", "bbl_nemo_pivot_ghost",
-                 "rk3_fold_exchange_tracer_pivot_row"):
+                 "rk3_end_of_stage_pivot_fold"):
         cut = l1.recipe.model_config._replace(**{flag: False})
         assert "ln_trabbl" in recipe._orca2g1_selector_failures(
             l1._replace(recipe=l1.recipe._replace(model_config=cut))), flag
@@ -200,8 +200,8 @@ def test_l1_kt1_4_every_field_bit_for_bit_and_bbl_acts_at_stage3_in_footprint_on
     assert assert_record_bit_for_bit(L1_TWINS, "ORCA2L1-bbl", kt_to=4, frame=False) is None
 
 
-def test_tracer_pivot_row_exchange_copies_the_image_half_from_its_mirror():
-    """lbcnfd.f90:620-628: points ipi/2+2..ipi-ihls of the T-pivot row take
+def test_end_of_stage_pivot_fold_copies_the_tracer_image_half_from_its_mirror():
+    """lbcnfd.f90:624-628: points ipi/2+2..ipi-ihls of the T-pivot row take
     the mirror's value (sign +1); the source half and every other row stay."""
     from types import SimpleNamespace
 
@@ -211,17 +211,20 @@ def test_tracer_pivot_row_exchange_copies_the_image_half_from_its_mirror():
     n = 8
     perm = np.array([0] + [n - i for i in range(1, n)])          # 0 and n/2 self-mirrored
     grid = SimpleNamespace(fold=SimpleNamespace(is_active=True, pivot_row_stored=True,
-                                                perm_T=perm))
+                                                perm_T=perm, vector_sign_u=-1.0))
     x = np.arange(3 * n * 2, dtype=np.float64).reshape(3, n, 2)
-    got = np.asarray(M._rk3_fold_exchange_tracer_pivot_row(jnp.asarray(x), grid))
-    want = x.copy()
-    want[-1, n // 2 + 1:] = x[-1, perm[n // 2 + 1:]]
-    assert np.array_equal(got, want)
-    assert np.array_equal(got[-1, : n // 2 + 1], x[-1, : n // 2 + 1])
-    assert np.array_equal(got[-1], got[-1, perm])                # the row is now symmetric
+    u = jnp.zeros((3, n + 1, 2))
+    _, T, S = M._rk3_end_of_stage_pivot_fold(u, jnp.asarray(x), jnp.asarray(2.0 * x), grid)
+    for got in (np.asarray(T), 0.5 * np.asarray(S)):
+        want = x.copy()
+        want[-1, n // 2 + 1:] = x[-1, perm[n // 2 + 1:]]
+        assert np.array_equal(got, want)
+        assert np.array_equal(got[-1, : n // 2 + 1], x[-1, : n // 2 + 1])
+        assert np.array_equal(got[-1], got[-1, perm])            # the row is now symmetric
     for fold in (None, SimpleNamespace(is_active=True, pivot_row_stored=False, perm_T=perm)):
         with pytest.raises(ValueError, match="T-pivot"):
-            M._rk3_fold_exchange_tracer_pivot_row(jnp.asarray(x), SimpleNamespace(fold=fold))
+            M._rk3_end_of_stage_pivot_fold(u, jnp.asarray(x), jnp.asarray(x),
+                                           SimpleNamespace(fold=fold))
 
 
 def test_bbl_north_neighbour_of_the_pivot_row_is_the_mirror_of_the_row_below():
