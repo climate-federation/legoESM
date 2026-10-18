@@ -8425,7 +8425,7 @@ CITATION_MAP = {
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:194-206': [
         '!*  vertical averaging  *!',
-        'END SELECT', 13,
+        ('END SELECT', 2), 13,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:302-303': [
         'IF( ln_dynspg_ts )',
