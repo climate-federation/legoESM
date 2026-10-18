@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
+import jax
 import netCDF4
 import numpy as np
 import pytest
@@ -13,6 +15,10 @@ from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
 from tests.ocean.fidelity.test_nemo_testcase_v1_orca2tke import (
     CARD_FILES, CASES, INPUTS, ORCA2_DECK, _differs, _flat, _root, _values,
 )
+from tests.ocean.fidelity.test_nemo_testcase_v3_orca2ddm import (
+    assert_record_bit_for_bit, kt2_restarts_differ,
+)
+from tests.ocean.fidelity.test_nemo_testcase_v4_orca2iwm import V4_RECORD, V4_TWINS
 
 V4 = CASES / "nemo_testcase_v4_orca2iwm"
 V5 = CASES / "nemo_testcase_v5_orca2havtb"
@@ -131,3 +137,22 @@ def test_run_script_reuses_v1_binaries_unbuilt_and_is_fail_closed():
                  "nn_havtb += +1$", 'check_havtb_frame "$TWIN_A"',
                  '"$V4_TOOL" --check-iwm-frame "$TWIN_A"', '--check-ddm-frame "$TWIN_A"'):
         assert name in text, name
+
+
+V5_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                 "gridladder_vmix_rounds/round15/oracle_v5_r15")
+V5_TWINS = [V5_RECORD / t for t in ("twin_a", "twin_b", "twin_c")]
+
+
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+@pytest.mark.skipif(not all(t.is_dir() for t in (*V4_TWINS, *V5_TWINS)),
+                    reason="the operator's V4/V5 records are not on this machine")
+def test_v5_kt1_2_every_field_and_kt1_frame_bit_for_bit_and_havtb_acts_in_band_only():
+    """nn_havtb reaches only the kt-1 avt_k seed (zdfiwm.f90:443 resets avtb_2d)."""
+    assert kt2_restarts_differ(V4_RECORD, V5_RECORD)   # the seed moves kt-2 T
+    frame = assert_record_bit_for_bit(V5_TWINS, "ORCA2V5-havtb", kt_to=2)
+    assert set(frame["rows"]) == {"avt", "avs", "avm", "en"}
+    act = frame["havtb_active"]
+    assert act["en"]["nemo_v5_ne_v4"] > 0
+    for f, a in act.items():
+        assert a["same_cells"] and a["nemo_outside_band"] == a["card_outside_band"] == 0, (f, a)

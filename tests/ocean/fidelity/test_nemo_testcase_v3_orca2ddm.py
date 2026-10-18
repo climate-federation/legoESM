@@ -158,7 +158,7 @@ def kt2_restarts_differ(before: Path, after: Path) -> bool:
 
 
 def assert_record_bit_for_bit(twins, case: str, *, kt_to: int) -> dict:
-    """kt-1 consumed avt/avs/avm (wet and dry) and every independent-arm field
+    """kt-1 frame rows (consumed avt/avs/avm; V5 adds en; wet and dry) and every independent-arm field
     kt 1..kt_to equal NEMO's record; returns the kt-1 frame for the caller's
     rung-specific checks."""
     sys.path.insert(0, str(CASES))
@@ -168,9 +168,10 @@ def assert_record_bit_for_bit(twins, case: str, *, kt_to: int) -> dict:
     spec.loader.exec_module(ladder)
     frame = ladder.run(twins[0], arm="ddm_kt1", kt_from=1, kt_to=1,
                        restart_roots=twins, allow_dirty=True, case=case)
-    for f in ("avt", "avs", "avm"):
-        assert frame["rows"][f]["n_unequal_wet"] == 0, f
-        assert frame["rows"][f]["summary"]["dry_n_unequal"] == 0, f
+    assert {"avt", "avs", "avm"} <= set(frame["rows"])
+    for f, r in frame["rows"].items():
+        assert r["n_unequal_wet"] == 0, f
+        assert r["summary"]["dry_n_unequal"] == 0, f
     out = ladder.run(twins[0], arm="independent", kt_from=1, kt_to=kt_to,
                      restart_roots=twins, allow_dirty=True, case=case)
     assert [k["kt"] for k in out["per_kt"]] == list(range(1, kt_to + 1))

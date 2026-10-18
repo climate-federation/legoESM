@@ -56,17 +56,24 @@ from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
 
 CASE = "ORCA2G2-zps"
 CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke",
-         "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm")
+         "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
 FORCED = ("ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd",
-          "ORCA2V3-ddm", "ORCA2V4-iwm")   # NEMO-supplied surface fields each kt (D123)
+          "ORCA2V3-ddm", "ORCA2V4-iwm",
+          "ORCA2V5-havtb")   # NEMO-supplied surface fields each kt (D123)
 # G5's record build (ORCA2-lane frames); V1 = that build + one hm_i writer;
-# V2/V3/V4 = V1's record binary with ORCA2's EVD (+ DDM, + IWM) namelist lines
-SI3 = ("ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm")
-TKE_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm")
+# V2/V3/V4/V5 = V1's record binary with ORCA2's EVD (+ DDM, + IWM, + nn_havtb) namelist lines
+SI3 = ("ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
+       "ORCA2V5-havtb")
+TKE_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
+ZDF_KT1_CASES = ("ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
 # V4's IWM-active check compares with V3's admitted (certified) kt-1 frame
 V3_ZDF_FRAME = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round13/"
     "oracle_v3_r13/twin_a/oracle_zdf_entry_kt00000001.bin")
+# V5's nn_havtb-active check compares with V4's admitted (certified) kt-1 frame
+V4_ZDF_FRAME = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round14/"
+    "oracle_v4_r14/twin_a/oracle_zdf_entry_kt00000001.bin")
 # V1: NEMO restart TKE fields -> carried card leaves (w levels 2..nk; the
 # card carries no surface en and no bottom w level)
 TKE_RESTART = {"tke": "en", "tke_avm": "avm_k", "tke_avt": "avt_k", "tke_dissl": "dissl"}
@@ -285,8 +292,8 @@ def ddm_kt1_rows(root: Path, model, grid, z_coord, cfg, s0, dt, forcing1, nk: in
     import jax
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
-    require(case in ("ORCA2V3-ddm", "ORCA2V4-iwm") and kt_from == kt_to == 1,
-            "the kt-1 double-diffusion frame is registered only for V3/V4 at kt 1")
+    require(case in ZDF_KT1_CASES and kt_from == kt_to == 1,
+            "the kt-1 double-diffusion frame is registered only for V3-V5 at kt 1")
     traced = jax.device_get(LatLonCGridOceanModel(
         grid, z_coord, cfg, iwm_forcing=model._iwm_forcing,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(tracer_zdf_trace=True)).step(
@@ -340,6 +347,31 @@ def ddm_kt1_rows(root: Path, model, grid, z_coord, cfg, s0, dt, forcing1, nk: in
             iwm[name] = {"nemo_v4_ne_v3": int(nemo.sum()), "card_v4_ne_v3": int(mine.sum()),
                          "same_cells": bool(np.array_equal(nemo, mine))}
         out["iwm_active"] = iwm
+    if case == "ORCA2V5-havtb":
+        # en after zdf_tke at kt 1 (the first reader of the avt_k seed,
+        # zdftke.f90:424) against the frame; then where the shape acts:
+        # V5 vs V4's certified frame, NEMO and card, and none outside the band
+        en = np.asarray(traced.state_after.tke.data, np.float64)
+        ref = z["en"][..., 1:nk]
+        rows = level_rows(ref, en, wcls)
+        out["rows"]["en"] = {"summary": class_summary(rows), "levels": rows,
+                             "ref_max_abs": float(np.max(np.abs(ref))),
+                             "n_unequal_wet": int(np.count_nonzero((en != ref) & wet))}
+        import netCDF4
+        with netCDF4.Dataset(Path(root) / "mesh_mask.nc") as h:
+            gphit = np.asarray(h.variables["gphit"][0], np.float64)
+        band = ((gphit >= -15.0) & (gphit < 15.0))[..., None]
+        v4 = read_zdf_kt1(V4_ZDF_FRAME, nk)
+        havtb = {}
+        for name, mine in (*card.items(), ("en", en)):
+            ref4 = v4[name][..., 1:nk]
+            nemo = (z[name][..., 1:nk] != ref4) & wet
+            mine = (np.asarray(mine, np.float64) != ref4) & wet
+            havtb[name] = {"nemo_v5_ne_v4": int(nemo.sum()), "card_v5_ne_v4": int(mine.sum()),
+                           "nemo_outside_band": int((nemo & ~band).sum()),
+                           "card_outside_band": int((mine & ~band).sum()),
+                           "same_cells": bool(np.array_equal(nemo, mine))}
+        out["havtb_active"] = havtb
     return out
 
 
@@ -620,7 +652,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 or (arm in ("stages", "barotropic_exit", "carried")
                     and case in SI3)
                 or (arm == "tke_mixing_length" and case == "ORCA2V1-tke")
-                or (arm == "ddm_kt1" and case in ("ORCA2V3-ddm", "ORCA2V4-iwm")),
+                or (arm == "ddm_kt1" and case in ZDF_KT1_CASES),
                 "G4/G5's NEMO-supplied per-step forcing is registered only for "
                 "the independent and given-entry ladders")
         require(cfg.rk3_stage_tracer_written_order is True,
@@ -1500,6 +1532,8 @@ def main(argv=None) -> int:
         print("CENSUS", json.dumps(out["census"], sort_keys=True))
         if "iwm_active" in out:
             print("IWM_ACTIVE", json.dumps(out["iwm_active"], sort_keys=True))
+        if "havtb_active" in out:
+            print("HAVTB_ACTIVE", json.dumps(out["havtb_active"], sort_keys=True))
         return 1 if bad else 0
     if a.arm == "tke_mixing_length":
         for row in out["rows"].values():
