@@ -49,10 +49,10 @@ def test_tke_card_selects_every_v1_statement(cards) -> None:
     vm = cards["rung10"].recipe.model_config.physics.vertical_mixing
     assert vm.scheme == "tke"
     assert _on(cards["rung10"]) == set(V1_FLAGS)
-    # htau/EXP are not selected: the card runs no nn_etau penetration.
-    assert vm.tke.etau_mode == "none"
-    assert vm.tke.tke_htau_evaluation == "jax_expression"
-    assert vm.tke.tke_etau_exponential_evaluation == "jax_expression"
+    # Round 312 (D135) added the nn_etau=1 penetration with V1's htau/EXP.
+    assert vm.tke.etau_mode == "below_ml"
+    assert vm.tke.tke_htau_evaluation == "nemo_scalar_libm"
+    assert vm.tke.tke_etau_exponential_evaluation == "nemo_scalar_libm"
 
 
 @pytest.mark.parametrize("rung", ["rung0", "omt0", "omt1", "omt2", "omt3", "omt4"])

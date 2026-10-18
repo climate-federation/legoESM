@@ -101,6 +101,12 @@ def selected_card(card, *, arm: str, rung: str, plant: str = "none"):
                     "not round 312's selection")
         return card
     base_runoff = SHIPPED_RUNOFF if rung == "rung10" else 0.0
+    selected = D122_SELECTED.get(rung)
+    if arm == "control" and selected is not None and (tke, runoff) == (
+            {**SHIPPED, **selected[0]}, selected[1]):
+        # Control on the selection tree: this round's selection stripped.
+        card = _with(card, SHIPPED, base_runoff)
+        tke, runoff = _carried(card)
     require(tke == SHIPPED and runoff == base_runoff,
             f"{rung}: control base carries {tke}, runoff {runoff}, not round 311's")
     if arm == "control":

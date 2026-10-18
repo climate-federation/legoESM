@@ -60,7 +60,7 @@ def test_orca2_structural_guard_rejects_iceberg_option_drift():
         tke_shear_avm_weighting="nemo_face",
         tke_shear_evaluation_stage="step_entry",
         tke_shear_metric_source="nemo_qco_live_face",
-        tke_langmuir_evaluation="vectorized",
+        tke_langmuir_evaluation="nemo_literal",
         bottom_tke_bc=True,
         eice=1,
     )
