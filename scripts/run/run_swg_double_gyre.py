@@ -157,8 +157,22 @@ def admit_listed_snapshot(path: Path) -> dict:
     }
 
 
-def compare_native_state_bitwise(state, path: Path) -> dict:
-    """Compare a stepped fine state with an admitted uninterrupted snapshot."""
+# Rigid-lid-only restart check (user decision 2026-10-18): the hourly-target
+# program differs from a plain restart by round-off (max |du| 2.6e-15 m/s);
+# the bitwise cause is deferred.  Explicit runs stay strictly bitwise.
+LID_RESTART_TOLERANCE = {
+    "kind": "max_abs_relative_to_field_max", "value": 1.0e-12,
+    "applies_to": "rigid_lid"}
+
+
+def compare_native_state_bitwise(
+        state, path: Path, relative_tolerance: float | None = None) -> dict:
+    """Compare a stepped fine state with an admitted uninterrupted snapshot.
+
+    ``all_equal`` is always the bitwise flag.  ``within_tolerance`` equals it
+    unless ``relative_tolerance`` is given, in which case every field needs
+    max|actual - expected| <= relative_tolerance * max|expected|.
+    """
     with np.load(path, allow_pickle=False) as saved:
         required = {"ssh_m", "u_m_s", "v_m_s"}
         missing = required - set(saved.files)
@@ -172,7 +186,7 @@ def compare_native_state_bitwise(state, path: Path) -> dict:
         "u_m_s": np.asarray(state.u.data[:, 1:, 0]),
         "v_m_s": np.asarray(state.v.data[1:, :, 0]),
     }
-    result = {"all_equal": True}
+    result = {"all_equal": True, "within_tolerance": True}
     for name in actual:
         if actual[name].shape != expected[name].shape:
             raise ValueError(f"comparison shape differs for {name}")
@@ -185,6 +199,14 @@ def compare_native_state_bitwise(state, path: Path) -> dict:
         result[f"{name}_max_abs"] = float(
             np.max(np.abs(actual[name] - expected[name])))
         result["all_equal"] = bool(result["all_equal"] and unequal == 0)
+        scale = float(np.max(np.abs(expected[name])))
+        max_abs = result[f"{name}_max_abs"]
+        result[f"{name}_relative_max_abs"] = (
+            max_abs / scale if scale > 0.0
+            else 0.0 if max_abs == 0.0 else float("inf"))
+        ok = (unequal == 0 if relative_tolerance is None
+              else max_abs <= relative_tolerance * scale)
+        result["within_tolerance"] = bool(result["within_tolerance"] and ok)
     return result
 
 
@@ -787,6 +809,8 @@ def run_long(
             None if verify_next is None else {
                 "path": str(verify_next.resolve()),
                 "admission": next_admission,
+                "tolerance": (LID_RESTART_TOLERANCE
+                              if surface == "rigid_lid" else None),
                 "result": None,
             }),
         "numerical_health": None,
@@ -943,9 +967,12 @@ def run_long(
                             hourly_initial[operator_index][field_index],
                             dtype=np.float64)
         if day == 1 and verify_next is not None:
-            comparison = compare_native_state_bitwise(state, verify_next)
+            comparison = compare_native_state_bitwise(
+                state, verify_next,
+                LID_RESTART_TOLERANCE["value"] if surface == "rigid_lid"
+                else None)
             manifest["restart_next_verification"]["result"] = comparison
-            if not comparison["all_equal"]:
+            if not comparison["within_tolerance"]:
                 _write_json_atomic(
                     pending_path,
                     manifest | {"status": "refused", "completed_days": 0,
