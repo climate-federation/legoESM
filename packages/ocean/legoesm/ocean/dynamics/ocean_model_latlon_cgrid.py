@@ -1930,7 +1930,10 @@ def _nemo_cen2_tracer_rhs(
     horizontal_sum = sr(delta_u + delta_v)
     r1_e1e2t = sr(1.0 / jnp.asarray(grid.area_T)[..., None])
     horizontal_scaled = sr(horizontal_sum * r1_e1e2t)
-    rhs = sr(-sr(horizontal_scaled / e3t_kmm))
+    # Gradient-only guard: e3t is 0 on dry cells, whose 0/0 is masked later
+    # but would turn the reverse pass NaN; wet divisions are unchanged.
+    e3t_div = jnp.where(e3t_kmm == 0.0, 1.0, e3t_kmm)
+    rhs = sr(-sr(horizontal_scaled / e3t_div))
 
     tracer_w_sum = sr(tracer[..., :-1] + tracer[..., 1:])
     tmask_kmm = jnp.broadcast_to(jnp.asarray(tmask_kmm), tracer.shape)
@@ -1943,7 +1946,7 @@ def _nemo_cen2_tracer_rhs(
     )
     vertical_difference = sr(flux_w[..., :-1] - flux_w[..., 1:])
     vertical_scaled = sr(vertical_difference * r1_e1e2t)
-    return sr(rhs - sr(vertical_scaled / e3t_kmm))
+    return sr(rhs - sr(vertical_scaled / e3t_div))
 
 
 def _nemo_stage_corrected_velocity(
@@ -2561,18 +2564,20 @@ def _nemo_ws_rk3_tracer_pair_step(
     ):
         if stage_qco_weights is not None and concentration_rhs is not None:
             q_before, q_rhs, q_after = stage_qco_weights[stage_index]
+            # Gradient-only: 1 on the lanes the where below discards.
+            q_after = jnp.where(active_3d > 0.5, q_after[..., None], 1.0)
             rhs = _source_order_sum(
                 concentration_rhs, source_rate, source_terms)
             if stage_tracer_written_order:
                 r = nemo_source_round
                 out = r(r(r(q_before[..., None] * base)
                           + r(r(stage_dt * q_rhs[..., None]) * rhs))
-                        / q_after[..., None])
+                        / q_after)
             else:
                 out = (
                     q_before[..., None] * base
                     + stage_dt * q_rhs[..., None] * rhs
-                ) / q_after[..., None]
+                ) / q_after
             return jnp.where(active_3d > 0.5, out, base)
         out = (
             h_k_old * base - stage_dt * flux_div
