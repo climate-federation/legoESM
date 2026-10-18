@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Round 316: count branch flips between x+eps*d and x-eps*d (measurement only).
 
-Evaluates ONE production step's jaxpr equation by equation (round 315's
-walker, no cotangent) at T0 + eps*T_dir0 and T0 - eps*T_dir0, and records the
-predicate of every branch-like primitive: comparisons (lt/gt/le/ge/eq/ne),
-max/min (which operand wins), sign, floor/ceil/round, clamp.  Each occurrence
-(scan iterations included) is keyed by (equation, call count).  A flip = a
-lane whose predicate differs between the two runs.  Also writes the central
+Evaluates ONE production step's jaxpr equation by equation on T0 + eps*T_dir0
+and T0 - eps*T_dir0 in lockstep, and compares the decision of every
+branch-like primitive: comparisons (lt/gt/le/ge/eq/ne), max/min (which
+operand wins), abs/sign, floor/ceil/round, clamp, cond index, while guard.
+A flip = a lane whose decision differs between the two evaluations.  Also writes the central
 FD of the T and SSH losses from the compiled step and forward mode, so the
 FD miss and the flip count are reported at the same eps.
 """
@@ -32,55 +31,119 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
 )
 
 COMPARE = {"lt", "gt", "le", "ge", "eq", "ne"}
-ROUNDING = {"sign", "floor", "ceil", "round"}
-MAXMIN = {"max", "min"}
+KINKS = {"max", "min", "abs", "sign", "floor", "ceil", "round", "clamp"}
 
 
-def _predicate(name, ins, outs):
+def _pred(name, ins, out):
+    """The branch decision an equation took (a boolean or integer array)."""
     import jax.numpy as jnp
-    if name in COMPARE:
-        return outs[0]
-    if name in MAXMIN:
+    if name in COMPARE or name in ("sign", "floor", "ceil", "round"):
+        return out
+    if name in ("max", "min"):
         return jnp.asarray(ins[0]) >= jnp.asarray(ins[1])
-    if name in ROUNDING:
-        return outs[0]
-    if name == "cond":  # the branch index itself
-        return jnp.asarray(ins[0])
-    if name == "clamp":  # clamp(lo, x, hi): which side binds
-        return jnp.stack([jnp.asarray(ins[1]) < ins[0], jnp.asarray(ins[1]) > ins[2]])
+    if name == "abs":
+        return jnp.asarray(ins[0]) >= 0
+    if name == "clamp":
+        return (jnp.asarray(ins[1]) < ins[0]) | (jnp.asarray(ins[1]) > ins[2])
     return None
 
 
-class PredicateRecorder(locate.BackwardWalker):
+class Lockstep:
+    """Evaluate a jaxpr on two inputs at once; count lanes whose branch
+    decision differs.  Values are freed after their last use."""
+
     def __init__(self):
-        super().__init__(sanitize=False)
-        self.calls, self.preds, self.frames = Counter(), {}, {}
+        self.by_stmt, self.occurrences, self.flipped = Counter(), 0, 0
 
-    def _eqn(self, e, ins, tin, fr):
-        outs = super()._eqn(e, ins, tin, fr)
-        name = e.primitive.name
-        pred = _predicate(name, ins, outs) if (
-            name in COMPARE | ROUNDING | MAXMIN | {"clamp", "cond"}) else None
-        if pred is not None:
-            k = id(e)
-            n = self.calls[k]
-            self.calls[k] += 1
-            pred = np.asarray(pred)
-            # booleans packed 8x (a full-step record is otherwise tens of GB)
-            self.preds[(k, n)] = (np.packbits(pred) if pred.dtype == bool else pred, pred.size)
-            self.frames.setdefault(k, (name, fr[0] if fr else "?"))
-        return outs
+    def run(self, jaxpr, consts, args, frames=()):
+        from jax._src import core
+        last = {}
+        for i, e in enumerate(jaxpr.eqns):
+            for v in e.invars:
+                if not isinstance(v, core.Literal):
+                    last[v] = i
+        keep = {v for v in jaxpr.outvars if not isinstance(v, core.Literal)}
+        env = dict(zip(jaxpr.constvars, [(c, c) for c in consts]))
+        env.update(zip(jaxpr.invars, args))
 
+        def read(v):
+            return (v.val, v.val) if isinstance(v, core.Literal) else env[v]
 
-def record(jaxpr, t):
-    w = PredicateRecorder()
-    w.run(jaxpr.jaxpr, list(jaxpr.consts), [t], [False])
-    return w
+        for i, e in enumerate(jaxpr.eqns):
+            ins = [read(v) for v in e.invars]
+            fr = locate.BackwardWalker._frames(e, frames)
+            for v, o in zip(e.outvars, self.eqn(e, ins, fr)):
+                env[v] = o
+            for v in e.invars:
+                if (not isinstance(v, core.Literal) and last.get(v) == i
+                        and v not in keep):
+                    env.pop(v, None)
+        return [read(v) for v in jaxpr.outvars]
+
+    def _count(self, name, fr, pa, pb):
+        n = int(np.count_nonzero(np.asarray(pa) != np.asarray(pb)))
+        self.occurrences += 1
+        if n:
+            self.flipped += n
+            self.by_stmt[f"{name} {fr[0] if fr else '?'}"] += n
+
+    def eqn(self, e, ins, fr):
+        name, p = e.primitive.name, e.params
+        if name in locate._CALLS:
+            j, c = locate._open(p.get("jaxpr") or p.get("call_jaxpr") or p.get("fun_jaxpr"))
+            return self.run(j, c, ins, fr)
+        if name == "scan":
+            return self._scan(p, ins, fr)
+        if name == "while":
+            return self._while(p, ins, fr)
+        if name == "cond":
+            ia, ib = int(ins[0][0]), int(ins[0][1])
+            self._count("cond", fr, ia, ib)
+            outs = []
+            for side, idx in ((0, ia), (1, ib)):
+                j, c = locate._open(p["branches"][idx])
+                outs.append(self.run(j, c, [(x[side], x[side]) for x in ins[1:]], fr))
+            return [(a[0], b[1]) for a, b in zip(*outs)]
+        res = []
+        for side in (0, 1):
+            o = e.primitive.bind(*[x[side] for x in ins], **p)
+            res.append(list(o) if e.primitive.multiple_results else [o])
+        if name in COMPARE or name in KINKS:
+            self._count(name, fr, _pred(name, [x[0] for x in ins], res[0][0]),
+                        _pred(name, [x[1] for x in ins], res[1][0]))
+        return list(zip(res[0], res[1]))
+
+    def _scan(self, p, ins, fr):
+        import jax.numpy as jnp
+        nc, nk, n = p["num_consts"], p["num_carry"], p["length"]
+        j, c = locate._open(p["jaxpr"])
+        consts, carry, xs = ins[:nc], ins[nc:nc + nk], ins[nc + nk:]
+        ys = [None] * n
+        for i in range(n):
+            k = n - 1 - i if p["reverse"] else i
+            out = self.run(j, c, consts + carry + [(x[0][k], x[1][k]) for x in xs], fr)
+            carry, ys[k] = out[:nk], out[nk:]
+        return carry + [(jnp.stack([y[m][0] for y in ys]), jnp.stack([y[m][1] for y in ys]))
+                        for m in range(len(j.outvars) - nk)]
+
+    def _while(self, p, ins, fr):
+        cn, bn = p["cond_nconsts"], p["body_nconsts"]
+        cj, cc = locate._open(p["cond_jaxpr"])
+        bj, bc = locate._open(p["body_jaxpr"])
+        cconsts, bconsts, carry = ins[:cn], ins[cn:cn + bn], ins[cn + bn:]
+        while True:
+            ga, gb = self.run(cj, cc, cconsts + carry, fr)[0]
+            ga, gb = bool(ga), bool(gb)
+            self._count("while", fr, ga, gb)
+            if not (ga or gb):
+                return carry
+            new = self.run(bj, bc, bconsts + carry, fr)
+            carry = [(nv[0] if ga else ov[0], nv[1] if gb else ov[1])
+                     for nv, ov in zip(new, carry)]
 
 
 def flips(rung: str, eps: float) -> dict:
     import jax
-    import jax.numpy as jnp
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.fidelity.provenance import worktree_stamp
 
@@ -106,24 +169,16 @@ def flips(rung: str, eps: float) -> dict:
             lambda x: losses[name](step_t(x)), (t,), (v,))[1])(t0, d))
         out["losses"][name] = {"fd": fd, "fwd": fwd, "rel_err": abs(fd - fwd) / abs(fwd)}
     closed = jax.make_jaxpr(step_t)(t0)
-    plus = record(closed, t0 + eps * d)
-    minus = record(closed, t0 - eps * d)
-    by_stmt, total, n_keys = Counter(), 0, 0
-    for key, p in plus.preds.items():
-        q = minus.preds.get(key)
-        if q is None:  # a cond took the other branch: count the whole record
-            n = p[1]
-        elif p[0].dtype == np.uint8 and q[0].dtype == np.uint8:
-            n = int(np.unpackbits(p[0] ^ q[0]).sum())
-        else:
-            n = int(np.count_nonzero(p[0] != q[0]))
-        n_keys += 1
-        if n:
-            total += n
-            by_stmt["%s %s" % plus.frames[key[0]]] += n
-    missing = len(set(minus.preds) - set(plus.preds))
-    out.update(predicate_occurrences=n_keys, occurrences_only_in_minus=missing, flipped_lanes=total,
-               statements_with_flips=len(by_stmt), top_statements=by_stmt.most_common(25))
+    w = Lockstep()
+    got = w.run(closed.jaxpr, list(closed.consts), [(t0 + eps * d, t0 - eps * d)])
+    # control: the interpreter reproduces the compiled step on both sides
+    ref = [jax.tree.leaves(jax.jit(step_t)(t0 + s * eps * d)) for s in (1, -1)]
+    out["interp_vs_jit_max_abs"] = max(
+        float(np.nanmax(np.abs(np.asarray(g[side], np.float64) - np.asarray(r, np.float64))))
+        if np.asarray(r).size else 0.0
+        for side in (0, 1) for g, r in zip(got, ref[side]))
+    out.update(predicate_occurrences=w.occurrences, flipped_lanes=w.flipped,
+               statements_with_flips=len(w.by_stmt), top_statements=w.by_stmt.most_common(25))
     return out
 
 
