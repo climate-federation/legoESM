@@ -181,4 +181,8 @@ residual content cells' operand.
 
 ## 7. Receipt citation gate
 
-Section added after the run (`round49/final/receipt_gate*.log`).
+`--from-heading` this title, at `089368d9d`: `PASS`, 12 citations,
+0 failures, 0 unmapped, 0 map entries failing the audit.  Its shift plant on
+the trazdf.f90:288 citation exits 1.  Nine map entries added (one pinned to
+its second occurrence).  Citation-gate test, private-import ratchet, TKE
+re-run after them: 91 passed (`round49/final/`).
