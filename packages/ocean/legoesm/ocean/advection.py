@@ -962,8 +962,8 @@ def fct_tracer_advection(
         north of the stored pivot row carry the fold image of the row below
         -- the upstream fluxes built on the halo (traadv_fct.f90:501-504,
         :568-573), the antidiffusive flux after ``lbc_lnk`` (:311), the
-        north neighbour of the ``nonosc`` bound (:806-840) and the face
-        coefficient from the halo ``zbetup``/``zbetdo`` (:888-898).  Needs
+        north neighbour of the ``nonosc`` bound (:817) and the face
+        coefficient from the halo ``zbetup``/``zbetdo`` (:910).  Needs
         an active pivot-row fold.  False keeps the wall north face.
 
     Returns

@@ -22,14 +22,14 @@ to the record build `ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1`).  The run has
 
 | # | NEMO statement | what it does on the fold | card before this round |
 |---|---|---|---|
-| 1 | upstream fluxes, step 1 (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:501`) | loop reaches the halo row, so the face north of the pivot row is the fold image of the face below | wall: flux 0 |
-| 2 | step-1 guess on the halo (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:530`) | guess above the pivot row = image | (follows 1) |
-| 3 | averaged upstream fluxes (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:568`) | pivot face reads the halo guess: image | wall |
-| 4 | antidiffusive flux (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:196`) | computed on the pivot face, then overwritten by 5 | wall placeholder |
+| 1 | upstream fluxes, step 1 (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:503`) | loop reaches the halo row, so the face north of the pivot row is the fold image of the face below | wall: flux 0 |
+| 2 | step-1 guess on the halo (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:538`) | guess above the pivot row = image | (follows 1) |
+| 3 | averaged upstream fluxes (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:571`) | pivot face reads the halo guess: image | wall |
+| 4 | antidiffusive flux (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:198`) | computed on the pivot face, then overwritten by 5 | wall placeholder |
 | 5 | `lbc_lnk(ztFu 'U' -1, ztFv 'V' -1, zta_up1 'T' +1)` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:311`) | pivot V faces = image of the row below; second half of the pivot row's U flux and guess = mirror of the first half | none |
-| 6 | `nonosc` bounds on the halo (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:806`) | pivot row's north neighbour in the 7-point bound = image of the row below | copy of the pivot row |
-| 7 | `nonosc` face coefficient (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:888`) | pivot face reads the halo betas: equals the image face's coefficient | 1 (unlimited) |
-| 8 | final trend (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:322`) | no exchange | — |
+| 6 | `nonosc` bounds on the halo (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:817`) | pivot row's north neighbour in the 7-point bound = image of the row below | copy of the pivot row |
+| 7 | `nonosc` face coefficient (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:910`) | pivot face reads the halo betas: equals the image face's coefficient | 1 (unlimited) |
+| 8 | final trend (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:327`) | no exchange | — |
 
 Measured on the card's own stage-3 inputs: the pivot-row second halves
 required by statement 5 (U flux, guess) already equal the mirror of the
