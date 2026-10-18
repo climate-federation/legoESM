@@ -1717,7 +1717,7 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:302': 'ln_traldf_msc   = .true.',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:393': 'ln_zdfddm   = .true.',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:394-395': [
-        'rn_avts  =    1.e-4', 'rn_hsbfr =    1.6'],
+        'rn_avts  =    1.e-4', 'rn_hsbfr =    1.6', 2],
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:396': 'ln_zdfiwm   = .true.',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:423': 'ln_mevar    = .false.',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:424': 'ln_tsdiff   = .true.',
