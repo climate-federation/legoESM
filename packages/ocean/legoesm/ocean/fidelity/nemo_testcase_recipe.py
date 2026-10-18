@@ -3833,9 +3833,7 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         # ln_zdfevd = F: the ORCA2 identity carries ORCA2's enhanced
         # vertical diffusion, which this deck switches off; V2 keeps it
         # with ORCA2's nn_evdm = 0.
-        convection=(_orca2v2_evd_convection(
-                        base.physics.convection,
-                        step_entry_bn2=case in _ORCA2V_DDM_CASES)
+        convection=(_orca2v2_evd_convection(base.physics.convection)
                     if case in _ORCA2V_EVD_CASES else
                     base.physics.convection._replace(scheme="none")),
     )
@@ -3966,8 +3964,7 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
              and not vm.iwm.enabled and not vm.ddm.enabled)),
         "ln_zad_Aimp=F": not cfg.adaptive_implicit_vertadv,
         ("ln_zdfevd" if card.case in _ORCA2V_EVD_CASES else "ln_zdfevd=F"): (
-            _orca2v2_evd_selected(cfg.physics.convection,
-                                  step_entry_bn2=card.case in _ORCA2V_DDM_CASES)
+            _orca2v2_evd_selected(cfg.physics.convection)
             if card.case in _ORCA2V_EVD_CASES
             else cfg.physics.convection.scheme == "none"),
         ("ln_zdfddm" if card.case in _ORCA2V_DDM_CASES else "ln_zdfddm=F"): (
@@ -4523,20 +4520,20 @@ _ORCA2V2_EVD_FIELDS: dict[str, object] = {
 }
 
 
-def _orca2v2_evd_convection(identity_convection, *, step_entry_bn2=False):
+def _orca2v2_evd_convection(identity_convection):
     """The ORCA2 identity's EVD arm (nemo_bn2 trigger MIN(rn2,rn2b) <= -1e-12,
     avt replaced by rn_evd, zdfevd.f90:107-110) with nn_evdm = 0: avm is left
-    untouched (zdfevd.f90:121), so no convective viscosity.  V3 also reads
-    the trigger off the step-entry bn2 bundle (stprk3.f90:171-174)."""
+    untouched (zdfevd.f90:121), so no convective viscosity.  The trigger reads
+    the step-entry bn2 bundle (stprk3.f90:171-174; D136 for V2)."""
 
     ed = identity_convection.enhanced_diffusion._replace(
         K_conv=_ORCA2V2_EVD_FIELDS["namzdf.rn_evd"], nu_conv=0.0,
-        trigger_step_entry_bn2=step_entry_bn2)
+        trigger_step_entry_bn2=True)
     return identity_convection._replace(scheme="enhanced_diffusion",
                                         enhanced_diffusion=ed)
 
 
-def _orca2v2_evd_selected(conv, *, step_entry_bn2: bool = False) -> bool:
+def _orca2v2_evd_selected(conv) -> bool:
     ed = conv.enhanced_diffusion
     return conv.scheme == "enhanced_diffusion" and (
         ed.K_conv, ed.nu_conv, ed.K_bg, ed.nu_bg, ed.smooth_transition,
@@ -4545,7 +4542,7 @@ def _orca2v2_evd_selected(conv, *, step_entry_bn2: bool = False) -> bool:
         ed.trigger_step_entry_bn2) == (
         _ORCA2V2_EVD_FIELDS["namzdf.rn_evd"], 0.0, 0.0, 0.0, False,
         "nemo_bn2", "eos80", -1.0e-12, True, "nemo_now_before", "nemo_replace",
-        step_entry_bn2)
+        True)
 
 
 def build_orca2v2_evd_card(deck_root: str | Path) -> NEMOTestcaseCard:

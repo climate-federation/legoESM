@@ -83,15 +83,16 @@ def test_v2_card_is_v1_plus_the_evd_selection_only(cards):
     a, b = _flat(v1.recipe.model_config), _flat(v2.recipe.model_config)
     moved = {k for k in set(a) | set(b) if _differs(a.get(k), b.get(k))}
     assert moved == {"physics.convection.scheme",
-                     "physics.convection.enhanced_diffusion.nu_conv"}
+                     "physics.convection.enhanced_diffusion.nu_conv",
+                     "physics.convection.enhanced_diffusion.trigger_step_entry_bn2"}
     conv = v2.recipe.model_config.physics.convection
     ed = conv.enhanced_diffusion
     # zdfevd.f90:107-110 avt <- rn_evd where MIN(rn2,rn2b) <= -1e-12; :121 nn_evdm=0
     assert (conv.scheme, ed.K_conv, ed.nu_conv, ed.K_bg, ed.nu_bg, ed.n2_threshold,
             ed.two_level_trigger, ed.evd_composition, ed.n2_mode, ed.n2_eos_form,
-            ed.evd_n2_time_level) == (
+            ed.evd_n2_time_level, ed.trigger_step_entry_bn2) == (
         "enhanced_diffusion", 100.0, 0.0, 0.0, 0.0, -1e-12, True, "nemo_replace",
-        "nemo_bn2", "eos80", "nemo_now_before")
+        "nemo_bn2", "eos80", "nemo_now_before", True)
     assert v1.recipe.model_config.physics.convection.scheme == "none"
     s1, s2 = v1.recipe.initial_state, v2.recipe.initial_state
     assert not [n for n in s1._fields if _differs(
@@ -110,7 +111,8 @@ def test_v2_selector_fires_on_each_planted_evd_field(cards):
     conv = cfg.physics.convection
     for plant in ({"nu_conv": 100.0}, {"K_conv": 1.0}, {"two_level_trigger": False},
                   {"n2_threshold": 0.0}, {"evd_composition": "additive"},
-                  {"evd_n2_time_level": "solver_state"}):
+                  {"evd_n2_time_level": "solver_state"},
+                  {"trigger_step_entry_bn2": False}):
         bad = conv._replace(enhanced_diffusion=conv.enhanced_diffusion._replace(**plant))
         card = v2._replace(recipe=v2.recipe._replace(model_config=cfg._replace(
             physics=cfg.physics._replace(convection=bad))))

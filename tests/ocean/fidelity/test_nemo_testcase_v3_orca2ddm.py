@@ -86,10 +86,9 @@ def test_v3_card_is_v2_plus_the_ddm_selection_only(cards):
     a, b = _flat(v2.recipe.model_config), _flat(v3.recipe.model_config)
     moved = {k for k in set(a) | set(b) if _differs(a.get(k), b.get(k))}
     assert moved == {"physics.vertical_mixing.ddm.enabled",
-                     "physics.vertical_mixing.ddm.form",
-                     "physics.convection.enhanced_diffusion.trigger_step_entry_bn2"}
+                     "physics.vertical_mixing.ddm.form"}
     assert v3.recipe.model_config.physics.convection.enhanced_diffusion.trigger_step_entry_bn2
-    assert not v2.recipe.model_config.physics.convection.enhanced_diffusion.trigger_step_entry_bn2
+    assert v2.recipe.model_config.physics.convection.enhanced_diffusion.trigger_step_entry_bn2
     ddm = v3.recipe.model_config.physics.vertical_mixing.ddm
     assert (ddm.enabled, ddm.form, ddm.rn_avts, ddm.rn_hsbfr) == (
         True, "nemo_literal", 1.0e-4, 1.6)
@@ -117,7 +116,7 @@ def test_v3_selector_fires_on_each_planted_ddm_field(cards):
             physics=cfg.physics._replace(vertical_mixing=vm._replace(
                 ddm=vm.ddm._replace(**plant))))))
         assert recipe._orca2g1_selector_failures(bad) == [row], plant
-    for card, flag in ((v3, False), (v2, True)):
+    for card, flag in ((v3, False), (v2, False)):
         cfg = card.recipe.model_config
         conv = cfg.physics.convection
         bad = card._replace(recipe=card.recipe._replace(model_config=cfg._replace(
