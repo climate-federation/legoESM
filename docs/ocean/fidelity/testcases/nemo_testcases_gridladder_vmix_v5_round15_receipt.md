@@ -1,7 +1,8 @@
 # Vertical-mixing lane — round 15 (vmix_r15): D136 (V2 re-scored, still bit-for-bit); V5 = V4 + ORCA2's nn_havtb built
 
-Status: **V2 still CERTIFIED** on the step-entry EVD trigger (Decision 136). **V5 BUILT, awaiting its record**
-(not scored). Decisions in force: D128-D130, D136. Codex review: paused (quota). Evidence:
+Status: **V2 still CERTIFIED** on the step-entry EVD trigger (Decision 136). **V5 CERTIFIED** (resume,
+2026-10-18): bit-for-bit with NEMO's record kt 1..10 under both labels, every field, no fix needed (section 6).
+Decisions in force: D128-D130, D136. Codex review: paused (quota). Evidence:
 `gridladder_vmix_rounds/round15/`. Preregistration: `PREREG_nemo_testcases_gridladder_vmix_v5_round15.md`,
 committed `8d0a4fc7a` before any V5 code.
 
@@ -118,9 +119,63 @@ UNVERIFIED:
 - Beyond kt 1, NEMO's `avt_k` seed is never read again on this deck (cold start, overwritten at kt 1); read off
   the code, not measured.
 
+## 6. Resume: V5 scored on its record
+
+Record: `gridladder_vmix_rounds/round15/oracle_v5_r15` (operator: `V5_PREFLIGHT_OK` at `9af53c16f`, nothing built;
+`V5_ACQUISITION_PASS steps=1..10 restarts=2..10`). CPU, x64, `land.sh` PYTHONPATH; packages tree `3ef41cfc`
+(= this round's tip; the ladder edit is scripts-only). Commit `4363c96d8`: ladder takes V5; V5 record test.
+
+**Score (no model change).**
+- **INDEPENDENT kt 1-10:** 149 rows (surface sea level, barotropic transports, u, v, T, S each kt; all-level u, v,
+  T, S, en, avm_k, avt_k, dissl and surface avm at kt 2-10): every row max 0, unequal 0, dry unequal 0.
+- **GIVEN-NEMO-ENTRY (entries kt 1/3/5/7/9, one- and two-step):** 113 rows, every row max 0, unequal 0.
+- **kt-1 post-`zdf_phy` frame:** consumed avt, avs, avm and the card's en after `zdf_tke`, each 0 unequal of
+  414,119 wet W cells, 0 dry.
+- 12,723 + 7,633 + 604 comparison entries in the three JSONs; none nonzero. D127 census empty (no unequal cell).
+  Classes: every row exact.
+
+**Where nn_havtb acts, on the record** (kt-1 frame, V5 vs V4's certified frame):
+
+| field | NEMO cells moved | card cells moved | outside -15 <= gphit < 15 | same cells |
+|---|---|---|---|---|
+| en | 7,595 | 7,595 | 0 / 0 | yes |
+| avt | 7,567 | 7,567 | 0 / 0 | yes |
+| avs | 7,567 | 7,567 | 0 / 0 | yes |
+| avm | 7,529 | 7,529 | 0 / 0 | yes |
+
+- Only through the kt-1 `avt_k` seed: its first reader is TKE's buoyancy term
+  (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:424`); the per-step floor reads `avtb_2d` after
+  `zdf_iwm_init`'s reset (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:443`). Every moved cell is in the band, as the
+  survey predicted; the card's TKE takes the same seed and the score above is exact, so nothing else moved.
+
+Preregistration:
+- **P1 CONFIRMED** (acquisition passed; log checks in the acquisition).
+- **P2 CONFIRMED**: en moved in 7,595 wet W cells, none outside the band (table).
+- **P3 CONFIRMED**: bit-for-bit kt 1..10, both labels, no further change.
+- P4 confirmed in section 3 (no model code changed since).
+
+**V5 record test** (`tests/ocean/fidelity/test_nemo_testcase_v5_orca2havtb.py`, kt 1-2, skipped when the record is
+absent; extends V4's through the shared helper): control (seed moves NEMO's kt-2 T vs V4's record); kt-1 frame avt,
+avs, avm, en wet and dry; every independent-arm field kt 1-2; shape acts in the same cells both sides, none outside
+the band. Model step jitted, state (incl. the seed) a traced input, x64.
+- **Plant** (scratch clone; nn_havtb seed removed from builder and validator, deck reader kept): **1 failed**,
+  avt unequal in 7,567 wet W cells. Evidence: `round15/resume/record_plant.log`.
+- **Restored** (this tree): V3 + V4 + V5 card files RESTORED_RESULT.
+
+Gates (resume, at `4363c96d8` unless stated):
+- Default gate (`land.sh` orca2 list, incl. citation-gate tests and private-import ratchet): DEFAULT_RESULT.
+- Per-receipt citation gate on this receipt: RECEIPT_RESULT.
+
+ASKED (resume): score V5 both labels; confirm where nn_havtb acts; V5 record test with plant.
+UNASKED (resume), offered for revert:
+- the shared record helper asserts every kt-1 frame row given (V3/V4: the same three rows as before);
+- the ladder's kt-1 frame arm adds V5's en row and the band census (V5 only).
+
+UNVERIFIED (resume): beyond kt 10 nothing scored; avs beyond kt 1 certified through T and S only.
+
 ## Machine lines
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r15/repo
-ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/testcases/nemo_testcase_v5_orca2havtb/run.sh --run (nothing built: V1 record binary + G5 writer-free binary; deck = V4's + nn_havtb = 1 (ORCA2 namelist_cfg:401); inputs = V4's seventeen, nothing new; records = V4's set, kt-1 frame en must differ from V4's and only inside -15 <= gphit < 15; smoke → boundary → twins A/B/C to ≤10 steps) into gridladder_vmix_rounds/round15/oracle_v5_r15
+ACQUISITION_NEEDED: NONE
 DECISION_NEEDED: NONE
-ROUND_STATUS: V5_BUILT_AWAITING_RECORD — D136 done: V2 on EVD's step-entry trigger still bit-for-bit kt 1..10 both labels on its round-12 record (149 + 113 rows, all 0); every other card's jaxpr identical. V5 = V4 + ORCA2's nn_havtb = 1 (shape reaches only the kt-1 avt_k seed, 113,081 band cells); no new input or state; flag-off jaxprs identical, V5's equals V4's; not scored; codex review: paused (quota).
+ROUND_STATUS: V5_CERTIFIED — V4 + ORCA2's nn_havtb = 1 bit-for-bit with NEMO kt 1..10 under both labels (149 + 113 rows, every row 0; kt-1 frame avt/avs/avm/en 0 unequal, wet and dry), no fix needed; nn_havtb acts only through the kt-1 avt_k seed, 7,529-7,595 cells, all inside -15 <= gphit < 15, same cells on the card; V5 record test added (fails with the seed removed: avt 7,567 cells); codex review: paused (quota).
