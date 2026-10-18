@@ -155,7 +155,22 @@ following their switch row.
 
 ## Gates and tests
 
-(filled below)
+JAX_ENABLE_X64=1, CPU, PYTHONPATH as in `land.sh`; evidence
+`orca2_rounds/round314/`.
+
+- Receipt citation gate on this receipt: 12 citations, failures 0, status
+  PASS (`citation_gate_receipt.json`).
+- Default gate list plus the new test, run in four foreground pieces (one
+  ten-minute tool limit; the first attempt ran in the background and died
+  without a summary line, so it does not count): 133 passed
+  (`gate_default_a.log`, includes the private-import ratchet, 6 passed),
+  1 passed and 1 passed (`gate_default_b1.log`, `gate_default_b2.log`, the
+  two slow face-mask tests), 16 passed (`gate_default_b3.log`, includes the
+  six round-314 tests).  151 passed, 0 failed.
+- New test non-vacuous: rewriting the mixed-layer-eddy rule turns the
+  pinned-table test red (restored, byte-compared).
+- Review: codex review: paused (quota).  Independent review: the operator's
+  Claude review before landing.
 
 ## OPEN
 
