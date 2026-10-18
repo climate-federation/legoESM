@@ -555,9 +555,10 @@ def _nemo_qsr_rgb_tendency(
             ),
         )
         delta = sr(zeT_k - zzeT)
-        # Gradient-only: 1 below the blue level, where the where discards it.
+        # Gradient-only: 1 below the blue level (discarded by the where) and
+        # on zero-thickness dry levels (masked downstream).
         increment = sr(sr(r1_rho0_csw * delta)
-                       / jnp.where(jk <= nkB, ze3t, c(1.0)))
+                       / jnp.where((jk <= nkB) & (ze3t != 0.0), ze3t, c(1.0)))
         increment = jnp.where(jk <= nkB, increment, c(0.0))
         next_carry = (
             jnp.where(jk <= nk0, zze0, ze0_k),

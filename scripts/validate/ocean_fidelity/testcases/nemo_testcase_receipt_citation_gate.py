@@ -1763,7 +1763,7 @@ CITATION_MAP = {
     'internal_wave_mixing.py:444': 'n_pos = safe_sqrt(n2_pos)',
     'tke.py:1082': 'safe_sqrt((jnp.asarray(2.0, e.dtype) * e) / zrn2),',
     'tke.py:3647': 'dissl_new = safe_sqrt(tke_curr) / l_eps_final',
-    'shortwave_penetration.py:560': '/ jnp.where(jk <= nkB, ze3t, c(1.0)))',
+    'shortwave_penetration.py:561': '/ jnp.where((jk <= nkB) & (ze3t != 0.0), ze3t, c(1.0)))',
     # round 314 namelist audit
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:21': 'nn_itend    =    5840',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:48': 'ln_tsd_dmp  = .true.',
