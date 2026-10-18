@@ -1749,6 +1749,9 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:317': 'ln_ldfeiv   = .true.',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:328': 'ln_tradmp   =  .true.',
     'namelist_ref:818': 'ln_drgice_imp = .true.',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:835-836': [
+        'IF( ln_zdfiwm ) THEN          ! Internal wave-driven mixing',
+        'rn_emin  = 1.e-10_wp             ! specific values of rn_emin & rmxl_min are used', 2],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:238': 'SUBROUTINE sbc_rnf_div( phdivn, Kmm )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:289': 'SUBROUTINE sbc_rnf_init( Kmm )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:486-489': [

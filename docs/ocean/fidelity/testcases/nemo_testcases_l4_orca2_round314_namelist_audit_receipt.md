@@ -1,6 +1,6 @@
 # ORCA2 round 314 — full namelist audit of rung 10 (the shipped ORCA2 card)
 
-Date: 2026-10-18 (Claude round; codex review: paused (quota)).
+Date: 2026-10-18 (Claude round; codex review: operator).
 
 Status: **STOPPED_FOR_DECISION** — read-only audit; no card, setting or
 default changed.  Six rows need the user (DECISION_NEEDED below).
@@ -8,9 +8,10 @@ default changed.  Six rows need the user (DECISION_NEEDED below).
 ## Headline
 
 - NEMO's ORCA2_OMIP_L4 run resolves 1,108 namelist keys (829 ocean, 279
-  sea ice).  Basis = the record run the card replays.  Against it: 189
-  MATCH, 8 DIFFERS, 32 UNCOMPARED, 662 NOT-MODELLED, 217 INERT.  Against
-  EXP00 (second column): 188 MATCH, 9 DIFFERS, same 32/662/217.
+  sea ice).  Basis = the record run the card replays.  Against it: 161
+  MATCH, 8 DIFFERS, 32 UNCOMPARED, 690 NOT-MODELLED, 217 INERT.  Against
+  EXP00 (second column): 160 MATCH, 9 DIFFERS, same 32/690/217.  Every
+  MATCH and DIFFERS row reads both the NEMO value and a card value.
 - The 8 DIFFERS vs the record: 2 are earlier decisions (the ice-dependent
   TKE mixing length, Decision 135; ice-ocean top drag, Decision 133).  6
   are unexplained: the isoneutral tracer diffusion (3 rows), the
@@ -43,6 +44,29 @@ default changed.  Six rows need the user (DECISION_NEEDED below).
   10, EXP00 5840), the T/S interval and climatology flags, the wave-mixing
   interval.  All agree with the raw namelists.
 
+## Second review fixes (hold of 2026-10-18; no card changed)
+
+- 38 MATCH rows never read the card.  Eight now do: single-column switch
+  (the card's grid shape, 148 x 180), the four alternative vertical-
+  coordinates (the builder builds z-star), restart start and initial T/S
+  (the files the builder opens: no restart, both climatology files), the
+  runoff depth file (none on the card), the eddy-energy equation (none on
+  the card), mixed vorticity scheme (the card runs energy-enstrophy).  The
+  other 28 (switches NEMO has off with no card value to read) are
+  NOT-MODELLED; NEMO's value is still asserted off.  MATCH 189 -> 161
+  (record) and 188 -> 160 (EXP00),
+  NOT-MODELLED 662 -> 690 on both.
+- TKE minimum energy now expects 1e-10 only when NEMO's resolved
+  wave-mixing switch is on, else the namelist value
+  (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:835-836`).  The record has it
+  on, so the row still MATCHes (card 1e-10, namelist 1e-6).
+- Pinned test on the old rule: 3 failed (counts, the off-switch plant, the
+  wave-mixing plant), `fix2_old_rule.log`.  New rule: 9 passed,
+  `fix2_new_rule.log`.  Old script restored and byte-compared.
+- Fix commits `15c8c1a94` (rules, test) and `909f1759b` (run-length text);
+  table regenerated at `69e2027fa` on a clean tree (`audit_fix2.json`,
+  `audit_fix2.log`).
+
 ## Provenance
 
 Base `78d61ed80` (round 313).  Script `4eb36a759` (+ header fix
@@ -53,12 +77,13 @@ table: `docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_round314_namelist_
 status, class, reason).  Evidence `orca2_rounds/round314/` (`audit.json`,
 `audit.log`).  No preregistration: an audit makes no prediction to falsify.
 
-- NEMO's value = `cfgs/SHARED/namelist_ref` overlaid by
-  `cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg`, and the same for the two SI3
-  files.
-- Record run = rung 10's record, round 5's
+- NEMO's value (the basis) = the record run's own resolved dump; the
+  record is rung 10's record, round 5's
   `orca1ice_surface_entry_every_step_a_np2` (the record every rung-10
   ladder replays).
+- EXP00 (second column) = `cfgs/SHARED/namelist_ref` overlaid by
+  `cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg`, and the same for the two SI3
+  files.
 - Card value = the built card (`build_orca2_zps_card` on that record's
   deck root): its resolved config, its carried mixing seeds, its masks; for
   file names, the files the builder opens; for one TKE constant, the
@@ -79,17 +104,19 @@ status, class, reason).  Evidence `orca2_rounds/round314/` (`audit.json`,
   automatic option is on).
 - Fail-closed: any unclassified key, any INERT row whose switch does not
   resolve as claimed, any DIFFERS row without a class, or any unexplained
-  parse disagreement exits 1.  The direct test pins the counts and the nine
-  DIFFERS rows; a planted rule change turns it red; flipping one card
-  setting in the built card moves exactly that row.
+  parse disagreement exits 1.  The direct test pins the counts on both
+  bases, the 8 DIFFERS rows vs the record and the 9 vs EXP00, and that no
+  MATCH row lacks a card value; a planted rule change turns it red;
+  flipping one card setting in the built card moves exactly that row.
 - Spot-checked by eye against the raw files (namelist_cfg, namelist_ref,
   the record's ocean.output): the isoneutral coefficient shape (20,
   `ORCA2_OMIP_L4/EXP00/namelist_cfg:304`), its velocity (0.018, `:306`), the
   mixed-layer eddies (on, `:312`), the stabilising correction (on, `:302`),
-  the eddy-induced velocity (on, `:317`), the run length (5840, `:21`), the
-  ice-dependent mixing length (2, `:415`), the implicit ice-ocean drag (on,
-  from `namelist_ref:818`), the ice category count (5 in EXP00, 1 in the
-  record).  All nine agree with the table.
+  the eddy-induced velocity (on, `:317`), the run length (EXP00 5840,
+  `:21`; record 10 from its dump), the ice-dependent mixing length (2,
+  `:415`), the implicit ice-ocean drag (on, from `namelist_ref:818`), the
+  ice category count (5 in EXP00, 1 in the record).  All agree with the
+  table in both columns.
 
 ## The record is not EXP00 in 50 rows
 
@@ -113,7 +140,7 @@ status, class, reason).  Evidence `orca2_rounds/round314/` (`audit.json`,
 | eddy parameterisations | mixed-layer eddies | on | on | off (not declared) | (c) |
 | vertical mixing | surface mixing length under ice | scaled by ice thickness | same | not scaled | (b) Decision 135 |
 | drag | implicit ice-ocean top drag | on | on | off | (b) Decision 133 |
-| run length | declared steps | 10 | 5840 | 2920 | (c) |
+| run length | declared steps (3 h each, 365-day calendar) | 10 (30 h) | 5840 (two years) | 2920 (one year) | (c) |
 | icebergs | icebergs | off (MATCH) | on | off | (b) Decision 7, EXP00 only |
 
 - NEMO's isoneutral diffusivity on ORCA2 is about 2000 m2/s near the
@@ -123,7 +150,7 @@ status, class, reason).  Evidence `orca2_rounds/round314/` (`audit.json`,
   are already on the card; the geometry ladder's pending FCT fold statements
   are not namelist settings.
 
-## NOT-MODELLED (662), by what they would change
+## NOT-MODELLED (690), by what they would change
 
 - Interior T/S damping, 4 rows (`ORCA2_OMIP_L4/EXP00/namelist_cfg:328`,
   `:48`): NEMO restores T and S toward climatology where the damping map is
@@ -146,6 +173,11 @@ status, class, reason).  Evidence `orca2_rounds/round314/` (`audit.json`,
 - Barotropic substep limit, 1 row: the card fixes NEMO's resolved 65
   substeps instead of deriving it.
 - Calendar, 3 rows: no calendar; the replay supplies each step's forcing.
+- Switches NEMO has off with no card value read, 28 rows (closed seas,
+  wetting and drying, Shuman filter, lateral-wall vorticity, nine surface-forcing
+  switches, iceberg runoff, open boundaries, three extra mixing
+  schemes, wave-height mixing length, drag boost, vorticity masking, ice
+  shelves, six stochastic switches).
 - No effect on model state, 79 rows: output, decomposition, diagnostics,
   run control.
 
@@ -153,8 +185,8 @@ status, class, reason).  Evidence `orca2_rounds/round314/` (`audit.json`,
 
 None made: no card, setting or default changed (ASKED: none needed;
 UNASKED: none).  Two classifications are mine and stated in the table:
-switch-off features the card simply lacks count as MATCH ("not built"),
-and parameters of a feature the card turns off count as NOT-MODELLED,
+a switch NEMO has off counts as MATCH only where the audit reads a card
+value showing the feature absent, otherwise NOT-MODELLED; and parameters of a feature the card turns off count as NOT-MODELLED,
 following their switch row.  Added by the review fixes: the 32 file-setting rows with no card value
 read are UNCOMPARED, not MATCH; and a one-record wave-mixing file held for
 the whole run is read as the card's climatology flag (T).
@@ -174,10 +206,10 @@ the whole run is read as the card's climatology flag (T).
    ladder rung (already declared unmeasured).
 5. Mixed-layer eddies: off -> on; restratifies the mixed layer.  Pick: on,
    after a rung; and add it to the card's unmeasured list meanwhile.
-6. Declared run length: 2920 -> 10 (the record) or 5840 (EXP00); changes no
-   measured number (the ladders replay 10 steps).  CHANGED by fix 2: the
-   basis is now the record's 10.  Pick: 10, since the card replays the
-   record.
+6. Declared run length.  Time step 10800 s (3 h): the record runs 10
+   steps (30 h), EXP00 runs 5840 steps (two years), the card declares 2920
+   (one year).  Changes no measured number (the ladders replay 10 steps).
+   No recommendation: the user decides (keep 2920, or 10, or 5840).
 
 ## Gates and tests
 
