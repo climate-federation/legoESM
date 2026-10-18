@@ -41,8 +41,11 @@ sha() { sha256sum "$1" | awk '{print $1}'; }
 repo=$(git -C "$here" rev-parse --show-toplevel) || fail 'not in worktree'
 readonly PYPATH=$repo/packages/core:$repo/packages/ocean:$repo/packages/atmosphere:$repo/packages/coupler:$repo/packages/ice:$repo/packages/land:$repo/packages/ml:$repo/packages/tools:$repo/src
 check_acting() {
+  local extra=()
+  [[ ${2:-} == barotropic ]] && extra+=(--require-barotropic)
   PYTHONPATH=$PYPATH JAX_PLATFORMS=cpu /home/dbalwada/legoESM/.venv/bin/python \
     "$CHECKER" --check "$1" --g5 "$G5_RECORD" --domain "$INPUT_ROOT/domain_cfg.nc" \
+    "${extra[@]}" \
     || fail "$1 does not show wet-only isoneutral tracer diffusion"
 }
 
@@ -177,7 +180,7 @@ preflight
 [[ "$mode" == --run ]] || { printf 'WOULD_RUN smoke, boundary, twins A/B/C into %s\n' "$EVIDENCE"; exit 0; }
 for dir in "$SMOKE" "$REF" "$TWIN_A" "$TWIN_B" "$TWIN_C"; do [[ ! -e "$dir" ]] || fail "run directory exists: $dir"; done
 mkdir -p "$EVIDENCE"
-run_one "$REC_BIN" "$SMOKE" 2 "$(pad10 2)" done; check_acting "$SMOKE"
+run_one "$REC_BIN" "$SMOKE" 2 "$(pad10 2)" done; check_acting "$SMOKE" barotropic
 run_one "$REF_BIN" "$REF" 100 '2,4,6,8,10,12,14,16,18,20' boundary
 completed=$(completed_steps "$REF"); steps=$((completed < 10 ? completed : 10)); steps=$((steps - steps % FSBC))
 ((steps >= 2)) || fail "NEMO completed only $completed steps"

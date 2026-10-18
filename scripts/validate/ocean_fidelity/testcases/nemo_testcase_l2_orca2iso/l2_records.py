@@ -20,6 +20,9 @@ from nemo_testcase_phase3_trajectory_gate import read_entry  # noqa: E402
 G5_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
     "round31/oracle_g5_r31/twin_a")
+G5_RESTART = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
+    "round31/oracle_g5_r31/smoke_2step/ORCA2G1_00000002_restart.nc")
 DOMAIN = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
     "round21/oracle_g4_r21/p6_a/domain_cfg.nc")
@@ -58,7 +61,12 @@ def read_tracer_stage3(path: Path) -> dict[str, np.ndarray | int]:
     return out
 
 
-def check_l2(l2_dir: Path, g5_dir: Path, domain: Path) -> dict[str, int | bool]:
+def check_l2(
+    l2_dir: Path,
+    g5_dir: Path,
+    domain: Path,
+    g5_restart: Path | None = None,
+) -> dict[str, int | bool]:
     l2_stage = read_tracer_stage3(l2_dir / STAGE_NAME)
     g5_stage = read_tracer_stage3(g5_dir / STAGE_NAME)
     l2_entry = read_entry(l2_dir / ENTRY_NAME, "ORCA2L2-iso")
@@ -85,11 +93,25 @@ def check_l2(l2_dir: Path, g5_dir: Path, domain: Path) -> dict[str, int | bool]:
     for name in ("T", "S", "u", "v", "ssh"):
         out[f"entry_{name}_unequal"] = int(np.count_nonzero(
             np.asarray(l2_entry[name]) != np.asarray(g5_entry[name])))
+    out["barotropic_checked"] = g5_restart is not None
+    if g5_restart is not None:
+        with (
+            netCDF4.Dataset(l2_dir / "ORCA2G1_00000002_restart.nc") as l2_ds,
+            netCDF4.Dataset(g5_restart) as g5_ds,
+        ):
+            out["barotropic_unequal"] = sum(
+                int(np.count_nonzero(
+                    np.asarray(l2_ds.variables[name][:]) !=
+                    np.asarray(g5_ds.variables[name][:])))
+                for name in ("ub_e", "vb_e", "ubb_e", "vbb_e")
+            )
+    else:
+        out["barotropic_unequal"] = 0
     out["pass"] = bool(
         moved > 0 and dry_moved == 0 and completed > 0
         and out["entry_T_unequal"] + out["entry_S_unequal"] > 0
         and out["entry_u_unequal"] == out["entry_v_unequal"]
-        == out["entry_ssh_unequal"] == 0)
+        == out["entry_ssh_unequal"] == out["barotropic_unequal"] == 0)
     return out
 
 
@@ -98,8 +120,14 @@ def main(argv=None) -> int:
     parser.add_argument("--check", type=Path, required=True, metavar="L2_DIR")
     parser.add_argument("--g5", type=Path, default=G5_ROOT)
     parser.add_argument("--domain", type=Path, default=DOMAIN)
+    parser.add_argument("--g5-restart", type=Path)
+    parser.add_argument("--require-barotropic", action="store_true")
     args = parser.parse_args(argv)
-    result = check_l2(args.check, args.g5, args.domain)
+    if args.require_barotropic and args.g5_restart is None:
+        args.g5_restart = G5_RESTART
+    result = check_l2(args.check, args.g5, args.domain, args.g5_restart)
+    if args.require_barotropic:
+        result["pass"] = bool(result["pass"] and result["barotropic_checked"])
     print("L2_ISO_ACTING " + " ".join(f"{k}={v}" for k, v in result.items()))
     return 0 if result["pass"] else 1
 

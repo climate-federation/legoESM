@@ -190,6 +190,56 @@ def test_acting_checker_requires_wet_ldf_and_tracer_only_entry(monkeypatch, tmp_
     assert not RECORDS.check_l2(Path("l2"), Path("g5"), tmp_path / "domain")["pass"]
 
 
+def test_acting_checker_requires_exact_barotropic_restart_when_requested(
+        monkeypatch, tmp_path):
+    shape = (1, 1, 1)
+    zero = np.zeros(shape)
+    stages = {f"{where}_{tr}": zero.copy()
+              for where in ("before_ldf", "after_ldf", "Kaa")
+              for tr in ("T", "S")}
+    l2_stages = {key: value.copy() for key, value in stages.items()}
+    l2_stages["after_ldf_T"][0, 0, 0] = 1.0
+    l2_stages["Kaa_T"][0, 0, 0] = 1.0
+    entries = {name: zero.copy() for name in ("T", "S", "u", "v", "ssh")}
+    l2_entries = {key: value.copy() for key, value in entries.items()}
+    l2_entries["T"][0, 0, 0] = 1.0
+    monkeypatch.setattr(RECORDS, "read_tracer_stage3",
+                        lambda path: l2_stages if "l2" in str(path) else stages)
+    monkeypatch.setattr(RECORDS, "read_entry",
+                        lambda path, case: l2_entries if case == "ORCA2L2-iso" else entries)
+
+    class Var:
+        def __init__(self, value): self.value = value
+        def __getitem__(self, key): return self.value
+
+    class Dataset:
+        def __init__(self, path):
+            if "domain" in str(path):
+                self.variables = {"bottom_level": Var(np.ones((1, 1), dtype=int))}
+            else:
+                value = np.ones(shape) if "l2" in str(path) else np.ones(shape)
+                self.variables = {name: Var(value.copy())
+                                  for name in ("ub_e", "vb_e", "ubb_e", "vbb_e")}
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+
+    monkeypatch.setattr(RECORDS.netCDF4, "Dataset", Dataset)
+    result = RECORDS.check_l2(
+        Path("l2"), Path("g5"), tmp_path / "domain", Path("g5_restart"))
+    assert result["pass"] and result["barotropic_checked"]
+    original = Dataset
+
+    class PlantedDataset(original):
+        def __init__(self, path):
+            super().__init__(path)
+            if "l2" in str(path):
+                self.variables["ub_e"] = Var(np.full(shape, 2.0))
+
+    monkeypatch.setattr(RECORDS.netCDF4, "Dataset", PlantedDataset)
+    assert not RECORDS.check_l2(
+        Path("l2"), Path("g5"), tmp_path / "domain", Path("g5_restart"))["pass"]
+
+
 def test_run_script_reuses_g5_binaries_and_is_fail_closed():
     text = RUN.read_text()
     assert subprocess.run(["bash", "-n", str(RUN)]).returncode == 0
@@ -199,6 +249,7 @@ def test_run_script_reuses_g5_binaries_and_is_fail_closed():
         "ORCA2G5_OMIP_L4_R31REF_FIX1/BLD/bin/nemo.exe",
         "for m in ldfslp.o ldftra.o ldfc1d_c2d.o traldf.o traldf_iso.o trazdf.o",
         "L2_DECK_SHA", "G5_STAGE_SHA", 'check_acting "$SMOKE"',
+        'check_acting "$SMOKE" barotropic', "--require-barotropic",
         'check_acting "$TWIN_A"', "ln_traldf_msc += +T$", "ln_ldfeiv += +F$",
         "commit the exact acquisition tool before running it",
     ):
