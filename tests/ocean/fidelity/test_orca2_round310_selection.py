@@ -1,5 +1,6 @@
 """Round 310 (Decision 122): G8's stored F area and stage-3 r3f on the ORCA2
-cards whose deck runs dynldf_lev; its fold rows and stage-1 order stay off."""
+cards whose deck runs dynldf_lev; its fold rows stay off.  Round 311 adds the
+stage-1 order on the same cards (its selection test checks the shipped arm)."""
 
 from __future__ import annotations
 
@@ -53,7 +54,7 @@ def test_g8_selection(cards, rung) -> None:
     assert cfg.nemo_ldf_stored_f_area is on
     assert cfg.nemo_ldf_stage_r3f is on
     assert cfg.nemo_ldf_fold_rows is False
-    assert cfg.rk3_stage1_ldf_source_order is False
+    assert cfg.rk3_stage1_ldf_source_order is on
 
 
 def test_omt_validators_accept_the_selection(cards) -> None:
@@ -86,13 +87,3 @@ def test_retained_selector_plant_fires(cards) -> None:
     with pytest.raises(GateError):
         selected_card(cards["rung0"], arm="control", rung="rung0",
                       plant="retained-selector")
-
-
-def test_shipped_arm_checks_the_selection(cards) -> None:
-    assert selected_card(cards["rung0"], arm="D122", rung="rung0") is cards["rung0"]
-    off = cards["rung0"]._replace(recipe=cards["rung0"].recipe._replace(
-        model_config=cards["rung0"].recipe.model_config._replace(
-            nemo_ldf_stage_r3f=False)))
-    with pytest.raises(GateError):
-        selected_card(off, arm="D122", rung="rung0")
-    assert selected_card(cards["omt1"], arm="D122", rung="omt1") is cards["omt1"]

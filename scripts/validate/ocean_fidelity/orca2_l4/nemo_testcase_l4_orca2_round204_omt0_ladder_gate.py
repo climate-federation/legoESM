@@ -47,7 +47,9 @@ OMT0_VECTOR_ONLY = (
 
 # Round 310: G8's dyn_ldf_lev statements; ln_dynldf_OFF here, so NEMO never
 # reaches dynldf_lev.  OMT-3 restores them with the diffusion.
-OMT0_LDF_ONLY = ("nemo_ldf_stored_f_area", "nemo_ldf_stage_r3f")
+# Round 311 adds G8's stage-1 order (stp2d.f90:144 is dyn_ldf's call).
+OMT0_LDF_ONLY = ("nemo_ldf_stored_f_area", "nemo_ldf_stage_r3f",
+                 "rk3_stage1_ldf_source_order")
 
 
 def build_omt0_card(deck_root: Path, *, plant: str = "none"):

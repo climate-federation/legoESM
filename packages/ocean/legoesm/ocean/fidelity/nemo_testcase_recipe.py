@@ -1800,10 +1800,12 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         # G8 round 1 / ORCA2 round 310 (Decision 122): dyn_ldf_lev's curl
         # term reads the stored r1_e1e2f (domhgr.f90:156 -> dynldf_lev.f90:123)
         # and stage 3 reads r3f = r1_2*(r3fb + r3fa) (stprk3_stg.f90:245).
-        # Left off: G8's fold rows (lean away, grow rung 10's sea-level
-        # error) and its stage-1 order (replaces G1b's KEG guard here).
+        # Round 311: stp_2D's stage-1 order hpg -> ldf -> vor -> keg
+        # (stp2d.f90:141/:144/:147/:164), G1b's dyn_keg guard kept.
+        # Left off: G8's fold rows (lean away, grow rung 10's sea-level error).
         nemo_ldf_stored_f_area=True,
         nemo_ldf_stage_r3f=True,
+        rk3_stage1_ldf_source_order=True,
         barotropic=model_config.barotropic._replace(
             barotropic_een_ratio_fold_exchange=True,
             barotropic_een_fe3mask_pivot_row=True,
