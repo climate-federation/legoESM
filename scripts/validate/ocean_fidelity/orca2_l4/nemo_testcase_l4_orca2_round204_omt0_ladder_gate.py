@@ -45,6 +45,10 @@ OMT0_VECTOR_ONLY = (
     "nemo_stage_momentum_wzv_stored_kmm_ratios",
 )
 
+# Round 310: G8's dyn_ldf_lev statements; ln_dynldf_OFF here, so NEMO never
+# reaches dynldf_lev.  OMT-3 restores them with the diffusion.
+OMT0_LDF_ONLY = ("nemo_ldf_stored_f_area", "nemo_ldf_stage_r3f")
+
 
 def build_omt0_card(deck_root: Path, *, plant: str = "none"):
     """Apply exactly Decision 103's five OFF module selections to rung 0."""
@@ -88,6 +92,7 @@ def build_omt0_card(deck_root: Path, *, plant: str = "none"):
         # stage wzv is stprk3_stg.f90:334, not :327).  The stored-ratio wzv
         # and the carried after-SSH slot stay (their lines run here).
         **{name: False for name in OMT0_VECTOR_ONLY},
+        **{name: False for name in OMT0_LDF_ONLY},
     )
     recipe = card.recipe._replace(model_config=cfg)
     return card._replace(
@@ -126,6 +131,8 @@ def validate_omt0_card(card) -> dict[str, object]:
         "no_unmeasured": tuple(card.unmeasured_features) == (),
         "vector_only_statements_off": not any(
             getattr(cfg, name) for name in OMT0_VECTOR_ONLY),
+        "ldf_only_statements_off": not any(
+            getattr(cfg, name) for name in OMT0_LDF_ONLY),
     }
     require(all(selectors.values()), f"OMT-0 selector moved: {selectors}")
     return selectors

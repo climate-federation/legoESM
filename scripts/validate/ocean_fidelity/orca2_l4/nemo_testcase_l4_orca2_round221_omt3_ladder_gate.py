@@ -56,6 +56,8 @@ def build_omt3_card(deck_root: Path, *, plant: str = "none"):
         lateral_viscosity_coefficient_source=(
             rung_cfg.lateral_viscosity_coefficient_source),
         lateral_side_bc=rung_cfg.lateral_side_bc,
+        # Round 310: G8's dyn_ldf_lev statements return with the diffusion.
+        **{name: getattr(rung_cfg, name) for name in omt1.omt0.OMT0_LDF_ONLY},
     )
     return card._replace(
         case="ORCA2-OMT3-vector-linear-drag-momentum-ldf-zps",
@@ -74,6 +76,7 @@ def validate_omt3_card(deck_root: Path, card) -> dict[str, object]:
         "lateral_viscosity", "lateral_viscosity_operator",
         "lateral_viscosity_e3_weighting",
         "lateral_viscosity_coefficient_source", "lateral_side_bc",
+        *omt1.omt0.OMT0_LDF_ONLY,
     }
     for name in before._fields:
         if name not in allowed:

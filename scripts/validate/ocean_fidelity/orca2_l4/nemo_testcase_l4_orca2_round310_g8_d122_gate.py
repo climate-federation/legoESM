@@ -50,8 +50,11 @@ STATEMENTS["G8"] = {k: v for arm in tuple(STATEMENTS) for k, v in
 STATEMENTS["SEL"] = {**STATEMENTS["AREA"], **STATEMENTS["R3F"]}
 RUNGS = ("rung0", "omt1", "omt2", "omt3", "omt4", "rung10")
 ARMS = ("control", "D122", *STATEMENTS)
-# This round's selection; filled from the measured arms.
-D122_SELECTED: dict[str, dict] = {rung: {} for rung in RUNGS}
+# This round's selection: SEL where the deck runs dynldf_lev; nothing on
+# OMT-1/OMT-2 (ln_dynldf_OFF, D122 (b) fails).
+D122_SELECTED: dict[str, dict] = {
+    rung: ({} if rung in ("omt1", "omt2") else dict(STATEMENTS["SEL"]))
+    for rung in RUNGS}
 
 
 def selected_card(card, *, arm: str, rung: str, plant: str = "none"):
