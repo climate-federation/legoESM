@@ -13065,6 +13065,10 @@ class LatLonCGridOceanModel:
                 )
                 if _salt_literal_here:
                     K_v_cell, A_v_cell, tke_new, K_s_literal = _kprof
+                    if not _ddm_literal_here:
+                        # trazdf.f90:175-176: without ln_zdfddm salt reuses
+                        # temperature's matrix; zdf_iwm's avs is never read.
+                        K_s_literal = None
                 else:
                     K_v_cell, A_v_cell, tke_new = _kprof
                 if (tke_new is not None
@@ -13891,11 +13895,13 @@ class LatLonCGridOceanModel:
         K_s_cell = K_v_cell if dK_ddm_salt is None else (K_v_cell + dK_ddm_salt)
         if K_s_literal is not None:
             # zdf_ddm's avs itself (zdfddm.f90:170), never avt + (avs - avt).
-            if K33_iso is not None:
-                raise ValueError(
-                    "literal double diffusion with an isoneutral K33 fold is "
-                    "not built (trazdf.f90:200-208 adds it to avs too)")
             K_s_cell = K_s_literal.astype(K_v_cell.dtype)
+            if K33_iso is not None:
+                # zwt = avs + akz (trazdf.f90:203; MSC, as heat at :185) or
+                # avs + ah_wslp2 (:207): the same K33 term heat receives.
+                K_s_cell = K_s_cell + K33_iso.astype(K_v_cell.dtype)
+                if _wet_if_vmix is not None:
+                    K_s_cell = K_s_cell * _wet_if_vmix
         if _fixed_solve_test_input is not None:
             _tracer_e3w = jnp.where(
                 _fixed_solve_replace[3],
