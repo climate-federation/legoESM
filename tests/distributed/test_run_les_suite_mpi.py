@@ -8,9 +8,8 @@ frame to rank 0. Its artifact must equal the serial artifact:
   the free-convective CBL (flux surface) and GABLS1 (prescribed-cooling MOST
   surface, Rayleigh sponge with its planar means — the sponge used local slab
   means before, which a 2-slab run exposes);
-* the dynamic LASD closure (every production case) to its documented MPI
-  tolerance: the dynamic coefficient amplifies the distributed FFT's ~1e-10
-  reordering (``test_lasd_mpi.py``), so it is not bit-matched;
+* the dynamic LASD closure (every production case) to round-off too (measured
+  2026-10-15: 5.6e-11 of each field's max, as Smagorinsky's 7.8e-11);
 * the column budgets the run prints close and agree with the serial run;
 * a checkpointed MPI run (stopped after its first step, resumed from the per-rank
   checkpoints) reproduces the uninterrupted MPI run exactly, and checkpoints from
@@ -47,7 +46,7 @@ pytestmark = pytest.mark.skipif(NPROC < 2, reason="needs >= 2 MPI ranks")
 _CASES = (
     ("cbl_nieuwstadt", "smagorinsky", ["--hours", f"{8 / 3600}", "--dt", "1.0"], 1e-9),
     ("sbl_gabls1", "smagorinsky", ["--hours", f"{1.0 / 3600}"], 1e-9),
-    ("cbl_nieuwstadt", "lasd", ["--hours", f"{8 / 3600}", "--dt", "1.0"], 1e-3),
+    ("cbl_nieuwstadt", "lasd", ["--hours", f"{8 / 3600}", "--dt", "1.0"], 1e-9),
 )
 _BUDGET = re.compile(r"budget (\w+): d\(column\)=(\S+) sources=(\S+) sponge=(\S+) "
                      r"residual=(\S+) column=(\S+)")
