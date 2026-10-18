@@ -212,7 +212,7 @@ row below it (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:588-590`, in `lbc_nfd_dp`
 `bbl_nemo_pivot_ghost` (default off, L1 only, selector-checked) routes the BBL's init geometry, face gate and trend
 through the existing shared fold-ghost helper. Section 5's first finding is closed by this.
 
-**Item 2 — `trabbl.f90:412` now covered.** The record test's independent arm runs kt 1-4 (jitted step, traced state,
+**Item 2 — the BBL depth statement now covered.** The record test's independent arm runs kt 1-4 (jitted step, traced state,
 x64). Plant (scratch worktree, the `ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:412` depth replaced by the old thickness
 ratio): **1 failed**, kt 4 T and S unequal. Restored: L1 file **11 passed**. New record-free fold-ghost test: fails
 with the old mirror, passes restored.
