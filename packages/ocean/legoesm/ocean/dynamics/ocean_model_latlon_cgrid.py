@@ -13443,10 +13443,16 @@ class LatLonCGridOceanModel:
                     # removal and the bottom-drag add (dynzdf.f90:156-167):
                     # deposited just before the solve, below
                     _rnd = nemo_source_round
+
+                    def _top_div(e3):
+                        # Gradient-only: 1 on zero-thickness (masked) faces.
+                        d = _rnd(e3 * _r0)
+                        return jnp.where(d == 0.0, 1.0, d)
+
                     _zdf_top_stress = (
-                        _rnd(_rnd(_rnd(dt_mom * _tau_i_u) / _rnd(_e3u1 * _r0))
+                        _rnd(_rnd(_rnd(dt_mom * _tau_i_u) / _top_div(_e3u1))
                              * state.u_mask.data),
-                        _rnd(_rnd(_rnd(dt_mom * _tau_j_v) / _rnd(_e3v1 * _r0))
+                        _rnd(_rnd(_rnd(dt_mom * _tau_j_v) / _top_div(_e3v1))
                              * state.v_mask.data))
                 else:
                     u_solve_in = state.u.data.at[..., 0].add(
