@@ -409,3 +409,98 @@ def test_g9_fct_pivot_row_right_half_is_the_image_of_its_left_half(tmp_path):
     ji = np.arange(1, n // 2 + 1)
     assert np.array_equal(anti_u[n // 2 + ji], -anti_u[n // 2 - ji + 1])
     assert np.array_equal(anti_u[0], anti_u[n])
+
+
+def _pivot_mirror_breaks(t_like, u_like, wet_top):
+    """Mirror breaks on the stored T-pivot row, indices from NEMO's T-pivot loops
+    (lbcnfd.f90:624-628: native T i <-> (N - i) mod N, sign +1; :669-673: native
+    U i <-> N - 1 - i, sign -1).  u_like is the card's compact U (column 0 is the
+    periodic closure, columns 1: the native row)."""
+    n = t_like[0].shape[1]
+    it = (-np.arange(n)) % n
+    iu = n - 1 - np.arange(n)
+    out = []
+    for a in t_like:
+        r = np.asarray(a)[-1]
+        out.append(int(((r != r[it]) & wet_top & wet_top[it]).sum()))
+    r = np.asarray(u_like)[-1, 1:]
+    out.append(int((r != -r[iu]).sum()))
+    return out
+
+
+@needs_inputs
+@pytest.mark.skipif(not (G9_RECORD / "oracle_stage_kt00000001_s3.bin").is_file(),
+                    reason="no round-46 G9 record")
+def test_g9_every_stage_ends_with_a_self_mirrored_pivot_row(tmp_path):
+    """stprk3_stg.f90:795-796: after every stage NEMO's lbc_lnk rewrites the right
+    half of the stored T-pivot row of uu, T and S from its left half (vv is the
+    existing top-V-row image).  The entry here is made asymmetric (pivot row's right
+    half: T, S scaled by 1+1e-6, u given 1e-3 on wet faces), so only the fold can
+    restore the mirror.  Jitted step, state traced, x64; stages 1, 2 via the
+    exposure hooks, stage 3 the returned state."""
+    import jax
+    import jax.numpy as jnp
+    sys.path[:0] = [str(CASES), str(CASES / "nemo_testcase_g5_orca2ice")]
+    import g5_records as g5
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    card = recipe.build_nemo_testcase_card("ORCA2G9-tadv", deck_root=G9_RECORD)
+    cfg, zc, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
+    assert cfg.rk3_end_of_stage_pivot_fold is True
+    fw, sf = g5.nemo_supplied_forcing(card, G9_RECORD, 1)
+    wet = np.asarray(zc.is_active, dtype=bool)[-1]
+    n = wet.shape[0]
+    half = np.arange(n) > n // 2
+    scale = np.where(half[:, None] & wet, 1.0 + 1.0e-6, 1.0)
+    um = np.asarray(s0.u_mask.data, dtype=float)[-1, 1:]
+    du = np.zeros(np.asarray(s0.u.data).shape)
+    du[-1, 1:] = np.where((np.arange(n) >= n // 2)[:, None], 1.0e-3, 0.0) * um[..., None]
+    entry = s0._replace(
+        T=s0.T.replace(data=jnp.asarray(s0.T.data).at[-1].multiply(scale)),
+        S=s0.S.replace(data=jnp.asarray(s0.S.data).at[-1].multiply(scale)),
+        u=s0.u.replace(data=jnp.asarray(s0.u.data) + du))
+    assert min(_pivot_mirror_breaks((entry.T.data, entry.S.data), entry.u.data, wet)) > 0
+    for stage in (1, 2, 3):
+        hooks = (_NEMOWSRK3TestHooks(expose_momentum_stage=stage, expose_tracer_stage=stage)
+                 if stage < 3 else _NEMOWSRK3TestHooks())
+        out = jax.device_get(LatLonCGridOceanModel(
+            card.recipe.grid, zc, cfg, _nemo_ws_test_hooks=hooks).step(
+                entry, dt=card.dt_s, freshwater=fw, surface_forcing=sf))
+        assert _pivot_mirror_breaks((out.T.data, out.S.data), out.u.data, wet) == [0, 0, 0], stage
+
+
+@needs_inputs
+@pytest.mark.skipif(not (G9_RECORD / "oracle_rktracer_operands_kt00000001_s2.bin").is_file(),
+                    reason="no round-46 G9 record")
+def test_g9_stage_transport_wzv_reads_nemos_stage_clock_pair(tmp_path):
+    """sshwzv.f90:297-298 at stages 1 and 2 reads that stage's rDt (rn_Dt/3, rn_Dt/2;
+    stprk3_stg.f90:134-135, :188-189) and r3t(Kaa) as the stored blend of r3t(Kbb)
+    and r3ta (:177, :221).  kt 1, jitted step, state traced, x64: the card's stage-1
+    zFw equals NEMO's recorded zFw on every cell (the N+1 ratio over rn_Dt misses
+    355,104), and stage 2 misses at most 100 cells (73 measured; 165,986 without)."""
+    import jax
+    sys.path[:0] = [str(CASES), str(CASES / "nemo_testcase_g5_orca2ice")]
+    import g5_records as g5
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    card = recipe.build_nemo_testcase_card("ORCA2G9-tadv", deck_root=G9_RECORD)
+    cfg, zc, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
+    assert cfg.rk3_stage_wzv_nemo_clock_pair is True
+    fw, sf = g5.nemo_supplied_forcing(card, G9_RECORD, 1)
+    nk = int(zc.n_levels)
+    for stage, budget in ((1, 0), (2, 100)):
+        # record fields: T_rhs0, S_rhs0, zFu, zFv, zFw, ... (zFw is the fifth)
+        with open(G9_RECORD / f"oracle_rktracer_operands_kt00000001_s{stage}.bin", "rb") as h:
+            h.read(16)
+            hd = struct.unpack("=11i", h.read(44))
+            v = np.fromfile(h, np.float64)
+        nx, ny, nz = hd[7:10]
+        n3 = nx * ny * nz
+        ref = v[4 * n3:5 * n3].reshape((nx, ny, nz), order="F").transpose(1, 0, 2)[2:-2, 2:-2, :nk]
+        out = jax.device_get(LatLonCGridOceanModel(
+            card.recipe.grid, zc, cfg,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_tracer_transport_stage=stage)).step(
+                s0, dt=card.dt_s, freshwater=fw, surface_forcing=sf))
+        got = np.asarray(out.T.data)
+        assert got.shape == ref.shape
+        assert int((got != ref).sum()) <= budget, (stage, int((got != ref).sum()))
