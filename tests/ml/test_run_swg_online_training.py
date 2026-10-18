@@ -1546,10 +1546,11 @@ def test_exp4_rigid_lid_configs_differ_from_their_parent_only_as_decided(
 
 
 @pytest.mark.parametrize("config_path", [EXP4_TEMPLATE, EXP4_SYMMETRIC])
-def test_exp4_refuses_to_load_data_until_the_rigid_lid_truth_exists(config_path):
+def test_exp4_refuses_to_load_data_until_the_rigid_lid_truth_exists(
+        config_path, tmp_path):
     config = driver.load_config(config_path)
-    for record in config["dataset"]["records"]:
-        assert not Path(record["root"]).exists()
+    for index, record in enumerate(config["dataset"]["records"]):
+        record["root"] = str(tmp_path / f"missing_record_{index}")
         with pytest.raises(ValueError, match="record root does not exist"):
             driver.complete_chunks(record)
     card = driver.build_deck_card(config["deck"], config["surface"])
