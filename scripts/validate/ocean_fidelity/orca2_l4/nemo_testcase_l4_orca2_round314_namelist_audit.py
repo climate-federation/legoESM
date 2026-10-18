@@ -452,7 +452,8 @@ def _rules() -> list[Rule]:
     a(Rule(r"oce:namdom\.ln_meshmask", "nm", why="output only", effect=NO_STATE))
     # ---- namrun ----
     a(Rule(r"oce:namrun\.nn_itend", "map", card=C("card.n_steps"),
-           why="card's declared run length (the ladders replay 10 steps)",
+           why="rn_dt = 10800 s, 365-day calendar: record 10 steps (30 h), EXP00 5840 steps "
+               "(two years), card declares 2920 (one year); the ladders replay 10 steps",
            effect="run length only", cls="c"))
     a(Rule(r"oce:namrun\.ln_rstart", "map",
            card=lambda c: any("restart" in f.lower() for f in c.builder_files),
