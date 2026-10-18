@@ -8320,11 +8320,11 @@ CITATION_MAP = {
     'cfgs/SHARED/namelist_ref:933':
         'ln_botmix_triad = .false.   !  lateral mixing on bottom',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfslp.f90:185-213': [
-        'DO jj = ntsj-( 2), ntej+(  1 ) ; DO ji = ntsi-( 2), ntei+(  1)',
+        ('DO jj = ntsj-( 2), ntej+(  1 ) ; DO ji = ntsi-( 2), ntei+(  1)', 1),
         ('END DO   ;   END DO', 8), 29,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfslp.f90:222-256': [
-        'DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)',
+        ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 4),
         'zvslp_hml(ji,jj) = zmlj * zww(ji,jj) * r1_hmlv(ji,jj)', 35,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfslp.f90:260-275': [
@@ -8340,14 +8340,14 @@ CITATION_MAP = {
         ('END DO   ;   END DO', 12), 16,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfslp.f90:338':
-        "CALL lbc_lnk( 'ldfslp', uslp , 'U'",
+        ("CALL lbc_lnk( 'ldfslp', uslp , 'U'", 1),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:231-232': [
         'READ(numnam_ref(MAX(INDEX(numnam_ref,"&namtra_ldf "),1):)',
         'READ(numnam_cfg(MAX(INDEX(numnam_cfg,"&namtra_ldf "),1):)', 2,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:278-289': [
         'IF ( ln_traldf_lap ) THEN        ! laplacian operator',
-        'IF ( ln_traldf_triad )   nldf_tra = np_lap_it', 12,
+        ('IF ( ln_traldf_triad )   nldf_tra = np_lap_it', 2), 12,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:312-313': [
         'IF(  nldf_tra == np_lap_i .OR. nldf_tra == np_lap_it',
@@ -8355,36 +8355,37 @@ CITATION_MAP = {
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:353-358': [
         'value of lap/blp eddy mixing coef.',
-        'zah_max = zUfac * (ra*rad)**inn', 6,
+        ('zah_max = zUfac * (ra*rad)**inn', 1), 6,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:386-390': [
         'CASE(  20  )      !== fixed horizontal shape',
-        "CALL ldf_c2d( 'TRA', zUfac", 5,
+        ("CALL ldf_c2d( 'TRA', zUfac", 1), 5,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:427-434': [
-        'IF( .NOT.l_ldftra_time ) THEN', ('ENDIF', 13), 8,
+        'IF( .NOT.l_ldftra_time ) THEN', ('ENDIF', 16), 8,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfc1d_c2d.f90:160-164': [
         "CASE( 'TRA' )                       ! U- and V-points",
-        ('END DO   ;   END DO', 2), 5,
+        ('END DO   ;   END DO', 4), 5,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfc1d_c2d.f90:168-172': [
-        'deeper values = surface one', ('END DO', 2), 5,
+        'deeper values = surface one', ('END DO', 6), 5,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf.f90:69':
         'SUBROUTINE tra_ldf( kt, Kbb, Kmm, pts, Krhs )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf.f90:105-110': [
-        'SELECT CASE ( nldf_tra )',
+        ('SELECT CASE ( nldf_tra )', 2),
         'CALL traldf_iso_lap  ( kt, Kbb, Kmm, pts, Krhs', 6,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:154':
-        'CALL traldf_iso_a33( Kmm, ah_wslp2, akz )',
+        ('CALL traldf_iso_a33( Kmm, ah_wslp2, akz )', 1),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:257-291': [
-        'A31  A32  explicit part of A33',
-        '* r1_e1e2t(ji,jj) / (e3t_3d', 35,
+        ('A31  A32  explicit part of A33', 1),
+        ('* r1_e1e2t(ji,jj) / (e3t_3d', 1), 35,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:780-795': [
-        'DO jk =    2,  jpkm1', ('END DO   ;   END DO   ;   END DO', 1), 16,
+        ('DO jk =    2,  jpkm1', 1),
+        ('END DO   ;   END DO   ;   END DO', 1), 16,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:811-830': [
         'IF( ln_traldf_msc ) THEN',
@@ -8401,7 +8402,7 @@ CITATION_MAP = {
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:198-208': [
         'ELSE                                               ! use avs for salinty',
-        ('END DO   ;   END DO', 5), 11,
+        ('END DO   ;   END DO', 6), 11,
     ],
 }
 
