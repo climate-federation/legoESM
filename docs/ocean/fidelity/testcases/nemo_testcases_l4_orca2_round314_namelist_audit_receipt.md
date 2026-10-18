@@ -47,8 +47,8 @@ default changed.  Six rows need the user (DECISION_NEEDED below).
 ## Second review fixes (hold of 2026-10-18; no card changed)
 
 - 38 MATCH rows never read the card.  Eight now do: single-column switch
-  (the card's grid shape, 148 x 180), the four alternative vertical-
-  coordinates (the builder builds z-star), restart start and initial T/S
+  (the card's grid shape, 148 x 180), the four alternative
+  vertical-coordinate switches (the builder builds z-star), restart start and initial T/S
   (the files the builder opens: no restart, both climatology files), the
   runoff depth file (none on the card), the eddy-energy equation (none on
   the card), mixed vorticity scheme (the card runs energy-enstrophy).  The
