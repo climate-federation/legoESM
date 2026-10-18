@@ -4783,7 +4783,7 @@ CITATION_MAP = {
         'if not self._nemo_ws_test_hooks.legacy_hadv_min_face_thickness:',
         'ldf_thickness_operands=_ws_ldf_thickness_kbb,', 53],
     'ocean_model_latlon_cgrid.py:7138-7203': [
-        '_stage_ldf_thickness = None', '_stage_ldf_thickness),', 64],
+        '_stage_ldf_thickness = None', '_stage_ldf_thickness),', 66],
     # --- round 135: accepted-state swap before the daily tracer record ---
     'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/stprk3.f90:220-229': [
         'IF ( .NOT. l_perpetual_ts ) THEN', ('ENDIF', 8), 10],
