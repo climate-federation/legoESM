@@ -1781,6 +1781,8 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:625': ('ii1 = ipi/2 + ji + 1', 2),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:670': ('ends at: ipi/2 + (ipi/2 - ihls) = ipi - ihls', 4),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:795': ("CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp", 2),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:134': 'rDt = r1_3 * rn_Dt            ! set time-step : rn_Dt/3',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:188': 'rDt = r1_2 * rn_Dt            ! set time-step : rn_Dt/2',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:796': ("ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp, ldfull=.TRUE.", 2),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:276': 'IF( ln_zdfcst .OR. ln_zdfosm .OR. ln_zdfric ) THEN   ;   l_zdfsh2 = .FALSE.',
     'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3.f90:338': 'WRITE(filename,\'("oracle_stage_kt",I8.8,"_s",I1,".bin")\') kstp, kstage',
