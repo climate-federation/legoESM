@@ -1750,14 +1750,14 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:1946': 'return sr(rhs - sr(vertical_scaled / e3t_kmm))',
     'ocean_model_latlon_cgrid.py:2568-2570': [
         'out = r(r(r(q_before[..., None] * base)', '/ q_after[..., None])', 3],
-    'ocean_model_latlon_cgrid.py:2576': 'return jnp.where(active_3d > 0.5, out, base)',
+    'ocean_model_latlon_cgrid.py:2576': [('return jnp.where(active_3d > 0.5, out, base)', 1)],
     'ocean_model_latlon_cgrid.py:13444': '_rnd(_rnd(_rnd(dt_mom * _tau_j_v) / _rnd(_e3v1 * _r0))',
     'ocean_pe_latlon_cgrid.py:4294-4298': [
-        'cd0=float(config.bottom_drag.bottom_drag_cd0),',
-        'uc0=float(config.bottom_drag.bottom_drag_uc0),', 5],
+        ('cd0=float(config.bottom_drag.bottom_drag_cd0),', 1),
+        ('uc0=float(config.bottom_drag.bottom_drag_uc0),', 1), 5],
     'ocean_pe_latlon_cgrid.py:4375-4379': [
-        'cd0=float(config.bottom_drag.bottom_drag_cd0),',
-        'uc0=float(config.bottom_drag.bottom_drag_uc0),', 5],
+        ('cd0=float(config.bottom_drag.bottom_drag_cd0),', 2),
+        ('uc0=float(config.bottom_drag.bottom_drag_uc0),', 2), 5],
     'implicit_solver.py:357-376': [
         '_round_the_multiply(quotient * previous))', 'numerator / current_diagonal)', 20],
     'internal_wave_mixing.py:443': 'n_pos = jnp.sqrt(n2_pos)',
