@@ -164,7 +164,7 @@ the band. Model step jitted, state (incl. the seed) a traced input, x64.
 
 Gates (resume; commits `4363c96d8` ladder + test, `e08d7a28c` receipt, then one map entry and one ladder pin re-anchored, +32 lines, anchors unchanged, `39e14c256`; this update fills numbers):
 - Default gate (`land.sh` orca2 list, incl. citation-gate tests and private-import ratchet) at `39e14c256`: **145 passed** (1,158 s).
-- Per-receipt citation gate on this receipt (`--from-heading` this title): **PASS, failures 0**, 17 citations, unmapped 0, map entries failing audit 0 (first runs: `zdfiwm.f90:443` unmapped; the ladder pin above shifted).
+- Per-receipt citation gate on this receipt (`--from-heading` this title): **PASS, failures 0**, 17 citations, unmapped 0, map entries failing audit 0 (first runs: one IWM-reset citation unmapped; the ladder pin above shifted).
 
 ASKED (resume): score V5 both labels; confirm where nn_havtb acts; V5 record test with plant.
 UNASKED (resume), offered for revert:
