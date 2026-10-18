@@ -24,12 +24,14 @@ from legoesm.ocean.dynamics.swe_rk3 import (
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_DG50_NAMELIST,
     SWG_MADDISON_NAMELIST,
+    SWG_MADDISON_RL_NAMELIST,
     build_swg_card,
     swg_surface_wind,
 )
 from legoesm.ocean.state import OceanSurfaceForcing
 from legoesm.training import swg_online
 from legoesm.training.swg_online import (
+    RIGID_LID_RESTART_TOLERANCE,
     START_REBALANCE_MAX_ITERATIONS,
     START_REBALANCE_TOLERANCE,
     BalancedNormalizers,
@@ -893,6 +895,91 @@ _CONTRACT_PLANTS = {
         "validation", lambda m: m["restart"]["manifest_admission"].update(
             manifest_status="refused"))}, "snapshot its truth run lists"),
 }
+
+
+def _lid_stream(m, *, within=True, tolerance=RIGID_LID_RESTART_TOLERANCE,
+                namelist=SWG_MADDISON_RL_NAMELIST):
+    """Edit a chunk manifest into a rigid-lid stream as the driver records it."""
+    m["surface"] = "rigid_lid"
+    m["namelist"] = json.loads(json.dumps(namelist._asdict()))
+    m["restart_next_verification"] = {
+        "result": {"all_equal": False, "within_tolerance": within},
+        "tolerance": None if tolerance is None else dict(tolerance)}
+
+
+@pytest.fixture(scope="module")
+def lid_card():
+    return build_swg_card(_SMALL_NAMELIST, surface="rigid_lid")
+
+
+def _every_chunk(edit):
+    return lambda name: edit
+
+
+def test_rigid_lid_stream_is_admitted_with_its_recorded_tolerance(
+        tmp_path, lid_card):
+    path = _plant_dataset(tmp_path, lid_card, "lid",
+                          chunk_edit=_every_chunk(_lid_stream))
+    contract = SWGDatasetContract.from_json(path, card=lid_card)
+    assert {source.surface for source in contract.sources} == {"rigid_lid"}
+
+
+@pytest.mark.parametrize("plant,message", [
+    ("lid, outside tolerance", "verification"),
+    ("lid, tolerance not recorded", "verification"),
+    ("lid, another tolerance", "verification"),
+    ("lid stream on the explicit namelist", "fine deck"),
+    ("unknown surface", "surface must be"),
+])
+def test_rigid_lid_stream_refusals(tmp_path, lid_card, plant, message):
+    def edit(m):
+        _lid_stream(m)
+        if plant == "lid, outside tolerance":
+            _lid_stream(m, within=False)
+        elif plant == "lid, tolerance not recorded":
+            _lid_stream(m, tolerance=None)
+        elif plant == "lid, another tolerance":
+            _lid_stream(m, tolerance={**RIGID_LID_RESTART_TOLERANCE,
+                                      "value": 1.0e-9})
+        elif plant == "lid stream on the explicit namelist":
+            _lid_stream(m, namelist=SWG_MADDISON_NAMELIST)
+        else:
+            m["surface"] = "ocean"
+    path = _plant_dataset(tmp_path, lid_card, "lid",
+                          chunk_edit=_every_chunk(edit))
+    with pytest.raises(ValueError, match=message):
+        SWGDatasetContract.from_json(path, card=lid_card)
+
+
+def test_explicit_stream_never_takes_the_round_off_tolerance(
+        tmp_path, small_card):
+    def edit(m):
+        m["restart_next_verification"] = {
+            "result": {"all_equal": False, "within_tolerance": True},
+            "tolerance": dict(RIGID_LID_RESTART_TOLERANCE)}
+    path = _plant_dataset(tmp_path, small_card, "explicit",
+                          chunk_edit=_every_chunk(edit))
+    with pytest.raises(ValueError, match="verification"):
+        SWGDatasetContract.from_json(path, card=small_card)
+
+
+def test_contract_refuses_a_card_of_another_surface(
+        tmp_path, small_card, lid_card):
+    lid = _plant_dataset(tmp_path, lid_card, "lid",
+                         chunk_edit=_every_chunk(_lid_stream))
+    with pytest.raises(ValueError, match="differs from the card's surface"):
+        SWGDatasetContract.from_json(lid, card=small_card)
+    explicit = _plant_dataset(tmp_path, small_card, "explicit")
+    with pytest.raises(ValueError, match="differs from the card's surface"):
+        SWGDatasetContract.from_json(explicit, card=lid_card)
+
+
+def test_contract_refuses_mixed_surfaces(tmp_path, lid_card):
+    path = _plant_dataset(
+        tmp_path, lid_card, "mixed",
+        chunk_edit=lambda name: _lid_stream if name == "train_a" else None)
+    with pytest.raises(ValueError, match="more than one surface"):
+        SWGDatasetContract.from_json(path, card=lid_card)
 
 
 @pytest.mark.parametrize("plant", sorted(_CONTRACT_PLANTS))

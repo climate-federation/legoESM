@@ -26,6 +26,7 @@ from legoesm.grids.operators_latlon_cgrid import (
 from legoesm.ml.training import TrainingConfig, create_optimizer
 from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
 from legoesm.ocean.dynamics.swe_rk3 import (
+    SWE_SURFACE_MODES,
     _entry_from_state,
     swe_rigid_lid_stage1_phi,
     swe_rk3_step,
@@ -34,6 +35,7 @@ from legoesm.ocean.dynamics.swe_rk3 import (
 )
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_MADDISON_NAMELIST,
+    SWG_MADDISON_RL_NAMELIST,
     swg_surface_wind,
 )
 from legoesm.ocean.fidelity.swg_coarse_graining import shifted_weighted_sum
@@ -60,6 +62,15 @@ _V2_SCHEMA = "legoesm-swg-double-gyre-hourly-target-v2"
 _HOURLY_FIELDS = (("ssh", "m"), ("u", "m_s"), ("v", "m_s"))
 # The fine-deck namelist keys that change with the run length alone.
 _RUN_LENGTH_KEYS = frozenset({"nn_itend", "nn_write", "nn_stock"})
+# Rigid-lid streams only (user decision 2026-10-18): the hourly-target program
+# differs from a plain restart by round-off.  Must equal the driver's
+# ``LID_RESTART_TOLERANCE`` (scripts/run/run_swg_double_gyre.py).
+RIGID_LID_RESTART_TOLERANCE = {
+    "kind": "max_abs_relative_to_field_max", "value": 1.0e-12,
+    "applies_to": "rigid_lid"}
+# The registered fine namelist of each surface a stream may be generated on.
+_FINE_NAMELIST_OF_SURFACE = {
+    "explicit": SWG_MADDISON_NAMELIST, "rigid_lid": SWG_MADDISON_RL_NAMELIST}
 # Two evaluations of one fine state (restriction inside the compiled scan and
 # eagerly) differ by at most 5.1e-13 m SSH and 8.9e-16 m/s on CPU and CPU/GPU
 # (round-5 review); 1e-10 of the field's largest magnitude is 300 times that
@@ -162,6 +173,7 @@ class PinnedHourlySource(NamedTuple):
     last_absolute_hour: int
     daily_sha256: tuple[str, ...]
     truth_run: str
+    surface: str
 
 
 class ShiftedConv2d(eqx.Module):
@@ -647,6 +659,17 @@ def _admitted_hourly_manifest(root: Path, expected_manifest_sha256: str) -> dict
     return manifest
 
 
+def _stream_surface(manifest: dict) -> str:
+    """The surface a v2 stream was generated on; streams made before the
+    rigid-lid surface existed record none and are explicit."""
+    surface = manifest.get("surface", "explicit")
+    if surface not in SWE_SURFACE_MODES:
+        raise ValueError(
+            f"hourly stream surface must be one of {SWE_SURFACE_MODES}; "
+            f"got {surface!r}")
+    return surface
+
+
 def _truth_run_of(manifest: dict) -> str:
     """Refuse a v2 stream that is not unperturbed, verified fp64 truth.
 
@@ -663,13 +686,18 @@ def _truth_run_of(manifest: dict) -> str:
     if restart.get("perturb_amplitude_m") is not None \
             or "balanced_perturbation" in restart:
         raise ValueError("hourly stream starts from a perturbed restart, not truth")
+    surface = _stream_surface(manifest)
     verification = manifest.get("restart_next_verification") or {}
-    if (verification.get("result") or {}).get("all_equal") is not True:
+    result = verification.get("result") or {}
+    if result.get("all_equal") is not True and not (
+            surface == "rigid_lid" and result.get("within_tolerance") is True
+            and verification.get("tolerance") == RIGID_LID_RESTART_TOLERANCE):
         raise ValueError(
             "hourly stream lacks a passed next-day restart verification")
     if (manifest.get("numerical_health") or {}).get("all_finite") is not True:
         raise ValueError("hourly stream did not record finite numerical health")
-    registered = json.loads(json.dumps(SWG_MADDISON_NAMELIST._asdict()))
+    registered = json.loads(json.dumps(
+        _FINE_NAMELIST_OF_SURFACE[surface]._asdict()))
     namelist = manifest.get("namelist") or {}
     if {key: value for key, value in namelist.items()
             if key not in _RUN_LENGTH_KEYS} \
@@ -764,13 +792,14 @@ def _pinned_source(root: Path, manifest_sha256: str) -> PinnedHourlySource:
         raise ValueError(
             "training dataset sources require v2 stored initial states")
     truth_run = _truth_run_of(manifest)
+    surface = _stream_surface(manifest)
     days = manifest["days"]
     source_day = int(manifest["restart"]["source_day"])
     return PinnedHourlySource(
         str(root.resolve()), manifest_sha256, source_day * HOURS_PER_DAY,
         (source_day + days) * HOURS_PER_DAY,
         tuple(manifest["daily_sha256"][f"day{day:04d}.npz"]
-              for day in range(1, days + 1)), truth_run)
+              for day in range(1, days + 1)), truth_run, surface)
 
 
 def _pinned_day(source: PinnedHourlySource, objective: str, day_index: int):
@@ -901,6 +930,13 @@ class SWGDatasetContract:
                 raise ValueError("dataset source differs from its pinned manifest")
         if len({source.truth_run for source in self.sources}) != 1:
             raise ValueError("dataset sources come from more than one truth run")
+        if len({source.surface for source in self.sources}) != 1:
+            raise ValueError("dataset sources come from more than one surface")
+        if self.sources[0].surface != self.card.recipe.model_config.swe_surface:
+            raise ValueError(
+                f"dataset surface {self.sources[0].surface!r} differs from "
+                "the card's surface "
+                f"{self.card.recipe.model_config.swe_surface!r}")
         self._validate_coverage()
         grid = tuple(self.card.recipe.initial_state.eta.data.shape)
         if self._stored_state(self.splits[0][1])[0].shape != grid:
