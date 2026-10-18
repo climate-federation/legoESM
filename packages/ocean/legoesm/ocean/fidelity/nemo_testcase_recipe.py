@@ -3579,7 +3579,15 @@ def read_orca2g1_deck(
         **(_ORCA2V3_DDM_FIELDS if case in _ORCA2V_DDM_CASES else {}),
         **(_ORCA2V4_IWM_FIELDS if case in _ORCA2V_IWM_CASES else {}),
         **(_ORCA2V5_HAVTB_FIELDS if case in _ORCA2V_HAVTB_CASES else {}),
+        **(_ORCA2L1_BBL_FIELDS if case in _ORCA2L_BBL_CASES else {}),
     }
+    bbl_keys = {k for k in values if k.startswith("nambbl.")}
+    if bbl_keys != (set(_ORCA2L1_BBL_FIELDS) if case in _ORCA2L_BBL_CASES
+                    else {"nambbl.ln_trabbl"}):
+        raise ValueError(
+            f"ORCA2G1 deck states &nambbl {sorted(bbl_keys)!r}; the card "
+            "transcribes only ln_trabbl = F, or ORCA2's five lines "
+            "(namelist_cfg:268-272) on L1")
     iwm_lines = {k: v for k, v in values.items() if k.startswith("namzdf_iwm.")}
     if iwm_lines != (_ORCA2V4_IWM_LINES if case in _ORCA2V_IWM_CASES else {}):
         raise ValueError(
@@ -3687,6 +3695,19 @@ def _orca2g1_domain(domain_path: Path, jpk: int = 2) -> dict[str, np.ndarray]:
     out.update(e3t_1d=e3t_1d[:-1], e3w_1d=e3w_1d[:-1], bottom_level=bottom)
     out.update({name: np.moveaxis(value[:-1], 0, -1) for name, value in raw.items()})
     return out
+
+
+def _orca2l1_bbl_selection(case: str) -> dict[str, object]:
+    """The BBL arm a ladder card selects: ORCA2's diffusive BBL on L1
+    (nn_bbl_ldf = 1, nn_bbl_adv = 0), none elsewhere (ln_trabbl = F)."""
+
+    if case in _ORCA2L_BBL_CASES:
+        return {"bbl_adv_option": _ORCA2L1_BBL_FIELDS["nambbl.nn_bbl_adv"],
+                "bbl_diffusive_option": _ORCA2L1_BBL_FIELDS["nambbl.nn_bbl_ldf"],
+                "bbl_aht_m2_s": _ORCA2L1_BBL_FIELDS["nambbl.rn_ahtbbl"],
+                "bbl_gamma_s": _ORCA2L1_BBL_FIELDS["nambbl.rn_gambbl"]}
+    return {"bbl_adv_option": 0, "bbl_diffusive_option": 0,
+            "bbl_aht_m2_s": 0.0, "bbl_gamma_s": 0.0}
 
 
 def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -> NEMOTestcaseCard:  # noqa: E501
@@ -3802,8 +3823,7 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         barotropic_time_filter="nemo_ab3am4",          # nn_bt_flt = 3
         nemo_barotropic_filter_alpha=deck.rn_bt_alpha,  # required card field
         n_barotropic_substeps=_orca2g1_auto_substeps(dom, deck),  # ln_bt_auto = T
-        bbl_adv_option=0, bbl_gamma_s=0.0,
-        bbl_diffusive_option=0, bbl_aht_m2_s=0.0,       # ln_trabbl = F
+        **_orca2l1_bbl_selection(case),                 # ln_trabbl (L1) / F
         whole_step_identity="orca2_vector_een_c2",
         tke_langmuir_evaluation="vectorized",
     )
@@ -3891,8 +3911,11 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
             root / _ORCA2V4_IWM_FILE, surface_wet, dom["gphit"], dom["glamt"])
             if case in _ORCA2V_IWM_CASES else None),
     )
+    bbl = _orca2l1_bbl_selection(case)
     card = NEMOTestcaseCard(
-        case, recipe, deck.rn_Dt_s, deck.nn_itend, 1, 0, 0, 0.0, 0.0,
+        case, recipe, deck.rn_Dt_s, deck.nn_itend, 1,
+        bbl["bbl_adv_option"], bbl["bbl_diffusive_option"],
+        bbl["bbl_aht_m2_s"], bbl["bbl_gamma_s"],
         surface_boundary_condition=(
             "nemo_post_si3_records" if case in _ORCA2G_SI3_CASES
             else "ncar_core_sbcblk" if _ORCA2G_SBC[case] else "none"
@@ -3971,7 +3994,13 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
            if card.case in _ORCA2V_IWM_CASES else {}),
         "nn_e3f_typ=0": cfg.een_e3f_scheme == "nemo_avg4",
         "lateral_mixing_none": cfg.physics.lateral_mixing.scheme == "none",
-        "ln_trabbl=F": (cfg.bbl_adv_option, cfg.bbl_diffusive_option) == (0, 0),
+        ("ln_trabbl" if card.case in _ORCA2L_BBL_CASES else "ln_trabbl=F"): (
+            (cfg.bbl_adv_option, cfg.bbl_diffusive_option, cfg.bbl_aht_m2_s, cfg.bbl_gamma_s)
+            == (card.bbl_adv_option, card.bbl_diffusive_option, card.bbl_aht_m2_s,
+                card.bbl_gamma_s)
+            == (tuple(_ORCA2L1_BBL_FIELDS[f"nambbl.{k}"] for k in (
+                "nn_bbl_adv", "nn_bbl_ldf", "rn_ahtbbl", "rn_gambbl"))
+                if card.case in _ORCA2L_BBL_CASES else (0, 0, 0.0, 0.0))),
         "surface_forcing": ((card.surface_boundary_condition, card.surface_input_operator) == (
                        ("nemo_post_si3_records", "nemo_ocean_surface_input_v1")
                        if card.case in _ORCA2G_SI3_CASES else
@@ -4383,13 +4412,23 @@ def build_orca2g5_ice_card(deck_root: str | Path) -> NEMOTestcaseCard:
 # ln_zdfcst=F and ORCA2's four &namzdf_tke lines (namelist_cfg:404-419);
 # every other key, ln_zdfiwm=F and ln_drg_OFF=T included, is G5's.
 _ORCA2G_SI3_CASES = ("ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm",
-                     "ORCA2V4-iwm", "ORCA2V5-havtb")
+                     "ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L1-bbl")
 _ORCA2V_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
                  "ORCA2V5-havtb")
 _ORCA2V_EVD_CASES = ("ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
 _ORCA2V_DDM_CASES = ("ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
 _ORCA2V_IWM_CASES = ("ORCA2V4-iwm", "ORCA2V5-havtb")
 _ORCA2V_HAVTB_CASES = ("ORCA2V5-havtb",)
+# ORCA2L1 (lane B, DECISION 138): certified G5 plus ORCA2's bottom boundary
+# layer, verbatim ORCA2_OMIP_L4/EXP00/namelist_cfg:268-272 (tra_bbl_init
+# trabbl.f90:527; bbl :357 at stage 3, stprk3_stg.f90:560; tra_bbl :154 ->
+# tra_bbl_dif :217 at stprk3_stg.f90:739).  nn_bbl_adv = 0: rn_gambbl is read
+# and printed only.
+_ORCA2L_BBL_CASES = ("ORCA2L1-bbl",)
+_ORCA2L1_BBL_FIELDS: dict[str, object] = {
+    "nambbl.ln_trabbl": True, "nambbl.nn_bbl_ldf": 1, "nambbl.nn_bbl_adv": 0,
+    "nambbl.rn_ahtbbl": 1000.0, "nambbl.rn_gambbl": 10.0,
+}
 _ORCA2V1_TKE_FIELDS: dict[str, object] = {
     "namzdf_tke.nn_mxl": 3, "namzdf_tke.nn_etau": 1,
     "namzdf_tke.ln_mxhsw": False, "namzdf_tke.nn_mxlice": 2,
@@ -4418,11 +4457,13 @@ for _rung_table in (_ORCA2G_JPK, _ORCA2G_ZDF_FACES, _ORCA2G_TRA_ZDF_ROUNDED,
     _rung_table["ORCA2V3-ddm"] = _rung_table["ORCA2G5-ice"]
     _rung_table["ORCA2V4-iwm"] = _rung_table["ORCA2G5-ice"]
     _rung_table["ORCA2V5-havtb"] = _rung_table["ORCA2G5-ice"]
+    _rung_table["ORCA2L1-bbl"] = _rung_table["ORCA2G5-ice"]
 _ORCA2G_UNMEASURED["ORCA2V1-tke"] = ORCA2V1_UNMEASURED
 _ORCA2G_UNMEASURED["ORCA2V2-evd"] = ORCA2V1_UNMEASURED
 _ORCA2G_UNMEASURED["ORCA2V3-ddm"] = ORCA2V1_UNMEASURED
 _ORCA2G_UNMEASURED["ORCA2V4-iwm"] = ORCA2V1_UNMEASURED
 _ORCA2G_UNMEASURED["ORCA2V5-havtb"] = ORCA2V1_UNMEASURED
+_ORCA2G_UNMEASURED["ORCA2L1-bbl"] = _ORCA2G_UNMEASURED["ORCA2G5-ice"]
 
 
 def _orca2v1_tke_vertical(g5_vm, deck: ORCA2G1Deck):
@@ -4676,6 +4717,12 @@ def build_orca2v5_havtb_card(deck_root: str | Path) -> NEMOTestcaseCard:
     return build_orca2g1_flat_card(deck_root, "ORCA2V5-havtb")
 
 
+def build_orca2l1_bbl_card(deck_root: str | Path) -> NEMOTestcaseCard:
+    """L1: certified G5 plus ORCA2's bottom boundary layer (ln_trabbl)."""
+
+    return build_orca2g1_flat_card(deck_root, "ORCA2L1-bbl")
+
+
 __all__ = (
     "NEMOTestcaseCard",
     "GYRESurfaceBoundaryCondition",
@@ -4696,6 +4743,7 @@ __all__ = (
     "build_orca2v3_ddm_card",
     "build_orca2v4_iwm_card",
     "build_orca2v5_havtb_card",
+    "build_orca2l1_bbl_card",
     "nemo_havtb_shape",
     "ORCA2V1_UNMEASURED",
     "orca2g_forcing_failures",
@@ -4726,3 +4774,4 @@ __all__ = (
     "validate_nemo_testcase_card_for_execution",
     "with_first_wzv_after_ssh",
 )
+

@@ -56,14 +56,15 @@ from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
 
 CASE = "ORCA2G2-zps"
 CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke",
-         "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
+         "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L1-bbl")
 FORCED = ("ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd",
           "ORCA2V3-ddm", "ORCA2V4-iwm",
-          "ORCA2V5-havtb")   # NEMO-supplied surface fields each kt (D123)
+          "ORCA2V5-havtb", "ORCA2L1-bbl")   # NEMO-supplied surface fields each kt (D123)
 # G5's record build (ORCA2-lane frames); V1 = that build + one hm_i writer;
 # V2/V3/V4/V5 = V1's record binary with ORCA2's EVD (+ DDM, + IWM, + nn_havtb) namelist lines
+# L1 = G5's record binary with ORCA2's five &nambbl lines
 SI3 = ("ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
-       "ORCA2V5-havtb")
+       "ORCA2V5-havtb", "ORCA2L1-bbl")
 TKE_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
 ZDF_KT1_CASES = ("ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
 # V4's IWM-active check compares with V3's admitted (certified) kt-1 frame
