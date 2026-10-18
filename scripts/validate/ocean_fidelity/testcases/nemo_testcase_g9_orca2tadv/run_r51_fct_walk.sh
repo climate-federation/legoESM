@@ -103,10 +103,10 @@ add_after(
 "            n_r51_fct = -1 ; l_r51_fct = .FALSE.\n"
 "         ENDIF\n")
 add_after(
-"         pt_up1(ji,jj,jk) = ( (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kbb)*tmask(ji,jj,jk))) * pt_b(ji,jj,jk) + zDt * ztra ) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk))) * tmask(ji,jj,jk) !!clem\n      END DO   ;   END DO   ;   END DO\n",
+"         pt_up1(ji,jj,jk) = ( e3t(ji,jj,jk,Kbb) * pt_b(ji,jj,jk) + zDt * ztra ) / e3t(ji,jj,jk,Kmm) * tmask(ji,jj,jk) !!clem\n      END_3D\n",
 "      IF( l_r51_fct ) WRITE(n_r51_fct) 'first_midpoint  ', ptFu, ptFv, ptFw, pt_up1\n")
 add_after(
-"         pt_up1(ji,jj,jk) = ( (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kbb)*tmask(ji,jj,jk))) * pt_b(ji,jj,jk) + zDt * ztra ) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kaa)*tmask(ji,jj,jk))) * tmask(ji,jj,jk) !!clem\n      END DO   ;   END DO   ;   END DO\n",
+"         pt_up1(ji,jj,jk) = ( e3t(ji,jj,jk,Kbb) * pt_b(ji,jj,jk) + zDt * ztra ) / e3t(ji,jj,jk,Kaa) * tmask(ji,jj,jk) !!clem\n      END_3D\n",
 "      IF( l_r51_fct ) WRITE(n_r51_fct) 'average_rhs     ', ptFu, ptFv, ptFw, pt_rhs\n")
 p.write_text(s)
 PY
