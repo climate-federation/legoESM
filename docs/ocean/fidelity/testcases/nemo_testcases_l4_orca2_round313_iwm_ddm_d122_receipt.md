@@ -22,6 +22,18 @@ Status: **LANDED-pending** (operator review + push gate).
 - The three ORCA2-lane tests red since round 308: the expectations were
   stale, not the code (re-pinned).
 
+## Provenance
+
+Base `bc12548d7` (round 312).  Preregistration `b4dbe8853` (frozen before
+code and runs).  Import `718300c8a`; stale-test re-pins `c31e1a19f` (arms
+ran here first and refused); salt-matrix fix `224fa9688` (arms); selection
+`a2daf2f0f`; tests `543545299` (seven pairs ran here); statement test
+`881be2d14`; receipt and map after.  Gate:
+`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round313_iwm_ddm_d122_gate.py`
+(round-285 ladder, round-276 classifier, round-278 decision).  CPU, fp64,
+libm, production JIT.  Evidence `orca2_rounds/round313/` (`arms/`,
+`arms2/`, `final/`, `jaxpr*/`, `config_*.json`, `subcensus.txt`).
+
 ## Survey
 
 - Internal-wave mixing: only rung 10 runs it, on the generic form with
@@ -160,7 +172,15 @@ refused without the raw-length arm.
   round-309 selection test (rung 10 now runs double diffusion), the rung-0
   card test, the IWM-maps test.
 - Neighbouring battery (selection rounds 305-313, recipe, rung-0 card,
-  defaults, constructibility, IWM maps, decision-43 gate): see below.
+  defaults, constructibility, IWM maps, decision-43 gate, imported
+  statement test), clean tree: 197 passed.
+- Default gate (land.sh orca2 list, JAX_ENABLE_X64=1): citation gate +
+  private-import ratchet + TKE + recipe + freshwater + barotropic state +
+  ORCA2 parallel receipt 143 passed; face-mask rank 2 passed.
+- This receipt's citation gate: PASS, 10 citations, 0 failures, 0 map
+  entries failing (10 new entries; first run flagged an unpinned range
+  extent, fixed).  76 pins of the model file and builder shifted by this
+  round's edits were re-anchored (round-312 tool, mechanical offsets).
 - No direct unit test of our salt-matrix fix; it is covered by the rung-10
   arms only (refused before, `IWM_LIT` = `IWM` after).
 - The frozen phase-2 and round-66 gates still list the two labels; they
