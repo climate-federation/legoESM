@@ -143,8 +143,16 @@ Scalars (OMT-3 runs lateral momentum diffusion; OMT-1/2 do not):
 - drag coefficient: untraceable on OMT-2..4; traceable on OMT-1 (AD 0, its
   rebuilt FD lost to the XLA error).
 
-## Rung 10 (full card)
-PENDING — filled from `runs/rung10.json` when the run lands.
+## Rung 10 (full card) — partial
+Measured: C1 forward parity bit-identical kt 1..10; the drag coefficient is
+untraceable (same statement); the reverse pass with per-step
+rematerialization ran steps 10..2 for every loss and N (backward for
+N = 10: 291 s per loss with remat, against 72 s without it on rung 0; ~47,000
+memory maps at peak). NOT YET MEASURED at the close of this round: the
+step-1 pullback (finite or NaN at the dry-cell division, which rung 10 also
+executes in its stage-1/2 tracer path — PLAUSIBLE NaN, not shown), and its FD
+rows. The detached run keeps writing `runs/rung10.json`
+(probe commit `dbf8822a3fb9`).
 
 ## Peak memory and wall time
 Reverse pass without rematerialization keeps every step's intermediates:
@@ -171,8 +179,14 @@ per step (6-8 s against ~2 s), linear in N; compile excluded.
    implicit solve to `custom_linear_solve`) only if forward-mode checks are
    wanted. Cost: a second derivative rule to keep consistent. Pick: defer.
 
+## Gates
+Default landing battery (land.sh T4 + this probe's test): 151 passed.
+Citation gate on this receipt: PASS, 2 citations, 0 failures.
+
 ## OPEN
-- Rung 10 numbers (pending section above).
+- Rung 10: step-1 pullback and FD rows (detached run, `runs/rung10.json`);
+  OMT-2 scalar re-run (`runs/omt2_scalars.json`): background-diffusivity and
+  rebuilt-model FD rows.
 - Later NaN statements hidden behind the first (re-run the locator after
   remedy 1 lands).
 - A six-epsilon T-direction sweep on a finite card (OMT-2) to turn the
