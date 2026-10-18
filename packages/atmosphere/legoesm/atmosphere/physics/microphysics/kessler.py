@@ -21,15 +21,21 @@ FAITHFUL (classic Kessler process forms + coefficients):
     AD safety).
   * **Latent heating** ``dT/dt = L_v·(cond − evap)/c_pd`` — thermodynamically
     consistent with the vapour<->liquid exchange.
+  * **Rain evaporation** — Klemp & Wilhelmson (1978) eq. 2.15, in the form coded
+    in WRF ``phys/module_mp_kessler.F``::
+
+        E = (1.6 + 124.9·(ρ' q_r)^0.2046)·(ρ' q_r)^0.525
+            / (2.55e8/(p q_sat) + 5.4e5) · (q_sat − q_v)₊/(ρ' q_sat)
+
+    with ``ρ' = 10⁻³ ρ`` the density in g cm⁻³ and ``p`` in Pa (WRF:
+    ``pressure = 1.e5*pii**(1004/287)``; KW78's ``2.55e6/(p q_vs)`` with p in mb
+    is the same term), times
+    ``evaporation_coeff`` (1 = the published rate). Kept from the reference: the
+    cap that rain cannot evaporate more than the sub-saturation left after the
+    cloud water has evaporated (WRF ``max(-prod - qc, 0)``) and the ``E·dt ≤ q_r``
+    donor cap. ``q_sat`` is the scheme's own saturation mixing ratio, not WRF's
+    Tetens fit.
 DEPARTURES / SURROGATES:
-  * **Rain-evaporation SURROGATE rate**:
-    ``E = evap_coeff·((q_sat − q_v)/q_sat)·q_r^0.525``.  Only the Marshall-Palmer
-    ventilation exponent 0.525 and the sub-saturation driver are Kessler-lineage —
-    and here the exponent is applied to ``q_r`` rather than the classic rain CONTENT
-    ``(ρ q_r)``.  The classic Klemp-Wilhelmson evaporation additionally carries a
-    ``1/ρ`` factor, a ventilation polynomial (``≈ 1.6 + 124.9·(ρ q_r)^0.2046``), and
-    a thermodynamic-resistance denominator; all of that is collapsed into the single
-    tunable ``evaporation_coeff``.
   * **Constant rain fall speed**: ``V_t = rain_fall_speed·(ρ_sfc/max(ρ, 0.1))^0.5``
     with a configurable DEFAULT ``rain_fall_speed = 5 m/s``.  The classic Kessler mass-
     weighted terminal velocity is q_r-DEPENDENT (``∝ (ρ q_r)^0.1364``); dropping
@@ -58,10 +64,10 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
-    rain_evaporation,
     safe_pow,
     donor_clamp_scale,
     saturation_adjustment,
+    saturation_deficit_rate,
 )
 from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
 from legoesm.atmosphere.physics.microphysics.output import (
@@ -74,6 +80,17 @@ from legoesm.atmosphere.physics.microphysics.output import (
 # Kessler accretion exponent + density floor (fixed).
 _KESSLER_ACCR_EXP = 0.875
 _RHO_FLOOR = 0.1
+
+# --- rain evaporation (Klemp & Wilhelmson 1978, J. Atmos. Sci. 35, eq. 2.15;
+# constants as coded in WRF phys/module_mp_kessler.F, pressure in Pa) ---
+_KW78_VENT_A = 1.6               # ventilation polynomial constant [-]
+_KW78_VENT_B = 124.9             # ventilation polynomial coefficient [-]
+_KW78_VENT_EXP = 0.2046          # ventilation exponent on ρ' q_r
+_KW78_CONTENT_EXP = 0.525        # rain-content exponent (Marshall-Palmer)
+_KW78_RESIST_CONST = 5.4e5       # thermal-conduction resistance term
+_KW78_RESIST_P = 2.55e8          # vapour-diffusion resistance numerator (p in Pa)
+_KG_M3_TO_G_CM3 = 1.0e-3         # ρ [kg m⁻³] -> ρ' [g cm⁻³] (the KW78 cgs content)
+_QSAT_FLOOR = 1.0e-10            # division guard on q_sat [kg/kg]
 
 __physics_contract__ = {
     "summary": (
@@ -109,6 +126,26 @@ __physics_contract__ = {
         ">= 0; differentiable wrt T, q_v."
     ),
 }
+
+
+def kw78_rain_evaporation(q_v, q_r, q_c, q_sat, p, rho, demand, dt, scale=1.0):
+    """Klemp & Wilhelmson (1978) rain evaporation rate [kg/kg/s] (see module doc).
+
+    ``demand`` is the scheme's signed saturation-adjustment rate WITHOUT the
+    cloud-water clamp (negative = sub-saturation); rain may evaporate only the
+    part left after all cloud water has evaporated, ``max(−demand − q_c/dt, 0)``
+    (WRF ``max(-prod - qc, 0)``), and at most ``q_r/dt``."""
+    q_r_pos = jnp.clip(q_r, 0.0, None)
+    q_sat_s = jnp.clip(q_sat, _QSAT_FLOOR)
+    rho_cgs = rho * _KG_M3_TO_G_CM3
+    content = rho_cgs * q_r_pos
+    vent = _KW78_VENT_A + _KW78_VENT_B * safe_pow(content, _KW78_VENT_EXP)
+    resist = _KW78_RESIST_P / (p * q_sat_s) + _KW78_RESIST_CONST
+    rate = (scale * vent * safe_pow(content, _KW78_CONTENT_EXP) / resist
+            * jnp.clip(q_sat - q_v, 0.0) / (rho_cgs * q_sat_s))
+    dt_s = jnp.maximum(dt, 1.0e-12)
+    rate = jnp.minimum(rate, jnp.clip(-demand - jnp.clip(q_c, 0.0) / dt_s, 0.0))
+    return jnp.minimum(rate, q_r_pos / dt_s)
 
 
 def kessler_microphysics(
@@ -193,13 +230,14 @@ def kessler_microphysics(
     # have unbounded derivative at q_r=0 — safe_pow handles the AD guard.
     accretion = config.accretion_coeff * q_c * safe_pow(q_r, _KESSLER_ACCR_EXP)
 
-    # 4. Evaporation of rain (q_r^0.525) via the shared donor-limited
-    # helper — bounds ``evap·dt ≤ q_r`` so one explicit step can't
-    # evaporate more rain than exists.  Centralises the formula so the
-    # four schemes (kessler/morrison/thompson/seifert_beheng) share
-    # one implementation.
-    evaporation = rain_evaporation(
-        q_v, q_r, q_sat, config.evaporation_coeff, dt=dt,
+    # 4. Evaporation of rain: Klemp & Wilhelmson (1978), capped by the
+    # sub-saturation left after the cloud evaporates and by q_r/dt.
+    # WRF's cap reads the scheme's HARD adjustment amount (``prod``), not the
+    # sigmoid-smoothed condensation rate
+    demand, _ = saturation_deficit_rate(T, q_v, p_full, _dt_safe)
+    evaporation = kw78_rain_evaporation(
+        q_v, q_r, q_c, q_sat, p_full, rho, demand, _dt_safe,
+        scale=config.evaporation_coeff,
     )
 
     # === Joint donor clamp on q_c sinks ===

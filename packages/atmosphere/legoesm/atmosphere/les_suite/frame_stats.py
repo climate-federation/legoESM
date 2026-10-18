@@ -112,7 +112,7 @@ def theta_l_sgs_faces(theta, q_c, nu, dz, pr_sgs, q_surface, exner_f):
     j_th = sgs_vertical_scalar_flux_faces(theta, nu, dz, pr_sgs=pr_sgs,
                                           surface_flux=q_surface)
     j_qc = sgs_vertical_scalar_flux_faces(q_c, nu, dz, pr_sgs=pr_sgs)
-    return j_th - (constants.L_v / constants.c_pd) * j_qc / np.asarray(exner_f)
+    return j_th - (constants.L_v / constants.c_pd) * j_qc / np.asarray(exner_f)  # latent-ok: liquid_water_theta's constant L_v
 
 
 def frame_statistics(st, g, fields, pr_sgs, *, exner_c=None, exner_f=None):
@@ -208,7 +208,7 @@ class FrameRecorder:
 
     ``record`` is called with the snapshot time, the state, the device fields
     (:func:`make_frame_fields_fn`) and the running time integrals of the surface
-    terms the step applied, plus any other per-frame scalar series (``series``:
+    terms the step applied, plus any other per-frame scalar or profile series (``series``:
     artifact field name → float)."""
 
     # profile channels passed to the artifact constructor by keyword, not via **stats
@@ -233,7 +233,7 @@ class FrameRecorder:
         for k, val in srf.items():
             self.surface.setdefault(k, []).append(val)
         for k, val in (series or {}).items():
-            self.series.setdefault(k, []).append(float(val))
+            self.series.setdefault(k, []).append(np.asarray(val, dtype=np.float64))
         self.times.append(float(t))
         return prof, srf
 
@@ -258,10 +258,11 @@ def column_contents(state, g, ref=None):
     contribution to the column budgets.
 
     With the anelastic reference state ``ref`` (moist drivers) two density-weighted
-    invariants of the microphysics follow: total water mass ``∫ρ q_w dz`` [kg/m²]
-    (changed only by surface precipitation) and moist enthalpy
-    ``∫ρ (c_pd Π θ + L_v q_v) dz`` [J/m²] (the latent heating ``c_pd Π Δθ`` the
-    adapter applies balances ``−L_v Δq_v``; precipitating liquid carries none)."""
+    invariants follow: total water mass ``∫ρ q_w dz`` [kg/m²] (changed by the
+    microphysics only through surface precipitation, by positivity not at all) and
+    moist enthalpy ``∫ρ (c_pd Π θ + L_v q_v) dz`` [J/m²] (the latent heating
+    ``c_pd Π Δθ`` the adapter applies balances ``−L_v Δq_v``; precipitating liquid
+    carries none)."""
     import jax.numpy as jnp
     from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl
 
@@ -276,7 +277,7 @@ def column_contents(state, g, ref=None):
         rho, exner = jnp.asarray(ref.rho_c), jnp.asarray(ref.exner_c)
         cols.append(col(rho * qw))
         cols.append(col(rho * (constants.c_pd * exner * state.theta
-                               + constants.L_v * state.tracers[..., 0])))
+                               + constants.L_v * state.tracers[..., 0])))  # latent-ok: the microphysics adapter's constant L_v
     return jnp.stack(cols)
 
 
@@ -298,7 +299,7 @@ def budget_report(label, d_column, sources, column):
 # applies around it, each the exact change of the column contents it caused.
 SPLIT_TERMS = ("ls_theta", "ls_water", "rad_theta", "micro_theta", "micro_water",
                "positivity_water", "sponge_u", "sponge_v", "precip_mass",
-               "micro_water_rho", "micro_enthalpy_rho")
+               "micro_water_rho", "micro_enthalpy_rho", "positivity_water_rho")
 
 
 def moist_step_budget(dycore, *, ls=None, rad=None, micro=None, positivity=None,
@@ -315,7 +316,7 @@ def moist_step_budget(dycore, *, ls=None, rad=None, micro=None, positivity=None,
         z if d is None else d for d in (ls, rad, micro, positivity, sponge))
     split = jnp.stack([ls[0], ls[3], rad[0], micro[0], micro[3], positivity[3],
                        sponge[1], sponge[2], jnp.asarray(precip_mass, dycore.dtype),
-                       micro[4], micro[5]])
+                       micro[4], micro[5], positivity[4]])
     return jnp.concatenate([dycore, split.astype(dycore.dtype)])
 
 
@@ -349,7 +350,7 @@ class MoistRunEmitter:
     def _named(self):
         return dict(zip(self.terms, np.asarray(self.acc)))
 
-    def record(self, t, state, sfc_theta_flux, sfc_qv_flux, precip_rate):
+    def record(self, t, state, sfc_theta_flux, sfc_qv_flux, precip_rate, series=None):
         """One output frame: statistics of ``state`` with the surface fluxes the
         driver applies at it, the domain-mean surface precipitation rate of the
         most recent microphysics call [kg/m²/s] (``bridge`` ``precip_s``), and the
@@ -361,7 +362,7 @@ class MoistRunEmitter:
             series={"w_theta_s_cum": n["sfc_heat_flux"], "tau_x_s_cum": n["sfc_stress_x"],
                   "tau_y_s_cum": n["sfc_stress_y"], "w_qv_s_cum": n["sfc_qv_flux"],
                   "precip_s_cum": n["precip_mass"],
-                  "precip_s": float(precip_rate)})
+                  "precip_s": float(precip_rate), **(series or {})})
         return prof, srf
 
     def close_budgets(self, state):
@@ -369,7 +370,8 @@ class MoistRunEmitter:
         θ, u, v and total water (transport norm ``∫q dz``), plus the microphysics'
         own density-weighted closures: its water-mass change against the surface
         precipitation it removed (``micro_water``) and its moist-enthalpy change
-        (``micro_enthalpy``, no source).
+        (``micro_enthalpy``, no source); and the positivity fixer's water-mass change
+        (``positivity_water``, no source: a clip that creates water fails it).
 
         The split-operator terms are measured column changes, so they route every
         change to a named term but cannot detect an error inside that operator;
@@ -391,6 +393,8 @@ class MoistRunEmitter:
             "micro_water", n["micro_water_rho"], {"precip": -n["precip_mass"]}, col1[4])
         res["micro_enthalpy"] = budget_report(
             "micro_enthalpy", n["micro_enthalpy_rho"], {}, col1[5])
+        res["positivity_water"] = budget_report(
+            "positivity_water", n["positivity_water_rho"], {}, col1[4])
         return res
 
     def artifact(self, **kw):

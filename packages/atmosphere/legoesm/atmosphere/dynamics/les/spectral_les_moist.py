@@ -115,7 +115,10 @@ def conserving_positive(tracers, rho_c, dz, n_water=6):
     created = jnp.sum(jnp.clip(-q, 0.0, None) * w[None, None, :, None])
     # factor ≤ 1 removes the borrowed mass from the positives; guard an
     # all-nonpositive column (col_clip→0) by leaving it at zero.
-    factor = jnp.where(col_clip > 1e-30, col_before / col_clip, 0.0)
+    # safe denominator INSIDE the division: an empty column's 0/0 would make
+    # reverse-mode gradients NaN even though the forward value is masked
+    full = col_clip > 1e-30
+    factor = jnp.where(full, col_before / jnp.where(full, col_clip, 1.0), 0.0)
     q_fixed = q_clip * jnp.clip(factor, 0.0, 1.0)
     numbers = jnp.clip(tracers[..., n_water:], 0.0, None)
     return jnp.concatenate([q_fixed, numbers], axis=-1), created

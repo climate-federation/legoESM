@@ -254,9 +254,9 @@ def test_moist_step_budget_vector_layout():
                             precip_mass=10.0)
     tail = np.asarray(vec[len(sl.BUDGET_TERMS):])
     # ls_theta ls_water rad_theta micro_theta micro_water positivity sponge_u sponge_v
-    # precip micro_water_rho micro_enthalpy_rho
+    # precip micro_water_rho micro_enthalpy_rho positivity_water_rho
     np.testing.assert_array_equal(
-        tail, [1.0, 4.0, 0.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0])
+        tail, [1.0, 4.0, 0.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 0.0])
     assert len(tail) == len(SPLIT_TERMS)
 
 
@@ -279,10 +279,10 @@ def test_kessler_conserves_water_with_precipitation_as_the_only_sink():
     zero = jnp.zeros_like(q_v)
     hyd = HydrometeorState(q_c=q_c, q_r=q_r, q_i=zero, q_s=zero, q_g=zero,
                            N_c=zero, N_r=zero, N_i=zero)
-    # The default evaporation coefficient evaporates all sub-saturated rain within
-    # one step (its rate clamps at q_r/dt), so no rain reaches the surface; with
-    # evaporation off the shaft does precipitate. Water closes in both.
-    for cfg, rains_out in ((KesslerConfig(), False),
+    # With the Klemp-Wilhelmson rain evaporation the sub-saturated shaft still
+    # reaches the surface (the old surrogate evaporated it all within one step,
+    # precip == 0); with evaporation off it precipitates too. Water closes in both.
+    for cfg, rains_out in ((KesslerConfig(), True),
                            (KesslerConfig(evaporation_coeff=0.0), True)):
         out = kessler_microphysics(T, q_v, hyd, p, p_half, rho, dz, dt, cfg)
         w0 = jnp.sum(rho * (q_v + q_c + q_r) * dz)
@@ -316,10 +316,8 @@ def _kessler_les(g, rain_dt):
     rho_c = p_c / (constants.R_d * 298.0 * exner_c)
     ref = SimpleNamespace(p_c=jnp.asarray(p_c), p_f=jnp.asarray(p_f),
                           rho_c=jnp.asarray(rho_c), exner_c=jnp.asarray(exner_c))
-    # evaporation off so the rain reaches the surface (the default coefficient
-    # evaporates sub-saturated rain within one step)
     cfg = MicrophysicsConfig(scheme="kessler", kessler=KesslerConfig(
-        autoconversion_threshold=1e-4, autoconversion_rate=5e-2, evaporation_coeff=0.0))
+        autoconversion_threshold=1e-4, autoconversion_rate=5e-2))
     return ref, make_les_microphysics_fn(cfg, ref, float(g.dz), rain_dt)
 
 
@@ -361,3 +359,32 @@ def test_driver_microphysics_closure_fails_without_the_precipitation_sink():
     assert abs(res["micro_enthalpy"]) <= 1e-12 * abs(col[5]), res
     bad, _p, _c = residuals(False)
     assert abs(bad["micro_water"]) > 1e3 * (1e-13 * abs(col[4]) + 1e-15), bad
+
+
+def test_positivity_water_closure_fails_for_a_clip():
+    """The emitter's positivity row (density-weighted water change across the
+    fixer, no source) is zero for the conserving fixer the drivers use and
+    nonzero for the plain clip they used before (which created water)."""
+    from legoesm.atmosphere.dynamics.les.spectral_les_moist import conserving_positive
+    g, st = _moist_state()
+    ref, _micro = _kessler_les(g, 1.0)
+    neg = st.tracers.at[..., 0].add(-0.02 * (np.asarray(g.z_c) > 1200.0))  # undershoots
+    st = st._replace(tracers=neg)
+    assert float(jnp.min(neg[..., 0])) < 0.0
+
+    def row(fix):
+        em = MoistRunEmitter.__new__(MoistRunEmitter)
+        em.g, em.ref = g, ref
+        em.terms = tuple(sl.BUDGET_TERMS) + SPLIT_TERMS
+        em.col0 = np.asarray(column_contents(st, g, ref))
+        new = st._replace(tracers=fix(st.tracers))
+        em.acc = moist_step_budget(jnp.zeros(len(sl.BUDGET_TERMS)),
+                                   positivity=column_contents(new, g, ref)
+                                   - column_contents(st, g, ref))
+        col = np.asarray(column_contents(new, g, ref))
+        return em.close_budgets(new)["positivity_water"], col[4]
+
+    good, col = row(lambda tr: conserving_positive(tr, ref.rho_c, g.dz)[0])
+    assert abs(good) <= 1e-13 * abs(col)
+    bad, _c = row(lambda tr: jnp.clip(tr, 0.0, None))
+    assert bad > 1e3 * 1e-13 * abs(col)                       # the clip created water

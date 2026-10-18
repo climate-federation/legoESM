@@ -47,6 +47,7 @@ from legoesm import constants  # noqa: E402
 from legoesm.thermo import saturation_mixing_ratio  # noqa: E402
 from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl  # noqa: E402
 from legoesm.atmosphere.dynamics.les.spectral_les_moist import (  # noqa: E402
+    conserving_positive,
     make_anelastic_reference,
     make_les_microphysics_fn,
 )
@@ -184,6 +185,7 @@ def main():
 
     emit = args.emit_suite_artifact is not None
     zcol = jnp.zeros(6, dtype)
+    rho_pos = jnp.asarray(ref.rho_c, dtype)
 
     def _cols(state):
         return column_contents(state, g, ref) if emit else zcol
@@ -207,10 +209,9 @@ def main():
             state = state._replace(
                 theta=state.theta + dt * args.micro_every * dth, tracers=tr)
             c2 = _cols(state)
-            wat = tr[..., :6]
-            created = jnp.sum(jnp.clip(-wat, 0.0, None))
-            tr = jnp.concatenate([jnp.clip(wat, 0.0, None),
-                                  jnp.clip(tr[..., 6:], 0.0, None)], axis=-1)
+            # MASS-CONSERVING positivity (BOMEX's): a plain clip turns the
+            # transport's negative undershoots into new water
+            tr, created = conserving_positive(tr, rho_pos, g.dz)
             state = state._replace(tracers=tr)
             d_micro = c2 - c1
             d_pos = _cols(state) - c2
@@ -357,8 +358,9 @@ def main():
                 "nu_floor_m2_s": float(g.cfg.nu_floor),
                 "pr_sgs": float(g.cfg.pr_sgs),
                 "scalar_advection": g.cfg.scalar_advection,
-                "z0_m": float(g.cfg.z0), "positive_mode": "clip",
+                "z0_m": float(g.cfg.z0), "positive_mode": "conserving",
                 "micro_every": int(args.micro_every),
+                "subsidence_species": ["q_v"],
                 "micro_scheme_dt_s": float(dt0 * args.micro_every),
                 "surface": "interactive bulk (van Zanten 2011 C_h, C_q) over fixed SST; "
                            "the realised flux series is recorded",

@@ -294,8 +294,11 @@ class TestMicrophysicsParams:
                           # — actually rate ∝ q_r^0.525 = 1e-6, q_r/dt
                           # = 3e-15 → still capped.  Use a tiny
                           # evap_coeff probe instead.
+        # q_c = 0: Klemp-Wilhelmson rain evaporation only takes the
+        # sub-saturation left after the cloud water has evaporated, so a cloudy
+        # column (q_c = 5e-3 absorbs the whole deficit) gives it nothing to do.
         T, q_v, hydro, p_full, p_half, rho, dz = _moist_microphys_column(
-            q_c=5e-3, q_r=q_r_tiny,
+            q_c=0.0, q_r=q_r_tiny,
         )
         q_sat = saturation_mixing_ratio(T, p_full)
         q_v_dry = 0.5 * q_sat

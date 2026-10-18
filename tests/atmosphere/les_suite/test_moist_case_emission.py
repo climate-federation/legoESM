@@ -101,7 +101,8 @@ def test_moist_driver_emits_complete_artifact_and_closes_budgets(
     assert float(np.min(np.asarray(art.subsidence_w))) < 0.0
     rows = _budget_lines(out)
     assert set(rows) == {"theta", "u", "v", "water", "micro_water",
-                         "micro_enthalpy"}, out
+                         "micro_enthalpy", "positivity_water"}, out
+    assert art.les_setup["positive_mode"] == "conserving"   # never the water-creating clip
     for lab, r in rows.items():
         assert abs(r["residual"]) <= 1e-13 * abs(r["column"]) + 1e-15, (lab, r)
     assert rows["water"]["sfc_qv_flux"] > 0.0          # evaporation entered the column
@@ -125,6 +126,12 @@ def test_moist_driver_emits_complete_artifact_and_closes_budgets(
         np.testing.assert_allclose(art.theta_adv, dth, rtol=1e-8, atol=1e-12)
         np.testing.assert_allclose(art.qv_adv, dqv, rtol=1e-8, atol=1e-15)
         assert float(np.max(np.abs(art.theta_adv))) > 0.0
+        # the recorded subsided species are the ones the operator moves: a
+        # height-varying cloud-water profile is left untouched (q_v only)
+        qc = st0.tracers.at[..., 1].set(1e-4 * jnp.linspace(0.0, 1.0, st0.theta.shape[-1]))
+        st2 = bx.make_forcing_fn(g, ref, forc, jnp.float64)(st0._replace(tracers=qc), dt)
+        np.testing.assert_array_equal(np.asarray(st2.tracers[..., 1]), np.asarray(qc[..., 1]))
+        assert art.les_setup["subsidence_species"] == ["q_v"]
 
 
 def test_rico_records_interactive_surface_fluxes(tmp_path, monkeypatch, capsys):
@@ -156,9 +163,17 @@ def test_dycoms_theta_adv_is_the_lw_cooling(tmp_path, monkeypatch, capsys):
             "--emit-suite-artifact", str(art_path)])
         assert mod.main() == 0
         arts.append(load_artifact(art_path))
-    np.testing.assert_array_equal(arts[0].theta_adv, arts[1].theta_adv)
+        rows = _budget_lines(capsys.readouterr().out)
+    np.testing.assert_array_equal(arts[0].theta_adv_cum, arts[1].theta_adv_cum)
     art = arts[1]
-    assert float(np.min(art.theta_adv)) < 0.0          # cloud-top radiative cooling
+    # the full time series of the applied cooling, not a late-window average
+    assert art.theta_adv is None and art.theta_adv_cum.shape == (art.nt, art.nz)
+    cum = np.asarray(art.theta_adv_cum)
+    assert np.all(cum[0] == 0.0) and float(np.min(cum[-1])) < 0.0   # cloud-top cooling
+    # its column integral is exactly the radiation term of the θ budget
+    np.testing.assert_allclose(float(np.sum(cum[-1])) * (art.heights_m[1] - art.heights_m[0]),
+                               rows["theta"]["rad_theta"], rtol=1e-6)
+    assert art.les_setup["subsidence_species"] == ["q_v", "q_c"]
     assert float(np.max(np.abs(art.qv_adv))) == 0.0    # no prescribed q_v advection
     # the cloudy start is recorded: θ_l below the mean θ where cloud water exists
     assert float(np.max(np.asarray(art.qc)[0])) > 0.0
@@ -166,8 +181,8 @@ def test_dycoms_theta_adv_is_the_lw_cooling(tmp_path, monkeypatch, capsys):
 
 def test_rain_reaches_the_surface_and_the_microphysics_closes_with_it(
         tmp_path, monkeypatch, capsys):
-    """A precipitating run (RF01 with Kessler autoconversion made fast and rain
-    evaporation off so rain forms and falls out within minutes): the surface
+    """A precipitating run (RF01 with Kessler autoconversion made fast so rain forms
+    and falls out within minutes, through Klemp-Wilhelmson evaporation): the surface
     precipitation is nonzero, the microphysics' density-weighted water change
     equals minus that precipitation,
     and every column budget still closes to round-off."""
@@ -177,10 +192,7 @@ def test_rain_reaches_the_surface_and_the_microphysics_closes_with_it(
         MicrophysicsConfig,
     )
     mod = _load("run_dycoms_les")
-    # evaporation off: the default coefficient evaporates sub-saturated rain within
-    # one step, so with it no rain would reach the surface
-    fast = KesslerConfig(autoconversion_threshold=1e-4, autoconversion_rate=5e-2,
-                         evaporation_coeff=0.0)
+    fast = KesslerConfig(autoconversion_threshold=1e-4, autoconversion_rate=5e-2)
 
     def _cfg(**kw):
         if kw.get("scheme") == "kessler":

@@ -62,6 +62,7 @@ if not _F32:
 import jax.numpy as jnp  # noqa: E402
 from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl  # noqa: E402
 from legoesm.atmosphere.dynamics.les.spectral_les_moist import (  # noqa: E402
+    conserving_positive,
     make_anelastic_reference,
     make_les_microphysics_fn,
 )
@@ -140,6 +141,9 @@ _STRATOCUMULUS_CASES = {
         "f_cor": 0.376e-4,   # the RF01 driver's own value
         "subsidence_divergence_s": 3.75e-6,
         "lz_m": 1500.0,
+        # published grid (Stevens et al. 2005; deck grd_5m): dx 35 m on a
+        # 3.36 km box, uniform dz 5 m -> 300 levels, 4 h
+        "nx": 96, "lx_m": 3360.0, "nz": 300, "hours": 4.0, "dt_s": 0.5,
         "n_c_m3": 140.0e6,
         "perturb_z_m": 840.0,
         # Printed next to the run's own diagnostics. Per case, because these
@@ -173,6 +177,10 @@ _STRATOCUMULUS_CASES = {
         # The deck's own stretched grid tops at 1459 m and its sounding runs to
         # 1595 m, so a 1500 m lid is spanned by the sounding.
         "lz_m": 1500.0,
+        # published grid (Ackerman et al. 2009; deck 128x128 at 50 m = 6.4 km),
+        # 6 h; the stretched 96-level grid (5 m minimum) is replaced by uniform
+        # dz 5 m -> 300 levels (this core has uniform dz only)
+        "nx": 128, "lx_m": 6400.0, "nz": 300, "hours": 6.0, "dt_s": 0.5,
         # prm &MICRO_DRIZZLE Nc0 = 55 cm^-3, and the RF02 SCM/LES
         # intercomparison specifies the same. RF01 runs 140 cm^-3.
         #
@@ -198,6 +206,9 @@ _STRATOCUMULUS_CASES = {
         "f_cor": 0.0,                 # prm: docoriolis = .false.
         "subsidence_divergence_s": 5.0e-6,   # lsf: w=-0.010 m/s at 2000 m
         "lz_m": 2500.0,
+        # published grid (deck caseid 144x144x100_50m_25m_3s): dx 50 m on a
+        # 7.2 km box, dz 25 m -> 100 levels, dt 3 s, 6 h
+        "nx": 144, "lx_m": 7200.0, "nz": 100, "hours": 6.0, "dt_s": 3.0,
         "n_c_m3": 100.0e6,            # ASTEX intercomparison N_c
         # UNCHANGED from the literal build() used for every deck, so this diff
         # does not move ASTEX. It is almost certainly too high -- ASTEX's
@@ -228,18 +239,19 @@ def parse_args():
                         "the initial perturbation is seeded below.")
     p.add_argument("--case-dir", default=None,
                    help="override the deck directory --case resolves to.")
-    p.add_argument("--nx", type=int, default=96)
-    p.add_argument("--ny", type=int, default=96)
-    p.add_argument("--nz", type=int, default=192,
-                   help="dz=7.8 m at Lz=1500 (official 5 m needs nz=300, "
-                        "beyond the projection's nz≲200 compile cliff).")
-    p.add_argument("--Lx", type=float, default=3360.0)
-    p.add_argument("--Ly", type=float, default=3360.0)
+    p.add_argument("--nx", type=int, default=None,
+                   help="defaults to the case's published grid")
+    p.add_argument("--ny", type=int, default=None)
+    p.add_argument("--nz", type=int, default=None,
+                   help="defaults to the case's published grid (RF01/RF02: "
+                        "dz 5 m = 300 levels).")
+    p.add_argument("--Lx", type=float, default=None)
+    p.add_argument("--Ly", type=float, default=None)
     p.add_argument("--Lz", type=float, default=None,
                    help="domain depth [m]; defaults to the case's own.")
     p.add_argument("--z0", type=float, default=1.0e-4)
-    p.add_argument("--hours", type=float, default=4.0)
-    p.add_argument("--dt", type=float, default=0.5)
+    p.add_argument("--hours", type=float, default=None)
+    p.add_argument("--dt", type=float, default=None)
     p.add_argument("--f32", action="store_true")
     p.add_argument("--microphysics", default="morrison")
     p.add_argument("--n-tracers", type=int, default=9)
@@ -282,8 +294,8 @@ def parse_args():
     p.add_argument("--emit-suite-artifact", type=Path, default=None,
                    help="write the moist LESReferenceArtifact (the SCM tuner's input) "
                         "to this path: per-frame statistics on the --record-frames "
-                        "cadence, the realised surface series, the 2nd-half-mean LW "
-                        "forcing, and the column budgets (printed).")
+                        "cadence, the realised surface series, the running integral "
+                        "of the applied LW forcing, and the column budgets (printed).")
     args = p.parse_args()
     # The frame label follows the case unless it was given explicitly. The old
     # literal default meant the ONE field that identifies a reference was wrong
@@ -300,8 +312,10 @@ def parse_args():
     args.case_spec = spec
     if args.case_dir is None:
         args.case_dir = resolve_sam_case_dir(spec["gsam_dir"])
-    if args.Lz is None:
-        args.Lz = spec["lz_m"]
+    for arg, key in (("Lz", "lz_m"), ("nx", "nx"), ("ny", "nx"), ("Lx", "lx_m"),
+                     ("Ly", "lx_m"), ("nz", "nz"), ("hours", "hours"), ("dt", "dt_s")):
+        if getattr(args, arg) is None:
+            setattr(args, arg, spec[key])
     args.f_cor = spec["f_cor"]
     args.subsidence_divergence_s = spec["subsidence_divergence_s"]
     args.n_c_m3 = spec["n_c_m3"]
@@ -470,6 +484,7 @@ def main():
 
     emit = args.emit_suite_artifact is not None
     zcol = jnp.zeros(6, dtype)
+    rho_pos = jnp.asarray(ref.rho_c, dtype)
 
     def _cols(state):
         return column_contents(state, g, ref) if emit else zcol
@@ -505,10 +520,9 @@ def main():
             state = state._replace(
                 theta=state.theta + dt * args.micro_every * dth, tracers=trn)
             c3 = _cols(state)
-            wat = trn[..., :6]
-            created = jnp.sum(jnp.clip(-wat, 0.0, None))
-            trn = jnp.concatenate([jnp.clip(wat, 0.0, None),
-                                   jnp.clip(trn[..., 6:], 0.0, None)], axis=-1)
+            # MASS-CONSERVING positivity (BOMEX's): a plain clip turns the
+            # transport's negative undershoots into new water
+            trn, created = conserving_positive(trn, rho_pos, g.dz)
             state = state._replace(tracers=trn)
             d_micro = c3 - c2
             d_pos = _cols(state) - c3
@@ -563,13 +577,17 @@ def main():
                 rho_z=np.asarray(ref.rho_c))
             if emitter is not None:
                 emitter.record(t_hours * 3600.0, st, forc["th_flux"], forc["qv_flux"],
-                               precip_rate[0])
+                               precip_rate[0], series={"theta_adv_cum": rad_cum[0]})
             frame += 1
             _last_rec_h[0] = t_hours
 
     dt = jnp.asarray(dt0, dtype)
     if emitter is not None:
         emitter.start(st)
+    # running time integral of the Δθ profile the radiation APPLIED (summed on
+    # device every step it fires), recorded at each frame as ``theta_adv_cum`` so
+    # the SCM receives the LES's own time-varying cooling
+    rad_cum = [jnp.zeros(zc_np.shape[0], dtype)]
     if rec:
         _save(0.0)
     t = 0.0; i = 0
@@ -586,9 +604,6 @@ def main():
     # θ forcing. lw_tend returns dθ/dt already (÷exner), NEGATIVE at cloud top (∂F/∂z>0 there ⇒
     # −∂F/∂z<0 = cooling), so it enters ``theta_adv`` with the correct cooling sign.
     rad_tend_sum = np.zeros(zc_np.shape[0]); n_rad = 0
-    # Emission: the Δθ the radiation APPLIED in that window, summed on device every
-    # step it fires, over the window length (not print-cadence samples).
-    rad_applied = jnp.zeros(zc_np.shape[0], dtype); t_rad = 0.0
     t_cavg0 = 0.5 * T
     next_rec = T / args.record_frames if rec else np.inf
     t0 = time.time()
@@ -600,8 +615,7 @@ def main():
         created_tot += float(created)
         if emitter is not None:
             emitter.add(budget)
-            if t >= t_cavg0:            # step starts inside the 2nd-half window
-                rad_applied = rad_applied + rad_prof; t_rad += dt0
+            rad_cum[0] = rad_cum[0] + rad_prof
             if do_micro:            # device scalar; read on the host only at frames
                 precip_rate[0] = precip / (dt0 * args.micro_every)
         t += dt0; i += 1
@@ -656,10 +670,6 @@ def main():
              z=zc_np, theta_rad_tend=rad_tend, subsidence_w=np.asarray(w_ls))
     if emitter is not None:
         emitter.close_budgets(st)
-        if t_rad <= 0.0:
-            raise SystemExit("--emit-suite-artifact: no step in the 2nd-half window, "
-                             "so no applied radiative forcing to record")
-        rad_applied_mean = np.asarray(rad_applied, np.float64) / t_rad
         art = emitter.artifact(
             case_name=args.case_label,
             sgs="lasd" if args.dynamic else args.sgs_model,
@@ -667,9 +677,9 @@ def main():
             u_geo=np.asarray(forc["ug"], np.float64),
             v_geo=np.asarray(forc["vg"], np.float64),
             subsidence_w=np.asarray(w_ls, np.float64),
-            # mean simple-LW θ tendency the LES applied over the 2nd half (the SCM
-            # runs with radiation off and receives it as prescribed theta_adv)
-            theta_adv=rad_applied_mean,
+            # the simple-LW θ forcing the LES applied rides in theta_adv_cum (its
+            # running integral per frame; the SCM runs with radiation off and
+            # receives its step means)
             qv_adv=np.zeros_like(zc_np),
             les_setup={
                 "microphysics": microphysics_record(micro_cfg),
@@ -681,11 +691,12 @@ def main():
                 "nu_floor_m2_s": float(g.cfg.nu_floor),
                 "pr_sgs": float(g.cfg.pr_sgs),
                 "scalar_advection": g.cfg.scalar_advection,
-                "z0_m": float(g.cfg.z0), "positive_mode": "clip",
+                "z0_m": float(g.cfg.z0), "positive_mode": "conserving",
                 "micro_every": int(args.micro_every), "rad_every": int(args.rad_every),
                 "case": args.case,
-                "theta_adv": "applied LES simple-LW tendency, mean over "
-                              f"t in [{t_cavg0:.1f}, {t:.1f}] s",
+                "theta_adv_cum": "running integral of the applied LES simple-LW "
+                                 "θ increments",
+                "subsidence_species": ["q_v", "q_c"],
                 "micro_scheme_dt_s": float(dt0 * args.micro_every),
             })
         save_artifact(art, args.emit_suite_artifact)

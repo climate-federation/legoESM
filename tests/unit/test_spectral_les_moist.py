@@ -20,6 +20,7 @@ from legoesm import constants
 from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl
 from legoesm.atmosphere.dynamics.les.spectral_les_moist import (
     SpectralRefState,
+    conserving_positive,
     make_anelastic_reference,
     make_les_microphysics_fn,
 )
@@ -487,3 +488,21 @@ def test_adapter_rejects_too_few_slots():
         ref, dz, 5.0)
     with pytest.raises(ValueError, match="tracer slots"):
         micro(jnp.full((2, 2, nz), 300.0), jnp.zeros((2, 2, nz, 3)))
+
+
+def test_conserving_positive_gradient_is_finite_with_an_empty_species_column():
+    """An all-zero species column (no rain yet) must not turn reverse-mode
+    gradients into NaN through the masked 0/0 rescale factor."""
+    nz = 6
+    rho = jnp.linspace(1.2, 0.9, nz)
+    tr = jnp.zeros((1, 2, nz, 6))
+    tr = tr.at[..., 0].set(0.01)                       # vapour everywhere
+    tr = tr.at[0, 0, :, 1].set(jnp.array([2e-4, -1e-5, 0, 0, 0, 0]))  # undershoot
+    # species 2..5 are all-zero columns
+    w = jnp.arange(1.0, 1.0 + tr.size).reshape(tr.shape)
+
+    def loss(x):
+        return jnp.sum(w * conserving_positive(x, rho, 40.0)[0])
+
+    grad = jax.grad(loss)(tr)
+    assert bool(jnp.all(jnp.isfinite(grad)))

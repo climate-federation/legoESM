@@ -91,7 +91,7 @@ ANCHOR_CASES: tuple[LESCase, ...] = (
         name="dycoms_rf01_sc",
         regime="stratocumulus",
         core="spectral",
-        grid=LESGrid(nx=96, ny=96, nz=192, Lx_m=3360.0, Ly_m=3360.0, Lz_m=1500.0, dt_s=0.5),
+        grid=LESGrid(nx=96, ny=96, nz=300, Lx_m=3360.0, Ly_m=3360.0, Lz_m=1500.0, dt_s=0.5),
         duration_hours=4.0,
         surface_theta_flux_K_m_s=None,   # interactive/prescribed moist surface (driver-internal)
         geostrophic_wind_m_s=7.0,        # DYCOMS-II RF01 U_g=(7, -5.5); dominant u-component
@@ -105,10 +105,11 @@ ANCHOR_CASES: tuple[LESCase, ...] = (
 )
 
 
-# --- further cloudy cases (grids/durations = their driver's current defaults) --
-# Each runs through its own driver with ``--emit-suite-artifact``. The grids are
-# the drivers' defaults, which differ from the published setups for RICO (dz),
-# RF02 (domain, dx, stretched dz, 6 h) and ASTEX (grid, 6 h) — pending a decision.
+# --- further cloudy cases (published grids/durations = their drivers' defaults) --
+# Each runs through its own driver with ``--emit-suite-artifact``. RICO: van
+# Zanten et al. 2011, 12.8 x 12.8 x 4 km at 100/40 m (128x128x100; the SAM deck's
+# 120 levels are its own taller variant). RF02: uniform dz 5 m in place of the
+# published stretched grid.
 MOIST_CASES: tuple[LESCase, ...] = (
     LESCase(
         name="rico_cu",
@@ -131,9 +132,9 @@ MOIST_CASES: tuple[LESCase, ...] = (
         name="dycoms_rf02_sc",
         regime="stratocumulus",
         core="spectral",
-        grid=LESGrid(nx=96, ny=96, nz=192, Lx_m=3360.0, Ly_m=3360.0, Lz_m=1500.0,
+        grid=LESGrid(nx=128, ny=128, nz=300, Lx_m=6400.0, Ly_m=6400.0, Lz_m=1500.0,
                      dt_s=0.5),
-        duration_hours=4.0,
+        duration_hours=6.0,
         surface_theta_flux_K_m_s=None,   # prescribed SHF/LHF (driver-internal)
         geostrophic_wind_m_s=None,       # sheared (u_g, v_g) from the deck lsf
         sgs_variants=_SGS_DEFAULT,
@@ -147,9 +148,9 @@ MOIST_CASES: tuple[LESCase, ...] = (
         name="astex_sc",
         regime="stratocumulus",
         core="spectral",
-        grid=LESGrid(nx=96, ny=96, nz=192, Lx_m=3360.0, Ly_m=3360.0, Lz_m=2500.0,
-                     dt_s=0.5),
-        duration_hours=4.0,
+        grid=LESGrid(nx=144, ny=144, nz=100, Lx_m=7200.0, Ly_m=7200.0, Lz_m=2500.0,
+                     dt_s=3.0),
+        duration_hours=6.0,
         surface_theta_flux_K_m_s=None,   # prescribed SHF/LHF (driver-internal)
         geostrophic_wind_m_s=None,       # no Coriolis in the deck
         sgs_variants=_SGS_DEFAULT,

@@ -58,7 +58,9 @@ from .bridge import (
     LESReferenceArtifact,
     LESTruth,
     diagnostic_truth,
+    forcing_profile_fn,
     prognostic_truth,
+    subsidence_tracers,
     surface_flux_fn,
 )
 from .scm_coupling import (
@@ -412,6 +414,17 @@ def build_cbl_scm_from_artifact(
             if prof is not None:
                 moist_kwargs[fld] = _const_profile(
                     interp_profile(jnp.asarray(prof), z_les, z_scm))
+        if artifact.theta_adv_cum is not None:
+            # a time-varying θ forcing (DYCOMS's longwave cooling): the step mean
+            # of what the LES applied, so the SCM receives the same heat
+            _th = forcing_profile_fn(artifact, dt_s=dt)
+            moist_kwargs["theta_adv"] = lambda t: interp_profile(_th(t), z_les, z_scm)
+        if artifact.subsidence_w is not None:
+            moist_kwargs["subsidence_tracers"] = subsidence_tracers(artifact)
+    if not artifact.is_moist and artifact.theta_adv_cum is not None:
+        raise ValueError(
+            f"{artifact.case_name}: dry artifact carries theta_adv_cum, but the dry "
+            "SCM builder has no θ-forcing channel; it would be silently dropped")
     physics = (_moist_cbl_physics(turbulence,
                                   moist_scm_microphysics(artifact, microphysics))
                if artifact.is_moist else _dry_cbl_physics(turbulence))

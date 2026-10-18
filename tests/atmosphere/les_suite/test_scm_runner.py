@@ -100,6 +100,7 @@ def _moist_artifact(**over) -> LESReferenceArtifact:
         subsidence_w=np.full(NZ, -0.005),   # large-scale subsidence [m/s], +up ⇒ downward
         theta_adv=np.full(NZ, -2.0e-5),     # radiative-cooling θ tendency [K/s]
         qv_adv=np.full(NZ, -1.0e-8),        # drying advective tendency [(kg/kg)/s]
+        les_setup={"subsidence_species": ["q_v"]},   # BOMEX subsides θ and q_v
     )
     base.update(over)
     return LESReferenceArtifact(**base)
@@ -614,7 +615,7 @@ def test_moist_scm_microphysics_precedence_and_legacy():
                              kessler=KesslerConfig(autoconversion_threshold=5e-4))
     rec = microphysics_record(kes)
     assert microphysics_from_record(rec) == kes                  # exact round trip
-    art = _moist_artifact(les_setup={"microphysics": rec})
+    art = _moist_artifact(les_setup={"microphysics": rec, "subsidence_species": ["q_v"]})
     assert moist_scm_microphysics(art) == kes                    # the LES's own scheme
     explicit = MicrophysicsConfig(scheme="sundqvist")
     assert moist_scm_microphysics(art, explicit) is explicit     # caller wins
@@ -648,7 +649,7 @@ def test_moist_scm_takes_the_realised_moisture_flux_not_its_first_sample():
     art = _moist_artifact(
         w_qv_s=w_qv, w_qv_s_cum=cum,
         les_setup={"microphysics": microphysics_record(
-            MicrophysicsConfig(scheme="kessler"))})
+            MicrophysicsConfig(scheme="kessler")), "subsidence_species": ["q_v"]})
     dt = 60.0
     scm, _grid = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=dt)
     applied = sum(float(scm.forcing.w_qv_s(k * dt)) * dt for k in range(int(t[-1] / dt)))
@@ -657,3 +658,54 @@ def test_moist_scm_takes_the_realised_moisture_flux_not_its_first_sample():
     final = scm_scan_final_state(scm, 5)
     assert "q_r" in final.tracers                              # Kessler carries rain
     assert np.all(np.isfinite(np.asarray(final.T.data)))
+
+
+def test_moist_scm_takes_the_les_time_varying_theta_forcing_and_subsided_species():
+    """A DYCOMS-like artifact: the LES's time-varying radiative θ forcing arrives as
+    its running integral and the SCM receives its step means (the exact recorded
+    heat, not a late-window average applied from t=0); the species the LES
+    subsided (q_v and q_c) are the ones the SCM subsides; a moist artifact with
+    subsidence but no species record is refused."""
+    from legoesm.atmosphere.les_suite.bridge import BridgeError
+    t = np.linspace(0.0, 1800.0, NT)
+    z = np.linspace(10.0, 2500.0, NZ)                         # the fixture's heights
+    # height-VARYING, so a flipped or mis-interpolated profile cannot pass
+    rate = -1e-5 * (1.0 + z / 2500.0)[None, :] * (1.0 + t[:, None] / 900.0)
+    cum = np.concatenate([np.zeros((1, NZ)),
+                          np.cumsum(0.5 * (rate[1:] + rate[:-1])
+                                    * np.diff(t)[:, None], axis=0)])
+    qc = np.zeros((NT, NZ)); qc[0, NZ // 2] = 1e-4                # a cloudy start
+    art = _moist_artifact(theta_adv=None, theta_adv_cum=cum, qc=qc,
+                          les_setup={"subsidence_species": ["q_v", "q_c"]})
+    dt = 60.0
+    scm, _grid = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=dt)
+    assert scm.forcing.subsidence_tracers == ("q_v", "q_c")
+    # step means of the recorded integral, interpolated to the SCM levels: the
+    # first step carries the first interval's rate, a late step the last one's
+    early = np.asarray(scm.forcing.theta_adv(0.0))
+    late = np.asarray(scm.forcing.theta_adv(1700.0))
+    means = 0.5 * (rate[1:] + rate[:-1])                       # recorded interval means
+    # level by level, against the same mean fed through the (separately tested)
+    # constant-profile θ channel: same interpolation and orientation
+    def _const_channel(prof):
+        scm_c, _ = build_cbl_scm_from_artifact(
+            _moist_artifact(theta_adv=prof, qc=qc,
+                            les_setup={"subsidence_species": ["q_v", "q_c"]}),
+            _mynn_config(), nlev=NZ, dt=dt)
+        f = scm_c.forcing.theta_adv
+        return np.asarray(f(0.0) if callable(f) else f)
+    np.testing.assert_allclose(early, _const_channel(means[0]), rtol=1e-12)
+    np.testing.assert_allclose(late, _const_channel(means[-1]), rtol=1e-12)
+    assert np.ptp(early) > 0.1 * np.max(np.abs(early))        # profile not uniform
+    assert np.min(late) < 1.2 * np.min(early)                  # it varies in time
+    with pytest.raises(BridgeError):
+        build_cbl_scm_from_artifact(_moist_artifact(les_setup={}), _mynn_config(),
+                                    nlev=NZ, dt=dt)
+
+
+def test_dry_artifact_with_time_varying_theta_forcing_is_refused():
+    """The dry builder has no θ-forcing channel: a recorded cumulative θ forcing
+    must not be dropped silently."""
+    art = _cbl_artifact(theta_adv_cum=np.zeros((NT, NZ)))
+    with pytest.raises(ValueError, match="theta_adv_cum"):
+        build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=5.0)

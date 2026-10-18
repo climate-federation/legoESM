@@ -394,6 +394,7 @@ def _les_setup(args, g, dt0, micro_cfg):
         "z0_m": float(g.cfg.z0),
         "positive_mode": args.positive_mode,
         "micro_every": int(args.micro_every),
+        "subsidence_species": ["q_v"],
         # controls that change the applied microphysics tendencies: the increment
         # is dt·micro_every/micro_substeps per substep, but the scheme's own
         # timestep (limiters, relaxation) is that times micro_relax_factor

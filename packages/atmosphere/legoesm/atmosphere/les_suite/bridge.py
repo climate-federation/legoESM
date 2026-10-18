@@ -70,6 +70,10 @@ class LESReferenceArtifact:
         subsidence_w : (nz,) large-scale vertical velocity [m/s], positive up, or ``None``.
         theta_adv, qv_adv : (nz,) prescribed horizontal-advection tendencies
             [K/s] / [(kg/kg)/s] or ``None``.
+        theta_adv_cum : (nt, nz) time integral from ``t=0`` of a TIME-VARYING θ
+            forcing the LES applied [K] (e.g. DYCOMS's interactive longwave
+            cooling), or ``None``. Exclusive with ``theta_adv``; the SCM receives
+            its interval means (:func:`forcing_profile_fn`).
         prescribe : "none" | "T_s" | "fluxes" — surface boundary treatment.
         T_s : (nt,) prescribed surface temperature [K] or ``None``.
         w_theta_s, w_qv_s : (nt,) surface kinematic heat/moisture fluxes
@@ -158,6 +162,7 @@ class LESReferenceArtifact:
     subsidence_w: Array | None = None
     theta_adv: Array | None = None
     qv_adv: Array | None = None
+    theta_adv_cum: Array | None = None
     prescribe: str = "fluxes"
     T_s: Array | None = None
     w_theta_s: Array | None = None
@@ -238,8 +243,8 @@ class LESReferenceArtifact:
         nt, nz = self.nt, self.nz
         # profile time series: (nt, nz)
         for name in (("theta", "u", "v", "wtheta_resolved", "wtheta_sgs",
-                      "qt", "wqt_resolved", "wqt_sgs", "qc") + TURBULENCE_STAT_FIELDS
-                     + MOIST_STAT_FIELDS):
+                      "qt", "wqt_resolved", "wqt_sgs", "qc", "theta_adv_cum")
+                     + TURBULENCE_STAT_FIELDS + MOIST_STAT_FIELDS):
             arr = getattr(self, name)
             if arr is None:
                 continue
@@ -305,6 +310,10 @@ class LESReferenceArtifact:
                     f"{self.case_name}: dry artifact (qt is None) must not carry "
                     f"moisture field(s) {dry_forbidden}"
                 )
+        if self.theta_adv_cum is not None and self.theta_adv is not None:
+            raise BridgeError(
+                f"{self.case_name}: theta_adv and theta_adv_cum are two channels for "
+                "one θ forcing; set exactly one")
         for cum_name, series in (("w_theta_s_cum", "w_theta_s"),
                                  ("w_qv_s_cum", "w_qv_s"),
                                  ("precip_s_cum", "precip_s")):
@@ -372,7 +381,7 @@ MOIST_STAT_FIELDS = ("qr", "cloud_frac")
 _ARTIFACT_ARRAY_FIELDS = (
     "heights_m", "times_s", "theta", "u", "v",
     "wtheta_resolved", "wtheta_sgs", "qt", "wqt_resolved", "wqt_sgs", "qc",
-    "u_geo", "v_geo", "subsidence_w", "theta_adv", "qv_adv",
+    "u_geo", "v_geo", "subsidence_w", "theta_adv", "qv_adv", "theta_adv_cum",
     "T_s", "w_theta_s", "w_qv_s",
 ) + (TURBULENCE_STAT_FIELDS + SURFACE_SERIES_FIELDS + MOIST_SURFACE_SERIES_FIELDS
      + MOIST_STAT_FIELDS)
@@ -594,15 +603,25 @@ def surface_flux_fn(artifact: LESReferenceArtifact, name: str, *,
                 "instantaneous samples, whose interpolation does not conserve the "
                 "exchanged amount")
         return _interp_scalar_fn(artifact.times_s, series)
-    cum = jnp.asarray(cum, dtype=times.dtype)
-    means = jnp.diff(cum) / jnp.diff(times)
+    return _cum_rate_fn(times, jnp.asarray(cum, dtype=times.dtype), dt_s)
+
+
+def _cum_rate_fn(times: Array, cum: Array, dt_s: float | None):
+    """The rate whose integral is ``cum`` (``(nt, ...)``, from ``t=0``): interval
+    means ``(cum[k+1] − cum[k])/(t[k+1] − t[k])`` on ``[t_k, t_{k+1})`` (the last
+    interval continues past the final frame), or, with ``dt_s``, the mean over
+    ``[t, t+dt_s]`` of that piecewise-constant rate (a forward-Euler consumer then
+    applies exactly the recorded amount; the sum telescopes)."""
+    dts = jnp.diff(times).reshape((-1,) + (1,) * (cum.ndim - 1))
+    means = jnp.diff(cum, axis=0) / dts
     last = means.shape[0] - 1
+
+    def _k(t):
+        return jnp.clip(jnp.searchsorted(times, t, side="right") - 1, 0, last)
 
     if dt_s is None:
         def _fn(t_seconds: float) -> Array:
-            k = jnp.searchsorted(times, jnp.asarray(t_seconds, dtype=times.dtype),
-                                 side="right") - 1
-            return means[jnp.clip(k, 0, last)]
+            return means[_k(jnp.asarray(t_seconds, dtype=times.dtype))]
         return _fn
 
     if not dt_s > 0:
@@ -610,9 +629,11 @@ def surface_flux_fn(artifact: LESReferenceArtifact, name: str, *,
 
     def _integral(t):
         t = jnp.asarray(t, dtype=times.dtype)
-        # beyond the last output the last interval's mean flux continues
-        past = cum[-1] + means[-1] * (t - times[-1])
-        return jnp.where(t > times[-1], past, jnp.interp(t, times, cum))
+        k = _k(t)
+        # piecewise-linear inside the record; beyond the last output the last
+        # interval's mean rate continues
+        return cum[k] + means[k] * (jnp.minimum(t, times[-1]) - times[k]) + jnp.where(
+            t > times[-1], means[-1] * (t - times[-1]), 0.0)
 
     def _step_mean(t_seconds: float) -> Array:
         return (_integral(t_seconds + dt_s) - _integral(t_seconds)) / dt_s
@@ -620,8 +641,40 @@ def surface_flux_fn(artifact: LESReferenceArtifact, name: str, *,
     return _step_mean
 
 
+def forcing_profile_fn(artifact: LESReferenceArtifact, *, dt_s: float | None = None):
+    """The θ forcing profile ``t -> (nz,)`` [K/s] that drives the SCM: the interval
+    means of the recorded ``theta_adv_cum`` when the LES forcing varied in time
+    (``dt_s`` as in :func:`surface_flux_fn`), else the constant ``theta_adv``."""
+    if artifact.theta_adv_cum is not None:
+        times = jnp.asarray(artifact.times_s, dtype=jnp.result_type(float))
+        if times.shape[0] < 2:
+            raise BridgeError(f"{artifact.case_name}: theta_adv_cum needs >=2 frames")
+        return _cum_rate_fn(times, jnp.asarray(artifact.theta_adv_cum, times.dtype),
+                            dt_s)
+    if artifact.theta_adv is None:
+        raise BridgeError(f"{artifact.case_name}: artifact carries no θ forcing")
+    prof = jnp.asarray(artifact.theta_adv)
+    return lambda t_seconds: prof
+
+
+def subsidence_tracers(artifact: LESReferenceArtifact) -> tuple | None:
+    """The SCM tracers the LES subsidence advected (``les_setup``'s record, in the
+    SCM's tracer names). A moist artifact with subsidence must carry the record;
+    a dry one has no water to subside (``None``)."""
+    setup = artifact.les_setup or {}
+    if "subsidence_species" in setup:
+        return tuple(setup["subsidence_species"])
+    if artifact.is_moist and artifact.subsidence_w is not None:
+        raise BridgeError(
+            f"{artifact.case_name}: moist artifact with subsidence but no "
+            "les_setup['subsidence_species'] record; which water species the LES "
+            "subsided is unknown")
+    return None
+
+
 def artifact_to_scm_forcing(
-    artifact: LESReferenceArtifact, *, scm_top_to_bottom: bool = True
+    artifact: LESReferenceArtifact, *, scm_top_to_bottom: bool = True,
+    dt_s: float | None = None,
 ) -> SCMForcing:
     """Reconstruct the exact large-scale forcing the LES received (D6 prognostic).
 
@@ -648,6 +701,10 @@ def artifact_to_scm_forcing(
     reversal assumes the SCM runs on the artifact's own vertical grid (levels
     reversed, same count); interpolating onto a *different* SCM grid is a separate
     regridding step the coupling layer must do explicitly.
+
+    ``dt_s`` (the consumer's forward-Euler step) turns the recorded-integral
+    channels (surface fluxes, ``theta_adv_cum``) into step means, so a step that
+    straddles an output time still applies exactly the recorded amount.
     """
     def _orient(prof: Array) -> Array:
         arr = jnp.asarray(prof)
@@ -664,6 +721,10 @@ def artifact_to_scm_forcing(
         prof = getattr(artifact, name)
         if prof is not None:
             kwargs[target] = _const_profile_fn(_orient(prof))
+    if artifact.theta_adv_cum is not None:
+        _th = forcing_profile_fn(artifact, dt_s=dt_s)
+        kwargs["theta_adv"] = lambda t: _orient(_th(t))
+    kwargs["subsidence_tracers"] = subsidence_tracers(artifact)
     if artifact.prescribe == "T_s" and artifact.T_s is not None:
         kwargs["T_s"] = _interp_scalar_fn(artifact.times_s, artifact.T_s)
     if artifact.prescribe == "fluxes":
@@ -673,7 +734,7 @@ def artifact_to_scm_forcing(
         # exactly zero. See SCMForcing.flux_to_closure.
         kwargs["flux_to_closure"] = True
         if artifact.w_theta_s is not None:
-            kwargs["w_th_s"] = surface_flux_fn(artifact, "w_theta_s")
+            kwargs["w_th_s"] = surface_flux_fn(artifact, "w_theta_s", dt_s=dt_s)
         if artifact.w_qv_s is not None:
-            kwargs["w_qv_s"] = surface_flux_fn(artifact, "w_qv_s")
+            kwargs["w_qv_s"] = surface_flux_fn(artifact, "w_qv_s", dt_s=dt_s)
     return SCMForcing(**kwargs)
