@@ -8197,6 +8197,8 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:424': '- p_avt(ji,jj,jk) * rn2(ji,jj,jk)          &   ! stratification',
     'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfphy.f90:217': 'IF( nn_havtb == 1 ) THEN',
     'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfphy.f90:227': 'avt_k(:,:,jk)    = avtb_2d(:,:) * avtb(jk) * wmask(',
+    # --- GRIDLADDER-VMIX round 15 resume (V5 scored) ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:443': 'avtb_2d(:,:) = 1._wp',
 }
 
 
