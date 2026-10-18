@@ -6,6 +6,20 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_MADDISON_NAMELIST,
 )
 
+# Rigid-lid decks (SWG_MADDISON_RL_NAMELIST, SWG_DG50_RL_NAMELIST): their
+# steps (1800 s, 3600 s) exceed the explicit free-surface CFL, so they run
+# under the lid only.  The explicit decks under the lid stay legal physics.
+RIGID_LID_ONLY_DECKS = ("maddison-rl", "dg50-rl")
+
+
+def require_surface_for_deck(deck: str, surface) -> None:
+    """Refuse a rigid-lid-only deck unless ``surface`` is ``"rigid_lid"``."""
+    if deck in RIGID_LID_ONLY_DECKS and surface != "rigid_lid":
+        raise ValueError(
+            f"deck {deck!r} steps beyond the explicit free-surface CFL and "
+            f"requires surface='rigid_lid'; got {surface!r}")
+
+
 # Resolution-control viscosity.  This is an experiment control, not the
 # NEMO-certified dg50 training model.
 SWG_DG50_NU80_NAMELIST = SWG_DG50_NAMELIST._replace(rn_Lv_m=80.0)
@@ -20,4 +34,7 @@ SWG_DG3125_NAMELIST = SWG_MADDISON_NAMELIST._replace(
     rn_Dt_s=25.0,
 )
 
-__all__ = ["SWG_DG50_NU80_NAMELIST", "SWG_DG3125_NAMELIST"]
+__all__ = [
+    "RIGID_LID_ONLY_DECKS", "SWG_DG50_NU80_NAMELIST", "SWG_DG3125_NAMELIST",
+    "require_surface_for_deck",
+]

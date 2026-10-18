@@ -27,6 +27,7 @@ from legoesm.ml.training import TrainingConfig, create_optimizer
 from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
 from legoesm.ocean.dynamics.swe_rk3 import (
     _entry_from_state,
+    swe_rigid_lid_stage1_phi,
     swe_rk3_step,
     swe_rotated_potential_forcing,
     wet_rectangle_bounds,
@@ -479,9 +480,9 @@ def eq6_scale_report(network: SWGScalarPotentialCNN, states: tuple,
         "ssh", "u_t", "v_t", "template_input_zeta", "output_potential",
         "output_laplacian")}
     for index, state in enumerate(states):
-        entry = _entry_from_state(
+        entry = _network_entry(_entry_from_state(
             state, tau, tau, card.recipe.grid, card.recipe.z_coord,
-            card.recipe.model_config)
+            card.recipe.model_config), state, card)
         potential = np.asarray(network(
             entry, geometry, key=jax.random.fold_in(key, index),
             noise=jnp.zeros_like(entry.ssh_k), noise_scale=jnp.asarray(0.0)),
@@ -1097,6 +1098,70 @@ def coarse_state_from_native(state, ssh, u, v):
         u=state.u.replace(data=u_full), v=state.v.replace(data=v_full))
 
 
+def _is_rigid_lid(card) -> bool:
+    return card.recipe.model_config.swe_surface == "rigid_lid"
+
+
+def require_rigid_lid_zero_ssh(card, ssh) -> None:
+    """Refuse a stored state with non-zero sea level on a rigid-lid card.
+
+    Eager (concrete arrays only).  A no-op on an explicit card.
+    """
+    if _is_rigid_lid(card) and np.any(np.asarray(ssh) != 0.0):
+        raise ValueError(
+            "a rigid-lid stored state must have identically zero ssh")
+
+
+def rigid_lid_start_state(card, state):
+    """``state`` with ``rigid_lid_phi`` set to what the stepper would compute.
+
+    Under the lid a stored (ssh, u, v) carries no pressure potential, which
+    the closure reads as ``phi/g`` ([m], gravity ``constants.g``) in place of
+    sea level.  The stored state's potential is the stage-1 projection
+    potential of the certified stage at that state
+    (``swe_rigid_lid_stage1_phi``: the stepper's own stage-1 computation).
+    Traceable; explicit cards are returned unchanged.
+    """
+    if not _is_rigid_lid(card):
+        return state
+    tau_u, tau_v = swg_surface_wind(card.resolved_namelist)
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jnp.asarray(tau_u), tau_j_native=jnp.asarray(tau_v))
+    phi = swe_rigid_lid_stage1_phi(
+        state, card.dt_s, forcing, card.recipe.grid, card.recipe.z_coord,
+        card.recipe.model_config)
+    return state._replace(rigid_lid_phi=phi)
+
+
+def start_state_from_native(card, ssh, u, v):
+    """The card's state from stored native (ssh, u, v), eager.
+
+    Under the lid: refuses non-zero ssh and carries the derived potential
+    (``rigid_lid_start_state``); explicit cards get ``coarse_state_from_native``
+    of the card's initial state exactly.
+    """
+    require_rigid_lid_zero_ssh(card, ssh)
+    return rigid_lid_start_state(card, coarse_state_from_native(
+        card.recipe.initial_state, ssh, u, v))
+
+
+def _network_entry(entry, state, card):
+    """The closure's stage-entry view of ``state``'s offline entry.
+
+    Explicit: the entry itself (network input = ssh).  Rigid lid: ssh is
+    replaced by the equivalent sea level ``rigid_lid_phi / g``, exactly what
+    ``swe_rk3_step`` shows the closure at stage 1.
+    """
+    if not _is_rigid_lid(card):
+        return entry
+    if state.rigid_lid_phi is None:
+        raise ValueError("a rigid-lid state needs rigid_lid_phi "
+                         "(rigid_lid_start_state)")
+    require_rigid_lid_zero_ssh(card, state.eta.data)
+    return entry._replace(ssh_k=jnp.asarray(state.rigid_lid_phi)
+                          / card.recipe.model_config.constants.g)
+
+
 def load_content_pinned_initial_state(
         card, path: Path, *, manifest_path: Path,
         expected_manifest_sha256: str):
@@ -1269,8 +1334,9 @@ def initial_closure_acceleration_ratio(
         entry = _entry_from_state(
             state, tau, tau, card.recipe.grid, card.recipe.z_coord,
             card.recipe.model_config)
+        net_entry = _network_entry(entry, state, card)
         potential = network(
-            entry, geometry, key=jax.random.fold_in(key, index),
+            net_entry, geometry, key=jax.random.fold_in(key, index),
             noise=jnp.zeros_like(entry.ssh_k), noise_scale=jnp.asarray(0.0))
         eta = np.asarray(entry.ssh_k, dtype=np.float64)
         h_u = jnp.asarray(live_face_thickness(eta, native_geometry, "U"))

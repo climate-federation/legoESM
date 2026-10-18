@@ -269,6 +269,23 @@ def test_config_refuses_missing_extra_and_unknown_choices(tmp_path, edit, match)
         driver.load_config(path)
 
 
+def test_rigid_lid_training_deck_requires_the_lid(tmp_path):
+    config = json.loads(CONFIGS[0].read_text())
+    config.update(deck="dg50-rl", surface="rigid_lid")
+    path = tmp_path / "lid.json"
+    path.write_text(json.dumps(config))
+    assert driver.load_config(path)["deck"] == "dg50-rl"
+    card = driver.build_deck_card("dg50-rl", "rigid_lid")
+    assert card.dt_s == 3600.0
+    assert card.recipe.model_config.swe_surface == "rigid_lid"
+    config["surface"] = "explicit"
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="requires surface='rigid_lid'"):
+        driver.load_config(path)
+    with pytest.raises(ValueError, match="requires surface='rigid_lid'"):
+        driver.build_deck_card("dg50-rl", "explicit")
+
+
 def test_driver_refuses_to_start_without_a_configuration_file(tmp_path, capsys):
     with pytest.raises(SystemExit) as stopped:
         driver.main(["train", "--device", "cpu", "--windows-per-call", "10",

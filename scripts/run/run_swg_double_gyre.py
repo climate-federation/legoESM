@@ -33,15 +33,22 @@ def _write_hashes_atomic(path: Path, hashes: dict[str, str]) -> None:
     temporary.replace(path)
 
 
-def resolved_daily_namelist(days: int, *, deck: str = "maddison"):
-    """Return a supported double-gyre deck resolved for a number of days."""
+def resolved_daily_namelist(days: int, *, deck: str = "maddison",
+                            surface: str | None = None):
+    """Return a supported double-gyre deck resolved for a number of days.
+
+    A rigid-lid-only deck (``*-rl``) requires ``surface="rigid_lid"``.
+    """
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         SWG_DG50_NAMELIST,
+        SWG_DG50_RL_NAMELIST,
         SWG_MADDISON_NAMELIST,
+        SWG_MADDISON_RL_NAMELIST,
     )
     from legoesm.ocean.fidelity.swg_online_decks import (
         SWG_DG50_NU80_NAMELIST,
         SWG_DG3125_NAMELIST,
+        require_surface_for_deck,
     )
 
     if type(days) is not int or days <= 0:
@@ -51,9 +58,12 @@ def resolved_daily_namelist(days: int, *, deck: str = "maddison"):
         "dg50": SWG_DG50_NAMELIST,
         "dg50-nu80": SWG_DG50_NU80_NAMELIST,
         "dg3125": SWG_DG3125_NAMELIST,
+        "maddison-rl": SWG_MADDISON_RL_NAMELIST,
+        "dg50-rl": SWG_DG50_RL_NAMELIST,
     }
     if deck not in decks:
         raise ValueError(f"unsupported double-gyre deck {deck!r}")
+    require_surface_for_deck(deck, surface)
     selected = decks[deck]
     dt_s = selected.rn_Dt_s
     steps_per_day = SECONDS_PER_DAY / dt_s
@@ -259,6 +269,22 @@ def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int,
         return state, result
 
     return scanned
+
+
+def zero_ssh_restrictor(restrictor):
+    """A restrictor whose sea level is exactly zero (rigid-lid targets).
+
+    The fine lid ssh is identically zero, but the restrictors form sea level
+    as volume/area minus the reference depth, which leaves 1e-13 m round-off
+    (measured: box 1.8e-14, filtered 2.1e-13 m); that is not a sea level.
+    """
+    import jax.numpy as jnp
+
+    def restrict(eta, u_native, v_native):
+        ssh, u, v = restrictor(eta, u_native, v_native)
+        return jnp.zeros_like(ssh), u, v
+
+    return restrict
 
 
 def build_dual_coarse_sampler(restrictors):
@@ -693,6 +719,10 @@ def run_long(
                     source_geometry, target_geometry,
                     sigma_source_cells=sigma_source_cells),
             }
+            if surface == "rigid_lid":
+                hourly_restrictors = {
+                    name: zero_ssh_restrictor(restrictor)
+                    for name, restrictor in hourly_restrictors.items()}
             hourly_stepper = build_scanned_hourly_target_stepper(
                 model, card.dt_s, forcing, int(steps_per_hour_f),
                 hourly_restrictors)
@@ -948,8 +978,9 @@ def main(argv=None) -> int:
     parser.add_argument("--days", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
-        "--deck", choices=("maddison", "dg50", "dg50-nu80", "dg3125"),
-                        default="maddison")
+        "--deck", choices=("maddison", "dg50", "dg50-nu80", "dg3125",
+                           "maddison-rl", "dg50-rl"),
+        default="maddison")
     parser.add_argument(
         "--surface", choices=("explicit", "rigid_lid"), required=True,
         help="SWE RK3 free-surface treatment; the certified card is explicit")
@@ -987,7 +1018,8 @@ def main(argv=None) -> int:
     try:
         from legoesm.ocean.fidelity.provenance import git_sha
 
-        namelist = resolved_daily_namelist(args.days, deck=args.deck)
+        namelist = resolved_daily_namelist(
+            args.days, deck=args.deck, surface=args.surface)
         manifest = run_long(
             namelist, args.output, days=args.days, mode=args.mode,
             commit=git_sha(), physical_gpu=args.physical_gpu,

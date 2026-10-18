@@ -4081,6 +4081,29 @@ SWG_DG50_NAMELIST = SWG_MADDISON_NAMELIST._replace(
     nn_stock=233_280,
     rn_Dt_s=400.0,
 )
+
+
+def _swg_rescaled_clock(parent: SwgResolvedNamelist, dt_s: float):
+    """``parent`` at another step with the same physical run length and
+    output cadences; refuses a step count that is not an integer."""
+    steps = {}
+    for name in ("nn_itend", "nn_write", "nn_stock"):
+        count = getattr(parent, name) * parent.rn_Dt_s / dt_s
+        if not float(count).is_integer():
+            raise ValueError(
+                f"{name}={getattr(parent, name)} at rn_Dt={parent.rn_Dt_s} s "
+                f"is not a whole number of {dt_s} s steps")
+        steps[name] = int(count)
+    return parent._replace(rn_Dt_s=dt_s, **steps)
+
+
+# Rigid-lid decks (user decision 2026-10-18): the lid removes the gravity-wave
+# clock, so the 6.25 km fine deck steps at 1800 s and the 50 km coarse deck at
+# 3600 s.  Same 1080 d run, one-day output and restart cadence as the parent:
+# fine 1_866_240/1_728/1_866_240 steps of 50 s -> 51_840/48/51_840 of 1800 s;
+# coarse 233_280/216/233_280 steps of 400 s -> 25_920/24/25_920 of 3600 s.
+SWG_MADDISON_RL_NAMELIST = _swg_rescaled_clock(SWG_MADDISON_NAMELIST, 1800.0)
+SWG_DG50_RL_NAMELIST = _swg_rescaled_clock(SWG_DG50_NAMELIST, 3600.0)
 # Frozen transcription of the compiled SWE readers, expressed in card field
 # names.  This is intentionally independent of ``SwgResolvedNamelist._fields``
 # so the inventory test detects a removed field instead of deriving its own
@@ -4534,6 +4557,8 @@ __all__ = (
     "SWG_NAMELIST",
     "SWG_MADDISON_NAMELIST",
     "SWG_DG50_NAMELIST",
+    "SWG_MADDISON_RL_NAMELIST",
+    "SWG_DG50_RL_NAMELIST",
     "validate_swg_namelist",
     "SWG_DEVIATIONS",
     "SWG_UNMEASURED",

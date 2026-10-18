@@ -63,6 +63,29 @@ def test_resolved_dg50_clock_and_unknown_dispatch():
         driver.resolved_daily_namelist(1, deck="typo")
 
 
+def test_rigid_lid_decks_resolve_and_refuse_the_explicit_surface():
+    fine = driver.resolved_daily_namelist(
+        2, deck="maddison-rl", surface="rigid_lid")
+    assert fine.nn_SWG == 16 and fine.rn_Dt_s == 1800.0
+    assert fine.nn_itend == 2 * 48 and fine.nn_write == fine.nn_stock == 48
+    coarse = driver.resolved_daily_namelist(
+        2, deck="dg50-rl", surface="rigid_lid")
+    assert coarse.nn_SWG == 2 and coarse.rn_Dt_s == 3600.0
+    assert coarse.nn_itend == 2 * 24 and coarse.nn_write == coarse.nn_stock == 24
+    for deck in ("maddison-rl", "dg50-rl"):
+        for surface in ("explicit", None):
+            with pytest.raises(ValueError, match="requires surface='rigid_lid'"):
+                driver.resolved_daily_namelist(1, deck=deck, surface=surface)
+    # An explicit-clock deck under the lid is legal.
+    assert driver.resolved_daily_namelist(
+        1, deck="dg50", surface="rigid_lid").rn_Dt_s == 400.0
+    with pytest.raises(SystemExit):
+        driver.main(["--days", "1", "--output", "unused", "--deck", "typo-rl",
+                     "--surface", "rigid_lid"])
+    assert driver.main(["--days", "1", "--output", "unused", "--deck",
+                        "dg50-rl", "--surface", "explicit"]) == 2
+
+
 def test_tiny_cpu_driver_writes_daily_native_state_with_provenance(tmp_path):
     from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_MADDISON_NAMELIST
 
@@ -335,6 +358,25 @@ def test_run_long_dual_hourly_writer_operators_endpoints_and_t0(
         assert np.max(np.abs(saved["filtered_ssh_hourly_m"][-1]
                              - reference(24 * steps_per_hour)["box"]["T"])) \
             > 1.0e-4
+
+
+def test_rigid_lid_hourly_targets_run_on_the_fine_rl_deck_with_zero_ssh(tmp_path):
+    # Real 640 x 640 fine deck under the lid, one day of 48 steps of 1800 s.
+    namelist = driver.resolved_daily_namelist(
+        1, deck="maddison-rl", surface="rigid_lid")
+    output = tmp_path / "hourly_lid"
+    manifest = driver.run_long(
+        namelist, output, days=1, mode="cpu-scanned", surface="rigid_lid",
+        commit="a" * 40, physical_gpu=None, hourly_targets=True)
+    assert manifest["schema"] == "legoesm-swg-double-gyre-hourly-target-v2"
+    assert manifest["surface"] == "rigid_lid" and manifest["steps_per_day"] == 48
+    with np.load(output / "day0001.npz") as saved:
+        for operator in ("box", "filtered"):
+            for name in (f"{operator}_ssh_initial_m", f"{operator}_ssh_hourly_m"):
+                assert np.array_equal(saved[name], np.zeros_like(saved[name])), name
+            for field in ("u", "v"):
+                hourly = saved[f"{operator}_{field}_hourly_m_s"]
+                assert np.all(np.isfinite(hourly)) and np.abs(hourly).max() > 1e-4
 
 
 def test_real_dual_hourly_sampler_lowering_has_no_convolution_operation():

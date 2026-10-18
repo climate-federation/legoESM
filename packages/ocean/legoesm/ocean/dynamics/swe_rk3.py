@@ -496,13 +496,12 @@ def _entry_from_state(state, stress_before, stress_now, grid, z_coord, config):
         u, v, stress_before[0], stress_before[1], stress_now[0], stress_now[1])
 
 
-def swe_rk3_step(state, dt, surface_forcing, grid, z_coord, config,
-                 stage_runner=None, stage_potential_fn=None):
-    """Advance the shared ocean state with the three-stage SWE RK3 program.
+def _step_boundary(state, surface_forcing, grid, z_coord, config):
+    """Validated stress carry and stage-1 boundary entry of one SWE RK3 step.
 
-    The surface caller supplies grid-native U/V stresses through
-    ``tau_i_native``/``tau_j_native``.  This keeps the shared stage program
-    independent of any testcase-specific analytic forcing formula.
+    Returns ``(state, boundary, now, lid)``; ``lid`` is the projection
+    geometry under ``swe_surface="rigid_lid"`` (state ssh zeroed) and None
+    otherwise.
     """
     _validate_program(config, z_coord, 1)
     if surface_forcing is None:
@@ -519,18 +518,68 @@ def swe_rk3_step(state, dt, surface_forcing, grid, z_coord, config,
         now[0] if state.tau_x_prev is None else jnp.asarray(state.tau_x_prev),
         now[1] if state.tau_y_prev is None else jnp.asarray(state.tau_y_prev),
     )
-    rigid_lid = config.swe_surface == "rigid_lid"
-    if rigid_lid:
+    lid = None
+    if config.swe_surface == "rigid_lid":
         # The lid holds ssh at zero: the boundary entry carries zero ssh and
         # zero thickness ratios whatever eta the state arrived with.
         lid = swe_rigid_lid_geometry(grid, z_coord)
         state = state._replace(
             eta=state.eta.replace(data=jnp.zeros_like(state.eta.data)))
     boundary = _entry_from_state(state, before, now, grid, z_coord, config)
+    return state, boundary, now, lid
+
+
+def swe_rigid_lid_stage1_phi(state, dt, surface_forcing, grid, z_coord,
+                             config):
+    """Stage-1 pressure potential [m2 s-2] of the certified stage at ``state``.
+
+    The projection potential the rigid-lid stepper computes in stage 1 of a
+    step from ``state`` with no closure: the offline stand-in for the stored
+    ``rigid_lid_phi`` that a stored (ssh, u, v) does not carry.
+    """
+    if config.swe_surface != "rigid_lid":
+        raise ValueError(
+            "stage-1 lid potential requires swe_surface='rigid_lid'")
+    state, boundary, _, lid = _step_boundary(
+        state, surface_forcing, grid, z_coord, config)
+    stage_dt = jnp.asarray(dt, dtype=state.eta.data.dtype) / 3.0
+    output = swe_rk3_stage(
+        boundary, boundary, dt, 1, grid, z_coord, state.land_mask.data, config)
+    return swe_rigid_lid_stage_output(output, boundary, 1, stage_dt, lid)[1]
+
+
+def swe_rk3_step(state, dt, surface_forcing, grid, z_coord, config,
+                 stage_runner=None, stage_potential_fn=None):
+    """Advance the shared ocean state with the three-stage SWE RK3 program.
+
+    The surface caller supplies grid-native U/V stresses through
+    ``tau_i_native``/``tau_j_native``.  This keeps the shared stage program
+    independent of any testcase-specific analytic forcing formula.
+
+    Under ``swe_surface="rigid_lid"`` the certified stage runs on a zero-ssh
+    entry, but ``stage_potential_fn`` is shown the equivalent sea level
+    ``phi/g`` [m] of the most recent projection in the entry's ``ssh_k``:
+    ``state.rigid_lid_phi`` (the previous step's stage 3) for stage 1, the
+    previous stage's potential for stages 2 and 3, with ``g`` =
+    ``config.constants.g`` (the gravity the stage itself uses).
+    """
+    dtype = state.eta.data.dtype
+    state, boundary, now, lid = _step_boundary(
+        state, surface_forcing, grid, z_coord, config)
+    rigid_lid = lid is not None
+    lid_phi = [state.rigid_lid_phi] if rigid_lid else []
     if stage_runner is None:
         def run(entry, before_entry, stage):
-            potential = (None if stage_potential_fn is None
-                         else stage_potential_fn(entry, stage))
+            potential = None
+            if stage_potential_fn is not None:
+                seen = entry
+                if rigid_lid:
+                    if lid_phi[-1] is None:
+                        raise ValueError(
+                            "rigid-lid closure needs state.rigid_lid_phi")
+                    seen = entry._replace(
+                        ssh_k=lid_phi[-1] / config.constants.g)
+                potential = stage_potential_fn(seen, stage)
             return swe_rk3_stage(
                 entry, before_entry, dt, stage, grid, z_coord,
                 state.land_mask.data, config, potential_f=potential)
@@ -541,7 +590,6 @@ def swe_rk3_step(state, dt, surface_forcing, grid, z_coord, config,
 
         def run(entry, before_entry, stage):
             return stage_runner(entry, dt, stage, before_entry)
-    lid_phi = []
     if rigid_lid:
         certified_run = run
 

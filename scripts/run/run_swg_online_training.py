@@ -74,10 +74,14 @@ from legoesm.ml.training import save_checkpoint
 from legoesm.ocean.dynamics.swe_rk3 import SWE_SURFACE_MODES
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_DG50_NAMELIST,
+    SWG_DG50_RL_NAMELIST,
     build_swg_card,
     swg_surface_wind,
 )
-from legoesm.ocean.fidelity.swg_online_decks import SWG_DG50_NU80_NAMELIST
+from legoesm.ocean.fidelity.swg_online_decks import (
+    SWG_DG50_NU80_NAMELIST,
+    require_surface_for_deck,
+)
 from legoesm.ocean.state import OceanSurfaceForcing
 from legoesm.training.swg_online import (
     ADMITTED_WINDOWS_DAYS,
@@ -114,6 +118,9 @@ from legoesm.training.swg_online import (
     maddison_half_width_m,
     network_parameter_count,
     record_start_state,
+    require_rigid_lid_zero_ssh,
+    rigid_lid_start_state,
+    start_state_from_native,
     swg_online_step,
 )
 
@@ -124,8 +131,9 @@ LOG_SCHEMA = "legoesm-swg-online-training-log-v2"
 PROFILE_SCHEMA = "legoesm-swg-online-training-profile-v1"
 DATASET_SCHEMA = "legoesm-swg-online-dataset-v1"
 SCALE_RULE = "maddison_eq6_shallow_water_grid_analogue"
-DECKS = {"dg50": SWG_DG50_NAMELIST, "dg50-nu80": SWG_DG50_NU80_NAMELIST}
-TRAINING_DECKS = ("dg50",)
+DECKS = {"dg50": SWG_DG50_NAMELIST, "dg50-nu80": SWG_DG50_NU80_NAMELIST,
+         "dg50-rl": SWG_DG50_RL_NAMELIST}
+TRAINING_DECKS = ("dg50", "dg50-rl")
 CONTROL_DECKS = {"nu10": "dg50", "nu80": "dg50-nu80"}
 FREE_RUN_SAMPLING = "end_of_day_snapshot_and_daily_mean"
 TRAINING_PRECISIONS = ("fp64", "fp32")
@@ -249,6 +257,7 @@ def load_config(path: Path) -> dict:
     if config["deck"] not in TRAINING_DECKS:
         raise ValueError(f"training deck must be one of {TRAINING_DECKS}")
     _validate_surface(config["surface"])
+    require_surface_for_deck(config["deck"], config["surface"])
     if config["objective"] not in OBJECTIVE_OPERATORS:
         raise ValueError(f"objective must be one of {OBJECTIVE_OPERATORS}")
     if config["wall_ring"] not in WALL_RING_OPTIONS:
@@ -357,7 +366,7 @@ def resolve_start(config: dict, card):
     (ssh, u, v), provenance = record_start_state(
         card, chunks, objective=start["objective"],
         absolute_hour=HOURS_PER_DAY * start["day"])
-    state = coarse_state_from_native(card.recipe.initial_state, ssh, u, v)
+    state = start_state_from_native(card, ssh, u, v)
     return state, _jsonable(start | provenance)
 
 
@@ -425,6 +434,7 @@ def build_deck_card(deck: str, surface: str):
     if deck not in DECKS:
         raise ValueError(f"deck must be one of {sorted(DECKS)}")
     _validate_surface(surface)
+    require_surface_for_deck(deck, surface)
     return build_swg_card(DECKS[deck], surface=surface)
 
 
@@ -606,7 +616,8 @@ def build_batch_functions(card, geometry, *, window_days: int,
         noise = jnp.zeros((n_steps, 3) + shape, dtype=noise_dtype)
 
         def rollout(ssh, u, v):
-            state = coarse_state_from_native(template, ssh, u, v)
+            state = rigid_lid_start_state(
+                card, coarse_state_from_native(template, ssh, u, v))
             return raw(network, state, noise, key, jnp.asarray(0.0))[1]
 
         predicted = jax.vmap(rollout)(*initial)
@@ -618,8 +629,18 @@ def build_batch_functions(card, geometry, *, window_days: int,
     value_and_grad = eqx.filter_jit(eqx.filter_value_and_grad(batch_loss))
     loss_fn = eqx.filter_jit(batch_loss)
     if single:
-        return _in_single_precision(value_and_grad), _in_single_precision(loss_fn)
-    return value_and_grad, loss_fn
+        value_and_grad = _in_single_precision(value_and_grad)
+        loss_fn = _in_single_precision(loss_fn)
+
+    def zero_lid_ssh(function):
+        # Under the lid the traced start cannot refuse stored sea level;
+        # the concrete batch is refused here (no-op on an explicit card).
+        def run(network, initial, target, key):
+            require_rigid_lid_zero_ssh(card, initial[0])
+            return function(network, initial, target, key)
+        return run
+
+    return zero_lid_ssh(value_and_grad), zero_lid_ssh(loss_fn)
 
 
 def _parts(batch, windows_per_call: int):
@@ -659,8 +680,8 @@ def _require_finite(loss, grads, where: str) -> None:
 
 
 def batch_start_states(card, batch) -> tuple:
-    return tuple(coarse_state_from_native(
-        card.recipe.initial_state, *(value[index] for value in batch.initial))
+    return tuple(start_state_from_native(
+        card, *(value[index] for value in batch.initial))
         for index in range(TEMPLATE_BATCH_SIZE))
 
 
