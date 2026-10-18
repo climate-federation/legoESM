@@ -1985,6 +1985,14 @@ def _nemo_ddm_literal(config) -> bool:
     return ddm.form == "nemo_literal"
 
 
+def _nemo_iwm_literal(config) -> bool:
+    """Static: the card selects NEMO-literal internal-wave mixing (zdfiwm)."""
+    iwm = getattr(getattr(getattr(config, "physics", None),
+                          "vertical_mixing", None), "iwm", None)
+    return bool(iwm is not None and iwm.enabled
+                and getattr(iwm, "form", "generic") == "nemo_literal")
+
+
 def nemo_stage_momentum_wzv_resolved(config) -> bool:
     """Does this card's configuration SELECT NEMO's two-solve stage program?
 
@@ -11893,7 +11901,8 @@ class LatLonCGridOceanModel:
             rn2=rn2, rn2b=rn2b, gdepw_Kmm=gdepw, e3w_Kmm=e3w,
             e3t_Kmm=e3t, e3w_surface_Kmm=e3w_surface,
             bn2_intermediate=_bn2_intermediate, e3t_jpk=e3t_jpk,
-            ddm_operands=_ddm_operands)
+            ddm_operands=_ddm_operands,
+            iwm_stretch=zrw_stretch if _nemo_iwm_literal(_cfg_b) else None)
 
     def _tke_step_entry_p_sh2(
         self, state, *, eta_now=None, u_now=None, v_now=None,
@@ -12836,11 +12845,13 @@ class LatLonCGridOceanModel:
         # NEMO-literal zdf_ddm's avs (zdfddm.f90:170); None on every other card.
         K_s_literal = None
         _ddm_literal_here = _nemo_ddm_literal(_cfg_b)
-        if _ddm_literal_here and K_v_phys is not None and A_v_phys is not None:
+        # zdf_iwm writes avs too (zdfiwm.f90:314), so it also needs the channel.
+        _salt_literal_here = _ddm_literal_here or _nemo_iwm_literal(_cfg_b)
+        if _salt_literal_here and K_v_phys is not None and A_v_phys is not None:
             raise ValueError(
-                "DoubleDiffusionConfig.form='nemo_literal' is composed in the "
-                "K-profile fallback (after EVD); the physics-provided-K fast "
-                "path cannot carry avs")
+                "DoubleDiffusionConfig/IWMConfig.form='nemo_literal' is "
+                "composed in the K-profile fallback (after EVD); the "
+                "physics-provided-K fast path cannot carry avs")
         if K_v_phys is not None and A_v_phys is not None:
             # Fast path: use K profiles already computed by the physics
             # function, just add the config background floors.
@@ -13050,9 +13061,9 @@ class LatLonCGridOceanModel:
                     tke_rhs_intermediate=(
                         self._nemo_ws_test_hooks.tke_rhs_intermediate),
                     seos_cfg=_cfg_b.eos_nemo_seos,
-                    return_salt_K=_ddm_literal_here,
+                    return_salt_K=_salt_literal_here,
                 )
-                if _ddm_literal_here:
+                if _salt_literal_here:
                     K_v_cell, A_v_cell, tke_new, K_s_literal = _kprof
                 else:
                     K_v_cell, A_v_cell, tke_new = _kprof

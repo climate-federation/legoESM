@@ -55,6 +55,10 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round
+from legoesm.core.transcendentals import exp as precision_exp
+from legoesm.core.transcendentals import log10 as precision_log10
+from legoesm.core.transcendentals import tanh as precision_tanh
 
 __physics_contract__ = {
     "summary": (
@@ -112,6 +116,10 @@ _TSDIFF_LOG10_OFFSET = 0.60
 _TSDIFF_REB_PREFAC = 5.0 / 6.0   # zdfiwm.F90: zReb * 5 * r1_6
 # NEMO zdfiwm denominators' regularisation floor
 _EPS_DENOM = 1.0e-20
+# zdfiwm.f90 module variable r1_6 = 1._wp / 6._wp (constant efficiency 1/6)
+_NEMO_IWM_R1_6 = 1.0 / 6.0
+# zdfiwm.f90:304 forms zReb * 5._wp * r1_6 left to right (not zReb * 5/6)
+_NEMO_IWM_TSDIFF_FIVE = 5.0
 
 __param_spec__ = {
     "IWMConfig": {
@@ -189,6 +197,9 @@ class IWMConfig(NamedTuple):
     # forgets to thread them gets a refusal instead of the uniform
     # constant-power fallback, which is different physics.
     require_forcing_maps: bool = False
+    # "generic": the vectorized port above.  "nemo_literal": NEMO 5.0.2
+    # zdf_iwm statement by statement (nemo_zdf_iwm), source-rounded.
+    form: str = "generic"
 
 
 class IWMForcing(NamedTuple):
@@ -371,3 +382,105 @@ def compute_iwm_diffusivity(
         av_ratio = jnp.ones_like(k_wave)
 
     return k_wave, av_ratio
+
+
+def nemo_zdf_iwm(avt, avs, avm, forcing: IWMForcing, rn2, stretch, ht_0,
+                 gdept_1d, e3w_1d, wmask, *, cfg: IWMConfig, rho_0: float):
+    """NEMO ``zdf_iwm`` (zdfiwm.f90:233-317) on W-interfaces; returns
+    ``(avt, avs, avm)``.
+
+    Interior interface ``k`` is NEMO's ``jk = k + 2`` (2..jpkm1).
+    ``rn2``/``wmask`` are ``(..., nif)``; ``stretch`` is ``1 + r3t(Kmm)`` and
+    ``ht_0`` the column depth, both ``(...)``; ``gdept_1d``/``e3w_1d`` are the
+    1-D reference ladders ``(nif + 1,)`` (index 0 = ``jk = 1``).  Every
+    operation is rounded in source order (the build has no FMA), the
+    ``zfact3``/``zfact4`` sums run in NEMO's level order, and EXP, TANH and
+    LOG10 are the precision policy's (scalar libm in certification).
+    """
+    if cfg.form != "nemo_literal":
+        raise ValueError(
+            "nemo_zdf_iwm requires IWMConfig.form='nemo_literal', "
+            f"got {cfg.form!r}")
+    if cfg.mevar:
+        raise ValueError(
+            "IWMConfig.form='nemo_literal' transcribes ln_mevar=.false. only "
+            "(zdfiwm.f90:283-291 is not built)")
+    from legoesm.core.precision import get_policy
+
+    if get_policy().transcendentals != "libm":
+        raise ValueError(
+            "IWMConfig.form='nemo_literal' evaluates EXP/TANH/LOG10 as NEMO's "
+            "scalar libm and requires the precision policy's "
+            f"transcendentals='libm'; got {get_policy().transcendentals!r}")
+    r = nemo_source_round
+    dtype = avt.dtype
+    zero = jnp.asarray(0.0, dtype)
+    one = jnp.asarray(1.0, dtype)
+    wm = wmask.astype(dtype)
+    r1_rho0 = 1.0 / rho_0                                   # phycst r1_rho0
+    nu = cfg.nu_molecular                                   # rnu
+    hcri = forcing.hcri_inv
+    # hbot_iwm is a runtime field in NEMO; in the step it is a constant, and
+    # XLA would turn "/ hbot" into a reciprocal multiply (an ulp off).
+    hbot = r(forcing.hbot)
+    gdept_1d = jnp.asarray(gdept_1d, dtype)
+    e3w_1d = jnp.asarray(e3w_1d, dtype)
+    nif = rn2.shape[-1]
+    if gdept_1d.shape != (nif + 1,) or e3w_1d.shape != (nif + 1,):
+        raise ValueError(
+            "nemo_zdf_iwm needs 1-D gdept_1d/e3w_1d of length "
+            f"{nif + 1}; got {gdept_1d.shape}/{e3w_1d.shape}")
+
+    hz = r(ht_0 * stretch)                                  # ht_0*(1+r3t)
+    wet = hz != 0.0
+    hz_safe = jnp.where(wet, hz, one)
+    denom1 = r(one - precision_exp(r(r(-hz) * hcri)))
+    zfact1 = jnp.where(wet, r(r(forcing.ecri * r1_rho0)
+                              / jnp.where(wet, denom1, one)), zero)   # :234-236
+    zfact2 = jnp.where(wet, r(r(forcing.ebot * r(one + r(hbot / hz_safe)))
+                              * r1_rho0), zero)                       # :241
+    n2_pos = jnp.maximum(zero, rn2)
+    n_pos = jnp.sqrt(n2_pos)
+    zfact3 = jnp.zeros_like(hz)
+    zfact4 = jnp.zeros_like(hz)
+    for k in range(nif):                                    # :248-251, jk order
+        e3w = r(e3w_1d[k + 1] * stretch)
+        zfact3 = r(zfact3 + r(e3w * n2_pos[..., k]))
+        zfact4 = r(zfact4 + r(e3w * n_pos[..., k]))
+    zfact3 = jnp.where(zfact3 != 0.0, r(r(forcing.ensq * r1_rho0)
+                       / jnp.where(zfact3 != 0.0, zfact3, one)), zero)  # :253
+    zfact4 = jnp.where(zfact4 != 0.0, r(r(forcing.esho * r1_rho0)
+                       / jnp.where(zfact4 != 0.0, zfact4, one)), zero)  # :254
+
+    s = stretch[..., None]
+    hk = hz[..., None]
+    g_dn = r(gdept_1d[1:] * s)                              # gdept_1d(jk)*(1+r3t)
+    g_up = r(gdept_1d[:-1] * s)                             # gdept_1d(jk-1)*(1+r3t)
+    e3w_k = r(e3w_1d[1:] * s)
+    hcri_k = hcri[..., None]
+    hbot_k = hbot[..., None]
+    cri = r(zfact1[..., None] * r(
+        precision_exp(r(r(g_dn - hk) * hcri_k))
+        - precision_exp(r(r(g_up - hk) * hcri_k))))         # :263-264
+    bot = r(zfact2[..., None] * r(
+        r(one / r(one + r(r(hk - g_dn) / hbot_k)))
+        - r(one / r(one + r(r(hk - g_up) / hbot_k)))))      # :267-268
+    zemx = r(r(r(r(r(cri + bot) * wm) / e3w_k)
+               + r(zfact3[..., None] * n2_pos))
+             + r(zfact4[..., None] * n_pos))                # :263-275
+    zreb = r(zemx / jnp.maximum(_EPS_DENOM, r(nu * rn2)))   # :278
+    zav_wave = r(r(zreb * _NEMO_IWM_R1_6) * nu)             # :280
+    zav_wave = r(jnp.minimum(jnp.maximum(cfg.k_min, zav_wave), cfg.k_max)
+                 * wm)                                      # :294
+    if cfg.tsdiff:                                          # :301-306
+        zlog = precision_log10(jnp.maximum(
+            _EPS_DENOM, r(r(zreb * _NEMO_IWM_TSDIFF_FIVE) * _NEMO_IWM_R1_6)))
+        ztanh = precision_tanh(r(_TSDIFF_TANH_SLOPE
+                                 * r(zlog - _TSDIFF_LOG10_OFFSET)))
+        zav_ratio = r(r(_TSDIFF_BASE + r(_TSDIFF_AMP * ztanh)) * wm)
+    else:                                                   # :308-310
+        zav_ratio = r(one * wm)
+    avs = r(avs + r(zav_wave * zav_ratio))                  # :314
+    avt = r(avt + zav_wave)                                 # :315
+    avm = r(avm + zav_wave)                                 # :316
+    return avt, avs, avm

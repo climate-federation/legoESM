@@ -498,6 +498,9 @@ class TKEEntryN2Bundle(NamedTuple):
     # (zdt, zds) for zdf_ddm (zdfddm.f90:127-128) when the card selects the
     # NEMO-literal double diffusion; None otherwise.
     ddm_operands: object = None
+    # (1 + r3t(Kmm)) for zdf_iwm (zdfiwm.f90:234-269) when the card selects
+    # the NEMO-literal internal-wave mixing; None otherwise.
+    iwm_stretch: jnp.ndarray | None = None
 
 
 class TKECarryOutput(NamedTuple):

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.eos import (
@@ -530,7 +531,52 @@ def compute_vertical_K_profiles(
     # diffusivity and momentum viscosity.  The wet-interface mask below
     # zeroes it at the seafloor (NEMO's wmask factor).
     iwm_cfg = getattr(vmix, "iwm", None)
-    if iwm_cfg is not None and iwm_cfg.enabled:
+    _iwm_form = getattr(iwm_cfg, "form", "generic")
+    if (iwm_cfg is not None and iwm_cfg.enabled
+            and _iwm_form not in ("generic", "nemo_literal")):
+        raise ValueError(
+            "Unknown IWMConfig.form (internal-wave scheme variant): expected "
+            f"'generic' or 'nemo_literal', got {_iwm_form!r}")
+    if (iwm_cfg is not None and iwm_cfg.enabled
+            and _iwm_form == "nemo_literal"):
+        # zdf_iwm (zdfiwm.f90:233-317) at zdfphy.f90:372, after zdf_ddm:
+        # adds onto avt, avs (V3's salt channel, or avs = avt when DDM is
+        # off, zdfphy.f90:365-367) and avm.
+        if not return_salt_K:
+            raise ValueError(
+                "IWMConfig.form='nemo_literal' writes the salt diffusivity "
+                "(zdfiwm.f90:314); the caller must request return_salt_K=True")
+        if (tke_n2_bundle is None
+                or getattr(tke_n2_bundle, "iwm_stretch", None) is None):
+            raise ValueError(
+                "IWMConfig.form='nemo_literal' needs the step-entry bn2 "
+                "bundle's rn2 and (1 + r3t(Kmm)) (zdfiwm.f90:234-278)")
+        if _wet_if is None or iwm_fields is None:
+            raise ValueError(
+                "IWMConfig.form='nemo_literal' needs the partial-cell wet W "
+                "mask and the card's zdfiwm forcing maps")
+        _gdept_1d = getattr(z_coord, "t_depth_ref", None)
+        _e3w_0 = getattr(z_coord, "nemo_e3w_0", None)
+        if _gdept_1d is None or _e3w_0 is None:
+            raise ValueError(
+                "IWMConfig.form='nemo_literal' reads NEMO's 1-D gdept_1d and "
+                "e3w_1d (z_coord.t_depth_ref / nemo_e3w_0)")
+        _e3w_cols = np.asarray(_e3w_0).reshape(-1, np.shape(_e3w_0)[-1])
+        if not np.array_equal(_e3w_cols, np.broadcast_to(
+                _e3w_cols[:1], _e3w_cols.shape)):
+            raise ValueError(
+                "IWMConfig.form='nemo_literal' reads the 1-D e3w_1d; this "
+                "coordinate's nemo_e3w_0 is not column-uniform")
+        from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+            nemo_zdf_iwm,
+        )
+        K_v_total, K_s_total, A_v_total = nemo_zdf_iwm(
+            K_v_total, K_v_total if K_s_total is None else K_s_total,
+            A_v_total, iwm_fields, tke_n2_bundle.rn2,
+            tke_n2_bundle.iwm_stretch, state.H_bathy.data,
+            np.asarray(_gdept_1d), _e3w_cols[0], _wet_if,
+            cfg=iwm_cfg, rho_0=physics_config.constants.rho_0)
+    elif iwm_cfg is not None and iwm_cfg.enabled:
         if iwm_cfg.tsdiff:
             # avs = avt * ratio needs a SEPARATE salinity diffusivity
             # channel through the implicit tracer solve; the lat-lon
