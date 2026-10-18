@@ -183,13 +183,23 @@ class TestConservation:
         grid = create_latlon_geometry(
             grid_small.n_lat, grid_small.n_lon, radius=grid_small.radius)
         wet = jnp.ones_like(tracer)
-        p_u = mu * jnp.asarray(grid.dy_u)[..., None]
-        p_v = mv * jnp.asarray(grid.dx_v)[..., None]
-        p_w = w_half * jnp.asarray(grid.area_T)[..., None]
+        rng = np.random.default_rng(51531)
 
-        def run(field, transport_u, transport_v, transport_w):
+        def transport(shape):
+            values = rng.standard_normal(shape)
+            scales = np.power(10.0, rng.uniform(-5.0, 5.0, shape))
+            return jnp.asarray(values * scales)
+
+        # The shared smooth-state fixture deliberately has zero V and W.
+        # Literal NEMO ordering needs all three divergence terms to be live.
+        p_u = transport(mu.shape)
+        p_v = transport(mv.shape)
+        p_w = transport(w_half.shape)
+
+        def run(field, transport_u, transport_v, transport_w, area):
+            traced_grid = grid._replace(area_T=area)
             return fct_tracer_advection(
-                field, mu, mv, w_half, h_k, grid, dt,
+                field, mu, mv, w_half, h_k, traced_grid, dt,
                 high_order="centred2", tracer_before=field,
                 active_mask=wet,
                 low_order_predictor="nemo_rk3_two_step",
@@ -199,21 +209,45 @@ class TestConservation:
                     transport_u, transport_v, transport_w),
             )[2]
 
-        trace = jax.jit(run)(tracer, p_u, p_v, p_w)
+        # Area is an explicit traced operand: the compiled program cannot fold
+        # its reciprocal into a constant or make division indistinguishable.
+        area = jnp.asarray(grid.area_T)
+        trace = jax.jit(run)(tracer, p_u, p_v, p_w, area)
         first_u = np.asarray(
             trace[NEMO_FCT_TRACE_FIELDS.index("first_u")])
+        first_v = np.asarray(
+            trace[NEMO_FCT_TRACE_FIELDS.index("first_v")])
+        first_w = np.asarray(
+            trace[NEMO_FCT_TRACE_FIELDS.index("first_w")])
         q = np.asarray(tracer)
         pu = np.asarray(p_u)
+        pv = np.asarray(p_v)
+        pw = np.asarray(p_w)
         west = np.concatenate([q[:, -1:], q], axis=1)
         east = np.concatenate([q, q[:, :1]], axis=1)
-        expected = np.maximum(pu, 0.0) * west + np.minimum(pu, 0.0) * east
-        np.testing.assert_array_equal(first_u, expected)
+        expected_u = np.add(
+            np.multiply(np.maximum(pu, 0.0), west),
+            np.multiply(np.minimum(pu, 0.0), east))
+        padded = np.pad(q, ((1, 1), (0, 0), (0, 0)))
+        expected_v = np.add(
+            np.multiply(np.maximum(pv, 0.0), padded[:-1]),
+            np.multiply(np.minimum(pv, 0.0), padded[1:]))
+        expected_w_inner = np.add(
+            np.multiply(np.maximum(pw[..., 1:-1], 0.0), q[..., 1:]),
+            np.multiply(np.minimum(pw[..., 1:-1], 0.0), q[..., :-1]))
+        expected_w = np.pad(expected_w_inner, ((0, 0), (0, 0), (1, 1)))
+        np.testing.assert_array_equal(first_u, expected_u)
+        np.testing.assert_array_equal(first_v, expected_v)
+        np.testing.assert_array_equal(first_w, expected_w)
         first_div = np.asarray(
             trace[NEMO_FCT_TRACE_FIELDS.index("first_div")])
-        du = np.subtract(expected[:, 1:], expected[:, :-1])
+        du = np.subtract(expected_u[:, 1:], expected_u[:, :-1])
+        dv = np.subtract(expected_v[1:], expected_v[:-1])
+        dw = np.subtract(expected_w[..., :-1], expected_w[..., 1:])
+        summed = np.add(np.add(du, dv), dw)
         r1_e1e2t = np.divide(
-            np.float64(1.0), np.asarray(grid.area_T)[..., None])
-        expected_div = np.negative(np.multiply(du, r1_e1e2t))
+            np.float64(1.0), np.asarray(area)[..., None])
+        expected_div = np.negative(np.multiply(summed, r1_e1e2t))
         np.testing.assert_array_equal(first_div, expected_div)
 
     def test_nemo_literal_nonosc_flux_sums_are_left_to_right(

@@ -643,12 +643,19 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         without_stage3_salt: bool = False,
         without_hpg_fold_geometry: bool = False,
         without_vector_raw_vmask: bool = False,
+        record_step_entry: bool = False,
+        without_recorded_external: bool = False,
         case: str = CASE) -> dict:
     require(case in CASES, f"unknown case {case!r}")
     require(arm in ARMS, f"unknown arm {arm!r}")
     require(plant in (None, "score", "level"), f"unknown plant {plant!r}")
     require(without_top_drag_consumer in (None, "residual", "substeps", "dyn_zdf"),
             f"unknown top-drag consumer {without_top_drag_consumer!r}")
+    require(not record_step_entry or (arm == "stages" and case == "ORCA2G9-tadv"
+                                      and kt_from >= 2),
+            "the recorded step-entry bridge is registered for G9 stages at kt >= 2")
+    require(not without_recorded_external or record_step_entry,
+            "the recorded-external plant requires --record-step-entry")
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
     allow_dirty_stamps(allow_dirty)
     sha = git_sha(allow_dirty=allow_dirty)
@@ -779,6 +786,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
            "rk3_stage3_tracer_nemo_stored_thickness": bool(
                cfg.rk3_stage3_tracer_nemo_stored_thickness),
            "without_top_drag_consumer": without_top_drag_consumer,
+           "record_step_entry": bool(record_step_entry),
+           "without_recorded_external": bool(without_recorded_external),
            "rk3_stage2_tracer_nemo_stored_thickness": bool(
                cfg.rk3_stage2_tracer_nemo_stored_thickness),
            "rk3_stage3_salt_nemo_written": bool(cfg.rk3_stage3_salt_nemo_written),
@@ -870,19 +879,54 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         # is the card's initial state (kt = 1) or NEMO's restart (other kt)
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
         kt = kt_from
-        out["label"] = ("INDEPENDENT (the card's own chain; stage-local)"
-                        if kt == 1 or state_in is not None else
-                        "GIVEN-NEMO-ENTRY (NEMO's restart; stage-local)")
+        out["label"] = (
+            "GIVEN-NEMO-ENTRY (recorded step entry and external handoff; stage-local)"
+            if record_step_entry else
+            "INDEPENDENT (the card's own chain; stage-local)"
+            if kt == 1 or state_in is not None else
+            "GIVEN-NEMO-ENTRY (NEMO's restart; stage-local)")
         g = read_step(kt)
         if state_in is not None:
             saved = pickle.loads(Path(state_in).read_bytes())
             require(saved["after_kt"] == kt - 1 and saved["packages"] == packages,
                     "--state-in is not this model code's chain after step kt - 1")
             entry = saved["state"]
+        elif record_step_entry:
+            from nemo_testcase_l1_vortex_kt2_walk import _seed_from_record
+            recorded = g5.read_entry(
+                root / f"oracle_step_entry_kt{kt:08d}.bin", "ORCA2G5-ice")
+            entry = _seed_from_record(s0, recorded, nk)
+            identity = {
+                "ssh": np.asarray(entry.eta.data),
+                "u": np.asarray(entry.u.data)[:, 1:],
+                "v": np.asarray(entry.v.data)[1:],
+                "T": np.asarray(entry.T.data),
+                "S": np.asarray(entry.S.data),
+            }
+            out["entry_identity"] = {
+                name: int(np.count_nonzero(identity[name] != np.asarray(
+                    recorded[name] if name == "ssh" else recorded[name][..., :nk])))
+                for name in identity
+            }
+            bt = g5.read_bt_frame(
+                root / f"oracle_bt_frames_kt{kt:08d}.bin", expect_step=kt)
+            stage1 = g5.read_stage(
+                root / f"oracle_stage_kt{kt:08d}_s1.bin",
+                expect_step=kt, expect_stage=1)
+            recorded_external = (
+                jnp.asarray(stage1["ssh"]),
+                jnp.asarray(g1.pad_u(bt["uu_b"])),
+                jnp.asarray(g1.pad_v(bt["vv_b"])),
+                jnp.asarray(g1.pad_u(bt["un_adv"])),
+                jnp.asarray(g1.pad_v(bt["vn_adv"])),
+            )
         else:
             entry = s0 if kt == 1 else nemo_entry(kt)
         for name in exposures:
             hooks, frame = EXPOSURES[name]
+            if record_step_entry and not without_recorded_external:
+                hooks = {**hooks,
+                         "stage_barotropic_output_override": recorded_external}
             kwargs = {}
             if case in FORCED:
                 fw, sf = (g4 if case == "ORCA2G4-sbc" else g5).nemo_supplied_forcing(
@@ -1426,6 +1470,10 @@ def main(argv=None) -> int:
                     help="G6 round-2 pair half: cyclic north HPG geometry")
     ap.add_argument("--without-vector-raw-vmask", action="store_true",
                     help="G6 round-2 pair half: compact vector V mask")
+    ap.add_argument("--record-step-entry", action="store_true",
+                    help="G9 round-6: seed a recorded kt>=2 entry and external handoff")
+    ap.add_argument("--without-recorded-external", action="store_true",
+                    help="G9 round-6 plant: remove the recorded external handoff")
     ap.add_argument("--case", choices=CASES, default=CASE)
     ap.add_argument("--allow-dirty", action="store_true")
     ap.add_argument("--output", type=Path, required=True)
@@ -1445,6 +1493,8 @@ def main(argv=None) -> int:
               without_stage3_salt=a.without_stage3_salt,
               without_hpg_fold_geometry=a.without_hpg_fold_geometry,
               without_vector_raw_vmask=a.without_vector_raw_vmask,
+              record_step_entry=a.record_step_entry,
+              without_recorded_external=a.without_recorded_external,
               case=a.case)
     a.output.write_text(json.dumps(out, indent=1) + "\n")
     if a.arm == "geometry":
