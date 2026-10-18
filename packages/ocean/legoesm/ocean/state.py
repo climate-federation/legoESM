@@ -3364,6 +3364,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # (stprk3_stg.f90:134-135, :177; :188-189, :221).  False keeps the
     # real-equal N+1 ratio over rn_Dt.
     rk3_stage_wzv_nemo_clock_pair: bool = False
+    # Stage 3 builds NEMO's tracer Krhs -- the FCT's two divided writes, then
+    # the surface, runoff and qsr terms in call order (stprk3_stg.f90:604,
+    # :637, :645, :717) -- and trazdf's content e3t(Kbb)*T(Kbb) +
+    # (p2dt*e3t(Kmm))*Krhs (trazdf.f90:284-289).  False keeps the content
+    # e3t(Kbb)*T - dt*(flux divergence) + (dt*e3t(Kmm))*sources.
+    rk3_stage3_tracer_krhs_nemo_order: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

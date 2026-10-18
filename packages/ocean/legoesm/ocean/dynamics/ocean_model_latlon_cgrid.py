@@ -493,6 +493,7 @@ def _compute_advection_flux_div(
     return_fct_activity: bool = False,
     return_fct_inputs: bool = False,
     fct_nemo_fold_exchange: bool = False,
+    return_fct_nemo_rhs: bool = False,
 ):
     """Compute advection flux divergence for a single tracer field.
 
@@ -536,6 +537,11 @@ def _compute_advection_flux_div(
     if return_fct_activity and return_fct_inputs:
         raise ValueError(
             "return_fct_activity and return_fct_inputs are mutually exclusive")
+    if return_fct_nemo_rhs and (return_fct_activity or return_fct_inputs
+                                or return_h_fluxes
+                                or tracer_advection not in ("ppm_fct", "fct2")):
+        raise ValueError(
+            "return_fct_nemo_rhs needs an FCT scheme and no other side output")
     # Wall tracer BC (#480): zero-gradient (Neumann) fill the RECONSTRUCTION
     # tracer over the dead cells so the flux-form face reconstructions (esp. the
     # wide WENO stencil) see a flat extension across solid walls / topographic
@@ -595,7 +601,13 @@ def _compute_advection_flux_div(
             implicit_w=fct_implicit_w,
             return_limiter_activity=return_fct_activity,
             nemo_fold_exchange=fct_nemo_fold_exchange,
+            return_nemo_trace=return_fct_nemo_rhs,
         )
+        if return_fct_nemo_rhs:
+            # traadv_fct.f90 writes Krhs twice: the averaged-upstream rate,
+            # then the limited anti-diffusive rate, each divided by e3t(Kmm).
+            div_hut, vert_flux_div, _fct_trace = fct_result
+            return div_hut, vert_flux_div, _fct_trace[-1]
         if return_fct_activity:
             div_hut, vert_flux_div, fct_activity = fct_result
         else:
@@ -778,8 +790,12 @@ def compute_advection_flux_div_pair(
     return_a_fct_activity: bool = False,
     return_fct_inputs: bool = False,
     fct_nemo_fold_exchange: bool = False,
+    return_fct_nemo_rhs: bool = False,
 ):
     """Advection flux divergence for TWO tracers (T, S) in one pass.
+
+    ``return_fct_nemo_rhs`` (FCT only): each pair is ``(div_h, vert, rhs)``
+    with ``rhs`` the FCT's NEMO source-order Krhs rate.
 
     ``return_b_h_fluxes`` (static Python bool, store_salt_flux capture):
     additionally return tracer B's HORIZONTAL face flux pair, as a 3-tuple
@@ -815,6 +831,9 @@ def compute_advection_flux_div_pair(
     if return_a_fct_activity and return_fct_inputs:
         raise ValueError(
             "return_a_fct_activity and return_fct_inputs are mutually exclusive")
+    if return_fct_nemo_rhs and (return_b_h_fluxes or return_a_fct_activity
+                                or return_fct_inputs):
+        raise ValueError("return_fct_nemo_rhs takes no other side output")
     # Trace-time opt-in gate (LEGOESM_TRACER_PAIR=1 → level-stacked
     # pair; baked into the compiled graph — flip BEFORE first compile).
     # DEFAULT OFF: the stack halves pad count + reconstruction calls
@@ -828,7 +847,23 @@ def compute_advection_flux_div_pair(
         return_b_h_fluxes
         or tracer_advection not in _LEVEL_SEPARABLE_H_SCHEMES
         or os.environ.get("LEGOESM_TRACER_PAIR", "0") != "1"
+        or return_fct_nemo_rhs
     ):
+        if return_fct_nemo_rhs:
+            _nemo_rhs_kw = dict(
+                recon_fill_mask=recon_fill_mask,
+                linssh_top_flux=linssh_top_flux,
+                fct_low_order_predictor=fct_low_order_predictor,
+                fct_base_thickness=fct_base_thickness,
+                fct_after_thickness=fct_after_thickness,
+                fct_implicit_w=fct_implicit_w,
+                fct_nemo_fold_exchange=fct_nemo_fold_exchange,
+                return_fct_nemo_rhs=True)
+            return tuple(_compute_advection_flux_div(
+                tr, tracer_advection, mass_flux_u, mass_flux_v,
+                w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
+                tr_before=tr_before, **_nemo_rhs_kw)
+                for tr, tr_before in ((tr_a, tr_a_before), (tr_b, tr_b_before)))
         pair_a_result = _compute_advection_flux_div(
             tr_a, tracer_advection, mass_flux_u, mass_flux_v,
             w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
@@ -2334,8 +2369,15 @@ def _nemo_ws_rk3_tracer_pair_step(
     return_fct_activity: bool = False,
     return_fct_inputs: bool = False,
     fct_nemo_fold_exchange: bool = False,
+    stage3_krhs_terms=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """NEMO key_RK3 tracer stage program (Wicker--Skamarock form).
+
+    ``stage3_krhs_terms=(terms_a, terms_b)`` (needs FCT and
+    ``stage3_content_written_order``): stage 3 builds NEMO's Krhs -- the FCT
+    rate, then each source term in NEMO's call order -- and the trazdf
+    content ``e3t(Kbb)*T(Kbb) + (p2dt*e3t(Kmm))*Krhs``; ``stage_source_rates[2]``
+    is not read.
 
     ``resume=(k, a_k, b_k)`` hands in the already-advanced stage-``k`` pair
     (k = 1 or 2) so stages ``<= k`` are not recomputed: the momentum program
@@ -2357,6 +2399,15 @@ def _nemo_ws_rk3_tracer_pair_step(
         raise ValueError("stage_transport_geometry must contain exactly 3 stages")
     if stop_after_stage not in (1, 2, 3):
         raise ValueError("stop_after_stage must be 1, 2, or 3")
+    if stage3_krhs_terms is not None and (
+            tracer_advection not in ("ppm_fct", "fct2")
+            or stage3_content_written_order is None
+            or stage3_advection_content_override is not None
+            or bbl_context is not None or return_fct_activity
+            or return_fct_inputs):
+        raise ValueError(
+            "stage3_krhs_terms needs FCT, stage3_content_written_order and "
+            "no BBL, content override or FCT side output")
     if stage_source_rates is None:
         zero_a = jnp.zeros_like(tr_a)
         zero_b = jnp.zeros_like(tr_b)
@@ -2463,8 +2514,13 @@ def _nemo_ws_rk3_tracer_pair_step(
                 return_fct_inputs=(
                     return_fct_inputs and stage_index == 2),
                 fct_nemo_fold_exchange=fct_nemo_fold_exchange,
+                return_fct_nemo_rhs=(
+                    stage3_krhs_terms is not None and stage_index == 2),
             )
-            if return_fct_activity and stage_index == 2:
+            rhs_a = rhs_b = None
+            if stage3_krhs_terms is not None and stage_index == 2:
+                (dh_a, dv_a, rhs_a), (dh_b, dv_b, rhs_b) = pair_result
+            elif return_fct_activity and stage_index == 2:
                 (dh_a, dv_a), (dh_b, dv_b), fct_activity = pair_result
             elif return_fct_inputs and stage_index == 2:
                 (dh_a, dv_a), (dh_b, dv_b), _raw_fct_inputs = pair_result
@@ -2479,7 +2535,6 @@ def _nemo_ws_rk3_tracer_pair_step(
                 (dh_a, dv_a), (dh_b, dv_b) = pair_result
                 fct_activity = None
             fd_a, fd_b = dh_a + dv_a, dh_b + dv_b
-            rhs_a = rhs_b = None
         if stage_index == 2 and bbl_context is not None:
             from legoesm.ocean.physics.bbl_adv import (
                 apply_bbl_diffusive_tendency,
@@ -2625,14 +2680,28 @@ def _nemo_ws_rk3_tracer_pair_step(
             None if _terms1 is None else _terms1[1])
     if stop_after_stage == 2:
         return a2, b2
-    fd2_a, fd2_b, _, _, fct_activity, fct_inputs = _flux_pair(
+    fd2_a, fd2_b, rhs2_a, rhs2_b, fct_activity, fct_inputs = _flux_pair(
         a2, b2, dt, 2, h_k_new)
     advection_content_a = h_k_old * tr_a - dt * fd2_a
     advection_content_b = h_k_old * tr_b - dt * fd2_b
     if stage3_advection_content_override is not None:
         advection_content_a, advection_content_b = (
             stage3_advection_content_override)
-    if stage3_content_written_order is not None:
+    if stage3_krhs_terms is not None:
+        # stprk3_stg.f90:604 zeroes Krhs; tra_adv (:637), tra_sbc_RK3 (:645)
+        # and tra_qsr (:717) add to it in that order; trazdf.f90:284-289 forms
+        # e3t(Kbb)*T(Kbb) + (p2dt*e3t(Kmm))*Krhs, each product and sum rounded.
+        e3t_bb, e3t_mm = stage3_content_written_order
+        sr = nemo_source_round
+        dt_h = sr(dt * e3t_mm)
+        krhs_a, krhs_b = rhs2_a, rhs2_b
+        for term in stage3_krhs_terms[0]:
+            krhs_a = sr(krhs_a + term)
+        for term in stage3_krhs_terms[1]:
+            krhs_b = sr(krhs_b + term)
+        content_a = sr(sr(e3t_bb * tr_a) + sr(dt_h * krhs_a))
+        content_b = sr(sr(e3t_bb * tr_b) + sr(dt_h * krhs_b))
+    elif stage3_content_written_order is not None:
         # trazdf.f90 2nd recurrence: e3t(Kbb)*T(Kbb) + p2dt*e3t(Kmm)*Krhs,
         # each product and the sum rounded as written; the argument is the
         # literal (e3t(Kbb), e3t(Kmm)) pair.
@@ -6976,6 +7045,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_live_operator_operands = [
             _nemo_ws_stage1_operator_operands, None, None]
         _nemo_ws_tracer_content_rhs = None
+        _stage3_krhs_terms = None
         _nemo_ws_advection_content_rhs = None
         _nemo_ws_fct_input_trace = None
         _nemo_ws_zdf_eta_kmm = None
@@ -8541,6 +8611,27 @@ class LatLonCGridOceanModel:
                     _zero_stage_source.at[..., 0].add(_salt_top),
                     None if _rnf_content is None else _rnf_content[1],
                     _h_s3_kmm))
+
+            if _cfg_b.rk3_stage3_tracer_krhs_nemo_order:
+                # The same stage-3 terms, kept apart so they add onto the FCT
+                # Krhs one at a time: trasbc.f90:297-298 (qns, sfx at level
+                # 1), :313-314 (runoff), then tra_qsr (stprk3_stg.f90:717).
+                if _stage3_T_written is None or _stage3_S_written is None:
+                    raise ValueError(
+                        "rk3_stage3_tracer_krhs_nemo_order needs "
+                        "rk3_stage3_heat_nemo_written and "
+                        "rk3_stage3_salt_nemo_written")
+                _rnf_terms = (
+                    ((), ()) if _rnf_content is None else tuple(
+                        (_add_rnf_stage_rate(
+                            _zero_stage_source, _rnf_content[i], _h_s3_kmm),)
+                        for i in (0, 1)))
+                _stage3_krhs_terms = (
+                    (_zero_stage_source.at[..., 0].set(_heat_top),
+                     *_rnf_terms[0], _stage3_qsr_kmm),
+                    (_zero_stage_source.at[..., 0].add(_salt_top),
+                     *_rnf_terms[1]),
+                )
 
             _stage12_source_terms = (
                 None
@@ -10310,6 +10401,7 @@ class LatLonCGridOceanModel:
                         else "one_step"),
                     stage_source_rates=_ws_stage_source_rates,
                     stage3_content_written_order=_stage3_e3t,
+                    stage3_krhs_terms=_stage3_krhs_terms,
                     # The written-order selector belongs to the weighted
                     # stage-1/2 call; this stage-3 finalizer has no weights.
                     bbl_context=_bbl_context,
