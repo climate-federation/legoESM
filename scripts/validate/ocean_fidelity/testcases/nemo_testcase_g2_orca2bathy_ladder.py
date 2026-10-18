@@ -953,6 +953,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                     entry, dt=card.dt_s, **kwargs))
             cand = card_surface(st)
             score_reg = reg
+            score_mask = None
             overlap_halo_unequal = None
             if record_step_entry:
                 # ORCA's two cyclic-overlap columns are MPI/domain halos, not
@@ -964,13 +965,16 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                              for region, mask in reg.items()}
                 for mask in score_reg.values():
                     mask[:, (0, -1)] = False
+                score_mask = np.ones_like(next(iter(score_reg.values())))
+                score_mask[:, (0, -1)] = False
                 overlap_halo_unequal = {
                     f: int(np.count_nonzero(
                         np.asarray(cand[f])[:, (0, -1)]
                         != np.asarray(g[n])[:, (0, -1)]))
                     for f, n in frame.items() if n in g
                 }
-            rows = [g1.row(f"{name}.kt{kt}.{f}", g[n], cand[f], score_reg)
+            rows = [g1.row(f"{name}.kt{kt}.{f}", g[n], cand[f], score_reg,
+                           mask=score_mask)
                     for f, n in frame.items() if n in g]
             levels = None
             if name.startswith("stage") and not record_step_entry:
