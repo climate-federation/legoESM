@@ -26,6 +26,8 @@ References
 
 from __future__ import annotations
 
+import math
+import warnings
 from typing import NamedTuple
 
 import jax
@@ -35,6 +37,7 @@ from legoesm import constants
 from legoesm.land.soil_grid import SoilGrid
 from legoesm.land.soil_hydraulics import (
     SoilHydraulicsConfig,
+    saturation_head,
     theta_from_psi,
     psi_from_theta,
     hydraulic_conductivity,
@@ -52,6 +55,10 @@ __param_spec__ = {
             "max_dse_per_iter": "numerics: per-iteration Picard step limit, fraction "
             "of (theta_sat - theta_r)",
             "pond_max": "numerics: surface ponding cap before overland runoff [m]",
+            "se_switch": "numerics: effective saturation below which a Picard layer "
+            "steps in theta instead of psi (primary-variable switch)",
+            "c_switch_per_m": "numerics: moisture capacity [1/m] below which a Picard "
+            "layer steps in theta instead of psi (primary-variable switch)",
             "fc_drain_saturation": "config-level knob (not auto-collected): the "
             "RichardsConfig field default is 0.0 (limiter OFF, guarded by `> 0.0`), which "
             "is the value the collector would seed — the lower bound of (0.0, 0.8), with no "
@@ -173,6 +180,27 @@ class RichardsConfig(NamedTuple):
     # ice density over porosity.  Read only when the caller passes log_impedance
     # (MultiLayerLand does so whenever soil freeze/thaw is on).  CLM5 value 6.
     ice_impedance_exponent: float = 6.0
+    # --- numerics: dry-layer primary-variable switch (Forsyth, Wu & Pruess 1995) ---
+    # Where the moisture capacity is tiny (a layer near residual water content) the
+    # Picard psi update turns a tiny source into a huge head step; the damping then
+    # shrinks the whole column step and the solve crawls without converging (one
+    # production day: 3550 of 4453 unconverged columns).  An unsaturated layer with
+    # Se < se_switch OR capacity < c_switch_per_m [1/m] takes the step in theta
+    # (theta + C*dpsi, the water change the mixed-form matrix already assumes) and
+    # inverts it to psi.  The fixed point is unchanged; only the iteration path.
+    # Both 0.0 = switch off.  Applied only with the air-entry van Genuchten curve
+    # (vg_air_entry_m < 0); see solve_richards for why the other curves are excluded.
+    se_switch: float = 0.01
+    c_switch_per_m: float = 1e-5
+
+
+def check_switch_thresholds(se_switch: float, c_switch_per_m: float) -> None:
+    """Raise ValueError unless the dry-layer switch thresholds are legal:
+    se_switch finite in [0, 1), c_switch_per_m finite and >= 0 [1/m]."""
+    if not (math.isfinite(se_switch) and 0.0 <= se_switch < 1.0):
+        raise ValueError(f"se_switch must be finite in [0, 1), got {se_switch!r}")
+    if not (math.isfinite(c_switch_per_m) and c_switch_per_m >= 0.0):
+        raise ValueError(f"c_switch_per_m must be finite and >= 0, got {c_switch_per_m!r}")
 
 
 class RichardsOutput(NamedTuple):
@@ -348,6 +376,26 @@ def solve_richards(
     psi_m = psi  # iterate
 
     _psi_dry_floor = psi_dry_floor(hydro_config)
+    _theta_lo = theta_from_psi(_psi_dry_floor, hydro_config)
+    _h_sat = saturation_head(hydro_config)
+    # The switch inverts theta -> psi every iteration, so it needs an inverse that
+    # is exact over the whole unsaturated range: only the air-entry van Genuchten
+    # curve.  Excluded, measured: PDI / Lu inverses are approximate (a column at
+    # rest moved -1000 m -> -3.9e6 m); the classic vG inverse clips near saturation
+    # (-1e-12 m -> -7.6e-5 m); Brooks-Corey clips likewise.  Clapp-Hornberger has an
+    # exact inverse, but on Cosby clays its dry floor sits at the -1e30 m head cap
+    # where the capacity is ~1e-28 1/m, and the theta step turned round-off-level
+    # head increments into O(1) water: unconverged columns created up to 260 m.
+    check_switch_thresholds(richards_config.se_switch, richards_config.c_switch_per_m)
+    _switch_requested = richards_config.se_switch > 0.0 or richards_config.c_switch_per_m > 0.0
+    _switch_on = _switch_requested and (
+        _curve == "van_genuchten" and hydro_config.vg_air_entry_m < 0.0)
+    if _switch_requested and not _switch_on:
+        warnings.warn(
+            "solve_richards: se_switch / c_switch_per_m are set but the dry-layer "
+            f"switch is inactive for retention curve {_curve!r} (vg_air_entry_m="
+            f"{hydro_config.vg_air_entry_m!r}); the thresholds have no effect.",
+            stacklevel=2)
 
     def _bottom_drain_K(K_m):
         """Free-drainage bottom conductivity, CFL-capped: ONE expression shared by
@@ -505,9 +553,17 @@ def solve_richards(
         # Schur relation still holds) by the factor that would cap the UNDAMPED
         # trial theta change at max_dse_per_iter of the theta range; the applied
         # theta change is not bounded by it (see RichardsConfig).
-        theta_try = theta_from_psi(jnp.maximum(psi_m + dpsi, _psi_dry_floor), hydro_config)
         theta_span = jnp.broadcast_to(hydro_config.theta_sat - hydro_config.theta_r,
                                       theta_m.shape)
+        theta_try = theta_from_psi(jnp.maximum(psi_m + dpsi, _psi_dry_floor), hydro_config)
+        if _switch_on:
+            # Unsaturated near-dry layers step in theta (see RichardsConfig.se_switch).
+            def _theta_step(d):
+                return jnp.clip(theta_m + C_m * d, _theta_lo, hydro_config.theta_sat)
+            switched = (((theta_m - hydro_config.theta_r) / theta_span
+                         < richards_config.se_switch)
+                        | (C_m < richards_config.c_switch_per_m)) & (psi_m < _h_sat)
+            theta_try = jnp.where(switched, _theta_step(dpsi), theta_try)
         dse_try = jnp.max(jnp.abs(theta_try - theta_m) / theta_span, axis=1)
         # limit / max(dse, limit): equals min(1, limit/dse) without a tiny-
         # denominator division whose float32 VJP overflows (0 * inf = NaN).
@@ -521,7 +577,11 @@ def solve_richards(
         # aware dry-side floor (_psi_dry_floor, see _SE_DRY_FLOOR): a fully-dried
         # layer (C, K -> 0) would otherwise drive dpsi -> ±inf and NaN the Thomas
         # solve.  maximum() leaves the whole normal + wet range untouched.
-        psi_new = jnp.maximum(psi_m + dpsi, _psi_dry_floor)
+        psi_new = psi_m + dpsi
+        if _switch_on:
+            psi_new = jnp.where(switched, psi_from_theta(_theta_step(dpsi), hydro_config),
+                                psi_new)
+        psi_new = jnp.maximum(psi_new, _psi_dry_floor)
         # No theta clip: theta_from_psi is bounded below at theta_r by the van-
         # Genuchten asymptote, and ABOVE theta_sat it is the physical elastic /
         # ponding storage (theta_sat + S_s*theta_sat*psi).  Clipping to theta_sat
@@ -692,12 +752,12 @@ def solve_richards(
     refill = jnp.clip(created, 0.0, draw)
     excess = jnp.maximum(created - refill, 0.0)
     deficit = jnp.maximum(-created, 0.0)    # refill = 0 whenever created < 0
-    # Unsaturated layers only (psi < 0): psi_from_theta has no inverse for the
-    # elastic storage above saturation, so a saturated layer is never touched.
+    # Unsaturated layers only (psi below the saturation head): a saturated layer
+    # is never touched.
     # Excess comes out of each layer's water above the dry floor; a deficit goes
     # into each layer's room below saturation; both in proportion, capped so no
     # layer leaves [theta_floor, theta_sat].
-    unsat = psi_final < 0.0
+    unsat = psi_final < _h_sat
     unsat_avail = jnp.where(
         unsat, jnp.maximum((theta_final - theta_floor) * dz[None, :], 0.0), 0.0)
     unsat_room = jnp.where(

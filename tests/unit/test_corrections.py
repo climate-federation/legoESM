@@ -1079,8 +1079,8 @@ class TestSoilHydraulicsConsistency:
         )
         cfg = SoilHydraulicsConfig()
         theta = jnp.linspace(cfg.theta_r + 0.01, cfg.theta_sat - 0.01, 20)
-        psi = van_genuchten_psi(theta, cfg)
-        theta_back = van_genuchten_theta(psi, cfg)
+        psi = van_genuchten_psi(theta, cfg, 0.0)
+        theta_back = van_genuchten_theta(psi, cfg, 0.0)
         assert jnp.allclose(theta, theta_back, atol=1e-4)
 
     def test_pdi_approximate_inversion(self):
@@ -1117,7 +1117,7 @@ class TestSoilHydraulicsConsistency:
         )
         cfg = SoilHydraulicsConfig()
         psi = jnp.linspace(-0.1, -10.0, 50)
-        K = van_genuchten_K(psi, cfg)
+        K = van_genuchten_K(psi, cfg, 0.0)
         # K should be monotonically decreasing (more negative psi = drier)
         dK = K[1:] - K[:-1]
         assert float(jnp.max(dK)) <= 1e-10, "K should decrease with suction"
@@ -1125,12 +1125,14 @@ class TestSoilHydraulicsConsistency:
     def test_theta_bounded(self):
         """Water content should be bounded between theta_r and theta_sat."""
         from legoesm.land.soil_hydraulics import (
-            SoilHydraulicsConfig, theta_from_psi
+            SoilHydraulicsConfig, saturation_head, theta_from_psi
         )
         for curve in ["van_genuchten", "clapp_hornberger", "pdi", "lu"]:
             cfg = SoilHydraulicsConfig(retention_curve=curve)
             psi = jnp.linspace(-0.01, -100.0, 100)
             theta = theta_from_psi(psi, cfg)
             assert float(jnp.min(theta)) >= 0.0, f"{curve}: theta < 0"
-            assert float(jnp.max(theta)) <= cfg.theta_sat + 1e-6, \
+            # above the saturation head only the elastic storage S_s*theta_sat*dpsi
+            elastic = cfg.S_s * cfg.theta_sat * max(-0.01 - saturation_head(cfg), 0.0)
+            assert float(jnp.max(theta)) <= cfg.theta_sat + elastic + 1e-6, \
                 f"{curve}: theta > theta_sat"

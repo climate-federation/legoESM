@@ -81,9 +81,9 @@ def _hydro_cfg(curve):
 # Suctions strictly BELOW the air-entry pressure of the sharp-air-entry
 # families (Clapp-Hornberger / Brooks-Corey default psi_sat = psi_b =
 # -0.478 m), i.e. genuinely unsaturated.  Above air entry those curves are
-# flat at theta_sat BY CONSTRUCTION (see
+# flat (Brooks-Corey) or elastic only (Clapp-Hornberger) BY CONSTRUCTION (see
 # TestSoilRetentionNearSaturation), so a fixture that straddled it would
-# report a scheme property as a dead gradient.
+# report a scheme property as a vanishing gradient.
 _UNSAT_PSI = np.array([-0.6, -1.0, -3.0, -10.0, -50.0])
 
 
@@ -187,22 +187,32 @@ class TestSoilRetentionCurves:
 class TestSoilRetentionNearSaturation:
     """The near-saturation band ``psi in (psi_air_entry, 0)``.
 
-    NOT a bug, but a differentiability CLIFF worth pinning: the
-    sharp-air-entry families (Clapp-Hornberger / Campbell / Brooks-Corey)
-    are flat at ``theta_sat`` above their air-entry pressure, so
+    Brooks-Corey is flat at ``theta_sat`` above its air-entry pressure, so
     ``dtheta/dpsi`` is EXACTLY zero there and the soil-moisture adjoint
-    through ``theta`` is dead in that band; the elastic specific-storage
-    term only switches on at ``psi >= 0``.  The smooth families (van
-    Genuchten / PDI / Lu) stay differentiable throughout.  A parameter-
-    estimation run that lands a wet column in that band gets no gradient
-    from those three schemes — pin the behaviour so the split is explicit
-    rather than discovered as a silent training stall.
+    through ``theta`` is dead in that band; its elastic specific-storage
+    term only switches on at ``psi >= 0``.  Clapp-Hornberger / Campbell
+    start the elastic branch at psi_sat (2026-10-15: the flat band lost
+    water from ponded columns), so their slope there is S_s*theta_sat.
+    The smooth families (van Genuchten / PDI / Lu) stay differentiable
+    throughout.  A parameter-estimation run that lands a wet column in that
+    band gets no gradient from Brooks-Corey and only the elastic one from
+    Clapp-Hornberger — pin the behaviour so the split is explicit rather
+    than discovered as a silent training stall.  Run with JAX_ENABLE_X64=1.
     """
 
     _NEAR_SAT = np.array([-0.40, -0.20, -0.05])   # above the -0.478 m air entry
 
-    @pytest.mark.parametrize("curve", ["clapp_hornberger", "campbell",
-                                       "brooks_corey"])
+    @pytest.mark.parametrize("curve", ["clapp_hornberger", "campbell"])
+    def test_clapp_hornberger_is_elastic_above_air_entry(self, curve):
+        from legoesm.land.soil_hydraulics import theta_from_psi
+        cfg = _hydro_cfg(curve)
+        psi = jnp.asarray(self._NEAR_SAT)
+        g = jax.grad(lambda p: jnp.sum(theta_from_psi(p, cfg)))(psi)
+        # exact up to rounding of S_s*theta_sat in the gradient's own precision
+        rtol = 10 * np.finfo(np.asarray(g).dtype).eps
+        np.testing.assert_allclose(np.asarray(g), cfg.S_s * cfg.theta_sat, rtol=rtol)
+
+    @pytest.mark.parametrize("curve", ["brooks_corey"])
     def test_sharp_air_entry_capacity_is_zero_near_saturation(self, curve):
         from legoesm.land.soil_hydraulics import theta_from_psi
         cfg = _hydro_cfg(curve)

@@ -3718,7 +3718,8 @@ class ModelDriver:
                 _lp = clm_surface_provider(
                     _lat_deg, _lon_deg,
                     surfdata_path=self.config.clm_surfdata_path,
-                    variant="multilayer")()
+                    variant="multilayer",
+                    vg_air_entry_m=float(self.config.land_soil_vg_air_entry_m))()
                 _alb = jnp.asarray(_lp.albedo_veg).reshape(
                     jnp.asarray(self.grid.grid_lat).shape)
                 # Defensive only: the provider floors/normalises PFT cover, so
@@ -4033,7 +4034,9 @@ class ModelDriver:
             surfdata_file = surfdata_path
         else:
             surfdata_file = download_clm_surfdata()
-        surface_map = load_clm_surface(surfdata_file, lat_deg, lon_deg)
+        surface_map = load_clm_surface(
+            surfdata_file, lat_deg, lon_deg,
+            vg_air_entry_m=float(self.config.land_soil_vg_air_entry_m))
 
         # Non-spatial defaults from the config; clm_multilayer_setup overwrites only
         # hydraulics/thermal.  Thread the active snow-albedo + stomata features the
@@ -4137,6 +4140,18 @@ class ModelDriver:
                 "land_soil_ice_impedance_exponent"]:
             logger.warning("  land soil ice impedance exponent set but soil "
                            "freeze/thaw is off: it has no effect")
+        # Soil-water numerics, same placement: the bake rebuilds ``hydraulics``
+        # from the CLM map with library defaults, so set them after it.
+        cfg = cfg._replace(
+            hydraulics=cfg.hydraulics._replace(
+                vg_air_entry_m=float(self.config.land_soil_vg_air_entry_m)),
+            richards=cfg.richards._replace(
+                se_switch=float(self.config.land_soil_richards_se_switch),
+                c_switch_per_m=float(self.config.land_soil_richards_c_switch_per_m)))
+        logger.info("  land soil water: retention curve %s, air-entry head %g m; "
+                    "dry-layer switch below Se %g or capacity %g 1/m",
+                    cfg.hydraulics.retention_curve, cfg.hydraulics.vg_air_entry_m,
+                    cfg.richards.se_switch, cfg.richards.c_switch_per_m)
         # Canopy solver smoothing widths, same placement: the calibration above
         # replaces surface_scheme with a fresh TwoLeafCanopyConfig, so a deck
         # value set any earlier would be discarded.

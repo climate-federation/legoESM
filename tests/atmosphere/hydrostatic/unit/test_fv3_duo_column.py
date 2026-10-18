@@ -1028,7 +1028,7 @@ def test_m6_setup_forcings_land_on_the_duo_columns(tmp_path, monkeypatch):
     assert np.isfinite(np.asarray(drv.state.native["state"]["pt"])).all()
 
 
-def _fake_surface_map_by_latitude(path, lat_deg, lon_deg):
+def _fake_surface_map_by_latitude(path, lat_deg, lon_deg, *, vg_air_entry_m):
     """A CLM map whose plant type is boreal needleleaf (PFT 2) exactly on
     the columns north of 60N and bare soil elsewhere -- at the latitudes
     the LOADER was handed, so the PFT-weighted land parameters (root

@@ -104,6 +104,9 @@ _EQ_STEPS = 600      # ~150 days of annual-mean spin -> deep-soil equilibrium
 # is deployed in AMIP cannot drift apart; the CLI flags below still override the
 # mode for exploratory fits (a fit that overrides them is NOT the baked model).
 _CALIBRATED = calibrated_multilayer_setup()
+# Air-entry head of the soil hydraulics this calibrator runs (build_multilayer_cfg),
+# shared with the CLM map's wilting point / field capacity.
+_VG_AIR_ENTRY_M = SoilHydraulicsConfig().vg_air_entry_m
 _N_LAYERS = _CALIBRATED["soil_grid"].n_layers
 _SOIL_DEPTH_M = _CALIBRATED["soil_grid"].total_depth
 _SOIL_GROWTH = _CALIBRATED["soil_grid"].growth_factor
@@ -402,7 +405,8 @@ def build_multilayer_cfg(cp, data):
     theta_sat_s = jnp.maximum(col("theta_sat") * sm_scale,
                               jnp.maximum(col("theta_r") + 0.05, plant_fc + 0.02))
     hyd = SoilHydraulicsConfig(theta_r=col("theta_r"), theta_sat=theta_sat_s,
-                               alpha_vg=col("alpha_vg"), n_vg=col("n_vg"), K_sat=col("K_sat"))
+                               alpha_vg=col("alpha_vg"), n_vg=col("n_vg"), K_sat=col("K_sat"),
+                               vg_air_entry_m=_VG_AIR_ENTRY_M)
     # Soil thermal inertia: per-cell TEXTURE (sand/clay) x per-PFT scale, blended
     # toward ICE on glacier cells (deep-ice inertia boost).  Reuse the SHARED
     # definition so the calibrator and the bake never diverge.
@@ -873,7 +877,8 @@ def load_training_data(diurnal_npz: str, n_sub: int, seed: int = 0,
     land = D["lsm"].reshape(nlat, nlon) > 0.5; lidx = np.where(land.ravel())[0]
     latc = np.deg2rad(np.broadcast_to(lat1[:, None], (nlat, nlon))).ravel()[lidx]
     lonc = lon1[lidx % nlon]
-    cmap = load_clm_surface(download_clm_surfdata(), np.rad2deg(latc), lonc)
+    cmap = load_clm_surface(download_clm_surfdata(), np.rad2deg(latc), lonc,
+                            vg_air_entry_m=_VG_AIR_ENTRY_M)
     sub = np.random.default_rng(seed).choice(lidx.size, size=min(n_sub, lidx.size),
                                              replace=False)
     g = lambda k: D[k].reshape(12, nh, -1)[:, :, lidx][:, :, sub]       # (12, nh, ncol)

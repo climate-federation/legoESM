@@ -850,6 +850,46 @@ def test_land_soil_freeze_thaw_round_trip_and_decks():
         assert cfg.land_soil_freeze_thaw is want, deck
 
 
+def test_land_soil_water_numerics_round_trip_deck_and_range():
+    """The air-entry head and the Richards dry-layer switch thresholds reach
+    ExperimentConfig, production states them explicitly (user 2026-10-14), and
+    illegal values are refused before the run."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land"]
+    f = ("land_soil_vg_air_entry_m", "land_soil_richards_se_switch",
+         "land_soil_richards_c_switch_per_m")
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert tuple(getattr(cfg0, k) for k in f) == (-0.02, 0.01, 1e-5)
+    cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(base + [
+        "--land-soil-vg-air-entry-m", "0", "--land-soil-richards-se-switch", "0.05",
+        "--land-soil-richards-c-switch-per-m", "0"]), parser))
+    assert tuple(getattr(cfg1, k) for k in f) == (0.0, 0.05, 0.0)
+    try:                                         # 0.0 = classic vG, switch off: legal
+        cfg1.validate_strict()
+    except ValueError as exc:                    # (this bare deck has no land mask)
+        assert "land_soil_" not in str(exc), exc
+    p = build_arg_parser()
+    rows = load_yaml_config(str(_repo_root() / "config" / "amip" / "amip_production.yaml"), p)
+    assert tuple(rows.get(k) for k in f) == (-0.02, 0.01, 1e-5)
+    for flag, bad in (("--land-soil-vg-air-entry-m", "0.01"),
+                      ("--land-soil-vg-air-entry-m", "nan"),
+                      ("--land-soil-vg-air-entry-m", "-inf"),
+                      ("--land-soil-richards-se-switch", "-0.1"),
+                      ("--land-soil-richards-se-switch", "1"),
+                      ("--land-soil-richards-se-switch", "nan"),
+                      ("--land-soil-richards-c-switch-per-m", "-1e-5"),
+                      ("--land-soil-richards-c-switch-per-m", "inf")):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+            base + [f"{flag}={bad}"]), parser))
+        with pytest.raises(ValueError, match=flag[2:].replace("-", "_")):
+            cfg.validate_strict()
+    slab = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--land-soil-richards-se-switch", "0.2"]), parser))
+    with pytest.raises(ValueError, match="requires use_multilayer_land"):
+        slab.validate_strict()
+
+
 def test_land_soil_ice_impedance_exponent_round_trip_deck_and_range():
     """CLM5 e_ice reaches ExperimentConfig, production states it explicitly
     (user 2026-09-28), and a value outside [0, 10] is refused."""
