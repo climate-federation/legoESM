@@ -1,8 +1,9 @@
 # Lane B — round 16 (vmix_r16): Decision 138 survey; L1 = G5 + ORCA2's bottom boundary layer built
 
-Status: **STOPPED_FOR_RECORD.** Survey of the four Decision-138 pieces done; L1 (G5 + ORCA2's diffusive bottom
-boundary layer) built, L1-selected, acquisition defined. Nothing scored (no L1 record). Decisions in force: D128-D130,
-D136, D138. Codex review: paused (quota). Evidence: `gridladder_vmix_rounds/round16/`. Preregistration:
+Status: **L1 CERTIFIED** (resume, 2026-10-18; section 5): bit-for-bit with NEMO's record kt 1..10 under both labels,
+every field, after three L1-selected NEMO statements. Round start: survey of the four Decision-138 pieces; L1 (G5 +
+ORCA2's diffusive bottom boundary layer) built, L1-selected, acquisition defined. Decisions in force: D128-D130,
+D136, D138. Codex review: paused (quota) at round start; resume: codex review: operator. Evidence: `gridladder_vmix_rounds/round16/`. Preregistration:
 `PREREG_nemo_testcases_gridladder_vmix_l1_round16.md`, committed `63afa503c` before any L1 code.
 
 Commits: `63afa503c` prereg; `ff628988a` L1 card, deck, acquisition, checker, tests, ladder case lists; `5cd5c2bd8`
@@ -127,9 +128,75 @@ UNVERIFIED:
   trend between `tra_bbc` and `tra_dmp` and uses `gdept_1d(mbkt)*(1+r3t(Kmm))`. Either may cost last bits.
 - The survey's "our model today" column is read off the code; only the BBL arm has a statement-level certification.
 
+## 5. Resume: L1 scored on its record, three statements fixed, L1 certified
+
+Record: `gridladder_vmix_rounds/round16/oracle_l1_r16` (operator: `L1_PREFLIGHT_OK` at `34ff2492a`, nothing built;
+`L1_ACQUISITION_PASS steps=1..10 restarts=2..10`). CPU, x64, `land.sh` PYTHONPATH. Operator decision on section 1's
+question: option (1) (isoneutral diffusion its own rung; the eddy-induced velocity later, on G9 + isoneutral).
+Evidence: `round16/score/`.
+
+**Where the BBL acts, on the record** (NEMO L1 vs G5's admitted record, kt 1): stages 1 and 2 bit-identical in T, S,
+u, v and sea level; stage 3 differs in T (2,655 cells) and S (2,282) only, u/v/sea level 0 unequal; the 913 moved
+columns all lie in the footprint (columns touching a wet face whose two bottom levels differ), 0 outside. The checker
+refuses G5's own record (exit 1). As the survey said.
+
+**First score (as built): not certified.** kt 1 exact at the surface; kt 2 onward DEBT under both labels. The walk:
+kt 1 stage 3 was the first differing state (stages 1-2 exact), T 52 / S 6 cells. Three NEMO statements, each fixed
+L1-selected (two new switches, default off; nothing else selects them):
+
+| # | NEMO statement | ORCA2_OMIP_L4 line | SUBROUTINE | card before | cells it cost |
+|---|---|---|---|---|---|
+| 1 | BBL trend added to Krhs, after the surface terms, before the vertical solve | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:258`, called at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:739` | `tra_bbl_dif` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:217`) | added as content to the stage flux divergence | kt 1: 45 bottom T cells, 1-2 units in the last place (S exact) |
+| 2 | after the stage-3 update and vertical solve, T/S exchanged on the north fold: the image half of the pivot row takes its mirror | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:795-796` -> `ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:620-628` | `stp_RK3_stg` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:78`); `lbc_nfd_dp` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:561`) | no tracer exchange; the BBL broke the row's symmetry | kt 1: 7 T + 6 S cells in two pivot-row columns |
+| 3 | BBL bottom depth `gdept_1d(mbkt)*(1+r3t(Kmm))`, the stored stage-3 ratio | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:412` | `bbl` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:357`) | reference depth times a ratio of thickness sums: equal only while the entry sea level is zero | kt 4 (given NEMO's entry): one face's gate flips, 6 T + 4 S cells |
+
+- (1) and (3) sit behind `bbl_nemo_stage3_krhs`, (2) behind `rk3_fold_exchange_tracer_pivot_row`; the L1 card selects
+  both and its selector checks them. Measured: the card's bottom reference depth equals `gdept_1d(mbkt)` in all 16,433
+  wet columns; (1) uses the card's existing stage-3 `e3t(Kmm)`, (3) its existing stage-3 `1+r3t(Kmm)`.
+- Not a statement change elsewhere: the gate, coefficients and geometry are unchanged.
+
+**Score after the fixes (packages tree `eaabad51`, commit `40b5e4413`):**
+- **INDEPENDENT kt 1-10:** 68 rows + 36 all-level rows (u, v, T, S at kt 2-10): every row max 0, unequal 0, dry
+  unequal 0. 4,162 comparison entries, none nonzero.
+- **GIVEN-NEMO-ENTRY (entries kt 1/3/5/7/9, one- and two-step):** 68 rows + 20 all-level rows: every row max 0.
+  2,608 entries, none nonzero.
+- D127 census (flushed subnormals) empty: no unequal cell. Classes: every row exact. **L1 CERTIFIED.**
+- Stage 3 at kt 1 and kt 4 (from NEMO's entry): T and S 0 unequal at every level.
+
+**Purity** (base `f8b546f1a6` vs the fixed tree): one-step jaxprs of the full ORCA2 (138,746 lines), DINO (123,234),
+G5 (168,423), V1 (174,013), V2 (174,046), V3 (174,349), V4 and V5 (176,180) **IDENTICAL**; L1's changes
+(169,583 -> 169,643).
+
+**L1 record test** (`test_nemo_testcase_l1_orca2bbl.py`, kt 1-2, skipped when the record is absent; the V-rung
+record helper takes `frame=False`, nothing duplicated): control (the BBL moves NEMO's kt-2 T vs G5's record); the
+stage check above; every independent-arm field kt 1-2, wet and dry. Model step jitted, state a traced input, x64.
+Plus a record-free check of the pivot-row exchange.
+- **Plant** (scratch clone; the stage-3 Krhs addition removed): **1 failed**, kt 1 T and S unequal.
+- **Restored** (this tree): L1 file **10 passed**, 0 skipped.
+
+Preregistration: P1 confirmed (acquisition); P2 confirmed (stage 3 only, footprint only); **P3 refuted as built**
+(three statements, the two suspects it named among them), confirmed after the fixes; P4 confirmed (purity above).
+
+GATES_PLACEHOLDER
+
+ASKED (resume): score both labels; confirm where the BBL acts; fix cited, L1-selected statements; L1 record test with
+plant; gates.
+UNASKED (resume), offered for revert:
+- two new config switches (default off) rather than changing the existing BBL arm for every card;
+- the pivot-row exchange placed after the vertical solve, before the conservation fixer (NEMO has no fixer);
+- `--check-bbl-stages` added to the L1 checker;
+- a record-free unit check of the pivot-row exchange.
+
+Findings, one line each (no action taken):
+- The card's BBL north neighbour on the pivot row reads the row's own mirror; with a stored pivot row NEMO's ghost is
+  the mirror of the row below. Inert on this record (the image half is overwritten; no source-half cell differed).
+- The full ORCA2 card selects the diffusive BBL without these three statements.
+
+UNVERIFIED (resume): beyond kt 10 nothing scored; the full ORCA2 card's BBL not re-measured.
+
 ## Machine lines
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r16/repo
-ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r16/repo/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_orca2bbl/run.sh
-DECISION_NEEDED: the eddy-induced velocity cannot run without isoneutral diffusion — (1) a G9 + isoneutral rung first, then + eddy-induced velocity [pick]; (2) one rung G9 + isoneutral + eddy-induced velocity (not needed before G9 certifies; L1-L3 proceed)
-ROUND_STATUS: STOPPED_FOR_RECORD — survey done (BBL, geothermal, isoneutral on G5; eddy-induced velocity needs G9 + isoneutral; only geothermal reads a file, in the on-disk tarball); L1 = G5 + ORCA2's diffusive BBL built through the existing arm, every other card's jaxpr identical; acquisition reuses G5's binaries; codex review: paused (quota).
+ACQUISITION_NEEDED: NONE
+DECISION_NEEDED: NONE
+ROUND_STATUS: L1_CERTIFIED — G5 + ORCA2's diffusive BBL bit-for-bit with NEMO kt 1..10 under both labels (4,162 + 2,608 entries, every one 0, dry included) after three L1-selected NEMO statements (BBL trend into stage-3 Krhs, trabbl.f90:258; BBL depth gdept_1d*(1+r3t(Kmm)), trabbl.f90:412; T/S north-fold exchange of the pivot row, stprk3_stg.f90:795-796); the BBL acts at stage 3 only, T/S only, inside the footprint; every other card's jaxpr identical; L1 record test fails with the BBL wiring removed; codex review: operator.
