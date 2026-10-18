@@ -1704,6 +1704,21 @@ def test_literal_raw_mixing_length_reverse_gradient_is_finite_at_zero_tke():
     cfg = TKEConfig(tke_mxl_raw_evaluation="nemo_literal")
     e = jnp.asarray([0.0, 1.0e-6, 3.0e-4])
     n2 = jnp.asarray([1.0e-5, 2.0e-5, -1.0e-6])
-    g = np.asarray(jax.jit(jax.grad(
-        lambda x: jnp.sum(_tke_raw_mixing_length(x, n2, cfg))))(e))
+    f = jax.jit(lambda x: _tke_raw_mixing_length(x, n2, cfg))
+    g = np.asarray(jax.grad(lambda x: jnp.sum(f(x)))(e))
     assert np.all(np.isfinite(g))
+
+    # Wet lanes (en > 0): derivative equals the unguarded formula's exactly.
+    rsmall = 0.5 * jnp.finfo(e.dtype).eps
+    floor = _tke_raw_mixing_length(jnp.zeros(1), n2[:1], cfg)[0]
+
+    def unguarded(x):
+        return jnp.maximum(jnp.sqrt((2.0 * x) / jnp.maximum(n2, rsmall)), floor)
+
+    g_ref = np.asarray(jax.jit(jax.grad(lambda x: jnp.sum(unguarded(x))))(e))
+    assert np.all(g_ref[1:] != 0.0)
+    np.testing.assert_array_equal(g[1:], g_ref[1:])
+    d = jnp.asarray([0.0, 2.0e-7, -5.0e-5])
+    _, t = jax.jit(lambda x, v: jax.jvp(f, (x,), (v,)))(e, d)
+    _, t_ref = jax.jit(lambda x, v: jax.jvp(unguarded, (x,), (v,)))(e, d)
+    np.testing.assert_array_equal(np.asarray(t)[1:], np.asarray(t_ref)[1:])

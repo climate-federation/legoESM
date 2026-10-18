@@ -1134,5 +1134,20 @@ def test_nemo_cen2_tracer_rhs_reverse_gradient_is_finite_on_dry_cells():
         rhs = model_module._nemo_cen2_tracer_rhs(tr, p_u, p_v, p_w, h, tm, grid)
         return jnp.sum(jnp.where(tm > 0.5, rhs, 0.0) ** 2)
 
-    for g in jax.jit(jax.grad(loss, argnums=(0, 1)))(tracer, e3t):
+    grads = jax.jit(jax.grad(loss, argnums=(0, 1)))(tracer, e3t)
+    for g in grads:
         assert np.all(np.isfinite(np.asarray(g)))
+
+    # Wet cells: e3t enters only as the divisor, so the unguarded formula's
+    # derivative is d(rhs)/d(e3t) = -rhs/e3t, i.e. dL/de3t = -2 rhs^2 / e3t.
+    wet = tmask > 0.5
+    rhs = np.asarray(model_module._nemo_cen2_tracer_rhs(
+        tracer, p_u, p_v, p_w, e3t, tm, grid))
+    ref = np.where(wet, -2.0 * rhs ** 2 / np.where(wet, np.asarray(e3t), 1.0), 0.0)
+    assert np.all(np.abs(ref[wet]) > 0.0)
+    # Rounding bound 1e-13 relative (two rounded divisions vs one).
+    np.testing.assert_allclose(np.asarray(grads[1])[wet], ref[wet], rtol=1.0e-13, atol=0.0)
+    d = jnp.asarray(rng.standard_normal(e3t.shape) * tmask)
+    jvp = jax.jit(lambda h, v: jax.jvp(lambda x: loss(tracer, x), (h,), (v,))[1])(e3t, d)
+    np.testing.assert_allclose(float(jvp), float(np.sum(ref * np.asarray(d))),
+                               rtol=1.0e-13, atol=0.0)

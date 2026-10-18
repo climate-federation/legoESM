@@ -7,6 +7,7 @@ import json
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round316_branch_flips as flips,
@@ -53,5 +54,17 @@ def test_lockstep_counts_known_flips_through_jit_scan_cond_and_while():
     assert _count(branchy, x, y) >= 2                  # the gt lane + the cond index
 
 
-def test_fused_grad_parser_requires_a_rung():
-    assert callable(fused.fused) and callable(fused.main)
+def test_fused_grad_parser_requires_a_rung(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(fused, "fused", lambda *a: calls.append(a) or {"ok": 1})
+    out = tmp_path / "o.json"
+    for argv in (["--output", str(out)], ["--rung", "nope", "--output", str(out)]):
+        monkeypatch.setattr("sys.argv", ["fused", *argv])
+        with pytest.raises(SystemExit) as exc:
+            fused.main()
+        assert exc.value.code == 2
+    assert calls == []
+    monkeypatch.setattr("sys.argv", ["fused", "--rung", "rung0", "--output", str(out)])
+    assert fused.main() == 0
+    assert calls == [("rung0", 10, ("T", "ssh"))]
+    assert json.loads(out.read_text()) == {"ok": 1}

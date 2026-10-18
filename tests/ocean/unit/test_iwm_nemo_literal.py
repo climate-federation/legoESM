@@ -157,9 +157,12 @@ def test_literal_form_refuses_mevar_native_policy_and_the_generic_form():
         _card(case)
 
 
-def test_literal_iwm_reverse_gradient_is_finite_where_n2_is_clipped():
+def test_literal_iwm_reverse_gradient_is_finite_where_n2_is_clipped(monkeypatch):
     """sqrt(max(0, N^2)) has an infinite slope at 0; the jitted reverse pass
-    through the literal IWM must stay finite there (round 316, rung 10)."""
+    through the literal IWM must stay finite there (round 316, rung 10), and
+    equal the unguarded sqrt's derivative where N^2 > 0."""
+    import legoesm.ocean.physics.vertical_mixing.internal_wave_mixing as iwm_mod
+
     avt, avs, avm, f, rn2, s, ht0, gd, e3, wm = _cases()
     assert (rn2 <= 0.0).any()
     forcing = IWMForcing(ebot=jnp.asarray(f[1]), ecri=jnp.asarray(f[0]),
@@ -174,3 +177,20 @@ def test_literal_iwm_reverse_gradient_is_finite_where_n2_is_clipped():
 
     g = np.asarray(jax.jit(jax.grad(loss))(jnp.asarray(rn2)))
     assert np.all(np.isfinite(g)) and np.any(g != 0.0)
+
+    # Positive N^2 everywhere: guarded VJP/JVP equal the unguarded jnp.sqrt's.
+    n2_wet = jnp.asarray(np.abs(rn2) + 1.0e-6)
+    d = jnp.asarray(np.random.default_rng(316).standard_normal(rn2.shape) * 1.0e-7)
+
+    def derivs():
+        vjp = jax.jit(jax.grad(loss))(n2_wet)
+        jvp = jax.jit(lambda x, v: jax.jvp(loss, (x,), (v,))[1])(n2_wet, d)
+        return np.asarray(vjp), float(jvp)
+
+    vjp, jvp = derivs()
+    monkeypatch.setattr(iwm_mod, "safe_sqrt", jnp.sqrt)
+    vjp_ref, jvp_ref = derivs()
+    assert np.all(np.isfinite(vjp_ref)) and np.any(vjp_ref != 0.0) and jvp_ref != 0.0
+    # Rounding bound: the two jitted graphs fuse differently (measured 6.8e-16).
+    np.testing.assert_allclose(vjp, vjp_ref, rtol=1.0e-14, atol=0.0)
+    np.testing.assert_allclose(jvp, jvp_ref, rtol=1.0e-14, atol=0.0)
