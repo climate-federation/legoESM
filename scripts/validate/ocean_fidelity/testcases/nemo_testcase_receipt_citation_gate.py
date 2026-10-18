@@ -2939,7 +2939,7 @@ CITATION_MAP = {
     # --- ORCA2 round 147: exact seven-field T-pivot association ----------
     'barotropic_latlon_cgrid.py:689-737': [
         ('def _nemo_external_mode_boundary_association(', 1),
-        ('inverse_u_post, inverse_v_post, eta,', 1), 55],
+        ('inverse_u_post, inverse_v_post, eta,', 1), 49],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:564-591': [
         ('!                             ! resulting flux at mid-step (not over the full domain)', 1),
         ('ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)', 1),
