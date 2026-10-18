@@ -63,8 +63,10 @@ def test_evd_trigger_and_ddm(cards, rung) -> None:
     ph = cards[rung].recipe.model_config.physics
     assert ph.convection.enhanced_diffusion.trigger_step_entry_bn2 is (
         rung == "rung10")
-    assert not ph.vertical_mixing.ddm.enabled
-    assert ph.vertical_mixing.ddm.form == "hybrid"
+    # Round 313 selects V3's literal double diffusion on rung 10.
+    assert ph.vertical_mixing.ddm.enabled is (rung == "rung10")
+    assert ph.vertical_mixing.ddm.form == (
+        "nemo_literal" if rung == "rung10" else "hybrid")
 
 
 def test_omt0_step_traces(cards) -> None:

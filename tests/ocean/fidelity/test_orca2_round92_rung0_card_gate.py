@@ -92,12 +92,10 @@ def test_rung0_execution_refuses_a_remaining_label(cards, label) -> None:
             rung0._replace(unmeasured_features=(label,)), execution=True)
 
 
-def test_shipped_card_execution_refuses_exactly_six_remaining_labels(cards):
+def test_shipped_card_execution_refuses_exactly_four_remaining_labels(cards):
     shipped, _ = cards
     remaining = (
         "staged_gm_eiv",
-        "internal_wave_salt_heat_differential",
-        "double_diffusive_salt_heat_split",
         "spatial_lateral_viscosity",
         "freshwater_budget_carry",
         "si3_jpl5_layered_prather_state",

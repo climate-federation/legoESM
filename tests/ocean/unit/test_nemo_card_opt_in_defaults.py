@@ -315,7 +315,7 @@ def test_orca2_card_states_the_after_ssh_form_and_the_cfl_cap():
         stated = build_orca2_zps_card(deck).recipe.model_config
     finally:
         recipe_module._model_config = original
-    assert stated.nemo_first_wzv_after_ssh == "rk3_extrapolated"
+    assert stated.nemo_first_wzv_after_ssh == "rk3_extrapolated_carried"
 
 
 # --------------------------------------------------------------------------

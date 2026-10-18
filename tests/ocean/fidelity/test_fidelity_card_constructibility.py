@@ -351,7 +351,8 @@ def test_orca2_card_selects_resolved_rk3_sh2():
     with pytest.raises(ValueError, match="nn_eice=1"):
         validate_nemo_testcase_card(planted)
 
-    langmuir_literal = tke._replace(tke_langmuir_evaluation="nemo_literal")
+    # D135 / round 312: the card runs the literal form; plant the old one.
+    langmuir_literal = tke._replace(tke_langmuir_evaluation="vectorized")
     planted_cfg = card.recipe.model_config._replace(
         physics=card.recipe.model_config.physics._replace(
             vertical_mixing=(
