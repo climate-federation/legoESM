@@ -65,6 +65,16 @@ def build_rung0_card(deck_root: Path):
             nemo_tke_matrix_rhs_source_rounded=False,
             nemo_sh2_r3_source_rounded=False,
             nemo_sh2_r3_stored_reciprocal=False,
+            # Round 312 (D135): the shipped card's penetration, mixing-length
+            # and Langmuir forms, likewise stated at their pre-import values.
+            etau_mode="none",
+            etau_htau_mode="constant10m",
+            nemo_etau_wmask=False,
+            tke_htau_evaluation="jax_expression",
+            tke_etau_exponential_evaluation="jax_expression",
+            tke_mxl_raw_evaluation="factored",
+            nemo_mxl_terminal_e3t=False,
+            tke_langmuir_evaluation="vectorized",
         ),
     )
     physics = model.physics._replace(

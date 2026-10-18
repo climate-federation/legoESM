@@ -1727,7 +1727,9 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         bbl_diffusive_option=1,
         bbl_aht_m2_s=1000.0,
         whole_step_identity="orca2_vector_een_c2",
-        tke_langmuir_evaluation="vectorized",
+        # ln_lc: the literal Langmuir source, imlc = mbkt+1 when no level
+        # crosses (zdftke.f90:311-378, :354; Decision 135, round 312).
+        tke_langmuir_evaluation="nemo_literal",
     )
     # Geometry-ladder G1 rounds 2-3: ORCA2's T-pivot fold retains NEMO's
     # fold-image V transport in vor_een and in the split-explicit live face
@@ -1904,6 +1906,22 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         nemo_tke_matrix_rhs_source_rounded=True,
         nemo_sh2_r3_source_rounded=True,
         nemo_sh2_r3_stored_reciprocal=True,
+        # Decision 135 / round 312: V1's remaining certified forms, each
+        # measured on this card under both labels (gridladder-vmix
+        # 0b9443cef2).  nn_etau=1 (namelist_cfg) with nn_htau=1
+        # (namelist_ref): the increment * wmask * tmask(1) and its EXP
+        # (zdftke.f90:498-502), htau from native gphit (:864).
+        etau_mode="below_ml",
+        etau_htau_mode="latitude",
+        nemo_etau_wmask=True,
+        tke_htau_evaluation="nemo_scalar_libm",
+        tke_etau_exponential_evaluation="nemo_scalar_libm",
+        # nn_mxl=3: the literal raw length (:643-645) and the dummy-bottom
+        # e3t(jpk) step of the bottom-up scan (:690-692).
+        tke_mxl_raw_evaluation="nemo_literal",
+        nemo_mxl_terminal_e3t=True,
+        # nn_mxlice=2 stays 0: it reads SI3's hm_i, which this card does not
+        # compute itself (Decision 135).
     )
     # namelist_cfg's namzdf_iwm: ln_mevar=.false. (constant mixing efficiency)
     # and ln_tsdiff=.true. (salt and heat get different wave diffusivities).
@@ -1923,7 +1941,12 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     model_config = model_config._replace(
         physics=model_config.physics._replace(
             vertical_mixing=model_config.physics.vertical_mixing._replace(
-                tke=tke_config, iwm=iwm_config)))
+                tke=tke_config, iwm=iwm_config)),
+        # Decision 126: runoff at the surface only.  namelist_ref sets
+        # ln_rnf_depth = ln_rnf_depth_ini = .false., so sbc_rnf_init takes
+        # nk_rnf = 1 (sbcrnf.f90:486-490) and sbc_rnf_div the surface branch
+        # (sbcrnf.f90:277-282); rn_dep_max = 150 is never read.
+        runoff_depth_spread_m=0.0, runoff_depth_spread_map=None)
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
@@ -3170,14 +3193,10 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
                 f"ke_gradient_scheme='c2'); got "
                 f"{cfg.momentum_advection!r}, {cfg.ke_gradient_scheme!r}")
         tke = cfg.physics.vertical_mixing.tke
-        expected_langmuir = (
-            "nemo_literal" if card.case == "GYRE-zco" else "vectorized"
-        )
-        if tke.tke_langmuir_evaluation != expected_langmuir:
+        if tke.tke_langmuir_evaluation != "nemo_literal":
             raise ValueError(
                 f"{card.case} requires tke_langmuir_evaluation="
-                f"{expected_langmuir!r}, got "
-                f"{tke.tke_langmuir_evaluation!r}")
+                f"'nemo_literal', got {tke.tke_langmuir_evaluation!r}")
         expected_baro_coriolis = (
             "ene_metric" if card.case == "GYRE-zco" else "een_metric"
         )

@@ -252,8 +252,8 @@ def card_fields(deck_root: Path) -> tuple[dict[str, np.ndarray], object]:
             "ORCA2 card no longer selects WS-RK3")
     require(config.vorticity_scheme == "een_total",
             "ORCA2 card no longer selects total-EEN vorticity")
-    require(config.physics.vertical_mixing.tke.tke_langmuir_evaluation == "vectorized",
-            "ORCA2 card no longer selects the vectorized Langmuir arm")
+    require(config.physics.vertical_mixing.tke.tke_langmuir_evaluation == "nemo_literal",
+            "ORCA2 card no longer selects the literal Langmuir source")
     require(tuple(card.unmeasured_features) == EXPECTED_UNMEASURED,
             "ORCA2 unmeasured_features tuple changed")
     state = card.recipe.initial_state
