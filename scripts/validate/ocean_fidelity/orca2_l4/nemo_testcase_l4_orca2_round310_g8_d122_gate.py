@@ -9,6 +9,7 @@ the shipped card):
   ORDER    stp_2D's stage-1 Krhs order hpg -> ldf -> vor -> keg -> zad.
   R3F      stage 3's F ratio = mean of the two stored ratios.
   G8       all four together.
+  SEL      AREA + R3F (the candidates after the first batch; see addendum).
   D122     the card as shipped after this round's selection.
 OMT-1 and OMT-2 run no lateral momentum diffusion (their decks set
 ln_dynldf_OFF), so NEMO never reaches dynldf_lev there: D122 (b) fails and
@@ -44,6 +45,9 @@ STATEMENTS = {
 }
 STATEMENTS["G8"] = {k: v for arm in tuple(STATEMENTS) for k, v in
                     STATEMENTS[arm].items()}
+# FOLDR leans away and grows rung 10's kt-10 sea-level error; ORDER's
+# stage-1 block replaces G1b's KEG contraction guard on vector cards.
+STATEMENTS["SEL"] = {**STATEMENTS["AREA"], **STATEMENTS["R3F"]}
 RUNGS = ("rung0", "omt1", "omt2", "omt3", "omt4", "rung10")
 ARMS = ("control", "D122", *STATEMENTS)
 # This round's selection; filled from the measured arms.
