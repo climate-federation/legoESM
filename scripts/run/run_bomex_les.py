@@ -82,6 +82,14 @@ import les_record  # noqa: E402
 
 from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 from legoesm.atmosphere.les_suite.bridge import save_artifact  # noqa: E402
+from legoesm.atmosphere.les_suite.checkpoint import (  # noqa: E402
+    EXIT_CHECKPOINTED,
+    add_checkpoint_args,
+    checkpoint_fingerprint,
+    load_checkpoint,
+    restore_state,
+    save_checkpoint,
+)
 from legoesm.atmosphere.les_suite.frame_stats import (  # noqa: E402
     MoistRunEmitter,
     column_contents,
@@ -272,6 +280,7 @@ def parse_args():
                         "column budgets (printed). Requires --record-frames > 0.")
     p.add_argument("--case-label", type=str, default="bomex_cu")
     p.add_argument("--output", type=Path, default=Path("results/les_bomex"))
+    add_checkpoint_args(p)
     return p.parse_args()
 
 
@@ -730,6 +739,10 @@ def main():
         raise ValueError("--print-every must be >= 1")
     if args.sdm_segment_steps < 1:
         raise ValueError("--sdm-segment-steps must be >= 1")
+    if args.wall_limit_s is not None and args.checkpoint is None:
+        raise SystemExit("--wall-limit-s needs --checkpoint (somewhere to stop to)")
+    if args.checkpoint is not None and args.lagrangian_sdm:
+        raise SystemExit("--checkpoint is wired for the Eulerian path only")
     dtype = jnp.float32 if args.f32 else jnp.float64
     args.output.mkdir(parents=True, exist_ok=True)
     g, st, ref, forc, th_prof = build(args, dtype)
@@ -887,10 +900,15 @@ def main():
             _last_rec_h[0] = t_hours
 
     dt = jnp.asarray(dt0, dtype)
-    if emitter is not None:
-        emitter.start(st)
-    if rec:
-        _save(0.0)                       # the INITIAL state (codex (f))
+    fp = (checkpoint_fingerprint(args, (st, forc, ref), __file__, les_record.__file__)
+          if args.checkpoint is not None else None)
+    resumed = (load_checkpoint(args.checkpoint, fp)
+               if fp is not None and args.checkpoint.exists() else None)
+    if resumed is None:
+        if emitter is not None:
+            emitter.start(st)
+        if rec:
+            _save(0.0)                   # the INITIAL state (codex (f))
     t = 0.0; i = 0
     created_tot = 0.0
     # Trailing time-mean of the cloud metrics over the quasi-steady 2nd half.
@@ -902,6 +920,28 @@ def main():
     cc_sum = lwp_sum = 0.0; n_cavg = 0
     t_cavg0 = 0.5 * T
     next_rec = T / args.record_frames if rec else np.inf
+
+    def _checkpoint():
+        save_checkpoint(args.checkpoint, dict(
+            st=st, t=t, i=i, created_tot=created_tot, cc_sum=cc_sum, lwp_sum=lwp_sum,
+            n_cavg=n_cavg, next_rec=next_rec, frame=frame if rec else 0,
+            last_rec_h=_last_rec_h[0] if rec else None, precip_rate=precip_rate[0],
+            emitter=emitter.state_dict() if emitter is not None else None), fp)
+
+    if resumed is not None:
+        st = restore_state(resumed["st"])
+        t, i = float(resumed["t"]), int(resumed["i"])
+        created_tot = float(resumed["created_tot"])
+        cc_sum, lwp_sum = float(resumed["cc_sum"]), float(resumed["lwp_sum"])
+        n_cavg, next_rec = int(resumed["n_cavg"]), float(resumed["next_rec"])
+        precip_rate[0] = resumed["precip_rate"]
+        if rec:
+            frame = int(resumed["frame"])
+            _last_rec_h[0] = (None if resumed["last_rec_h"] is None
+                              else float(resumed["last_rec_h"]))
+        if emitter is not None:
+            emitter.load_state_dict(resumed["emitter"])
+        print(f"[RESUME] {args.checkpoint} at step {i}/{n_steps}")
     t0 = time.time()
     while t < T:
         # micro fires on every micro_every-th step, never on a partial first
@@ -928,6 +968,14 @@ def main():
                 cc_sum += float(d["cloud_cover"]); lwp_sum += float(d["lwp"]); n_cavg += 1
         if rec and t >= next_rec and frame < args.record_frames:
             _save(t / 3600.0); next_rec += T / args.record_frames
+            if args.checkpoint is not None:
+                _checkpoint()
+        if (args.wall_limit_s is not None and t < T
+                and time.time() - t0 >= args.wall_limit_s):
+            _checkpoint()
+            print(f"[CHECKPOINT] wall limit {args.wall_limit_s:.0f}s reached at step "
+                  f"{i}/{n_steps} -> {args.checkpoint}; exit {EXIT_CHECKPOINTED}")
+            return EXIT_CHECKPOINTED
     wall = time.time() - t0
     print(f"[DONE] wall={wall:.0f}s  {i/wall:.1f} steps/s")
     # ALWAYS record the terminal state. The initial-state frame consumes one
@@ -966,6 +1014,8 @@ def main():
         save_artifact(art, args.emit_suite_artifact)
         print(f"[emit-suite-artifact] {art.case_name}: {art.nt} frames, "
               f"{art.nz} levels, sgs={art.sgs} -> {args.emit_suite_artifact}")
+    if args.checkpoint is not None and args.checkpoint.exists():
+        args.checkpoint.unlink()
     return 0
 
 

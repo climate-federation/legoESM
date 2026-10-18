@@ -256,3 +256,77 @@ def test_moist_cases_resolve_to_registry_regimes():
     assert get_case("astex_sc").regime == "stratocumulus"
     assert get_case("rico_cu").regime == "shallow_cumulus"
     assert get_case("bomex_cu").regime == "shallow_cumulus"
+
+
+# --print-every 1 fills the 2nd-half time means; micro/radiation cadences > 1 make
+# the step index matter across a resume (emission needs an RK scheme, so no AB2)
+_RESUME_CASES = [
+    ("run_bomex_les", ["--hours", f"{4 * 1.0 / 3600}", "--dt", "1.0", "--print-every", "1",
+                       "--micro-every", "2"], "bomex_cu"),
+    ("run_rico_les", ["--hours", f"{4 * 1.0 / 3600}", "--dt", "1.0", "--print-every", "1"],
+     "rico_cu"),
+    ("run_dycoms_les", ["--case", "dycoms", "--hours", f"{4 * 0.5 / 3600}",
+                        "--print-every", "1", "--rad-every", "2", "--micro-every", "2"],
+     "dycoms_rf01_sc"),
+]
+
+
+@pytest.mark.parametrize("driver,extra,label", _RESUME_CASES,
+                         ids=[c[2] for c in _RESUME_CASES])
+def test_moist_driver_resumed_run_is_bit_identical(driver, extra, label, tmp_path,
+                                                   monkeypatch):
+    """A run stopped at its wall limit after EVERY step (exit 75) and resumed from
+    its checkpoint until done writes exactly the files of an uninterrupted run
+    (artifact, recorded frames, final profiles); a checkpoint is refused by a run
+    with another configuration, and removed once the run finishes."""
+    from legoesm.atmosphere.les_suite.checkpoint import EXIT_CHECKPOINTED
+    mod = _load(driver)
+
+    def _run(name, more):
+        art = tmp_path / f"{name}.npz"
+        monkeypatch.setattr(sys, "argv", [driver] + _TINY + extra + [
+            "--case-label", label, "--output", str(tmp_path / name),
+            "--emit-suite-artifact", str(art)] + more)
+        return mod.main(), art
+
+    rc, ref = _run("whole", [])
+    assert rc == 0
+    ckpt = tmp_path / "run.ckpt"
+    codes = []
+    for _ in range(20):
+        rc, got = _run("chained", ["--checkpoint", str(ckpt), "--wall-limit-s", "0"])
+        codes.append(rc)
+        if rc != EXIT_CHECKPOINTED:
+            break
+        if len(codes) == 1:
+            other = ["--hours", str(2 * float(extra[extra.index("--hours") + 1]))]
+            with pytest.raises(SystemExit, match="different run"):
+                _run("chained", ["--checkpoint", str(ckpt), "--wall-limit-s", "0"]
+                     + other)
+    assert codes[-1] == 0 and len(codes) >= 3 and set(codes[:-1]) == {EXIT_CHECKPOINTED}
+    assert not ckpt.exists()
+    pairs = [(ref, got)] + [
+        (f, tmp_path / "chained" / f.relative_to(tmp_path / "whole"))
+        for f in sorted((tmp_path / "whole").rglob("*.npz"))]
+    assert len(pairs) > 2
+    for fa, fb in pairs:
+        with np.load(fa, allow_pickle=True) as a, np.load(fb, allow_pickle=True) as b:
+            assert sorted(a.files) == sorted(b.files), fa.name
+            for k in a.files:
+                assert np.array_equal(a[k], b[k], equal_nan=a[k].dtype.kind in "fc"), \
+                    (fa.name, k)
+
+
+def test_checkpoint_of_another_run_is_refused(tmp_path):
+    from legoesm.atmosphere.les_suite.checkpoint import (
+        load_checkpoint,
+        save_checkpoint,
+    )
+    path = tmp_path / "c.ckpt"
+    x = np.arange(5.0) / 3.0
+    save_checkpoint(path, {"x": x, "n": 3}, "run-A")
+    got = load_checkpoint(path, "run-A")
+    np.testing.assert_array_equal(got["x"], x)
+    assert int(got["n"]) == 3
+    with pytest.raises(SystemExit, match="different run"):
+        load_checkpoint(path, "run-B")

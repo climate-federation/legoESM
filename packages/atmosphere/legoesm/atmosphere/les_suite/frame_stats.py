@@ -347,6 +347,22 @@ class MoistRunEmitter:
     def add(self, step_budget):
         self.acc = self.acc + step_budget
 
+    def state_dict(self):
+        """Everything accumulated so far (budgets, recorded frames), for a
+        checkpoint; :meth:`load_state_dict` restores it exactly."""
+        return {"acc": self.acc, "col0": self.col0, "profs": self.rec.profs,
+                "surface": self.rec.surface, "series": self.rec.series,
+                "times": self.rec.times}
+
+    def load_state_dict(self, d):
+        import jax.numpy as jnp
+        self.acc = jnp.asarray(d["acc"])
+        self.col0 = np.asarray(d["col0"])
+        self.rec.profs = {k: list(v) for k, v in d["profs"].items()}
+        self.rec.surface = {k: list(v) for k, v in d["surface"].items()}
+        self.rec.series = {k: list(v) for k, v in d["series"].items()}
+        self.rec.times = [float(t) for t in d["times"]]
+
     def _named(self):
         return dict(zip(self.terms, np.asarray(self.acc)))
 

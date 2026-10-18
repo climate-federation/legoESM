@@ -87,6 +87,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import les_record  # noqa: E402
 from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 from legoesm.atmosphere.les_suite.bridge import save_artifact  # noqa: E402
+from legoesm.atmosphere.les_suite.checkpoint import (  # noqa: E402
+    EXIT_CHECKPOINTED,
+    add_checkpoint_args,
+    checkpoint_fingerprint,
+    load_checkpoint,
+    restore_state,
+    save_checkpoint,
+)
 from legoesm.atmosphere.les_suite.frame_stats import (  # noqa: E402
     MoistRunEmitter,
     column_contents,
@@ -296,6 +304,7 @@ def parse_args():
                         "to this path: per-frame statistics on the --record-frames "
                         "cadence, the realised surface series, the running integral "
                         "of the applied LW forcing, and the column budgets (printed).")
+    add_checkpoint_args(p)
     args = p.parse_args()
     # The frame label follows the case unless it was given explicitly. The old
     # literal default meant the ONE field that identifies a reference was wrong
@@ -449,6 +458,8 @@ def make_stevens_lw(g, ref, dtype):
 
 def main():
     args = parse_args()
+    if args.wall_limit_s is not None and args.checkpoint is None:
+        raise SystemExit("--wall-limit-s needs --checkpoint (somewhere to stop to)")
     dtype = jnp.float32 if args.f32 else jnp.float64
     args.output.mkdir(parents=True, exist_ok=True)
     g, st, ref, forc = build(args, dtype)
@@ -582,13 +593,17 @@ def main():
             _last_rec_h[0] = t_hours
 
     dt = jnp.asarray(dt0, dtype)
-    if emitter is not None:
+    fp = (checkpoint_fingerprint(args, (st, forc, ref), __file__, les_record.__file__)
+          if args.checkpoint is not None else None)
+    resumed = (load_checkpoint(args.checkpoint, fp)
+               if fp is not None and args.checkpoint.exists() else None)
+    if emitter is not None and resumed is None:
         emitter.start(st)
     # running time integral of the Δθ profile the radiation APPLIED (summed on
     # device every step it fires), recorded at each frame as ``theta_adv_cum`` so
     # the SCM receives the LES's own time-varying cooling
     rad_cum = [jnp.zeros(zc_np.shape[0], dtype)]
-    if rec:
+    if rec and resumed is None:
         _save(0.0)
     t = 0.0; i = 0
     created_tot = 0.0
@@ -606,6 +621,32 @@ def main():
     rad_tend_sum = np.zeros(zc_np.shape[0]); n_rad = 0
     t_cavg0 = 0.5 * T
     next_rec = T / args.record_frames if rec else np.inf
+
+    def _checkpoint():
+        save_checkpoint(args.checkpoint, dict(
+            st=st, t=t, i=i, created_tot=created_tot, cc_sum=cc_sum, lwp_sum=lwp_sum,
+            n_cavg=n_cavg, rad_tend_sum=rad_tend_sum, n_rad=n_rad, rad_cum=rad_cum[0],
+            next_rec=next_rec, frame=frame if rec else 0,
+            last_rec_h=_last_rec_h[0] if rec else None, precip_rate=precip_rate[0],
+            emitter=emitter.state_dict() if emitter is not None else None), fp)
+
+    if resumed is not None:
+        st = restore_state(resumed["st"])
+        t, i = float(resumed["t"]), int(resumed["i"])
+        created_tot = float(resumed["created_tot"])
+        cc_sum, lwp_sum = float(resumed["cc_sum"]), float(resumed["lwp_sum"])
+        n_cavg, n_rad = int(resumed["n_cavg"]), int(resumed["n_rad"])
+        rad_tend_sum = np.asarray(resumed["rad_tend_sum"])
+        rad_cum[0] = jnp.asarray(resumed["rad_cum"])
+        next_rec = float(resumed["next_rec"])
+        precip_rate[0] = resumed["precip_rate"]
+        if rec:
+            frame = int(resumed["frame"])
+            _last_rec_h[0] = (None if resumed["last_rec_h"] is None
+                              else float(resumed["last_rec_h"]))
+        if emitter is not None:
+            emitter.load_state_dict(resumed["emitter"])
+        print(f"[RESUME] {args.checkpoint} at step {i}/{n_steps}")
     t0 = time.time()
     while t < T:
         do_micro = (i + 1) % args.micro_every == 0
@@ -635,6 +676,14 @@ def main():
                 n_rad += 1
         if rec and t >= next_rec and frame < args.record_frames:
             _save(t / 3600.0); next_rec += T / args.record_frames
+            if args.checkpoint is not None:
+                _checkpoint()
+        if (args.wall_limit_s is not None and t < T
+                and time.time() - t0 >= args.wall_limit_s):
+            _checkpoint()
+            print(f"[CHECKPOINT] wall limit {args.wall_limit_s:.0f}s reached at step "
+                  f"{i}/{n_steps} -> {args.checkpoint}; exit {EXIT_CHECKPOINTED}")
+            return EXIT_CHECKPOINTED
     wall = time.time() - t0
     print(f"[DONE] wall={wall:.0f}s  {i/wall:.1f} steps/s")
     # ALWAYS record the terminal state. The initial-state frame consumes one
@@ -702,6 +751,8 @@ def main():
         save_artifact(art, args.emit_suite_artifact)
         print(f"[emit-suite-artifact] {art.case_name}: {art.nt} frames, "
               f"{art.nz} levels, sgs={art.sgs} -> {args.emit_suite_artifact}")
+    if args.checkpoint is not None and args.checkpoint.exists():
+        args.checkpoint.unlink()
     return 0
 
 
