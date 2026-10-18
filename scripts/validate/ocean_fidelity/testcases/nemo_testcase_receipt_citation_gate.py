@@ -126,6 +126,11 @@ _OVERFLOW_R56UP3_COMPILED = (
 _OVERFLOW_R62ZDF_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo")
 FILES = {
+    # ORCA2 round 311: G1b's build (P5) and G8's build (R31FULLENTRY_FIX1).
+    "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90": NEMO / "cfgs/ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90",
+    "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynkeg.f90": NEMO / "cfgs/ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynkeg.f90",
+    "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stp2d.f90": NEMO / "cfgs/ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stp2d.f90",
+    "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynkeg.f90": NEMO / "cfgs/ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynkeg.f90",
     # --- GRIDLADDER round 1 (G1 survey) BEGIN ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90': NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90",
     'cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg': NEMO / "cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg",
@@ -1708,6 +1713,56 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # ORCA2 round 311: stage-1 order and dyn_keg in the ORCA2, G1b and G8 builds.
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynkeg.f90:61': 'SUBROUTINE dyn_keg(',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90:63': 'SUBROUTINE stp_2D(',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90:138': {
+        'anchors': 'CALL dyn_hpg( kt, Kbb     , uu, vv, Krhs )',
+        'routine': 'stp_2D',
+    },
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90:141': {
+        'anchors': 'CALL dyn_ldf( kt, Kbb, Kbb, uu, vv, Krhs )',
+        'routine': 'stp_2D',
+    },
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90:144': {
+        'anchors': 'CALL dyn_vor( kt,      Kbb, uu, vv, Krhs )',
+        'routine': 'stp_2D',
+    },
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90:161': {
+        'anchors': 'CALL dyn_keg( kt, nn_dynkeg, Kbb, uu, vv, Krhs )',
+        'routine': 'stp_2D',
+    },
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynkeg.f90:61': 'SUBROUTINE dyn_keg(',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynkeg.f90:129-130': {
+        'anchors': [('puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - ( zhke(ji+1,jj  ) - zhke(ji,jj) ) * r1_e1u(ji,jj)', 1),
+                    ('pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) - ( zhke(ji  ,jj+1) - zhke(ji,jj) ) * r1_e2v(ji,jj)', 1),
+                    2],
+        'routine': 'dyn_keg',
+    },
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stp2d.f90:63': 'SUBROUTINE stp_2D(',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stp2d.f90:141': {
+        'anchors': 'CALL dyn_hpg( kt, Kbb     , uu, vv, Krhs )',
+        'routine': 'stp_2D',
+    },
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stp2d.f90:144': {
+        'anchors': 'CALL dyn_ldf( kt, Kbb, Kbb, uu, vv, Krhs )',
+        'routine': 'stp_2D',
+    },
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stp2d.f90:147': {
+        'anchors': 'CALL dyn_vor( kt,      Kbb, uu, vv, Krhs )',
+        'routine': 'stp_2D',
+    },
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stp2d.f90:164': {
+        'anchors': 'CALL dyn_keg( kt, nn_dynkeg, Kbb, uu, vv, Krhs )',
+        'routine': 'stp_2D',
+    },
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynkeg.f90:61': 'SUBROUTINE dyn_keg(',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynkeg.f90:129-130': {
+        'anchors': [('puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - ( zhke(ji+1,jj  ) - zhke(ji,jj) ) * r1_e1u(ji,jj)', 1),
+                    ('pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) - ( zhke(ji  ,jj+1) - zhke(ji,jj) ) * r1_e2v(ji,jj)', 1),
+                    2],
+        'routine': 'dyn_keg',
+    },
     # --- ORCA2 round 309: OMT-0's np_LIN_dyn lines; V3's EVD trigger and DDM ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:171': 'CALL bn2    ( ts(:,:,:,:,Nbb), rab_b, rn2b, Nbb ) ! before Brunt-Vaisala frequency',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:174': 'rn2   = rn2b',
