@@ -125,7 +125,12 @@ with the guard kept those cards are bit-identical to shipped.
 
 - Resolved configs vs base (572 fields; rung 10 635): rung 0, OMT-3, OMT-4,
   rung 10 differ in the stage-1 order only; OMT-0..2 identical.
-- SHIPPED_ARM_LINE
+- Shipped rung 0, OMT-3, OMT-4 and rung 10 (both labels) reproduce the
+  stage-1 order arm row for row; shipped OMT-1/OMT-2 reproduce their
+  controls row for row (`final/instrument_check.txt`).  OMT-0's config is
+  unchanged.
+- GYRE, DINO, VORTEX: the selection touches only the ORCA2 card builders;
+  their jaxprs were identical at the fix.
 
 ## Predictions
 
@@ -144,8 +149,17 @@ with the guard kept those cards are bit-identical to shipped.
   the selection fails 9/14; tree restored, `git status` clean.  Round 310's
   selection test now expects the order on its four cards; its shipped-arm
   test moved to round 311's.
-- BATTERY_LINE
-- CITATION_LINE
+- Neighbouring ORCA2 selection (rounds 305-311), OMT-3 ladder, G1
+  transfer, G1b import and split tests: 90 passed.
+- Default gate (land.sh set, JAX_ENABLE_X64=1, in pieces under the
+  10-minute cap): citation gate + private-import ratchet + TKE + recipe +
+  freshwater + barotropic state + ORCA2 parallel receipt 143 passed;
+  face-mask rank 2 passed (the second alone; the file run hit the cap after
+  the first).
+- Receipt citation gate on this receipt: PASS, 21 citations, failures 0,
+  0 map entries failing (15 new entries for the ORCA2, G1b and G8 builds; 92 map
+  entries and 22 GYRE round-8 receipt citations shifted by the split and
+  selection re-anchored).
 - codex review: paused (quota).  The operator runs an independent Claude
   review before landing.
 
