@@ -177,7 +177,14 @@ Plus a record-free check of the pivot-row exchange.
 Preregistration: P1 confirmed (acquisition); P2 confirmed (stage 3 only, footprint only); **P3 refuted as built**
 (three statements, the two suspects it named among them), confirmed after the fixes; P4 confirmed (purity above).
 
-GATES_PLACEHOLDER
+Gates (resume; CPU, x64, `land.sh` PYTHONPATH; commits `40b5e4413` fix + tests, `ebe2eb3e9` this section, then four
+map entries and ORCA2's fold file registered, 63 pins re-anchored by the fix's own offsets and two in-span extents
+grown, anchors unchanged, `b2a9315ca`):
+- **Default gate** (`land.sh` orca2 list, incl. the citation-gate tests and the private-import ratchet) at
+  `b2a9315ca`, clean tree: **145 passed** (661 s).
+- **Per-receipt citation gate** on this receipt (`--from-heading` this title): **PASS, failures 0**, 36 citations,
+  unmapped 0, map entries failing audit 0; a planted shifted citation exits 1.
+- **V3 + V4 + V5 card files** (they share the record helper): **23 passed**. L1 file: 10 passed (above).
 
 ASKED (resume): score both labels; confirm where the BBL acts; fix cited, L1-selected statements; L1 record test with
 plant; gates.
