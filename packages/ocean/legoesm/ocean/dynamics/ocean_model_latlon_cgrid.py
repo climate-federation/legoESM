@@ -11749,7 +11749,12 @@ class LatLonCGridOceanModel:
             # ldf_slp even when the vertical closure is constant.  The bundle
             # is therefore a stage-program operand, not TKE-owned state.
             _n2_mode = getattr(_gm, "slope_n2", "adiabatic")
-            _n2_eos_form = "seos" if _cfg_b.eos == "nemo_seos" else _cfg_b.eos
+            # The model selector carries the public ``nemo_*`` spelling;
+            # eosbn2's resolved branch selector is the suffix (seos/eos80/
+            # teos10).  VORTEX/DINO had only exercised nemo_seos here; ORCA2
+            # L2 is the first constant-closure card to carry nemo_eos80 into
+            # this once-per-step slope bundle.
+            _n2_eos_form = _cfg_b.eos.removeprefix("nemo_")
         else:
             return None
         if _n2_mode != "nemo_bn2":

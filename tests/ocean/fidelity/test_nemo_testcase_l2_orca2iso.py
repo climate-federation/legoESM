@@ -137,6 +137,20 @@ def test_selector_refuses_missing_msc_metric_mode_or_nonzero_eiv(cards):
         assert "ln_traldf_lap+iso+msc" in failures or "ln_ldfeiv=F" in failures
 
 
+def test_l2_carried_slope_n2_resolves_orca2s_eos80_branch(cards):
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    _, l2 = cards
+    run = l2.recipe
+    model = LatLonCGridOceanModel(run.grid, run.z_coord, run.model_config)
+    bundle = model._tke_step_entry_n2_bundle(run.initial_state)
+    assert bundle is not None
+    assert bundle.rn2.shape[-1] == run.initial_state.T.data.shape[-1] - 1
+    assert np.isfinite(np.asarray(bundle.rn2)).all()
+
+
 def test_shared_constructor_keeps_vortex_smt3_selection_unchanged():
     smt3 = recipe.build_vortex_smt_zps_card("vector", "smt3")
     assert smt3.recipe.model_config.gm_redi == recipe._orca2_isoneutral_gm_redi(270.0)
