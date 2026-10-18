@@ -1064,6 +1064,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "soil conductivity x 10**(-e * ice fraction). Active "
                              "only with --land-soil-freeze-thaw. Default 6 (CLM5); "
                              "0 = no impedance; range 0..10.")
+    parser.add_argument("--land-soil-vg-air-entry-m", dest="land_soil_vg_air_entry_m",
+                        type=float, default=_EXPERIMENT_DEFAULTS.land_soil_vg_air_entry_m,
+                        help="Air-entry head [m] of the modified van Genuchten soil "
+                             "retention curve (Vogel et al. 2001); <= 0, 0 = the "
+                             "classic curve. Default -0.02.")
+    parser.add_argument("--land-soil-richards-se-switch",
+                        dest="land_soil_richards_se_switch", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_soil_richards_se_switch,
+                        help="Richards dry-layer switch: a layer below this effective "
+                             "saturation steps in water content. [0, 1); default 0.01.")
+    parser.add_argument("--land-soil-richards-c-switch-per-m",
+                        dest="land_soil_richards_c_switch_per_m", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_soil_richards_c_switch_per_m,
+                        help="Richards dry-layer switch: a layer below this moisture "
+                             "capacity [1/m] steps in water content. >= 0; default 1e-5.")
     parser.add_argument("--land-canopy-stress-b0", dest="land_canopy_stress_b0",
                         action=argparse.BooleanOptionalAction,
                         default=_EXPERIMENT_DEFAULTS.land_canopy_stress_b0,
@@ -2727,6 +2742,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_snow_scheme=args.land_snow_scheme,
         land_snow_emissivity=args.land_snow_emissivity,
         land_soil_ice_impedance_exponent=args.land_soil_ice_impedance_exponent,
+        land_soil_vg_air_entry_m=args.land_soil_vg_air_entry_m,
+        land_soil_richards_se_switch=args.land_soil_richards_se_switch,
+        land_soil_richards_c_switch_per_m=args.land_soil_richards_c_switch_per_m,
         land_canopy_stress_b0=args.land_canopy_stress_b0,
         land_canopy_interception=args.land_canopy_interception,
         land_canopy_snow_masking=args.land_canopy_snow_masking,

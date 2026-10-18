@@ -29,7 +29,7 @@ from legoesm.driver.model_driver import ModelDriver
 from legoesm.land.state import MultiLayerLandState
 
 
-def _fake_surface_map(path, lat_deg, lon_deg):
+def _fake_surface_map(path, lat_deg, lon_deg, *, vg_air_entry_m):
     """A uniform-loam, all-bare-soil CLM map sized to the requested columns."""
     n = int(np.asarray(lat_deg).size)
     pft = np.zeros((n, 17)); pft[:, 0] = 1.0          # 100% bare soil

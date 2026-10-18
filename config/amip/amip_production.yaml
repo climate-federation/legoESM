@@ -316,6 +316,11 @@ land_snow_scheme: bulk
 # Frozen soil impedes water flow, CLM5 form 10**(-e * ice fraction), e = 6
 # (user 2026-09-28).  Active because freeze/thaw is on.
 land_soil_ice_impedance_exponent: 6.0
+# Soil-water numerics (user 2026-10-14): modified van Genuchten air-entry head [m]
+# and the Richards dry-layer switch thresholds (effective saturation, capacity 1/m).
+land_soil_vg_air_entry_m: -0.02
+land_soil_richards_se_switch: 0.01
+land_soil_richards_c_switch_per_m: 1.0e-5
 land_soil_moisture_init_frac: 0.25
 land_stomatal_beta: false
 land_calibrated_physics: true

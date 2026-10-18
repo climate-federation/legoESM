@@ -986,7 +986,8 @@ class CoupledESMDriver:
             lat = self._atm._grid_lat; lon = self._atm._grid_lon
             lat_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lat, shape_2d)).ravel())
             lon_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lon, shape_2d)).ravel())
-            smap = load_clm_surface(download_clm_surfdata(), lat_d, lon_d)
+            smap = load_clm_surface(download_clm_surfdata(), lat_d, lon_d,
+                                    vg_air_entry_m=land_cfg.hydraulics.vg_air_entry_m)
             # per-cell calibrated soil hydraulics (van-Genuchten), thermal inertia
             # (C_soil/k_solid -> seasonal cycle) and bulk exchange Ch.  Cast to the
             # storage dtype so the (float64) PFT-table matmuls do not silently down-
@@ -1004,7 +1005,10 @@ class CoupledESMDriver:
                    @ jnp.asarray(TUNED_PFT_SNOWMASK_MULTILAYER))
                 + jnp.asarray(smap["glacier_frac"])).astype(_sd)
             land_cfg = land_cfg._replace(
-                hydraulics=cast(clm_hydraulics_config(smap)),
+                # keep the configured air-entry head: the map's wilting point /
+                # field capacity above were built on it (user 2026-10-18)
+                hydraulics=cast(clm_hydraulics_config(smap)._replace(
+                    vg_air_entry_m=land_cfg.hydraulics.vg_air_entry_m)),
                 thermal=cast(clm_multilayer_thermal_config(smap)),
                 land_albedo=land_cfg.land_albedo._replace(
                     snow_cover_scale=_mask_cell),
@@ -1232,6 +1236,11 @@ class CoupledESMDriver:
             # surface-energy params against a different soil forward).
             variant = ("multilayer" if self.coupled_cfg.land_mode == "multilayer"
                        else "slab")
+            # Air-entry head for the map's soil wilting point / field capacity: the
+            # multilayer land's own; the slab land solves no van Genuchten soil
+            # water, so the classic curve (0.0) as before (user 2026-10-18).
+            head = (self._land_cfg.hydraulics.vg_air_entry_m if variant == "multilayer"
+                    else 0.0)
             # Transient land-use cover (opt-in): the vegetation params re-weight per
             # segment from a transient legoesm_surfdata cover; soil frozen.  Base +
             # per-year both go through clm_provider_rebuild so their albedo treatment
@@ -1243,7 +1252,7 @@ class CoupledESMDriver:
                     load_transient_cover_on_columns, TransientCoverProvider)
                 clm_path = getattr(self.coupled_cfg, "clm_surfdata_path", "") \
                     or download_clm_surfdata()
-                m = load_clm_surface(clm_path, lat_deg, lon_deg)
+                m = load_clm_surface(clm_path, lat_deg, lon_deg, vg_air_entry_m=head)
                 # Match the non-transient coupled provider (clm_surface_provider omits
                 # the soil-colour albedo) so an unchanged cover slice is a no-op.
                 rebuild = clm_provider_rebuild(m, variant=variant,
@@ -1262,7 +1271,8 @@ class CoupledESMDriver:
                     f"{cover.shape[0]} years {int(years[0])}-{int(years[-1])}, "
                     f"{variant} tuning), {lat_deg.size} columns")
                 return provider
-            provider = clm_surface_provider(lat_deg, lon_deg, variant=variant)
+            provider = clm_surface_provider(lat_deg, lon_deg, variant=variant,
+                                            vg_air_entry_m=head)
             logger.info(f"  Land params: CLM reference surfdata (real PFT map + "
                         f"reference soil, {variant} tuning), {lat_deg.size} columns")
             return provider

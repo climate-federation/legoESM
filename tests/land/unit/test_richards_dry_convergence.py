@@ -30,6 +30,14 @@ _DZ = (0.002932551319648094, 0.005865102639296188, 0.011730205278592375,
 _DT = 1800.0
 _HYDRO = SoilHydraulicsConfig(theta_r=0.1, theta_sat=0.39, alpha_vg=5.9,
                               n_vg=1.48, K_sat=3.64e-06)
+# The unmodified van Genuchten curve and no dry-layer theta step: the solver these
+# columns were recorded under.  Tests of the unconverged-column paths use it, since
+# the current defaults converge the recorded columns.
+_LEGACY_HYDRO = _HYDRO._replace(vg_air_entry_m=0.0)
+
+
+def _legacy(rc):
+    return rc._replace(se_switch=0.0, c_switch_per_m=0.0)
 
 # Converges in 15 damped iterations.
 _COL_A = dict(
@@ -64,10 +72,10 @@ _COL_B = dict(
     flux_top=2.772393189929857e-08)
 
 
-def _solve(col, richards_config):
+def _solve(col, richards_config, hydro=_HYDRO):
     grid = make_soil_grid_custom(_DZ)
     out = solve_richards(
-        jnp.asarray([col["psi"]]), jnp.asarray([col["theta"]]), grid, _HYDRO,
+        jnp.asarray([col["psi"]]), jnp.asarray([col["theta"]]), grid, hydro,
         richards_config, jnp.asarray([col["flux_top"]]), jnp.asarray([col["sink"]]),
         _DT, surface_water=jnp.zeros(1))
     dz = np.asarray(_DZ)
@@ -84,7 +92,7 @@ def _former():
     # Former iteration settings (10 undamped iterations).  Main's post-loop
     # water take-back still runs, so this is not the historical solver; the
     # spike survives it on these columns.
-    return MultiLayerLandConfig().richards._replace(max_iter=10, max_dse_per_iter=1e9)
+    return _legacy(MultiLayerLandConfig().richards)._replace(max_iter=10, max_dse_per_iter=1e9)
 
 
 def test_production_config_converges_and_conserves_on_dry_top_layer():
@@ -96,7 +104,7 @@ def test_production_config_converges_and_conserves_on_dry_top_layer():
 
 
 def test_unconverged_column_is_flagged_without_a_spike():
-    out, residual = _solve(_COL_B, MultiLayerLandConfig().richards)
+    out, residual = _solve(_COL_B, _legacy(MultiLayerLandConfig().richards), _LEGACY_HYDRO)
     assert not bool(out.converged[0])
     assert float(out.theta_new[0, 0]) <= 0.39
     assert float(out.psi_new[0, 0]) < 0.0
@@ -114,7 +122,7 @@ def test_former_undamped_ten_iterations_spike_on_these_columns():
     and theta 1.5-2.6 against theta_sat 0.39.
     """
     for col in (_COL_A, _COL_B):
-        out, _ = _solve(col, _former())
+        out, _ = _solve(col, _former(), _LEGACY_HYDRO)
         assert not bool(out.converged[0])
         assert float(out.theta_new[0, 0]) > 1.0
         assert float(out.psi_new[0, 0]) > 1e4
@@ -181,10 +189,10 @@ _COL_C = dict(
 
 def test_unreturnable_deficit_goes_back_to_the_pond():
     col = _COL_C
-    rc = MultiLayerLandConfig().richards
+    rc = _legacy(MultiLayerLandConfig().richards)
     out = solve_richards(
         jnp.asarray([col["psi"]]), jnp.asarray([col["theta"]]), make_soil_grid_custom(_DZ),
-        _HYDRO, rc, jnp.asarray([col["flux_top"]]), jnp.asarray([col["sink"]]), _DT,
+        _LEGACY_HYDRO, rc, jnp.asarray([col["flux_top"]]), jnp.asarray([col["sink"]]), _DT,
         surface_water=jnp.asarray([col["pond"]]))
     assert not bool(out.converged[0])
     dz = np.asarray(_DZ)
@@ -202,10 +210,10 @@ def test_unreturnable_deficit_goes_back_to_the_pond():
 
 def test_returned_deficit_above_pond_max_spills_to_runoff():
     col = _COL_C
-    rc = MultiLayerLandConfig().richards._replace(pond_max=0.001)
+    rc = _legacy(MultiLayerLandConfig().richards)._replace(pond_max=0.001)
     out = solve_richards(
         jnp.asarray([col["psi"]]), jnp.asarray([col["theta"]]), make_soil_grid_custom(_DZ),
-        _HYDRO, rc, jnp.asarray([col["flux_top"]]), jnp.asarray([col["sink"]]), _DT,
+        _LEGACY_HYDRO, rc, jnp.asarray([col["flux_top"]]), jnp.asarray([col["sink"]]), _DT,
         surface_water=jnp.asarray([col["pond"]]))
     assert float(out.surface_water[0]) <= rc.pond_max
     assert float(out.runoff_surface[0]) > 0.0
