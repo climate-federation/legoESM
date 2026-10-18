@@ -375,7 +375,7 @@ def nemo_ldf_reference_e3f(z_coord):
     return reference
 
 
-def _nemo_qco_r1_area_f(raw, geom_grid, dtype):
+def nemo_qco_r1_area_f(raw, geom_grid, dtype):
     b, one = lax.optimization_barrier, jnp.asarray(1.0, dtype=dtype)
     e1f = None if raw is None else getattr(raw, "e1f", None)
     e2f = None if raw is None else getattr(raw, "e2f", None)
@@ -527,7 +527,7 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
     # Preserve NEMO's native F-layout operand and stored-reciprocal boundary
     # on cards that carry its raw mesh.
-    r1_area_f = _nemo_qco_r1_area_f(raw, geom_grid, dtype)
+    r1_area_f = nemo_qco_r1_area_f(raw, geom_grid, dtype)
     r3f = b(b(b(quarter * quad) * r1_hf0) * r1_area_f)
     # dom_qco_zgr applies the F-point lateral boundary condition to r3f
     # (domqco.F90:124-135) before domzgr_substitute.h90:130 consumes it.
