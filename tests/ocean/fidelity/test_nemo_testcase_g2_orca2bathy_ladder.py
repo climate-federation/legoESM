@@ -131,7 +131,8 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
         "zdf_tracer_nemo_rounded_thickness"] is False       # round 3
     assert recipe._ORCA2G_ZDF_FACES == {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
                                           "ORCA2G4-sbc": True, "ORCA2G5-ice": True, "ORCA2G6-vec": True,
-                                          "ORCA2G7-drg": True, "ORCA2G8-ldf": True}
+                                          "ORCA2G7-drg": True, "ORCA2G8-ldf": True,
+                                          "ORCA2G9-tadv": True}
     assert recipe.ORCA2G2_UNMEASURED == ("multi_level_partial_cell_step",)
     # no other builder assigns it: one assignment in the whole package, the
     # shared G1/G2 builder's, keyed by the rung table (the resolved pair of
@@ -143,7 +144,8 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
     # round 3's option: its own rung table, one assignment in the package
     assert recipe._ORCA2G_TRA_ZDF_ROUNDED == {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
                                           "ORCA2G4-sbc": True, "ORCA2G5-ice": True, "ORCA2G6-vec": True,
-                                          "ORCA2G7-drg": True, "ORCA2G8-ldf": True}
+                                          "ORCA2G7-drg": True, "ORCA2G8-ldf": True,
+                                          "ORCA2G9-tadv": True}
     mine = [(path.name, line) for path in (CASES.parents[3] / "packages").rglob("*.py")
             for line in path.read_text().splitlines()
             if "zdf_tracer_nemo_rounded_thickness=" in line]
@@ -154,7 +156,8 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
         "barotropic_rhs_ascending_level_sum"] is False
     assert recipe._ORCA2G_UE_RHS_ASCENDING == {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
                                           "ORCA2G4-sbc": True, "ORCA2G5-ice": True, "ORCA2G6-vec": True,
-                                          "ORCA2G7-drg": True, "ORCA2G8-ldf": True}
+                                          "ORCA2G7-drg": True, "ORCA2G8-ldf": True,
+                                          "ORCA2G9-tadv": True}
     sums = [(path.name, line) for path in (CASES.parents[3] / "packages").rglob("*.py")
             for line in path.read_text().splitlines()
             if "barotropic_rhs_ascending_level_sum=" in line]
@@ -166,18 +169,19 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
         "zdf_momentum_stage_r3u_nemo_literal"] is False
     assert recipe._ORCA2G_ZDF_STAGE_R3U == {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
                                               "ORCA2G4-sbc": True, "ORCA2G5-ice": True, "ORCA2G6-vec": True,
-                                          "ORCA2G7-drg": True, "ORCA2G8-ldf": True}
+                                          "ORCA2G7-drg": True, "ORCA2G8-ldf": True,
+                                          "ORCA2G9-tadv": True}
     r3u = [(path.name, line) for path in (CASES.parents[3] / "packages").rglob("*.py")
            for line in path.read_text().splitlines()
            if "zdf_momentum_stage_r3u_nemo_literal=" in line]
     assert [name for name, _ in r3u] == ["nemo_testcase_recipe.py"]
     assert "_ORCA2G_ZDF_STAGE_R3U[case]" in r3u[0][1]
-    assert LatLonCGridOceanConfig._fields[-24:-16] == (
+    assert LatLonCGridOceanConfig._fields[-25:-17] == (
         "zdf_tracer_nemo_rounded_thickness", "barotropic_rhs_ascending_level_sum",
         "zdf_momentum_stage_r3u_nemo_literal", "barotropic_wind_nemo_stored_depth",
         "surface_stress_nemo_fold_vector_sign", "zdf_surface_stress_nemo_face_thickness",
         "een_nemo_relative_vorticity", "rk3_stage_tracer_written_order")
-    assert LatLonCGridOceanConfig._fields[-16:-8] == (
+    assert LatLonCGridOceanConfig._fields[-17:-9] == (
         "rk3_vector_rhs_nemo_order", "rk3_stage3_heat_nemo_written",
         "rk3_stage3_tracer_nemo_stored_thickness",
         "implicit_ice_ocean_top_drag",
@@ -186,20 +190,23 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
         # G6 (9f8316fab): appended last, default off, G6-selected only
         "nemo_hpg_sco_fold_geometry", "rk3_vector_raw_vmask")
     # G6 round 7: appended last, default off, G6-selected only
-    assert LatLonCGridOceanConfig._fields[-8:-6] == (
+    assert LatLonCGridOceanConfig._fields[-9:-7] == (
         "nemo_wzv_stored_r3_ratios", "nemo_zad_written_association")
     # G6 round 8: appended last, default off, G6-selected only
-    assert LatLonCGridOceanConfig._fields[-6] == "nemo_stage2_momentum_wzv_half_step"
+    assert LatLonCGridOceanConfig._fields[-7] == "nemo_stage2_momentum_wzv_half_step"
     # G6 round 8 resume: appended last, default off, G6-selected only
-    assert LatLonCGridOceanConfig._fields[-5] == "nemo_stage_momentum_wzv_stored_kmm_ratios"
+    assert LatLonCGridOceanConfig._fields[-6] == "nemo_stage_momentum_wzv_stored_kmm_ratios"
     # G8 round 1: appended last, default off, G8-selected only
-    assert LatLonCGridOceanConfig._fields[-4:] == (
+    assert LatLonCGridOceanConfig._fields[-5:-1] == (
         "nemo_ldf_stored_f_area", "nemo_ldf_fold_rows",
         "rk3_stage1_ldf_source_order", "nemo_ldf_stage_r3f")
+    # G9 round 1: appended last, default off, G9-selected only
+    assert LatLonCGridOceanConfig._fields[-1] == "rk3_stage_transport_raw_vmask"
     assert not any(LatLonCGridOceanConfig._field_defaults[f] for f in (
         "nemo_hpg_sco_fold_geometry", "rk3_vector_raw_vmask",
         "nemo_wzv_stored_r3_ratios", "nemo_zad_written_association",
-        "nemo_stage2_momentum_wzv_half_step", "nemo_stage_momentum_wzv_stored_kmm_ratios"))
+        "nemo_stage2_momentum_wzv_half_step", "nemo_stage_momentum_wzv_stored_kmm_ratios",
+        "rk3_stage_transport_raw_vmask"))
     assert "_ORCA2G_ZDF_FACES[case]" in (
         CASES.parents[3] / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py"
     ).read_text().splitlines()[hits[0][1] - 1]

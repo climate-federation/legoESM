@@ -3338,6 +3338,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # True hands rk3_stage_r3f_nemo_literal's ratio to the stage-3 lateral
     # diffusion; False preserves previously measured cards.
     nemo_ldf_stage_r3f: bool = False
+    # NEMO's stage transport zFv multiplies by vmask (stprk3_stg.f90:283),
+    # the mask AFTER its V-point fold exchange (dommsk.f90:211, :232): the
+    # T-pivot row's V faces are wet, where the compact T-derived face mask
+    # calls them dry.  True hands every stage transport the resolved raw-mesh
+    # V mask; False preserves previously measured cards.
+    rk3_stage_transport_raw_vmask: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
