@@ -335,6 +335,8 @@ FILES = {
         _ORCA2_COMPILED / "sbcflx.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2_COMPILED / "stprk3_stg.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90": (
+        _ORCA2_COMPILED / "lbcnfd.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90": (
         _ORCA2_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90": (
@@ -8236,6 +8238,16 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbc.f90:177': ('SUBROUTINE tra_bbc_init', 1),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbc.f90:243': 'qgh_trd0(:,:) = r1_rho0_rcp * sf_qgh(1)%fnow(:,:,1) * 1.e-3 ! conversion in W/m2',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:217': 'SUBROUTINE tra_bbl_dif( pt, pt_rhs, kjpt, Kmm )',
+    # --- lane B round 16 resume: L1 scored (stage-3 tracer fold exchange) ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:78': 'SUBROUTINE stp_RK3_stg( kstg, kstp, Kbb, Kmm, Krhs, Kaa )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:795-796': [
+        ("CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:,:       ,Kaa), 'V', -1._wp   &", 2),
+        "&                       , ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp, ldfull=.TRUE. )",
+        2],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:561': 'SUBROUTINE lbc_nfd_dp( ptab, cd_nat, psgn, kfld )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:620-627': [
+        ('DO jj = 1, 1', 5),
+        ('ptab(jf)%pt4d(ii1,ij1,jk,jl) = psgn(jf) * ptab(jf)%pt4d(ii2,ij2,jk,jl)', 46), 8],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:258': 'pt_rhs(ji,jj,ik,jn) = pt_rhs(ji,jj,ik,jn)',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:357': 'SUBROUTINE bbl( kt, kit000, Kbb, Kmm )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:412': 'zdep(ji,jj) = ((gdept_1d(ik) ) *(1._wp+r3t(ji,jj,Kmm)))            ! bottom T-level refere',
