@@ -234,6 +234,14 @@ JAX_ENABLE_X64=1, CPU, PYTHONPATH as in `land.sh`; evidence
   alone: 6 passed, `gate_fix_ratchet.log`); 2 passed (`gate_fix_b1.log`,
   face-mask); 15 passed (`gate_fix_b2.log`, barotropic state + the seven
   round-314 tests).  152 passed, 0 failed.
+- After the second review fixes, at `d82c6f46d`, same pieces: citation
+  gate on this receipt 13 citations, failures 0, PASS
+  (`citation_gate_receipt_fix2.json`); 135 passed (`gate_fix2_a.log`,
+  includes the private-import ratchet, also run alone: 6 passed,
+  `gate_fix2_ratchet.log`); 2 passed (`gate_fix2_b1.log`, face-mask); 17
+  passed (`gate_fix2_b2.log`, barotropic state + the nine round-314
+  tests).  154 passed, 0 failed.
+- Second resume: codex review: operator.
 - Review: codex review: paused (quota).  Independent Claude review
   (operator): CONFIRMED the DIFFERS rows, absences and direct test; HELD on
   the two instrument defects fixed above.
