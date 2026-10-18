@@ -63,6 +63,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     fold_ghost_source_T,
     fold_perm_f,
     fold_perm_u,
+    fold_pivot_half_row,
     pad_ns_scalar,
 )
 from legoesm.ocean.vertical import (
@@ -715,15 +716,9 @@ def _nemo_external_mode_boundary_association(
         # periodic closure; columns 1: are NEMO's native U row.  The pivot
         # branch leaves its left half in place and writes the right half from
         # the sign-flipped U-stagger permutation of that same row.
-        n_lon = fold.perm_T.shape[0]
-        half = n_lon // 2
-        perm = fold_perm_u(fold)[half:]
-        folded = u_post.at[-1, half + 1:].set(
-            fold.vector_sign_u * u_post[-1, 1:][perm])
         # mppini.f90:1425-1427 also marks the periodic west closure for the
         # no-gather T-pivot overwrite.  It is the image of native U column 0.
-        folded = folded.at[-1, 0].set(
-            fold.vector_sign_u * u_post[-1, 1])
+        folded = fold_pivot_half_row(u_post, fold, "U")
         if fold_is_local(grid):
             u_post = folded
         else:

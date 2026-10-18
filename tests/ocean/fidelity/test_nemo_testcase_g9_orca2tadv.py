@@ -354,3 +354,56 @@ def test_g9_stage3_fct_reads_the_fold_on_the_pivot_rows(tmp_path):
         assert ref.shape == got.shape
         err = np.where(wet, np.abs(got - ref), 0.0) / np.abs(np.where(wet, ref, 0.0)).max()
         assert err[-3:].max() <= 1.0e-15, (name, float(err[-3:].max()))
+
+
+@needs_inputs
+@pytest.mark.skipif(not (G9_RECORD / "oracle_stage_kt00000001_s3.bin").is_file(),
+                    reason="no round-46 G9 record")
+def test_g9_fct_pivot_row_right_half_is_the_image_of_its_left_half(tmp_path):
+    """The lbc_lnk at traadv_fct.f90:311 also overwrites the right half of the stored
+    pivot row: zta_up1 (T, +1) and ztFu (U, -1) become the image of the left half of
+    the same row (lbcnfd.f90:624-628, :669-673).  On a self-mirrored pivot row that
+    is a no-op, so the input here is made asymmetric: the card's kt-1 stage-3 FCT
+    inputs with the pivot row's right half of both tracer levels scaled by 1+1e-6.
+    Jitted FCT, tracers traced, x64.  The expected values are NEMO's loop indices,
+    written out here, not the model's helper."""
+    import jax
+    import jax.numpy as jnp
+    sys.path[:0] = [str(CASES), str(CASES / "nemo_testcase_g5_orca2ice")]
+    import g5_records as g5
+    from legoesm.ocean.advection import (
+        NEMO_FCT_STENCIL_TRACE_FIELDS, NEMO_FCT_TRACE_FIELDS, fct_tracer_advection)
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    card = recipe.build_nemo_testcase_card("ORCA2G9-tadv", deck_root=G9_RECORD)
+    cfg, zc, s0, grid = (card.recipe.model_config, card.recipe.z_coord,
+                         card.recipe.initial_state, card.recipe.grid)
+    fw, sf = g5.nemo_supplied_forcing(card, G9_RECORD, 1)
+    obs = LatLonCGridOceanModel(
+        grid, zc, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_stage3_fct_inputs=True)
+    ).step(s0, dt=card.dt_s, freshwater=fw, surface_forcing=sf).mass_flux_w
+    n = grid.n_lon
+    right = jnp.zeros_like(obs.tracer_a).at[-1, n // 2 + 1:].set(1.0e-6)
+    now, before = obs.tracer_a * (1.0 + right), obs.tracer_a_before * (1.0 + right)
+    assert float(jnp.abs(now[-1] - now[-1][np.r_[0, n - 1:0:-1]]).max()) > 0.0
+
+    def fct(now, before, trace):
+        return fct_tracer_advection(
+            now, obs.mass_flux_u, obs.mass_flux_v, obs.w_explicit, obs.thickness, grid,
+            card.dt_s, high_order="centred2", tracer_before=before,
+            active_mask=obs.active_mask, low_order_predictor="nemo_rk3_two_step",
+            base_thickness=obs.base_thickness, after_thickness=obs.after_thickness,
+            implicit_w=obs.w_implicit, nemo_fold_exchange=True, **{trace: True})[2]
+
+    anti_u = np.asarray(dict(zip(NEMO_FCT_TRACE_FIELDS, jax.jit(
+        lambda a, b: fct(a, b, "return_nemo_trace"))(now, before)))["anti_pre_u"])[-1]
+    paft = np.asarray(dict(zip(NEMO_FCT_STENCIL_TRACE_FIELDS, jax.jit(
+        lambda a, b: fct(a, b, "return_nemo_stencil_trace"))(now, before)))["paft"])[-1]
+    # T: native i1 = N/2 + ji <- i2 = N/2 - ji, ji = 1 .. N/2-1 (lbcnfd.f90:624-628).
+    ji = np.arange(1, n // 2)
+    assert np.array_equal(paft[n // 2 + ji], paft[n // 2 - ji])
+    # U (compact column = native U + 1, column 0 the periodic closure):
+    # native N/2 - 1 + ji <- N/2 - ji, ji = 1 .. N/2, sign -1 (lbcnfd.f90:669-673).
+    ji = np.arange(1, n // 2 + 1)
+    assert np.array_equal(anti_u[n // 2 + ji], -anti_u[n // 2 - ji + 1])
+    assert np.array_equal(anti_u[0], anti_u[n])

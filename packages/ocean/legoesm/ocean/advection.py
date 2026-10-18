@@ -961,7 +961,9 @@ def fct_tracer_advection(
         NEMO's T-pivot fold inside ``tra_adv_fct`` (nn_hls=2): the faces
         north of the stored pivot row carry the fold image of the row below
         -- the upstream fluxes built on the halo (traadv_fct.f90:501-504,
-        :568-573), the antidiffusive flux after ``lbc_lnk`` (:311), the
+        :568-573), the antidiffusive flux after ``lbc_lnk`` (:311, which
+        also sets the pivot row's right half of ``ztFu`` and ``zta_up1``
+        to the image of its left half), the
         north neighbour of the ``nonosc`` bound (:817) and the face
         coefficient from the halo ``zbetup``/``zbetdo`` (:910).  Needs
         an active pivot-row fold.  False keeps the wall north face.
@@ -1008,14 +1010,21 @@ def fct_tracer_advection(
             raise ValueError(
                 "nemo_fold_exchange=True needs an active T-pivot fold with "
                 "the pivot row stored")
-        from legoesm.grids.operators_latlon_cgrid import fold_row
+        from legoesm.grids.operators_latlon_cgrid import (
+            fold_pivot_half_row, fold_row)
         _n_lon_fold = fold.perm_T.shape[0]
 
         def _fold_v(a):
             return a.at[-1].set(fold_row(
                 a[-2:-1], fold.perm_v, fold.vector_sign_v, _n_lon_fold)[0])
+
+        def _fold_half(a, stagger):
+            return fold_pivot_half_row(a, fold, stagger)
     else:
         def _fold_v(a):
+            return a
+
+        def _fold_half(a, stagger):
             return a
 
     # Monotonicity base (Kbb under leapfrog; == tracer on the FE/AB2 path).
@@ -1151,7 +1160,7 @@ def fct_tracer_advection(
 
     # --- Step 3: True sign-split Zalesak (1979) limiter (issue #212) ---
     # Anti-diffusive face fluxes:
-    ad_flux_u = flux_u_hi - flux_u_low      # (n_lat, n_lon+1, nlev)
+    ad_flux_u = _fold_half(flux_u_hi - flux_u_low, "U")  # (n_lat, n_lon+1, nlev)
     ad_flux_v = _fold_v(flux_v_hi - flux_v_low)  # lbc_lnk, traadv_fct.f90:311
     ad_vert_int = F_vert_hi_int - F_vert_low_int  # (..., nlev-1)
     if return_nemo_trace:
@@ -1215,6 +1224,7 @@ def fct_tracer_advection(
             up1_explicit_ztra, up1_implicit_ztra, up1_total_ztra,
             up1_base_content, up1_dt_ztra, up1_numerator, h_new, q_td,
         ))
+    q_td = _fold_half(q_td, "T")  # zta_up1 in lbc_lnk, traadv_fct.f90:311
 
     # Local min / max over the (cell + 6 neighbours) stencil.  For non-
     # cyclic latitude the boundary cell is its own south/north neighbour
