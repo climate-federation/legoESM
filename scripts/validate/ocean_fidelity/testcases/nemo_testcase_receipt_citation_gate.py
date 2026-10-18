@@ -1236,6 +1236,13 @@ FILES = {
     "ocean_model_latlon_cgrid.py":
         REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py",
     "advection.py": REPO / "packages/ocean/legoesm/ocean/advection.py",
+    "implicit_solver.py":
+        REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/implicit_solver.py",
+    "internal_wave_mixing.py":
+        REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/internal_wave_mixing.py",
+    "tke.py": REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py",
+    "shortwave_penetration.py":
+        REPO / "packages/ocean/legoesm/ocean/physics/shortwave_penetration.py",
     "barotropic_latlon_cgrid.py":
         REPO / "packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py",
     "eos.py": REPO / "packages/ocean/legoesm/ocean/eos.py",
@@ -1740,6 +1747,23 @@ CITATION_MAP = {
     # round 315 differentiability probe (legoESM statements, measurement only)
     'ocean_model_latlon_cgrid.py:1933': 'rhs = sr(-sr(horizontal_scaled / e3t_kmm))',
     'ocean_pe_latlon_cgrid.py:4294': [('cd0=float(config.bottom_drag.bottom_drag_cd0),', 1)],
+    'ocean_model_latlon_cgrid.py:1946': 'return sr(rhs - sr(vertical_scaled / e3t_kmm))',
+    'ocean_model_latlon_cgrid.py:2568-2570': [
+        'out = r(r(r(q_before[..., None] * base)', '/ q_after[..., None])', 3],
+    'ocean_model_latlon_cgrid.py:2576': 'return jnp.where(active_3d > 0.5, out, base)',
+    'ocean_model_latlon_cgrid.py:13444': '_rnd(_rnd(_rnd(dt_mom * _tau_j_v) / _rnd(_e3v1 * _r0))',
+    'ocean_pe_latlon_cgrid.py:4294-4298': [
+        'cd0=float(config.bottom_drag.bottom_drag_cd0),',
+        'uc0=float(config.bottom_drag.bottom_drag_uc0),', 5],
+    'ocean_pe_latlon_cgrid.py:4375-4379': [
+        'cd0=float(config.bottom_drag.bottom_drag_cd0),',
+        'uc0=float(config.bottom_drag.bottom_drag_uc0),', 5],
+    'implicit_solver.py:357-376': [
+        '_round_the_multiply(quotient * previous))', 'numerator / current_diagonal)', 20],
+    'internal_wave_mixing.py:443': 'n_pos = jnp.sqrt(n2_pos)',
+    'tke.py:1081': 'jnp.sqrt((jnp.asarray(2.0, e.dtype) * e) / zrn2),',
+    'tke.py:3646': 'dissl_new = jnp.sqrt(tke_curr) / l_eps_final',
+    'shortwave_penetration.py:558': 'increment = sr(sr(r1_rho0_csw * delta) / ze3t)',
     # round 314 namelist audit
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:21': 'nn_itend    =    5840',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:48': 'ln_tsd_dmp  = .true.',
