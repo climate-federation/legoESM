@@ -90,7 +90,7 @@ def moist_diagnostics(u, v, w_centre, theta, tracers, rho_c, dz, dx,
         qv_min=float(qv.min()), qv_max=float(qv.max()), qc_max=float(qc.max()))
 
 
-def conserving_positive(tracers, rho_c, dz, n_water=6):
+def conserving_positive(tracers, theta, rho_c, exner, dz, n_water=6):
     """MASS-CONSERVING positivity fixer for the water tracers (slots 0..n_water-1).
 
     The pseudo-spectral scalar transport is NON-MONOTONE: at the sharp trade /
@@ -100,12 +100,22 @@ def conserving_positive(tracers, rho_c, dz, n_water=6):
     condensation (whole-column saturation). Instead, per column per species,
     clip to zero THEN rescale the positive cells so the column-integrated
     ``∫ρq dz`` is unchanged (hole-filling / borrowing; standard for
-    positive-definite-but-non-monotone scalar transport). Number slots
-    (≥ n_water) clip freely (their conservation is not physically required).
+    positive-definite-but-non-monotone scalar transport).
 
-    Returns ``(tracers_fixed, created_water)`` where ``created_water`` is the
-    column-summed water the OLD clip WOULD have created — a near-zero
-    monotonicity diagnostic, kept for the run log.
+    A condensate column whose species total is itself negative (the cloud-free
+    columns beside a cumulus, where the transport undershoot is all there is)
+    cannot fill itself: there the negative cells are filled from the column's
+    VAPOUR, taken in proportion to the vapour at each level, with the latent
+    heat of that condensation released where the vapour is taken (L_v for
+    liquid, L_s for ice). Total water and the moist enthalpy
+    ``c_pd Π θ + L_v q_v − L_f q_ice`` are conserved exactly. If the column holds
+    less vapour than the deficit, the holes are filled only by the fraction the
+    vapour covers (never creating water, never making vapour negative). Number
+    slots (≥ n_water) clip freely (their conservation is not physically required).
+
+    Returns ``(tracers_fixed, theta_fixed, created_water)`` where
+    ``created_water`` is the column-summed water the OLD clip WOULD have created —
+    a near-zero monotonicity diagnostic, kept for the run log.
     """
     w = rho_c * dz                                       # (nz,) mass weight
     q = tracers[..., :n_water]                           # (ny,nx,nz,n_water)
@@ -115,10 +125,35 @@ def conserving_positive(tracers, rho_c, dz, n_water=6):
     created = jnp.sum(jnp.clip(-q, 0.0, None) * w[None, None, :, None])
     # factor ≤ 1 removes the borrowed mass from the positives; guard an
     # all-nonpositive column (col_clip→0) by leaving it at zero.
-    factor = jnp.where(col_clip > 1e-30, col_before / col_clip, 0.0)
+    # safe denominator INSIDE the division: an empty column's 0/0 would make
+    # reverse-mode gradients NaN even though the forward value is masked
+    full = col_clip > 1e-30
+    factor = jnp.where(full, col_before / jnp.where(full, col_clip, 1.0), 0.0)
     q_fixed = q_clip * jnp.clip(factor, 0.0, 1.0)
+    # condensate columns with a negative total: fill their negative cells from
+    # the column's vapour (slot 0 is vapour, never filled this way)
+    condensate = jnp.arange(n_water) > 0
+    from_vapour = (col_before < 0.0) & condensate        # (ny,nx,1,n_water)
+    neg = jnp.where(from_vapour, jnp.minimum(q, 0.0), 0.0)  # ≤ 0, cell by cell
+    deficit = -jnp.sum(neg * w[None, None, :, None], axis=2, keepdims=True)  # ≥ 0
+    need = jnp.sum(deficit, axis=-1, keepdims=True)     # (ny,nx,1,1) [kg/m²]
+    qv = q_fixed[..., :1]                               # rescaled vapour, ≥ 0
+    have = jnp.sum(qv * w[None, None, :, None], axis=2, keepdims=True)
+    cover = jnp.where(need > 0.0,
+                      jnp.minimum(1.0, have / jnp.where(need > 0.0, need, 1.0)), 0.0)
+    q_fixed = jnp.where(from_vapour, q_clip + (1.0 - cover) * neg, q_fixed)
+    taken = jnp.minimum(cover * need / jnp.where(have > 0.0, have, 1.0), 1.0)  # of vapour
+    q_fixed = q_fixed.at[..., :1].multiply(1.0 - taken)
+    latent = jnp.asarray([constants.L_v, constants.L_v, constants.L_v,  # latent-ok: liquid condensation, the budgets' enthalpy
+                          constants.L_s, constants.L_s, constants.L_s][:n_water],  # latent-ok: ice deposition
+                         dtype=q.dtype)
+    # heat per kg of vapour taken: the deficit-weighted latent heat of the holes
+    l_eff = jnp.sum(deficit * latent, axis=-1) / jnp.where(need[..., 0] > 0.0,
+                                                           need[..., 0], 1.0)
+    theta_fixed = theta + (taken[..., 0] * qv[..., 0] * l_eff) / (
+        constants.c_pd * jnp.asarray(exner, theta.dtype)[None, None, :])
     numbers = jnp.clip(tracers[..., n_water:], 0.0, None)
-    return jnp.concatenate([q_fixed, numbers], axis=-1), created
+    return jnp.concatenate([q_fixed, numbers], axis=-1), theta_fixed, created
 
 
 class SpectralRefState(NamedTuple):

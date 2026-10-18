@@ -6,12 +6,18 @@
 #PBS -l walltime=06:00:00
 #PBS -j oe
 #
-# One LES-suite reference emission (scripts/run/run_les_suite.py) on one A100.
-# Derecho twin of les_suite_campaign.sbatch's emit step. All run arguments are
-# passed explicitly through ARGS so the run's configuration is in the job record.
+# One LES-suite reference emission on one A100. Derecho twin of
+# les_suite_campaign.sbatch's emit step. All run arguments are passed explicitly
+# through ARGS so the run's configuration is in the job record.
 #
-#   qsub -N cbl_lasd -v ARGS="--case cbl_nieuwstadt --sgs lasd --hours 1 --frames 12" \
+# Dry cases run scripts/run/run_les_suite.py (the default DRIVER), which writes
+# into OUT. Cloudy cases run their own driver, which takes every path in ARGS
+# (--output for its frame records, --emit-suite-artifact for the artifact):
+#
+#   qsub -N cbl_lasd -v ARGS="--case cbl_nieuwstadt --sgs lasd --hours 2 --frames 12" \
 #        derecho_les_case.pbs
+#   qsub -N bomex -v DRIVER=run_bomex_les.py,ARGS="--microphysics kessler \
+#        --output <dir> --emit-suite-artifact <dir>/bomex_cu.npz" derecho_les_case.pbs
 #
 # A run longer than one walltime chains: set CKPT (checkpoint file) and
 # WALL_LIMIT_S (seconds of stepping per link, leave margin for compile + the
@@ -24,7 +30,8 @@
 #        --hours 9",CKPT=/glade/derecho/scratch/$USER/les_suite/ckpt/gabls1_r2.npz,\
 #        WALL_LIMIT_S=41400,RESUBMIT_WALLTIME=12:00:00 derecho_les_case.pbs
 set -uo pipefail
-: "${ARGS:?ARGS (run_les_suite.py arguments) is required}"
+: "${ARGS:?ARGS (driver arguments) is required}"
+: "${DRIVER:=run_les_suite.py}"
 : "${REPO:=/glade/u/home/${USER}/legoesm}"
 : "${OUT:=${REPO}/results/les_suite/artifacts}"
 : "${CONDA_ENV_PREFIX:=/glade/work/${USER}/conda-envs/legoesm-gpu}"
@@ -46,11 +53,13 @@ cd "${REPO}" || exit 2
 # own sources first so a worktree/branch REPO runs its own code.
 PYTHONPATH="${REPO}/src$(printf ':%s' "${REPO}"/packages/*)${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTHONPATH
-echo "[les] host=$(hostname) sha=$(git rev-parse HEAD) dirty=$(git status --porcelain | wc -l) args=${ARGS} out=${OUT}"
+echo "[les] host=$(hostname) sha=$(git rev-parse HEAD) dirty=$(git status --porcelain | wc -l) driver=${DRIVER} args=${ARGS} out=${OUT}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+OUT_ARGS=()
+[[ "${DRIVER}" == "run_les_suite.py" ]] && OUT_ARGS=(--output "${OUT}")
 # shellcheck disable=SC2086
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 python scripts/run/run_les_suite.py ${ARGS} \
-    "${CHAIN_ARGS[@]}" --output "${OUT}"
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 python "scripts/run/${DRIVER}" ${ARGS} \
+    "${CHAIN_ARGS[@]}" ${OUT_ARGS[@]+"${OUT_ARGS[@]}"}
 rc=$?
 echo "[les] exit=${rc}"
 if (( rc == 75 )); then

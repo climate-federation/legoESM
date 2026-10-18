@@ -1252,3 +1252,37 @@ def test_flux_to_closure_needs_a_closure_to_receive_it():
         _make_scm(forcing=SCMForcing(**flux, flux_to_closure=True))
     scm = _make_scm(forcing=SCMForcing(**flux))
     assert scm.forcing.prescribe == "fluxes"
+
+
+def test_subsidence_tracers_subside_cloud_water_like_vapour():
+    """``subsidence_tracers=("q_v", "q_c")`` advects q_c with the SAME upwind
+    operator as q_v (identical profiles -> identical tendencies); the default
+    leaves q_c alone; naming a tracer the column lacks raises."""
+    prof = jnp.linspace(1e-6, 1.5e-2, NLEV)
+    w = lambda t: jnp.full(NLEV, -0.01)                         # noqa: E731
+    scm = SingleColumnModel.create(
+        physics_config=_no_physics_cfg(), nlev=NLEV, dt=60.0,
+        T_profile=jnp.linspace(220.0, 295.0, NLEV), q_v_profile=prof,
+        q_c_profile=prof, u=0.0, v=0.0)
+    both = SCMForcing(subsidence_w=w, subsidence_tracers=("q_v", "q_c"))
+    tend = compute_forcing_tendencies(scm.state, scm.sigma_coord, both, t_seconds=0.0)
+    dqv = np.asarray(tend.tracer_tendencies["q_v"].data)
+    dqc = np.asarray(tend.tracer_tendencies["q_c"].data)
+    assert np.max(np.abs(dqc)) > 0.0
+    np.testing.assert_array_equal(dqc, dqv)
+    vapour_only = compute_forcing_tendencies(
+        scm.state, scm.sigma_coord, SCMForcing(subsidence_w=w), t_seconds=0.0)
+    assert "q_c" not in vapour_only.tracer_tendencies
+    no_qc = _make_scm(q_v_profile=prof)
+    with pytest.raises(ValueError, match="subsidence_tracers"):
+        compute_forcing_tendencies(no_qc.state, no_qc.sigma_coord, both, t_seconds=0.0)
+    # an explicitly named q_v is validated too (a dry column cannot take it) ...
+    dry = _make_scm()
+    with pytest.raises(ValueError, match="subsidence_tracers"):
+        compute_forcing_tendencies(dry.state, dry.sigma_coord,
+                                   SCMForcing(subsidence_w=w, subsidence_tracers=("q_v",)),
+                                   t_seconds=0.0)
+    # ... while the default stays a no-op on water for a dry column
+    dry_tend = compute_forcing_tendencies(dry.state, dry.sigma_coord,
+                                          SCMForcing(subsidence_w=w), t_seconds=0.0)
+    assert not (dry_tend.tracer_tendencies or {})

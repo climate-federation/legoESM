@@ -62,6 +62,7 @@ if not _F32:
 import jax.numpy as jnp  # noqa: E402
 from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl  # noqa: E402
 from legoesm.atmosphere.dynamics.les.spectral_les_moist import (  # noqa: E402
+    conserving_positive,
     make_anelastic_reference,
     make_les_microphysics_fn,
 )
@@ -85,10 +86,25 @@ from legoesm import constants  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import les_record  # noqa: E402
 from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
+from legoesm.atmosphere.les_suite.bridge import save_artifact  # noqa: E402
+from legoesm.atmosphere.les_suite.checkpoint import (  # noqa: E402
+    EXIT_CHECKPOINTED,
+    add_checkpoint_args,
+    checkpoint_fingerprint,
+    load_checkpoint,
+    restore_state,
+    save_checkpoint,
+)
+from legoesm.atmosphere.les_suite.frame_stats import (  # noqa: E402
+    MoistRunEmitter,
+    column_contents,
+    moist_step_budget,
+)
 from legoesm.atmosphere.les_suite.scm_coupling import (  # noqa: E402
     liquid_water_theta,
     saturation_adjust,
 )
+from legoesm.atmosphere.les_suite.scm_runner import microphysics_record  # noqa: E402
 
 
 def _record_theta_l(st, ref):
@@ -133,6 +149,9 @@ _STRATOCUMULUS_CASES = {
         "f_cor": 0.376e-4,   # the RF01 driver's own value
         "subsidence_divergence_s": 3.75e-6,
         "lz_m": 1500.0,
+        # published grid (Stevens et al. 2005; deck grd_5m): dx 35 m on a
+        # 3.36 km box, uniform dz 5 m -> 300 levels, 4 h
+        "nx": 96, "lx_m": 3360.0, "nz": 300, "hours": 4.0, "dt_s": 0.5,
         "n_c_m3": 140.0e6,
         "perturb_z_m": 840.0,
         # Printed next to the run's own diagnostics. Per case, because these
@@ -166,6 +185,10 @@ _STRATOCUMULUS_CASES = {
         # The deck's own stretched grid tops at 1459 m and its sounding runs to
         # 1595 m, so a 1500 m lid is spanned by the sounding.
         "lz_m": 1500.0,
+        # published grid (Ackerman et al. 2009; deck 128x128 at 50 m = 6.4 km),
+        # 6 h; the stretched 96-level grid (5 m minimum) is replaced by uniform
+        # dz 5 m -> 300 levels (this core has uniform dz only)
+        "nx": 128, "lx_m": 6400.0, "nz": 300, "hours": 6.0, "dt_s": 0.5,
         # prm &MICRO_DRIZZLE Nc0 = 55 cm^-3, and the RF02 SCM/LES
         # intercomparison specifies the same. RF01 runs 140 cm^-3.
         #
@@ -191,6 +214,9 @@ _STRATOCUMULUS_CASES = {
         "f_cor": 0.0,                 # prm: docoriolis = .false.
         "subsidence_divergence_s": 5.0e-6,   # lsf: w=-0.010 m/s at 2000 m
         "lz_m": 2500.0,
+        # published grid (deck caseid 144x144x100_50m_25m_3s): dx 50 m on a
+        # 7.2 km box, dz 25 m -> 100 levels, dt 3 s, 6 h
+        "nx": 144, "lx_m": 7200.0, "nz": 100, "hours": 6.0, "dt_s": 3.0,
         "n_c_m3": 100.0e6,            # ASTEX intercomparison N_c
         # UNCHANGED from the literal build() used for every deck, so this diff
         # does not move ASTEX. It is almost certainly too high -- ASTEX's
@@ -221,18 +247,19 @@ def parse_args():
                         "the initial perturbation is seeded below.")
     p.add_argument("--case-dir", default=None,
                    help="override the deck directory --case resolves to.")
-    p.add_argument("--nx", type=int, default=96)
-    p.add_argument("--ny", type=int, default=96)
-    p.add_argument("--nz", type=int, default=192,
-                   help="dz=7.8 m at Lz=1500 (official 5 m needs nz=300, "
-                        "beyond the projection's nz≲200 compile cliff).")
-    p.add_argument("--Lx", type=float, default=3360.0)
-    p.add_argument("--Ly", type=float, default=3360.0)
+    p.add_argument("--nx", type=int, default=None,
+                   help="defaults to the case's published grid")
+    p.add_argument("--ny", type=int, default=None)
+    p.add_argument("--nz", type=int, default=None,
+                   help="defaults to the case's published grid (RF01/RF02: "
+                        "dz 5 m = 300 levels).")
+    p.add_argument("--Lx", type=float, default=None)
+    p.add_argument("--Ly", type=float, default=None)
     p.add_argument("--Lz", type=float, default=None,
                    help="domain depth [m]; defaults to the case's own.")
     p.add_argument("--z0", type=float, default=1.0e-4)
-    p.add_argument("--hours", type=float, default=4.0)
-    p.add_argument("--dt", type=float, default=0.5)
+    p.add_argument("--hours", type=float, default=None)
+    p.add_argument("--dt", type=float, default=None)
     p.add_argument("--f32", action="store_true")
     p.add_argument("--microphysics", default="morrison")
     p.add_argument("--n-tracers", type=int, default=9)
@@ -273,9 +300,11 @@ def parse_args():
                         "'dycoms', and the reference loader refused it.")
     p.add_argument("--output", type=Path, default=Path("results/les_dycoms"))
     p.add_argument("--emit-suite-artifact", type=Path, default=None,
-                   help="after the run, assemble a moist LESReferenceArtifact (the SCM "
-                        "tuner's input) from the recorded prof series + RF01 radiative "
-                        "forcing and write it to this path")
+                   help="write the moist LESReferenceArtifact (the SCM tuner's input) "
+                        "to this path: per-frame statistics on the --record-frames "
+                        "cadence, the realised surface series, the running integral "
+                        "of the applied LW forcing, and the column budgets (printed).")
+    add_checkpoint_args(p)
     args = p.parse_args()
     # The frame label follows the case unless it was given explicitly. The old
     # literal default meant the ONE field that identifies a reference was wrong
@@ -292,8 +321,10 @@ def parse_args():
     args.case_spec = spec
     if args.case_dir is None:
         args.case_dir = resolve_sam_case_dir(spec["gsam_dir"])
-    if args.Lz is None:
-        args.Lz = spec["lz_m"]
+    for arg, key in (("Lz", "lz_m"), ("nx", "nx"), ("ny", "nx"), ("Lx", "lx_m"),
+                     ("Ly", "lx_m"), ("nz", "nz"), ("hours", "hours"), ("dt", "dt_s")):
+        if getattr(args, arg) is None:
+            setattr(args, arg, spec[key])
     args.f_cor = spec["f_cor"]
     args.subsidence_divergence_s = spec["subsidence_divergence_s"]
     args.n_c_m3 = spec["n_c_m3"]
@@ -427,6 +458,8 @@ def make_stevens_lw(g, ref, dtype):
 
 def main():
     args = parse_args()
+    if args.wall_limit_s is not None and args.checkpoint is None:
+        raise SystemExit("--wall-limit-s needs --checkpoint (somewhere to stop to)")
     dtype = jnp.float32 if args.f32 else jnp.float64
     args.output.mkdir(parents=True, exist_ok=True)
     g, st, ref, forc = build(args, dtype)
@@ -460,39 +493,68 @@ def main():
     spf = jnp.where(zf > z_sp, 0.5 * (1.0 - jnp.cos(
         jnp.pi * (zf - z_sp) / (args.Lz - z_sp))), 0.0).astype(dtype)
 
+    emit = args.emit_suite_artifact is not None
+    zcol = jnp.zeros(6, dtype)
+    rho_pos = jnp.asarray(ref.rho_c, dtype)
+    exner_pos = jnp.asarray(ref.exner_c, dtype)
+
+    def _cols(state):
+        return column_contents(state, g, ref) if emit else zcol
+
     @partial(jax.jit, static_argnames=("first", "do_micro", "do_rad"))
     def step(state, dt, first=False, do_micro=True, do_rad=True):
-        state, us = sl.step(state, g=g, dt=dt,
-                            u_geo=(forc["ug"], forc["vg"]), f_cor=args.f_cor,
-                            first=first, force=(0.0, 0.0),
-                            sfc_theta_flux=forc["th_flux"],
-                            sfc_qv_flux=forc["qv_flux"])
+        out = sl.step(state, g=g, dt=dt,
+                      u_geo=(forc["ug"], forc["vg"]), f_cor=args.f_cor,
+                      first=first, force=(0.0, 0.0),
+                      sfc_theta_flux=forc["th_flux"],
+                      sfc_qv_flux=forc["qv_flux"], return_budget=emit)
+        state, us = out[0], out[1]
+        c0 = _cols(state)
         th = state.theta
         tr = state.tracers
         th = th - dt * w_ls * ddz_up(th)
         tr = tr.at[..., 0].set(tr[..., 0] - dt * w_ls * ddz_up(tr[..., 0]))
         tr = tr.at[..., 1].set(tr[..., 1] - dt * w_ls * ddz_up(tr[..., 1]))
-        if do_rad:
-            th = th + dt * args.rad_every * lw_tend(tr)
         state = state._replace(theta=th, tracers=tr)
+        c1 = _cols(state)
+        rad_prof = jnp.zeros(th.shape[-1], th.dtype) if emit else None
+        if do_rad:
+            rad_inc = dt * args.rad_every * lw_tend(tr)
+            state = state._replace(theta=th + rad_inc)
+            if emit:                       # applied Δθ profile [K] (artifact theta_adv)
+                rad_prof = rad_inc.mean((0, 1))
+        c2 = _cols(state)
+        d_micro = d_pos = zcol
+        precip = jnp.asarray(0.0, state.theta.dtype)
         if do_micro:
-            dth, dtr, _pr = micro(state.theta, state.tracers)
+            dth, dtr, pr = micro(state.theta, state.tracers)
             trn = state.tracers + dt * args.micro_every * dtr
-            wat = trn[..., :6]
-            created = jnp.sum(jnp.clip(-wat, 0.0, None))
-            trn = jnp.concatenate([jnp.clip(wat, 0.0, None),
-                                   jnp.clip(trn[..., 6:], 0.0, None)], axis=-1)
             state = state._replace(
                 theta=state.theta + dt * args.micro_every * dth, tracers=trn)
+            c3 = _cols(state)
+            # MASS-CONSERVING positivity (BOMEX's): a plain clip turns the
+            # transport's negative undershoots into new water
+            trn, th, created = conserving_positive(trn, state.theta, rho_pos, exner_pos,
+                                                   g.dz)
+            state = state._replace(tracers=trn, theta=th)
+            d_micro = c3 - c2
+            d_pos = _cols(state) - c3
+            precip = dt * args.micro_every * jnp.mean(pr)
         else:
             created = jnp.asarray(0.0, state.theta.dtype)
+        c4 = _cols(state)
         rc = (dt / tau_sp) * spc
         rf = (dt / tau_sp) * spf
         u = state.u - rc * (state.u - state.u.mean((0, 1), keepdims=True))
         v = state.v - rc * (state.v - state.v.mean((0, 1), keepdims=True))
         w = state.w - rf * state.w
         u, v, w = sl.project(u, v, w, dt=dt, g=g)
-        return state._replace(u=u, v=v, w=w), us, created
+        state = state._replace(u=u, v=v, w=w)
+        budget = (moist_step_budget(out[2], ls=c1 - c0, rad=c2 - c1, micro=d_micro,
+                                    positivity=d_pos, sponge=_cols(state) - c4,
+                                    precip_mass=precip)
+                  if emit else None)
+        return state, us, created, budget, precip, rad_prof
 
     T = args.hours * 3600.0
     n_steps = int(round(T / dt0))
@@ -505,6 +567,11 @@ def main():
           f" (sat-adjusted θ_l sounding); {n_steps} steps")
 
     rec = args.record_frames > 0
+    if emit and not rec:
+        raise SystemExit("--emit-suite-artifact needs --record-frames > 0")
+    emitter = (MoistRunEmitter(g, ref, (forc["ug"], forc["vg"]), args.f_cor)
+               if emit else None)
+    precip_rate = [0.0]                  # last step's domain-mean surface precip [kg/m²/s]
     zc_np = np.asarray(g.z_c)
     if rec:
         h_idx, h_z = les_record.select_heights(zc_np, args.Lz)
@@ -521,11 +588,24 @@ def main():
                 qc3=np.asarray(st.tracers[..., 1]),
                 qr3=np.asarray(st.tracers[..., 2]),
                 rho_z=np.asarray(ref.rho_c))
+            if emitter is not None:
+                emitter.record(t_hours * 3600.0, st, forc["th_flux"], forc["qv_flux"],
+                               precip_rate[0], series={"theta_adv_cum": rad_cum[0]})
             frame += 1
             _last_rec_h[0] = t_hours
 
     dt = jnp.asarray(dt0, dtype)
-    if rec:
+    fp = (checkpoint_fingerprint(args, (st, forc, ref), __file__, les_record.__file__)
+          if args.checkpoint is not None else None)
+    resumed = (load_checkpoint(args.checkpoint, fp)
+               if fp is not None and args.checkpoint.exists() else None)
+    if emitter is not None and resumed is None:
+        emitter.start(st)
+    # running time integral of the Δθ profile the radiation APPLIED (summed on
+    # device every step it fires), recorded at each frame as ``theta_adv_cum`` so
+    # the SCM receives the LES's own time-varying cooling
+    rad_cum = [jnp.zeros(zc_np.shape[0], dtype)]
+    if rec and resumed is None:
         _save(0.0)
     t = 0.0; i = 0
     created_tot = 0.0
@@ -543,13 +623,44 @@ def main():
     rad_tend_sum = np.zeros(zc_np.shape[0]); n_rad = 0
     t_cavg0 = 0.5 * T
     next_rec = T / args.record_frames if rec else np.inf
+
+    def _checkpoint():
+        save_checkpoint(args.checkpoint, dict(
+            st=st, t=t, i=i, created_tot=created_tot, cc_sum=cc_sum, lwp_sum=lwp_sum,
+            n_cavg=n_cavg, rad_tend_sum=rad_tend_sum, n_rad=n_rad, rad_cum=rad_cum[0],
+            next_rec=next_rec, frame=frame if rec else 0,
+            last_rec_h=_last_rec_h[0] if rec else None, precip_rate=precip_rate[0],
+            emitter=emitter.state_dict() if emitter is not None else None), fp)
+
+    if resumed is not None:
+        st = restore_state(resumed["st"])
+        t, i = float(resumed["t"]), int(resumed["i"])
+        created_tot = float(resumed["created_tot"])
+        cc_sum, lwp_sum = float(resumed["cc_sum"]), float(resumed["lwp_sum"])
+        n_cavg, n_rad = int(resumed["n_cavg"]), int(resumed["n_rad"])
+        rad_tend_sum = np.asarray(resumed["rad_tend_sum"])
+        rad_cum[0] = jnp.asarray(resumed["rad_cum"])
+        next_rec = float(resumed["next_rec"])
+        precip_rate[0] = resumed["precip_rate"]
+        if rec:
+            frame = int(resumed["frame"])
+            _last_rec_h[0] = (None if resumed["last_rec_h"] is None
+                              else float(resumed["last_rec_h"]))
+        if emitter is not None:
+            emitter.load_state_dict(resumed["emitter"])
+        print(f"[RESUME] {args.checkpoint} at step {i}/{n_steps}")
     t0 = time.time()
     while t < T:
-        st, us, created = step(
-            st, dt, first=(i == 0),
-            do_micro=((i + 1) % args.micro_every == 0),
+        do_micro = (i + 1) % args.micro_every == 0
+        st, us, created, budget, precip, rad_prof = step(
+            st, dt, first=(i == 0), do_micro=do_micro,
             do_rad=((i + 1) % args.rad_every == 0))
         created_tot += float(created)
+        if emitter is not None:
+            emitter.add(budget)
+            rad_cum[0] = rad_cum[0] + rad_prof
+            if do_micro:            # device scalar; read on the host only at frames
+                precip_rate[0] = precip / (dt0 * args.micro_every)
         t += dt0; i += 1
         if i % args.print_every == 0:
             mw = float(jnp.max(jnp.abs(st.w)))
@@ -567,6 +678,14 @@ def main():
                 n_rad += 1
         if rec and t >= next_rec and frame < args.record_frames:
             _save(t / 3600.0); next_rec += T / args.record_frames
+            if args.checkpoint is not None:
+                _checkpoint()
+        if (args.wall_limit_s is not None and t < T
+                and time.time() - t0 >= args.wall_limit_s):
+            _checkpoint()
+            print(f"[CHECKPOINT] wall limit {args.wall_limit_s:.0f}s reached at step "
+                  f"{i}/{n_steps} -> {args.checkpoint}; exit {EXIT_CHECKPOINTED}")
+            return EXIT_CHECKPOINTED
     wall = time.time() - t0
     print(f"[DONE] wall={wall:.0f}s  {i/wall:.1f} steps/s")
     # ALWAYS record the terminal state. The initial-state frame consumes one
@@ -600,105 +719,43 @@ def main():
     rad_tend = (rad_tend_sum / n_rad if n_rad else rad_tend_sum)
     np.savez(args.output / "dycoms_rad_forcing.npz",
              z=zc_np, theta_rad_tend=rad_tend, subsidence_w=np.asarray(w_ls))
-    if args.emit_suite_artifact is not None:
-        _emit_suite_artifact(args, forc, rad_tend, np.asarray(w_ls),
-                             args.emit_suite_artifact)
+    if emitter is not None:
+        emitter.close_budgets(st)
+        art = emitter.artifact(
+            case_name=args.case_label,
+            sgs="lasd" if args.dynamic else args.sgs_model,
+            f_c=float(args.f_cor),
+            u_geo=np.asarray(forc["ug"], np.float64),
+            v_geo=np.asarray(forc["vg"], np.float64),
+            subsidence_w=np.asarray(w_ls, np.float64),
+            # the simple-LW θ forcing the LES applied rides in theta_adv_cum (its
+            # running integral per frame; the SCM runs with radiation off and
+            # receives its step means)
+            qv_adv=np.zeros_like(zc_np),
+            les_setup={
+                "microphysics": microphysics_record(micro_cfg),
+                "grid": f"{g.cfg.nx}x{g.cfg.ny}x{g.cfg.nz}",
+                "domain_m": [g.cfg.Lx, g.cfg.Ly, g.cfg.Lz],
+                "dt_s": float(dt0), "hours": float(args.hours),
+                "sgs": "lasd" if args.dynamic else args.sgs_model,
+                "sgs_buoyancy": bool(g.cfg.sgs_buoyancy),
+                "nu_floor_m2_s": float(g.cfg.nu_floor),
+                "pr_sgs": float(g.cfg.pr_sgs),
+                "scalar_advection": g.cfg.scalar_advection,
+                "z0_m": float(g.cfg.z0), "positive_mode": "conserving",
+                "micro_every": int(args.micro_every), "rad_every": int(args.rad_every),
+                "case": args.case,
+                "theta_adv_cum": "running integral of the applied LES simple-LW "
+                                 "θ increments",
+                "subsidence_species": ["q_v", "q_c"],
+                "micro_scheme_dt_s": float(dt0 * args.micro_every),
+            })
+        save_artifact(art, args.emit_suite_artifact)
+        print(f"[emit-suite-artifact] {art.case_name}: {art.nt} frames, "
+              f"{art.nz} levels, sgs={art.sgs} -> {args.emit_suite_artifact}")
+    if args.checkpoint is not None and args.checkpoint.exists():
+        args.checkpoint.unlink()
     return 0
-
-
-def _resolved_f_cor(args) -> float:
-    """The case's Coriolis parameter, from the run if it carries one.
-
-    Argument resolution puts it on ``args``; a caller that builds an artifact
-    straight from recorded profiles never went through that, so the case table
-    is consulted only in that case.
-    """
-    value = getattr(args, "f_cor", None)
-    if value is not None:
-        return float(value)
-    return float(
-        _STRATOCUMULUS_CASES[_case_key_for_label(args.case_label)]["f_cor"])
-
-
-def _case_key_for_label(case_label):
-    """Map an artifact's case label back to its entry in the case table.
-
-    Labels are the case key with a descriptive suffix (``dycoms_rf01_sc``),
-    so match on the leading key rather than requiring an exact name; an
-    unrecognised label raises rather than silently picking a case.
-    """
-    label = str(case_label)
-    for key in _STRATOCUMULUS_CASES:
-        if label == key or label.startswith(key + "_"):
-            return key
-    raise KeyError(
-        f"case label {label!r} matches no entry in _STRATOCUMULUS_CASES "
-        f"({sorted(_STRATOCUMULUS_CASES)}); its Coriolis parameter and "
-        f"subsidence cannot be resolved")
-
-def _emit_suite_artifact(args, forc, rad_tend, subsidence_w, out_path):
-    """Assemble a moist stratocumulus ``LESReferenceArtifact`` from the ``prof_NNN.npz`` series.
-
-    Mirrors ``run_bomex_les._emit_suite_artifact`` but for DYCOMS-II RF01, whose non-turbulent
-    θ forcing is the parameterized RF01 LW COOLING (``rad_tend``, dθ/dt [K/s], negative at cloud
-    top) rather than BOMEX's large-scale advective tendency — it is placed in the SAME
-    ``theta_adv`` channel so the SCM (radiation off) still sees the LES's cloud-top radiative
-    driving. Large-scale subsidence is ``−D·z`` (``subsidence_w``, +up ⇒ negative = sinking).
-    There is no prescribed q_v advection in RF01 (subsidence already dries), so ``qv_adv=0``.
-    ``theta`` in the moist prof IS θ_l. Signs follow the artifact convention (fluxes +up,
-    subsidence_w +up); the cooling sign is verified in ``make_stevens_lw``.
-    """
-    from legoesm.atmosphere.les_suite.bridge import (  # noqa: E402
-        LESReferenceArtifact,
-        save_artifact,
-    )
-    prof_dir = Path(args.output) / "profiles"
-    files = sorted(prof_dir.glob("prof_*.npz"))
-    if not files:
-        raise SystemExit(
-            "[emit-suite-artifact] no prof_*.npz in "
-            f"{prof_dir} — run with --record-frames > 0")
-    frames = [np.load(f) for f in files]
-    z = np.asarray(frames[0]["z"], np.float64)
-    times = np.array([float(f["t_hours"]) * 3600.0 for f in frames], np.float64)
-
-    def stack(key):
-        return np.stack([np.asarray(f[key], np.float64) for f in frames])  # (nt, nz)
-
-    nt = len(frames)
-    wtheta = stack("wtheta")
-    wqt = stack("wqt")
-    sgs = "lasd" if getattr(args, "dynamic", False) else args.sgs_model
-    art = LESReferenceArtifact(
-        case_name=args.case_label, sgs=sgs,
-        heights_m=z, times_s=times,
-        theta=stack("theta"),                 # θ_l for the moist prognostic
-        u=stack("u"), v=stack("v"),
-        wtheta_resolved=wtheta, wtheta_sgs=np.zeros_like(wtheta),
-        qt=stack("qt"),
-        # Cloud water, so a consumer can tell a cloudy start from a clear one
-        # without guessing from saturation; absent for a run that carried none.
-        qc=(stack("qc") if "qc" in frames[0] else None),
-        wqt_resolved=wqt, wqt_sgs=np.zeros_like(wqt),
-        prescribe="fluxes",
-        w_theta_s=np.full(nt, float(forc["th_flux"]), np.float64),
-        w_qv_s=np.full(nt, float(forc["qv_flux"]), np.float64),
-        # The Coriolis parameter is a property of the CASE, not of how the
-        # emitter was reached: a caller that builds the artifact from recorded
-        # profiles alone never went through argument resolution. Resolved
-        # before the call rather than inside a lookup with a default, because
-        # a default argument is evaluated whether or not it is needed -- an
-        # earlier version raised on any unfamiliar case label even for a run
-        # that had the value in hand.
-        f_c=_resolved_f_cor(args),
-        u_geo=np.asarray(forc["ug"], np.float64),
-        v_geo=np.asarray(forc["vg"], np.float64),
-        subsidence_w=np.asarray(subsidence_w, np.float64),
-        theta_adv=np.asarray(rad_tend, np.float64),   # RF01 LW cooling (dθ/dt, <0 at cloud top)
-        qv_adv=np.zeros_like(z))
-    save_artifact(art, out_path)
-    print(f"[emit-suite-artifact] moist DYCOMS LESReferenceArtifact "
-          f"({nt} frames, {z.size} levels, sgs={sgs}) -> {out_path}")
 
 
 def _diag(st, g, ref):

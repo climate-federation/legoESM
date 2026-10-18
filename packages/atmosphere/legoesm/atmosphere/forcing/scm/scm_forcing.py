@@ -66,7 +66,13 @@ class SCMForcing(NamedTuple):
         Large-scale vertical velocity callable.  Returns ``(nlev,)`` at
         full levels [m/s], **positive upward** (subsidence is therefore
         negative).  Applied as first-order upwind advection on theta and
-        q_v.
+        on the tracers selected by ``subsidence_tracers``.
+    subsidence_tracers
+        ``None`` (default): q_v when the column carries it (a dry column has
+        nothing else to subside).  A tuple names the column tracers subsided
+        besides theta EXPLICITLY, e.g. ``("q_v", "q_c")`` for a case whose
+        reference subsides cloud water too (DYCOMS-II); every named tracer must
+        exist in the column — a missing one is an error, not a silent drop.
     theta_adv, qv_adv
         Prescribed horizontal-advection tendency callables.  Return
         ``(nlev,)`` profiles in [K/s] (potential temperature) and
@@ -115,6 +121,7 @@ class SCMForcing(NamedTuple):
     w_th_s: Optional[ScalarFn] = None
     w_qv_s: Optional[ScalarFn] = None
     flux_to_closure: bool = False
+    subsidence_tracers: Optional[tuple] = None
 
 
 def default_forcing() -> SCMForcing:
@@ -214,6 +221,15 @@ def validate_forcing_against_state(
             "column with ``q_v_profile=...`` (zeros are fine), or "
             "remove w_qv_s from the forcing."
         )
+    if forcing.subsidence_w is not None:
+        carried = set(state.tracers or {})
+        missing = [n for n in (forcing.subsidence_tracers or ())
+                   if n not in carried]
+        if missing:
+            raise ValueError(
+                f"SCMForcing.subsidence_tracers names {missing} but the SCM state "
+                f"carries only {sorted(carried)}; their subsidence would be "
+                "silently dropped.")
     if forcing.f_c != 0.0 and state.v is None:
         raise ValueError(
             "SCMForcing.f_c != 0 (Coriolis / geostrophic relaxation) "
@@ -326,7 +342,8 @@ def compute_forcing_tendencies(
         du_dt = du_dt + forcing.f_c * (v - v_g)
         dv_dt = dv_dt - forcing.f_c * (u - u_g)
 
-    # --- Large-scale subsidence on theta and q_v -----------------------
+    # --- Large-scale subsidence on theta and the named tracers ---------
+    other_tend: dict = {}
     if forcing.subsidence_w is not None:
         w_ls = _eval_profile(
             forcing.subsidence_w, t_seconds, nlev, sd,
@@ -337,12 +354,21 @@ def compute_forcing_tendencies(
             -w_ls * dtheta_dz, w_ls,
         )
         dT_dt = dT_dt + exner * dtheta_dt_subs
-        if dqv_dt is not None:
+        names = (forcing.subsidence_tracers
+                 if forcing.subsidence_tracers is not None else ("q_v",))
+        if dqv_dt is not None and "q_v" in names:
             dqv_dz = _upwind_dphi_dz_top2bottom(q_v, z_full, w_ls)
             dqv_subs = _mask_inflow_endpoint_tendency(
                 -w_ls * dqv_dz, w_ls,
             )
             dqv_dt = dqv_dt + dqv_subs
+        for name in names:
+            if name == "q_v":
+                continue
+            fld = state.tracers[name]
+            dphi_dz = _upwind_dphi_dz_top2bottom(fld.data, z_full, w_ls)
+            other_tend[name] = fld.replace(
+                data=_mask_inflow_endpoint_tendency(-w_ls * dphi_dz, w_ls))
 
     # --- Prescribed surface kinematic fluxes (prescribe="fluxes") ----
     # ``w_th_s`` [K m/s] and ``w_qv_s`` [(kg/kg) m/s] are bulk-formula
@@ -397,9 +423,9 @@ def compute_forcing_tendencies(
         ).reshape(1, 1, 1, nlev)
         dqv_dt = dqv_dt + qv_tend
 
-    tracer_tend = None
+    tracer_tend = dict(other_tend) or None
     if dqv_dt is not None and q_v_fld is not None:
-        tracer_tend = {"q_v": q_v_fld.replace(data=dqv_dt)}
+        tracer_tend = {"q_v": q_v_fld.replace(data=dqv_dt), **other_tend}
 
     return HydrostaticTendencies(
         du_dt=state.u.replace(data=du_dt),

@@ -28,7 +28,7 @@ from typing import Literal
 
 # Physical boundary-layer regimes the suite spans (LES_SUITE.md D2/D3). Dry axes
 # are the confound-free core; the two moist non-precipitating regimes add the
-# cloud response. Precipitating (RICO) is out of scope (D2).
+# cloud response; RICO (precipitating shallow Cu) runs in the shallow_cumulus regime.
 Regime = Literal[
     "dry_convective",   # free/mixed convective BL (Nieuwstadt CBL anchor)
     "dry_stable",       # stably stratified, sheared BL (GABLS1 SBL anchor)

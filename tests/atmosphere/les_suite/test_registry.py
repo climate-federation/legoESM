@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from legoesm.atmosphere.les_suite import (
     ANCHOR_CASES,
+    MOIST_CASES,
     REGIMES,
     SGS_CHOICES,
     LESCase,
@@ -117,13 +118,15 @@ def test_selectors():
 # --- default catalog --------------------------------------------------------
 def test_default_catalog_registers_anchors_and_dry_grid():
     cases = register_default_catalog()
-    # 4 anchors + 4 fluxes x 3 winds + 26 published full-setup cases = 42
-    assert len(cases) == 42
-    assert len(list_cases()) == 42
+    # 4 anchors + 3 further cloudy cases + 4 fluxes x 3 winds + 26 published
+    # full-setup cases = 45
+    assert len(cases) == 45
+    assert len(list_cases()) == 45
     clear_registry()
-    assert len(register_default_catalog(include_published=False)) == 16
+    assert len(register_default_catalog(include_published=False)) == 19
     names = {c.name for c in cases}
-    assert {"cbl_nieuwstadt", "sbl_gabls1", "bomex_cu", "dycoms_rf01_sc"} <= names
+    assert {"cbl_nieuwstadt", "sbl_gabls1", "bomex_cu", "dycoms_rf01_sc",
+            "rico_cu", "dycoms_rf02_sc", "astex_sc"} <= names
 
 
 def test_all_default_cases_validate_and_have_unique_names():
@@ -144,7 +147,7 @@ def test_anchors_are_real_grid_is_provisional():
 
 
 def test_anchor_drivers_exist_on_disk():
-    for c in ANCHOR_CASES:
+    for c in ANCHOR_CASES + MOIST_CASES:
         p = _REPO / "scripts" / "run" / c.driver
         assert p.is_file(), f"{c.name} references missing driver {c.driver}"
 
