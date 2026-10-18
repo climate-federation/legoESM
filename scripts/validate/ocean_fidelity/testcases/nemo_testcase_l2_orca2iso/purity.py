@@ -13,7 +13,6 @@ import tempfile
 from pathlib import Path
 
 import jax
-
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
