@@ -9,7 +9,7 @@ runoff), relative to the round-311 shipped card (``control``):
   ETAU       the five together (V1's values).
   MXLRAW     literal raw length MAX(rmxl_min,SQRT(2*en/zrn2)) (:643-645).
   MXL        MXLRAW + the dummy-bottom e3t(jpk) step (:690-692).
-  MXLTERM    the step alone (the code refuses it without MXLRAW).
+  MXLTERM    the step alone (runs without MXLRAW: round 312 measured it).
   LC         literal Langmuir source (:311-378, imlc=mbkt+1 at :354).
   TKE        ETAU + MXL + LC;  ALL  TKE + RNF.
   D122       the card as shipped after this round's selection.

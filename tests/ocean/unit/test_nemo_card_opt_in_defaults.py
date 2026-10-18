@@ -250,7 +250,9 @@ def test_orca2_card_states_the_after_ssh_form_and_the_cfl_cap():
     RK3 vector-invariant program -- ``stp2d.f90`` takes the "Vector Inv. Form"
     Coriolis arm and the "only KEG + ZAD in Vector Inv. Form" advection -- and
     that program leaves the previous step's linear extrapolation in the after
-    slot (``stprk3.f90:241``), so the card must resolve ``rk3_extrapolated``.
+    slot (``stprk3.f90:241``).  Decision 132 + addendum 104 (G6 certified)
+    and round 308's Decision-122 import carry that slot, so the card resolves
+    ``rk3_extrapolated_carried``.
 
     The lateral-mixing CFL cap must not be inherited from a library default
     (decision 75): the card is built twice with every ``enforce_cfl`` default
@@ -272,7 +274,7 @@ def test_orca2_card_states_the_after_ssh_form_and_the_cfl_cap():
     config = build_orca2_zps_card(deck).recipe.model_config
     assert config.momentum_time_integrator == "rk3_ws"
     assert config.momentum_advection == "vector_invariant"
-    assert config.nemo_first_wzv_after_ssh == "rk3_extrapolated"
+    assert config.nemo_first_wzv_after_ssh == "rk3_extrapolated_carried"
 
     # Reuse the decision-75 flip harness rather than writing a second one.
     root = Path(__file__).resolve().parents[3]

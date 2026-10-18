@@ -265,8 +265,9 @@ def test_decision_78_census_switches_only_gyre_and_vortex_vector():
     cards = module._card_execution("rk3_after_ssh")
     executing = {
         name for name, row in cards.items() if row["executes_route"]}
-    assert executing == {"GYRE-zco", "VORTEX_VEC-zco"}
-    assert cards["ORCA2-zps"]["after_ssh_form"] == "rk3_extrapolated"
+    # Decision 132 / round 308: ORCA2 runs the carried slot since G6 certified it.
+    assert executing == {"GYRE-zco", "VORTEX_VEC-zco", "ORCA2-zps"}
+    assert cards["ORCA2-zps"]["after_ssh_form"] == "rk3_extrapolated_carried"
     assert cards["DINO:nemo_dino_kamm"]["after_ssh_form"] == (
         "leapfrog_continuity")
 

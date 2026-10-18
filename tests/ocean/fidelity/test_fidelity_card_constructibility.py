@@ -305,8 +305,8 @@ def test_orca2_card_selects_resolved_rk3_sh2():
     assert tke.eice == 1
     assert tke.tke_langmuir_evaluation == "nemo_literal"  # D135, round 312
     assert (card.recipe.model_config.nemo_first_wzv_after_ssh
-            == "rk3_extrapolated"), (
-        "Decision 78 keeps ORCA2 on the uncarried form until its own ladder")
+            == "rk3_extrapolated_carried"), (
+        "Decision 132: G6 certified the carried slot; round 308 imported it")
     validate_nemo_testcase_card(card)
 
     # Binding selector plant: the former tuple must be rejected by the real
