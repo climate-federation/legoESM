@@ -209,6 +209,11 @@ FILES = {
         _ORCA2_COMPILED / "zdfiwm.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90": (
         _ORCA2_COMPILED / "zdfddm.f90"),
+    # ORCA2 round 310 imports rung G8's dyn_ldf_lev statements.
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynldf_lev.f90": (
+        _ORCA2_COMPILED / "dynldf_lev.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynkeg.f90": (
+        _ORCA2_COMPILED / "dynkeg.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90": (
         _ORCA2_COMPILED / "sbcmod.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbc_oce.f90": (
@@ -4075,6 +4080,29 @@ CITATION_MAP = {
         '* rnfmsk(ji,jj) * wmask(ji,jj,jk)',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:359':
         'IF( ln_zdfevd )   CALL zdf_evd( kt, Kmm, Krhs, avm, avt )',
+    # ORCA2 round 310 (G8 import under Decision 122).
+    'cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:371-373': [
+        'ln_dynldf_lap =  .true.', 'nn_ahm_ijk_t  = -30', 3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynldf_lev.f90:123': {
+        'anchors': ('* (e3f_3d(ji-1,jj-1,jk) *(1._wp+r3f(ji-1,jj-1)*fe3mask(ji-1,jj-1,jk))) * r1_e1e2f(ji-1,jj-1)', 1),
+        'routine': 'dynldf_lev_lap',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domhgr.f90:156':
+        'r1_e1e2f(:,:) = 1._wp / e1e2f(:,:)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:144': {
+        'anchors': 'CALL dyn_ldf( kt, Kbb, Kbb, uu, vv, Krhs )',
+        'routine': 'stp_2D',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:493': {
+        'anchors': 'CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )',
+        'routine': 'stp_RK3_stg',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynkeg.f90:129-130': {
+        'anchors': [('puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - ( zhke(ji+1,jj  ) - zhke(ji,jj) ) * r1_e1u(ji,jj)', 1),
+                    ('pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) - ( zhke(ji  ,jj+1) - zhke(ji,jj) ) * r1_e2v(ji,jj)', 1),
+                    2],
+        'routine': 'dyn_keg',
+    },
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:108-109': [
         ('MIN( rn2(ji,jj,jk), rn2b(ji,jj,jk) ) <= -1.e-12', 1),
         ('p_avt(ji,jj,jk) = rn_evd * wmask(ji,jj,jk)', 1),
