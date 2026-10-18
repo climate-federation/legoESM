@@ -110,7 +110,9 @@ def test_g9_card_is_g5_plus_fct2_and_the_folded_transport_vmask(tmp_path):
     c5, c9 = g5.recipe.model_config, g9.recipe.model_config
     assert [f for f in c5._fields if getattr(c5, f) != getattr(c9, f)] == [
         "tracer_advection", "rk3_stage_transport_raw_vmask", "rk3_stage_transport_fold_exchanges",
-        "fct_fold_exchange", "rk3_end_of_stage_pivot_fold", "rk3_stage_wzv_nemo_clock_pair"]
+        "fct_fold_exchange", "rk3_end_of_stage_pivot_fold", "rk3_stage_wzv_nemo_clock_pair",
+        "rk3_stage3_tracer_krhs_nemo_order"]
+    assert (c5.rk3_stage3_tracer_krhs_nemo_order, c9.rk3_stage3_tracer_krhs_nemo_order) == (False, True)
     assert (c5.rk3_end_of_stage_pivot_fold, c9.rk3_end_of_stage_pivot_fold) == (False, True)
     assert (c5.rk3_stage_wzv_nemo_clock_pair, c9.rk3_stage_wzv_nemo_clock_pair) == (False, True)
     assert (c5.tracer_advection, c9.tracer_advection) == ("none", "fct2")
@@ -382,7 +384,9 @@ def test_g9_fct_pivot_row_right_half_is_the_image_of_its_left_half(tmp_path):
                          card.recipe.initial_state, card.recipe.grid)
     fw, sf = g5.nemo_supplied_forcing(card, G9_RECORD, 1)
     obs = LatLonCGridOceanModel(
-        grid, zc, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_stage3_fct_inputs=True)
+        # the FCT-input side output refuses the stage-3 Krhs path; the inputs sit upstream of it
+        grid, zc, cfg._replace(rk3_stage3_tracer_krhs_nemo_order=False),
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_stage3_fct_inputs=True)
     ).step(s0, dt=card.dt_s, freshwater=fw, surface_forcing=sf).mass_flux_w
     n = grid.n_lon
     right = jnp.zeros_like(obs.tracer_a).at[-1, n // 2 + 1:].set(1.0e-6)
