@@ -542,6 +542,43 @@ def test_tune_active_moves_active_keeps_frozen_and_flags_all_inactive():
     assert "not_tuned" in rec2 and bool(jnp.all(same == x0))
 
 
+def test_baseline_loss_compiles_once_and_matches_eager(monkeypatch):
+    import cosci_eval
+    from tune_scm_to_les import (
+        _base_turbulence,
+        _scheme_tunable_metas,
+        apply_overrides_to_base,
+    )
+    base, key = _base_turbulence("louis")
+    fields = [m.field for m in _scheme_tunable_metas(key, (1,))]
+    x0 = jnp.asarray([float(getattr(base.louis, f)) for f in fields])
+    art = _cbl_artifact(seconds=60.0)
+    train = [("cbl_harness.npz", art)]
+    traces = []
+    real_run = cosci_eval.Arm.run
+    real_rwt = cosci_eval.Arm.run_with_turb
+
+    def counting_rwt(self, *a, **k):
+        traces.append(1)  # Python side effect: runs only while tracing
+        return real_rwt(self, *a, **k)
+    monkeypatch.setattr(cosci_eval.Arm, "run_with_turb", counting_rwt)
+    arm = cosci_eval.Arm(base)
+    jl = cosci_eval.baseline_loss(arm, base, fields, train, nlev=16, dt=10.0)
+    xp = x0 * jnp.asarray([1.0, 0.5])            # perturb l_mix_max (active here)
+    v0 = jl(x0)
+    g = jax.grad(jl)(xp)
+    vp = jl(xp)
+    assert len(traces) <= 2   # one forward trace (+ one for the grad), not per call
+    assert float(jnp.max(jnp.abs(g))) > 0.0
+    for x, v in ((x0, v0), (xp, vp)):  # equals a FULL rebuild at that x
+        turb = apply_overrides_to_base(base, {f: x[i] for i, f in enumerate(fields)})
+        rec, _ = real_run(arm, art, ev.e2_nsteps(art, 10.0), nlev=16, dt=10.0, turb=turb)
+        eager = float(ev.e2_score(art, rec, 10.0).combined)
+        # jit reassociates float64 sums (measured 4e-11 relative), so parity is 1e-9
+        assert abs(float(v) - eager) < 1e-9 * abs(eager)
+    assert abs(float(vp) - float(v0)) > 1e-6 * abs(float(v0))  # the perturbation acts
+
+
 def test_tune_active_refuses_a_non_finite_gradient():
     import cosci_eval
     with pytest.raises(SystemExit, match="non-finite"):

@@ -30,6 +30,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import copy
 import dataclasses
 import hashlib
 import json
@@ -83,6 +84,7 @@ from legoesm.atmosphere.les_suite.score import (  # noqa: E402
     PROFILE_FLOOR_QFLUX,
     normalized_rmse_series,
 )
+from legoesm.atmosphere.physics.combined import make_physics  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.les_tuned import (  # noqa: E402
     LESTunedInapplicableError,
     apply_les_tuned_turbulence,
@@ -181,6 +183,21 @@ class Arm:
         return rollout(scm, phys, nsteps, candidate=self.candidate, params=params,
                        heat_form=self.heat_form, ke_heating=self.ke_heating,
                        f_c=f_c, u_geo=ug, v_geo=vg)
+
+    def run_with_turb(self, prep, artifact, nsteps, turb):
+        """BASELINE rollout of a column prepared with the concrete base, with its
+        physics rebuilt from ``turb`` (which may be traced), so it traces under
+        ``jit``. State, grid, forcing and the initial physics state are the
+        prepared ones: they do not depend on any tier-1 tunable (they do depend on
+        floors such as ``tke_min``, which are not tuned). Equality with a full
+        rebuild at perturbed values is tested."""
+        if self.candidate is not None:
+            raise ValueError("run_with_turb is for baseline arms (no candidate)")
+        scm, _, ug, vg, f_c = prep
+        cfg = scm_physics_config(artifact, turb)
+        col = copy.copy(scm)
+        col.physics_fn = make_physics(cfg, model_type="hydrostatic", dt=scm.dt)
+        return rollout(col, cfg, nsteps, f_c=f_c, u_geo=ug, v_geo=vg)
 
     def run(self, artifact, nsteps, *, params=None, turb=None, nlev, dt):
         return self.run_prepared(self.prepare(artifact, turb=turb, nlev=nlev, dt=dt),
@@ -456,6 +473,24 @@ def tune_active(loss_of, lo, hi, x0, names, *, steps, lr):
                                   "train_loss_best": best_loss, "history": hist}
 
 
+def baseline_loss(arm, base, fields, train, *, nlev, dt):
+    """Regime-mean E2 training loss of a roster closure as a function of its tunable
+    values, compiled ONCE: the SCM build and rollout are traced with the parameter
+    vector, so every tuning step reuses one executable instead of re-lowering the
+    rollout (which exhausted XLA's CPU JIT on CLUBB)."""
+    preps = {path: arm.prepare(art, nlev=nlev, dt=dt) for path, art in train}
+
+    @jax.jit
+    def loss_of(x):
+        turb = apply_overrides_to_base(base, {f: x[i] for i, f in enumerate(fields)})
+
+        def per_case(path, art):
+            rec, _ = arm.run_with_turb(preps[path], art, e2_nsteps(art, dt), turb)
+            return e2_score(art, rec, dt).combined
+        return _regime_mean_loss(per_case, train)
+    return loss_of
+
+
 def les_tuned_arm(base):
     """The LES-tuned config of ``base``, or ``(None, reason)`` when the tuned
     coefficients do not apply to this base (e.g. CLUBB coefficients fit on the
@@ -481,14 +516,6 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, steps, lr,
     res = {"split": {Path(p).name: {"held_out": _held_out(a.case_name),
                                     "regime": _regime(a.case_name)}
                      for p, a in artifacts}, "arms": {}}
-
-    def loss_for(make_arm_and_kwargs):
-        def per_case(path, art):
-            arm, kw = make_arm_and_kwargs
-            n = e2_nsteps(art, dt)
-            rec, _ = arm.run(art, n, nlev=nlev, dt=dt, **kw)
-            return e2_score(art, rec, dt).combined
-        return per_case
 
     if cand_arm is not None:
         cand = cand_arm.candidate
@@ -533,9 +560,7 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, steps, lr,
             hi = jnp.asarray([float(m.bounds[1]) for m in metas])
             x0 = jnp.asarray([float(m.default) for m in metas])
 
-            def loss_of(x, base=base, fields=fields, arm=arm):
-                turb = apply_overrides_to_base(base, {f: x[i] for i, f in enumerate(fields)})
-                return _regime_mean_loss(loss_for((arm, {"turb": turb})), train)
+            loss_of = baseline_loss(arm, base, fields, train, nlev=nlev, dt=dt)
             best, record = tune_active(loss_of, lo, hi, x0, fields, steps=steps, lr=lr)
             ov = {f: float(best[i]) for i, f in enumerate(fields)}
             entry["ad"] = {"params": ov, **record,
