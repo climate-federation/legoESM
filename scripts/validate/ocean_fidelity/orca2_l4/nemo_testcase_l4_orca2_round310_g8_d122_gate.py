@@ -68,7 +68,7 @@ def selected_card(card, *, arm: str, rung: str, plant: str = "none"):
         return card
     want = {} if arm == "control" else STATEMENTS[arm]
     if plant == "retained-selector" and arm == "control":
-        want = STATEMENTS["AREA"]
+        want = STATEMENTS["FOLDR"]
     new = cfg._replace(**want)
     for key in STATEMENTS["G8"]:
         expect = want.get(key, getattr(cfg, key))
