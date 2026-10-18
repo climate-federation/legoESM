@@ -358,6 +358,9 @@ FILES = {
         _ORCA2_COMPILED / "sbcflx.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2_COMPILED / "stprk3_stg.f90"),
+    # G9 round-2 resume: the T-pivot half-row branch of lbc_nfd.
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90": (
+        _ORCA2_COMPILED / "lbcnfd.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90": (
         _ORCA2_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90": (
@@ -1775,6 +1778,12 @@ CITATION_MAP = {
     # --- GRIDLADDER round 47 (G9 round 2: the FCT's fold statements) ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:198': 'ztFv(ji,jj,jk) = 0.5_wp * pV(ji,jj,jk) * ( pt(ji,jj,jk,jn,Kmm) + pt(ji,jj+1,jk,jn,Kmm) ) - ztFv(ji,jj,jk)',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:311': "CALL lbc_lnk( 'traadv_fct', ztFu, 'U', -1.0_wp, ztFv, 'V', -1.0_wp, zta_up1, 'T', 1.0_wp )",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:625': 'ii1 = ipi/2 + ji + 1',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/lbcnfd.f90:670': 'ends at: ipi/2 + (ipi/2 - ihls) = ipi - ihls',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:795': "CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:796': "ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp, ldfull=.TRUE.",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:276': 'IF( ln_zdfcst .OR. ln_zdfosm .OR. ln_zdfric ) THEN   ;   l_zdfsh2 = .FALSE.',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3.f90:338': 'WRITE(filename,\'("oracle_stage_kt",I8.8,"_s",I1,".bin")\') kstp, kstage',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:327': 'pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) + ztra / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk))) * tmask(ji,jj,jk) !!clem',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:503': 'ptFv(ji,jj,jk) = MAX( pV(ji,jj,jk) , 0._wp ) * pt_b(ji,jj,jk) + MIN( pV(ji,jj,jk) , 0._wp ) * pt_b(ji  ,jj+1,jk)',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:538': 'pt_up1(ji,jj,jk) = ( (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kbb)*tmask(ji,jj,jk))) * pt_b(ji,jj,jk) + zDt * ztra ) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk))) * tmask(ji,jj,jk) !!clem',
