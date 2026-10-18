@@ -4,11 +4,11 @@
 argv: <repo> <case> <out.txt>.  Imports come from <repo> (the caller sets
 PYTHONPATH to that tree).  Cases:
   orca2:<rung>    shipped ORCA2 ladder card (rung0, omt0..omt4, rung10)
-  orca2full       build_orca2_zps_card on the ORCA2 input deck
   recipe:<CASE>   build_nemo_testcase_card(CASE) (GYRE, VORTEX, ...)
   orca2g:<CASE>   a grid-ladder rung card (ORCA2G1-flat .. ORCA2G8-ldf)
   dino            the DINO driver's first step
-Callback addresses are masked; two outputs are compared with cmp.
+Rung 10 and G4-G8 step with NEMO's recorded kt-1 surface fields (their
+cards refuse a step without them).  Callback addresses are masked; two outputs are compared with cmp.
 """
 import re
 import shutil
@@ -37,6 +37,10 @@ G_DIRS = {"ORCA2G1-flat": "g1_orca2grid", "ORCA2G1b-vec": "g1b_orca2vec",
           "ORCA2G4-sbc": "g4_orca2sbc", "ORCA2G5-ice": "g5_orca2ice",
           "ORCA2G6-vec": "g6_orca2vec", "ORCA2G7-drg": "g7_orca2drg",
           "ORCA2G8-ldf": "g8_orca2ldf"}
+G_RUNS = {"ORCA2G4-sbc": "round17/oracle_g4_r17", "ORCA2G5-ice": "round31/oracle_g5_r31",
+          "ORCA2G6-vec": "round36/oracle_g6_r36", "ORCA2G7-drg": "round41/oracle_g7_r41",
+          "ORCA2G8-ldf": "round45/oracle_g8_r45"}
+G_ROUNDS = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds")
 
 from legoesm.core.precision import PrecisionPolicy, set_policy  # noqa: E402
 
@@ -55,11 +59,12 @@ def _write(text, cfg=None):
     print(f"{CASE}: {len(text.splitlines())} jaxpr lines -> {OUT}")
 
 
-def _step_jaxpr(card):
+def _step_jaxpr(card, forcing=None):
     r = card.recipe
     model = LatLonCGridOceanModel(r.grid, r.z_coord, r.model_config,
                                   iwm_forcing=getattr(r, "iwm_forcing", None))
-    _write(str(jax.make_jaxpr(lambda s: model.step(s, card.dt_s))(r.initial_state)),
+    kw = {} if forcing is None else dict(zip(("freshwater", "surface_forcing"), forcing))
+    _write(str(jax.make_jaxpr(lambda s: model.step(s, card.dt_s, **kw))(r.initial_state)),
            r.model_config)
 
 
@@ -83,18 +88,37 @@ if CASE.startswith("orca2:"):
         from scripts.validate.ocean_fidelity.orca2_l4 import (
             nemo_testcase_l4_orca2_round1_ladder_gate as rung10)
         card = rung10.card_fields(ROOTS[rung])[1]
+        fields = rung10.assemble_surface_fields(ROOTS[rung], 1)
+        _step_jaxpr(card, rung10._surface_forcings(card, ROOTS[rung], fields, 1))
+        raise SystemExit(0)
+    if rung == "omt0":
+        from scripts.validate.ocean_fidelity.orca2_l4 import (
+            nemo_testcase_l4_orca2_round204_omt0_ladder_gate as omt0)
+        card = omt0.build_omt0_card(ROOTS[rung])
     else:
         from scripts.validate.ocean_fidelity.orca2_l4 import (
             nemo_testcase_l4_orca2_round269_g1_decision96_gate as prior)
         card = prior._selected_card(rung, ROOTS[rung])
     _step_jaxpr(card)
-elif CASE == "orca2full":
-    _step_jaxpr(rec.build_orca2_zps_card(INPUTS))
 elif CASE.startswith("recipe:"):
     _step_jaxpr(rec.build_nemo_testcase_card(CASE.split(":", 1)[1]))
 elif CASE.startswith("orca2g:"):
     case = CASE.split(":", 1)[1]
-    _step_jaxpr(rec.build_nemo_testcase_card(case, deck_root=_g_root(case)))
+    card = rec.build_nemo_testcase_card(case, deck_root=_g_root(case))
+    forcing = None
+    if case in G_RUNS:
+        here = REPO / "scripts/validate/ocean_fidelity/testcases"
+        sys.path[:0] = [str(here), str(REPO / "scripts/validate/ocean_fidelity/orca2_l4"),
+                        str(here / "nemo_testcase_g4_orca2sbc"),
+                        str(here / "nemo_testcase_g5_orca2ice")]
+        run = G_ROUNDS / G_RUNS[case] / "twin_a"
+        if case == "ORCA2G4-sbc":
+            import g4_forcing_steps as g4
+            forcing = g4.nemo_supplied_forcing(card, run, 1)
+        else:
+            import g5_records as g5
+            forcing = g5.nemo_supplied_forcing(card, run, 1)
+    _step_jaxpr(card, forcing)
 elif CASE == "dino":
     orig = LatLonCGridOceanModel.step
 
