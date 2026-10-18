@@ -8,18 +8,40 @@ default changed.  Six rows need the user (DECISION_NEEDED below).
 ## Headline
 
 - NEMO's ORCA2_OMIP_L4 run resolves 1,108 namelist keys (829 ocean, 279
-  sea ice).  Against rung 10: 220 MATCH, 9 DIFFERS, 662 NOT-MODELLED,
-  217 INERT.
-- The 9 DIFFERS: 3 are earlier decisions (icebergs off, Decision 7; the
-  ice-dependent TKE mixing length, Decision 135; ice-ocean top drag,
-  Decision 133).  6 are unexplained: the isoneutral tracer diffusion (3
-  rows), the eddy-induced velocity, the mixed-layer eddies, and the
-  declared run length.
+  sea ice).  Basis = the record run the card replays.  Against it: 189
+  MATCH, 8 DIFFERS, 32 UNCOMPARED, 662 NOT-MODELLED, 217 INERT.  Against
+  EXP00 (second column): 188 MATCH, 9 DIFFERS, same 32/662/217.
+- The 8 DIFFERS vs the record: 2 are earlier decisions (the ice-dependent
+  TKE mixing length, Decision 135; ice-ocean top drag, Decision 133).  6
+  are unexplained: the isoneutral tracer diffusion (3 rows), the
+  eddy-induced velocity, the mixed-layer eddies, and the declared run
+  length.  EXP00 adds the ninth, icebergs (on in EXP00, off in the record
+  and the card; Decision 7).
 - No DIFFERS row is a ladder-certified statement waiting for import.
 - Four pieces of interior physics the deck runs are absent from the card
   and from its "unmeasured" list: interior T/S damping, geothermal heating,
   river-mouth mixing, mixed-layer eddies.  Only the eddy-induced velocity is
   declared.
+
+## Review fixes (hold of 2026-10-18; no card changed)
+
+- The 56 initial-T/S and wave-mixing file-setting rows were counted MATCH
+  by comparing a fixed label with itself.  Now: interval, interpolation and
+  climatology (24 rows) compare NEMO's value against what the card reads
+  (the builder's two record indices and weight and the file's 12 records;
+  the wave-mixing reader's single record of a one-record file, no time
+  interpolation).  All 24 MATCH.  File type, weights, rotation and
+  land-fill names (32 rows) are UNCOMPARED: the audit reads no card value.
+- Rows were compared against EXP00.  Now the record is the basis and EXP00
+  is a labelled second column.  Before fix 1 the record basis gave 221
+  MATCH / 8 DIFFERS (the review's number); after it, 189 / 8 / 32.
+- Pinned test on the old rule: 2 failed (the plant "did not raise"; counts
+  220/9), `fix_old_rule.log`.  New rule: 7 passed, `fix_new_rule.log`.
+  Old script restored and byte-compared.
+- Fix commit `707c012d7`; table regenerated there on a clean tree
+  (`audit_fix.json`, `audit_fix.log`).  Re-read by eye: run length (record
+  10, EXP00 5840), the T/S interval and climatology flags, the wave-mixing
+  interval.  All agree with the raw namelists.
 
 ## Provenance
 
@@ -80,19 +102,19 @@ status, class, reason).  Evidence `orca2_rounds/round314/` (`audit.json`,
   record's ice fluxes, so rung 10's oracle is the one-category ice, not
   EXP00's.
 
-## DIFFERS (9), by what they change
+## DIFFERS (8 vs record; 9 vs EXP00), by what they change
 
-| what it changes | setting | NEMO | card | class |
-|---|---|---|---|---|
-| isoneutral tracer mixing | stabilising split of the vertical term | on | off (fully implicit) | (c) |
-| isoneutral tracer mixing | diffusivity shape | half the diffusive velocity times local grid spacing | constant | (c) |
-| isoneutral tracer mixing | diffusive velocity | 0.018 m/s | none (1000 m2/s everywhere) | (c) |
-| eddy parameterisations | eddy-induced velocity | on | off (declared unmeasured) | (c) |
-| eddy parameterisations | mixed-layer eddies | on | off (not declared) | (c) |
-| vertical mixing | surface mixing length under ice | scaled by ice thickness | not scaled | (b) Decision 135 |
-| drag | implicit ice-ocean top drag | on | off | (b) Decision 133 |
-| icebergs | icebergs | on | off | (b) Decision 7 |
-| run length | declared steps | 5840 | 2920 | (c) |
+| what it changes | setting | record | EXP00 | card | class |
+|---|---|---|---|---|---|
+| isoneutral tracer mixing | stabilising split of the vertical term | on | on | off (fully implicit) | (c) |
+| isoneutral tracer mixing | diffusivity shape | half the diffusive velocity times local grid spacing | same | constant | (c) |
+| isoneutral tracer mixing | diffusive velocity | 0.018 m/s | 0.018 m/s | none (1000 m2/s everywhere) | (c) |
+| eddy parameterisations | eddy-induced velocity | on | on | off (declared unmeasured) | (c) |
+| eddy parameterisations | mixed-layer eddies | on | on | off (not declared) | (c) |
+| vertical mixing | surface mixing length under ice | scaled by ice thickness | same | not scaled | (b) Decision 135 |
+| drag | implicit ice-ocean top drag | on | on | off | (b) Decision 133 |
+| run length | declared steps | 10 | 5840 | 2920 | (c) |
+| icebergs | icebergs | off (MATCH) | on | off | (b) Decision 7, EXP00 only |
 
 - NEMO's isoneutral diffusivity on ORCA2 is about 2000 m2/s near the
   equator and about 850 m2/s poleward of 60 degrees (arithmetic from the
@@ -133,7 +155,9 @@ None made: no card, setting or default changed (ASKED: none needed;
 UNASKED: none).  Two classifications are mine and stated in the table:
 switch-off features the card simply lacks count as MATCH ("not built"),
 and parameters of a feature the card turns off count as NOT-MODELLED,
-following their switch row.
+following their switch row.  Added by the review fixes: the 32 file-setting rows with no card value
+read are UNCOMPARED, not MATCH; and a one-record wave-mixing file held for
+the whole run is read as the card's climatology flag (T).
 
 ## DECISION_NEEDED (batched; nothing changed)
 
@@ -150,8 +174,10 @@ following their switch row.
    ladder rung (already declared unmeasured).
 5. Mixed-layer eddies: off -> on; restratifies the mixed layer.  Pick: on,
    after a rung; and add it to the card's unmeasured list meanwhile.
-6. Declared run length: 2920 -> 5840 steps; changes no measured number (the
-   ladders replay 10 steps).  Pick: 5840.
+6. Declared run length: 2920 -> 10 (the record) or 5840 (EXP00); changes no
+   measured number (the ladders replay 10 steps).  CHANGED by fix 2: the
+   basis is now the record's 10.  Pick: 10, since the card replays the
+   record.
 
 ## Gates and tests
 
