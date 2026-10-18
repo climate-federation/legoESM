@@ -3872,6 +3872,8 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         # (stprk3_stg.f90:283, dommsk.f90:232); the tracer update on the
         # T-pivot row is its first consumer (traadv_fct.f90:322-329).
         rk3_stage_transport_raw_vmask=_ORCA2G_TADV[case], rk3_stage_transport_fold_exchanges=_ORCA2G_TADV[case],  # ... and vn_adv, r3v after their fold exchanges (dynspg_ts.f90:844, stprk3_stg.f90:169)  # noqa: E501
+        # G9 round 2: the FCT's faces north of the T-pivot row read the fold (traadv_fct.f90:311).
+        fct_fold_exchange=_ORCA2G_TADV[case],
         # G6 round 7: the first wzv's ww reads NEMO's STORED r3t(Kaa) and
         # r3t(Kbb) (stp2d.f90:152, domqco.f90:257 -> sshwzv.f90:297-298).
         nemo_wzv_stored_r3_ratios=case == "ORCA2G6-vec",
@@ -3990,7 +3992,7 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
         ("ln_traadv_fct" if _ORCA2G_TADV.get(card.case) else "ln_traadv_OFF"): (
             cfg.tracer_advection == ("fct2" if _ORCA2G_TADV.get(card.case) else "none")),
         "stage transport vmask": cfg.rk3_stage_transport_raw_vmask is bool(
-            _ORCA2G_TADV.get(card.case)), "stage transport fold exchanges": cfg.rk3_stage_transport_fold_exchanges is bool(_ORCA2G_TADV.get(card.case)),  # noqa: E501
+            _ORCA2G_TADV.get(card.case)), "stage transport fold exchanges": cfg.rk3_stage_transport_fold_exchanges is bool(_ORCA2G_TADV.get(card.case)), "FCT fold exchange": cfg.fct_fold_exchange is bool(_ORCA2G_TADV.get(card.case)),  # noqa: E501
         ("ln_dynldf_lap" if _ORCA2G_LDF.get(card.case) else "ln_dynldf_OFF"): (
             (lv.A_h > 0.0 and all(getattr(lv, name) == 0.0 for name in (
                 "B_h", "C_smag", "C_smag_lap", "C_leith", "A_h_floor"))

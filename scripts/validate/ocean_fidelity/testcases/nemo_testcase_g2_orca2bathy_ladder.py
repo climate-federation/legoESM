@@ -916,8 +916,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         # source ordered: zero accumulator -> HPG -> VOR -> KEG+ZAD.  Publish
         # the production accumulators through the existing write-only hook;
         # no operator is reimplemented here.
-        require(case == "ORCA2G6-vec" and kt_from == 1,
-                "the operator walk is registered for G6 step 1 only")
+        require(case in ("ORCA2G6-vec", "ORCA2G9-tadv") and kt_from == 1,
+                "the operator walk is registered for G6 and G9 step 1 only")
         terms = read_stage2_terms(
             root / "oracle_rkstage2_terms_kt00000001.bin")
         require(all(not np.any(terms[name]) for name in ("before_u", "before_v")),

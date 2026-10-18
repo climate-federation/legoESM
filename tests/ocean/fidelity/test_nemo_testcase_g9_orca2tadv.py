@@ -109,10 +109,12 @@ def test_g9_card_is_g5_plus_fct2_and_the_folded_transport_vmask(tmp_path):
     g9 = recipe.build_nemo_testcase_card("ORCA2G9-tadv", deck_root=g9_root)
     c5, c9 = g5.recipe.model_config, g9.recipe.model_config
     assert [f for f in c5._fields if getattr(c5, f) != getattr(c9, f)] == [
-        "tracer_advection", "rk3_stage_transport_raw_vmask", "rk3_stage_transport_fold_exchanges"]
+        "tracer_advection", "rk3_stage_transport_raw_vmask", "rk3_stage_transport_fold_exchanges",
+        "fct_fold_exchange"]
     assert (c5.tracer_advection, c9.tracer_advection) == ("none", "fct2")
     assert c9.rk3_stage_transport_raw_vmask is c9.rk3_stage_transport_fold_exchanges is True
     assert c5.rk3_stage_transport_raw_vmask is c5.rk3_stage_transport_fold_exchanges is False
+    assert (c5.fct_fold_exchange, c9.fct_fold_exchange) == (False, True)
     assert c9.momentum_advection == "flux_form" and c9.lateral_viscosity.A_h == 0.0
     for name in ("z_coord", "grid", "initial_state"):
         a, b = getattr(g5.recipe, name), getattr(g9.recipe, name)
@@ -322,3 +324,33 @@ def test_g9_stage_transport_on_the_pivot_row_is_nemos(tmp_path):
         assert not pivot.any(), (stage, int(pivot.sum()))
         if stage == 1:
             assert np.array_equal(card_zfv.view(np.uint64), nemo.view(np.uint64))
+
+
+@needs_inputs
+@pytest.mark.skipif(not (G9_RECORD / "oracle_stage_kt00000001_s3.bin").is_file(),
+                    reason="no round-46 G9 record")
+def test_g9_stage3_fct_reads_the_fold_on_the_pivot_rows(tmp_path):
+    """kt 1 of the jitted G9 step from the card's initial state (state traced, x64),
+    on NEMO's recorded surface input: after stage 3, T and S on the three rows
+    under the T-pivot fold are within the bar of NEMO's, every level.  It needs
+    the FCT's faces north of the pivot row as the fold image (traadv_fct.f90:311
+    and the halo upstream fluxes and limiter bound around it); without them the
+    pivot rows are off by ~1e-4 K / PSU."""
+    import jax
+    sys.path[:0] = [str(CASES), str(CASES / "nemo_testcase_g5_orca2ice")]
+    import g5_records as g5
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    card = recipe.build_nemo_testcase_card("ORCA2G9-tadv", deck_root=G9_RECORD)
+    cfg, zc, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
+    assert cfg.fct_fold_exchange is True
+    fw, sf = g5.nemo_supplied_forcing(card, G9_RECORD, 1)
+    nk = int(zc.n_levels)
+    nemo = g5.read_step(G9_RECORD, 1, [G9_RECORD], nk)
+    out = jax.device_get(LatLonCGridOceanModel(card.recipe.grid, zc, cfg).step(
+        s0, dt=card.dt_s, freshwater=fw, surface_forcing=sf))
+    wet = np.asarray(zc.is_active, dtype=bool)
+    for name, key in (("T", "3_tn_all_aa"), ("S", "3_sn_all_aa")):
+        ref, got = nemo[key], np.asarray(getattr(out, name).data)
+        assert ref.shape == got.shape
+        err = np.where(wet, np.abs(got - ref), 0.0) / np.abs(np.where(wet, ref, 0.0)).max()
+        assert err[-3:].max() <= 1.0e-15, (name, float(err[-3:].max()))

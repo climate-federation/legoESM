@@ -871,6 +871,7 @@ def fct_tracer_advection(
     return_nemo_stencil_trace: bool = False,
     return_nemo_up1_trace: bool = False,
     return_limiter_activity: bool = False,
+    nemo_fold_exchange: bool = False,
 ) -> tuple:
     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
 
@@ -956,6 +957,14 @@ def fct_tracer_advection(
         Private write-only readout of the seven source-ordered ``zbup`` inputs,
         their ``pbef``/``paft`` sources, wet mask, and resulting ``zup``.  False
         preserves the ordinary return.
+    nemo_fold_exchange : bool
+        NEMO's T-pivot fold inside ``tra_adv_fct`` (nn_hls=2): the faces
+        north of the stored pivot row carry the fold image of the row below
+        -- the upstream fluxes built on the halo (traadv_fct.f90:501-504,
+        :568-573), the antidiffusive flux after ``lbc_lnk`` (:311), the
+        north neighbour of the ``nonosc`` bound (:806-840) and the face
+        coefficient from the halo ``zbetup``/``zbetdo`` (:888-898).  Needs
+        an active pivot-row fold.  False keeps the wall north face.
 
     Returns
     -------
@@ -992,6 +1001,22 @@ def fct_tracer_advection(
         raise ValueError("NEMO stencil trace requires the compiled wet mask")
 
     eps = 1e-30
+    if nemo_fold_exchange:
+        fold = getattr(grid, "fold", None)
+        if (fold is None or not bool(fold.is_active)
+                or not bool(getattr(fold, "pivot_row_stored", False))):
+            raise ValueError(
+                "nemo_fold_exchange=True needs an active T-pivot fold with "
+                "the pivot row stored")
+        from legoesm.grids.operators_latlon_cgrid import fold_row
+        _n_lon_fold = fold.perm_T.shape[0]
+
+        def _fold_v(a):
+            return a.at[-1].set(fold_row(
+                a[-2:-1], fold.perm_v, fold.vector_sign_v, _n_lon_fold)[0])
+    else:
+        def _fold_v(a):
+            return a
 
     # Monotonicity base (Kbb under leapfrog; == tracer on the FE/AB2 path).
     # The low-order upwind flux, the vertical upwind interface flux, the
@@ -1005,7 +1030,7 @@ def fct_tracer_advection(
     tr_u_low = upwind_to_u_points(base, mass_flux_u)
     tr_v_low = upwind_to_v_points(base, mass_flux_v)
     flux_u_low = mass_flux_u * tr_u_low
-    flux_v_low = mass_flux_v * tr_v_low
+    flux_v_low = _fold_v(mass_flux_v * tr_v_low)
     div_h_low = divergence_cgrid(flux_u_low, flux_v_low, grid)
     if return_nemo_trace:
         trace_first_u = flux_u_low * jnp.asarray(grid.dy_u)[..., None]
@@ -1100,7 +1125,7 @@ def fct_tracer_advection(
         qmid_u = upwind_to_u_points(q_mid, mass_flux_u)
         qmid_v = upwind_to_v_points(q_mid, mass_flux_v)
         flux_u_low = 0.5 * (flux_u_low + mass_flux_u * qmid_u)
-        flux_v_low = 0.5 * (flux_v_low + mass_flux_v * qmid_v)
+        flux_v_low = _fold_v(0.5 * (flux_v_low + mass_flux_v * qmid_v))
         div_h_low = divergence_cgrid(flux_u_low, flux_v_low, grid)
         qmid_below = q_mid[..., 1:]
         qmid_above = q_mid[..., :-1]
@@ -1127,7 +1152,7 @@ def fct_tracer_advection(
     # --- Step 3: True sign-split Zalesak (1979) limiter (issue #212) ---
     # Anti-diffusive face fluxes:
     ad_flux_u = flux_u_hi - flux_u_low      # (n_lat, n_lon+1, nlev)
-    ad_flux_v = flux_v_hi - flux_v_low      # (n_lat+1, n_lon, nlev)
+    ad_flux_v = _fold_v(flux_v_hi - flux_v_low)  # lbc_lnk, traadv_fct.f90:311
     ad_vert_int = F_vert_hi_int - F_vert_low_int  # (..., nlev-1)
     if return_nemo_trace:
         trace_anti_pre_u = ad_flux_u * jnp.asarray(grid.dy_u)[..., None]
@@ -1225,7 +1250,9 @@ def fct_tracer_advection(
     tr_west = jnp.roll(bnd_up, 1, axis=1)
     tr_east = jnp.roll(bnd_up, -1, axis=1)
     tr_south = jnp.concatenate([bnd_up[:1, :, :], bnd_up[:-1, :, :]], axis=0)
-    tr_north = jnp.concatenate([bnd_up[1:, :, :], bnd_up[-1:, :, :]], axis=0)
+    tr_north = jnp.concatenate([bnd_up[1:, :, :], (
+        bnd_up[-2:-1][:, fold.perm_T] if nemo_fold_exchange
+        else bnd_up[-1:, :, :])], axis=0)
     tr_above = jnp.concatenate([bnd_up[..., :1], bnd_up[..., :-1]], axis=-1)
     tr_below = jnp.concatenate([bnd_up[..., 1:], bnd_up[..., -1:]], axis=-1)
     q_max = jnp.maximum(
@@ -1243,7 +1270,9 @@ def fct_tracer_advection(
     tr_west_do = jnp.roll(bnd_do, 1, axis=1)
     tr_east_do = jnp.roll(bnd_do, -1, axis=1)
     tr_south_do = jnp.concatenate([bnd_do[:1, :, :], bnd_do[:-1, :, :]], axis=0)
-    tr_north_do = jnp.concatenate([bnd_do[1:, :, :], bnd_do[-1:, :, :]], axis=0)
+    tr_north_do = jnp.concatenate([bnd_do[1:, :, :], (
+        bnd_do[-2:-1][:, fold.perm_T] if nemo_fold_exchange
+        else bnd_do[-1:, :, :])], axis=0)
     tr_above_do = jnp.concatenate([bnd_do[..., :1], bnd_do[..., :-1]], axis=-1)
     tr_below_do = jnp.concatenate([bnd_do[..., 1:], bnd_do[..., -1:]], axis=-1)
     q_min = jnp.minimum(
@@ -1270,6 +1299,8 @@ def fct_tracer_advection(
             diagnostic_inputs[6], dt, grid, eps,
             return_nemo_beta_trace=True,
         )
+    if nemo_fold_exchange:
+        alpha_v = alpha_v.at[-1].set(alpha_v[-2][fold.perm_v])
     limited_u, limited_v = alpha_u_full * ad_flux_u, alpha_v * ad_flux_v
     div_h_fct = divergence_cgrid(flux_u_low + limited_u, flux_v_low + limited_v, grid)
     div_h_anti = divergence_cgrid(limited_u, limited_v, grid)

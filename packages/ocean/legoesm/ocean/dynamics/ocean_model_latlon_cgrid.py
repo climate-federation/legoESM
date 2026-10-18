@@ -492,6 +492,7 @@ def _compute_advection_flux_div(
     fct_implicit_w=None,
     return_fct_activity: bool = False,
     return_fct_inputs: bool = False,
+    fct_nemo_fold_exchange: bool = False,
 ):
     """Compute advection flux divergence for a single tracer field.
 
@@ -593,6 +594,7 @@ def _compute_advection_flux_div(
             after_thickness=fct_after_thickness,
             implicit_w=fct_implicit_w,
             return_limiter_activity=return_fct_activity,
+            nemo_fold_exchange=fct_nemo_fold_exchange,
         )
         if return_fct_activity:
             div_hut, vert_flux_div, fct_activity = fct_result
@@ -775,6 +777,7 @@ def compute_advection_flux_div_pair(
     fct_implicit_w=None,
     return_a_fct_activity: bool = False,
     return_fct_inputs: bool = False,
+    fct_nemo_fold_exchange: bool = False,
 ):
     """Advection flux divergence for TWO tracers (T, S) in one pass.
 
@@ -838,6 +841,7 @@ def compute_advection_flux_div_pair(
             fct_implicit_w=fct_implicit_w,
             return_fct_activity=return_a_fct_activity,
             return_fct_inputs=return_fct_inputs,
+            fct_nemo_fold_exchange=fct_nemo_fold_exchange,
         )
         if return_a_fct_activity:
             pair_a = pair_a_result[:2]
@@ -859,6 +863,7 @@ def compute_advection_flux_div_pair(
             fct_after_thickness=fct_after_thickness,
             fct_implicit_w=fct_implicit_w,
             return_fct_inputs=return_fct_inputs,
+            fct_nemo_fold_exchange=fct_nemo_fold_exchange,
         )
         if return_b_h_fluxes:
             div_b, vert_b, sf_u, sf_v = out_b
@@ -2322,6 +2327,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     return_stage1_trace: bool = False,
     return_fct_activity: bool = False,
     return_fct_inputs: bool = False,
+    fct_nemo_fold_exchange: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """NEMO key_RK3 tracer stage program (Wicker--Skamarock form).
 
@@ -2450,6 +2456,7 @@ def _nemo_ws_rk3_tracer_pair_step(
                     return_fct_activity and stage_index == 2),
                 return_fct_inputs=(
                     return_fct_inputs and stage_index == 2),
+                fct_nemo_fold_exchange=fct_nemo_fold_exchange,
             )
             if return_fct_activity and stage_index == 2:
                 (dh_a, dv_a), (dh_b, dv_b), fct_activity = pair_result
@@ -10313,6 +10320,7 @@ class LatLonCGridOceanModel:
                         and self._nemo_ws_test_hooks
                         .tracer_process_branch_activity),
                     return_fct_inputs=bool(_fct_input_exposure),
+                    fct_nemo_fold_exchange=_cfg_b.fct_fold_exchange,  # traadv_fct.f90:311  # noqa: E501
                 )
                 if (_return_tracer_process_trace
                         and self._nemo_ws_test_hooks

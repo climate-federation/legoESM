@@ -3349,6 +3349,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # lbc_lnk (dynspg_ts.f90:844) and r3v after stp_RK3_stg's (stprk3_stg.f90:169).
     # True hands every stage transport both images; False preserves previously measured cards.
     rk3_stage_transport_fold_exchanges: bool = False
+    # NEMO's FCT reads the T-pivot fold on the faces north of the pivot row:
+    # upstream fluxes on the halo, the antidiffusive flux after lbc_lnk
+    # (traadv_fct.f90:311) and the limiter's halo bound and coefficient.
+    # True selects them; False preserves previously measured cards.
+    fct_fold_exchange: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
