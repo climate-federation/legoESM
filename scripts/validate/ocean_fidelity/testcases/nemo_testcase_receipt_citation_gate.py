@@ -453,6 +453,8 @@ FILES = {
         _ORCA2_COMPILED / "dynldf_lev.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_COMPILED / "traadv.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_cen.f90": (
+        _ORCA2_COMPILED / "traadv_cen.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90": (
         _ORCA2_COMPILED / "ldftra.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfdrg.f90": (
@@ -1770,6 +1772,32 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- GRIDLADDER round 46 (G9 round 1: ORCA2's tracer advection) ---
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:293-295': [
+        'ln_traadv_fct = .true.     !  FCT scheme',
+        'nn_fct_v   =  2               !  =2/4, vertical   2nd / COMPACT 4th order', 3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:586-596': [
+        'NAMELIST/namtra_adv/ ln_traadv_OFF,                                    &   ! No advection',
+        'READ(numnam_cfg(MAX(INDEX(numnam_cfg,"&namtra_adv "),1):),namtra_adv,IOSTAT=ios);CALL ctl_nam(ios,"namtra_adv (cfg)",.FALSE.)', 11],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:626-633': [
+        'IF( ln_traadv_OFF ) THEN   ;   ioptio = ioptio + 1   ;   nadv = np_NO_adv   ;   ENDIF',
+        "IF( ioptio /= 1 )   CALL ctl_stop( 'tra_adv_init: Choose ONE advection option in namelist namtra_adv' )", 8],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:491-494': [
+        '! FCT at last stage only with RK3',
+        ('ENDIF', 22), 4],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:529-535': [
+        'CASE ( np_FCT )                                 ! FCT scheme      : 2nd / 4th order',
+        ('ENDIF', 27), 7],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_cen.f90:149-158': [
+        ('CASE(  2  )                         !* 2nd order centered', 1),
+        ('pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) - (  ( ztFu(ji,jj) - ztFu(ji-1,jj  ) )    &   ! add () for NP repro', 1), 10],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:195-199': [
+        ('CASE(  2  )                   !- 2nd order centered', 1),
+        ('END DO   ;   END DO   ;   END DO', 4), 5],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:637': 'CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs, zFu, zFv, zFw, kstg )   ! horizontal & vertical advection',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:283': 'zFv(ji,jj,jk) = e1v(ji,jj)*(e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk))) * ( vv(ji,jj,jk,Kmm) + zvb(ji,jj)*vmask(ji,jj,jk) )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90:211': 'vmask(ji,jj,jk) = tmask(ji,jj  ,jk) * tmask(ji  ,jj+1,jk)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90:232': "CALL lbc_lnk( 'dommsk', umask, 'U', 1.0_wp, vmask, 'V', 1.0_wp, fmask, 'F', 1.0_wp )      ! Lateral boundary conditions",
     # --- GRIDLADDER round 44 resume 2 (G6 round 8: stored Kmm ratios) ---
     'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3_stg.f90:167': 'CALL dom_qco_r3c_RK3( ssha, r3ta, r3ua, r3va, r3fa )',
     'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3_stg.f90:177-179': [
