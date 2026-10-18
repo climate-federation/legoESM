@@ -1560,6 +1560,9 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     with netCDF4.Dataset(domain_path, "r") as ds:
         e3t_1d = np.asarray(ds.variables["e3t_1d"][:30], dtype=np.float64)
         e3w_1d = np.asarray(ds.variables["e3w_1d"][:30], dtype=np.float64)
+        # Level jpk is NEMO's masked dummy bottom; zdftke's bottom-up
+        # mixing-length scan reads its thickness (zdftke.f90:690-692).
+        e3t_jpk = np.asarray(ds.variables["e3t_0"][30], dtype=np.float64)
         bottom = np.asarray(ds.variables["bottom_level"][:], dtype=np.int32)
         strait = np.asarray(ds.variables["strait_shlat"][:], dtype=np.float64)
         raw_e3 = {
@@ -1588,7 +1591,8 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         # card is the NEMO-literal one, so it opts in; every other tripole
         # caller keeps the analytic default.
         use_mesh_coriolis=True,
-    )
+    )._replace(  # htau reads native gphit, zdftke.f90:864
+        native_lat_T_deg=jnp.asarray(metric["gphit"], dtype=jnp.float64))
     tmask, umask, vmask, fmask = _orca2_masks(bottom, strait)
     # dommsk.F90:146-198 copies the four-T-cell free-slip mask into
     # fe3mask before rn_shlat and strait_shlat alter the vorticity fmask.
@@ -1658,6 +1662,7 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         nemo_e3t_0=jnp.asarray(raw_e3["e3t_0"], dtype=jnp.float64),
         nemo_bbl_e3u_0=jnp.asarray(raw_e3["e3u_0"], dtype=jnp.float64),
         nemo_bbl_e3v_0=jnp.asarray(raw_e3["e3v_0"], dtype=jnp.float64),
+        nemo_e3t_jpk=jnp.asarray(e3t_jpk, dtype=jnp.float64),
     )
 
     temperature, salinity = build_orca2_initial_ts(
