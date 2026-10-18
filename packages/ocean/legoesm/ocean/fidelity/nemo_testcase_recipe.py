@@ -1736,14 +1736,7 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     # zdftke.F90:839-846 sees ln_zdfiwm=T and forces rn_emin=1e-10 before
     # tke_rst initializes en (:914-923).  Seed those carried card inputs here;
     # the shared step consumes the same state fields.
-    lat_t = metric["gphit"]
-    avtb_2d = np.ones(lat_t.shape, dtype=np.float64)
-    select = (-15.0 <= lat_t) & (lat_t < -5.0)
-    avtb_2d[select] = 1.0 - 0.09 * (lat_t[select] + 15.0)
-    select = (-5.0 <= lat_t) & (lat_t < 5.0)
-    avtb_2d[select] = 0.1
-    select = (5.0 <= lat_t) & (lat_t < 15.0)
-    avtb_2d[select] = 0.1 + 0.09 * (lat_t[select] - 5.0)
+    avtb_2d = nemo_havtb_shape(metric["gphit"])
     wet_w = tmask[..., 1:30]
     avm_pre = np.float64(1.2e-4) * wet_w
     avt_pre = (avtb_2d[..., None] * np.float64(1.2e-5)) * wet_w
@@ -3585,6 +3578,7 @@ def read_orca2g1_deck(
         **(_ORCA2V2_EVD_FIELDS if case in _ORCA2V_EVD_CASES else {}),
         **(_ORCA2V3_DDM_FIELDS if case in _ORCA2V_DDM_CASES else {}),
         **(_ORCA2V4_IWM_FIELDS if case in _ORCA2V_IWM_CASES else {}),
+        **(_ORCA2V5_HAVTB_FIELDS if case in _ORCA2V_HAVTB_CASES else {}),
     }
     iwm_lines = {k: v for k, v in values.items() if k.startswith("namzdf_iwm.")}
     if iwm_lines != (_ORCA2V4_IWM_LINES if case in _ORCA2V_IWM_CASES else {}):
@@ -3800,7 +3794,9 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         state = _orca2v1_tke_initial_state(
             state, tmask, deck,
             rn_emin=(_ORCA2V4_RN_EMIN if case in _ORCA2V_IWM_CASES
-                     else _ORCA2V1_RN_EMIN))
+                     else _ORCA2V1_RN_EMIN),
+            avtb_2d=(nemo_havtb_shape(dom["gphit"])
+                     if case in _ORCA2V_HAVTB_CASES else None))
 
     base = _model_config(
         barotropic_time_filter="nemo_ab3am4",          # nn_bt_flt = 3
@@ -4026,6 +4022,11 @@ def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) ->
                             else (vm.constant.A_v, vm.constant.K_v)) == (
             (_ORCA2V4_AVMB, _ORCA2V4_AVTB) if card.case in _ORCA2V_IWM_CASES
             else (deck.rn_avm0_m2_s, deck.rn_avt0_m2_s)),
+        "nn_havtb": card.case not in _ORCA2V_CASES or np.array_equal(
+            np.asarray(state.tke_avt.data),
+            ((nemo_havtb_shape(dom["gphit"]) if card.case in _ORCA2V_HAVTB_CASES
+              else np.ones(wet.shape))[..., None] * deck.rn_avt0_m2_s)
+            * wet3[..., 1:]),
         "domain_shape": np.shape(state.eta.data) == wet.shape,
         "coast": np.array_equal(np.asarray(card.recipe.land_mask) > 0.5, wet),
         "cell_thickness": np.array_equal(     # every level, partial cells included
@@ -4382,11 +4383,13 @@ def build_orca2g5_ice_card(deck_root: str | Path) -> NEMOTestcaseCard:
 # ln_zdfcst=F and ORCA2's four &namzdf_tke lines (namelist_cfg:404-419);
 # every other key, ln_zdfiwm=F and ln_drg_OFF=T included, is G5's.
 _ORCA2G_SI3_CASES = ("ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm",
-                     "ORCA2V4-iwm")
-_ORCA2V_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm")
-_ORCA2V_EVD_CASES = ("ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm")
-_ORCA2V_DDM_CASES = ("ORCA2V3-ddm", "ORCA2V4-iwm")
-_ORCA2V_IWM_CASES = ("ORCA2V4-iwm",)
+                     "ORCA2V4-iwm", "ORCA2V5-havtb")
+_ORCA2V_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
+                 "ORCA2V5-havtb")
+_ORCA2V_EVD_CASES = ("ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
+_ORCA2V_DDM_CASES = ("ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
+_ORCA2V_IWM_CASES = ("ORCA2V4-iwm", "ORCA2V5-havtb")
+_ORCA2V_HAVTB_CASES = ("ORCA2V5-havtb",)
 _ORCA2V1_TKE_FIELDS: dict[str, object] = {
     "namzdf_tke.nn_mxl": 3, "namzdf_tke.nn_etau": 1,
     "namzdf_tke.ln_mxhsw": False, "namzdf_tke.nn_mxlice": 2,
@@ -4414,10 +4417,12 @@ for _rung_table in (_ORCA2G_JPK, _ORCA2G_ZDF_FACES, _ORCA2G_TRA_ZDF_ROUNDED,
     _rung_table["ORCA2V2-evd"] = _rung_table["ORCA2G5-ice"]
     _rung_table["ORCA2V3-ddm"] = _rung_table["ORCA2G5-ice"]
     _rung_table["ORCA2V4-iwm"] = _rung_table["ORCA2G5-ice"]
+    _rung_table["ORCA2V5-havtb"] = _rung_table["ORCA2G5-ice"]
 _ORCA2G_UNMEASURED["ORCA2V1-tke"] = ORCA2V1_UNMEASURED
 _ORCA2G_UNMEASURED["ORCA2V2-evd"] = ORCA2V1_UNMEASURED
 _ORCA2G_UNMEASURED["ORCA2V3-ddm"] = ORCA2V1_UNMEASURED
 _ORCA2G_UNMEASURED["ORCA2V4-iwm"] = ORCA2V1_UNMEASURED
+_ORCA2G_UNMEASURED["ORCA2V5-havtb"] = ORCA2V1_UNMEASURED
 
 
 def _orca2v1_tke_vertical(g5_vm, deck: ORCA2G1Deck):
@@ -4484,12 +4489,16 @@ def _orca2v1_tke_selected(vm, *, iwm: bool = False) -> bool:
 
 
 def _orca2v1_tke_initial_state(state, tmask, deck: ORCA2G1Deck, *,
-                               rn_emin: float = _ORCA2V1_RN_EMIN):
+                               rn_emin: float = _ORCA2V1_RN_EMIN,
+                               avtb_2d=None):
     """zdfphy.f90:226-229 seeds avt_k/avm_k with the background, then
     tke_rst from rest sets en=rn_emin*wmask and dissl (zdftke.f90:913-916);
-    the same carried fields and masking as the full ORCA2 card."""
+    the same carried fields and masking as the full ORCA2 card.  ``avtb_2d``
+    (nn_havtb = 1, V5): avt_k = avtb_2d*avtb(jk)*wmask (zdfphy.f90:227)."""
 
     wet_w = np.asarray(tmask[..., 1:], dtype=np.float64)
+    avt_k = (deck.rn_avt0_m2_s * wet_w if avtb_2d is None
+             else (avtb_2d[..., None] * deck.rn_avt0_m2_s) * wet_w)
 
     def field(data, name, units):
         return Field(data=jnp.asarray(data), name=name,
@@ -4498,7 +4507,7 @@ def _orca2v1_tke_initial_state(state, tmask, deck: ORCA2G1Deck, *,
     return state._replace(
         tke=field(rn_emin * wet_w, "tke", "m^2/s^2"),
         tke_avm=field(deck.rn_avm0_m2_s * wet_w, "tke_avm", "m^2/s"),
-        tke_avt=field(deck.rn_avt0_m2_s * wet_w, "tke_avt", "m^2/s"),
+        tke_avt=field(avt_k, "tke_avt", "m^2/s"),
         tke_avm_surface=Field(
             data=jnp.asarray(deck.rn_avm0_m2_s * np.asarray(tmask[..., 0], dtype=np.float64)),
             name="tke_avm_surface", dims=("lat", "lon"), units="m^2/s"),
@@ -4638,6 +4647,35 @@ def build_orca2v4_iwm_card(deck_root: str | Path) -> NEMOTestcaseCard:
     return build_orca2g1_flat_card(deck_root, "ORCA2V4-iwm")
 
 
+def nemo_havtb_shape(gphit) -> np.ndarray:
+    """NEMO's ``avtb_2d`` with nn_havtb = 1: the three latitude-band WHERE
+    statements of zdf_phy_init (zdfphy.f90:215-224), in doubles
+    (-fdefault-real-8), on the T-point latitudes."""
+
+    lat_t = np.asarray(gphit, dtype=np.float64)
+    avtb_2d = np.ones(lat_t.shape, dtype=np.float64)
+    select = (-15.0 <= lat_t) & (lat_t < -5.0)
+    avtb_2d[select] = 1.0 - 0.09 * (lat_t[select] + 15.0)
+    select = (-5.0 <= lat_t) & (lat_t < 5.0)
+    avtb_2d[select] = 0.1
+    select = (5.0 <= lat_t) & (lat_t < 15.0)
+    avtb_2d[select] = 0.1 + 0.09 * (lat_t[select] - 5.0)
+    return avtb_2d
+
+
+# ORCA2V5: certified V4 plus ORCA2's nn_havtb = 1
+# (ORCA2_OMIP_L4/EXP00/namelist_cfg:401).  zdf_iwm_init resets avtb_2d = 1
+# afterwards (zdfiwm.f90:443), so on this deck the shape reaches only the
+# avt_k seed (zdfphy.f90:227), read once by tke_tke at kt 1 (zdftke.f90:424).
+_ORCA2V5_HAVTB_FIELDS: dict[str, object] = {"namzdf.nn_havtb": 1}
+
+
+def build_orca2v5_havtb_card(deck_root: str | Path) -> NEMOTestcaseCard:
+    """V5: certified V4 plus ORCA2's equatorial background shape (nn_havtb)."""
+
+    return build_orca2g1_flat_card(deck_root, "ORCA2V5-havtb")
+
+
 __all__ = (
     "NEMOTestcaseCard",
     "GYRESurfaceBoundaryCondition",
@@ -4657,6 +4695,8 @@ __all__ = (
     "build_orca2v2_evd_card",
     "build_orca2v3_ddm_card",
     "build_orca2v4_iwm_card",
+    "build_orca2v5_havtb_card",
+    "nemo_havtb_shape",
     "ORCA2V1_UNMEASURED",
     "orca2g_forcing_failures",
     "orca2g_ice_failures",
