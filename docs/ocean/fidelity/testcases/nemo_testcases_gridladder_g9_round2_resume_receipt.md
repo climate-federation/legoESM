@@ -90,7 +90,9 @@ Against round 47 (`5070601653`), row by row, 212 rows:
 This is the expected shape: the overwrite only acts on the card's
 asymmetric chain, which NEMO never has.
 
-Score SHA-256 (first 16) in `resume/manifest.sha256`; row diff `resume/cmp.txt`.
+Score SHA-256 (first 16): `indep_kt1_5.json` `68001b2c0c19f703`,
+`indep_kt6_10.json` `03311a0e2488fac3`, `given_e135.json` `e4befe7f0396a30b`,
+`given_e79.json` `d4749a56bf4ec839`.  Row diff `resume/cmp.txt`.
 
 ## 5. Test and plants (item 4)
 
@@ -118,9 +120,18 @@ Results in `gridladder_rounds/round47/resume/` (`JAX_ENABLE_X64=1`,
 
 | battery | result |
 |---|---|
-| G9 file | see `g9_file.log` |
-| default gate (land.sh list) | see `gate_*.log` |
-| receipt citation gate, this receipt | see `receipt_gate.log` |
+| G9 file | 16 passed |
+| citation-gate test, private-import ratchet, TKE | 91 passed |
+| recipe, freshwater, barotropic state | 49 passed |
+| face-mask rank (`-n 2`; serial run timed out at 590 s after 1 of 2) | 2 passed |
+| external-mode association users (continuity, round-167 walk) | 19 passed |
+
+Receipt citation gate (`--from-heading` this title): `PASS`, 7 citations,
+0 failures, 0 unmapped, 0 map entries failing the audit.  Its shift plant
+exits 1, `FAIL`.  Before it passed: the code edits shifted 29 older map
+lines (re-anchored with the existing tool from `4a118c11b6`), one entry's
+extent shrank 55 → 49 lines with the helper, and the round-157 receipt's
+one citation of that function was moved to match (its gate: `PASS`).
 
 ## Choices
 
