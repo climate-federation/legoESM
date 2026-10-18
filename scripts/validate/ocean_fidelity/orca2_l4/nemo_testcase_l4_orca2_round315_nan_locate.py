@@ -36,9 +36,10 @@ def repo_frames(error: BaseException) -> list[str]:
 
 
 def locate(rung: str, leaf: str, mode: str) -> dict:
+    """``leaf="state"`` pulls back to the whole state with every traceable
+    scale traced, exactly as the probe's per-step pullback does."""
     import jax
     import jax.numpy as jnp
-
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 
     card, state0, forcing = probe.build(rung)
@@ -49,22 +50,32 @@ def locate(rung: str, leaf: str, mode: str) -> dict:
     model.step(state0, card.dt_s, freshwater=fw, surface_forcing=sf)  # prime caches
     losses, _ = probe.make_losses(model, card.recipe.z_coord)
     step = probe.traced_step(model)
-    ones = {k: jnp.float64(1.0) for k in probe.SCALARS if k != "bottom_cd0"}
-    field = getattr(state0, leaf)
+    trace = probe.traceability(model, state0, forcing, card.dt_s)
+    ones = {k: jnp.float64(1.0) for k in probe.SCALARS if trace[k]["traceable"]}
+    if leaf == "state":
+        def loss_of(st):
+            return losses["T"](step(st, ones, card.dt_s, fw, sf))
 
-    def loss_of_leaf(data):
-        st = state0._replace(**{leaf: field.replace(data=data)})
-        return losses["T"](step(st, ones, card.dt_s, fw, sf))
+        arg = state0
+    else:
+        field = getattr(state0, leaf)
 
-    grad = jax.jit(jax.grad(loss_of_leaf))
-    plain = grad(field.data)
-    out = {"rung": rung, "leaf": leaf, "mode": mode,
-           "worktree": probe_stamp(),
-           "nonfinite_count_jit": int(jnp.sum(~jnp.isfinite(plain))),
-           "nan_count_jit": int(jnp.sum(jnp.isnan(plain)))}
+        def loss_of(data):
+            st = state0._replace(**{leaf: field.replace(data=data)})
+            return losses["T"](step(st, ones, card.dt_s, fw, sf))
+
+        arg = field.data
+    grad = jax.jit(jax.grad(loss_of, allow_int=True))
+    plain = grad(arg)
+    bad = [jax.tree_util.keystr(path) for path, x in jax.tree_util.tree_leaves_with_path(plain)
+           if jnp.issubdtype(jnp.asarray(x).dtype, jnp.inexact)
+           and not bool(jnp.all(jnp.isfinite(x)))]
+    out = {"rung": rung, "leaf": leaf, "mode": mode, "traced_scales": sorted(ones),
+           "worktree": probe_stamp(), "nonfinite_leaves_jit": bad,
+           "nonfinite_count_jit": len(bad)}
     jax.config.update(f"jax_debug_{mode}", True)
     try:
-        grad(field.data)
+        grad(arg)
         out["raised"] = False
     except FloatingPointError as error:
         out.update(raised=True, message=str(error).splitlines()[0][:400],
