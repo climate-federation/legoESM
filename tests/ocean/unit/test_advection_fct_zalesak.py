@@ -168,6 +168,55 @@ class TestConservation:
         assert not np.array_equal(
             np.asarray(planted[first_u]), np.asarray(trace[first_u]))
 
+    def test_nemo_literal_fct_consumes_metric_transport_in_source_order(
+        self, grid_small, smooth_state,
+    ):
+        """The selectable literal path writes NEMO's first upstream face.
+
+        The tracer and all three metric transports are traced through a
+        jitted x64 call.  This is a value assertion on the compiled statement,
+        not a graph-shape assertion.
+        """
+        from legoesm.grids.latlon import create_latlon_geometry
+
+        tracer, mu, mv, w_half, h_k, dt = smooth_state
+        grid = create_latlon_geometry(
+            grid_small.n_lat, grid_small.n_lon, radius=grid_small.radius)
+        wet = jnp.ones_like(tracer)
+        p_u = mu * jnp.asarray(grid.dy_u)[..., None]
+        p_v = mv * jnp.asarray(grid.dx_v)[..., None]
+        p_w = w_half * jnp.asarray(grid.area_T)[..., None]
+
+        def run(field, transport_u, transport_v, transport_w):
+            return fct_tracer_advection(
+                field, mu, mv, w_half, h_k, grid, dt,
+                high_order="centred2", tracer_before=field,
+                active_mask=wet,
+                low_order_predictor="nemo_rk3_two_step",
+                base_thickness=h_k, after_thickness=h_k,
+                return_nemo_trace=True,
+                nemo_literal_transports=(
+                    transport_u, transport_v, transport_w),
+            )[2]
+
+        trace = jax.jit(run)(tracer, p_u, p_v, p_w)
+        first_u = np.asarray(
+            trace[NEMO_FCT_TRACE_FIELDS.index("first_u")])
+        q = np.asarray(tracer)
+        pu = np.asarray(p_u)
+        west = np.concatenate([q[:, -1:], q], axis=1)
+        east = np.concatenate([q, q[:, :1]], axis=1)
+        expected = np.maximum(pu, 0.0) * west + np.minimum(pu, 0.0) * east
+        np.testing.assert_array_equal(first_u, expected)
+        first_div = np.asarray(
+            trace[NEMO_FCT_TRACE_FIELDS.index("first_div")])
+        expected_div = -(
+            expected[:, 1:] - expected[:, :-1]
+        ) / np.asarray(grid.area_T)[..., None]
+        np.testing.assert_allclose(
+            first_div, expected_div, rtol=4.0 * np.finfo(np.float64).eps,
+            atol=0.0)
+
     def test_write_only_nemo_beta_trace_preserves_outputs_and_is_live(
         self, grid_small, smooth_state,
     ):

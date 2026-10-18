@@ -22,6 +22,7 @@ where:
 
 import jax
 import jax.numpy as jnp
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.core.weno import weno5_z, weno7_z, weno_upwind
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.core.flux_limiters import grad_safe_ratio, ratio_grad_floor
@@ -872,6 +873,7 @@ def fct_tracer_advection(
     return_nemo_up1_trace: bool = False,
     return_limiter_activity: bool = False,
     nemo_fold_exchange: bool = False,
+    nemo_literal_transports: tuple | None = None,
 ) -> tuple:
     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
 
@@ -967,6 +969,13 @@ def fct_tracer_advection(
         north neighbour of the ``nonosc`` bound (:817) and the face
         coefficient from the halo ``zbetup``/``zbetdo`` (:910).  Needs
         an active pivot-row fold.  False keeps the wall north face.
+    nemo_literal_transports : tuple or None
+        Select NEMO's compiled arithmetic form for the existing FCT pipeline.
+        The tuple is the metric-bearing ``(pU, pV, pW)`` transport triplet;
+        ``None`` preserves the generic form.  The literal form requires
+        ``centred2``, the RK3 two-step predictor, a wet mask, and explicit
+        vertical advection.  It changes association and store boundaries, not
+        the algorithm or its fold operations.
 
     Returns
     -------
@@ -1001,6 +1010,18 @@ def fct_tracer_advection(
                 "NEMO trace returns require the NEMO RK3 two-step predictor")
     if return_nemo_stencil_trace and active_mask is None:
         raise ValueError("NEMO stencil trace requires the compiled wet mask")
+    literal = nemo_literal_transports is not None
+    if literal:
+        if high_order != "centred2" or low_order_predictor != "nemo_rk3_two_step":
+            raise ValueError(
+                "NEMO literal FCT requires centred2 and the RK3 two-step predictor")
+        if active_mask is None or base_thickness is None or after_thickness is None:
+            raise ValueError(
+                "NEMO literal FCT requires wet, Kbb, and Kaa thickness operands")
+        if implicit_w is not None:
+            raise ValueError("NEMO literal FCT requires the explicit-W arm")
+        if len(nemo_literal_transports) != 3:
+            raise ValueError("nemo_literal_transports must contain pU, pV, and pW")
 
     eps = 1e-30
     if nemo_fold_exchange:
@@ -1035,85 +1056,152 @@ def fct_tracer_advection(
     # (Kmm).  ``tracer_before is None`` ⇒ ``base is tracer`` ⇒ byte-identical.
     base = tracer if tracer_before is None else tracer_before
 
-    # --- Step 1: Horizontal face fluxes (low and high order) ---
-    tr_u_low = upwind_to_u_points(base, mass_flux_u)
-    tr_v_low = upwind_to_v_points(base, mass_flux_v)
-    flux_u_low = mass_flux_u * tr_u_low
-    flux_v_low = _fold_v(mass_flux_v * tr_v_low)
-    div_h_low = divergence_cgrid(flux_u_low, flux_v_low, grid)
-    if return_nemo_trace:
-        trace_first_u = flux_u_low * jnp.asarray(grid.dy_u)[..., None]
-        trace_first_v = flux_v_low * jnp.asarray(grid.dx_v)[..., None]
-
-    if high_order == "ppm":
-        tr_u_hi = ppm_to_u_points(tracer, mass_flux_u)
-        tr_v_hi = ppm_to_v_points(tracer, mass_flux_v)
-    else:
-        tr_u_hi = centred2_to_u_points(tracer)
-        tr_v_hi = centred2_to_v_points(tracer)
-    flux_u_hi = mass_flux_u * tr_u_hi
-    flux_v_hi = mass_flux_v * tr_v_hi
-
-    # --- Step 2: Vertical interface fluxes (low and high order) ---
+    # --- Steps 1-2: low- and high-order face fluxes ---
     nlev = tracer.shape[-1]
     w_int = w_half[..., 1:nlev]  # interior interfaces (..., nlev-1)
     T_below = tracer[..., 1:]    # (..., nlev-1) NOW level (Kmm), high-order
     T_above = tracer[..., :-1]   # (..., nlev-1)
+    h_base = h_k if base_thickness is None else base_thickness
+    pad_axes_v = ((0, 0),) * (tracer.ndim - 1)
+    literal_low_rhs = None
+    if literal:
+        # One pipeline, alternate arithmetic form.  These are the array-store
+        # boundaries of compiled fct_up1_2stp (traadv_fct.f90:501-609).
+        sr = nemo_source_round
+        p_u, p_v, p_w = (jnp.asarray(value) for value in nemo_literal_transports)
+        if (p_u.shape != mass_flux_u.shape or p_v.shape != mass_flux_v.shape
+                or p_w.shape != w_half.shape):
+            raise ValueError("NEMO literal FCT transports do not match the face grids")
+        zero = jnp.asarray(0.0, dtype=tracer.dtype)
+        half = jnp.asarray(0.5, dtype=tracer.dtype)
+        dt_value = jnp.asarray(dt, dtype=tracer.dtype)
+        mask = jnp.broadcast_to(jnp.asarray(active_mask), tracer.shape)
+        wmask_int = sr(mask[..., :-1] * mask[..., 1:])
+        area = jnp.asarray(grid.area_T, dtype=tracer.dtype)[..., None]
+        r1_area = sr(1.0 / area)
 
-    # Upwind interface flux from the BEFORE (Kbb) base level
-    Tb_below = base[..., 1:]     # (..., nlev-1)
-    Tb_above = base[..., :-1]    # (..., nlev-1)
-    T_face_low = jnp.where(w_int > 0.0, Tb_below, Tb_above)
-    F_vert_low_int = w_int * T_face_low  # (..., nlev-1)
+        def _literal_u_upwind(q):
+            left = jnp.concatenate([q[:, -1:, :], q], axis=1)
+            right = jnp.concatenate([q, q[:, :1, :]], axis=1)
+            positive = sr(jnp.maximum(p_u, zero) * left)
+            negative = sr(jnp.minimum(p_u, zero) * right)
+            return sr(positive + negative)
 
-    if high_order == "ppm":
-        # PPM interface flux
-        from legoesm.core.operators_fv import ppm_edge_values, ppm_limit
-        f_pad = jnp.concatenate(
-            [tracer[..., 1::-1], tracer, tracer[..., -1:-3:-1]], axis=-1)
-        f_pad_2d = f_pad[..., jnp.newaxis]
-        q_hat = ppm_edge_values(f_pad_2d)[..., 0]
-        a_L = q_hat[..., :-1]
-        a_R = q_hat[..., 1:]
-        q_c = f_pad[..., 1:-1]
-        a_L_2d, a_R_2d = ppm_limit(
-            q_c[..., jnp.newaxis], a_L[..., jnp.newaxis],
-            a_R[..., jnp.newaxis])
-        a_L, a_R = a_L_2d[..., 0], a_R_2d[..., 0]
-        q_R_above = a_R[..., 1:nlev]
-        q_L_below = a_L[..., 2:nlev + 1]
-        T_face_hi = jnp.where(w_int > 0.0, q_L_below, q_R_above)
-        T_face_hi = jnp.clip(T_face_hi,
-                             jnp.minimum(T_above, T_below),
-                             jnp.maximum(T_above, T_below))
+        def _literal_v_upwind(q):
+            padded = jnp.pad(q, ((1, 1), (0, 0), (0, 0)))
+            south, north = padded[:-1], padded[1:]
+            positive = sr(jnp.maximum(p_v, zero) * south)
+            negative = sr(jnp.minimum(p_v, zero) * north)
+            return _fold_v(sr(positive + negative))
+
+        def _literal_w_upwind(q):
+            positive = sr(
+                jnp.maximum(p_w[..., 1:nlev], zero) * q[..., 1:])
+            negative = sr(
+                jnp.minimum(p_w[..., 1:nlev], zero) * q[..., :-1])
+            inner = sr(sr(positive + negative) * wmask_int)
+            return jnp.pad(inner, (*pad_axes_v, (1, 1)))
+
+        def _literal_rate(fu, fv, fw):
+            du = sr(fu[:, 1:, :] - fu[:, :-1, :])
+            dv = sr(fv[1:, :, :] - fv[:-1, :, :])
+            dw = sr(fw[..., :-1] - fw[..., 1:])
+            summed = sr(sr(du + dv) + dw)
+            return sr(-sr(summed * r1_area))
+
+        first_u = _literal_u_upwind(base)
+        first_v = _literal_v_upwind(base)
+        first_w = _literal_w_upwind(base)
+        first_rate = _literal_rate(first_u, first_v, first_w)
+        h_k_divisor = jnp.where(mask > 0.5, h_k, jnp.ones_like(h_k))
+        half_dt = sr(half * dt_value)
+        q_mid = sr(sr(sr(sr(sr(h_base) * base)
+                           + sr(half_dt * first_rate))
+                       / sr(h_k_divisor)) * mask)
+        next_u = _literal_u_upwind(q_mid)
+        next_v = _literal_v_upwind(q_mid)
+        next_w = _literal_w_upwind(q_mid)
+        first_u = sr(half * sr(first_u + next_u))
+        first_v = _fold_v(sr(half * sr(first_v + next_v)))
+        first_w_int = sr(
+            half * sr(first_w[..., 1:nlev] + next_w[..., 1:nlev]))
+        first_w = jnp.pad(first_w_int, (*pad_axes_v, (1, 1)))
+        low_rate = _literal_rate(first_u, first_v, first_w)
+        literal_low_rhs = sr(
+            sr(sr(low_rate / sr(h_k_divisor)) * mask)
+            + jnp.zeros_like(low_rate))
+        literal_low_rhs = jnp.where(
+            mask > 0.5, literal_low_rhs, jnp.zeros_like(literal_low_rhs))
+
+        # Keep the common downstream names.  The literal values remain
+        # metric-bearing until nonosc and the final correction have executed.
+        flux_u_low, flux_v_low, F_vert_low = first_u, first_v, first_w
+        F_vert_low_int = F_vert_low[..., 1:nlev]
+        div_h_low, vert_div_low = -low_rate, jnp.zeros_like(low_rate)
+        if return_nemo_trace:
+            trace_first_u, trace_first_v, trace_first_w = (
+                _literal_u_upwind(base), _literal_v_upwind(base),
+                _literal_w_upwind(base))
+            trace_first_div = first_rate
     else:
-        # NEMO nn_fct_v=2: plain centred interface mean, no clamp
-        T_face_hi = 0.5 * (T_above + T_below)
-    F_vert_hi_int = w_int * T_face_hi
+        tr_u_low = upwind_to_u_points(base, mass_flux_u)
+        tr_v_low = upwind_to_v_points(base, mass_flux_v)
+        flux_u_low = mass_flux_u * tr_u_low
+        flux_v_low = _fold_v(mass_flux_v * tr_v_low)
+        div_h_low = divergence_cgrid(flux_u_low, flux_v_low, grid)
+        if return_nemo_trace:
+            trace_first_u = flux_u_low * jnp.asarray(grid.dy_u)[..., None]
+            trace_first_v = flux_v_low * jnp.asarray(grid.dx_v)[..., None]
 
-    # Vertical divergences for Zalesak bounds computation — pad
-    # (single Pad HLO each) instead of allocating a fresh ``(..., 1)``
-    # zero buffer and concatenating it on both ends.
-    pad_axes_v = ((0, 0),) * (F_vert_low_int.ndim - 1)
-    F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
-    vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
-    if return_nemo_up1_trace:
-        up1_first_u = flux_u_low
-        up1_first_v = flux_v_low
-        up1_first_w = F_vert_low
-        up1_first_div = -(div_h_low + vert_div_low)
-    if return_nemo_trace:
-        trace_first_w = F_vert_low * jnp.asarray(grid.area_T)[..., None]
-        trace_first_div = -(div_h_low + vert_div_low)
+        if high_order == "ppm":
+            tr_u_hi = ppm_to_u_points(tracer, mass_flux_u)
+            tr_v_hi = ppm_to_v_points(tracer, mass_flux_v)
+        else:
+            tr_u_hi = centred2_to_u_points(tracer)
+            tr_v_hi = centred2_to_v_points(tracer)
+        flux_u_hi = mass_flux_u * tr_u_hi
+        flux_v_hi = mass_flux_v * tr_v_hi
+
+        Tb_below = base[..., 1:]
+        Tb_above = base[..., :-1]
+        T_face_low = jnp.where(w_int > 0.0, Tb_below, Tb_above)
+        F_vert_low_int = w_int * T_face_low
+
+        if high_order == "ppm":
+            from legoesm.core.operators_fv import ppm_edge_values, ppm_limit
+            f_pad = jnp.concatenate(
+                [tracer[..., 1::-1], tracer, tracer[..., -1:-3:-1]], axis=-1)
+            f_pad_2d = f_pad[..., jnp.newaxis]
+            q_hat = ppm_edge_values(f_pad_2d)[..., 0]
+            a_L = q_hat[..., :-1]
+            a_R = q_hat[..., 1:]
+            q_c = f_pad[..., 1:-1]
+            a_L_2d, a_R_2d = ppm_limit(
+                q_c[..., jnp.newaxis], a_L[..., jnp.newaxis],
+                a_R[..., jnp.newaxis])
+            a_L, a_R = a_L_2d[..., 0], a_R_2d[..., 0]
+            q_R_above = a_R[..., 1:nlev]
+            q_L_below = a_L[..., 2:nlev + 1]
+            T_face_hi = jnp.where(w_int > 0.0, q_L_below, q_R_above)
+            T_face_hi = jnp.clip(T_face_hi,
+                                 jnp.minimum(T_above, T_below),
+                                 jnp.maximum(T_above, T_below))
+        else:
+            T_face_hi = 0.5 * (T_above + T_below)
+        F_vert_hi_int = w_int * T_face_hi
+        F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
+        vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
+        if return_nemo_up1_trace:
+            up1_first_u = flux_u_low
+            up1_first_v = flux_v_low
+            up1_first_w = F_vert_low
+            up1_first_div = -(div_h_low + vert_div_low)
+        if return_nemo_trace:
+            trace_first_w = F_vert_low * jnp.asarray(grid.area_T)[..., None]
+            trace_first_div = -(div_h_low + vert_div_low)
 
     # NEMO key_RK3 does not use the ordinary one-step upstream predictor.
-    # traadv_fct.F90:493-537 first advances Kbb by pDt/2 with upstream
-    # fluxes to a Kmm-thickness midpoint.  Lines 560-607 then replace every
-    # upstream face flux by the arithmetic mean of the Kbb and midpoint
-    # upstream fluxes.  That averaged flux supplies BOTH the low-order guess
-    # and the antidiffusive difference consumed by nonosc.
-    h_base = h_k if base_thickness is None else base_thickness
-    if low_order_predictor == "nemo_rk3_two_step":
+    if low_order_predictor == "nemo_rk3_two_step" and not literal:
         implicit_mass_div = 0.0
         if implicit_w is not None:
             if implicit_w.shape != tracer.shape[:-1] + (nlev + 1,):
@@ -1144,7 +1232,7 @@ def fct_tracer_advection(
         F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
         vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
 
-    if return_nemo_up1_trace:
+    if return_nemo_up1_trace and not literal:
         up1_explicit_ztra = -(div_h_low + vert_div_low)
         up1_implicit_ztra = -implicit_mass_div
         up1_total_ztra = up1_explicit_ztra + up1_implicit_ztra
@@ -1153,22 +1241,49 @@ def fct_tracer_advection(
         up1_numerator = up1_base_content + up1_dt_ztra
 
     if return_nemo_trace:
-        trace_average_u = flux_u_low * jnp.asarray(grid.dy_u)[..., None]
-        trace_average_v = flux_v_low * jnp.asarray(grid.dx_v)[..., None]
-        trace_average_w = F_vert_low * jnp.asarray(grid.area_T)[..., None]
-        trace_upstream_div = -(div_h_low + vert_div_low)
+        if literal:
+            trace_average_u = flux_u_low
+            trace_average_v = flux_v_low
+            trace_average_w = F_vert_low
+            trace_upstream_div = low_rate
+        else:
+            trace_average_u = flux_u_low * jnp.asarray(grid.dy_u)[..., None]
+            trace_average_v = flux_v_low * jnp.asarray(grid.dx_v)[..., None]
+            trace_average_w = F_vert_low * jnp.asarray(grid.area_T)[..., None]
+            trace_upstream_div = -(div_h_low + vert_div_low)
 
     # --- Step 3: True sign-split Zalesak (1979) limiter (issue #212) ---
     # Anti-diffusive face fluxes:
-    ad_flux_u = _fold_half(flux_u_hi - flux_u_low, "U")  # (n_lat, n_lon+1, nlev)
-    ad_flux_v = _fold_v(flux_v_hi - flux_v_low)  # lbc_lnk, traadv_fct.f90:311
-    ad_vert_int = F_vert_hi_int - F_vert_low_int  # (..., nlev-1)
+    if literal:
+        tr_u_sum = sr(
+            jnp.concatenate([tracer[:, -1:, :], tracer], axis=1)
+            + jnp.concatenate([tracer, tracer[:, :1, :]], axis=1))
+        tr_v_sum = sr(
+            jnp.concatenate([tracer[:1], tracer], axis=0)
+            + jnp.concatenate([tracer, tracer[-1:]], axis=0))
+        high_u = sr(sr(0.5 * p_u) * tr_u_sum)
+        high_v = sr(sr(0.5 * p_v) * tr_v_sum)
+        ad_flux_u = _fold_half(
+            nemo_source_round(high_u - flux_u_low), "U")
+        ad_flux_v = _fold_v(nemo_source_round(high_v - flux_v_low))
+        tr_w_sum = sr(T_above + T_below)
+        ad_vert_int = nemo_source_round(
+            sr(sr(sr(p_w[..., 1:nlev] * 0.5) * tr_w_sum)
+               - F_vert_low_int) * wmask_int)
+    else:
+        ad_flux_u = _fold_half(flux_u_hi - flux_u_low, "U")
+        ad_flux_v = _fold_v(flux_v_hi - flux_v_low)
+        ad_vert_int = F_vert_hi_int - F_vert_low_int
     if return_nemo_trace:
-        trace_anti_pre_u = ad_flux_u * jnp.asarray(grid.dy_u)[..., None]
-        trace_anti_pre_v = ad_flux_v * jnp.asarray(grid.dx_v)[..., None]
-        trace_anti_pre_w = jnp.pad(
-            ad_vert_int, (*pad_axes_v, (1, 1))) * jnp.asarray(
-                grid.area_T)[..., None]
+        if literal:
+            trace_anti_pre_u, trace_anti_pre_v = ad_flux_u, ad_flux_v
+            trace_anti_pre_w = jnp.pad(ad_vert_int, (*pad_axes_v, (1, 1)))
+        else:
+            trace_anti_pre_u = ad_flux_u * jnp.asarray(grid.dy_u)[..., None]
+            trace_anti_pre_v = ad_flux_v * jnp.asarray(grid.dx_v)[..., None]
+            trace_anti_pre_w = jnp.pad(
+                ad_vert_int, (*pad_axes_v, (1, 1))) * jnp.asarray(
+                    grid.area_T)[..., None]
 
     # AFTER thickness from the SAME advecting fluxes: under z-star the
     # caller's flux-form update divides by h_new = h_k - dt*div(mf), so the
@@ -1209,15 +1324,20 @@ def fct_tracer_advection(
     t_grad_h = ratio_grad_floor(tracer.dtype)
 
     # Provisional low-order (upwind) update in AFTER-thickness form.
-    q_td = grad_safe_ratio(
-        h_base * base - dt * (
-            div_h_low + vert_div_low + (
-                (implicit_w[..., :-1] - implicit_w[..., 1:]) * base
-                if implicit_w is not None else 0.0)),
-        jnp.maximum(h_new, eps),
-        h_new > t_grad_h,
-    )
-    if return_nemo_up1_trace:
+    if literal:
+        h_new_divisor = jnp.where(mask > 0.5, h_new, jnp.ones_like(h_new))
+        q_td = sr(sr(sr(sr(sr(h_base) * base) + sr(dt_value * low_rate))
+                     / sr(h_new_divisor)) * mask)
+    else:
+        q_td = grad_safe_ratio(
+            h_base * base - dt * (
+                div_h_low + vert_div_low + (
+                    (implicit_w[..., :-1] - implicit_w[..., 1:]) * base
+                    if implicit_w is not None else 0.0)),
+            jnp.maximum(h_new, eps),
+            h_new > t_grad_h,
+        )
+    if return_nemo_up1_trace and not literal:
         up1_trace = jax.lax.optimization_barrier((
             up1_first_u, up1_first_v, up1_first_w, up1_first_div,
             q_mid, flux_u_low, flux_v_low, F_vert_low,
@@ -1254,7 +1374,10 @@ def fct_tracer_advection(
         # tracer update masks the cell out anyway) and must not widen a
         # WET neighbour's box.  ``zbig`` finite-sentineled to the dtype's
         # max (not ``inf``) so float32 callers stay finite under AD.
-        zbig = jnp.asarray(0.5, dtype=bnd_up.dtype) * jnp.finfo(bnd_up.dtype).max
+        zbig = (
+            jnp.asarray(jnp.finfo(bnd_up.dtype).max, dtype=bnd_up.dtype)
+            if literal else
+            jnp.asarray(0.5, dtype=bnd_up.dtype) * jnp.finfo(bnd_up.dtype).max)
         bnd_up = jnp.where(wet, bnd_up, -zbig)
         bnd_do = jnp.where(wet, bnd_do, zbig)
     tr_west = jnp.roll(bnd_up, 1, axis=1)
@@ -1292,11 +1415,68 @@ def fct_tracer_advection(
 
     # h_new, not h_k: the budgets Q/P are increments of the AFTER field,
     # which the caller normalises by the AFTER thickness (see h_new above).
-    alpha_u_full, alpha_v, alpha_vert_face = _zalesak_signsplit_face_alphas(
-        ad_flux_u, ad_flux_v, ad_vert_int,
-        q_td, q_min, q_max, h_new, dt, grid, eps,
-    )
-    if return_nemo_beta_trace:
+    if literal:
+        one = jnp.asarray(1.0, dtype=tracer.dtype)
+        anti_w = jnp.pad(ad_vert_int, (*pad_axes_v, (1, 1)))
+        west_u, east_u = ad_flux_u[:, :-1], ad_flux_u[:, 1:]
+        south_v, north_v = ad_flux_v[:-1], ad_flux_v[1:]
+        top_w, bottom_w = anti_w[..., :-1], anti_w[..., 1:]
+        zpos = sr(
+            sr(sr(jnp.maximum(zero, west_u) - jnp.minimum(zero, east_u))
+               + sr(jnp.maximum(zero, south_v) - jnp.minimum(zero, north_v)))
+            + sr(jnp.maximum(zero, bottom_w) - jnp.minimum(zero, top_w)))
+        zneg = sr(
+            sr(sr(jnp.maximum(zero, east_u) - jnp.minimum(zero, west_u))
+               + sr(jnp.maximum(zero, north_v) - jnp.minimum(zero, south_v)))
+            + sr(jnp.maximum(zero, top_w) - jnp.minimum(zero, bottom_w)))
+        inv_dt = sr(one / dt_value)
+        zbt = sr(sr(area * h_new) * inv_dt)
+        beta_up_valid = (q_max != -zbig) & (zpos != zero)
+        beta_do_valid = (q_min != zbig) & (zneg != zero)
+        beta_up = jnp.where(
+            beta_up_valid,
+            sr(sr(sr(q_max - q_td) / jnp.where(
+                zpos != zero, zpos, one)) * zbt),
+            zbig)
+        beta_down = jnp.where(
+            beta_do_valid,
+            sr(sr(sr(q_td - q_min) / jnp.where(
+                zneg != zero, zneg, one)) * zbt),
+            zbig)
+
+        up_west = jnp.concatenate([beta_up[:, -1:], beta_up], axis=1)
+        up_east = jnp.concatenate([beta_up, beta_up[:, :1]], axis=1)
+        do_west = jnp.concatenate([beta_down[:, -1:], beta_down], axis=1)
+        do_east = jnp.concatenate([beta_down, beta_down[:, :1]], axis=1)
+        alpha_u_full = jnp.where(
+            ad_flux_u > zero,
+            jnp.minimum(one, jnp.minimum(do_west, up_east)),
+            jnp.minimum(one, jnp.minimum(up_west, do_east)))
+
+        up_south = jnp.concatenate([beta_up[:1], beta_up], axis=0)
+        up_north = jnp.concatenate([beta_up, beta_up[-1:]], axis=0)
+        do_south = jnp.concatenate([beta_down[:1], beta_down], axis=0)
+        do_north = jnp.concatenate([beta_down, beta_down[-1:]], axis=0)
+        alpha_v = jnp.where(
+            ad_flux_v > zero,
+            jnp.minimum(one, jnp.minimum(do_south, up_north)),
+            jnp.minimum(one, jnp.minimum(up_south, do_north)))
+
+        alpha_vert_face = jnp.where(
+            ad_vert_int > zero,
+            jnp.minimum(one, jnp.minimum(
+                beta_down[..., 1:], beta_up[..., :-1])),
+            jnp.minimum(one, jnp.minimum(
+                beta_up[..., 1:], beta_down[..., :-1])))
+        beta_trace = (
+            q_max, q_min, zpos, zneg, zbt, beta_up, beta_down,
+            jnp.minimum(one, beta_up), jnp.minimum(one, beta_down))
+    else:
+        alpha_u_full, alpha_v, alpha_vert_face = _zalesak_signsplit_face_alphas(
+            ad_flux_u, ad_flux_v, ad_vert_int,
+            q_td, q_min, q_max, h_new, dt, grid, eps,
+        )
+    if return_nemo_beta_trace and not literal:
         # Keep the observer out of the production limiter graph.  Without this
         # explicit barrier XLA can fuse the extra source-aligned readouts back
         # into the live alpha computation and move the bits being observed.
@@ -1311,22 +1491,52 @@ def fct_tracer_advection(
         )
     if nemo_fold_exchange:
         alpha_v = alpha_v.at[-1].set(alpha_v[-2][fold.perm_v])
-    limited_u, limited_v = alpha_u_full * ad_flux_u, alpha_v * ad_flux_v
-    div_h_fct = divergence_cgrid(flux_u_low + limited_u, flux_v_low + limited_v, grid)
-    div_h_anti = divergence_cgrid(limited_u, limited_v, grid)
-    limited_w = alpha_vert_face * ad_vert_int
-    F_vert_fct = jnp.pad(F_vert_low_int + limited_w, (*pad_axes_v, (1, 1)))
-    vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]
-    anti_full = jnp.pad(limited_w, (*pad_axes_v, (1, 1)))
+    if literal:
+        limited_u = sr(ad_flux_u * alpha_u_full)
+        limited_v = sr(ad_flux_v * alpha_v)
+        limited_w = sr(ad_vert_int * alpha_vert_face)
+        anti_full = jnp.pad(limited_w, (*pad_axes_v, (1, 1)))
+        anti_rate = _literal_rate(limited_u, limited_v, anti_full)
+        anti_rhs = sr(sr(anti_rate / sr(h_k_divisor)) * mask)
+        literal_final_rhs = sr(literal_low_rhs + anti_rhs)
+        literal_final_rhs = jnp.where(
+            mask > 0.5, literal_final_rhs,
+            jnp.zeros_like(literal_final_rhs))
+        total_u = sr(flux_u_low + limited_u)
+        total_v = sr(flux_v_low + limited_v)
+        total_w = sr(F_vert_low + anti_full)
+        div_h_fct = sr(sr(
+            sr(total_u[:, 1:] - total_u[:, :-1])
+            + sr(total_v[1:] - total_v[:-1])) * r1_area)
+        vert_div_fct = sr(
+            sr(total_w[..., :-1] - total_w[..., 1:]) * r1_area)
+        div_h_anti = sr(sr(
+            sr(limited_u[:, 1:] - limited_u[:, :-1])
+            + sr(limited_v[1:] - limited_v[:-1])) * r1_area)
+    else:
+        limited_u, limited_v = alpha_u_full * ad_flux_u, alpha_v * ad_flux_v
+        div_h_fct = divergence_cgrid(
+            flux_u_low + limited_u, flux_v_low + limited_v, grid)
+        div_h_anti = divergence_cgrid(limited_u, limited_v, grid)
+        limited_w = alpha_vert_face * ad_vert_int
+        F_vert_fct = jnp.pad(
+            F_vert_low_int + limited_w, (*pad_axes_v, (1, 1)))
+        vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]
+        anti_full = jnp.pad(limited_w, (*pad_axes_v, (1, 1)))
     if return_nemo_trace:
-        mask = (
-            jnp.ones_like(h_k) if active_mask is None else active_mask)
-        safe_h = jnp.maximum(h_k, jnp.asarray(1.0e-10, h_k.dtype))
-        anti_vert_div = anti_full[..., :-1] - anti_full[..., 1:]
-        trace_final_div = -(div_h_anti + anti_vert_div)
-        trace_rhs_after_up = trace_upstream_div / safe_h * mask
-        trace_rhs_final = (
-            trace_rhs_after_up + trace_final_div / safe_h * mask)
+        if literal:
+            trace_final_div = anti_rate
+            trace_rhs_after_up = literal_low_rhs
+            trace_rhs_final = literal_final_rhs
+        else:
+            mask = (
+                jnp.ones_like(h_k) if active_mask is None else active_mask)
+            safe_h = jnp.maximum(h_k, jnp.asarray(1.0e-10, h_k.dtype))
+            anti_vert_div = anti_full[..., :-1] - anti_full[..., 1:]
+            trace_final_div = -(div_h_anti + anti_vert_div)
+            trace_rhs_after_up = trace_upstream_div / safe_h * mask
+            trace_rhs_final = (
+                trace_rhs_after_up + trace_final_div / safe_h * mask)
         trace = (
             trace_first_u, trace_first_v, trace_first_w, trace_first_div,
             q_mid, trace_average_u, trace_average_v, trace_average_w,
@@ -1335,9 +1545,12 @@ def fct_tracer_advection(
             alpha_u_full, alpha_v,
             jnp.pad(alpha_vert_face, (*pad_axes_v, (1, 1)),
                     constant_values=1.0),
-            limited_u * jnp.asarray(grid.dy_u)[..., None],
-            limited_v * jnp.asarray(grid.dx_v)[..., None],
-            anti_full * jnp.asarray(grid.area_T)[..., None],
+            (limited_u if literal else
+             limited_u * jnp.asarray(grid.dy_u)[..., None]),
+            (limited_v if literal else
+             limited_v * jnp.asarray(grid.dx_v)[..., None]),
+            (anti_full if literal else
+             anti_full * jnp.asarray(grid.area_T)[..., None]),
             trace_final_div, h_k, trace_rhs_final,
         )
         return div_h_fct, vert_div_fct, trace

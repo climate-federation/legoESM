@@ -494,6 +494,7 @@ def _compute_advection_flux_div(
     return_fct_inputs: bool = False,
     fct_nemo_fold_exchange: bool = False,
     return_fct_nemo_rhs: bool = False,
+    fct_nemo_literal_transports=None,
 ):
     """Compute advection flux divergence for a single tracer field.
 
@@ -602,6 +603,7 @@ def _compute_advection_flux_div(
             return_limiter_activity=return_fct_activity,
             nemo_fold_exchange=fct_nemo_fold_exchange,
             return_nemo_trace=return_fct_nemo_rhs,
+            nemo_literal_transports=fct_nemo_literal_transports,
         )
         if return_fct_nemo_rhs:
             # traadv_fct.f90 writes Krhs twice: the averaged-upstream rate,
@@ -791,6 +793,7 @@ def compute_advection_flux_div_pair(
     return_fct_inputs: bool = False,
     fct_nemo_fold_exchange: bool = False,
     return_fct_nemo_rhs: bool = False,
+    fct_nemo_literal_transports=None,
 ):
     """Advection flux divergence for TWO tracers (T, S) in one pass.
 
@@ -858,7 +861,8 @@ def compute_advection_flux_div_pair(
                 fct_after_thickness=fct_after_thickness,
                 fct_implicit_w=fct_implicit_w,
                 fct_nemo_fold_exchange=fct_nemo_fold_exchange,
-                return_fct_nemo_rhs=True)
+                return_fct_nemo_rhs=True,
+                fct_nemo_literal_transports=fct_nemo_literal_transports)
             return tuple(_compute_advection_flux_div(
                 tr, tracer_advection, mass_flux_u, mass_flux_v,
                 w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
@@ -877,6 +881,7 @@ def compute_advection_flux_div_pair(
             return_fct_activity=return_a_fct_activity,
             return_fct_inputs=return_fct_inputs,
             fct_nemo_fold_exchange=fct_nemo_fold_exchange,
+            fct_nemo_literal_transports=fct_nemo_literal_transports,
         )
         if return_a_fct_activity:
             pair_a = pair_a_result[:2]
@@ -899,6 +904,7 @@ def compute_advection_flux_div_pair(
             fct_implicit_w=fct_implicit_w,
             return_fct_inputs=return_fct_inputs,
             fct_nemo_fold_exchange=fct_nemo_fold_exchange,
+            fct_nemo_literal_transports=fct_nemo_literal_transports,
         )
         if return_b_h_fluxes:
             div_b, vert_b, sf_u, sf_v = out_b
@@ -2498,6 +2504,18 @@ def _nemo_ws_rk3_tracer_pair_step(
             (fd_a, rhs_a), (fd_b, rhs_b) = (
                 _cen2_content_div(a_val), _cen2_content_div(b_val))
         else:
+            literal_transports = None
+            fct_implicit_w = wi_stage
+            if stage3_krhs_terms is not None and stage_index == 2:
+                if zfu_stage is None or zfv_stage is None:
+                    raise ValueError(
+                        "NEMO literal FCT requires stage zFu/zFv")
+                p_w = nemo_source_round(
+                    jnp.asarray(grid.area_T)[..., None] * w_stage)
+                literal_transports = (zfu_stage, zfv_stage, p_w)
+                # G9 selects NEMO's explicit-W FCT arm.  Do not let the
+                # all-zero diagnostic wi array select an implicit branch.
+                fct_implicit_w = None
             pair_result = compute_advection_flux_div_pair(
                 a_val, b_val, tracer_advection, mf_u, mf_v,
                 w_stage, h_stage, hu_stage, hv_stage, grid, stage_dt,
@@ -2508,7 +2526,7 @@ def _nemo_ws_rk3_tracer_pair_step(
                 fct_low_order_predictor=fct_low_order_predictor,
                 fct_base_thickness=h_k_old,
                 fct_after_thickness=h_after,
-                fct_implicit_w=wi_stage,
+                fct_implicit_w=fct_implicit_w,
                 return_a_fct_activity=(
                     return_fct_activity and stage_index == 2),
                 return_fct_inputs=(
@@ -2516,6 +2534,7 @@ def _nemo_ws_rk3_tracer_pair_step(
                 fct_nemo_fold_exchange=fct_nemo_fold_exchange,
                 return_fct_nemo_rhs=(
                     stage3_krhs_terms is not None and stage_index == 2),
+                fct_nemo_literal_transports=literal_transports,
             )
             rhs_a = rhs_b = None
             if stage3_krhs_terms is not None and stage_index == 2:

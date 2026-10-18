@@ -535,8 +535,9 @@ def test_g9_stage3_tracer_content_is_nemos_trazdf_zrhs(tmp_path):
     """trazdf.f90:284-289: zrhs = e3t(Kbb)*T(Kbb) + (p2dt*e3t(Kmm))*Krhs, Krhs the
     FCT rate plus sbc, runoff, qsr in call order (stprk3_stg.f90:604-717).  kt 1,
     jitted step, state and forcing traced, x64: on every wet cell the card's
-    pre-implicit T and S content is at the bar against NEMO's literal zrhs
-    (evaluated from the record's Kbb, after-qsr Krhs, r3t and e3t_0).  The
+    pre-implicit T and S content is at the value bar against NEMO's literal
+    zrhs (evaluated from the record's Kbb, after-qsr Krhs, r3t and e3t_0).
+    The assertion is value-based, not a fitted unequal-cell count; the
     statement's value is pinned by the synthetic test below."""
     import jax
     import netCDF4
@@ -573,8 +574,9 @@ def test_g9_stage3_tracer_content_is_nemos_trazdf_zrhs(tmp_path):
     for name, i in (("T", 0), ("S", 1)):
         zrhs = e3bb * f3(10 + i) + (dt * e3mm) * f3(6 + i)   # Kbb, after-qsr (= after-ldf) Krhs
         got = np.asarray(getattr(content, name).data)
-        err = np.abs(np.where(wet, got - zrhs, 0.0)).max() / np.abs(np.where(wet, zrhs, 0.0)).max()
-        assert err <= 1e-15, (name, err)
+        max_ref = np.abs(zrhs[wet]).max()
+        max_abs = np.abs(got[wet] - zrhs[wet]).max()
+        assert max_abs <= 1.0e-15 * max_ref, (name, max_abs, max_ref)
 
 
 def test_g9_stage3_krhs_and_content_are_nemos_statements(monkeypatch):
@@ -609,10 +611,13 @@ def test_g9_stage3_krhs_and_content_are_nemos_statements(monkeypatch):
             return (z, z, adv_T), (z, z, adv_S)
         monkeypatch.setattr(mm, "compute_advection_flux_div_pair", fct_pair)
         h, mf_u, mf_v = jnp.ones_like(T), jnp.ones(shape[:1] + (25, 3)), jnp.ones((25,) + shape[1:])
+        w = jnp.ones(shape[:2] + (4,))
+        stage_geometry = (mf_u, mf_v, w, h, mf_u, mf_v, None, mf_u, mf_v)
         return mm._nemo_ws_rk3_tracer_pair_step(
-            T, S, "fct2", mf_u, mf_v, jnp.ones(shape[:2] + (4,)), h, h, mf_u, mf_v,
+            T, S, "fct2", mf_u, mf_v, w, h, h, mf_u, mf_v,
             grid, dt, h, stage3_content_written_order=(e3bb, e3mm),
             stage3_krhs_terms=(tuple(terms_T), tuple(terms_S)),
+            stage_transport_geometry=(stage_geometry,) * 3,
             return_final_content=True)[2:4]
 
     got = jax.device_get(jax.jit(content)(T, S, e3bb, e3mm, adv_T, adv_S,
