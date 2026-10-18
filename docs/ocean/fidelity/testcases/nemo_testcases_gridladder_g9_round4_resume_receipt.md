@@ -23,16 +23,15 @@ rate.  Against a numpy transcription of NEMO's lines — Krhs zeroed
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:308`,
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:323`), plus qsr
 (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:717`), then the content
-(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:288`,
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:289`) — bit-equal on every cell,
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:288-289`) — bit-equal on every cell,
 T and S.
 
 ## 2. The 1% cap is dropped
 
 Removed from the stage-wzv test: the 1% cap on excluded columns and the
-extra one-cell widening around them.  What is left is wzv's own stencil
-(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/sshwzv.f90:297`,
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/sshwzv.f90:298`): a column is excluded only
+extra one-cell widening around them.  What is left is wzv's own stencil, the
+horizontal divergence of a column's four faces
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/sshwzv.f90:297-298`): a column is excluded only
 if one of its four faces' zFu/zFv differs from NEMO's.  It still passes.
 
 ## 3. Plants (jit, traced inputs, x64; `round49/plants/r49b/`)
