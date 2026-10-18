@@ -1772,6 +1772,13 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- GRIDLADDER round 46 resume (G9 round 1 scoring: stage-transport fold exchanges) ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:844': "CALL lbc_lnk( 'dynspg_ts', un_adv, 'U', -1._wp, vn_adv, 'V', -1._wp ) ! Boundary conditions",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:136': 'SUBROUTINE dyn_spg_ts( kt, Kbb, Kmm, Krhs, puu, pvv, pssh, puu_b, pvv_b, Kaa )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:169': "CALL lbc_lnk( 'stp_RK3_stg', r3ua, 'U', 1._wp, r3va, 'V', 1._wp, r3fa, 'F', 1._wp )",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:309-311': [
+        "CALL lbc_lnk( 'traadv_fct', ztFu, 'U', -1.0_wp, ztFv, 'V', -1.0_wp, ztFw, 'T', 1.0_wp, zta_up1, 'T', 1.0_wp )",
+        "CALL lbc_lnk( 'traadv_fct', ztFu, 'U', -1.0_wp, ztFv, 'V', -1.0_wp, zta_up1, 'T', 1.0_wp )", 3],
     # --- GRIDLADDER round 46 (G9 round 1: ORCA2's tracer advection) ---
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:293-295': [
         'ln_traadv_fct = .true.     !  FCT scheme',
