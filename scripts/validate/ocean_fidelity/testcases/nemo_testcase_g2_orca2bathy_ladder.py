@@ -56,15 +56,16 @@ from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
 
 CASE = "ORCA2G2-zps"
 CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke",
-         "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L1-bbl")
+         "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb",
+         "ORCA2L1-bbl", "ORCA2L2-iso")
 FORCED = ("ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd",
           "ORCA2V3-ddm", "ORCA2V4-iwm",
-          "ORCA2V5-havtb", "ORCA2L1-bbl")   # NEMO-supplied surface fields each kt (D123)
+          "ORCA2V5-havtb", "ORCA2L1-bbl", "ORCA2L2-iso")   # NEMO-supplied surface fields each kt (D123)
 # G5's record build (ORCA2-lane frames); V1 = that build + one hm_i writer;
 # V2/V3/V4/V5 = V1's record binary with ORCA2's EVD (+ DDM, + IWM, + nn_havtb) namelist lines
 # L1 = G5's record binary with ORCA2's five &nambbl lines
 SI3 = ("ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
-       "ORCA2V5-havtb", "ORCA2L1-bbl")
+       "ORCA2V5-havtb", "ORCA2L1-bbl", "ORCA2L2-iso")
 TKE_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
 ZDF_KT1_CASES = ("ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
 # V4's IWM-active check compares with V3's admitted (certified) kt-1 frame
@@ -620,6 +621,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         without_top_drag_consumer: str | None = None,
         without_stage2_stored_thickness: bool = False,
         without_stage3_salt: bool = False,
+        without_l2_metric: bool = False,
+        without_l2_eos80: bool = False,
+        without_l2_north_fold: bool = False,
         case: str = CASE) -> dict:
     require(case in CASES, f"unknown case {case!r}")
     require(arm in ARMS, f"unknown arm {arm!r}")
@@ -682,6 +686,21 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         cfg = cfg._replace(rk3_stage2_tracer_nemo_stored_thickness=False)
     if without_stage3_salt:               # G5 ROUND-4 BEFORE ARM
         cfg = cfg._replace(rk3_stage3_salt_nemo_written=False)
+    l2_controls = (without_l2_metric, without_l2_eos80,
+                   without_l2_north_fold)
+    require(not any(l2_controls) or case == "ORCA2L2-iso",
+            "L2 controls are registered only for ORCA2L2-iso")
+    if case == "ORCA2L2-iso":
+        require(recipe._orca2l2_isoneutral_selected(cfg.gm_redi),
+                "the L2 card no longer selects its complete isoneutral path")
+        gm = cfg.gm_redi
+        if without_l2_metric:
+            gm = gm._replace(kappa_redi_lat_scaling=False)
+        if without_l2_eos80:
+            gm = gm._replace(slope_prd_evaluation="nemo_literal")
+        if without_l2_north_fold:
+            gm = gm._replace(nemo_slope_north_fold=False)
+        cfg = cfg._replace(gm_redi=gm)
     nk = int(z.n_levels)
     roots = (root, *restart_roots)
     reg = g1.regions(np.asarray(z.is_active)[..., 0])
@@ -753,6 +772,13 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
            "rk3_stage2_tracer_nemo_stored_thickness": bool(
                cfg.rk3_stage2_tracer_nemo_stored_thickness),
            "rk3_stage3_salt_nemo_written": bool(cfg.rk3_stage3_salt_nemo_written),
+           "l2_metric_selected": bool(
+               case != "ORCA2L2-iso" or cfg.gm_redi.kappa_redi_lat_scaling),
+           "l2_eos80_selected": bool(
+               case != "ORCA2L2-iso" or
+               cfg.gm_redi.slope_prd_evaluation == "nemo_eos80_literal"),
+           "l2_north_fold_selected": bool(
+               case != "ORCA2L2-iso" or cfg.gm_redi.nemo_slope_north_fold),
            "forcing": ("NEMO-supplied surface fields at each kt"
                        if case == "ORCA2G4-sbc" else
                        "NEMO's post-SI3 ocean surface input at each kt"
@@ -1470,6 +1496,12 @@ def main(argv=None) -> int:
                     help="G5 round-4 before arm: stage-2 thickness interpolant")
     ap.add_argument("--without-stage3-salt", action="store_true",
                     help="G5 round-4 before arm: rescaled Kbb salt tendency")
+    ap.add_argument("--without-l2-metric", action="store_true",
+                    help="L2 CONTROL: replace mode-20 metric kappa with the scalar")
+    ap.add_argument("--without-l2-eos80", action="store_true",
+                    help="L2 CONTROL: use the simplified slope EOS")
+    ap.add_argument("--without-l2-north-fold", action="store_true",
+                    help="L2 CONTROL: close the northern wall instead of folding it")
     ap.add_argument("--case", choices=CASES, default=CASE)
     ap.add_argument("--allow-dirty", action="store_true")
     ap.add_argument("--output", type=Path, required=True)
@@ -1487,6 +1519,9 @@ def main(argv=None) -> int:
               without_top_drag_consumer=a.without_top_drag_consumer,
               without_stage2_stored_thickness=a.without_stage2_stored_thickness,
               without_stage3_salt=a.without_stage3_salt,
+              without_l2_metric=a.without_l2_metric,
+              without_l2_eos80=a.without_l2_eos80,
+              without_l2_north_fold=a.without_l2_north_fold,
               case=a.case)
     a.output.write_text(json.dumps(out, indent=1) + "\n")
     if a.arm == "geometry":

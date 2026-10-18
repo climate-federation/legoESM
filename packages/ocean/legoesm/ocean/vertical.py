@@ -204,7 +204,7 @@ def nemo_qco_live_face_geometry_from_operands(
     hv_0,
     area_t,
     area_u,
-    area_v, r3_native=None,  # (r3u, r3v) handed in place of the sea-level ratios (stprk3_stg.f90:172-173, :216-217)
+    area_v, r3_native=None, *, grid=None,  # (r3u, r3v) handed in place of the sea-level ratios (stprk3_stg.f90:172-173, :216-217)
 ):
     """Build live native-face QCO geometry in NEMO source association.
 
@@ -237,7 +237,12 @@ def nemo_qco_live_face_geometry_from_operands(
 
     weighted_eta = b(area_t * eta)
     num_u = b(half * b(weighted_eta + jnp.roll(weighted_eta, -1, axis=1)))
-    num_v = b(half * b(weighted_eta + jnp.roll(weighted_eta, -1, axis=0)))
+    if grid is None:
+        weighted_eta_north = jnp.roll(weighted_eta, -1, axis=0)
+    else:
+        from legoesm.grids.operators_latlon_cgrid import north_neighbor_T
+        weighted_eta_north = north_neighbor_T(weighted_eta, grid)
+    num_v = b(half * b(weighted_eta + weighted_eta_north))
     wet_u = (hu_0 > 0.0).astype(dtype)
     wet_v = (hv_0 > 0.0).astype(dtype)
     r1_hu0 = b(wet_u / (hu_0 + one - wet_u))
@@ -863,6 +868,8 @@ def nemo_qco_live_face_thicknesses(
     e3v_0,
     umask3,
     vmask3,
+    *,
+    grid=None,
 ):
     """Build NEMO QCO live ``e3u/e3v`` on its native east/north faces.
 
@@ -875,7 +882,7 @@ def nemo_qco_live_face_thicknesses(
     dtype = jnp.asarray(e3u_0).dtype
     geom = nemo_qco_live_face_geometry_from_operands(
         eta, e3u_0, e3v_0, umask3, vmask3,
-        *nemo_qco_mesh_operands(z_coord, dtype),
+        *nemo_qco_mesh_operands(z_coord, dtype), grid=grid,
     )
     return geom.e3u, geom.e3v
 

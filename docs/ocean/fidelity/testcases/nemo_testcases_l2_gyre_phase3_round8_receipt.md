@@ -2844,7 +2844,7 @@ bit; the alternative right-associated product differs in `78865` U and
 The source-rounded recurrence alone leaves the baseline transport rows
 unchanged; it is the final one-variable discriminator after the reciprocal
 handoff, closing the remaining fourteen U cells.  The implementation is
-shared in `vertical.py:185-238,482-552` and
+shared in `vertical.py:185-238,487-557` and
 `ocean_model_latlon_cgrid.py:1385-1510,1468-1515`; S-21 in the branch
 isomorphism map records the one owner and its NEMO references.  The exact
 probe transcript hashes `7e2bf16f...`; its built-in vector/C2 selector plant
@@ -4124,7 +4124,7 @@ Round 25 landed two source associations inside NEMO's hydrostatic pressure
 gradient and showed the changed operator bit-exact given NEMO's inputs on GYRE
 only.  Rule 12 asks for that row on every card that executes it, and the
 testcase recipe pins `pgf_scheme="nemo_sco"` on all of them
-(`nemo_testcase_recipe.py:375,631,3031`).
+(`nemo_testcase_recipe.py:375,631,3042`).
 
 The lane-1 tanks have no HPG-literal dump and do not need one.  NEMO
 accumulates `dyn_hpg`, `dyn_vor` and `dyn_adv` into a zeroed `puu(Krhs)`
@@ -5191,7 +5191,7 @@ ratio is NOT zero during step 1: `r3u(:,:,Kaa)` is assigned at STAGE 1 from
 `ssha` (`stprk3_stg.F90:156`, the assignment at `:163`), so a stage-3
 thickness already carries a nonzero free-surface ratio inside the step that
 produces the kt=2 state.  And the MIN rule is not what the production stage
-builder uses: `nemo_qco_live_face_geometry_cgrid` (`vertical.py:779`)
+builder uses: `nemo_qco_live_face_geometry_cgrid` (`vertical.py:784`)
 transcribes NEMO's area-weighted MEAN (`domqco.F90:166-169` for the MLF
 entry, `:219-222` for the RK3 one) and both time-stepping lanes call it, so
 MIN survives only as an ablation arm.  What the measured `3.06e-08` actually
@@ -5779,7 +5779,7 @@ Caught by the gate.
    tests stop there.  What should that mask be on a card with no mesh file?
 3. **The slow forcing's depth average** still uses the min rule where NEMO
    uses the area-weighted mean (`domqco.F90:166-169`, `:219-222`, transcribed
-   in `vertical.py:779`).  `3.06e-08` at kt=2.  Land it, or leave it as debt?
+   in `vertical.py:784`).  `3.06e-08` at kt=2.  Land it, or leave it as debt?
 4. **Decision 16 is preregistered and NOT landed** — the unconditional
    vorticity call in the pre-stage 2-D momentum RHS.  Its predictions are in
    the round-29 manifest; landing it needs cross-card runs this round did not
@@ -9562,8 +9562,8 @@ packages/ocean/legoesm/ocean/state.py:2188       tracer_combine: str = "concentr
 packages/ocean/legoesm/ocean/experiments/dino.py:1016    tracer_combine: str = "concentration"
 packages/ocean/legoesm/ocean/experiments/dino.py:1769    "tracer_combine": "thickness_weighted",
 packages/ocean/legoesm/ocean/experiments/dino.py:3988        tracer_combine=cfg.tracer_combine,
-packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13578  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
-packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:14004  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
+packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:13580  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
+packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:14006  _combine = getattr(_cfg_b, "tracer_combine", "concentration")
 ```
 
 The two readers are `_leapfrog_step` and `_nemo_mlf_step`.  The three NEMO
@@ -10426,7 +10426,7 @@ macro is `e3t(i,j,k,t) = e3t_0(i,j,k)*(1 + r3t(i,j,t))`
 `stprk3_stg.F90:156` computes `r3ta` from `ssha`, and `stprk3_stg.F90:231`
 assigns it to `r3t(:,:,Kaa)`.  NEMO never forms `(ssh + ht_0)/ht_0`.
 
-legoESM's shared `compute_ocean_jacobian` (`vertical.py:1924`) formed the SUM
+legoESM's shared `compute_ocean_jacobian` (`vertical.py:1931`) formed the SUM
 first, so the low bits of the small ratio were lost to cancellation.
 
 **THE INSTRUMENT WAS VALIDATED BEFORE THE CLAIM.**  On host arrays, from
@@ -10710,7 +10710,7 @@ through the shared helper, one feeds legoESM's, and the arm's verdict sentence
 is now READ OFF those rows instead of asserted beside them.
 
 **THE CHANGE IS ONE STATEMENT IN ONE SHARED HELPER**, no knob and no default
-that preserves the old behaviour.  `compute_ocean_jacobian` (`vertical.py:1924`)
+that preserves the old behaviour.  `compute_ocean_jacobian` (`vertical.py:1931`)
 forms `1 + eta*r1_h` with the reciprocal taken in the PROMOTED dtype of ssh and
 bathymetry — an existing test caught the first version taking it in the
 bathymetry's storage dtype, at a relative `3.0e-10` that is f32 eps times the

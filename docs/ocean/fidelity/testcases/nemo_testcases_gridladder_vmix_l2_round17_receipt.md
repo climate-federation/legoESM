@@ -1,13 +1,13 @@
-# GRIDLADDER-VMIX lane — round 17 (vmix_r17): L2 built, stopped for record
+# GRIDLADDER-VMIX lane — round 17 (vmix_r17): L2 corrected and scored
 
-Status: **L2 BUILT; NOT SCORED; ACQUISITION_NEEDED.** This round implements
+Status: **L2 SCORED; DEBT; NOT CERTIFIED.** This round implements
 Decision 138's second L rung: certified G5 plus ORCA2's standard isoneutral
 tracer diffusion. Eddy-induced velocity remains off. The preregistration was
 committed as `59e9622500` before implementation or any L2 measurement. No L2
-NEMO record has been admitted, so this receipt makes no fidelity verdict. The
-operator's first acquisition passed preflight, then the smoke record was
-refused by the erroneous end-of-kt-2 barotropic-invariance condition; that
-evidence is retained as `oracle_l2_r17_refused1` and is not scored.
+NEMO record had been admitted at the first writing of this receipt. The
+operator has now admitted the corrected acquisition as `oracle_l2_r17`; the
+superseding review repair and D127 score are in section 6. The first smoke
+record remains retained as `oracle_l2_r17_refused1` and is not scored.
 
 Read first: the lane standing note, campaign synthesis and debt register,
 round-16 survey, L1 receipt, and the ORCA2 round-313/314 receipts. GitHub issue
@@ -286,7 +286,76 @@ shift of the new kt-2 density/HPG citation exits 1. Clean-tree acquisition
 preflight: `L2_PREFLIGHT_OK`, default evidence root
 `gridladder_vmix_rounds/round17/oracle_l2_r17`; nothing built.
 
+## 6. Superseding review repair and D127 score
+
+The corrected acquisition completed and was admitted:
+`L2_ACQUISITION_PASS steps=1..10 restarts=2..10`. Its evidence root is
+`gridladder_vmix_rounds/round17/oracle_l2_r17`, with identical admitted twins
+A/B/C. The independent review then held four omissions in the first build.
+All four are repaired before the score:
+
+1. Mode 20 now always selects the shared metric coefficient path. The card's
+   U/V fields are bit-identical to the independent NEMO mesh calculation
+   `0.009*MAX(e1,e2)` at
+   `ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfc1d_c2d.f90:160-164`, before the mask at
+   `ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:427-434`. Their unmasked extrema
+   are 134.99730994125315 and 2001.5806220738168 m2/s. The test reads the
+   admitted `mesh_mask.nc`; it no longer derives both sides from the card.
+2. The once-per-step slope density is EOS-80, matching the executed
+   `CALL eos(ts,Nbb,rhd)` at
+   `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:188`. Three fixed kt-1 NEMO PRD
+   values and the full independently evaluated field are checked; replacing
+   it with the simplified EOS fails both the selector and record controls.
+3. The northern pivot is open on 1,319 wet V levels. Density/tracer gradients,
+   live QCO V geometry, Shapiro halos, and the returned U/V/W/W slopes all use
+   the shared pivot maps; the four slopes use NEMO's associated sign-minus
+   exchange at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfslp.f90:338`. No second fold
+   helper was introduced. Fixed NEMO pivot values supplement the structural
+   fold checks.
+4. The focused suite has independent value anchors for all three corrections.
+   Its slow kt-1 record gate runs the complete selection and then individually
+   removes metric scaling, EOS-80, and the fold. Every omission produces a
+   distinct DEBT tracer signature. That gate passed in 430.51 s; the ordinary
+   focused tests passed 14/14 before the record arm, and the three independent
+   metric/EOS/fold value tests passed together after the final anchors.
+
+Because item 1 changes the shared SMT constructor, both downstream registries
+were re-run on their admitted NEMO records. SMT-3 retained all 50 row statuses
+and the same first-over-bar boundary (kt=2: T/u/v/SSH); 34 normalized residuals
+moved, 30 toward its oracle and four away. SMT-4 reproduced all 50 normalized
+residuals and statuses exactly. Thus the shared-constructor change does not
+invalidate either registered verdict.
+
+### D127 result
+
+The exact preregistered scorer ran the independent chain for kt=1..10 and the
+given-NEMO-entry starts at kt=1,3,5,7,9, each with its second-step continuation;
+together the latter covers kt=1..10. It scores SSH, barotropic U/V, 3-D U/V,
+T and S, and every full/partial/dry cell in each available restart. D127 is
+exact/AT-BAR at normalized error <=1e-15 and DEBT otherwise.
+
+- Independent: 68 surface rows = 5 exact and 63 DEBT; 36 full-depth class
+  summaries = 36 DEBT. Every dry-cell count is zero. At kt=1 SSH, barotropic
+  U/V and 3-D U/V are exact; T/S first become DEBT at the L2 stage. Thereafter
+  the tracer difference propagates through the independent dynamics.
+- Given entry: 68 surface rows = 25 exact and 43 DEBT; 20 full-depth class
+  summaries = 20 DEBT. Every odd entry resets SSH and all four velocity rows
+  to exact NEMO values, while T/S are DEBT in that same first L2 step; each
+  even continuation then carries propagated dynamic debt. Every dry cell is
+  exact.
+
+The stage walk is decisive: stages 1 and 2 are exact in every field, and the
+first differing state is stage-3 T/S. The coefficient, EOS-80 PRD, N2/MLD and
+all four final slope fields have independent NEMO value checks, including the
+pivot. The first remaining differing L2-only statement is therefore the
+in-place `tra_ldf` flux-divergence increment at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:287-291`; the candidate's
+vectorised returned-tendency association is the retained difference already
+declared in section 2. Re-scoring after that walk gives the same DEBT boundary.
+L2 is held, not certified, and the next work is an independently recorded
+horizontal/vertical flux-statement walk rather than another input substitution.
+
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r17/repo
-ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_orca2iso/run.sh --run
+ACQUISITION_NEEDED: NONE
 DECISION_NEEDED: NONE
-ROUND_STATUS: L2_BUILT_STOPPED_FOR_RECORD — the invalid end-of-kt-2 barotropic condition is replaced by exact kt-1 frame invariance; exact ORCA2 isoneutral tracer diffusion remains L2-selected on certified G5; refused evidence is unscored; reacquisition required; codex review: operator.
+ROUND_STATUS: L2_SCORED_DEBT — review omissions fixed and independently controlled; both labels cover kt=1..10 with dry cells exact; first remaining debt is the L2-only stage-3 tra_ldf update at traldf_iso.f90:287-291; L2 is not certified; codex review: operator.

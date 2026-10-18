@@ -399,8 +399,10 @@ class GMRediConfig(NamedTuple):
     slope_prd_geometry_stage: str = "current_step"
     # Construction of the dimensionless density anomaly entering ldf_slp.
     # ``"density_roundtrip"`` preserves the historical rho/rho0-1 path.
-    # ``"nemo_literal"`` evaluates eosbn2.F90's zn*r1_rho0 directly and is
-    # selected only by the DINO NEMO cards.
+    # ``"nemo_literal"`` evaluates the simplified-EOS eosbn2.F90
+    # zn*r1_rho0 directly and is selected only by the DINO NEMO cards.
+    # ``"nemo_eos80_literal"`` evaluates the corresponding EOS-80
+    # polynomial used by ORCA2 before ldf_slp (stprk3.f90:188-189).
     slope_prd_evaluation: str = "density_roundtrip"
     # Arithmetic form of ldfslp's horizontal metric application. ``division``
     # is the historical path. ``nemo_reciprocal`` evaluates and carries the
@@ -438,6 +440,10 @@ class GMRediConfig(NamedTuple):
     # interior slope amplitude ~1.27x too large; wet-renormalized so land drops
     # out.  Applied after the ML ramp (NEMO order).  Oracle-matching; opt-in.
     nemo_slope_shapiro: bool = False
+    # Apply ORCA's stored T-pivot north fold to native ldf_slp operands,
+    # Shapiro halos, and the four returned slope fields (ldfslp.f90:338).
+    # L2 selects it; closed-channel DINO/VORTEX cards retain the old path.
+    nemo_slope_north_fold: bool = False
     # NEMO nn_aht_ijk_t=20 grid-size scaling: the effective kappa_Redi is
     # cfg.kappa_Redi * cos(lat) per row (Mercator dx ∝ cos φ, so
     # aht(φ) = ½·U_d·Δx(φ) with cfg.kappa_Redi = the EQUATOR value

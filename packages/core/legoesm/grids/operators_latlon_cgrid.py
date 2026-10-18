@@ -249,24 +249,44 @@ def fold_perm_u(fold):
     return fold.perm_T if p is None else p
 
 
-def fold_pivot_half_row(a, fold, stagger):
+def fold_pivot_half_row(a, fold, stagger, *, scalar_sign=1.0):
     """NEMO's T-pivot ``lbc_nfd`` on the stored pivot row (last row of ``a``):
     the right half becomes the image of the left half of the SAME row.
 
     ``stagger='T'`` (lbcnfd.f90:624-628): native cells N/2+1..N-1 <- N/2-1..1,
-    sign +1.  ``stagger='U'`` (lbcnfd.f90:669-673; compact U, column 0 the
+    with ``scalar_sign`` (normally +1 for T, -1 for W).  ``stagger='U'``
+    (lbcnfd.f90:669-673; compact U, column 0 the
     periodic closure): native U N/2..N-1 <- N/2-1..0 with the U vector sign,
     and column 0 then repeats native U N-1.
     """
     n_lon = fold.perm_T.shape[0]
     half = n_lon // 2
     if stagger == "T":
-        return a.at[-1, half + 1:].set(a[-1][fold.perm_T[half + 1:]])
+        return a.at[-1, half + 1:].set(
+            scalar_sign * a[-1][fold.perm_T[half + 1:]])
     if stagger != "U":
         raise ValueError(f"unknown pivot half-row stagger: {stagger!r}")
     perm = fold_perm_u(fold)[half:]
     out = a.at[-1, half + 1:].set(fold.vector_sign_u * a[-1, 1:][perm])
     return out.at[-1, 0].set(fold.vector_sign_u * a[-1, 1])
+
+
+def north_neighbor_T(interior, grid):
+    """T-point value immediately north, including a stored ORCA T-pivot.
+
+    The last row is the north ghost of the pivot row.  On a de-haloed
+    T-pivot mesh NEMO sources it from the row below the pivot and applies the
+    shared T permutation (``lbcnfd.f90:584-590``).  This helper deliberately
+    refuses non-local/no-fold grids: callers select it only for an executed
+    north-fold branch and retain their historical wall/roll path otherwise.
+    """
+    fold = getattr(grid, "fold", None)
+    if not (fold_is_local(grid)
+            and bool(getattr(fold, "pivot_row_stored", False))):
+        raise ValueError(
+            "north_neighbor_T requires a locally stored active T-pivot fold")
+    ghost = fold_ghost_source_T(interior, fold)[:, fold.perm_T]
+    return jnp.concatenate([interior[1:], ghost], axis=0)
 
 
 def fold_perm_f(fold):

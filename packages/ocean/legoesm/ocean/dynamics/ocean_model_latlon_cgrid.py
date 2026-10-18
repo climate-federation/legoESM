@@ -11817,8 +11817,10 @@ class LatLonCGridOceanModel:
             zrw_gdept_0=gdept_0,
             zrw_gdepw_0=gdepw_0,
             zrw_stretch=zrw_stretch,
-            source_rounded=bool(_tke_active and getattr(
-                tke_cfg, "nemo_bn2_source_rounded", False)),
+            source_rounded=bool(
+                (_tke_active and getattr(
+                    tke_cfg, "nemo_bn2_source_rounded", False))
+                or (_gm_carried and _n2_eos_form in ("eos80", "teos10"))),
         )
         _bn2_selector = self._nemo_ws_test_hooks.bn2_intermediate
         _bn2_override = self._nemo_ws_test_hooks.bn2_alpha_beta_override
