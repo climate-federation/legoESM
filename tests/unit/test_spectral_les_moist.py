@@ -498,11 +498,17 @@ def test_conserving_positive_gradient_is_finite_with_an_empty_species_column():
     tr = jnp.zeros((1, 2, nz, 6))
     tr = tr.at[..., 0].set(0.01)                       # vapour everywhere
     tr = tr.at[0, 0, :, 1].set(jnp.array([2e-4, -1e-5, 0, 0, 0, 0]))  # undershoot
-    # species 2..5 are all-zero columns
+    tr = tr.at[0, 1, :, 2].set(-1e-6)                  # a negative-total rain column
+    tr = tr.at[0, 1, :, 3].set(-1e-6)                  # ... and ice column
+    # remaining species columns are all zero
     w = jnp.arange(1.0, 1.0 + tr.size).reshape(tr.shape)
 
     def loss(x):
-        return jnp.sum(w * conserving_positive(x, rho, 40.0)[0])
+        tr, th, _ = conserving_positive(x, theta, rho, exner, 40.0)
+        return jnp.sum(w * tr) + jnp.sum(th)
 
+    theta = jnp.full(tr.shape[:3], 300.0)
+    exner = jnp.linspace(1.0, 0.98, nz)
     grad = jax.grad(loss)(tr)
     assert bool(jnp.all(jnp.isfinite(grad)))
+    assert float(jnp.max(jnp.abs(grad[0, 1, :, 2]))) > 0.0      # the vapour fill is live

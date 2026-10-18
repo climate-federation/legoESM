@@ -249,14 +249,15 @@ def test_moist_step_budget_vector_layout():
     dyc = jnp.arange(len(sl.BUDGET_TERMS), dtype=jnp.float64)
     vec = moist_step_budget(dyc, ls=jnp.array([1.0, 2.0, 3.0, 4.0, 0.0, 0.0]),
                             micro=jnp.array([5.0, 0.0, 0.0, 6.0, 11.0, 12.0]),
-                            positivity=jnp.array([0.0, 0.0, 0.0, 7.0, 0.0, 0.0]),
+                            positivity=jnp.array([13.0, 0.0, 0.0, 7.0, 0.0, 14.0]),
                             sponge=jnp.array([0.0, 8.0, 9.0, 0.0, 0.0, 0.0]),
                             precip_mass=10.0)
     tail = np.asarray(vec[len(sl.BUDGET_TERMS):])
     # ls_theta ls_water rad_theta micro_theta micro_water positivity sponge_u sponge_v
-    # precip micro_water_rho micro_enthalpy_rho positivity_water_rho
+    # precip micro_water_rho micro_enthalpy_rho positivity_water_rho positivity_theta
+    # positivity_enthalpy_rho
     np.testing.assert_array_equal(
-        tail, [1.0, 4.0, 0.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 0.0])
+        tail, [1.0, 4.0, 0.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 0.0, 13.0, 14.0])
     assert len(tail) == len(SPLIT_TERMS)
 
 
@@ -377,14 +378,90 @@ def test_positivity_water_closure_fails_for_a_clip():
         em.g, em.ref = g, ref
         em.terms = tuple(sl.BUDGET_TERMS) + SPLIT_TERMS
         em.col0 = np.asarray(column_contents(st, g, ref))
-        new = st._replace(tracers=fix(st.tracers))
+        new = fix(st)
         em.acc = moist_step_budget(jnp.zeros(len(sl.BUDGET_TERMS)),
                                    positivity=column_contents(new, g, ref)
                                    - column_contents(st, g, ref))
         col = np.asarray(column_contents(new, g, ref))
         return em.close_budgets(new)["positivity_water"], col[4]
 
-    good, col = row(lambda tr: conserving_positive(tr, ref.rho_c, g.dz)[0])
+    def conserving(s):
+        tr, th, _ = conserving_positive(s.tracers, s.theta, ref.rho_c, ref.exner_c, g.dz)
+        return s._replace(tracers=tr, theta=th)
+
+    good, col = row(conserving)
     assert abs(good) <= 1e-13 * abs(col)
-    bad, _c = row(lambda tr: jnp.clip(tr, 0.0, None))
+    bad, _c = row(lambda s: s._replace(tracers=jnp.clip(s.tracers, 0.0, None)))
     assert bad > 1e3 * 1e-13 * abs(col)                       # the clip created water
+
+
+def _negative_condensate_state(slot, qv_scale=1.0):
+    from legoesm.atmosphere.dynamics.les.spectral_les_moist import conserving_positive
+    g, st = _moist_state()
+    ref, _micro = _kessler_les(g, 1.0)
+    z = np.asarray(g.z_c)
+    ring = -1e-6 * np.sin(np.pi * z / z[-1]) ** 2              # negative condensate
+    qs = jnp.broadcast_to(jnp.asarray(ring), st.theta.shape)
+    qs = qs.at[0, 0, len(z) // 2].set(5e-4)                     # one column with some
+    tr = st.tracers.at[..., slot].set(qs).at[..., 0].multiply(qv_scale)
+    st = st._replace(tracers=tr)
+    assert float(jnp.sum(qs[1, 1] * ref.rho_c)) < 0.0           # a negative-total column
+
+    def fix(s):
+        t, th, _ = conserving_positive(s.tracers, s.theta, ref.rho_c, ref.exner_c, g.dz)
+        return s._replace(tracers=t, theta=th)
+    return g, ref, st, fix
+
+
+def _positivity_rows(g, ref, st, new):
+    em = MoistRunEmitter.__new__(MoistRunEmitter)
+    em.g, em.ref = g, ref
+    em.terms = tuple(sl.BUDGET_TERMS) + SPLIT_TERMS
+    em.col0 = np.asarray(column_contents(st, g, ref))
+    em.acc = moist_step_budget(jnp.zeros(len(sl.BUDGET_TERMS)),
+                               positivity=column_contents(new, g, ref)
+                               - column_contents(st, g, ref))
+    return em.close_budgets(new), np.asarray(column_contents(new, g, ref))
+
+
+@pytest.mark.parametrize("slot", [1, 2, 3], ids=["cloud", "rain", "ice"])
+def test_positivity_conserves_water_and_enthalpy_in_negative_condensate_columns(slot):
+    """Cloud-free columns beside a cumulus carry only the transport's negative
+    condensate (their species total is negative, so the column cannot fill
+    itself). The fixer fills them from the column's vapour with the latent heat of
+    that condensation (deposition for ice): total water, the moist enthalpy and
+    the θ budget close to round-off; zeroing them (the old behaviour) created
+    water, and filling without the latent heat breaks the enthalpy row."""
+    g, ref, st, fix = _negative_condensate_state(slot)
+    new = fix(st)
+    assert float(jnp.min(new.tracers[..., :6])) >= 0.0
+    res, col = _positivity_rows(g, ref, st, new)
+    assert abs(res["positivity_water"]) <= 1e-13 * abs(col[4]), res
+    assert abs(res["positivity_enthalpy"]) <= 1e-13 * abs(col[5]), res
+    assert abs(res["theta"]) <= 1e-13 * abs(col[0]), res
+    assert float(jnp.max(new.theta - st.theta)) > 0.0           # condensation heated
+    again = fix(new)                                            # already positive: no-op
+    np.testing.assert_array_equal(np.asarray(again.tracers), np.asarray(new.tracers))
+    np.testing.assert_array_equal(np.asarray(again.theta), np.asarray(new.theta))
+    # controls: the old zeroing creates water; a fill without heat breaks enthalpy
+    zeroed = st._replace(tracers=st.tracers.at[..., slot].set(
+        jnp.where(jnp.sum(st.tracers[..., slot] * ref.rho_c, -1, keepdims=True) < 0,
+                  jnp.clip(st.tracers[..., slot], 0.0), new.tracers[..., slot])))
+    bad, col = _positivity_rows(g, ref, st, zeroed)
+    assert bad["positivity_water"] > 1e3 * 1e-13 * abs(col[4]), bad
+    cold, col = _positivity_rows(g, ref, st, new._replace(theta=st.theta))
+    assert abs(cold["positivity_enthalpy"]) > 1e3 * 1e-13 * abs(col[5]), cold
+
+
+def test_positivity_with_too_little_vapour_fills_partially_and_creates_nothing():
+    """A column holding less vapour than its condensate deficit: the holes are
+    filled only by the fraction the vapour covers; vapour never goes negative and
+    no water is created."""
+    g, ref, st, fix = _negative_condensate_state(1, qv_scale=0.0)
+    st = st._replace(tracers=st.tracers.at[..., 0].set(1e-9))
+    new = fix(st)
+    assert float(jnp.min(new.tracers[..., 0])) >= 0.0
+    assert float(jnp.min(new.tracers[1, 1, :, 1])) < 0.0        # deficit left in place
+    res, col = _positivity_rows(g, ref, st, new)
+    assert abs(res["positivity_water"]) <= 1e-13 * abs(col[4]) + 1e-18, res
+    assert abs(res["positivity_enthalpy"]) <= 1e-13 * abs(col[5]), res

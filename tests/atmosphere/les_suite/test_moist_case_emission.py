@@ -101,7 +101,8 @@ def test_moist_driver_emits_complete_artifact_and_closes_budgets(
     assert float(np.min(np.asarray(art.subsidence_w))) < 0.0
     rows = _budget_lines(out)
     assert set(rows) == {"theta", "u", "v", "water", "micro_water",
-                         "micro_enthalpy", "positivity_water"}, out
+                         "micro_enthalpy", "positivity_water",
+                         "positivity_enthalpy"}, out
     assert art.les_setup["positive_mode"] == "conserving"   # never the water-creating clip
     for lab, r in rows.items():
         assert abs(r["residual"]) <= 1e-13 * abs(r["column"]) + 1e-15, (lab, r)

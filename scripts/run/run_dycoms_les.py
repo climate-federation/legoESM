@@ -496,6 +496,7 @@ def main():
     emit = args.emit_suite_artifact is not None
     zcol = jnp.zeros(6, dtype)
     rho_pos = jnp.asarray(ref.rho_c, dtype)
+    exner_pos = jnp.asarray(ref.exner_c, dtype)
 
     def _cols(state):
         return column_contents(state, g, ref) if emit else zcol
@@ -533,8 +534,9 @@ def main():
             c3 = _cols(state)
             # MASS-CONSERVING positivity (BOMEX's): a plain clip turns the
             # transport's negative undershoots into new water
-            trn, created = conserving_positive(trn, rho_pos, g.dz)
-            state = state._replace(tracers=trn)
+            trn, th, created = conserving_positive(trn, state.theta, rho_pos, exner_pos,
+                                                   g.dz)
+            state = state._replace(tracers=trn, theta=th)
             d_micro = c3 - c2
             d_pos = _cols(state) - c3
             precip = dt * args.micro_every * jnp.mean(pr)

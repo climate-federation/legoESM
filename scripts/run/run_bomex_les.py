@@ -783,14 +783,16 @@ def main():
     spf = jnp.where(zf > z_sp, 0.5 * (1.0 - jnp.cos(
         jnp.pi * (zf - z_sp) / (args.Lz - z_sp))), 0.0).astype(dtype)
 
-    def _positive(tr):
+    exner_c = jnp.asarray(ref.exner_c, dtype)
+
+    def _positive(tr, th):
         if args.positive_mode == "clip":
             q = jnp.clip(tr[..., :6], 0.0, None)
             numbers = jnp.clip(tr[..., 6:], 0.0, None)
             created = jnp.sum(jnp.clip(-tr[..., :6], 0.0, None)
                               * rho_c[None, None, :, None] * g.dz)
-            return jnp.concatenate([q, numbers], axis=-1), created
-        return conserving_positive(tr, rho_c, g.dz)
+            return jnp.concatenate([q, numbers], axis=-1), th, created
+        return conserving_positive(tr, th, rho_c, exner_c, g.dz)
 
     emit = args.emit_suite_artifact is not None
     zcol = jnp.zeros(6, dtype)
@@ -816,8 +818,8 @@ def main():
             # spectral scalar transport undershoots at the moisture inversion;
             # a plain clip would convert those undershoots into spurious water
             # and drive runaway whole-column condensation. Borrow instead.
-            tr, created = _positive(state.tracers)
-            state = state._replace(tracers=tr)
+            tr, th, created = _positive(state.tracers, state.theta)
+            state = state._replace(tracers=tr, theta=th)
             d_micro = d_micro + (c1 - c0)
             d_pos = d_pos + (_cols(state) - c1)
             precip = precip + dt_sub * jnp.mean(pr)
