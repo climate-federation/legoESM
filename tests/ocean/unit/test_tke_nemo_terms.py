@@ -1694,3 +1694,16 @@ def test_nn_mxlice2_anchor_is_nemos_case2_and_refuses_missing_inputs():
     with pytest.raises(ValueError, match="nemo_mxlice"):
         _mxl0_surface_anchor(cfg._replace(nemo_mxlice=1), jnp.asarray(taum),
                              _RHO0, constants.g, jnp.asarray(tm))
+
+
+def test_literal_raw_mixing_length_reverse_gradient_is_finite_at_zero_tke():
+    """SQRT(2*en/zrn2) at en = 0 (floored to rmxl_min afterwards) must not turn
+    the jitted reverse pass NaN (round 316, rung 10)."""
+    from legoesm.ocean.physics.vertical_mixing.tke import _tke_raw_mixing_length
+
+    cfg = TKEConfig(tke_mxl_raw_evaluation="nemo_literal")
+    e = jnp.asarray([0.0, 1.0e-6, 3.0e-4])
+    n2 = jnp.asarray([1.0e-5, 2.0e-5, -1.0e-6])
+    g = np.asarray(jax.jit(jax.grad(
+        lambda x: jnp.sum(_tke_raw_mixing_length(x, n2, cfg))))(e))
+    assert np.all(np.isfinite(g))

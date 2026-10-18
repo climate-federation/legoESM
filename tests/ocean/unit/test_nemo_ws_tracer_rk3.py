@@ -1109,3 +1109,30 @@ def test_nemo_ws_split_freeze_hooks_compose_to_the_freeze_arm():
     live = _lock_model().step(entry, dt=card.dt_s)
     eta_arm = _lock_model(H(freeze_stage_hpg_eta=True)).step(entry, dt=card.dt_s)
     assert float(np.abs(np.asarray(eta_arm.u.data) - np.asarray(live.u.data)).max()) > 0.0
+
+
+def test_nemo_cen2_tracer_rhs_reverse_gradient_is_finite_on_dry_cells():
+    """A dry cell (e3t = 0) is masked in the forward pass; its 0/0 must not
+    turn the jitted reverse pass NaN (round 316, ORCA2 rung 0)."""
+    set_policy(PrecisionPolicy.fp64())
+    rng = np.random.default_rng(316)
+    ny, nx, nz = 3, 4, 2
+    base = create_latlon_grid(ny, nx, dtype=jnp.float64)
+    grid = SimpleNamespace(**base._asdict(),
+                           area_T=jnp.asarray(rng.uniform(1.0e5, 9.0e6, (ny, nx))))
+    tmask = np.ones((ny, nx, nz))
+    tmask[0, 0, 1] = 0.0
+    tracer = jnp.asarray(rng.uniform(-3.0, 37.0, (ny, nx, nz)))
+    p_u = jnp.asarray(rng.uniform(-8.0e5, 8.0e5, (ny, nx + 1, nz)))
+    p_v = jnp.asarray(rng.uniform(-8.0e5, 8.0e5, (ny + 1, nx, nz)))
+    p_w = jnp.asarray(np.pad(rng.uniform(-2.0e3, 2.0e3, (ny, nx, nz - 1)),
+                             ((0, 0), (0, 0), (1, 1))))
+    e3t = jnp.asarray(rng.uniform(0.2, 250.0, (ny, nx, nz)) * tmask)
+    tm = jnp.asarray(tmask)
+
+    def loss(tr, h):
+        rhs = model_module._nemo_cen2_tracer_rhs(tr, p_u, p_v, p_w, h, tm, grid)
+        return jnp.sum(jnp.where(tm > 0.5, rhs, 0.0) ** 2)
+
+    for g in jax.jit(jax.grad(loss, argnums=(0, 1)))(tracer, e3t):
+        assert np.all(np.isfinite(np.asarray(g)))

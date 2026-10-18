@@ -155,3 +155,22 @@ def test_literal_form_refuses_mevar_native_policy_and_the_generic_form():
     set_policy(PrecisionPolicy.fp64(transcendentals="native"))
     with pytest.raises(ValueError, match="libm"):
         _card(case)
+
+
+def test_literal_iwm_reverse_gradient_is_finite_where_n2_is_clipped():
+    """sqrt(max(0, N^2)) has an infinite slope at 0; the jitted reverse pass
+    through the literal IWM must stay finite there (round 316, rung 10)."""
+    avt, avs, avm, f, rn2, s, ht0, gd, e3, wm = _cases()
+    assert (rn2 <= 0.0).any()
+    forcing = IWMForcing(ebot=jnp.asarray(f[1]), ecri=jnp.asarray(f[0]),
+                         ensq=jnp.asarray(f[2]), esho=jnp.asarray(f[3]),
+                         hbot=jnp.asarray(f[4]), hcri_inv=jnp.asarray(f[5]))
+
+    def loss(n2):
+        out = nemo_zdf_iwm(jnp.asarray(avt), jnp.asarray(avs), jnp.asarray(avm),
+                           forcing, n2, jnp.asarray(s), jnp.asarray(ht0), gd, e3,
+                           jnp.asarray(wm), cfg=CFG, rho_0=RHO0)
+        return sum(jnp.sum(x) for x in out)
+
+    g = np.asarray(jax.jit(jax.grad(loss))(jnp.asarray(rn2)))
+    assert np.all(np.isfinite(g)) and np.any(g != 0.0)
