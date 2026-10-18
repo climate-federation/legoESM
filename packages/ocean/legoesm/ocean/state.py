@@ -3344,6 +3344,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # calls them dry.  True hands every stage transport the resolved raw-mesh
     # V mask; False preserves previously measured cards.
     rk3_stage_transport_raw_vmask: bool = False
+    # Two fold exchanges the stage transport zFv reads on the T-pivot row,
+    # where the card's compact values differ: vn_adv after dyn_spg_ts's
+    # lbc_lnk (dynspg_ts.f90:844) and r3v after stp_RK3_stg's (stprk3_stg.f90:169).
+    # True hands every stage transport both images; False preserves previously measured cards.
+    rk3_stage_transport_fold_exchanges: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

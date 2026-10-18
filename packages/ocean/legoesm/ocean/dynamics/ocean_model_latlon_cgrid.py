@@ -2084,7 +2084,7 @@ def _nemo_ws_stage_transport(
          r1_hv_stage) = _nemo_ws_qco_stage_faces(
             eta_stage, h_ref, u_mask_3d, v_mask_3d, grid,
             z_coord=z_coord,
-            include_reciprocals=True, fold_grid=grid if config.rk3_vector_raw_vmask else None)
+            include_reciprocals=True, fold_grid=grid if (config.rk3_vector_raw_vmask or config.rk3_stage_transport_fold_exchanges) else None)  # r3v fold exchange, stprk3_stg.f90:169  # noqa: E501
     Hu_stage_depth = jnp.sum(hu_stage, axis=-1)
     Hv_stage_depth = jnp.sum(hv_stage, axis=-1)
     if barotropic_velocity is None:
@@ -8137,7 +8137,7 @@ class LatLonCGridOceanModel:
                 self._nemo_ws_test_hooks
                 .legacy_reduced_stage_transport_mean_arm)
             _stage_transport_kw = dict(
-                h_ref=_h_ref_ws, Hu_avg=Hu_avg, Hv_avg=Hv_avg,
+                h_ref=_h_ref_ws, Hu_avg=Hu_avg, Hv_avg=(_rk3_fold_exchange_top_v(Hv_avg, _grid, state.v_mask.data) if _cfg_b.rk3_stage_transport_fold_exchanges else Hv_avg),  # dynspg_ts.f90:844 lbc_lnk(vn_adv, 'V', -1)  # noqa: E501
                 u_mask_3d=_u_live_mask,
                 v_mask_3d=(jnp.zeros_like(_v_live_mask).at[1:].set(nemo_qco_resolved_mesh_operands(_zc, _grid, _u_live_mask, _v_live_mask, h_k_old.dtype, h_k_old.shape[-1]).vmask3) if bool(_cfg_b.rk3_stage_transport_raw_vmask) else _v_live_mask), grid=_grid, z_coord=_zc,  # stprk3_stg.f90:283 reads vmask after its V fold exchange (dommsk.f90:232): the resolved raw-mesh mask  # noqa: E501
                 H_bathy=state.H_bathy.data, config=_cfg_b,

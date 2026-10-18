@@ -109,10 +109,10 @@ def test_g9_card_is_g5_plus_fct2_and_the_folded_transport_vmask(tmp_path):
     g9 = recipe.build_nemo_testcase_card("ORCA2G9-tadv", deck_root=g9_root)
     c5, c9 = g5.recipe.model_config, g9.recipe.model_config
     assert [f for f in c5._fields if getattr(c5, f) != getattr(c9, f)] == [
-        "tracer_advection", "rk3_stage_transport_raw_vmask"]
+        "tracer_advection", "rk3_stage_transport_raw_vmask", "rk3_stage_transport_fold_exchanges"]
     assert (c5.tracer_advection, c9.tracer_advection) == ("none", "fct2")
-    assert c9.rk3_stage_transport_raw_vmask is True
-    assert c5.rk3_stage_transport_raw_vmask is False
+    assert c9.rk3_stage_transport_raw_vmask is c9.rk3_stage_transport_fold_exchanges is True
+    assert c5.rk3_stage_transport_raw_vmask is c5.rk3_stage_transport_fold_exchanges is False
     assert c9.momentum_advection == "flux_form" and c9.lateral_viscosity.A_h == 0.0
     for name in ("z_coord", "grid", "initial_state"):
         a, b = getattr(g5.recipe, name), getattr(g9.recipe, name)
@@ -127,7 +127,9 @@ def test_g9_card_is_g5_plus_fct2_and_the_folded_transport_vmask(tmp_path):
         recipe.build_orca2g9_tadv_card(g5_root)
     # the selector check is not vacuous: each G9 selection planted back fails it
     for field, value, row in (("tracer_advection", "none", "ln_traadv_fct"),
-                              ("rk3_stage_transport_raw_vmask", False, "stage transport vmask")):
+                              ("rk3_stage_transport_raw_vmask", False, "stage transport vmask"),
+                              ("rk3_stage_transport_fold_exchanges", False,
+                               "stage transport fold exchanges")):
         planted = g9._replace(recipe=g9.recipe._replace(model_config=c9._replace(**{field: value})))
         assert recipe._orca2g1_selector_failures(planted) == [row]
 
@@ -149,7 +151,7 @@ def test_only_g9_selects_tracer_advection():
         assert values["namtra_adv.ln_traadv_fct"] is (deck.parent == G9)
     hits = [path.name for path in (REPO / "packages").rglob("*.py")
             for line in path.read_text().splitlines()
-            if "rk3_stage_transport_raw_vmask=" in line]
+            if "rk3_stage_transport_raw_vmask=" in line or "rk3_stage_transport_fold_exchanges=" in line]
     assert hits == ["nemo_testcase_recipe.py"]
 
 
@@ -267,3 +269,56 @@ def test_g9_transport_vmask_reaches_the_step_on_the_fold_band_only(tmp_path):
         assert np.isfinite(on[name]).all()
         rows = set(np.nonzero(on[name] != off[name])[0].tolist())
         assert rows and min(rows) >= n_rows - 4, (name, sorted(rows))
+
+
+G9_RECORD = ROUNDS / "round46/oracle_g9_r46/twin_a"
+
+
+def _nemo_stage_zfv(stage):
+    """NEMO's zFv as tra_adv receives it at kt 1, stage 1 or 2 (stprk3_stg.f90:283;
+    the record binary's tracer-operand stream, written before tra_adv)."""
+    path = G9_RECORD / f"oracle_rktracer_operands_kt00000001_s{stage}.bin"
+    with path.open("rb") as handle:
+        assert handle.read(16).decode("ascii").rstrip() == "NEMO_L2_RKTRA_1"
+        header = struct.unpack("=11i", handle.read(44))
+        values = np.fromfile(handle, dtype=np.float64)
+    assert header[2] == stage
+    nx, ny, nz = header[7:10]
+    n3 = nx * ny * nz
+    zfv = values[3 * n3:4 * n3].reshape((nx, ny, nz), order="F")   # T S zFu zFv
+    return zfv.transpose(1, 0, 2)[2:-2, 2:-2]
+
+
+@needs_inputs
+@pytest.mark.skipif(not (G9_RECORD / "oracle_rktracer_operands_kt00000001_s2.bin").is_file(),
+                    reason="no round-46 G9 record")
+def test_g9_stage_transport_on_the_pivot_row_is_nemos(tmp_path):
+    """kt 1 of the jitted G9 step from the card's initial state (state traced, x64),
+    on NEMO's recorded surface input: the stage-1 and stage-2 V transports the
+    tracer update reads equal NEMO's on the T-pivot row, on every level and wet
+    or dry face (bit-identical but for signed zeros).  It needs vn_adv after its fold exchange
+    (dynspg_ts.f90:844) and r3v after its fold exchange (stprk3_stg.f90:169);
+    stage 1 is bit-identical everywhere."""
+    import jax
+    sys.path[:0] = [str(CASES), str(CASES / "nemo_testcase_g5_orca2ice")]
+    import g5_records as g5
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    card = recipe.build_nemo_testcase_card("ORCA2G9-tadv", deck_root=G9_RECORD)
+    cfg, zc, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
+    assert cfg.rk3_stage_transport_fold_exchanges is True
+    fw, sf = g5.nemo_supplied_forcing(card, G9_RECORD, 1)
+    nk = int(zc.n_levels)
+    for stage in (1, 2):
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, zc, cfg,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_tracer_transport_stage=stage))
+        out = jax.device_get(model.step(s0, dt=card.dt_s, freshwater=fw, surface_forcing=sf))
+        card_zfv = np.asarray(out.v.data)[1:]          # card V rows 1.. = NEMO rows 0..
+        nemo = _nemo_stage_zfv(stage)[..., :nk]
+        assert card_zfv.shape == nemo.shape
+        assert np.count_nonzero(nemo[-1]) == 1319, stage
+        pivot = card_zfv[-1] != nemo[-1]          # stage 2: 375 zeros differ only in sign
+        assert not pivot.any(), (stage, int(pivot.sum()))
+        if stage == 1:
+            assert np.array_equal(card_zfv.view(np.uint64), nemo.view(np.uint64))
