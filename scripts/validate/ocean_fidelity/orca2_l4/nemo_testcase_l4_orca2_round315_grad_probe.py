@@ -101,6 +101,7 @@ def scaled_parts(config, z_coord, s: dict):
     traced or not.
     """
 
+    s = {k: s.get(k, 1.0) for k in SCALARS}  # absent = held static (untraceable)
     ph = config.physics
     lm = ph.lateral_mixing
     vm = ph.vertical_mixing
@@ -137,11 +138,18 @@ def nominal_scalars(config, z_coord) -> dict:
 
 def build(rung: str):
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
     from scripts.validate.ocean_fidelity.orca2_l4 import (
         nemo_testcase_l4_orca2_round1_ladder_gate as rung10_gate,
+    )
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
         nemo_testcase_l4_orca2_round92_rung0_card_gate as rung0_gate,
-        nemo_testcase_l4_orca2_round269_g1_decision96_gate as prior,
+    )
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
         nemo_testcase_l4_orca2_round103_rung0_ladder_gate as rung0_ladder,
+    )
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round269_g1_decision96_gate as prior,
     )
 
     root = ROOTS[rung]
@@ -196,6 +204,37 @@ def traced_step(model):
         return raw(m, state, dt, freshwater, surface)
 
     return jax.jit(step)
+
+
+def traceability(model, state0, forcing, dt) -> dict:
+    """Trace the step with ONE scalar traced at a time; name the first refusal.
+
+    A scalar the step converts to a Python value (``float(x)``, ``if x``) cannot
+    carry a gradient at all; the innermost repository frame is recorded.
+    """
+
+    import traceback
+
+    import jax
+    import jax.numpy as jnp
+
+    step = traced_step(model)
+    fw, sf = forcing[0]
+    out = {}
+    for key in SCALARS:
+        try:
+            jax.eval_shape(step, state0, {key: jnp.float64(1.0)}, dt, fw, sf)
+            out[key] = {"traceable": True}
+        except (jax.errors.ConcretizationTypeError,
+                jax.errors.TracerBoolConversionError,
+                jax.errors.TracerIntegerConversionError) as error:
+            frames = [f for f in traceback.extract_tb(error.__traceback__)
+                      if "/packages/" in f.filename]
+            f = frames[-1]
+            out[key] = {"traceable": False, "error": type(error).__name__,
+                        "first_statement": f"{f.filename.split('/packages/')[1]}:{f.lineno}",
+                        "code": f.line, "function": f.name}
+    return out
 
 
 # --- chained reverse / forward mode ------------------------------------------
@@ -287,10 +326,9 @@ def _with_t(state, t_data):
 
 # --- measurement ----------------------------------------------------------
 
-def measure(rung: str, n_dirs: int, full_sweep: bool) -> dict:
+def measure(rung: str, n_dirs: int, full_sweep: bool, output: Path | None = None) -> dict:
     import jax
     import jax.numpy as jnp
-
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.fidelity.provenance import worktree_stamp
 
@@ -311,7 +349,16 @@ def measure(rung: str, n_dirs: int, full_sweep: bool) -> dict:
               "rung": rung, "worktree": worktree_stamp(allow_dirty=True),
               "jax": jax.__version__, "n_list": list(n_list), "dt_s": dt,
               "nominal": nominal_scalars(cfg, z),
-              "fd_tol": FD_TOL, "revfwd_tol": REVFWD_TOL}
+              "fd_tol": FD_TOL, "revfwd_tol": REVFWD_TOL, "log": []}
+    clock = time.perf_counter()
+
+    def save(phase: str) -> None:
+        # partial results survive a long run; the final write is the record
+        result["log"].append({"phase": phase, "t_s": time.perf_counter() - clock,
+                              "peak_rss_gb": _rss_gb()})
+        print(f"[{time.perf_counter() - clock:8.1f}s] {phase}", flush=True)
+        if output is not None:
+            output.write_text(json.dumps(result, indent=1, sort_keys=True, default=str) + "\n")
 
     # production trajectory (also primes the model's step caches)
     t0 = time.perf_counter()
@@ -323,9 +370,14 @@ def measure(rung: str, n_dirs: int, full_sweep: bool) -> dict:
     result["production_forward_s"] = time.perf_counter() - t0
     result["production_losses"] = {f"{k}@{n}": float(f(prod[n - 1]))
                                    for k, f in losses.items() for n in n_list}
+    save("production")
 
+    trace = traceability(model, state0, forcing, dt)
+    result["traceability"] = trace
+    save("traceability")
+    keys = tuple(k for k in SCALARS if trace[k]["traceable"])
     step = traced_step(model)
-    ones = {k: jnp.float64(1.0) for k in SCALARS}
+    ones = {k: jnp.float64(1.0) for k in keys}
     t0 = time.perf_counter()
     st, parity = state0, []
     for n in range(1, max(n_list) + 1):
@@ -339,6 +391,7 @@ def measure(rung: str, n_dirs: int, full_sweep: bool) -> dict:
     result["traced_forward_s_incl_compile"] = time.perf_counter() - t0
     result["forward_parity"] = parity
     result["forward_parity_bit_identical"] = all(not p["non_bit_leaves"] for p in parity)
+    save("forward_parity")
 
     # reverse mode
     rev = chain_reverse(step, state0, ones, forcing, n_list, losses, dt)
@@ -361,13 +414,14 @@ def measure(rung: str, n_dirs: int, full_sweep: bool) -> dict:
             "dscales": r["dscales"],
         }
     result["reverse"] = grads
+    result["checks"] = checks = []
+    save("reverse")
 
     # directional checks: T directions (FD sweep + jvp), scalars (FD sweep + jvp)
     rng = np.random.default_rng(315)
     t_eps = T_EPS if full_sweep else T_EPS[2:4]
     s_eps = S_EPS if full_sweep else S_EPS[2:4]
     t0_data = state0.T.data
-    checks = []
     for d_i in range(n_dirs):
         d = rng.standard_normal(np.shape(t0_data)) * np.asarray(tmask)
         d = d / np.sqrt(np.mean(d[wet] ** 2))
@@ -383,14 +437,22 @@ def measure(rung: str, n_dirs: int, full_sweep: bool) -> dict:
             ad = float(jnp.vdot(rev[(name, n)]["dstate0"].T.data, d))
             checks.append(_row(f"T_dir{d_i}", name, n, ad, jvp[(name, n)][1],
                                {e: fd[e][(name, n)] for e in t_eps}))
+        save(f"T_dir{d_i}")
     for key in SCALARS:
-        tan = {k: jnp.float64(1.0 if k == key else 0.0) for k in SCALARS}
+        if key not in keys:
+            row = _rebuilt_fd(key, cfg, z, new_model, state0, forcing,
+                              n_list, losses, dt, s_eps[len(s_eps) // 2])
+            row.pop("_plus")
+            checks.append(row)
+            save(f"scalar {key} (rebuilt only)")
+            continue
+        tan = {k: jnp.float64(1.0 if k == key else 0.0) for k in keys}
         jvp = chain_forward(step, state0, ones, forcing, n_list, losses, dt,
                             tangent_scales=tan)
         fd = {}
         for eps in s_eps:
-            up = {k: jnp.float64(1.0 + (eps if k == key else 0.0)) for k in SCALARS}
-            dn = {k: jnp.float64(1.0 - (eps if k == key else 0.0)) for k in SCALARS}
+            up = {k: jnp.float64(1.0 + (eps if k == key else 0.0)) for k in keys}
+            dn = {k: jnp.float64(1.0 - (eps if k == key else 0.0)) for k in keys}
             p = chain_forward(step, state0, up, forcing, n_list, losses, dt)
             m = chain_forward(step, state0, dn, forcing, n_list, losses, dt)
             fd[eps] = {k: (p[k] - m[k]) / (2 * eps) for k in p}
@@ -400,28 +462,38 @@ def measure(rung: str, n_dirs: int, full_sweep: bool) -> dict:
         # construction parity: a model REBUILT with the scaled config at the
         # sweep's middle epsilon, run through production model.step.
         eps = s_eps[len(s_eps) // 2]
-        rebuilt = {}
-        for sign in (+1, -1):
-            sc = {k: (1.0 + sign * eps if k == key else 1.0) for k in SCALARS}
-            m_cfg, m_z = scaled_parts(cfg, z, sc)
-            mm, st = new_model(m_cfg, m_z), state0
-            vals = {}
-            for n in range(1, max(n_list) + 1):
-                fw, sf = forcing[n - 1]
-                st = mm.step(st, dt, freshwater=fw, surface_forcing=sf)
-                if n in n_list:
-                    vals.update({(k, n): float(f(st)) for k, f in losses.items()})
-            rebuilt[sign] = vals
+        row = _rebuilt_fd(key, cfg, z, new_model, state0, forcing, n_list,
+                          losses, dt, eps)
         traced_up = chain_forward(step, state0, {k: jnp.float64(1.0 + (eps if k == key else 0.0))
-                                                 for k in SCALARS}, forcing, n_list, losses, dt)
-        checks.append({"input": key, "construction_parity_eps": eps,
-                       "rebuilt_fd": {f"{k}@{n}": (rebuilt[1][(k, n)] - rebuilt[-1][(k, n)]) / (2 * eps)
-                                      for (k, n) in rebuilt[1]},
-                       "rebuilt_vs_traced_plus_bit_identical": all(
-                           rebuilt[1][kn] == traced_up[kn] for kn in rebuilt[1])})
-    result["checks"] = checks
+                                                 for k in keys}, forcing, n_list, losses, dt)
+        row["rebuilt_vs_traced_plus_bit_identical"] = all(
+            row["_plus"][kn] == traced_up[kn] for kn in row["_plus"])
+        row.pop("_plus")
+        checks.append(row)
+        save(f"scalar {key}")
     result["peak_rss_gb"] = _rss_gb()
+    result["complete"] = True
+    save("done")
     return result
+
+
+def _rebuilt_fd(key, cfg, z, new_model, state0, forcing, n_list, losses, dt, eps):
+    """Central FD of a model REBUILT with the scaled config (production step)."""
+
+    rebuilt = {}
+    for sign in (+1, -1):
+        m_cfg, m_z = scaled_parts(cfg, z, {key: 1.0 + sign * eps})
+        mm, st = new_model(m_cfg, m_z), state0
+        vals = {}
+        for n in range(1, max(n_list) + 1):
+            fw, sf = forcing[n - 1]
+            st = mm.step(st, dt, freshwater=fw, surface_forcing=sf)
+            if n in n_list:
+                vals.update({(k, n): float(f(st)) for k, f in losses.items()})
+        rebuilt[sign] = vals
+    return {"input": key, "construction_parity_eps": eps, "_plus": rebuilt[1],
+            "rebuilt_fd": {f"{k}@{n}": (rebuilt[1][(k, n)] - rebuilt[-1][(k, n)]) / (2 * eps)
+                           for (k, n) in rebuilt[1]}}
 
 
 def _row(inp, loss, n, ad, fwd, fd_by_eps):
@@ -442,7 +514,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
-        result = measure(args.rung, args.directions, not args.short_sweep)
+        result = measure(args.rung, args.directions, not args.short_sweep, args.output)
     except GateError as error:
         print(f"STATUS REFUSE: {error}")
         return 2
