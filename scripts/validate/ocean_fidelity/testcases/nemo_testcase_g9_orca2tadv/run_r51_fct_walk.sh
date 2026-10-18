@@ -96,7 +96,7 @@ add_after(
 "         CALL nonosc( Kaa, pt(:,:,:,jn,Kbb), ztFu, ztFv, ztFw, zta_up1, p2dt )\n",
 "         IF( l_r51_fct ) WRITE(n_r51_fct) 'anti_post       ', ztFu, ztFv, ztFw\n")
 add_after(
-"         END DO   ;   END DO   ;   END DO\n         !\n         IF ( ll_zAimp2 ) THEN\n",
+"         END_3D\n         !\n         IF ( ll_zAimp2 ) THEN\n",
 "         IF( l_r51_fct ) THEN\n"
 "            WRITE(n_r51_fct) 'rhs_final       ', pt(:,:,:,jn,Krhs)\n"
 "            CLOSE(n_r51_fct)\n"
