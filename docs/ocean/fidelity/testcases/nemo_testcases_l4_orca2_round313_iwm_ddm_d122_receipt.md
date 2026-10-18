@@ -181,8 +181,22 @@ refused without the raw-length arm.
   entries failing (10 new entries; first run flagged an unpinned range
   extent, fixed).  76 pins of the model file and builder shifted by this
   round's edits were re-anchored (round-312 tool, mechanical offsets).
-- No direct unit test of our salt-matrix fix; it is covered by the rung-10
-  arms only (refused before, `IWM_LIT` = `IWM` after).
+- Review follow-up (HOLD item): new
+  `tests/ocean/fidelity/test_orca2_round313_salt_matrix.py` (3), one
+  production-JIT rung-10 step, x64, zero surface fluxes.  Double diffusion
+  on: salt's diffusivity in the literal solve = (literal avs + isoneutral
+  term) x wet mask, bit-equal.  Double diffusion off: salt reuses heat's
+  matrix.  With the salt-matrix fix alone reverted both fail (refusal);
+  with only its first hunk reverted the off test fails on its assertion;
+  restored, 3 passed.
+- Hybrid double diffusion with literal internal-wave mixing (no card runs
+  it) now refuses at model construction: the hybrid salt path never reads
+  the literal avs, so the wave-mixing salt increment would be lost.  The
+  third test above; without the check it does not raise.  Not built.
+- After the follow-up: neighbouring battery (IWM maps, defaults, SSH sh2,
+  imported statement test, selection rounds 30x-31x, recipe,
+  constructibility, rung-0 card, double diffusion) 236 passed.  The check
+  shifted 49 gate pins and 16 round-8 receipt pins (same re-anchor tool).
 - The frozen phase-2 and round-66 gates still list the two labels; they
   read historical artifacts and no test runs them against the new card.
 - codex review: paused (quota).  The operator runs an independent Claude
@@ -196,6 +210,8 @@ refused without the raw-length arm.
   double-diffusion forms back to their previous values (round 307's
   pattern); the card now states `rn_avts`/`rn_hsbfr` explicitly (same
   values).
+- ASKED (review follow-up): hybrid double diffusion + literal
+  internal-wave mixing becomes a hard error at configuration time.
 - UNASKED, offered for revert: our salt-matrix fix (needed to run either
   feature on rung 10; transcribes the cited NEMO lines; not ladder-certified).
 - Still off: `nn_mxlice`, G8's fold rows (D137), the G6 fold statements, G9.

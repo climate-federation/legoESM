@@ -4588,6 +4588,18 @@ class LatLonCGridOceanModel:
                 "unknown zdf_implicit_solver_evaluation "
                 f"{_zdf_solver_evaluation!r}; expected 'shared_thomas' or "
                 "'nemo_literal'")
+        _ddm_v = getattr(getattr(getattr(config, "physics", None),
+                                 "vertical_mixing", None), "ddm", None)
+        if (_nemo_iwm_literal(config) and _ddm_v is not None
+                and _ddm_v.enabled and not _nemo_ddm_literal(config)):
+            # The hybrid DDM carries salt as avt + (avs - avt) and never reads
+            # the literal zdf_iwm avs (zdfiwm.f90:314): its increment would
+            # be dropped silently.
+            raise ValueError(
+                "IWMConfig.form='nemo_literal' with hybrid double diffusion "
+                "(DoubleDiffusionConfig.form='hybrid') is not built: the "
+                "internal-wave salt diffusivity would be lost; select "
+                "DoubleDiffusionConfig.form='nemo_literal' or disable one")
         # barotropic_drag_substep (#1226, NEMO dyn_drg): the in-subcycle
         # explicit barotropic drag + pu_RHSi slow-forcing correction.
         if getattr(config, "barotropic_drag_substep", False):
