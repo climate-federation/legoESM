@@ -594,6 +594,115 @@ def test_snapshot_admission_and_bitwise_comparison_have_live_plants(tmp_path):
         driver.admit_listed_snapshot(path)
 
 
+def _tiny_comparison(tmp_path):
+    arrays = {
+        "ssh_m": np.zeros((2, 2)),
+        "u_m_s": np.arange(4.0).reshape(2, 2) + 10.0,
+        "v_m_s": np.arange(4.0).reshape(2, 2) + 20.0,
+    }
+    path = tmp_path / "next.npz"
+    np.savez(path, **arrays)
+    state = _ScanState(
+        _Field(arrays["ssh_m"]),
+        _Field(np.pad(arrays["u_m_s"][:, :, None], ((0, 0), (1, 0), (0, 0)))),
+        _Field(np.pad(arrays["v_m_s"][:, :, None], ((1, 0), (0, 0), (0, 0)))),
+    )
+    return state, path, arrays
+
+
+def _shift_u(state, amount):
+    return state._replace(u=_Field(state.u.data + np.pad(
+        np.full((2, 2, 1), amount), ((0, 0), (1, 0), (0, 0)))))
+
+
+def test_lid_restart_check_accepts_roundoff_and_refuses_real_differences(tmp_path):
+    state, path, arrays = _tiny_comparison(tmp_path)
+    tol = driver.LID_RESTART_TOLERANCE["value"]
+    assert tol == 1.0e-12
+    result = driver.compare_native_state_bitwise(_shift_u(state, 1.0e-15), path, tol)
+    assert result["within_tolerance"] and not result["all_equal"]
+    assert result["u_m_s_unequal"] > 0
+    assert 0.0 < result["u_m_s_relative_max_abs"] < 1.0e-15
+    assert result["ssh_m_relative_max_abs"] == 0.0
+    # 1e-9 against a field of magnitude 13 is refused ...
+    assert not driver.compare_native_state_bitwise(
+        _shift_u(state, 1.0e-9), path, tol)["within_tolerance"]
+    # ... and any ssh difference is refused (the lid's ssh scale is zero).
+    ssh = state._replace(eta=_Field(arrays["ssh_m"] + 1.0e-30))
+    assert not driver.compare_native_state_bitwise(ssh, path, tol)[
+        "within_tolerance"]
+
+
+def test_explicit_restart_check_stays_bitwise(tmp_path):
+    state, path, _ = _tiny_comparison(tmp_path)
+    result = driver.compare_native_state_bitwise(_shift_u(state, 1.0e-15), path)
+    assert not result["within_tolerance"] and not result["all_equal"]
+    assert driver.compare_native_state_bitwise(state, path)["within_tolerance"]
+
+
+def test_lid_manifest_records_tolerance_and_measured_relative_values(
+        tmp_path, monkeypatch):
+    # Real fine lid deck (644 x 644 native), one day.  Run A expects an all-zero
+    # "next day", so it is refused and the pending manifest keeps the record.
+    # Run B expects run A's own final state plus a 1e-15 round-off: accepted.
+    shape = (644, 644)
+    zeros = {"ssh_m": np.zeros(shape), "u_m_s": np.zeros(shape),
+             "v_m_s": np.zeros(shape)}
+    restart = tmp_path / "restart.npz"
+    np.savez(restart, **zeros, day=0, step=0, dt_s=1800.0)
+    nxt = tmp_path / "next.npz"
+    np.savez(nxt, **zeros)
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "status": "complete", "daily_sha256": {
+            restart.name: hashlib.sha256(restart.read_bytes()).hexdigest(),
+            nxt.name: hashlib.sha256(nxt.read_bytes()).hexdigest()}}))
+    namelist = driver.resolved_daily_namelist(
+        1, deck="maddison-rl", surface="rigid_lid")
+    output = tmp_path / "run"
+    seen = []
+    real_compare = driver.compare_native_state_bitwise
+
+    def spy(state, path, *args):
+        seen.append(state)
+        return real_compare(state, path, *args)
+
+    monkeypatch.setattr(driver, "compare_native_state_bitwise", spy)
+
+    def run(out, expected):
+        return driver.run_long(
+            namelist, out, days=1, mode="cpu-scanned", surface="rigid_lid",
+            commit="a" * 40, physical_gpu=None, hourly_targets=True,
+            restart=restart, verify_next=expected)
+
+    with pytest.raises(RuntimeError, match="does not reproduce"):
+        run(output, nxt)
+    record = json.loads(
+        (output / "manifest.pending.json").read_text())["restart_next_verification"]
+    assert record["tolerance"] == {
+        "kind": "max_abs_relative_to_field_max", "value": 1e-12,
+        "applies_to": "rigid_lid"}
+    result = record["result"]
+    assert result["within_tolerance"] is False and result["all_equal"] is False
+    assert result["ssh_m_relative_max_abs"] == 0.0
+    assert result["u_m_s_unequal"] > 0 and result["u_m_s_max_abs"] > 0.0
+    assert result["u_m_s_relative_max_abs"] == float("inf")
+    final = seen[0]
+    close = tmp_path / "close" / "next.npz"
+    close.parent.mkdir()
+    np.savez(close, ssh_m=np.asarray(final.eta.data),
+             u_m_s=np.asarray(final.u.data[:, 1:, 0]) + 1.0e-15,
+             v_m_s=np.asarray(final.v.data[1:, :, 0]))
+    (close.parent / "manifest.json").write_text(json.dumps({
+        "status": "complete", "daily_sha256": {
+            close.name: hashlib.sha256(close.read_bytes()).hexdigest()}}))
+    accepted = run(tmp_path / "run_close", close)
+    result = accepted["restart_next_verification"]["result"]
+    assert accepted["status"] == "complete"
+    assert result["within_tolerance"] is True and result["all_equal"] is False
+    assert result["u_m_s_unequal"] > 0 and result["v_m_s_unequal"] == 0
+    assert 0.0 < result["u_m_s_relative_max_abs"] < 1.0e-12
+
+
 def test_daily_mean_output_refuses_certified_cpu_mode(tmp_path):
     from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_MADDISON_NAMELIST
 
