@@ -84,6 +84,24 @@ def test_compile_key_switch_reads_the_cpp_file():
         audit.classify(("oce", "namdom", "rn_atfp"), nemo, _Ctx(), "bld::tool::fppkeys key_qco")
 
 
+def test_file_read_settings_compare_the_card_value_not_a_label():
+    # The 24 interval / interpolation / climatology rows read the card's value:
+    # planting a card value that disagrees with NEMO's turns the row into an
+    # unclassed DIFFERS (fail-closed).  The pre-fix rule compared a fixed label
+    # with itself and returned MATCH here.
+    cases = (("namtsd", "sn_tem%ln_clim", True, "tem.ln_clim", False),
+             ("namtsd", "sn_sal%freqh", -1.0, "sal.freqh", -12.0),
+             ("namzdf_iwm", "sn_mpb%freqh", -12.0, "iwm.freqh", -1.0),
+             ("namzdf_iwm", "sn_dsc%ln_tint", False, "iwm.ln_tint", True))
+    for group, key, nemo_v, flat_key, wrong in cases:
+        nemo = {("oce", group, key): [nemo_v]}
+        assert audit.classify(("oce", group, key), nemo, _Ctx(**{flat_key: nemo_v}), "")["status"] == "MATCH"
+        with pytest.raises(audit.AuditError, match="DIFFERS without"):
+            audit.classify(("oce", group, key), nemo, _Ctx(**{flat_key: wrong}), "")
+    row = audit.classify(("oce", "namtsd", "sn_tem%wname"), {("oce", "namtsd", "sn_tem%wname"): [""]}, _Ctx(), "")
+    assert row["status"] == "UNCOMPARED"
+
+
 EXPECTED_DIFFERS = {
     "oce:namrun.nn_itend": "c",
     "oce:namzdf_tke.nn_mxlice": "b:D135",
@@ -93,8 +111,8 @@ EXPECTED_DIFFERS = {
     "oce:namtra_ldf.rn_ud": "c",
     "oce:namtra_eiv.ln_ldfeiv": "c",
     "oce:namtra_mle.ln_mle": "c",
-    "oce:namberg.ln_icebergs": "b:D7",
 }
+EXPECTED_DIFFERS_EXP00 = {**EXPECTED_DIFFERS, "oce:namberg.ln_icebergs": "b:D7"}
 
 
 @pytest.fixture(scope="module")
@@ -107,11 +125,20 @@ def report():
 
 def test_rung10_audit_pins_the_round314_table(report):
     assert report["n_keys"] == 1108
-    assert report["counts"] == {"MATCH": 220, "DIFFERS": 9, "NOT-MODELLED": 662, "INERT": 217}
+    assert report["counts"] == {"MATCH": 189, "DIFFERS": 8, "NOT-MODELLED": 662, "INERT": 217,
+                                "UNCOMPARED": 32}
+    assert report["counts_exp00"] == {"MATCH": 188, "DIFFERS": 9, "NOT-MODELLED": 662, "INERT": 217,
+                                      "UNCOMPARED": 32}
     assert report["selfcheck"]["unexplained"] == []
     differs = {f"{r['ns']}:{r['group']}.{r['key']}": r["class"]
                for r in report["rows"] if r["status"] == "DIFFERS"}
     assert differs == EXPECTED_DIFFERS
+    differs_exp00 = {f"{r['ns']}:{r['group']}.{r['key']}": r["class_exp00"]
+                     for r in report["rows"] if r["status_exp00"] == "DIFFERS"}
+    assert differs_exp00 == EXPECTED_DIFFERS_EXP00
+    unc = {(r["group"], r["key"].split("%")[1]) for r in report["rows"] if r["status"] == "UNCOMPARED"}
+    assert unc == {(g, f) for g in ("namtsd", "namzdf_iwm") for f in ("clftyp", "wname", "vcomp", "lname")}
+    assert not any(r["card"] in ("two-record fldread weights", "read once") for r in report["rows"])
     oo_disagree = {r["key"] for r in report["rows"] if r["ocean_output"] == "disagree"}
     assert oo_disagree == {"jpni", "jpnj", "nn_e"}
 

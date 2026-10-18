@@ -11,7 +11,11 @@ builder executes.  Never from a comment.
 
 Statuses: MATCH, DIFFERS, NOT-MODELLED (no card counterpart; ``why`` says
 what the card does instead), INERT (NEMO's own resolved switch, named in
-``why``, makes the key irrelevant; the switch value is asserted).
+``why``, makes the key irrelevant; the switch value is asserted), UNCOMPARED
+(a card counterpart may exist but the audit reads no card value for it).
+
+The basis is the RECORD run (its own resolved dump): the card replays that
+record.  Every key is also classified against EXP00 as a second column.
 
 Fail-closed: an unclassified key, a DIFFERS row without a (a)/(b)/(c)
 class, an INERT row whose switch does not hold, or a parse disagreement
@@ -43,7 +47,7 @@ RECIPE_SRC = REPO / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.
 TKE_SRC = REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py"
 IWM_SRC = REPO / "packages/ocean/legoesm/ocean/iwm_forcing.py"
 
-STATUSES = ("MATCH", "DIFFERS", "NOT-MODELLED", "INERT")
+STATUSES = ("MATCH", "DIFFERS", "NOT-MODELLED", "INERT", "UNCOMPARED")
 
 
 class AuditError(RuntimeError):
@@ -299,6 +303,44 @@ class CardContext(NamedTuple):
     nn_e_resolved: int
 
 
+def _n_records(path: Path, dim: str) -> int:
+    import netCDF4  # noqa: N813
+
+    with netCDF4.Dataset(path) as ds:
+        return len(ds.dimensions[dim])
+
+
+def _input_file_reads(root: Path, ts_src: str) -> dict:
+    """What the card reads in time from the T/S and wave-mixing files.
+
+    T/S: the record indices and the after-weight in the builder's source, and
+    the file's record count (12 records in one yearly file = monthly, NEMO
+    freqh -1).  Wave mixing: the shared reader squeezes the time axis and has
+    no time interpolation, so it takes the file's only record for the run."""
+
+    w = re.search(r"after_weight = np\.float64\(([0-9.]+) / ([0-9.]+)\)", ts_src)
+    require(w is not None, "T/S builder after-weight not found")
+    after = float(w.group(1)) / float(w.group(2))
+    out = {}
+    for tag, var, fname in (("tem", "votemper", "data_1m_potential_temperature_nomask.nc"),
+                            ("sal", "vosaline", "data_1m_salinity_nomask.nc")):
+        recs = [int(i) for i in re.findall(rf'variables\["{var}"\]\[(\d+)', ts_src)]
+        require(len(recs) == 2, f"T/S builder record reads of {var} not found")
+        n_ts = _n_records(root / fname, "time_counter")
+        out.update({f"{tag}.freqh": -12.0 / n_ts,
+                    f"{tag}.ln_tint": recs[0] != recs[1] and 0.0 < after < 1.0,
+                    f"{tag}.ln_clim": recs == [n_ts - 1, 0]})
+    n_iwm = _n_records(root / "zdfiwm_forcing_orca2.nc", "time")
+    reader = _function_text(IWM_SRC, "read_iwm_file")
+    require("np.squeeze(arr)" in reader, "wave-mixing reader no longer squeezes the time axis")
+    return {
+        **out,
+        "iwm.freqh": -12.0 / n_iwm,
+        "iwm.ln_tint": False,
+        "iwm.ln_clim": n_iwm == 1,
+    }
+
+
 def build_context(record: Path, ocean_output: str) -> CardContext:
     import numpy as np
     from legoesm.core.precision import PrecisionPolicy, set_policy
@@ -322,6 +364,7 @@ def build_context(record: Path, ocean_output: str) -> CardContext:
     flat["seed.avt_min_over_max"] = float(avt.min() / avt.max())
     flat["mask.fmask_max"] = float(np.max(np.asarray(
         card.recipe.z_coord.nemo_een_barotropic.fmask)))
+    flat.update(_input_file_reads(record, ts))
     return CardContext(
         flat=flat, card=card,
         builder_files=tuple(re.findall(r'root / "([^"]+)"', builder)),
@@ -339,7 +382,7 @@ def build_context(record: Path, ocean_output: str) -> CardContext:
 # --------------------------------------------------------------------------
 class Rule(NamedTuple):
     pat: str
-    kind: str                       # map | off | nm | inert
+    kind: str                       # map | off | nm | inert | unc
     card: Callable | None = None    # ctx -> card value
     want: Callable | None = None    # (nemo_scalar, ctx) -> expected card value
     why: str = ""
@@ -448,9 +491,14 @@ def _rules() -> list[Rule]:
     a(Rule(r"oce:namtsd\.sn_(tem|sal)%clvar", "map", card=lambda c: c.ts_variables,
            want=lambda n, c: tuple(v for v in c.ts_variables) if n in c.ts_variables else (n,),
            why="variables the builder reads", effect="initial state"))
-    a(Rule(r"oce:namtsd\.sn_(tem|sal)%.*", "map", card=lambda c: "two-record fldread weights",
-           want=lambda n, c: "two-record fldread weights",
-           why="builder applies fldread's two-record monthly interpolation at kt=1",
+    for f, why in (("freqh", "record interval of the file the builder reads (12 records = monthly)"),
+                   ("ln_tint", "builder blends two records with a weight strictly inside (0, 1)"),
+                   ("ln_clim", "builder's earlier record is the file's last (the year wraps)")):
+        for v in ("tem", "sal"):
+            a(Rule(rf"oce:namtsd\.sn_{v}%{f}", "map", card=C(f"{v}.{f}"), why=why,
+                   effect="initial state"))
+    a(Rule(r"oce:namtsd\.sn_(tem|sal)%(clftyp|wname|vcomp|lname)", "unc",
+           why="file type / weights / rotation / land-fill name: no card value read",
            effect="initial state"))
     a(Rule(r"oce:namtsd\.cn_dir", "nm", why="card reads from the deck root it is given",
            effect=NO_STATE))
@@ -562,9 +610,12 @@ def _rules() -> list[Rule]:
     a(Rule(r"oce:namzdf_iwm\.sn_[a-z]+%clvar", "map",
            card=lambda c: c.iwm_variables, want=lambda n, c: c.iwm_variables if n in c.iwm_variables else (n,),
            why="variables the card's IWM reader takes", effect=VM))
-    a(Rule(r"oce:namzdf_iwm\.sn_[a-z]+%.*", "map", card=lambda c: "read once",
-           want=lambda n, c: "read once",
-           why="one yearly climatology record; the card reads it once at build", effect=VM))
+    for f, why in (("freqh", "record interval of the file the card reads (1 record = yearly)"),
+                   ("ln_tint", "the card's reader has no time interpolation"),
+                   ("ln_clim", "a one-record file held for the whole run")):
+        a(Rule(rf"oce:namzdf_iwm\.sn_[a-z]+%{f}", "map", card=C("iwm." + f), why=why, effect=VM))
+    a(Rule(r"oce:namzdf_iwm\.sn_[a-z]+%(clftyp|wname|vcomp|lname)", "unc",
+           why="file type / weights / rotation / land-fill name: no card value read", effect=VM))
     a(Rule(r"oce:namzdf_iwm\.cn_dir", "nm", why="card reads from the deck root it is given",
            effect=NO_STATE))
     # ---- namdrg / namdrg_bot ----
@@ -793,6 +844,8 @@ def classify(key: tuple[str, str, str], nemo: dict, ctx, cpp: str) -> dict:
         row = {"why": rule.why, "effect": rule.effect, "class": ""}
         if rule.kind == "nm":
             row.update(status="NOT-MODELLED", card="-")
+        elif rule.kind == "unc":
+            row.update(status="UNCOMPARED", card="-")
         elif rule.kind == "inert":
             for name, want in rule.switch:
                 require(_switch_holds(name, want, nemo, cpp),
@@ -852,34 +905,36 @@ def audit(record: Path, exp00: Path, shared: Path, ctx=None) -> dict:
             "record namelists do not reproduce NEMO's dump: "
             + "; ".join(selfcheck["unexplained"][:10]))
 
-    nemo: dict = {}
-    differs_from_record = {}
+    exp00: dict = {}
+    differs_from_record = set()
     for key, dv in dump.items():
         ev, rv = exp_res[key], rec_res[key]
         if (ev is None) == (rv is None) and (ev is None or same_list(ev, rv)[0] and same_list(rv, ev)[0]):
-            nemo[key] = dv
+            exp00[key] = dv
         else:
-            nemo[key] = ev if ev is not None else dv
-            differs_from_record[key] = True
-            if ev is None:
-                differs_from_record[key] = "EXP00 leaves it at namelist_ref/initial; record cfg sets it"
+            exp00[key] = ev if ev is not None else dv
+            differs_from_record.add(key)
     oo_text = (record / "ocean.output").read_text(errors="replace")
     cpp = CPP_KEYS.read_text()
     if ctx is None:
         ctx = build_context(record, oo_text)
     rows = []
     for key in dump:
-        status = classify(key, nemo, ctx, cpp)
+        status = classify(key, dump, ctx, cpp)
+        vs_exp = classify(key, exp00, ctx, cpp)
         oo, oo_val = ocean_output_check(oo_text, key[2], dump[key])
         rows.append({
             "ns": key[0], "group": key[1], "key": key[2],
-            "nemo": show(nemo[key]), "record": show(dump[key]),
+            "record": show(dump[key]), "exp00": show(exp00[key]),
             "record_differs_from_exp00": key in differs_from_record,
             "ocean_output": oo, "ocean_output_value": oo_val,
             **status,
+            "status_exp00": vs_exp["status"], "class_exp00": vs_exp["class"],
         })
     counts = {s: sum(r["status"] == s for r in rows) for s in STATUSES}
-    return {"rows": rows, "counts": counts, "selfcheck": selfcheck,
+    counts_exp00 = {s: sum(r["status_exp00"] == s for r in rows) for s in STATUSES}
+    return {"rows": rows, "counts": counts, "counts_exp00": counts_exp00,
+            "selfcheck": selfcheck,
             "n_keys": len(rows),
             "record_vs_exp00_rows": sum(r["record_differs_from_exp00"] for r in rows),
             "ocean_output": {s: sum(r["ocean_output"] == s for r in rows)
@@ -888,13 +943,14 @@ def audit(record: Path, exp00: Path, shared: Path, ctx=None) -> dict:
 
 def table_markdown(report: dict, header: str) -> str:
     lines = [header, "",
-             "| ns | group | key | NEMO (EXP00) | record | rec!=EXP00 | ocean.output | card | status | class | why |",
-             "|---|---|---|---|---|---|---|---|---|---|---|"]
+             "| ns | group | key | record (basis) | EXP00 | rec!=EXP00 | ocean.output | card "
+             "| status vs record | class | status vs EXP00 | class vs EXP00 | why |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in report["rows"]:
         oo = r["ocean_output"] + (f" ({r['ocean_output_value']})" if r["ocean_output_value"] else "")
-        cells = [r["ns"], r["group"], r["key"], r["nemo"], r["record"],
+        cells = [r["ns"], r["group"], r["key"], r["record"], r["exp00"],
                  "Y" if r["record_differs_from_exp00"] else "", oo, r["card"],
-                 r["status"], r["class"], r["why"]]
+                 r["status"], r["class"], r["status_exp00"], r["class_exp00"], r["why"]]
         lines.append("| " + " | ".join(str(c).replace("|", "/") for c in cells) + " |")
     return "\n".join(lines) + "\n"
 
@@ -924,15 +980,17 @@ def main() -> int:
             "# ORCA2 rung 10 namelist audit table (round 314)\n\n"
             f"Generated by `scripts/validate/ocean_fidelity/orca2_l4/"
             f"nemo_testcase_l4_orca2_round314_namelist_audit.py` at commit {stamp['commit']} (clean={stamp['clean']}); "
-            f"record `{a.record.name}`; counts {report['counts']}.")))
-    print(json.dumps({k: report[k] for k in ("n_keys", "counts", "record_vs_exp00_rows",
+            f"record `{a.record.name}`; counts vs record {report['counts']}; "
+            f"counts vs EXP00 {report['counts_exp00']}.")))
+    print(json.dumps({k: report[k] for k in ("n_keys", "counts", "counts_exp00", "record_vs_exp00_rows",
                                              "ocean_output")}))
     print("selfcheck:", {k: (v if isinstance(v, int) else len(v))
                          for k, v in report["selfcheck"].items()})
     for r in report["rows"]:
-        if r["status"] == "DIFFERS":
-            print(f"DIFFERS {r['ns']}:{r['group']}.{r['key']} nemo={r['nemo']} "
-                  f"card={r['card']} class={r['class']}")
+        if "DIFFERS" in (r["status"], r["status_exp00"]):
+            print(f"DIFFERS {r['ns']}:{r['group']}.{r['key']} record={r['record']} "
+                  f"exp00={r['exp00']} card={r['card']} vs_record={r['status']}/{r['class']} "
+                  f"vs_exp00={r['status_exp00']}/{r['class_exp00']}")
     print("AUDIT_PASS")
     return 0
 
