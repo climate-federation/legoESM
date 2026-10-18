@@ -1792,7 +1792,7 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:717': 'CALL tra_qsr( kstp, Kmm, ts, Krhs )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:749': 'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:288': 'zrhs =       (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kbb)*tmask(ji,jj,jk))) * pt(ji,jj,jk,jn,Kbb )',
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:605': 'pt_rhs(ji,jj,jk) = pt_rhs(ji,jj,jk) + ztra / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk))) * tmask(ji,jj,jk)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:605': ('pt_rhs(ji,jj,jk) = pt_rhs(ji,jj,jk) + ztra / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk))) * tmask(ji,jj,jk)', 2),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:502': 'ptFu(ji,jj,jk) = MAX( pU(ji,jj,jk) , 0._wp ) * pt_b(ji,jj,jk) + MIN( pU(ji,jj,jk) , 0._wp ) * pt_b(ji+1,jj  ,jk)',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:308': 'pts(ji,jj,1,jp_sal,Krhs) = pts(ji,jj,1,jp_sal,Krhs) +           sfx(ji,jj) * z1_rho0_e3t',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:323': 'pts(ji,jj,jk,jp_tem,Krhs) = pts(ji,jj,jk,jp_tem,Krhs)  + rnf_tsc(ji,jj,jp_tem) * zdep',
