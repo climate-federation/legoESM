@@ -232,7 +232,13 @@ Purity: full ORCA2, DINO, G5, V1-V5 one-step jaxprs IDENTICAL to base; L1's chan
 - Resolving would mean dropping or editing lane A hunks by hand, so per the instruction I stopped. Scratch branch
   deleted; tree verified clean.
 
-Gates (CPU, x64, `land.sh` PYTHONPATH): see the lines below this section's choices.
+Gates (CPU, x64, `land.sh` PYTHONPATH; 62 citation pins re-anchored by the fix's offsets, none inside an edited
+hunk, plus one map entry, commit after `53624609d`):
+- **Default gate** (`land.sh` orca2 list, incl. the citation-gate tests and the private-import ratchet), clean tree:
+  **145 passed** (790 s, 16 workers).
+- **Per-receipt citation gate** on this receipt (`--from-heading` this title): **PASS, failures 0**, 37 citations,
+  unmapped 0, map entries failing audit 0; a planted shift of the new fold citation exits 1.
+- BBL unit file: 15 passed. L1 file: 11 passed (above).
 
 ASKED (second resume): items 1-3 as instructed; re-score; plants; gates.
 UNASKED, offered for revert:
