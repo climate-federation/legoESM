@@ -692,3 +692,86 @@ def test_balanced_vorticity_perturbation_is_smooth_and_nondivergent():
     planted = transport_divergence(
         native_face_transports(fields, geometry), geometry)
     assert np.max(np.abs(planted[wet])) > 1.0e-15
+
+
+def _tiny_lid_namelist(**changes):
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_MADDISON_NAMELIST
+
+    return SWG_MADDISON_NAMELIST._replace(
+        nn_SWG=1, rn_Dt_s=43_200.0, nn_itend=2, nn_write=2, nn_stock=2,
+        rn_modified_grav_m_s2=1.0e-6, **changes)
+
+
+def _run_tiny(tmp_path, surface, **kwargs):
+    return driver.run_long(
+        _tiny_lid_namelist(rn_tau_pa=0.1), tmp_path / "run", days=1,
+        mode="cpu-certified", surface=surface, commit="a" * 40,
+        physical_gpu=None, **kwargs)
+
+
+def test_rigid_lid_run_stores_the_pressure_potential_only_when_carried(tmp_path):
+    _run_tiny(tmp_path, "rigid_lid")
+    with np.load(tmp_path / "run" / "day0001.npz") as saved:
+        phi = saved["rigid_lid_phi_m2_s2"]
+        assert phi.shape == saved["ssh_m"].shape and phi.dtype == np.float64
+        assert np.all(np.isfinite(phi)) and np.abs(phi).max() > 0.0
+        assert np.all(saved["ssh_m"] == 0.0)
+    shutil.rmtree(tmp_path / "run")
+    _run_tiny(tmp_path, "explicit")
+    with np.load(tmp_path / "run" / "day0001.npz") as saved:
+        assert "rigid_lid_phi_m2_s2" not in saved.files
+
+
+def test_scanned_day_mean_of_the_rigid_lid_potential_is_the_poststep_mean():
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_swg_card,
+        swg_surface_wind,
+    )
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    tiny = _tiny_lid_namelist(rn_tau_pa=0.1)._replace(rn_Dt_s=3600.0)
+    card = build_swg_card(tiny, surface="rigid_lid")
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    tau_u, tau_v = swg_surface_wind(tiny)
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jax.numpy.asarray(tau_u, dtype=jax.numpy.float64),
+        tau_j_native=jax.numpy.asarray(tau_v, dtype=jax.numpy.float64))
+    state = driver.seed_steady_forcing_carry(card.recipe.initial_state, forcing)
+    phis, reference = [], state
+    for _ in range(3):
+        reference = model.step(reference, card.dt_s, surface_forcing=forcing)
+        phis.append(np.asarray(reference.rigid_lid_phi))
+    _, means = driver.build_scanned_day_mean_stepper(
+        model, card.dt_s, forcing, 3)(state)
+    assert len(means) == 4
+    np.testing.assert_allclose(
+        np.asarray(means[-1]), np.mean(phis, axis=0), rtol=0.0, atol=1.0e-15)
+    assert np.any(np.asarray(means[-1]) != phis[-1])
+
+
+def test_rigid_lid_refuses_a_white_ssh_perturbation(tmp_path):
+    with pytest.raises(ValueError, match="no-op under rigid_lid"):
+        _run_tiny(tmp_path, "rigid_lid", restart=tmp_path / "unread.npz",
+                  perturb_amplitude_m=1.0e-6)
+
+
+def test_rigid_lid_refuses_a_restart_with_nonzero_ssh(tmp_path):
+    shape = (44, 44)
+    restarts = {}
+    for name, ssh in (("zero", np.zeros(shape)), ("nonzero", np.full(shape, 1.0e-3))):
+        restarts[name] = tmp_path / f"{name}.npz"
+        np.savez(restarts[name], ssh_m=ssh, u_m_s=np.zeros(shape),
+                 v_m_s=np.zeros(shape), day=0, step=0, dt_s=43_200.0)
+    with pytest.raises(ValueError, match="identically zero ssh"):
+        _run_tiny(tmp_path, "rigid_lid", restart=restarts["nonzero"])
+    assert not (tmp_path / "run").exists()
+    assert _run_tiny(
+        tmp_path, "rigid_lid", restart=restarts["zero"])["status"] == "complete"
+    shutil.rmtree(tmp_path / "run")
+    assert _run_tiny(
+        tmp_path, "explicit", restart=restarts["nonzero"])["status"] == "complete"

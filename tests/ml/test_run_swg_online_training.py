@@ -1479,7 +1479,11 @@ def test_exp3_is_the_symmetric_candidate_in_single_precision_on_the_gpu():
     assert exp3["description"] == (
         "Next run after the 2026-10-17 decision (user: symmetric objective "
         "next, single-precision training, GPU free runs): "
-        + symmetric["description"])
+        + symmetric["description"].replace(
+            "One of three candidates; the owner has not chosen the objective, "
+            "and the wall-ring treatment for this candidate is also open.",
+            "Wall ring weighted, as in the full experiment (user decision "
+            "2026-10-15)."))
     assert exp3 == symmetric | {
         "experiment": exp3["experiment"], "description": exp3["description"],
         "training_precision": "fp32",

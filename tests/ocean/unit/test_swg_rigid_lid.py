@@ -299,6 +299,10 @@ def test_rigid_lid_energy_budget_pressure_does_no_work(
     s1, _ = rk3.swe_rigid_lid_stage_output(
         stage(boundary, 1), boundary, 1, dt / 3.0, geo)
     s2, _ = rk3.swe_rigid_lid_stage_output(stage(s1, 2), s1, 2, dt / 2.0, geo)
+    for projected in (s1, s2):
+        scale = float(jnp.abs(projected.u_k).max() / geo.spacing_m)
+        assert float(jnp.abs(_divergence(
+            projected.u_k, projected.v_k, geo.spacing_m)).max()) <= DIV_TOL * scale
     raw3 = stage(s2, 3)
     s3, _ = rk3.swe_rigid_lid_stage_output(raw3, s2, 3, dt, geo)
     assert np.array_equal(np.asarray(s3.u_k), np.asarray(u_a[0]))
@@ -412,6 +416,10 @@ def test_thirty_days_from_rest_spin_a_double_gyre(cards, forcing):
         assert psi.max() > 0.2 * abs(psi.min()) and -psi.min() > 0.2 * psi.max()
         assert ke > 0.0
     assert report["rigid_lid dt=3600"][3] == 0.0
+    pmax, pmin, ke, _ = report["rigid_lid dt=3600"]
+    assert pmax == pytest.approx(53.60, abs=0.1)
+    assert pmin == pytest.approx(-53.60, abs=0.1)
+    assert ke == pytest.approx(6.977e13, rel=0.01)
     print("\nDAY30 " + " | ".join(
         f"{name}: max psi {pmax:.3f} Sv, min psi {pmin:.3f} Sv, "
         f"KE {ke:.4e} m^5 s^-2 (per unit density), max|ssh| {ssh:.3e} m"

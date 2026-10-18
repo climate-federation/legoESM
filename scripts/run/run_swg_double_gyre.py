@@ -218,7 +218,7 @@ def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int,
         raise ValueError("daily-mean scan n_steps must be a positive integer")
 
     def scan_body(carry, count):
-        state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv = carry
+        state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv, mean_phi = carry
         state = model.step(state, dt_s, surface_forcing=forcing)
         ssh = state.eta.data
         u = state.u.data[:, 1:, 0]
@@ -233,7 +233,9 @@ def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int,
             qu, qv = transport_diagnostic(ssh, u, v)
             mean_qu = (mean_qu * old_count + qu) / count
             mean_qv = (mean_qv * old_count + qv) / count
-        return (state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv), None
+        if state.rigid_lid_phi is not None:
+            mean_phi = (mean_phi * old_count + state.rigid_lid_phi) / count
+        return (state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv, mean_phi), None
 
     @jax.jit
     def scanned(state):
@@ -243,13 +245,18 @@ def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int,
             jnp.zeros_like(state.v.data[1:, :, 0]),
             jnp.zeros_like(state.u.data[:, 1:, 0]),
             jnp.zeros_like(state.v.data[1:, :, 0]),
+            (jnp.zeros(()) if state.rigid_lid_phi is None
+             else jnp.zeros_like(state.rigid_lid_phi)),
         )
         counts = jnp.arange(1, n_steps + 1, dtype=state.eta.data.dtype)
-        (state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv), _ = jax.lax.scan(
-            scan_body, (state, *means), counts)
-        if transport_diagnostic is None:
-            return state, (mean_ssh, mean_u, mean_v)
-        return state, (mean_ssh, mean_u, mean_v, mean_qu, mean_qv)
+        (state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv, mean_phi), _ = (
+            jax.lax.scan(scan_body, (state, *means), counts))
+        result = (mean_ssh, mean_u, mean_v)
+        if transport_diagnostic is not None:
+            result += (mean_qu, mean_qv)
+        if state.rigid_lid_phi is not None:
+            result += (mean_phi,)
+        return state, result
 
     return scanned
 
@@ -616,6 +623,11 @@ def run_long(
         raise ValueError("unknown perturbation kind")
     if perturb_kind != "white-ssh" and perturb_amplitude_m is None:
         raise ValueError("non-default perturbation kind requires --perturb")
+    if (surface == "rigid_lid" and perturb_amplitude_m is not None
+            and perturb_kind == "white-ssh"):
+        raise ValueError(
+            "white-ssh perturbation is a no-op under rigid_lid (ssh is "
+            "projected out); use balanced-vorticity")
     if restart is not None:
         if hourly_targets:
             restart_admission = admit_listed_snapshot(restart)
@@ -625,6 +637,9 @@ def run_long(
             state, forcing, restart, dt_s=card.dt_s,
             perturb_amplitude_m=(
                 perturb_amplitude_m if perturb_kind == "white-ssh" else None))
+        if surface == "rigid_lid" and np.any(np.asarray(state.eta.data) != 0.0):
+            raise ValueError(
+                "rigid_lid restart requires a snapshot with identically zero ssh")
         restart_provenance["manifest_admission"] = restart_admission
         restart_provenance["perturb_kind"] = perturb_kind
         if perturb_kind == "balanced-vorticity":
@@ -837,6 +852,9 @@ def run_long(
                 "u_m_s": np.asarray(state.u.data[:, 1:, 0], dtype=np.float64),
                 "v_m_s": np.asarray(state.v.data[1:, :, 0], dtype=np.float64),
             })
+            if state.rigid_lid_phi is not None:
+                arrays["rigid_lid_phi_m2_s2"] = np.asarray(
+                    state.rigid_lid_phi, dtype=np.float64)
         daily_health = numerical_health(state, namelist)
         previous_health = manifest["numerical_health"]
         manifest["numerical_health"] = {
@@ -870,6 +888,9 @@ def run_long(
                 "v_daily_mean_transport_m3_s": np.asarray(
                     means[4], dtype=np.float64),
             })
+            if state.rigid_lid_phi is not None:
+                arrays["rigid_lid_phi_daily_mean_m2_s2"] = np.asarray(
+                    means[-1], dtype=np.float64)
         if hourly is not None:
             source_day = (0 if restart_provenance is None else
                           restart_provenance["source_day"])

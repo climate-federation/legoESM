@@ -4426,6 +4426,8 @@ def _validate_swg_card(
         card: NEMOTestcaseCard,
         namelist: SwgResolvedNamelist | None = None,
 ) -> None:
+    from legoesm.ocean.dynamics.swe_rk3 import SWE_SURFACE_MODES
+
     nl = card.resolved_namelist if namelist is None else namelist
     if not isinstance(nl, SwgResolvedNamelist):
         raise ValueError("SWG-zco must retain its resolved namelist")
@@ -4449,7 +4451,7 @@ def _validate_swg_card(
         raise ValueError("SWG-zco dynamics and physics gravity constants differ")
     if card.recipe.model_config.outer_integrator != "swe_rk3":
         raise ValueError("SWG-zco must select the SWE RK3 stage dispatcher")
-    if card.recipe.model_config.swe_surface not in ("explicit", "rigid_lid"):
+    if card.recipe.model_config.swe_surface not in SWE_SURFACE_MODES:
         raise ValueError("SWG-zco must state its SWE free-surface treatment")
     vor = card.recipe.model_config.vorticity_scheme
     if (not isinstance(vor, ENSVorticityConfig)
