@@ -426,16 +426,16 @@ def measure(rung: str, n_dirs: int, full_sweep: bool, output: Path | None = None
         d = rng.standard_normal(np.shape(t0_data)) * np.asarray(tmask)
         d = d / np.sqrt(np.mean(d[wet] ** 2))
         d = jnp.asarray(d)
-        jvp = chain_forward(step, state0, ones, forcing, n_list, losses, dt,
-                            tangent_state=_with_t(_zero_tangent(state0), d))
+        jvp = _try_jvp(step, state0, ones, forcing, n_list, losses, dt,
+                       tangent_state=_with_t(_zero_tangent(state0), d))
         fd = {eps: {k: (p - m) / (2 * eps) for (k, p), m in zip(
             chain_forward(step, _with_t(state0, t0_data + eps * d), ones, forcing,
                           n_list, losses, dt).items(),
             chain_forward(step, _with_t(state0, t0_data - eps * d), ones, forcing,
                           n_list, losses, dt).values())} for eps in t_eps}
-        for (name, n) in jvp:
+        for (name, n) in rev:
             ad = float(jnp.vdot(rev[(name, n)]["dstate0"].T.data, d))
-            checks.append(_row(f"T_dir{d_i}", name, n, ad, jvp[(name, n)][1],
+            checks.append(_row(f"T_dir{d_i}", name, n, ad, jvp.get((name, n), (0, None))[1],
                                {e: fd[e][(name, n)] for e in t_eps}))
         save(f"T_dir{d_i}")
     for key in SCALARS:
@@ -447,8 +447,8 @@ def measure(rung: str, n_dirs: int, full_sweep: bool, output: Path | None = None
             save(f"scalar {key} (rebuilt only)")
             continue
         tan = {k: jnp.float64(1.0 if k == key else 0.0) for k in keys}
-        jvp = chain_forward(step, state0, ones, forcing, n_list, losses, dt,
-                            tangent_scales=tan)
+        jvp = _try_jvp(step, state0, ones, forcing, n_list, losses, dt,
+                       tangent_scales=tan)
         fd = {}
         for eps in s_eps:
             up = {k: jnp.float64(1.0 + (eps if k == key else 0.0)) for k in keys}
@@ -456,9 +456,10 @@ def measure(rung: str, n_dirs: int, full_sweep: bool, output: Path | None = None
             p = chain_forward(step, state0, up, forcing, n_list, losses, dt)
             m = chain_forward(step, state0, dn, forcing, n_list, losses, dt)
             fd[eps] = {k: (p[k] - m[k]) / (2 * eps) for k in p}
-        for (name, n) in jvp:
+        for (name, n) in rev:
             checks.append(_row(key, name, n, rev[(name, n)]["dscales"][key],
-                               jvp[(name, n)][1], {e: fd[e][(name, n)] for e in s_eps}))
+                               jvp.get((name, n), (0, None))[1],
+                               {e: fd[e][(name, n)] for e in s_eps}))
         # construction parity: a model REBUILT with the scaled config at the
         # sweep's middle epsilon, run through production model.step.
         eps = s_eps[len(s_eps) // 2]
@@ -496,13 +497,26 @@ def _rebuilt_fd(key, cfg, z, new_model, state0, forcing, n_list, losses, dt, eps
                            for (k, n) in rebuilt[1]}}
 
 
+def _try_jvp(*args, **kwargs) -> dict:
+    """Forward mode, or {} when the step holds a custom_vjp (no JVP rule)."""
+
+    try:
+        return chain_forward(*args, **kwargs)
+    except TypeError as error:
+        if "custom_vjp" not in str(error):
+            raise
+        return {}
+
+
 def _row(inp, loss, n, ad, fwd, fd_by_eps):
+    revfwd = None if fwd is None else rel_err(ad, fwd)
     return {"input": inp, "loss": loss, "N": n, "ad_reverse": ad, "ad_forward": fwd,
-            "revfwd_rel": rel_err(ad, fwd), "revfwd_pass": rel_err(ad, fwd) <= REVFWD_TOL,
+            "revfwd_rel": revfwd,
+            "revfwd_pass": None if fwd is None else revfwd <= REVFWD_TOL,
             "fd": {f"{e:g}": v for e, v in fd_by_eps.items()},
             "fd_rel": {f"{e:g}": rel_err(ad, v) for e, v in fd_by_eps.items()},
             "best": best_fd(ad, fd_by_eps),
-            "finite": bool(np.isfinite(ad) and np.isfinite(fwd)), "nonzero": ad != 0.0}
+            "finite": bool(np.isfinite(ad)), "nonzero": ad != 0.0}
 
 
 def main() -> int:
