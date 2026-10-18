@@ -72,7 +72,7 @@ preflight() {
   [[ "$(sha "$REC_BIN")" == "$REC_BIN_SHA" ]] || fail 'G5 record binary changed'
   [[ "$(sha "$G5_RECORD/oracle_rktracer_stage3_kt00000001.bin")" == "$G5_STAGE_SHA" ]] \
     || fail 'G5 admitted stage-3 record changed'
-  rendered=$(mktemp "$EVIDENCE.rendered.XXXXXX")
+  rendered=$(mktemp "$repo/.l2-rendered.XXXXXX")
   /home/dbalwada/legoESM/.venv/bin/python "$RENDER" "$G5_DECK" "$rendered"
   [[ "$(sha "$rendered")" == "$L2_DECK_SHA" ]] || fail 'rendered L2 deck changed'
   rm -f "$rendered"
