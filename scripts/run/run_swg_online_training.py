@@ -26,6 +26,15 @@ trajectory, loss and gradient are computed in float32, and the gradient is
 cast back to float64 before the float64 optimiser update; checkpoints, resume
 and the float64 free runs are unchanged.
 
+``gradient_checkpointing`` (``true`` or ``false``, required) selects whether
+the segment rematerialises every production step in the backward pass; the
+loss and gradient are the same either way, ``false`` trading memory for time.
+``dataset.cache`` (``"none"`` or ``"memory"``, required) selects whether
+training holds every stored hour its batches can read in host memory
+(``SWGDatasetContract.preload_memory``, loaded once through the same
+digest-pinned sources) or reads the day files for every batch; batches are
+identical.
+
 ``free-run`` integrates the coarse card from rest with the closure of one
 trained window length (its last checkpoint) on the device and math policy
 the configuration states, writing every day's end-of-day snapshot beside its
@@ -138,6 +147,7 @@ TRAINING_DECKS = ("dg50", "dg50-rl")
 CONTROL_DECKS = {"nu10": "dg50", "nu80": "dg50-nu80"}
 FREE_RUN_SAMPLING = "end_of_day_snapshot_and_daily_mean"
 TRAINING_PRECISIONS = ("fp64", "fp32")
+DATASET_CACHES = ("none", "memory")
 SECONDS_PER_DAY = 86_400
 _OPERATOR_FIELDS = {"symmetric": "box", "template": "filtered"}
 
@@ -246,7 +256,8 @@ def load_config(path: Path) -> dict:
 
     _require_keys(config, (
         "schema", "experiment", "description", "deck", "surface", "objective",
-        "wall_ring", "training_precision", "target_interval_hours", "network", "seeds", "dataset",
+        "wall_ring", "training_precision", "gradient_checkpointing",
+        "target_interval_hours", "network", "seeds", "dataset",
         "curriculum", "optimiser", "free_run"), "configuration")
     if config["schema"] != CONFIG_SCHEMA:
         raise ValueError(f"configuration schema must be {CONFIG_SCHEMA!r}")
@@ -266,6 +277,8 @@ def load_config(path: Path) -> dict:
     if config["training_precision"] not in TRAINING_PRECISIONS:
         raise ValueError(
             f"training_precision must be one of {TRAINING_PRECISIONS}")
+    if type(config["gradient_checkpointing"]) is not bool:
+        raise ValueError("gradient_checkpointing must be true or false")
     # A valid interval whose whole number of deck steps fits (refused here,
     # not mid-run).
     steps_per_target_interval(
@@ -299,7 +312,10 @@ def load_config(path: Path) -> dict:
         raise ValueError("seeds must list one or more distinct seeds")
 
     dataset = config["dataset"]
-    _require_keys(dataset, ("records", "splits_days", "batch_size"), "dataset")
+    _require_keys(dataset, ("records", "splits_days", "batch_size", "cache"),
+                  "dataset")
+    if dataset["cache"] not in DATASET_CACHES:
+        raise ValueError(f"dataset cache must be one of {DATASET_CACHES}")
     if dataset["batch_size"] != TEMPLATE_BATCH_SIZE:
         raise ValueError(f"batch_size must be {TEMPLATE_BATCH_SIZE}")
     records = dataset["records"]
@@ -589,7 +605,7 @@ def _in_single_precision(function):
 def build_batch_functions(card, geometry, *, window_days: int,
                           target_interval_hours: int,
                           objective: str, wall_ring: str,
-                          training_precision: str):
+                          training_precision: str, checkpoint: bool):
     """Jitted (value-and-grad, value) of the Eq. 7 loss of a window batch.
 
     Every window starts from its (rebalanced) stored state and runs the
@@ -602,10 +618,15 @@ def build_batch_functions(card, geometry, *, window_days: int,
     master weights and batch, compute the trajectory, loss and gradient in
     float32 (x64 off for the build, trace and call only) and return them in
     float64; ``"fp64"`` computes in float64 throughout.
+    ``checkpoint`` is passed to ``build_segment_fn``: ``True`` rematerialises
+    every step in the backward pass, ``False`` keeps
+    the activations (same loss and gradient, more memory, less time).
     """
     if training_precision not in TRAINING_PRECISIONS:
         raise ValueError(
             f"training_precision must be one of {TRAINING_PRECISIONS}")
+    if type(checkpoint) is not bool:
+        raise ValueError("checkpoint must be true or false")
     single = training_precision == "fp32"
     with _single_precision_trace() if single else contextlib.nullcontext():
         if single:
@@ -616,7 +637,7 @@ def build_batch_functions(card, geometry, *, window_days: int,
             geometry = _single(geometry)
         raw, _ = build_segment_fn(
             card, geometry, window_days=window_days,
-            target_interval_hours=target_interval_hours, checkpoint=True)
+            target_interval_hours=target_interval_hours, checkpoint=checkpoint)
     n_steps = window_steps(card, window_days, target_interval_hours)
     template = card.recipe.initial_state
     namelist = card.resolved_namelist
@@ -873,7 +894,10 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
         "execution": {
             "windows_per_call": windows_per_call,
             "segment": "build_segment_fn(checkpoint=True): rematerialise "
-                       "every production step"},
+                       "every production step"
+            if config["gradient_checkpointing"] else
+            "build_segment_fn(checkpoint=False): keep every production "
+            "step's activations"},
         "card": {"namelist": namelist._asdict(), "dt_s": card.dt_s,
                  "steps_per_day": per_day,
                  "grid_shape": list(geometry.tmask.shape)},
@@ -1078,6 +1102,13 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
             raise
         staging.rename(run_dir)
     contract = SWGDatasetContract.from_json(contract_path, card=card)
+    if config["dataset"]["cache"] == "memory":
+        loaded = time.perf_counter()
+        held = contract.preload_memory(
+            window_days=config["curriculum"]["window_days"],
+            target_interval_hours=config["target_interval_hours"])
+        print(f"DATASET_CACHE hours={held['hours']} bytes={held['bytes']} "
+              f"seconds={time.perf_counter() - loaded:.1f}", flush=True)
     log["invocations"].append(invocation | {
         "completed_epochs_at_start": len(log["epochs"])})
     _write_json(log_path, log)
@@ -1105,7 +1136,8 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
                     target_interval_hours=config["target_interval_hours"],
                     objective=config["objective"],
                     wall_ring=config["wall_ring"],
-                    training_precision=config["training_precision"])
+                    training_precision=config["training_precision"],
+                    checkpoint=config["gradient_checkpointing"])
                 update = _update_function(optimizer)
             if epoch == 1:
                 opt_state = optimizer.init(
@@ -1323,7 +1355,8 @@ def profile(config: dict, *, card, device: dict, windows_per_call: int) -> dict:
             card, geometry, window_days=window_days,
             target_interval_hours=config["target_interval_hours"],
             objective=config["objective"], wall_ring=config["wall_ring"],
-            training_precision=config["training_precision"])
+            training_precision=config["training_precision"],
+            checkpoint=config["gradient_checkpointing"])
         target = np.zeros(
             (TEMPLATE_BATCH_SIZE,
              HOURS_PER_DAY * window_days // config["target_interval_hours"])

@@ -340,7 +340,8 @@ def main():
         _, loss_fn = driver.build_batch_functions(card, geometry, window_days=window_days,
                                                   objective=config["objective"], wall_ring=config["wall_ring"],
                                                   training_precision=config["training_precision"],
-                                                      target_interval_hours=1)
+                                                      target_interval_hours=1,
+                                                  checkpoint=True)
         networks = {
             "pilot2": nets[window_days],
             "exp1_seed1": load_network(EXP1 / f"{tag}_e05.eqx", spec, optimizer, key, "exp1 seed-1 closure"),

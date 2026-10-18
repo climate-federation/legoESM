@@ -239,6 +239,12 @@ def test_gpu_control_configs_name_the_frozen_control_choices_exactly():
     (lambda c: c.update(training_precision="fp16"), "training_precision"),
     (lambda c: c.update(training_precision="FP32"), "training_precision"),
     (lambda c: c.update(training_precision=32), "training_precision"),
+    (lambda c: c.pop("gradient_checkpointing"), "exactly the keys"),
+    (lambda c: c.update(gradient_checkpointing="yes"), "gradient_checkpointing"),
+    (lambda c: c.update(gradient_checkpointing=1), "gradient_checkpointing"),
+    (lambda c: c["dataset"].pop("cache"), "exactly the keys"),
+    (lambda c: c["dataset"].update(cache="disk"), "cache"),
+    (lambda c: c["dataset"].update(cache=True), "cache"),
     (lambda c: c["optimiser"].pop("adam_epsilon_convention"), "exactly"),
     (lambda c: c["optimiser"].update(schedule="warmup_cosine"), "constant"),
     (lambda c: c["optimiser"].update(gradient_clipping="global_norm"), "none"),
@@ -1499,9 +1505,13 @@ def test_every_committed_training_config_states_its_training_precision():
     assert precisions.pop(EXP3_FP32.name) == "fp32"
     assert precisions.pop(EXP4_TEMPLATE.name) == "fp32"
     assert precisions.pop(EXP4_SYMMETRIC.name) == "fp32"
+    assert precisions.pop(EXP5_TEMPLATE.name) == "fp32"
+    assert precisions.pop(EXP5_SYMMETRIC.name) == "fp32"
     assert set(precisions.values()) == {"fp64"}
 
 
+EXP5_SYMMETRIC = _ROOT / "config/swg_online/exp5_rigidlid_symmetric_fast.json"
+EXP5_TEMPLATE = _ROOT / "config/swg_online/exp5_rigidlid_template_fast.json"
 EXP4_TEMPLATE = _ROOT / "config/swg_online/exp4_rigidlid_template_ring_weighted_fp32.json"
 EXP4_SYMMETRIC = _ROOT / "config/swg_online/exp4_rigidlid_symmetric_ring_weighted_fp32.json"
 RIGID_LID_TRUTH = ("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
@@ -1516,6 +1526,8 @@ def test_every_committed_training_config_states_its_target_interval():
                  for path in trained_configs}
     assert intervals.pop(EXP4_TEMPLATE.name) == 3
     assert intervals.pop(EXP4_SYMMETRIC.name) == 3
+    assert intervals.pop(EXP5_TEMPLATE.name) == 3
+    assert intervals.pop(EXP5_SYMMETRIC.name) == 3
     assert len(intervals) >= 17 and set(intervals.values()) == {1}
 
 
@@ -1656,13 +1668,15 @@ def precision_steps(small_card):
     eqx.filter_jit = spy
     try:
         functions32 = driver.build_batch_functions(
-            card, geometry, training_precision="fp32", **options, target_interval_hours=1)
+            card, geometry, training_precision="fp32", checkpoint=True, **options,
+            target_interval_hours=1)
     finally:
         eqx.filter_jit = real_filter_jit
     return {
         "parent": step(_parent_batch_functions(card, geometry, **options)),
         "fp64": step(driver.build_batch_functions(
-            card, geometry, training_precision="fp64", **options, target_interval_hours=1)),
+            card, geometry, training_precision="fp64", checkpoint=True, **options,
+            target_interval_hours=1)),
         "fp32": step(functions32), "traced": traced[-1], "calls": calls,
         "network": network, "batch": batch, "key": key, "card": card,
         "geometry": geometry}
@@ -1797,7 +1811,7 @@ def test_build_batch_functions_refuses_an_unknown_training_precision(
         driver.build_batch_functions(
             small_card, build_closure_geometry(small_card), window_days=1,
             objective="template", wall_ring="weighted",
-            training_precision="bf16", target_interval_hours=1)
+            training_precision="bf16", checkpoint=True, target_interval_hours=1)
 
 
 # ----------------------------------------- rigid-lid deck at a 3-hour step
@@ -1845,7 +1859,7 @@ def test_rigid_lid_three_hour_training_rollout_has_live_gradients(
         lid_card, geometry, window_days=1,
         target_interval_hours=config["target_interval_hours"],
         objective=objective, wall_ring=config["wall_ring"],
-        training_precision="fp64")
+        training_precision="fp64", checkpoint=True)
     rng = np.random.default_rng(4)
     template = lid_card.recipe.initial_state
     u_shape = tuple(template.u.data[:, 1:, 0].shape)
@@ -1889,3 +1903,115 @@ def test_rigid_lid_free_run_writes_whole_day_dual_files(tmp_path, lid_card):
         assert int(saved["daily_mean_sample_count"]) == 8
         assert set(driver.SNAPSHOT_FIELDS + driver.DAILY_MEAN_FIELDS) \
             <= set(saved.files)
+
+
+# ------------------------------------------- gradient checkpointing and cache
+
+def test_every_committed_training_config_states_checkpointing_and_cache():
+    trained_configs = [
+        path for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
+        if "network" in json.loads(path.read_text())]
+    states = {}
+    for path in trained_configs:
+        config = driver.load_config(path)
+        states[path.name] = (config["gradient_checkpointing"],
+                             config["dataset"]["cache"])
+    assert states.pop(EXP5_SYMMETRIC.name) == (False, "memory")
+    assert states.pop(EXP5_TEMPLATE.name) == (False, "memory")
+    assert len(states) >= 17 and set(states.values()) == {(True, "none")}
+
+
+@pytest.mark.parametrize("parent,child,experiment", [
+    (EXP4_TEMPLATE, EXP5_TEMPLATE,
+     "swgonl_exp5_rigidlid_template_fast"),
+    (EXP4_SYMMETRIC, EXP5_SYMMETRIC,
+     "swgonl_exp5_rigidlid_symmetric_fast")])
+def test_exp5_fast_configs_differ_from_exp4_only_as_decided(
+        parent, child, experiment):
+    base, new = driver.load_config(parent), driver.load_config(child)
+    assert new["description"] == (
+        "Speed-up of exp4 (user 2026-10-18): in-memory record cache and no "
+        "gradient checkpointing; numerically identical training. "
+        + base["description"])
+    assert new == base | {
+        "experiment": experiment, "description": new["description"],
+        "gradient_checkpointing": False,
+        "dataset": base["dataset"] | {"cache": "memory"}}
+
+
+_REMAT = {"checkpoint", "remat", "remat2"}
+
+
+@pytest.fixture(scope="module")
+def unrematerialised_step(precision_steps):
+    """The ``precision_steps`` fp64 step again with both ``checkpoint``
+    values, and the primitives of each build's loss and gradient programs."""
+    card, geometry = precision_steps["card"], precision_steps["geometry"]
+    batch, network = precision_steps["batch"], precision_steps["network"]
+    key = precision_steps["key"]
+    options = {"window_days": 1, "objective": "template",
+               "wall_ring": "excluded", "training_precision": "fp64",
+               "target_interval_hours": 1}
+    arguments = (network, tuple(map(jnp.asarray, batch.initial)),
+                 tuple(map(jnp.asarray, batch.target)), key)
+    built, primitives = {}, {}
+    for checkpoint in (True, False):
+        value_and_grad, loss_fn = driver.build_batch_functions(
+            card, geometry, checkpoint=checkpoint, **options)
+        built[checkpoint] = driver.batch_value_and_grad(
+            value_and_grad, network, batch, key, 10)
+        primitives[checkpoint] = set().union(*(
+            _jaxpr_float64_use(jax.make_jaxpr(function)(*arguments))[3]
+            for function in (value_and_grad, loss_fn)))
+    return built, primitives
+
+
+def test_checkpoint_flag_changes_the_program_not_the_step(
+        unrematerialised_step):
+    built, primitives = unrematerialised_step
+    assert _REMAT & primitives[True]            # the detector sees remat
+    assert not _REMAT & primitives[False]       # and it is gone when off
+    loss_on, grads_on = built[True]
+    loss_off, grads_off = built[False]
+    assert float(loss_on) > 0.0
+    assert float(loss_off) == pytest.approx(float(loss_on), rel=1.0e-14)
+    on = np.concatenate([np.ravel(leaf) for leaf in jax.tree.leaves(
+        eqx.filter(grads_on, eqx.is_inexact_array))])
+    off = np.concatenate([np.ravel(leaf) for leaf in jax.tree.leaves(
+        eqx.filter(grads_off, eqx.is_inexact_array))])
+    assert np.max(np.abs(on)) > 0.0
+    assert np.max(np.abs(on - off)) <= 1.0e-14 * np.max(np.abs(on))
+
+
+@pytest.mark.parametrize("checkpoint", [1, "false", None])
+def test_build_batch_functions_refuses_a_non_boolean_checkpoint(
+        small_card, checkpoint):
+    with pytest.raises(ValueError, match="checkpoint"):
+        driver.build_batch_functions(
+            small_card, build_closure_geometry(small_card), window_days=1,
+            objective="template", wall_ring="weighted",
+            training_precision="fp64", checkpoint=checkpoint,
+            target_interval_hours=1)
+
+
+def test_memory_cache_training_reproduces_the_file_reading_run_bit_for_bit(
+        one_window, small_card, tmp_path, capsys):
+    config = copy.deepcopy(one_window["config"])
+    assert config["dataset"]["cache"] == "none"
+    config["dataset"]["cache"] = "memory"
+    path = _write_config(tmp_path / "config.json", config)
+    log = driver.train(config, path, card=small_card, seed=11,
+                       run_dir=tmp_path / "run", device=CPU,
+                       windows_per_call=10, commit="0" * 40)
+    assert "DATASET_CACHE hours=" in capsys.readouterr().out
+    assert log["status"] == "complete"
+    reference = json.loads(
+        (one_window["folder"] / "run/training_log.json").read_text())["epochs"]
+    keys = ("window_days", "epoch", "optimizer_steps", "train_loss_mean",
+            "train_loss_per_batch", "validation_loss", "checkpoint")
+    assert [{key: entry[key] for key in keys} for entry in log["epochs"]] \
+        == [{key: entry[key] for key in keys} for entry in reference]
+    for entry in reference:
+        name = entry["checkpoint"]["path"]
+        assert driver._sha256(tmp_path / "run" / name) \
+            == driver._sha256(one_window["folder"] / "run" / name)

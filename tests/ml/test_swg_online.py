@@ -1653,3 +1653,97 @@ def test_three_hour_loss_is_the_same_plain_mean_over_a_subsample(
     # A time-constant error is the case where the two are exactly equal.
     constant = np.broadcast_to(zeta_error[:, -1:], zeta_error.shape).copy()
     assert loss(constant[:, 2::3]) == pytest.approx(loss(constant), rel=1.0e-12)
+
+
+# ----------------------------------------------------------- memory cache
+
+def _same_batch(left, right):
+    assert np.array_equal(left.start_absolute_hour, right.start_absolute_hour)
+    assert (left.split, left.window_days) == (right.split, right.window_days)
+    for new, old in zip(left.initial + left.target,
+                        right.initial + right.target, strict=True):
+        assert new.dtype == old.dtype == np.float64
+        assert np.array_equal(new, old)
+
+
+def test_memory_cache_serves_the_batches_of_the_file_reading_contract(dataset):
+    plain = SWGDatasetContract.from_json(
+        dataset["path"], card=dataset["card"])
+    cached = SWGDatasetContract.from_json(
+        dataset["path"], card=dataset["card"])
+    held = cached.preload_memory(window_days=(1, 2), target_interval_hours=3)
+    assert held["hours"] > 0 and held["bytes"] > 0
+    compared = 0
+    for interval in (3, 1):
+        for window in (1, 2):
+            for split, kwargs in (
+                    [("train", {"epoch": epoch, "seed": seed})
+                     for epoch in range(6) for seed in (7, 12)]
+                    + [("validation", {}), ("test", {})]):
+                try:
+                    expected = list(plain.batches(
+                        split=split, window_days=window,
+                        target_interval_hours=interval, **kwargs))
+                except ValueError:                  # no full batch of this size
+                    continue
+                if interval != 3 and split != "train":
+                    # Training starts take every hour, so every hour is held;
+                    # a held-out lattice holds only its start + 3k hours.
+                    with pytest.raises(ValueError, match="not preloaded"):
+                        list(cached.batches(
+                            split=split, window_days=window,
+                            target_interval_hours=interval, **kwargs))
+                    continue
+                served = list(cached.batches(
+                    split=split, window_days=window,
+                    target_interval_hours=interval, **kwargs))
+                assert len(served) == len(expected) > 0
+                for new, old in zip(served, expected, strict=True):
+                    _same_batch(new, old)
+                    cached.validate_batch_membership(new)
+                compared += len(served)
+    assert compared >= 20
+
+
+def test_memory_cache_reads_no_file_after_preloading(dataset, monkeypatch):
+    cached = SWGDatasetContract.from_json(
+        dataset["path"], card=dataset["card"])
+    cached.preload_memory(window_days=(1,), target_interval_hours=1)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a day file was read after preloading")
+
+    monkeypatch.setattr(swg_online, "_load_pinned_day", refuse)
+    monkeypatch.setattr(swg_online, "stored_state_at", refuse)
+    batch = next(cached.batches(split="train", window_days=1, epoch=0,
+                                seed=12, target_interval_hours=1))
+    assert batch.target[0].shape[1] == 24
+    next(cached.batches(split="validation", window_days=1,
+                        target_interval_hours=1))
+
+
+def test_memory_cache_keeps_the_digest_check_of_every_day_file(
+        tmp_path, small_card):
+    geometry = build_closure_geometry(small_card)
+    masks = (np.asarray(geometry.umask), np.asarray(geometry.vmask))
+    sources = [(tmp_path / name, _write_chunk(
+        tmp_path / name, source_day=day, days=days, masks=masks,
+        truth_run=tmp_path / "truth")) for name, day, days in _CHUNKS]
+    contract = SWGDatasetContract.from_json(
+        _write_contract(tmp_path / "contract.json", sources), card=small_card)
+    swg_online._load_pinned_day.cache_clear()
+    with (tmp_path / "train_a" / "day0003.npz").open("ab") as damaged:
+        damaged.write(b"x")
+    with pytest.raises(ValueError, match="digest differs"):
+        contract.preload_memory(window_days=(1,), target_interval_hours=1)
+    assert contract._memory is None
+
+
+@pytest.mark.parametrize("windows", [(), (3,), (1, 16)])
+def test_memory_preload_refuses_unregistered_windows(dataset, windows):
+    contract = SWGDatasetContract.from_json(
+        dataset["path"], card=dataset["card"])
+    with pytest.raises(ValueError, match="preload windows"):
+        contract.preload_memory(window_days=windows, target_interval_hours=1)
+    with pytest.raises(ValueError, match="target_interval_hours"):
+        contract.preload_memory(window_days=(1,), target_interval_hours=5)

@@ -7,6 +7,7 @@
   "objective": "template",
   "wall_ring": "weighted",
   "training_precision": "fp64",
+  "gradient_checkpointing": true,
   "target_interval_hours": 1,
   "network": {
     "hidden_channels": 16,
@@ -43,7 +44,8 @@
         5506
       ]
     },
-    "batch_size": 10
+    "batch_size": 10,
+    "cache": "none"
   },
   "curriculum": {
     "window_days": [

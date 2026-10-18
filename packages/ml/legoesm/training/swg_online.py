@@ -901,6 +901,8 @@ class SWGDatasetContract:
         init=False, repr=False, compare=False, default=None)
     _issued: dict = field(
         init=False, repr=False, compare=False, default_factory=dict)
+    _memory: dict | None = field(
+        init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self):
         if self.objective not in OBJECTIVE_OPERATORS:
@@ -1016,7 +1018,53 @@ class SWGDatasetContract:
         return _pinned_day(source, self.objective, 0)[1]
 
     def _stored_state(self, hour: int):
-        return stored_state_at(self.sources, self.objective, hour)[0]
+        if self._memory is None:
+            return stored_state_at(self.sources, self.objective, hour)[0]
+        if hour not in self._memory:
+            raise ValueError(
+                f"absolute hour {hour} was not preloaded into memory; "
+                "preload_memory covers only the registered windows and "
+                "target interval")
+        return self._memory[hour]
+
+    def preload_memory(self, *, window_days, target_interval_hours: int) -> dict:
+        """Hold every stored hour that ``batches`` can read in host memory.
+
+        Each hour is read once through ``stored_state_at`` (the digest-pinned
+        day files, so every admission check still runs) and copied, so
+        ``batches`` then serves identical float64 arrays without file reads.
+        The hours are the union, over the given window lengths, of the window
+        starts (training: every offset; held-out: the fixed lattice) and
+        their targets ``target_interval_hours, 2 * ..., 24 * w`` later.  A
+        batch needing any other hour raises instead of reading the files.
+        Returns ``{"hours": count, "bytes": array bytes held}``.
+        """
+        window_days = tuple(window_days)
+        if not window_days or any(
+                window not in ADMITTED_WINDOWS_DAYS for window in window_days):
+            raise ValueError("preload windows must be from 1, 2, 4, or 8 days")
+        interval = require_target_interval_hours(target_interval_hours)
+        wanted = []
+        for name, start_bound, end_bound in self.splits:
+            for window in window_days:
+                window_hours = HOURS_PER_DAY * window
+                leads = np.arange(interval, window_hours + 1, interval)
+                for offset in range(window_hours if name == "train" else 1):
+                    starts = np.arange(start_bound + offset,
+                                       end_bound - window_hours + 1,
+                                       window_hours, dtype=np.int64)
+                    wanted += [starts, (starts[:, None] + leads).ravel()]
+        memory = {}
+        for hour in np.unique(np.concatenate(wanted)):
+            state = tuple(np.array(value) for value in
+                          stored_state_at(self.sources, self.objective,
+                                          int(hour))[0])
+            for value in state:
+                value.flags.writeable = False
+            memory[int(hour)] = state
+        object.__setattr__(self, "_memory", memory)
+        return {"hours": len(memory), "bytes": sum(
+            value.nbytes for state in memory.values() for value in state)}
 
     def start_state(self, absolute_hour: int):
         """One window start: the stored state at ``absolute_hour`` with its

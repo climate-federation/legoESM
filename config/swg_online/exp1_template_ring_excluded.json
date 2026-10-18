@@ -7,6 +7,7 @@
   "objective": "template",
   "wall_ring": "excluded",
   "training_precision": "fp64",
+  "gradient_checkpointing": true,
   "target_interval_hours": 1,
   "network": {
     "hidden_channels": 16,
@@ -32,7 +33,8 @@
       "validation": [4265, 5111],
       "test": [5141, 5506]
     },
-    "batch_size": 10
+    "batch_size": 10,
+    "cache": "none"
   },
   "curriculum": {
     "window_days": [1, 2, 4, 8],
