@@ -255,8 +255,11 @@ cards; the tracer helpers are in the WS-RK3 path GYRE also runs, so the GYRE
    uses it.
 
 ## Gates
-Default landing battery (land.sh T4 + this probe's test): 151 passed.
-Citation gate on this receipt: PASS, 2 citations, 0 failures.
+Resume, at `6a1ebef604cc` (x64, CPU): default landing battery (land.sh T4 +
+this probe's test, private-import ratchet included): 155 passed; private-import
+ratchet alone: 6 passed; citation gate on this receipt: PASS, 12 citations,
+0 failures (`resume/gate_default.log`, `resume/citation_gate_receipt.json`).
+No model file changed in this round or its resume.
 
 ## OPEN
 - Rung 10: forward-mode NaN (T loss every N, SSH from N = 2) not located;
