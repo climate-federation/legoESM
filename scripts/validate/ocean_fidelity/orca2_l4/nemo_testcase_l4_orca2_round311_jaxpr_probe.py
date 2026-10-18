@@ -37,9 +37,11 @@ G_DIRS = {"ORCA2G1-flat": "g1_orca2grid", "ORCA2G1b-vec": "g1b_orca2vec",
           "ORCA2G4-sbc": "g4_orca2sbc", "ORCA2G5-ice": "g5_orca2ice",
           "ORCA2G6-vec": "g6_orca2vec", "ORCA2G7-drg": "g7_orca2drg",
           "ORCA2G8-ldf": "g8_orca2ldf"}
-G_RUNS = {"ORCA2G4-sbc": "round17/oracle_g4_r17", "ORCA2G5-ice": "round31/oracle_g5_r31",
-          "ORCA2G6-vec": "round36/oracle_g6_r36", "ORCA2G7-drg": "round41/oracle_g7_r41",
-          "ORCA2G8-ldf": "round45/oracle_g8_r45"}
+G_RUNS = {"ORCA2G4-sbc": "round21/oracle_g4_r21/p6_a",
+          "ORCA2G5-ice": "round31/oracle_g5_r31/twin_a",
+          "ORCA2G6-vec": "round36/oracle_g6_r36/twin_a",
+          "ORCA2G7-drg": "round41/oracle_g7_r41/twin_a",
+          "ORCA2G8-ldf": "round45/oracle_g8_r45/twin_a"}
 G_ROUNDS = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds")
 
 from legoesm.core.precision import PrecisionPolicy, set_policy  # noqa: E402
@@ -111,7 +113,7 @@ elif CASE.startswith("orca2g:"):
         sys.path[:0] = [str(here), str(REPO / "scripts/validate/ocean_fidelity/orca2_l4"),
                         str(here / "nemo_testcase_g4_orca2sbc"),
                         str(here / "nemo_testcase_g5_orca2ice")]
-        run = G_ROUNDS / G_RUNS[case] / "twin_a"
+        run = G_ROUNDS / G_RUNS[case]
         if case == "ORCA2G4-sbc":
             import g4_forcing_steps as g4
             forcing = g4.nemo_supplied_forcing(card, run, 1)
