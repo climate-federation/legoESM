@@ -3354,6 +3354,16 @@ class LatLonCGridOceanConfig(NamedTuple):
     # (traadv_fct.f90:311) and the limiter's halo bound and coefficient.
     # True selects them; False preserves previously measured cards.
     fct_fold_exchange: bool = False
+    # NEMO's end-of-stage exchange (stprk3_stg.f90:795-796) also re-mirrors
+    # the stored T-pivot row of uu, T and S (lbcnfd.f90:624-628, :669-673).
+    # True applies that pivot half-row after every stage; False preserves
+    # previously measured cards.  T-pivot fold grids only.
+    rk3_end_of_stage_pivot_fold: bool = False
+    # The stage-1/2 transport wzv reads NEMO's stage pair: rDt = rn_Dt/3
+    # (rn_Dt/2) and r3t(Kaa) = the stored blend of r3t(Kbb) and r3ta
+    # (stprk3_stg.f90:134-135, :177; :188-189, :221).  False keeps the
+    # real-equal N+1 ratio over rn_Dt.
+    rk3_stage_wzv_nemo_clock_pair: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

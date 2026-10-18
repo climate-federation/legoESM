@@ -176,12 +176,12 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
            if "zdf_momentum_stage_r3u_nemo_literal=" in line]
     assert [name for name, _ in r3u] == ["nemo_testcase_recipe.py"]
     assert "_ORCA2G_ZDF_STAGE_R3U[case]" in r3u[0][1]
-    assert LatLonCGridOceanConfig._fields[-27:-19] == (
+    assert LatLonCGridOceanConfig._fields[-29:-21] == (
         "zdf_tracer_nemo_rounded_thickness", "barotropic_rhs_ascending_level_sum",
         "zdf_momentum_stage_r3u_nemo_literal", "barotropic_wind_nemo_stored_depth",
         "surface_stress_nemo_fold_vector_sign", "zdf_surface_stress_nemo_face_thickness",
         "een_nemo_relative_vorticity", "rk3_stage_tracer_written_order")
-    assert LatLonCGridOceanConfig._fields[-19:-11] == (
+    assert LatLonCGridOceanConfig._fields[-21:-13] == (
         "rk3_vector_rhs_nemo_order", "rk3_stage3_heat_nemo_written",
         "rk3_stage3_tracer_nemo_stored_thickness",
         "implicit_ice_ocean_top_drag",
@@ -190,27 +190,30 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
         # G6 (9f8316fab): appended last, default off, G6-selected only
         "nemo_hpg_sco_fold_geometry", "rk3_vector_raw_vmask")
     # G6 round 7: appended last, default off, G6-selected only
-    assert LatLonCGridOceanConfig._fields[-11:-9] == (
+    assert LatLonCGridOceanConfig._fields[-13:-11] == (
         "nemo_wzv_stored_r3_ratios", "nemo_zad_written_association")
     # G6 round 8: appended last, default off, G6-selected only
-    assert LatLonCGridOceanConfig._fields[-9] == "nemo_stage2_momentum_wzv_half_step"
+    assert LatLonCGridOceanConfig._fields[-11] == "nemo_stage2_momentum_wzv_half_step"
     # G6 round 8 resume: appended last, default off, G6-selected only
-    assert LatLonCGridOceanConfig._fields[-8] == "nemo_stage_momentum_wzv_stored_kmm_ratios"
+    assert LatLonCGridOceanConfig._fields[-10] == "nemo_stage_momentum_wzv_stored_kmm_ratios"
     # G8 round 1: appended last, default off, G8-selected only
-    assert LatLonCGridOceanConfig._fields[-7:-3] == (
+    assert LatLonCGridOceanConfig._fields[-9:-5] == (
         "nemo_ldf_stored_f_area", "nemo_ldf_fold_rows",
         "rk3_stage1_ldf_source_order", "nemo_ldf_stage_r3f")
     # G9 round 1: appended last, default off, G9-selected only
-    assert LatLonCGridOceanConfig._fields[-3:-1] == (
+    assert LatLonCGridOceanConfig._fields[-5:-3] == (
         "rk3_stage_transport_raw_vmask", "rk3_stage_transport_fold_exchanges")
-    # G9 round 2: appended last, default off, G9-selected only
-    assert LatLonCGridOceanConfig._fields[-1] == "fct_fold_exchange"
+    # G9 rounds 2 and 3: appended last, default off, G9-selected only
+    assert LatLonCGridOceanConfig._fields[-3:] == (
+        "fct_fold_exchange", "rk3_end_of_stage_pivot_fold",
+        "rk3_stage_wzv_nemo_clock_pair")
     assert not any(LatLonCGridOceanConfig._field_defaults[f] for f in (
         "nemo_hpg_sco_fold_geometry", "rk3_vector_raw_vmask",
         "nemo_wzv_stored_r3_ratios", "nemo_zad_written_association",
         "nemo_stage2_momentum_wzv_half_step", "nemo_stage_momentum_wzv_stored_kmm_ratios",
         "rk3_stage_transport_raw_vmask", "rk3_stage_transport_fold_exchanges",
-        "fct_fold_exchange"))
+        "fct_fold_exchange", "rk3_end_of_stage_pivot_fold",
+        "rk3_stage_wzv_nemo_clock_pair"))
     assert "_ORCA2G_ZDF_FACES[case]" in (
         CASES.parents[3] / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py"
     ).read_text().splitlines()[hits[0][1] - 1]

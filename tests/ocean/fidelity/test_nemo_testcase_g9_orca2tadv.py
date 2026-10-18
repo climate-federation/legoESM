@@ -110,7 +110,9 @@ def test_g9_card_is_g5_plus_fct2_and_the_folded_transport_vmask(tmp_path):
     c5, c9 = g5.recipe.model_config, g9.recipe.model_config
     assert [f for f in c5._fields if getattr(c5, f) != getattr(c9, f)] == [
         "tracer_advection", "rk3_stage_transport_raw_vmask", "rk3_stage_transport_fold_exchanges",
-        "fct_fold_exchange"]
+        "fct_fold_exchange", "rk3_end_of_stage_pivot_fold", "rk3_stage_wzv_nemo_clock_pair"]
+    assert (c5.rk3_end_of_stage_pivot_fold, c9.rk3_end_of_stage_pivot_fold) == (False, True)
+    assert (c5.rk3_stage_wzv_nemo_clock_pair, c9.rk3_stage_wzv_nemo_clock_pair) == (False, True)
     assert (c5.tracer_advection, c9.tracer_advection) == ("none", "fct2")
     assert c9.rk3_stage_transport_raw_vmask is c9.rk3_stage_transport_fold_exchanges is True
     assert c5.rk3_stage_transport_raw_vmask is c5.rk3_stage_transport_fold_exchanges is False
