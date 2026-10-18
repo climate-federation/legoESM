@@ -25,6 +25,9 @@ from tests.ocean.fidelity.test_nemo_testcase_v1_orca2tke import (
 
 L2 = CASES / "nemo_testcase_l2_orca2iso"
 RUN = L2 / "run.sh"
+REFUSED_SMOKE = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/"
+    "round17/oracle_l2_r17_refused1/smoke_2step")
 
 
 def _module(name: str, path: Path):
@@ -190,7 +193,7 @@ def test_acting_checker_requires_wet_ldf_and_tracer_only_entry(monkeypatch, tmp_
     assert not RECORDS.check_l2(Path("l2"), Path("g5"), tmp_path / "domain")["pass"]
 
 
-def test_acting_checker_requires_exact_barotropic_restart_when_requested(
+def test_acting_checker_requires_exact_kt1_barotropic_frame_when_requested(
         monkeypatch, tmp_path):
     shape = (1, 1, 1)
     zero = np.zeros(shape)
@@ -208,6 +211,18 @@ def test_acting_checker_requires_exact_barotropic_restart_when_requested(
     monkeypatch.setattr(RECORDS, "read_entry",
                         lambda path, case: l2_entries if case == "ORCA2L2-iso" else entries)
 
+    barotropic = {
+        "Kaa": 3,
+        "uu_b": np.ones(shape),
+        "vv_b": np.ones(shape),
+        "un_adv": np.ones(shape),
+        "vn_adv": np.ones(shape),
+    }
+    monkeypatch.setattr(
+        RECORDS, "read_bt_frame",
+        lambda path, expect_step: {key: value.copy() if hasattr(value, "copy") else value
+                                   for key, value in barotropic.items()})
+
     class Var:
         def __init__(self, value): self.value = value
         def __getitem__(self, key): return self.value
@@ -216,28 +231,51 @@ def test_acting_checker_requires_exact_barotropic_restart_when_requested(
         def __init__(self, path):
             if "domain" in str(path):
                 self.variables = {"bottom_level": Var(np.ones((1, 1), dtype=int))}
-            else:
-                value = np.ones(shape) if "l2" in str(path) else np.ones(shape)
-                self.variables = {name: Var(value.copy())
-                                  for name in ("ub_e", "vb_e", "ubb_e", "vbb_e")}
         def __enter__(self): return self
         def __exit__(self, *args): return False
 
     monkeypatch.setattr(RECORDS.netCDF4, "Dataset", Dataset)
     result = RECORDS.check_l2(
-        Path("l2"), Path("g5"), tmp_path / "domain", Path("g5_restart"))
+        Path("l2"), Path("g5"), tmp_path / "domain", check_barotropic=True)
     assert result["pass"] and result["barotropic_checked"]
-    original = Dataset
 
-    class PlantedDataset(original):
-        def __init__(self, path):
-            super().__init__(path)
-            if "l2" in str(path):
-                self.variables["ub_e"] = Var(np.full(shape, 2.0))
+    def planted_frame(path, expect_step):
+        out = {key: value.copy() if hasattr(value, "copy") else value
+               for key, value in barotropic.items()}
+        if "l2" in str(path):
+            out["uu_b"][0, 0, 0] = 2.0
+        return out
 
-    monkeypatch.setattr(RECORDS.netCDF4, "Dataset", PlantedDataset)
+    monkeypatch.setattr(RECORDS, "read_bt_frame", planted_frame)
     assert not RECORDS.check_l2(
-        Path("l2"), Path("g5"), tmp_path / "domain", Path("g5_restart"))["pass"]
+        Path("l2"), Path("g5"), tmp_path / "domain",
+        check_barotropic=True)["pass"]
+
+
+@pytest.mark.skipif(not REFUSED_SMOKE.is_dir(), reason="no refused L2 smoke record")
+def test_corrected_acting_checker_accepts_refused_smoke_and_rejects_kt1_plant(
+        monkeypatch):
+    result = RECORDS.check_l2(
+        REFUSED_SMOKE, RECORDS.G5_ROOT, RECORDS.DOMAIN,
+        check_barotropic=True)
+    assert result["pass"]
+    assert result["barotropic_unequal"] == 0
+
+    original = RECORDS.read_bt_frame
+
+    def planted_frame(path, *, expect_step):
+        out = original(path, expect_step=expect_step)
+        if Path(path).parent == REFUSED_SMOKE:
+            out["uu_b"] = out["uu_b"].copy()
+            out["uu_b"].flat[0] += 1.0
+        return out
+
+    monkeypatch.setattr(RECORDS, "read_bt_frame", planted_frame)
+    planted = RECORDS.check_l2(
+        REFUSED_SMOKE, RECORDS.G5_ROOT, RECORDS.DOMAIN,
+        check_barotropic=True)
+    assert not planted["pass"]
+    assert planted["barotropic_unequal"] == 1
 
 
 def test_run_script_reuses_g5_binaries_and_is_fail_closed():

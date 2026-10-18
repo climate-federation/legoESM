@@ -4,7 +4,10 @@ Status: **L2 BUILT; NOT SCORED; ACQUISITION_NEEDED.** This round implements
 Decision 138's second L rung: certified G5 plus ORCA2's standard isoneutral
 tracer diffusion. Eddy-induced velocity remains off. The preregistration was
 committed as `59e9622500` before implementation or any L2 measurement. No L2
-NEMO record exists, so this receipt makes no fidelity verdict.
+NEMO record has been admitted, so this receipt makes no fidelity verdict. The
+operator's first acquisition passed preflight, then the smoke record was
+refused by the erroneous end-of-kt-2 barotropic-invariance condition; that
+evidence is retained as `oracle_l2_r17_refused1` and is not scored.
 
 Read first: the lane standing note, campaign synthesis and debt register,
 round-16 survey, L1 receipt, and the ORCA2 round-313/314 receipts. GitHub issue
@@ -171,16 +174,17 @@ the focused test checks all fields.
 
 Tests and active controls:
 
-- focused L2 file: **10 passed** in 14.04 s;
+- focused L2 file before the resumed predicate correction: **10 passed** in
+  14.04 s;
 - L1, VORTEX SMT-3 record/card, and V1-V5 regression files: **64 passed** in
   1447.86 s;
 - post-EOS focused step-entry selection: **13 passed, 52 deselected** in
   17.54 s;
 - L2 checker against G5 itself: 0 wet moves, 0 dry moves, 0 completed-tracer
   differences, 0 differences in T/S/u/v/SSH, `pass=False`, exit 1;
-- planted dry-cell tracer movement is refused; a planted `ub_e` mismatch is
-  refused; the required barotropic smoke comparison covers `ub_e`, `vb_e`,
-  `ubb_e`, and `vbb_e`;
+- planted dry-cell tracer movement is refused; a planted kt-1 primary
+  barotropic velocity mismatch is refused; the required barotropic smoke
+  comparison covers kt-1 `uu_b`, `vv_b`, `un_adv`, and `vn_adv`;
 - final read-only preflight at `0435ddf85a4c`: `L2_PREFLIGHT_OK`; nothing
   built and the intended evidence root is
   `gridladder_vmix_rounds/round17/oracle_l2_r17`.
@@ -226,8 +230,9 @@ The default invocation is read-only preflight. The run mode is fail-closed:
 - **Acting proof:** stage-3 after-minus-before lateral diffusion is nonzero in
   at least 1 wet T/S cell and exactly 0 in dry cells; completed T/S differs
   from G5; kt-2 entry T or S differs while u, v, and SSH are exact; the smoke
-  step-2 restart's `ub_e`, `vb_e`, `ubb_e`, and `vbb_e` are exact against G5.
-  The self-file inert control above proves this test can fail.
+  kt-1 barotropic frame's primary velocities and advecting transports are exact
+  against G5. The self-file inert control above proves the tracer test can fail,
+  and a planted kt-1 frame mismatch proves the barotropic test can fail.
 - **Logs:** require every resolved `&namtra_ldf` row, the standard-isoneutral
   operator banner, MSC T, mode 20, `rn_Ud = 0.018`, `rn_Ld = 200000`, and
   `ln_ldfeiv = F`; refuse BBL and geothermal heating.
@@ -239,9 +244,43 @@ The default invocation is read-only preflight. The run mode is fail-closed:
 
 Predictions P1/P2/P4 remain live and unscored P3 remains explicitly
 withheld. There is no decision request. Independent review has not been run
-by the author: **independent review: operator (Claude)**.
+by the author: **codex review: operator**.
 
-COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/vmix_r17-38378530
+## 5. Resume: refused smoke diagnosed; admission predicate corrected
+
+The operator's reading is **confirmed in the compiled ORCA2 order**. In
+`SUBROUTINE stp_RK3` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:62`), kt 1
+calls `stp_2D` and writes `oracle_bt_frames_kt00000001.bin` immediately on
+return (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:201-203`), before the three RK
+stages. Stage 3 subsequently applies `tra_ldf` and completes the tracer update
+through `tra_zdf` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:734-749`). The
+end-of-step swap then makes that stage-3 `Naa` state the next step's `Nbb`
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:233-237`).
+
+At kt 2, `SUBROUTINE stp_2D`
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:63`) recomputes density from
+`ts(:,:,:,:,Kbb)` and immediately applies the hydrostatic pressure gradient
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:140-141`). That changed three-
+dimensional momentum RHS is vertically averaged into the external-mode forcing
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:194-206`) and passed to the
+split-explicit solve (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:302-303`). Thus
+the kt-2 end-state `ub_e`, `vb_e`, `ubb_e`, and `vbb_e` are not required to
+equal G5 after kt 1's T/S changed.
+
+The corrected predicate keeps every other condition and replaces that invalid
+restart comparison with exact comparison of the kt-1 barotropic frame against
+G5. On `oracle_l2_r17_refused1/smoke_2step`, the kt-1 frame is byte-identical
+(shared SHA-256 `a76f98edc18eb18ba417c245c197fccf57f8205aa3c9f7fefa60ca22f744bb51`),
+whereas the kt-2 frames differ. The corrected checker reports the same wet/dry,
+completed-tracer, and kt-2 entry counts as the refused run, with
+`barotropic_unequal=0 pass=True`. Its unit check runs this exact refused smoke
+record and then plants one kt-1 `uu_b` mismatch; the plant reports one unequal
+value and fails. No score was run.
+
+Focused L2 file after the resumed correction: **11 passed** in 12.83 s (CPU,
+x64, landing-script `PYTHONPATH`).
+
+COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r17/repo
 ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_orca2iso/run.sh --run
 DECISION_NEEDED: NONE
-ROUND_STATUS: L2_BUILT_STOPPED_FOR_RECORD — exact ORCA2 isoneutral tracer diffusion is L2-selected on certified G5; EIV remains off; no new state/input/binary; no L2 record and no score; independent review: operator (Claude).
+ROUND_STATUS: L2_BUILT_STOPPED_FOR_RECORD — the invalid end-of-kt-2 barotropic condition is replaced by exact kt-1 frame invariance; exact ORCA2 isoneutral tracer diffusion remains L2-selected on certified G5; refused evidence is unscored; reacquisition required; codex review: operator.
