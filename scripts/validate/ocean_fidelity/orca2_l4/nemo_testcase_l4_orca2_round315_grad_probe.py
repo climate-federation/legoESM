@@ -244,6 +244,8 @@ def _zero_tangent(tree):
     import jax.numpy as jnp
 
     def zero(x):
+        if getattr(x, "dtype", None) == jax.dtypes.float0:
+            return x
         x = jnp.asarray(x)
         if jnp.issubdtype(x.dtype, jnp.inexact):
             return jnp.zeros_like(x)
@@ -256,38 +258,82 @@ def _rss_gb() -> float:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 ** 2
 
 
-def chain_reverse(step, state0, scales, forcing, n_list, losses, dt):
+def _maps() -> int:
+    try:
+        with open("/proc/self/maps") as handle:
+            return sum(1 for _ in handle)
+    except OSError:
+        return -1
+
+
+def chain_reverse(step, state0, scales, forcing, n_list, losses, dt, log=print):
     """Gradients of every loss at every N in ``n_list`` w.r.t. state0 and scales.
 
-    One forward per step with its pullback kept; for each N, the loss cotangent
-    is pulled back through steps N..1.  Returns per (loss, N): dstate0 (the
-    whole state cotangent), dscales, backward seconds, peak RSS after.
+    One forward per step with its pullback kept; each loss cotangent is pulled
+    back through steps N..1.  Compiled executables are dropped
+    (``jax.clear_caches``) between stages so that at most one reverse-mode
+    executable is resident: one ORCA2 reverse executable holds tens of
+    thousands of memory maps against a 65,530 per-process limit.  Step 1 has
+    its own input structure (the cold-start state), so its pullback is applied
+    last, to every stored cotangent at once.  Returns per (loss, N): dstate0,
+    dscales, backward seconds (sum over stages, compile excluded), peak RSS.
     """
 
     import jax
 
-    pullbacks, state, out = [], state0, {}
+    jax.clear_caches()
+    pullbacks, state, at_n = [], state0, {}
     for n in range(1, max(n_list) + 1):
         fw, sf = forcing[n - 1]
+        t0 = time.perf_counter()
         state, pb = jax.vjp(lambda st, sc: step(st, sc, dt, fw, sf), state, scales)
         jax.block_until_ready(state)
         pullbacks.append(pb)
-        if n not in n_list:
-            continue
-        for name, loss in losses.items():
-            value, lpb = jax.vjp(loss, state)
-            t0 = time.perf_counter()
-            (ct,) = lpb(jax.numpy.ones_like(value))
-            dscale = jax.tree.map(jax.numpy.zeros_like, scales)
-            for pb_k in reversed(pullbacks):
-                ct, ds = pb_k(ct)
-                dscale = jax.tree.map(lambda a, b: a + b, dscale, ds)
-            jax.block_until_ready((ct, dscale))
-            out[(name, n)] = {"loss": float(value), "dstate0": ct,
-                              "dscales": {k: float(v) for k, v in dscale.items()},
-                              "backward_s": time.perf_counter() - t0,
-                              "peak_rss_gb": _rss_gb()}
-    return out
+        log(f"vjp forward step {n}: {time.perf_counter() - t0:.1f}s maps={_maps()}")
+        if n == 1:
+            jax.clear_caches()
+        if n in n_list:
+            for name, loss in losses.items():
+                value, lpb = jax.vjp(loss, state)
+                at_n[(name, n)] = (float(value), lpb(jax.numpy.ones_like(value))[0])
+    jax.clear_caches()
+
+    def run_pullbacks(ct, steps):
+        dscale = jax.tree.map(jax.numpy.zeros_like, scales)
+        for k in steps:
+            ct, ds = pullbacks[k - 1](ct)
+            dscale = jax.tree.map(lambda a, b: a + b, dscale, ds)
+        jax.block_until_ready((ct, dscale))
+        return ct, dscale
+
+    # warm (compile) each stage once so the timed runs exclude compilation
+    out = {}
+    if max(n_list) > 1:
+        t0 = time.perf_counter()
+        run_pullbacks(_zero_tangent(state), (2,))
+        log(f"transpose compile (steps>=2): {time.perf_counter() - t0:.1f}s maps={_maps()}")
+    for key, (value, ct) in at_n.items():
+        t0 = time.perf_counter()
+        ct, ds = run_pullbacks(ct, range(key[1], 1, -1))
+        out[key] = {"loss": value, "ct1": ct, "ds": ds,
+                    "backward_s": time.perf_counter() - t0}
+        log(f"backward {key} steps {key[1]}..2: {out[key]['backward_s']:.1f}s maps={_maps()}")
+    jax.clear_caches()
+    t0 = time.perf_counter()
+    jax.block_until_ready(pullbacks[0](_zero_tangent(next(iter(out.values()))["ct1"])))
+    log(f"transpose compile (step 1): {time.perf_counter() - t0:.1f}s maps={_maps()}")
+    result = {}
+    for key, r in out.items():
+        t0 = time.perf_counter()
+        ct0, ds = run_pullbacks(r["ct1"], (1,))
+        dscale = jax.tree.map(lambda a, b: a + b, r["ds"], ds)
+        result[key] = {"loss": r["loss"], "dstate0": ct0,
+                       "dscales": {k: float(v) for k, v in dscale.items()},
+                       "backward_s": r["backward_s"] + time.perf_counter() - t0,
+                       "peak_rss_gb": _rss_gb()}
+    log(f"backward step 1 for all: maps={_maps()}")
+    jax.clear_caches()
+    return result
 
 
 def chain_forward(step, state0, scales, forcing, n_list, losses, dt,
@@ -394,7 +440,20 @@ def measure(rung: str, n_dirs: int, full_sweep: bool, output: Path | None = None
     save("forward_parity")
 
     # reverse mode
-    rev = chain_reverse(step, state0, ones, forcing, n_list, losses, dt)
+    a_tree = jax.tree_util.tree_structure(state0)
+    b_tree = jax.tree_util.tree_structure(prod[0])
+    result["step1_structure_differs"] = a_tree != b_tree
+    if a_tree == b_tree:
+        result["step1_aval_diffs"] = [
+            f"{jax.tree_util.keystr(pa)} {jnp.asarray(x).dtype}/{getattr(x, 'weak_type', None)}"
+            f" -> {jnp.asarray(y).dtype}/{getattr(y, 'weak_type', None)}"
+            for (pa, x), y in zip(jax.tree_util.tree_leaves_with_path(state0),
+                                  jax.tree_util.tree_leaves(prod[0]))
+            if (np.shape(x), jnp.asarray(x).dtype) != (np.shape(y), jnp.asarray(y).dtype)][:20]
+    del prod
+    rev = chain_reverse(step, state0, ones, forcing, n_list, losses, dt,
+                        log=lambda msg: print(f"  {msg}", flush=True))
+    jax.clear_caches()
     wet = np.asarray(tmask) > 0.5
     grads = {}
     for (name, n), r in rev.items():
