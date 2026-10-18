@@ -8409,10 +8409,6 @@ CITATION_MAP = {
         'CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )',
         'CALL l1_dump_bt_frames( kstp, Naa )', 2,
     ],
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:734-749': [
-        'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )',
-        'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )', 16,
-    ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:233-237': [
         'Nrhs = Nbb   ;   Nbb  = Naa   ;   Naa  = Nrhs',
         'ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)', 5,
