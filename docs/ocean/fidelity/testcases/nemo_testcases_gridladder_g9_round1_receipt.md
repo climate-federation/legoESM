@@ -8,7 +8,7 @@ NEMO, because no G9 NEMO record exists yet.
   committed `162f603ba` before any card change.
 - Build commit `d6887bfc1`.  Line-neutral model form and citation re-anchor
   `cbd070c74`.
-- Evidence: `gridladder_rounds/round46/` (`manifest.sha256`).
+- Evidence: `gridladder_rounds/round46/` (`manifest.sha256` `ec1f62fe08ccfdf9`; state pickles excluded).
 - codex review: paused (quota).  The operator runs an independent Claude
   review of this diff before landing.
 
@@ -152,6 +152,14 @@ Re-anchor: my model insertion first shifted 51 gate citations; it now sits
 on its existing line (0 shifted).  Six recipe citations and one ladder
 citation shifted mechanically (reanchor tool); none fell inside a changed
 hunk.
+
+Gates before the final commit (`JAX_ENABLE_X64=1`, `land.sh` PYTHONPATH):
+
+| gate | result |
+|---|---|
+| this receipt's citation gate | `PASS`: 13 citations, 0 failures, 0 unmapped (`receipt_citation_gate.json`) |
+| its shift plant on `stprk3_stg.f90:283` | exits 1, `FAIL` |
+| default citation-gate test + private-import ratchet + G9 file (fast part) | 35 passed (`final_gates.log`) |
 
 ## 7. Acquisition (ACQUISITION_NEEDED)
 
