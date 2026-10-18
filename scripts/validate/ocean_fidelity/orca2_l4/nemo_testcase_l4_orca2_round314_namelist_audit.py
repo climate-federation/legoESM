@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """Round 314: every namelist key ORCA2_OMIP_L4 resolves, against rung 10's card.
 
-NEMO's value is ``namelist_ref`` overlaid by ``EXP00/namelist_cfg`` (and the
-two SI3 files).  The parse is checked against a rung-10 record run's own
-resolved dump (``output.namelist.dyn``/``.ice``: every key that run read)
-and against its ``ocean.output`` prints.  The card value comes from the
-built card (``build_orca2_zps_card``): its resolved config, its state seeds,
-or -- for file names and two scheme constants -- the source literal the
-builder executes.  Never from a comment.
+NEMO's value is the RECORD run's own resolved dump (``output.namelist.dyn``/
+``.ice``: every key that run read; the card replays that record), checked
+against the record's namelist files and its ``ocean.output`` prints.  EXP00
+(``namelist_ref`` overlaid by ``EXP00/namelist_cfg``, and the two SI3 files)
+is a second, labelled column.  The card value comes from the built card
+(``build_orca2_zps_card``): its resolved config, its state seeds, its grid,
+or -- for file names and one TKE constant -- the source literal the builder
+executes.  Never from a comment.
 
-Statuses: MATCH, DIFFERS, NOT-MODELLED (no card counterpart; ``why`` says
-what the card does instead), INERT (NEMO's own resolved switch, named in
+Statuses: MATCH and DIFFERS (both sides read), NOT-MODELLED (no card
+counterpart read; ``why`` says what the card does instead; a switch NEMO
+has off is asserted off), INERT (NEMO's own resolved switch, named in
 ``why``, makes the key irrelevant; the switch value is asserted), UNCOMPARED
 (a card counterpart may exist but the audit reads no card value for it).
-
-The basis is the RECORD run (its own resolved dump): the card replays that
-record.  Every key is also classified against EXP00 as a second column.
 
 Fail-closed: an unclassified key, a DIFFERS row without a (a)/(b)/(c)
 class, an INERT row whose switch does not hold, or a parse disagreement
@@ -362,6 +361,7 @@ def build_context(record: Path, ocean_output: str) -> CardContext:
     avt = np.asarray(st.tke_avt.data)[wet]
     flat["seed.avt_max"] = float(avt.max())
     flat["seed.avt_min_over_max"] = float(avt.min() / avt.max())
+    flat["grid.horizontal_shape"] = tuple(np.shape(card.recipe.land_mask))
     flat["mask.fmask_max"] = float(np.max(np.asarray(
         card.recipe.z_coord.nemo_een_barotropic.fmask)))
     flat.update(_input_file_reads(record, ts))
@@ -384,7 +384,7 @@ class Rule(NamedTuple):
     pat: str
     kind: str                       # map | off | nm | inert | unc
     card: Callable | None = None    # ctx -> card value
-    want: Callable | None = None    # (nemo_scalar, ctx) -> expected card value
+    want: Callable | None = None    # (nemo_scalar, ctx, nemo) -> expected card value
     why: str = ""
     effect: str = ""
     switch: tuple = ()              # inert: (("ns:group.key", value), ...)
@@ -399,8 +399,8 @@ def has_file(name: str) -> Callable:
     return lambda ctx: name if any(f.startswith(name) for f in ctx.builder_files) else "not opened"
 
 
-def file_name(nemo: object, ctx) -> object:
-    return nemo
+def file_name(value: object, ctx, nemo=None) -> object:
+    return value
 
 
 NO_STATE = "no effect on model state (I/O, decomposition, diagnostics, control)"
@@ -423,7 +423,7 @@ def _rules() -> list[Rule]:
                effect=NO_STATE))
     # ---- namcfg ----
     a(Rule(r"oce:namcfg\.ln_read_cfg", "map", card=has_file("ORCA_R2_zps_domcfg"),
-           want=lambda n, c: "ORCA_R2_zps_domcfg" if n else "not opened",
+           want=lambda n, c, _: "ORCA_R2_zps_domcfg" if n else "not opened",
            why="builder reads the domain file", effect="grid"))
     a(Rule(r"oce:namcfg\.cn_domcfg", "map", card=has_file("ORCA_R2_zps_domcfg"),
            want=file_name, why="builder reads the same domain file", effect="grid"))
@@ -446,15 +446,17 @@ def _rules() -> list[Rule]:
     a(Rule(r"oce:namdom\.rn_dt", "map", card=C("card.dt_s"), why="card time step", effect="time step"))
     a(Rule(r"oce:namdom\.rn_atfp", "inert", switch=(RK3,),
            why="Asselin filter is leapfrog-only; ORCA2_OMIP_L4 compiles key_RK3"))
-    a(Rule(r"oce:namdom\.ln_c1d", "off", why="3-D card", effect="grid"))
+    a(Rule(r"oce:namdom\.ln_c1d", "map", card=lambda c: c.flat["grid.horizontal_shape"] == (1, 1),
+           why="card's horizontal grid shape (1-D = a 1x1-point domain)", effect="grid"))
     a(Rule(r"oce:namdom\.ln_shuman", "off", why="no Shuman filter on the card", effect="momentum"))
     a(Rule(r"oce:namdom\.ln_meshmask", "nm", why="output only", effect=NO_STATE))
     # ---- namrun ----
     a(Rule(r"oce:namrun\.nn_itend", "map", card=C("card.n_steps"),
            why="card's declared run length (the ladders replay 10 steps)",
            effect="run length only", cls="c"))
-    a(Rule(r"oce:namrun\.ln_rstart", "map", card=lambda c: False,
-           why="card builds its state from the deck files (rest + climatology), no restart",
+    a(Rule(r"oce:namrun\.ln_rstart", "map",
+           card=lambda c: any("restart" in f.lower() for f in c.builder_files),
+           why="files the builder opens: none is a restart (state from rest + climatology)",
            effect="initial state"))
     a(Rule(r"oce:namrun\.nn_rstctl", "inert", switch=(("oce:namrun.ln_rstart", False),),
            why="ln_rstart = F"))
@@ -473,23 +475,25 @@ def _rules() -> list[Rule]:
     # ---- nam_vvl ----
     a(Rule(r"oce:nam_vvl\.ln_vvl_zstar", "map", card=lambda c: c.builds_zstar,
            why="builder builds z-star thicknesses", effect="vertical coordinate"))
-    a(Rule(r"oce:nam_vvl\.ln_vvl_(ztilde|layer|ztilde_as_zstar|zstar_at_eqtor)", "off",
-           why="card is z-star", effect="vertical coordinate"))
+    a(Rule(r"oce:nam_vvl\.ln_vvl_(ztilde|layer|ztilde_as_zstar|zstar_at_eqtor)", "map",
+           card=lambda c: not c.builds_zstar, why="builder builds z-star thicknesses", effect="vertical coordinate"))
     a(Rule(r"oce:nam_vvl\.(rn_ahe3|rn_rst_e3t|rn_lf_cutoff|rn_zdef_max)", "inert",
            switch=(("oce:nam_vvl.ln_vvl_ztilde", False),), why="z-tilde only; ln_vvl_ztilde = F"))
     a(Rule(r"oce:nam_vvl\.nn_vvl_interp", "inert", switch=(("oce:none", "key_qco"),),
            why="key_qco builds thicknesses from ratios, not vvl interpolation"))
     a(Rule(r"oce:nam_vvl\.ln_vvl_dbg", "nm", why="debug prints", effect=NO_STATE))
     # ---- namtsd ----
-    a(Rule(r"oce:namtsd\.ln_tsd_init", "map", card=lambda c: True,
-           why="builder reads the T/S climatology as its initial state", effect="initial state"))
+    a(Rule(r"oce:namtsd\.ln_tsd_init", "map",
+           card=lambda c: all(has_file(f)(c) == f for f in ("data_1m_potential_temperature_nomask",
+                                                             "data_1m_salinity_nomask")),
+           why="builder opens and reads the T/S climatology as its initial state", effect="initial state"))
     a(Rule(r"oce:namtsd\.ln_tsd_dmp", "nm", why="card has no interior T/S damping",
            effect="interior T/S damping"))
     for v, f in (("tem", "data_1m_potential_temperature_nomask"), ("sal", "data_1m_salinity_nomask")):
         a(Rule(rf"oce:namtsd\.sn_{v}%clname", "map", card=has_file(f), want=file_name,
                why="builder opens the same climatology file", effect="initial state"))
     a(Rule(r"oce:namtsd\.sn_(tem|sal)%clvar", "map", card=lambda c: c.ts_variables,
-           want=lambda n, c: tuple(v for v in c.ts_variables) if n in c.ts_variables else (n,),
+           want=lambda n, c, _: tuple(v for v in c.ts_variables) if n in c.ts_variables else (n,),
            why="variables the builder reads", effect="initial state"))
     for f, why in (("freqh", "record interval of the file the builder reads (12 records = monthly)"),
                    ("ln_tint", "builder blends two records with a weight strictly inside (0, 1)"),
@@ -520,7 +524,9 @@ def _rules() -> list[Rule]:
     a(Rule(r"oce:namsbc_rnf\.ln_rnf_depth", "map",
            card=lambda c: c.flat["runoff_depth_spread_m"] != 0.0,
            why="runoff_depth_spread_m = 0 (Decision 126)", effect="runoff"))
-    a(Rule(r"oce:namsbc_rnf\.ln_rnf_depth_ini", "off", why="no depth file on the card", effect="runoff"))
+    a(Rule(r"oce:namsbc_rnf\.ln_rnf_depth_ini", "map",
+           card=lambda c: c.flat["runoff_depth_spread_map"] is not None,
+           why="card runoff_depth_spread_map = None (no depth file)", effect="runoff"))
     a(Rule(r"oce:namsbc_rnf\.ln_rnf_icb", "off", why="no iceberg runoff", effect="runoff"))
     a(Rule(r"oce:namsbc_rnf\.(rn_dep_max|rn_rnf_max|nn_rnf_depth_file)", "inert",
            switch=(("oce:namsbc_rnf.ln_rnf_depth", False), ("oce:namsbc_rnf.ln_rnf_depth_ini", False)),
@@ -577,8 +583,9 @@ def _rules() -> list[Rule]:
                  ("rn_efr", "etau_frac"), ("ln_lc", "lc")):
         a(Rule(rf"oce:namzdf_tke\.{k}", "map", card=C(T + f), effect=VM))
     a(Rule(r"oce:namzdf_tke\.rn_emin", "map", card=C(T + "tke_background"),
-           want=lambda n, c: 1.0e-10,
-           why="ln_zdfiwm = T forces rn_emin = 1e-10 in zdf_tke_init", effect=VM))
+           want=lambda n, c, nemo: 1.0e-10 if nemo[("oce", "namzdf", "ln_zdfiwm")][0] else n,
+           why="zdf_tke_init: rn_emin = 1e-10 when NEMO's ln_zdfiwm = T, else the namelist value",
+           effect=VM))
     a(Rule(r"oce:namzdf_tke\.rn_ebb", "map", card=lambda c: c.tke_ebb,
            why="hard-coded in the card's TKE scheme (not a card field)", effect=VM))
     a(Rule(r"oce:namzdf_tke\.nn_mxl", "map", card=lambda c: float(c.flat[T + "tke_mxl_choice"]),
@@ -608,7 +615,7 @@ def _rules() -> list[Rule]:
     a(Rule(r"oce:namzdf_iwm\.sn_[a-z]+%clname", "map", card=has_file("zdfiwm_forcing_orca2"),
            want=file_name, why="builder opens the same map file", effect=VM))
     a(Rule(r"oce:namzdf_iwm\.sn_[a-z]+%clvar", "map",
-           card=lambda c: c.iwm_variables, want=lambda n, c: c.iwm_variables if n in c.iwm_variables else (n,),
+           card=lambda c: c.iwm_variables, want=lambda n, c, _: c.iwm_variables if n in c.iwm_variables else (n,),
            why="variables the card's IWM reader takes", effect=VM))
     for f, why in (("freqh", "record interval of the file the card reads (1 record = yearly)"),
                    ("ln_tint", "the card's reader has no time interpolation"),
@@ -665,7 +672,8 @@ def _rules() -> list[Rule]:
     EDDY = "eddy-induced advection / mixed-layer eddies"
     a(Rule(r"oce:namtra_eiv\.ln_ldfeiv", "map", card=lambda c: c.flat[G + "kappa_GM"] > 0.0,
            why="card kappa_GM = 0 (declared unmeasured: 'staged_gm_eiv')", effect=EDDY, cls="c"))
-    a(Rule(r"oce:namtra_eiv\.ln_eke_equ", "off", why="not on the card", effect=EDDY))
+    a(Rule(r"oce:namtra_eiv\.ln_eke_equ", "map", card=lambda c: c.flat[G + "eke"] is not None,
+           why="card gm_redi.eke = None", effect=EDDY))
     a(Rule(r"oce:namtra_eiv\..*", "nm", why="follows ln_ldfeiv: the card runs no eddy-induced velocity",
            effect=EDDY))
     # ---- namdyn_ldf ----
@@ -757,11 +765,11 @@ def _rules() -> list[Rule]:
            card=lambda c: 0.0 if c.flat["ke_gradient_scheme"] == "c2" else 1.0, effect=MO))
     a(Rule(r"oce:namdyn_vor\.ln_dynvor_een", "map",
            card=lambda c: c.flat["vorticity_scheme"] == "een_total", effect=MO))
-    a(Rule(r"oce:namdyn_vor\.ln_dynvor_(ens|ene|ent)", "map",
+    a(Rule(r"oce:namdyn_vor\.ln_dynvor_(ens|ene|ent|mix)", "map",
            card=lambda c: not c.flat["vorticity_scheme"].startswith("een"), effect=MO))
     a(Rule(r"oce:namdyn_vor\.nn_e3f_typ", "map",
            card=lambda c: 0.0 if c.flat["een_e3f_scheme"] == "nemo_avg4" else 1.0, effect=MO))
-    a(Rule(r"oce:namdyn_vor\.ln_dynvor_(mix|msk)", "off", why="not on the card", effect=MO))
+    a(Rule(r"oce:namdyn_vor\.ln_dynvor_msk", "off", why="not on the card", effect=MO))
     a(Rule(r"oce:namdyn_hpg\.ln_hpg_sco", "map", card=lambda c: c.flat["pgf_scheme"] == "nemo_sco", effect=MO))
     a(Rule(r"oce:namdyn_hpg\.ln_hpg_(zco|djc|prj|isf)", "map",
            card=lambda c: c.flat["pgf_scheme"] != "nemo_sco", effect=MO))
@@ -854,10 +862,11 @@ def classify(key: tuple[str, str, str], nemo: dict, ctx, cpp: str) -> dict:
         elif rule.kind == "off":
             require(scalar is False or scalar == 0.0 or scalar == "none",
                     f"{full}: 'off' rule but NEMO value is {scalar!r}")
-            row.update(status="MATCH", card="not built (off)")
+            row.update(status="NOT-MODELLED", card="-",
+                       why=f"NEMO switch off; no card value read ({rule.why})")
         else:
             card_v = rule.card(ctx)
-            want = rule.want(scalar, ctx) if rule.want else scalar
+            want = rule.want(scalar, ctx, nemo) if rule.want else scalar
             if isinstance(card_v, bool) or isinstance(want, bool):
                 ok = isinstance(card_v, bool) and isinstance(want, bool) and card_v == want
             elif isinstance(card_v, (int, float)) and isinstance(want, (int, float)):

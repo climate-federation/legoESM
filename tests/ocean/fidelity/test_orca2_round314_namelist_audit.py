@@ -102,6 +102,21 @@ def test_file_read_settings_compare_the_card_value_not_a_label():
     assert row["status"] == "UNCOMPARED"
 
 
+def test_off_switch_without_card_value_is_not_a_match():
+    row = audit.classify(("oce", "namisf", "ln_isf"), _nemo(**{"namisf.ln_isf": False}), _Ctx(), "")
+    assert (row["status"], row["card"]) == ("NOT-MODELLED", "-")
+
+
+def test_tke_minimum_energy_follows_nemo_wave_mixing_switch():
+    key = ("oce", "namzdf_tke", "rn_emin")
+    card = _Ctx(**{"physics.vertical_mixing.tke.tke_background": 1.0e-10})
+    on = _nemo(**{"namzdf_tke.rn_emin": 1.0e-6, "namzdf.ln_zdfiwm": True})
+    off = _nemo(**{"namzdf_tke.rn_emin": 1.0e-6, "namzdf.ln_zdfiwm": False})
+    assert audit.classify(key, on, card, "")["status"] == "MATCH"
+    with pytest.raises(audit.AuditError, match="DIFFERS without"):
+        audit.classify(key, off, card, "")
+
+
 EXPECTED_DIFFERS = {
     "oce:namrun.nn_itend": "c",
     "oce:namzdf_tke.nn_mxlice": "b:D135",
@@ -125,10 +140,11 @@ def report():
 
 def test_rung10_audit_pins_the_round314_table(report):
     assert report["n_keys"] == 1108
-    assert report["counts"] == {"MATCH": 189, "DIFFERS": 8, "NOT-MODELLED": 662, "INERT": 217,
+    assert report["counts"] == {"MATCH": 161, "DIFFERS": 8, "NOT-MODELLED": 690, "INERT": 217,
                                 "UNCOMPARED": 32}
-    assert report["counts_exp00"] == {"MATCH": 188, "DIFFERS": 9, "NOT-MODELLED": 662, "INERT": 217,
+    assert report["counts_exp00"] == {"MATCH": 160, "DIFFERS": 9, "NOT-MODELLED": 690, "INERT": 217,
                                       "UNCOMPARED": 32}
+    assert not [r["key"] for r in report["rows"] if r["status"] == "MATCH" and r["card"] in ("-", "not built (off)")]
     assert report["selfcheck"]["unexplained"] == []
     differs = {f"{r['ns']}:{r['group']}.{r['key']}": r["class"]
                for r in report["rows"] if r["status"] == "DIFFERS"}
