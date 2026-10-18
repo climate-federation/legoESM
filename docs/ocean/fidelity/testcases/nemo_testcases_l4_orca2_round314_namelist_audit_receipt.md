@@ -1,0 +1,167 @@
+# ORCA2 round 314 — full namelist audit of rung 10 (the shipped ORCA2 card)
+
+Date: 2026-10-18 (Claude round; codex review: paused (quota)).
+
+Status: **STOPPED_FOR_DECISION** — read-only audit; no card, setting or
+default changed.  Six rows need the user (DECISION_NEEDED below).
+
+## Headline
+
+- NEMO's ORCA2_OMIP_L4 run resolves 1,108 namelist keys (829 ocean, 279
+  sea ice).  Against rung 10: 220 MATCH, 9 DIFFERS, 662 NOT-MODELLED,
+  217 INERT.
+- The 9 DIFFERS: 3 are earlier decisions (icebergs off, Decision 7; the
+  ice-dependent TKE mixing length, Decision 135; ice-ocean top drag,
+  Decision 133).  6 are unexplained: the isoneutral tracer diffusion (3
+  rows), the eddy-induced velocity, the mixed-layer eddies, and the
+  declared run length.
+- No DIFFERS row is a ladder-certified statement waiting for import.
+- Four pieces of interior physics the deck runs are absent from the card
+  and from its "unmeasured" list: interior T/S damping, geothermal heating,
+  river-mouth mixing, mixed-layer eddies.  Only the eddy-induced velocity is
+  declared.
+
+## Provenance
+
+Base `78d61ed80` (round 313).  Script `4eb36a759` (+ header fix
+`b69e76896`); table generated at `b69e76896` on a clean tree.  Script:
+`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round314_namelist_audit.py`;
+table: `docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_round314_namelist_audit_table.md`
+(one row per key: NEMO value, record value, ocean.output check, card value,
+status, class, reason).  Evidence `orca2_rounds/round314/` (`audit.json`,
+`audit.log`).  No preregistration: an audit makes no prediction to falsify.
+
+- NEMO's value = `cfgs/SHARED/namelist_ref` overlaid by
+  `cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg`, and the same for the two SI3
+  files.
+- Record run = rung 10's record, round 5's
+  `orca1ice_surface_entry_every_step_a_np2` (the record every rung-10
+  ladder replays).
+- Card value = the built card (`build_orca2_zps_card` on that record's
+  deck root): its resolved config, its carried mixing seeds, its masks; for
+  file names, the files the builder opens; for one TKE constant, the
+  scheme's module value.  Never a comment.
+
+## Instrument checks
+
+- Parse vs NEMO's own resolved dump of that run (`output.namelist.dyn`,
+  `output.namelist.ice`): 1,078 keys equal; 17 equal once explained (16
+  partially-set arrays, 1 string NEMO truncates to its declared length);
+  13 not in any namelist file (NEMO's built-in initial value, taken from the
+  dump); 0 unexplained.  The first run failed this check (continuation lines
+  of long arrays), which is how the parser bug was found and fixed.
+- ocean.output cross-check: 422 agree, 221 not printed, 462 not applicable
+  (structure fields, arrays), 3 differ.  All 3 are NEMO changing the value
+  at run time: the domain decomposition (2 x 1, namelist 0 x 0 = automatic),
+  and the barotropic substep count (65, namelist 30, recomputed because the
+  automatic option is on).
+- Fail-closed: any unclassified key, any INERT row whose switch does not
+  resolve as claimed, any DIFFERS row without a class, or any unexplained
+  parse disagreement exits 1.  The direct test pins the counts and the nine
+  DIFFERS rows; a planted rule change turns it red; flipping one card
+  setting in the built card moves exactly that row.
+- Spot-checked by eye against the raw files (namelist_cfg, namelist_ref,
+  the record's ocean.output): the isoneutral coefficient shape (20,
+  `ORCA2_OMIP_L4/EXP00/namelist_cfg:304`), its velocity (0.018, `:306`), the
+  mixed-layer eddies (on, `:312`), the stabilising correction (on, `:302`),
+  the eddy-induced velocity (on, `:317`), the run length (5840, `:21`), the
+  ice-dependent mixing length (2, `:415`), the implicit ice-ocean drag (on,
+  from `namelist_ref:818`), the ice category count (5 in EXP00, 1 in the
+  record).  All nine agree with the table.
+
+## The record is not EXP00 in 50 rows
+
+- Run control (3): length 10 steps, initial-state output, restart at 10.
+- Icebergs off (1, Decision 7).
+- Sea ice (46): the record runs a one-category ice deck (1 category, 3 ice
+  and 3 snow layers, salinity option 2, no ponds, other initial ice) where
+  EXP00 runs 5 categories, 10/5 layers, salinity option 4, ponds.  This is
+  Decision 80's rung 10 and Decision 50's scope.  The card replays this
+  record's ice fluxes, so rung 10's oracle is the one-category ice, not
+  EXP00's.
+
+## DIFFERS (9), by what they change
+
+| what it changes | setting | NEMO | card | class |
+|---|---|---|---|---|
+| isoneutral tracer mixing | stabilising split of the vertical term | on | off (fully implicit) | (c) |
+| isoneutral tracer mixing | diffusivity shape | half the diffusive velocity times local grid spacing | constant | (c) |
+| isoneutral tracer mixing | diffusive velocity | 0.018 m/s | none (1000 m2/s everywhere) | (c) |
+| eddy parameterisations | eddy-induced velocity | on | off (declared unmeasured) | (c) |
+| eddy parameterisations | mixed-layer eddies | on | off (not declared) | (c) |
+| vertical mixing | surface mixing length under ice | scaled by ice thickness | not scaled | (b) Decision 135 |
+| drag | implicit ice-ocean top drag | on | off | (b) Decision 133 |
+| icebergs | icebergs | on | off | (b) Decision 7 |
+| run length | declared steps | 5840 | 2920 | (c) |
+
+- NEMO's isoneutral diffusivity on ORCA2 is about 2000 m2/s near the
+  equator and about 850 m2/s poleward of 60 degrees (arithmetic from the
+  domain file's grid spacings, not a model run); the card uses 1000 m2/s.
+- No row is (a): the vertical-mixing ladder's certified statements (V1-V5)
+  are already on the card; the geometry ladder's pending FCT fold statements
+  are not namelist settings.
+
+## NOT-MODELLED (662), by what they would change
+
+- Interior T/S damping, 4 rows (`ORCA2_OMIP_L4/EXP00/namelist_cfg:328`,
+  `:48`): NEMO restores T and S toward climatology where the damping map is
+  set; the card applies no damping.  Not declared.
+- Geothermal heating, 12 rows (`ORCA2_OMIP_L4/EXP00/namelist_cfg:256`):
+  NEMO heats the bottom from a map; the card has no bottom heat source.
+  Not declared.
+- River-mouth mixing, 12 rows (`ORCA2_OMIP_L4/EXP00/namelist_cfg:161`):
+  NEMO adds 1e-3 m2/s of vertical diffusion over the top 15 m at river
+  mouths; the card does not.  Not declared.
+- Eddy-scheme parameters, 11 rows: follow the two eddy DIFFERS rows above.
+- Icebergs, 35 rows: follow the iceberg row (Decision 7).
+- Surface fluxes, 215 rows (bulk formulae, surface restoring, freshwater
+  budget, forcing files, coupling frequency, runoff input): the card is
+  driven by the record's recorded surface fluxes and computes none of them.
+- Sea ice, 279 rows: the card runs no ice model and replays the record's
+  ice-affected fluxes (Decision 50).
+- Chlorophyll input, 11 rows: the replay reads the same chlorophyll file
+  each step; the card's own shortwave settings all MATCH.
+- Barotropic substep limit, 1 row: the card fixes NEMO's resolved 65
+  substeps instead of deriving it.
+- Calendar, 3 rows: no calendar; the replay supplies each step's forcing.
+- No effect on model state, 79 rows: output, decomposition, diagnostics,
+  run control.
+
+## Configuration choices
+
+None made: no card, setting or default changed (ASKED: none needed;
+UNASKED: none).  Two classifications are mine and stated in the table:
+switch-off features the card simply lacks count as MATCH ("not built"),
+and parameters of a feature the card turns off count as NOT-MODELLED,
+following their switch row.
+
+## DECISION_NEEDED (batched; nothing changed)
+
+1. Isoneutral stabilising split: off -> on (NEMO's split of the vertical
+   isoneutral term); changes T/S mixing along sloping density surfaces.
+   Pick: on, after a new isoneutral ladder rung certifies it.
+2. Isoneutral diffusivity shape: constant -> half the diffusive velocity
+   times local grid spacing; about doubles it near the equator, lowers it
+   poleward.  Pick: on, same rung as 1.
+3. Isoneutral diffusive velocity: none (1000 m2/s) -> 0.018 m/s; the value
+   choice 2 uses.  Pick: with 2.
+4. Eddy-induced velocity: off -> on (growth-rate-scaled, 3000 m2/s
+   reference); adds eddy advection of T and S.  Pick: on, after its own
+   ladder rung (already declared unmeasured).
+5. Mixed-layer eddies: off -> on; restratifies the mixed layer.  Pick: on,
+   after a rung; and add it to the card's unmeasured list meanwhile.
+6. Declared run length: 2920 -> 5840 steps; changes no measured number (the
+   ladders replay 10 steps).  Pick: 5840.
+
+## Gates and tests
+
+(filled below)
+
+## OPEN
+
+1. The DECISION_NEEDED batch above.
+2. Damping, geothermal heating and river-mouth mixing are undeclared
+   absences on the card; whether to declare or build them is the same kind
+   of question as 4-5.
+3. TOP/PISCES namelists not audited: ORCA2_OMIP_L4 does not compile passive
+   tracers, so they cannot reach the ocean.

@@ -1737,6 +1737,18 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:406': 'nn_mxl      =   3',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:410': 'nn_etau     =   1',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:415': 'nn_mxlice = 2',
+    # round 314 namelist audit
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:21': 'nn_itend    =    5840',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:48': 'ln_tsd_dmp  = .true.',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:161': 'ln_rnf_mouth = .true.',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:206': 'ln_icebergs = .true.',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:256': 'ln_trabbc   = .true.',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:304': 'nn_aht_ijk_t    = 20',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:306': 'rn_Ud        = 0.018',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:312': 'ln_mle      = .true.',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:317': 'ln_ldfeiv   = .true.',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:328': 'ln_tradmp   =  .true.',
+    'namelist_ref:818': 'ln_drgice_imp = .true.',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:238': 'SUBROUTINE sbc_rnf_div( phdivn, Kmm )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:289': 'SUBROUTINE sbc_rnf_init( Kmm )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:486-489': [
