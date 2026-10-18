@@ -102,6 +102,7 @@ def main(argv=None) -> int:
     parser.add_argument("--deck-root", type=Path)
     parser.add_argument("--record-root", type=Path)
     parser.add_argument("--expected", type=Path)
+    parser.add_argument("--expected-sha256")
     parser.add_argument("--expect", choices=("identical", "different"))
     args = parser.parse_args(argv)
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
@@ -130,15 +131,20 @@ def main(argv=None) -> int:
             text = dino_jaxpr(repo, Path(tmp) / "dino-output")
 
     normalized = normalize(text)
+    digest = hashlib.sha256(normalized.encode()).hexdigest()
     same = None
     if args.expected:
         same = normalized == expected_text(
             args.expected, has_header=args.case in ("orca2", "dino"))
+    if args.expected_sha256:
+        if same is not None:
+            raise ValueError("select only one expected trace or SHA-256")
+        same = digest == args.expected_sha256
     result = {
         "case": args.case,
         "jaxpr_lines": len(text.splitlines()),
         "pure_callback": text.count("pure_callback"),
-        "sha256": hashlib.sha256(normalized.encode()).hexdigest(),
+        "sha256": digest,
         "expected_identical": same,
     }
     print(json.dumps(result, sort_keys=True))
