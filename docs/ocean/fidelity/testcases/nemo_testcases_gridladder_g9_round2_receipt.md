@@ -145,7 +145,24 @@ Gates (`JAX_ENABLE_X64=1`, `land.sh` PYTHONPATH):
 
 ## 7. Default gate and receipt citation gate
 
-Results in `gridladder_rounds/round47/final/`.
+Results in `gridladder_rounds/round47/final/` (`JAX_ENABLE_X64=1`, `land.sh` PYTHONPATH).
+
+| battery | result |
+|---|---|
+| citation-gate test, private-import ratchet, TKE | 91 passed |
+| recipe, freshwater, barotropic state | 49 passed |
+| face-mask rank (`-n 2`) | 2 passed |
+
+Receipt citation gate (`--from-heading` this title), at `32aef8fc0`: `PASS`,
+8 citations, 0 failures, 0 unmapped, 0 map entries failing the audit.  Its
+shift plant on the `lbc_lnk` citation exits 1, `FAIL`.  Before it passed,
+this round's code edits shifted lines pinned by older map entries; the
+re-anchor tool moved 75 map lines and 18 lines of one older receipt, and one
+stencil entry's extent and end anchor were updated by hand (18 → 20 lines,
+its two new lines are this round's).
+
+Evidence manifest `gridladder_rounds/round47/manifest.sha256` (pickles and
+arrays excluded).
 
 ## Choices
 
