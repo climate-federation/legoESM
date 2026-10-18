@@ -1542,7 +1542,7 @@ N_WATER_SLOTS = 6
 def _column_fv_source(phi, div_fv, g: SpectralLESGrid):
     """``∫⟨φ ∇_fv·u⟩ dz`` — the column-integrated planar-mean source the monotone
     path's free-stream correction adds to ``φ`` (zero for a uniform ``φ``)."""
-    return g.dz * jnp.sum(_planar_mean(phi * div_fv, g))
+    return g.dz * jnp.sum(planar_mean(phi * div_fv, g))
 
 
 def _budget_rates(s: SpectralLESState, g: SpectralLESGrid, u_geo, f_cor, force,
