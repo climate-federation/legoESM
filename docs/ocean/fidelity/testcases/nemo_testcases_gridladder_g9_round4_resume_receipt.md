@@ -55,11 +55,15 @@ either.  Not covered by a test.
 | battery | result |
 |---|---|
 | G9 file | 20 passed |
-| default gate (`land.sh` list) | see section 5 |
+| citation-gate test, private-import ratchet, TKE | 91 passed |
+| recipe, freshwater, barotropic state | 49 passed |
+| face-mask rank | UNVERIFIED: killed at the 10-minute cap three times, no summary line (`-n 2` printed both dots once); file not touched by this diff |
 
 ## 5. Receipt citation gate
 
-See commit; run on this receipt with `--from-heading` this title.
+`--from-heading` this title, at `dd7a72501`: `PASS`, 8 citations, 0 failures,
+0 unmapped, 0 map entries failing the audit.  No map entries added
+(`round49/resume/citation_gate.json`).
 
 ## Choices
 
