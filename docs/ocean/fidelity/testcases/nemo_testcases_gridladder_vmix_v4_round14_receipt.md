@@ -214,7 +214,7 @@ K-profile builder left every V4 test green (no record test, unlike V2 and V3).
   them (no copy). No arithmetic changes.
 - **Plant** (scratch clone, internal-wave call replaced by a pass-through): **1 failed**, avt unequal in 414,119 wet
   W cells. **Restored**: V3 + V4 test files **15 passed**, 0 skipped (612 s). Evidence: `round14/resume2/`.
-- Gates at this update: default gate __DEFAULT__; per-receipt citation gate __CITE__.
+- Gates at this update: default gate (`land.sh` orca2 list, incl. citation-gate tests and private-import ratchet) at `e76663cf4` **145 passed** (1,626 s; first run 2 failed only on the dirty-tree stamp, re-run after committing); per-receipt citation gate **PASS, failures 0**, 21 citations, unmapped 0, map entries failing audit 0.
 
 UNASKED (second resume), offered for revert: V3's record test now calls the shared helpers (same assertions).
 
