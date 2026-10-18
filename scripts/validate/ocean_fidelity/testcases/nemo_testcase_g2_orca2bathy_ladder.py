@@ -952,10 +952,28 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hooks)).step(
                     entry, dt=card.dt_s, **kwargs))
             cand = card_surface(st)
-            rows = [g1.row(f"{name}.kt{kt}.{f}", g[n], cand[f], reg)
+            score_reg = reg
+            overlap_halo_unequal = None
+            if record_step_entry:
+                # ORCA's two cyclic-overlap columns are MPI/domain halos, not
+                # owned physical cells.  The private exposure is returned
+                # through the ordinary step epilogue, whereas NEMO writes its
+                # stage frame inside stprk3_stg before that epilogue.  Census
+                # their differing bytes, but do not score them as stage work.
+                score_reg = {region: np.asarray(mask).copy()
+                             for region, mask in reg.items()}
+                for mask in score_reg.values():
+                    mask[:, (0, -1)] = False
+                overlap_halo_unequal = {
+                    f: int(np.count_nonzero(
+                        np.asarray(cand[f])[:, (0, -1)]
+                        != np.asarray(g[n])[:, (0, -1)]))
+                    for f, n in frame.items() if n in g
+                }
+            rows = [g1.row(f"{name}.kt{kt}.{f}", g[n], cand[f], score_reg)
                     for f, n in frame.items() if n in g]
             levels = None
-            if name.startswith("stage"):
+            if name.startswith("stage") and not record_step_entry:
                 stage = int(name[-1])
                 card_all = card_levels(st)
                 levels = {}
@@ -965,7 +983,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                     levels[f] = {"summary": class_summary(by_level), "levels": by_level}
             out["per_kt"].append({"kt": kt, "exposure": name, "rows": rows,
                                   "first_unequal": g1.first_unequal(rows),
-                                  "all_levels": levels})
+                                  "all_levels": levels,
+                                  "overlap_halo_unequal": overlap_halo_unequal})
             if dump is not None:
                 np.savez(Path(dump) / f"card_kt{kt}_{name}.npz", **card_levels(st),
                          ssh=np.asarray(st.eta.data))
