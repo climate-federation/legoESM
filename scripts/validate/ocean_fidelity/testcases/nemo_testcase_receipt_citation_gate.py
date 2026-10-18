@@ -8405,9 +8405,9 @@ CITATION_MAP = {
         ('END DO   ;   END DO', 6), 11,
     ],
     # --- lane B round 17 resume: corrected barotropic admission boundary ---
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:201-203': [
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:201-202': [
         'CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )',
-        'CALL l1_dump_bt_frames( kstp, Naa )', 3,
+        'CALL l1_dump_bt_frames( kstp, Naa )', 2,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:734-749': [
         'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )',
@@ -8425,8 +8425,7 @@ CITATION_MAP = {
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:194-206': [
         '!*  vertical averaging  *!',
-        'Ue_rhs(ji,jj) = SUM( e3u_3d',
-        'Ve_rhs(ji,jj) = SUM( e3v_3d', 13,
+        'END SELECT', 13,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:302-303': [
         'IF( ln_dynspg_ts )',

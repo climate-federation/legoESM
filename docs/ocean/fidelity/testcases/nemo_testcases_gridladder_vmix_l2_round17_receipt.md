@@ -251,7 +251,7 @@ by the author: **codex review: operator**.
 The operator's reading is **confirmed in the compiled ORCA2 order**. In
 `SUBROUTINE stp_RK3` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:62`), kt 1
 calls `stp_2D` and writes `oracle_bt_frames_kt00000001.bin` immediately on
-return (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:201-203`), before the three RK
+return (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:201-202`), before the three RK
 stages. Stage 3 subsequently applies `tra_ldf` and completes the tracer update
 through `tra_zdf` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:734-749`). The
 end-of-step swap then makes that stage-3 `Naa` state the next step's `Nbb`
