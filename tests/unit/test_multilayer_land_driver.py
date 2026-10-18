@@ -1153,7 +1153,7 @@ def test_soil_water_numerics_reach_the_mpas_land_and_the_run_record(monkeypatch,
     base = _small_cfg()._replace(
         grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
         dycore=DycoreConfig(dt=600.0, discretization="mpas"),
-        mpas_land_beta_soil=True,
+        land_beta_soil=True,
         turbulence="louis",
         land_calibrated_physics=True,
         land_stomatal_beta=False,
