@@ -160,16 +160,17 @@ avs, avm, en wet and dry; every independent-arm field kt 1-2; shape acts in the 
 the band. Model step jitted, state (incl. the seed) a traced input, x64.
 - **Plant** (scratch clone; nn_havtb seed removed from builder and validator, deck reader kept): **1 failed**,
   avt unequal in 7,567 wet W cells. Evidence: `round15/resume/record_plant.log`.
-- **Restored** (this tree): V3 + V4 + V5 card files RESTORED_RESULT.
+- **Restored** (this tree): V3 + V4 + V5 card files **23 passed**, 0 skipped (1,081 s; tests as committed in `4363c96d8`). Evidence: `round15/resume/record_restored.log`.
 
-Gates (resume, at `4363c96d8` unless stated):
-- Default gate (`land.sh` orca2 list, incl. citation-gate tests and private-import ratchet): DEFAULT_RESULT.
-- Per-receipt citation gate on this receipt: RECEIPT_RESULT.
+Gates (resume; commits `4363c96d8` ladder + test, `e08d7a28c` receipt, then one map entry and one ladder pin re-anchored, +32 lines, anchors unchanged, `39e14c256`; this update fills numbers):
+- Default gate (`land.sh` orca2 list, incl. citation-gate tests and private-import ratchet) at `39e14c256`: **145 passed** (1,158 s).
+- Per-receipt citation gate on this receipt (`--from-heading` this title): **PASS, failures 0**, 17 citations, unmapped 0, map entries failing audit 0 (first runs: `zdfiwm.f90:443` unmapped; the ladder pin above shifted).
 
 ASKED (resume): score V5 both labels; confirm where nn_havtb acts; V5 record test with plant.
 UNASKED (resume), offered for revert:
 - the shared record helper asserts every kt-1 frame row given (V3/V4: the same three rows as before);
-- the ladder's kt-1 frame arm adds V5's en row and the band census (V5 only).
+- the ladder's kt-1 frame arm adds V5's en row and the band census (V5 only);
+- one ladder citation pin re-anchored (+32 lines) to keep the gate green.
 
 UNVERIFIED (resume): beyond kt 10 nothing scored; avs beyond kt 1 certified through T and S only.
 
