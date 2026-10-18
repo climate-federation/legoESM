@@ -172,6 +172,14 @@ This receipt's citation gate: section 8.
 "# Grid ladder rung G9 — round 1 resume receipt (gridladder_r46, scoring)"`.
 Result in `gridladder_rounds/round46/score/final/receipt_citation_gate.json`.
 
+- At `8337e2191` (the receipt commit): `PASS`, 7 citations, 0 failures, 0 unmapped,
+  0 map entries failing the audit.
+- Its shift plant on `ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:844` exits 1, `FAIL`.
+- Citation-gate test + private-import ratchet after the map edit: 23 passed
+  (`final/final_gates.log`).
+- Evidence manifest `gridladder_rounds/round46/score/manifest.sha256`
+  (`42c090a0f5d0e33b`, 43 files; pickles and arrays excluded).
+
 ## Choices
 
 ASKED: G9's definition and record (the brief); the bar and labels (D127).
