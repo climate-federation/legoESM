@@ -533,8 +533,9 @@ def measure(rung: str, n_dirs: int, full_sweep: bool, output: Path | None = None
                           losses, dt, eps)
         traced_up = chain_forward(step, state0, {k: jnp.float64(1.0 + (eps if k == key else 0.0))
                                                  for k in keys}, forcing, n_list, losses, dt)
-        row["rebuilt_vs_traced_plus_bit_identical"] = all(
+        row["rebuilt_vs_traced_plus_bit_identical"] = (all(
             row["_plus"][kn] == traced_up[kn] for kn in row["_plus"])
+            if row["_plus"] else None)
         row.pop("_plus")
         checks.append(row)
         save(f"scalar {key}")
@@ -547,17 +548,28 @@ def measure(rung: str, n_dirs: int, full_sweep: bool, output: Path | None = None
 def _rebuilt_fd(key, cfg, z, new_model, state0, forcing, n_list, losses, dt, eps):
     """Central FD of a model REBUILT with the scaled config (production step)."""
 
+    import jax
+
     rebuilt = {}
     for sign in (+1, -1):
+        # many compiles in one process intermittently fail with XLA's
+        # "Failed to materialize symbols" (round 315 lost three cards' rows to
+        # it); drop resident executables first and record, not crash, on it
+        jax.clear_caches()
         m_cfg, m_z = scaled_parts(cfg, z, {key: 1.0 + sign * eps})
         mm, st = new_model(m_cfg, m_z), state0
         vals = {}
-        for n in range(1, max(n_list) + 1):
-            fw, sf = forcing[n - 1]
-            st = mm.step(st, dt, freshwater=fw, surface_forcing=sf)
-            if n in n_list:
-                vals.update({(k, n): float(f(st)) for k, f in losses.items()})
+        try:
+            for n in range(1, max(n_list) + 1):
+                fw, sf = forcing[n - 1]
+                st = mm.step(st, dt, freshwater=fw, surface_forcing=sf)
+                if n in n_list:
+                    vals.update({(k, n): float(f(st)) for k, f in losses.items()})
+        except jax.errors.JaxRuntimeError as error:
+            return {"input": key, "construction_parity_eps": eps, "_plus": {},
+                    "rebuilt_error": str(error).splitlines()[0][:300], "rebuilt_fd": {}}
         rebuilt[sign] = vals
+    jax.clear_caches()
     return {"input": key, "construction_parity_eps": eps, "_plus": rebuilt[1],
             "rebuilt_fd": {f"{k}@{n}": (rebuilt[1][(k, n)] - rebuilt[-1][(k, n)]) / (2 * eps)
                            for (k, n) in rebuilt[1]}}
