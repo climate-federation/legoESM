@@ -24,9 +24,11 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
 from legoesm.ocean.state import OceanSurfaceForcing
 from legoesm.training.swg_online import (
     DAILY_MEAN_FIELDS,
+    SECONDS_PER_HOUR,
     SNAPSHOT_FIELDS,
     SWGOptimizerSettings,
     SWGScalarPotentialCNN,
+    assert_network_gradients_live,
     build_closure_geometry,
     build_segment_fn,
     coarse_state_from_native,
@@ -259,6 +261,15 @@ def test_gpu_control_configs_name_the_frozen_control_choices_exactly():
     (lambda c: c.update(deck="maddison"), "deck"),
     (lambda c: c.update(surface="free"), "surface"),
     (lambda c: c.pop("surface"), "exactly the keys"),
+    (lambda c: c.pop("target_interval_hours"), "exactly the keys"),
+    (lambda c: c.update(target_interval_hours=0), "target_interval_hours"),
+    (lambda c: c.update(target_interval_hours=5), "target_interval_hours"),
+    (lambda c: c.update(target_interval_hours="3"), "target_interval_hours"),
+    (lambda c: c.update(target_interval_hours=True), "target_interval_hours"),
+    (lambda c: c.update(target_interval_hours=2.0), "target_interval_hours"),
+    # dg50 steps at 400 s: 3 h is 27 steps, 8 h is not a divisor of a day.
+    (lambda c: c.update(target_interval_hours=16), "target_interval_hours"),
+    (lambda c: c.update(deck="dg50-rl", surface="rigid_lid"), "must divide"),
 ])
 def test_config_refuses_missing_extra_and_unknown_choices(tmp_path, edit, match):
     config = json.loads(CONFIGS[0].read_text())
@@ -271,12 +282,12 @@ def test_config_refuses_missing_extra_and_unknown_choices(tmp_path, edit, match)
 
 def test_rigid_lid_training_deck_requires_the_lid(tmp_path):
     config = json.loads(CONFIGS[0].read_text())
-    config.update(deck="dg50-rl", surface="rigid_lid")
+    config.update(deck="dg50-rl", surface="rigid_lid", target_interval_hours=3)
     path = tmp_path / "lid.json"
     path.write_text(json.dumps(config))
     assert driver.load_config(path)["deck"] == "dg50-rl"
     card = driver.build_deck_card("dg50-rl", "rigid_lid")
-    assert card.dt_s == 3600.0
+    assert card.dt_s == 10_800.0
     assert card.recipe.model_config.swe_surface == "rigid_lid"
     config["surface"] = "explicit"
     path.write_text(json.dumps(config))
@@ -594,11 +605,11 @@ def test_logged_first_loss_is_eq7_of_the_first_batch_recomputed(
     contract = driver.SWGDatasetContract.from_json(
         run / "dataset_contract.json", card=small_card)
     batch = next(contract.batches(split="train", window_days=1, epoch=0,
-                                  seed=11))
+                                  seed=11, target_interval_hours=1))
     geometry = build_closure_geometry(small_card)
     spec, _ = driver.network_spec(config, small_card, geometry)
     network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(11))
-    _, segment = build_segment_fn(small_card, geometry, window_days=1)
+    _, segment = build_segment_fn(small_card, geometry, window_days=1, target_interval_hours=1)
     noise = jnp.zeros((24, 3) + tuple(geometry.tmask.shape))
     hourly = [segment(network, coarse_state_from_native(
         small_card.recipe.initial_state, *(value[k] for value in batch.initial)),
@@ -1001,7 +1012,8 @@ def test_real_chunks_build_the_contract_and_pass_the_start_gates(
     network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(seed))
     gates = driver._start_gates(network, contract, card, geometry, scales,
                                 window_days=1, seed=seed,
-                                key=jax.random.PRNGKey(seed))
+                                key=jax.random.PRNGKey(seed),
+                                target_interval_hours=1)
     hours = np.asarray(gates["start_absolute_hours"])
     assert hours.size == 10 and len(set(hours)) == 10
     assert hours.min() >= 731 * 24 and hours.max() + 24 <= 761 * 24
@@ -1095,7 +1107,7 @@ def test_record_start_is_the_datasets_window_start_bit_for_bit(
     contract_path = tmp_path / "contract.json"
     driver.write_dataset_contract(config, contract_path)
     contract = driver.SWGDatasetContract.from_json(contract_path, card=small_card)
-    batch = next(contract.batches(split="validation", window_days=1))
+    batch = next(contract.batches(split="validation", window_days=1, target_interval_hours=1))
     assert int(batch.start_absolute_hour[0]) == 52 * 24
     state, block = driver.resolve_start(driver.load_config(path), small_card)
     for index, field in enumerate((state.eta.data, state.u.data[:, 1:, 0],
@@ -1485,7 +1497,64 @@ def test_every_committed_training_config_states_its_training_precision():
     precisions = {path.name: driver.load_config(path)["training_precision"]
                   for path in trained_configs}
     assert precisions.pop(EXP3_FP32.name) == "fp32"
+    assert precisions.pop(EXP4_TEMPLATE.name) == "fp32"
+    assert precisions.pop(EXP4_SYMMETRIC.name) == "fp32"
     assert set(precisions.values()) == {"fp64"}
+
+
+EXP4_TEMPLATE = _ROOT / "config/swg_online/exp4_rigidlid_template_ring_weighted_fp32.json"
+EXP4_SYMMETRIC = _ROOT / "config/swg_online/exp4_rigidlid_symmetric_ring_weighted_fp32.json"
+RIGID_LID_TRUTH = ("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                   "swgonl_rounds/round16_rigidlid_truth/")
+
+
+def test_every_committed_training_config_states_its_target_interval():
+    trained_configs = [
+        path for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
+        if "network" in json.loads(path.read_text())]
+    intervals = {path.name: driver.load_config(path)["target_interval_hours"]
+                 for path in trained_configs}
+    assert intervals.pop(EXP4_TEMPLATE.name) == 3
+    assert intervals.pop(EXP4_SYMMETRIC.name) == 3
+    assert len(intervals) >= 17 and set(intervals.values()) == {1}
+
+
+@pytest.mark.parametrize("parent,child,experiment", [
+    (EXP1_WEIGHTED, EXP4_TEMPLATE,
+     "swgonl_exp4_rigidlid_template_ring_weighted_fp32"),
+    (EXP3_FP32, EXP4_SYMMETRIC,
+     "swgonl_exp4_rigidlid_symmetric_ring_weighted_fp32")])
+def test_exp4_rigid_lid_configs_differ_from_their_parent_only_as_decided(
+        parent, child, experiment):
+    base, new = driver.load_config(parent), driver.load_config(child)
+    prefix = ("Rigid-lid training on the rigid-lid truth (user decisions "
+              "2026-10-18: rigid lid, phi/g input, 3-hour step and 3-hour "
+              "loss sampling, both objectives): ")
+    assert new["description"].startswith(prefix + base["description"])
+    assert "PLACEHOLDERS" in new["description"]
+    records = [{"root": RIGID_LID_TRUTH + name, "chunk_label": label}
+               for name, label in (("hourly_dual_12y", "dual"),
+                                   ("hourly_dual_test_year", "dual_test"))]
+    assert new == base | {
+        "experiment": new["experiment"], "description": new["description"],
+        "deck": "dg50-rl", "surface": "rigid_lid", "training_precision": "fp32",
+        "target_interval_hours": 3,
+        "dataset": base["dataset"] | {"records": records}}
+    assert new["experiment"] == experiment
+    assert new["free_run"]["device"] == "cuda" \
+        and new["free_run"]["math_library"] == "native"
+
+
+@pytest.mark.parametrize("config_path", [EXP4_TEMPLATE, EXP4_SYMMETRIC])
+def test_exp4_refuses_to_load_data_until_the_rigid_lid_truth_exists(config_path):
+    config = driver.load_config(config_path)
+    for record in config["dataset"]["records"]:
+        assert not Path(record["root"]).exists()
+        with pytest.raises(ValueError, match="record root does not exist"):
+            driver.complete_chunks(record)
+    card = driver.build_deck_card(config["deck"], config["surface"])
+    with pytest.raises(ValueError, match="record root does not exist"):
+        driver.check_data(config, card=card)
 
 
 def test_exp3_is_the_symmetric_candidate_in_single_precision_on_the_gpu():
@@ -1516,9 +1585,9 @@ def _parent_batch_functions(card, geometry, *, window_days, objective,
                             wall_ring):
     """``build_batch_functions`` as it was before ``training_precision``."""
     raw, _ = build_segment_fn(
-        card, geometry, window_days=window_days, checkpoint=True)
+        card, geometry, window_days=window_days, checkpoint=True, target_interval_hours=1)
     n_steps = (window_days * driver.HOURS_PER_DAY
-               * int(driver.SECONDS_PER_HOUR / card.dt_s))
+               * int(SECONDS_PER_HOUR / card.dt_s))
     template = card.recipe.initial_state
     namelist = card.resolved_namelist
     shape = tuple(geometry.tmask.shape)
@@ -1586,13 +1655,13 @@ def precision_steps(small_card):
     eqx.filter_jit = spy
     try:
         functions32 = driver.build_batch_functions(
-            card, geometry, training_precision="fp32", **options)
+            card, geometry, training_precision="fp32", **options, target_interval_hours=1)
     finally:
         eqx.filter_jit = real_filter_jit
     return {
         "parent": step(_parent_batch_functions(card, geometry, **options)),
         "fp64": step(driver.build_batch_functions(
-            card, geometry, training_precision="fp64", **options)),
+            card, geometry, training_precision="fp64", **options, target_interval_hours=1)),
         "fp32": step(functions32), "traced": traced[-1], "calls": calls,
         "network": network, "batch": batch, "key": key, "card": card,
         "geometry": geometry}
@@ -1727,4 +1796,95 @@ def test_build_batch_functions_refuses_an_unknown_training_precision(
         driver.build_batch_functions(
             small_card, build_closure_geometry(small_card), window_days=1,
             objective="template", wall_ring="weighted",
-            training_precision="bf16")
+            training_precision="bf16", target_interval_hours=1)
+
+
+# ----------------------------------------- rigid-lid deck at a 3-hour step
+
+@pytest.fixture(scope="module")
+def lid_card():
+    return driver.build_deck_card("dg50-rl", "rigid_lid")
+
+
+def test_rigid_lid_deck_free_run_day_is_eight_steps_of_three_hours(lid_card):
+    assert lid_card.dt_s == 10_800.0 and driver.steps_per_day(lid_card) == 8
+    namelist = driver.free_run_namelist(lid_card, 2)
+    assert (namelist.nn_itend, namelist.nn_write, namelist.nn_stock) == (16, 8, 8)
+    geometry = build_closure_geometry(lid_card)
+    key = jax.random.PRNGKey(0)
+    forcing, one_day = driver.free_run_day(None, lid_card, geometry, key=key)
+    start = driver._double_gyre_driver().seed_steady_forcing_carry(
+        lid_card.recipe.initial_state, forcing)
+    end, means = one_day(start)
+    stage_noise = jnp.zeros((3,) + tuple(geometry.tmask.shape), jnp.float64)
+    state = start
+    for _ in range(8):
+        state = driver.swg_online_step(
+            None, state, stage_noise, key, jnp.asarray(0.0), card=lid_card,
+            geometry=geometry, forcing=forcing)
+    for new, old in ((end.u.data, state.u.data), (end.v.data, state.v.data)):
+        np.testing.assert_allclose(np.asarray(new), np.asarray(old),
+                                   rtol=1.0e-10, atol=1.0e-14)
+    assert float(jnp.abs(end.u.data).max()) > 0.0       # the wind spun it up
+    assert len(means) == 4     # ssh, u, v and the lid potential phi
+
+
+@pytest.mark.parametrize("objective", ["symmetric", "template"])
+def test_rigid_lid_three_hour_training_rollout_has_live_gradients(
+        lid_card, objective):
+    """Two one-day windows on the rigid-lid dg50 deck: the jitted batch loss
+    and its gradient over 8 three-hourly records (phi/g closure input)."""
+    config = driver.load_config(
+        EXP4_SYMMETRIC if objective == "symmetric" else EXP4_TEMPLATE)
+    assert config["objective"] == objective
+    geometry = build_closure_geometry(lid_card)
+    spec, _ = driver.network_spec(config, lid_card, geometry)
+    network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(3))
+    value_and_grad, loss_fn = driver.build_batch_functions(
+        lid_card, geometry, window_days=1,
+        target_interval_hours=config["target_interval_hours"],
+        objective=objective, wall_ring=config["wall_ring"],
+        training_precision="fp64")
+    rng = np.random.default_rng(4)
+    template = lid_card.recipe.initial_state
+    u_shape = tuple(template.u.data[:, 1:, 0].shape)
+    v_shape = tuple(template.v.data[1:, :, 0].shape)
+
+    def native(*lead):
+        return (np.zeros(lead + tuple(template.eta.data.shape)),
+                1.0e-3 * rng.normal(size=lead + u_shape),
+                1.0e-3 * rng.normal(size=lead + v_shape))
+
+    initial, target = native(2), native(2, 8)
+    key = jax.random.PRNGKey(1)
+    loss, grads = value_and_grad(
+        network, tuple(map(jnp.asarray, initial)),
+        tuple(map(jnp.asarray, target)), key)
+    assert np.isfinite(float(loss)) and float(loss) > 0.0
+    assert_network_gradients_live(grads)       # finite and non-zero, every leaf
+    assert len(jax.tree.leaves(eqx.filter(grads, eqx.is_inexact_array))) == 9
+    value = loss_fn(network, tuple(map(jnp.asarray, initial)),
+                    tuple(map(jnp.asarray, target)), key)
+    assert float(value) == pytest.approx(float(loss), rel=1.0e-10)
+    # Hourly targets do not fit a 3-hourly rollout.
+    wrong = native(2, 24)
+    with pytest.raises(ValueError, match="share"):
+        loss_fn(network, tuple(map(jnp.asarray, initial)),
+                tuple(map(jnp.asarray, wrong)), key)
+
+
+def test_rigid_lid_free_run_writes_whole_day_dual_files(tmp_path, lid_card):
+    geometry = build_closure_geometry(lid_card)
+    manifest = driver.free_run(
+        None, lid_card, geometry, tmp_path / "free", days=2,
+        closure={"kind": "none", "control": "nu10"}, commit="0" * 40,
+        device=CPU, start=(None, "rest"))
+    assert manifest["status"] == "complete" and manifest["steps_per_day"] == 8
+    assert manifest["namelist"]["nn_write"] == 8
+    for day in (1, 2):
+        saved = np.load(tmp_path / "free" / f"day{day:04d}.npz")
+        assert int(saved["step"]) == 8 * day and int(saved["day"]) == day
+        assert float(saved["dt_s"]) == 10_800.0
+        assert int(saved["daily_mean_sample_count"]) == 8
+        assert set(driver.SNAPSHOT_FIELDS + driver.DAILY_MEAN_FIELDS) \
+            <= set(saved.files)

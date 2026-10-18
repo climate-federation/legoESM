@@ -67,7 +67,8 @@ def starts(card):
     """[(label, absolute start hour, start (ssh,u,v), truth at +1 h, truth at +24 h)]."""
     contract = SWGDatasetContract.from_json(eb.RUN / "dataset_contract.json", card=card)
     rows = []
-    train = contract.batches(split="train", window_days=1, epoch=0, seed=eb.SEED)
+    train = contract.batches(split="train", window_days=1, epoch=0, seed=eb.SEED,
+        target_interval_hours=1)
     for index in range(N_TRAIN_BATCHES):
         batch = next(train)
         rows.append((f"train_batch{index:02d}_win0_h{int(batch.start_absolute_hour[0])}",
@@ -75,7 +76,7 @@ def starts(card):
                      tuple(np.asarray(a[0]) for a in batch.initial),
                      tuple(np.asarray(a[0, 0]) for a in batch.target),
                      tuple(np.asarray(a[0, HOURS_PER_DAY - 1]) for a in batch.target)))
-    batch = next(contract.batches(split="validation", window_days=1))
+    batch = next(contract.batches(split="validation", window_days=1, target_interval_hours=1))
     for index in range(N_VALIDATION_STARTS):
         rows.append((f"validation_win{index}_h{int(batch.start_absolute_hour[index])}",
                      int(batch.start_absolute_hour[index]),

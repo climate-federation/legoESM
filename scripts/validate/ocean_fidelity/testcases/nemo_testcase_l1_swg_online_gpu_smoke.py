@@ -286,7 +286,7 @@ def _run_worker(args) -> dict:
                 one_step_lowered, label="closure model step")
 
             _, segment = build_segment_fn(
-                card, geometry, window_days=1, checkpoint=True)
+                card, geometry, window_days=1, checkpoint=True, target_interval_hours=1)
             n_steps = 24 * int(3_600 / card.dt_s)
             noise = jnp.zeros(
                 (n_steps, 3) + tuple(geometry.tmask.shape), dtype=jnp.float64)

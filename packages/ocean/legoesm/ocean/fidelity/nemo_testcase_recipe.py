@@ -4102,8 +4102,11 @@ def _swg_rescaled_clock(parent: SwgResolvedNamelist, dt_s: float):
 # 3600 s.  Same 1080 d run, one-day output and restart cadence as the parent:
 # fine 1_866_240/1_728/1_866_240 steps of 50 s -> 51_840/48/51_840 of 1800 s;
 # coarse 233_280/216/233_280 steps of 400 s -> 25_920/24/25_920 of 3600 s.
+# User decision 2026-10-18 (backed by a measured time-step test): the coarse
+# rigid-lid deck steps at 10800 s (3 h), 233_280/216/233_280 steps of 400 s ->
+# 8_640/8/8_640 of 10800 s (one-day output = 8 steps).
 SWG_MADDISON_RL_NAMELIST = _swg_rescaled_clock(SWG_MADDISON_NAMELIST, 1800.0)
-SWG_DG50_RL_NAMELIST = _swg_rescaled_clock(SWG_DG50_NAMELIST, 3600.0)
+SWG_DG50_RL_NAMELIST = _swg_rescaled_clock(SWG_DG50_NAMELIST, 10_800.0)
 # Frozen transcription of the compiled SWE readers, expressed in card field
 # names.  This is intentionally independent of ``SwgResolvedNamelist._fields``
 # so the inventory test detects a removed field instead of deriving its own

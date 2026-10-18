@@ -996,8 +996,13 @@ class SWGDatasetContract:
         raise ValueError(f"unknown or leaked dataset split {split!r}")
 
     def batches(self, *, split: str, window_days: int,
+                target_interval_hours: int,
                 epoch: int | None = None, seed: int | None = None):
         """Yield batches of ten non-overlapping windows inside one split.
+
+        The record is hourly; the targets are every ``target_interval_hours``-th
+        stored hour after the window start (hours ``k*interval`` after the
+        start, ``k = 1..24w/interval``), so 1 keeps every hour.
 
         Training draws one starting offset per (seed, window length, epoch)
         and shuffles the windows, as the template redraws both every epoch.
@@ -1008,6 +1013,7 @@ class SWGDatasetContract:
         start_bound, end_bound = self._split_bounds(split)
         if window_days not in ADMITTED_WINDOWS_DAYS:
             raise ValueError("window must be one of 1, 2, 4, or 8 days")
+        require_target_interval_hours(target_interval_hours)
         window_hours = HOURS_PER_DAY * window_days
         if split == "train":
             if type(epoch) is not int or epoch < 0 \
@@ -1039,7 +1045,9 @@ class SWGDatasetContract:
             initial = tuple(np.stack([state[index] for state in start_states])
                             for index in range(3))
             hourly = [[self._stored_state(int(start) + lead)
-                       for lead in range(1, window_hours + 1)]
+                       for lead in range(
+                           target_interval_hours, window_hours + 1,
+                           target_interval_hours)]
                       for start in batch_starts]
             target = tuple(np.stack([np.stack([state[index] for state in window])
                                      for window in hourly]) for index in range(3))
@@ -1540,21 +1548,53 @@ def swg_online_step(network, state, stage_noise, key, noise_scale, *,
         card.recipe.model_config, stage_potential_fn=potential)
 
 
+def require_target_interval_hours(value) -> int:
+    """The spacing in hours of the stored states a window is scored on."""
+    if type(value) is not int or value < 1 or HOURS_PER_DAY % value:
+        raise ValueError(
+            "target_interval_hours must be an integer >= 1 that divides 24, "
+            f"got {value!r}")
+    return value
+
+
+def steps_per_target_interval(dt_s: float, target_interval_hours: int) -> int:
+    """Model steps between two recorded states; refuses a step that does not
+    divide the target interval exactly."""
+    interval_s = require_target_interval_hours(
+        target_interval_hours) * SECONDS_PER_HOUR
+    steps = int(interval_s / dt_s)
+    if steps < 1 or steps * dt_s != interval_s:
+        raise ValueError(
+            f"SWG timestep {dt_s} s must divide the "
+            f"{target_interval_hours}-hour target interval exactly")
+    return steps
+
+
+def window_steps(card, window_days: int, target_interval_hours: int) -> int:
+    """Model steps of one ``window_days`` training window."""
+    return (HOURS_PER_DAY * window_days // target_interval_hours
+            * steps_per_target_interval(card.dt_s, target_interval_hours))
+
+
 def build_segment_fn(card, geometry: SWGClosureGeometry, *,
-                     window_days: int, checkpoint: bool = True):
-    """Build one fixed-window hourly training segment with closed steady wind."""
+                     window_days: int, target_interval_hours: int,
+                     checkpoint: bool = True):
+    """Build one fixed-window training segment with closed steady wind.
+
+    The segment records the model state every ``target_interval_hours`` hours
+    (1 = hourly), ``24 * window_days / target_interval_hours`` records.
+    """
     if window_days not in ADMITTED_WINDOWS_DAYS:
         raise ValueError(
             f"window_days must be one of {ADMITTED_WINDOWS_DAYS}, got {window_days}")
-    steps_per_hour = int(SECONDS_PER_HOUR / card.dt_s)
-    if steps_per_hour * card.dt_s != SECONDS_PER_HOUR:
-        raise ValueError("SWG timestep must divide one hour exactly")
+    steps_per_record = steps_per_target_interval(
+        card.dt_s, target_interval_hours)
     tau_u, tau_v = swg_surface_wind(card.resolved_namelist)
     forcing = OceanSurfaceForcing(
         tau_i_native=jnp.asarray(tau_u, dtype=jnp.float64),
         tau_j_native=jnp.asarray(tau_v, dtype=jnp.float64))
-    n_hours = 24 * window_days
-    n_steps = n_hours * steps_per_hour
+    n_records = HOURS_PER_DAY * window_days // target_interval_hours
+    n_steps = n_records * steps_per_record
 
     def one_step(network, noise_scale, carry, inputs):
         step_key, stage_noise = inputs
@@ -1577,21 +1617,21 @@ def build_segment_fn(card, geometry: SWGClosureGeometry, *,
             raise ValueError("segment initial state has incomplete wind-stress carry")
         keys = jax.random.split(key, n_steps)
 
-        def one_hour(state, hour):
-            start = hour * steps_per_hour
-            hour_keys = jax.lax.dynamic_slice_in_dim(
-                keys, start, steps_per_hour, axis=0)
-            hour_noise = jax.lax.dynamic_slice_in_dim(
-                noise, start, steps_per_hour, axis=0)
+        def one_record(state, record):
+            start = record * steps_per_record
+            record_keys = jax.lax.dynamic_slice_in_dim(
+                keys, start, steps_per_record, axis=0)
+            record_noise = jax.lax.dynamic_slice_in_dim(
+                noise, start, steps_per_record, axis=0)
             state, _ = jax.lax.scan(
                 lambda carry, values: scanned_step(
                     network, noise_scale, carry, values),
-                state, (hour_keys, hour_noise))
+                state, (record_keys, record_noise))
             native = (state.eta.data, state.u.data[:, 1:, 0],
                       state.v.data[1:, :, 0])
             return state, native
 
-        return jax.lax.scan(one_hour, initial_state, jnp.arange(n_hours))
+        return jax.lax.scan(one_record, initial_state, jnp.arange(n_records))
 
     return raw, eqx.filter_jit(raw)
 

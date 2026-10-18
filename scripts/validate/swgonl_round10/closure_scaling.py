@@ -55,7 +55,8 @@ WORKS = ("closure_work", "wind_work", "viscous_work", "drag_work")
 def load_state(card, root, day):
     if root is None:
         contract = eb.SWGDatasetContract.from_json(eb.RUN / "dataset_contract.json", card=card)
-        batch = next(contract.batches(split="train", window_days=2, epoch=0, seed=eb.SEED))
+        batch = next(contract.batches(split="train", window_days=2, epoch=0, seed=eb.SEED,
+            target_interval_hours=1))
         return tuple(np.asarray(value[0], dtype=np.float64) for value in batch.initial)
     with np.load(root / f"day{day:04d}.npz") as f:
         return f["ssh_m"].astype(np.float64), f["u_m_s"].astype(np.float64), f["v_m_s"].astype(np.float64)

@@ -4,6 +4,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import types
 from pathlib import Path
 
 import equinox as eqx
@@ -50,11 +51,14 @@ from legoesm.training.swg_online import (
     create_swg_optimizer,
     deterministic_trajectory_loss,
     eq6_scale_report,
+    eq7_point_weights,
     initial_closure_acceleration_ratio,
     load_content_pinned_hourly_segment,
     load_content_pinned_initial_state,
     maddison_eq6_network_scales,
     network_parameter_count,
+    require_target_interval_hours,
+    steps_per_target_interval,
     swg_online_step,
     wall_margin_mask,
 )
@@ -704,7 +708,7 @@ def test_contract_batches_start_from_rebalanced_stored_states(dataset):
     contract, card = dataset["contract"], dataset["card"]
     umask, vmask = dataset["masks"]
     batch = next(contract.batches(
-        split="train", window_days=1, epoch=0, seed=12))
+        split="train", window_days=1, epoch=0, seed=12, target_interval_hours=1))
     assert batch.initial[0].shape == (10,) + umask.shape
     assert batch.target[0].shape == (10, 24) + umask.shape
     rebalance = build_start_rebalancer(
@@ -733,7 +737,7 @@ def test_training_sampler_redraws_offset_per_window_and_epoch(dataset):
         return np.concatenate([batch.start_absolute_hour for batch in
                                contract.batches(split="train",
                                                 window_days=window_days,
-                                                epoch=epoch, seed=seed)])
+                                                epoch=epoch, seed=seed, target_interval_hours=1)])
 
     one_day = {epoch: starts(1, epoch, 7) for epoch in range(6)}
     for values in one_day.values():
@@ -756,25 +760,25 @@ def test_training_sampler_redraws_offset_per_window_and_epoch(dataset):
 def test_heldout_splits_use_one_fixed_chronological_lattice(dataset):
     contract = dataset["contract"]
     first = [batch.start_absolute_hour for batch in
-             contract.batches(split="validation", window_days=1)]
+             contract.batches(split="validation", window_days=1, target_interval_hours=1)]
     again = [batch.start_absolute_hour for batch in
-             contract.batches(split="validation", window_days=1)]
+             contract.batches(split="validation", window_days=1, target_interval_hours=1)]
     assert np.array_equal(np.concatenate(first),
                           np.arange(1248, 1488 - 24 + 1, 24))
     assert np.array_equal(np.concatenate(again), np.concatenate(first))
     with pytest.raises(ValueError, match="epoch and seed must be None"):
         next(contract.batches(split="validation", window_days=1, epoch=0,
-                              seed=1))
+                              seed=1, target_interval_hours=1))
     with pytest.raises(ValueError, match="integer epoch and seed"):
-        next(contract.batches(split="train", window_days=1))
+        next(contract.batches(split="train", window_days=1, target_interval_hours=1))
     with pytest.raises(ValueError, match="unknown or leaked"):
-        next(contract.batches(split="holdout", window_days=1))
+        next(contract.batches(split="holdout", window_days=1, target_interval_hours=1))
 
 
 def test_a_split_without_one_full_batch_raises(dataset):
     with pytest.raises(ValueError, match="fewer than one batch"):
         next(dataset["contract"].batches(
-            split="train", window_days=4, epoch=0, seed=0))
+            split="train", window_days=4, epoch=0, seed=0, target_interval_hours=1))
 
 
 def test_shared_restart_hour_uses_the_inscan_record_within_round_off(
@@ -936,8 +940,8 @@ def test_day_file_plants_raise_when_the_day_is_read(
 def test_batch_membership_is_bound_to_the_issued_arrays(dataset):
     contract = dataset["contract"]
     train = next(contract.batches(
-        split="train", window_days=1, epoch=0, seed=3))
-    validation = next(contract.batches(split="validation", window_days=1))
+        split="train", window_days=1, epoch=0, seed=3, target_interval_hours=1))
+    validation = next(contract.batches(split="validation", window_days=1, target_interval_hours=1))
     contract.validate_batch_membership(train)
     contract.validate_batch_membership(validation)
     plants = {
@@ -983,9 +987,9 @@ def test_day_files_are_hashed_once_while_cached(dataset, monkeypatch):
         return original(path)
 
     monkeypatch.setattr(swg_online, "_sha256", counting)
-    next(contract.batches(split="train", window_days=1, epoch=0, seed=5))
+    next(contract.batches(split="train", window_days=1, epoch=0, seed=5, target_interval_hours=1))
     first = len(hashed)
-    next(contract.batches(split="train", window_days=1, epoch=0, seed=5))
+    next(contract.batches(split="train", window_days=1, epoch=0, seed=5, target_interval_hours=1))
     assert first > 0
     assert len(hashed) == first
 
@@ -1075,7 +1079,7 @@ def test_segment_builder_rejects_unregistered_windows_and_has_live_gradients(
         online_case):
     card, geometry, _, entry, network = online_case
     with pytest.raises(ValueError, match="window_days"):
-        build_segment_fn(card, geometry, window_days=16)
+        build_segment_fn(card, geometry, window_days=16, target_interval_hours=1)
 
     # The first-step gate probes the actual stage seam.  A spatial objective is
     # used instead of an integrated potential, whose constant mode is correctly
@@ -1104,8 +1108,8 @@ def test_network_gradient_gate_rejects_one_poisoned_component():
 
 def test_zero_closure_four_and_eight_day_compositions_match(online_case):
     card, geometry, _, _, _ = online_case
-    _, four_day = build_segment_fn(card, geometry, window_days=4)
-    _, eight_day = build_segment_fn(card, geometry, window_days=8)
+    _, four_day = build_segment_fn(card, geometry, window_days=4, target_interval_hours=1)
+    _, eight_day = build_segment_fn(card, geometry, window_days=8, target_interval_hours=1)
     steps_per_day = 24 * int(3_600 / card.dt_s)
     noise4 = jnp.zeros((4 * steps_per_day, 3) + geometry.tmask.shape)
     noise8 = jnp.zeros((8 * steps_per_day, 3) + geometry.tmask.shape)
@@ -1266,7 +1270,7 @@ def test_real_data_one_optimizer_step_has_no_inert_leaf():
     initialization = initial_closure_acceleration_ratio(
         network, (initial,), card, geometry, key=jax.random.PRNGKey(20261013))
     assert initialization["passes"], initialization
-    _, segment = build_segment_fn(card, geometry, window_days=1)
+    _, segment = build_segment_fn(card, geometry, window_days=1, target_interval_hours=1)
     n_steps = 24 * int(3_600 / card.dt_s)
     noise = jnp.zeros((n_steps, 3) + geometry.tmask.shape, dtype=jnp.float64)
 
@@ -1443,3 +1447,122 @@ def test_eq6_scale_report_measures_what_the_network_reads(online_case):
             spec._replace(potential_scale_m3_s2=1.0),
             key=jax.random.PRNGKey(3)),
             (state,), card, geometry, scales, key=jax.random.PRNGKey(4))
+
+
+# ----------------------------------------------------- target interval (3 h)
+
+def test_target_interval_batches_are_every_third_stored_hour_from_the_start(
+        dataset):
+    contract = dataset["contract"]
+    for split, extra in (("train", {"epoch": 0, "seed": 12}), ("validation", {})):
+        hourly = next(contract.batches(
+            split=split, window_days=1, target_interval_hours=1, **extra))
+        sparse = next(contract.batches(
+            split=split, window_days=1, target_interval_hours=3, **extra))
+        assert hourly.target[0].shape[1] == 24 and sparse.target[0].shape[1] == 8
+        assert np.array_equal(hourly.start_absolute_hour,
+                              sparse.start_absolute_hour)
+        for new, old in zip(sparse.initial, hourly.initial, strict=True):
+            assert np.array_equal(new, old)
+        # Hours 3, 6, ..., 24 after the start: indices 2, 5, ... of 1..24.
+        for new, old in zip(sparse.target, hourly.target, strict=True):
+            assert np.array_equal(new, old[:, 2::3])
+        contract.validate_batch_membership(sparse)
+
+
+@pytest.mark.parametrize("interval", [0, 5, 48, -1, 2.0, "3", True, None])
+def test_target_interval_must_be_an_integer_dividing_a_day(dataset, interval):
+    with pytest.raises(ValueError, match="target_interval_hours"):
+        require_target_interval_hours(interval)
+    with pytest.raises(ValueError, match="target_interval_hours"):
+        next(dataset["contract"].batches(
+            split="validation", window_days=1, target_interval_hours=interval))
+    with pytest.raises(ValueError, match="target_interval_hours"):
+        build_segment_fn(dataset["card"], build_closure_geometry(
+            dataset["card"]), window_days=1, target_interval_hours=interval)
+
+
+def test_target_interval_must_be_a_whole_number_of_model_steps():
+    assert steps_per_target_interval(400.0, 1) == 9
+    assert steps_per_target_interval(10_800.0, 3) == 1
+    assert steps_per_target_interval(3_600.0, 3) == 3
+    for dt_s, interval in ((10_800.0, 1), (4_000.0, 3), (7_200.0, 1)):
+        with pytest.raises(ValueError, match="must divide"):
+            steps_per_target_interval(dt_s, interval)
+    card = types.SimpleNamespace(dt_s=10_800.0)
+    with pytest.raises(ValueError, match="must divide"):
+        build_segment_fn(card, None, window_days=1, target_interval_hours=1)
+
+
+def test_three_hour_rollout_records_exactly_the_three_hourly_states(dataset):
+    card = dataset["card"]
+    geometry = build_closure_geometry(card)
+    _, hourly = build_segment_fn(
+        card, geometry, window_days=1, target_interval_hours=1)
+    _, sparse = build_segment_fn(
+        card, geometry, window_days=1, target_interval_hours=3)
+    key, scale = jax.random.PRNGKey(5), jnp.asarray(0.0)
+    steps = 24 * int(3_600 / card.dt_s)
+    start = card.recipe.initial_state
+    # A moving start so the records are not identically the rest state.
+    start = start._replace(u=start.u.replace(
+        data=start.u.data.at[10:14, 10:14].set(1.0e-2)))
+    noise = jnp.zeros((steps, 3) + tuple(geometry.tmask.shape))
+    state_h, records_h = hourly(None, start, noise, key, scale)
+    state_3, records_3 = sparse(None, start, noise, key, scale)
+    assert records_h[1].shape[0] == 24 and records_3[1].shape[0] == 8
+    assert np.any(np.asarray(records_h[1][0]) != np.asarray(records_h[1][-1]))
+    for new, old in zip(records_3, records_h, strict=True):
+        assert np.array_equal(np.asarray(new), np.asarray(old)[2::3])
+    assert np.array_equal(np.asarray(state_3.u.data), np.asarray(state_h.u.data))
+    with pytest.raises(ValueError, match="segment noise shape"):
+        sparse(None, start, noise[:-1], key, scale)
+
+
+@pytest.mark.parametrize("days,bound", [(1, 0.13), (2, 0.06), (4, 0.03), (8, 0.012)])
+def test_three_hour_loss_is_the_same_plain_mean_over_a_subsample(
+        online_case, days, bound):
+    """Eq. 7 here is ``prefactor * mean over (windows, hours)`` of the weighted
+    squared vorticity error: equal weights, no end-point half weights, so the
+    3-hour loss is the same mean over every third sample and only approximates
+    the hourly loss (exactly equal only for an error constant in time).  The
+    samples at hours 3, 6, ... sit one hour later on average than hours 1, 2,
+    ..., so an error growing in time reads high by about 2 h / window; the
+    bounds are the measured 11.4/5.3/2.3/0.9 % for an error growing as
+    ``1 - exp(-t/72 h)`` squared, rounded up."""
+    card, geometry, _, _, _ = online_case
+    shape = tuple(geometry.tmask.shape)
+    pattern = np.zeros(shape)
+    pattern[20:30, 20:30] = 1.0
+    hours = np.arange(1, 24 * days + 1)
+    amplitude = 1.0e-6 * (1.0 - np.exp(-hours / 72.0))   # smooth error growth
+    zeta_error = amplitude[None, :, None, None] * pattern[None, None]
+
+    def loss(error):
+        zeros = jnp.zeros(error.shape)
+        return float(balanced_trajectory_loss(
+            BalancedTrajectory(jnp.asarray(error), zeros, zeros),
+            BalancedTrajectory(zeros, zeros, zeros), geometry, None,
+            kind="point", **_eq7(card)))
+
+    hourly = loss(zeta_error)
+    sparse = loss(zeta_error[:, 2::3])
+    # The code's rule, restated by hand: scale * mean_t sum_x W e^2.
+    namelist = card.resolved_namelist
+    half = 0.5 * namelist.rn_domsiz_m
+    scale = 1.0e4 / (namelist.rn_beta_m_s**2 * half**2) / (4.0 * half**2)
+    weights = np.asarray(eq7_point_weights(geometry, wall_ring="weighted"))
+    by_hand = scale * np.mean(
+        np.sum(zeta_error[:, 2::3]**2 * weights, axis=(-2, -1)))
+    assert sparse == pytest.approx(by_hand, rel=1.0e-12)
+    # Equal weights: one hour's error moves the mean by exactly 1/N of its term.
+    bumped = zeta_error.copy()
+    bumped[:, 5] *= 2.0
+    term = scale * np.sum(zeta_error[:, 5]**2 * weights) * 3.0
+    assert loss(bumped) - hourly == pytest.approx(term / hours.size, rel=1.0e-9)
+    # Smooth trajectory: the subsampled mean tracks the hourly one.
+    assert sparse != hourly
+    assert 0.0 < sparse / hourly - 1.0 < bound
+    # A time-constant error is the case where the two are exactly equal.
+    constant = np.broadcast_to(zeta_error[:, -1:], zeta_error.shape).copy()
+    assert loss(constant[:, 2::3]) == pytest.approx(loss(constant), rel=1.0e-12)

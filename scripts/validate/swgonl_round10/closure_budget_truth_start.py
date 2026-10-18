@@ -116,7 +116,8 @@ def main():
 
     # the first training-window start, as the spans probe built it (measurement-3 control)
     contract = eb.SWGDatasetContract.from_json(eb.RUN / "dataset_contract.json", card=card)
-    batch = next(contract.batches(split="train", window_days=2, epoch=0, seed=eb.SEED))
+    batch = next(contract.batches(split="train", window_days=2, epoch=0, seed=eb.SEED,
+        target_interval_hours=1))
     ssh, u, v = (np.asarray(value[0]) for value in batch.initial)
     out["training_window_start"] = {
         "start_absolute_hour": int(batch.start_absolute_hour[0]),

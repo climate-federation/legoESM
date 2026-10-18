@@ -228,7 +228,7 @@ def test_offline_network_inputs_read_phi_over_g(lid, stepped):
 
 def test_rigid_lid_namelists_keep_every_physical_duration():
     for parent, rl, dt in ((SWG_MADDISON_NAMELIST, SWG_MADDISON_RL_NAMELIST, 1800.0),
-                           (SWG_DG50_NAMELIST, SWG_DG50_RL_NAMELIST, 3600.0)):
+                           (SWG_DG50_NAMELIST, SWG_DG50_RL_NAMELIST, 10_800.0)):
         assert rl.rn_Dt_s == dt
         for name in ("nn_itend", "nn_write", "nn_stock"):
             assert getattr(rl, name) * rl.rn_Dt_s \
@@ -239,7 +239,7 @@ def test_rigid_lid_namelists_keep_every_physical_duration():
     assert (SWG_MADDISON_RL_NAMELIST.nn_itend, SWG_MADDISON_RL_NAMELIST.nn_write,
             SWG_MADDISON_RL_NAMELIST.nn_stock) == (51_840, 48, 51_840)
     assert (SWG_DG50_RL_NAMELIST.nn_itend, SWG_DG50_RL_NAMELIST.nn_write,
-            SWG_DG50_RL_NAMELIST.nn_stock) == (25_920, 24, 25_920)
+            SWG_DG50_RL_NAMELIST.nn_stock) == (8_640, 8, 8_640)
     with pytest.raises(ValueError, match="not a whole number"):
         _swg_rescaled_clock(SWG_DG50_NAMELIST, 7000.0)
 

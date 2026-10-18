@@ -72,14 +72,15 @@ def starts(card):
     """[(label, ssh, u, v)]: ten training starts then five validation starts."""
     contract = SWGDatasetContract.from_json(eb.RUN / "dataset_contract.json", card=card)
     rows, first_batch = [], None
-    train = contract.batches(split="train", window_days=1, epoch=0, seed=eb.SEED)
+    train = contract.batches(split="train", window_days=1, epoch=0, seed=eb.SEED,
+        target_interval_hours=1)
     for index in range(N_TRAIN_BATCHES):
         batch = next(train)
         if first_batch is None:
             first_batch = batch
         rows.append((f"train_batch{index:02d}_win0_h{int(batch.start_absolute_hour[0])}",
                      *(np.asarray(value[0]) for value in batch.initial)))
-    batch = next(contract.batches(split="validation", window_days=1))
+    batch = next(contract.batches(split="validation", window_days=1, target_interval_hours=1))
     for index in range(N_VALIDATION_STARTS):
         rows.append((f"validation_win{index}_h{int(batch.start_absolute_hour[index])}",
                      *(np.asarray(value[index]) for value in batch.initial)))

@@ -83,7 +83,7 @@ def run_profile(window_days: int, mode: str, objective_operator: str,
     network = SWGScalarPotentialCNN(
         PROFILE_NETWORK_SPEC, key=jax.random.PRNGKey(20261013))
     _, segment = build_segment_fn(
-        card, geometry, window_days=window_days, checkpoint=True)
+        card, geometry, window_days=window_days, checkpoint=True, target_interval_hours=1)
     n_steps = window_days * 24 * int(3_600 / card.dt_s)
     noise = jnp.zeros((n_steps, 3) + geometry.tmask.shape, dtype=jnp.float64)
     key = jax.random.PRNGKey(311)

@@ -7,6 +7,7 @@
   "objective": "template",
   "wall_ring": "excluded",
   "training_precision": "fp64",
+  "target_interval_hours": 1,
   "network": {
     "hidden_channels": 16,
     "hidden_layers": 4,

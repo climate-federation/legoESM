@@ -93,7 +93,6 @@ from legoesm.training.swg_online import (
     FREE_RUN_MANIFEST_SCHEMA,
     HOURS_PER_DAY,
     OBJECTIVE_OPERATORS,
-    SECONDS_PER_HOUR,
     SNAPSHOT_FIELDS,
     SNAPSHOT_LABEL,
     START_REBALANCE_MAX_ITERATIONS,
@@ -121,7 +120,9 @@ from legoesm.training.swg_online import (
     require_rigid_lid_zero_ssh,
     rigid_lid_start_state,
     start_state_from_native,
+    steps_per_target_interval,
     swg_online_step,
+    window_steps,
 )
 
 CONFIG_SCHEMA = "legoesm-swg-online-training-v3"
@@ -245,7 +246,7 @@ def load_config(path: Path) -> dict:
 
     _require_keys(config, (
         "schema", "experiment", "description", "deck", "surface", "objective",
-        "wall_ring", "training_precision", "network", "seeds", "dataset",
+        "wall_ring", "training_precision", "target_interval_hours", "network", "seeds", "dataset",
         "curriculum", "optimiser", "free_run"), "configuration")
     if config["schema"] != CONFIG_SCHEMA:
         raise ValueError(f"configuration schema must be {CONFIG_SCHEMA!r}")
@@ -265,6 +266,10 @@ def load_config(path: Path) -> dict:
     if config["training_precision"] not in TRAINING_PRECISIONS:
         raise ValueError(
             f"training_precision must be one of {TRAINING_PRECISIONS}")
+    # A valid interval whose whole number of deck steps fits (refused here,
+    # not mid-run).
+    steps_per_target_interval(
+        DECKS[config["deck"]].rn_Dt_s, config["target_interval_hours"])
 
     network = config["network"]
     _require_keys({key: value for key, value in network.items()
@@ -440,9 +445,8 @@ def build_deck_card(deck: str, surface: str):
 
 def steps_per_day(card) -> int:
     steps = SECONDS_PER_DAY / card.dt_s
-    if not float(steps).is_integer() \
-            or not float(SECONDS_PER_HOUR / card.dt_s).is_integer():
-        raise ValueError("the coarse timestep must divide one hour")
+    if not float(steps).is_integer():
+        raise ValueError("the coarse timestep must divide one day")
     return int(steps)
 
 
@@ -479,6 +483,8 @@ def complete_chunks(record: dict) -> list[tuple[int, int, Path]]:
     pattern = re.compile(
         rf"{re.escape(record['chunk_label'])}_day(\d{{4}})_to_day(\d{{4}})")
     chunks = []
+    if not Path(record["root"]).is_dir():
+        raise ValueError(f"dataset record root does not exist: {record['root']}")
     for path in sorted(Path(record["root"]).iterdir()):
         match = pattern.fullmatch(path.name)
         manifest_path = path / "manifest.json"
@@ -539,7 +545,9 @@ def check_data(config: dict, *, card) -> dict:
                 sampler = ({"epoch": 0, "seed": config["seeds"][0]}
                            if split == "train" else {})
                 batch = next(contract.batches(
-                    split=split, window_days=window_days, **sampler))
+                    split=split, window_days=window_days,
+                    target_interval_hours=config["target_interval_hours"],
+                    **sampler))
                 rows.append({
                     "split": split, "window_days": window_days,
                     "first_batch_start_hours": [
@@ -579,6 +587,7 @@ def _in_single_precision(function):
 
 
 def build_batch_functions(card, geometry, *, window_days: int,
+                          target_interval_hours: int,
                           objective: str, wall_ring: str,
                           training_precision: str):
     """Jitted (value-and-grad, value) of the Eq. 7 loss of a window batch.
@@ -586,7 +595,8 @@ def build_batch_functions(card, geometry, *, window_days: int,
     Every window starts from its (rebalanced) stored state and runs the
     certified segment with the closure at every RK3 stage, zero stage noise
     and zero noise scale; the batch loss is ``deterministic_trajectory_loss``
-    over all windows and hourly endpoints (Eq. 7's mean).
+    over all windows and recorded endpoints, one every
+    ``target_interval_hours`` hours (Eq. 7's mean, equal weights).
 
     ``training_precision`` ``"fp32"`` makes both functions take the float64
     master weights and batch, compute the trajectory, loss and gradient in
@@ -605,8 +615,9 @@ def build_batch_functions(card, geometry, *, window_days: int,
                 initial_state=_single(card.recipe.initial_state)))
             geometry = _single(geometry)
         raw, _ = build_segment_fn(
-            card, geometry, window_days=window_days, checkpoint=True)
-    n_steps = window_days * HOURS_PER_DAY * int(SECONDS_PER_HOUR / card.dt_s)
+            card, geometry, window_days=window_days,
+            target_interval_hours=target_interval_hours, checkpoint=True)
+    n_steps = window_steps(card, window_days, target_interval_hours)
     template = card.recipe.initial_state
     namelist = card.resolved_namelist
     shape = tuple(geometry.tmask.shape)
@@ -794,7 +805,7 @@ def free_run(network, card, geometry, output: Path, *, days: int,
                      daily_mean_sample_count=np.int64(per_day),
                      **{key: np.asarray(value, dtype=np.float64) for key, value
                         in zip(SNAPSHOT_FIELDS + DAILY_MEAN_FIELDS,
-                               snapshot + tuple(means), strict=True)})
+                               snapshot + tuple(means)[:3], strict=True)})
         temporary.replace(output / name)
         hashes[name] = _sha256(output / name)
         if day % driver.METADATA_CHECKPOINT_DAYS == 0 or day == days:
@@ -830,6 +841,7 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
     namelist = card.resolved_namelist
     half_width = maddison_half_width_m(namelist.rn_domsiz_m, geometry)
     per_day = steps_per_day(card)
+    interval = config["target_interval_hours"]
     pretrained = config["network"].get("initial_checkpoint")
     network_init = "SWGScalarPotentialCNN(spec, key=PRNGKey(seed))"
     initial_checkpoint = {}
@@ -888,7 +900,9 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
             "half_width_m": half_width,
             "prefactor": 1.0e4 / (namelist.rn_beta_m_s**2 * half_width**2)
             / (4.0 * half_width**2),
-            "reduction": "mean over windows and hourly right endpoints",
+            "reduction": "mean over windows and "
+                         + ("hourly" if interval == 1
+                            else f"{interval}-hourly") + " right endpoints",
             "training_loss_logged": "mean over the epoch's batches, each at "
                                     "its pre-update parameters",
             "validation_loss_logged": "mean over every validation batch of "
@@ -903,8 +917,10 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
                         "rebalanced (build_start_rebalancer)",
                 "tolerance": START_REBALANCE_TOLERANCE,
                 "max_iterations": START_REBALANCE_MAX_ITERATIONS},
-            "target": "stored right endpoints 1..24w hours later, same "
-                      "operator"},
+            "target": ("stored right endpoints 1..24w hours later, same "
+                       "operator" if interval == 1 else
+                       f"every {interval}th stored hour, {interval}..24w "
+                       "hours after the window start, same operator")},
         "curriculum": config["curriculum"],
         "gates": {
             "initial_closure_acceleration": "initial_closure_acceleration_"
@@ -1086,6 +1102,7 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
             if value_and_grad is None:
                 value_and_grad, loss_fn = build_batch_functions(
                     card, geometry, window_days=window_days,
+                    target_interval_hours=config["target_interval_hours"],
                     objective=config["objective"],
                     wall_ring=config["wall_ring"],
                     training_precision=config["training_precision"])
@@ -1096,7 +1113,8 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
             if first_step:
                 log["gates"] = _start_gates(
                     network, contract, card, geometry, scales,
-                    window_days=window_days, seed=seed, key=key)
+                    window_days=window_days, seed=seed, key=key,
+                    target_interval_hours=config["target_interval_hours"])
                 _write_json(log_path, log)
                 if not log["gates"]["initial_closure_acceleration"]["passes"]:
                     raise RuntimeError(
@@ -1105,8 +1123,9 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
             started = time.perf_counter()
             losses = []
             for step, batch in enumerate(contract.batches(
-                    split="train", window_days=window_days, epoch=epoch - 1,
-                    seed=seed)):
+                    split="train", window_days=window_days,
+                    target_interval_hours=config["target_interval_hours"],
+                    epoch=epoch - 1, seed=seed)):
                 if batch.split != "train" or batch.window_days != window_days:
                     raise RuntimeError("contract issued a mislabelled batch")
                 loss, grads = batch_value_and_grad(
@@ -1124,7 +1143,8 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
             validation = [
                 batch_loss_value(loss_fn, network, batch, key, windows_per_call)
                 for batch in contract.batches(
-                    split="validation", window_days=window_days)]
+                    split="validation", window_days=window_days,
+                    target_interval_hours=config["target_interval_hours"])]
             name = _checkpoint_name(window_days, epoch)
             save_checkpoint((network, opt_state), run_dir / name)
             log["epochs"].append({
@@ -1248,10 +1268,12 @@ def _update_function(optimizer):
 
 
 def _start_gates(network, contract, card, geometry, scales, *,
-                 window_days: int, seed: int, key) -> dict:
+                 window_days: int, seed: int, key,
+                 target_interval_hours: int) -> dict:
     """Round-6 acceleration bar and the Eq. 6 report on the first batch."""
     batch = next(contract.batches(
-        split="train", window_days=window_days, epoch=0, seed=seed))
+        split="train", window_days=window_days,
+        target_interval_hours=target_interval_hours, epoch=0, seed=seed))
     states = batch_start_states(card, batch)
     return {
         "start_absolute_hours": [int(hour) for hour in batch.start_absolute_hour],
@@ -1299,10 +1321,13 @@ def profile(config: dict, *, card, device: dict, windows_per_call: int) -> dict:
     for window_days in config["curriculum"]["window_days"]:
         value_and_grad, loss_fn = build_batch_functions(
             card, geometry, window_days=window_days,
+            target_interval_hours=config["target_interval_hours"],
             objective=config["objective"], wall_ring=config["wall_ring"],
             training_precision=config["training_precision"])
-        target = np.zeros((TEMPLATE_BATCH_SIZE, HOURS_PER_DAY * window_days)
-                          + shape)
+        target = np.zeros(
+            (TEMPLATE_BATCH_SIZE,
+             HOURS_PER_DAY * window_days // config["target_interval_hours"])
+            + shape)
         batch = WindowBatch((rest,) * 3, (target,) * 3,
                             np.zeros(TEMPLATE_BATCH_SIZE, dtype=np.int64),
                             "profile", window_days)
