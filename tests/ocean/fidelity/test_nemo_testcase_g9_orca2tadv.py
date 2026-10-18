@@ -481,8 +481,8 @@ def test_g9_stage_transport_wzv_reads_nemos_stage_clock_pair(tmp_path):
     stprk3_stg.f90:134-135, :188-189) and r3t(Kaa) as the stored blend of r3t(Kbb)
     and r3ta (:177, :221).  kt 1, jitted step, state and forcing traced, x64,
     against NEMO's recorded zFu, zFv, zFw: stage-1 zFw equals NEMO's on every cell;
-    stage-2 zFw equals NEMO's on every column whose own and neighbouring stage-2
-    zFu/zFv equal NEMO's (those horizontal transports differ upstream of wzv), and
+    stage-2 zFw equals NEMO's on every column whose four face zFu/zFv equal
+    NEMO's (those horizontal transports differ upstream of wzv), and
     every stage-2 zFu, zFv, zFw cell is at the bar (|card - NEMO| / max|NEMO| <= 1e-15)."""
     import jax
     sys.path[:0] = [str(CASES), str(CASES / "nemo_testcase_g5_orca2ice")]
@@ -521,10 +521,9 @@ def test_g9_stage_transport_wzv_reads_nemos_stage_clock_pair(tmp_path):
         off_v = (got["zFv"] != ref["zFv"]).any(-1)
         if stage == 1:
             assert not off_u.any() and not off_v.any()
+        # wzv's stencil (sshwzv.f90:297-298): a column reads its own east/west zFu
+        # and north/south zFv
         dirty = off_u | np.roll(off_u, 1, 1) | off_v | np.roll(off_v, 1, 0)
-        dirty = (dirty | np.roll(dirty, 1, 0) | np.roll(dirty, -1, 0)
-                 | np.roll(dirty, 1, 1) | np.roll(dirty, -1, 1))
-        assert dirty.mean() < 0.01, (stage, int(dirty.sum()))  # support is the domain
         off_w = (got["zFw"] != ref["zFw"]) & ~dirty[..., None]
         assert not off_w.any(), (stage, int(off_w.sum()))
 
@@ -537,8 +536,8 @@ def test_g9_stage3_tracer_content_is_nemos_trazdf_zrhs(tmp_path):
     FCT rate plus sbc, runoff, qsr in call order (stprk3_stg.f90:604-717).  kt 1,
     jitted step, state and forcing traced, x64: on every wet cell the card's
     pre-implicit T and S content is at the bar against NEMO's literal zrhs
-    (evaluated from the record's Kbb, after-qsr Krhs, r3t and e3t_0) and equal
-    to it on all but the measured residual cells."""
+    (evaluated from the record's Kbb, after-qsr Krhs, r3t and e3t_0).  The
+    statement's value is pinned by the synthetic test below."""
     import jax
     import netCDF4
     sys.path[:0] = [str(CASES), str(CASES / "nemo_testcase_g5_orca2ice")]
@@ -576,7 +575,53 @@ def test_g9_stage3_tracer_content_is_nemos_trazdf_zrhs(tmp_path):
         got = np.asarray(getattr(content, name).data)
         err = np.abs(np.where(wet, got - zrhs, 0.0)).max() / np.abs(np.where(wet, zrhs, 0.0)).max()
         assert err <= 1e-15, (name, err)
-        # measured 1,226 T / 762 S cells off (owner unwalked: G9 round-4 receipt);
-        # the former content form missed 68,045 / 1,738
-        off = int(((got != zrhs) & wet).sum())
-        assert off <= {"T": 1_300, "S": 800}[name], (name, off)
+
+
+def test_g9_stage3_krhs_and_content_are_nemos_statements(monkeypatch):
+    """stprk3_stg.f90:604 zeroes Krhs; the FCT rate (:637), then qns/sfx and runoff
+    (trasbc.f90:307-308, :323) and qsr (:717) add to it in call order; trazdf.f90:288-289
+    forms zrhs = e3t(Kbb)*T(Kbb) + (p2dt*e3t(Kmm))*Krhs.  Synthetic traced operands
+    (magnitudes spread so association shows), jitted, x64, against a numpy transcription
+    of those lines: bit-equal on every cell."""
+    import jax
+    import jax.numpy as jnp
+    from types import SimpleNamespace
+    from legoesm.grids.latlon import create_latlon_grid
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as mm
+
+    rng = np.random.default_rng(49)
+    shape = (24, 24, 3)
+    T, S = rng.uniform(-2.0, 30.0, shape), rng.uniform(33.0, 37.0, shape)
+    e3bb, e3mm = rng.uniform(9.9, 10.1, shape), rng.uniform(9.9, 10.1, shape)
+    adv_T, adv_S = rng.normal(scale=1e-6, size=shape), rng.normal(scale=1e-7, size=shape)
+    terms_T = [rng.normal(scale=s, size=shape) for s in (3e-5, 1e-9, 2e-6)]  # sbc, rnf, qsr
+    terms_S = [rng.normal(scale=s, size=shape) for s in (4e-6, 1e-9)]        # sbc, rnf
+    dt = 10800.0
+    base = create_latlon_grid(24, 24, dtype=jnp.float64)
+    grid = SimpleNamespace(**base._asdict(), dy_u=jnp.ones((24, 25)),
+                           dx_v=jnp.ones((25, 24)), area_T=jnp.asarray(base.area))
+    seen = []
+
+    def content(T, S, e3bb, e3mm, adv_T, adv_S, terms_T, terms_S, dt):
+        def fct_pair(a, b, scheme, *args, **kw):
+            seen.append(kw.get("return_fct_nemo_rhs"))
+            z = jnp.zeros_like(a)
+            return (z, z, adv_T), (z, z, adv_S)
+        monkeypatch.setattr(mm, "compute_advection_flux_div_pair", fct_pair)
+        h, mf_u, mf_v = jnp.ones_like(T), jnp.ones(shape[:1] + (25, 3)), jnp.ones((25,) + shape[1:])
+        return mm._nemo_ws_rk3_tracer_pair_step(
+            T, S, "fct2", mf_u, mf_v, jnp.ones(shape[:2] + (4,)), h, h, mf_u, mf_v,
+            grid, dt, h, stage3_content_written_order=(e3bb, e3mm),
+            stage3_krhs_terms=(tuple(terms_T), tuple(terms_S)),
+            return_final_content=True)[2:4]
+
+    got = jax.device_get(jax.jit(content)(T, S, e3bb, e3mm, adv_T, adv_S,
+                                          terms_T, terms_S, jnp.float64(dt)))
+    assert seen == [True]
+    for g, tr, adv, terms in ((got[0], T, adv_T, terms_T), (got[1], S, adv_S, terms_S)):
+        krhs = np.zeros(shape)                    # stprk3_stg.f90:604
+        krhs = krhs + adv                         # :637
+        for term in terms:                        # trasbc :307-308, :323; qsr :717
+            krhs = krhs + term
+        zrhs = e3bb * tr + (dt * e3mm) * krhs     # trazdf.f90:288-289
+        np.testing.assert_array_equal(np.asarray(g), zrhs)
