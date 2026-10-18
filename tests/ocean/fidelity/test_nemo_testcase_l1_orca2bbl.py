@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import subprocess
+from pathlib import Path
 
+import jax
+import netCDF4
 import numpy as np
 import pytest
 
@@ -12,6 +15,9 @@ from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
 from tests.ocean.fidelity.test_nemo_testcase_v1_orca2tke import (
     CARD_FILES, CASES, INPUTS, ORCA2_DECK, _differs, _flat, _root, _values,
+)
+from tests.ocean.fidelity.test_nemo_testcase_v3_orca2ddm import (
+    assert_record_bit_for_bit, kt2_restarts_differ,
 )
 
 G5 = CASES / "nemo_testcase_g5_orca2ice"
@@ -88,7 +94,8 @@ def test_l1_card_is_g5_plus_the_diffusive_bbl_selection_only(cards):
     a, b = _flat(g5.recipe.model_config), _flat(l1.recipe.model_config)
     changed = {k: (a.get(k), b.get(k)) for k in set(a) | set(b) if _differs(a.get(k), b.get(k))}
     assert changed == {"bbl_diffusive_option": (0, 1), "bbl_aht_m2_s": (0.0, 1000.0),
-                       "bbl_gamma_s": (0.0, 10.0)}
+                       "bbl_gamma_s": (0.0, 10.0), "bbl_nemo_stage3_krhs": (False, True),
+                       "rk3_fold_exchange_tracer_pivot_row": (False, True)}
     assert l1.recipe.model_config.bbl_adv_option == 0
     s5, s1 = g5.recipe.initial_state, l1.recipe.initial_state
     assert [n for n in s5._fields if _differs(
@@ -107,6 +114,10 @@ def test_selector_refuses_l1_without_bbl_and_g5_with_it(cards):
     off = l1.recipe.model_config._replace(bbl_diffusive_option=0)
     assert "ln_trabbl" in recipe._orca2g1_selector_failures(
         l1._replace(recipe=l1.recipe._replace(model_config=off)))
+    for flag in ("bbl_nemo_stage3_krhs", "rk3_fold_exchange_tracer_pivot_row"):
+        cut = l1.recipe.model_config._replace(**{flag: False})
+        assert "ln_trabbl" in recipe._orca2g1_selector_failures(
+            l1._replace(recipe=l1.recipe._replace(model_config=cut))), flag
     meta = l1._replace(bbl_aht_m2_s=500.0)        # card metadata disagreeing with config
     assert "ln_trabbl" in recipe._orca2g1_selector_failures(meta)
     on = g5.recipe.model_config._replace(bbl_diffusive_option=1, bbl_aht_m2_s=1000.0)
@@ -164,3 +175,47 @@ def test_run_script_reuses_g5_binaries_unbuilt_and_is_fail_closed():
                  "nn_bbl_ldf = +1$", "nn_bbl_adv = +0$", "rn_ahtbbl += +1000", 'check_bbl_entry "$SMOKE"',
                  'check_bbl_entry "$TWIN_A"', "ln_trabbc += +F$", "commit the exact acquisition tool"):
         assert name in text, name
+
+
+G5_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                 "gridladder_rounds/round31/oracle_g5_r31")
+L1_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                 "gridladder_vmix_rounds/round16/oracle_l1_r16")
+L1_TWINS = [L1_RECORD / t for t in ("twin_a", "twin_b", "twin_c")]
+
+
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+@pytest.mark.skipif(not all(t.is_dir() for t in (*L1_TWINS, G5_RECORD / "twin_b")),
+                    reason="the operator's G5/L1 records are not on this machine")
+def test_l1_kt1_2_every_field_bit_for_bit_and_bbl_acts_at_stage3_in_footprint_only():
+    """NEMO runs bbl/tra_bbl at stage 3 only (stprk3_stg.f90:560, :739)."""
+    assert kt2_restarts_differ(G5_RECORD, L1_RECORD)   # the BBL moves kt-2 T
+    with netCDF4.Dataset(_checker().DOMAIN) as ds:
+        mb = np.squeeze(np.asarray(ds.variables["bottom_level"][:]))
+    stages = _checker().check_bbl_stages(L1_TWINS[0], G5_RECORD / "twin_a", mb)
+    assert stages["pass"], stages
+    assert assert_record_bit_for_bit(L1_TWINS, "ORCA2L1-bbl", kt_to=2, frame=False) is None
+
+
+def test_tracer_pivot_row_exchange_copies_the_image_half_from_its_mirror():
+    """lbcnfd.f90:620-628: points ipi/2+2..ipi-ihls of the T-pivot row take
+    the mirror's value (sign +1); the source half and every other row stay."""
+    from types import SimpleNamespace
+
+    import jax.numpy as jnp
+
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as M
+    n = 8
+    perm = np.array([0] + [n - i for i in range(1, n)])          # 0 and n/2 self-mirrored
+    grid = SimpleNamespace(fold=SimpleNamespace(is_active=True, pivot_row_stored=True,
+                                                perm_T=perm))
+    x = np.arange(3 * n * 2, dtype=np.float64).reshape(3, n, 2)
+    got = np.asarray(M._rk3_fold_exchange_tracer_pivot_row(jnp.asarray(x), grid))
+    want = x.copy()
+    want[-1, n // 2 + 1:] = x[-1, perm[n // 2 + 1:]]
+    assert np.array_equal(got, want)
+    assert np.array_equal(got[-1, : n // 2 + 1], x[-1, : n // 2 + 1])
+    assert np.array_equal(got[-1], got[-1, perm])                # the row is now symmetric
+    for fold in (None, SimpleNamespace(is_active=True, pivot_row_stored=False, perm_T=perm)):
+        with pytest.raises(ValueError, match="T-pivot"):
+            M._rk3_fold_exchange_tracer_pivot_row(jnp.asarray(x), SimpleNamespace(fold=fold))

@@ -2327,6 +2327,8 @@ def _nemo_ws_rk3_tracer_pair_step(
     stage_qco_weights=None,
     stage_tracer_written_order: bool = False,
     stage3_content_written_order=None,
+    bbl_stage3_krhs: bool = False,
+    bbl_stage3_r3t_stretch=None,
     stop_after_stage: int = 3,
     resume=None,
     stage3_advection_content_override=None,
@@ -2375,6 +2377,8 @@ def _nemo_ws_rk3_tracer_pair_step(
         if resume_stage not in (1, 2) or resume_stage >= stop_after_stage:
             raise ValueError(
                 "resume must hand in stage 1 or 2, below stop_after_stage")
+
+    stage3_krhs = {}
 
     def _flux_pair(a_val, b_val, stage_dt, stage_index, h_after):
         fct_activity = None
@@ -2489,7 +2493,16 @@ def _nemo_ws_rk3_tracer_pair_step(
             (adv_option, diffusive_option, geom, diffusive_geom,
              area, dy_u, dx_v, gamma_s, aht_m2_s, rho0,
              nemo_reference_geometry, bbl_grid, bbl_eos_form) = bbl_context
-            if diffusive_option == 1:
+            if diffusive_option == 1 and bbl_stage3_krhs:
+                # trabbl.f90:412: gdept_1d(mbkt)*(1+r3t(Kmm)), r3t(Kmm) the
+                # stored stage-3 ratio, not a ratio of thickness sums.
+                if bbl_stage3_r3t_stretch is None:
+                    raise ValueError(
+                        "bbl_nemo_stage3_krhs needs the stage-3 1+r3t(Kmm) "
+                        "(rk3_stage3_tracer_nemo_stored_thickness)")
+                live_bottom_depth = nemo_source_round(
+                    diffusive_geom.dep_bot_ref * bbl_stage3_r3t_stretch)
+            elif diffusive_option == 1:
                 # trabbl.F90:348 reads gdept(bottom,Kmm).  Under key_qco that
                 # is gdept_0(bottom)*(1+r3t(Kmm)); the stage thickness sum is
                 # H*(1+r3t), so this ratio is the identical stage stretch.
@@ -2525,6 +2538,20 @@ def _nemo_ws_rk3_tracer_pair_step(
                     bottom_depth_m=live_bottom_depth, rho_0=rho0,
                     grid=bbl_grid, eos_form=bbl_eos_form,
                 )
+            if diffusive_option == 1 and bbl_stage3_krhs:
+                if adv_option != 0 or stage3_content_written_order is None:
+                    raise ValueError(
+                        "bbl_nemo_stage3_krhs needs bbl_adv_option=0 and the "
+                        "stage-3 written order (rk3_stage3_heat_nemo_written)")
+                # stprk3_stg.f90:739 -> trabbl.f90:249-256: the trend joins
+                # Krhs (the surface terms already in it), divided by e3t(Kmm).
+                stage3_krhs["ab"] = apply_bbl_diffusive_tendency(
+                    stage_source_rates[2][0], stage_source_rates[2][1],
+                    tr_a, tr_b, stage3_content_written_order[1], area,
+                    diffusive_geom, ahu_bbl, ahv_bbl, grid=bbl_grid,
+                )
+                return fd_a, fd_b, rhs_a, rhs_b, fct_activity, fct_inputs
+            if diffusive_option == 1:
                 bbl_a, bbl_b = apply_bbl_diffusive_tendency(
                     bbl_a, bbl_b, tr_a, tr_b, h_stage, area,
                     diffusive_geom, ahu_bbl, ahv_bbl, grid=bbl_grid,
@@ -2647,8 +2674,9 @@ def _nemo_ws_rk3_tracer_pair_step(
         content_b = sr(sr(e3t_bb * tr_b) - sr(dt * fd2_b)
                        if stage3_advection_content_override is None
                        else advection_content_b)
-        content_a = sr(content_a + sr(dt_h * stage_source_rates[2][0]))
-        content_b = sr(content_b + sr(dt_h * stage_source_rates[2][1]))
+        krhs_a, krhs_b = stage3_krhs.get("ab", stage_source_rates[2])
+        content_a = sr(content_a + sr(dt_h * krhs_a))
+        content_b = sr(content_b + sr(dt_h * krhs_b))
     else:
         content_a = (advection_content_a
                      + dt * h_one_half * stage_source_rates[2][0])
@@ -10261,6 +10289,9 @@ class LatLonCGridOceanModel:
                         else "one_step"),
                     stage_source_rates=_ws_stage_source_rates,
                     stage3_content_written_order=_stage3_e3t,
+                    bbl_stage3_krhs=_cfg_b.bbl_nemo_stage3_krhs,
+                    bbl_stage3_r3t_stretch=(
+                        _stretch_s3_kmm if _cfg_b.bbl_nemo_stage3_krhs else None),
                     # The written-order selector belongs to the weighted
                     # stage-1/2 call; this stage-3 finalizer has no weights.
                     bbl_context=_bbl_context,
@@ -10937,6 +10968,11 @@ class LatLonCGridOceanModel:
                 u=state_new.u.replace(data=state_new.u.data + _du * _um),
                 v=state_new.v.replace(data=state_new.v.data + _dv * _vm),
             )
+
+        if _cfg_b.rk3_fold_exchange_tracer_pivot_row:   # after tra_zdf
+            state_new = state_new._replace(**{
+                n: getattr(state_new, n).replace(data=_rk3_fold_exchange_tracer_pivot_row(
+                    getattr(state_new, n).data, _grid)) for n in ("T", "S")})
 
         # 9. Conservation fixers
         if _cfg_b.use_conservation_fixer and _apply_implicit_vmix:
@@ -17190,6 +17226,24 @@ def _zdf_residual_nemo_literal(cfg) -> bool:
             "barotropic.nemo_stage_mean_imposition=True: without the stage "
             "correction nothing restores the removed barotropic velocity")
     return True
+
+
+def _rk3_fold_exchange_tracer_pivot_row(tracer, grid):
+    """NEMO's end-of-step T-point exchange on a stored T-pivot row.
+
+    ``lbc_lnk( 'stp_RK3_stg', ts(Kaa), 'T', 1. )`` (stprk3_stg.f90:795-796)
+    sets the image half of the pivot row from its mirror, sign +1
+    (lbcnfd.f90:620-628: points ipi/2+2..ipi-ihls from ipi/2..ihls+2).
+    """
+    fold = getattr(grid, "fold", None)
+    if (fold is None or not bool(fold.is_active)
+            or not bool(getattr(fold, "pivot_row_stored", False))):
+        raise ValueError(
+            "rk3_fold_exchange_tracer_pivot_row=True needs a grid that stores "
+            "the T-pivot row of an active north fold")
+    perm = np.asarray(fold.perm_T)
+    image = np.arange(perm.shape[0] // 2 + 1, perm.shape[0])
+    return tracer.at[-1, image].set(tracer[-1, perm[image]])
 
 
 def _rk3_fold_exchange_top_v(v, grid, v_mask_3d):
