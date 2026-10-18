@@ -176,6 +176,16 @@ re-anchor moved 74 map entries and 18 historical audited-receipt pins; four
 changed-code anchors then received symbol/extent corrections before the clean
 gate.  Transcripts are in `gridladder_rounds/round50/final/`.
 
+Review closure reran that exact 144-test ORCA2 selection with the prescribed
+CPU/x64 environment and `PYTHONPATH`.  The execution channel stalled while
+returning the first invocation after 132 observed passes, so the remaining
+12-test face-mask/prognostic/parallel-receipt tail was rerun and passed in
+1,681.25 s; thus every selected test was observed passing without weakening
+the selection.  The private-import ratchet also passed standalone, 6 / 6 in
+18.75 s.  On the final receipt, the receipt-specific citation gate passed all
+5 citations with no unmapped or failing entries; its +2-line plant on the new
+`nonosc` citation failed with `SYMBOL-NOT-AT-LINE` as required.
+
 ## Choices
 
 ASKED: literal shared-FCT form; G9-only selection; kt-1 stage walk; both-label
