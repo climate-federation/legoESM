@@ -2383,6 +2383,10 @@ class LatLonCGridOceanConfig(NamedTuple):
     # trabbl.f90:249-256), with e3t(Kmm) as its divisor.  False folds it into
     # the stage flux divergence as content.  Needs the stage-3 written order.
     bbl_nemo_stage3_krhs: bool = False
+    # The diffusive BBL's north neighbour of a stored T-pivot row is NEMO's
+    # fold ghost, the mirror of the row below (lbcnfd.f90:588-590).  False
+    # mirrors the pivot row itself.
+    bbl_nemo_pivot_ghost: bool = False
     ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar) — also the
     #   Adams-Bashforth ε for the OUTER integrator (Veros AB_eps=0.1).
     # Outer (baroclinic) time integrator. "forward_euler" (default) = the existing

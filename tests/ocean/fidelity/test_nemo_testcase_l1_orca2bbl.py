@@ -95,6 +95,7 @@ def test_l1_card_is_g5_plus_the_diffusive_bbl_selection_only(cards):
     changed = {k: (a.get(k), b.get(k)) for k in set(a) | set(b) if _differs(a.get(k), b.get(k))}
     assert changed == {"bbl_diffusive_option": (0, 1), "bbl_aht_m2_s": (0.0, 1000.0),
                        "bbl_gamma_s": (0.0, 10.0), "bbl_nemo_stage3_krhs": (False, True),
+                       "bbl_nemo_pivot_ghost": (False, True),
                        "rk3_fold_exchange_tracer_pivot_row": (False, True)}
     assert l1.recipe.model_config.bbl_adv_option == 0
     s5, s1 = g5.recipe.initial_state, l1.recipe.initial_state
@@ -114,7 +115,8 @@ def test_selector_refuses_l1_without_bbl_and_g5_with_it(cards):
     off = l1.recipe.model_config._replace(bbl_diffusive_option=0)
     assert "ln_trabbl" in recipe._orca2g1_selector_failures(
         l1._replace(recipe=l1.recipe._replace(model_config=off)))
-    for flag in ("bbl_nemo_stage3_krhs", "rk3_fold_exchange_tracer_pivot_row"):
+    for flag in ("bbl_nemo_stage3_krhs", "bbl_nemo_pivot_ghost",
+                 "rk3_fold_exchange_tracer_pivot_row"):
         cut = l1.recipe.model_config._replace(**{flag: False})
         assert "ln_trabbl" in recipe._orca2g1_selector_failures(
             l1._replace(recipe=l1.recipe._replace(model_config=cut))), flag
@@ -187,14 +189,15 @@ L1_TWINS = [L1_RECORD / t for t in ("twin_a", "twin_b", "twin_c")]
 @pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
 @pytest.mark.skipif(not all(t.is_dir() for t in (*L1_TWINS, G5_RECORD / "twin_b")),
                     reason="the operator's G5/L1 records are not on this machine")
-def test_l1_kt1_2_every_field_bit_for_bit_and_bbl_acts_at_stage3_in_footprint_only():
-    """NEMO runs bbl/tra_bbl at stage 3 only (stprk3_stg.f90:560, :739)."""
+def test_l1_kt1_4_every_field_bit_for_bit_and_bbl_acts_at_stage3_in_footprint_only():
+    """NEMO runs bbl/tra_bbl at stage 3 only (stprk3_stg.f90:560, :739); kt 4
+    is the first step the BBL depth gdept_1d*(1+r3t(Kmm)) decides a gate."""
     assert kt2_restarts_differ(G5_RECORD, L1_RECORD)   # the BBL moves kt-2 T
     with netCDF4.Dataset(_checker().DOMAIN) as ds:
         mb = np.squeeze(np.asarray(ds.variables["bottom_level"][:]))
     stages = _checker().check_bbl_stages(L1_TWINS[0], G5_RECORD / "twin_a", mb)
     assert stages["pass"], stages
-    assert assert_record_bit_for_bit(L1_TWINS, "ORCA2L1-bbl", kt_to=2, frame=False) is None
+    assert assert_record_bit_for_bit(L1_TWINS, "ORCA2L1-bbl", kt_to=4, frame=False) is None
 
 
 def test_tracer_pivot_row_exchange_copies_the_image_half_from_its_mirror():
@@ -219,3 +222,27 @@ def test_tracer_pivot_row_exchange_copies_the_image_half_from_its_mirror():
     for fold in (None, SimpleNamespace(is_active=True, pivot_row_stored=False, perm_T=perm)):
         with pytest.raises(ValueError, match="T-pivot"):
             M._rk3_fold_exchange_tracer_pivot_row(jnp.asarray(x), SimpleNamespace(fold=fold))
+
+
+def test_bbl_north_neighbour_of_the_pivot_row_is_the_mirror_of_the_row_below():
+    """lbcnfd.f90:588-590: the ghost north of the stored T-pivot row takes
+    row ipj-2*ihls+jj-1 (the row below the pivot) through the fold map."""
+    from types import SimpleNamespace
+
+    import jax.numpy as jnp
+
+    from legoesm.ocean.physics import bbl_adv
+    n = 8
+    perm = np.array([0] + [n - i for i in range(1, n)])
+    grid = SimpleNamespace(fold=SimpleNamespace(is_active=True, pivot_row_stored=True,
+                                                perm_T=perm))
+    x = np.arange(4 * n, dtype=np.float64).reshape(4, n)
+    got = np.asarray(jax.jit(lambda v: bbl_adv._north_cell(v, grid, True))(jnp.asarray(x)))
+    assert np.array_equal(got[:-1], x[1:])
+    assert np.array_equal(got[-1], x[-2, perm])
+    assert not np.array_equal(got[-1], x[-1, perm])           # not the pivot row's own mirror
+    legacy = np.asarray(bbl_adv._north_cell(jnp.asarray(x), grid))
+    assert np.array_equal(legacy[-1], x[-1, perm])
+    with pytest.raises(ValueError, match="pivot"):
+        bbl_adv._north_cell(jnp.asarray(x), SimpleNamespace(fold=SimpleNamespace(
+            is_active=True, pivot_row_stored=False, perm_T=perm)), True)

@@ -2492,7 +2492,8 @@ def _nemo_ws_rk3_tracer_pair_step(
             )
             (adv_option, diffusive_option, geom, diffusive_geom,
              area, dy_u, dx_v, gamma_s, aht_m2_s, rho0,
-             nemo_reference_geometry, bbl_grid, bbl_eos_form) = bbl_context
+             nemo_reference_geometry, bbl_grid, bbl_eos_form,
+             bbl_pivot_ghost) = bbl_context
             if diffusive_option == 1 and bbl_stage3_krhs:
                 # trabbl.f90:412: gdept_1d(mbkt)*(1+r3t(Kmm)), r3t(Kmm) the
                 # stored stage-3 ratio, not a ratio of thickness sums.
@@ -2537,6 +2538,7 @@ def _nemo_ws_rk3_tracer_pair_step(
                     tr_a, tr_b, diffusive_geom,
                     bottom_depth_m=live_bottom_depth, rho_0=rho0,
                     grid=bbl_grid, eos_form=bbl_eos_form,
+                    pivot_ghost=bbl_pivot_ghost,
                 )
             if diffusive_option == 1 and bbl_stage3_krhs:
                 if adv_option != 0 or stage3_content_written_order is None:
@@ -2549,12 +2551,14 @@ def _nemo_ws_rk3_tracer_pair_step(
                     stage_source_rates[2][0], stage_source_rates[2][1],
                     tr_a, tr_b, stage3_content_written_order[1], area,
                     diffusive_geom, ahu_bbl, ahv_bbl, grid=bbl_grid,
+                    pivot_ghost=bbl_pivot_ghost,
                 )
                 return fd_a, fd_b, rhs_a, rhs_b, fct_activity, fct_inputs
             if diffusive_option == 1:
                 bbl_a, bbl_b = apply_bbl_diffusive_tendency(
                     bbl_a, bbl_b, tr_a, tr_b, h_stage, area,
                     diffusive_geom, ahu_bbl, ahv_bbl, grid=bbl_grid,
+                    pivot_ghost=bbl_pivot_ghost,
                 )
             # tra_bbl adds a concentration tendency to Krhs using Kbb tracers
             # and Kmm volume (stprk3_stg.F90:588; trabbl.F90:129-136,243-284).
@@ -10245,6 +10249,7 @@ class LatLonCGridOceanModel:
                             _raw_bbl.e1v, _raw_bbl.e2v,
                             _raw_bbl.umask, _raw_bbl.vmask,
                             aht_m2_s=_cfg_b.bbl_aht_m2_s, grid=_grid,
+                            pivot_ghost=_cfg_b.bbl_nemo_pivot_ghost,
                         )
                     _bbl_context = (
                         _cfg_b.bbl_adv_option,
@@ -10260,6 +10265,7 @@ class LatLonCGridOceanModel:
                         _nemo_bbl_geometry,
                         _grid,
                         _cfg_b.eos,
+                        _cfg_b.bbl_nemo_pivot_ghost,
                     )
                 _ws_tracer_result = _nemo_ws_rk3_tracer_pair_step(
                     # NEMO's stage ladder always restarts from ts(Kbb).

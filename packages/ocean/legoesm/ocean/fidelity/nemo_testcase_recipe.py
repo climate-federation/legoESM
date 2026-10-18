@@ -3828,7 +3828,7 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         tke_langmuir_evaluation="vectorized",
     )
     if case in _ORCA2L_BBL_CASES:   # stprk3_stg.f90:739 (Krhs); :795-796 (pivot row)
-        base = base._replace(bbl_nemo_stage3_krhs=True,
+        base = base._replace(bbl_nemo_stage3_krhs=True, bbl_nemo_pivot_ghost=True,  # lbcnfd.f90:588-590
                              rk3_fold_exchange_tracer_pivot_row=True)
     vertical = base.physics.vertical_mixing
     vertical = vertical._replace(
@@ -4004,8 +4004,9 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
             == (tuple(_ORCA2L1_BBL_FIELDS[f"nambbl.{k}"] for k in (
                 "nn_bbl_adv", "nn_bbl_ldf", "rn_ahtbbl", "rn_gambbl"))
                 if card.case in _ORCA2L_BBL_CASES else (0, 0, 0.0, 0.0))
-            and (cfg.bbl_nemo_stage3_krhs, cfg.rk3_fold_exchange_tracer_pivot_row)
-            == ((card.case in _ORCA2L_BBL_CASES,) * 2)),
+            and (cfg.bbl_nemo_stage3_krhs, cfg.bbl_nemo_pivot_ghost,
+                 cfg.rk3_fold_exchange_tracer_pivot_row)
+            == ((card.case in _ORCA2L_BBL_CASES,) * 3)),
         "surface_forcing": ((card.surface_boundary_condition, card.surface_input_operator) == (
                        ("nemo_post_si3_records", "nemo_ocean_surface_input_v1")
                        if card.case in _ORCA2G_SI3_CASES else
