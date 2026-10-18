@@ -8186,6 +8186,17 @@ CITATION_MAP = {
         ('+ zfact2(ji,jj) * ( 1._wp / ( 1._wp + ( (ht_0(ji,jj)', 1),
         ('-1._wp / ( 1._wp + ( (ht_0(ji,jj)', 1), 2,
     ],
+    # --- GRIDLADDER-VMIX round 15 (D136; V5 = V4 + ORCA2's nn_havtb) ---
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:401': 'nn_havtb    =    1         !  horizontal shape for avtb (=1) or not (=0)',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:33': 'ln_read_cfg = .true.    !  (=T) read the domain configuration file',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:215': 'avtb_2d(:,:) = 1._wp                   ! uniform',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:221-223': [
+        ('avtb_2d(:,:) = (1.  - 0.09 * (gphit(', 1),
+        ('avtb_2d(:,:) = (0.1 + 0.09 * (gphit(', 1), 3,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:424': '- p_avt(ji,jj,jk) * rn2(ji,jj,jk)          &   ! stratification',
+    'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfphy.f90:217': 'IF( nn_havtb == 1 ) THEN',
+    'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfphy.f90:227': 'avt_k(:,:,jk)    = avtb_2d(:,:) * avtb(jk) * wmask(',
 }
 
 
