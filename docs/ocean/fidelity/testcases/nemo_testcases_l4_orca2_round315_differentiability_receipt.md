@@ -94,7 +94,7 @@ sources below (PLAUSIBLE, read off the walker's order); from N = 2 on the
 cotangent arriving from the later step is already NaN.
 
 The first locator (`jax_debug_nans`) stopped on a `neg` at
-`ocean_model_latlon_cgrid.py:1933`. That is the FORWARD 0/0 (later masked,
+`ocean_model_latlon_cgrid.py:1936`. That is the FORWARD 0/0 (later masked,
 kept as a residual); a `neg` cannot create a NaN, and that run did not show
 where the backward pass first goes non-finite. Superseded by the walker below.
 
@@ -184,8 +184,8 @@ Rung 0, one step (OMT-4 runs the same path), in reverse-pass order:
 
 | # | statement | what is zero | lanes | class | reaches |
 |---|---|---|---|---|---|
-| 1 | `implicit_solver.py:357-376` | pivot of the vertical momentum solve, one row of V faces | 180 | residual | land- and V-mask cotangents only |
-| 2 | `ocean_model_latlon_cgrid.py:13444` | top V-face thickness in the surface-stress division, same row | 180 | generated + residual | the same two masks only |
+| 1 | `implicit_solver.py:363-382` | pivot of the vertical momentum solve, one row of V faces | 180 | residual | land- and V-mask cotangents only |
+| 2 | `ocean_model_latlon_cgrid.py:13455` | top V-face thickness in the surface-stress division, same row | 180 | generated + residual | the same two masks only |
 | 3 | `:2568-2570` | `q_after` in the stage-1/2 tracer combine (masked by `:2576`) | 368,648 | residual | every leaf |
 | 4 | `:1946` | `e3t_kmm` in the vertical tracer flux divergence | 368,648 | generated + residual | every leaf |
 | 5 | `:1933` | `e3t_kmm` in the horizontal tracer flux divergence | 368,648 | generated + residual | every leaf |
@@ -213,10 +213,10 @@ Rung 10 (one step) has 1-5 plus:
 
 | # | statement | what | lanes | class |
 |---|---|---|---|---|
-| 6 | `internal_wave_mixing.py:443` | square root of the clipped N^2: infinite slope where N^2 <= 0 | 359,826 (60,973 inf) | residual |
-| 7 | `tke.py:1081` | square root in the TKE mixing length | 358,441 | residual |
-| 8 | `tke.py:3646` | square root over the dissipation length | 358,441 | residual |
-| 9 | `shortwave_penetration.py:558` | level thickness below the bottom (masked) | 21,883 | generated + residual |
+| 6 | `internal_wave_mixing.py:444` | square root of the clipped N^2: infinite slope where N^2 <= 0 | 359,826 (60,973 inf) | residual |
+| 7 | `tke.py:1082` | square root in the TKE mixing length | 358,441 | residual |
+| 8 | `tke.py:3647` | square root over the dissipation length | 358,441 | residual |
+| 9 | `shortwave_penetration.py:560` | level thickness below the bottom (masked) | 21,883 | generated + residual |
 
 6, 7 and 9 also fire in the fused T-loss gradient. With 1-9 zeroed the
 rung-10 gradient is finite (dT0 . T_dir0 = -4.17882e-2; FD -4.18476e-2 at
@@ -235,11 +235,11 @@ per step (6-8 s against ~2 s), linear in N; compile excluded.
 Each must keep every forward value bit-identical, re-proven by C1 on all six
 cards; the tracer helpers are in the WS-RK3 path GYRE also runs, so the GYRE
 (Decision 43+45) and D122 seven-pair gates apply too.
-1. Sources 3-5 (`ocean_model_latlon_cgrid.py:1933`, `:1946`, `:2568-2570`):
+1. Sources 3-5 (`ocean_model_latlon_cgrid.py:1936`, `:1946`, `:2568-2570`):
    divide by a denominator equal to 1 on dry lanes and the live value on wet
    lanes (same operands on wet lanes; dry lanes stay masked). Measured: zeroing
    exactly these makes rung 0 finite and equal to forward mode. Pick: yes.
-2. Sources 1-2 (`implicit_solver.py:357-376`, `ocean_model_latlon_cgrid.py:13444`):
+2. Sources 1-2 (`implicit_solver.py:363-382`, `ocean_model_latlon_cgrid.py:13455`):
    same guard on the zero pivot / zero face thickness. Reach only the mask
    cotangents. Pick: yes, after 1.
 3. Sources 6-9 (rung 10): a square root whose derivative is zero where its
