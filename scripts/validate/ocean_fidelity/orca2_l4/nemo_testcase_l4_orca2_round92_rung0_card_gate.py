@@ -52,8 +52,11 @@ def build_rung0_card(deck_root: Path):
         scheme="constant",
         constant=vertical.constant._replace(
             A_v=1.2e-4, K_v=1.2e-5, lat_dependent=False),
-        iwm=vertical.iwm._replace(enabled=False, require_forcing_maps=False),
-        ddm=vertical.ddm._replace(enabled=False),
+        # Round 313: the shipped card's literal IWM/DDM forms stated back to
+        # their previous values; constant mixing runs neither.
+        iwm=vertical.iwm._replace(enabled=False, require_forcing_maps=False,
+                                  form="generic", tsdiff=False),
+        ddm=vertical.ddm._replace(enabled=False, form="hybrid"),
         vmix_background_mode="additive",
         # Decision 130: the shipped card's V1 TKE statements stay off on a
         # card that does not run TKE (stated, not inherited).

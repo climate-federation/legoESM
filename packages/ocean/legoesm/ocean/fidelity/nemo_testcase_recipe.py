@@ -1923,25 +1923,25 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         # nn_mxlice=2 stays 0: it reads SI3's hm_i, which this card does not
         # compute itself (Decision 135).
     )
-    # namelist_cfg's namzdf_iwm: ln_mevar=.false. (constant mixing efficiency)
-    # and ln_tsdiff=.true. (salt and heat get different wave diffusivities).
-    # The efficiency option is taken; the salt/heat differential is NOT, and it
-    # is not silently dropped either: legoESM's implicit tracer solve carries
-    # ONE diffusivity for both tracers, so a separate salt coefficient has
-    # nowhere to go, and the gap is declared in the card's unmeasured features
-    # below rather than hidden behind a False.  The heat and momentum halves of
-    # the arm, which are what the retired mixing-length floor was standing in
-    # for, are unaffected by that gap.
+    # Decision 122 / round 313: V4's NEMO-literal zdf_iwm (gridladder-vmix
+    # 1fc44b9b98) with namelist_cfg's &namzdf_iwm: ln_mevar=.false. (:423),
+    # ln_tsdiff=.true. (:424); and V3's literal zdf_ddm, ln_zdfddm=.true.,
+    # rn_avts=1e-4, rn_hsbfr=1.6 (:393-395).  zdf_phy runs EVD, DDM, IWM in
+    # that order (zdfphy.f90:359, :363, :372); salt gets its own matrix
+    # because ln_zdfddm is on (trazdf.f90:175-176).
     iwm_config = model_config.physics.vertical_mixing.iwm._replace(
         enabled=True,
+        form="nemo_literal",
         mevar=False,
-        tsdiff=False,
+        tsdiff=True,
         require_forcing_maps=True,
     )
+    ddm_config = model_config.physics.vertical_mixing.ddm._replace(
+        enabled=True, form="nemo_literal", rn_avts=1.0e-4, rn_hsbfr=1.6)
     model_config = model_config._replace(
         physics=model_config.physics._replace(
             vertical_mixing=model_config.physics.vertical_mixing._replace(
-                tke=tke_config, iwm=iwm_config)),
+                tke=tke_config, iwm=iwm_config, ddm=ddm_config)),
         # Decision 126: runoff at the surface only.  namelist_ref sets
         # ln_rnf_depth = ln_rnf_depth_ini = .false., so sbc_rnf_init takes
         # nk_rnf = 1 (sbcrnf.f90:486-489) and sbc_rnf_div the surface branch
@@ -1971,12 +1971,6 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         surface_input_operator="nemo_fld_read",
         unmeasured_features=(
             "staged_gm_eiv",
-            # The deck's ln_tsdiff: NEMO gives salt a different wave-driven
-            # diffusivity from heat, and the shared-K implicit tracer solve
-            # cannot carry two.  The deck's second salt/heat differential,
-            # ln_zdfddm, is unbuilt for the same reason.
-            "internal_wave_salt_heat_differential",
-            "double_diffusive_salt_heat_split",
             "spatial_lateral_viscosity",
             "freshwater_budget_carry",
             "si3_jpl5_layered_prather_state",

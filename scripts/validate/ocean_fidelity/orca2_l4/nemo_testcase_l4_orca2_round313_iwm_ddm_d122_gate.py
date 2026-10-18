@@ -47,7 +47,7 @@ ARMS.update({rung: ("control", "D122") for rung in RUNGS[:-1]})
 D122_SELECTED: dict[str, tuple] = {"rung10": BOTH}
 
 
-def _carried(card) -> tuple:
+def carried(card) -> tuple:
     vm = card.recipe.model_config.physics.vertical_mixing
     return (vm.iwm.form, bool(vm.iwm.tsdiff), bool(vm.ddm.enabled), vm.ddm.form)
 
@@ -68,7 +68,7 @@ def _with(card, values: tuple):
 
 def selected_card(card, *, arm: str, rung: str, plant: str = "none"):
     require(arm in ARMS[rung], f"{rung}: arm {arm} is not defined")
-    got = _carried(card)
+    got = carried(card)
     want = D122_SELECTED.get(rung)
     if arm == "D122":
         require(got == (want or _base(rung)),
@@ -77,15 +77,15 @@ def selected_card(card, *, arm: str, rung: str, plant: str = "none"):
     if arm == "control" and want is not None and got == want:
         # Control on the selection tree: this round's selection stripped.
         card = _with(card, _base(rung))
-        got = _carried(card)
+        got = carried(card)
     require(got == _base(rung),
             f"{rung}: control base carries {got}, not round 312's")
     if arm == "control":
         new = _with(card, IWM) if plant == "retained-selector" else card
-        require(_carried(new) == _base(rung), f"{rung}: control arm moved the card")
+        require(carried(new) == _base(rung), f"{rung}: control arm moved the card")
         return new
     new = _with(card, ARM_VALUES[arm])
-    require(_carried(new) == ARM_VALUES[arm], f"{rung}: arm {arm} carries {_carried(new)}")
+    require(carried(new) == ARM_VALUES[arm], f"{rung}: arm {arm} carries {carried(new)}")
     return new
 
 

@@ -38,10 +38,9 @@ from legoesm.ocean.fidelity.provenance import worktree_stamp
 NX, NY, NZ, NTR = 94, 152, 31, 2
 HALO = 2
 FIELD_ORDER = ("T", "S", "u", "v", "ssh")
+# Round 313 built both salt/heat differentials (ln_tsdiff, ln_zdfddm).
 EXPECTED_UNMEASURED = (
     "staged_gm_eiv",
-    "internal_wave_salt_heat_differential",
-    "double_diffusive_salt_heat_split",
     "spatial_lateral_viscosity",
     "freshwater_budget_carry",
     "si3_jpl5_layered_prather_state",
