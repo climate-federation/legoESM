@@ -1737,6 +1737,9 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:406': 'nn_mxl      =   3',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:410': 'nn_etau     =   1',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:415': 'nn_mxlice = 2',
+    # round 315 differentiability probe (legoESM statements, measurement only)
+    'ocean_model_latlon_cgrid.py:1933': 'rhs = sr(-sr(horizontal_scaled / e3t_kmm))',
+    'ocean_pe_latlon_cgrid.py:4294': 'cd0=float(config.bottom_drag.bottom_drag_cd0),',
     # round 314 namelist audit
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:21': 'nn_itend    =    5840',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:48': 'ln_tsd_dmp  = .true.',
