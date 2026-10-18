@@ -5635,7 +5635,9 @@ CITATION_MAP = {
     # pinned endpoint statements are unchanged.
     'ocean_model_latlon_cgrid.py:2600-2684': [
         'h_one_third = h_k_old',
-        '+ dt * h_one_half * stage_source_rates[2][1])', 84],
+        '+ dt * h_one_half * stage_source_rates[2][1])', 85],
+    # Extent 84 -> 85 at lane B round 16: the L1 Krhs selection added one
+    # line inside the span; endpoints are the same statements.
     # Extent 172 -> 174 and end anchor renamed at G4 round 9: the stage-3
     # Kmm option added two lines inside the span; endpoints are the same
     # statements.
@@ -5652,7 +5654,9 @@ CITATION_MAP = {
         'S_mid = S_mid + dt * dS_gm * active_3d', 453],
     'ocean_model_latlon_cgrid.py:10264-10311': [
         ('_nemo_ws_rk3_tracer_pair_step(', 3),
-        'return_final_content=True,', 45],
+        'return_final_content=True,', 48],
+    # Extent 45 -> 48 at lane B round 16: the L1 BBL arguments added three
+    # lines inside the call; endpoints are the same statements.
     # --- round 65: admitted R64 Krhs/FCT/TKE walk ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:827-828': [
         ('DO jn = 1, jpts', 1), 'ts(:,:,:,jn,Krhs) = 0._wp', 2],
