@@ -195,8 +195,16 @@ JAX_ENABLE_X64=1, CPU, PYTHONPATH as in `land.sh`; evidence
   six round-314 tests).  151 passed, 0 failed.
 - New test non-vacuous: rewriting the mixed-layer-eddy rule turns the
   pinned-table test red (restored, byte-compared).
-- Review: codex review: paused (quota).  Independent review: the operator's
-  Claude review before landing.
+- After the review fixes (record basis, UNCOMPARED rows), commit
+  at `c208304ef`, same pieces: citation gate on this receipt 12
+  citations, failures 0, PASS (`citation_gate_receipt_fix.json`); 135
+  passed (`gate_fix_a.log`, includes the private-import ratchet, also run
+  alone: 6 passed, `gate_fix_ratchet.log`); 2 passed (`gate_fix_b1.log`,
+  face-mask); 15 passed (`gate_fix_b2.log`, barotropic state + the seven
+  round-314 tests).  152 passed, 0 failed.
+- Review: codex review: paused (quota).  Independent Claude review
+  (operator): CONFIRMED the DIFFERS rows, absences and direct test; HELD on
+  the two instrument defects fixed above.
 
 ## OPEN
 
