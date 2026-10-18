@@ -428,6 +428,16 @@ FILES = {
         _ORCA2_COMPILED / "traadv.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90": (
         _ORCA2_COMPILED / "ldftra.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfc1d_c2d.f90": (
+        _ORCA2_COMPILED / "ldfc1d_c2d.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfslp.f90": (
+        _ORCA2_COMPILED / "ldfslp.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbc.f90": (
+        _ORCA2_COMPILED / "trabbc.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90": (
+        _ORCA2_COMPILED / "trabbl.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90": (
+        _ORCA2_COMPILED / "traldf_iso.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfdrg.f90": (
         _ORCA2_COMPILED / "zdfdrg.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90": (
@@ -8199,6 +8209,60 @@ CITATION_MAP = {
     'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfphy.f90:227': 'avt_k(:,:,jk)    = avtb_2d(:,:) * avtb(jk) * wmask(',
     # --- GRIDLADDER-VMIX round 15 resume (V5 scored) ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:443': 'avtb_2d(:,:) = 1._wp',
+    # Lane B round 16 (vmix_r16): Decision 138 survey and rung L1 (bottom boundary layer).
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfc1d_c2d.f90:125': 'SUBROUTINE ldf_c2d( cd_type, pUfac, knn, pah1, pah2 )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfslp.f90:99': 'SUBROUTINE ldf_slp( kt, prd, pn2, Kbb, Kmm )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:181': ('SUBROUTINE ldf_tra_init', 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:611-612': [
+        'IF( .NOT.( ln_traldf_iso .OR. ln_traldf_triad ) )   &',
+        "&                  CALL ctl_stop( 'ln_ldfeiv=T requires iso-neutral laplacian diffusion' )", 2,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:707': 'SUBROUTINE ldf_eiv( kt, paei0, paeiu, paeiv, Kmm )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:892': 'SUBROUTINE ldf_eiv_trp_RK3_t( kt, kit000, pFu, pFv, ktFuv, pFw, Kmm, Krhs )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:189': 'CALL ldf_slp( kstp, rhd, rn2b, Nbb, Nbb )   ! before slope for standard operator',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:193': 'IF( l_ldftra_time .OR. l_ldfeiv_time )   CALL ldf_tra( kstp, Nbb, Nbb )  !       and/or ei',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:560': ('IF( kstg == 3 .AND. ln_trabbl )   CALL bbl( kstp, nit000, Kbb, Kmm )', 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:734': 'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )  ! lateral mixing',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:738': 'IF( ln_trabbc  )   CALL tra_bbc( kstp,      Kmm, ts, Krhs )  ! bottom heat flux',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:739': 'IF( ln_trabbl  )   CALL tra_bbl( kstp, Kbb, Kmm, ts, Krhs )  ! advective (and/or diffusive',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:255-257': [
+        'IF( ln_ldfeiv .AND. .NOT. ln_traldf_triad ) THEN                     ! Add the eiv transpo',
+        'CALL ldf_eiv_trp( kt, kit000, pFu, pFv, pFw, Kmm, Krhs )', 3,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbc.f90:158-159': [
+        'pts(ji,jj,mbkt(ji,jj),jp_tem,Krhs) = pts(ji,jj,mbkt(ji,jj),jp_tem,Krhs)   &',
+        '&             + qgh_trd0(ji,jj) / (e3t_3d(ji,jj,mbkt(ji,jj)) *(1._wp+r3t(ji,jj,Kmm)*tmask(', 2,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbc.f90:177': ('SUBROUTINE tra_bbc_init', 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbc.f90:243': 'qgh_trd0(:,:) = r1_rho0_rcp * sf_qgh(1)%fnow(:,:,1) * 1.e-3 ! conversion in W/m2',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:217': 'SUBROUTINE tra_bbl_dif( pt, pt_rhs, kjpt, Kmm )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:258': 'pt_rhs(ji,jj,ik,jn) = pt_rhs(ji,jj,ik,jn)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:357': 'SUBROUTINE bbl( kt, kit000, Kbb, Kmm )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:412': 'zdep(ji,jj) = ((gdept_1d(ik) ) *(1._wp+r3t(ji,jj,Kmm)))            ! bottom T-level refere',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:430': 'zsign  = SIGN(  0.5_wp, -zgdrho * REAL( mgrhu(ji,jj) )  )    ! sign of ( i-gradient * i-sl',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:527': ('SUBROUTINE tra_bbl_init', 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:600': 'ahu_bbl_0(:,:) = rn_ahtbbl * e2_e1u(:,:) * e3u_bbl_0(:,:) * ssumask(:,:)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:73': 'SUBROUTINE traldf_iso_lap( kt, Kbb, Kmm, pt, Krhs, ld_ptr, ld_hst )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:746': 'SUBROUTINE traldf_iso_a33( Kmm, pah_wslp2, pakz )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:185': 'zwt(ji,jk) = avt(ji,jj,jk) + akz(ji,jj,jk)',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:256': 'ln_trabbc   = .true.    !  Apply a geothermal heating at the ocean bottom',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:256-263': [
+        'ln_trabbc   = .true.    !  Apply a geothermal heating at the ocean bottom',
+        "sn_qgh      ='geothermal_heating.nc'  ,       -12.        , 'heatflow',   .false.   , .tru", 8,
+    ],
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:268-272': [
+        'ln_trabbl   = .true.    !  Bottom Boundary Layer parameterisation flag',
+        'rn_gambbl   =  10.      !  advective bbl coefficient                 [s]', 5,
+    ],
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:300-307': [
+        'ln_traldf_lap   = .true.    !    laplacian operator',
+        'rn_Ld        = 200.e+3        !  lateral diffusive length   [m]   (nn_aht_ijk_t= 0, 10)', 8,
+    ],
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:312': 'ln_mle      = .true.   ! (T) use the Mixed Layer Eddy (MLE) parameterisation',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:317-323': [
+        'ln_ldfeiv   = .true.    ! use eddy induced velocity parameterization',
+        'rn_Le        = 200.e+3           !  lateral diffusive length   [m]   (nn_aht_ijk_t= 0, 10)', 7,
+    ],
 }
 
 
