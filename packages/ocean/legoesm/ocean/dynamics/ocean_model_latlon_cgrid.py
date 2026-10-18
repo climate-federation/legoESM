@@ -4178,6 +4178,13 @@ class LatLonCGridOceanModel:
                 "rk3_vector_rhs_nemo_order=True requires vector-form "
                 "momentum advection; flux_form has no separate dyn_keg "
                 "Krhs accumulation to order")
+        if (config.rk3_stage1_ldf_source_order
+                and config.momentum_advection != "flux_form"
+                and not config.rk3_vector_rhs_nemo_order):
+            raise ValueError(
+                "rk3_stage1_ldf_source_order=True with vector-form momentum "
+                "advection requires rk3_vector_rhs_nemo_order=True: NEMO's "
+                "stage 1 runs dyn_keg's guarded subtraction after dyn_vor")
         if config.weno_smoothness not in VALID_WENO_SMOOTHNESS:
             raise ValueError(
                 f"weno_smoothness must be one of "
@@ -5778,6 +5785,7 @@ class LatLonCGridOceanModel:
                    ene_generic_f_vtx=False,
                    legacy_hpg_algebraic=False,
                    nemo_operator_association=False,
+                   nemo_stage1_ldf_source_order=False,
                    return_nemo_operator_components=False,
                    nemo_stage_zad_operands=None,
                    nemo_stage_zad_operand_observer=None,
@@ -5841,6 +5849,7 @@ class LatLonCGridOceanModel:
             ene_generic_f_vtx=ene_generic_f_vtx,
             legacy_hpg_algebraic=legacy_hpg_algebraic,
             nemo_operator_association=nemo_operator_association,
+            nemo_stage1_ldf_source_order=nemo_stage1_ldf_source_order,
             nemo_stage_zad_operands=nemo_stage_zad_operands,
             nemo_stage_zad_operand_observer=nemo_stage_zad_operand_observer,
             nemo_stage_zad_eta_after_override=(
@@ -6281,7 +6290,9 @@ class LatLonCGridOceanModel:
                                momentum_flux_face_thickness=_ws_face_thickness_kbb,
                                ldf_thickness_operands=_ws_ldf_thickness_kbb,
                                nemo_operator_association=(self._nemo_ws_test_hooks.nemo_stage_rhs_accumulation_order_arm
-                                                          or (("stage1-source-order", None, "baseline") if _cfg_b.rk3_stage1_ldf_source_order else bool(_cfg_b.rk3_vector_rhs_nemo_order))),  # noqa: E501
+                                                          or bool(_cfg_b.rk3_vector_rhs_nemo_order)),
+                               nemo_stage1_ldf_source_order=_nemo_ws_stage1_ldf_source_order(
+                                   _cfg_b, self._nemo_ws_test_hooks.nemo_stage_rhs_accumulation_order_arm),
                                nemo_stage_zad_operands=(
                                    (self._nemo_ws_test_hooks.stage1_zad_w_override, None, None)
                                    if self._nemo_ws_test_hooks.stage1_zad_w_override is not None else None),
@@ -17290,6 +17301,15 @@ def _rk3_fold_exchange_top_v(v, grid, v_mask_3d):
     perm = fold.perm_v
     return v.at[-1].set(
         fold.vector_sign_v * v[-2][perm] * v_mask_3d[-2][perm].astype(v.dtype))
+
+
+def _nemo_ws_stage1_ldf_source_order(cfg, private_order_arm):
+    """The public stage-1 order; refused beside a private stage-RHS order arm."""
+    if cfg.rk3_stage1_ldf_source_order and private_order_arm:
+        raise ValueError(
+            "rk3_stage1_ldf_source_order and the private stage-RHS "
+            "accumulation-order arm both select the stage-1 Krhs order")
+    return bool(cfg.rk3_stage1_ldf_source_order)
 
 
 def _nemo_ws_stage_r3f(cfg, stage_index, eta_pair, z_coord, grid):

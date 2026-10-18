@@ -3334,6 +3334,8 @@ class LatLonCGridOceanConfig(NamedTuple):
     # -> dyn_keg/dyn_zad (stp2d.f90:141-147); the card's default sum adds
     # the vorticity term before the lateral diffusion.  True selects NEMO's
     # order for the step-entry RHS; False preserves previously measured cards.
+    # With vector-form advection it needs rk3_vector_rhs_nemo_order, whose
+    # dyn_keg subtraction (dynkeg.f90:129-130) the stage-1 block then keeps.
     rk3_stage1_ldf_source_order: bool = False
     # Stage 3's dyn_ldf_lev reads r3f = r1_2*(r3fb + r3fa), the mean of the
     # two stored F ratios (stprk3_stg.f90:245, read at dynldf_lev.f90:123),

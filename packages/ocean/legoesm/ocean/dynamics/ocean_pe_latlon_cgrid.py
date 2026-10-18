@@ -5300,6 +5300,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     ene_generic_f_vtx=False,
     legacy_hpg_algebraic=False,
     nemo_operator_association: bool = False,
+    nemo_stage1_ldf_source_order: bool = False,
     return_nemo_operator_components: bool = False,
     nemo_stage_zad_operands=None,
     nemo_stage_zad_operand_observer=None,
@@ -5510,15 +5511,22 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dp_dx, rho_0, direct_hpg_u)
     hpg_tendency_v = _nemo_hpg_tendency_from_pressure_or_direct(
         dp_dy, rho_0, direct_hpg_v)
-    _nemo_stage1_source_order = (
+    _nemo_stage1_hook = (
         isinstance(nemo_operator_association, tuple)
         and len(nemo_operator_association) >= 2
         and nemo_operator_association[0] == "stage1-source-order")
-    _nemo_stage1_keg_arm = (
-        nemo_operator_association[2]
-        if _nemo_stage1_source_order and len(nemo_operator_association) >= 3
-        else "baseline")
-    if _nemo_stage1_source_order and nemo_operator_association[1] is not None:
+    _nemo_stage1_source_order = (
+        _nemo_stage1_hook or bool(nemo_stage1_ldf_source_order))
+    if _nemo_stage1_hook:
+        _nemo_stage1_keg_arm = (
+            nemo_operator_association[2]
+            if len(nemo_operator_association) >= 3 else "baseline")
+    elif config.rk3_vector_rhs_nemo_order:
+        # NEMO runs both: stp_2D's stage-1 order and dyn_keg's subtraction.
+        _nemo_stage1_keg_arm = "nemo-keg-guard"
+    else:
+        _nemo_stage1_keg_arm = "baseline"
+    if _nemo_stage1_hook and nemo_operator_association[1] is not None:
         # Production-closure ULP plant only.  The private model hook supplies a
         # complete HPG pair; no public configuration can reach this branch.
         hpg_tendency_u, hpg_tendency_v = nemo_operator_association[1]
@@ -5921,6 +5929,12 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 _nemo_after_vor_u + (-dKE_dx))
             _nemo_after_keg_v = jax.lax.optimization_barrier(
                 _nemo_after_vor_v + (-dKE_dy))
+        elif _nemo_stage1_keg_arm == "nemo-keg-guard":
+            # dynkeg.f90:129-130, as G1b's vector-order branch above.
+            _nemo_after_keg_u = jax.lax.optimization_barrier(
+                _nemo_keg_accumulate(_nemo_after_vor_u, dKE_dx))
+            _nemo_after_keg_v = jax.lax.optimization_barrier(
+                _nemo_keg_accumulate(_nemo_after_vor_v, dKE_dy))
         elif _nemo_stage1_keg_arm == "unmasked-materialized":
             _nemo_keg_addend_u = jax.lax.optimization_barrier(-dKE_dx)
             _nemo_keg_addend_v = jax.lax.optimization_barrier(-dKE_dy)
