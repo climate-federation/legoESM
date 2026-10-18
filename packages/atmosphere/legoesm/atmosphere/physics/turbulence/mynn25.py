@@ -395,8 +395,17 @@ def _compute_SM_SH(
     SH2 = 3.0 * A2 * (gamma1 + gamma2) * (Rfc - Rf) / one_m_Rf
     SM2 = (A1 * F1) / (A2 * F2) * (Rf1 - Rf) / Rf2_m_Rf * SH2
 
-    # Level-2 diagnosed qke (NN09 eq A2) — used to derive alpha_c.
-    qke_diag = B1 * L * L * SM2 * (1.0 - Rf) * G_M * (q_half * q_half / (L * L + _SMOOTH_EPS))
+    # Level-2 qke q2^2 (NN09 eq A1): 1 = B1 (SM2 G_M + SH2 G_H), i.e.
+    # q2^2 = B1 q^2 (SM2 G_M + SH2 G_H) = B1 L^2 (SM2 S^2 - SH2 N^2). Eq A2 rewrites
+    # this as B1 L^2 SM2 (1 - Rf) S^2, which needs S^2 > 0: with no shear the
+    # clipped Ri drops the buoyancy term, q2 collapses to the floor, alpha_c = 1
+    # and the Helfand-Labraga scaling that keeps SM25/SH25 >= 0 (NN09 eq 42) never
+    # engages, so a windless convective column stays at the qke floor. Level-2
+    # turbulence exists only below the critical flux Richardson number (SH2 < 0
+    # on Rfc < Rf < 1, eq A4), so supercritical layers get no level-2 TKE. The
+    # two forms agree wherever the Ri -> Rf relation is live and Ri unclipped.
+    qke_diag = jnp.where(Rf < Rfc,
+                         B1 * (SM2 * G_M + SH2 * G_H) * q_half * q_half, 0.0)
     qke_diag = jnp.maximum(qke_diag, _QKE_FLOOR)
     q2 = _safe_pow_pos(qke_diag, 0.5)
 
@@ -432,9 +441,9 @@ def _compute_SM_SH(
     # neighbourhood of the root changes, which is the only place that was
     # producing 1e25 diffusivities.
     #
-    # This bounds the singularity; it is not the NN09/Helfand-Labraga (1988)
-    # joint (G_M, G_H) realizability limit, which would additionally keep the
-    # closure inside its derived region.
+    # Since q2 uses NN09 eq A1 (above), the Helfand-Labraga alpha_c engages in
+    # shear-free unstable layers too and keeps alpha_c^2 * G_H off this root, so
+    # the floor is now a backstop rather than the operative guard there.
     D25 = _away_from_zero(phi_2 * phi_4 + phi_5 * phi_3, config.d25_floor)
     SM25 = alpha_c * A1 * (phi_3 - 3.0 * C1 * phi_4) / D25
     SH25 = alpha_c * A2 * (phi_2 + 3.0 * C1 * phi_5) / D25
@@ -583,17 +592,13 @@ def mynn25_turbulence(
     Kh_half = L * q_half * SH
     Kq_half = L * q_half * (3.0 * SM)        # NN09 eq 67
     # Sign convention: eddy diffusivities are >= 0 (down-gradient mixing).
-    # This clamp is LOAD-BEARING, not defensive. The comment it replaces said
-    # the level-2.5 SM/SH are "analytically nonnegative" and that only a
-    # numerical edge case could make them "slightly negative"; both halves are
-    # false and were measured so. Past the D25 root at G_M = 0 the exact
-    # algebra gives SM25 = -0.67 and SH25 = -0.032 at G_H = 1 -- O(1) negative,
-    # not slight -- because SH25 reduces to A2/phi_4 there and phi_4 changes
-    # sign. So this is a real upgradient branch of the closure being clamped
-    # away, and the clamp must stay.
-    # It is also NOT sufficient on its own: the same root produces LARGE
-    # POSITIVE SM25/SH25 on the other side, which a >= 0 clamp cannot see. That
-    # is bounded at the source by the two-sided D25 floor in _compute_SM_SH.
+    # History: with q2 from NN09 eq A2 the shear-free branch went past the D25
+    # root (SM25 = -0.67, SH25 = -0.032 at G_M = 0, G_H = 1) and this clamp, with
+    # the two-sided D25 floor, was the operative guard. With q2 from eq A1 the
+    # Helfand-Labraga alpha_c keeps SM25/SH25 >= 0 and bounded: measured over
+    # 52,326 (G_M, G_H, q) points spanning 1e-8..1e8 in both signs at the NN09
+    # constants, neither this clamp nor the D25 floor changes any value. Both
+    # stay as backstops for retuned coefficients.
     Km_half = jnp.maximum(Km_half, 0.0)
     Kh_half = jnp.maximum(Kh_half, 0.0)
     Kq_half = jnp.maximum(Kq_half, 0.0)

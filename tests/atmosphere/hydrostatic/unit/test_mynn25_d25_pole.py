@@ -16,9 +16,13 @@ the root: the Nieuwstadt CBL, the one LES tuning case with
 step and the whole column to NaN by step 10, while the seven other cases and
 the eight other closures ran 2000 steps clean.
 
-These tests pin the two-sided floor: that the pole is REAL (so the fix is not
-decoration), that the floor bounds it, that the sign is untouched, and that
-every well-posed point is bit-identical to the unfloored algebra.
+HISTORY: that was with the level-2 q2 from NN09 eq A2. With eq A1 the
+Helfand-Labraga alpha_c engages without shear and the shear-free sweep no
+longer reaches the root; measured at the NN09 constants, the floor changes no
+value and SH25 is never negative. These tests now pin that realizability
+result, that the floor (kept as a backstop for retuned coefficients) never
+flips a sign, and that every well-posed point is bit-identical to the
+unfloored algebra.
 
 They also pin the three sibling guards an adversarial review turned up on the
 same path, each MEASURED before it was believed:
@@ -77,41 +81,45 @@ def _phi4_root(cfg: MYNN25Config) -> float:
     return 1.0 / slope
 
 
-def test_the_pole_is_real_and_the_old_floor_amplified_it():
-    """NON-VACUOUS GATE: with the floor put back to 1e-30 the closure must
-    still blow up. If this stops failing, the pole is gone and the fix below
-    is testing nothing."""
+def test_shear_free_sweep_never_reaches_the_pole_even_without_the_floor():
+    """With the NN09 eq-A1 level-2 q2, the Helfand-Labraga alpha_c engages at
+    G_M = 0 and caps alpha_c^2 * G_H, so the shear-free sweep across the phi_4
+    root stays bounded even with the D25 floor removed. (Before, q2 used the
+    eq-A2 form, collapsed to the floor without shear, and the pole fired here:
+    |SH25| > 1e6.) The floor is a backstop, no longer the operative guard."""
     cfg = MYNN25Config(d25_floor=1e-30)
     root = _phi4_root(cfg)
     worst = max(abs(v)
                 for gh in np.linspace(0.5 * root, 1.5 * root, 401)
                 for v in _sm_sh(0.0, gh, cfg))
-    assert worst > 1e6, (
-        f"expected an unbounded stability function near G_H = {root:.4g}; "
+    assert worst < 1.0e1, (
+        f"shear-free stability functions unbounded near G_H = {root:.4g}: "
         f"largest |SM25|,|SH25| was {worst:.4g}")
 
 
-def test_the_default_floor_bounds_the_pole():
+def test_the_default_config_stays_bounded_near_the_root():
+    """Realizability coverage at the default floor (the floor itself no longer
+    binds at the NN09 constants; see the sweep test below)."""
     cfg = MYNN25Config()
     root = _phi4_root(cfg)
     worst = max(abs(v)
                 for gh in np.linspace(0.5 * root, 1.5 * root, 401)
                 for v in _sm_sh(0.0, gh, cfg))
-    # The neutral values are SM25 = 0.695, SH25 = 0.665. Two orders of
-    # magnitude above that is still a finite, physically small diffusivity
-    # (Kh = L*q*SH ~ 4e-3 m^2/s here) and is what the floor buys.
+    # The neutral values are SM25 = 0.695, SH25 = 0.665; realizability keeps
+    # the sweep within a few times that (measured max 1.47).
     assert worst < 1.0e2, f"|SM25|,|SH25| reached {worst:.4g} near the root"
 
 
-def test_the_root_from_the_constants_is_where_the_sign_flips():
-    """The derived root must be the OBSERVED one, or the derivation in the
-    source comment is describing a different pole from the one that fires."""
+def test_sh_stays_positive_across_the_old_root():
+    """Helfand-Labraga realizability (NN09 eq 42 with the eq-A1 q2): SH25 is
+    non-negative on both sides of the phi_4 root at G_M = 0. (Before the fix it
+    went negative above the root and the Kh >= 0 clamp zeroed it.)"""
     cfg = MYNN25Config()
     root = _phi4_root(cfg)
     _sm_lo, sh_lo = _sm_sh(0.0, 0.5 * root, cfg)
     _sm_hi, sh_hi = _sm_sh(0.0, 2.0 * root, cfg)
     assert sh_lo > 0.0, f"SH25 should be positive below the root, got {sh_lo}"
-    assert sh_hi < 0.0, f"SH25 should be negative above the root, got {sh_hi}"
+    assert sh_hi > 0.0, f"SH25 should stay positive above the root, got {sh_hi}"
 
 
 @pytest.mark.parametrize("G_M", [0.0, 1e-8, 1.0, 1e4, 1e8])
@@ -135,10 +143,9 @@ def test_well_posed_points_are_bit_identical(G_M, G_H):
 
 
 def test_the_floor_never_flips_the_sign():
-    """Two-sided by construction: past the root SM25/SH25 stay negative and
-    the existing Km/Kh >= 0 clamp keeps handling them. A one-sided floor would
-    turn that branch positive and inject upgradient mixing as if it were real.
-    """
+    """Two-sided by construction: wherever D25 is floored the sign is kept,
+    never flipped (a one-sided floor would turn a negative branch positive and
+    inject upgradient mixing). At the NN09 constants no point is floored."""
     cfg = MYNN25Config()
     ref = MYNN25Config(d25_floor=1e-300)
     root = _phi4_root(cfg)
@@ -345,3 +352,24 @@ def test_away_from_zero_keeps_a_python_scalar_a_python_scalar():
     # And it still floors what it must.
     assert _away_from_zero(1e-9, 1e-6) == 1e-6
     assert _away_from_zero(-1e-9, 1e-6) == -1e-6
+
+
+def test_floor_and_clamp_never_bind_over_a_wide_sweep_at_nn09_constants():
+    """Measured fact pinned: with the eq-A1 q2, across G_M, |G_H| in 1e-8..1e8
+    (both signs) and several q, removing the D25 floor changes nothing and SH25
+    is never negative, so neither guard is operative at the NN09 constants.
+    (Fails on the eq-A2 code, where the shear-free branch was negative.)"""
+    mags = np.logspace(-8, 8, 33)
+    g_m = np.concatenate([[0.0], mags])
+    g_h = np.concatenate([-mags[::-1], [0.0], mags])
+    pts = np.array([(a, b) for a in g_m for b in g_h])
+    a = jnp.asarray(pts[:, 0])[None]
+    b = jnp.asarray(pts[:, 1])[None]
+    for q in (1e-5, 0.3):
+        args = (a, b, jnp.full_like(a, _L), jnp.full_like(a, q))
+        sm0, sh0 = _compute_SM_SH(*args, MYNN25Config(d25_floor=1e-300))
+        sm1, sh1 = _compute_SM_SH(*args, MYNN25Config())
+        assert np.array_equal(np.asarray(sm0), np.asarray(sm1))
+        assert np.array_equal(np.asarray(sh0), np.asarray(sh1))
+        assert float(jnp.min(sh0)) >= 0.0 and float(jnp.min(sm0)) >= 0.0
+        assert float(jnp.max(jnp.maximum(jnp.abs(sm0), jnp.abs(sh0)))) < 10.0
