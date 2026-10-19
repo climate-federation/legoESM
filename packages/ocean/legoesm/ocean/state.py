@@ -3343,6 +3343,46 @@ class LatLonCGridOceanConfig(NamedTuple):
     # True hands rk3_stage_r3f_nemo_literal's ratio to the stage-3 lateral
     # diffusion; False preserves previously measured cards.
     nemo_ldf_stage_r3f: bool = False
+    # NEMO's stage transport zFv multiplies by vmask (stprk3_stg.f90:283),
+    # the mask AFTER its V-point fold exchange (dommsk.f90:211, :232): the
+    # T-pivot row's V faces are wet, where the compact T-derived face mask
+    # calls them dry.  True hands every stage transport the resolved raw-mesh
+    # V mask; False preserves previously measured cards.
+    rk3_stage_transport_raw_vmask: bool = False
+    # Two fold exchanges the stage transport zFv reads on the T-pivot row,
+    # where the card's compact values differ: vn_adv after dyn_spg_ts's
+    # lbc_lnk (dynspg_ts.f90:844) and r3v after stp_RK3_stg's (stprk3_stg.f90:169).
+    # True hands every stage transport both images; False preserves previously measured cards.
+    rk3_stage_transport_fold_exchanges: bool = False
+    # NEMO's FCT reads the T-pivot fold on the faces north of the pivot row:
+    # upstream fluxes on the halo, the antidiffusive flux after lbc_lnk
+    # (traadv_fct.f90:311) and the limiter's halo bound and coefficient.
+    # True selects them; False preserves previously measured cards.
+    fct_fold_exchange: bool = False
+    # NEMO's end-of-stage exchange (stprk3_stg.f90:795-796) also re-mirrors
+    # the stored T-pivot row of uu, T and S (lbcnfd.f90:624-628, :669-673).
+    # True applies that pivot half-row after every stage; False preserves
+    # previously measured cards.  T-pivot fold grids only.
+    rk3_end_of_stage_pivot_fold: bool = False
+    # The stage-1/2 transport wzv reads NEMO's stage pair: rDt = rn_Dt/3
+    # (rn_Dt/2) and r3t(Kaa) = the stored blend of r3t(Kbb) and r3ta
+    # (stprk3_stg.f90:134-135, :177; :188-189, :221).  False keeps the
+    # real-equal N+1 ratio over rn_Dt.
+    rk3_stage_wzv_nemo_clock_pair: bool = False
+    # Stage 3 builds NEMO's tracer Krhs -- the FCT's two divided writes, then
+    # the surface, runoff and qsr terms in call order (stprk3_stg.f90:604,
+    # :637, :645, :717) -- and trazdf's content e3t(Kbb)*T(Kbb) +
+    # (p2dt*e3t(Kmm))*Krhs (trazdf.f90:284-289).  False keeps the content
+    # e3t(Kbb)*T - dt*(flux divergence) + (dt*e3t(Kmm))*sources.
+    rk3_stage3_tracer_krhs_nemo_order: bool = False
+    # The tracer-owned stage-2/3 WZV reads r3t(Kmm) from the ratio slot the
+    # preceding RK stage stored (stprk3_stg.f90:177-179, :221-223), not from
+    # the real-equal interpolated sea level.  False preserves prior cards.
+    rk3_stage_tracer_wzv_stored_kmm_ratios: bool = False
+    # The stage-2/3 transport (zFu/zFv and its zub divisor) reads the stored
+    # r3u/r3v(Kmm) blend (stprk3_stg.f90:177-179, :221-223 -> :270-283), not
+    # the ratio of the interpolated sea level.  False preserves prior cards.
+    rk3_stage_transport_stored_r3uv: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
