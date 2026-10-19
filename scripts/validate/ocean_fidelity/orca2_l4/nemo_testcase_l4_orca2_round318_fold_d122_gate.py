@@ -170,7 +170,7 @@ def selected_card(card, *, arm: str, rung: str, plant: str = "none"):
         return card
     want = {} if arm == "control" else STATEMENTS[arm]
     if plant == "retained-selector" and arm == "control":
-        want = STATEMENTS["VMASK"]
+        want = STATEMENTS["KRHS3"]  # never shipped (round 318)
     new = _set(cfg, want)
     for key in STATEMENTS["ALL"]:
         expect = want.get(key, _get(cfg, key))
