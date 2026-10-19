@@ -101,7 +101,7 @@ kt 1..10 score.
 
 ## 5. Tests, gates and choices
 
-Focused evidence before the final gate:
+Final validation:
 
 - hardened literal-FCT exact-value test: pass under jit, traced inputs and
   x64;
@@ -109,6 +109,13 @@ Focused evidence before the final gate:
 - exact-entry stage-1 probe: seven of seven owned fields bit-identical;
 - removed-external wiring plant: seven of seven rows DEBT, exit 1;
 - acquisition preflight: pass; observer patch additive.
+
+The focused literal-FCT regression, the default citation-gate tests and the
+private-import ratchet pass together: **24 passed in 22.12 s**.  The
+receipt-specific citation gate finds 2 citations, 0 failures, 0 unmapped
+citations and 0 failing map entries.  The ladder edits shifted one historical
+Python citation; it was re-anchored from lines 858-866 to 867-875 before the
+clean gate.
 
 ASKED: preregistered kt-2 split; exact NEMO entry; statement walk; cited-only
 fix discipline; conditional both-label rescore and certification verdict.
