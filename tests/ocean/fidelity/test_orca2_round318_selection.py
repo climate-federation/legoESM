@@ -7,6 +7,7 @@ stage-3 Krhs order stays off everywhere."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import jax
@@ -26,7 +27,7 @@ from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round318_fo
     D122_SELECTED,
     STATEMENTS,
     GateError,
-    _comparison_admitting_later_first,
+    classify_later_first,
     _get,
     _set,
     selected_card,
@@ -95,17 +96,64 @@ def test_retained_selector_plant_fires(cards) -> None:
                       plant="retained-selector")
 
 
-def _doc(first):
-    rows = [{"kt": 1, "checkpoint": "stage1", "field": f} for f in ("T", "S", "u")]
-    return {"independent": {"rows": rows, "first_non_bit_checkpoint": first}}
+EVIDENCE = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+                "round318/arms2")
+T1, S1, U1 = ({"kt": 1, "checkpoint": "stage1", "field": f} for f in "TSu")
 
 
-def test_later_first_row_admitted_earlier_refused() -> None:
-    seen = []
-    compare = _comparison_admitting_later_first(
-        lambda b, c: seen.append(c) or {})
-    t, u = ({"kt": 1, "checkpoint": "stage1", "field": f} for f in ("T", "u"))
-    assert compare(_doc(t), _doc(u))["first_non_bit_after"] == u
-    assert seen[-1]["independent"]["first_non_bit_checkpoint"] == t
-    with pytest.raises(GateError):
-        compare(_doc(u), _doc(t))
+def _classify(tmp_path, edit=None):
+    """Classify the real OMT-1 control vs ALLN records, optionally planted."""
+    paths = [EVIDENCE / f"omt1_independent_{arm}.json" for arm in ("control", "ALLN")]
+    if not all(p.is_file() for p in paths):
+        pytest.skip("round-318 OMT-1 evidence is unavailable")
+    candidate = json.loads(paths[1].read_text(encoding="utf-8"))
+    rows = {(r["kt"], r["checkpoint"], r["field"]): r
+            for r in candidate["ladder"]["rows"]}
+    if edit:
+        edit(rows, candidate["ladder"])
+    planted = tmp_path / "candidate.json"
+    planted.write_text(json.dumps(candidate), encoding="utf-8")
+    return classify_later_first(paths[0], planted, plant="none")
+
+
+def _worsen(row):
+    row.update(bit_identical=False, unequal=row["unequal"] + 1,
+               rms=float(row["rms"]) + 1.0, max_abs=float(row["max_abs"]) + 1.0)
+
+
+def test_omt1_later_first_row_admitted(tmp_path) -> None:
+    out = _classify(tmp_path)
+    assert (out["first_non_bit_before"], out["first_non_bit_after"]) == (T1, U1)
+    assert out["decision96_eligible"] and not out["exact_row_losses"]
+    assert out["first_over_bar"]["target"] == [1, "stage1", "u"]
+
+
+def test_old_first_row_worsened_refused(tmp_path) -> None:
+    # The marker still claims u; the rows say T is the first and got worse.
+    with pytest.raises(GateError, match="marker"):
+        _classify(tmp_path, lambda rows, _: _worsen(rows[(1, "stage1", "T")]))
+
+
+def test_earlier_row_worsened_refused(tmp_path) -> None:
+    # Entry T (non-exact by signed zeros, not a first-row candidate on OMT)
+    # got worse before u: no exact row is lost, so only the new rule fires.
+    with pytest.raises(GateError, match="got worse"):
+        _classify(tmp_path, lambda rows, _: _worsen(rows[(1, "entry", "T")]))
+
+
+def test_new_first_row_away_not_eligible(tmp_path) -> None:
+    def edit(rows, ladder):
+        _worsen(rows[(1, "stage1", "S")])
+        ladder["first_non_bit_checkpoint"] = S1
+
+    out = _classify(tmp_path, edit)
+    assert out["first_over_bar"]["rms_direction"] == "away"
+    assert not out["decision96_eligible"]
+
+
+def test_earlier_first_row_refused(tmp_path) -> None:
+    paths = [EVIDENCE / f"omt1_independent_{arm}.json" for arm in ("ALLN", "control")]
+    if not all(p.is_file() for p in paths):
+        pytest.skip("round-318 OMT-1 evidence is unavailable")
+    with pytest.raises(GateError, match="earlier"):
+        classify_later_first(*paths, plant="none")

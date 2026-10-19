@@ -19,7 +19,8 @@ the shipped card):
     FOLDUNIT, RAWV, TOPV  (G6, held in round 308 / Decision 125)
     FOLDR                 (G8 fold rows, Decision 137)
   combinations: G9TOPV, G9FOLD (G9 + the three G6), G9FOLDR, ALL.
-  D122      the card as shipped after this round's selection.
+  D122      the card as shipped after this round's selection (its control
+            is the shipped card too: a determinism check, not a decision).
 """
 
 from __future__ import annotations
@@ -100,33 +101,76 @@ for _rung in RUNGS:
                             if k not in _drop}
 
 
-def _comparison_admitting_later_first(original):
-    """Decision-96 row comparison that admits a first non-bit row moving LATER.
+METRICS = ("rms", "max_abs", "mean_abs_over_unequal")
 
-    The frozen comparison refuses any move of the first non-bit row; it was
-    written for statements that never make a row exact.  A later first row
-    means every earlier row became exact (losses are still refused), and the
-    round-276 classifier already scores its first over-bar direction at the
-    candidate's first row.  An EARLIER move is still refused.
+
+def _key(row) -> tuple:
+    return (row["kt"], row["checkpoint"], row["field"])
+
+
+def first_mismatch(ladder: dict, rung: str):
+    """First non-bit row recomputed from the row metrics (ladder order).
+
+    Entry rows count only on rung 10: the OMT/rung-0 ladders score NEMO's
+    dry-T signed zeros at entry and start the first row at stage 1.
     """
+    for row in ladder["rows"]:
+        if row["checkpoint"] == "entry" and rung != "rung10":
+            continue
+        if not row["bit_identical"]:
+            return {"kt": row["kt"], "checkpoint": row["checkpoint"],
+                    "field": row["field"]}
+    return None
+
+
+def later_first_admission(control: dict, candidate: dict):
+    """Recompute both first rows; return (old, new) when the move is admissible.
+
+    Never trusts a record's first-row marker.  A later first row is admitted
+    only if the old first row is now exact and no row before the new first
+    row got worse on any metric; exact-row losses and the new first row's
+    direction stay with the round-276 classifier.  Returns None when the
+    first row did not move.
+    """
+    rung = control["rung"]
+    old_rows = control["ladder"]["rows"]
+    new_rows = candidate["ladder"]["rows"]
+    require([_key(r) for r in old_rows] == [_key(r) for r in new_rows],
+            "candidate row order moved")
+    old_first = first_mismatch(control["ladder"], rung)
+    new_first = first_mismatch(candidate["ladder"], rung)
+    for doc, first in ((control, old_first), (candidate, new_first)):
+        require(doc["ladder"]["first_non_bit_checkpoint"] == first,
+                f"{doc['arm']}: first-row marker "
+                f"{doc['ladder']['first_non_bit_checkpoint']} != rows {first}")
+    if old_first == new_first:
+        return None
+    require(old_first is not None and new_first is not None,
+            f"first non-bit row appeared or vanished: {old_first} -> {new_first}")
+    index = {_key(r): i for i, r in enumerate(old_rows)}
+    at = lambda first: index[tuple(first.values())]  # noqa: E731
+    require(at(new_first) > at(old_first),
+            f"first non-bit row moved earlier: {old_first} -> {new_first}")
+    require(new_rows[at(old_first)]["bit_identical"],
+            f"old first row {old_first} is not exact in the candidate")
+    worse = [_key(b) for b, a in zip(old_rows[:at(new_first)],
+                                     new_rows[:at(new_first)])
+             if any(float(a[m]) > float(b[m]) for m in METRICS)]
+    require(not worse, f"rows before the new first row got worse: {worse}")
+    return old_first, new_first
+
+
+def _comparison_admitting(original, admitted):
+    """Decision-96 comparison tolerating exactly the pre-verified first-row move."""
 
     def compare(base: dict, candidate: dict) -> dict:
-        old_rows, old_first = r276.decision96._rows(base)
+        _, old_first = r276.decision96._rows(base)
         _, new_first = r276.decision96._rows(candidate)
-        if old_first == new_first:
-            return original(base, candidate)
-        order = [(r["kt"], r["checkpoint"], r["field"]) for r in old_rows]
-        index = {key: i for i, key in enumerate(order)}
-
-        def at(first):
-            return index[(first["kt"], first["checkpoint"], first["field"])]
-        require(old_first is not None and new_first is not None
-                and at(new_first) > at(old_first),
-                f"first non-bit checkpoint moved earlier: {old_first} -> {new_first}")
+        require((old_first, new_first) == admitted,
+                f"first-row move {old_first} -> {new_first} was not verified")
         label = next(iter(candidate))
-        candidate = {label: {**candidate[label],
-                             "first_non_bit_checkpoint": old_first}}
-        out = original(base, candidate)
+        out = original(base, {label: {**candidate[label],
+                                      "first_non_bit_checkpoint": old_first}})
         out["first_non_bit_after"] = new_first
         return out
 
@@ -134,16 +178,20 @@ def _comparison_admitting_later_first(original):
 
 
 def classify_later_first(control: Path, candidate: Path, plant: str) -> dict:
-    original = r276.decision96._comparison
-    r276.decision96._comparison = _comparison_admitting_later_first(original)
-    try:
-        result = r276.classify(control, candidate, plant=plant)
-    finally:
-        r276.decision96._comparison = original
-    docs = [json.loads(Path(p).read_text(encoding="utf-8"))["ladder"]
+    docs = [json.loads(Path(p).read_text(encoding="utf-8"))
             for p in (control, candidate)]
+    admitted = later_first_admission(*docs)
+    if admitted is None:
+        result = r276.classify_documents(*docs, plant=plant)
+    else:
+        original = r276.decision96._comparison
+        r276.decision96._comparison = _comparison_admitting(original, admitted)
+        try:
+            result = r276.classify_documents(*docs, plant=plant)
+        finally:
+            r276.decision96._comparison = original
     result["first_non_bit_before"], result["first_non_bit_after"] = (
-        d["first_non_bit_checkpoint"] for d in docs)
+        d["ladder"]["first_non_bit_checkpoint"] for d in docs)
     return result
 
 

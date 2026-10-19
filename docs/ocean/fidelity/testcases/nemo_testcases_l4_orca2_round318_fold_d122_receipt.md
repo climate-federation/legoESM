@@ -2,7 +2,8 @@
 
 Date: 2026-10-19 (Claude round; codex review: operator).
 
-Status: **LANDED-pending** (operator review + push gate).
+Status: **HELD** — gate fixed after the Codex HOLD; lands after the user rules
+on the "later first row" reading (operator review + push gate).
 
 ## Headline
 
@@ -61,9 +62,14 @@ OMT-3 4 -> 36, OMT-4 4 -> 12, rung 0 5 -> 11, rung 10 4/5 unchanged.
 - Classifier extension (this round's gate only): the frozen comparison
   refused any move of the first non-bit row.  The full set makes kt-1
   stage-1 T and S exact on OMT-1..4, so their first non-bit row moves later
-  (T -> u).  The gate admits a LATER move (still refuses an earlier one and
-  any exact-row loss) and scores the first over-bar direction at the new
-  row, as the round-276 classifier already does.  Unit test included.
+  (T -> u).  The gate recomputes both first rows from the row metrics (the
+  ladder's own rule: first non-exact row in ladder order, entry rows only on
+  rung 10; it reproduces the stored marker on all 194 round-318 records) and
+  refuses a record whose marker disagrees.  A later first row is admitted
+  only if the old first row is now exact and no row before the new first
+  row got worse on any metric; exact-row losses stay refused and the first
+  over-bar direction is scored at the new row (toward or equal required).
+  An earlier move is refused.
 
 ## Map: statement -> setting -> compiled line (ORCA2_OMIP_L4 ppsrc)
 
@@ -150,8 +156,14 @@ and lands as certified.
   seven pairs) states the whole set off.
 - Shipped cards at `5a0c45540` reproduce the ALLN arm row for row on all
   seven pairs (1,360 rows); the two pre-selection controls (`d566bd09a`,
-  `bbb4cee48`) agree row for row; seven-pair decision on the shipped cards
-  PASS (`final/instrument_check.txt`, `final/decide7_D122.json`).
+  `bbb4cee48`) agree row for row (`final/instrument_check.txt`).
+- The landing decision is the fold-set run: ALLN (and G9NFOLD) against the
+  pre-selection control, seven pairs, PASS (`arms2/decide7_ALLN.json`),
+  re-run with the fixed classifier: PASS, identical decision document
+  (`fixed_classifier/decide7_ALLN.json`, `fixed_classifier/decide7_G9NFOLD.json`).
+  The `final/decide7_D122.json` run is NOT a decision: its control did not
+  strip the selection, so it compared the shipped card with itself (0 rows
+  moved); it only shows the shipped card is deterministic.
 
 ## GYRE, DINO, VORTEX, OMT-0
 
@@ -180,10 +192,17 @@ and day-30 run were not rerun (step program identical).
 
 ## Gates and tests
 
-- New `tests/ocean/fidelity/test_orca2_round318_selection.py` (11 tests):
+- New `tests/ocean/fidelity/test_orca2_round318_selection.py` (15 tests):
   per-card selection, OMT validators, each landed switch changes the traced
-  rung-0 step, plant, later-first classifier rule.  Reverting the recipe
-  selection fails 6 (OMT-0 unaffected, as intended); restored, clean.
+  rung-0 step, plant, and the classifier on the real OMT-1 control/ALLN
+  records: the real T -> u move admitted; old first row worsened (marker
+  kept) REFUSED; an earlier row worsened (kt-1 entry T, no exact row lost)
+  REFUSED; new first row away -> not eligible; earlier move REFUSED.  With
+  the pre-fix classifier 3 of these 5 fail (the two worsened plants were
+  admitted eligible).  Reverting the recipe selection fails 6 (OMT-0
+  unaffected, as intended); restored, clean.
+- All 140 round-318 census records re-classified with the fixed classifier:
+  0 verdicts changed.
 - Seven stale pins that asserted the fold switches off now follow the
   selection (rounds 282, 308, 310, 311 selection/import tests, the G1
   transfer test, the OMT-1 and OMT-4 builder tests); the round-310 and
@@ -214,4 +233,14 @@ and day-30 run were not rerun (step program identical).
 ASKED: import the fold set from lane A; D122 on seven pairs, alone and
 together; report the kt-10 sea-level error; keep GYRE/DINO/VORTEX.
 UNASKED, offered for revert: (1) OMT-0 states the set off (unmeasured
-there); (2) the classifier admits a later first non-bit row (gate-local).
+there); (2) the classifier admits a later first non-bit row (gate-local;
+awaiting the user's ruling on this reading before landing).
+
+## Review (round 318 resume)
+
+- Claude review: LAND (import = lane A's G9 commits, rows reproduced).
+- Codex review: HOLD — the classifier trusted the candidate's first-row
+  marker, so a record whose old first row worsened returned eligible; the
+  mock test could not see it; the final decision's control was the shipped
+  card itself.  Fixed above (recomputed first rows, real-record plants,
+  decision cited from the fold-set run).  Gate and docs only; no model change.
