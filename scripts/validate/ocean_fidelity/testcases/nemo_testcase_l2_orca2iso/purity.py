@@ -28,6 +28,11 @@ CASES = {
     "l2": "ORCA2L2-iso",
 }
 
+STATIC_CASES = (
+    "gyre", "vortex", "smt1", "smt2", "smt3", "smt4",
+    "rung0", "omt0", "omt1", "omt2", "omt3", "omt4",
+)
+
 
 def normalize(text: str) -> str:
     return re.sub(r" at 0x[0-9a-f]+", " at 0xADDR", text)
@@ -54,6 +59,45 @@ def ladder_jaxpr(case: str, deck: Path, record: Path) -> str:
 
 def full_orca2_jaxpr(deck: Path) -> str:
     card = recipe.build_orca2_zps_card(deck)
+    run = card.recipe
+    model = LatLonCGridOceanModel(
+        run.grid, run.z_coord, run.model_config, iwm_forcing=run.iwm_forcing)
+    return str(jax.make_jaxpr(lambda state: model.step(state, card.dt_s))(
+        run.initial_state))
+
+
+def static_card_jaxpr(case: str, deck: Path | None) -> str:
+    """Trace cards outside the lane-B deck without duplicating card setup."""
+    if case == "gyre":
+        card = recipe.build_gyre_zco_card()
+    elif case == "vortex":
+        card = recipe.build_vortex_zco_card()
+    elif case.startswith("smt"):
+        card = recipe.build_vortex_smt_zps_card("vector", case)
+    elif case == "rung0":
+        if deck is None:
+            raise ValueError("rung0 requires --deck-root")
+        from scripts.validate.ocean_fidelity.orca2_l4 import (
+            nemo_testcase_l4_orca2_round92_rung0_card_gate as rung0,
+        )
+        card = rung0.build_rung0_card(deck)
+    elif case.startswith("omt"):
+        if deck is None:
+            raise ValueError(f"{case} requires --deck-root")
+        import importlib
+        rounds = {
+            "omt0": "round204_omt0",
+            "omt1": "round209_omt1",
+            "omt2": "round219_omt2",
+            "omt3": "round221_omt3",
+            "omt4": "round223_omt4",
+        }
+        module = importlib.import_module(
+            "scripts.validate.ocean_fidelity.orca2_l4."
+            f"nemo_testcase_l4_orca2_{rounds[case]}_ladder_gate")
+        card = getattr(module, f"build_{case}_card")(deck)
+    else:
+        raise ValueError(f"unsupported static purity card {case!r}")
     run = card.recipe
     model = LatLonCGridOceanModel(
         run.grid, run.z_coord, run.model_config, iwm_forcing=run.iwm_forcing)
@@ -98,7 +142,8 @@ def dino_jaxpr(repo: Path, output: Path) -> str:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("case", choices=(*CASES, "orca2", "dino"))
+    parser.add_argument(
+        "case", choices=(*CASES, *STATIC_CASES, "orca2", "dino"))
     parser.add_argument("--deck-root", type=Path)
     parser.add_argument("--record-root", type=Path)
     parser.add_argument("--expected", type=Path)
@@ -127,6 +172,8 @@ def main(argv=None) -> int:
             if deck is None:
                 raise ValueError("orca2 requires --deck-root")
             text = full_orca2_jaxpr(deck)
+        elif args.case in STATIC_CASES:
+            text = static_card_jaxpr(args.case, deck)
         else:
             text = dino_jaxpr(repo, Path(tmp) / "dino-output")
 
