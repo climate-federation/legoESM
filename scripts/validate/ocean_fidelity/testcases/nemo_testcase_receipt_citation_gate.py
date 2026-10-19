@@ -1747,7 +1747,7 @@ CITATION_MAP = {
     # round 315 differentiability probe (legoESM statements, measurement only)
     'ocean_model_latlon_cgrid.py:1936': 'rhs = sr(-sr(horizontal_scaled / e3t_div))',
     # round 317: the drag casts left in the TKE bottom boundary condition
-    'ocean_model_latlon_cgrid.py:11589-11593': [('float(_cfg_b.bottom_drag.bottom_drag_', 5)],
+    'ocean_model_latlon_cgrid.py:11589-11593': [('float(_cfg_b.bottom_drag.bottom_drag_', 5), 5],
     'ocean_pe_latlon_cgrid.py:4294': [('cd0=config.bottom_drag.bottom_drag_cd0,', 1)],
     'ocean_model_latlon_cgrid.py:1949': 'return sr(rhs - sr(vertical_scaled / e3t_div))',
     'ocean_model_latlon_cgrid.py:2573-2575': [
