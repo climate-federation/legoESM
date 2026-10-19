@@ -47,7 +47,7 @@ process exceeds its cap or available memory < 150 GiB).
 | card | status | finite | reverse vs forward | peak |
 |---|---|---|---|---|
 | OMT-1 (`d85c4fa0f323`) | complete, 6,617 s | yes, N = 1, 2, 5 | 1.5e-13 (42 rows); 4 parity controls pass | 95.5 GiB |
-| OMT-2 | running at commit | — | — | — |
+| OMT-2 | running at commit (T_dir0..1 done) | yes, N = 1, 2, 5, 10 | 5.7e-14 so far | 124.5 GiB so far |
 | OMT-3, OMT-4 | queued after OMT-2 | — | — | — |
 
 OMT-1's FD at 1e-6 misses by up to 0.3 on T_dir1, N = 5 (best 1.4e-3 at
@@ -121,8 +121,10 @@ OMT-2, OMT-3, OMT-4 probes (serial, 160 GiB cap); rung 0 no-remat N = 10;
 rung 10 no-remat N = 2, 5, 10 (95 GiB cap); every cap-stopped cost row is
 retried under 150 GiB after the OMT probes.
 
-## Gates
-- Citation gate on this receipt: see `gates/citation_gate_receipt.json`.
-- Default citation-gate test + private-import ratchet: 23 passed.
+## Gates (x64, CPU, `gates/`)
+- Citation gate on this receipt: PASS, failures 0
+  (`gates/citation_gate_receipt.json`).
+- Default citation-gate test 17, private-import ratchet 6, round-316/317
+  instrument tests 9: 32 passed; round-315 probe tests: 10 passed.
 
 codex review: operator
