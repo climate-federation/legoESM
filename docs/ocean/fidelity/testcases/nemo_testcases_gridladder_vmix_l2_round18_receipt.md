@@ -1,10 +1,12 @@
 # GRIDLADDER-VMIX lane — round 18 (vmix_r18): L2 operator walk acquisition
 
-Status: **STOPPED FOR RECORD; NO PHYSICS CHANGE; NOT CERTIFIED.** The frozen
-round-18 prediction is commit `9f51498b92`; the operator-only acquisition is
-commit `5e9d88345f`, repaired at `c2ec20cf41` and again after `f2784f8a2a`.
-Three operator attempts produced no oracle record or measurement; the third
-compiled successfully but NEMO's initialization rejected its one-step deck.
+Status: **L2 SCORED; DEBT; NOT CERTIFIED** (Claude continuation, 2026-10-19;
+section 5 supersedes the stop below). The operator's record is admitted; the
+over-bar statement is fixed and L2-selected; the kt-1 lateral trend is now at
+the bar in every cell, but one-ULP residuals still grow under the independent
+label. The earlier stop for record: the frozen prediction is commit
+`9f51498b92`; the operator-only acquisition is commit `5e9d88345f`, repaired
+at `c2ec20cf41` and again after `f2784f8a2a`.
 
 ## 1. Frozen statement walk
 
@@ -169,11 +171,114 @@ Unasked choices: none. The target configuration and evidence-root names are
 mechanical acquisition identifiers. No threshold, field set, cadence, model
 selection, or scientific decision was changed.
 
+## 5. Continuation: admitted walk, a33 fix, and re-score
+
+### Admission
+
+The operator's fourth run built, ran two steps, stopped normally, and passed
+the passive-observer twin check. The admission replay was repaired in
+`0afedd0573`. From a clean tree at the fix commit, `--admit-existing` ends:
+
+```text
+ROUND18_L2_LDF_READY /data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round18/oracle_l2_r18_ldf_walk
+```
+
+### P18-1 and P18-2 outcomes
+
+P18-1 is **confirmed as the first non-bit operand but refuted as the owner of
+the debt**. The live U/V face thicknesses differ from NEMO's dumped
+`e3u_live`/`e3v_live` in 36 U and 20 V faces, each by one ULP (normalized
+`<=1e-16`, below the bar). Slopes, gradients, `zA13`, and `zA23` are exact.
+
+P18-2 is **refuted as stated**: the over-bar owner is upstream of the vertical
+flux, in `traldf_iso_a33`, called at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:154`. Its laplacian branch forms
+`ze3w_2` from `e3w_1d*(1+r3t(Kmm))` at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:825-829`, and the vertical A33
+flux divides by the same object at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:283`. Kmm is stage 2's stored
+N+1/2 ratio. L2 used the step-entry stretch: 492,990 of 799,200 `e3w` values
+differed from NEMO's, max 5.10 m.
+
+### Fix (commit `30934c2bd2`)
+
+L2's stage-3 Redi path now passes the stored stage-3 Kmm `e3w` to both the
+explicit operator and the K33 path. It is selected only by the existing
+`redi_flux_geometry_stage = "rk3_kmm"`, which only ORCA2L2-iso sets; the
+default (`step_entry`) is unchanged.
+
+Codex's uncommitted face rewiring was **dropped, not committed**. It moved
+1,319 north-fold face values off NEMO (max 0.024 m); the existing face path is
+within one ULP of NEMO in 36 U / 20 V faces.
+
+Value gates (jitted production step, traced state, x64):
+
+- production `e3w` equals NEMO's `e3w_1d*(1+r3t(Kmm))` exactly; faces equal
+  NEMO's dump except 36 U / 20 V one-ULP cells;
+- removing only the new `e3w` wiring fails that gate (492,990 cells) and the
+  kt-1 record gate (T/S leave the bar);
+- kt-1 record gate: SSH, barotropic U/V, U, V, T, S all AT-BAR; T and S differ
+  in 2 cells by `7.105427357601002e-15`. The metric, EOS-80, north-fold, and
+  Kmm-geometry omission controls each remain DEBT with fixed value tuples.
+
+kt-1 operator walk against NEMO's dump after the fix: the lateral trend
+differs in 280,831 cells, max `2.558e-16` of scale; **zero cells exceed
+`1e-6`** (round 17: 7,878).
+
+### Re-score, kt 1..10, D127 bar `1e-15`
+
+| label | surface rows at bar | full-depth summaries at bar | worst normalized |
+|---|---:|---:|---:|
+| independent | 31 / 68 | 14 / 36 | `1.85e-14` (kt-9 SSH) |
+| given NEMO entry | 64 / 68 | 19 / 20 | `1.7e-15` (kt-2 V) |
+
+Every dry cell is exact. Round 17's score was 5/68 + 0/36 and 25/68 + 0/20.
+The DEBT rows are all SSH and velocity, beginning at kt 2, seeded by the two
+one-ULP T/S cells at kt 1. Given-entry DEBT rows are second-step
+continuations only (kt 2, 4, 8). **L2 is not certified.**
+
+### Next first non-bit statement (measured, not fixed)
+
+In compiled order the first one-ULP owner is `ah_wslp2`, the first output of
+`traldf_iso_a33`. NEMO sums the four face diffusivities as two bracketed pairs
+at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:788-791`, then forms
+`ah_wslp2` left to right at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:793`. Replayed from NEMO's own
+dumped operands: bracketed pairs give 0 unequal cells; left-to-right sums
+(the shared kappa-sum helper's order) give 18,465. The shared helper under
+jit gives 60,720, equal to the production count, so compiler contraction is a
+second, separate cause. Both need an L2-selected source-ordered path. That is
+the next round's frozen prediction, not this round's change.
+
+### Controls
+
+Measured jaxpr SHA-256, parent `0afedd0573` vs fix: identical for G5, V1, V2,
+V3, V4, V5, L1, full ORCA2, and DINO; L2 differs (193,776 -> 193,772 lines),
+as intended. Identical jaxprs imply bit-identical values for L1, full ORCA2,
+and DINO.
+
+GYRE's ten-step trajectory gate: all 50 field rows, 20 barotropic rows, both
+first-over-bar summaries, and status equal round 17's; the residual archive is
+byte-identical at SHA-256
+`3b3d865cf5c82d38e15b24356492572a85546e51e35f70c2e7c89e5b9cb9df5b`.
+
+**NO GATE**: OMT-0..4, rung 0, VORTEX, SMT-1/2 jaxprs, and SMT-3/4 values were
+not run. Read off the code only: the new path is entered only when
+`redi_flux_geometry_stage == "rk3_kmm"`; otherwise the override is `None` and
+both consumers take their previous branch.
+
+Evidence: `gridladder_vmix_rounds/round18/score/` (both score JSONs,
+purity logs) and `gridladder_vmix_rounds/round18/gyre_regression/`.
+
+Unasked choices: none. The fix uses an existing L2-only selector; no default,
+threshold, or card selection changed. Dropping the uncommitted face rewiring
+followed the operator's instruction for unreviewed diffs.
+
 independent review: operator (Claude)
 
 codex review: operator
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r18/repo
-ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r18/repo/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_orca2iso/run_round18_ldf_walk.sh --run
+ACQUISITION_NEEDED: NONE
 DECISION_NEEDED: NONE
-ROUND_STATUS: STOPPED_FOR_RECORD — preflighted operator-only L2 internal walk is required before the first differing statement can be fixed
+ROUND_STATUS: L2 SCORED; DEBT; NOT CERTIFIED — a33 Kmm e3w fixed (0 trend cells over 1e-6); independent label 37 surface + 22 full-depth rows over the 1e-15 bar, seeded by one-ULP ah_wslp2 pair-sum association and compiler contraction (traldf_iso.f90:788-793), measured, unfixed
