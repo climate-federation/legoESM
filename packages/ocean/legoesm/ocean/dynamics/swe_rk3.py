@@ -11,15 +11,14 @@ import inspect
 from typing import NamedTuple
 
 import jax.numpy as jnp
-
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.halo_latlon import meridional_periodicity
 from legoesm.grids.latlon import ensure_geometry
 from legoesm.grids.operators_latlon_cgrid import compute_vertex_mask
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     compute_face_masks_3d,
-    nemo_lateral_viscosity_constant_coefficients,
     nemo_lateral_viscosity_coefficients,
+    nemo_lateral_viscosity_constant_coefficients,
     nemo_ldf_lap_viscosity_e3_cgrid,
     nemo_vor_ene_vorticity_cgrid,
     pv_flux_ens,
@@ -74,6 +73,41 @@ def _native_north(field):
     return jnp.concatenate([field[1:], jnp.zeros_like(field[:1])], axis=0)
 
 
+def swe_rotated_potential_forcing(
+        potential_f, e2u, e1v, e3u, e3v, umask, vmask, vertex_mask):
+    """Map an F-point transport potential to non-divergent U/V acceleration.
+
+    ``potential_f`` is a volume-transport tendency potential (m3 s-2). Its
+    matched differences are divided by the live face cross-sections.  The
+    returned accelerations therefore make exactly cancelling contributions to
+    the native C-grid continuity stencil.  Multiplying by ``vertex_mask``
+    imposes zero potential on boundary vertices; this gives zero wall-normal
+    force and makes the basin-integrated transport force telescope to zero.
+
+    Coordinates and signs are native NEMO C-grid: positive U is east and
+    positive V is north.  A positive northward potential difference produces
+    positive (eastward) U force; a positive eastward difference produces
+    negative (southward) V force.  Thus the map is the clockwise rotated
+    gradient ``(d potential/dy, -d potential/dx)``.
+    """
+    potential = jnp.asarray(potential_f) * (jnp.asarray(vertex_mask) != 0)
+    south = jnp.concatenate(
+        [jnp.zeros_like(potential[:1]), potential[:-1]], axis=0)
+    west = jnp.concatenate(
+        [jnp.zeros_like(potential[:, :1]), potential[:, :-1]], axis=1)
+    # East/north convention: +d_y(potential) -> +east U and
+    # +d_x(potential) -> -north V (clockwise rotated gradient).
+    transport_u = (potential - south) * jnp.asarray(umask)
+    transport_v = -(potential - west) * jnp.asarray(vmask)
+    wet_u = jnp.asarray(umask) != 0
+    wet_v = jnp.asarray(vmask) != 0
+    cross_u = jnp.where(
+        wet_u, jnp.asarray(e2u) * jnp.asarray(e3u), 1.0)
+    cross_v = jnp.where(
+        wet_v, jnp.asarray(e1v) * jnp.asarray(e3v), 1.0)
+    force_u = jnp.where(wet_u, transport_u / cross_u, 0.0)
+    force_v = jnp.where(wet_v, transport_v / cross_v, 0.0)
+    return force_u, force_v
 def _config_periodicity(fn):
     """Trace ``fn`` inside the y-wrap its ``config`` selects, not the caller's."""
     signature = inspect.signature(fn)
@@ -135,7 +169,7 @@ def _validate_program(config, z_coord, stage):
 
 @_config_periodicity
 def swe_rk3_stage(entry, before_entry, dt, stage, grid, z_coord, land_mask,
-                  config):
+                  config, potential_f=None):
     """Execute one NEMO SWE RK3 stage from native-A2D stage/before entries.
 
     Source order is the compiled P3 program: zero RHS; C2 KEG then the
@@ -276,6 +310,19 @@ def swe_rk3_stage(entry, before_entry, dt, stage, grid, z_coord, land_mask,
     rhs_u = sr(rhs_u + _native_to_u(zrhs_u_native))
     rhs_v = sr(rhs_v + _native_to_v(zrhs_v_native))
 
+    # The learned lane is an optional additive transport-potential tendency.
+    # Keep the ordinary certified program structurally untouched when absent:
+    # no zero addition and no changed source-rounding association are allowed.
+    if potential_f is not None:
+        closure_u, closure_v = swe_rotated_potential_forcing(
+            potential_f,
+            jnp.asarray(ops.e2u, dtype=dtype),
+            jnp.asarray(ops.e1v, dtype=dtype),
+            e3u_native[..., 0], e3v_native[..., 0],
+            umask3[:, 1:, 0], vmask3[1:, :, 0], vtx_mask[1:, 1:])
+        rhs_u = rhs_u + _native_to_u(closure_u)
+        rhs_v = rhs_v + _native_to_v(closure_v)
+
     # ssh_nxt: div_hor(Kbb,Kbb), one live layer, emp=0 on this deck.
     u_native = u[:, 1:, :]
     v_native = v[1:, :, :]
@@ -360,7 +407,7 @@ def _entry_from_state(state, stress_before, stress_now, grid, z_coord, config):
 
 @_config_periodicity
 def swe_rk3_step(state, dt, surface_forcing, grid, z_coord, config,
-                 stage_runner=None):
+                 stage_runner=None, stage_potential_fn=None):
     """Advance the shared ocean state with the three-stage SWE RK3 program.
 
     The surface caller supplies grid-native U/V stresses through
@@ -394,10 +441,16 @@ def swe_rk3_step(state, dt, surface_forcing, grid, z_coord, config,
     boundary = _entry_from_state(state, before, now, grid, z_coord, config)
     if stage_runner is None:
         def run(entry, before_entry, stage):
+            potential = (None if stage_potential_fn is None
+                         else stage_potential_fn(entry, stage))
             return swe_rk3_stage(
                 entry, before_entry, dt, stage, grid, z_coord,
-                state.land_mask.data, config)
+                state.land_mask.data, config, potential_f=potential)
     else:
+        if stage_potential_fn is not None:
+            raise ValueError(
+                "stage_potential_fn cannot be combined with stage_runner")
+
         def run(entry, before_entry, stage):
             return stage_runner(entry, dt, stage, before_entry)
     s1 = run(boundary, boundary, 1)

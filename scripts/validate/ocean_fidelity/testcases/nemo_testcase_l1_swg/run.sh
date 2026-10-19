@@ -13,7 +13,7 @@ usage() {
   cat <<'EOF'
 Usage: run.sh --nemo-root DIR --evidence DIR --python PYTHON
               [--reference DIR] [--mpiexec CMD]
-              [--deck shipped|maddison] [--run]
+              [--deck shipped|maddison|dg50] [--run]
 
 The shipped deck requires --reference. Default mode is read-only preflight;
 --run builds and executes NEMO and is operator-only.
@@ -138,14 +138,14 @@ if [[ "$deck" == shipped ]]; then
 else
   instrumented_dir=$EVIDENCE/instrumented
   reference_dir=$EVIDENCE/reference
-  admission=$EVIDENCE/swg_dg_round1_stage_admission.json
+  admission=$EVIDENCE/swg_${deck}_round1_stage_admission.json
 fi
 mkdir -p "$EVIDENCE/manifest" "$instrumented_dir"
 printf '%s\n' "$COMMIT" >"$EVIDENCE/manifest/legoesm_commit"
 sha256sum "$STEP_PATCH" "$MODULE" "$DECK_PATCH" "$MESH_PATCH" "$CHECKER" \
   "$here/deck.sh" "$SOURCE_PATCH" \
   >"$EVIDENCE/manifest/tool.sha256"
-if [[ "$deck" == maddison ]]; then
+if [[ "$deck" != shipped ]]; then
   mkdir -p "$reference_dir"
   cp -rL "$BASE_DECK/." "$reference_dir/"
   patch "$reference_dir/namelist_cfg" <"$DECK_PATCH"
@@ -195,7 +195,7 @@ sha256sum "$reference_dir/nemo" "$reference_dir/namelist_cfg" \
   export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
   "$mpiexec" -np 1 --oversubscribe ./nemo >run.user.log 2>&1
 )
-if [[ "$deck" == maddison ]]; then
+if [[ "$deck" != shipped ]]; then
   [[ -s "$reference_dir/run.stat" && -s "$instrumented_dir/run.stat" ]] || {
     printf 'REFUSE_MISSING_RUNSTAT: Maddison reference/instrumented run.stat\n' >&2
     exit 70

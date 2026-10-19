@@ -57,15 +57,17 @@ def array_digest(value: np.ndarray) -> str:
     return hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest()
 
 
-def require_legoesm_deck(namelist: dict) -> None:
-    """Bind a legoESM manifest to the registered Maddison deck."""
-    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-        SWG_MADDISON_NAMELIST,
-    )
+def require_legoesm_deck(namelist: dict, expected_namelist=None) -> None:
+    """Bind a legoESM manifest to one explicitly selected resolved deck."""
+    if expected_namelist is None:
+        from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+            SWG_MADDISON_NAMELIST,
+        )
+        expected_namelist = SWG_MADDISON_NAMELIST
 
     # Normalize tuple-valued records through the same JSON representation the
     # driver manifest uses before exact field comparison.
-    expected = json.loads(json.dumps(SWG_MADDISON_NAMELIST._asdict()))
+    expected = json.loads(json.dumps(expected_namelist._asdict()))
     # Run length is the only permitted difference between year 1 and the
     # registered three-year window.  Everything physical -- including
     # rn_shlat/free-slip and all dispatch switches -- must match the deck.
@@ -285,6 +287,7 @@ def nemo_ioipsl_provider(
 
 def legoesm_npz_provider(
         root: Path, days: int, *, start_day: int = 1,
+        name: str = "legoESM", expected_namelist=None,
 ) -> DailyProvider:
     """Build a repeatable provider over content-pinned legoESM daily states."""
     require(start_day > 0 and days > 0, "legoESM window must be positive")
@@ -301,7 +304,12 @@ def legoesm_npz_provider(
                 "legoesm-swg-double-gyre-daily-v1",
                 "legoesm-swg-double-gyre-daily-v2"},
             "unknown legoESM daily schema")
-    require_legoesm_deck(manifest.get("namelist", {}))
+    if expected_namelist is None:
+        from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+            SWG_MADDISON_NAMELIST,
+        )
+        expected_namelist = SWG_MADDISON_NAMELIST
+    require_legoesm_deck(manifest.get("namelist", {}), expected_namelist)
     complete = [root / f"day{day:04d}.npz"
                 for day in range(1, total_days + 1)]
     require(sorted(root.glob("day????.npz")) == complete,
@@ -317,6 +325,9 @@ def legoesm_npz_provider(
     fields = (
         ("ssh_daily_mean_m", "u_daily_mean_m_s", "v_daily_mean_m_s")
         if sampling == "daily_mean" else ("ssh_m", "u_m_s", "v_m_s"))
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
+    expected_shape = tuple(
+        build_swg_card(expected_namelist).recipe.land_mask.shape)
     if sampling == "daily_mean":
         require(manifest.get("schema") == "legoesm-swg-double-gyre-daily-v2",
                 "daily-mean sampling requires the v2 legoESM schema")
@@ -327,7 +338,7 @@ def legoesm_npz_provider(
             with np.load(path, allow_pickle=False) as data:
                 require(int(data["day"]) == absolute_day,
                         f"{path.name}: embedded day differs")
-                require(float(data["dt_s"]) == 50.0,
+                require(float(data["dt_s"]) == expected_namelist.rn_Dt_s,
                         f"{path.name}: timestep differs")
                 if sampling == "daily_mean":
                     require(data["daily_mean_sampling"].item() ==
@@ -337,20 +348,84 @@ def legoesm_npz_provider(
                             f"{path.name}: daily-mean sample count differs")
                 values = [np.asarray(data[name], dtype=np.float64)
                           for name in fields]
-            require(all(field.shape == (644, 644) for field in values),
+            require(all(field.shape == expected_shape for field in values),
                     f"{path.name}: field shape differs")
             require(all(np.all(np.isfinite(field)) for field in values),
                     f"{path.name}: non-finite field")
             yield DailyFrame(local_day, *values)
 
     return DailyProvider(
-        "legoESM", sampling,
+        name, sampling,
         {"root": str(root.resolve()), "days": days,
          "window_days": [start_day, stop_day],
          "manifest_sha256": sha256(manifest_path),
          "legoesm_git_sha": manifest.get("legoesm_git_sha"),
          "mode": manifest.get("mode"),
          "certified_policy": manifest.get("certified_policy")},
+        iterate)
+
+
+def filtered_npz_provider(
+        root: Path, days: int, *, start_day: int = 1,
+        name: str = "filtered truth",
+) -> DailyProvider:
+    """Build a provider over content-pinned dg50-filtered fine truth."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        SWG_DG50_NAMELIST,
+        build_swg_card,
+    )
+
+    require(start_day > 0 and days > 0, "filtered window must be positive")
+    manifest_path = root / "manifest.json"
+    require(manifest_path.is_file(), f"missing complete manifest {manifest_path}")
+    manifest = json.loads(manifest_path.read_text())
+    total_days = manifest.get("days")
+    stop_day = start_day + days - 1
+    require(manifest.get("schema") in {
+                "legoesm-swg-filtered-truth-v1",
+                "legoesm-swg-conservative-truth-v2"}
+            and manifest.get("status") == "complete"
+            and manifest.get("completed_days") == total_days
+            and isinstance(total_days, int) and total_days >= stop_day,
+            "filtered manifest does not contain the complete requested window")
+    require_legoesm_deck(
+        manifest.get("target_namelist", {}), SWG_DG50_NAMELIST)
+    sampling = manifest.get("sampling")
+    require(sampling in ("daily_snapshot", "daily_mean"),
+            "filtered sampling is unsupported")
+    pins = manifest.get("output_daily_sha256", {})
+    complete = [root / f"day{day:04d}.npz" for day in range(1, total_days + 1)]
+    require(sorted(root.glob("day????.npz")) == complete,
+            "filtered daily file sequence differs")
+    require(set(pins) == {path.name for path in complete},
+            "filtered manifest does not pin every output")
+    expected = complete[start_day - 1:stop_day]
+    shape = tuple(build_swg_card(SWG_DG50_NAMELIST).recipe.land_mask.shape)
+    fields = (("ssh_daily_mean_m", "u_daily_mean_m_s", "v_daily_mean_m_s")
+              if sampling == "daily_mean" else ("ssh_m", "u_m_s", "v_m_s"))
+
+    def iterate() -> Iterator[DailyFrame]:
+        for local_day, path in enumerate(expected, 1):
+            require(sha256(path) == pins[path.name],
+                    f"filtered output digest mismatch: {path.name}")
+            with np.load(path, allow_pickle=False) as data:
+                require(int(data["day"]) == start_day + local_day - 1,
+                        f"{path.name}: embedded day differs")
+                values = [np.asarray(data[field], dtype=np.float64)
+                          for field in fields]
+            require(all(value.shape == shape for value in values),
+                    f"{path.name}: filtered field shape differs")
+            require(all(np.all(np.isfinite(value)) for value in values),
+                    f"{path.name}: filtered field is non-finite")
+            yield DailyFrame(local_day, *values)
+
+    return DailyProvider(
+        name, sampling,
+        {"root": str(root.resolve()), "days": days,
+         "window_days": [start_day, stop_day],
+         "manifest_sha256": sha256(manifest_path),
+         "legoesm_git_sha": manifest.get("legoesm_git_sha"),
+         "filter": manifest.get("filter")},
         iterate)
 
 
@@ -368,9 +443,138 @@ def _cell_centred(frame: DailyFrame, masks) -> DailyFrame:
         np.asarray(u_c), np.asarray(v_c))
 
 
-def diagnose(provider: DailyProvider, *, days: int, card=None,
-             geometry: dict | None = None) -> dict[str, np.ndarray]:
-    """Compute the frozen Round-4 metrics in two streaming passes."""
+def grid_noise_index(u: np.ndarray, v: np.ndarray) -> float:
+    """Local two-dimensional second-difference RMS divided by velocity RMS."""
+    u = np.asarray(u, dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    if u.shape != v.shape or u.ndim != 2:
+        raise ValueError("grid-noise fields must be conformable 2-D arrays")
+    if min(u.shape) < 3:
+        raise ValueError("grid-noise fields need at least three cells per axis")
+    differences = []
+    for field in (u, v):
+        differences.extend((
+            field[:, 2:] - 2.0 * field[:, 1:-1] + field[:, :-2],
+            field[2:, :] - 2.0 * field[1:-1, :] + field[:-2, :],
+        ))
+    numerator = np.mean(np.concatenate([
+        value.ravel() ** 2 for value in differences]), dtype=np.float64)
+    denominator = np.mean(u * u + v * v, dtype=np.float64)
+    return float(np.sqrt(numerator / denominator)) if denominator > 0.0 else 0.0
+
+
+def native_face_grid_noise_index(u: np.ndarray, v: np.ndarray,
+                                 masks: dict[str, np.ndarray]) -> float:
+    """Phase-safe second-difference index on native U and V wet rectangles."""
+    differences = []
+    energy_sum = 0.0
+    energy_count = 0
+    for field, kind in ((u, "U"), (v, "V")):
+        values = np.asarray(field, dtype=np.float64)
+        mask = np.asarray(masks[kind], dtype=bool)
+        if values.shape != mask.shape or not np.any(mask):
+            raise ValueError(f"native {kind} noise field differs from its mask")
+        jj, ii = np.where(mask)
+        box = values[jj.min():jj.max() + 1, ii.min():ii.max() + 1]
+        if min(box.shape) < 3:
+            raise ValueError("native face noise field needs three faces per axis")
+        differences.extend((
+            box[:, 2:] - 2.0 * box[:, 1:-1] + box[:, :-2],
+            box[2:, :] - 2.0 * box[1:-1, :] + box[:-2, :]))
+        energy_sum += float(np.sum(box * box, dtype=np.float64))
+        energy_count += box.size
+    numerator = np.sum([np.sum(value * value, dtype=np.float64)
+                        for value in differences], dtype=np.float64) / sum(
+                            value.size for value in differences)
+    denominator = energy_sum / energy_count
+    return float(np.sqrt(numerator / denominator)) if denominator > 0.0 else 0.0
+
+
+def closed_basin_spectra(u: np.ndarray, v: np.ndarray,
+                         spacing_m: float) -> tuple[np.ndarray, ...]:
+    """DST-I streamfunction KE and direct-vorticity enstrophy spectra."""
+    from scipy.fft import dstn
+
+    u = np.asarray(u, dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    if u.shape != v.shape or u.ndim != 2 or min(u.shape) < 3:
+        raise ValueError("closed-basin spectra require conformable 2-D fields")
+    if not np.isfinite(spacing_m) or spacing_m <= 0.0:
+        raise ValueError("spectral spacing must be positive finite")
+    zeta = (np.gradient(v, spacing_m, axis=1, edge_order=2)
+            - np.gradient(u, spacing_m, axis=0, edge_order=2))
+    zeta_hat = dstn(zeta, type=1, norm="ortho")
+    ny, nx = zeta.shape
+    my = np.arange(1, ny + 1, dtype=np.float64)[:, None]
+    mx = np.arange(1, nx + 1, dtype=np.float64)[None, :]
+    ky = np.pi * my / ((ny + 1) * spacing_m)
+    kx = np.pi * mx / ((nx + 1) * spacing_m)
+    k2 = kx**2 + ky**2
+    psi_hat = -zeta_hat / k2
+    ke_mode = 0.5 * k2 * psi_hat**2
+    enstrophy_mode = 0.5 * zeta_hat**2
+    shell = np.rint(np.sqrt(mx**2 + my**2)).astype(int)
+    bins = np.arange(1, int(shell.max()) + 1)
+    ke = np.bincount(shell.ravel(), weights=ke_mode.ravel(),
+                     minlength=bins[-1] + 1)[1:]
+    enstrophy = np.bincount(
+        shell.ravel(), weights=enstrophy_mode.ravel(),
+        minlength=bins[-1] + 1)[1:]
+    wavenumber = bins * np.pi / (
+        max(nx + 1, ny + 1) * spacing_m)
+    return wavenumber, ke, enstrophy
+
+
+def closed_basin_native_face_spectra(
+        u_native: np.ndarray, v_native: np.ndarray, masks,
+        grid, spacing_m: float) -> tuple[np.ndarray, ...]:
+    """DST streamfunction spectra from native-face F-point vorticity."""
+    import jax.numpy as jnp
+    from legoesm.grids.operators_latlon_cgrid import (
+        compute_vertex_mask,
+        curl_vertex_cgrid,
+    )
+
+    u = np.where(masks["U"], u_native, 0.0)
+    v = np.where(masks["V"], v_native, 0.0)
+    u_full = np.concatenate([np.zeros_like(u[:, :1]), u], axis=1)
+    v_full = np.concatenate([np.zeros_like(v[:1]), v], axis=0)
+    zeta = np.asarray(curl_vertex_cgrid(
+        jnp.asarray(u_full), jnp.asarray(v_full), grid))[1:, 1:]
+    fmask = np.asarray(compute_vertex_mask(masks["T"], grid=grid),
+                       dtype=bool)[1:, 1:]
+    jj, ii = np.where(fmask)
+    box = zeta[jj.min():jj.max() + 1, ii.min():ii.max() + 1]
+    if not np.all(fmask[jj.min():jj.max() + 1, ii.min():ii.max() + 1]):
+        raise ValueError("native spectral F-point basin is not rectangular")
+    from scipy.fft import dstn
+
+    zeta_hat = dstn(box, type=1, norm="ortho")
+    ny, nx = box.shape
+    my = np.arange(1, ny + 1, dtype=np.float64)[:, None]
+    mx = np.arange(1, nx + 1, dtype=np.float64)[None, :]
+    ky = np.pi * my / ((ny + 1) * spacing_m)
+    kx = np.pi * mx / ((nx + 1) * spacing_m)
+    k2 = kx**2 + ky**2
+    psi_hat = -zeta_hat / k2
+    ke_mode = 0.5 * k2 * psi_hat**2
+    enstrophy_mode = 0.5 * zeta_hat**2
+    shell = np.rint(np.sqrt(mx**2 + my**2)).astype(int)
+    bins = np.arange(1, int(shell.max()) + 1)
+    ke = np.bincount(shell.ravel(), weights=ke_mode.ravel(),
+                     minlength=bins[-1] + 1)[1:]
+    enstrophy = np.bincount(
+        shell.ravel(), weights=enstrophy_mode.ravel(),
+        minlength=bins[-1] + 1)[1:]
+    wavenumber = bins * np.pi / (max(nx + 1, ny + 1) * spacing_m)
+    return wavenumber, ke, enstrophy
+
+
+def _diagnose_registered(
+        provider: DailyProvider, *, days: int, card=None,
+        geometry: dict | None = None,
+) -> dict[str, np.ndarray]:
+    """Compute the registered double-gyre metrics in two streaming passes."""
     import jax.numpy as jnp
     from legoesm.ocean.diagnostics import isotropic_energy_spectrum
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
@@ -472,14 +676,178 @@ def diagnose(provider: DailyProvider, *, days: int, card=None,
     }
 
 
-def compare(providers: tuple[DailyProvider, DailyProvider], *, days: int) -> dict:
+def _diagnose_online(
+        provider: DailyProvider, *, days: int, card, namelist,
+        geometry: dict | None = None,
+) -> dict[str, np.ndarray]:
+    """Compute explicitly selected online-closure health diagnostics."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        swg_horizontal_coordinates,
+    )
+
+    require(card is not None and namelist is not None,
+            "online diagnostics require a card and resolved namelist")
+    if geometry is None:
+        from nemo_testcase_l1_swg_ladder import card_masks
+        source = swg_horizontal_coordinates(namelist)
+        geometry = {
+            "masks": card_masks(card),
+            "area": np.asarray(card.recipe.grid.area),
+            "x": np.asarray(source["glamt"]),
+            "y": np.asarray(source["gphit"]),
+            "spacing_m": float(source["spacing_m"]),
+        }
+    masks = geometry["masks"]
+    wet = masks["T"]
+    area = np.where(wet, np.asarray(geometry["area"]), 0.0)
+    area_sum = np.sum(area, dtype=np.float64)
+    require(area_sum > 0.0, "empty wet area")
+    wet_indices = np.argwhere(wet)
+    j0, i0 = wet_indices.min(axis=0)
+    j1, i1 = wet_indices.max(axis=0) + 1
+    wet_box = wet[j0:j1, i0:i1]
+    require(np.all(wet_box), "spectral wet basin is not rectangular")
+    spacing = float(geometry["spacing_m"])
+
+    sum_ssh = np.zeros(wet.shape, dtype=np.float64)
+    sum_u = np.zeros(wet.shape, dtype=np.float64)
+    sum_v = np.zeros(wet.shape, dtype=np.float64)
+    sum_speed = np.zeros(wet.shape, dtype=np.float64)
+    ke_series = np.empty(days, dtype=np.float64)
+    spectrum_sum = None
+    enstrophy_spectrum_sum = None
+    wavenumber = None
+    grid_noise = np.empty(days, dtype=np.float64)
+    min_thickness = np.empty(days, dtype=np.float64) if card is not None else None
+    max_u_courant = np.empty(days, dtype=np.float64) if namelist is not None else None
+    max_v_courant = np.empty(days, dtype=np.float64) if namelist is not None else None
+    bathymetry = (np.asarray(card.recipe.initial_state.H_bathy.data)
+                  if card is not None else None)
+    for index, raw in enumerate(provider.iterate()):
+        require(index < days and raw.day == index + 1,
+                f"{provider.name}: daily sequence differs")
+        frame = _cell_centred(raw, masks)
+        if card is not None:
+            min_thickness[index] = np.min(
+                (bathymetry + raw.ssh)[wet])
+        if namelist is not None:
+            max_u_courant[index] = (
+                np.max(np.abs(raw.u[masks["U"]])) * namelist.rn_Dt_s / spacing)
+            max_v_courant[index] = (
+                np.max(np.abs(raw.v[masks["V"]])) * namelist.rn_Dt_s / spacing)
+        speed2 = frame.u * frame.u + frame.v * frame.v
+        sum_ssh += frame.ssh
+        sum_u += frame.u
+        sum_v += frame.v
+        sum_speed += np.sqrt(speed2)
+        ke_series[index] = np.sum(0.5 * speed2 * area) / area_sum
+        k, spectrum, enstrophy_spectrum = closed_basin_native_face_spectra(
+            raw.u, raw.v, masks, card.recipe.grid, spacing)
+        if spectrum_sum is None:
+            wavenumber, spectrum_sum = k, np.zeros_like(spectrum)
+            enstrophy_spectrum_sum = np.zeros_like(enstrophy_spectrum)
+        else:
+            require(np.array_equal(k, wavenumber),
+                    "spectrum wavenumbers changed across days")
+        spectrum_sum += spectrum
+        enstrophy_spectrum_sum += enstrophy_spectrum
+        grid_noise[index] = native_face_grid_noise_index(
+            raw.u, raw.v, masks)
+    require(index + 1 == days, f"{provider.name}: daily sequence ended early")
+    mean_ssh = sum_ssh / days
+    mean_u = sum_u / days
+    mean_v = sum_v / days
+    mean_speed = sum_speed / days
+    mean_ke_spectrum = spectrum_sum / days
+    mean_enstrophy_spectrum = enstrophy_spectrum_sum / days
+    top_octave = wavenumber >= 0.5 * np.max(wavenumber)
+    resolved = wavenumber > 0.0
+    ke_spectral_total = np.sum(mean_ke_spectrum[resolved], dtype=np.float64)
+    enstrophy_spectral_total = np.sum(
+        mean_enstrophy_spectrum[resolved], dtype=np.float64)
+    require(ke_spectral_total > 0.0 and enstrophy_spectral_total > 0.0,
+            "spectral health denominator is zero")
+
+    eke_map_sum = np.zeros(wet.shape, dtype=np.float64)
+    eke_series = np.empty(days, dtype=np.float64)
+    for index, raw in enumerate(provider.iterate()):
+        frame = _cell_centred(raw, masks)
+        anomaly2 = ((frame.u - mean_u) ** 2 + (frame.v - mean_v) ** 2)
+        eke_map_sum += 0.5 * anomaly2
+        eke_series[index] = np.sum(0.5 * anomaly2 * area) / area_sum
+
+    y = np.asarray(geometry["y"])
+    x = np.asarray(geometry["x"])
+    jet_y = np.full(wet.shape[1], np.nan, dtype=np.float64)
+    jet_speed = np.full(wet.shape[1], np.nan, dtype=np.float64)
+    jet_x = np.full(wet.shape[1], np.nan, dtype=np.float64)
+    for i in range(wet.shape[1]):
+        js = np.flatnonzero(wet[:, i])
+        if js.size:
+            j = js[np.argmax(mean_u[js, i])]
+            jet_x[i] = x[j, i]
+            jet_y[i] = y[j, i]
+            jet_speed[i] = mean_u[j, i]
+    result = {
+        "mean_ssh_m": np.where(wet, mean_ssh, np.nan),
+        "mean_u_m_s": np.where(wet, mean_u, np.nan),
+        "mean_v_m_s": np.where(wet, mean_v, np.nan),
+        "mean_speed_m_s": np.where(wet, mean_speed, np.nan),
+        "eke_map_m2_s2": np.where(wet, eke_map_sum / days, np.nan),
+        "basin_mean_ke_m2_s2": ke_series,
+        "basin_mean_eke_m2_s2": eke_series,
+        "jet_x_m": jet_x,
+        "jet_y_m": jet_y,
+        "jet_eastward_speed_m_s": jet_speed,
+        "spectrum_wavenumber_m-1": wavenumber,
+        "mean_kinetic_energy_spectrum_m3_s2": mean_ke_spectrum,
+        "mean_enstrophy_spectrum_m_s2": mean_enstrophy_spectrum,
+        "top_octave_ke_fraction": np.asarray([
+            np.sum(mean_ke_spectrum[top_octave], dtype=np.float64)
+            / ke_spectral_total]),
+        "top_octave_enstrophy_fraction": np.asarray([
+            np.sum(mean_enstrophy_spectrum[top_octave], dtype=np.float64)
+            / enstrophy_spectral_total]),
+        "native_grid_noise_index": grid_noise,
+    }
+    if card is not None:
+        result.update({
+            "minimum_total_layer_thickness_m": min_thickness,
+            "maximum_u_courant": max_u_courant,
+            "maximum_v_courant": max_v_courant,
+        })
+    return result
+
+
+def diagnose(provider: DailyProvider, *, days: int, card=None, namelist=None,
+             geometry: dict | None = None,
+             diagnostics: str = "registered") -> dict[str, np.ndarray]:
+    """Dispatch to registered or explicitly selected online diagnostics."""
+    if diagnostics == "registered":
+        return _diagnose_registered(
+            provider, days=days, card=card, geometry=geometry)
+    if diagnostics == "online":
+        return _diagnose_online(
+            provider, days=days, card=card, namelist=namelist,
+            geometry=geometry)
+    raise ValueError(f"unknown climate diagnostics {diagnostics!r}")
+
+
+def compare(providers: tuple[DailyProvider, DailyProvider], *, days: int,
+            card=None, namelist=None, diagnostics: str = "registered") -> dict:
     """Require controlled sampling and diagnose both models independently."""
     left, right = providers
     require(left.sampling == right.sampling,
             f"sampling mismatch: {left.name}={left.sampling}, "
             f"{right.name}={right.sampling}")
-    return {left.name: diagnose(left, days=days),
-            right.name: diagnose(right, days=days)}
+    return {
+        left.name: diagnose(
+            left, days=days, card=card, namelist=namelist,
+            diagnostics=diagnostics),
+        right.name: diagnose(
+            right, days=days, card=card, namelist=namelist,
+            diagnostics=diagnostics),
+    }
 
 
 def _summary(arrays: dict[str, np.ndarray]) -> dict:
@@ -596,10 +964,30 @@ def write_outputs(
     return report
 
 
+def online_control_namelist(name: str):
+    """Resolve one explicitly named no-closure experiment control."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_DG50_NAMELIST
+    from legoesm.ocean.fidelity.swg_online_decks import SWG_DG50_NU80_NAMELIST
+
+    controls = {
+        "dg50": SWG_DG50_NAMELIST,
+        "dg50-nu80": SWG_DG50_NU80_NAMELIST,
+    }
+    require(name in controls, f"unsupported online control {name}")
+    return controls[name]
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--nemo-root", type=Path, required=True)
-    parser.add_argument("--legoesm-root", type=Path, required=True)
+    parser.add_argument("--nemo-root", type=Path)
+    parser.add_argument("--legoesm-root", type=Path)
+    parser.add_argument("--filtered-root", type=Path)
+    parser.add_argument("--coarse-root", type=Path)
+    parser.add_argument(
+        "--coarse-deck", choices=("dg50", "dg50-nu80"), default="dg50")
+    parser.add_argument(
+        "--diagnostics", choices=("registered", "online"),
+        default="registered")
     parser.add_argument("--start-day", type=int, default=1)
     parser.add_argument("--days", type=int, default=365)
     parser.add_argument("--output", type=Path, required=True)
@@ -607,12 +995,43 @@ def main(argv=None) -> int:
     try:
         require(args.start_day > 0 and args.days > 0,
                 "window must be positive")
-        providers = (nemo_ioipsl_provider(
-                         args.nemo_root, args.days, start_day=args.start_day),
-                     legoesm_npz_provider(
-                         args.legoesm_root, args.days,
-                         start_day=args.start_day))
-        diagnosed = compare(providers, days=args.days)
+        oracle_pair = args.nemo_root is not None or args.legoesm_root is not None
+        online_pair = args.filtered_root is not None or args.coarse_root is not None
+        require(oracle_pair != online_pair,
+                "select exactly one complete NEMO/legoESM or filtered/coarse pair")
+        if oracle_pair:
+            require(args.diagnostics == "registered",
+                    "NEMO/legoESM comparison requires registered diagnostics")
+            require(args.nemo_root is not None and args.legoesm_root is not None,
+                    "NEMO/legoESM pair is incomplete")
+            providers = (nemo_ioipsl_provider(
+                             args.nemo_root, args.days, start_day=args.start_day),
+                         legoesm_npz_provider(
+                             args.legoesm_root, args.days,
+                             start_day=args.start_day))
+            card = None
+            namelist = None
+        else:
+            require(args.diagnostics == "online",
+                    "filtered/coarse comparison requires --diagnostics online")
+            require(args.filtered_root is not None and args.coarse_root is not None,
+                    "filtered/coarse pair is incomplete")
+            from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
+
+            namelist = online_control_namelist(args.coarse_deck)
+            coarse_name = ("dg50 no closure" if args.coarse_deck == "dg50"
+                           else "dg50 nu80 no closure")
+            providers = (filtered_npz_provider(
+                             args.filtered_root, args.days,
+                             start_day=args.start_day),
+                         legoesm_npz_provider(
+                             args.coarse_root, args.days,
+                             start_day=args.start_day, name=coarse_name,
+                             expected_namelist=namelist))
+            card = build_swg_card(namelist)
+        diagnosed = compare(
+            providers, days=args.days, card=card, namelist=namelist,
+            diagnostics=args.diagnostics)
         report = write_outputs(
             args.output, diagnosed, providers, days=args.days,
             start_day=args.start_day)

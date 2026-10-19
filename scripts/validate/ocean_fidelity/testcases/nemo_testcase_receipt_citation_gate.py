@@ -1493,6 +1493,31 @@ FILES = {
         NEMO / "tests/VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/domhgr.f90"),
     "VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/vortex_r23_ldf_terms.f90": (
         NEMO / "tests/VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/vortex_r23_ldf_terms.f90"),
+    "SWG_DG/BLD/ppsrc/nemo/diacfl.f90": (
+        _SWG_DG_COMPILED / "diacfl.f90"),
+    # TSUNAMI lane round 3: the compiled RK3 build the record was taken from.
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stp2d.f90"),
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/eosbn2.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/eosbn2.f90"),
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynhpg.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynhpg.f90"),
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynadv.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynadv.f90"),
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/traadv.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/traadv.f90"),
+    # TSUNAMI lane round 4
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynvor.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynvor.f90"),
+    # TSUNAMI lane round 5 (the j-periodic exchange)
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/lbclnk.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/lbclnk.f90"),
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/lbcnfd.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/lbcnfd.f90"),
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/mppini.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/mppini.f90"),
 }
 
 # citation -> the anchors that IDENTIFY its first and last line, plus the
@@ -6481,6 +6506,279 @@ CITATION_MAP = {
     'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-138': [
         'SELECT CASE( n_dynadv )    !==  compute advection trend and add it to general trend  ==!',
         'CALL dyn_zad     ( kt                , Kmm, puu, pvv, Krhs )                  !* vertical advection', 5],
+    'SWG_DG/BLD/ppsrc/nemo/stprk3.f90:196-227': [
+        'rDt   = rn_Dt / 2._wp',
+        ('vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb) + rDt * vv(ji,jj,jk,Nrhs)', 2),
+        32],
+    'SWG_DG/BLD/ppsrc/nemo/stprk3.f90:252-290': [
+        ('rDt   = rn_Dt', 3),
+        ('vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb) + rDt * vv(ji,jj,jk,Nrhs)', 3),
+        39],
+    'SWG_DG/BLD/ppsrc/nemo/diacfl.f90:74-97': [
+        'Compute the Courant numbers Cu=u*dt/dx and Cv=v*dt/dy',
+        'zCw_cfl(ji,jj,jk) = ABS( ww(ji,jj,jk) ) * rDt', 24],
+    # --- SWG round 2: exact admitted, instrumented P3 compiled branch ---
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:250-251': [
+        ('CASE( np_ENS )', 2),
+        'CALL vor_ens( kt, Kmm, ntot, puu(:,:,:,Kmm)', 2],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:639-675': [
+        ('CASE ( np_CRV )', 3),
+        'pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zvau', 37],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:639-646': [
+        ("CASE ( np_CRV )", 3),
+        ("zwz(ji,jj) = ( zwz(ji,jj) - ff_f(ji,jj) ) * fmask(ji,jj,jk) + ff_f(ji,jj)", 2),
+        8],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:659-660': [
+        ("DO jj = ntsj-( 1), ntej+(  0 ) ; DO ji = ntsi-( 1), ntei+(  0)                 !==  potential vorticity  ==!   (1)", 2),
+        ("zwz(ji,jj) = zwz(ji,jj) / (e3f_0vor(ji,jj,jk)*(1._wp+r3f(ji,jj)))", 2),
+        2],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:187-190': [
+        ("IF( ln_dynadv_vec ) THEN", 1),
+        ("vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb) + rDt * vv(ji,jj,jk,Nrhs) * vmask(ji,jj,jk)", 1),
+        4],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:164-190': [
+        ("uu(:,:,:,Nrhs) = 0._wp", 1),
+        ("vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb) + rDt * vv(ji,jj,jk,Nrhs) * vmask(ji,jj,jk)", 1),
+        27],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:164-210': [
+        ("uu(:,:,:,Nrhs) = 0._wp", 1),
+        ("Naa = Nrhs", 1),
+        47],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:172-176': [
+        ("zrhs_u =        - grav", 1),
+        ("vv(ji,jj,jk,Nrhs) = vv(ji,jj,jk,Nrhs) + zrhs_v", 1),
+        5],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:213-215': [
+        ("RK3 2nd stage Ocean dynamics", 1),
+        ("rDt   = rn_Dt / 2._wp", 1),
+        3],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-138': [
+        ("SELECT CASE( n_dynadv )", 1),
+        ("CALL dyn_zad", 1),
+        5],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/sshwzv.f90:135-149': [
+        ("CALL div_hor( kt, Kbb, Kmm )", 1),
+        ("CALL lbc_lnk( 'sshwzv'", 1),
+        15],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90:208-234': [
+        ("pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)", 1),
+        ("END SUBROUTINE dom_qco_r3c", 1),
+        27],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:317-338': [
+        "CALL dyn_ldf( kstp, Nbb, Nnn, uu, vv, Nrhs )  ! lateral mixing",
+        ("CALL dom_qco_r3c( ssh(:,:,Naa), r3t(:,:,Naa), r3u(:,:,Naa), r3v(:,:,Naa), r3f(:,:) )", 3),
+        22],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:141-367': [
+        "rDt   = rn_Dt / 3._wp",
+        ("Naa = Nrhs", 3),
+        227],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynldf_lev.f90:130-150': [
+        ("DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)", 1),
+        ("END DO   ;   END DO", 2),
+        21],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/ldfdyn.f90:311-322': [
+        "IF(     ln_dynldf_lap ) THEN   ;   zUfac = r1_2 *rn_Uv",
+        "ahmf(:,:,1:jpkm1) = zah0",
+        12],
+    'dynadv.f90:134-139': [
+        ("SELECT CASE( n_dynadv )", 1),
+        ("         !", 13),
+        6],
+    'dynadv.f90:134-138': [
+        ("SELECT CASE( n_dynadv )", 1),
+        "CALL dyn_zad",
+        5],
+    'domqco.f90:207-234': [
+        ("DO jj = ntsj-( nn_hls), ntej+(  nn_hls ) ; DO ji = ntsi-( nn_hls), ntei+(  nn_hls)", 1),
+        ("END SUBROUTINE dom_qco_r3c", 1),
+        28],
+    'domqco.f90:208-234': [
+        ("pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)", 1),
+        ("END SUBROUTINE dom_qco_r3c", 1),
+        27],
+    'stprk3.f90:170-176': [
+        ("DO jk =  1,  jpkm1  ; DO jj = ntsj-(  0), ntej+(   0) ; DO ji = ntsi-( 0), ntei+(   0)", 1),
+        ("vv(ji,jj,jk,Nrhs) = vv(ji,jj,jk,Nrhs) + zrhs_v", 1),
+        7],
+    'stprk3.f90:172-176': [
+        ("zrhs_u =        - grav", 1),
+        ("vv(ji,jj,jk,Nrhs) = vv(ji,jj,jk,Nrhs) + zrhs_v", 1),
+        5],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:317-317': (
+        "CALL dyn_ldf( kstp, Nbb, Nnn, uu, vv, Nrhs )  ! lateral mixing", 1),
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:317': (
+        "CALL dyn_ldf( kstp, Nbb, Nnn, uu, vv, Nrhs )  ! lateral mixing", 1),
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:319-332': [
+        "z1_2rho0 = 0.5_wp * r1_rho0",
+        ("END DO   ;   END DO   ;   END DO", 7),
+        14],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:312-317': [
+        ("uu(:,:,:,Nrhs) = 0._wp", 3),
+        "CALL dyn_ldf( kstp, Nbb, Nnn, uu, vv, Nrhs )  ! lateral mixing",
+        6],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:319-328': [
+        "z1_2rho0 = 0.5_wp * r1_rho0",
+        "- rn_rfr   * vv(ji,jj,jk,Nbb)",
+        10],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:329-331': [
+        ("! ==> RHS", 3),
+        ("vv(ji,jj,jk,Nrhs) = vv(ji,jj,jk,Nrhs) + zrhs_v", 3),
+        3],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:342-345': [
+        ("IF( ln_dynadv_vec ) THEN", 3),
+        ("vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb) + rDt * vv(ji,jj,jk,Nrhs) * vmask(ji,jj,jk)", 3),
+        4],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:325-328': [
+        "zrhs_u = zrhs_u + z1_2rho0",
+        "- rn_rfr   * vv(ji,jj,jk,Nbb)",
+        4],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:326,328': [
+        "- rn_rfr   * uu(ji,jj,jk,Nbb)",
+        "- rn_rfr   * vv(ji,jj,jk,Nbb)",
+        2],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:344-345': [
+        ("uu(ji,jj,jk,Naa) = uu(ji,jj,jk,Nbb)", 3),
+        ("vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb)", 3),
+        2],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:255-257': [
+        ("CALL ssh_nxt( kstp, Nbb, Nnn, ssh, Naa )", 1),
+        ("CALL dom_qco_r3c( ssh(:,:,Naa), r3t(:,:,Naa), r3u(:,:,Naa), r3v(:,:,Naa), r3f(:,:) )", 2),
+        3],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/sbcmod.f90:553-560': [
+        "calculate utau and vtau on U,V-points",
+        ("vmask(ji,jj,1) ) * MAX( tmask(ji,jj,1), tmask(ji,jj+1,1) )", 2),
+        8],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/sbcmod.f90:563-585': [
+        "IF( kt == nit000 ) THEN",
+        ("ENDIF", 29),
+        23],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynldf.f90:81-92': [
+        "SELECT CASE ( nldf_dyn )",
+        ("END SELECT", 1),
+        12],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90:220-230': [
+        ("IF( PRESENT( pr3f ) ) THEN", 1),
+        ("END DO   ;   END DO", 3),
+        11],
+    # --- SWG round 6: whole-step carry and explicit RK3 materialization ---
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90:218-229': [
+        ("END DO   ;   END DO", 2),
+        ("&                    ) * r1_hf_0", 1),
+        12],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:336-338': [
+        ("CALL ssh_nxt( kstp, Nbb, Nnn, ssh, Naa )", 2),
+        ("CALL dom_qco_r3c( ssh(:,:,Naa)", 3),
+        3],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:358-366': [
+        ("ENDIF", 7),
+        ("Nbb = Naa", 1),
+        9],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:147-159': [
+        ("CALL swg_open( kstp, 1", 1),
+        ("CALL swg_w2( 'utau_now'", 1),
+        13],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:204-210': [
+        ("CALL lbc_lnk( 'stp_RK3'", 1),
+        ("Naa = Nrhs", 1),
+        7],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:278-284': [
+        ("CALL lbc_lnk( 'stp_RK3'", 3),
+        ("Naa = Nrhs", 2),
+        7],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:360-366': [
+        ("CALL lbc_lnk( 'stp_RK3'", 5),
+        ("Nbb = Naa", 1),
+        7],
+    # --- SWG round 7: admitted daily P3D boundaries ---
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/usrdef_istate.f90:70-72,96': [
+        'pu  (:,:,:)   = 0._wp',
+        'pts (:,:,:,:) = 0._wp',
+        'pssh(:,:)   = 0._wp',
+        4],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/stprk3.f90:146-161': [
+        'IF( MOD(kstp - nit000, 24) == 0 ) THEN',
+        'CALL swg_close( kstp, 1 )',
+        16],
+    'SWG_DG_OMIP_L1_P3D/BLD/ppsrc/nemo/stprk3.f90:146-161': [
+        'IF( MOD(kstp - nit000, NINT(rday / rn_Dt)) == 0 ) THEN',
+        'CALL swg_close( kstp, 1 )',
+        16],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/stprk3.f90:324-340': [
+        ("CALL lbc_lnk( 'stp_RK3'", 5),
+        'IF( lrst_oce   )   CALL rst_write',
+        17],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/sbcmod.f90:590-603': [
+        'IF( lrst_oce .AND. lk_SWE ) THEN',
+        "CALL iom_rstput( kt, nitrst, numrow, 'sfx_b'",
+        14],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/stprk3.f90:141-340': [
+        'rDt   = rn_Dt / 3._wp',
+        'IF( lrst_oce   )   CALL rst_write',
+        200],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/domain.f90:282-287': [
+        'NAMELIST/namrun/',
+        'NAMELIST/namdom/ rn_Dt',
+        6],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/domain.f90:302-303': [
+        'READ(numnam_ref(MAX(INDEX(numnam_ref,"&namdom ")',
+        'READ(numnam_cfg(MAX(INDEX(numnam_cfg,"&namdom ")',
+        2],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/domain.f90:332-333': [
+        'READ(numnam_ref(MAX(INDEX(numnam_ref,"&namrun ")',
+        'READ(numnam_cfg(MAX(INDEX(numnam_cfg,"&namrun ")',
+        2],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/domain.f90:374-377': [
+        'cexper = cn_exp',
+        'nitend = nn_itend',
+        4],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/nemogcm.f90:147-160': [
+        'istp = nit000',
+        'END DO',
+        14],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/restart.f90:103-129': [
+        'IF( kt == nit000 ) THEN',
+        'IF( nitrst <= nitend .AND. nitrst > 0 ) THEN',
+        27],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/diawri.f90:146-160': [
+        'IF( nn_write == -1 )   RETURN',
+        'zout = REAL( nn_write, wp ) * rn_Dt',
+        15],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/stprk3.f90:141-142,215-216,271-272': [
+        ('rDt   = rn_Dt / 3._wp', 1),
+        ('r1_Dt = 1._wp / rDt', 1),
+        ('rDt   = rn_Dt / 2._wp', 1),
+        ('r1_Dt = 1._wp / rDt', 2),
+        ('rDt   = rn_Dt', 3),
+        ('r1_Dt = 1._wp / rDt', 3),
+        6],
+    'sbcmod.f90:553-560': [
+        "calculate utau and vtau on U,V-points",
+        ("vmask(ji,jj,1) ) * MAX( tmask(ji,jj,1), tmask(ji,jj+1,1) )", 2),
+        8],
+    'sbcmod.f90:563-585': [
+        "IF( kt == nit000 ) THEN",
+        ("ENDIF", 29),
+        23],
+    'stprk3.f90:325-328': [
+        "zrhs_u = zrhs_u + z1_2rho0",
+        "- rn_rfr   * vv(ji,jj,jk,Nbb)",
+        4],
+    'stprk3.f90:326,328': [
+        "- rn_rfr   * uu(ji,jj,jk,Nbb)",
+        "- rn_rfr   * vv(ji,jj,jk,Nbb)",
+        2],
+    'stprk3.f90:344-345': [
+        ("uu(ji,jj,jk,Naa) = uu(ji,jj,jk,Nbb)", 3),
+        ("vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb)", 3),
+        2],
+    'dynldf.f90:81-92': [
+        "SELECT CASE ( nldf_dyn )",
+        ("END SELECT", 1),
+        12],
+    'dynldf_lev.f90:130-150': [
+        ("DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)", 1),
+        ("END DO   ;   END DO", 2),
+        21],
 }
 
 

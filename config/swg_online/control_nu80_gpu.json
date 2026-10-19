@@ -1,0 +1,15 @@
+{
+  "schema": "legoesm-swg-online-control-v1",
+  "experiment": "swgonl_control_nu80_gpu",
+  "description": "Twenty-year no-closure dg50 nu=80 reference rerun from rest with daily snapshots and daily means on CUDA/native for the registered device check.",
+  "control": "nu80",
+  "deck": "dg50-nu80",
+  "closure": "none",
+  "free_run": {
+    "days": 7300,
+    "start": "rest",
+    "sampling": "end_of_day_snapshot_and_daily_mean",
+    "device": "cuda",
+    "math_library": "native"
+  }
+}

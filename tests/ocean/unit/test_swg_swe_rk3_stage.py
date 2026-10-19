@@ -5,13 +5,19 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
-from legoesm.ocean.dynamics.swe_rk3 import SWERK3StageEntry, swe_rk3_stage
+from legoesm.ocean.dynamics.swe_rk3 import (
+    SWERK3StageEntry,
+    swe_rk3_stage,
+    swe_rotated_potential_forcing,
+)
 from legoesm.ocean.eos import nemo_qco_r3t_ratio
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-    SWG_NAMELIST, build_swg_card, swg_horizontal_coordinates)
+    SWG_NAMELIST,
+    build_swg_card,
+    swg_horizontal_coordinates,
+)
 from legoesm.ocean.state import OceanSurfaceForcing
 
 
@@ -54,6 +60,69 @@ def test_zero_state_executes_jit_and_preserves_record_layout(
         assert np.array_equal(np.asarray(value), np.zeros((84, 84)))
 
 
+def test_rotated_potential_force_is_closed_wall_nondivergent_and_zero_integral():
+    rng = np.random.default_rng(7281)
+    potential = rng.standard_normal((12, 13))
+    vertex = np.ones_like(potential, dtype=bool)
+    vertex[[0, -1], :] = False
+    vertex[:, [0, -1]] = False
+    e2u = 40_000.0 + rng.random(potential.shape) * 20_000.0
+    e1v = 40_000.0 + rng.random(potential.shape) * 20_000.0
+    e3u = 400.0 + rng.random(potential.shape) * 200.0
+    e3v = 400.0 + rng.random(potential.shape) * 200.0
+    mask = np.ones_like(potential)
+    force_u, force_v = swe_rotated_potential_forcing(
+        jnp.asarray(potential), jnp.asarray(e2u), jnp.asarray(e1v),
+        jnp.asarray(e3u), jnp.asarray(e3v), jnp.asarray(mask),
+        jnp.asarray(mask), jnp.asarray(vertex))
+    transport_u = np.asarray(force_u) * e2u * e3u
+    transport_v = np.asarray(force_v) * e1v * e3v
+    divergence = (transport_u - np.roll(transport_u, 1, axis=1)
+                  + transport_v
+                  - np.concatenate([np.zeros_like(transport_v[:1]),
+                                    transport_v[:-1]], axis=0))
+    assert np.max(np.abs(divergence)) < 2.0e-15
+    assert np.max(np.abs(transport_u[:, [0, -1]])) == 0.0
+    assert np.max(np.abs(transport_v[[0, -1], :])) == 0.0
+    assert abs(np.sum(transport_u)) < 2.0e-14
+    assert abs(np.sum(transport_v)) < 2.0e-14
+
+
+def test_rotated_potential_orientation_signs_and_all_four_corners():
+    potential = np.zeros((7, 8), dtype=np.float64)
+    potential[3, 4] = 2.0
+    vertex = np.ones_like(potential, dtype=bool)
+    vertex[[0, -1], :] = False
+    vertex[:, [0, -1]] = False
+    mask = np.ones_like(potential)
+    one = np.ones_like(potential)
+    force_u, force_v = swe_rotated_potential_forcing(
+        potential, one, one, one, one, mask, mask, vertex)
+    force_u, force_v = np.asarray(force_u), np.asarray(force_v)
+    assert force_u[3, 4] == 2.0 and force_u[4, 4] == -2.0
+    assert force_v[3, 4] == -2.0 and force_v[3, 5] == 2.0
+    for corner in ((0, 0), (0, -1), (-1, 0), (-1, -1)):
+        assert force_u[corner] == force_v[corner] == 0.0
+    # Flipping only V is a plausible rotated-gradient sign error; it must
+    # destroy the matched divergence cancellation by a large margin.
+    wrong_divergence = (force_u - np.roll(force_u, 1, axis=1)
+                        - force_v
+                        + np.concatenate([np.zeros_like(force_v[:1]),
+                                          force_v[:-1]], axis=0))
+    assert np.max(np.abs(wrong_divergence)) >= 4.0
+
+
+def test_absent_potential_is_bit_identical_to_certified_stage(card_and_model):
+    card, model = card_and_model
+    entry = _entry()
+    direct = model.replay_swe_rk3_stage(entry, card.dt_s, 1)
+    from legoesm.ocean.dynamics.swe_rk3 import swe_rk3_stage
+    absent = jax.jit(lambda value: swe_rk3_stage(
+        value, value, card.dt_s, 1, card.recipe.grid, card.recipe.z_coord,
+        card.recipe.land_mask, card.recipe.model_config,
+        potential_f=None))(entry)
+    for left, right in zip(direct, absent, strict=True):
+        assert np.array_equal(np.asarray(left), np.asarray(right))
 def test_swe_face_masks_follow_the_config_not_the_caller_scope(
         card_and_model, monkeypatch):
     import legoesm.ocean.dynamics.swe_rk3 as swe

@@ -13,9 +13,12 @@ from legoesm.core.precision import get_policy, set_policy
 _P = (Path(__file__).resolve().parents[3] / "scripts/validate/ocean_fidelity/"
       "testcases/nemo_testcase_l1_swg_ladder.py")
 _S = importlib.util.spec_from_file_location("swg_ladder", _P)
-lad = importlib.util.module_from_spec(_S); _S.loader.exec_module(lad)
+lad = importlib.util.module_from_spec(_S)
+_S.loader.exec_module(lad)
 ROOT = lad.DEFAULT_ROOT
 MONTH_ROOT = lad.DEFAULT_MONTH_ROOT
+DG50_STAGE_ROOT = lad.DG50_STAGE_ROOT
+DG50_MONTH_ROOT = lad.DG50_MONTH_ROOT
 _LAST_RESTORED = [None, None]
 
 
@@ -42,6 +45,52 @@ def test_maddison_deck_selects_admitted_card_clocks_and_roots():
     assert lad.DG_MONTH_RESTART_KTS == tuple(range(432, 12961, 432))
     with pytest.raises(Exception, match="unknown SWG deck"):
         lad._deck_namelist("typo")
+
+
+def test_dg50_deck_selects_preregistered_stage_and_month_clocks():
+    stage = lad._deck_namelist("dg50")
+    month = lad._deck_namelist("dg50", month=True)
+    assert (stage.nn_SWG, stage.rn_Dt_s, stage.nn_itend,
+            stage.nn_stock, stage.nn_write) == (2, 400.0, 10, 1, 1)
+    assert (month.nn_SWG, month.rn_Dt_s, month.nn_itend,
+            month.nn_stock, month.nn_write) == (2, 400.0, 6480, 216, 216)
+    physical = set(stage._fields) - {"nn_itend", "nn_stock", "nn_write"}
+    fine = lad._deck_namelist("maddison")
+    differing = {name for name in physical if getattr(stage, name) != getattr(fine, name)}
+    assert differing == {"nn_SWG", "rn_Dt_s"}
+
+
+@pytest.mark.skipif(not DG50_STAGE_ROOT.is_dir(),
+                    reason="admitted dg50 stage records not mounted")
+def test_dg50_stage_admission_pins_records_restarts_and_outputs():
+    pins = lad._pinned_stage_hashes(DG50_STAGE_ROOT)
+    assert len(pins) == 30
+    records = lad.read_restarts(
+        DG50_STAGE_ROOT, namelist=lad._deck_namelist("dg50"))
+    assert list(records) == list(range(1, 11))
+    assert all(value.shape == (84, 84) for value in records[1].values())
+
+
+@pytest.mark.skipif(not DG50_MONTH_ROOT.is_dir(),
+                    reason="admitted dg50 month records not mounted")
+def test_dg50_month_admission_reports_registered_numerical_debt():
+    out = lad.month(DG50_MONTH_ROOT, deck="dg50", allow_dirty=True)
+    assert out["record_counts"] == {"stage_entries": 30, "restarts": 30}
+    assert len(out["per_kt"]) == 30
+    rows = [row for day in out["per_kt"] for row in day["rows"]]
+    assert len(rows) == 690
+    assert sum(row["exact"] for row in rows) == 339
+    assert sum(row["exact"] or row.get("numerical_status") == "AT-BAR"
+               for row in rows) == 561
+    first_numerical_debt = next(
+        day["day"] for day in out["per_kt"]
+        if any(not row["exact"]
+               and row.get("numerical_status") != "AT-BAR"
+               for row in day["rows"]))
+    assert first_numerical_debt == 9
+    assert max(row["max_abs"] for row in rows) == pytest.approx(
+        9.478529072737274e-15)
+    assert not out["all_at_bar"] and not out["all_bit_identical"]
 
 
 def test_exact_row_gate_distinguishes_signed_zero_bits():
@@ -265,6 +314,41 @@ def test_numerical_debt_makes_the_ladder_gate_nonzero():
     gated = lad._gate_rows(debt)
     assert gated["first_kt_over_bar"] == 1
     assert lad._exit_code(gated) == 1
+
+
+def test_composition_summary_keeps_exact_and_numerical_counts_separate():
+    out = lad._gate_rows({"per_kt": [
+        {"day": 1, "kt": 216, "rows": [
+            {"status": "AT-BAR", "bit_identical": True, "max_abs": 0.0},
+            {"status": "DEBT", "numerical_status": "AT-BAR",
+             "bit_identical": False, "max_abs": 5.0e-16},
+        ]},
+        {"day": 2, "kt": 432, "rows": [
+            {"status": "DEBT", "bit_identical": False,
+             "max_abs": 2.0e-15},
+        ]},
+    ]})
+    summary = lad._composition_summary(out)
+    assert summary == {
+        "rows": 3,
+        "exact_rows": 1,
+        "rows_within_1e-15": 2,
+        "maximum_absolute_difference": 2.0e-15,
+        "first_day_not_bit_identical": 1,
+        "first_day_over_1e-15": 2,
+    }
+    with pytest.raises(ValueError, match="unknown month composition"):
+        lad.month_composition(Path("unused"), composition="nested",
+                              allow_dirty=True)
+
+
+def test_ulp_distance_orders_signed_zero_and_adjacent_floats():
+    assert lad._ulp_distance(np.float64(-0.0), np.float64(0.0)) == 1
+    one = np.float64(1.0)
+    assert lad._ulp_distance(one, np.nextafter(one, np.inf)) == 1
+    minus_one = np.float32(-1.0)
+    assert lad._ulp_distance(
+        minus_one, np.nextafter(minus_one, np.float32(-np.inf))) == 1
 
 
 def test_month_reader_refuses_absent_admission(tmp_path):

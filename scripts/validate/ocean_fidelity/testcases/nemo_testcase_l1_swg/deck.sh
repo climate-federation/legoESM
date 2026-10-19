@@ -26,8 +26,18 @@ swg_select_deck() {
       RUN_NAME=SWG_DG_OMIP_L1_P3D
       DECK_PATCH=$here/namelist_cfg_maddison_30d.patch
       ;;
+    dg50:stage)
+      SOURCE_CASE_NAME=SWG_DG
+      RUN_NAME=SWG_DG50_OMIP_L1_P3
+      DECK_PATCH=$here/namelist_cfg_dg50_kt10.patch
+      ;;
+    dg50:month)
+      SOURCE_CASE_NAME=SWG_DG
+      RUN_NAME=SWG_DG50_OMIP_L1_P3D
+      DECK_PATCH=$here/namelist_cfg_dg50_30d.patch
+      ;;
     *)
-      printf 'REFUSE_DECK: expected shipped or maddison\n' >&2
+      printf 'REFUSE_DECK: expected shipped, maddison, or dg50\n' >&2
       return 64
       ;;
   esac
