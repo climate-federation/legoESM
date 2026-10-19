@@ -42,6 +42,25 @@ with the recorder's own filter, sigma ``sqrt(value**2 - 1)`` cells, and under
 the rigid lid projects the start velocities non-divergent.  The symmetric
 objective refuses a value above 1.
 
+``network.noise_channel`` (``"none"`` or ``"white_input"``, required) selects
+the network input: ``"white_input"`` adds a fifth channel ``xi`` ~ N(0,1) per
+cell (one draw per model step, shared by the three RK3 stages), whose
+first-layer weights are the learned noise amplitude.  ``loss`` (required) is
+``{"kind": "eq7"}`` (Maddison Eq. 7), ``{"kind": "energy_score", "members": M}``
+(Brolly Eq. 9 over M members per window from the same start with independent
+xi, normalised by the training split's variances of the three balanced
+fields, which needs ``"white_input"`` and replaces Eq. 7) or ``{"kind":
+"eq7_window_statistics", "calibration_window_days": W}`` (Eq. 7 plus the
+NRMSE^2 of the window-mean vorticity map and of the window EKE map, each
+weighted by a constant set once from the first training batch of W-day
+windows so that it equals the Eq. 7 term).  Whatever a loss freezes at the
+start is recorded in the run manifest (``loss_constants``) and read back on
+resume.  ``network.initial_acceleration_gate`` (``"enforced"`` or
+``"recorded_only"``, required) says whether the 1% bar on the initialised
+closure acceleration stops the run; ``"recorded_only"`` needs
+``network.initial_checkpoint`` (a loaded trained network is measured and
+logged, not refused).
+
 ``free-run`` integrates the coarse card from rest with the closure of one
 trained window length (its last checkpoint) on the device and math policy
 the configuration states, writing every day's end-of-day snapshot beside its
@@ -116,23 +135,29 @@ from legoesm.training.swg_online import (
     START_REBALANCE_TOLERANCE,
     TEMPLATE_BATCH_SIZE,
     WALL_RING_OPTIONS,
+    BalancedNormalizers,
     SWGDatasetContract,
     SWGNetworkSpec,
     SWGOptimizerSettings,
     SWGScalarPotentialCNN,
     WindowBatch,
+    add_noise_channel,
     assert_network_gradients_live,
+    balanced_field_second_moments,
     build_closure_geometry,
     build_segment_fn,
     coarse_state_from_native,
     create_swg_optimizer,
     deterministic_trajectory_loss,
+    diagnose_native_windows,
+    ensemble_trajectory_scores,
     eq6_scale_report,
     free_run_closure,
     initial_closure_acceleration_ratio,
     maddison_eq6_network_scales,
     maddison_half_width_m,
     network_parameter_count,
+    normalizers_from_moments,
     record_start_state,
     require_curriculum_windows,
     require_rigid_lid_zero_ssh,
@@ -141,6 +166,7 @@ from legoesm.training.swg_online import (
     start_state_from_native,
     steps_per_target_interval,
     swg_online_step,
+    window_statistics_trajectory_loss,
     window_steps,
 )
 
@@ -162,6 +188,23 @@ CONTROL_DECKS = {("nu10", "explicit"): "dg50", ("nu80", "explicit"): "dg50-nu80"
 FREE_RUN_SAMPLING = "end_of_day_snapshot_and_daily_mean"
 TRAINING_PRECISIONS = ("fp64", "fp32")
 DATASET_CACHES = ("none", "memory")
+NOISE_CHANNELS = ("none", "white_input")
+# The 1% bar on the initialised closure acceleration is for a seed's random
+# initialisation; a network loaded from a trained file is measured and logged
+# only (the w08 file of the arm configurations measures 10-15 x the wind).
+ACCELERATION_GATES = ("enforced", "recorded_only")
+REPORT_NAMES = {
+    "energy_score": ("energy_score", "member_truth_distance", "member_spread"),
+    "eq7_window_statistics": ("total", "eq7", "vorticity_nrmse2",
+                              "eke_nrmse2")}
+LOSS_KINDS = ("eq7", "energy_score", "eq7_window_statistics")
+# User decision 2026-10-19 (arm B): the xi first-layer weights start at 1e-2
+# of the SSH-channel weights' rms.  The tag separates their random stream
+# from every other use of PRNGKey(seed).
+NOISE_CHANNEL_INIT_RELATIVE_SCALE = 1.0e-2
+NOISE_CHANNEL_INIT_TAG = 2026_10_19
+# Training and validation draw their ensemble noise from separate streams.
+TRAIN_NOISE_TAG, VALIDATION_NOISE_TAG = 1, 2
 SECONDS_PER_DAY = 86_400
 _OPERATOR_FIELDS = {"symmetric": "box", "template": "filtered"}
 
@@ -244,6 +287,26 @@ def _validate_free_run(free_run: dict) -> None:
             "cpu+libm or cuda+native")
 
 
+def _validate_loss(loss, noise_channel: str, windows: list) -> None:
+    """The training loss and the network input it needs, both stated."""
+    if not isinstance(loss, dict) or loss.get("kind") not in LOSS_KINDS:
+        raise ValueError(f"loss kind must be one of {LOSS_KINDS}")
+    if loss["kind"] == "eq7":
+        _require_keys(loss, ("kind",), "loss")
+    elif loss["kind"] == "energy_score":
+        _require_keys(loss, ("kind", "members"), "loss")
+        _require_int(loss["members"], "loss members", minimum=2)
+    else:
+        _require_keys(loss, ("kind", "calibration_window_days"), "loss")
+        if loss["calibration_window_days"] not in windows:
+            raise ValueError("loss calibration_window_days must be one of the "
+                             f"curriculum's window lengths {windows}")
+    if (loss["kind"] == "energy_score") != (noise_channel == "white_input"):
+        raise ValueError(
+            "the energy_score loss needs network noise_channel 'white_input' "
+            "and only it trains one (an unused xi weight is an inert leaf)")
+
+
 def load_config(path: Path) -> dict:
     """Read one training configuration; every key is required, none extra."""
     config = json.loads(Path(path).read_text())
@@ -273,7 +336,7 @@ def load_config(path: Path) -> dict:
     _require_keys(config, (
         "schema", "experiment", "description", "deck", "surface", "objective",
         "wall_ring", "training_precision", "gradient_checkpointing",
-        "target_interval_hours", "network", "seeds", "dataset",
+        "target_interval_hours", "network", "loss", "seeds", "dataset",
         "curriculum", "optimiser", "free_run"), "configuration")
     if config["schema"] != CONFIG_SCHEMA:
         raise ValueError(f"configuration schema must be {CONFIG_SCHEMA!r}")
@@ -304,7 +367,18 @@ def load_config(path: Path) -> dict:
     _require_keys({key: value for key, value in network.items()
                    if key != "initial_checkpoint"},
                   ("hidden_channels", "hidden_layers", "kernel_size",
-                   "wall_margin_rings", "scales"), "network")
+                   "wall_margin_rings", "scales", "noise_channel",
+                   "initial_acceleration_gate"), "network")
+    if network["noise_channel"] not in NOISE_CHANNELS:
+        raise ValueError(f"network noise_channel must be one of {NOISE_CHANNELS}")
+    if network["initial_acceleration_gate"] not in ACCELERATION_GATES:
+        raise ValueError("network initial_acceleration_gate must be one of "
+                         f"{ACCELERATION_GATES}")
+    if network["initial_acceleration_gate"] == "recorded_only" \
+            and "initial_checkpoint" not in network:
+        raise ValueError("initial_acceleration_gate 'recorded_only' needs "
+                         "network initial_checkpoint (a seed's random "
+                         "initialisation must pass the bar)")
     if "initial_checkpoint" in network and (
             not isinstance(network["initial_checkpoint"], str)
             or not Path(network["initial_checkpoint"]).is_absolute()):
@@ -364,6 +438,7 @@ def load_config(path: Path) -> dict:
                                "optimiser_between_windows"), "curriculum")
     windows = curriculum["window_days"]
     require_curriculum_windows(windows, splits)
+    _validate_loss(config["loss"], network["noise_channel"], windows)
     _require_int(curriculum["epochs_per_window"], "epochs_per_window", minimum=1)
     if curriculum["network_between_windows"] != "carried":
         raise ValueError("network_between_windows must be 'carried'")
@@ -498,7 +573,8 @@ def network_spec(config: dict, card, geometry) -> tuple:
         ssh_scale_m=scales.ssh_scale_m,
         velocity_scale_m_s=scales.velocity_scale_m_s,
         potential_scale_m3_s2=scales.potential_scale_m3_s2,
-        wall_margin_rings=network["wall_margin_rings"]), scales
+        wall_margin_rings=network["wall_margin_rings"],
+        noise_channel=network["noise_channel"] == "white_input"), scales
 
 
 # --------------------------------------------------------------------- dataset
@@ -638,11 +714,43 @@ def build_batch_functions(card, geometry, *, window_days: int,
     every step in the backward pass, ``False`` keeps
     the activations (same loss and gradient, more memory, less time).
     """
+    programs = build_batch_programs(
+        card, geometry, window_days=window_days,
+        target_interval_hours=target_interval_hours, objective=objective,
+        wall_ring=wall_ring, training_precision=training_precision,
+        checkpoint=checkpoint, loss={"kind": "eq7"}, constants=None)
+    return programs["value_and_grad"], programs["loss"]
+
+
+def build_batch_programs(card, geometry, *, window_days: int,
+                         target_interval_hours: int, objective: str,
+                         wall_ring: str, training_precision: str,
+                         checkpoint: bool, loss: dict, constants):
+    """Jitted ``value_and_grad``, ``loss`` and (non-Eq. 7 losses) ``report``
+    of one window batch, all ``(network, initial, target, key)``.
+
+    ``loss`` is the configuration's ``loss`` block.  ``eq7``: see
+    ``build_batch_functions`` (``constants`` None, no ``report``).
+    ``energy_score``: ``loss["members"]`` rollouts per window from the same
+    start, member ``m`` of window ``w`` driven by the ``(w, m)`` split of
+    ``key``; ``constants`` is the ``BalancedNormalizers``; the loss is the
+    mean over windows of Brolly's energy score and ``report`` the vector
+    ``(score, member_truth_distance, member_spread)``.
+    ``eq7_window_statistics``: the deterministic rollout (``key`` shared);
+    ``constants`` is ``(vorticity_weight, eke_weight)``; the loss is
+    ``window_statistics_trajectory_loss``'s total and ``report`` the vector
+    ``(total, eq7, vorticity_term, eke_term)``.
+    """
     if training_precision not in TRAINING_PRECISIONS:
         raise ValueError(
             f"training_precision must be one of {TRAINING_PRECISIONS}")
     if type(checkpoint) is not bool:
         raise ValueError("checkpoint must be true or false")
+    kind = loss["kind"]
+    if kind not in LOSS_KINDS:
+        raise ValueError(f"loss kind must be one of {LOSS_KINDS}")
+    if (kind == "eq7") != (constants is None):
+        raise ValueError("only the Eq. 7 loss takes no loss constants")
     single = training_precision == "fp32"
     with _single_precision_trace() if single else contextlib.nullcontext():
         if single:
@@ -659,26 +767,58 @@ def build_batch_functions(card, geometry, *, window_days: int,
     namelist = card.resolved_namelist
     shape = tuple(geometry.tmask.shape)
     noise_dtype = jnp.float32 if single else jnp.float64
+    eq7 = dict(objective=objective, beta_m1_s1=namelist.rn_beta_m_s,
+               basin_length_m=namelist.rn_domsiz_m, wall_ring=wall_ring)
 
-    def batch_loss(network, initial, target, key):
+    def rollout(network, ssh, u, v, key):
         noise = jnp.zeros((n_steps, 3) + shape, dtype=noise_dtype)
+        state = rigid_lid_start_state(
+            card, coarse_state_from_native(template, ssh, u, v))
+        return raw(network, state, noise, key, jnp.asarray(0.0))[1]
 
-        def rollout(ssh, u, v):
-            state = rigid_lid_start_state(
-                card, coarse_state_from_native(template, ssh, u, v))
-            return raw(network, state, noise, key, jnp.asarray(0.0))[1]
+    def ensemble(network, initial, key):
+        windows = initial[0].shape[0]
+        keys = jax.random.split(key, windows * loss["members"]).reshape(
+            (windows, loss["members"]) + key.shape)
+        return jax.vmap(lambda ssh, u, v, member_keys: jax.vmap(
+            lambda member_key: rollout(network, ssh, u, v, member_key))(
+            member_keys))(*initial, keys)
 
-        predicted = jax.vmap(rollout)(*initial)
-        return deterministic_trajectory_loss(
-            predicted, target, geometry, objective=objective,
-            beta_m1_s1=namelist.rn_beta_m_s,
-            basin_length_m=namelist.rn_domsiz_m, wall_ring=wall_ring)
+    def deterministic(network, initial, key):
+        return jax.vmap(lambda ssh, u, v: rollout(
+            network, ssh, u, v, key))(*initial)
 
-    value_and_grad = eqx.filter_jit(eqx.filter_value_and_grad(batch_loss))
-    loss_fn = eqx.filter_jit(batch_loss)
+    if kind == "eq7":
+        def batch_loss(network, initial, target, key):
+            return deterministic_trajectory_loss(
+                deterministic(network, initial, key), target, geometry, **eq7)
+        report = None
+    elif kind == "energy_score":
+        def scores(network, initial, target, key):
+            return jnp.stack(ensemble_trajectory_scores(
+                ensemble(network, initial, key), target, geometry, constants,
+                objective=objective))
+
+        def batch_loss(network, initial, target, key):
+            return scores(network, initial, target, key)[0]
+        report = scores
+    else:
+        def terms(network, initial, target, key):
+            return jnp.stack(window_statistics_trajectory_loss(
+                deterministic(network, initial, key), target, geometry,
+                vorticity_weight=constants[0], eke_weight=constants[1], **eq7))
+
+        def batch_loss(network, initial, target, key):
+            return terms(network, initial, target, key)[0]
+        report = terms
+
+    programs = {"value_and_grad": eqx.filter_jit(eqx.filter_value_and_grad(
+        batch_loss)), "loss": eqx.filter_jit(batch_loss)}
+    if report is not None:
+        programs["report"] = eqx.filter_jit(report)
     if single:
-        value_and_grad = _in_single_precision(value_and_grad)
-        loss_fn = _in_single_precision(loss_fn)
+        programs = {name: _in_single_precision(function)
+                    for name, function in programs.items()}
 
     def zero_lid_ssh(function):
         # Under the lid the traced start cannot refuse stored sea level;
@@ -688,7 +828,7 @@ def build_batch_functions(card, geometry, *, window_days: int,
             return function(network, initial, target, key)
         return run
 
-    return zero_lid_ssh(value_and_grad), zero_lid_ssh(loss_fn)
+    return {name: zero_lid_ssh(function) for name, function in programs.items()}
 
 
 def _parts(batch, windows_per_call: int):
@@ -698,15 +838,27 @@ def _parts(batch, windows_per_call: int):
                tuple(jnp.asarray(value[part]) for value in batch.target))
 
 
-def batch_value_and_grad(value_and_grad, network, batch, key, windows_per_call):
+def _part_keys(key, windows_per_call: int, per_part_keys: bool):
+    """The key of each part: ``key`` itself, or (ensemble noise) ``key``
+    folded with the part's first window so no two parts share a stream."""
+    return [jax.random.fold_in(key, first) if per_part_keys else key
+            for first in range(0, TEMPLATE_BATCH_SIZE, windows_per_call)]
+
+
+def batch_value_and_grad(value_and_grad, network, batch, key, windows_per_call,
+                         *, per_part_keys: bool = False):
     """Batch loss and gradient from equal parts of the ten windows.
 
     Each part's loss is the Eq. 7 mean over its windows, so the mean of the
     parts is the batch's Eq. 7 loss exactly (only the summation order
-    depends on ``windows_per_call``).
+    depends on ``windows_per_call``).  ``per_part_keys`` (stochastic losses)
+    gives every part its own noise stream.
     """
-    results = [value_and_grad(network, initial, target, key)
-               for initial, target in _parts(batch, windows_per_call)]
+    results = [value_and_grad(network, initial, target, part_key)
+               for (initial, target), part_key in zip(
+                   _parts(batch, windows_per_call),
+                   _part_keys(key, windows_per_call, per_part_keys),
+                   strict=True)]
     count = len(results)
     loss = functools.reduce(operator.add, [value for value, _ in results])
     grads = jax.tree.map(lambda *parts: functools.reduce(operator.add, parts),
@@ -714,10 +866,26 @@ def batch_value_and_grad(value_and_grad, network, batch, key, windows_per_call):
     return loss / count, jax.tree.map(lambda leaf: leaf / count, grads)
 
 
-def batch_loss_value(loss_fn, network, batch, key, windows_per_call) -> float:
-    values = [loss_fn(network, initial, target, key)
-              for initial, target in _parts(batch, windows_per_call)]
+def batch_loss_value(loss_fn, network, batch, key, windows_per_call,
+                     *, per_part_keys: bool = False) -> float:
+    values = [loss_fn(network, initial, target, part_key)
+              for (initial, target), part_key in zip(
+                  _parts(batch, windows_per_call),
+                  _part_keys(key, windows_per_call, per_part_keys),
+                  strict=True)]
     return float(functools.reduce(operator.add, values) / len(values))
+
+
+def batch_report(report_fn, network, batch, key, windows_per_call,
+                 *, per_part_keys: bool = False) -> np.ndarray:
+    """Mean over the parts of ``report_fn``'s vector (each part's mean over
+    its windows), so the mean over the batch's ten windows."""
+    values = [np.asarray(report_fn(network, initial, target, part_key))
+              for (initial, target), part_key in zip(
+                  _parts(batch, windows_per_call),
+                  _part_keys(key, windows_per_call, per_part_keys),
+                  strict=True)]
+    return np.mean(values, axis=0)
 
 
 def _require_finite(loss, grads, where: str) -> None:
@@ -742,6 +910,11 @@ def free_run_day(network, card, geometry, *, key):
     (closure at every RK3 stage, zero stage noise, noise scale 0;
     ``network=None`` steps without a closure): ``state -> (end-of-day state,
     (ssh, u, v) arithmetic means of every post-step state of the day)``.
+
+    ``day(state, day_index=0)`` runs model day ``day_index`` (0-based from
+    the free run's start).  A network with the white-noise channel draws
+    fresh ``xi`` every model step: step ``n`` of the run (global, from 0) is
+    keyed ``fold_in(key, n)``, so a free run is reproducible from ``key``.
     """
     tau_u, tau_v = swg_surface_wind(card.resolved_namelist)
     forcing = OceanSurfaceForcing(
@@ -749,16 +922,26 @@ def free_run_day(network, card, geometry, *, key):
         tau_j_native=jnp.asarray(tau_v, dtype=jnp.float64))
     stage_noise = jnp.zeros((3,) + tuple(geometry.tmask.shape), jnp.float64)
 
-    def step(state, dt_s, surface_forcing):
+    noisy = network is not None and network.spec.noise_channel
+    per_day = steps_per_day(card)
+
+    def step(state, dt_s, surface_forcing, step_index=None):
         if dt_s != card.dt_s:
             raise ValueError("a free-run step must use the card's timestep")
+        step_key = jax.random.fold_in(key, step_index) if noisy else key
         return swg_online_step(
-            network, state, stage_noise, key, jnp.asarray(0.0), card=card,
+            network, state, stage_noise, step_key, jnp.asarray(0.0), card=card,
             geometry=geometry, forcing=surface_forcing)
 
-    return forcing, _double_gyre_driver().build_scanned_day_mean_stepper(
-        types.SimpleNamespace(step=step), card.dt_s, forcing,
-        steps_per_day(card))
+    scanned = _double_gyre_driver().build_scanned_day_mean_stepper(
+        types.SimpleNamespace(step=step), card.dt_s, forcing, per_day)
+
+    def day(state, day_index: int = 0):
+        if not noisy:
+            return scanned(state)
+        return scanned(state, jnp.asarray(day_index * per_day, dtype=jnp.int32))
+
+    return forcing, day
 
 
 def free_run(network, card, geometry, output: Path, *, days: int,
@@ -795,7 +978,12 @@ def free_run(network, card, geometry, output: Path, *, days: int,
         "integration": ("one jitted scan per model day of swg_online_step "
                         "(certified SWE RK3 step, closure potential at every "
                         "stage, zero stage noise, noise scale 0) in the "
-                        "double-gyre driver's daily-mean stepper"),
+                        "double-gyre driver's daily-mean stepper"
+                        + ("; white-noise input channel: a fresh N(0,1) draw "
+                           "per model step, step n of the run keyed "
+                           "fold_in(PRNGKey(network_seed), n)"
+                           if network is not None
+                           and network.spec.noise_channel else "")),
         "sampling": FREE_RUN_SAMPLING,
         "fields": {"ssh_m": "end-of-day snapshot; T points",
                    "u_m_s": "end-of-day snapshot; native NEMO U record",
@@ -813,7 +1001,7 @@ def free_run(network, card, geometry, output: Path, *, days: int,
     health = None
     started = time.perf_counter()
     for day in range(1, days + 1):
-        state, means = one_day(state)
+        state, means = one_day(state, day - 1)
         jax.block_until_ready(state.eta.data)
         if day == 1:
             first_day_s = time.perf_counter() - started
@@ -889,7 +1077,16 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
             "path": pretrained, "sha256": _sha256(Path(pretrained))}}
         network_init += ("; weights then loaded from "
                          "network.initial_checkpoint (optimiser fresh)")
-    return _jsonable({
+        if config["network"]["noise_channel"] == "white_input":
+            network_init += (
+                "; the file's four-channel network gains the xi input "
+                "channel (add_noise_channel: weights ~ N(0, (relative_scale "
+                "x rms of the SSH-channel first-layer weights)^2), key = "
+                "fold_in(PRNGKey(seed), tag))")
+            initial_checkpoint["initial_checkpoint"]["noise_channel_init"] = {
+                "relative_scale": NOISE_CHANNEL_INIT_RELATIVE_SCALE,
+                "tag": NOISE_CHANNEL_INIT_TAG}
+    identity = _jsonable({
         "schema": RUN_SCHEMA,
         "run_id": f"{config['experiment']}/seed{seed}",
         "config_sha256": _sha256(config_path),
@@ -900,7 +1097,11 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
             "window_sampler": "SWGDatasetContract.batches(seed=seed, "
                               "epoch=epoch-1): offset per (seed, window, "
                               "epoch), shuffled",
-            "rollout_key": "PRNGKey(seed); inert: zero stage noise, scale 0"},
+            "rollout_key": "PRNGKey(seed); inert: zero stage noise, scale 0"
+            if config["loss"]["kind"] != "energy_score" else
+            "member (w, m) of a training batch step: split(fold_in(fold_in("
+            "fold_in(fold_in(PRNGKey(seed), 1), window_days), epoch), step), "
+            "part-folded); validation: the same with tag 2, no epoch/step"},
         "legoesm_git_sha": commit,
         "versions": {"jax": jax.__version__, "equinox": eqx.__version__,
                      "optax": optax.__version__, "numpy": np.__version__},
@@ -924,7 +1125,12 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
             "scale_rule": SCALE_RULE, "scales": scales._asdict(),
             "input_channels": ["ssh/ssh_scale (+ zero noise)",
                                "T-centred u/velocity_scale",
-                               "T-centred v/velocity_scale", "wet mask"],
+                               "T-centred v/velocity_scale", "wet mask"]
+            if not spec.noise_channel else
+            ["ssh/ssh_scale", "T-centred u/velocity_scale",
+             "T-centred v/velocity_scale", "wet mask",
+             "xi ~ N(0,1) per T cell: one draw per model step, shared by the "
+             "three RK3 stages"],
             "output": "potential_scale x boundary-zero F-point potential",
             **initial_checkpoint},
         "optimiser": {
@@ -967,13 +1173,43 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
         "gates": {
             "initial_closure_acceleration": "initial_closure_acceleration_"
                                             "ratio on the ten starts of the "
-                                            "first training batch, bar 0.01",
+                                            "first training batch, bar 0.01"
+            + ("" if config["network"]["initial_acceleration_gate"]
+               == "enforced" else " (recorded, not enforced: the network is "
+               "loaded from network.initial_checkpoint)"),
             "no_inert": "assert_network_gradients_live on the first "
                         "optimiser step's gradient",
             "finite": "loss and every gradient element at every step"},
         "free_run": config["free_run"] | {"namelist": free_run_namelist(
             card, config["free_run"]["days"])._asdict()},
     })
+    kind = config["loss"]["kind"]
+    if kind == "energy_score":
+        identity["loss"] = {key: identity["loss"][key] for key in (
+            "objective", "wall_ring")} | {
+            "definition": "Brolly (2026) Eq. 9 energy score, "
+                          "balanced_trajectory_loss(kind='energy_score') per "
+                          "window, mean over windows",
+            "members": config["loss"]["members"],
+            "member_start": "the window's stored start state, every member",
+            "normalizers": "training-split area-weighted variances of the "
+                           "three balanced fields (run manifest "
+                           "loss_constants)",
+            "validation_report": ["energy_score", "member_truth_distance",
+                                  "member_spread"]}
+    elif kind == "eq7_window_statistics":
+        identity["loss"] = identity["loss"] | {
+            "definition": "Eq. 7 + vorticity_weight * NRMSE^2(window-mean "
+                          "filtered vorticity map) + eke_weight * "
+                          "NRMSE^2(window EKE map of the filtered rotational "
+                          "velocity), window_statistics_trajectory_loss",
+            "weights": "set once from the first training batch of "
+                       f"{config['loss']['calibration_window_days']}-day "
+                       "windows so each added term equals the Eq. 7 term, "
+                       "then frozen (run manifest loss_constants)",
+            "validation_report": ["total", "eq7", "vorticity_nrmse2",
+                                  "eke_nrmse2"]}
+    return identity
 
 
 def _checkpoint_name(window_days: int, epoch: int) -> str:
@@ -986,12 +1222,15 @@ def _checkpoint_name(window_days: int, epoch: int) -> str:
 # and the commit of the extending code.  Everything else, epochs_per_window
 # included, must be identical.
 _EXTENSION_KEYS = ("config", "config_sha256", "curriculum", "legoesm_git_sha")
+# Written into the manifest after it exists (the extension record, the loss
+# constants measured on the first batch): not part of the run's identity.
+_RECORDED_KEYS = ("curriculum_extensions", "loss_constants")
 
 
 def run_identity(stored: dict) -> dict:
-    """A stored run manifest without its record of curriculum extensions."""
+    """A stored run manifest without what was recorded into it later."""
     return {key: value for key, value in stored.items()
-            if key != "curriculum_extensions"}
+            if key not in _RECORDED_KEYS}
 
 
 def curriculum_extension(stored: dict, identity: dict, log: dict,
@@ -1039,6 +1278,126 @@ def curriculum_extension(stored: dict, identity: dict, log: dict,
         "legoesm_git_sha": identity["legoesm_git_sha"]}
 
 
+def initial_network(config: dict, spec, optimizer, *, key):
+    """``(network, optimiser state)`` at the start of a run.
+
+    The seed's random initialisation, or ``network.initial_checkpoint``'s
+    network (its optimiser state is discarded: the first stage starts fresh;
+    a structurally different file raises before any run directory exists).
+    A spec with the white-noise channel loads the file as the four-channel
+    network it holds and grows the channel (``add_noise_channel``, weights
+    ``NOISE_CHANNEL_INIT_RELATIVE_SCALE`` x the SSH-channel weights' rms).
+    """
+    pretrained = config["network"].get("initial_checkpoint")
+    loaded = spec._replace(noise_channel=False) \
+        if pretrained is not None else spec
+    network = SWGScalarPotentialCNN(loaded, key=key)
+    opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))
+    if pretrained is not None:
+        network, _ = load_checkpoint_or_fail(
+            Path(pretrained), (network, opt_state),
+            what="network initial_checkpoint")
+        if spec.noise_channel:
+            network = add_noise_channel(
+                network, key=jax.random.fold_in(key, NOISE_CHANNEL_INIT_TAG),
+                relative_scale=NOISE_CHANNEL_INIT_RELATIVE_SCALE)
+            opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))
+    return network, opt_state
+
+
+def _train_window_batches(contract, config: dict, *, window_days: int,
+                          seed: int, epoch: int = 0):
+    return contract.batches(
+        split="train", window_days=window_days,
+        target_interval_hours=config["target_interval_hours"],
+        epoch=epoch, seed=seed)
+
+
+def measure_loss_constants(config: dict, *, card, geometry, contract, network,
+                           key, seed: int, windows_per_call: int) -> dict:
+    """The constants a non-Eq. 7 loss freezes at the start of a run.
+
+    ``energy_score``: area-weighted variances of the three balanced fields
+    of the training split's targets (every batch of one epoch of
+    ``curriculum.window_days[0]`` windows, the objective's diagnostic).
+    ``eq7_window_statistics``: the two weights that make each added term
+    equal the Eq. 7 term on the first training batch of
+    ``calibration_window_days`` windows at the starting network.
+    """
+    loss = config["loss"]
+    if loss["kind"] == "energy_score":
+        window_days = config["curriculum"]["window_days"][0]
+        diagnose = jax.jit(lambda native: diagnose_native_windows(
+            native, geometry, objective=config["objective"]))
+        moments, batches = np.zeros((3, 3)), 0
+        for batch in _train_window_batches(
+                contract, config, window_days=window_days, seed=seed):
+            moments += balanced_field_second_moments(
+                diagnose(tuple(jnp.asarray(value) for value in batch.target)),
+                geometry)
+            batches += 1
+        normalizers = normalizers_from_moments(moments)
+        return {"kind": "energy_score",
+                "normalizers": normalizers._asdict(),
+                "source": {
+                    "split": "train", "window_days": window_days,
+                    "target_interval_hours": config["target_interval_hours"],
+                    "epoch": 0, "seed": seed, "batches": batches,
+                    "samples": int(moments[0, 0]),
+                    "definition": "area_t*tmask-weighted variance about the "
+                                  "sample-and-area mean of the objective's "
+                                  "balanced fields (diagnose_native_windows)"}}
+    window_days = loss["calibration_window_days"]
+    batch = next(_train_window_batches(
+        contract, config, window_days=window_days, seed=seed))
+    programs = build_batch_programs(
+        card, geometry, window_days=window_days,
+        target_interval_hours=config["target_interval_hours"],
+        objective=config["objective"], wall_ring=config["wall_ring"],
+        training_precision=config["training_precision"],
+        checkpoint=config["gradient_checkpointing"], loss=loss,
+        constants=(0.0, 0.0))
+    _, eq7, vorticity, kinetic = (float(value) for value in batch_report(
+        programs["report"], network, batch, key, windows_per_call))
+    if not all(np.isfinite(value) and value > 0.0
+               for value in (eq7, vorticity, kinetic)):
+        raise RuntimeError("window-statistic calibration terms must be "
+                           f"positive and finite, got {eq7, vorticity, kinetic}")
+    return {"kind": "eq7_window_statistics",
+            "vorticity_weight": eq7 / vorticity, "eke_weight": eq7 / kinetic,
+            "calibration": {
+                "window_days": window_days, "epoch": 0, "seed": seed,
+                "batch": "first training batch, the starting network",
+                "start_absolute_hours": [int(hour) for hour
+                                         in batch.start_absolute_hour],
+                "eq7": eq7, "vorticity_nrmse2": vorticity,
+                "eke_nrmse2": kinetic}}
+
+
+def frozen_loss_constants(config: dict, manifest_path: Path, *, have_epochs,
+                          **measurement):
+    """The loss constants for ``build_batch_programs`` (None for Eq. 7),
+    measured once and recorded in the run manifest, read back on resume."""
+    kind = config["loss"]["kind"]
+    if kind == "eq7":
+        return None
+    stored = json.loads(manifest_path.read_text())
+    record = stored.get("loss_constants")
+    if record is None:
+        if have_epochs:
+            raise RuntimeError(
+                "epochs are logged but the run manifest records no loss "
+                "constants")
+        record = _jsonable(measure_loss_constants(config, **measurement))
+        _write_json(manifest_path, stored | {"loss_constants": record})
+    if record["kind"] != kind:
+        raise RuntimeError("the manifest's loss constants are for "
+                           f"{record['kind']!r}, not {kind!r}")
+    if kind == "energy_score":
+        return BalancedNormalizers(**record["normalizers"])
+    return (record["vorticity_weight"], record["eke_weight"])
+
+
 def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
           device: dict, windows_per_call: int, commit: str) -> dict:
     """Run, or resume, one seed of one configuration in ``run_dir``."""
@@ -1066,16 +1425,7 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
             windows_per_call=windows_per_call, commit=commit)
 
     key = jax.random.PRNGKey(seed)
-    network = SWGScalarPotentialCNN(spec, key=key)
-    opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))
-    pretrained = config["network"].get("initial_checkpoint")
-    if pretrained is not None:
-        # The file's network replaces the seed's initialisation; its
-        # optimiser state is discarded (the first stage starts fresh).  A
-        # structurally different file raises here, before any run directory.
-        network, _ = load_checkpoint_or_fail(
-            Path(pretrained), (network, opt_state),
-            what="network initial_checkpoint")
+    network, opt_state = initial_network(config, spec, optimizer, key=key)
 
     if manifest_path.is_file():
         stored = json.loads(manifest_path.read_text())
@@ -1142,20 +1492,32 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
     windows = config["curriculum"]["window_days"]
     epochs = config["curriculum"]["epochs_per_window"]
     first_step = not log["epochs"]
+    constants = frozen_loss_constants(
+        config, manifest_path, have_epochs=bool(log["epochs"]), card=card,
+        geometry=geometry, contract=contract, network=network, key=key,
+        seed=seed, windows_per_call=windows_per_call)
+    kind = config["loss"]["kind"]
+    stochastic = kind == "energy_score"
+    train_key = jax.random.fold_in(key, TRAIN_NOISE_TAG)
+    validation_key = jax.random.fold_in(key, VALIDATION_NOISE_TAG)
 
     for window_days in windows:
-        value_and_grad = loss_fn = None
+        value_and_grad = loss_fn = report_fn = None
         for epoch in range(1, epochs + 1):
             if (window_days, epoch) in done:
                 continue
             if value_and_grad is None:
-                value_and_grad, loss_fn = build_batch_functions(
+                programs = build_batch_programs(
                     card, geometry, window_days=window_days,
                     target_interval_hours=config["target_interval_hours"],
                     objective=config["objective"],
                     wall_ring=config["wall_ring"],
                     training_precision=config["training_precision"],
-                    checkpoint=config["gradient_checkpointing"])
+                    checkpoint=config["gradient_checkpointing"],
+                    loss=config["loss"], constants=constants)
+                value_and_grad, loss_fn = (
+                    programs["value_and_grad"], programs["loss"])
+                report_fn = programs.get("report")
                 update = _update_function(optimizer)
             if epoch == 1:
                 opt_state = optimizer.init(
@@ -1166,7 +1528,12 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
                     window_days=window_days, seed=seed, key=key,
                     target_interval_hours=config["target_interval_hours"])
                 _write_json(log_path, log)
-                if not log["gates"]["initial_closure_acceleration"]["passes"]:
+                if config["network"]["initial_acceleration_gate"] \
+                        == "recorded_only":
+                    log["gates"]["initial_closure_acceleration"][
+                        "enforced"] = False
+                    _write_json(log_path, log)
+                elif not log["gates"]["initial_closure_acceleration"]["passes"]:
                     raise RuntimeError(
                         "initial closure acceleration exceeds 1% of the wind "
                         "acceleration on the first batch's ten starts")
@@ -1178,8 +1545,12 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
                     epoch=epoch - 1, seed=seed)):
                 if batch.split != "train" or batch.window_days != window_days:
                     raise RuntimeError("contract issued a mislabelled batch")
+                step_key = jax.random.fold_in(jax.random.fold_in(
+                    jax.random.fold_in(train_key, window_days), epoch), step) \
+                    if stochastic else key
                 loss, grads = batch_value_and_grad(
-                    value_and_grad, network, batch, key, windows_per_call)
+                    value_and_grad, network, batch, step_key, windows_per_call,
+                    per_part_keys=stochastic)
                 where = f"window {window_days} d, epoch {epoch}, step {step}"
                 _require_finite(loss, grads, where)
                 if first_step:
@@ -1190,11 +1561,35 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
                     first_step = False
                 network, opt_state = update(network, grads, opt_state)
                 losses.append(float(loss))
-            validation = [
-                batch_loss_value(loss_fn, network, batch, key, windows_per_call)
-                for batch in contract.batches(
-                    split="validation", window_days=window_days,
-                    target_interval_hours=config["target_interval_hours"])]
+            if report_fn is None:
+                validation = [
+                    batch_loss_value(
+                        loss_fn, network, batch, key, windows_per_call)
+                    for batch in contract.batches(
+                        split="validation", window_days=window_days,
+                        target_interval_hours=config["target_interval_hours"])]
+                validation_report = {}
+            else:
+                # One pass per batch: the report's first entry is the loss.
+                reports = [batch_report(
+                    report_fn, network, batch,
+                    jax.random.fold_in(jax.random.fold_in(
+                        validation_key, window_days), index),
+                    windows_per_call, per_part_keys=stochastic)
+                    for index, batch in enumerate(contract.batches(
+                        split="validation", window_days=window_days,
+                        target_interval_hours=config["target_interval_hours"]))]
+                validation = [report[0] for report in reports]
+                means = np.mean(reports, axis=0)
+                validation_report = {"validation_report": dict(zip(
+                    REPORT_NAMES[kind], (float(x) for x in means),
+                    strict=True))}
+                if stochastic:
+                    # Collapse monitor: spread near the member-to-truth
+                    # distance is a calibrated ensemble, near 0 a collapsed one.
+                    validation_report["validation_report"][
+                        "spread_over_member_truth_distance"] = float(
+                        means[2] / means[1])
             name = _checkpoint_name(window_days, epoch)
             save_checkpoint((network, opt_state), run_dir / name)
             log["epochs"].append({
@@ -1204,6 +1599,7 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
                 "train_loss_per_batch": losses,
                 "validation_loss": float(np.mean(validation)),
                 "validation_windows": TEMPLATE_BATCH_SIZE * len(validation),
+                **validation_report,
                 "wall_seconds": time.perf_counter() - started,
                 "checkpoint": {"path": name,
                                "sha256": _sha256(run_dir / name)}})
@@ -1365,16 +1761,23 @@ def profile(config: dict, *, card, device: dict, windows_per_call: int) -> dict:
     update = _update_function(optimizer)
     shape = tuple(geometry.tmask.shape)
     rest = np.zeros((TEMPLATE_BATCH_SIZE,) + shape)
+    # The compiled programs' cost does not depend on the loss constants.
+    stochastic = config["loss"]["kind"] == "energy_score"
+    placeholder_constants = {
+        "eq7": None, "energy_score": BalancedNormalizers(1.0, 1.0, 1.0),
+        "eq7_window_statistics": (1.0, 1.0)}[config["loss"]["kind"]]
     splits = config["dataset"]["splits_days"]
     epochs = config["curriculum"]["epochs_per_window"]
     rows = []
     for window_days in config["curriculum"]["window_days"]:
-        value_and_grad, loss_fn = build_batch_functions(
+        programs = build_batch_programs(
             card, geometry, window_days=window_days,
             target_interval_hours=config["target_interval_hours"],
             objective=config["objective"], wall_ring=config["wall_ring"],
             training_precision=config["training_precision"],
-            checkpoint=config["gradient_checkpointing"])
+            checkpoint=config["gradient_checkpointing"],
+            loss=config["loss"], constants=placeholder_constants)
+        value_and_grad, loss_fn = programs["value_and_grad"], programs["loss"]
         target = np.zeros(
             (TEMPLATE_BATCH_SIZE,
              HOURS_PER_DAY * window_days // config["target_interval_hours"])
@@ -1387,13 +1790,15 @@ def profile(config: dict, *, card, device: dict, windows_per_call: int) -> dict:
         for label in ("first_s", "step_s"):
             started = time.perf_counter()
             loss, grads = batch_value_and_grad(
-                value_and_grad, network, batch, key, windows_per_call)
+                value_and_grad, network, batch, key, windows_per_call,
+                per_part_keys=stochastic)
             stepped, _ = update(network, grads, opt_state)
             jax.block_until_ready(jax.tree.leaves(stepped))
             timings[label] = time.perf_counter() - started
         for label in ("forward_first_s", "forward_s"):
             started = time.perf_counter()
-            batch_loss_value(loss_fn, network, batch, key, windows_per_call)
+            batch_loss_value(loss_fn, network, batch, key, windows_per_call,
+                             per_part_keys=stochastic)
             timings[label] = time.perf_counter() - started
         train_batches = (splits["train"][1] - splits["train"][0]) \
             // window_days // TEMPLATE_BATCH_SIZE

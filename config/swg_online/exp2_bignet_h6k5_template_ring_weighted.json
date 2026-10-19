@@ -14,7 +14,12 @@
     "hidden_layers": 6,
     "kernel_size": 5,
     "wall_margin_rings": 0,
-    "scales": "maddison_eq6_shallow_water_grid_analogue"
+    "scales": "maddison_eq6_shallow_water_grid_analogue",
+    "noise_channel": "none",
+    "initial_acceleration_gate": "enforced"
+  },
+  "loss": {
+    "kind": "eq7"
   },
   "seeds": [
     20261013,

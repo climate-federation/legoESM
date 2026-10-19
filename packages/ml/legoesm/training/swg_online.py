@@ -24,6 +24,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     curl_vertex_cgrid,
 )
 from legoesm.ml.training import TrainingConfig, create_optimizer
+from legoesm.ocean.diagnostics import velocity_to_cell_centre
 from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
 from legoesm.ocean.dynamics.swe_rk3 import (
     SWE_SURFACE_MODES,
@@ -138,6 +139,10 @@ class SWGNetworkSpec(NamedTuple):
     velocity_scale_m_s: float
     potential_scale_m3_s2: float
     wall_margin_rings: int
+    # ponytail: a NamedTuple default keeps the ~30 positional spec call sites
+    # (tests, probes) unchanged; the training driver passes it from its
+    # required ``network.noise_channel`` key, never from this default.
+    noise_channel: bool = False
 
 
 class SWGClosureGeometry(eqx.Module):
@@ -377,6 +382,12 @@ class SWGScalarPotentialCNN(eqx.Module):
     cannot leave a noise-only parameter leaf inert.  The final convolution has
     no bias because a spatially constant potential is annihilated by the
     rotated gradient and would therefore be an inert trainable leaf.
+
+    ``spec.noise_channel`` replaces that path with a fifth, LAST input
+    channel ``xi`` (white noise, N(0,1) per T cell, supplied by the caller or
+    drawn from ``key``); the SSH channel then carries no noise and the
+    first-layer weights on ``xi`` are the learned amplitude.  Channels 0-3
+    and every other leaf are those of the four-channel network.
     """
 
     layers: tuple
@@ -395,8 +406,9 @@ class SWGScalarPotentialCNN(eqx.Module):
         keys = jax.random.split(key, spec.hidden_layers + 1)
         padding = spec.kernel_size // 2
         layers = [ShiftedConv2d(
-            4, spec.hidden_channels, spec.kernel_size, padding=padding,
-            key=keys[0], dtype=jnp.float64)]
+            5 if spec.noise_channel else 4, spec.hidden_channels,
+            spec.kernel_size, padding=padding, key=keys[0],
+            dtype=jnp.float64)]
         for layer_key in keys[1:-1]:
             layers.append(ShiftedConv2d(
                 spec.hidden_channels, spec.hidden_channels,
@@ -409,7 +421,9 @@ class SWGScalarPotentialCNN(eqx.Module):
         self.spec = spec
 
     def __call__(self, entry, geometry: SWGClosureGeometry, *, key, noise,
-                 noise_scale):
+                 noise_scale, xi=None):
+        if xi is not None and not self.spec.noise_channel:
+            raise ValueError("xi was given to a network without a noise channel")
         noise = jnp.asarray(noise, dtype=jnp.asarray(entry.ssh_k).dtype)
         if noise.shape != jnp.asarray(entry.ssh_k).shape:
             raise ValueError("closure noise must have the native F/T shape")
@@ -421,13 +435,27 @@ class SWGScalarPotentialCNN(eqx.Module):
         v_t = 0.5 * (v + v_south)
         # The key is structurally live from phase 3 onward.  A caller-provided
         # noise realization remains reparameterizable and reproducible.
-        keyed_noise = noise + noise_scale * jax.random.normal(
-            key, noise.shape, noise.dtype)
-        channels = jnp.stack((
-            jnp.asarray(entry.ssh_k) / self.spec.ssh_scale_m + keyed_noise,
-            u_t / self.spec.velocity_scale_m_s,
-            v_t / self.spec.velocity_scale_m_s,
-            geometry.tmask.astype(u.dtype)), axis=0)
+        if self.spec.noise_channel:
+            # ``noise`` and ``noise_scale`` are not used by this network: the
+            # SSH-channel path is replaced by the xi channel.
+            if xi is None:
+                xi = jax.random.normal(key, noise.shape, noise.dtype)
+            xi = jnp.asarray(xi, dtype=noise.dtype)
+            if xi.shape != noise.shape:
+                raise ValueError("xi must have the native F/T shape")
+            channels = jnp.stack((
+                jnp.asarray(entry.ssh_k) / self.spec.ssh_scale_m,
+                u_t / self.spec.velocity_scale_m_s,
+                v_t / self.spec.velocity_scale_m_s,
+                geometry.tmask.astype(u.dtype), xi), axis=0)
+        else:
+            keyed_noise = noise + noise_scale * jax.random.normal(
+                key, noise.shape, noise.dtype)
+            channels = jnp.stack((
+                jnp.asarray(entry.ssh_k) / self.spec.ssh_scale_m + keyed_noise,
+                u_t / self.spec.velocity_scale_m_s,
+                v_t / self.spec.velocity_scale_m_s,
+                geometry.tmask.astype(u.dtype)), axis=0)
         value = channels
         for layer in self.layers[:-1]:
             value = jax.nn.elu(layer(value))
@@ -1696,6 +1724,26 @@ def balanced_trajectory_loss(predicted: BalancedTrajectory,
         raise ValueError(f"unknown SWG balanced loss {kind!r}")
     if normalizers is None:
         raise ValueError("energy_score requires explicit normalizers")
+    return _energy_score(*_energy_score_distances(
+        predicted, target, geometry, normalizers))
+
+
+def _energy_score(observation_distance, pairwise):
+    """Brolly's score from the per-lead distances (unbiased pair term)."""
+    members = observation_distance.shape[0]
+    score_by_lead = (jnp.mean(observation_distance, axis=0)
+                     - jnp.sum(pairwise, axis=(0, 1))
+                     / (2.0 * members * (members - 1)))
+    return jnp.mean(score_by_lead)
+
+
+def _energy_score_distances(predicted: BalancedTrajectory,
+                            target: BalancedTrajectory,
+                            geometry: SWGClosureGeometry,
+                            normalizers: BalancedNormalizers):
+    """Per-lead normalized, area-weighted distances of Brolly's score:
+    ``(members, hours)`` member-to-truth and ``(members, members, hours)``
+    member-to-member (zero on the diagonal, with a zero gradient there)."""
     pred = jnp.stack((
         predicted.relative_vorticity_s1
         / jnp.sqrt(normalizers.relative_vorticity_variance_s2),
@@ -1715,18 +1763,21 @@ def balanced_trajectory_loss(predicted: BalancedTrajectory,
     members = pred.shape[0]
     if members < 2:
         raise ValueError("energy_score requires at least two ensemble members")
+
     def lead_distance(left, right):
-        return jnp.sqrt(jnp.sum(
-            (left - right) ** 2 * weight[:, :, None], axis=(-3, -2, -1)))
+        squares = jnp.sum(
+            (left - right) ** 2 * weight[:, :, None], axis=(-3, -2, -1))
+        # sqrt has an infinite slope at 0: two identical members (the
+        # diagonal) would turn a zero gradient into NaN.
+        positive = squares > 0.0
+        return jnp.where(positive, jnp.sqrt(jnp.where(positive, squares, 1.0)),
+                         0.0)
 
     observation_distance = jax.vmap(
         lambda member: jax.vmap(lead_distance)(member, obs))(pred)
     pairwise = jax.vmap(lambda left: jax.vmap(
         lambda right: jax.vmap(lead_distance)(left, right))(pred))(pred)
-    score_by_lead = (jnp.mean(observation_distance, axis=0)
-                     - jnp.sum(pairwise, axis=(0, 1))
-                     / (2.0 * members * (members - 1)))
-    return jnp.mean(score_by_lead)
+    return observation_distance, pairwise
 
 
 def deterministic_trajectory_loss(
@@ -1765,6 +1816,171 @@ def deterministic_trajectory_loss(
         wall_ring=wall_ring)
 
 
+def diagnose_native_windows(native, geometry: SWGClosureGeometry, *,
+                             objective: str):
+    """``diagnose_native_trajectory`` of each window of ``(windows, hours,
+    y, x)`` native arrays, ``(windows, hours, y, x)`` balanced fields."""
+    if objective not in OBJECTIVE_OPERATORS:
+        raise ValueError(
+            f"objective must be explicitly selected from {OBJECTIVE_OPERATORS}")
+    return jax.vmap(lambda ssh, u, v: diagnose_native_trajectory(
+        (ssh, u, v), geometry, objective=objective))(*native)
+
+
+def ensemble_trajectory_scores(
+        predicted_native, target_native, geometry: SWGClosureGeometry,
+        normalizers: BalancedNormalizers, *, objective: str):
+    """Brolly energy score of an ensemble and its two collapse monitors.
+
+    ``predicted_native`` holds native (ssh, u, v) arrays of shape ``(windows,
+    members, hours, y, x)``, ``target_native`` ``(windows, hours, y, x)``;
+    both go through the selected objective's diagnostic.  Returns ``(score,
+    member_truth_distance, member_spread)``, means over windows: the score is
+    ``balanced_trajectory_loss(kind="energy_score")`` per window (Eq. 9);
+    ``member_truth_distance`` is the mean normalized, area-weighted distance
+    of a member to the truth, ``member_spread`` the mean distance between two
+    different members (the score is the first minus half the second).
+    """
+    if len(predicted_native) != 3 or len(target_native) != 3 \
+            or predicted_native[0].ndim != 5 \
+            or any(value.shape != predicted_native[0].shape
+                   for value in predicted_native) \
+            or any(value.shape != predicted_native[0].shape[:1]
+                   + predicted_native[0].shape[2:] for value in target_native):
+        raise ValueError("ensemble arrays must be (windows,members,hours,y,x) "
+                         "against (windows,hours,y,x)")
+    members = predicted_native[0].shape[1]
+    predicted = jax.vmap(lambda *fields: diagnose_native_windows(
+        fields, geometry, objective=objective), in_axes=1, out_axes=1)(
+        *predicted_native)
+    target = diagnose_native_windows(
+        target_native, geometry, objective=objective)
+
+    def one_window(window_predicted, window_target):
+        observation_distance, pairwise = _energy_score_distances(
+            window_predicted, window_target, geometry, normalizers)
+        return jnp.stack((
+            _energy_score(observation_distance, pairwise),
+            jnp.mean(observation_distance),
+            jnp.mean(jnp.sum(pairwise, axis=(0, 1)) / (members * (members - 1)))))
+
+    scores = jax.vmap(one_window)(predicted, target)
+    return tuple(jnp.mean(scores, axis=0))
+
+
+def window_statistic_terms(predicted: BalancedTrajectory,
+                           target: BalancedTrajectory,
+                           geometry: SWGClosureGeometry):
+    """NRMSE squared of the window-mean vorticity map and of the window EKE map.
+
+    Inputs are the objective's own balanced fields, ``(windows, hours, y,
+    x)``.  Per window, ``(map - truth)^2`` summed over the points / truth
+    squared summed (the arm-E tool's ``Statistic.terms`` form), then the mean
+    over windows: the time-mean (filtered) relative vorticity over the F
+    points (zero on the closed walls), and the EKE map ``0.5 (var(u_c) +
+    var(v_c))`` (population variance over the window's hours) of the
+    cell-centred rotational velocity over the wet T points, centred as the
+    tool's and the scorer's ``_cell_centred``.
+    """
+    def eke(trajectory):
+        u = jnp.where(geometry.umask, trajectory.rotational_u_m_s, 0.0)
+        v = jnp.where(geometry.vmask, trajectory.rotational_v_m_s, 0.0)
+        u_c, v_c = jax.vmap(jax.vmap(velocity_to_cell_centre))(
+            jnp.concatenate([jnp.zeros_like(u[..., :1]), u], axis=-1),
+            jnp.concatenate([jnp.zeros_like(v[..., :1, :]), v], axis=-2))
+        return 0.5 * (jnp.var(u_c, axis=1) + jnp.var(v_c, axis=1))
+
+    def nrmse_squared(candidate, reference, mask):
+        mask = jnp.broadcast_to(mask, candidate.shape)
+        return (jnp.sum(jnp.where(mask, (candidate - reference) ** 2, 0.0),
+                        axis=(-2, -1))
+                / jnp.sum(jnp.where(mask, reference ** 2, 0.0), axis=(-2, -1)))
+
+    vorticity = nrmse_squared(
+        jnp.mean(predicted.relative_vorticity_s1, axis=1),
+        jnp.mean(target.relative_vorticity_s1, axis=1),
+        geometry.vertex_interior)
+    kinetic = nrmse_squared(eke(predicted), eke(target), geometry.tmask)
+    return jnp.mean(vorticity), jnp.mean(kinetic)
+
+
+def window_statistics_trajectory_loss(
+        predicted_native, target_native, geometry: SWGClosureGeometry, *,
+        objective: str, beta_m1_s1: float, basin_length_m: float,
+        wall_ring: str, vorticity_weight: float, eke_weight: float):
+    """Eq. 7 plus ``vorticity_weight`` and ``eke_weight`` times the window
+    statistic terms; returns ``(total, eq7, vorticity_term, eke_term)``.
+
+    The Eq. 7 term is ``deterministic_trajectory_loss`` on the same
+    diagnostic fields; with both weights zero ``total`` is ``eq7`` plus
+    exact zeros.
+    """
+    predicted = diagnose_native_windows(
+        predicted_native, geometry, objective=objective)
+    target = diagnose_native_windows(
+        target_native, geometry, objective=objective)
+    eq7 = balanced_trajectory_loss(
+        predicted, target, geometry, None, kind="point",
+        beta_m1_s1=beta_m1_s1, basin_length_m=basin_length_m,
+        wall_ring=wall_ring)
+    vorticity, kinetic = window_statistic_terms(predicted, target, geometry)
+    return (eq7 + vorticity_weight * vorticity + eke_weight * kinetic,
+            eq7, vorticity, kinetic)
+
+
+def balanced_field_second_moments(trajectory: BalancedTrajectory,
+                                  geometry: SWGClosureGeometry) -> np.ndarray:
+    """``(samples, sum, sum of squares)`` of the three balanced fields of a
+    ``(windows, hours, y, x)`` trajectory, float64, shape ``(3, 3)`` (rows:
+    vorticity, rotational u, rotational v), each sample point weighted by
+    the energy score's own normalized area weight (``area_t * tmask``)."""
+    weight = np.asarray(geometry.area_t_m2 * geometry.tmask, dtype=np.float64)
+    weight = weight / weight.sum()
+    out = np.zeros((3, 3))
+    for row, balanced in enumerate((trajectory.relative_vorticity_s1,
+                                 trajectory.rotational_u_m_s,
+                                 trajectory.rotational_v_m_s)):
+        values = np.asarray(balanced, dtype=np.float64)
+        samples = values.shape[0] * values.shape[1]
+        out[row] = (samples, np.sum(values * weight),
+                    np.sum(values ** 2 * weight))
+    return out
+
+
+def normalizers_from_moments(moments: np.ndarray) -> BalancedNormalizers:
+    """Area-weighted variances about the sample-and-area mean from the summed
+    ``balanced_field_second_moments`` of the training split."""
+    samples, total, squares = moments[:, 0], moments[:, 1], moments[:, 2]
+    variance = squares / samples - (total / samples) ** 2
+    if not np.all(np.isfinite(variance)) or np.any(variance <= 0.0):
+        raise ValueError(f"balanced field variances must be positive: {variance}")
+    return BalancedNormalizers(*(float(value) for value in variance))
+
+
+def add_noise_channel(network: SWGScalarPotentialCNN, *, key,
+                      relative_scale: float) -> SWGScalarPotentialCNN:
+    """The five-channel network of a trained four-channel one.
+
+    Every leaf is the trained network's; the first layer gains input channel
+    4 (``xi``) whose weights are i.i.d. normal with standard deviation
+    ``relative_scale`` times the rms of the first layer's SSH-channel
+    (input channel 0) weights.
+    """
+    if network.spec.noise_channel:
+        raise ValueError("network already has a noise channel")
+    first = network.layers[0]
+    ssh_rms = jnp.sqrt(jnp.mean(first.weight[:, 0] ** 2))
+    xi_weight = relative_scale * ssh_rms * jax.random.normal(
+        key, first.weight[:, :1].shape, first.weight.dtype)
+    grown = SWGScalarPotentialCNN(
+        network.spec._replace(noise_channel=True), key=key)
+    first_layer = eqx.tree_at(
+        lambda layer: (layer.weight, layer.bias), grown.layers[0],
+        (jnp.concatenate([first.weight, xi_weight], axis=1), first.bias))
+    return eqx.tree_at(lambda net: net.layers, grown,
+                       (first_layer,) + tuple(network.layers[1:]))
+
+
 def swg_online_step(network, state, stage_noise, key, noise_scale, *,
                     card, geometry: SWGClosureGeometry, forcing):
     """Run one certified RK3 step with an optional traced closure term."""
@@ -1778,10 +1994,17 @@ def swg_online_step(network, state, stage_noise, key, noise_scale, *,
         raise ValueError(
             f"stage noise shape {stage_noise.shape}, expected {expected}")
 
+    xi = None
+    if network.spec.noise_channel:
+        # One white-noise draw per model step, shared by the three RK3 stages;
+        # fold_in(key, 0) is not a stage key (stages are 1, 2, 3).
+        xi = jax.random.normal(jax.random.fold_in(key, 0),
+                               tuple(geometry.tmask.shape), state.eta.data.dtype)
+
     def potential(entry, stage):
         return network(
             entry, geometry, key=jax.random.fold_in(key, stage),
-            noise=stage_noise[stage - 1], noise_scale=noise_scale)
+            noise=stage_noise[stage - 1], noise_scale=noise_scale, xi=xi)
 
     return swe_rk3_step(
         state, card.dt_s, forcing, card.recipe.grid, card.recipe.z_coord,
@@ -2029,8 +2252,12 @@ def free_run_closure(closure) -> dict:
     if closure["wall_ring"] not in WALL_RING_OPTIONS:
         raise ValueError(f"free-run closure wall_ring must be one of "
                          f"{WALL_RING_OPTIONS}")
+    # Manifests written before the noise channel existed lack that key (no
+    # channel); every other key is required.
+    spec_keys = (set(SWGNetworkSpec._fields),
+                 set(SWGNetworkSpec._fields) - {"noise_channel"})
     if not isinstance(closure["network_spec"], dict) \
-            or set(closure["network_spec"]) != set(SWGNetworkSpec._fields):
+            or set(closure["network_spec"]) not in spec_keys:
         raise ValueError("free-run closure network_spec must hold exactly the "
                          f"keys {sorted(SWGNetworkSpec._fields)}")
     path = closure["checkpoint_path"]

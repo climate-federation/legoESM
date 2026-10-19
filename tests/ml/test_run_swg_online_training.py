@@ -9,6 +9,7 @@ import json
 import shutil
 import types
 from pathlib import Path
+from typing import NamedTuple
 
 import equinox as eqx
 import jax
@@ -22,6 +23,7 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     swg_surface_wind,
 )
 from legoesm.ocean.state import OceanSurfaceForcing
+from legoesm.training import swg_online
 from legoesm.training.swg_online import (
     DAILY_MEAN_FIELDS,
     SECONDS_PER_HOUR,
@@ -117,7 +119,9 @@ def test_committed_configs_are_the_three_candidates_of_the_template_procedure():
         assert len(config["seeds"]) >= 3
         assert config["network"] == {
             "hidden_channels": 16, "hidden_layers": 4, "kernel_size": 3,
-            "wall_margin_rings": 0, "scales": driver.SCALE_RULE}
+            "wall_margin_rings": 0, "scales": driver.SCALE_RULE,
+            "noise_channel": "none", "initial_acceleration_gate": "enforced"}
+        assert config["loss"] == {"kind": "eq7"}
         # Daily means beside the snapshots.  The candidate chosen for the full
         # experiment (template, wall ring weighted) runs its free runs on the
         # GPU with native math (user decision 2026-10-14, after the GPU
@@ -703,7 +707,8 @@ def test_first_step_gradient_gates_stop_the_run(
     config = _config(record)
     path = _write_config(tmp_path / "config.json", config)
 
-    def planted(value_and_grad, network, batch, key, windows_per_call):
+    def planted(value_and_grad, network, batch, key, windows_per_call,
+                **_):
         grads = jax.tree.map(lambda leaf: jnp.full_like(leaf, gradient),
                              eqx.filter(network, eqx.is_inexact_array))
         return jnp.asarray(loss), grads
@@ -1556,6 +1561,8 @@ def test_every_committed_training_config_states_its_training_precision():
     for path in EXP6:
         assert precisions.pop(path.name) == "fp32"
     assert precisions.pop(EXP4_SYMMETRIC_LONG.name) == "fp32"
+    assert precisions.pop(EXP7.name) == "fp32"
+    assert precisions.pop(EXP8.name) == "fp32"
     assert set(precisions.values()) == {"fp64"}
 
 
@@ -1584,6 +1591,8 @@ def test_every_committed_training_config_states_its_target_interval():
     for path in EXP6:
         assert intervals.pop(path.name) == 3
     assert intervals.pop(EXP4_SYMMETRIC_LONG.name) == 3
+    assert intervals.pop(EXP7.name) == 3
+    assert intervals.pop(EXP8.name) == 3
     assert len(intervals) >= 17 and set(intervals.values()) == {1}
 
 
@@ -1972,6 +1981,10 @@ def test_every_committed_training_config_states_checkpointing_and_cache():
         config = driver.load_config(path)
         states[path.name] = (config["gradient_checkpointing"],
                              config["dataset"]["cache"])
+    # The arms keep checkpointing: 16 and 32 days have no measured no-checkpoint
+    # peak (exp5 stopped at 8) and arm B holds 8 members per window.
+    assert states.pop(EXP7.name) == (True, "memory")
+    assert states.pop(EXP8.name) == (True, "memory")
     assert states.pop(EXP5_SYMMETRIC.name) == (False, "memory")
     assert states.pop(EXP5_TEMPLATE.name) == (False, "memory")
     for path in EXP6:
@@ -2152,3 +2165,573 @@ def test_committed_long_config_extends_exp4_symmetric_and_refuses_what_does_not_
         path.write_text(json.dumps(config))
         with pytest.raises(ValueError, match=match):
             driver.load_config(path)
+
+
+# ------------------------------- arms B and C: noise channel, energy score, statistics
+
+EXP7 = _ROOT / "config/swg_online/exp7_rigidlid_energy_score_m8.json"
+EXP8 = _ROOT / "config/swg_online/exp8_rigidlid_window_stats.json"
+W08_CHECKPOINT = (
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/"
+    "round17_rigidlid/swgonl_exp4_rigidlid_symmetric_ring_weighted_fp32/"
+    "seed20261013/checkpoints/w08_e05.eqx")
+
+
+def test_every_committed_training_config_states_its_loss_and_noise_channel():
+    trained_configs = [
+        path for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
+        if "network" in json.loads(path.read_text())]
+    seen = {path.name: (driver.load_config(path)["loss"],
+                        driver.load_config(path)["network"]["noise_channel"],
+                        driver.load_config(path)["network"][
+                            "initial_acceleration_gate"])
+            for path in trained_configs}
+    # The arms load the trained w08 file, whose closure is 10-15 x the wind
+    # acceleration; every other configuration keeps the 1% bar enforced.
+    assert seen.pop(EXP7.name) == (
+        {"kind": "energy_score", "members": 8}, "white_input", "recorded_only")
+    assert seen.pop(EXP8.name) == (
+        {"kind": "eq7_window_statistics", "calibration_window_days": 8}, "none",
+        "recorded_only")
+    assert len(seen) >= 17
+    assert {json.dumps(value) for value in seen.values()} == {
+        json.dumps(({"kind": "eq7"}, "none", "enforced"))}
+
+
+@pytest.mark.parametrize("path,loss", [
+    (EXP7, {"kind": "energy_score", "members": 8}),
+    (EXP8, {"kind": "eq7_window_statistics", "calibration_window_days": 8})])
+def test_committed_arm_configs_differ_from_the_long_config_only_in_the_arm(
+        path, loss):
+    long = driver.load_config(EXP4_SYMMETRIC_LONG)
+    arm = driver.load_config(path)
+    differing = sorted(key for key in long if long[key] != arm[key])
+    assert differing == sorted([
+        "experiment", "description", "network", "loss", "seeds", "dataset"])
+    assert arm["loss"] == loss
+    assert arm["network"]["initial_checkpoint"] == W08_CHECKPOINT
+    arm_keys = ("noise_channel", "initial_checkpoint",
+                "initial_acceleration_gate")
+    assert {key: value for key, value in arm["network"].items()
+            if key not in arm_keys} \
+        == {key: value for key, value in long["network"].items()
+            if key not in arm_keys}
+    assert arm["network"]["initial_acceleration_gate"] == "recorded_only"
+    assert arm["seeds"] == [20261013]
+    assert arm["dataset"]["cache"] == "memory"
+    assert arm["dataset"] | {"cache": "none"} == long["dataset"]
+    assert arm["gradient_checkpointing"] is True
+    # The prefix rule: 16 and 32 days follow 1, 2, 4, 8.
+    assert arm["curriculum"]["window_days"] == [1, 2, 4, 8, 16, 32]
+    assert (arm["surface"], arm["objective"], arm["training_precision"],
+            arm["target_interval_hours"]) == (
+        "rigid_lid", "symmetric", "fp32", 3)
+
+
+@pytest.mark.parametrize("edit,match", [
+    (lambda c: c["network"].update(noise_channel="gaussian"),
+     "noise_channel must be one of"),
+    (lambda c: c["network"].pop("noise_channel"), "must hold exactly the keys"),
+    (lambda c: c.pop("loss"), "must hold exactly the keys"),
+    (lambda c: c.update(loss={"kind": "crps"}), "loss kind must be one of"),
+    (lambda c: c.update(loss={"kind": "eq7", "members": 8}),
+     "loss must hold exactly the keys"),
+    (lambda c: c.update(loss={"kind": "energy_score", "members": 1}),
+     "members must be an integer >= 2"),
+    (lambda c: c.update(loss={"kind": "energy_score", "members": 8}),
+     "energy_score loss needs network noise_channel"),
+    (lambda c: c.update(loss={"kind": "eq7_window_statistics",
+                              "calibration_window_days": 3}),
+     "calibration_window_days must be one of the curriculum"),
+    (lambda c: c.update(loss={"kind": "eq7_window_statistics"}),
+     "loss must hold exactly the keys"),
+    (lambda c: c["network"].update(noise_channel="white_input"),
+     "energy_score loss needs network noise_channel"),
+    (lambda c: c["network"].update(initial_acceleration_gate="off"),
+     "initial_acceleration_gate must be one of"),
+    (lambda c: c["network"].pop("initial_acceleration_gate"),
+     "must hold exactly the keys"),
+    (lambda c: c["network"].update(initial_acceleration_gate="recorded_only"),
+     "needs network initial_checkpoint")])
+def test_load_config_refuses_an_inconsistent_loss_or_noise_channel(
+        tmp_path, edit, match):
+    config = copy.deepcopy(driver.load_config(EXP4_SYMMETRIC))
+    edit(config)
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match=match):
+        driver.load_config(path)
+
+
+@pytest.fixture(scope="module")
+def lid_geometry(lid_card):
+    return build_closure_geometry(lid_card)
+
+
+def _lid_batch(lid_card, windows=2, hours=8):
+    rng = np.random.default_rng(4)
+    template = lid_card.recipe.initial_state
+    u_shape = tuple(template.u.data[:, 1:, 0].shape)
+    v_shape = tuple(template.v.data[1:, :, 0].shape)
+
+    def native(*lead):
+        return (np.zeros(lead + tuple(template.eta.data.shape)),
+                1.0e-3 * rng.normal(size=lead + u_shape),
+                1.0e-3 * rng.normal(size=lead + v_shape))
+
+    return (tuple(map(jnp.asarray, native(windows))),
+            tuple(map(jnp.asarray, native(windows, hours))))
+
+
+def _programs(lid_card, lid_geometry, loss, constants, **changes):
+    config = driver.load_config(EXP4_SYMMETRIC)
+    return driver.build_batch_programs(
+        lid_card, lid_geometry, window_days=1,
+        target_interval_hours=config["target_interval_hours"],
+        objective="symmetric", wall_ring=config["wall_ring"],
+        training_precision="fp64", checkpoint=True, loss=loss,
+        constants=constants, **changes)
+
+
+def _channel(lid_card, lid_geometry, scale, seed=3):
+    config = driver.load_config(EXP7)
+    spec, _ = driver.network_spec(config, lid_card, lid_geometry)
+    four = SWGScalarPotentialCNN(
+        spec._replace(noise_channel=False), key=jax.random.PRNGKey(seed))
+    return swg_online.add_noise_channel(
+        four, key=jax.random.PRNGKey(seed + 1), relative_scale=scale)
+
+
+def test_energy_score_programs_run_members_that_differ_and_every_leaf_is_live(
+        lid_card, lid_geometry):
+    network = _channel(lid_card, lid_geometry, 1.0)
+    loss = {"kind": "energy_score", "members": 3}
+    normalizers = swg_online.BalancedNormalizers(1.0e-10, 1.0e-6, 1.0e-6)
+    programs = _programs(lid_card, lid_geometry, loss, normalizers)
+    initial, target = _lid_batch(lid_card)
+    key = jax.random.PRNGKey(1)
+    value, grads = programs["value_and_grad"](network, initial, target, key)
+    assert np.isfinite(float(value)) and float(value) > 0.0
+    assert_network_gradients_live(grads)        # includes the xi weights
+    assert np.any(np.asarray(grads.layers[0].weight[:, 4:]) != 0.0)
+    score, member_truth, spread = (float(x) for x in programs["report"](
+        network, initial, target, key))
+    assert score == pytest.approx(float(value), rel=1.0e-12)
+    assert score == pytest.approx(member_truth - 0.5 * spread, rel=1.0e-9)
+    assert spread > 1.0e-6 * member_truth       # the members differ
+    # Seeded: the same key gives the same ensemble; another key another one.
+    again = float(programs["loss"](network, initial, target, key))
+    other = float(programs["loss"](network, initial, target,
+                                   jax.random.PRNGKey(2)))
+    assert again == float(value) and other != again
+    # Without xi weights the members coincide: no spread (the monitor reads 0).
+    silent = _channel(lid_card, lid_geometry, 0.0)
+    assert float(programs["report"](silent, initial, target, key)[2]) \
+        < 1.0e-6 * spread
+    # Only the energy score takes members; the Eq. 7 loss takes no constants.
+    with pytest.raises(ValueError, match="takes no loss constants"):
+        _programs(lid_card, lid_geometry, {"kind": "eq7"}, normalizers)
+    with pytest.raises(ValueError, match="loss kind"):
+        _programs(lid_card, lid_geometry, {"kind": "crps"}, normalizers)
+
+
+def test_window_statistics_programs_with_zero_weights_are_eq7_bit_for_bit(
+        precision_steps):
+    """Against the parent code path (``_parent_batch_functions``, written
+    before the loss choice existed): loss and every gradient leaf equal."""
+    s = precision_steps
+    config = driver.load_config(EXP1_SYMMETRIC)
+    loss = {"kind": "eq7_window_statistics", "calibration_window_days": 1}
+    options = dict(
+        window_days=1, target_interval_hours=1, objective=config["objective"],
+        wall_ring=config["wall_ring"], training_precision="fp64",
+        checkpoint=True)
+    zero = driver.build_batch_programs(
+        s["card"], s["geometry"], loss=loss, constants=(0.0, 0.0), **options)
+    eq7 = driver.build_batch_programs(
+        s["card"], s["geometry"], loss={"kind": "eq7"}, constants=None, **options)
+    for programs in (zero, eq7):
+        value, grads = driver.batch_value_and_grad(
+            programs["value_and_grad"], s["network"], s["batch"], s["key"], 10)
+        assert float(value) == float(s["parent"]["loss"]) > 0.0
+        assert all(np.array_equal(np.asarray(a), np.asarray(b)) for a, b in zip(
+            jax.tree.leaves(grads), jax.tree.leaves(s["parent"]["grads"]),
+            strict=True))
+    # Weighted: the total is Eq. 7 plus the weighted terms the report shows.
+    total, eq7_term, vorticity, kinetic = driver.batch_report(
+        zero["report"], s["network"], s["batch"], s["key"], 10)
+    assert total == eq7_term == float(s["parent"]["loss"])
+    assert vorticity > 0.0 and kinetic > 0.0
+    weighted = driver.build_batch_programs(
+        s["card"], s["geometry"], loss=loss, constants=(2.0, 3.0), **options)
+    value, grads = driver.batch_value_and_grad(
+        weighted["value_and_grad"], s["network"], s["batch"], s["key"], 10)
+    assert float(value) == pytest.approx(
+        eq7_term + 2.0 * vorticity + 3.0 * kinetic, rel=1.0e-12)
+    assert_network_gradients_live(grads)
+    assert float(value) != float(s["parent"]["loss"])
+
+
+def test_free_run_with_the_noise_channel_draws_fresh_seeded_xi_each_step(
+        lid_card, lid_geometry):
+    key = jax.random.PRNGKey(7)
+    network = _channel(lid_card, lid_geometry, 1.0)
+    forcing, one_day = driver.free_run_day(
+        network, lid_card, lid_geometry, key=key)
+    start = driver._double_gyre_driver().seed_steady_forcing_carry(
+        lid_card.recipe.initial_state, forcing)
+    stage_noise = jnp.zeros((3,) + tuple(lid_geometry.tmask.shape))
+    per_day = driver.steps_per_day(lid_card)
+    assert per_day == 8
+
+    def steps(first, step_key):
+        state = start
+        for index in range(first, first + per_day):
+            state = driver.swg_online_step(
+                network, state, stage_noise, step_key(index), jnp.asarray(0.0),
+                card=lid_card, geometry=lid_geometry, forcing=forcing)
+        return np.asarray(state.u.data)
+
+    # The compiled day is eight steps, step n keyed fold_in(key, n) ...
+    day, _ = one_day(start)
+    np.testing.assert_allclose(
+        np.asarray(day.u.data), steps(0, lambda n: jax.random.fold_in(key, n)),
+        rtol=1.0e-10, atol=1.0e-14)
+    # ... a later day continues the stream (steps 8..15) rather than repeating it
+    later, _ = one_day(start, 1)
+    np.testing.assert_allclose(
+        np.asarray(later.u.data),
+        steps(per_day, lambda n: jax.random.fold_in(key, n)),
+        rtol=1.0e-10, atol=1.0e-14)
+    scale = np.abs(np.asarray(day.u.data)).max()
+    assert np.abs(np.asarray(later.u.data) - np.asarray(day.u.data)).max() \
+        > 1.0e-3 * scale
+    # ... and a frozen step key (the same xi every step) is another day.
+    assert np.abs(steps(0, lambda n: key) - np.asarray(day.u.data)).max() \
+        > 1.0e-3 * scale
+    # Seeded: the same key gives the same day; another key another.
+    repeat, _ = one_day(start)
+    assert np.array_equal(np.asarray(day.u.data), np.asarray(repeat.u.data))
+    _, other_day = driver.free_run_day(
+        network, lid_card, lid_geometry, key=jax.random.PRNGKey(8))
+    assert np.abs(np.asarray(other_day(start)[0].u.data)
+                  - np.asarray(day.u.data)).max() > 1.0e-3 * scale
+
+
+class _Field(NamedTuple):
+    data: jax.Array
+
+
+class _State(NamedTuple):
+    eta: _Field
+    u: _Field
+    v: _Field
+    rigid_lid_phi: object = None
+
+
+class _IndexModel:
+    """Adds 0.5 to eta per step, or the step index when it is given."""
+
+    def step(self, state, dt_s, surface_forcing, step_index=None):
+        added = 0.5 if step_index is None else step_index.astype(jnp.float64)
+        return state._replace(eta=_Field(state.eta.data + added))
+
+
+def test_day_mean_stepper_passes_global_step_indices_only_when_asked():
+    state = _State(_Field(jnp.zeros((4, 4))), _Field(jnp.zeros((4, 5, 1))),
+                   _Field(jnp.zeros((5, 4, 1))))
+    stepper = driver._double_gyre_driver().build_scanned_day_mean_stepper(
+        _IndexModel(), 1.0, None, 3)
+    plain, _ = stepper(state)
+    assert np.all(np.asarray(plain.eta.data) == 1.5)        # no index passed
+    indexed, means = stepper(state, jnp.asarray(10, dtype=jnp.int32))
+    assert np.all(np.asarray(indexed.eta.data) == 10 + 11 + 12)
+    # The daily mean sees each post-step eta: 10, 21, 33.
+    assert np.allclose(np.asarray(means[0]), (10 + 21 + 33) / 3.0)
+
+
+def _textured(card):
+    """A day edit that gives the synthetic record's velocities a smooth
+    spatial structure.  The plain record's flow is uniform inside the basin
+    (balanced vorticity and rotational velocity identically zero, so no
+    variance and no statistic to measure); the same factor on every chunk and
+    on the start arrays keeps overlapping hours equal."""
+    ny, nx = np.asarray(card.recipe.land_mask).shape
+    factor = 1.0 + 0.5 * np.sin(2.0 * np.pi * np.arange(nx) / nx)[None, :] \
+        * np.cos(2.0 * np.pi * np.arange(ny) / ny)[:, None]
+
+    def edit(day, arrays):
+        for name in list(arrays):
+            if "_u_" in name or "_v_" in name:
+                arrays[name] = arrays[name] * factor
+    return edit
+
+
+@pytest.fixture(scope="module")
+def textured_record(tmp_path_factory, small_card):
+    root = tmp_path_factory.mktemp("swg_textured") / "record"
+    geometry = build_closure_geometry(small_card)
+    masks = (np.asarray(geometry.umask), np.asarray(geometry.vmask))
+    for first, days in ((0, 11), (11, 11), (52, 20), (102, 20)):
+        records._write_chunk(
+            root / f"dual_day{first:04d}_to_day{first + days:04d}",
+            source_day=first, days=days, masks=masks,
+            truth_run=root.parent / "truth", day_edit=_textured(small_card))
+    return root
+
+
+def _arm_config(record, loss, noise_channel, **changes):
+    config = _config(record, **changes)
+    config["curriculum"].update(window_days=[1], epochs_per_window=2)
+    config["network"]["noise_channel"] = noise_channel
+    config["loss"] = loss
+    return config
+
+
+ENERGY_SEED = 11
+
+
+@pytest.fixture(scope="module")
+def energy_run(tmp_path_factory, small_card, textured_record, trained):
+    folder = tmp_path_factory.mktemp("swg_energy")
+    config = _arm_config(textured_record, {"kind": "energy_score", "members": 2},
+                         "white_input")
+    # As in production: the file of a trained four-channel network, whose
+    # closure is far above the random-initialisation bar (recorded only).
+    config["network"]["initial_checkpoint"] = str(
+        trained["folder"] / "run" / "checkpoints" / "w01_e02.eqx")
+    config["network"]["initial_acceleration_gate"] = "recorded_only"
+    path = _write_config(folder / "config.json", config)
+    log = driver.train(config, path, card=small_card, seed=ENERGY_SEED,
+                       run_dir=folder / "run", device=CPU,
+                       windows_per_call=10, commit="0" * 40)
+    return {"folder": folder, "config": config, "path": path, "log": log}
+
+
+def test_energy_score_run_freezes_normalizers_and_logs_the_collapse_monitor(
+        energy_run, small_card):
+    run = energy_run["folder"] / "run"
+    log = energy_run["log"]
+    assert log["status"] == "complete"
+    assert log["gates"]["first_step_no_inert"]["passed"]
+    manifest = json.loads((run / "run_manifest.json").read_text())
+    constants = manifest["loss_constants"]
+    assert constants["kind"] == "energy_score"
+    assert all(value > 0.0 for value in constants["normalizers"].values())
+    assert constants["source"]["split"] == "train"
+    assert constants["source"]["window_days"] == 1
+    assert manifest["network"]["input_channels"][-1].startswith("xi ~ N(0,1)")
+    assert manifest["network"]["spec"]["noise_channel"] is True
+    assert manifest["loss"]["members"] == 2
+    for entry in log["epochs"]:
+        report = entry["validation_report"]
+        assert report["energy_score"] == entry["validation_loss"]
+        assert report["member_spread"] > 0.0
+        assert report["spread_over_member_truth_distance"] == pytest.approx(
+            report["member_spread"] / report["member_truth_distance"])
+        assert np.isfinite(entry["train_loss_mean"])
+    # The normalizers are the training split's own: recompute independently.
+    contract = driver.SWGDatasetContract.from_json(
+        run / "dataset_contract.json", card=small_card)
+    geometry = build_closure_geometry(small_card)
+    moments = np.zeros((3, 3))
+    for batch in contract.batches(
+            split="train", window_days=1, epoch=0, seed=ENERGY_SEED,
+            target_interval_hours=1):
+        moments += swg_online.balanced_field_second_moments(
+            swg_online.diagnose_native_windows(
+                tuple(jnp.asarray(v) for v in batch.target), geometry,
+                objective=energy_run["config"]["objective"]), geometry)
+    expected = swg_online.normalizers_from_moments(moments)
+    assert tuple(constants["normalizers"].values()) == pytest.approx(
+        tuple(expected), rel=1.0e-9)
+
+
+def test_energy_score_run_resumes_with_the_recorded_normalizers(
+        energy_run, small_card, tmp_path):
+    run = tmp_path / "run"
+    shutil.copytree(energy_run["folder"] / "run", run)
+    before = json.loads((run / "run_manifest.json").read_text())
+    log = driver.train(
+        energy_run["config"], energy_run["path"], card=small_card,
+        seed=ENERGY_SEED, run_dir=run, device=CPU, windows_per_call=10,
+        commit="0" * 40)
+    assert log["status"] == "complete"
+    assert json.loads((run / "run_manifest.json").read_text()) == before
+    # Epochs but no recorded constants: refused, never silently re-measured.
+    stripped = {key: value for key, value in before.items()
+                if key != "loss_constants"}
+    (run / "run_manifest.json").write_text(json.dumps(stripped))
+    with pytest.raises(RuntimeError, match="records no loss constants"):
+        driver.frozen_loss_constants(
+            energy_run["config"], run / "run_manifest.json", have_epochs=True)
+    # A manifest of another loss is refused too.
+    wrong = before | {"loss_constants": {"kind": "eq7_window_statistics"}}
+    (run / "run_manifest.json").write_text(json.dumps(wrong))
+    with pytest.raises(RuntimeError, match="loss constants are for"):
+        driver.frozen_loss_constants(
+            energy_run["config"], run / "run_manifest.json", have_epochs=True)
+
+
+def test_energy_score_free_run_is_admitted_with_the_channel_in_its_spec(
+        energy_run, small_card):
+    run_dir = energy_run["folder"] / "run"
+    manifest = driver.run_free_run(
+        energy_run["config"], energy_run["path"], card=small_card,
+        seed=ENERGY_SEED, run_dir=run_dir, window_days=1, device=CPU,
+        commit="0" * 40)
+    closure = manifest["closure"]
+    assert closure["network_spec"]["noise_channel"] is True
+    assert "white-noise input channel" in manifest["integration"]
+    assert manifest["numerical_health"]["all_finite"]
+    assert swg_online.admit_free_run_closure(manifest) == closure
+    # Manifests written before the channel existed lack the key: still admitted.
+    legacy = copy.deepcopy(manifest)
+    del legacy["closure"]["network_spec"]["noise_channel"]
+    assert swg_online.admit_free_run_closure(legacy)
+    extra = copy.deepcopy(manifest)
+    extra["closure"]["network_spec"]["amplitude"] = 1.0
+    with pytest.raises(ValueError, match="network_spec must hold exactly"):
+        swg_online.admit_free_run_closure(extra)
+
+
+@pytest.fixture(scope="module")
+def statistics_run(tmp_path_factory, small_card, textured_record):
+    folder = tmp_path_factory.mktemp("swg_statistics")
+    config = _arm_config(
+        textured_record,
+        {"kind": "eq7_window_statistics", "calibration_window_days": 1},
+        "none")
+    path = _write_config(folder / "config.json", config)
+    log = driver.train(config, path, card=small_card, seed=11,
+                       run_dir=folder / "run", device=CPU,
+                       windows_per_call=10, commit="0" * 40)
+    return {"folder": folder, "config": config, "path": path, "log": log}
+
+
+def test_window_statistics_run_sets_the_weights_once_from_the_first_batch(
+        statistics_run, small_card):
+    run = statistics_run["folder"] / "run"
+    log = statistics_run["log"]
+    assert log["status"] == "complete"
+    manifest = json.loads((run / "run_manifest.json").read_text())
+    constants = manifest["loss_constants"]
+    calibration = constants["calibration"]
+    # Each added term equals the Eq. 7 term on the first batch.
+    assert constants["vorticity_weight"] * calibration["vorticity_nrmse2"] \
+        == pytest.approx(calibration["eq7"], rel=1.0e-12)
+    assert constants["eke_weight"] * calibration["eke_nrmse2"] \
+        == pytest.approx(calibration["eq7"], rel=1.0e-12)
+    # ... recomputed independently on the contract's first batch and the
+    # seed's network.
+    config = statistics_run["config"]
+    contract = driver.SWGDatasetContract.from_json(
+        run / "dataset_contract.json", card=small_card)
+    batch = next(contract.batches(split="train", window_days=1, epoch=0,
+                                  seed=11, target_interval_hours=1))
+    assert calibration["start_absolute_hours"] == [
+        int(hour) for hour in batch.start_absolute_hour]
+    geometry = build_closure_geometry(small_card)
+    spec, _ = driver.network_spec(config, small_card, geometry)
+    network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(11))
+    programs = driver.build_batch_programs(
+        small_card, geometry, window_days=1, target_interval_hours=1,
+        objective=config["objective"], wall_ring=config["wall_ring"],
+        training_precision="fp64", checkpoint=True, loss=config["loss"],
+        constants=(0.0, 0.0))
+    _, eq7, vorticity, kinetic = driver.batch_report(
+        programs["report"], network, batch, jax.random.PRNGKey(11), 10)
+    assert calibration["eq7"] == pytest.approx(eq7, rel=1.0e-9)
+    assert calibration["vorticity_nrmse2"] == pytest.approx(vorticity, rel=1.0e-9)
+    assert calibration["eke_nrmse2"] == pytest.approx(kinetic, rel=1.0e-9)
+    # Frozen: every logged epoch's total is built from those same weights.
+    for entry in log["epochs"]:
+        report = entry["validation_report"]
+        assert report["total"] == pytest.approx(
+            report["eq7"] + constants["vorticity_weight"]
+            * report["vorticity_nrmse2"] + constants["eke_weight"]
+            * report["eke_nrmse2"], rel=1.0e-9)
+        assert report["total"] == pytest.approx(entry["validation_loss"], rel=1.0e-12)
+    assert manifest["loss"]["weights"].startswith("set once")
+    assert log["gates"]["first_step_no_inert"]["passed"]
+
+
+def test_window_statistics_run_resumes_with_the_recorded_weights(
+        statistics_run, small_card, tmp_path):
+    run = tmp_path / "run"
+    shutil.copytree(statistics_run["folder"] / "run", run)
+    before = json.loads((run / "run_manifest.json").read_text())
+    driver.train(
+        statistics_run["config"], statistics_run["path"], card=small_card,
+        seed=11, run_dir=run, device=CPU, windows_per_call=10, commit="0" * 40)
+    assert json.loads((run / "run_manifest.json").read_text()) == before
+    # The recorded keys are not part of the run's identity.
+    assert driver.run_identity(before) == {
+        key: value for key, value in before.items() if key != "loss_constants"}
+
+
+def test_noise_channel_run_starts_from_a_four_channel_checkpoint(
+        tmp_path, small_card, record, trained):
+    """A finished deterministic network's file seeds the channel network:
+    trained leaves identical, xi weights at 1e-2 of the SSH-channel rms."""
+    checkpoint = trained["folder"] / "run" / "checkpoints" / "w01_e02.eqx"
+    config = _arm_config(
+        record, {"kind": "energy_score", "members": 2}, "white_input")
+    config["network"]["initial_checkpoint"] = str(checkpoint)
+    geometry = build_closure_geometry(small_card)
+    spec, _ = driver.network_spec(config, small_card, geometry)
+    optimizer = create_swg_optimizer(SWGOptimizerSettings(**config["optimiser"]))
+    key = jax.random.PRNGKey(11)
+    network, opt_state = driver.initial_network(config, spec, optimizer, key=key)
+    four_spec = spec._replace(noise_channel=False)
+    four = SWGScalarPotentialCNN(four_spec, key=key)
+    loaded, _ = driver.load_checkpoint_or_fail(
+        checkpoint, (four, optimizer.init(eqx.filter(four, eqx.is_inexact_array))),
+        what="test")
+    assert network.layers[0].weight.shape[1] == 5
+    assert np.array_equal(np.asarray(network.layers[0].weight[:, :4]),
+                          np.asarray(loaded.layers[0].weight))
+    rms = float(jnp.sqrt(jnp.mean(loaded.layers[0].weight[:, 0] ** 2)))
+    xi_weights = np.asarray(network.layers[0].weight[:, 4:])
+    assert 0.3e-2 * rms < xi_weights.std() < 3.0e-2 * rms
+    assert eqx.tree_equal(opt_state, optimizer.init(
+        eqx.filter(network, eqx.is_inexact_array)))
+    # The identity records how the channel was grown.
+    assert driver.NOISE_CHANNEL_INIT_RELATIVE_SCALE == 1.0e-2
+    # A wrong file is refused before anything is built.
+    config["network"]["initial_checkpoint"] = str(tmp_path / "missing.eqx")
+    with pytest.raises(FileNotFoundError):
+        driver.initial_network(config, spec, optimizer, key=key)
+
+
+def test_a_loaded_network_may_start_past_the_acceleration_bar_only_when_recorded(
+        tmp_path, small_card, record):
+    """The bar is for a seed's random initialisation: a network loaded from a
+    file whose closure is far above it is refused when the gate is
+    enforced and starts, with the measurement logged, when recorded_only."""
+    config = _arm_config(record, {"kind": "eq7"}, "none")
+    geometry = build_closure_geometry(small_card)
+    spec, _ = driver.network_spec(config, small_card, geometry)
+    optimizer = create_swg_optimizer(SWGOptimizerSettings(**config["optimiser"]))
+    network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(11))
+    loud = eqx.tree_at(lambda n: n.layers[-1].weight, network,
+                       network.layers[-1].weight * 100.0)
+    checkpoint = tmp_path / "loud.eqx"
+    driver.save_checkpoint(
+        (loud, optimizer.init(eqx.filter(loud, eqx.is_inexact_array))), checkpoint)
+    config["network"]["initial_checkpoint"] = str(checkpoint)
+    config["curriculum"].update(epochs_per_window=1)
+    path = _write_config(tmp_path / "enforced.json", config)
+    with pytest.raises(RuntimeError, match="initial closure acceleration"):
+        driver.train(config, path, card=small_card, seed=11,
+                     run_dir=tmp_path / "enforced", device=CPU,
+                     windows_per_call=10, commit="0" * 40)
+    config["network"]["initial_acceleration_gate"] = "recorded_only"
+    path = _write_config(tmp_path / "recorded.json", config)
+    log = driver.train(config, path, card=small_card, seed=11,
+                       run_dir=tmp_path / "recorded", device=CPU,
+                       windows_per_call=10, commit="0" * 40)
+    gate = log["gates"]["initial_closure_acceleration"]
+    assert log["status"] == "complete" and len(log["epochs"]) == 1
+    assert gate["enforced"] is False and gate["passes"] is False
+    assert gate["maximum_ratio"] > 0.1

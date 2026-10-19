@@ -244,16 +244,27 @@ def build_scanned_stepper(model, dt_s: float, forcing, n_steps: int):
 
 def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int,
                                    transport_diagnostic=None):
-    """Return one JIT program for exact state and live-transport means."""
+    """Return one JIT program for exact state and live-transport means.
+
+    ``scanned(state)`` steps ``model.step(state, dt_s, surface_forcing=...)``.
+    ``scanned(state, first_step)`` (an int32 scalar, traced: the model step
+    index of the day's first step) also passes ``step_index=`` to
+    ``model.step``, for a model whose step draws fresh noise.
+    """
     import jax
     import jax.numpy as jnp
 
     if type(n_steps) is not int or n_steps <= 0:
         raise ValueError("daily-mean scan n_steps must be a positive integer")
 
-    def scan_body(carry, count):
+    def scan_body(carry, xs):
+        count, step_index = xs
         state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv, mean_phi = carry
-        state = model.step(state, dt_s, surface_forcing=forcing)
+        if step_index is None:
+            state = model.step(state, dt_s, surface_forcing=forcing)
+        else:
+            state = model.step(
+                state, dt_s, surface_forcing=forcing, step_index=step_index)
         ssh = state.eta.data
         u = state.u.data[:, 1:, 0]
         v = state.v.data[1:, :, 0]
@@ -272,7 +283,7 @@ def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int,
         return (state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv, mean_phi), None
 
     @jax.jit
-    def scanned(state):
+    def scanned(state, first_step=None):
         means = (
             jnp.zeros_like(state.eta.data),
             jnp.zeros_like(state.u.data[:, 1:, 0]),
@@ -283,8 +294,10 @@ def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int,
              else jnp.zeros_like(state.rigid_lid_phi)),
         )
         counts = jnp.arange(1, n_steps + 1, dtype=state.eta.data.dtype)
+        indices = None if first_step is None else (
+            first_step + jnp.arange(n_steps, dtype=jnp.int32))
         (state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv, mean_phi), _ = (
-            jax.lax.scan(scan_body, (state, *means), counts))
+            jax.lax.scan(scan_body, (state, *means), (counts, indices)))
         result = (mean_ssh, mean_u, mean_v)
         if transport_diagnostic is not None:
             result += (mean_qu, mean_qv)

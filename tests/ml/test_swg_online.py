@@ -2113,3 +2113,353 @@ def test_curriculum_windows_extend_the_prefix_and_must_fit_the_splits():
         require([1, 2, 4, 8, 32], rigid_lid | {"train": [0, 351]})
     require([1, 2, 4, 8, 32], rigid_lid | {"train": [0, 352]})
 
+
+
+# ------------------------------------------- noise channel, ensembles, statistics
+
+def _golden_entry(online_case):
+    """The non-trivial entry the golden numbers were taken on."""
+    _, geometry, _, entry, _ = online_case
+    shape = tuple(geometry.tmask.shape)
+    rng = np.random.default_rng(3)
+    return entry._replace(
+        ssh_k=jnp.asarray(0.1 * rng.standard_normal(shape)),
+        u_k=jnp.asarray(0.05 * rng.standard_normal(shape)),
+        v_k=jnp.asarray(0.05 * rng.standard_normal(shape)))
+
+
+def test_network_without_the_noise_channel_is_the_committed_network_bit_for_bit(
+        online_case):
+    """Golden numbers taken from the code before the channel existed (commit
+    41f446411's tree, same seed, entry, step keys, 3-hour segment)."""
+    card, geometry, forcing, _, network = online_case
+    shape = tuple(geometry.tmask.shape)
+    assert network.spec.noise_channel is False
+    assert network.layers[0].weight.shape[1] == 4
+    assert network_parameter_count(network) == 952
+    entry = _golden_entry(online_case)
+    for scale, total, squares in ((0.0, 367.11772655224945, 23.090433558619793),
+                                  (0.3, 362.51731705021484, 26.335005038850692)):
+        potential = network(entry, geometry, key=jax.random.PRNGKey(1),
+                            noise=jnp.zeros(shape), noise_scale=jnp.asarray(scale))
+        assert float(jnp.sum(potential)) == pytest.approx(total, rel=1.0e-13)
+        assert float(jnp.sum(potential ** 2)) == pytest.approx(squares, rel=1.0e-13)
+    state = card.recipe.initial_state._replace(
+        tau_x_prev=forcing.tau_i_native, tau_y_prev=forcing.tau_j_native)
+    step = jax.jit(lambda s, k: swg_online_step(
+        network, s, jnp.zeros((3,) + shape), k, jnp.asarray(0.0), card=card,
+        geometry=geometry, forcing=forcing))
+    for index in range(2):
+        state = step(state, jax.random.PRNGKey(10 + index))
+    assert float(jnp.sum(state.u.data ** 2)) == pytest.approx(
+        7.647777307345999e-05, rel=1.0e-12)
+    assert float(jnp.sum(state.v.data ** 2)) == pytest.approx(
+        3.8012558668868516e-08, rel=1.0e-12)
+    assert float(jnp.sum(state.eta.data ** 2)) == pytest.approx(
+        7.011463941915811e-06, rel=1.0e-12)
+    raw, _ = build_segment_fn(card, geometry, window_days=1, target_interval_hours=3)
+    records = raw(network, state, jnp.zeros(
+        (swg_online.window_steps(card, 1, 3), 3) + shape),
+        jax.random.PRNGKey(5), jnp.asarray(0.0))[1]
+    for field, expected in zip(records, (25.47094486475052, 0.5989961645432657,
+                                         0.26443312569959987), strict=True):
+        assert float(jnp.sum(field ** 2)) == pytest.approx(expected, rel=1.0e-12)
+
+
+def _channel_network(online_case, seed=8):
+    spec = online_case[4].spec._replace(noise_channel=True)
+    return SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(seed))
+
+
+def test_noise_channel_network_reads_xi_as_a_fifth_channel_not_through_ssh(
+        online_case):
+    _, geometry, _, _, plain = online_case
+    entry = _golden_entry(online_case)
+    network = _channel_network(online_case)
+    shape = tuple(geometry.tmask.shape)
+    assert network.layers[0].weight.shape[1] == 5
+    assert network_parameter_count(network) == 952 + 8 * 9
+    xi = jax.random.normal(jax.random.PRNGKey(2), shape)
+
+    def potential(xi_value, noise=jnp.zeros(shape), scale=0.0):
+        return network(entry, geometry, key=jax.random.PRNGKey(1), noise=noise,
+                       noise_scale=jnp.asarray(scale), xi=xi_value)
+
+    base = potential(xi)
+    # xi matters; the old SSH-noise path (noise, noise_scale) no longer does.
+    assert np.any(np.asarray(potential(2.0 * xi)) != np.asarray(base))
+    assert np.array_equal(np.asarray(potential(
+        xi, noise=jnp.ones(shape), scale=5.0)), np.asarray(base))
+    # Without xi the network draws it from the key: reproducible, key-dependent.
+    drawn = network(entry, geometry, key=jax.random.PRNGKey(1),
+                    noise=jnp.zeros(shape), noise_scale=jnp.asarray(0.0))
+    again = network(entry, geometry, key=jax.random.PRNGKey(1),
+                    noise=jnp.zeros(shape), noise_scale=jnp.asarray(0.0))
+    other = network(entry, geometry, key=jax.random.PRNGKey(2),
+                    noise=jnp.zeros(shape), noise_scale=jnp.asarray(0.0))
+    assert np.array_equal(np.asarray(drawn), np.asarray(again))
+    assert np.any(np.asarray(drawn) != np.asarray(other))
+    with pytest.raises(ValueError, match="xi must have"):
+        potential(jnp.zeros((3, 3)))
+    with pytest.raises(ValueError, match="without a noise channel"):
+        plain(entry, geometry, key=jax.random.PRNGKey(1), noise=jnp.zeros(shape),
+              noise_scale=jnp.asarray(0.0), xi=xi)
+
+
+class _StageSpy:
+    """A closure that records the xi each RK3 stage hands it."""
+
+    spec = types.SimpleNamespace(noise_channel=True)
+
+    def __init__(self, shape):
+        self.shape = shape
+        self.xi = []
+
+    def __call__(self, entry, geometry, *, key, noise, noise_scale, xi):
+        self.xi.append(np.asarray(xi))
+        return jnp.zeros(self.shape)
+
+
+def test_xi_is_one_draw_per_step_shared_by_the_three_stages_and_seeded(
+        online_case):
+    card, geometry, forcing, _, _ = online_case
+    shape = tuple(geometry.tmask.shape)
+    state = card.recipe.initial_state._replace(
+        tau_x_prev=forcing.tau_i_native, tau_y_prev=forcing.tau_j_native)
+
+    def draws(key):
+        spy = _StageSpy(shape)
+        swg_online_step(spy, state, jnp.zeros((3,) + shape), key,
+                        jnp.asarray(0.0), card=card, geometry=geometry,
+                        forcing=forcing)
+        return spy.xi
+
+    first = draws(jax.random.PRNGKey(4))
+    assert len(first) == 3
+    assert np.array_equal(first[0], first[1]) and np.array_equal(first[0], first[2])
+    # Seeded: exactly the documented stream; N(0,1) per T cell.
+    expected = jax.random.normal(
+        jax.random.fold_in(jax.random.PRNGKey(4), 0), shape, state.eta.data.dtype)
+    assert np.array_equal(first[0], np.asarray(expected))
+    assert abs(first[0].mean()) < 0.05 and abs(first[0].std() - 1.0) < 0.05
+    # Reproducible for one step key, fresh for the next step's key.
+    assert np.array_equal(draws(jax.random.PRNGKey(4))[0], first[0])
+    next_key = jax.random.split(jax.random.PRNGKey(4), 2)[1]
+    assert np.any(draws(next_key)[0] != first[0])
+
+
+def test_channel_segment_is_seeded_and_members_of_one_start_differ(online_case):
+    card, geometry, forcing, _, _ = online_case
+    shape = tuple(geometry.tmask.shape)
+    network = swg_online.add_noise_channel(
+        online_case[4], key=jax.random.PRNGKey(3), relative_scale=1.0)
+    state = card.recipe.initial_state._replace(
+        tau_x_prev=forcing.tau_i_native, tau_y_prev=forcing.tau_j_native)
+    raw, _ = build_segment_fn(card, geometry, window_days=1, target_interval_hours=3)
+    noise = jnp.zeros((swg_online.window_steps(card, 1, 3), 3) + shape)
+
+    def run(key):
+        return raw(network, state, noise, key, jnp.asarray(0.0))[1]
+
+    members = [run(jax.random.PRNGKey(seed)) for seed in (1, 2)]
+    again = run(jax.random.PRNGKey(1))
+    assert all(np.array_equal(np.asarray(a), np.asarray(b))
+               for a, b in zip(members[0], again, strict=True))
+    assert np.any(np.asarray(members[0][1]) != np.asarray(members[1][1]))
+
+
+def test_add_noise_channel_keeps_every_trained_leaf_and_scales_the_new_weights(
+        online_case):
+    _, geometry, _, _, plain = online_case
+    entry = _golden_entry(online_case)
+    shape = tuple(geometry.tmask.shape)
+    key = jax.random.PRNGKey(6)
+    grown = swg_online.add_noise_channel(plain, key=key, relative_scale=1.0e-2)
+    assert grown.spec == plain.spec._replace(noise_channel=True)
+    old, new = plain.layers[0].weight, grown.layers[0].weight
+    assert new.shape == old.shape[:1] + (5,) + old.shape[2:]
+    assert np.array_equal(np.asarray(new[:, :4]), np.asarray(old))
+    assert np.array_equal(np.asarray(grown.layers[0].bias),
+                          np.asarray(plain.layers[0].bias))
+    for grown_layer, plain_layer in zip(grown.layers[1:], plain.layers[1:],
+                                        strict=True):
+        assert np.array_equal(np.asarray(grown_layer.weight),
+                              np.asarray(plain_layer.weight))
+    rms = float(jnp.sqrt(jnp.mean(old[:, 0] ** 2)))
+    expected = 1.0e-2 * rms * np.asarray(jax.random.normal(
+        key, old[:, :1].shape, old.dtype))
+    assert np.array_equal(np.asarray(new[:, 4:]), expected)
+    # With xi = 0 the grown network is the trained one.
+    call = dict(key=jax.random.PRNGKey(1), noise=jnp.zeros(shape),
+                noise_scale=jnp.asarray(0.0))
+    np.testing.assert_allclose(
+        np.asarray(grown(entry, geometry, xi=jnp.zeros(shape), **call)),
+        np.asarray(plain(entry, geometry, **call)), rtol=1.0e-12, atol=1.0e-14)
+    with pytest.raises(ValueError, match="already has"):
+        swg_online.add_noise_channel(grown, key=key, relative_scale=1.0e-2)
+
+
+def test_every_leaf_of_the_channel_network_carries_gradient_including_xi_weights(
+        online_case):
+    """One energy-score step on a two-member ensemble: the first-layer xi
+    weights, and every other leaf, are live (the driver's gate)."""
+    card, geometry, forcing, _, _ = online_case
+    shape = tuple(geometry.tmask.shape)
+    network = swg_online.add_noise_channel(
+        online_case[4], key=jax.random.PRNGKey(3), relative_scale=1.0e-2)
+    state = card.recipe.initial_state._replace(
+        tau_x_prev=forcing.tau_i_native, tau_y_prev=forcing.tau_j_native)
+    raw, _ = build_segment_fn(card, geometry, window_days=1, target_interval_hours=3)
+    noise = jnp.zeros((swg_online.window_steps(card, 1, 3), 3) + shape)
+    target = tuple(jnp.full((1, 8) + shape, 1.0e-3) for _ in range(3))
+
+    def loss(net):
+        members = jnp.stack([jnp.stack(raw(
+            net, state, noise, jax.random.PRNGKey(seed), jnp.asarray(0.0))[1])
+            for seed in (1, 2)])           # (members, 3 fields, hours, y, x)
+        predicted = tuple(members[:, field][None] for field in range(3))
+        return swg_online.ensemble_trajectory_scores(
+            predicted, target, geometry, BalancedNormalizers(1.0, 1.0, 1.0),
+            objective="symmetric")[0]
+
+    _, grads = eqx.filter_value_and_grad(loss)(network)
+    assert_network_gradients_live(grads)
+    xi_gradient = np.asarray(grads.layers[0].weight[:, 4:])
+    assert np.all(np.isfinite(xi_gradient)) and np.any(xi_gradient != 0.0)
+
+
+def test_energy_score_of_the_ensemble_is_the_existing_function_and_its_monitors(
+        online_case):
+    _, geometry, _, _, _ = online_case
+    shape = (2, 3, 4) + tuple(geometry.tmask.shape)         # windows, members, hours
+    rng = np.random.default_rng(5)
+    scale = 1.0e-2
+    predicted = tuple(jnp.asarray(scale * rng.standard_normal(shape))
+                      for _ in range(3))
+    target = tuple(jnp.asarray(scale * rng.standard_normal(
+        (2, 4) + tuple(geometry.tmask.shape))) for _ in range(3))
+    normalizers = BalancedNormalizers(2.0e-9, 3.0e-6, 4.0e-6)
+    score, member_truth, spread = swg_online.ensemble_trajectory_scores(
+        predicted, target, geometry, normalizers, objective="symmetric")
+    # The existing function, window by window, on the objective's diagnostic.
+    per_window = []
+    for window in range(2):
+        window_predicted = swg_online.diagnose_native_windows(
+            tuple(field[window] for field in predicted), geometry,
+            objective="symmetric")
+        window_target = swg_online.diagnose_native_windows(
+            tuple(field[window][None] for field in target), geometry,
+            objective="symmetric")
+        per_window.append(float(balanced_trajectory_loss(
+            window_predicted, jax.tree.map(lambda x: x[0], window_target),
+            geometry, normalizers, kind="energy_score")))
+    assert float(score) == pytest.approx(np.mean(per_window), rel=1.0e-12)
+    # The monitors are the two terms of the score: score = distance - spread/2.
+    assert float(score) == pytest.approx(
+        float(member_truth) - 0.5 * float(spread), rel=1.0e-10)
+    assert float(spread) > 0.0 and float(member_truth) > 0.0
+    with pytest.raises(ValueError, match="windows,members,hours"):
+        swg_online.ensemble_trajectory_scores(
+            tuple(field[:, 0] for field in predicted), target, geometry,
+            normalizers, objective="symmetric")
+
+
+def test_energy_score_of_identical_members_is_their_rms_distance_with_finite_gradient(
+        online_case):
+    """Two coinciding members: the pair term is exactly 0, the score is the
+    normalized area-weighted RMS distance to the truth -- here sqrt(3) for a
+    unit offset in all three fields -- and the gradient has no NaN."""
+    _, geometry, _, _, _ = online_case
+    shape = (2, 1) + tuple(geometry.tmask.shape)
+    ones = jnp.ones(shape)
+    predicted = BalancedTrajectory(ones, ones, ones)
+    target = BalancedTrajectory(jnp.zeros(shape[1:]), jnp.zeros(shape[1:]),
+                                jnp.zeros(shape[1:]))
+    unit = BalancedNormalizers(1.0, 1.0, 1.0)
+    score = balanced_trajectory_loss(
+        predicted, target, geometry, unit, kind="energy_score")
+    assert float(score) == pytest.approx(math.sqrt(3.0), rel=1.0e-14)
+
+    def loss(value):
+        fields = BalancedTrajectory(value, value, value)
+        return balanced_trajectory_loss(
+            fields, target, geometry, unit, kind="energy_score")
+
+    gradient = np.asarray(jax.grad(loss)(ones))
+    assert np.all(np.isfinite(gradient)) and np.any(gradient != 0.0)
+
+
+def test_balanced_variances_are_area_weighted_about_the_sample_and_area_mean(
+        online_case):
+    _, geometry, _, _, _ = online_case
+    rng = np.random.default_rng(9)
+    shape = (3, 4) + tuple(geometry.tmask.shape)
+    fields = [rng.standard_normal(shape) * s + m
+              for s, m in ((2.0e-6, 1.0e-7), (3.0e-2, -1.0e-3), (5.0e-2, 4.0e-3))]
+    trajectories = [BalancedTrajectory(*(jnp.asarray(f[window:window + 1])
+                                         for f in fields))
+                    for window in range(3)]
+    moments = sum(swg_online.balanced_field_second_moments(t, geometry)
+                  for t in trajectories)
+    normalizers = swg_online.normalizers_from_moments(moments)
+    weight = np.asarray(geometry.area_t_m2 * geometry.tmask)
+    weight = weight / weight.sum()
+    for field, value in zip(fields, normalizers, strict=True):
+        mean = np.sum(field * weight, axis=(-2, -1)).mean()
+        expected = np.mean(np.sum((field - mean) ** 2 * weight, axis=(-2, -1)))
+        assert value == pytest.approx(expected, rel=1.0e-9)
+    with pytest.raises(ValueError, match="must be positive"):
+        swg_online.normalizers_from_moments(np.zeros((3, 3)) + 1.0)
+
+
+def test_window_statistic_terms_are_nrmse_squared_of_the_mean_and_eke_maps(
+        online_case):
+    _, geometry, _, _, _ = online_case
+    rng = np.random.default_rng(11)
+    shape = (2, 6) + tuple(geometry.tmask.shape)
+    zeta = jnp.asarray(rng.standard_normal(shape)) * geometry.vertex_interior
+    ru = jnp.asarray(rng.standard_normal(shape)) * geometry.umask
+    rv = jnp.asarray(rng.standard_normal(shape)) * geometry.vmask
+    truth = BalancedTrajectory(zeta + 0.3 * geometry.vertex_interior, ru, rv)
+
+    def terms(candidate):
+        return [float(x) for x in swg_online.window_statistic_terms(
+            candidate, truth, geometry)]
+
+    assert terms(truth) == [0.0, 0.0]
+    # Every field scaled by (1 + e): the mean map is off by e (NRMSE^2 = e^2),
+    # the EKE map (quadratic in velocity) by (1+e)^2 - 1.
+    e = 0.1
+    vorticity, kinetic = terms(BalancedTrajectory(
+        truth.relative_vorticity_s1 * (1 + e), ru * (1 + e), rv * (1 + e)))
+    assert vorticity == pytest.approx(e ** 2, rel=1.0e-10)
+    assert kinetic == pytest.approx(((1 + e) ** 2 - 1) ** 2, rel=1.0e-10)
+    # A time-constant velocity error changes no EKE; a time-constant vorticity
+    # offset changes the mean map and nothing else.
+    constant = BalancedTrajectory(
+        truth.relative_vorticity_s1, ru + 5.0 * geometry.umask, rv)
+    assert terms(constant)[1] == pytest.approx(0.0, abs=1.0e-20)
+    offset = BalancedTrajectory(truth.relative_vorticity_s1 + 0.2, ru, rv)
+    assert terms(offset)[0] > 0.0 and terms(offset)[1] == pytest.approx(
+        0.0, abs=1.0e-20)
+
+
+def test_window_statistics_loss_with_zero_weights_is_eq7_and_weights_add_the_terms(
+        online_case):
+    card, geometry, _, _, _ = online_case
+    rng = np.random.default_rng(13)
+    shape = (2, 3) + tuple(geometry.tmask.shape)
+    scale = 1.0e-2
+    predicted = tuple(jnp.asarray(scale * rng.standard_normal(shape)) for _ in range(3))
+    target = tuple(jnp.asarray(scale * rng.standard_normal(shape)) for _ in range(3))
+    common = dict(objective="symmetric", beta_m1_s1=card.resolved_namelist.rn_beta_m_s,
+                  basin_length_m=card.resolved_namelist.rn_domsiz_m,
+                  wall_ring="weighted")
+    eq7 = deterministic_trajectory_loss(predicted, target, geometry, **common)
+    zero, eq7_again, vorticity, kinetic = swg_online.window_statistics_trajectory_loss(
+        predicted, target, geometry, vorticity_weight=0.0, eke_weight=0.0, **common)
+    assert float(zero) == float(eq7) == float(eq7_again)
+    total, _, _, _ = swg_online.window_statistics_trajectory_loss(
+        predicted, target, geometry, vorticity_weight=2.0, eke_weight=3.0, **common)
+    assert float(total) == pytest.approx(
+        float(eq7) + 2.0 * float(vorticity) + 3.0 * float(kinetic), rel=1.0e-13)
