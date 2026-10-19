@@ -1804,8 +1804,6 @@ CITATION_MAP = {
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:205-217": [
         ("!                          ! set ssh and (uu_b,vv_b) at N+1/2  (Kaa)", 1),
         ("ssh (:,:,Kaa) = r1_2 * ( ssh (:,:,Kbb) + ssha(:,:) )", 2), 13],
-    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:229":
-        "CASE ( 3 )           !==  Stage 3  ==!",
     "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10006-10013": [
         "redi_flux_eta=(_eta_live_one_half if gm_cfg.redi_flux_geometry_stage == \"rk3_kmm\" else state.eta.data),",
         "if gm_cfg.redi_flux_stored_face_ratios else None),", 8],
