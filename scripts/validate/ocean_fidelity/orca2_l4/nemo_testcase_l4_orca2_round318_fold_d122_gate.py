@@ -67,6 +67,19 @@ STATEMENTS["G9FOLD"] = {**STATEMENTS["G9"], **STATEMENTS["FOLDUNIT"],
                         **STATEMENTS["RAWV"], **STATEMENTS["TOPV"]}
 STATEMENTS["G9FOLDR"] = {**STATEMENTS["G9"], **STATEMENTS["FOLDR"]}
 STATEMENTS["ALL"] = {**STATEMENTS["G9FOLD"], **STATEMENTS["FOLDR"]}
+# Addendum (frozen before arms2): KRHS3 refuses on every card (rung 0/OMT
+# keep the forced stage-3 heat/salt forms off; rung 10 runs the diffusive
+# BBL), so G9N = G9 without it; and the pairs the singles point to.
+STATEMENTS["G9N"] = {k: v for k, v in STATEMENTS["G9"].items()
+                     if k not in STATEMENTS["KRHS3"]}
+STATEMENTS["VT"] = {**STATEMENTS["VMASK"], **STATEMENTS["TOPV"]}
+STATEMENTS["VTX"] = {**STATEMENTS["VT"], **STATEMENTS["FOLDX"]}
+STATEMENTS["FP"] = {**STATEMENTS["FCTF"], **STATEMENTS["PIVOT"]}
+STATEMENTS["G9NTOPV"] = {**STATEMENTS["G9N"], **STATEMENTS["TOPV"]}
+STATEMENTS["G9NFOLD"] = {**STATEMENTS["G9N"], **STATEMENTS["FOLDUNIT"],
+                         **STATEMENTS["RAWV"], **STATEMENTS["TOPV"]}
+STATEMENTS["G9NFOLDR"] = {**STATEMENTS["G9N"], **STATEMENTS["FOLDR"]}
+STATEMENTS["ALLN"] = {**STATEMENTS["G9NFOLD"], **STATEMENTS["FOLDR"]}
 RUNGS = ("rung0", "omt1", "omt2", "omt3", "omt4", "rung10")
 ARMS = ("control", "D122", *STATEMENTS)
 # This round's selection: filled in after the arms (addendum).

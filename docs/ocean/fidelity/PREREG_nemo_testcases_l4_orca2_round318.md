@@ -26,3 +26,28 @@ card runs vector-form momentum (G9 itself is flux form).
 
 Census (toward/away/equal), FOLDR's re-measure (Decision 137) and every
 other number are registered, not predicted.
+
+## Addendum (frozen before the arms2 runs)
+
+First batch so far (rung 0, OMT-1..4, part of rung 10):
+- KRHS3 (and so G9, G9FOLD, G9TOPV, G9FOLDR, ALL) refuses on all seven
+  pairs: rung 0/OMT-1..4 keep the forced stage-3 heat/salt forms off (no
+  forcing module, B90), which KRHS3 requires; rung 10 runs the diffusive
+  BBL, which KRHS3's stage-3 path refuses (G9 has none).  R318-P2 is
+  FALSIFIED for KRHS3.  Running it would need new code, not an import.
+- VMASK moves 0 rows on every measured pair (with top-V off the card's
+  pivot-row V velocity is zero, so the mask multiplies zero).
+- FCTF alone: 0 rows lost, first over-bar equal, census all away (0/179 on
+  rung 0, OMT-4), kt-10 max abs ssh error 0.394 -> 6.24 m.
+- PIVOT alone: first over-bar row (kt-1 stage-1 T) `away` on rung 0 and
+  OMT-1..4 -> fails (d).
+New arms: G9N (G9 without KRHS3), VT (VMASK+TOPV), VTX (VT+FOLDX), FP
+(FCTF+PIVOT), G9NTOPV, G9NFOLD, G9NFOLDR, ALLN.
+
+| ID | Prediction | Falsifier |
+|---|---|---|
+| R318-P7 | FP passes (c)+(d) on rung 0, OMT-4, rung 10 (both labels) and its kt-10 max abs ssh error stays <= 1.5x control. | first over-bar away, exact row lost, or > 1.5x. |
+| R318-P8 | VT moves rows and passes (c)+(d) on rung 0, OMT-4, rung 10; its kt-10 ssh error <= 1.5x control. | any of those fails. |
+| R318-P9 | G9N passes (c)+(d) on all seven pairs. | an exact row lost, first over-bar away, refusal. |
+| R318-P10 | G9NFOLD completes on rung 0, OMT-4, rung 10 (replaces P4 for the KRHS3-free set). | a refusal. |
+| R318-P11 | G9NTOPV's kt-10 max abs ssh error <= 1.5x control on rung 0 and OMT-4 (replaces P5). | > 1.5x. |
