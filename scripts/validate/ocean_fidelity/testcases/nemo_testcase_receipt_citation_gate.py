@@ -8412,13 +8412,13 @@ CITATION_MAP = {
         ('e1e2t(ji,jj) / (e3w_1d(jk+1) *(1._wp+r3t(ji,jj,Kmm)))', 1),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:788-791': [
         ('zahu_w = (  ( ahtu(ji  ,jj,jk-1) + ahtu(ji-1,jj,jk) )', 1),
-        ('zahv_w = (  ( ahtv(ji,jj  ,jk-1) + ahtv(ji,jj-1,jk) )', 1), 4,
+        ('+ ( ahtv(ji,jj-1,jk-1) + ahtv(ji,jj  ,jk) )  ) * zmskv', 1), 4,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:793':
         ('pah_wslp2(ji,jj,jk) = zahu_w * wslpi(ji,jj,jk) * wslpi(ji,jj,jk)', 1),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:825-829': [
         ('ELSEIF( ln_traldf_lap )', 1),
-        ('ze3w_2 = (e3w_1d(jk) *(1._wp+r3t(ji,jj,Kmm)))', 1), 5,
+        ('pakz(ji,jj,jk) = MAX( zcoef0 - 0.5_wp', 1), 5,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:287-291': [
         ('pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +', 1),
