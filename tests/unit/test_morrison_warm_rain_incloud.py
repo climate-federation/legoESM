@@ -633,3 +633,46 @@ def test_spectral_microphysics_reads_clubbs_cloud_fraction_from_the_same_substep
     w0 = written[0].reshape(read[0].shape)
     assert (aists[0] > w0).any() and (aists[0] <= w0).any()
     assert not np.all(read[0] == 0.123)
+    # the two sub-steps' CLUBB fractions differ, so the zip above
+    # discriminates same-sub-step from previous-sub-step reads
+    assert not np.array_equal(written[0], written[1])
+
+
+def test_spectral_incloud_off_requests_no_carry(monkeypatch):
+    from legoesm.atmosphere.physics.microphysics import integration as mi
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    read = []
+    real_micro = mi.morrison_microphysics
+
+    def micro(*a, **k):
+        read.append(k.get("cloud_fraction"))
+        return real_micro(*a, **k)
+    monkeypatch.setattr(mi, "morrison_microphysics", micro)
+    monkeypatch.setattr(jax, "checkpoint", lambda f, **k: f)
+    build, cfg, grid, sigma, state = _spectral_setup(incloud=False)
+    fn_m = mi.make_microphysics_physics(cfg.microphysics, "spectral_pe", 900.0,
+                                        cloud_config=cfg.radiation.cloud_config)
+    assert not getattr(fn_m, "_wants_phys_state_ro", False)
+    ncol = int(grid.n_lat) * int(grid.n_lon)
+    with jax.disable_jit():
+        build()(state, grid, sigma,
+                phys_state=init_physics_state(ncol, 6, cfg))
+    assert read == [None, None]
+
+
+def test_spectral_incloud_compiled_gradient_is_finite_and_nonzero():
+    """Deployment mode: jit(grad) through the checkpointed macmic scan."""
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    build, cfg, grid, sigma, state = _spectral_setup()
+    fn = build()
+    ncol = int(grid.n_lat) * int(grid.n_lon)
+    ps = init_physics_state(ncol, 6, cfg)
+
+    def loss(q_c):
+        tr = dict(state.tracers)
+        tr["q_c"] = q_c
+        tend, _ = fn(state._replace(tracers=tr), grid, sigma, phys_state=ps)
+        return jnp.sum(tend.T_hat.data.real ** 2)
+    g = jax.jit(jax.grad(loss))(state.tracers["q_c"])
+    g = np.asarray(g.data if hasattr(g, "data") else g)
+    assert np.all(np.isfinite(g)) and np.any(g != 0.0)
