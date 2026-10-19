@@ -99,6 +99,7 @@ add_after(
     "      REAL(wp), DIMENSION(:,:,:,:), ALLOCATABLE :: zr52_content, zr52_matrix\n"
     "      REAL(wp), DIMENSION(:,:,:,:), ALLOCATABLE :: zr52_forward, zr52_solution\n")
 add_after(
+    "      REAL(wp), DIMENSION(:,:,:,:), ALLOCATABLE :: zr52_forward, zr52_solution\n"
     "      !!---------------------------------------------------------------------\n      !\n",
     "      l_r52_capture = lwp .AND. .NOT.l_istiled .AND. cdtype == 'TRA' .AND. &\n"
     "         & n_r52_kt == nit000 .AND. Kbb == 1 .AND. Kmm == 2 .AND. &\n"
