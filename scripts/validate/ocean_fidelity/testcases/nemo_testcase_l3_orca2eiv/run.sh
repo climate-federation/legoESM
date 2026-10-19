@@ -113,7 +113,7 @@ preflight() {
     -e 's/^(   nn_stock    = ).*/\1      2/' \
     -e 's/^(   nn_stocklist = ).*/\1 2,0,0,0,0,0,0,0,0,0/' "$DECK" >"$rendered"
   check_namelist_clock "$rendered" || fail 'rendered clock violates init rules'
-  sed 's/nn_stock    =      2/nn_stock    =      1/' "$rendered" >"$tmp/bad-clock"
+  sed -E 's/^( *nn_stock *= *).*/\1 1/' "$rendered" >"$tmp/bad-clock"
   if check_namelist_clock "$tmp/bad-clock"; then fail 'bad clock plant was accepted'; fi
 
   # 4: reader/writer byte identity, truncation/tag plants, and 16-byte literals.
