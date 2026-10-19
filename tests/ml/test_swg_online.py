@@ -1176,7 +1176,7 @@ def test_segment_builder_rejects_unregistered_windows_and_has_live_gradients(
         online_case):
     card, geometry, _, entry, network = online_case
     with pytest.raises(ValueError, match="window_days"):
-        build_segment_fn(card, geometry, window_days=16, target_interval_hours=1)
+        build_segment_fn(card, geometry, window_days=3, target_interval_hours=1)
 
     # The first-step gate probes the actual stage seam.  A spatial objective is
     # used instead of an integrated potential, whose constant mode is correctly
@@ -2067,3 +2067,49 @@ def test_rigid_lid_filter_keeps_a_nondivergent_state_nondivergent(lid_card):
         u_proj, _ = swg_online.build_lid_start_projection(lid_card)(
             u_wide, v_wide)
         assert np.abs(u_proj - u_wide).max() < 1.0e-12 * scale
+
+
+def test_window_lengths_beyond_eight_days_are_admitted_whole_days_only(dataset):
+    admitted = swg_online.window_days_admitted
+    assert [w for w in range(0, 40) if admitted(w)] == [1, 2, 4, 8] + list(
+        range(9, 40))
+    assert not any(admitted(w) for w in (True, 16.0, "16", None, -8))
+    # A longer window reaches the batch sampler, which then refuses it only
+    # for lack of a full batch in this small record, not as an unknown length.
+    with pytest.raises(ValueError, match="fewer than one batch"):
+        next(dataset["contract"].batches(
+            split="validation", window_days=16, target_interval_hours=1))
+    with pytest.raises(ValueError, match="window must be one of"):
+        next(dataset["contract"].batches(
+            split="validation", window_days=5, target_interval_hours=1))
+
+
+def test_curriculum_windows_extend_the_prefix_and_must_fit_the_splits():
+    require = swg_online.require_curriculum_windows
+    rigid_lid = {"train": [731, 4235], "validation": [4265, 5111],
+                 "test": [5141, 5506]}
+    for windows in ([1, 2, 4, 8], [4], [1, 2], [8], [1, 2, 4, 8, 16],
+                    [1, 2, 4, 8, 16, 32]):
+        require(windows, rigid_lid)
+    for windows, match in (
+            ([8, 16], "without starting with"),
+            ([1, 2, 4, 16], "without starting with"),
+            ([1, 2, 4, 8, 32, 16], "window_days must increase"),
+            ([1, 2, 4, 8, 16, 16], "window_days must increase"),
+            ([1, 2, 4, 8, 12.0], "window_days must increase"),
+            ([1, 2, 4, 8, 6], "window_days must increase"),
+            ([1, 2, 4, 8, True], "window_days must increase"),
+            ((1, 2, 4, 8), "window_days must increase"),
+            ([], "window_days must increase")):
+        with pytest.raises(ValueError, match=match):
+            require(windows, rigid_lid)
+    # 32 d: the validation split holds 26 windows, the test split 11.
+    short_validation = rigid_lid | {"validation": [4265, 4265 + 9 * 32]}
+    with pytest.raises(ValueError, match="validation split holds 9 32-day"):
+        require([1, 2, 4, 8, 16, 32], short_validation)
+    require([1, 2, 4, 8, 16], short_validation)
+    # Train: the worst starting offset of the 32-day lattice needs 352 days.
+    with pytest.raises(ValueError, match="train split holds 9 32-day"):
+        require([1, 2, 4, 8, 32], rigid_lid | {"train": [0, 351]})
+    require([1, 2, 4, 8, 32], rigid_lid | {"train": [0, 352]})
+

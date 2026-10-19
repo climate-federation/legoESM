@@ -58,6 +58,47 @@ OBJECTIVE_OPERATORS = ("symmetric", "template")
 WALL_RING_OPTIONS = ("weighted", "excluded")
 DATASET_GAP_HOURS = 30 * 24
 TEMPLATE_BATCH_SIZE = 10
+
+
+def window_days_admitted(window_days) -> bool:
+    """Whole days: a length of ``ADMITTED_WINDOWS_DAYS`` or longer than all of
+    them (a curriculum extension; whether it fits the splits is
+    ``require_curriculum_windows``)."""
+    return type(window_days) is int and (
+        window_days in ADMITTED_WINDOWS_DAYS
+        or window_days > ADMITTED_WINDOWS_DAYS[-1])
+
+
+def require_curriculum_windows(windows, splits_days) -> None:
+    """Refuse a curriculum other than strictly increasing admitted lengths in
+    which every length beyond ``ADMITTED_WINDOWS_DAYS`` follows all of them
+    and fits ``splits_days`` (``{name: [first_day, last_day]}``): at least
+    one batch of ``TEMPLATE_BATCH_SIZE`` windows in the training split for
+    every starting offset of the training lattice, and in the validation
+    split (the held-out lattice starts at its first hour)."""
+    if not isinstance(windows, list) or not windows \
+            or not all(window_days_admitted(window) for window in windows) \
+            or windows != sorted(set(windows)):
+        raise ValueError(
+            f"window_days must increase through {ADMITTED_WINDOWS_DAYS} and "
+            "may then continue with longer whole-day lengths")
+    longer = [window for window in windows if window > ADMITTED_WINDOWS_DAYS[-1]]
+    if longer and tuple(windows[:len(ADMITTED_WINDOWS_DAYS)]) \
+            != ADMITTED_WINDOWS_DAYS:
+        raise ValueError(
+            f"window_days {windows} continue past {ADMITTED_WINDOWS_DAYS[-1]} "
+            f"days without starting with {ADMITTED_WINDOWS_DAYS}")
+    for window in longer:
+        window_hours = HOURS_PER_DAY * window
+        for split, offset in (("train", window_hours - 1), ("validation", 0)):
+            first_day, last_day = splits_days[split]
+            span = HOURS_PER_DAY * (last_day - first_day)
+            count = len(range(offset, span - window_hours + 1, window_hours))
+            if count < TEMPLATE_BATCH_SIZE:
+                raise ValueError(
+                    f"the {split} split holds {count} {window}-day windows "
+                    f"(worst starting offset), fewer than one batch of "
+                    f"{TEMPLATE_BATCH_SIZE}")
 # Sea-level-only start balance, the rule registered with the operator's
 # 2026-10-13 ten-start measurement: stop when the closed-wall divergent part
 # of the first-step acceleration is at most this fraction of its rotational
@@ -1207,8 +1248,10 @@ class SWGDatasetContract:
         final batch is dropped; a split without one full batch raises.
         """
         start_bound, end_bound = self._split_bounds(split)
-        if window_days not in ADMITTED_WINDOWS_DAYS:
-            raise ValueError("window must be one of 1, 2, 4, or 8 days")
+        if not window_days_admitted(window_days):
+            raise ValueError(
+                f"window must be one of {ADMITTED_WINDOWS_DAYS} days or a "
+                f"longer whole number of days, got {window_days!r}")
         require_target_interval_hours(target_interval_hours)
         window_hours = HOURS_PER_DAY * window_days
         if split == "train":
@@ -1254,9 +1297,10 @@ class SWGDatasetContract:
 
     def _check_bounds(self, batch: WindowBatch) -> None:
         start_bound, end_bound = self._split_bounds(batch.split)
-        if type(batch.window_days) is not int \
-                or batch.window_days not in ADMITTED_WINDOWS_DAYS:
-            raise ValueError("dataset batch window is not 1, 2, 4, or 8 days")
+        if not window_days_admitted(batch.window_days):
+            raise ValueError(
+                "dataset batch window is not one of "
+                f"{ADMITTED_WINDOWS_DAYS} days or a longer whole number of days")
         window_hours = HOURS_PER_DAY * batch.window_days
         starts = np.asarray(batch.start_absolute_hour, dtype=np.int64)
         if starts.shape != (self.batch_size,):
@@ -1780,9 +1824,10 @@ def build_segment_fn(card, geometry: SWGClosureGeometry, *,
     The segment records the model state every ``target_interval_hours`` hours
     (1 = hourly), ``24 * window_days / target_interval_hours`` records.
     """
-    if window_days not in ADMITTED_WINDOWS_DAYS:
+    if not window_days_admitted(window_days):
         raise ValueError(
-            f"window_days must be one of {ADMITTED_WINDOWS_DAYS}, got {window_days}")
+            f"window_days must be one of {ADMITTED_WINDOWS_DAYS} or a longer "
+            f"whole number of days, got {window_days}")
     steps_per_record = steps_per_target_interval(
         card.dt_s, target_interval_hours)
     tau_u, tau_v = swg_surface_wind(card.resolved_namelist)
@@ -1974,9 +2019,10 @@ def free_run_closure(closure) -> dict:
         raise ValueError("free-run closure network_seed must be a "
                          "non-negative int")
     window = closure["window_days"]
-    if type(window) is not int or window not in ADMITTED_WINDOWS_DAYS:
+    if not window_days_admitted(window):
         raise ValueError("free-run closure window_days must be one of "
-                         f"{ADMITTED_WINDOWS_DAYS}")
+                         f"{ADMITTED_WINDOWS_DAYS} or a longer whole number "
+                         "of days")
     if closure["objective"] not in OBJECTIVE_OPERATORS:
         raise ValueError(f"free-run closure objective must be one of "
                          f"{OBJECTIVE_OPERATORS}")

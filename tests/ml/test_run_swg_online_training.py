@@ -1555,6 +1555,7 @@ def test_every_committed_training_config_states_its_training_precision():
     assert precisions.pop(EXP5_SYMMETRIC.name) == "fp32"
     for path in EXP6:
         assert precisions.pop(path.name) == "fp32"
+    assert precisions.pop(EXP4_SYMMETRIC_LONG.name) == "fp32"
     assert set(precisions.values()) == {"fp64"}
 
 
@@ -1564,6 +1565,8 @@ EXP6 = tuple(_ROOT / f"config/swg_online/exp6_rigidlid_template_{tag}.json"
              for tag in ("sigma1p5", "sigma2"))
 EXP4_TEMPLATE = _ROOT / "config/swg_online/exp4_rigidlid_template_ring_weighted_fp32.json"
 EXP4_SYMMETRIC = _ROOT / "config/swg_online/exp4_rigidlid_symmetric_ring_weighted_fp32.json"
+EXP4_SYMMETRIC_LONG = EXP4_SYMMETRIC.with_name(
+    "exp4_rigidlid_symmetric_ring_weighted_fp32_long.json")
 RIGID_LID_TRUTH = ("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
                    "swgonl_rounds/round16_rigidlid_truth/")
 
@@ -1580,6 +1583,7 @@ def test_every_committed_training_config_states_its_target_interval():
     assert intervals.pop(EXP5_SYMMETRIC.name) == 3
     for path in EXP6:
         assert intervals.pop(path.name) == 3
+    assert intervals.pop(EXP4_SYMMETRIC_LONG.name) == 3
     assert len(intervals) >= 17 and set(intervals.values()) == {1}
 
 
@@ -2121,3 +2125,30 @@ def test_contract_names_the_target_filter_width_and_check_data_reads_it(
     config["dataset"]["target_filter_sigma_cells"] = 1.5
     report = driver.check_data(config, card=small_card)
     assert len(report["batches"]) == 6
+
+
+def test_committed_long_config_extends_exp4_symmetric_and_refuses_what_does_not_fit(
+        tmp_path):
+    """The long rigid-lid configuration is exp4 symmetric with the 16- and
+    32-day windows appended; a curriculum past eight days must start with
+    1/2/4/8 and fit the splits."""
+    base = driver.load_config(EXP4_SYMMETRIC)
+    long = driver.load_config(EXP4_SYMMETRIC_LONG)
+    assert base["curriculum"]["window_days"] == [1, 2, 4, 8]
+    assert long["curriculum"]["window_days"] == [1, 2, 4, 8, 16, 32]
+    assert long | {"description": base["description"],
+                   "curriculum": base["curriculum"]} == base
+    for name, edit, match in (
+            ("no prefix", lambda c: c["curriculum"].update(
+                window_days=[8, 16]), "without starting with"),
+            ("unordered", lambda c: c["curriculum"].update(
+                window_days=[1, 2, 4, 8, 32, 16]), "window_days must increase"),
+            ("no room for a batch", lambda c: c["dataset"]["splits_days"].update(
+                validation=[4265, 4265 + 9 * 32]),
+             "validation split holds 9 32-day")):
+        config = copy.deepcopy(long)
+        edit(config)
+        path = tmp_path / f"{name.replace(' ', '_')}.json"
+        path.write_text(json.dumps(config))
+        with pytest.raises(ValueError, match=match):
+            driver.load_config(path)

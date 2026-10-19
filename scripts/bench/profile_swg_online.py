@@ -170,8 +170,7 @@ def run_profile(window_days: int, mode: str, objective_operator: str,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--window-days", type=int, choices=(1, 2, 4, 8),
-                        required=True)
+    parser.add_argument("--window-days", type=int, required=True)
     parser.add_argument("--mode", choices=("forward", "reverse"), required=True)
     parser.add_argument("--objective", choices=("symmetric", "template"),
                         required=True)

@@ -1535,12 +1535,15 @@ def bind_trained_runs(seeds: dict[str, tuple[Path, str]], *, objective: str,
     under different bytes is refused once the windows are loaded
     (``score_trained_closure``).
     """
-    from legoesm.training.swg_online import ADMITTED_WINDOWS_DAYS
+    from legoesm.training.swg_online import (
+        ADMITTED_WINDOWS_DAYS,
+        window_days_admitted,
+    )
 
     frozen_gate(objective, surface)
-    if type(window_days) is not int or window_days not in ADMITTED_WINDOWS_DAYS:
-        raise ValueError(f"window_days must be one of {ADMITTED_WINDOWS_DAYS}, "
-                         f"got {window_days!r}")
+    if not window_days_admitted(window_days):
+        raise ValueError(f"window_days must be one of {ADMITTED_WINDOWS_DAYS} "
+                         f"or a longer whole number of days, got {window_days!r}")
     if len(seeds) < 3:
         raise ValueError("held-out gate requires at least three network seeds")
     bound = {}

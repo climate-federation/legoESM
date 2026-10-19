@@ -134,6 +134,7 @@ from legoesm.training.swg_online import (
     maddison_half_width_m,
     network_parameter_count,
     record_start_state,
+    require_curriculum_windows,
     require_rigid_lid_zero_ssh,
     require_target_filter_sigma_cells,
     rigid_lid_start_state,
@@ -362,11 +363,7 @@ def load_config(path: Path) -> dict:
                                "network_between_windows",
                                "optimiser_between_windows"), "curriculum")
     windows = curriculum["window_days"]
-    if not isinstance(windows, list) or not windows \
-            or any(window not in ADMITTED_WINDOWS_DAYS for window in windows) \
-            or windows != sorted(set(windows)):
-        raise ValueError(
-            f"window_days must increase through {ADMITTED_WINDOWS_DAYS}")
+    require_curriculum_windows(windows, splits)
     _require_int(curriculum["epochs_per_window"], "epochs_per_window", minimum=1)
     if curriculum["network_between_windows"] != "carried":
         raise ValueError("network_between_windows must be 'carried'")
