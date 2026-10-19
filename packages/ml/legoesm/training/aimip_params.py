@@ -1849,7 +1849,10 @@ def make_aimip_classical_spectral_physics(
         make_radiation_physics,
     )
     non_rad_cfg = PhysicsConfig(
-        radiation=RadiationConfig(scheme="none"),
+        # Radiation is off here, but the run's (spliced) cloud config rides
+        # along: MG2 in-cloud warm rain reads its aist rh ramps.
+        radiation=RadiationConfig(scheme="none",
+                                  cloud_config=rad_cfg.cloud_config),
         convection=conv_cfg,
         turbulence=turb_cfg,
         microphysics=micro_cfg,
