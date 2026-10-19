@@ -62,6 +62,10 @@ and 96 S unequal values.  The test passes.
 
 The option is a static G9-only branch.  The 26 non-G9 cards retain their
 round-50 address-masked jaxprs; G9 alone reaches the new call arguments.
+The measured comparison reports 26 byte-identical graphs and zero different.
+Its current-output and comparison-summary SHA-256 hashes are respectively
+`43bbaae929734c09a725e0a88b998caadec361ece0eb31c31b9bae527a4cfa11`
+and `cae0425898533f43f389659d4bb9061f2642c7e38ead6688e2401de42d03ac74`.
 
 ## 3. Both-label kt 1..10 rescore
 
@@ -131,9 +135,12 @@ No NEMO build or run occurred in the agent session.
 
 ## 6. Gates and disposition
 
-The receipt-specific citation gate, default gate, and private-import ratchet
-are run with CPU x64 and the prescribed `PYTHONPATH`.  Their final counts are
-recorded after completion.
+The receipt-specific citation gate found 8 citations, 0 failures, 0 unmapped
+citations, and 0 failing map entries.  Its complete unit suite passed 17 / 17.
+The combined default gate and private-import ratchet, run with CPU x64 and the
+prescribed `PYTHONPATH`, passed 144 / 144 in 1045.90 s.  The combined log
+SHA-256 is
+`1fd7b5f638637a2b326519c03ec98c5608f80f124b41ca47735b1a612f71ab4e`.
 
 ASKED: admit and diagnose the kt-1 stage-3 `trazdf` content record; fix the
 first cited owner G9-only; exact-test selected and removed wiring; rescore both
