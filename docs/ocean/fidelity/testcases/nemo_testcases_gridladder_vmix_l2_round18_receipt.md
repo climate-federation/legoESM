@@ -2,8 +2,8 @@
 
 Status: **STOPPED FOR RECORD; NO PHYSICS CHANGE; NOT CERTIFIED.** The frozen
 round-18 prediction is commit `9f51498b92`; the operator-only acquisition is
-commit `5e9d88345f`. This round did not build or run NEMO and produced no new
-oracle measurement.
+commit `5e9d88345f`, repaired at `c2ec20cf41`. Two operator attempts refused
+before running NEMO, and no oracle record or measurement was produced.
 
 ## 1. Frozen statement walk
 
@@ -57,8 +57,8 @@ has read-only default preflight, operator-only `--run`, and
 - `traldf_iso_scheme_round18.patch`, SHA-256
   `c72eef59d12fbb15c72aee1bd5cadda60ffa43bf0e4d3636863ffd341c0c5045`.
 
-The acquisition script itself is SHA-256
-`47483448f65b1e877eb79f7df195a4d75eb2f37305acf2ae7abcacb433fef078`.
+The repaired acquisition script is SHA-256
+`548d5c2d3bf6fd2fa504ceed8ef124d97a91ec38ca9567f8e4752db9e7eda3ee`.
 It pins the source executable, canonical operator sources, deck, step-entry
 record, and stage-3 record. It records 40 three-dimensional arrays, 11
 two-dimensional arrays, and the 31-level vertical coordinate in a registered
@@ -75,19 +75,44 @@ record stamp. `--plant-layout` removes a required writer assignment;
 `--plant-admission` corrupts an existing record's magic. Neither plant can
 pass its corresponding gate.
 
+The first operator attempt refused because `df` was given the absent round-18
+evidence parent. The second passed that point after the operator created the
+parent, but `makenemo -r ORCA2_OMIP_L4` treated a work configuration as a
+reference: it attempted `/work_cfgs.txt`, then failed preprocessing because
+`do_loop_substitute.h90` was absent. The partial configuration was moved aside;
+the requested target name and evidence target are both still absent.
+
+The repaired build follows the working gridladder acquisitions: its reference
+is `ORCA2_ICE_PISCES`, which preflight requires to be listed in
+`cfgs/ref_cfgs.txt`; after that reference creates the target, the script
+replaces `MY_SRC` and the cpp key file from
+`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1`, reapplies the two additive observer files,
+and clean-rebuilds. Free-space checks resolve a missing requested directory to
+its nearest existing ancestor, and now run during read-only preflight.
+
 Read-only preflight passed the exact additive-patch layout and a gfortran
 syntax proof, reporting:
 
 ```text
+DISK_PREFLIGHT_PASS requested=/tmp ancestor=/tmp
+DISK_PREFLIGHT_PASS requested=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round18 ancestor=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round18
+DISK_PREFLIGHT_PASS requested=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2 ancestor=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
 SYNTAX_PROOF_PASS traldf_iso.f90
 ROUND18_L2_LDF_PREFLIGHT_READY target=ORCA2G5_OMIP_L4_VMIX_R18LDFWALK evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round18/oracle_l2_r18_ldf_walk
 ```
 
-The source-layout plant fired and exited 69 as required:
+The new invalid-reference and missing-evidence-parent plants each fired and
+exited 69 as required. The latter resolved the deliberately absent nested path
+to the existing `gridladder_vmix_rounds` ancestor before its intentional exit:
 
 ```text
-STATUS PLANT-FIRED: source-layout
-REFUSE: intentional source-layout plant exit
+STATUS PLANT-FIRED: work-configuration-reference
+REFUSE: intentional work-configuration reference plant exit
+PLANT_EXIT=69
+DISK_PREFLIGHT_PASS requested=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/.round18-missing-parent-plant/nested ancestor=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds
+STATUS PLANT-FIRED: missing-evidence-parent ancestor=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds
+REFUSE: intentional missing-evidence-parent plant exit
+PLANT_EXIT=69
 ```
 
 The operator should run, from a clean checkout:
@@ -106,16 +131,12 @@ controls remain mandatory for the eventual correction: unchanged jaxprs for
 G5, V1-V5, OMT-0..4, rung 0, VORTEX, and SMT-1/2; unchanged values for L1,
 full ORCA2, DINO, and SMT-3/4; and byte-identical GYRE ten-step evidence.
 
-Final gates (CPU, x64, landing-script `PYTHONPATH`):
+Repair gates (CPU, x64, landing-script `PYTHONPATH`):
 
-- this receipt's explicit citation gate: **PASS**, 5 citations, 0 unmapped,
-  0 failures, and 0 map entries failing audit;
-- planted shift of the stage-2 ratio citation: gate **FAIL**, 1 failure, exit
-  1, as required;
-- exact default ORCA2 landing list, including the receipt-citation tests,
-  private-import ratchet, and parallel-receipt guard: **145 passed in
-  1136.90 s (18:56)**;
-- `git diff --check`: **PASS**.
+- this receipt's explicit citation gate: **PENDING**;
+- exact default ORCA2 landing list: **PENDING**;
+- private-import ratchet: **PENDING**;
+- `git diff --check`: **PENDING**.
 
 Unasked choices: none. The target configuration and evidence-root names are
 mechanical acquisition identifiers. No threshold, field set, cadence, model
@@ -125,7 +146,7 @@ independent review: operator (Claude)
 
 codex review: operator
 
-COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/vmix_r18-1984811343
-ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/vmix_r18-1984811343/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_orca2iso/run_round18_ldf_walk.sh --run
+COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r18/repo
+ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r18/repo/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_orca2iso/run_round18_ldf_walk.sh --run
 DECISION_NEEDED: NONE
 ROUND_STATUS: STOPPED_FOR_RECORD — preflighted operator-only L2 internal walk is required before the first differing statement can be fixed
