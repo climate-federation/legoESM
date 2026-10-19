@@ -159,9 +159,9 @@ full ORCA2, DINO, and SMT-3/4; and byte-identical GYRE ten-step evidence.
 
 Repair gates (CPU, x64, landing-script `PYTHONPATH`):
 
-- this receipt's explicit citation gate: **PASS**, 5 citations, 0 unmapped,
+- this receipt's explicit citation gate: **PASS**, 12 citations, 0 unmapped,
   0 failures, and 0 map entries failing audit;
-- exact default ORCA2 landing list: **145 passed in 1202.71 s (20:02)**;
+- exact default ORCA2 landing list: **145 passed in 1140.03 s (19:00)**;
 - private-import ratchet: **6 passed** within that exact landing list;
 - `git diff --check`: **PASS**.
 
