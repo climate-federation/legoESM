@@ -73,7 +73,7 @@ def _col(field) -> Array:
 
 
 def scm_column_inputs(state, sigma_coord, phys_state, *, f_c, u_geo, v_geo, dt,
-                      uw_s, vw_s) -> ColumnInputs:
+                      uw_s, vw_s, z0_m=None, z0h_m=None) -> ColumnInputs:
     """:class:`ColumnInputs` for the SCM column, built with the SAME height/density
     helpers the roster's turbulence wrapper uses (moist hypsometric heights, moist
     density). Surface heat/moisture fluxes are the kinematic overrides the forcing
@@ -85,6 +85,7 @@ def scm_column_inputs(state, sigma_coord, phys_state, *, f_c, u_geo, v_geo, dt,
     tr = state.tracers or {}
     q_v = jnp.asarray(tr["q_v"].data)[0, 0, 0] if "q_v" in tr else jnp.zeros_like(temp)
     q_c = jnp.asarray(tr["q_c"].data)[0, 0, 0] if "q_c" in tr else jnp.zeros_like(temp)
+    q_r = jnp.asarray(tr["q_r"].data)[0, 0, 0] if "q_r" in tr else jnp.zeros_like(temp)
     z_full, z_half = compute_heights_from_sigma(temp[None], p_half[None], q_v=q_v[None])
     rho = compute_rho(temp[None], p_full[None], q_v=q_v[None])[0]
     exner = exner_function(p_full)
@@ -99,13 +100,13 @@ def scm_column_inputs(state, sigma_coord, phys_state, *, f_c, u_geo, v_geo, dt,
         rho_half=half_level_average(rho_sf, rho_sf[0]), mass=mass[::-1],
         exner=exner[::-1], exner_half=exner_function(p_half)[::-1],
         p_full=p_full[::-1], p_half=p_half[::-1],
-        theta_l=theta_l[::-1], q_t=(q_v + q_c)[::-1],
+        theta_l=theta_l[::-1], q_t=(q_v + q_c + q_r)[::-1],
         u=_col(state.u.data), v=_col(state.v.data),
         w_theta_s=zero if w_th is None else jnp.reshape(w_th, ()),
         w_qt_s=zero if w_qv is None else jnp.reshape(w_qv, ()),
         uw_s=uw_s, vw_s=vw_s, f_c=f_c,
         u_geo=u_geo, v_geo=v_geo,
-        dt=dt, temp=temp[::-1], q_v=q_v[::-1], q_c=q_c[::-1])
+        dt=dt, temp=temp[::-1], q_v=q_v[::-1], q_c=q_c[::-1], z0_m=z0_m, z0h_m=z0h_m)
 
 
 class Fluxes(NamedTuple):
@@ -217,14 +218,29 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
     dt = scm.dt
     kind = None if candidate is None else candidate.kind
 
-    def _inputs(state, phys_state, tend_turb, uw_s=None, vw_s=None):
+    forcing = scm.forcing_arg
+
+    def _geo(t):
+        """The geostrophic wind the SCM forcing applies at time ``t`` (surface-first;
+        time-varying for e.g. GABLS3), else the ``u_geo``/``v_geo`` given."""
+        if forcing is None or forcing.u_geo is None:
+            return u_geo, v_geo
+        vg = (None if forcing.v_geo is None
+              else jnp.asarray(forcing.v_geo(t))[::-1])
+        return jnp.asarray(forcing.u_geo(t))[::-1], vg
+
+    # the roughness the baseline surface layer runs with (the LES case's)
+    _surf = getattr(physics_config.turbulence, physics_config.turbulence.scheme).surface
+    z0_m, z0h_m = _surf.z0, _surf.z0 * _surf.z0h_z0_ratio
+
+    def _inputs(state, phys_state, tend_turb, t):
         zero = jnp.zeros((), jnp.asarray(state.T.data).dtype)
-        base = scm_column_inputs(state, sigma, phys_state, f_c=f_c, u_geo=u_geo,
-                                 v_geo=v_geo, dt=dt, uw_s=zero, vw_s=zero)
+        ug, vg = _geo(t)
+        base = scm_column_inputs(state, sigma, phys_state, f_c=f_c, u_geo=ug,
+                                 v_geo=vg, dt=dt, uw_s=zero, vw_s=zero, z0_m=z0_m,
+                                 z0h_m=z0h_m)
         imp = implied_fluxes(tend_turb, base)
         return base._replace(uw_s=imp.uw[0], vw_s=imp.vw[0]), imp
-
-    forcing = scm.forcing_arg
 
     def _other_accel(tend_full, tend_turb, st, sc, t):
         """Wind tendencies of everything but the candidate in this step: the
@@ -250,7 +266,8 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
         def probe_fn(st, grid, sc, phys_state=None):
             tend_full, phys_out = physics_full(st, grid, sc, phys_state=phys_state)
             probe["inputs"], _ = _inputs(st, phys_state,
-                                         _turb_tend(st, grid, sc, phys_state, tend_full))
+                                         _turb_tend(st, grid, sc, phys_state, tend_full),
+                                         scm.t_seconds)
             return tend_full, phys_out
 
         scm.pure_step_with_physics(scm.state, scm.phys_state, scm.t_seconds, probe_fn)
@@ -265,7 +282,7 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
                 raise RuntimeError("rollout: physics called twice in one step")
             tend_full, phys_out = physics_full(st, grid, sc, phys_state=phys_state)
             tend_turb = _turb_tend(st, grid, sc, phys_state, tend_full)
-            inputs, imp = _inputs(st, phys_state, tend_turb)
+            inputs, imp = _inputs(st, phys_state, tend_turb, t)
             stash["inputs"] = inputs
             stash["other"] = None
             if candidate is None:
@@ -287,10 +304,10 @@ def rollout(scm, physics_config, nsteps: int, *, candidate: Candidate | None = N
         return ((new_state, new_phys, t + dt, stash["aux"]),
                 (stash["inputs"], stash["fluxes"], stash["other"]))
 
-    (fstate, fphys, _t, aux_f), (inputs_rec, flux_rec, other_rec) = lax.scan(
+    (fstate, fphys, t_f, aux_f), (inputs_rec, flux_rec, other_rec) = lax.scan(
         body, (scm.state, scm.phys_state, scm.t_seconds, aux0), None, length=nsteps)
     tend_f, _ = physics_turb(fstate, scm.grid, sigma, phys_state=fphys)
-    final_inputs, _ = _inputs(fstate, fphys, tend_f)
+    final_inputs, _ = _inputs(fstate, fphys, tend_f, t_f)
     return RolloutRecord(inputs=inputs_rec, fluxes=flux_rec, final_inputs=final_inputs,
                          other_accel=other_rec), aux_f
 
@@ -332,12 +349,14 @@ MOMFLUX_FLOOR_USTAR2_FRAC = 0.05
 def momentum_flux_floor(artifact: LESReferenceArtifact) -> float | None:
     """Floor for scoring u'w', v'w' in ``artifact``, or ``None`` = not scored.
 
-    Momentum fluxes are scored only in a case with a geostrophic wind (``u_geo`` or
-    ``v_geo`` present and not all zero); the floor is ``MOMFLUX_FLOOR_USTAR2_FRAC``
+    Momentum fluxes are scored only in a case with a geostrophic wind (``u_geo`` /
+    ``v_geo``, or their time integrals ``u_geo_cum`` / ``v_geo_cum``, present and not
+    all zero); the floor is ``MOMFLUX_FLOOR_USTAR2_FRAC``
     times the case's LES ``u*^2`` = mean over the frames after t=0 of the surface
     stress magnitude ``|(tau_x_s, tau_y_s)|``. Such a case without LES momentum
     fluxes or surface stress is an error (user decision 2026-10-15)."""
-    geo = [np.asarray(g) for g in (artifact.u_geo, artifact.v_geo) if g is not None]
+    geo = [np.asarray(g) for g in (artifact.u_geo, artifact.v_geo, artifact.u_geo_cum,
+                                   artifact.v_geo_cum) if g is not None]
     if not any(bool(np.any(g != 0.0)) for g in geo):
         return None
     missing = [n for n in ("uw_resolved", "vw_resolved", "tau_x_s", "tau_y_s")
@@ -451,7 +470,7 @@ def adam_descend_normalized(loss_of, lo: Array, hi: Array, x0: Array, *,
 # --- synthetic columns (L stage, E0 test columns) -----------------------------------
 
 def synthetic_artifact(name: str, heights_m, theta, u, v, *, w_theta_s: float,
-                       hours: float, nframes: int, f_c: float = 0.0,
+                       hours: float, nframes: int, z0_m: float, f_c: float = 0.0,
                        u_geo=None, v_geo=None) -> LESReferenceArtifact:
     """An LES-free reference holding only an initial state and its forcing (constant
     surface heat flux, optional geostrophic wind) — the input the SCM builder needs
@@ -472,7 +491,8 @@ def synthetic_artifact(name: str, heights_m, theta, u, v, *, w_theta_s: float,
         u=rep(u), v=rep(v), wtheta_resolved=rep(jnp.zeros_like(z)),
         wtheta_sgs=rep(jnp.zeros_like(z)), prescribe="fluxes",
         w_theta_s=jnp.full((nt,), w_theta_s, z.dtype),
-        w_theta_s_cum=w_theta_s * times, f_c=f_c, u_geo=prof(u_geo), v_geo=prof(v_geo))
+        w_theta_s_cum=w_theta_s * times, f_c=f_c, u_geo=prof(u_geo), v_geo=prof(v_geo),
+        les_setup={"z0_m": float(z0_m)})
 
 
 # --- E0: static checks -------------------------------------------------------------

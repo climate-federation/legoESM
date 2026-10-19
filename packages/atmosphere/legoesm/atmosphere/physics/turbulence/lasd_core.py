@@ -21,8 +21,8 @@ Every closed form here is a faithful port of the jax-alfa oracle
 (``DynamicSGS_LASDD_SM.LASDD``, ``Filtering_Level1/2``, ``Utilities.Roots`` +
 ``Imfilter`` + ``PlanarMean``), pinned to round-off (rel 1e-12) against an INDEPENDENT
 numpy reimplementation in ``tests/unit/test_lasd_faithful.py``: the sharp spectral test
-filter (cutoff ``round(N/(2·FGR·TFR))``), the 3×3 periodic box average /9, the Laguerre
-max-real-root-in-(0,5) β-solver (default 1.0, cross-checked against ``numpy.roots`` — a
+filter (cutoff ``round(N/(2·FGR·TFR))``), the 3×3 periodic box average /9, the
+max-real-root-in-(0,5) β rule (default 1.0, cross-checked against ``numpy.roots`` — a
 different algorithm), and the full a1..e2 / aa..ff / M_ij / LM / MM / ``C_s²``-clip
 assembly (with the Lilly-1992 error-functional coefficient ``_LASD_LILLY_COEFF=8`` and
 ``_TFR=2``).  Documented departures from the oracle:
@@ -34,12 +34,14 @@ assembly (with the Lilly-1992 error-functional coefficient ``_LASD_LILLY_COEFF=8
   (``LMx / where(|MMx|<1e-10, 1e-10, MMx)``), not the project ``safe_divide`` helper;
   it is forward-identical to the oracle (the ``|MMx|<1e-10`` cells are masked to 0 either
   way) and keeps the reverse-mode cotangent finite by never dividing by a tiny denominator.
-- the β-solver is a fixed-trip ``lax.scan`` that FREEZES the converged root via ``where``
-  (the oracle uses a ``while_loop`` that stops early).  It returns the SAME converged root
-  as the oracle to the Laguerre tolerance, but is NOT bit-identical to the ``while_loop``
-  (it keeps evaluating — and discarding — later Laguerre steps after convergence) and can
-  differ at a convergence boundary; the scan form is what makes it reverse-mode
-  differentiable.
+- the β root is found by exhaustive isolation of the SIGN-CHANGING real roots
+  (derivative-root intervals + bisection; a tangent / even-multiplicity root is in fp64
+  indistinguishable from a near-real complex pair and is reported only if round-off makes
+  ``p`` change sign), NOT the oracle's 8-guess Laguerre,
+  which on the coefficients of a real CBL (O(1e-49..1e-17)) stopped after one step on
+  every level, could miss the largest of clustered roots, accepted near-real complex
+  roots and averaged gradients over guesses; the Germano moments are normalised per
+  test-filter level before the quintic is formed (fp32 underflow).
 - the ``(ny, nx, nz)`` layout (oracle ``(nx, ny, nz)`` — a transpose) and the optional
   MPI y-slab distributed path (serial path is the pinned one).
 """
@@ -162,80 +164,202 @@ def imfilter_box3(field_yxz: jax.Array, layout=None) -> jax.Array:
     return (fy_up + fx + fy_dn) / 3.0
 
 
-def laguerre_max_real_root_beta(coeffs6: jax.Array) -> jax.Array:
-    """Largest real root in ``(0, 5)`` of a quintic, default ``1.0``.
+_BISECT_ITERS = 64   # bit-pattern halvings: any non-negative fp64 bracket -> adjacent floats
+#                      (needs >= 63 in fp64; recheck if the window or dtype changes)
+_BETA_LO, _BETA_HI = 0.0, 5.0   # physical β window (oracle ComputeBeta1)  # coeff-ok: β window
 
-    Faithful port of the jax-alfa β-solver (``Utilities.Roots`` Laguerre +
-    ``ComputeBeta1``). Fixed-trip ``lax.scan`` (freeze-on-convergence) ⇒
-    reverse-mode differentiable. ``coeffs6`` is ``(..., 6)`` DESCENDING degree.
 
-    AD note: differentiable almost everywhere (reverse-mode finite), with the two Laguerre
-    singularities that a repeated/degenerate polynomial can hit GUARDED, forward-identically:
-    (i) the ALL-ZERO polynomial (a strain-free level → every coefficient 0) is detected in
-    ``per_level`` and the solver is fed a benign quintic (default ``1.0`` selected forward);
-    (ii) ``sqrt(disc)`` at ``disc == 0`` (a repeated root, e.g. ``x^5`` → disc == 0 at every
-    guess) uses a double-``where`` so the VJP never differentiates sqrt at 0.  A quintic with
-    no root in ``(0, 5)`` (the ``nanmax`` → default-``1.0`` branch) is also finite-gradient.
-    NOT smoothed: a tiny-but-nonzero ``disc`` from a NEAR-repeated-root polynomial gives a
-    large-but-finite VJP (kept faithful to the oracle's raw sqrt) — a measure-zero-adjacent
-    locus not reached by a physical strain field.  See ``test_lasd_faithful.py``."""
-    cdtype = jnp.complex128 if jax.config.jax_enable_x64 else jnp.complex64
-    guesses = jnp.array([0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.5], cdtype)  # coeff-ok: dynamic-coeff root-search initial guesses
-    n_deg, tol, max_iter = 5, 1e-6, 20  # coeff-ok: polynomial degree / tol / max iterations
-    # A benign, well-conditioned quintic (x^5 - 1, real root at 1.0) fed to the solver in
-    # place of an all-zero (strain-free-level) polynomial, so the Laguerre sqrt(0)/0-inf
-    # trap never produces a NaN cotangent.  The default 1.0 is selected forward regardless.
-    benign_quintic = jnp.array([1.0, 0.0, 0.0, 0.0, 0.0, -1.0])  # coeff-ok: AD-guard poly
+def _two_sum(a, b):
+    """Knuth's error-free sum: a + b == s + e exactly."""
+    s = a + b
+    z = s - a
+    return s, (a - (s - z)) + (b - z)
 
-    def one_root(coeffs, x0):
-        coeffs = coeffs.astype(cdtype)
-        eps = 1e-16 + 0j
 
-        def step(carry, _):
-            x, conv = carry
-            f = jnp.polyval(coeffs, x)
-            df = jnp.polyval(jnp.polyder(coeffs), x)
-            d2f = jnp.polyval(jnp.polyder(jnp.polyder(coeffs)), x)
-            fs = jnp.where(jnp.abs(f) < jnp.abs(eps), eps, f)
-            G = df / fs
-            H = G ** 2 - d2f / fs
-            disc = (n_deg - 1) * (n_deg * H - G ** 2)
-            # AD guard: sqrt(disc) has a SINGULAR reverse derivative at disc == 0, which a
-            # repeated-root polynomial (e.g. x^5 -> disc == 0 at every guess) hits exactly.
-            # Double-``where``: forward sqrt(0) = 0 is unchanged, but the VJP never
-            # differentiates sqrt AT 0 (the inner where feeds 1 there).
-            disc_zero = disc == 0
-            sq = jnp.where(disc_zero, jnp.zeros_like(disc),
-                           jnp.sqrt(jnp.where(disc_zero, jnp.ones_like(disc), disc)))
-            d1, d2 = G + sq, G - sq
-            denom = jnp.where(jnp.abs(d1) > jnp.abs(d2), d1, d2)
-            denom = jnp.where(jnp.abs(denom) < jnp.abs(eps), eps, denom)
-            xn = x - n_deg / denom
-            now = (jnp.abs(xn - x) < tol * (1 + jnp.abs(x))) | (jnp.abs(f) < tol)
-            return (jnp.where(conv, x, xn), conv | now), None
+def _two_prod(a, b):
+    """Dekker's error-free product (Veltkamp split): a * b == p + e exactly."""
+    if a.dtype not in (jnp.float32, jnp.float64):
+        raise TypeError(f"error-free product needs float32/float64, got {a.dtype}")
+    f = 134217729.0 if a.dtype == jnp.float64 else 4097.0   # coeff-ok: 2^27+1 / 2^12+1 splitters
+    def split(x):
+        t = f * x
+        h = t - (t - x)
+        return h, x - h
+    p = a * b
+    ah, al = split(a)
+    bh, bl = split(b)
+    return p, al * bl - (((p - ah * bh) - al * bh) - ah * bl)
 
-        (xf, conv), _ = jax.lax.scan(
-            step, (x0, jnp.array(False)), None, length=max_iter)
-        return jnp.where(conv, xf, jnp.nan + 0j)
+
+def comp_horner(c, x):
+    """Compensated Horner (Graillat, Langlois & Louvet 2005): ``polyval(c, x)`` as if
+    in twice the working precision, so the SIGN of p is right much closer to a root
+    (e.g. an exact zero at a window edge evaluates to exactly 0). ``c`` DESCENDING."""
+    s = jnp.broadcast_to(c[0], jnp.shape(x)).astype(c.dtype)
+    err = jnp.zeros_like(s)
+    for i in range(1, c.shape[-1]):
+        p, pe = _two_prod(s, x)
+        s, se = _two_sum(p, c[i])
+        err = err * x + (pe + se)
+    return s + err
+
+
+def _real_roots_in(c, lo, hi):
+    """Every SIGN-CHANGING real root of ``polyval(c, x)`` in the CLOSED ``[lo, hi]``.
+
+    Exhaustive: the real roots of ``p'`` (recursively, down to the linear case) split
+    ``[lo, hi]`` into intervals on which ``p`` is monotone, so each holds at most one
+    sign-changing root, found by bisection (signs from :func:`comp_horner`) on the float
+    BIT PATTERN (monotone for
+    non-negative floats, so ``lo >= 0``): 64 halvings reach adjacent floats, i.e. full
+    relative precision for roots above ~2^-110 (fp32) / 2^-990 (fp64) — where the low
+    half of x in the Veltkamp split (x·2^-12 / x·2^-27) is still normal; closer to 0 the
+    compensated product's low parts go subnormal and only absolute precision is kept
+    (irrelevant for β, an O(1) ratio of Smagorinsky coefficients). A zero (as evaluated) at an interval end is
+    returned exactly on it.
+    Only sign changes certify a root: an even-multiplicity (tangent) root is in fp64
+    indistinguishable from a complex pair within ~sqrt(eps) of the axis, and neither is
+    reported unless round-off makes ``p`` change sign. ``c`` is ``(n+1,)`` DESCENDING;
+    returns ``(n,)`` candidates, NaN where an interval holds no root."""
+    if lo < 0:
+        raise ValueError(f"bit-pattern bisection needs lo >= 0, got {lo}")
+    n = c.shape[-1] - 1
+    if n == 1:
+        ok = c[0] != 0
+        r = jnp.where(ok, -c[1] / jnp.where(ok, c[0], 1.0), jnp.nan)
+        return jnp.where((r >= lo) & (r <= hi), r, jnp.nan)[None]
+    crit = _real_roots_in(jnp.polyder(c), lo, hi)
+    pts = jnp.sort(jnp.where(jnp.isnan(crit), hi, crit))
+    a = jnp.concatenate([jnp.full((1,), lo, c.dtype), pts])
+    b = jnp.concatenate([pts, jnp.full((1,), hi, c.dtype)])
+
+    # signs from c * 2^S (exact): near a tiny root |p| would otherwise be subnormal and
+    # flush to zero; |c| <= 120 (normalised, 4th derivative), x <= 5 and the 2^12+1 split keep
+    # every intermediate of comp_horner finite (fp32: 2^88*120*5^5*4097 < 3.4e38)
+    cs = c * (2.0 ** (88 if c.dtype == jnp.float32 else 900))   # coeff-ok: exact power-of-two sign scaling, within fp32/fp64 range
+    pa, pb = comp_horner(cs, a), comp_horner(cs, b)
+    bracket = (b > a) & (jnp.sign(pa) * jnp.sign(pb) <= 0) & ~((pa == 0) & (pb == 0))
+    s_lo = jnp.sign(pa)
+    itype = jnp.int64 if c.dtype == jnp.float64 else jnp.int32
+    # -0.0 -> +0.0 first: the signed bit pattern of -0.0 is not ordered with the positives
+    bits = lambda x: jax.lax.bitcast_convert_type(jnp.where(x == 0, 0.0, x).astype(c.dtype),  # noqa: E731
+                                                  itype)
+    flt = lambda i: jax.lax.bitcast_convert_type(i, c.dtype)         # noqa: E731
+
+    def halve(_, ab):
+        i0, i1 = ab
+        im = i0 + (i1 - i0) // 2
+        right = jnp.sign(comp_horner(cs, flt(im))) == s_lo
+        return jnp.where(right, im, i0), jnp.where(right, i1, im)
+
+    i0, i1 = jax.lax.fori_loop(0, _BISECT_ITERS, halve, (bits(a), bits(b)))
+    x0, x1 = flt(i0), flt(i1)
+    p0, p1 = jnp.abs(comp_horner(cs, x0)), jnp.abs(comp_horner(cs, x1))
+    root = jnp.where(pa == 0, a, jnp.where(pb == 0, b, jnp.where(p1 < p0, x1, x0)))
+    return jnp.where(bracket, root, jnp.nan)
+
+
+def _scale_pow2(x, ref):
+    """``x / 2^e`` with ``2^e`` the power of two at or above |ref| (``ref == 0``: ``x``).
+    EXACT (an exponent shift, applied as two power-of-two factors 2^-(e//2), 2^-(e-e//2)
+    so neither overflows near the float limits), so exact zeros of a polynomial survive (a
+    root ON a window edge). No gradient flows through ``e``."""
+    _, e = jnp.frexp(jax.lax.stop_gradient(ref))
+    e = jnp.where(ref == 0, 0, e)
+    h = e // 2
+    return x * _exact_pow2(-h, x.dtype) * _exact_pow2(-(e - h), x.dtype)
+
+
+def _exact_pow2(k, dtype):
+    """2^k for integer k in the normal range, built from its bit pattern (exact)."""
+    if dtype == jnp.float64:
+        return jax.lax.bitcast_convert_type((k.astype(jnp.int64) + 1023) << 52, dtype)  # coeff-ok: IEEE-754 binary64 exponent bias / mantissa bits
+    return jax.lax.bitcast_convert_type((k.astype(jnp.int32) + 127) << 23, dtype)  # coeff-ok: IEEE-754 binary32 exponent bias / mantissa bits
+
+
+def _derivative_at(c, x):
+    """``p'(x)`` with the coefficients ``k·c_k`` formed error-free (TwoProduct) and
+    evaluated compensated — accurate where p' itself suffers cancellation."""
+    n = c.shape[-1] - 1
+    k = jnp.arange(n, 0, -1).astype(c.dtype)
+    hi, lo = _two_prod(k, c[:-1])
+    return comp_horner(hi, x) + jnp.polyval(lo, x)
+
+
+def _beta_search(c):
+    """(β, found): largest root of the (already normalised) quintic in the OPEN (0, 5),
+    else 1.0. Near an edge the result is limited by the conditioning of ``p`` there: a
+    root closer to 0 or 5 than Horner round-off / |p'| may fall on either side."""
+    roots = _real_roots_in(c, _BETA_LO, _BETA_HI)
+    roots = jnp.where((roots > _BETA_LO) & (roots < _BETA_HI), roots, jnp.nan)
+    found = ~jnp.all(jnp.isnan(roots))
+    b = jnp.max(jnp.where(jnp.isnan(roots), -jnp.inf, roots))
+    return jnp.where(found, b, 1.0), found
+
+
+@jax.custom_jvp
+def _beta_root(c):
+    return _beta_search(c)[0]
+
+
+@_beta_root.defjvp
+def _beta_root_jvp(primals, tangents):
+    # implicit function theorem at the selected root: dβ = -(Σ dc_i β^(5-i)) / p'(β);
+    # β from _beta_root itself so higher derivatives are exact too
+    (c,), (dc,) = primals, tangents
+    dc = jnp.zeros_like(c) if dc is None else dc
+    b = _beta_root(c)
+    found = jax.lax.stop_gradient(_beta_search(c)[1])
+    dp = _derivative_at(c, b)
+    ok = found & (dp != 0)
+    return b, jnp.where(ok, -jnp.polyval(dc, b) / jnp.where(ok, dp, 1.0), 0.0)
+
+
+def max_real_root_beta(coeffs6: jax.Array) -> jax.Array:
+    """Largest real root in ``(0, 5)`` of a quintic per row, default ``1.0`` (the oracle's
+    ``ComputeBeta1`` rule). ``coeffs6`` is ``(n, 6)`` DESCENDING degree.
+
+    The polynomial is scaled by the power of two above its max |coefficient| (exact;
+    roots are scale invariant; the Germano coefficients are O(1e-49..1e-17) in a real
+    CBL) and its real roots are
+    isolated exhaustively (:func:`_real_roots_in`). The derivative is the exact implicit
+    one at the selected root (custom JVP), not an average over search candidates. A row
+    with no root in (0, 5), or all-zero coefficients, returns 1.0 with zero gradient.
+    Accuracy at a k-fold root is limited to ~eps^(1/k) by evaluation cancellation."""
+
+    if (coeffs6.dtype not in (jnp.float32, jnp.float64) or coeffs6.ndim != 2
+            or coeffs6.shape[1] != 6):
+        raise TypeError(f"β quintic coefficients must be a real float32/float64 (n, 6) "
+                        f"array, got {coeffs6.dtype} {coeffs6.shape}")
 
     def per_level(coeffs):
-        # AD guard: a strain-free level yields an ALL-ZERO quintic (0·strain = 0 exactly),
-        # on which the Laguerre step is a √0 / 0·∞ trap that poisons the reverse gradient
-        # with NaN (the forward still defaults to 1.0).  Detect it (max|coeff| == 0, exact
-        # for a 0·strain level) and feed the solver the BENIGN quintic instead, then select
-        # the default 1.0 forward.  Forward-IDENTICAL for every non-degenerate polynomial
-        # (``where`` picks ``coeffs``); NaN-free gradient on the degenerate one.
-        degenerate = jnp.max(jnp.abs(coeffs)) == 0.0
-        safe = jnp.where(degenerate, benign_quintic, coeffs)
-        roots = jax.vmap(lambda g: one_root(safe, g))(guesses)
-        valid = jnp.where(
-            (jnp.abs(jnp.imag(roots)) < 1e-6)
-            & (jnp.real(roots) > 0.0) & (jnp.real(roots) < 5.0),  # coeff-ok: physical-root upper bound
-            jnp.real(roots), jnp.nan)
-        mx = jnp.nanmax(valid)
-        return jnp.where(degenerate, 1.0, jnp.where(jnp.isnan(mx), 1.0, mx))
+        scale = jnp.max(jnp.abs(coeffs))
+        degenerate = scale == 0.0
+        c = jnp.where(degenerate, jnp.zeros_like(coeffs).at[0].set(1.0),   # x^5: β = 1
+                      _scale_pow2(coeffs, scale))
+        return jnp.where(degenerate, 1.0, _beta_root(c))
 
     return jax.vmap(per_level)(coeffs6)
+
+
+def beta_from_germano_moments(m1, m2):
+    """β per level from the level-1 (2Δ) moments ``m1 = (a1, b1, c1, d1, e1)`` and the
+    level-2 (4Δ) moments ``m2`` (each ``(nz,)``). Every quintic coefficient is a sum of
+    (level-1 × level-2) products, so each level's moments are first normalised by their
+    own max (exact: the roots do not change) — keeping the products representable in
+    fp32, where unscaled O(1e-25) moments underflow to an all-zero quintic."""
+    def unit(m):
+        s = jnp.max(jnp.abs(jnp.stack(m)), axis=0)
+        return [_scale_pow2(x, s) for x in m]
+    a1, b1, c1, d1, e1 = unit(m1)
+    a2, b2, c2, d2, e2 = unit(m2)
+    aa = a1*c2 - a2*c1
+    bb = a2*e1 - b1*c2
+    cc = b2*c1 - a1*e2 - a2*d1
+    dd = b1*e2 - b2*e1
+    ee = a1*d2 + b2*d1
+    ff = -b1*d2
+    return max_real_root_beta(jnp.stack([ff, ee, dd, cc, bb, aa], -1))
 
 
 # --------------------------------------------------------------------------- #
@@ -315,13 +439,7 @@ def lasd_cs2(uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag,
     e2 = pm((_LASD_LILLY_COEFF*L2**2)*(_TFR**4)*S_d*(S11d*SS11d+S22d*SS22d+S33d*SS33d
                                        + 2.0*(S12d*SS12d+S13d*SS13d+S23d*SS23d)))
 
-    aa = a1*c2 - a2*c1
-    bb = a2*e1 - b1*c2
-    cc = b2*c1 - a1*e2 - a2*d1
-    dd = b1*e2 - b2*e1
-    ee = a1*d2 + b2*d1
-    ff = -b1*d2
-    beta = laguerre_max_real_root_beta(jnp.stack([ff, ee, dd, cc, bb, aa], -1))
+    beta = beta_from_germano_moments((a1, b1, c1, d1, e1), (a2, b2, c2, d2, e2))
     beta3d = beta.reshape(1, 1, nz)
 
     T1, T2 = 2.0*L2, 2.0*(_TFR**2)*L2

@@ -40,6 +40,7 @@ import jax.numpy as jnp  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl  # noqa: E402
+from legoesm.atmosphere.les_suite.catalog import catalog_case  # noqa: E402
 from legoesm.timestepping.split_explicit import select_dt  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -153,7 +154,8 @@ def main():
     # stress-free rigid lid are damped rather than reflected (without it the SBL
     # jet piles at the lid and the run blows up ~0.9 h — Beare et al. 2006 use a
     # sponge here too). Mirrors the neutral channel driver's sponge.
-    zc = g.z_c; zf = g.z_f; z_sp = 0.75 * args.Lz
+    zc = g.z_c; zf = g.z_f
+    z_sp = catalog_case("sbl_gabls1").sponge_base_m(args.Lz)
     spc = jnp.where(zc > z_sp,
                     0.5 * (1.0 - jnp.cos(jnp.pi * (zc - z_sp) / (args.Lz - z_sp))),
                     0.0).astype(dtype)

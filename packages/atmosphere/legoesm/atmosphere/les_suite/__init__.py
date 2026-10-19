@@ -19,6 +19,7 @@ from .bridge import (
 )
 from .catalog import (
     ANCHOR_CASES,
+    MOIST_CASES,
     dry_shear_buoyancy_grid,
     register_default_catalog,
 )
@@ -49,6 +50,7 @@ from .registry import (
     SGS_CHOICES,
     LESCase,
     LESGrid,
+    LESSetup,
     RegistryError,
     clear_registry,
     get_case,
@@ -90,6 +92,7 @@ from .sigma_les import (
 
 __all__ = [
     "ANCHOR_CASES",
+    "MOIST_CASES",
     "CBL_ENVELOPE",
     "CBLDiagnostics",
     "CI_MARKERS",
@@ -103,6 +106,7 @@ __all__ = [
     "LESCase",
     "LESGrid",
     "LESReferenceArtifact",
+    "LESSetup",
     "LESTruth",
     "MetricBand",
     "PrognosticScore",

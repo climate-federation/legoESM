@@ -102,26 +102,24 @@ def column_share(part: Array, total: Array) -> float:
     return float(np.sum(np.abs(np.asarray(part)))) / den
 
 
-def sgs_vertical_scalar_flux_mean(
+def sgs_vertical_scalar_flux_faces(
     phi: Array, nu_t: Array, dz: float, *, pr_sgs: float = 1.0,
-    surface_flux: float = 0.0,
+    surface_flux: float = 0.0, top_flux: float = 0.0,
 ) -> Array:
-    """SGS horizontal-mean vertical scalar flux, matching the core's discretization.
+    """Horizontal-mean SGS vertical scalar flux on all ``nz+1`` faces, exactly as
+    ``spectral_les_plane.scalar_rhs`` (and ``scalar_rhs_monotone``) apply it.
 
-    Reproduces EXACTLY the vertical SGS flux ``spectral_les_plane.scalar_rhs``
-    integrates (not a centred approximation), so the emitted ``<w'φ'>_sgs`` equals
-    the flux the model actually applied. ``phi`` and ``nu_t`` are ``(ny, nx, nz)``
-    cell-centre fields (``nu_t`` from ``eddy_viscosity``); ``dz`` is the uniform
-    layer thickness; ``surface_flux`` is the prescribed surface kinematic flux
-    ``<w'φ'>_0`` (``Q0`` for θ, ``0`` for a scalar with no surface source).
+    ``phi`` and ``nu_t`` are ``(ny, nx, nz)`` cell-centre fields (``nu_t`` the
+    viscosity the core applied, ``effective_eddy_viscosity``); ``dz`` is the
+    uniform layer thickness; ``surface_flux`` is the surface kinematic flux
+    ``<w'φ'>_0`` the core imposed (``0`` for a scalar with no surface source).
 
     The core forms the DIFFUSIVE flux ``J = K_h ∂φ/∂z`` on interior faces
     (``K_h = ν_t/Pr``, ``K_h`` averaged centre→face by ``c2f``, gradient by
-    ``ddz_c2f``), imposes ``J = -surface_flux`` on the surface face and ``J = 0`` on
-    the lid, then takes ``∂J/∂z`` at centres. The turbulent flux is ``<w'φ'> = -J``;
-    this returns the horizontal mean of ``-J`` mapped to centres (``f2c``), positive
-    upward. Sign check: stable (``∂θ/∂z>0``) ⇒ negative (downward) interior SGS heat
-    flux; the surface carries exactly ``+surface_flux`` (upward for CBL heating).
+    ``ddz_c2f``), imposes ``J = -surface_flux`` on the surface face and
+    ``J = -top_flux`` on the lid (0 = no-flux lid; a lid inversion Γ gives
+    ``top_flux = -⟨K_h⟩Γ``), then takes ``∂J/∂z`` at centres. The turbulent flux is
+    ``<w'φ'> = -J``, positive upward; this returns its horizontal mean per face.
     """
     phi = np.asarray(phi)
     nu_t = np.asarray(nu_t)
@@ -135,14 +133,30 @@ def sgs_vertical_scalar_flux_mean(
     # interior faces (nz-1): K_h centre→face (c2f), gradient centre→face (ddz_c2f)
     k_h_face = 0.5 * (k_h[..., :-1] + k_h[..., 1:])
     dphi_dz_face = (phi[..., 1:] - phi[..., :-1]) / dz
-    # TURBULENT flux <w'φ'> = -J on interior faces (down-gradient), surface = the
-    # prescribed +surface_flux (upward), lid = 0 (no-flux).
-    turb_int = -k_h_face * dphi_dz_face                              # (ny,nx,nz-1)
-    surf = np.full(phi[..., :1].shape, float(surface_flux), dtype=phi.dtype)
-    lid = np.zeros(phi[..., :1].shape, dtype=phi.dtype)
-    turb_face = np.concatenate([surf, turb_int, lid], axis=-1)      # (ny,nx,nz+1)
-    turb_center = 0.5 * (turb_face[..., :-1] + turb_face[..., 1:])  # f2c -> (nz)
-    return turb_center.mean(axis=_HORIZ)
+    turb_int = (-k_h_face * dphi_dz_face).mean(axis=_HORIZ)        # (nz-1,)
+    return np.concatenate([np.asarray([float(surface_flux)], dtype=turb_int.dtype),
+                           turb_int, np.asarray([float(top_flux)], dtype=turb_int.dtype)])
+
+
+def faces_to_centres(face_profile: Array) -> Array:
+    """Average a ``(nz+1,)`` face profile to the ``(nz,)`` centres (the core's
+    ``f2c``)."""
+    f = np.asarray(face_profile)
+    return 0.5 * (f[:-1] + f[1:])
+
+
+def sgs_vertical_scalar_flux_mean(
+    phi: Array, nu_t: Array, dz: float, *, pr_sgs: float = 1.0,
+    surface_flux: float = 0.0,
+) -> Array:
+    """SGS horizontal-mean vertical scalar flux at the centres, matching the core's
+    discretization (:func:`sgs_vertical_scalar_flux_faces` mapped face→centre).
+
+    Sign check: stable (``∂θ/∂z>0``) ⇒ negative (downward) interior SGS heat flux;
+    the surface face carries exactly ``+surface_flux`` (upward for CBL heating).
+    """
+    return faces_to_centres(sgs_vertical_scalar_flux_faces(
+        phi, nu_t, dz, pr_sgs=pr_sgs, surface_flux=surface_flux))
 
 
 def build_reference_artifact(

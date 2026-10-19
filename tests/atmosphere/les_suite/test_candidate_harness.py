@@ -105,7 +105,7 @@ def test_absorb_top_conserves_column_momentum_and_zeroes_lid():
 def test_prognostic_baseline_names_are_roster_schemes():
     from tune_scm_to_les import _base_turbulence
     for name in ev.PROGNOSTIC_TURBULENCE:
-        assert _base_turbulence(name)[0].scheme == name
+        assert _base_turbulence(name, **_RGH)[0].scheme == name
 
 
 @pytest.mark.parametrize("heating, expect_closed", [(True, True), (False, False)])
@@ -222,6 +222,10 @@ def test_load_candidate_rejects_bad_contract(tmp_path):
 
 # --- SCM integration --------------------------------------------------------------
 
+# the roughness every test column records (the SCM is built with the case's own)
+_RGH = dict(z0_m=0.1, z0h_m=0.1)
+
+
 def _cbl_artifact(nz=20, nt=3, seconds=600.0):
     z = np.linspace(10.0, 1500.0, nz)
     th = np.where(z > 800.0, 300.0 + 0.006 * (z - 800.0), 300.0)
@@ -233,13 +237,14 @@ def _cbl_artifact(nz=20, nt=3, seconds=600.0):
         wtheta_sgs=np.zeros((nt, nz)), prescribe="fluxes", w_theta_s=np.full(nt, 0.06),
         w_theta_s_cum=0.06 * times, f_c=0.0,
         uw_resolved=np.zeros((nt, nz)), uw_sgs=np.zeros((nt, nz)),
-        vw_resolved=np.zeros((nt, nz)), vw_sgs=np.zeros((nt, nz)))
+        vw_resolved=np.zeros((nt, nz)), vw_sgs=np.zeros((nt, nz)),
+        les_setup={"z0_m": _RGH["z0_m"]})
 
 
 def test_pure_step_with_physics_matches_pure_step():
     from legoesm.atmosphere.les_suite.scm_runner import build_cbl_scm_from_artifact
     from tune_scm_to_les import _base_turbulence
-    scm, _ = build_cbl_scm_from_artifact(_cbl_artifact(), _base_turbulence("louis")[0],
+    scm, _ = build_cbl_scm_from_artifact(_cbl_artifact(), _base_turbulence("louis", **_RGH)[0],
                                          nlev=16, dt=10.0)
     a, _ = scm.pure_step(scm.state, scm.phys_state, 0.0)
     b, _ = scm.pure_step_with_physics(scm.state, scm.phys_state, 0.0, scm.physics_fn)
@@ -248,10 +253,14 @@ def test_pure_step_with_physics_matches_pure_step():
 
 
 def _hb_rollouts(candidate, nsteps=30):
+    import dataclasses
+
     from cosci_eval import Arm
     from tune_scm_to_les import _base_turbulence
-    base = _base_turbulence("holtslag_boville")[0]
-    art = _cbl_artifact()
+    base = _base_turbulence("holtslag_boville", **_RGH)[0]
+    # the case's roughness differs from the base's, with z0h != z0, so the
+    # candidate must take it from the column inputs
+    art = dataclasses.replace(_cbl_artifact(), les_setup={"z0_m": 0.05, "z0h_m": 0.005})
     rb, _ = Arm(base).run(art, nsteps, nlev=16, dt=10.0)
     rc, _ = Arm(base, candidate, "theta", False).run(
         art, nsteps, params=candidate.default_params(), nlev=16, dt=10.0)
@@ -276,9 +285,35 @@ def _moist_artifact():
     # saturated in the upper mixed layer, so condensation physics acts
     qt = np.broadcast_to(np.where(z > 800.0, 0.008, 0.020), (nt, nz)).copy()
     qc = np.broadcast_to(np.where((z > 500.0) & (z <= 800.0), 5e-4, 0.0), (nt, nz)).copy()
+    from legoesm.atmosphere.les_suite.scm_runner import microphysics_record
+    from legoesm.atmosphere.physics import MicrophysicsConfig
     return dataclasses.replace(
         art, case_name="moist_harness", qt=qt, qc=qc, wqt_resolved=np.zeros((nt, nz)),
-        wqt_sgs=np.zeros((nt, nz)), w_qv_s=np.full(nt, 1.5e-4))
+        wqt_sgs=np.zeros((nt, nz)), w_qv_s=np.full(nt, 1.5e-4),
+        les_setup=dict(art.les_setup, microphysics=microphysics_record(
+            MicrophysicsConfig(scheme="kessler"))))
+
+
+def test_harness_scores_moist_cases_with_recorded_kessler_only():
+    """User 2026-10-19: a moist reference without a microphysics record, or with a
+    scheme other than Kessler, is refused rather than run under a fallback."""
+    import dataclasses
+
+    from cosci_eval import Arm
+    from legoesm.atmosphere.les_suite.scm_runner import microphysics_record
+    from legoesm.atmosphere.physics import MicrophysicsConfig
+    from tune_scm_to_les import _base_turbulence
+    arm = Arm(_base_turbulence("louis", **_RGH)[0])
+    art = _moist_artifact()
+    no_record = dataclasses.replace(art, les_setup={"z0_m": _RGH["z0_m"]})
+    with pytest.raises(ValueError, match="must record its LES microphysics"):
+        arm.prepare(no_record, nlev=16, dt=10.0)
+    sund = dataclasses.replace(art, les_setup=dict(
+        art.les_setup, microphysics=microphysics_record(
+            MicrophysicsConfig(scheme="sundqvist"))))
+    with pytest.raises(ValueError, match="Kessler only"):
+        arm.prepare(sund, nlev=16, dt=10.0)
+    assert arm.prepare(art, nlev=16, dt=10.0)[1].microphysics.scheme == "kessler"
 
 
 def test_hb_equivalent_reproduces_hb_on_a_moist_column():
@@ -287,7 +322,7 @@ def test_hb_equivalent_reproduces_hb_on_a_moist_column():
     from cosci_eval import Arm
     from tune_scm_to_les import _base_turbulence
     cand = cmod.load_candidate(_CANDS / "hb_equivalent.py")
-    base = _base_turbulence("holtslag_boville")[0]
+    base = _base_turbulence("holtslag_boville", **_RGH)[0]
     art = _moist_artifact()
     rb, _ = Arm(base).run(art, ev.e2_nsteps(art, 10.0), nlev=16, dt=10.0)
     rc, _ = Arm(base, cand, "theta", None).run(
@@ -337,7 +372,7 @@ def test_init_aux_sees_the_prescribed_surface_flux(tmp_path):
             z = jnp.zeros_like(inputs.z_half)
             return z.at[0].set(inputs.w_theta_s), z.at[0].set(inputs.w_qt_s), aux
     """)
-    _, aux = Arm(_base_turbulence("louis")[0], cand, "theta", False).run(
+    _, aux = Arm(_base_turbulence("louis", **_RGH)[0], cand, "theta", False).run(
         _cbl_artifact(), 1, params={}, nlev=16, dt=10.0)
     assert abs(float(aux) - 0.06) < 1e-12
 
@@ -347,7 +382,7 @@ def test_e2_score_finite_and_gradient_reaches_candidate_param(tmp_path):
     from tune_scm_to_les import _base_turbulence
     cand = _write(tmp_path, "good3", _GOOD_SCALAR)
     art = _cbl_artifact()
-    arm = Arm(_base_turbulence("louis")[0], cand, "theta", False)
+    arm = Arm(_base_turbulence("louis", **_RGH)[0], cand, "theta", False)
 
     def loss(p):
         rec, _ = arm.run(art, ev.e2_nsteps(art, 10.0), params=p, nlev=16, dt=10.0)
@@ -415,7 +450,7 @@ def test_rollout_other_accel_is_what_the_step_applied(tmp_path, monkeypatch, pla
             return ft._replace(du_dt=ft.du_dt.replace(data=0.0 * ft.du_dt.data))
         monkeypatch.setattr(ev, "compute_forcing_tendencies", planted)
     cand = _write(tmp_path, f"mom_roll_{plant}", _GOOD_MOMENTUM)
-    rec, _ = Arm(_base_turbulence("louis")[0], cand, None, True).run(
+    rec, _ = Arm(_base_turbulence("louis", **_RGH)[0], cand, None, True).run(
         _forced_artifact(), 5, params=cand.default_params(), nlev=16, dt=10.0)
     worst = 0.0
     for s in range(5):
@@ -434,7 +469,7 @@ def test_candidate_refuses_a_prognostic_baseline(tmp_path):
     from tune_scm_to_les import _base_turbulence
     cand = _write(tmp_path, "sc_prog", _GOOD_SCALAR)
     with pytest.raises(ValueError, match="prognostic"):
-        Arm(_base_turbulence("tke")[0], cand, "theta", None).run(
+        Arm(_base_turbulence("tke", **_RGH)[0], cand, "theta", None).run(
             _cbl_artifact(), 1, params=cand.default_params(), nlev=16, dt=10.0)
 
 
@@ -549,7 +584,7 @@ def test_baseline_loss_compiles_once_and_matches_eager(monkeypatch):
         _scheme_tunable_metas,
         apply_overrides_to_base,
     )
-    base, key = _base_turbulence("louis")
+    base, key = _base_turbulence("louis", **_RGH)
     fields = [m.field for m in _scheme_tunable_metas(key, (1,))]
     x0 = jnp.asarray([float(getattr(base.louis, f)) for f in fields])
     art = _cbl_artifact(seconds=60.0)
@@ -590,9 +625,9 @@ def test_tune_active_refuses_a_non_finite_gradient():
 def test_les_tuned_arm_records_inapplicable_clubb_instead_of_crashing():
     import cosci_eval
     from tune_scm_to_les import _base_turbulence
-    tuned, why = cosci_eval.les_tuned_arm(_base_turbulence("clubb")[0])
+    tuned, why = cosci_eval.les_tuned_arm(_base_turbulence("clubb", **_RGH)[0])
     assert tuned is None and "PROGNOSTIC" in why
-    tuned, why = cosci_eval.les_tuned_arm(_base_turbulence("tke")[0])
+    tuned, why = cosci_eval.les_tuned_arm(_base_turbulence("tke", **_RGH)[0])
     assert why is None and tuned is not None
 
 
@@ -627,3 +662,109 @@ def test_cli_e2_writes_provenanced_json(tmp_path):
     scores = rec["result"]["arms"]["candidate:good4"]["default"]["cbl_harness.npz"]
     # no geostrophic wind in this case -> momentum fluxes not scored
     assert np.isfinite(scores["combined"]) and "uw" not in scores["per_var"]
+
+
+# --- merge with the GABLS3 lineage (user 2026-10-19) --------------------------------
+def _geo_cum_artifact(nt=4, seconds=600.0):
+    """A CBL column under a geostrophic wind that grows in time (u_g = 2 + 0.01 t),
+    recorded as running integrals the way GABLS3 records its forcing."""
+    import dataclasses
+    art = _cbl_artifact(nt=nt, seconds=seconds)
+    t = np.asarray(art.times_s)
+    nz = np.asarray(art.heights_m).size
+    ug_cum = (2.0 * t + 0.005 * t ** 2)[:, None] * np.ones(nz)
+    return dataclasses.replace(art, f_c=1.0e-4, u_geo_cum=ug_cum,
+                               v_geo_cum=np.zeros((nt, nz)),
+                               tau_x_s=np.full(nt, -0.05), tau_y_s=np.zeros(nt))
+
+
+def test_time_varying_geostrophic_wind_is_scored_and_seen_by_the_closure():
+    from cosci_eval import Arm
+    from tune_scm_to_les import _base_turbulence
+    art = _geo_cum_artifact()
+    assert ev.momentum_flux_floor(art) is not None     # u'w', v'w' are scored
+    arm = Arm(_base_turbulence("louis", **_RGH)[0])
+    prep = arm.prepare(art, nlev=16, dt=10.0)
+    scm = prep[0]
+    rec, _ = arm.run_prepared(prep, 30)
+    for k in (0, 29):   # the closure's u_g is the one the SCM applies at that step
+        want = np.asarray(scm.forcing_arg.u_geo(scm.t_seconds + 10.0 * k))[::-1]
+        np.testing.assert_allclose(np.asarray(rec.inputs.u_geo[k]), want, rtol=1e-12)
+    # interval means 3 m/s over [0, 200 s] and 5 m/s over [200, 400 s]
+    assert float(rec.inputs.u_geo[29][0]) - float(rec.inputs.u_geo[0][0]) > 1.9
+    # the closure also sees the case's roughness
+    assert float(rec.inputs.z0_m[0]) == 0.1
+
+
+def test_e1_frame_keeps_the_forcing_rate_applied_after_that_frame():
+    import cosci_eval
+    art = _geo_cum_artifact()
+    t, c = np.asarray(art.times_s), np.asarray(art.u_geo_cum)
+    for k, (a, b) in ((1, (1, 2)), (3, (2, 3))):        # the last frame: interval before
+        fa = cosci_eval._frame_artifact(art, k)
+        rate = (c[b] - c[a]) / (t[b] - t[a])
+        np.testing.assert_allclose(np.asarray(fa.u_geo_cum)[1] / 3600.0, rate,
+                                   rtol=1e-12)
+        assert float(np.min(rate)) > 2.0
+        assert np.asarray(fa.u_geo_cum)[0].max() == 0.0
+
+
+def test_e1_frame_classifies_the_moist_surface_series():
+    import dataclasses
+
+    import cosci_eval
+    art = _moist_artifact()
+    nt = np.asarray(art.times_s).size
+    art = dataclasses.replace(art, w_qv_s_cum=1.5e-4 * np.asarray(art.times_s),
+                              precip_s=np.full(nt, 2e-5),
+                              precip_s_cum=2e-5 * np.asarray(art.times_s))
+    fa = cosci_eval._frame_artifact(art, 1)
+    np.testing.assert_allclose(np.asarray(fa.w_qv_s_cum), [0.0, 1.5e-4 * 3600.0])
+    np.testing.assert_allclose(np.asarray(fa.precip_s_cum), [0.0, 2e-5 * 3600.0])
+
+
+def test_every_run_uses_the_les_cases_roughness():
+    import dataclasses
+
+    from cosci_eval import Arm
+    from tune_scm_to_les import _base_turbulence
+    art = dataclasses.replace(_cbl_artifact(),
+                              les_setup={"z0_m": 0.05, "z0h_m": 0.005})
+    arm = Arm(_base_turbulence("louis", **_RGH)[0])       # built with z0 = 0.1
+    prep = arm.prepare(art, nlev=16, dt=10.0)
+    surf = prep[1].turbulence.louis.surface
+    assert surf.z0 == 0.05 and surf.z0h_z0_ratio == pytest.approx(0.1, rel=1e-14)
+    import cosci_eval
+    seen = {}
+
+    def _spy(col, cfg, nsteps, **kw):
+        seen["surface"] = cfg.turbulence.louis.surface
+        return "ran"
+    orig = cosci_eval.rollout
+    cosci_eval.rollout = _spy
+    try:
+        assert arm.run_with_turb(prep, art, 1, arm.base_turb) == "ran"
+    finally:
+        cosci_eval.rollout = orig
+    assert seen["surface"].z0 == 0.05
+    assert seen["surface"].z0h_z0_ratio == pytest.approx(0.1, rel=1e-14)
+
+
+def test_total_water_includes_rain():
+    from legoesm.atmosphere.les_suite.scm_runner import build_cbl_scm_from_artifact
+    from legoesm.atmosphere.physics import MicrophysicsConfig
+    from tune_scm_to_les import _base_turbulence
+    scm, _ = build_cbl_scm_from_artifact(
+        _moist_artifact(), _base_turbulence("louis", **_RGH)[0], nlev=16, dt=10.0,
+        microphysics=MicrophysicsConfig(scheme="kessler"))
+    tr = dict(scm.state.tracers)
+    tr["q_r"] = tr["q_r"].replace(data=tr["q_r"].data + 1.0e-4)
+    st = scm.state._replace(tracers=tr)
+    zero = jnp.zeros(())
+    inp = ev.scm_column_inputs(st, scm.sigma_coord, scm.phys_state, f_c=0.0,
+                               u_geo=None, v_geo=None, dt=10.0, uw_s=zero, vw_s=zero)
+
+    def col(name):
+        return np.asarray(tr[name].data)[0, 0, 0][::-1]
+    np.testing.assert_allclose(np.asarray(inp.q_t),
+                               col("q_v") + col("q_c") + col("q_r"), rtol=1e-14)

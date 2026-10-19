@@ -484,6 +484,33 @@ def hard_saturation_drain(T, q_v, p_full, dt,
                                        l_over_cp=lcp_cap)
 
 
+def _saturation_excess(T, q_v, p_full):
+    """``(q_v - q_sat, q_sat, 1 + L_v dq_sat/dT / c_pd)`` shared by the smooth
+    and the hard adjustment rates (q_sat and the residual in fp64 when x64 is
+    available; see :func:`saturation_adjustment`)."""
+    if jax.config.jax_enable_x64:
+        _state_dtype = q_v.dtype
+        q_sat64 = saturation_specific_humidity(T.astype(jnp.float64),
+                                          p_full.astype(jnp.float64))
+        excess = (q_v.astype(jnp.float64) - q_sat64).astype(_state_dtype)
+        q_sat = q_sat64.astype(_state_dtype)
+    else:
+        q_sat = saturation_specific_humidity(T, p_full)
+        excess = q_v - q_sat
+    dqsdt = constants.L_v * q_sat / (constants.R_v * T ** 2)
+    psychrometric = 1.0 + dqsdt * constants.L_v / constants.c_pd
+    return excess, q_sat, psychrometric
+
+
+def saturation_deficit_rate(T, q_v, p_full, dt):
+    """The UNSMOOTHED adjustment rate ``(q_v - q_sat) / (dt (1 + L_v dq_sat/dT /
+    c_pd))`` [kg/kg/s] (negative when subsaturated): the rate that lands q_v on
+    the saturation curve in one step, with no sigmoid switch.  Returns
+    ``(rate, q_sat)``."""
+    excess, q_sat, psychrometric = _saturation_excess(T, q_v, p_full)
+    return excess / (dt * psychrometric), q_sat
+
+
 def saturation_adjustment(T, q_v, p_full, dt, sharpness=_DEFAULT_SAT_SHARPNESS, q_c=None,
                           hard_adjust=False, hard_threshold=_DEFAULT_HARD_SAT_THRESHOLD,
                           hard_max_heating_K=_DEFAULT_HARD_SAT_MAX_HEATING_K):
@@ -566,17 +593,7 @@ def saturation_adjustment(T, q_v, p_full, dt, sharpness=_DEFAULT_SAT_SHARPNESS, 
     # is a STATIC Python ``if`` on the compile-time x64 flag (not traced), so the
     # x64-off path is byte-identical to the original fp32 code AND avoids the
     # spurious "float64 truncated to float32" astype warning JAX emits otherwise.
-    if jax.config.jax_enable_x64:
-        _state_dtype = q_v.dtype
-        q_sat64 = saturation_specific_humidity(T.astype(jnp.float64),
-                                          p_full.astype(jnp.float64))
-        excess = (q_v.astype(jnp.float64) - q_sat64).astype(_state_dtype)
-        q_sat = q_sat64.astype(_state_dtype)
-    else:
-        q_sat = saturation_specific_humidity(T, p_full)
-        excess = q_v - q_sat
-    dqsdt = constants.L_v * q_sat / (constants.R_v * T ** 2)
-    psychrometric = 1.0 + dqsdt * constants.L_v / constants.c_pd
+    excess, q_sat, psychrometric = _saturation_excess(T, q_v, p_full)
     cond_frac = jax.nn.sigmoid(sharpness * excess)
     condensation = cond_frac * excess / (dt * psychrometric)
     if hard_adjust:

@@ -50,7 +50,9 @@ from legoesm.atmosphere.les_suite import (  # noqa: E402
     register_default_catalog,
 )
 from legoesm.atmosphere.les_suite.bridge import (  # noqa: E402
+    CUM_CHANNELS,
     load_artifact,
+    surface_roughness,
     total_turbulent_flux,
 )
 from legoesm.atmosphere.les_suite.candidate import column_inputs, load_candidate  # noqa: E402
@@ -77,6 +79,7 @@ from legoesm.atmosphere.les_suite.candidate_eval import (  # noqa: E402
 from legoesm.atmosphere.les_suite.scm_coupling import interp_profile  # noqa: E402
 from legoesm.atmosphere.les_suite.scm_runner import (  # noqa: E402
     build_cbl_scm_from_artifact,
+    moist_scm_microphysics,
     scm_physics_config,
 )
 from legoesm.atmosphere.les_suite.score import (  # noqa: E402
@@ -100,6 +103,7 @@ from tune_scm_to_les import (  # noqa: E402
     _base_turbulence,
     _scheme_tunable_metas,
     apply_overrides_to_base,
+    with_surface_roughness,
 )
 
 #: Held-out case families (user decision 2026-10-15), matched as substrings of the
@@ -123,6 +127,34 @@ _L_CBL_HOURS = 2.0
 _L_EKMAN_G = 10.0          # m/s
 _L_EKMAN_F = 1.0e-4        # 1/s
 _L_EKMAN_PERIODS = 3       # inertial periods integrated; the last one is averaged
+
+
+def _roster_base(name):
+    """Roster closure ``name`` as ``(config, scheme_key)``. Its surface roughness is
+    a placeholder: every run sets the roughness of the case it runs
+    (:func:`_case_turb`), so this value never reaches a column."""
+    return _base_turbulence(name, z0_m=_L_Z0, z0h_m=_L_Z0)
+
+
+def _case_turb(turb, artifact):
+    """``turb`` with the surface roughness the LES case ran with (user 2026-10-19:
+    roughness comes from each LES case; synthetic columns record ``_L_Z0``)."""
+    return with_surface_roughness(turb, *surface_roughness(artifact))
+
+
+def _require_kessler(artifact):
+    """User 2026-10-19: every moist case is scored with Kessler. A moist reference
+    must record its LES scheme (no legacy fallback) and that scheme must be Kessler."""
+    if not artifact.is_moist:
+        return
+    if "microphysics" not in (artifact.les_setup or {}):
+        raise ValueError(f"{artifact.case_name}: a moist reference must record its "
+                         "LES microphysics; the harness scores moist cases with "
+                         "Kessler only")
+    scheme = moist_scm_microphysics(artifact).scheme
+    if scheme != "kessler":
+        raise ValueError(f"{artifact.case_name}: the reference records microphysics "
+                         f"{scheme!r}; the harness scores moist cases with Kessler only")
 
 
 def _sha256(path) -> str:
@@ -166,7 +198,8 @@ class Arm:
     def prepare(self, artifact, *, turb=None, nlev, dt):
         """Build the SCM for ``artifact`` once (concrete config): ``(scm, physics,
         u_geo, v_geo, f_c)`` on the column, reusable across parameter values."""
-        turb = self.base_turb if turb is None else turb
+        _require_kessler(artifact)
+        turb = _case_turb(self.base_turb if turb is None else turb, artifact)
         scm, _grid = build_cbl_scm_from_artifact(artifact, turb, les_tuned=False,
                                                 nlev=nlev, dt=dt)
         forcing = scm.forcing_arg
@@ -194,7 +227,7 @@ class Arm:
         if self.candidate is not None:
             raise ValueError("run_with_turb is for baseline arms (no candidate)")
         scm, _, ug, vg, f_c = prep
-        cfg = scm_physics_config(artifact, turb)
+        cfg = scm_physics_config(artifact, _case_turb(turb, artifact))
         col = copy.copy(scm)
         col.physics_fn = make_physics(cfg, model_type="hydrostatic", dt=scm.dt)
         return rollout(col, cfg, nsteps, f_c=f_c, u_geo=ug, v_geo=vg)
@@ -230,7 +263,7 @@ def _l_neutral(arm, nlev, dt):
     art = synthetic_artifact(
         "L_neutral_sl", z, _L_THETA0 + tstar / kap * jnp.log(z / _L_Z0),
         _L_USTAR / kap * jnp.log(z / _L_Z0), jnp.zeros_like(z),
-        w_theta_s=_L_NEUTRAL_WTH, hours=1.0, nframes=2)
+        w_theta_s=_L_NEUTRAL_WTH, hours=1.0, nframes=2, z0_m=_L_Z0)
     rec, _ = arm.run(art, 1, params=arm_params(arm), nlev=nlev, dt=dt)
     return rec, neutral_surface_layer_metrics(rec.at(0), rec.fluxes_of_step(0),
                                               z_max=_L_SL_ZMAX)
@@ -243,7 +276,7 @@ def _l_stable(arm, nlev, dt):
         gamma = ri * _L_THETA0 * _L_STABLE_S ** 2 / constants.g
         art = synthetic_artifact(
             f"L_stable_ri{ri:g}", z, _L_THETA0 + gamma * z, 1.0 + _L_STABLE_S * z,
-            jnp.zeros_like(z), w_theta_s=_L_STABLE_WTH, hours=1.0, nframes=2)
+            jnp.zeros_like(z), w_theta_s=_L_STABLE_WTH, hours=1.0, nframes=2, z0_m=_L_Z0)
         rec, _ = arm.run(art, 1, params=arm_params(arm), nlev=nlev, dt=dt)
         out[f"Ri={ri:g}"] = stable_metrics(rec.at(0), rec.fluxes_of_step(0),
                                            _L_STABLE_HEIGHTS)
@@ -255,7 +288,7 @@ def _l_cbl(arm, nlev, dt):
     theta = _L_THETA0 + _L_CBL_GAMMA * jnp.maximum(z - _L_CBL_ZI0, 0.0)
     art = synthetic_artifact("L_free_convection", z, theta, jnp.zeros_like(z),
                              jnp.zeros_like(z), w_theta_s=_L_CBL_Q0,
-                             hours=_L_CBL_HOURS, nframes=13)
+                             hours=_L_CBL_HOURS, nframes=13, z0_m=_L_Z0)
     n = _nsteps(art, dt)
     rec, _ = arm.run(art, n + 1, params=arm_params(arm), nlev=nlev, dt=dt)
     col = rec.at(n)  # profile and flux of the same column, at the end time
@@ -268,7 +301,8 @@ def _l_ekman(arm, nlev, dt):
     hours = _L_EKMAN_PERIODS * 2.0 * math.pi / _L_EKMAN_F / 3600.0
     art = synthetic_artifact("L_neutral_ekman", z, jnp.full_like(z, _L_THETA0),
                              jnp.full_like(z, _L_EKMAN_G), jnp.zeros_like(z),
-                             w_theta_s=0.0, hours=hours, nframes=2, f_c=_L_EKMAN_F,
+                             w_theta_s=0.0, hours=hours, nframes=2, z0_m=_L_Z0,
+                             f_c=_L_EKMAN_F,
                              u_geo=_L_EKMAN_G, v_geo=0.0)
     n = int(round(hours * 3600.0 / dt))
     rec, _ = arm.run(art, n, params=arm_params(arm), nlev=nlev, dt=dt)
@@ -372,30 +406,49 @@ def stage_l(arms: dict, artifacts, nlev, dt) -> dict:
 
 #: Artifact channels indexed by output time: 2-D (nt, nz) profile series, and these
 #: 1-D (nt,) surface series. Selected by NAME, never by matching a dimension length.
-_TIME_SERIES_1D = ("w_theta_s", "w_qv_s", "T_s", "tau_x_s", "tau_y_s")
-_TIME_INTEGRALS = ("w_theta_s_cum", "tau_x_s_cum", "tau_y_s_cum")
+_TIME_SERIES_1D = ("w_theta_s", "w_qv_s", "T_s", "tau_x_s", "tau_y_s", "precip_s")
+#: running time integrals of a 1-D series, rebuilt from the frame-``k`` value
+_TIME_INTEGRALS = {"w_theta_s_cum": "w_theta_s", "w_qv_s_cum": "w_qv_s",
+                   "precip_s_cum": "precip_s", "tau_x_s_cum": "tau_x_s",
+                   "tau_y_s_cum": "tau_y_s"}
+#: running time integrals of a time-varying forcing profile (nt, nz)
+_FORCING_INTEGRALS = tuple(f"{c}_cum" for c in CUM_CHANNELS)
 _STATIC_FIELDS = ("case_name", "sgs", "heights_m", "times_s", "f_c", "prescribe",
                   "les_setup", "u_geo", "v_geo", "subsidence_w", "theta_adv", "qv_adv")
 
 
+def _forcing_rate_at(art, name, k):
+    """The rate the LES applied right after frame ``k`` (``(nz,)``), from the running
+    integral ``name``: the step mean over the interval that starts at frame ``k``
+    (the last frame uses the interval that ends there)."""
+    t = jnp.asarray(art.times_s)
+    c = jnp.asarray(getattr(art, name))
+    a = k if k + 1 < t.shape[0] else k - 1
+    return (c[a + 1] - c[a]) / (t[a + 1] - t[a])
+
+
 def _frame_artifact(art, k):
     """A two-frame reference whose t=0 is frame ``k`` (the a-priori state); the surface
-    series hold their frame-``k`` value and the flux integral is rebuilt to match."""
+    series hold their frame-``k`` value and their integrals are rebuilt to match; a
+    time-varying forcing holds the rate the LES applied right after frame ``k``."""
     sel = jnp.asarray([k, k])
+    times = jnp.asarray([0.0, 3600.0])
     fields = {}
     for f in dataclasses.fields(art):
         val = getattr(art, f.name)
         if val is None or f.name in _STATIC_FIELDS:
             continue
         if f.name in _TIME_INTEGRALS:
-            fields[f.name] = None
+            series = getattr(art, _TIME_INTEGRALS[f.name])
+            fields[f.name] = (None if series is None
+                              else times * jnp.asarray(series)[k])
+        elif f.name in _FORCING_INTEGRALS:
+            fields[f.name] = times[:, None] * _forcing_rate_at(art, f.name, k)[None, :]
         elif f.name in _TIME_SERIES_1D or jnp.asarray(val).ndim == 2:
             fields[f.name] = jnp.asarray(val)[sel]
         else:
             raise ValueError(f"_frame_artifact: unclassified artifact field {f.name!r}")
-    fields["times_s"] = jnp.asarray([0.0, 3600.0])
-    if art.w_theta_s_cum is not None:
-        fields["w_theta_s_cum"] = fields["times_s"] * jnp.asarray(art.w_theta_s)[k]
+    fields["times_s"] = times
     return dataclasses.replace(art, **fields)
 
 
@@ -547,7 +600,7 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, steps, lr,
                                                   params=tuned)}
         res["arms"]["candidate:" + cand.name] = entry
     for name in base_names:
-        base, key = _base_turbulence(name)
+        base, key = _roster_base(name)
         arm = Arm(base)
         entry = {"default": _case_scores(arm, artifacts, nlev, dt)}
         tuned_turb, why_not = les_tuned_arm(base)
@@ -581,7 +634,7 @@ def stage_e0(cand_arm, artifacts, nlev, dt) -> dict:
     z = jnp.arange(10.0, 1000.0, 20.0)
     gamma = 0.25 * _L_THETA0 * _L_STABLE_S ** 2 / constants.g
     st = synthetic_artifact("E0_stable", z, _L_THETA0 + gamma * z, 1.0 + _L_STABLE_S * z,
-                            jnp.zeros_like(z), w_theta_s=_L_STABLE_WTH, hours=1.0, nframes=2)
+                            jnp.zeros_like(z), w_theta_s=_L_STABLE_WTH, hours=1.0, nframes=2, z0_m=_L_Z0)
     cols["stable_ri0.25"] = Arm(cand_arm.base_turb).run(st, 1, nlev=nlev, dt=dt)[0].at(0)
     for path, art in artifacts:
         cols["t0:" + Path(path).name] = Arm(cand_arm.base_turb).run(
@@ -654,12 +707,12 @@ def main(argv=None) -> int:
     if args.candidate is not None:
         cand = load_candidate(args.candidate)
         check_kind_choices(cand.kind, args.heat_form, args.ke_heating)
-        base, _key = _base_turbulence(args.baseline)
+        base, _key = _roster_base(args.baseline)
         cand_arm = Arm(base, cand, args.heat_form,
                        None if args.ke_heating is None else args.ke_heating == "on")
         arms["candidate:" + cand.name] = cand_arm
     for name in args.baseline_only:
-        arms["baseline:" + name] = Arm(_base_turbulence(name)[0])
+        arms["baseline:" + name] = Arm(_roster_base(name)[0])
     if args.stage == "E0":
         result = stage_e0(cand_arm, artifacts, args.nlev, args.dt)
     elif args.stage == "L":

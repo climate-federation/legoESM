@@ -10,15 +10,13 @@ accretion), then pinned EXACTLY vs an independent NumPy reimpl using LITERAL
 constants:
   * autoconversion A = k1·max(q_c − a, 0), k1 = a = 1e-3 (Kessler/Klemp-Wilhelmson);
   * accretion C = k2·q_c·q_r^0.875, k2 = 2.2, exponent 0.875;
-  * latent heating dT/dt = L_v·(cond − evap)/c_pd.
+  * latent heating dT/dt = L_v·(cond − evap)/c_pd;
+  * rain evaporation = Klemp & Wilhelmson (1978) as coded in WRF
+    module_mp_kessler.F (cgs rain content, p in Pa), pinned against a literal-
+    constant NumPy reimpl, with its sub-saturation cap.
 A separate constants canary pins the production private exponents == the literals.
 
 DEPARTURE / SURROGATE (locked + labeled):
-  * rain-evaporation SURROGATE rate E = evap_coeff·((q_sat − q_v)/q_sat)·q_r^0.525 —
-    only the Marshall-Palmer ventilation exponent 0.525 is Kessler-lineage (classic
-    Klemp-Wilhelmson also has a 1/ρ factor, a ventilation polynomial, and a
-    thermodynamic-resistance denominator, all lumped into evap_coeff); pinned
-    against the PRODUCTION surrogate form;
   * constant rain fall speed (V_t independent of q_r) ⇒ sedimentation flux LINEAR in
     q_r, NOT the Kessler q_r^1.1364 law; a single-layer precip magnitude also pins
     V_t = rain_fall_speed at the surface (ρ=ρ_sfc);
@@ -93,10 +91,14 @@ def _accretion_numpy(q_c, q_r, cfg):
     return cfg.accretion_coeff * q_c * (max(q_r, 0.0) ** 0.875)
 
 
-def _rain_evap_numpy(q_v, q_r, q_sat, cfg):
-    # Independent reimpl: LITERAL Marshall-Palmer ventilation exponent 0.525.
-    sub = max(q_sat - q_v, 0.0) / max(q_sat, 1.0e-10)
-    return cfg.evaporation_coeff * sub * (max(q_r, 0.0) ** 0.525)
+def _rain_evap_numpy(q_v, q_r, q_sat, p, rho, cfg):
+    # Independent reimpl of WRF module_mp_kessler.F's ern / dt with LITERAL
+    # constants: rcgs = 0.001*rho, (1.6+124.9*(rcgs*qr)**.2046)*(rcgs*qr)**.525
+    # / (2.55e8/(p*qvs)+5.4e5) * dim(qvs,qv)/(rcgs*qvs)   (p in Pa)
+    rcgs = 0.001 * rho
+    c = rcgs * max(q_r, 0.0)
+    return (cfg.evaporation_coeff * (1.6 + 124.9 * c ** 0.2046) * c ** 0.525
+            / (2.55e8 / (p * q_sat) + 5.4e5) * max(q_sat - q_v, 0.0) / (rcgs * q_sat))
 
 
 # ===========================================================================
@@ -144,24 +146,25 @@ def test_faithful_kessler_accretion_pinned():
     assert _s(o.dq_c_dt) == pytest.approx(-accr, rel=1e-12, abs=1e-18)
 
 
-def test_departure_kessler_rain_evaporation_surrogate_pinned():
-    """Rain-evaporation SURROGATE rate: subsaturated, q_c=0 ⇒ dq_v=+evap.
+@pytest.mark.parametrize("rho", [0.6, 1.0, 1.2])
+def test_faithful_kessler_rain_evaporation_klemp_wilhelmson_pinned(rho):
+    """Rain evaporation = Klemp & Wilhelmson (1978): subsaturated, q_c=0 ⇒ dq_v=+evap.
 
-    Pins the PRODUCTION surrogate ``evap_coeff·((q_sat−q_v)/q_sat)·q_r^0.525`` (only
-    the 0.525 ventilation exponent is Kessler-lineage) against an independent NumPy
-    reimpl.  q_c=0 kills autoconversion, accretion, and cloud evaporation; the rate
-    is kept below the donor clamp (evap·dt < q_r) so the surrogate is exercised
-    unclamped.  The latent-heat coupling dT=-L_v·evap/c_pd IS the faithful part.
+    Pinned against the literal-constant WRF form. q_c=0 kills autoconversion,
+    accretion and cloud evaporation; the rate is far below both caps (q_r/dt and
+    the sub-saturation), so the formula itself is exercised. The previous
+    surrogate (evap_coeff·deficit·q_r^0.525) is ~10³× larger here and fails.
     """
     cfg = KesslerConfig()
     T, p = 290.0, 8.0e4
     qs = _q_sat(T, p)
-    sub_frac = 0.05                 # RH = 95 %
-    q_v = qs * (1.0 - sub_frac)
-    q_r = 5.0e-3                    # large enough that evap·dt < q_r (unclamped)
-    o = _run(T, q_v, 0.0, q_r, cfg, p=p, dt=1.0)
-    evap = _rain_evap_numpy(q_v, q_r, qs, cfg)
-    assert evap * 1.0 < q_r         # confirm we are below the donor clamp
+    q_v = qs * 0.8                  # RH = 80 %
+    q_r = 1.0e-3
+    o = _run(T, q_v, 0.0, q_r, cfg, p=p, rho=rho, dt=1.0)
+    evap = _rain_evap_numpy(q_v, q_r, qs, p, rho, cfg)
+    assert 1e-7 < evap < 1e-2 * q_r   # magnitude of the published rate; unclamped
+    surrogate = 0.2 * q_r ** 0.525
+    assert surrogate > 100.0 * evap
     assert _s(o.dq_v_dt) == pytest.approx(evap, rel=1e-12, abs=1e-18)
     assert _s(o.dq_c_dt) == pytest.approx(0.0, abs=1e-15)
     dT = -constants.L_v * evap / constants.c_pd
@@ -213,17 +216,17 @@ def test_departure_kessler_constant_terminal_velocity():
 def test_departure_kessler_rain_evap_donor_clamped():
     """Rain evaporation is donor-clamped: evap·dt ≤ q_r (positivity surrogate).
 
-    With a large deficit and small q_r, the unclamped Marshall-Palmer rate exceeds
-    q_r/dt, so production returns exactly q_r/dt — NOT the unclamped formula.
+    With a large deficit, a trace of rain and a long step, the unclamped KW78 rate
+    exceeds q_r/dt, so production returns exactly q_r/dt — NOT the unclamped formula.
     """
     cfg = KesslerConfig()
     T, p = 290.0, 8.0e4
     qs = _q_sat(T, p)
     q_v = qs * 0.8          # RH 80 %, large deficit
-    q_r = 1.0e-4
-    dt = 1.0
-    o = _run(T, q_v, 0.0, q_r, cfg, p=p, dt=dt)
-    unclamped = _rain_evap_numpy(q_v, q_r, qs, cfg)
+    q_r = 1.0e-9
+    dt = 1000.0
+    o = _run(T, q_v, 0.0, q_r, cfg, p=p, rho=1.0, dt=dt)
+    unclamped = _rain_evap_numpy(q_v, q_r, qs, p, 1.0, cfg)
     assert unclamped * dt > q_r                              # clamp genuinely fires
     assert _s(o.dq_v_dt) == pytest.approx(q_r / dt, rel=1e-12)  # clamped to q_r/dt
 
@@ -259,3 +262,43 @@ def test_dispatch_unknown_scheme_raises():
     """Dispatch hardening: an unknown microphysics scheme raises ValueError."""
     with pytest.raises(ValueError, match="[Uu]nknown microphysics scheme"):
         get_microphysics_fn(MicrophysicsConfig(scheme="not_a_scheme"))
+
+
+def test_kw78_rain_cannot_evaporate_past_the_cloud_left_subsaturation():
+    """WRF ``max(-prod - qc, 0)`` cap: rain evaporates only the sub-saturation that
+    remains after all cloud water has evaporated (``demand`` = the signed
+    saturation-adjustment rate, negative when sub-saturated)."""
+    from legoesm.atmosphere.physics.microphysics.kessler import kw78_rain_evaporation
+
+    def a(v):
+        return jnp.array([[v]], dtype=jnp.float64)
+    T, p, dt = 290.0, 8.0e4, 1.0
+    qs = _q_sat(T, p)
+    q_v, q_r = qs * 0.8, 1.0e-3
+    free = _s(kw78_rain_evaporation(a(q_v), a(q_r), a(0.0), a(qs), a(p), a(1.0),
+                                    a(-1.0), dt))
+    assert free == pytest.approx(_rain_evap_numpy(q_v, q_r, qs, p, 1.0, KesslerConfig()),
+                                 rel=1e-12)
+    # cloud water already able to absorb the whole deficit -> no rain evaporation
+    assert _s(kw78_rain_evaporation(a(q_v), a(q_r), a(2e-3), a(qs), a(p), a(1.0),
+                                    a(-1e-3), dt)) == 0.0
+    # partly absorbed -> capped at the remainder
+    capped = _s(kw78_rain_evaporation(a(q_v), a(q_r), a(1e-3), a(qs), a(p), a(1.0),
+                                      a(-1e-3 - 0.5 * free), dt))
+    assert capped == pytest.approx(0.5 * free, rel=1e-9)
+
+
+def test_kw78_cap_is_the_unsmoothed_subsaturation_of_the_scheme():
+    """In the scheme, the WRF ``max(-prod - qc, 0)`` cap uses the HARD adjustment
+    amount ``prod = (q_v - q_s)/(1 + L_v dq_s/dT / c_pd)``, not the sigmoid-smoothed
+    condensation rate (which is < half of it in sub-saturated air)."""
+    cfg = KesslerConfig()
+    T, p, dt = 290.0, 8.0e4, 1000.0
+    qs = _q_sat(T, p)
+    q_v, q_r = 0.5 * qs, 1.0e-2
+    psy = 1.0 + constants.L_v ** 2 * qs / (constants.R_v * T ** 2 * constants.c_pd)
+    cap = (qs - q_v) / (psy * dt)
+    assert _rain_evap_numpy(q_v, q_r, qs, p, 1.0, cfg) > 2.0 * cap   # cap binds ...
+    assert q_r / dt > 2.0 * cap                                      # ... alone
+    o = _run(T, q_v, 0.0, q_r, cfg, p=p, rho=1.0, dt=dt)
+    assert _s(o.dq_v_dt) == pytest.approx(cap, rel=1e-9)

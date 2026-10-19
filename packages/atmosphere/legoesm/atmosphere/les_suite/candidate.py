@@ -60,7 +60,9 @@ class ColumnInputs(NamedTuple):
     ``uw_s``, ``vw_s`` [m²/s²]; Coriolis ``f_c`` [1/s]; geostrophic wind
     ``u_geo``, ``v_geo`` (n,); step ``dt`` [s]; the actual temperature ``temp`` [K],
     vapour ``q_v`` and cloud liquid ``q_c`` [kg/kg] (n,) the column carries
-    (``theta_l``/``q_t`` are their conserved combinations).
+    (``theta_l`` = θ − L_v q_c/(c_pd Π); ``q_t`` is the total water q_v + q_c + q_r,
+    rain included as the LES records it); the surface roughness ``z0_m``, ``z0h_m``
+    [m] of the LES case the column runs (NaN when the column has none).
     """
 
     z_full: Array
@@ -87,6 +89,8 @@ class ColumnInputs(NamedTuple):
     temp: Array
     q_v: Array
     q_c: Array
+    z0_m: Array
+    z0h_m: Array
 
 
 class Candidate(NamedTuple):
@@ -300,7 +304,7 @@ def column_energy_budget(tend: CandidateTendencies, flux_a: Array, flux_b: Array
 def column_inputs(*, z_full, z_half, rho_full, rho_half, mass, exner, exner_half,
                   p_full, p_half, theta_l, q_t, u, v, w_theta_s, w_qt_s, uw_s, vw_s,
                   f_c=0.0, u_geo=None, v_geo=None, dt, temp=None, q_v=None,
-                  q_c=None) -> ColumnInputs:
+                  q_c=None, z0_m=None, z0h_m=None) -> ColumnInputs:
     """Assemble :class:`ColumnInputs` (surface-first arrays; scalars broadcast).
 
     ``temp``/``q_v``/``q_c`` given together, or all omitted for a cloud-free column
@@ -324,7 +328,9 @@ def column_inputs(*, z_full, z_half, rho_full, rho_half, mass, exner, exner_half
         v_geo=zeros if v_geo is None else _s(v_geo), dt=_s(dt),
         temp=_s(theta_l) * _s(exner) if temp is None else _s(temp),
         q_v=_s(q_t) if q_v is None else _s(q_v),
-        q_c=zeros if q_c is None else _s(q_c))
+        q_c=zeros if q_c is None else _s(q_c),
+        z0_m=_s(jnp.nan if z0_m is None else z0_m),
+        z0h_m=_s(jnp.nan if z0h_m is None else z0h_m))
 
 
 def half_level_average(full: Array, surface_value: Array) -> Array:

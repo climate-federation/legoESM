@@ -280,6 +280,53 @@ DEPHY_SCM_CASES: dict[str, DEPHYCaseSpec] = {
              "quantities.",
         rename=_COMBLE_RENAME,
     ),
+    "gabls4_stage3": DEPHYCaseSpec(
+        sha256="ef7cf0bc5f31fd329ea41b9152010d828b1b147aeaf2389b87160f08df6d01cd",
+        url=f"{_DEPHY_RAW}/GABLS4/STAGE3/GABLS4_STAGE3_SCM_driver.nc",
+        filename="GABLS4_STAGE3_SCM_driver.nc",
+        reference="Couvreux et al. (2020, BLM 176, 369-400), "
+                  "doi:10.1007/s10546-020-00539-4",
+        regime="very stable boundary layer (diurnal cycle over snow)",
+        campaign="GABLS4, Dome C, 11 December 2009",
+        note="Dry case, no radiation or advection: the forcing is a "
+             "height-varying geostrophic wind constant in time and a prescribed "
+             "surface temperature series (hourly, 36 h from 00 UTC). Roughness "
+             "z0=1e-3 m, z0h=1e-4 m (the paper's experiment 2).",
+    ),
+    "gabls4_stage3_short": DEPHYCaseSpec(
+        sha256="f6e947e45eb2fe9498c0607a77f222e8ff75fc2c7b2aa3ff6b39126c602b2d9d",
+        url=f"{_DEPHY_RAW}/GABLS4/STAGE3-SHORT/GABLS4_STAGE3-SHORT_SCM_driver.nc",
+        filename="GABLS4_STAGE3-SHORT_SCM_driver.nc",
+        reference="Couvreux et al. (2020, BLM 176, 369-400), "
+                  "doi:10.1007/s10546-020-00539-4",
+        regime="very stable boundary layer (evening transition)",
+        campaign="GABLS4, Dome C, 11 December 2009",
+        note="The paper's experiment 3: 10 h from 10 UTC, initialised from the "
+             "ensemble mean of experiment 2, same forcing and roughness.",
+    ),
+    **{
+        f"ayotte_{sub.lower()}": DEPHYCaseSpec(
+            sha256=digest,
+            url=f"{_DEPHY_RAW}/AYOTTE/{sub}/AYOTTE_{sub}_SCM_driver.nc",
+            filename=f"AYOTTE_{sub}_SCM_driver.nc",
+            reference="Ayotte et al. (1996, BLM 79, 131-175)",
+            regime=("neutral" if sub.startswith("00") else "convective")
+                   + " sheared boundary layer under a "
+                   + ("weak" if sub.endswith("WC") else "strong") + " capping inversion",
+            campaign="Ayotte et al. (1996) idealised shear/inversion matrix",
+            note="Dry, constant geostrophic wind 15 m/s at 45 N, z0=0.16 m, a "
+                 "constant prescribed sensible heat flux, 7 h. DEPHY stores the "
+                 "flux in W/m2.",
+        )
+        for sub, digest in (
+            ("00SC", "299e5a54f214a0e83ef292384e8b1a192d20cab1a8e029613de6eed36d521c4f"),
+            ("00WC", "d206adf0bbe93dc066f901ee267d0418f7e8040b16747f68620341fb9d2362f6"),
+            ("03SC", "930a70ce3fb8f1eb731620329edba3b917ecb43eb1a1b34eb7c3ace705d645fc"),
+            ("05SC", "4cd1aa45a73d37956e9012d084fc6dfaf1085b7bfd178e3697e0967819d3a471"),
+            ("05WC", "c16e4ead9e276454c89c7f9931889a7019ea0444135a827345168c2cc87c6a89"),
+            ("24SC", "accf476865bcd054e1104bfd4b8464384aa7e1250404e34456f577a1ad3cebac"),
+        )
+    },
 }
 
 
@@ -348,6 +395,197 @@ def load_dephy_case(name: str, *, verify: bool = True, **kwargs) -> DEPHYSCMCase
             )
     kwargs.setdefault("rename", spec.rename_map)
     return load_dephy_scm_case(path, **kwargs)
+
+
+@dataclass(frozen=True)
+class DEPHYLESForcing:
+    """A DRY, height-based DEPHY case read for a doubly-periodic LES.
+
+    Profiles are on the file's own height levels ``z_m`` (DEPHY ``zh`` at t0);
+    the LES interpolates them to its grid. Exactly one of ``w_theta_s`` (a
+    prescribed kinematic potential-temperature flux, +up, [K m/s]) or
+    ``theta_s`` (a prescribed surface potential temperature [K]) is set, each a
+    series on ``time_s``."""
+
+    case_id: str
+    z_m: np.ndarray
+    theta_K: np.ndarray
+    u_m_s: np.ndarray
+    v_m_s: np.ndarray
+    ug_m_s: np.ndarray
+    vg_m_s: np.ndarray
+    lat_deg: float
+    z0_m: float
+    z0h_m: float | None
+    p_s_Pa: float
+    time_s: np.ndarray
+    duration_s: float
+    w_theta_s: np.ndarray | None
+    theta_s: np.ndarray | None
+
+
+# DEPHY switches a dry periodic LES (geostrophic wind + a surface condition) can
+# honour; any OTHER nonzero adv_*/forc_*/nudging_* switch is refused (whitelist,
+# so a forcing channel this list does not know is never silently dropped).
+# forc_z says forcing is given on heights (the LES reads ``zh``); pressure-level
+# forcing (forc_p) is refused.
+_LES_ACCEPTED_SWITCHES = frozenset({"forc_geo", "forc_z"})
+_LES_SWITCH_PREFIXES = ("adv_", "forc_", "nudging_")
+
+
+def _switch_off(value) -> bool:
+    """A DEPHY 0/1 switch that is numerically 0 (anything else counts as on)."""
+    try:
+        return float(value) == 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _require_increasing(case: str, label: str, arr) -> None:
+    """A 1-D coordinate the LES interpolates on must be finite and strictly
+    increasing (np.interp silently mis-reads anything else)."""
+    a = np.asarray(np.ma.filled(arr, np.nan), dtype=np.float64)
+    if a.ndim != 1 or a.size == 0 or not np.all(np.isfinite(a)) or np.any(np.diff(a) <= 0):
+        raise ValueError(f"DEPHY case {case!r}: {label} must be a finite, strictly "
+                         "increasing 1-D coordinate")
+
+
+def _require_time_constant(case: str, label: str, arr) -> None:
+    """The WHOLE series (axis 0 = time) is finite, non-empty and equal to its first
+    slice; a missing value anywhere is an error, never hidden by the comparison."""
+    a = np.asarray(np.ma.filled(arr, np.nan), dtype=np.float64)
+    if a.size == 0 or not np.all(np.isfinite(a)):
+        raise ValueError(f"DEPHY case {case!r}: {label} is empty or has missing / "
+                         "non-finite values")
+    if np.any(a != a[0]):
+        raise ValueError(f"DEPHY case {case!r}: {label} varies in time; the LES "
+                         "applies it as a constant")
+
+
+def _exactly_zero(arr) -> bool:
+    """Non-empty, every value finite and exactly 0 (a missing value is not 0)."""
+    a = np.asarray(np.ma.filled(arr, np.nan), dtype=np.float64)
+    return bool(a.size > 0 and np.all(np.isfinite(a)) and np.all(a == 0.0))
+
+
+def load_dephy_les_forcing(name: str, *, verify: bool = True) -> DEPHYLESForcing:
+    """Read a named DEPHY case as the forcing of a DRY doubly-periodic LES.
+
+    Raises (never silently drops) if the case carries anything such an LES
+    cannot run: advection, large-scale vertical motion, nudging, radiation,
+    moisture (in the profiles, or a nonzero surface moisture forcing), no
+    geostrophic forcing, a surface wind condition other than ``z0``, or a
+    time-varying geostrophic wind, latitude or roughness.
+
+    Surface forcing, by ``surface_forcing_temp``:
+
+    * ``"surface_flux"`` — ``w'θ'_s = H / (ρ_s c_pd Π_s)``: the sensible heat flux
+      ``hfss`` [W/m²] over ``ρ_s c_pd`` is the TEMPERATURE flux (the same
+      conversion as the SCM loader, ``ρ_s`` from the file's lowest-level
+      temperature and pressure), and dividing by the surface Exner function
+      ``Π_s`` makes it the potential-temperature flux the LES transports.
+    * ``"ts"`` — ``θ_s`` from ``thetas_forc`` when the file carries it, else
+      ``ts_forc / Π_s``.
+    """
+    spec = DEPHY_SCM_CASES[name] if name in DEPHY_SCM_CASES else None
+    if spec is None:
+        raise ValueError(f"Unknown DEPHY case {name!r}; choose from "
+                         f"{sorted(DEPHY_SCM_CASES)}.")
+    path = Path(resolve_dephy_case_path(name))
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"DEPHY case {name!r} is not in the local cache: {path}\n"
+            f"    python scripts/data/fetch_dephy_cases.py --only {name}")
+    if verify and spec.sha256 and _file_sha256(path) != spec.sha256:
+        raise ValueError(f"DEPHY case {name!r}: {path} does not match the registry "
+                         "checksum")
+    ds = _open_loaded_dataset(path)
+    try:
+        bad = [a for a, v in ds.attrs.items()
+               if a.startswith(_LES_SWITCH_PREFIXES) and a not in _LES_ACCEPTED_SWITCHES
+               and not _switch_off(v)]
+        if str(ds.attrs.get("radiation", "off")).lower() != "off":
+            bad.append(f"radiation={ds.attrs.get('radiation')!r}")
+        for q in ("qv", "qt", "rv", "rt", "ql", "qi", "rl", "ri"):
+            if _has_var(ds, q) and not _exactly_zero(_squeezed_var(ds, q)):
+                bad.append(f"{q} not all exactly 0 (a moist case, or missing values)")
+        if _switch_off(ds.attrs.get("forc_geo", 0)) or str(
+                ds.attrs.get("forc_geo")).strip() not in ("1", "1.0"):
+            bad.append(f"forc_geo={ds.attrs.get('forc_geo')!r} (the LES applies ug/vg)")
+        wind = str(ds.attrs.get("surface_forcing_wind", "")).lower()
+        if wind != "z0":
+            bad.append(f"surface_forcing_wind={wind!r} (the LES wall model uses z0)")
+        moist = str(ds.attrs.get("surface_forcing_moisture", "none")).lower()
+        moist_var = {"surface_flux": "hfls", "beta": "beta"}.get(moist)
+        if moist != "none" and (moist_var is None or not _has_var(ds, moist_var)
+                                or not _exactly_zero(_squeezed_var(ds, moist_var))):
+            bad.append(f"surface_forcing_moisture={moist!r} with a nonzero or missing "
+                       f"{moist_var or 'moisture forcing'}")
+        sft = str(ds.attrs.get("surface_forcing_temp", "")).lower()
+        other = {"ts": ("hfss", "hfls"), "surface_flux": ("ts_forc", "thetas_forc")}
+        bad += [f"surface_forcing_temp={sft!r} with a nonzero {f} as well"
+                for f in other.get(sft, ())
+                if _has_var(ds, f) and not _exactly_zero(_squeezed_var(ds, f))]
+        if bad:
+            raise ValueError(f"DEPHY case {name!r} has forcing a dry periodic LES "
+                             f"cannot run: {bad}")
+        time = _time_axis(ds)
+        z = _profile_var(ds, "zh")
+        ug_t = _profile_time_var(ds, "ug", time.size)
+        vg_t = _profile_time_var(ds, "vg", time.size)
+        for label, arr in (("ug", ug_t), ("vg", vg_t)):
+            _require_time_constant(name, label, arr)
+        consts = {}
+        for key in ("lat", "z0") + (("z0h",) if _has_var(ds, "z0h") else ()):
+            series = _scalar_series(ds, key, time)
+            _require_time_constant(name, key, series)
+            consts[key] = float(series[0])
+        p_s = float(_scalar_var(ds, "ps"))
+        if _has_var(ds, "ps_forc"):
+            ps_forc = _scalar_series(ds, "ps_forc", time)
+            _require_time_constant(name, "ps_forc", ps_forc)
+            if abs(float(ps_forc[0]) - p_s) > 1e-6 * p_s:
+                raise ValueError(f"DEPHY case {name!r}: ps_forc={float(ps_forc[0])} Pa "
+                                 f"differs from the initial ps={p_s} Pa")
+        exner_s = float(np.asarray(exner_function(jnp.asarray(p_s))))
+        mode = str(ds.attrs.get("surface_forcing_temp", "none")).lower()
+        w_th = th_s = None
+        if mode == "surface_flux":
+            rho_s = float(np.asarray(compute_rho(
+                jnp.asarray(_profile_var(ds, "ta")[0]),
+                jnp.asarray(_profile_var(ds, "pa")[0]), jnp.asarray(0.0))))
+            w_th = _scalar_series(ds, "hfss", time) / (rho_s * constants.c_pd * exner_s)
+        elif mode == "ts":
+            th_s = (_scalar_series(ds, "thetas_forc", time)
+                    if _has_var(ds, "thetas_forc")
+                    else _scalar_series(ds, "ts_forc", time) / exner_s)
+        else:
+            raise ValueError(f"DEPHY case {name!r}: surface_forcing_temp={mode!r} "
+                             "is not a dry-LES surface condition")
+        out = DEPHYLESForcing(
+            case_id=str(ds.attrs.get("case", name)),
+            z_m=z, theta_K=_profile_var(ds, "theta"),
+            u_m_s=_profile_var(ds, "ua"), v_m_s=_profile_var(ds, "va"),
+            ug_m_s=np.asarray(ug_t[0]), vg_m_s=np.asarray(vg_t[0]),
+            lat_deg=consts["lat"], z0_m=consts["z0"], z0h_m=consts.get("z0h"),
+            p_s_Pa=p_s, time_s=time,
+            duration_s=float(time[-1] - time[0]),
+            w_theta_s=w_th, theta_s=th_s)
+        _require_increasing(name, "zh", out.z_m)
+        _require_increasing(name, "time", out.time_s)
+        for field in ("z_m", "theta_K", "u_m_s", "v_m_s", "ug_m_s", "vg_m_s", "lat_deg",
+                      "z0_m", "z0h_m", "p_s_Pa", "time_s", "w_theta_s", "theta_s"):
+            val = getattr(out, field)
+            if val is not None and not (np.size(val) > 0
+                                        and np.all(np.isfinite(np.ma.filled(
+                                            np.asarray(val, dtype=np.float64), np.nan)))):
+                raise ValueError(f"DEPHY case {name!r}: {field} is empty or has "
+                                 "missing / non-finite values")
+        return out
+    finally:
+        close = getattr(ds, "close", None)
+        if callable(close):
+            close()
 
 
 def load_dephy_scm_case(

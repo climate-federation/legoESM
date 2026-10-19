@@ -29,7 +29,8 @@ from pathlib import Path
 
 import numpy as np
 from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing  # noqa: F401  (doc)
-from legoesm.atmosphere.les_suite.bridge import load_artifact
+from legoesm.atmosphere.les_suite.bridge import (
+    BridgeError, load_artifact, surface_roughness)
 from legoesm.atmosphere.les_suite.candidate_eval import (
     AD_LR,
     AD_STEPS,
@@ -281,7 +282,8 @@ def _cbl_scheme_table():
     }
 
 
-def _base_turbulence(scheme: str, *, clubb_cloud_buoyancy: bool = True,
+def _base_turbulence(scheme: str, *, z0_m: float, z0h_m: float,
+                     clubb_cloud_buoyancy: bool = True,
                      clubb_cloud_source: str = "native"):
     """A CBL-appropriate base TurbulenceConfig + its registry scheme_key.
 
@@ -299,7 +301,9 @@ def _base_turbulence(scheme: str, *, clubb_cloud_buoyancy: bool = True,
             f"--scheme {scheme!r} not wired for the CBL tuner; "
             f"available: {sorted(table)}")
     config_cls, scheme_key = table[scheme]
-    surf = SurfaceLayerConfig(z0=0.1, Cd_neutral=1.5e-3, Ch_neutral=0.0)
+    # The LES case's own roughness (bridge.surface_roughness), never a stand-in.
+    surf = SurfaceLayerConfig(z0=z0_m, z0h_z0_ratio=z0h_m / z0_m,
+                              Cd_neutral=1.5e-3, Ch_neutral=0.0)
     if scheme == "clubb":
         sub = config_cls(surface=surf, cloud_buoyancy=clubb_cloud_buoyancy,
                          cloud_source=clubb_cloud_source)
@@ -307,6 +311,14 @@ def _base_turbulence(scheme: str, *, clubb_cloud_buoyancy: bool = True,
         sub = config_cls(surface=surf)
     turb = TurbulenceConfig(scheme=scheme, **{scheme: sub})
     return turb, scheme_key
+
+
+def with_surface_roughness(turb, z0_m: float, z0h_m: float):
+    """``turb`` with its scheme's surface layer set to the LES case's roughness
+    (``bridge.surface_roughness``): ``z0`` and ``z0h/z0``; every other field kept."""
+    sub = getattr(turb, turb.scheme)
+    surf = sub.surface._replace(z0=z0_m, z0h_z0_ratio=z0h_m / z0_m)
+    return turb._replace(**{turb.scheme: sub._replace(surface=surf)})
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -346,8 +358,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {args.artifact} does not exist", file=sys.stderr)
         return 2
     artifact = load_artifact(args.artifact)
+    try:
+        z0_m, z0h_m = surface_roughness(artifact)
+    except BridgeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     base, scheme_key = _base_turbulence(
-        args.scheme, clubb_cloud_buoyancy=not args.clubb_no_cloud_buoyancy,
+        args.scheme, z0_m=z0_m, z0h_m=z0h_m,
+        clubb_cloud_buoyancy=not args.clubb_no_cloud_buoyancy,
         clubb_cloud_source="shared" if args.clubb_shared_cloud else "native")
 
     results: dict = {}

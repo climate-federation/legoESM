@@ -22,8 +22,8 @@ gate-0-validated) and — when the artifact carries a geostrophic wind (``f_c!=0
 forcing is applied so the Ekman/jet dynamics reproduce the LES. Moist regimes (BOMEX
 shallow cumulus / DYCOMS stratocumulus) are wired too: an ``is_moist`` artifact drives the
 SCM with its large-scale subsidence + θ/q_v advective tendencies + surface moisture flux,
-runs diagnostic (Sundqvist) condensation, and is scored in liquid-water potential
-temperature θ_l + total water q_t (the variables the LES stores).
+runs the LES's recorded microphysics (``moist_scm_microphysics``), and is scored in
+liquid-water potential temperature θ_l + total water q_t (the variables the LES stores).
 """
 from __future__ import annotations
 
@@ -46,20 +46,24 @@ from legoesm.atmosphere.physics._shared import (
     compute_rho,
     exner_function,
 )
+from legoesm.atmosphere.physics.microphysics.integration import min_tracer_slots
 from legoesm.atmosphere.physics.turbulence.integration import (
     get_turbulence_fn,
     turbulence_scheme_traits,
 )
+from legoesm.core.tracers import make_full_moisture_registry
+from legoesm.thermo import saturation_mixing_ratio
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
 
 from .bridge import (
     LESReferenceArtifact,
     LESTruth,
     diagnostic_truth,
+    forcing_profile_fn,
     prognostic_truth,
-    surface_heat_flux_fn,
+    subsidence_tracers,
+    surface_flux_fn,
 )
 from .scm_coupling import (
     T_from_theta,
@@ -130,43 +134,151 @@ def _dry_cbl_physics(turbulence: TurbulenceConfig) -> PhysicsConfig:
     )
 
 
-def _moist_cbl_physics(turbulence: TurbulenceConfig) -> PhysicsConfig:
-    """Turbulence + diagnostic (Sundqvist) condensation for a moist shallow-cumulus SCM.
+# Microphysics of a moist SCM whose artifact does not record the LES's own
+# (artifacts emitted before the record existed): the diagnostic Sundqvist scheme
+# these artifacts were always paired with.
+_LEGACY_MOIST_SCM_MICROPHYSICS = "sundqvist"
 
-    Sundqvist is the large-scale diagnostic condensation scheme (subgrid RH>RH_crit
-    partial-cloud-fraction) appropriate at the SCM's coarse column resolution — it converts
-    supersaturated q_v to q_c with the latent-heating feedback on T, so the SCM reproduces a
-    cloud-topped moist BL (BOMEX/DYCOMS). Radiation/convection/GWD stay off (the tuned
-    turbulence closure is the object under study, per the dry regimes)."""
+
+def microphysics_record(config: MicrophysicsConfig) -> dict:
+    """JSON-serialisable record of a :class:`MicrophysicsConfig` (the active scheme
+    and its sub-config) for an artifact's ``les_setup["microphysics"]``."""
+    sub = getattr(config, config.scheme, None)
+    rec = {"scheme": config.scheme}
+    if sub is not None:
+        rec[config.scheme] = _config_to_dict(sub)
+    return rec
+
+
+def _config_to_dict(cfg) -> dict:
+    """NamedTuple → dict, nested sub-configs included (JSON keeps dicts, while a
+    bare NamedTuple would come back as a list)."""
+    return {k: (_config_to_dict(v) if hasattr(v, "_asdict") else v)
+            for k, v in cfg._asdict().items()}
+
+
+def _config_from_dict(default, rec: dict, where: str):
+    """Inverse of :func:`_config_to_dict` against the type's ``default`` instance;
+    raises on unknown fields at any depth. JSON lists return as tuples where the
+    default holds a tuple."""
+    unknown = set(rec) - set(default._fields)
+    if unknown:
+        raise ValueError(f"recorded {where} config has unknown fields {sorted(unknown)}")
+    vals = {}
+    for k, v in rec.items():
+        d = getattr(default, k)
+        if hasattr(d, "_asdict"):
+            if not isinstance(v, dict):
+                raise ValueError(f"recorded {where}.{k} must be a nested record")
+            v = _config_from_dict(d, v, f"{where}.{k}")
+        elif isinstance(d, tuple) and isinstance(v, list):
+            v = tuple(v)
+        vals[k] = v
+    return default._replace(**vals)
+
+
+def microphysics_from_record(record: dict) -> MicrophysicsConfig:
+    """Rebuild the :class:`MicrophysicsConfig` an artifact recorded with
+    :func:`microphysics_record`, so the SCM runs the LES's own scheme and
+    coefficients. Raises on an unknown scheme or sub-config field."""
+    scheme = record["scheme"]
+    defaults = MicrophysicsConfig()._field_defaults
+    if scheme not in defaults and scheme != "none":
+        raise ValueError(f"recorded microphysics scheme {scheme!r} has no "
+                         "MicrophysicsConfig sub-config")
+    kwargs = {"scheme": scheme}
+    if scheme != "none" and defaults[scheme] is not None:
+        if scheme not in record:
+            raise ValueError(f"recorded microphysics {scheme!r} lacks its {scheme} "
+                             "sub-record; its coefficients would silently be defaults")
+        kwargs[scheme] = _config_from_dict(defaults[scheme], record[scheme], scheme)
+    return MicrophysicsConfig(**kwargs)
+
+
+def _moist_cbl_physics(turbulence: TurbulenceConfig,
+                       microphysics: MicrophysicsConfig) -> PhysicsConfig:
+    """Turbulence + the given microphysics for a moist cloud-topped SCM.
+    Radiation/convection/GWD stay off (the tuned turbulence closure is the object
+    under study, per the dry regimes)."""
     return PhysicsConfig(
         radiation=RadiationConfig(scheme="none"),
         convection=ConvectionConfig(scheme="none"),
         turbulence=turbulence,
-        microphysics=MicrophysicsConfig(scheme="sundqvist"),
+        microphysics=microphysics,
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
     )
 
 
 def scm_physics_config(
-    artifact: LESReferenceArtifact, turbulence: TurbulenceConfig
+    artifact: LESReferenceArtifact, turbulence: TurbulenceConfig,
+    microphysics: MicrophysicsConfig | None = None,
 ) -> PhysicsConfig:
     """The physics config the artifact's SCM runs: turbulence only for a dry artifact,
-    turbulence + diagnostic condensation for a moist one (the selection
-    :func:`build_cbl_scm_from_artifact` applies)."""
-    return (_moist_cbl_physics(turbulence) if artifact.is_moist
-            else _dry_cbl_physics(turbulence))
+    turbulence + :func:`moist_scm_microphysics` (the scheme the LES recorded, unless
+    ``microphysics`` is given) for a moist one — the selection
+    :func:`build_cbl_scm_from_artifact` applies (user 2026-10-19: the harness SCM
+    runs each LES run's recorded scheme)."""
+    return (_moist_cbl_physics(turbulence, moist_scm_microphysics(artifact, microphysics))
+            if artifact.is_moist else _dry_cbl_physics(turbulence))
+
+
+def moist_scm_microphysics(artifact: LESReferenceArtifact,
+                           microphysics: MicrophysicsConfig | None = None
+                           ) -> MicrophysicsConfig:
+    """The microphysics a moist SCM runs against ``artifact``: an explicit
+    ``microphysics`` wins; else the scheme the LES recorded in
+    ``les_setup["microphysics"]`` (same scheme, same coefficients); else, for an
+    artifact without that record, the legacy diagnostic Sundqvist pairing."""
+    if microphysics is not None:
+        return microphysics
+    setup = artifact.les_setup or {}
+    if "microphysics" in setup:
+        return microphysics_from_record(setup["microphysics"])
+    return MicrophysicsConfig(scheme=_LEGACY_MOIST_SCM_MICROPHYSICS)
+
+
+def _seed_rain(artifact: LESReferenceArtifact, micro: MicrophysicsConfig,
+               z_les, z_scm):
+    """The rain mass to seed the SCM with at the artifact's t=0, or ``None``.
+
+    The harness scores moist cases with Kessler only (user 2026-10-19). A scheme
+    that carries rain or droplet NUMBER is refused outright: seeding its rain mass
+    would mean guessing a drop number, and folding the rain into vapour would
+    start the column from a state the LES never had. Rain under any other
+    single-moment scheme is refused too, for the same reason.
+    """
+    registry = make_full_moisture_registry()
+    slots = min_tracer_slots(micro.scheme, getattr(micro, micro.scheme, None))
+    numbers = [t.name for t in registry.tracers[:slots] if t.units != "kg/kg"]
+    if numbers:
+        raise ValueError(
+            f"{artifact.case_name}: the reference records microphysics "
+            f"{micro.scheme!r}, which carries number concentrations {numbers}; the "
+            "harness scores moist cases with Kessler only (no drop number is guessed)")
+    if artifact.qr is None:
+        return None
+    qr0 = jnp.asarray(artifact.qr)[0]
+    qc0 = 0.0 if artifact.qc is None else jnp.asarray(artifact.qc)[0]
+    if not bool(jnp.all(jnp.isfinite(qr0))) or bool(jnp.any(qr0 < 0.0)):
+        raise ValueError(f"{artifact.case_name}: recorded rain qr must be finite "
+                         "and non-negative")
+    if bool(jnp.any(qc0 + qr0 > jnp.asarray(artifact.qt)[0])):
+        raise ValueError(f"{artifact.case_name}: recorded qc + qr exceeds qt; the "
+                         "seeded vapour would be negative")
+    if not bool(jnp.any(qr0 > 0.0)):
+        return None
+    q_r = interp_profile(qr0, z_les, z_scm)
+    if micro.scheme != "kessler":
+        raise ValueError(
+            f"{artifact.case_name}: the reference carries rain at t=0 but records "
+            f"microphysics {micro.scheme!r}; rain is seeded under Kessler only")
+    return q_r
 
 
 def _const_profile(profile):
     """A time-constant SCMForcing ``ProfileFn`` returning ``profile`` for every ``t`` — used
     for the steady geostrophic wind of the sheared CBL / stable SBL."""
     return lambda _t: profile
-
-
-def _const_scalar(value):
-    """A time-constant SCMForcing ``ScalarFn`` returning ``value`` for every ``t`` (moist
-    surface moisture flux ``w_qv_s``)."""
-    return lambda _t: jnp.asarray(value)
 
 
 def _liquid_water_theta(theta: Array, q_c: Array, p: Array) -> Array:
@@ -177,6 +289,13 @@ def _liquid_water_theta(theta: Array, q_c: Array, p: Array) -> Array:
     return liquid_water_theta(theta, q_c, exner)
 
 
+def _interp_fn(fn, z_les, z_scm):
+    """A time-varying LES-grid profile ``fn(t)`` on the SCM levels (grids checked
+    once here; the callback itself is trace-safe)."""
+    interp_profile(jnp.zeros_like(jnp.asarray(z_les)), z_les, z_scm)
+    return lambda t: jnp.interp(z_scm, z_les, fn(t))
+
+
 def build_cbl_scm_from_artifact(
     artifact: LESReferenceArtifact,
     turbulence: TurbulenceConfig | str,
@@ -185,6 +304,7 @@ def build_cbl_scm_from_artifact(
     nlev: int = 32,
     sigma_top: float | None = None,
     dt: float = 5.0,
+    microphysics: MicrophysicsConfig | None = None,
 ) -> tuple[SingleColumnModel, SCMGridSpec]:
     """Build an SCM initialised to LES(t=0), driven by the artifact's CBL forcing.
 
@@ -209,6 +329,10 @@ def build_cbl_scm_from_artifact(
     LES-tuned coefficients by DEFAULT (``les_tuned=True``); pass ``les_tuned=False``
     for the library defaults. An explicit ``TurbulenceConfig`` is used verbatim --
     the caller's own config always wins, and ``les_tuned`` is ignored for it.
+
+    A moist artifact's SCM runs :func:`moist_scm_microphysics` (``microphysics`` if
+    given, else the LES's recorded scheme). Its surface heat AND moisture fluxes are
+    the realised series as step means of the recorded integrals.
     """
     if isinstance(turbulence, str):
         from legoesm.atmosphere.physics.turbulence.les_tuned import (
@@ -221,6 +345,7 @@ def build_cbl_scm_from_artifact(
         # entry, the splice is silently bypassed — warn so name-vs-config paths
         # don't diverge unnoticed (GLM review P2 #4). Pass a name to get tuning.
         import logging
+
         from legoesm.atmosphere.physics.turbulence.les_tuned import (
             load_les_tuned_overrides,
         )
@@ -262,28 +387,36 @@ def build_cbl_scm_from_artifact(
         # SCMForcing would rotate the wind toward u_g=v_g=0 (a silent wrong physics — the
         # Ekman balance is against the geostrophic wind, not zero). A sheared/stable artifact
         # always records u_geo; its absence is a malformed artifact → fail loudly.
-        if artifact.u_geo is None:
+        if artifact.u_geo is None and artifact.u_geo_cum is None:
             raise ValueError(
                 f"{artifact.case_name}: f_c={artifact.f_c:g} != 0 (Coriolis on) but the "
                 "artifact has no u_geo. A sheared CBL / stable SBL must record its "
                 "geostrophic wind; without it the SCM would spin down toward zero wind, "
                 "not the LES geostrophic balance.")
-        u_geo_scm = interp_profile(jnp.asarray(artifact.u_geo), z_les, z_scm)
-        v_geo_src = (artifact.v_geo if artifact.v_geo is not None
-                     else jnp.zeros_like(jnp.asarray(artifact.u_geo)))
-        v_geo_scm = interp_profile(jnp.asarray(v_geo_src), z_les, z_scm)
-        geo_kwargs = {"u_geo": _const_profile(u_geo_scm),
-                      "v_geo": _const_profile(v_geo_scm)}
+        if artifact.u_geo_cum is not None:
+            # a time-varying geostrophic wind (GABLS3): the step means of what the
+            # LES applied
+            geo_kwargs = {ch: _interp_fn(forcing_profile_fn(artifact, dt_s=dt,
+                                                            channel=ch), z_les, z_scm)
+                          for ch in ("u_geo", "v_geo")}
+        else:
+            u_geo_scm = interp_profile(jnp.asarray(artifact.u_geo), z_les, z_scm)
+            v_geo_src = (artifact.v_geo if artifact.v_geo is not None
+                         else jnp.zeros_like(jnp.asarray(artifact.u_geo)))
+            v_geo_scm = interp_profile(jnp.asarray(v_geo_src), z_les, z_scm)
+            geo_kwargs = {"u_geo": _const_profile(u_geo_scm),
+                          "v_geo": _const_profile(v_geo_scm)}
     # Moist regime (BOMEX/DYCOMS shallow-cumulus / stratocumulus). q_t IC (q_c≈0 at t=0 ⇒
     # q_v(t0)=q_t(t0)), plus the artifact's large-scale forcing: subsidence_w [m/s, +up],
     # the prescribed θ/q_v advective tendencies, and the surface moisture flux w_qv_s
     # [(kg/kg) m/s, +up]. These are the SAME sign conventions SCMForcing documents
     # (subsidence_w +up, prescribe='fluxes' fluxes +up), which is how the moist artifact
-    # stores them — no sign flip here. Diagnostic Sundqvist condensation (_moist_cbl_physics)
-    # then forms q_c so the SCM reproduces a cloud-topped moist BL. A dry artifact skips this
+    # stores them — no sign flip here. The microphysics (moist_scm_microphysics) then forms
+    # q_c so the SCM reproduces a cloud-topped moist BL. A dry artifact skips this
     # block entirely (byte-unchanged).
     q_v_scm = None
     q_c_scm = None
+    q_r_scm = None
     moist_kwargs: dict = {}
     if artifact.is_moist:
         # The moist artifact records LIQUID-WATER potential temperature θ_l (in
@@ -305,16 +438,21 @@ def build_cbl_scm_from_artifact(
         # A clear column gives q_c=0, θ=θ_l, q_v=q_t either way ⇒ BOMEX unchanged.
         qt0 = interp_profile(jnp.asarray(artifact.qt)[0], z_les, z_scm)
         exner = exner_function(p_full)
+        q_r_scm = _seed_rain(artifact, moist_scm_microphysics(artifact, microphysics),
+                             z_les, z_scm)
         if artifact.qc is not None:
             q_c_adj = jnp.clip(
                 interp_profile(jnp.asarray(artifact.qc)[0], z_les, z_scm), 0.0, None)
             theta_adj = theta_scm + constants.L_v / (constants.c_pd * exner) * q_c_adj
-            # q_v = q_t − q_c folds any rain q_r into vapour (q_t = q_v+q_c+q_r).
-            # Faithful for the suite's NON-precipitating moist cases (q_r≈0;
-            # RICO/precipitating is out of scope, D2) and the Sundqvist SCM carries
-            # no q_r; total water q_t is conserved regardless.
-            q_v_scm = qt0 - q_c_adj
+            # q_t = q_v + q_c + q_r: the rain the LES carried at this frame is
+            # seeded as rain (Kessler only, see _seed_rain), never folded into vapour.
+            q_v_scm = qt0 - q_c_adj - (0.0 if q_r_scm is None else q_r_scm)
         else:
+            if q_r_scm is not None:
+                raise ValueError(
+                    f"{artifact.case_name}: the reference carries rain but no "
+                    "cloud-water channel; the rain-free saturation adjustment "
+                    "cannot split its total water")
             theta_adj, q_v_scm, q_c_adj = saturation_adjust(theta_scm, qt0, exner, p_full)
             # The adjustment is a damped fixed point with a fixed trip count,
             # which contracts over this suite's boundary-layer states and NOT
@@ -341,14 +479,27 @@ def build_cbl_scm_from_artifact(
         T_profile = theta_adj * exner            # actual temperature (θ_l→θ warmed by q_c)
         if float(jnp.max(q_c_adj)) > 0.0:
             q_c_scm = q_c_adj
-        moist_kwargs["w_qv_s"] = _const_scalar(
-            float(jnp.asarray(artifact.w_qv_s)[0]))
+        # the realised surface moisture flux, as its mean over each forward-Euler
+        # step (exact recorded water even across output times)
+        moist_kwargs["w_qv_s"] = surface_flux_fn(artifact, "w_qv_s", dt_s=dt)
         for fld in ("subsidence_w", "theta_adv", "qv_adv"):
             prof = getattr(artifact, fld)
             if prof is not None:
                 moist_kwargs[fld] = _const_profile(
                     interp_profile(jnp.asarray(prof), z_les, z_scm))
-    physics = scm_physics_config(artifact, turbulence)
+        for ch in ("theta_adv", "qv_adv"):
+            if getattr(artifact, f"{ch}_cum") is not None:
+                # a time-varying forcing (DYCOMS's longwave cooling, GABLS3's
+                # advection): the step mean of what the LES applied
+                moist_kwargs[ch] = _interp_fn(
+                    forcing_profile_fn(artifact, dt_s=dt, channel=ch), z_les, z_scm)
+        if artifact.subsidence_w is not None:
+            moist_kwargs["subsidence_tracers"] = subsidence_tracers(artifact)
+    if not artifact.is_moist and artifact.theta_adv_cum is not None:
+        raise ValueError(
+            f"{artifact.case_name}: dry artifact carries theta_adv_cum, but the dry "
+            "SCM builder has no θ-forcing channel; it would be silently dropped")
+    physics = scm_physics_config(artifact, turbulence, microphysics)
     forcing = SCMForcing(
         f_c=float(artifact.f_c),
         prescribe="fluxes",
@@ -361,7 +512,7 @@ def build_cbl_scm_from_artifact(
         flux_to_closure=True,
         # the realised surface flux the LES column received, as its mean over each
         # forward-Euler step (exact recorded heat even across output times)
-        w_th_s=surface_heat_flux_fn(artifact, dt_s=dt),
+        w_th_s=surface_flux_fn(artifact, "w_theta_s", dt_s=dt),
         **geo_kwargs,
         **moist_kwargs,
     )
@@ -372,6 +523,7 @@ def build_cbl_scm_from_artifact(
         T_profile=T_profile,
         q_v_profile=q_v_scm,
         q_c_profile=q_c_scm,
+        q_r_profile=q_r_scm,
         u=u_scm,
         v=v_scm,
         p_s=_P_S_PA,

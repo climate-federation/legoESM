@@ -14,8 +14,8 @@ Faithful forms pinned:
   - spectral test filter: sharp cutoff at ``round(N/(2·FGR·TFR))`` (FGR=1) — fold the
     full-fft axis, halve the rfft axis (oracle ``Filtering_Level1/2``).
   - 3×3 periodic box average /9 (oracle ``Utilities.Imfilter``).
-  - Laguerre max-real-root-in-(0,5) β-solver, default 1.0 (oracle ``Roots`` +
-    ``ComputeBeta1``) — pinned against ``numpy.roots`` (a DIFFERENT algorithm:
+  - the max-real-root-in-(0,5) β rule, default 1.0 (oracle ``ComputeBeta1``; solved by
+    exhaustive real-root isolation, not the oracle's Laguerre ``Roots``) — pinned against ``numpy.roots`` (a DIFFERENT algorithm:
     companion-matrix eigenvalues), so the agreement is non-circular.
   - the LASDD assembly: L_ij/Q_ij Germano stresses at 2Δ/4Δ, the a1..e2 plane-mean
     contractions with the oracle's exact ``2L²``/``TFR^n``/``8L⁴`` weights, the
@@ -26,33 +26,30 @@ Departures (legoESM adaptations, documented — the scheme is otherwise faithful
   - ``cs_max`` is a CONFIGURABLE clip extension: the default cs_max=1 reproduces the
     oracle mask exactly, but cs_max != 1 changes the C_s² ceiling (a closure change).
   - C_s² uses a RAW divide after flooring the denominator (``LMx/where(|MMx|<1e-10,
-    1e-10, MMx)``) — NOT the project ``safe_divide`` helper — and a fixed-trip
-    ``lax.scan`` freeze-on-convergence Laguerre (oracle uses raw divide + ``while_loop``).
-    Both return the oracle's forward result (the |MM|<1e-10 cells are masked to 0; the
-    scan freezes the converged root to the Laguerre tol) but the scan is NOT bit-identical
-    to the while_loop; both are for reverse-mode differentiability.
+    1e-10, MMx)``) — NOT the project ``safe_divide`` helper (forward-identical: the |MM|<1e-10
+    cells are masked to 0).
+  - the β root by exhaustive isolation with an implicit-function JVP (the oracle's
+    8-guess Laguerre mis-solved the tiny Germano quintics of a real CBL; see the
+    ``test_beta_*`` defect tests).
   - a ``(ny, nx, nz)`` layout (oracle ``(nx, ny, nz)``) — a transpose convention — and
     an optional MPI y-slab distributed path (serial path pinned here).
 
-The β-solver's Laguerre tolerance is 1e-6, so the full ASSEMBLY pin reuses the
-separately-pinned ``laguerre_max_real_root_beta`` as a GIVEN (like the shared thermo in
+The β-solver is pinned to 1e-6 vs numpy.roots, so the full ASSEMBLY pin reuses the
+separately-pinned ``max_real_root_beta`` as a GIVEN (like the shared thermo in
 the convection pins) and independently reimplements only the L/Q/M/LM/MM/mask glue at
 1e-12; the solver itself is pinned to 1e-6 vs numpy.roots in its own test, AND its β on the
 assembly-produced polynomials aa..ff is cross-checked vs numpy.roots (β-realism).
 
-Differentiability: AD-safe (finite reverse-mode gradient) almost everywhere.  Two Laguerre
-singularities a repeated/degenerate β-quintic can hit are GUARDED forward-identically: (i)
-the all-zero quintic (a strain-free level → every β coefficient 0) — ``per_level`` feeds the
-solver a benign quintic and selects the default 1.0; (ii) sqrt(disc) at disc==0 (a repeated
-root such as x^5) — a double-``where`` keeps the VJP finite.  A no-root-in-(0,5) quintic (the
-default-to-1.0 branch) is also finite-gradient.  NOT smoothed (kept faithful to the oracle's
-raw sqrt): a tiny-nonzero disc from a NEAR-repeated-root gives a large-but-finite VJP — a
-measure-zero-adjacent locus a physical strain field does not reach.  Pinned by the zero-
+Differentiability: β carries the exact implicit-function derivative of the selected root
+(custom JVP, higher orders exact); an all-zero (strain-free) or no-root-in-(0,5) quintic
+returns the default 1.0 with zero gradient.  A near-multiple root has a large-but-finite
+derivative (the true one).  Pinned by the zero-
 strain, mixed dead+active level, and repeated-root (x^5) gradient tests.
 """
 
 from __future__ import annotations
 
+import pytest
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -62,7 +59,9 @@ jax.config.update("jax_enable_x64", True)
 from legoesm.atmosphere.physics.turbulence.lasd_core import (
     spectral_test_filter,
     imfilter_box3,
-    laguerre_max_real_root_beta,
+    max_real_root_beta,
+    beta_from_germano_moments,
+    comp_horner,
     lasd_cs2,
     _LASD_LILLY_COEFF,
     _TFR,
@@ -187,7 +186,7 @@ def _lasd_cs2_oracle(uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag, delta,
     elif beta_solver is not None:
         beta = beta_solver(aa, bb, cc, dd, ee, ff)
     else:
-        beta = _np(laguerre_max_real_root_beta(
+        beta = _np(max_real_root_beta(
             jnp.stack([jnp.asarray(ff), jnp.asarray(ee), jnp.asarray(dd),
                        jnp.asarray(cc), jnp.asarray(bb), jnp.asarray(aa)], -1)))
     beta3d = beta.reshape(1, 1, nz)
@@ -305,12 +304,12 @@ def test_box3_is_ninth_weight_on_delta():
     assert abs(out[0, 0, 0]) < 1e-14                    # far cell untouched
 
 
-# ---------------------------- Laguerre β-solver ------------------------------ #
+# --------------------------------- β-solver ---------------------------------- #
 
-def test_laguerre_matches_numpy_roots():
-    # Non-circular: pin the module's Laguerre solver against numpy.roots (a DIFFERENT
+def test_beta_matches_numpy_roots():
+    # Non-circular: pin the module's β solver against numpy.roots (a DIFFERENT
     # algorithm — companion-matrix eigenvalues).  Quintics with a known real root in
-    # (0,5); Laguerre tol 1e-6.
+    # (0,5); tol 1e-6.
     rng = np.random.default_rng(1)
     polys = []
     for _ in range(6):
@@ -320,24 +319,248 @@ def test_laguerre_matches_numpy_roots():
         coeffs = np.poly(np.array([target] + others))    # leading coeff 1 == ff
         polys.append((coeffs, target))
     coeffs6 = jnp.asarray(np.stack([p[0] for p in polys]))
-    beta = _np(laguerre_max_real_root_beta(coeffs6))
+    beta = _np(max_real_root_beta(coeffs6))
     for k, (coeffs, target) in enumerate(polys):
         ref = _np_beta_from_numpy_roots(*[np.array([coeffs[5 - i]]) for i in range(6)])
         assert abs(beta[k] - ref[0]) < 1e-6              # matches numpy.roots
         assert abs(beta[k] - target) < 1e-6             # and the constructed root
 
 
-def test_laguerre_defaults_to_one_when_no_root_in_range():
+@pytest.mark.parametrize("scale", [1e-17, 1e-30, 1e-49, 1e20])
+def test_beta_is_invariant_to_coefficient_scale(scale):
+    # Roots do not depend on the polynomial's overall scale; the Germano plane-mean
+    # coefficients of a real CBL are O(1e-49..1e-17), where an unnormalised |p| < tol
+    # stop test declares every guess converged at once (measured: residual 0.9).
+    rng = np.random.default_rng(2)
+    polys = []
+    for _ in range(6):
+        target = rng.uniform(0.5, 3.0)
+        others = [rng.uniform(5.5, 8.0), 6.0 + 1.0j, 6.0 - 1.0j, rng.uniform(-4.0, -0.5)]
+        polys.append((np.poly(np.array([target] + others)).real, target))
+    coeffs6 = jnp.asarray(np.stack([scale * p[0] for p in polys]))
+    beta = _np(max_real_root_beta(coeffs6))
+    for k, (_, target) in enumerate(polys):
+        assert abs(beta[k] - target) < 1e-6, (scale, k, beta[k], target)
+
+
+def test_beta_finds_an_odd_multiple_root():
+    # (x-2.5)^5: a 5-fold root is only resolvable to ~eps^(1/5) ~ 7e-4 by any method
+    coeffs = np.poly(np.full(5, 2.5))
+    beta = float(_np(max_real_root_beta(jnp.asarray(coeffs[None, :])))[0])
+    assert abs(beta - 2.5) < 5e-3, beta
+
+
+@pytest.mark.parametrize("roots", [[0.0, 6.0, 7.0, 8.0, 9.0], [0.0] * 5,
+                                   [5.0, 6.0, 7.0, -1.0, -2.0]])
+def test_beta_excludes_roots_on_the_window_edges(roots):
+    # roots exactly at 0 or 5 are outside the OPEN (0, 5): default 1.0
+    coeffs = np.poly(np.array(roots))
+    beta = float(_np(max_real_root_beta(jnp.asarray(coeffs[None, :])))[0])
+    assert beta == 1.0, beta
+
+
+@pytest.mark.parametrize("root,dtype", [(5.0 - 2.0 ** -47, jnp.float64),
+                                        (5.0 - 2.0 ** -17, jnp.float32)])
+def test_beta_keeps_an_interior_root_next_to_the_edge(root, dtype):
+    # a root one-few ulps inside 5 is a valid β (codex round 6: edge snapping lost it)
+    c = jnp.asarray([[0.0, 0.0, 0.0, 0.0, 1.0, -root]], dtype)
+    np.testing.assert_allclose(float(_np(max_real_root_beta(c))[0]), root, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype,big", [(jnp.float64, 2.0 ** 1022), (jnp.float32, 2.0 ** 126)])
+def test_beta_normalisation_does_not_overflow(dtype, big):
+    # finite coefficients near the float limit (codex round 7: a built 2^e overflowed)
+    c = jnp.asarray([[0.0, 0.0, 0.0, 0.0, big, -2.0 * big]], dtype)
+    assert float(_np(max_real_root_beta(c))[0]) == 2.0
+    g = jax.grad(lambda c: jnp.sum(max_real_root_beta(c)))(c)
+    assert np.all(np.isfinite(np.asarray(g, np.float64)))
+
+
+def test_compensated_horner_products_are_error_free_under_jit():
+    # Dekker's TwoProduct is exact only if the compiler does not contract a*b+c into an
+    # FMA or reassociate: check the evaluated value against exact rational arithmetic
+    from fractions import Fraction
+    rng = np.random.default_rng(9)
+    c = rng.standard_normal(6)
+    x = rng.uniform(0.0, 5.0, 64)
+    got = np.asarray(jax.jit(comp_horner)(jnp.asarray(c), jnp.asarray(x)))
+    for xi, gi in zip(x, got):
+        exact = Fraction(0)
+        for ci in c:
+            exact = exact * Fraction(xi) + Fraction(ci)
+        # compensated Horner: error <= eps|p| + O(eps^2) * sum|c||x|^i
+        bound = 2.3e-16 * abs(float(exact)) + 1e-28 * float(np.polyval(np.abs(c), xi))
+        assert abs(Fraction(float(gi)) - exact) <= Fraction(bound), (xi, gi, float(exact))
+
+
+def test_beta_finds_the_interior_root_next_to_an_exact_edge_root():
+    # codex round 7/8: exact p(5) = 0 lost to plain-Horner cancellation (A = 2^51) made the
+    # edge root look interior (4.99999999984); the true largest interior root is
+    # 4.999999150814952869...
+    A, v = 2.0 ** 51, 2.0 ** 40
+    c = np.array([A, -A + 3, -20 * A, -225 * A, 1125 * A + v, -5 * (375 + v)])
+    assert float(comp_horner(jnp.asarray(c), jnp.asarray(5.0))) == 0.0
+    beta = float(_np(max_real_root_beta(jnp.asarray(c[None, :])))[0])
+    np.testing.assert_allclose(beta, 4.999999150814952869, rtol=1e-15)
+
+
+def test_beta_with_a_negative_zero_breakpoint():
+    # x^5 - 32: the recursion produces a -0.0 breakpoint; its signed bit pattern broke the
+    # bisection ordering (returned the default 1.0 instead of 2)
+    c = jnp.asarray([[1.0, 0.0, 0.0, 0.0, 0.0, -32.0]])
+    np.testing.assert_allclose(float(_np(max_real_root_beta(c))[0]), 2.0, rtol=1e-15)
+
+
+def test_beta_gradient_is_accurate_under_cancellation():
+    # (x-4)^5 - 2^-42: p'(beta) cancels in plain Horner (relative error 1.6e-4)
+    from fractions import Fraction
+    c = np.poly(np.full(5, 4.0))
+    c[-1] -= 2.0 ** -42
+    f = lambda c: jnp.sum(max_real_root_beta(c[None, :]))  # noqa: E731
+    beta = float(f(jnp.asarray(c)))
+    g = np.asarray(jax.grad(f)(jnp.asarray(c)))
+    b = Fraction(beta)
+    dp = sum(Fraction(float(ci)) * (5 - i) * b ** (4 - i) for i, ci in enumerate(c[:-1]))
+    np.testing.assert_allclose(g[-1], float(-1 / dp), rtol=1e-12)
+
+
+@pytest.mark.parametrize("root,dtype,rtol", [(1e-33, jnp.float32, 1e-6),
+                                             (1e-290, jnp.float64, 1e-14)])
+def test_beta_keeps_relative_accuracy_for_tiny_roots(root, dtype, rtol):
+    # codex round 10: |p| near a tiny root was subnormal, flushed to 0 (23 % error);
+    # full relative precision is the contract down to ~2^-110 fp32 / 2^-990 fp64
+    c = jnp.asarray([[0.0, 0.0, 0.0, 0.0, 1.0, -root]], dtype)
+    np.testing.assert_allclose(float(_np(max_real_root_beta(c))[0]), root, rtol=rtol)
+
+
+@pytest.mark.parametrize("shape", [(1, 2), (1, 1), (6,), (2, 3, 6)])
+def test_beta_refuses_a_non_quintic_shape(shape):
+    with pytest.raises(TypeError):
+        max_real_root_beta(jnp.ones(shape))
+
+
+def test_beta_second_derivative_is_exact():
+    # p = x^2 - t (padded quintic): beta = sqrt(t), d2beta/dt2 = -t^-1.5 / 4 = -1/32 at 4
+    def beta(t):
+        c = jnp.stack([0.0, 0.0, 0.0, 1.0, 0.0, -t])
+        return max_real_root_beta(c[None, :])[0]
+    t = jnp.asarray(4.0)
+    np.testing.assert_allclose(float(beta(t)), 2.0, rtol=1e-12)
+    np.testing.assert_allclose(float(jax.grad(beta)(t)), 0.25, rtol=1e-9)
+    np.testing.assert_allclose(float(jax.grad(jax.grad(beta))(t)), -1.0 / 32.0, rtol=1e-9)
+
+
+def test_beta_finds_the_largest_of_clustered_roots():
+    # roots 4.6..4.9 within 0.1: the 8-guess Laguerre returned ~4.6
+    coeffs = np.poly(np.array([4.6, 4.7, 4.8, 4.9, 6.0]))
+    beta = float(_np(max_real_root_beta(jnp.asarray(coeffs[None, :])))[0])
+    assert abs(beta - 4.9) < 1e-8, beta
+
+
+@pytest.mark.parametrize("coeffs", [
+    np.poly(np.array([1.0, 2.0 + 5e-7j, 2.0 - 5e-7j, 6.0, 7.0])).real,
+    # (x-1)(x-6)(x-7)((x-4)^2 + 2^-42), exact in fp64 (codex round 4)
+    np.polymul(np.poly(np.array([1.0, 6.0, 7.0])), [1.0, -8.0, 16.0 + 2.0 ** -42])])
+def test_beta_rejects_a_near_real_complex_pair(coeffs):
+    # a complex pair is not a real root; the |Im| < 1e-6 filter accepted 2 ± 5e-7 i
+    beta = float(_np(max_real_root_beta(jnp.asarray(coeffs[None, :])))[0])
+    assert abs(beta - 1.0) < 1e-9, beta
+
+
+def test_beta_keeps_relative_accuracy_near_zero():
+    # root 1e-30 (padded linear): 64 halvings alone gave 1.4e-19
+    c = jnp.asarray([[0.0, 0.0, 0.0, 0.0, 1.0, -1e-30]])
+    np.testing.assert_allclose(float(_np(max_real_root_beta(c))[0]), 1e-30, rtol=1e-9)
+    g = jax.grad(lambda c: jnp.sum(max_real_root_beta(c)))(c)
+    np.testing.assert_allclose(float(g[0, 4]), -1e-30, rtol=1e-9)
+
+    def beta(t):   # x^2 - t, root sqrt(t) = 1e-30, d beta/dt = 1/(2 sqrt t) = 5e29
+        return max_real_root_beta(jnp.stack([0.0, 0.0, 0.0, 1.0, 0.0, -t])[None, :])[0]
+    t = jnp.asarray(1e-60)
+    np.testing.assert_allclose(float(beta(t)), 1e-30, rtol=1e-9)
+    np.testing.assert_allclose(float(jax.grad(beta)(t)), 5e29, rtol=1e-9)
+
+
+def test_beta_handles_a_degree_drop():
+    # leading coefficient 0: a quartic with roots 0.5, 2, 3.5 and 7 -> 3.5
+    c = np.concatenate([[0.0], np.poly(np.array([0.5, 2.0, 3.5, 7.0]))])
+    beta = float(_np(max_real_root_beta(jnp.asarray(c[None, :])))[0])
+    np.testing.assert_allclose(beta, 3.5, rtol=1e-12)
+
+
+@pytest.mark.parametrize("roots", [[1.0, 1j, -1j, 2j, -2j],
+                                   [1.7, 6.0, 6.5 + 1j, 6.5 - 1j, -2.0],
+                                   [0.8, 1.3, 2.9, 6.0, -1.0]])
+def test_beta_gradient_is_the_implicit_derivative(roots):
+    # d beta / d c_i = -beta^(5-i) / p'(beta) at the selected root; the Laguerre version
+    # averaged tied guesses (x^5 - 1: -0.175 instead of -0.2)
+    coeffs = np.poly(np.array(roots)).real
+    f = lambda c: jnp.sum(max_real_root_beta(c[None, :]))  # noqa: E731
+    beta = float(f(jnp.asarray(coeffs)))
+    g = np.asarray(jax.grad(f)(jnp.asarray(coeffs)))
+    ref = -beta ** np.arange(5, -1, -1) / np.polyval(np.polyder(coeffs), beta)
+    np.testing.assert_allclose(g, ref, rtol=1e-9)
+
+
+def test_beta_gradient_is_finite_and_scale_covariant():
+    # beta(s c) == beta(c), so d beta/d(s c) == (d beta/d c) / s: finite at the tiny
+    # scales of real Germano coefficients, in fp64 and fp32.
+    coeffs = np.poly(np.array([1.7, 6.0, 6.5 + 1j, 6.5 - 1j, -2.0])).real
+
+    def grad_at(s, dtype):
+        f = lambda c: jnp.sum(max_real_root_beta(c[None, :]))  # noqa: E731
+        return np.asarray(jax.grad(f)(jnp.asarray(s * coeffs, dtype)), np.float64)
+
+    g1 = grad_at(1.0, jnp.float64)
+    assert np.all(np.isfinite(g1)) and np.any(g1 != 0.0)
+    for s in (1e-17, 1e-30):
+        gs = grad_at(s, jnp.float64)
+        assert np.all(np.isfinite(gs)), (s, gs)
+        np.testing.assert_allclose(gs * s, g1, rtol=1e-6, atol=1e-12 * np.abs(g1).max())
+    g32 = grad_at(1e-30, jnp.float32)
+    assert np.all(np.isfinite(g32)), g32
+
+
+def test_beta_from_tiny_germano_moments_in_fp32():
+    # real-CBL moments are ~1e-25: their products underflow fp32 unless each test-filter
+    # level is normalised first (roots unchanged)
+    rng = np.random.default_rng(5)
+    m1 = rng.standard_normal((5, 8))
+    m2 = rng.standard_normal((5, 8))
+    ref = _np(beta_from_germano_moments(list(jnp.asarray(m1)), list(jnp.asarray(m2))))
+    assert np.sum(np.abs(ref - 1.0) > 1e-3) >= 3              # non-vacuous: real roots
+    tiny = 1e-25
+    got = _np(beta_from_germano_moments(list(jnp.asarray(tiny * m1, jnp.float32)),
+                                        list(jnp.asarray(tiny * m2, jnp.float32))))
+    np.testing.assert_allclose(got, ref, atol=1e-4)
+
+
+def test_beta_from_germano_moments_gradient_matches_finite_difference():
+    rng = np.random.default_rng(5)
+    m1, m2 = rng.standard_normal((5, 8)), rng.standard_normal((5, 8))
+    d1 = rng.standard_normal((5, 8))
+
+    def f(e):
+        return jnp.sum(beta_from_germano_moments(list(jnp.asarray(m1) + e * jnp.asarray(d1)),
+                                                 list(jnp.asarray(m2))))
+    g = float(jax.grad(f)(jnp.asarray(0.0)))
+    h = 1e-6
+    fd = (float(f(jnp.asarray(h))) - float(f(jnp.asarray(-h)))) / (2 * h)
+    assert np.isfinite(g) and abs(g) > 1e-6
+    np.testing.assert_allclose(g, fd, rtol=1e-5)
+
+
+def test_beta_defaults_to_one_when_no_root_in_range():
     # Quintic whose only real roots are OUTSIDE (0,5) -> β defaults to 1.0.
     coeffs = np.poly(np.array([6.0, 7.0, -1.0, 8.0 + 1j, 8.0 - 1j]))  # none in (0,5)
-    beta = float(_np(laguerre_max_real_root_beta(jnp.asarray(coeffs[None, :])))[0])
+    beta = float(_np(max_real_root_beta(jnp.asarray(coeffs[None, :])))[0])
     assert beta == 1.0
 
 
-def test_laguerre_picks_max_real_root_in_range():
+def test_beta_picks_max_real_root_in_range():
     # Two real roots in (0,5): 1.2 and 3.7 -> the solver returns the MAX (3.7).
     coeffs = np.poly(np.array([1.2, 3.7, 6.5, 7.0 + 1j, 7.0 - 1j]))
-    beta = float(_np(laguerre_max_real_root_beta(jnp.asarray(coeffs[None, :])))[0])
+    beta = float(_np(max_real_root_beta(jnp.asarray(coeffs[None, :])))[0])
     assert abs(beta - 3.7) < 1e-6
 
 
@@ -360,7 +583,7 @@ def test_beta_solver_on_ASSEMBLY_polynomials_matches_numpy_roots():
     d = _lasd_cs2_oracle(*_F)
     coeffs6 = jnp.stack([jnp.asarray(d["ff"]), jnp.asarray(d["ee"]), jnp.asarray(d["dd"]),
                          jnp.asarray(d["cc"]), jnp.asarray(d["bb"]), jnp.asarray(d["aa"])], -1)
-    beta_module = _np(laguerre_max_real_root_beta(coeffs6))
+    beta_module = _np(max_real_root_beta(coeffs6))
     beta_np = _np_beta_from_numpy_roots(d["aa"], d["bb"], d["cc"], d["dd"], d["ee"], d["ff"])
     # non-vacuous: the real field's polynomials have genuine roots in (0,5) (β != default 1)
     assert np.sum(np.abs(beta_module - 1.0) > 1e-3) >= 1
@@ -429,7 +652,7 @@ def test_differentiable_through_beta_default_no_valid_root():
     coeffs = np.poly(np.array([6.0, 7.0, -1.0, 8.0 + 1j, 8.0 - 1j])).real  # none in (0,5)
 
     def loss(scale):
-        return jnp.sum(laguerre_max_real_root_beta(jnp.asarray(coeffs)[None, :] * scale))
+        return jnp.sum(max_real_root_beta(jnp.asarray(coeffs)[None, :] * scale))
 
     assert float(loss(jnp.asarray(1.0))) == 1.0                 # β defaults to 1.0
     g = float(jax.grad(loss)(jnp.asarray(1.0)))
@@ -495,7 +718,7 @@ def test_repeated_root_disc_zero_grad_is_finite():
     x5 = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])              # x^5: max|coeff| != 0 (not all-zero)
 
     def loss(scale):
-        return jnp.sum(laguerre_max_real_root_beta(jnp.asarray(x5)[None, :] * scale))
+        return jnp.sum(max_real_root_beta(jnp.asarray(x5)[None, :] * scale))
 
     assert float(loss(jnp.asarray(1.0))) == 1.0                # β defaults (root 0 not in (0,5))
     assert np.isfinite(float(jax.grad(loss)(jnp.asarray(1.0))))  # finite grad (disc guard)

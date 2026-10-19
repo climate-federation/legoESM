@@ -116,7 +116,7 @@ __param_spec__ = {
             "autoconversion_threshold": {"units": "kg/kg", "bounds": (0.0001, 0.003), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Kessler (1969)", "shape": None},
             "autoconversion_rate": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Kessler (1969)", "shape": None},
             "accretion_coeff": {"units": "1", "bounds": (0.5, 6.6), "tunable_tier": 1, "transform": "sigmoid", "category": "accretion", "reference": "Kessler (1969)", "shape": None},
-            "evaporation_coeff": {"units": "1", "bounds": (0.1, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "evaporation", "reference": "Kessler (1969)", "shape": None},
+            "evaporation_coeff": {"units": "1", "bounds": (0.1, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "evaporation", "reference": "multiplier on the Klemp & Wilhelmson (1978) rain-evaporation rate (1 = published)", "shape": None},
             "rain_fall_speed": {"units": "m/s", "bounds": (1.0, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Kessler (1969)", "shape": None},
             "hard_sat_adjust_threshold": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
             "hard_sat_max_heating_K": {"units": "K", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
@@ -420,7 +420,7 @@ class KesslerConfig(NamedTuple):
     autoconversion_threshold: float = 1.0e-3   # q_c threshold [kg/kg]
     autoconversion_rate: float = 1.0e-3         # Rate [1/s]
     accretion_coeff: float = 2.2                # Collection coefficient
-    evaporation_coeff: float = 1.0              # Evaporation coefficient
+    evaporation_coeff: float = 1.0              # × Klemp-Wilhelmson 1978 rate
     rain_fall_speed: float = 5.0                # Terminal velocity [m/s]
     saturation_sharpness: float = 100.0         # Smooth switch sharpness
     # --- Hard (iterated) saturation-adjustment guard (opt-in) ---

@@ -29,7 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "scripts" / "run"))
 from tune_scm_to_les import _base_turbulence  # noqa: E402
 
 KIND = "scalar"
-_BASE = _base_turbulence("holtslag_boville")[0].holtslag_boville
+# The roster HB config; its surface roughness is replaced by the column's (the LES
+# case's, ``inputs.z0_m``/``z0h_m``) on every call, so the value here never acts.
+_BASE = _base_turbulence("holtslag_boville", z0_m=1.0, z0h_m=1.0)[0].holtslag_boville
 PARAMS = {"Ri_crit": (float(_BASE.Ri_crit), 0.1, 0.9, "1")}
 
 
@@ -48,8 +50,10 @@ def fluxes(params, inputs, aux):
     rho_sfc = rho[:, -1]
     # Same kinematic -> energetic conversion the SCM turbulence wrapper applies to
     # the per-step prescribed flux (lowest-level density).
+    base = _BASE._replace(surface=_BASE.surface._replace(
+        z0=inputs.z0_m, z0h_z0_ratio=inputs.z0h_m / inputs.z0_m))
     cfg = fold_prescribed_surface_fluxes(
-        apply_param_overrides(_BASE, params),
+        apply_param_overrides(base, params),
         shflx_w_m2=rho_sfc * constants.c_pd * inputs.w_theta_s,
         # latent-ok: mirrors the SCM kinematic-override fold (constant L_v)
         lhflx_w_m2=rho_sfc * constants.L_v * inputs.w_qt_s,  # latent-ok: see above

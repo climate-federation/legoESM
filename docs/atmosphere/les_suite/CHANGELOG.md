@@ -233,3 +233,44 @@ obs-constrained NCAR-SCCM variational-analysis product already on disk at
   codex-reviewed (numerics CONFIRMED; docstring over-claims + an unused knob tightened). Also
   migrated `ocean/.../gm_bvp.py::GMBVPConfig` `__param_spec__` to the nested schema (was the lone
   param-spec CI failure on the merged main).
+
+## 2026-10-15 campaign — published dry cases (stage 3)
+- **Cases (`catalog.PUBLISHED_CASES`, 17):** Conzemius & Fedorovich (2006) CBL-growth
+  matrix (5 points), Sullivan & Patton (2011) run D, Sullivan et al. (2016) 0.25 and
+  1.0 K/h, Huang & Bou-Zeid (2013) 1.0 and 2.5 K/h, GABLS4 experiment 2 and the six
+  Ayotte (1996) shear x inversion cases (DEPHY files, registered and checksum-pinned in
+  `dephy_scm.DEPHY_SCM_CASES`, read by `load_dephy_les_forcing`). GABLS3 data vendored
+  (`data/les_cases/GABLS3/`), not wired (moist, advective forcing). Held-out split per
+  the user: Ayotte, Sullivan–Patton, GABLS3, GABLS4, neutral Ekman, RICO.
+- **One generic dry builder** (`LESSetup` on the case): sounding, height-varying U_g,
+  latitude (sign kept), z0/z0h, surface flux / cooling / surface-θ series, sponge, seed
+  noise, dt — all on the case; CLI overrides of any of them (and of Pr_t, the viscosity
+  floor, dt) are refused; `--hours` only with `--smoke`, which requires it.
+- **Unapproved values gate:** every value a paper does not fix is listed in
+  `setup.pending` with its proposed value; the driver emits only `--smoke` artifacts
+  until the list is approved and cleared.
+- **Core:** `SpectralLESConfig.z0h` (thermal roughness in the prescribed-temperature
+  MOST layer; None = z0, bit-identical) and `sfc_flux_drag="most"` (Businger–Dyer drag
+  at the Obukhov length a prescribed flux sets; unstable root by bisection in ln(−ζ)
+  with implicit-function derivatives of every order (custom JVP), closed form past ψ's
+  ζ = −10 clamp; stable branch a fixed point that returns NaN when unconverged (past
+  the critical cooling); default "neutral" unchanged). Legacy anchors: arrays identical to stage 1 (old-tree vs new-tree run);
+  `les_setup` metadata gains keys (z0h_m, sfc_flux_drag, held_out, smoke, setup).
+- **Restart:** `--checkpoint/--wall-limit-s` (exit 75) + PBS chaining; resumed run is
+  bit-identical to an uninterrupted one (test); the fingerprint covers the case, run
+  options, the resolved core config, a digest of the resolved IC + forcing and of the
+  source, so a checkpoint never resumes under different inputs or edited code.
+- **User decisions 2026-10-15:** every proposed value is approved and recorded in
+  `setup.approved` (artifact provenance). Huang & Bou-Zeid 2013 gets the suite's GABLS1
+  sponge (above 300 m, 50 s) instead of none. GABLS4 dt is raised to 0.3 s (~0.8 of the
+  advective CFL bound); it stays pending until a short-window check against 0.1 s.
+  GABLS3 moves to the cloud-case stage.
+- **Neutral Ekman:** Pedersen, Gryning & Kelly (2014), doi:10.1007/s10546-014-9937-z,
+  neutral cases n01–n04, held out, with their unstated values pending. Liu & Stevens
+  (2022) is analytical (its LES is given only by Zi/Ro), so it is not registered.
+- **SCM roughness:** the SCM tuner used z0 = 0.1 m for every case. It now gets the
+  case's z0/z0h from the artifact (`bridge.surface_roughness`, error if absent). Under
+  the tuner's constant-Cd surface layer z0 is not yet read; that switch is pending.
+- **Prescribed-surface-temperature MOST solver** (10 iterations, unchanged) reports its
+  convergence residual: per frame in the log and the worst value in
+  `les_setup['most_residual_max']`.

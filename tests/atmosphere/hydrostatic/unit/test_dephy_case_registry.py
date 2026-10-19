@@ -404,6 +404,9 @@ _DECLARED_GAPS = {
     "sandu_slow": _SANDU_NUD,
     "mpace": frozenset({"ua_nud", "va_nud"}),
     "armcu": frozenset(), "comble": frozenset(),
+    "gabls4_stage3": frozenset(), "gabls4_stage3_short": frozenset(),
+    **{f"ayotte_{s}": frozenset()
+       for s in ("00sc", "00wc", "03sc", "05sc", "05wc", "24sc")},
 }
 
 

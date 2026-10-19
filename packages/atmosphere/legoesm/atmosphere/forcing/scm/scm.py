@@ -117,6 +117,7 @@ def make_column_state(
     T_profile: jax.Array,
     q_v_profile: jax.Array | None = None,
     q_c_profile: jax.Array | None = None,
+    q_r_profile: jax.Array | None = None,
     u: float | jax.Array = 0.0,
     v: float | jax.Array = 0.0,
     p_s: float = 1.0e5,
@@ -167,19 +168,21 @@ def make_column_state(
             )
         }
 
-    # Optional cloud-liquid IC (a saturated-start moist column: seeding q_c keeps
-    # total water q_t = q_v + q_c consistent instead of dropping the cloud mass).
-    if q_c_profile is not None:
-        q_c_arr = jnp.asarray(q_c_profile, dtype=dtype)
-        if q_c_arr.size != nlev:
+    # Optional cloud-liquid and rain ICs (a moist column started mid-run: seeding
+    # them keeps total water q_t = q_v + q_c + q_r instead of dropping the mass).
+    for name, prof in (("q_c", q_c_profile), ("q_r", q_r_profile)):
+        if prof is None:
+            continue
+        arr = jnp.asarray(prof, dtype=dtype)
+        if arr.size != nlev:
             raise ValueError(
-                f"q_c_profile must have {nlev} elements, got {q_c_arr.size}"
+                f"{name}_profile must have {nlev} elements, got {arr.size}"
             )
         if tracers is None:
             tracers = {}
-        tracers["q_c"] = Field(
-            data=q_c_arr.reshape(1, 1, 1, nlev),
-            name="q_c", dims=_DIMS_3D, units="kg/kg",
+        tracers[name] = Field(
+            data=arr.reshape(1, 1, 1, nlev),
+            name=name, dims=_DIMS_3D, units="kg/kg",
         )
 
     return HydrostaticState(
@@ -821,6 +824,7 @@ class SingleColumnModel:
         T_profile: jax.Array,
         q_v_profile: jax.Array | None = None,
         q_c_profile: jax.Array | None = None,
+        q_r_profile: jax.Array | None = None,
         u: float | jax.Array = 0.0,
         v: float | jax.Array = 0.0,
         p_s: float = 1.0e5,
@@ -859,6 +863,11 @@ class SingleColumnModel:
             so total water ``q_t = q_v + q_c`` is preserved rather than the
             cloud mass being dropped. ``None`` (default) starts cloud-free;
             an active microphysics scheme still pre-allocates ``q_c`` to zero.
+        q_r_profile
+            Optional initial rain mixing ratio [kg/kg], shape ``(nlev,)``,
+            seeding the ``q_r`` tracer (a column started from a raining state).
+            Only for a scheme with no rain NUMBER (Kessler): rain mass with zero
+            number is degenerate.
         u, v
             Initial wind components [m/s]. Scalars initialize uniform winds;
             ``(nlev,)`` profiles initialize level-varying winds, indexed
@@ -921,7 +930,7 @@ class SingleColumnModel:
             q_v_profile = jnp.zeros(nlev)
         state = make_column_state(
             nlev, T_profile=T_profile, q_v_profile=q_v_profile,
-            q_c_profile=q_c_profile,
+            q_c_profile=q_c_profile, q_r_profile=q_r_profile,
             u=u, v=v, p_s=p_s, phis=phis, dtype=dtype,
         )
         # Allocate the tracers the configured microphysics consumes, taking

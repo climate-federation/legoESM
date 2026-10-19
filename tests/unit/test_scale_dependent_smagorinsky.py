@@ -8,7 +8,7 @@ ported from the jax-alfa LES oracle (`DynamicSGS_LASDD_SM.LASDD`):
      The reference builds the sharp spectral test filter with the oracle's
      own quadrant-set indexing (distinct from production's fold-mask), so the
      2Δ/4Δ filters are cross-validated too.
-  2. β-SOLVER — `_laguerre_max_real_root_beta` recovers the known largest real
+  2. β-SOLVER — `_max_real_root_beta` recovers the known largest real
      root in (0,5) of constructed quintics (independent of the dycore).
   3. β=1 REDUCTION — pinning β=1 collapses M_ij to the standard (scale-
      invariant) Germano mixed tensor, the analytic limit of LASD.
@@ -27,7 +27,7 @@ from legoesm.atmosphere.dynamics.les.compressible_euler_plane import (
 )
 from legoesm.atmosphere.physics.turbulence.lasd_core import (
     imfilter_box3 as _imfilter_box3_plane,
-    laguerre_max_real_root_beta as _laguerre_max_real_root_beta,
+    max_real_root_beta as _max_real_root_beta,
 )
 from legoesm.grids.plane import create_plane_grid
 from legoesm.grids.vertical import create_height_coordinate
@@ -130,7 +130,7 @@ def _ref_lasd_cs2(u, v, w, grid, hc, cs_max=1.0, pin_beta=None):
         beta = np.full(nz, float(pin_beta))
     else:
         coeffs6 = np.stack([ff, ee, dd, cc, bb, aa], axis=-1)
-        beta = np.asarray(_laguerre_max_real_root_beta(jnp.asarray(coeffs6)))
+        beta = np.asarray(_max_real_root_beta(jnp.asarray(coeffs6)))
     beta3d = beta.reshape(1, 1, nz)
 
     T1, T2 = 2*L2, 2*(_TFR**2)*L2
@@ -161,17 +161,17 @@ def test_oracle_fidelity_cs_field():
 
 
 def test_beta_solver_known_roots():
-    """Laguerre solver returns the largest real root in (0,5), else β=1."""
+    """β solver returns the largest real root in (0,5), else β=1."""
     # (x-0.8)(x-1.3)(x²+1)(x-6)  → real roots {0.8, 1.3, 6}; 6 is out of (0,5)
     # and ±i are complex ⇒ expected max valid = 1.3.
     p = np.polynomial.polynomial.polyfromroots(
         [0.8, 1.3, 1j, -1j, 6.0])[::-1].real        # descending, degree 5
-    beta = float(_laguerre_max_real_root_beta(jnp.asarray(p[None, :]))[0])
+    beta = float(_max_real_root_beta(jnp.asarray(p[None, :]))[0])
     assert abs(beta - 1.3) < 1e-4
     # No real root in (0,5) ⇒ fallback β=1.
     p2 = np.polynomial.polynomial.polyfromroots(
         [1j, -1j, 2j, -2j, 7.0])[::-1].real
-    beta2 = float(_laguerre_max_real_root_beta(jnp.asarray(p2[None, :]))[0])
+    beta2 = float(_max_real_root_beta(jnp.asarray(p2[None, :]))[0])
     assert abs(beta2 - 1.0) < 1e-9
 
 

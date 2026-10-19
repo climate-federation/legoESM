@@ -34,6 +34,7 @@ buoyancy-independent.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, NamedTuple
 
 import jax
@@ -197,6 +198,25 @@ class SpectralLESConfig(NamedTuple):
     #                                 moist monotone scalar path leaves water
     #                                 tracers unfiltered by default; set True only
     #                                 to reproduce the old filtered-tracer behavior.
+    z0h: float | None = None        # thermal roughness [m] for the prescribed-surface-
+    #                                 temperature MOST layer; None = z0 (GABLS1, Beare
+    #                                 et al. 2006). GABLS4 sets z0 ≠ z0h.
+    sfc_flux_drag: str = "neutral"  # wall drag under a PRESCRIBED surface heat flux:
+    #                                 "neutral" = log law (κ/ln(z₁/z0))²; "most" =
+    #                                 Businger–Dyer stability-corrected drag at the
+    #                                 Obukhov length the prescribed flux sets.
+    sfc_ref_height: float | None = None  # height [m] at which a prescribed surface
+    #                                 θ (and q) series is given (GABLS3: 0.25 m air
+    #                                 values) — the MOST scalar relation is then the
+    #                                 integral one from that height (most_surface_flux
+    #                                 ``z_ref``); None = surface values with z0h.
+    most_virtual: bool = False      # Obukhov length from the virtual heat flux
+    #                                 (θ_v* = θ_* + ε_v θ_ref q_*) when the surface
+    #                                 moisture is prescribed; False = θ_* only.
+    theta_top_gradient: float = 0.0  # dθ/dz [K/m] imposed at the lid for the SGS θ
+    #                                 flux (GABLS3 "inversion strength"): the lid face
+    #                                 carries J = K_h·Γ (heat entering from above);
+    #                                 0 = no-flux lid.
 
 
 class SpectralLESLayout(NamedTuple):
@@ -382,7 +402,7 @@ def _ifft(fh, g: SpectralLESGrid):
                               n_ranks=L.n_ranks, comm=L.comm)
 
 
-def _planar_mean(f, g: SpectralLESGrid, keepdims=False):
+def planar_mean(f, g: SpectralLESGrid, keepdims=False):
     """Horizontal (y, x) mean. Serial: ``jnp.mean`` over axes (0,1). Under the
     y-slab MPI layout each rank holds only a y-slab, so the true planar mean is a
     global reduction: ``global_sum_mpi(Σ_slab) / (ny_global·nx)`` (AD-safe SUM
@@ -571,6 +591,24 @@ def eddy_viscosity(u, v, w, g: SpectralLESGrid):
     return (l_m ** 2) * Smag + g.cfg.nu_floor               # (ny,nx,nz)
 
 
+def effective_eddy_viscosity(u, v, w, g: SpectralLESGrid, theta=None, tracers=None):
+    """The ``ν_t`` :func:`rhs` actually applies to momentum and (as ``ν_t/Pr``) to
+    every scalar: :func:`eddy_viscosity`, and with ``cfg.sgs_buoyancy`` and a θ field
+    the Lilly (1962) stable-stratification suppression on top of it.
+
+    The suppression damps momentum and scalar SGS mixing by the SAME factor, so the
+    cloud-top inversion stops over-entraining; neutral runs leave it off (byte-
+    identical).  ``f·(strain + nu_floor) + (1−f)·nu_floor = f·strain + nu_floor``
+    keeps the background floor UNsuppressed: a molecular-like minimum that must
+    survive ``f→0``, else the inviscid inversion grows the 2Δ KH/gravity-wave mode
+    ``nu_floor`` exists to damp."""
+    nu_t = eddy_viscosity(u, v, w, g)
+    if g.cfg.sgs_buoyancy and theta is not None:
+        f_buoy = sgs_buoyancy_factor(theta, tracers, u, v, w, g)
+        nu_t = f_buoy * nu_t + (1.0 - f_buoy) * g.cfg.nu_floor
+    return nu_t
+
+
 def sgs_buoyancy_factor(theta, tracers, u, v, w, g: SpectralLESGrid):
     """Lilly (1962) stable-stratification suppression factor for the SGS eddy
     viscosity, at CENTRES: ``f = √(max(0, 1 − Ri/Pr_t))`` with ``Ri = N²/|S|²``.
@@ -657,7 +695,58 @@ def advection(u, v, w, g: SpectralLESGrid):
 # --------------------------------------------------------------------------- #
 # Coupled stable Monin–Obukhov surface layer (GABLS1 prescribed-cooling BC)     #
 # --------------------------------------------------------------------------- #
-def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10):
+# Unstable prescribed-flux MOST root bracket in s = ln(−ζ): ζ ∈ [−ZETA_CLIP, −1e−20].
+# The shared ψ clamps ζ at −ZETA_CLIP, so a root beyond it is closed-form; 64
+# halvings of the ~48-wide bracket leave < 1e−17.
+_MOST_ZETA_CLIP = 10.0
+_MOST_BISECT_S_LO = -46.0
+_MOST_BISECT_N = 64
+_MOST_FP_N = 50          # stable prescribed-flux fixed-point iterations
+# Domain of most_drag_prescribed_flux: ⟨U⟩ ≥ this; surface_boundary's planar-mean
+# speed ⟨sqrt(u² + v² + 1e−12)⟩ ≥ 1e−6 always is (2x margin for float32 rounding).
+# Below it: NaN (loud), not a float32 overflow of the ⟨U⟩⁻³ terms.
+_MOST_U_MIN = 5e-7
+
+
+def _flux_most_resid(s, spd, a, lnz):
+    """``F(s) = κ⟨U⟩/u_*(s) − (ln(z₁/z0) − ψ_m(−e^s))`` with ``u_*³ = a e^{−s}``:
+    the unstable prescribed-flux MOST relation in ``s = ln(−ζ)``, strictly
+    increasing in ``s``."""
+    kappa = constants.kappa_von_karman
+    return kappa * spd / jnp.cbrt(a * jnp.exp(-s)) - (lnz - psi_m(-jnp.exp(s)))
+
+
+@jax.custom_jvp
+def _flux_most_root(spd, a, lnz):
+    """Root of :func:`_flux_most_resid` in ``[S_LO, ln ZETA_CLIP]`` by bisection (the
+    bracket edge when the root lies outside; callers select those cases away).
+    Derivatives of every order follow the implicit-function rule (custom JVP)."""
+    def bisect(_, lohi):
+        lo, hi = lohi
+        mid = 0.5 * (lo + hi)
+        up = _flux_most_resid(mid, spd, a, lnz) > 0
+        return jnp.where(up, lo, mid), jnp.where(up, mid, hi)
+
+    lo, hi = jax.lax.fori_loop(
+        0, _MOST_BISECT_N, bisect,
+        (jnp.full_like(a, _MOST_BISECT_S_LO), jnp.full_like(a, math.log(_MOST_ZETA_CLIP))))
+    return 0.5 * (lo + hi)
+
+
+@_flux_most_root.defjvp
+def _flux_most_root_jvp(primals, tangents):
+    # F(s(p), p) = 0  ⇒  ṡ = −(∂F/∂p · ṗ) / (∂F/∂s); F_s > 0 for ⟨U⟩ > 0.
+    spd, a, lnz = primals
+    s = _flux_most_root(spd, a, lnz)
+    f_s = jax.jvp(lambda s_: _flux_most_resid(s_, spd, a, lnz), (s,),
+                  (jnp.ones_like(s),))[1]
+    f_p = jax.jvp(lambda *p: _flux_most_resid(s, *p), primals, tangents)[1]
+    return s, -f_p / f_s
+
+
+def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10,
+                      z0h=None, return_residual=False, z_ref=None, dq=None,
+                      virtual=False):
     """Coupled Monin–Obukhov surface layer (planar-mean, GABLS1-faithful).
 
     Given the planar-mean first-level wind speed ``spd_mean=⟨|u₁|⟩`` and potential
@@ -673,7 +762,9 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
     implementation (:func:`legoesm.core.bulk_flux.psi_m`/``psi_h``; stable branch
     Dyer 1974 ``−5ζ``, unstable Businger–Dyer, both internally clipped to
     ``ζ∈[−10,10]`` with safe-branch gradients) rather than a re-derived form.
-    Thermal roughness ``z0h=z0`` (Beare et al. 2006 specify z0m=z0h=0.1 m).
+    Thermal roughness ``z0h`` enters the θ relation as ``ln(z₁/z0h) − ψ_h``;
+    ``None`` means ``z0h = z0`` (Beare et al. 2006 specify z0m=z0h=0.1 m), which
+    reproduces the single-roughness form exactly.
 
     Returns ``(u_star, theta_star, q0, cd_eff)`` with the kinematic surface heat
     flux ``q0 = ⟨w'θ'⟩₀ = −u_* θ_*`` (negative ⇒ surface cooling) and the
@@ -683,21 +774,140 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
     cannot reproduce.
 
     Differentiable / JIT-safe: a fixed Python-unrolled iteration on scalar
-    (planar-mean) quantities, no data-dependent control flow."""
+    (planar-mean) quantities, no data-dependent control flow.
+
+    ``return_residual=True`` appends the convergence residual: the relative change
+    one more iteration would make, ``max(|Δu_*|/u_*, |Δθ_*|/|θ_*|)`` (and
+    ``|Δq_*|/|q_*|`` with ``dq``; the returned values themselves are unchanged).
+
+    ``z_ref`` (GABLS3, Basu et al. 2008): the prescribed θ (and q) are the AIR
+    values at height ``z_ref`` rather than surface values, so the scalar relation
+    is the integral one between ``z_ref`` and ``z₁``,
+    ``θ_* = κ(⟨θ₁⟩−θ(z_ref)) / (ln(z₁/z_ref) − ψ_h(z₁/L) + ψ_h(z_ref/L))``
+    (``z0h`` is then unused). ``dq = ⟨q₁⟩ − q(z_ref or surface)`` adds the moisture
+    relation with the same scalar denominator, and the kinematic moisture flux
+    ``⟨w'q'⟩₀ = −u_* q_*`` is returned after ``cd_eff``. ``virtual=True`` takes the
+    Obukhov length from the virtual heat flux, ``θ_v* = θ_* + ε_v θ_ref q_*``
+    (``ε_v = 1/ε − 1``)."""
     kappa = constants.kappa_von_karman
     gacc = constants.g
     lnz = jnp.log(z1 / z0)
+    if z_ref is not None:
+        lnzh = jnp.log(z1 / z_ref)
+    else:
+        lnzh = lnz if z0h is None else jnp.log(z1 / z0h)
+    eps_v = 1.0 / constants.epsilon - 1.0
+
+    def _den_h(inv_L, zeta):
+        if z_ref is None:
+            return lnzh - psi_h(zeta)
+        return lnzh - psi_h(zeta) + psi_h(z_ref * inv_L)
+
+    def _inv_L(u_star, th_star, q_star):
+        thv_star = th_star if not virtual else th_star + eps_v * theta_ref * q_star
+        return kappa * gacc * thv_star / (u_star ** 2 * theta_ref + 1e-12)
+
     dth = th_air_mean - t_sfc                     # >0 when air warmer than surface
     u_star = kappa * spd_mean / lnz               # neutral first guess
-    th_star = kappa * dth / lnz
+    th_star = kappa * dth / lnzh
+    q_star = 0.0 if dq is None else kappa * dq / lnzh
     for _ in range(n_iter):
-        inv_L = kappa * gacc * th_star / (u_star ** 2 * theta_ref + 1e-12)
+        inv_L = _inv_L(u_star, th_star, q_star)
         zeta = z1 * inv_L                         # +ve stable, −ve unstable
         u_star = kappa * spd_mean / (lnz - psi_m(zeta))
-        th_star = kappa * dth / (lnz - psi_h(zeta))
+        den_h = _den_h(inv_L, zeta)
+        th_star = kappa * dth / den_h
+        if dq is not None:
+            q_star = kappa * dq / den_h
     q0 = -u_star * th_star
     cd_eff = (u_star / (spd_mean + 1e-12)) ** 2
-    return u_star, th_star, q0, cd_eff
+    out = (u_star, th_star, q0, cd_eff)
+    if dq is not None:
+        out = out + (-u_star * q_star,)
+    if not return_residual:
+        return out
+    inv_L = _inv_L(u_star, th_star, q_star)
+    zeta = z1 * inv_L
+    tiny = jnp.finfo(jnp.result_type(u_star)).tiny
+    resid = jnp.maximum(
+        jnp.abs(kappa * spd_mean / (lnz - psi_m(zeta)) - u_star)
+        / jnp.maximum(jnp.abs(u_star), tiny),
+        jnp.abs(kappa * dth / _den_h(inv_L, zeta) - th_star)
+        / jnp.maximum(jnp.abs(th_star), tiny))
+    if dq is not None:
+        resid = jnp.maximum(resid, jnp.abs(kappa * dq / _den_h(inv_L, zeta) - q_star)
+                            / jnp.maximum(jnp.abs(q_star), tiny))
+    return out + (resid,)
+
+
+def most_drag_prescribed_flux(spd_mean, q0, z1, z0, theta_ref):
+    """Stability-corrected wall drag when the surface heat flux is PRESCRIBED.
+
+    The flux fixes the Obukhov length directly, ``1/L = −κ g q0 / (u_*³ θ_ref)``
+    (``q0 > 0`` heating ⇒ ``L < 0``, unstable), so only the momentum relation is
+    iterated::
+
+        u_* = κ ⟨U⟩ / (ln(z₁/z0) − ψ_m(z₁/L))
+
+    with the shared Businger–Dyer ``ψ_m`` (:func:`legoesm.core.bulk_flux.psi_m`).
+    ``q0 = 0`` gives ``1/L = 0`` and the neutral log law (to the ``1e-10`` ζ clamp
+    inside the shared ψ). Returns ``(u_star, cd_eff)`` with
+    ``cd_eff = (u_*/⟨U⟩)²``.
+
+    Defined for ``⟨U⟩ ≥ 5e−7`` m/s (NaN below; :func:`surface_boundary`'s speed,
+    ≥ 1e−6, always is). ``q0 ≤ 0``: fixed-point iteration in ``u_*``; if its
+    relative residual exceeds ``sqrt(eps)`` (slow or no convergence near the
+    critical cooling) the result is NaN — loud, never a wrong stress. Past ζ = +10 the shared ψ is clamped, so
+    strong cooling gets ``u_* = κ⟨U⟩/(ln(z₁/z0) − ψ_m(10))``, the root of the
+    relation as implemented (mirror of the unstable ζ ≤ −10 limit below).
+    ``q0 > 0``:
+    the fixed point oscillates near free convection, so the root is found in
+    ``s = ln(−ζ)``, where ``F(s) = κ⟨U⟩/u_*(s) − (ln(z₁/z0) − ψ_m(−e^s))`` with
+    ``u_*³ = κ g q0 z₁/(θ_ref e^s)`` is strictly increasing (unique root), by
+    bisection with implicit-function derivatives of every order
+    (:func:`_flux_most_root`). The shared ψ is constant for ζ ≤ −10, so when the
+    root lies there (calm wind / free convection) ``u_* = κ⟨U⟩/(ln(z₁/z0) −
+    ψ_m(−10))`` exactly; that needs ``ln(z₁/z0) > ψ_m(−10)`` (checked in
+    :func:`surface_boundary`). JIT- and AD-safe."""
+    kappa = constants.kappa_von_karman
+    gacc = constants.g
+    dt = jnp.result_type(spd_mean, q0, z1, z0, theta_ref, float)
+    spd_mean, q0, z1, z0, theta_ref = (jnp.asarray(x, dt)
+                                       for x in (spd_mean, q0, z1, z0, theta_ref))
+    lnz = jnp.log(z1 / z0)
+    in_domain = spd_mean >= _MOST_U_MIN
+    spd_mean = jnp.where(in_domain, spd_mean, 1.0)   # safe operand; NaN returned below
+
+    # Iterate in ζ (the u_* iteration mapped through ζ(u_*), same sequence) so no
+    # 1/u_*³ appears: ζ = c (ln(z₁/z0) − ψ_m(ζ))³ with c = −z₁ g q0/(θ_ref κ² ⟨U⟩³).
+    stable = q0 <= 0
+    # inactive branches get safe operands, so no 0·inf reaches the gradient
+    c = -z1 * gacc * jnp.where(stable, q0, 0.0) / (
+        theta_ref * kappa ** 2 * jnp.where(stable, spd_mean, 1.0) ** 3)
+
+    def zeta_step(_, zeta):
+        return c * (lnz - psi_m(zeta)) ** 3
+
+    zeta = jax.lax.fori_loop(0, _MOST_FP_N, zeta_step, c * lnz ** 3)  # neutral guess
+    u_star = kappa * spd_mean / (lnz - psi_m(zeta))
+    u_next = kappa * spd_mean / (lnz - psi_m(zeta_step(0, zeta)))
+    tol = jnp.sqrt(jnp.finfo(dt).eps)
+    u_star = jnp.where(jnp.abs(u_next - u_star) <= tol * u_star, u_star, jnp.nan)
+
+    unstable = q0 > 0
+    a = kappa * gacc * jnp.where(unstable, q0, 1.0) * z1 / theta_ref   # u_*³ (−ζ)
+    spd_arr, lnz_arr = spd_mean, lnz
+    s = _flux_most_root(spd_arr, a, lnz_arr)
+    u_free = kappa * spd_mean / (lnz - psi_m(-_MOST_ZETA_CLIP))   # ψ clamped
+    f_hi = _flux_most_resid(jnp.full_like(a, math.log(_MOST_ZETA_CLIP)), spd_arr, a, lnz_arr)
+    f_lo = _flux_most_resid(jnp.full_like(a, _MOST_BISECT_S_LO), spd_arr, a, lnz_arr)
+    # Root past ζ = −10: closed form. Root below ζ = −1e−20 (q0 ≈ 0): neutral to
+    # round-off, which the fixed point already has. Otherwise the bisected root.
+    u_unst = jnp.where(f_hi <= 0, u_free,
+                       jnp.where(f_lo >= 0, u_star, jnp.cbrt(a * jnp.exp(-s))))
+    u_star = jnp.where(in_domain, jnp.where(unstable, u_unst, u_star), jnp.nan)
+    cd_eff = (u_star / (spd_mean + 1e-12)) ** 2
+    return u_star, cd_eff
 
 
 # --------------------------------------------------------------------------- #
@@ -713,20 +923,57 @@ def surface_drag_coefficient(g: SpectralLESGrid, cd_surf=None):
     return (kappa / jnp.log(g.z_c[0] / g.cfg.z0)) ** 2
 
 
-def surface_boundary(u, v, theta, g: SpectralLESGrid, sfc_theta_flux, t_sfc):
+def surface_boundary(u, v, theta, g: SpectralLESGrid, sfc_theta_flux, t_sfc,
+                     return_residual=False, q_sfc=None, tracers=None):
     """Surface BC actually applied by :func:`rhs`: ``(cd_surf, sfc_flux)``.
 
-    ``t_sfc=None`` (or no θ) ⇒ the prescribed kinematic heat flux and the neutral
-    drag (``cd_surf=None``). A prescribed surface temperature ⇒ both from the
-    coupled stable MOST surface layer on the planar-mean first level."""
-    if t_sfc is None or theta is None:
-        return None, sfc_theta_flux
+    ``t_sfc=None`` (or no θ) ⇒ the prescribed kinematic heat flux, with the
+    neutral drag (``cd_surf=None``) when ``cfg.sfc_flux_drag == "neutral"`` or the
+    Businger–Dyer drag at the flux's Obukhov length when ``"most"``
+    (:func:`most_drag_prescribed_flux`). A prescribed surface temperature ⇒ both
+    from the coupled MOST surface layer on the planar-mean first level.
+
+    ``return_residual=True`` appends that coupled solver's convergence residual
+    (:func:`most_surface_flux`; NaN on the prescribed-flux paths, which have their
+    own convergence handling).
+
+    ``q_sfc`` (with ``t_sfc``): prescribed specific humidity at the same reference
+    as ``t_sfc``; the moisture flux of the same MOST layer (``tracers`` slot 0 is
+    q_v) is then returned after the heat flux."""
+    drag = g.cfg.sfc_flux_drag
+    if q_sfc is not None and (t_sfc is None or tracers is None):
+        raise ValueError("q_sfc needs a prescribed t_sfc and the water tracers")
+    if drag not in ("neutral", "most"):
+        raise ValueError(f"sfc_flux_drag must be 'neutral' or 'most', got {drag!r}")
     u1, v1 = u[..., 0], v[..., 0]
-    spd_mean = _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
-    th1_mean = _planar_mean(theta[..., 0], g)
-    _us, _ths, sfc_flux, cd_surf = most_surface_flux(
-        spd_mean, th1_mean, t_sfc, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0)
-    return cd_surf, sfc_flux
+    if drag == "most" and theta is None:
+        raise ValueError("sfc_flux_drag='most' needs θ (buoyancy): the drag is set by "
+                         "the heat flux's Obukhov length")
+    if t_sfc is None or theta is None:
+        if drag == "neutral":
+            return ((None, sfc_theta_flux, jnp.nan) if return_residual
+                    else (None, sfc_theta_flux))
+        z1 = 0.5 * g.cfg.Lz / g.cfg.nz          # static: cfg holds strings, never traced
+        with jax.ensure_compile_time_eval():    # a constant, also under jit
+            psi_clip = float(psi_m(-_MOST_ZETA_CLIP))
+        if math.log(z1 / g.cfg.z0) <= psi_clip:
+            raise ValueError(
+                f"sfc_flux_drag='most' needs ln(z1/z0) > psi_m(-{_MOST_ZETA_CLIP}) = "
+                f"{psi_clip:.3f} (no MOST solution in free convection otherwise); "
+                f"z1={z1} m, z0={g.cfg.z0} m")
+        spd_mean = planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
+        _us, cd_surf = most_drag_prescribed_flux(
+            spd_mean, sfc_theta_flux, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0)
+        return ((cd_surf, sfc_theta_flux, jnp.nan) if return_residual
+                else (cd_surf, sfc_theta_flux))
+    spd_mean = planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
+    th1_mean = planar_mean(theta[..., 0], g)
+    dq = None if q_sfc is None else planar_mean(tracers[..., 0, 0], g) - q_sfc
+    out = most_surface_flux(
+        spd_mean, th1_mean, t_sfc, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0,
+        z0h=g.cfg.z0h, return_residual=return_residual, z_ref=g.cfg.sfc_ref_height,
+        dq=dq, virtual=g.cfg.most_virtual)
+    return (out[3], out[2]) + tuple(out[4:])
 
 
 def sgs_vertical_momentum_flux_faces(u, v, w, nu_t, g: SpectralLESGrid, cd_surf=None):
@@ -756,7 +1003,7 @@ def sgs_vertical_momentum_flux_faces(u, v, w, nu_t, g: SpectralLESGrid, cd_surf=
     # the local wind — the standard, well-behaved ABL-LES wall model.
     u1, v1 = u[..., 0], v[..., 0]
     spd1 = jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12)
-    spd1_mean = _planar_mean(spd1, g)                       # planar mean ⟨|u₁|⟩
+    spd1_mean = planar_mean(spd1, g)                       # planar mean ⟨|u₁|⟩
     # Neutral log-law drag, OR the stability-corrected drag ``cd_surf`` supplied by
     # the coupled MOST surface layer (GABLS1 prescribed-cooling BC). cd_surf=None
     # ⇒ neutral (unchanged default path, no regression).
@@ -1029,7 +1276,7 @@ def buoyancy_w_moist(theta, tracers, g: SpectralLESGrid):
     — the planar mean is absorbed by the pressure projection)."""
     th_v = virtual_theta(theta, tracers)
     g_over_th = constants.g / g.cfg.theta_ref0
-    b_c = g_over_th * (th_v - _planar_mean(th_v, g, keepdims=True))
+    b_c = g_over_th * (th_v - planar_mean(th_v, g, keepdims=True))
     return jnp.pad(c2f(b_c), ((0, 0), (0, 0), (1, 1)))      # faces, 0 at walls
 
 
@@ -1038,7 +1285,7 @@ def buoyancy_w(theta, g: SpectralLESGrid):
     the deviation from the horizontal-mean profile drives the eddies (the mean is
     in hydrostatic balance, absorbed by the pressure)."""
     g_over_th = constants.g / g.cfg.theta_ref0
-    b_c = g_over_th * (theta - _planar_mean(theta, g, keepdims=True))
+    b_c = g_over_th * (theta - planar_mean(theta, g, keepdims=True))
     bf = jnp.pad(c2f(b_c), ((0, 0), (0, 0), (1, 1)))        # faces, 0 at walls
     return bf
 
@@ -1143,7 +1390,7 @@ def _divergence_damping(u, v, w, g: SpectralLESGrid):
 
 def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
         theta=None, sfc_theta_flux=0.0, t_sfc=None,
-        tracers=None, sfc_qv_flux=0.0):
+        tracers=None, sfc_qv_flux=0.0, q_sfc=None):
     """Momentum RHS = -advection + SGS force + Coriolis + a constant body force.
 
     ``f_cor``≠0 drives a geostrophic/Ekman balance toward ``u_geo=(ug,vg)``; a
@@ -1156,21 +1403,18 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
     ``t_sfc`` (a prescribed/cooled surface temperature) is supplied AND ``theta``
     is active, the surface heat flux AND a stability-corrected drag are derived
     from the coupled stable MOST surface layer (:func:`most_surface_flux`) — the
-    GABLS1-faithful prescribed-cooling boundary condition."""
+    GABLS1-faithful prescribed-cooling boundary condition. ``q_sfc`` (with
+    ``t_sfc``) prescribes the surface-reference humidity too: the moisture flux
+    into q_v then comes from the same MOST layer and replaces ``sfc_qv_flux``.
+    ``cfg.theta_top_gradient`` Γ ≠ 0 gives the lid face the SGS heat flux
+    ``K_h Γ`` (heat entering from above, :func:`lid_heat_flux`)."""
     Cu, Cv, Cw = advection(u, v, w, g)
-    nu_t = eddy_viscosity(u, v, w, g)
-    if g.cfg.sgs_buoyancy and theta is not None:
-        # Suppress the strain-based ν_t across stable stratification (Lilly 1962);
-        # the SAME factor damps momentum (sgs_and_wall) and scalar (K_h=ν_t/Pr)
-        # mixing, so the cloud-top inversion stops over-entraining. Neutral runs
-        # leave this off ⇒ byte-identical.
-        #   f·(strain + nu_floor) + (1−f)·nu_floor = f·strain + nu_floor
-        # keeps the background floor UNsuppressed — a molecular-like minimum that
-        # must survive f→0, else the inviscid inversion grows the 2Δ KH/gravity-
-        # wave mode nu_floor exists to damp. No-op when nu_floor=0 (the default).
-        f_buoy = sgs_buoyancy_factor(theta, tracers, u, v, w, g)
-        nu_t = f_buoy * nu_t + (1.0 - f_buoy) * g.cfg.nu_floor
-    cd_surf, sfc_flux = surface_boundary(u, v, theta, g, sfc_theta_flux, t_sfc)
+    nu_t = effective_eddy_viscosity(u, v, w, g, theta=theta, tracers=tracers)
+    sb = surface_boundary(u, v, theta, g, sfc_theta_flux, t_sfc, q_sfc=q_sfc,
+                          tracers=tracers)
+    cd_surf, sfc_flux = sb[0], sb[1]
+    if q_sfc is not None:
+        sfc_qv_flux = sb[2]
     Fu, Fv, Fw, u_star = sgs_and_wall(u, v, w, nu_t, g, u_geo, cd_surf=cd_surf)
     ug, vg = u_geo
     Ru = Cu + Fu + f_cor * (v - vg) + force[0]
@@ -1188,6 +1432,10 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
     Rtheta = None
     if theta is not None:
         Rtheta = scalar_fn(theta, u, v, w, nu_t, g, sfc_flux)
+        if g.cfg.theta_top_gradient != 0.0:
+            # the lid face carries J = K_h Γ instead of 0: ∂J/∂z warms the top cell
+            Rtheta = Rtheta.at[..., -1].add(
+                nu_t[..., -1] / g.cfg.pr_sgs * g.cfg.theta_top_gradient / g.dz)
         if g.cfg.theta_hyperdiff_coeff > 0.0:
             # SCALE-SELECTIVE k⁴ damping of the 2Δ θ' noise the sharp latent
             # heating injects — the instability SOURCE. Not broad diffusion: it
@@ -1264,7 +1512,7 @@ def _surface_ustar(u, v, g: SpectralLESGrid):
     kappa = constants.kappa_von_karman
     u1, v1 = u[..., 0], v[..., 0]
     Cd = (kappa / jnp.log(g.z_c[0] / g.cfg.z0)) ** 2
-    return (Cd ** 0.5) * _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
+    return (Cd ** 0.5) * planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
 
 
 def _filt_state(u, v, w, th, tr, g):
@@ -1311,7 +1559,7 @@ def _filt_state(u, v, w, th, tr, g):
 
 def kinematic_pressure(state: SpectralLESState, g: SpectralLESGrid, u_geo,
                        f_cor: float, force=(0.0, 0.0), sfc_theta_flux=0.0,
-                       t_sfc=None, sfc_qv_flux=0.0):
+                       t_sfc=None, sfc_qv_flux=0.0, q_sfc=None):
     """Instantaneous kinematic pressure ``p/ρ₀`` [m²/s²] at centres (diagnostic).
 
     The momentum RHS here is the ROTATIONAL form ``u×ω + …``, so the potential the
@@ -1326,7 +1574,7 @@ def kinematic_pressure(state: SpectralLESState, g: SpectralLESGrid, u_geo,
     ru, rv, rw, _us, _rth, _rtr = rhs(
         state.u, state.v, state.w, g, u_geo, f_cor, force=force, theta=state.theta,
         sfc_theta_flux=sfc_theta_flux, t_sfc=t_sfc, tracers=state.tracers,
-        sfc_qv_flux=sfc_qv_flux)
+        sfc_qv_flux=sfc_qv_flux, q_sfc=q_sfc)
     big_p = pressure_potential(ru, rv, rw, 1.0, g)
     return big_p - resolved_kinetic_energy(state.u, state.v, state.w, g)
 
@@ -1345,41 +1593,88 @@ def resolved_kinetic_energy(u, v, w, g: SpectralLESGrid):
 
 
 # Order of the column-budget source terms returned by ``step(return_budget=True)``.
+# ``fv_theta`` / ``fv_water`` are the NON-flux-form part of the monotone scalar
+# advection (``+φ·∇_fv·u``, see :func:`scalar_rhs_monotone`): the one transport
+# term whose column integral is not zero by construction. ``fv_water`` sums the
+# water-species slots (``N_WATER_SLOTS``); both are 0 on the spectral scalar path.
 BUDGET_TERMS = ("sfc_heat_flux", "sfc_stress_x", "sfc_stress_y",
-                "coriolis_u", "coriolis_v", "body_force_u", "body_force_v")
+                "coriolis_u", "coriolis_v", "body_force_u", "body_force_v",
+                "sfc_qv_flux", "fv_theta", "fv_water", "lid_heat_flux")
+
+# Water-species slots of the standard microphysics tracer layout (q_v, q_c, q_r,
+# q_i, q_s, q_g); the slots after them are number concentrations.
+N_WATER_SLOTS = 6
+
+
+def _column_fv_source(phi, div_fv, g: SpectralLESGrid):
+    """``∫⟨φ ∇_fv·u⟩ dz`` — the column-integrated planar-mean source the monotone
+    path's free-stream correction adds to ``φ`` (zero for a uniform ``φ``)."""
+    return g.dz * jnp.sum(planar_mean(phi * div_fv, g))
+
+
+def lid_heat_flux(theta, nu_t, g: SpectralLESGrid):
+    """Planar-mean heat flux entering through the lid [K m/s] when
+    ``cfg.theta_top_gradient`` Γ is set: ``⟨K_h⟩_top Γ`` (0 for the no-flux lid)."""
+    if theta is None or g.cfg.theta_top_gradient == 0.0:
+        return 0.0
+    return planar_mean(nu_t[..., -1], g) / g.cfg.pr_sgs * g.cfg.theta_top_gradient
 
 
 def _budget_rates(s: SpectralLESState, g: SpectralLESGrid, u_geo, f_cor, force,
-                  sfc_theta_flux, t_sfc):
-    """Column-integrated horizontal-mean source rates entering the θ/u/v budgets
-    at state ``s`` (kinematic; heat [K m/s], momentum [m²/s²]), in
-    :data:`BUDGET_TERMS` order. Each is the boundary/body term ``rhs`` applies: the
-    surface face of the θ flux, the surface face of the momentum flux
-    (``−Cd⟨|u₁|⟩⟨u₁⟩``), ``∫f(v−v_g)dz``, ``−∫f(u−u_g)dz`` and ``∫force dz``."""
-    cd_surf, q = surface_boundary(s.u, s.v, s.theta, g, sfc_theta_flux, t_sfc)
+                  sfc_theta_flux, t_sfc, sfc_qv_flux=0.0, q_sfc=None):
+    """Column-integrated horizontal-mean source rates entering the θ/u/v/water
+    budgets at state ``s`` (kinematic; heat [K m/s], momentum [m²/s²], water
+    [(kg/kg) m/s]), in :data:`BUDGET_TERMS` order. Each is a boundary/body term
+    ``rhs`` applies — the surface face of the θ flux, the surface face of the
+    momentum flux (``−Cd⟨|u₁|⟩⟨u₁⟩``), ``∫f(v−v_g)dz``, ``−∫f(u−u_g)dz``,
+    ``∫force dz``, the surface moisture flux into ``q_v`` — or the monotone
+    advection's free-stream correction for θ and the summed water slots."""
+    sb = surface_boundary(s.u, s.v, s.theta, g, sfc_theta_flux, t_sfc, q_sfc=q_sfc,
+                          tracers=s.tracers)
+    cd_surf, q = sb[0], sb[1]
+    if q_sfc is not None:
+        sfc_qv_flux = sb[2]
+    lid = 0.0
+    if g.cfg.theta_top_gradient != 0.0 and s.theta is not None:
+        lid = lid_heat_flux(s.theta, effective_eddy_viscosity(
+            s.u, s.v, s.w, g, theta=s.theta, tracers=s.tracers), g)
     cd = surface_drag_coefficient(g, cd_surf)
     u1, v1 = s.u[..., 0], s.v[..., 0]
-    spd1_mean = _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
+    spd1_mean = planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
     lz = g.dz * s.u.shape[-1]
     ug, vg = u_geo
-    um = _planar_mean(s.u, g)
-    vm = _planar_mean(s.v, g)
+    um = planar_mean(s.u, g)
+    vm = planar_mean(s.v, g)
     dt_ = s.u.dtype
+    has_tr = s.tracers is not None and s.tracers.shape[-1] > 0
+    fv_theta = fv_water = 0.0
+    if g.cfg.monotone_scalars and (s.theta is not None or has_tr):
+        div_fv = _vanleer_fv_velocity_divergence(s.u, s.v, s.w, g)
+        if s.theta is not None:
+            fv_theta = _column_fv_source(s.theta, div_fv, g)
+        if has_tr:
+            water = jnp.sum(s.tracers[..., :N_WATER_SLOTS], axis=-1)
+            fv_water = _column_fv_source(water, div_fv, g)
     terms = (
         q if s.theta is not None else 0.0,
-        -cd * spd1_mean * _planar_mean(u1, g),
-        -cd * spd1_mean * _planar_mean(v1, g),
+        -cd * spd1_mean * planar_mean(u1, g),
+        -cd * spd1_mean * planar_mean(v1, g),
         f_cor * g.dz * jnp.sum(vm - vg),
         -f_cor * g.dz * jnp.sum(um - ug),
         force[0] * lz,
         force[1] * lz,
+        sfc_qv_flux if has_tr else 0.0,
+        fv_theta,
+        fv_water,
+        lid,
     )
     return jnp.stack([jnp.asarray(t, dt_) for t in terms])
 
 
 def step(state: SpectralLESState, g: SpectralLESGrid, dt,
          u_geo, f_cor: float, first: bool = False, force=(0.0, 0.0),
-         sfc_theta_flux=0.0, t_sfc=None, sfc_qv_flux=0.0, return_budget=False):
+         sfc_theta_flux=0.0, t_sfc=None, sfc_qv_flux=0.0, return_budget=False,
+         q_sfc=None):
     """One time step + pressure projection.
 
     ``time_scheme`` selects the integrator. The RK options ("rk3"=SSP-RK3,
@@ -1403,7 +1698,7 @@ def step(state: SpectralLESState, g: SpectralLESGrid, dt,
         Ru, Rv, Rw, u_star, Rth, Rtr = rhs(u, v, w, g, u_geo, f_cor, force=force,
                                            theta=th, sfc_theta_flux=sfc_theta_flux,
                                            t_sfc=t_sfc, tracers=tr,
-                                           sfc_qv_flux=sfc_qv_flux)
+                                           sfc_qv_flux=sfc_qv_flux, q_sfc=q_sfc)
         if first:
             au, av, aw, ath, atr = Ru, Rv, Rw, Rth, Rtr
         else:
@@ -1431,7 +1726,7 @@ def step(state: SpectralLESState, g: SpectralLESGrid, dt,
                                        force=force, theta=s.theta,
                                        sfc_theta_flux=sfc_theta_flux,
                                        t_sfc=t_sfc, tracers=s.tracers,
-                                       sfc_qv_flux=sfc_qv_flux)
+                                       sfc_qv_flux=sfc_qv_flux, q_sfc=q_sfc)
         # History leaves zeroed from the INPUT state's structure (not the RHS):
         # if the caller passed rhs_*_prev=None with an active field, mirroring
         # Rth/Rtr here would change the pytree structure mid-integration and
@@ -1456,7 +1751,8 @@ def step(state: SpectralLESState, g: SpectralLESGrid, dt,
         def slow_aug(sa):
             s, _acc = sa
             return (slow_fn(s), _budget_rates(s, g, u_geo, f_cor, force,
-                                              sfc_theta_flux, t_sfc))
+                                              sfc_theta_flux, t_sfc, sfc_qv_flux,
+                                              q_sfc))
 
         def proj_aug(sa, slow_tend, dt_sub, n_sub, cfg):
             return (proj_fn(sa[0], slow_tend[0], dt_sub, n_sub, cfg), sa[1])
