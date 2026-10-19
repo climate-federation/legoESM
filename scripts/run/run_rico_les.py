@@ -1,5 +1,5 @@
 """RICO precipitating trade-wind cumulus on the spectral TRUE-LES core +
-swappable microphysics (Morrison/M2005 default; warm rain ACTIVE).
+swappable microphysics (the LES-suite catalog scheme, Kessler; warm rain ACTIVE).
 
 RICO (van Zanten et al. 2011, JAMES 3; gSAM ``CASES/RICO``) — the GCSS/GEWEX
 precipitating shallow-cumulus intercomparison:
@@ -69,7 +69,10 @@ import run_bomex_les as bx  # noqa: E402  (shared forcing/profiles machinery)
 
 from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 from legoesm.atmosphere.les_suite.bridge import save_artifact  # noqa: E402
-from legoesm.atmosphere.les_suite.catalog import catalog_case  # noqa: E402
+from legoesm.atmosphere.les_suite.catalog import (  # noqa: E402
+    case_microphysics,
+    catalog_case,
+)
 from legoesm.atmosphere.les_suite.checkpoint import (  # noqa: E402
     EXIT_CHECKPOINTED,
     add_checkpoint_args,
@@ -109,7 +112,8 @@ def parse_args():
     p.add_argument("--hours", type=float, default=24.0)
     p.add_argument("--dt", type=float, default=2.0)
     p.add_argument("--f32", action="store_true")
-    p.add_argument("--microphysics", default="morrison")
+    p.add_argument("--microphysics", default=None,
+                   help="the case's catalog scheme (Kessler); an explicit value must agree with it.")
     p.add_argument("--n-tracers", type=int, default=9)
     p.add_argument("--scalar-advection", choices=["van_leer","weno5","weno5_hv"], default="van_leer",
                    help="monotone scalar reconstruction (weno5=less diffusive).")
@@ -146,7 +150,9 @@ def parse_args():
                         "precipitation, and the column budgets (printed).")
     p.add_argument("--output", type=Path, default=Path("results/les_rico"))
     add_checkpoint_args(p)
-    return p.parse_args()
+    args = p.parse_args()
+    args.microphysics = case_microphysics("rico_cu", args.microphysics)
+    return args
 
 
 def main():

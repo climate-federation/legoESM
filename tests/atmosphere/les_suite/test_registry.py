@@ -285,3 +285,18 @@ def test_dycoms_deck_names_map_to_catalog_cases():
         assert case.driver == "run_dycoms_les.py"
         # the deck's own domain is the catalog case's
         assert case.grid.Lz_m == mod._STRATOCUMULUS_CASES[deck]["lz_m"]
+
+
+def test_catalog_microphysics_is_what_the_launched_runs_used():
+    """The launched cloudy runs all passed --microphysics kessler (launch deck
+    2026-10-15/18); the catalog now resolves exactly that, GABLS3 runs none."""
+    from legoesm.atmosphere.les_suite.catalog import catalog_case, case_microphysics
+    for name in ("bomex_cu", "rico_cu", "dycoms_rf01_sc", "dycoms_rf02_sc", "astex_sc"):
+        assert case_microphysics(name) == "kessler"
+        assert case_microphysics(name, "kessler") == "kessler"
+        with pytest.raises(ValueError, match="disagrees"):
+            case_microphysics(name, "morrison")
+    assert case_microphysics("gabls3") == "none"
+    with pytest.raises(ValueError, match="records no microphysics"):
+        case_microphysics("cbl_nieuwstadt")
+    assert catalog_case("cbl_nieuwstadt").microphysics is None

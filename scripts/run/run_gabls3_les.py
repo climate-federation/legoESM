@@ -42,6 +42,7 @@ from legoesm.atmosphere.les_suite.catalog import (  # noqa: E402
     GABLS3_PENDING,
     GABLS3_SPONGE_TAU_S,
     MOIST_CASES,
+    case_microphysics,
 )
 from legoesm.atmosphere.les_suite.checkpoint import (  # noqa: E402
     EXIT_CHECKPOINTED,
@@ -136,6 +137,11 @@ def forcing_at(z_c, f_cor, t0, t1):
 
 def main(argv=None):
     args = parse_args(argv)
+    # This driver has no condensation; it refuses a catalog that records otherwise.
+    recorded = case_microphysics("gabls3")
+    if recorded != "none":
+        raise RuntimeError(f"gabls3: the catalog records microphysics {recorded!r}, "
+                           "this driver runs none")
     if GABLS3_PENDING and not args.smoke:
         raise SystemExit("gabls3: values the user has not approved — production is "
                          "refused (run --smoke to test):\n  " + "\n  ".join(GABLS3_PENDING))
@@ -277,7 +283,8 @@ def main(argv=None):
             "theta_ref_K": _THETA_REF_K, "most_virtual": True,
             "theta_top_gradient_K_m": gb.THETA_TOP_GRADIENT_K_M,
             "sponge": [z_sp, GABLS3_SPONGE_TAU_S],
-            "microphysics": microphysics_record(MicrophysicsConfig(scheme="none")),
+            "microphysics": microphysics_record(
+                MicrophysicsConfig(scheme=case_microphysics("gabls3"))),
             "held_out": True, "smoke": bool(args.smoke),
             "approved": list(GABLS3_APPROVED), "pending": list(GABLS3_PENDING),
             "surface": "prescribed θ, q at 0.25 m through MOST; the realised flux "

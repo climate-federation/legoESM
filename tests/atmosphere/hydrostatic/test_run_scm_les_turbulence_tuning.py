@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -949,7 +950,8 @@ def _report_args(tmp_path):
     return types.SimpleNamespace(
         case=None, radiation_confound=None, nlev=4, tier="extended",
         optimizer="muon", lr=0.1, steps=2, joint_aggregation="mean",
-        relative_norm_floor=0.05, microphysics="none",
+        relative_norm_floor=0.05, microphysics=None,
+        microphysics_per_case={"bomex": "kessler"},
     )
 
 
@@ -1456,29 +1458,35 @@ def test_the_arm_actually_receives_the_case_droplet_number():
     case = drv.load_case("rf02", nlev=16, dt=30.0)
     arm = type("Arm", (), {"case": case, "name": "rf02",
                            "prescribed_fluxes": True, "surface": None})()
-    args = type("Args", (), {"microphysics": "morrison",
+    args = type("Args", (), {"microphysics": None,
                              "clubb_prognostic": True})()
-    cfg = drv._arm_config("louis", arm, args)
-    assert cfg.microphysics.scheme == "morrison"
+    # The arm runs RF02's catalog scheme (Kessler, no droplet number) ...
+    assert drv._arm_config("louis", arm, args).microphysics.scheme == "kessler"
+    # ... and a Morrison column still receives the case's droplet number.
+    cfg = drv.build_physics_config("louis", prescribed_fluxes=True,
+                                   microphysics="morrison",
+                                   n_c_m3=case.spec.les_n_c_m3, simple_lw=True)
     assert cfg.microphysics.morrison.Nc_0 == pytest.approx(55.0e6), (
         "the arm must run RF02's 55 cm^-3, not the library default")
 
 
-def test_the_les_drivers_still_run_the_scm_default_scheme():
-    """The single-column default is Morrison because that is what the LES runs.
-
-    Nothing derives it: the default is a literal. That is fine only while every
-    LES driver actually runs Morrison, so this asserts exactly that, and goes
-    red the day one of them changes -- at which point the comparison has
-    stopped being like-for-like and the default has to follow or become
-    per case.
-    """
-    for script in ("run_dycoms_les.py", "run_bomex_les.py", "run_rico_les.py"):
-        src = (_ROOT / "scripts" / "run" / script).read_text()
-        assert '"--microphysics", default="morrison"' in src \
-            or "'--microphysics', default='morrison'" in src, (
-            f"{script} no longer defaults to morrison; the SCM arm's default "
-            "is now a different scheme from its LES")
+def test_every_moist_arm_runs_its_catalog_microphysics():
+    """Each moist arm takes the scheme its LES ran from the LES-suite catalog,
+    not a driver default (user 2026-10-19); a disagreeing flag is refused."""
+    from legoesm.atmosphere.les_suite.catalog import case_microphysics
+    assert set(drv._SCM_CATALOG_NAME) == set(drv.SAM_SCM_CASES)
+    for name, label in drv._SCM_CATALOG_NAME.items():
+        assert drv.arm_microphysics(name) == case_microphysics(label) == "kessler"
+        with pytest.raises(ValueError, match="disagrees with the catalog"):
+            drv.arm_microphysics(name, "morrison")
+    for name in drv.ANALYTIC_SCM_CASES:
+        assert drv.arm_microphysics(name) == "morrison"
+    args = types.SimpleNamespace(microphysics=None, clubb_prognostic=True)
+    for name in ("bomex", "dycoms"):
+        arm = types.SimpleNamespace(
+            name=name, prescribed_fluxes=True, surface=None,
+            case=types.SimpleNamespace(spec=drv.SAM_SCM_CASES[name]))
+        assert drv._arm_config("louis", arm, args).microphysics.scheme == "kessler"
 
 
 # --- the column carries what its scheme needs -------------------------------

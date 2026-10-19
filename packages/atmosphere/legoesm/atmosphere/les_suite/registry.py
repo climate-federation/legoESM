@@ -250,6 +250,11 @@ class LESCase:
         case WITHOUT a ``setup`` (its driver reads it from here; a setup case
         carries ``setup.sponge_bottom_m``). ``None`` = no sponge. See
         :meth:`sponge_base_m`.
+    microphysics : str | None
+        The microphysics scheme the case's LES runs (a ``MicrophysicsConfig.scheme``
+        name; ``"none"`` = no condensation). Moist drivers read it from here; an
+        explicit ``--microphysics`` that disagrees is refused. ``None`` for the dry
+        cases.
     """
 
     name: str
@@ -269,6 +274,7 @@ class LESCase:
     setup: LESSetup | None = None
     held_out: bool = False
     sponge_base_frac: float | None = None
+    microphysics: str | None = None
 
     def sponge_base_m(self, lz_m: float | None = None) -> float | None:
         """Height [m] of the LES sponge base (``None`` = no sponge): the setup's
@@ -337,6 +343,10 @@ class LESCase:
                     0.0 < frac < 1.0):
                 raise RegistryError(
                     f"{self.name}: sponge_base_frac must be in (0, 1), got {frac!r}")
+        if self.microphysics is not None and (
+                not isinstance(self.microphysics, str) or not self.microphysics):
+            raise RegistryError(f"{self.name}: microphysics must be a scheme name or "
+                                f"None, got {self.microphysics!r}")
         self.grid.validate()
 
 

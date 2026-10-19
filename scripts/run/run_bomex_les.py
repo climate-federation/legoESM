@@ -1,5 +1,5 @@
 """BOMEX shallow-cumulus on the pseudo-spectral incompressible TRUE-LES core,
-coupled to the swappable legoESM microphysics (Morrison/M2005 default).
+coupled to the swappable legoESM microphysics (the LES-suite catalog scheme, Kessler).
 
 BOMEX (Siebesma et al. 2003, JAS 60; gSAM ``CASES/BOMEX``) — the canonical GCSS
 trade-wind shallow-cumulus case:
@@ -13,7 +13,7 @@ trade-wind shallow-cumulus case:
   wall model with z0 tuned to the BOMEX u* ≈ 0.28 m/s.
 * Coriolis f = 0.376e-4 s⁻¹ toward the HEIGHT-DEPENDENT geostrophic wind
   u_g = −10 + 1.8e-3·z m/s, v_g = 0 (the lsf u_ls profile).
-* Microphysics: swappable via --microphysics (default morrison, SAM flavor).
+* Microphysics: swappable via --microphysics (default: the catalog scheme, Kessler).
   BOMEX is non-precipitating by construction (autoconversion is negligible at
   its LWC) — doprecip=.false. in SAM is matched by physics, not by a switch.
 
@@ -82,7 +82,10 @@ import les_record  # noqa: E402
 
 from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 from legoesm.atmosphere.les_suite.bridge import save_artifact  # noqa: E402
-from legoesm.atmosphere.les_suite.catalog import catalog_case  # noqa: E402
+from legoesm.atmosphere.les_suite.catalog import (  # noqa: E402
+    case_microphysics,
+    catalog_case,
+)
 from legoesm.atmosphere.les_suite.checkpoint import (  # noqa: E402
     EXIT_CHECKPOINTED,
     add_checkpoint_args,
@@ -146,9 +149,8 @@ def parse_args():
     p.add_argument("--dt-max", type=float, default=2.0)
     p.add_argument("--max-wind", type=float, default=12.0)
     p.add_argument("--f32", action="store_true")
-    p.add_argument("--microphysics", default="morrison",
-                   help="any MicrophysicsConfig scheme (swappable; morrison "
-                        "default, SAM flavor).")
+    p.add_argument("--microphysics", default=None,
+                   help="the case's catalog scheme (Kessler); an explicit value must agree with it.")
     p.add_argument("--lagrangian-sdm", action="store_true",
                    help="OPT-IN persistent advected Lagrangian SDM instead of "
                         "the Eulerian microphysics adapter.")
@@ -282,7 +284,9 @@ def parse_args():
     p.add_argument("--case-label", type=str, default="bomex_cu")
     p.add_argument("--output", type=Path, default=Path("results/les_bomex"))
     add_checkpoint_args(p)
-    return p.parse_args()
+    args = p.parse_args()
+    args.microphysics = case_microphysics("bomex_cu", args.microphysics)
+    return args
 
 
 def build(args, dtype):

@@ -96,6 +96,7 @@ ANCHOR_CASES: tuple[LESCase, ...] = (
         sgs_variants=_SGS_DEFAULT,
         driver="run_bomex_les.py",
         sponge_base_frac=0.75,           # top 25 % (BOMEX dodamping)
+        microphysics="kessler",       # user 2026-10-19: the LES and every SCM arm run Kessler
         reference="Siebesma et al. (2003) BOMEX shallow-cumulus LES intercomparison",
         ci_marker="manual_only",
         description="Non-precipitating shallow trade cumulus; cloud fraction from the "
@@ -112,6 +113,7 @@ ANCHOR_CASES: tuple[LESCase, ...] = (
         sgs_variants=_SGS_DEFAULT,
         driver="run_dycoms_les.py",
         sponge_base_frac=0.85,           # top 15 % (run_dycoms_les)
+        microphysics="kessler",       # user 2026-10-19: the LES and every SCM arm run Kessler
         reference="Stevens et al. (2005) DYCOMS-II RF01 stratocumulus LES intercomparison",
         ci_marker="manual_only",
         description="Nocturnal marine stratocumulus with a sharp cloud-top inversion; "
@@ -138,6 +140,7 @@ MOIST_CASES: tuple[LESCase, ...] = (
         sgs_variants=_SGS_DEFAULT,
         driver="run_rico_les.py",
         sponge_base_frac=0.75,           # top 25 %
+        microphysics="kessler",       # user 2026-10-19: the LES and every SCM arm run Kessler
         reference="van Zanten et al. (2011) RICO precipitating shallow-cumulus LES "
                   "intercomparison",
         ci_marker="manual_only",
@@ -156,6 +159,7 @@ MOIST_CASES: tuple[LESCase, ...] = (
         sgs_variants=_SGS_DEFAULT,
         driver="run_dycoms_les.py",
         sponge_base_frac=0.85,           # top 15 % (run_dycoms_les)
+        microphysics="kessler",       # user 2026-10-19: the LES and every SCM arm run Kessler
         reference="Ackerman et al. (2009) DYCOMS-II RF02 drizzling stratocumulus LES "
                   "intercomparison",
         ci_marker="manual_only",
@@ -173,6 +177,7 @@ MOIST_CASES: tuple[LESCase, ...] = (
         sgs_variants=_SGS_DEFAULT,
         driver="run_dycoms_les.py",
         sponge_base_frac=0.85,           # top 15 % (run_dycoms_les)
+        microphysics="kessler",       # user 2026-10-19: the LES and every SCM arm run Kessler
         reference="ASTEX flight 209 stratocumulus (gSAM ASTEX209 deck)",
         ci_marker="manual_only",
         description="ASTEX stratocumulus deck, steady forcing "
@@ -190,6 +195,7 @@ MOIST_CASES: tuple[LESCase, ...] = (
         sgs_variants=_SGS_DEFAULT,
         driver="run_gabls3_les.py",
         sponge_base_frac=0.75,           # 600 m of 800 m (approved 2026-10-18)
+        microphysics="none",       # no condensation (approved 2026-10-18)
         reference="Basu (2008) GABLS3 LES intercomparison case description (revised "
                   "6 Oct 2008); Cabauw 2 July 2006 00-09 UTC",
         ci_marker="manual_only",
@@ -752,3 +758,16 @@ def catalog_case(name: str) -> LESCase:
         if case.name == name:
             return case
     raise KeyError(f"no LES catalog case named {name!r}")
+
+
+def case_microphysics(name: str, requested: str | None = None) -> str:
+    """The microphysics scheme the catalog records for case ``name``; ``requested``
+    (a driver's explicit ``--microphysics``) must agree with it, so no run silently
+    falls back to a driver default (user 2026-10-19)."""
+    recorded = catalog_case(name).microphysics
+    if recorded is None:
+        raise ValueError(f"{name}: the catalog records no microphysics scheme")
+    if requested is not None and requested != recorded:
+        raise ValueError(f"{name}: --microphysics {requested!r} disagrees with the "
+                         f"catalog's {recorded!r}")
+    return recorded

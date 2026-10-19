@@ -1,5 +1,5 @@
 """Marine stratocumulus on the spectral TRUE-LES core + swappable microphysics
-(Morrison/M2005 default; non-drizzling RF01).
+(the LES-suite catalog scheme, Kessler; non-drizzling RF01).
 
 Three decks, selected with ``--case``: DYCOMS-II RF01 (default, described
 below), DYCOMS-II RF02 (``rf02``, the DRIZZLING flight of the same campaign)
@@ -87,7 +87,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import les_record  # noqa: E402
 from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 from legoesm.atmosphere.les_suite.bridge import save_artifact  # noqa: E402
-from legoesm.atmosphere.les_suite.catalog import catalog_case  # noqa: E402
+from legoesm.atmosphere.les_suite.catalog import (  # noqa: E402
+    case_microphysics,
+    catalog_case,
+)
 from legoesm.atmosphere.les_suite.checkpoint import (  # noqa: E402
     EXIT_CHECKPOINTED,
     add_checkpoint_args,
@@ -265,7 +268,8 @@ def parse_args():
     p.add_argument("--hours", type=float, default=None)
     p.add_argument("--dt", type=float, default=None)
     p.add_argument("--f32", action="store_true")
-    p.add_argument("--microphysics", default="morrison")
+    p.add_argument("--microphysics", default=None,
+                   help="the case's catalog scheme (Kessler); an explicit value must agree with it.")
     p.add_argument("--n-tracers", type=int, default=9)
     p.add_argument("--scalar-advection", choices=["van_leer","weno5","weno5_hv"], default="van_leer",
                    help="monotone scalar reconstruction (weno5=less diffusive).")
@@ -333,6 +337,7 @@ def parse_args():
     args.subsidence_divergence_s = spec["subsidence_divergence_s"]
     args.n_c_m3 = spec["n_c_m3"]
     args.perturb_z_m = spec["perturb_z_m"]
+    args.microphysics = case_microphysics(_CATALOG_NAME[args.case], args.microphysics)
     return args
 
 

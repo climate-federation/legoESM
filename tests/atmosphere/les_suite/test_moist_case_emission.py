@@ -375,3 +375,33 @@ def test_driver_takes_its_sponge_base_from_the_catalog(driver, argv, case, lz,
     rc = mod.main()
     assert rc in (0, None)
     assert calls == [(case, lz)]
+
+
+# The moist drivers take the microphysics scheme from the catalog (user 2026-10-19):
+# without --microphysics they run the case's Kessler, not their own former Morrison
+# default; a flag that disagrees is refused.
+_NO_FLAG = [a for a in _TINY if a not in ("--microphysics", "kessler")]
+assert len(_NO_FLAG) == len(_TINY) - 2
+_MICRO_CASES = [
+    ("run_bomex_les", ["--hours", "0.002", "--dt", "1.0"], "bomex_cu"),
+    ("run_rico_les", ["--hours", "0.002", "--dt", "1.0"], "rico_cu"),
+    ("run_dycoms_les", ["--case", "astex", "--hours", "0.001"], "astex_sc"),
+]
+
+
+@pytest.mark.parametrize("driver,extra,label", _MICRO_CASES,
+                         ids=[c[2] for c in _MICRO_CASES])
+def test_moist_driver_runs_the_catalog_microphysics(driver, extra, label, tmp_path,
+                                                    monkeypatch):
+    from legoesm.atmosphere.les_suite.bridge import load_artifact
+    mod = _load(driver)
+    art = tmp_path / f"{label}.npz"
+    monkeypatch.setattr(sys, "argv", [driver] + _NO_FLAG + extra + [
+        "--case-label", label, "--output", str(tmp_path / "rec"),
+        "--emit-suite-artifact", str(art)])
+    assert mod.main() == 0
+    assert load_artifact(art).les_setup["microphysics"]["scheme"] == "kessler"
+    monkeypatch.setattr(sys, "argv", [driver] + _NO_FLAG + extra + [
+        "--microphysics", "morrison", "--output", str(tmp_path / "x")])
+    with pytest.raises(ValueError, match="disagrees with the catalog"):
+        mod.parse_args()

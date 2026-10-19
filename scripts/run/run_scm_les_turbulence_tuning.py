@@ -64,6 +64,7 @@ from legoesm.atmosphere.forcing.scm.sam_case_scm import (  # noqa: E402
     SAM_SCM_CASES,
     load_sam_scm_case,
 )
+from legoesm.atmosphere.les_suite.catalog import case_microphysics  # noqa: E402
 from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.physics._shared import exner_function  # noqa: E402
 from legoesm.atmosphere.physics.combined import PhysicsConfig  # noqa: E402
@@ -127,6 +128,26 @@ _SIMPLE_LW_CASES = frozenset({"dycoms", "rf02", "astex"})
 
 ALL_CASES: tuple[str, ...] = tuple(sorted(SAM_SCM_CASES)) + tuple(
     sorted(ANALYTIC_SCM_CASES))
+
+# Each moist arm runs the microphysics its LES ran, read from the LES-suite
+# catalog (user 2026-10-19); an explicit --microphysics must agree with it.
+_SCM_CATALOG_NAME: dict[str, str] = {
+    "bomex": "bomex_cu", "rico": "rico_cu", "astex": "astex_sc",
+    "dycoms": "dycoms_rf01_sc", "rf02": "dycoms_rf02_sc",
+}
+# The analytic cases are dry (no water in the column, nothing recorded in the
+# catalog); they keep the scheme this driver always gave them.
+_DRY_ARM_MICROPHYSICS = "morrison"
+
+
+def arm_microphysics(name: str, requested: str | None = None) -> str:
+    """Microphysics scheme for arm ``name``: the catalog's for a moist case."""
+    if name in SAM_SCM_CASES:
+        if name not in _SCM_CATALOG_NAME:
+            raise ValueError(f"{name}: no LES-suite catalog entry is mapped for "
+                             "this case's microphysics")
+        return case_microphysics(_SCM_CATALOG_NAME[name], requested)
+    return _DRY_ARM_MICROPHYSICS if requested is None else requested
 
 
 def load_case(name: str, *, nlev: int, dt: float | None):
@@ -433,12 +454,9 @@ def build_physics_config(scheme: str, *, prescribed_fluxes: bool,
                          simple_lw: bool = False) -> PhysicsConfig:
     """PhysicsConfig with ONLY the turbulence scheme varying.
 
-    ``microphysics`` defaults to "morrison", which is what every LES driver in
-    this repo runs today. It is a DEFAULT, not a value derived from the LES
-    configuration -- nothing here reads the driver -- so a case whose LES used
-    a different scheme would silently stop being a like-for-like comparison.
-    ``test_the_les_drivers_still_run_the_scm_default_scheme`` goes red if that
-    ever becomes true.
+    The campaign passes each arm's scheme from :func:`arm_microphysics` (the
+    case's catalog scheme); the "morrison" default here only serves direct
+    callers.
 
     ``prescribed_fluxes`` zeroes the bulk exchange coefficient for heat on the
     active scheme's surface sub-config. The SCM refuses ``prescribe="fluxes"``
@@ -923,7 +941,7 @@ class SchemeResult:
 def _arm_config(scheme: str, arm: "CaseArm", args) -> PhysicsConfig:
     return build_physics_config(
         scheme, prescribed_fluxes=arm.prescribed_fluxes,
-        microphysics=args.microphysics,
+        microphysics=arm_microphysics(arm.name, args.microphysics),
         n_c_m3=arm.case.spec.les_n_c_m3,
         simple_lw=arm.name in _SIMPLE_LW_CASES,
         bulk_ch=arm.case.spec.bulk_ch, bulk_ce=arm.case.spec.bulk_ce,
@@ -1424,14 +1442,11 @@ def parse_args(argv=None):
                         "case's own LES z0 (which reproduces the LES u*), and "
                         "is required whenever the case prescribes its surface "
                         "heat flux, since the MOST path would double-count it.")
-    p.add_argument("--microphysics", default="morrison",
-                   help="microphysics scheme, held identical across arms. "
-                        "Defaults to morrison, which is the scheme every LES "
-                        "driver here runs today. 'none' means "
-                        "the SCM cannot condense at all, so its cloud layer "
-                        "is supersaturated vapour where the LES holds liquid "
-                        "and the stratocumulus cases lose their cloud-top "
-                        "radiative cooling entirely.")
+    p.add_argument("--microphysics", default=None,
+                   help="each moist case runs its LES-suite catalog scheme "
+                        "(Kessler); an explicit value must agree with every "
+                        "selected moist case's catalog scheme. Dry cases run "
+                        "morrison unless this is given.")
     p.add_argument("--surface-flux-to-closure",
                    action=argparse.BooleanOptionalAction, default=False,
                    help="Hand a case deck's PRESCRIBED surface heat/moisture "
@@ -1640,6 +1655,8 @@ def main(argv=None) -> int:
         if args.les_dir is None:
             raise SystemExit("--case requires --les-dir")
         case_names, les_dirs = [args.case], {args.case: args.les_dir}
+    args.microphysics_per_case = {
+        n: arm_microphysics(n, args.microphysics) for n in case_names}
     for n in case_names:
         if n in _RADIATION_MISMATCH and not args.allow_radiation_mismatch:
             raise SystemExit(
@@ -1973,7 +1990,11 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
             "joint_aggregation": args.joint_aggregation,
             "relative_norm_floor": args.relative_norm_floor,
                         "radiation": "none", "convection": "none",
-            "microphysics": args.microphysics,
+            "microphysics": (
+                next(iter(set(args.microphysics_per_case.values())))
+                if len(set(args.microphysics_per_case.values())) == 1
+                else "per_case"),
+            "microphysics_per_case": args.microphysics_per_case,
             "scored_variables_per_case": {a.name: list(a.scored) for a in arms},
             "note": (
                 "All arms share one column and forcing built from the same "
@@ -2003,10 +2024,9 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
                 "Surface momentum: the SCM uses a constant-Cd bulk drag while "
                 "the LES uses a z0 log-law wall model. This is why u and v are "
                 "not scored by default.",
-                "Microphysics: the LES runs Morrison; the SCM runs "
-                f"{args.microphysics!r}. With 'none' the SCM cannot condense, "
-                "so its cloud layer holds supersaturated vapour where the LES "
-                "forms liquid, and for RICO the LES precipitates.",
+                "Microphysics: each moist arm runs its LES's catalog scheme "
+                f"({args.microphysics_per_case}); the SCM's single column "
+                "still differs from the LES's resolved cloud field.",
                 "Resolved vs parameterized: the LES resolves the large eddies "
                 "the SCM closure must represent — that difference IS the "
                 "quantity being tuned, not an error.",
@@ -2158,8 +2178,8 @@ def _write_outputs(outdir: Path, args, arms, results) -> None:
         "- The SCM is NOT otherwise a replica of the LES. It uses a "
         "constant-Cd surface drag against the LES's z0 log-law wall model "
         "(which is why u and v are excluded from the score by default), and "
-        "the LES runs Morrison microphysics while the SCM's is set by "
-        "`--microphysics`. Each difference is identical across arms, so the "
+        "each moist arm runs the microphysics scheme its LES ran (the "
+        "catalog's). Each difference is identical across arms, so the "
         "RANKING is controlled, but each also degrades the absolute LES-match "
         "and can be absorbed into a tuned parameter. See "
         "`known_scm_les_differences` in tuned_parameters.json.",
