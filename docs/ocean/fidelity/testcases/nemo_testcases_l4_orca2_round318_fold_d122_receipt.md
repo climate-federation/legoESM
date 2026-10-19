@@ -244,3 +244,8 @@ awaiting the user's ruling on this reading before landing).
   mock test could not see it; the final decision's control was the shipped
   card itself.  Fixed above (recomputed first rows, real-record plants,
   decision cited from the fold-set run).  Gate and docs only; no model change.
+- After the fix (JAX_ENABLE_X64=1, CPU, land.sh PYTHONPATH): receipt
+  citation gate PASS (12 citations, 0 failures, 0 unmapped); round-318
+  tests + citation gate test + private-import ratchet 38 passed; default
+  gate set 118 + 18 + 10 = 146 passed, 0 failed
+  (`gate_default_fix_{a,b,c}.log`).
