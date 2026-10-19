@@ -20,18 +20,22 @@ refuse() {
 # the only mode that builds or runs NEMO.
 readonly MODE=${1:---preflight-only}
 case "$MODE" in
-  --preflight-only|--run|--admit-existing|--plant-layout|--plant-admission) ;;
-  *) refuse 64 "usage: $0 [--preflight-only|--run|--admit-existing|--plant-layout|--plant-admission]" ;;
+  --preflight-only|--run|--admit-existing|--plant-layout|--plant-admission|\
+    --plant-reference|--plant-evidence-parent) ;;
+  *) refuse 64 "usage: $0 [--preflight-only|--run|--admit-existing|--plant-layout|--plant-admission|--plant-reference|--plant-evidence-parent]" ;;
 esac
 
 export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:$PATH
 readonly NEMO_ROOT=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
+readonly REFERENCE_CFG=ORCA2_ICE_PISCES
 readonly SOURCE_CFG=ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1
 readonly TARGET_CFG=ORCA2G5_OMIP_L4_VMIX_R18LDFWALK
 readonly SOURCE_ROOT=$NEMO_ROOT/cfgs/$SOURCE_CFG
 readonly TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
+readonly REF_CFG_LIST=$NEMO_ROOT/cfgs/ref_cfgs.txt
+readonly ROUNDS_ROOT=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds
 readonly SOURCE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round17/oracle_l2_r17/twin_a
-readonly TARGET_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round18/oracle_l2_r18_ldf_walk
+readonly TARGET_RUN=$ROUNDS_ROOT/round18/oracle_l2_r18_ldf_walk
 readonly RECORD=oracle_l2_ldf_walk_kt00000001.bin
 readonly SOURCE_BINARY_SHA=41cd9a63844218e7c37e75708813649603b80df0366102b8ce3e340f89a60275
 readonly SOURCE_TRA_SHA=e0ff55594dfd34eefe0d39aa9d4544567d7e6e2c18433ec77a5432124db9b3b3
@@ -73,9 +77,38 @@ check_sha() {
     refuse 65 "$path hash is $actual, expected $expected"
 }
 
+is_reference_cfg() {
+  local name=$1 list=$2
+  awk -v name="$name" '$1 == name { found=1 } END { exit !found }' "$list"
+}
+
+existing_ancestor() {
+  local path=$1 parent
+  while [[ ! -e "$path" ]]; do
+    parent=$(dirname -- "$path")
+    [[ "$parent" != "$path" ]] || return 1
+    path=$parent
+  done
+  [[ -d "$path" ]] || path=$(dirname -- "$path")
+  printf '%s\n' "$path"
+}
+
+check_free_space() {
+  local requested=$1 ancestor free_kb
+  ancestor=$(existing_ancestor "$requested") || \
+    refuse 67 "no existing ancestor for disk check $requested"
+  free_kb=$(df -Pk "$ancestor" | awk 'NR==2 {print $4}')
+  [[ "$free_kb" =~ ^[0-9]+$ ]] || \
+    refuse 67 "could not read free space for $requested via $ancestor"
+  [[ "$free_kb" -ge 4194304 ]] || \
+    refuse 67 "$requested has under 4 GB free (checked via $ancestor)"
+  printf 'DISK_PREFLIGHT_PASS requested=%s ancestor=%s\n' "$requested" "$ancestor"
+}
+
 for path in "$CANONICAL_TRA" "$CANONICAL_SCHEME" "$TRA_PATCH" \
     "$SCHEME_PATCH" "$PREREG" "$SOURCE_ROOT/BLD/bin/nemo.exe" \
-    "$SOURCE_RUN/nemo" "$SOURCE_RUN/namelist_cfg"; do
+    "$SOURCE_RUN/nemo" "$SOURCE_RUN/namelist_cfg" "$REF_CFG_LIST" \
+    "$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm"; do
   [[ -f "$path" ]] || refuse 64 "missing required input $path"
 done
 for name in "${INPUT_FILES[@]}"; do
@@ -90,6 +123,32 @@ check_sha "$SOURCE_SCHEME_SHA" "$CANONICAL_SCHEME"
 check_sha "$SOURCE_DECK_SHA" "$SOURCE_RUN/namelist_cfg"
 check_sha "$ENTRY_SHA" "$SOURCE_RUN/oracle_step_entry_kt00000001.bin"
 check_sha "$STAGE3_SHA" "$SOURCE_RUN/oracle_rktracer_stage3_kt00000001.bin"
+
+is_reference_cfg "$REFERENCE_CFG" "$REF_CFG_LIST" || \
+  refuse 64 "$REFERENCE_CFG is not listed in $REF_CFG_LIST"
+if [[ "$MODE" == --plant-reference ]]; then
+  if is_reference_cfg ORCA2_OMIP_L4 "$REF_CFG_LIST"; then
+    refuse 2 "work-configuration reference plant stayed green"
+  fi
+  printf 'STATUS PLANT-FIRED: work-configuration-reference\n'
+  refuse 69 "intentional work-configuration reference plant exit"
+fi
+
+readonly MISSING_EVIDENCE_PLANT=$ROUNDS_ROOT/.round18-missing-parent-plant/nested
+if [[ "$MODE" == --plant-evidence-parent ]]; then
+  [[ ! -e "$MISSING_EVIDENCE_PLANT" ]] || \
+    refuse 2 "missing-evidence-parent plant unexpectedly exists"
+  plant_ancestor=$(existing_ancestor "$MISSING_EVIDENCE_PLANT")
+  [[ "$plant_ancestor" == "$ROUNDS_ROOT" ]] || \
+    refuse 2 "missing-evidence-parent plant resolved to $plant_ancestor"
+  check_free_space "$MISSING_EVIDENCE_PLANT"
+  printf 'STATUS PLANT-FIRED: missing-evidence-parent ancestor=%s\n' \
+    "$plant_ancestor"
+  refuse 69 "intentional missing-evidence-parent plant exit"
+fi
+for mount in /tmp "$(dirname -- "$TARGET_RUN")" "$NEMO_ROOT"; do
+  check_free_space "$mount"
+done
 
 for patch_path in "$TRA_PATCH" "$SCHEME_PATCH"; do
   removed=$(awk '/^--- / {next} /^-/ {n++} END {print n+0}' "$patch_path")
@@ -273,10 +332,6 @@ fi
 [[ "$MODE" == --run ]] || refuse 64 "unexpected mode $MODE"
 [[ ! -e "$TARGET_ROOT" && ! -e "$TARGET_RUN" ]] || \
   refuse 67 "target exists; use --admit-existing: $TARGET_ROOT or $TARGET_RUN"
-for mount in /tmp "$(dirname "$TARGET_RUN")" "$NEMO_ROOT"; do
-  free_kb=$(df -Pk "$mount" | awk 'NR==2 {print $4}')
-  [[ "$free_kb" -ge 4194304 ]] || refuse 67 "$mount has under 4 GB free"
-done
 
 readonly MANIFEST=$(mktemp -d /tmp/orca2-l2-r18-ldf-manifest.XXXXXXXX)
 printf '%s\n' "$COMMIT" >"$MANIFEST/producer_commit.txt"
@@ -290,13 +345,12 @@ sha256sum "$CANONICAL_TRA" "$CANONICAL_SCHEME" "$TRA_PATCH" \
   >"$MANIFEST/toolchain.sha256"
 
 cd "$NEMO_ROOT"
-./makenemo -r ORCA2_OMIP_L4 -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
+./makenemo -r "$REFERENCE_CFG" -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 while IFS= read -r -d '' source; do
   cp -a "$source" "$TARGET_ROOT/EXP00/$(basename "$source")"
 done < <(find "$SOURCE_ROOT/EXP00" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
-while IFS= read -r -d '' source; do
-  cp -a "$source" "$TARGET_ROOT/MY_SRC/$(basename "$source")"
-done < <(find "$SOURCE_ROOT/MY_SRC" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
+rm -f "$TARGET_ROOT/MY_SRC/"*
+cp -a "$SOURCE_ROOT/MY_SRC/." "$TARGET_ROOT/MY_SRC/"
 cp "$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm" "$TARGET_ROOT/cpp_$TARGET_CFG.fcm"
 cp "$DRY/traldf_iso.F90" "$TARGET_ROOT/MY_SRC/traldf_iso.F90"
 cp "$DRY/traldf_iso_scheme.h90" "$TARGET_ROOT/MY_SRC/traldf_iso_scheme.h90"
@@ -323,6 +377,7 @@ print("NAMELIST_DELTA_PASS nn_itend=1 nn_stock=1 nn_stocklist=1")
 PYNAMELIST
 
 touch "$TARGET_ROOT/MY_SRC/"*.F90 "$TARGET_ROOT/MY_SRC/"*.h90
+./makenemo -n "$TARGET_CFG" -m conda-scalarmath -y --clean
 ./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 [[ -x "$BINARY" ]] || refuse 68 "target build produced no executable"
 check_layout "$TARGET_ROOT/MY_SRC/traldf_iso.F90" \
