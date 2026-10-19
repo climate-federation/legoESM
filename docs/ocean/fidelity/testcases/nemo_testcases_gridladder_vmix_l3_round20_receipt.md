@@ -126,8 +126,19 @@ record exists yet, so no score or bar verdict is permitted.
 
 ## Landing gates
 
-The final gate results are recorded in the landing commit that contains this
-receipt.  No NEMO executable was built or run.
+- explicit L3 receipt citation gate: **PASS**, 25 citations, zero failures,
+  zero unmapped citations, and zero map-audit failures;
+- citation-gate unit suite after re-anchoring every merge-shifted pin:
+  **17 passed in 5.30 s**;
+- exact default ORCA2 landing list: **145 passed in 1019.36 s**;
+- private-import ratchet, rerun separately: **6 passed in 5.07 s**; and
+- acquisition preflight at `ab0978659197`: **PASS**, all seven plants refused.
+
+The first default-list attempt correctly stopped at **144 passed, 1 failed**:
+the default receipt still held ten stale bare continuations after the lane
+merge.  Those citations were re-anchored in `ab0978659197`; the complete list
+was then rerun to the 145-test result above.  No NEMO executable was built or
+run.
 
 independent review: operator (Claude)
 
