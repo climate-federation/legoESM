@@ -185,9 +185,9 @@ def cost(rung: str, n_list: tuple[int, ...], remat: bool, jvp_at: tuple[int, ...
                "grad_l2": float(np.linalg.norm(np.nan_to_num(g))),
                "rev_dot_dir0": float(np.vdot(g, np.asarray(d)))}
         np.save(output.with_name(f"{output.stem}_grad_n{n}.npy"), g)
+        del compiled  # its code mappings count against the per-process map limit
+        jax.clear_caches()
         if n in jvp_at:
-            del compiled
-            jax.clear_caches()
             tic = time.perf_counter()
             primal, tangent = jax.jit(lambda t, v: jax.jvp(f, (t,), (v,)))(t0, d)
             row["jvp_compile_plus_run_s"] = round(time.perf_counter() - tic, 1)
