@@ -137,6 +137,12 @@ FILES = {
         _ORCA2G5_R31 / "ppsrc/nemo/stprk3.f90"),
     "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynzdf.f90": (
         _ORCA2G5_R31 / "ppsrc/nemo/dynzdf.f90"),
+    "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/sbcmod.f90": (
+        _ORCA2G5_R31 / "ppsrc/nemo/sbcmod.f90"),
+    "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domain.f90": (
+        _ORCA2G5_R31 / "ppsrc/nemo/domain.f90"),
+    "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90": (
+        _ORCA2G5_R31 / "ppsrc/nemo/restart.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceupdate.f90": (
         _ORCA2_COMPILED / "iceupdate.f90"),
     # --- GRIDLADDER round 1 (G1 survey) BEGIN ---
@@ -8405,6 +8411,18 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:287-291': [
         ('pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +', 1),
         ('* r1_e1e2t(ji,jj) / (e3t_3d', 1), 5,
+    ],
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/sbcmod.f90:340-350': [
+        ('MOD( nitend - nit000 + 1, nn_fsbc) /= 0', 1),
+        ('MOD( nn_stock, nn_fsbc) /= 0', 1), 11,
+    ],
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domain.f90:323-397': [
+        ('nit000 = nn_it000', 1),
+        ('IF( .NOT. ln_rst_list ) THEN', 1), 75,
+    ],
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90:94-120': [
+        ('nitrst = nn_stocklist( nrst_lst )', 1),
+        ('IF( kt == nitrst - 1 .OR. nn_stock == 1', 1), 27,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:780-795': [
         ('DO jk =    2,  jpkm1', 1),

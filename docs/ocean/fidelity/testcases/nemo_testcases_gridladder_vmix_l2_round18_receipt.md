@@ -2,8 +2,9 @@
 
 Status: **STOPPED FOR RECORD; NO PHYSICS CHANGE; NOT CERTIFIED.** The frozen
 round-18 prediction is commit `9f51498b92`; the operator-only acquisition is
-commit `5e9d88345f`, repaired at `c2ec20cf41`. Two operator attempts refused
-before running NEMO, and no oracle record or measurement was produced.
+commit `5e9d88345f`, repaired at `c2ec20cf41` and again after `f2784f8a2a`.
+Three operator attempts produced no oracle record or measurement; the third
+compiled successfully but NEMO's initialization rejected its one-step deck.
 
 ## 1. Frozen statement walk
 
@@ -58,7 +59,7 @@ has read-only default preflight, operator-only `--run`, and
   `c72eef59d12fbb15c72aee1bd5cadda60ffa43bf0e4d3636863ffd341c0c5045`.
 
 The repaired acquisition script is SHA-256
-`548d5c2d3bf6fd2fa504ceed8ef124d97a91ec38ca9567f8e4752db9e7eda3ee`.
+`54ac7294e1ca3ac6b2d1b3af643074e57b11488d8d59952e3178ec04f76b9317`.
 It pins the source executable, canonical operator sources, deck, step-entry
 record, and stage-3 record. It records 40 three-dimensional arrays, 11
 two-dimensional arrays, and the 31-level vertical coordinate in a registered
@@ -79,8 +80,10 @@ The first operator attempt refused because `df` was given the absent round-18
 evidence parent. The second passed that point after the operator created the
 parent, but `makenemo -r ORCA2_OMIP_L4` treated a work configuration as a
 reference: it attempted `/work_cfgs.txt`, then failed preprocessing because
-`do_loop_substitute.h90` was absent. The partial configuration was moved aside;
-the requested target name and evidence target are both still absent.
+`do_loop_substitute.h90` was absent. The third attempt built, then NEMO stopped
+in `sbc_init`: its experiment length was 1 while `nn_fsbc` was 2. The failed
+configuration and run were moved aside; the requested target name and evidence
+target are both free again.
 
 The repaired build follows the working gridladder acquisitions: its reference
 is `ORCA2_ICE_PISCES`, which preflight requires to be listed in
@@ -90,6 +93,19 @@ replaces `MY_SRC` and the cpp key file from
 and clean-rebuilds. Free-space checks resolve a missing requested directory to
 its nearest existing ancestor, and now run during read-only preflight.
 
+The rendered delta now keeps `nn_it000=1` and sets `nn_itend=2`, `nn_stock=2`,
+and `nn_stocklist=2,0,...`. NEMO assigns the configured start and end to
+`nit000` and `nitend`, and only normalizes `nn_stock` when list mode is off, at
+`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domain.f90:323-397`.
+`sbc_init` requires the inclusive experiment length and, outside list mode,
+the stock frequency to be multiples of `nn_fsbc`, at
+`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/sbcmod.f90:340-350`.
+Here both the length and `nn_stock` are 2. With list mode on, restart setup
+takes `nn_stocklist(1)` as `nitrst` and opens the restart at `nitrst-1`, at
+`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90:94-120`;
+therefore the restart opens at kt 1 and writes at kt 2, while the independent
+observer condition remains `kt == nit000` and records kt 1.
+
 Read-only preflight passed the exact additive-patch layout and a gfortran
 syntax proof, reporting:
 
@@ -97,13 +113,14 @@ syntax proof, reporting:
 DISK_PREFLIGHT_PASS requested=/tmp ancestor=/tmp
 DISK_PREFLIGHT_PASS requested=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round18 ancestor=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round18
 DISK_PREFLIGHT_PASS requested=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2 ancestor=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
+NAMELIST_DELTA_PASS nn_it000=1 nn_itend=2 experiment_length=2 nn_fsbc=2 ln_rst_list=true nn_stock=2 nn_stocklist=2 record_kt=1
 SYNTAX_PROOF_PASS traldf_iso.f90
 ROUND18_L2_LDF_PREFLIGHT_READY target=ORCA2G5_OMIP_L4_VMIX_R18LDFWALK evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round18/oracle_l2_r18_ldf_walk
 ```
 
-The new invalid-reference and missing-evidence-parent plants each fired and
-exited 69 as required. The latter resolved the deliberately absent nested path
-to the existing `gridladder_vmix_rounds` ancestor before its intentional exit:
+The invalid-reference, missing-evidence-parent, and invalid-namelist plants each
+fired and exited 69 as required. The namelist plant rendered `nn_itend=1` and
+the preflight rejected its one-step experiment against `nn_fsbc=2`:
 
 ```text
 STATUS PLANT-FIRED: work-configuration-reference
@@ -112,6 +129,9 @@ PLANT_EXIT=69
 DISK_PREFLIGHT_PASS requested=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/.round18-missing-parent-plant/nested ancestor=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds
 STATUS PLANT-FIRED: missing-evidence-parent ancestor=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds
 REFUSE: intentional missing-evidence-parent plant exit
+PLANT_EXIT=69
+STATUS PLANT-FIRED: namelist-nn_itend=1 nn_fsbc=2
+REFUSE: intentional invalid experiment-length plant exit
 PLANT_EXIT=69
 ```
 

@@ -21,8 +21,8 @@ refuse() {
 readonly MODE=${1:---preflight-only}
 case "$MODE" in
   --preflight-only|--run|--admit-existing|--plant-layout|--plant-admission|\
-    --plant-reference|--plant-evidence-parent) ;;
-  *) refuse 64 "usage: $0 [--preflight-only|--run|--admit-existing|--plant-layout|--plant-admission|--plant-reference|--plant-evidence-parent]" ;;
+    --plant-reference|--plant-evidence-parent|--plant-namelist) ;;
+  *) refuse 64 "usage: $0 [--preflight-only|--run|--admit-existing|--plant-layout|--plant-admission|--plant-reference|--plant-evidence-parent|--plant-namelist]" ;;
 esac
 
 export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:$PATH
@@ -105,6 +105,80 @@ check_free_space() {
   printf 'DISK_PREFLIGHT_PASS requested=%s ancestor=%s\n' "$requested" "$ancestor"
 }
 
+render_namelist() {
+  local source=$1 target=$2 itend=$3
+  "$PY" - "$source" "$target" "$itend" <<'PYNAMELIST'
+import re
+import sys
+
+source, target, itend = sys.argv[1:4]
+text = open(source, encoding="utf-8").read()
+for key, value in (("nn_itend", itend), ("nn_stock", "2")):
+    text, count = re.subn(
+        rf"^(\s*{key}\s*=\s*)(\S+)", rf"\g<1>{value}", text,
+        count=1, flags=re.MULTILINE)
+    if count != 1:
+        raise SystemExit(f"REFUSE: {key} was not found exactly once")
+text, count = re.subn(
+    r"^(\s*nn_stocklist\s*=\s*).*$", r"\g<1>2,0,0,0,0,0,0,0,0,0",
+    text, count=1, flags=re.MULTILINE)
+if count != 1:
+    raise SystemExit("REFUSE: nn_stocklist was not found exactly once")
+open(target, "w", encoding="utf-8").write(text)
+PYNAMELIST
+}
+
+check_namelist_timeline() {
+  local namelist=$1
+  "$PY" - "$namelist" <<'PYNAMELISTCHECK'
+import re
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+
+def assignment(name):
+    matches = re.findall(
+        rf"^\s*{name}\s*=\s*([^!\n]+)", text, flags=re.MULTILINE)
+    if len(matches) != 1:
+        raise SystemExit(
+            f"REFUSE: {name} occurs {len(matches)} times in rendered namelist")
+    return matches[0].strip()
+
+nit000 = int(assignment("nn_it000"))
+nitend = int(assignment("nn_itend"))
+nn_stock = int(assignment("nn_stock"))
+nn_fsbc = int(assignment("nn_fsbc"))
+ln_rst_list = assignment("ln_rst_list").lower() == ".true."
+stocklist = [int(value.strip()) for value in assignment("nn_stocklist").split(",")]
+length = nitend - nit000 + 1
+if nn_fsbc <= 0:
+    raise SystemExit(f"REFUSE: nn_fsbc must be positive, got {nn_fsbc}")
+if length <= 0 or length % nn_fsbc:
+    raise SystemExit(
+        "REFUSE: sbc_init experiment length "
+        f"({length}) is not a multiple of nn_fsbc ({nn_fsbc})")
+if nitend % nn_fsbc:
+    raise SystemExit(
+        f"REFUSE: nn_itend ({nitend}) is not a multiple of nn_fsbc ({nn_fsbc})")
+if nn_stock % nn_fsbc:
+    raise SystemExit(
+        f"REFUSE: nn_stock ({nn_stock}) is not a multiple of nn_fsbc ({nn_fsbc})")
+if not ln_rst_list:
+    raise SystemExit("REFUSE: rendered acquisition disabled ln_rst_list")
+if stocklist != [nitend] + [0] * 9:
+    raise SystemExit(
+        f"REFUSE: nn_stocklist {stocklist} does not write once at nn_itend {nitend}")
+if nit000 != 1:
+    raise SystemExit(f"REFUSE: observer record would move from kt 1 to kt {nit000}")
+print(
+    "NAMELIST_DELTA_PASS "
+    f"nn_it000={nit000} nn_itend={nitend} experiment_length={length} "
+    f"nn_fsbc={nn_fsbc} ln_rst_list=true nn_stock={nn_stock} "
+    f"nn_stocklist={stocklist[0]} record_kt={nit000}")
+PYNAMELISTCHECK
+}
+
 for path in "$CANONICAL_TRA" "$CANONICAL_SCHEME" "$TRA_PATCH" \
     "$SCHEME_PATCH" "$PREREG" "$SOURCE_ROOT/BLD/bin/nemo.exe" \
     "$SOURCE_RUN/nemo" "$SOURCE_RUN/namelist_cfg" "$REF_CFG_LIST" \
@@ -160,6 +234,21 @@ cp "$CANONICAL_TRA" "$DRY/traldf_iso.F90"
 cp "$CANONICAL_SCHEME" "$DRY/traldf_iso_scheme.h90"
 patch -s -d "$DRY" -p0 --fuzz=0 <"$TRA_PATCH"
 patch -s -d "$DRY" -p0 --fuzz=0 <"$SCHEME_PATCH"
+render_namelist "$SOURCE_RUN/namelist_cfg" "$DRY/namelist_cfg" 2
+check_namelist_timeline "$DRY/namelist_cfg"
+
+if [[ "$MODE" == --plant-namelist ]]; then
+  render_namelist "$SOURCE_RUN/namelist_cfg" "$DRY/namelist_cfg.plant" 1
+  if check_namelist_timeline "$DRY/namelist_cfg.plant" \
+      >"$DRY/namelist-plant.log" 2>&1; then
+    refuse 2 "nn_itend=1 namelist plant stayed green"
+  fi
+  grep -Fq 'experiment length (1) is not a multiple of nn_fsbc (2)' \
+    "$DRY/namelist-plant.log" || \
+    refuse 72 "nn_itend=1 plant failed without the sbc_init rule"
+  printf 'STATUS PLANT-FIRED: namelist-nn_itend=1 nn_fsbc=2\n'
+  refuse 69 "intentional invalid experiment-length plant exit"
+fi
 
 check_layout() {
   local tra=$1 scheme=$2
@@ -354,27 +443,8 @@ cp -a "$SOURCE_ROOT/MY_SRC/." "$TARGET_ROOT/MY_SRC/"
 cp "$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm" "$TARGET_ROOT/cpp_$TARGET_CFG.fcm"
 cp "$DRY/traldf_iso.F90" "$TARGET_ROOT/MY_SRC/traldf_iso.F90"
 cp "$DRY/traldf_iso_scheme.h90" "$TARGET_ROOT/MY_SRC/traldf_iso_scheme.h90"
-
-"$PY" - "$SOURCE_RUN/namelist_cfg" "$TARGET_ROOT/EXP00/namelist_cfg" <<'PYNAMELIST'
-import re
-import sys
-
-source, target = sys.argv[1:3]
-text = open(source, encoding="utf-8").read()
-for key, value in (("nn_itend", "1"), ("nn_stock", "1")):
-    text, count = re.subn(
-        rf"^(\s*{key}\s*=\s*)(\S+)", rf"\g<1>{value}", text,
-        count=1, flags=re.MULTILINE)
-    if count != 1:
-        raise SystemExit(f"REFUSE: {key} was not found exactly once")
-text, count = re.subn(
-    r"^(\s*nn_stocklist\s*=\s*).*$", r"\g<1>1,0,0,0,0,0,0,0,0,0",
-    text, count=1, flags=re.MULTILINE)
-if count != 1:
-    raise SystemExit("REFUSE: nn_stocklist was not found exactly once")
-open(target, "w", encoding="utf-8").write(text)
-print("NAMELIST_DELTA_PASS nn_itend=1 nn_stock=1 nn_stocklist=1")
-PYNAMELIST
+cp "$DRY/namelist_cfg" "$TARGET_ROOT/EXP00/namelist_cfg"
+check_namelist_timeline "$TARGET_ROOT/EXP00/namelist_cfg"
 
 touch "$TARGET_ROOT/MY_SRC/"*.F90 "$TARGET_ROOT/MY_SRC/"*.h90
 ./makenemo -n "$TARGET_CFG" -m conda-scalarmath -y --clean
