@@ -2451,6 +2451,8 @@ def _nemo_linear_bottom_drag(model_config):
 # --- rung SMT-3 (decision 93): ORCA2 rung 0's namtra_ldf ------------
 _SMT3_RN_UD = 0.018              # lateral diffusive velocity       [m/s]
 _SMT3_RN_LD = 200.0e3            # lateral diffusive length         [m]
+_ORCA2_EIV_RN_UE = 0.03          # namtra_eiv.rn_Ue                 [m/s]
+_ORCA2_EIV_RN_LE = 200.0e3       # namtra_eiv.rn_Le                 [m]
 
 
 def _orca2_isoneutral_gm_redi(
@@ -2460,6 +2462,7 @@ def _orca2_isoneutral_gm_redi(
     redi_flux_geometry_stage: str = "step_entry", slope_uv_source_rounding: bool = False,
     redi_a33_source_ordering: bool = False,
     redi_flux_stored_face_ratios: bool = False,
+    eddy_induced_velocity: bool = False,
 ):
     """ORCA2's shared standard-isoneutral ``&namtra_ldf`` selection.
 
@@ -2471,14 +2474,20 @@ def _orca2_isoneutral_gm_redi(
 
     from legoesm.ocean.physics.lateral_mixing.config import (
         GMRediConfig,
+        TreguierConfig,
         VisbeckConfig,
     )
+    aei0 = 0.5 * _ORCA2_EIV_RN_UE * _ORCA2_EIV_RN_LE
     return GMRediConfig(
-        kappa_GM=0.0,
+        kappa_GM=aei0 if eddy_induced_velocity else 0.0,
         kappa_Redi=kappa_redi,
         S_max=0.01,
         visbeck=VisbeckConfig(enabled=False),
+        treguier=TreguierConfig(
+            enabled=eddy_induced_velocity, aei0=aei0, kappa_min=0.0),
         slope_scheme="nemo_iso_lap",
+        gm_bolus_advection=("through_fct" if eddy_induced_velocity else "centred"),
+        gm_bolus_kappa_face_average=eddy_induced_velocity,
         slope_density="neutral",
         slope_limit="nemo_cap",
         slope_positions="nemo_native",
@@ -2506,6 +2515,10 @@ def _orca2_isoneutral_gm_redi(
         redi_a33_source_ordering=redi_a33_source_ordering,
         redi_flux_stored_face_ratios=redi_flux_stored_face_ratios,
         redi_w_slope_stage_evaluation="nemo_post_slope_pair",
+        treguier_vertical_reduction_evaluation=(
+            "nemo_left" if eddy_induced_velocity else "tree"),
+        treguier_sqrt_evaluation=(
+            "nemo_forward_exact" if eddy_induced_velocity else "guarded_floor"),
         msc_stabilize=True,
         implicit_K33=True,
     )
@@ -3623,6 +3636,8 @@ def read_orca2g1_deck(
         **(_ORCA2L1_BBL_FIELDS if case in _ORCA2L_BBL_CASES else {}),
         **(_ORCA2L2_LDF_FIELDS if case in _ORCA2L_ISO_CASES
            else _ORCA2G_LDF_OFF_FIELDS),
+        **(_ORCA2L3_EIV_FIELDS if case in _ORCA2L_EIV_CASES
+           else {"namtra_eiv.ln_ldfeiv": False}),
     }
     bbl_keys = {k for k in values if k.startswith("nambbl.")}
     if bbl_keys != (set(_ORCA2L1_BBL_FIELDS) if case in _ORCA2L_BBL_CASES
@@ -3640,6 +3655,14 @@ def read_orca2g1_deck(
             "transcribes only G5's OFF group, or ORCA2's complete resolved "
             "standard-isoneutral group (namelist_cfg:298-308; "
             "namelist_ref:915-948) on L2")
+    eiv_lines = {k: v for k, v in values.items() if k.startswith("namtra_eiv.")}
+    want_eiv = (_ORCA2L3_EIV_FIELDS if case in _ORCA2L_EIV_CASES
+                else {"namtra_eiv.ln_ldfeiv": False})
+    if eiv_lines != want_eiv:
+        raise ValueError(
+            f"ORCA2G1 deck states &namtra_eiv {eiv_lines!r}; the card "
+            "transcribes only ln_ldfeiv = F, or ORCA2's complete resolved "
+            "group (namelist_cfg:315-324; namelist_ref:963-982) on L3")
     iwm_lines = {k: v for k, v in values.items() if k.startswith("namzdf_iwm.")}
     if iwm_lines != (_ORCA2V4_IWM_LINES if case in _ORCA2V_IWM_CASES else {}):
         raise ValueError(
@@ -4007,7 +4030,8 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
                 north_fold=True, redi_flux_reference_thickness_evaluation="nemo_native",
                 redi_flux_geometry_stage="rk3_kmm", slope_uv_source_rounding=True,
                 redi_a33_source_ordering=True,
-                redi_flux_stored_face_ratios=True))
+                redi_flux_stored_face_ratios=True,
+                eddy_induced_velocity=case in _ORCA2L_EIV_CASES))
     if case in _ORCA2G_SI3_CASES:
         # ORCA2 resolves ln_drgice_imp=T.  SI3 supplies rCdU_ice through the
         # post-SI3 record; all other rungs retain the appended default False.
@@ -4135,10 +4159,15 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
              and card.recipe.z_coord.nemo_ldf_ahmt is None)),
         ("ln_traldf_lap+iso+msc" if card.case in _ORCA2L_ISO_CASES
          else "ln_traldf_OFF"): (
-            _orca2l2_isoneutral_selected(cfg.gm_redi)
+            (_orca2l3_eiv_selected(cfg.gm_redi)
+             if card.case in _ORCA2L_EIV_CASES else
+             _orca2l2_isoneutral_selected(cfg.gm_redi))
             if card.case in _ORCA2L_ISO_CASES else
             cfg.K_h == 0.0 and cfg.K_bih == 0.0 and cfg.gm_redi is None),
-        "ln_ldfeiv=F": cfg.gm_redi is None or cfg.gm_redi.kappa_GM == 0.0,
+        ("ln_ldfeiv" if card.case in _ORCA2L_EIV_CASES else "ln_ldfeiv=F"): (
+            _orca2l3_eiv_selected(cfg.gm_redi)
+            if card.case in _ORCA2L_EIV_CASES else
+            cfg.gm_redi is None or cfg.gm_redi.kappa_GM == 0.0),
         ("ln_lin" if _ORCA2G_DRG.get(card.case) else "ln_drg_OFF"): (
             _nemo_linear_bottom_drag(cfg) == cfg
             if _ORCA2G_DRG.get(card.case) else
@@ -4733,7 +4762,7 @@ _ORCA2G_SI3_CASES = ("ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg",
                      "ORCA2G8-ldf", "ORCA2G9-tadv",
                      "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm",
                      "ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L1-bbl",
-                     "ORCA2L2-iso")
+                     "ORCA2L2-iso", "ORCA2L3-eiv")
 _ORCA2V_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
                  "ORCA2V5-havtb")
 _ORCA2V_EVD_CASES = ("ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
@@ -4753,7 +4782,15 @@ _ORCA2L1_BBL_FIELDS: dict[str, object] = {
 # ORCA2L2 (lane B, DECISION 138): certified G5 plus ORCA2's complete
 # resolved standard-isoneutral tracer-diffusion group.  rn_Ld and the triad
 # options are inert on nn_aht_ijk_t=20 + ln_traldf_iso, but remain deck-bound.
-_ORCA2L_ISO_CASES = ("ORCA2L2-iso",)
+_ORCA2L_ISO_CASES = ("ORCA2L2-iso", "ORCA2L3-eiv")
+_ORCA2L_EIV_CASES = ("ORCA2L3-eiv",)
+_ORCA2L3_EIV_FIELDS: dict[str, object] = {
+    "namtra_eiv.ln_ldfeiv": True,
+    "namtra_eiv.nn_aei_ijk_t": 21,
+    "namtra_eiv.rn_ue": _ORCA2_EIV_RN_UE,
+    "namtra_eiv.rn_le": _ORCA2_EIV_RN_LE,
+    "namtra_eiv.ln_eke_equ": False,
+}
 _ORCA2G_LDF_OFF_FIELDS: dict[str, object] = {
     "namtra_ldf.ln_traldf_off": True,
     "namtra_ldf.ln_traldf_lap": False,
@@ -4821,6 +4858,30 @@ def _orca2l2_isoneutral_selected(gm) -> bool:
         "implicit_K33": True,
     }
     return all(getattr(gm, name) == value for name, value in expected.items())
+
+
+def _orca2l3_eiv_selected(gm) -> bool:
+    """Whether ``gm`` is certified L2 plus ORCA2's Treguier-21 EIV arm."""
+
+    if gm is None:
+        return False
+    aei0 = 0.5 * _ORCA2_EIV_RN_UE * _ORCA2_EIV_RN_LE
+    redi = gm._replace(
+        kappa_GM=0.0,
+        treguier=gm.treguier._replace(enabled=False),
+        gm_bolus_advection="centred",
+        gm_bolus_kappa_face_average=False,
+        treguier_vertical_reduction_evaluation="tree",
+        treguier_sqrt_evaluation="guarded_floor",
+    )
+    return (_orca2l2_isoneutral_selected(redi)
+            and gm.kappa_GM == aei0
+            and (gm.treguier.enabled, gm.treguier.aei0,
+                 gm.treguier.kappa_min) == (True, aei0, 0.0)
+            and gm.gm_bolus_advection == "through_fct"
+            and gm.gm_bolus_kappa_face_average is True
+            and gm.treguier_vertical_reduction_evaluation == "nemo_left"
+            and gm.treguier_sqrt_evaluation == "nemo_forward_exact")
 _ORCA2V1_TKE_FIELDS: dict[str, object] = {
     "namzdf_tke.nn_mxl": 3, "namzdf_tke.nn_etau": 1,
     "namzdf_tke.ln_mxhsw": False, "namzdf_tke.nn_mxlice": 2,
@@ -4851,6 +4912,7 @@ for _rung_table in (_ORCA2G_JPK, _ORCA2G_ZDF_FACES, _ORCA2G_TRA_ZDF_ROUNDED,
     _rung_table["ORCA2V5-havtb"] = _rung_table["ORCA2G5-ice"]
     _rung_table["ORCA2L1-bbl"] = _rung_table["ORCA2G5-ice"]
     _rung_table["ORCA2L2-iso"] = _rung_table["ORCA2G5-ice"]
+    _rung_table["ORCA2L3-eiv"] = _rung_table["ORCA2G9-tadv"]
 _ORCA2G_UNMEASURED["ORCA2V1-tke"] = ORCA2V1_UNMEASURED
 _ORCA2G_UNMEASURED["ORCA2V2-evd"] = ORCA2V1_UNMEASURED
 _ORCA2G_UNMEASURED["ORCA2V3-ddm"] = ORCA2V1_UNMEASURED
@@ -4858,6 +4920,11 @@ _ORCA2G_UNMEASURED["ORCA2V4-iwm"] = ORCA2V1_UNMEASURED
 _ORCA2G_UNMEASURED["ORCA2V5-havtb"] = ORCA2V1_UNMEASURED
 _ORCA2G_UNMEASURED["ORCA2L1-bbl"] = _ORCA2G_UNMEASURED["ORCA2G5-ice"]
 _ORCA2G_UNMEASURED["ORCA2L2-iso"] = _ORCA2G_UNMEASURED["ORCA2G5-ice"]
+_ORCA2G_UNMEASURED["ORCA2L3-eiv"] = (
+    "nemo_post_si3_surface_records",
+    "l3_record_not_admitted",
+    "eddy_induced_velocity",
+)
 
 
 def _orca2v1_tke_vertical(g5_vm, deck: ORCA2G1Deck):
@@ -5123,6 +5190,12 @@ def build_orca2l2_iso_card(deck_root: str | Path) -> NEMOTestcaseCard:
     return build_orca2g1_flat_card(deck_root, "ORCA2L2-iso")
 
 
+def build_orca2l3_eiv_card(deck_root: str | Path) -> NEMOTestcaseCard:
+    """L3: certified G9 + certified L2 plus ORCA2's eddy-induced velocity."""
+
+    return build_orca2g1_flat_card(deck_root, "ORCA2L3-eiv")
+
+
 def build_orca2g6_vec_card(deck_root: str | Path) -> NEMOTestcaseCard:
     """G6: certified G5 plus ORCA2's vector-form momentum advection."""
 
@@ -5169,6 +5242,7 @@ __all__ = (
     "build_orca2v5_havtb_card",
     "build_orca2l1_bbl_card",
     "build_orca2l2_iso_card",
+    "build_orca2l3_eiv_card",
     "nemo_havtb_shape",
     "ORCA2V1_UNMEASURED",
     "build_orca2g6_vec_card",

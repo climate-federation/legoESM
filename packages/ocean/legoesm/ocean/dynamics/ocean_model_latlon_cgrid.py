@@ -5404,9 +5404,16 @@ class LatLonCGridOceanModel:
             _ws_gm_redi = getattr(config, "gm_redi", None)
             if (_ws_gm_redi is not None
                     and getattr(_ws_gm_redi, "kappa_GM", 0.0) != 0.0):
-                raise ValueError(
-                    "NEMO rk3_ws does not yet support staged GM bolus "
-                    "transports; pure Redi (kappa_GM=0) is supported")
+                if not (
+                    config.tracer_advection == "fct2"
+                    and getattr(_ws_gm_redi, "slope_scheme", "") == "nemo_iso_lap"
+                    and getattr(_ws_gm_redi, "gm_bolus_advection", "") == "through_fct"
+                    and getattr(_ws_gm_redi, "treguier", None) is not None
+                    and _ws_gm_redi.treguier.enabled
+                ):
+                    raise ValueError(
+                        "NEMO rk3_ws GM requires the complete staged "
+                        "Treguier/nemo_iso_lap/bolus-through-fct composition")
         if (config.momentum_flux_scheme == "nemo_up3"
                 and _mom_ti_for_ws != "rk3_ws"):
             # S-47 (docs/ocean/fidelity/nemo_branch_isomorphism_map.md):
@@ -10242,6 +10249,33 @@ class LatLonCGridOceanModel:
                             _zc,
                         )
                     )
+                    if getattr(_cfg_b, "tracer_time_integrator", "euler") == "rk3_ws":
+                        if _nemo_ws_stage_transport_geometry is None:
+                            raise ValueError(
+                                "staged GM bolus requires materialized WS transports")
+                        # traadv.f90:254-258 calls ldf_eiv_trp at stage 3 only.
+                        # Preserve stages 1/2 byte-for-byte; add the existing
+                        # single GM transport to stage 3's mass-flux and native
+                        # metric-bearing zF arrays before the FCT limiter.
+                        stage3 = list(_nemo_ws_stage_transport_geometry[2])
+                        stage3[0], stage3[1], stage3[2] = (
+                            add_bolus_to_advecting_flux(
+                                _bolus, stage3[0], stage3[1],
+                                u_mask_3d_tracer, v_mask_3d_tracer, _grid, _zc,
+                            )
+                        )
+                        u_eiv, v_eiv, _ = _bolus
+                        zfu_eiv = jnp.concatenate(
+                            [u_eiv[:, -1:, :], u_eiv], axis=1)
+                        zfv_eiv = jnp.concatenate(
+                            [v_eiv[-1:, :, :], v_eiv], axis=0)
+                        stage3[7] = stage3[7] + zfu_eiv
+                        stage3[8] = stage3[8] + zfv_eiv
+                        _nemo_ws_stage_transport_geometry = (
+                            _nemo_ws_stage_transport_geometry[0],
+                            _nemo_ws_stage_transport_geometry[1],
+                            tuple(stage3),
+                        )
             else:
                 dT_gm, dS_gm, *_ldf_diag = _gm_out; _nemo_ws_ldf_diagnostics = _ldf_diag[0] if _ldf_diag else None
             if gm_cfg.implicit_K33:

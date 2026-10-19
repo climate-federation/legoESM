@@ -19,6 +19,7 @@ from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
 
 CASES = {
     "g5": "ORCA2G5-ice",
+    "g9": "ORCA2G9-tadv",
     "v1": "ORCA2V1-tke",
     "v2": "ORCA2V2-evd",
     "v3": "ORCA2V3-ddm",
