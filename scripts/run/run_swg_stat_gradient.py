@@ -39,6 +39,12 @@ so no trajectory is stored: the backward pass keeps one model state per step
 ``--precision fp32`` traces and differentiates in float32 from float64
 masters, as the training driver does.
 
+``free-run`` free-runs one saved ``train`` step with the training driver's own
+free-run code (``free_run``, the configuration's ``free_run`` block, device and
+output layout): the step's ``effective_network`` is written as a plain network
+checkpoint in the driver's format (``--network-output``) and that file, loaded
+back as the driver loads a checkpoint, is the closure the free run names.
+
 No command has a default for any scientific choice; the output directory
 holds ``manifest.json`` (git SHA, every argument, the start days) beside the
 results.
@@ -74,6 +80,7 @@ from legoesm.training.swg_online import (
     build_segment_fn,
     coarse_state_from_native,
     create_swg_optimizer,
+    free_run_closure,
     require_rigid_lid_zero_ssh,
     rigid_lid_start_state,
     start_state_from_native,
@@ -695,9 +702,100 @@ def run_train(args) -> int:
     return 0
 
 
+def run_free_run(args) -> int:
+    """Free-run one saved ``train`` step as a plain network (``free-run``).
+
+    Everything but the step comes from the training run's ``manifest.json``
+    (configuration, checkpoint, subset, optimiser settings); the input files
+    must still match its digests.  The exported plain network is never
+    overwritten; a complete free run is never overwritten and an incomplete
+    one is archived (the driver's rules).
+    """
+    from legoesm.ocean.fidelity.provenance import git_sha
+
+    stored = json.loads((args.run / "manifest.json").read_text())
+    if stored["schema"] != SCHEMA or stored["command"] != "train":
+        raise ValueError(f"{args.run} is not a {SCHEMA} train run")
+    given = stored["arguments"]
+    config_path, base = Path(given["config"]), Path(given["checkpoint"])
+    for path, key in ((config_path, "config_sha256"),
+                      (Path(given["contract"]), "contract_sha256"),
+                      (base, "checkpoint_sha256")):
+        if _sha256(path) != stored[key]:
+            raise ValueError(f"{path} differs from the {key} of {args.run}")
+    config = driver.load_config(config_path)
+    if config["schema"] != driver.CONFIG_SCHEMA:
+        raise ValueError("the run's configuration is not a training configuration")
+    free = config["free_run"]
+    device = driver.select_device(
+        free["device"], free["math_library"], args.physical_gpu,
+        reproducible_cuda=True)
+    card = driver.build_deck_card(config["deck"], config["surface"])
+    geometry = build_closure_geometry(card)
+    model = load_model(config, card, geometry, base)
+    optimizer = create_swg_optimizer(SWGOptimizerSettings(
+        **config["optimiser"])._replace(learning_rate=given["lr"],
+                                        weight_decay=given["weight_decay"]))
+    spec = trainable_spec(model, given["trainable"])
+    model, _ = load_checkpoint_or_fail(
+        args.run / f"step_{args.step:05d}.eqx",
+        (model, optimizer.init(eqx.partition(model, spec)[0])),
+        what="arm-E step")
+    network = model.effective_network()
+    plain = create_swg_optimizer(SWGOptimizerSettings(**config["optimiser"]))
+    skeleton = (network, plain.init(eqx.filter(network, eqx.is_inexact_array)))
+    if args.network_output.exists():
+        raise FileExistsError(f"{args.network_output} exists")
+    if (args.output / "manifest.json").is_file():
+        raise FileExistsError(f"{args.output} already holds a complete free run")
+    args.network_output.parent.mkdir(parents=True, exist_ok=True)
+    save_checkpoint(skeleton, args.network_output)
+    network, _ = load_checkpoint_or_fail(
+        args.network_output, skeleton, what="exported network")
+    network_spec, _ = driver.network_spec(config, card, geometry)
+    closure = free_run_closure({
+        "kind": "trained",
+        "run_id": (f"{config['experiment']}/seed{args.seed}/arm_e/"
+                   f"{args.run.name}/step{args.step:05d}"),
+        "experiment": config["experiment"],
+        "config_sha256": stored["config_sha256"],
+        "dataset_contract_sha256": stored["contract_sha256"],
+        "network_seed": args.seed, "window_days": args.window_days,
+        "objective": config["objective"], "wall_ring": config["wall_ring"],
+        "network_spec": driver._jsonable(network_spec._asdict()),
+        "checkpoint_path": str(args.network_output.resolve()),
+        "checkpoint_sha256": _sha256(args.network_output)})
+    driver._archive_incomplete(args.output)
+    completed = driver.free_run(
+        network, card, geometry, args.output, days=free["days"],
+        closure=closure, commit=git_sha(), device=device,
+        start=driver.resolve_start(config, card))
+    print(f"FREE_RUN_COMPLETE root={args.output.resolve()} "
+          f"manifest_sha256={_sha256(args.output / 'manifest.json')} "
+          f"all_finite={completed['numerical_health']['all_finite']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    command = commands.add_parser("free-run")
+    command.add_argument("--run", type=Path, required=True,
+                         help="a ``train`` output directory")
+    command.add_argument("--step", type=int, required=True)
+    command.add_argument("--seed", type=int, required=True,
+                         help="network_seed of the closure block (the starting "
+                              "network's seed; the key it seeds meets noise "
+                              "scale 0)")
+    command.add_argument("--window-days", type=int, required=True,
+                         help="window_days of the closure block (the starting "
+                              "network's window; the manifest schema admits "
+                              "1, 2, 4 and 8)")
+    command.add_argument("--physical-gpu", type=int)
+    command.add_argument("--network-output", type=Path, required=True,
+                         help="the plain network checkpoint to write")
+    command.add_argument("--output", type=Path, required=True,
+                         help="the free run's directory")
     for name in ("measure", "train"):
         command = commands.add_parser(name)
         command.add_argument("--config", type=Path, required=True,
@@ -726,7 +824,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        return run_measure(args) if args.command == "measure" else run_train(args)
+        return {"measure": run_measure, "train": run_train,
+                "free-run": run_free_run}[args.command](args)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"REFUSE: {exc}", file=sys.stderr)
         return 2
