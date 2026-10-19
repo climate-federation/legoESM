@@ -591,7 +591,7 @@ def node_budget(dE_node, dH_soil, G, Q_geo, src_sum, dt):
 
 
 def pin_melting_node(T_s0, S, T_g0, theta, grid, hyd, thc, G, dt, T_s1, T_g1, src,
-                     n_substeps, nq):
+                     n_substeps, nq, f_snow=None):
     """PROTOTYPE of a fix (replay only): where the solved node ends above
     T_freeze on a pack, redo the soil with the node held at T_freeze (infinite
     node capacity) and give the node the energy it absorbed as melt enthalpy,
@@ -607,8 +607,8 @@ def pin_melting_node(T_s0, S, T_g0, theta, grid, hyd, thc, G, dt, T_s1, T_g1, sr
     R = S / rho / snow_thermal_conductivity(rho)
     _, Tp_g = solve_snow_soil_thermal(
         jnp.full_like(S, tf)[:, None], jnp.full_like(S, 1e30)[:, None],
-        jnp.zeros_like(T_g0[:, :0]), R, jnp.ones_like(S), T_g0, theta, grid,
-        hyd, thc, G, dt, layer_source=src, n_substeps=n_substeps)
+        jnp.zeros_like(T_g0[:, :0]), R, jnp.ones_like(S) if f_snow is None else f_snow,
+        T_g0, theta, grid, hyd, thc, G, dt, layer_source=src, n_substeps=n_substeps)
     dz = jnp.asarray(grid.dz)
     supplied = (G + thc.Q_geothermal + (0.0 if src is None else jnp.sum(src, -1))) * dt
     E_m = (supplied - (soil_enthalpy(Tp_g, theta, hyd, thc, dz, nq)
@@ -630,6 +630,26 @@ def pin_melting_node(T_s0, S, T_g0, theta, grid, hyd, thc, G, dt, T_s1, T_g1, sr
     return T_new, jnp.where(use[:, None], Tp_g, T_g1)
 
 
+def covered_node_solve(T_s0, S, T_g0, theta, grid, hyd, thc, G, dt, f_snow, src, n_substeps):
+    """PROTOTYPE (replay only): the model's node solve with the snow-cover
+    fraction ``f_snow`` instead of whole-cell cover (f*G into the node,
+    (1-f)*G into the soil, f-weighted interface); snow-free columns take the
+    plain soil solve, as in ``solve_snow_node_soil_thermal``."""
+    import jax.numpy as jnp
+    from legoesm import constants
+    from legoesm.land.soil_thermal import (snow_thermal_conductivity, solve_snow_soil_thermal,
+                                           solve_soil_thermal)
+    bare = solve_soil_thermal(T_g0, theta, grid, hyd, thc, G, dt, layer_source=src,
+                              n_substeps=n_substeps)
+    rho = thc.snow_bulk_density_kg_m3
+    R = S / rho / snow_thermal_conductivity(rho)
+    Ts, Tg = solve_snow_soil_thermal(
+        T_s0[:, None], (constants.c_pi * S)[:, None], jnp.zeros_like(T_g0[:, :0]), R,
+        f_snow, T_g0, theta, grid, hyd, thc, G, dt, layer_source=src, n_substeps=n_substeps)
+    cov = S > 0.0
+    return jnp.where(cov, Ts[:, 0], bare[:, 0]), jnp.where(cov[:, None], Tg, bare)
+
+
 def mechanism(a):
     """Snow node ON vs OFF on an exported capture, with per-step records of
     the FINAL thermal solve: the ground flux it receives, the node+soil
@@ -641,9 +661,12 @@ def mechanism(a):
     import jax.numpy as jnp
     import legoesm.land.multilayer_land as mll
     from legoesm import constants
+    from legoesm.surface_albedo import snow_cover_fraction
     from legoesm.land.soil_grid import make_soil_grid
 
     cap, state0, forcings, config, k, U_min, dt, land = load_plain(a.plain)
+    if a.uncap and a.cover:
+        raise SystemExit("--uncap and --cover are different canopy patches; pick one")
     sw0 = np.asarray(state0.snow_depth)
     start_trace = land & (sw0 > 0) & (sw0 < TRACE_SWE)
     healthy = land & (sw0 > HEALTHY_SWE)
@@ -660,15 +683,21 @@ def mechanism(a):
     rec, last = [], {}
 
     def node(T_s0, swe, T_g0, theta, grid, hyd, thc, G, dt_, **kw):
-        T_s1, T_g1 = real_node(T_s0, swe, T_g0, theta, grid, hyd, thc, G, dt_, **kw)
+        S = jnp.maximum(swe, 0.0)
+        f = (jnp.where(S > 0, snow_cover_fraction(S, config.land_albedo), 0.0)
+             if a.cover else None)
+        if a.cover:
+            T_s1, T_g1 = covered_node_solve(T_s0, S, T_g0, theta, grid, hyd, thc, G, dt_, f,
+                                            kw.get("layer_source"), kw.get("n_substeps", 1))
+        else:
+            T_s1, T_g1 = real_node(T_s0, swe, T_g0, theta, grid, hyd, thc, G, dt_, **kw)
         if "layer_source" not in kw:            # canopy Picard pass
-            last.update(Ts=T_s1, snow=swe)
+            last.update(Ts=T_s1, snow=swe, Tg=T_g1[:, 0], f=f)
             return T_s1, T_g1
         src = kw["layer_source"]
-        S = jnp.maximum(swe, 0.0)
         if a.pin_melt:
             T_s1, T_g1 = pin_melting_node(T_s0, S, T_g0, theta, grid, hyd, thc, G, dt_,
-                                          T_s1, T_g1, src, kw.get("n_substeps", 1), a.nq)
+                                          T_s1, T_g1, src, kw.get("n_substeps", 1), a.nq, f)
         dE = jnp.where(S > 0, constants.c_pi * S * (T_s1 - T_s0), 0.0)
         dH = (soil_enthalpy(T_g1, theta, hyd, thc, dz, a.nq)
               - soil_enthalpy(T_g0, theta, hyd, thc, dz, a.nq))
@@ -691,11 +720,15 @@ def mechanism(a):
         return T1
 
     def canopy(*args, soil_thermal_fn, **kw):
-        if a.uncap and on_arm[0]:
+        if (a.uncap or a.cover) and on_arm[0]:
             inner = soil_thermal_fn
 
             def soil_thermal_fn(G, dt_):         # noqa: F811
                 capped = inner(G, dt_)
+                if a.cover:                      # cover-weighted ground, node capped
+                    blend = (last["f"] * jnp.minimum(last["Ts"], tf)
+                             + (1.0 - last["f"]) * last["Tg"])
+                    return jnp.where(last["snow"] > 0.0, blend, capped)
                 return jnp.where(last["snow"] > 0.0, last["Ts"], capped)
         return real_canopy(*args, soil_thermal_fn=soil_thermal_fn, **kw)
 
@@ -734,7 +767,7 @@ def mechanism(a):
     n_on = out["on"]
     runaway = land & (n_on["Tsmax"] > tf + 5.0)
     print(f"run {cap['run']} day {cap['day']}: {a.days} d, dt {dt} s, uncap {a.uncap}, "
-          f"pin_melt {a.pin_melt}, freeze/thaw {th.enable_freeze_thaw}, "
+          f"pin_melt {a.pin_melt}, cover {a.cover}, freeze/thaw {th.enable_freeze_thaw}, "
           f"trace SWE set to {a.trace_swe_to}; trace < {TRACE_SWE}, healthy > "
           f"{HEALTHY_SWE} kg/m2 at start; runaway = ON T_snow > T_freeze + 5 K at any step")
     print("class n | mean G into column W/m2 off on | mean soil heating W/m2 off on | "
@@ -793,6 +826,9 @@ def main(argv=None):
                    help="canopy sees the node temperature, not min(node, T_freeze)")
     m.add_argument("--pin-melt", action="store_true",
                    help="PROTOTYPE fix: node held at T_freeze while melting (replay only)")
+    m.add_argument("--cover", action="store_true",
+                   help="PROTOTYPE: node with the albedo's snow-cover fraction, canopy sees "
+                        "the cover-weighted ground (replay only)")
     m.add_argument("--no-freeze-thaw", action="store_true",
                    help="control: freeze/thaw off, both budgets must close")
     m.add_argument("--nq", type=int, default=200)

@@ -219,7 +219,7 @@ def test_export_then_mechanism_records_every_final_solve(tmp_path, capsys):
     p = _capture_file(tmp_path, cfg, st, f)
     q = tmp_path / "plain.pkl"
     rp.export(argparse.Namespace(capture=str(p), out=str(q)))
-    ns = dict(plain=str(q), days=1, trace_swe_to=None, uncap=False, pin_melt=False, no_freeze_thaw=False, nq=200)
+    ns = dict(plain=str(q), days=1, trace_swe_to=None, uncap=False, pin_melt=False, cover=False, no_freeze_thaw=False, nq=200)
     out = rp.mechanism(argparse.Namespace(**ns))
     assert out["on"]["G"].shape == out["off"]["G"].shape == (48, 3)
     for arm in ("off", "on"):       # instrument check: the solves conserve energy
@@ -229,3 +229,5 @@ def test_export_then_mechanism_records_every_final_solve(tmp_path, capsys):
     np.testing.assert_array_equal(unc["off"]["G"], out["off"]["G"])   # OFF untouched
     pin = rp.mechanism(argparse.Namespace(**{**ns, "pin_melt": True}))
     assert np.abs(pin["on"]["res"]).max() < 1e-6     # melt enthalpy closes the budget
+    cov = rp.mechanism(argparse.Namespace(**{**ns, "cover": True, "pin_melt": True}))
+    assert np.abs(cov["on"]["res"]).max() < 1e-6     # cover + melt enthalpy closes too
