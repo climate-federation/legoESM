@@ -101,7 +101,9 @@ def main() -> int:
     args = parser.parse_args()
     text = args.source.read_text()
     if args.plant_after_continuation:
-        text = text.replace(DECL_ANCHOR, "      l3_plant = 1 &\n" + DECL_ANCHOR, 1)
+        start = text.index("SUBROUTINE ldf_eiv_trp_RK3_t(")
+        text = (text[:start] + text[start:].replace(
+            DECL_ANCHOR, "      l3_plant = 1 &\n" + DECL_ANCHOR, 1))
     out = instrument(text)
     if args.plant_short_literal:
         out = out.replace(MAGIC, MAGIC[:-1], 1)
