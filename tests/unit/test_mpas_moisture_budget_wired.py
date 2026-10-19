@@ -259,3 +259,17 @@ def test_the_first_sample_after_a_restart_reports_nothing():
     d._feed_mpas_moisture_budget(10.0, diag, _kw(16, precip_mm_day=2.0,
                                                  hfls_w_m2=100.0, evspsbl=_water_of(16, 100.0)))
     assert np.isnan(diag.moisture_tracker.residual[-1])
+
+
+def test_the_daily_series_reads_the_closure_after_the_feed_records_it():
+    """The run loop must read the tracker AFTER this window's flux feed.
+
+    Reading it before published the previous window's closure, so a two-day
+    run reported NaN for both days and the last window was never reported.
+    Names ``_run_column``, the loop that runs on the MPAS lane.
+    """
+    import inspect
+    src = inspect.getsource(ModelDriver._run_column)
+    feed = src.index("START_DAY + elapsed_day, flux_only=True)")
+    publish = src.index('_ts["moisture_residual"][-1] = float(_mt.residual[-1])')
+    assert publish > feed, "the series reads the tracker before the feed fills it"

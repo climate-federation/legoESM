@@ -15266,15 +15266,15 @@ class ModelDriver:
                 for _ek, _ev in self._mpas_energy_sample(
                         p_s_data, elapsed_day).items():
                     _ts[_ek].append(_ev)
-                # Latest closure the CMOR feed recorded, or NaN before the
-                # first complete diagnostic window.  NaN, never 0: a zero here
-                # reads as "the budget closes", which is the one answer this
-                # series must never invent.
+                # Placeholder for this write's water-budget closure.  The CMOR
+                # flux feed below is what records this window's closure, so the
+                # value is filled in after it; reading the tracker here gave the
+                # PREVIOUS window's number (or NaN on the first two writes).
+                # NaN, never 0: a zero reads as "the budget closes".
                 _mt = getattr(getattr(self, "diagnostics", None),
                               "moisture_tracker", None)
-                _ts["moisture_residual"].append(
-                    float(_mt.residual[-1])
-                    if _mt is not None and _mt.residual else float("nan"))
+                _mt_n0 = len(_mt.residual) if _mt is not None else 0
+                _ts["moisture_residual"].append(float("nan"))
 
                 # Ice-crystal number telemetry (2026-07-28, century3 day-803
                 # NaN): N_i grew x2/day for 800 days with every CLIMATE
@@ -15449,6 +15449,10 @@ class ModelDriver:
                 if self._mpas_cmip_feed_on:
                     self._feed_mpas_cmip_accumulators(
                         START_DAY + elapsed_day, flux_only=True)
+                # Publish the closure only if THIS feed recorded one; a skipped
+                # window must not inherit the previous window's number.
+                if _mt is not None and len(_mt.residual) > _mt_n0:
+                    _ts["moisture_residual"][-1] = float(_mt.residual[-1])
 
             if _DIGEST_EVERY > 0 and (step + 1) % _DIGEST_EVERY == 0:
                 _lv = locals()
