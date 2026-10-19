@@ -341,7 +341,7 @@ def trace_summary(T_snow, T_soil0, skin, swe, land, t_freeze, cohort=None):
 
 def _nanmax(v):
     v = np.asarray(v, dtype=float)
-    return float(np.nanmax(v)) if np.isfinite(v).any() else float("nan")
+    return float(np.nanmax(v)) if (~np.isnan(v)).any() else float("nan")
 
 
 def worst_of(rows):
