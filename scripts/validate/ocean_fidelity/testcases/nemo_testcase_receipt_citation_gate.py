@@ -1848,6 +1848,9 @@ CITATION_MAP = {
         ('r3v(:,:,Kaa) = r1_2 * ( r3v(:,:,Kbb) + r3va(:,:) )', 2), 3],
     'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domqco.f90:266': ('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)', 2),
     'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/sshwzv.f90:297': 'pww(ji,jj,jk) = pww(ji,jj,jk+1) - (  ze3div(ji,jj,jk)',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/divhor.f90:132-138': [
+        'CASE ( np_transport )',
+        '&             ) * r1_e1e2t(ji,jj) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 7],
     'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3.f90:222': 'CALL stp_RK3_stg( 2, kstp, Nbb, Nnn, Nrhs, Naa )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:167': 'CALL dom_qco_r3c_RK3( ssha, r3ta, r3ua, r3va, r3fa )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:177-179': [
@@ -1858,6 +1861,9 @@ CITATION_MAP = {
         ('r3v(:,:,Kaa) = r1_2 * ( r3v(:,:,Kbb) + r3va(:,:) )', 2), 3],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:266': ('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)', 2),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sshwzv.f90:297': 'pww(ji,jj,jk) = pww(ji,jj,jk+1) - (  ze3div(ji,jj,jk)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/divhor.f90:132-138': [
+        'CASE ( np_transport )',
+        '&             ) * r1_e1e2t(ji,jj) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 7],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:218': 'CALL stp_RK3_stg( 2, kstp, Nbb, Nnn, Nrhs, Naa )',
     # --- GRIDLADDER round 44 (G6 round 8 receipt) ---
     'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3_stg.f90:188-189': ['rDt = r1_2 * rn_Dt', ('r1_Dt = 1._wp / rDt', 2), 2],
