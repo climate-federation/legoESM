@@ -387,7 +387,7 @@ def l2_production_ldf_trace(cards):
     steps = g5_records.read_step(
         L2_RECORD / "twin_a", 1,
         (L2_RECORD / "twin_b", L2_RECORD / "twin_c"), 30)
-    return l2, trace.ldf_diagnostics, steps
+    return l2, trace.ldf_diagnostics, trace.isoneutral_K, steps
 
 
 def _observer_slopes():
@@ -415,6 +415,7 @@ def test_l2_production_face_geometry_and_slopes_match_admitted_values(
         l2_production_ldf_trace):
     import jax
     import jax.numpy as jnp
+    from legoesm.grids.latlon import ensure_geometry
     from legoesm.ocean.vertical import (
         compute_ocean_jacobian,
         nemo_qco_live_face_thicknesses,
@@ -425,7 +426,7 @@ def test_l2_production_face_geometry_and_slopes_match_admitted_values(
         nemo_iso_a33_e3w,
     )
 
-    l2, diag, steps = l2_production_ldf_trace
+    l2, diag, implicit_akz, steps = l2_production_ldf_trace
     run, state = l2.recipe, l2.recipe.initial_state
     nlev = state.T.data.shape[-1]
     u3 = jnp.broadcast_to(
@@ -504,6 +505,59 @@ def test_l2_production_face_geometry_and_slopes_match_admitted_values(
 
     zfw = diag["zfw_operands"]
 
+    for record_index, name in ((13, "ahtu"), (14, "ahtv")):
+        face_full = np.memmap(
+            L2_WALK_RECORD, dtype="=f8", mode="r",
+            offset=68 + record_index * count3 * 8, shape=shape3, order="F")
+        nemo_face = np.asarray(
+            face_full[2:-2, 2:-2, :30]).transpose(1, 0, 2).copy()
+        np.testing.assert_array_equal(np.asarray(zfw[name]), nemo_face)
+
+    akz_full = np.memmap(
+        L2_WALK_RECORD, dtype="=f8", mode="r",
+        offset=68 + 20 * count3 * 8, shape=shape3, order="F")
+    nemo_akz = np.asarray(
+        akz_full[2:-2, 2:-2, :30]).transpose(1, 0, 2).copy()
+    np.testing.assert_array_equal(np.asarray(zfw["akz_above"]), nemo_akz)
+    np.testing.assert_array_equal(np.asarray(implicit_akz), nemo_akz[..., 1:])
+    assert np.count_nonzero(nemo_akz) == 171
+
+    # traldf_iso.f90:814-829 replayed independently from NEMO's dumped
+    # operands.  The former reciprocal-metric/left-fold/final-division form is
+    # a fixed non-jitted plant on the same operands.
+    ahtu = np.asarray(zfw["ahtu"])
+    ahtv = np.asarray(zfw["ahtv"])
+    geom = ensure_geometry(run.grid)
+    e1u = np.asarray(geom.dx_u[:, 1:])[..., None]
+    e2v = np.asarray(geom.dy_v[1:, :])[..., None]
+    up = lambda a: np.roll(a, +1, axis=2)
+    im1 = lambda a: np.roll(a, +1, axis=1)
+    jm1 = lambda a: np.roll(a, +1, axis=0)
+    u0 = (ahtu + up(ahtu)) / (e1u * e1u)
+    u1 = (im1(ahtu) + up(im1(ahtu))) / (im1(e1u) * im1(e1u))
+    v0 = (ahtv + up(ahtv)) / (e2v * e2v)
+    v1 = (jm1(ahtv) + up(jm1(ahtv))) / (jm1(e2v) * jm1(e2v))
+    nemo_akz_h = ((u0 + u1) + (v0 + v1)) * np.float64(0.25)
+    rdt = np.float64(l2.dt_s)
+    r1_dt = np.float64(1.0) / rdt
+    ze3w_2 = nemo_e3w * nemo_e3w
+    nemo_zcoef0 = rdt * (nemo_akz_h + nemo_ah / ze3w_2)
+    replayed_akz = (np.maximum(nemo_zcoef0 - np.float64(0.5), 0.0)
+                    * ze3w_2) * r1_dt
+    np.testing.assert_array_equal(replayed_akz, nemo_akz)
+
+    inv_e1u2 = 1.0 / (e1u ** 2)
+    inv_e2v2 = 1.0 / (e2v ** 2)
+    legacy_h = np.float64(0.25) * (
+        (ahtu + up(ahtu)) * inv_e1u2
+        + (im1(ahtu) + up(im1(ahtu))) * im1(inv_e1u2)
+        + (ahtv + up(ahtv)) * inv_e2v2
+        + (jm1(ahtv) + up(jm1(ahtv))) * jm1(inv_e2v2))
+    legacy_zcoef0 = rdt * (legacy_h + nemo_ah / ze3w_2)
+    legacy_akz = np.maximum(
+        legacy_zcoef0 - np.float64(0.5), 0.0) * ze3w_2 / rdt
+    assert np.count_nonzero(legacy_akz != nemo_akz) == 50
+
     @jax.jit
     def without_source_ordering(ahtu, ahtv, umask, vmask, wmask, wi, wj):
         ones2 = jnp.ones(ahtu.shape[:2], dtype=ahtu.dtype)
@@ -557,29 +611,32 @@ def test_l2_kt1_record_requires_metric_eos80_and_north_fold(ladder):
     assert all(selected_status[name] == "AT-BAR"
                for name in ("ssh", "uu_b", "vv_b", "u", "v", "T", "S"))
     assert tracer_values(selected) == (
-        (2, 7.105427357601002e-15, 4.3618394145414156e-17),
-        (2, 7.105427357601002e-15, 6.156559646205488e-17),
+        (0, 0.0, 0.0),
+        (0, 0.0, 0.0),
     )
     controls = (
         ("without_l2_metric", "l2_metric_selected", (
-            (16433, 0.020541617987626548, 0.0006725116923845033),
-            (16433, 0.020566462820472253, 0.00042662880934269434))),
+            (16433, 0.02054161798762677, 0.0006725116923845033),
+            (16433, 0.020566462820472253, 0.0004266288093426869))),
         ("without_l2_eos80", "l2_eos80_selected", (
-            (16429, 0.004663857636465485, 0.0001388908523019663),
-            (16429, 0.0014607050156243417, 3.852705067169812e-05))),
+            (16429, 0.004663857636465485, 0.00013889085230196617),
+            (16429, 0.0014607050156243417, 3.852705067169809e-05))),
         ("without_l2_north_fold", "l2_north_fold_selected", (
-            (140, 0.0013241514577646551, 1.595933265099751e-05),
-            (140, 0.008011780370249966, 9.00824649513366e-05))),
+            (138, 0.0013241514577646551, 1.595933265099751e-05),
+            (138, 0.008011780370249966, 9.00824649513366e-05))),
         ("without_l2_kmm_face_geometry", "l2_kmm_face_geometry_selected", (
-            (16432, 5.456048228147381e-05, 5.273630166024779e-07),
-            (16433, 2.605229774843565e-05, 3.3306669931064525e-07))),
+            (16428, 5.092867354017372e-05, 4.384825971525139e-07),
+            (16428, 2.572830925373637e-05, 2.698489329967449e-07))),
     )
+    measured_controls = []
     for flag, stamp, expected in controls:
         omitted = ladder.run(root, **common, **{flag: True})
         assert omitted[stamp] is False
         rows = statuses(omitted)
         assert rows["T"] == "DEBT" or rows["S"] == "DEBT", flag
-        assert tracer_values(omitted) == expected, flag
+        measured_controls.append((flag, tracer_values(omitted)))
+    assert measured_controls == [
+        (flag, expected) for flag, _, expected in controls]
 
 
 def test_shared_constructor_keeps_vortex_smt3_selection_unchanged():

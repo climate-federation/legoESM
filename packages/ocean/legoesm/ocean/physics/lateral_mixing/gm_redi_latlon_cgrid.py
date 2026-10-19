@@ -2435,12 +2435,12 @@ def nemo_iso_a33(aht, umask, vmask, wmask, wslpi, wslpj,
       * ``msc=False`` (``ln_traldf_msc=F``): ``akz = ah_wslp2`` — the FULL
         diagonal goes implicit and the explicit A33 flux coefficient
         ``ah_wslp2 - akz`` is zero.
-      * ``msc=True`` (``ln_traldf_msc=T`` — the DINO namelist): NEMO's Method
-        of Stabilizing Correction, verbatim (``traldf_iso.F90:314-333``):
+      * ``msc=True`` (``ln_traldf_msc=T``): NEMO's Method of Stabilizing
+        Correction, verbatim (``traldf_iso.f90:811-830``):
         ``akz_h = 0.25·Σ4( ahtu/e1u² + ahtv/e2v² )`` (per-face metric, level
         pair (k-1,k); NEMO ships the 0.25 form — the ``!!gm BUG?`` note about
         zmsku is NOT in the executed code, so it is NOT transcribed), then
-        ``akz = MAX( dt·(akz_h + ah_wslp2/e3w²) − ½, 0 )·e3w²/dt`` — the
+        ``akz = MAX( dt·(akz_h + ah_wslp2/e3w²) − ½, 0 )·e3w²·r1_Dt`` — the
         implicit part, leaving the explicit remainder ``ah_wslp2 − akz``
         bounded by the ½ vertical-CFL limit.
 
@@ -2491,23 +2491,52 @@ def nemo_iso_a33(aht, umask, vmask, wmask, wslpi, wslpj,
         raise ValueError(
             "nemo_iso_a33: msc=True (ln_traldf_msc) requires dt (rDt) for "
             "the akz stability threshold.")
-    inv_e1u2 = (1.0 / (e1u_c ** 2))[:, :, jnp.newaxis]
-    inv_e2v2 = (1.0 / (e2v_c ** 2))[:, :, jnp.newaxis]
-    inv_e1u2_im1 = jnp.roll(inv_e1u2, +1, ax_x)
-    inv_e2v2_jm1 = jnp.roll(inv_e2v2, +1, ax_y)
-    ahu = aht * umask
-    ahu_im1 = jnp.roll(ahu, +1, ax_x)
-    ahv = aht_v_ * vmask
-    ahv_jm1 = jnp.roll(ahv, +1, ax_y)
-    # a33 msc akz_h, level pair (k, k-1) per face, per-face metric, x0.25.
-    akz_h = 0.25 * (
-        (ahu + up(ahu)) * inv_e1u2
-        + (ahu_im1 + up(ahu_im1)) * inv_e1u2_im1
-        + (ahv + up(ahv)) * inv_e2v2
-        + (ahv_jm1 + up(ahv_jm1)) * inv_e2v2_jm1
-    )
-    zcoef0 = dt * (akz_h + ah_wslp2 / e3w2)
-    akz = jnp.maximum(zcoef0 - 0.5, 0.0) * e3w2 / dt
+    if source_ordered:
+        # traldf_iso.f90:814-829.  NEMO divides each materialized vertical
+        # pair by its written metric product, adds the two U terms and two V
+        # terms as bracketed pairs, then adds those pairs.  Keep the statement
+        # boundaries so XLA cannot turn the divisions into reciprocal products
+        # or contract the final left-associated multiplications.
+        b = nemo_source_round
+        ahu = aht * umask
+        ahv = aht_v_ * vmask
+        ahu, ahv = b(ahu), b(ahv)
+        ahu_im1 = jnp.roll(ahu, +1, ax_x)
+        ahv_jm1 = jnp.roll(ahv, +1, ax_y)
+        e1u = jnp.asarray(e1u_c)[:, :, jnp.newaxis]
+        e2v = jnp.asarray(e2v_c)[:, :, jnp.newaxis]
+        e1u_im1 = jnp.roll(e1u, +1, ax_x)
+        e2v_jm1 = jnp.roll(e2v, +1, ax_y)
+        u0 = b(b(ahu + up(ahu)) / b(e1u * e1u))
+        u1 = b(b(ahu_im1 + up(ahu_im1)) / b(e1u_im1 * e1u_im1))
+        v0 = b(b(ahv + up(ahv)) / b(e2v * e2v))
+        v1 = b(b(ahv_jm1 + up(ahv_jm1)) / b(e2v_jm1 * e2v_jm1))
+        akz_h = b(b(b(u0 + u1) + b(v0 + v1)) * 0.25)
+        rDt = jnp.asarray(dt, dtype=ah_wslp2.dtype)
+        r1_Dt = b(jnp.asarray(1.0, dtype=ah_wslp2.dtype) / rDt)
+        e3w2 = b(e3w2)
+        zcoef0 = b(rDt * b(akz_h + b(ah_wslp2 / e3w2)))
+        limited = b(jnp.maximum(b(zcoef0 - 0.5), 0.0))
+        akz = b(b(limited * e3w2) * r1_Dt)
+    else:
+        inv_e1u2 = (1.0 / (e1u_c ** 2))[:, :, jnp.newaxis]
+        inv_e2v2 = (1.0 / (e2v_c ** 2))[:, :, jnp.newaxis]
+        inv_e1u2_im1 = jnp.roll(inv_e1u2, +1, ax_x)
+        inv_e2v2_jm1 = jnp.roll(inv_e2v2, +1, ax_y)
+        ahu = aht * umask
+        ahu_im1 = jnp.roll(ahu, +1, ax_x)
+        ahv = aht_v_ * vmask
+        ahv_jm1 = jnp.roll(ahv, +1, ax_y)
+        # Historical shared graph: retained byte-for-byte for every card that
+        # does not select ORCA2 L2's source-ordered transcription.
+        akz_h = 0.25 * (
+            (ahu + up(ahu)) * inv_e1u2
+            + (ahu_im1 + up(ahu_im1)) * inv_e1u2_im1
+            + (ahv + up(ahv)) * inv_e2v2
+            + (ahv_jm1 + up(ahv_jm1)) * inv_e2v2_jm1
+        )
+        zcoef0 = dt * (akz_h + ah_wslp2 / e3w2)
+        akz = jnp.maximum(zcoef0 - 0.5, 0.0) * e3w2 / dt
     return ah_wslp2, akz
 
 
@@ -2869,10 +2898,21 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         ahtv_s = jnp.roll(ahtv_masked, +1, ax_y)
         ahtv_kp1 = jnp.roll(ahtv_masked, -1, ax_z)
         ahtv_s_kp1 = jnp.roll(ahtv_kp1, +1, ax_y)
-        zahu_w = _pair4(
-            aht_masked, aht_w_kp1, aht_w, aht_kp1) * zmsku_w
-        zahv_w = _pair4(
-            ahtv_masked, ahtv_s_kp1, ahtv_s, ahtv_kp1) * zmskv_w
+        if a33_source_ordering:
+            b = nemo_source_round
+            zmsku_w = b(zmsku_w)
+            zmskv_w = b(zmskv_w)
+            zahu_w = b(b(
+                b(aht_masked + aht_w_kp1)
+                + b(aht_w + aht_kp1)) * zmsku_w)
+            zahv_w = b(b(
+                b(ahtv_masked + ahtv_s_kp1)
+                + b(ahtv_s + ahtv_kp1)) * zmskv_w)
+        else:
+            zahu_w = _pair4(
+                aht_masked, aht_w_kp1, aht_w, aht_kp1) * zmsku_w
+            zahv_w = _pair4(
+                ahtv_masked, ahtv_s_kp1, ahtv_s, ahtv_kp1) * zmskv_w
     else:
         _ksum_u, _cnt_u, _ksum_v, _cnt_v = nemo_iso_w_kappa_sums(
             aht, umask, vmask, aht_v=aht_v)
@@ -2885,23 +2925,46 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     wslpj_kp1 = jnp.roll(wslpj, -1, ax_z)
     bolus_wslpi_kp1 = jnp.roll(bolus_wslpi, -1, ax_z)
     bolus_wslpj_kp1 = jnp.roll(bolus_wslpj, -1, ax_z)
-    zA31 = -zahu_w * e2t[:, :, jnp.newaxis] * zmsku_w * wslpi_kp1
-    zA32 = -zahv_w * e1t[:, :, jnp.newaxis] * zmskv_w * wslpj_kp1
+    if a33_source_ordering:
+        b = nemo_source_round
+        zA31 = b(b(b(
+            b(-zahu_w * e2t[:, :, jnp.newaxis]) * zmsku_w)
+            * wslpi_kp1))
+        zA32 = b(b(b(
+            b(-zahv_w * e1t[:, :, jnp.newaxis]) * zmskv_w)
+            * wslpj_kp1))
+    else:
+        zA31 = -zahu_w * e2t[:, :, jnp.newaxis] * zmsku_w * wslpi_kp1
+        zA32 = -zahv_w * e1t[:, :, jnp.newaxis] * zmskv_w * wslpj_kp1
 
     # 4-pt horizontal-gradient average around the w-point (i, jk+1)
     zdit_kp1 = jnp.roll(zdit, -1, ax_z)
     zdjt_kp1 = jnp.roll(zdjt, -1, ax_z)
     if vertical_skew_evaluation == "nemo_literal":
-        avg4_wi = ((zdit + jnp.roll(zdit_kp1, +1, ax_x))
-                   + (jnp.roll(zdit, +1, ax_x) + zdit_kp1))
-        avg4_wj = ((zdjt + jnp.roll(zdjt_kp1, +1, ax_y))
-                   + (jnp.roll(zdjt, +1, ax_y) + zdjt_kp1))
+        if a33_source_ordering:
+            b = nemo_source_round
+            avg4_wi = b(
+                b(zdit + jnp.roll(zdit_kp1, +1, ax_x))
+                + b(jnp.roll(zdit, +1, ax_x) + zdit_kp1))
+            avg4_wj = b(
+                b(zdjt + jnp.roll(zdjt_kp1, +1, ax_y))
+                + b(jnp.roll(zdjt, +1, ax_y) + zdjt_kp1))
+        else:
+            avg4_wi = ((zdit + jnp.roll(zdit_kp1, +1, ax_x))
+                       + (jnp.roll(zdit, +1, ax_x) + zdit_kp1))
+            avg4_wj = ((zdjt + jnp.roll(zdjt_kp1, +1, ax_y))
+                       + (jnp.roll(zdjt, +1, ax_y) + zdjt_kp1))
     else:
         avg4_wi = (zdit + jnp.roll(zdit_kp1, +1, ax_x)
                    + jnp.roll(zdit, +1, ax_x) + zdit_kp1)
         avg4_wj = (zdjt + jnp.roll(zdjt_kp1, +1, ax_y)
                    + jnp.roll(zdjt, +1, ax_y) + zdjt_kp1)
-    zfw_kp1 = zA31 * avg4_wi + zA32 * avg4_wj        # flux at interface BELOW cell k
+    if a33_source_ordering:
+        zfw_kp1 = nemo_source_round(
+            nemo_source_round(zA31 * avg4_wi)
+            + nemo_source_round(zA32 * avg4_wj))
+    else:
+        zfw_kp1 = zA31 * avg4_wi + zA32 * avg4_wj    # flux below cell k
     zfw_skew_current = zfw_kp1
     zfw_a33_current = jnp.zeros_like(zfw_kp1)
     # A33 explicit vertical-diagonal part.  With ln_traldf_msc=F the FULL K33
@@ -2913,7 +2976,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     # interface below cell k, with (all at that interface k+1):
     #   ah_wslp2  = zahu_w·wslpi² + zahv_w·wslpj²                  (the K33 diag)
     #   akz_h     = ¼ Σ4( aht/e1u² + aht/e2v² )                   (horiz stabiliser)
-    #   akz       = MAX( dt·(akz_h + ah_wslp2/e3w²) − ½, 0 )·e3w²/dt   (impl part)
+    #   akz       = MAX( dt·(akz_h + ah_wslp2/e3w²) − ½, 0 )·e3w²·r1_Dt (impl part)
     # so the explicit coeff is bounded by the ½ vertical-CFL limit at steep slopes.
     if msc_stabilize:
         if dt is None:
@@ -2945,11 +3008,24 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 raise ValueError(
                     "msc_e3w_override must have the full tracer shape "
                     f"{q.shape}, got {e3w_ab.shape}")
-        _ahw_ab, _akz_ab = nemo_iso_a33(
-            aht, umask, vmask, wmask, wslpi, wslpj,
-            e1u, e2v, e3w_ab ** 2, dt=dt, msc=True, aht_v=aht_v,
-            evaluation=a33_evaluation,
-            source_ordered=a33_source_ordering)
+        # traldf_iso.f90:827 writes the live e3w expression twice, then
+        # multiplies the two rounded operands.  Guard the live-thickness
+        # producer before squaring; a barrier applied only after ``** 2``
+        # still lets XLA fuse the producer into the square in the full step.
+        if a33_source_ordering:
+            _e3w_ab_for_square = nemo_source_round(e3w_ab)
+            _e3w2_ab = _e3w_ab_for_square * _e3w_ab_for_square
+            _ahw_ab, _akz_ab = nemo_iso_a33(
+                aht, umask, vmask, wmask, wslpi, wslpj,
+                e1u, e2v, _e3w2_ab, dt=dt, msc=True, aht_v=aht_v,
+                evaluation=a33_evaluation,
+                source_ordered=a33_source_ordering)
+        else:
+            _ahw_ab, _akz_ab = nemo_iso_a33(
+                aht, umask, vmask, wmask, wslpi, wslpj,
+                e1u, e2v, e3w_ab ** 2, dt=dt, msc=True, aht_v=aht_v,
+                evaluation=a33_evaluation,
+                source_ordered=a33_source_ordering)
         ah_wslp2 = jnp.roll(_ahw_ab, -1, ax_z)
         akz = jnp.roll(_akz_ab, -1, ax_z)
         e3w_kp1 = jnp.roll(e3w_ab, -1, ax_z)
@@ -2961,9 +3037,24 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         # below.  The near-surface ML k1/k2 over-diffusion is a pre-existing ML-ramp
         # SLOPE mismatch (native wslp match NEMO corr 0.99 below the ML, ~0.3 in it),
         # not this A33 term — masking it here would drop a legitimate NEMO flux.
-        zfw_a33_current = (e1t * e2t)[:, :, jnp.newaxis] / e3w_kp1 * (
-            ah_wslp2 - akz) * zdkt_kp1
-        zfw_kp1 = zfw_kp1 + zfw_a33_current
+        if a33_source_ordering:
+            # traldf_iso.f90:281-286, in the exact written left-associated
+            # order.  NEMO reads its stored A33 arrays and live Kmm e3w before
+            # this one vertical-flux statement; preserve those producer
+            # boundaries in the full model graph.
+            b = nemo_source_round
+            _wmask_kp1 = jnp.roll(wmask, -1, ax_z)
+            _qdiff_kp1 = b(q - jnp.roll(q, -1, ax_z))
+            _a33_delta = b(ah_wslp2 - akz)
+            _area = b(e1t * e2t)[:, :, jnp.newaxis]
+            zfw_a33_current = b(b(b(b(
+                b(_area / b(e3w_kp1)) * _wmask_kp1)
+                * _a33_delta) * _qdiff_kp1))
+            zfw_kp1 = b(zfw_kp1 + zfw_a33_current)
+        else:
+            zfw_a33_current = (e1t * e2t)[:, :, jnp.newaxis] / e3w_kp1 * (
+                ah_wslp2 - akz) * zdkt_kp1
+            zfw_kp1 = zfw_kp1 + zfw_a33_current
     # Sea-floor / bottom no-flux BC: the interface below cell k carries flux
     # only if cell k+1 is water.  This zeros the flux crossing into the floor
     # (already ~0 there via the padded bottom slope) AND, critically, kills the
@@ -4914,12 +5005,14 @@ def gm_redi_tracer_tendency_latlon(
                 horizontal_flux_evaluation=(
                     redi_horizontal_flux_evaluation_override
                     if redi_horizontal_flux_evaluation_override is not None
-                    else "vectorized"),
+                    else ("nemo_literal_divergence"
+                          if cfg.redi_a33_source_ordering else "vectorized")),
                 area_reciprocal=redi_area_reciprocal_override,
                 area_reciprocal_evaluation=(
                     redi_area_reciprocal_evaluation_override
                     if redi_area_reciprocal_evaluation_override is not None
-                    else "vectorized"),
+                    else ("nemo_stored"
+                          if cfg.redi_a33_source_ordering else "vectorized")),
                 final_update_evaluation=(
                     redi_final_update_evaluation_override
                     if redi_final_update_evaluation_override is not None
@@ -4951,12 +5044,14 @@ def gm_redi_tracer_tendency_latlon(
                 horizontal_flux_evaluation=(
                     redi_horizontal_flux_evaluation_override
                     if redi_horizontal_flux_evaluation_override is not None
-                    else "vectorized"),
+                    else ("nemo_literal_divergence"
+                          if cfg.redi_a33_source_ordering else "vectorized")),
                 area_reciprocal=redi_area_reciprocal_override,
                 area_reciprocal_evaluation=(
                     redi_area_reciprocal_evaluation_override
                     if redi_area_reciprocal_evaluation_override is not None
-                    else "vectorized"),
+                    else ("nemo_stored"
+                          if cfg.redi_a33_source_ordering else "vectorized")),
                 north_fold=cfg.nemo_slope_north_fold)
             if return_bolus_transport:
                 return dT_dt, dS_dt, _bolus
@@ -5211,11 +5306,20 @@ def compute_isoneutral_K33_latlon(
         else:
             _e3w = (nemo_iso_a33_e3w(z_coord, _e3t, _J, T.dtype) if _msc
                     else _e3t)
-        _, _akz = nemo_iso_a33(
-            _aht, _um3, _vm3, _wm3, _wi, _wj,
-            _e1u_c, _e2v_c, _e3w ** 2, dt=dt, msc=_msc, aht_v=_aht_v,
-            evaluation=cfg.redi_a33_evaluation,
-            source_ordered=cfg.redi_a33_source_ordering)
+        if cfg.redi_a33_source_ordering:
+            _e3w_for_square = nemo_source_round(_e3w)
+            _e3w2 = _e3w_for_square * _e3w_for_square
+            _, _akz = nemo_iso_a33(
+                _aht, _um3, _vm3, _wm3, _wi, _wj,
+                _e1u_c, _e2v_c, _e3w2, dt=dt, msc=_msc, aht_v=_aht_v,
+                evaluation=cfg.redi_a33_evaluation,
+                source_ordered=cfg.redi_a33_source_ordering)
+        else:
+            _, _akz = nemo_iso_a33(
+                _aht, _um3, _vm3, _wm3, _wi, _wj,
+                _e1u_c, _e2v_c, _e3w ** 2, dt=dt, msc=_msc, aht_v=_aht_v,
+                evaluation=cfg.redi_a33_evaluation,
+                source_ordered=cfg.redi_a33_source_ordering)
         return _akz[:, :, 1:]                              # interfaces 0..nlev-2
     kappa_Redi = cfg.kappa_Redi if kappa_redi_override is None else kappa_redi_override
     nlev = T.shape[-1]

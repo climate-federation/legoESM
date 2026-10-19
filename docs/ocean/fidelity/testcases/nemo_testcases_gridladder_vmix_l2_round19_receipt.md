@@ -1,111 +1,117 @@
 # GRIDLADDER-VMIX lane — round 19 (vmix_r19): L2 A33 and face operands
 
-Status: **DIRECT OPERAND DEBT CLOSED; CERTIFICATION PREDICTION REFUTED; L2
-REMAINS DEBT / NOT CERTIFIED** (2026-10-19).
+Status: **L2 CERTIFIED** (2026-10-19).
 
-Round 19 made the two instructed operands exact and L2-only.  It did not make
-the two labels pass the D127 trajectory bar.  The preregistered P19-4 claim is
-therefore retracted here as a measured refutation, not softened into a
-certification.
+The resume closes the held `kt=1` gate, corrects the stage-ratio citations,
+and transcribes the stabilising vertical diffusivity and its consuming Redi
+flux in NEMO's written arithmetic topology.  Both L2 labels are AT-BAR through
+`kt=10`; all non-L2 controls retain their normalized jaxprs and GYRE retains
+its ten-step residual archive byte-for-byte.
 
 ## Source transcription
 
-The compiled oracle adds the U and V diffusivities as two bracketed pairs,
-materializes each normalized sum, and then evaluates the two slope-square
-terms (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:782-794`).  L2's selected
-path now preserves those assignments with `nemo_source_round`; the shared
-default remains the old graph
-(`packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py:2360-2385`,
-`packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py:2463-2487`).
-The synthetic fp64 test traces both pair sums and the complete A33 expression
-under JIT against an independent NumPy transcription; its left-fold plant is
-non-identical
-(`tests/ocean/unit/test_gm_redi_latlon_cgrid.py:100-152`).
+NEMO first forms A33 from two bracketed U/V diffusivity pairs
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:782-794`).  Its MSC branch then
+divides each vertical face pair by the written metric product, adds the two U
+terms and two V terms as bracketed pairs, multiplies the combined sum by
+`0.25`, materializes the live squared Kmm thickness, and finishes the
+Laplacian branch with `* ze3w_2 * r1_Dt`
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:811-830`).  The selected L2
+implementation now preserves those operands, divisions, pair association,
+and statement boundaries with `nemo_source_round`; the false branch remains
+the historical reciprocal-metric/left-fold/final-division graph
+(`packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py:2463-2540`).
 
-The compiled stage stores the N+1/2 U/V ratios independently
-(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:205-217`) and calls that level
-Kmm in stage 3 (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:229`).  L2
-passes those stored native ratios to the live face builder
-(`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10006-10013`).
-The builder uses them off-fold and retains its existing fold-aware last native
-U/V row (`packages/ocean/legoesm/ocean/vertical.py:864-907`).
-
-Both switches default false
+The same selected source-order path preserves NEMO's vertical-flux statement
+boundaries and uses the existing literal horizontal-divergence and stored-area
+evaluators; the unselected branches remain unchanged
+(`packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py:2901-3057`,
+`packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py:5000-5055`).
+The production selector is still ORCA2 L2 only: both configuration fields
+default false
 (`packages/ocean/legoesm/ocean/physics/lateral_mixing/config.py:480-493`) and
-the exact L2 selector requires them true
+the exact L2 predicate requires both true
 (`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4525-4564`).
-The shared SMT-3 constructor therefore remains unchanged unless its caller
-explicitly selects either switch
-(`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2428-2482`).
 
-## Direct value gates
+ORCA2 executes the stored stage-2 `r3u`/`r3v` averages in the `np_HYB` branch
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:222-223`) and consumes that Kmm
+in stage 3 (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:229`).  L2 passes
+those stored native ratios to the live face builder
+(`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10006-10013`).
 
-The jitted production trace against the admitted round-18 operator record
-measures:
+## Exact-value gates
 
-- `ah_wslp2`: **0 / 799,200 unequal**; removing source ordering restores
-  **60,720 unequal**;
-- `e3u_live`: **0 / 799,200 unequal**, versus **36** when the stored ratio is
-  rederived from mean SSH;
-- `e3v_live`: **0 / 799,200 unequal**, versus **20** under that plant;
-- the retained pivot row is exact, including the independently counted 1,319
-  wet V faces from the round-18 review evidence.
+The x64 JIT unit test uses traced inputs and an independent NumPy
+transcription.  It is array-exact for A33 and `akz`; its fixed former-formula
+plant differs in 13 cells
+(`tests/ocean/unit/test_gm_redi_latlon_cgrid.py:100-196`).
 
-The committed gate and its fixed plants are
-`tests/ocean/fidelity/test_nemo_testcase_l2_orca2iso.py:414-518`.  The copied
-review evidence and checksums are in
-`gridladder_vmix_rounds/round19/review_round18/`.
+The jitted production gate checks stored `ahtu`/`ahtv`, explicit `akz`, and
+the implicit K33 consumer.  NEMO has 171
+nonzero `akz` cells; the new path and an independent replay have zero
+mismatches over all 799,200 cells.  The former formula, replayed eagerly on
+the same operands, has 50 mismatches
+(`tests/ocean/fidelity/test_nemo_testcase_l2_orca2iso.py:414-572`).
 
-## Certification refutation
+The independent review located the original four surface residuals at T
+(87,43) and S (86,43), near 11 N 166 E, and T (115,53) and S (116,53), near
+57 N 174 W.  Their columns and all 68 three-dimensional S residual cells lay
+where the pre-fix stabilising `akz` differed, including 165 of NEMO's 171
+nonzero cells.  The copied review report, scripts, logs, and checksums are in
+`gridladder_vmix_rounds/round19/review_vmix20/`; no claim here depends on a
+temporary path.
 
-The independent kt 1..10 rescore has **33 / 68** surface rows and **19 / 36**
-full-depth summaries AT-BAR.  The given-NEMO-entry label has **64 / 68**
-surface rows and **19 / 20** full-depth summaries AT-BAR.  Its remaining
-surface DEBT rows are the second-step kt-2 SSH/V and kt-4/kt-8 SSH rows.  Thus
-P19-4 is refuted and L2 is not certified.
+The held full-step record test was rerun after all source changes and reports
+**1 passed in 466.28 s**.  Its measured selected T/S tuples are both
+`(0, 0.0, 0.0)`.
+All four omission arms remain non-vacuous and are pinned from that run:
 
-The first step still has exactly two T and two S surface cells unequal, each
-with maximum absolute difference `7.105427357601002e-15`.  The post-refutation
-discriminator was committed before its runs.  Disabling only source-ordered
-A33 leaves that four-cell tuple unchanged; disabling only stored face ratios
-also leaves it unchanged.  The exact direct operands are therefore real
-fidelity fixes but are not the owner of the surviving final-update residual.
-The admitted record is sufficient to prove their exactness and this
-non-ownership; it does not identify the next downstream owner.
+- metric: T `(16433, 0.02054161798762677, 0.0006725116923845033)`, S
+  `(16433, 0.020566462820472253, 0.0004266288093426869)`;
+- EOS-80: T `(16429, 0.004663857636465485, 0.00013889085230196617)`, S
+  `(16429, 0.0014607050156243417, 3.852705067169809e-05)`;
+- north fold: T `(138, 0.0013241514577646551, 1.595933265099751e-05)`, S
+  `(138, 0.008011780370249966, 9.00824649513366e-05)`;
+- Kmm face geometry: T
+  `(16428, 5.092867354017372e-05, 4.384825971525139e-07)`, S
+  `(16428, 2.572830925373637e-05, 2.698489329967449e-07)`.
 
-Evidence:
-`gridladder_vmix_rounds/round19/score/l2_independent.json`,
-`l2_given_entry.json`, `without_a33.json`, and `without_faces.json`.
+## Certification score and controls
 
-## Unchanged-card controls
+The independent label covers `kt=1..10`: **68 / 68** surface rows and **36 /
+36** full-depth summaries are AT-BAR.  The given-NEMO-entry scorer covers the
+same ten steps through its entry and following-step rows: **68 / 68** surface
+rows and **20 / 20** full-depth summaries are AT-BAR.  Evidence and SHA-256
+stable inputs are under `gridladder_vmix_rounds/round19/resume_score/`.
+Therefore the round-19 outcome is **L2 CERTIFIED**.
 
-Normalized jaxpr hashes are exactly unchanged before/after for G5, V1-V5,
-L1, full ORCA2, DINO, GYRE, VORTEX, SMT-1..4, rung 0, and OMT-0..4.  The
-previously ungated cards now have explicit before/after evidence under
-`gridladder_vmix_rounds/round19/purity_before/` and `purity_after/`.
+Normalized jaxpr hashes are unchanged for the 20 non-DINO cards: G5, V1-V5,
+L1, full ORCA2, GYRE, VORTEX, SMT-1..4, rung 0, and OMT-0..4.  DINO is also
+unchanged.  All 21 comparisons report `expected_identical: true` under
+`gridladder_vmix_rounds/round19/purity_resume/`.
 
-GYRE's ten-step comparison passes all **70** compared rows with zero ULP
-worsening.  Its residual archive is byte-identical to round 18 at SHA-256
+The fresh GYRE ten-step comparison passes all 70 rows with zero ULP worsening.
+Its residual archive is byte-identical to the prior artifact at SHA-256
 `3b3d865cf5c82d38e15b24356492572a85546e51e35f70c2e7c89e5b9cb9df5b`.
-Evidence: `gridladder_vmix_rounds/round19/gyre_regression/`.
+Evidence is under `gridladder_vmix_rounds/round19/gyre_resume/`.
 
-No NEMO executable was built or run.  No new record is needed to support the
-claims made in this receipt.
+No NEMO executable was built or run.  No new record is needed.
 
 ## Landing gates
 
 - explicit round-19 receipt citation gate: **PASS**, 12 citations, zero
-  unmapped, zero failures, zero map-audit failures;
-- default ORCA2 landing list: **145 passed in 1109.39 s**;
-- private-import ratchet within that list: **6 passed**;
-- focused selector/synthetic tests: **3 passed in 9.32 s**;
-- jitted production operand gate: **1 passed in 154.51 s**.
+  failures, zero unmapped citations, zero map-audit failures;
+- default ORCA2 landing list: **145 passed in 983.84 s**;
+- private-import ratchet: **6 passed in 9.31 s**;
+- x64 JIT exact-value unit test: **1 passed in 1.02 s**;
+- jitted production exactness gate: **1 passed in 193.87 s**;
+- held `kt=1` record/omission gate: **1 passed in 466.28 s**.
 
 independent review: operator (Claude)
 
 codex review: operator
 
-COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/vmix_r19-1789813485
+COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r19/repo
 ACQUISITION_NEEDED: NONE
 DECISION_NEEDED: NONE
-ROUND_STATUS: DIRECT L2 A33 AND FACE OPERANDS EXACT; P19-4 REFUTED; L2 SCORED, DEBT, NOT CERTIFIED — independent 33/68 surface + 19/36 depth rows AT-BAR; given-entry 64/68 + 19/20
+ROUND_STATUS: LANDED — L2 CERTIFIED; independent 68/68 surface + 36/36 depth and given-entry 68/68 + 20/20 AT-BAR through kt=10; all other cards unchanged

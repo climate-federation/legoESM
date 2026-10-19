@@ -10004,7 +10004,7 @@ class LatLonCGridOceanModel:
                 native_bolus_slope_eta=_eta_gm_in,
                 # traldf_iso.f90:230-231 uses Kmm; only L2 selects stage-2 SSH.
                 redi_flux_eta=(_eta_live_one_half if gm_cfg.redi_flux_geometry_stage == "rk3_kmm" else state.eta.data),
-                # stprk3_stg.f90:216-217 stores the stage-2 r3u/r3v as the
+                # stprk3_stg.f90:222-223 stores the np_HYB stage-2 r3u/r3v as the
                 # average of the two ratios, not the ratio of averaged SSH.
                 # The face builder retains its fold-aware final native row.
                 redi_flux_r3_native=(
@@ -11179,7 +11179,8 @@ class LatLonCGridOceanModel:
                 raise ValueError("WS-RK3 LDF diagnostic trace is incomplete")
             return _NEMOWSLdfDiagnosticTrace(
                 state_after=state_new,
-                ldf_diagnostics=_nemo_ws_ldf_diagnostics)
+                ldf_diagnostics=_nemo_ws_ldf_diagnostics,
+                isoneutral_K=k33_implicit)
         if _return_tracer_process_trace:
             if (_nemo_ws_process_qco is None
                     or _nemo_ws_process_boundaries is None
@@ -13318,7 +13319,18 @@ class LatLonCGridOceanModel:
                 # tracer solve (Veros core/isoneutral/diffusion.py:154). K_33 ≥ 0 at
                 # interfaces, same (n_lat, n_lon, nlev-1) shape as K_v_cell.  TRACERS
                 # ONLY — momentum uses A_v_cell, which is untouched.
-                K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)
+                _gm_zdf = getattr(_cfg_b, "gm_redi", None)
+                if bool(getattr(_gm_zdf, "redi_a33_source_ordering", False)):
+                    # trazdf.f90:185 materializes the already-stored ``akz``
+                    # before the distinct ``zwt = avt + akz`` statement.  In
+                    # the full JIT graph, guard both boundaries or XLA can
+                    # fuse the A33 producer through this downstream consumer.
+                    _k33_stored = nemo_source_round(
+                        K33_iso.astype(state.T.data.dtype))
+                    K_v_cell = nemo_source_round(K_v_cell + _k33_stored)
+                else:
+                    # Historical shared graph for every non-L2 card.
+                    K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)
             # Double diffusion (NEMO zdfddm): salt fingering / diffusive
             # convection add a SEPARATE heat (avt) and salt (avs) diffusivity.
             # avt folds into K_v_cell (heat) HERE — before the wet-interface
@@ -17236,6 +17248,7 @@ class _NEMOWSLdfDiagnosticTrace(NamedTuple):
 
     state_after: object
     ldf_diagnostics: object
+    isoneutral_K: object
 
 
 def _rk3_stage_update_written_order(velocity_before, rhs, dt_stage, qco_before,
