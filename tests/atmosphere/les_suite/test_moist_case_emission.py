@@ -331,3 +331,47 @@ def test_checkpoint_of_another_run_is_refused(tmp_path):
     assert int(got["n"]) == 3
     with pytest.raises(SystemExit, match="different run"):
         load_checkpoint(path, "run-B")
+
+
+# Each driver reads its sponge base from the catalog at the run's own domain height
+# (not a local literal): the lookup is recorded with the case name and --Lz.
+_SPONGE_WIRING = [
+    ("run_bomex_les", _TINY + ["--hours", "0.002", "--dt", "1.0", "--Lz", "2400"],
+     "bomex_cu", 2400.0),
+    ("run_bomex_les", ["--lagrangian-sdm", "--nx", "4", "--ny", "4", "--nz", "4",
+                       "--Lx", "200", "--Ly", "200", "--Lz", "200", "--hours", "0.001",
+                       "--dt", "1.0", "--n-sd", "16", "--collision-mode",
+                       "deterministic", "--print-every", "1000", "--record-frames", "0"],
+     "bomex_cu", 200.0),
+    ("run_rico_les", _TINY + ["--hours", "0.002", "--dt", "1.0", "--Lz", "3600"],
+     "rico_cu", 3600.0),
+    ("run_dycoms_les", _TINY + ["--case", "rf02", "--hours", "0.001", "--Lz", "1400"],
+     "dycoms_rf02_sc", 1400.0),
+    ("run_spectral_sbl", ["--nx", "8", "--ny", "8", "--nz", "12", "--Lx", "300",
+                          "--Ly", "300", "--Lz", "300", "--hours", "0.0005",
+                          "--record-frames", "0", "--print-every", "100000"],
+     "sbl_gabls1", 300.0),
+]
+
+
+@pytest.mark.parametrize("driver,argv,case,lz", _SPONGE_WIRING,
+                         ids=["bomex", "bomex_sdm", "rico", "rf02", "sbl"])
+def test_driver_takes_its_sponge_base_from_the_catalog(driver, argv, case, lz,
+                                                       tmp_path, monkeypatch):
+    mod = _load(driver)
+    real = mod.catalog_case
+    calls = []
+
+    class _Recorded:
+        def __init__(self, c):
+            self.c = c
+
+        def sponge_base_m(self, lz_m=None):
+            calls.append((self.c.name, lz_m))
+            return self.c.sponge_base_m(lz_m)
+
+    monkeypatch.setattr(mod, "catalog_case", lambda name: _Recorded(real(name)))
+    monkeypatch.setattr(sys, "argv", [driver] + argv + ["--output", str(tmp_path)])
+    rc = mod.main()
+    assert rc in (0, None)
+    assert calls == [(case, lz)]

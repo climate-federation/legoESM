@@ -78,6 +78,7 @@ ANCHOR_CASES: tuple[LESCase, ...] = (
         surface_cooling_rate_K_per_h=0.25,  # Beare et al. (2006): T_s = 265 K − 0.25 K/h·t
         sgs_variants=_SGS_SPREAD,         # stable anchor is in the D7 spread subset
         driver="run_spectral_sbl.py",
+        sponge_base_frac=0.75,           # top 25 % (run_spectral_sbl / run_les_suite)
         reference="Beare et al. (2006) GABLS1 stable BL LES intercomparison",
         ci_marker="nightly",
         description="GABLS1 stably-stratified sheared Ekman SBL (Ug=8, f=1.39e-4); "
@@ -94,6 +95,7 @@ ANCHOR_CASES: tuple[LESCase, ...] = (
         geostrophic_wind_m_s=8.75,       # trade-wind u_g ~ -8.75 m/s
         sgs_variants=_SGS_DEFAULT,
         driver="run_bomex_les.py",
+        sponge_base_frac=0.75,           # top 25 % (BOMEX dodamping)
         reference="Siebesma et al. (2003) BOMEX shallow-cumulus LES intercomparison",
         ci_marker="manual_only",
         description="Non-precipitating shallow trade cumulus; cloud fraction from the "
@@ -109,6 +111,7 @@ ANCHOR_CASES: tuple[LESCase, ...] = (
         geostrophic_wind_m_s=7.0,        # DYCOMS-II RF01 U_g=(7, -5.5); dominant u-component
         sgs_variants=_SGS_DEFAULT,
         driver="run_dycoms_les.py",
+        sponge_base_frac=0.85,           # top 15 % (run_dycoms_les)
         reference="Stevens et al. (2005) DYCOMS-II RF01 stratocumulus LES intercomparison",
         ci_marker="manual_only",
         description="Nocturnal marine stratocumulus with a sharp cloud-top inversion; "
@@ -134,6 +137,7 @@ MOIST_CASES: tuple[LESCase, ...] = (
         geostrophic_wind_m_s=None,       # height-dependent (u_g, v_g) from the deck lsf
         sgs_variants=_SGS_DEFAULT,
         driver="run_rico_les.py",
+        sponge_base_frac=0.75,           # top 25 %
         reference="van Zanten et al. (2011) RICO precipitating shallow-cumulus LES "
                   "intercomparison",
         ci_marker="manual_only",
@@ -151,6 +155,7 @@ MOIST_CASES: tuple[LESCase, ...] = (
         geostrophic_wind_m_s=None,       # sheared (u_g, v_g) from the deck lsf
         sgs_variants=_SGS_DEFAULT,
         driver="run_dycoms_les.py",
+        sponge_base_frac=0.85,           # top 15 % (run_dycoms_les)
         reference="Ackerman et al. (2009) DYCOMS-II RF02 drizzling stratocumulus LES "
                   "intercomparison",
         ci_marker="manual_only",
@@ -167,6 +172,7 @@ MOIST_CASES: tuple[LESCase, ...] = (
         geostrophic_wind_m_s=None,       # no Coriolis in the deck
         sgs_variants=_SGS_DEFAULT,
         driver="run_dycoms_les.py",
+        sponge_base_frac=0.85,           # top 15 % (run_dycoms_les)
         reference="ASTEX flight 209 stratocumulus (gSAM ASTEX209 deck)",
         ci_marker="manual_only",
         description="ASTEX stratocumulus deck, steady forcing "
@@ -183,6 +189,7 @@ MOIST_CASES: tuple[LESCase, ...] = (
         geostrophic_wind_m_s=None,       # time- and height-varying (spec Table 4)
         sgs_variants=_SGS_DEFAULT,
         driver="run_gabls3_les.py",
+        sponge_base_frac=0.75,           # 600 m of 800 m (approved 2026-10-18)
         reference="Basu (2008) GABLS3 LES intercomparison case description (revised "
                   "6 Oct 2008); Cabauw 2 July 2006 00-09 UTC",
         ci_marker="manual_only",
@@ -294,6 +301,8 @@ def dry_shear_buoyancy_grid(
                     geostrophic_wind_m_s=(float(wind) if wind > 0.0 else None),
                     sgs_variants=_SGS_DEFAULT,
                     driver=driver,
+                    # the stable points run the GABLS1 driver and its sponge
+                    sponge_base_frac=0.75 if stable else None,
                     reference="LES_SUITE.md D2 dry (buoyancy x shear) grid "
                               "(anchors: Nieuwstadt CBL, GABLS1 SBL)",
                     ci_marker=ci_marker,  # type: ignore[arg-type]  (validated in register_case)
@@ -732,3 +741,14 @@ def register_default_catalog(*, include_dry_grid: bool = True,
         for case in PUBLISHED_CASES:
             registered.append(register_case(case))
     return registered
+
+
+def catalog_case(name: str) -> LESCase:
+    """The default-catalog case ``name`` (anchors, further moist cases, the default
+    dry grid and the published cases) without touching the process registry, so a
+    driver can read its own case's values. Raises ``KeyError`` on an unknown name."""
+    for case in (ANCHOR_CASES + MOIST_CASES + tuple(dry_shear_buoyancy_grid())
+                 + PUBLISHED_CASES):
+        if case.name == name:
+            return case
+    raise KeyError(f"no LES catalog case named {name!r}")

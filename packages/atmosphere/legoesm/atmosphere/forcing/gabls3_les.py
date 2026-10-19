@@ -24,7 +24,7 @@ from legoesm import constants
 
 __all__ = [
     "LAT_DEG", "Z0_M", "Z_REF_M", "P_SFC_PA", "THETA_TOP_GRADIENT_K_M",
-    "SPONGE_BOTTOM_M", "DURATION_S", "coriolis_parameter", "series_mean",
+"DURATION_S", "coriolis_parameter", "series_mean",
     "surface_mean", "geostrophic_mean", "advection_mean", "initial_profiles",
     "perturbation_std",
 ]
@@ -34,7 +34,6 @@ Z0_M = 0.15
 Z_REF_M = 0.25                      # height of the prescribed θ, q (Table 1)
 P_SFC_PA = 102210.0                 # Table 1 at 00 UTC, held (approved 2026-10-18)
 THETA_TOP_GRADIENT_K_M = 0.0029     # upper-boundary inversion strength
-SPONGE_BOTTOM_M = 600.0             # spec: lower limit ~550-600 m (approved 600)
 DURATION_S = 9.0 * 3600.0
 _H = 3600.0
 

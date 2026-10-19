@@ -198,3 +198,90 @@ def test_cooling_rate_validation_and_gabls1_is_cooling_forced():
     gabls = by_name["sbl_gabls1"]
     assert gabls.surface_cooling_rate_K_per_h == 0.25   # Beare et al. (2006)
     assert gabls.surface_theta_flux_K_m_s is None
+
+
+# The drivers' sponge bases before they read them from the catalog: (fraction of the
+# domain height, the driver's default domain height [m]).
+_OLD_DRIVER_SPONGE = {
+    "sbl_gabls1": (0.75, 400.0),       # run_spectral_sbl / run_les_suite: 0.75 * Lz
+    "bomex_cu": (0.75, 3000.0),        # run_bomex_les: 0.75 * args.Lz (main and SDM)
+    "dycoms_rf01_sc": (0.85, 1500.0),  # run_dycoms_les: 0.85 * args.Lz
+    "dycoms_rf02_sc": (0.85, 1500.0),
+    "astex_sc": (0.85, 2500.0),
+    "rico_cu": (0.75, 4000.0),         # run_rico_les: 0.75 * args.Lz
+    "gabls3": (None, 600.0),           # run_gabls3_les: 600 m
+}
+
+
+def test_catalog_sponge_base_is_what_each_driver_applied_before():
+    from legoesm.atmosphere.les_suite.catalog import (
+        PUBLISHED_CASES,
+        catalog_case,
+        dry_shear_buoyancy_grid,
+    )
+    for name, (frac, lz) in _OLD_DRIVER_SPONGE.items():
+        case = catalog_case(name)
+        if frac is None:            # an absolute base on a fixed domain (GABLS3)
+            assert case.grid.Lz_m == 800.0 and case.sponge_base_m() == lz, name
+            continue
+        assert case.grid.Lz_m == lz, name
+        # bit-identical at the default domain and at any --Lz a run passes
+        for h in (lz, 200.0, 1800.0, 3000.0):
+            assert case.sponge_base_m(h) == frac * h, (name, h)
+    assert catalog_case("cbl_nieuwstadt").sponge_base_m() is None
+    for c in dry_shear_buoyancy_grid():   # run_les_suite: 0.75 Lz on the stable points
+        want = 0.75 * c.grid.Lz_m if c.regime == "dry_stable" else None
+        assert c.sponge_base_m() == want, c.name
+    for c in PUBLISHED_CASES:
+        assert c.sponge_base_m() == c.setup.sponge_bottom_m, c.name
+
+
+def test_sponge_base_frac_is_validated():
+    base = dict(name="x", regime="dry_stable", core="spectral",
+                grid=LESGrid(nx=8, ny=8, nz=8, Lx_m=100.0, Ly_m=100.0, Lz_m=100.0,
+                             dt_s=0.1),
+                duration_hours=1.0, surface_theta_flux_K_m_s=-0.01,
+                geostrophic_wind_m_s=5.0, sgs_variants=("lasd",),
+                driver="run_spectral_sbl.py", reference="ref")
+    for bad in (0.0, 1.0, -0.2, True):
+        with pytest.raises(RegistryError, match="sponge_base_frac"):
+            LESCase(**base, sponge_base_frac=bad).validate()
+    LESCase(**base, sponge_base_frac=0.75).validate()
+
+
+def test_every_sponge_driver_case_resolves_a_sponge_and_setups_reject_a_fraction():
+    import dataclasses
+
+    from legoesm.atmosphere.les_suite.catalog import (
+        ANCHOR_CASES,
+        MOIST_CASES,
+        PUBLISHED_CASES,
+        dry_shear_buoyancy_grid,
+    )
+    sponge_drivers = {"run_bomex_les.py", "run_rico_les.py", "run_dycoms_les.py",
+                      "run_spectral_sbl.py", "run_gabls3_les.py"}
+    for c in ANCHOR_CASES + MOIST_CASES + tuple(dry_shear_buoyancy_grid()):
+        if c.driver in sponge_drivers:
+            assert c.sponge_base_m() is not None, c.name
+    with pytest.raises(RegistryError, match="sponge_base_frac"):
+        dataclasses.replace(PUBLISHED_CASES[0], sponge_base_frac=0.75).validate()
+
+
+def test_dycoms_deck_names_map_to_catalog_cases():
+    import importlib.util
+    import sys
+    run = _REPO / "scripts" / "run"
+    sys.path.insert(0, str(run))
+    spec = importlib.util.spec_from_file_location("run_dycoms_les",
+                                                  run / "run_dycoms_les.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    from legoesm.atmosphere.les_suite.catalog import catalog_case
+    assert mod._CATALOG_NAME == {"dycoms": "dycoms_rf01_sc", "rf02": "dycoms_rf02_sc",
+                                 "astex": "astex_sc"}
+    assert set(mod._CATALOG_NAME) == set(mod._STRATOCUMULUS_CASES)
+    for deck, name in mod._CATALOG_NAME.items():
+        case = catalog_case(name)
+        assert case.driver == "run_dycoms_les.py"
+        # the deck's own domain is the catalog case's
+        assert case.grid.Lz_m == mod._STRATOCUMULUS_CASES[deck]["lz_m"]

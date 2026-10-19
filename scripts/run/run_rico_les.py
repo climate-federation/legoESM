@@ -69,6 +69,7 @@ import run_bomex_les as bx  # noqa: E402  (shared forcing/profiles machinery)
 
 from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 from legoesm.atmosphere.les_suite.bridge import save_artifact  # noqa: E402
+from legoesm.atmosphere.les_suite.catalog import catalog_case  # noqa: E402
 from legoesm.atmosphere.les_suite.checkpoint import (  # noqa: E402
     EXIT_CHECKPOINTED,
     add_checkpoint_args,
@@ -179,7 +180,7 @@ def main():
     q_sfc = float(saturation_mixing_ratio(jnp.asarray(sst),
                                           jnp.asarray(p_sfc)))
 
-    zc = g.z_c; z_sp = 0.75 * args.Lz; tau_sp = 60.0
+    zc = g.z_c; z_sp = catalog_case("rico_cu").sponge_base_m(args.Lz); tau_sp = 60.0
     spc = jnp.where(zc > z_sp, 0.5 * (1.0 - jnp.cos(
         jnp.pi * (zc - z_sp) / (args.Lz - z_sp))), 0.0).astype(dtype)
     zf = g.z_f

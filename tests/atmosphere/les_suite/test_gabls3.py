@@ -150,6 +150,7 @@ def test_gabls3_smoke_closes_budgets_and_records_the_applied_forcing(
     assert case.held_out and case.driver == "run_gabls3_les.py"
     art = load_artifact(art_path)
     assert art.is_moist and art.nt == 4 and art.les_setup["smoke"] is True
+    assert art.les_setup["sponge"][0] == 600.0     # the approved base, via the catalog
     rows = _budget_lines(out)
     for lab in ("theta", "u", "v", "water"):
         r = rows[lab]

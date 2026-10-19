@@ -245,6 +245,11 @@ class LESCase:
         ``True`` = held out of tuning and evolution, scored only for
         generalisation (the user's 2026-10-15 split: Ayotte, Sullivan–Patton,
         GABLS3, GABLS4, neutral Ekman, RICO held out).
+    sponge_base_frac : float | None
+        Base of the LES Rayleigh sponge as a fraction of the domain height, for a
+        case WITHOUT a ``setup`` (its driver reads it from here; a setup case
+        carries ``setup.sponge_bottom_m``). ``None`` = no sponge. See
+        :meth:`sponge_base_m`.
     """
 
     name: str
@@ -263,6 +268,17 @@ class LESCase:
     surface_cooling_rate_K_per_h: float | None = None
     setup: LESSetup | None = None
     held_out: bool = False
+    sponge_base_frac: float | None = None
+
+    def sponge_base_m(self, lz_m: float | None = None) -> float | None:
+        """Height [m] of the LES sponge base (``None`` = no sponge): the setup's
+        ``sponge_bottom_m``, else ``sponge_base_frac`` of the domain height
+        ``lz_m`` (default the catalog grid's)."""
+        if self.setup is not None:
+            return self.setup.sponge_bottom_m
+        if self.sponge_base_frac is None:
+            return None
+        return self.sponge_base_frac * (self.grid.Lz_m if lz_m is None else lz_m)
 
     def validate(self) -> None:
         if not self.name or not isinstance(self.name, str):
@@ -312,6 +328,15 @@ class LESCase:
                     f"{self.name}: a setup case needs exactly one surface forcing "
                     "(flux, cooling rate, surface θ series or a DEPHY file), got "
                     f"{n_forcing}")
+        frac = self.sponge_base_frac
+        if frac is not None:
+            if self.setup is not None:
+                raise RegistryError(f"{self.name}: a setup case carries its sponge in "
+                                    "setup.sponge_bottom_m, not sponge_base_frac")
+            if isinstance(frac, bool) or not isinstance(frac, (int, float)) or not (
+                    0.0 < frac < 1.0):
+                raise RegistryError(
+                    f"{self.name}: sponge_base_frac must be in (0, 1), got {frac!r}")
         self.grid.validate()
 
 

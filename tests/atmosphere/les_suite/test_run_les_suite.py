@@ -74,9 +74,10 @@ def test_build_sbl_stratified_ic_and_geostrophic_wind():
 
 def test_emit_step_factory_rejects_unknown_regime():
     import jax.numpy as jnp
+    from legoesm.atmosphere.les_suite.catalog import catalog_case
     m = _driver()
     with pytest.raises(SystemExit):
-        m._make_emit_step(None, "shallow_cumulus", (0.0, 0.0), 0.0, 0.06, 400.0,
+        m._make_emit_step(None, catalog_case("bomex_cu"), (0.0, 0.0), 0.0, 0.06,
                           jnp.float32)
 
 
@@ -314,3 +315,16 @@ def test_frame_schedule_last_is_nsteps():
         rec = m.frame_step_schedule(n_steps, frames)
         assert rec[-1] == n_steps
         assert rec == sorted(set(rec))
+
+
+def test_emit_step_sponge_is_the_catalog_cases(monkeypatch):
+    import jax.numpy as jnp
+    from legoesm.atmosphere.les_suite.catalog import catalog_case
+    m = _driver()
+    got = []
+    monkeypatch.setattr(m, "_make_step", lambda *a, sponge=None: got.append(sponge))
+    m._make_emit_step(None, catalog_case("sbl_gabls1"), (8.0, 0.0), 1e-4, None,
+                      jnp.float64)
+    m._make_emit_step(None, catalog_case("cbl_nieuwstadt"), (0.0, 0.0), 0.0, 0.06,
+                      jnp.float64)
+    assert got == [(0.75 * 400.0, m._SBL_TAU_SPONGE_S), None]

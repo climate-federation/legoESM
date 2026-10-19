@@ -153,7 +153,7 @@ def main(argv=None):
     f_cor = gb.coriolis_parameter()
     z_c = np.asarray(g.z_c)
     Lz = g.cfg.Lz
-    z_sp = gb.SPONGE_BOTTOM_M
+    z_sp = _CASE.sponge_base_m()
     spc = jnp.where(g.z_c > z_sp, 0.5 * (1.0 - jnp.cos(
         jnp.pi * (g.z_c - z_sp) / (Lz - z_sp))), 0.0).astype(dtype)
     spf = jnp.where(g.z_f > z_sp, 0.5 * (1.0 - jnp.cos(
@@ -276,7 +276,7 @@ def main(argv=None):
             "z0_m": gb.Z0_M, "surface_ref_height_m": gb.Z_REF_M,
             "theta_ref_K": _THETA_REF_K, "most_virtual": True,
             "theta_top_gradient_K_m": gb.THETA_TOP_GRADIENT_K_M,
-            "sponge": [gb.SPONGE_BOTTOM_M, GABLS3_SPONGE_TAU_S],
+            "sponge": [z_sp, GABLS3_SPONGE_TAU_S],
             "microphysics": microphysics_record(MicrophysicsConfig(scheme="none")),
             "held_out": True, "smoke": bool(args.smoke),
             "approved": list(GABLS3_APPROVED), "pending": list(GABLS3_PENDING),

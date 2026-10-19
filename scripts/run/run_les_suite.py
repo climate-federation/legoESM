@@ -355,7 +355,7 @@ def _build_setup(case, args, dtype, sgs):
     return g, st, res["q0"], res
 
 
-def _make_emit_step(g, regime, u_geo, f_cor, Q0, Lz, dtype):
+def _make_emit_step(g, case, u_geo, f_cor, Q0, dtype):
     """The jitted per-step map for one regime:
     ``step(state, dt, t_sfc) -> (state, u_*, budget)``.
 
@@ -365,12 +365,11 @@ def _make_emit_step(g, regime, u_geo, f_cor, Q0, Lz, dtype):
     re-projection to restore ∇·u=0 after the sponge) so the jet/gravity-waves
     reaching the rigid lid are absorbed, not reflected. ``t_sfc`` is the
     prescribed surface temperature (MOST BC) or ``None`` for the flux ``Q0``."""
-    if regime == "dry_convective":
-        return _make_step(g, u_geo, f_cor, Q0, dtype, sponge=None)
-    if regime == "dry_stable":
-        return _make_step(g, u_geo, f_cor, Q0, dtype,
-                          sponge=(0.75 * Lz, _SBL_TAU_SPONGE_S))
-    raise SystemExit(f"no emit step wired for regime {regime!r}")
+    if case.regime not in ("dry_convective", "dry_stable"):
+        raise SystemExit(f"no emit step wired for regime {case.regime!r}")
+    z_sp = case.sponge_base_m(case.grid.Lz_m)       # the catalog's (None = no sponge)
+    return _make_step(g, u_geo, f_cor, Q0, dtype,
+                      sponge=None if z_sp is None else (z_sp, _SBL_TAU_SPONGE_S))
 
 
 def _make_step(g, u_geo, f_cor, Q0, dtype, sponge=None):
@@ -842,8 +841,7 @@ def main(argv: list[str] | None = None) -> int:
         st_ic = st
         g, st = _distribute(g, st, comm, dtype)
         u_geo = (u_geo_mag, 0.0)
-        step = _make_emit_step(g, case.regime, u_geo, f_cor, Q0,
-                               case.grid.Lz_m, dtype)
+        step = _make_emit_step(g, case, u_geo, f_cor, Q0, dtype)
         fields_fn = _frame_fields_fn(g, u_geo, f_cor, Q0)
     hours = args.hours if args.hours is not None else case.duration_hours
     T = hours * 3600.0

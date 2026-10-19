@@ -82,6 +82,7 @@ import les_record  # noqa: E402
 
 from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 from legoesm.atmosphere.les_suite.bridge import save_artifact  # noqa: E402
+from legoesm.atmosphere.les_suite.catalog import catalog_case  # noqa: E402
 from legoesm.atmosphere.les_suite.checkpoint import (  # noqa: E402
     EXIT_CHECKPOINTED,
     add_checkpoint_args,
@@ -532,7 +533,7 @@ def run_lagrangian_sdm(args, dtype, g, st, ref, forc):
         sfc_theta_flux=forc["th_flux"], sfc_qv_flux=forc["qv_flux"],
         do_condensation=True, do_coalescence=True)
 
-    zc = g.z_c; z_sp = 0.75 * args.Lz; tau_sp = 60.0
+    zc = g.z_c; z_sp = catalog_case("bomex_cu").sponge_base_m(args.Lz); tau_sp = 60.0
     spc = jnp.where(zc > z_sp, 0.5 * (1.0 - jnp.cos(
         jnp.pi * (zc - z_sp) / (args.Lz - z_sp))), 0.0).astype(dtype)
     zf = g.z_f
@@ -776,7 +777,7 @@ def main():
     # Rayleigh sponge (top 25%, w + fluctuations) — BOMEX dodamping: absorb
     # gravity waves at the inversion-capped lid (same pattern as the dry
     # drivers; re-project after).
-    zc = g.z_c; z_sp = 0.75 * args.Lz; tau_sp = 60.0
+    zc = g.z_c; z_sp = catalog_case("bomex_cu").sponge_base_m(args.Lz); tau_sp = 60.0
     spc = jnp.where(zc > z_sp, 0.5 * (1.0 - jnp.cos(
         jnp.pi * (zc - z_sp) / (args.Lz - z_sp))), 0.0).astype(dtype)
     zf = g.z_f

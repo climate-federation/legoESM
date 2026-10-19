@@ -87,6 +87,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import les_record  # noqa: E402
 from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
 from legoesm.atmosphere.les_suite.bridge import save_artifact  # noqa: E402
+from legoesm.atmosphere.les_suite.catalog import catalog_case  # noqa: E402
 from legoesm.atmosphere.les_suite.checkpoint import (  # noqa: E402
     EXIT_CHECKPOINTED,
     add_checkpoint_args,
@@ -143,6 +144,9 @@ _DEFAULT_CASE = resolve_sam_case_dir("DYCOMS_RF01")
 #                the case's inversion: seeding above it puts noise in the free
 #                troposphere the case does not perturb. RF01's 840 m was a
 #                literal in build(); RF02's inversion is at 795 m.
+# --case -> the LES catalog case (its sponge base is read from there)
+_CATALOG_NAME = {"dycoms": "dycoms_rf01_sc", "rf02": "dycoms_rf02_sc",
+                 "astex": "astex_sc"}
 _STRATOCUMULUS_CASES = {
     "dycoms": {
         "gsam_dir": "DYCOMS_RF01",
@@ -486,7 +490,8 @@ def main():
         d = (f[..., 1:] - f[..., :-1]) / dz
         return jnp.concatenate([d, jnp.zeros_like(d[..., :1])], axis=-1)
 
-    zc = g.z_c; z_sp = 0.85 * args.Lz; tau_sp = 30.0
+    zc = g.z_c; z_sp = catalog_case(_CATALOG_NAME[args.case]).sponge_base_m(args.Lz)
+    tau_sp = 30.0
     spc = jnp.where(zc > z_sp, 0.5 * (1.0 - jnp.cos(
         jnp.pi * (zc - z_sp) / (args.Lz - z_sp))), 0.0).astype(dtype)
     zf = g.z_f
