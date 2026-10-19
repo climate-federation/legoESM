@@ -87,10 +87,64 @@ for _m in FOLD_MEMBERS:
                              if k not in STATEMENTS[_m]}
 STATEMENTS["FOLDSET"] = {k: v for arm in FOLD_MEMBERS
                          for k, v in STATEMENTS[arm].items()}
+# This round's selection: ALLN where NEMO runs every line; no FCT images
+# without FCT (OMT-1..3), no fold rows without lateral diffusion (OMT-1/2).
+D122_SELECTED: dict[str, dict] = {}
+
 RUNGS = ("rung0", "omt1", "omt2", "omt3", "omt4", "rung10")
 ARMS = ("control", "D122", *STATEMENTS)
-# This round's selection: filled in after the arms (addendum).
-D122_SELECTED: dict[str, dict] = {rung: {} for rung in RUNGS}
+for _rung in RUNGS:
+    _drop = (({} if _rung in ("rung0", "omt4", "rung10") else STATEMENTS["FCTF"])
+             | ({} if _rung not in ("omt1", "omt2") else STATEMENTS["FOLDR"]))
+    D122_SELECTED[_rung] = {k: v for k, v in STATEMENTS["ALLN"].items()
+                            if k not in _drop}
+
+
+def _comparison_admitting_later_first(original):
+    """Decision-96 row comparison that admits a first non-bit row moving LATER.
+
+    The frozen comparison refuses any move of the first non-bit row; it was
+    written for statements that never make a row exact.  A later first row
+    means every earlier row became exact (losses are still refused), and the
+    round-276 classifier already scores its first over-bar direction at the
+    candidate's first row.  An EARLIER move is still refused.
+    """
+
+    def compare(base: dict, candidate: dict) -> dict:
+        old_rows, old_first = r276.decision96._rows(base)
+        _, new_first = r276.decision96._rows(candidate)
+        if old_first == new_first:
+            return original(base, candidate)
+        order = [(r["kt"], r["checkpoint"], r["field"]) for r in old_rows]
+        index = {key: i for i, key in enumerate(order)}
+
+        def at(first):
+            return index[(first["kt"], first["checkpoint"], first["field"])]
+        require(old_first is not None and new_first is not None
+                and at(new_first) > at(old_first),
+                f"first non-bit checkpoint moved earlier: {old_first} -> {new_first}")
+        label = next(iter(candidate))
+        candidate = {label: {**candidate[label],
+                             "first_non_bit_checkpoint": old_first}}
+        out = original(base, candidate)
+        out["first_non_bit_after"] = new_first
+        return out
+
+    return compare
+
+
+def classify_later_first(control: Path, candidate: Path, plant: str) -> dict:
+    original = r276.decision96._comparison
+    r276.decision96._comparison = _comparison_admitting_later_first(original)
+    try:
+        result = r276.classify(control, candidate, plant=plant)
+    finally:
+        r276.decision96._comparison = original
+    docs = [json.loads(Path(p).read_text(encoding="utf-8"))["ladder"]
+            for p in (control, candidate)]
+    result["first_non_bit_before"], result["first_non_bit_after"] = (
+        d["first_non_bit_checkpoint"] for d in docs)
+    return result
 
 
 def _get(cfg, path):
@@ -165,7 +219,7 @@ def main() -> int:
                               if args.measure == "D122"
                               else STATEMENTS.get(args.measure, {})))
         elif args.classify:
-            result = r276.classify(*args.classify, plant=args.plant)
+            result = classify_later_first(*args.classify, plant=args.plant)
         else:
             require(args.decide is not None, "no gate operation selected")
             result = r278.decide(args.decide)

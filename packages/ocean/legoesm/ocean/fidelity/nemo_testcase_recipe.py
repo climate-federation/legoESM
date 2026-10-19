@@ -1809,14 +1809,35 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         # and stage 3 reads r3f = r1_2*(r3fb + r3fa) (stprk3_stg.f90:245).
         # Round 311: stp_2D's stage-1 order hpg -> ldf -> vor -> keg
         # (stp2d.f90:141/:144/:147/:164), G1b's dyn_keg guard kept.
-        # Left off: G8's fold rows (lean away, grow rung 10's sea-level error).
         nemo_ldf_stored_f_area=True,
         nemo_ldf_stage_r3f=True,
         rk3_stage1_ldf_source_order=True,
+        # ORCA2 round 318 (Decision 122, Decisions 125/137 re-measured): the
+        # north-fold set, which passes only as a whole.  G9 (gridladder round
+        # 52): stage transport V mask after its fold exchange and the vn_adv/
+        # r3v exchanges (stprk3_stg.f90:283, dommsk.f90:232, dynspg_ts.f90:844,
+        # stprk3_stg.f90:169), FCT fold images (traadv_fct.f90:311), the
+        # end-of-stage pivot fold (stprk3_stg.f90:795-796), the stage wzv
+        # clock pair, stored tracer-wzv r3t and stored r3u/r3v (stprk3_stg.f90
+        # :177-179, :221-223, :282-283); G6's raw pivot V mask, vector fold
+        # unit and top-V exchange; G8's fold rows.  G9's stage-3 Krhs order
+        # stays off: its path refuses the diffusive BBL and needs the forced
+        # stage-3 heat/salt forms.
+        rk3_stage_transport_raw_vmask=True,
+        rk3_stage_transport_fold_exchanges=True,
+        fct_fold_exchange=True,
+        rk3_end_of_stage_pivot_fold=True,
+        rk3_stage_wzv_nemo_clock_pair=True,
+        rk3_stage_tracer_wzv_stored_kmm_ratios=True,
+        rk3_stage_transport_stored_r3uv=True,
+        rk3_vector_raw_vmask=True,
+        rk3_fold_exchange_top_v_row=True,
+        nemo_ldf_fold_rows=True,
         barotropic=model_config.barotropic._replace(
             barotropic_een_ratio_fold_exchange=True,
             barotropic_een_fe3mask_pivot_row=True,
             barotropic_een_ratio_written_order=True,
+            barotropic_literal_fold_unit_vector_form=True,
         ),
     )
     # Decision 132 via Decision 122 (round 308): the first vector-form wzv

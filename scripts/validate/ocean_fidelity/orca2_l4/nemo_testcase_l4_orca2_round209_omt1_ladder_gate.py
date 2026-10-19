@@ -56,9 +56,13 @@ def build_omt1_card(deck_root: Path, *, plant: str = "none"):
         vorticity_scheme=rung_cfg.vorticity_scheme,
         # Round 309: OMT-0 turns these off (np_LIN_dyn); vector form restores them.
         **{name: getattr(rung_cfg, name) for name in omt0.OMT0_VECTOR_ONLY},
+        # Round 318: the north-fold set (its FCT images wait for OMT-4's FCT).
+        **{name: getattr(rung_cfg, name) for name in omt0.OMT0_FOLD_SET},
         barotropic=cfg.barotropic._replace(
             barotropic_flux_update_nemo_literal=False,
             barotropic_entry_depth_nemo_literal=False,
+            barotropic_literal_fold_unit_vector_form=(
+                rung_cfg.barotropic.barotropic_literal_fold_unit_vector_form),
         ),
     )
     recipe = card.recipe._replace(model_config=cfg)

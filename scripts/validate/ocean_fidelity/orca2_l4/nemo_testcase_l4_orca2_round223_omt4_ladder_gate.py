@@ -37,7 +37,10 @@ def build_omt4_card(deck_root: Path, *, plant: str = "none"):
     tracer_advection = rung_cfg.tracer_advection
     if plant == "card-module":
         tracer_advection = "none"
-    cfg = cfg._replace(tracer_advection=tracer_advection)
+    # Round 318: G9's FCT fold images return with the FCT.
+    cfg = cfg._replace(tracer_advection=tracer_advection,
+                       **{name: getattr(rung_cfg, name)
+                          for name in omt3.omt1.omt0.OMT0_FCT_ONLY})
     return card._replace(
         case="ORCA2-OMT4-vector-linear-drag-momentum-ldf-fct-zps",
         recipe=card.recipe._replace(model_config=cfg),
@@ -51,7 +54,7 @@ def validate_omt4_card(deck_root: Path, card) -> dict[str, object]:
     before = base.recipe.model_config
     after = card.recipe.model_config
     for name in before._fields:
-        if name != "tracer_advection":
+        if name not in ("tracer_advection", "fct_fold_exchange"):
             require(omt3.omt2._same_value(getattr(after, name), getattr(before, name)),
                     f"unexpected OMT-3 -> OMT-4 field replacement: {name}")
     require(before.tracer_advection == "none",
@@ -65,6 +68,8 @@ def validate_omt4_card(deck_root: Path, card) -> dict[str, object]:
     return {
         "changed_model_config_fields": {
             "tracer_advection": {"before": "none", "after": "fct2"},
+            "fct_fold_exchange": {"before": before.fct_fold_exchange,
+                                  "after": after.fct_fold_exchange},
         },
         "resolved_tracer_advection": {
             "scheme": after.tracer_advection,

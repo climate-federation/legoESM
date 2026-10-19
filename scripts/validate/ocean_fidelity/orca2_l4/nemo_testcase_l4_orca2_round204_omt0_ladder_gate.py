@@ -49,7 +49,17 @@ OMT0_VECTOR_ONLY = (
 # reaches dynldf_lev.  OMT-3 restores them with the diffusion.
 # Round 311 adds G8's stage-1 order (stp2d.f90:144 is dyn_ldf's call).
 OMT0_LDF_ONLY = ("nemo_ldf_stored_f_area", "nemo_ldf_stage_r3f",
-                 "rk3_stage1_ldf_source_order")
+                 "rk3_stage1_ldf_source_order", "nemo_ldf_fold_rows")
+# Round 318: the north-fold set is measured on the seven D122 pairs only;
+# flux-form OMT-0 states it off until its own ladder measures it.  OMT-1
+# restores it (FCT images return with FCT on OMT-4, fold rows with OMT-3).
+OMT0_FOLD_SET = ("rk3_stage_transport_raw_vmask",
+                 "rk3_stage_transport_fold_exchanges",
+                 "rk3_end_of_stage_pivot_fold", "rk3_stage_wzv_nemo_clock_pair",
+                 "rk3_stage_tracer_wzv_stored_kmm_ratios",
+                 "rk3_stage_transport_stored_r3uv", "rk3_vector_raw_vmask",
+                 "rk3_fold_exchange_top_v_row")
+OMT0_FCT_ONLY = ("fct_fold_exchange",)
 
 
 def build_omt0_card(deck_root: Path, *, plant: str = "none"):
@@ -87,6 +97,7 @@ def build_omt0_card(deck_root: Path, *, plant: str = "none"):
         barotropic=cfg.barotropic._replace(
             barotropic_flux_update_nemo_literal=True,
             barotropic_entry_depth_nemo_literal=True,
+            barotropic_literal_fold_unit_vector_form=False,  # round 318
         ),
         # Round 309: G6's vector-form statements whose compiled lines
         # np_LIN_dyn never runs (no dyn_keg/dyn_zad, stp2d.f90:160-166;
@@ -95,6 +106,7 @@ def build_omt0_card(deck_root: Path, *, plant: str = "none"):
         # and the carried after-SSH slot stay (their lines run here).
         **{name: False for name in OMT0_VECTOR_ONLY},
         **{name: False for name in OMT0_LDF_ONLY},
+        **{name: False for name in OMT0_FOLD_SET + OMT0_FCT_ONLY},
     )
     recipe = card.recipe._replace(model_config=cfg)
     return card._replace(
@@ -133,6 +145,9 @@ def validate_omt0_card(card) -> dict[str, object]:
         "no_unmeasured": tuple(card.unmeasured_features) == (),
         "vector_only_statements_off": not any(
             getattr(cfg, name) for name in OMT0_VECTOR_ONLY),
+        "fold_set_off": not any(
+            getattr(cfg, name) for name in OMT0_FOLD_SET + OMT0_FCT_ONLY)
+        and not cfg.barotropic.barotropic_literal_fold_unit_vector_form,
         "ldf_only_statements_off": not any(
             getattr(cfg, name) for name in OMT0_LDF_ONLY),
     }
