@@ -1,132 +1,135 @@
-# Grid ladder rung G9 — round 6 receipt (gridladder_r51)
+# Grid ladder rung G9 — round 6 receipt (gridladder_r51, second resume)
 
-Status: **STOPPED FOR RECORD; G9 NOT CERTIFIED.**  Starting kt 2 from
-NEMO's exact recorded step entry and exact recorded external/barotropic
-handoff makes every owned stage-1 value bit-identical.  The kt-2 departure is
-therefore amplification of kt 1's at-bar residue, not a kt-2-only statement.
-Round 46 does not record NEMO's internal kt-1 FCT boundaries, so it cannot
-identify the remaining statement owner and no production change is made.
-
-Record: round 46's admitted `oracle_g9_r46`, unchanged.  A new WRITE-only
-boundary record is requested below.  Preregistration commit: `f82e6a0e2`.
+Status: **LANDED ANALYSIS; G9 NOT CERTIFIED.**  The existing round-51 FCT
+record is admitted explicitly as **PARTIAL**.  Its five present frames are
+finite and its declared sixth frame, `rhs_final`, is reported missing.  The
+first NEMO/card departure is the first-midpoint assignment, but the recorded
+operands and an isolated transcription of that assignment are exact: the
+remaining difference is introduced only when XLA embeds the same arithmetic
+in the whole-step graph.  No source association justified a production fix.
 
 - codex review: operator
 - independent review: operator (Claude)
 - evidence: `gridladder_rounds/round51/`
-- implementation: diagnostic controls and record-entry/acquisition tooling
-  only; no model code changed
+- admission commit: `a5897cbc67`
+- model code changed in this resume: none
 
-## 1. Registered split: carry-over confirmed
+## 1. Existing record admitted as PARTIAL
 
-The committed ladder probe's new `--record-step-entry` route loads the
-round-46 kt-2 T, S, u, v and ssh entry fields, seeds the preceding barotropic
-pair, and supplies the recorded kt-2 stage-1 external handoff.  It verifies
-the loaded entry before stepping and scores only ORCA's owned cells; columns
-0 and -1 are cyclic overlap storage and are reported separately rather than
-silently mixed into the physical score.
+`run_r51_fct_walk.sh --admit-existing` now accepts exactly the payload that
+exists, not the payload that was intended.  For each tracer it reads and
+checks every value in `entry`, `first_midpoint`, `average_rhs`, `anti_pre`
+and `anti_post`: five labels, 19 arrays, all finite, with no unread bytes.
+It requires the declared `rhs_final` label and array to be absent and prints
+`missing_frame=rhs_final`; a short record at any earlier boundary, a complete
+record presented to this PARTIAL route, a non-finite value, a wrong label or
+trailing bytes is rejected.
 
-All seven entry-identity counts are zero.  At kt 2 stage 1, u, v, T, S, ssh,
-uu_b and vv_b each have zero unequal owned cells, zero maximum difference,
-and are bit-identical.  The excluded cyclic-overlap unequal counts are 0, 63,
-64, 64, 0, 0 and 0 respectively in that same field order.  This confirms P1:
-the independent kt-2 departure is inherited amplification.
+The unchanged passivity loop compares all 42 pre-existing kt-1 and kt-2
+binary records with round 46 byte-for-byte before admitting the new files.
+The command completed with this final line:
 
-The negative control removes only the recorded external handoff while keeping
-the same exact entry.  It exits 1 and makes all seven rows DEBT.  Unequal-cell
-counts for u, v, T, S, ssh, uu_b and vv_b are 15,723; 15,811; 16,297; 16,297;
-16,297; 15,723; and 15,811.  Their maximum absolute differences are
-`3.826e-3`, `1.055e-2`, `2.841e-5`, `9.805e-6`, `5.998e-3`, `3.826e-3` and
-`1.055e-2`.  Thus the exact result is connected to the added wiring.
+```
+G9R51_ACQUISITION_PARTIAL passivity_records=42 missing_frame=rhs_final evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round51/oracle_g9_r51
+```
 
-Evidence:
+This is no longer `STOPPED_FOR_RECORD`: the owner is before the missing final
+frame, so the conditional instruction to repair the observer and define a
+new acquisition does not apply.  `ACQUISITION_NEEDED` is therefore `NONE`.
 
-- `g9_kt2_record_entry_stage1_v5.json`
-- `g9_kt2_record_entry_without_external.json` and `.log`
+## 2. Boundary walk
 
-## 2. Round-50 control caveat closed
-
-The literal-FCT source-order fixture now uses nonzero, nondegenerate U, V and
-W transports with independently spread magnitudes.  Cell area is an explicit
-traced argument to the jitted x64 call.  Its exact NumPy transcription follows
-the live two-step upstream program, including NEMO's first divergence in
+The walk uses NEMO's present kt-1 stage-3 arrays and the card's jitted x64
+trace from the same exact FCT entry.  NEMO's first divergence is the
+left-associated U/V/W flux difference and reciprocal-area multiplication in
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:495-609`.
 
-The restored test passes.  Reassociating `(du + dv) + dw` as
-`du + (dv + dw)` fails on 154 of 768 values and exits 1.  Replacing the
-reciprocal-area multiplication with direct division fails on 170 of 768
-values and exits 1.  These are live controls: V and W are not zeros, and XLA
-cannot fold the traced area reciprocal.  Transcripts are
-`sum_order_plant.log` and `divide_area_plant.log`.
+| stored boundary | T | S | conclusion |
+|---|---:|---:|---|
+| first flux divergence replay | 0 unequal | 0 unequal | exact |
+| first midpoint | 16 unequal wet values | 13 unequal wet values | first departure |
+| averaged-flux RHS | 34 unequal wet values | 25 unequal wet values | downstream |
+| pre-limiter faces touching final residue | 21 / 21 cells | 14 / 17 cells | downstream |
+| post-limiter faces touching final residue | 21 / 21 cells | 14 / 17 cells | downstream |
+| final correction | missing | missing | explicitly unmeasured |
 
-## 3. Statement walk and why the record cannot decide
+At the final recorded round-46 after-advection boundary the known residue is
+still 21 T and 17 S wet cells, with normalized maxima `2.95e-19` and
+`1.26e-17`.  Thus the first statement owning their causal chain is the
+midpoint assignment itself,
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:538`, whose divisor reads the
+stored stage-3 `r3t(Kmm)`.
 
-The registered P2 prediction was that the real-record first divergence would
-be the first unequal statement.  The card-side compiled trace and exact NumPy
-transcription can test its arithmetic, but round 46 contains only the FCT
-entry operands and the final post-advection RHS.  It contains no NEMO array at
-the first divergence, midpoint, averaged-flux divergence, limiter input or
-limiter output.  Comparing a card intermediate to a replay of that same card
-intermediate would be a self-comparison, not the required NEMO statement
-comparison.  P2 therefore remains **UNMEASURED**, not confirmed or refuted.
+## 3. Why no NEMO-line fix is valid
 
-The recorded final boundary is already at the bar but non-exact: round 50
-measured 21 T and 17 S unequal wet cells after advection.  That boundary is
-the accumulated upstream result plus the limited correction written by the
-final FCT loop (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:320-329`), so it
-does not attribute the residue to either contributing statement.  No
-reciprocal/divide, reassociation, or contraction change is justified by the
-available record.  Consistent with the “fix only a cited statement” rule, no
-production statement is changed.
+The source chain was checked at each stored operand:
 
-The requested acquisition is
-`scripts/validate/ocean_fidelity/testcases/nemo_testcase_g9_orca2tadv/run_r51_fct_walk.sh`.
-It creates one new config from the pinned round-46 record build, adds only
-WRITE-only observations to `traadv_fct.F90`, and records 20 full native arrays
-per tracer across entry, first/midpoint, averaged/RHS, pre-limiter,
-post-limiter and final-RHS frames.  Admission requires every pre-existing
-kt-1 and kt-2 record to remain byte-identical to round 46.  Read-only
-preflight passes `FCT_OBSERVER_ADDITIVE_OK` and names the intended target and
-evidence directory.  The author ran neither `makenemo` nor NEMO.
+1. The card's entry SSH and whole-step final SSH are bit-identical to NEMO.
+2. NEMO stores the midpoint ratio at
+   `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:221`; its preceding T-point
+   ratio products are the stored `pssh * r1_ht_0` statement at
+   `ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:257`.
+3. Evaluating that source order in an isolated jitted x64 function, with the
+   same traced SSH, reference thickness and mask operands, reproduces NEMO's
+   `r3t(Kmm)` and all midpoint thickness values exactly: zero unequal.
+4. In the whole-step graph only, the resulting Kmm thickness has 16 one-ULP
+   differences, all at owned column `(y=4, x=50)`, levels
+   `0,1,2,3,5,6,7,8,9,11,13,14,15,17,18,19`; maximum absolute difference is
+   `1.4210854715202004e-14`.
+5. A G9-only experimental materialization of the stored SSH boundary was
+   compiled and compared, then removed: it left the same 16 values and bits
+   unchanged.  No alternative reciprocal, divide, sum order or stored-array
+   association matches better than the already-exact isolated source program.
 
-## 4. Certification and blast radius
+The owner is therefore XLA whole-graph arithmetic, not a missing or wrong
+source-level association with a cited NEMO statement.  Per the requested
+discipline, no model statement is changed.  There is consequently no new
+production value test or wiring to plant; the existing exact, jitted,
+traced-input, x64 literal-FCT tests remain the applicable controls.
 
-P3 (both labels kt 1..10 without DEBT) and P4 (26 non-G9 jaxprs unchanged)
-are not reached because no statement was changed.  A fresh score after an
-unchanged model would only duplicate round 50, so it was not run.  G9 remains
-uncertified, and this round certifies none of the ORCA2 fold import: the
-stage-1 V transport mask, round-46 exchanges, round-47/48 fold statements and
-stage pair, round-49 stage-3 RHS order, and round-50 literal FCT remain
-pending the missing statement record and a subsequent clean both-label
-kt 1..10 score.
+## 4. Rows that remain over the bar
 
-## 5. Tests, gates and choices
+Because this resume changes admission and documentation only, the round-50
+both-label kt 1..10 score remains the score of the identical model.  The 26
+non-G9 configurations' jaxprs are unchanged by construction: the diff from
+the resumed model commit contains no file under `packages/`.
 
-Final validation:
+For the independent label, kt 1 has no DEBT; kt 2 remains over the bar in
+`ssh`, `u`, `v` and `S`; every one of `ssh`, `uu_b`, `vv_b`, `u`, `v`, `T`
+and `S` remains over the bar at kt 3..10.  For the given-entry label, each
+single odd step (kt 1,3,5,7,9) has no DEBT, while its paired two-step rows
+remain over the bar as follows:
 
-- hardened literal-FCT exact-value test: pass under jit, traced inputs and
-  x64;
-- sum-order and divide-area plants: both fail with exit 1;
-- exact-entry stage-1 probe: seven of seven owned fields bit-identical;
-- removed-external wiring plant: seven of seven rows DEBT, exit 1;
-- acquisition preflight: pass; observer patch additive.
+| given-entry pair | rows over the bar |
+|---|---|
+| kt 2 | ssh, u, v, S |
+| kt 4 | ssh, uu_b, vv_b, u, v, T, S |
+| kt 6 | ssh, u, v, T, S |
+| kt 8 | ssh, u, v, T, S |
+| kt 10 | ssh, u, v, S |
 
-The focused literal-FCT regression, the default citation-gate tests and the
-private-import ratchet pass together: **24 passed in 22.12 s**.  The
-receipt-specific citation gate finds 2 citations, 0 failures, 0 unmapped
-citations and 0 failing map entries.  The ladder edits shifted one historical
-Python citation; it was re-anchored from lines 858-866 to 867-875 before the
-clean gate.
+G9 is not certified.  Consequently this round certifies none of the ORCA2
+lane's proposed fold import: the stage-1 V-mask handling, transport/final
+fold exchanges, FCT fold statements and end-of-stage fold/stage pair remain
+pending a G9 certification.
 
-ASKED: preregistered kt-2 split; exact NEMO entry; statement walk; cited-only
-fix discipline; conditional both-label rescore and certification verdict.
+## 5. Gates and disposition
+
+The receipt-specific citation gate, run with `JAX_ENABLE_X64=1` and the lane
+`PYTHONPATH`, finds 4 citations, 0 failures, 0 unmapped citations and 0
+failing map entries.  The default citation-gate suite and private-import
+ratchet pass together: **23 passed in 10.11 s**.
+
+ASKED: explicit PARTIAL admission; finite/read-complete present frames;
+round-46 passivity; boundary owner; cited-only fix discipline; conditional
+score/certification; gates and machine disposition.
 
 UNASKED, offered for revert: none.
 
-UNVERIFIED: the first unequal NEMO FCT statement inside kt-1 stage 3.  The
-new record is required to distinguish the first divergence, midpoint,
-averaged-flux RHS, limiter and final accumulation boundaries.
+UNVERIFIED: the absent `rhs_final` frame itself.  It is not needed to locate
+the earlier owner and is never treated as present.
 
-COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/gridladder_r51-29306485
-ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/gridladder_r51-29306485/scripts/validate/ocean_fidelity/testcases/nemo_testcase_g9_orca2tadv/run_r51_fct_walk.sh
+COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/gridladder_r51/repo
+ACQUISITION_NEEDED: NONE
 DECISION_NEEDED: NONE
-ROUND_STATUS: STOPPED_FOR_RECORD — exact kt-2 entry proves carry-over, but round 46 lacks the internal NEMO FCT boundaries needed to name and fix the kt-1 statement.
+ROUND_STATUS: LANDED — PARTIAL record admitted; midpoint is the first unequal boundary, but exact operands and isolated source arithmetic identify the remaining 21 T / 17 S residue as XLA whole-graph arithmetic, so G9 remains uncertified.
