@@ -14,7 +14,9 @@ with a fresh optimiser, and the run manifest and training log record the
 extension (from which windows to which, from which commit to which).
 An optional ``network.initial_checkpoint`` (absolute path of a checkpoint in
 this driver's format; no default: absent means the seed's random
-initialisation) initialises the network from that file before the first
+initialisation) lets the curriculum start at that checkpoint's last trained
+window (read from its run's ``training_log.json``; unreadable refuses) instead
+of the 1, 2, 4, 8 prefix.  It initialises the network from that file before the first
 stage, the optimiser starting fresh; the file's SHA-256 is recorded in the
 run manifest and the training log, and a missing, structurally different or
 later changed file refuses the run.
@@ -307,6 +309,25 @@ def _validate_loss(loss, noise_channel: str, windows: list) -> None:
             "and only it trains one (an unused xi weight is an inert leaf)")
 
 
+def checkpoint_last_window_days(checkpoint: Path) -> int:
+    """The window length (days) ``checkpoint`` was trained at, read from the
+    ``training_log.json`` of the run directory it sits in
+    (``<run>/checkpoints/<file>``); refuses rather than guesses."""
+    log_path = checkpoint.parent.parent / "training_log.json"
+    try:
+        epochs = json.loads(log_path.read_text())["epochs"]
+    except (OSError, ValueError, KeyError) as error:
+        raise ValueError(f"the initial checkpoint's run log {log_path} cannot "
+                         f"be read ({error!r})") from None
+    listed = f"{checkpoint.parent.name}/{checkpoint.name}"
+    windows = [epoch["window_days"] for epoch in epochs
+               if epoch["checkpoint"]["path"] == listed]
+    if len(windows) != 1:
+        raise ValueError(f"{log_path} lists {len(windows)} epochs with "
+                         f"checkpoint {listed} (need exactly one)")
+    return windows[0]
+
+
 def load_config(path: Path) -> dict:
     """Read one training configuration; every key is required, none extra."""
     config = json.loads(Path(path).read_text())
@@ -437,7 +458,19 @@ def load_config(path: Path) -> dict:
                                "network_between_windows",
                                "optimiser_between_windows"), "curriculum")
     windows = curriculum["window_days"]
-    require_curriculum_windows(windows, splits)
+    try:
+        require_curriculum_windows(windows, splits)
+    except ValueError as cold_start_error:
+        if "initial_checkpoint" not in network:
+            raise
+        # Warm start (user decision 2026-10-19): the curriculum may start at
+        # the checkpoint's last trained window instead of the 1, 2, 4, 8 prefix.
+        try:
+            start = checkpoint_last_window_days(Path(network["initial_checkpoint"]))
+        except ValueError as unreadable:
+            raise ValueError(f"{cold_start_error}; and as a warm start: "
+                             f"{unreadable}") from None
+        require_curriculum_windows(windows, splits, start_window_days=start)
     _validate_loss(config["loss"], network["noise_channel"], windows)
     _require_int(curriculum["epochs_per_window"], "epochs_per_window", minimum=1)
     if curriculum["network_between_windows"] != "carried":

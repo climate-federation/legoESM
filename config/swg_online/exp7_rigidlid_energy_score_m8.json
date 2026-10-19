@@ -1,7 +1,7 @@
 {
   "schema": "legoesm-swg-online-training-v3",
   "experiment": "swgonl_exp7_rigidlid_energy_score_m8",
-  "description": "Arm B (user decision 2026-10-19, Brolly 2026 stochastic closure): a white-noise input channel xi ~ N(0,1) per grid cell, one draw per model step shared by the three RK3 stages, with first-layer weights initialised at 1e-2 of the SSH-channel weights' rms; M = 8 members per window from the same start with independent xi; the loss is the Eq. 9 energy score (normalised by training-split variances of the three balanced fields) replacing Eq. 7. Both arms start from the finished deterministic symmetric rigid-lid 8-day network (exp4 seed 20261013, w08_e05), on the rigid-lid truth (rigid lid, phi/g input, 3-hour step and 3-hour loss sampling, fp32 training, symmetric objective, wall ring weighted, in-memory data cache, per-step rematerialisation). Curriculum 1, 2, 4, 8, 16, 32 days, 5 epochs each: the longer lengths are admitted only after 1, 2, 4, 8 (require_curriculum_windows), so the 8 -> 16 -> 32 plan of the 2026-10-19 decision carries the three short stages first. One seed: the checkpoint is seed 20261013's.",
+  "description": "Arm B (user decision 2026-10-19, Brolly 2026 stochastic closure): a white-noise input channel xi ~ N(0,1) per grid cell, one draw per model step shared by the three RK3 stages, with first-layer weights initialised at 1e-2 of the SSH-channel weights' rms; M = 8 members per window from the same start with independent xi; the loss is the Eq. 9 energy score (normalised by training-split variances of the three balanced fields) replacing Eq. 7. Both arms start from the finished deterministic symmetric rigid-lid 8-day network (exp4 seed 20261013, w08_e05), on the rigid-lid truth (rigid lid, phi/g input, 3-hour step and 3-hour loss sampling, fp32 training, symmetric objective, wall ring weighted, in-memory data cache, per-step rematerialisation). Curriculum 8, 16, 32 days, 5 epochs each: a warm start at the checkpoint's last trained window (8 days, read from its run's training_log.json; user decision 2026-10-19), so no 1, 2, 4 days stages. One seed: the checkpoint is seed 20261013's.",
   "deck": "dg50-rl",
   "surface": "rigid_lid",
   "objective": "symmetric",
@@ -57,9 +57,6 @@
   },
   "curriculum": {
     "window_days": [
-      1,
-      2,
-      4,
       8,
       16,
       32

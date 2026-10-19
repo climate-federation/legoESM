@@ -70,13 +70,17 @@ def window_days_admitted(window_days) -> bool:
         or window_days > ADMITTED_WINDOWS_DAYS[-1])
 
 
-def require_curriculum_windows(windows, splits_days) -> None:
+def require_curriculum_windows(windows, splits_days,
+                               start_window_days=None) -> None:
     """Refuse a curriculum other than strictly increasing admitted lengths in
     which every length beyond ``ADMITTED_WINDOWS_DAYS`` follows all of them
     and fits ``splits_days`` (``{name: [first_day, last_day]}``): at least
     one batch of ``TEMPLATE_BATCH_SIZE`` windows in the training split for
     every starting offset of the training lattice, and in the validation
-    split (the held-out lattice starts at its first hour)."""
+    split (the held-out lattice starts at its first hour).  With
+    ``start_window_days`` (the last window length an initial checkpoint was
+    trained at; user decision 2026-10-19) the 1, 2, 4, 8 prefix is not
+    required but the curriculum must start at that length."""
     if not isinstance(windows, list) or not windows \
             or not all(window_days_admitted(window) for window in windows) \
             or windows != sorted(set(windows)):
@@ -84,7 +88,12 @@ def require_curriculum_windows(windows, splits_days) -> None:
             f"window_days must increase through {ADMITTED_WINDOWS_DAYS} and "
             "may then continue with longer whole-day lengths")
     longer = [window for window in windows if window > ADMITTED_WINDOWS_DAYS[-1]]
-    if longer and tuple(windows[:len(ADMITTED_WINDOWS_DAYS)]) \
+    if start_window_days is not None:
+        if windows[0] != start_window_days:
+            raise ValueError(
+                f"window_days {windows} must start at the initial "
+                f"checkpoint's last trained window, {start_window_days} days")
+    elif longer and tuple(windows[:len(ADMITTED_WINDOWS_DAYS)]) \
             != ADMITTED_WINDOWS_DAYS:
         raise ValueError(
             f"window_days {windows} continue past {ADMITTED_WINDOWS_DAYS[-1]} "

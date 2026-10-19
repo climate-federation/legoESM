@@ -2207,7 +2207,9 @@ def test_committed_arm_configs_differ_from_the_long_config_only_in_the_arm(
     arm = driver.load_config(path)
     differing = sorted(key for key in long if long[key] != arm[key])
     assert differing == sorted([
-        "experiment", "description", "network", "loss", "seeds", "dataset"])
+        "experiment", "description", "network", "loss", "seeds", "dataset",
+        "curriculum"])
+    assert arm["curriculum"] == long["curriculum"] | {"window_days": [8, 16, 32]}
     assert arm["loss"] == loss
     assert arm["network"]["initial_checkpoint"] == W08_CHECKPOINT
     arm_keys = ("noise_channel", "initial_checkpoint",
@@ -2221,11 +2223,69 @@ def test_committed_arm_configs_differ_from_the_long_config_only_in_the_arm(
     assert arm["dataset"]["cache"] == "memory"
     assert arm["dataset"] | {"cache": "none"} == long["dataset"]
     assert arm["gradient_checkpointing"] is True
-    # The prefix rule: 16 and 32 days follow 1, 2, 4, 8.
-    assert arm["curriculum"]["window_days"] == [1, 2, 4, 8, 16, 32]
+    # Warm start (user decision 2026-10-19): from the w08 checkpoint's window.
+    assert arm["curriculum"]["window_days"] == [8, 16, 32]
     assert (arm["surface"], arm["objective"], arm["training_precision"],
             arm["target_interval_hours"]) == (
         "rigid_lid", "symmetric", "fp32", 3)
+
+
+def _fake_run(tmp_path, windows=(1, 2, 4, 8), log=True):
+    """A run directory whose training log lists w<NN>_e01 for each window."""
+    run = tmp_path / "run"
+    (run / "checkpoints").mkdir(parents=True)
+    if log:
+        (run / "training_log.json").write_text(json.dumps({"epochs": [
+            {"window_days": w, "checkpoint": {
+                "path": f"checkpoints/w{w:02d}_e01.eqx"}} for w in windows]}))
+    return run / "checkpoints" / "w08_e01.eqx"
+
+
+@pytest.mark.parametrize("windows,match", [
+    ([8, 16, 32], None),
+    ([8, 16], None),
+    ([16, 32], "must start at the initial checkpoint's last trained window, "
+               "8 days"),
+    ([1, 2, 4, 8, 16, 32], None),     # the cold-start rule still holds
+    ([4, 8, 16], "must start at the initial checkpoint's last trained"),
+    ([8, 6], "window_days must increase")])
+def test_warm_start_curriculum_starts_at_the_checkpoints_last_window(
+        tmp_path, windows, match):
+    config = copy.deepcopy(driver.load_config(EXP8))
+    config["network"]["initial_checkpoint"] = str(_fake_run(tmp_path))
+    config["curriculum"]["window_days"] = windows
+    path = tmp_path / "warm.json"
+    path.write_text(json.dumps(config))
+    if match is None:
+        assert driver.load_config(path)["curriculum"]["window_days"] == windows
+    else:
+        with pytest.raises(ValueError, match=match):
+            driver.load_config(path)
+
+
+def test_cold_start_curriculum_beyond_eight_days_still_needs_the_prefix(tmp_path):
+    config = copy.deepcopy(driver.load_config(EXP4_SYMMETRIC_LONG))
+    assert "initial_checkpoint" not in config["network"]
+    config["curriculum"]["window_days"] = [8, 16, 32]
+    path = tmp_path / "cold.json"
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="without starting with"):
+        driver.load_config(path)
+
+
+@pytest.mark.parametrize("kwargs,match", [
+    ({"log": False}, "run log .* cannot be read"),
+    ({"windows": (1, 2, 4)}, "lists 0 epochs with checkpoint checkpoints/w08"),
+])
+def test_warm_start_refuses_an_unreadable_checkpoint_run(
+        tmp_path, kwargs, match):
+    config = copy.deepcopy(driver.load_config(EXP8))
+    config["network"]["initial_checkpoint"] = str(_fake_run(tmp_path, **kwargs))
+    config["curriculum"]["window_days"] = [8, 16, 32]
+    path = tmp_path / "unreadable.json"
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match=match):
+        driver.load_config(path)
 
 
 @pytest.mark.parametrize("edit,match", [

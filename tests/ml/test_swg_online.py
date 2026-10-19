@@ -2112,6 +2112,13 @@ def test_curriculum_windows_extend_the_prefix_and_must_fit_the_splits():
     with pytest.raises(ValueError, match="train split holds 9 32-day"):
         require([1, 2, 4, 8, 32], rigid_lid | {"train": [0, 351]})
     require([1, 2, 4, 8, 32], rigid_lid | {"train": [0, 352]})
+    # Warm start: no prefix, but the first length is the checkpoint's window.
+    for windows, start in (([8, 16, 32], 8), ([16, 32], 16), ([8], 8)):
+        require(windows, rigid_lid, start_window_days=start)
+    with pytest.raises(ValueError, match="must start at the initial checkpoint"):
+        require([16, 32], rigid_lid, start_window_days=8)
+    with pytest.raises(ValueError, match="train split holds 9 32-day"):
+        require([8, 32], rigid_lid | {"train": [0, 351]}, start_window_days=8)
 
 
 
