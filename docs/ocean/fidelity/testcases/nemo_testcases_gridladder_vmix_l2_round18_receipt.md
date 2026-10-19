@@ -270,6 +270,15 @@ both consumers take their previous branch.
 Evidence: `gridladder_vmix_rounds/round18/score/` (both score JSONs,
 purity logs) and `gridladder_vmix_rounds/round18/gyre_regression/`.
 
+Gates (CPU, x64, landing-script `PYTHONPATH`):
+
+- this receipt's explicit citation gate: **PASS**, 17 citations, 0 unmapped,
+  0 failures, 0 map entries failing audit (model-file spans re-anchored);
+- exact default ORCA2 landing list: **145 passed in 1142.10 s (19:02)**;
+- private-import ratchet: **6 passed in 5.60 s**;
+- focused L2 file: **17 passed** (the two record gates re-run after the
+  expectation update: **2 passed in 565.44 s**).
+
 Unasked choices: none. The fix uses an existing L2-only selector; no default,
 threshold, or card selection changed. Dropping the uncommitted face rewiring
 followed the operator's instruction for unreviewed diffs.
