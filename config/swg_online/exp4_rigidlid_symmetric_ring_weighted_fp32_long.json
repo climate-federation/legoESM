@@ -7,6 +7,7 @@
   "objective": "symmetric",
   "wall_ring": "weighted",
   "training_precision": "fp32",
+  "gradient_checkpointing": true,
   "target_interval_hours": 3,
   "network": {
     "hidden_channels": 16,
@@ -15,11 +16,7 @@
     "wall_margin_rings": 0,
     "scales": "maddison_eq6_shallow_water_grid_analogue"
   },
-  "seeds": [
-    20261013,
-    20261014,
-    20261015
-  ],
+  "seeds": [20261013, 20261014, 20261015],
   "dataset": {
     "records": [
       {
@@ -32,30 +29,16 @@
       }
     ],
     "splits_days": {
-      "train": [
-        731,
-        4235
-      ],
-      "validation": [
-        4265,
-        5111
-      ],
-      "test": [
-        5141,
-        5506
-      ]
+      "train": [731, 4235],
+      "validation": [4265, 5111],
+      "test": [5141, 5506]
     },
-    "batch_size": 10
+    "batch_size": 10,
+    "cache": "none",
+    "target_filter_sigma_cells": 1.0
   },
   "curriculum": {
-    "window_days": [
-      1,
-      2,
-      4,
-      8,
-      16,
-      32
-    ],
+    "window_days": [1, 2, 4, 8, 16, 32],
     "epochs_per_window": 5,
     "network_between_windows": "carried",
     "optimiser_between_windows": "reinitialised"
