@@ -2891,8 +2891,9 @@ CITATION_MAP = {
     'advection.py:840-874': [
         'NEMO_FCT_STENCIL_TRACE_FIELDS = (',
         'return_limiter_activity: bool = False,', 35],
-    'advection.py:1392-1411': [
-        'tr_west = jnp.roll(bnd_up, 1, axis=1)', ('))', 30), 18],
+    # Round 318 (G9 import, advection.py = gridladder tip): lane A's entries.
+    'advection.py:1392-1410': [
+        'tr_west = jnp.roll(bnd_up, 1, axis=1)', 'base, q_td, wet, q_max,', 19],
     'advection.py:1576-1577': [
         ('if return_nemo_stencil_trace:', 2),
         'return div_h_fct, vert_div_fct, stencil_trace', 2],
@@ -2911,14 +2912,14 @@ CITATION_MAP = {
     'advection.py:1487-1502': [
         'alpha_u_full, alpha_v, alpha_vert_face = _zalesak_signsplit_face_alphas(',
         'return_nemo_beta_trace=True,', 16],
-    'advection.py:1531-1536': [
+    'advection.py:1529-1536': [
         'limited_u, limited_v = alpha_u_full * ad_flux_u, alpha_v * ad_flux_v',
-        'vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]', 6],
+        'vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]', 8],
     'advection.py:2061-2084': [
-        ('if return_nemo_beta_trace:', 5),
+        ('if return_nemo_beta_trace:', 4),
         'zbetup_literal, zbetdo_literal, R_in, R_out,', 24],
     'advection.py:2139-2140': [
-        ('if return_nemo_beta_trace:', 6),
+        ('if return_nemo_beta_trace:', 5),
         'return alpha_u_full, alpha_v, alpha_vert_face, beta_trace', 2],
     'ocean_model_latlon_cgrid.py:14663-14678': [
         'if self._nemo_ws_test_hooks.expose_stage3_fct_inputs:',
@@ -2964,7 +2965,7 @@ CITATION_MAP = {
     # --- ORCA2 round 147: exact seven-field T-pivot association ----------
     'barotropic_latlon_cgrid.py:694-742': [
         ('def _nemo_external_mode_boundary_association(', 1),
-        ('inverse_u_post, inverse_v_post, eta,', 1), 55],
+        ('inverse_u_post, inverse_v_post, eta,', 1), 49],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:564-591': [
         ('!                             ! resulting flux at mid-step (not over the full domain)', 1),
         ('ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)', 1),
@@ -4695,7 +4696,7 @@ CITATION_MAP = {
         ('return bool(config_split)', 1), 38],
     'ocean_model_latlon_cgrid.py:2254-2265': [
         ('w_momentum, _, _ = nemo_qco_wzv_operands(', 1),
-        'else 0))', 12],
+        ('else 0))', 2), 12],
     'ocean_model_latlon_cgrid.py:8830-8836': [
         ('def _momentum_stage_w(geom):', 1),
         ('return geom[2] if geom[11] is None else geom[11]', 1), 7],
@@ -5867,13 +5868,13 @@ CITATION_MAP = {
         ('no explicit diffusion', 1), 'iso-neutral triad operator', 8],
     'ocean_model_latlon_cgrid.py:2692-2789': [
         'h_one_third = h_k_old',
-        '+ dt * h_one_half * stage_source_rates[2][1])', 84],
+        '+ dt * h_one_half * stage_source_rates[2][1])', 98],
     # Extent 174 -> 199 at ORCA2 round 304 (G5 round 4 import): the stage-3
     # salt block (trasbc.f90:308) was inserted between the same two pinned
     # endpoint statements.
     'ocean_model_latlon_cgrid.py:8555-8774': [
         '_stage3_T_rate = (',
-        '/ jnp.maximum(_h_s3_kmm, 1.0e-10),', 199],
+        '/ jnp.maximum(_h_s3_kmm, 1.0e-10),', 220],
     # Extent 433 -> 434 at the 2026-09-25 merge: main added one line inside
     # this span (``omega=_cfg_b.omega,`` on the isoneutral K33 call), so the
     # two pinned endpoint statements are one line further apart than before.
@@ -5882,7 +5883,7 @@ CITATION_MAP = {
         'S_mid = S_mid + dt * dS_gm * active_3d', 453],
     'ocean_model_latlon_cgrid.py:10484-10529': [
         ('_nemo_ws_rk3_tracer_pair_step(', 3),
-        'return_final_content=True,', 45],
+        'return_final_content=True,', 46],
     # --- round 65: admitted R64 Krhs/FCT/TKE walk ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:827-828': [
         ('DO jn = 1, jpts', 1), 'ts(:,:,:,jn,Krhs) = 0._wp', 2],
