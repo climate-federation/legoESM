@@ -339,6 +339,11 @@ def trace_summary(T_snow, T_soil0, skin, swe, land, t_freeze, cohort=None):
     return out
 
 
+def _nanmax(v):
+    v = np.asarray(v, dtype=float)
+    return float(np.nanmax(v)) if np.isfinite(v).any() else float("nan")
+
+
 def worst_of(rows):
     """Day aggregate of per-step summaries: the largest value of every entry
     (a node overheated at one step is melted back at the next, so a day-end
@@ -347,7 +352,7 @@ def worst_of(rows):
     for c in rows[-1]:
         agg[c] = {key: (rows[-1][c][key] if key == "n" else
                         max(r[c][key] for r in rows) if key in ("runaway", "past_meltout") else
-                        float(np.nanmax([r[c][key] for r in rows])))
+                        _nanmax([r[c][key] for r in rows]))
                   for key in rows[-1][c]}
     return agg
 
