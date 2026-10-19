@@ -4124,7 +4124,7 @@ Round 25 landed two source associations inside NEMO's hydrostatic pressure
 gradient and showed the changed operator bit-exact given NEMO's inputs on GYRE
 only.  Rule 12 asks for that row on every card that executes it, and the
 testcase recipe pins `pgf_scheme="nemo_sco"` on all of them
-(`nemo_testcase_recipe.py:375,631,3042`).
+(`nemo_testcase_recipe.py:375,631,3046`).
 
 The lane-1 tanks have no HPG-literal dump and do not need one.  NEMO
 accumulates `dyn_hpg`, `dyn_vor` and `dyn_adv` into a zeroed `puu(Krhs)`
@@ -6438,7 +6438,7 @@ model, and it touches none of the solve's own inputs (`avm`, `e3uw(Kmm)`,
 
 **Round 30 was wrong that legoESM exposes no pre-solve vector.**
 `expose_pre_implicit_state` publishes `state_new` immediately before the
-implicit solver (`ocean_model_latlon_cgrid.py:10792-10794`, struck in place from lines 7731 to
+implicit solver (`ocean_model_latlon_cgrid.py:10799-10801`, struck in place from lines 7731 to
 7733, which round 32 moved) and it carries u and v.  **P4b is REFUTED**: that vector is not NEMO's explicit stage update, and
 not by a little — `4.269765124169735e-04` on u, which is the size of the
 FIELD, not of a residual.
@@ -9365,7 +9365,7 @@ transcription of the isoneutral formula — it is the CALL SITE.
   `trazdf.F90:173` reads `zwt = avt + ah_wslp2` at every stage.
 * legoESM recomputes its `K33` INSIDE each stage from that stage's own
 tracers: `ocean_model_latlon_cgrid.py:9667` sets `_T_gm_in = T_mid` on this
-path — `_ldf_state` is `None` outside `_nemo_mlf_step` — and `ocean_model_latlon_cgrid.py:10056` hands it
+path — `_ldf_state` is `None` outside `_nemo_mlf_step` — and `ocean_model_latlon_cgrid.py:10063` hands it
   to `compute_isoneutral_K33_latlon`.
 
 At `kt = nit000` GYRE has `ln_rstart = F` and its analytic initial T and S are
@@ -9382,7 +9382,7 @@ all 20416 faces**.  So legoESM's slope arithmetic leaves no rounding residue on
 a horizontally uniform field, and the difference is the STATE the function is
 handed, not the function.  This arm calls the function directly rather than
 through the model and is a property of that function, not of the model's call:
-it omits ten arguments `ocean_model_latlon_cgrid.py:10056` passes.  Two of them
+it omits ten arguments `ocean_model_latlon_cgrid.py:10063` passes.  Two of them
 were measured inert by the diff review (`u_mask`/`v_mask` threaded: 0 bits
 changed), and the zero is not degenerate (a `1e-12` tracer bump gives
 `4.69e-31`).
@@ -10426,7 +10426,7 @@ macro is `e3t(i,j,k,t) = e3t_0(i,j,k)*(1 + r3t(i,j,t))`
 `stprk3_stg.F90:156` computes `r3ta` from `ssha`, and `stprk3_stg.F90:231`
 assigns it to `r3t(:,:,Kaa)`.  NEMO never forms `(ssh + ht_0)/ht_0`.
 
-legoESM's shared `compute_ocean_jacobian` (`vertical.py:1931`) formed the SUM
+legoESM's shared `compute_ocean_jacobian` (`vertical.py:1951`) formed the SUM
 first, so the low bits of the small ratio were lost to cancellation.
 
 **THE INSTRUMENT WAS VALIDATED BEFORE THE CLAIM.**  On host arrays, from
@@ -10710,7 +10710,7 @@ through the shared helper, one feeds legoESM's, and the arm's verdict sentence
 is now READ OFF those rows instead of asserted beside them.
 
 **THE CHANGE IS ONE STATEMENT IN ONE SHARED HELPER**, no knob and no default
-that preserves the old behaviour.  `compute_ocean_jacobian` (`vertical.py:1931`)
+that preserves the old behaviour.  `compute_ocean_jacobian` (`vertical.py:1951`)
 forms `1 + eta*r1_h` with the reciprocal taken in the PROMOTED dtype of ssh and
 bathymetry — an existing test caught the first version taking it in the
 bathymetry's storage dtype, at a relative `3.0e-10` that is f32 eps times the
