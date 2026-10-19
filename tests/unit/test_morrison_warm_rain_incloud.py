@@ -604,7 +604,11 @@ def test_spectral_microphysics_reads_clubbs_cloud_fraction_from_the_same_substep
         return out
 
     def upd(carry_field, carry_val, turb_out):
-        written.append(np.asarray(turb_out.cloud_fraction))
+        # a distinct, spatially uniform CLUBB fraction per sub-step, so a
+        # previous-sub-step read is distinguishable after the aist maximum
+        cf = jnp.full_like(turb_out.cloud_fraction, 0.2 + 0.4 * len(written))
+        turb_out = turb_out._replace(cloud_fraction=cf)
+        written.append(np.asarray(cf))
         return real_upd(carry_field, carry_val, turb_out)
 
     def micro(*a, cloud_fraction=None, **k):
@@ -636,6 +640,9 @@ def test_spectral_microphysics_reads_clubbs_cloud_fraction_from_the_same_substep
     # the two sub-steps' CLUBB fractions differ, so the zip above
     # discriminates same-sub-step from previous-sub-step reads
     assert not np.array_equal(written[0], written[1])
+    stale = np.maximum(np.clip(written[0].reshape(read[1].shape), 0.0, 1.0),
+                       aists[1])
+    assert not np.array_equal(stale, read[1])
 
 
 def test_spectral_incloud_off_requests_no_carry(monkeypatch):
