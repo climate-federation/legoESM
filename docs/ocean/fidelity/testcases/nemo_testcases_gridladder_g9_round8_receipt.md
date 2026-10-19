@@ -51,7 +51,8 @@ Here `n_baro_upd = np_HYB`.  The card rebuilt the ratio from the interpolated
 sea level, which is real-equal but differs in the last place on a few faces.
 
 **First owning statement of the kt-4 over-bar row:** the stage-2 transport
-at `stprk3_stg.f90:282-283`, read with the stored `r3u/r3v(Kmm)` of :177-179.
+at `ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3_stg.f90:282-283`,
+read with the stored `r3u/r3v(Kmm)` blend of lines 177-179.
 This was measured against NEMO's admitted kt-2 stage-2 record, using its
 recorded entry and external handoff:
 
