@@ -2091,6 +2091,7 @@ def _nemo_ws_stage_transport(
     momentum_velocity_form_w=False, momentum_wzv_clock=None,
     legacy_wzv_rederived_transport=False,
     legacy_aimp_midpoint_w_metric=False, runoff_mass_flux=None,
+    nemo_stage_pair=None,
 ):
     """NEMO ``stprk3_stg.F90:257-304`` Kmm stage transport triplet.
 
@@ -2129,7 +2130,7 @@ def _nemo_ws_stage_transport(
         (hu_stage, hv_stage, _, _, r1_hu_stage,
          r1_hv_stage) = _nemo_ws_qco_stage_faces(
             eta_stage, h_ref, u_mask_3d, v_mask_3d, grid,
-            z_coord=z_coord,
+            z_coord=z_coord, nemo_stage_pair=nemo_stage_pair,
             include_reciprocals=True, fold_grid=grid if (config.rk3_vector_raw_vmask or config.rk3_stage_transport_fold_exchanges) else None)  # r3v fold exchange, stprk3_stg.f90:169  # noqa: E501
     Hu_stage_depth = jnp.sum(hu_stage, axis=-1)
     Hv_stage_depth = jnp.sum(hv_stage, axis=-1)
@@ -9082,6 +9083,9 @@ class LatLonCGridOceanModel:
             _g1 = _nemo_ws_stage_transport(
                 (u1_corr, v1_corr), _h_live_one_third, 1,
                 eta_stage=_eta_live_one_third,
+                nemo_stage_pair=(
+                    _nemo_ws_stage_pair(_cfg_b, 1, _ws_eta_pair)
+                    if _cfg_b.rk3_stage_transport_stored_r3uv else None),
                 dt=(dt / 2.0 if self._nemo_ws_test_hooks.source_stage_wzv_clock_arm
                     else dt),
                 barotropic_velocity=(
@@ -9150,6 +9154,9 @@ class LatLonCGridOceanModel:
             _g2 = _nemo_ws_stage_transport(
                 (u2_corr, v2_corr), _h_live_one_half, 2,
                 eta_stage=_eta_live_one_half,
+                nemo_stage_pair=(
+                    _nemo_ws_stage_pair(_cfg_b, 2, _ws_eta_pair)
+                    if _cfg_b.rk3_stage_transport_stored_r3uv else None),
                 dt=dt,
                 barotropic_velocity=(
                     None if _legacy_reduced_transport_mean_arm else

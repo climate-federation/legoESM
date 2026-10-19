@@ -3883,6 +3883,9 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         # G9 round 7: tracer WZV reads the stored Kmm r3t at stages 2/3
         # (stprk3_stg.f90:177-179, :221-223; consumed at sshwzv.f90:297).
         rk3_stage_tracer_wzv_stored_kmm_ratios=_ORCA2G_TADV[case],
+        # G9 round 8: the stage-2/3 transport faces read the stored r3u/r3v(Kmm)
+        # (stprk3_stg.f90:221-223, read at :270-283).
+        rk3_stage_transport_stored_r3uv=_ORCA2G_TADV[case],
         # G6 round 7: the first wzv's ww reads NEMO's STORED r3t(Kaa) and
         # r3t(Kbb) (stp2d.f90:152, domqco.f90:257 -> sshwzv.f90:297-298).
         nemo_wzv_stored_r3_ratios=case == "ORCA2G6-vec",

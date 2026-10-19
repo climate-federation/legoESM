@@ -3374,6 +3374,10 @@ class LatLonCGridOceanConfig(NamedTuple):
     # preceding RK stage stored (stprk3_stg.f90:177-179, :221-223), not from
     # the real-equal interpolated sea level.  False preserves prior cards.
     rk3_stage_tracer_wzv_stored_kmm_ratios: bool = False
+    # The stage-2/3 transport (zFu/zFv and its zub divisor) reads the stored
+    # r3u/r3v(Kmm) blend (stprk3_stg.f90:177-179, :221-223 -> :270-283), not
+    # the ratio of the interpolated sea level.  False preserves prior cards.
+    rk3_stage_transport_stored_r3uv: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
