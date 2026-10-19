@@ -141,6 +141,36 @@ def test_emitted_sgs_flux_is_what_rhs_applies(monkeypatch):
     assert not np.allclose(emitted, rhs_sgs(), rtol=1e-3)
 
 
+def test_lid_inversion_flux_is_what_rhs_applies_and_is_emitted():
+    """With a lid gradient Γ the core's SGS θ tendency has the lid face flux K_h Γ;
+    the emitted face fluxes (top face = −lid) have exactly that divergence, and the
+    frame's top-cell SGS heat flux carries half of it (the face→centre average)."""
+    g0, st = _moist_state()
+    gam = 0.0029
+    g = sl.make_grid(g0.cfg._replace(theta_top_gradient=gam), dtype=jnp.float64)
+    fields = make_frame_fields_fn(g, (-6.0, 0.0), 4e-5)(st, 0.0, 0.0)
+    lid = float(fields["lid"])
+    nu = np.asarray(fields["nu_t"])
+    assert lid == pytest.approx(nu[..., -1].mean() / g.cfg.pr_sgs * gam, rel=1e-12)
+    faces = sgs_vertical_scalar_flux_faces(np.asarray(st.theta), nu, float(g.dz),
+                                           pr_sgs=g.cfg.pr_sgs, top_flux=-lid)
+    emitted = -(faces[1:] - faces[:-1]) / g.dz
+    adv = np.asarray(sl.scalar_rhs_monotone(st.theta, st.u, st.v, st.w,
+                                            fields["nu_t"] * 0.0, g, 0.0).mean((0, 1)))
+    r = sl.rhs(st.u, st.v, st.w, g, (-6.0, 0.0), 4e-5, theta=st.theta,
+               tracers=st.tracers)
+    np.testing.assert_allclose(emitted, np.asarray(r[4].mean((0, 1))) - adv,
+                               rtol=1e-10, atol=1e-18)
+    ex_c, ex_f = _exners(g)
+    with_lid, _ = frame_statistics(st, g, fields, g.cfg.pr_sgs, exner_c=ex_c,
+                                   exner_f=ex_f)
+    no_lid, _ = frame_statistics(st, g0, make_frame_fields_fn(g0, (-6.0, 0.0), 4e-5)(
+        st, 0.0, 0.0), g0.cfg.pr_sgs, exner_c=ex_c, exner_f=ex_f)
+    assert with_lid["wtheta_sgs"][-1] - no_lid["wtheta_sgs"][-1] == pytest.approx(
+        -0.5 * lid, rel=1e-10)
+    np.testing.assert_array_equal(with_lid["wtheta_sgs"][:-1], no_lid["wtheta_sgs"][:-1])
+
+
 def test_frame_fields_use_the_effective_viscosity():
     g, st = _moist_state()
     f = make_frame_fields_fn(g, (-6.0, 0.0), 4e-5)(st, 0.01, 5e-5)

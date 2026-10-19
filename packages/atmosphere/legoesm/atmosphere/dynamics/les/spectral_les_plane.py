@@ -205,6 +205,18 @@ class SpectralLESConfig(NamedTuple):
     #                                 "neutral" = log law (κ/ln(z₁/z0))²; "most" =
     #                                 Businger–Dyer stability-corrected drag at the
     #                                 Obukhov length the prescribed flux sets.
+    sfc_ref_height: float | None = None  # height [m] at which a prescribed surface
+    #                                 θ (and q) series is given (GABLS3: 0.25 m air
+    #                                 values) — the MOST scalar relation is then the
+    #                                 integral one from that height (most_surface_flux
+    #                                 ``z_ref``); None = surface values with z0h.
+    most_virtual: bool = False      # Obukhov length from the virtual heat flux
+    #                                 (θ_v* = θ_* + ε_v θ_ref q_*) when the surface
+    #                                 moisture is prescribed; False = θ_* only.
+    theta_top_gradient: float = 0.0  # dθ/dz [K/m] imposed at the lid for the SGS θ
+    #                                 flux (GABLS3 "inversion strength"): the lid face
+    #                                 carries J = K_h·Γ (heat entering from above);
+    #                                 0 = no-flux lid.
 
 
 class SpectralLESLayout(NamedTuple):
@@ -733,7 +745,8 @@ def _flux_most_root_jvp(primals, tangents):
 
 
 def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10,
-                      z0h=None, return_residual=False):
+                      z0h=None, return_residual=False, z_ref=None, dq=None,
+                      virtual=False):
     """Coupled Monin–Obukhov surface layer (planar-mean, GABLS1-faithful).
 
     Given the planar-mean first-level wind speed ``spd_mean=⟨|u₁|⟩`` and potential
@@ -764,33 +777,67 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
     (planar-mean) quantities, no data-dependent control flow.
 
     ``return_residual=True`` appends the convergence residual: the relative change
-    one more iteration would make, ``max(|Δu_*|/u_*, |Δθ_*|/|θ_*|)`` (the returned
-    values themselves are unchanged)."""
+    one more iteration would make, ``max(|Δu_*|/u_*, |Δθ_*|/|θ_*|)`` (and
+    ``|Δq_*|/|q_*|`` with ``dq``; the returned values themselves are unchanged).
+
+    ``z_ref`` (GABLS3, Basu et al. 2008): the prescribed θ (and q) are the AIR
+    values at height ``z_ref`` rather than surface values, so the scalar relation
+    is the integral one between ``z_ref`` and ``z₁``,
+    ``θ_* = κ(⟨θ₁⟩−θ(z_ref)) / (ln(z₁/z_ref) − ψ_h(z₁/L) + ψ_h(z_ref/L))``
+    (``z0h`` is then unused). ``dq = ⟨q₁⟩ − q(z_ref or surface)`` adds the moisture
+    relation with the same scalar denominator, and the kinematic moisture flux
+    ``⟨w'q'⟩₀ = −u_* q_*`` is returned after ``cd_eff``. ``virtual=True`` takes the
+    Obukhov length from the virtual heat flux, ``θ_v* = θ_* + ε_v θ_ref q_*``
+    (``ε_v = 1/ε − 1``)."""
     kappa = constants.kappa_von_karman
     gacc = constants.g
     lnz = jnp.log(z1 / z0)
-    lnzh = lnz if z0h is None else jnp.log(z1 / z0h)
+    if z_ref is not None:
+        lnzh = jnp.log(z1 / z_ref)
+    else:
+        lnzh = lnz if z0h is None else jnp.log(z1 / z0h)
+    eps_v = 1.0 / constants.epsilon - 1.0
+
+    def _den_h(inv_L, zeta):
+        if z_ref is None:
+            return lnzh - psi_h(zeta)
+        return lnzh - psi_h(zeta) + psi_h(z_ref * inv_L)
+
+    def _inv_L(u_star, th_star, q_star):
+        thv_star = th_star if not virtual else th_star + eps_v * theta_ref * q_star
+        return kappa * gacc * thv_star / (u_star ** 2 * theta_ref + 1e-12)
+
     dth = th_air_mean - t_sfc                     # >0 when air warmer than surface
     u_star = kappa * spd_mean / lnz               # neutral first guess
     th_star = kappa * dth / lnzh
+    q_star = 0.0 if dq is None else kappa * dq / lnzh
     for _ in range(n_iter):
-        inv_L = kappa * gacc * th_star / (u_star ** 2 * theta_ref + 1e-12)
+        inv_L = _inv_L(u_star, th_star, q_star)
         zeta = z1 * inv_L                         # +ve stable, −ve unstable
         u_star = kappa * spd_mean / (lnz - psi_m(zeta))
-        th_star = kappa * dth / (lnzh - psi_h(zeta))
+        den_h = _den_h(inv_L, zeta)
+        th_star = kappa * dth / den_h
+        if dq is not None:
+            q_star = kappa * dq / den_h
     q0 = -u_star * th_star
     cd_eff = (u_star / (spd_mean + 1e-12)) ** 2
+    out = (u_star, th_star, q0, cd_eff)
+    if dq is not None:
+        out = out + (-u_star * q_star,)
     if not return_residual:
-        return u_star, th_star, q0, cd_eff
-    inv_L = kappa * gacc * th_star / (u_star ** 2 * theta_ref + 1e-12)
+        return out
+    inv_L = _inv_L(u_star, th_star, q_star)
     zeta = z1 * inv_L
     tiny = jnp.finfo(jnp.result_type(u_star)).tiny
     resid = jnp.maximum(
         jnp.abs(kappa * spd_mean / (lnz - psi_m(zeta)) - u_star)
         / jnp.maximum(jnp.abs(u_star), tiny),
-        jnp.abs(kappa * dth / (lnzh - psi_h(zeta)) - th_star)
+        jnp.abs(kappa * dth / _den_h(inv_L, zeta) - th_star)
         / jnp.maximum(jnp.abs(th_star), tiny))
-    return u_star, th_star, q0, cd_eff, resid
+    if dq is not None:
+        resid = jnp.maximum(resid, jnp.abs(kappa * dq / _den_h(inv_L, zeta) - q_star)
+                            / jnp.maximum(jnp.abs(q_star), tiny))
+    return out + (resid,)
 
 
 def most_drag_prescribed_flux(spd_mean, q0, z1, z0, theta_ref):
@@ -877,7 +924,7 @@ def surface_drag_coefficient(g: SpectralLESGrid, cd_surf=None):
 
 
 def surface_boundary(u, v, theta, g: SpectralLESGrid, sfc_theta_flux, t_sfc,
-                     return_residual=False):
+                     return_residual=False, q_sfc=None, tracers=None):
     """Surface BC actually applied by :func:`rhs`: ``(cd_surf, sfc_flux)``.
 
     ``t_sfc=None`` (or no θ) ⇒ the prescribed kinematic heat flux, with the
@@ -888,8 +935,14 @@ def surface_boundary(u, v, theta, g: SpectralLESGrid, sfc_theta_flux, t_sfc,
 
     ``return_residual=True`` appends that coupled solver's convergence residual
     (:func:`most_surface_flux`; NaN on the prescribed-flux paths, which have their
-    own convergence handling)."""
+    own convergence handling).
+
+    ``q_sfc`` (with ``t_sfc``): prescribed specific humidity at the same reference
+    as ``t_sfc``; the moisture flux of the same MOST layer (``tracers`` slot 0 is
+    q_v) is then returned after the heat flux."""
     drag = g.cfg.sfc_flux_drag
+    if q_sfc is not None and (t_sfc is None or tracers is None):
+        raise ValueError("q_sfc needs a prescribed t_sfc and the water tracers")
     if drag not in ("neutral", "most"):
         raise ValueError(f"sfc_flux_drag must be 'neutral' or 'most', got {drag!r}")
     u1, v1 = u[..., 0], v[..., 0]
@@ -915,10 +968,12 @@ def surface_boundary(u, v, theta, g: SpectralLESGrid, sfc_theta_flux, t_sfc,
                 else (cd_surf, sfc_theta_flux))
     spd_mean = planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
     th1_mean = planar_mean(theta[..., 0], g)
+    dq = None if q_sfc is None else planar_mean(tracers[..., 0, 0], g) - q_sfc
     out = most_surface_flux(
         spd_mean, th1_mean, t_sfc, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0,
-        z0h=g.cfg.z0h, return_residual=return_residual)
-    return (out[3], out[2], out[4]) if return_residual else (out[3], out[2])
+        z0h=g.cfg.z0h, return_residual=return_residual, z_ref=g.cfg.sfc_ref_height,
+        dq=dq, virtual=g.cfg.most_virtual)
+    return (out[3], out[2]) + tuple(out[4:])
 
 
 def sgs_vertical_momentum_flux_faces(u, v, w, nu_t, g: SpectralLESGrid, cd_surf=None):
@@ -1335,7 +1390,7 @@ def _divergence_damping(u, v, w, g: SpectralLESGrid):
 
 def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
         theta=None, sfc_theta_flux=0.0, t_sfc=None,
-        tracers=None, sfc_qv_flux=0.0):
+        tracers=None, sfc_qv_flux=0.0, q_sfc=None):
     """Momentum RHS = -advection + SGS force + Coriolis + a constant body force.
 
     ``f_cor``≠0 drives a geostrophic/Ekman balance toward ``u_geo=(ug,vg)``; a
@@ -1348,10 +1403,18 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
     ``t_sfc`` (a prescribed/cooled surface temperature) is supplied AND ``theta``
     is active, the surface heat flux AND a stability-corrected drag are derived
     from the coupled stable MOST surface layer (:func:`most_surface_flux`) — the
-    GABLS1-faithful prescribed-cooling boundary condition."""
+    GABLS1-faithful prescribed-cooling boundary condition. ``q_sfc`` (with
+    ``t_sfc``) prescribes the surface-reference humidity too: the moisture flux
+    into q_v then comes from the same MOST layer and replaces ``sfc_qv_flux``.
+    ``cfg.theta_top_gradient`` Γ ≠ 0 gives the lid face the SGS heat flux
+    ``K_h Γ`` (heat entering from above, :func:`lid_heat_flux`)."""
     Cu, Cv, Cw = advection(u, v, w, g)
     nu_t = effective_eddy_viscosity(u, v, w, g, theta=theta, tracers=tracers)
-    cd_surf, sfc_flux = surface_boundary(u, v, theta, g, sfc_theta_flux, t_sfc)
+    sb = surface_boundary(u, v, theta, g, sfc_theta_flux, t_sfc, q_sfc=q_sfc,
+                          tracers=tracers)
+    cd_surf, sfc_flux = sb[0], sb[1]
+    if q_sfc is not None:
+        sfc_qv_flux = sb[2]
     Fu, Fv, Fw, u_star = sgs_and_wall(u, v, w, nu_t, g, u_geo, cd_surf=cd_surf)
     ug, vg = u_geo
     Ru = Cu + Fu + f_cor * (v - vg) + force[0]
@@ -1369,6 +1432,10 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
     Rtheta = None
     if theta is not None:
         Rtheta = scalar_fn(theta, u, v, w, nu_t, g, sfc_flux)
+        if g.cfg.theta_top_gradient != 0.0:
+            # the lid face carries J = K_h Γ instead of 0: ∂J/∂z warms the top cell
+            Rtheta = Rtheta.at[..., -1].add(
+                nu_t[..., -1] / g.cfg.pr_sgs * g.cfg.theta_top_gradient / g.dz)
         if g.cfg.theta_hyperdiff_coeff > 0.0:
             # SCALE-SELECTIVE k⁴ damping of the 2Δ θ' noise the sharp latent
             # heating injects — the instability SOURCE. Not broad diffusion: it
@@ -1492,7 +1559,7 @@ def _filt_state(u, v, w, th, tr, g):
 
 def kinematic_pressure(state: SpectralLESState, g: SpectralLESGrid, u_geo,
                        f_cor: float, force=(0.0, 0.0), sfc_theta_flux=0.0,
-                       t_sfc=None, sfc_qv_flux=0.0):
+                       t_sfc=None, sfc_qv_flux=0.0, q_sfc=None):
     """Instantaneous kinematic pressure ``p/ρ₀`` [m²/s²] at centres (diagnostic).
 
     The momentum RHS here is the ROTATIONAL form ``u×ω + …``, so the potential the
@@ -1507,7 +1574,7 @@ def kinematic_pressure(state: SpectralLESState, g: SpectralLESGrid, u_geo,
     ru, rv, rw, _us, _rth, _rtr = rhs(
         state.u, state.v, state.w, g, u_geo, f_cor, force=force, theta=state.theta,
         sfc_theta_flux=sfc_theta_flux, t_sfc=t_sfc, tracers=state.tracers,
-        sfc_qv_flux=sfc_qv_flux)
+        sfc_qv_flux=sfc_qv_flux, q_sfc=q_sfc)
     big_p = pressure_potential(ru, rv, rw, 1.0, g)
     return big_p - resolved_kinetic_energy(state.u, state.v, state.w, g)
 
@@ -1532,7 +1599,7 @@ def resolved_kinetic_energy(u, v, w, g: SpectralLESGrid):
 # water-species slots (``N_WATER_SLOTS``); both are 0 on the spectral scalar path.
 BUDGET_TERMS = ("sfc_heat_flux", "sfc_stress_x", "sfc_stress_y",
                 "coriolis_u", "coriolis_v", "body_force_u", "body_force_v",
-                "sfc_qv_flux", "fv_theta", "fv_water")
+                "sfc_qv_flux", "fv_theta", "fv_water", "lid_heat_flux")
 
 # Water-species slots of the standard microphysics tracer layout (q_v, q_c, q_r,
 # q_i, q_s, q_g); the slots after them are number concentrations.
@@ -1545,8 +1612,16 @@ def _column_fv_source(phi, div_fv, g: SpectralLESGrid):
     return g.dz * jnp.sum(planar_mean(phi * div_fv, g))
 
 
+def lid_heat_flux(theta, nu_t, g: SpectralLESGrid):
+    """Planar-mean heat flux entering through the lid [K m/s] when
+    ``cfg.theta_top_gradient`` Γ is set: ``⟨K_h⟩_top Γ`` (0 for the no-flux lid)."""
+    if theta is None or g.cfg.theta_top_gradient == 0.0:
+        return 0.0
+    return planar_mean(nu_t[..., -1], g) / g.cfg.pr_sgs * g.cfg.theta_top_gradient
+
+
 def _budget_rates(s: SpectralLESState, g: SpectralLESGrid, u_geo, f_cor, force,
-                  sfc_theta_flux, t_sfc, sfc_qv_flux=0.0):
+                  sfc_theta_flux, t_sfc, sfc_qv_flux=0.0, q_sfc=None):
     """Column-integrated horizontal-mean source rates entering the θ/u/v/water
     budgets at state ``s`` (kinematic; heat [K m/s], momentum [m²/s²], water
     [(kg/kg) m/s]), in :data:`BUDGET_TERMS` order. Each is a boundary/body term
@@ -1554,7 +1629,15 @@ def _budget_rates(s: SpectralLESState, g: SpectralLESGrid, u_geo, f_cor, force,
     momentum flux (``−Cd⟨|u₁|⟩⟨u₁⟩``), ``∫f(v−v_g)dz``, ``−∫f(u−u_g)dz``,
     ``∫force dz``, the surface moisture flux into ``q_v`` — or the monotone
     advection's free-stream correction for θ and the summed water slots."""
-    cd_surf, q = surface_boundary(s.u, s.v, s.theta, g, sfc_theta_flux, t_sfc)
+    sb = surface_boundary(s.u, s.v, s.theta, g, sfc_theta_flux, t_sfc, q_sfc=q_sfc,
+                          tracers=s.tracers)
+    cd_surf, q = sb[0], sb[1]
+    if q_sfc is not None:
+        sfc_qv_flux = sb[2]
+    lid = 0.0
+    if g.cfg.theta_top_gradient != 0.0 and s.theta is not None:
+        lid = lid_heat_flux(s.theta, effective_eddy_viscosity(
+            s.u, s.v, s.w, g, theta=s.theta, tracers=s.tracers), g)
     cd = surface_drag_coefficient(g, cd_surf)
     u1, v1 = s.u[..., 0], s.v[..., 0]
     spd1_mean = planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
@@ -1583,13 +1666,15 @@ def _budget_rates(s: SpectralLESState, g: SpectralLESGrid, u_geo, f_cor, force,
         sfc_qv_flux if has_tr else 0.0,
         fv_theta,
         fv_water,
+        lid,
     )
     return jnp.stack([jnp.asarray(t, dt_) for t in terms])
 
 
 def step(state: SpectralLESState, g: SpectralLESGrid, dt,
          u_geo, f_cor: float, first: bool = False, force=(0.0, 0.0),
-         sfc_theta_flux=0.0, t_sfc=None, sfc_qv_flux=0.0, return_budget=False):
+         sfc_theta_flux=0.0, t_sfc=None, sfc_qv_flux=0.0, return_budget=False,
+         q_sfc=None):
     """One time step + pressure projection.
 
     ``time_scheme`` selects the integrator. The RK options ("rk3"=SSP-RK3,
@@ -1613,7 +1698,7 @@ def step(state: SpectralLESState, g: SpectralLESGrid, dt,
         Ru, Rv, Rw, u_star, Rth, Rtr = rhs(u, v, w, g, u_geo, f_cor, force=force,
                                            theta=th, sfc_theta_flux=sfc_theta_flux,
                                            t_sfc=t_sfc, tracers=tr,
-                                           sfc_qv_flux=sfc_qv_flux)
+                                           sfc_qv_flux=sfc_qv_flux, q_sfc=q_sfc)
         if first:
             au, av, aw, ath, atr = Ru, Rv, Rw, Rth, Rtr
         else:
@@ -1641,7 +1726,7 @@ def step(state: SpectralLESState, g: SpectralLESGrid, dt,
                                        force=force, theta=s.theta,
                                        sfc_theta_flux=sfc_theta_flux,
                                        t_sfc=t_sfc, tracers=s.tracers,
-                                       sfc_qv_flux=sfc_qv_flux)
+                                       sfc_qv_flux=sfc_qv_flux, q_sfc=q_sfc)
         # History leaves zeroed from the INPUT state's structure (not the RHS):
         # if the caller passed rhs_*_prev=None with an active field, mirroring
         # Rth/Rtr here would change the pytree structure mid-integration and
@@ -1666,7 +1751,8 @@ def step(state: SpectralLESState, g: SpectralLESGrid, dt,
         def slow_aug(sa):
             s, _acc = sa
             return (slow_fn(s), _budget_rates(s, g, u_geo, f_cor, force,
-                                              sfc_theta_flux, t_sfc, sfc_qv_flux))
+                                              sfc_theta_flux, t_sfc, sfc_qv_flux,
+                                              q_sfc))
 
         def proj_aug(sa, slow_tend, dt_sub, n_sub, cfg):
             return (proj_fn(sa[0], slow_tend[0], dt_sub, n_sub, cfg), sa[1])

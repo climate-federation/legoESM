@@ -47,6 +47,8 @@ _DRY_GRID = LESGrid(nx=96, ny=96, nz=96, Lx_m=3200.0, Ly_m=3200.0, Lz_m=1600.0, 
 _STABLE_GRID = LESGrid(nx=64, ny=64, nz=96, Lx_m=400.0, Ly_m=400.0, Lz_m=400.0,
                        dt_s=0.1)
 
+_SUITE_SPONGE_TAU_S = 50.0          # the suite's SBL sponge timescale
+
 
 # --- anchor cases (real published setups; parameters == driver defaults) -----
 ANCHOR_CASES: tuple[LESCase, ...] = (
@@ -170,6 +172,69 @@ MOIST_CASES: tuple[LESCase, ...] = (
         description="ASTEX stratocumulus deck, steady forcing "
                     "(run_dycoms_les.py --case astex).",
     ),
+    LESCase(
+        name="gabls3",
+        regime="dry_stable",
+        core="spectral",
+        grid=LESGrid(nx=128, ny=128, nz=128, Lx_m=800.0, Ly_m=800.0, Lz_m=800.0,
+                     dt_s=0.25),
+        duration_hours=9.0,
+        surface_theta_flux_K_m_s=None,   # prescribed θ, q at 0.25 m through MOST
+        geostrophic_wind_m_s=None,       # time- and height-varying (spec Table 4)
+        sgs_variants=_SGS_DEFAULT,
+        driver="run_gabls3_les.py",
+        reference="Basu (2008) GABLS3 LES intercomparison case description (revised "
+                  "6 Oct 2008); Cabauw 2 July 2006 00-09 UTC",
+        ci_marker="manual_only",
+        held_out=True,
+        description="Nocturnal stable BL with a low-level jet through the morning "
+                    "transition; moisture active through θ_v buoyancy, no "
+                    "condensation. Forcing in forcing/gabls3_les.py.",
+    ),
+)
+
+# GABLS3 values the spec does not fix. APPROVED: user 2026-10-18. PENDING: the
+# driver refuses a production run while any remain (--smoke only).
+GABLS3_SPONGE_TAU_S = _SUITE_SPONGE_TAU_S
+GABLS3_APPROVED: tuple[str, ...] = tuple(f"APPROVED 2026-10-18: {a}" for a in (
+    "sponge: Rayleigh from 600 m to the lid with the suite's 50 s timescale "
+    "(spec: damping layer above ~550-600 m)",
+    "lid: the spec's 0.0029 K/m inversion imposed as the SGS heat flux K_h·Γ "
+    "through the lid",
+    "surface layer: Businger–Dyer unstable branch after sunrise (spec gives only "
+    "the stable ψ = -5z/L)",
+    "seed: θ noise variance 0.1 K² (σ 0.316 K) below 200 m, no q noise, seed 0",
+    "surface pressure: held at 1022.1 hPa (00 UTC) for the reference column",
+    "moisture: active in buoyancy through θ_v; no condensation, no microphysics",
+))
+GABLS3_PENDING: tuple[str, ...] = (
+    "dt: PROPOSED 0.25 s fixed (spec: not stated; advective CFL ~0.5 at 12 m/s on "
+    "6.25 m)",
+    "closure: PROPOSED the suite's stable-case closure — LASD dynamic, Pr 1.0, "
+    "background viscosity 0.01 m2/s, no SGS buoyancy term, RK3, 3/2-rule "
+    "dealiasing, spectral (non-monotone) scalar advection (spec: own closure)",
+    "θ_ref: PROPOSED 291.28 K = θ(0.25 m) at 00 UTC for the Boussinesq buoyancy "
+    "(spec: not stated)",
+    "Obukhov length: PROPOSED from the virtual heat flux θ_v* = θ* + 0.61 θ_ref q* "
+    "(spec: ψ(z/L), L not defined)",
+    "humidity: PROPOSED the spec's Q used directly as the model's q_v (as a "
+    "mixing ratio it would be ~1 % larger)",
+    "initial profiles: PROPOSED held at the 10 m values below 10 m (lowest LES "
+    "level 3.125 m; spec starts at 10 m)",
+    "sponge: PROPOSED the suite form — relaxes u, v, θ deviations and w; q_v "
+    "deviations not relaxed",
+    "momentum advection: PROPOSED applied as the equivalent geostrophic-wind shift "
+    "(v_g − u_adv/f, u_g + v_adv/f; exact in the LES, and what the SCM receives)",
+    "forcing sampling: PROPOSED each step applies the exact interval mean of the "
+    "prescribed series (step changes integrated exactly)",
+    "output: PROPOSED 54 frames (every 10 min) plus the initial state",
+    "regime label: PROPOSED dry_stable (no regime exists for a cloud-free moist SBL)",
+    "u, v noise seeds: PROPOSED 1 and 2 (the spec's variance 0.2(1 − z/200)² below "
+    "200 m; θ seed 0 approved)",
+    "lid flux: PROPOSED K_h of the top cell centre times Γ (no face K_h exists at "
+    "the lid)",
+    "SCM side: the lid heat input is NOT yet delivered to the SCM (no SCM upper "
+    "heat-flux boundary); recorded in the LES budget only — open defect",
 )
 
 
@@ -255,7 +320,6 @@ def _lat_for_f(f_cor: float) -> float:
 
 
 _GABLS1_F = 1.39e-4                 # Beare et al. (2006) / Sullivan 2016 / Huang 2013
-_SUITE_SPONGE_TAU_S = 50.0          # the suite's SBL sponge timescale (proposal only)
 _PENDING_DT = "dt: PROPOSED {dt} s fixed (paper: adaptive CFL / not stated)"
 _PENDING_SEED = ("seed noise: PROPOSED {amp} K θ below {top} m (paper: {paper})")
 

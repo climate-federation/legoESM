@@ -104,7 +104,7 @@ def column_share(part: Array, total: Array) -> float:
 
 def sgs_vertical_scalar_flux_faces(
     phi: Array, nu_t: Array, dz: float, *, pr_sgs: float = 1.0,
-    surface_flux: float = 0.0,
+    surface_flux: float = 0.0, top_flux: float = 0.0,
 ) -> Array:
     """Horizontal-mean SGS vertical scalar flux on all ``nz+1`` faces, exactly as
     ``spectral_les_plane.scalar_rhs`` (and ``scalar_rhs_monotone``) apply it.
@@ -116,8 +116,9 @@ def sgs_vertical_scalar_flux_faces(
 
     The core forms the DIFFUSIVE flux ``J = K_h ∂φ/∂z`` on interior faces
     (``K_h = ν_t/Pr``, ``K_h`` averaged centre→face by ``c2f``, gradient by
-    ``ddz_c2f``), imposes ``J = -surface_flux`` on the surface face and ``J = 0`` on
-    the lid, then takes ``∂J/∂z`` at centres. The turbulent flux is
+    ``ddz_c2f``), imposes ``J = -surface_flux`` on the surface face and
+    ``J = -top_flux`` on the lid (0 = no-flux lid; a lid inversion Γ gives
+    ``top_flux = -⟨K_h⟩Γ``), then takes ``∂J/∂z`` at centres. The turbulent flux is
     ``<w'φ'> = -J``, positive upward; this returns its horizontal mean per face.
     """
     phi = np.asarray(phi)
@@ -134,7 +135,7 @@ def sgs_vertical_scalar_flux_faces(
     dphi_dz_face = (phi[..., 1:] - phi[..., :-1]) / dz
     turb_int = (-k_h_face * dphi_dz_face).mean(axis=_HORIZ)        # (nz-1,)
     return np.concatenate([np.asarray([float(surface_flux)], dtype=turb_int.dtype),
-                           turb_int, np.zeros(1, dtype=turb_int.dtype)])
+                           turb_int, np.asarray([float(top_flux)], dtype=turb_int.dtype)])
 
 
 def faces_to_centres(face_profile: Array) -> Array:

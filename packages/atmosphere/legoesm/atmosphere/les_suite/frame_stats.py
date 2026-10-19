@@ -60,11 +60,14 @@ _QT_SLOTS = (0, 1, 2)
 
 def make_frame_fields_fn(g, u_geo, f_cor):
     """Jitted per-frame device field set ``fields(st, sfc_theta_flux, sfc_qv_flux,
-    t_sfc=None) -> dict``.
+    t_sfc=None, q_sfc=None, u_geo=None) -> dict``.
 
     ``sfc_theta_flux`` / ``sfc_qv_flux`` are the surface fluxes the driver passes
     the core at this state (prescribed, or interactive bulk); ``t_sfc`` a
-    prescribed surface temperature (MOST BC) or ``None``. ``nu_t`` is the
+    prescribed surface temperature (MOST BC) or ``None``; ``q_sfc`` the prescribed
+    surface-reference humidity of that MOST layer (its moisture flux replaces
+    ``sfc_qv_flux``); ``u_geo`` the geostrophic wind at this time when it varies
+    (default: the one given here). ``nu_t`` is the
     viscosity ``rhs`` applies (``effective_eddy_viscosity``: Lilly suppression
     included when ``cfg.sgs_buoyancy``), so the SGS fluxes rebuilt from it are the
     ones the model integrated."""
@@ -73,14 +76,19 @@ def make_frame_fields_fn(g, u_geo, f_cor):
     from legoesm.atmosphere.dynamics.les import spectral_les_plane as sl
 
     @jax.jit
-    def _fields(st, sfc_theta_flux, sfc_qv_flux, t_sfc=None):
-        cd_surf, q = sl.surface_boundary(st.u, st.v, st.theta, g, sfc_theta_flux, t_sfc)
+    def _fields(st, sfc_theta_flux, sfc_qv_flux, t_sfc=None, q_sfc=None, ug=None):
+        ug = u_geo if ug is None else ug
+        sb = sl.surface_boundary(st.u, st.v, st.theta, g, sfc_theta_flux, t_sfc,
+                                 q_sfc=q_sfc, tracers=st.tracers)
+        cd_surf, q = sb[0], sb[1]
+        if q_sfc is not None:
+            sfc_qv_flux = sb[2]
         nu_t = sl.effective_eddy_viscosity(st.u, st.v, st.w, g, theta=st.theta,
                                            tracers=st.tracers)
         tau13, tau23, spd1, cd = sl.sgs_vertical_momentum_flux_faces(
             st.u, st.v, st.w, nu_t, g, cd_surf=cd_surf)
-        p = sl.kinematic_pressure(st, g, u_geo, f_cor, sfc_theta_flux=sfc_theta_flux,
-                                  t_sfc=t_sfc, sfc_qv_flux=sfc_qv_flux)
+        p = sl.kinematic_pressure(st, g, ug, f_cor, sfc_theta_flux=sfc_theta_flux,
+                                  t_sfc=t_sfc, sfc_qv_flux=sfc_qv_flux, q_sfc=q_sfc)
         dpdz = sl.f2c(jnp.pad(sl.ddz_c2f(p, g.dz), ((0, 0), (0, 0), (1, 1))))
         floor = jnp.full_like(nu_t, g.cfg.nu_floor)
         fl13, fl23, _s, _c = sl.sgs_vertical_momentum_flux_faces(
@@ -89,6 +97,7 @@ def make_frame_fields_fn(g, u_geo, f_cor):
         fl23 = fl23.at[..., 0].set(0.0)
         return dict(
             q=jnp.asarray(q, st.u.dtype),
+            lid=jnp.asarray(sl.lid_heat_flux(st.theta, nu_t, g), st.u.dtype),
             qv=jnp.asarray(sfc_qv_flux, st.u.dtype),
             nu_t=nu_t, tau13=tau13, tau23=tau23,
             tau_x_s=-cd * spd1 * jnp.mean(st.u[..., 0]),
@@ -100,7 +109,7 @@ def make_frame_fields_fn(g, u_geo, f_cor):
     return _fields
 
 
-def theta_l_sgs_faces(theta, q_c, nu, dz, pr_sgs, q_surface, exner_f):
+def theta_l_sgs_faces(theta, q_c, nu, dz, pr_sgs, q_surface, exner_f, q_top=0.0):
     """θ_l SGS flux on the ``nz+1`` faces from the fluxes the core applied: θ and
     q_c are diffused separately with the same diffusivity, so
     ``J_θl = J_θ − (L_v/(c_pd Π_f)) J_qc`` (q_c has no surface flux).
@@ -110,7 +119,7 @@ def theta_l_sgs_faces(theta, q_c, nu, dz, pr_sgs, q_surface, exner_f):
     ``(L_v/c_pd)/dz · [J_qc,k+1 (1/Π_c,k − 1/Π_f,k+1) − J_qc,k (1/Π_c,k − 1/Π_f,k)]``
     (the q_c flux crossing a level of different Π), which no flux can carry."""
     j_th = sgs_vertical_scalar_flux_faces(theta, nu, dz, pr_sgs=pr_sgs,
-                                          surface_flux=q_surface)
+                                          surface_flux=q_surface, top_flux=q_top)
     j_qc = sgs_vertical_scalar_flux_faces(q_c, nu, dz, pr_sgs=pr_sgs)
     return j_th - (constants.L_v / constants.c_pd) * j_qc / np.asarray(exner_f)  # latent-ok: liquid_water_theta's constant L_v
 
@@ -127,6 +136,10 @@ def frame_statistics(st, g, fields, pr_sgs, *, exner_c=None, exner_f=None):
     wf = np.asarray(st.w)
     dz = float(g.dz)
     q = float(a["q"])
+    # the lid face: heat entering from above (cfg.theta_top_gradient) is a downward
+    # turbulent flux; the background floor's share uses the floor viscosity
+    q_top = -float(a["lid"])
+    q_top_floor = -g.cfg.nu_floor / pr_sgs * g.cfg.theta_top_gradient
     moist = st.tracers is not None and st.tracers.shape[-1] > 0
     theta = np.asarray(st.theta)
     floor = np.full_like(theta, g.cfg.nu_floor)
@@ -135,13 +148,13 @@ def frame_statistics(st, g, fields, pr_sgs, *, exner_c=None, exner_f=None):
         if exner_c is None or exner_f is None:
             raise ValueError("a moist frame needs exner_c and exner_f (θ_l)")
         tr = np.asarray(st.tracers)
-        q_c = tr[..., 1]
+        q_c = tr[..., 1] if tr.shape[-1] > 1 else np.zeros_like(theta)
         th = np.asarray(liquid_water_theta(
             theta, q_c, np.asarray(exner_c)[None, None, :]))
         wtheta_sgs = faces_to_centres(theta_l_sgs_faces(
-            theta, q_c, a["nu_t"], dz, pr_sgs, q, exner_f))
+            theta, q_c, a["nu_t"], dz, pr_sgs, q, exner_f, q_top=q_top))
         wtheta_floor = faces_to_centres(theta_l_sgs_faces(
-            theta, q_c, floor, dz, pr_sgs, 0.0, exner_f))
+            theta, q_c, floor, dz, pr_sgs, 0.0, exner_f, q_top=q_top_floor))
         qt3 = sum(tr[..., k] for k in _QT_SLOTS if k < tr.shape[-1])
         qv_flux = float(a["qv"])
         wqt_sgs_f = sum(
@@ -160,9 +173,9 @@ def frame_statistics(st, g, fields, pr_sgs, *, exner_c=None, exner_f=None):
     else:
         th = theta
         wtheta_sgs = faces_to_centres(sgs_vertical_scalar_flux_faces(
-            th, a["nu_t"], dz, pr_sgs=pr_sgs, surface_flux=q))
+            th, a["nu_t"], dz, pr_sgs=pr_sgs, surface_flux=q, top_flux=q_top))
         wtheta_floor = faces_to_centres(sgs_vertical_scalar_flux_faces(
-            th, floor, dz, pr_sgs=pr_sgs))
+            th, floor, dz, pr_sgs=pr_sgs, top_flux=q_top_floor))
     ww_f = covariance(wf, wf)                 # faces (nz+1) via the same reducer
     out.update(
         theta=horizontal_mean(th), u=horizontal_mean(u), v=horizontal_mean(v),
@@ -370,15 +383,18 @@ class MoistRunEmitter:
     def _named(self):
         return dict(zip(self.terms, np.asarray(self.acc)))
 
-    def record(self, t, state, sfc_theta_flux, sfc_qv_flux, precip_rate, series=None):
+    def record(self, t, state, sfc_theta_flux, sfc_qv_flux, precip_rate, series=None,
+               *, t_sfc=None, q_sfc=None, u_geo=None):
         """One output frame: statistics of ``state`` with the surface fluxes the
         driver applies at it, the domain-mean surface precipitation rate of the
         most recent microphysics call [kg/m²/s] (``bridge`` ``precip_s``), and the
         running exact integrals of the applied surface fluxes and of the
-        precipitation."""
+        precipitation. ``t_sfc``/``q_sfc``/``u_geo``: a prescribed-surface MOST BC
+        and a time-varying geostrophic wind, passed as the step applies them."""
         n = self._named()
         prof, srf = self.rec.record(
-            t, state, self.fields_fn(state, sfc_theta_flux, sfc_qv_flux),
+            t, state, self.fields_fn(state, sfc_theta_flux, sfc_qv_flux, t_sfc, q_sfc,
+                                     u_geo),
             series={"w_theta_s_cum": n["sfc_heat_flux"], "tau_x_s_cum": n["sfc_stress_x"],
                   "tau_y_s_cum": n["sfc_stress_y"], "w_qv_s_cum": n["sfc_qv_flux"],
                   "precip_s_cum": n["precip_mass"],
@@ -402,7 +418,7 @@ class MoistRunEmitter:
         d = col1 - self.col0
         groups = {
             "theta": ("sfc_heat_flux", "fv_theta", "ls_theta", "rad_theta", "micro_theta",
-                      "positivity_theta"),
+                      "positivity_theta", "lid_heat_flux"),
             "u": ("sfc_stress_x", "coriolis_u", "body_force_u", "sponge_u"),
             "v": ("sfc_stress_y", "coriolis_v", "body_force_v", "sponge_v"),
             "water": ("sfc_qv_flux", "fv_water", "ls_water", "micro_water",

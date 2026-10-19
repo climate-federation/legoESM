@@ -74,6 +74,9 @@ class LESReferenceArtifact:
             forcing the LES applied [K] (e.g. DYCOMS's interactive longwave
             cooling), or ``None``. Exclusive with ``theta_adv``; the SCM receives
             its interval means (:func:`forcing_profile_fn`).
+        qv_adv_cum, u_geo_cum, v_geo_cum : (nt, nz) the same running time
+            integrals for a time-varying moisture advection [kg/kg] and geostrophic
+            wind [m] (GABLS3), each exclusive with its constant channel.
         prescribe : "none" | "T_s" | "fluxes" — surface boundary treatment.
         T_s : (nt,) prescribed surface temperature [K] or ``None``.
         w_theta_s, w_qv_s : (nt,) surface kinematic heat/moisture fluxes
@@ -163,6 +166,9 @@ class LESReferenceArtifact:
     theta_adv: Array | None = None
     qv_adv: Array | None = None
     theta_adv_cum: Array | None = None
+    qv_adv_cum: Array | None = None
+    u_geo_cum: Array | None = None
+    v_geo_cum: Array | None = None
     prescribe: str = "fluxes"
     T_s: Array | None = None
     w_theta_s: Array | None = None
@@ -243,7 +249,8 @@ class LESReferenceArtifact:
         nt, nz = self.nt, self.nz
         # profile time series: (nt, nz)
         for name in (("theta", "u", "v", "wtheta_resolved", "wtheta_sgs",
-                      "qt", "wqt_resolved", "wqt_sgs", "qc", "theta_adv_cum")
+                      "qt", "wqt_resolved", "wqt_sgs", "qc")
+                     + tuple(f"{c}_cum" for c in CUM_CHANNELS)
                      + TURBULENCE_STAT_FIELDS + MOIST_STAT_FIELDS):
             arr = getattr(self, name)
             if arr is None:
@@ -301,7 +308,8 @@ class LESReferenceArtifact:
                     )
         else:
             dry_forbidden = [
-                n for n in ("wqt_resolved", "wqt_sgs", "qv_adv", "w_qv_s", "qc")
+                n for n in ("wqt_resolved", "wqt_sgs", "qv_adv", "qv_adv_cum", "w_qv_s",
+                            "qc")
                 + MOIST_SURFACE_SERIES_FIELDS + MOIST_STAT_FIELDS
                 if getattr(self, n) is not None
             ]
@@ -310,10 +318,13 @@ class LESReferenceArtifact:
                     f"{self.case_name}: dry artifact (qt is None) must not carry "
                     f"moisture field(s) {dry_forbidden}"
                 )
-        if self.theta_adv_cum is not None and self.theta_adv is not None:
-            raise BridgeError(
-                f"{self.case_name}: theta_adv and theta_adv_cum are two channels for "
-                "one θ forcing; set exactly one")
+        if (self.u_geo_cum is None) != (self.v_geo_cum is None):
+            raise BridgeError(f"{self.case_name}: u_geo_cum and v_geo_cum go together")
+        for ch in CUM_CHANNELS:
+            if getattr(self, f"{ch}_cum") is not None and getattr(self, ch) is not None:
+                raise BridgeError(
+                    f"{self.case_name}: {ch} and {ch}_cum are two channels for one "
+                    "forcing; set exactly one")
         for cum_name, series in (("w_theta_s_cum", "w_theta_s"),
                                  ("w_qv_s_cum", "w_qv_s"),
                                  ("precip_s_cum", "precip_s")):
@@ -382,6 +393,7 @@ _ARTIFACT_ARRAY_FIELDS = (
     "heights_m", "times_s", "theta", "u", "v",
     "wtheta_resolved", "wtheta_sgs", "qt", "wqt_resolved", "wqt_sgs", "qc",
     "u_geo", "v_geo", "subsidence_w", "theta_adv", "qv_adv", "theta_adv_cum",
+    "qv_adv_cum", "u_geo_cum", "v_geo_cum",
     "T_s", "w_theta_s", "w_qv_s",
 ) + (TURBULENCE_STAT_FIELDS + SURFACE_SERIES_FIELDS + MOIST_SURFACE_SERIES_FIELDS
      + MOIST_STAT_FIELDS)
@@ -665,19 +677,31 @@ def _cum_rate_fn(times: Array, cum: Array, dt_s: float | None):
     return _step_mean
 
 
-def forcing_profile_fn(artifact: LESReferenceArtifact, *, dt_s: float | None = None):
-    """The θ forcing profile ``t -> (nz,)`` [K/s] that drives the SCM: the interval
-    means of the recorded ``theta_adv_cum`` when the LES forcing varied in time
-    (``dt_s`` as in :func:`surface_flux_fn`), else the constant ``theta_adv``."""
-    if artifact.theta_adv_cum is not None:
+# Forcing channels that may be recorded as running time integrals ``<name>_cum``.
+CUM_CHANNELS = ("theta_adv", "qv_adv", "u_geo", "v_geo")
+
+
+def _oriented_fn(fn, orient):
+    return lambda t: orient(fn(t))
+
+
+def forcing_profile_fn(artifact: LESReferenceArtifact, *, dt_s: float | None = None,
+                       channel: str = "theta_adv"):
+    """A forcing profile ``t -> (nz,)`` that drives the SCM (``channel`` one of
+    :data:`CUM_CHANNELS`; default the θ forcing [K/s]): the interval means of the
+    recorded ``<channel>_cum`` when the LES forcing varied in time (``dt_s`` as in
+    :func:`surface_flux_fn`), else the constant ``<channel>`` profile."""
+    if channel not in CUM_CHANNELS:
+        raise BridgeError(f"unknown forcing channel {channel!r}; known {CUM_CHANNELS}")
+    cum = getattr(artifact, f"{channel}_cum")
+    if cum is not None:
         times = jnp.asarray(artifact.times_s, dtype=jnp.result_type(float))
         if times.shape[0] < 2:
-            raise BridgeError(f"{artifact.case_name}: theta_adv_cum needs >=2 frames")
-        return _cum_rate_fn(times, jnp.asarray(artifact.theta_adv_cum, times.dtype),
-                            dt_s)
-    if artifact.theta_adv is None:
-        raise BridgeError(f"{artifact.case_name}: artifact carries no θ forcing")
-    prof = jnp.asarray(artifact.theta_adv)
+            raise BridgeError(f"{artifact.case_name}: {channel}_cum needs >=2 frames")
+        return _cum_rate_fn(times, jnp.asarray(cum, times.dtype), dt_s)
+    if getattr(artifact, channel) is None:
+        raise BridgeError(f"{artifact.case_name}: artifact carries no {channel}")
+    prof = jnp.asarray(getattr(artifact, channel))
     return lambda t_seconds: prof
 
 
@@ -745,9 +769,10 @@ def artifact_to_scm_forcing(
         prof = getattr(artifact, name)
         if prof is not None:
             kwargs[target] = _const_profile_fn(_orient(prof))
-    if artifact.theta_adv_cum is not None:
-        _th = forcing_profile_fn(artifact, dt_s=dt_s)
-        kwargs["theta_adv"] = lambda t: _orient(_th(t))
+    for ch in CUM_CHANNELS:
+        if getattr(artifact, f"{ch}_cum") is not None:
+            kwargs[ch] = _oriented_fn(forcing_profile_fn(artifact, dt_s=dt_s, channel=ch),
+                                      _orient)
     kwargs["subsidence_tracers"] = subsidence_tracers(artifact)
     if artifact.prescribe == "T_s" and artifact.T_s is not None:
         kwargs["T_s"] = _interp_scalar_fn(artifact.times_s, artifact.T_s)

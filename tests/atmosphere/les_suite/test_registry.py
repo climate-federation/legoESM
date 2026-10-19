@@ -118,12 +118,12 @@ def test_selectors():
 # --- default catalog --------------------------------------------------------
 def test_default_catalog_registers_anchors_and_dry_grid():
     cases = register_default_catalog()
-    # 4 anchors + 3 further cloudy cases + 4 fluxes x 3 winds + 26 published
-    # full-setup cases = 45
-    assert len(cases) == 45
-    assert len(list_cases()) == 45
+    # 4 anchors + 4 further cloudy/moist cases (incl. GABLS3) + 4 fluxes x 3 winds
+    # + 26 published full-setup cases = 46
+    assert len(cases) == 46
+    assert len(list_cases()) == 46
     clear_registry()
-    assert len(register_default_catalog(include_published=False)) == 19
+    assert len(register_default_catalog(include_published=False)) == 20
     names = {c.name for c in cases}
     assert {"cbl_nieuwstadt", "sbl_gabls1", "bomex_cu", "dycoms_rf01_sc",
             "rico_cu", "dycoms_rf02_sc", "astex_sc"} <= names

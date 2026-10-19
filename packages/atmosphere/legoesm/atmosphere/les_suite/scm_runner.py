@@ -236,6 +236,13 @@ def _liquid_water_theta(theta: Array, q_c: Array, p: Array) -> Array:
     return liquid_water_theta(theta, q_c, exner)
 
 
+def _interp_fn(fn, z_les, z_scm):
+    """A time-varying LES-grid profile ``fn(t)`` on the SCM levels (grids checked
+    once here; the callback itself is trace-safe)."""
+    interp_profile(jnp.zeros_like(jnp.asarray(z_les)), z_les, z_scm)
+    return lambda t: jnp.interp(z_scm, z_les, fn(t))
+
+
 def build_cbl_scm_from_artifact(
     artifact: LESReferenceArtifact,
     turbulence: TurbulenceConfig | str,
@@ -327,18 +334,25 @@ def build_cbl_scm_from_artifact(
         # SCMForcing would rotate the wind toward u_g=v_g=0 (a silent wrong physics — the
         # Ekman balance is against the geostrophic wind, not zero). A sheared/stable artifact
         # always records u_geo; its absence is a malformed artifact → fail loudly.
-        if artifact.u_geo is None:
+        if artifact.u_geo is None and artifact.u_geo_cum is None:
             raise ValueError(
                 f"{artifact.case_name}: f_c={artifact.f_c:g} != 0 (Coriolis on) but the "
                 "artifact has no u_geo. A sheared CBL / stable SBL must record its "
                 "geostrophic wind; without it the SCM would spin down toward zero wind, "
                 "not the LES geostrophic balance.")
-        u_geo_scm = interp_profile(jnp.asarray(artifact.u_geo), z_les, z_scm)
-        v_geo_src = (artifact.v_geo if artifact.v_geo is not None
-                     else jnp.zeros_like(jnp.asarray(artifact.u_geo)))
-        v_geo_scm = interp_profile(jnp.asarray(v_geo_src), z_les, z_scm)
-        geo_kwargs = {"u_geo": _const_profile(u_geo_scm),
-                      "v_geo": _const_profile(v_geo_scm)}
+        if artifact.u_geo_cum is not None:
+            # a time-varying geostrophic wind (GABLS3): the step means of what the
+            # LES applied
+            geo_kwargs = {ch: _interp_fn(forcing_profile_fn(artifact, dt_s=dt,
+                                                            channel=ch), z_les, z_scm)
+                          for ch in ("u_geo", "v_geo")}
+        else:
+            u_geo_scm = interp_profile(jnp.asarray(artifact.u_geo), z_les, z_scm)
+            v_geo_src = (artifact.v_geo if artifact.v_geo is not None
+                         else jnp.zeros_like(jnp.asarray(artifact.u_geo)))
+            v_geo_scm = interp_profile(jnp.asarray(v_geo_src), z_les, z_scm)
+            geo_kwargs = {"u_geo": _const_profile(u_geo_scm),
+                          "v_geo": _const_profile(v_geo_scm)}
     # Moist regime (BOMEX/DYCOMS shallow-cumulus / stratocumulus). q_t IC (q_c≈0 at t=0 ⇒
     # q_v(t0)=q_t(t0)), plus the artifact's large-scale forcing: subsidence_w [m/s, +up],
     # the prescribed θ/q_v advective tendencies, and the surface moisture flux w_qv_s
@@ -414,11 +428,12 @@ def build_cbl_scm_from_artifact(
             if prof is not None:
                 moist_kwargs[fld] = _const_profile(
                     interp_profile(jnp.asarray(prof), z_les, z_scm))
-        if artifact.theta_adv_cum is not None:
-            # a time-varying θ forcing (DYCOMS's longwave cooling): the step mean
-            # of what the LES applied, so the SCM receives the same heat
-            _th = forcing_profile_fn(artifact, dt_s=dt)
-            moist_kwargs["theta_adv"] = lambda t: interp_profile(_th(t), z_les, z_scm)
+        for ch in ("theta_adv", "qv_adv"):
+            if getattr(artifact, f"{ch}_cum") is not None:
+                # a time-varying forcing (DYCOMS's longwave cooling, GABLS3's
+                # advection): the step mean of what the LES applied
+                moist_kwargs[ch] = _interp_fn(
+                    forcing_profile_fn(artifact, dt_s=dt, channel=ch), z_les, z_scm)
         if artifact.subsidence_w is not None:
             moist_kwargs["subsidence_tracers"] = subsidence_tracers(artifact)
     if not artifact.is_moist and artifact.theta_adv_cum is not None:

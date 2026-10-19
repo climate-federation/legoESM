@@ -1046,7 +1046,7 @@ def main(argv: list[str] | None = None) -> int:
     # body sources the RK stages applied + the sponge (reported separately).
     a_np = np.asarray(acc)
     names = dict(zip(sl.BUDGET_TERMS, a_np[:n_core]))
-    src_th = names["sfc_heat_flux"]
+    src_th = names["sfc_heat_flux"] + names["lid_heat_flux"]
     src_u = names["sfc_stress_x"] + names["coriolis_u"] + names["body_force_u"]
     src_v = names["sfc_stress_y"] + names["coriolis_v"] + names["body_force_v"]
     # Round-off is set by the column CONTENT (e.g. ∫θdz ~ 1e5 K m), so the residual
