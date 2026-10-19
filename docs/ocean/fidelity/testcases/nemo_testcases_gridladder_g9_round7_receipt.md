@@ -1,6 +1,6 @@
 # Grid ladder rung G9 — round 7 resumed receipt (gridladder_r52)
 
-Status: **LANDED KT-1 FIX; G9 NOT CERTIFIED; FOLLOW-UP ACQUISITION NEEDED.**
+Status: **LANDED KT-1 FIX; G9 NOT CERTIFIED; REPAIRED ACQUISITION NEEDED.**
 The admitted `trazdf` record rules out the matrix, solution, stage update, and
 end-of-stage fold as owners of the registered 105 T / 96 S kt-1 residue.  The
 first owning category is the **RHS terms**: the tracer advection RHS used a
@@ -121,7 +121,7 @@ after-advection T/S RHS, after-SBC T/S RHS, and the final T/S stage update.
 These boundaries will distinguish WZV/transport, centred-advection RHS, SBC,
 and update without fitting an unobserved value.
 
-The observer is additive and WRITE-only.  Admission requires a successful
+The observer is additive and WRITE-only. Admission requires a successful
 two-step run, all 12 arrays finite and complete, no trailing bytes, exactly
 one new record, and all 42 prior records byte-identical.  Preflight passed its
 synthetic Fortran layout reader, truncated-final-frame plant, and
@@ -131,7 +131,38 @@ non-additive-source plant, ending with:
 
 The preflight log SHA-256 is
 `48dc9e74caad0f9953c7bc9725fb17013a0cfee36c2e999e7e75ff63777ae53e`.
-No NEMO build or run occurred in the agent session.
+
+The operator then ran that revision. Its preflight passed, but the NEMO build
+failed: the stage-update observer had been inserted after the first line of a
+continued `prt_ctl` call and before its continuation. The compiler consequently
+parsed the observer as part of the call. The failed log SHA-256 is
+`3b39b489a24e31434f5f7375114eb0da35b4d63a4b7da9bdcfa2397da76ad078`.
+The failed configuration and partial evidence were moved to names ending in
+`_failed1`; the requested target and run names are free.
+
+Commit `6bb255842f4dba04313fa69b8423f1c5f51e9b39` repairs the acquisition.
+The patch anchor now contains the complete two-line `prt_ctl` statement, and
+the shared insertion helper rejects any anchor whose terminal line ends in
+`&`. The default preflight proves that rejection with an unchanged-source
+plant, then preprocesses the patched `stprk3_stg.F90` under the target keys and
+runs `gfortran -fsyntax-only`. The repaired script SHA-256 is
+`0cefd5c81196f58cee3e960b747a9803eb0a5feef2cb5189e19e7972c708dd24`.
+Its read-only preflight reports:
+
+```text
+STAGE2_OBSERVER_ADDITIVE_OK
+SYNTAX_PROOF_PASS stprk3_stg.f90
+G9R52_STAGE2_CONTINUED_ANCHOR_PLANT_REFUSED
+G9R52_STAGE2_NONADDITIVE_PATCH_PLANT_REFUSED
+G9R52_STAGE2_RECORD_OK profile=synthetic frames=5 finite_arrays=12 bytes=1156
+G9R52_STAGE2_MISSING_FRAME_PLANT_REFUSED
+G9R52_STAGE2_LAYOUT_SELFTEST_OK magic_bytes=16 frame_tag_bytes=16 arrays=12
+G9R52_STAGE2_PREFLIGHT_OK base=ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1 target=ORCA2G9_OMIP_L4_R52STG2 commit=6bb255842f4dba04313fa69b8423f1c5f51e9b39
+```
+
+The repaired preflight log SHA-256 is
+`aea711531ab2e36ff1aeb9831b6daacc81e5baed8de8e601d0c45dcd8961914f`.
+No NEMO build or run occurred in this repair session.
 
 ## 6. Gates and disposition
 
