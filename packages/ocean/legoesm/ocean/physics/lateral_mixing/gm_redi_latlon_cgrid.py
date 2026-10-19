@@ -3105,6 +3105,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                     "ah_wslp2": ah_wslp2,
                     "akz": akz,
                     "ah_wslp2_above": _ahw_ab, "akz_above": _akz_ab,
+                    "e3w_above": e3w_ab,
                     "e1e2t": e1t * e2t,
                     "e3w_kp1": e3w_kp1,
                     "qdiff_kp1": q - jnp.roll(q, -1, axis=2),
@@ -4325,6 +4326,7 @@ def gm_redi_tracer_tendency_latlon(
     native_bolus_slope_eta: jnp.ndarray | None = None,
     redi_flux_eta: jnp.ndarray | None = None,
     redi_divisor_eta: jnp.ndarray | None = None,
+    redi_msc_e3w_override: jnp.ndarray | None = None,
     dt: float | None = None,
     return_bolus_transport: bool = False,
     return_redi_diagnostics: bool = False, return_redi_slope_diagnostics: bool = False, native_slope_nmln_override: jnp.ndarray | None = None,
@@ -4861,6 +4863,7 @@ def gm_redi_tracer_tendency_latlon(
                 kappa_Redi_v=kappa_Redi_v_eff,
                 face_thickness_u=_flux_e3u,
                 face_thickness_v=_flux_e3v,
+                msc_e3w_override=redi_msc_e3w_override,
                 vertical_skew_evaluation=_skew_eval,
                 a33_evaluation=_a33_eval,
                 return_diagnostics=return_redi_diagnostics,
@@ -4898,6 +4901,7 @@ def gm_redi_tracer_tendency_latlon(
                 kappa_Redi_v=kappa_Redi_v_eff,
                 face_thickness_u=_flux_e3u,
                 face_thickness_v=_flux_e3v,
+                msc_e3w_override=redi_msc_e3w_override,
                 vertical_skew_evaluation=_skew_eval,
                 a33_evaluation=_a33_eval,
                 divisor_thickness=_divisor_e3t,
@@ -4993,6 +4997,7 @@ def compute_isoneutral_K33_latlon(
     native_slope_pn2: jnp.ndarray | None = None,
     native_slope_e3w: jnp.ndarray | None = None,
     native_slope_eta: jnp.ndarray | None = None,
+    msc_e3w_override: jnp.ndarray | None = None,
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
     dt: float | None = None,
@@ -5155,8 +5160,15 @@ def compute_isoneutral_K33_latlon(
         # own guard: with msc=F, akz = ah_wslp2 and traldf_iso.f90:88-91 never
         # reads e3w at all, so a coordinate the resolver would REFUSE must not
         # be refused for a value nothing consumes.
-        _e3w = (nemo_iso_a33_e3w(z_coord, _e3t, _J, T.dtype) if _msc
-                else _e3t)
+        if _msc and msc_e3w_override is not None:
+            _e3w = jnp.asarray(msc_e3w_override, dtype=T.dtype)
+            if _e3w.shape != T.shape:
+                raise ValueError(
+                    "msc_e3w_override must have the full tracer shape "
+                    f"{T.shape}, got {_e3w.shape}")
+        else:
+            _e3w = (nemo_iso_a33_e3w(z_coord, _e3t, _J, T.dtype) if _msc
+                    else _e3t)
         _, _akz = nemo_iso_a33(
             _aht, _um3, _vm3, _wm3, _wi, _wj,
             _e1u_c, _e2v_c, _e3w ** 2, dt=dt, msc=_msc, aht_v=_aht_v,

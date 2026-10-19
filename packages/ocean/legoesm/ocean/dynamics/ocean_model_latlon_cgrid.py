@@ -123,6 +123,7 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     gm_redi_density_and_jacobian,
     harmonic_lateral_kediss_eke_source,
     compute_isoneutral_K33_latlon,
+    nemo_iso_a33_e3w,
 )
 from legoesm.ocean.physics.lateral_mixing.eke import eke_apply_local_source
 # Public symbol from the blessed shared "_gm_redi_common" module pattern (see
@@ -6981,6 +6982,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_qsr_association = None
         _nemo_ws_process_boundaries = None
         _nemo_ws_process_Taa = None; _nemo_ws_ldf_diagnostics = None
+        _nemo_ws_redi_msc_e3w = None
         _nemo_ws_vertical_solve_trace = None
         _return_vertical_solve_trace = (
             (_return_tracer_process_trace
@@ -8232,6 +8234,19 @@ class LatLonCGridOceanModel:
                     state.H_bathy.data, half=True)
                 _h_s3_kmm = nemo_source_round(
                     _h_ref_ws * _stretch_s3_kmm[..., None])
+            _gm_stage_cfg = _cfg_b.gm_redi
+            if (_gm_stage_cfg is not None
+                    and _gm_stage_cfg.redi_flux_geometry_stage == "rk3_kmm"):
+                if _stretch_s3_kmm is None:
+                    raise ValueError(
+                        "rk3_kmm Redi geometry requires the stored stage-3 "
+                        "Kmm tracer stretch")
+                # traldf_iso_a33 and the A33 flux use e3w_1d*(1+r3t(Kmm))
+                # (traldf_iso.f90:825-829, :283), Kmm = this stored stretch.
+                if _gm_stage_cfg.msc_stabilize:
+                    _nemo_ws_redi_msc_e3w = nemo_iso_a33_e3w(
+                        _zc, _h_s3_kmm, _stretch_s3_kmm,
+                        _h_s3_kmm.dtype)
             # Stage 2's Kmm: NEMO's stored e3t_0*(1+r3t(Kmm)), r3t(Kmm) being
             # stage 1's r3t(Kaa) (stprk3_stg.f90:160-179), in the EMP dilution
             # and runoff divisors (trasbc.f90:284-286, sbcrnf.f90:281).
@@ -9943,6 +9958,11 @@ class LatLonCGridOceanModel:
                 getattr(gm_cfg, "gm_bolus_advection", "centred") == "through_fct"
                 and getattr(gm_cfg, "slope_scheme", "") == "nemo_iso_lap"
             )
+            _ldf_hook = self._nemo_ws_test_hooks.tracer_ldf_diagnostics
+            _redi_msc_e3w_override = (
+                _ldf_hook["msc_e3w"]
+                if isinstance(_ldf_hook, dict) and "msc_e3w" in _ldf_hook
+                else _nemo_ws_redi_msc_e3w)
             _gm_out = gm_redi_tracer_tendency_latlon(
                 _T_gm_in, _S_gm_in, _eta_gm_in, state_new.H_bathy.data,
                 _grid, _zc, gm_cfg,
@@ -9993,6 +10013,7 @@ class LatLonCGridOceanModel:
                     _eta_live_one_half
                     if getattr(_cfg_b, "tracer_time_integrator", "euler")
                     == "rk3_ws" else None),
+                redi_msc_e3w_override=_redi_msc_e3w_override,
                 return_bolus_transport=_want_bolus,
                 return_redi_diagnostics=((_return_tracer_process_trace or _return_ldf_diagnostic_trace) and self._nemo_ws_test_hooks.tracer_ldf_diagnostics is not None), return_redi_slope_diagnostics=((_return_tracer_process_trace or _return_ldf_diagnostic_trace) and (self._nemo_ws_test_hooks.tracer_ldf_diagnostics == "slope" or isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict))), native_slope_nmln_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("nmln") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
                 redi_face_thickness_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("face_thickness") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else (self._nemo_ws_test_hooks.tracer_ldf_diagnostics if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, tuple) else None)),
@@ -10049,6 +10070,7 @@ class LatLonCGridOceanModel:
                     native_slope_pn2=_gm_native_pn2,
                     native_slope_e3w=_gm_native_e3w,
                     native_slope_eta=state.eta.data,
+                    msc_e3w_override=_redi_msc_e3w_override,
                     # #1226: the SAME wall masks the tendency dispatcher uses,
                     # so the nemo_native K33 slopes/masks are bit-identical to
                     # the explicit operator's (staircase-aware; the K33-side

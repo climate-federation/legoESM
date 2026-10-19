@@ -33,6 +33,10 @@ REFUSED_SMOKE = Path(
 L2_RECORD = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/"
     "round17/oracle_l2_r17")
+L2_WALK_RECORD = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+    "gridladder_vmix_rounds/round18/oracle_l2_r18_ldf_walk/"
+    "oracle_l2_ldf_walk_kt00000001.bin")
 L2_OBSERVER = L2_RECORD / "observer_ldf_slopes"
 needs_l2_record = pytest.mark.skipif(
     not (L2_RECORD / "twin_a/oracle_step_entry_kt00000001.bin").is_file(),
@@ -401,13 +405,19 @@ def _observer_slopes():
 
 
 @needs_l2_record
+@pytest.mark.skipif(not L2_WALK_RECORD.is_file(), reason="no admitted L2 walk")
 @pytest.mark.slow
 def test_l2_production_face_geometry_and_slopes_match_admitted_values(
         l2_production_ldf_trace):
+    import jax
     import jax.numpy as jnp
     from legoesm.ocean.vertical import (
+        compute_ocean_jacobian,
         nemo_qco_live_face_thicknesses,
         nemo_qco_resolved_mesh_operands,
+    )
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        nemo_iso_a33_e3w,
     )
 
     l2, diag, steps = l2_production_ldf_trace
@@ -419,16 +429,31 @@ def test_l2_production_face_geometry_and_slopes_match_admitted_values(
         state.v_mask.data[..., None], (*state.v_mask.data.shape, nlev))
     ops = nemo_qco_resolved_mesh_operands(
         run.z_coord, run.grid, u3, v3, state.T.data.dtype, nlev)
-    expected = nemo_qco_live_face_thicknesses(
+    mean_ssh_faces = nemo_qco_live_face_thicknesses(
         steps["2_ssh_aa"], run.z_coord, ops.e3u_0, ops.e3v_0,
         ops.umask3, ops.vmask3, grid=run.grid)
     got = tuple(np.asarray(diag[name]) for name in ("e3u_flux", "e3v_flux"))
-    for actual, want in zip(got, expected, strict=True):
+    shape3 = (184, 152, 31)
+    count3 = int(np.prod(shape3))
+    direct_faces = []
+    for index in (7, 8):
+        full = np.memmap(
+            L2_WALK_RECORD, dtype="=f8", mode="r",
+            offset=68 + index * count3 * 8, shape=shape3, order="F")
+        direct_faces.append(np.asarray(
+            full[2:-2, 2:-2, :30]).transpose(1, 0, 2).copy())
+    for actual, want in zip(got, mean_ssh_faces, strict=True):
         np.testing.assert_array_equal(actual, np.asarray(want))
+    assert jax.config.x64_enabled
     assert tuple(hashlib.sha256(a.tobytes()).hexdigest() for a in got) == (
         "fe9697432f56aec0ae5375cef68d23a16f62ffbbbbe24b4079b3d75bd2a6c252",
         "eae07bc5b76ad220ef0026a27c2be796650fdee9daace911741d9fe233678134",
     )
+    # Against NEMO's dumped e3u/e3v_live: 36 U and 20 V faces differ, each
+    # within one ULP (normalized <=1e-15, the D127 bar).
+    for actual, want, n_ulp in zip(got, direct_faces, (36, 20), strict=True):
+        assert np.count_nonzero(actual != want) == n_ulp
+        assert np.max(np.abs(actual - want) / np.max(np.abs(want))) <= 1e-15
 
     # Both plants have fixed, measured value effects: aliasing face reference
     # thickness changes every face cell; using step-entry SSH changes only the
@@ -444,6 +469,32 @@ def test_l2_production_face_geometry_and_slopes_match_admitted_values(
                  for a, b in zip(got, alias, strict=True)) == (18803, 18300)
     assert tuple(np.count_nonzero(a != np.asarray(b))
                  for a, b in zip(got, entry, strict=True)) == (413030, 415175)
+
+    # traldf_iso_a33 uses e3w_1d*(1+r3t(Kmm)), where Kmm is stage 2's stored
+    # N+1/2 ratio.  The production diagnostic comes through the jitted model
+    # step above; the admitted NEMO operands below are independent values.
+    count2 = 184 * 152
+    arrays2_offset = 68 + 40 * count3 * 8
+    r3t_full = np.memmap(
+        L2_WALK_RECORD, dtype="=f8", mode="r", offset=arrays2_offset,
+        shape=shape3[:2], order="F")
+    r3t = np.asarray(r3t_full[2:-2, 2:-2].T).copy()
+    e3w_1d = np.memmap(
+        L2_WALK_RECORD, dtype="=f8", mode="r",
+        offset=arrays2_offset + 11 * count2 * 8, shape=(31,))
+    nemo_e3w = np.asarray(e3w_1d[:30])[None, None, :] * (
+        1.0 + r3t[..., None])
+    np.testing.assert_array_equal(
+        np.asarray(diag["zfw_operands"]["e3w_above"]), nemo_e3w)
+
+    entry_jacobian = compute_ocean_jacobian(
+        state.eta.data, state.H_bathy.data, run.z_coord)
+    entry_e3t = run.z_coord.dz_ref[None, None, :] * entry_jacobian[..., None]
+    entry_e3w = np.asarray(nemo_iso_a33_e3w(
+        run.z_coord, entry_e3t, entry_jacobian, state.T.data.dtype))
+    entry_delta = np.abs(entry_e3w - nemo_e3w)
+    assert np.count_nonzero(entry_delta) == 492990
+    assert np.max(entry_delta) == 5.102821413176116
 
     observer = _observer_slopes()
     for name in ("uslp", "vslp", "wslpi", "wslpj"):
@@ -474,25 +525,21 @@ def test_l2_kt1_record_requires_metric_eos80_and_north_fold(ladder):
     selected = ladder.run(root, **common)
     selected_status = statuses(selected)
     assert all(selected_status[name] == "AT-BAR"
-               for name in ("ssh", "uu_b", "vv_b", "u", "v"))
-    # The resumed score localises the retained debt to the first L2-only
-    # stage-3 tra_ldf update.  This is a record non-vacuity gate for the three
-    # corrected inputs, not a circular certificate for that downstream debt.
-    assert selected_status["T"] == selected_status["S"] == "DEBT"
+               for name in ("ssh", "uu_b", "vv_b", "u", "v", "T", "S"))
     assert tracer_values(selected) == (
-        (16428, 5.092867354017372e-05, 4.3848188806266483e-07),
-        (16428, 2.572830925373637e-05, 2.6974345661453047e-07),
+        (2, 7.105427357601002e-15, 4.3618394145414156e-17),
+        (2, 7.105427357601002e-15, 6.156559646205488e-17),
     )
     controls = (
         ("without_l2_metric", "l2_metric_selected", (
-            (16433, 0.02053621665387828, 0.0006725426316756697),
-            (16433, 0.020562389380618384, 0.00042658098417711006))),
+            (16433, 0.020541617987626548, 0.0006725116923845033),
+            (16433, 0.020566462820472253, 0.00042662880934269434))),
         ("without_l2_eos80", "l2_eos80_selected", (
-            (16429, 0.004663860261775676, 0.00013884468157169974),
-            (16429, 0.0014613557669136412, 3.852875336842716e-05))),
+            (16429, 0.004663857636465485, 0.0001388908523019663),
+            (16429, 0.0014607050156243417, 3.852705067169812e-05))),
         ("without_l2_north_fold", "l2_north_fold_selected", (
-            (16428, 0.0013241522320124322, 1.5965368634205867e-05),
-            (16428, 0.008011785046257103, 9.008299487551314e-05))),
+            (140, 0.0013241514577646551, 1.595933265099751e-05),
+            (140, 0.008011780370249966, 9.00824649513366e-05))),
         ("without_l2_kmm_face_geometry", "l2_kmm_face_geometry_selected", (
             (16432, 5.456048228147381e-05, 5.273630166024779e-07),
             (16433, 2.605229774843565e-05, 3.3306669931064525e-07))),
