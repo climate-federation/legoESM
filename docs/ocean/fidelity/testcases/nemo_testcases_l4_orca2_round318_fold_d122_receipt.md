@@ -184,8 +184,20 @@ and day-30 run were not rerun (step program identical).
   per-card selection, OMT validators, each landed switch changes the traced
   rung-0 step, plant, later-first classifier rule.  Reverting the recipe
   selection fails 6 (OMT-0 unaffected, as intended); restored, clean.
-- Receipt citation gate on this receipt, default gate and private-import
-  ratchet: see the gate lines below.
+- Seven stale pins that asserted the fold switches off now follow the
+  selection (rounds 282, 308, 310, 311 selection/import tests, the G1
+  transfer test, the OMT-1 and OMT-4 builder tests); the round-310 and
+  round-311 tests now check their own gates on cards without the fold rows,
+  the round-310 plant on OMT-1.  Neighbour batteries: 60 + 71 passed.
+- Citation map: 148 lines re-anchored by the repo tool; nine entries whose
+  ranges grew around imported lines aligned (the four advection.py entries
+  = the gridladder's own); four new entries for this receipt.
+- Receipt citation gate on this receipt: PASS, 12 citations, 0 failures,
+  0 unmapped, 0 map entries failing.
+- Default gate (land.sh set, JAX_ENABLE_X64=1, CPU, in three pieces under
+  the 10-minute cap): 118 + 18 + 8 = 144 passed, 0 failed; private-import
+  ratchet 6 passed within it; final re-run of citation gate + ratchet 23
+  passed.
 
 ## Not done / OPEN
 
