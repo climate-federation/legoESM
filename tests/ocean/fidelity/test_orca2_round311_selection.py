@@ -33,7 +33,7 @@ def cards():
     if not DECK.is_dir():
         pytest.skip("ORCA2 input deck is unavailable")
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-    return {
+    built = {
         "rung10": build_orca2_zps_card(DECK),
         "rung0": rung0.build_rung0_card(DECK),
         "omt0": omt0.build_omt0_card(DECK),
@@ -42,6 +42,11 @@ def cards():
         "omt3": omt3.build_omt3_card(DECK),
         "omt4": omt4.build_omt4_card(DECK),
     }
+    # The round-311 gate pins round 311's selection; round 318 adds G8's
+    # fold rows, so check it on the cards without them.
+    return {rung: card._replace(recipe=card.recipe._replace(
+        model_config=card.recipe.model_config._replace(nemo_ldf_fold_rows=False)))
+        for rung, card in built.items()}
 
 
 @pytest.mark.parametrize("rung", ALL)

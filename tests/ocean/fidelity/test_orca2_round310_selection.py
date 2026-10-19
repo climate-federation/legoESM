@@ -53,7 +53,7 @@ def test_g8_selection(cards, rung) -> None:
     assert (cfg.lateral_viscosity.A_h > 0.0) is on
     assert cfg.nemo_ldf_stored_f_area is on
     assert cfg.nemo_ldf_stage_r3f is on
-    assert cfg.nemo_ldf_fold_rows is False
+    assert cfg.nemo_ldf_fold_rows is on  # round 318 (Decision 137)
     assert cfg.rk3_stage1_ldf_source_order is on
 
 
@@ -85,5 +85,6 @@ def test_each_selected_statement_is_consumed(cards) -> None:
 
 def test_retained_selector_plant_fires(cards) -> None:
     with pytest.raises(GateError):
-        selected_card(cards["rung0"], arm="control", rung="rung0",
+        # Round 318 ships the fold rows on rung 0; OMT-1 ships no G8 statement.
+        selected_card(cards["omt1"], arm="control", rung="omt1",
                       plant="retained-selector")

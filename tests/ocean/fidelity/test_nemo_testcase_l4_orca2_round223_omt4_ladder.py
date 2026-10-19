@@ -17,6 +17,7 @@ def test_omt4_card_is_exact_tracer_advection_edge() -> None:
     report = gate.validate_omt4_card(DECK_ROOT, card)
     assert report["changed_model_config_fields"] == {
         "tracer_advection": {"before": "none", "after": "fct2"},
+        "fct_fold_exchange": {"before": False, "after": True},  # round 318
     }
     assert report["resolved_tracer_advection"] == {
         "scheme": "fct2", "nn_fct_h": 2, "nn_fct_v": 2,

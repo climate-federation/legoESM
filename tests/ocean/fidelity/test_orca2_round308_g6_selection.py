@@ -22,7 +22,8 @@ from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round308_g6
 )
 
 DECK = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
-OFF = {**STATEMENTS["FOLD"]}
+# Round 318 ships the fold unit, top-V and raw V mask; HPG fold geometry stays off.
+OFF = {**STATEMENTS["HPGF"]}
 
 
 @pytest.fixture(scope="module")
@@ -60,7 +61,7 @@ def test_arm_moves_exactly_its_statements(cards) -> None:
     assert not {f for f in cfg._fields if getattr(cfg, f) is not getattr(ctrl, f)}
     moved = selected_card(card, arm="RAWV", rung="rung0").recipe.model_config
     diff = {f for f in cfg._fields if getattr(cfg, f) != getattr(moved, f)}
-    assert diff == {"rk3_vector_raw_vmask"}
+    assert diff == set()  # round 318: the shipped card already selects it
     fold = selected_card(card, arm="FOLD", rung="rung0").recipe.model_config
     assert all(_get(fold, k) == v for k, v in STATEMENTS["FOLD"].items())
 

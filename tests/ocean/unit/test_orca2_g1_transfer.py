@@ -176,9 +176,10 @@ def test_orca2_and_omt_cards_select_executed_transferred_statements():
         ):
             assert getattr(config.barotropic, name) is True, name
         # vor_een's written order: G6-certified on np_CRV (round 308); OMT-0
-        # runs np_COR and leaves it off (round 309).  Top-V stays held.
+        # runs np_COR and leaves it off (round 309).  Top-V: round 318
+        # ships it with the fold set; flux-form OMT-0 states it off.
         assert config.een_vorticity_written_order is (card is not omt0_card)
-        assert config.rk3_fold_exchange_top_v_row is False
+        assert config.rk3_fold_exchange_top_v_row is (card is not omt0_card)
     assert omt0_card.recipe.model_config.barotropic.barotropic_flux_update_nemo_literal
     assert omt0_card.recipe.model_config.barotropic.barotropic_entry_depth_nemo_literal
     for card in (shipped, omt1_card, omt4_card):

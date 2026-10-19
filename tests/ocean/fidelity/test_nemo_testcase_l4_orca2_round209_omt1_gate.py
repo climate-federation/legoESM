@@ -96,6 +96,7 @@ def test_omt1_card_restores_only_vector_module() -> None:
         "momentum_advection", "momentum_flux_scheme",
         "vertical_momentum_scheme", "vorticity_scheme", "barotropic",
         *ladder_gate.omt0.OMT0_VECTOR_ONLY,
+        *ladder_gate.omt0.OMT0_FOLD_SET,   # round 318
     }
 
 

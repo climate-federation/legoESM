@@ -17,7 +17,12 @@ def _card():
     from scripts.validate.ocean_fidelity.orca2_l4 import (
         nemo_testcase_l4_orca2_round269_g1_decision96_gate as prior,
     )
-    return prior._selected_card("omt4", OMT4)
+    card = prior._selected_card("omt4", OMT4)
+    # Round 318 ships the fold unit; round 282's arms are relative to it off.
+    cfg = card.recipe.model_config
+    cfg = cfg._replace(barotropic=cfg.barotropic._replace(
+        barotropic_literal_fold_unit_vector_form=False))
+    return card._replace(recipe=card.recipe._replace(model_config=cfg))
 
 
 def test_g1b_orca2_selectors_default_off():
