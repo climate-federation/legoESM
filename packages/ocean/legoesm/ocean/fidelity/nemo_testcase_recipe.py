@@ -3878,11 +3878,8 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         rk3_end_of_stage_pivot_fold=_ORCA2G_TADV[case],
         # ... and the stage-1/2 transport wzv reads NEMO's (rDt, r3t(Kaa)) stage pair (stprk3_stg.f90:177, :221).
         rk3_stage_wzv_nemo_clock_pair=_ORCA2G_TADV[case],
-        # G9 round 4: stage 3 forms NEMO's Krhs and trazdf content (trazdf.f90:288-289).
-        rk3_stage3_tracer_krhs_nemo_order=_ORCA2G_TADV[case],
-        # G9 round 7: tracer WZV reads the stored Kmm r3t at stages 2/3
-        # (stprk3_stg.f90:177-179, :221-223, consumed at :297).
-        rk3_stage_tracer_wzv_stored_kmm_ratios=_ORCA2G_TADV[case],
+        # G9 rounds 4/7: NEMO Krhs/content order, and stored stage-2/3 Kmm r3t.
+        rk3_stage3_tracer_krhs_nemo_order=_ORCA2G_TADV[case], rk3_stage_tracer_wzv_stored_kmm_ratios=_ORCA2G_TADV[case],  # trazdf.f90:288-289; stprk3_stg.f90:177-179/:221-223  # noqa: E501
         # G6 round 7: the first wzv's ww reads NEMO's STORED r3t(Kaa) and
         # r3t(Kbb) (stp2d.f90:152, domqco.f90:257 -> sshwzv.f90:297-298).
         nemo_wzv_stored_r3_ratios=case == "ORCA2G6-vec",
