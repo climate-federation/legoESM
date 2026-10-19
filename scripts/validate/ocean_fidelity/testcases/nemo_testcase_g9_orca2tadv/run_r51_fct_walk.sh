@@ -196,26 +196,36 @@ admit() {
 import pathlib, struct, sys
 import numpy as np
 root = pathlib.Path(sys.argv[1])
+magic_expected = 'NEMO_G9_FCTW_1 '
+frames = (
+    ('entry', 5),
+    ('first_midpoint', 4),
+    ('average_rhs', 4),
+    ('anti_pre', 3),
+    ('anti_post', 3),
+    ('rhs_final', 1),
+)
 for tracer in (1, 2):
     path = root / f'oracle_g9_fct_walk_kt00000001_tr{tracer}.bin'
     with path.open('rb') as h:
-        magic = h.read(16).decode('ascii')
+        magic = h.read(len(magic_expected)).decode('ascii')
         head = struct.unpack('=13i', h.read(52))
         payload = h.read()
     version, kt, tr, kbb, kmm, kaa, krhs, nx, ny, nz, halo, bits, arrays = head[:13]
     n3 = nx * ny * nz
     expected = 6 * 16 + arrays * n3 * 8
-    if magic != 'NEMO_G9_FCTW_1 ' or (version, kt, tr, kbb, kmm, kaa, bits, arrays) != (1, 1, tracer, 1, 2, 3, 64, 20):
+    if magic != magic_expected or (version, kt, tr, kbb, kmm, kaa, bits, arrays) != (1, 1, tracer, 1, 2, 3, 64, 20):
         raise SystemExit(f'bad header {path.name}: {magic!r} {head}')
     if len(payload) != expected:
         raise SystemExit(f'bad payload {path.name}: {len(payload)}/{expected}')
-    # Skip five 16-byte labels; all remaining words must be finite fp64.
+    # The magic is 15 bytes, but every frame label written below it is 16.
     at = 0
-    for count in (5, 4, 4, 3, 3, 1):
+    for expected_label, count in frames:
         label = payload[at:at+16].decode('ascii').rstrip(); at += 16
         values = np.frombuffer(payload, dtype=np.float64, count=count*n3, offset=at)
-        if not label or values.size != count*n3 or not np.isfinite(values).all():
-            raise SystemExit(f'bad frame {path.name}: {label!r}')
+        if label != expected_label or values.size != count*n3 or not np.isfinite(values).all():
+            raise SystemExit(
+                f'bad frame {path.name}: {label!r}, expected {expected_label!r}')
         at += values.nbytes
     print(f'FCT_WALK_RECORD_OK tracer={tracer} arrays={arrays}')
 PY
