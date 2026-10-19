@@ -49,6 +49,7 @@ readonly DECK=$here/namelist_cfg ICE_DECK=$here/namelist_ice_cfg
 readonly ICE_REF=$NEMO_ROOT/cfgs/SHARED/namelist_ice_ref
 
 declare -a scratch_dirs=()
+scratch_path=
 cleanup() {
   local path
   for path in "${scratch_dirs[@]}"; do
@@ -58,10 +59,8 @@ cleanup() {
 trap cleanup EXIT
 
 new_scratch() {
-  local path
-  path=$(mktemp -d "$repo/.g9-r52-preflight.XXXXXX")
-  scratch_dirs+=("$path")
-  printf '%s\n' "$path"
+  scratch_path=$(mktemp -d "$repo/.g9-r52-preflight.XXXXXX")
+  scratch_dirs+=("$scratch_path")
 }
 
 sha() { sha256sum "$1" | awk '{print $1}'; }
@@ -243,7 +242,8 @@ PY
 
 layout_selftest() {
   local root writer record missing bytes
-  root=$(new_scratch)
+  new_scratch
+  root=$scratch_path
   writer=$root/write_layout.f90
   record=$root/$RECORD
   cat >"$writer" <<'F90'
@@ -293,7 +293,8 @@ preflight() {
   [[ "$(find "$R46" -maxdepth 1 -type f -name 'oracle_*kt0000000[12]*.bin' | wc -l)" -eq 42 ]] \
     || fail 'round-46 passivity set is not exactly 42 records'
   grep -Fq 'SUBROUTINE tra_zdf_imp' "$TRA_SRC" || fail 'NEMO trazdf source moved'
-  dry=$(new_scratch)
+  new_scratch
+  dry=$scratch_path
   cp "$TRA_SRC" "$dry/trazdf.F90"
   patch_trazdf "$dry/trazdf.F90"
   check_additive "$TRA_SRC" "$dry/trazdf.F90"
