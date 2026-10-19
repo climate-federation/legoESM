@@ -205,6 +205,7 @@ frames = (
     ('anti_post', 3),
     ('rhs_final', 1),
 )
+present_frames = frames[:-1]
 for tracer in (1, 2):
     path = root / f'oracle_g9_fct_walk_kt00000001_tr{tracer}.bin'
     with path.open('rb') as h:
@@ -213,28 +214,36 @@ for tracer in (1, 2):
         payload = h.read()
     version, kt, tr, kbb, kmm, kaa, krhs, nx, ny, nz, halo, bits, arrays = head[:13]
     n3 = nx * ny * nz
-    expected = 6 * 16 + arrays * n3 * 8
+    declared = len(frames) * 16 + arrays * n3 * 8
+    partial = sum(16 + count * n3 * 8 for _, count in present_frames)
     if magic != magic_expected or (version, kt, tr, kbb, kmm, kaa, bits, arrays) != (1, 1, tracer, 1, 2, 3, 64, 20):
         raise SystemExit(f'bad header {path.name}: {magic!r} {head}')
-    if len(payload) != expected:
-        raise SystemExit(f'bad payload {path.name}: {len(payload)}/{expected}')
+    if len(payload) != partial:
+        raise SystemExit(
+            f'bad payload {path.name}: {len(payload)}; expected partial={partial} '
+            f'or complete={declared}')
     # The magic is 15 bytes, but every frame label written below it is 16.
     at = 0
-    for expected_label, count in frames:
+    for expected_label, count in present_frames:
         label = payload[at:at+16].decode('ascii').rstrip(); at += 16
         values = np.frombuffer(payload, dtype=np.float64, count=count*n3, offset=at)
         if label != expected_label or values.size != count*n3 or not np.isfinite(values).all():
             raise SystemExit(
                 f'bad frame {path.name}: {label!r}, expected {expected_label!r}')
         at += values.nbytes
-    print(f'FCT_WALK_RECORD_OK tracer={tracer} arrays={arrays}')
+    if at != len(payload):
+        raise SystemExit(f'unread payload in {path.name}: {len(payload) - at} bytes')
+    print(
+        f'FCT_WALK_RECORD_PARTIAL tracer={tracer} present_frames={len(present_frames)} '
+        f'finite_arrays={sum(count for _, count in present_frames)} '
+        f'missing_frame=rhs_final declared_arrays={arrays}')
 PY
   mkdir -p "$EVIDENCE/manifest"
   printf '%s\n' "$COMMIT" >"$EVIDENCE/manifest/legoesm_commit"
   sha256sum "$TARGET/BLD/bin/nemo.exe" "$TARGET/MY_SRC/traadv_fct.F90" \
     "$TARGET/BLD/ppsrc/nemo/traadv_fct.f90" "$DECK" "$ICE_DECK" \
     >"$EVIDENCE/manifest/producers.sha256"
-  printf 'G9R51_ACQUISITION_PASS passivity_records=%s evidence=%s\n' "$n" "$EVIDENCE"
+  printf 'G9R51_ACQUISITION_PARTIAL passivity_records=%s missing_frame=rhs_final evidence=%s\n' "$n" "$EVIDENCE"
 }
 
 preflight
