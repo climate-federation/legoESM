@@ -154,4 +154,32 @@ OMT-2 only.
   before the cut); full runs detached to `gates/*_full.log`. land.sh runs
   both again at landing.
 
+## Review resume: tests strengthened (`29bbd4fe2`, no model change)
+Reviews: Claude LAND; codex HOLD on tests only (implementation clean). The
+four gradient tests checked finiteness only, so a guard that stopped the
+gradient would pass. Each now also compares the guarded VJP and JVP (jit,
+traced inputs, x64) on wet lanes with an unguarded reference:
+
+| test | unguarded reference | bound |
+|---|---|---|
+| TKE raw mixing length (en > 0) | plain `sqrt` formula, inline | exact |
+| literal IWM (N^2 > 0 everywhere) | `safe_sqrt` swapped for `jnp.sqrt` | 1e-14 rel (measured 6.8e-16) |
+| stage tracer RHS (wet cells) | analytic d(rhs)/d(e3t) = -rhs/e3t | 1e-13 rel |
+| literal tridiagonal solve (wet column) | dense solve of the same matrix | 1e-12 rel |
+
+The fused-gradient parser test now runs the entry point: missing or unknown
+`--rung` exits 2 before any run; a valid rung reaches the run with the
+default steps and losses.
+
+Plants (`test_plants/plants.log`, `plant_reasons.log`): `stop_gradient` in
+the `safe_sqrt` body (TKE and IWM fail), on the tracer divisor guard, on the
+solver pivot guard, and `--rung` made optional — each fails on its equality
+or exit-code line; restored, 5/5 pass; tree clean after each revert.
+
+Gates after the change: TKE terms 70, IWM 6, implicit literal 14, round-316
+instruments 3, ratchet 6, default citation gate 17 — all passed. Tracer RK3
+file: 20/37 passed, 0 failed in two 10-minute slices under machine load;
+the edited test passes alone; the full file passed 37/37 (44 min) before
+this change, which touches only that test's body.
+
 codex review: operator
