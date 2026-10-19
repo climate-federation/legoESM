@@ -51,3 +51,16 @@ New arms: G9N (G9 without KRHS3), VT (VMASK+TOPV), VTX (VT+FOLDX), FP
 | R318-P9 | G9N passes (c)+(d) on all seven pairs. | an exact row lost, first over-bar away, refusal. |
 | R318-P10 | G9NFOLD completes on rung 0, OMT-4, rung 10 (replaces P4 for the KRHS3-free set). | a refusal. |
 | R318-P11 | G9NTOPV's kt-10 max abs ssh error <= 1.5x control on rung 0 and OMT-4 (replaces P5). | > 1.5x. |
+
+## Addendum 2 (frozen before the arms3 runs; diagnostic, not a landing arm)
+
+G9NFOLD on rung 0: 195/200 rows moved, 195 toward / 0 away, first over-bar
+toward, kt-10 max abs ssh error 0.394 -> 0.0070 m.  Each fold member alone
+leans away.  Arms3 (rung 0, OMT-4, rung 10 independent): NO<member> =
+G9NFOLD without one of VMASK, FOLDX, FCTF, PIVOT, FOLDUNIT, RAWV, TOPV;
+FOLDSET = those seven only (no CLOCKP, TWZV, R3UV).
+
+| ID | Prediction | Falsifier |
+|---|---|---|
+| R318-P12 | Every NO<member> arm raises the kt-10 max abs ssh error on rung 0 above 2x G9NFOLD's (each fold member is needed). | some NO<member> stays within 2x. |
+| R318-P13 | FOLDSET's kt-10 max abs ssh error on rung 0 is within 2x G9NFOLD's (CLOCKP/TWZV/R3UV are not fold partners). | > 2x. |

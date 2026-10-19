@@ -80,6 +80,13 @@ STATEMENTS["G9NFOLD"] = {**STATEMENTS["G9N"], **STATEMENTS["FOLDUNIT"],
                          **STATEMENTS["RAWV"], **STATEMENTS["TOPV"]}
 STATEMENTS["G9NFOLDR"] = {**STATEMENTS["G9N"], **STATEMENTS["FOLDR"]}
 STATEMENTS["ALLN"] = {**STATEMENTS["G9NFOLD"], **STATEMENTS["FOLDR"]}
+# Addendum 2 (frozen before arms3): which members G9NFOLD needs.
+FOLD_MEMBERS = ("VMASK", "FOLDX", "FCTF", "PIVOT", "FOLDUNIT", "RAWV", "TOPV")
+for _m in FOLD_MEMBERS:
+    STATEMENTS["NO" + _m] = {k: v for k, v in STATEMENTS["G9NFOLD"].items()
+                             if k not in STATEMENTS[_m]}
+STATEMENTS["FOLDSET"] = {k: v for arm in FOLD_MEMBERS
+                         for k, v in STATEMENTS[arm].items()}
 RUNGS = ("rung0", "omt1", "omt2", "omt3", "omt4", "rung10")
 ARMS = ("control", "D122", *STATEMENTS)
 # This round's selection: filled in after the arms (addendum).
