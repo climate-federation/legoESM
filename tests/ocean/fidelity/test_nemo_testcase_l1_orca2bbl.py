@@ -234,18 +234,19 @@ def test_bbl_north_neighbour_of_the_pivot_row_is_the_mirror_of_the_row_below():
 
     import jax.numpy as jnp
 
-    from legoesm.ocean.physics import bbl_adv
+    from legoesm.grids.operators_latlon_cgrid import north_neighbor_T
     n = 8
     perm = np.array([0] + [n - i for i in range(1, n)])
-    grid = SimpleNamespace(fold=SimpleNamespace(is_active=True, pivot_row_stored=True,
-                                                perm_T=perm))
+    grid = SimpleNamespace(fold=SimpleNamespace(
+        is_active=True, pivot_row_stored=True, fold_j=0, perm_T=perm))
     x = np.arange(4 * n, dtype=np.float64).reshape(4, n)
-    got = np.asarray(jax.jit(lambda v: bbl_adv._north_cell(v, grid, True))(jnp.asarray(x)))
+    got = np.asarray(jax.jit(
+        lambda v: north_neighbor_T(v, grid, True))(jnp.asarray(x)))
     assert np.array_equal(got[:-1], x[1:])
     assert np.array_equal(got[-1], x[-2, perm])
     assert not np.array_equal(got[-1], x[-1, perm])           # not the pivot row's own mirror
-    legacy = np.asarray(bbl_adv._north_cell(jnp.asarray(x), grid))
+    legacy = np.asarray(north_neighbor_T(jnp.asarray(x), grid, False))
     assert np.array_equal(legacy[-1], x[-1, perm])
     with pytest.raises(ValueError, match="pivot"):
-        bbl_adv._north_cell(jnp.asarray(x), SimpleNamespace(fold=SimpleNamespace(
-            is_active=True, pivot_row_stored=False, perm_T=perm)), True)
+        north_neighbor_T(jnp.asarray(x), SimpleNamespace(fold=SimpleNamespace(
+            is_active=True, pivot_row_stored=False, fold_j=0, perm_T=perm)), True)

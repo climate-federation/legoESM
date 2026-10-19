@@ -1,0 +1,70 @@
+--- src/OCE/LDF/ldfslp.F90
++++ ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/MY_SRC/ldfslp.F90
+@@ -107,6 +107,7 @@
+       REAL(wp), INTENT(in), DIMENSION(:,:,:) ::   pn2   ! Brunt-Vaisala frequency (locally ref.)
+       !!
+       INTEGER  ::   ji , jj , jk                 ! dummy loop indices
++      INTEGER  ::   vmix_dump_unit
+       INTEGER  ::   iik, iikm1, itmp, iku, ikv   ! local integer
+       REAL(wp) ::   zeps, zm1_g, zm1_2g, z1_16, zcofw, z1_slpmax ! local scalars
+       REAL(wp) ::   zci, zfi, zau, zbu, zai, zbi, zmli   !   -      -
+@@ -121,6 +122,7 @@
+       REAL(wp), DIMENSION(A2D(1))   ::  zvslp_hml, zwslpj_hml, r1_hmlv
+       REAL(wp), DIMENSION(A2D(1))   ::                         r1_hmlw
+       REAL(wp), DIMENSION(A2D(2),2) ::  zgru, zgrv
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: vmix_raw_u, vmix_raw_v, vmix_raw_wi, vmix_raw_wj
+       !!----------------------------------------------------------------------
+       !
+       IF( ln_timing )   CALL timing_start('ldf_slp')
+@@ -133,6 +135,12 @@
+       !
+       zuslp_hml(:,:) = 0._wp   ;   zwslpi_hml(:,:) = 0._wp
+       zvslp_hml(:,:) = 0._wp   ;   zwslpj_hml(:,:) = 0._wp
++      IF( kt == nit000 ) THEN
++         ALLOCATE( vmix_raw_u(jpi,jpj,jpk), vmix_raw_v(jpi,jpj,jpk), &
++            &      vmix_raw_wi(jpi,jpj,jpk), vmix_raw_wj(jpi,jpj,jpk) )
++         vmix_raw_u(:,:,:) = 0._wp ; vmix_raw_v(:,:,:) = 0._wp
++         vmix_raw_wi(:,:,:) = 0._wp ; vmix_raw_wj(:,:,:) = 0._wp
++      ENDIF
+       !
+       ! nmln calculation in zdfmxl is only on internal points
+       DO_2D( 1, 2, 1, 2 )
+@@ -235,6 +243,10 @@
+             !                                              ! store 1/hml*(dxR/dzR)_ml at nmln level
+             zuslp_hml(ji,jj) = zmli * zwz(ji,jj) * r1_hmlu(ji,jj) + ( 1._wp - zmli ) * zuslp_hml(ji,jj)
+             zvslp_hml(ji,jj) = zmlj * zww(ji,jj) * r1_hmlv(ji,jj) + ( 1._wp - zmlj ) * zvslp_hml(ji,jj)
++            IF( kt == nit000 ) THEN
++               vmix_raw_u(ji,jj,jk) = zwz(ji,jj)
++               vmix_raw_v(ji,jj,jk) = zww(ji,jj)
++            ENDIF
+          END_2D
+          !dir$ VECTOR
+          !
+@@ -295,6 +307,10 @@
+             !                                        ! store 1/hml*(dxR/dzR)_ml at nmln+1 level (1st level above lower T-point in ML)
+             zwslpi_hml(ji,jj) = zmlk * zwz(ji,jj) * r1_hmlw(ji,jj) + ( 1._wp - zmlk ) * zwslpi_hml(ji,jj)
+             zwslpj_hml(ji,jj) = zmlk * zww(ji,jj) * r1_hmlw(ji,jj) + ( 1._wp - zmlk ) * zwslpj_hml(ji,jj)
++            IF( kt == nit000 ) THEN
++               vmix_raw_wi(ji,jj,jk) = zwz(ji,jj)
++               vmix_raw_wj(ji,jj,jk) = zww(ji,jj)
++            ENDIF
+          END_2D
+          !dir$ VECTOR
+          !                           !== horizontal Shapiro filter + decrease in vicinity of topography  ==!
+@@ -318,6 +334,16 @@
+       END DO  ! end jk
+       !                              !==  Lateral boundary conditions  ==!
+       CALL lbc_lnk( 'ldfslp', uslp , 'U', -1.0_wp , vslp , 'V', -1.0_wp , wslpi, 'W', -1.0_wp, wslpj, 'W', -1.0_wp )
++      IF( kt == nit000 ) THEN
++         OPEN( NEWUNIT=vmix_dump_unit, FILE='vmix_r17_slopes.bin', &
++            &  STATUS='REPLACE', ACCESS='STREAM', FORM='UNFORMATTED' )
++         WRITE(vmix_dump_unit) jpi, jpj, jpk
++         WRITE(vmix_dump_unit) ts(:,:,:,jp_tem,Kbb), ts(:,:,:,jp_sal,Kbb), &
++            & ssh(:,:,Kbb), r3t(:,:,Kmm), nmln, hmlp, prd, pn2, uslp, vslp, &
++            & wslpi, wslpj, vmix_raw_u, vmix_raw_v, vmix_raw_wi, vmix_raw_wj
++         CLOSE(vmix_dump_unit)
++         DEALLOCATE( vmix_raw_u, vmix_raw_v, vmix_raw_wi, vmix_raw_wj )
++      ENDIF
+       !
+       IF(sn_cfctl%l_prtctl) THEN
+          CALL prt_ctl(tab3d_1=uslp , clinfo1=' slp  - u : ', tab3d_2=vslp,  clinfo2=' v : ')

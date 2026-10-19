@@ -214,3 +214,32 @@ def test_rk3_card_steps_with_nemo_face_shear_and_live_face_metric(gate):
                            surface_forcing=surface)
     fields = phase3.lego_fields(state)
     assert all(np.all(np.isfinite(np.asarray(fields[k]))) for k in ("T", "S", "u", "v", "ssh"))
+
+
+@needs_oracle
+def test_gyre_tke_bundle_does_not_inherit_l2_bn2_source_rounding(
+        gate, monkeypatch):
+    """The carried-slope L2 rounding selector is explicitly non-TKE.
+
+    GYRE also carries an EOS-80/TEOS-10 step-entry bundle, but its TKE card's
+    own ``nemo_bn2_source_rounded`` switch is false.  Spying on the production
+    builder makes removal of the non-TKE guard observable without comparing
+    graphs or signatures.
+    """
+    from legoesm.ocean import eos as eos_mod
+
+    card, ladder, _year, _owners = gate.resolve_programs()
+    assert ladder.physics.vertical_mixing.scheme == "tke"
+    assert ladder.physics.vertical_mixing.tke.nemo_bn2_source_rounded is False
+    seen = []
+    real = eos_mod.compute_buoyancy_frequency_nemo_bn2
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["source_rounded"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(eos_mod, "compute_buoyancy_frequency_nemo_bn2", spy)
+    model = gate._model(card, ladder)
+    bundle = model._tke_step_entry_n2_bundle(card.recipe.initial_state)
+    assert bundle is not None
+    assert seen == [False, False]

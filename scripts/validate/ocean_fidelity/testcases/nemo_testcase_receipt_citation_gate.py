@@ -1802,6 +1802,8 @@ CITATION_MAP = {
     # --- GRIDLADDER round 30 (G4 round 9 receipt) ---
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stprk3_stg.f90:215': ('r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )', 2),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:221': ('r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )', 2),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:229':
+        'CASE ( 3 )           !==  Stage 3  ==!   Kbb = N   ;   Kmm = N+1/2   ;   Kaa = N+1',
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/domqco.f90:257': ('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2),
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcrnf.f90:281': 'update h_rnf to be depth of top box',
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trazdf.f90:231-232': [
@@ -8327,6 +8329,10 @@ CITATION_MAP = {
         ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 4),
         'zvslp_hml(ji,jj) = zmlj * zww(ji,jj) * r1_hmlv(ji,jj)', 35,
     ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfslp.f90:245-250': [
+        'zdepu = 0.5_wp *',
+        '&              - (e3v_3d(ji,jj,mikv', 6,
+    ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfslp.f90:260-275': [
         'horizontal Shapiro filter + decrease along coastal boundaries',
         '* ( vmask(ji  ,jj,jk) + vmask(ji  ,jj,jk+1) ) * 0.5_wp', 16,
@@ -8381,6 +8387,14 @@ CITATION_MAP = {
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:154':
         ('CALL traldf_iso_a33( Kmm, ah_wslp2, akz )', 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:183-204': [
+        ('zdit(ji,jj,ik  ) =', 1),
+        ('zdkt(ji,jj,ikp1) =', 2), 22,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:230-231': [
+        ('zA11 = e2_e1u(ji,jj) * (e3u_3d', 1),
+        ('zA22 = e1_e2v(ji,jj) * (e3v_3d', 1), 2,
+    ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:257-291': [
         ('A31  A32  explicit part of A33', 1),
         ('* r1_e1e2t(ji,jj) / (e3t_3d', 1), 35,

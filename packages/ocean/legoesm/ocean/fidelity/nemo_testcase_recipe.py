@@ -2427,9 +2427,9 @@ _SMT3_RN_LD = 200.0e3            # lateral diffusive length         [m]
 
 def _orca2_isoneutral_gm_redi(
     kappa_redi: float,
-    *,
-    slope_prd_evaluation: str = "nemo_literal",
-    north_fold: bool = False,
+    *, slope_prd_evaluation: str = "nemo_literal", north_fold: bool = False,
+    redi_flux_reference_thickness_evaluation: str = "tpoint_alias",
+    redi_flux_geometry_stage: str = "step_entry", slope_uv_source_rounding: bool = False,
 ):
     """ORCA2's shared standard-isoneutral ``&namtra_ldf`` selection.
 
@@ -2456,15 +2456,15 @@ def _orca2_isoneutral_gm_redi(
         mld_criterion="n2_integral",
         slope_n2="nemo_bn2",
         slope_n2_evaluation="carried_step_entry",
-        # stprk3.f90:188-189 evaluates EOS and ldf_slp once, before the RK
-        # stages, from the step-entry time level.  The existing before-step
-        # bridge maps that level to T_before/S_before/eta_before under WS-RK3
-        # and deliberately aliases the current state under forward Euler.
         slope_prd_geometry_stage="before_step",
         slope_prd_evaluation=slope_prd_evaluation,
         slope_metric_evaluation="nemo_reciprocal",
+        slope_uv_source_rounding=slope_uv_source_rounding,
         slope_face_thickness_evaluation="nemo_qco_live",
         redi_flux_face_thickness_evaluation="nemo_qco_live",
+        redi_flux_reference_thickness_evaluation=(
+            redi_flux_reference_thickness_evaluation),
+        redi_flux_geometry_stage=redi_flux_geometry_stage,
         slope_depth_evaluation="nemo_qco_live_literal",
         nemo_slope_shapiro=True,
         nemo_slope_north_fold=north_fold,
@@ -3923,9 +3923,9 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         # scalar records aht0=0.5*rn_Ud*rn_Ld but is not the executed field.
         model_config = model_config._replace(
             gm_redi=_orca2_isoneutral_gm_redi(
-                0.5 * _SMT3_RN_UD * _SMT3_RN_LD,
-                slope_prd_evaluation="nemo_eos80_literal",
-                north_fold=True))
+                0.5 * _SMT3_RN_UD * _SMT3_RN_LD, slope_prd_evaluation="nemo_eos80_literal",
+                north_fold=True, redi_flux_reference_thickness_evaluation="nemo_native",
+                redi_flux_geometry_stage="rk3_kmm", slope_uv_source_rounding=True))
     if case in _ORCA2G_SI3_CASES:
         # ORCA2 resolves ln_drgice_imp=T.  SI3 supplies rCdU_ice through the
         # post-SI3 record; all other rungs retain the appended default False.
@@ -4536,8 +4536,11 @@ def _orca2l2_isoneutral_selected(gm) -> bool:
         "slope_prd_geometry_stage": "before_step",
         "slope_prd_evaluation": "nemo_eos80_literal",
         "slope_metric_evaluation": "nemo_reciprocal",
+        "slope_uv_source_rounding": True,
         "slope_face_thickness_evaluation": "nemo_qco_live",
         "redi_flux_face_thickness_evaluation": "nemo_qco_live",
+        "redi_flux_reference_thickness_evaluation": "nemo_native",
+        "redi_flux_geometry_stage": "rk3_kmm",
         "slope_depth_evaluation": "nemo_qco_live_literal",
         "nemo_slope_shapiro": True,
         "nemo_slope_north_fold": True,

@@ -409,6 +409,11 @@ class GMRediConfig(NamedTuple):
     # reciprocal as a separate fp64 value before multiplying, matching
     # domhgr.F90:140 + ldfslp.F90:225-226. NEMO-identity DINO and GYRE cards opt in.
     slope_metric_evaluation: str = "division"
+    # Preserve the compiled scalar assignment boundaries in ldfslp's U/V
+    # slope and Shapiro statements under JIT.  False is the historical graph;
+    # ORCA2 L2 selects True after its instrumented slope record exposed the
+    # otherwise last-bit-only fused discrepancy.
+    slope_uv_source_rounding: bool = False
     # Vertical face thickness used by ldfslp's 7 km stability limiter.
     # ``static_face`` is the historical partial-cell min construction.
     # ``nemo_qco_live`` applies NEMO's NOW-SSH r3u/r3v dilation to that raw
@@ -420,6 +425,16 @@ class GMRediConfig(NamedTuple):
     # dilated by NOW SSH, matching traldf_iso_scheme.h90:73/90. Only the two
     # DINO NEMO cards opt in.
     redi_flux_face_thickness_evaluation: str = "tpoint_jacobian"
+    # Reference face ladder consumed by the live traldf_iso thickness build.
+    # ``tpoint_alias`` preserves the historical e3t_0 alias.  ``nemo_native``
+    # resolves the separately-carried e3u_0/e3v_0 arrays and their masks; the
+    # ORCA2 L2 card selects it because its partial-cell face ladders differ from
+    # e3t_0 at coastal and bottom steps.
+    redi_flux_reference_thickness_evaluation: str = "tpoint_alias"
+    # Sea-level time level used by the live face ladder.  ``step_entry`` is the
+    # historical path.  ``rk3_kmm`` selects the materialized stage-2 half-step
+    # state consumed as Kmm by stage-3 tra_ldf; ORCA2 L2 alone opts in.
+    redi_flux_geometry_stage: str = "step_entry"
     # Live depths and U/V-point depth accumulation used by ldfslp's mixed-
     # layer ramp. ``legacy_jacobian_t_surface`` preserves the historical
     # Jacobian and T-column subtraction. ``nemo_qco_live_literal`` uses raw

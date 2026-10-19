@@ -50,6 +50,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.source_rounding import nemo_source_round
+from legoesm.grids.operators_latlon_cgrid import north_neighbor_T
 
 
 __physics_contract__ = {
@@ -135,25 +136,6 @@ class BBLDiffusiveGeometry(NamedTuple):
     v_active: jnp.ndarray
 
 
-def _north_cell(value: jnp.ndarray, grid, pivot_ghost: bool = False
-                ) -> jnp.ndarray:
-    """T-point value immediately north, including an ORCA T-fold.
-
-    ``pivot_ghost``: the ghost north of a stored T-pivot row is the mirror of
-    the row below it (lbcnfd.f90:588-590); False mirrors the top row itself.
-    """
-    north = jnp.concatenate([value[1:], value[-1:]], axis=0)
-    fold = getattr(grid, "fold", None)
-    if fold is not None and bool(getattr(fold, "is_active", False)):
-        if pivot_ghost:
-            from legoesm.grids.operators_latlon_cgrid import fold_ghost_source_T
-            if not bool(getattr(fold, "pivot_row_stored", False)):
-                raise ValueError("pivot_ghost needs a stored T-pivot row")
-            return north.at[-1].set(fold_ghost_source_T(value, fold)[0][fold.perm_T])
-        north = north.at[-1].set(value[-1, fold.perm_T])
-    return north
-
-
 def _gather_level(field: jnp.ndarray, level: jnp.ndarray) -> jnp.ndarray:
     return jnp.take_along_axis(field, level[..., None], axis=-1)[..., 0]
 
@@ -195,9 +177,9 @@ def nemo_bbl_diffusive_geometry(
 
     dep_bot = _gather_level(depth, bot_k)
     east_bot = jnp.roll(bot_k, -1, axis=1)
-    north_bot = _north_cell(bot_k, grid, pivot_ghost)
+    north_bot = north_neighbor_T(bot_k, grid, pivot_ghost)
     east_dep = jnp.roll(dep_bot, -1, axis=1)
-    north_dep = _north_cell(dep_bot, grid, pivot_ghost)
+    north_dep = north_neighbor_T(dep_bot, grid, pivot_ghost)
     mgrhu = jnp.sign(b(east_dep - dep_bot)).astype(jnp.int32)
     mgrhv = jnp.sign(b(north_dep - dep_bot)).astype(jnp.int32)
 
@@ -271,8 +253,10 @@ def nemo_bbl_diffusive_coefficients(
     zsign_u = sign_half(arg_u)
     ahu = b(b(half - zsign_u) * geom.ahu_bbl_0)
 
-    Tn, Sn = _north_cell(Tb, grid, pivot_ghost), _north_cell(Sb, grid, pivot_ghost)
-    an, bn = _north_cell(alpha, grid, pivot_ghost), _north_cell(beta, grid, pivot_ghost)
+    Tn = north_neighbor_T(Tb, grid, pivot_ghost)
+    Sn = north_neighbor_T(Sb, grid, pivot_ghost)
+    an = north_neighbor_T(alpha, grid, pivot_ghost)
+    bn = north_neighbor_T(beta, grid, pivot_ghost)
     za = b(an + alpha)
     zb = b(bn + beta)
     zgdrho_v = b(b(b(za * b(Tn - Tb)) - b(zb * b(Sn - Sb)))
@@ -319,7 +303,7 @@ def apply_bbl_diffusive_tendency(
     def apply(rhs, tracer):
         zptb = _gather_level(jnp.asarray(tracer), geom.bot_k)
         east, west = jnp.roll(zptb, -1, axis=1), jnp.roll(zptb, 1, axis=1)
-        north = _north_cell(zptb, grid, pivot_ghost)
+        north = north_neighbor_T(zptb, grid, pivot_ghost)
         south = jnp.concatenate([zptb[:1], zptb[:-1]], axis=0)
         ahu_w = jnp.roll(ahu, 1, axis=1)
         ahv_s = jnp.concatenate([jnp.zeros_like(ahv[:1]), ahv[:-1]], axis=0)

@@ -344,18 +344,136 @@ exact/AT-BAR at normalized error <=1e-15 and DEBT otherwise.
   even continuation then carries propagated dynamic debt. Every dry cell is
   exact.
 
-The stage walk is decisive: stages 1 and 2 are exact in every field, and the
-first differing state is stage-3 T/S. The coefficient, EOS-80 PRD, N2/MLD and
-all four final slope fields have independent NEMO value checks, including the
-pivot. The first remaining differing L2-only statement is therefore the
-in-place `tra_ldf` flux-divergence increment at
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:287-291`; the candidate's
-vectorised returned-tendency association is the retained difference already
-declared in section 2. Re-scoring after that walk gives the same DEBT boundary.
-L2 is held, not certified, and the next work is an independently recorded
-horizontal/vertical flux-statement walk rather than another input substitution.
+The stage walk established only that stages 1 and 2 are exact and stage-3 T/S
+is the first differing state. Its attribution of the first differing statement
+to `ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:287-291` is **retracted** by
+the admitted operand walk in section 7: the first mismatch was already in the
+face thickness consumed at the top of the horizontal-flux loop. The score in
+this section is superseded below.
+
+## 7. HOLD disposition: GYRE isolation, provenance, operator walk, and re-score
+
+### GYRE is unchanged
+
+The carried-slope BN2 rounding selection is now explicitly restricted to the
+non-TKE L2 branch. GYRE's TKE path continues to obey its own false
+`nemo_bn2_source_rounded` selector. The production spy observes two GYRE BN2
+calls and `source_rounded=False` on both; removing the non-TKE guard makes that
+value check fail.
+
+The ten-step GYRE record check was run both at parent
+`56aeb343b5f7beff61891b1ce3cd1316c87ce3bb` and on this correction. All 50
+trajectory field rows, all 20 barotropic rows, both first-over-bar summaries,
+and the status are identical. The two residual archives are byte-identical at
+SHA-256
+`3b3d865cf5c82d38e15b24356492572a85546e51e35f70c2e7c89e5b9cb9df5b`.
+Both JSON records, both residual archives, and their producer/comparison
+manifest are durable under
+`gridladder_vmix_rounds/round17/gyre_bn2_regression/`; no evidence remains
+dependent on `/tmp`.
+
+### The slope observer is reproducible and admitted
+
+The exact write-only instrumentation is committed as
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_orca2iso/ldfslp_slope_dump.F90.patch`
+(SHA-256
+`a8d8223cc3be43c58e440f30c8d4924afe4c8a362e64c93e66eeb88aaf324f8f`).
+The dump, instrumented source, executable, build configuration, namelists,
+log, marker, checksums, and provenance now live under
+`gridladder_vmix_rounds/round17/oracle_l2_r17/observer_ldf_slopes/`.
+The unmodified producer source is pinned at
+`8d0e6d42e7c19dca848734179584198d2735b154ab3fbea02a7f693129dc53de`,
+the instrumented source at
+`2cd8e353c2b85c5eb6d5fc040043325c722e427508c86e4f1e5d118ca96d987b`,
+the executable at
+`91064e46d04610c47e2786affea83ead177e24cc07cb88e7a3fb18cd651745c5`,
+and the dump at
+`e8b07d7f8dfffdbbe69020f125eb628af9529ee8079595a5a5e65572023d5724`.
+The observer reproduces 42 of 45 same-named admitted streams byte for byte,
+including both step-entry streams and every stage stream at kt 1 and 2; the
+three moving streams are unrelated SI3 observers and do not feed the dump.
+
+The admitted production value gate runs the actual jitted L2 step. It checks
+the four final slope arrays exactly against that dump. Before the source-order
+repair, U and V differed in 1,610 and 1,465 cells by at most
+`4.336808689942018e-19`, while both W slopes were exact. A statement walk found
+PRD, PN2, gradients, metrics, bounds, and masks exact; the first U/V mismatch
+was the face-depth assignment. NEMO forms `zdepu` and `zdepv` with explicit
+scalar statement boundaries at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfslp.f90:245-250`. L2 alone now preserves
+those boundaries through the U/V slope and Shapiro statements. All four
+production slope arrays are exact; disabling that selector fails the dump
+comparison. L1's BBL and L2 now use the same shared north-neighbour helper.
+
+### Compiled-order `traldf_iso_lap` walk and correction
+
+At kt 1, SSH, barotropic U/V, and 3-D U/V were exact, but the old stage-3
+lateral trend differed in all 430,168 wet tracer cells: 32,227 exceeded
+`1e-6` of scale, 1,431 exceeded `1e-3`, and the maximum normalised difference
+was 0.16. Tracer, coefficient, masks, and all slopes matched the admitted
+observer before entry to the operator. The old attribution to the final
+increment was therefore false.
+
+Walking `traldf_iso_lap` in compiled order showed exact tracer-gradient
+statements at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:183-204`. The first differing
+statements were `zA11` and `zA22`: NEMO multiplies native `e3u_3d`/`e3v_3d`
+by the live `r3u`/`r3v` at Kmm at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:230-231`; the candidate had
+aliased both reference ladders to `e3t_0` and used step-entry sea level.
+Stage 3 defines Kmm as the stage-2, N+1/2 time level at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:229`.
+
+The measured lead separated the two inputs. Half-step sea level with the old
+T-point alias left 24,929 cells above `1e-6`, 1,433 above `1e-3`, and the same
+0.16 maximum. Native face reference ladders plus half-step Kmm reduced the
+direct-operator residual to 7,878 cells above `1e-6`, zero above `1e-3`, and
+maximum `3.55187264925e-4`. The fix is L2-only: resolve the already-carried
+native face ladders and use the materialised stage-2 sea level only for L2's
+stage-3 Redi flux geometry. The jitted value gate exactly reconstructs both
+face arrays independently, pins their canonical hashes, and plants two
+failures: the T-point alias changes 18,803 U-face and 18,300 V-face values,
+while step-entry sea level changes 413,030 U-face and 415,175 V-face values.
+
+### Superseding kt-1 score
+
+With all HOLD repairs enabled, kt-1 SSH, barotropic U/V, and 3-D U/V remain
+exact/AT-BAR. T and S remain DEBT, but the score is improved and the owner is
+no longer misattributed:
+
+| field | unequal | max abs | RMS |
+|---|---:|---:|---:|
+| T | 16,428 | `5.092867354017372e-05` | `4.3848188806266483e-07` |
+| S | 16,428 | `2.572830925373637e-05` | `2.6974345661453047e-07` |
+
+The remaining residual has not been localised past the corrected face
+geometry and is not claimed to begin at the final divergence increment.
+Metric, EOS-80, north-fold, and Kmm-geometry omissions each have fixed exact
+T/S value tuples in the record gate; the former `!= signature` assertions are
+gone. The native-face and U/V source-order plants are checked directly at the
+operator operands, where their value effects are observable rather than
+rounded away in the final state.
+
+The review-confirmed purity result is retained: one-step jaxprs are identical
+for G5, V1-V5, OMT-0-4, rung 0, VORTEX, and SMT-1/2. L1, full ORCA2, DINO,
+and SMT-3/4 have changed jaxprs but bit-identical values. The final test and
+gate results supersede the earlier counts in this receipt:
+
+- GYRE production BN2 selector: **1 passed**; ten-step record payloads and
+  residual archive are bit-identical as recorded above;
+- focused L2/L1/private-import set: **32 passed, 2 deselected in 248.30 s**;
+- jitted production face/slope value gate: **1 passed in 158.57 s**;
+- kt-1 selected score plus four exact omission plants: **1 passed in
+  540.25 s**;
+- exact clean ORCA2 landing list from `claude_rounds/land.sh`, including the
+  citation tests, private-import ratchet, and parallel-receipt gate:
+  **145 passed in 1294.27 s**;
+- this receipt's explicit citation gate: **PASS**, 61 citations, 0 unmapped,
+  0 failures, and 0 map entries failing audit. `git diff --check` is clean.
+
+codex review: operator
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r17/repo
 ACQUISITION_NEEDED: NONE
 DECISION_NEEDED: NONE
-ROUND_STATUS: L2_SCORED_DEBT — review omissions fixed and independently controlled; both labels cover kt=1..10 with dry cells exact; first remaining debt is the L2-only stage-3 tra_ldf update at traldf_iso.f90:287-291; L2 is not certified; codex review: operator.
+ROUND_STATUS: L2 SCORED; DEBT; NOT CERTIFIED

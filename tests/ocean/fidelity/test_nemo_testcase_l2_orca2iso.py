@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import subprocess
 import sys
@@ -32,6 +33,7 @@ REFUSED_SMOKE = Path(
 L2_RECORD = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/"
     "round17/oracle_l2_r17")
+L2_OBSERVER = L2_RECORD / "observer_ldf_slopes"
 needs_l2_record = pytest.mark.skipif(
     not (L2_RECORD / "twin_a/oracle_step_entry_kt00000001.bin").is_file(),
     reason="the operator's admitted L2 record is not on this machine")
@@ -131,7 +133,9 @@ def test_l2_card_is_g5_plus_shared_isoneutral_config_only(cards):
     assert recipe._orca2l2_isoneutral_selected(l2.recipe.model_config.gm_redi)
     assert l2.recipe.model_config.gm_redi == recipe._orca2_isoneutral_gm_redi(
         0.5 * recipe._SMT3_RN_UD * recipe._SMT3_RN_LD,
-        slope_prd_evaluation="nemo_eos80_literal", north_fold=True)
+        slope_prd_evaluation="nemo_eos80_literal", north_fold=True,
+        redi_flux_reference_thickness_evaluation="nemo_native",
+        redi_flux_geometry_stage="rk3_kmm", slope_uv_source_rounding=True)
     assert l2.recipe.model_config.gm_redi.slope_prd_geometry_stage == "before_step"
     assert l2.recipe.model_config.gm_redi.kappa_GM == 0.0
     assert l2.recipe.model_config.tracer_advection == "none"
@@ -153,6 +157,9 @@ def test_selector_refuses_each_l2_isoneutral_wiring_or_nonzero_eiv(cards):
                    {"slope_prd_geometry_stage": "current_step"},
                    {"slope_prd_evaluation": "nemo_literal"},
                    {"nemo_slope_north_fold": False},
+                   {"redi_flux_reference_thickness_evaluation": "tpoint_alias"},
+                   {"redi_flux_geometry_stage": "step_entry"},
+                   {"slope_uv_source_rounding": False},
                    {"kappa_GM": 1.0}):
         bad = l2.recipe.model_config._replace(gm_redi=gm._replace(**change))
         failures = recipe._orca2g1_selector_failures(
@@ -299,7 +306,8 @@ def test_l2_north_fold_opens_faces_crosses_pivot_and_folds_slopes(
     assert np.asarray(wslpj)[-1, 39, 20] == -0.00024243406967063396
 
 
-def test_l2_carried_slope_n2_resolves_orca2s_eos80_branch(cards):
+def test_l2_carried_slope_n2_resolves_orca2s_eos80_branch(cards, monkeypatch):
+    from legoesm.ocean import eos as eos_mod
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
     )
@@ -307,10 +315,139 @@ def test_l2_carried_slope_n2_resolves_orca2s_eos80_branch(cards):
     _, l2 = cards
     run = l2.recipe
     model = LatLonCGridOceanModel(run.grid, run.z_coord, run.model_config)
+    seen = []
+    real = eos_mod.compute_buoyancy_frequency_nemo_bn2
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["source_rounded"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(eos_mod, "compute_buoyancy_frequency_nemo_bn2", spy)
     bundle = model._tke_step_entry_n2_bundle(run.initial_state)
     assert bundle is not None
     assert bundle.rn2.shape[-1] == run.initial_state.T.data.shape[-1] - 1
     assert np.isfinite(np.asarray(bundle.rn2)).all()
+    assert seen == [True]
+
+
+def test_l2_observer_dump_has_committed_reproducer_and_pinned_producers():
+    patch = L2 / "ldfslp_slope_dump.F90.patch"
+    if not (L2_OBSERVER / "vmix_r17_slopes.bin").is_file():
+        pytest.skip("round-17 write-only slope observer is not on this machine")
+
+    def sha(path):
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    assert sha(patch) == "a8d8223cc3be43c58e440f30c8d4924afe4c8a362e64c93e66eeb88aaf324f8f"
+    assert sha(L2_OBSERVER / "vmix_r17_slopes.bin") == \
+        "e8b07d7f8dfffdbbe69020f125eb628af9529ee8079595a5a5e65572023d5724"
+    assert sha(L2_OBSERVER / "nemo_observer.exe") == \
+        "91064e46d04610c47e2786affea83ead177e24cc07cb88e7a3fb18cd651745c5"
+    provenance = (L2_OBSERVER / "PROVENANCE.txt").read_text()
+    assert "8d0e6d42e7c19dca848734179584198d2735b154ab3fbea02a7f693129dc53de" in provenance
+    assert "37fc7d2e294e8c4f42e398675fb99c13a8294c39bca037199637afe6d525168d" in provenance
+
+
+@pytest.fixture(scope="module")
+def l2_production_ldf_trace(cards):
+    import jax
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+
+    sys.path.insert(0, str(CASES / "nemo_testcase_g5_orca2ice"))
+    import g5_records
+
+    _, l2 = cards
+    forcing, surface = g5_records.nemo_supplied_forcing(
+        l2, L2_RECORD / "twin_a", 1)
+    model = LatLonCGridOceanModel(
+        l2.recipe.grid, l2.recipe.z_coord, l2.recipe.model_config,
+        iwm_forcing=l2.recipe.iwm_forcing)
+    # The hook is write-only and intentionally unavailable to public config.
+    # Install it after construction, as the ladder's other private observers do.
+    model._nemo_ws_test_hooks = _NEMOWSRK3TestHooks(
+        tracer_ldf_diagnostics={})
+    trace = jax.device_get(model.step(
+        l2.recipe.initial_state, dt=l2.dt_s, freshwater=forcing,
+        surface_forcing=surface))
+    steps = g5_records.read_step(
+        L2_RECORD / "twin_a", 1,
+        (L2_RECORD / "twin_b", L2_RECORD / "twin_c"), 30)
+    return l2, trace.ldf_diagnostics, steps
+
+
+def _observer_slopes():
+    with (L2_OBSERVER / "vmix_r17_slopes.bin").open("rb") as handle:
+        ni, nj, nk = map(int, np.fromfile(handle, np.int32, 3))
+        n3, n2 = ni * nj * nk, ni * nj
+
+        def a3():
+            return np.fromfile(handle, np.float64, n3).reshape(
+                (ni, nj, nk), order="F").transpose(1, 0, 2)
+
+        def a2(dtype=np.float64):
+            return np.fromfile(handle, dtype, n2).reshape(
+                (ni, nj), order="F").T
+
+        _ = a3(), a3(), a2(), a2(), a2(np.int32), a2(), a3(), a3()
+        names = ("uslp", "vslp", "wslpi", "wslpj")
+        return {name: a3()[2:-2, 2:-2, :30] for name in names}
+
+
+@needs_l2_record
+@pytest.mark.slow
+def test_l2_production_face_geometry_and_slopes_match_admitted_values(
+        l2_production_ldf_trace):
+    import jax.numpy as jnp
+    from legoesm.ocean.vertical import (
+        nemo_qco_live_face_thicknesses,
+        nemo_qco_resolved_mesh_operands,
+    )
+
+    l2, diag, steps = l2_production_ldf_trace
+    run, state = l2.recipe, l2.recipe.initial_state
+    nlev = state.T.data.shape[-1]
+    u3 = jnp.broadcast_to(
+        state.u_mask.data[..., None], (*state.u_mask.data.shape, nlev))
+    v3 = jnp.broadcast_to(
+        state.v_mask.data[..., None], (*state.v_mask.data.shape, nlev))
+    ops = nemo_qco_resolved_mesh_operands(
+        run.z_coord, run.grid, u3, v3, state.T.data.dtype, nlev)
+    expected = nemo_qco_live_face_thicknesses(
+        steps["2_ssh_aa"], run.z_coord, ops.e3u_0, ops.e3v_0,
+        ops.umask3, ops.vmask3, grid=run.grid)
+    got = tuple(np.asarray(diag[name]) for name in ("e3u_flux", "e3v_flux"))
+    for actual, want in zip(got, expected, strict=True):
+        np.testing.assert_array_equal(actual, np.asarray(want))
+    assert tuple(hashlib.sha256(a.tobytes()).hexdigest() for a in got) == (
+        "fe9697432f56aec0ae5375cef68d23a16f62ffbbbbe24b4079b3d75bd2a6c252",
+        "eae07bc5b76ad220ef0026a27c2be796650fdee9daace911741d9fe233678134",
+    )
+
+    # Both plants have fixed, measured value effects: aliasing face reference
+    # thickness changes every face cell; using step-entry SSH changes only the
+    # live Kmm stretch.  These are values, not graph/signature assertions.
+    e3t0 = run.z_coord.nemo_e3t_0[..., :nlev]
+    alias = nemo_qco_live_face_thicknesses(
+        steps["2_ssh_aa"], run.z_coord, e3t0, e3t0,
+        ops.umask3, ops.vmask3, grid=run.grid)
+    entry = nemo_qco_live_face_thicknesses(
+        steps["e_ssh_bb"], run.z_coord, ops.e3u_0, ops.e3v_0,
+        ops.umask3, ops.vmask3, grid=run.grid)
+    assert tuple(np.count_nonzero(a != np.asarray(b))
+                 for a, b in zip(got, alias, strict=True)) == (18803, 18300)
+    assert tuple(np.count_nonzero(a != np.asarray(b))
+                 for a, b in zip(got, entry, strict=True)) == (413030, 415175)
+
+    observer = _observer_slopes()
+    for name in ("uslp", "vslp", "wslpi", "wslpj"):
+        np.testing.assert_array_equal(np.asarray(diag[name]), observer[name])
 
 
 @needs_l2_record
@@ -327,10 +464,11 @@ def test_l2_kt1_record_requires_metric_eos80_and_north_fold(ladder):
         return {row["name"].rsplit(".", 1)[-1]: row["status"]
                 for row in out["per_kt"][0]["rows"]}
 
-    def tracer_signature(out):
+    def tracer_values(out):
         rows = {row["name"].rsplit(".", 1)[-1]: row
                 for row in out["per_kt"][0]["rows"]}
-        return tuple((rows[name]["n_unequal"], rows[name]["max_abs"])
+        return tuple((rows[name]["n_unequal"], rows[name]["max_abs"],
+                      rows[name]["rms"])
                      for name in ("T", "S"))
 
     selected = ladder.run(root, **common)
@@ -341,16 +479,30 @@ def test_l2_kt1_record_requires_metric_eos80_and_north_fold(ladder):
     # stage-3 tra_ldf update.  This is a record non-vacuity gate for the three
     # corrected inputs, not a circular certificate for that downstream debt.
     assert selected_status["T"] == selected_status["S"] == "DEBT"
-    selected_signature = tracer_signature(selected)
-    for flag, stamp in (
-            ("without_l2_metric", "l2_metric_selected"),
-            ("without_l2_eos80", "l2_eos80_selected"),
-            ("without_l2_north_fold", "l2_north_fold_selected")):
+    assert tracer_values(selected) == (
+        (16428, 5.092867354017372e-05, 4.3848188806266483e-07),
+        (16428, 2.572830925373637e-05, 2.6974345661453047e-07),
+    )
+    controls = (
+        ("without_l2_metric", "l2_metric_selected", (
+            (16433, 0.02053621665387828, 0.0006725426316756697),
+            (16433, 0.020562389380618384, 0.00042658098417711006))),
+        ("without_l2_eos80", "l2_eos80_selected", (
+            (16429, 0.004663860261775676, 0.00013884468157169974),
+            (16429, 0.0014613557669136412, 3.852875336842716e-05))),
+        ("without_l2_north_fold", "l2_north_fold_selected", (
+            (16428, 0.0013241522320124322, 1.5965368634205867e-05),
+            (16428, 0.008011785046257103, 9.008299487551314e-05))),
+        ("without_l2_kmm_face_geometry", "l2_kmm_face_geometry_selected", (
+            (16432, 5.456048228147381e-05, 5.273630166024779e-07),
+            (16433, 2.605229774843565e-05, 3.3306669931064525e-07))),
+    )
+    for flag, stamp, expected in controls:
         omitted = ladder.run(root, **common, **{flag: True})
         assert omitted[stamp] is False
         rows = statuses(omitted)
         assert rows["T"] == "DEBT" or rows["S"] == "DEBT", flag
-        assert tracer_signature(omitted) != selected_signature, flag
+        assert tracer_values(omitted) == expected, flag
 
 
 def test_shared_constructor_keeps_vortex_smt3_selection_unchanged():

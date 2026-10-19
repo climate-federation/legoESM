@@ -9982,10 +9982,10 @@ class LatLonCGridOceanModel:
                 # resolves kappa_GM = 0.0 and gm_bolus_advection = "centred",
                 # so the bolus is not even requested there.
                 native_bolus_slope_eta=_eta_gm_in,
-                # tra_ldf e3u/e3v use the step-entry Nnn SSH (Kmm).
-                redi_flux_eta=state.eta.data,
+                # traldf_iso.f90:230-231 uses Kmm; only L2 selects stage-2 SSH.
+                redi_flux_eta=(_eta_live_one_half if gm_cfg.redi_flux_geometry_stage == "rk3_kmm" else state.eta.data),
                 # Stage-3 tra_ldf receives the stage-2 output as Kmm
-                # (stprk3_stg.f90:531-532).  Its T-point divisor therefore
+                # (stprk3_stg.f90:229).  Its T-point divisor therefore
                 # uses the materialized one-half-stage sea surface, while the
                 # once-per-step slope and current face path above retain their
                 # independently cited operands.
@@ -11820,7 +11820,7 @@ class LatLonCGridOceanModel:
             source_rounded=bool(
                 (_tke_active and getattr(
                     tke_cfg, "nemo_bn2_source_rounded", False))
-                or (_gm_carried and _n2_eos_form in ("eos80", "teos10"))),
+                or (not _tke_active and _gm_carried and _n2_eos_form in ("eos80", "teos10"))),
         )
         _bn2_selector = self._nemo_ws_test_hooks.bn2_intermediate
         _bn2_override = self._nemo_ws_test_hooks.bn2_alpha_beta_override

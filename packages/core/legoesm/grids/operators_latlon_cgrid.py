@@ -271,16 +271,24 @@ def fold_pivot_half_row(a, fold, stagger, *, scalar_sign=1.0):
     return out.at[-1, 0].set(fold.vector_sign_u * a[-1, 1])
 
 
-def north_neighbor_T(interior, grid):
+def north_neighbor_T(interior, grid, pivot_ghost: bool = True):
     """T-point value immediately north, including a stored ORCA T-pivot.
 
     The last row is the north ghost of the pivot row.  On a de-haloed
     T-pivot mesh NEMO sources it from the row below the pivot and applies the
-    shared T permutation (``lbcnfd.f90:584-590``).  This helper deliberately
+    shared T permutation (``lbcnfd.f90:584-590``).  With ``pivot_ghost=False``
+    the final neighbour is the mirrored top row itself, the legacy BBL
+    geometry convention; a regular grid simply repeats its last row.  The
+    default fold-ghost arm deliberately
     refuses non-local/no-fold grids: callers select it only for an executed
     north-fold branch and retain their historical wall/roll path otherwise.
     """
     fold = getattr(grid, "fold", None)
+    if not pivot_ghost:
+        north = jnp.concatenate([interior[1:], interior[-1:]], axis=0)
+        if fold is not None and bool(getattr(fold, "is_active", False)):
+            north = north.at[-1].set(interior[-1, fold.perm_T])
+        return north
     if not (fold_is_local(grid)
             and bool(getattr(fold, "pivot_row_stored", False))):
         raise ValueError(
