@@ -3370,6 +3370,10 @@ class LatLonCGridOceanConfig(NamedTuple):
     # (p2dt*e3t(Kmm))*Krhs (trazdf.f90:284-289).  False keeps the content
     # e3t(Kbb)*T - dt*(flux divergence) + (dt*e3t(Kmm))*sources.
     rk3_stage3_tracer_krhs_nemo_order: bool = False
+    # The tracer-owned stage-2/3 WZV reads r3t(Kmm) from the ratio slot the
+    # preceding RK stage stored (stprk3_stg.f90:177-179, :221-223), not from
+    # the real-equal interpolated sea level.  False preserves prior cards.
+    rk3_stage_tracer_wzv_stored_kmm_ratios: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

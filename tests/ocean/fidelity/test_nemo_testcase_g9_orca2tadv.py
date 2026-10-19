@@ -111,10 +111,13 @@ def test_g9_card_is_g5_plus_fct2_and_the_folded_transport_vmask(tmp_path):
     assert [f for f in c5._fields if getattr(c5, f) != getattr(c9, f)] == [
         "tracer_advection", "rk3_stage_transport_raw_vmask", "rk3_stage_transport_fold_exchanges",
         "fct_fold_exchange", "rk3_end_of_stage_pivot_fold", "rk3_stage_wzv_nemo_clock_pair",
-        "rk3_stage3_tracer_krhs_nemo_order"]
+        "rk3_stage3_tracer_krhs_nemo_order",
+        "rk3_stage_tracer_wzv_stored_kmm_ratios"]
     assert (c5.rk3_stage3_tracer_krhs_nemo_order, c9.rk3_stage3_tracer_krhs_nemo_order) == (False, True)
     assert (c5.rk3_end_of_stage_pivot_fold, c9.rk3_end_of_stage_pivot_fold) == (False, True)
     assert (c5.rk3_stage_wzv_nemo_clock_pair, c9.rk3_stage_wzv_nemo_clock_pair) == (False, True)
+    assert (c5.rk3_stage_tracer_wzv_stored_kmm_ratios,
+            c9.rk3_stage_tracer_wzv_stored_kmm_ratios) == (False, True)
     assert (c5.tracer_advection, c9.tracer_advection) == ("none", "fct2")
     assert c9.rk3_stage_transport_raw_vmask is c9.rk3_stage_transport_fold_exchanges is True
     assert c5.rk3_stage_transport_raw_vmask is c5.rk3_stage_transport_fold_exchanges is False
@@ -278,6 +281,8 @@ def test_g9_transport_vmask_reaches_the_step_on_the_fold_band_only(tmp_path):
 
 
 G9_RECORD = ROUNDS / "round46/oracle_g9_r46/twin_a"
+G9_R52_ZRHS = (ROUNDS / "round52/oracle_g9_r52/twin_walk/"
+               "oracle_g9_trazdf_zrhs_kt00000001.bin")
 
 
 def _nemo_stage_zfv(stage):
@@ -529,16 +534,16 @@ def test_g9_stage_transport_wzv_reads_nemos_stage_clock_pair(tmp_path):
 
 
 @needs_inputs
-@pytest.mark.skipif(not (G9_RECORD / "oracle_rktracer_stage3_kt00000001.bin").is_file(),
-                    reason="no round-46 G9 record")
+@pytest.mark.skipif(not (G9_RECORD / "oracle_rktracer_stage3_kt00000001.bin").is_file()
+                    or not G9_R52_ZRHS.is_file(), reason="no round-46/r52 G9 record")
 def test_g9_stage3_tracer_content_is_nemos_trazdf_zrhs(tmp_path):
     """trazdf.f90:284-289: zrhs = e3t(Kbb)*T(Kbb) + (p2dt*e3t(Kmm))*Krhs, Krhs the
     FCT rate plus sbc, runoff, qsr in call order (stprk3_stg.f90:604-717).  kt 1,
-    jitted step, state and forcing traced, x64: on every wet cell the card's
-    pre-implicit T and S content is at the value bar against NEMO's literal
-    zrhs (evaluated from the record's Kbb, after-qsr Krhs, r3t and e3t_0).
-    The assertion is value-based, not a fitted unequal-cell count; the
-    statement's value is pinned by the synthetic test below."""
+    jitted ordinary step, state and forcing traced, x64.  NEMO's round-52
+    content record is reconstructed bit-exactly from the passivity-identical
+    round-46 RHS operands, and the card's ordinary final T/S is bit-exact
+    against the record's downstream solution.  Removing only the G9
+    stored-Kmm tracer-WZV wiring restores the scored 105 T / 96 S residue."""
     import jax
     import netCDF4
     sys.path[:0] = [str(CASES), str(CASES / "nemo_testcase_g5_orca2ice")]
@@ -560,6 +565,22 @@ def test_g9_stage3_tracer_content_is_nemos_trazdf_zrhs(tmp_path):
     n3, n2 = nx * ny * nz, nx * ny
     f3 = lambda i: v[i * n3:(i + 1) * n3].reshape((nx, ny, nz), order="F").transpose(1, 0, 2)[2:-2, 2:-2, :nk]  # noqa: E731
     f2 = lambda i: v[16 * n3 + i * n2:16 * n3 + (i + 1) * n2].reshape((nx, ny), order="F").T[2:-2, 2:-2, None]  # noqa: E731
+    with G9_R52_ZRHS.open("rb") as h:
+        assert h.read(16).decode() == "NEMO_G9_ZRHS_1  "
+        r52 = struct.unpack("=13i", h.read(52))
+        assert r52 == (1, 1, 1, 2, 3, 3, nx, ny, nz, 2, 64, 4, 10)
+        assert h.read(16).decode().rstrip() == "zrhs_content"
+        r52_content = np.fromfile(h, np.float64, count=2 * n3).reshape(
+            (nx, ny, nz, 2), order="F").transpose(1, 0, 2, 3)[
+                2:-2, 2:-2, :nk]
+        assert h.read(16).decode().rstrip() == "matrix_diags"
+        h.seek(4 * n3 * 8, 1)
+        assert h.read(16).decode().rstrip() == "forward_state"
+        h.seek(2 * n3 * 8, 1)
+        assert h.read(16).decode().rstrip() == "solution"
+        r52_solution = np.fromfile(h, np.float64, count=2 * n3).reshape(
+            (nx, ny, nz, 2), order="F").transpose(1, 0, 2, 3)[
+                2:-2, 2:-2, :nk]
     mesh = netCDF4.Dataset(G9_RECORD / "mesh_mask.nc")
     e3t0 = np.asarray(mesh["e3t_0"][0]).transpose(1, 2, 0)[..., :nk]
     tmask = np.asarray(mesh["tmask"][0]).transpose(1, 2, 0)[..., :nk].astype(float)
@@ -567,16 +588,25 @@ def test_g9_stage3_tracer_content_is_nemos_trazdf_zrhs(tmp_path):
     e3bb, e3mm = e3t0 * (1.0 + f2(0) * tmask), e3t0 * (1.0 + f2(1) * tmask)
     dt = float(card.dt_s)
 
-    model = LatLonCGridOceanModel(card.recipe.grid, zc, cfg, _nemo_ws_test_hooks=(
-        _NEMOWSRK3TestHooks(expose_pre_implicit_content=True)))
-    content = jax.device_get(jax.jit(lambda s, f, g: model.step(
-        s, dt=card.dt_s, freshwater=f, surface_forcing=g))(s0, fw, sf))
+    def step(selected):
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, zc,
+            cfg._replace(rk3_stage_tracer_wzv_stored_kmm_ratios=selected))
+        return jax.device_get(jax.jit(lambda s, f, g: model.step(
+            s, dt=card.dt_s, freshwater=f, surface_forcing=g))(s0, fw, sf))
+
+    selected, ablated = step(True), step(False)
     for name, i in (("T", 0), ("S", 1)):
         zrhs = e3bb * f3(10 + i) + (dt * e3mm) * f3(6 + i)   # Kbb, after-qsr (= after-ldf) Krhs
-        got = np.asarray(getattr(content, name).data)
-        max_ref = np.abs(zrhs[wet]).max()
-        max_abs = np.abs(got[wet] - zrhs[wet]).max()
-        assert max_abs <= 1.0e-15 * max_ref, (name, max_abs, max_ref)
+        assert np.array_equal(zrhs[wet], r52_content[..., i][wet]), name
+        ref = r52_solution[..., i]
+        assert np.array_equal(ref[wet], f3(14 + i)[wet]), name
+        wet1 = wet[..., 0]
+        got = np.asarray(getattr(selected, name).data)[..., 0]
+        assert np.array_equal(got[wet1], ref[..., 0][wet1]), name
+        old = np.asarray(getattr(ablated, name).data)[..., 0]
+        assert int(np.count_nonzero(old[wet1] != ref[..., 0][wet1])) == {
+            "T": 105, "S": 96}[name]
 
 
 def test_g9_stage3_krhs_and_content_are_nemos_statements(monkeypatch):
