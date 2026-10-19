@@ -8412,17 +8412,33 @@ CITATION_MAP = {
         ('pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +', 1),
         ('* r1_e1e2t(ji,jj) / (e3t_3d', 1), 5,
     ],
-    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/sbcmod.f90:340-350': [
-        ('MOD( nitend - nit000 + 1, nn_fsbc) /= 0', 1),
-        ('MOD( nn_stock, nn_fsbc) /= 0', 1), 11,
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domain.f90:323-324': [
+        ('READ(numnam_ref(MAX(INDEX(numnam_ref,"&namrun "),1):),namrun', 1),
+        ('READ(numnam_cfg(MAX(INDEX(numnam_cfg,"&namrun "),1):),namrun', 1), 2,
     ],
-    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domain.f90:323-397': [
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domain.f90:367-368': [
         ('nit000 = nn_it000', 1),
-        ('IF( .NOT. ln_rst_list ) THEN', 1), 75,
+        ('nitend = nn_itend', 1), 2,
     ],
-    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90:94-120': [
-        ('nitrst = nn_stocklist( nrst_lst )', 1),
-        ('IF( kt == nitrst - 1 .OR. nn_stock == 1', 1), 27,
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domain.f90:390':
+        ('IF( .NOT. ln_rst_list ) THEN', 1),
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/sbcmod.f90:342-344': [
+        ('MOD( nitend - nit000 + 1, nn_fsbc) /= 0', 1),
+        ("CALL ctl_stop( ctmp1, 'Impossible to properly do model restart' )", 1),
+        3,
+    ],
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/sbcmod.f90:346-348': [
+        ('MOD( nn_stock, nn_fsbc) /= 0', 1),
+        ("CALL ctl_stop( ctmp1, 'Impossible to properly do model restart' )", 2),
+        3,
+    ],
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90:96-98': [
+        ('IF( ln_rst_list ) THEN', 1),
+        ('nitrst = nn_stocklist( nrst_lst )', 1), 3,
+    ],
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90:119-120': [
+        ('IF( kt == nitrst - 1 .OR. nn_stock == 1', 1),
+        ('IF( nitrst <= nitend .AND. nitrst > 0 ) THEN', 1), 2,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:780-795': [
         ('DO jk =    2,  jpkm1', 1),

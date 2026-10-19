@@ -95,15 +95,21 @@ its nearest existing ancestor, and now run during read-only preflight.
 
 The rendered delta now keeps `nn_it000=1` and sets `nn_itend=2`, `nn_stock=2`,
 and `nn_stocklist=2,0,...`. NEMO assigns the configured start and end to
-`nit000` and `nitend`, and only normalizes `nn_stock` when list mode is off, at
-`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domain.f90:323-397`.
+`nit000` and `nitend` after reading `namrun`, at
+`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domain.f90:323-324` and
+`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domain.f90:367-368`.
+It only normalizes `nn_stock` when list mode is off, at
+`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/domain.f90:390`.
 `sbc_init` requires the inclusive experiment length and, outside list mode,
 the stock frequency to be multiples of `nn_fsbc`, at
-`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/sbcmod.f90:340-350`.
+`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/sbcmod.f90:342-344` and
+`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/sbcmod.f90:346-348`.
 Here both the length and `nn_stock` are 2. With list mode on, restart setup
-takes `nn_stocklist(1)` as `nitrst` and opens the restart at `nitrst-1`, at
-`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90:94-120`;
-therefore the restart opens at kt 1 and writes at kt 2, while the independent
+takes `nn_stocklist(1)` as `nitrst` at
+`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90:96-98` and
+opens the restart at `nitrst-1` under the condition at
+`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/restart.f90:119-120`.
+Therefore the restart opens at kt 1 and writes at kt 2, while the independent
 observer condition remains `kt == nit000` and records kt 1.
 
 Read-only preflight passed the exact additive-patch layout and a gfortran
