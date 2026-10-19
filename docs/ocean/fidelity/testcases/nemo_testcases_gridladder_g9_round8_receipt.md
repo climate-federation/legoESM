@@ -132,7 +132,12 @@ T-pivot row is now exercised and certified on a rung (G9).
 
 ## 6. Gates and disposition
 
-Gates are recorded in the commit that lands this receipt.
+The receipt citation gate on this receipt found 9 citations, with 0 failures,
+0 unmapped citations and 0 failing map entries; its unit suite passed 17 / 17.
+The default gate and the private-import ratchet ran file by file in CPU x64
+with the prescribed PYTHONPATH.  The counts were 17 + 6 + 68 + 25 + 16 + 2 + 8
+= 142 passed, 0 failed.  The changed G9 and G2 census tests passed 3 / 3.
+Combined gate-log SHA-256: `688e1af8ccd0f59d6cdd80f3b3b032fb3e6354268ebbe6736a8b335d371b3899`.
 
 ASKED: review and dispose of Codex's diff; extend the kt-1 test to full depth
 and explain or fix the cell; restore normal formatting and re-anchor; name
