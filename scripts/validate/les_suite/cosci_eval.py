@@ -85,6 +85,7 @@ from legoesm.atmosphere.les_suite.scm_runner import (  # noqa: E402
 from legoesm.atmosphere.les_suite.score import (  # noqa: E402
     PROFILE_FLOOR_FLUX,
     PROFILE_FLOOR_QFLUX,
+    case_score_weights,
     normalized_rmse_series,
 )
 from legoesm.atmosphere.physics.combined import make_physics  # noqa: E402
@@ -92,7 +93,6 @@ from legoesm.atmosphere.physics.turbulence.les_tuned import (  # noqa: E402
     LESTunedInapplicableError,
     apply_les_tuned_turbulence,
 )
-from legoesm.core.profile_metrics import layer_weights_from_heights  # noqa: E402
 from legoesm.training.inert_params import assert_no_inert  # noqa: E402
 
 from legoesm import constants  # noqa: E402
@@ -456,7 +456,7 @@ def stage_e1(arms: dict, artifacts, nlev, dt) -> dict:
     res = {}
     for path, art in artifacts:
         z = jnp.asarray(art.heights_m)
-        w = layer_weights_from_heights(z)
+        w = case_score_weights(art.case_name, z)
         nt = int(jnp.asarray(art.times_s).shape[0])
         truth = {"wtheta": total_turbulent_flux(art.wtheta_resolved, art.wtheta_sgs)[1:]}
         momflux_floor = momentum_flux_floor(art)

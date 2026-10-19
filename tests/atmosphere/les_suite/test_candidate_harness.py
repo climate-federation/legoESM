@@ -768,3 +768,32 @@ def test_total_water_includes_rain():
         return np.asarray(tr[name].data)[0, 0, 0][::-1]
     np.testing.assert_allclose(np.asarray(inp.q_t),
                                col("q_v") + col("q_c") + col("q_r"), rtol=1e-14)
+
+
+def test_e1_and_e2_ignore_the_layer_above_the_case_sponge_base():
+    """User 2026-10-19: every case is scored only below its catalog sponge base.
+    Spoiling the reference above it (frames after the start, so the column is
+    unchanged) must not move the E1 or E2 score."""
+    import dataclasses
+
+    import cosci_eval
+    from cosci_eval import Arm
+    from legoesm.atmosphere.les_suite.score import sponge_base_for_score
+    from tune_scm_to_les import _base_turbulence
+    art = dataclasses.replace(_cbl_artifact(), case_name="gabls3")
+    z = np.asarray(art.heights_m)
+    above = z > sponge_base_for_score("gabls3", z)
+    assert 0 < above.sum() < z.size
+
+    wt = np.asarray(art.wtheta_resolved).copy(); wt[1:, above] += 5.0
+    th = np.asarray(art.theta).copy(); th[1:, above] += 30.0
+    flux_spoiled = dataclasses.replace(art, wtheta_resolved=wt)
+    spoiled = dataclasses.replace(flux_spoiled, theta=th)
+    arm = Arm(_base_turbulence("louis", **_RGH)[0])
+    rec, _ = arm.run(art, ev.e2_nsteps(art, 10.0), nlev=16, dt=10.0)
+    a, b = ev.e2_score(art, rec, 10.0), ev.e2_score(spoiled, rec, 10.0)
+    assert float(a.combined) == pytest.approx(float(b.combined), rel=1e-12)
+    e1 = cosci_eval.stage_e1({"louis": arm}, [("a.npz", art)], 16, 10.0)
+    e1b = cosci_eval.stage_e1({"louis": arm}, [("a.npz", flux_spoiled)], 16, 10.0)
+    assert e1["a.npz"]["louis"]["wtheta"] == pytest.approx(
+        e1b["a.npz"]["louis"]["wtheta"], rel=1e-12)

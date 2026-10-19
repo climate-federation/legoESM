@@ -220,35 +220,39 @@ GABLS3_APPROVED: tuple[str, ...] = tuple(f"APPROVED 2026-10-18: {a}" for a in (
     "surface pressure: held at 1022.1 hPa (00 UTC) for the reference column",
     "moisture: active in buoyancy through θ_v; no condensation, no microphysics",
 ))
-GABLS3_PENDING: tuple[str, ...] = (
-    "dt: PROPOSED 0.25 s fixed (spec: not stated; advective CFL ~0.5 at 12 m/s on "
-    "6.25 m)",
-    "closure: PROPOSED the suite's stable-case closure — LASD dynamic, Pr 1.0, "
+GABLS3_APPROVED_2026_10_19: tuple[str, ...] = tuple(
+    f"APPROVED 2026-10-19: {a}" for a in (
+    "dt: 0.25 s fixed (spec: not stated; advective CFL ~0.5 at 12 m/s on 6.25 "
+    "m)",
+    "closure: the suite's stable-case closure — LASD dynamic, Pr 1.0, "
     "background viscosity 0.01 m2/s, no SGS buoyancy term, RK3, 3/2-rule "
     "dealiasing, spectral (non-monotone) scalar advection (spec: own closure)",
-    "θ_ref: PROPOSED 291.28 K = θ(0.25 m) at 00 UTC for the Boussinesq buoyancy "
-    "(spec: not stated)",
-    "Obukhov length: PROPOSED from the virtual heat flux θ_v* = θ* + 0.61 θ_ref q* "
+    "θ_ref: 291.28 K = θ(0.25 m) at 00 UTC for the Boussinesq buoyancy (spec: "
+    "not stated)",
+    "Obukhov length: from the virtual heat flux θ_v* = θ* + 0.61 θ_ref q* "
     "(spec: ψ(z/L), L not defined)",
-    "humidity: PROPOSED the spec's Q used directly as the model's q_v (as a "
-    "mixing ratio it would be ~1 % larger)",
-    "initial profiles: PROPOSED held at the 10 m values below 10 m (lowest LES "
-    "level 3.125 m; spec starts at 10 m)",
-    "sponge: PROPOSED the suite form — relaxes u, v, θ deviations and w; q_v "
-    "deviations not relaxed",
-    "momentum advection: PROPOSED applied as the equivalent geostrophic-wind shift "
-    "(v_g − u_adv/f, u_g + v_adv/f; exact in the LES, and what the SCM receives)",
-    "forcing sampling: PROPOSED each step applies the exact interval mean of the "
+    "humidity: the spec's Q used directly as the model's q_v (as a mixing ratio "
+    "it would be ~1 % larger)",
+    "initial profiles: held at the 10 m values below 10 m (lowest LES level "
+    "3.125 m; spec starts at 10 m)",
+    "sponge: the suite form — relaxes u, v, θ deviations and w; q_v deviations "
+    "not relaxed",
+    "momentum advection: applied as the equivalent geostrophic-wind shift (v_g "
+    "− u_adv/f, u_g + v_adv/f; exact in the LES, and what the SCM receives)",
+    "forcing sampling: each step applies the exact interval mean of the "
     "prescribed series (step changes integrated exactly)",
-    "output: PROPOSED 54 frames (every 10 min) plus the initial state",
-    "regime label: PROPOSED dry_stable (no regime exists for a cloud-free moist SBL)",
-    "u, v noise seeds: PROPOSED 1 and 2 (the spec's variance 0.2(1 − z/200)² below "
-    "200 m; θ seed 0 approved)",
-    "lid flux: PROPOSED K_h of the top cell centre times Γ (no face K_h exists at "
-    "the lid)",
-    "SCM side: the lid heat input is NOT yet delivered to the SCM (no SCM upper "
-    "heat-flux boundary); recorded in the LES budget only — open defect",
-)
+    "output: 54 frames (every 10 min) plus the initial state",
+    "regime label: dry_stable (no regime exists for a cloud-free moist SBL)",
+    "u, v noise seeds: 1 and 2 (the spec's variance 0.2(1 − z/200)² below 200 "
+    "m; θ seed 0 approved)",
+    "lid flux: K_h of the top cell centre times Γ (no face K_h exists at the "
+    "lid)",
+    "lid heat not delivered to SCM; GABLS3 scored below 600 m",
+    "scoring: every LES-suite case is scored only below its catalog sponge "
+    "base; cases without a sponge are not cut",
+))
+GABLS3_APPROVED = GABLS3_APPROVED + GABLS3_APPROVED_2026_10_19
+GABLS3_PENDING: tuple[str, ...] = ()
 
 
 def _classify_dry_regime(flux_K_m_s: float) -> Regime:
@@ -747,6 +751,16 @@ def register_default_catalog(*, include_dry_grid: bool = True,
         for case in PUBLISHED_CASES:
             registered.append(register_case(case))
     return registered
+
+
+#: The moist drivers' default ``--case-label`` values and the catalog case each
+#: runs (production launches pass the catalog name itself).
+CATALOG_ALIASES: dict[str, str] = {
+    "rico": "rico_cu",
+    "dycoms": "dycoms_rf01_sc",
+    "rf02": "dycoms_rf02_sc",
+    "astex": "astex_sc",
+}
 
 
 def catalog_case(name: str) -> LESCase:

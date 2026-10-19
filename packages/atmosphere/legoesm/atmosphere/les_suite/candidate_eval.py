@@ -30,7 +30,7 @@ from legoesm.atmosphere.physics._shared import (
     exner_function,
 )
 from legoesm.atmosphere.physics.combined import make_physics
-from legoesm.core.profile_metrics import layer_weights_from_heights, safe_sqrt
+from legoesm.core.profile_metrics import safe_sqrt
 
 from legoesm import constants
 
@@ -51,6 +51,7 @@ from .score import (
     PROFILE_FLOOR_QT,
     PROFILE_FLOOR_THETA,
     PROFILE_FLOOR_WIND,
+    case_score_weights,
     normalized_rmse_series,
 )
 
@@ -392,7 +393,7 @@ def e2_score(artifact: LESReferenceArtifact, rec: RolloutRecord, dt: float) -> E
                          f"{rec.fluxes.wtheta.shape[0]} steps; E2 needs e2_nsteps = "
                          f"{steps[-1] + 1} (the flux AT the last frame)")
     z = jnp.asarray(artifact.heights_m)
-    w = layer_weights_from_heights(z)
+    w = case_score_weights(artifact.case_name, z)
     sl = slice(1, None)
     truth = {
         "theta": jnp.asarray(artifact.theta)[sl], "u": jnp.asarray(artifact.u)[sl],

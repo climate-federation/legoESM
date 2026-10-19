@@ -185,3 +185,94 @@ def test_prognostic_moist_truth_without_scm_qt_raises():
     truth = _moist_snapshot()
     with pytest.raises(ValueError, match="requires scm_qt"):
         prognostic_profile_score(truth, truth.theta, truth.u, truth.v)  # scm_qt omitted
+
+
+# --- sponge-base cutoff (user 2026-10-19) -------------------------------------
+
+def _gabls3_z():
+    return jnp.linspace(3.125, 796.875, 128)          # 6.25 m cells, lid at 800 m
+
+
+def test_case_weights_cut_at_the_catalog_sponge_base():
+    from legoesm.atmosphere.les_suite.score import case_score_weights, sponge_base_for_score
+    from legoesm.core.profile_metrics import layer_weights_from_heights
+    z = _gabls3_z()
+    assert sponge_base_for_score("gabls3", z) == pytest.approx(600.0, rel=1e-12)
+    w = case_score_weights("gabls3", z)
+    base = layer_weights_from_heights(z)
+    below = z <= 600.0
+    assert float(jnp.max(jnp.where(below, 0.0, w))) == 0.0
+    assert float(jnp.sum(w)) == pytest.approx(1.0, rel=1e-12)
+    expect = jnp.where(below, base, 0.0) / jnp.sum(jnp.where(below, base, 0.0))
+    assert jnp.allclose(w, expect, rtol=1e-12, atol=0.0)
+    # no sponge in the catalog, or not a catalog case: no cutoff
+    assert jnp.allclose(case_score_weights("cbl_nieuwstadt", z), base, rtol=0.0, atol=0.0)
+    assert jnp.allclose(case_score_weights("cbl_test", z), base, rtol=0.0, atol=0.0)
+
+
+def test_profile_score_ignores_the_layer_above_the_sponge_base():
+    z = _gabls3_z()
+    nz = z.shape[0]
+    above = z > 600.0
+
+    def truth(spoil):
+        th = 290.0 + 0.003 * z + jnp.where(above, spoil, 0.0)
+        return LESTruth(case_name="gabls3", heights_m=z, times_s=jnp.array([3600.0]),
+                        theta=th, u=jnp.full((nz,), 5.0) + jnp.where(above, spoil, 0.0),
+                        v=jnp.zeros((nz,)), wtheta=jnp.full((nz,), 0.01))
+    scm_th, scm_u = 290.5 + 0.003 * z, jnp.full((nz,), 4.0)
+    a = prognostic_profile_score(truth(0.0), scm_th, scm_u, jnp.zeros((nz,)))
+    b = prognostic_profile_score(truth(25.0), scm_th, scm_u, jnp.zeros((nz,)))
+    assert float(a.combined) == pytest.approx(float(b.combined), rel=1e-12)
+    d_a = diagnostic_flux_score(truth(0.0), jnp.full((nz,), 0.02))
+    spoiled = truth(0.0)
+    import dataclasses
+    spoiled = dataclasses.replace(spoiled, wtheta=jnp.where(above, 3.0, spoiled.wtheta))
+    d_b = diagnostic_flux_score(spoiled, jnp.full((nz,), 0.02))
+    assert float(d_a.combined) == pytest.approx(float(d_b.combined), rel=1e-12)
+
+
+def test_cutoff_reads_driver_labels_traces_and_masks_excluded_levels():
+    import jax
+    from legoesm.atmosphere.les_suite.catalog import CATALOG_ALIASES, catalog_case
+    from legoesm.atmosphere.les_suite.score import (
+        case_score_weights,
+        normalized_rmse_series,
+        sponge_base_for_score,
+    )
+    z = _gabls3_z()
+    for label, name in CATALOG_ALIASES.items():          # driver default labels
+        assert catalog_case(name) is not None
+        assert sponge_base_for_score(label, z) == sponge_base_for_score(name, z)
+    assert sponge_base_for_score("rico", z) is not None
+    for label, name in CATALOG_ALIASES.items():
+        assert catalog_case(name).name == name
+    # under jit the heights are closed over (run metadata); traced heights are refused
+    eager = case_score_weights("gabls3", z)
+    jitted = jax.jit(lambda: case_score_weights("gabls3", z))()
+    assert jnp.allclose(eager, jitted, rtol=1e-12, atol=0.0)
+    with pytest.raises(TypeError, match="concrete heights"):
+        jax.jit(lambda h: case_score_weights("gabls3", h))(z)
+    # a non-finite residual above the cutoff cannot erase the error below it
+    w = case_score_weights("gabls3", z)
+    ref = jnp.broadcast_to(290.0 + 0.003 * z, (2, z.shape[0]))
+    scm = ref + 0.5
+    clean = normalized_rmse_series(scm, ref, w, 0.1)
+    bad = normalized_rmse_series(scm.at[:, -1].set(jnp.nan), ref, w, 0.1)
+    assert float(clean) > 0.0 and float(bad) == pytest.approx(float(clean), rel=1e-12)
+    g = jax.grad(lambda s: normalized_rmse_series(s, ref, w, 0.1))(
+        scm.at[:, -1].set(jnp.nan))
+    assert bool(jnp.all(jnp.isfinite(g)))
+
+
+def test_cutoff_accepts_fp32_heights_and_refuses_a_stretched_grid():
+    import numpy as np
+    from legoesm.atmosphere.les_suite.score import sponge_base_for_score
+    dz = 400.0 / 96                                   # sbl_gabls1: 96 levels, 400 m
+    z32 = jnp.asarray((np.arange(96) + 0.5) * dz, dtype=jnp.float32)
+    assert float(sponge_base_for_score("sbl_gabls1", z32)) == pytest.approx(300.0, rel=1e-5)
+    stretched = jnp.asarray(np.cumsum(np.linspace(2.0, 8.0, 96)))
+    with pytest.raises(ValueError, match="not uniform"):
+        sponge_base_for_score("sbl_gabls1", stretched)
+    # no sponge, or an absolute one: nothing to infer, any grid is accepted
+    assert sponge_base_for_score("cbl_nieuwstadt", stretched) is None

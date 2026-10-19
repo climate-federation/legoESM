@@ -17,7 +17,8 @@ produces.
 Normalization: each variable is divided by the mass-weighted std of the LES
 *reference* profile (floored), so a variable with intrinsically small variability
 does not dominate — identical to the SCM-RCE convention. Weights are the LES-grid
-layer-thickness weights (:func:`legoesm.core.profile_metrics.layer_weights_from_heights`);
+layer-thickness weights (:func:`legoesm.core.profile_metrics.layer_weights_from_heights`),
+with zero weight above the case's catalog sponge base (:func:`case_score_weights`);
 pass a density-scaled weight explicitly for a true mass weighting.
 
 All functions are pure and AD-safe (finite gradient at a perfect fit) so the same
@@ -27,7 +28,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 from legoesm.core.profile_metrics import (
     layer_weights_from_heights,
     safe_sqrt,
@@ -36,6 +39,7 @@ from legoesm.core.profile_metrics import (
 )
 
 from .bridge import LESTruth
+from .catalog import CATALOG_ALIASES, catalog_case
 
 Array = jnp.ndarray
 
@@ -85,14 +89,68 @@ def normalized_rmse_series(
     # per-snapshot mean-square (weights sum to 1 over levels), averaged over time,
     # then ONE safe_sqrt so the gradient stays finite at a perfect fit (a bare
     # intermediate sqrt of the per-time term would NaN the backward pass at 0).
+    # a zero-weight level (above a sponge cutoff) contributes exactly zero even if
+    # its residual is not finite, as in core.profile_metrics.weighted_rmse
+    keep = weights[None, :] > 0
+    scm = jnp.where(keep, scm, jnp.zeros_like(scm))
+    ref = jnp.where(keep, ref, jnp.zeros_like(ref))
     per_time_ms = jnp.sum(weights[None, :] * ((scm - ref) / std) ** 2, axis=1)
     return safe_sqrt(jnp.mean(per_time_ms))
 
 
+def _concrete_heights(case_name: str, heights_m) -> np.ndarray:
+    if isinstance(heights_m, jax.core.Tracer):
+        raise TypeError(f"{case_name}: the sponge cutoff needs concrete heights (run "
+                        "metadata); close over the truth instead of tracing it")
+    return np.asarray(heights_m, dtype=np.float64)
+
+
+def sponge_base_for_score(case_name: str, heights_m: Array) -> float | None:
+    """The catalog sponge base [m] of case ``case_name`` (or a driver's default label
+    for it, :data:`~.catalog.CATALOG_ALIASES`) on a run whose cell centres are
+    ``heights_m`` — the spectral LES grids are uniform, so the domain top is the top
+    centre plus half its spacing — or ``None`` for a case without a sponge or a
+    column that is not a catalog case. ``heights_m`` must be concrete."""
+    try:
+        case = catalog_case(CATALOG_ALIASES.get(case_name, case_name))
+    except KeyError:
+        return None
+    if case.setup is not None or case.sponge_base_frac is None:
+        return case.sponge_base_m()          # absolute base, or no sponge
+    z = _concrete_heights(case_name, heights_m)
+    if z.shape[0] < 2:
+        raise ValueError(f"{case_name}: the sponge cutoff needs at least two levels")
+    dz = np.diff(z)
+    # rounding of the stored centres, not of their spacing, sets the tolerance
+    eps = np.finfo(np.asarray(heights_m).dtype).eps
+    if np.max(np.abs(dz - np.mean(dz))) > 64.0 * eps * float(np.max(np.abs(z))):
+        raise ValueError(f"{case_name}: the sponge cutoff infers the domain top "
+                         "from a uniform grid; these heights are not uniform")
+    return float(case.sponge_base_m(z[-1] + 0.5 * (z[-1] - z[-2])))
+
+
+def case_score_weights(case_name: str, heights_m: Array) -> Array:
+    """Layer weights for scoring case ``case_name``: the thickness weights with zero
+    weight on every level above the case's catalog sponge base, renormalised to 1
+    (user 2026-10-19: the damped layer is not LES truth). No cutoff for a case
+    without a sponge or a column that is not a catalog case. The cut is decided in
+    float64 on the concrete heights."""
+    w = layer_weights_from_heights(heights_m)
+    z_sp = sponge_base_for_score(case_name, heights_m)
+    if z_sp is None:
+        return w
+    keep = _concrete_heights(case_name, heights_m) <= z_sp
+    if not keep.any():
+        raise ValueError(f"{case_name}: no level lies below the sponge base {z_sp:g} m")
+    w = jnp.where(jnp.asarray(keep), w, 0.0)
+    return w / jnp.sum(w)
+
+
 def _resolve_weights(
-    heights_m: Array, weights: Array | None
+    heights_m: Array, weights: Array | None, case_name: str | None = None
 ) -> Array:
-    """Layer weights for the score (default: midpoint-rule thickness).
+    """Layer weights for the score (default: :func:`case_score_weights` for
+    ``case_name``, else midpoint-rule thickness).
 
     An explicit ``weights`` must match ``heights_m``, be non-negative, and sum to
     1 (the normalized-RMSE arithmetic in ``core.profile_metrics`` assumes a
@@ -101,7 +159,9 @@ def _resolve_weights(
     a *perfect* score for a bad fit.
     """
     if weights is None:
-        return layer_weights_from_heights(heights_m)
+        if case_name is None:
+            return layer_weights_from_heights(heights_m)
+        return case_score_weights(case_name, heights_m)
     w = jnp.asarray(weights)
     if w.shape != jnp.asarray(heights_m).shape:
         raise ValueError("weights must match heights_m shape")
@@ -148,7 +208,7 @@ def diagnostic_flux_score(
     theta = jnp.asarray(truth.theta)
     if theta.ndim != 1:
         raise ValueError("diagnostic_flux_score expects a single-time truth snapshot")
-    w = _resolve_weights(truth.heights_m, weights)
+    w = _resolve_weights(truth.heights_m, weights, truth.case_name)
     wtheta_rmse = _normalized_rmse(scm_wtheta, truth.wtheta, w, theta_flux_floor)
     # A moist truth demands the SCM moisture flux — silently dropping it would let
     # an incomplete run out-score a complete one on the combined metric.
@@ -207,7 +267,7 @@ def prognostic_profile_score(
     (``(nz,)`` single time or ``(nt, nz)`` series). Combined = RMS over the enabled
     variables (θ_l, u, v, and q_t when moist).
     """
-    w = _resolve_weights(truth.heights_m, weights)
+    w = _resolve_weights(truth.heights_m, weights, truth.case_name)
     theta_rmse = normalized_rmse_series(scm_theta, truth.theta, w, theta_floor)
     u_rmse = normalized_rmse_series(scm_u, truth.u, w, wind_floor)
     v_rmse = normalized_rmse_series(scm_v, truth.v, w, wind_floor)

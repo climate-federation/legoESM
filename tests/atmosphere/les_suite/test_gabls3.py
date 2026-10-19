@@ -122,10 +122,12 @@ def _budget_lines(out):
     return rows
 
 
-def test_production_is_refused_while_values_are_pending(tmp_path):
-    from legoesm.atmosphere.les_suite.catalog import GABLS3_PENDING
-    assert GABLS3_PENDING
+def test_production_is_refused_while_values_are_pending(tmp_path, monkeypatch):
+    from legoesm.atmosphere.les_suite.catalog import GABLS3_APPROVED, GABLS3_PENDING
+    assert GABLS3_PENDING == ()                       # all approved 2026-10-19
+    assert any("scored below 600 m" in a for a in GABLS3_APPROVED)
     mod = _load()
+    monkeypatch.setattr(mod, "GABLS3_PENDING", ("a value awaiting approval",))
     with pytest.raises(SystemExit, match="not approved"):
         mod.main(["--emit-suite-artifact", str(tmp_path / "a.npz")])
 

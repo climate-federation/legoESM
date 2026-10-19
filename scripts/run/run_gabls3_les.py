@@ -63,7 +63,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_les_suite as suite  # noqa: E402  (the suite's SGS closure selector)
 
 _CASE = next(c for c in MOIST_CASES if c.name == "gabls3")
-_THETA_REF_K = gb.SURFACE_THETA[0][1]      # pending: θ(0.25 m) at 00 UTC
+_THETA_REF_K = gb.SURFACE_THETA[0][1]      # θ(0.25 m) at 00 UTC (approved 2026-10-19)
 
 
 def parse_args(argv=None):
