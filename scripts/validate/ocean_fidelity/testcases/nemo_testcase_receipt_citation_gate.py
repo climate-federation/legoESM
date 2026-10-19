@@ -2220,6 +2220,11 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:231-233': ['zwi(ji,jk) = - p2dt * zwt(ji,jk  ) / (e3w_1d(jk) *(1._wp+r3t(ji,jj,Kmm', ('zwd(ji,jk) = (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kaa)*tmask(ji,jj,jk))', 2), 3],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:198-199': ['Ue_rhs(ji,jj) = SUM( e3u_3d(ji,jj,1:jpkm1)*uu(ji,jj,1:jpkm1,Krhs)*umas', 'Ve_rhs(ji,jj) = SUM( e3v_3d(ji,jj,1:jpkm1)*vv(ji,jj,1:jpkm1,Krhs)*vmas', 2],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:221-223': [('r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )   ! at N+1/2 (Kaa)', 2), ('r3v(:,:,Kaa) = r1_2 * ( r3v(:,:,Kbb) + r3va(:,:) )', 2), 3],
+    # --- ORCA2 round 318: north-fold set under Decision 122 ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:844': "CALL lbc_lnk( 'dynspg_ts', un_adv, 'U', -1._wp, vn_adv, 'V', -1._wp )",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:311': "CALL lbc_lnk( 'traadv_fct', ztFu, 'U', -1.0_wp, ztFv, 'V', -1.0_wp, zta_up1, 'T', 1.0_wp )",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:177-179': ['r3t(:,:,Kaa) = r2_3 * r3t(:,:,Kbb) + r1_3 * r3ta(:,:)', 'r3v(:,:,Kaa) = r2_3 * r3v(:,:,Kbb) + r1_3 * r3va(:,:)', 3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:284-290': ['pt(ji,jj,1,jn,Kaa) =       (e3t_3d(ji,jj,1) *(1._wp+r3t(ji,jj,Kbb)*tmask(ji,jj,1)))', 'pt(ji,jj,jk,jn,Kaa) = zrhs - zwi(ji,jk) / zwt(ji,jk-1) * pt(ji,jj,jk-1,jn,Kaa)', 7],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:169': "CALL lbc_lnk( 'stp_RK3_stg', r3ua, 'U', 1._wp, r3va, 'V', 1._wp, r3fa,",
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90:232': "CALL lbc_lnk( 'dommsk', umask, 'U', 1.0_wp, vmask, 'V', 1.0_wp, fmask,",
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90:258': 'fe3mask(:,:,:) = fmask(:,:,:)',
