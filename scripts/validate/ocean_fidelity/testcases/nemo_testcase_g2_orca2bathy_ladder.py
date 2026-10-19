@@ -624,7 +624,10 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         without_l2_metric: bool = False,
         without_l2_eos80: bool = False,
         without_l2_north_fold: bool = False, without_l2_native_face_reference: bool = False,
-        without_l2_kmm_face_geometry: bool = False, case: str = CASE) -> dict:
+        without_l2_kmm_face_geometry: bool = False,
+        without_l2_a33_source_ordering: bool = False,
+        without_l2_stored_face_ratios: bool = False,
+        case: str = CASE) -> dict:
     require(case in CASES, f"unknown case {case!r}")
     require(arm in ARMS, f"unknown arm {arm!r}")
     require(plant in (None, "score", "level", "tke_e3t"),
@@ -687,7 +690,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     if without_stage3_salt:               # G5 ROUND-4 BEFORE ARM
         cfg = cfg._replace(rk3_stage3_salt_nemo_written=False)
     l2_controls = (without_l2_metric, without_l2_eos80, without_l2_north_fold,
-                   without_l2_native_face_reference, without_l2_kmm_face_geometry)
+                   without_l2_native_face_reference, without_l2_kmm_face_geometry,
+                   without_l2_a33_source_ordering,
+                   without_l2_stored_face_ratios)
     require(not any(l2_controls) or case == "ORCA2L2-iso",
             "L2 controls are registered only for ORCA2L2-iso")
     if case == "ORCA2L2-iso":
@@ -705,6 +710,10 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 redi_flux_reference_thickness_evaluation="tpoint_alias")
         if without_l2_kmm_face_geometry:
             gm = gm._replace(redi_flux_geometry_stage="step_entry")
+        if without_l2_a33_source_ordering:
+            gm = gm._replace(redi_a33_source_ordering=False)
+        if without_l2_stored_face_ratios:
+            gm = gm._replace(redi_flux_stored_face_ratios=False)
         cfg = cfg._replace(gm_redi=gm)
     nk = int(z.n_levels)
     roots = (root, *restart_roots)
@@ -779,6 +788,10 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
            "l2_north_fold_selected": bool(
                case != "ORCA2L2-iso" or cfg.gm_redi.nemo_slope_north_fold),
            "l2_kmm_face_geometry_selected": bool(case != "ORCA2L2-iso" or cfg.gm_redi.redi_flux_geometry_stage == "rk3_kmm"),
+           "l2_a33_source_ordering_selected": bool(
+               case != "ORCA2L2-iso" or cfg.gm_redi.redi_a33_source_ordering),
+           "l2_stored_face_ratios_selected": bool(
+               case != "ORCA2L2-iso" or cfg.gm_redi.redi_flux_stored_face_ratios),
            "forcing": ("NEMO-supplied surface fields at each kt"
                        if case == "ORCA2G4-sbc" else
                        "NEMO's post-SI3 ocean surface input at each kt"
@@ -1506,6 +1519,10 @@ def main(argv=None) -> int:
                     help="L2 CONTROL: alias e3u_0/e3v_0 to e3t_0")
     ap.add_argument("--without-l2-kmm-face-geometry", action="store_true",
                     help="L2 CONTROL: use step-entry rather than stage-3 Kmm SSH")
+    ap.add_argument("--without-l2-a33-source-ordering", action="store_true",
+                    help="L2 CONTROL: restore the fused left-fold A33 graph")
+    ap.add_argument("--without-l2-stored-face-ratios", action="store_true",
+                    help="L2 CONTROL: rederive Kmm face ratios from mean SSH")
     ap.add_argument("--case", choices=CASES, default=CASE)
     ap.add_argument("--allow-dirty", action="store_true")
     ap.add_argument("--output", type=Path, required=True)
@@ -1529,6 +1546,10 @@ def main(argv=None) -> int:
               without_l2_native_face_reference=(
                   a.without_l2_native_face_reference),
               without_l2_kmm_face_geometry=a.without_l2_kmm_face_geometry,
+              without_l2_a33_source_ordering=(
+                  a.without_l2_a33_source_ordering),
+              without_l2_stored_face_ratios=(
+                  a.without_l2_stored_face_ratios),
               case=a.case)
     a.output.write_text(json.dumps(out, indent=1) + "\n")
     if a.arm == "geometry":
