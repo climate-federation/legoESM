@@ -297,6 +297,20 @@ FILES = {
     "dynldf.F90": _DYN / "dynldf.F90",
     "dynldf_lev_rot_scheme.h90": _DYN / "dynldf_lev_rot_scheme.h90",
     "vertical.py": REPO / "packages/ocean/legoesm/ocean/vertical.py",
+    "packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py":
+        REPO / "packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py",
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py":
+        REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py",
+    "packages/ocean/legoesm/ocean/physics/lateral_mixing/config.py":
+        REPO / "packages/ocean/legoesm/ocean/physics/lateral_mixing/config.py",
+    "packages/ocean/legoesm/ocean/vertical.py":
+        REPO / "packages/ocean/legoesm/ocean/vertical.py",
+    "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py":
+        REPO / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py",
+    "tests/ocean/unit/test_gm_redi_latlon_cgrid.py":
+        REPO / "tests/ocean/unit/test_gm_redi_latlon_cgrid.py",
+    "tests/ocean/fidelity/test_nemo_testcase_l2_orca2iso.py":
+        REPO / "tests/ocean/fidelity/test_nemo_testcase_l2_orca2iso.py",
     # GYRE's own run log and its own compiled branch, so a GYRE resolved value
     # cannot bind to OVERFLOW's ocean.output or to LOCK's ppsrc.
     "LDF/ldfslp.F90": _OCE / "LDF/ldfslp.F90",
@@ -1774,6 +1788,42 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- GRIDLADDER-VMIX round 19 (L2 direct operands) ---
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:782-794": [
+        "zmsku = wmask(ji,jj,jk) / MAX(",
+        "+ zahv_w * wslpj(ji,jj,jk) * wslpj(ji,jj,jk)", 13],
+    "packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py:2360-2385": [
+        "um_im1 = jnp.roll(umask, +1, ax_x)",
+        "return ksum_u, cnt_u, ksum_v, cnt_v", 26],
+    "packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py:2463-2487": [
+        "ksum_u, cnt_u, ksum_v, cnt_v = nemo_iso_w_kappa_sums(",
+        "ah_wslp2 = zahu_w * wslpi ** 2 + zahv_w * wslpj ** 2", 25],
+    "tests/ocean/unit/test_gm_redi_latlon_cgrid.py:100-152": [
+        "def test_nemo_a33_source_order_is_exact_under_jit_and_left_fold_fails():",
+        "np.testing.assert_array_equal(np.asarray(got_ah), expected_ah)", 53],
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:205-217": [
+        ("!                          ! set ssh and (uu_b,vv_b) at N+1/2  (Kaa)", 1),
+        ("ssh (:,:,Kaa) = r1_2 * ( ssh (:,:,Kbb) + ssha(:,:) )", 2), 13],
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:229":
+        "CASE ( 3 )           !==  Stage 3  ==!",
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10006-10013": [
+        "redi_flux_eta=(_eta_live_one_half if gm_cfg.redi_flux_geometry_stage == \"rk3_kmm\" else state.eta.data),",
+        "if gm_cfg.redi_flux_stored_face_ratios else None),", 8],
+    "packages/ocean/legoesm/ocean/vertical.py:864-907": [
+        "def nemo_qco_live_face_thicknesses(",
+        "return geom.e3u, geom.e3v", 44],
+    "packages/ocean/legoesm/ocean/physics/lateral_mixing/config.py:480-493": [
+        "# Arithmetic topology of traldf_iso's A33 slope-square coefficient.",
+        "redi_flux_stored_face_ratios: bool = False", 14],
+    "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4525-4564": [
+        "def _orca2l2_isoneutral_selected(gm) -> bool:",
+        "return all(getattr(gm, name) == value for name, value in expected.items())", 40],
+    "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2428-2482": [
+        "def _orca2_isoneutral_gm_redi(",
+        "implicit_K33=True,", 55],
+    "tests/ocean/fidelity/test_nemo_testcase_l2_orca2iso.py:414-518": [
+        "def test_l2_production_face_geometry_and_slopes_match_admitted_values(",
+        "assert np.count_nonzero(legacy_ah != nemo_ah) == 60720", 105],
     # --- GRIDLADDER round 32 (G5 round 2 receipt) ---
     'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynspg_ts.f90:1431-1432': [
         'pCdU_u(ji,jj) = r1_2*( ( rCdU_bot(ji+1,jj) + rCdU_bot(ji,jj) ) + ( rCdU_top(ji+1,jj) + rCdU_top(ji,jj) ) )',
