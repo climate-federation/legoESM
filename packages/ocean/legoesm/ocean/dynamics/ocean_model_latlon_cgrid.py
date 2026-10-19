@@ -2196,8 +2196,19 @@ def _nemo_ws_stage_transport(
                 # indicator) differences the already corrected zFu/zFv.
                 None if (legacy_wzv_rederived_transport or velocity_form_wzv)
                 else (zfu_stage, zfv_stage)),
-            fold_exchange_ratios=bool(config.rk3_vector_raw_vmask), runoff_mass_flux=runoff_mass_flux,
-            stored_r3_ratios=bool(config.nemo_wzv_stored_r3_ratios or config.rk3_stage_tracer_wzv_stored_kmm_ratios), stored_kmm_level=(stage_index if (config.rk3_stage_tracer_wzv_stored_kmm_ratios and stage_index in (1, 2)) else 0))  # stprk3_stg.f90:177-179/:221-223, read at sshwzv.f90:297  # noqa: E501
+            fold_exchange_ratios=bool(config.rk3_vector_raw_vmask),
+            runoff_mass_flux=runoff_mass_flux,
+            stored_r3_ratios=bool(
+                config.nemo_wzv_stored_r3_ratios
+                or config.rk3_stage_tracer_wzv_stored_kmm_ratios),
+            # Stages 2/3 read the r3t(Kmm) slot written by the preceding RK
+            # stage, not a ratio rebuilt from its interpolated ssh
+            # (stprk3_stg.f90:177-179/:221-223; sshwzv.f90:297).
+            stored_kmm_level=(
+                stage_index
+                if (config.rk3_stage_tracer_wzv_stored_kmm_ratios
+                    and stage_index in (1, 2))
+                else 0))
         if momentum_velocity_form_w:
             # THE SECOND SOLVE.  stprk3_stg.f90:360 hands wzv the raw stage
             # velocity under the velocity indicator and the momentum vertical
