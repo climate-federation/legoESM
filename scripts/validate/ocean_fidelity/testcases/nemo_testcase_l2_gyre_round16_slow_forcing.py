@@ -47,13 +47,15 @@ def _full_3d(values: np.ndarray, nx: int, ny: int, nz: int) -> np.ndarray:
 
 
 def read_slow_forcing(
-    path: Path, *, dims: tuple[int, int, int] = DIMS
+    path: Path, *, dims: tuple[int, int, int] = DIMS,
+    levels: tuple[int, int, int] = (1, 1, 3),
 ) -> dict[str, object]:
     """Read ``NEMO_L2_SLOW_2`` with explicit size and EOF checks.
 
     ``dims`` is the writing rank's ``(jpi, jpj, jpk)``.  The default is GYRE's,
     so every existing caller is unchanged; the ORCA2 lane passes its own
-    rank-0 extent rather than copying this reader.
+    rank-0 extent rather than copying this reader.  ``levels`` is the
+    record's ``(kt, Kbb, Krhs)``; RK3 swaps Kbb and Kaa every step.
     """
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
@@ -62,7 +64,7 @@ def read_slow_forcing(
         sizes = struct.unpack("=7i", handle.read(28))
         expected_sizes = (nx * ny * nz,) * 6 + ((nx - 4) * (ny - 4),)
         require(
-            (magic, *header, sizes) == ("NEMO_L2_SLOW_2", 2, 1, 1, 3, *dims, 64, expected_sizes),
+            (magic, *header, sizes) == ("NEMO_L2_SLOW_2", 2, *levels, *dims, 64, expected_sizes),
             f"{path}: bad header {(magic, *header, sizes)}",
         )
 

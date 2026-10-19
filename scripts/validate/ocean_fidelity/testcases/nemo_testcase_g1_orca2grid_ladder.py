@@ -25,6 +25,9 @@ Arms (``--arm``):
                NOT seeded: NEMO's after-ssh slot (restart.f90:184, :362-370);
                the card's ``nemo_first_wzv_after_ssh`` selection does not read
                the carried slot, and the arm refuses a card that does
+  carried     every leaf the card carries into one step against the previous
+               NEMO restart, followed by steps from the two complete states
+               and from the card state with every restart-held field replaced
   rhs_terms    kt = 1..10, the stp_2D right-hand side term by term: the
                card's pressure-gradient and vorticity terms (the model's own
                WRITE-only per-term observer) against the OFFLINE replay of
@@ -116,13 +119,15 @@ Arms (``--arm``):
                call, in a compiled XLA function (4 and 1,000,000 elements),
                in uncompiled jax.numpy, and in numpy again afterwards
 
-Every scored row of the whole-step arms also carries ``unequal_census``: the
-unequal cells split into those where NEMO holds a nonzero number below the
-smallest normal double and the card holds exactly zero, and all others.
+Every scored field at every step reports the shared Decision 127 comparison
+classes: NEMO-nonzero-subnormal/card-zero cells are matching but counted as
+``flushed_subnormal``; every other unequal cell is ``normal_difference`` and
+retains the campaign's 1e-15 normalized bar.
 
 Every scored row is split into the preregistered regions (fold band, seam,
 south, interior; interior again into coast-adjacent and open).  The scorer
-and its 1e-15 bar are the shared trajectory gate's; the record reader is the
+and its Decision 127 classifier are the shared trajectory gate's; the record
+reader is the
 admission parser (check_records.read_stream).  The arm layout follows the
 TSUNAMI lane's ladder, which is not on this branch (PR #1920).
 """
@@ -140,7 +145,13 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from nemo_testcase_phase3_trajectory_gate import BAR, require, score  # noqa: E402
+from nemo_testcase_phase3_trajectory_gate import (  # noqa: E402
+    BAR,
+    comparison_census,
+    comparison_masks,
+    require,
+    score,
+)
 
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round1/"
@@ -149,7 +160,7 @@ ARMS = ("geometry", "independent", "given_entry", "rhs", "handoff", "stages",
         "vor_fold_replay", "restart_entry", "fold_v_depth", "rhs_terms",
         "interior_events", "stage_replay", "substeps", "substeps_independent",
         "flux_update_replay", "ratio_fold_replay", "ratio_order_replay",
-        "stage_operand_replay", "subnormal_environment")
+        "stage_operand_replay", "subnormal_environment", "carried")
 PLANTS = ("score", "entry", "rhs_split")
 CASES = ("ORCA2G1-flat", "ORCA2G1b-vec")   # G1b = G1 + ORCA2's vector-form advection
 CASE = CASES[0]           # --case: the card every arm builds
@@ -233,9 +244,12 @@ def regions(tmask: np.ndarray) -> dict[str, np.ndarray]:
 CELL: list = []            # --cell j,i: every row also reports this cell
 
 
-def row(name, ref, cand, reg, *, plant=False) -> dict:
+def row(name, ref, cand, reg, *, mask=None, plant=False) -> dict:
     ref = np.asarray(ref, dtype=np.float64)
     cand = np.asarray(cand, dtype=np.float64)
+    use = (np.ones(ref.shape, dtype=bool) if mask is None
+           else np.asarray(mask, dtype=bool))
+    require(use.shape == ref.shape, f"{name}: score mask shape mismatch")
     at_cell = None
     if CELL:
         j, i = CELL
@@ -246,40 +260,51 @@ def row(name, ref, cand, reg, *, plant=False) -> dict:
                    "ulps": float(d0[j, i] / np.spacing(abs(ref[j, i]))),
                    "neighbourhood_max_abs": float(np.max(np.abs(near))),
                    "neighbourhood_errors": near.tolist()}
-    r = score(name, ref, cand, np.ones(ref.shape, dtype=bool), plant=plant)
+    r = score(name, ref, cand, use, plant=plant)
     if plant:
         cand = cand.copy()
-        cand.flat[0] += 1.0
-    d = cand - ref
+        cand[tuple(np.argwhere(use)[0])] += 1.0
+    masks = comparison_masks(ref, cand, use)
+    d = np.where(masks["normal_difference"], cand - ref, 0.0)
     scale = max(float(np.max(np.abs(ref))), 1.0)
-    bad = np.argwhere(d != 0)
+    bad = np.argwhere(masks["normal_difference"])
+    bitwise_bad = np.argwhere(masks["unequal"])
     r.update({
         "n_unequal": int(bad.shape[0]),
+        "n_bitwise_unequal": int(bitwise_bad.shape[0]),
+        "flushed_subnormal": int(masks["flushed_subnormal"].sum()),
         "first_unequal_cell": bad[0].tolist() if bad.size else None,
+        "first_normal_difference_cell": bad[0].tolist() if bad.size else None,
         "max_abs": float(np.max(np.abs(d))),
         "max_abs_cell": [int(x) for x in np.unravel_index(
             int(np.argmax(np.abs(d))), d.shape)],
         "rms": float(np.sqrt(np.mean(d * d))),
         "ref_max_abs": float(np.max(np.abs(ref))),
-        "bit_identical": bool(bad.shape[0] == 0),
-        "unequal_census": unequal_census(ref, cand),
+        "bit_identical": bool(bitwise_bad.shape[0] == 0),
+        "exact_modulo_flushed_subnormal": bool(bad.shape[0] == 0),
         "at_cell": at_cell,
-        "regions": {
-            k: {"n_cells": int(m.sum()),
-                "n_unequal": int(np.count_nonzero(d[m])),
-                "max_abs": float(np.max(np.abs(d[m]))),
-                "rms": float(np.sqrt(np.mean(d[m] ** 2))),
-                "normalized_max_abs": float(np.max(np.abs(d[m]))) / scale,
-                "ref_max_abs": float(np.max(np.abs(ref[m]))),
-                "n_ref_nonzero": int(np.count_nonzero(ref[m]))}
-            for k, m in reg.items()},
+        "regions": {},
     })
+    for k, m in reg.items():
+        region = m & use
+        census = comparison_census(ref, cand, region)
+        r["regions"][k] = {
+            "n_cells": int(region.sum()),
+            "n_unequal": census["normal_difference"],
+            "flushed_subnormal": census["flushed_subnormal"],
+            "max_abs": float(np.max(np.abs(d[region]), initial=0.0)),
+            "rms": float(np.sqrt(np.mean(d[region] ** 2))) if region.any() else 0.0,
+            "normalized_max_abs": (
+                float(np.max(np.abs(d[region]), initial=0.0)) / scale),
+            "ref_max_abs": float(np.max(np.abs(ref[region]), initial=0.0)),
+            "n_ref_nonzero": int(np.count_nonzero(ref[region])),
+        }
     return r
 
 
 def first_unequal(rows):
     for r in rows:
-        if not r["bit_identical"]:
+        if not r["exact_modulo_flushed_subnormal"]:
             return {k: r[k] for k in ("name", "n_unequal", "first_unequal_cell",
                                       "max_abs", "normalized_max_abs", "status")}
     return None
@@ -336,6 +361,34 @@ def nemo_histories(root: Path, kt: int):
         return tuple(jnp.asarray(a) for a in (
             pad_u(var("ub_e")), pad_u(var("ubb_e")), pad_v(var("vb_e")),
             pad_v(var("vbb_e")), var("sshb_e"), var("sshbb_e")))
+
+
+def carried_leaf_diff(carried, restart) -> dict[str, dict]:
+    """Diff every pytree leaf of two state objects, including shape changes."""
+    import jax
+
+    out = {}
+    for name in carried._fields:
+        left = jax.tree_util.tree_leaves(getattr(carried, name))
+        right = jax.tree_util.tree_leaves(getattr(restart, name))
+        require(len(left) == len(right), f"{name}: leaf count differs")
+        for index, (a, b) in enumerate(zip(left, right)):
+            a, b = np.asarray(a), np.asarray(b)
+            key = f"{name}[{index}]" if len(left) > 1 else name
+            if a.shape != b.shape:
+                out[key] = {"shape": [list(a.shape), list(b.shape)]}
+                continue
+            unequal = a != b
+            numeric = np.issubdtype(a.dtype, np.number) and np.issubdtype(
+                b.dtype, np.number)
+            out[key] = {
+                "n_unequal": int(np.count_nonzero(unequal)),
+                "max_abs": (float(np.max(np.abs(
+                    a.astype(np.float64) - b.astype(np.float64))))
+                    if a.size and numeric else None),
+                "cells": np.argwhere(unequal)[:8].tolist(),
+            }
+    return out
 
 
 # ----------------------------------------------------------------- geometry
@@ -993,10 +1046,11 @@ def stage_momentum_replay(root: Path, kt: int, card, stage: int, g: dict,
                           card_raw=None, card_terms=None) -> dict:
     """NEMO's stage velocity from NEMO's own recorded frames, offline.
 
-    The stage's right-hand side is ``rhs_term_replay`` (the pressure gradient
-    and the vorticity term from the frame the stage reads); the update is the
-    thickness-weighted statement (stprk3_stg.f90:373-378 at stages 1 and 2,
-    dynzdf.f90:145-150 at stage 3, followed there by the removal of the
+    The stage's right-hand side is ``rhs_term_replay`` (the pressure gradient,
+    vorticity and, on G1b, KE-gradient terms from the frame the stage reads).
+    The update selects the same vector/thickness predicate as NEMO
+    (stprk3_stg.f90:366-378 at stages 1 and 2, dynzdf.f90:138-150 at stage 3),
+    followed at stage 3 by the removal of the
     barotropic velocity, :160-161, which the deck's resolved ln_drgimp = T
     switches on; the one-level implicit solve after it is the identity on
     this deck: no stress, no drag, and the interface below the only level is
@@ -1007,7 +1061,9 @@ def stage_momentum_replay(root: Path, kt: int, card, stage: int, g: dict,
     The top V row is not replayed."""
     raw = card.recipe.z_coord.nemo_een_barotropic
     a = lambda n: np.asarray(getattr(raw, n), dtype=np.float64)  # noqa: E731
-    rep = rhs_term_replay(root, kt, a("fe3mask")[..., 0], stage=stage)
+    vector_form = card.recipe.model_config.momentum_advection == "vector_invariant"
+    rep = rhs_term_replay(root, kt, a("fe3mask")[..., 0], stage=stage,
+                          vector=vector_form)
     rdt = {1: 1.0 / 3.0, 2: 0.5, 3: 1.0}[stage] * float(card.dt_s)
     pre, suf = ("e_", "_bb") if stage == 1 else (f"{stage - 1}_", "_aa")
     out = {"stage": stage, "rDt": rdt, "rows": []}
@@ -1019,8 +1075,10 @@ def stage_momentum_replay(root: Path, kt: int, card, stage: int, g: dict,
         before, rhs = g[f"e_{face}{face}_k1_bb"], rep["rhs_" + face]
         target, r1 = g[f"{stage}_{face}{face}_b_aa"], _inverse_depth(a(f"h{face}_0"))
         with np.errstate(divide="ignore", invalid="ignore"):
-            vel_raw = np.where(wet, (
-                (1.0 + r3b) * before + rdt * (1.0 + r3m) * rhs) / (1.0 + r3a) * mask, 0.0)
+            vel_raw = ((before + rdt * rhs) * mask if vector_form else
+                       np.where(wet, ((1.0 + r3b) * before
+                                      + rdt * (1.0 + r3m) * rhs)
+                                / (1.0 + r3a) * mask, 0.0))
         if stage == 3:      # dynzdf.f90:160-161 (ln_drgimp and ln_dynspg_ts)
             vel_raw = (vel_raw - target) * mask
         vel = vel_raw + (target - (e3 * vel_raw) * r1) * mask
@@ -1035,8 +1093,10 @@ def stage_momentum_replay(root: Path, kt: int, card, stage: int, g: dict,
             row["card_raw_vs_replay_raw"] = substep_row(
                 "raw", vel_raw, card_raw[face], wet, reg)
             with np.errstate(divide="ignore", invalid="ignore"):
-                own = np.where(wet, ((1.0 + r3b) * before + rdt * (1.0 + r3m)
-                                     * card_rhs[face]) / (1.0 + r3a) * mask, 0.0)
+                own = ((before + rdt * card_rhs[face]) * mask if vector_form else
+                       np.where(wet, ((1.0 + r3b) * before
+                                      + rdt * (1.0 + r3m) * card_rhs[face])
+                                / (1.0 + r3a) * mask, 0.0))
             if stage == 3:
                 own = (own - target) * mask
             row["card_raw_vs_written_update_of_card_rhs"] = substep_row(
@@ -1047,13 +1107,18 @@ def stage_momentum_replay(root: Path, kt: int, card, stage: int, g: dict,
         if card_terms is not None:      # round 9: the term split (model hook
             # expose_momentum_operator); the sum row is the split's control
             hpg, vor = card_terms["hpg"][face], card_terms["vorticity"][face]
+            keg = card_terms.get("keg", {}).get(face)
             row["card_pressure_gradient_vs_replay"] = substep_row(
                 "hpg", rep["hpg_" + face], hpg, wet, reg)
             row["card_vorticity_vs_replay"] = substep_row(
                 "vor", rep["vor_" + face], vor, wet, reg)
+            if vector_form and keg is not None:
+                row["card_keg_vs_replay"] = substep_row(
+                    "keg", -rep["keg_" + face], keg, wet, reg)
             if card_rhs is not None:
                 row["control_card_terms_sum_vs_card_rhs"] = substep_row(
-                    "rhs", card_rhs[face], hpg + vor, wet, reg)
+                    "rhs", card_rhs[face], hpg + vor + (keg if keg is not None else 0.0),
+                    wet, reg)
             for n, mine, got in (("hpg", rep["hpg_" + face], hpg),
                                  ("vor", rep["vor_" + face], vor)):
                 # lists, not dicts: every dict in a row is a score row
@@ -1136,32 +1201,13 @@ def stage_face_ratio_rows(root: Path, kt: int, card) -> list[dict]:
     return rows
 
 
-TINY = float(np.finfo(np.float64).tiny)     # smallest normal double
-
-
-def unequal_census(ref, cand) -> dict:
-    """The unequal cells of one row, split by the tiny-number class."""
-    ref, cand = np.asarray(ref, dtype=np.float64), np.asarray(cand, dtype=np.float64)
-    bad = ref != cand
-    sub_ref = (np.abs(ref) < TINY) & (ref != 0.0)
-    flushed = bad & sub_ref & (cand == 0.0)
-    mag = np.abs(ref[bad])
-    return {"n_unequal": int(bad.sum()),
-            "nemo_subnormal_card_zero": int(flushed.sum()),
-            "other": int(bad.sum() - flushed.sum()),
-            "nemo_subnormal_anywhere": int(sub_ref.sum()),
-            "card_subnormal_anywhere": int(((np.abs(cand) < TINY) & (cand != 0.0)).sum()),
-            "unequal_nemo_abs_min": float(mag.min()) if mag.size else None,
-            "unequal_nemo_abs_max": float(mag.max()) if mag.size else None,
-            "unequal_card_abs_max": float(np.abs(cand[bad]).max()) if mag.size else None}
-
-
 def subnormal_environment() -> dict:
     """How numpy and XLA on this host treat subnormal results and operands."""
     import jax
     import jax.numpy as jnp
     a, b, s = 1.0e-200, 1.0e-110, 5.0e-310        # a * b = 1e-310 exactly-ish
-    out = {"smallest_normal": TINY, "product_operands": [a, b],
+    out = {"smallest_normal": float(np.finfo(np.float64).tiny),
+           "product_operands": [a, b],
            "subnormal_operand": s}
 
     def numpy_pair(n):
@@ -1327,19 +1373,33 @@ def substep_row(name, ref, cand, wet, reg, *, plant=False) -> dict:
     if plant:
         j, i = np.argwhere(wet & reg["interior"])[0]
         cand[j, i] += 1.0
-    d = np.where(wet, cand - ref, 0.0)
+    masks = comparison_masks(ref, cand, wet)
+    d = np.where(masks["normal_difference"], cand - ref, 0.0)
     worst = np.unravel_index(int(np.argmax(np.abs(d))), d.shape)
 
     def part(m):
-        return {"n_unequal": int(np.count_nonzero(d[m])),
+        census = comparison_census(ref, cand, m & wet)
+        return {"n_unequal": census["normal_difference"],
+                "flushed_subnormal": census["flushed_subnormal"],
                 "max_abs": float(np.max(np.abs(d[m]))),
                 "ref_max_abs": float(np.max(np.abs(ref[m & wet]), initial=0.0))}
+    at_cell = None
+    if CELL:
+        j, i = CELL
+        at_cell = {"cell": [j, i], "error": float(d[j, i]),
+                   "reference": float(ref[j, i]), "candidate": float(cand[j, i]),
+                   "wet": bool(wet[j, i])}
     return {"name": name, "n_wet": int(wet.sum()),
-            "n_unequal": int(np.count_nonzero(d)),
+            "n_unequal": int(masks["normal_difference"].sum()),
+            "n_bitwise_unequal": int(masks["unequal"].sum()),
+            "flushed_subnormal": int(masks["flushed_subnormal"].sum()),
             "max_abs": float(np.max(np.abs(d))),
             "max_abs_cell": [int(x) for x in worst],
             "ref_max_abs": float(np.max(np.abs(ref[wet]))),
-            "bit_identical": not np.any(d),
+            "bit_identical": not np.any(masks["unequal"]),
+            "exact_modulo_flushed_subnormal": not np.any(
+                masks["normal_difference"]),
+            "at_cell": at_cell,
             "regions": {k: part(reg[k]) for k in (
                 *SUB_REGIONS, *(n for n, _ in FOLD_ROW_NAMES))}}
 
@@ -1556,7 +1616,7 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                       (without_stage_r3t, "rk3_stage_r3t_nemo_literal"),  # round 9
                       (without_eos_gdept, "nemo_eos_gdept_rounded_product"),
                       (without_stage_r3uv, "rk3_stage_r3uv_nemo_literal"),
-                      (without_nemo_zeta, "een_nemo_relative_vorticity")):  # G1b round 2
+                      (without_nemo_zeta, "een_nemo_relative_vorticity")):
         if off:               # ROUND-6 BEFORE ARMS / plants, one option each
             require(getattr(cfg, name) is True, f"the card no longer selects {name}")
             cfg = cfg._replace(**{name: False})
@@ -1644,9 +1704,11 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
             st = jax.device_get(m.step(st, dt=card.dt_s))
             g = read_step(root, kt)
             nemo, mine = g["f_ssh_bb"], np.asarray(st.eta.data)
-            err = np.where(wet, mine - nemo, 0.0)
+            masks = comparison_masks(nemo, mine, wet)
+            err = np.where(masks["normal_difference"], mine - nemo, 0.0)
             over = np.abs(err) > BAR
             ev = {"kt": kt, "n_over_bar": int(over.sum()),
+                  "flushed_subnormal": int(masks["flushed_subnormal"].sum()),
                   "max_abs": float(np.max(np.abs(err)))}
             if over.any() and prev is not None:
                 j, i = (int(x) for x in np.unravel_index(
@@ -1687,7 +1749,7 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                 "barotropic_fold_top_v_face_ssh": bool(
                     cfg.barotropic.barotropic_fold_top_v_face_ssh),
                 "per_kt": events}
-    cap = 100 if arm in ("independent", "restart_entry") else n_stage
+    cap = 100 if arm in ("independent", "restart_entry", "carried") else n_stage
     require(1 <= kt_max <= cap, f"kt_max must lie in 1..{cap}")
     require(1 <= kt_min <= kt_max, "kt_min must lie in 1..kt_max")
     require(kt_min == 1 or arm not in ("independent", "restart_entry"),
@@ -1912,6 +1974,65 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
             "listed in nemo_histories_at_kt), w and the after-ssh slot "
             "come from the card's own chain at each kt")
 
+    if arm == "carried":
+        # G1b round 6: compare every carried leaf at one step entry with the
+        # previous NEMO restart, then distinguish a carried-state owner from a
+        # same-step arithmetic leave by replacing all restart-held fields.
+        require(kt_min == kt_max and kt_min > 1,
+                "carried scores one step after a NEMO restart")
+        import netCDF4
+
+        kt = kt_min
+        path = root / f"ORCA2G1_{kt - 1:08d}_restart.nc"
+        require(path.is_file(), f"missing {path}")
+        carried = before[kt]
+        with netCDF4.Dataset(path) as h:
+            var = lambda n: np.asarray(h.variables[n][0], dtype=np.float64)  # noqa: E731
+            restart = s0._replace(
+                T=s0.T.replace(data=jnp.asarray(var("tn")[0][..., None])),
+                S=s0.S.replace(data=jnp.asarray(var("sn")[0][..., None])),
+                u=s0.u.replace(data=jnp.asarray(pad_u(var("un")[0])[..., None])),
+                v=s0.v.replace(data=jnp.asarray(pad_v(var("vn")[0])[..., None])),
+                eta=s0.eta.replace(data=jnp.asarray(var("sshn"))),
+                uu_b=s0.uu_b.replace(data=jnp.asarray(pad_u(var("uu_n")))),
+                vv_b=s0.vv_b.replace(data=jnp.asarray(pad_v(var("vv_n")))),
+                bt_hist=nemo_histories(root, kt))
+        if plant == "entry":
+            eta = np.asarray(carried.eta.data).copy()
+            eta.flat[0] += 1.0e-3
+            carried = carried._replace(
+                eta=carried.eta.replace(data=jnp.asarray(eta)))
+        held = ("T", "S", "u", "v", "eta", "uu_b", "vv_b", "bt_hist")
+        out.update({
+            "label": "INDEPENDENT carried state vs NEMO restart, then swap arms",
+            "restart": str(path),
+            "restart_held_fields": list(held),
+            "restart_unheld_fields": [n for n in carried._fields if n not in held],
+            "carried_vs_restart": carried_leaf_diff(carried, restart),
+        })
+        g = read_step(root, kt)
+        nxt = read_step(root, kt + 1) if kt < n_stage else None
+        ref = {"ssh": g["f_ssh_bb"], "uu_b": g["f_uu_b_bb"],
+               "vv_b": g["f_vv_b_bb"], "u": g["f_uu_k1_bb"],
+               "v": g["f_vv_k1_bb"]}
+        if nxt is not None:
+            ref.update(T=nxt["e_tn_k1_bb"], S=nxt["e_sn_k1_bb"])
+        arms = {
+            "carried": carried,
+            "restart": restart,
+            "carried_with_nemo_restart_fields": carried._replace(
+                **{name: getattr(restart, name) for name in held}),
+            "restart_with_card_restart_fields": restart._replace(
+                **{name: getattr(carried, name) for name in held}),
+        }
+        for name, entry in arms.items():
+            cand = state_fields(jax.device_get(model().step(entry, dt=card.dt_s)))
+            rows = [row(f"carried.{name}.kt{kt}.{field}", ref[field], cand[field], reg)
+                    for field in (*FIELDS, "T", "S") if field in ref]
+            out["per_kt"].append({"kt": kt, "arm": name, "rows": rows,
+                                  "first_unequal": first_unequal(rows)})
+        return out
+
     if arm in ("independent", "given_entry"):
         out["label"] = ("GIVEN-NEMO-ENTRY (whole step)" if arm == "given_entry"
                         else "INDEPENDENT" if not fold_fill_v else
@@ -1952,7 +2073,13 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                 "west_u_all_zero": bool(not np.any(u_raw[:, 0])),
                 "south_v_all_zero": bool(not np.any(v_raw[0]))}
             cand = state_fields(state)
+            # NEMO retains initialized land T/S in the first entry-frame
+            # step; the ladder's standing GIVEN convention scores wet cells
+            # there and changes no other field or step mask.
             rows = [row(f"{arm}.kt{kt}.{f}", ref[f], cand[f], reg,
+                        mask=(np.asarray(card.recipe.z_coord.is_active)[..., 0] > 0
+                              if arm == "given_entry" and kt == 1
+                              and f in ("T", "S") else None),
                         plant=(plant == "score" and kt == 1 and f == "ssh"))
                     for f in (*FIELDS, "T", "S") if f in ref]
             out["per_kt"].append({"kt": kt, "rows": rows,
@@ -2183,7 +2310,7 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                                 expose_momentum_operator=name,
                                 expose_momentum_operator_stage=stage)).step(
                                     seed(g, before[kt], kt), dt=card.dt_s)))
-                        for name in ("hpg", "vorticity")}
+                        for name in ("hpg", "vorticity", "keg")}
                     stages[-1]["stage_replay"] = stage_momentum_replay(
                         root, kt, card, stage, g, cand, reg, *exposed,
                         card_terms=terms)
@@ -2311,7 +2438,8 @@ def _print(out: dict) -> None:
                   k.get("over_bar_by_region"))
     for r in out.get("history_rows", []):
         print(f"{r['name']:24s} {r['status']:6s} max={r['max_abs']:.3e} "
-              f"n_unequal={r['n_unequal']}")
+              f"n_unequal={r['n_unequal']} "
+              f"flushed={r['flushed_subnormal']}")
     for k in out["per_kt"]:
         for grp in k.get("stages", []):
             for r in grp.get("momentum_replay", {}).get("rows", []):
@@ -2339,7 +2467,7 @@ def _print(out: dict) -> None:
                           f"near={c['neighbourhood_max_abs']:.2e}")
                 print(f"{r['name']:24s} {r['status']:6s} max={r['max_abs']:.3e} "
                       f"norm={r['normalized_max_abs']:.3e} rms={r['rms']:.3e} "
-                      "n_unequal " + " ".join(
+                      f"flushed={r['flushed_subnormal']} n_unequal " + " ".join(
                           f"{n}={reg[n]['n_unequal']}/{reg[n]['max_abs']:.1e}"
                           for n in ("fold", "seam", "south", "interior_coast",
                                     "interior_open", "masked_faces")
@@ -2504,6 +2632,11 @@ def main(argv=None) -> int:
                 r["control_split_sum_vs_combined"]["n_unequal"] >= 1
                 and r["card_hpg_vs_replay"]["n_unequal"] == 1
                 for r in rows)
+            print("STATUS PLANT-FIRED" if fired else "REFUSE: plant stayed green",
+                  file=sys.stderr)
+            return 1 if fired else 3
+        if a.arm == "carried" and a.plant == "entry":
+            fired = out["carried_vs_restart"]["eta"]["n_unequal"] >= 1
             print("STATUS PLANT-FIRED" if fired else "REFUSE: plant stayed green",
                   file=sys.stderr)
             return 1 if fired else 3

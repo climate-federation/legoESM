@@ -205,7 +205,7 @@ def test_standin_card_builds_and_states_every_selector(standin_root):
         "rn_bt_alpha": moved(barotropic=cfg.barotropic._replace(
             nemo_barotropic_filter_alpha=0.07)),
         "rn_Dt": card._replace(dt_s=5400.0),
-        "no_ice": card._replace(icebergs_enabled=True),
+        "no_internal_ice_model": card._replace(icebergs_enabled=True),
         "bump": card._replace(recipe=card.recipe._replace(
             initial_state=state._replace(eta=state.eta.replace(
                 data=np.asarray(state.eta.data) * 2.0)))),

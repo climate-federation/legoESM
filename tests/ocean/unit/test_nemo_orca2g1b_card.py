@@ -227,3 +227,236 @@ def test_g1b_step_routes_the_vector_rhs_order_into_every_stage(roots, monkeypatc
         m.step(card.recipe.initial_state, dt=card.dt_s)
         assert len(seen) >= 3
         assert all(bool(s) is on for s in seen), seen
+
+
+def test_g6_raw_vmask_consumers_are_live_under_traced_jit(roots):
+    """G6's raw V mask reaches both Krhs and the vector stage update.
+
+    The one-level G1b card is the fast instance of the same vector/fold
+    program; only G6 selects ``rk3_vector_raw_vmask``.  The perturbed fold-row
+    velocities enter ``model.step`` as dynamic inputs to its production JIT.
+    Exact binary64 words pin the completed stage-2 RHS and its raw Kaa update,
+    so removing either production consumer changes the asserted last bits.
+    """
+    import jax.numpy as jnp
+    import numpy as np
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+
+    card = recipe.build_nemo_testcase_card(
+        "ORCA2G1b-vec", deck_root=roots["g1b"])
+    cfg = card.recipe.model_config._replace(rk3_vector_raw_vmask=True)
+    state = card.recipe.initial_state
+    u = state.u.data.at[-1, :, 0].set(
+        jnp.linspace(-2.0e-5, 3.0e-5, state.u.data.shape[1]))
+    v = state.v.data.at[-2, :, 0].set(
+        jnp.linspace(4.0e-5, -1.0e-5, state.v.data.shape[1]))
+    state = state._replace(u=state.u.replace(data=u), v=state.v.replace(data=v))
+
+    def exposed(name):
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**{name: True}))
+        return np.asarray(model.step(state, dt=card.dt_s).v.data)[-1, 29:33, 0]
+
+    rhs_words = exposed("expose_stage2_momentum_rhs").view(np.uint64)
+    raw_words = exposed("expose_stage2_raw_momentum").view(np.uint64)
+    assert np.array_equal(rhs_words, np.array([
+        0xbdff8bd7c5fbf193, 0xbe08b82c5abcff03,
+        0xbe115ba09e6de23e, 0xbe193713aaab926c,
+    ], dtype=np.uint64))
+    assert np.array_equal(raw_words, np.array([
+        0xbec4cb6e7bc1d37e, 0xbed04b673cd01519,
+        0xbed6e24c40ddddc5, 0xbee09f0e36c098c5,
+    ], dtype=np.uint64))
+
+
+def test_g6_stage_state_hands_vor_een_the_folded_pivot_v(roots, monkeypatch):
+    """dynvor.f90:762-766: np_CRV's pivot-row F vorticity reads vv(Kmm) on
+    the pivot V row, which the stage-end lbc_lnk fills with the fold image of
+    the row below (lbcnfd.f90 'V').  Under G6's raw V mask the stage state
+    handed to the momentum tendency keeps that row; the compact mask zeroes
+    it.  Fails if the stage state goes back to the compact mask."""
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as om
+
+    card = recipe.build_nemo_testcase_card(
+        "ORCA2G1b-vec", deck_root=roots["g1b"])
+    state = card.recipe.initial_state
+    v = state.v.data.at[-2, :, 0].set(
+        jnp.linspace(4.0e-5, -1.0e-5, state.v.data.shape[1]))
+    state = state._replace(v=state.v.replace(data=v))
+    seen = []
+    real = om.LatLonCGridOceanModel.tendencies
+
+    def spy(self, st, *a, **kw):
+        jax.debug.callback(lambda x: seen.append(np.asarray(x)),
+                           st.v.data[..., 0], ordered=True)
+        return real(self, st, *a, **kw)
+
+    monkeypatch.setattr(om.LatLonCGridOceanModel, "tendencies", spy)
+    fold = card.recipe.grid.fold
+    pivots = {}
+    for on in (True, False):
+        seen.clear()
+        cfg = card.recipe.model_config._replace(rk3_vector_raw_vmask=on)
+        om.LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
+                                 cfg).step(state, dt=card.dt_s)
+        assert len(seen) >= 3
+        pivots[on] = [s[-1] for s in seen[1:]]
+        if on:
+            for s in seen[1:]:
+                image = fold.vector_sign_v * s[-2][np.asarray(fold.perm_v)]
+                wet = s[-1] != 0.0
+                assert wet.any()
+                assert np.array_equal(s[-1][wet], image[wet])
+    assert not any(p.any() for p in pivots[False])
+
+
+def test_g6_dyn_zad_v_face_mask_keeps_the_pivot_row(roots, monkeypatch):
+    """dynzad.f90:125-126: dyn_zad updates the pivot V row, whose raw vmask is
+    wet.  Under G6's raw V mask the vector-form vertical momentum advection
+    gets that mask for its V faces; the compact mask is dry there and zeroed
+    the increment.  Fails if the ZAD call goes back to the compact mask."""
+    import jax
+    import numpy as np
+
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as om
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
+
+    card = recipe.build_nemo_testcase_card(
+        "ORCA2G1b-vec", deck_root=roots["g1b"])
+    seen = []
+    real = pe._bc_vertical_momentum_advection
+
+    def spy(du, dv, up, vp, w, hu, hv, um, vm, *a, **kw):
+        jax.debug.callback(lambda x: seen.append(np.asarray(x)),
+                           vm[-1, :, 0], ordered=True)
+        return real(du, dv, up, vp, w, hu, hv, um, vm, *a, **kw)
+
+    monkeypatch.setattr(pe, "_bc_vertical_momentum_advection", spy)
+    pivot = {}
+    for on in (True, False):
+        seen.clear()
+        cfg = card.recipe.model_config._replace(rk3_vector_raw_vmask=on)
+        om.LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
+                                 cfg).step(card.recipe.initial_state,
+                                           dt=card.dt_s)
+        assert len(seen) >= 3
+        pivot[on] = [float(s.sum()) for s in seen[1:]]
+    assert all(p > 0 for p in pivot[True])
+    assert not any(pivot[False])
+
+
+def test_g6_pivot_v_ratio_is_nemos_fold_image(roots, monkeypatch):
+    """stprk3_stg.f90:167-169: NEMO passes the stage ratios r3u/r3v through
+    lbc_lnk (sign +1), so the pivot V row is the mirrored row below, and both
+    div_hor (divhor.f90:125-130 -> ww) and dyn_zad's divisor
+    (dynzad.f90:125-126) read that image.  The card's stencil wraps the
+    pivot V row's northern neighbour to row 0.  Under G6's raw V mask the
+    ZAD divisor's pivot row is the fold image (fails if the stage faces drop
+    the exchange), and the wzv builder called directly with the exchange moves
+    only the pivot-row ww (fails if the builder drops it).  Whether each wzv
+    CALL SITE passes the exchange is pinned by the next test."""
+    import jax
+    import numpy as np
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as om
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
+
+    card = recipe.build_nemo_testcase_card(
+        "ORCA2G1b-vec", deck_root=roots["g1b"])
+    s0 = card.recipe.initial_state
+    tm = np.asarray(card.recipe.z_coord.is_active)[..., 0]
+    eta = np.random.default_rng(0).uniform(-0.05, 0.05, tm.shape) * tm
+    s0 = s0._replace(eta=s0.eta.replace(data=jax.numpy.asarray(eta)))
+    perm = np.asarray(card.recipe.grid.fold.perm_v)
+    seen = []
+    real = pe._bc_vertical_momentum_advection
+
+    def spy(du, dv, up, vp, w, hu, hv, um, vm, *a, **kw):
+        jax.debug.callback(lambda *x: seen.append([np.asarray(y) for y in x]),
+                           hv[-1, :, 0], hv[-2, :, 0], vm[-1, :, 0], w[-1, :, 1],
+                           ordered=True)
+        return real(du, dv, up, vp, w, hu, hv, um, vm, *a, **kw)
+
+    monkeypatch.setattr(pe, "_bc_vertical_momentum_advection", spy)
+    got = {}
+    for on in (True, False):
+        seen.clear()
+        cfg = card.recipe.model_config._replace(rk3_vector_raw_vmask=on)
+        om.LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
+                                 cfg).step(s0, dt=card.dt_s)
+        assert len(seen) >= 3
+        got[on] = seen[1:]
+    for (top, below, wet, _), (top_off, _, _, _) in zip(got[True], got[False]):
+        wet = wet > 0
+        assert wet.sum() > 0
+        np.testing.assert_array_equal(top[wet], below[perm][wet])
+        assert (top_off[wet] != below[perm][wet]).any()
+    # the wzv call: same operands, only the exchange toggled
+    rng = np.random.default_rng(1)
+    st = card.recipe.initial_state
+    u = jax.numpy.asarray(rng.uniform(-0.1, 0.1, np.shape(st.u.data)))
+    v = jax.numpy.asarray(rng.uniform(-0.1, 0.1, np.shape(st.v.data)))
+    act = jax.numpy.asarray(card.recipe.z_coord.is_active, dtype=u.dtype)
+    out = {}
+    for on in (True, False):
+        out[on] = pe.nemo_qco_wzv_operands(
+            jax.numpy.asarray(eta), jax.numpy.asarray(eta), u, v,
+            card.recipe.grid, card.recipe.z_coord,
+            jax.numpy.asarray(st.u_mask.data)[..., None] * jax.numpy.ones_like(u),
+            jax.numpy.asarray(st.v_mask.data)[..., None] * jax.numpy.ones_like(v),
+            act, card.dt_s, eta_after_override=jax.numpy.asarray(eta) * 1.5,
+            fold_exchange_ratios=on)
+    lv_on, lv_off = np.asarray(out[True][2]), np.asarray(out[False][2])
+    w_on, w_off = np.asarray(out[True][0]), np.asarray(out[False][0])
+    np.testing.assert_array_equal(lv_on[-1][wet], lv_on[-2][perm][wet])
+    assert (lv_off[-1][wet] != lv_on[-1][wet]).any()
+    assert (w_on[-1] != w_off[-1]).any()
+    np.testing.assert_array_equal(w_on[:-1], w_off[:-1])
+
+
+def test_g6_every_wzv_call_site_takes_the_fold_exchange(roots, monkeypatch):
+    """The three G6 wzv calls -- the tracer (stprk3_stg.f90:297) and momentum
+    (:360) solves in the stage transport and the tendency's first call -- each
+    carry the pivot-row ww fix (sshwzv.f90 via divhor.f90:125-130).  One step
+    of G6 records, per call site, whether the fold exchange reached it; fails
+    if any one site drops it."""
+    import sys
+
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as om
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
+
+    card = recipe.build_nemo_testcase_card(
+        "ORCA2G1b-vec", deck_root=roots["g1b"])
+    seen = []
+    real = pe.nemo_qco_wzv_operands
+
+    def spy(*a, **kw):
+        f = sys._getframe(1)
+        if f.f_code.co_name == "_step_impl":
+            # ponytail: the step-body call only builds the stored diagnostic w
+            # on G6 (no prognostic moves over two steps), so it is not pinned.
+            return real(*a, **kw)
+        seen.append(((f.f_code.co_name, f.f_lineno),
+                     kw.get("fold_exchange_ratios", False)))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(om, "nemo_qco_wzv_operands", spy)
+    monkeypatch.setattr(pe, "_nemo_qco_zad_operands", spy)
+    for on in (True, False):
+        seen.clear()
+        cfg = card.recipe.model_config._replace(rk3_vector_raw_vmask=on)
+        om.LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
+                                 cfg).step(card.recipe.initial_state, dt=card.dt_s)
+        sites = {s for s, _ in seen}
+        names = sorted(n for n, _ in sites)
+        assert names == ["_nemo_ws_stage_transport", "_nemo_ws_stage_transport",
+                         "latlon_cgrid_ocean_baroclinic_tendencies"], sites
+        assert {flag for _, flag in seen} == {on}, seen

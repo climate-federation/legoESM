@@ -135,7 +135,9 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
     assert LatLonCGridOceanConfig._field_defaults[
         "zdf_tracer_nemo_rounded_thickness"] is False       # round 3
     assert _g_rungs(recipe._ORCA2G_ZDF_FACES) == {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
-                                          "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
+                                          "ORCA2G4-sbc": True, "ORCA2G5-ice": True, "ORCA2G6-vec": True,
+                                          "ORCA2G7-drg": True, "ORCA2G8-ldf": True,
+                                          "ORCA2G9-tadv": True}
     assert recipe.ORCA2G2_UNMEASURED == ("multi_level_partial_cell_step",)
     # no other builder assigns it: one assignment in the whole package, the
     # shared G1/G2 builder's, keyed by the rung table (the resolved pair of
@@ -146,7 +148,9 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
     assert [name for name, _ in hits] == ["nemo_testcase_recipe.py"]
     # round 3's option: its own rung table, one assignment in the package
     assert _g_rungs(recipe._ORCA2G_TRA_ZDF_ROUNDED) == {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
-                                          "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
+                                          "ORCA2G4-sbc": True, "ORCA2G5-ice": True, "ORCA2G6-vec": True,
+                                          "ORCA2G7-drg": True, "ORCA2G8-ldf": True,
+                                          "ORCA2G9-tadv": True}
     mine = [(path.name, line) for path in (CASES.parents[3] / "packages").rglob("*.py")
             for line in path.read_text().splitlines()
             if "zdf_tracer_nemo_rounded_thickness=" in line]
@@ -156,7 +160,9 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
     assert LatLonCGridOceanConfig._field_defaults[
         "barotropic_rhs_ascending_level_sum"] is False
     assert _g_rungs(recipe._ORCA2G_UE_RHS_ASCENDING) == {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
-                                          "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
+                                          "ORCA2G4-sbc": True, "ORCA2G5-ice": True, "ORCA2G6-vec": True,
+                                          "ORCA2G7-drg": True, "ORCA2G8-ldf": True,
+                                          "ORCA2G9-tadv": True}
     sums = [(path.name, line) for path in (CASES.parents[3] / "packages").rglob("*.py")
             for line in path.read_text().splitlines()
             if "barotropic_rhs_ascending_level_sum=" in line]
@@ -167,23 +173,54 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
     assert LatLonCGridOceanConfig._field_defaults[
         "zdf_momentum_stage_r3u_nemo_literal"] is False
     assert _g_rungs(recipe._ORCA2G_ZDF_STAGE_R3U) == {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
-                                              "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
+                                              "ORCA2G4-sbc": True, "ORCA2G5-ice": True, "ORCA2G6-vec": True,
+                                          "ORCA2G7-drg": True, "ORCA2G8-ldf": True,
+                                          "ORCA2G9-tadv": True}
     r3u = [(path.name, line) for path in (CASES.parents[3] / "packages").rglob("*.py")
            for line in path.read_text().splitlines()
            if "zdf_momentum_stage_r3u_nemo_literal=" in line]
     assert [name for name, _ in r3u] == ["nemo_testcase_recipe.py"]
     assert "_ORCA2G_ZDF_STAGE_R3U[case]" in r3u[0][1]
-    assert LatLonCGridOceanConfig._fields[-14:-6] == (
+    assert LatLonCGridOceanConfig._fields[-32:-24] == (
         "zdf_tracer_nemo_rounded_thickness", "barotropic_rhs_ascending_level_sum",
         "zdf_momentum_stage_r3u_nemo_literal", "barotropic_wind_nemo_stored_depth",
         "surface_stress_nemo_fold_vector_sign", "zdf_surface_stress_nemo_face_thickness",
         "een_nemo_relative_vorticity", "rk3_stage_tracer_written_order")
-    assert LatLonCGridOceanConfig._fields[-6:] == (
+    assert LatLonCGridOceanConfig._fields[-24:-16] == (
         "rk3_vector_rhs_nemo_order", "rk3_stage3_heat_nemo_written",
         "rk3_stage3_tracer_nemo_stored_thickness",
         "implicit_ice_ocean_top_drag",
         "rk3_stage2_tracer_nemo_stored_thickness",
-        "rk3_stage3_salt_nemo_written")
+        "rk3_stage3_salt_nemo_written",
+        # G6 (9f8316fab): appended last, default off, G6-selected only
+        "nemo_hpg_sco_fold_geometry", "rk3_vector_raw_vmask")
+    # G6 round 7: appended last, default off, G6-selected only
+    assert LatLonCGridOceanConfig._fields[-16:-14] == (
+        "nemo_wzv_stored_r3_ratios", "nemo_zad_written_association")
+    # G6 round 8: appended last, default off, G6-selected only
+    assert LatLonCGridOceanConfig._fields[-14] == "nemo_stage2_momentum_wzv_half_step"
+    # G6 round 8 resume: appended last, default off, G6-selected only
+    assert LatLonCGridOceanConfig._fields[-13] == "nemo_stage_momentum_wzv_stored_kmm_ratios"
+    # G8 round 1: appended last, default off, G8-selected only
+    assert LatLonCGridOceanConfig._fields[-12:-8] == (
+        "nemo_ldf_stored_f_area", "nemo_ldf_fold_rows",
+        "rk3_stage1_ldf_source_order", "nemo_ldf_stage_r3f")
+    # G9 round 1: appended last, default off, G9-selected only
+    assert LatLonCGridOceanConfig._fields[-8:-6] == (
+        "rk3_stage_transport_raw_vmask", "rk3_stage_transport_fold_exchanges")
+    # G9 rounds 2, 3, 4, 7 and 8: appended last, default off, G9-selected only
+    assert LatLonCGridOceanConfig._fields[-6:] == (
+        "fct_fold_exchange", "rk3_end_of_stage_pivot_fold",
+        "rk3_stage_wzv_nemo_clock_pair", "rk3_stage3_tracer_krhs_nemo_order",
+        "rk3_stage_tracer_wzv_stored_kmm_ratios", "rk3_stage_transport_stored_r3uv")
+    assert not any(LatLonCGridOceanConfig._field_defaults[f] for f in (
+        "nemo_hpg_sco_fold_geometry", "rk3_vector_raw_vmask",
+        "nemo_wzv_stored_r3_ratios", "nemo_zad_written_association",
+        "nemo_stage2_momentum_wzv_half_step", "nemo_stage_momentum_wzv_stored_kmm_ratios",
+        "rk3_stage_transport_raw_vmask", "rk3_stage_transport_fold_exchanges",
+        "fct_fold_exchange", "rk3_end_of_stage_pivot_fold",
+        "rk3_stage_wzv_nemo_clock_pair", "rk3_stage3_tracer_krhs_nemo_order",
+        "rk3_stage_tracer_wzv_stored_kmm_ratios", "rk3_stage_transport_stored_r3uv"))
     assert "_ORCA2G_ZDF_FACES[case]" in (
         CASES.parents[3] / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py"
     ).read_text().splitlines()[hits[0][1] - 1]
@@ -466,3 +503,52 @@ def test_g5_stage2_e3t_and_stage3_sfx_statements_are_each_required(ladder):
     assert (unequal(no_s2, "stage2", "T"), unequal(no_s2, "stage2", "S")) == (1, 1)
     no_salt = ladder.run(root, exposures=("stage3",), without_stage3_salt=True, **kw)
     assert unequal(no_salt, "stage3", "S") == 1
+
+
+def _stp2d_record(path, kt=3, nx=8, ny=7, nz=4):
+    import struct
+    rng = np.random.default_rng(kt)
+    n3, n2 = nx * ny * nz, nx * ny
+    fields = []
+    for i in range(15):
+        if 5 <= i <= 10:
+            fields.append(rng.normal(size=n2))
+        else:
+            a = rng.normal(size=(nx, ny, nz))
+            if i != 4:
+                a[..., nz - 1] = 0.0          # the dummy level holds nothing
+            fields.append(a.ravel(order="F"))
+    with path.open("wb") as h:
+        h.write(b"NEMO_G6_STP2D_1 ")
+        h.write(struct.pack("=9i", 1, kt, 1, 3, 3, nx, ny, nz, 64))
+        for f in fields:
+            h.write(np.asarray(f, np.float64).tobytes())
+    return fields
+
+
+def test_stp2d_term_record_is_cut_to_the_inner_domain_in_order(ladder, tmp_path):
+    path = tmp_path / "oracle_stp2d_terms_kt00000003.bin"
+    fields = _stp2d_record(path)
+    out = ladder.read_stp2d_terms(path, 3, 3)
+    names = (*ladder.STP2D_3D, *ladder.STP2D_2D, *ladder.STP2D_3D_LATE)
+    for name, raw in zip(names, fields):
+        if name in ladder.STP2D_2D:
+            want = raw.reshape((8, 7), order="F").T[2:-2, 2:-2]
+        else:
+            want = raw.reshape((8, 7, 4), order="F").transpose(1, 0, 2)[2:-2, 2:-2, :3]
+        assert np.array_equal(out[name], want), name
+    assert out["ww"].shape == (3, 4, 3) and out["levels"] == (3, 1, 3)
+    with pytest.raises(Exception, match="bad stp_2D term record"):
+        ladder.read_stp2d_terms(path, 2, 3)          # header says kt 3
+
+
+def test_bit_rows_count_wet_points_and_the_plant_fires(ladder):
+    ref = np.arange(1.0, 13.0).reshape(3, 4)
+    wet = np.ones_like(ref, bool)
+    wet[0, 0] = False
+    cand = ref.copy()
+    cand[0, 0] = 99.0                                  # dry: reported apart
+    r = ladder.bit_rows("x", ref, cand, wet)
+    assert (r["n_unequal"], r["dry_card_nonzero"], r["max_ulps"]) == (0, 1, 0)
+    p = ladder.bit_rows("x", ref, ref, wet, plant=True)
+    assert p["n_unequal"] == 1 and p["max_ulps"] == 1

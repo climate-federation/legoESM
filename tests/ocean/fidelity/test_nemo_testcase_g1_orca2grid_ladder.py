@@ -6,6 +6,7 @@ are skipped off this machine; each one has a plant that must turn it red.
 from __future__ import annotations
 
 import importlib.util
+from collections import namedtuple
 from pathlib import Path
 
 import jax.numpy as jnp
@@ -72,6 +73,33 @@ def test_redundant_face_records():
     assert np.array_equal(ladder.pad_u(a)[:, 0], a[:, -1])
     assert ladder.pad_u(a).shape == (3, 5) and ladder.pad_v(a).shape == (4, 4)
     assert not ladder.pad_v(a)[0].any()
+
+
+def test_carried_leaf_diff_checks_every_leaf_and_its_plant():
+    """The carried-state audit must see a change outside the scored fields."""
+    State = namedtuple("State", "eta nested")
+    same = State(jnp.zeros((2, 3)), (jnp.ones(2), jnp.arange(3.0)))
+    changed = State(jnp.zeros((2, 3)), (jnp.ones(2), jnp.arange(3.0).at[1].add(0.5)))
+    clean = ladder.carried_leaf_diff(same, same)
+    planted = ladder.carried_leaf_diff(changed, same)
+    assert set(clean) == {"eta", "nested[0]", "nested[1]"}
+    assert all(row["n_unequal"] == 0 for row in clean.values())
+    assert planted["nested[1]"]["n_unequal"] == 1
+    assert planted["nested[1]"]["cells"] == [[1]]
+
+
+def test_ladder_row_uses_shared_decision127_classes_and_score_mask():
+    ref = np.array([[1.0, 1.0e-310], [2.3e-308, 0.0]], dtype=np.float64)
+    cand = np.array([[2.0, 0.0], [0.0, 0.0]], dtype=np.float64)
+    use = np.array([[False, True], [True, True]])
+    result = ladder.row("masked", ref, cand, {"interior": use}, mask=use)
+    assert result["n"] == 3
+    assert result["flushed_subnormal"] == 1
+    assert result["normal_difference"] == 1
+    assert result["first_normal_difference_cell"] == [1, 0]
+    assert result["exact_modulo_flushed_subnormal"] is False
+    assert result["status"] == "AT-BAR"
+    assert result["regions"]["interior"]["n_cells"] == 3
 
 
 class _Fold:
@@ -1203,16 +1231,6 @@ def test_stage_t_stretch_is_one_plus_the_mean_of_the_stored_ratios():
             NS(rk3_stage_r3t_nemo_literal=True, pgf_scheme="adcroft"), 3, pair, zc, depth)
 
 
-def test_unequal_census_separates_flushed_subnormals_from_other_cells():
-    ref = np.array([0.0, 1.0e-310, -3.0e-320, 1.0e-300, 2.0, 5.0e-309])
-    cand = np.array([0.0, 0.0, 0.0, 1.1e-300, 2.0, 5.0e-309])
-    c = ladder.unequal_census(ref, cand)
-    assert (c["n_unequal"], c["nemo_subnormal_card_zero"], c["other"]) == (3, 2, 1)
-    assert (c["nemo_subnormal_anywhere"], c["card_subnormal_anywhere"]) == (3, 1)
-    assert c["unequal_nemo_abs_min"] == 3.0e-320 and c["unequal_nemo_abs_max"] == 1.0e-300
-    assert ladder.unequal_census(ref, ref)["unequal_nemo_abs_min"] is None
-
-
 def test_xla_flushes_subnormals_and_numpy_keeps_them_on_this_host():
     """The registered environment row: the card's executable returns zero
     for a subnormal result and reads a subnormal operand as zero; numpy in
@@ -1272,19 +1290,18 @@ def test_stage_operands_at_steps_5_and_40_name_the_round9_cells():
     assert (d3["depth_n_unequal"], d3["rhd_n_unequal"]) == (1, 0)
 
 
-R9_FIRST_OVER = {(): None, ("without_stage_r3t",): 76, ("without_eos_gdept",): 63,
+R9_FIRST_OVER = {(): None, ("without_stage_r3t",): 76,
+                 ("without_eos_gdept",): 63,
                  ("without_stage_r3uv",): None}
 
 
 @needs_record5
 @pytest.mark.parametrize("off", list(R9_FIRST_OVER))
-def test_the_100_step_record_is_at_the_bar_and_needs_each_round9_statement(off):
-    """INDEPENDENT chain, 100 steps.  The card: no row over the bar, no
-    unequal cell after step 11, and steps 8 to 11 hold only the registered
-    tiny-number class (NEMO subnormal, the card zero, and their descendants
-    below 1e-280).  Each option off is the plant: the sea level leaves the
-    bar at the pinned step, or (the U and V ratios) cells differ past step 11
-    while staying at the bar."""
+def test_the_100_step_record_is_at_bar_and_needs_round9_statements(off):
+    """INDEPENDENT chain, 100 steps.  Step 8 contains only Decision-127
+    flushed subnormals; normal-range differences at steps 9--11 remain below
+    the unchanged 1e-15 bar.  Each option-off plant retains its registered
+    first over-bar step or creates differences after step 11."""
     out = ladder.run(RECORD5, arm="independent", kt_max=100, allow_dirty=True,
                      **{k: True for k in off})
     rows = [(k["kt"], r) for k in out["per_kt"] for r in k["rows"]]
@@ -1295,12 +1312,13 @@ def test_the_100_step_record_is_at_the_bar_and_needs_each_round9_statement(off):
         assert late                               # the plant moved cells
         return
     assert not late
-    early = [(kt, r) for kt, r in rows if r["n_unequal"]]
+    early = [(kt, r) for kt, r in rows if kt <= 11 and r["n_bitwise_unequal"]]
     assert {kt for kt, _ in early} == {8, 9, 10, 11}
-    assert all(r["max_abs"] < 1.0e-280 for _, r in early)
-    assert all(r["unequal_census"]["card_subnormal_anywhere"] == 0 for _, r in rows)
-    first = [r for kt, r in early if kt == 8]
-    assert all(r["unequal_census"]["other"] == 0 for r in first)
+    assert all(r["max_abs"] < 1.0e-280 for kt, r in early if kt > 8)
+    assert all(r["candidate_nonzero_subnormal"] == 0 for _, r in rows)
+    step8 = [r for kt, r in early if kt == 8]
+    assert step8 and all(r["normal_difference"] == 0 for r in step8)
+    assert sum(r["flushed_subnormal"] for r in step8) > 0
 
 
 @needs_record5

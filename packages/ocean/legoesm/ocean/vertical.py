@@ -204,7 +204,7 @@ def nemo_qco_live_face_geometry_from_operands(
     hv_0,
     area_t,
     area_u,
-    area_v, r3_native=None, *, grid=None,  # (r3u, r3v) handed in place of the sea-level ratios (stprk3_stg.f90:172-173, :216-217)
+    area_v, r3_native=None, *, grid=None, fold_grid=None,  # (r3u, r3v) handed in place of the sea-level ratios (stprk3_stg.f90:172-173, :216-217)
 ):
     """Build live native-face QCO geometry in NEMO source association.
 
@@ -250,7 +250,7 @@ def nemo_qco_live_face_geometry_from_operands(
     r1_area_u = b(one / area_u)
     r1_area_v = b(one / area_v)
     r3u = b(b(num_u * r1_hu0) * r1_area_u) if r3_native is None else r3_native[0]
-    r3v = b(b(num_v * r1_hv0) * r1_area_v) if r3_native is None else r3_native[1]
+    r3u, r3v = _nemo_ratio_fold_exchange(r3u, b(b(num_v * r1_hv0) * r1_area_v) if r3_native is None else r3_native[1], fold_grid)
     one_plus_r3u = b(one + r3u)
     one_plus_r3v = b(one + r3v)
     e3u = b(e3u_0 * b(one + r3u[..., None] * umask3))
@@ -380,7 +380,7 @@ def nemo_ldf_reference_e3f(z_coord):
     return reference
 
 
-def _nemo_qco_r1_area_f(raw, geom_grid, dtype):
+def nemo_qco_r1_area_f(raw, geom_grid, dtype):
     b, one = lax.optimization_barrier, jnp.asarray(1.0, dtype=dtype)
     e1f = None if raw is None else getattr(raw, "e1f", None)
     e2f = None if raw is None else getattr(raw, "e2f", None)
@@ -532,7 +532,7 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
     # Preserve NEMO's native F-layout operand and stored-reciprocal boundary
     # on cards that carry its raw mesh.
-    r1_area_f = _nemo_qco_r1_area_f(raw, geom_grid, dtype)
+    r1_area_f = nemo_qco_r1_area_f(raw, geom_grid, dtype)
     r3f = b(b(b(quarter * quad) * r1_hf0) * r1_area_f)
     # dom_qco_zgr applies the F-point lateral boundary condition to r3f
     # (domqco.F90:124-135) before domzgr_substitute.h90:130 consumes it.
@@ -793,7 +793,7 @@ def nemo_qco_live_face_geometry_cgrid(
     area_u,
     area_v,
     *,
-    include_reciprocals=False, r3_native=None,
+    include_reciprocals=False, r3_native=None, fold_grid=None,
 ):
     """NEMO ``e3u/e3v(Kmm)`` on legoESM's redundant west/south C-grid faces.
 
@@ -839,7 +839,7 @@ def nemo_qco_live_face_geometry_cgrid(
     """
     geom = nemo_qco_live_face_geometry_from_operands(
         eta, e3u_0, e3v_0, umask3, vmask3,
-        hu_0, hv_0, area_t, area_u, area_v, r3_native,
+        hu_0, hv_0, area_t, area_u, area_v, r3_native, fold_grid=fold_grid,
     )
     one = jnp.asarray(1.0, dtype=geom.e3u.dtype)
     result = (
@@ -2444,6 +2444,7 @@ def nemo_advective_vertical_momentum_advection(
     face_area: jnp.ndarray,
     face_active: jnp.ndarray | None = None,
     bottom_face_mask_mode: str = "min_rule",
+    nemo_written_association: bool = False,
 ) -> jnp.ndarray:
     """NEMO-faithful ADVECTIVE-form vertical momentum advection (dynzad.F90).
 
@@ -2551,6 +2552,8 @@ def nemo_advective_vertical_momentum_advection(
     w_interior = w_area_half[..., 1:nlev]           # (..., nlev-1)
     du_interior = u[..., :-1] - u[..., 1:]           # u[k-1] - u[k], k=1..nlev-1
     G_interior = 2.0 * w_interior * du_interior
+    if nemo_written_association:
+        G_interior = nemo_source_round(G_interior)        # zzWdzU (dynzad.f90:119)
 
     if bottom_face_mask_mode == "min_rule" and face_active is not None:
         active_above = face_active[..., :-1]    # cell k-1 for k=1..nlev-1
@@ -2576,7 +2579,14 @@ def nemo_advective_vertical_momentum_advection(
     # tendency is zero — but 0 (masked G) * inf (1/0 area) is nan, not 0,
     # without the floor.
     face_area_safe = jnp.maximum(face_area, 1.0e-10)
-    tend = -0.25 / (face_area_safe * h_u_safe) * (G_top + G_bot)
+    if nemo_written_association:
+        # dynzad.f90:123-124: Krhs - 0.25*r1_e1e2u/e3u * (zWdzU + zzWdzU),
+        # r1_e1e2u = 1/e1e2u stored (domhgr.f90:170); every product rounded.
+        coef = nemo_source_round(
+            nemo_source_round(0.25 * (1.0 / face_area_safe)) / h_u_safe)
+        tend = -nemo_source_round(coef * nemo_source_round(G_top + G_bot))
+    else:
+        tend = -0.25 / (face_area_safe * h_u_safe) * (G_top + G_bot)
     if bottom_face_mask_mode == "nemo_faithful" and face_active is not None:
         # dynzdf.F90:121 -- ``puu(Kaa) = (puu(Kbb) + rDt*Krhs) * umask(ji,jj,jk)``:
         # the ONLY masking NEMO applies to this term, keyed on the cell's
@@ -3128,3 +3138,15 @@ def _nemo_r3t_product(product, z_coord):
     if getattr(z_coord, "nemo_r3t_stored_product", False) is not True:
         return product      # identity test: a traced flag reads as off, never raises
     return nemo_source_round(product)
+
+
+def _nemo_ratio_fold_exchange(r3u, r3v, fold_grid):
+    """NEMO's ``lbc_lnk`` sign +1 of the stage ratios (stprk3_stg.f90:169):
+    with a fold grid the pivot V row becomes the mirrored row below instead of
+    the stencil over the wrapped southern row.  None = no exchange."""
+    if fold_grid is None:
+        return r3u, r3v
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import nemo_een_ratio_fold_exchange
+
+    # ponytail: the shared exchange also folds an F ratio; this caller has none
+    return nemo_een_ratio_fold_exchange(r3u, r3v, r3v, fold_grid, True)[:2]

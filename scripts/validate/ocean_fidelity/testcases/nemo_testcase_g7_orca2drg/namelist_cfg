@@ -1,0 +1,337 @@
+!!>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+!! NEMO/OCE  ORCA2G7  -- grid ladder rung G7 (DECISION 128, lane A)
+!!
+!! The certified G5 deck with ONE switch: &namdrg is ORCA2's
+!! (ORCA2 :249-252): ln_lin = T, so ln_drg_OFF = F.  Every other line is
+!! G5's, byte for byte (a committed test compares the assignments);
+!! momentum advection stays OFF as in G5.  &namdrg_bot, &namdrg_top,
+!! ln_drgimp and ln_drgice_imp are not stated, as ORCA2 does not state
+!! them: they resolve to namelist_ref (rn_Cd0 = 1.e-3 :834, rn_Uc0 = 0.4
+!! :835, ln_boost = F :839, ln_drgimp = T :817, ln_drgice_imp = T :818).
+!! What NEMO derives (not deck lines): ndrg = np_lin, l_zdfdrg = F,
+!! rCdU_bot = -(rn_Cd0*ssmask)*rn_Uc0 once (zdfdrg.f90:276, :540-547).
+!! cn_exp stays "ORCA2G1": G5's binaries and record readers are reused.
+!!
+!! "ORCA2" = cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg,
+!! "TSUNAMI" = tests/TSUNAMI/EXPREF/namelist_cfg.
+!!>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+!-----------------------------------------------------------------------
+&namrun        !   parameters of the run
+!-----------------------------------------------------------------------
+   nn_no       =       0
+   cn_exp      = "ORCA2G1"
+   nn_it000    =       1
+   nn_itend    =     100
+   nn_date0    =  010101
+   nn_time0    =       0
+   nn_leapy    =       0
+   ln_rstart   = .false.
+   ln_1st_euler = .false.
+   nn_istate   =       0
+   ln_rst_list = .true.    !  restarts at nn_stocklist; nn_itend and every entry are multiples of nn_fsbc
+   nn_stock    =     100
+   nn_stocklist = 10,20,30,40,50,60,70,80,90,100
+   nn_write    =     100
+   ln_mskland  = .false.
+   ln_cfmeta   = .false.
+   ln_clobber  = .true.
+   nn_chunksz  =       0
+   ln_xios_read = .false.
+   nn_wxios    =       0
+   ln_top      = .false.   !  no passive tracers (key_top is not compiled)
+/
+!-----------------------------------------------------------------------
+&namdom        !   time and space domain
+!-----------------------------------------------------------------------
+   rn_Dt       =  10800.   !  ORCA2_OMIP_L4/EXP00/namelist_cfg:28 (D118; 5400. superseded)
+   rn_atfp     =      0.1  !  unused under key_RK3
+   ln_c1d      = .false.
+   ln_meshmask = .true.    !  geometry receipt
+   ln_shuman   = .false.
+/
+!-----------------------------------------------------------------------
+&namcfg        !   parameters of the configuration
+!-----------------------------------------------------------------------
+   ln_read_cfg = .true.            !  ORCA2's shipped domain file
+      cn_domcfg = "domain_cfg"
+      ln_closea    = .false.       !  ORCA2
+   ln_write_cfg = .false.
+/
+!-----------------------------------------------------------------------
+&namtile       !   parameters of the tiling
+!-----------------------------------------------------------------------
+   ln_tile = .false.
+/
+!-----------------------------------------------------------------------
+&namtsd        !    Temperature & Salinity Data
+!-----------------------------------------------------------------------
+   ln_tsd_init = .true.    !  ORCA2:47 -- ORCA2's initial T/S
+   ln_tsd_dmp  = .true.    !  ORCA2:48 -- ORCA_R2 hand edits (dtatsd.f90:219); ln_tradmp = F: no restoring (D120)
+   cn_dir = './'           !  ORCA2:50
+   sn_tem = 'data_1m_potential_temperature_nomask',     -1.     ,'votemper',   .true.    , .true. , 'yearly'  ,    ''    ,    ''    ,    ''   !  ORCA2:54
+   sn_sal = 'data_1m_salinity_nomask'             ,     -1.     ,'vosaline',   .true.    , .true. , 'yearly'  ,    ''    ,    ''    ,    ''   !  ORCA2:55
+/
+!-----------------------------------------------------------------------
+&namwad        !   Wetting and Drying
+!-----------------------------------------------------------------------
+   ln_wd_dl    = .false.
+/
+!-----------------------------------------------------------------------
+&namc1d        !   1D configuration options
+!-----------------------------------------------------------------------
+   ln_uvd_init = .false.
+/
+!-----------------------------------------------------------------------
+&namsbc        !   Surface Boundary Condition manager
+!-----------------------------------------------------------------------
+   nn_fsbc     = 2         !  ORCA2 :80
+   ln_usr      = .false.   !  G4: no user forcing (G1-G3: zero fluxes)
+   ln_flx      = .false.
+   ln_blk      = .true.    !  ORCA2_OMIP_L4/EXP00/namelist_cfg:83
+   ln_abl      = .false.
+   ln_cpl      = .false.
+   ln_mixcpl   = .false.
+   nn_components = 0
+   nn_ice      = 2         !  G5: ORCA2 sea ice (ORCA2 :85)
+   ln_ice_embd = .false.
+   ln_traqsr   = .true.    !  ORCA2 :89
+   ln_dm2dc    = .false.
+   ln_ssr      = .true.    !  ORCA2 :90
+   nn_fwb      = 2         !  ORCA2 :92
+   ln_rnf      = .true.    !  ORCA2 :91
+   ln_apr_dyn  = .false.
+   ln_wave     = .false.
+   nn_lsm      = 0
+/
+!-----------------------------------------------------------------------
+!  ORCA2_OMIP_L4/EXP00/namelist_cfg:97-115, verbatim
+&namsbc_blk    !   namsbc_blk  generic Bulk formula                     (ln_blk =T)
+!-----------------------------------------------------------------------
+   !                    !  bulk algorithm :
+   ln_NCAR    = .true.     ! "NCAR"      algorithm   (Large and Yeager 2008)
+
+   cn_dir = './'  !  root directory for the bulk data location
+   !___________!_________________________!___________________!___________!_____________!________!___________!______________________________________!__________!_______________!
+   !           !  file name              ! frequency (hours) ! variable  ! time interp.!  clim  ! 'yearly'/ !          weights filename            ! rotation ! land/sea mask !
+   !           !                         !  (if <0  months)  !   name    !   (logical) !  (T/F) ! 'monthly' !                                      ! pairing  !    filename   !
+   sn_wndi     = 'u_10.15JUNE2009_fill'       ,    6.        , 'U_10_MOD',   .false.   , .true. , 'yearly'  , 'weights_core2_orca2_bicub'  , 'Uwnd'   , ''
+   sn_wndj     = 'v_10.15JUNE2009_fill'       ,    6.        , 'V_10_MOD',   .false.   , .true. , 'yearly'  , 'weights_core2_orca2_bicub'  , 'Vwnd'   , ''
+   sn_qsr      = 'ncar_rad.15JUNE2009_fill'   ,   24.        , 'SWDN_MOD',   .false.   , .true. , 'yearly'  , 'weights_core2_orca2_bilin' , ''       , ''
+   sn_qlw      = 'ncar_rad.15JUNE2009_fill'   ,   24.        , 'LWDN_MOD',   .false.   , .true. , 'yearly'  , 'weights_core2_orca2_bilin' , ''       , ''
+   sn_tair     = 't_10.15JUNE2009_fill'       ,    6.        , 'T_10_MOD',   .false.   , .true. , 'yearly'  , 'weights_core2_orca2_bilin' , ''       , ''
+   sn_humi     = 'q_10.15JUNE2009_fill'       ,    6.        , 'Q_10_MOD',   .false.   , .true. , 'yearly'  , 'weights_core2_orca2_bilin' , ''       , ''
+   sn_prec     = 'ncar_precip.15JUNE2009_fill',   -1.        , 'PRC_MOD1',   .false.   , .true. , 'yearly'  , 'weights_core2_orca2_bilin' , ''       , ''
+   sn_snow     = 'ncar_precip.15JUNE2009_fill',   -1.        , 'SNOW'    ,   .false.   , .true. , 'yearly'  , 'weights_core2_orca2_bilin' , ''       , ''
+   sn_slp      = 'slp.15JUNE2009_fill'        ,    6.        , 'SLP'     ,   .false.   , .true. , 'yearly'  , 'weights_core2_orca2_bilin' , ''       , ''
+/
+!-----------------------------------------------------------------------
+!  ORCA2_OMIP_L4/EXP00/namelist_cfg:133-149, verbatim
+&namtra_qsr    !   penetrative solar radiation                          (ln_traqsr =T)
+!-----------------------------------------------------------------------
+   !                       ! type of penetration                        (default: NO selection)
+   ln_qsr_rgb  = .true.       !  RGB light penetration (Red-Green-Blue)
+   !
+   nn_chldta   =      1       !  RGB : Chl data (=1) or cst value (=0)
+      nn_chlprfl  =      1       !  Chl vertical profile (nn_chldta = 1)
+                                 !  0 = vertical extrapolation of surface data
+                                 !  1 = vertical analytical profile deduced from surface data
+                                 !  2 = 3D Chl data
+
+   cn_dir = './'  !  root directory for the chlorophyl data location
+   !___________!_________________________!___________________!___________!_____________!________!___________!__________________!__________!_______________!
+   !           !  file name              ! frequency (hours) ! variable  ! time interp.!  clim  ! 'yearly'/ ! weights filename ! rotation ! land/sea mask !
+   !           !                         !  (if <0  months)  !   name    !   (logical) !  (T/F) ! 'monthly' !                  ! pairing  !    filename   !
+   sn_chl      ='chlorophyll'            ,        -1.        , 'CHLA'    ,   .true.    , .true. , 'yearly'  , ''               , ''       , ''
+/
+!-----------------------------------------------------------------------
+!  ORCA2_OMIP_L4/EXP00/namelist_cfg:151-157, verbatim
+&namsbc_ssr    !   surface boundary condition : sea surface restoring   (ln_ssr =T)
+!-----------------------------------------------------------------------
+   nn_sssr     =     2     !  add a damping term to the surface freshwater flux
+      rn_deds     =  -166.67  !  magnitude of the damping on salinity   [mm/day]
+      ln_sssr_bnd =  .true.   !  flag to bound erp term (associated with nn_sssr=2)
+      rn_sssr_bnd =   4.e0    !  ABS(Max/Min) value of the damping erp term [mm/day]
+/
+!-----------------------------------------------------------------------
+!  ORCA2_OMIP_L4/EXP00/namelist_cfg:159-175, verbatim
+&namsbc_rnf    !   runoffs                                              (ln_rnf =T)
+!-----------------------------------------------------------------------
+   ln_rnf_mouth = .true.    !  specific treatment at rivers mouths
+      rn_hrnf     =  15.e0    !  depth over which enhanced vertical mixing is used    (ln_rnf_mouth=T)
+      rn_avt_rnf  =   1.e-3   !  value of the additional vertical mixing coef. [m2/s] (ln_rnf_mouth=T)
+   rn_rfact    =   1.e0    !  multiplicative factor for runoff
+
+   cn_dir = './'  !  root directory for the location of the runoff files
+   !___________!_____________!___________________!___________!_____________!_________!___________!__________!__________!_______________!
+   !           !  file name  ! frequency (hours) ! variable  ! time interp. !  clim  ! 'yearly'/ ! weights  ! rotation ! land/sea mask !
+   !           !             !  (if <0  months)  !   name    !   (logical)  !  (T/F) ! 'monthly' ! filename ! pairing  ! filename      !
+   sn_rnf      = 'runoff_core_monthly',    -1.   , 'sorunoff',   .true.     , .true. , 'yearly'  , ''       , ''       , ''
+   sn_cnf      = 'runoff_core_monthly',     0.   , 'socoefr0',   .false.    , .true. , 'yearly'  , ''       , ''       , ''
+   sn_s_rnf    = 'runoffs'            ,    24.   , 'rosaline',   .true.     , .true. , 'yearly'  , ''       , ''       , ''
+   sn_t_rnf    = 'runoffs'            ,    24.   , 'rotemper',   .true.     , .true. , 'yearly'  , ''       , ''       , ''
+   sn_dep_rnf  = 'runoffs'            ,     0.   , 'rodepth' ,   .false.    , .true. , 'yearly'  , ''       , ''       , ''
+/
+!-----------------------------------------------------------------------
+&namberg       !   iceberg parameters
+!-----------------------------------------------------------------------
+   ln_icebergs = .false.
+/
+!-----------------------------------------------------------------------
+&namisf        !   ice shelf
+!-----------------------------------------------------------------------
+   ln_isf      = .false.
+/
+!-----------------------------------------------------------------------
+&namlbc        !   lateral momentum boundary condition
+!-----------------------------------------------------------------------
+   rn_shlat    =    2.     !  ORCA2 (no slip); the file's strait_shlat overrides it at two straits
+   ln_vorlat   = .false.
+/
+!-----------------------------------------------------------------------
+&namdrg        !   top/bottom drag coefficient
+!-----------------------------------------------------------------------
+   ln_drg_OFF  = .false.   !  G7: ORCA2 selects linear drag instead
+   ln_lin      = .true.    !  ORCA2_OMIP_L4/EXP00/namelist_cfg:251
+   ln_non_lin  = .false.
+   ln_loglayer = .false.
+/
+!-----------------------------------------------------------------------
+&nambbc        !   bottom temperature boundary condition
+!-----------------------------------------------------------------------
+   ln_trabbc   = .false.
+/
+!-----------------------------------------------------------------------
+&nambbl        !   bottom boundary layer scheme
+!-----------------------------------------------------------------------
+   ln_trabbl   = .false.
+/
+!-----------------------------------------------------------------------
+&nameos        !   ocean Equation Of State
+!-----------------------------------------------------------------------
+   ln_teos10   = .false.
+   ln_eos80    = .true.    !  ORCA2 (TSUNAMI runs ln_seos)
+   ln_seos     = .false.
+/
+!-----------------------------------------------------------------------
+&namtra_adv    !   advection scheme for tracer
+!-----------------------------------------------------------------------
+   ln_traadv_OFF = .true.  !  TSUNAMI
+   ln_traadv_cen = .false.
+   ln_traadv_fct = .false.
+   ln_traadv_mus = .false.
+   ln_traadv_ubs = .false.
+   ln_traadv_qck = .false.
+/
+!-----------------------------------------------------------------------
+&namtra_ldf    !   lateral diffusion scheme for tracers
+!-----------------------------------------------------------------------
+   ln_traldf_OFF   = .true.   !  TSUNAMI
+   ln_traldf_lap   = .false.
+   ln_traldf_blp   = .false.
+   ln_traldf_iso   = .false.
+   ln_traldf_triad = .false.
+   ln_traldf_msc   = .false.
+/
+!-----------------------------------------------------------------------
+&namtra_mle    !   mixed layer eddy parametrisation
+!-----------------------------------------------------------------------
+   ln_mle      = .false.
+/
+!-----------------------------------------------------------------------
+&namtra_eiv    !   eddy induced velocity param.
+!-----------------------------------------------------------------------
+   ln_ldfeiv   = .false.
+/
+!-----------------------------------------------------------------------
+&namtra_dmp    !   tracer: T & S newtonian damping
+!-----------------------------------------------------------------------
+   ln_tradmp   = .false.
+/
+!-----------------------------------------------------------------------
+&namdyn_adv    !   formulation of the momentum advection
+!-----------------------------------------------------------------------
+   ln_dynadv_OFF  = .true.    !  TSUNAMI
+   ln_dynadv_vec  = .false.
+   ln_dynadv_cen2 = .false.
+   ln_dynadv_up3  = .false.
+/
+!-----------------------------------------------------------------------
+&namdyn_vor    !   Vorticity / Coriolis scheme
+!-----------------------------------------------------------------------
+   ln_dynvor_ene = .false.
+   ln_dynvor_ens = .false.
+   ln_dynvor_mix = .false.
+   ln_dynvor_enT = .false.
+   ln_dynvor_een = .true.     !  ORCA2 and TSUNAMI
+   ln_dynvor_msk = .false.
+   nn_e3f_typ    = 0
+/
+!-----------------------------------------------------------------------
+&namdyn_hpg    !   Hydrostatic pressure gradient option
+!-----------------------------------------------------------------------
+   ln_hpg_zco  = .false.
+   ln_hpg_sco  = .true.       !  ORCA2 and TSUNAMI
+   ln_hpg_isf  = .false.
+   ln_hpg_djc  = .false.
+   ln_hpg_prj  = .false.
+/
+!-----------------------------------------------------------------------
+&namdyn_spg    !   surface pressure gradient
+!-----------------------------------------------------------------------
+   ln_dynspg_exp = .false.
+   ln_dynspg_ts  = .true.     !  ORCA2 and TSUNAMI
+      ln_bt_fw      = .true.
+      nn_bt_flt     = 3          !  ORCA2
+      rn_bt_alpha   = 0.09       !  ORCA2
+      ln_bt_auto    = .true.     !  as ORCA2's deck resolves it (namelist_ref:1099; D118)
+         rn_bt_cmax   =  0.8        !  as ORCA2's deck resolves it (namelist_ref:1100)
+         nn_e         =  30         !  unused (ln_bt_auto = T; namelist_ref:1101): dynspg_ts.f90:1062 resolves 65
+/
+!-----------------------------------------------------------------------
+&namdyn_ldf    !   lateral diffusion on momentum
+!-----------------------------------------------------------------------
+   ln_dynldf_OFF = .true.     !  TSUNAMI
+   ln_dynldf_lap = .false.
+   ln_dynldf_blp = .false.
+/
+!-----------------------------------------------------------------------
+&namzdf        !   vertical physics manager
+!-----------------------------------------------------------------------
+   ln_zad_Aimp = .false.
+   ln_zdfcst   = .true.       !  TSUNAMI
+   ln_zdfric   = .false.
+   ln_zdftke   = .false.
+   ln_zdfgls   = .false.
+   ln_zdfosm   = .false.
+   ln_zdfevd   = .false.
+   ln_zdfnpc   = .false.
+   ln_zdfmfc   = .false.
+   ln_zdfddm   = .false.
+   ln_zdfiwm   = .false.
+   ln_zdfswm   = .false.
+   rn_avm0     =   1.2e-4     !  ORCA2 and TSUNAMI (namelist_ref value)
+   rn_avt0     =   1.2e-5     !  ORCA2 and TSUNAMI (namelist_ref value)
+   nn_avb      =    0
+   nn_havtb    =    0
+/
+!-----------------------------------------------------------------------
+&namtrd        !   trend diagnostics
+!-----------------------------------------------------------------------
+   ln_glo_trd  = .false.
+/
+!-----------------------------------------------------------------------
+&namsto        !   Stochastic parametrization of EOS
+!-----------------------------------------------------------------------
+   ln_sto_eos  = .false.
+/
+!-----------------------------------------------------------------------
+&nammpp        !   Massively Parallel Processing
+!-----------------------------------------------------------------------
+   nn_hls      =   2          !  ORCA2 (namelist_ref value)
+/
+!-----------------------------------------------------------------------
+&namctl        !   Control prints
+!-----------------------------------------------------------------------
+   ln_timing   = .false.
+   ln_diacfl   = .false.
+/

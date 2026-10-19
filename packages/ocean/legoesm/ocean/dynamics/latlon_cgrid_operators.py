@@ -1649,6 +1649,8 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
                                       jnp.ndarray] | None = None,
     coefficient_fmask_already_applied: bool = False,
     return_intermediates: bool = False,
+    stored_r1_e1e2f: jnp.ndarray | None = None,
+    nemo_fold_rows: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[
     jnp.ndarray, jnp.ndarray, dict[str, jnp.ndarray]
 ]:
@@ -1733,6 +1735,13 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
         ``r1_e2u`` and ``r1_e1v`` operands.  The NEMO identity harness passes
         these as dynamic given inputs so XLA cannot replace the compiled
         multiply-then-divide statements with reciprocal multiplication.
+    stored_r1_e1e2f : (n_lat+1, n_lon+1), optional
+        NEMO's stored ``r1_e1e2f`` on the vertex layout, replacing
+        ``1/grid.area_q`` when ``metric_reciprocal_operands`` is not given.
+    nemo_fold_rows : bool, default False
+        T-pivot fold: the divergence reads the V fold row's flux as the
+        fold image of the row below, and the F fold row's curl term is the
+        F image of the row below (NEMO's lbc-complete operands).
     coefficient_fmask_already_applied : bool, default False
         The ``nn_ahm_ijk_t=-30`` read path stores ``ahmf*fmask`` before
         ``dyn_ldf`` runs (``ldfdyn.f90:387-393``).  Do not apply legoESM's
@@ -1796,12 +1805,18 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
         e1v = jnp.asarray(grid.dx_v)[..., jnp.newaxis]
         zu = sbr(sbr(e2u * e3u_kbb) * u_eff)
         zv = sbr(sbr(e1v * e3v_kbb) * v_eff)
+        if nemo_fold_rows:
+            # dynldf_lev.f90:127-129 reads pv on the V fold row, which the
+            # lbc_lnk 'V', -1 exchange holds as the image of the row below.
+            fold = grid.fold
+            zv = zv.at[-1].set(fold.vector_sign_v * zv[-2][fold.perm_v])
         dx = sbr(zu[:, 1:] - zu[:, :-1])
         dy = sbr(zv[1:] - zv[:-1])
         flux_sum = sbr(dx + dy)
         if metric_reciprocal_operands is None:
             r1_area_t = sr(1.0 / jnp.asarray(grid.area_T))[..., jnp.newaxis]
-            r1_area_f = sr(1.0 / jnp.asarray(grid.area_q))[..., jnp.newaxis]
+            r1_area_f = (sr(1.0 / jnp.asarray(grid.area_q)) if stored_r1_e1e2f is None
+                         else jnp.asarray(stored_r1_e1e2f))[..., jnp.newaxis]
             r1_e1u = sr(1.0 / jnp.asarray(grid.dx_u))[..., jnp.newaxis]
             r1_e2v = sr(
                 1.0 / jnp.maximum(jnp.asarray(grid.dy_v), 1.0e-30)
@@ -1831,6 +1846,13 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
             ahmf_live = sr(ahmf_live * _bm(fmask))
         zcur_scale = sbr(sbr(ahmf_live * e3f_live) * r1_area_f)
         zcur = sbr(zcur_scale * curl_bracket)
+        if nemo_fold_rows:
+            # dynldf_lev.f90:123 computes zwf on the F fold row from halo
+            # operands; it equals the F image of the row below.  Vertex
+            # [j+1, i+1] is NEMO's F(j, i); vertex column 0 is F(:, n_lon-1).
+            from legoesm.ocean.vertical import nemo_t_fold_f_owned
+            top = nemo_t_fold_f_owned(zcur[1:, 1:], grid)[-1]
+            zcur = zcur.at[-1].set(jnp.concatenate([top[-1:], top], axis=0))
 
         zdiv_pad_x = pad_lon_cgrid(zdiv, halo=1)
         div_dx = sbr(zdiv_pad_x[:, 1:] - zdiv_pad_x[:, :-1])
@@ -4028,6 +4050,7 @@ def _nemo_hpg_sco_literal_cgrid_impl(
     return_components: bool = False,
     _source_round: bool = True,
     _north_fold_density: bool = False,
+    _north_fold_geometry: bool = False,
 ) -> tuple[jnp.ndarray, ...]:
     """Literal NEMO ``hpg_sco`` recurrence on native east/north faces.
 
@@ -4060,25 +4083,36 @@ def _nemo_hpg_sco_literal_cgrid_impl(
     rhd_i1 = jnp.roll(rhd, -1, axis=1)
     rhd_j1 = jnp.roll(rhd, -1, axis=0)
     fold = getattr(grid, "fold", None)
+    def _folded_north(value, rolled):
+        source = fold_ghost_source_T(value, fold)[0]
+        folded = source[fold.perm_T]
+        if fold_is_local(grid):
+            return rolled.at[-1].set(folded)
+        nmask = north_fold_mask(grid)
+        if nmask is not None:
+            selector = nmask
+            while selector.ndim < folded.ndim:
+                selector = selector[..., None]
+            return rolled.at[-1].set(
+                jnp.where(selector, folded, rolled[-1]))
+        return rolled
+
     if _north_fold_density:
         # dynhpg.f90:414-416,445-453 reads jj+1 at V points.  At NEMO's
         # northern fold that neighbour is the T-point fold ghost supplied by
         # lbc_lnk, not a cyclic roll of the final owned row.
-        source = fold_ghost_source_T(rhd, fold)[0]
-        folded = source[fold.perm_T]
-        nmask = north_fold_mask(grid)
-        if fold_is_local(grid):
-            rhd_j1 = rhd_j1.at[-1].set(folded)
-        elif nmask is not None:
-            selector = nmask
-            while selector.ndim < folded.ndim:
-                selector = selector[..., None]
-            rhd_j1 = rhd_j1.at[-1].set(
-                jnp.where(selector, folded, rhd_j1[-1]))
+        rhd_j1 = _folded_north(rhd, rhd_j1)
     e3w_i1 = jnp.roll(e3w, -1, axis=1)
     e3w_j1 = jnp.roll(e3w, -1, axis=0)
     dep_i1 = jnp.roll(gdept_z0, -1, axis=1)
     dep_j1 = jnp.roll(gdept_z0, -1, axis=0)
+    if _north_fold_geometry:
+        # Same compiled V statements as density: the north e3w product and
+        # terrain-correction depth are halo reads too, not cyclic rolls of the
+        # owned pivot row.  Kept behind an explicit card choice because only
+        # the G6 multilevel record has certified this composition.
+        e3w_j1 = _folded_north(e3w, e3w_j1)
+        dep_j1 = _folded_north(gdept_z0, dep_j1)
 
     zhpi = multiply(
         multiply(zcoef0, r1_e1u),
@@ -4181,7 +4215,8 @@ def _nemo_hpg_sco_literal_cgrid_impl(
 _nemo_hpg_sco_literal_cgrid_compiled = jax.jit(
     _nemo_hpg_sco_literal_cgrid_impl,
     static_argnames=(
-        "return_components", "_source_round", "_north_fold_density"))
+        "return_components", "_source_round", "_north_fold_density",
+        "_north_fold_geometry"))
 
 
 def nemo_hpg_sco_literal_cgrid(
@@ -4193,6 +4228,7 @@ def nemo_hpg_sco_literal_cgrid(
     *,
     return_components: bool = False,
     _source_round: bool = True,
+    fold_north_geometry: bool = False,
 ) -> tuple[jnp.ndarray, ...]:
     """Run NEMO's SCO recurrence identically inside and outside outer JIT."""
     fold = getattr(grid, "fold", None)
@@ -4206,12 +4242,14 @@ def nemo_hpg_sco_literal_cgrid(
         return _nemo_hpg_sco_literal_cgrid_impl(
             rhd, e3w, gdept_z0, grid, g,
             return_components=return_components, _source_round=_source_round,
-            _north_fold_density=north_fold_density)
+            _north_fold_density=north_fold_density,
+            _north_fold_geometry=(north_fold_density and fold_north_geometry))
     with jax.disable_jit(False):
         return _nemo_hpg_sco_literal_cgrid_compiled(
             rhd, e3w, gdept_z0, grid, g,
             return_components=return_components, _source_round=_source_round,
-            _north_fold_density=north_fold_density)
+            _north_fold_density=north_fold_density,
+            _north_fold_geometry=(north_fold_density and fold_north_geometry))
 
 
 def partial_cell_pgf_correction_x(
@@ -4790,6 +4828,7 @@ def pv_flux_al81_partial_cell(
     q_boundary: str = "neumann_fill",
     metric_widths: tuple | None = None,
     written_order: bool = False,
+    north_fold_grid=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Arakawa-Lamb 1981 (AL81) energy-and-enstrophy-conserving PV flux.
 
@@ -4968,6 +5007,10 @@ def pv_flux_al81_partial_cell(
         divides by the thickness, weights each triad by 1/12, multiplies the
         transport by the width last and sums the four products left to
         right, which is equal as real numbers and differs in the last place.
+    north_fold_grid : grid or None
+        Active T-pivot grid whose owned top V row reads NEMO's northern
+        fold-cell triads and signed U-transport halo.  ``None`` retains the
+        physical-pole zero halo used by every non-fold caller.
 
     Returns
     -------
@@ -5098,6 +5141,41 @@ def pv_flux_al81_partial_cell(
         t_SE = sr(sr(q_NE + q_SE) + q_SW)
         t_SW = sr(sr(q_SE + q_SW) + q_NW)
 
+    # The stored top V row of a T-pivot ORCA mesh is an owned vector row, not
+    # a physical pole wall.  Its northern cell is supplied by ``lbc_lnk``'s
+    # fold halo.  Keep that one halo explicit for the V update below: its F
+    # corners are the ordinary F-fold image and its U transports are the
+    # signed U-fold image.  The default remains a zero pole halo.
+    _north_t = None
+    if north_fold_grid is not None:
+        _fold = getattr(north_fold_grid, "fold", None)
+        if _fold is None or not bool(getattr(_fold, "is_active", False)):
+            raise ValueError("north_fold_grid needs an active north fold")
+        from legoesm.grids.operators_latlon_cgrid import fold_perm_f
+        _src = -3 if bool(getattr(_fold, "pivot_row_stored", False)) else -2
+        # q's column 0 is the cyclic copy of native F column n; native
+        # columns live in [1:].  Fold in that native layout, then restore the
+        # west cyclic copy.  Folding ``q[:, :n]`` shifts the reflected row by
+        # two native columns (one on each side of the reflection).
+        _q_n_native = q[_src, 1:][fold_perm_f(_fold)]
+        _q_n = jnp.concatenate([_q_n_native[-1:], _q_n_native])
+        _q_sw, _q_se = q[-1, :-1], q[-1, 1:]
+        _q_nw, _q_ne = _q_n[:-1], _q_n[1:]
+        if written_order:
+            _north_t = (
+                sr(sr(_q_sw + _q_nw) + _q_ne),
+                sr(sr(_q_nw + _q_ne) + _q_se),
+                sr(sr(_q_se + _q_sw) + _q_nw),
+                sr(sr(_q_ne + _q_se) + _q_sw),
+            )
+        else:
+            _north_t = (
+                inv12 * (_q_nw + _q_sw + _q_ne),
+                inv12 * (_q_ne + _q_se + _q_nw),
+                inv12 * (_q_sw + _q_se + _q_nw),
+                inv12 * (_q_se + _q_sw + _q_ne),
+            )
+
     # --- 4. AL81 PV flux at u-faces --------------------------------
     # u-face u[j, i] is between west cell (j, i-1) and east cell
     # (j, i).  AL81 form (NEMO dyn_vor_een, translated to our index
@@ -5222,6 +5300,24 @@ def pv_flux_al81_partial_cell(
     t_stack_pad, F_u_pad = pad_with_pole_bc_lat_multi(
         (t_stack, F_u), halo=1,
     )  # (n_lat+2, n_lon, 4*nlev), (n_lat+2, n_lon+1, nlev)
+    if _north_t is not None:
+        from legoesm.grids.operators_latlon_cgrid import (
+            apply_north_fold, fold_ghost_source_T, fold_is_local,
+            fold_perm_u, north_fold_mask,
+        )
+        _north_stack = jnp.concatenate(_north_t, axis=-1)[jnp.newaxis]
+        _fu_native = fold_ghost_source_T(F_u, _fold)[0, 1:]
+        _north_fu_native = (
+            _fold.vector_sign_u * _fu_native[fold_perm_u(_fold)])
+        _north_fu = jnp.concatenate(
+            [_north_fu_native[-1:], _north_fu_native])[jnp.newaxis]
+        _nmask = north_fold_mask(north_fold_grid)
+        if fold_is_local(north_fold_grid) or _nmask is not None:
+            t_stack_pad = apply_north_fold(
+                t_stack_pad, _north_stack, north_fold_grid,
+                north_mask=_nmask)
+            F_u_pad = apply_north_fold(
+                F_u_pad, _north_fu, north_fold_grid, north_mask=_nmask)
     t_NW_pad, t_NE_pad, t_SW_pad, t_SE_pad = jnp.split(t_stack_pad, 4, axis=-1)
     t_NW_S = t_NW_pad[:-1, :, :]   # south-cell NW at v-face j
     t_NE_S = t_NE_pad[:-1, :, :]

@@ -13,8 +13,8 @@ level; this script reuses its readers, regions and row scorer and adds what
                resumable (--state-in/--state-out): one step costs about a
                minute, so 100 steps are run in chunks.
   given_entry  NEMO's restart of step kt - 1 as the entry of step kt (all
-               prognostics on all levels and the six barotropic histories),
-               then one step (level 1 and 2-D rows) and a second step
+               prognostics on all levels, the six barotropic histories and,
+               on G6, the carried after-ssh slot 'ssha'), then one step (level 1 and 2-D rows) and a second step
                (all-level rows against NEMO's next restart: TWO-STEP rows).
   substeps     step 1: the split-explicit solver's loop, every recorded
                operand in compiled order against the model's write-only
@@ -24,6 +24,12 @@ level; this script reuses its readers, regions and row scorer and adds what
                against NEMO's frame after stp_2D (wet and dry faces apart),
                and an OFFLINE replay of its depth mean (stp2d.f90:178-179,
                ascending k) against the card's.
+  stp2d_terms  G6, kt 1..3: stp_2D in compiled order -- the 3-D RHS after
+               dyn_hpg, dyn_vor, dyn_keg, dyn_zad (r42 record), its depth mean,
+               after drag, after wind (slow-forcing record) and dyn_spg_ts's
+               exit -- against the card's write-only observers.  kt 1 from
+               the initial state, kt 2 the card's own chain (INDEPENDENT),
+               kt >= 3 NEMO's restart of kt - 1 (GIVEN-NEMO-ENTRY).
   trazdf_replay  step 1, OFFLINE numpy replay of NEMO's implicit vertical
                tracer solve (trazdf.f90:231-233, :269-272, :284-298) from
                NEMO's recorded thickness ratios and the mesh file: level 1
@@ -41,6 +47,7 @@ from __future__ import annotations
 import argparse
 import json
 import pickle
+import struct
 import subprocess
 import sys
 import time
@@ -55,36 +62,37 @@ import nemo_testcase_g1_orca2grid_ladder as g1  # noqa: E402
 from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
 
 CASE = "ORCA2G2-zps"
-CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke",
-         "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb",
-         "ORCA2L1-bbl", "ORCA2L2-iso")
-FORCED = ("ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd",
-          "ORCA2V3-ddm", "ORCA2V4-iwm",
-          "ORCA2V5-havtb", "ORCA2L1-bbl", "ORCA2L2-iso")   # NEMO-supplied surface fields each kt (D123)
+CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice",
+         "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf", "ORCA2G9-tadv",
+         "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
+         "ORCA2V5-havtb", "ORCA2L1-bbl", "ORCA2L2-iso")
 # G5's record build (ORCA2-lane frames); V1 = that build + one hm_i writer;
-# V2/V3/V4/V5 = V1's record binary with ORCA2's EVD (+ DDM, + IWM, + nn_havtb) namelist lines
-# L1 = G5's record binary with ORCA2's five &nambbl lines
-SI3 = ("ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
-       "ORCA2V5-havtb", "ORCA2L1-bbl", "ORCA2L2-iso")
-TKE_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
+# V2/V3/V4/V5 = V1's record binary with the ORCA2 vertical-mixing switches.
+# L1/L2 use G5's record surface-input format.
+ICE_CASES = ("ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf",
+             "ORCA2G9-tadv", "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm",
+             "ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L1-bbl", "ORCA2L2-iso")
+SI3 = ICE_CASES
+TKE_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
+             "ORCA2V5-havtb")
 ZDF_KT1_CASES = ("ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
-# V4's IWM-active check compares with V3's admitted (certified) kt-1 frame
 V3_ZDF_FRAME = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round13/"
     "oracle_v3_r13/twin_a/oracle_zdf_entry_kt00000001.bin")
-# V5's nn_havtb-active check compares with V4's admitted (certified) kt-1 frame
 V4_ZDF_FRAME = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round14/"
     "oracle_v4_r14/twin_a/oracle_zdf_entry_kt00000001.bin")
-# V1: NEMO restart TKE fields -> carried card leaves (w levels 2..nk; the
-# card carries no surface en and no bottom w level)
-TKE_RESTART = {"tke": "en", "tke_avm": "avm_k", "tke_avt": "avt_k", "tke_dissl": "dissl"}
+TKE_RESTART = {"tke": "en", "tke_avm": "avm_k", "tke_avt": "avt_k",
+               "tke_dissl": "dissl"}
+FORCED = ("ORCA2G4-sbc", *ICE_CASES)   # NEMO-supplied surface fields each kt (D123)
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round10/"
     "oracle_g2_r10/p3_a_100step")
-ARMS = ("geometry", "independent", "given_entry", "stages", "barotropic_exit",
+ARMS = ("geometry", "independent", "given_entry", "stages", "operators",
+        "barotropic_exit",
         "zdf_replay", "substeps", "trazdf_replay", "rhs_frame",
-        "restart_independent", "carried", "tke_mixing_length", "ddm_kt1")
+        "restart_independent", "carried", "stp2d_terms",
+        "tke_mixing_length", "ddm_kt1")
 # stage exposures of one step: the private hook that returns it, and the
 # level-1 NEMO frame fields (u, v, T, S, ssh) it must equal
 EXPOSURES = {
@@ -122,69 +130,6 @@ def levels_last(a, nk: int) -> np.ndarray:
     a = np.asarray(a, dtype=np.float64)
     require(not np.any(a[nk:]), "NEMO holds a value below the card's last level")
     return np.ascontiguousarray(np.moveaxis(a[:nk], 0, -1))
-
-
-def depth_classes(mesh_path: Path, nk: int) -> dict:
-    """{point: {"full": mask, "partial": mask}} on (y, x, nk), from NEMO's
-    mesh file alone."""
-    import netCDF4
-    out = {}
-    with netCDF4.Dataset(mesh_path) as h:
-        ladder = np.asarray(h.variables["e3t_1d"][0], dtype=np.float64)[:nk]
-        for p in "tuv":
-            wet = levels_last(h.variables[f"{p}mask"][0], nk) > 0.5
-            e3 = levels_last(h.variables[f"e3{p}_0"][0] * h.variables[f"{p}mask"][0], nk)
-            same = e3 == ladder[None, None, :]
-            out[p] = {"full": wet & same, "partial": wet & ~same}
-    return out
-
-
-def level_rows(ref, cand, cls: dict, *, plant=False) -> list[dict]:
-    """One row per level: the wet cells split into the two depth classes.
-    ``relative`` divides by NEMO's own maximum over the whole field."""
-    ref, cand = np.asarray(ref, np.float64), np.asarray(cand, np.float64)
-    require(ref.shape == cand.shape == cls["full"].shape, "level rows: shape mismatch")
-    if plant:
-        cand = cand.copy()
-        cand[tuple(np.argwhere(cls["partial"])[0])] += 1.0
-    d, scale = np.abs(cand - ref), max(float(np.max(np.abs(ref))), 1.0)
-    rows = []
-    for k in range(ref.shape[-1]):
-        r = {"level": k + 1}
-        for name, mask in cls.items():
-            m = mask[..., k]
-            n = int(m.sum())
-            r[name] = {"n_cells": n,
-                       "n_unequal": int(np.count_nonzero(d[..., k][m])),
-                       "max_abs": float(d[..., k][m].max()) if n else 0.0,
-                       "relative": (float(d[..., k][m].max()) / scale) if n else 0.0,
-                       "ref_max_abs": float(np.abs(ref[..., k][m]).max()) if n else 0.0}
-        dry = ~(cls["full"][..., k] | cls["partial"][..., k])
-        r["dry_n_unequal"] = int(np.count_nonzero(d[..., k][dry]))
-        rows.append(r)
-    return rows
-
-
-def class_summary(rows: list[dict]) -> dict:
-    out = {}
-    for name in ("full", "partial"):
-        out[name] = {
-            "n_cells": sum(r[name]["n_cells"] for r in rows),
-            "n_unequal": sum(r[name]["n_unequal"] for r in rows),
-            "max_abs": max(r[name]["max_abs"] for r in rows),
-            "relative": max(r[name]["relative"] for r in rows),
-            "worst_level": max(rows, key=lambda r: r[name]["max_abs"])["level"]}
-    out["dry_n_unequal"] = sum(r["dry_n_unequal"] for r in rows)
-    out["levels_partial_worse"] = sum(
-        r["partial"]["relative"] > r["full"]["relative"] for r in rows
-        if r["partial"]["n_cells"] and r["full"]["n_cells"])
-    out["levels_full_worse"] = sum(
-        r["full"]["relative"] > r["partial"]["relative"] for r in rows
-        if r["partial"]["n_cells"] and r["full"]["n_cells"])
-    out["status"] = "AT-BAR" if (max(out["full"]["relative"],
-                                     out["partial"]["relative"]) <= BAR
-                                 and not out["dry_n_unequal"]) else "DEBT"
-    return out
 
 
 def w_classes(cls: dict) -> dict:
@@ -374,6 +319,290 @@ def ddm_kt1_rows(root: Path, model, grid, z_coord, cfg, s0, dt, forcing1, nk: in
                            "card_outside_band": int((mine & ~band).sum()),
                            "same_cells": bool(np.array_equal(nemo, mine))}
         out["havtb_active"] = havtb
+    return out
+
+
+def read_stage2_terms(path: Path) -> dict[str, np.ndarray]:
+    """Read NEMO's source-ordered stage-2 momentum accumulators.
+
+    The writer records native ``(i, j, k)`` arrays including the two-cell
+    halo and dummy bottom level.  Keep that native extent here; the caller
+    strips it only after validating the header and payload.
+    """
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        raw_header = handle.read(struct.calcsize("=9i"))
+        require(len(raw_header) == struct.calcsize("=9i"),
+                f"{path}: truncated stage-2 header")
+        header = struct.unpack("=9i", raw_header)
+        values = np.fromfile(handle, dtype=np.float64)
+        require(handle.read(1) == b"", f"{path}: trailing stage-2 payload")
+    version, kt, stage, kmm, krhs, nx, ny, nz, bits = header
+    require(magic == "NEMO_L2_RKTRM_1", f"{path}: bad stage-2 magic")
+    require((version, kt, stage, kmm, krhs, bits) == (1, 1, 2, 3, 2, 64),
+            f"{path}: bad stage-2 header {header}")
+    count = nx * ny * nz
+    names = (
+        "before_u", "before_v", "after_hpg_u", "after_hpg_v",
+        "after_vorticity_u", "after_vorticity_v",
+        "after_advection_u", "after_advection_v",
+    )
+    require(values.size == len(names) * count,
+            f"{path}: bad stage-2 payload count {values.size}")
+    require(bool(np.isfinite(values).all()), f"{path}: non-finite stage-2 payload")
+    out = {}
+    for index, name in enumerate(names):
+        raw = values[index * count:(index + 1) * count]
+        out[name] = raw.reshape((nx, ny, nz), order="F").transpose(1, 0, 2).copy()
+    return out
+
+
+G6_STGTRM_3D = ("ww",)
+G6_STGTRM_2D = ("r3t_bb", "r3t_mm", "r3t_aa", "r3u_mm", "r3v_mm",
+                "ssh_bb", "ssh_mm", "ssh_aa")
+G6_STGTRM_KRHS = ("before_hpg", "after_hpg", "after_vor", "after_keg", "after_zad")
+
+
+def read_g6_stage_terms(path: Path, kt: int, stage: int) -> dict:
+    """NEMO's write-only stage-term dump (run_r44_stage_terms.sh): the stage
+    momentum wzv's ww and its ratio / sea-level slots, then the 3-D Krhs at
+    five source-ordered boundaries.  Native (y, x, z) with the halo."""
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii")
+        head = struct.unpack("=12i", handle.read(48))
+        values = np.fromfile(handle, dtype=np.float64)
+    ver, k, s, kbb, kmm, kaa, krhs, nx, ny, nz, hls, bits = head
+    n3, n2 = nx * ny * nz, nx * ny
+    require((magic, ver, k, s, hls, bits) == ("NEMO_G6_STGTRM_1", 1, kt, stage, 2, 64)
+            and values.size == (1 + 2 * len(G6_STGTRM_KRHS)) * n3 + 8 * n2,
+            f"{path}: bad stage-term header {magic!r} {head} {values.size}")
+    require(bool(np.isfinite(values).all()), f"{path}: non-finite payload")
+    names = (*G6_STGTRM_3D, *G6_STGTRM_2D,
+             *(f"{b}_{f}" for b in G6_STGTRM_KRHS for f in "uv"))
+    out, at = {"levels": (kbb, kmm, kaa, krhs)}, 0
+    for name in names:
+        n = n2 if name in G6_STGTRM_2D else n3
+        raw = values[at:at + n]
+        at += n
+        out[name] = (raw.reshape((nx, ny), order="F").T.copy() if n == n2 else
+                     raw.reshape((nx, ny, nz), order="F").transpose(1, 0, 2).copy())
+    return out
+
+
+def depth_classes(mesh_path: Path, nk: int) -> dict:
+    """{point: {"full": mask, "partial": mask}} on (y, x, nk), from NEMO's
+    mesh file alone."""
+    import netCDF4
+    out = {}
+    with netCDF4.Dataset(mesh_path) as h:
+        ladder = np.asarray(h.variables["e3t_1d"][0], dtype=np.float64)[:nk]
+        for p in "tuv":
+            wet = levels_last(h.variables[f"{p}mask"][0], nk) > 0.5
+            e3 = levels_last(h.variables[f"e3{p}_0"][0] * h.variables[f"{p}mask"][0], nk)
+            same = e3 == ladder[None, None, :]
+            out[p] = {"full": wet & same, "partial": wet & ~same}
+    return out
+
+
+def level_rows(ref, cand, cls: dict, *, plant=False) -> list[dict]:
+    """One row per level: the wet cells split into the two depth classes.
+    ``relative`` divides by NEMO's own maximum over the whole field."""
+    ref, cand = np.asarray(ref, np.float64), np.asarray(cand, np.float64)
+    require(ref.shape == cand.shape == cls["full"].shape, "level rows: shape mismatch")
+    if plant:
+        cand = cand.copy()
+        cand[tuple(np.argwhere(cls["partial"])[0])] += 1.0
+    d, scale = np.abs(cand - ref), max(float(np.max(np.abs(ref))), 1.0)
+    rows = []
+    for k in range(ref.shape[-1]):
+        r = {"level": k + 1}
+        for name, mask in cls.items():
+            m = mask[..., k]
+            n = int(m.sum())
+            r[name] = {"n_cells": n,
+                       "n_unequal": int(np.count_nonzero(d[..., k][m])),
+                       "max_abs": float(d[..., k][m].max()) if n else 0.0,
+                       "relative": (float(d[..., k][m].max()) / scale) if n else 0.0,
+                       "ref_max_abs": float(np.abs(ref[..., k][m]).max()) if n else 0.0}
+        dry = ~(cls["full"][..., k] | cls["partial"][..., k])
+        r["dry_n_unequal"] = int(np.count_nonzero(d[..., k][dry]))
+        rows.append(r)
+    return rows
+
+
+def class_summary(rows: list[dict]) -> dict:
+    out = {}
+    for name in ("full", "partial"):
+        out[name] = {
+            "n_cells": sum(r[name]["n_cells"] for r in rows),
+            "n_unequal": sum(r[name]["n_unequal"] for r in rows),
+            "max_abs": max(r[name]["max_abs"] for r in rows),
+            "relative": max(r[name]["relative"] for r in rows),
+            "worst_level": max(rows, key=lambda r: r[name]["max_abs"])["level"]}
+    out["dry_n_unequal"] = sum(r["dry_n_unequal"] for r in rows)
+    out["levels_partial_worse"] = sum(
+        r["partial"]["relative"] > r["full"]["relative"] for r in rows
+        if r["partial"]["n_cells"] and r["full"]["n_cells"])
+    out["levels_full_worse"] = sum(
+        r["full"]["relative"] > r["partial"]["relative"] for r in rows
+        if r["partial"]["n_cells"] and r["full"]["n_cells"])
+    out["status"] = "AT-BAR" if (max(out["full"]["relative"],
+                                     out["partial"]["relative"]) <= BAR
+                                 and not out["dry_n_unequal"]) else "DEBT"
+    return out
+
+
+STP2D_3D = ("after_hpg_u", "after_hpg_v", "after_vor_u", "after_vor_v", "ww")
+STP2D_2D = ("ssh_aa", "ssh_bb", "r3t_aa", "r3t_bb", "r3u_bb", "r3v_bb")
+STP2D_3D_LATE = ("after_keg_u", "after_keg_v", "after_zad_u", "after_zad_v")
+
+
+def read_stp2d_terms(path: Path, kt: int, nk: int) -> dict[str, np.ndarray]:
+    """NEMO's write-only stp_2D term dump (run_r42_stp2d.sh): the 3-D Krhs
+    after dyn_hpg, dyn_vor, the first wzv's ww with its sea-level operands,
+    after dyn_keg and after dyn_zad, cut to the inner domain and nk levels."""
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        version, k, kbb, kaa, krhs, nx, ny, nz, bits = struct.unpack(
+            "=9i", handle.read(36))
+        values = np.fromfile(handle, dtype=np.float64)
+    names = (*STP2D_3D, *STP2D_2D, *STP2D_3D_LATE)
+    n3, n2 = nx * ny * nz, nx * ny
+    require((magic, version, k, bits) == ("NEMO_G6_STP2D_1", 1, kt, 64)
+            and values.size == 9 * n3 + 6 * n2,
+            f"{path}: bad stp_2D term record {(magic, version, k, bits, values.size)}")
+    require(bool(np.isfinite(values).all()), f"{path}: non-finite payload")
+    require(nz == nk + 1, f"{path}: {nz} levels, the card has {nk}")
+    out, at = {}, 0
+    for name in names:
+        n = n2 if name in STP2D_2D else n3
+        raw = values[at:at + n]
+        at += n
+        if name in STP2D_2D:
+            out[name] = raw.reshape((nx, ny), order="F").T[2:-2, 2:-2].copy()
+        else:
+            a = raw.reshape((nx, ny, nz), order="F").transpose(1, 0, 2)
+            require(not np.any(a[..., nk:]) or name == "ww",
+                    f"{name}: NEMO holds a value on the dummy level")
+            out[name] = a[2:-2, 2:-2, :nk].copy()
+    out["levels"] = (kt, kbb, krhs)
+    return out
+
+
+def bit_rows(name: str, ref, cand, wet, *, plant=False) -> dict:
+    """Bitwise census on NEMO's wet points (dry points reported apart):
+    unequal count, max |difference|, max ulps, worst level and cell."""
+    from nemo_testcase_state_ulp_probe import ulp_distance
+    ref, cand = np.asarray(ref, np.float64), np.array(cand, np.float64)
+    wet = np.asarray(wet, bool)
+    require(ref.shape == cand.shape == wet.shape, f"{name}: shape mismatch "
+            f"{ref.shape} {cand.shape} {wet.shape}")
+    if plant:
+        cand[tuple(np.argwhere(wet & (ref != 0))[0])] = np.nextafter(
+            cand[tuple(np.argwhere(wet & (ref != 0))[0])], np.inf)
+    unequal = (cand.view(np.uint64) != ref.view(np.uint64)) & wet
+    d = np.where(wet, np.abs(cand - ref), 0.0)
+    scale = float(np.max(np.abs(ref[wet]), initial=0.0))
+    worst = tuple(int(i) for i in np.unravel_index(int(np.argmax(d)), d.shape))
+    first = np.argwhere(unequal)
+    return {"name": name, "n_wet": int(wet.sum()), "n_unequal": int(unequal.sum()),
+            "max_abs": float(d.max()), "ref_max_abs": scale,
+            "normalised": float(d.max()) / scale if scale else 0.0,
+            "max_ulps": int(np.max(ulp_distance(cand[wet], ref[wet]), initial=0)),
+            "worst_cell": worst, "first_cell": first[0].tolist() if first.size else None,
+            "levels_touched": (sorted({int(i) + 1 for i in first[:, -1]})
+                               if first.size and ref.ndim == 3 else None),
+            "dry_card_nonzero": int(np.count_nonzero(cand[~wet])),
+            "dry_nemo_nonzero": int(np.count_nonzero(ref[~wet]))}
+
+
+def stp2d_terms(out, root, kt_from, kt_to, *, card, cfg, z, s0, nk, cls, reg,
+                nemo_entry, plant=None, dump=None) -> dict:
+    """stp_2D boundaries in compiled order (stp2d.f90 of the r42 build) at
+    kt_from..kt_to; every card value comes from a write-only observer of the
+    ordinary step, no operator is re-implemented here."""
+    import jax
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from nemo_testcase_l1_vortex_kt2_walk import read_bt_frame
+    from nemo_testcase_l2_gyre_round16_slow_forcing import read_slow_forcing
+    sys.path.insert(0, str(HERE / "nemo_testcase_g5_orca2ice"))
+    import g5_records as g5  # noqa: E402
+    require(out["case"] == "ORCA2G6-vec", "stp2d_terms is registered for G6")
+    seen, zad = {}, {}
+    observed = LatLonCGridOceanModel(
+        card.recipe.grid, z, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_barotropic_substeps=True,
+            slow_forcing_rhs_term_observer=lambda d: seen.update(
+                {k: np.asarray(v) for k, v in d.items()}),
+            stage1_zad_operand_observer=lambda d: zad.update(
+                {k: np.asarray(v) for k, v in d.items()})))
+    plain = LatLonCGridOceanModel(card.recipe.grid, z, cfg)
+    wet = {f: cls[f]["full"] | cls[f]["partial"] for f in "uv"}
+    wet["t"] = cls["t"]["full"] | cls["t"]["partial"]
+    cut = {"u": lambda a: np.asarray(a)[:, 1:], "v": lambda a: np.asarray(a)[1:]}
+    out["label"] = ("kt 1: INDEPENDENT = GIVEN-NEMO-ENTRY; kt 2: INDEPENDENT "
+                    "(card chain); kt >= 3: GIVEN-NEMO-ENTRY (NEMO restart kt-1)")
+    chain = s0
+    for kt in range(kt_from, kt_to + 1):
+        fw, sf = g5.nemo_supplied_forcing(card, root, kt)
+        if kt <= 2:
+            entry, label = chain, ("INDEPENDENT = GIVEN" if kt == 1 else "INDEPENDENT")
+        else:
+            entry, label = nemo_entry(kt), "GIVEN-NEMO-ENTRY"
+        seen.clear()
+        zad.clear()
+        res = jax.device_get(observed.step(entry, dt=card.dt_s, freshwater=fw,
+                                           surface_forcing=sf))
+        jax.effects_barrier()           # the observer is an async callback
+        require(bool(seen) and bool(zad), "a stp_2D observer never fired")
+        terms = read_stp2d_terms(root / f"oracle_stp2d_terms_kt{kt:08d}.bin", kt, nk)
+        kbb, krhs = terms["levels"][1], terms["levels"][2]
+        slow = read_slow_forcing(root / f"oracle_slow_forcing_kt{kt:08d}.bin",
+                                 dims=(184, 152, nk + 1), levels=(kt, kbb, krhs))
+        ops = {k: np.asarray(v) for k, v in res.slow_forcing_operands.items()}
+        bt = read_bt_frame(root / f"oracle_bt_frames_kt{kt:08d}.bin", expect_step=kt)
+        rows = []
+        w = zad["w"]
+        require(w.shape[:2] == terms["ww"].shape[:2] and w.shape[-1] >= nk,
+                f"card w {w.shape} vs NEMO ww {terms['ww'].shape}")
+        # ww(:,:,1) is the surface face; level k of both is the top of cell k
+        rows.append(bit_rows("first_wzv.ww", terms["ww"], w[..., :nk], wet["t"]))
+        # level 1 carries NEMO's runoff divergence (registered); 2..nk alone
+        rows.append(bit_rows("first_wzv.ww_lev2+", terms["ww"][..., 1:],
+                             w[..., 1:nk], wet["t"][..., 1:]))
+        for f in "uv":
+            for b, card_key in (("after_hpg", "after_hpg"), ("after_vor", "after_vor"),
+                                ("after_keg", "after_keg"), ("after_zad", "after_adv")):
+                rows.append(bit_rows(f"{b}.{f}", terms[f"{b}_{f}"],
+                                     cut[f](seen[f"{card_key}_{f}"]), wet[f],
+                                     plant=plant == "score" and b == "after_hpg"
+                                     and f == "u"))
+            rows.append(bit_rows(f"krhs_into_mean.{f}", slow[f"krhs_{f}"],
+                                 cut[f](ops[f"d{f}_dt"]), wet[f]))
+        for f in "uv":
+            w2 = wet[f][..., 0]
+            for b, k in (("Ue_rhs_mean", "depth"), ("Ue_rhs_post_drag", "post_drag"),
+                         ("Ue_rhs_post_wind", "post_wind")):
+                rows.append(bit_rows(f"{b}.{f}", slow[f"{k}_{f}"],
+                                     cut[f](ops[f"{k}_{f}"]), w2))
+        for f, key in (("uu_b", "u"), ("vv_b", "v")):
+            rows.append(bit_rows(f"spg_ts_exit.{f}", bt[f],
+                                 cut[key](getattr(res.state_after_barotropic, f).data),
+                                 wet[key][..., 0]))
+        if dump is not None:
+            Path(dump).mkdir(parents=True, exist_ok=True)
+            np.savez(Path(dump) / f"stp2d_kt{kt}.npz",
+                     **{f"nemo_{k}": v for k, v in terms.items() if k != "levels"},
+                     **{f"card_zad_{k}": v for k, v in zad.items()},
+                     **{f"card_{k}": v for k, v in seen.items()
+                        if k.startswith("after_")})
+        first = next((r for r in rows if r["n_unequal"]), None)
+        out["per_kt"].append({"kt": kt, "label": label, "stp2d_rows": rows,
+                              "first_unequal": first and first["name"]})
+        if kt < kt_to and kt <= 1:
+            chain = jax.device_get(plain.step(chain, dt=card.dt_s, freshwater=fw,
+                                              surface_forcing=sf))
     return out
 
 
@@ -623,10 +852,15 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         without_stage3_salt: bool = False,
         without_l2_metric: bool = False,
         without_l2_eos80: bool = False,
-        without_l2_north_fold: bool = False, without_l2_native_face_reference: bool = False,
+        without_l2_north_fold: bool = False,
+        without_l2_native_face_reference: bool = False,
         without_l2_kmm_face_geometry: bool = False,
         without_l2_a33_source_ordering: bool = False,
         without_l2_stored_face_ratios: bool = False,
+        without_hpg_fold_geometry: bool = False,
+        without_vector_raw_vmask: bool = False,
+        record_step_entry: bool = False,
+        without_recorded_external: bool = False,
         case: str = CASE) -> dict:
     require(case in CASES, f"unknown case {case!r}")
     require(arm in ARMS, f"unknown arm {arm!r}")
@@ -634,6 +868,11 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             f"unknown plant {plant!r}")
     require(without_top_drag_consumer in (None, "residual", "substeps", "dyn_zdf"),
             f"unknown top-drag consumer {without_top_drag_consumer!r}")
+    require(not record_step_entry or (arm == "stages" and case == "ORCA2G9-tadv"
+                                      and kt_from >= 2),
+            "the recorded step-entry bridge is registered for G9 stages at kt >= 2")
+    require(not without_recorded_external or record_step_entry,
+            "the recorded-external plant requires --record-step-entry")
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
     allow_dirty_stamps(allow_dirty)
     sha = git_sha(allow_dirty=allow_dirty)
@@ -657,11 +896,12 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     cfg, z, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
     if case in FORCED:
         require(arm in ("independent", "given_entry")
-                or (arm in ("stages", "barotropic_exit", "carried")
-                    and case in SI3)
+                or (arm in ("stages", "operators", "barotropic_exit", "carried",
+                            "stp2d_terms")
+                    and case in ICE_CASES)
                 or (arm == "tke_mixing_length" and case == "ORCA2V1-tke")
                 or (arm == "ddm_kt1" and case in ZDF_KT1_CASES),
-                "G4/G5's NEMO-supplied per-step forcing is registered only for "
+                "G4/G5/G6 NEMO-supplied per-step forcing is registered only for "
                 "the independent and given-entry ladders")
         require(cfg.rk3_stage_tracer_written_order is True,
                 "the G4 card no longer selects NEMO's tracer update order")
@@ -682,17 +922,16 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             "only the G3/G4 cards select NEMO's stored r3u(Kmm) in dyn_zdf")
     if without_zdf_stage_r3u:      # G3 ROUND-3 BEFORE ARM / plant
         cfg = cfg._replace(zdf_momentum_stage_r3u_nemo_literal=False)
-    require(cfg.rk3_stage2_tracer_nemo_stored_thickness is (case in SI3)
-            and cfg.rk3_stage3_salt_nemo_written is (case in SI3),
-            "only the G5/V1 cards select the stage-2 e3t(Kmm) and stage-3 sfx options")
+    require(cfg.rk3_stage2_tracer_nemo_stored_thickness is (case in ICE_CASES)
+            and cfg.rk3_stage3_salt_nemo_written is (case in ICE_CASES),
+            "only the G5/G6 cards select the stage-2 e3t(Kmm) and stage-3 sfx options")
     if without_stage2_stored_thickness:   # G5 ROUND-4 BEFORE ARM
         cfg = cfg._replace(rk3_stage2_tracer_nemo_stored_thickness=False)
     if without_stage3_salt:               # G5 ROUND-4 BEFORE ARM
         cfg = cfg._replace(rk3_stage3_salt_nemo_written=False)
     l2_controls = (without_l2_metric, without_l2_eos80, without_l2_north_fold,
                    without_l2_native_face_reference, without_l2_kmm_face_geometry,
-                   without_l2_a33_source_ordering,
-                   without_l2_stored_face_ratios)
+                   without_l2_a33_source_ordering, without_l2_stored_face_ratios)
     require(not any(l2_controls) or case == "ORCA2L2-iso",
             "L2 controls are registered only for ORCA2L2-iso")
     if case == "ORCA2L2-iso":
@@ -706,8 +945,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         if without_l2_north_fold:
             gm = gm._replace(nemo_slope_north_fold=False)
         if without_l2_native_face_reference:
-            gm = gm._replace(
-                redi_flux_reference_thickness_evaluation="tpoint_alias")
+            gm = gm._replace(redi_flux_reference_thickness_evaluation="tpoint_alias")
         if without_l2_kmm_face_geometry:
             gm = gm._replace(redi_flux_geometry_stage="step_entry")
         if without_l2_a33_source_ordering:
@@ -715,16 +953,23 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         if without_l2_stored_face_ratios:
             gm = gm._replace(redi_flux_stored_face_ratios=False)
         cfg = cfg._replace(gm_redi=gm)
+    if without_hpg_fold_geometry:         # G6 ROUND-2 PAIR HALF
+        cfg = cfg._replace(nemo_hpg_sco_fold_geometry=False)
+    if without_vector_raw_vmask:          # G6 ROUND-2 PAIR HALF
+        cfg = cfg._replace(rk3_vector_raw_vmask=False)
     nk = int(z.n_levels)
     roots = (root, *restart_roots)
     reg = g1.regions(np.asarray(z.is_active)[..., 0])
     cls = depth_classes(root / "mesh_mask.nc", nk)
     wcls = w_classes(cls)
-    has_frames = (root / ("oracle_step_entry_kt00000001.bin" if case in SI3
+    # no step frames (an acquisition that stopped before the record binary
+    # ran): only the restart-scored arm can run
+    # G5's record build writes the ORCA2 lane's single-rank frames instead
+    has_frames = (root / ("oracle_step_entry_kt00000001.bin" if case in ICE_CASES
                           else "oracle_g1step_kt00000001.bin")).is_file()
     require(has_frames or arm == "restart_independent",
             f"{root} holds no step frames; only restart_independent can run")
-    if has_frames and case in SI3:
+    if has_frames and case in ICE_CASES:
         n_stage = 0
         while (root / f"oracle_step_entry_kt{n_stage + 1:08d}.bin").is_file():
             n_stage += 1
@@ -744,7 +989,13 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     model = LatLonCGridOceanModel(
         card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
         _nemo_ws_test_hooks=consumer_hooks)
-    require(s0.eta_rk3_after is None, "the card carries an after-ssh slot")
+    # from rest NEMO's after-ssh slot is the initial height (restart.f90:406):
+    # the model's unseeded slot
+    require(s0.eta_rk3_after is None, "the card's initial after-ssh slot is seeded")
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import nemo_rk3_after_ssh_is_carried
+    carries_after_ssh = nemo_rk3_after_ssh_is_carried(cfg)
+    require(carries_after_ssh is (case == "ORCA2G6-vec"),
+            "only the G6 card carries NEMO's after-ssh slot (Decision 132)")
     if case == "ORCA2G4-sbc":
         sys.path.insert(0, str(HERE / "nemo_testcase_g4_orca2sbc"))
         import g4_forcing_steps as g4  # noqa: E402
@@ -753,7 +1004,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             header, fields = g4.frames(root, kt)
             return {name: g4.inner(value, header)
                     for name, value in fields.items()}
-    elif case in SI3:
+    elif case in ICE_CASES:
         sys.path.insert(0, str(HERE / "nemo_testcase_g5_orca2ice"))
         import g5_records as g5  # noqa: E402
         read_step = lambda kt: g5.read_step(root, kt, roots, nk)  # noqa: E731
@@ -777,6 +1028,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
            "rk3_stage3_tracer_nemo_stored_thickness": bool(
                cfg.rk3_stage3_tracer_nemo_stored_thickness),
            "without_top_drag_consumer": without_top_drag_consumer,
+           "record_step_entry": bool(record_step_entry),
+           "without_recorded_external": bool(without_recorded_external),
            "rk3_stage2_tracer_nemo_stored_thickness": bool(
                cfg.rk3_stage2_tracer_nemo_stored_thickness),
            "rk3_stage3_salt_nemo_written": bool(cfg.rk3_stage3_salt_nemo_written),
@@ -787,15 +1040,19 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                cfg.gm_redi.slope_prd_evaluation == "nemo_eos80_literal"),
            "l2_north_fold_selected": bool(
                case != "ORCA2L2-iso" or cfg.gm_redi.nemo_slope_north_fold),
-           "l2_kmm_face_geometry_selected": bool(case != "ORCA2L2-iso" or cfg.gm_redi.redi_flux_geometry_stage == "rk3_kmm"),
+           "l2_kmm_face_geometry_selected": bool(
+               case != "ORCA2L2-iso" or
+               cfg.gm_redi.redi_flux_geometry_stage == "rk3_kmm"),
            "l2_a33_source_ordering_selected": bool(
                case != "ORCA2L2-iso" or cfg.gm_redi.redi_a33_source_ordering),
            "l2_stored_face_ratios_selected": bool(
                case != "ORCA2L2-iso" or cfg.gm_redi.redi_flux_stored_face_ratios),
+           "nemo_hpg_sco_fold_geometry": bool(cfg.nemo_hpg_sco_fold_geometry),
+           "rk3_vector_raw_vmask": bool(cfg.rk3_vector_raw_vmask),
            "forcing": ("NEMO-supplied surface fields at each kt"
                        if case == "ORCA2G4-sbc" else
                        "NEMO's post-SI3 ocean surface input at each kt"
-                       if case in SI3 else "none"),
+                       if case in ICE_CASES else "none"),
            "n_barotropic_substeps": int(cfg.barotropic.n_barotropic_substeps),
            "region_cells": {k: int(m.sum()) for k, m in reg.items()},
            "depth_class_cells": {p: {k: int(m.sum()) for k, m in c.items()}
@@ -811,6 +1068,13 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             for f, n in (("ssh", "e_ssh_bb"), ("u", "e_uu_k1_bb"), ("v", "e_vv_k1_bb")):
                 require(np.array_equal(ref[f], nxt[n]),
                         f"kt {kt}: after-step {f} != entry of kt {kt + 1}")
+        elif (path := restart_path(roots, kt)) is not None:
+            # The final admitted step has no following entry frame.  Its
+            # restart is already tied to the after-step frame above, and is
+            # the only recorded source for the endpoint tracer surfaces.
+            with netCDF4.Dataset(path) as h:
+                ref["T"] = levels_last(h.variables["tn"][0], nk)[..., 0]
+                ref["S"] = levels_last(h.variables["sn"][0], nk)[..., 0]
         cand = card_surface(state)
         return [g1.row(f"{tag}.kt{kt}.{f}", ref[f], cand[f], reg,
                        plant=(plant == "score" and f == "ssh"))
@@ -863,9 +1127,12 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 uu_b=s0.uu_b.replace(data=jnp.asarray(g1.pad_u(var("uu_n")))),
                 vv_b=s0.vv_b.replace(data=jnp.asarray(g1.pad_v(var("vv_n")))),
                 bt_hist=g1.nemo_histories(path.parent, kt),
+                # rst_read_ssh reads 'ssha' into ssh(Kaa) (restart.f90:367)
+                eta_rk3_after=(s0.eta.replace(data=jnp.asarray(var("ssha")))
+                               if carries_after_ssh else None),
                 **({leaf: getattr(s0, leaf).replace(data=jnp.asarray(
-                    levels_last(var(n), nk + 1)[..., 1:nk]))
-                    for leaf, n in TKE_RESTART.items()} if case in TKE_CASES else {}),
+                    levels_last(var(name), nk + 1)[..., 1:nk]))
+                    for leaf, name in TKE_RESTART.items()} if case in TKE_CASES else {}),
                 **({"tke_avm_surface": s0.tke_avm_surface.replace(
                     data=jnp.asarray(var("avm_k")[0]))} if case in TKE_CASES else {}))
 
@@ -874,7 +1141,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             return {}
         freshwater, surface = (g4 if case == "ORCA2G4-sbc" else g5).nemo_supplied_forcing(
             card, root, kt)
-        if case in TKE_CASES:    # nn_mxlice=2 reads SI3's hm_i (D123 route)
+        if case in TKE_CASES:
             surface = surface._replace(ice_mean_thickness_hm_i=g5.read_v1_hm_i(root, kt))
         return {"freshwater": freshwater, "surface_forcing": surface}
 
@@ -1098,29 +1365,105 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         # is the card's initial state (kt = 1) or NEMO's restart (other kt)
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
         kt = kt_from
-        out["label"] = ("INDEPENDENT (the card's own chain; stage-local)"
-                        if kt == 1 or state_in is not None else
-                        "GIVEN-NEMO-ENTRY (NEMO's restart; stage-local)")
+        out["label"] = (
+            "GIVEN-NEMO-ENTRY (recorded step entry and external handoff; stage-local)"
+            if record_step_entry else
+            "INDEPENDENT (the card's own chain; stage-local)"
+            if kt == 1 or state_in is not None else
+            "GIVEN-NEMO-ENTRY (NEMO's restart; stage-local)")
         g = read_step(kt)
         if state_in is not None:
             saved = pickle.loads(Path(state_in).read_bytes())
             require(saved["after_kt"] == kt - 1 and saved["packages"] == packages,
                     "--state-in is not this model code's chain after step kt - 1")
             entry = saved["state"]
+        elif record_step_entry:
+            from nemo_testcase_l1_vortex_kt2_walk import _seed_from_record
+            recorded = g5.read_entry(
+                root / f"oracle_step_entry_kt{kt:08d}.bin", "ORCA2G5-ice")
+            entry = _seed_from_record(s0, recorded, nk)
+            previous_bt = g5.read_bt_frame(
+                root / f"oracle_bt_frames_kt{kt - 1:08d}.bin",
+                expect_step=kt - 1)
+            entry = entry._replace(
+                uu_b=entry.uu_b.replace(
+                    data=jnp.asarray(g1.pad_u(previous_bt["uu_b"]))),
+                vv_b=entry.vv_b.replace(
+                    data=jnp.asarray(g1.pad_v(previous_bt["vv_b"]))),
+            )
+            identity = {
+                "ssh": np.asarray(entry.eta.data),
+                "u": np.asarray(entry.u.data)[:, 1:],
+                "v": np.asarray(entry.v.data)[1:],
+                "T": np.asarray(entry.T.data),
+                "S": np.asarray(entry.S.data),
+                "uu_b": np.asarray(entry.uu_b.data)[:, 1:],
+                "vv_b": np.asarray(entry.vv_b.data)[1:],
+            }
+            out["entry_identity"] = {
+                name: int(np.count_nonzero(identity[name] != np.asarray(
+                    previous_bt[name] if name in ("uu_b", "vv_b") else
+                    recorded[name] if name == "ssh" else recorded[name][..., :nk])))
+                for name in identity
+            }
+            bt = g5.read_bt_frame(
+                root / f"oracle_bt_frames_kt{kt:08d}.bin", expect_step=kt)
+            # stprk3_stg.f90:137 saves the external solver's N+1 ``ssha``;
+            # stage 1 exposes its N+1/3 interpolation, while stage 3 restores
+            # the saved N+1 value (:235).  The hook takes that saved handoff.
+            stage3 = g5.read_stage(
+                root / f"oracle_stage_kt{kt:08d}_s3.bin",
+                expect_step=kt, expect_stage=3)
+            recorded_external = (
+                jnp.asarray(stage3["ssh"]),
+                jnp.asarray(g1.pad_u(bt["uu_b"])),
+                jnp.asarray(g1.pad_v(bt["vv_b"])),
+                jnp.asarray(g1.pad_u(bt["un_adv"])),
+                jnp.asarray(g1.pad_v(bt["vn_adv"])),
+            )
         else:
             entry = s0 if kt == 1 else nemo_entry(kt)
         for name in exposures:
             hooks, frame = EXPOSURES[name]
-            kwargs = forcing(kt)
+            if record_step_entry and not without_recorded_external:
+                hooks = {**hooks,
+                         "stage_barotropic_output_override": recorded_external}
+            kwargs = {}
+            if case in FORCED:
+                fw, sf = (g4 if case == "ORCA2G4-sbc" else g5).nemo_supplied_forcing(
+                    card, root, kt)
+                kwargs = {"freshwater": fw, "surface_forcing": sf}
             st = jax.device_get(LatLonCGridOceanModel(
                 card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
                 _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hooks)).step(
                     entry, dt=card.dt_s, **kwargs))
             cand = card_surface(st)
-            rows = [g1.row(f"{name}.kt{kt}.{f}", g[n], cand[f], reg)
+            score_reg = reg
+            score_mask = None
+            overlap_halo_unequal = None
+            if record_step_entry:
+                # ORCA's two cyclic-overlap columns are MPI/domain halos, not
+                # owned physical cells.  The private exposure is returned
+                # through the ordinary step epilogue, whereas NEMO writes its
+                # stage frame inside stprk3_stg before that epilogue.  Census
+                # their differing bytes, but do not score them as stage work.
+                score_reg = {region: np.asarray(mask).copy()
+                             for region, mask in reg.items()}
+                for mask in score_reg.values():
+                    mask[:, (0, -1)] = False
+                score_mask = np.ones_like(next(iter(score_reg.values())))
+                score_mask[:, (0, -1)] = False
+                overlap_halo_unequal = {
+                    f: int(np.count_nonzero(
+                        np.asarray(cand[f])[:, (0, -1)]
+                        != np.asarray(g[n])[:, (0, -1)]))
+                    for f, n in frame.items() if n in g
+                }
+            rows = [g1.row(f"{name}.kt{kt}.{f}", g[n], cand[f], score_reg,
+                           mask=score_mask)
                     for f, n in frame.items() if n in g]
             levels = None
-            if name.startswith("stage"):
+            if name.startswith("stage") and not record_step_entry:
                 stage = int(name[-1])
                 card_all = card_levels(st)
                 levels = {}
@@ -1130,11 +1473,146 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                     levels[f] = {"summary": class_summary(by_level), "levels": by_level}
             out["per_kt"].append({"kt": kt, "exposure": name, "rows": rows,
                                   "first_unequal": g1.first_unequal(rows),
-                                  "all_levels": levels})
+                                  "all_levels": levels,
+                                  "overlap_halo_unequal": overlap_halo_unequal})
             if dump is not None:
                 np.savez(Path(dump) / f"card_kt{kt}_{name}.npz", **card_levels(st),
                          ssh=np.asarray(st.eta.data))
         return out
+    if arm == "operators":
+        # G6's first multilevel vector-form statement walk.  The record is
+        # source ordered: zero accumulator -> HPG -> VOR -> KEG+ZAD.  Publish
+        # the production accumulators through the existing write-only hook;
+        # no operator is reimplemented here.
+        require(case in ("ORCA2G6-vec", "ORCA2G9-tadv") and kt_from == 1,
+                "the operator walk is registered for G6 and G9 step 1 only")
+        terms = read_stage2_terms(
+            root / "oracle_rkstage2_terms_kt00000001.bin")
+        require(all(not np.any(terms[name]) for name in ("before_u", "before_v")),
+                "NEMO's stage-2 accumulator did not start at zero")
+        out["label"] = (
+            "INDEPENDENT = GIVEN-NEMO-ENTRY at kt 1 (source-ordered stage-2 "
+            "momentum accumulators)"
+        )
+        fw, sf = g5.nemo_supplied_forcing(card, root, 1)
+        boundaries = (
+            ("after_hpg", "after_hpg"),
+            ("after_vor", "after_vorticity"),
+            ("after_zad", "after_advection"),
+        )
+        # Round-44 record: KEG split from ZAD, and the stage momentum ww.
+        # Its three shared boundaries must equal the older record bit for bit.
+        stg_path = root / "oracle_g6_stage_terms_kt00000001_s2.bin"
+        stg = read_g6_stage_terms(stg_path, 1, 2) if stg_path.is_file() else None
+        stg3_path = root / "oracle_g6_stage_terms_kt00000001_s3.bin"
+        stg3 = read_g6_stage_terms(stg3_path, 1, 3) if stg3_path.is_file() else None
+        if stg3 is not None:
+            require(stg3["levels"][:3] == (1, 2, 3),
+                    f"stage-3 slots {stg3['levels']} are not NEMO's (Nbb, Nnn, Naa)")
+        if stg is not None:
+            require(stg["levels"] == (1, 3, 2, 2),
+                    f"stage-2 slots {stg['levels']} are not NEMO's (Nbb, Nnn, Naa)")
+            # the raw dump keeps NEMO's dry-point and halo values; the older
+            # record is l4_canon_3d (inner domain, wet umask/vmask only)
+            for f in "uv":
+                wet_f = np.zeros(stg[f"after_hpg_{f}"].shape, bool)
+                wet_f[2:-2, 2:-2, :nk] = cls[f]["full"] | cls[f]["partial"]
+                for b in G6_STGTRM_KRHS:
+                    stg[f"{b}_{f}"] = np.where(wet_f, stg[f"{b}_{f}"], 0.0)
+                for b, rec in boundaries:
+                    require(np.array_equal(stg[f"{b}_{f}"], terms[f"{rec}_{f}"]),
+                            f"{b}.{f}: the two NEMO stage-2 records disagree")
+                terms[f"after_keg_{f}"] = stg[f"after_keg_{f}"]
+            boundaries = boundaries[:2] + (("after_keg", "after_keg"),) + boundaries[2:]
+        ww_seen, ww3_seen = {}, {}
+        selected = set(exposures)
+        if selected & {name for name, _ in boundaries}:
+            boundaries = tuple(pair for pair in boundaries if pair[0] in selected)
+        for hook_name, record_name in boundaries:
+            exposed = jax.device_get(LatLonCGridOceanModel(
+                card.recipe.grid, z, cfg,
+                _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                    expose_momentum_operator=hook_name,
+                    expose_momentum_operator_stage=2,
+                    stage2_zad_operand_observer=(
+                        (lambda d: ww_seen.update(w=np.asarray(d["w_consumed"]), u=np.asarray(d["u"]), h_u=np.asarray(d["h_u_consumed"])))
+                        if stg is not None and hook_name == "after_zad" else None),
+                    stage3_zad_operand_observer=(
+                        (lambda d: ww3_seen.update(w=np.asarray(d["w_consumed"])))
+                        if stg3 is not None and hook_name == "after_zad" else None),
+                )).step(s0, dt=card.dt_s, freshwater=fw, surface_forcing=sf))
+            jax.effects_barrier()
+            cand = card_levels(exposed)
+            rows, all_levels, differences = [], {}, {}
+            for field in ("u", "v"):
+                native = terms[f"{record_name}_{field}"]
+                require(native.shape[-1] == nk + 1 and native.shape[:2] == (
+                    cand[field].shape[0] + 4, cand[field].shape[1] + 4),
+                    f"{field}: unexpected native stage-2 shape {native.shape}")
+                ref = native[2:-2, 2:-2, :nk]
+                delta = np.abs(cand[field] - ref)
+                unequal = cand[field].view(np.uint64) != ref.view(np.uint64)
+                first = np.argwhere(unequal)
+                argmax = tuple(int(i) for i in np.unravel_index(
+                    int(np.argmax(delta)), delta.shape))
+                first_index = tuple(int(i) for i in first[0]) if first.size else None
+                differences[field] = {
+                    "n_unequal": int(np.count_nonzero(unequal)),
+                    "first_index": first_index,
+                    "first_nemo": (float(ref[first_index]) if first_index else None),
+                    "first_card": (float(cand[field][first_index]) if first_index else None),
+                    "argmax": argmax,
+                    "argmax_nemo": float(ref[argmax]),
+                    "argmax_card": float(cand[field][argmax]),
+                    "max_abs": float(delta[argmax]),
+                }
+                rows.append(g1.row(
+                    f"stage2.{hook_name}.{field}", ref[..., 0],
+                    cand[field][..., 0], reg,
+                    plant=(plant == "score" and hook_name == "after_hpg"
+                           and field == "u"),
+                ))
+                by_level = level_rows(
+                    ref, cand[field], cls[field],
+                    plant=(plant == "level" and hook_name == "after_hpg"
+                           and field == "u"),
+                )
+                all_levels[field] = {
+                    "summary": class_summary(by_level), "levels": by_level,
+                }
+            out["per_kt"].append({
+                "kt": 1, "boundary": hook_name, "rows": rows,
+                "first_unequal": g1.first_unequal(rows),
+                "all_levels": all_levels, "differences": differences,
+            })
+            if dump is not None:
+                Path(dump).mkdir(parents=True, exist_ok=True)
+                np.savez(Path(dump) / f"g6_stage2_{hook_name}.npz",
+                         **{f"card_{name}": cand[name] for name in ("u", "v")},
+                         **{f"nemo_{name}": terms[f"{record_name}_{name}"][
+                             2:-2, 2:-2, :nk] for name in ("u", "v")})
+        if stg is not None:
+            require("w" in ww_seen, "the stage-2 dyn_zad observer never fired")
+            wet_t = cls["t"]["full"] | cls["t"]["partial"]
+            # level k of both is the top face of cell k
+            out["stage2_ww"] = bit_rows("stage2_momentum_wzv.ww",
+                                        stg["ww"][2:-2, 2:-2, :nk],
+                                        ww_seen["w"][..., :nk], wet_t)
+            if dump is not None:
+                np.savez(Path(dump) / "g6_stage2_ww.npz", card_w=ww_seen["w"],
+                         card_u=ww_seen["u"], card_h_u=ww_seen["h_u"],
+                         **{f"nemo_{k}": v for k, v in stg.items() if k != "levels"})
+        if stg3 is not None and "after_zad" in {h for h, _ in boundaries}:
+            require("w" in ww3_seen, "the stage-3 dyn_zad observer never fired")
+            out["stage3_ww"] = bit_rows("stage3_momentum_wzv.ww",
+                                        stg3["ww"][2:-2, 2:-2, :nk],
+                                        ww3_seen["w"][..., :nk],
+                                        cls["t"]["full"] | cls["t"]["partial"])
+        return out
+    if arm == "stp2d_terms":
+        return stp2d_terms(out, root, kt_from, kt_to, card=card, cfg=cfg, z=z,
+                           s0=s0, nk=nk, cls=cls, reg=reg, nemo_entry=nemo_entry,
+                           plant=plant, dump=dump)
     if arm == "carried":
         # G5 round 4: every leaf the card carries into step kt against what
         # NEMO's restart of kt - 1 hands it, then one step from swapped states
@@ -1181,7 +1659,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         # external-mode stream only at kt=1.  Expose the ordinary solver's
         # exit without changing it, so a post-kt1 card chain can locate a
         # later leave on the barotropic side of the stage-1 handoff.
-        require(case == "ORCA2G5-ice", "barotropic_exit is a G5-only arm")
+        require(case in ICE_CASES, "barotropic_exit is a G5/G6-only arm")
         require(state_in is not None, "barotropic_exit needs --state-in")
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
         from nemo_testcase_l1_vortex_kt2_walk import read_bt_frame
@@ -1314,6 +1792,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         out["per_kt"].append({"kt": 1, "trazdf_replay": rows})
         return out
     if arm == "zdf_replay":
+        require(case != "ORCA2G7-drg",
+                "the dyn_zdf replay transcribes zero drag; G7 has bottom drag")
         # OFFLINE replay (rule 5): the card's own passive stage-3 arrays, from
         # its write-only observer, are pushed through NEMO's statements.
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
@@ -1469,13 +1949,20 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         for kt in entries:
             first, s1 = step(s0 if kt == 1 else nemo_entry(kt), kt)
             rows = surface_rows("given_entry", kt, first)
-            second, s2 = step(first, kt + 1)
-            out["per_kt"].append({
-                "kt": kt, "seconds": [s1, s2], "rows": rows,
-                "first_unequal": g1.first_unequal(rows),
-                "two_step_kt": kt + 1,
-                "two_step_rows": surface_rows("given_entry_two_step", kt + 1, second),
-                "two_step_all_levels": all_level_rows(kt + 1, second)})
+            result = {"kt": kt, "seconds": [s1], "rows": rows,
+                      "first_unequal": g1.first_unequal(rows),
+                      "all_levels": all_level_rows(kt, first)}
+            # The G6 acquisition completed kt=7 but its certification record
+            # ends at kt=6 (nn_fsbc=2).  Do not manufacture an unrecorded kt=7
+            # two-step row merely because kt=6 is a requested entry point.
+            if kt < n_stage:
+                second, s2 = step(first, kt + 1)
+                result.update({
+                    "seconds": [s1, s2], "two_step_kt": kt + 1,
+                    "two_step_rows": surface_rows(
+                        "given_entry_two_step", kt + 1, second),
+                    "two_step_all_levels": all_level_rows(kt + 1, second)})
+            out["per_kt"].append(result)
     return out
 
 
@@ -1523,6 +2010,14 @@ def main(argv=None) -> int:
                     help="L2 CONTROL: restore the fused left-fold A33 graph")
     ap.add_argument("--without-l2-stored-face-ratios", action="store_true",
                     help="L2 CONTROL: rederive Kmm face ratios from mean SSH")
+    ap.add_argument("--without-hpg-fold-geometry", action="store_true",
+                    help="G6 round-2 pair half: cyclic north HPG geometry")
+    ap.add_argument("--without-vector-raw-vmask", action="store_true",
+                    help="G6 round-2 pair half: compact vector V mask")
+    ap.add_argument("--record-step-entry", action="store_true",
+                    help="G9 round-6: seed a recorded kt>=2 entry and external handoff")
+    ap.add_argument("--without-recorded-external", action="store_true",
+                    help="G9 round-6 plant: remove the recorded external handoff")
     ap.add_argument("--case", choices=CASES, default=CASE)
     ap.add_argument("--allow-dirty", action="store_true")
     ap.add_argument("--output", type=Path, required=True)
@@ -1543,13 +2038,14 @@ def main(argv=None) -> int:
               without_l2_metric=a.without_l2_metric,
               without_l2_eos80=a.without_l2_eos80,
               without_l2_north_fold=a.without_l2_north_fold,
-              without_l2_native_face_reference=(
-                  a.without_l2_native_face_reference),
+              without_l2_native_face_reference=a.without_l2_native_face_reference,
               without_l2_kmm_face_geometry=a.without_l2_kmm_face_geometry,
-              without_l2_a33_source_ordering=(
-                  a.without_l2_a33_source_ordering),
-              without_l2_stored_face_ratios=(
-                  a.without_l2_stored_face_ratios),
+              without_l2_a33_source_ordering=a.without_l2_a33_source_ordering,
+              without_l2_stored_face_ratios=a.without_l2_stored_face_ratios,
+              without_hpg_fold_geometry=a.without_hpg_fold_geometry,
+              without_vector_raw_vmask=a.without_vector_raw_vmask,
+              record_step_entry=a.record_step_entry,
+              without_recorded_external=a.without_recorded_external,
               case=a.case)
     a.output.write_text(json.dumps(out, indent=1) + "\n")
     if a.arm == "geometry":
@@ -1617,6 +2113,15 @@ def main(argv=None) -> int:
                   f"replay unequal {r['ascending_replay_vs_card_unequal']}, 4-lane "
                   f"{r['lane4_replay_vs_card_unequal']}")
         return 1 if bad else 0
+    if a.arm == "stp2d_terms":
+        for p in out["per_kt"]:
+            print(f"kt {p['kt']} ({p['label']}): first unequal {p['first_unequal']}")
+            for r in p["stp2d_rows"]:
+                print(f"  {r['name']:24s} unequal {r['n_unequal']:6d}/{r['n_wet']:6d} "
+                      f"max {r['max_abs']:.3e} norm {r['normalised']:.2e} "
+                      f"ulps {r['max_ulps']} first {r['first_cell']} "
+                      f"dry card/nemo {r['dry_card_nonzero']}/{r['dry_nemo_nonzero']}")
+        return 0
     if a.arm == "substeps":
         f = out["first_unequal"]
         print("SUBSTEPS first unequal operand:", f and (f["name"], f["n_unequal"]))
@@ -1627,6 +2132,10 @@ def main(argv=None) -> int:
                   f"ordinary handoff vs NEMO unequal {v['ordinary_vs_nemo_unequal']}")
         return 0
     bad = False
+    if "stage2_ww" in out:
+        r = out["stage2_ww"]
+        print(f"{r['name']:34s} unequal {r['n_unequal']}/{r['n_wet']} max {r['max_abs']:.3e} "
+              f"norm {r['normalised']:.2e} ulps {r['max_ulps']} first {r['first_cell']}")
     for p in out["per_kt"]:
         for r in p["rows"] + p.get("two_step_rows", []) + p.get("history_rows", []):
             bad |= r["status"] != "AT-BAR"
