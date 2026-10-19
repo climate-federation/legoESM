@@ -273,3 +273,14 @@ def test_the_daily_series_reads_the_closure_after_the_feed_records_it():
     feed = src.index("START_DAY + elapsed_day, flux_only=True)")
     publish = src.index('_ts["moisture_residual"][-1] = float(_mt.residual[-1])')
     assert publish > feed, "the series reads the tracker before the feed fills it"
+
+
+def test_a_window_the_feed_did_not_record_drops_the_tendency_baseline():
+    """Without this the closure after a skipped window mixes two spans."""
+    import inspect
+    src = inspect.getsource(ModelDriver._run_column)
+    publish = src.index('_ts["moisture_residual"][-1] = float(_mt.residual[-1])')
+    drop = src.index("_mt.drop_baseline()", publish)
+    # Only on the not-recorded branch: an unconditional drop would erase
+    # the baseline after every recorded window and no closure would survive.
+    assert src[publish:drop].split("\n")[-2].strip() == "else:"

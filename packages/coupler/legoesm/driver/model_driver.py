@@ -15450,9 +15450,13 @@ class ModelDriver:
                     self._feed_mpas_cmip_accumulators(
                         START_DAY + elapsed_day, flux_only=True)
                 # Publish the closure only if THIS feed recorded one; a skipped
-                # window must not inherit the previous window's number.
-                if _mt is not None and len(_mt.residual) > _mt_n0:
-                    _ts["moisture_residual"][-1] = float(_mt.residual[-1])
+                # window must not inherit the previous window's number, and the
+                # next closure must not difference water across the gap.
+                if _mt is not None:
+                    if len(_mt.residual) > _mt_n0:
+                        _ts["moisture_residual"][-1] = float(_mt.residual[-1])
+                    else:
+                        _mt.drop_baseline()
 
             if _DIGEST_EVERY > 0 and (step + 1) % _DIGEST_EVERY == 0:
                 _lv = locals()
