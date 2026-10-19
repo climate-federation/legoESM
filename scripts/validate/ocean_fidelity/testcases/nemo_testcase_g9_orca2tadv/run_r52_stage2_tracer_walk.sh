@@ -24,6 +24,7 @@ readonly NAME=ORCA2G9_OMIP_L4_R52STG2
 readonly BASE=$NEMO_ROOT/cfgs/$BASE_NAME TARGET=$NEMO_ROOT/cfgs/$NAME
 readonly BASE_BIN_SHA=41cd9a63844218e7c37e75708813649603b80df0366102b8ce3e340f89a60275
 readonly WANT_KEYS='key_RK3 key_qco key_si3 key_vco_1d3d'
+readonly FC=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
 readonly ROUNDS=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds
 readonly INPUT_ROOT=$ROUNDS/round21/oracle_g4_r21/p6_a
 readonly R46=$ROUNDS/round46/oracle_g9_r46/twin_a
@@ -61,20 +62,33 @@ new_scratch() {
 sha() { sha256sum "$1" | awk '{print $1}'; }
 sorted_keys() { sed -E 's/.*fppkeys *//' "$1" | xargs -n1 | LC_ALL=C sort | xargs; }
 
-patch_stage2() { # target stprk3_stg.F90
-  python3 -I - "$1" <<'PY'
+patch_stage2() { # target stprk3_stg.F90 [continued-anchor-plant]
+  python3 -I - "$1" "${2:-production}" <<'PY'
 import pathlib
 import sys
 
 p = pathlib.Path(sys.argv[1])
+mode = sys.argv[2]
 s = p.read_text()
 
 def add_after(old: str, addition: str) -> None:
     global s
+    terminal = old.rstrip("\n").splitlines()[-1].rstrip()
+    if terminal.endswith("&"):
+        raise SystemExit(
+            f"{p}: refusing insertion after continued line: {terminal!r}")
     count = s.count(old)
     if count != 1:
         raise SystemExit(f"{p}: non-unique after anchor ({count}): {old[:80]!r}")
     s = s.replace(old, old + addition)
+
+if mode == "continued-anchor-plant":
+    add_after(
+        "         IF(sn_cfctl%l_prtctl)   CALL prt_ctl( tab3d_1=ts(:,:,:,jp_tem,Kaa), clinfo1='stp stg   - Ta: ', mask1=tmask,   &\n",
+        "         CONTINUED_ANCHOR_PLANT_MUST_NOT_APPEAR\n")
+    raise SystemExit(f"{p}: continued-anchor plant unexpectedly passed")
+if mode != "production":
+    raise SystemExit(f"{p}: unknown patch mode: {mode}")
 
 add_after(
     "      INTEGER  ::   l1_unit, l1_ios, l2_tracer_unit, l2_tracer_ios\n",
@@ -106,7 +120,8 @@ add_after(
     "            & l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &\n"
     "            & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')\n")
 add_after(
-    "         END DO\n         !\n         IF(sn_cfctl%l_prtctl)   CALL prt_ctl( tab3d_1=ts(:,:,:,jp_tem,Kaa), clinfo1='stp stg   - Ta: ', mask1=tmask,   &\n",
+    "         IF(sn_cfctl%l_prtctl)   CALL prt_ctl( tab3d_1=ts(:,:,:,jp_tem,Kaa), clinfo1='stp stg   - Ta: ', mask1=tmask,   &\n"
+    "            &                                  tab3d_2=ts(:,:,:,jp_sal,Kaa), clinfo2=           ' Sa: ', mask2=tmask, clinfo3='tra' )\n",
     "         IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000+1 .AND. kstg == 2 ) THEN\n"
     "            WRITE(n_r52s2_unit) 'stage_update    ', &\n"
     "               & l4_canon_3d(ts(:,:,:,jp_tem,Kaa),'T'), &\n"
@@ -115,6 +130,19 @@ add_after(
     "         ENDIF\n")
 p.write_text(s)
 PY
+}
+
+syntax_proof() { # patched stprk3_stg.F90
+  local source=$1 syntax
+  new_scratch; syntax=$scratch_path
+  cpp -Dkey_RK3 -Dkey_qco -Dkey_si3 -Dkey_vco_1d3d -P -traditional \
+    -I "$(dirname "$source")" -I "$BASE/WORK" -I "$BASE/BLD/inc" \
+    "$source" -o "$syntax/stprk3_stg.f90"
+  "$FC" -fsyntax-only -fdefault-real-8 -ffree-line-length-none \
+    -fallow-argument-mismatch -I "$BASE/BLD/inc" -I "$syntax" \
+    -J "$syntax" "$syntax/stprk3_stg.f90" \
+    || fail 'gfortran syntax proof failed for stprk3_stg.f90'
+  printf 'SYNTAX_PROOF_PASS stprk3_stg.f90\n'
 }
 
 check_additive() { # base source, patched source
@@ -199,7 +227,7 @@ F90
 }
 
 preflight() {
-  local f dry planted
+  local f dry planted continued
   [[ -x "$BASE/BLD/bin/nemo.exe" && "$(sha "$BASE/BLD/bin/nemo.exe")" == "$BASE_BIN_SHA" ]] \
     || fail 'round-46 record binary base is missing or changed'
   [[ "$(sorted_keys "$BASE/cpp_$BASE_NAME.fcm")" == "$WANT_KEYS" ]] || fail 'base key set changed'
@@ -211,6 +239,15 @@ preflight() {
   new_scratch; dry=$scratch_path; cp "$STG_SRC" "$dry/stprk3_stg.F90"
   patch_stage2 "$dry/stprk3_stg.F90"; check_additive "$STG_SRC" "$dry/stprk3_stg.F90"
   grep -Fq "WRITE(n_r52s2_unit) 'stage_update    '" "$dry/stprk3_stg.F90" || fail 'terminal frame absent'
+  syntax_proof "$dry/stprk3_stg.F90"
+  continued=$dry/continued-anchor.F90; cp "$STG_SRC" "$continued"
+  if patch_stage2 "$continued" continued-anchor-plant >"$dry/continued-anchor.log" 2>&1; then
+    fail 'continued-line anchor plant stayed green'
+  fi
+  grep -Fq 'refusing insertion after continued line' "$dry/continued-anchor.log" \
+    || fail 'continued-line anchor plant lacked refusal'
+  cmp -s "$STG_SRC" "$continued" || fail 'continued-line anchor plant modified its source'
+  printf 'G9R52_STAGE2_CONTINUED_ANCHOR_PLANT_REFUSED\n'
   planted=$dry/nonadditive.F90; cp "$dry/stprk3_stg.F90" "$planted"
   sed -i '0,/CALL tra_adv    (/s//CALL tra_adv_REMOVED(/' "$planted"
   if check_additive "$STG_SRC" "$planted" >"$dry/nonadditive.log" 2>&1; then fail 'non-additive plant stayed green'; fi
