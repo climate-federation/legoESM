@@ -25,7 +25,7 @@ grep -rn "nemo_een_barotropic\|nemo_e3u_0\|nemo_e3v_0\|nemo_e3f_0\|nemo_e3w_0" p
 ```
 
 One builder, `nemo_qco_resolved_mesh_operands`
-(`packages/ocean/legoesm/ocean/vertical.py:673`), reached from one production
+(`packages/ocean/legoesm/ocean/vertical.py:678`), reached from one production
 call site (`ocean_pe_latlon_cgrid.py:1695`, inside `nemo_qco_wzv_operands`)
 and one diagnostic one (`:1519`). Exactly one alias in the package tree
 (`vertical.py:701`) plus one in the DINO analytic mesh

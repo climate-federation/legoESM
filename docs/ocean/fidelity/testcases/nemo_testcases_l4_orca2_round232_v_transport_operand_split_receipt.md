@@ -67,7 +67,7 @@ The candidate stage path instead calls the reconstructed-card builder at
 `ocean_model_latlon_cgrid.py:1821-1825`; that builder derives `e3v_0` from
 neighbouring T thicknesses at `vertical.py:647-654`. The already-shared
 resolved builder reads the card's raw NEMO face thickness at
-`vertical.py:673-748`.
+`vertical.py:678-748`.
 
 On both labels:
 
