@@ -157,4 +157,11 @@ retried under 150 GiB after the OMT probes.
 - Default citation-gate test 17, private-import ratchet 6, round-316/317
   instrument tests 9: 32 passed; round-315 probe tests: 10 passed.
 
+- Resume (review hold), at `7210915ac`: citation gate on this receipt
+  PASS, failures 0 (`gates/citation_gate_receipt_resume.json`); citation
+  test + private-import ratchet + ORCA2 parallel receipt gate 25 passed;
+  TKE / recipe / freshwater / barotropic 119 passed; WS stage face-mask
+  2 passed (run one at a time, 10-min limit); probe + instrument tests
+  20 passed (incl. the new isoneutral no-inert test).
+
 codex review: operator
