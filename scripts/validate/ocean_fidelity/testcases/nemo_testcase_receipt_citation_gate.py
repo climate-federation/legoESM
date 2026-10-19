@@ -5664,7 +5664,7 @@ CITATION_MAP = {
     # two pinned endpoint statements are one line further apart than before.
     'ocean_model_latlon_cgrid.py:9643-10102': [
         'T_mid = state_new.T.data',
-        'S_mid = S_mid + dt * dS_gm * active_3d', 453],
+        'S_mid = S_mid + dt * dS_gm * active_3d', 460],
     'ocean_model_latlon_cgrid.py:10298-10345': [
         ('_nemo_ws_rk3_tracer_pair_step(', 3),
         'return_final_content=True,', 48],
