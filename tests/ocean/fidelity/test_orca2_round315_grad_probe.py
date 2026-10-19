@@ -137,6 +137,7 @@ class _BD(NamedTuple):
 class _CFG(NamedTuple):
     physics: _PH
     bottom_drag: _BD
+    gm_redi: _GM | None
 
 
 class _Z(NamedTuple):
@@ -147,7 +148,7 @@ class _Z(NamedTuple):
 @pytest.mark.parametrize("scheme", ["tke", "constant"])
 def test_scaled_parts_is_bit_identical_at_one_and_scales_only_its_field(scheme):
     cfg = _CFG(_PH(_LM(_GM(1000.0)), _VM(scheme, _TKE(1.4e-10), _CONST(1.2e-5))),
-               _BD(1e-3))
+               _BD(1e-3), _GM(500.0))
     z = _Z(np.array([1.0e4, 3.3e3]), np.array([2.0e4]))
     same_cfg, same_z = probe.scaled_parts(cfg, z, {k: 1.0 for k in probe.SCALARS})
     assert same_cfg == cfg
@@ -159,6 +160,12 @@ def test_scaled_parts_is_bit_identical_at_one_and_scales_only_its_field(scheme):
     else:
         assert vm.constant.K_v == 2.4e-5 and vm.tke.kappaH_min == 1.4e-10
     assert bumped.bottom_drag == cfg.bottom_drag
+    redi, _ = probe.scaled_parts(cfg, z, {"kappa_redi": 2.0})
+    # the step reads the top-level copy; the physics copy is never read
+    assert redi.gm_redi.kappa_Redi == 1000.0
+    assert redi.physics == cfg.physics
+    none_cfg = cfg._replace(gm_redi=None)
+    assert probe.scaled_parts(none_cfg, z, {"kappa_redi": 2.0})[0] == none_cfg
     with pytest.raises(probe.GateError):
         probe.scaled_parts(cfg._replace(physics=cfg.physics._replace(
             vertical_mixing=cfg.physics.vertical_mixing._replace(scheme="kpp"))),
@@ -234,3 +241,48 @@ def test_walker_finds_a_residual_nan_inside_a_scan_and_reproduces_finite_pullbac
 def test_fd_sweep_defaults_reach_the_reviewed_epsilons():
     # the review measured agreement only below 1e-6 K; the sweep must reach it
     assert min(probe.SWEEP_EPS) <= 1e-7 and max(probe.SWEEP_EPS) >= 1e-3
+
+
+
+def test_kappa_redi_scale_moves_the_traced_step_state():
+    """No inert parameter: 1 % on kappa_redi changes the one-step T of a
+    lat-lon model that runs isoneutral mixing."""
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_full_step_coordinate, create_ocean_z_star
+
+    saved = get_policy()
+    set_policy(PrecisionPolicy.fp64())  # a 1 % Redi increment is below fp32's ulp of T
+    try:
+        grid = create_latlon_grid(n_lat=12, n_lon=8)
+        z = create_ocean_z_star(n_levels=6, H_max=3000.0)
+        ones = jnp.ones((grid.n_lat, grid.n_lon, z.n_levels))
+        z = create_full_step_coordinate(z, bottom_level=np.full(ones.shape[:2], z.n_levels))
+        # the probe also scales viscosity/vertical-mixing/drag fields: give it real ones
+        z = z._replace(nemo_ldf_ahmt=ones, nemo_ldf_ahmf=ones)
+        ph = OceanPhysicsConfig()
+        cfg = LatLonCGridOceanConfig.from_flat(
+            A_h=1.0e3, A_v=1.0e-3, K_h=0.0, K_v=1.0e-4, bottom_drag_r=1.0e-3,
+            gm_redi=GMRediConfig(kappa_GM=0.0, kappa_Redi=1.0e3,
+                                 slope_scheme="nemo_iso_lap"),
+            outer_integrator="forward_euler")._replace(physics=ph._replace(
+                lateral_mixing=ph.lateral_mixing._replace(scheme="none")))
+        st = rest_state_latlon_cgrid_ocean(grid, z, T_water_init_C=20.0, T_deep=4.0,
+                                           S_uniform=35.0, H_max=3000.0)
+        # a meridional T front plus a zonal S contrast: T varies along isopycnals
+        wet = st.land_mask.data[:, :, None]
+        rows = jnp.arange(grid.n_lat, dtype=st.T.data.dtype)[:, None, None]
+        cols = jnp.arange(grid.n_lon, dtype=st.S.data.dtype)[None, :, None]
+        st = st._replace(T=st.T.replace(data=st.T.data + 4.0 * jnp.tanh((rows - 6.0) / 2.0) * wet),
+                         S=st.S.replace(data=st.S.data + 0.5 * jnp.sin(cols) * wet))
+        step = probe.traced_step(LatLonCGridOceanModel(grid, z, cfg))
+        one, bump = (step(st, {"kappa_redi": jnp.float64(v)}, 900.0, None, None)
+                     for v in (1.0, 1.01))
+        assert np.count_nonzero(np.asarray(one.T.data) != np.asarray(bump.T.data)) > 0
+    finally:
+        set_policy(saved)

@@ -103,9 +103,12 @@ def scaled_parts(config, z_coord, s: dict):
 
     s = {k: s.get(k, 1.0) for k in SCALARS}  # absent = held static (untraceable)
     ph = config.physics
-    lm = ph.lateral_mixing
     vm = ph.vertical_mixing
-    redi = lm.gm_redi._replace(kappa_Redi=lm.gm_redi.kappa_Redi * s["kappa_redi"])
+    # the lat-lon step reads the top-level gm_redi, never
+    # physics.lateral_mixing.gm_redi; None = the card runs no isoneutral mixing
+    redi = config.gm_redi
+    if redi is not None:
+        redi = redi._replace(kappa_Redi=redi.kappa_Redi * s["kappa_redi"])
     if _vm_background_path(config) == "tke.kappaH_min":
         vm = vm._replace(tke=vm.tke._replace(
             kappaH_min=vm.tke.kappaH_min * s["kv_background"]))
@@ -113,8 +116,8 @@ def scaled_parts(config, z_coord, s: dict):
         vm = vm._replace(constant=vm.constant._replace(
             K_v=vm.constant.K_v * s["kv_background"]))
     config = config._replace(
-        physics=ph._replace(lateral_mixing=lm._replace(gm_redi=redi),
-                            vertical_mixing=vm),
+        gm_redi=redi,
+        physics=ph._replace(vertical_mixing=vm),
         bottom_drag=config.bottom_drag._replace(
             bottom_drag_cd0=config.bottom_drag.bottom_drag_cd0 * s["bottom_cd0"]))
     z_coord = z_coord._replace(
@@ -127,7 +130,8 @@ def nominal_scalars(config, z_coord) -> dict:
     vm = config.physics.vertical_mixing
     bg = (vm.tke.kappaH_min if _vm_background_path(config) == "tke.kappaH_min"
           else vm.constant.K_v)
-    return {"kappa_redi": float(config.physics.lateral_mixing.gm_redi.kappa_Redi),
+    return {"kappa_redi": (None if config.gm_redi is None
+                           else float(np.max(np.asarray(config.gm_redi.kappa_Redi)))),
             "visc_scale": float(np.max(np.asarray(z_coord.nemo_ldf_ahmt))),
             "kv_background": float(bg),
             "kv_background_field": _vm_background_path(config),
@@ -378,7 +382,8 @@ def _with_t(state, t_data):
 # --- measurement ----------------------------------------------------------
 
 def measure(rung: str, n_dirs: int, full_sweep: bool, output: Path | None = None,
-            remat: bool = False) -> dict:
+            remat: bool = False, n_max: int | None = None,
+            scalars: tuple = SCALARS) -> dict:
     import jax
     import jax.numpy as jnp
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
@@ -389,7 +394,7 @@ def measure(rung: str, n_dirs: int, full_sweep: bool, output: Path | None = None
     card, state0, forcing = build(rung)
     cfg, z = card.recipe.model_config, card.recipe.z_coord
     dt = card.dt_s
-    n_list = tuple(n for n in N_LIST if n <= len(forcing))
+    n_list = tuple(n for n in N_LIST if n <= min(len(forcing), n_max or len(forcing)))
 
     def new_model(config, z_coord):
         return LatLonCGridOceanModel(card.recipe.grid, z_coord, config,
@@ -504,7 +509,7 @@ def measure(rung: str, n_dirs: int, full_sweep: bool, output: Path | None = None
             checks.append(_row(f"T_dir{d_i}", name, n, ad, jvp.get((name, n), (0, None))[1],
                                {e: fd[e][(name, n)] for e in t_eps}))
         save(f"T_dir{d_i}")
-    for key in SCALARS:
+    for key in scalars:
         if key not in keys:
             row = _rebuilt_fd(key, cfg, z, new_model, state0, forcing,
                               n_list, losses, dt, s_eps[len(s_eps) // 2])
@@ -651,6 +656,10 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--fd-sweep", action="store_true",
                         help="only the T_dir0 epsilon sweep against forward mode")
+    parser.add_argument("--n-max", type=int, default=None,
+                        help="only N <= this (memory)")
+    parser.add_argument("--scalars", nargs="+", choices=SCALARS, default=SCALARS,
+                        help="scalar rows to measure (all are still traced)")
     args = parser.parse_args()
     if args.fd_sweep:
         fd_sweep(args.rung, args.output)
@@ -658,7 +667,7 @@ def main() -> int:
         return 0
     try:
         result = measure(args.rung, args.directions, not args.short_sweep, args.output,
-                         remat=args.remat)
+                         remat=args.remat, n_max=args.n_max, scalars=tuple(args.scalars))
     except GateError as error:
         print(f"STATUS REFUSE: {error}")
         return 2
