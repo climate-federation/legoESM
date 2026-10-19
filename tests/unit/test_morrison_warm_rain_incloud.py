@@ -537,3 +537,99 @@ def test_production_deck_selects_incloud_and_threads_it():
     cfg.validate_strict()
     assert thread_morrison_scalars(cfg, "morrison", MorrisonConfig()
                                    ).warm_rain_incloud is True
+
+
+def _spectral_setup(incloud=True, n=2, turb="clubb"):
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+        isothermal_rest_state_spectral)
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.convection import ConvectionConfig
+    from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from legoesm.atmosphere.physics.radiation import RadiationConfig
+    from legoesm.atmosphere.physics.turbulence import TurbulenceConfig
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    nlev = 6
+    grid = create_gaussian_grid(8, dealiasing="quadratic")
+    sigma = create_sigma_coordinate(nlev)
+    shp = (grid.n_lat, grid.n_lon, nlev)
+    # ice-supersaturated cloud ice on the top half: aist > CLUBB's alst there
+    top = (jnp.arange(nlev) < nlev // 2)[None, None, :] * jnp.ones(shp)
+    state = isothermal_rest_state_spectral(
+        grid, sigma, T_init=250.0, p_s_init=1.0e5, perturbation_amplitude=0.5,
+        tracers={"q_v": jnp.maximum(jnp.full(shp, 6.0e-4), 2.0e-3 * top),
+                 "q_c": jnp.full(shp, 2.0e-4), "q_i": 1.0e-5 * top,
+                 "q_r": jnp.zeros(shp)})
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none",
+                                  cloud_config=CloudConfig(scheme="cam6_clubb")),
+        convection=ConvectionConfig(scheme="none"),
+        turbulence=TurbulenceConfig(scheme=turb),
+        microphysics=MicrophysicsConfig(
+            scheme="morrison",
+            morrison=MorrisonConfig(warm_rain_scheme="kk2000_cam6",
+                                    warm_rain_incloud=incloud)))
+    build = lambda: make_physics(cfg, model_type="spectral_pe", dt=1800.0,
+                                 cld_macmic_num_steps=n)
+    return build, cfg, grid, sigma, state
+
+
+def test_spectral_lane_guard_needs_clubb_and_the_subcycle():
+    for kw in (dict(n=1), dict(turb="tke")):
+        build = _spectral_setup(**kw)[0]
+        with pytest.raises(ValueError, match="cld_macmic_num_steps>=2"):
+            build()
+    assert callable(_spectral_setup()[0]())
+
+
+def test_spectral_microphysics_reads_clubbs_cloud_fraction_from_the_same_substep(
+        monkeypatch):
+    """Spectral lane: Morrison's cloud fraction in sub-step i is
+    max(CLUBB's sub-step-i alst, aist), with aist on the Gaussian latitudes
+    in the (n_lat, n_lon) column order."""
+    from legoesm.atmosphere.physics.microphysics import integration as mi
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    from legoesm.atmosphere.physics.turbulence import integration as ti
+    written, read, aists, lats = [], [], [], []
+    real_upd = ti._carry_update_with_cloud_fraction
+    real_micro = mi.morrison_microphysics
+    real_aist = mi.cam6_ice_stratus_fraction
+
+    def aist(q_v, T, p, q_i, lat, *a, **k):
+        out = real_aist(q_v, T, p, q_i, lat, *a, **k)
+        aists.append(np.asarray(out))
+        lats.append(np.asarray(lat))
+        return out
+
+    def upd(carry_field, carry_val, turb_out):
+        written.append(np.asarray(turb_out.cloud_fraction))
+        return real_upd(carry_field, carry_val, turb_out)
+
+    def micro(*a, cloud_fraction=None, **k):
+        read.append(None if cloud_fraction is None else np.asarray(cloud_fraction))
+        return real_micro(*a, cloud_fraction=cloud_fraction, **k)
+    monkeypatch.setattr(ti, "_carry_update_with_cloud_fraction", upd)
+    monkeypatch.setattr(mi, "morrison_microphysics", micro)
+    monkeypatch.setattr(mi, "cam6_ice_stratus_fraction", aist)
+    # the sub-cycle remats each sub-step, which traces even under
+    # disable_jit; the spies need concrete arrays
+    monkeypatch.setattr(jax, "checkpoint", lambda f, **k: f)
+    build, cfg, grid, sigma, state = _spectral_setup()
+    fn = build()
+    ncol = int(grid.n_lat) * int(grid.n_lon)
+    ps = init_physics_state(ncol, 6, cfg)._replace(
+        cloud_fraction=jnp.full((ncol, 6), 0.123))
+    with jax.disable_jit():
+        fn(state, grid, sigma, phys_state=ps)
+    assert len(written) == len(read) == len(aists) == 2
+    for w, r, ai in zip(written, read, aists):
+        np.testing.assert_array_equal(
+            np.maximum(np.clip(w.reshape(r.shape), 0.0, 1.0), ai), r)
+    np.testing.assert_array_equal(
+        lats[0].reshape(grid.n_lat, grid.n_lon),
+        np.broadcast_to(np.asarray(grid.lat)[:, None], (grid.n_lat, grid.n_lon)))
+    w0 = written[0].reshape(read[0].shape)
+    assert (aists[0] > w0).any() and (aists[0] <= w0).any()
+    assert not np.all(read[0] == 0.123)

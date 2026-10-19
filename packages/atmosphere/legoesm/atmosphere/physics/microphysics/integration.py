@@ -177,6 +177,38 @@ from legoesm.atmosphere.physics._shared import (
 )
 
 
+def _incloud_liquid_cloud_fraction(phys_state, q_v_col, T_col, p_full_col,
+                                   p_half_col, q_i_col, lat_col, cloud_config):
+    """CAM6 MG2 liquid cloud fraction ``ast = max(alst, aist)``, (ncol, nlev).
+
+    CAM6 micro_mg_cam.F90:1809-1810 liqcldf = ast, with clubb_intr.F90:2575
+    ast = max(alst, aist).  ``alst`` is CLUBB's PDF cloud fraction, written
+    into the carry by the turbulence sub-step that precedes this one in the
+    macmic loop (clubb_tend_cam, then MG2); ``aist`` is cldfrc2m aist_vector
+    on the post-CLUBB state (:2556), which is this sub-step's input state.
+    """
+    _cf = (None if phys_state is None
+           else getattr(phys_state, "cloud_fraction", None))
+    if _cf is None:
+        raise ValueError(
+            "warm_rain_incloud=True but no cloud_fraction carry "
+            "reached the microphysics (needs CLUBB turbulence).")
+    _aist = cam6_ice_stratus_fraction(
+        q_v_col, T_col, p_full_col, q_i_col, lat_col, cloud_config,
+        p_half_col[:, :-1])
+    return jnp.maximum(jnp.clip(_cf.reshape(T_col.shape), 0.0, 1.0), _aist)
+
+
+def _check_incloud_cloud_config(scheme_config, cloud_config) -> bool:
+    _incloud = bool(getattr(scheme_config, "warm_rain_incloud", False))
+    if _incloud and getattr(cloud_config, "scheme", None) != "cam6_clubb":
+        raise ValueError(
+            "warm_rain_incloud=True uses CAM6's ast = max(alst, aist); the "
+            "ice-stratus fraction needs the cam6_clubb cloud config, got "
+            f"{getattr(cloud_config, 'scheme', None)!r}.")
+    return _incloud
+
+
 def make_microphysics_physics(
     microphysics_config: MicrophysicsConfig,
     model_type: str = "hydrostatic",
@@ -218,7 +250,8 @@ def make_microphysics_physics(
     elif model_type == "mpas_nh":
         return _make_mpas_nh_microphysics(microphysics_config, dt)
     elif model_type == "spectral_pe":
-        return _make_spectral_pe_microphysics(microphysics_config, dt)
+        return _make_spectral_pe_microphysics(microphysics_config, dt,
+                                              cloud_config=cloud_config)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -258,12 +291,7 @@ def _make_hydrostatic_microphysics(
         and not getattr(scheme_config, "predict_Nc", False)
     )
 
-    _incloud = bool(getattr(scheme_config, "warm_rain_incloud", False))
-    if _incloud and getattr(cloud_config, "scheme", None) != "cam6_clubb":
-        raise ValueError(
-            "warm_rain_incloud=True uses CAM6's ast = max(alst, aist); the "
-            "ice-stratus fraction needs the cam6_clubb cloud config, got "
-            f"{getattr(cloud_config, 'scheme', None)!r}.")
+    _incloud = _check_incloud_cloud_config(scheme_config, cloud_config)
     if _incloud and model_type != "mpas":
         # Checked at build time, not the first step: aist's tropopause
         # switch needs MPAS cell latitudes (mesh.latCell).
@@ -426,29 +454,14 @@ def _make_hydrostatic_microphysics(
         else:
             _kw = {}
             if _incloud:
-                # CLUBB's PDF cloud fraction, written into the carry by the
-                # turbulence sub-step that precedes this one in the macmic
-                # loop (CAM6: clubb_tend_cam, then MG2 on ast).
-                _cf = (None if phys_state is None
-                       else getattr(phys_state, "cloud_fraction", None))
-                if _cf is None:
-                    raise ValueError(
-                        "warm_rain_incloud=True but no cloud_fraction carry "
-                        "reached the microphysics (needs CLUBB turbulence).")
                 if not hasattr(grid, "latCell"):
                     raise ValueError(
                         "warm_rain_incloud=True: the aist tropopause switch "
                         "needs cell latitudes (MPAS mesh latCell).")
-                # CAM6 micro_mg_cam.F90:1809-1810 liqcldf = ast, with
-                # clubb_intr.F90:2575 ast = max(alst, aist); aist is
-                # cldfrc2m aist_vector on the post-CLUBB state (:2556),
-                # which is this sub-step's input state.
-                _aist = cam6_ice_stratus_fraction(
-                    q_v_col, T_col, p_full_col, hydrometeors.q_i,
-                    jnp.asarray(grid.latCell).reshape(ncol), cloud_config,
-                    p_half_col[:, :-1])
-                _kw["cloud_fraction"] = jnp.maximum(
-                    jnp.clip(_cf.reshape(ncol, nlev), 0.0, 1.0), _aist)
+                _kw["cloud_fraction"] = _incloud_liquid_cloud_fraction(
+                    phys_state, q_v_col, T_col, p_full_col, p_half_col,
+                    hydrometeors.q_i, jnp.asarray(grid.latCell).reshape(ncol),
+                    cloud_config)
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half_col, rho, dz, dt, scheme_config, **_kw,
@@ -1141,6 +1154,7 @@ def _make_mpas_nh_microphysics(
 def _make_spectral_pe_microphysics(
     microphysics_config: MicrophysicsConfig,
     dt: float,
+    cloud_config=None,
 ) -> Callable:
     """Create microphysics physics_fn for SpectralPEModel.
 
@@ -1157,6 +1171,7 @@ def _make_spectral_pe_microphysics(
     scheme_name, micro_fn, scheme_config = _get_microphysics_fn(microphysics_config)
     is_ml = scheme_name == "ml_emulator"
     _ml_model_cache = [None]
+    _incloud = _check_incloud_cloud_config(scheme_config, cloud_config)
 
     # Tracer key → MicrophysicsOutput attribute name.  Mirrors the
     # ``HydrometeorState`` field layout in ``microphysics/output.py``
@@ -1175,7 +1190,8 @@ def _make_spectral_pe_microphysics(
         "N_i": "dN_i_dt",
     }
 
-    def physics_fn(state, grid, sigma_coord, grid_fields=None):
+    def physics_fn(state, grid, sigma_coord, grid_fields=None,
+                   phys_state=None):
         # Transform spectral state to grid space
         fields = grid_fields
         if fields is None:
@@ -1259,9 +1275,19 @@ def _make_spectral_pe_microphysics(
                 scheme_config, _ml_model_cache[0],
             )
         else:
+            _kw = {}
+            if _incloud:
+                # Gaussian latitudes [rad] (n_lat,), broadcast to the
+                # (n_lat, n_lon) column order of T_col.
+                _lat_col = jnp.broadcast_to(
+                    jnp.asarray(grid.lat)[:, None], (n_lat, n_lon)
+                ).reshape(ncol)
+                _kw["cloud_fraction"] = _incloud_liquid_cloud_fraction(
+                    phys_state, q_v_col, T_col, p_full_col, p_half_col,
+                    hydrometeors.q_i, _lat_col, cloud_config)
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
-                p_full_col, p_half_col, rho, dz, dt, scheme_config,
+                p_full_col, p_half_col, rho, dz, dt, scheme_config, **_kw,
             )
 
         dT_dt = micro_out.dT_dt.reshape(n_lat, n_lon, nlev)
@@ -1317,4 +1343,6 @@ def _make_spectral_pe_microphysics(
         _ml_model_cache[0] = None
 
     physics_fn.reset_state = reset_state
+    if _incloud:
+        physics_fn._wants_phys_state_ro = True
     return physics_fn

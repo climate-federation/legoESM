@@ -655,6 +655,21 @@ def physics_cache_seed(physics_fn, state, grid, sigma_coord, phys_state, forcing
     return jax.tree_util.tree_map(lambda x: jnp.zeros(x.shape, x.dtype), shapes)
 
 
+def _check_warm_rain_incloud(config: PhysicsConfig, n_macmic: int) -> None:
+    # MG2 in-cloud warm rain reads the cloud fraction CLUBB wrote in the SAME
+    # macmic sub-step (CAM order); at N=1 the modules run in parallel and it
+    # would read the previous step's value.
+    if (getattr(getattr(config.microphysics, config.microphysics.scheme, None),
+                "warm_rain_incloud", False)
+            and (config.turbulence.scheme != "clubb" or n_macmic < 2)):
+        raise ValueError(
+            "MorrisonConfig.warm_rain_incloud=True needs CLUBB turbulence and "
+            "cld_macmic_num_steps>=2 (the microphysics reads the cloud "
+            "fraction CLUBB diagnosed in the same sub-step); got "
+            f"turbulence.scheme={config.turbulence.scheme!r}, "
+            f"cld_macmic_num_steps={n_macmic}.")
+
+
 def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                model_type: str = "hydrostatic",
                                column_mesh=None,
@@ -758,18 +773,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             f"turbulence.scheme={config.turbulence.scheme!r}."
         )
     _use_clubb_cf = config.radiation.use_clubb_cloud_fraction
-    # MG2 in-cloud warm rain reads the cloud fraction CLUBB wrote in the SAME
-    # macmic sub-step (CAM order); at N=1 the modules run in parallel and it
-    # would read the previous step's value.
-    if (getattr(getattr(config.microphysics, config.microphysics.scheme, None),
-                "warm_rain_incloud", False)
-            and (not _turb_produces_cf or _n_macmic < 2)):
-        raise ValueError(
-            "MorrisonConfig.warm_rain_incloud=True needs CLUBB turbulence and "
-            "cld_macmic_num_steps>=2 (the microphysics reads the cloud "
-            "fraction CLUBB diagnosed in the same sub-step); got "
-            f"turbulence.scheme={config.turbulence.scheme!r}, "
-            f"cld_macmic_num_steps={_n_macmic}.")
+    _check_warm_rain_incloud(config, _n_macmic)
     if config.radiation.scheme != "none":
         tagged_fns.append((
             make_radiation_physics(
@@ -1505,6 +1509,7 @@ def _make_spectral_pe_combined(
             f"turbulence={config.turbulence.scheme!r}, "
             f"microphysics={config.microphysics.scheme!r}; the sub-cycle would "
             "re-run a single module against itself.")
+    _check_warm_rain_incloud(config, _n_macmic)
     tagged_fns = []
     # Same producer gate as the hydrostatic combined: routing the CLUBB
     # cloud fraction to radiation needs a closure that writes it, else the
@@ -1554,7 +1559,10 @@ def _make_spectral_pe_combined(
         tagged_fns.append((make_spectral_surface_bulk_physics(
             *surface_bulk_coeffs), False, None))
     if config.microphysics.scheme != "none":
-        tagged_fns.append((make_microphysics_physics(config.microphysics, "spectral_pe", _dt_sub), False, None))
+        # The run's built cloud config: the aist rh ramps are run parameters.
+        tagged_fns.append((make_microphysics_physics(
+            config.microphysics, "spectral_pe", _dt_sub,
+            cloud_config=config.radiation.cloud_config), False, None))
     if config.gravity_wave_drag.scheme != "none":
         tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, "spectral_pe", dt), True, "gwd_spectrum"))
 
