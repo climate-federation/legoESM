@@ -1745,21 +1745,21 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:410': 'nn_etau     =   1',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:415': 'nn_mxlice = 2',
     # round 315 differentiability probe (legoESM statements, measurement only)
-    'ocean_model_latlon_cgrid.py:1936': 'rhs = sr(-sr(horizontal_scaled / e3t_div))',
+    'ocean_model_latlon_cgrid.py:1982': 'rhs = sr(-sr(horizontal_scaled / e3t_div))',
     # round 317: the drag casts left in the TKE bottom boundary condition
-    'ocean_model_latlon_cgrid.py:11589-11593': [
+    'ocean_model_latlon_cgrid.py:11751-11755': [
         'cd0=float(_cfg_b.bottom_drag.bottom_drag_cd0),',
         'uc0=float(_cfg_b.bottom_drag.bottom_drag_uc0),', 5],
-    'ocean_pe_latlon_cgrid.py:4294': [('cd0=config.bottom_drag.bottom_drag_cd0,', 1)],
-    'ocean_model_latlon_cgrid.py:1949': 'return sr(rhs - sr(vertical_scaled / e3t_div))',
-    'ocean_model_latlon_cgrid.py:2573-2575': [
+    'ocean_pe_latlon_cgrid.py:4302': [('cd0=config.bottom_drag.bottom_drag_cd0,', 1)],
+    'ocean_model_latlon_cgrid.py:1995': 'return sr(rhs - sr(vertical_scaled / e3t_div))',
+    'ocean_model_latlon_cgrid.py:2677-2679': [
         'out = r(r(r(q_before[..., None] * base)', '/ q_after)', 3],
-    'ocean_model_latlon_cgrid.py:2581': [('return jnp.where(active_3d > 0.5, out, base)', 1)],
-    'ocean_model_latlon_cgrid.py:13455': '_rnd(_rnd(_rnd(dt_mom * _tau_j_v) / _top_div(_e3v1))',
-    'ocean_pe_latlon_cgrid.py:4294-4298': [
+    'ocean_model_latlon_cgrid.py:2685': [('return jnp.where(active_3d > 0.5, out, base)', 1)],
+    'ocean_model_latlon_cgrid.py:13617': '_rnd(_rnd(_rnd(dt_mom * _tau_j_v) / _top_div(_e3v1))',
+    'ocean_pe_latlon_cgrid.py:4302-4306': [
         ('cd0=config.bottom_drag.bottom_drag_cd0,', 1),
         ('uc0=config.bottom_drag.bottom_drag_uc0,', 1), 5],
-    'ocean_pe_latlon_cgrid.py:4375-4379': [
+    'ocean_pe_latlon_cgrid.py:4383-4387': [
         ('cd0=config.bottom_drag.bottom_drag_cd0,', 2),
         ('uc0=config.bottom_drag.bottom_drag_uc0,', 2), 5],
     'implicit_solver.py:363-382': [
@@ -2209,7 +2209,7 @@ CITATION_MAP = {
         "CALL lbc_lnk( 'dommsk', umask, 'U', 1.0_wp, vmask, 'V', 1.0_wp, fmask, 'F', 1.0_wp )",
         27,
     ],
-    'ocean_model_latlon_cgrid.py:6182-6186': [
+    'ocean_model_latlon_cgrid.py:6300-6304': [
         ('if isinstance(_zc, OceanPartialCellCoordinate):', 1),
         '_ws_v_live_mask = _ws_v_live_mask.astype(state.eta.data.dtype)',
         5,
@@ -2289,15 +2289,15 @@ CITATION_MAP = {
         ('!* Swap', 1),
         ('sshn_e (:,:) = ssha_e(:,:)', 1),
         13],
-    'barotropic_latlon_cgrid.py:2074-2120': [
+    'barotropic_latlon_cgrid.py:2069-2115': [
         ('if _continuity_evaluation == "nemo_literal":', 1),
         ('eta_new = _clamp_redistribute(eta_unfloored, eta_floor, mask, area)', 1),
         47],
-    'barotropic_latlon_cgrid.py:2374-2413': [
+    'barotropic_latlon_cgrid.py:2369-2408': [
         ('association_post = None', 1),
         ('V_bar_new = association_post[1]', 2),
         40],
-    'barotropic_latlon_cgrid.py:2442-2447': [
+    'barotropic_latlon_cgrid.py:2437-2442': [
         ('if ab3_za is not None:', 5),
         ('U_bar_c, Ub_c, V_bar_c, Vb_c, eta_c, etab_c)', 1),
         6],
@@ -2480,13 +2480,13 @@ CITATION_MAP = {
     'vertical.py:281': ('def nemo_fe3mask_from_tmask(tmask, *, grid=None):', 1),
     'vertical.py:883': ('class NemoEENBarotropicOperands(NamedTuple):', 1),
     'vertical.py:673': ('def nemo_qco_resolved_mesh_operands(', 1),
-    'ocean_model_latlon_cgrid.py:4507': ('_nemo_filter_alpha = config.barotropic.nemo_barotropic_filter_alpha', 1),
-    'nemo_testcase_recipe.py:3808': ('def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:', 1),
-    'nemo_testcase_recipe.py:3709': ('def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:', 1),
-    'nemo_testcase_recipe.py:3757': ('def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:', 1),
-    'nemo_testcase_recipe.py:4021': ('def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:', 1),
+    'ocean_model_latlon_cgrid.py:4625': ('_nemo_filter_alpha = config.barotropic.nemo_barotropic_filter_alpha', 1),
+    'nemo_testcase_recipe.py:3829': ('def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:', 1),
+    'nemo_testcase_recipe.py:3730': ('def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:', 1),
+    'nemo_testcase_recipe.py:3778': ('def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:', 1),
+    'nemo_testcase_recipe.py:4042': ('def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:', 1),
     'vertical.py:1088': ('nemo_e3w_source="mesh_reference", allow_single_level: bool = False,', 1),
-    'nemo_testcase_recipe.py:3871': ('allow_single_level=True,               # jpk = 2: one wet level', 1),
+    'nemo_testcase_recipe.py:3892': ('allow_single_level=True,               # jpk = 2: one wet level', 1),
     # --- GRIDLADDER round 1 (G1 survey) END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
@@ -2552,7 +2552,7 @@ CITATION_MAP = {
         ('puu(ji,jj,jk,Krhs) = zhpi(ji,jj) + zuap', 1),
         ('pvv(ji,jj,jk,Krhs) = zhpj(ji,jj) + zvap', 1),
         2],
-    'barotropic_latlon_cgrid.py:2030-2049': [
+    'barotropic_latlon_cgrid.py:2025-2044': [
         ('eta_mid = eta_c', 1),
         ('za_i, eta_c, etab_c, etabb_c)', 1),
         20],
@@ -2612,7 +2612,7 @@ CITATION_MAP = {
         ('IF( lwp .AND. kt == nit000 .AND. jn <= 2 ) THEN', 3),
         ("& l4_canon_2d(ffv_nw,'V'), l4_canon_2d(ffv_ne,'V')", 2),
         25],
-    'barotropic_latlon_cgrid.py:794-814': [
+    'barotropic_latlon_cgrid.py:789-809': [
         'def nemo_literal_metric_transports(', 'return zh_u, zh_v', 21],
     # --- ORCA2 round 227: OMT-4 stage-3 implicit tracer solve ---
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/trazdf.f90:171-216': [
@@ -2888,12 +2888,12 @@ CITATION_MAP = {
         'CALL nonosc( Kaa, pt(:,:,:,jn,Kbb),'],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:816-845': [
         ('! 2nd option', 1), ('END DO   ;   END DO', 52), 30],
-    'advection.py:839-873': [
+    'advection.py:840-874': [
         'NEMO_FCT_STENCIL_TRACE_FIELDS = (',
         'return_limiter_activity: bool = False,', 35],
-    'advection.py:1225-1242': [
+    'advection.py:1392-1411': [
         'tr_west = jnp.roll(bnd_up, 1, axis=1)', ('))', 30), 18],
-    'advection.py:1310-1311': [
+    'advection.py:1576-1577': [
         ('if return_nemo_stencil_trace:', 2),
         'return div_h_fct, vert_div_fct, stencil_trace', 2],
     # --- ORCA2 round 138: passive FCT beta-operand walk ------------
@@ -2905,22 +2905,22 @@ CITATION_MAP = {
         '&        zbup(ji  ,jj  ,ikm1), zbup(ji  ,jj  ,ikp1)  )', 4],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90:858-878': [
         'zdo = MIN(  zbdo(ji  ,jj  ,ik  ),', ('ENDIF', 33), 21],
-    'advection.py:975-990': [
+    'advection.py:995-1010': [
         ('raise ValueError(', 2),
         '"NEMO trace returns require the NEMO RK3 two-step predictor")', 16],
-    'advection.py:1256-1271': [
+    'advection.py:1487-1502': [
         'alpha_u_full, alpha_v, alpha_vert_face = _zalesak_signsplit_face_alphas(',
         'return_nemo_beta_trace=True,', 16],
-    'advection.py:1273-1278': [
+    'advection.py:1531-1536': [
         'limited_u, limited_v = alpha_u_full * ad_flux_u, alpha_v * ad_flux_v',
         'vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]', 6],
-    'advection.py:1795-1818': [
+    'advection.py:2061-2084': [
         ('if return_nemo_beta_trace:', 5),
         'zbetup_literal, zbetdo_literal, R_in, R_out,', 24],
-    'advection.py:1873-1874': [
+    'advection.py:2139-2140': [
         ('if return_nemo_beta_trace:', 6),
         'return alpha_u_full, alpha_v, alpha_vert_face, beta_trace', 2],
-    'ocean_model_latlon_cgrid.py:14501-14516': [
+    'ocean_model_latlon_cgrid.py:14663-14678': [
         'if self._nemo_ws_test_hooks.expose_stage3_fct_inputs:',
         'return state_after._replace(mass_flux_w=diagnostic)', 16],
     # --- ORCA2 round 136: passive literal tracer-ZDF source walk --------
@@ -2941,16 +2941,16 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:734-749': [
         'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )',
         'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )', 16],
-    'ocean_model_latlon_cgrid.py:1496,1713': [
+    'ocean_model_latlon_cgrid.py:1542,1759': [
         'stage1_momentum_rhs_transform: object = None',
         ('tracer_zdf_trace: bool = False', 1), 2],
-    'ocean_model_latlon_cgrid.py:8961-8965': [
+    'ocean_model_latlon_cgrid.py:9101-9105': [
         'if (self._nemo_ws_test_hooks.stage1_momentum_rhs_transform',
         '_u1_rhs, _v1_rhs))', 5],
-    'ocean_model_latlon_cgrid.py:11221-11228': [
+    'ocean_model_latlon_cgrid.py:11383-11390': [
         'if _return_tracer_zdf_trace:',
         ('solve=_nemo_ws_vertical_solve_trace,', 2), 8],
-    'ocean_model_latlon_cgrid.py:14488-14500': [
+    'ocean_model_latlon_cgrid.py:14650-14662': [
         ('if self._nemo_ws_test_hooks.tracer_zdf_trace:', 1),
         ('return result._replace(state_after=state_after)', 4), 13],
     # --- ORCA2 round 129: split-explicit boundary association walk -------
@@ -2962,7 +2962,7 @@ CITATION_MAP = {
         ("CASE ( 'V' )                               ! V-point", 5),
         ('END DO   ;   END DO', 6), 38],
     # --- ORCA2 round 147: exact seven-field T-pivot association ----------
-    'barotropic_latlon_cgrid.py:693-747': [
+    'barotropic_latlon_cgrid.py:694-742': [
         ('def _nemo_external_mode_boundary_association(', 1),
         ('inverse_u_post, inverse_v_post, eta,', 1), 55],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:564-591': [
@@ -2981,10 +2981,10 @@ CITATION_MAP = {
         8],
     # ORCA2 round 155: promote the four separately proved operands as one
     # source program on the production NEMO-literal path.
-    'barotropic_latlon_cgrid.py:569-598': [
+    'barotropic_latlon_cgrid.py:570-599': [
         ('def _nemo_literal_reference_face_depths(z_coord, dtype):', 1),
         ('return hu_compact, hv_compact', 1), 30],
-    'barotropic_latlon_cgrid.py:859-891': [
+    'barotropic_latlon_cgrid.py:854-886': [
         ('def nemo_literal_continuity_divergence(', 1),
         ('return (du + dv) * (1.0 / grid.area)', 1), 33],
     # --- ORCA2 round 148: V-face north-neighbour association arm --------
@@ -2996,11 +2996,11 @@ CITATION_MAP = {
         ("CASE ( 'T' , 'W' )                         ! T-, W-point", 5),
         ('ptab(jf)%pt4d(ii1,ij1,jk,jl) = psgn(jf) * ptab(jf)%pt4d(ii2,ij2,jk,jl)', 45),
         32],
-    'barotropic_latlon_cgrid.py:601-685': [
+    'barotropic_latlon_cgrid.py:602-686': [
         'def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,',
         ('return H_u, H_v, r1_u_entry, r1_v_entry', 2), 85],
     # --- ORCA2 round 149: carried V reciprocal retraction ---------------
-    'barotropic_latlon_cgrid.py:2601-2605': [
+    'barotropic_latlon_cgrid.py:2596-2600': [
         '# Preserve associated halo operands in the private trace.',
         '"inverse_depth_v": r1_H_v,', 5],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:680-699': [
@@ -3011,13 +3011,13 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90:639-683': [
         ("CASE ( 'U' )", 5),
         ('END DO   ;   END DO', 5), 45],
-    'barotropic_latlon_cgrid.py:1088-1109': [
+    'barotropic_latlon_cgrid.py:1083-1104': [
         ('def _nemo_een_north_u(field, grid):', 1),
         ('return north', 2), 22],
-    'barotropic_latlon_cgrid.py:1214-1229': [
+    'barotropic_latlon_cgrid.py:1209-1224': [
         ('e3u = b(e3u0 * b(one + r3u[..., None] * umask))', 1),
         ('jnp.max(jnp.where(vmask > 0.0, levels, 0), axis=-1), 1)', 1), 16],
-    'barotropic_latlon_cgrid.py:1332-1368': [
+    'barotropic_latlon_cgrid.py:1327-1363': [
         ('un = {', 1),
         ('e3v, mbkv, neighbor, neighbor_mask, vq[corner],', 1), 37],
     # --- ORCA2 round 127: northern V recurrence prefix -------------------
@@ -3028,7 +3028,7 @@ CITATION_MAP = {
         ('r105_acc_v_nw(ji,jj) = ffv_nw(ji,jj)', 1),
         ('ffv_ne(ji,jj) = r1_12 * r1_e2v(ji,jj)', 1), 8],
     # --- ORCA2 round 126: complete northern frozen-mask association ------
-    'barotropic_latlon_cgrid.py:1179-1185': [
+    'barotropic_latlon_cgrid.py:1174-1180': [
         ('# dommsk.f90:232-258 applies the ordinary F-grid lateral boundary before', 1),
         ('fmask = fmask.at[-1].set(_nemo_een_north_f(fmask, grid)[-1])', 1), 7],
     # --- ORCA2 round 125: northeast northern frozen-mask association ------
@@ -3043,10 +3043,10 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R120EENVFRAC/BLD/ppsrc/nemo/lbcnfd.f90:722-747': [
         ("CASE ( 'F' )", 5),
         ('END DO; END DO', 6), 26],
-    'barotropic_latlon_cgrid.py:1059-1080': [
+    'barotropic_latlon_cgrid.py:1054-1075': [
         ('def _nemo_een_north_f(field, grid):', 1),
         ('return north', 1), 22],
-    'barotropic_latlon_cgrid.py:1217-1220': [
+    'barotropic_latlon_cgrid.py:1212-1215': [
         ('q = b(ff[..., None] / e3f)', 1),
         ('q_north = b(ff_north[..., None] / e3f_north)', 1), 4],
     # --- ORCA2 round 121: northern V fraction walk -------------------------
@@ -3098,7 +3098,7 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90:1999-2004': [
         ('IF(     ifill(jn,jf) == jpfillcst ) THEN', 4),
         ('ptab(jf)%pt4d(ishti+ji,ishtj+jj,jk,jl) = zland', 4), 6],
-    'barotropic_latlon_cgrid.py:1054-1056': [
+    'barotropic_latlon_cgrid.py:1049-1051': [
         ('def _nemo_south_zero_fill(field):', 1),
         ('return jnp.concatenate([jnp.zeros_like(field[:1]), field[:-1]], axis=0)', 1), 3],
     # --- ORCA2 round 113: southern frozen vorticity thickness association ---
@@ -3117,10 +3117,10 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/lbclnk.f90:2021-2046': [
         ('ELSE                                                        ! southern/northern side', 4),
         ('ptab(jf)%pt4d(ii1,ij1,jk,jl) = ptab(jf)%pt4d(ii2,ij2,jk,jl)', 4), 26],
-    'barotropic_latlon_cgrid.py:1049-1051': [
+    'barotropic_latlon_cgrid.py:1044-1046': [
         ('def _nemo_een_south_e3f0(e3f0, mesh_e3f0):', 1),
         ('return jnp.concatenate([mesh_e3f0[:1], e3f0[:-1]], axis=0)', 1), 3],
-    'barotropic_latlon_cgrid.py:1239-1253': [
+    'barotropic_latlon_cgrid.py:1234-1248': [
         ('# dyn_vor_init applies the default zero fill to e3f_0vor', 1),
         ('q_south = b(ff_south[..., None] / e3f_south)', 1), 15],
     # --- ORCA2 round 112: executed ff_f read/fill and literal EEN consumer ---
@@ -3136,10 +3136,10 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1244-1248': [
         ('DO jj = ntsj-( 0), ntej+(  0) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
         ('& ff_f(ji  ,jj-1) /', 1), 5],
-    'barotropic_latlon_cgrid.py:1044-1046': [
+    'barotropic_latlon_cgrid.py:1039-1041': [
         ('def _nemo_south_copy_fill(field):', 1),
         ('return jnp.concatenate([field[:1], field[:-1]], axis=0)', 1), 3],
-    'barotropic_latlon_cgrid.py:1235-1238': [
+    'barotropic_latlon_cgrid.py:1230-1233': [
         ('# ORCA2 reads ff_f through iom_get(..., kfill=jpfillcopy)', 1),
         ('ff_south = _nemo_south_copy_fill(ff)', 1), 4],
     # --- ORCA2 round 111: EEN frozen mask and next southern-halo owner ---
@@ -3349,7 +3349,7 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:203-215': [
         '!*  vertical averaging  *!',
         ('END SELECT', 2), 13],
-    'ocean_pe_latlon_cgrid.py:6223-6242': [
+    'ocean_pe_latlon_cgrid.py:6231-6250': [
         ('du_dt = du_dt * u_mask_3d', 1),
         'dv_dt = jnp.where(_restore_hpg, hpg_tendency_v, dv_dt * v_mask_3d)',
         20],
@@ -3699,11 +3699,11 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:1522-1557': [
         'SUBROUTINE ts_bck_interp( jn, ll_init,',
         'END SUBROUTINE ts_bck_interp', 36],
-    'barotropic_latlon_cgrid.py:112-124': [
+    'barotropic_latlon_cgrid.py:113-125': [
         '# --- NEMO dynspg_ts nn_bt_flt=3 (Demange 2019 dissipative FB) coefficients ---',
         'def nemo_ab3am4_coeff_arrays(n_loop: int, alpha: float,',
         13],
-    'barotropic_latlon_cgrid.py:3474-3475': [
+    'barotropic_latlon_cgrid.py:3469-3470': [
         ('_ab3_za, _ab3_zb = nemo_ab3am4_coeff_arrays(', 2),
         'n_loop, alpha=_nemo_filter_alpha, ramp=_ab3_hist is None)', 2],
     'orca2_rounds/round222/acquisition/orca2_omt4_frames_10step_a_np2/namelist_cfg:383-387': [
@@ -3804,7 +3804,7 @@ CITATION_MAP = {
         ("CASE ( 'V' )", 7),
         ('ptab(1,ipj+jh) = psgn * ptab(3,ipj-3-jh)', 2),
         8],
-    'ocean_model_latlon_cgrid.py:1853-1863': [
+    'ocean_model_latlon_cgrid.py:1899-1909': [
         ('nemo_qco_card_mesh_operands(', 1),
         ('include_reciprocals=include_reciprocals', 1),
         11],
@@ -3877,12 +3877,12 @@ CITATION_MAP = {
     'OVERFLOW_OMIP_L1/EXP00/namelist_cfg:89': 'ln_dynvor_ens = .true.',
     'overflow_kt1_10/namelist_cfg:86': 'ln_dynadv_up3 = .true.',
     'overflow_kt1_10/namelist_cfg:92': 'ln_dynvor_ens = .true.',
-    'nemo_testcase_recipe.py:3182':
+    'nemo_testcase_recipe.py:3203':
         'if (cfg.momentum_advection != "vector_invariant"',
-    'ocean_pe_latlon_cgrid.py:5589': ('if _mom_adv == "flux_form":', 2),
-    'ocean_pe_latlon_cgrid.py:5607': (
+    'ocean_pe_latlon_cgrid.py:5597': ('if _mom_adv == "flux_form":', 2),
+    'ocean_pe_latlon_cgrid.py:5615': (
         '_bc_horizontal_momentum_advection_flux_form(', 2),
-    'nemo_testcase_recipe.py:3185':
+    'nemo_testcase_recipe.py:3206':
         'requires ln_dynadv_vec=.true. with nn_dynkeg=0',
     # --- ORCA2 round 57: acquired OVERFLOW UP3 source-order walk ---
     'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:157-166': [
@@ -4650,11 +4650,11 @@ CITATION_MAP = {
     # it and legoESM's three answering lines.
     'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/domqco.f90:257':
         ('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2),
-    'ocean_pe_latlon_cgrid.py:1786':
+    'ocean_pe_latlon_cgrid.py:1787':
         ('r3_now = jax.lax.optimization_barrier(eta_now * r1_h0)', 1),
-    'ocean_pe_latlon_cgrid.py:1793':
+    'ocean_pe_latlon_cgrid.py:1794':
         ('live_t = e3t0 * (1.0 + r3_now[..., None] * tmask) * tmask', 1),
-    'ocean_pe_latlon_cgrid.py:1817':
+    'ocean_pe_latlon_cgrid.py:1818':
         ('flux_u, west, flux_v, south, r1_area_t, live_t[..., jk],', 1),
     # Round 162's review disputed whether the multiply-back is on the
     # vertical-velocity path.  It is: the statement writes the routine's own
@@ -4666,7 +4666,7 @@ CITATION_MAP = {
         ('CALL div_hor( kt, Kbb, Kmm, pu, pv, ze3div )', 1),
     'ocean_pe_latlon_cgrid.py:1617':
         ('return jax.lax.optimization_barrier(live_e3t * hdiv) * tmask', 1),
-    'ocean_pe_latlon_cgrid.py:1888-1889': [
+    'ocean_pe_latlon_cgrid.py:1889-1890': [
         ('r3_after = jax.lax.optimization_barrier(eta_after * r1_h0)', 1),
         ('r3_before = jax.lax.optimization_barrier(eta_before * r1_h0)', 1), 2],
     # --- round 161: the stage face ratio, its producer and its composition ---
@@ -4690,13 +4690,13 @@ CITATION_MAP = {
     'vertical.py:251':
         ('e3u = b(e3u_0 * b(one + r3u[..., None] * umask3))', 1),
     # --- round 160: legoESM's own two-solve statements ---
-    'ocean_model_latlon_cgrid.py:2025-2062': [
+    'ocean_model_latlon_cgrid.py:2071-2108': [
         ('def nemo_stage_momentum_wzv_executes(config, hooks=None) -> bool:', 1),
         ('return bool(config_split)', 1), 38],
-    'ocean_model_latlon_cgrid.py:2190-2201': [
+    'ocean_model_latlon_cgrid.py:2254-2265': [
         ('w_momentum, _, _ = nemo_qco_wzv_operands(', 1),
         'else 0))', 12],
-    'ocean_model_latlon_cgrid.py:8690-8696': [
+    'ocean_model_latlon_cgrid.py:8830-8836': [
         ('def _momentum_stage_w(geom):', 1),
         ('return geom[2] if geom[11] is None else geom[11]', 1), 7],
     # --- round 160: the stage clock, the stage after-level and the two
@@ -4909,7 +4909,7 @@ CITATION_MAP = {
         'def nemo_qco_live_vorticity_e3f_cgrid(',
         'return jnp.concatenate([with_south[:, -1:], with_south], axis=1)',
         99],
-    'ocean_model_latlon_cgrid.py:6173-6175': [
+    'ocean_model_latlon_cgrid.py:6291-6293': [
         '_ws_uses_nemo_ldf_e3 = (',
         'and _cfg_b.lateral_viscosity_e3_weighting == "nemo_e3")', 3],
     'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/stp2d.f90:158-164': [
@@ -4918,10 +4918,10 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R148LDF/BLD/ppsrc/nemo/stprk3_stg.f90:704-739': [
         ('!              !---------------!', 2),
         'IF( kstg == 3 )   CALL dyn_zdf(', 36],
-    'ocean_model_latlon_cgrid.py:6264-6316': [
+    'ocean_model_latlon_cgrid.py:6382-6434': [
         'if not self._nemo_ws_test_hooks.legacy_hadv_min_face_thickness:',
         'ldf_thickness_operands=_ws_ldf_thickness_kbb,', 53],
-    'ocean_model_latlon_cgrid.py:7174-7239': [
+    'ocean_model_latlon_cgrid.py:7293-7358': [
         '_stage_ldf_thickness = None', '_stage_ldf_thickness),', 66],
     # --- round 135: accepted-state swap before the daily tracer record ---
     'GYRE_OMIP_L2_P3_SM_R132DAILY/BLD/ppsrc/nemo/stprk3.f90:220-229': [
@@ -5822,20 +5822,20 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90:547-565': [
         ('DO ji = ntsi-( 0), ntei+( 0 )', 2),
         'pt(ji,jj,jk,jn,Kaa) = zrhs - zwi(ji,jk)', 19],
-    'ocean_model_latlon_cgrid.py:10843-10966': [
+    'ocean_model_latlon_cgrid.py:10997-11120': [
         'T=state_new.T.replace(data=_adv_content_T)',
         ('z_coord=z_coord, config=config, iwm_fields=iwm_fields)', 2), 124],
-    'ocean_model_latlon_cgrid.py:13328-13334': [
+    'ocean_model_latlon_cgrid.py:13490-13496': [
         'K_v_cell = K_v_cell.astype(state.T.data.dtype)',
         'K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)', 7],
-    'ocean_model_latlon_cgrid.py:13952-13984': [
+    'ocean_model_latlon_cgrid.py:14114-14146': [
         ('if do_tracers:', 2),
         'rounded_thickness=_zdf_tracer_rounded))', 33],
     # --- parallel LDF step-3 re-proof: current private arm and execution ---
-    'ocean_model_latlon_cgrid.py:1682-1685': [
+    'ocean_model_latlon_cgrid.py:1728-1731': [
         '# Route the already-computed GM/Redi rate into the same stage-3 source',
         'route_gm_redi_stage3_source: bool = False', 4],
-    'ocean_model_latlon_cgrid.py:10256-10264': [
+    'ocean_model_latlon_cgrid.py:10408-10416': [
         ('elif _tti == "rk3_ws":', 2),
         '_stage_source_rates[2][1] + dS_gm * active_3d,', 9],
     # Decision 90 added nine stated lines INSIDE this block (the slow-forcing
@@ -5865,22 +5865,22 @@ CITATION_MAP = {
         ('END DO   ;   END DO', 8), 19],
     'round64/oracle_krhs_split/ocean.output:649-656': [
         ('no explicit diffusion', 1), 'iso-neutral triad operator', 8],
-    'ocean_model_latlon_cgrid.py:2588-2671': [
+    'ocean_model_latlon_cgrid.py:2692-2789': [
         'h_one_third = h_k_old',
         '+ dt * h_one_half * stage_source_rates[2][1])', 84],
     # Extent 174 -> 199 at ORCA2 round 304 (G5 round 4 import): the stage-3
     # salt block (trasbc.f90:308) was inserted between the same two pinned
     # endpoint statements.
-    'ocean_model_latlon_cgrid.py:8436-8634': [
+    'ocean_model_latlon_cgrid.py:8555-8774': [
         '_stage3_T_rate = (',
         '/ jnp.maximum(_h_s3_kmm, 1.0e-10),', 199],
     # Extent 433 -> 434 at the 2026-09-25 merge: main added one line inside
     # this span (``omega=_cfg_b.omega,`` on the isoneutral K33 call), so the
     # two pinned endpoint statements are one line further apart than before.
-    'ocean_model_latlon_cgrid.py:9686-10138': [
+    'ocean_model_latlon_cgrid.py:9838-10290': [
         'T_mid = state_new.T.data',
         'S_mid = S_mid + dt * dS_gm * active_3d', 453],
-    'ocean_model_latlon_cgrid.py:10332-10376': [
+    'ocean_model_latlon_cgrid.py:10484-10529': [
         ('_nemo_ws_rk3_tracer_pair_step(', 3),
         'return_final_content=True,', 45],
     # --- round 65: admitted R64 Krhs/FCT/TKE walk ---
@@ -6096,10 +6096,10 @@ CITATION_MAP = {
     'nemo_testcase_recipe.py:445-447': [
         'tke_shear_production="nemo_face_native_now2"',
         ('tke_shear_metric_source="nemo_qco_live_face"', 2), 3],
-    'ocean_model_latlon_cgrid.py:11988-12005': [
+    'ocean_model_latlon_cgrid.py:12150-12167': [
         'if shear_disc not in ("nemo_face_native", "nemo_face_native_now2"):',
         '_u_before, _v_before = _u_now, _v_now', 18],
-    'ocean_model_latlon_cgrid.py:12060-12159': [
+    'ocean_model_latlon_cgrid.py:12222-12321': [
         'if metric_source == "nemo_qco_live_face":',
         'ref_v * (1.0 + r3vb[..., None]),', 100],
     'packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py:387-460': [
@@ -6131,10 +6131,10 @@ CITATION_MAP = {
     'nemo_testcase_l2_gyre_round54_tke_operands.py:225-239': [
         'header = struct.unpack("=13i", take(13 * 4))',
         'f"Kbb={head[\'Kbb\']}/Kmm={head[\'Kmm\']}",', 15],
-    'ocean_model_latlon_cgrid.py:14219-14224': [
+    'ocean_model_latlon_cgrid.py:14381-14386': [
         'if _tke_coeff_new is not None:',
         'tke_avt=Field(data=_tke_coeff_new.K_H', 6],
-    'ocean_model_latlon_cgrid.py:14425-14440': [
+    'ocean_model_latlon_cgrid.py:14587-14602': [
         '# ``step`` is the production-compiled entry point even when a caller',
         ('_nemo_stage1_zad_eta_after_override))', 1), 16],
     'state.py:616-620': [
@@ -6306,13 +6306,13 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/usrdef_sbc.f90:151-157': [
         "zsumemp = glob_2Dsum( 'usrdef_sbc', emp  (:,:)   )",
         'emp (ji,jj) = emp(ji,jj) - zsumemp * tmask(ji,jj,1)', 7],
-    'ocean_model_latlon_cgrid.py:9240-9305': [
+    'ocean_model_latlon_cgrid.py:9392-9457': [
         'if _cfg_b.fix_eta_drift:',
         'eta=state_new.eta.replace(data=eta_fixed),', 66],
     # --- round 51: live WS-RK3 operand selection and history carry ---
-    'ocean_model_latlon_cgrid.py:7081-7082': [
+    'ocean_model_latlon_cgrid.py:7200-7201': [
         ('u0 = state.u.data', 2), ('v0 = state.v.data', 2), 2],
-    'ocean_model_latlon_cgrid.py:8858-8863': [
+    'ocean_model_latlon_cgrid.py:8998-9003': [
         '_p0_with_zub = _mom_pert_ws(',
         ('stage_face_thickness=_face_thickness_kbb, stage_index=1)', 2), 6],
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3.f90:190-215': [
@@ -6415,21 +6415,21 @@ CITATION_MAP = {
         'IF( .NOT. ln_wave ) THEN', 'RETURN', 16],
     'GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sbcwave.f90:469-477': [
         ('IF( ln_sdw ) THEN', 1), 'wsd   (:,:,:) = 0._wp', 9],
-    'ocean_pe_latlon_cgrid.py:2098-2132': [
+    'ocean_pe_latlon_cgrid.py:2106-2140': [
         'elif config.ke_gradient_scheme == "c2":', 'dp_dy = _dKp_dy[..., 1]', 35],
-    'ocean_pe_latlon_cgrid.py:3351-3382': [
+    'ocean_pe_latlon_cgrid.py:3359-3390': [
         'area_w = jax.lax.optimization_barrier(',
         'diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)', 32],
-    'ocean_pe_latlon_cgrid.py:5418-5457': [
+    'ocean_pe_latlon_cgrid.py:5426-5465': [
         'zad_w, zad_h_u, zad_h_v = w, h_u, h_v',
         ('zad_h_v = jax.lax.optimization_barrier(zad_h_v)', 1), 40],
-    'ocean_model_latlon_cgrid.py:8129-8139': [
+    'ocean_model_latlon_cgrid.py:8248-8258': [
         '_freeze_hpg = self._nemo_ws_test_hooks.freeze_stage_hpg_operands',
         ('getattr(_cfg_b, "adaptive_implicit_vertadv", False)', 1), 11],
-    'ocean_model_latlon_cgrid.py:9591-9608': [
+    'ocean_model_latlon_cgrid.py:9743-9760': [
         ('if (getattr(_cfg_b, "adaptive_implicit_vertadv", False)', 1),
         '/ jnp.maximum(_area_v, 1.0e-30))', 18],
-    'ocean_model_latlon_cgrid.py:9619-9641': [
+    'ocean_model_latlon_cgrid.py:9771-9793': [
         '# 7b. Adaptive-implicit vertical momentum advection',
         'and _pflow is None):', 23],
     # --- ROUND 42: this round's compiled header and slope walk ---
@@ -6521,7 +6521,7 @@ CITATION_MAP = {
         'vn_adv(:,:)     = 0._wp', 27],
     # --- PR #1802 final round: decisions 66 and 67 -----------------------
     # D67's own call site, and the DINO year screen's pre-existing refusal.
-    'barotropic_latlon_cgrid.py:3202-3203': [
+    'barotropic_latlon_cgrid.py:3197-3198': [
         'U_bar_corr, V_bar_corr = _depth_average_to_faces(',
         'u_corr, v_corr, _h_k_corr, min_water_col, mask, u_mask, v_mask, grid,',
         2],
@@ -6651,10 +6651,10 @@ CITATION_MAP = {
         'zbj = MIN( zbw , -100._wp* ABS( zaj ) , '
         '-7.e+3_wp/e3w(ji,jj,jk,Kmm)* ABS( zaj )  )', 2],
     'vertical.py:1924': ('def compute_ocean_jacobian(', 1),
-    'ocean_model_latlon_cgrid.py:7158-7162': [
+    'ocean_model_latlon_cgrid.py:7277-7281': [
         'transport_velocity = (', ('* _ws_stage_v_mask,', 1), 5],
-    'ocean_model_latlon_cgrid.py:9071': ('_g2 = _nemo_ws_stage_transport(', 1),
-    'ocean_model_latlon_cgrid.py:9090': (
+    'ocean_model_latlon_cgrid.py:9220': ('_g2 = _nemo_ws_stage_transport(', 1),
+    'ocean_model_latlon_cgrid.py:9242': (
         '_stage3_hpg_operands = _stage_hpg_operands(', 1),
     'nemo_testcase_l2_gyre_phase3_gate.py:323': (
         'require(magic == "NEMO_L2_RKTRM_1", f"{path}: bad magic")', 1),
@@ -6684,7 +6684,7 @@ CITATION_MAP = {
     'domqco.F90:160': (
         'pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)   !==  ratio at t-point  ==!', 1),
     'fidelity/nemo_recipe.py:993': ('def build_nemo_gyre_recipe(', 1),
-    'ocean_model_latlon_cgrid.py:6412': (
+    'ocean_model_latlon_cgrid.py:6530': (
         'T_new = state.T.data + dt * tend.dT_dt.data', 1),
     'round38_oracle_trazdf_kt2/ocean.output:798': (
         'Vector form: 2nd order centered scheme           ln_dynadv_vec  =  T', 1),
@@ -6708,12 +6708,12 @@ CITATION_MAP = {
     'traldf_iso.F90:135': (
         'CALL traldf_iso_a33( Kmm, ah_wslp2, akz )   ! calculate  a33 element   (ah_wslp2 and akz)', 1),
     'trazdf.F90:173': ('zwt(ji,jk) = avt(ji,jj,jk) + ah_wslp2(ji,jj,jk)', 1),
-    'ocean_model_latlon_cgrid.py:9710': (
+    'ocean_model_latlon_cgrid.py:9862': (
         '_T_gm_in = T_mid if _ldf_state is None else _ldf_state[0]', 1),
     # ROUND 39 moved these two: the before-state slope block added lines
     # above them, so the STATEMENT is unchanged and its line number is not.
     # Re-anchored rather than left to rot, which is what the gate exists for.
-    'ocean_model_latlon_cgrid.py:10093': (
+    'ocean_model_latlon_cgrid.py:10245': (
         'k33_implicit = compute_isoneutral_K33_latlon(', 1),
     # tracer_combine is READ by two step functions and SELECTED by a DINO
     # recipe -- the retraction of round 37's "a lever nothing selects".
@@ -6861,7 +6861,7 @@ CITATION_MAP = {
     # each tank's OWN resolved momentum-advection arm.
     'lock_kt1_10/ocean.output:705': 'ln_dynadv_vec  =  F',
     'overflow_kt1_10/ocean.output:822': 'ln_dynadv_vec  =  F',
-    'ocean_model_latlon_cgrid.py:8315': '_vector_velocity_stage_update = (',
+    'ocean_model_latlon_cgrid.py:8434': '_vector_velocity_stage_update = (',
     'dynzdf.F90:119': 'IF( ln_dynadv_vec .OR. lk_linssh )',
     'dynzdf.F90:150-151': ['puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - uu_b',
                            'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - vv_b', 2],
@@ -7067,11 +7067,11 @@ CITATION_MAP = {
         5],
     # ROUND 32 moved this site: stage 3 no longer corrects before the solve,
     # it defers the closure (stprk3_stg.F90:437-446 runs after :430).
-    'ocean_model_latlon_cgrid.py:9145-9148': [
+    'ocean_model_latlon_cgrid.py:9297-9300': [
         ('u3_corr = u3_raw * _ws_stage_u_mask', 1),
         ('_replace_stage_mean, target_u, target_v)', 1),
         4],
-    'ocean_model_latlon_cgrid.py:10992-11018': [
+    'ocean_model_latlon_cgrid.py:11146-11172': [
         ('if _ws_stage3_correction is not None:', 1),
         ('v=state_new.v.replace(data=_v_after),', 1),
         27],
@@ -7084,48 +7084,48 @@ CITATION_MAP = {
         'uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)',
         'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)',
         2],
-    'ocean_model_latlon_cgrid.py:10823-10825': [
+    'ocean_model_latlon_cgrid.py:10977-10979': [
         '_nemo_ws_pre_implicit_state = (',
         'if self._nemo_ws_test_hooks.expose_pre_implicit_state else None)',
         3],
-    'ocean_model_latlon_cgrid.py:13647': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
-    'ocean_model_latlon_cgrid.py:13839': ('u_solve_in = u_solve_in - (', 1),
+    'ocean_model_latlon_cgrid.py:13809': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
+    'ocean_model_latlon_cgrid.py:14001': ('u_solve_in = u_solve_in - (', 1),
     # ORCA2 round 61: private post-dyn_zdf/pre-barotropic raw-Kaa observer.
-    'ocean_model_latlon_cgrid.py:1511': (
+    'ocean_model_latlon_cgrid.py:1557': (
         'expose_stage3_raw_momentum: bool = False', 1),
-    'ocean_model_latlon_cgrid.py:3191-3283': [
+    'ocean_model_latlon_cgrid.py:3309-3401': [
         '_stage3_rhs_hook = self._nemo_ws_test_hooks.expose_stage3_momentum_rhs',
         'expose_stage3_raw_momentum cannot be combined with another', 93],
-    'ocean_model_latlon_cgrid.py:10985-10992': [
+    'ocean_model_latlon_cgrid.py:11139-11146': [
         'if self._nemo_ws_test_hooks.expose_stage3_raw_momentum:',
         'if _ws_stage3_correction is not None:', 8],
     # Merge re-anchor (round 207): the GYRE side adds a third occurrence of
     # this fragment, so the ORCA2 block's own copy is now the THIRD, not the
     # second.  Pinning the stale occurrence resolved the range BACKWARDS.
-    'ocean_model_latlon_cgrid.py:11156-11160': [
+    'ocean_model_latlon_cgrid.py:11318-11322': [
         'if _nemo_ws_exposed_stage3_raw is not None:',
         ('v=state_new.v.replace(data=_raw_v),', 3), 5],
     # ORCA2 round 63: private write-only dyn_zdf seam observer.
-    'ocean_model_latlon_cgrid.py:1512-1517': [
+    'ocean_model_latlon_cgrid.py:1558-1563': [
         '# WRITE-only observer for the four source-ordered stage-3 dyn_zdf',
         'zdf_momentum_observer: object = None', 6],
-    'ocean_model_latlon_cgrid.py:3285-3289': [
+    'ocean_model_latlon_cgrid.py:3403-3407': [
         '_zdf_momentum_observer = (',
         'raise ValueError("zdf_momentum_observer must be callable or None")', 5],
-    'ocean_model_latlon_cgrid.py:12776-12788': [
+    'ocean_model_latlon_cgrid.py:12938-12950': [
         ('_zc = self.z_coord if z_coord is None else z_coord', 11),
         '# Argument validation at ENTRY, not inside the drag branch below:', 13],
-    'ocean_model_latlon_cgrid.py:13400-13404': [
+    'ocean_model_latlon_cgrid.py:13562-13566': [
         'u_new, v_new = state.u.data, state.v.data',
         'if do_momentum and getattr(_cfg_b, "surface_stress_implicit",', 5],
-    'ocean_model_latlon_cgrid.py:13647-13650': [
+    'ocean_model_latlon_cgrid.py:13809-13812': [
         'u_solve_in = u_solve_in - _u_bt_mean',
         'u_solve_in, v_solve_in)', 4],
     # Round 305: the G7 dyn_zdf bottom statement now sits inside this span.
-    'ocean_model_latlon_cgrid.py:13839-13881': [
+    'ocean_model_latlon_cgrid.py:14001-14043': [
         'u_solve_in = u_solve_in - (',
         '_zdf_baro_drag_u, _zdf_baro_drag_v = u_solve_in, v_solve_in', 43],
-    'ocean_model_latlon_cgrid.py:14082-14089': [
+    'ocean_model_latlon_cgrid.py:14244-14251': [
         'if _zdf_momentum_observer is not None:',
         'ordered=True,', 8],
     'nemo_testcase_l1_overflow_round63_dynzdf_walk_gate.py:171-230': [
@@ -7137,7 +7137,7 @@ CITATION_MAP = {
     'nemo_testcase_l1_overflow_round63_dynzdf_walk_gate.py:280-292': [
         'planted = None',
         'R60.require(after == before + 1, "plant did not add one refusal")', 13],
-    'ocean_pe_latlon_cgrid.py:3648-3651': [
+    'ocean_pe_latlon_cgrid.py:3656-3659': [
         ('if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):', 1),
         ('"with a scalar dlon (got dlon<=0; tripolar unsupported)."', 1),
         4],
@@ -7204,13 +7204,13 @@ CITATION_MAP = {
     'ocean.output:875': 'Barotropic time filter => nn_bt_flt',
     'lock_kt1_10/ocean.output:615': 'no explicit diffusion                ln_dynldf_OFF',
     'overflow_kt1_10/ocean.output:727': 'no explicit diffusion                ln_dynldf_OFF',
-    'ocean_pe_latlon_cgrid.py:5901': 'rho_prime=rho_prime, h_k=h_k,',
-    'ocean_pe_latlon_cgrid.py:5878-5879': [
+    'ocean_pe_latlon_cgrid.py:5909': 'rho_prime=rho_prime, h_k=h_k,',
+    'ocean_pe_latlon_cgrid.py:5886-5887': [
         '_u_ldf_local = u if ldf_state is None else ldf_state[2]',
         '_v_ldf_local = v if ldf_state is None else ldf_state[3]',
         2],
-    'ocean_pe_latlon_cgrid.py:2223-2224': [('z_coord,', 26), ('eta_safe,', 7), 2],
-    'ocean_pe_latlon_cgrid.py:2264-2265': ['requires the raw NEMO',
+    'ocean_pe_latlon_cgrid.py:2231-2232': [('z_coord,', 26), ('eta_safe,', 7), 2],
+    'ocean_pe_latlon_cgrid.py:2272-2273': ['requires the raw NEMO',
          'nemo_e3w_0 mesh field; midpoint reconstruction on',
          2],
     # ROUND 34: decision 19 added seventeen lines above the last of these
@@ -7222,7 +7222,7 @@ CITATION_MAP = {
     # inserted the initial-state helper above the THIRD anchor only, moving it
     # 1411 -> 1493; later card additions moved all three to their current
     # merged locations without changing the anchor text.
-    'nemo_testcase_recipe.py:378,634,3166': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    'nemo_testcase_recipe.py:378,634,3187': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',
@@ -7502,10 +7502,10 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/domain.f90:212-215': [
         'r1_ht_0(:,:) = ssmask',
         'r1_hf_0(:,:) = ssfmask', 4],
-    'ocean_model_latlon_cgrid.py:6169-6274': [
+    'ocean_model_latlon_cgrid.py:6287-6392': [
         '_ws_face_thickness_kbb = None',
         ('_ws_v_live_mask, _grid, z_coord=_zc)[:2])', 1), 106],
-    'ocean_model_latlon_cgrid.py:6656-6719': [
+    'ocean_model_latlon_cgrid.py:6774-6837': [
         ('if _sfx is not None:', 1),
         ('F_slow_v + _wind_increment_v) * _slow_surface_v_mask', 1), 64],
     # --- round 186: admitted pre-day-180 process stream and qsr promotion ---
@@ -7561,11 +7561,11 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R186QSRWALK/BLD/ppsrc/nemo/stprk3_stg.f90:911-950': [
         '!           !==  complete the tracers RHS  ==!   except ZDF (implicit)',
         'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )  ! lateral mixing', 40],
-    'ocean_model_latlon_cgrid.py:8639-8687': [
+    'ocean_model_latlon_cgrid.py:8779-8827': [
         ('if _return_tracer_process_trace:', 1),
         'process_qsr_rate=_nemo_ws_process_qsr_rate,', 49],
     # --- ORCA2 round 101: sufficient owner of the merged GYRE year move ---
-    'ocean_model_latlon_cgrid.py:8260-8270': [
+    'ocean_model_latlon_cgrid.py:8379-8389': [
         'nemo_r3t_rk3_stage1_stretch,',
         '_qt_13 = nemo_r3t_rk3_stage1_stretch(', 11],
     'eos.py:1004-1035': [
