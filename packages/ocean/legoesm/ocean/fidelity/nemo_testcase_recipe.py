@@ -2430,6 +2430,8 @@ def _orca2_isoneutral_gm_redi(
     *, slope_prd_evaluation: str = "nemo_literal", north_fold: bool = False,
     redi_flux_reference_thickness_evaluation: str = "tpoint_alias",
     redi_flux_geometry_stage: str = "step_entry", slope_uv_source_rounding: bool = False,
+    redi_a33_source_ordering: bool = False,
+    redi_flux_stored_face_ratios: bool = False,
 ):
     """ORCA2's shared standard-isoneutral ``&namtra_ldf`` selection.
 
@@ -2473,6 +2475,8 @@ def _orca2_isoneutral_gm_redi(
         kappa_redi_diffusive_velocity=_SMT3_RN_UD,
         redi_vertical_skew_evaluation="nemo_literal",
         redi_a33_evaluation="nemo_literal",
+        redi_a33_source_ordering=redi_a33_source_ordering,
+        redi_flux_stored_face_ratios=redi_flux_stored_face_ratios,
         redi_w_slope_stage_evaluation="nemo_post_slope_pair",
         msc_stabilize=True,
         implicit_K33=True,
@@ -3925,7 +3929,9 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
             gm_redi=_orca2_isoneutral_gm_redi(
                 0.5 * _SMT3_RN_UD * _SMT3_RN_LD, slope_prd_evaluation="nemo_eos80_literal",
                 north_fold=True, redi_flux_reference_thickness_evaluation="nemo_native",
-                redi_flux_geometry_stage="rk3_kmm", slope_uv_source_rounding=True))
+                redi_flux_geometry_stage="rk3_kmm", slope_uv_source_rounding=True,
+                redi_a33_source_ordering=True,
+                redi_flux_stored_face_ratios=True))
     if case in _ORCA2G_SI3_CASES:
         # ORCA2 resolves ln_drgice_imp=T.  SI3 supplies rCdU_ice through the
         # post-SI3 record; all other rungs retain the appended default False.
@@ -4549,6 +4555,8 @@ def _orca2l2_isoneutral_selected(gm) -> bool:
         "kappa_redi_diffusive_velocity": _SMT3_RN_UD,
         "redi_vertical_skew_evaluation": "nemo_literal",
         "redi_a33_evaluation": "nemo_literal",
+        "redi_a33_source_ordering": True,
+        "redi_flux_stored_face_ratios": True,
         "redi_w_slope_stage_evaluation": "nemo_post_slope_pair",
         "msc_stabilize": True,
         "implicit_K33": True,

@@ -10004,6 +10004,13 @@ class LatLonCGridOceanModel:
                 native_bolus_slope_eta=_eta_gm_in,
                 # traldf_iso.f90:230-231 uses Kmm; only L2 selects stage-2 SSH.
                 redi_flux_eta=(_eta_live_one_half if gm_cfg.redi_flux_geometry_stage == "rk3_kmm" else state.eta.data),
+                # stprk3_stg.f90:216-217 stores the stage-2 r3u/r3v as the
+                # average of the two ratios, not the ratio of averaged SSH.
+                # The face builder retains its fold-aware final native row.
+                redi_flux_r3_native=(
+                    (_qu_12[:, 1:, 0] - 1.0,
+                     _qv_12[1:, :, 0] - 1.0)
+                    if gm_cfg.redi_flux_stored_face_ratios else None),
                 # Stage-3 tra_ldf receives the stage-2 output as Kmm
                 # (stprk3_stg.f90:229).  Its T-point divisor therefore
                 # uses the materialized one-half-stage sea surface, while the

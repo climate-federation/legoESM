@@ -482,6 +482,15 @@ class GMRediConfig(NamedTuple):
     # ``nemo_literal`` follows scheme.h90's left-associated zahu*wslpi*wslpi
     # expression. NEMO-identity DINO and GYRE cards opt in.
     redi_a33_evaluation: str = "normalized_square"
+    # Preserve the materialized ahtu/ahtv values and NEMO's two-pair
+    # diffusivity reduction in traldf_iso_a33.  False keeps the shared
+    # historical graph; ORCA2 L2 alone selects the source-ordered path.
+    redi_a33_source_ordering: bool = False
+    # Feed traldf_iso's Kmm face thickness with the stored WS-RK3 r3u/r3v
+    # ratios rather than re-deriving them from the interpolated SSH.  The
+    # stored north-fold row is not a valid ldf face operand, so the consumer
+    # retains the fold-aware reconstruction there.  ORCA2 L2 alone opts in.
+    redi_flux_stored_face_ratios: bool = False
     # Stage of the W-position native slopes consumed by the Redi vertical
     # flux. ``redi_tuple`` preserves the historical all-Kmm tuple.
     # ``nemo_post_slope_pair`` carries the separately computed post-stage

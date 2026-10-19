@@ -29,7 +29,9 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     gm_redi_tracer_tendency_latlon,
     gm_redi_lateral_mixing_latlon,
     compute_isoneutral_K33_latlon,
+    nemo_iso_a33,
     nemo_iso_lap_tracer_tendency_latlon_cgrid,
+    nemo_iso_w_kappa_sums,
 )
 from tests.legoesm_paths import legoesm_source_path
 
@@ -93,6 +95,61 @@ def _stratified_with_meridional_tilt(n_lat=10, n_lon=20, nlev=5, slope=1e-4):
 
     return (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
             jacobian, rho, T, S, cfg)
+
+
+def test_nemo_a33_source_order_is_exact_under_jit_and_left_fold_fails():
+    """traldf_iso.f90:788-791: two rounded pairs, including under JIT."""
+    rng = np.random.default_rng(1903)
+    aht = rng.uniform(1.0e-3, 1.0e4, size=(2, 3, 7)).astype(np.float64)
+    aht_v = rng.uniform(1.0e-3, 1.0e4, size=(2, 3, 7)).astype(np.float64)
+    mask = np.ones_like(aht)
+
+    def numpy_nemo_pairs(field, horizontal_axis):
+        a = field
+        b = np.roll(field, +1, axis=horizontal_axis)
+        return ((np.roll(a, +1, axis=2) + b)
+                + (np.roll(b, +1, axis=2) + a))
+
+    def numpy_left_fold(field, horizontal_axis):
+        a = field
+        b = np.roll(field, +1, axis=horizontal_axis)
+        return (((np.roll(a, +1, axis=2) + b)
+                 + np.roll(b, +1, axis=2)) + a)
+
+    expected = (numpy_nemo_pairs(aht, 1), numpy_nemo_pairs(aht_v, 0))
+    left_fold = (numpy_left_fold(aht, 1), numpy_left_fold(aht_v, 0))
+    assert sum(np.count_nonzero(a != b)
+               for a, b in zip(left_fold, expected, strict=True)) > 0
+
+    @jax.jit
+    def traced(u, v, wet):
+        ku, _, kv, _ = nemo_iso_w_kappa_sums(
+            u, wet, wet, aht_v=v, source_ordered=True)
+        return ku, kv
+
+    got = traced(jnp.asarray(aht), jnp.asarray(aht_v), jnp.asarray(mask))
+    for actual, want in zip(got, expected, strict=True):
+        np.testing.assert_array_equal(np.asarray(actual), want)
+
+    wi = rng.uniform(-1.0e-2, 1.0e-2, size=aht.shape).astype(np.float64)
+    wj = rng.uniform(-1.0e-2, 1.0e-2, size=aht.shape).astype(np.float64)
+    zahu, zahv = expected[0] * np.float64(0.25), expected[1] * np.float64(0.25)
+    term_u = (zahu * wi) * wi
+    term_v = (zahv * wj) * wj
+    expected_ah = term_u + term_v
+
+    @jax.jit
+    def traced_a33(u, v, wet, sx, sy):
+        return nemo_iso_a33(
+            u, wet, wet, wet, sx, sy,
+            jnp.ones(wet.shape[:2]), jnp.ones(wet.shape[:2]), wet,
+            msc=False, aht_v=v, evaluation="nemo_literal",
+            source_ordered=True)[0]
+
+    got_ah = traced_a33(
+        jnp.asarray(aht), jnp.asarray(aht_v), jnp.asarray(mask),
+        jnp.asarray(wi), jnp.asarray(wj))
+    np.testing.assert_array_equal(np.asarray(got_ah), expected_ah)
 
 
 # =====================================================================

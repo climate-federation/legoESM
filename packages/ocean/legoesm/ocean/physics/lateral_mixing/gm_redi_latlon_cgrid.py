@@ -2319,7 +2319,9 @@ def nemo_iso_face_masks(u_mask, v_mask, act, *, grid=None, north_fold=False):
     return umask, vmask, wmask
 
 
-def nemo_iso_w_kappa_sums(aht, umask, vmask, aht_v=None):
+def nemo_iso_w_kappa_sums(
+    aht, umask, vmask, aht_v=None, *, source_ordered: bool = False,
+):
     """Masked 4-point kappa sums + wet counts for the traldf_iso w-point
     kappa average, in the a33 "above" convention: level pair (k-1, k),
     faces (i-1, i) / (j-1, j).
@@ -2359,12 +2361,27 @@ def nemo_iso_w_kappa_sums(aht, umask, vmask, aht_v=None):
     ah_im1 = jnp.roll(aht, +1, ax_x)
     A_u, B_u = aht * umask, ah_im1 * um_im1
     cnt_u = up(umask) + um_im1 + up(um_im1) + umask
-    ksum_u = up(A_u) + B_u + up(B_u) + A_u
+    if source_ordered:
+        # ORCA2_OMIP_L4/BLD/ppsrc/nemo/traldf_iso.f90:788-789 materializes
+        # each ahtu operand, then adds (k-1,i)+(k,i-1) and
+        # (k-1,i-1)+(k,i) as two bracketed pairs.  The round barriers keep
+        # XLA from contracting a masked coefficient into either addition.
+        b = nemo_source_round
+        A_u, B_u = b(A_u), b(B_u)
+        ksum_u = b(b(up(A_u) + B_u) + b(up(B_u) + A_u))
+    else:
+        ksum_u = up(A_u) + B_u + up(B_u) + A_u
     vm_jm1 = jnp.roll(vmask, +1, ax_y)
     ah_jm1 = jnp.roll(aht_v_, +1, ax_y)
     A_v, B_v = aht_v_ * vmask, ah_jm1 * vm_jm1
     cnt_v = up(vmask) + vm_jm1 + up(vm_jm1) + vmask
-    ksum_v = up(A_v) + B_v + up(B_v) + A_v
+    if source_ordered:
+        # traldf_iso.f90:790-791: the identical two-pair statement for ahtv.
+        b = nemo_source_round
+        A_v, B_v = b(A_v), b(B_v)
+        ksum_v = b(b(up(A_v) + B_v) + b(up(B_v) + A_v))
+    else:
+        ksum_v = up(A_v) + B_v + up(B_v) + A_v
     return ksum_u, cnt_u, ksum_v, cnt_v
 
 
@@ -2408,7 +2425,8 @@ def nemo_iso_a33_e3w(z_coord, e3t, jacobian, dtype):
 
 def nemo_iso_a33(aht, umask, vmask, wmask, wslpi, wslpj,
                  e1u_c, e2v_c, e3w2, dt=None, msc: bool = False, aht_v=None,
-                 evaluation: str = "normalized_square"):
+                 evaluation: str = "normalized_square",
+                 source_ordered: bool = False):
     """``traldf_iso_a33`` in the "above" (k-1,k) convention: the a33 element
     of the rotated tensor and its explicit/implicit split.
 
@@ -2442,12 +2460,29 @@ def nemo_iso_a33(aht, umask, vmask, wmask, wslpi, wslpj,
     ax_y, ax_x, ax_z = 0, 1, 2
     up = lambda a: jnp.roll(a, +1, ax_z)
     aht_v_ = aht if aht_v is None else aht_v
-    ksum_u, cnt_u, ksum_v, cnt_v = nemo_iso_w_kappa_sums(aht, umask, vmask, aht_v=aht_v)
-    zahu_w = ksum_u * (wmask / jnp.maximum(cnt_u, 1.0))
-    zahv_w = ksum_v * (wmask / jnp.maximum(cnt_v, 1.0))
+    ksum_u, cnt_u, ksum_v, cnt_v = nemo_iso_w_kappa_sums(
+        aht, umask, vmask, aht_v=aht_v, source_ordered=source_ordered)
+    if source_ordered:
+        # traldf_iso.f90:782-794 assigns each scalar statement before the
+        # next one consumes it.  These barriers are required under XLA:
+        # without them the compiler contracts the pair sum/normalization and
+        # the final slope products, despite the written Fortran boundaries.
+        b = nemo_source_round
+        zmsku = b(wmask / jnp.maximum(cnt_u, 1.0))
+        zmskv = b(wmask / jnp.maximum(cnt_v, 1.0))
+        zahu_w = b(ksum_u * zmsku)
+        zahv_w = b(ksum_v * zmskv)
+    else:
+        zahu_w = ksum_u * (wmask / jnp.maximum(cnt_u, 1.0))
+        zahv_w = ksum_v * (wmask / jnp.maximum(cnt_v, 1.0))
     if evaluation == "nemo_literal":
         # traldf_iso.F90:296-297: preserve Fortran's left association.
-        ah_wslp2 = (zahu_w * wslpi) * wslpi + (zahv_w * wslpj) * wslpj
+        if source_ordered:
+            ah_u = b(b(zahu_w * wslpi) * wslpi)
+            ah_v = b(b(zahv_w * wslpj) * wslpj)
+            ah_wslp2 = b(ah_u + ah_v)
+        else:
+            ah_wslp2 = (zahu_w * wslpi) * wslpi + (zahv_w * wslpj) * wslpj
     else:
         ah_wslp2 = zahu_w * wslpi ** 2 + zahv_w * wslpj ** 2
     if not msc:
@@ -2502,6 +2537,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     bolus_native_slopes: tuple | None = None,
     vertical_skew_evaluation: str = "normalized_sums",
     a33_evaluation: str = "normalized_square",
+    a33_source_ordering: bool = False,
     return_diagnostics: bool = False,
     return_operand_diagnostics: bool = False,
     divisor_thickness: jnp.ndarray | None = None,
@@ -2912,7 +2948,8 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         _ahw_ab, _akz_ab = nemo_iso_a33(
             aht, umask, vmask, wmask, wslpi, wslpj,
             e1u, e2v, e3w_ab ** 2, dt=dt, msc=True, aht_v=aht_v,
-            evaluation=a33_evaluation)
+            evaluation=a33_evaluation,
+            source_ordered=a33_source_ordering)
         ah_wslp2 = jnp.roll(_ahw_ab, -1, ax_z)
         akz = jnp.roll(_akz_ab, -1, ax_z)
         e3w_kp1 = jnp.roll(e3w_ab, -1, ax_z)
@@ -4325,6 +4362,7 @@ def gm_redi_tracer_tendency_latlon(
     native_kappa_slope_eta: jnp.ndarray | None = None,
     native_bolus_slope_eta: jnp.ndarray | None = None,
     redi_flux_eta: jnp.ndarray | None = None,
+    redi_flux_r3_native: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     redi_divisor_eta: jnp.ndarray | None = None,
     redi_msc_e3w_override: jnp.ndarray | None = None,
     dt: float | None = None,
@@ -4774,7 +4812,9 @@ def gm_redi_tracer_tendency_latlon(
             _flux_eta = eta if redi_flux_eta is None else redi_flux_eta
             _flux_e3u, _flux_e3v = nemo_qco_live_face_thicknesses(
                 _flux_eta, z_coord, _e3u0, _e3v0, _umask3, _vmask3,
-                grid=grid if cfg.nemo_slope_north_fold else None)
+                grid=grid if cfg.nemo_slope_north_fold else None,
+                r3_native=redi_flux_r3_native,
+                preserve_north_fold=cfg.redi_flux_stored_face_ratios)
             if _divisor_e3t is None:
                 # traldf_iso.f90:306-310/:327-331 divides the flux
                 # divergence by e3t(Kmm).  Use the same literal QCO T-point
@@ -4866,6 +4906,7 @@ def gm_redi_tracer_tendency_latlon(
                 msc_e3w_override=redi_msc_e3w_override,
                 vertical_skew_evaluation=_skew_eval,
                 a33_evaluation=_a33_eval,
+                a33_source_ordering=cfg.redi_a33_source_ordering,
                 return_diagnostics=return_redi_diagnostics,
                 return_operand_diagnostics=return_redi_diagnostics,
                 divisor_thickness=_divisor_e3t,
@@ -4904,6 +4945,7 @@ def gm_redi_tracer_tendency_latlon(
                 msc_e3w_override=redi_msc_e3w_override,
                 vertical_skew_evaluation=_skew_eval,
                 a33_evaluation=_a33_eval,
+                a33_source_ordering=cfg.redi_a33_source_ordering,
                 divisor_thickness=_divisor_e3t,
                 closed_bottom_wmask=_closed_bottom_wmask,
                 horizontal_flux_evaluation=(
@@ -5172,7 +5214,8 @@ def compute_isoneutral_K33_latlon(
         _, _akz = nemo_iso_a33(
             _aht, _um3, _vm3, _wm3, _wi, _wj,
             _e1u_c, _e2v_c, _e3w ** 2, dt=dt, msc=_msc, aht_v=_aht_v,
-            evaluation=cfg.redi_a33_evaluation)
+            evaluation=cfg.redi_a33_evaluation,
+            source_ordered=cfg.redi_a33_source_ordering)
         return _akz[:, :, 1:]                              # interfaces 0..nlev-2
     kappa_Redi = cfg.kappa_Redi if kappa_redi_override is None else kappa_redi_override
     nlev = T.shape[-1]

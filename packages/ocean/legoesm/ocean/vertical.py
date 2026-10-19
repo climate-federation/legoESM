@@ -870,6 +870,8 @@ def nemo_qco_live_face_thicknesses(
     vmask3,
     *,
     grid=None,
+    r3_native=None,
+    preserve_north_fold: bool = False,
 ):
     """Build NEMO QCO live ``e3u/e3v`` on its native east/north faces.
 
@@ -880,9 +882,27 @@ def nemo_qco_live_face_thicknesses(
     source association measured by the DINO fidelity instruments.
     """
     dtype = jnp.asarray(e3u_0).dtype
+    if r3_native is not None and preserve_north_fold:
+        fold = None if grid is None else getattr(grid, "fold", None)
+        if fold is not None and bool(getattr(fold, "is_active", False)):
+            # The WS-RK3 stored ratios are source-identical off the fold
+            # (stprk3_stg.f90:216-217), but their native last V row was built
+            # before ldf's T-pivot face exchange.  Keep the existing
+            # fold-aware domqco construction for the final native U/V row;
+            # only the ordinary rows consume the stored Kmm ratios.
+            current = nemo_qco_live_face_geometry_from_operands(
+                eta, e3u_0, e3v_0, umask3, vmask3,
+                *nemo_qco_mesh_operands(z_coord, dtype), grid=grid,
+            )
+            r3_native = (
+                jnp.asarray(r3_native[0], dtype=dtype).at[-1].set(
+                    current.r3u[-1]),
+                jnp.asarray(r3_native[1], dtype=dtype).at[-1].set(
+                    current.r3v[-1]),
+            )
     geom = nemo_qco_live_face_geometry_from_operands(
         eta, e3u_0, e3v_0, umask3, vmask3,
-        *nemo_qco_mesh_operands(z_coord, dtype), grid=grid,
+        *nemo_qco_mesh_operands(z_coord, dtype), r3_native, grid=grid,
     )
     return geom.e3u, geom.e3v
 

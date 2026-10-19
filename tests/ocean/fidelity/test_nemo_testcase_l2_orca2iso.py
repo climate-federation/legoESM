@@ -139,7 +139,9 @@ def test_l2_card_is_g5_plus_shared_isoneutral_config_only(cards):
         0.5 * recipe._SMT3_RN_UD * recipe._SMT3_RN_LD,
         slope_prd_evaluation="nemo_eos80_literal", north_fold=True,
         redi_flux_reference_thickness_evaluation="nemo_native",
-        redi_flux_geometry_stage="rk3_kmm", slope_uv_source_rounding=True)
+        redi_flux_geometry_stage="rk3_kmm", slope_uv_source_rounding=True,
+        redi_a33_source_ordering=True,
+        redi_flux_stored_face_ratios=True)
     assert l2.recipe.model_config.gm_redi.slope_prd_geometry_stage == "before_step"
     assert l2.recipe.model_config.gm_redi.kappa_GM == 0.0
     assert l2.recipe.model_config.tracer_advection == "none"
@@ -164,6 +166,8 @@ def test_selector_refuses_each_l2_isoneutral_wiring_or_nonzero_eiv(cards):
                    {"redi_flux_reference_thickness_evaluation": "tpoint_alias"},
                    {"redi_flux_geometry_stage": "step_entry"},
                    {"slope_uv_source_rounding": False},
+                   {"redi_a33_source_ordering": False},
+                   {"redi_flux_stored_face_ratios": False},
                    {"kappa_GM": 1.0}):
         bad = l2.recipe.model_config._replace(gm_redi=gm._replace(**change))
         failures = recipe._orca2g1_selector_failures(
@@ -417,6 +421,7 @@ def test_l2_production_face_geometry_and_slopes_match_admitted_values(
         nemo_qco_resolved_mesh_operands,
     )
     from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        nemo_iso_a33,
         nemo_iso_a33_e3w,
     )
 
@@ -442,18 +447,18 @@ def test_l2_production_face_geometry_and_slopes_match_admitted_values(
             offset=68 + index * count3 * 8, shape=shape3, order="F")
         direct_faces.append(np.asarray(
             full[2:-2, 2:-2, :30]).transpose(1, 0, 2).copy())
-    for actual, want in zip(got, mean_ssh_faces, strict=True):
-        np.testing.assert_array_equal(actual, np.asarray(want))
     assert jax.config.x64_enabled
     assert tuple(hashlib.sha256(a.tobytes()).hexdigest() for a in got) == (
-        "fe9697432f56aec0ae5375cef68d23a16f62ffbbbbe24b4079b3d75bd2a6c252",
-        "eae07bc5b76ad220ef0026a27c2be796650fdee9daace911741d9fe233678134",
+        "d4c8a130a91e0a820c6f30b3bb6d7ad26d401c8b252b9de337dfe588621c0f87",
+        "205a83db3055b0701775b7165c33c6d37b2944dcc4d6ad9cec1e5972e53a8a7a",
     )
-    # Against NEMO's dumped e3u/e3v_live: 36 U and 20 V faces differ, each
-    # within one ULP (normalized <=1e-15, the D127 bar).
-    for actual, want, n_ulp in zip(got, direct_faces, (36, 20), strict=True):
-        assert np.count_nonzero(actual != want) == n_ulp
-        assert np.max(np.abs(actual - want) / np.max(np.abs(want))) <= 1e-15
+    # Stored Kmm ratios close the 36 U / 20 V one-ULP off-fold debt exactly.
+    # Re-deriving the ratios from mean SSH is a fixed, non-vacuous plant.
+    for actual, want in zip(got, direct_faces, strict=True):
+        np.testing.assert_array_equal(actual, want)
+        np.testing.assert_array_equal(actual[-1], want[-1])
+    assert tuple(np.count_nonzero(a != np.asarray(b))
+                 for a, b in zip(got, mean_ssh_faces, strict=True)) == (36, 20)
 
     # Both plants have fixed, measured value effects: aliasing face reference
     # thickness changes every face cell; using step-entry SSH changes only the
@@ -466,7 +471,7 @@ def test_l2_production_face_geometry_and_slopes_match_admitted_values(
         steps["e_ssh_bb"], run.z_coord, ops.e3u_0, ops.e3v_0,
         ops.umask3, ops.vmask3, grid=run.grid)
     assert tuple(np.count_nonzero(a != np.asarray(b))
-                 for a, b in zip(got, alias, strict=True)) == (18803, 18300)
+                 for a, b in zip(got, alias, strict=True)) == (18838, 18318)
     assert tuple(np.count_nonzero(a != np.asarray(b))
                  for a, b in zip(got, entry, strict=True)) == (413030, 415175)
 
@@ -486,6 +491,31 @@ def test_l2_production_face_geometry_and_slopes_match_admitted_values(
         1.0 + r3t[..., None])
     np.testing.assert_array_equal(
         np.asarray(diag["zfw_operands"]["e3w_above"]), nemo_e3w)
+
+    ah_full = np.memmap(
+        L2_WALK_RECORD, dtype="=f8", mode="r",
+        offset=68 + 19 * count3 * 8, shape=shape3, order="F")
+    nemo_ah = np.asarray(
+        ah_full[2:-2, 2:-2, :30]).transpose(1, 0, 2).copy()
+    # traldf_iso.f90:788-793: the jitted production path must preserve both
+    # bracketed diffusivity pairs and the final ah_wslp2 statement exactly.
+    np.testing.assert_array_equal(
+        np.asarray(diag["zfw_operands"]["ah_wslp2_above"]), nemo_ah)
+
+    zfw = diag["zfw_operands"]
+
+    @jax.jit
+    def without_source_ordering(ahtu, ahtv, umask, vmask, wmask, wi, wj):
+        ones2 = jnp.ones(ahtu.shape[:2], dtype=ahtu.dtype)
+        return nemo_iso_a33(
+            ahtu, umask, vmask, wmask, wi, wj,
+            ones2, ones2, jnp.ones_like(ahtu), msc=False, aht_v=ahtv,
+            evaluation="nemo_literal", source_ordered=False)[0]
+
+    legacy_ah = np.asarray(without_source_ordering(
+        zfw["ahtu"], zfw["ahtv"], diag["umask"], diag["vmask"],
+        diag["wmask"], zfw["wslpi"], zfw["wslpj"]))
+    assert np.count_nonzero(legacy_ah != nemo_ah) == 60720
 
     entry_jacobian = compute_ocean_jacobian(
         state.eta.data, state.H_bathy.data, run.z_coord)
