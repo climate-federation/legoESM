@@ -181,6 +181,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/arg_activation.py", "activated_nc_field"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py", "_get_microphysics_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/integration.py", "make_microphysics_physics"),
+        # Kessler warm-rain parameter set ("classic" | "cloudbench"): a typo must
+        # raise, never silently run the classic rates.
+        ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/kessler.py", "kessler_microphysics"),
         ("packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py", "morrison_microphysics"),
         # thompson snow_scheme guard (hardened 2026-06-22; previously a bare
         # ``else`` silently used the bulk power-law fall speed on a typo).

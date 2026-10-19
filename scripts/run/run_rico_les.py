@@ -110,6 +110,11 @@ def parse_args():
     p.add_argument("--dt", type=float, default=2.0)
     p.add_argument("--f32", action="store_true")
     p.add_argument("--microphysics", default="morrison")
+    p.add_argument("--kessler-parameter-set", choices=["classic", "cloudbench"],
+                   default=None,
+                   help="Kessler warm-rain rate set (only with --microphysics "
+                        "kessler): 'classic' = Kessler 1969 + KW78 (the scheme "
+                        "default), 'cloudbench' = CloudBench one-moment set")
     p.add_argument("--n-tracers", type=int, default=9)
     p.add_argument("--scalar-advection", choices=["van_leer","weno5","weno5_hv"], default="van_leer",
                    help="monotone scalar reconstruction (weno5=less diffusive).")
@@ -151,6 +156,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.kessler_parameter_set is not None and args.microphysics != "kessler":
+        raise SystemExit("--kessler-parameter-set needs --microphysics kessler")
     if args.wall_limit_s is not None and args.checkpoint is None:
         raise SystemExit("--wall-limit-s needs --checkpoint (somewhere to stop to)")
     dtype = jnp.float32 if args.f32 else jnp.float64
@@ -165,6 +172,9 @@ def main():
         scheme="morrison", morrison=MorrisonConfig(morrison_flavor="sam"))
         if args.microphysics == "morrison"
         else MicrophysicsConfig(scheme=args.microphysics))
+    if args.kessler_parameter_set is not None:
+        micro_cfg = micro_cfg._replace(kessler=micro_cfg.kessler._replace(
+            parameter_set=args.kessler_parameter_set))
     dt0 = float(args.dt)
     micro = make_les_microphysics_fn(micro_cfg, ref, g.dz,
                                      dt0 * args.micro_every)
