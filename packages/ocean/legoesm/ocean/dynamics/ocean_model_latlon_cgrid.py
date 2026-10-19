@@ -2516,6 +2516,11 @@ def _nemo_ws_rk3_tracer_pair_step(
                 # G9 selects NEMO's explicit-W FCT arm.  Do not let the
                 # all-zero diagnostic wi array select an implicit branch.
                 fct_implicit_w = None
+                # FCT reads the stored stage-3 Kmm thickness, not the live
+                # thickness rebuilt from the averaged SSH (traadv_fct.f90:538;
+                # r3t(Kmm) is stored at stprk3_stg.f90:221).  The same stored
+                # array already reaches the later trazdf content update.
+                h_stage = stage3_content_written_order[1]
             pair_result = compute_advection_flux_div_pair(
                 a_val, b_val, tracer_advection, mf_u, mf_v,
                 w_stage, h_stage, hu_stage, hv_stage, grid, stage_dt,

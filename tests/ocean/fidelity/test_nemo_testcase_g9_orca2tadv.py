@@ -630,3 +630,58 @@ def test_g9_stage3_krhs_and_content_are_nemos_statements(monkeypatch):
             krhs = krhs + term
         zrhs = e3bb * tr + (dt * e3mm) * krhs     # trazdf.f90:288-289
         np.testing.assert_array_equal(np.asarray(g), zrhs)
+
+
+def test_g9_stage3_fct_divides_by_stored_kmm_thickness(monkeypatch):
+    """traadv_fct.f90:538 reads stored e3t(Kmm), whose r3t is assigned at
+    stprk3_stg.f90:221.  Synthetic traced x64 operands make the divisor
+    observable in every cell; restoring the old live-stage divisor fails
+    exactly."""
+    import jax
+    import jax.numpy as jnp
+    from types import SimpleNamespace
+    from legoesm.grids.latlon import create_latlon_grid
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as mm
+
+    shape = (4, 4, 2)
+    base = create_latlon_grid(4, 4, dtype=jnp.float64)
+    grid = SimpleNamespace(**base._asdict(), dy_u=jnp.ones((4, 5)),
+                           dx_v=jnp.ones((5, 4)), area_T=jnp.asarray(base.area))
+
+    def fct_pair(a, b, scheme, *args, **kwargs):
+        assert scheme == "fct2" and kwargs["return_fct_nemo_rhs"] is True
+        zero = jnp.zeros_like(a)
+        reciprocal_divisor = jnp.reciprocal(args[3])
+        return ((zero, zero, reciprocal_divisor),
+                (zero, zero, reciprocal_divisor))
+
+    monkeypatch.setattr(mm, "compute_advection_flux_div_pair", fct_pair)
+    tracer = jnp.arange(np.prod(shape), dtype=jnp.float64).reshape(shape) + 1.0
+    e3bb = jnp.linspace(9.8, 10.2, np.prod(shape), dtype=jnp.float64).reshape(shape)
+    e3mm = jnp.linspace(10.3, 10.9, np.prod(shape), dtype=jnp.float64).reshape(shape)
+    live = jnp.linspace(11.1, 11.7, np.prod(shape), dtype=jnp.float64).reshape(shape)
+    mf_u = jnp.ones((4, 5, 2), dtype=jnp.float64)
+    mf_v = jnp.ones((5, 4, 2), dtype=jnp.float64)
+    w = jnp.ones((4, 4, 3), dtype=jnp.float64)
+    dt = jnp.asarray(10800.0, dtype=jnp.float64)
+
+    def run(tr, stored, live_arg, dt_arg):
+        geom = (mf_u, mf_v, w, live_arg, mf_u, mf_v, None, mf_u, mf_v)
+        return mm._nemo_ws_rk3_tracer_pair_step(
+            tr, tr, "fct2", mf_u, mf_v, w, e3bb, stored, mf_u, mf_v,
+            grid, dt_arg, jnp.ones_like(tr),
+            stage3_content_written_order=(e3bb, stored),
+            stage3_krhs_terms=((), ()), stage_transport_geometry=(geom,) * 3,
+            resume=(2, tr, tr), return_final_content=True)[2]
+
+    got = np.asarray(jax.jit(run)(tracer, e3mm, live, dt))
+    expected = np.add(
+        np.multiply(np.asarray(e3bb), np.asarray(tracer)),
+        np.multiply(np.multiply(np.float64(10800.0), np.asarray(e3mm)),
+                    np.reciprocal(np.asarray(e3mm))))
+    old_divisor = np.add(
+        np.multiply(np.asarray(e3bb), np.asarray(tracer)),
+        np.multiply(np.multiply(np.float64(10800.0), np.asarray(e3mm)),
+                    np.reciprocal(np.asarray(live))))
+    np.testing.assert_array_equal(got, expected)
+    assert np.count_nonzero(got != old_divisor) == got.size
