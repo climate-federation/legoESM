@@ -203,3 +203,29 @@ def test_export_then_trace_runs_both_arms(tmp_path, capsys):
     res = rp.trace(argparse.Namespace(**{**ns, "trace_swe_to": 10.0}))
     assert res["on"][0]["trace"]["n"] == 0
     assert res["on"][0]["cohort"]["n"] >= 1      # the perturbed column is still followed
+
+
+def test_node_budget_sign():
+    # stored 3600 J/m2 over 1800 s = 2 W/m2 against 1.5 W/m2 supplied: created
+    assert rp.node_budget(1800.0, 1800.0, 1.0, 0.25, 0.25, 1800.0) == pytest.approx(0.5)
+    assert rp.node_budget(0.0, 0.0, 1.0, 0.0, 0.0, 1800.0) == pytest.approx(-1.0)
+
+
+def test_export_then_mechanism_records_every_final_solve(tmp_path, capsys):
+    cfg, st, f = _setup()
+    # freeze/thaw off: constant heat capacity, so both budgets must close
+    cfg = cfg._replace(thermal=cfg.thermal._replace(enable_freeze_thaw=False))
+    st = st._replace(snow_depth=jnp.array([1e-9, 0.0, 20.0]))
+    p = _capture_file(tmp_path, cfg, st, f)
+    q = tmp_path / "plain.pkl"
+    rp.export(argparse.Namespace(capture=str(p), out=str(q)))
+    ns = dict(plain=str(q), days=1, trace_swe_to=None, uncap=False, pin_melt=False, no_freeze_thaw=False, nq=200)
+    out = rp.mechanism(argparse.Namespace(**ns))
+    assert out["on"]["G"].shape == out["off"]["G"].shape == (48, 3)
+    for arm in ("off", "on"):       # instrument check: the solves conserve energy
+        assert np.abs(out[arm]["res"]).max() < 1e-6
+    assert "trace" in capsys.readouterr().out
+    unc = rp.mechanism(argparse.Namespace(**{**ns, "uncap": True}))
+    np.testing.assert_array_equal(unc["off"]["G"], out["off"]["G"])   # OFF untouched
+    pin = rp.mechanism(argparse.Namespace(**{**ns, "pin_melt": True}))
+    assert np.abs(pin["on"]["res"]).max() < 1e-6     # melt enthalpy closes the budget
