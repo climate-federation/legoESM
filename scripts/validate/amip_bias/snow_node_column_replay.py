@@ -381,6 +381,8 @@ def trace(a):
         raise SystemExit("FATAL: captured run already has the snow node on")
     if abs(len(forcings) * dt - 86400.0) > 1e-6:
         raise SystemExit(f"FATAL: the captured forcing spans {len(forcings) * dt} s")
+    sw0 = np.asarray(state0.snow_depth)
+    start_trace = (sw0 > 0) & (sw0 < TRACE_SWE)     # followed even if perturbed
     if a.trace_swe_to is not None:
         sw = state0.snow_depth
         state0 = state0._replace(snow_depth=jnp.where(
@@ -394,12 +396,12 @@ def trace(a):
         step = jax.jit(lambda s_, f_, c=cfg: step_multilayer_land_with_diagnostics(
             s_, f_, c, U_min, dt, **kw))
         rows, day = [], []
-        sw = np.asarray(s.snow_depth)
-        cohort = (sw > 0) & (sw < TRACE_SWE)
+        cohort = start_trace.copy()
         for i in range(a.days * len(forcings)):
             s = step(s, forcings[i % len(forcings)])[0]
             T0 = np.asarray(s.T_soil[:, 0])
-            Ts = np.asarray(s.T_snow) if on else T0
+            # no snow node OFF: its snow-node measures are NaN / 0, not soil proxies
+            Ts = np.asarray(s.T_snow) if on else np.full_like(T0, np.nan)
             sw = np.asarray(s.snow_depth)
             cohort |= (sw > 0) & (sw < TRACE_SWE)
             day.append(trace_summary(Ts, T0, np.asarray(land_skin_temperature(s)),

@@ -198,5 +198,8 @@ def test_export_then_trace_runs_both_arms(tmp_path, capsys):
     assert set(res) == {"off", "on"} and len(res["on"]) == 1
     assert res["on"][0]["land"]["n"] == 3
     assert "  1 on  | land" in capsys.readouterr().out
+    assert np.isnan(res["off"][0]["land"]["T_snow_max"])     # no node when OFF
+    assert res["off"][0]["land"]["runaway"] == 0
     res = rp.trace(argparse.Namespace(**{**ns, "trace_swe_to": 10.0}))
     assert res["on"][0]["trace"]["n"] == 0
+    assert res["on"][0]["cohort"]["n"] >= 1      # the perturbed column is still followed
