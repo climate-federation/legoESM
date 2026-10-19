@@ -341,10 +341,17 @@ for name, value in arrays.items():
     if not np.isfinite(value).all():
         raise SystemExit(f"REFUSE: {name} contains non-finite values")
 
-rebuilt_u = arrays["e3u_3d"] * (
+statement_u = arrays["e3u_3d"] * (
     np.float64(1.0) + arrays["r3u_Kmm"][..., None] * arrays["umask"])
-rebuilt_v = arrays["e3v_3d"] * (
+statement_v = arrays["e3v_3d"] * (
     np.float64(1.0) + arrays["r3v_Kmm"][..., None] * arrays["vmask"])
+# The observer arrays are zero-initialised, then assigned inside NEMO's
+# DO_2D(INN+1, INN, INN+1, INN) loop for jk=1..jpkm1.  In this registered
+# one-rank ORCA2 layout that association is i=2..182, j=2..150, k=1..30.
+rebuilt_u = np.zeros_like(statement_u)
+rebuilt_v = np.zeros_like(statement_v)
+rebuilt_u[1:182, 1:150, :30] = statement_u[1:182, 1:150, :30]
+rebuilt_v[1:182, 1:150, :30] = statement_v[1:182, 1:150, :30]
 if not np.array_equal(rebuilt_u, arrays["e3u_live"]):
     raise SystemExit("REFUSE: dumped e3u_live does not replay its NEMO statement")
 if not np.array_equal(rebuilt_v, arrays["e3v_live"]):
