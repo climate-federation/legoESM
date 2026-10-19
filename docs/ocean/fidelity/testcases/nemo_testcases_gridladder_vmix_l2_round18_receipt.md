@@ -108,9 +108,14 @@ full ORCA2, DINO, and SMT-3/4; and byte-identical GYRE ten-step evidence.
 
 Final gates (CPU, x64, landing-script `PYTHONPATH`):
 
-- receipt citation gate: **PENDING**;
-- default ORCA2 landing list and private-import ratchet: **PENDING**;
-- `git diff --check`: **PENDING**.
+- this receipt's explicit citation gate: **PASS**, 5 citations, 0 unmapped,
+  0 failures, and 0 map entries failing audit;
+- planted shift of the stage-2 ratio citation: gate **FAIL**, 1 failure, exit
+  1, as required;
+- exact default ORCA2 landing list, including the receipt-citation tests,
+  private-import ratchet, and parallel-receipt guard: **145 passed in
+  1136.90 s (18:56)**;
+- `git diff --check`: **PASS**.
 
 Unasked choices: none. The target configuration and evidence-root names are
 mechanical acquisition identifiers. No threshold, field set, cadence, model
