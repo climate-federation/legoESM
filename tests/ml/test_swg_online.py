@@ -1749,7 +1749,16 @@ def test_memory_cache_keeps_the_digest_check_of_every_day_file(
     assert contract._memory is None
 
 
-@pytest.mark.parametrize("windows", [(), (3,), (1, 16)])
+def test_memory_preload_admits_curriculum_extension_windows(dataset):
+    contract = SWGDatasetContract.from_json(
+        dataset["path"], card=dataset["card"])
+    short = contract.preload_memory(window_days=(1,), target_interval_hours=1)
+    longer = contract.preload_memory(window_days=(1, 16),
+                                     target_interval_hours=1)
+    assert longer["hours"] >= short["hours"] > 0
+
+
+@pytest.mark.parametrize("windows", [(), (3,), (5,)])
 def test_memory_preload_refuses_unregistered_windows(dataset, windows):
     contract = SWGDatasetContract.from_json(
         dataset["path"], card=dataset["card"])

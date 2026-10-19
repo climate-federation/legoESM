@@ -1229,9 +1229,11 @@ class SWGDatasetContract:
         Returns ``{"hours": count, "bytes": array bytes held}``.
         """
         window_days = tuple(window_days)
-        if not window_days or any(
-                window not in ADMITTED_WINDOWS_DAYS for window in window_days):
-            raise ValueError("preload windows must be from 1, 2, 4, or 8 days")
+        if not window_days or not all(
+                window_days_admitted(window) for window in window_days):
+            raise ValueError(
+                "preload windows must be admitted lengths (1, 2, 4, 8 days or a "
+                "curriculum extension beyond 8 days)")
         interval = require_target_interval_hours(target_interval_hours)
         wanted = []
         for name, start_bound, end_bound in self.splits:
