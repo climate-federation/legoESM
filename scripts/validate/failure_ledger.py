@@ -3,6 +3,8 @@
 Usage:
     python scripts/validate/failure_ledger.py JOB=path.xml [JOB=path.xml ...] [--md out.md]
 
+Several XML files may share a JOB (a re-run of files a crashed run never
+finished); a test is then one row whose kinds and texts are merged.
 Each row is one failing test id per job: (job, test id, kinds, category, reason).
 A test that fails AND errors in teardown is one row with kinds "failure+error".
 The category is a FIRST GUESS from the test path and the failure text, never a
@@ -28,13 +30,14 @@ RULES: list[tuple[str, str | None, str | None]] = [
     ("config round-trip", r"(round_?trip|roundtrip).*config|config.*(round_?trip|roundtrip)", None),
     ("stale fake driver", None, r"'(_?Fake|_?Dummy|_?Stub|Mock|SimpleNamespace)\w*' object has no attribute"),
     ("missing data/doc", None, r"FileNotFoundError|No such file or directory|does not exist"),
-    # ci.yml: the top-level tests/test_*.py files are the AST/source ratchets.
-    ("policy drift", r"^tests/test_[^/]+\.py(::|$)", None),
     ("stale-after-rename", None,
      r"unexpected keyword argument|cannot import name|module '[\w.]+' has no attribute|"
      r"missing \d+ required (positional|keyword)|has no field|got multiple values"),
-    ("oracle/fixture mismatch", r"oracle|fv3_native|gnomonic", None),
+    ("oracle/fixture mismatch", r"^[^:]*(oracle|fv3_native|gnomonic)", None),  # file path, not params
     ("pinned reference changed", None, r"Not equal to tolerance|Mismatched elements|\u00b1"),
+    # ci.yml: the top-level tests/test_*.py files are the AST/source ratchets
+    # (mostly; a numeric failure there was matched by the rules above first).
+    ("policy drift", r"^tests/test_[^/]+\.py(::|$)", None),
     # Only a guard the model RAISES: an exception type, then refuse/require wording.
     ("new safety check vs old test", None,
      r"(ValueError|RuntimeError|SystemExit|NotImplementedError)\b[^\n]*(\brefus|\brequires\b|not supported)"),
@@ -74,6 +77,10 @@ def _reason(texts: list[tuple[str, str]]) -> str:
         for ln in body.splitlines():
             if ln.startswith("E "):
                 return " ".join(ln[1:].split())[:160]
+    for _, body in texts:  # last resort: the traceback's last line
+        lines = [ln for ln in body.splitlines() if ln.strip()]
+        if lines:
+            return " ".join(lines[-1].split())[:160]
     return ""
 
 

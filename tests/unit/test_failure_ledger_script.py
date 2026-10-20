@@ -94,3 +94,16 @@ def test_safety_rule_needs_a_raised_guard():
 def test_policy_drift_is_any_top_level_ratchet_not_subdir():
     assert tfl.classify("tests/test_pe_dycore_inline_imports.py::t[x]", "AssertionError: 24 inline") == "policy drift"
     assert tfl.classify("tests/unit/test_pe.py::t", "AssertionError: 24 inline") == "other"
+
+
+def test_top_level_numeric_failure_is_a_reference_not_policy():
+    assert tfl.classify("tests/test_fv3_lin_pgf.py::t", "Not equal to tolerance rtol=1e-12") == "pinned reference changed"
+
+
+def test_reason_falls_back_to_the_traceback_tail():
+    assert tfl._reason([("", "frame 1\nRuntimeError: boom\n")]) == "RuntimeError: boom"
+
+
+def test_oracle_rule_reads_the_file_path_not_the_parameter():
+    tid = "tests/test_no_bare_latent_heat.py::t[scripts/validate/oracle/x.py]"
+    assert tfl.classify(tid, "AssertionError: bare constant") == "policy drift"
