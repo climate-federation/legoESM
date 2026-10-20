@@ -1752,6 +1752,9 @@ CITATION_MAP = {
         'cd0=_cfg_b.bottom_drag.bottom_drag_cd0,',
         'uc0=_cfg_b.bottom_drag.bottom_drag_uc0,', 5],
     'ocean_pe_latlon_cgrid.py:4302': [('cd0=config.bottom_drag.bottom_drag_cd0,', 1)],
+    # round 319: the cast-free cd0 argument; DECISION 142 at the card run length
+    'ocean_model_latlon_cgrid.py:11751': [('cd0=_cfg_b.bottom_drag.bottom_drag_cd0,', 1)],
+    'nemo_testcase_recipe.py:1985': [('2920,  # DECISION 142 (user, 2026-10-20): one year, deliberate', 1)],
     'ocean_model_latlon_cgrid.py:1995': 'return sr(rhs - sr(vertical_scaled / e3t_div))',
     'ocean_model_latlon_cgrid.py:2677-2679': [
         'out = r(r(r(q_before[..., None] * base)', '/ q_after)', 3],
