@@ -2,6 +2,9 @@
 the KE-spectrum term and the bias term (Kochkov et al. 2024, Methods 7.4)."""
 from __future__ import annotations
 
+import json
+import pathlib
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -96,6 +99,31 @@ def test_cutoff_table_placeholder_refuses_and_a_table_steps_with_lead():
         table, n_records=12, target_interval_hours=3).tolist() == [
         50, 20, 20, 20, 20, 20, 20, 5.5, 5.5, 5.5, 5.5, 5.5]
     assert lead_time_cutoff_table(table) == ((0, 6, 24), (50.0, 20.0, 5.5))
+
+
+@pytest.mark.parametrize("name", [
+    "exp9_rigidlid_neuralgcm.json",
+    "exp10_rigidlid_energy_score_neuralgcm_m8.json"])
+def test_committed_table_rounds_a_lead_up_to_the_next_measured_day(name):
+    root = pathlib.Path(__file__).resolve().parents[2] / "config/swg_online"
+    table = json.loads((root / name).read_text())["loss"]["lead_time_cutoff"]
+    # 3-hour records: lead 3 h is record 0, lead 24 h record 7, 27 h record 8.
+    cut = lead_time_cutoff_bands(table, n_records=32 * 8,
+                                 target_interval_hours=3)
+
+    def at(lead_hours):
+        return cut[lead_hours // 3 - 1]
+
+    # Leads 3, 24 -> day 1; 27, 48 -> day 2 (the measured day-1/day-2 bands).
+    assert [at(h) for h in (3, 24, 27, 48)] == [70, 70, 63, 63]
+    # An unmeasured day takes the next measured day's band: day 5 -> day 6,
+    # day 7 -> day 8, days 9-11 -> day 12; day 32 is the last.
+    assert [at(24 * d) for d in (3, 4, 5, 6, 7, 8, 9, 12, 13, 16, 17, 24, 25,
+                                 32)] == [
+        57, 54, 48, 48, 42, 42, 27, 27, 19, 19, 13, 13, 9, 9]
+    assert at(24 * 4 + 3) == 48 and at(24 * 8 + 3) == 27
+    # Lead 0 keeps every mode (the 80 x 80 wet box's largest radius is 111.7).
+    assert lead_time_cutoff_table(table)[1][0] >= np.hypot(79, 79)
 
 
 @pytest.mark.parametrize("table", [

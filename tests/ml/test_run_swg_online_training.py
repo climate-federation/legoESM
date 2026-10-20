@@ -1549,8 +1549,7 @@ EXP1_SYMMETRIC = _ROOT / "config/swg_online/exp1_symmetric_ring_weighted.json"
 def test_every_committed_training_config_states_its_training_precision():
     trained_configs = [
         path for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
-        if "network" in json.loads(path.read_text())
-        and path.name not in PENDING_CONFIGS]
+        if "network" in json.loads(path.read_text())]
     assert len(trained_configs) >= 17
     precisions = {path.name: driver.load_config(path)["training_precision"]
                   for path in trained_configs}
@@ -1564,6 +1563,8 @@ def test_every_committed_training_config_states_its_training_precision():
     assert precisions.pop(EXP4_SYMMETRIC_LONG.name) == "fp32"
     assert precisions.pop(EXP7.name) == "fp32"
     assert precisions.pop(EXP8.name) == "fp32"
+    assert precisions.pop(EXP9.name) == "fp32"
+    assert precisions.pop(EXP10.name) == "fp32"
     assert set(precisions.values()) == {"fp64"}
 
 
@@ -1582,8 +1583,7 @@ RIGID_LID_TRUTH = ("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
 def test_every_committed_training_config_states_its_target_interval():
     trained_configs = [
         path for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
-        if "network" in json.loads(path.read_text())
-        and path.name not in PENDING_CONFIGS]
+        if "network" in json.loads(path.read_text())]
     intervals = {path.name: driver.load_config(path)["target_interval_hours"]
                  for path in trained_configs}
     assert intervals.pop(EXP4_TEMPLATE.name) == 3
@@ -1595,6 +1595,8 @@ def test_every_committed_training_config_states_its_target_interval():
     assert intervals.pop(EXP4_SYMMETRIC_LONG.name) == 3
     assert intervals.pop(EXP7.name) == 3
     assert intervals.pop(EXP8.name) == 3
+    assert intervals.pop(EXP9.name) == 3
+    assert intervals.pop(EXP10.name) == 3
     assert len(intervals) >= 17 and set(intervals.values()) == {1}
 
 
@@ -1977,8 +1979,7 @@ def test_rigid_lid_free_run_writes_whole_day_dual_files(tmp_path, lid_card):
 def test_every_committed_training_config_states_checkpointing_and_cache():
     trained_configs = [
         path for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
-        if "network" in json.loads(path.read_text())
-        and path.name not in PENDING_CONFIGS]
+        if "network" in json.loads(path.read_text())]
     states = {}
     for path in trained_configs:
         config = driver.load_config(path)
@@ -1988,6 +1989,8 @@ def test_every_committed_training_config_states_checkpointing_and_cache():
     # peak (exp5 stopped at 8) and arm B holds 8 members per window.
     assert states.pop(EXP7.name) == (True, "memory")
     assert states.pop(EXP8.name) == (True, "memory")
+    assert states.pop(EXP9.name) == (True, "memory")
+    assert states.pop(EXP10.name) == (True, "memory")
     assert states.pop(EXP5_SYMMETRIC.name) == (False, "memory")
     assert states.pop(EXP5_TEMPLATE.name) == (False, "memory")
     for path in EXP6:
@@ -2097,8 +2100,7 @@ def test_every_committed_training_config_states_its_target_filter_width():
     widths = {path.name: driver.load_config(path)["dataset"][
         "target_filter_sigma_cells"]
         for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
-        if "network" in json.loads(path.read_text())
-        and path.name not in PENDING_CONFIGS}
+        if "network" in json.loads(path.read_text())}
     assert widths.pop(EXP6[0].name) == 1.5
     assert widths.pop(EXP6[1].name) == 2.0
     assert len(widths) >= 17 and set(widths.values()) == {1.0}
@@ -2177,9 +2179,6 @@ EXP7 = _ROOT / "config/swg_online/exp7_rigidlid_energy_score_m8.json"
 EXP8 = _ROOT / "config/swg_online/exp8_rigidlid_window_stats.json"
 EXP9 = _ROOT / "config/swg_online/exp9_rigidlid_neuralgcm.json"
 EXP10 = _ROOT / "config/swg_online/exp10_rigidlid_energy_score_neuralgcm_m8.json"
-# Shipped with a placeholder cutoff table (the twin measurement is pending):
-# they refuse to load, so the "every committed config" tests leave them out.
-PENDING_CONFIGS = (EXP9.name, EXP10.name)
 W08_CHECKPOINT = (
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/"
     "round17_rigidlid/swgonl_exp4_rigidlid_symmetric_ring_weighted_fp32/"
@@ -2189,8 +2188,7 @@ W08_CHECKPOINT = (
 def test_every_committed_training_config_states_its_loss_and_noise_channel():
     trained_configs = [
         path for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
-        if "network" in json.loads(path.read_text())
-        and path.name not in PENDING_CONFIGS]
+        if "network" in json.loads(path.read_text())]
     seen = {path.name: (driver.load_config(path)["loss"],
                         driver.load_config(path)["network"]["noise_channel"],
                         driver.load_config(path)["network"][
@@ -2203,6 +2201,15 @@ def test_every_committed_training_config_states_its_loss_and_noise_channel():
     assert seen.pop(EXP8.name) == (
         {"kind": "eq7_window_statistics", "calibration_window_days": 8}, "none",
         "recorded_only")
+    # The NeuralGCM-style arms carry the measured cutoff table (exp9 trains
+    # from scratch, so its 1% bar is enforced).
+    assert seen.pop(EXP9.name) == (
+        {"kind": "eq7_neuralgcm", "calibration_window_days": 1,
+         "lead_time_cutoff": MEASURED_TABLE}, "none", "enforced")
+    assert seen.pop(EXP10.name) == (
+        {"kind": "energy_score_neuralgcm", "members": 8,
+         "calibration_window_days": 8, "lead_time_cutoff": MEASURED_TABLE},
+        "white_input", "recorded_only")
     assert len(seen) >= 17
     assert {json.dumps(value) for value in seen.values()} == {
         json.dumps(({"kind": "eq7"}, "none", "enforced"))}
@@ -2817,22 +2824,23 @@ PENDING = "PENDING_TWIN_MEASUREMENT"
 
 def _with_table(path, tmp_path, table=LID_TABLE):
     config = json.loads(path.read_text())
-    assert config["loss"]["lead_time_cutoff"] == PENDING
     config["loss"]["lead_time_cutoff"] = table
     target = tmp_path / path.name
     target.write_text(json.dumps(config))
     return target
 
 
+# Measured twin schedule (psi swap, anomaly coherence >= 0.5, mean of 8 pairs;
+# probe band * 80 / 79 floored); lead 0 full band, lead rounded up to a day.
+MEASURED_TABLE = {
+    "lead_hours": [0, 1, 25, 49, 73, 97, 145, 193, 289, 385, 577],
+    "cutoff_band": [112, 70, 63, 57, 54, 48, 42, 27, 19, 13, 9]}
+
+
 @pytest.mark.parametrize("path", [EXP9, EXP10])
-def test_committed_neuralgcm_configs_refuse_to_load_until_the_table_is_measured(
-        path, tmp_path):
-    assert json.loads(path.read_text())["loss"]["lead_time_cutoff"] == PENDING
-    with pytest.raises(ValueError, match="PENDING_TWIN_MEASUREMENT"):
-        driver.load_config(path)
-    # With a measured table in its place the configuration loads.
-    assert driver.load_config(_with_table(path, tmp_path))[
-        "loss"]["lead_time_cutoff"] == LID_TABLE
+def test_committed_neuralgcm_configs_carry_the_measured_cutoff_table(path):
+    assert driver.load_config(path)["loss"]["lead_time_cutoff"] \
+        == MEASURED_TABLE
 
 
 def test_exp9_is_the_exp4_symmetric_recipe_from_scratch_with_the_new_loss(
