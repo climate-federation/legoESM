@@ -64,14 +64,15 @@ from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
 CASE = "ORCA2G2-zps"
 CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice",
          "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf", "ORCA2G9-tadv",
-         "ORCA2L4-bbc",
+         "ORCA2L4-bbc", "ORCA2L4b-iso-bbc",
          "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
          "ORCA2V5-havtb", "ORCA2L1-bbl", "ORCA2L2-iso", "ORCA2L3-eiv")
 # G5's record build (ORCA2-lane frames); V1 = that build + one hm_i writer;
 # V2/V3/V4/V5 = V1's record binary with the ORCA2 vertical-mixing switches.
 # L1/L2/L4 use G5's record surface-input format.
 ICE_CASES = ("ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf",
-             "ORCA2G9-tadv", "ORCA2L4-bbc", "ORCA2V1-tke", "ORCA2V2-evd",
+             "ORCA2G9-tadv", "ORCA2L4-bbc", "ORCA2L4b-iso-bbc",
+             "ORCA2V1-tke", "ORCA2V2-evd",
              "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L1-bbl",
              "ORCA2L2-iso", "ORCA2L3-eiv")
 SI3 = ICE_CASES
@@ -954,9 +955,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     l2_controls = (without_l2_metric, without_l2_eos80, without_l2_north_fold,
                    without_l2_native_face_reference, without_l2_kmm_face_geometry,
                    without_l2_a33_source_ordering, without_l2_stored_face_ratios)
-    require(not any(l2_controls) or case == "ORCA2L2-iso",
-            "L2 controls are registered only for ORCA2L2-iso")
-    if case == "ORCA2L2-iso":
+    require(not any(l2_controls) or case in ("ORCA2L2-iso", "ORCA2L4b-iso-bbc"),
+            "L2 controls are registered only for ORCA2L2-iso/L4b")
+    if case in ("ORCA2L2-iso", "ORCA2L4b-iso-bbc"):
         require(recipe._orca2l2_isoneutral_selected(cfg.gm_redi),
                 "the L2 card no longer selects its complete isoneutral path")
         gm = cfg.gm_redi
@@ -980,10 +981,13 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     if without_vector_raw_vmask:          # G6 ROUND-2 PAIR HALF
         cfg = cfg._replace(rk3_vector_raw_vmask=False)
     if without_geothermal:                # L4 ROUND-1 wiring-removal plant
-        require(case == "ORCA2L4-bbc"
+        require(case in ("ORCA2L4-bbc", "ORCA2L4b-iso-bbc")
                 and cfg.rk3_stage3_geothermal_nemo_written,
                 "the geothermal plant requires the selected L4 card")
-        cfg = cfg._replace(rk3_stage3_geothermal_nemo_written=False)
+        cfg = cfg._replace(
+            rk3_stage3_geothermal_nemo_written=False,
+            rk3_stage3_geothermal_after_ldf_nemo_order=False,
+        )
     nk = int(z.n_levels)
     roots = (root, *restart_roots)
     reg = g1.regions(np.asarray(z.is_active)[..., 0])
@@ -1196,7 +1200,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         return new, round(time.time() - t0, 1)
 
     if arm == "geothermal":
-        require(case == "ORCA2L4-bbc", "the geothermal arm is L4-only")
+        require(case in ("ORCA2L4-bbc", "ORCA2L4b-iso-bbc"),
+                "the geothermal arm is L4/L4b-only")
         import importlib.util
         from legoesm.ocean.physics.geothermal import (
             nemo_geothermal_bottom_heating_tendency,
@@ -1245,6 +1250,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 "zero_heatflow_wet_columns": int(np.count_nonzero(wet & (qgh == 0.0))),
                 "trend_row": trend_row,
             })
+        return out
+
     if arm == "ddm_kt1":
         return {**ddm_kt1_rows(root, model, card.recipe.grid, z, cfg, s0, card.dt_s, forcing(1), nk,
                                wcls, case=case, kt_from=kt_from, kt_to=kt_to),

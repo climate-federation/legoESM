@@ -152,6 +152,22 @@ MASS_FLUX_W_DIMS = ("lat", "lon", "level_interface")
 MASS_FLUX_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w")
 
 
+def _nemo_stage3_ldf_then_geothermal(
+    stage_t, stage_s, dT_ldf, dS_ldf, geothermal_t, active_3d,
+):
+    """Add L4b's stage-3 tracer terms in NEMO call order.
+
+    ``stprk3_stg.f90:734-740`` calls ``tra_ldf`` and then ``tra_bbc``.
+    Materialize both Krhs writes so XLA cannot reassociate geothermal ahead
+    of lateral diffusion.  There is no new division or square root here; the
+    two already-certified kernels produce ``d*_ldf`` and ``geothermal_t``.
+    """
+
+    t_after_ldf = nemo_source_round(stage_t + dT_ldf * active_3d)
+    s_after_ldf = nemo_source_round(stage_s + dS_ldf * active_3d)
+    return nemo_source_round(t_after_ldf + geothermal_t), s_after_ldf
+
+
 def mass_flux_fields(u_field, v_field, w_field, mfu_data, mfv_data, mfw_data):
     """Wrap the tracer-advecting mass fluxes as the three ``mass_flux_*`` Fields.
 
@@ -3995,23 +4011,48 @@ class LatLonCGridOceanModel:
             )
 
         # NEMO applies geothermal BBC after tracer LDF in stage 3
-        # (stprk3_stg.f90:734-740).  The literal geothermal path currently
-        # joins the G5 stage-3 source assembly, before this model's separate
-        # tracer-diffusion increment.  Likewise, the G9 written-Krhs list is a
-        # closed list of heat/runoff/solar terms and would omit geothermal.
-        # Refuse both unreproduced orderings instead of silently running them.
+        # (stprk3_stg.f90:734-740).  L4 keeps the original no-LDF placement;
+        # L4b alone defers the add to the ordered LDF boundary below.  The G9
+        # written-Krhs list remains unsupported because it also brings FCT.
         if config.rk3_stage3_geothermal_nemo_written:
             if config.rk3_stage3_tracer_krhs_nemo_order:
                 raise ValueError(
                     "rk3_stage3_geothermal_nemo_written is not supported with "
                     "rk3_stage3_tracer_krhs_nemo_order: the written stage-3 "
                     "Krhs term list does not yet carry tra_bbc")
-            if (config.K_h > 0.0 or config.K_bih > 0.0
-                    or config.gm_redi is not None):
+            _after_ldf = config.rk3_stage3_geothermal_after_ldf_nemo_order
+            _has_ldf = (config.K_h > 0.0 or config.K_bih > 0.0
+                        or config.gm_redi is not None)
+            if _has_ldf and not _after_ldf:
                 raise ValueError(
                     "rk3_stage3_geothermal_nemo_written is not supported with "
                     "tracer lateral diffusion: NEMO applies tra_ldf before "
-                    "tra_bbc, while this path would add diffusion afterward")
+                    "tra_bbc; select the L4b ordered composition")
+            if _after_ldf:
+                _gm = config.gm_redi
+                _is_l2 = (
+                    config.K_h == 0.0 and config.K_bih == 0.0
+                    and _gm is not None
+                    and _gm.kappa_GM == 0.0
+                    and _gm.slope_scheme == "nemo_iso_lap"
+                    and _gm.msc_stabilize
+                    and _gm.implicit_K33
+                    and _gm.redi_coefficient == "constant"
+                    and not _gm.treguier.enabled
+                    and _gm.gm_bolus_advection == "centred"
+                )
+                if not _is_l2:
+                    raise ValueError(
+                        "rk3_stage3_geothermal_after_ldf_nemo_order requires "
+                        "the certified L2 standard-isoneutral selection")
+                if (config.bbl_adv_option != 0
+                        or config.bbl_diffusive_option != 0):
+                    raise ValueError(
+                        "L4b ordered geothermal does not support tra_bbl")
+        elif config.rk3_stage3_geothermal_after_ldf_nemo_order:
+            raise ValueError(
+                "rk3_stage3_geothermal_after_ldf_nemo_order requires "
+                "rk3_stage3_geothermal_nemo_written")
         if _phys is not None and _phys.shortwave_penetration is not None:
             from legoesm.ocean.physics.shortwave_penetration import (
                 SHORTWAVE_PENETRATION_SCHEMES,
@@ -8774,6 +8815,7 @@ class LatLonCGridOceanModel:
                     None if _rnf_content is None else _rnf_content[1],
                     _h_s3_kmm))
 
+            _qgh_rate = None
             if _cfg_b.rk3_stage3_geothermal_nemo_written:
                 # stprk3_stg.f90:734-739 calls tra_bbc after tra_ldf and before
                 # tra_bbl.  L4 inherits G5's OFF selections for both neighbors,
@@ -8797,8 +8839,9 @@ class LatLonCGridOceanModel:
                     rho_0=_cfg_b.rho_0,
                     c_sw=_cfg_b.physics.constants.c_sw,
                 )
-                _stage3_T_written = nemo_source_round(
-                    _stage3_T_written + _qgh_rate)
+                if not _cfg_b.rk3_stage3_geothermal_after_ldf_nemo_order:
+                    _stage3_T_written = nemo_source_round(
+                        _stage3_T_written + _qgh_rate)
 
             if _cfg_b.rk3_stage3_tracer_krhs_nemo_order:
                 # The same stage-3 terms, kept apart so they add onto the FCT
@@ -10561,13 +10604,24 @@ class LatLonCGridOceanModel:
                 _ws_stage_source_rates = _stage_source_rates
                 _stage3_krhs_terms_live = _stage3_krhs_terms
                 if _cfg_b.gm_redi is not None:
+                    if _cfg_b.rk3_stage3_geothermal_after_ldf_nemo_order:
+                        if _qgh_rate is None:
+                            raise ValueError(
+                                "L4b ordered geothermal has no stage-3 rate")
+                        _ordered_stage3 = _nemo_stage3_ldf_then_geothermal(
+                            _stage_source_rates[2][0],
+                            _stage_source_rates[2][1],
+                            dT_gm, dS_gm, _qgh_rate, active_3d,
+                        )
+                    else:
+                        _ordered_stage3 = (
+                            _stage_source_rates[2][0] + dT_gm * active_3d,
+                            _stage_source_rates[2][1] + dS_gm * active_3d,
+                        )
                     _ws_stage_source_rates = (
                         _stage_source_rates[0],
                         _stage_source_rates[1],
-                        (
-                            _stage_source_rates[2][0] + dT_gm * active_3d,
-                            _stage_source_rates[2][1] + dS_gm * active_3d,
-                        ),
+                        _ordered_stage3,
                     )
                     if _stage3_krhs_terms is not None:
                         # stprk3_stg.f90:717,734,749: stage 3 adds QSR,

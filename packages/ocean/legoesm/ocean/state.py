@@ -3407,6 +3407,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # selected path requires OceanSurfaceForcing.geothermal_heat_flux_mwm2;
     # False leaves every pre-L4 card's pytree and JAX program unchanged.
     rk3_stage3_geothermal_nemo_written: bool = False
+    # ORCA2 L4b composes the geothermal statement with standard isoneutral
+    # diffusion.  NEMO adds tra_ldf to stage-3 Krhs first, then tra_bbc
+    # (stprk3_stg.f90:734-740).  This selector defers the geothermal add to
+    # that boundary; validation permits it only with the certified L2 form.
+    rk3_stage3_geothermal_after_ldf_nemo_order: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

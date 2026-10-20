@@ -168,7 +168,7 @@ def nemo_supplied_forcing(card, root: Path, kt: int, *, zero: bool = False):
             np.zeros_like(rec["rCdU_ice"]) if zero else rec["rCdU_ice"]),
         salt_flux_sfx=fields["sfx"],
     )
-    if card.case == "ORCA2L4-bbc":
+    if card.recipe.model_config.rk3_stage3_geothermal_nemo_written:
         path = Path(root) / "geothermal_heating.nc"
         heatflow = read_l4_geothermal_heatflow(
             path, np.asarray(card.recipe.initial_state.eta.data).shape)
