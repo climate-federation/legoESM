@@ -24,6 +24,13 @@ pytestmark = pytest.mark.skipif(not jax.config.jax_enable_x64, reason="needs JAX
 # freeze it out (measured, round 319). Every other scalar must move the state.
 _NP_LIN = "rung 10 runs nemo_linear: rate = cd0 * uc0 (zdfdrg.F90 np_lin) never reads it"
 RUNG10_INERT = {"cd_max": _NP_LIN, "z0": _NP_LIN, "ke0": _NP_LIN}
+# Scalars that move the state when raised and not when lowered: the loss
+# gradient is exactly 0, so a gradient trainer cannot move them. Each one is
+# pending the user's decision; it is not a live trainable.
+RUNG10_ONE_SIDED = {
+    "kappaH_min": "one-sided, gradient exactly 0, pending the user's decision: the floor "
+                  "sits 1 ulp below the TKE branch's minimum (0.1 * 1e-9) in 7,634 cells",
+}
 
 
 def _toy_config():
@@ -103,9 +110,14 @@ def test_rung10_traced_step_at_one_is_the_production_step(rung10_scan):
 
 @needs_record
 @pytest.mark.parametrize("name", ts.SCALARS)
-def test_rung10_scalar_moves_the_state_or_is_declared_inert(rung10_scan, name):
-    moved = sum(rung10_scan["scalars"][name]["moved_total_by_kt"])
+def test_rung10_scalar_moves_both_ways_or_is_declared(rung10_scan, name):
+    """A live trainable needs a nonzero loss gradient: it must move the state
+    under both +1e-3 and -1e-3. Moving one way only is a kink with gradient 0."""
+    row = rung10_scan["scalars"][name]
+    up, down = (sum(row[k]["moved_total_by_kt"]) for k in ("up", "down"))
     if name in RUNG10_INERT:
-        assert moved == 0, f"{name} now moves {moved} values: drop it from RUNG10_INERT"
+        assert (up, down) == (0, 0), f"{name} now moves ({up}, {down}): drop it from RUNG10_INERT"
+    elif name in RUNG10_ONE_SIDED:
+        assert up > 0 and down == 0, f"{name} is no longer one-sided ({up}, {down})"
     else:
-        assert moved > 0, f"{name}: 1e-3 relative perturbation moves no state (inert)"
+        assert up > 0 and down > 0, f"{name}: moves {up} values raised, {down} lowered"

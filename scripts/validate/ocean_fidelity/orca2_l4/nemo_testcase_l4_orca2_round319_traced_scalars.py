@@ -5,7 +5,10 @@ MEASUREMENT ONLY. Each scalar a closure trainer would expose on rung 10 is a
 traced multiplicative scale s (= 1) on its config field (the copy the step
 reads). ``--scan``: one jitted step body, run at s = 1 (bit parity with the
 production ``model.step``) and with each scalar alone at 1 + ``--rel``; per
-kt, the number of state values that moved. ``--trace-cd0``: trace
+kt, the number of state values that moved (each scalar at 1 + rel and
+1 - rel). ``--linearity``: one step, responses and forward-mode tangent.
+``--floor-cells``: NEMO's diffusivity statement on the floor cells.
+``--trace-cd0``: trace
 ``jit(grad)`` of a one-step loss w.r.t. the cd0 scale (no compile).
 """
 
@@ -144,11 +147,14 @@ def scan(rung: str, rel: float, steps: int, log=print) -> dict:
               "nominal": _nominal(model), "parity_kt1_vs_production": moved_counts(prod, base[0]),
               "scalars": {}}
     for k in SCALARS:
-        bumped = run({**ones, k: jnp.float64(1.0 + rel)})
-        rows = [moved_counts(b, p) for b, p in zip(base, bumped, strict=True)]
-        result["scalars"][k] = {"moved_by_kt": rows,
-                                "moved_total_by_kt": [sum(r.values()) for r in rows]}
-        log(f"[{time.time() - t0:7.1f}s] {k}: {result['scalars'][k]['moved_total_by_kt']}")
+        row = {}
+        for sign, r in (("up", rel), ("down", -rel)):
+            bumped = run({**ones, k: jnp.float64(1.0 + r)})
+            rows = [moved_counts(b, p) for b, p in zip(base, bumped, strict=True)]
+            row[sign] = {"moved_by_kt": rows, "moved_total_by_kt": [sum(x.values()) for x in rows]}
+        result["scalars"][k] = row
+        log(f"[{time.time() - t0:7.1f}s] {k}: up {row['up']['moved_total_by_kt']}"
+            f" down {row['down']['moved_total_by_kt']}")
     return result
 
 
@@ -172,22 +178,132 @@ def linearity(rung: str, keys, rel: float, log=print) -> dict:
     card, model, state0, forcing = _model(rung)
     body = step_body(model)
     ones = {k: jnp.float64(1.0) for k in SCALARS}
-    step = jax.jit(lambda s: body(state0, s, card.dt_s, *forcing[0]))
-    tangent = jax.jit(lambda t: jax.jvp(lambda s: body(state0, s, card.dt_s, *forcing[0]),
-                                        (ones,), (t,))[1])
-    base = jax.device_get(step(ones))
-    out = {"rung": rung, "rel": rel, "worktree": worktree_stamp(allow_dirty=True), "keys": {}}
+    # state, dt and forcing are ARGUMENTS (as in the production step): closed
+    # over, they become constants and XLA folds them into a different program.
+    args = (card.dt_s, *forcing[0])
+    jstep = jax.jit(body)
+    jtan = jax.jit(lambda st, t, *a: jax.jvp(lambda s: body(st, s, *a), (ones,), (t,))[1])
+    base = jax.device_get(jstep(state0, ones, *args))
+    prod = jax.device_get(model.step(state0, card.dt_s, freshwater=forcing[0][0],
+                                     surface_forcing=forcing[0][1]))
+    out = {"rung": rung, "rel": rel, "worktree": worktree_stamp(allow_dirty=True),
+           "parity_vs_production": moved_counts(prod, base), "keys": {}}
+    log("parity vs production:", out["parity_vs_production"])
     for k in keys:
         row = {}
         for r in (rel, 10 * rel):
-            row[f"diff@{r:g}"] = _max_abs(jax.device_get(step({**ones, k: jnp.float64(1 + r)})),
-                                          base)
-        t = jax.device_get(tangent({j: jnp.float64(1.0 if j == k else 0.0) for j in SCALARS}))
+            row[f"diff@{r:g}"] = _max_abs(
+                jax.device_get(jstep(state0, {**ones, k: jnp.float64(1 + r)}, *args)), base)
+        t = jax.device_get(jtan(state0, {j: jnp.float64(1.0 if j == k else 0.0)
+                                         for j in SCALARS}, *args))
         row[f"jvp*{rel:g}"] = {p: v * rel for p, v in _max_abs(t, jax.tree_util.tree_map(
             np.zeros_like, t)).items()}
         out["keys"][k] = row
         log(k, {name: {p: v for p, v in d.items() if p.startswith(".T[")}
                 for name, d in row.items()})
+    return out
+
+
+def floor_cells(rung: str, log=print) -> dict:
+    """The TKE diffusivity cells within 0.1 % above the background floor.
+
+    Records the closure's inputs from inside the jitted production step
+    (ordered callbacks; control: the recorded step's state equals the
+    unrecorded one) and evaluates there, in fp64 numpy:
+    NEMO ``zdftke.f90:707-717``: avt = MAX(pdlr * MAX(zav, avtb), avtb),
+    zav = (rn_ediff * zmxlm) * SQRT(en); the closure eager, avtb vs
+    zav / (1 / pdlr); and the closure jitted alone, where XLA may rewrite
+    the reciprocal division.
+    """
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+    from legoesm.ocean.physics.vertical_mixing import tke as tke_mod
+
+    card, model, state0, forcing = _model(rung)
+    tcfg = model.config.physics.vertical_mixing.tke
+    fl = np.float64(tcfg.kappaH_min)
+    args = (card.dt_s, *forcing[0])
+    body = step_body(model)
+    ones = {k: jnp.float64(1.0) for k in SCALARS}
+    base = jax.device_get(jax.jit(body)(state0, ones, *args))
+
+    calls = []
+    orig_k, orig_pr = tke_mod.compute_K_from_tke, tke_mod._prandtl_number
+
+    def rec(tag):
+        return lambda **a: calls.append((tag, {k: np.asarray(v) for k, v in a.items()}))
+
+    def pr_rec(*a, **kw):
+        pr = orig_pr(*a, **kw)
+        jax.debug.callback(rec("Pr"), Pr=pr, ordered=True)
+        return pr
+
+    def k_rec(e, l_k, cfg, **kw):
+        k_m, k_h = orig_k(e, l_k, cfg, **kw)
+        jax.debug.callback(rec("K"), e=e, l_k=l_k, K_H=k_h, ordered=True)
+        return k_m, k_h
+
+    tke_mod.compute_K_from_tke, tke_mod._prandtl_number = k_rec, pr_rec
+    try:
+        recorded = jax.device_get(jax.jit(step_body(model))(state0, ones, *args))
+    finally:
+        tke_mod.compute_K_from_tke, tke_mod._prandtl_number = orig_k, orig_pr
+    out = {"rung": rung, "worktree": worktree_stamp(allow_dirty=True), "floor": float(fl),
+           "recorded_vs_unrecorded_step": moved_counts(base, recorded),
+           "calls": [t for t, _ in calls]}
+    avt = np.asarray(base.tke_avt.data)
+    cells = (avt >= fl) & (avt < fl * 1.001)
+    # the closure call whose K_H is the stored diffusivity on the floor cells,
+    # with its own Prandtl number (recorded just before it)
+    agree = {i: (a["K_H"].shape == avt.shape and int(np.sum(a["K_H"][cells] == avt[cells])))
+             for i, (t, a) in enumerate(calls) if t == "K"}
+    out["closure_call_shapes"] = [list(a["K_H"].shape) for t, a in calls if t == "K"]
+    out["stored_avt_shape"] = list(avt.shape)
+    out["closure_call_equal_on_floor_cells"] = agree
+    hits = [i for i, n in agree.items() if n == int(cells.sum())]
+    if not hits or calls[hits[-1] - 1][0] != "Pr":
+        raise SystemExit(f"no recorded closure call reproduces tke_avt on the floor cells: {out}")
+    a, pr = calls[hits[-1]][1], calls[hits[-1] - 1][1]["Pr"]
+    out["closure_call_used"] = hits[-1]
+    out["closure_call_equal_wet"] = int(np.sum((a["K_H"] == avt) & (avt > 0)))
+    out["wet"] = int(np.sum(avt > 0))
+    e, lk, pr_c = a["e"][cells], a["l_k"][cells], pr[cells]
+    zav = (np.float64(tcfg.c_k) * lk) * np.sqrt(e)
+    # every pdlr whose reciprocal rounds to the recorded Pr (Pr = 1 / pdlr)
+    pdlr_set = sorted({float(1.0 / p) for p in np.unique(pr_c)})
+    cand = [np.nextafter(x, d) for x in pdlr_set for d in (0.0, 1.0)] + pdlr_set
+    pdlr_ok = sorted({float(c) for c in cand if np.float64(1.0) / c in set(np.unique(pr_c))})
+
+    def ulps(x):
+        return np.asarray(x, np.float64).view(np.int64) - fl.view(np.int64)
+
+    def hist(x):
+        u, c = np.unique(ulps(x), return_counts=True)
+        return {int(k): int(v) for k, v in zip(u[:8], c[:8], strict=True)}
+
+    eager = np.asarray(jnp.maximum(fl, jnp.asarray(zav) / jnp.asarray(pr_c)))
+    jit_alone = np.asarray(jax.jit(lambda z, p: jnp.maximum(fl, z / (1.0 / p)))(
+        jnp.asarray(zav), jnp.asarray(1.0 / pr_c)))
+    out.update({
+        "cells": int(cells.sum()),
+        "stored_avt_ulps_above_floor": hist(avt[cells]),
+        "e_unique": [float(x) for x in np.unique(e)[:5]],
+        "e_n_unique": int(np.unique(e).size),
+        "l_k_unique": [float(x) for x in np.unique(lk)[:5]],
+        "Pr_unique": [float(x) for x in np.unique(pr_c)],
+        "pdlr_consistent_with_Pr": pdlr_ok,
+        "closure_eager_ulps": hist(eager),
+        "closure_jit_alone_ulps": hist(jit_alone),
+        "closure_eager_equals_stored": int(np.sum(eager == avt[cells])),
+        "nemo": {},
+    })
+    for p in pdlr_ok:
+        nemo = np.maximum(np.float64(p) * np.maximum(zav, fl), fl)
+        out["nemo"][repr(p)] = {"ulps": hist(nemo),
+                                "equals_stored_jit": int(np.sum(nemo == avt[cells])),
+                                "equals_closure_eager": int(np.sum(nemo == eager))}
+    log(json.dumps(out, indent=1, default=str))
     return out
 
 
@@ -208,6 +324,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--trace-cd0", action="store_true")
     parser.add_argument("--linearity", nargs="+", choices=SCALARS)
+    parser.add_argument("--floor-cells", action="store_true")
     args = parser.parse_args()
     import jax
     if not (jax.config.jax_enable_x64 and jax.default_backend() == "cpu"):
@@ -217,6 +334,9 @@ def main() -> int:
         return 0
     if args.output is None:
         parser.error("--output is required with a scan")
+    if args.floor_cells:
+        args.output.write_text(json.dumps(floor_cells(args.rung), indent=1, default=str) + "\n")
+        return 0
     if args.linearity:
         args.output.write_text(json.dumps(linearity(args.rung, args.linearity, args.rel),
                                           indent=1, default=str) + "\n")

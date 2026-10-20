@@ -1755,6 +1755,18 @@ CITATION_MAP = {
     # round 319: the cast-free cd0 argument; DECISION 142 at the card run length
     'ocean_model_latlon_cgrid.py:11751': [('cd0=_cfg_b.bottom_drag.bottom_drag_cd0,', 1)],
     'nemo_testcase_recipe.py:1985': [('2920,  # DECISION 142 (user, 2026-10-20): one year, deliberate', 1)],
+    # round 319 review: the background diffusivity floor against NEMO's avt statement
+    'tke.py:2309': 'K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)',
+    'tke.py:2165': 'pdlr = jnp.maximum(0.1, ri_cri / jnp.maximum(ri_cri, zri))',
+    'tke.py:2166': 'return 1.0 / pdlr',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:405':
+        'p_pdlr(ji,jj,jk) = MAX(  0.1_wp,  ri_cri / MAX( ri_cri , zri )  )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:708': 'zav   = rn_ediff * zmxlm(ji,jk) * zsqen',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:710':
+        'p_avt(ji,jj,jk) = MAX( zav, avtb_2d(ji,jj) * avtb(jk) ) * wmask(ji,jj,jk)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:717':
+        'p_avt(ji,jj,jk)   = MAX( p_pdlr(ji,jj,jk) * p_avt(ji,jj,jk), avtb_2d(ji,jj) * avtb(jk) )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:442': 'avtb(:) = 1.e-10_wp',
     'ocean_model_latlon_cgrid.py:1995': 'return sr(rhs - sr(vertical_scaled / e3t_div))',
     'ocean_model_latlon_cgrid.py:2677-2679': [
         'out = r(r(r(q_before[..., None] * base)', '/ q_after)', 3],

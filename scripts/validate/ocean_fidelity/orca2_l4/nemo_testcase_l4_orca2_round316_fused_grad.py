@@ -167,13 +167,21 @@ def cost(rung: str, n_list: tuple[int, ...], remat: bool, jvp_at: tuple[int, ...
         compiled = jax.jit(jax.value_and_grad(f)).lower(t0).compile()
         t_compile = time.perf_counter() - tic
         mem = compiled.memory_analysis()
+        # Persisted BEFORE executing: a row with "compiled" and no run fields
+        # is a run-time stop; no row at all is a compile-time stop.
+        out["rows"][str(n)] = {"status": "compiled", "compile_s": round(t_compile, 1),
+                               "xla_temp_gb": mem.temp_size_in_bytes / 1e9,
+                               "xla_argument_gb": mem.argument_size_in_bytes / 1e9,
+                               "xla_output_gb": mem.output_size_in_bytes / 1e9}
+        output.write_text(json.dumps(out, indent=1, default=str) + "\n")
+        print(f"N={n} compiled", out["rows"][str(n)], flush=True)
         base = rss_bytes()
         with RssSampler() as sampler:
             tic = time.perf_counter()
             value, g = jax.block_until_ready(compiled(t0))
             t_run = time.perf_counter() - tic
         g = np.asarray(g)
-        row = {"compile_s": round(t_compile, 1), "backward_run_s": round(t_run, 2),
+        row = {"status": "ran", "compile_s": round(t_compile, 1), "backward_run_s": round(t_run, 2),
                "rss_before_run_gb": base / 1e9, "run_peak_rss_gb": sampler.peak / 1e9,
                "run_rss_growth_gb": (sampler.peak - base) / 1e9,
                "xla_temp_gb": mem.temp_size_in_bytes / 1e9,
