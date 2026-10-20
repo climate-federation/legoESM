@@ -11,6 +11,9 @@ others an arm is the shipped card, stated, never silently skipped):
            Deck: rung 10 only (ln_trabbc, nn_geoflx = 2, namelist_cfg:257-264).
   BOTH     ISO and GEO.
   D122     the card as shipped after this round's selection.
+"control" and the arms always start from the card before the selection;
+on the selected tree rung 10's isoneutral block is rebuilt for them
+(pre_round320_gm_redi).
 """
 
 from __future__ import annotations
@@ -56,6 +59,22 @@ def _apply(cfg, pieces):
     return cfg
 
 
+def pre_round320_gm_redi():
+    """Rung 10's isoneutral block before round 320 (the generic card block).
+
+    Default GMRediConfig plus these twelve fields, read off the card at
+    246f73429; the control ladder rerun on the selected tree reproduces the
+    pre-selection control row for row (receipt)."""
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    return GMRediConfig()._replace(
+        kappa_GM=0.0, slope_scheme="nemo_iso_lap", slope_density="neutral",
+        slope_positions="nemo_native", nemo_mld_slope_ramp=True,
+        mld_criterion="n2_integral", slope_metric_evaluation="nemo_reciprocal",
+        slope_face_thickness_evaluation="nemo_qco_live",
+        slope_depth_evaluation="nemo_qco_live_literal", nemo_slope_shapiro=True,
+        redi_a33_evaluation="nemo_literal", implicit_K33=True)
+
+
 def selected_card(card, *, arm: str, rung: str):
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         orca2_l2_isoneutral_gm_redi,
@@ -65,18 +84,25 @@ def selected_card(card, *, arm: str, rung: str):
     iso = cfg.gm_redi == orca2_l2_isoneutral_gm_redi()
     geo = cfg.rk3_stage3_geothermal_nemo_written
     shipped = tuple(p for p, on in (("ISO", iso), ("GEO", geo)) if on)
-    # Arms run on the pre-selection card; D122 on the card after selection.
-    want = D122_SELECTED[rung] if arm == "D122" else ()
-    require(shipped == want,
-            f"{rung}: arm {arm} needs a shipped card carrying {want}, "
-            f"found {shipped}")
+    # Tolerates the tree before the selection (3da2f6835: nothing shipped)
+    # and after it (D122_SELECTED shipped); anything else refuses.
+    require(shipped in ((), D122_SELECTED[rung]),
+            f"{rung}: shipped card carries {shipped}")
     if arm == "D122":
+        require(shipped == D122_SELECTED[rung],
+                f"{rung}: D122 needs the selected card, found {shipped}")
         return card
+    if shipped:
+        # "control" is the card before round 320's selection.
+        cfg = cfg._replace(gm_redi=pre_round320_gm_redi())
     pieces = tuple(p for p in ARM_PIECES[arm] if p in DECK_PIECES[rung])
     new = _apply(cfg, pieces)
     if not pieces:
         require(new == cfg, f"{rung}: arm {arm} moved a card whose deck "
                             "sets none of its pieces")
+        if not shipped:
+            require(new == card.recipe.model_config,
+                    f"{rung}: arm {arm} moved the pre-selection card")
     return card._replace(recipe=card.recipe._replace(model_config=new))
 
 

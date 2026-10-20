@@ -26,6 +26,7 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 )
 from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round320_l2_l4_d122_gate import (  # noqa: E501
     GateError,
+    pre_round320_gm_redi,
     selected_card,
 )
 
@@ -72,12 +73,22 @@ def test_geothermal_refuses_with_isoneutral_diffusion(cards) -> None:
                               iwm_forcing=getattr(r, "iwm_forcing", None))
 
 
-def test_gate_refuses_a_card_that_does_not_match_the_arm(cards) -> None:
-    # Arms run on the pre-selection card; the shipped card now carries L2.
-    with pytest.raises(GateError, match="needs a shipped card"):
-        selected_card(cards["rung10"], arm="control", rung="rung10")
-    assert selected_card(cards["rung10"], arm="D122", rung="rung10") is cards["rung10"]
-    unselected = cards["rung10"]._replace(recipe=cards["rung10"].recipe._replace(
-        model_config=cards["rung10"].recipe.model_config._replace(gm_redi=None)))
-    with pytest.raises(GateError, match="needs a shipped card"):
-        selected_card(unselected, arm="D122", rung="rung10")
+def _with(card, **fields):
+    return card._replace(recipe=card.recipe._replace(
+        model_config=card.recipe.model_config._replace(**fields)))
+
+
+def test_gate_control_is_the_pre_selection_card(cards) -> None:
+    card = cards["rung10"]
+    control = selected_card(card, arm="control", rung="rung10")
+    assert control.recipe.model_config == card.recipe.model_config._replace(
+        gm_redi=pre_round320_gm_redi())
+    assert selected_card(card, arm="ISO", rung="rung10") == card
+    assert selected_card(card, arm="D122", rung="rung10") is card
+    with pytest.raises(GateError, match="D122 needs the selected card"):
+        selected_card(_with(card, gm_redi=pre_round320_gm_redi()),
+                      arm="D122", rung="rung10")
+    with pytest.raises(GateError, match="shipped card carries"):
+        selected_card(_with(card, rk3_stage3_geothermal_nemo_written=True),
+                      arm="control", rung="rung10")
+    assert selected_card(cards["omt1"], arm="ISO", rung="omt1") == cards["omt1"]
