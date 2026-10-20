@@ -169,6 +169,23 @@ def test_official_geothermal_file_hash_and_size():
     assert hashlib.sha256(path.read_bytes()).hexdigest() == QGH_SHA256
 
 
+def test_receipt_uses_remeasured_artifacts_and_withdraws_old_preflight():
+    receipt = (REPO / "docs/ocean/fidelity/testcases/"
+               "nemo_testcases_gridladder_l4_round1_receipt.md").read_text()
+    for measured in (
+        "65e0d2f111f675d08e1224f4336bd65b0f0911c151ea2ae8b306b66937581ac6",
+        "5d47eab85c591fe0fd7e63a80892f3264b6387edf93cbb975a71b2f2f5fdf1a4",
+        "L4_PREFLIGHT_OK commit=588c0e3da2affac10cf958e811a85bdb4c0d75a3",
+        "claimed successful preflight at `763a8625f3` is also withdrawn",
+    ):
+        assert measured in receipt
+    for superseded in (
+        "65e0d2b9302248caece34141d05e78b1982e4ac954771bb16370437de61ace3b",
+        "5d47eab63a54c0e3a41dc11aac823e447bc3a687126789863d8f86bab7e263ec",
+    ):
+        assert superseded not in receipt
+
+
 @needs_inputs
 def test_heatflow_loader_exactly_widens_native_float32():
     reader = _forcing_records_module()
