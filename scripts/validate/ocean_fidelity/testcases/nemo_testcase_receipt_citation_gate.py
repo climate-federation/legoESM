@@ -8602,6 +8602,31 @@ CITATION_MAP = {
         'IF( MOD( nitend - nit000 + 1, nn_fsbc) /= 0 ) THEN',
         "WRITE(ctmp1,*) 'sbc_init : nn_stock (', nn_stock, ') is NOT a multiple of nn_fsbc (', nn_fsbc, ')'", 6,
     ],
+    # --- lane B round 20 continuation (Codex): defined-cell L3 observer ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:108':
+        'REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) ::   zFu, zFv, zFw',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:121':
+        'ALLOCATE( zFu(jpi,jpj,jpk), zFv(jpi,jpj,jpk), zFw(jpi,jpj,jpk) )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:281-283': [
+        ('DO jk =  1,  jpkm1', 1),
+        'zFv(ji,jj,jk) = e1v(ji,jj)', 3,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:248-251': [
+        ('DO jj = ntsj-( nn_hls), ntej+(  nn_hls-1 )', 2),
+        'pFw(ji,jj,jpk) = 0._wp', 4,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:254-257': [
+        'IF( kstg == 3 ) THEN',
+        'CALL ldf_eiv_trp( kt, kit000, pFu, pFv, pFw, Kmm, Krhs )', 4,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:938-955': [
+        ('zpsi_uw(:,:,:) = 0._wp', 2),
+        'pFv(ji,jj,jk) = pFv(ji,jj,jk) - ( zpsi_vw', 18,
+    ],
+    'packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:452-459': [
+        'Mask the bolus by the SAME 3-D tracer face masks',
+        'bolus_mfv = bolus_mfv * v_mask_3d', 8,
+    ],
     # --- lane B round 17: L2 standard isoneutral tracer diffusion ---
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:300':
         'ln_traldf_lap   = .true.    !    laplacian operator',

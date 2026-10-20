@@ -60,8 +60,11 @@ streamfunctions at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:947-950`, and adds
 their vertical differences to `pFu/pFv` at
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:954-955`.  `tra_adv` invokes that
 transport only for EIV with the non-triad scheme at
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:255-257`.  Thus the bolus reaches the
-existing G9 FCT transport and does not enter momentum or continuity.
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:255-257`.  Thus the bolus augments
+the horizontal transport passed to the existing G9 FCT path; NEMO then
+recomputes `ww` from those augmented transports at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:296`.  It therefore enters tracer
+continuity, but not momentum.  This corrects P2's frozen continuity clause.
 
 No extra EIV input file is active: selection 21 derives the coefficient from
 the live stratification, slopes, metrics, Coriolis field, and masks named in
@@ -119,9 +122,10 @@ The committed entry point defaults to read-only preflight and reserves
 7. both target configuration and run root are absent, with planted existing
    targets refused.
 
-The operator acquisition creates three deterministic two-step twins, requires
-all six observer frames, requires nonzero EIV transport deltas, and refuses an
-L3 stage-3 tracer record equal to either admitted G9 or admitted L2.  No
+The operator acquisition runs a two-step smoke, a writer-free boundary arm,
+and three twins to a common even endpoint no greater than 10 steps.  Admission
+requires all six observer frames, nonzero EIV transport deltas, and an L3
+stage-3 tracer record unequal to both admitted G9 and admitted L2.  No admitted
 record exists yet, so no score or bar verdict is permitted.
 
 ## Landing gates
@@ -222,11 +226,66 @@ Landing gates for this continuation (JAX_ENABLE_X64=1, land.sh PYTHONPATH):
 - acquisition preflight: `L3_PREFLIGHT_OK checklist=7 plants=all_refused`
   with the evidence parent absent.
 
+## Continuation (Codex, 2026-10-20) — failed twin diagnosis and acquisition repair
+
+The second operator acquisition is retained as `oracle_l3_r20_failed2` and is
+not admitted.  Smoke, the writer-free boundary arm, and all three L3 twins ran;
+each twin completed 10 steps with exit 0, and the acting check reported
+837,255 changed transport values.  Of 110 oracle files, 109 are byte-identical.
+Only `oracle_l3_eiv_kt00000001.bin` differs, and only twin B's `before_u` and
+`after_u`: the same 281 cells differ, all on levels 1-2 and all in the final
+local row or column.  `delta_u`, every V frame, and twins A/C are identical.
+
+The cause is read off NEMO's executed RK3 path.  `zFu/zFv` are allocatable work
+arrays at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:108` and are allocated
+without initialization at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:121`.
+The producer writes levels 1 through `jpkm1` only over its lower-inclusive,
+upper-exclusive halo rectangle at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:281-283`; `tra_adv_trp` writes the
+bottom level over the same horizontal rectangle at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:248-251`, then calls EIV at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:254-257`.  EIV initializes its own
+streamfunctions and updates `pFu/pFv` over that same rectangle at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:938-955`.
+
+For this one-rank record, the array is 184 x 152 x 31 and those loops write
+`i=1..183, j=1..151`; the untouched union `i=184 OR j=152` therefore contains
+10,385 allocated-but-undefined slots per transport field.  All 281 observed
+differences lie in that union.  The halo-free mesh has exactly 413,030 wet U
+slots and 415,175 wet V slots.  Both sets lie wholly inside the initialized
+rectangle.
+
+The observer now follows the existing `l4_canon_3d` pattern: a private result
+starts at +0 and reads only owned cells whose U/V mesh mask is nonzero.  NEMO's
+arrays remain `INTENT(in)` to that helper and are never assigned.  Thus every
+undefined halo slot and every other excluded dry/halo slot is canonical +0,
+while all defined wet values retain their exact bytes.  The reader requires
+canonical +0 outside that domain and the twin scorer byte-compares only the
+same wet U/V masks.  legoESM has no NEMO halo cells and holds zero on excluded
+dry faces by its production face-mask multiplication at
+`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:452-459`.
+The synthetic plants prove that garbage in an excluded cell is canonicalized
+away, while the same garbage in a defined wet cell still separates the twins.
+
+Existing-record admission no longer trusts twin A's `time.step`.  It derives
+the common even endpoint from the audited writer-free boundary arm, then
+independently rechecks the current producer binary, immutable inputs, rendered
+deck, L3 log selection and numeric values, exit status, and final step for the
+smoke and all three twins.  Plants alter B/C's final step, a completed deck, a
+completed log, and the smoke exit; each is refused.  The raw-observer plant is
+also refused.
+
+At `cf43852d6b`, with both target configurations and the evidence parent
+absent, read-only preflight reports
+`L3_RECORD_SELFTEST_OK undefined_garbage=canonicalized defined_garbage=detected`
+and `L3_PREFLIGHT_OK checklist=7 plants=all_refused`.  No NEMO executable was
+built or run, and no score was computed.
+
 independent review: operator (Claude)
 
-codex review: operator (Claude-authored continuation; codex review when capacity allows)
+codex review: operator
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r20/repo
-ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/testcases/nemo_testcase_l3_orca2eiv/run.sh --run
+ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r20/repo/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l3_orca2eiv/run.sh --run
 DECISION_NEEDED: NONE
-ROUND_STATUS: ACQUISITION_NEEDED — L3 reviewed, fixed and preflighted; L1 restored; record not acquired or scored
+ROUND_STATUS: STOPPED_FOR_RECORD — L3 reviewed, fixed and preflighted; acquisition needed; record not acquired or scored
