@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import inspect
 import struct
 import sys
 from pathlib import Path
@@ -74,6 +75,21 @@ def test_cancellation_sensitive_coefficient_plant_moves_one_word_one_ulp():
     assert control["coefficient_movement"]["max_ulp"] == 1
     np.testing.assert_array_equal(planted[0], pair[0])
     assert planted[1][0, 1, 0] == np.nextafter(3.0, np.inf)
+
+
+def test_stage1_routes_smagorinsky_override_into_initial_tendency_call():
+    """The factor arm must reach stage 1, not only RK stages 2 and 3."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    source = inspect.getsource(LatLonCGridOceanModel._step_impl)
+    initial_call = source.index("_tend_result = self.tendencies(")
+    initial_end = source.index(
+        "return_nemo_operator_components=_want_rhs_components)", initial_call)
+    initial_source = source[initial_call:initial_end]
+    assert "nemo_smagorinsky_coefficient_override=(" in initial_source
+    assert ".smagorinsky_coefficient_override)" in initial_source
 
 
 def test_envelope_uses_registered_four_times_maximum():
