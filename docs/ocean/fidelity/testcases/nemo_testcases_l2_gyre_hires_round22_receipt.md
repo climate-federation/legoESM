@@ -148,9 +148,13 @@ keyword on the existing physical call line also restores the complete historic
 citation-map audit after an intermediate three-line form correctly made it
 fail.
 
-Review status remains **HELD / UNREVIEWED-BY-GLM** pending the read-only CLI
-review attempts recorded in the final documentation commit. No production
-physics fix depends on this unreviewed composition localization.
+Review status is **HELD / UNREVIEWED-BY-GLM**. The read-only Codex reviewer
+failed while initializing its app-server client on the read-only host
+filesystem. The read-only Claude reviewer reported that the workspace trust
+record was unavailable, then produced no review content and was terminated
+after the bounded wait. GLM is unavailable as recorded by the operator. These
+are service failures, not verdicts or waivers. No production physics fix
+depends on this unreviewed composition localization.
 
 Choice audit -- **ASKED**: repair merged citation anchors, score the acquired
 scalar/vector coefficients, walk one factor at a time, preserve exact bars,
