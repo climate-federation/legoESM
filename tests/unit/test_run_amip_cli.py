@@ -5524,3 +5524,41 @@ def test_production_deck_selects_log_form_vapour_filter():
     cfg = build_config_from_args(parser.parse_args([]))
     assert cfg.dycore.mpas_vert4_log_form_tracers == ("q_v",)
     assert cfg.dycore.mpas_vert4_flux_form_tracers == ()
+
+
+_DRY_BASE = ["--grid-type", "latlon", "--dataset", "analytical", "--dry-run"]
+
+
+def test_dry_run_reports_missing_input_and_returns_1(tmp_path, capsys):
+    from scripts.run.run_amip import main
+    gone = str(tmp_path / "no_such_restart.npz")
+    assert main(_DRY_BASE + ["--restart-from", gone]) == 1
+    out = capsys.readouterr().out
+    assert "MISSING" in out and gone in out
+    assert "Setup..." not in out
+
+
+def test_dry_run_all_present_returns_0(tmp_path, capsys):
+    from scripts.run.run_amip import main
+    here = tmp_path / "restart.npz"
+    here.write_bytes(b"")
+    assert main(_DRY_BASE + ["--restart-from", str(here)]) == 0
+    out = capsys.readouterr().out
+    assert "all input files present" in out and "MISSING" not in out
+
+
+def test_dry_run_builtin_topography_is_not_a_file(capsys):
+    from scripts.run.run_amip import main
+    assert main(_DRY_BASE + ["--topography", "gaussian"]) == 0
+    assert "not used  topography" in capsys.readouterr().out
+
+
+def test_dry_run_exit_code_reaches_the_shell(tmp_path):
+    import subprocess
+    gone = str(tmp_path / "no_such_restart.npz")
+    proc = subprocess.run(
+        [sys.executable, "scripts/run/run_amip.py", *_DRY_BASE,
+         "--restart-from", gone],
+        capture_output=True, text=True, env={**__import__("os").environ,
+                                             "JAX_PLATFORMS": "cpu"})
+    assert proc.returncode == 1, proc.stderr[-2000:]
