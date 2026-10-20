@@ -10286,7 +10286,7 @@ class LatLonCGridOceanModel:
                         zfu_eiv = jnp.concatenate(
                             [u_eiv[:, -1:, :], u_eiv], axis=1)
                         zfv_eiv = jnp.concatenate(
-                            [v_eiv[-1:, :, :], v_eiv], axis=0)
+                            [jnp.zeros_like(v_eiv[:1]), v_eiv], axis=0)
                         _zfu_before = stage3[7]
                         _zfv_before = stage3[8]
                         stage3[7] = stage3[7] + zfu_eiv   # ldftra.f90:954

@@ -1895,10 +1895,11 @@ def compute_treguier_kappa_gm_nemo_native(
     # wslpj=0 (dry columns, or a genuinely flat/unstratified wet column —
     # unlike compute_treguier_kappa_gm's sigma, which always carries a
     # 1e-30 floor baked into S_mag, wslpi/wslpj here are the raw
-    # ldfslp-native slopes and CAN be exact zero); floor before sqrt.
+    # ldfslp-native slopes and CAN be exact zero). Preserve NEMO's exact
+    # forward sqrt(0), but select its finite zero tangent in reverse mode.
     if source_ordered_final:
         ratio = b(zah / zhw)
-        t_inv = b(jnp.sqrt(ratio))
+        t_inv = b(_nemo_sqrt_nonnegative_forward_exact(ratio))
         zaeiw = b(b(b(ro * ro) * t_inv) * mask)
         rad20 = b(jnp.asarray(TREGUIER_TAPER_LAT_DEG, dtype=dtype)
                   * jnp.asarray(float.fromhex("0x1.1df46a2529d39p-6"),

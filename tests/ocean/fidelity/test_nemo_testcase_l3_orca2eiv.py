@@ -326,6 +326,12 @@ def test_l3_record_jitted_traced_x64_transport_and_wiring(cards):
         run.initial_state, l3.dt_s, freshwater=fw, surface_forcing=sf))
     assert isinstance(observed.mass_flux_w, _NEMOWSL3EIVTransportTrace)
     trace = observed.mass_flux_w
+    # The native V transport has no redundant southern row.  Its staged
+    # NEMO view therefore pads the closed south wall with zero; copying the
+    # final (north-pivot) row here plants 1,319 nonzero wall transports on
+    # this record.  The live north row makes the control non-vacuous.
+    assert np.count_nonzero(np.asarray(trace.delta_v)[0]) == 0
+    assert np.count_nonzero(np.asarray(trace.delta_v)[-1]) > 0
     record = RECORDS.read(L3_RECORD / "oracle_l3_eiv_kt00000001.bin")
 
     def inner(name):
