@@ -41,7 +41,9 @@ Status: **LANDED-pending** (operator review + push gate + DINO month gate).
   constructor (lane B's argument list).
 - `50388ab5d` selection (rung 10) + round-314 audit rows; `2113923a5`
   audit table/receipt; `dd63567e4` selection test; `16ba169d2` gate control
-  = card before the selection (below).
+  = card before the selection (below); `45db33d21` citation re-anchor;
+  `629127391` lane B's isoneutral unit tests; `6583a4439` rung-10
+  isoneutral scalar declared inert.
 - Gate: `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round320_l2_l4_d122_gate.py`
   (round-285 ladder, round-318 later-first classifier = DECISION 139's
   safeguard, round-278 decision). CPU, fp64, libm, production JIT. Evidence
@@ -136,13 +138,33 @@ RMS S 2.284e-3 -> 2.267e-3 (both labels).
 - L1 (BBL) commits are not imported beyond the BBL module's off-by-default
   helper change; L3 not imported (brief).
 
-## Gates (x64, CPU)
+## Gates (x64, CPU; logs `orca2_rounds/round320/gates/`)
 
-Filled in after the batteries (next commit).
+- Receipt citation gate on this receipt: PASS, 5 citations, 0 failures,
+  0 map entries failing (`citation_gate_receipt.json`). The imports shifted
+  89 map entries; re-anchored to the lines their symbols now identify (map +
+  default receipt, `45db33d21`).
+- Default gate (land.sh list), split across calls: citation-gate test 17,
+  private-import ratchet 6, TKE terms 71, recipe 25, freshwater closure 16,
+  stage face mask 2, prognostic barotropic 8, ORCA2 parallel receipt 2 =
+  147 passed, 0 failed.
+- Nearby: lane B's isoneutral unit tests (imported) 100, round-318
+  selection 15, round-315 gradient probe 11, card constructibility 22,
+  recipe unit 31, round-320 selection 3, round-314 audit 9 passed.
+- Round-319 traced scalars: 12 passed, 1 failed before the fix: rung 10's
+  isoneutral scalar kappa_Redi now moves 0 values raised and 0 lowered (the
+  executed coefficient comes from rn_Ud). Declared inert; rerun 13 passed.
+- Non-vacuity: with the card selection reverted, 2 of the 3 round-320
+  selection tests fail (`nonvacuity.log`).
 
 ## OPEN
 
-- DECISION: geothermal on rung 10 (below).
+- DECISION: geothermal on rung 10. (1) lane A certifies L4 on a rung that
+  also runs isoneutral diffusion (NEMO's tra_ldf -> tra_bbc order), then
+  import; (2) write that order on this card now, measured under D96 only;
+  (3) leave off. Pick 1.
+- Rung-10 trainers: the isoneutral knob that moves the state is now rn_Ud,
+  not kappa_Redi (inert). Whether a trainer exposes rn_Ud is the user's call.
 - Rung 0 runs no isoneutral diffusion although its NEMO run does; L2 needs
   the stored stage-3 tracer thickness there.
 - The geothermal-refusal test is not plant-checked (its guard is lane A's).
