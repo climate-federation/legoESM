@@ -155,8 +155,9 @@ skipped, and the SWG card case passed: `11 passed, 1 skipped`. Aggregate:
 
 The citation-map drift caused by the new 24-line hash helper was repaired only
 after re-reading the moved record-magic check; all 17 citation tests and their
-plants pass. The receipt citation gate is run on the committed receipt,
-including a planted shift that must exit nonzero.
+plants pass. The committed-receipt citation gate reports `PASS` with one
+resolved citation and no failures; shifting that citation by two lines reports
+`SYMBOL-NOT-AT-LINE` and exits 1.
 
 Choice audit -- **ASKED**: exact config diff, ten-step whole-state byte audit,
 digest adoption, explicit climate-PASS provenance transfer, preregistered
