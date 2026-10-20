@@ -247,8 +247,9 @@ round-315 probe 11, round-319 scalar tests 13.
 - Gates re-run after the resume at `d9067e78d` (x64, CPU,
   `jobs/gates2/`, one process each): private-import ratchet 6, TKE terms
   71, recipe 25, freshwater 16, WS stage face-mask 2, barotropic state 8,
-  ORCA2 parallel receipt 2, round-316 instruments 9 — 0 failed. Citation
-  gate test and this receipt's gate: see the next commit's line below.
+  ORCA2 parallel receipt 2, round-316 instruments 9 — 0 failed. At
+  `4910fdccd` (clean tree): citation-gate test 17 passed; this receipt's
+  gate PASS, 11 citations, failures 0 (`gates/citation_gate_receipt_resume.json`).
 
 ## OPEN
 - The background floor kappaH_min is one-sided on rung 10 (and in NEMO's
