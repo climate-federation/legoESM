@@ -121,9 +121,6 @@ EXPECTED_DIFFERS = {
     "oce:namrun.nn_itend": "c",
     "oce:namzdf_tke.nn_mxlice": "b:D135",
     "oce:namdrg.ln_drgice_imp": "b:D133",
-    "oce:namtra_ldf.ln_traldf_msc": "c",
-    "oce:namtra_ldf.nn_aht_ijk_t": "c",
-    "oce:namtra_ldf.rn_ud": "c",
     "oce:namtra_eiv.ln_ldfeiv": "c",
     "oce:namtra_mle.ln_mle": "c",
 }
@@ -140,9 +137,9 @@ def report():
 
 def test_rung10_audit_pins_the_round314_table(report):
     assert report["n_keys"] == 1108
-    assert report["counts"] == {"MATCH": 161, "DIFFERS": 8, "NOT-MODELLED": 690, "INERT": 217,
+    assert report["counts"] == {"MATCH": 164, "DIFFERS": 5, "NOT-MODELLED": 690, "INERT": 217,
                                 "UNCOMPARED": 32}
-    assert report["counts_exp00"] == {"MATCH": 160, "DIFFERS": 9, "NOT-MODELLED": 690, "INERT": 217,
+    assert report["counts_exp00"] == {"MATCH": 163, "DIFFERS": 6, "NOT-MODELLED": 690, "INERT": 217,
                                       "UNCOMPARED": 32}
     assert not [r["key"] for r in report["rows"] if r["status"] == "MATCH" and r["card"] in ("-", "not built (off)")]
     assert report["selfcheck"]["unexplained"] == []
@@ -161,11 +158,11 @@ def test_rung10_audit_pins_the_round314_table(report):
 
 def test_card_side_is_read_from_the_built_card(report):
     # Plant: the same audit with the card's isoneutral MSC flag flipped moves
-    # exactly that row to MATCH, so the column is read, not asserted.
+    # exactly that row (to DIFFERS since round 320), so the column is read.
     oo = (audit.RECORD / "ocean.output").read_text(errors="replace")
     ctx = audit.build_context(audit.RECORD, oo)
     assert ctx.card.case == "ORCA2-zps"
-    planted = ctx._replace(flat={**ctx.flat, "gm_redi.msc_stabilize": True})
+    planted = ctx._replace(flat={**ctx.flat, "gm_redi.msc_stabilize": False})
     again = audit.audit(audit.RECORD, audit.EXP00, audit.NEMO / "cfgs/SHARED", ctx=planted)
     moved = {r["key"] for r, s in zip(again["rows"], report["rows"]) if r["status"] != s["status"]}
     assert moved == {"ln_traldf_msc"}

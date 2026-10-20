@@ -656,18 +656,18 @@ def _rules() -> list[Rule]:
     a(Rule(r"oce:namtra_ldf\.ln_traldf_(off|blp|lev|hor|triad)", "map",
            card=lambda c: c.flat[G + "slope_scheme"] != "nemo_iso_lap", effect=LT))
     a(Rule(r"oce:namtra_ldf\.ln_traldf_msc", "map", card=C(G + "msc_stabilize"),
-           why="card keeps the full K33 term implicit (GYRE form) instead of NEMO's "
-               "stabilising split", effect=LT, cls="c"))
+           why="card runs NEMO's stabilising split since round 320 (lane B L2); "
+               "before it kept the full K33 term implicit (GYRE form)", effect=LT, cls="c"))
     a(Rule(r"oce:namtra_ldf\.rn_slpmax", "map", card=C(G + "S_max"), effect=LT))
     a(Rule(r"oce:namtra_ldf\.(ln_triad_iso|ln_botmix_triad|rn_sw_triad)", "inert",
            switch=(("oce:namtra_ldf.ln_traldf_triad", False),), why="ln_traldf_triad = F"))
     a(Rule(r"oce:namtra_ldf\.nn_aht_ijk_t", "map",
            card=lambda c: 20.0 if c.flat[G + "kappa_redi_lat_scaling"] else 0.0,
-           why="card: constant kappa_Redi everywhere (lat scaling off); NEMO 20 = "
-               "1/2*rn_Ud*max(e1,e2) per face", effect=LT, cls="c"))
+           why="NEMO 20 = 1/2*rn_Ud*max(e1,e2) per face; card runs it since round 320 "
+               "(lane B L2), before a constant kappa_Redi", effect=LT, cls="c"))
     a(Rule(r"oce:namtra_ldf\.rn_ud", "map", card=C(G + "kappa_redi_diffusive_velocity"),
-           why="card carries no diffusive velocity; it uses kappa_Redi = 1000 m2/s",
-           effect=LT, cls="c"))
+           why="card carries rn_Ud since round 320 (lane B L2); before it used "
+               "kappa_Redi = 1000 m2/s", effect=LT, cls="c"))
     a(Rule(r"oce:namtra_ldf\.rn_ld", "inert", switch=(("oce:namtra_ldf.nn_aht_ijk_t", 20.0),),
            why="nn_aht_ijk_t = 20 takes the length from max(e1,e2); rn_Ld only prints aht0"))
     # ---- namtra_eiv ----
@@ -718,7 +718,8 @@ def _rules() -> list[Rule]:
     # ---- nambbc (geothermal) ----
     a(Rule(r"oce:nambbc\.rn_geoflx_cst", "inert", switch=(("oce:nambbc.nn_geoflx", 2.0),),
            why="nn_geoflx = 2 reads the map"))
-    a(Rule(r"oce:nambbc\..*", "nm", why="card's step has no geothermal heat source",
+    a(Rule(r"oce:nambbc\..*", "nm", why="card's step has no geothermal heat source (lane A "
+           "L4's statement is imported but refuses with tracer lateral diffusion, round 320)",
            effect="interior tracer sources (geothermal)"))
     # ---- nambbl ----
     BBL = "bottom boundary layer"

@@ -1968,6 +1968,11 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         # nk_rnf = 1 (sbcrnf.f90:486-489) and sbc_rnf_div the surface branch
         # (sbcrnf.f90:279-282); rn_dep_max = 150 is never read.
         runoff_depth_spread_m=0.0, runoff_depth_spread_map=None)
+    # ORCA2 round 320 (Decision 122): lane B rung L2's certified isoneutral
+    # block replaces the generic constant-1000 m2/s one: ln_traldf_lap/iso/msc,
+    # nn_aht_ijk_t = 20, rn_Ud = 0.018 (EXP00 namelist_cfg:300-307), EOS-80
+    # slopes.  Rung 0 and the OMT cards still state their own block.
+    model_config = model_config._replace(gm_redi=orca2_l2_isoneutral_gm_redi())
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
