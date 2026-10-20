@@ -220,9 +220,10 @@ maximum `2.769e-11` K, and exit 1; that plant JSON SHA-256 is
 
 ## 8. Unchanged-card controls and round-53 code
 
-The implementation commit and this scoring run have the same production
-`packages` tree, `7a1a6409ea80b0320a56a338176fae65605e1bf3`, except for this
-round's selector-census assertion.  The latter now pins G9's
+The implementation commit and this scoring run have the same numerical
+production package files; the base `packages` tree was
+`7a1a6409ea80b0320a56a338176fae65605e1bf3`.  The only package edit in this
+resume is a selector-census assertion.  It now pins G9's
 `rk3_stage_transport_stored_r3uv` flag, closing the standing round-52 nit; it
 does not enter any model JAXPR.  Consequently the previously gated two-step
 values of G1--G9 and the flag-off JAXPRs of full ORCA2, DINO, GYRE, SMT,
@@ -232,6 +233,12 @@ checked exactly against the official netCDF variable.
 
 The focused L4/G9 x64 CPU suite passed 32 / 32.  The exact record test is JIT
 compiled with both numeric inputs traced, and its wiring-removal plant fires.
+After the scoring commit, the receipt-specific citation gate found 9 citations,
+0 unmapped, 0 failures and 0 failing map entries; all nine self-test plants
+fired.  The default x64 CPU gate passed 142 / 142 when split at the documented
+compiler limit: citation 17, private imports 6, TKE/recipe/freshwater 109,
+stage-face-mask 2, and prognostic barotropic state 8.  The separately required
+private-import ratchet therefore passed 6 / 6.
 The required review disposition remains `codex review: operator`; no local
 Codex review was run.
 
