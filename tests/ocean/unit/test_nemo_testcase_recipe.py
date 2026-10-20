@@ -248,7 +248,7 @@ def test_gyre_whole_step_identity_rejects_hybrid_and_staged_gm():
             recipe.z_coord,
             recipe.model_config._replace(ke_gradient_scheme="centered"),
         )
-    with pytest.raises(ValueError, match="staged GM bolus"):
+    with pytest.raises(ValueError, match="complete staged Treguier"):
         LatLonCGridOceanModel(
             recipe.grid,
             recipe.z_coord,
