@@ -204,7 +204,8 @@ def nemo_qco_live_face_geometry_from_operands(
     hv_0,
     area_t,
     area_u,
-    area_v, r3_native=None, *, grid=None, fold_grid=None,  # (r3u, r3v) handed in place of the sea-level ratios (stprk3_stg.f90:172-173, :216-217)
+    area_v, r3_native=None, *, grid=None, north_fold=False,
+    fold_exchange_ratios=False,  # (r3u, r3v) handed in place of the sea-level ratios (stprk3_stg.f90:172-173, :216-217)
 ):
     """Build live native-face QCO geometry in NEMO source association.
 
@@ -237,11 +238,13 @@ def nemo_qco_live_face_geometry_from_operands(
 
     weighted_eta = b(area_t * eta)
     num_u = b(half * b(weighted_eta + jnp.roll(weighted_eta, -1, axis=1)))
-    if grid is None:
-        weighted_eta_north = jnp.roll(weighted_eta, -1, axis=0)
-    else:
+    if north_fold:
+        if grid is None:
+            raise ValueError("north_fold=True needs the grid")
         from legoesm.grids.operators_latlon_cgrid import north_neighbor_T
         weighted_eta_north = north_neighbor_T(weighted_eta, grid)
+    else:
+        weighted_eta_north = jnp.roll(weighted_eta, -1, axis=0)
     num_v = b(half * b(weighted_eta + weighted_eta_north))
     wet_u = (hu_0 > 0.0).astype(dtype)
     wet_v = (hv_0 > 0.0).astype(dtype)
@@ -250,7 +253,11 @@ def nemo_qco_live_face_geometry_from_operands(
     r1_area_u = b(one / area_u)
     r1_area_v = b(one / area_v)
     r3u = b(b(num_u * r1_hu0) * r1_area_u) if r3_native is None else r3_native[0]
-    r3u, r3v = _nemo_ratio_fold_exchange(r3u, b(b(num_v * r1_hv0) * r1_area_v) if r3_native is None else r3_native[1], fold_grid)
+    r3u, r3v = _nemo_ratio_fold_exchange(
+        r3u,
+        b(b(num_v * r1_hv0) * r1_area_v)
+        if r3_native is None else r3_native[1],
+        grid, fold_exchange_ratios)
     one_plus_r3u = b(one + r3u)
     one_plus_r3v = b(one + r3v)
     e3u = b(e3u_0 * b(one + r3u[..., None] * umask3))
@@ -793,7 +800,8 @@ def nemo_qco_live_face_geometry_cgrid(
     area_u,
     area_v,
     *,
-    include_reciprocals=False, r3_native=None, fold_grid=None,
+    include_reciprocals=False, r3_native=None, grid=None,
+    north_fold=False, fold_exchange_ratios=False,
 ):
     """NEMO ``e3u/e3v(Kmm)`` on legoESM's redundant west/south C-grid faces.
 
@@ -839,7 +847,9 @@ def nemo_qco_live_face_geometry_cgrid(
     """
     geom = nemo_qco_live_face_geometry_from_operands(
         eta, e3u_0, e3v_0, umask3, vmask3,
-        hu_0, hv_0, area_t, area_u, area_v, r3_native, fold_grid=fold_grid,
+        hu_0, hv_0, area_t, area_u, area_v, r3_native, grid=grid,
+        north_fold=north_fold,
+        fold_exchange_ratios=fold_exchange_ratios,
     )
     one = jnp.asarray(1.0, dtype=geom.e3u.dtype)
     result = (
@@ -893,6 +903,7 @@ def nemo_qco_live_face_thicknesses(
             current = nemo_qco_live_face_geometry_from_operands(
                 eta, e3u_0, e3v_0, umask3, vmask3,
                 *nemo_qco_mesh_operands(z_coord, dtype), grid=grid,
+                north_fold=True,
             )
             r3_native = (
                 jnp.asarray(r3_native[0], dtype=dtype).at[-1].set(
@@ -903,6 +914,7 @@ def nemo_qco_live_face_thicknesses(
     geom = nemo_qco_live_face_geometry_from_operands(
         eta, e3u_0, e3v_0, umask3, vmask3,
         *nemo_qco_mesh_operands(z_coord, dtype), r3_native, grid=grid,
+        north_fold=grid is not None,
     )
     return geom.e3u, geom.e3v
 
@@ -3140,13 +3152,15 @@ def _nemo_r3t_product(product, z_coord):
     return nemo_source_round(product)
 
 
-def _nemo_ratio_fold_exchange(r3u, r3v, fold_grid):
+def _nemo_ratio_fold_exchange(r3u, r3v, grid, selected):
     """NEMO's ``lbc_lnk`` sign +1 of the stage ratios (stprk3_stg.f90:169):
     with a fold grid the pivot V row becomes the mirrored row below instead of
     the stencil over the wrapped southern row.  None = no exchange."""
-    if fold_grid is None:
+    if not selected:
         return r3u, r3v
+    if grid is None:
+        raise ValueError("fold_exchange_ratios=True needs the grid")
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import nemo_een_ratio_fold_exchange
 
     # ponytail: the shared exchange also folds an F ratio; this caller has none
-    return nemo_een_ratio_fold_exchange(r3u, r3v, r3v, fold_grid, True)[:2]
+    return nemo_een_ratio_fold_exchange(r3u, r3v, r3v, grid, True)[:2]

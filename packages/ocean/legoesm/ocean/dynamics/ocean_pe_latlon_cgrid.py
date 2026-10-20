@@ -1725,7 +1725,6 @@ def nemo_qco_wzv_operands(
         z_coord, grid, u_mask_3d, v_mask_3d, eta_now.dtype, nlev)
     e3t0, area_t = ops.e3t_0, ops.area_t
     raw_umask, raw_vmask = ops.umask3, ops.vmask3
-    _fold = grid if fold_exchange_ratios else None
     _r3uv_kmm = None
     if stored_kmm_level:
         # RK3 stages 2/3: Kmm's r3u/r3v are the ratios STORED by the previous
@@ -1739,14 +1738,16 @@ def nemo_qco_wzv_operands(
         _gb, _ga = (nemo_qco_live_face_geometry_from_operands(
             jnp.asarray(e, dtype=eta_now.dtype), ops.e3u_0, ops.e3v_0,
             raw_umask, raw_vmask, ops.hu_0, ops.hv_0, area_t, ops.area_u,
-            ops.area_v, fold_grid=_fold)
+            ops.area_v, grid=grid,
+            fold_exchange_ratios=fold_exchange_ratios)
             for e in (eta_before, jnp.asarray(eta_after_override, dtype=eta_now.dtype) * _t0))
         _r3uv_kmm = (nemo_stage_ratio(stored_kmm_level, _gb.r3u, _ga.r3u),
                      nemo_stage_ratio(stored_kmm_level, _gb.r3v, _ga.r3v))
     live_u_raw, live_v_raw = nemo_qco_live_face_geometry_from_operands(
         eta_now, ops.e3u_0, ops.e3v_0, raw_umask, raw_vmask,
         ops.hu_0, ops.hv_0, area_t, ops.area_u, ops.area_v,
-        r3_native=_r3uv_kmm, fold_grid=_fold)[:2]
+        r3_native=_r3uv_kmm, grid=grid,
+        fold_exchange_ratios=fold_exchange_ratios)[:2]
 
     if volume_transport_override is not None:
         if transport_after_override is not None:

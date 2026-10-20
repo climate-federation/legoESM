@@ -1848,7 +1848,8 @@ def rk3_stage_velocity_update(
 
 def _nemo_ws_qco_stage_faces(
     eta, h_ref, u_mask_3d, v_mask_3d, grid, *, z_coord=None,
-    include_reciprocals=False, nemo_stage_pair=None, fold_grid=None,
+    include_reciprocals=False, nemo_stage_pair=None,
+    fold_exchange_ratios=False,
 ):
     """NEMO ``e3u/e3v(Kmm)`` and ``1 + r3u/r3v`` for one WS-RK3 stage ssh.
 
@@ -1907,7 +1908,9 @@ def _nemo_ws_qco_stage_faces(
     return nemo_qco_live_face_geometry_cgrid(
         jnp.asarray(eta, dtype=dtype), ops.e3u_0, ops.e3v_0, ops.umask3,
         ops.vmask3, ops.hu_0, ops.hv_0, ops.area_t, ops.area_u, ops.area_v,
-        include_reciprocals=include_reciprocals, r3_native=_nemo_ws_stage_r3uv(nemo_stage_pair, ops, dtype), fold_grid=fold_grid,
+        include_reciprocals=include_reciprocals,
+        r3_native=_nemo_ws_stage_r3uv(nemo_stage_pair, ops, dtype),
+        grid=grid, fold_exchange_ratios=fold_exchange_ratios,
     )
 
 
@@ -2154,7 +2157,9 @@ def _nemo_ws_stage_transport(
          r1_hv_stage) = _nemo_ws_qco_stage_faces(
             eta_stage, h_ref, u_mask_3d, v_mask_3d, grid,
             z_coord=z_coord, nemo_stage_pair=nemo_stage_pair,
-            include_reciprocals=True, fold_grid=grid if (config.rk3_vector_raw_vmask or config.rk3_stage_transport_fold_exchanges) else None)  # r3v fold exchange, stprk3_stg.f90:169  # noqa: E501
+            include_reciprocals=True,
+            fold_exchange_ratios=(config.rk3_vector_raw_vmask
+                                  or config.rk3_stage_transport_fold_exchanges))  # r3v fold exchange, stprk3_stg.f90:169  # noqa: E501
     Hu_stage_depth = jnp.sum(hu_stage, axis=-1)
     Hv_stage_depth = jnp.sum(hv_stage, axis=-1)
     if barotropic_velocity is None:

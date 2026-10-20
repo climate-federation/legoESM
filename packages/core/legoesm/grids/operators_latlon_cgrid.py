@@ -271,7 +271,9 @@ def fold_pivot_half_row(a, fold, stagger, *, scalar_sign=1.0):
     return out.at[-1, 0].set(fold.vector_sign_u * a[-1, 1])
 
 
-def north_neighbor_T(interior, grid, pivot_ghost: bool = True):
+def north_neighbor_T(
+    interior, grid, pivot_ghost: bool = True, *, rolled=None,
+):
     """T-point value immediately north, including a stored ORCA T-pivot.
 
     The last row is the north ghost of the pivot row.  On a de-haloed
@@ -284,6 +286,21 @@ def north_neighbor_T(interior, grid, pivot_ghost: bool = True):
     north-fold branch and retain their historical wall/roll path otherwise.
     """
     fold = getattr(grid, "fold", None)
+    if rolled is not None:
+        if not pivot_ghost:
+            raise ValueError("a supplied rolled neighbour requires pivot_ghost=True")
+        source = fold_ghost_source_T(interior, fold)[0]
+        folded = source[fold.perm_T]
+        if fold_is_local(grid):
+            return rolled.at[-1].set(folded)
+        nmask = north_fold_mask(grid)
+        if nmask is not None:
+            selector = nmask
+            while selector.ndim < folded.ndim:
+                selector = selector[..., None]
+            return rolled.at[-1].set(
+                jnp.where(selector, folded, rolled[-1]))
+        return rolled
     if not pivot_ghost:
         north = jnp.concatenate([interior[1:], interior[-1:]], axis=0)
         if fold is not None and bool(getattr(fold, "is_active", False)):
