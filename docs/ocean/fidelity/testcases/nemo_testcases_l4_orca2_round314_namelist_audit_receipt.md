@@ -143,6 +143,10 @@ status, class, reason).  Evidence `orca2_rounds/round314/` (`audit.json`,
 | run length | declared steps (3 h each, 365-day calendar) | 10 (30 h) | 5840 (two years) | 2920 (one year) | (c) |
 | icebergs | icebergs | off (MATCH) | on | off | (b) Decision 7, EXP00 only |
 
+Round 320 update: the three isoneutral rows now MATCH (lane B L2 on rung 10;
+record 164 MATCH / 5 DIFFERS, EXP00 163 / 6). Geothermal stays NOT-MODELLED
+(lane A L4 imported, refuses with tracer lateral diffusion).
+
 - NEMO's isoneutral diffusivity on ORCA2 is about 2000 m2/s near the
   equator and about 850 m2/s poleward of 60 degrees (arithmetic from the
   domain file's grid spacings, not a model run); the card uses 1000 m2/s.
