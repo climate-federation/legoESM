@@ -47,19 +47,33 @@ def test_envelope_score_and_one_ulp_plant_fire():
     assert moved["clears_four_times_twin"]
 
 
-def test_largest_coefficient_plant_moves_one_word_by_one_ulp():
+def test_cancellation_sensitive_coefficient_plant_moves_one_word_one_ulp():
     module = _load_module()
     pair = (
-        np.array([[[1.0], [2.0]]], dtype=np.float64),
-        np.array([[[3.0], [4.0]]], dtype=np.float64),
+        np.ones((2, 2, 30), dtype=np.float64),
+        np.full((2, 2, 30), 3.0, dtype=np.float64),
     )
-    planted, control = module._plant_largest_coefficient_one_ulp(pair)
+    tiny = np.nextafter(0.0, 1.0)
+    hpg_u = np.zeros((2, 2, 31), dtype=np.float64)
+    ldf_u = np.zeros((2, 2, 31), dtype=np.float64)
+    hpg_u[0, 1, 0] = 1.0
+    ldf_u[0, 1, 0] = tiny
+    family = {
+        "after_hpg_u": hpg_u,
+        "after_ldf_u": ldf_u,
+        "after_hpg_v": np.zeros((2, 2, 31), dtype=np.float64),
+        "after_ldf_v": np.zeros((2, 2, 31), dtype=np.float64),
+    }
+    planted, control = (
+        module._plant_cancellation_sensitive_coefficient_one_ulp(
+            pair, family))
     assert control["field"] == "ahmf"
     assert control["index_j_i_k"] == [0, 1, 0]
+    assert control["selected_output_face"] == "u"
     assert control["coefficient_movement"]["unequal_words"] == 1
     assert control["coefficient_movement"]["max_ulp"] == 1
     np.testing.assert_array_equal(planted[0], pair[0])
-    assert planted[1][0, 1, 0] == np.nextafter(4.0, np.inf)
+    assert planted[1][0, 1, 0] == np.nextafter(3.0, np.inf)
 
 
 def test_envelope_uses_registered_four_times_maximum():

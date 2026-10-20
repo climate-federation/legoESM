@@ -274,21 +274,46 @@ def _plant_one_ulp(field: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return planted
 
 
-def _plant_largest_coefficient_one_ulp(
+def _plant_cancellation_sensitive_coefficient_one_ulp(
     pair: tuple[np.ndarray, np.ndarray],
+    scalar_family: dict[str, np.ndarray],
 ) -> tuple[tuple[np.ndarray, np.ndarray], dict[str, object]]:
-    """Move one finite nonzero coefficient by one ULP away from zero."""
+    """Move one active F coefficient at the most shift-sensitive RHS word.
+
+    A coefficient ULP can disappear when the LDF term is accumulated onto a
+    much larger HPG term.  Select the native output word with the largest
+    ``eps * abs(LDF) / spacing(accumulated RHS)`` ratio, then plant the F-point
+    coefficient entering that word's second-pass curl.  This keeps the control
+    one-word/one-ULP while choosing it from the acquired, executed support.
+    """
     arrays = tuple(np.asarray(value, dtype=np.float64) for value in pair)
-    maxima = []
-    for value in arrays:
-        active = np.isfinite(value) & (value != 0.0)
-        require(np.any(active), "coefficient field has no finite nonzero word")
-        maxima.append(float(np.max(np.where(active, np.abs(value), -np.inf))))
-    field_index = int(np.argmax(maxima))
+    best = None
+    for face in FACE_ORDER:
+        before = _active_levels(scalar_family[f"after_hpg_{face}"])
+        after = _active_levels(scalar_family[f"after_ldf_{face}"])
+        term = after - before
+        spacing = np.abs(np.spacing(after))
+        score = np.divide(
+            np.finfo(np.float64).eps * np.abs(term), spacing,
+            out=np.zeros_like(term), where=spacing > 0.0,
+        )
+        flat_index = int(np.argmax(score))
+        candidate = (float(score.ravel()[flat_index]), face,
+                     tuple(np.unravel_index(flat_index, score.shape)))
+        if best is None or candidate[0] > best[0]:
+            best = candidate
+    require(best is not None and best[0] > 0.0,
+            "no cancellation-sensitive post-LDF word was found")
+    sensitivity, output_face, index = best
+    # dynldf_lev's second pass forms both U and V curl differences from ahmf at
+    # the same native (j, i, k) index as the output word.
+    field_index = 1
     planted_field = np.array(arrays[field_index], copy=True)
-    index = tuple(np.unravel_index(
-        int(np.argmax(np.abs(planted_field))), planted_field.shape))
+    require(all(index[axis] < planted_field.shape[axis] for axis in range(3)),
+            "selected native output has no matching F coefficient")
     before = planted_field[index]
+    require(np.isfinite(before) and before != 0.0,
+            "selected F coefficient is not finite and active")
     direction = np.inf if before >= 0.0 else -np.inf
     planted_field[index] = np.nextafter(before, direction)
     planted = list(arrays)
@@ -306,6 +331,8 @@ def _plant_largest_coefficient_one_ulp(
         "index_j_i_k": [int(value) for value in index],
         "before": float(before),
         "after": float(planted_field[index]),
+        "selected_output_face": output_face,
+        "selection_eps_ldf_over_rhs_spacing": sensitivity,
         "coefficient_movement": movement,
     }
 
@@ -645,7 +672,8 @@ def run(
             require(pair_operands is not None,
                     "paired coefficient substitution was not evaluated")
             planted_pair, coefficient_plant = (
-                _plant_largest_coefficient_one_ulp(scalar_pair))
+                _plant_cancellation_sensitive_coefficient_one_ulp(
+                    scalar_pair, scalar_family))
             planted_trace = jax.device_get(source_order_step(
                 tuple(jnp.asarray(value) for value in planted_pair)))
             planted_operands = planted_trace.operator_operands[0]
