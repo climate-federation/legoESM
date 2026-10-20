@@ -267,11 +267,13 @@ def _native_v_term(record: dict[str, object]) -> np.ndarray:
 
 def _native_v_field(record: dict[str, object], name: str) -> np.ndarray:
     """Map one native NEMO V field onto legoESM's owned north faces."""
-    from legoesm.ocean.fidelity.nemo_state_bridge import _v_north_to_face
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        nemo_closed_v_north_to_face,
+    )
 
     native = np.asarray(record[name])
     owned = native[2:-2, 2:-2, :ACTIVE_LEVELS]
-    return np.asarray(_v_north_to_face(owned))
+    return np.asarray(nemo_closed_v_north_to_face(owned))
 
 
 def _q_to_legoesm(operands: dict[str, object]) -> np.ndarray:

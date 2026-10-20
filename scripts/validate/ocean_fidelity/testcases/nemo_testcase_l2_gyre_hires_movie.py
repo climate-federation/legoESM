@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render common-scale NEMO/legoESM GYRE movies for years 1 and 5."""
+"""Render common-scale NEMO/legoESM GYRE movies for days 1..365 and 1461..1825."""
 
 from __future__ import annotations
 
@@ -106,7 +106,10 @@ def render_year(
         build_gyre_zco_card,
     )
 
-    require(year in (1, 5), "only preregistered years 1 and 5 may be rendered")
+    # "year" labels the two preregistered 365-day windows, days 1..365 and
+    # 1461..1825.  GYRE runs a 360-day calendar, so neither is exactly a
+    # model year; the windows are kept because they were preregistered.
+    require(year in (1, 5), "only preregistered windows 1 and 5 may be rendered")
     start = 1 + (year - 1) * 365
     providers = (
         nemo_ioipsl_provider(nemo_root, 365, start_day=start),
@@ -154,7 +157,10 @@ def main(argv=None) -> int:
         default=HERE / "gyre_hires_registered_runs.json",
     )
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--years", type=int, nargs="+", choices=(1, 5), default=(1, 5))
+    parser.add_argument(
+        "--years", type=int, nargs="+", choices=(1, 5), default=(1, 5),
+        help="window labels: 1 = days 1..365, 5 = days 1461..1825 (365-day "
+             "windows; GYRE's model year is 360 days)")
     parser.add_argument("--fps", type=int, default=15)
     args = parser.parse_args(argv)
     try:
@@ -164,7 +170,7 @@ def main(argv=None) -> int:
         for year in args.years:
             reports.append(render_year(
                 args.nemo_root, args.legoesm_run_label,
-                args.output / f"gyre_r4_smag_year{year}.mp4", year=year, fps=args.fps,
+                args.output / f"gyre_r4_smag_days{1 + (year - 1) * 365}_{365 * year}.mp4", year=year, fps=args.fps,
                 registry_path=args.run_registry,
             ))
         report = {"schema": "gyre-r4-smag-side-by-side-movies-v1",

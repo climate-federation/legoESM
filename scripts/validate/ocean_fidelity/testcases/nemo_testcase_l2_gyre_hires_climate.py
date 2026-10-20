@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Compare the preregistered year-5 GYRE r4_smag climate statistics."""
+"""Compare the preregistered GYRE r4_smag climate statistics over days 1461..1825.
+
+GYRE runs a 360-day calendar (nn_leapy=30), so this window is NOT model
+year 5 (days 1441..1800): it starts 20 days into year 5 and ends 25 days
+into year 6.  It is kept because it was preregistered."""
 
 from __future__ import annotations
 
@@ -677,11 +681,11 @@ def write_comparison_figure(path: Path, results: dict[str, dict], score: dict) -
         axes[4, 1].loglog(
             results[model]["spectrum_wavenumber_m-1"],
             results[model]["mean_ke_spectrum_m3_s2"], label=model)
-    axes[4, 0].set_title("year-5 basin-mean surface KE")
+    axes[4, 0].set_title("days 1461-1825 basin-mean surface KE")
     axes[4, 0].set_xlabel("day in window")
     axes[4, 0].set_ylabel("m2/s2")
     axes[4, 0].legend()
-    axes[4, 1].set_title("year-5 mean KE wavenumber spectrum")
+    axes[4, 1].set_title("days 1461-1825 mean KE wavenumber spectrum")
     axes[4, 1].set_xlabel("wavenumber (m-1)")
     axes[4, 1].set_ylabel("m3/s2")
     axes[4, 1].legend()

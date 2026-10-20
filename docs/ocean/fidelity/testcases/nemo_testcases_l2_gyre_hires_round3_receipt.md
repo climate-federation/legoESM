@@ -116,7 +116,8 @@ non-finite daily fields or incomplete/unpinned day sequences, and refuses any
 scored window other than days 1461..1825.  A real NEMO day passed this path and
 assembled four 82x122 fields.
 
-The primary comparison window is year 5, days 1461..1825.  The 31-day
+The primary comparison window is days 1461..1825 (preregistered; on GYRE's
+360-day calendar this is not model year 5, days 1441..1800).  The 31-day
 high-pass filter is a centered uniform filter with nearest-edge treatment; it
 loads days 1446..1825 so the target begins after 15 real context days.  Both
 models use the identical window and operator.  The instrument reports:
@@ -129,7 +130,7 @@ models use the identical window and operator.  The instrument reports:
 - the mean isotropic kinetic-energy wavenumber spectrum.
 
 Before the legoESM run completes, the registered scalar bars are fixed as:
-year-5 mean basin KE relative difference at most 20%, eddy-fraction relative
+window mean basin KE relative difference at most 20%, eddy-fraction relative
 difference at most 20%, absolute-U jet-row difference at most two rows, and
 SSH-zero-crossing-row difference at most two rows.  The fields and spectrum
 are report-only pattern diagnostics.  Trajectory divergence is expected and
@@ -148,11 +149,11 @@ series and KE spectra.
 
 ## Movie instrument
 
-`nemo_testcase_l2_gyre_hires_movie.py` renders daily-mean frames for year 1
-(days 1..365) and year 5 (days 1461..1825).  Each frame has one NEMO row and
+`nemo_testcase_l2_gyre_hires_movie.py` renders daily-mean frames for the preregistered windows days 1..365 and
+1461..1825 (365-day windows; GYRE's model year is 360 days).  Each frame has one NEMO row and
 one legoESM row with surface relative vorticity/f, SSH, surface speed, and SST.
 It uses the shared C-grid velocity and vorticity diagnostics, scans both models
-first to establish common per-year color limits, and streams 1280x640 RGB
+first to establish common per-window color limits, and streams 1280x640 RGB
 frames to `imageio_ffmpeg.write_frames` using H.264.  The output manifest pins
 provider provenance (including NEMO tile content hashes and the legoESM run
 manifest), windows, frame count, scales, fps, and movie digests.
@@ -195,8 +196,8 @@ OPEN:
 
 1. the operator-launched legoESM r4_smag run must finish all 1825 days and
    atomically publish `manifest.json`; this round does not relaunch it;
-2. after completion, run the committed year-5 climate gate and the year-1 and
-   year-5 movie instrument against the existing five-year NEMO reference;
+2. after completion, run the committed days-1461..1825 climate gate and the days-1..365 and
+   days-1461..1825 movie instrument against the existing five-year NEMO reference;
 3. the r4 resolution rung remains measured debt already present in the
    RK-stage-1 advective-transport bundle; the first moving multiplicand inside
    `zFu` is not yet isolated.  r4_smag adds a separately measured port-specific

@@ -200,7 +200,8 @@ def validate_gyre_namelist(namelist: GyreResolvedNamelist) -> None:
                 f"unsupported GYRE namelist value {name}={value!r}; "
                 f"certified value is {fixed[name]!r}"
             )
-    if namelist.nn_GYRE < 1:
+    if (not isinstance(namelist.nn_GYRE, int)
+            or isinstance(namelist.nn_GYRE, bool) or namelist.nn_GYRE < 1):
         raise ValueError("GYRE nn_GYRE must be a positive integer")
     if namelist.rn_Dt_s <= 0.0:
         raise ValueError("GYRE rn_Dt must be positive")
@@ -232,11 +233,18 @@ def validate_gyre_namelist(namelist: GyreResolvedNamelist) -> None:
         if namelist.rn_Uv_m_s is not None or namelist.rn_Lv_m is not None:
             raise ValueError(
                 "GYRE Smagorinsky mode 32 requires rn_Uv/rn_Lv absent")
-        if (namelist.rn_csmc, namelist.rn_minfac, namelist.rn_maxfac) != (
-                3.5, 1.0, 1.0):
-            raise ValueError(
-                "GYRE Smagorinsky mode 32 currently implements exactly "
-                "rn_csmc=3.5 and rn_minfac=rn_maxfac=1.0")
+    # Pinned in both modes: Laplacian mode 0 never reads them, so a changed
+    # value there would be an inert namelist edit.
+    if (namelist.rn_csmc, namelist.rn_minfac, namelist.rn_maxfac) != (
+            3.5, 1.0, 1.0):
+        raise ValueError(
+            "GYRE Smagorinsky fields: the card implements exactly "
+            "rn_csmc=3.5 and rn_minfac=rn_maxfac=1.0 (mode 32; Laplacian "
+            "mode 0 does not read them)")
+    for _name in ("nn_it000", "nn_itend", "nn_stock", "nn_write", "ptimincr"):
+        _value = getattr(namelist, _name)
+        if not isinstance(_value, int) or isinstance(_value, bool):
+            raise ValueError(f"GYRE {_name} must be an integer, got {_value!r}")
     if namelist.nn_it000 != 1 or namelist.nn_itend < namelist.nn_it000:
         raise ValueError("GYRE card supports nn_it000=1 and nn_itend >= 1")
     if namelist.nn_stock < 1 or namelist.nn_write < 1:
@@ -4109,7 +4117,8 @@ def build_nemo_testcase_card(
         raise ValueError(f"{case} does not accept a GYRE namelist")
     if case not in builders:
         raise ValueError(
-            f"unknown NEMO testcase {case!r}; expected one of {sorted(builders)}"
+            f"unknown NEMO testcase {case!r}; expected one of "
+            f"{sorted({*builders, 'GYRE-zco', 'ORCA2-zps'})}"
         )
     return builders[case]()
 
