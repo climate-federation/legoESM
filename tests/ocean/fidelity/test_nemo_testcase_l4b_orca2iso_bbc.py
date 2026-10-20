@@ -150,6 +150,11 @@ def test_l4b_guard_accepts_only_geothermal_after_certified_l2(cards):
             rk3_stage3_geothermal_after_ldf_nemo_order=True))
     with pytest.raises(ValueError, match="certified L2"):
         LatLonCGridOceanModel._validate_config(cfg._replace(gm_redi=None))
+    with pytest.raises(ValueError, match="certified L2"):
+        LatLonCGridOceanModel._validate_config(cfg._replace(
+            gm_redi=cfg.gm_redi._replace(kappa_GM=1.0)))
+    with pytest.raises(ValueError, match="certified L2"):
+        LatLonCGridOceanModel._validate_config(cfg._replace(K_h=1.0))
     with pytest.raises(ValueError, match="written stage-3 Krhs"):
         LatLonCGridOceanModel._validate_config(cfg._replace(
             rk3_stage3_tracer_krhs_nemo_order=True))

@@ -264,7 +264,7 @@ while all defined wet values retain their exact bytes.  The reader requires
 canonical +0 outside that domain and the twin scorer byte-compares only the
 same wet U/V masks.  legoESM has no NEMO halo cells and holds zero on excluded
 dry faces by its production face-mask multiplication at
-`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:452-459`.
+`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:468-475`.
 The synthetic plants prove that garbage in an excluded cell is canonicalized
 away, while the same garbage in a defined wet cell still separates the twins.
 
@@ -388,7 +388,7 @@ kt 1 through 10; land differs only in signed zero, as NEMO's own records do.
 Two forward-neutral defects are fixed in `e4d6cfc9f3`:
 
 1. The staged V-transport view now pads the closed south wall with zero at
-   `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10288-10289`.
+   `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10376-10377`.
    The old north-pivot copy puts 1,319 nonzero EIV transports on the south wall
    in the clean kt-1 witness; the regression requires a zero southern row and
    a nonzero northern control row.
@@ -423,11 +423,11 @@ order:
 
 1. **First NaN:** the stage tracer combine divides by `q_after == 0` on dry
    cells before its mask at
-   `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2722-2732`.
+   `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2738-2748`.
 2. The vertical CEN2 tracer divergence divides by `e3t_kmm == 0` on dry cells
-   at `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2011`.
+   at `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2027`.
 3. The horizontal CEN2 tracer divergence makes the same dry-cell division at
-   `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:1998`.
+   `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2014`.
 
 Each forward non-finite value is later masked, but its transpose receives a
 zero cotangent and produces NaN.  No L2-only source was found.  ORCA2 round
