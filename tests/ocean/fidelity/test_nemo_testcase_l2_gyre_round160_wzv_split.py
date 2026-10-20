@@ -110,6 +110,7 @@ def test_orca2_resolves_and_decision58_selects_the_program(card):
 
     orca2_config = _model_config(
         barotropic_time_filter="nemo_ab3am4", n_barotropic_substeps=65,
+        nemo_barotropic_filter_alpha=0.09,
         bbl_adv_option=0, bbl_gamma_s=0.0, bbl_diffusive_option=1,
         bbl_aht_m2_s=1000.0, whole_step_identity="orca2_vector_een_c2",
         tke_langmuir_evaluation="vectorized")
@@ -135,6 +136,7 @@ def test_a_card_that_resolves_the_program_without_a_config_choice_raises():
 
     bare_config = _model_config(
         barotropic_time_filter="nemo_ab3am4", n_barotropic_substeps=65,
+        nemo_barotropic_filter_alpha=0.07,
         bbl_adv_option=0, bbl_gamma_s=0.0, bbl_diffusive_option=1,
         bbl_aht_m2_s=1000.0, whole_step_identity="gyre_vector_ene_c2",
         tke_langmuir_evaluation="vectorized"

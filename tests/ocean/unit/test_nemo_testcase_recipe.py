@@ -84,6 +84,7 @@ def test_orca2_structural_guard_rejects_iceberg_option_drift():
                 barotropic=good.recipe.model_config.barotropic._replace(
                     barotropic_coriolis="een_metric",
                     n_barotropic_substeps=65,
+                    nemo_barotropic_filter_alpha=0.09,
                 ),
                 physics=good.recipe.model_config.physics._replace(
                     vertical_mixing=(good.recipe.model_config.physics
@@ -328,11 +329,23 @@ def test_testcase_cards_select_their_resolved_barotropic_filters():
     assert lock_baro.barotropic_time_filter == "nemo_ab3am4"
     assert overflow_baro.barotropic_time_filter == "nemo_boxcar1_ab3"
     assert gyre_baro.barotropic_time_filter == "nemo_ab3am4"
+    assert lock_baro.nemo_barotropic_filter_alpha == 0.07
+    assert overflow_baro.nemo_barotropic_filter_alpha == 0.0
+    assert gyre_baro.nemo_barotropic_filter_alpha == 0.07
     # Resolved ln_bt_auto counts, independently printed by the pinned NEMO
     # runs: LOCK ocean.output:763 and OVERFLOW ocean.output:879.
     assert lock_baro.n_barotropic_substeps == 1
     assert overflow_baro.n_barotropic_substeps == 3
     assert gyre_baro.n_barotropic_substeps == 50
+
+    missing = build_gyre_zco_card()
+    missing = missing._replace(
+        recipe=missing.recipe._replace(
+            model_config=missing.recipe.model_config._replace(
+                barotropic=missing.recipe.model_config.barotropic._replace(
+                    nemo_barotropic_filter_alpha=None))))
+    with pytest.raises(ValueError, match="must state its deck's rn_bt_alpha"):
+        validate_nemo_testcase_card(missing)
 
 
 def test_gyre_card_pins_rotated_grid_mi96_ic_and_seasonal_sbc():
@@ -879,3 +892,22 @@ def test_nemo_tpoint_requires_explicit_t_depth_on_stretched_grid():
         pinned, depth, bottom_index_rule="nemo_tpoint"
     )
     assert int(nemo.bottom_level[0, 0]) == 0
+
+
+def test_orca2_evd_mixes_tracers_only_while_gyre_mixes_momentum_too():
+    """ORCA2 nn_evdm = 0 vs GYRE nn_evdm = 1 (zdfevd.f90:121-135)."""
+    kwargs = dict(
+        barotropic_time_filter="nemo_ab3am4", nemo_barotropic_filter_alpha=0.09,
+        n_barotropic_substeps=65, bbl_adv_option=0, bbl_gamma_s=0.0,
+        bbl_diffusive_option=1, bbl_aht_m2_s=1000.0,
+        tke_langmuir_evaluation="vectorized",
+    )
+    orca2 = testcase_recipe._model_config(
+        whole_step_identity="orca2_vector_een_c2", **kwargs)
+    gyre = testcase_recipe._model_config(
+        whole_step_identity="gyre_vector_ene_c2", **kwargs)
+    orca2_evd = orca2.physics.convection.enhanced_diffusion
+    gyre_evd = gyre.physics.convection.enhanced_diffusion
+    assert (orca2_evd.K_conv, orca2_evd.nu_conv) == (100.0, 0.0)
+    assert (gyre_evd.K_conv, gyre_evd.nu_conv) == (100.0, 100.0)
+    assert orca2_evd._replace(nu_conv=100.0, n2_eos_form="teos10") == gyre_evd

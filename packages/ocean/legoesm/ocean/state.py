@@ -345,6 +345,11 @@ class OceanSurfaceForcing(NamedTuple):
     # salt helper (``freshwater.runoff_spread_virtual_salt_tendency_3d``).
     # ``None`` -> no runoff tracer source, which is every card that does not
     # supply one.
+    q_nonsolar: object = None
+    # NEMO's non-solar surface heat flux ``qns`` [W/m2, positive into ocean].
+    # This is the stage-3 source operand written by tra_sbc before runoff and
+    # penetrative shortwave are accumulated; it remains separate from q_net
+    # so the NEMO written order can be reproduced without reconstructing it.
 
 
 class OceanConfig(NamedTuple):
@@ -1602,6 +1607,57 @@ class BarotropicConfig(NamedTuple):
     # ``barotropic_implicit_preconditioner = 'chebyshev'``); higher = stronger
     # smoothing per solve at more A-op applies. A count, not a trainable float.
     barotropic_chebyshev_degree: int = 4
+    # NEMO's split-explicit face depth on the fold-image V row
+    # (dynspg_ts.f90:419-421, consumed at :437; same form at :480): NEMO's
+    # wet surface V mask on that row and the T fold halo as the north
+    # neighbour. False keeps the model's dry top V row (depth = hv_0 there).
+    # Needs ``barotropic_face_depth = "nemo_ssh_avg"`` and raw NEMO masks.
+    barotropic_fold_top_v_face_ssh: bool = False
+    # NEMO's flux-form external velocity update in the written order
+    # (dynspg_ts.f90:557-568): the bracket times the inverse exit depth.
+    # False keeps the compiled division form. Requires the flux-form branch.
+    barotropic_flux_update_nemo_literal: bool = False
+    # NEMO forms rDt_e as the true quotient rn_Dt / REAL(nn_e, wp)
+    # (dynspg_ts.f90:886). False keeps the compiler-folded reciprocal product.
+    barotropic_substep_dt_nemo_literal: bool = False
+    # NEMO's loop-entry hu_e/hv_e is h0 * (1 + r3(Kmm))
+    # (dynspg_ts.f90:329-330). Read only by the literal flux-form update.
+    barotropic_entry_depth_nemo_literal: bool = False
+    # NEMO's north-fold exchange (sign +1) of the U-, V- and F-point thickness
+    # ratios the solver's EEN coefficients are stretched with
+    # (stprk3_stg.f90:163; T-pivot rules lbcnfd.f90:639-749): the pivot row of
+    # the V and F ratios is the mirrored row below, the second half of the U
+    # ratio's pivot row its mirrored first half.  False keeps the bare
+    # stencil values there.  T-pivot fold, pivot row stored.
+    barotropic_een_ratio_fold_exchange: bool = False
+    # The solver's EEN coefficients read the mesh's own pivot row of fe3mask
+    # (dommsk.f90:232 exchanges fmask, :258 freezes it; the T-pivot F rule
+    # makes that row the mirrored row below).  False overwrites the row with
+    # the halo row's source, two rows below.  One fold unit with the option
+    # above: the solver refuses one without the other.
+    barotropic_een_fe3mask_pivot_row: bool = False
+    # NEMO's written order for the U-, V- and F-point thickness ratios the
+    # solver's EEN coefficients are stretched with (domqco.f90:266-269,
+    # :281-285): times the stored reciprocal face area, not divided by the
+    # area.  False keeps the division.  e1 * e2 face areas only.
+    barotropic_een_ratio_written_order: bool = False
+    # The solver's literal fold unit (raw hu_0/hv_0, the fold-image V row's
+    # transport zhV, its materialised product, the end-of-substep exchange)
+    # also under vector-form momentum: those statements sit outside NEMO's
+    # vector/flux branch (dynspg_ts.f90:413-421, :436-438, :594).  False
+    # keeps the unit to flux-form decks only.
+    barotropic_literal_fold_unit_vector_form: bool = False
+    # NEMO namdyn_spg ``rn_bt_alpha``.  No physical default: every NEMO card
+    # states its resolved deck value, including cards whose selected filter
+    # makes the value inert.  ``None`` is an unset sentinel and the NEMO-card
+    # validator plus every consuming nn_bt_flt=1/2/3 path refuse it.
+    nemo_barotropic_filter_alpha: float | None = None
+    # Card-selected: the literal external-mode bundle (raw reference face
+    # depths, unmasked/materialised V transport, boundary association) on a
+    # FLUX-form card.  Selected by OVERFLOW and LOCK_EXCHANGE, whose kt=1-10
+    # NEMO-record distances it leaves equal; not by the VORTEX cards, where it
+    # moved VORTEX-SMT further from its record (user decision 2026-10-17).
+    nemo_literal_external_mode_flux_form: bool = False
 
 
 class RuntimeChecksConfig(NamedTuple):
@@ -3098,6 +3154,118 @@ class LatLonCGridOceanConfig(NamedTuple):
     # matrices and their three separate ordered recurrences.  Appended to keep
     # every positional constructor byte-compatible.
     zdf_implicit_solver_evaluation: str = "shared_thomas"
+    # NEMO vor_een on a T-pivot north fold: the u trend on the pivot T row
+    # reads vv, e3v and vmask on the fold-image V row above it
+    # (dynvor.f90:767, :779-780), where NEMO holds the lbc_lnk image of the
+    # row below. True hands the 3-D vorticity trend that image row; False
+    # keeps the legacy compact-grid dry row. Needs an active north fold.
+    een_fold_image_v_row: bool = False
+    # NEMO's np_HYB stage-1 sea level (stprk3_stg.f90:148): two rounded
+    # products and one rounded sum. False keeps the algebraically equal
+    # increment-over-three expression.
+    rk3_stage1_ssh_nemo_literal: bool = False
+    # Flux-form RK3 stage 1 consumes the three-dimensional right-hand side
+    # stp_2D left in uu(Krhs) (stp2d.f90:138, :144), whole, as NEMO does
+    # (stprk3_stg.f90:373-378).  False keeps that right-hand side with the
+    # slow barotropic forcing subtracted, which the stage's barotropic
+    # correction makes real-equal and not bit-equal.
+    rk3_stage1_rhs_nemo_literal: bool = False
+    # The stage velocity update and barotropic correction
+    # (stprk3_stg.f90:373-378, :413-418) with every product and sum rounded
+    # once, in the written order.  False leaves the expressions to the
+    # compiler, which may fuse a product into the following sum.
+    rk3_stage_velocity_written_order: bool = False
+    # The EEN vorticity trend in the operation order NEMO's vor_een writes
+    # (dynvor.f90:720, :727, :767-768, :772-775, :779-783), every product and
+    # sum rounded once.  False keeps the operator's own order (divide by the
+    # F thickness, 1/12 inside each triad, the four products summed left to
+    # right), which is real-equal and differs in the last place.
+    een_vorticity_written_order: bool = False
+    # The barotropic velocity dyn_zdf removes before its implicit solve
+    # (dynzdf.f90:158-162) is NOT added back after it; the WS-RK3 stage
+    # correction (stprk3_stg.f90:407-418) restores the depth mean from the
+    # residual, as NEMO does.  False re-adds it after the solve, which is
+    # real-equal and differs in the last place.
+    zdf_barotropic_removal_nemo_literal: bool = False
+    # NEMO's dyn_zdf matrix divisors on a multi-level card with partial cells
+    # (dynzdf.f90:191-205 for U, :360-374 for V): the diagonal thickness is
+    # ``e3u_3d*(1 + r3u(Kaa)*umask)`` -- the mesh's min-rule face thickness,
+    # not the mean of the two T cells -- and the interface thickness is
+    # ``e3w_1d(jk)*(1 + r3u(Kmm))``.  False keeps the two-cell mean and the
+    # face-mapped T-point interface thickness (every card before rung G2).
+    zdf_momentum_nemo_face_thickness: bool = False
+    # The stored top V row of the 3-D velocity is NEMO's fold image of the
+    # row below it, as the exchange that ends each stage leaves it
+    # (stprk3_stg.f90:572-573).  False keeps the row at the compact mask's
+    # zero.  T-pivot fold grids only.
+    rk3_fold_exchange_top_v_row: bool = False
+    # The F-point thickness ratio the vorticity term of stages 2 and 3
+    # reads is NEMO's interpolation of the entry and after ratios
+    # (stprk3_stg.f90:218, :239).  False takes the ratio of the stage's
+    # interpolated sea level, which is real-equal and differs in the last
+    # place on rare points.
+    rk3_stage_r3f_nemo_literal: bool = False
+    # The T-point thickness ratio at N+1/2 is NEMO's mean of the entry and
+    # after ratios (stprk3_stg.f90:215), read by stage 2's tracer weight and
+    # by stage 3's pressure gradient.  False takes the ratio of the mean sea
+    # level, real-equal and different in the last place on rare cells.
+    rk3_stage_r3t_nemo_literal: bool = False
+    # The depth the density reads is the rounded product
+    # ``gdept_0 * (1 + r3t)`` before it is scaled (eosbn2.f90:324, :559).
+    # False leaves the product bare; compiled, its constant factor is folded
+    # into the scale, real-equal and different in the last place.
+    nemo_eos_gdept_rounded_product: bool = False
+    # The U and V thickness ratios at N+1/3 and N+1/2 are NEMO's
+    # interpolation of the entry and after ratios (stprk3_stg.f90:172-173,
+    # :216-217), read by the stage velocity weights and the stage's face
+    # thickness.  False takes the ratio of the interpolated sea level.
+    rk3_stage_r3uv_nemo_literal: bool = False
+    # NEMO's tracer ZDF diagonal rounds its live T thickness before
+    # subtracting the two off-diagonal coefficients (trazdf.f90:233).
+    # False leaves the compiler free to fuse the product and subtraction.
+    zdf_tracer_nemo_rounded_thickness: bool = False
+    # NEMO's barotropic forcing depth mean is a Fortran SUM over levels in
+    # ascending k (stp2d.f90:178-179).  False leaves the reduction tree to
+    # the backend.
+    barotropic_rhs_ascending_level_sum: bool = False
+    # dyn_zdf's interface thickness at stage 3 reads r3u/r3v(Kmm), which
+    # stprk3_stg.f90:216-217 stored as r1_2*(r3u(Kbb) + r3ua): the mean of
+    # the two ratios, not the ratio of the mean sea level.  False takes the
+    # ratio of the interpolated sea level (last-place different on some faces).
+    zdf_momentum_stage_r3u_nemo_literal: bool = False
+    # een_total's relative vorticity in vor_een's np_CRV statement
+    # (dynvor.f90:762-766): the circulation bracket of e2v*v and e1u*u times
+    # r1_e1e2f, added to ff_f before the F thickness.  False takes the
+    # generic vertex curl, which differs on a curvilinear mesh.
+    een_nemo_relative_vorticity: bool = False
+    # At the top F row, NEMO's np_CRV circulation reads e1u*u from the U-fold
+    # halo north of the pivot row (vor_een, dynvor.f90:764-766), not a zero
+    # wall.  Kept separate from the F-area selector so each cited statement
+    # has a one-variable landing gate.
+    een_nemo_top_f_u_halo: bool = False
+    # The barotropic wind term (stp2d.f90:225-230) divides by NEMO's stored
+    # r1_hu_0/(1+r3u(Kbb)), not the card's live column depth.
+    barotropic_wind_nemo_stored_depth: bool = False
+    # The native surface stress's pivot-row V face reads NEMO's vector halo,
+    # -vtau(pivot-1) mirrored (sbcmod.f90:553-569).
+    surface_stress_nemo_fold_vector_sign: bool = False
+    # dyn_zdf's surface-stress deposit divides by NEMO's live face thickness
+    # e3u_3d(1)*(1+r3u(Kaa)*umask) (dynzdf.f90:334-340).
+    zdf_surface_stress_nemo_face_thickness: bool = False
+    # NEMO's stage-1/2 tracer update (stprk3_stg.f90:672-680) rounds each
+    # written product and sum before the final quotient.
+    rk3_stage_tracer_written_order: bool = False
+    # NEMO's stage-3 temperature RHS writes the non-solar surface source,
+    # then runoff content, then the penetrative shortwave term on Kmm
+    # (trasbc.f90, sbcrnf.f90, traqsr.f90). False retains the prior derived
+    # Kbb-source path.
+    rk3_stage3_heat_nemo_written: bool = False
+    # Stage 3's Kmm thickness as NEMO stores it, e3t_0*(1+r3t(Kmm)) with
+    # r3t(Kmm) stage 2's r1_2*(r3t(Kbb)+r3ta) (stprk3_stg.f90:215), in every
+    # stage-3 tracer read: heat/runoff/solar divisors, solve RHS, e3w(Kmm).
+    # False keeps the thickness mean 0.5*(h(Kbb)+h(Kaa)).  Needs
+    # rk3_stage3_heat_nemo_written.
+    rk3_stage3_tracer_nemo_stored_thickness: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

@@ -1292,7 +1292,7 @@ def laplacian_smag_cfl_cap(grid, dt: float, safety: float):
 
 
 def _bc_geometry_and_density(
-    eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
+    eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val, nemo_stage_r3t_stretch=None,
 ):
     """Stages 1-3 of the baroclinic tendencies: layer thickness + Jacobian,
     density from the EOS, and the baroclinic pressure anomaly (filled).
@@ -1358,7 +1358,7 @@ def _bc_geometry_and_density(
     _eos_geometric_depth = (
         (jnp.abs(z_coord.z_full_ref)
          if getattr(z_coord, "t_depth_ref", None) is None
-         else nemo_bn2_live_ladders(z_coord, eta_safe, H_bathy)[0])
+         else _nemo_eos_gdept(config, z_coord, eta_safe, H_bathy, nemo_stage_r3t_stretch))
         if _eos_depth == "geometric" else None
     )
     _nemo_tmask3 = (
@@ -1429,7 +1429,7 @@ def _bc_geometry_and_density(
     return J, h_k, rho_prime, p_prime_filled, nemo_hpg_rhd
 
 
-def compute_frozen_geom_density(state, grid, z_coord, config):
+def compute_frozen_geom_density(state, grid, z_coord, config, nemo_stage_r3t_stretch=None):
     """``(J, h_k, rho_prime, p_prime_filled, nemo_hpg_rhd)`` from eta/T/S.
 
     The eta_safe derivation (mirrors :func:`latlon_cgrid_ocean_baroclinic_
@@ -1452,7 +1452,7 @@ def compute_frozen_geom_density(state, grid, z_coord, config):
     eta_floor = min_water_col - H_bathy
     eta_safe = _jnp.maximum(eta, eta_floor) * mask
     return _bc_geometry_and_density(
-        eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
+        eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val, nemo_stage_r3t_stretch,
     )
 
 
@@ -1873,7 +1873,7 @@ def _nemo_qco_gdept_z0(t_depth, stretch, eta):
 def _bc_ke_and_pressure_gradients(
     u, v, p_prime_filled, rho_prime, grid, config, z_coord,
     eta_safe, H_bathy, g_val, mask, legacy_hpg_algebraic=False,
-    nemo_hpg_rhd=None,
+    nemo_hpg_rhd=None, nemo_stage_r3t_stretch=None,
 ):
     """Stages 6 / 6-7 / 6b: kinetic-energy gradient (centered, Hollingsworth,
     or WENO), baroclinic pressure gradient (batched with KE), and the
@@ -2163,12 +2163,12 @@ def _bc_ke_and_pressure_gradients(
             # domqco.F90:160 multiplies ssh by the reciprocal column depth
             # stored at domain.F90:158.  The helper returns the complete
             # ``1+r3t`` stretch, not r3t itself.
-            stretch = nemo_r3t_stretch(
+            stretch = (nemo_r3t_stretch(
                 z_coord,
                 eta_safe,
                 H_bathy,
-                evaluation="nemo_reciprocal",
-            )[..., jnp.newaxis]
+                evaluation="nemo_reciprocal",  # a handed stretch is NEMO's stored stage ratio (stprk3_stg.f90:215)
+            ) if nemo_stage_r3t_stretch is None else nemo_stage_r3t_stretch)[..., jnp.newaxis]
             # domzgr_substitute.h90:145 (key_qco): the gdept_z0 operand read
             # by dynhpg is formed as two source statements' operations,
             # ``gdept_0 * (1+r3t) - ssh``.  Materialise the multiply before
@@ -2604,8 +2604,13 @@ def _bc_pv_flux(
     reconstruct_zeta=False,
     vorticity_scheme="al81",
     een_q_boundary="neumann_fill",
+    een_fold_image_v=False,
+    een_written_order=False,
     een_e3f_scheme="min",
     een_metric_weighting="off",
+    een_nemo_zeta=False,
+    een_nemo_top_f_u_halo=False,
+    nemo_f_area=None,
     dz_ref=None,
     h_vtx_override=None,
     f_vtx_override=None,
@@ -2667,6 +2672,14 @@ def _bc_pv_flux(
             f"unknown een_metric_weighting {een_metric_weighting!r}; expected "
             f"'off' or 'nemo'"
         )
+    if een_nemo_zeta and een_metric_weighting != "nemo":
+        raise ValueError(
+            "een_nemo_relative_vorticity requires een_metric_weighting='nemo'"
+        )
+    if een_nemo_top_f_u_halo and not een_nemo_zeta:
+        raise ValueError(
+            "een_nemo_top_f_u_halo requires een_nemo_relative_vorticity"
+        )
     # --- 7b. Potential vorticity flux (#160, Sadourny EC) ---
     # Vector-invariant advection: (u·∇)u = ∇(KE) + (f+ζ) × u.
     # Coriolis (f × u) handled in step function; here only ζ × u.
@@ -2697,11 +2710,16 @@ def _bc_pv_flux(
         # no relative vorticity is dropped silently here.
         zeta = jnp.zeros_like(curl_vertex_cgrid(u, v, grid))
     elif (een_metric_weighting == "nemo"
-            and vorticity_scheme in ("ene", "ene_total", "ens_total")):
+            and (vorticity_scheme in ("ene", "ene_total", "ens_total")
+                 or (een_nemo_zeta and vorticity_scheme == "een_total"))):
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             nemo_vor_ene_vorticity_cgrid,
         )
-        zeta = nemo_vor_ene_vorticity_cgrid(u, v, grid)
+        zeta = nemo_vor_ene_vorticity_cgrid(
+            u, v,
+            grid if nemo_f_area is None else grid._replace(area_q=nemo_f_area),
+            north_fold_u=bool(een_nemo_top_f_u_halo),
+        )
     else:
         zeta = curl_vertex_cgrid(u, v, grid)  # (n_lat+1, n_lon+1, nlev)
 
@@ -2944,8 +2962,10 @@ def _bc_pv_flux(
             # (barotropic_latlon_cgrid.een_barotropic_coriolis); this is the
             # baroclinic path's selector for it. "off" is bit-identical.
             diag_vortcor_u, diag_vortcor_v = pv_flux_al81_partial_cell(
-                zeta, h_vtx, h_v, v, h_u, u,
-                u_mask_3d, v_mask_3d, vtx_mask_va,
+                zeta, h_vtx, *_een_fold_image_v_row(
+                    een_fold_image_v, grid, h_v, v, h_u, u,
+                    u_mask_3d, v_mask_3d), vtx_mask_va,
+                written_order=een_written_order,
                 f_vtx=_f_vtx_al,
                 q_boundary=een_q_boundary,
                 metric_widths=_mw,
@@ -4512,7 +4532,7 @@ def _bc_physics_tendencies(du_dt, dv_dt, dT_dt, dS_dt, physics_fn, state, grid, 
 def surface_stress_faces(
     surface_forcing, u_dtype, z_coord, J, grid, *,
     nemo_literal_association=False, use_native=True,
-    cell_mask=None, u_mask=None, v_mask=None,
+    cell_mask=None, u_mask=None, v_mask=None, nemo_fold_vector_sign=False,
 ):
     """Wind stress at u/v faces + the top-cell thicknesses (single owner of
     the tau sign/interp/rotation chain — used by the explicit stage-10b'
@@ -4523,6 +4543,11 @@ def surface_stress_faces(
     identity.  They apply ``sbcmod.F90:543-546``'s coastal unmasking after
     interpolation: ``(2-umask)*MAX(tmask_w,tmask_e)`` (and its V analogue).
     Omitting all three retains the generic non-NEMO handoff.
+
+    ``nemo_fold_vector_sign`` (native stress, T-pivot fold with the pivot row
+    stored): the pivot-row V face reads the halo NEMO's ``lbc_lnk`` gives
+    ``vtau`` as a vector, ``-vtau(pivot-1)`` mirrored (``sbcmod.F90:548-551``
+    then ``:559``); otherwise the face is the scalar mirror of the one below.
 
     Returns ``(tau_i_u, tau_j_v, dz_0_u, dz_0_v)`` (ocean-reaction sign,
     grid-aligned) or ``None`` when the forcing carries no stress."""
@@ -4564,10 +4589,40 @@ def surface_stress_faces(
         tau_j_v, dz_0_v = interp_to_v_points_multi(
             (tau_j_T, jnp.asarray(z_coord.dz_ref[0], dtype=u_dtype) * J),
             grid=grid, source_round=True)
+        if nemo_fold_vector_sign:
+            from legoesm.grids.operators_latlon_cgrid import fold_ghost_source_T
+            fold = getattr(grid, "fold", None)
+            if not (fold_is_local(grid)
+                    and bool(getattr(fold, "pivot_row_stored", False))):
+                raise ValueError(
+                    "nemo_fold_vector_sign needs a local T-pivot north fold "
+                    "with its pivot row stored")
         dz_0_u = interp_cell_to_uface(
             jnp.asarray(z_coord.dz_ref[0], dtype=u_dtype) * J)
         tau_i_u, tau_j_v = _apply_nemo_coastal_factors(tau_i_u, tau_j_v)
+        if nemo_fold_vector_sign:
+            # the pivot-row V face, all of sbcmod.F90:559-560 on NEMO's folded
+            # rows: vtau's halo is -vtau(pivot-1) mirrored, and vmask/tmask
+            # there are the scalar mirrors (the card stores this row as wall)
+            if cell_mask is None:
+                raise ValueError("nemo_fold_vector_sign needs the NEMO masks")
+            halo = -fold_ghost_source_T(tau_j_T, fold)[0][fold.perm_T]
+            tm = jnp.asarray(cell_mask, dtype=u_dtype)
+            vm_top = jnp.asarray(v_mask, dtype=u_dtype)[-2][fold.perm_v]
+            tm_halo = fold_ghost_source_T(tm, fold)[0][fold.perm_T]
+            top = nemo_source_round(0.5 * nemo_source_round(tau_j_T[-1] + halo))
+            top = nemo_source_round(
+                nemo_source_round(top * nemo_source_round(2.0 - vm_top))
+                * jnp.maximum(tm[-1], tm_halo))
+            tau_j_v = tau_j_v.at[-1].set(top)
         return tau_i_u, tau_j_v, dz_0_u, dz_0_v
+    if nemo_fold_vector_sign and (
+            _sf_tau_x is not None or _sf_tau_y is not None
+            or _native_i is not None) and (
+            _native_i is None or not use_native):
+        raise ValueError(
+            "nemo_fold_vector_sign needs the on-grid tau_i_native/tau_j_native "
+            "path; geographic tau_x/tau_y would skip the fold sign")
     if surface_forcing is None or _sf_tau_x is None or _sf_tau_y is None:
         return None
     tau_e_T = -jnp.asarray(_sf_tau_x, dtype=u_dtype)
@@ -5218,6 +5273,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     nemo_stage_zad_eta_after_override=None,
     nemo_vorticity_q_override=None,
     nemo_vorticity_transport_override=None,
+    nemo_literal_hpg_vmask=None, nemo_stage_r3f=None, nemo_stage_r3t_stretch=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -5317,7 +5373,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         J, h_k, rho_prime, p_prime_filled, nemo_hpg_rhd = (
             _bc_geometry_and_density(
                 eta_safe, H_bathy, z_coord, config, T, S, mask, grid,
-                rho_0, g_val,
+                rho_0, g_val, nemo_stage_r3t_stretch,
             ))
 
     # --- Stages 4-4b: vertical velocity (w), face thicknesses (h_u, h_v),
@@ -5401,7 +5457,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         u, v, p_prime_filled, rho_prime, grid, config, z_coord,
         eta_safe, H_bathy, g_val, mask,
         legacy_hpg_algebraic=legacy_hpg_algebraic,
-        nemo_hpg_rhd=nemo_hpg_rhd,
+        nemo_hpg_rhd=nemo_hpg_rhd, nemo_stage_r3t_stretch=nemo_stage_r3t_stretch,
     )
     # Flux-form momentum advection (stage 7b below) provides the FULL horizontal
     # advection -div(transport(x)u), which already includes the kinetic-energy
@@ -5492,6 +5548,16 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     _vorticity_scheme = getattr(
         _vorticity_selection, "scheme", _vorticity_selection)
     _nemo_ene_operands = None
+    if getattr(config, "een_nemo_relative_vorticity", False) and (
+            _mom_adv != "vector_invariant" or _vorticity_scheme != "een_total"):
+        # Only the vector-invariant een_total triad (NEMO's vor_een) reads
+        # np_CRV's relative vorticity; flux form ignores the switch and WENO
+        # would apply it outside the NEMO triad.
+        raise ValueError(
+            "een_nemo_relative_vorticity requires vector-form "
+            "vorticity_scheme='een_total'; got "
+            f"momentum_advection={_mom_adv!r}, "
+            f"vorticity_scheme={_vorticity_scheme!r}")
     if _mom_adv == "flux_form":
         # NEMO dynadv_up3 consumes ONE face thickness -- e3u(Kmm) =
         # e3u_0*(1+r3u(Kmm)) (domzgr_substitute.h90:127; domqco.F90:219-220)
@@ -5542,7 +5608,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                     nemo_qco_live_vorticity_e3f_cgrid,
                 )
                 _h_vtx_ov = nemo_qco_live_vorticity_e3f_cgrid(
-                    state.eta.data, z_coord, h_k.dtype, nn_e3f_typ=0, grid=grid)
+                    state.eta.data, z_coord, h_k.dtype, nn_e3f_typ=0, grid=grid, r3f_override=nemo_stage_r3f)
                 _f_vtx_ov = (
                     vertex_coriolis(grid) if ene_generic_f_vtx
                     else nemo_een_ene_vertex_coriolis(grid)
@@ -5558,6 +5624,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 vorticity_scheme="een_planetary",
                 een_q_boundary=getattr(config, "een_q_boundary",
                                        "neumann_fill"),
+                een_fold_image_v=getattr(
+                    config, "een_fold_image_v_row", False),
+                een_written_order=getattr(
+                    config, "een_vorticity_written_order", False),
                 een_e3f_scheme=config.een_e3f_scheme,
                 een_metric_weighting=getattr(
                     config, "een_metric_weighting", "off"),
@@ -5587,7 +5657,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             )
             from legoesm.ocean.vertical import nemo_qco_live_vorticity_e3f_cgrid
             _h_vtx_override = nemo_qco_live_vorticity_e3f_cgrid(
-                state.eta.data, z_coord, h_k.dtype, nn_e3f_typ=0, grid=grid)
+                state.eta.data, z_coord, h_k.dtype, nn_e3f_typ=0, grid=grid, r3f_override=nemo_stage_r3f)
             _f_vtx_override = (
                 vertex_coriolis(grid) if ene_generic_f_vtx
                 else nemo_een_ene_vertex_coriolis(grid)
@@ -5602,9 +5672,17 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             reconstruct_zeta=config.vortcor_reconstruct_zeta,
             vorticity_scheme=_vorticity_scheme,
             een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
+            een_fold_image_v=getattr(
+                config, "een_fold_image_v_row", False),
+            een_written_order=getattr(
+                config, "een_vorticity_written_order", False),
             een_e3f_scheme=config.een_e3f_scheme,
             een_metric_weighting=getattr(
                 config, "een_metric_weighting", "off"),
+            een_nemo_zeta=config.een_nemo_relative_vorticity,
+            een_nemo_top_f_u_halo=config.een_nemo_top_f_u_halo,
+            nemo_f_area=(_nemo_f_vertex_area(grid, z_coord)
+                         if config.een_nemo_relative_vorticity else None),
             dz_ref=z_coord.dz_ref,
             h_vtx_override=_h_vtx_override,
             f_vtx_override=_f_vtx_override,
@@ -6010,6 +6088,12 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             )
     _sf_implicit = bool(getattr(config, "surface_forcing_implicit", False))
     _stress_implicit = bool(getattr(config, "surface_stress_implicit", False))
+    if (getattr(config, "surface_stress_nemo_fold_vector_sign", False)
+            and not _stress_implicit):
+        # The explicit stage-10b' deposit never reads the fold sign.
+        raise ValueError(
+            "surface_stress_nemo_fold_vector_sign requires "
+            "surface_stress_implicit=True")
     # Two selectors reach the external-forcing shortwave path: the NEMO qsr
     # identities live on physics.shortwave_penetration.scheme (the shared
     # pipeline consumes the same field), every other choice on
@@ -6105,7 +6189,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
     # --- 11. Land masking ---
     du_dt = du_dt * u_mask_3d
-    dv_dt = dv_dt * v_mask_3d
+    if nemo_literal_hpg_vmask is None:
+        dv_dt = dv_dt * v_mask_3d
+    else:
+        # Private fidelity arm for NEMO's vector-form source order. NEMO
+        # stores literal HPG without this compact mask and applies its raw
+        # vmask only in the later depth integral (stp2d.f90:203-209).
+        _literal_vmask = jnp.asarray(nemo_literal_hpg_vmask, dtype=dv_dt.dtype)
+        if _literal_vmask.shape != dv_dt.shape:
+            raise ValueError(
+                "nemo_literal_hpg_vmask must match the V tendency shape; "
+                f"got {_literal_vmask.shape} versus {dv_dt.shape}")
+        _restore_hpg = (_literal_vmask != 0.0) & (v_mask_3d == 0.0)
+        dv_dt = jnp.where(_restore_hpg, hpg_tendency_v, dv_dt * v_mask_3d)
     dT_dt = dT_dt * mask_3d
     dS_dt = dS_dt * mask_3d
 
@@ -6367,3 +6463,65 @@ def nemo_c2_kinetic_energy(u, v):
     zu = nemo_source_round(u_w_sq + u_e_sq)
     zv = nemo_source_round(v_s_sq + v_n_sq)
     return nemo_source_round(0.25 * nemo_source_round(zv + zu))
+
+
+def _een_fold_image_v_row(
+    enabled, grid, h_v, v, h_u, u, u_mask_3d, v_mask_3d,
+):
+    """Give NEMO ``vor_een`` its T-pivot fold-image V row.
+
+    ``zwy`` is built from ``vv``, ``e3v`` and ``vmask`` on that row
+    (dynvor.f90:767) and is consumed by the two northern triads on the pivot
+    T row (dynvor.f90:779-780). The image carries the V-vector fold sign;
+    thickness and wet mask do not. Disabled is the unchanged legacy path.
+    """
+    if not enabled:
+        return h_v, v, h_u, u, u_mask_3d, v_mask_3d
+    fold = getattr(grid, "fold", None)
+    if fold is None or not bool(fold.is_active):
+        raise ValueError(
+            "een_fold_image_v_row=True needs an active north fold")
+    perm = fold.perm_v
+    wet = v_mask_3d[-2][perm]
+    v = v.at[-1].set(fold.vector_sign_v * v[-2][perm] * wet.astype(v.dtype))
+    h_v = h_v.at[-1].set(h_v[-2][perm])
+    v_mask_3d = v_mask_3d.at[-1].set(wet)
+    return h_v, v, h_u, u, u_mask_3d, v_mask_3d
+
+
+def _nemo_eos_gdept(config, z_coord, eta, H_bathy, stage_stretch=None):
+    """NEMO's ``gdept(Kmm)`` as the density reads it: a rounded product.
+
+    ``zh = ((gdept_1d(jk))*(1._wp+r3t(ji,jj,Knn))) * r1_Z0`` (eosbn2.f90:324,
+    :559): the stretched depth is formed first, then scaled.  Left bare, the
+    compiled graph folds the two constant factors into one and scales the
+    stretch by it, which rounds differently (3,474 cells of 15,000 at one
+    stage of the G1 record, one of which changes the density anomaly).
+    ``nemo_eos_gdept_rounded_product`` keeps the first product.
+    ``stage_stretch`` is NEMO's stored ``1 + r3t`` for the stage when the
+    caller holds it (``rk3_stage_r3t_nemo_literal``); None takes the ratio of
+    the sea level passed in.
+    """
+    if stage_stretch is None or getattr(z_coord, "linear_free_surface", False):
+        depth = nemo_bn2_live_ladders(z_coord, eta, H_bathy)[0]
+    else:
+        from legoesm.ocean.eos import nemo_bn2_depth_ladders
+        depth = nemo_bn2_depth_ladders(z_coord)[0] * stage_stretch[..., jnp.newaxis]
+    if getattr(config, "nemo_eos_gdept_rounded_product", False):
+        depth = nemo_source_round(depth)
+    return depth
+
+
+def _nemo_f_vertex_area(grid, z_coord):
+    """``area_q`` with NEMO's F-cell area ``e1e2f = e1f*e2f`` (domhgr.f90:156)
+    on the native F points (vertex ``[1:, 1:]``, the west column its cyclic
+    image), the area np_CRV's relative vorticity divides by
+    (dynvor.f90:762-766).  The south wall row keeps the grid's own."""
+    raw = getattr(z_coord, "nemo_een_barotropic", None)
+    if raw is None:
+        raise ValueError(
+            "een_nemo_relative_vorticity reads NEMO's e1f and e2f; the card must "
+            "carry them as z_coord.nemo_een_barotropic")
+    area = jnp.asarray(grid.area_q)
+    e1e2f = jnp.asarray(raw.e1f, area.dtype) * jnp.asarray(raw.e2f, area.dtype)
+    return area.at[1:, 1:].set(e1e2f).at[1:, 0].set(e1e2f[:, -1])

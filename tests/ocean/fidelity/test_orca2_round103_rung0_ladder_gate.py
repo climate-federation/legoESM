@@ -43,3 +43,16 @@ def test_source_statement_is_the_measured_round94_boundary() -> None:
     statement = gate.FIRST_SOURCE_STATEMENT
     assert statement["nemo_source"].endswith("stp2d.f90:206-219")
     assert statement["status"] == "HELD_BY_GYRE_2ULP_GATE"
+
+
+def test_boundary_association_arm_is_not_scoped_to_trace_models() -> None:
+    source = gate.Path(
+        gate.__file__).parents[4] / "packages/ocean/legoesm/ocean/dynamics" \
+        / "ocean_model_latlon_cgrid.py"
+    text = source.read_text()
+    assert (
+        "\n                if (\n"
+        "                    self._nemo_ws_test_hooks\n"
+        "                    .barotropic_external_mode_association\n"
+        "                ):"
+    ) in text
