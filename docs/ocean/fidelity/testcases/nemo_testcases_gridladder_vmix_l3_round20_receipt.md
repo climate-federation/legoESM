@@ -208,7 +208,19 @@ One pre-existing failure is unrelated to this diff: a source-text test of the
 Treguier dispatcher (`test_treguier_kappa_uses_the_same_n2_variant_as_the_slopes`)
 fails identically at merge `d68c94cd66`.
 
-Landing gates for this continuation: recorded in the next commit.
+Landing gates for this continuation (JAX_ENABLE_X64=1, land.sh PYTHONPATH):
+
+- this receipt's citation gate: **PASS**, 30 citations, 0 failures,
+  0 unmapped, 0 map-audit failures (92 shifted legoESM-source entries
+  re-anchored; one duplicate key removed);
+- default landing list: **144 passed, 1 failed** on the first run, the
+  failure being my duplicated map key; removed, the citation-gate file is
+  re-run below;
+- private-import ratchet: **6 passed**;
+- L1 + L3 + bolus unit file **37 passed**; L2 **15 passed** plus its two slow
+  tests **2 passed**; G6 **17 passed**; the other touched unit files passed;
+- acquisition preflight: `L3_PREFLIGHT_OK checklist=7 plants=all_refused`
+  with the evidence parent absent.
 
 independent review: operator (Claude)
 

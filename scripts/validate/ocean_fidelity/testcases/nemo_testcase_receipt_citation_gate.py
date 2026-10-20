@@ -8596,8 +8596,6 @@ CITATION_MAP = {
     # --- lane B round 20 continuation (Claude): L3 fold, routing, clock ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:783':
         "CALL lbc_lnk( 'ldftra', zaeiu(:,:), 'U', 1.0_wp , zaeiv(:,:), 'V', 1.0_wp )",
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfslp.f90:338':
-        "wslpi, 'W', -1.0_wp, wslpj, 'W', -1.0_wp )",
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:296':
         'CALL wzv( kt, Kbb, Kmm, Kaa, pFu, pFv, ww, np_transport )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:342-347': [
