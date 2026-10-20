@@ -171,6 +171,10 @@ RMS S 2.284e-3 -> 2.267e-3 (both labels).
   3 passed. Scratch edit disabling lane A's lateral-diffusion guard: that
   test fails ("DID NOT RAISE"), 1 failed / 2 passed, exit 1; source restored,
   0 dirty lines (`plant_geothermal_guard.log`).
+- Resume gates at `dc34fa98c` (clean tree): receipt citation gate 0
+  failures; default gate (land.sh list, incl. private-import ratchet) + the
+  round-320 selection tests = 148 + 2 = 150 passed, 0 failed
+  (`default_gate_resume_a.log`, `default_gate_resume_b.log`).
 
 ## OPEN
 
