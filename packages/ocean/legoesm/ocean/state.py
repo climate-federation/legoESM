@@ -358,6 +358,11 @@ class OceanSurfaceForcing(NamedTuple):
     # jnp.ndarray | None [g/m^2/s], NEMO ``sfx`` as recorded.  Read only by
     # ``rk3_stage3_salt_nemo_written`` (trasbc.f90:308 ``sfx*z1_rho0_e3t``);
     # ``1e3*(1e-3*sfx)`` through ``salt_flux`` is not bitwise ``sfx``.
+    geothermal_heat_flux_mwm2: object = None
+    # jnp.ndarray | None [mW/m^2], NEMO ``sn_qgh`` variable ``heatflow``.
+    # Read only by ``rk3_stage3_geothermal_nemo_written``.  Native file units
+    # are retained so the production path executes trabbc.f90's written
+    # ``* 1.e-3`` conversion rather than pre-converting outside the model.
 
 
 class OceanConfig(NamedTuple):
@@ -3378,6 +3383,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # r3u/r3v(Kmm) blend (stprk3_stg.f90:177-179, :221-223 -> :270-283), not
     # the ratio of the interpolated sea level.  False preserves prior cards.
     rk3_stage_transport_stored_r3uv: bool = False
+    # ORCA2 L4's bottom-temperature boundary condition.  At RK3 stage 3,
+    # after the ordinary tracer sources, add trabbc.f90's variable geothermal
+    # flux to the deepest wet T cell using the stored Kmm thickness.  The
+    # selected path requires OceanSurfaceForcing.geothermal_heat_flux_mwm2;
+    # False leaves every pre-L4 card's pytree and JAX program unchanged.
+    rk3_stage3_geothermal_nemo_written: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

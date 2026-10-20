@@ -1,0 +1,48 @@
+Error while loading conda entry point: conda-anaconda-tos (cannot import name 'validate_prefix_exists' from 'conda.cli.install' (/home/dbalwada/miniconda3/lib/python3.13/site-packages/conda/cli/install.py))
+--- trabbc.F90
++++ trabbc.F90
+@@ -80,7 +80,11 @@
+       REAL(wp), DIMENSION(jpi,jpj,jpk,jpts,jpt), INTENT(inout) :: pts        ! active tracers and RHS of tracer equation
+       !
+       INTEGER  ::   ji, jj, jk    ! dummy loop indices
++      INTEGER  ::   l4_unit, l4_ios
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) ::   ztrdt   ! 3D workspace
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:) ::   l4_qgh, l4_e3t, l4_trend
++      CHARACTER(len=16)  :: l4_magic
++      CHARACTER(len=256) :: l4_path
+       !!----------------------------------------------------------------------
+       !
+       IF( ln_timing )   CALL timing_start('tra_bbc')
+@@ -89,11 +93,32 @@
+          ALLOCATE( ztrdt(T2D(0),jpk) )
+          ztrdt(:,:,:) = pts(T2D(0),:,jp_tem,Krhs)
+       ENDIF
++      ALLOCATE( l4_qgh(jpi,jpj), l4_e3t(jpi,jpj), l4_trend(jpi,jpj) )
++      l4_qgh(:,:) = 0._wp
++      l4_e3t(:,:) = 0._wp
++      l4_trend(:,:) = 0._wp
+       !                             !  Add the geothermal trend on temperature
+       DO_2D( 0, 0, 0, 0 )
+          pts(ji,jj,mbkt(ji,jj),jp_tem,Krhs) = pts(ji,jj,mbkt(ji,jj),jp_tem,Krhs)   &
+             &             + qgh_trd0(ji,jj) / e3t(ji,jj,mbkt(ji,jj),Kmm)
++         IF( tmask(ji,jj,mbkt(ji,jj)) > 0._wp ) THEN
++            l4_qgh(ji,jj) = qgh_trd0(ji,jj)
++            l4_e3t(ji,jj) = e3t(ji,jj,mbkt(ji,jj),Kmm)
++            l4_trend(ji,jj) = qgh_trd0(ji,jj) / e3t(ji,jj,mbkt(ji,jj),Kmm)
++         ENDIF
+       END_2D
++      IF( lwp ) THEN
++         l4_magic = 'NEMO_L4_BBC__1'
++         WRITE(l4_path,'("oracle_geothermal_kt",I8.8,".bin")') kt
++         OPEN( NEWUNIT=l4_unit, FILE=TRIM(l4_path), STATUS='NEW', ACTION='WRITE', &
++            &  ACCESS='STREAM', FORM='UNFORMATTED', IOSTAT=l4_ios )
++         IF( l4_ios /= 0 )   CALL ctl_stop( 'tra_bbc: cannot create round-53 geothermal record' )
++         WRITE(l4_unit) l4_magic
++         WRITE(l4_unit) 1, kt, Kmm, Krhs, jpi, jpj, STORAGE_SIZE(0._wp), 3
++         WRITE(l4_unit) l4_qgh, l4_e3t, l4_trend
++         CLOSE(l4_unit)
++      ENDIF
++      DEALLOCATE( l4_qgh, l4_e3t, l4_trend )
+       !
+       IF( l_trdtra ) THEN        ! Send the trend for diagnostics
+          ztrdt(:,:,:) = pts(T2D(0),:,jp_tem,Krhs) - ztrdt(:,:,:)

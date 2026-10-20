@@ -8648,6 +8648,32 @@ class LatLonCGridOceanModel:
                     None if _rnf_content is None else _rnf_content[1],
                     _h_s3_kmm))
 
+            if _cfg_b.rk3_stage3_geothermal_nemo_written:
+                # stprk3_stg.f90:734-739 calls tra_bbc after tra_ldf and before
+                # tra_bbl.  L4 inherits G5's OFF selections for both neighbors,
+                # so its observable statement is the add to the already-built
+                # temperature Krhs (trabbc.f90:156-160).
+                _qgh = (None if surface_forcing is None else getattr(
+                    surface_forcing, "geothermal_heat_flux_mwm2", None))
+                if (_qgh is None or _stage3_T_written is None
+                        or not _cfg_b.rk3_stage3_tracer_nemo_stored_thickness):
+                    raise ValueError(
+                        "rk3_stage3_geothermal_nemo_written needs "
+                        "OceanSurfaceForcing.geothermal_heat_flux_mwm2, "
+                        "rk3_stage3_heat_nemo_written, and "
+                        "rk3_stage3_tracer_nemo_stored_thickness")
+                from legoesm.ocean.physics.geothermal import (
+                    nemo_geothermal_bottom_heating_tendency,
+                )
+                _qgh_rate = nemo_geothermal_bottom_heating_tendency(
+                    _h_s3_kmm, _active_live,
+                    heatflow_mwm2=_qgh,
+                    rho_0=_cfg_b.rho_0,
+                    c_sw=_cfg_b.physics.constants.c_sw,
+                )
+                _stage3_T_written = nemo_source_round(
+                    _stage3_T_written + _qgh_rate)
+
             if _cfg_b.rk3_stage3_tracer_krhs_nemo_order:
                 # The same stage-3 terms, kept apart so they add onto the FCT
                 # Krhs one at a time: trasbc.f90:307-308 (qns, sfx at level
