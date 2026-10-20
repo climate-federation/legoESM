@@ -14,10 +14,10 @@ CPU, fp64, x64, production JIT, libm policy.
   move the state; cd_max, z0 and ke0 move nothing (the card's linear drag
   never reads them) and are declared inert in the test.
 - Rung-10 isoneutral gradient at N = 2, 5, 10: PENDING (running, section 4).
-- FINDING (OPEN): the background diffusivity floor kappaH_min changes the
-  state linearly but its forward-mode derivative is exactly 0. A trainer
-  must freeze it out until the cut is located (round 317's "AD exactly 0"
-  was this, not an inert floor).
+- FINDING: the background diffusivity floor kappaH_min sits exactly on a
+  kink at its rung-10 value. Raising it moves the state linearly; lowering
+  it moves nothing; its derivative under jit is exactly 0 (round 317's
+  "AD exactly 0" was this). A gradient trainer cannot move it from 1e-10.
 
 ## 1. The fix (`7f4c7f360050`)
 `ocean_model_latlon_cgrid.py:11751-11755`: `cd0`, `cd_max`, `z0`, `ke0`,
@@ -88,14 +88,21 @@ the forward-mode tangent times 1e-3.
 | TKE minimum (control) | 5.799e-10 K | 5.788e-9 K | 5.800e-10 K |
 | kappaH_min | 4.664e-11 K | 4.666e-10 K | 0 |
 
-- kappaH_min: the response is linear (x10 for x10) and the diffusivity
-  moves by exactly the floor's change (1.000e-13 at +1e-3) where it binds,
-  so the floor is live; its derivative is cut. CONFIRMED by the two
-  controls (tangent = difference to <= 0.02 %).
+| kappaH_min, lowered (`jobs/lin_rung10_neg.json`) | 0 at -1e-3 | 0 at -1e-2 | 0 |
+
+- kappaH_min: raised, the response is linear (x10 for x10) and the
+  diffusivity moves by exactly the floor's change (1.000e-13 at +1e-3)
+  where it binds; lowered, no state value moves. One-sided: CONFIRMED.
+  The two controls match their tangent to <= 0.02 %.
 - Not the cold-start seed: rung 10 enters with a carried diffusivity
-  (minimum 1.2e-6, no cell at 1e-10). The card runs the `nemo_ri`
-  Prandtl closure and the literal TKE matrix; where the derivative is cut
-  is not located (next round).
+  (minimum 1.2e-6, no cell at 1e-10).
+- PLAUSIBLE mechanism: in a quiescent cell at the TKE minimum and the
+  minimum mixing length, the closure's raw diffusivity is
+  0.1 x 1e-3 m x sqrt(1e-10) / Prandtl 10 = 1e-10, the floor itself, so
+  the floor ties the other branch. The closure alone (toy column, rung-10
+  TKE settings): strictly binding, the floor's tangent is 1e-10 eager and
+  jit; at the tie it is 0.5 x 1e-10 eager and 0 under jit. Rung-10 tie
+  cells not counted.
 
 ## 3. Round 317's detached results
 | run | status | finite | reverse vs forward (worst) | peak |
