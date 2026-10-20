@@ -309,10 +309,9 @@ admitted artifacts; it did not invoke NEMO.
 
 The first walk was exact through stages 1 and 2 and exact at stage 3 for U/V
 transport, momentum, SSH, and barotropic state.  Stage-3 T and S were the
-first debt: 16,433 surface cells in each field, with maxima 0.04338 K and
-0.02613 psu, and the same tracer debt extended through the wet full-depth
-classes; dry cells were exact.  The independently observed pre-EIV transport
-was already exact.  Reproducing the written Treguier accumulator, Rossby/taper
+first debt throughout the wet full-depth classes; dry cells were exact.  The
+independently observed pre-EIV transport was already exact.  Reproducing the
+written Treguier accumulator, Rossby/taper
 chain, face materialization and streamfunction association from
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:758-760`,
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:767`,
@@ -334,31 +333,23 @@ unselected operator or introduce new physics.
 
 ### Frozen score
 
-Both preregistered labels pass:
+The earlier score JSONs named here were produced from `09a22e7fc0-dirty` and
+are withdrawn as certification evidence.  The independent reviewer instead
+ran its own bitwise driver at clean tip `c1911bb1d7ef`: both labels, kt 1
+through 10, all 30 levels, and every recorded T, S, u, v, SSH and barotropic
+field have zero unequal bits on ocean cells at every step.  Land differences
+are sign-of-zero only, matching disagreements between NEMO's own stage and
+restart records.  The clean artifacts are
+`gridladder_vmix_rounds/round20/review_claude_r20_cert/out/independent.json`,
+`given.json`, `witness.json`, and `report.txt`; each JSON stamps the clean
+packages tree and an empty dirty string.
 
-- **independent:** kt 1 through 10, 70/70 surface rows exact and 40/40
-  full-depth summaries AT-BAR;
-- **given-entry:** odd entries 1, 3, 5, 7, 9 plus their carried second steps
-  2, 4, 6, 8, 10, again 70/70 surface rows exact and 40/40 full-depth
-  summaries AT-BAR.
-
-The full-depth rows cover U, V, T and S at all 30 levels.  Across full-wet,
-partial-wet, and dry cells they report zero normal differences, zero bitwise
-differences, zero maximum error, and zero flushed-subnormal exceptions.  The
-classifier nevertheless uses Decision 127 explicitly: a planted NEMO
-nonzero subnormal against card zero is AT-BAR/flushed, while a planted normal
-difference is DEBT.  The score artifacts are
-`gridladder_vmix_rounds/round20/l3_independent_score_final.json` and
-`gridladder_vmix_rounds/round20/l3_given_entry_score_final.json`.
-
-The eddy-induced velocity acts exactly where predicted.  Its before, delta,
-and after U/V horizontal transports have zero normal differences from the
-record.  A jitted production step with traced inputs and fp64 then matches
-the stage-3 NEMO T/S fields at full depth.  Removing Treguier-21 changes
-430,385 T and 430,365 S cells; removing NEMO face averaging changes 430,366
-T and 430,161 S cells; removing through-FCT routing changes 430,290 T and
-429,336 S cells.  The record test therefore fails with each frozen L3 wiring
-removed.
+The eddy-induced-velocity witness is exact on all 413,030 wet U faces and
+415,175 wet V faces for before, delta and after transports.  Its delta is
+nonzero on 409,024 U and 414,779 V faces.  Turning EIV off makes 430,385 wet T
+cells and 430,365 wet S cells unequal at kt 1 while momentum stays exact; a
+one-ulp ocean plant and a land sign plant are both refused.  These values all
+come from the same clean-tip reviewer run.
 
 Every other card remains fixed.  Normalized one-step jaxprs are identical for
 G5-G9, V1-V5, L1, L2, GYRE, DINO, full ORCA2, SMT1-4, VORTEX, OMT0-4, and
@@ -384,6 +375,68 @@ then rerun to the green results above.  The full L3 file is independently
 preregistered verdict is **L3 CERTIFIED**.
 
 independent review: operator (Claude)
+
+codex review: operator
+
+## Continuation (Codex, 2026-10-20) — clean provenance, boundary fix and AD measurement
+
+The independent Claude certification is **LAND**.  Its clean-tip driver at
+`c1911bb1d7ef` replaces the withdrawn dirty-tree score files above.  L3 stays
+certified: both labels are bitwise exact on every ocean cell in every field at
+kt 1 through 10; land differs only in signed zero, as NEMO's own records do.
+
+Two forward-neutral defects are fixed in `e4d6cfc9f3`:
+
+1. The staged V-transport view now pads the closed south wall with zero at
+   `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10288-10289`.
+   The old north-pivot copy puts 1,319 nonzero EIV transports on the south wall
+   in the clean kt-1 witness; the regression requires a zero southern row and
+   a nonzero northern control row.
+2. The source-ordered Treguier inverse timescale now calls the existing
+   forward-exact, finite-tangent square root at
+   `packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py:1900-1902`.
+   Its zero-ratio gradient is finite and exactly zero.  Replacing it with the
+   former raw square root makes the test fail with an infinite gradient.
+
+At clean `e4d6cfc9f3`, a production kt-1 rerun has zero differing bits from
+the clean reviewer's pre-fix state in T, S, u, v and SSH; the corrected south
+pad has zero nonzero values.  Normalized one-step programs for every other
+buildable card are unchanged: 31 of 31 hashes match clean `c1911bb1d7ef`, with
+no foreign imports (G5-G9, V1-V5, L1-L2, GYRE, DINO, full ORCA2, SMT and
+SMT1-4, vector SMT, VORTEX and vector VORTEX, OMT0-4, rung 0, OVERFLOW and
+LOCK_EXCHANGE).  Evidence is under
+`gridladder_vmix_rounds/round20/codex_r20_land/{out,jx}/`.  The focused clean
+test run is **44 passed in 493.76 s**.
+
+### Online-training measurement — intentionally not fixed here
+
+The same stamped one-step T/S loss was differentiated with respect to the
+initial T field at clean `e4d6cfc9f3`.  G9 alone and G9+L2 each return NaN in
+all 799,200 gradient entries, including all 430,552 wet entries; neither has an
+infinite entry.  Thus the failure predates L3 and is independent of the safe
+Treguier square root.  The clean artifacts are `codex_r20_land/out/g9_grad.json`
+and `g9_l2_grad.json`, both with an empty dirty stamp.
+
+The round-315 sanitized backward walker on this shared G9 stage-1/2 tracer path
+names the same complete three-source sequence for G9 and G9+L2.  In reverse
+order:
+
+1. **First NaN:** the stage tracer combine divides by `q_after == 0` on dry
+   cells before its mask at
+   `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2722-2732`.
+2. The vertical CEN2 tracer divergence divides by `e3t_kmm == 0` on dry cells
+   at `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2011`.
+3. The horizontal CEN2 tracer divergence makes the same dry-cell division at
+   `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:1998`.
+
+Each forward non-finite value is later masked, but its transpose receives a
+zero cotangent and produces NaN.  No L2-only source was found.  ORCA2 round
+316's group-A guard (`fae1fe1a42b9`) covers all three: it substitutes one only
+for the discarded dry `q_after` lanes and for zero dry `e3t_kmm` divisors,
+leaving every wet operand and every forward bit unchanged.  Per instruction,
+those guards are named but not imported or fixed in this round.
+
+independent review: operator (Claude) — LAND
 
 codex review: operator
 

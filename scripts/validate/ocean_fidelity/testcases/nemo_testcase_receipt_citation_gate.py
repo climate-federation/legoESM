@@ -8542,6 +8542,23 @@ CITATION_MAP = {
         'ln_ldfeiv   = .true.    ! use eddy induced velocity parameterization',
         'rn_Le        = 200.e+3           !  lateral diffusive length   [m]   (nn_aht_ijk_t= 0, 10)', 7,
     ],
+    # --- lane B round 20 landing continuation: boundary and AD audit ---
+    'packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10288-10289': [
+        'zfv_eiv = jnp.concatenate(',
+        '[jnp.zeros_like(v_eiv[:1]), v_eiv], axis=0)', 2,
+    ],
+    'packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py:1900-1902': [
+        'if source_ordered_final:',
+        't_inv = b(_nemo_sqrt_nonnegative_forward_exact(ratio))', 3,
+    ],
+    'packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2722-2732': [
+        'if stage_tracer_written_order:',
+        'return jnp.where(active_3d > 0.5, out, base)', 11,
+    ],
+    'packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2011':
+        'return sr(rhs - sr(vertical_scaled / e3t_kmm))',
+    'packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:1998':
+        'rhs = sr(-sr(horizontal_scaled / e3t_kmm))',
     # --- lane B round 20: L3 ORCA2 eddy-induced velocity ---
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:317':
         'ln_ldfeiv   = .true.    ! use eddy induced velocity parameterization',
