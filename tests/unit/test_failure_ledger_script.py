@@ -89,3 +89,8 @@ def test_safety_rule_needs_a_raised_guard():
     assert tfl.classify("tests/unit/t.py::f", "temperature must be positive is required") == "other"
     assert tfl.classify("tests/unit/t.py::f",
                         "ValueError: the tiled dycore refuses the energy fixer") == "new safety check vs old test"
+
+
+def test_policy_drift_is_any_top_level_ratchet_not_subdir():
+    assert tfl.classify("tests/test_pe_dycore_inline_imports.py::t[x]", "AssertionError: 24 inline") == "policy drift"
+    assert tfl.classify("tests/unit/test_pe.py::t", "AssertionError: 24 inline") == "other"

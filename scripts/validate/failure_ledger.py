@@ -28,8 +28,8 @@ RULES: list[tuple[str, str | None, str | None]] = [
     ("config round-trip", r"(round_?trip|roundtrip).*config|config.*(round_?trip|roundtrip)", None),
     ("stale fake driver", None, r"'(_?Fake|_?Dummy|_?Stub|Mock|SimpleNamespace)\w*' object has no attribute"),
     ("missing data/doc", None, r"FileNotFoundError|No such file or directory|does not exist"),
-    ("policy drift", r"^tests/test_(no_|param_|physics_contracts|dispatch|validate_strict|scripts_|"
-                     r"federation|inline|ratchet|import)", None),
+    # ci.yml: the top-level tests/test_*.py files are the AST/source ratchets.
+    ("policy drift", r"^tests/test_[^/]+\.py(::|$)", None),
     ("stale-after-rename", None,
      r"unexpected keyword argument|cannot import name|module '[\w.]+' has no attribute|"
      r"missing \d+ required (positional|keyword)|has no field|got multiple values"),
