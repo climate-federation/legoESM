@@ -257,7 +257,9 @@ mpi-nightly,claude-code-review}.yml`).
 `pytest tests/` collects about 58,000 tests. That is far more than CI runs, and it
 can take most of a day on a laptop. To check a change against what CI checks, run
 the test steps of `.github/workflows/ci.yml` directly. Use the precision each job
-sets: the unit tier runs fp32, and the other jobs set `JAX_ENABLE_X64=1`.
+sets: the unit tier and the restart and integration smoke jobs run fp32; the
+Fortran-fidelity job (top-level tests, SFNO restart, FV3 native grid) and the
+visual-regression job set `JAX_ENABLE_X64=1`.
 
 ```bash
 export JAX_PLATFORMS=cpu   # needed on Apple Silicon when the mps extra is installed
