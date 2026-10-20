@@ -33,7 +33,7 @@ constructs U and V reference thickness as the minimum of the neighbouring T
 thicknesses and then exchanges the paired fields at
 `VORTEX_SMT_R3_OMIP_L1_P3/BLD/ppsrc/nemo/usrdef_zgr.f90:240-247`. The shared
 consumer now takes the already-attached NEMO-built face arrays and fails
-closed if they are absent at `vertical.py:673-735`. The preregistration used
+closed if they are absent at `vertical.py:678-735`. The preregistration used
 the unpreprocessed `MY_SRC` line numbers 225/228/231; those are **not** the
 compiled line numbers, so this receipt corrects the citation rather than
 silently carrying it forward.

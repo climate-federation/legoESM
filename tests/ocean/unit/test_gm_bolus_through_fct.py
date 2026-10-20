@@ -15,6 +15,7 @@ new ``through_fct`` option:
  (d) monotonicity: a sharp front develops NO new extrema under FCT-with-bolus.
 """
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
@@ -241,3 +242,45 @@ def test_accessor_is_pure_curl_divergence_free():
     w_top = jnp.roll(w_eiv, +1, ax_z).at[:, :, 0].set(0.0)
     div3d = hdiv + (w_top - w_eiv)
     assert float(jnp.max(jnp.abs(div3d))) < 1e-9
+
+
+def test_eiv_pivot_v_transport_reads_nemo_folded_ghost_row_exactly():
+    """ldf_eiv_trp's pivot V row reads three fold exchanges: aeiv after
+    lbc_lnk 'V' +1 (ldftra.f90:783), wslpj's ghost after lbc_lnk 'W' -1
+    (ldfslp.f90:338) and the exchanged, open V pivot mask (dommsk)."""
+    import jax
+
+    nlat, nlon, nlev = 4, 8, 3
+    perm = np.array([(nlon - i) % nlon for i in range(nlon)])
+    grid = SimpleNamespace(fold=SimpleNamespace(
+        is_active=True, pivot_row_stored=True, fold_j=0, perm_T=perm,
+        perm_u=np.arange(nlon - 1, -1, -1), perm_v=perm,
+        perm_f=np.arange(nlon - 1, -1, -1)))
+    rng = np.random.default_rng(7)
+    kappa = rng.uniform(100.0, 3000.0, (nlat, nlon, nlev))
+    slope_i = rng.uniform(-1e-3, 1e-3, (nlat, nlon, nlev))
+    slope_j = rng.uniform(-1e-3, 1e-3, (nlat, nlon, nlev))
+    e1v = rng.uniform(1e5, 2e5, (nlat, nlon))
+    act = np.ones((nlat, nlon, nlev))
+    below = act.copy()
+    below[..., -1] = 0.0
+    umask = np.ones((nlat, nlon + 1))
+    vmask = np.ones((nlat + 1, nlon))
+    vmask[-1] = 0.0     # dommsk's compact V pivot row, closed before lbc_lnk
+
+    @jax.jit
+    def pivot_v(kappa, slope_i, slope_j, e1v):
+        return nemo_eiv_bolus_transport(
+            kappa, slope_i, slope_j, jnp.ones((nlat, nlon)), e1v,
+            jnp.asarray(umask), jnp.asarray(vmask), jnp.asarray(act),
+            jnp.asarray(below), (nlat, nlon, nlev), jnp.float64,
+            kappa_face_average=True, grid=grid, north_fold=True)[1][-1]
+
+    got = np.asarray(pivot_v(kappa, slope_i, slope_j, e1v))
+    aeiv = 0.5 * (kappa[-2] + kappa[-1])[perm]          # V row below, mirrored
+    aeiv_w = 0.5 * (aeiv + np.roll(aeiv, -1, axis=-1))
+    wslpj_v = 0.5 * (slope_j[-1] + -slope_j[-2][perm])  # 'W' ghost, sign -1
+    psi = -(e1v[-1][:, None] * wslpj_v * aeiv_w * below[-1])
+    top = np.concatenate([np.zeros((nlon, 1)), psi[:, :-1]], axis=1)
+    want = -(top - psi)
+    assert np.array_equal(got.view(np.uint64), want.view(np.uint64))

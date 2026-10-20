@@ -110,6 +110,8 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.source_rounding import nemo_source_round
+from legoesm.core.transcendentals import exp as precision_exp
+from legoesm.core.transcendentals import sin as precision_sin
 from legoesm.core.transcendentals import tanh as precision_tanh
 from legoesm.ocean.physics.vertical_mixing._glibc234_exp_table import (
     GLIBC234_EXP_TABLE_BITS,
@@ -227,6 +229,7 @@ def _mxl0_anchor_floor(cfg: "TKEConfig"):
 
 def _mxl0_surface_anchor(
     cfg: "TKEConfig", taum, rho_0: float, g: float, surface_tmask=None,
+    mxlice_fr_i=None, mxlice_hm_i=None,
 ):
     """ln_mxl0 surface anchor (shipped zdftke.F90:575,602,640-642).
 
@@ -241,6 +244,27 @@ def _mxl0_surface_anchor(
     if cfg.tke_mxl_choice not in (3, 4):
         return None
     taum = jnp.asarray(taum)
+    mxlice = int(getattr(cfg, "nemo_mxlice", 0))
+    if mxlice not in (0, 2):
+        raise ValueError(
+            f"Unknown TKEConfig.nemo_mxlice={mxlice!r}; expected 0 (no "
+            "under-ice scaling) or 2 (SI3 mean thickness hm_i).")
+    if mxlice == 2:
+        if (not cfg.nemo_mxl0_surface_tmask or surface_tmask is None
+                or mxlice_fr_i is None or mxlice_hm_i is None):
+            raise ValueError(
+                "TKEConfig.nemo_mxlice=2 requires nemo_mxl0_surface_tmask, "
+                "surface_tmask and the raw ice fraction fr_i and mean ice "
+                "thickness hm_i (zdftke.f90:620-623).")
+        fr_i = jnp.asarray(mxlice_fr_i, dtype=taum.dtype)
+        hm_i = jnp.asarray(mxlice_hm_i, dtype=taum.dtype)
+        zraug = _NEMO_MXL0_VKARMN * _NEMO_MXL0_LENGTH_SCALE / (rho_0 * g)
+        # CASE( 2 ): zmxlm(1) = ((1-fr_i)*zraug*taum + fr_i*hm_i*2)*tmask(1),
+        # then MAX(rn_mxl0, zmxlm(1)) (zdftke.f90:620-623, :635-637)
+        raw = (((1.0 - fr_i) * zraug * taum + fr_i * hm_i * 2.0)
+               * jnp.asarray(surface_tmask, dtype=taum.dtype))
+        return jnp.maximum(
+            jnp.asarray(_mxl0_anchor_floor(cfg), dtype=taum.dtype), raw)
     if not cfg.nemo_mxl0_surface_tmask:
         # Default (main's behaviour): unmasked stress.  Callers with no
         # surface T-mask (FESOM) stay supported; NEMO-literal cards opt into
@@ -470,6 +494,13 @@ class TKEEntryN2Bundle(NamedTuple):
     # e3w_Kmm field above intentionally has nlev-1 eosbn2 interfaces.
     e3w_surface_Kmm: jnp.ndarray | None = None
     bn2_intermediate: object = None
+    e3t_jpk: jnp.ndarray | None = None
+    # (zdt, zds) for zdf_ddm (zdfddm.f90:127-128) when the card selects the
+    # NEMO-literal double diffusion; None otherwise.
+    ddm_operands: object = None
+    # (1 + r3t(Kmm)) for zdf_iwm (zdfiwm.f90:234-269) when the card selects
+    # the NEMO-literal internal-wave mixing; None otherwise.
+    iwm_stretch: jnp.ndarray | None = None
 
 
 class TKECarryOutput(NamedTuple):
@@ -895,9 +926,11 @@ def compute_mixing_lengths(
         n_e3 = e3T_raw.shape[0]
         n_l = lT.shape[0]
         if n_e3 == n_l + 1:
+            has_terminal_e3t = True
             e3T = e3T_raw[:-1]        # (nlev,), UNCHANGED vs the legacy contract
             e3_bottom = e3T_raw[-1]   # true e3t(jpk), the extra row
         elif n_e3 == n_l:
+            has_terminal_e3t = False
             e3T = e3T_raw             # legacy contract, bit-identical to before
             e3_bottom = e3T_raw[-1]   # proxy: e3t(jpkm1) (documented residual gap)
         else:
@@ -938,11 +971,22 @@ def compute_mixing_lengths(
         if raw_evaluation == "nemo_literal":
             # NEMO leaves zmxlm(jpk) at rmxl_min and uses that UNMODIFIED
             # terminal pad as the carry for the first jk=jpkm1 iteration.
-            # Do not apply a fictitious update to jpk itself from raw en(jpk).
-            _, ldn_rest = jax.lax.scan(
-                _down, _seed, (lT[1:-1][::-1], e3T[2:][::-1]))
-            ldn = jnp.concatenate(
-                [lT[:1], ldn_rest[::-1], _seed[None]], axis=0)
+            # zdftke.f90:690-692 nevertheless UPDATES jk=jpkm1 from that pad
+            # plus e3t(jpk).  Execute that statement when the caller carries
+            # the true terminal thickness; the legacy shape cannot represent
+            # it and retains its prior bounded proxy bit-for-bit.
+            if has_terminal_e3t:
+                first_ldn = jnp.minimum(_seed + e3_bottom, lT[-1])
+                _, ldn_rest = jax.lax.scan(
+                    _down, first_ldn,
+                    (lT[1:-1][::-1], e3T[2:][::-1]))
+                ldn = jnp.concatenate(
+                    [lT[:1], ldn_rest[::-1], first_ldn[None]], axis=0)
+            else:
+                _, ldn_rest = jax.lax.scan(
+                    _down, _seed, (lT[1:-1][::-1], e3T[2:][::-1]))
+                ldn = jnp.concatenate(
+                    [lT[:1], ldn_rest[::-1], _seed[None]], axis=0)
         else:
             # Historical shared recurrence, retained bit-for-bit outside the
             # two literal DINO cards.
@@ -1071,6 +1115,7 @@ def _nemo_literal_tke_solve(
     surface_en: jnp.ndarray,
     w_active: jnp.ndarray,
     floor: float,
+    source_rounded: bool = False,
 ) -> jnp.ndarray:
     """Solve the NEMO ``zdftke`` system in literal source order.
 
@@ -1089,7 +1134,11 @@ def _nemo_literal_tke_solve(
     index IS ``jpkm1``, the deepest row NEMO SOLVES. ``en(jpk)`` is read by
     nothing — the back-substitution above drops it and ``tke_avn`` loops
     ``jk = 1, jpkm1`` (``zdftke.f90:681-687``) — so no slot is needed for it.
+
+    ``source_rounded`` (card-selected) rounds the two products that feed a
+    subtraction (``zdftke.f90:466,472``) so XLA cannot contract them to FMAs.
     """
+    rp = nemo_source_round if source_rounded else (lambda value: value)
     if not (a.shape == b.shape == c.shape == rhs.shape):
         raise ValueError("literal TKE tridiagonal operands must share a shape")
     if a.ndim < 1 or a.shape[-1] < 2:
@@ -1133,7 +1182,7 @@ def _nemo_literal_tke_solve(
         def rhs_step(previous, operands):
             source, lower, previous_diagonal = operands
             # Preserve NEMO's division-before-multiply association (:556).
-            current = source - lower / previous_diagonal * previous
+            current = source - rp(lower / previous_diagonal * previous)
             return current, current
 
         _, work_rows = jax.lax.scan(rhs_step, work_seed, rhs_inputs)
@@ -1148,7 +1197,7 @@ def _nemo_literal_tke_solve(
 
             def reverse_step(next_value, operands):
                 source, upper, current_diagonal = operands
-                current = (source - upper * next_value) / current_diagonal
+                current = (source - rp(upper * next_value)) / current_diagonal
                 return current, current
 
             _, reverse_rows = jax.lax.scan(
@@ -1368,6 +1417,11 @@ def _solve_tke_backward_euler(
     if literal_solver and not literal_matrix:
         raise ValueError(
             "tke_solver_evaluation='nemo_literal' requires "
+            "tke_matrix_evaluation='nemo_literal'.")
+    if (getattr(cfg, "nemo_tke_matrix_rhs_source_rounded", False)
+            and not literal_matrix):
+        raise ValueError(
+            "nemo_tke_matrix_rhs_source_rounded requires "
             "tke_matrix_evaluation='nemo_literal'.")
     if return_statement_trace and (
             not literal_solver or surface_bc_level != "nemo_z0"):
@@ -1687,6 +1741,16 @@ def _solve_tke_backward_euler(
                 "tke_matrix_evaluation='nemo_literal' requires "
                 "dissipation_discretization='nemo_1p5_split'.")
         dissl = jnp.asarray(dissl_old, dtype=e_old.dtype)
+    if literal_matrix and getattr(cfg, "nemo_tke_matrix_rhs_source_rounded", False):
+        # zdftke.f90:420 one rounding per operation (no FMA in NEMO's build).
+        r = nemo_source_round
+        # zfact2 = 1.5*rn_Dt*rn_ediss (:247) = 11340 on V1; unrounded, XLA
+        # reassociates it to dt*(1.5*0.7) = 11339.999999999998.
+        zfact2 = r(r(1.5 * dt) * cfg.c_eps)  # coeff-ok: NEMO zfact2 split weight
+        diag = r(r(1.0 - literal_lw) - literal_up) + r(
+            r(zfact2 * dissl[..., :N])
+            * jnp.asarray(w_active[..., :N], dtype=e_old.dtype))
+    elif literal_matrix:
         diag = (1.0 - literal_lw - literal_up
                 # NEMO's literal zfact2 = 1.5 * rn_Dt * rn_ediss.
                 + ((1.5 * dt) * cfg.c_eps)  # coeff-ok: NEMO zfact2 split weight
@@ -1716,10 +1780,12 @@ def _solve_tke_backward_euler(
             rhs, rhs_intermediate_value = _nemo_literal_rhs_materialized(
                 rhs_base, dt, P_s, K_H_old, N2, diss_rate, dissl_old,
                 cfg.c_eps, w_active, "", intermediate=rhs_intermediate)
-        elif rhs_materialization:
+        elif rhs_materialization or getattr(
+                cfg, "nemo_tke_matrix_rhs_source_rounded", False):
+            # zdftke.f90:423-426 in written order, every operation rounded.
             rhs = _nemo_literal_rhs_materialized(
                 rhs_base, dt, P_s, K_H_old, N2, diss_rate, dissl_old,
-                cfg.c_eps, w_active, rhs_materialization)
+                cfg.c_eps, w_active, rhs_materialization or "all")
         else:
             rhs = rhs_base + dt * (
                 P_s + buoy_source + 0.5 * diss_rate * rhs_base
@@ -1882,7 +1948,8 @@ def _solve_tke_backward_euler(
         if literal_solver:
             e_new = _nemo_literal_tke_solve(
                 a_ext, b_ext, c_ext, rhs_ext, e_sfc, w_active,
-                cfg.tke_background)
+                cfg.tke_background, source_rounded=bool(getattr(
+                    cfg, "nemo_tke_solve_source_rounded", False)))
         else:
             e_new_ext = _tridiag_thomas(a_ext, b_ext, c_ext, rhs_ext)
             e_new = e_new_ext[..., 1:]
@@ -2617,6 +2684,18 @@ def _nemo_glibc234_vector_sin(argument: jnp.ndarray) -> jnp.ndarray:
     return jnp.where(ordinary, literal, jnp.sin(argument))
 
 
+def _require_libm_policy(field: str) -> None:
+    """'nemo_scalar_libm' promises NEMO's scalar libm; the native policy
+    would silently substitute XLA's own sin/exp."""
+    from legoesm.core.precision import get_policy
+
+    if get_policy().transcendentals != "libm":
+        raise ValueError(
+            f"TKEConfig.{field}='nemo_scalar_libm' requires the precision "
+            "policy's transcendentals='libm'; got "
+            f"{get_policy().transcendentals!r}")
+
+
 def _nemo_etau_htau(
     lat_deg: jnp.ndarray,
     cfg: TKEConfig,
@@ -2628,17 +2707,22 @@ def _nemo_etau_htau(
         # Historical expression: deliberately unchanged for every generic and
         # non-oracle card.
         sine = jnp.sin(jnp.deg2rad(lat_deg))
-    elif evaluation == "nemo_literal":
+    elif evaluation in ("nemo_literal", "nemo_scalar_libm"):
         # NEMO zdftke.F90:493: rpi / 180._wp * gphit.  The caller guarantees
         # that lat_deg is the bridge-carried native gphit array in this arm.
         phase = _nemo_binary64_round(
             jnp.asarray(lat_deg, dtype=dtype)
             * float.fromhex("0x1.1df46a2529d39p-6"))
-        sine = _nemo_glibc234_vector_sin(phase)
+        if evaluation == "nemo_literal":
+            sine = _nemo_glibc234_vector_sin(phase)
+        else:
+            _require_libm_policy("tke_htau_evaluation")
+            sine = precision_sin(phase)
     else:
         raise ValueError(
             "Unknown TKEConfig.tke_htau_evaluation: expected "
-            f"'jax_expression' or 'nemo_literal', got {evaluation!r}.")
+            "'jax_expression', 'nemo_literal' or 'nemo_scalar_libm', got "
+            f"{evaluation!r}.")
     return jnp.maximum(
         _NEMO_TKE_HTAU_MIN_M,
         jnp.minimum(
@@ -2656,6 +2740,8 @@ def nemo_etau_injection(
     rho_0: float = constants.rho_ocean,
     lat_deg: jnp.ndarray | None = None,
     ice_frac: jnp.ndarray | None = None,
+    wmask: jnp.ndarray | None = None,
+    surface_tmask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     r"""Sub-ML penetration of surface TKE (NEMO nn_etau=1, zdftke.F90:492-496).
 
@@ -2674,10 +2760,12 @@ def nemo_etau_injection(
     """
     exp_evaluation = getattr(
         cfg, "tke_etau_exponential_evaluation", "jax_expression")
-    if exp_evaluation not in ("jax_expression", "nemo_literal"):
+    if exp_evaluation not in (
+            "jax_expression", "nemo_literal", "nemo_scalar_libm"):
         raise ValueError(
             "Unknown TKEConfig.tke_etau_exponential_evaluation: expected "
-            f"'jax_expression' or 'nemo_literal', got {exp_evaluation!r}.")
+            "'jax_expression', 'nemo_literal' or 'nemo_scalar_libm', got "
+            f"{exp_evaluation!r}.")
     mode = cfg.etau_mode
     if mode == "none":
         return e
@@ -2703,11 +2791,21 @@ def nemo_etau_injection(
                         * jnp.maximum(taum, 0.0))
     if exp_evaluation == "jax_expression":
         profile = jnp.exp(-depth_w / htau)
+    elif exp_evaluation == "nemo_scalar_libm":
+        _require_libm_policy("tke_etau_exponential_evaluation")
+        profile = precision_exp(-depth_w / htau)
     else:  # validated above
         profile = _nemo_glibc234_vector_exp(-depth_w / htau)
     inj = cfg.etau_frac * e_sfc[..., None] * profile
     if ice_frac is not None:
         inj = inj * jnp.maximum(0.0, 1.0 - ice_frac[..., None])
+    if getattr(cfg, "nemo_etau_wmask", False):
+        if wmask is None or surface_tmask is None:
+            raise ValueError(
+                "nemo_etau_wmask=True requires wmask and surface_tmask "
+                "(zdftke.f90:500-501).")
+        inj = (inj * jnp.asarray(wmask, dtype=inj.dtype)
+               * jnp.asarray(surface_tmask, dtype=inj.dtype)[..., None])
     return e + inj
 
 
@@ -2749,6 +2847,8 @@ def tke_vertical_mixing(
     e3w_int: jnp.ndarray | None = None,
     ice_frac: jnp.ndarray | None = None,
     surface_tmask: jnp.ndarray | None = None,
+    mxlice_fr_i: jnp.ndarray | None = None,
+    mxlice_hm_i: jnp.ndarray | None = None,
     bottom_dirichlet: jnp.ndarray | None = None,
     bottom_level: jnp.ndarray | None = None,
     T_n2b: jnp.ndarray | None = None,
@@ -3018,6 +3118,22 @@ def tke_vertical_mixing(
             "Unknown TKEConfig.tke_n2_evaluation_stage: expected "
             "'implicit_solve_state' or 'step_entry', got "
             f"{_n2_stage!r}.")
+    if (getattr(cfg, "nemo_mxl_terminal_e3t", False)
+            and cfg.tke_mxl_choice not in (3, 4)):
+        raise ValueError(
+            "nemo_mxl_terminal_e3t=True requires tke_mxl_choice 3 or 4 (the "
+            "NEMO nn_mxl sweeps that read e3t(jpk)).")
+    if (getattr(cfg, "nemo_etau_wmask", False)
+            and getattr(cfg, "etau_mode", "none") == "none"):
+        raise ValueError(
+            "nemo_etau_wmask=True requires etau_mode='below_ml' (the mask "
+            "belongs to the nn_etau increment).")
+    if (_n2_stage != "step_entry"
+            and getattr(cfg, "nemo_mxl_terminal_e3t", False)):
+        raise ValueError(
+            "nemo_mxl_terminal_e3t=True requires "
+            "tke_n2_evaluation_stage='step_entry' (the e3t(jpk) row rides on "
+            "the step-entry bundle).")
     if _n2_stage == "implicit_solve_state" and precomputed_n2_bundle is not None:
         raise ValueError(
             "precomputed_n2_bundle was supplied while "
@@ -3045,6 +3161,19 @@ def tke_vertical_mixing(
         # length scans on the later implicit-solve Jacobian, so every sloping
         # column used the wrong e3t operand at zdftke.F90:800-806.
         dz_cell_mxl = precomputed_n2_bundle.e3t_Kmm
+        if getattr(cfg, "nemo_mxl_terminal_e3t", False):
+            if precomputed_n2_bundle.e3t_jpk is None:
+                raise ValueError(
+                    "nemo_mxl_terminal_e3t=True requires the raw NEMO "
+                    "dummy-bottom e3t(jpk) operand")
+            _terminal = jnp.asarray(precomputed_n2_bundle.e3t_jpk)
+            if _terminal.shape != tke_old.shape[:-1]:
+                raise ValueError(
+                    "precomputed_n2_bundle.e3t_jpk must match the horizontal "
+                    f"TKE shape; got {_terminal.shape} vs "
+                    f"{tke_old.shape[:-1]}.")
+            dz_cell_mxl = jnp.concatenate(
+                (dz_cell_mxl, _terminal[..., jnp.newaxis]), axis=-1)
 
     _shear_stage = getattr(
         cfg, "tke_shear_evaluation_stage", "implicit_solve_state")
@@ -3397,7 +3526,8 @@ def tke_vertical_mixing(
     _statement_shear = None
     _statement_rhs_intermediate = None
     # NEMO ln_mxl0 anchor for nn_mxl=3: l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
-    _l_anchor = _mxl0_surface_anchor(cfg, taum, rho_0, g, surface_tmask)
+    _l_anchor = _mxl0_surface_anchor(
+        cfg, taum, rho_0, g, surface_tmask, mxlice_fr_i, mxlice_hm_i)
     # T3-exact: NEMO's TRUE surface-w-level viscosity avm(jk=1)
     # (:func:`nemo_surface_avm`), consulted only by the nemo_z0 face
     # assembly. Requires the ln_mxl0 anchor (tke_mxl_choice=3) and a held
@@ -3496,7 +3626,7 @@ def tke_vertical_mixing(
         # review finding #2). Prognostic mode (n_iterations=1) identical.
         tke_curr = nemo_etau_injection(
             tke_curr, taum, _depth_w, cfg, rho_0=rho_0, lat_deg=lat_deg,
-            ice_frac=ice_frac)
+            ice_frac=ice_frac, wmask=w_active, surface_tmask=surface_tmask)
 
     # Final K from converged TKE.
     l_k_final, l_eps_final = compute_mixing_lengths(
@@ -3659,6 +3789,17 @@ def _validate_post_mixing_cfg(cfg: TKEConfig) -> None:
                 "mixing does not accept bottom_dirichlet and would silently "
                 "keep the natural no-flux bottom row. Disable "
                 "bottom_tke_bc or use the standard pre_mixing path.")
+        if getattr(cfg, "nemo_etau_wmask", False):
+            raise ValueError(
+                "TKEConfig.nemo_etau_wmask=True is not supported with "
+                "buoyancy_timing='post_mixing_veros' — that path never runs "
+                "the nn_etau injection, so the mask would silently no-op.")
+        if getattr(cfg, "nemo_mxl_terminal_e3t", False):
+            raise ValueError(
+                "TKEConfig.nemo_mxl_terminal_e3t=True is not supported with "
+                "buoyancy_timing='post_mixing_veros' — tke_set_diffusivities "
+                "takes no step-entry bundle, so the e3t(jpk) row would be "
+                "silently dropped. Use the standard pre_mixing path.")
         if getattr(cfg, "tke_dry_wmask", False):
             raise ValueError(
                 "TKEConfig.tke_dry_wmask=True is not supported with "
@@ -3707,6 +3848,8 @@ def tke_set_diffusivities(
     e3w_int: jnp.ndarray | None = None,
     ice_frac: jnp.ndarray | None = None,
     surface_tmask: jnp.ndarray | None = None,
+    mxlice_fr_i: jnp.ndarray | None = None,
+    mxlice_hm_i: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, TKEPostMixingContext]:
     """Veros ``set_tke_diffusivities`` (tke.py:20-113) from the CARRIED TKE.
 
@@ -3782,7 +3925,8 @@ def tke_set_diffusivities(
     else:
         langmuir_source = None
 
-    _l_anchor = _mxl0_surface_anchor(cfg, taum, rho_0, g, surface_tmask)
+    _l_anchor = _mxl0_surface_anchor(
+        cfg, taum, rho_0, g, surface_tmask, mxlice_fr_i, mxlice_hm_i)
     l_k, l_eps = compute_mixing_lengths(
         tke_old, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell,
         boundary_cap=boundary_cap, l_surface_anchor=_l_anchor)

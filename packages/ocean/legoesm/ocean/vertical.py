@@ -204,7 +204,8 @@ def nemo_qco_live_face_geometry_from_operands(
     hv_0,
     area_t,
     area_u,
-    area_v, r3_native=None, fold_grid=None,  # (r3u, r3v) handed in place of the sea-level ratios (stprk3_stg.f90:172-173, :216-217)
+    area_v, r3_native=None, *, grid=None, north_fold=False,
+    fold_exchange_ratios=False,  # (r3u, r3v) handed in place of the sea-level ratios (stprk3_stg.f90:172-173, :216-217)
 ):
     """Build live native-face QCO geometry in NEMO source association.
 
@@ -237,7 +238,14 @@ def nemo_qco_live_face_geometry_from_operands(
 
     weighted_eta = b(area_t * eta)
     num_u = b(half * b(weighted_eta + jnp.roll(weighted_eta, -1, axis=1)))
-    num_v = b(half * b(weighted_eta + jnp.roll(weighted_eta, -1, axis=0)))
+    if north_fold:
+        if grid is None:
+            raise ValueError("north_fold=True needs the grid")
+        from legoesm.grids.operators_latlon_cgrid import north_neighbor_T
+        weighted_eta_north = north_neighbor_T(weighted_eta, grid)
+    else:
+        weighted_eta_north = jnp.roll(weighted_eta, -1, axis=0)
+    num_v = b(half * b(weighted_eta + weighted_eta_north))
     wet_u = (hu_0 > 0.0).astype(dtype)
     wet_v = (hv_0 > 0.0).astype(dtype)
     r1_hu0 = b(wet_u / (hu_0 + one - wet_u))
@@ -245,7 +253,11 @@ def nemo_qco_live_face_geometry_from_operands(
     r1_area_u = b(one / area_u)
     r1_area_v = b(one / area_v)
     r3u = b(b(num_u * r1_hu0) * r1_area_u) if r3_native is None else r3_native[0]
-    r3u, r3v = _nemo_ratio_fold_exchange(r3u, b(b(num_v * r1_hv0) * r1_area_v) if r3_native is None else r3_native[1], fold_grid)
+    r3u, r3v = _nemo_ratio_fold_exchange(
+        r3u,
+        b(b(num_v * r1_hv0) * r1_area_v)
+        if r3_native is None else r3_native[1],
+        grid, fold_exchange_ratios)
     one_plus_r3u = b(one + r3u)
     one_plus_r3v = b(one + r3v)
     e3u = b(e3u_0 * b(one + r3u[..., None] * umask3))
@@ -788,7 +800,8 @@ def nemo_qco_live_face_geometry_cgrid(
     area_u,
     area_v,
     *,
-    include_reciprocals=False, r3_native=None, fold_grid=None,
+    include_reciprocals=False, r3_native=None, grid=None,
+    north_fold=False, fold_exchange_ratios=False,
 ):
     """NEMO ``e3u/e3v(Kmm)`` on legoESM's redundant west/south C-grid faces.
 
@@ -834,7 +847,9 @@ def nemo_qco_live_face_geometry_cgrid(
     """
     geom = nemo_qco_live_face_geometry_from_operands(
         eta, e3u_0, e3v_0, umask3, vmask3,
-        hu_0, hv_0, area_t, area_u, area_v, r3_native, fold_grid=fold_grid,
+        hu_0, hv_0, area_t, area_u, area_v, r3_native, grid=grid,
+        north_fold=north_fold,
+        fold_exchange_ratios=fold_exchange_ratios,
     )
     one = jnp.asarray(1.0, dtype=geom.e3u.dtype)
     result = (
@@ -863,6 +878,10 @@ def nemo_qco_live_face_thicknesses(
     e3v_0,
     umask3,
     vmask3,
+    *,
+    grid=None,
+    r3_native=None,
+    preserve_north_fold: bool = False,
 ):
     """Build NEMO QCO live ``e3u/e3v`` on its native east/north faces.
 
@@ -873,9 +892,29 @@ def nemo_qco_live_face_thicknesses(
     source association measured by the DINO fidelity instruments.
     """
     dtype = jnp.asarray(e3u_0).dtype
+    if r3_native is not None and preserve_north_fold:
+        fold = None if grid is None else getattr(grid, "fold", None)
+        if fold is not None and bool(getattr(fold, "is_active", False)):
+            # The WS-RK3 stored ratios are source-identical off the fold
+            # (stprk3_stg.f90:216-217), but their native last V row was built
+            # before ldf's T-pivot face exchange.  Keep the existing
+            # fold-aware domqco construction for the final native U/V row;
+            # only the ordinary rows consume the stored Kmm ratios.
+            current = nemo_qco_live_face_geometry_from_operands(
+                eta, e3u_0, e3v_0, umask3, vmask3,
+                *nemo_qco_mesh_operands(z_coord, dtype), grid=grid,
+                north_fold=True,
+            )
+            r3_native = (
+                jnp.asarray(r3_native[0], dtype=dtype).at[-1].set(
+                    current.r3u[-1]),
+                jnp.asarray(r3_native[1], dtype=dtype).at[-1].set(
+                    current.r3v[-1]),
+            )
     geom = nemo_qco_live_face_geometry_from_operands(
         eta, e3u_0, e3v_0, umask3, vmask3,
-        *nemo_qco_mesh_operands(z_coord, dtype),
+        *nemo_qco_mesh_operands(z_coord, dtype), r3_native, grid=grid,
+        north_fold=grid is not None,
     )
     return geom.e3u, geom.e3v
 
@@ -981,6 +1020,10 @@ class OceanZStarCoordinate(NamedTuple):
     nemo_e2u: jnp.ndarray | None = None
     nemo_e1v: jnp.ndarray | None = None
     nemo_een_barotropic: NemoEENBarotropicOperands | None = None
+    # Raw NEMO dummy-bottom T-cell thickness e3t_0(jpk), shape (...).
+    # It is separate from the n_levels live slots in nemo_e3t_0 and is read
+    # only by a card-selected literal TKE mixing-length sweep.
+    nemo_e3t_jpk: jnp.ndarray | None = None
 
 
 def create_ocean_z_star(
@@ -1477,6 +1520,7 @@ class OceanPartialCellCoordinate(NamedTuple):
     nemo_e2u: jnp.ndarray | None = None
     nemo_e1v: jnp.ndarray | None = None
     nemo_een_barotropic: NemoEENBarotropicOperands | None = None
+    nemo_e3t_jpk: jnp.ndarray | None = None
     # NEMO ldf_dyn_init's READ coefficient (nn_ahm_ijk_t = -30,
     # ldfdyn.f90:348-353): the whole 3-D lateral momentum viscosity, already
     # exchanged and masked as that routine leaves it.  ``nemo_ldf_ahmt`` is on
@@ -1689,6 +1733,7 @@ def create_partial_cell_coordinate(
         nemo_e1v=getattr(z_coord, "nemo_e1v", None),
         nemo_een_barotropic=getattr(
             z_coord, "nemo_een_barotropic", None), nemo_r3t_stored_product=getattr(z_coord, "nemo_r3t_stored_product", False) is True,  # noqa: E501
+        nemo_e3t_jpk=getattr(z_coord, "nemo_e3t_jpk", None),
     )
 
 
@@ -1771,6 +1816,7 @@ def create_full_step_coordinate(
         nemo_e1v=getattr(z_coord, "nemo_e1v", None),
         nemo_een_barotropic=getattr(
             z_coord, "nemo_een_barotropic", None), nemo_r3t_stored_product=getattr(z_coord, "nemo_r3t_stored_product", False) is True,  # noqa: E501
+        nemo_e3t_jpk=getattr(z_coord, "nemo_e3t_jpk", None),
     )
 
 
@@ -3106,13 +3152,15 @@ def _nemo_r3t_product(product, z_coord):
     return nemo_source_round(product)
 
 
-def _nemo_ratio_fold_exchange(r3u, r3v, fold_grid):
+def _nemo_ratio_fold_exchange(r3u, r3v, grid, selected):
     """NEMO's ``lbc_lnk`` sign +1 of the stage ratios (stprk3_stg.f90:169):
     with a fold grid the pivot V row becomes the mirrored row below instead of
     the stencil over the wrapped southern row.  None = no exchange."""
-    if fold_grid is None:
+    if not selected:
         return r3u, r3v
+    if grid is None:
+        raise ValueError("fold_exchange_ratios=True needs the grid")
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import nemo_een_ratio_fold_exchange
 
     # ponytail: the shared exchange also folds an F ratio; this caller has none
-    return nemo_een_ratio_fold_exchange(r3u, r3v, r3v, fold_grid, True)[:2]
+    return nemo_een_ratio_fold_exchange(r3u, r3v, r3v, grid, True)[:2]

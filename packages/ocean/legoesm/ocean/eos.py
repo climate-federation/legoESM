@@ -635,6 +635,7 @@ def _nemo_bn2_zrw(
     gdept_0: jnp.ndarray | None = None,
     gdepw_0: jnp.ndarray | None = None,
     stretch: jnp.ndarray | None = None,
+    source_rounded: bool = False,
 ) -> jnp.ndarray:
     """Evaluate eosbn2.F90:1459-1460 with a selectable rounding boundary."""
     gd = jnp.asarray(gdept)
@@ -655,9 +656,15 @@ def _nemo_bn2_zrw(
     stretch3 = jnp.asarray(stretch)[..., jnp.newaxis]
     gd0 = jnp.asarray(gdept_0)
     gw0 = jnp.asarray(gdepw_0)
-    gd_up = lax.optimization_barrier(gd0[..., :-1] * stretch3)
-    gd_lo = lax.optimization_barrier(gd0[..., 1:] * stretch3)
-    gw = lax.optimization_barrier(gw0 * stretch3)
+    # XLA strips optimization_barrier, so only source rounding stops each
+    # depth product contracting into its subtraction.
+    rb = nemo_source_round if source_rounded else lax.optimization_barrier
+    gd_up = rb(gd0[..., :-1] * stretch3)
+    gd_lo = rb(gd0[..., 1:] * stretch3)
+    gw = rb(gw0 * stretch3)
+    if source_rounded:
+        return nemo_source_round(
+            nemo_source_round(gw - gd_lo) / nemo_source_round(gd_up - gd_lo))
     return (gw - gd_lo) / (gd_up - gd_lo)
 
 
@@ -676,10 +683,15 @@ def compute_buoyancy_frequency_nemo_bn2(
     zrw_gdept_0: jnp.ndarray | None = None,
     zrw_gdepw_0: jnp.ndarray | None = None,
     zrw_stretch: jnp.ndarray | None = None,
+    source_rounded: bool = False,
+    return_ddm_operands: bool = False,
     _alpha_beta_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
     _return_intermediate: str = "",
 ) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
     r"""Brunt-Väisälä ``N²`` by NEMO's exact ``bn2``.
+
+    ``source_rounded=True`` (card-selected) rounds every source operation of
+    ``rab_3d_t`` and ``bn2_t`` before its consumer (no compiled contraction).
 
     ``eos_form`` selects where alpha/beta come from. ``"seos"`` (default,
     BIT-IDENTICAL legacy) uses the 3-term simplified EOS. ``"teos10"`` uses
@@ -765,7 +777,8 @@ def compute_buoyancy_frequency_nemo_bn2(
             raise ValueError(
                 "zrw_evaluation='nemo_literal' requires zrw_gdept_0 and "
                 "zrw_stretch for the literal eos_rab depth")
-        eos_gdept = lax.optimization_barrier(
+        eos_gdept = (nemo_source_round if source_rounded
+                     else lax.optimization_barrier)(
             jnp.asarray(zrw_gdept_0)
             * jnp.asarray(zrw_stretch)[..., jnp.newaxis])
     if _alpha_beta_override is not None:
@@ -787,8 +800,13 @@ def compute_buoyancy_frequency_nemo_bn2(
         # ``CASE( np_teos10, np_eos80 )`` runs a single polynomial and the two
         # forms differ only in the coefficient set and normalization that
         # eos_init loads (rdeltaS 20 vs 32, r1_S0 1/40 vs 0.875/35.16504).
-        alpha, beta = nemo_roquet_alpha_beta(T, S, eos_gdept, eos_form=eos_form)
+        alpha, beta = nemo_roquet_alpha_beta(
+            T, S, eos_gdept, eos_form=eos_form, source_rounded=source_rounded)
     else:
+        if source_rounded:
+            raise ValueError(
+                "source_rounded=True is implemented for NEMO's polynomial "
+                "rab_3d_t (eos_form 'teos10'/'eos80') only")
         if cfg is None:
             cfg = NemoSEOSConfig()
         alpha, beta = nemo_seos_alpha_beta(
@@ -799,18 +817,29 @@ def compute_buoyancy_frequency_nemo_bn2(
     zrw = _nemo_bn2_zrw(
         gd, gdepw_int, evaluation=zrw_evaluation,
         gdept_0=zrw_gdept_0, gdepw_0=zrw_gdepw_0,
-        stretch=zrw_stretch)
-    a_w = alpha[..., 1:] * (1.0 - zrw) + alpha[..., :-1] * zrw
-    b_w = beta[..., 1:] * (1.0 - zrw) + beta[..., :-1] * zrw
+        stretch=zrw_stretch, source_rounded=source_rounded)
+    r = nemo_source_round if source_rounded else (lambda value: value)
+    a_w = r(r(alpha[..., 1:] * r(1.0 - zrw)) + r(alpha[..., :-1] * zrw))
+    b_w = r(r(beta[..., 1:] * r(1.0 - zrw)) + r(beta[..., :-1] * zrw))
     if e3w is None:
         e3w = gd_lo - gd_up                                    # explicit legacy
-    dT = T[..., :-1] - T[..., 1:]                              # T_upper - T_lower
-    dS = S[..., :-1] - S[..., 1:]
-    temperature_contribution = a_w * dT
-    salinity_contribution = b_w * dS
-    contribution_difference = temperature_contribution - salinity_contribution
-    gravity_product = g * contribution_difference
-    thickness_division = gravity_product / e3w
+    dT = r(T[..., :-1] - T[..., 1:])                           # T_upper - T_lower
+    dS = r(S[..., :-1] - S[..., 1:])
+    temperature_contribution = r(a_w * dT)
+    salinity_contribution = r(b_w * dS)
+    contribution_difference = r(
+        temperature_contribution - salinity_contribution)
+    gravity_product = r(g * contribution_difference)
+    thickness_division = r(gravity_product / e3w)
+    if return_ddm_operands:
+        # zdfddm.f90:118-128 re-forms bn2_t's zrw/zaw/zbw (same 1-D depths,
+        # same rab_n = rab_b at Kmm = Nbb, stprk3.f90:170-174) and multiplies
+        # by dk[T], dk[S]: on wet interfaces its zdt/zds ARE these products.
+        if _return_intermediate:
+            raise ValueError(
+                "return_ddm_operands and a private intermediate are exclusive")
+        return thickness_division, (temperature_contribution,
+                                    salinity_contribution)
     if not _return_intermediate:
         return thickness_division
     intermediates = {
@@ -1472,7 +1501,8 @@ _NEMO_RHO0 = 1026.0   # NEMO rho0 (eosbn2.F90:1898); legoESM's
 
 
 def nemo_roquet_alpha_beta(
-    T, S, depth_m, rho0: float = _NEMO_RHO0, *, eos_form: str = "teos10"
+    T, S, depth_m, rho0: float = _NEMO_RHO0, *, eos_form: str = "teos10",
+    source_rounded: bool = False,
 ):
     r"""NEMO ``rab_3d`` thermal expansion / haline contraction (polynomial EOS).
 
@@ -1505,33 +1535,46 @@ def nemo_roquet_alpha_beta(
     else:
         raise ValueError(
             "eos_form must name NEMO's 'teos10' or 'eos80' coefficient set")
-    zh = jnp.asarray(depth_m) * c["r1_Z0"]
-    zt = jnp.asarray(T) * c["r1_T0"]
-    zs = jnp.sqrt(jnp.abs(jnp.asarray(S) + c["rdeltaS"]) * c["r1_S0"])
+    # ``source_rounded`` (card-selected) rounds every source operation, as
+    # NEMO's -O3 build without FMA does; XLA otherwise contracts multiply/add
+    # pairs inside the compiled Horner chains (V1 kt 1: 409,554 beta cells).
+    r = nemo_source_round if source_rounded else (lambda value: value)
+    zh = r(jnp.asarray(depth_m) * c["r1_Z0"])
+    zt = r(jnp.asarray(T) * c["r1_T0"])
+    zs = r(jnp.sqrt(r(r(jnp.abs(r(jnp.asarray(S) + c["rdeltaS"]))) * c["r1_S0"])))
     r1_rho0 = 1.0 / rho0
+
+    def m(a, b):
+        return r(a * b)
+
+    def a(*terms):
+        value = terms[0]
+        for term in terms[1:]:
+            value = r(value + term)
+        return value
 
     def _horner(P):
         """Shared ALP/BET nesting — identical in NEMO for both families."""
-        zn3 = c[P + "003"]
-        zn2 = c[P + "012"] * zt + c[P + "102"] * zs + c[P + "002"]
-        zn1 = ((c[P + "031"] * zt
-                + c[P + "121"] * zs + c[P + "021"]) * zt
-               + (c[P + "211"] * zs + c[P + "111"]) * zs + c[P + "011"]) * zt \
-            + ((c[P + "301"] * zs + c[P + "201"]) * zs + c[P + "101"]) * zs \
-            + c[P + "001"]
-        zn0 = ((((c[P + "050"] * zt
-                  + c[P + "140"] * zs + c[P + "040"]) * zt
-                 + (c[P + "230"] * zs + c[P + "130"]) * zs + c[P + "030"]) * zt
-                + ((c[P + "320"] * zs + c[P + "220"]) * zs
-                   + c[P + "120"]) * zs + c[P + "020"]) * zt
-               + (((c[P + "410"] * zs + c[P + "310"]) * zs
-                   + c[P + "210"]) * zs + c[P + "110"]) * zs + c[P + "010"]) * zt \
-            + ((((c[P + "500"] * zs + c[P + "400"]) * zs + c[P + "300"]) * zs
-                + c[P + "200"]) * zs + c[P + "100"]) * zs + c[P + "000"]
-        return ((zn3 * zh + zn2) * zh + zn1) * zh + zn0
+        def k(n):
+            return c[P + n]
+        zn3 = k("003")
+        zn2 = a(m(k("012"), zt), m(k("102"), zs), k("002"))
+        zn1 = a(m(a(m(a(m(k("031"), zt), m(k("121"), zs), k("021")), zt),
+                    m(a(m(k("211"), zs), k("111")), zs), k("011")), zt),
+                m(a(m(a(m(k("301"), zs), k("201")), zs), k("101")), zs),
+                k("001"))
+        zn0 = a(m(a(m(a(m(a(m(a(m(k("050"), zt), m(k("140"), zs), k("040")), zt),
+                            m(a(m(k("230"), zs), k("130")), zs), k("030")), zt),
+                        m(a(m(a(m(k("320"), zs), k("220")), zs), k("120")), zs),
+                        k("020")), zt),
+                    m(a(m(a(m(a(m(k("410"), zs), k("310")), zs), k("210")), zs),
+                        k("110")), zs), k("010")), zt),
+                m(a(m(a(m(a(m(a(m(k("500"), zs), k("400")), zs), k("300")), zs),
+                        k("200")), zs), k("100")), zs), k("000"))
+        return a(m(a(m(a(m(zn3, zh), zn2), zh), zn1), zh), zn0)
 
-    alpha = _horner("ALP") * r1_rho0
-    beta = _horner("BET") / zs * r1_rho0
+    alpha = m(_horner("ALP"), r1_rho0)
+    beta = m(r(_horner("BET") / zs), r1_rho0)
     return alpha, beta
 
 

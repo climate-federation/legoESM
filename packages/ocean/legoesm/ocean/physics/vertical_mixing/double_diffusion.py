@@ -138,6 +138,9 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from legoesm.core.source_rounding import nemo_source_round
+from legoesm.core.transcendentals import exp as precision_exp
+
 # --- Salt-fingering heat/salt flux ratio (NEMO zdfddm / Merryfield 1999) ---
 # gamma = 0.7 is the salt-finger FLUX ratio -> diffusivity ratio 0.7/R_rho
 # (the salt-diffusivity CUBIC amplitude is Large 1994 / CVMix Eq. 6.6, on rn_avts).
@@ -152,6 +155,12 @@ _DC_AVS_HI_B = 0.85
 _DC_AVS_LO = 0.15                 # avs/avt slope, R_rho < 0.5
 _DC_RRHO_SPLIT = 0.5
 _EPS = float(jnp.finfo(jnp.float32).eps)
+# --- NEMO zdfddm.f90:129-168 literals (double under -fdefault-real-8) ---
+_NEMO_DDM_TINY = 1.e-20           # :129-130 zds floor and zrau floor
+_NEMO_DDM_N2_EPS = 1.e-12         # :135 stability indicator offset
+_NEMO_DDM_DC_PREFACTOR = 1.3635e-6  # :166 zavdt
+_NEMO_DDM_DC_INNER = -0.54        # :166
+_NEMO_DDM_DC_OUTER = 4.6          # :166
 
 __physics_contract__ = {
     "summary": (
@@ -237,6 +246,9 @@ class DoubleDiffusionConfig(NamedTuple):
     rn_avts: float = 1e-4     # max salt-fingering salt diffusivity [m^2/s]
     rn_hsbfr: float = 1.6     # salt-fingering cutoff density ratio R_c [1]
     k_max: float = 1e-2       # diffusivity cap [m^2/s]
+    # "hybrid" (default): compute_ddm_diffusivity above.  "nemo_literal":
+    # nemo_zdf_ddm below, NEMO zdfddm.f90:107-175 statement by statement.
+    form: str = "hybrid"
 
 
 def compute_ddm_diffusivity(
@@ -292,3 +304,60 @@ def compute_ddm_diffusivity(
     avt = jnp.clip(avt, 0.0, cfg.k_max)
     avs = jnp.clip(avs, 0.0, cfg.k_max)
     return avt, avs
+
+
+def nemo_zdf_ddm(avt, avm, zdt, zds, rn2, wmask, cfg: DoubleDiffusionConfig):
+    """NEMO ``zdf_ddm`` (zdfddm.f90:107-175) on W-interfaces; returns
+    ``(avt, avs, avm)``.
+
+    ``zdt``/``zds`` are ``zaw*dk[T]``/``zbw*dk[S]`` (:127-128), i.e. bn2_t's
+    temperature/salinity contributions (eosbn2.f90:1632-1636 share zrw, zaw,
+    zbw); ``rn2`` the same step's N2; ``wmask`` NEMO's W mask (:136).  Every
+    operation is rounded in source order (the build has no FMA) and EXP is
+    the precision policy's (scalar libm in certification).
+    """
+    if cfg.form != "nemo_literal":
+        raise ValueError(
+            "nemo_zdf_ddm requires DoubleDiffusionConfig.form='nemo_literal', "
+            f"got {cfg.form!r}")
+    from legoesm.core.precision import get_policy
+
+    if get_policy().transcendentals != "libm":
+        raise ValueError(
+            "DoubleDiffusionConfig.form='nemo_literal' evaluates EXP as NEMO's "
+            "scalar libm (zdfddm.f90:166) and requires the precision policy's "
+            f"transcendentals='libm'; got {get_policy().transcendentals!r}")
+    r = nemo_source_round
+    dtype = avt.dtype
+    one = jnp.asarray(1.0, dtype)
+    zero = jnp.asarray(0.0, dtype)
+    tiny = jnp.asarray(_NEMO_DDM_TINY, dtype)
+    zds = jnp.where(jnp.abs(zds) <= tiny, tiny, zds)                    # :129
+    zrau = jnp.maximum(tiny, r(zdt / zds))                              # :130
+    zmsks = jnp.where(r(rn2 + _NEMO_DDM_N2_EPS) <= 0.0, zero,
+                      r(one * wmask.astype(dtype)))                     # :135-137
+    zmskf = jnp.where(zrau <= 1.0, zero, one)                           # :139-141
+    zmskd1 = jnp.where(zrau >= 1.0, zero, one)                          # :144-146
+    zmskd2 = jnp.where(zrau >= 0.5, zero, one)                          # :148-150
+    zmskd3 = jnp.where((zrau <= 0.5) | (zrau >= 1.0), zero, one)        # :152-154
+    zinr = r(one / zrau)                                                # :159
+    # rn_hsbfr is a runtime namelist value in NEMO: keep it opaque so XLA
+    # cannot fold 1/1.6 into a reciprocal multiply (0.625; off by an ulp).
+    zrr = r(zrau / r(jnp.asarray(cfg.rn_hsbfr, dtype)))                 # :161
+    zrr = r(zrr * zrr)                                                  # :162
+    zavfs = r(r(r(cfg.rn_avts / r(1.0 + r(r(zrr * zrr) * zrr)))
+                * zmsks) * zmskf)                                       # :163
+    zavft = r(r(_FINGER_HEAT_RATIO * zavfs) * zinr)                     # :164
+    inner = precision_exp(r(_NEMO_DDM_DC_INNER * r(zinr - 1.0)))
+    zavdt = r(r(r(_NEMO_DDM_DC_PREFACTOR
+                  * precision_exp(r(_NEMO_DDM_DC_OUTER * inner)))
+                * zmsks) * zmskd1)                                      # :166
+    zavds = r(r(zavdt * zmsks) * r(
+        r(r(r(_DC_AVS_HI_A * zrau) - _DC_AVS_HI_B) * zmskd3)
+        + r(r(_DC_AVS_LO * zrau) * zmskd2)))                            # :167-168
+    avs = r(r(avt + zavfs) + zavds)                                     # :170
+    heat = r(zavft + zavdt)
+    salt = r(zavfs + zavds)
+    avt_new = r(r(avt + zavft) + zavdt)                                 # :171
+    avm_new = r(avm + jnp.maximum(heat, salt))                          # :172
+    return avt_new, avs, avm_new

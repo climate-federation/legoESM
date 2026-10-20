@@ -101,6 +101,25 @@ def surface(root: Path, kt: int, *, keep_halo: bool = False) -> dict[str, np.nda
     return out
 
 
+def read_v1_hm_i(root: Path, kt: int) -> np.ndarray:
+    """V1 record: SI3's hm_i after sbc at kt (run.sh ``v1_dump_hm_i``), inner
+    domain (y, x).  Header magic + version, kt, nx, ny, bits; the round-1
+    legacy frames declare the haloed 184 x 152 over a 180 x 148 payload."""
+    path = Path(root) / f"oracle_v1_hm_i_kt{kt:08d}.bin"
+    with path.open("rb") as fh:
+        magic = fh.read(16).decode("ascii").rstrip()
+        version, k, nx, ny, bits = struct.unpack("=5i", fh.read(20))
+        data = np.fromfile(fh, dtype=np.float64)
+    require(magic == "NEMO_V1_HMI_1" and (version, k, bits) == (1, kt, 64)
+            and data.size in (nx * ny, (nx - 4) * (ny - 4)),
+            f"{path.name}: {magic!r} {version} {k} {nx}x{ny} {bits} {data.size}")
+    if data.size != nx * ny:
+        nx, ny = nx - 4, ny - 4
+    require(bool(np.isfinite(data).all()) and bool((data >= 0).all()),
+            f"{path.name}: non-finite or negative hm_i")
+    return np.ascontiguousarray(data.reshape((nx, ny), order="F").T)
+
+
 def _lev(a: np.ndarray, nk: int) -> np.ndarray:
     a = np.asarray(a, np.float64)
     require(not np.any(a[..., nk:]), "NEMO holds a value below the card's last level")

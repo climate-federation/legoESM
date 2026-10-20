@@ -355,6 +355,10 @@ class OceanSurfaceForcing(NamedTuple):
     # rebuilding it from ice state.  Read only when
     # ``implicit_ice_ocean_top_drag=True``; a selected path refuses None.
     salt_flux_sfx: object = None
+    ice_mean_thickness_hm_i: object = None
+    # jnp.ndarray | None [m], SI3's mean ice thickness ``hm_i`` at T points.
+    # Read only by ``TKEConfig.nemo_mxlice=2`` (zdftke.f90:620-623); that
+    # selection refuses None.
     # jnp.ndarray | None [g/m^2/s], NEMO ``sfx`` as recorded.  Read only by
     # ``rk3_stage3_salt_nemo_written`` (trasbc.f90:308 ``sfx*z1_rho0_e3t``);
     # ``1e3*(1e-3*sfx)`` through ``salt_flux`` is not bitwise ``sfx``.
@@ -2379,6 +2383,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     # independently, even though the certified ORCA2 deck selects only ldf=1.
     bbl_diffusive_option: int = 0
     bbl_aht_m2_s: float = 0.0
+    # The diffusive BBL trend is added to stage 3's concentration Krhs, after
+    # the surface terms and before tra_zdf (stprk3_stg.f90:739,
+    # trabbl.f90:249-256), with e3t(Kmm) as its divisor.  False folds it into
+    # the stage flux divergence as content.  Needs the stage-3 written order.
+    bbl_nemo_stage3_krhs: bool = False
+    # The diffusive BBL's north neighbour of a stored T-pivot row is NEMO's
+    # fold ghost, the mirror of the row below (lbcnfd.f90:588-590).  False
+    # mirrors the pivot row itself.
+    bbl_nemo_pivot_ghost: bool = False
     ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar) — also the
     #   Adams-Bashforth ε for the OUTER integrator (Veros AB_eps=0.1).
     # Outer (baroclinic) time integrator. "forward_euler" (default) = the existing
@@ -3185,6 +3198,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # (stprk3_stg.f90:572-573).  False keeps the row at the compact mask's
     # zero.  T-pivot fold grids only.
     rk3_fold_exchange_top_v_row: bool = False
+    # NEMO's end-of-stage exchange (stprk3_stg.f90:795-796) also re-mirrors
+    # the stored T-pivot row of uu, T and S (lbcnfd.f90:624-628, :669-673).
+    # True applies that pivot half-row after every stage; False preserves
+    # previously measured cards.  T-pivot fold grids only.
+    rk3_end_of_stage_pivot_fold: bool = False
     # The F-point thickness ratio the vorticity term of stages 2 and 3
     # reads is NEMO's interpolation of the entry and after ratios
     # (stprk3_stg.f90:218, :239).  False takes the ratio of the stage's

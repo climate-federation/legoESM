@@ -29,7 +29,9 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     gm_redi_tracer_tendency_latlon,
     gm_redi_lateral_mixing_latlon,
     compute_isoneutral_K33_latlon,
+    nemo_iso_a33,
     nemo_iso_lap_tracer_tendency_latlon_cgrid,
+    nemo_iso_w_kappa_sums,
 )
 from tests.legoesm_paths import legoesm_source_path
 
@@ -93,6 +95,105 @@ def _stratified_with_meridional_tilt(n_lat=10, n_lon=20, nlev=5, slope=1e-4):
 
     return (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
             jacobian, rho, T, S, cfg)
+
+
+def test_nemo_a33_source_order_is_exact_under_jit_and_left_fold_fails():
+    """traldf_iso.f90:788-829: exact A33/akz values, including under JIT."""
+    rng = np.random.default_rng(1903)
+    aht = rng.uniform(1.0e-3, 1.0e4, size=(2, 3, 7)).astype(np.float64)
+    aht_v = rng.uniform(1.0e-3, 1.0e4, size=(2, 3, 7)).astype(np.float64)
+    mask = np.ones_like(aht)
+
+    def numpy_nemo_pairs(field, horizontal_axis):
+        a = field
+        b = np.roll(field, +1, axis=horizontal_axis)
+        return ((np.roll(a, +1, axis=2) + b)
+                + (np.roll(b, +1, axis=2) + a))
+
+    def numpy_left_fold(field, horizontal_axis):
+        a = field
+        b = np.roll(field, +1, axis=horizontal_axis)
+        return (((np.roll(a, +1, axis=2) + b)
+                 + np.roll(b, +1, axis=2)) + a)
+
+    expected = (numpy_nemo_pairs(aht, 1), numpy_nemo_pairs(aht_v, 0))
+    left_fold = (numpy_left_fold(aht, 1), numpy_left_fold(aht_v, 0))
+    assert sum(np.count_nonzero(a != b)
+               for a, b in zip(left_fold, expected, strict=True)) > 0
+
+    @jax.jit
+    def traced(u, v, wet):
+        ku, _, kv, _ = nemo_iso_w_kappa_sums(
+            u, wet, wet, aht_v=v, source_ordered=True)
+        return ku, kv
+
+    got = traced(jnp.asarray(aht), jnp.asarray(aht_v), jnp.asarray(mask))
+    for actual, want in zip(got, expected, strict=True):
+        np.testing.assert_array_equal(np.asarray(actual), want)
+
+    wi = rng.uniform(-1.0e-2, 1.0e-2, size=aht.shape).astype(np.float64)
+    wj = rng.uniform(-1.0e-2, 1.0e-2, size=aht.shape).astype(np.float64)
+    zahu, zahv = expected[0] * np.float64(0.25), expected[1] * np.float64(0.25)
+    term_u = (zahu * wi) * wi
+    term_v = (zahv * wj) * wj
+    expected_ah = term_u + term_v
+
+    @jax.jit
+    def traced_a33(u, v, wet, sx, sy):
+        return nemo_iso_a33(
+            u, wet, wet, wet, sx, sy,
+            jnp.ones(wet.shape[:2]), jnp.ones(wet.shape[:2]), wet,
+            msc=False, aht_v=v, evaluation="nemo_literal",
+            source_ordered=True)[0]
+
+    got_ah = traced_a33(
+        jnp.asarray(aht), jnp.asarray(aht_v), jnp.asarray(mask),
+        jnp.asarray(wi), jnp.asarray(wj))
+    np.testing.assert_array_equal(np.asarray(got_ah), expected_ah)
+
+    e1u = rng.uniform(4.0e3, 1.2e5, size=mask.shape[:2]).astype(np.float64)
+    e2v = rng.uniform(4.0e3, 1.2e5, size=mask.shape[:2]).astype(np.float64)
+    e3w2 = rng.uniform(4.0, 2.5e3, size=mask.shape).astype(np.float64)
+    dt = np.float64(10800.0)
+    up = lambda a: np.roll(a, +1, axis=2)
+    im1 = lambda a: np.roll(a, +1, axis=1)
+    jm1 = lambda a: np.roll(a, +1, axis=0)
+    u0 = (aht + up(aht)) / ((e1u * e1u)[..., None])
+    u1 = (im1(aht) + up(im1(aht))) / ((im1(e1u) * im1(e1u))[..., None])
+    v0 = (aht_v + up(aht_v)) / ((e2v * e2v)[..., None])
+    v1 = (jm1(aht_v) + up(jm1(aht_v))) / ((jm1(e2v) * jm1(e2v))[..., None])
+    akz_h = ((u0 + u1) + (v0 + v1)) * np.float64(0.25)
+    zcoef0 = dt * (akz_h + expected_ah / e3w2)
+    expected_akz = (np.maximum(zcoef0 - np.float64(0.5), np.float64(0.0))
+                    * e3w2) * (np.float64(1.0) / dt)
+
+    @jax.jit
+    def traced_akz(u, v, wet, sx, sy, metric_u, metric_v, thickness2, step):
+        return nemo_iso_a33(
+            u, wet, wet, wet, sx, sy, metric_u, metric_v, thickness2,
+            dt=step, msc=True, aht_v=v, evaluation="nemo_literal",
+            source_ordered=True)[1]
+
+    got_akz = traced_akz(
+        jnp.asarray(aht), jnp.asarray(aht_v), jnp.asarray(mask),
+        jnp.asarray(wi), jnp.asarray(wj), jnp.asarray(e1u), jnp.asarray(e2v),
+        jnp.asarray(e3w2), jnp.asarray(dt))
+    assert jax.config.x64_enabled
+    np.testing.assert_array_equal(np.asarray(got_akz), expected_akz)
+
+    # Fixed plant: the former implementation multiplies by reciprocal metrics,
+    # left-folds all four terms, and divides by dt at the final statement.
+    inv_e1u2 = 1.0 / (e1u ** 2)
+    inv_e2v2 = 1.0 / (e2v ** 2)
+    legacy_h = np.float64(0.25) * (
+        (aht + up(aht)) * inv_e1u2[..., None]
+        + (im1(aht) + up(im1(aht))) * im1(inv_e1u2)[..., None]
+        + (aht_v + up(aht_v)) * inv_e2v2[..., None]
+        + (jm1(aht_v) + up(jm1(aht_v))) * jm1(inv_e2v2)[..., None])
+    legacy_zcoef0 = dt * (legacy_h + expected_ah / e3w2)
+    legacy_akz = (np.maximum(
+        legacy_zcoef0 - np.float64(0.5), np.float64(0.0)) * e3w2 / dt)
+    assert np.count_nonzero(legacy_akz != expected_akz) == 13
 
 
 # =====================================================================

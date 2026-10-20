@@ -108,11 +108,11 @@ def test_g9_card_is_g5_plus_fct2_and_the_folded_transport_vmask(tmp_path):
     g5 = recipe.build_orca2g5_ice_card(g5_root)
     g9 = recipe.build_nemo_testcase_card("ORCA2G9-tadv", deck_root=g9_root)
     c5, c9 = g5.recipe.model_config, g9.recipe.model_config
-    assert [f for f in c5._fields if getattr(c5, f) != getattr(c9, f)] == [
+    assert {f for f in c5._fields if getattr(c5, f) != getattr(c9, f)} == {
         "tracer_advection", "rk3_stage_transport_raw_vmask", "rk3_stage_transport_fold_exchanges",
         "fct_fold_exchange", "rk3_end_of_stage_pivot_fold", "rk3_stage_wzv_nemo_clock_pair",
         "rk3_stage3_tracer_krhs_nemo_order",
-        "rk3_stage_tracer_wzv_stored_kmm_ratios", "rk3_stage_transport_stored_r3uv"]
+        "rk3_stage_tracer_wzv_stored_kmm_ratios", "rk3_stage_transport_stored_r3uv"}
     assert (c5.rk3_stage3_tracer_krhs_nemo_order, c9.rk3_stage3_tracer_krhs_nemo_order) == (False, True)
     assert (c5.rk3_end_of_stage_pivot_fold, c9.rk3_end_of_stage_pivot_fold) == (False, True)
     assert (c5.rk3_stage_wzv_nemo_clock_pair, c9.rk3_stage_wzv_nemo_clock_pair) == (False, True)
@@ -145,8 +145,9 @@ def test_g9_card_is_g5_plus_fct2_and_the_folded_transport_vmask(tmp_path):
         assert recipe._orca2g1_selector_failures(planted) == [row]
 
 
-def test_only_g9_selects_tracer_advection():
-    assert [c for c, on in recipe._ORCA2G_TADV.items() if on] == ["ORCA2G9-tadv"]
+def test_only_g9_and_its_l3_composition_select_tracer_advection():
+    assert [c for c, on in recipe._ORCA2G_TADV.items() if on] == [
+        "ORCA2G9-tadv", "ORCA2L3-eiv"]
     assert set(recipe._ORCA2G_TADV) == set(recipe._ORCA2G_JPK)
     for table in (recipe._ORCA2G_ZDF_FACES, recipe._ORCA2G_TRA_ZDF_ROUNDED,
                   recipe._ORCA2G_UE_RHS_ASCENDING, recipe._ORCA2G_ZDF_STAGE_R3U,

@@ -64,9 +64,28 @@ from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
 CASE = "ORCA2G2-zps"
 CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice",
          "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf", "ORCA2G9-tadv",
-         "ORCA2L4-bbc")
+         "ORCA2L4-bbc",
+         "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
+         "ORCA2V5-havtb", "ORCA2L1-bbl", "ORCA2L2-iso", "ORCA2L3-eiv")
+# G5's record build (ORCA2-lane frames); V1 = that build + one hm_i writer;
+# V2/V3/V4/V5 = V1's record binary with the ORCA2 vertical-mixing switches.
+# L1/L2/L4 use G5's record surface-input format.
 ICE_CASES = ("ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf",
-             "ORCA2G9-tadv", "ORCA2L4-bbc")
+             "ORCA2G9-tadv", "ORCA2L4-bbc", "ORCA2V1-tke", "ORCA2V2-evd",
+             "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L1-bbl",
+             "ORCA2L2-iso", "ORCA2L3-eiv")
+SI3 = ICE_CASES
+TKE_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
+             "ORCA2V5-havtb")
+ZDF_KT1_CASES = ("ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
+V3_ZDF_FRAME = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round13/"
+    "oracle_v3_r13/twin_a/oracle_zdf_entry_kt00000001.bin")
+V4_ZDF_FRAME = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round14/"
+    "oracle_v4_r14/twin_a/oracle_zdf_entry_kt00000001.bin")
+TKE_RESTART = {"tke": "en", "tke_avm": "avm_k", "tke_avt": "avt_k",
+               "tke_dissl": "dissl"}
 FORCED = ("ORCA2G4-sbc", *ICE_CASES)   # NEMO-supplied surface fields each kt (D123)
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round10/"
@@ -74,7 +93,8 @@ DEFAULT_ROOT = Path(
 ARMS = ("geometry", "independent", "given_entry", "stages", "operators",
         "barotropic_exit",
         "zdf_replay", "substeps", "trazdf_replay", "rhs_frame",
-        "restart_independent", "carried", "stp2d_terms", "geothermal")
+        "restart_independent", "carried", "stp2d_terms",
+        "tke_mixing_length", "ddm_kt1", "geothermal")
 # stage exposures of one step: the private hook that returns it, and the
 # level-1 NEMO frame fields (u, v, T, S, ssh) it must equal
 EXPOSURES = {
@@ -112,6 +132,196 @@ def levels_last(a, nk: int) -> np.ndarray:
     a = np.asarray(a, dtype=np.float64)
     require(not np.any(a[nk:]), "NEMO holds a value below the card's last level")
     return np.ascontiguousarray(np.moveaxis(a[:nk], 0, -1))
+
+
+def w_classes(cls: dict) -> dict:
+    """V1: the card's w levels 2..nk (NEMO wmask(k) = tmask(k)*tmask(k-1));
+    PARTIAL = a wet w point beside a partial T cell."""
+    wet_t, part_t = cls["t"]["full"] | cls["t"]["partial"], cls["t"]["partial"]
+    wet = wet_t[..., :-1] & wet_t[..., 1:]
+    part = wet & (part_t[..., :-1] | part_t[..., 1:])
+    return {"full": wet & ~part, "partial": part}
+
+
+def read_zdf_kt1(path: Path, nk: int) -> dict[str, np.ndarray]:
+    """NEMO's avm/avt/avs/en right after zdf_phy at kt 1 (l2_dump_zdf in the
+    record build's stprk3.f90): avm on the haloed domain, the rest interior;
+    returned (y, x, jpk) on the inner domain."""
+    import struct
+    with Path(path).open("rb") as fh:
+        magic = fh.read(16).decode("ascii").rstrip()
+        version, kt, _, nx, ny, nz, bits = struct.unpack("=7i", fh.read(28))
+        data = np.fromfile(fh, dtype=np.float64)
+    require(magic == "NEMO_L4_ZDF___2" and (version, kt, bits) == (2, 1, 64)
+            and nz == nk + 1, f"{path}: header {magic!r} {version} {kt} {nz} {bits}")
+    n3, ni3 = nx * ny * nz, (nx - 4) * (ny - 4) * nz
+    require(data.size == n3 + 3 * ni3, f"{path}: payload {data.size}")
+    require(bool(np.isfinite(data).all()), f"{path}: non-finite payload")
+    out = {"avm": data[:n3].reshape((nx, ny, nz), order="F")[2:-2, 2:-2]}
+    for i, name in enumerate(("avt", "avs", "en")):
+        out[name] = data[n3 + i * ni3:n3 + (i + 1) * ni3].reshape(
+            (nx - 4, ny - 4, nz), order="F")
+    return {k: np.ascontiguousarray(np.swapaxes(v, 0, 1)) for k, v in out.items()}
+
+
+def v1_e3t_with_terminal_row(
+    carried: np.ndarray, raw_jpk: np.ndarray, *, plant: bool = False,
+) -> np.ndarray:
+    """Append NEMO's separately carried ``e3t(jpk)`` mixing-length row.
+
+    ``carried`` is the production Kmm bundle through ``jpkm1``. ``raw_jpk``
+    is the mesh record through ``jpk``. The terminal row is dry in NEMO, so
+    key_qco leaves it unstretched before ``zdftke.f90:690-692`` reads it.
+    """
+    carried = np.asarray(carried, dtype=np.float64)
+    raw_jpk = np.asarray(raw_jpk, dtype=np.float64)
+    require(carried.ndim == 3 and raw_jpk.ndim == 3,
+            "V1 e3t arrays must be (y,x,level)")
+    require(raw_jpk.shape == carried.shape[:-1] + (carried.shape[-1] + 1,),
+            "V1 raw e3t must carry exactly one terminal jpk row")
+    require(np.all(np.isfinite(carried)) and np.all(np.isfinite(raw_jpk)),
+            "V1 e3t arrays must be finite")
+    terminal = raw_jpk[..., -1:].copy()
+    if plant:
+        terminal = np.nextafter(terminal, np.inf)
+    return np.concatenate([carried, terminal], axis=-1)
+
+
+def _mxl_array_row(name: str, ref: np.ndarray, cand: np.ndarray,
+                   mask: np.ndarray) -> dict:
+    """Cellwise V1 mixing-length row on the campaign's fixed 1e-15 bar."""
+    ref, cand, mask = (np.asarray(x) for x in (ref, cand, mask))
+    require(ref.shape == cand.shape == mask.shape,
+            f"{name}: mixing-length row shape mismatch")
+    require(np.all(np.isfinite(ref[mask])) and np.all(np.isfinite(cand[mask])),
+            f"{name}: non-finite wet value")
+    delta = np.abs(cand - ref)
+    scale = max(float(np.max(np.abs(ref[mask]))), 1.0)
+    over = mask & (delta > BAR * scale)
+    unequal = mask & (cand != ref)
+    worst = np.unravel_index(
+        int(np.argmax(np.where(mask, delta, -1.0))), delta.shape)
+    return {
+        "name": name,
+        "n_cells": int(mask.sum()),
+        "n_unequal": int(unequal.sum()),
+        "n_over_bar": int(over.sum()),
+        "max_abs": float(delta[worst]),
+        "relative": float(delta[worst] / scale),
+        "max_abs_cell": [int(k) for k in worst],
+        "status": "AT-BAR" if not np.any(over) else "DEBT",
+    }
+
+
+def zdf_kt1_rows(root: Path, state, nk: int, wcls: dict, reg) -> dict:
+    """V1 kt 1: the card's carried closure after step 1 against NEMO's
+    post-zdf_phy frame (ln_rnf_mouth's avt term is inert: socoefr0 == 0)."""
+    z = read_zdf_kt1(Path(root) / "oracle_zdf_entry_kt00000001.bin", nk)
+    out = {}
+    for leaf, name in (("tke", "en"), ("tke_avm", "avm"), ("tke_avt", "avt")):
+        ref = z[name][..., 1:nk]
+        rows = level_rows(ref, np.asarray(getattr(state, leaf).data), wcls)
+        d = (np.asarray(getattr(state, leaf).data) != ref) & (wcls["full"] | wcls["partial"])
+        out[name] = {"summary": class_summary(rows), "levels": rows,
+                     "ref_max_abs": float(np.max(np.abs(ref))),
+                     "card_max_abs": float(np.max(np.abs(np.asarray(
+                         getattr(state, leaf).data)))),
+                     "unequal_columns": int(np.count_nonzero(d.any(-1))),
+                     "first_cells": np.argwhere(d)[:8].tolist()}
+    out["avs_equals_avt"] = bool(np.array_equal(z["avs"], z["avt"]))
+    out["nemo_surface_en_max"] = float(np.max(z["en"][..., 0]))
+    return out
+
+
+def ddm_kt1_rows(root: Path, model, grid, z_coord, cfg, s0, dt, forcing1, nk: int, wcls: dict,
+                 *, case: str, kt_from: int, kt_to: int) -> dict:
+    """V3 kt 1: the avt/avs/avm the step's tracer and momentum solves consume
+    (after TKE, EVD, DDM) against NEMO's post-zdf_phy frame, plus where each
+    zdf_ddm branch fires on both sides."""
+    import jax
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    require(case in ZDF_KT1_CASES and kt_from == kt_to == 1,
+            "the kt-1 double-diffusion frame is registered only for V3-V5 at kt 1")
+    traced = jax.device_get(LatLonCGridOceanModel(
+        grid, z_coord, cfg, iwm_forcing=model._iwm_forcing,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(tracer_zdf_trace=True)).step(
+            s0, dt, **forcing1))
+    solve = traced.solve
+    require(solve.salt_K is not None, "the V3 trace exposes no salt diffusivity")
+    z = read_zdf_kt1(Path(root) / "oracle_zdf_entry_kt00000001.bin", nk)
+    wet = wcls["full"] | wcls["partial"]
+    card = {"avt": solve.heat_K, "avs": solve.salt_K, "avm": solve.viscosity_K}
+    out = {"label": "kt-1 post-zdf_phy frame (consumed K)", "rows": {}}
+    for name, cand in card.items():
+        cand = np.asarray(cand, np.float64)
+        ref = z[name][..., 1:nk]
+        rows = level_rows(ref, cand, wcls)
+        out["rows"][name] = {"summary": class_summary(rows), "levels": rows,
+                             "ref_max_abs": float(np.max(np.abs(ref))),
+                             "n_unequal_wet": int(np.count_nonzero((cand != ref) & wet))}
+    # branch census: NEMO from its own record (sign of avs - avt: fingering
+    # raises avs above avt, diffusive convection lowers it), the card from its
+    # own consumed K and, by branch, from its zdf_ddm operands
+    def signs(avt, avs):
+        d = np.asarray(avs, np.float64) - np.asarray(avt, np.float64)
+        return {"avs_gt_avt": int(np.count_nonzero((d > 0) & wet)),
+                "avs_lt_avt": int(np.count_nonzero((d < 0) & wet)),
+                "wet_w": int(wet.sum())}
+    bundle = model._tke_step_entry_n2_bundle(s0)
+    zdt, zds = (np.asarray(x, np.float64) for x in bundle.ddm_operands)
+    rn2 = np.asarray(bundle.rn2, np.float64)
+    zds = np.where(np.abs(zds) <= 1e-20, 1e-20, zds)
+    zrau = np.maximum(1e-20, zdt / zds)
+    on = wet & (rn2 + 1e-12 > 0.0)
+    out["census"] = {
+        "nemo": signs(z["avt"][..., 1:nk], z["avs"][..., 1:nk]),
+        "card": signs(card["avt"], card["avs"]),
+        "card_branches": {
+            "stable_wet": int(on.sum()),
+            "fingering_zrau_gt_1": int(np.count_nonzero(on & (zrau > 1.0))),
+            "diffusive_zrau_lt_1": int(np.count_nonzero(on & (zrau < 1.0))),
+            "diffusive_0p5_lt_zrau_lt_1": int(np.count_nonzero(
+                on & (zrau > 0.5) & (zrau < 1.0))),
+            "diffusive_zrau_lt_0p5": int(np.count_nonzero(on & (zrau < 0.5))),
+            "single_signed_floor_zrau_1e-20": int(np.count_nonzero(
+                on & (zrau == 1e-20)))}}
+    if case == "ORCA2V4-iwm":   # IWM active: V4 vs V3's certified frame, both sides
+        v3 = read_zdf_kt1(V3_ZDF_FRAME, nk)
+        iwm = {}
+        for name in ("avt", "avs", "avm"):
+            ref3 = v3[name][..., 1:nk]
+            nemo = (z[name][..., 1:nk] != ref3) & wet
+            mine = (np.asarray(card[name], np.float64) != ref3) & wet
+            iwm[name] = {"nemo_v4_ne_v3": int(nemo.sum()), "card_v4_ne_v3": int(mine.sum()),
+                         "same_cells": bool(np.array_equal(nemo, mine))}
+        out["iwm_active"] = iwm
+    if case == "ORCA2V5-havtb":
+        # en after zdf_tke at kt 1 (the first reader of the avt_k seed,
+        # zdftke.f90:424) against the frame; then where the shape acts:
+        # V5 vs V4's certified frame, NEMO and card, and none outside the band
+        en = np.asarray(traced.state_after.tke.data, np.float64)
+        ref = z["en"][..., 1:nk]
+        rows = level_rows(ref, en, wcls)
+        out["rows"]["en"] = {"summary": class_summary(rows), "levels": rows,
+                             "ref_max_abs": float(np.max(np.abs(ref))),
+                             "n_unequal_wet": int(np.count_nonzero((en != ref) & wet))}
+        import netCDF4
+        with netCDF4.Dataset(Path(root) / "mesh_mask.nc") as h:
+            gphit = np.asarray(h.variables["gphit"][0], np.float64)
+        band = ((gphit >= -15.0) & (gphit < 15.0))[..., None]
+        v4 = read_zdf_kt1(V4_ZDF_FRAME, nk)
+        havtb = {}
+        for name, mine in (*card.items(), ("en", en)):
+            ref4 = v4[name][..., 1:nk]
+            nemo = (z[name][..., 1:nk] != ref4) & wet
+            mine = (np.asarray(mine, np.float64) != ref4) & wet
+            havtb[name] = {"nemo_v5_ne_v4": int(nemo.sum()), "card_v5_ne_v4": int(mine.sum()),
+                           "nemo_outside_band": int((nemo & ~band).sum()),
+                           "card_outside_band": int((mine & ~band).sum()),
+                           "same_cells": bool(np.array_equal(nemo, mine))}
+        out["havtb_active"] = havtb
+    return out
 
 
 def read_stage2_terms(path: Path) -> dict[str, np.ndarray]:
@@ -204,20 +414,31 @@ def level_rows(ref, cand, cls: dict, *, plant=False) -> list[dict]:
     if plant:
         cand = cand.copy()
         cand[tuple(np.argwhere(cls["partial"])[0])] += 1.0
-    d, scale = np.abs(cand - ref), max(float(np.max(np.abs(ref))), 1.0)
+    scale = max(float(np.max(np.abs(ref))), 1.0)
     rows = []
     for k in range(ref.shape[-1]):
         r = {"level": k + 1}
         for name, mask in cls.items():
             m = mask[..., k]
             n = int(m.sum())
+            masks = g1.comparison_masks(ref[..., k], cand[..., k], m)
+            d = np.where(
+                masks["normal_difference"],
+                np.abs(cand[..., k] - ref[..., k]), 0.0)
             r[name] = {"n_cells": n,
-                       "n_unequal": int(np.count_nonzero(d[..., k][m])),
-                       "max_abs": float(d[..., k][m].max()) if n else 0.0,
-                       "relative": (float(d[..., k][m].max()) / scale) if n else 0.0,
+                       "n_unequal": int(masks["normal_difference"].sum()),
+                       "n_bitwise_unequal": int(masks["unequal"].sum()),
+                       "flushed_subnormal": int(
+                           masks["flushed_subnormal"].sum()),
+                       "max_abs": float(d[m].max()) if n else 0.0,
+                       "relative": (float(d[m].max()) / scale) if n else 0.0,
                        "ref_max_abs": float(np.abs(ref[..., k][m]).max()) if n else 0.0}
         dry = ~(cls["full"][..., k] | cls["partial"][..., k])
-        r["dry_n_unequal"] = int(np.count_nonzero(d[..., k][dry]))
+        dry_masks = g1.comparison_masks(ref[..., k], cand[..., k], dry)
+        r["dry_n_unequal"] = int(dry_masks["normal_difference"].sum())
+        r["dry_n_bitwise_unequal"] = int(dry_masks["unequal"].sum())
+        r["dry_flushed_subnormal"] = int(
+            dry_masks["flushed_subnormal"].sum())
         rows.append(r)
     return rows
 
@@ -228,10 +449,18 @@ def class_summary(rows: list[dict]) -> dict:
         out[name] = {
             "n_cells": sum(r[name]["n_cells"] for r in rows),
             "n_unequal": sum(r[name]["n_unequal"] for r in rows),
+            "n_bitwise_unequal": sum(
+                r[name]["n_bitwise_unequal"] for r in rows),
+            "flushed_subnormal": sum(
+                r[name]["flushed_subnormal"] for r in rows),
             "max_abs": max(r[name]["max_abs"] for r in rows),
             "relative": max(r[name]["relative"] for r in rows),
             "worst_level": max(rows, key=lambda r: r[name]["max_abs"])["level"]}
     out["dry_n_unequal"] = sum(r["dry_n_unequal"] for r in rows)
+    out["dry_n_bitwise_unequal"] = sum(
+        r["dry_n_bitwise_unequal"] for r in rows)
+    out["dry_flushed_subnormal"] = sum(
+        r["dry_flushed_subnormal"] for r in rows)
     out["levels_partial_worse"] = sum(
         r["partial"]["relative"] > r["full"]["relative"] for r in rows
         if r["partial"]["n_cells"] and r["full"]["n_cells"])
@@ -642,6 +871,13 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         without_top_drag_consumer: str | None = None,
         without_stage2_stored_thickness: bool = False,
         without_stage3_salt: bool = False,
+        without_l2_metric: bool = False,
+        without_l2_eos80: bool = False,
+        without_l2_north_fold: bool = False,
+        without_l2_native_face_reference: bool = False,
+        without_l2_kmm_face_geometry: bool = False,
+        without_l2_a33_source_ordering: bool = False,
+        without_l2_stored_face_ratios: bool = False,
         without_hpg_fold_geometry: bool = False,
         without_vector_raw_vmask: bool = False,
         without_geothermal: bool = False,
@@ -650,7 +886,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         case: str = CASE) -> dict:
     require(case in CASES, f"unknown case {case!r}")
     require(arm in ARMS, f"unknown arm {arm!r}")
-    require(plant in (None, "score", "level"), f"unknown plant {plant!r}")
+    require(plant in (None, "score", "level", "tke_e3t"),
+            f"unknown plant {plant!r}")
     require(without_top_drag_consumer in (None, "residual", "substeps", "dyn_zdf"),
             f"unknown top-drag consumer {without_top_drag_consumer!r}")
     require(not record_step_entry or (arm == "stages" and case == "ORCA2G9-tadv"
@@ -683,7 +920,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         require(arm in ("independent", "given_entry", "geothermal")
                 or (arm in ("stages", "operators", "barotropic_exit", "carried",
                             "stp2d_terms")
-                    and case in ICE_CASES),
+                    and case in ICE_CASES)
+                or (arm == "tke_mixing_length" and case == "ORCA2V1-tke")
+                or (arm == "ddm_kt1" and case in ZDF_KT1_CASES),
                 "G4/G5/G6 NEMO-supplied per-step forcing is registered only for "
                 "the independent and given-entry ladders")
         require(cfg.rk3_stage_tracer_written_order is True,
@@ -712,6 +951,30 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         cfg = cfg._replace(rk3_stage2_tracer_nemo_stored_thickness=False)
     if without_stage3_salt:               # G5 ROUND-4 BEFORE ARM
         cfg = cfg._replace(rk3_stage3_salt_nemo_written=False)
+    l2_controls = (without_l2_metric, without_l2_eos80, without_l2_north_fold,
+                   without_l2_native_face_reference, without_l2_kmm_face_geometry,
+                   without_l2_a33_source_ordering, without_l2_stored_face_ratios)
+    require(not any(l2_controls) or case == "ORCA2L2-iso",
+            "L2 controls are registered only for ORCA2L2-iso")
+    if case == "ORCA2L2-iso":
+        require(recipe._orca2l2_isoneutral_selected(cfg.gm_redi),
+                "the L2 card no longer selects its complete isoneutral path")
+        gm = cfg.gm_redi
+        if without_l2_metric:
+            gm = gm._replace(kappa_redi_lat_scaling=False)
+        if without_l2_eos80:
+            gm = gm._replace(slope_prd_evaluation="nemo_literal")
+        if without_l2_north_fold:
+            gm = gm._replace(nemo_slope_north_fold=False)
+        if without_l2_native_face_reference:
+            gm = gm._replace(redi_flux_reference_thickness_evaluation="tpoint_alias")
+        if without_l2_kmm_face_geometry:
+            gm = gm._replace(redi_flux_geometry_stage="step_entry")
+        if without_l2_a33_source_ordering:
+            gm = gm._replace(redi_a33_source_ordering=False)
+        if without_l2_stored_face_ratios:
+            gm = gm._replace(redi_flux_stored_face_ratios=False)
+        cfg = cfg._replace(gm_redi=gm)
     if without_hpg_fold_geometry:         # G6 ROUND-2 PAIR HALF
         cfg = cfg._replace(nemo_hpg_sco_fold_geometry=False)
     if without_vector_raw_vmask:          # G6 ROUND-2 PAIR HALF
@@ -725,6 +988,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     roots = (root, *restart_roots)
     reg = g1.regions(np.asarray(z.is_active)[..., 0])
     cls = depth_classes(root / "mesh_mask.nc", nk)
+    wcls = w_classes(cls)
     # no step frames (an acquisition that stopped before the record binary
     # ran): only the restart-scored arm can run
     # G5's record build writes the ORCA2 lane's single-rank frames instead
@@ -737,9 +1001,6 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         while (root / f"oracle_step_entry_kt{n_stage + 1:08d}.bin").is_file():
             n_stage += 1
     elif has_frames and case == "ORCA2G4-sbc":
-        # G4 records the NCAR bulk-iteration operands on odd forcing steps,
-        # so its otherwise complete kt=1..10 stage files alternate sizes.
-        # Count the contiguous files; G1-G3's equal-size rule is not valid.
         checker = g1._checker()
         n_stage = 0
         while checker.step_path(root, n_stage + 1).is_file():
@@ -753,7 +1014,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         omit_ice_top_drag_zdf=without_top_drag_consumer == "dyn_zdf",
     )
     model = LatLonCGridOceanModel(
-        card.recipe.grid, z, cfg, _nemo_ws_test_hooks=consumer_hooks)
+        card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
+        _nemo_ws_test_hooks=consumer_hooks)
     # from rest NEMO's after-ssh slot is the initial height (restart.f90:406):
     # the model's unseeded slot
     require(s0.eta_rk3_after is None, "the card's initial after-ssh slot is seeded")
@@ -800,6 +1062,20 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
            "rk3_stage3_salt_nemo_written": bool(cfg.rk3_stage3_salt_nemo_written),
            "rk3_stage3_geothermal_nemo_written": bool(
                cfg.rk3_stage3_geothermal_nemo_written),
+           "l2_metric_selected": bool(
+               case != "ORCA2L2-iso" or cfg.gm_redi.kappa_redi_lat_scaling),
+           "l2_eos80_selected": bool(
+               case != "ORCA2L2-iso" or
+               cfg.gm_redi.slope_prd_evaluation == "nemo_eos80_literal"),
+           "l2_north_fold_selected": bool(
+               case != "ORCA2L2-iso" or cfg.gm_redi.nemo_slope_north_fold),
+           "l2_kmm_face_geometry_selected": bool(
+               case != "ORCA2L2-iso" or
+               cfg.gm_redi.redi_flux_geometry_stage == "rk3_kmm"),
+           "l2_a33_source_ordering_selected": bool(
+               case != "ORCA2L2-iso" or cfg.gm_redi.redi_a33_source_ordering),
+           "l2_stored_face_ratios_selected": bool(
+               case != "ORCA2L2-iso" or cfg.gm_redi.redi_flux_stored_face_ratios),
            "nemo_hpg_sco_fold_geometry": bool(cfg.nemo_hpg_sco_fold_geometry),
            "rk3_vector_raw_vmask": bool(cfg.rk3_vector_raw_vmask),
            "forcing": ("NEMO-supplied surface fields at each kt"
@@ -835,6 +1111,22 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
 
     def all_level_rows(kt, state):
         path = restart_path(roots, kt)
+        if path is None and case == "ORCA2L3-eiv" and kt == 1:
+            frame = read_step(kt)
+            cand, rows = card_levels(state), {}
+            for f, name in (("u", "uu"), ("v", "vv"),
+                            ("T", "tn"), ("S", "sn")):
+                ref = frame[f"3_{name}_all_aa"]
+                by_level = level_rows(ref, cand[f], cls[POINT[f]],
+                                      plant=(plant == "level" and f == "u"))
+                rows[f] = {
+                    "summary": class_summary(by_level),
+                    "levels": by_level,
+                    "ref_max_abs": float(np.max(np.abs(ref))),
+                    "stage_record": str(
+                        root / "oracle_stage_kt00000001_s3.bin"),
+                }
+            return rows
         if path is None:
             return None
         cand, rows = card_levels(state), {}
@@ -851,6 +1143,17 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 rows[f] = {"summary": class_summary(by_level), "levels": by_level,
                            "ref_max_abs": float(np.max(np.abs(ref))),
                            "restart": str(path)}
+            if case in TKE_CASES:
+                for leaf, var in TKE_RESTART.items():
+                    ref = levels_last(h.variables[var][0], nk + 1)[..., 1:nk]
+                    by_level = level_rows(ref, np.asarray(getattr(state, leaf).data), wcls)
+                    rows[var] = {"summary": class_summary(by_level), "levels": by_level,
+                                 "ref_max_abs": float(np.max(np.abs(ref))),
+                                 "restart": str(path)}
+                rows["avm_k_surface"] = g1.row(
+                    f"restart.kt{kt}.avm_k_surface",
+                    np.asarray(h.variables["avm_k"][0][0], np.float64),
+                    np.asarray(state.tke_avm_surface.data), reg)
         return rows
 
     def nemo_entry(kt):
@@ -871,16 +1174,25 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 bt_hist=g1.nemo_histories(path.parent, kt),
                 # rst_read_ssh reads 'ssha' into ssh(Kaa) (restart.f90:367)
                 eta_rk3_after=(s0.eta.replace(data=jnp.asarray(var("ssha")))
-                               if carries_after_ssh else None))
+                               if carries_after_ssh else None),
+                **({leaf: getattr(s0, leaf).replace(data=jnp.asarray(
+                    levels_last(var(name), nk + 1)[..., 1:nk]))
+                    for leaf, name in TKE_RESTART.items()} if case in TKE_CASES else {}),
+                **({"tke_avm_surface": s0.tke_avm_surface.replace(
+                    data=jnp.asarray(var("avm_k")[0]))} if case in TKE_CASES else {}))
+
+    def forcing(kt):
+        if case not in FORCED:
+            return {}
+        freshwater, surface = (g4 if case == "ORCA2G4-sbc" else g5).nemo_supplied_forcing(
+            card, root, kt)
+        if case in TKE_CASES:
+            surface = surface._replace(ice_mean_thickness_hm_i=g5.read_v1_hm_i(root, kt))
+        return {"freshwater": freshwater, "surface_forcing": surface}
 
     def step(state, kt):
         t0 = time.time()
-        kwargs = {}
-        if case in FORCED:
-            freshwater, surface = (g4 if case == "ORCA2G4-sbc" else g5).nemo_supplied_forcing(
-                card, root, kt)
-            kwargs = {"freshwater": freshwater, "surface_forcing": surface}
-        new = jax.device_get(model.step(state, dt=card.dt_s, **kwargs))
+        new = jax.device_get(model.step(state, dt=card.dt_s, **forcing(kt)))
         return new, round(time.time() - t0, 1)
 
     if arm == "geothermal":
@@ -933,6 +1245,214 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 "zero_heatflow_wet_columns": int(np.count_nonzero(wet & (qgh == 0.0))),
                 "trend_row": trend_row,
             })
+    if arm == "ddm_kt1":
+        return {**ddm_kt1_rows(root, model, card.recipe.grid, z, cfg, s0, card.dt_s, forcing(1), nk,
+                               wcls, case=case, kt_from=kt_from, kt_to=kt_to),
+                "legoesm_git_sha": sha, "packages": packages}
+
+    if arm == "tke_mixing_length":
+        require(case == "ORCA2V1-tke" and kt_from == kt_to == 1,
+                "the V1 mixing-length measurement is registered only at kt 1")
+        from legoesm.ocean.physics.vertical_mixing.tke import (
+            _mxl0_surface_anchor,
+            compute_K_from_tke,
+            compute_mixing_lengths,
+        )
+
+        plain, seconds = step(s0, 1)
+        trace_model = LatLonCGridOceanModel(
+            card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_live_stage_operands=True))
+        trace = jax.device_get(trace_model.step(
+            s0, dt=card.dt_s, **forcing(1)))
+        plain_leaves = jax.tree_util.tree_leaves(plain)
+        traced_leaves = jax.tree_util.tree_leaves(trace.state_after)
+        require(len(plain_leaves) == len(traced_leaves),
+                "TKE trace changed the state pytree")
+        trace_passive = all(np.array_equal(np.asarray(a), np.asarray(b))
+                            for a, b in zip(plain_leaves, traced_leaves, strict=True))
+        require(trace_passive, "TKE trace moved the production step")
+
+        bundle = model._tke_step_entry_n2_bundle(s0)
+        rn2 = np.asarray(trace.tke_statement_trace.bn2_output, np.float64)
+        bundle_rn2 = np.asarray(bundle.rn2, np.float64)
+        rn2_delta = np.abs(rn2 - bundle_rn2)
+        rn2_bundle_comparison = {
+            "n_unequal": int(np.count_nonzero(rn2 != bundle_rn2)),
+            "max_abs": float(np.max(rn2_delta)),
+            "max_abs_cell": [int(k) for k in np.unravel_index(
+                int(np.argmax(rn2_delta)), rn2_delta.shape)],
+        }
+        zdf = read_zdf_kt1(root / "oracle_zdf_entry_kt00000001.bin", nk)
+        en = zdf["en"][..., 1:nk]
+        avm = zdf["avm"][..., 1:nk]
+        restart_kt1 = restart_path(roots, 1)
+        frame_restart_exact = {"available": restart_kt1 is not None}
+        if restart_kt1 is not None:
+            with netCDF4.Dataset(restart_kt1) as h:
+                restart_en = levels_last(h.variables["en"][0], nk + 1)[..., 1:nk]
+                restart_avm = levels_last(
+                    h.variables["avm_k"][0], nk + 1)[..., 1:nk]
+            frame_restart_exact.update(
+                en=bool(np.array_equal(en, restart_en)),
+                avm_k=bool(np.array_equal(avm, restart_avm)))
+            require(frame_restart_exact["en"],
+                    "kt-1 zdf en frame != NEMO restart en")
+            require(frame_restart_exact["avm_k"],
+                    "kt-1 zdf avm frame != NEMO restart avm_k")
+        wet_w = wcls["full"] | wcls["partial"]
+        rec = g5.surface(root, 1)
+        tke_cfg = cfg.physics.vertical_mixing.tke
+        l_surface = _mxl0_surface_anchor(
+            tke_cfg, rec["taum"], cfg.constants.rho_0, cfg.constants.g,
+            np.asarray(z.is_active)[..., 0], rec["fr_i"],
+            g5.read_v1_hm_i(root, 1))
+        card_taum = np.asarray(
+            trace.tke_statement_trace.taum_surface, np.float64)
+        card_l_surface = _mxl0_surface_anchor(
+            tke_cfg, card_taum, cfg.constants.rho_0, cfg.constants.g,
+            np.asarray(z.is_active)[..., 0], rec["fr_i"],
+            g5.read_v1_hm_i(root, 1))
+        carried_e3t = np.asarray(bundle.e3t_Kmm, np.float64)
+        with netCDF4.Dataset(root / "mesh_mask.nc") as h:
+            raw_e3t = np.moveaxis(
+                np.asarray(h.variables["e3t_0"][0], np.float64), 0, -1)
+            raw_tmask = np.moveaxis(
+                np.asarray(h.variables["tmask"][0], np.float64), 0, -1)
+        if raw_e3t.shape[:2] == (
+                carried_e3t.shape[0] + 4, carried_e3t.shape[1] + 4):
+            raw_e3t, raw_tmask = raw_e3t[2:-2, 2:-2], raw_tmask[2:-2, 2:-2]
+        require(raw_e3t.shape == carried_e3t.shape[:-1] + (nk + 1,),
+                "mesh record does not carry jpk e3t")
+        require(not np.any(raw_tmask[..., -1]),
+                "NEMO terminal e3t row is not dry")
+        true_e3t = v1_e3t_with_terminal_row(carried_e3t, raw_e3t)
+        candidate_e3t = v1_e3t_with_terminal_row(
+            carried_e3t, raw_e3t, plant=plant == "tke_e3t")
+
+        def lengths(e3t):
+            return tuple(np.asarray(a) for a in compute_mixing_lengths(
+                jnp.asarray(en), jnp.asarray(rn2), jnp.asarray(bundle.e3w_Kmm),
+                tke_cfg, signed_n2=True, dz_cell=jnp.asarray(e3t),
+                l_surface_anchor=jnp.asarray(l_surface)))
+
+        legacy_lm, legacy_ld = lengths(carried_e3t)
+        nemo_lm, nemo_ld = lengths(true_e3t)
+        candidate_lm, candidate_ld = lengths(candidate_e3t)
+        card_en = np.asarray(plain.tke.data, np.float64)
+
+        def lengths_from_en(energy, e3t, surface_anchor):
+            return tuple(np.asarray(a) for a in compute_mixing_lengths(
+                jnp.asarray(energy), jnp.asarray(rn2),
+                jnp.asarray(bundle.e3w_Kmm), tke_cfg, signed_n2=True,
+                dz_cell=jnp.asarray(e3t),
+                l_surface_anchor=jnp.asarray(surface_anchor)))
+
+        card_en_lm, card_en_ld = lengths_from_en(
+            card_en, true_e3t, card_l_surface)
+        planted_output_moved = bool(
+            np.any(candidate_lm != nemo_lm) or np.any(candidate_ld != nemo_ld))
+        if plant == "tke_e3t":
+            require(planted_output_moved,
+                    "one-ULP terminal e3t plant did not reach a mixing length")
+
+        pred_avm, _ = compute_K_from_tke(
+            jnp.asarray(en), jnp.asarray(nemo_lm), tke_cfg,
+            N2=jnp.asarray(rn2), shear_sq=jnp.ones_like(jnp.asarray(rn2)))
+        pred_avm = np.where(wet_w, np.asarray(pred_avm), 0.0)
+        card_en_pred_avm, _ = compute_K_from_tke(
+            jnp.asarray(card_en), jnp.asarray(card_en_lm), tke_cfg,
+            N2=jnp.asarray(rn2), shear_sq=jnp.ones_like(jnp.asarray(rn2)))
+        card_en_pred_avm = np.where(
+            wet_w, np.asarray(card_en_pred_avm), 0.0)
+        active = wet_w & (avm > float(tke_cfg.kappaM_min)) & (en > 0.0)
+        observed_lm = np.zeros_like(en)
+        observed_lm[active] = (avm[active] / float(tke_cfg.c_k)
+                               / np.sqrt(en[active]))
+
+        rows = {
+            "card_taum_vs_nemo_record": _mxl_array_row(
+                "card_taum_vs_nemo_record", rec["taum"], card_taum,
+                np.asarray(z.is_active)[..., 0].astype(bool)),
+            "card_surface_mxl_vs_nemo_replay": _mxl_array_row(
+                "card_surface_mxl_vs_nemo_replay", np.asarray(l_surface),
+                np.asarray(card_l_surface),
+                np.asarray(z.is_active)[..., 0].astype(bool)),
+            "legacy_zmxlm_vs_nemo_replay": _mxl_array_row(
+                "legacy_zmxlm_vs_nemo_replay", nemo_lm, legacy_lm, wet_w),
+            "legacy_zmxld_vs_nemo_replay": _mxl_array_row(
+                "legacy_zmxld_vs_nemo_replay", nemo_ld, legacy_ld, wet_w),
+            "candidate_zmxlm_vs_nemo_replay": _mxl_array_row(
+                "candidate_zmxlm_vs_nemo_replay", nemo_lm, candidate_lm, wet_w),
+            "candidate_zmxld_vs_nemo_replay": _mxl_array_row(
+                "candidate_zmxld_vs_nemo_replay", nemo_ld, candidate_ld, wet_w),
+            "card_en_zmxlm_vs_nemo_en_replay": _mxl_array_row(
+                "card_en_zmxlm_vs_nemo_en_replay", nemo_lm, card_en_lm, wet_w),
+            "card_en_zmxld_vs_nemo_en_replay": _mxl_array_row(
+                "card_en_zmxld_vs_nemo_en_replay", nemo_ld, card_en_ld, wet_w),
+            "nemo_zmxlm_replay_vs_observable": _mxl_array_row(
+                "nemo_zmxlm_replay_vs_observable", observed_lm, nemo_lm, active),
+            "nemo_avm_replay_vs_record": _mxl_array_row(
+                "nemo_avm_replay_vs_record", avm, pred_avm, wet_w),
+            "card_avm_vs_record": _mxl_array_row(
+                "card_avm_vs_record", avm, np.asarray(plain.tke_avm.data), wet_w),
+            "card_en_avm_replay_vs_card": _mxl_array_row(
+                "card_en_avm_replay_vs_card", np.asarray(plain.tke_avm.data),
+                card_en_pred_avm, wet_w),
+            "card_avt_vs_record": _mxl_array_row(
+                "card_avt_vs_record", zdf["avt"][..., 1:nk],
+                np.asarray(plain.tke_avt.data), wet_w),
+        }
+
+        bottom = np.asarray(z.bottom_level, np.int64)
+        wet_col = bottom >= 0
+        jj, ii = np.indices(bottom.shape)
+        at_bottom = raw_e3t[jj, ii, np.clip(bottom, 0, nk - 1)]
+        below_bottom = raw_e3t[jj, ii, np.clip(bottom + 1, 0, nk)]
+        full = wet_col & (bottom == nk - 1)
+        partial = wet_col & (bottom < nk - 1)
+        partial_below_live = carried_e3t[
+            jj[partial], ii[partial], bottom[partial] + 1]
+        thickness = {
+            "wet_columns": int(wet_col.sum()),
+            "full_depth_columns": int(full.sum()),
+            "partial_columns": int(partial.sum()),
+            "at_bottom_min_m": float(at_bottom[wet_col].min()),
+            "at_bottom_max_m": float(at_bottom[wet_col].max()),
+            "below_bottom_min_m": float(below_bottom[wet_col].min()),
+            "below_bottom_max_m": float(below_bottom[wet_col].max()),
+            "partial_below_bottom_exact": int(np.count_nonzero(
+                partial_below_live == below_bottom[partial])),
+            "partial_below_bottom_count": int(partial.sum()),
+            "terminal_e3t_min_m": float(raw_e3t[..., -1][full].min()),
+            "terminal_e3t_max_m": float(raw_e3t[..., -1][full].max()),
+        }
+        gate_pass = (
+            trace_passive
+            and rows["legacy_zmxlm_vs_nemo_replay"]["status"] == "DEBT"
+            and rows["legacy_zmxld_vs_nemo_replay"]["status"] == "DEBT"
+            and rows["candidate_zmxlm_vs_nemo_replay"]["status"] == "AT-BAR"
+            and rows["candidate_zmxld_vs_nemo_replay"]["status"] == "AT-BAR"
+            and thickness["partial_below_bottom_exact"]
+                == thickness["partial_below_bottom_count"]
+            and plant is None)
+        out.update({
+            "label": "V1 kt-1 source-ordered nn_mxl=3 cellwise replay",
+            "seconds": seconds,
+            "trace_passive": trace_passive,
+            "frame_restart_exact": frame_restart_exact,
+            "observable_limits": {
+                "zmxld": "kt-1 ZDF frame records no dissl or mixing length",
+            },
+            "rn2_trace_vs_direct_bundle": rn2_bundle_comparison,
+            "plant_output_moved": planted_output_moved,
+            "preregistered_p2_confirmed": (
+                rows["nemo_avm_replay_vs_record"]["n_over_bar"] == 0),
+            "rows": rows,
+            "thickness": thickness,
+            "gate_pass": bool(gate_pass),
+        })
         return out
 
     if arm == "stages":
@@ -1009,7 +1529,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                     card, root, kt)
                 kwargs = {"freshwater": fw, "surface_forcing": sf}
             st = jax.device_get(LatLonCGridOceanModel(
-                card.recipe.grid, z, cfg,
+                card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
                 _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hooks)).step(
                     entry, dt=card.dt_s, **kwargs))
             cand = card_surface(st)
@@ -1243,7 +1763,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 "--state-in is not this model code's chain after step kt - 1")
         fw, sf = g5.nemo_supplied_forcing(card, root, kt_from)
         result = jax.device_get(LatLonCGridOceanModel(
-            card.recipe.grid, z, cfg,
+            card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
             _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 expose_barotropic_substeps=True)).step(
                     saved["state"], dt=card.dt_s, freshwater=fw,
@@ -1273,7 +1793,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         require(n_sub == int(cfg.barotropic.n_barotropic_substeps),
                 "NEMO and the card ran different substep counts")
         res = jax.device_get(LatLonCGridOceanModel(
-            card.recipe.grid, z, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 expose_barotropic_substeps=True)).step(s0, dt=card.dt_s))
         trace = {k: np.asarray(v) for k, v in res.substeps.items()}
         raw = z.nemo_een_barotropic
@@ -1283,7 +1804,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         table = g1.substep_table(sub, trace, n_sub, wet, reg, plant)
         # passive: the traced loop's exit is the ordinary stage-1 handoff
         plain = card_surface(jax.device_get(LatLonCGridOceanModel(
-            card.recipe.grid, z, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 expose_momentum_stage=1, expose_tracer_stage=1)).step(
                     s0, dt=card.dt_s)))
         traced = card_surface(res.state_after_barotropic)
@@ -1305,7 +1827,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         out["label"] = "INDEPENDENT = GIVEN-NEMO-ENTRY at step 1 (3-D RHS after stp_2D)"
         g = read_step(1)
         res = jax.device_get(LatLonCGridOceanModel(
-            card.recipe.grid, z, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 expose_barotropic_substeps=True)).step(s0, dt=card.dt_s))
         ops = {k: np.asarray(v) for k, v in res.slow_forcing_operands.items()}
         rows = {}
@@ -1375,7 +1898,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                                               else "GIVEN-NEMO-ENTRY"))
         g, entry = read_step(kt), s0 if kt == 1 else nemo_entry(kt)
         st = jax.device_get(LatLonCGridOceanModel(
-            card.recipe.grid, z, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 zdf_momentum_observer=lambda *a: seen.append(
                     [np.array(x) for x in a]))).step(entry, dt=card.dt_s))
         require(len(seen) == 1, f"the observer fired {len(seen)} times, not once")
@@ -1502,6 +2026,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             out["per_kt"].append({"kt": kt, "seconds": seconds, "rows": rows,
                                   "first_unequal": g1.first_unequal(rows),
                                   "all_levels": all_level_rows(kt, state)})
+            if case == "ORCA2V1-tke" and kt == 1:
+                out["per_kt"][-1]["zdf_kt1"] = zdf_kt1_rows(root, state, nk, wcls, reg)
             if kt % 10 == 0:
                 at = restart_path(roots, kt)
                 if at is not None:
@@ -1548,7 +2074,7 @@ def main(argv=None) -> int:
                     "all-level stage arrays (evidence, never git)")
     ap.add_argument("--state-in", type=Path)
     ap.add_argument("--state-out", type=Path)
-    ap.add_argument("--plant", choices=("score", "level"))
+    ap.add_argument("--plant", choices=("score", "level", "tke_e3t"))
     ap.add_argument("--geometry-plant")
     ap.add_argument("--without-zdf-faces", action="store_true",
                     help="BEFORE ARM: the card without NEMO's dyn_zdf divisors")
@@ -1565,6 +2091,20 @@ def main(argv=None) -> int:
                     help="G5 round-4 before arm: stage-2 thickness interpolant")
     ap.add_argument("--without-stage3-salt", action="store_true",
                     help="G5 round-4 before arm: rescaled Kbb salt tendency")
+    ap.add_argument("--without-l2-metric", action="store_true",
+                    help="L2 CONTROL: replace mode-20 metric kappa with the scalar")
+    ap.add_argument("--without-l2-eos80", action="store_true",
+                    help="L2 CONTROL: use the simplified slope EOS")
+    ap.add_argument("--without-l2-north-fold", action="store_true",
+                    help="L2 CONTROL: close the northern wall instead of folding it")
+    ap.add_argument("--without-l2-native-face-reference", action="store_true",
+                    help="L2 CONTROL: alias e3u_0/e3v_0 to e3t_0")
+    ap.add_argument("--without-l2-kmm-face-geometry", action="store_true",
+                    help="L2 CONTROL: use step-entry rather than stage-3 Kmm SSH")
+    ap.add_argument("--without-l2-a33-source-ordering", action="store_true",
+                    help="L2 CONTROL: restore the fused left-fold A33 graph")
+    ap.add_argument("--without-l2-stored-face-ratios", action="store_true",
+                    help="L2 CONTROL: rederive Kmm face ratios from mean SSH")
     ap.add_argument("--without-hpg-fold-geometry", action="store_true",
                     help="G6 round-2 pair half: cyclic north HPG geometry")
     ap.add_argument("--without-vector-raw-vmask", action="store_true",
@@ -1592,6 +2132,13 @@ def main(argv=None) -> int:
               without_top_drag_consumer=a.without_top_drag_consumer,
               without_stage2_stored_thickness=a.without_stage2_stored_thickness,
               without_stage3_salt=a.without_stage3_salt,
+              without_l2_metric=a.without_l2_metric,
+              without_l2_eos80=a.without_l2_eos80,
+              without_l2_north_fold=a.without_l2_north_fold,
+              without_l2_native_face_reference=a.without_l2_native_face_reference,
+              without_l2_kmm_face_geometry=a.without_l2_kmm_face_geometry,
+              without_l2_a33_source_ordering=a.without_l2_a33_source_ordering,
+              without_l2_stored_face_ratios=a.without_l2_stored_face_ratios,
               without_hpg_fold_geometry=a.without_hpg_fold_geometry,
               without_vector_raw_vmask=a.without_vector_raw_vmask,
               without_geothermal=a.without_geothermal,
@@ -1632,6 +2179,27 @@ def main(argv=None) -> int:
                   f"replay all levels: unequal {n} max "
                   f"{max(s2['full']['max_abs'], s2['partial']['max_abs']):.3e}")
         return 1 if bad else 0
+    if a.arm == "ddm_kt1":
+        bad = False
+        for f, t in out["rows"].items():
+            s = t["summary"]
+            bad |= s["status"] != "AT-BAR"
+            print(f"kt1 frame {f}: {s['status']} full {s['full']['relative']:.2e} "
+                  f"({s['full']['n_unequal']}) partial {s['partial']['relative']:.2e} "
+                  f"({s['partial']['n_unequal']}) dry unequal {s['dry_n_unequal']}")
+        print("CENSUS", json.dumps(out["census"], sort_keys=True))
+        if "iwm_active" in out:
+            print("IWM_ACTIVE", json.dumps(out["iwm_active"], sort_keys=True))
+        if "havtb_active" in out:
+            print("HAVTB_ACTIVE", json.dumps(out["havtb_active"], sort_keys=True))
+        return 1 if bad else 0
+    if a.arm == "tke_mixing_length":
+        for row in out["rows"].values():
+            print(f"{row['name']}: {row['status']} over-bar "
+                  f"{row['n_over_bar']} unequal {row['n_unequal']} "
+                  f"max {row['max_abs']:.3e}")
+        print("THICKNESS", json.dumps(out["thickness"], sort_keys=True))
+        return 0 if out["gate_pass"] else 1
     if a.arm == "rhs_frame":
         bad = False
         for f, r in out["per_kt"][0]["rhs_frame"].items():
@@ -1682,6 +2250,11 @@ def main(argv=None) -> int:
                   f"rms {r['rms']:.3e} unequal {r['n_unequal']}")
         lv = p.get("all_levels") or p.get("two_step_all_levels")
         for f, t in (lv or {}).items():
+            if "summary" not in t:      # V1's 2-D surface avm_k row
+                bad |= t["status"] != "AT-BAR"
+                print(f"  levels kt{p.get('two_step_kt', p['kt'])} {f}: {t['status']} "
+                      f"max {t['max_abs']:.3e} unequal {t['n_unequal']}")
+                continue
             s = t["summary"]
             bad |= s["status"] != "AT-BAR"
             print(f"  levels kt{p.get('two_step_kt', p['kt'])} {f}: {s['status']} "

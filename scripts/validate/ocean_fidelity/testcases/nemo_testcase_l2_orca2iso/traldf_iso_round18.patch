@@ -1,0 +1,72 @@
+--- traldf_iso.F90
++++ traldf_iso.F90
+@@ -120,0 +121,13 @@
++      LOGICAL :: lr18_write
++      INTEGER :: r18_unit, r18_ios
++      CHARACTER(LEN=16) :: r18_magic
++      CHARACTER(LEN=64) :: r18_filename
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r18_rhs_before, r18_e3u_live, r18_e3v_live
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r18_dit, r18_djt, r18_dkt
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r18_A11, r18_A22, r18_A13, r18_A23
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r18_hmsku, r18_hmskv, r18_fu, r18_fv
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r18_vmsku, r18_vmskv
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r18_ahu_w, r18_ahv_w
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r18_A31, r18_A32
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: r18_fw_lower, r18_fw_upper
++      !
+@@ -135,0 +149,25 @@
++      lr18_write = lwp .AND. kt == nit000
++      IF( lr18_write ) THEN
++         ALLOCATE( r18_rhs_before(jpi,jpj,jpk), r18_e3u_live(jpi,jpj,jpk), r18_e3v_live(jpi,jpj,jpk) )
++         ALLOCATE( r18_dit(jpi,jpj,jpk), r18_djt(jpi,jpj,jpk), r18_dkt(jpi,jpj,jpk) )
++         ALLOCATE( r18_A11(jpi,jpj,jpk), r18_A22(jpi,jpj,jpk), r18_A13(jpi,jpj,jpk), r18_A23(jpi,jpj,jpk) )
++         ALLOCATE( r18_hmsku(jpi,jpj,jpk), r18_hmskv(jpi,jpj,jpk), r18_fu(jpi,jpj,jpk), r18_fv(jpi,jpj,jpk) )
++         ALLOCATE( r18_vmsku(jpi,jpj,jpk), r18_vmskv(jpi,jpj,jpk), r18_ahu_w(jpi,jpj,jpk), r18_ahv_w(jpi,jpj,jpk) )
++         ALLOCATE( r18_A31(jpi,jpj,jpk), r18_A32(jpi,jpj,jpk), r18_fw_lower(jpi,jpj,jpk), r18_fw_upper(jpi,jpj,jpk) )
++         r18_rhs_before(:,:,:) = pt(:,:,:,jp_tem,Krhs)
++         r18_e3u_live(:,:,:) = 0._wp ; r18_e3v_live(:,:,:) = 0._wp
++         r18_dit(:,:,:) = 0._wp ; r18_djt(:,:,:) = 0._wp ; r18_dkt(:,:,:) = 0._wp
++         r18_A11(:,:,:) = 0._wp ; r18_A22(:,:,:) = 0._wp
++         r18_A13(:,:,:) = 0._wp ; r18_A23(:,:,:) = 0._wp
++         r18_hmsku(:,:,:) = 0._wp ; r18_hmskv(:,:,:) = 0._wp
++         r18_fu(:,:,:) = 0._wp ; r18_fv(:,:,:) = 0._wp
++         r18_vmsku(:,:,:) = 0._wp ; r18_vmskv(:,:,:) = 0._wp
++         r18_ahu_w(:,:,:) = 0._wp ; r18_ahv_w(:,:,:) = 0._wp
++         r18_A31(:,:,:) = 0._wp ; r18_A32(:,:,:) = 0._wp
++         r18_fw_lower(:,:,:) = 0._wp ; r18_fw_upper(:,:,:) = 0._wp
++      ENDIF
++      !
++      ! Round 18 captures the selected Laplacian include below. The
++      ! companion include patch is guarded by defined(iso_lap).
++      !
++
+@@ -161,0 +200,29 @@
++      IF( lr18_write ) THEN
++         WRITE(r18_filename,'("oracle_l2_ldf_walk_kt",I8.8,".bin")') kt
++         OPEN( NEWUNIT=r18_unit, FILE=TRIM(r18_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=r18_ios )
++         IF( r18_ios /= 0 ) CALL ctl_stop( 'traldf_iso_lap: cannot open Round-18 dump' )
++         r18_magic = 'NEMO_L2_R18LDF1X'
++         WRITE(r18_unit) r18_magic, 1, kt, Kbb, Kmm, Krhs, jpi, jpj, jpk, jpkm1, jp_tem, STORAGE_SIZE(1._wp), 40, 11
++         WRITE(r18_unit) pt(:,:,:,jp_tem,Kbb), r18_rhs_before, pt(:,:,:,jp_tem,Krhs), &
++            &            pt(:,:,:,jp_tem,Krhs) - r18_rhs_before, &
++            &            e3t_3d, e3u_3d, e3v_3d, r18_e3u_live, r18_e3v_live, &
++            &            tmask, umask, vmask, wmask, ahtu, ahtv, uslp, vslp, &
++            &            wslpi, wslpj, ah_wslp2, akz
++         WRITE(r18_unit) r18_dit, r18_djt, r18_dkt, r18_A11, r18_A22, r18_A13, r18_A23, &
++            &            r18_hmsku, r18_hmskv, r18_fu, r18_fv, r18_vmsku, r18_vmskv, &
++            &            r18_ahu_w, r18_ahv_w, r18_A31, r18_A32, r18_fw_lower, r18_fw_upper
++         WRITE(r18_unit) r3t(:,:,Kmm), r3u(:,:,Kmm), r3v(:,:,Kmm), &
++            &            e2_e1u, e1_e2v, e2u, e1v, e1t, e2t, e1e2t, r1_e1e2t
++         WRITE(r18_unit) e3w_1d
++         CLOSE(r18_unit, IOSTAT=r18_ios)
++         IF( r18_ios /= 0 ) CALL ctl_stop( 'traldf_iso_lap: cannot close Round-18 dump' )
++         DEALLOCATE( r18_rhs_before, r18_e3u_live, r18_e3v_live, r18_dit, r18_djt, r18_dkt )
++         DEALLOCATE( r18_A11, r18_A22, r18_A13, r18_A23 )
++         DEALLOCATE( r18_hmsku, r18_hmskv, r18_fu, r18_fv )
++         DEALLOCATE( r18_vmsku, r18_vmskv, r18_ahu_w, r18_ahv_w )
++         DEALLOCATE( r18_A31, r18_A32, r18_fw_lower, r18_fw_upper )
++         WRITE(numout,*) 'ROUND18_L2_LDF_DUMP ', kt, Kbb, Kmm, Krhs, TRIM(r18_filename)
++      ENDIF
++      !
++

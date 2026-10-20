@@ -85,6 +85,8 @@ def test_off_cards_keep_the_appended_selector_false():
         "ORCA2G1-flat", "ORCA2G1b-vec", "ORCA2G2-zps", "ORCA2G3-ts",
         "ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg",
         "ORCA2G8-ldf", "ORCA2G9-tadv", "ORCA2L4-bbc",
+        "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
+        "ORCA2V5-havtb", "ORCA2L1-bbl", "ORCA2L2-iso", "ORCA2L3-eiv",
     }
     # An appended default-false field contributes no dynamic pytree leaf and
     # every pre-L4 builder resolves it identically.  The production branch is

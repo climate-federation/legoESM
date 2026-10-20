@@ -134,8 +134,8 @@ allow_single_level, j_periodic, eos_depth, nemo_barotropic_filter_alpha,
 namelist parsers in packages/.
 - Reused unchanged: tripolar grid loader `tripole.py:453`; ORCA2 mask and fold
   images `nemo_testcase_recipe.py:1290`; depth ladder
-  `nemo_testcase_recipe.py:1271`; fold-owned F mask `vertical.py:281`; raw-mesh
-  operand carrier `vertical.py:883` and its resolved builder `vertical.py:673`
+  `nemo_testcase_recipe.py:1271`; fold-owned F mask `vertical.py:286`; raw-mesh
+  operand carrier `vertical.py:910` and its resolved builder `vertical.py:678`
   (D114); required alpha `ocean_model_latlon_cgrid.py:4415` (D115); the
   advection-OFF arms; the RK3 identity "orca2_vector_een_c2" with the OMT-0
   five-OFF selections.
@@ -150,7 +150,7 @@ namelist parsers in packages/.
   gates). Listing it would also move lines that older receipts cite.
 - No namelist reader existed in packages/ (three exist under scripts/ and are
   not importable from the package); a 20-line one was added.
-- THE ONE new explicit selector: `vertical.py:1084` (one-level column), default
+- THE ONE new explicit selector: `vertical.py:1115` (one-level column), default
   off, selected only by this card at `nemo_testcase_recipe.py:3725`. No second
   builder, fold, mask or mesh machinery.
 

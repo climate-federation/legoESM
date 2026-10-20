@@ -1,0 +1,42 @@
+--- traldf_iso_scheme.h90
++++ traldf_iso_scheme.h90
+@@ -57,0 +58,10 @@
++#if defined iso_lap
++            IF( lr18_write .AND. jn == jp_tem ) THEN
++               DO_2D( INN+1, INN+1, INN+1, INN+1 )
++                  r18_dit(ji,jj,jk) = zdit(ji,jj,ik)
++                  r18_djt(ji,jj,jk) = zdjt(ji,jj,ik)
++                  r18_dkt(ji,jj,jk) = zdkt(ji,jj,ik)
++                  IF( jk == jpkm1 ) r18_dkt(ji,jj,jpk) = zdkt(ji,jj,ikp1)
++               END_2D
++            ENDIF
++#endif
+@@ -89,0 +100,11 @@
++#if defined iso_lap
++               IF( lr18_write .AND. jn == jp_tem ) THEN
++                  r18_e3u_live(ji,jj,jk) = e3u_3d(ji,jj,jk) * (1._wp+r3u(ji,jj,Kmm)*umask(ji,jj,jk))
++                  r18_e3v_live(ji,jj,jk) = e3v_3d(ji,jj,jk) * (1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk))
++                  r18_A11(ji,jj,jk) = zA11 ; r18_A22(ji,jj,jk) = zA22
++                  r18_A13(ji,jj,jk) = zA13 ; r18_A23(ji,jj,jk) = zA23
++                  r18_hmsku(ji,jj,jk) = zmsku ; r18_hmskv(ji,jj,jk) = zmskv
++                  r18_fu(ji,jj,jk) = zfu(ji,jj) ; r18_fv(ji,jj,jk) = zfv(ji,jj)
++               ENDIF
++#endif
++
+@@ -138,0 +161,9 @@
++#if defined iso_lap
++                  IF( lr18_write .AND. jn == jp_tem ) THEN
++                     r18_vmsku(ji,jj,jk) = zmsku ; r18_vmskv(ji,jj,jk) = zmskv
++                     r18_ahu_w(ji,jj,jk) = zahu_w ; r18_ahv_w(ji,jj,jk) = zahv_w
++                     r18_A31(ji,jj,jk) = zA31 ; r18_A32(ji,jj,jk) = zA32
++                     r18_fw_lower(ji,jj,jk) = zfw(ji,jj) ; r18_fw_upper(ji,jj,jk) = zfw_kp1
++                  ENDIF
++#endif
++
+@@ -157,0 +190,6 @@
++#if defined iso_lap
++                  IF( lr18_write .AND. jn == jp_tem ) THEN
++                     r18_fw_lower(ji,jj,jk) = zfw(ji,jj) ; r18_fw_upper(ji,jj,jk) = 0._wp
++                  ENDIF
++#endif
++
