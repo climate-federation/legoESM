@@ -8548,12 +8548,12 @@ CITATION_MAP = {
         '[jnp.zeros_like(v_eiv[:1]), v_eiv], axis=0)', 2,
     ],
     'packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py:1900-1902': [
-        'if source_ordered_final:',
+        ('if source_ordered_final:', 3),
         't_inv = b(_nemo_sqrt_nonnegative_forward_exact(ratio))', 3,
     ],
     'packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2722-2732': [
         'if stage_tracer_written_order:',
-        'return jnp.where(active_3d > 0.5, out, base)', 11,
+        ('return jnp.where(active_3d > 0.5, out, base)', 1), 11,
     ],
     'packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2011':
         'return sr(rhs - sr(vertical_scaled / e3t_kmm))',
