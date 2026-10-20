@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import struct
 import sys
 from pathlib import Path
@@ -198,6 +199,16 @@ def test_trace_source_boundary_maps_owned_faces():
     mapped = module._trace_source_boundary(operands, "after_hpg")
     assert mapped["u"].shape == (2, 3, 2)
     assert mapped["v"].shape == (2, 3, 2)
+
+
+def test_run_uses_source_order_arm_only_for_cumulative_family():
+    """The acquired NEMO cumulatives must not use ordinary legoESM order."""
+    module = _load_module()
+    source = inspect.getsource(module.run)
+    assert '"stage1-source-order", None' in source
+    assert "live_operands = source_order_trace.operator_operands[0]" in source
+    assert "live_operands = trace.operator_operands[0]" not in source
+    assert "source_order_trace.state_after, ordinary" in source
 
 
 def test_operator_acquisition_is_single_rank_passive_and_creates_parent():

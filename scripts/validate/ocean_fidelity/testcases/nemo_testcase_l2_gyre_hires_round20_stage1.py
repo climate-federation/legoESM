@@ -335,6 +335,33 @@ def run(
     passive, passive_bytes = _state_bytes_equal(trace.state_after, ordinary)
     require(passive, f"live-stage trace moved {passive_bytes} state bytes")
 
+    # NEMO's stage-1 accumulator order is HPG -> LDF -> VOR -> KEG -> ZAD
+    # (compiled stp2d.f90:159-190).  legoESM's ordinary tendency evaluator
+    # forms the same isolated terms in a different order.  Use the existing
+    # private Round-119 association arm for the cumulative comparison; retain
+    # the ordinary trace above as the independent passivity control.
+    source_order_trace = None
+    source_order_state_identity = None
+    if rhs_family_vector_root is not None:
+        source_order_trace = LatLonCGridOceanModel(
+            card.recipe.grid,
+            card.recipe.z_coord,
+            card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_live_stage_operands=True,
+                nemo_stage_rhs_accumulation_order_arm=(
+                    "stage1-source-order", None),
+            ),
+        ).step(state, dt=card.dt_s, freshwater=freshwater,
+               surface_forcing=surface)
+        source_order_trace = jax.device_get(source_order_trace)
+        arm_exact, arm_bytes = _state_bytes_equal(
+            source_order_trace.state_after, ordinary)
+        source_order_state_identity = {
+            "bit_exact": arm_exact,
+            "mismatched_bytes": arm_bytes,
+        }
+
     masks = expected_masks(card)
     planted_control = None
     stages = []
@@ -401,12 +428,15 @@ def run(
     first_source_boundary = None
     source_order_calibration = None
     if rhs_family_vector_root is not None:
+        require(source_order_trace is not None,
+                "source-order trace was not materialized")
         scalar_family = read_stage1_rhs_family(
             rhs_family_scalar_root / "instrumented" / RHS_FAMILY_RECORD)
         vector_family = read_stage1_rhs_family(
             rhs_family_vector_root / "instrumented" / RHS_FAMILY_RECORD)
-        live_operands = trace.operator_operands[0]
+        live_operands = source_order_trace.operator_operands[0]
         live_final = _trace_source_boundary(live_operands, "after_adv")
+        source_order_rhs = _face_fields(source_order_trace.stage1_full_rhs)
         source_order_calibration = {}
         for face in FACE_ORDER:
             active = masks[face]
@@ -417,8 +447,10 @@ def run(
                 "vector_final_equals_inherited_completed_rhs": wordwise_result(
                     _active_levels(vector_family[f"after_adv_{face}"])[active],
                     _active_levels(vector_rhs[face])[active]),
-                "legoesm_final_equals_completed_rhs": wordwise_result(
-                    live_final[face][active], live_rhs[face][active]),
+                "legoesm_source_order_final_equals_source_order_rhs": (
+                    wordwise_result(
+                        live_final[face][active],
+                        source_order_rhs[face][active])),
             }
         require(all(
             row[check]["bit_exact"]
@@ -493,6 +525,7 @@ def run(
             "bit_exact": passive,
             "mismatched_bytes": passive_bytes,
         },
+        "source_order_arm_vs_ordinary_state": source_order_state_identity,
         "plant": plant,
         "plant_control": planted_control,
         "stages": stages,
