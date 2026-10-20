@@ -20,6 +20,11 @@ _XML = """<?xml version="1.0"?>
     <failure message="AssertionError: &#10;Not equal to tolerance rtol=1e-07">t</failure></testcase>
   <testcase classname="tests.unit.test_d" name="test_mystery">
     <failure message="AssertionError: assert 1 == 2">t</failure></testcase>
+  <testcase classname="tests.unit.test_d" name="test_mystery">
+    <error message="failed on teardown">t</error></testcase>
+  <testcase classname="" name="tests.unit.test_broken">
+    <error message="collection failure">ImportError: cannot import name 'x'</error></testcase>
+  <testcase classname="tests.unit.test_e" name="test_skip"><skipped message="s"/></testcase>
 </testsuite></testsuites>
 """
 
@@ -27,13 +32,16 @@ _XML = """<?xml version="1.0"?>
 def test_rows_ids_and_categories(tmp_path):
     xml = tmp_path / "u.xml"
     xml.write_text(_XML)
-    rows = {r["id"]: r for r in tfl.rows_from_junit("unit", str(xml))}
+    got = tfl.rows_from_junit("unit", str(xml))
+    rows = {r["id"]: r for r in got}
+    assert len(got) == len(rows) == 6  # fail + teardown error on one test = one row
     assert set(rows) == {
         "tests/unit/test_a.py::TestX::test_slow",
         "tests/test_no_hardcoded_constants.py::test_ratchet",
         "tests/unit/test_b.py::test_fake[p1]",
         "tests/unit/test_c.py::test_ref",
         "tests/unit/test_d.py::test_mystery",
+        "tests/unit/test_broken.py",
     }  # passing test excluded
     cat = {k: r["category"] for k, r in rows.items()}
     assert cat["tests/unit/test_a.py::TestX::test_slow"] == "timeout"
@@ -43,6 +51,8 @@ def test_rows_ids_and_categories(tmp_path):
     assert cat["tests/unit/test_c.py::test_ref"] == "pinned reference changed"
     assert cat["tests/unit/test_d.py::test_mystery"] == "other"
     assert rows["tests/unit/test_c.py::test_ref"]["reason"] == "AssertionError:"
+    assert rows["tests/unit/test_d.py::test_mystery"]["kind"] == "failure+error"
+    assert cat["tests/unit/test_broken.py"] == "stale-after-rename"
 
 
 def test_main_writes_markdown_with_counts(tmp_path, capsys):
@@ -51,6 +61,18 @@ def test_main_writes_markdown_with_counts(tmp_path, capsys):
     md = tmp_path / "ledger.md"
     assert tfl.main([f"unit={xml}", "--md", str(md)]) == 0
     text = md.read_text()
-    assert "# Failure ledger (5 rows)" in text
+    assert "# Failure ledger (6 rows)" in text
     assert "| timeout | 1 |" in text and "## other" in text
     assert "Failure ledger" in capsys.readouterr().out
+
+
+def test_without_md_prints_rows(tmp_path, capsys):
+    xml = tmp_path / "u.xml"
+    xml.write_text(_XML)
+    assert tfl.main([f"unit={xml}"]) == 0
+    assert "`tests/unit/test_b.py::test_fake[p1]`" in capsys.readouterr().out
+
+
+def test_approx_text_alone_is_not_a_pinned_reference():
+    assert tfl.classify("tests/unit/t.py::f", "assert x == pytest.approx(1.0)") == "other"
+    assert tfl.classify("tests/unit/t.py::f", "assert 1.2 == 1.0 \u00b1 1e-6") == "pinned reference changed"

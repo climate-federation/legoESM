@@ -3,9 +3,11 @@
 Usage:
     python scripts/validate/failure_ledger.py JOB=path.xml [JOB=path.xml ...] [--md out.md]
 
-Each row is (job, test id, kind, category, reason). The category is a FIRST GUESS
-from the test path and the failure text; the reason is the failure message's first
-line, so every row can be re-checked by eye. Categories follow the issue's table.
+Each row is one failing test id per job: (job, test id, kinds, category, reason).
+A test that fails AND errors in teardown is one row with kinds "failure+error".
+The category is a FIRST GUESS from the test path and the failure text, never a
+diagnosis; the reason is the first failure message line, so every row can be
+re-checked by eye. Categories follow the issue's table.
 """
 from __future__ import annotations
 
@@ -32,7 +34,7 @@ RULES: list[tuple[str, str | None, str | None]] = [
      r"unexpected keyword argument|cannot import name|module '[\w.]+' has no attribute|"
      r"missing \d+ required (positional|keyword)|has no field|got multiple values"),
     ("oracle/fixture mismatch", r"oracle|fixture|fv3_native|gnomonic", None),
-    ("pinned reference changed", None, r"Not equal to tolerance|Mismatched elements|assert_allclose|approx"),
+    ("pinned reference changed", None, r"Not equal to tolerance|Mismatched elements|\u00b1"),
     ("new safety check vs old test", None, r"(refus|requires?|must be|not supported|is required)"),
 ]
 
@@ -49,6 +51,8 @@ def classify(test_id: str, text: str) -> str:
 
 def _test_id(case: ET.Element) -> str:
     cls = case.get("classname", "")
+    if not cls:  # collection error: pytest puts the dotted module path in name
+        return case.get("file") or case.get("name", "").replace(".", "/") + ".py"
     f = case.get("file") or (cls.replace(".", "/") + ".py" if cls else "")
     # classname is dotted module[.Class]; rebuild a pytest-like id
     parts = cls.split(".")
@@ -61,19 +65,25 @@ def _test_id(case: ET.Element) -> str:
 
 
 def rows_from_junit(job: str, path: str) -> list[dict]:
-    out = []
+    rows: dict[str, dict] = {}
     for case in ET.parse(path).getroot().iter("testcase"):
-        for kind in ("failure", "error"):
-            el = case.find(kind)
-            if el is None:
-                continue
-            msg = el.get("message") or ""
-            text = msg + "\n" + (el.text or "")
-            tid = _test_id(case)
-            first = next((ln.strip() for ln in msg.splitlines() if ln.strip()), "") or \
-                next((ln.strip() for ln in (el.text or "").splitlines()[::-1] if ln.strip()), "")
-            out.append({"job": job, "id": tid, "kind": kind,
-                        "category": classify(tid, text), "reason": first[:160]})
+        bad = case.findall("failure") + case.findall("error")
+        if not bad:
+            continue
+        tid = _test_id(case)
+        row = rows.setdefault(tid, {"job": job, "id": tid, "kinds": [], "texts": []})
+        for el in bad:
+            if el.tag not in row["kinds"]:
+                row["kinds"].append(el.tag)
+            row["texts"].append((el.get("message") or "", el.text or ""))
+    out = []
+    for row in rows.values():
+        msg, body = row["texts"][0]
+        text = "\n".join(m + "\n" + b for m, b in row["texts"])
+        first = next((ln.strip() for ln in msg.splitlines() if ln.strip()), "") or \
+            next((ln.strip() for ln in body.splitlines()[::-1] if ln.strip()), "")
+        out.append({"job": job, "id": row["id"], "kind": "+".join(row["kinds"]),
+                    "category": classify(row["id"], text), "reason": first[:160]})
     return out
 
 
@@ -82,7 +92,7 @@ def to_markdown(rows: list[dict]) -> str:
     lines = [f"# Failure ledger ({len(rows)} rows)", "", "| Category | Count |", "|---|---|"]
     lines += [f"| {c} | {n} |" for c, n in counts.most_common()]
     for cat, _ in counts.most_common():
-        lines += ["", f"## {cat}", "", "| Job | Test | Kind | Reason |", "|---|---|---|---|"]
+        lines += ["", f"## {cat} (first-guess category)", "", "| Job | Test | Kind | Reason |", "|---|---|---|---|"]
         for r in sorted((r for r in rows if r["category"] == cat), key=lambda r: (r["job"], r["id"])):
             reason = r["reason"].replace("|", "\\|")
             lines.append(f"| {r['job']} | `{r['id']}` | {r['kind']} | {reason} |")
@@ -104,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.md:
         with open(a.md, "w") as fh:
             fh.write(md)
-    print(md.split("\n## ")[0])
+    print(md.split("\n## ")[0] if a.md else md)
     return 0
 
 
