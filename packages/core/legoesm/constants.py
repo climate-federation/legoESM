@@ -213,6 +213,18 @@ ice_landfast_speed_stop_nemo = 5.0e-3  # [m/s] icesbc.F90:421
 ice_full_cover_margin_nemo = 1.0e-3
 ice_growth_thickness_stop_nemo = 3.0  # [m]
 
+# WRF v4.8.0 Thompson microphysics (phys/module_mp_thompson.F, commit
+# 06d4240ae989cc3e50af412bb472df3d9048783c) carries its OWN thermodynamic
+# constants; the faithful port (microphysics/thompson_wrf.py) uses these so
+# it reproduces the running scheme.  Line numbers are in that file.
+R_v_wrf_thompson = 461.5         # [J/(kg*K)] :202 Rv
+R_d_wrf_thompson = 287.04        # [J/(kg*K)] :204 R
+c_p_wrf_thompson = 1004.0        # [J/(kg*K)] :205 Cp (times 1+0.887 q_v in use)
+L_s_wrf_thompson = 2.834e6       # [J/kg] :216 lsub
+L_v0_wrf_thompson = 2.5e6        # [J/kg] :217 lvap0 (lvap = lvap0 + (c_pi - c_pw) T_C)
+epsilon_wrf_thompson = 0.622     # [-] literal in rho (:1234, :1802), RSLF/RSIF, t_dew
+T_flatau_wrf_thompson = 273.16   # [K] Flatau et al. (1992) fit origin in RSLF/RSIF (:5398, :5433)
+
 # Active no-pond ice_alb identity, icealb.F90:124-185 and accepted namalb.
 albedo_snow_dry_orca1 = 0.85
 albedo_snow_melt_orca1 = 0.75

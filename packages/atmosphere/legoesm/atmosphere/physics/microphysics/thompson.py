@@ -1,5 +1,18 @@
 """Thompson hybrid-moment microphysics.
 
+NOT YET FAITHFUL.  This entry point still runs the legacy surrogate below
+(Morrison-style processes with Seifert-Beheng warm rain); the 2026-10-19
+tier-2 oracle audit measured it O(1) away from Thompson on every tendency.
+The faithful port of the oracle the user chose (WRF v4.8.0
+``phys/module_mp_thompson.F``, commit
+06d4240ae989cc3e50af412bb472df3d9048783c, ``mp_physics=8``) is
+:func:`legoesm.atmosphere.physics.microphysics.thompson_wrf.thompson_wrf_step`,
+matched to the running oracle in ``tests/atmosphere/microphysics/unit/
+test_thompson_wrf_oracle.py``.  Routing this entry point to it waits on user
+decisions about the state mapping (specific humidity vs the oracle's mixing
+ratios, the density used for per-volume rain number, the prescribed droplet
+number vs the carried ``N_c``, the vertical velocity the oracle reads).
+
 Extends Morrison with graupel formation from intense riming and
 gamma distribution shape corrections for autoconversion/accretion.
 
