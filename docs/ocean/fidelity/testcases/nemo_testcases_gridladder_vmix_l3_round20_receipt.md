@@ -436,6 +436,13 @@ for the discarded dry `q_after` lanes and for zero dry `e3t_kmm` divisors,
 leaving every wet operand and every forward bit unchanged.  Per instruction,
 those guards are named but not imported or fixed in this round.
 
+The clean landing gates use `JAX_ENABLE_X64=1` and the exact `land.sh`
+`PYTHONPATH`.  The explicit receipt citation gate passes with 43 citations,
+zero failures, zero unmapped citations and zero map-audit failures.  The exact
+default ORCA2 landing list passes **145 tests in 1014.79 s**.  Its included
+private-import ratchet passes all six tests; it is also rerun separately at
+the final committed tip below.
+
 independent review: operator (Claude) — LAND
 
 codex review: operator
