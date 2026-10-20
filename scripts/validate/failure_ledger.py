@@ -33,9 +33,11 @@ RULES: list[tuple[str, str | None, str | None]] = [
     ("stale-after-rename", None,
      r"unexpected keyword argument|cannot import name|module '[\w.]+' has no attribute|"
      r"missing \d+ required (positional|keyword)|has no field|got multiple values"),
-    ("oracle/fixture mismatch", r"oracle|fixture|fv3_native|gnomonic", None),
+    ("oracle/fixture mismatch", r"oracle|fv3_native|gnomonic", None),
     ("pinned reference changed", None, r"Not equal to tolerance|Mismatched elements|\u00b1"),
-    ("new safety check vs old test", None, r"(refus|requires?|must be|not supported|is required)"),
+    # Only a guard the model RAISES: an exception type, then refuse/require wording.
+    ("new safety check vs old test", None,
+     r"(ValueError|RuntimeError|SystemExit|NotImplementedError)\b[^\n]*(\brefus|\brequires\b|not supported)"),
 ]
 
 
@@ -64,27 +66,34 @@ def _test_id(case: ET.Element) -> str:
     return f"{f}::{case.get('name', '')}"
 
 
-def rows_from_junit(job: str, path: str) -> list[dict]:
+def _reason(texts: list[tuple[str, str]]) -> str:
+    for msg, _ in texts:  # the whole message, on one line
+        if msg.strip():
+            return " ".join(msg.split())[:160]
+    for _, body in texts:  # no message: pytest's "E   ..." line
+        for ln in body.splitlines():
+            if ln.startswith("E "):
+                return " ".join(ln[1:].split())[:160]
+    return ""
+
+
+def rows_from_junit(job: str, paths: str | list[str]) -> list[dict]:
     rows: dict[str, dict] = {}
-    for case in ET.parse(path).getroot().iter("testcase"):
-        bad = case.findall("failure") + case.findall("error")
-        if not bad:
-            continue
-        tid = _test_id(case)
-        row = rows.setdefault(tid, {"job": job, "id": tid, "kinds": [], "texts": []})
-        for el in bad:
-            if el.tag not in row["kinds"]:
-                row["kinds"].append(el.tag)
-            row["texts"].append((el.get("message") or "", el.text or ""))
-    out = []
-    for row in rows.values():
-        msg, body = row["texts"][0]
-        text = "\n".join(m + "\n" + b for m, b in row["texts"])
-        first = next((ln.strip() for ln in msg.splitlines() if ln.strip()), "") or \
-            next((ln.strip() for ln in body.splitlines()[::-1] if ln.strip()), "")
-        out.append({"job": job, "id": row["id"], "kind": "+".join(row["kinds"]),
-                    "category": classify(row["id"], text), "reason": first[:160]})
-    return out
+    for path in [paths] if isinstance(paths, str) else paths:
+        for case in ET.parse(path).getroot().iter("testcase"):
+            bad = case.findall("failure") + case.findall("error")
+            if not bad:
+                continue
+            tid = _test_id(case)
+            row = rows.setdefault(tid, {"kinds": [], "texts": []})
+            for el in bad:
+                if el.tag not in row["kinds"]:
+                    row["kinds"].append(el.tag)
+                row["texts"].append((el.get("message") or "", el.text or ""))
+    return [{"job": job, "id": tid, "kind": "+".join(r["kinds"]),
+             "category": classify(tid, "\n".join(m + "\n" + b for m, b in r["texts"])),
+             "reason": _reason(r["texts"])}
+            for tid, r in rows.items()]
 
 
 def to_markdown(rows: list[dict]) -> str:
@@ -104,12 +113,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("inputs", nargs="+", help="JOB=path/to/junit.xml")
     ap.add_argument("--md", help="write the markdown ledger here")
     a = ap.parse_args(argv)
-    rows = []
+    by_job: dict[str, list[str]] = {}
     for item in a.inputs:
         job, sep, path = item.partition("=")
         if not sep:
             ap.error(f"expected JOB=path, got {item!r}")
-        rows += rows_from_junit(job, path)
+        by_job.setdefault(job, []).append(path)
+    rows = [r for job, paths in by_job.items() for r in rows_from_junit(job, paths)]
     md = to_markdown(rows)
     if a.md:
         with open(a.md, "w") as fh:

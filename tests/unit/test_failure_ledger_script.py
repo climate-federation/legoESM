@@ -50,7 +50,7 @@ def test_rows_ids_and_categories(tmp_path):
     assert rows["tests/unit/test_b.py::test_fake[p1]"]["kind"] == "error"
     assert cat["tests/unit/test_c.py::test_ref"] == "pinned reference changed"
     assert cat["tests/unit/test_d.py::test_mystery"] == "other"
-    assert rows["tests/unit/test_c.py::test_ref"]["reason"] == "AssertionError:"
+    assert rows["tests/unit/test_c.py::test_ref"]["reason"] == "AssertionError: Not equal to tolerance rtol=1e-07"
     assert rows["tests/unit/test_d.py::test_mystery"]["kind"] == "failure+error"
     assert cat["tests/unit/test_broken.py"] == "stale-after-rename"
 
@@ -76,3 +76,16 @@ def test_without_md_prints_rows(tmp_path, capsys):
 def test_approx_text_alone_is_not_a_pinned_reference():
     assert tfl.classify("tests/unit/t.py::f", "assert x == pytest.approx(1.0)") == "other"
     assert tfl.classify("tests/unit/t.py::f", "assert 1.2 == 1.0 \u00b1 1e-6") == "pinned reference changed"
+
+
+def test_same_job_twice_is_one_row_per_test(tmp_path, capsys):
+    xml = tmp_path / "u.xml"
+    xml.write_text(_XML)
+    tfl.main([f"unit={xml}", f"unit={xml}"])
+    assert "# Failure ledger (6 rows)" in capsys.readouterr().out
+
+
+def test_safety_rule_needs_a_raised_guard():
+    assert tfl.classify("tests/unit/t.py::f", "temperature must be positive is required") == "other"
+    assert tfl.classify("tests/unit/t.py::f",
+                        "ValueError: the tiled dycore refuses the energy fixer") == "new safety check vs old test"
