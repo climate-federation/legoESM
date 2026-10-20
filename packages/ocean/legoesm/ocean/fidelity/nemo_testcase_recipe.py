@@ -2705,6 +2705,21 @@ def orca2_l2_isoneutral_gm_redi():
         redi_flux_stored_face_ratios=True)
 
 
+def orca2_l3_eiv_gm_redi():
+    """Lane B rung L3's certified selection (gridladder-vmix fb02c4b29f).
+
+    L2's arguments plus ORCA2's eddy-induced velocity (&namtra_eiv:
+    ln_ldfeiv, nn_aei_ijk_t = 21, aei0 = 0.5*rn_Ue*rn_Le).
+    """
+
+    return _orca2_isoneutral_gm_redi(
+        0.5 * _SMT3_RN_UD * _SMT3_RN_LD, slope_prd_evaluation="nemo_eos80_literal",
+        north_fold=True, redi_flux_reference_thickness_evaluation="nemo_native",
+        redi_flux_geometry_stage="rk3_kmm", slope_uv_source_rounding=True,
+        redi_a33_source_ordering=True,
+        redi_flux_stored_face_ratios=True, eddy_induced_velocity=True)
+
+
 # --- rung SMT-4 (decision 93): ORCA2 rung 0's namdyn_ldf ----------
 # Decision 93 replaces ORCA2's unavailable file-backed coefficient only with
 # mode 20. ldfdyn.f90:311/:342-346 evaluates 0.5*rn_Uv*MAX(e1,e2).
