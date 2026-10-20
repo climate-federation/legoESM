@@ -152,6 +152,45 @@ def scan(rung: str, rel: float, steps: int, log=print) -> dict:
     return result
 
 
+def _max_abs(a, b) -> dict:
+    import jax
+
+    return {jax.tree_util.keystr(p): float(np.max(np.abs(np.asarray(x, np.float64)
+                                                         - np.asarray(y, np.float64))))
+            for (p, x), y in zip(jax.tree_util.tree_leaves_with_path(a),
+                                 jax.tree_util.tree_leaves(b), strict=True)
+            if np.issubdtype(np.asarray(x).dtype, np.floating) and np.size(x)}
+
+
+def linearity(rung: str, keys, rel: float, log=print) -> dict:
+    """One step: max |state(1 + r) - state(1)| at r = rel and 10 rel, and the
+    forward-mode tangent times rel, per leaf, for each key."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    card, model, state0, forcing = _model(rung)
+    body = step_body(model)
+    ones = {k: jnp.float64(1.0) for k in SCALARS}
+    step = jax.jit(lambda s: body(state0, s, card.dt_s, *forcing[0]))
+    tangent = jax.jit(lambda t: jax.jvp(lambda s: body(state0, s, card.dt_s, *forcing[0]),
+                                        (ones,), (t,))[1])
+    base = jax.device_get(step(ones))
+    out = {"rung": rung, "rel": rel, "worktree": worktree_stamp(allow_dirty=True), "keys": {}}
+    for k in keys:
+        row = {}
+        for r in (rel, 10 * rel):
+            row[f"diff@{r:g}"] = _max_abs(jax.device_get(step({**ones, k: jnp.float64(1 + r)})),
+                                          base)
+        t = jax.device_get(tangent({j: jnp.float64(1.0 if j == k else 0.0) for j in SCALARS}))
+        row[f"jvp*{rel:g}"] = {p: v * rel for p, v in _max_abs(t, jax.tree_util.tree_map(
+            np.zeros_like, t)).items()}
+        out["keys"][k] = row
+        log(k, {name: {p: v for p, v in d.items() if p.startswith(".T[")}
+                for name, d in row.items()})
+    return out
+
+
 def _nominal(model) -> dict:
     c = model.config
     return {**{k: getattr(c.bottom_drag, f) for k, f in DRAG.items()},
@@ -168,6 +207,7 @@ def main() -> int:
     parser.add_argument("--steps", type=int, default=2)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--trace-cd0", action="store_true")
+    parser.add_argument("--linearity", nargs="+", choices=SCALARS)
     args = parser.parse_args()
     import jax
     if not (jax.config.jax_enable_x64 and jax.default_backend() == "cpu"):
@@ -177,6 +217,10 @@ def main() -> int:
         return 0
     if args.output is None:
         parser.error("--output is required with a scan")
+    if args.linearity:
+        args.output.write_text(json.dumps(linearity(args.rung, args.linearity, args.rel),
+                                          indent=1, default=str) + "\n")
+        return 0
     args.output.write_text(json.dumps(scan(args.rung, args.rel, args.steps),
                                       indent=1, default=str) + "\n")
     return 0
