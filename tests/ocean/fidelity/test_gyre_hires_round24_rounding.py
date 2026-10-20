@@ -68,6 +68,8 @@ def test_regional_self_sse_localizes_a_western_only_pattern():
 def test_preregistration_and_comparison_artifact_are_pinned():
     assert ROUND24.sha256(ROUND24.PREREGISTRATION) == \
         ROUND24.PREREGISTRATION_SHA256
+    assert ROUND24.sha256(ROUND24.ROUND25_PREREGISTRATION) == \
+        ROUND24.ROUND25_PREREGISTRATION_SHA256
     if ROUND24.ROUND11_ARRAYS.is_file():
         assert ROUND24.sha256(ROUND24.ROUND11_ARRAYS) == \
             ROUND24.ROUND11_ARRAYS_SHA256
@@ -96,6 +98,41 @@ def test_gpu_wrapper_requires_an_explicit_physical_device():
                             text=True)
     assert result.returncode == 64
     assert "--physical-gpu" in result.stderr
+
+    recurring = ROOT / (
+        "scripts/run/run_gyre_hires_round25_recurring_rounding_gpu.sh")
+    result = subprocess.run([str(recurring)], check=False, capture_output=True,
+                            text=True)
+    assert result.returncode == 64
+    assert "--physical-gpu" in result.stderr
+
+
+def test_recurring_arm_uses_intervention_model_for_every_scanned_step(
+    monkeypatch,
+):
+    production = object()
+    intervention = object()
+    card = object()
+    calls = []
+
+    def build(model, actual_card, n_steps):
+        calls.append((model, actual_card, n_steps))
+        return (model, n_steps)
+
+    monkeypatch.setattr(ROUND24, "build_scanned_day_mean_stepper", build)
+    steppers = ROUND24._build_arm_steppers(production, intervention, card)
+    assert calls == [
+        (production, card, ROUND24.STEPS_PER_DAY - 1),
+        (intervention, card, ROUND24.STEPS_PER_DAY - 1),
+        (production, card, ROUND24.STEPS_PER_DAY),
+        (intervention, card, ROUND24.STEPS_PER_DAY),
+    ]
+    assert steppers == (
+        (production, ROUND24.STEPS_PER_DAY - 1),
+        (intervention, ROUND24.STEPS_PER_DAY - 1),
+        (production, ROUND24.STEPS_PER_DAY),
+        (intervention, ROUND24.STEPS_PER_DAY),
+    )
 
 
 def test_json_writer_serializes_numpy_scalars_and_stays_strict(tmp_path):

@@ -54,6 +54,16 @@ PREREGISTRATION_SHA256 = (
     "3a9cc855a1f90fb7ee8a7f13a3844d07f431f1dc7a13eeece67f84a2139ab95b"
 )
 PREREGISTRATION_COMMIT = "3117150a54f2e4abf29b18f7d29d5b8557ca56f8"
+ROUND25_PREREGISTRATION = REPO / (
+    "docs/ocean/fidelity/testcases/"
+    "nemo_testcases_l2_gyre_hires_round25_preregistration.md"
+)
+ROUND25_PREREGISTRATION_SHA256 = (
+    "8d555a6a9c1bdf2bedd75775fe85b9ce75eaef6424560b46c569fba42d7f1624"
+)
+ROUND25_PREREGISTRATION_COMMIT = (
+    "17957ee9252e9fb6eeb1223c66d86cf2de28ee28"
+)
 ROUND11_ARRAYS = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gyrehr_rounds/"
     "round11/divergence_regional_v3/gyre_hires_divergence_arrays.npz"
@@ -108,6 +118,20 @@ def validate_registration(producer_commit: str) -> None:
     )
     require(ancestry.returncode == 0,
             "producer does not descend from the round-24 preregistration")
+
+
+def validate_round25_registration(producer_commit: str) -> None:
+    require(sha256(ROUND25_PREREGISTRATION)
+            == ROUND25_PREREGISTRATION_SHA256,
+            "round-25 preregistration moved")
+    require(len(producer_commit) == 40, "producer commit is not a full SHA")
+    ancestry = subprocess.run(
+        ["git", "-C", str(REPO), "merge-base", "--is-ancestor",
+         ROUND25_PREREGISTRATION_COMMIT, producer_commit],
+        check=False, capture_output=True,
+    )
+    require(ancestry.returncode == 0,
+            "producer does not descend from the round-25 preregistration")
 
 
 def registered_verdict(rows: dict[str, dict[str, float]]) -> str:
@@ -245,8 +269,21 @@ def _load_seed(root: Path) -> tuple[np.ndarray, np.ndarray, dict]:
         return np.asarray(data["delta_u"]), np.asarray(data["delta_v"]), manifest
 
 
-def run_experiment(seed_root: Path, output: Path, physical_gpu: int) -> dict:
-    """Apply the registered seed at step 4321, then run identical models."""
+def _build_arm_steppers(production, intervention, card):
+    return (
+        build_scanned_day_mean_stepper(
+            production, card, STEPS_PER_DAY - 1),
+        build_scanned_day_mean_stepper(
+            intervention, card, STEPS_PER_DAY - 1),
+        build_scanned_day_mean_stepper(production, card, STEPS_PER_DAY),
+        build_scanned_day_mean_stepper(intervention, card, STEPS_PER_DAY),
+    )
+
+
+def run_experiment(
+    seed_root: Path, output: Path, physical_gpu: int, *, recurring: bool = False,
+) -> dict:
+    """Run the registered one-time or every-step residue experiment."""
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, set_policy
@@ -265,7 +302,9 @@ def run_experiment(seed_root: Path, output: Path, physical_gpu: int) -> dict:
     require(jax.default_backend() == "gpu", "closing run requires GPU")
     stamp = worktree_stamp()
     require(stamp["clean"], "closing run requires a clean commit")
-    validate_registration(stamp["commit"])
+    registration = (
+        validate_round25_registration if recurring else validate_registration)
+    registration(stamp["commit"])
     require(not output.exists(), "run output already exists")
     delta_u, delta_v, seed_manifest = _load_seed(seed_root)
     card = common_card()
@@ -300,9 +339,17 @@ def run_experiment(seed_root: Path, output: Path, physical_gpu: int) -> dict:
     require(movement["unequal_words"] > 0,
             "registered residue seed moved no state word")
 
+    preregistration_sha256 = (
+        ROUND25_PREREGISTRATION_SHA256 if recurring
+        else PREREGISTRATION_SHA256)
+    wrapper = REPO / "scripts/run" / (
+        "run_gyre_hires_round25_recurring_rounding_gpu.sh" if recurring
+        else "run_gyre_hires_round24_rounding_gpu.sh")
     output.mkdir(parents=True)
     manifest = {
-        "schema": "gyre-r4-smag-round24-rounding-run-v1",
+        "schema": (
+            "gyre-r4-smag-round25-recurring-rounding-run-v1" if recurring
+            else "gyre-r4-smag-round24-rounding-run-v1"),
         "status": "pending",
         "producer": stamp,
         "backend": jax.default_backend(),
@@ -315,33 +362,40 @@ def run_experiment(seed_root: Path, output: Path, physical_gpu: int) -> dict:
         "seed_sha256": seed_manifest["seed_sha256"],
         "identity_transform": passivity,
         "seeded_step_movement": movement,
+        "seed_application": {
+            "cadence": "every_step" if recurring else "first_step_only",
+            "count": TOTAL_DAYS * STEPS_PER_DAY if recurring else 1,
+            "first_step": FIRST_STEP,
+            "last_step": (
+                FIRST_STEP + TOTAL_DAYS * STEPS_PER_DAY - 1
+                if recurring else FIRST_STEP),
+        },
         "fields": list(FIELD_NAMES),
-        "preregistration_sha256": PREREGISTRATION_SHA256,
+        "preregistration_sha256": preregistration_sha256,
         "instrument_sha256": sha256(Path(__file__)),
-        "wrapper_sha256": sha256(
-            REPO / "scripts/run/run_gyre_hires_round24_rounding_gpu.sh"),
+        "wrapper_sha256": sha256(wrapper),
         "daily_sha256": {},
     }
     _write_json(output / "manifest.pending.json", manifest)
-    tail = build_scanned_day_mean_stepper(
-        production, card, STEPS_PER_DAY - 1)
-    day_step = build_scanned_day_mean_stepper(
-        production, card, STEPS_PER_DAY)
+    intervention = seeded if recurring else production
+    control_tail, perturbed_tail, control_day, perturbed_day = (
+        _build_arm_steppers(production, intervention, card))
     control_means0 = _mean_accumulators(control_state, card)
     perturbed_means0 = _mean_accumulators(perturbed_state, card)
     hashes = {}
     for day in range(1, TOTAL_DAYS + 1):
         if day == 1:
-            control_state, control_means = tail(
+            control_state, control_means = control_tail(
                 control_state, FIRST_STEP + 1,
                 initial_means=control_means0, initial_count=1)
-            perturbed_state, perturbed_means = tail(
+            perturbed_state, perturbed_means = perturbed_tail(
                 perturbed_state, FIRST_STEP + 1,
                 initial_means=perturbed_means0, initial_count=1)
         else:
             first = FIRST_STEP + (day - 1) * STEPS_PER_DAY
-            control_state, control_means = day_step(control_state, first)
-            perturbed_state, perturbed_means = day_step(perturbed_state, first)
+            control_state, control_means = control_day(control_state, first)
+            perturbed_state, perturbed_means = perturbed_day(
+                perturbed_state, first)
         jax.block_until_ready(perturbed_state.eta.data)
         arrays = {"day": np.int64(day)}
         for arm, arm_state, means in (
@@ -370,10 +424,27 @@ def run_experiment(seed_root: Path, output: Path, physical_gpu: int) -> dict:
 
 def _load_run(root: Path) -> tuple[dict[str, dict[str, np.ndarray]], dict]:
     manifest = json.loads((root / "manifest.json").read_text())
+    schema = manifest.get("schema")
+    require(schema in {
+        "gyre-r4-smag-round24-rounding-run-v1",
+        "gyre-r4-smag-round25-recurring-rounding-run-v1",
+    }, f"unregistered rounding-run schema: {schema!r}")
     require(manifest["status"] == "complete"
             and manifest["completed_days"] == TOTAL_DAYS,
-            "round-24 run is incomplete")
-    validate_registration(manifest["producer"]["commit"])
+            "rounding run is incomplete")
+    if schema == "gyre-r4-smag-round25-recurring-rounding-run-v1":
+        validate_round25_registration(manifest["producer"]["commit"])
+        require(manifest["preregistration_sha256"]
+                == ROUND25_PREREGISTRATION_SHA256,
+                "round-25 run names the wrong preregistration")
+        require(manifest["seed_application"] == {
+            "cadence": "every_step",
+            "count": TOTAL_DAYS * STEPS_PER_DAY,
+            "first_step": FIRST_STEP,
+            "last_step": FIRST_STEP + TOTAL_DAYS * STEPS_PER_DAY - 1,
+        }, "round-25 run does not apply the residue at every step")
+    else:
+        validate_registration(manifest["producer"]["commit"])
     series = {
         arm: {field: [] for field in FIELDS}
         for arm in ("control", "perturbed")
@@ -424,6 +495,11 @@ def score(run_root: Path, output: Path, round11_arrays: Path) -> dict:
     require(sha256(round11_arrays) == ROUND11_ARRAYS_SHA256,
             "round-11 comparison arrays moved")
     series, manifest = _load_run(run_root)
+    recurring = (
+        manifest["schema"]
+        == "gyre-r4-smag-round25-recurring-rounding-run-v1")
+    report_stem = (
+        "round25_recurring_rounding" if recurring else "round24_rounding")
     card = common_card()
     masks0 = expected_masks(card)
     masks = {"T": masks0["T"][..., 0],
@@ -498,14 +574,16 @@ def score(run_root: Path, output: Path, round11_arrays: Path) -> dict:
             series["control"][field], series["perturbed"][field],
             masks[mask_name])
     output.mkdir(parents=True)
-    arrays_path = output / "round24_rounding_curves.npz"
+    arrays_path = output / f"{report_stem}_curves.npz"
     np.savez_compressed(arrays_path, **{
         f"self.{field}.{metric}": values
         for field, metrics in curves.items()
         for metric, values in metrics.items()
     })
     report = {
-        "schema": "gyre-r4-smag-round24-rounding-score-v1",
+        "schema": (
+            "gyre-r4-smag-round25-recurring-rounding-score-v1" if recurring
+            else "gyre-r4-smag-round24-rounding-score-v1"),
         "instrument": worktree_stamp(),
         "run_manifest_sha256": sha256(run_root / "manifest.json"),
         "round11_arrays": {"path": str(round11_arrays),
@@ -522,7 +600,7 @@ def score(run_root: Path, output: Path, round11_arrays: Path) -> dict:
         "run": manifest,
         "artifacts": {arrays_path.name: sha256(arrays_path)},
     }
-    _write_json(output / "round24_rounding_report.json", report)
+    _write_json(output / f"{report_stem}_report.json", report)
     return report
 
 
@@ -535,6 +613,10 @@ def main(argv=None) -> int:
     run_parser.add_argument("--seed-root", type=Path, required=True)
     run_parser.add_argument("--output", type=Path, required=True)
     run_parser.add_argument("--physical-gpu", type=int, required=True)
+    recurring_parser = sub.add_parser("run-recurring")
+    recurring_parser.add_argument("--seed-root", type=Path, required=True)
+    recurring_parser.add_argument("--output", type=Path, required=True)
+    recurring_parser.add_argument("--physical-gpu", type=int, required=True)
     score_parser = sub.add_parser("score")
     score_parser.add_argument("--run-root", type=Path, required=True)
     score_parser.add_argument("--output", type=Path, required=True)
@@ -544,9 +626,10 @@ def main(argv=None) -> int:
     try:
         if args.command == "make-seed":
             result = make_seed(args.output)
-        elif args.command == "run":
+        elif args.command in ("run", "run-recurring"):
             result = run_experiment(
-                args.seed_root, args.output, args.physical_gpu)
+                args.seed_root, args.output, args.physical_gpu,
+                recurring=args.command == "run-recurring")
         else:
             result = score(args.run_root, args.output, args.round11_arrays)
     except Exception as exc:  # noqa: BLE001 - fail-closed instrument boundary
