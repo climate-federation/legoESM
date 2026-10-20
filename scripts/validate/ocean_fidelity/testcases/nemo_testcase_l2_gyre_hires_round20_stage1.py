@@ -674,14 +674,32 @@ def run(
             planted_pair, coefficient_plant = (
                 _plant_cancellation_sensitive_coefficient_one_ulp(
                     scalar_pair, scalar_family))
+            # A single coefficient ULP can legitimately round away through
+            # two bilaplacian passes and the cumulative HPG addition.  Keep
+            # that exact one-ULP input control, and separately amplify only
+            # the same acquired active word to prove the override seam reaches
+            # the executed post-LDF boundary.
+            seam_pair = [np.array(value, copy=True) for value in scalar_pair]
+            seam_field = 0 if coefficient_plant["field"] == "ahmt" else 1
+            seam_index = tuple(coefficient_plant["index_j_i_k"])
+            seam_before = seam_pair[seam_field][seam_index]
+            seam_pair[seam_field][seam_index] = seam_before * (1.0 + 2.0**-26)
+            seam_movement = wordwise_result(
+                np.concatenate([value.ravel() for value in seam_pair]),
+                np.concatenate([value.ravel() for value in scalar_pair]),
+            )
+            require(seam_movement["unequal_words"] == 1,
+                    "coefficient seam plant moved more than one word")
             planted_trace = jax.device_get(source_order_step(
-                tuple(jnp.asarray(value) for value in planted_pair)))
+                tuple(jnp.asarray(value) for value in seam_pair)))
             planted_operands = planted_trace.operator_operands[0]
-            coefficient_plant["rows_vs_unplanted_pair"] = {}
+            coefficient_plant["one_ulp_post_ldf_observable"] = False
+            coefficient_plant["seam_movement"] = seam_movement
+            coefficient_plant["seam_rows_vs_unplanted_pair"] = {}
             for boundary in ("after_hpg", "after_ldf"):
                 unplanted = _trace_source_boundary(pair_operands, boundary)
                 planted = _trace_source_boundary(planted_operands, boundary)
-                coefficient_plant["rows_vs_unplanted_pair"][boundary] = {
+                coefficient_plant["seam_rows_vs_unplanted_pair"][boundary] = {
                     face: wordwise_result(
                         planted[face][masks[face]],
                         unplanted[face][masks[face]],
@@ -689,13 +707,13 @@ def run(
                     for face in FACE_ORDER
                 }
             require(all(
-                coefficient_plant["rows_vs_unplanted_pair"]["after_hpg"]
+                coefficient_plant["seam_rows_vs_unplanted_pair"]["after_hpg"]
                 [face]["bit_exact"] for face in FACE_ORDER
             ), "coefficient plant moved the upstream HPG boundary")
             require(any(
-                not coefficient_plant["rows_vs_unplanted_pair"]["after_ldf"]
+                not coefficient_plant["seam_rows_vs_unplanted_pair"]["after_ldf"]
                 [face]["bit_exact"] for face in FACE_ORDER
-            ), "active one-ULP coefficient plant did not reach post-LDF")
+            ), "active one-word coefficient seam plant did not reach post-LDF")
             coefficient_factor_walk = {
                 "input_time_level": "Nbb before velocity",
                 "coefficient_rows": coefficient_rows,
