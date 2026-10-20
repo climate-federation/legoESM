@@ -1982,7 +1982,7 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         "ORCA2-zps",
         recipe,
         10800.0,
-        2920,
+        2920,  # DECISION 142 (user, 2026-10-20): one year, deliberate; EXP00 runs 5840
         1,
         0,
         1,

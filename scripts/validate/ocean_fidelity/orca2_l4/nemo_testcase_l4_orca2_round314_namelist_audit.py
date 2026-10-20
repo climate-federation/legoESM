@@ -453,7 +453,8 @@ def _rules() -> list[Rule]:
     # ---- namrun ----
     a(Rule(r"oce:namrun\.nn_itend", "map", card=C("card.n_steps"),
            why="rn_dt = 10800 s, 365-day calendar: record 10 steps (30 h), EXP00 5840 steps "
-               "(two years), card declares 2920 (one year); the ladders replay 10 steps",
+               "(two years), card declares 2920 (one year, DECISION 142: deliberate); the ladders "
+               "replay 10 steps",
            effect="run length only", cls="c"))
     a(Rule(r"oce:namrun\.ln_rstart", "map",
            card=lambda c: any("restart" in f.lower() for f in c.builder_files),
