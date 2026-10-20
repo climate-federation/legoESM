@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import pickle
 import subprocess
 import sys
@@ -29,6 +30,18 @@ from tests.ocean.fidelity.test_nemo_testcase_v1_orca2tke import _differs, _flat
 
 L3 = CASES / "nemo_testcase_l3_orca2eiv"
 RUN = L3 / "run.sh"
+
+
+def _module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+RECORDS = _module("l3_records", L3 / "l3_records.py")
+INSTRUMENT = _module("instrument_ldftra", L3 / "instrument_ldftra.py")
 
 
 def _copied_root(base: Path, rung: Path) -> Path:
@@ -110,9 +123,34 @@ def test_l3_acquisition_is_fail_closed_and_uses_numeric_log_admission():
         "smoke_2step", "ref_100step", "completed_steps",
         "REF_TARGET_NAME=ORCA2L3_EIV_R20_REF", "--admit-existing",
         "steps=$((completed < 10 ? completed : 10))",
+        'audit_run "$TARGET/BLD/bin/nemo.exe" "$TWIN_B"',
+        'audit_run "$TARGET/BLD/bin/nemo.exe" "$TWIN_C"',
+        "altered completed-run deck plant was accepted",
+        "altered completed-run log plant was accepted",
+        "incomplete smoke-run plant was accepted",
         "commit the exact acquisition tool",
     ):
         assert required in text, required
+
+
+def test_l3_record_canonicalization_and_defined_domain_plants(capsys):
+    RECORDS.selftest()
+    assert "undefined_garbage=canonicalized defined_garbage=detected" in (
+        capsys.readouterr().out)
+
+
+@pytest.mark.skipif(
+    not (ORCA2.parent / "BLD/ppsrc/nemo/ldftra.f90").is_file(),
+    reason="no compiled NEMO tree")
+def test_l3_observer_uses_zero_first_views_only():
+    source = (ORCA2.parent / "BLD/ppsrc/nemo/ldftra.f90").read_text()
+    instrumented = INSTRUMENT.instrument(source)
+    INSTRUMENT.validate_observer(instrumented)
+    assert "zfield(:,:,:) = 0._wp" in instrumented
+    assert "IF( llwet ) zfield(ji,jj,jk) = pfield(ji,jj,jk)" in instrumented
+    planted = instrumented.replace("l3_canon_3d(pFu,'U')", "pFu", 1)
+    with pytest.raises(ValueError, match="bypasses canonical view"):
+        INSTRUMENT.validate_observer(planted)
 
 
 @pytest.fixture(scope="module")

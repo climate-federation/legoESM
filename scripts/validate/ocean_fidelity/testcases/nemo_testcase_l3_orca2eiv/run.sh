@@ -157,6 +157,10 @@ preflight() {
        "$tmp/short-literal.f90" >/dev/null 2>&1; then
     fail 'short character-literal plant was accepted'
   fi
+  if "$PY" "$INSTRUMENT" --plant-raw-observer "$PP_SOURCE" \
+       "$tmp/raw-observer.f90" >/dev/null 2>&1; then
+    fail 'raw undefined-cell observer plant was accepted'
+  fi
 
   # 5: all six declared frames have a writer; deleting one must be refused.
   check_frame_writes "$tmp/ldftra.f90" || fail 'expected writer frame missing'
@@ -190,6 +194,32 @@ preflight() {
   if [[ -f "$FAILED1_LOG" ]]; then   # the refused first acquisition's own log
     check_log_values "$FAILED1_LOG" "$rendered" \
       || fail 'the first acquisition log is still refused'
+  fi
+
+  # Admission metadata plants.  These use symlinks to the immutable inputs so
+  # preflight exercises the exact completed-run audit without copying data.
+  plant_audit_run "$tmp/admit-metadata" 2 "$(pad10 2)"
+  audit_run "$FC" "$tmp/admit-metadata" 2 "$(pad10 2)" done \
+    || fail 'valid admission metadata plant was refused'
+  printf '4\n' >"$tmp/admit-metadata/time.step"
+  if audit_run "$FC" "$tmp/admit-metadata" 2 "$(pad10 2)" done; then
+    fail 'wrong twin-B/C final-step plant was accepted'
+  fi
+  printf '2\n' >"$tmp/admit-metadata/time.step"
+  sed -i 's/nn_itend    =       2/nn_itend    =       4/' \
+    "$tmp/admit-metadata/namelist_cfg"
+  if audit_run "$FC" "$tmp/admit-metadata" 2 "$(pad10 2)" done; then
+    fail 'altered completed-run deck plant was accepted'
+  fi
+  render_deck "$tmp/admit-metadata/namelist_cfg" 2 "$(pad10 2)"
+  sed -i '/ln_ldfeiv/d' "$tmp/admit-metadata/ocean.output"
+  if audit_run "$FC" "$tmp/admit-metadata" 2 "$(pad10 2)" done; then
+    fail 'altered completed-run log plant was accepted'
+  fi
+  plant_audit_log >"$tmp/admit-metadata/ocean.output"
+  printf '1\n' >"$tmp/admit-metadata/run.exit"
+  if audit_run "$FC" "$tmp/admit-metadata" 2 "$(pad10 2)" done; then
+    fail 'incomplete smoke-run plant was accepted'
   fi
 
   # 7: both configurations and the run root must be absent; planted existing
@@ -241,9 +271,59 @@ check_log() {
     && grep -Eq 'ln_traldf_msc += +T$' "$out" \
     && grep -Eq 'ln_ldfeiv += +T$' "$out" \
     && grep -Fq 'ldf_eiv_trp : eddy induced advection' "$out" \
-    || fail "$1 did not execute exact L3 selection"
+    || return 1
   check_log_values "$out" "$1/namelist_cfg" \
-    || fail "$1 did not execute exact L3 numeric selection"
+    || return 1
+}
+
+check_done() { # directory, expected final step
+  local dir=$1 expected=$2 rc step
+  [[ -f "$dir/run.exit" && -f "$dir/time.step" ]] || return 1
+  rc=$(tr -d '[:space:]' <"$dir/run.exit")
+  step=$(tr -d '[:space:]' <"$dir/time.step")
+  [[ "$rc" == 0 && "$step" == "$expected" ]]
+}
+
+audit_run() { # binary, directory, itend, stock-list, done|boundary
+  local binary=$1 dir=$2 itend=$3 stock=$4 completion=$5 expected f
+  expected=$(mktemp /tmp/orca2l3-admit-deck.XXXXXX)
+  render_deck "$expected" "$itend" "$stock"
+  cmp -s "$expected" "$dir/namelist_cfg" || return 1
+  rm -f "$expected"
+  cmp -s "$ICE_REF" "$dir/namelist_ice_ref" || return 1
+  cmp -s "$ICE_DECK" "$dir/namelist_ice_cfg" || return 1
+  cmp -s "$binary" "$dir/nemo" || return 1
+  for f in "${INPUT_FILES[@]}"; do
+    cmp -s "$INPUT_ROOT/$f" "$dir/$f" || return 1
+  done
+  check_log "$dir" || return 1
+  if [[ "$completion" == done ]]; then
+    check_done "$dir" "$itend"
+  else
+    completed_steps "$dir" >/dev/null
+  fi
+}
+
+plant_audit_log() {
+  printf '%s\n' \
+    ' ln_traadv_fct = T' ' ln_traldf_iso = T' ' ln_traldf_msc = T' \
+    ' ln_ldfeiv = T' ' ldf_eiv_trp : eddy induced advection' \
+    ' type of time-space variation nn_aei_ijk_t = 21' \
+    ' lateral diffusive velocity rn_Ue = 2.9999999999999999E-002' \
+    ' lateral diffusive length rn_Le = 200000.00000000000'
+}
+
+plant_audit_run() { # synthetic completed run for preflight-only plants
+  local dir=$1 itend=$2 stock=$3 f
+  mkdir -p "$dir"
+  for f in "${INPUT_FILES[@]}"; do ln -s "$INPUT_ROOT/$f" "$dir/$f"; done
+  ln -s "$ICE_REF" "$dir/namelist_ice_ref"
+  ln -s "$ICE_DECK" "$dir/namelist_ice_cfg"
+  ln -s "$FC" "$dir/nemo"
+  render_deck "$dir/namelist_cfg" "$itend" "$stock"
+  plant_audit_log >"$dir/ocean.output"
+  printf '0\n' >"$dir/run.exit"
+  printf '%s\n' "$itend" >"$dir/time.step"
 }
 
 run_one() { # binary, directory, itend, stock-list, done|boundary
@@ -253,7 +333,7 @@ run_one() { # binary, directory, itend, stock-list, done|boundary
   printf '%s\n' "$rc" >"$dir/run.exit"
   [[ -f "$dir/ocean.output" && -f "$dir/time.step" ]] \
     || fail "$dir produced no NEMO log"
-  check_log "$dir"
+  check_log "$dir" || fail "$dir did not execute exact L3 selection"
   if [[ "$5" == done ]]; then
     [[ $rc -eq 0 && "$(tr -d '[:space:]' <"$dir/time.step")" == "$3" ]] \
       || fail "$dir did not complete $3 steps"
@@ -293,16 +373,34 @@ completed_steps() {
   printf '%s' $((t - 1))
 }
 
-admit() { # acquired twin step count
-  local steps=$1 name=oracle_rktracer_stage3_kt00000001.bin dir step restart
+admit() {
+  local completed steps name=oracle_rktracer_stage3_kt00000001.bin dir step restart
+  audit_run "$TARGET/BLD/bin/nemo.exe" "$SMOKE" 2 "$(pad10 2)" done \
+    || fail 'smoke metadata, deck, log, binary, inputs, or completion differ'
+  audit_run "$REF_TARGET/BLD/bin/nemo.exe" "$REF" 100 \
+    '2,4,6,8,10,12,14,16,18,20' boundary \
+    || fail 'writer-free boundary metadata, deck, log, binary, or inputs differ'
+  completed=$(completed_steps "$REF")
+  steps=$((completed < 10 ? completed : 10)); steps=$((steps - steps % FSBC))
+  ((steps >= 2)) || fail "NEMO completed only $completed steps"
+  audit_run "$TARGET/BLD/bin/nemo.exe" "$TWIN_A" "$steps" "$(list_a "$steps")" done \
+    || fail 'twin A metadata, deck, log, binary, inputs, or final step differ'
+  audit_run "$TARGET/BLD/bin/nemo.exe" "$TWIN_B" "$steps" "$(list_b "$steps")" done \
+    || fail 'twin B metadata, deck, log, binary, inputs, or final step differ'
+  audit_run "$TARGET/BLD/bin/nemo.exe" "$TWIN_C" "$steps" "$(list_c "$steps")" done \
+    || fail 'twin C metadata, deck, log, binary, inputs, or final step differ'
   for dir in "$SMOKE" "$TWIN_A" "$TWIN_B" "$TWIN_C"; do
     "$PY" "$READER" --check "$dir/oracle_l3_eiv_kt00000001.bin" \
+      --mesh "$dir/mesh_mask.nc" \
       || fail "$dir has no acting EIV witness"
     [[ -s "$dir/$name" ]] || fail "$dir lacks the inherited stage-3 record"
   done
   for dir in "$TWIN_B" "$TWIN_C"; do
-    cmp -s "$TWIN_A/oracle_l3_eiv_kt00000001.bin" "$dir/oracle_l3_eiv_kt00000001.bin" \
-      && cmp -s "$TWIN_A/$name" "$dir/$name" || fail 'twins differ'
+    "$PY" "$READER" --compare-defined \
+      "$TWIN_A/oracle_l3_eiv_kt00000001.bin" \
+      "$dir/oracle_l3_eiv_kt00000001.bin" --mesh "$TWIN_A/mesh_mask.nc" \
+      || fail 'twins differ on the defined EIV domain'
+    cmp -s "$TWIN_A/$name" "$dir/$name" || fail 'twins differ'
   done
   cmp -s "$TWIN_A/$name" "$G9_RECORD/$name" \
     && fail 'L3 stage-3 tracer record equals G9 baseline'
@@ -315,9 +413,6 @@ admit() { # acquired twin step count
   done
   restart=$(printf 'ORCA2G1_%08d_restart.nc' "$steps")
   [[ -f "$REF/$restart" ]] || fail "writer-free reference lacks $restart"
-  for dir in "$TWIN_A" "$TWIN_B" "$TWIN_C"; do
-    [[ "$(<"$dir/run.exit")" == 0 ]] || fail "$dir is not a completed twin"
-  done
   mkdir -p "$EVIDENCE/manifest"
   printf '%s\n' "$(git -C "$repo" rev-parse HEAD)" >"$EVIDENCE/manifest/legoesm_commit"
   sha256sum "$DECK" "$ICE_DECK" "$REF_TARGET/BLD/bin/nemo.exe" \
@@ -336,8 +431,7 @@ if [[ "$mode" == --preflight-only ]]; then
   exit 0
 fi
 if [[ "$mode" == --admit-existing ]]; then
-  steps=$(tr -d '[:space:]' <"$TWIN_A/time.step")
-  admit "$steps"
+  admit
   exit 0
 fi
 build_targets
@@ -351,4 +445,4 @@ steps=$((completed < 10 ? completed : 10)); steps=$((steps - steps % FSBC))
 run_one "$TARGET/BLD/bin/nemo.exe" "$TWIN_A" "$steps" "$(list_a "$steps")" done
 run_one "$TARGET/BLD/bin/nemo.exe" "$TWIN_B" "$steps" "$(list_b "$steps")" done
 run_one "$TARGET/BLD/bin/nemo.exe" "$TWIN_C" "$steps" "$(list_c "$steps")" done
-admit "$steps"
+admit
