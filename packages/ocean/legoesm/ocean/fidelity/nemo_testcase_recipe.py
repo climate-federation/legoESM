@@ -2614,6 +2614,64 @@ def _nemo_linear_bottom_drag(model_config):
 _SMT3_RN_UD = 0.018              # lateral diffusive velocity       [m/s]
 _SMT3_RN_LD = 200.0e3            # lateral diffusive length         [m]
 
+
+def _orca2_isoneutral_gm_redi(
+    kappa_redi: float,
+    *, slope_prd_evaluation: str = "nemo_literal", north_fold: bool = False,
+    redi_flux_reference_thickness_evaluation: str = "tpoint_alias",
+    redi_flux_geometry_stage: str = "step_entry", slope_uv_source_rounding: bool = False,
+    redi_a33_source_ordering: bool = False,
+    redi_flux_stored_face_ratios: bool = False,
+):
+    """ORCA2's shared standard-isoneutral ``&namtra_ldf`` selection.
+
+    ``kappa_redi`` records the nominal/equatorial scalar; mode 20's executed
+    coefficient is evaluated independently at U and V points from ``rn_Ud``
+    and the live metrics.  Both VORTEX SMT-3 and grid-ladder L2 call this one
+    constructor so the ORCA2 block cannot drift between cards.
+    """
+
+    from legoesm.ocean.physics.lateral_mixing.config import (
+        GMRediConfig,
+        VisbeckConfig,
+    )
+    return GMRediConfig(
+        kappa_GM=0.0,
+        kappa_Redi=kappa_redi,
+        S_max=0.01,
+        visbeck=VisbeckConfig(enabled=False),
+        slope_scheme="nemo_iso_lap",
+        slope_density="neutral",
+        slope_limit="nemo_cap",
+        slope_positions="nemo_native",
+        nemo_mld_slope_ramp=True,
+        mld_criterion="n2_integral",
+        slope_n2="nemo_bn2",
+        slope_n2_evaluation="carried_step_entry",
+        slope_prd_geometry_stage="before_step",
+        slope_prd_evaluation=slope_prd_evaluation,
+        slope_metric_evaluation="nemo_reciprocal",
+        slope_uv_source_rounding=slope_uv_source_rounding,
+        slope_face_thickness_evaluation="nemo_qco_live",
+        redi_flux_face_thickness_evaluation="nemo_qco_live",
+        redi_flux_reference_thickness_evaluation=(
+            redi_flux_reference_thickness_evaluation),
+        redi_flux_geometry_stage=redi_flux_geometry_stage,
+        slope_depth_evaluation="nemo_qco_live_literal",
+        nemo_slope_shapiro=True,
+        nemo_slope_north_fold=north_fold,
+        kappa_redi_lat_scaling=True,
+        kappa_redi_horizontal_evaluation="nemo_metric_literal",
+        kappa_redi_diffusive_velocity=_SMT3_RN_UD,
+        redi_vertical_skew_evaluation="nemo_literal",
+        redi_a33_evaluation="nemo_literal",
+        redi_a33_source_ordering=redi_a33_source_ordering,
+        redi_flux_stored_face_ratios=redi_flux_stored_face_ratios,
+        redi_w_slope_stage_evaluation="nemo_post_slope_pair",
+        msc_stabilize=True,
+        implicit_K33=True,
+    )
+
 # --- rung SMT-4 (decision 93): ORCA2 rung 0's namdyn_ldf ----------
 # Decision 93 replaces ORCA2's unavailable file-backed coefficient only with
 # mode 20. ldfdyn.f90:311/:342-346 evaluates 0.5*rn_Uv*MAX(e1,e2).
@@ -2985,39 +3043,10 @@ def build_vortex_smt_zps_card(
         # 0.5*rn_Ud*MAX(e1u,e2u)=270 m2/s; the production operator evaluates
         # the face coefficient from the metric and rn_Ud rather than relying
         # on that derived scalar.
-        from legoesm.ocean.physics.lateral_mixing.config import (
-            GMRediConfig, VisbeckConfig,
-        )
         model_config = model_config._replace(
             K_h=0.0,
-            gm_redi=GMRediConfig(
-                kappa_GM=0.0,
-                kappa_Redi=0.5 * _SMT3_RN_UD * res.dx_m,
-                S_max=0.01,
-                visbeck=VisbeckConfig(enabled=False),
-                slope_scheme="nemo_iso_lap",
-                slope_density="neutral",
-                slope_limit="nemo_cap",
-                slope_positions="nemo_native",
-                nemo_mld_slope_ramp=True,
-                mld_criterion="n2_integral",
-                slope_n2="nemo_bn2",
-                slope_n2_evaluation="carried_step_entry",
-                slope_prd_geometry_stage="current_step",
-                slope_prd_evaluation="nemo_literal",
-                slope_metric_evaluation="nemo_reciprocal",
-                slope_face_thickness_evaluation="nemo_qco_live",
-                redi_flux_face_thickness_evaluation="nemo_qco_live",
-                slope_depth_evaluation="nemo_qco_live_literal",
-                nemo_slope_shapiro=True,
-                kappa_redi_horizontal_evaluation="nemo_metric_literal",
-                kappa_redi_diffusive_velocity=_SMT3_RN_UD,
-                redi_vertical_skew_evaluation="nemo_literal",
-                redi_a33_evaluation="nemo_literal",
-                redi_w_slope_stage_evaluation="nemo_post_slope_pair",
-                msc_stabilize=True,
-                implicit_K33=True,
-            ),
+            gm_redi=_orca2_isoneutral_gm_redi(
+                0.5 * _SMT3_RN_UD * res.dx_m),
         )
     if rung == "smt4":
         # DECISION 93: div-rot, level Laplacian momentum diffusion with

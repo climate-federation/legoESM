@@ -124,6 +124,7 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     gm_redi_density_and_jacobian,
     harmonic_lateral_kediss_eke_source,
     compute_isoneutral_K33_latlon,
+    nemo_iso_a33_e3w,
 )
 from legoesm.ocean.physics.lateral_mixing.eke import eke_apply_local_source
 # Public symbol from the blessed shared "_gm_redi_common" module pattern (see
@@ -3937,6 +3938,25 @@ class LatLonCGridOceanModel:
                 "and propagates them to physics) instead of the raw "
                 "constructor, or pass matching ConstantsConfig values."
             )
+
+        # NEMO applies geothermal BBC after tracer LDF in stage 3
+        # (stprk3_stg.f90:734-740).  The literal geothermal path currently
+        # joins the G5 stage-3 source assembly, before this model's separate
+        # tracer-diffusion increment.  Likewise, the G9 written-Krhs list is a
+        # closed list of heat/runoff/solar terms and would omit geothermal.
+        # Refuse both unreproduced orderings instead of silently running them.
+        if config.rk3_stage3_geothermal_nemo_written:
+            if config.rk3_stage3_tracer_krhs_nemo_order:
+                raise ValueError(
+                    "rk3_stage3_geothermal_nemo_written is not supported with "
+                    "rk3_stage3_tracer_krhs_nemo_order: the written stage-3 "
+                    "Krhs term list does not yet carry tra_bbc")
+            if (config.K_h > 0.0 or config.K_bih > 0.0
+                    or config.gm_redi is not None):
+                raise ValueError(
+                    "rk3_stage3_geothermal_nemo_written is not supported with "
+                    "tracer lateral diffusion: NEMO applies tra_ldf before "
+                    "tra_bbc, while this path would add diffusion afterward")
         if _phys is not None and _phys.shortwave_penetration is not None:
             from legoesm.ocean.physics.shortwave_penetration import (
                 SHORTWAVE_PENETRATION_SCHEMES,
@@ -7148,6 +7168,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_qsr_association = None
         _nemo_ws_process_boundaries = None
         _nemo_ws_process_Taa = None; _nemo_ws_ldf_diagnostics = None
+        _nemo_ws_redi_msc_e3w = None
         _nemo_ws_vertical_solve_trace = None
         _return_vertical_solve_trace = (
             (_return_tracer_process_trace
@@ -8415,6 +8436,19 @@ class LatLonCGridOceanModel:
                     state.H_bathy.data, half=True)
                 _h_s3_kmm = nemo_source_round(
                     _h_ref_ws * _stretch_s3_kmm[..., None])
+            _gm_stage_cfg = _cfg_b.gm_redi
+            if (_gm_stage_cfg is not None
+                    and _gm_stage_cfg.redi_flux_geometry_stage == "rk3_kmm"):
+                if _stretch_s3_kmm is None:
+                    raise ValueError(
+                        "rk3_kmm Redi geometry requires the stored stage-3 "
+                        "Kmm tracer stretch")
+                # traldf_iso_a33 and the A33 flux use e3w_1d*(1+r3t(Kmm))
+                # (traldf_iso.f90:825-829, :283), Kmm = this stored stretch.
+                if _gm_stage_cfg.msc_stabilize:
+                    _nemo_ws_redi_msc_e3w = nemo_iso_a33_e3w(
+                        _zc, _h_s3_kmm, _stretch_s3_kmm,
+                        _h_s3_kmm.dtype)
             # Stage 2's Kmm: NEMO's stored e3t_0*(1+r3t(Kmm)), r3t(Kmm) being
             # stage 1's r3t(Kaa) (stprk3_stg.f90:160-179), in the EMP dilution
             # and runoff divisors (trasbc.f90:284-286, sbcrnf.f90:281).
@@ -8713,6 +8747,32 @@ class LatLonCGridOceanModel:
                     _zero_stage_source.at[..., 0].add(_salt_top),
                     None if _rnf_content is None else _rnf_content[1],
                     _h_s3_kmm))
+
+            if _cfg_b.rk3_stage3_geothermal_nemo_written:
+                # stprk3_stg.f90:734-739 calls tra_bbc after tra_ldf and before
+                # tra_bbl.  L4 inherits G5's OFF selections for both neighbors,
+                # so its observable statement is the add to the already-built
+                # temperature Krhs (trabbc.f90:156-160).
+                _qgh = (None if surface_forcing is None else getattr(
+                    surface_forcing, "geothermal_heat_flux_mwm2", None))
+                if (_qgh is None or _stage3_T_written is None
+                        or not _cfg_b.rk3_stage3_tracer_nemo_stored_thickness):
+                    raise ValueError(
+                        "rk3_stage3_geothermal_nemo_written needs "
+                        "OceanSurfaceForcing.geothermal_heat_flux_mwm2, "
+                        "rk3_stage3_heat_nemo_written, and "
+                        "rk3_stage3_tracer_nemo_stored_thickness")
+                from legoesm.ocean.physics.geothermal import (
+                    nemo_geothermal_bottom_heating_tendency,
+                )
+                _qgh_rate = nemo_geothermal_bottom_heating_tendency(
+                    _h_s3_kmm, _active_live,
+                    heatflow_mwm2=_qgh,
+                    rho_0=_cfg_b.rho_0,
+                    c_sw=_cfg_b.physics.constants.c_sw,
+                )
+                _stage3_T_written = nemo_source_round(
+                    _stage3_T_written + _qgh_rate)
 
             if _cfg_b.rk3_stage3_tracer_krhs_nemo_order:
                 # The same stage-3 terms, kept apart so they add onto the FCT
@@ -10153,6 +10213,11 @@ class LatLonCGridOceanModel:
                 getattr(gm_cfg, "gm_bolus_advection", "centred") == "through_fct"
                 and getattr(gm_cfg, "slope_scheme", "") == "nemo_iso_lap"
             )
+            _ldf_hook = self._nemo_ws_test_hooks.tracer_ldf_diagnostics
+            _redi_msc_e3w_override = (
+                _ldf_hook["msc_e3w"]
+                if isinstance(_ldf_hook, dict) and "msc_e3w" in _ldf_hook
+                else _nemo_ws_redi_msc_e3w)
             _gm_out = gm_redi_tracer_tendency_latlon(
                 _T_gm_in, _S_gm_in, _eta_gm_in, state_new.H_bathy.data,
                 _grid, _zc, gm_cfg,
@@ -10192,10 +10257,17 @@ class LatLonCGridOceanModel:
                 # resolves kappa_GM = 0.0 and gm_bolus_advection = "centred",
                 # so the bolus is not even requested there.
                 native_bolus_slope_eta=_eta_gm_in,
-                # tra_ldf e3u/e3v use the step-entry Nnn SSH (Kmm).
-                redi_flux_eta=state.eta.data,
+                # traldf_iso.f90:230-231 uses Kmm; only L2 selects stage-2 SSH.
+                redi_flux_eta=(_eta_live_one_half if gm_cfg.redi_flux_geometry_stage == "rk3_kmm" else state.eta.data),
+                # stprk3_stg.f90:222-223 stores the np_HYB stage-2 r3u/r3v as the
+                # average of the two ratios, not the ratio of averaged SSH.
+                # The face builder retains its fold-aware final native row.
+                redi_flux_r3_native=(
+                    (_qu_12[:, 1:, 0] - 1.0,
+                     _qv_12[1:, :, 0] - 1.0)
+                    if gm_cfg.redi_flux_stored_face_ratios else None),
                 # Stage-3 tra_ldf receives the stage-2 output as Kmm
-                # (stprk3_stg.f90:531-532).  Its T-point divisor therefore
+                # (stprk3_stg.f90:229).  Its T-point divisor therefore
                 # uses the materialized one-half-stage sea surface, while the
                 # once-per-step slope and current face path above retain their
                 # independently cited operands.
@@ -10203,6 +10275,7 @@ class LatLonCGridOceanModel:
                     _eta_live_one_half
                     if getattr(_cfg_b, "tracer_time_integrator", "euler")
                     == "rk3_ws" else None),
+                redi_msc_e3w_override=_redi_msc_e3w_override,
                 return_bolus_transport=_want_bolus,
                 return_redi_diagnostics=((_return_tracer_process_trace or _return_ldf_diagnostic_trace) and self._nemo_ws_test_hooks.tracer_ldf_diagnostics is not None), return_redi_slope_diagnostics=((_return_tracer_process_trace or _return_ldf_diagnostic_trace) and (self._nemo_ws_test_hooks.tracer_ldf_diagnostics == "slope" or isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict))), native_slope_nmln_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("nmln") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
                 redi_face_thickness_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("face_thickness") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else (self._nemo_ws_test_hooks.tracer_ldf_diagnostics if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, tuple) else None)),
@@ -10259,6 +10332,7 @@ class LatLonCGridOceanModel:
                     native_slope_pn2=_gm_native_pn2,
                     native_slope_e3w=_gm_native_e3w,
                     native_slope_eta=state.eta.data,
+                    msc_e3w_override=_redi_msc_e3w_override,
                     # #1226: the SAME wall masks the tendency dispatcher uses,
                     # so the nemo_native K33 slopes/masks are bit-identical to
                     # the explicit operator's (staircase-aware; the K33-side
@@ -11357,7 +11431,8 @@ class LatLonCGridOceanModel:
                 raise ValueError("WS-RK3 LDF diagnostic trace is incomplete")
             return _NEMOWSLdfDiagnosticTrace(
                 state_after=state_new,
-                ldf_diagnostics=_nemo_ws_ldf_diagnostics)
+                ldf_diagnostics=_nemo_ws_ldf_diagnostics,
+                isoneutral_K=k33_implicit)
         if _return_tracer_process_trace:
             if (_nemo_ws_process_qco is None
                     or _nemo_ws_process_boundaries is None
@@ -11956,7 +12031,12 @@ class LatLonCGridOceanModel:
             # ldf_slp even when the vertical closure is constant.  The bundle
             # is therefore a stage-program operand, not TKE-owned state.
             _n2_mode = getattr(_gm, "slope_n2", "adiabatic")
-            _n2_eos_form = "seos" if _cfg_b.eos == "nemo_seos" else _cfg_b.eos
+            # The model selector carries the public ``nemo_*`` spelling;
+            # eosbn2's resolved branch selector is the suffix (seos/eos80/
+            # teos10).  VORTEX/DINO had only exercised nemo_seos here; ORCA2
+            # L2 is the first constant-closure card to carry nemo_eos80 into
+            # this once-per-step slope bundle.
+            _n2_eos_form = _cfg_b.eos.removeprefix("nemo_")
         else:
             return None
         if _n2_mode != "nemo_bn2":
@@ -12019,8 +12099,10 @@ class LatLonCGridOceanModel:
             zrw_gdept_0=gdept_0,
             zrw_gdepw_0=gdepw_0,
             zrw_stretch=zrw_stretch,
-            source_rounded=bool(_tke_active and getattr(
-                tke_cfg, "nemo_bn2_source_rounded", False)),
+            source_rounded=bool(
+                (_tke_active and getattr(
+                    tke_cfg, "nemo_bn2_source_rounded", False))
+                or (not _tke_active and _gm_carried and _n2_eos_form in ("eos80", "teos10"))),
         )
         _bn2_selector = self._nemo_ws_test_hooks.bn2_intermediate
         _bn2_override = self._nemo_ws_test_hooks.bn2_alpha_beta_override
@@ -13493,7 +13575,18 @@ class LatLonCGridOceanModel:
                 # tracer solve (Veros core/isoneutral/diffusion.py:154). K_33 ≥ 0 at
                 # interfaces, same (n_lat, n_lon, nlev-1) shape as K_v_cell.  TRACERS
                 # ONLY — momentum uses A_v_cell, which is untouched.
-                K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)
+                _gm_zdf = getattr(_cfg_b, "gm_redi", None)
+                if bool(getattr(_gm_zdf, "redi_a33_source_ordering", False)):
+                    # trazdf.f90:185 materializes the already-stored ``akz``
+                    # before the distinct ``zwt = avt + akz`` statement.  In
+                    # the full JIT graph, guard both boundaries or XLA can
+                    # fuse the A33 producer through this downstream consumer.
+                    _k33_stored = nemo_source_round(
+                        K33_iso.astype(state.T.data.dtype))
+                    K_v_cell = nemo_source_round(K_v_cell + _k33_stored)
+                else:
+                    # Historical shared graph for every non-L2 card.
+                    K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)
             # Double diffusion (NEMO zdfddm): salt fingering / diffusive
             # convection add a SEPARATE heat (avt) and salt (avs) diffusivity.
             # avt folds into K_v_cell (heat) HERE — before the wet-interface
@@ -17438,6 +17531,7 @@ class _NEMOWSLdfDiagnosticTrace(NamedTuple):
 
     state_after: object
     ldf_diagnostics: object
+    isoneutral_K: object
 
 
 def _rk3_stage_update_written_order(velocity_before, rhs, dt_stage, qco_before,

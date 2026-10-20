@@ -36,6 +36,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round
 
 # --- geothermal heat flux (Goutorbe et al. 2011; NEMO rn_geoflx_cst) ---
 # Global-mean seafloor geothermal heat flux.  NEMO's namelist default for the
@@ -170,3 +171,52 @@ def geothermal_bottom_heating_tendency(
             f"ndim {dz.ndim}: pass a scalar or a per-column field shape "
             f"{dz.shape[:-1]}")
     return flux * is_bottom / (rho_0 * c_sw * h_safe)
+
+
+def nemo_geothermal_bottom_heating_tendency(
+    e3t_kmm: jnp.ndarray,
+    wet_cell: jnp.ndarray,
+    *,
+    heatflow_mwm2,
+    rho_0: float,
+    c_sw: float,
+) -> jnp.ndarray:
+    """NEMO ``trabbc`` stage-3 bottom-cell tendency, statement by statement.
+
+    Unlike :func:`geothermal_bottom_heating_tendency`, this identity receives
+    the forcing in the file's native mW/m² units and preserves NEMO's written
+    association: ``1/(rho0*rcp)``, then ``* heatflow * 1.e-3``, then division
+    by the live Kmm bottom-cell thickness.  ``rho_0`` and ``c_sw`` are required
+    because this NEMO-named identity must receive the constants resolved by the
+    calling card rather than the shared library defaults.  Dry columns remain
+    canonical zero.
+    """
+
+    e3t = jnp.asarray(e3t_kmm)
+    dtype = jnp.result_type(e3t.dtype, jnp.float32)
+    e3t = e3t.astype(dtype)
+    bottom = _bottom_cell_onehot(wet_cell, dtype)
+    heatflow = jnp.asarray(heatflow_mwm2, dtype=dtype)
+    if heatflow.ndim == e3t.ndim - 1:
+        heatflow = heatflow[..., None]
+    elif heatflow.ndim not in (0, e3t.ndim):
+        raise ValueError(
+            f"geothermal heatflow_mwm2 ndim {heatflow.ndim} incompatible with "
+            f"e3t_kmm ndim {e3t.ndim}: pass a scalar or per-column field shape "
+            f"{e3t.shape[:-1]}")
+
+    rho0_rcp = nemo_source_round(
+        jnp.asarray(rho_0, dtype=dtype) * jnp.asarray(c_sw, dtype=dtype))
+    r1_rho0_rcp = nemo_source_round(
+        jnp.asarray(1.0, dtype=dtype) / rho0_rcp)
+    qgh_trd0 = nemo_source_round(nemo_source_round(
+        r1_rho0_rcp * heatflow) * jnp.asarray(1.0e-3, dtype=dtype))
+    safe_e3t = jnp.where(bottom > 0.5, e3t, jnp.asarray(1.0, dtype=dtype))
+    return nemo_source_round(qgh_trd0 / safe_e3t) * bottom
+
+
+__all__ = (
+    "GeothermalConfig",
+    "geothermal_bottom_heating_tendency",
+    "nemo_geothermal_bottom_heating_tendency",
+)
