@@ -2672,6 +2672,21 @@ def _orca2_isoneutral_gm_redi(
         implicit_K33=True,
     )
 
+def orca2_l2_isoneutral_gm_redi():
+    """Lane B rung L2's certified isoneutral selection (gridladder-vmix 51b2582f5e).
+
+    The same arguments as the L2 card; the scalar records the nominal
+    0.5*rn_Ud*rn_Ld, mode 20 evaluates the executed coefficient per face.
+    """
+
+    return _orca2_isoneutral_gm_redi(
+        0.5 * _SMT3_RN_UD * _SMT3_RN_LD, slope_prd_evaluation="nemo_eos80_literal",
+        north_fold=True, redi_flux_reference_thickness_evaluation="nemo_native",
+        redi_flux_geometry_stage="rk3_kmm", slope_uv_source_rounding=True,
+        redi_a33_source_ordering=True,
+        redi_flux_stored_face_ratios=True)
+
+
 # --- rung SMT-4 (decision 93): ORCA2 rung 0's namdyn_ldf ----------
 # Decision 93 replaces ORCA2's unavailable file-backed coefficient only with
 # mode 20. ldfdyn.f90:311/:342-346 evaluates 0.5*rn_Uv*MAX(e1,e2).
