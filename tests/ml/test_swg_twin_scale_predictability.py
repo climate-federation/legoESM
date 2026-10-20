@@ -44,3 +44,12 @@ def test_scale_selective_noise_gives_the_right_cutoff():
 def test_length_conversion():
     assert np.isnan(probe.length_km(0, N, 50e3))
     assert probe.length_km(N, N, 50e3) == pytest.approx(100.0)  # Nyquist 2*dx
+
+
+def test_control_starts_default_and_validation():
+    assert probe.control_starts(None, 3) == [0, 0, 0]
+    assert probe.control_starts([731, 1168], 2) == [731, 1168]
+    with pytest.raises(ValueError):
+        probe.control_starts([731], 2)
+    with pytest.raises(ValueError):
+        probe.control_starts([-1, 5], 2)

@@ -7,6 +7,9 @@ sees it), control vs each perturbed twin.  The cutoff k_c(t) is the largest band
 the length scale is 2*N*dx/k; bands k <= N-1 only (wavelength of DCT-II index k over N interior vertices of spacing dx).
 
 usage: swg_twin_scale_predictability.py <control_dir> <perturbed_dir> [<perturbed_dir> ...] --out DIR
+       [--control-start D [D ...]]
+``--control-start``: one day offset per perturbed dir; its control days are D+1..D+N of the control dir
+(a restarted twin's day t is the control's day D+t).  Default 0 for all (a twin from the control's own start).
 (JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 and the packages on PYTHONPATH.)
 """
 from __future__ import annotations
@@ -91,6 +94,15 @@ def coarse_vorticity(root: Path, days, restrict, geometry, balanced_fields):
     return np.stack(out)
 
 
+def control_starts(starts, n_perturbed: int) -> list[int]:
+    """One control day offset per perturbed run (default 0)."""
+    if starts is None:
+        return [0] * n_perturbed
+    if len(starts) != n_perturbed or min(starts) < 0:
+        raise ValueError("--control-start needs one non-negative offset per perturbed dir")
+    return list(starts)
+
+
 def summarize(coh: np.ndarray, days, n_points: int, dx_m: float) -> dict:
     """coh: (pairs, T, K).  Mean over pairs, spread = min/max over pairs, cutoffs from the mean."""
     coh = coh[..., :n_points]  # full quarter-rings only (k <= N-1); the corner bands hold a few coefficients
@@ -138,6 +150,7 @@ def main():
     ap.add_argument("perturbed", nargs="+")
     ap.add_argument("--out", required=True)
     ap.add_argument("--days", type=int, default=120)
+    ap.add_argument("--control-start", type=int, nargs="+")
     args = ap.parse_args()
     if not jax.config.jax_enable_x64:
         raise SystemExit("JAX_ENABLE_X64=1 required")
@@ -149,13 +162,15 @@ def main():
     geometry = build_closure_geometry(drv.build_deck_card("dg50", "explicit"))
     restrict = ev.truth_restrictor("symmetric")
     days = range(1, args.days + 1)
-    zc = coarse_vorticity(Path(args.control), days, restrict, geometry, balanced_fields_from_native)
-    n_points = zc.shape[-1]
-    if zc.shape[-2] != n_points:
-        raise SystemExit("square interior expected")
-    mean_c = zc.mean(axis=0)
+    starts = control_starts(args.control_start, len(args.perturbed))
     coh = {"full": [], "anom": [], "dst": []}
-    for p in args.perturbed:
+    for p, start in zip(args.perturbed, starts):
+        zc = coarse_vorticity(Path(args.control), range(start + 1, start + args.days + 1), restrict,
+                              geometry, balanced_fields_from_native)
+        n_points = zc.shape[-1]
+        if zc.shape[-2] != n_points:
+            raise SystemExit("square interior expected")
+        mean_c = zc.mean(axis=0)
         zp = coarse_vorticity(Path(p), days, restrict, geometry, balanced_fields_from_native)
         coh["full"].append(band_coherence(zc, zp))
         coh["dst"].append(band_coherence(zc, zp, "dst"))
@@ -163,7 +178,7 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     np.savez(out / "coherence.npz", days=np.array(days), **{k: np.stack(v) for k, v in coh.items()})
-    result = {"control": args.control, "perturbed": args.perturbed, "n_points": n_points,
+    result = {"control": args.control, "perturbed": args.perturbed, "control_start": starts, "n_points": n_points,
               "dx_m": geometry.spacing_m, "wet_bounds": list(geometry.wet_bounds),
               "length_conversion": "lambda = 2*N*dx/k, N=n_points interior vertices (DCT-II index k)"}
     for name, arr in coh.items():
