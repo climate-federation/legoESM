@@ -59,6 +59,14 @@ Status: **LANDED-pending** (operator review + push gate + DINO month gate).
 
 The 11: rung 0, OMT-0..4, rung 10, GYRE, VORTEX SMT, VORTEX SMT vector, DINO.
 
+"Identical" here means the normalized step-program TEXT compares byte for
+byte; the comparison does not include the baked-in constants, so it is not
+a value check. Value evidence (independent Claude review,
+`orca2_rounds/round320/review_claude_r320/`): rung 10 with L2 selected, three
+production steps, every state leaf's SHA-256 is identical with and without
+`8a6fbf66e` (`fwd_head.json` vs `fwd_rev.json`), although the two programs
+differ (157,261 vs 157,269 lines).
+
 ## Which decks set each piece
 
 - Isoneutral: rung 0 and rung 10 (lap + iso + MSC, mode 20, rn_Ud = 0.018;
@@ -156,6 +164,13 @@ RMS S 2.284e-3 -> 2.267e-3 (both labels).
   executed coefficient comes from rn_Ud). Declared inert; rerun 13 passed.
 - Non-vacuity: with the card selection reverted, 2 of the 3 round-320
   selection tests fail (`nonvacuity.log`).
+- Geothermal-refusal plant (codex HOLD blocker): the refusal test builds
+  rung 10 (L2 selected; lateral diffusion on), turns geothermal on, and
+  asserts the constructor refuses; it now also asserts it reaches the
+  lateral-diffusion branch (Krhs-order flag off, isoneutral block present).
+  3 passed. Scratch edit disabling lane A's lateral-diffusion guard: that
+  test fails ("DID NOT RAISE"), 1 failed / 2 passed, exit 1; source restored,
+  0 dirty lines (`plant_geothermal_guard.log`).
 
 ## OPEN
 
@@ -164,10 +179,28 @@ RMS S 2.284e-3 -> 2.267e-3 (both labels).
   import; (2) write that order on this card now, measured under D96 only;
   (3) leave off. Pick 1.
 - Rung-10 trainers: the isoneutral knob that moves the state is now rn_Ud,
-  not kappa_Redi (inert). Whether a trainer exposes rn_Ud is the user's call.
+  not kappa_Redi. kappa_Redi is still a tier-2 trainable but inert on
+  rung 10 (gradient exactly 0); rn_Ud has no trainable entry (typed
+  float | None, so not spec-eligible). Both await the user's decision on
+  whether a trainer exposes rn_Ud.
 - Rung 0 runs no isoneutral diffusion although its NEMO run does; L2 needs
   the stored stage-3 tracer thickness there.
-- The geothermal-refusal test is not plant-checked (its guard is lane A's).
+
+## Review
+
+- codex review: operator. Operator's codex run: HOLD on one blocker, the
+  geothermal-refusal plant; closed above.
+- Independent Claude review: LAND. D122 re-derived 7/7 from this round's
+  artifacts at a clean tree.
+- Gradients (reviewer, rung 10, L2 selected, N = 1): finite; 0 of 799,200
+  non-finite in the T-loss gradient with respect to initial T; reverse vs
+  forward agree to 2.5e-10 (T) and 4.0e-14 (sea level). With the round-316
+  group-A guard reverted, all 799,200 are NaN, so that guard is required
+  with L2 on (`plant_noA.json`).
+- rn_Ud finite-difference check misses the 1e-6 bar: best relative error
+  2.8e-6 (step 0.01; 3.6e-6 at 1e-4); reverse and forward agree to 9e-16.
+  PLAUSIBLE: branch flips in L2's stabilising MAX(.,0) under the
+  perturbation; not counted.
 
 ## Choices
 

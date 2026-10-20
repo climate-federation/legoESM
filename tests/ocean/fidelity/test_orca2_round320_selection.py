@@ -67,6 +67,9 @@ def test_geothermal_refuses_with_isoneutral_diffusion(cards) -> None:
     )
 
     r = cards["rung10"].recipe
+    # Reach the lateral-diffusion branch, not the earlier Krhs-order refusal.
+    assert r.model_config.rk3_stage3_tracer_krhs_nemo_order is False
+    assert r.model_config.gm_redi is not None
     cfg = r.model_config._replace(rk3_stage3_geothermal_nemo_written=True)
     with pytest.raises(ValueError, match="tracer lateral diffusion"):
         LatLonCGridOceanModel(r.grid, r.z_coord, cfg,
