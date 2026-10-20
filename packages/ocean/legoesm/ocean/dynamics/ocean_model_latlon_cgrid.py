@@ -10430,7 +10430,7 @@ class LatLonCGridOceanModel:
             if eke_diss_new is not None:
                 state_new = state_new._replace(eke_diss=eke_diss_new)
 
-        _mle_cfg = _cfg_b.physics.mle
+        _mle_cfg = getattr(getattr(_cfg_b, "physics", None), "mle", None)
         if _mle_cfg is not None and _mle_cfg.through_fct:
             # traadv.f90:259-265: MLE is diagnosed from the stage-2 (Kmm)
             # tracer state, adds only pFu/pFv, and the shared WZV statement
