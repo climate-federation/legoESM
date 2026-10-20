@@ -587,10 +587,12 @@ class RRTMOptics(optics_base.OpticsScheme):
       igpt: Array,
       vmr_fields: dict[int, Array] | None = None,
       sfc_temperature: Array | None = None,
+      level_temperature: Array | None = None,
   ) -> dict[str, Array]:
     """Compute the monochromatic Planck sources given the atmospheric state.
 
-    This requires interpolating the temperature to z faces.
+    The face temperatures are the host's level temperatures (RRTMGP takes
+    tlev from the host; CAM6 builds it in rrtmg_state.F90).
 
     Args:
       pressure: The pressure field [Pa].
@@ -599,6 +601,9 @@ class RRTMOptics(optics_base.OpticsScheme):
       vmr_fields: An optional dictionary containing precomputed volume mixing
         ratio fields, keyed by gas index, that will overwrite the global means.
       sfc_temperature: The optional surface temperature [K], 2D field.
+      level_temperature: ``(nx, ny, nz-1)`` level temperature [K] at the
+        nz-1 faces of the nz-2 interior cells, surface first
+        (``rrtmgp.cam_interface_temperature`` flipped).  Required.
 
     Returns:
       A dictionary containing the Planck source at the cell center
@@ -609,10 +614,18 @@ class RRTMOptics(optics_base.OpticsScheme):
       computational layer, as the local temperature field is used to compute it.
     """
     assert sfc_temperature is not None, 'sfc_temperature is required.'
+    if level_temperature is None:
+      raise ValueError(
+          'compute_planck_sources needs the host level temperatures '
+          '(level_temperature, see rrtmgp.cam_interface_temperature).')
 
-    temperature_bottom, temperature_top = optics_base.reconstruct_face_values(
-        temperature, f_lower_bc=sfc_temperature
-    )
+    # Face index i <-> face x_{i-1/2} below node i (halo width 1): node 1's
+    # bottom face is the surface level, node nz-2's top face the lid.  The
+    # halo nodes' outer faces repeat the boundary levels.
+    temperature_bottom = jnp.concatenate(
+        [level_temperature[:, :, :1], level_temperature], axis=2)
+    temperature_top = jnp.concatenate(
+        [level_temperature, level_temperature[:, :, -1:]], axis=2)
     planck_fraction_fn = self.planck_fraction_fn(igpt)
     planck_fraction = planck_fraction_fn(pressure, temperature, vmr_fields)
 

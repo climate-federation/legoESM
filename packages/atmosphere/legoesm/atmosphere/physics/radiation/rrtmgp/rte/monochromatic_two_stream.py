@@ -141,6 +141,12 @@ def lw_combine_sources(planck_srcs: StatesMap) -> StatesMap:
   combined_src_top = jnp.sqrt(jnp.maximum(
       planck_src_top * _shift_down(planck_src_bottom), _EPSILON
   ))
+  # Surface level (face between the bottom halo node 0 and node 1): RRTMGP
+  # uses the lowest layer's Planck fraction alone, lev_src(sfc) =
+  # pfrac(1) * B(tlev(sfc)) (rte-rrtmgp v1.8 mo_gas_optics_rrtmgp_kernels.F90
+  # compute_Planck_source, L695/L705 depending on top_at_1), i.e. node 1's
+  # own bottom-face source -- no halo Planck fraction.
+  combined_src_top = combined_src_top.at[:, :, 0].set(planck_src_bottom[:, :, 1])
   combined_src_bottom = _shift_up(combined_src_top)
   return {
       'planck_src_top': combined_src_top,

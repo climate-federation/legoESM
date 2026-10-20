@@ -98,6 +98,7 @@ def _compute_local_properties_lw(
     lw_diffusive_factor: float | Array = monochromatic_two_stream._LW_DIFFUSIVE_FACTOR,
     precomputed_lw_optical_props: dict[str, Array] | None = None,
     precomputed_planck_srcs: dict[str, Array] | None = None,
+    level_temperature: Array | None = None,
 ) -> dict[str, Array]:
   """Compute local optical properties for longwave radiative transfer.
 
@@ -140,7 +141,8 @@ def _compute_local_properties_lw(
     planck_srcs = precomputed_planck_srcs
   else:
     planck_srcs = optics_lib.compute_planck_sources(
-        pressure, temperature, igpt, vmr_fields, sfc_temperature=sfc_temperature
+        pressure, temperature, igpt, vmr_fields, sfc_temperature=sfc_temperature,
+        level_temperature=level_temperature,
     )
 
   halo_width = 1
@@ -357,6 +359,7 @@ def solve_lw(
     gpoint_checkpoint: bool = True,
     cloud_path_fn=None,
     clear_sky: bool = False,
+    level_temperature: Array | None = None,
 ) -> dict[str, Array]:
   """Solves two-stream radiative transfer equation over the longwave spectrum.
 
@@ -397,6 +400,8 @@ def solve_lw(
       (1 − ω) before passing it here.  ``None`` (the default) leaves the
       longwave solution byte-identical.
     use_scan: Whether to use scan or for loops for the recurrent operation.
+    level_temperature: ``(ncol, 1, nlev+1)`` level (interface) temperature
+      [K], surface first: the host's tlev (``rrtmgp.cam_interface_temperature``).
 
   Returns:
     A dictionary with the following entries (in units of W/m²):
@@ -499,6 +504,7 @@ def solve_lw(
         lw_diffusive_factor=lw_diffusive_factor,
         precomputed_lw_optical_props=precomputed_props,
         precomputed_planck_srcs=planck_srcs,
+        level_temperature=level_temperature,
     )
 
     # Boundary conditions.
@@ -544,7 +550,8 @@ def solve_lw(
       if isinstance(sfc_t, float):
         sfc_t = sfc_t * jnp.ones(temperature.shape[:2], dtype=temperature.dtype)
       planck_srcs = optics_lib.compute_planck_sources(
-          pressure, temperature, igpt, vmr_fields, sfc_temperature=sfc_t)
+          pressure, temperature, igpt, vmr_fields, sfc_temperature=sfc_t,
+          level_temperature=level_temperature)
       fluxes = _lw_gpoint_fluxes(igpt, cloudy_props, liq_g, ice_g, planck_srcs)
       fluxes_clr = _lw_gpoint_fluxes(igpt, gas_props, None, None, planck_srcs)
       fluxes = {**fluxes, **{k + '_clr': v for k, v in fluxes_clr.items()}}
@@ -769,6 +776,7 @@ def compute_lw_optical_field(
     cloud_path_ice: Array | None = None,
     cloud_fraction: Array | None = None,
     aerosol_absorption_optical_depth: Array | None = None,
+    level_temperature: Array | None = None,
 ) -> dict[str, Array]:
   """Stack per-g-point longwave ABSORPTION optical depth + Planck sources for
   the 3D Monte-Carlo emission tracer.
@@ -792,7 +800,7 @@ def compute_lw_optical_field(
         cloud_fraction=cloud_fraction)
     planck = optics_lib.compute_planck_sources(
         pressure, temperature, igpt, vmr_fields,
-        sfc_temperature=sfc_temperature)
+        sfc_temperature=sfc_temperature, level_temperature=level_temperature)
     ssa = jnp.clip(props['ssa'], 0.0, 1.0)
     abs_od = jnp.maximum(props['optical_depth'], 0.0) * (1.0 - ssa)
     if aerosol_absorption_optical_depth is not None:

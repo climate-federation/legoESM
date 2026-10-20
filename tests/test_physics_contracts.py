@@ -127,7 +127,6 @@ EXCLUDED: frozenset[str] = frozenset(
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/config/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/config/radiative_transfer.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/constants.py",
-        "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/interpolation.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/kernel_ops.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/__init__.py",
         "packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/atmospheric_state.py",

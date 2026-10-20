@@ -125,6 +125,37 @@ def _add_halos(f_3d):
     return jnp.concatenate([bottom_halo, f_3d, top_halo], axis=2)
 
 
+def cam_interface_temperature(T, p_full, p_half, sfc_temperature):
+    """Longwave level temperatures, CAM6 host recipe (TOA-first).
+
+    Port of CAM cam_cesm2_1_rel_60 ``rrtmg_state.F90`` (rrtmg_state_create,
+    lines 113-119): the top interface takes the top-layer temperature, the
+    surface interface takes the surface temperature, and each interior
+    interface k (between layers k-1 above and k below) is
+
+        tint(k) = t(k) - dy * (t(k) - t(k-1)),
+        dy = (ln pint(k) - ln pmid(k)) / (ln pmid(k-1) - ln pmid(k)).
+
+    CAM's surface value is (lwup/stebol)**0.25; here it is the
+    ``sfc_temperature`` the radiation is handed (equal for a surface whose
+    upward LW is stebol*T**4).
+
+    Args:
+      T: ``(ncol, nlev)`` layer temperature [K], index 0 = model top.
+      p_full: ``(ncol, nlev)`` layer-midpoint pressure [Pa].
+      p_half: ``(ncol, nlev+1)`` interface pressure [Pa].
+      sfc_temperature: ``(ncol,)`` surface temperature [K].
+
+    Returns:
+      ``(ncol, nlev+1)`` interface temperature [K], index 0 = model top.
+    """
+    lnpm = jnp.log(p_full)
+    dy = (jnp.log(p_half[:, 1:-1]) - lnpm[:, 1:]) / (lnpm[:, :-1] - lnpm[:, 1:])
+    t_int = T[:, 1:] - dy * (T[:, 1:] - T[:, :-1])
+    return jnp.concatenate(
+        [T[:, :1], t_int, jnp.reshape(sfc_temperature, (-1, 1))], axis=1)
+
+
 def _standard_o3_profile(p_full):
     """Climatological ozone VMR profile, US Std Atm 1976 piecewise fit.
 
@@ -726,7 +757,12 @@ class RRTMGP:
       # whose per-layer output must stay on the model grid.
       overhead = (bool(getattr(config, "overhead_layer", False))
                   and not (sw_optical_field_only or lw_optical_field_only))
+      # LW level temperatures from the model column (CAM6 rrtmg_state).
+      T_lev = cam_interface_temperature(T, p_full, p_half, sfc_temperature)
       if overhead:
+          # CAM's extra layer (rrtmg_state.F90 L122-136, kk = max(k-1, 1)):
+          # both of its interfaces take tint(1), the top-layer temperature.
+          T_lev = jnp.concatenate([T_lev[:, :1], T_lev], axis=1)
           p_top = p_half[:, :1]
           p_lid = jnp.minimum(p_top, 1.0)  # coeff-ok: 1 Pa lid (CAM-like ~0 Pa top)
 
@@ -875,6 +911,7 @@ class RRTMGP:
       )
 
       sfc_T_2d = sfc_temperature[:, None]
+      T_lev_3d = T_lev[:, None, ::-1]  # (ncol, 1, nlev+1), surface first
 
       # --- Cloud properties ---
       has_clouds = config.include_clouds and (
@@ -1058,6 +1095,7 @@ class RRTMGP:
       if lw_optical_field_only:
           lw_props = two_stream.compute_lw_optical_field(
               p_3d, T_3d, molecules, optics_lib, sfc_T_2d, vmr_fields,
+              level_temperature=T_lev_3d,
               cloud_r_eff_liq=crl_3d, cloud_path_liq=cpl_lw_3d,
               cloud_r_eff_ice=cri_3d, cloud_path_ice=cpi_lw_3d,
               cloud_fraction=cf_3d,
@@ -1089,6 +1127,7 @@ class RRTMGP:
           atmos_state,
           vmr_fields,
           sfc_T_2d,
+          level_temperature=T_lev_3d,
           cloud_r_eff_liq=crl_3d,
           cloud_path_liq=cpl_lw_3d,
           cloud_r_eff_ice=cri_3d,
