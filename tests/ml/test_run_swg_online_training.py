@@ -2848,10 +2848,10 @@ def test_exp9_is_the_exp4_symmetric_recipe_from_scratch_with_the_new_loss(
     parent = driver.load_config(EXP4_SYMMETRIC)
     arm = driver.load_config(_with_table(EXP9, tmp_path))
     assert sorted(key for key in parent if parent[key] != arm[key]) == [
-        "dataset", "description", "experiment", "loss", "seeds"]
+        "dataset", "description", "experiment", "loss"]
     assert arm["loss"] == {"kind": "eq7_neuralgcm", "calibration_window_days": 1,
                            "lead_time_cutoff": LID_TABLE}
-    assert arm["seeds"] == parent["seeds"][:1] == [20261013]
+    assert arm["seeds"] == parent["seeds"] == [20261013, 20261014, 20261015]
     assert arm["dataset"] == parent["dataset"] | {"cache": "memory"}
     # From scratch: no checkpoint, the 1% bar enforced, the 1, 2, 4, 8 days.
     assert "initial_checkpoint" not in arm["network"]
