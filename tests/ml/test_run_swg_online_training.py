@@ -1564,6 +1564,7 @@ def test_every_committed_training_config_states_its_training_precision():
     assert precisions.pop(EXP7.name) == "fp32"
     assert precisions.pop(EXP8.name) == "fp32"
     assert precisions.pop(EXP9.name) == "fp32"
+    assert precisions.pop(EXP9_LONG.name) == "fp32"
     assert precisions.pop(EXP10.name) == "fp32"
     for seed_copy in EXP10_SEEDS:
         assert precisions.pop(seed_copy.name) == "fp32"
@@ -1598,6 +1599,7 @@ def test_every_committed_training_config_states_its_target_interval():
     assert intervals.pop(EXP7.name) == 3
     assert intervals.pop(EXP8.name) == 3
     assert intervals.pop(EXP9.name) == 3
+    assert intervals.pop(EXP9_LONG.name) == 3
     assert intervals.pop(EXP10.name) == 3
     for seed_copy in EXP10_SEEDS:
         assert intervals.pop(seed_copy.name) == 3
@@ -1994,6 +1996,7 @@ def test_every_committed_training_config_states_checkpointing_and_cache():
     assert states.pop(EXP7.name) == (True, "memory")
     assert states.pop(EXP8.name) == (True, "memory")
     assert states.pop(EXP9.name) == (True, "memory")
+    assert states.pop(EXP9_LONG.name) == (True, "memory")
     assert states.pop(EXP10.name) == (True, "memory")
     for seed_copy in EXP10_SEEDS:
         assert states.pop(seed_copy.name) == (True, "memory")
@@ -2229,6 +2232,7 @@ def test_every_committed_training_config_states_its_loss_and_noise_channel():
         "recorded_only")
     # The NeuralGCM-style arms carry the measured cutoff table (exp9 trains
     # from scratch, so its 1% bar is enforced).
+    assert seen.pop(EXP9_LONG.name) == seen[EXP9.name]
     assert seen.pop(EXP9.name) == (
         {"kind": "eq7_neuralgcm", "calibration_window_days": 1,
          "lead_time_cutoff": MEASURED_TABLE}, "none", "enforced")
@@ -3221,3 +3225,17 @@ def test_energy_score_neuralgcm_run_freezes_normalizers_and_the_spectrum_weight(
     assert manifest["loss"]["members"] == 2
     assert manifest["loss"]["lead_time_cutoff"] == SMALL_TABLE
     assert manifest["network"]["spec"]["noise_channel"] is True
+
+
+EXP9_LONG = _ROOT / "config/swg_online/exp9_rigidlid_neuralgcm_long.json"
+
+
+def test_exp9_long_extends_only_the_curriculum():
+    base = json.loads(EXP9.read_text())
+    long = json.loads(EXP9_LONG.read_text())
+    assert long["curriculum"]["window_days"] == [1, 2, 4, 8, 16, 32]
+    assert base["curriculum"]["window_days"] == [1, 2, 4, 8]
+    for config in (base, long):
+        config.pop("description")
+        config["curriculum"].pop("window_days")
+    assert long == base
