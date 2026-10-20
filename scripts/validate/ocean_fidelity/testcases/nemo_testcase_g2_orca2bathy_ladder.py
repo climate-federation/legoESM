@@ -63,9 +63,10 @@ from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
 
 CASE = "ORCA2G2-zps"
 CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice",
-         "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf", "ORCA2G9-tadv")
+         "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf", "ORCA2G9-tadv",
+         "ORCA2L4-bbc")
 ICE_CASES = ("ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf",
-             "ORCA2G9-tadv")
+             "ORCA2G9-tadv", "ORCA2L4-bbc")
 FORCED = ("ORCA2G4-sbc", *ICE_CASES)   # NEMO-supplied surface fields each kt (D123)
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round10/"
@@ -73,7 +74,7 @@ DEFAULT_ROOT = Path(
 ARMS = ("geometry", "independent", "given_entry", "stages", "operators",
         "barotropic_exit",
         "zdf_replay", "substeps", "trazdf_replay", "rhs_frame",
-        "restart_independent", "carried", "stp2d_terms")
+        "restart_independent", "carried", "stp2d_terms", "geothermal")
 # stage exposures of one step: the private hook that returns it, and the
 # level-1 NEMO frame fields (u, v, T, S, ssh) it must equal
 EXPOSURES = {
@@ -643,6 +644,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         without_stage3_salt: bool = False,
         without_hpg_fold_geometry: bool = False,
         without_vector_raw_vmask: bool = False,
+        without_geothermal: bool = False,
         record_step_entry: bool = False,
         without_recorded_external: bool = False,
         case: str = CASE) -> dict:
@@ -678,7 +680,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     card = recipe.build_nemo_testcase_card(case, deck_root=root)
     cfg, z, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
     if case in FORCED:
-        require(arm in ("independent", "given_entry")
+        require(arm in ("independent", "given_entry", "geothermal")
                 or (arm in ("stages", "operators", "barotropic_exit", "carried",
                             "stp2d_terms")
                     and case in ICE_CASES),
@@ -714,6 +716,11 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         cfg = cfg._replace(nemo_hpg_sco_fold_geometry=False)
     if without_vector_raw_vmask:          # G6 ROUND-2 PAIR HALF
         cfg = cfg._replace(rk3_vector_raw_vmask=False)
+    if without_geothermal:                # L4 ROUND-1 wiring-removal plant
+        require(case == "ORCA2L4-bbc"
+                and cfg.rk3_stage3_geothermal_nemo_written,
+                "the geothermal plant requires the selected L4 card")
+        cfg = cfg._replace(rk3_stage3_geothermal_nemo_written=False)
     nk = int(z.n_levels)
     roots = (root, *restart_roots)
     reg = g1.regions(np.asarray(z.is_active)[..., 0])
@@ -791,6 +798,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
            "rk3_stage2_tracer_nemo_stored_thickness": bool(
                cfg.rk3_stage2_tracer_nemo_stored_thickness),
            "rk3_stage3_salt_nemo_written": bool(cfg.rk3_stage3_salt_nemo_written),
+           "rk3_stage3_geothermal_nemo_written": bool(
+               cfg.rk3_stage3_geothermal_nemo_written),
            "nemo_hpg_sco_fold_geometry": bool(cfg.nemo_hpg_sco_fold_geometry),
            "rk3_vector_raw_vmask": bool(cfg.rk3_vector_raw_vmask),
            "forcing": ("NEMO-supplied surface fields at each kt"
@@ -873,6 +882,58 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             kwargs = {"freshwater": freshwater, "surface_forcing": surface}
         new = jax.device_get(model.step(state, dt=card.dt_s, **kwargs))
         return new, round(time.time() - t0, 1)
+
+    if arm == "geothermal":
+        require(case == "ORCA2L4-bbc", "the geothermal arm is L4-only")
+        import importlib.util
+        from legoesm.ocean.physics.geothermal import (
+            nemo_geothermal_bottom_heating_tendency,
+        )
+
+        module_path = HERE / "nemo_testcase_l4_orca2bbc" / "l4_records.py"
+        spec = importlib.util.spec_from_file_location("l4_records_score", module_path)
+        records = importlib.util.module_from_spec(spec)
+        require(spec.loader is not None, f"cannot load {module_path}")
+        spec.loader.exec_module(records)
+        with netCDF4.Dataset(root / "geothermal_heating.nc") as dataset:
+            heatflow = np.asarray(dataset.variables["heatflow"][0], np.float64)
+        wet3 = np.asarray(z.is_active) > 0.5
+        bottom = wet3 & (np.cumsum(wet3[..., ::-1], axis=-1)[..., ::-1] == 1)
+        require(np.all(bottom.sum(axis=-1) == wet3.any(axis=-1)),
+                "the L4 card does not select exactly one bottom cell per wet column")
+        kernel = jax.jit(lambda thickness, flux:
+                         nemo_geothermal_bottom_heating_tendency(
+                             thickness, jnp.asarray(wet3), heatflow_mwm2=flux,
+                             rho_0=cfg.rho_0, c_sw=cfg.physics.constants.c_sw))
+        out["label"] = ("GIVEN-NEMO-OPERANDS: NEMO's recorded live Kmm bottom "
+                        "thickness and the traced native heatflow field")
+        out["jit"] = True
+        out["traced_inputs"] = ["e3t_Kmm", "heatflow_mwm2"]
+        for kt in range(kt_from, kt_to + 1):
+            header, fields = records.decode(
+                root / f"oracle_geothermal_kt{kt:08d}.bin", kt)
+            qgh, bottom_e3t, trend = (
+                np.asarray(field).reshape(header[5], header[4])[2:-2, 2:-2]
+                for field in fields)
+            require(bottom_e3t.shape == heatflow.shape, "record/card grid mismatch")
+            e3t3 = bottom * bottom_e3t[..., None]
+            if cfg.rk3_stage3_geothermal_nemo_written:
+                candidate3 = np.asarray(kernel(jnp.asarray(e3t3),
+                                               jnp.asarray(heatflow)))
+            else:
+                candidate3 = np.zeros_like(e3t3)
+            candidate = np.sum(candidate3, axis=-1)
+            wet = bottom_e3t > 0.0
+            trend_row = bit_rows(f"geothermal.kt{kt}.bottom_tendency", trend,
+                                 candidate, wet)
+            out["per_kt"].append({
+                "kt": kt,
+                "qgh_nonzero": int(np.count_nonzero(qgh)),
+                "wet_columns": int(np.count_nonzero(wet)),
+                "zero_heatflow_wet_columns": int(np.count_nonzero(wet & (qgh == 0.0))),
+                "trend_row": trend_row,
+            })
+        return out
 
     if arm == "stages":
         # one step, each stage exposed by the model's private hook; the entry
@@ -1508,6 +1569,8 @@ def main(argv=None) -> int:
                     help="G6 round-2 pair half: cyclic north HPG geometry")
     ap.add_argument("--without-vector-raw-vmask", action="store_true",
                     help="G6 round-2 pair half: compact vector V mask")
+    ap.add_argument("--without-geothermal", action="store_true",
+                    help="L4 round-1 plant: remove the selected stage-3 BBC wire")
     ap.add_argument("--record-step-entry", action="store_true",
                     help="G9 round-6: seed a recorded kt>=2 entry and external handoff")
     ap.add_argument("--without-recorded-external", action="store_true",
@@ -1531,6 +1594,7 @@ def main(argv=None) -> int:
               without_stage3_salt=a.without_stage3_salt,
               without_hpg_fold_geometry=a.without_hpg_fold_geometry,
               without_vector_raw_vmask=a.without_vector_raw_vmask,
+              without_geothermal=a.without_geothermal,
               record_step_entry=a.record_step_entry,
               without_recorded_external=a.without_recorded_external,
               case=a.case)
@@ -1588,6 +1652,15 @@ def main(argv=None) -> int:
                       f"ulps {r['max_ulps']} first {r['first_cell']} "
                       f"dry card/nemo {r['dry_card_nonzero']}/{r['dry_nemo_nonzero']}")
         return 0
+    if a.arm == "geothermal":
+        bad = False
+        for point in out["per_kt"]:
+            row = point["trend_row"]
+            bad |= bool(row["n_unequal"] or row["dry_card_nonzero"])
+            print(f"kt {point['kt']} bottom tendency: unequal "
+                  f"{row['n_unequal']}/{row['n_wet']} max {row['max_abs']:.3e}; "
+                  f"dry card/nemo {row['dry_card_nonzero']}/{row['dry_nemo_nonzero']}")
+        return 1 if bad else 0
     if a.arm == "substeps":
         f = out["first_unequal"]
         print("SUBSTEPS first unequal operand:", f and (f["name"], f["n_unequal"]))

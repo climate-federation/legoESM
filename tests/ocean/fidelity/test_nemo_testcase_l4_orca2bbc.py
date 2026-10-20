@@ -21,12 +21,18 @@ CASES = REPO / "scripts/validate/ocean_fidelity/testcases"
 G5 = CASES / "nemo_testcase_g5_orca2ice"
 L4 = CASES / "nemo_testcase_l4_orca2bbc"
 INPUTS = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+L4_RECORD = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round53/"
+    "oracle_l4_r53/twin_a")
 QGH_SHA256 = "e369762f068a7fbc1561be310fb8ded844233da37e6a0c6ffc10805e4996fffb"
 CARD_FILES = ("ORCA_R2_zps_domcfg.nc", "data_1m_potential_temperature_nomask.nc",
               "data_1m_salinity_nomask.nc")
 needs_inputs = pytest.mark.skipif(
     not all((INPUTS / name).is_file() for name in CARD_FILES),
     reason="no ORCA2 inputs")
+needs_l4_record = pytest.mark.skipif(
+    not (L4_RECORD / "oracle_geothermal_kt00000001.bin").is_file(),
+    reason="no admitted L4 record")
 
 
 @pytest.fixture(autouse=True)
@@ -231,3 +237,37 @@ def test_acquisition_tool_modes_order_and_seven_item_contract():
     assert 'cp "$QGH_SOURCE" "$2/geothermal_heating.nc"' in text
     assert "check_deck_delta" in text and "float(log_match.group(1)" in (
         L4 / "l4_records.py").read_text()
+
+
+@needs_l4_record
+def test_l4_recorded_bottom_tendency_is_exact_and_wiring_plant_fires():
+    card = recipe.build_nemo_testcase_card("ORCA2L4-bbc", deck_root=L4_RECORD)
+    forcing_path = G5 / "g5_records.py"
+    forcing_spec = importlib.util.spec_from_file_location("l4_g5_records", forcing_path)
+    forcing_reader = importlib.util.module_from_spec(forcing_spec)
+    assert forcing_spec.loader is not None
+    forcing_spec.loader.exec_module(forcing_reader)
+    _, forcing = forcing_reader.nemo_supplied_forcing(card, L4_RECORD, 1)
+    import netCDF4
+    with netCDF4.Dataset(L4_RECORD / "geothermal_heating.nc") as dataset:
+        heatflow = np.asarray(dataset.variables["heatflow"][0], np.float64)
+    np.testing.assert_array_equal(forcing.geothermal_heat_flux_mwm2, heatflow)
+
+    path = CASES / "nemo_testcase_g2_orca2bathy_ladder.py"
+    spec = importlib.util.spec_from_file_location("l4_ladder_score", path)
+    scorer = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(scorer)
+
+    exact = scorer.run(
+        L4_RECORD, arm="geothermal", kt_from=1, kt_to=1,
+        allow_dirty=True, case="ORCA2L4-bbc")
+    assert exact["jit"] is True
+    assert exact["traced_inputs"] == ["e3t_Kmm", "heatflow_mwm2"]
+    assert exact["per_kt"][0]["trend_row"]["n_unequal"] == 0
+    assert exact["per_kt"][0]["trend_row"]["dry_card_nonzero"] == 0
+
+    plant = scorer.run(
+        L4_RECORD, arm="geothermal", kt_from=1, kt_to=1,
+        allow_dirty=True, without_geothermal=True, case="ORCA2L4-bbc")
+    assert plant["per_kt"][0]["trend_row"]["n_unequal"] == 16_428

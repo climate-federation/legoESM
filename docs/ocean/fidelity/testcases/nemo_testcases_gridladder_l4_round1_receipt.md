@@ -4,16 +4,18 @@ Date: 2026-10-20
 
 Starting parent: `7a31b67ef96e3954b64b204671942c84119fa923`
 
-Status: **STOPPED_FOR_RECORD.**  L4 is implemented as certified G5 plus one
-variable geothermal-bottom-heating switch.  The committed seven-item preflight
-passes while the round-53 evidence parent is absent.  NEMO was not built or run
-in this session, and no L4 fidelity score or verdict is reported.
+Status: **L4 CERTIFIED.**  L4 is certified G5 plus one variable
+geothermal-bottom-heating switch.  The operator-produced ten-step record was
+admitted, then every available INDEPENDENT, GIVEN-NEMO-ENTRY, full-depth,
+stage, wet-cell and dry-cell row was scored.  Every row is bit-identical; no
+statement owns an over-bar row and no corrective physics change was needed.
 
 - codex review: operator (Claude)
 - independent review: operator (Claude)
 - NEMO execution: operator-only; not run here
 - preregistration commit: `50ea9550d0`
 - implementation/acquisition commit: `763a8625f3`
+- operator pipefail correction commit: `1bd536e885`
 
 ## 1. Survey verification
 
@@ -150,17 +152,99 @@ the 8 prognostic-state tests in 71.70 seconds.  The added L4 and geothermal
 suites also passed separately, 10 / 10 and 14 / 14.  No NEMO model execution
 occurred.
 
-ASKED and completed: verify the oracle deck, executed sources, input tar
-member, and compiled G5 route; preregister before implementation; build L4 as
-G5 plus one switch; preserve every other selector; extend the existing
-geothermal module; commit a smoke/boundary/three-twin acquisition with exact
-records and binding plants; run the clean seven-item preflight; stop for the
-operator record.
+## 5. Admitted operator record
+
+The operator ran the committed acquisition after the `nm | grep -q` pipefail
+preflight defect was corrected at `1bd536e885`; this scoring session did not
+build or run NEMO.  Read-only admission printed:
+
+```text
+L4_PREFLIGHT_7_OF_7_PASS plants=7/7 evidence_parent_absent=false
+L4_GEOTHERMAL_RECORDS_PASS steps=1..10 sha256=0b184a56aca2c3c7c871cc545a6df057f7318c09d2695f8c412ac34712c93ab4
+L4_ACQUISITION_PASS steps=1..10 twins=3 evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round53/oracle_l4_r53
+```
+
+The manifest's producer-list SHA-256 is
+`d666a29a4accc44ec6acf6582d2e15fadd81cd8b6f18e27a771c33039e69394d`.
+All three geothermal streams are byte-identical; their admitted payload hash
+is the hash printed above.  The ordinary surface, stage, barotropic and restart
+payloads passed the acquisition's pre-existing G5 identity checks.
+
+## 6. Both-label score, full depth, wet and dry
+
+The shared multilevel scorer was extended to register `ORCA2L4-bbc` and to
+attach the native `heatflow` field to the existing G5 surface-forcing object.
+It was not forked.  Restarts exist after kt 2--10, not kt 1; therefore full
+depth is scored wherever the record permits it, while the kt 1 stage record
+supplies all-level stage coverage.  GIVEN-NEMO-ENTRY has no synthetic kt 2
+entry: its kt 2 result is the two-step output from kt 1, and direct restart
+entries cover kt 3--10.
+
+| label / record | coverage | exact rows | at-bar-not-exact | over bar |
+|---|---:|---:|---:|---:|
+| INDEPENDENT surface (ssh, uu_b, vv_b, u, v, T, S) | kt 1--10 | 70 / 70 | 0 | 0 |
+| INDEPENDENT full/partial/dry depth summaries (u, v, T, S) | restarts kt 2--10 | 36 / 36 | 0 | 0 |
+| GIVEN-NEMO-ENTRY direct + two-step surface | outputs kt 1--10 | 119 / 119 | 0 | 0 |
+| GIVEN-NEMO-ENTRY full/partial/dry depth summaries | every available direct/two-step restart row | 64 / 64 | 0 | 0 |
+| kt 1 stages 1--3 surface | 21 rows | 21 / 21 | 0 | 0 |
+| kt 1 stages 1--3 full/partial/dry depth | 12 summaries | 12 / 12 | 0 | 0 |
+
+Every maximum absolute difference is exactly `0.0`; every unequal-cell count,
+including every dry-cell count, is zero.  There are no flushed-subnormal
+exceptions.  Thus there is no first over-bar row and no NEMO statement to fix.
+The score JSON SHA-256 values are:
+
+- INDEPENDENT: `b3eb42c06149309fc5f6cfd6228a9194a373b5242f4bb4da03e0f6f095b4c587`;
+- GIVEN-NEMO-ENTRY: `993abdbb8dea04a862c2d0d1c5438b6e4996f283d8fe442fcd6e0bdf8e0c56ee`;
+- kt 1 stages: `cd454ab5899569ebd8202a13f2fae0e92a8db7a99f6a540bfd2c068332216abd`.
+
+## 7. Geothermal trend, bit for bit
+
+At every kt 1--10, a JIT-compiled fp64 call to the production
+bottom-heating operator receives traced `e3t_Kmm` and `heatflow_mwm2` inputs.
+It is compared directly with NEMO's recorded result of the cited
+`qgh_trd0/e3t(Kmm)` statement at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbc.f90:156-160`.
+
+Each step has 16,433 wet bottom columns: 16,428 carry nonzero heating and five
+have zero input heat flow.  For each of the ten steps, the result is 0 unequal
+of 16,433 wet cells, maximum difference exactly `0.0`, with 0 noncanonical dry
+cells.  The ten-row JSON SHA-256 is
+`06389175a92a3cdfd0d1544c78f3b765df798a26e54a55824d79e7c315375fdf`.
+
+Two non-vacuity controls fired.  Removing the selector from the direct trend
+comparison produced 16,428 unequal wet cells and exited 1.  Removing it from
+the full production step made kt 1 temperature DEBT: 249 unequal cells,
+maximum `2.769e-11` K, and exit 1; that plant JSON SHA-256 is
+`6919bd98985099d127dd9e7d8c6b3eaedde86de545cb1221d9943e4f957efce1`.
+
+## 8. Unchanged-card controls and round-53 code
+
+The implementation commit and this scoring run have the same production
+`packages` tree, `7a1a6409ea80b0320a56a338176fae65605e1bf3`, except for this
+round's selector-census assertion.  The latter now pins G9's
+`rk3_stage_transport_stored_r3uv` flag, closing the standing round-52 nit; it
+does not enter any model JAXPR.  Consequently the previously gated two-step
+values of G1--G9 and the flag-off JAXPRs of full ORCA2, DINO, GYRE, SMT,
+VORTEX, OMT and rung 0 are byte-for-byte unchanged.  L4 is the only card whose
+forcing reader attaches `geothermal_heat_flux_mwm2`, and the selected field is
+checked exactly against the official netCDF variable.
+
+The focused L4/G9 x64 CPU suite passed 32 / 32.  The exact record test is JIT
+compiled with both numeric inputs traced, and its wiring-removal plant fires.
+The required review disposition remains `codex review: operator`; no local
+Codex review was run.
+
+ASKED and completed: verify and admit the operator record; score both labels at
+every recorded output, full depth wherever a restart exists, the kt 1 stage
+record, and wet/dry cells; compare the geothermal trend bit for bit; prove the
+score fails without its wiring; preserve every other card; pin G9's open
+stored-r3u/r3v selector census; and certify L4 because every row is exact.
 
 UNASKED and not done: fetch or vendor data; add prognostic state; merge lane B;
-select G9; execute NEMO; score L4; relax any bar; publish or push.
+select G9 for L4; execute NEMO; relax any bar; publish or push.
 
-COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/gridladder_r53-27712084
-ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/gridladder_r53-27712084/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l4_orca2bbc/run.sh --run
+COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/gridladder_r53/repo
+ACQUISITION_NEEDED: NONE
 DECISION_NEEDED: NONE
-ROUND_STATUS: STOPPED_FOR_RECORD — preflight 7/7 and plants 7/7 pass; operator must run the committed acquisition before any score
+ROUND_STATUS: LANDED — L4 CERTIFIED: every admitted trajectory, full-depth, stage, wet/dry and geothermal-trend row is bit-identical

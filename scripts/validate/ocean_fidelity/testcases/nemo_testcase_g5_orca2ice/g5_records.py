@@ -143,12 +143,24 @@ def nemo_supplied_forcing(card, root: Path, kt: int, *, zero: bool = False):
     if zero:
         fields = {k: np.zeros_like(v) for k, v in fields.items()}
     freshwater, forcing = _surface_forcings(card, root, fields, kt)
-    return freshwater, forcing._replace(
+    forcing = forcing._replace(
         q_nonsolar=fields["qns"],
         ice_ocean_top_drag_rCdu=(
             np.zeros_like(rec["rCdU_ice"]) if zero else rec["rCdU_ice"]),
         salt_flux_sfx=fields["sfx"],
     )
+    if card.case == "ORCA2L4-bbc":
+        import netCDF4
+
+        path = Path(root) / "geothermal_heating.nc"
+        require(path.is_file(), f"missing L4 geothermal forcing: {path}")
+        with netCDF4.Dataset(path) as dataset:
+            heatflow = np.asarray(dataset.variables["heatflow"][0], np.float64)
+        require(heatflow.shape == np.asarray(card.recipe.initial_state.eta.data).shape,
+                f"L4 heatflow shape {heatflow.shape} != card grid")
+        forcing = forcing._replace(
+            geothermal_heat_flux_mwm2=(np.zeros_like(heatflow) if zero else heatflow))
+    return freshwater, forcing
 
 
 def _cmp(card, nemo, sel) -> dict:
