@@ -21,6 +21,10 @@ Observed BEFORE this preregistration (trace only, not predictions;
 - L3 traces on rung 10 (L2 + EIV, G9's stage-3 Krhs order off as shipped).
 - L3 with G9's stage-3 Krhs order refuses on rung 10 (that order needs
   FCT's stage-3 written content order, which rung 10 keeps off).
+  CORRECTION (2026-10-20 resume, after freeze; predictions unchanged): the
+  stated reason is wrong. That order is refused because rung 10 runs the
+  diffusive BBL (the order needs no BBL); rung 10 already runs the written
+  content order.
 - L3 refuses on rung 0 (same refusal as L2 in round 320); rung 0's record
   does not run EIV anyway.
 

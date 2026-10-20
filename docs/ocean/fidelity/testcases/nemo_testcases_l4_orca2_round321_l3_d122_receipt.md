@@ -60,7 +60,7 @@ then ww recomputed (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:296`).
 | card | arm | result |
 |---|---|---|
 | rung 10 | L3 | traces |
-| rung 10 | L3 + G9's stage-3 Krhs order | refuses: that order needs FCT's stage-3 written content order, off on rung 10 |
+| rung 10 | L3 + G9's stage-3 Krhs order | refuses: that order needs no BBL, and rung 10 runs the diffusive BBL (corrected at resume; rung 10 already runs the written content order) |
 | rung 0 | L3 | refuses (same as L2 in round 320); its record runs no EIV |
 
 ## Decision 122, seven pairs (tree `1a9ad3c17`, arms control vs L3)
@@ -90,16 +90,26 @@ preregistration it is asked, not landed.
 Velocity max errors also grow: u 0.154 -> 1.768, v 0.141 -> 1.722 m/s
 (independent).
 
-## Why it leans away (READ OFF THE CODE; PLAUSIBLE, not measured)
+## Why it leans away (MEASURED by the Claude reviewer; reproduced at resume)
 
-L3 adds the bolus to the stage-3 zFu/zFv slots and recomputes the vertical
-velocity from them. The stage-3 FCT reads zFu/zFv only when G9's stage-3
-Krhs order is on; otherwise it reads the older mass-flux slots, which L3
-does not change. Rung 10 keeps that order off (round 318), so its
-horizontal tracer flux would miss the bolus while its vertical velocity
-carries the bolus divergence. Lane B certified L3 only with that order on.
-Discriminating check (not run): one rung-10 step's tracer continuity
-residual with and without L3.
+One rung-10 production step, `orca2_rounds/round321/review_claude_r321/`
+(probe `probe_cont.py`), re-run on this tree at resume
+(`orca2_rounds/round321/resume_repro/`):
+
+- With L3 on, the horizontal transports the stage-3 FCT reads are
+  bit-identical to L3 off; its vertical velocity includes the bolus.
+- Subsurface continuity residual of those transports: 7.0e-5 m/s with L3
+  (413,665 subsurface wet cells above 1e-15; the reviewer counted 409,337
+  at its own threshold) vs 1.9e-17 with L3 off (0 cells). It equals minus
+  the bolus divergence to 1.9e-17 (reviewer 3.9e-19). Lane B's card: 1.6e-17
+  (reviewer).
+- So the FCT moves tracer with a vertical bolus but no horizontal one; this
+  is the cause of the away lean. CONFIRMED.
+- Causal arm (reviewer only, SCRATCH DIAGNOSTIC, NOT A ROUTE: adds the
+  bolus to the FCT mass-flux slots, which is not NEMO's order and must not
+  be committed): residual back to 1.9e-17; kt-10 max T 0.202 K, RMS T
+  3.31e-3 (control 3.60e-3), max S 0.143; per-row RMS 140 toward / 39 away
+  (the reviewer's row comparison, not the D122 classifier).
 
 ## Predictions (PREREG_nemo_testcases_l4_orca2_round321.md)
 
@@ -135,8 +145,15 @@ stays DIFFERS, its three coefficient rows NOT-MODELLED).
   Krhs order (the route lane B certified), then re-measure; (2) land it now
   under D122 (passes; max T error 0.20 -> 3.0 K); (3) as (1), and also make
   the model refuse the L3 bolus without that route. Pick 1.
-- G9's stage-3 Krhs order refuses on rung 10 (needs FCT's stage-3 written
-  content order); that is the prerequisite for (1).
+- G9's stage-3 Krhs order refuses on rung 10 because rung 10 runs the
+  diffusive BBL (that order needs no BBL); rung 10 already runs the written
+  content order (round 318). Trace check: rung 10 with BBL removed traces
+  (`resume_repro/r10_trace_krhs_nobbl.log`). The Krhs order with BBL is the
+  prerequisite for (1).
+- DECISION (asked, not done): the guard refusing L3 without the stage-3
+  Krhs route.
+- DECISION 145 (rn_Ud trainable; kappa_Redi frozen on rung 10): held at
+  resume, see Resume.
 - Rung 0 runs no isoneutral diffusion although its record does (round 320).
 
 ## Gates (x64, CPU; logs `orca2_rounds/round321/gates/`)
@@ -153,6 +170,26 @@ stays DIFFERS, its three coefficient rows NOT-MODELLED).
   stage face mask 2, prognostic barotropic 8, ORCA2 parallel receipt 2 =
   147 passed, 0 failed. Round-320 selection tests 3 passed.
 
+## Resume (2026-10-20, after the dual review)
+
+- No model value changed. Dual review: both HOLD; import inert.
+- Two tests the import broke (pass at base, fail at tip) were stale
+  expectations: lane B narrowed the rk3_ws GM refusal to an incomplete
+  staged Treguier/nemo_iso_lap/bolus-through-fct composition, and both
+  tests build exactly that (GYRE with kappa_GM = 1). The new message is
+  the intended one; the match text was updated. Non-vacuity: with that
+  guard disabled both fail (2 failed); restored, 0 dirty lines.
+- Refusal reason corrected (Feasibility, OPEN) here and in the
+  preregistration (dated correction note).
+- DECISION 145 held: rn_Ud's config field has no library default
+  (unset = the card must set it), and the trainable collector seeds every
+  entry from the library default, so any entry needs a choice the user has
+  not made (question in the final lines). Proposed bounds 0.0033-0.03 m/s:
+  kappa_Redi's (330, 3000) m2/s through NEMO's aht0 = 1/2 rn_Ud rn_Ld
+  (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:354-357`, rn_Ld
+  = 200 km on ORCA2); contains NEMO's reference 0.01 and ORCA2's 0.018.
+  kappa_Redi's rung-10 freeze-out waits on the same trainer entry.
+
 ## Review
 
 - codex review: operator.
@@ -163,3 +200,5 @@ stays DIFFERS, its three coefficient rows NOT-MODELLED).
 - UNASKED: lane B's two L3 unit-test hunks imported (tests only).
 - UNASKED: one import line kept in the latlon operators that lane B
   dropped (no value change; needed by this branch).
+- UNASKED (resume): two test expectations updated to the narrowed refusal
+  message (tests only).
