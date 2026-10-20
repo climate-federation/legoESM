@@ -2309,9 +2309,10 @@ def nemo_iso_face_masks(u_mask, v_mask, act, *, grid=None, north_fold=False):
     their stencils from IDENTICAL masks (#1226).
     """
     umask = u_mask[:, 1:, jnp.newaxis] * act * jnp.roll(act, -1, axis=1)
-    act_north = (north_neighbor_T(act, grid) if north_fold
-                 else jnp.roll(act, -1, axis=0))
-    vmask = v_mask[1:, :, jnp.newaxis] * act * act_north
+    # Neighbour evaluated after the slice: keeps the pre-fold program order.
+    vmask = v_mask[1:, :, jnp.newaxis] * act * (
+        act_north := (north_neighbor_T(act, grid) if north_fold
+                      else jnp.roll(act, -1, axis=0)))
     if north_fold:
         vmask = vmask.at[-1].set(act[-1] * act_north[-1])
     wmask = act * jnp.roll(act, +1, axis=2)

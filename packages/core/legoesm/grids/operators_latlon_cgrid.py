@@ -262,8 +262,10 @@ def fold_pivot_half_row(a, fold, stagger, *, scalar_sign=1.0):
     n_lon = fold.perm_T.shape[0]
     half = n_lon // 2
     if stagger == "T":
+        image = a[-1][fold.perm_T[half + 1:]]
+        # Static sign; +1 keeps the pre-sign program (no multiply equation).
         return a.at[-1, half + 1:].set(
-            scalar_sign * a[-1][fold.perm_T[half + 1:]])
+            image if scalar_sign == 1.0 else scalar_sign * image)
     if stagger != "U":
         raise ValueError(f"unknown pivot half-row stagger: {stagger!r}")
     perm = fold_perm_u(fold)[half:]
