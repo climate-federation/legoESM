@@ -100,6 +100,11 @@ class MLEConfig(NamedTuple):
     bolus_cfl_cap : float
         If > 0, cap |w_mle| so the bolus vertical Courant number stays below this
         fraction (stability guard; 0 = off = oracle behaviour).
+    through_fct : bool
+        Route the diagnosed volume transports through the model's tracer
+        advection program.  ``False`` retains the standalone centred-flux
+        tendency; the ORCA2 L5 card selects ``True`` because NEMO adds MLE to
+        the stage-3 transports before its FCT limiter.
     """
     ce: float = 0.06
     lat_ref_deg: float = 20.0
@@ -109,6 +114,7 @@ class MLEConfig(NamedTuple):
     no_mle_in_convection: bool = True
     max_grid_scale_m: float = 111.0e3
     bolus_cfl_cap: float = 0.0
+    through_fct: bool = False
 
 
 def mle_coefficient(ce: float, lat_ref_deg: float) -> float | jnp.ndarray:

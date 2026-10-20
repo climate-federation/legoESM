@@ -36,6 +36,7 @@ from legoesm.ocean.physics.convection.config import (
     OceanConvectionConfig,
 )
 from legoesm.ocean.physics.shortwave_penetration import ShortwavePenetrationConfig
+from legoesm.ocean.physics.lateral_mixing.mle import MLEConfig
 from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.vertical import (
     NemoEENBarotropicOperands,
@@ -3638,6 +3639,8 @@ def read_orca2g1_deck(
            else _ORCA2G_LDF_OFF_FIELDS),
         **(_ORCA2L3_EIV_FIELDS if case in _ORCA2L_EIV_CASES
            else {"namtra_eiv.ln_ldfeiv": False}),
+        **({"namtra_mle.ln_mle": True} if case in _ORCA2L_MLE_CASES
+           else {"namtra_mle.ln_mle": False}),
     }
     bbl_keys = {k for k in values if k.startswith("nambbl.")}
     if bbl_keys != (set(_ORCA2L1_BBL_FIELDS) if case in _ORCA2L_BBL_CASES
@@ -3663,6 +3666,16 @@ def read_orca2g1_deck(
             f"ORCA2G1 deck states &namtra_eiv {eiv_lines!r}; the card "
             "transcribes only ln_ldfeiv = F, or ORCA2's complete resolved "
             "group (namelist_cfg:315-324; namelist_ref:963-982) on L3")
+    mle_lines = {k: v for k, v in values.items() if k.startswith("namtra_mle.")}
+    want_mle = ({"namtra_mle.ln_mle": True}
+                if case in _ORCA2L_MLE_CASES
+                else {"namtra_mle.ln_mle": False})
+    if mle_lines != want_mle:
+        raise ValueError(
+            f"ORCA2G1 deck states &namtra_mle {mle_lines!r}; the card "
+            "transcribes only ln_mle = F, or ORCA2's ln_mle = T override "
+            "with the complete reference defaults (namelist_cfg:310-313; "
+            "namelist_ref:950-961) on L5")
     iwm_lines = {k: v for k, v in values.items() if k.startswith("namzdf_iwm.")}
     if iwm_lines != (_ORCA2V4_IWM_LINES if case in _ORCA2V_IWM_CASES else {}):
         raise ValueError(
@@ -3931,7 +3944,16 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
     physics = base.physics._replace(
         vertical_mixing=vertical,
         shortwave_penetration=_orca2g_qsr(case, deck.rn_Dt_s),    # ln_traqsr (G4: ORCA2's RGB)
-        mle=None,                                       # ln_mle = F
+        mle=(MLEConfig(
+            ce=_ORCA2L5_MLE_RESOLVED_FIELDS["namtra_mle.rn_ce"],
+            lat_ref_deg=_ORCA2L5_MLE_RESOLVED_FIELDS["namtra_mle.rn_lat"],
+            rho_c_mle=_ORCA2L5_MLE_RESOLVED_FIELDS[
+                "namtra_mle.rn_rho_c_mle"],
+            ref_depth_m=10.0,
+            mld_uv="min",
+            no_mle_in_convection=False,
+            through_fct=True,
+        ) if case in _ORCA2L_MLE_CASES else None),
         # ln_zdfevd = F: the ORCA2 identity carries ORCA2's enhanced
         # vertical diffusion, which this deck switches off; V2 keeps it
         # with ORCA2's nn_evdm = 0.
@@ -4172,6 +4194,16 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
             _orca2l3_eiv_selected(cfg.gm_redi)
             if card.case in _ORCA2L_EIV_CASES else
             cfg.gm_redi is None or cfg.gm_redi.kappa_GM == 0.0),
+        ("ln_mle" if card.case in _ORCA2L_MLE_CASES else "ln_mle=F"): (
+            ((cfg.physics.mle.ce, cfg.physics.mle.lat_ref_deg,
+              cfg.physics.mle.rho_c_mle, cfg.physics.mle.mld_uv,
+              cfg.physics.mle.no_mle_in_convection,
+              cfg.physics.mle.through_fct) ==
+             (_ORCA2L5_MLE_RESOLVED_FIELDS["namtra_mle.rn_ce"],
+              _ORCA2L5_MLE_RESOLVED_FIELDS["namtra_mle.rn_lat"],
+              _ORCA2L5_MLE_RESOLVED_FIELDS["namtra_mle.rn_rho_c_mle"],
+              "min", False, True))
+            if card.case in _ORCA2L_MLE_CASES else cfg.physics.mle is None),
         ("ln_lin" if _ORCA2G_DRG.get(card.case) else "ln_drg_OFF"): (
             _nemo_linear_bottom_drag(cfg) == cfg
             if _ORCA2G_DRG.get(card.case) else
@@ -4222,7 +4254,8 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
                        ("ncar_core_sbcblk", "nemo_fld_read") if _ORCA2G_SBC.get(card.case)
                        else ("none", "none"))
                        and cfg.physics.shortwave_penetration == _orca2g_qsr(card.case, card.dt_s)
-                       and cfg.physics.mle is None),
+                       and ((cfg.physics.mle is not None)
+                            is (card.case in _ORCA2L_MLE_CASES))),
         "no_internal_ice_model": card.icebergs_enabled is False and card.iceberg_inputs == (),
         "wet_levels": (np.shape(state.T.data)[-1] == _ORCA2G_JPK.get(card.case, 0) - 1
                           and card.dummy_bottom_records == 1),
@@ -4766,7 +4799,7 @@ _ORCA2G_SI3_CASES = ("ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg",
                      "ORCA2G8-ldf", "ORCA2G9-tadv",
                      "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm",
                      "ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L1-bbl",
-                     "ORCA2L2-iso", "ORCA2L3-eiv")
+                     "ORCA2L2-iso", "ORCA2L3-eiv", "ORCA2L5-mle")
 _ORCA2V_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
                  "ORCA2V5-havtb")
 _ORCA2V_EVD_CASES = ("ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
@@ -4794,6 +4827,22 @@ _ORCA2L3_EIV_FIELDS: dict[str, object] = {
     "namtra_eiv.rn_ue": _ORCA2_EIV_RN_UE,
     "namtra_eiv.rn_le": _ORCA2_EIV_RN_LE,
     "namtra_eiv.ln_eke_equ": False,
+}
+# ORCA2L5 (lane B, DECISION 141): certified G9 with exactly ORCA2's
+# mixed-layer eddy card enabled.  The experiment deck overrides only ln_mle;
+# every numeric value below resolves from SHARED/namelist_ref:950-961 and is
+# stated here so the card never depends on an implicit Python default.
+_ORCA2L_MLE_CASES = ("ORCA2L5-mle",)
+_ORCA2L5_MLE_RESOLVED_FIELDS: dict[str, object] = {
+    "namtra_mle.ln_mle": True,
+    "namtra_mle.rn_ce": 0.06,
+    "namtra_mle.nn_mle": 1,
+    "namtra_mle.rn_lf": 5000.0,
+    "namtra_mle.rn_time": 172800.0,
+    "namtra_mle.rn_lat": 20.0,
+    "namtra_mle.nn_mld_uv": 0,
+    "namtra_mle.nn_conv": 0,
+    "namtra_mle.rn_rho_c_mle": 0.01,
 }
 _ORCA2G_LDF_OFF_FIELDS: dict[str, object] = {
     "namtra_ldf.ln_traldf_off": True,
@@ -4917,6 +4966,7 @@ for _rung_table in (_ORCA2G_JPK, _ORCA2G_ZDF_FACES, _ORCA2G_TRA_ZDF_ROUNDED,
     _rung_table["ORCA2L1-bbl"] = _rung_table["ORCA2G5-ice"]
     _rung_table["ORCA2L2-iso"] = _rung_table["ORCA2G5-ice"]
     _rung_table["ORCA2L3-eiv"] = _rung_table["ORCA2G9-tadv"]
+    _rung_table["ORCA2L5-mle"] = _rung_table["ORCA2G9-tadv"]
 _ORCA2G_UNMEASURED["ORCA2V1-tke"] = ORCA2V1_UNMEASURED
 _ORCA2G_UNMEASURED["ORCA2V2-evd"] = ORCA2V1_UNMEASURED
 _ORCA2G_UNMEASURED["ORCA2V3-ddm"] = ORCA2V1_UNMEASURED
@@ -4928,6 +4978,11 @@ _ORCA2G_UNMEASURED["ORCA2L3-eiv"] = (
     "nemo_post_si3_surface_records",
     "l3_record_not_admitted",
     "eddy_induced_velocity",
+)
+_ORCA2G_UNMEASURED["ORCA2L5-mle"] = (
+    "nemo_post_si3_surface_records",
+    "l5_record_not_admitted",
+    "mixed_layer_eddies",
 )
 
 
@@ -5200,6 +5255,12 @@ def build_orca2l3_eiv_card(deck_root: str | Path) -> NEMOTestcaseCard:
     return build_orca2g1_flat_card(deck_root, "ORCA2L3-eiv")
 
 
+def build_orca2l5_mle_card(deck_root: str | Path) -> NEMOTestcaseCard:
+    """L5: certified G9 plus ORCA2's stage-3 mixed-layer eddies."""
+
+    return build_orca2g1_flat_card(deck_root, "ORCA2L5-mle")
+
+
 def build_orca2g6_vec_card(deck_root: str | Path) -> NEMOTestcaseCard:
     """G6: certified G5 plus ORCA2's vector-form momentum advection."""
 
@@ -5247,6 +5308,7 @@ __all__ = (
     "build_orca2l1_bbl_card",
     "build_orca2l2_iso_card",
     "build_orca2l3_eiv_card",
+    "build_orca2l5_mle_card",
     "nemo_havtb_shape",
     "ORCA2V1_UNMEASURED",
     "build_orca2g6_vec_card",

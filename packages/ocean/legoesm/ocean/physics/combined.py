@@ -290,7 +290,11 @@ def make_ocean_physics(
         # r1_exact equatorial surface jet integrated raw wind stress
         # unmixed and blew up by day ~30 (probe job 8818083).
 
-    if config.mle is not None:
+    # NEMO's MLE arm contributes volume transports to the stage-3 FCT call.
+    # The coupled WS-RK3 model owns that route; do not also emit this module's
+    # standalone centred tendency.  Every pre-existing config keeps the
+    # default ``through_fct=False`` and therefore the exact former program.
+    if config.mle is not None and not config.mle.through_fct:
         fns.append(_make_mle(config.mle))
 
     sw_config = config.shortwave_penetration

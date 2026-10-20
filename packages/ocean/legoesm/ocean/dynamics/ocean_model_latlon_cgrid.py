@@ -126,6 +126,9 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_isoneutral_K33_latlon,
     nemo_iso_a33_e3w,
 )
+from legoesm.ocean.physics.lateral_mixing.mle_latlon_cgrid import (
+    mle_tracer_tendency_latlon_cgrid,
+)
 from legoesm.ocean.physics.lateral_mixing.eke import eke_apply_local_source
 # Public symbol from the blessed shared "_gm_redi_common" module pattern (see
 # tests/test_no_private_cross_imports.py): the SAME Hallberg f_res definition
@@ -470,6 +473,41 @@ def add_bolus_to_advecting_flux(bolus, mass_flux_u, mass_flux_v,
     # self-consistent because it derives deta_dt from the SAME divergence.
     w_tr = diagnose_w_from_flux_div(flux_div_tr, z_coord, thickness_weighted=True)
     return mfu_tr, mfv_tr, w_tr
+
+
+def _nemo_ws_add_stage3_bolus(
+    stage_geometry, zfu_delta, zfv_delta, *, eta_kmm, eta_before,
+    eta_after, u_kmm, v_kmm, grid, z_coord, stage_transport_kw, active_live,
+    dt, fold_exchange_ratios, stored_r3_ratios, stored_kmm_level,
+    return_trace=False,
+):
+    """Add a NEMO bolus pair to stage-3 pFu/pFv and rebuild pFw once.
+
+    ``ldf_eiv_trp`` and ``tra_mle_trp`` both edit the same transport pair;
+    ``tra_adv_trp`` then repeats ``wzv`` before FCT.  Keeping that statement
+    here avoids a second, subtly different reconstruction for L5.
+    """
+    if stage_geometry is None:
+        raise ValueError("staged bolus requires materialized WS transports")
+    stage3 = list(stage_geometry[2])
+    zfu_before, zfv_before = stage3[7], stage3[8]
+    stage3[7] = stage3[7] + zfu_delta
+    stage3[8] = stage3[8] + zfv_delta
+    stage3[2], _, _ = nemo_qco_wzv_operands(
+        eta_kmm, eta_before, u_kmm, v_kmm, grid, z_coord,
+        stage_transport_kw["u_mask_3d"], stage_transport_kw["v_mask_3d"],
+        active_live, dt, eta_after_override=eta_after,
+        volume_transport_override=(stage3[7], stage3[8]),
+        fold_exchange_ratios=fold_exchange_ratios,
+        runoff_mass_flux=stage_transport_kw["runoff_mass_flux"],
+        stored_r3_ratios=stored_r3_ratios,
+        stored_kmm_level=stored_kmm_level,
+    )
+    updated = (stage_geometry[0], stage_geometry[1], tuple(stage3))
+    trace = ((zfu_before, zfv_before, stage3[7] - zfu_before,
+              stage3[8] - zfv_before, stage3[7], stage3[8])
+             if return_trace else None)
+    return updated, trace
 
 
 def _compute_advection_flux_div(
@@ -5335,6 +5373,14 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"tracer_time_integrator must be one of {_valid_time_int}, "
                 f"got {config.tracer_time_integrator!r}")
+        _mle = None if config.physics is None else config.physics.mle
+        if (_mle is not None and _mle.through_fct
+                and (config.tracer_time_integrator != "rk3_ws"
+                     or config.tracer_advection != "fct2")):
+            raise ValueError(
+                "MLEConfig.through_fct is NEMO's stage-3 transport route and "
+                "requires tracer_time_integrator='rk3_ws' with "
+                "tracer_advection='fct2'")
         _mom_ti_for_ws = getattr(config, "momentum_time_integrator", "euler")
         # NEMO's carried after-SSH slot belongs to the RK3 stage program: it is
         # written by that program's end-of-step time-level rotation
@@ -10274,56 +10320,38 @@ class LatLonCGridOceanModel:
                 dT_gm, dS_gm, _bolus = _gm_out
                 if _bolus is not None:
                     if getattr(_cfg_b, "tracer_time_integrator", "euler") == "rk3_ws":
-                        if _nemo_ws_stage_transport_geometry is None:
-                            raise ValueError(
-                                "staged GM bolus requires materialized WS transports")
                         # traadv.f90:254-258 calls ldf_eiv_trp at stage 3 only.
                         # NEMO changes ONLY pFu/pFv, then calls wzv again with
                         # np_transport (traadv.f90:296).  Preserve the
                         # certified G9+L2 mass-flux geometry and stages 1/2.
-                        stage3 = list(_nemo_ws_stage_transport_geometry[2])
                         u_eiv, v_eiv, _ = _bolus
                         zfu_eiv = jnp.concatenate(
                             [u_eiv[:, -1:, :], u_eiv], axis=1)
                         zfv_eiv = jnp.concatenate(
                             [jnp.zeros_like(v_eiv[:1]), v_eiv], axis=0)
-                        _zfu_before = stage3[7]
-                        _zfv_before = stage3[8]
-                        stage3[7] = stage3[7] + zfu_eiv   # ldftra.f90:954
-                        stage3[8] = stage3[8] + zfv_eiv   # ldftra.f90:955
-                        if _l3_eiv_transport_exposure:
-                            _nemo_ws_l3_eiv_transport_trace = (
-                                _zfu_before, _zfv_before,
-                                stage3[7] - _zfu_before,
-                                stage3[8] - _zfv_before,
-                                stage3[7], stage3[8])
-                        # traadv.f90:296 repeats the transport-indicator WZV
-                        # call on the updated pair.  These are exactly the
-                        # stage-3 operands used above; no legacy continuity
-                        # diagnosis is permitted on this route.
-                        stage3[2], _, _ = nemo_qco_wzv_operands(
-                            _eta_live_one_half, state.eta.data,
-                            u2_corr, v2_corr, _grid, _zc,
-                            _stage_transport_kw["u_mask_3d"],
-                            _stage_transport_kw["v_mask_3d"],
-                            _active_live, dt,
-                            eta_after_override=state_new.eta.data,
-                            volume_transport_override=(stage3[7], stage3[8]),
+                        (_nemo_ws_stage_transport_geometry,
+                         _eiv_trace) = _nemo_ws_add_stage3_bolus(
+                            _nemo_ws_stage_transport_geometry,
+                            zfu_eiv, zfv_eiv,
+                            eta_kmm=_eta_live_one_half,
+                            eta_before=state.eta.data,
+                            eta_after=state_new.eta.data,
+                            u_kmm=u2_corr, v_kmm=v2_corr,
+                            grid=_grid, z_coord=_zc,
+                            stage_transport_kw=_stage_transport_kw,
+                            active_live=_active_live, dt=dt,
                             fold_exchange_ratios=bool(
                                 _cfg_b.rk3_vector_raw_vmask),
-                            runoff_mass_flux=
-                            _stage_transport_kw["runoff_mass_flux"],
                             stored_r3_ratios=bool(
                                 _cfg_b.nemo_wzv_stored_r3_ratios
                                 or _cfg_b.rk3_stage_tracer_wzv_stored_kmm_ratios),
                             stored_kmm_level=(
                                 2 if _cfg_b.rk3_stage_tracer_wzv_stored_kmm_ratios
-                                else 0))
-                        _nemo_ws_stage_transport_geometry = (
-                            _nemo_ws_stage_transport_geometry[0],
-                            _nemo_ws_stage_transport_geometry[1],
-                            tuple(stage3),
+                                else 0),
+                            return_trace=_l3_eiv_transport_exposure,
                         )
+                        if _l3_eiv_transport_exposure:
+                            _nemo_ws_l3_eiv_transport_trace = _eiv_trace
                     else:
                         mass_flux_u_tr, mass_flux_v_tr, w_baro_tr = (
                             add_bolus_to_advecting_flux(
@@ -10401,6 +10429,54 @@ class LatLonCGridOceanModel:
             # source's ONE-STEP-LAGGED recycling (only the 3-D path produces it).
             if eke_diss_new is not None:
                 state_new = state_new._replace(eke_diss=eke_diss_new)
+
+        _mle_cfg = _cfg_b.physics.mle
+        if _mle_cfg is not None and _mle_cfg.through_fct:
+            # traadv.f90:259-265: MLE is diagnosed from the stage-2 (Kmm)
+            # tracer state, adds only pFu/pFv, and the shared WZV statement
+            # rebuilds pFw before stage-3 FCT.  nn_conv=0 on ORCA2, so rn2 is
+            # not an operand; provide the correctly shaped inert value.
+            from legoesm.ocean.eos import make_eos_fn as _make_mle_eos
+            _mle_rhop = _make_mle_eos(
+                eos=_cfg_b.eos,
+                eos_linear=_cfg_b.eos_linear,
+                eos_nemo_seos=_cfg_b.eos_nemo_seos,
+                rho0=_cfg_b.constants.rho_0,
+            )(_T_stage2, _S_stage2, jnp.zeros_like(_T_stage2))
+            _mle_n2 = jnp.zeros(
+                (*_T_stage2.shape[:-1], _T_stage2.shape[-1] - 1),
+                dtype=_T_stage2.dtype,
+            )
+            _zfu_mle, _zfv_mle = mle_tracer_tendency_latlon_cgrid(
+                _T_stage2, _S_stage2, _mle_rhop, _mle_n2,
+                state.land_mask.data, state.u_mask.data, state.v_mask.data,
+                _zc, _qt_12[..., 0], _grid, _mle_cfg,
+                h_k=_h_s3_kmm,
+                rho0=_cfg_b.constants.rho_0,
+                grav=_cfg_b.constants.g,
+                return_horizontal_transport=True,
+            )
+            _nemo_ws_stage_transport_geometry, _ = (
+                _nemo_ws_add_stage3_bolus(
+                    _nemo_ws_stage_transport_geometry,
+                    _zfu_mle, _zfv_mle,
+                    eta_kmm=_eta_live_one_half,
+                    eta_before=state.eta.data,
+                    eta_after=state_new.eta.data,
+                    u_kmm=u2_corr, v_kmm=v2_corr,
+                    grid=_grid, z_coord=_zc,
+                    stage_transport_kw=_stage_transport_kw,
+                    active_live=_active_live, dt=dt,
+                    fold_exchange_ratios=bool(
+                        _cfg_b.rk3_vector_raw_vmask),
+                    stored_r3_ratios=bool(
+                        _cfg_b.nemo_wzv_stored_r3_ratios
+                        or _cfg_b.rk3_stage_tracer_wzv_stored_kmm_ratios),
+                    stored_kmm_level=(
+                        2 if _cfg_b.rk3_stage_tracer_wzv_stored_kmm_ratios
+                        else 0),
+                )
+            )
 
         if _cfg_b.tracer_advection == "som":
             # SOM (Prather 1986): Second Order Moments advection (#210).

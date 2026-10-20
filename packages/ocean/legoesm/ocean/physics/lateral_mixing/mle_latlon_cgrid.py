@@ -171,7 +171,12 @@ def mle_tracer_tendency_latlon_cgrid(
     grid,
     cfg: MLEConfig,
     h_k: jnp.ndarray | None = None,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+    *,
+    rho0: float = constants.rho_ocean,
+    grav: float = constants.g,
+    return_horizontal_transport: bool = False,
+    return_bolus_transport: bool = False,
+):
     """Fox-Kemper MLE bolus tracer tendency on the lat-lon C-grid (NEMO nn_mle=1).
 
     Parameters
@@ -247,8 +252,8 @@ def mle_tracer_tendency_latlon_cgrid(
         z_centers_ref=(None if _t_ref is None else jnp.abs(jnp.asarray(_t_ref))),
         rho_c_mle=cfg.rho_c_mle,
         ref_depth_m=cfg.ref_depth_m,
-        rho0=constants.rho_ocean,
-        grav=constants.g,
+        rho0=rho0,
+        grav=grav,
     )                                                 # zmld, bm both (n_lat, n_lon)
 
     # Neumann-fill bm / zmld so the face gradients and face MLD across a
@@ -332,16 +337,27 @@ def mle_tracer_tendency_latlon_cgrid(
     utr_u = psi_uw[:, :, :-1] - psi_uw[:, :, 1:]      # (n_lat, n_lon+1, nlev)
     vtr_v = psi_vw[:, :, :-1] - psi_vw[:, :, 1:]      # (n_lat+1, n_lon, nlev)
 
-    # --- Centered tracer flux at the faces; mask closed faces BEFORE divergence ---
-    T_u = interp_cell_to_uface(T)                     # (n_lat, n_lon+1, nlev) = 0.5(T_W+T_E)
-    T_v = interp_cell_to_vface(T, grid)               # (n_lat+1, n_lon, nlev)
-    S_u = interp_cell_to_uface(S)
-    S_v = interp_cell_to_vface(S, grid)
     # Apply the per-level wet face masks to the TRANSPORTS (codex: mask the
     # transports/fluxes, not the final tendency).  utr already vanishes where mu
     # or psim is zero, but a partial-cell step face must be hard-zeroed.
     utr_u = utr_u * u_face_act3
     vtr_v = vtr_v * v_face_act3
+    if cfg.bolus_cfl_cap > 0.0:
+        raise NotImplementedError(
+            "MLEConfig.bolus_cfl_cap > 0 needs the timestep dt, which is not "
+            "available in the lateral-mixing physics_fn signature. Leave it at "
+            "0.0 (the NEMO-oracle default); the bolus magnitude is already "
+            "bounded by H^2 and the mu(z) structure. (TODO: plumb dt to enable "
+            "the cap.)"
+        )
+    if return_horizontal_transport:
+        return utr_u, vtr_v
+
+    # --- Centered tracer flux at the faces; mask closed faces BEFORE divergence ---
+    T_u = interp_cell_to_uface(T)                     # (n_lat, n_lon+1, nlev) = 0.5(T_W+T_E)
+    T_v = interp_cell_to_vface(T, grid)               # (n_lat+1, n_lon, nlev)
+    S_u = interp_cell_to_uface(S)
+    S_v = interp_cell_to_vface(S, grid)
     FxT = utr_u * T_u                                 # (n_lat, n_lon+1, nlev) [degC·m^3/s]
     FyT = vtr_v * T_v
     FxS = utr_u * S_u
@@ -402,15 +418,8 @@ def mle_tracer_tendency_latlon_cgrid(
     # oracle behaviour; raise loudly rather than silently no-op if requested.
     # TODO(dt-plumbing): thread dt into the lateral-mixing physics_fn to enable
     # the cap, mirroring bbl_adv's host-applied transport-CFL guard.
-    if cfg.bolus_cfl_cap > 0.0:
-        raise NotImplementedError(
-            "MLEConfig.bolus_cfl_cap > 0 needs the timestep dt, which is not "
-            "available in the lateral-mixing physics_fn signature. Leave it at "
-            "0.0 (the NEMO-oracle default); the bolus magnitude is already "
-            "bounded by H^2 and the mu(z) structure. (TODO: plumb dt to enable "
-            "the cap.)"
-        )
-
     # The tendency is already zero on dry cells (inv_vol = 0 there); no final
     # mask multiply (codex: divide by the live volume, do not mask the result).
+    if return_bolus_transport:
+        return dT_dt, dS_dt, (utr_u, vtr_v, W_w)
     return dT_dt, dS_dt
