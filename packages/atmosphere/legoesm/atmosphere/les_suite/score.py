@@ -109,12 +109,15 @@ def sponge_base_for_score(case_name: str, heights_m: Array) -> float | None:
     """The catalog sponge base [m] of case ``case_name`` (or a driver's default label
     for it, :data:`~.catalog.CATALOG_ALIASES`) on a run whose cell centres are
     ``heights_m`` — the spectral LES grids are uniform, so the domain top is the top
-    centre plus half its spacing — or ``None`` for a case without a sponge or a
-    column that is not a catalog case. ``heights_m`` must be concrete."""
+    centre plus half its spacing — or ``None`` for a case without a sponge. A name
+    that is not a catalog case raises (user 2026-10-19). ``heights_m`` must be
+    concrete."""
     try:
         case = catalog_case(CATALOG_ALIASES.get(case_name, case_name))
     except KeyError:
-        return None
+        raise ValueError(f"{case_name!r} is not an LES catalog case (or a driver "
+                         "label for one), so its sponge cutoff is unknown; pass "
+                         "explicit weights for a non-catalog column") from None
     if case.setup is not None or case.sponge_base_frac is None:
         return case.sponge_base_m()          # absolute base, or no sponge
     z = _concrete_heights(case_name, heights_m)
@@ -133,8 +136,8 @@ def case_score_weights(case_name: str, heights_m: Array) -> Array:
     """Layer weights for scoring case ``case_name``: the thickness weights with zero
     weight on every level above the case's catalog sponge base, renormalised to 1
     (user 2026-10-19: the damped layer is not LES truth). No cutoff for a case
-    without a sponge or a column that is not a catalog case. The cut is decided in
-    float64 on the concrete heights."""
+    without a sponge; a name that is not a catalog case raises. The cut is decided
+    in float64 on the concrete heights."""
     w = layer_weights_from_heights(heights_m)
     z_sp = sponge_base_for_score(case_name, heights_m)
     if z_sp is None:

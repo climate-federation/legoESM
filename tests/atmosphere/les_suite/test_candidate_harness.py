@@ -231,7 +231,7 @@ def _cbl_artifact(nz=20, nt=3, seconds=600.0):
     th = np.where(z > 800.0, 300.0 + 0.006 * (z - 800.0), 300.0)
     times = np.linspace(0.0, seconds, nt)
     return LESReferenceArtifact(
-        case_name="cbl_harness", sgs="lasd", heights_m=z, times_s=times,
+        case_name="cbl_nieuwstadt", sgs="lasd", heights_m=z, times_s=times,
         theta=np.broadcast_to(th, (nt, nz)).copy(), u=np.full((nt, nz), 2.0),
         v=np.zeros((nt, nz)), wtheta_resolved=np.zeros((nt, nz)),
         wtheta_sgs=np.zeros((nt, nz)), prescribe="fluxes", w_theta_s=np.full(nt, 0.06),
@@ -288,7 +288,7 @@ def _moist_artifact():
     from legoesm.atmosphere.les_suite.scm_runner import microphysics_record
     from legoesm.atmosphere.physics import MicrophysicsConfig
     return dataclasses.replace(
-        art, case_name="moist_harness", qt=qt, qc=qc, wqt_resolved=np.zeros((nt, nz)),
+        art, case_name="cbl_nieuwstadt", qt=qt, qc=qc, wqt_resolved=np.zeros((nt, nz)),
         wqt_sgs=np.zeros((nt, nz)), w_qv_s=np.full(nt, 1.5e-4),
         les_setup=dict(art.les_setup, microphysics=microphysics_record(
             MicrophysicsConfig(scheme="kessler"))))
@@ -306,7 +306,7 @@ def test_harness_scores_moist_cases_with_recorded_kessler_only():
     arm = Arm(_base_turbulence("louis", **_RGH)[0])
     art = _moist_artifact()
     no_record = dataclasses.replace(art, les_setup={"z0_m": _RGH["z0_m"]})
-    with pytest.raises(ValueError, match="must record its LES microphysics"):
+    with pytest.raises(ValueError, match="records no LES microphysics"):
         arm.prepare(no_record, nlev=16, dt=10.0)
     sund = dataclasses.replace(art, les_setup=dict(
         art.les_setup, microphysics=microphysics_record(

@@ -31,13 +31,21 @@ from legoesm.atmosphere.physics.turbulence.config import (
 NZ, NT = 24, 3
 
 
+def _record(scheme="sundqvist"):
+    """The microphysics record a moist reference must carry (no fallback scheme,
+    user 2026-10-19); these fixtures keep the Sundqvist pairing they always ran."""
+    from legoesm.atmosphere.les_suite.scm_runner import microphysics_record
+    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    return microphysics_record(MicrophysicsConfig(scheme=scheme))
+
+
 def _cbl_artifact(**over) -> LESReferenceArtifact:
     z = np.linspace(10.0, 1500.0, NZ)
     # a developing CBL: well-mixed θ below ~800 m, inversion above
     theta_col = np.where(z > 800.0, 300.0 + 0.006 * (z - 800.0), 300.0)
     theta = np.broadcast_to(theta_col, (NT, NZ)).copy()
     base = dict(
-        case_name="cbl_run",
+        case_name="cbl_nieuwstadt",
         sgs="lasd",
         heights_m=z,
         times_s=np.linspace(0.0, 1800.0, NT),
@@ -77,7 +85,7 @@ def _moist_artifact(**over) -> LESReferenceArtifact:
     thl_col = 298.5 + np.clip((z - 500.0) / 1000.0, 0.0, None) * 6.0   # θ_l [K]
     qt_col = np.clip(0.0165 - 6.0e-6 * z, 0.003, None)                 # q_t [kg/kg]
     base = dict(
-        case_name="bomex_run",
+        case_name="cbl_nieuwstadt",
         sgs="lasd",
         heights_m=z,
         times_s=np.linspace(0.0, 1800.0, NT),
@@ -103,6 +111,8 @@ def _moist_artifact(**over) -> LESReferenceArtifact:
         les_setup={"subsidence_species": ["q_v"]},   # BOMEX subsides θ and q_v
     )
     base.update(over)
+    if "microphysics" not in base["les_setup"]:
+        base["les_setup"] = {**base["les_setup"], "microphysics": _record()}
     return LESReferenceArtifact(**base)
 
 
@@ -187,7 +197,7 @@ def _windy_cbl_artifact(**over):
     theta_col = np.where(z > 800.0, 300.0 + 0.006 * (z - 800.0), 300.0)
     theta = np.broadcast_to(theta_col, (NT, NZ)).copy()
     base = dict(
-        case_name="cbl_windy",
+        case_name="cbl_nieuwstadt",
         sgs="lasd",
         heights_m=z,
         times_s=np.linspace(0.0, 1800.0, NT),
@@ -468,7 +478,7 @@ def test_moist_combined_folds_in_qt():
     z = jnp.linspace(10.0, 1500.0, NZ)
     theta = 300.0 + 0.003 * z
     qt_truth = 0.010 + jnp.zeros_like(z)
-    truth = LESTruth(case_name="m", heights_m=z, times_s=jnp.array([1800.0]),
+    truth = LESTruth(case_name="cbl_nieuwstadt", heights_m=z, times_s=jnp.array([1800.0]),
                      theta=theta, u=jnp.zeros_like(z), v=jnp.zeros_like(z),
                      wtheta=jnp.zeros_like(z), qt=qt_truth)
     # θ_l/u/v exact ⇒ their rmse 0; q_t offset ⇒ only qt_rmse nonzero
@@ -522,7 +532,7 @@ def test_partly_cloudy_reference_is_initialised_from_its_recorded_cloud_water():
 
     def _artifact(with_qc):
         return LESReferenceArtifact(
-            case_name="partly_cloudy", sgs="smagorinsky",
+            case_name="cbl_nieuwstadt", sgs="smagorinsky",
             heights_m=z, times_s=jnp.asarray([0.0, 3600.0]),
             theta=theta, u=zero, v=zero,
             wtheta_resolved=zero, wtheta_sgs=zero,
@@ -530,6 +540,7 @@ def test_partly_cloudy_reference_is_initialised_from_its_recorded_cloud_water():
             qc=(qc if with_qc else None),
             prescribe="fluxes",
             w_theta_s=jnp.zeros(nt), w_qv_s=jnp.zeros(nt),
+            les_setup={"microphysics": _record()},
         )
 
     # Without the channel the mean-saturation fallback sees nothing → clear start.
@@ -586,7 +597,7 @@ def test_a_saturation_adjustment_that_did_not_settle_is_refused():
     z = jnp.linspace(0.0, 800.0, nz)
     zero = jnp.zeros((nt, nz))
     art = LESReferenceArtifact(
-        case_name="too_warm_and_wet", sgs="smagorinsky",
+        case_name="cbl_nieuwstadt", sgs="smagorinsky",
         heights_m=z, times_s=jnp.asarray([0.0, 3600.0]),
         theta=jnp.broadcast_to(jnp.full((nz,), 300.0), (nt, nz)),
         u=zero, v=zero, wtheta_resolved=zero, wtheta_sgs=zero,
@@ -595,13 +606,14 @@ def test_a_saturation_adjustment_that_did_not_settle_is_refused():
         qc=None,                       # forces the iterative fallback
         prescribe="fluxes",
         w_theta_s=jnp.zeros(nt), w_qv_s=jnp.zeros(nt),
+        les_setup={"microphysics": _record()},
     )
     with pytest.raises(ValueError, match="did not settle"):
         build_cbl_scm_from_artifact(art, _mynn_config(), nlev=16, dt=10.0)
 
 
 # --- moist SCM microphysics + realised moisture flux --------------------------
-def test_moist_scm_microphysics_precedence_and_legacy():
+def test_moist_scm_microphysics_precedence_and_no_fallback():
     from legoesm.atmosphere.les_suite.scm_runner import (
         microphysics_from_record,
         microphysics_record,
@@ -619,8 +631,15 @@ def test_moist_scm_microphysics_precedence_and_legacy():
     assert moist_scm_microphysics(art) == kes                    # the LES's own scheme
     explicit = MicrophysicsConfig(scheme="sundqvist")
     assert moist_scm_microphysics(art, explicit) is explicit     # caller wins
-    # an artifact without the record keeps its historical pairing
-    assert moist_scm_microphysics(_moist_artifact()).scheme == "sundqvist"
+    # an artifact without the record is refused, even with an explicit scheme
+    import dataclasses
+    bare = dataclasses.replace(art, les_setup={"subsidence_species": ["q_v"]})
+    with pytest.raises(ValueError, match="records no LES microphysics"):
+        moist_scm_microphysics(bare)
+    with pytest.raises(ValueError, match="records no LES microphysics"):
+        moist_scm_microphysics(bare, explicit)
+    with pytest.raises(ValueError, match="records no LES microphysics"):
+        build_cbl_scm_from_artifact(bare, _mynn_config(), nlev=NZ, dt=60.0)
     with pytest.raises(ValueError):
         microphysics_from_record({"scheme": "kessler", "kessler": {"nope": 1.0}})
     with pytest.raises(ValueError):                              # no silent defaults

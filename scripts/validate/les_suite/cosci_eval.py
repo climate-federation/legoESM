@@ -147,11 +147,7 @@ def _require_kessler(artifact):
     must record its LES scheme (no legacy fallback) and that scheme must be Kessler."""
     if not artifact.is_moist:
         return
-    if "microphysics" not in (artifact.les_setup or {}):
-        raise ValueError(f"{artifact.case_name}: a moist reference must record its "
-                         "LES microphysics; the harness scores moist cases with "
-                         "Kessler only")
-    scheme = moist_scm_microphysics(artifact).scheme
+    scheme = moist_scm_microphysics(artifact).scheme   # raises with no record
     if scheme != "kessler":
         raise ValueError(f"{artifact.case_name}: the reference records microphysics "
                          f"{scheme!r}; the harness scores moist cases with Kessler only")

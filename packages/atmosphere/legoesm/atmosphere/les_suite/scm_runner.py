@@ -134,12 +134,6 @@ def _dry_cbl_physics(turbulence: TurbulenceConfig) -> PhysicsConfig:
     )
 
 
-# Microphysics of a moist SCM whose artifact does not record the LES's own
-# (artifacts emitted before the record existed): the diagnostic Sundqvist scheme
-# these artifacts were always paired with.
-_LEGACY_MOIST_SCM_MICROPHYSICS = "sundqvist"
-
-
 def microphysics_record(config: MicrophysicsConfig) -> dict:
     """JSON-serialisable record of a :class:`MicrophysicsConfig` (the active scheme
     and its sub-config) for an artifact's ``les_setup["microphysics"]``."""
@@ -225,16 +219,18 @@ def scm_physics_config(
 def moist_scm_microphysics(artifact: LESReferenceArtifact,
                            microphysics: MicrophysicsConfig | None = None
                            ) -> MicrophysicsConfig:
-    """The microphysics a moist SCM runs against ``artifact``: an explicit
-    ``microphysics`` wins; else the scheme the LES recorded in
-    ``les_setup["microphysics"]`` (same scheme, same coefficients); else, for an
-    artifact without that record, the legacy diagnostic Sundqvist pairing."""
+    """The microphysics a moist SCM runs against ``artifact``. The artifact must
+    record its LES scheme in ``les_setup["microphysics"]``; one without that record
+    is refused, explicit ``microphysics`` or not (user 2026-10-19: no fallback
+    scheme). Given the record, an explicit ``microphysics`` wins; else the recorded
+    scheme and coefficients are used."""
+    setup = artifact.les_setup or {}
+    if "microphysics" not in setup:
+        raise ValueError(f"{artifact.case_name}: the reference records no LES "
+                         "microphysics; there is no fallback scheme")
     if microphysics is not None:
         return microphysics
-    setup = artifact.les_setup or {}
-    if "microphysics" in setup:
-        return microphysics_from_record(setup["microphysics"])
-    return MicrophysicsConfig(scheme=_LEGACY_MOIST_SCM_MICROPHYSICS)
+    return microphysics_from_record(setup["microphysics"])
 
 
 def _seed_rain(artifact: LESReferenceArtifact, micro: MicrophysicsConfig,

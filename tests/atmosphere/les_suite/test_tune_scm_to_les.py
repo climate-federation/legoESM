@@ -23,7 +23,7 @@ def _cbl_artifact() -> LESReferenceArtifact:
     theta_col = np.where(z > 800.0, 300.0 + 0.006 * (z - 800.0), 300.0)
     theta = np.broadcast_to(theta_col, (NT, NZ)).copy()
     return LESReferenceArtifact(
-        case_name="cbl_tune", sgs="lasd", heights_m=z,
+        case_name="cbl_nieuwstadt", sgs="lasd", heights_m=z,
         times_s=np.linspace(0.0, 600.0, NT), theta=theta,
         u=np.zeros((NT, NZ)), v=np.zeros((NT, NZ)),
         wtheta_resolved=np.zeros((NT, NZ)), wtheta_sgs=np.zeros((NT, NZ)),
@@ -221,7 +221,7 @@ def test_main_stamps_flux_provenance(tmp_path):
     assert rec["artifact"] == "cbl_probe"       # artifact stem, not the case name
     assert rec["q0"] == pytest.approx(0.06)     # constant surface flux = Q0
     assert rec["sgs"] == "lasd"
-    assert rec["case"] == "cbl_tune"
+    assert rec["case"] == "cbl_nieuwstadt"
     # nlev/dt recorded so a tuned config can be re-scored faithfully (θ-consistent D7
     # analysis re-scores best_overrides at the SAME resolution/timestep it was tuned at).
     assert rec["nlev"] == NZ

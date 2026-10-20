@@ -19,10 +19,13 @@ def _z():
     return jnp.linspace(10.0, 1600.0, NZ)
 
 
+# Fixtures use cbl_nieuwstadt, a catalog case with no sponge (asserted in
+# test_case_weights_cut_at_the_catalog_sponge_base), so their weights are the
+# plain thickness weights.
 def _dry_snapshot(theta=None, wtheta=None) -> LESTruth:
     z = _z()
     return LESTruth(
-        case_name="cbl_test",
+        case_name="cbl_nieuwstadt",
         heights_m=z,
         times_s=jnp.array([3600.0]),
         theta=300.0 + 0.003 * z if theta is None else theta,
@@ -37,7 +40,7 @@ def _dry_series(nt=4) -> LESTruth:
     theta = 300.0 + 0.003 * z
     theta = jnp.broadcast_to(theta, (nt, NZ))
     return LESTruth(
-        case_name="cbl_series",
+        case_name="cbl_nieuwstadt",
         heights_m=z,
         times_s=jnp.linspace(0.0, 3600.0, nt),
         theta=theta,
@@ -50,7 +53,7 @@ def _dry_series(nt=4) -> LESTruth:
 def _moist_snapshot() -> LESTruth:
     z = _z()
     return LESTruth(
-        case_name="bomex_test",
+        case_name="cbl_nieuwstadt",
         heights_m=z,
         times_s=jnp.array([3600.0]),
         theta=300.0 + 0.003 * z,
@@ -205,9 +208,10 @@ def test_case_weights_cut_at_the_catalog_sponge_base():
     assert float(jnp.sum(w)) == pytest.approx(1.0, rel=1e-12)
     expect = jnp.where(below, base, 0.0) / jnp.sum(jnp.where(below, base, 0.0))
     assert jnp.allclose(w, expect, rtol=1e-12, atol=0.0)
-    # no sponge in the catalog, or not a catalog case: no cutoff
+    # no sponge in the catalog: no cutoff; not a catalog case: refused
     assert jnp.allclose(case_score_weights("cbl_nieuwstadt", z), base, rtol=0.0, atol=0.0)
-    assert jnp.allclose(case_score_weights("cbl_test", z), base, rtol=0.0, atol=0.0)
+    with pytest.raises(ValueError, match="not an LES catalog case"):
+        case_score_weights("cbl_test", z)
 
 
 def test_profile_score_ignores_the_layer_above_the_sponge_base():
@@ -276,3 +280,19 @@ def test_cutoff_accepts_fp32_heights_and_refuses_a_stretched_grid():
         sponge_base_for_score("sbl_gabls1", stretched)
     # no sponge, or an absolute one: nothing to infer, any grid is accepted
     assert sponge_base_for_score("cbl_nieuwstadt", stretched) is None
+
+
+def test_explicit_weights_score_a_non_catalog_column():
+    """A non-catalog name has no sponge cutoff and is refused by default; explicit
+    weights are the way to score it, and bypass the catalog lookup."""
+    from legoesm.core.profile_metrics import layer_weights_from_heights
+    z = _z()
+    truth = LESTruth(case_name="not_a_catalog_case", heights_m=z,
+                     times_s=jnp.array([3600.0]), theta=300.0 + 0.003 * z,
+                     u=jnp.full((NZ,), 1.0), v=jnp.zeros((NZ,)),
+                     wtheta=jnp.full((NZ,), 0.05))
+    with pytest.raises(ValueError, match="not an LES catalog case"):
+        prognostic_profile_score(truth, truth.theta + 0.1, truth.u, truth.v)
+    s = prognostic_profile_score(truth, truth.theta + 0.1, truth.u, truth.v,
+                                 weights=layer_weights_from_heights(z))
+    assert float(s.combined) > 0.0

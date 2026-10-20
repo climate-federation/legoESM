@@ -32,8 +32,8 @@ def _write_variant(d: Path, case: str, sgs: str, dtheta: float) -> None:
 def test_cli_computes_sigma_from_variants(tmp_path, capsys):
     m = _driver()
     for sgs, dth in (("lasd", 0.0), ("smagorinsky", 0.3), ("vreman", -0.2)):
-        _write_variant(tmp_path, "cbl_x", sgs, dth)
-    rc = m.main(["--artifacts-dir", str(tmp_path), "--case", "cbl_x"])
+        _write_variant(tmp_path, "cbl_nieuwstadt", sgs, dth)
+    rc = m.main(["--artifacts-dir", str(tmp_path), "--case", "cbl_nieuwstadt"])
     assert rc == 0
     out = capsys.readouterr().out
     assert "σ_LES" in out and "combined" in out
@@ -41,6 +41,6 @@ def test_cli_computes_sigma_from_variants(tmp_path, capsys):
 
 def test_cli_errors_with_one_variant(tmp_path):
     m = _driver()
-    _write_variant(tmp_path, "cbl_x", "lasd", 0.0)  # only one → cannot form a spread
-    rc = m.main(["--artifacts-dir", str(tmp_path), "--case", "cbl_x"])
+    _write_variant(tmp_path, "cbl_nieuwstadt", "lasd", 0.0)  # only one → cannot form a spread
+    rc = m.main(["--artifacts-dir", str(tmp_path), "--case", "cbl_nieuwstadt"])
     assert rc == 2

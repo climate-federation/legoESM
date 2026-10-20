@@ -12,7 +12,7 @@ from legoesm.atmosphere.les_suite.sigma_les import (
 NZ, NT = 24, 3
 
 
-def _artifact(sgs="lasd", *, case="cbl_x", dtheta=0.0, du=0.0, times=None, moist=False):
+def _artifact(sgs="lasd", *, case="cbl_nieuwstadt", dtheta=0.0, du=0.0, times=None, moist=False):
     """A minimal dry CBL artifact; dtheta/du perturb θ/u so pairs have a known spread."""
     z = np.linspace(10.0, 1500.0, NZ)
     theta = np.broadcast_to(300.0 + 0.004 * z + dtheta, (NT, NZ)).copy()
