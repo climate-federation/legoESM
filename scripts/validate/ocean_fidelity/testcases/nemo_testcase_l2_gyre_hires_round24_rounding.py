@@ -80,9 +80,18 @@ FIELDS = {
 
 
 def _write_json(path: Path, payload: dict) -> None:
+    def numpy_scalar(value):
+        if isinstance(value, np.generic):
+            return value.item()
+        raise TypeError(
+            f"Object of type {type(value).__name__} is not JSON serializable")
+
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(
-        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        json.dumps(
+            payload, indent=2, sort_keys=True, allow_nan=False,
+            default=numpy_scalar,
+        ) + "\n",
         encoding="utf-8",
     )
     temporary.replace(path)

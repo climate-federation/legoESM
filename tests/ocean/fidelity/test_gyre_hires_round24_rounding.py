@@ -96,3 +96,17 @@ def test_gpu_wrapper_requires_an_explicit_physical_device():
                             text=True)
     assert result.returncode == 64
     assert "--physical-gpu" in result.stderr
+
+
+def test_json_writer_serializes_numpy_scalars_and_stays_strict(tmp_path):
+    output = tmp_path / "report.json"
+    ROUND24._write_json(output, {
+        "integer": np.int64(7),
+        "floating": np.float64(0.25),
+        "boolean": np.bool_(True),
+    })
+    assert json.loads(output.read_text()) == {
+        "integer": 7, "floating": 0.25, "boolean": True,
+    }
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        ROUND24._write_json(output, {"unsupported": object()})
