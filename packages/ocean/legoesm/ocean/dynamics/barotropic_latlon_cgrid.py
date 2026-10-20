@@ -4238,6 +4238,8 @@ def nemo_een_ratio_fold_exchange(r3u, r3v, r3f, grid, selected):
             "north fold with its pivot row stored")
     n = r3u.shape[1]
     second_half = jnp.arange(n) >= n // 2
+    while second_half.ndim < r3u.ndim - 1:
+        second_half = second_half[..., None]
     return (r3u.at[-1].set(jnp.where(second_half, r3u[-1][fold_perm_u(fold)], r3u[-1])),
             r3v.at[-1].set(r3v[-2][fold.perm_v]),
             r3f.at[-1].set(r3f[-2][fold_perm_f(fold)]))

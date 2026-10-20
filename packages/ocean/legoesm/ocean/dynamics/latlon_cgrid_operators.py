@@ -38,6 +38,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     reads_stored_vface_metric,
     fold_is_local,
     north_fold_mask,
+    north_neighbor_T,
     apply_north_fold,
     lat_ends_are_poles,  # noqa: F401 — re-export for ocean dynamics call sites
     pad_ns_scalar,
@@ -4086,26 +4087,12 @@ def _nemo_hpg_sco_literal_cgrid_impl(
 
     rhd_i1 = jnp.roll(rhd, -1, axis=1)
     rhd_j1 = jnp.roll(rhd, -1, axis=0)
-    fold = getattr(grid, "fold", None)
-    def _folded_north(value, rolled):
-        source = fold_ghost_source_T(value, fold)[0]
-        folded = source[fold.perm_T]
-        if fold_is_local(grid):
-            return rolled.at[-1].set(folded)
-        nmask = north_fold_mask(grid)
-        if nmask is not None:
-            selector = nmask
-            while selector.ndim < folded.ndim:
-                selector = selector[..., None]
-            return rolled.at[-1].set(
-                jnp.where(selector, folded, rolled[-1]))
-        return rolled
 
     if _north_fold_density:
         # dynhpg.f90:414-416,445-453 reads jj+1 at V points.  At NEMO's
         # northern fold that neighbour is the T-point fold ghost supplied by
         # lbc_lnk, not a cyclic roll of the final owned row.
-        rhd_j1 = _folded_north(rhd, rhd_j1)
+        rhd_j1 = north_neighbor_T(rhd, grid, rolled=rhd_j1)
     e3w_i1 = jnp.roll(e3w, -1, axis=1)
     e3w_j1 = jnp.roll(e3w, -1, axis=0)
     dep_i1 = jnp.roll(gdept_z0, -1, axis=1)
@@ -4115,8 +4102,8 @@ def _nemo_hpg_sco_literal_cgrid_impl(
         # terrain-correction depth are halo reads too, not cyclic rolls of the
         # owned pivot row.  Kept behind an explicit card choice because only
         # the G6 multilevel record has certified this composition.
-        e3w_j1 = _folded_north(e3w, e3w_j1)
-        dep_j1 = _folded_north(gdept_z0, dep_j1)
+        e3w_j1 = north_neighbor_T(e3w, grid, rolled=e3w_j1)
+        dep_j1 = north_neighbor_T(gdept_z0, grid, rolled=dep_j1)
 
     zhpi = multiply(
         multiply(zcoef0, r1_e1u),

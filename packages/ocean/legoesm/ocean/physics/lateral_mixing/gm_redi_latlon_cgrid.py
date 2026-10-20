@@ -25,6 +25,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.source_rounding import nemo_source_round
+from legoesm.core.transcendentals import sin as precision_sin
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.grids.operators_latlon_cgrid import (
     fold_ghost_source_T,
@@ -1664,13 +1665,18 @@ def compute_nemo_native_slopes(
     return ((uslp, vslp, wslpi, wslpj, _nemo_native_slope_diagnostics(locals())) if return_diagnostics else (uslp, vslp, wslpi, wslpj))
 
 
-def _nemo_treguier_left_reductions(zn_term, zah_term, ze3w, zhw_offset):
+def _nemo_treguier_left_reductions(
+    zn_term, zah_term, ze3w, zhw_offset, *, source_ordered=False,
+):
     """Source-ordered ``ldf_eiv`` column accumulators (jk=1..jpk)."""
     def _left_body(jk, carry):
         _zn, _zah, _zhw = carry
-        return (_zn + zn_term[..., jk],
-                _zah + zah_term[..., jk],
-                _zhw + ze3w[..., jk])
+        values = (_zn + zn_term[..., jk],
+                  _zah + zah_term[..., jk],
+                  _zhw + ze3w[..., jk])
+        if source_ordered:
+            values = tuple(nemo_source_round(value) for value in values)
+        return values
 
     _zero = jnp.zeros_like(zn_term[..., 0])
     return jax.lax.fori_loop(
@@ -1717,6 +1723,7 @@ def compute_treguier_kappa_gm_nemo_native(
     omega: float = constants.Omega,
     vertical_reduction_evaluation: str = "tree",
     sqrt_evaluation: str = "guarded_floor",
+    source_ordered_final: bool = False,
     pn2_override: jnp.ndarray | None = None,
     e3w_override: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
@@ -1838,12 +1845,23 @@ def compute_treguier_kappa_gm_nemo_native(
         # once, then each jk contributes exactly once in surface-to-bottom
         # source order. A tree reduction changes the last bits of all three
         # operands and those bits survive the Rossby-radius/timescale chain.
-        _zn_term = sqrt_zn2 * e3w_3d
-        _ze3w = e3w_3d * wmask3
-        _zah_term = zn2 * (wslpi ** 2 + wslpj ** 2) * _ze3w
+        if source_ordered_final:
+            # ldftra.f90:752-760: the selected L3 route materializes each
+            # scalar loop statement before the next accumulator update.
+            b = nemo_source_round
+            _zn2 = b(jnp.maximum(pn2, jnp.zeros_like(pn2)))
+            _zn_term = b(sqrt_zn2 * e3w_3d)
+            _ze3w = b(e3w_3d * wmask3)
+            _slope2 = b(b(wslpi * wslpi) + b(wslpj * wslpj))
+            _zah_term = b(b(_zn2 * _slope2) * _ze3w)
+        else:
+            _zn_term = sqrt_zn2 * e3w_3d
+            _ze3w = e3w_3d * wmask3
+            _zah_term = zn2 * (wslpi ** 2 + wslpj ** 2) * _ze3w
 
         zn, zah, zhw = _nemo_treguier_left_reductions(
-            _zn_term, _zah_term, _ze3w, TREGUIER_ZHW_OFFSET_M)
+            _zn_term, _zah_term, _ze3w, TREGUIER_ZHW_OFFSET_M,
+            source_ordered=source_ordered_final)
     elif _reduction == "tree":
         # Preserve the generic/off statements byte-for-byte.
         zn = jnp.sum(sqrt_zn2 * e3w_3d, axis=-1)  # :689, unmasked term
@@ -1855,18 +1873,49 @@ def compute_treguier_kappa_gm_nemo_native(
             "GMRediConfig.treguier_vertical_reduction_evaluation must be "
             f"'tree' or 'nemo_left', got {_reduction!r}")
 
-    f_abs = jnp.maximum(jnp.abs(f_coriolis), TREGUIER_F_MIN)
-    ro = jnp.clip(TREGUIER_RO_FACTOR * zn / f_abs,
-                  TREGUIER_RO_MIN_M, TREGUIER_RO_MAX_M)
+    if source_ordered_final:
+        # ldftra.f90:765-776.  zfw is recomputed from gphit; the tropical
+        # taper separately reads the mesh's stored ff_t.
+        b = nemo_source_round
+        two_omega = b(jnp.asarray(2.0, dtype=dtype)
+                      * jnp.asarray(omega, dtype=dtype))
+        zfw = b(jnp.maximum(
+            jnp.abs(b(two_omega * precision_sin(grid.lat_T))),
+            jnp.asarray(TREGUIER_F_MIN, dtype=dtype)))
+        ro = b(jnp.asarray(TREGUIER_RO_FACTOR, dtype=dtype) * zn)
+        ro = b(ro / zfw)
+        ro = b(jnp.maximum(
+            jnp.asarray(TREGUIER_RO_MIN_M, dtype=dtype),
+            jnp.minimum(ro, jnp.asarray(TREGUIER_RO_MAX_M, dtype=dtype))))
+    else:
+        f_abs = jnp.maximum(jnp.abs(f_coriolis), TREGUIER_F_MIN)
+        ro = jnp.clip(TREGUIER_RO_FACTOR * zn / f_abs,
+                      TREGUIER_RO_MIN_M, TREGUIER_RO_MAX_M)
     # Same sqrt(0)-VJP guard as zn above: zah is EXACTLY 0 wherever wslpi=
     # wslpj=0 (dry columns, or a genuinely flat/unstratified wet column —
     # unlike compute_treguier_kappa_gm's sigma, which always carries a
     # 1e-30 floor baked into S_mag, wslpi/wslpj here are the raw
-    # ldfslp-native slopes and CAN be exact zero); floor before sqrt.
-    t_inv = jnp.sqrt(jnp.maximum(zah, 1e-30) / jnp.maximum(zhw, _EPS_DIV))
-    f20 = 2.0 * omega * jnp.sin(jnp.deg2rad(TREGUIER_TAPER_LAT_DEG))
-    taper = jnp.minimum(1.0, jnp.abs(f_coriolis) / f20)
-    kappa = jnp.minimum(taper * ro ** 2 * t_inv, cfg.aei0)
+    # ldfslp-native slopes and CAN be exact zero). Preserve NEMO's exact
+    # forward sqrt(0), but select its finite zero tangent in reverse mode.
+    if source_ordered_final:
+        ratio = b(zah / zhw)
+        t_inv = b(_nemo_sqrt_nonnegative_forward_exact(ratio))
+        zaeiw = b(b(b(ro * ro) * t_inv) * mask)
+        rad20 = b(jnp.asarray(TREGUIER_TAPER_LAT_DEG, dtype=dtype)
+                  * jnp.asarray(float.fromhex("0x1.1df46a2529d39p-6"),
+                                dtype=dtype))
+        f20 = b(two_omega * precision_sin(rad20))
+        z1_f20 = b(jnp.asarray(1.0, dtype=dtype) / f20)
+        taper = b(jnp.minimum(
+            jnp.asarray(1.0, dtype=dtype),
+            jnp.abs(b(f_coriolis * z1_f20))))
+        zzaei = b(taper * zaeiw)
+        kappa = b(jnp.minimum(zzaei, jnp.asarray(cfg.aei0, dtype=dtype)))
+    else:
+        t_inv = jnp.sqrt(jnp.maximum(zah, 1e-30) / jnp.maximum(zhw, _EPS_DIV))
+        f20 = 2.0 * omega * jnp.sin(jnp.deg2rad(TREGUIER_TAPER_LAT_DEG))
+        taper = jnp.minimum(1.0, jnp.abs(f_coriolis) / f20)
+        kappa = jnp.minimum(taper * ro ** 2 * t_inv, cfg.aei0)
     # Same equatorial-taper floor as the generic path
     # (``_gm_redi_common.compute_treguier_kappa_gm``): the NEMO-native branch
     # runs the IDENTICAL min(1,|f/f20|) taper, so it needs the IDENTICAL floor
@@ -1876,8 +1925,9 @@ def compute_treguier_kappa_gm_nemo_native(
     # when a trained/traced aei0 disables the Python-level validator) and
     # applied BEFORE the wet mask so dry columns still return exactly 0;
     # default kappa_min=0.0 keeps this byte-identical.
-    kappa = jnp.maximum(kappa, jnp.minimum(cfg.kappa_min, cfg.aei0))
-    kappa = jnp.where(mask > 0.5, kappa, 0.0)
+    if not source_ordered_final:
+        kappa = jnp.maximum(kappa, jnp.minimum(cfg.kappa_min, cfg.aei0))
+        kappa = jnp.where(mask > 0.5, kappa, 0.0)
     if return_diagnostics:
         # The intermediates, named as in NEMO ldf_eiv (ldftra.F90:664-707), so
         # an oracle deficit in the final coefficient can be localised to ONE
@@ -2233,6 +2283,9 @@ def nemo_eiv_bolus_transport(
     out_shape: tuple,
     dtype,
     kappa_face_average: bool = False,
+    *,
+    grid=None,
+    north_fold: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """NEMO ``ldf_eiv_trp_MLF`` eddy-induced (GM bolus) TRANSPORT, curl form.
 
@@ -2274,24 +2327,97 @@ def nemo_eiv_bolus_transport(
     # legacy path stays bit-identical.
     if kappa_face_average:
         aeiu_u = 0.5 * (aeiu + jnp.roll(aeiu, -1, ax_x))       # -> u-face
-        aeiu_v = 0.5 * (aeiu + jnp.roll(aeiu, -1, ax_y))       # -> v-face
+        aeiu_north = (north_neighbor_T(aeiu, grid) if north_fold
+                      else jnp.roll(aeiu, -1, ax_y))
+        aeiu_v = 0.5 * (aeiu + aeiu_north)                     # -> v-face
+        if north_fold:
+            # ldftra.f90:780-781 are stored statements before lbc_lnk and
+            # the later vertical transport loop.  Preserve those rounding
+            # boundaries for the selected ORCA2 L3 literal path.
+            b = nemo_source_round
+            half = jnp.asarray(0.5, dtype=dtype)
+            aeiu_u = b(b(half * b(aeiu + jnp.roll(aeiu, -1, ax_x))))
+            aeiu_v = b(b(half * b(aeiu + aeiu_north)))
     else:
         aeiu_u = aeiu_v = aeiu
+    if north_fold:
+        # ldftra.f90:783: lbc_lnk(zaeiu,'U',1,zaeiv,'V',1).
+        # This is the same shared U/V ratio exchange used by domqco after its
+        # face construction: U replaces its image half on the pivot row and
+        # V replaces the whole pivot row from the mirrored row below.
+        from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+            nemo_een_ratio_fold_exchange,
+        )
+        aeiu_u, aeiu_v = nemo_een_ratio_fold_exchange(
+            aeiu_u, aeiu_v, aeiu_v, grid, True)[:2]
     aeiu_if_u = 0.5 * (aeiu_u + jnp.roll(aeiu_u, -1, ax_z))   # mk() at iface below k
     aeiu_if_v = 0.5 * (aeiu_v + jnp.roll(aeiu_v, -1, ax_z))
     wslpi_u = 0.5 * (wslpi_kp1 + jnp.roll(wslpi_kp1, -1, ax_x))  # mi(wslpi) -> u-face
-    wslpj_v = 0.5 * (wslpj_kp1 + jnp.roll(wslpj_kp1, -1, ax_y))
+    if north_fold:
+        # ldfslp.f90:338 folds wslpj as 'W' with sign -1: its ghost row is
+        # the NEGATED mirror of the row below the pivot.
+        wslpj_north = north_neighbor_T(wslpj_kp1, grid)
+        wslpj_north = wslpj_north.at[-1].set(-wslpj_north[-1])
+    else:
+        wslpj_north = jnp.roll(wslpj_kp1, -1, ax_y)
+    wslpj_v = 0.5 * (wslpj_kp1 + wslpj_north)
     act_kp1 = act_below
-    wumask_uw = (u_mask[:, 1:, jnp.newaxis] * act * jnp.roll(act, -1, ax_x)
-                 * act_kp1 * jnp.roll(act_kp1, -1, ax_x))
-    wvmask_vw = (v_mask[1:, :, jnp.newaxis] * act * jnp.roll(act, -1, ax_y)
-                 * act_kp1 * jnp.roll(act_kp1, -1, ax_y))
-    psi_uw = -(e2u[:, :, jnp.newaxis] * wslpi_u * aeiu_if_u * wumask_uw)
-    psi_vw = -(e1v[:, :, jnp.newaxis] * wslpj_v * aeiu_if_v * wvmask_vw)
+    if north_fold:
+        umask3 = u_mask[:, 1:, jnp.newaxis] * act * jnp.roll(act, -1, ax_x)
+        wumask_uw = umask3 * (
+            u_mask[:, 1:, jnp.newaxis] * act_kp1
+            * jnp.roll(act_kp1, -1, ax_x))
+        act_north = north_neighbor_T(act, grid)
+        act_kp1_north = north_neighbor_T(act_kp1, grid)
+        vmask3 = v_mask[1:, :, jnp.newaxis] * act * act_north
+        wvmask_vw = vmask3 * act_kp1 * act_kp1_north
+        # dommsk's compact V pivot row is closed before lbc_lnk; ldf_eiv_trp
+        # consumes the exchanged row, which is open wherever both fold-image
+        # T columns and their cells below are wet.
+        wvmask_vw = wvmask_vw.at[-1].set(
+            act[-1] * act_north[-1] * act_kp1[-1]
+            * act_kp1_north[-1])
+        vmask3 = vmask3.at[-1].set(act[-1] * act_north[-1])
+    else:
+        # Legacy cards retain their exact pre-L3 operation schedule.
+        wumask_uw = (
+            u_mask[:, 1:, jnp.newaxis] * act * jnp.roll(act, -1, ax_x)
+            * act_kp1 * jnp.roll(act_kp1, -1, ax_x))
+        wvmask_vw = (
+            v_mask[1:, :, jnp.newaxis] * act * jnp.roll(act, -1, ax_y)
+            * act_kp1 * jnp.roll(act_kp1, -1, ax_y))
+    if north_fold:
+        # Literal ldftra.f90:947-950.  NEMO first stores the face coefficient
+        # at every masked level (lines 785-787), then multiplies the unhalved
+        # slope and coefficient sums by r1_4 in the written left association.
+        # Computing two independent half-averages here changes the last bits.
+        b = nemo_source_round
+        quarter = jnp.asarray(-0.25, dtype=dtype)
+        aeiu_level_u = b(aeiu_u * umask3)
+        aeiu_level_v = b(aeiu_v * vmask3)
+        slope_sum_u = b(wslpi_kp1 + jnp.roll(wslpi_kp1, -1, ax_x))
+        slope_sum_v = b(wslpj_kp1 + wslpj_north)
+        kappa_sum_u = b(aeiu_level_u + jnp.roll(aeiu_level_u, -1, ax_z))
+        kappa_sum_v = b(aeiu_level_v + jnp.roll(aeiu_level_v, -1, ax_z))
+        psi_uw = b(b(b(b(quarter * e2u[:, :, jnp.newaxis])
+                         * slope_sum_u) * kappa_sum_u) * wumask_uw)
+        psi_vw = b(b(b(b(quarter * e1v[:, :, jnp.newaxis])
+                         * slope_sum_v) * kappa_sum_v) * wvmask_vw)
+    else:
+        psi_uw = -(e2u[:, :, jnp.newaxis] * wslpi_u
+                   * aeiu_if_u * wumask_uw)
+        psi_vw = -(e1v[:, :, jnp.newaxis] * wslpj_v
+                   * aeiu_if_v * wvmask_vw)
     psi_uw_top = jnp.roll(psi_uw, +1, ax_z).at[:, :, 0].set(0.0)
     psi_vw_top = jnp.roll(psi_vw, +1, ax_z).at[:, :, 0].set(0.0)
-    u_eiv = psi_uw - psi_uw_top
-    v_eiv = psi_vw - psi_vw_top
+    if north_fold:
+        # ldftra.f90:954-955 pFu - (zpsi(jk) - zpsi(jk+1)); x + u_eiv is then
+        # that subtraction bit for bit, signed zeros included.
+        u_eiv = -(psi_uw_top - psi_uw)
+        v_eiv = -(psi_vw_top - psi_vw)
+    else:
+        u_eiv = psi_uw - psi_uw_top
+        v_eiv = psi_vw - psi_vw_top
     w_eiv_kp1 = ((psi_uw - jnp.roll(psi_uw, +1, ax_x))
                  + (psi_vw - jnp.roll(psi_vw, +1, ax_y)))
     return u_eiv, v_eiv, w_eiv_kp1
@@ -3088,6 +3214,10 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
             kappa_GM, bolus_wslpi_kp1, bolus_wslpj_kp1, e2u, e1v,
             u_mask, v_mask, act, act_below, q.shape, dtype,
             kappa_face_average=gm_bolus_kappa_face_average,
+            # ldf_eiv_trp runs only for ln_ldfeiv (traadv.f90:255-257), the
+            # through-FCT export; L2's zero centred bolus keeps its program.
+            grid=grid,
+            north_fold=north_fold and gm_bolus_advection == "through_fct",
         )
         bolus_transport = (u_eiv, v_eiv, w_eiv_kp1)
         if gm_bolus_advection == "centred":
@@ -4417,6 +4547,9 @@ def native_treguier_kappa_for_state(
             cfg, "treguier_vertical_reduction_evaluation", "tree"),
         sqrt_evaluation=getattr(
             cfg, "treguier_sqrt_evaluation", "guarded_floor"),
+        source_ordered_final=bool(
+            cfg.nemo_slope_north_fold
+            and cfg.gm_bolus_advection == "through_fct"),
         pn2_override=pn2,
         e3w_override=e3w,
     )

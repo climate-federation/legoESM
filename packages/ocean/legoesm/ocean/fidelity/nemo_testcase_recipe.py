@@ -2618,6 +2618,8 @@ def _nemo_linear_bottom_drag(model_config):
 # --- rung SMT-3 (decision 93): ORCA2 rung 0's namtra_ldf ------------
 _SMT3_RN_UD = 0.018              # lateral diffusive velocity       [m/s]
 _SMT3_RN_LD = 200.0e3            # lateral diffusive length         [m]
+_ORCA2_EIV_RN_UE = 0.03          # namtra_eiv.rn_Ue                 [m/s]
+_ORCA2_EIV_RN_LE = 200.0e3       # namtra_eiv.rn_Le                 [m]
 
 
 def _orca2_isoneutral_gm_redi(
@@ -2627,6 +2629,7 @@ def _orca2_isoneutral_gm_redi(
     redi_flux_geometry_stage: str = "step_entry", slope_uv_source_rounding: bool = False,
     redi_a33_source_ordering: bool = False,
     redi_flux_stored_face_ratios: bool = False,
+    eddy_induced_velocity: bool = False,
 ):
     """ORCA2's shared standard-isoneutral ``&namtra_ldf`` selection.
 
@@ -2638,14 +2641,20 @@ def _orca2_isoneutral_gm_redi(
 
     from legoesm.ocean.physics.lateral_mixing.config import (
         GMRediConfig,
+        TreguierConfig,
         VisbeckConfig,
     )
+    aei0 = 0.5 * _ORCA2_EIV_RN_UE * _ORCA2_EIV_RN_LE
     return GMRediConfig(
-        kappa_GM=0.0,
+        kappa_GM=aei0 if eddy_induced_velocity else 0.0,
         kappa_Redi=kappa_redi,
         S_max=0.01,
         visbeck=VisbeckConfig(enabled=False),
+        treguier=TreguierConfig(
+            enabled=eddy_induced_velocity, aei0=aei0, kappa_min=0.0),
         slope_scheme="nemo_iso_lap",
+        gm_bolus_advection=("through_fct" if eddy_induced_velocity else "centred"),
+        gm_bolus_kappa_face_average=eddy_induced_velocity,
         slope_density="neutral",
         slope_limit="nemo_cap",
         slope_positions="nemo_native",
@@ -2673,6 +2682,10 @@ def _orca2_isoneutral_gm_redi(
         redi_a33_source_ordering=redi_a33_source_ordering,
         redi_flux_stored_face_ratios=redi_flux_stored_face_ratios,
         redi_w_slope_stage_evaluation="nemo_post_slope_pair",
+        treguier_vertical_reduction_evaluation=(
+            "nemo_left" if eddy_induced_velocity else "tree"),
+        treguier_sqrt_evaluation=(
+            "nemo_forward_exact" if eddy_induced_velocity else "guarded_floor"),
         msc_stabilize=True,
         implicit_K33=True,
     )
