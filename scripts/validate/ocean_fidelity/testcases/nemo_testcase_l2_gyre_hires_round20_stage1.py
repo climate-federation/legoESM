@@ -274,6 +274,42 @@ def _plant_one_ulp(field: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return planted
 
 
+def _plant_largest_coefficient_one_ulp(
+    pair: tuple[np.ndarray, np.ndarray],
+) -> tuple[tuple[np.ndarray, np.ndarray], dict[str, object]]:
+    """Move one finite nonzero coefficient by one ULP away from zero."""
+    arrays = tuple(np.asarray(value, dtype=np.float64) for value in pair)
+    maxima = []
+    for value in arrays:
+        active = np.isfinite(value) & (value != 0.0)
+        require(np.any(active), "coefficient field has no finite nonzero word")
+        maxima.append(float(np.max(np.where(active, np.abs(value), -np.inf))))
+    field_index = int(np.argmax(maxima))
+    planted_field = np.array(arrays[field_index], copy=True)
+    index = tuple(np.unravel_index(
+        int(np.argmax(np.abs(planted_field))), planted_field.shape))
+    before = planted_field[index]
+    direction = np.inf if before >= 0.0 else -np.inf
+    planted_field[index] = np.nextafter(before, direction)
+    planted = list(arrays)
+    planted[field_index] = planted_field
+    movement = wordwise_result(
+        np.concatenate([value.ravel() for value in planted]),
+        np.concatenate([value.ravel() for value in arrays]),
+    )
+    require(
+        movement["unequal_words"] == 1 and movement["max_ulp"] == 1,
+        "coefficient plant did not move exactly one word by one ULP",
+    )
+    return (planted[0], planted[1]), {
+        "field": ("ahmt", "ahmf")[field_index],
+        "index_j_i_k": [int(value) for value in index],
+        "before": float(before),
+        "after": float(planted_field[index]),
+        "coefficient_movement": movement,
+    }
+
+
 def _state_bytes_equal(left, right) -> tuple[bool, int]:
     import jax
 
@@ -571,6 +607,7 @@ def run(
                 for index, name in enumerate(("ahmt", "ahmf"))
             }
             arms = {}
+            pair_operands = None
             for name, override in (
                 ("ahmt", (scalar_pair[0], live_pair[1])),
                 ("ahmf", (live_pair[0], scalar_pair[1])),
@@ -579,6 +616,8 @@ def run(
                 factor_trace = jax.device_get(source_order_step(
                     tuple(jnp.asarray(value) for value in override)))
                 factor_operands = factor_trace.operator_operands[0]
+                if name == "ahmt_ahmf":
+                    pair_operands = factor_operands
                 rows = {}
                 for boundary in ("after_hpg", "after_ldf"):
                     live_boundary = _trace_source_boundary(
@@ -603,10 +642,37 @@ def run(
                         rows["after_ldf"][face]["legoesm_minus_scalar"]
                         ["bit_exact"] for face in FACE_ORDER),
                 }
+            require(pair_operands is not None,
+                    "paired coefficient substitution was not evaluated")
+            planted_pair, coefficient_plant = (
+                _plant_largest_coefficient_one_ulp(scalar_pair))
+            planted_trace = jax.device_get(source_order_step(
+                tuple(jnp.asarray(value) for value in planted_pair)))
+            planted_operands = planted_trace.operator_operands[0]
+            coefficient_plant["rows_vs_unplanted_pair"] = {}
+            for boundary in ("after_hpg", "after_ldf"):
+                unplanted = _trace_source_boundary(pair_operands, boundary)
+                planted = _trace_source_boundary(planted_operands, boundary)
+                coefficient_plant["rows_vs_unplanted_pair"][boundary] = {
+                    face: wordwise_result(
+                        planted[face][masks[face]],
+                        unplanted[face][masks[face]],
+                    )
+                    for face in FACE_ORDER
+                }
+            require(all(
+                coefficient_plant["rows_vs_unplanted_pair"]["after_hpg"]
+                [face]["bit_exact"] for face in FACE_ORDER
+            ), "coefficient plant moved the upstream HPG boundary")
+            require(any(
+                not coefficient_plant["rows_vs_unplanted_pair"]["after_ldf"]
+                [face]["bit_exact"] for face in FACE_ORDER
+            ), "active one-ULP coefficient plant did not reach post-LDF")
             coefficient_factor_walk = {
                 "input_time_level": "Nbb before velocity",
                 "coefficient_rows": coefficient_rows,
                 "arms": arms,
+                "one_ulp_control": coefficient_plant,
                 "owner": coefficient_factor_owner(arms),
             }
 

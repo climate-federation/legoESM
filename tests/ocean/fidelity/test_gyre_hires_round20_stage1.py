@@ -47,6 +47,21 @@ def test_envelope_score_and_one_ulp_plant_fire():
     assert moved["clears_four_times_twin"]
 
 
+def test_largest_coefficient_plant_moves_one_word_by_one_ulp():
+    module = _load_module()
+    pair = (
+        np.array([[[1.0], [2.0]]], dtype=np.float64),
+        np.array([[[3.0], [4.0]]], dtype=np.float64),
+    )
+    planted, control = module._plant_largest_coefficient_one_ulp(pair)
+    assert control["field"] == "ahmf"
+    assert control["index_j_i_k"] == [0, 1, 0]
+    assert control["coefficient_movement"]["unequal_words"] == 1
+    assert control["coefficient_movement"]["max_ulp"] == 1
+    np.testing.assert_array_equal(planted[0], pair[0])
+    assert planted[1][0, 1, 0] == np.nextafter(4.0, np.inf)
+
+
 def test_envelope_uses_registered_four_times_maximum():
     module = _load_module()
     scalar = np.zeros(2, dtype=np.float64)
