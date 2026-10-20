@@ -169,19 +169,28 @@ Stage scoring covered kt 1 stages 1--3. Geothermal scoring covered kt 1--10.
 Each geothermal step has 16,428 nonzero-flux wet columns and five zero-flux
 wet columns. Every maximum absolute difference is exactly 0.0.
 
-The exact score commands used `python
-scripts/validate/ocean_fidelity/testcases/nemo_testcase_g2_orca2bathy_ladder.py`
-with `--case ORCA2L4-bbc`, `--kt-from 1 --kt-to 10`, and output paths named
-below. Their arm-specific arguments were:
+The exact score commands were:
 
-```text
---arm independent --root twin_a --restart-root twin_b --restart-root twin_c
---arm given_entry --root twin_a --restart-root twin_b --restart-root twin_c --entries 1,3,4,5,6,7,8,9,10
---arm stages --root twin_a --restart-root twin_b --restart-root twin_c --kt-from 1 --kt-to 1
---arm geothermal --root twin_a --restart-root twin_b --restart-root twin_c
+```bash
+export PATH=/home/dbalwada/legoESM/.venv/bin:$PATH
+export PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src
+export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
+E=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round53/oracle_l4_r53
+S=scripts/validate/ocean_fidelity/testcases/nemo_testcase_g2_orca2bathy_ladder.py
+python "$S" --root "$E/twin_a" --restart-root "$E/twin_b" --restart-root "$E/twin_c" --arm independent --kt-from 1 --kt-to 10 --case ORCA2L4-bbc --output "$E/scores/final_recheck_independent.json"
+python "$S" --root "$E/twin_a" --restart-root "$E/twin_b" --restart-root "$E/twin_c" --arm given_entry --kt-from 1 --kt-to 10 --entries 1,3,4,5,6,7,8,9,10 --case ORCA2L4-bbc --output "$E/scores/final_recheck_given_entry.json"
+python "$S" --root "$E/twin_a" --restart-root "$E/twin_b" --restart-root "$E/twin_c" --arm stages --kt-from 1 --kt-to 1 --case ORCA2L4-bbc --output "$E/scores/final_recheck_stages_kt1.json"
+python "$S" --root "$E/twin_a" --restart-root "$E/twin_b" --restart-root "$E/twin_c" --arm geothermal --kt-from 1 --kt-to 10 --case ORCA2L4-bbc --output "$E/scores/final_recheck_geothermal.json"
 ```
 
-The output hashes were measured with `sha256sum` on the four final files:
+The output hashes were measured with:
+
+```bash
+sha256sum "$E/scores/final_recheck_independent.json" \
+  "$E/scores/final_recheck_given_entry.json" \
+  "$E/scores/final_recheck_stages_kt1.json" \
+  "$E/scores/final_recheck_geothermal.json"
+```
 
 ```text
 d1d6ea623f8287bdfa6879e4a6bdff873c8e920326c45ca5f5e73117fc5a905f  final_recheck_independent.json
@@ -192,7 +201,15 @@ d1d6ea623f8287bdfa6879e4a6bdff873c8e920326c45ca5f5e73117fc5a905f  final_recheck_
 
 After recursively deleting only provenance/timing keys
 (`legoesm_git_sha`, `packages_tree`, and `seconds`) and canonicalizing with
-`jq -cS`, old and final scientific payload hashes matched pairwise:
+`jq -cS`, old and final scientific payload hashes matched pairwise. The
+measurement command was:
+
+```bash
+for stem in independent given_entry stages_kt1 geothermal; do
+  jq -cS 'walk(if type == "object" then del(.legoesm_git_sha,.packages_tree,.seconds) else . end)' "$E/scores/$stem.json" | sha256sum
+  jq -cS 'walk(if type == "object" then del(.legoesm_git_sha,.packages_tree,.seconds) else . end)' "$E/scores/final_recheck_$stem.json" | sha256sum
+done
+```
 
 ```text
 independent old/final c990bd7a289d49ab8ff98cfbdbe598b3db88956b53204ffd360f32a8483fe54e
@@ -203,7 +220,7 @@ geothermal old/final f6498933ea9dbe6a9ad95e2af956eb207196055ca54103cb6b6cd47c28f
 
 ## 6. Tests, gates, and control scope
 
-The focused CPU/x64 suite passed 31 / 31. Its new tests bind exact binary
+The focused CPU/x64 suite passed 32 / 32. Its new tests bind exact binary
 widening, association, required constants, both order guards, existing-record
 passivity plus plant, the real production model step, and deletion of the
 actual stage-3 model block. The direct receipt citation gate and its 17-test
