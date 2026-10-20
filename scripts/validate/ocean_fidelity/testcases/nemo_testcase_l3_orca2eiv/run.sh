@@ -10,8 +10,11 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repo=$(git -C "$here" rev-parse --show-toplevel) || fail 'not in a worktree'
 readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly REF_CFG=ORCA2_ICE_PISCES TARGET_NAME=ORCA2L3_EIV_R20
+readonly REF_TARGET_NAME=ORCA2L3_EIV_R20_REF
 readonly TARGET=$NEMO_ROOT/cfgs/$TARGET_NAME
+readonly REF_TARGET=$NEMO_ROOT/cfgs/$REF_TARGET_NAME
 readonly BASE=$NEMO_ROOT/cfgs/ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1
+readonly REF_BASE=$NEMO_ROOT/cfgs/ORCA2G5_OMIP_L4_R31REF_FIX1
 readonly ORCA2=$NEMO_ROOT/cfgs/ORCA2_OMIP_L4
 readonly SOURCE=$NEMO_ROOT/src/OCE/LDF/ldftra.F90
 readonly PP_SOURCE=$ORCA2/BLD/ppsrc/nemo/ldftra.f90
@@ -25,7 +28,10 @@ readonly ICE_REF=$NEMO_ROOT/cfgs/SHARED/namelist_ice_ref
 readonly G9_RECORD=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round46/oracle_g9_r46/twin_a
 readonly L2_RECORD=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round17/oracle_l2_r17/twin_a
 readonly EVIDENCE=${EVIDENCE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round20/oracle_l3_r20}
+readonly FAILED1_LOG=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round20/oracle_l3_r20_failed1/twin_a/ocean.output
+readonly SMOKE=$EVIDENCE/smoke_2step REF=$EVIDENCE/ref_100step
 readonly TWIN_A=$EVIDENCE/twin_a TWIN_B=$EVIDENCE/twin_b TWIN_C=$EVIDENCE/twin_c
+readonly FSBC=2
 readonly INPUT_FILES=(domain_cfg.nc data_1m_potential_temperature_nomask.nc
   data_1m_salinity_nomask.nc u_10.15JUNE2009_fill.nc v_10.15JUNE2009_fill.nc
   ncar_rad.15JUNE2009_fill.nc t_10.15JUNE2009_fill.nc q_10.15JUNE2009_fill.nc
@@ -42,19 +48,17 @@ input_sha() { sed -nE "s/^  \[$1\]=([0-9a-f]{64})$/\1/p" "$G5_TOOL"; }
 require_absent() { [[ ! -e "$1" ]] || return 1; }
 ref_is_listed() { awk -v n="$1" '$1==n {found=1} END{exit !found}' "$NEMO_ROOT/cfgs/ref_cfgs.txt"; }
 
-check_namelist_clock() {
+check_namelist_clock() { # NEMO's rule, sbcmod.f90:342-347
   "$PY" - "$1" <<'PY'
 import re, sys
 text = open(sys.argv[1]).read()
-def one(name):
-    hits = re.findall(rf"^\s*{name}\s*=\s*([0-9]+)", text, re.M | re.I)
+def one(name, kind=r"[0-9]+"):
+    hits = re.findall(rf"^\s*{name}\s*=\s*({kind})", text, re.M | re.I)
     if len(hits) != 1: raise SystemExit(1)
-    return int(hits[0])
-fsbc, itend, stock = one("nn_fsbc"), one("nn_itend"), one("nn_stock")
-line = re.findall(r"^\s*nn_stocklist\s*=\s*([^!\n]+)", text, re.M | re.I)
-if len(line) != 1: raise SystemExit(1)
-stocklist = [int(x) for x in re.findall(r"[0-9]+", line[0]) if int(x)]
-if fsbc != 2 or not stocklist or any(x % fsbc for x in [itend, stock, *stocklist]):
+    return hits[0]
+fsbc, it000, itend, stock = (int(one(n)) for n in ("nn_fsbc", "nn_it000", "nn_itend", "nn_stock"))
+rst_list = one("ln_rst_list", r"\.(?:true|false)\.").lower() == ".true."
+if fsbc != 2 or (itend - it000 + 1) % fsbc or (not rst_list and stock % fsbc):
     raise SystemExit(1)
 PY
 }
@@ -66,6 +70,29 @@ check_frame_writes() {
              'AFTER_V         ' 'DELTA_U         ' 'DELTA_V         '; do
     [[ $(grep -F -c "WRITE(l3_unit) '$tag'" "$file") -eq 1 ]] || return 1
   done
+}
+
+check_log_values() { # ocean.output, rendered namelist
+  "$PY" - "$1" "$2" <<'PY'
+import re, sys
+
+log = open(sys.argv[1]).read()
+deck = open(sys.argv[2]).read()
+
+number = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eEdD][+-]?\d+)?"
+def values(text, name, anchor):
+    return re.findall(rf"(?im){anchor}\b{re.escape(name)}\s*=\s*({number})", text)
+
+for name in ("nn_aei_ijk_t", "rn_Ue", "rn_Le"):
+    wanted = values(deck, name, r"^\s*")
+    got = values(log, name, "")   # ocean.output prints a description first
+    if len(wanted) != 1 or not got:
+        raise SystemExit(f"missing or ambiguous {name}: deck={wanted} log={got}")
+    parse = lambda value: float(value.replace("D", "E").replace("d", "e"))
+    expected = parse(wanted[0])
+    if any(parse(value) != expected for value in got):
+        raise SystemExit(f"{name} differs: deck={wanted[0]} log={got}")
+PY
 }
 
 probe_output_parent() {
@@ -107,14 +134,22 @@ preflight() {
   ref_is_listed "$REF_CFG" || fail "$REF_CFG is not in ref_cfgs.txt"
   if ref_is_listed ORCA2_L3_NOT_A_REFERENCE; then fail 'bad -r plant was accepted'; fi
 
-  # 3: render a two-step deck and enforce every restart time modulo nn_fsbc=2.
-  rendered=$tmp/namelist_cfg
-  sed -E -e 's/^(   nn_itend    = ).*/\1      2/' \
-    -e 's/^(   nn_stock    = ).*/\1      2/' \
-    -e 's/^(   nn_stocklist = ).*/\1 2,0,0,0,0,0,0,0,0,0/' "$DECK" >"$rendered"
-  check_namelist_clock "$rendered" || fail 'rendered clock violates init rules'
-  sed -E 's/^( *nn_stock *= *).*/\1 1/' "$rendered" >"$tmp/bad-clock"
-  if check_namelist_clock "$tmp/bad-clock"; then fail 'bad clock plant was accepted'; fi
+  # 3: every deck --run renders passes NEMO's clock rule (sbcmod.f90:342-347);
+  # a run length off nn_fsbc and an unlisted odd nn_stock are refused.
+  local n
+  render_deck "$tmp/smoke" 2 "$(pad10 2)"
+  render_deck "$tmp/ref" 100 '2,4,6,8,10,12,14,16,18,20'
+  for n in 2 4 6 8 10; do
+    render_deck "$tmp/a$n" "$n" "$(list_a "$n")"
+    render_deck "$tmp/b$n" "$n" "$(list_b "$n")"
+    render_deck "$tmp/c$n" "$n" "$(list_c "$n")"
+  done
+  rendered=$tmp/smoke
+  sed -E 's/^( *nn_itend *= *).*/\1 3/' "$tmp/c10" >"$tmp/bad-clock"
+  if check_namelist_clock "$tmp/bad-clock"; then fail 'odd run-length plant was accepted'; fi
+  sed -E -e 's/^( *nn_stock *= *).*/\1 1/' \
+    -e 's/^( *ln_rst_list *= *)\.true\./\1.false./' "$tmp/c10" >"$tmp/bad-stock"
+  if check_namelist_clock "$tmp/bad-stock"; then fail 'odd nn_stock plant was accepted'; fi
 
   # 4: reader/writer byte identity, truncation/tag plants, and 16-byte literals.
   "$PY" "$READER" --selftest || fail 'record layout selftest failed'
@@ -133,12 +168,43 @@ preflight() {
   : >"$tmp/blocked-parent"
   if probe_output_parent "$tmp/blocked-parent/child"; then fail 'file-parent plant was accepted'; fi
 
-  # 7: both configuration and run root must be absent; planted existing paths fail.
-  require_absent "$TARGET" || fail "target config exists: $TARGET"
-  require_absent "$EVIDENCE" || fail "run root exists: $EVIDENCE"
-  mkdir "$tmp/existing-target" "$tmp/existing-run"
-  if require_absent "$tmp/existing-target" || require_absent "$tmp/existing-run"; then
-    fail 'existing target/run plant was accepted'
+  # The namelist/log admission parses Fortran numbers and compares their
+  # binary64 values exactly.  The plant is NEMO's own ldf_tra_init print
+  # (description first, gfortran's 0.03): the old rn_Ue text grep refused it,
+  # the numeric check must accept it, and a neighbouring float must fail.
+  printf '%s\n' \
+    '          type of time-space variation            nn_aei_ijk_t  =           21' \
+    '          lateral diffusive velocity (if cst)     rn_Ue         =    2.9999999999999999E-002  m/s' \
+    '          lateral diffusive length   (if cst)     rn_Le         =    200000.00000000000       m' \
+    >"$tmp/float-log"
+  check_log_values "$tmp/float-log" "$rendered" \
+    || fail "NEMO's rn_Ue print plant was refused"
+  if grep -Eq 'rn_Ue += +3\.000000000000000[0-9]*E-002' "$tmp/float-log"; then
+    fail 'old rn_Ue text grep unexpectedly accepted its refusal plant'
+  fi
+  sed 's/2\.9999999999999999E-002/3.0000000000000006E-002/' \
+    "$tmp/float-log" >"$tmp/bad-float-log"
+  if check_log_values "$tmp/bad-float-log" "$rendered"; then
+    fail 'unequal rn_Ue numeric plant was accepted'
+  fi
+  if [[ -f "$FAILED1_LOG" ]]; then   # the refused first acquisition's own log
+    check_log_values "$FAILED1_LOG" "$rendered" \
+      || fail 'the first acquisition log is still refused'
+  fi
+
+  # 7: both configurations and the run root must be absent; planted existing
+  # paths fail.  --admit-existing deliberately audits completed evidence.
+  if [[ "$mode" != --admit-existing ]]; then
+    require_absent "$TARGET" || fail "target config exists: $TARGET"
+    require_absent "$REF_TARGET" || fail "reference config exists: $REF_TARGET"
+    require_absent "$EVIDENCE" || fail "run root exists: $EVIDENCE"
+    mkdir "$tmp/existing-target" "$tmp/existing-run"
+    if require_absent "$tmp/existing-target" || require_absent "$tmp/existing-run"; then
+      fail 'existing target/run plant was accepted'
+    fi
+  else
+    [[ -x "$TARGET/BLD/bin/nemo.exe" && -x "$REF_TARGET/BLD/bin/nemo.exe" \
+       && -d "$EVIDENCE" ]] || fail 'existing acquisition is incomplete'
   fi
   rm -rf -- "$tmp"
   trap - RETURN
@@ -146,21 +212,26 @@ preflight() {
     "$(git -C "$repo" rev-parse HEAD)"
 }
 
-render_deck() { # destination, stock-list
-  sed -E -e 's/^(   nn_itend    = ).*/\1      2/' \
-    -e 's/^(   nn_stock    = ).*/\1      2/' \
-    -e "s/^(   nn_stocklist = ).*/\1 $2/" "$DECK" >"$1"
+render_deck() { # destination, itend, stock-list
+  sed -E -e "s/^(   nn_itend    = ).*/\1      $2/" \
+    -e "s/^(   nn_stock    = ).*/\1      $2/" \
+    -e "s/^(   nn_stocklist = ).*/\1 $3/" "$DECK" >"$1"
   check_namelist_clock "$1" || fail "bad rendered deck $1"
 }
 
-stage_run() { # directory, stock-list
-  local f
-  require_absent "$1" || fail "run directory exists: $1"
-  mkdir -p "$1"
-  for f in "${INPUT_FILES[@]}"; do cp "$INPUT_ROOT/$f" "$1/$f"; done
-  cp "$ICE_REF" "$1/namelist_ice_ref"; cp "$ICE_DECK" "$1/namelist_ice_cfg"
-  render_deck "$1/namelist_cfg" "$2"
-  cp "$TARGET/BLD/bin/nemo.exe" "$1/nemo"
+pad10() { local a=("$@"); while ((${#a[@]} < 10)); do a+=(0); done; local IFS=,; printf '%s' "${a[*]}"; }
+list_a() { pad10 "$1"; }
+list_b() { pad10 $(seq 2 2 "$1"); }
+list_c() { (($1 >= 3)) && pad10 $(seq 3 2 "$1") || pad10 0; }
+
+stage_run() { # binary, directory, itend, stock-list
+  local f dir=$2
+  require_absent "$dir" || fail "run directory exists: $dir"
+  mkdir -p "$dir"
+  for f in "${INPUT_FILES[@]}"; do cp "$INPUT_ROOT/$f" "$dir/$f"; done
+  cp "$ICE_REF" "$dir/namelist_ice_ref"; cp "$ICE_DECK" "$dir/namelist_ice_cfg"
+  render_deck "$dir/namelist_cfg" "$3" "$4"
+  cp "$1" "$dir/nemo"
 }
 
 check_log() {
@@ -169,43 +240,66 @@ check_log() {
     && grep -Eq 'ln_traldf_iso += +T$' "$out" \
     && grep -Eq 'ln_traldf_msc += +T$' "$out" \
     && grep -Eq 'ln_ldfeiv += +T$' "$out" \
-    && grep -Eq 'nn_aei_ijk_t += +21$' "$out" \
-    && grep -Eq 'rn_Ue += +3\.000000000000000[0-9]*E-002' "$out" \
-    && grep -Eq 'rn_Le += +200000\.00000000000' "$out" \
     && grep -Fq 'ldf_eiv_trp : eddy induced advection' "$out" \
     || fail "$1 did not execute exact L3 selection"
+  check_log_values "$out" "$1/namelist_cfg" \
+    || fail "$1 did not execute exact L3 numeric selection"
 }
 
-run_one() {
-  local rc=0
-  stage_run "$1" "$2"
-  (cd "$1"; mpirun -np 1 --oversubscribe ./nemo >run.user.log 2>&1) || rc=$?
-  [[ $rc -eq 0 && -f "$1/time.step" \
-     && "$(tr -d '[:space:]' <"$1/time.step")" == 2 ]] \
-    || fail "$1 did not complete two steps"
-  check_log "$1"
-  "$PY" "$READER" --check "$1/oracle_l3_eiv_kt00000001.bin" \
-    || fail "$1 has no acting EIV witness"
-  [[ -s "$1/oracle_rktracer_stage3_kt00000001.bin" ]] \
-    || fail "$1 lacks the inherited stage-3 tracer record"
+run_one() { # binary, directory, itend, stock-list, done|boundary
+  local dir=$2 rc=0
+  stage_run "$1" "$dir" "$3" "$4"
+  (cd "$dir"; mpirun -np 1 --oversubscribe ./nemo >run.user.log 2>&1) || rc=$?
+  printf '%s\n' "$rc" >"$dir/run.exit"
+  [[ -f "$dir/ocean.output" && -f "$dir/time.step" ]] \
+    || fail "$dir produced no NEMO log"
+  check_log "$dir"
+  if [[ "$5" == done ]]; then
+    [[ $rc -eq 0 && "$(tr -d '[:space:]' <"$dir/time.step")" == "$3" ]] \
+      || fail "$dir did not complete $3 steps"
+  fi
 }
 
-build_target() {
-  (cd "$NEMO_ROOT" && ./makenemo -r "$REF_CFG" -n "$TARGET_NAME" \
+build_one() { # target name, inherited source, instrument=yes|no
+  local name=$1 inherited=$2 target=$NEMO_ROOT/cfgs/$1
+  (cd "$NEMO_ROOT" && ./makenemo -r "$REF_CFG" -n "$name" \
     -m conda-scalarmath del_key key_xios)
-  cp -a "$BASE/MY_SRC/." "$TARGET/MY_SRC/"
-  cp "$ORCA2/cpp_ORCA2_OMIP_L4.fcm" "$TARGET/cpp_$TARGET_NAME.fcm"
-  "$PY" "$INSTRUMENT" "$SOURCE" "$TARGET/MY_SRC/ldftra.F90"
-  touch "$TARGET/MY_SRC/"*.F90
-  (cd "$NEMO_ROOT" && ./makenemo -n "$TARGET_NAME" -m conda-scalarmath -y --clean)
-  (cd "$NEMO_ROOT" && ./makenemo -n "$TARGET_NAME" -m conda-scalarmath del_key key_xios)
-  [[ -x "$TARGET/BLD/bin/nemo.exe" ]] || fail 'build produced no executable'
+  cp -a "$inherited/MY_SRC/." "$target/MY_SRC/"
+  cp "$ORCA2/cpp_ORCA2_OMIP_L4.fcm" "$target/cpp_$name.fcm"
+  if [[ "$3" == yes ]]; then
+    "$PY" "$INSTRUMENT" "$SOURCE" "$target/MY_SRC/ldftra.F90"
+  fi
+  touch "$target/MY_SRC/"*.F90
+  (cd "$NEMO_ROOT" && ./makenemo -n "$name" -m conda-scalarmath -y --clean)
+  (cd "$NEMO_ROOT" && ./makenemo -n "$name" -m conda-scalarmath del_key key_xios)
+  [[ -x "$target/BLD/bin/nemo.exe" ]] || fail "$name produced no executable"
+}
+
+build_targets() {
+  build_one "$REF_TARGET_NAME" "$REF_BASE" no
+  build_one "$TARGET_NAME" "$BASE" yes
+  ! grep -Rqs 'oracle_l3_eiv' "$REF_TARGET/BLD/ppsrc/nemo" \
+    || fail 'writer-free reference contains the L3 observer'
   grep -Fq 'oracle_l3_eiv_kt00000001.bin' "$TARGET/BLD/ppsrc/nemo/ldftra.f90" \
     || fail 'built source lacks L3 observer'
 }
 
-admit() {
-  local name=oracle_rktracer_stage3_kt00000001.bin dir
+completed_steps() {
+  local t rc
+  t=$(tr -d '[:space:]' <"$1/time.step"); rc=$(<"$1/run.exit")
+  if [[ "$rc" -eq 0 && "$t" == 100 ]]; then printf 100; return; fi
+  grep -q 'stp_ctl: |ssh| > 20 m  or  |U| > 10 m/s' "$1/ocean.output" \
+    && [[ -f "$1/output.abort.nc" ]] || fail "reference stopped outside stp_ctl at kt=$t"
+  printf '%s' $((t - 1))
+}
+
+admit() { # acquired twin step count
+  local steps=$1 name=oracle_rktracer_stage3_kt00000001.bin dir step restart
+  for dir in "$SMOKE" "$TWIN_A" "$TWIN_B" "$TWIN_C"; do
+    "$PY" "$READER" --check "$dir/oracle_l3_eiv_kt00000001.bin" \
+      || fail "$dir has no acting EIV witness"
+    [[ -s "$dir/$name" ]] || fail "$dir lacks the inherited stage-3 record"
+  done
   for dir in "$TWIN_B" "$TWIN_C"; do
     cmp -s "$TWIN_A/oracle_l3_eiv_kt00000001.bin" "$dir/oracle_l3_eiv_kt00000001.bin" \
       && cmp -s "$TWIN_A/$name" "$dir/$name" || fail 'twins differ'
@@ -214,24 +308,47 @@ admit() {
     && fail 'L3 stage-3 tracer record equals G9 baseline'
   cmp -s "$TWIN_A/$name" "$L2_RECORD/$name" \
     && fail 'L3 stage-3 tracer record equals L2 baseline'
+  for step in $(seq 2 "$steps"); do
+    restart=$(printf 'ORCA2G1_%08d_restart.nc' "$step")
+    [[ -f "$TWIN_A/$restart" || -f "$TWIN_B/$restart" \
+       || -f "$TWIN_C/$restart" ]] || fail "no twin wrote restart step $step"
+  done
+  restart=$(printf 'ORCA2G1_%08d_restart.nc' "$steps")
+  [[ -f "$REF/$restart" ]] || fail "writer-free reference lacks $restart"
+  for dir in "$TWIN_A" "$TWIN_B" "$TWIN_C"; do
+    [[ "$(<"$dir/run.exit")" == 0 ]] || fail "$dir is not a completed twin"
+  done
   mkdir -p "$EVIDENCE/manifest"
   printf '%s\n' "$(git -C "$repo" rev-parse HEAD)" >"$EVIDENCE/manifest/legoesm_commit"
-  sha256sum "$DECK" "$ICE_DECK" "$TARGET/BLD/bin/nemo.exe" \
+  sha256sum "$DECK" "$ICE_DECK" "$REF_TARGET/BLD/bin/nemo.exe" \
+    "$TARGET/BLD/bin/nemo.exe" \
     >"$EVIDENCE/manifest/producers.sha256"
-  printf 'L3_ACQUISITION_PASS twins=3 steps=2 evidence=%s\n' "$EVIDENCE"
+  printf 'L3_ACQUISITION_PASS twins=3 steps=1..%s reference_completed=%s evidence=%s\n' \
+    "$steps" "$(completed_steps "$REF")" "$EVIDENCE"
 }
 
 mode=${1:---preflight-only}
-case "$mode" in --preflight-only|--run) ;; *) exit 64 ;; esac
+case "$mode" in --preflight-only|--run|--admit-existing) ;; *) exit 64 ;; esac
 preflight
-[[ "$mode" == --run ]] || {
-  printf 'WOULD_RUN makenemo -r %s -n %s and three 2-step twins into %s\n' \
-    "$REF_CFG" "$TARGET_NAME" "$EVIDENCE"
+if [[ "$mode" == --preflight-only ]]; then
+  printf 'WOULD_RUN build writer-free=%s record=%s; smoke, boundary, twins A/B/C into %s\n' \
+    "$REF_TARGET_NAME" "$TARGET_NAME" "$EVIDENCE"
   exit 0
-}
-build_target
+fi
+if [[ "$mode" == --admit-existing ]]; then
+  steps=$(tr -d '[:space:]' <"$TWIN_A/time.step")
+  admit "$steps"
+  exit 0
+fi
+build_targets
 mkdir -p "$EVIDENCE"
-run_one "$TWIN_A" '2,0,0,0,0,0,0,0,0,0'
-run_one "$TWIN_B" '0,2,0,0,0,0,0,0,0,0'
-run_one "$TWIN_C" '2,0,0,0,0,0,0,0,0,0'
-admit
+run_one "$TARGET/BLD/bin/nemo.exe" "$SMOKE" 2 "$(pad10 2)" done
+run_one "$REF_TARGET/BLD/bin/nemo.exe" "$REF" 100 \
+  '2,4,6,8,10,12,14,16,18,20' boundary
+completed=$(completed_steps "$REF")
+steps=$((completed < 10 ? completed : 10)); steps=$((steps - steps % FSBC))
+((steps >= 2)) || fail "NEMO completed only $completed steps"
+run_one "$TARGET/BLD/bin/nemo.exe" "$TWIN_A" "$steps" "$(list_a "$steps")" done
+run_one "$TARGET/BLD/bin/nemo.exe" "$TWIN_B" "$steps" "$(list_b "$steps")" done
+run_one "$TARGET/BLD/bin/nemo.exe" "$TWIN_C" "$steps" "$(list_c "$steps")" done
+admit "$steps"

@@ -28,6 +28,7 @@ from tests.ocean.fidelity.test_nemo_testcase_v1_orca2tke import _differs, _flat
 
 
 L3 = CASES / "nemo_testcase_l3_orca2eiv"
+RUN = L3 / "run.sh"
 
 
 def _copied_root(base: Path, rung: Path) -> Path:
@@ -98,6 +99,20 @@ def test_reader_refuses_l3_as_g9_or_l2_and_off_eiv_as_l3(tmp_path):
         recipe.read_orca2g1_deck(l3, "ORCA2L2-iso")
     with pytest.raises(ValueError, match="namtra_(adv|eiv)"):
         recipe.read_orca2g1_deck(_copied_l2_root(tmp_path / "l2"), "ORCA2L3-eiv")
+
+
+def test_l3_acquisition_is_fail_closed_and_uses_numeric_log_admission():
+    text = RUN.read_text()
+    assert subprocess.run(["bash", "-n", str(RUN)]).returncode == 0
+    for required in (
+        "check_log_values", "2.9999999999999999E-002",
+        "old rn_Ue text grep unexpectedly accepted", "bad-float-log",
+        "smoke_2step", "ref_100step", "completed_steps",
+        "REF_TARGET_NAME=ORCA2L3_EIV_R20_REF", "--admit-existing",
+        "steps=$((completed < 10 ? completed : 10))",
+        "commit the exact acquisition tool",
+    ):
+        assert required in text, required
 
 
 @pytest.fixture(scope="module")
