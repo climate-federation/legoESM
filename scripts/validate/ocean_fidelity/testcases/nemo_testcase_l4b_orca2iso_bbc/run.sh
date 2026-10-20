@@ -149,9 +149,12 @@ seven_item_preflight() {
   # 1 source context and syntax, plus a syntax plant.
   cp "$BASE_TRABBC" "$scratch/trabbc.F90"; patch -s -d "$scratch" -p0 <"$PATCH"
   python -I - "$NEMO_ROOT/cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90" <<'PY'
-import sys
-text=open(sys.argv[1]).read(); calls=('CALL tra_ldf','IF( ln_trabbc ) CALL tra_bbc','IF( ln_trabbl ) CALL tra_bbl','IF( ln_tradmp ) CALL tra_dmp')
-positions=[text.find(call) for call in calls]
+import re, sys
+text=open(sys.argv[1]).read()
+calls=(r'CALL\s+tra_ldf\s*\(', r'IF\s*\(\s*ln_trabbc\s*\)\s*CALL\s+tra_bbc\s*\(',
+       r'IF\s*\(\s*ln_trabbl\s*\)\s*CALL\s+tra_bbl\s*\(',
+       r'IF\s*\(\s*ln_tradmp\s*\)\s*CALL\s+tra_dmp\s*\(')
+positions=[match.start() if (match := re.search(call, text, re.I)) else -1 for call in calls]
 if -1 in positions or positions != sorted(positions): raise SystemExit(f'bad stage-3 call order: {positions}')
 PY
   ! python -I - <<'PY'
