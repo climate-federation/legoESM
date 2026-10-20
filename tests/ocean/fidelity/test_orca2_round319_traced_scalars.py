@@ -23,12 +23,15 @@ pytestmark = pytest.mark.skipif(not jax.config.jax_enable_x64, reason="needs JAX
 # Scalars that move no state on rung 10, each with the reason a trainer must
 # freeze it out (measured, round 319). Every other scalar must move the state.
 _NP_LIN = "rung 10 runs nemo_linear: rate = cd0 * uc0 (zdfdrg.F90 np_lin) never reads it"
-RUNG10_INERT = {"cd_max": _NP_LIN, "z0": _NP_LIN, "ke0": _NP_LIN}
+RUNG10_INERT = {"cd_max": _NP_LIN, "z0": _NP_LIN, "ke0": _NP_LIN,
+                # Round 320: rung 10 runs L2's mode 20, 0.5*rn_Ud*max(e1,e2)
+                # per face; kappa_Redi only records the nominal aht0.
+                "kappa_redi": "inert since round 320 (mode-20 coefficient from rn_Ud)"}
 # Scalars that move the state when raised and not when lowered: the loss
 # gradient is exactly 0, so a gradient trainer cannot move them. Each one is
 # pending the user's decision; it is not a live trainable.
 RUNG10_ONE_SIDED = {
-    "kappaH_min": "one-sided, gradient exactly 0, pending the user's decision: the floor "
+    "kappaH_min": "one-sided, gradient exactly 0, frozen out of training (DECISION 143): the floor "
                   "sits 1 ulp below the TKE branch's minimum (0.1 * 1e-9) in 7,634 cells",
 }
 
