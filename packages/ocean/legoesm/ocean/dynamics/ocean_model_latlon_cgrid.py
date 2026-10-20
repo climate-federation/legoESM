@@ -10247,39 +10247,56 @@ class LatLonCGridOceanModel:
             if _want_bolus:
                 dT_gm, dS_gm, _bolus = _gm_out
                 if _bolus is not None:
-                    mass_flux_u_tr, mass_flux_v_tr, w_baro_tr = (
-                        add_bolus_to_advecting_flux(
-                            _bolus, mass_flux_u, mass_flux_v,
-                            u_mask_3d_tracer, v_mask_3d_tracer, _grid,
-                            _zc,
-                        )
-                    )
                     if getattr(_cfg_b, "tracer_time_integrator", "euler") == "rk3_ws":
                         if _nemo_ws_stage_transport_geometry is None:
                             raise ValueError(
                                 "staged GM bolus requires materialized WS transports")
                         # traadv.f90:254-258 calls ldf_eiv_trp at stage 3 only.
-                        # Preserve stages 1/2 byte-for-byte; add the existing
-                        # single GM transport to stage 3's mass-flux and native
-                        # metric-bearing zF arrays before the FCT limiter.
+                        # NEMO changes ONLY pFu/pFv, then calls wzv again with
+                        # np_transport (traadv.f90:296).  Preserve the
+                        # certified G9+L2 mass-flux geometry and stages 1/2.
                         stage3 = list(_nemo_ws_stage_transport_geometry[2])
-                        stage3[0], stage3[1], stage3[2] = (
-                            add_bolus_to_advecting_flux(
-                                _bolus, stage3[0], stage3[1],
-                                u_mask_3d_tracer, v_mask_3d_tracer, _grid, _zc,
-                            )
-                        )
                         u_eiv, v_eiv, _ = _bolus
                         zfu_eiv = jnp.concatenate(
                             [u_eiv[:, -1:, :], u_eiv], axis=1)
                         zfv_eiv = jnp.concatenate(
                             [v_eiv[-1:, :, :], v_eiv], axis=0)
-                        stage3[7] = stage3[7] + zfu_eiv
-                        stage3[8] = stage3[8] + zfv_eiv
+                        stage3[7] = stage3[7] + zfu_eiv   # ldftra.f90:954
+                        stage3[8] = stage3[8] + zfv_eiv   # ldftra.f90:955
+                        # traadv.f90:296 repeats the transport-indicator WZV
+                        # call on the updated pair.  These are exactly the
+                        # stage-3 operands used above; no legacy continuity
+                        # diagnosis is permitted on this route.
+                        stage3[2], _, _ = nemo_qco_wzv_operands(
+                            _eta_live_one_half, state.eta.data,
+                            u2_corr, v2_corr, _grid, _zc,
+                            _stage_transport_kw["u_mask_3d"],
+                            _stage_transport_kw["v_mask_3d"],
+                            _active_live, dt,
+                            eta_after_override=state_new.eta.data,
+                            volume_transport_override=(stage3[7], stage3[8]),
+                            fold_exchange_ratios=bool(
+                                _cfg_b.rk3_vector_raw_vmask),
+                            runoff_mass_flux=
+                            _stage_transport_kw["runoff_mass_flux"],
+                            stored_r3_ratios=bool(
+                                _cfg_b.nemo_wzv_stored_r3_ratios
+                                or _cfg_b.rk3_stage_tracer_wzv_stored_kmm_ratios),
+                            stored_kmm_level=(
+                                2 if _cfg_b.rk3_stage_tracer_wzv_stored_kmm_ratios
+                                else 0))
                         _nemo_ws_stage_transport_geometry = (
                             _nemo_ws_stage_transport_geometry[0],
                             _nemo_ws_stage_transport_geometry[1],
                             tuple(stage3),
+                        )
+                    else:
+                        mass_flux_u_tr, mass_flux_v_tr, w_baro_tr = (
+                            add_bolus_to_advecting_flux(
+                                _bolus, mass_flux_u, mass_flux_v,
+                                u_mask_3d_tracer, v_mask_3d_tracer, _grid,
+                                _zc,
+                            )
                         )
             else:
                 dT_gm, dS_gm, *_ldf_diag = _gm_out; _nemo_ws_ldf_diagnostics = _ldf_diag[0] if _ldf_diag else None

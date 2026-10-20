@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pickle
+import subprocess
+import sys
 from pathlib import Path
 
 import jax
@@ -183,3 +185,39 @@ def test_l3_step_jaxpr_contains_bolus_only_for_l3(cards):
     text = str(closed)
     assert "reduce_sum" in text
     assert np.isfinite(run.model_config.gm_redi.treguier.aei0)
+
+
+G9_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                 "gridladder_rounds/round46/oracle_g9_r46/twin_a")
+
+
+@pytest.mark.skipif(not G9_RECORD.is_dir(), reason="no admitted G9 record")
+def test_zero_bolus_l3_step_is_bit_identical_to_certified_g9_plus_l2(cards):
+    """A zero ldf_eiv_trp addition leaves G9+L2's whole step unchanged."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    sys.path[:0] = [str(CASES), str(CASES / "nemo_testcase_g5_orca2ice")]
+    import g5_records as g5
+
+    _, l2, l3 = cards
+    run = l3.recipe
+    baseline_cfg = run.model_config._replace(
+        gm_redi=l2.recipe.model_config.gm_redi)
+    zero_gm = run.model_config.gm_redi._replace(
+        kappa_GM=0.0,
+        treguier=run.model_config.gm_redi.treguier._replace(enabled=False))
+    zero_cfg = run.model_config._replace(gm_redi=zero_gm)
+    fw, sf = g5.nemo_supplied_forcing(l3, G9_RECORD, 1)
+    outputs = []
+    for cfg in (baseline_cfg, zero_cfg):
+        model = LatLonCGridOceanModel(
+            run.grid, run.z_coord, cfg, iwm_forcing=run.iwm_forcing)
+        outputs.append(jax.device_get(model.step(
+            run.initial_state, l3.dt_s, freshwater=fw,
+            surface_forcing=sf)))
+    for name in ("T", "S", "u", "v", "eta"):
+        left = np.asarray(getattr(outputs[0], name).data)
+        right = np.asarray(getattr(outputs[1], name).data)
+        assert np.array_equal(left.view(np.uint64), right.view(np.uint64)), name
