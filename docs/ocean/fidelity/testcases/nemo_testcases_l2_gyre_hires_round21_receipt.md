@@ -136,9 +136,14 @@ citations with zero unmapped citations, failures, or stale map entries. All
 nine synthetic controls fire. Shifting the source-order citation by two lines
 returns `SYMBOL-NOT-AT-LINE` and a nonzero exit, as required.
 
-Review status is **HELD / UNREVIEWED-BY-GLM**. No physics fix depends on this
-unreviewed localization. The result is an exact measured boundary plus the
-minimal passive acquisition needed for the proving substitution.
+Review status is **HELD / UNREVIEWED-BY-GLM**. The read-only Claude reviewer
+refused because the CLI is not logged in and the workspace trust record cannot
+be written from this sandbox. The read-only Codex reviewer refused while
+initialising its app-server client on the read-only host filesystem. GLM is
+unavailable as recorded by the operator. These are service failures, not
+verdicts or waivers. No physics fix depends on this unreviewed localization;
+the result is an exact measured boundary plus the minimal passive acquisition
+needed for the proving substitution.
 
 ## Compiled-source citations
 
