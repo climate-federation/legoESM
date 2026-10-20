@@ -13,7 +13,9 @@ CPU, fp64, x64, production JIT, libm policy.
   viscosity scale, TKE minimum and the background diffusivity floor all
   move the state; cd_max, z0 and ke0 move nothing (the card's linear drag
   never reads them) and are declared inert in the test.
-- Rung-10 isoneutral gradient at N = 2, 5, 10: PENDING (running, section 4).
+- Rung-10 isoneutral gradient through the copy the step reads: finite at
+  N = 1, 2, 5, 10; reverse = forward mode to <= 1.5e-11; no
+  flip-free FD epsilon in the sweep.
 - FINDING: the background diffusivity floor kappaH_min sits exactly on a
   kink at its rung-10 value. Raising it moves the state linearly; lowering
   it moves nothing; its derivative under jit is exactly 0 (round 317's
@@ -125,7 +127,34 @@ No-remat cost rows (fused fwd+bwd, T loss; remat values in round 317's table):
 - Without remat, N >= 5 does not fit under 150 GiB on either card.
 
 ## 4. Rung-10 isoneutral gradient at N = 2, 5, 10
-PENDING: `jobs/redi_rung10_n10.*` (probe `--rung rung10 --directions 0 --scalars kappa_redi --remat`, prereg commit, 220 GiB cap).
+Round 315's probe, `--rung rung10 --directions 0 --scalars kappa_redi
+--remat`, at the prereg commit (top-level isoneutral copy, round 317's
+wiring), `jobs/redi_rung10_n10.json`: 8,329 s, peak 238 GiB (a first run
+stopped at its 220 GiB cap, `jobs/capstop220/`). Forward parity
+bit-identical; construction parity (model rebuilt at s = 1 + 1e-5)
+bit-identical to the traced path.
+
+| loss | N | reverse | reverse vs forward | FD best (eps) |
+|---|---|---|---|---|
+| T | 1 | -3.2176504e-5 | 2.7e-15 | 7.2e-8 (1e-2) |
+| T | 2 | -6.3816880e-5 | 2.5e-12 | 1.9e-6 (1e-4) |
+| T | 5 | -1.5901266e-4 | 1.1e-12 | 1.4e-5 (1e-5) |
+| T | 10 | -3.1101906e-4 | 1.2e-11 | 1.4e-5 (1e-5) |
+| SSH | 1 | 0 | 0 | 0 (FD = 0) |
+| SSH | 2 | 3.6290348e-8 | 4.8e-13 | 1.6e-6 (1e-2) |
+| SSH | 5 | 4.6135930e-7 | 5.4e-12 | 2.2e-4 (1e-5) |
+| SSH | 10 | -6.3076545e-6 | 1.5e-11 | 1.9e-5 (1e-5) |
+
+- P4: finite, reverse = forward <= 1e-10, SSH nonzero from N = 2:
+  CONFIRMED. FD <= 1e-6 at N = 2: missed (1.9e-6 T, 1.6e-6 SSH).
+- Flip-free epsilon: none in the sweep (1e-2 .. 1e-7). The FD miss does
+  not fall as epsilon shrinks (T, N = 10: 1.4e-5 at 1e-5, 1.2e-4 at 1e-6,
+  2.0e-3 at 1e-7), the switch pattern round 316 measured on OMT-2. Branch
+  flips not counted here.
+- Same run, prereg commit (casts present): the traceability check reports
+  cd0 NOT traceable on rung 10 — the defect this round's fix removes.
+- Same run: the background floor's reverse gradient is exactly 0 at every
+  N and loss (section 2's one-sided floor).
 
 ## 5. DECISION 142 (docs/comments only)
 - Card run-length declaration (`nemo_testcase_recipe.py:1985`): one-line
@@ -142,7 +171,14 @@ terms 71, recipe 25, freshwater 16, WS stage face-mask 2, barotropic state
 round-315 probe 11, round-319 scalar tests 13.
 - Re-anchor (`ccec4003606d`): the round-317 citation of the TKE bottom-BC
   drag lines anchored on the cast text; it now anchors on the arguments.
-- Citation gate on this receipt: CITEGATE_PLACEHOLDER
+- Citation gate on this receipt: PASS, failures 0 (`gates/citation_gate_receipt.json`).
+
+## OPEN
+- The background floor's kink on rung 10: count the tie cells; whether a
+  trainer exposes this floor at all is a user decision.
+- Branch-flip count for the rung-10 isoneutral FD (no flip-free epsilon).
+- OMT-4's viscosity, floor and drag probe rows (cap stop).
+- The C-D grid and MPAS drag paths keep their casts.
 
 ## Choices
 - ASKED (operator): the cast removal.
