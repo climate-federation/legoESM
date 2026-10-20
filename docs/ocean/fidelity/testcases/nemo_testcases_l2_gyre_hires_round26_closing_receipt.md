@@ -152,8 +152,20 @@ The existing direct instrument tests cover the exhaustive terminal rules,
 pinned preregistrations/comparison artifact, moved-seed refusal, explicit GPU
 selection, recurring-arm routing, and strict NumPy-scalar JSON serialization.
 
-The final lane battery and receipt citation-gate verdicts are recorded in the
-closing commit after this receipt is present.
+The complete high-resolution split reports `207 passed, 2 deselected`. The
+time-level/card-reconciliation/phase-3 split reports `62 passed, 2
+deselected`. Fresh compiler processes report nine generic gradient cases
+passed, the registered six-step GYRE case skipped, and the SWG card case
+passed. The isolated one-step GYRE gradient case emitted no verdict during the
+bounded wait and was terminated; it is **INCOMPLETE (compiler stall)**, not a
+failed gradient measurement. Aggregate completed results are
+`FULL_LANE_BATTERY_SPLIT_PASS: 279 passed, 4 deselected, 1 skipped; one GYRE gradient case incomplete`.
+
+The citation gate run explicitly from this receipt's compiled-source heading
+reports `PASS` with four citations, zero failures, zero unmapped entries, an
+empty map audit, and all nine controls firing. Shifting the mode-32 coefficient
+citation reports `SYMBOL-NOT-AT-LINE` and exits nonzero. `git diff --check`
+passes.
 
 Choice audit -- **ASKED**: verify the acquired report and controls, measure the
 one-time post-step word count, record the one-time and recurring verdicts at
