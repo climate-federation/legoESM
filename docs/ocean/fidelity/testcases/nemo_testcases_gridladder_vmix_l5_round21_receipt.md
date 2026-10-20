@@ -117,7 +117,7 @@ source.
 ## Acquisition preflight
 
 The committed entry point defaults to read-only preflight and reserves
-`--run` for the operator.  At clean `acda81beb9`, while both target
+`--run` for the operator.  At clean `bedbcf650e`, while both target
 configurations and the evidence parent were absent, it reported:
 
 `L5_PREFLIGHT_OK checklist=7 plants=all_refused`
@@ -132,6 +132,28 @@ the writer-free boundary arm, and every twin.  The operator workflow is a
 two-step smoke, a writer-free run to NEMO's own stop or 100 steps, then three
 twins to a common even endpoint no greater than 10 steps.  No score is allowed
 until that record is admitted.
+
+## Landing gates
+
+All landing gates used `JAX_ENABLE_X64=1`, the exact `land.sh` `PYTHONPATH`,
+and CPU JAX.  At the final substantive tip:
+
+- this receipt's explicit citation gate: **PASS**, 19 citations, zero
+  failures, zero unmapped citations, and zero map-audit failures;
+- citation-gate unit suite: **17 passed in 5.25 s**;
+- L5 card/operator suite, including the exact jitted transport and production
+  one-step controls: **16 passed in 188.89 s**;
+- exact default ORCA2 landing list: **145 passed in 1000.10 s**;
+- private-import ratchet, rerun separately: **6 passed in 5.16 s**; and
+- acquisition preflight: `L5_PREFLIGHT_OK checklist=7 plants=all_refused` at
+  `bedbcf650e`.
+
+The first default-list attempt reported 140 passed and five failed.  All five
+were the same legacy-card compatibility defect: cards with `physics=None`
+reached the new MLE selector before doing any physics.  The selector now treats
+that legacy shape as MLE-off.  The five exact failures then passed in 634.29 s,
+and the complete default list above passed from the clean committed tip.  No
+NEMO command was run and no record was scored.
 
 independent review: operator (Claude)
 
