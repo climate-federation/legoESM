@@ -18,13 +18,17 @@ from typing import NamedTuple
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import jax.scipy.fft as jax_fft
 import numpy as np
 from legoesm.grids.operators_latlon_cgrid import (
     compute_vertex_mask,
     curl_vertex_cgrid,
 )
 from legoesm.ml.training import TrainingConfig, create_optimizer
-from legoesm.ocean.diagnostics import velocity_to_cell_centre
+from legoesm.ocean.diagnostics import (
+    isotropic_energy_spectrum,
+    velocity_to_cell_centre,
+)
 from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
 from legoesm.ocean.dynamics.swe_rk3 import (
     SWE_SURFACE_MODES,
@@ -1693,6 +1697,17 @@ def maddison_half_width_m(basin_length_m: float,
     return 0.5 * float(basin_length_m)
 
 
+def _eq7_scale_and_weights(geometry: SWGClosureGeometry, *,
+                           beta_m1_s1: float, basin_length_m: float,
+                           wall_ring: str):
+    """Eq. 7's prefactor ``1e4/(beta^2 L^2)/(4 L^2)`` and its diagonal ``W``."""
+    half_width = maddison_half_width_m(basin_length_m, geometry)
+    weights = eq7_point_weights(geometry, wall_ring=wall_ring)
+    scale = (1.0e4 / (beta_m1_s1**2 * half_width**2)
+             / (4.0 * half_width**2))
+    return scale, weights
+
+
 def balanced_trajectory_loss(predicted: BalancedTrajectory,
                              target: BalancedTrajectory,
                              geometry: SWGClosureGeometry,
@@ -1718,8 +1733,9 @@ def balanced_trajectory_loss(predicted: BalancedTrajectory,
             raise ValueError("Maddison point loss requires beta and basin length")
         if not np.isfinite(beta_m1_s1) or beta_m1_s1 <= 0.0:
             raise ValueError("Maddison beta must be positive finite")
-        half_width = maddison_half_width_m(basin_length_m, geometry)
-        weights = eq7_point_weights(geometry, wall_ring=wall_ring)
+        scale, weights = _eq7_scale_and_weights(
+            geometry, beta_m1_s1=beta_m1_s1, basin_length_m=basin_length_m,
+            wall_ring=wall_ring)
         if predicted.relative_vorticity_s1.shape \
                 != target.relative_vorticity_s1.shape \
                 or predicted.relative_vorticity_s1.ndim != 4:
@@ -1728,8 +1744,6 @@ def balanced_trajectory_loss(predicted: BalancedTrajectory,
         zeta_error = (predicted.relative_vorticity_s1
                       - target.relative_vorticity_s1)
         weighted_sum = jnp.sum(zeta_error**2 * weights, axis=(-2, -1))
-        scale = (1.0e4 / (beta_m1_s1**2 * half_width**2)
-                 / (4.0 * half_width**2))
         return scale * jnp.mean(weighted_sum)
     if kind != "energy_score":
         raise ValueError(f"unknown SWG balanced loss {kind!r}")
@@ -1838,6 +1852,36 @@ def diagnose_native_windows(native, geometry: SWGClosureGeometry, *,
         (ssh, u, v), geometry, objective=objective))(*native)
 
 
+def _diagnosed_ensemble(predicted_native, target_native,
+                        geometry: SWGClosureGeometry, *, objective: str):
+    """Balanced fields of an ensemble ``(windows, members, hours, y, x)`` and
+    of its ``(windows, hours, y, x)`` target, one diagnostic for both."""
+    if len(predicted_native) != 3 or len(target_native) != 3 \
+            or predicted_native[0].ndim != 5 \
+            or any(value.shape != predicted_native[0].shape
+                   for value in predicted_native) \
+            or any(value.shape != predicted_native[0].shape[:1]
+                   + predicted_native[0].shape[2:] for value in target_native):
+        raise ValueError("ensemble arrays must be (windows,members,hours,y,x) "
+                         "against (windows,hours,y,x)")
+    predicted = jax.vmap(lambda *fields: diagnose_native_windows(
+        fields, geometry, objective=objective), in_axes=1, out_axes=1)(
+        *predicted_native)
+    target = diagnose_native_windows(
+        target_native, geometry, objective=objective)
+    return predicted, target
+
+
+def _window_score_vector(window_predicted, window_target, geometry,
+                         normalizers, members):
+    observation_distance, pairwise = _energy_score_distances(
+        window_predicted, window_target, geometry, normalizers)
+    return jnp.stack((
+        _energy_score(observation_distance, pairwise),
+        jnp.mean(observation_distance),
+        jnp.mean(jnp.sum(pairwise, axis=(0, 1)) / (members * (members - 1)))))
+
+
 def ensemble_trajectory_scores(
         predicted_native, target_native, geometry: SWGClosureGeometry,
         normalizers: BalancedNormalizers, *, objective: str):
@@ -1852,31 +1896,32 @@ def ensemble_trajectory_scores(
     of a member to the truth, ``member_spread`` the mean distance between two
     different members (the score is the first minus half the second).
     """
-    if len(predicted_native) != 3 or len(target_native) != 3 \
-            or predicted_native[0].ndim != 5 \
-            or any(value.shape != predicted_native[0].shape
-                   for value in predicted_native) \
-            or any(value.shape != predicted_native[0].shape[:1]
-                   + predicted_native[0].shape[2:] for value in target_native):
-        raise ValueError("ensemble arrays must be (windows,members,hours,y,x) "
-                         "against (windows,hours,y,x)")
+    predicted, target = _diagnosed_ensemble(
+        predicted_native, target_native, geometry, objective=objective)
     members = predicted_native[0].shape[1]
-    predicted = jax.vmap(lambda *fields: diagnose_native_windows(
-        fields, geometry, objective=objective), in_axes=1, out_axes=1)(
-        *predicted_native)
-    target = diagnose_native_windows(
-        target_native, geometry, objective=objective)
-
-    def one_window(window_predicted, window_target):
-        observation_distance, pairwise = _energy_score_distances(
-            window_predicted, window_target, geometry, normalizers)
-        return jnp.stack((
-            _energy_score(observation_distance, pairwise),
-            jnp.mean(observation_distance),
-            jnp.mean(jnp.sum(pairwise, axis=(0, 1)) / (members * (members - 1)))))
-
-    scores = jax.vmap(one_window)(predicted, target)
+    scores = jax.vmap(lambda window_predicted, window_target:
+                      _window_score_vector(window_predicted, window_target,
+                                           geometry, normalizers, members))(
+        predicted, target)
     return tuple(jnp.mean(scores, axis=0))
+
+
+def cell_centred_rotational_velocity(trajectory: BalancedTrajectory,
+                                     geometry: SWGClosureGeometry):
+    """Rotational velocity of ``(..., hours, y, x)`` balanced fields at the T
+    cell centres, ``(u_c, v_c)`` of the shape of the fields: the wet faces
+    padded with the closed west and south wall faces and averaged to the
+    centre, as the scorer's ``_cell_centred``."""
+    u = jnp.where(geometry.umask, trajectory.rotational_u_m_s, 0.0)
+    v = jnp.where(geometry.vmask, trajectory.rotational_v_m_s, 0.0)
+    leading = u.shape[:-2]
+    u = u.reshape((-1,) + u.shape[-2:])
+    v = v.reshape((-1,) + v.shape[-2:])
+    u_c, v_c = jax.vmap(velocity_to_cell_centre)(
+        jnp.concatenate([jnp.zeros_like(u[..., :1]), u], axis=-1),
+        jnp.concatenate([jnp.zeros_like(v[..., :1, :]), v], axis=-2))
+    return (u_c.reshape(leading + u_c.shape[-2:]),
+            v_c.reshape(leading + v_c.shape[-2:]))
 
 
 def window_statistic_terms(predicted: BalancedTrajectory,
@@ -1894,11 +1939,7 @@ def window_statistic_terms(predicted: BalancedTrajectory,
     tool's and the scorer's ``_cell_centred``.
     """
     def eke(trajectory):
-        u = jnp.where(geometry.umask, trajectory.rotational_u_m_s, 0.0)
-        v = jnp.where(geometry.vmask, trajectory.rotational_v_m_s, 0.0)
-        u_c, v_c = jax.vmap(jax.vmap(velocity_to_cell_centre))(
-            jnp.concatenate([jnp.zeros_like(u[..., :1]), u], axis=-1),
-            jnp.concatenate([jnp.zeros_like(v[..., :1, :]), v], axis=-2))
+        u_c, v_c = cell_centred_rotational_velocity(trajectory, geometry)
         return 0.5 * (jnp.var(u_c, axis=1) + jnp.var(v_c, axis=1))
 
     def nrmse_squared(candidate, reference, mask):
@@ -1937,6 +1978,231 @@ def window_statistics_trajectory_loss(
     vorticity, kinetic = window_statistic_terms(predicted, target, geometry)
     return (eq7 + vorticity_weight * vorticity + eke_weight * kinetic,
             eq7, vorticity, kinetic)
+
+
+# ---------------------------------------------------------------------------
+# NeuralGCM-style terms (Kochkov et al. 2024, arXiv 2311.07222, Methods 7.4):
+# a lead-time-dependent low-pass on the trajectory loss, a spectrum MSE and a
+# bias MSE.  User decisions 2026-10-20.
+
+LEAD_TIME_CUTOFF_PENDING = "PENDING_TWIN_MEASUREMENT"
+
+
+def lead_time_cutoff_table(table) -> tuple[tuple[int, ...], tuple[float, ...]]:
+    """``(lead_hours, cutoff_bands)`` of a ``loss.lead_time_cutoff`` block.
+
+    ``{"lead_hours": [0, h1, ...], "cutoff_band": [k0, k1, ...]}``: entry
+    ``i`` holds from lead ``lead_hours[i]`` until the next listed lead (a
+    left-continuous step: a record at lead ``L`` uses the last entry with
+    ``lead_hours <= L``).  ``lead_hours`` are integers, start at 0 and
+    strictly increase; the bands are finite, non-negative and non-increasing
+    (the filter only ever removes more with lead).  The placeholder string
+    ``PENDING_TWIN_MEASUREMENT`` (the table awaits the twin measurement) and
+    anything else refuse.
+    """
+    if table == LEAD_TIME_CUTOFF_PENDING:
+        raise ValueError(
+            f"loss lead_time_cutoff is {LEAD_TIME_CUTOFF_PENDING!r}: the "
+            "cutoff table comes from a measurement that is not made yet; "
+            "this configuration cannot run until it is replaced by "
+            '{"lead_hours": [...], "cutoff_band": [...]}')
+    if not isinstance(table, dict) \
+            or set(table) != {"lead_hours", "cutoff_band"}:
+        raise ValueError('loss lead_time_cutoff must be {"lead_hours": [...], '
+                         '"cutoff_band": [...]}')
+    leads, bands = table["lead_hours"], table["cutoff_band"]
+    if not isinstance(leads, list) or not isinstance(bands, list) \
+            or not leads or len(leads) != len(bands):
+        raise ValueError("lead_time_cutoff lead_hours and cutoff_band must be "
+                         "equal-length non-empty lists")
+    if any(type(hour) is not int for hour in leads) or leads[0] != 0 \
+            or any(b <= a for a, b in zip(leads, leads[1:], strict=False)):
+        raise ValueError("lead_time_cutoff lead_hours must be integers that "
+                         "start at 0 and strictly increase")
+    if any(type(band) not in (int, float) or not math.isfinite(band)
+           or band < 0 for band in bands) \
+            or any(b > a for a, b in zip(bands, bands[1:], strict=False)):
+        raise ValueError("lead_time_cutoff cutoff_band must be finite, "
+                         "non-negative and non-increasing")
+    return tuple(leads), tuple(float(band) for band in bands)
+
+
+def lead_time_cutoff_bands(table, *, n_records: int,
+                           target_interval_hours: int) -> np.ndarray:
+    """The cutoff band of each of a window's ``n_records`` records; record
+    ``r`` is at lead ``(r + 1) * target_interval_hours`` hours."""
+    lead_hours, bands = lead_time_cutoff_table(table)
+    leads = target_interval_hours * np.arange(1, n_records + 1)
+    return np.asarray(bands)[np.searchsorted(lead_hours, leads, side="right") - 1]
+
+
+def lead_filter_max_band(geometry: SWGClosureGeometry) -> float:
+    """The cutoff at and above which the lead filter keeps every mode: the
+    largest isotropic DCT index radius of the wet T box."""
+    j0, j1, i0, i1 = geometry.wet_bounds
+    return float(math.hypot(j1 - j0, i1 - i0))
+
+
+def lead_filter(field, geometry: SWGClosureGeometry, cutoff_bands, support):
+    """Closed-box spectral low-pass of ``(..., hours, y, x)`` by lead.
+
+    The wet T box of record ``r`` is transformed with the orthonormal DCT-II
+    (Neumann basis, ``jax.scipy.fft.dctn(type=2, norm="ortho")`` over the two
+    trailing axes; the basis of the rigid-lid projection), the coefficients
+    with isotropic mode-index radius ``sqrt(ky^2 + kx^2)`` above
+    ``cutoff_bands[r]`` are zeroed (a sharp cutoff: the filter is linear, so
+    it is differentiable as it is) and the box is transformed back.  The
+    result is multiplied by ``support`` (the field's own wet points) so the
+    wall values the cut would otherwise leak stay zero.  A record whose
+    cutoff reaches ``lead_filter_max_band`` is returned untouched, bit for
+    bit; with every record so, ``field`` itself comes back.
+    """
+    cutoff = np.asarray(cutoff_bands, dtype=np.float64)
+    if cutoff.ndim != 1 or cutoff.shape[0] != field.shape[-3] \
+            or not np.all(np.isfinite(cutoff)) or np.any(cutoff < 0):
+        raise ValueError(
+            f"cutoff_bands must be {field.shape[-3]} finite non-negative "
+            f"numbers (one per record), got shape {cutoff.shape}")
+    full = cutoff >= lead_filter_max_band(geometry)
+    if full.all():
+        return field
+    j0, j1, i0, i1 = geometry.wet_bounds
+    box = (Ellipsis, slice(j0, j1 + 1), slice(i0, i1 + 1))
+    radius = np.hypot(np.arange(j1 - j0 + 1)[:, None],
+                      np.arange(i1 - i0 + 1)[None, :])
+    keep = jnp.asarray(radius[None] <= cutoff[:, None, None], field.dtype)
+    low = jax_fft.idctn(
+        jax_fft.dctn(field[box], type=2, axes=(-2, -1), norm="ortho") * keep,
+        type=2, axes=(-2, -1), norm="ortho")
+    filtered = jnp.where(support, field.at[box].set(low), 0.0)
+    return jnp.where(jnp.asarray(full)[:, None, None], field, filtered)
+
+
+def lead_filtered_trajectory(trajectory: BalancedTrajectory,
+                             geometry: SWGClosureGeometry,
+                             cutoff_bands) -> BalancedTrajectory:
+    """``lead_filter`` of the three balanced fields, each on its own wet
+    points (F points for the vorticity, the U and V faces)."""
+    return BalancedTrajectory(
+        lead_filter(trajectory.relative_vorticity_s1, geometry, cutoff_bands,
+                    geometry.vertex_interior),
+        lead_filter(trajectory.rotational_u_m_s, geometry, cutoff_bands,
+                    geometry.umask),
+        lead_filter(trajectory.rotational_v_m_s, geometry, cutoff_bands,
+                    geometry.vmask))
+
+
+def kinetic_energy_spectra(trajectory: BalancedTrajectory,
+                           geometry: SWGClosureGeometry):
+    """Isotropic KE spectra ``(..., hours, bins)`` of ``(..., hours, y, x)``
+    balanced fields: the scorer's definition, ``isotropic_energy_spectrum``
+    (FFT, mean removed, isotropic shells) of the cell-centred rotational
+    velocity over the wet T box."""
+    u_c, v_c = cell_centred_rotational_velocity(trajectory, geometry)
+    j0, j1, i0, i1 = geometry.wet_bounds
+    leading = u_c.shape[:-2]
+    box = (j1 - j0 + 1, i1 - i0 + 1)
+
+    def flat(values):
+        return values[..., j0:j1 + 1, i0:i1 + 1].reshape((-1,) + box)
+
+    spectra = jax.vmap(lambda u, v: isotropic_energy_spectrum(
+        u, v, geometry.spacing_m)[1])(flat(u_c), flat(v_c))
+    return spectra.reshape(leading + spectra.shape[-1:])
+
+
+def kinetic_energy_spectrum_term(predicted_spectra, target_spectra):
+    """Squared-error mean of the KE spectra over every lead, bin and (window,
+    member) of ``predicted_spectra``; ``target_spectra`` broadcasts against it.
+    A plain squared loss on the spectrum, no per-band normalisation."""
+    return jnp.mean((predicted_spectra - target_spectra) ** 2)
+
+
+def vorticity_bias_term(predicted_zeta, target_zeta,
+                        geometry: SWGClosureGeometry, *, beta_m1_s1: float,
+                        basin_length_m: float, wall_ring: str):
+    """Eq. 7's scale and weights on the squared error of the window-and-lead
+    mean vorticity: ``scale * sum_W (mean_(w,h) (zeta - zeta_C))^2`` for
+    ``(windows, hours, y, x)`` fields.  Never above the Eq. 7 term of the
+    same fields (the mean of the error is inside the square)."""
+    scale, weights = _eq7_scale_and_weights(
+        geometry, beta_m1_s1=beta_m1_s1, basin_length_m=basin_length_m,
+        wall_ring=wall_ring)
+    mean_error = jnp.mean(predicted_zeta - target_zeta, axis=(0, 1))
+    return scale * jnp.sum(mean_error**2 * weights)
+
+
+def neuralgcm_trajectory_loss(
+        predicted_native, target_native, geometry: SWGClosureGeometry, *,
+        objective: str, beta_m1_s1: float, basin_length_m: float,
+        wall_ring: str, cutoff_bands, spectrum_weight: float,
+        bias_weight: float):
+    """Eq. 7 on the lead-filtered vorticity plus ``spectrum_weight`` times the
+    KE-spectrum term plus ``bias_weight`` times the bias term; returns
+    ``(total, eq7, spectrum, bias)``.
+
+    Model and target go through one diagnostic (the objective's).  The Eq. 7
+    and bias terms act on the vorticity after ``lead_filter``; the spectrum
+    term on the unfiltered balanced velocity (the filter would otherwise
+    hide exactly the small scales it constrains).  With every cutoff at
+    ``lead_filter_max_band`` the Eq. 7 term is ``deterministic_trajectory_loss``
+    bit for bit, and with both weights zero ``total`` is it plus exact zeros.
+    """
+    predicted = diagnose_native_windows(
+        predicted_native, geometry, objective=objective)
+    target = diagnose_native_windows(
+        target_native, geometry, objective=objective)
+    zeta_p = lead_filter(predicted.relative_vorticity_s1, geometry,
+                         cutoff_bands, geometry.vertex_interior)
+    zeta_t = lead_filter(target.relative_vorticity_s1, geometry,
+                         cutoff_bands, geometry.vertex_interior)
+    eq7_constants = dict(beta_m1_s1=beta_m1_s1,
+                         basin_length_m=basin_length_m, wall_ring=wall_ring)
+    eq7 = balanced_trajectory_loss(
+        predicted._replace(relative_vorticity_s1=zeta_p),
+        target._replace(relative_vorticity_s1=zeta_t), geometry, None,
+        kind="point", **eq7_constants)
+    spectrum = kinetic_energy_spectrum_term(
+        kinetic_energy_spectra(predicted, geometry),
+        kinetic_energy_spectra(target, geometry))
+    bias = vorticity_bias_term(zeta_p, zeta_t, geometry, **eq7_constants)
+    return (eq7 + spectrum_weight * spectrum + bias_weight * bias,
+            eq7, spectrum, bias)
+
+
+def neuralgcm_ensemble_scores(
+        predicted_native, target_native, geometry: SWGClosureGeometry,
+        normalizers: BalancedNormalizers, *, objective: str, cutoff_bands,
+        spectrum_weight: float):
+    """Energy score of the lead-filtered ensemble plus ``spectrum_weight``
+    times the KE-spectrum term.
+
+    Inputs as ``ensemble_trajectory_scores``.  The three balanced fields of
+    members and truth go through ``lead_filtered_trajectory`` before the
+    score's distances; the spectrum term compares the spectrum of every
+    unfiltered member with the truth's, averaged over members, leads, bins
+    and windows.  Returns ``(total, member_truth_distance, member_spread,
+    energy_score, spectrum)``, means over windows; the three monitors are
+    those of the filtered fields.  With every cutoff at
+    ``lead_filter_max_band`` the first three score entries are
+    ``ensemble_trajectory_scores`` bit for bit.
+    """
+    predicted, target = _diagnosed_ensemble(
+        predicted_native, target_native, geometry, objective=objective)
+    members = predicted_native[0].shape[1]
+    scores = jax.vmap(lambda window_predicted, window_target:
+                      _window_score_vector(
+                          lead_filtered_trajectory(
+                              window_predicted, geometry, cutoff_bands),
+                          lead_filtered_trajectory(
+                              window_target, geometry, cutoff_bands),
+                          geometry, normalizers, members))(predicted, target)
+    energy, distance, spread = jnp.mean(scores, axis=0)
+    spectrum = kinetic_energy_spectrum_term(
+        kinetic_energy_spectra(predicted, geometry),
+        kinetic_energy_spectra(target, geometry)[:, None])
+    return (energy + spectrum_weight * spectrum, distance, spread, energy,
+            spectrum)
 
 
 def balanced_field_second_moments(trajectory: BalancedTrajectory,

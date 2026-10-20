@@ -55,7 +55,18 @@ fields, which needs ``"white_input"`` and replaces Eq. 7) or ``{"kind":
 "eq7_window_statistics", "calibration_window_days": W}`` (Eq. 7 plus the
 NRMSE^2 of the window-mean vorticity map and of the window EKE map, each
 weighted by a constant set once from the first training batch of W-day
-windows so that it equals the Eq. 7 term).  Whatever a loss freezes at the
+windows so that it equals the Eq. 7 term).  The NeuralGCM-style losses
+(Kochkov et al. 2024, Methods 7.4) are ``{"kind": "eq7_neuralgcm",
+"calibration_window_days": W, "lead_time_cutoff": TABLE}`` (Eq. 7 on a vorticity
+low-passed with a cutoff that shrinks with lead time, plus a KE-spectrum
+MSE and a MSE of the batch-and-lead mean vorticity, the two weights set once
+like the arm-C ones; ``windows_per_call`` must be 10) and ``{"kind":
+"energy_score_neuralgcm", "members": M, "calibration_window_days": W,
+"lead_time_cutoff": TABLE}`` (the energy score of the low-passed fields plus
+the KE-spectrum MSE; needs ``"white_input"``).  ``TABLE`` is ``{"lead_hours":
+[0, ...], "cutoff_band": [...]}`` (``lead_time_cutoff_table``); the string
+``"PENDING_TWIN_MEASUREMENT"`` stands for a table not measured yet and refuses
+at load.  Whatever a loss freezes at the
 start is recorded in the run manifest (``loss_constants``) and read back on
 resume.  ``network.initial_acceleration_gate`` (``"enforced"`` or
 ``"recorded_only"``, required) says whether the 1% bar on the initialised
@@ -156,9 +167,13 @@ from legoesm.training.swg_online import (
     eq6_scale_report,
     free_run_closure,
     initial_closure_acceleration_ratio,
+    lead_time_cutoff_bands,
+    lead_time_cutoff_table,
     maddison_eq6_network_scales,
     maddison_half_width_m,
     network_parameter_count,
+    neuralgcm_ensemble_scores,
+    neuralgcm_trajectory_loss,
     normalizers_from_moments,
     record_start_state,
     require_curriculum_windows,
@@ -198,8 +213,20 @@ ACCELERATION_GATES = ("enforced", "recorded_only")
 REPORT_NAMES = {
     "energy_score": ("energy_score", "member_truth_distance", "member_spread"),
     "eq7_window_statistics": ("total", "eq7", "vorticity_nrmse2",
-                              "eke_nrmse2")}
-LOSS_KINDS = ("eq7", "energy_score", "eq7_window_statistics")
+                              "eke_nrmse2"),
+    "eq7_neuralgcm": ("total", "eq7_filtered", "spectrum_mse", "bias_mse"),
+    "energy_score_neuralgcm": ("total", "member_truth_distance",
+                               "member_spread", "energy_score_filtered",
+                               "spectrum_mse")}
+LOSS_KINDS = ("eq7", "energy_score", "eq7_window_statistics", "eq7_neuralgcm",
+              "energy_score_neuralgcm")
+# Losses over an ensemble of members driven by independent xi: they need the
+# noise channel, their own noise streams and the spread monitor (report index
+# 1 member-to-truth distance, 2 member spread).
+ENSEMBLE_LOSS_KINDS = ("energy_score", "energy_score_neuralgcm")
+# The NeuralGCM-style losses (user decisions 2026-10-20): a lead-time
+# low-pass plus a KE-spectrum term (plus a bias term for the Eq. 7 variant).
+NEURALGCM_LOSS_KINDS = ("eq7_neuralgcm", "energy_score_neuralgcm")
 # User decision 2026-10-19 (arm B): the xi first-layer weights start at 1e-2
 # of the SSH-channel weights' rms.  The tag separates their random stream
 # from every other use of PRNGKey(seed).
@@ -299,14 +326,25 @@ def _validate_loss(loss, noise_channel: str, windows: list) -> None:
         _require_keys(loss, ("kind", "members"), "loss")
         _require_int(loss["members"], "loss members", minimum=2)
     else:
-        _require_keys(loss, ("kind", "calibration_window_days"), "loss")
+        extra = {"eq7_window_statistics": (),
+                 "eq7_neuralgcm": ("lead_time_cutoff",),
+                 "energy_score_neuralgcm": ("members", "lead_time_cutoff")}[
+            loss["kind"]]
+        _require_keys(loss, ("kind", "calibration_window_days") + extra,
+                      "loss")
         if loss["calibration_window_days"] not in windows:
             raise ValueError("loss calibration_window_days must be one of the "
                              f"curriculum's window lengths {windows}")
-    if (loss["kind"] == "energy_score") != (noise_channel == "white_input"):
+        if "members" in extra:
+            _require_int(loss["members"], "loss members", minimum=2)
+        if "lead_time_cutoff" in extra:
+            lead_time_cutoff_table(loss["lead_time_cutoff"])
+    if (loss["kind"] in ENSEMBLE_LOSS_KINDS) != (noise_channel == "white_input"):
         raise ValueError(
             "the energy_score loss needs network noise_channel 'white_input' "
-            "and only it trains one (an unused xi weight is an inert leaf)")
+            "(likewise energy_score_neuralgcm) and only the ensemble losses "
+            f"{ENSEMBLE_LOSS_KINDS} train one (an unused xi weight is an "
+            "inert leaf)")
 
 
 def checkpoint_last_window_days(checkpoint: Path) -> int:
@@ -773,6 +811,15 @@ def build_batch_programs(card, geometry, *, window_days: int,
     ``constants`` is ``(vorticity_weight, eke_weight)``; the loss is
     ``window_statistics_trajectory_loss``'s total and ``report`` the vector
     ``(total, eq7, vorticity_term, eke_term)``.
+    ``eq7_neuralgcm``: the deterministic rollout; ``constants`` is
+    ``(spectrum_weight, bias_weight)``; the loss is
+    ``neuralgcm_trajectory_loss``'s total and ``report`` the vector
+    ``(total, eq7_filtered, spectrum, bias)``; ``loss["lead_time_cutoff"]``
+    is the cutoff table.
+    ``energy_score_neuralgcm``: the ``energy_score`` ensemble;
+    ``constants`` is ``(BalancedNormalizers, spectrum_weight)``; the loss is
+    ``neuralgcm_ensemble_scores``'s total and ``report`` the vector
+    ``(total, member_truth_distance, member_spread, energy_score, spectrum)``.
     """
     if training_precision not in TRAINING_PRECISIONS:
         raise ValueError(
@@ -796,6 +843,11 @@ def build_batch_programs(card, geometry, *, window_days: int,
             card, geometry, window_days=window_days,
             target_interval_hours=target_interval_hours, checkpoint=checkpoint)
     n_steps = window_steps(card, window_days, target_interval_hours)
+    cutoff_bands = lead_time_cutoff_bands(
+        loss["lead_time_cutoff"],
+        n_records=HOURS_PER_DAY * window_days // target_interval_hours,
+        target_interval_hours=target_interval_hours,
+    ) if kind in NEURALGCM_LOSS_KINDS else None
     template = card.recipe.initial_state
     namelist = card.resolved_namelist
     shape = tuple(geometry.tmask.shape)
@@ -835,7 +887,27 @@ def build_batch_programs(card, geometry, *, window_days: int,
         def batch_loss(network, initial, target, key):
             return scores(network, initial, target, key)[0]
         report = scores
-    else:
+    elif kind == "energy_score_neuralgcm":
+        def scores(network, initial, target, key):
+            return jnp.stack(neuralgcm_ensemble_scores(
+                ensemble(network, initial, key), target, geometry,
+                constants[0], objective=objective, cutoff_bands=cutoff_bands,
+                spectrum_weight=constants[1]))
+
+        def batch_loss(network, initial, target, key):
+            return scores(network, initial, target, key)[0]
+        report = scores
+    elif kind == "eq7_neuralgcm":
+        def terms(network, initial, target, key):
+            return jnp.stack(neuralgcm_trajectory_loss(
+                deterministic(network, initial, key), target, geometry,
+                cutoff_bands=cutoff_bands, spectrum_weight=constants[0],
+                bias_weight=constants[1], **eq7))
+
+        def batch_loss(network, initial, target, key):
+            return terms(network, initial, target, key)[0]
+        report = terms
+    elif kind == "eq7_window_statistics":
         def terms(network, initial, target, key):
             return jnp.stack(window_statistics_trajectory_loss(
                 deterministic(network, initial, key), target, geometry,
@@ -844,6 +916,8 @@ def build_batch_programs(card, geometry, *, window_days: int,
         def batch_loss(network, initial, target, key):
             return terms(network, initial, target, key)[0]
         report = terms
+    else:
+        raise ValueError(f"loss kind must be one of {LOSS_KINDS}")
 
     programs = {"value_and_grad": eqx.filter_jit(eqx.filter_value_and_grad(
         batch_loss)), "loss": eqx.filter_jit(batch_loss)}
@@ -862,6 +936,17 @@ def build_batch_programs(card, geometry, *, window_days: int,
         return run
 
     return {name: zero_lid_ssh(function) for name, function in programs.items()}
+
+
+def require_whole_batch_for_bias(kind: str, windows_per_call: int) -> None:
+    """The ``eq7_neuralgcm`` bias term is the squared window-and-lead mean
+    error of the batch: not a mean of per-part terms, so the batch must be
+    one call (the parts of a split batch would each see their own mean)."""
+    if kind == "eq7_neuralgcm" and windows_per_call != TEMPLATE_BATCH_SIZE:
+        raise ValueError(
+            "the eq7_neuralgcm loss's bias term is the mean error of the "
+            f"whole batch: windows_per_call must be {TEMPLATE_BATCH_SIZE}, "
+            f"got {windows_per_call}")
 
 
 def _parts(batch, windows_per_call: int):
@@ -1093,6 +1178,20 @@ def _archive_incomplete(path: Path) -> None:
 
 # ---------------------------------------------------------------------- train
 
+_LEAD_FILTER_DEFINITION = (
+    "per record, orthonormal DCT-II (jax.scipy.fft.dctn type 2) of the wet T "
+    "box, coefficients with isotropic mode-index radius sqrt(ky^2+kx^2) above "
+    "the record's cutoff band zeroed, inverse transform, wet points kept; "
+    "cutoff of the record at lead L hours = cutoff_band of the last "
+    "lead_hours entry <= L (left-continuous step); a cutoff at or above the "
+    "box's largest radius leaves the record untouched")
+_KE_SPECTRUM_DEFINITION = (
+    "legoesm.ocean.diagnostics.isotropic_energy_spectrum of the cell-centred "
+    "rotational velocity over the wet T box, per record; squared error, "
+    "mean over bins, records, windows (and members), no per-band "
+    "normalisation")
+
+
 def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
               contract_sha256: str, contract: dict, *, seed: int,
               device: dict, windows_per_call: int, commit: str) -> dict:
@@ -1131,7 +1230,7 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
                               "epoch=epoch-1): offset per (seed, window, "
                               "epoch), shuffled",
             "rollout_key": "PRNGKey(seed); inert: zero stage noise, scale 0"
-            if config["loss"]["kind"] != "energy_score" else
+            if config["loss"]["kind"] not in ENSEMBLE_LOSS_KINDS else
             "member (w, m) of a training batch step: split(fold_in(fold_in("
             "fold_in(fold_in(PRNGKey(seed), 1), window_days), epoch), step), "
             "part-folded); validation: the same with tag 2, no epoch/step"},
@@ -1230,6 +1329,45 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
                            "loss_constants)",
             "validation_report": ["energy_score", "member_truth_distance",
                                   "member_spread"]}
+    elif kind == "energy_score_neuralgcm":
+        identity["loss"] = {key: identity["loss"][key] for key in (
+            "objective", "wall_ring")} | {
+            "definition": "Brolly (2026) Eq. 9 energy score of the "
+                          "lead-filtered fields (neuralgcm_ensemble_scores) "
+                          "+ spectrum_weight * MSE of the KE spectrum of "
+                          "each unfiltered member against the truth's, "
+                          "means over windows",
+            "members": config["loss"]["members"],
+            "member_start": "the window's stored start state, every member",
+            "lead_time_filter": _LEAD_FILTER_DEFINITION,
+            "lead_time_cutoff": config["loss"]["lead_time_cutoff"],
+            "ke_spectrum": _KE_SPECTRUM_DEFINITION,
+            "weights": "normalizers: training-split area-weighted variances "
+                       "of the three balanced fields; spectrum_weight set "
+                       "once from the first training batch of "
+                       f"{config['loss']['calibration_window_days']}-day "
+                       "windows so the spectrum term equals the energy-score "
+                       "term, then frozen (run manifest loss_constants)",
+            "validation_report": list(REPORT_NAMES[kind])}
+    elif kind == "eq7_neuralgcm":
+        identity["loss"] = identity["loss"] | {
+            "definition": "Eq. 7 on the lead-filtered vorticity + "
+                          "spectrum_weight * MSE of the KE spectrum (of the "
+                          "unfiltered rotational velocity) + bias_weight * "
+                          "Eq. 7-weighted squared error of the window-and-"
+                          "lead mean of the lead-filtered vorticity "
+                          "(neuralgcm_trajectory_loss)",
+            "lead_time_filter": _LEAD_FILTER_DEFINITION,
+            "lead_time_cutoff": config["loss"]["lead_time_cutoff"],
+            "ke_spectrum": _KE_SPECTRUM_DEFINITION,
+            "bias_batch": "the ten windows of one batch (windows_per_call "
+                          "must be 10)",
+            "weights": "both set once from the first training batch of "
+                       f"{config['loss']['calibration_window_days']}-day "
+                       "windows so each added term equals the filtered "
+                       "Eq. 7 term, then frozen (run manifest "
+                       "loss_constants)",
+            "validation_report": list(REPORT_NAMES[kind])}
     elif kind == "eq7_window_statistics":
         identity["loss"] = identity["loss"] | {
             "definition": "Eq. 7 + vorticity_weight * NRMSE^2(window-mean "
@@ -1346,65 +1484,101 @@ def _train_window_batches(contract, config: dict, *, window_days: int,
         epoch=epoch, seed=seed)
 
 
+def _measure_normalizers(config: dict, *, geometry, contract, seed: int):
+    """The energy score's frozen normalizers and their provenance:
+    area-weighted variances of the three balanced fields of the training
+    split's targets (every batch of one epoch of ``curriculum.window_days[0]``
+    windows, the objective's diagnostic); ``(record, BalancedNormalizers)``."""
+    window_days = config["curriculum"]["window_days"][0]
+    diagnose = jax.jit(lambda native: diagnose_native_windows(
+        native, geometry, objective=config["objective"]))
+    moments, batches = np.zeros((3, 3)), 0
+    for batch in _train_window_batches(
+            contract, config, window_days=window_days, seed=seed):
+        moments += balanced_field_second_moments(
+            diagnose(tuple(jnp.asarray(value) for value in batch.target)),
+            geometry)
+        batches += 1
+    normalizers = normalizers_from_moments(moments)
+    return {"normalizers": normalizers._asdict(),
+            "source": {
+                "split": "train", "window_days": window_days,
+                "target_interval_hours": config["target_interval_hours"],
+                "epoch": 0, "seed": seed, "batches": batches,
+                "samples": int(moments[0, 0]),
+                "definition": "area_t*tmask-weighted variance about the "
+                              "sample-and-area mean of the objective's "
+                              "balanced fields (diagnose_native_windows)"}}, \
+        normalizers
+
+
 def measure_loss_constants(config: dict, *, card, geometry, contract, network,
                            key, seed: int, windows_per_call: int) -> dict:
     """The constants a non-Eq. 7 loss freezes at the start of a run.
 
-    ``energy_score``: area-weighted variances of the three balanced fields
-    of the training split's targets (every batch of one epoch of
-    ``curriculum.window_days[0]`` windows, the objective's diagnostic).
+    ``energy_score``: the normalizers (``_measure_normalizers``).
     ``eq7_window_statistics``: the two weights that make each added term
     equal the Eq. 7 term on the first training batch of
     ``calibration_window_days`` windows at the starting network.
+    ``eq7_neuralgcm``: the same for the KE-spectrum and bias terms against
+    the lead-filtered Eq. 7 term.  ``energy_score_neuralgcm``: the
+    ``energy_score`` normalizers plus the one weight that makes the spectrum
+    term equal the filtered energy-score term on that batch (its members
+    drawn with the key of the first training step of that window length).
     """
     loss = config["loss"]
-    if loss["kind"] == "energy_score":
-        window_days = config["curriculum"]["window_days"][0]
-        diagnose = jax.jit(lambda native: diagnose_native_windows(
-            native, geometry, objective=config["objective"]))
-        moments, batches = np.zeros((3, 3)), 0
-        for batch in _train_window_batches(
-                contract, config, window_days=window_days, seed=seed):
-            moments += balanced_field_second_moments(
-                diagnose(tuple(jnp.asarray(value) for value in batch.target)),
-                geometry)
-            batches += 1
-        normalizers = normalizers_from_moments(moments)
-        return {"kind": "energy_score",
-                "normalizers": normalizers._asdict(),
-                "source": {
-                    "split": "train", "window_days": window_days,
-                    "target_interval_hours": config["target_interval_hours"],
-                    "epoch": 0, "seed": seed, "batches": batches,
-                    "samples": int(moments[0, 0]),
-                    "definition": "area_t*tmask-weighted variance about the "
-                                  "sample-and-area mean of the objective's "
-                                  "balanced fields (diagnose_native_windows)"}}
+    kind = loss["kind"]
+    if kind == "energy_score":
+        record, _ = _measure_normalizers(
+            config, geometry=geometry, contract=contract, seed=seed)
+        return {"kind": "energy_score", **record}
     window_days = loss["calibration_window_days"]
     batch = next(_train_window_batches(
         contract, config, window_days=window_days, seed=seed))
-    programs = build_batch_programs(
-        card, geometry, window_days=window_days,
+    programs_for = functools.partial(
+        build_batch_programs, card, geometry, window_days=window_days,
         target_interval_hours=config["target_interval_hours"],
         objective=config["objective"], wall_ring=config["wall_ring"],
         training_precision=config["training_precision"],
-        checkpoint=config["gradient_checkpointing"], loss=loss,
-        constants=(0.0, 0.0))
-    _, eq7, vorticity, kinetic = (float(value) for value in batch_report(
-        programs["report"], network, batch, key, windows_per_call))
-    if not all(np.isfinite(value) and value > 0.0
-               for value in (eq7, vorticity, kinetic)):
-        raise RuntimeError("window-statistic calibration terms must be "
-                           f"positive and finite, got {eq7, vorticity, kinetic}")
-    return {"kind": "eq7_window_statistics",
-            "vorticity_weight": eq7 / vorticity, "eke_weight": eq7 / kinetic,
-            "calibration": {
-                "window_days": window_days, "epoch": 0, "seed": seed,
-                "batch": "first training batch, the starting network",
-                "start_absolute_hours": [int(hour) for hour
-                                         in batch.start_absolute_hour],
-                "eq7": eq7, "vorticity_nrmse2": vorticity,
-                "eke_nrmse2": kinetic}}
+        checkpoint=config["gradient_checkpointing"], loss=loss)
+    provenance = {
+        "window_days": window_days, "epoch": 0, "seed": seed,
+        "batch": "first training batch, the starting network",
+        "start_absolute_hours": [int(hour) for hour
+                                 in batch.start_absolute_hour]}
+    if kind == "energy_score_neuralgcm":
+        record, normalizers = _measure_normalizers(
+            config, geometry=geometry, contract=contract, seed=seed)
+        step_key = jax.random.fold_in(jax.random.fold_in(jax.random.fold_in(
+            jax.random.fold_in(key, TRAIN_NOISE_TAG), window_days), 1), 0)
+        energy, spectrum = (float(value) for value in batch_report(
+            programs_for(constants=(normalizers, 0.0))["report"], network,
+            batch, step_key, windows_per_call, per_part_keys=True)[3:])
+        if not all(np.isfinite(value) and value > 0.0
+                   for value in (energy, spectrum)):
+            raise RuntimeError("spectrum calibration terms must be positive "
+                               f"and finite, got {energy, spectrum}")
+        return {"kind": kind, **record, "spectrum_weight": energy / spectrum,
+                "calibration": provenance | {
+                    "energy_score_filtered": energy, "spectrum_mse": spectrum}}
+    report = batch_report(programs_for(constants=(0.0, 0.0))["report"],
+                          network, batch, key, windows_per_call)
+    if kind == "eq7_neuralgcm":
+        _, eq7, spectrum, bias = (float(value) for value in report)
+        terms = {"eq7_filtered": eq7, "spectrum_mse": spectrum,
+                 "bias_mse": bias}
+        weights = {"spectrum_weight": eq7 / spectrum,
+                   "bias_weight": eq7 / bias}
+    else:
+        _, eq7, vorticity, kinetic = (float(value) for value in report)
+        terms = {"eq7": eq7, "vorticity_nrmse2": vorticity,
+                 "eke_nrmse2": kinetic}
+        weights = {"vorticity_weight": eq7 / vorticity,
+                   "eke_weight": eq7 / kinetic}
+    if not all(np.isfinite(value) and value > 0.0 for value in terms.values()):
+        raise RuntimeError("loss calibration terms must be positive and "
+                           f"finite, got {terms}")
+    return {"kind": kind, **weights, "calibration": provenance | terms}
 
 
 def frozen_loss_constants(config: dict, manifest_path: Path, *, have_epochs,
@@ -1428,6 +1602,11 @@ def frozen_loss_constants(config: dict, manifest_path: Path, *, have_epochs,
                            f"{record['kind']!r}, not {kind!r}")
     if kind == "energy_score":
         return BalancedNormalizers(**record["normalizers"])
+    if kind == "energy_score_neuralgcm":
+        return (BalancedNormalizers(**record["normalizers"]),
+                record["spectrum_weight"])
+    if kind == "eq7_neuralgcm":
+        return (record["spectrum_weight"], record["bias_weight"])
     return (record["vorticity_weight"], record["eke_weight"])
 
 
@@ -1438,6 +1617,7 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
         raise ValueError(f"seed {seed} is not one of the configuration's seeds")
     if windows_per_call not in (1, 2, 5, 10):
         raise ValueError("windows_per_call must divide the batch of ten")
+    require_whole_batch_for_bias(config["loss"]["kind"], windows_per_call)
     geometry = build_closure_geometry(card)
     spec, scales = network_spec(config, card, geometry)
     settings = SWGOptimizerSettings(**config["optimiser"])
@@ -1530,7 +1710,7 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
         geometry=geometry, contract=contract, network=network, key=key,
         seed=seed, windows_per_call=windows_per_call)
     kind = config["loss"]["kind"]
-    stochastic = kind == "energy_score"
+    stochastic = kind in ENSEMBLE_LOSS_KINDS
     train_key = jax.random.fold_in(key, TRAIN_NOISE_TAG)
     validation_key = jax.random.fold_in(key, VALIDATION_NOISE_TAG)
 
@@ -1785,6 +1965,7 @@ def profile(config: dict, *, card, device: dict, windows_per_call: int) -> dict:
     count at offset zero, an upper bound), the same for validation.  The
     free-run day is timed only on the free runs' configured device.
     """
+    require_whole_batch_for_bias(config["loss"]["kind"], windows_per_call)
     geometry = build_closure_geometry(card)
     spec, _ = network_spec(config, card, geometry)
     key = jax.random.PRNGKey(config["seeds"][0])
@@ -1795,10 +1976,12 @@ def profile(config: dict, *, card, device: dict, windows_per_call: int) -> dict:
     shape = tuple(geometry.tmask.shape)
     rest = np.zeros((TEMPLATE_BATCH_SIZE,) + shape)
     # The compiled programs' cost does not depend on the loss constants.
-    stochastic = config["loss"]["kind"] == "energy_score"
+    stochastic = config["loss"]["kind"] in ENSEMBLE_LOSS_KINDS
     placeholder_constants = {
         "eq7": None, "energy_score": BalancedNormalizers(1.0, 1.0, 1.0),
-        "eq7_window_statistics": (1.0, 1.0)}[config["loss"]["kind"]]
+        "eq7_window_statistics": (1.0, 1.0), "eq7_neuralgcm": (1.0, 1.0),
+        "energy_score_neuralgcm": (BalancedNormalizers(1.0, 1.0, 1.0), 1.0),
+    }[config["loss"]["kind"]]
     splits = config["dataset"]["splits_days"]
     epochs = config["curriculum"]["epochs_per_window"]
     rows = []

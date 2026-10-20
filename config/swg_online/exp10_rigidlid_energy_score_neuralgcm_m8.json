@@ -1,0 +1,88 @@
+{
+  "schema": "legoesm-swg-online-training-v3",
+  "experiment": "swgonl_exp10_rigidlid_energy_score_neuralgcm_m8",
+  "description": "NeuralGCM-style objective (user decisions 2026-10-20; Kochkov et al. 2024, arXiv 2311.07222, Methods 7.4): identical to exp7 (arm B: noise channel, M = 8 members, warm start from the finished deterministic symmetric 8-day network, curriculum 8, 16, 32 days) except that the energy score is taken on the lead-time-low-passed fields (all three balanced fields) and gains a MSE of each member's kinetic-energy spectrum against the truth's; no bias term. The spectrum weight is set once so the spectrum term equals the filtered energy-score term on the first training batch of 8-day windows, then frozen and recorded in the run manifest. The lead-time cutoff table (loss.lead_time_cutoff) is PENDING_TWIN_MEASUREMENT: it comes from a twin measurement the owner has not approved yet, and until it is replaced by {\"lead_hours\": [0, ...], \"cutoff_band\": [...]} this configuration refuses to load.",
+  "deck": "dg50-rl",
+  "surface": "rigid_lid",
+  "objective": "symmetric",
+  "wall_ring": "weighted",
+  "training_precision": "fp32",
+  "gradient_checkpointing": true,
+  "target_interval_hours": 3,
+  "network": {
+    "hidden_channels": 16,
+    "hidden_layers": 4,
+    "kernel_size": 3,
+    "wall_margin_rings": 0,
+    "scales": "maddison_eq6_shallow_water_grid_analogue",
+    "noise_channel": "white_input",
+    "initial_acceleration_gate": "recorded_only",
+    "initial_checkpoint": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round17_rigidlid/swgonl_exp4_rigidlid_symmetric_ring_weighted_fp32/seed20261013/checkpoints/w08_e05.eqx"
+  },
+  "loss": {
+    "kind": "energy_score_neuralgcm",
+    "members": 8,
+    "calibration_window_days": 8,
+    "lead_time_cutoff": "PENDING_TWIN_MEASUREMENT"
+  },
+  "seeds": [
+    20261013
+  ],
+  "dataset": {
+    "records": [
+      {
+        "root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round16_rigidlid_truth/hourly_dual_12y",
+        "chunk_label": "dual"
+      },
+      {
+        "root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round16_rigidlid_truth/hourly_dual_test_year",
+        "chunk_label": "dual_test"
+      }
+    ],
+    "splits_days": {
+      "train": [
+        731,
+        4235
+      ],
+      "validation": [
+        4265,
+        5111
+      ],
+      "test": [
+        5141,
+        5506
+      ]
+    },
+    "batch_size": 10,
+    "cache": "memory",
+    "target_filter_sigma_cells": 1.0
+  },
+  "curriculum": {
+    "window_days": [
+      8,
+      16,
+      32
+    ],
+    "epochs_per_window": 5,
+    "network_between_windows": "carried",
+    "optimiser_between_windows": "reinitialised"
+  },
+  "optimiser": {
+    "optimizer": "adamw",
+    "learning_rate": 0.001,
+    "schedule": "constant",
+    "weight_decay": 0.004,
+    "adam_b1": 0.9,
+    "adam_b2": 0.999,
+    "adam_epsilon": 1e-07,
+    "adam_epsilon_convention": "keras_epsilon_hat",
+    "gradient_clipping": "none"
+  },
+  "free_run": {
+    "days": 7300,
+    "start": "rest",
+    "sampling": "end_of_day_snapshot_and_daily_mean",
+    "device": "cuda",
+    "math_library": "native"
+  }
+}

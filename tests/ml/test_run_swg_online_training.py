@@ -1549,7 +1549,8 @@ EXP1_SYMMETRIC = _ROOT / "config/swg_online/exp1_symmetric_ring_weighted.json"
 def test_every_committed_training_config_states_its_training_precision():
     trained_configs = [
         path for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
-        if "network" in json.loads(path.read_text())]
+        if "network" in json.loads(path.read_text())
+        and path.name not in PENDING_CONFIGS]
     assert len(trained_configs) >= 17
     precisions = {path.name: driver.load_config(path)["training_precision"]
                   for path in trained_configs}
@@ -1581,7 +1582,8 @@ RIGID_LID_TRUTH = ("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
 def test_every_committed_training_config_states_its_target_interval():
     trained_configs = [
         path for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
-        if "network" in json.loads(path.read_text())]
+        if "network" in json.loads(path.read_text())
+        and path.name not in PENDING_CONFIGS]
     intervals = {path.name: driver.load_config(path)["target_interval_hours"]
                  for path in trained_configs}
     assert intervals.pop(EXP4_TEMPLATE.name) == 3
@@ -1975,7 +1977,8 @@ def test_rigid_lid_free_run_writes_whole_day_dual_files(tmp_path, lid_card):
 def test_every_committed_training_config_states_checkpointing_and_cache():
     trained_configs = [
         path for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
-        if "network" in json.loads(path.read_text())]
+        if "network" in json.loads(path.read_text())
+        and path.name not in PENDING_CONFIGS]
     states = {}
     for path in trained_configs:
         config = driver.load_config(path)
@@ -2094,7 +2097,8 @@ def test_every_committed_training_config_states_its_target_filter_width():
     widths = {path.name: driver.load_config(path)["dataset"][
         "target_filter_sigma_cells"]
         for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
-        if "network" in json.loads(path.read_text())}
+        if "network" in json.loads(path.read_text())
+        and path.name not in PENDING_CONFIGS}
     assert widths.pop(EXP6[0].name) == 1.5
     assert widths.pop(EXP6[1].name) == 2.0
     assert len(widths) >= 17 and set(widths.values()) == {1.0}
@@ -2171,6 +2175,11 @@ def test_committed_long_config_extends_exp4_symmetric_and_refuses_what_does_not_
 
 EXP7 = _ROOT / "config/swg_online/exp7_rigidlid_energy_score_m8.json"
 EXP8 = _ROOT / "config/swg_online/exp8_rigidlid_window_stats.json"
+EXP9 = _ROOT / "config/swg_online/exp9_rigidlid_neuralgcm.json"
+EXP10 = _ROOT / "config/swg_online/exp10_rigidlid_energy_score_neuralgcm_m8.json"
+# Shipped with a placeholder cutoff table (the twin measurement is pending):
+# they refuse to load, so the "every committed config" tests leave them out.
+PENDING_CONFIGS = (EXP9.name, EXP10.name)
 W08_CHECKPOINT = (
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/"
     "round17_rigidlid/swgonl_exp4_rigidlid_symmetric_ring_weighted_fp32/"
@@ -2180,7 +2189,8 @@ W08_CHECKPOINT = (
 def test_every_committed_training_config_states_its_loss_and_noise_channel():
     trained_configs = [
         path for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
-        if "network" in json.loads(path.read_text())]
+        if "network" in json.loads(path.read_text())
+        and path.name not in PENDING_CONFIGS]
     seen = {path.name: (driver.load_config(path)["loss"],
                         driver.load_config(path)["network"]["noise_channel"],
                         driver.load_config(path)["network"][
@@ -2795,3 +2805,383 @@ def test_a_loaded_network_may_start_past_the_acceleration_bar_only_when_recorded
     assert log["status"] == "complete" and len(log["epochs"]) == 1
     assert gate["enforced"] is False and gate["passes"] is False
     assert gate["maximum_ratio"] > 0.1
+
+
+# --------------------- NeuralGCM-style losses: exp9 (Eq. 7) and exp10 (energy)
+
+FULL_BAND_TABLE = {"lead_hours": [0], "cutoff_band": [1000]}
+# 3-hour records of a 1-day window: leads 3 | 6, 9 | 12 .. 24.
+LID_TABLE = {"lead_hours": [0, 6, 12], "cutoff_band": [1000, 8, 4]}
+PENDING = "PENDING_TWIN_MEASUREMENT"
+
+
+def _with_table(path, tmp_path, table=LID_TABLE):
+    config = json.loads(path.read_text())
+    assert config["loss"]["lead_time_cutoff"] == PENDING
+    config["loss"]["lead_time_cutoff"] = table
+    target = tmp_path / path.name
+    target.write_text(json.dumps(config))
+    return target
+
+
+@pytest.mark.parametrize("path", [EXP9, EXP10])
+def test_committed_neuralgcm_configs_refuse_to_load_until_the_table_is_measured(
+        path, tmp_path):
+    assert json.loads(path.read_text())["loss"]["lead_time_cutoff"] == PENDING
+    with pytest.raises(ValueError, match="PENDING_TWIN_MEASUREMENT"):
+        driver.load_config(path)
+    # With a measured table in its place the configuration loads.
+    assert driver.load_config(_with_table(path, tmp_path))[
+        "loss"]["lead_time_cutoff"] == LID_TABLE
+
+
+def test_exp9_is_the_exp4_symmetric_recipe_from_scratch_with_the_new_loss(
+        tmp_path):
+    parent = driver.load_config(EXP4_SYMMETRIC)
+    arm = driver.load_config(_with_table(EXP9, tmp_path))
+    assert sorted(key for key in parent if parent[key] != arm[key]) == [
+        "dataset", "description", "experiment", "loss", "seeds"]
+    assert arm["loss"] == {"kind": "eq7_neuralgcm", "calibration_window_days": 1,
+                           "lead_time_cutoff": LID_TABLE}
+    assert arm["seeds"] == parent["seeds"][:1] == [20261013]
+    assert arm["dataset"] == parent["dataset"] | {"cache": "memory"}
+    # From scratch: no checkpoint, the 1% bar enforced, the 1, 2, 4, 8 days.
+    assert "initial_checkpoint" not in arm["network"]
+    assert arm["network"] == parent["network"]
+    assert arm["curriculum"] == parent["curriculum"]
+    assert arm["curriculum"]["window_days"] == [1, 2, 4, 8]
+
+
+def test_exp10_is_exp7_with_only_the_loss_changed(tmp_path):
+    parent = driver.load_config(EXP7)
+    arm = driver.load_config(_with_table(EXP10, tmp_path))
+    assert sorted(key for key in parent if parent[key] != arm[key]) == [
+        "description", "experiment", "loss"]
+    assert arm["loss"] == {
+        "kind": "energy_score_neuralgcm", "members": 8,
+        "calibration_window_days": 8, "lead_time_cutoff": LID_TABLE}
+    assert arm["loss"]["members"] == parent["loss"]["members"]
+
+
+@pytest.mark.parametrize("edit,match", [
+    (lambda c: c["loss"].pop("lead_time_cutoff"),
+     "loss must hold exactly the keys"),
+    (lambda c: c["loss"].update(lead_time_cutoff=PENDING),
+     "PENDING_TWIN_MEASUREMENT"),
+    (lambda c: c["loss"].update(lead_time_cutoff={"lead_hours": [0]}),
+     "lead_time_cutoff must be"),
+    (lambda c: c["loss"].update(
+        lead_time_cutoff={"lead_hours": [0, 6], "cutoff_band": [4, 8]}),
+     "non-increasing"),
+    (lambda c: c["loss"].update(calibration_window_days=3),
+     "calibration_window_days must be one of the curriculum"),
+    (lambda c: c["loss"].update(members=8), "loss must hold exactly the keys"),
+    (lambda c: c["network"].update(noise_channel="white_input"),
+     "energy_score loss needs network noise_channel"),
+    (lambda c: c["loss"].update(kind="eq7_neuralgcm_v2"),
+     "loss kind must be one of")])
+def test_load_config_refuses_an_inconsistent_eq7_neuralgcm_loss(
+        tmp_path, edit, match):
+    config = copy.deepcopy(driver.load_config(_with_table(EXP9, tmp_path)))
+    edit(config)
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match=match):
+        driver.load_config(path)
+
+
+@pytest.mark.parametrize("edit,match", [
+    (lambda c: c["loss"].pop("lead_time_cutoff"),
+     "loss must hold exactly the keys"),
+    (lambda c: c["loss"].pop("members"), "loss must hold exactly the keys"),
+    (lambda c: c["loss"].update(members=1), "members must be an integer >= 2"),
+    (lambda c: c["network"].update(noise_channel="none"),
+     "energy_score loss needs network noise_channel"),
+    (lambda c: c["loss"].update(lead_time_cutoff=PENDING),
+     "PENDING_TWIN_MEASUREMENT")])
+def test_load_config_refuses_an_inconsistent_energy_score_neuralgcm_loss(
+        tmp_path, edit, match):
+    config = copy.deepcopy(driver.load_config(_with_table(EXP10, tmp_path)))
+    edit(config)
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match=match):
+        driver.load_config(path)
+
+
+def _deterministic_network(lid_card, lid_geometry, seed=3):
+    config = driver.load_config(EXP4_SYMMETRIC)
+    spec, _ = driver.network_spec(config, lid_card, lid_geometry)
+    return SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(seed))
+
+
+def _bits(tree_a, tree_b):
+    return all(np.array_equal(np.asarray(a), np.asarray(b)) for a, b in zip(
+        jax.tree.leaves(tree_a), jax.tree.leaves(tree_b), strict=True))
+
+
+def test_eq7_neuralgcm_programs_at_the_full_band_are_the_eq7_programs_bit_for_bit(
+        lid_card, lid_geometry):
+    network = _deterministic_network(lid_card, lid_geometry)
+    initial, target = _lid_batch(lid_card)
+    key = jax.random.PRNGKey(1)
+    loss = {"kind": "eq7_neuralgcm", "calibration_window_days": 1,
+            "lead_time_cutoff": FULL_BAND_TABLE}
+    parent = _programs(lid_card, lid_geometry, {"kind": "eq7"}, None)
+    zero = _programs(lid_card, lid_geometry, loss, (0.0, 0.0))
+    p_value, p_grads = parent["value_and_grad"](network, initial, target, key)
+    value, grads = zero["value_and_grad"](network, initial, target, key)
+    assert float(value) == float(p_value) > 0.0 and _bits(grads, p_grads)
+    total, eq7, spectrum, bias = (float(x) for x in zero["report"](
+        network, initial, target, key))
+    # (the report is another compiled program than value_and_grad: same
+    # arithmetic, last-bit freedom)
+    assert total == eq7 and spectrum > 0.0 and bias > 0.0
+    assert eq7 == pytest.approx(float(p_value), rel=1.0e-13)
+    # Weighted: the total adds the two terms; every trainable leaf is live.
+    weighted = _programs(lid_card, lid_geometry, loss, (2.0, 3.0))
+    value, grads = weighted["value_and_grad"](network, initial, target, key)
+    assert float(value) == pytest.approx(
+        eq7 + 2.0 * spectrum + 3.0 * bias, rel=1.0e-12)
+    assert_network_gradients_live(grads)
+    # A narrower cutoff table is a different loss (the lead filter reaches the
+    # compiled program), and a missing table is refused, not defaulted.
+    narrow = _programs(lid_card, lid_geometry, loss | {
+        "lead_time_cutoff": LID_TABLE}, (0.0, 0.0))
+    assert float(narrow["loss"](network, initial, target, key)) \
+        < float(p_value)
+    with pytest.raises(ValueError, match="PENDING_TWIN_MEASUREMENT"):
+        _programs(lid_card, lid_geometry,
+                  loss | {"lead_time_cutoff": PENDING}, (1.0, 1.0))
+    with pytest.raises(ValueError, match="takes no loss constants"):
+        _programs(lid_card, lid_geometry, loss, None)
+
+
+def test_energy_score_neuralgcm_programs_at_the_full_band_match_the_energy_score(
+        lid_card, lid_geometry):
+    network = _channel(lid_card, lid_geometry, 1.0)
+    initial, target = _lid_batch(lid_card)
+    key = jax.random.PRNGKey(1)
+    normalizers = swg_online.BalancedNormalizers(1.0e-10, 1.0e-6, 1.0e-6)
+    parent = _programs(lid_card, lid_geometry,
+                       {"kind": "energy_score", "members": 3}, normalizers)
+    loss = {"kind": "energy_score_neuralgcm", "members": 3,
+            "calibration_window_days": 1, "lead_time_cutoff": FULL_BAND_TABLE}
+    zero = _programs(lid_card, lid_geometry, loss, (normalizers, 0.0))
+    p_value, p_grads = parent["value_and_grad"](network, initial, target, key)
+    value, grads = zero["value_and_grad"](network, initial, target, key)
+    assert float(value) == float(p_value) > 0.0 and _bits(grads, p_grads)
+    total, distance, spread, energy, spectrum = (float(x) for x in zero[
+        "report"](network, initial, target, key))
+    assert total == energy and spectrum > 0.0
+    assert energy == pytest.approx(float(p_value), rel=1.0e-13)
+    assert (distance, spread) == tuple(
+        float(x) for x in parent["report"](network, initial, target, key)[1:])
+    weighted = _programs(lid_card, lid_geometry, loss, (normalizers, 5.0))
+    value, grads = weighted["value_and_grad"](network, initial, target, key)
+    assert float(value) == pytest.approx(energy + 5.0 * spectrum, rel=1.0e-12)
+    assert_network_gradients_live(grads)        # includes the xi weights
+    narrow = _programs(lid_card, lid_geometry,
+                       loss | {"lead_time_cutoff": LID_TABLE},
+                       (normalizers, 0.0))
+    assert float(narrow["loss"](network, initial, target, key)) \
+        < float(p_value)
+
+
+def test_the_bias_term_needs_the_whole_batch_in_one_call(tmp_path, small_card,
+                                                         textured_record):
+    for kind in ("eq7", "energy_score", "eq7_window_statistics",
+                 "energy_score_neuralgcm"):
+        for per_call in (1, 2, 5, 10):
+            driver.require_whole_batch_for_bias(kind, per_call)
+    driver.require_whole_batch_for_bias("eq7_neuralgcm", 10)
+    for per_call in (1, 2, 5):
+        with pytest.raises(ValueError, match="windows_per_call must be 10"):
+            driver.require_whole_batch_for_bias("eq7_neuralgcm", per_call)
+    config = _arm_config(
+        textured_record, {"kind": "eq7_neuralgcm", "calibration_window_days": 1,
+                          "lead_time_cutoff": SMALL_TABLE}, "none")
+    path = _write_config(tmp_path / "config.json", config)
+    with pytest.raises(ValueError, match="windows_per_call must be 10"):
+        driver.train(config, path, card=small_card, seed=11,
+                     run_dir=tmp_path / "run", device=CPU, windows_per_call=5,
+                     commit="0" * 40)
+    assert not (tmp_path / "run").exists()
+
+
+SMALL_TABLE = {"lead_hours": [0, 6, 12], "cutoff_band": [1000, 8, 4]}
+
+
+@pytest.fixture(scope="module")
+def neuralgcm_eq7_run(tmp_path_factory, small_card, textured_record):
+    folder = tmp_path_factory.mktemp("swg_neuralgcm_eq7")
+    config = _arm_config(
+        textured_record,
+        {"kind": "eq7_neuralgcm", "calibration_window_days": 1,
+         "lead_time_cutoff": SMALL_TABLE}, "none")
+    path = _write_config(folder / "config.json", config)
+    log = driver.train(config, path, card=small_card, seed=11,
+                       run_dir=folder / "run", device=CPU,
+                       windows_per_call=10, commit="0" * 40)
+    return {"folder": folder, "config": config, "path": path, "log": log}
+
+
+def test_eq7_neuralgcm_run_sets_both_weights_once_and_records_them(
+        neuralgcm_eq7_run, small_card):
+    run = neuralgcm_eq7_run["folder"] / "run"
+    log = neuralgcm_eq7_run["log"]
+    assert log["status"] == "complete"
+    assert log["gates"]["first_step_no_inert"]["passed"]
+    manifest = json.loads((run / "run_manifest.json").read_text())
+    constants = manifest["loss_constants"]
+    calibration = constants["calibration"]
+    # Each added term equals the filtered Eq. 7 term on the first batch.
+    assert constants["spectrum_weight"] * calibration["spectrum_mse"] \
+        == pytest.approx(calibration["eq7_filtered"], rel=1.0e-12)
+    assert constants["bias_weight"] * calibration["bias_mse"] \
+        == pytest.approx(calibration["eq7_filtered"], rel=1.0e-12)
+    # ... recomputed independently on the contract's first batch.
+    config = neuralgcm_eq7_run["config"]
+    contract = driver.SWGDatasetContract.from_json(
+        run / "dataset_contract.json", card=small_card)
+    batch = next(contract.batches(split="train", window_days=1, epoch=0,
+                                  seed=11, target_interval_hours=1))
+    assert calibration["start_absolute_hours"] == [
+        int(hour) for hour in batch.start_absolute_hour]
+    geometry = build_closure_geometry(small_card)
+    spec, _ = driver.network_spec(config, small_card, geometry)
+    network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(11))
+    programs = driver.build_batch_programs(
+        small_card, geometry, window_days=1, target_interval_hours=1,
+        objective=config["objective"], wall_ring=config["wall_ring"],
+        training_precision="fp64", checkpoint=True, loss=config["loss"],
+        constants=(0.0, 0.0))
+    _, eq7, spectrum, bias = driver.batch_report(
+        programs["report"], network, batch, jax.random.PRNGKey(11), 10)
+    assert calibration["eq7_filtered"] == pytest.approx(eq7, rel=1.0e-9)
+    assert calibration["spectrum_mse"] == pytest.approx(spectrum, rel=1.0e-9)
+    assert calibration["bias_mse"] == pytest.approx(bias, rel=1.0e-9)
+    # Frozen: every logged epoch's total is built from those same weights.
+    for entry in log["epochs"]:
+        report = entry["validation_report"]
+        assert report["total"] == pytest.approx(
+            report["eq7_filtered"]
+            + constants["spectrum_weight"] * report["spectrum_mse"]
+            + constants["bias_weight"] * report["bias_mse"], rel=1.0e-9)
+        assert report["total"] == pytest.approx(
+            entry["validation_loss"], rel=1.0e-12)
+        assert np.isfinite(entry["train_loss_mean"])
+    assert manifest["loss"]["lead_time_cutoff"] == SMALL_TABLE
+    assert manifest["loss"]["weights"].startswith("both set once")
+
+
+def test_eq7_neuralgcm_run_resumes_with_the_recorded_weights_or_refuses(
+        neuralgcm_eq7_run, small_card, tmp_path):
+    run = tmp_path / "run"
+    shutil.copytree(neuralgcm_eq7_run["folder"] / "run", run)
+    before = json.loads((run / "run_manifest.json").read_text())
+    driver.train(
+        neuralgcm_eq7_run["config"], neuralgcm_eq7_run["path"], card=small_card,
+        seed=11, run_dir=run, device=CPU, windows_per_call=10, commit="0" * 40)
+    assert json.loads((run / "run_manifest.json").read_text()) == before
+    stripped = {key: value for key, value in before.items()
+                if key != "loss_constants"}
+    (run / "run_manifest.json").write_text(json.dumps(stripped))
+    with pytest.raises(RuntimeError, match="records no loss constants"):
+        driver.frozen_loss_constants(
+            neuralgcm_eq7_run["config"], run / "run_manifest.json",
+            have_epochs=True)
+    wrong = before | {"loss_constants": {"kind": "eq7_window_statistics"}}
+    (run / "run_manifest.json").write_text(json.dumps(wrong))
+    with pytest.raises(RuntimeError, match="loss constants are for"):
+        driver.frozen_loss_constants(
+            neuralgcm_eq7_run["config"], run / "run_manifest.json",
+            have_epochs=True)
+    # A changed cutoff table is a changed run: the stored identity differs.
+    changed = copy.deepcopy(neuralgcm_eq7_run["config"])
+    changed["loss"]["lead_time_cutoff"] = {
+        "lead_hours": [0, 6, 12], "cutoff_band": [1000, 8, 3]}
+    path = _write_config(tmp_path / "changed.json", changed)
+    (run / "run_manifest.json").write_text(json.dumps(before))
+    with pytest.raises(RuntimeError, match="refusing to resume"):
+        driver.train(changed, path, card=small_card, seed=11, run_dir=run,
+                     device=CPU, windows_per_call=10, commit="0" * 40)
+
+
+@pytest.fixture(scope="module")
+def neuralgcm_energy_run(tmp_path_factory, small_card, textured_record,
+                         trained):
+    folder = tmp_path_factory.mktemp("swg_neuralgcm_energy")
+    config = _arm_config(
+        textured_record,
+        {"kind": "energy_score_neuralgcm", "members": 2,
+         "calibration_window_days": 1, "lead_time_cutoff": SMALL_TABLE},
+        "white_input")
+    config["network"]["initial_checkpoint"] = str(
+        trained["folder"] / "run" / "checkpoints" / "w01_e02.eqx")
+    config["network"]["initial_acceleration_gate"] = "recorded_only"
+    path = _write_config(folder / "config.json", config)
+    log = driver.train(config, path, card=small_card, seed=ENERGY_SEED,
+                       run_dir=folder / "run", device=CPU,
+                       windows_per_call=10, commit="0" * 40)
+    return {"folder": folder, "config": config, "path": path, "log": log}
+
+
+def test_energy_score_neuralgcm_run_freezes_normalizers_and_the_spectrum_weight(
+        neuralgcm_energy_run, energy_run, small_card):
+    run = neuralgcm_energy_run["folder"] / "run"
+    log = neuralgcm_energy_run["log"]
+    assert log["status"] == "complete"
+    assert log["gates"]["first_step_no_inert"]["passed"]   # xi weights too
+    manifest = json.loads((run / "run_manifest.json").read_text())
+    constants = manifest["loss_constants"]
+    assert constants["kind"] == "energy_score_neuralgcm"
+    # The normalizers are the energy-score arm's: same machinery, same data.
+    arm_b = json.loads((energy_run["folder"] / "run" / "run_manifest.json"
+                        ).read_text())["loss_constants"]
+    assert constants["normalizers"] == arm_b["normalizers"]
+    calibration = constants["calibration"]
+    assert constants["spectrum_weight"] * calibration["spectrum_mse"] \
+        == pytest.approx(calibration["energy_score_filtered"], rel=1.0e-12)
+    # ... recomputed independently: the first batch, the first training
+    # step's noise key, the starting network (the loaded file plus xi).
+    config = neuralgcm_energy_run["config"]
+    contract = driver.SWGDatasetContract.from_json(
+        run / "dataset_contract.json", card=small_card)
+    batch = next(contract.batches(split="train", window_days=1, epoch=0,
+                                  seed=ENERGY_SEED, target_interval_hours=1))
+    assert calibration["start_absolute_hours"] == [
+        int(hour) for hour in batch.start_absolute_hour]
+    geometry = build_closure_geometry(small_card)
+    spec, _ = driver.network_spec(config, small_card, geometry)
+    optimizer = create_swg_optimizer(SWGOptimizerSettings(**config["optimiser"]))
+    key = jax.random.PRNGKey(ENERGY_SEED)
+    network, _ = driver.initial_network(config, spec, optimizer, key=key)
+    step_key = key
+    for part in (driver.TRAIN_NOISE_TAG, 1, 1, 0):
+        step_key = jax.random.fold_in(step_key, part)
+    programs = driver.build_batch_programs(
+        small_card, geometry, window_days=1, target_interval_hours=1,
+        objective=config["objective"], wall_ring=config["wall_ring"],
+        training_precision="fp64", checkpoint=True, loss=config["loss"],
+        constants=(swg_online.BalancedNormalizers(**constants["normalizers"]),
+                   0.0))
+    report = driver.batch_report(programs["report"], network, batch, step_key,
+                                 10, per_part_keys=True)
+    assert calibration["energy_score_filtered"] == pytest.approx(
+        report[3], rel=1.0e-9)
+    assert calibration["spectrum_mse"] == pytest.approx(report[4], rel=1.0e-9)
+    for entry in log["epochs"]:
+        report = entry["validation_report"]
+        assert report["total"] == pytest.approx(
+            report["energy_score_filtered"]
+            + constants["spectrum_weight"] * report["spectrum_mse"],
+            rel=1.0e-9)
+        assert report["total"] == pytest.approx(
+            entry["validation_loss"], rel=1.0e-12)
+        assert report["member_spread"] > 0.0
+        assert report["spread_over_member_truth_distance"] == pytest.approx(
+            report["member_spread"] / report["member_truth_distance"])
+    assert manifest["loss"]["members"] == 2
+    assert manifest["loss"]["lead_time_cutoff"] == SMALL_TABLE
+    assert manifest["network"]["spec"]["noise_channel"] is True
