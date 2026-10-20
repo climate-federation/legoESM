@@ -206,7 +206,7 @@ preflight() {
       || fail "missing or changed input $f"
   done
   check_deck_delta
-  nm "$REF_BIN" | grep -q '__trabbc_MOD_tra_bbc$' || fail 'G5 reference binary lacks tra_bbc'
+  nm "$REF_BIN" | grep '__trabbc_MOD_tra_bbc$' >/dev/null || fail 'G5 reference binary lacks tra_bbc'
   seven_item_preflight
   printf 'L4_PREFLIGHT_OK commit=%s reference=%s record_target=%s\n' \
     "$(git -C "$repo" rev-parse HEAD)" "$REF_NAME" "$TARGET_NAME"
@@ -230,7 +230,7 @@ build_target() {
   cp "$BASE_TRABBC" "$TARGET/MY_SRC/trabbc.F90"
   patch -s -d "$TARGET/MY_SRC" -p0 <"$PATCH"
   (cd "$NEMO_ROOT" && ./makenemo -n "$TARGET_NAME" -m conda-scalarmath -j 8)
-  nm "$TARGET/BLD/bin/nemo.exe" | grep -q '__trabbc_MOD_tra_bbc$' \
+  nm "$TARGET/BLD/bin/nemo.exe" | grep '__trabbc_MOD_tra_bbc$' >/dev/null \
     || fail 'record binary lacks tra_bbc'
 }
 
