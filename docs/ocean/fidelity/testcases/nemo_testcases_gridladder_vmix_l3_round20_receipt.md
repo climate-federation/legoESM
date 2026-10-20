@@ -140,11 +140,81 @@ merge.  Those citations were re-anchored in `ab0978659197`; the complete list
 was then rerun to the 145-test result above.  No NEMO executable was built or
 run.
 
+## Continuation (Claude, 2026-10-20) — review of codex's uncommitted resume, items 1-5
+
+Status stays **ACQUISITION_NEEDED**.  No NEMO was built or run and nothing was
+scored.  The first acquisition (kept aside as `oracle_l3_r20_failed1`) ran NEMO
+correctly with the eddy-induced velocity on; only the tool's `rn_Ue` text grep
+refused it.
+
+Codex left eleven files uncommitted.  Every hunk was kept; five defects in
+them were fixed first, and nothing was stashed:
+
+1. The bolus read the slope ghost row with sign +1; NEMO folds `wslpj` as
+   `W` with sign -1 at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfslp.f90:338`.
+2. The new fold also ran in L2's zero-coefficient centred bolus, changing
+   L2's program.  It is now selected only with the through-FCT bolus, which
+   exists only for `ln_ldfeiv` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:255-257`).
+3. The shared ratio exchange emitted a dead slice in every traced program, so
+   every ladder card's jaxpr had moved; it now emits no op.
+4. A signed-zero `jnp.where` around the stage-3 add was replaced by NEMO's
+   own association, `pFu - (zpsi(jk) - zpsi(jk+1))`
+   (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:954-955`).
+5. The acquisition's numeric log check anchored the name at line start, but
+   NEMO prints a description first, so it would have refused the same log
+   again; and its clock check demanded every restart-list entry be even,
+   which refuses twin C (restarts 3,5,7,9, as L2's admitted twin C ran).
+   NEMO's rule is `ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:342-347`.
+
+The five items, as landed:
+
+1. **L1 restored.**  The merge let G9's table switch off L1's end-of-stage
+   pivot fold (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:795-796`).  L1's
+   two-step values now equal lane B's pre-merge tip `51b2582f5e`, 36 of 36
+   leaves bitwise; the L1 tests, including the kt 1-4 record test, pass.
+2. **Stage-3 routing.**  The bolus is added only to `pFu/pFv`, then `ww` is
+   recomputed by `wzv` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:296`).  With
+   the bolus forced to zero, T, S, u, v and ssh of the G9+L2 step are
+   bit-identical (full depth); under the old route the same plant moves T in
+   430,550 cells and S in 430,552 (up to 0.016 K and 0.14 psu), and the new
+   test fails there.
+3. **EIV north fold.**  The face coefficients take NEMO's `U`/`V` +1 exchange
+   (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:783`), the slope ghost row its
+   -1 fold, and the open exchanged V pivot mask, all through the shared fold
+   helpers and L3-selected.  The exact unit test (jit, traced inputs) fails
+   with any one of the three removed.
+4. **One fold helper.**  Lane A's private `_folded_north` is gone;
+   `north_neighbor_T` serves both.  The face builder takes one `grid=` with
+   explicit `north_fold=` and `fold_exchange_ratios=` choices.
+5. **Acquisition.**  Log values are parsed as binary64 and compared exactly
+   to the deck.  Plants: NEMO's exact print lines (the old grep refuses them,
+   the new check accepts them), a neighbouring float (refused), and the first
+   acquisition's own log (accepted).  Preflight renders every deck the run
+   uses.  The record follows the ladder standard: smoke, writer-free boundary
+   run to NEMO's own stop or 100 steps, then three twins to at most 10 steps.
+
+Every other card is unchanged.  Normalized one-step jaxprs equal merge
+`d68c94cd66` for G5-G9, V1-V5, L2, GYRE, DINO, full ORCA2, SMT1-4, VORTEX,
+OMT0-4 and rung 0.  Merge `d68c94cd66` itself reproduces both lane tips'
+two-step values bitwise (G5, V1-V5, L2 against `51b2582f5e`; G9 against
+`7a31b67ef9`; G6-G8 jaxprs equal lane A's).  Only L1 (restored) and L3 move.
+
+Evidence, outside git:
+`gridladder_vmix_rounds/round20/claude_r20c/` (jaxpr hashes, two-step arrays,
+zero-bolus probes, pytest logs, preflight log); the inherited review dumps are
+under `round20/independent_review_failed1/` and `claude_r20c/st_ref/`.
+
+One pre-existing failure is unrelated to this diff: a source-text test of the
+Treguier dispatcher (`test_treguier_kappa_uses_the_same_n2_variant_as_the_slopes`)
+fails identically at merge `d68c94cd66`.
+
+Landing gates for this continuation: recorded in the next commit.
+
 independent review: operator (Claude)
 
-codex review: operator
+codex review: operator (Claude-authored continuation; codex review when capacity allows)
 
-COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/vmix_r20-26952523
+COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r20/repo
 ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/testcases/nemo_testcase_l3_orca2eiv/run.sh --run
 DECISION_NEEDED: NONE
-ROUND_STATUS: ACQUISITION_NEEDED — L3 preregistered and L3-selected; record not acquired or scored
+ROUND_STATUS: ACQUISITION_NEEDED — L3 reviewed, fixed and preflighted; L1 restored; record not acquired or scored

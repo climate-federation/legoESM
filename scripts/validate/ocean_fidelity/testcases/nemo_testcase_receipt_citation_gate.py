@@ -8593,6 +8593,17 @@ CITATION_MAP = {
         'pFu(ji,jj,jk) = pFu(ji,jj,jk) - ( zpsi_uw',
         'pFv(ji,jj,jk) = pFv(ji,jj,jk) - ( zpsi_vw', 2,
     ],
+    # --- lane B round 20 continuation (Claude): L3 fold, routing, clock ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:783':
+        "CALL lbc_lnk( 'ldftra', zaeiu(:,:), 'U', 1.0_wp , zaeiv(:,:), 'V', 1.0_wp )",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfslp.f90:338':
+        "wslpi, 'W', -1.0_wp, wslpj, 'W', -1.0_wp )",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:296':
+        'CALL wzv( kt, Kbb, Kmm, Kaa, pFu, pFv, ww, np_transport )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:342-347': [
+        'IF( MOD( nitend - nit000 + 1, nn_fsbc) /= 0 ) THEN',
+        'IF( .NOT. ln_rst_list .AND. MOD( nn_stock, nn_fsbc) /= 0 ) THEN', 6,
+    ],
     # --- lane B round 17: L2 standard isoneutral tracer diffusion ---
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:300':
         'ln_traldf_lap   = .true.    !    laplacian operator',
