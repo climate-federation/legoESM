@@ -136,9 +136,19 @@ nonzero rejection.
 
 The focused x64 CPU suite passed 43 / 43: the geothermal unit tests, the L4
 card/deck/record/acquisition tests, and the G5 card plus production top-drag
-controls.  The receipt citation gate, its default unit gate, the default
-landing gate, and the private-import ratchet are recorded in the final commit
-after the line re-anchor.  No NEMO model execution occurred.
+controls.  After the required line re-anchor, the direct gate on this receipt
+found 9 citations, 0 unmapped citations, 0 citation failures, and 0 failing
+map entries; all 9 non-vacuity controls fired.  Its unit suite passed 17 / 17,
+and the private-import ratchet passed 6 / 6.
+
+The prescribed default landing gate passed 142 / 142 in CPU x64: 17 citation,
+6 private-import, 68 TKE-term, 25 recipe, 16 freshwater, 2 stage-face-mask,
+and 8 prognostic-barotropic-state tests.  The combined process was split at
+the documented per-process compiler limit; the remaining files passed in
+fresh processes, including the 2 stage-face-mask tests in 614.65 seconds and
+the 8 prognostic-state tests in 71.70 seconds.  The added L4 and geothermal
+suites also passed separately, 10 / 10 and 14 / 14.  No NEMO model execution
+occurred.
 
 ASKED and completed: verify the oracle deck, executed sources, input tar
 member, and compiled G5 route; preregister before implementation; build L4 as
