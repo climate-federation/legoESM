@@ -1565,6 +1565,8 @@ def test_every_committed_training_config_states_its_training_precision():
     assert precisions.pop(EXP8.name) == "fp32"
     assert precisions.pop(EXP9.name) == "fp32"
     assert precisions.pop(EXP10.name) == "fp32"
+    for seed_copy in EXP10_SEEDS:
+        assert precisions.pop(seed_copy.name) == "fp32"
     assert set(precisions.values()) == {"fp64"}
 
 
@@ -1597,6 +1599,8 @@ def test_every_committed_training_config_states_its_target_interval():
     assert intervals.pop(EXP8.name) == 3
     assert intervals.pop(EXP9.name) == 3
     assert intervals.pop(EXP10.name) == 3
+    for seed_copy in EXP10_SEEDS:
+        assert intervals.pop(seed_copy.name) == 3
     assert len(intervals) >= 17 and set(intervals.values()) == {1}
 
 
@@ -1991,6 +1995,8 @@ def test_every_committed_training_config_states_checkpointing_and_cache():
     assert states.pop(EXP8.name) == (True, "memory")
     assert states.pop(EXP9.name) == (True, "memory")
     assert states.pop(EXP10.name) == (True, "memory")
+    for seed_copy in EXP10_SEEDS:
+        assert states.pop(seed_copy.name) == (True, "memory")
     assert states.pop(EXP5_SYMMETRIC.name) == (False, "memory")
     assert states.pop(EXP5_TEMPLATE.name) == (False, "memory")
     for path in EXP6:
@@ -2179,6 +2185,26 @@ EXP7 = _ROOT / "config/swg_online/exp7_rigidlid_energy_score_m8.json"
 EXP8 = _ROOT / "config/swg_online/exp8_rigidlid_window_stats.json"
 EXP9 = _ROOT / "config/swg_online/exp9_rigidlid_neuralgcm.json"
 EXP10 = _ROOT / "config/swg_online/exp10_rigidlid_energy_score_neuralgcm_m8.json"
+EXP10_SEEDS = [_ROOT / f"config/swg_online/exp10_rigidlid_energy_score_neuralgcm_m8_seed{seed}.json"
+               for seed in (20261014, 20261015)]
+
+
+def test_exp10_seed_copies_differ_only_in_seed_and_start_network():
+    base = json.loads(EXP10.read_text())
+    for seed, path in zip((20261014, 20261015), EXP10_SEEDS):
+        copy_ = json.loads(path.read_text())
+        assert copy_["seeds"] == [seed]
+        assert copy_["network"]["initial_checkpoint"].endswith(
+            f"seed{seed}/checkpoints/w08_e05.eqx")
+        for key in ("seeds", "description"):
+            copy_.pop(key)
+            base.pop(key, None)
+        copy_["network"].pop("initial_checkpoint")
+        reference = json.loads(EXP10.read_text())
+        for key in ("seeds", "description"):
+            reference.pop(key)
+        reference["network"].pop("initial_checkpoint")
+        assert copy_ == reference
 W08_CHECKPOINT = (
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/"
     "round17_rigidlid/swgonl_exp4_rigidlid_symmetric_ring_weighted_fp32/"
@@ -2206,6 +2232,8 @@ def test_every_committed_training_config_states_its_loss_and_noise_channel():
     assert seen.pop(EXP9.name) == (
         {"kind": "eq7_neuralgcm", "calibration_window_days": 1,
          "lead_time_cutoff": MEASURED_TABLE}, "none", "enforced")
+    for seed_copy in EXP10_SEEDS:
+        assert seen.pop(seed_copy.name) == seen[EXP10.name]
     assert seen.pop(EXP10.name) == (
         {"kind": "energy_score_neuralgcm", "members": 8,
          "calibration_window_days": 8, "lead_time_cutoff": MEASURED_TABLE},
