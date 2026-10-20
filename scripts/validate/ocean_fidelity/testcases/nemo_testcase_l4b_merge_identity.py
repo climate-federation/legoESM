@@ -17,8 +17,8 @@ PHASE3 = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3")
 ROOTS = {
     "ORCA2G1-flat": PHASE3 / "gridladder_rounds/round1/oracle_g1_r1/smoke_2step",
     "ORCA2G2-zps": PHASE3 / "gridladder_rounds/round10/oracle_g2_r10/smoke_2step",
-    "ORCA2G3-ts": PHASE3 / "gridladder_rounds/round14/oracle_g3_r14/smoke_2step",
-    "ORCA2G4-sbc": PHASE3 / "gridladder_rounds/round19/oracle_g4_r19/p6_a",
+    "ORCA2G3-ts": PHASE3 / "gridladder_rounds/round21/oracle_g3_r21/p3_a",
+    "ORCA2G4-sbc": PHASE3 / "gridladder_rounds/round21/oracle_g4_r21/p6_a",
     "ORCA2G5-ice": PHASE3 / "gridladder_rounds/round31/oracle_g5_r31/twin_a",
     "ORCA2G6-vec": PHASE3 / "gridladder_rounds/round36/oracle_g6_r36/twin_a",
     "ORCA2G7-drg": PHASE3 / "gridladder_rounds/round41/oracle_g7_r41/twin_a",
