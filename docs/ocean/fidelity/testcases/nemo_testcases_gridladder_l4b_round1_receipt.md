@@ -127,7 +127,11 @@ The citation repair moved 82 shifted pins and removed one duplicate. Its
 shift-sensitive audit reports zero failures, the citation-gate test file
 passes 17 / 17, and the private-import ratchet passes 6 / 6.
 
-DEFAULT_AND_RECEIPT_GATES_TBD
+The exact ORCA2 default landing suite from `claude_rounds/land.sh` passed
+145 / 145 in 1037.36 seconds. The explicit gate on this receipt found one
+citation, zero failures, zero unmapped citations, zero failing map-audit
+entries, and all nine self-test plants fired. The default receipt gate found
+274 citations with the same zero-failure result and all nine plants fired.
 
 No trajectory scorer or fidelity bar was invoked because there is no admitted
 L4b record.
