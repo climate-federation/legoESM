@@ -15,6 +15,7 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repo=$(git -C "$here" rev-parse --show-toplevel) || fail 'not in worktree'
 readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly G5_TOOL=$here/../nemo_testcase_g5_orca2ice/run.sh
+readonly G5_RECORDS=$here/../nemo_testcase_g5_orca2ice/g5_records.py
 readonly G5_DECK=$here/../nemo_testcase_g5_orca2ice/namelist_cfg
 readonly DECK=$here/namelist_cfg ICE_DECK=$here/namelist_ice_cfg
 readonly PATCH=$here/trabbc_round53.patch CHECKER=$here/l4_records.py
@@ -34,6 +35,7 @@ readonly SMOKE=$EVIDENCE/smoke_2step REF=$EVIDENCE/ref_100step
 readonly TWIN_A=$EVIDENCE/twin_a TWIN_B=$EVIDENCE/twin_b TWIN_C=$EVIDENCE/twin_c
 readonly FSBC=2
 readonly G5_DECK_SHA=c57eeb83d8f59c5b1d44df1295a10f5f30d28537358c8d327fcecc3d538f569e
+readonly G5_RECORDS_SHA=12c269d91a53a0b3a6a4e5733e78310afcc5578e4b4e7f569089bc53d667cfbb
 readonly L4_DECK_SHA=00c849085493cf0b8fcdb9ec2b0c3099096a8515a6741f8565b035d6aa4c879e
 readonly ICE_DECK_SHA=9d5ae3fae3878a74c4fe88f0fd8db40129fe97ca6ffa6d699121d1cd44713dd8
 readonly PATCH_SHA=dd98dfca4051cec8dd4814edd71c3bc2717ad599af3a4a9b7e086495f2f68453
@@ -190,11 +192,12 @@ preflight() {
   local f want
   [[ -z "$(git -C "$repo" status --porcelain --untracked-files=all)" ]] \
     || fail 'commit the exact acquisition tool before running it'
-  for f in "$G5_TOOL" "$G5_DECK" "$DECK" "$ICE_DECK" "$PATCH" "$CHECKER" \
+  for f in "$G5_TOOL" "$G5_RECORDS" "$G5_DECK" "$DECK" "$ICE_DECK" "$PATCH" "$CHECKER" \
            "$BASE_TRABBC" "$REF_BIN" "$REC_SOURCE/BLD/bin/nemo.exe" "$QGH_SOURCE"; do
     [[ -f "$f" ]] || fail "missing $f"
   done
-  [[ "$(sha "$G5_DECK")" == "$G5_DECK_SHA" && "$(sha "$DECK")" == "$L4_DECK_SHA" \
+  [[ "$(sha "$G5_RECORDS")" == "$G5_RECORDS_SHA" \
+     && "$(sha "$G5_DECK")" == "$G5_DECK_SHA" && "$(sha "$DECK")" == "$L4_DECK_SHA" \
      && "$(sha "$ICE_DECK")" == "$ICE_DECK_SHA" && "$(sha "$PATCH")" == "$PATCH_SHA" \
      && "$(sha "$CHECKER")" == "$CHECKER_SHA" && "$(sha "$BASE_TRABBC")" == "$BASE_TRABBC_SHA" \
      && "$(sha "$REF_BIN")" == "$REF_BIN_SHA" ]] || fail 'pinned producer changed'
@@ -281,6 +284,15 @@ admit() { # steps
     cmp -s "$TWIN_A/$rel" "$TWIN_B/$rel" && cmp -s "$TWIN_A/$rel" "$TWIN_C/$rel" \
       || fail "twins differ in $rel"
   done < <(cd "$TWIN_A" && find . -maxdepth 1 -type f -name 'oracle_*.bin' -printf '%P\n' | LC_ALL=C sort)
+  # The WRITE-only instrument must be passive: at every matching restart step,
+  # each instrumented twin must equal the writer-free reference run.  Reuse the
+  # G5 admission validator and fire its one-ULP restart plant here as well.
+  PYTHONPATH=$PYPATH python "$G5_RECORDS" admit \
+    --evidence "$EVIDENCE" --steps "$steps"
+  ! PYTHONPATH=$PYPATH python "$G5_RECORDS" admit \
+    --evidence "$EVIDENCE" --steps "$steps" --plant >/dev/null 2>&1 \
+    || fail 'passivity plant was not rejected'
+  printf 'L4_WRITER_PASSIVITY_PASS reference=ref_100step twins=A/B/C plant=fired\n'
   mkdir -p "$EVIDENCE/manifest"
   sha256sum "$DECK" "$ICE_DECK" "$PATCH" "$CHECKER" "$QGH_SOURCE" \
     "$REF_BIN" "$TARGET/BLD/bin/nemo.exe" >"$EVIDENCE/manifest/producers.sha256"

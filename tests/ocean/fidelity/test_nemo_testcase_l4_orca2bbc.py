@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import jax
+import jax.numpy as jnp
 
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
@@ -168,9 +169,79 @@ def test_official_geothermal_file_hash_and_size():
     assert hashlib.sha256(path.read_bytes()).hexdigest() == QGH_SHA256
 
 
+@needs_inputs
+def test_heatflow_loader_exactly_widens_native_float32():
+    reader = _forcing_records_module()
+    path = INPUTS / "geothermal_heating.nc"
+    import netCDF4
+    with netCDF4.Dataset(path) as dataset:
+        variable = dataset.variables["heatflow"]
+        variable.set_auto_maskandscale(False)
+        native = np.asarray(variable[0])
+    assert native.dtype.kind == "f" and native.dtype.itemsize == 4
+    loaded = reader.read_l4_geothermal_heatflow(path, native.shape)
+    assert loaded.dtype == np.float64
+    np.testing.assert_array_equal(loaded, native.astype(np.float64))
+    distinct = np.unique(native)
+    reparsed = np.asarray(
+        [float(format(float(value), ".8g")) for value in distinct],
+        dtype=np.float64)
+    assert np.count_nonzero(
+        reparsed.view(np.uint64)
+        != distinct.astype(np.float64).view(np.uint64)) == 170
+
+
+@needs_inputs
+def test_nemo_association_uses_file_values_and_nemo_constants():
+    from legoesm.ocean.physics.geothermal import (
+        nemo_geothermal_bottom_heating_tendency,
+    )
+
+    reader = _forcing_records_module()
+    path = INPUTS / "geothermal_heating.nc"
+    heatflow = np.unique(reader.read_l4_geothermal_heatflow(path, (148, 180)))
+    assert heatflow.size == 183
+    q = jnp.asarray(heatflow[None, :], dtype=jnp.float64)
+    e3t = jnp.ones((1, heatflow.size, 1), dtype=jnp.float64)
+    wet = jnp.ones_like(e3t)
+    got = np.asarray(nemo_geothermal_bottom_heating_tendency(
+        e3t, wet, heatflow_mwm2=q,
+        rho_0=1026.0, c_sw=3991.86795711963))[0, :, 0]
+    rho0_rcp = np.float64(1026.0) * np.float64(3991.86795711963)
+    r1_rho0_rcp = np.float64(1.0) / rho0_rcp
+    written = (r1_rho0_rcp * heatflow) * np.float64(1.0e-3)
+    mutation = r1_rho0_rcp * (heatflow * np.float64(1.0e-3))
+    np.testing.assert_array_equal(got.view(np.uint64), written.view(np.uint64))
+    assert np.count_nonzero(
+        written.view(np.uint64) != mutation.view(np.uint64)) == 57
+
+
+def test_geothermal_rejects_unimplemented_stage3_order_combinations():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    base = recipe.LatLonCGridOceanConfig()._replace(
+        rk3_stage3_geothermal_nemo_written=True)
+    with pytest.raises(ValueError, match="written stage-3 Krhs term list"):
+        LatLonCGridOceanModel._validate_config(base._replace(
+            rk3_stage3_tracer_krhs_nemo_order=True))
+    with pytest.raises(ValueError, match="NEMO applies tra_ldf before tra_bbc"):
+        LatLonCGridOceanModel._validate_config(base._replace(K_h=1.0))
+
+
 def _records_module():
     path = L4 / "l4_records.py"
     spec = importlib.util.spec_from_file_location("l4_records", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _forcing_records_module():
+    path = G5 / "g5_records.py"
+    spec = importlib.util.spec_from_file_location("l4_g5_records", path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -237,16 +308,32 @@ def test_acquisition_tool_modes_order_and_seven_item_contract():
     assert 'cp "$QGH_SOURCE" "$2/geothermal_heating.nc"' in text
     assert "check_deck_delta" in text and "float(log_match.group(1)" in (
         L4 / "l4_records.py").read_text()
+    assert 'python "$G5_RECORDS" admit' in text
+    assert "L4_WRITER_PASSIVITY_PASS" in text
+
+
+@needs_l4_record
+def test_existing_acquisition_passivity_and_plant():
+    tool = G5 / "g5_records.py"
+    evidence = L4_RECORD.parent
+    passed = subprocess.run(
+        [__import__("sys").executable, str(tool), "admit", "--evidence",
+         str(evidence), "--steps", "10"],
+        text=True, capture_output=True)
+    assert passed.returncode == 0, passed.stderr
+    assert "PASS_G5_ADMISSION" in passed.stdout
+    plant = subprocess.run(
+        [__import__("sys").executable, str(tool), "admit", "--evidence",
+         str(evidence), "--steps", "10", "--plant"],
+        text=True, capture_output=True)
+    assert plant.returncode == 1
+    assert "PASSIVITY FAILED" in plant.stderr and "PLANT-FIRED" in plant.stderr
 
 
 @needs_l4_record
 def test_l4_recorded_bottom_tendency_is_exact_and_wiring_plant_fires():
     card = recipe.build_nemo_testcase_card("ORCA2L4-bbc", deck_root=L4_RECORD)
-    forcing_path = G5 / "g5_records.py"
-    forcing_spec = importlib.util.spec_from_file_location("l4_g5_records", forcing_path)
-    forcing_reader = importlib.util.module_from_spec(forcing_spec)
-    assert forcing_spec.loader is not None
-    forcing_spec.loader.exec_module(forcing_reader)
+    forcing_reader = _forcing_records_module()
     _, forcing = forcing_reader.nemo_supplied_forcing(card, L4_RECORD, 1)
     import netCDF4
     with netCDF4.Dataset(L4_RECORD / "geothermal_heating.nc") as dataset:
@@ -271,3 +358,69 @@ def test_l4_recorded_bottom_tendency_is_exact_and_wiring_plant_fires():
         L4_RECORD, arm="geothermal", kt_from=1, kt_to=1,
         allow_dirty=True, without_geothermal=True, case="ORCA2L4-bbc")
     assert plant["per_kt"][0]["trend_row"]["n_unequal"] == 16_428
+
+
+@needs_l4_record
+def test_l4_g5_forcing_route_reaches_the_production_model_step():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        compute_layer_thickness,
+    )
+    from legoesm.ocean.freshwater import FreshwaterForcing
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    card = recipe.build_nemo_testcase_card("ORCA2L4-bbc", deck_root=L4_RECORD)
+    _, routed_forcing = _forcing_records_module().nemo_supplied_forcing(
+        card, L4_RECORD, 1)
+    cfg = card.recipe.model_config
+    model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
+    state = card.recipe.initial_state
+    qgh = jnp.asarray(
+        routed_forcing.geothermal_heat_flux_mwm2, dtype=jnp.float64)
+    zero = jnp.zeros_like(qgh)
+    one = jnp.ones_like(qgh)
+    freshwater = FreshwaterForcing(
+        precip=zero, evap=zero, runoff=zero, ice_fw=zero, restoring=zero)
+    # Hold every non-geothermal input fixed at the review probe's controlled
+    # values.  The geothermal field itself still comes through the production
+    # G5/L4 netCDF loader above.
+    forcing = OceanSurfaceForcing(
+        sw_down=one, q_net=one, tau_x=zero, tau_y=zero, salt_flux=zero,
+        chl=0.1 * one, taum=zero, ice_concentration=zero,
+        tau_i_native=zero, tau_j_native=zero,
+        runoff_tracer_content=(zero, zero), q_nonsolar=one,
+        ice_ocean_top_drag_rCdu=zero, salt_flux_sfx=zero,
+        geothermal_heat_flux_mwm2=qgh)
+
+    run = jax.jit(lambda q: model.step(
+        state, dt=card.dt_s, freshwater=freshwater,
+        surface_forcing=forcing._replace(geothermal_heat_flux_mwm2=q)))
+    heated = jax.device_get(run(qgh))
+    zeroed = jax.device_get(run(jnp.zeros_like(qgh)))
+
+    for name in ("S", "u", "v", "eta"):
+        got = np.asarray(getattr(heated, name).data)
+        control = np.asarray(getattr(zeroed, name).data)
+        np.testing.assert_array_equal(got.view(np.uint64), control.view(np.uint64))
+
+    delta_t = np.asarray(heated.T.data) - np.asarray(zeroed.T.data)
+    wet = np.asarray(card.recipe.z_coord.is_active) > 0.5
+    bottom = np.zeros_like(wet)
+    jj, ii = np.nonzero(wet.any(axis=-1))
+    kb = wet.sum(axis=-1) - 1
+    bottom[jj, ii, kb[jj, ii]] = True
+    acting = wet.any(axis=-1) & (np.asarray(qgh) > 0.0)
+    acting_bottom = bottom & acting[..., None]
+    assert acting.sum() == 16_428
+    assert np.count_nonzero(delta_t[acting_bottom]) == 16_428
+    assert np.all(delta_t[acting_bottom] > 0.0)
+    assert np.count_nonzero(delta_t[~wet]) == 0
+
+    h_after = np.asarray(compute_layer_thickness(
+        heated.eta.data, heated.H_bathy.data, card.recipe.z_coord,
+        min_water_column_m=cfg.min_water_column_m))
+    column_heat = (cfg.rho_0 * cfg.physics.constants.c_sw
+                   * np.sum(h_after * delta_t * wet, axis=-1))
+    ratio = column_heat[acting] / (
+        card.dt_s * np.asarray(qgh)[acting] * 1.0e-3)
+    np.testing.assert_allclose(ratio, 1.0, rtol=1.1e-8, atol=0.0)

@@ -3910,6 +3910,25 @@ class LatLonCGridOceanModel:
                 "and propagates them to physics) instead of the raw "
                 "constructor, or pass matching ConstantsConfig values."
             )
+
+        # NEMO applies geothermal BBC after tracer LDF in stage 3
+        # (stprk3_stg.f90:734-740).  The literal geothermal path currently
+        # joins the G5 stage-3 source assembly, before this model's separate
+        # tracer-diffusion increment.  Likewise, the G9 written-Krhs list is a
+        # closed list of heat/runoff/solar terms and would omit geothermal.
+        # Refuse both unreproduced orderings instead of silently running them.
+        if config.rk3_stage3_geothermal_nemo_written:
+            if config.rk3_stage3_tracer_krhs_nemo_order:
+                raise ValueError(
+                    "rk3_stage3_geothermal_nemo_written is not supported with "
+                    "rk3_stage3_tracer_krhs_nemo_order: the written stage-3 "
+                    "Krhs term list does not yet carry tra_bbc")
+            if (config.K_h > 0.0 or config.K_bih > 0.0
+                    or config.gm_redi is not None):
+                raise ValueError(
+                    "rk3_stage3_geothermal_nemo_written is not supported with "
+                    "tracer lateral diffusion: NEMO applies tra_ldf before "
+                    "tra_bbc, while this path would add diffusion afterward")
         if _phys is not None and _phys.shortwave_penetration is not None:
             from legoesm.ocean.physics.shortwave_penetration import (
                 SHORTWAVE_PENETRATION_SCHEMES,

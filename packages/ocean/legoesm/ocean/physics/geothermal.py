@@ -178,15 +178,18 @@ def nemo_geothermal_bottom_heating_tendency(
     wet_cell: jnp.ndarray,
     *,
     heatflow_mwm2,
-    rho_0: float = constants.rho_ocean,
-    c_sw: float = constants.c_sw,
+    rho_0: float,
+    c_sw: float,
 ) -> jnp.ndarray:
     """NEMO ``trabbc`` stage-3 bottom-cell tendency, statement by statement.
 
     Unlike :func:`geothermal_bottom_heating_tendency`, this identity receives
     the forcing in the file's native mW/m² units and preserves NEMO's written
     association: ``1/(rho0*rcp)``, then ``* heatflow * 1.e-3``, then division
-    by the live Kmm bottom-cell thickness.  Dry columns remain canonical zero.
+    by the live Kmm bottom-cell thickness.  ``rho_0`` and ``c_sw`` are required
+    because this NEMO-named identity must receive the constants resolved by the
+    calling card rather than the shared library defaults.  Dry columns remain
+    canonical zero.
     """
 
     e3t = jnp.asarray(e3t_kmm)

@@ -150,17 +150,31 @@ def nemo_supplied_forcing(card, root: Path, kt: int, *, zero: bool = False):
         salt_flux_sfx=fields["sfx"],
     )
     if card.case == "ORCA2L4-bbc":
-        import netCDF4
-
         path = Path(root) / "geothermal_heating.nc"
-        require(path.is_file(), f"missing L4 geothermal forcing: {path}")
-        with netCDF4.Dataset(path) as dataset:
-            heatflow = np.asarray(dataset.variables["heatflow"][0], np.float64)
-        require(heatflow.shape == np.asarray(card.recipe.initial_state.eta.data).shape,
-                f"L4 heatflow shape {heatflow.shape} != card grid")
+        heatflow = read_l4_geothermal_heatflow(
+            path, np.asarray(card.recipe.initial_state.eta.data).shape)
         forcing = forcing._replace(
             geothermal_heat_flux_mwm2=(np.zeros_like(heatflow) if zero else heatflow))
     return freshwater, forcing
+
+
+def read_l4_geothermal_heatflow(path: Path, expected_shape) -> np.ndarray:
+    """Read native float32 heatflow and widen each value exactly to float64."""
+    import netCDF4
+
+    path = Path(path)
+    require(path.is_file(), f"missing L4 geothermal forcing: {path}")
+    with netCDF4.Dataset(path) as dataset:
+        variable = dataset.variables["heatflow"]
+        variable.set_auto_maskandscale(False)
+        native = np.asarray(variable[0])
+    require(native.dtype.kind == "f" and native.dtype.itemsize == 4,
+            f"L4 heatflow dtype {native.dtype} is not native float32")
+    require(native.shape == tuple(expected_shape),
+            f"L4 heatflow shape {native.shape} != card grid {tuple(expected_shape)}")
+    # astype performs IEEE binary32 -> binary64 widening.  Never format these
+    # values as decimal: doing so changes 170 of the file's 183 distinct values.
+    return native.astype(np.float64, copy=True)
 
 
 def _cmp(card, nemo, sel) -> dict:

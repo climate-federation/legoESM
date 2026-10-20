@@ -30,6 +30,8 @@ from legoesm.ocean.physics.geothermal import (
 
 RHO = constants.rho_ocean
 CP = constants.c_sw
+NEMO_RHO = 1026.0
+NEMO_CP = 3991.86795711963
 
 
 def _column(nlev=5, wet_levels=3, dz=100.0):
@@ -172,13 +174,13 @@ def test_nemo_variable_flux_statement_is_exact_jitted_traced_and_x64():
     heatflow = jnp.asarray([[86.4, 91.0]], dtype=jnp.float64)
 
     def written(q):
-        rho0_rcp = RHO * CP
+        rho0_rcp = NEMO_RHO * NEMO_CP
         r1_rho0_rcp = 1.0 / rho0_rcp
         qgh_trd0 = (r1_rho0_rcp * q) * 1.0e-3
         return qgh_trd0 / jnp.asarray(37.0, dtype=jnp.float64)
 
     run = jax.jit(lambda q: nemo_geothermal_bottom_heating_tendency(
-        e3t, wet, heatflow_mwm2=q, rho_0=RHO, c_sw=CP))
+        e3t, wet, heatflow_mwm2=q, rho_0=NEMO_RHO, c_sw=NEMO_CP))
     got = run(heatflow)
     assert got.dtype == jnp.float64
     assert np.asarray(got)[0, 0, 1].tobytes() == np.asarray(
@@ -194,6 +196,15 @@ def test_nemo_variable_flux_wiring_removal_is_observable():
     e3t = jnp.asarray([[20.0, 11.0]], dtype=jnp.float64)
     wet = jnp.ones_like(e3t)
     wired = nemo_geothermal_bottom_heating_tendency(
-        e3t, wet, heatflow_mwm2=jnp.asarray([75.0], dtype=jnp.float64))
+        e3t, wet, heatflow_mwm2=jnp.asarray([75.0], dtype=jnp.float64),
+        rho_0=NEMO_RHO, c_sw=NEMO_CP)
     unwired = jnp.zeros_like(wired)
     assert not np.array_equal(np.asarray(wired), np.asarray(unwired))
+
+
+def test_nemo_named_helper_requires_card_constants():
+    e3t = jnp.ones((1, 1), dtype=jnp.float64)
+    wet = jnp.ones_like(e3t)
+    with pytest.raises(TypeError, match="rho_0"):
+        nemo_geothermal_bottom_heating_tendency(
+            e3t, wet, heatflow_mwm2=jnp.ones((1,), dtype=jnp.float64))
