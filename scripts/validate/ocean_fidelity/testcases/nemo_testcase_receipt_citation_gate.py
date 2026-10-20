@@ -3876,6 +3876,8 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:954-955': [
         'pFu(ji,jj,jk) = pFu(ji,jj,jk) - ( zpsi_uw(ji,jj,1) - zpsi_uw(ji,jj,2) )',
         'pFv(ji,jj,jk) = pFv(ji,jj,jk) - ( zpsi_vw(ji,jj,1) - zpsi_vw(ji,jj,2) )', 2],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:354-357': [
+        'zUfac = r1_2 *rn_Ud', 'aht0    = zUfac *    rn_Ld**inn', 4],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:296':
         'CALL wzv( kt, Kbb, Kmm, Kaa, pFu, pFv, ww, np_transport )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:255-260': [
