@@ -42,6 +42,7 @@ def _module(name: str, path: Path):
 
 RECORDS = _module("l3_records", L3 / "l3_records.py")
 INSTRUMENT = _module("instrument_ldftra", L3 / "instrument_ldftra.py")
+LADDER = _module("l3_ladder", CASES / "nemo_testcase_g2_orca2bathy_ladder.py")
 
 
 def _copied_root(base: Path, rung: Path) -> Path:
@@ -137,6 +138,24 @@ def test_l3_record_canonicalization_and_defined_domain_plants(capsys):
     RECORDS.selftest()
     assert "undefined_garbage=canonicalized defined_garbage=detected" in (
         capsys.readouterr().out)
+
+
+def test_l3_full_depth_rows_apply_decision_127():
+    ref = np.array([[[np.nextafter(0.0, 1.0)]]], dtype=np.float64)
+    card = np.zeros_like(ref)
+    classes = {
+        "full": np.ones(ref.shape, dtype=bool),
+        "partial": np.zeros(ref.shape, dtype=bool),
+    }
+    summary = LADDER.class_summary(LADDER.level_rows(ref, card, classes))
+    assert summary["status"] == "AT-BAR"
+    assert summary["full"]["n_unequal"] == 0
+    assert summary["full"]["flushed_subnormal"] == 1
+    planted = card.copy()
+    planted[0, 0, 0] = 1.0
+    summary = LADDER.class_summary(LADDER.level_rows(ref, planted, classes))
+    assert summary["status"] == "DEBT"
+    assert summary["full"]["n_unequal"] == 1
 
 
 @pytest.mark.skipif(
@@ -242,6 +261,8 @@ def test_l3_step_jaxpr_contains_bolus_only_for_l3(cards):
 
 G9_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
                  "gridladder_rounds/round46/oracle_g9_r46/twin_a")
+L3_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                 "gridladder_vmix_rounds/round20/oracle_l3_r20/twin_a")
 
 
 @pytest.mark.skipif(not G9_RECORD.is_dir(), reason="no admitted G9 record")
@@ -274,3 +295,94 @@ def test_zero_bolus_l3_step_is_bit_identical_to_certified_g9_plus_l2(cards):
         left = np.asarray(getattr(outputs[0], name).data)
         right = np.asarray(getattr(outputs[1], name).data)
         assert np.array_equal(left.view(np.uint64), right.view(np.uint64)), name
+
+
+@pytest.mark.skipif(not L3_RECORD.is_dir(), reason="no admitted L3 record")
+def test_l3_record_jitted_traced_x64_transport_and_wiring(cards):
+    """The jitted fp64 L3 step consumes the recorded post-EIV transport."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSL3EIVTransportTrace,
+        _NEMOWSRK3TestHooks,
+    )
+
+    sys.path[:0] = [str(CASES), str(CASES / "nemo_testcase_g5_orca2ice")]
+    import g5_records as g5
+    from nemo_testcase_phase3_trajectory_gate import comparison_masks
+
+    l3 = cards[2]
+    run = l3.recipe
+    assert jax.config.jax_enable_x64
+    assert not jax.config.jax_disable_jit
+    assert get_policy().compute == np.dtype(np.float64)
+    fw, sf = g5.nemo_supplied_forcing(l3, L3_RECORD, 1)
+    model = LatLonCGridOceanModel(
+        run.grid, run.z_coord, run.model_config,
+        iwm_forcing=run.iwm_forcing,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_l3_eiv_transport=True),
+    )
+    observed = jax.device_get(model.step(
+        run.initial_state, l3.dt_s, freshwater=fw, surface_forcing=sf))
+    assert isinstance(observed.mass_flux_w, _NEMOWSL3EIVTransportTrace)
+    trace = observed.mass_flux_w
+    record = RECORDS.read(L3_RECORD / "oracle_l3_eiv_kt00000001.bin")
+
+    def inner(name):
+        native = np.asarray(record[name])[2:-2, 2:-2, :run.z_coord.n_levels]
+        return np.ascontiguousarray(np.swapaxes(native, 0, 1))
+
+    pairs = {}
+    for point, card_slice in (("u", (slice(None), slice(1, None))),
+                              ("v", (slice(1, None), slice(None)))):
+        for boundary in ("before", "delta", "after"):
+            name = f"{boundary}_{point}"
+            got = np.asarray(getattr(trace, name))[card_slice]
+            pairs[name] = inner(name), got
+    for name, (ref, got) in pairs.items():
+        assert ref.shape == got.shape
+        masks = comparison_masks(ref, got, np.ones(ref.shape, dtype=bool))
+        print(name, int(masks["normal_difference"].sum()),
+              int(masks["flushed_subnormal"].sum()))
+        assert not np.any(masks["normal_difference"]), name
+
+    # The hook is a post-step side output: these are the ordinary compiled
+    # prognostics, and they must equal NEMO at full depth, wet and dry.
+    stage = g5.read_step(L3_RECORD, 1, [L3_RECORD], run.z_coord.n_levels)
+    selected = {
+        "T": np.asarray(observed.T.data),
+        "S": np.asarray(observed.S.data),
+    }
+    for field, nemo_name in (("T", "tn"), ("S", "sn")):
+        ref = stage[f"3_{nemo_name}_all_aa"]
+        masks = comparison_masks(
+            ref, selected[field], np.ones(ref.shape, dtype=bool))
+        assert not np.any(masks["normal_difference"]), field
+
+    # Bypass only the public composition refusal after constructing the
+    # selected model.  Each one-variable plant still runs through model.step,
+    # hence through the same JIT with traced state/forcing leaves and x64.
+    gm = run.model_config.gm_redi
+    plants = {
+        "without_treguier": gm._replace(
+            kappa_GM=0.0, treguier=gm.treguier._replace(enabled=False)),
+        "without_face_average": gm._replace(
+            gm_bolus_kappa_face_average=False),
+        "without_through_fct": gm._replace(
+            gm_bolus_advection="centred"),
+    }
+    for name, planted_gm in plants.items():
+        planted = LatLonCGridOceanModel(
+            run.grid, run.z_coord, run.model_config,
+            iwm_forcing=run.iwm_forcing)
+        planted.config = run.model_config._replace(gm_redi=planted_gm)
+        after = jax.device_get(planted.step(
+            run.initial_state, l3.dt_s, freshwater=fw, surface_forcing=sf))
+        counts = {}
+        for field, nemo_name in (("T", "tn"), ("S", "sn")):
+            ref = stage[f"3_{nemo_name}_all_aa"]
+            got = np.asarray(getattr(after, field).data)
+            masks = comparison_masks(ref, got, np.ones(ref.shape, dtype=bool))
+            counts[field] = int(masks["normal_difference"].sum())
+        print(name, counts)
+        assert counts["T"] > 0 and counts["S"] > 0, name

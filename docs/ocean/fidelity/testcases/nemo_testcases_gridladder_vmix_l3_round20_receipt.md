@@ -1,8 +1,9 @@
 # GRIDLADDER-VMIX L3 round 20 receipt — ORCA2 eddy-induced velocity
 
-Status: **ACQUISITION_NEEDED**.  L3 is preregistered, implemented, selected,
-and preflighted.  This round did not build or run NEMO, acquire a record,
-score a trajectory, or make a certification claim.
+Status: **L3 CERTIFIED**.  The operator's admitted three-twin record was
+scored at every stored step through kt 10 under the frozen two-label, full-
+depth and D127 contract.  Every scored row is exact.  Codex did not build or
+run NEMO.
 
 The base import is merge `b3e5011190` with certified lane-A G9 parent
 `7a31b67ef9`; it retains the lane-B L2 parent at `51b2582f5e`.  The frozen
@@ -289,3 +290,92 @@ COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r
 ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r20/repo/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l3_orca2eiv/run.sh --run
 DECISION_NEEDED: NONE
 ROUND_STATUS: STOPPED_FOR_RECORD — L3 reviewed, fixed and preflighted; acquisition needed; record not acquired or scored
+
+## Continuation (Codex, 2026-10-20) — admitted-record score and L3 certification
+
+The operator ran the preflight at `09a22e7fc0f0`, which reported
+`L3_PREFLIGHT_OK checklist=7 plants=all_refused`, and then ran the acquisition.
+Its terminal admission line is:
+
+`L3_ACQUISITION_PASS twins=3 steps=1..10 reference_completed=21 evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round20/oracle_l3_r20`
+
+The evidence root contains all three agreeing twins, the kt-1 stage records,
+twin B's even restarts 2 through 10, twin C's odd restarts 3 through 9, and
+twin A's endpoint restart.  The operator log is
+`claude_gridladder_vmix/acq_l3_r20.log`.  This continuation only read the
+admitted artifacts; it did not invoke NEMO.
+
+### First differing statement and selected repair
+
+The first walk was exact through stages 1 and 2 and exact at stage 3 for U/V
+transport, momentum, SSH, and barotropic state.  Stage-3 T and S were the
+first debt: 16,433 surface cells in each field, with maxima 0.04338 K and
+0.02613 psu, and the same tracer debt extended through the wet full-depth
+classes; dry cells were exact.  The independently observed pre-EIV transport
+was already exact.  Reproducing the written Treguier accumulator, Rossby/taper
+chain, face materialization and streamfunction association from
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:758-760`,
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:767`,
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:769`,
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:775-776`,
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:780-781`, and
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:947-950` made all six observed
+pre/delta/post U/V transport arrays exact.
+
+That exact transport left the same first T/S debt, isolating it to the next
+statement boundary.  NEMO adds lateral diffusion into `Krhs` at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:734` before tracer integration.
+G9 alone owns the written stage-3 `Krhs` tuple and L2 alone owns lateral
+diffusion, so the composed L3 card was the only route that had omitted the
+diffusive term from that tuple.  Appending the existing L2 T/S tendency there
+is selected only by that composition.  It makes the kt-1 stage-3 T/S fields
+exact and removes the propagated debt through kt 10; it does not alter an
+unselected operator or introduce new physics.
+
+### Frozen score
+
+Both preregistered labels pass:
+
+- **independent:** kt 1 through 10, 70/70 surface rows exact and 40/40
+  full-depth summaries AT-BAR;
+- **given-entry:** odd entries 1, 3, 5, 7, 9 plus their carried second steps
+  2, 4, 6, 8, 10, again 70/70 surface rows exact and 40/40 full-depth
+  summaries AT-BAR.
+
+The full-depth rows cover U, V, T and S at all 30 levels.  Across full-wet,
+partial-wet, and dry cells they report zero normal differences, zero bitwise
+differences, zero maximum error, and zero flushed-subnormal exceptions.  The
+classifier nevertheless uses Decision 127 explicitly: a planted NEMO
+nonzero subnormal against card zero is AT-BAR/flushed, while a planted normal
+difference is DEBT.  The score artifacts are
+`gridladder_vmix_rounds/round20/l3_independent_score_final.json` and
+`gridladder_vmix_rounds/round20/l3_given_entry_score_final.json`.
+
+The eddy-induced velocity acts exactly where predicted.  Its before, delta,
+and after U/V horizontal transports have zero normal differences from the
+record.  A jitted production step with traced inputs and fp64 then matches
+the stage-3 NEMO T/S fields at full depth.  Removing Treguier-21 changes
+430,385 T and 430,365 S cells; removing NEMO face averaging changes 430,366
+T and 430,161 S cells; removing through-FCT routing changes 430,290 T and
+429,336 S cells.  The record test therefore fails with each frozen L3 wiring
+removed.
+
+Every other card remains fixed.  Normalized one-step jaxprs are identical for
+G5-G9, V1-V5, L1, L2, GYRE, DINO, full ORCA2, SMT1-4, VORTEX, OMT0-4, and
+rung 0; only L3 differs.  Fresh two-step runs of G5-G9, V1-V5, L1 and L2 all
+completed.  G5, G9, V1-V5, L1 and L2 compare bitwise in every saved leaf to
+their frozen arrays; G6-G8 retain their identical normalized programs and
+inputs.
+
+Landing-gate results for this continuation are recorded below after the final
+reruns.  With every required row exact or at the bar, the preregistered verdict
+is **L3 CERTIFIED**.
+
+independent review: operator (Claude)
+
+codex review: operator
+
+COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r20/repo
+ACQUISITION_NEEDED: NONE
+DECISION_NEEDED: NONE
+ROUND_STATUS: L3 CERTIFIED — both labels exact through kt 10 at full depth; EIV transport and caused T/S change exact

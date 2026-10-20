@@ -65,13 +65,14 @@ CASE = "ORCA2G2-zps"
 CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice",
          "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf", "ORCA2G9-tadv",
          "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
-         "ORCA2V5-havtb", "ORCA2L1-bbl", "ORCA2L2-iso")
+         "ORCA2V5-havtb", "ORCA2L1-bbl", "ORCA2L2-iso", "ORCA2L3-eiv")
 # G5's record build (ORCA2-lane frames); V1 = that build + one hm_i writer;
 # V2/V3/V4/V5 = V1's record binary with the ORCA2 vertical-mixing switches.
 # L1/L2 use G5's record surface-input format.
 ICE_CASES = ("ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf",
              "ORCA2G9-tadv", "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm",
-             "ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L1-bbl", "ORCA2L2-iso")
+             "ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L1-bbl", "ORCA2L2-iso",
+             "ORCA2L3-eiv")
 SI3 = ICE_CASES
 TKE_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
              "ORCA2V5-havtb")
@@ -412,20 +413,31 @@ def level_rows(ref, cand, cls: dict, *, plant=False) -> list[dict]:
     if plant:
         cand = cand.copy()
         cand[tuple(np.argwhere(cls["partial"])[0])] += 1.0
-    d, scale = np.abs(cand - ref), max(float(np.max(np.abs(ref))), 1.0)
+    scale = max(float(np.max(np.abs(ref))), 1.0)
     rows = []
     for k in range(ref.shape[-1]):
         r = {"level": k + 1}
         for name, mask in cls.items():
             m = mask[..., k]
             n = int(m.sum())
+            masks = g1.comparison_masks(ref[..., k], cand[..., k], m)
+            d = np.where(
+                masks["normal_difference"],
+                np.abs(cand[..., k] - ref[..., k]), 0.0)
             r[name] = {"n_cells": n,
-                       "n_unequal": int(np.count_nonzero(d[..., k][m])),
-                       "max_abs": float(d[..., k][m].max()) if n else 0.0,
-                       "relative": (float(d[..., k][m].max()) / scale) if n else 0.0,
+                       "n_unequal": int(masks["normal_difference"].sum()),
+                       "n_bitwise_unequal": int(masks["unequal"].sum()),
+                       "flushed_subnormal": int(
+                           masks["flushed_subnormal"].sum()),
+                       "max_abs": float(d[m].max()) if n else 0.0,
+                       "relative": (float(d[m].max()) / scale) if n else 0.0,
                        "ref_max_abs": float(np.abs(ref[..., k][m]).max()) if n else 0.0}
         dry = ~(cls["full"][..., k] | cls["partial"][..., k])
-        r["dry_n_unequal"] = int(np.count_nonzero(d[..., k][dry]))
+        dry_masks = g1.comparison_masks(ref[..., k], cand[..., k], dry)
+        r["dry_n_unequal"] = int(dry_masks["normal_difference"].sum())
+        r["dry_n_bitwise_unequal"] = int(dry_masks["unequal"].sum())
+        r["dry_flushed_subnormal"] = int(
+            dry_masks["flushed_subnormal"].sum())
         rows.append(r)
     return rows
 
@@ -436,10 +448,18 @@ def class_summary(rows: list[dict]) -> dict:
         out[name] = {
             "n_cells": sum(r[name]["n_cells"] for r in rows),
             "n_unequal": sum(r[name]["n_unequal"] for r in rows),
+            "n_bitwise_unequal": sum(
+                r[name]["n_bitwise_unequal"] for r in rows),
+            "flushed_subnormal": sum(
+                r[name]["flushed_subnormal"] for r in rows),
             "max_abs": max(r[name]["max_abs"] for r in rows),
             "relative": max(r[name]["relative"] for r in rows),
             "worst_level": max(rows, key=lambda r: r[name]["max_abs"])["level"]}
     out["dry_n_unequal"] = sum(r["dry_n_unequal"] for r in rows)
+    out["dry_n_bitwise_unequal"] = sum(
+        r["dry_n_bitwise_unequal"] for r in rows)
+    out["dry_flushed_subnormal"] = sum(
+        r["dry_flushed_subnormal"] for r in rows)
     out["levels_partial_worse"] = sum(
         r["partial"]["relative"] > r["full"]["relative"] for r in rows
         if r["partial"]["n_cells"] and r["full"]["n_cells"])
@@ -1082,6 +1102,22 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
 
     def all_level_rows(kt, state):
         path = restart_path(roots, kt)
+        if path is None and case == "ORCA2L3-eiv" and kt == 1:
+            frame = read_step(kt)
+            cand, rows = card_levels(state), {}
+            for f, name in (("u", "uu"), ("v", "vv"),
+                            ("T", "tn"), ("S", "sn")):
+                ref = frame[f"3_{name}_all_aa"]
+                by_level = level_rows(ref, cand[f], cls[POINT[f]],
+                                      plant=(plant == "level" and f == "u"))
+                rows[f] = {
+                    "summary": class_summary(by_level),
+                    "levels": by_level,
+                    "ref_max_abs": float(np.max(np.abs(ref))),
+                    "stage_record": str(
+                        root / "oracle_stage_kt00000001_s3.bin"),
+                }
+            return rows
         if path is None:
             return None
         cand, rows = card_levels(state), {}
