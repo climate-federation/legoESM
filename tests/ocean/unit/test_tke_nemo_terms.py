@@ -1642,6 +1642,25 @@ class TestNemoBottomTkeVelocityConvention:
             "the universal factor 2, more at step columns")
         assert rel.max() > 0.7, "no column shows the step-column amplification"
 
+    def test_drag_coefficient_is_a_traced_input(self):
+        """Round 319: rn_Cd0 reaches the bottom TKE value as a traced input
+        (jit, x64); a ``float()`` cast raises ConcretizationTypeError. Cd is
+        cd0 itself on nemo_quadratic, so d(sum)/d(cd0) = sum(unfloored)/cd0."""
+        model, state, _ = self._model_and_state()
+        cfg = model.config
+        bd = cfg.bottom_drag
+
+        def total(cd0):
+            c = cfg._replace(bottom_drag=bd._replace(bottom_drag_cd0=cd0))
+            return jnp.sum(model._tke_bottom_dirichlet(state, config=c))
+
+        cd0 = jnp.float64(bd.bottom_drag_cd0)
+        out = np.asarray(model._tke_bottom_dirichlet(state))
+        live = out > cfg.physics.vertical_mixing.tke.tke_background
+        assert live.sum() > 0
+        g = float(jax.jit(jax.grad(total))(cd0))
+        np.testing.assert_allclose(g, out[live].sum() / float(cd0), rtol=1e-12)
+
     def test_requires_raw_face_state(self):
         """Passing an already-collapsed (T-point) state must RAISE, never
         silently fall back to the plain average."""

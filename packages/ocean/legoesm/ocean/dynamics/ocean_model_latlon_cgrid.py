@@ -11748,11 +11748,11 @@ class LatLonCGridOceanModel:
         r_t = nemo_effective_bottom_drag_r(
             u_bot, v_bot, h_bot,
             scheme=_scheme,
-            cd0=float(_cfg_b.bottom_drag.bottom_drag_cd0),
-            cd_max=float(_cfg_b.bottom_drag.bottom_drag_cdmax),
-            z0=float(_cfg_b.bottom_drag.bottom_drag_z0),
-            ke0=float(_cfg_b.bottom_drag.bottom_drag_ke0),
-            uc0=float(_cfg_b.bottom_drag.bottom_drag_uc0),
+            cd0=_cfg_b.bottom_drag.bottom_drag_cd0,
+            cd_max=_cfg_b.bottom_drag.bottom_drag_cdmax,
+            z0=_cfg_b.bottom_drag.bottom_drag_z0,
+            ke0=_cfg_b.bottom_drag.bottom_drag_ke0,
+            uc0=_cfg_b.bottom_drag.bottom_drag_uc0,
             von_karman=constants.kappa_von_karman,
         )
         from legoesm.ocean.physics.vertical_mixing.tke import (
