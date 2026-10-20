@@ -15,6 +15,8 @@ SCRIPT_DIR = ROOT / "scripts/validate/ocean_fidelity/testcases"
 SCRIPT = SCRIPT_DIR / "nemo_testcase_l2_gyre_hires_round20_stage1.py"
 ACQUISITION_DIR = (
     SCRIPT_DIR / "nemo_testcase_l2_gyre_hires_round20_stage1")
+ROUND21_DIR = (
+    SCRIPT_DIR / "nemo_testcase_l2_gyre_hires_round21_ldf")
 
 
 def _load_module():
@@ -101,6 +103,33 @@ def test_first_clearing_source_boundary_respects_executed_order():
     assert result is not None
     assert (result["boundary"], result["term"], result["field"]) == (
         "after_ldf", "lateral_diffusion", "v")
+
+
+@pytest.mark.parametrize(
+    ("exact", "expected"),
+    [
+        ({"ahmt"}, "COEFFICIENT_AHMT"),
+        ({"ahmf"}, "COEFFICIENT_AHMF"),
+        ({"ahmt", "ahmf"}, "COEFFICIENT_NON_UNIQUE"),
+        ({"ahmt_ahmf"}, "COUPLED_COEFFICIENT_FIELDS"),
+        (set(), "COEFFICIENT_EXONERATED_OPERATOR_WALK_REQUIRED"),
+    ],
+)
+def test_coefficient_owner_requires_exact_one_factor_collapse(exact, expected):
+    module = _load_module()
+    arms = {
+        name: {
+            "untouched_hpg_bit_exact": True,
+            "after_ldf_bit_exact": name in exact,
+        }
+        for name in ("ahmt", "ahmf", "ahmt_ahmf")
+    }
+    assert module.coefficient_factor_owner(arms) == expected
+
+    arms["ahmt"]["untouched_hpg_bit_exact"] = False
+    if expected == "COEFFICIENT_AHMT":
+        assert module.coefficient_factor_owner(arms) == (
+            "COEFFICIENT_EXONERATED_OPERATOR_WALK_REQUIRED")
 
 
 def test_active_level_mapping_drops_only_nemo_closed_jpk(monkeypatch):
@@ -240,3 +269,39 @@ def test_writer_patch_has_five_source_ordered_cumulative_frames():
     positions = [patch.find(header) for header in headers]
     assert all(position >= 0 for position in positions)
     assert positions == sorted(positions)
+
+
+def test_round21_writer_captures_post_ldf_dyn_coefficients(tmp_path):
+    source = Path(
+        "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/"
+        "cfgs/GYRE_OMIP_L2_P3/MY_SRC/stprk3.F90")
+    if not source.is_file():
+        pytest.skip("local NEMO P3 writer source is unavailable")
+    target = tmp_path / "stprk3.F90"
+    target.write_bytes(source.read_bytes())
+    with (ROUND21_DIR / "stprk3_round21.patch").open("rb") as patch:
+        import subprocess
+
+        result = subprocess.run(
+            ["patch", "-s", "--fuzz=0", str(target)], stdin=patch,
+            check=False, capture_output=True)
+    assert result.returncode == 0, result.stderr.decode()
+    text = target.read_text(encoding="utf-8")
+    ldf = "CALL ldf_dyn( kstp, Nbb )"
+    dump = "CALL r21_dump_ahm( kstp, Nbb )"
+    assert text.index(ldf) < text.index(dump) < text.index("CALL stp_2D")
+    assert "WRITE(iunit) ahmt(:,:,:), ahmf(:,:,:)" in text
+    assert "GYRE_R21_WRITE" in text
+
+
+def test_round21_operator_recipe_is_one_rank_passive_and_creates_parent():
+    run = (ROUND21_DIR / "run.sh").read_text(encoding="utf-8")
+    assert "RANKS must be 1" in run
+    assert "mkdir -p \"$(dirname -- \"$EVIDENCE\")\"" in run
+    assert "./makenemo -r \"$SOURCE_NAME\" -n \"$TARGET_NAME\" -d 'OCE'" in run
+    assert "export GYRE_R21_WRITE=$enabled" in run
+    assert "run_nemo control 0" in run
+    assert "run_nemo instrumented 1" in run
+    assert "REFUSE_WRITER_MOVED_TRAJECTORY" in run
+    assert "mpirun -np 1" in run
+    assert "rg " not in run

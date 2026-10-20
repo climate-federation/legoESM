@@ -44,6 +44,7 @@ SCALAR_ROOT = Path(
 RHS_RECORD = "oracle_rhs_kt00000001.bin"
 BT_RECORD = "oracle_bt_frames_kt00004321.bin"
 RHS_FAMILY_RECORD = "oracle_r20_stage1_rhs_kt00004321.bin"
+AHM_RECORD = "oracle_ahm_kt00004321.bin"
 STEP = 4321
 ACTIVE_LEVELS = 30
 TWIN_CLEAR_FACTOR = 4.0
@@ -221,6 +222,25 @@ def first_clearing_source_boundary(
     return None
 
 
+def coefficient_factor_owner(arms: dict[str, dict[str, object]]) -> str:
+    """Classify only an exact, upstream-preserving coefficient substitution."""
+    single_exact = [
+        name for name in ("ahmt", "ahmf")
+        if arms[name]["untouched_hpg_bit_exact"]
+        and arms[name]["after_ldf_bit_exact"]
+    ]
+    pair_exact = (
+        arms["ahmt_ahmf"]["untouched_hpg_bit_exact"]
+        and arms["ahmt_ahmf"]["after_ldf_bit_exact"])
+    if len(single_exact) == 1:
+        return f"COEFFICIENT_{single_exact[0].upper()}"
+    if single_exact:
+        return "COEFFICIENT_NON_UNIQUE"
+    if pair_exact:
+        return "COUPLED_COEFFICIENT_FIELDS"
+    return "COEFFICIENT_EXONERATED_OPERATOR_WALK_REQUIRED"
+
+
 def _face_fields(values: tuple) -> dict[str, np.ndarray]:
     return {
         "u": np.asarray(values[0], dtype=np.float64)[:, 1:, :],
@@ -278,6 +298,8 @@ def run(
     *,
     rhs_family_vector_root: Path | None = None,
     rhs_family_scalar_root: Path | None = None,
+    ahm_vector_root: Path | None = None,
+    ahm_scalar_root: Path | None = None,
     plant: str = "none",
 ) -> dict[str, object]:
     import jax
@@ -340,10 +362,8 @@ def run(
     # forms the same isolated terms in a different order.  Use the existing
     # private Round-119 association arm for the cumulative comparison; retain
     # the ordinary trace above as the independent passivity control.
-    source_order_trace = None
-    source_order_state_identity = None
-    if rhs_family_vector_root is not None:
-        source_order_trace = LatLonCGridOceanModel(
+    def source_order_step(coefficient_override=None):
+        return LatLonCGridOceanModel(
             card.recipe.grid,
             card.recipe.z_coord,
             card.recipe.model_config,
@@ -351,9 +371,19 @@ def run(
                 expose_live_stage_operands=True,
                 nemo_stage_rhs_accumulation_order_arm=(
                     "stage1-source-order", None),
+                smagorinsky_coefficient_override=coefficient_override,
             ),
         ).step(state, dt=card.dt_s, freshwater=freshwater,
                surface_forcing=surface)
+
+    require((ahm_vector_root is None) == (ahm_scalar_root is None),
+            "both scalar and vector AHM providers are required")
+    require(ahm_vector_root is None or rhs_family_vector_root is not None,
+            "AHM factor walk requires the cumulative RHS providers")
+    source_order_trace = None
+    source_order_state_identity = None
+    if rhs_family_vector_root is not None:
+        source_order_trace = source_order_step()
         source_order_trace = jax.device_get(source_order_trace)
         arm_exact, arm_bytes = _state_bytes_equal(
             source_order_trace.state_after, ordinary)
@@ -427,6 +457,7 @@ def run(
     source_boundaries = None
     first_source_boundary = None
     source_order_calibration = None
+    coefficient_factor_walk = None
     if rhs_family_vector_root is not None:
         require(source_order_trace is not None,
                 "source-order trace was not materialized")
@@ -483,6 +514,102 @@ def run(
         first_source_boundary = first_clearing_source_boundary(
             source_boundaries)
 
+        if ahm_vector_root is not None:
+            import jax.numpy as jnp
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                compute_vertex_mask,
+                nemo_smagorinsky_bilaplacian_coefficients_cgrid,
+            )
+            from nemo_testcase_l2_gyre_hires_ladder_gate import read_ahm
+
+            providers["ahm_vector"] = manifest_contract(
+                ahm_vector_root, "vector-math-conda")
+            providers["ahm_scalar"] = manifest_contract(
+                ahm_scalar_root, "scalar-math-conda")
+            scalar_ahm = read_ahm(
+                ahm_scalar_root / "instrumented" / AHM_RECORD,
+                expected_kt=STEP,
+            )
+            vector_ahm = read_ahm(
+                ahm_vector_root / "instrumented" / AHM_RECORD,
+                expected_kt=STEP,
+            )
+            cell3 = (
+                np.asarray(card.recipe.z_coord.is_active, dtype=np.float64)
+                * np.asarray(state.land_mask.data)[..., None]
+            )
+            coefficient_vertex_mask = jax.vmap(
+                lambda level: compute_vertex_mask(
+                    level, grid=card.recipe.grid),
+                in_axes=-1, out_axes=-1,
+            )(jnp.asarray(cell3))
+            live_ahmt, live_ahmf = (
+                nemo_smagorinsky_bilaplacian_coefficients_cgrid(
+                    state.u.data, state.v.data, card.recipe.grid,
+                    card.recipe.model_config.lateral_viscosity.C_smag,
+                    card.dt_s, mask=state.land_mask.data,
+                    cell_mask=jnp.asarray(cell3),
+                    u_mask=state.u_mask.data, v_mask=state.v_mask.data,
+                    vertex_mask=coefficient_vertex_mask,
+                )
+            )
+            live_ahmt, live_ahmf = jax.device_get((live_ahmt, live_ahmf))
+            scalar_pair = (
+                np.asarray(scalar_ahm["ahmt"]),
+                np.asarray(scalar_ahm["ahmf"]),
+            )
+            vector_pair = (
+                np.asarray(vector_ahm["ahmt"]),
+                np.asarray(vector_ahm["ahmf"]),
+            )
+            live_pair = (np.asarray(live_ahmt), np.asarray(live_ahmf))
+            coefficient_rows = {
+                name: envelope_score(
+                    live_pair[index], scalar_pair[index], vector_pair[index],
+                    np.ones_like(scalar_pair[index], dtype=bool),
+                )
+                for index, name in enumerate(("ahmt", "ahmf"))
+            }
+            arms = {}
+            for name, override in (
+                ("ahmt", (scalar_pair[0], live_pair[1])),
+                ("ahmf", (live_pair[0], scalar_pair[1])),
+                ("ahmt_ahmf", scalar_pair),
+            ):
+                factor_trace = jax.device_get(source_order_step(
+                    tuple(jnp.asarray(value) for value in override)))
+                factor_operands = factor_trace.operator_operands[0]
+                rows = {}
+                for boundary in ("after_hpg", "after_ldf"):
+                    live_boundary = _trace_source_boundary(
+                        factor_operands, boundary)
+                    rows[boundary] = {
+                        face: envelope_score(
+                            live_boundary[face],
+                            _active_levels(
+                                scalar_family[f"{boundary}_{face}"]),
+                            _active_levels(
+                                vector_family[f"{boundary}_{face}"]),
+                            masks[face],
+                        )
+                        for face in FACE_ORDER
+                    }
+                arms[name] = {
+                    "rows": rows,
+                    "untouched_hpg_bit_exact": all(
+                        rows["after_hpg"][face]["legoesm_minus_scalar"]
+                        ["bit_exact"] for face in FACE_ORDER),
+                    "after_ldf_bit_exact": all(
+                        rows["after_ldf"][face]["legoesm_minus_scalar"]
+                        ["bit_exact"] for face in FACE_ORDER),
+                }
+            coefficient_factor_walk = {
+                "input_time_level": "Nbb before velocity",
+                "coefficient_rows": coefficient_rows,
+                "arms": arms,
+                "owner": coefficient_factor_owner(arms),
+            }
+
     first_stage = first_clearing_stage(stages)
     rhs_clears = any(
         rhs_rows[face]["clears_four_times_twin"] for face in FACE_ORDER)
@@ -533,6 +660,7 @@ def run(
         "source_ordered_stage1_rhs": source_boundaries,
         "source_order_calibration": source_order_calibration,
         "first_source_boundary_beyond_twin": first_source_boundary,
+        "coefficient_factor_walk": coefficient_factor_walk,
         "external_mode_handoff": bt_rows,
         "first_stage_beyond_twin": first_stage,
         "next_boundary": next_boundary,
@@ -545,6 +673,8 @@ def main() -> int:
     parser.add_argument("--scalar-root", type=Path, default=SCALAR_ROOT)
     parser.add_argument("--rhs-family-vector-root", type=Path)
     parser.add_argument("--rhs-family-scalar-root", type=Path)
+    parser.add_argument("--ahm-vector-root", type=Path)
+    parser.add_argument("--ahm-scalar-root", type=Path)
     parser.add_argument("--plant", default="none", choices=(
         "none", "stage1-u", "stage1-v", "stage2-u", "stage2-v",
         "rhs-u", "rhs-v", "bt-u", "bt-v",
@@ -559,6 +689,8 @@ def main() -> int:
         args.scalar_root,
         rhs_family_vector_root=args.rhs_family_vector_root,
         rhs_family_scalar_root=args.rhs_family_scalar_root,
+        ahm_vector_root=args.ahm_vector_root,
+        ahm_scalar_root=args.ahm_scalar_root,
         plant=args.plant,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
