@@ -895,6 +895,16 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_R17VORS/BLD/ppsrc/nemo/stp2d.f90"),
     "GYRE_OMIP_L2_P3_R17VORS/BLD/ppsrc/nemo/dynvor.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_R17VORS/BLD/ppsrc/nemo/dynvor.f90"),
+    # GYRE-HR round 21 consumes the round-20 cumulative-RHS writer records;
+    # bind its source-order and LDF factor walk to that exact producer.
+    "GYRE_OMIP_L2_P3_R20RHSS/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_R20RHSS/BLD/ppsrc/nemo/stprk3.f90"),
+    "GYRE_OMIP_L2_P3_R20RHSS/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_R20RHSS/BLD/ppsrc/nemo/stp2d.f90"),
+    "GYRE_OMIP_L2_P3_R20RHSS/BLD/ppsrc/nemo/ldfdyn.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_R20RHSS/BLD/ppsrc/nemo/ldfdyn.f90"),
+    "GYRE_OMIP_L2_P3_R20RHSS/BLD/ppsrc/nemo/dynldf_lev.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_R20RHSS/BLD/ppsrc/nemo/dynldf_lev.f90"),
     "round64/oracle_krhs_split/ocean.output": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round64/"
         "oracle_krhs_split/ocean.output"),
@@ -1637,6 +1647,21 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- GYRE high-resolution round 21: source-order LDF factor walk ---
+    'GYRE_OMIP_L2_P3_R20RHSS/BLD/ppsrc/nemo/stprk3.f90:184-190': [
+        'IF( l_ldfdyn_time                    )   CALL ldf_dyn( kstp, Nbb )',
+        'CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )', 7],
+    'GYRE_OMIP_L2_P3_R20RHSS/BLD/ppsrc/nemo/stp2d.f90:159-190': [
+        'CALL eos    ( ts, Kbb, rhd )',
+        ('IF( r20_write .AND. lwp .AND. .NOT.ln_tile .AND. kt == nit000 ) THEN', 2),
+        32],
+    'GYRE_OMIP_L2_P3_R20RHSS/BLD/ppsrc/nemo/ldfdyn.f90:462-534': [
+        ('CASE(  32  )       !==  time varying 3D field  ==!', 2),
+        "CALL lbc_lnk( 'ldfdyn', ahmt, 'T', 1.0_wp , ahmf, 'F', 1.0_wp )",
+        73],
+    'GYRE_OMIP_L2_P3_R20RHSS/BLD/ppsrc/nemo/dynldf_lev.f90:249-330': [
+        ('SELECT CASE( nn_dynldf_typ )', 2),
+        ('( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 3), 82],
     # --- GYRE high-resolution round 20: common-state stage-1 boundary ---
     'GYRE_OMIP_L2_P3_R17VORS/BLD/ppsrc/nemo/stp2d.f90:136-163': [
         '!*  hydrostatic pressure gradient (HPG))  *!',
