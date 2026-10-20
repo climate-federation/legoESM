@@ -189,6 +189,10 @@ stays DIFFERS, its three coefficient rows NOT-MODELLED).
   (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:354-357`, rn_Ld
   = 200 km on ORCA2); contains NEMO's reference 0.01 and ORCA2's 0.018.
   kappa_Redi's rung-10 freeze-out waits on the same trainer entry.
+- Resume gates (x64, CPU; `gates/resume_*`): receipt citation gate PASS,
+  5 citations, 0 failures, 0 unmapped (one map entry added for the
+  aht0 lines); default gate (land.sh list) 17 + 6 + 71 + 25 + 16 + 2 + 8 +
+  2 = 147 passed, 0 failed; the two fixed test files 53 passed.
 
 ## Review
 
