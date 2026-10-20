@@ -2233,6 +2233,9 @@ def nemo_eiv_bolus_transport(
     out_shape: tuple,
     dtype,
     kappa_face_average: bool = False,
+    *,
+    grid=None,
+    north_fold: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """NEMO ``ldf_eiv_trp_MLF`` eddy-induced (GM bolus) TRANSPORT, curl form.
 
@@ -2274,24 +2277,63 @@ def nemo_eiv_bolus_transport(
     # legacy path stays bit-identical.
     if kappa_face_average:
         aeiu_u = 0.5 * (aeiu + jnp.roll(aeiu, -1, ax_x))       # -> u-face
-        aeiu_v = 0.5 * (aeiu + jnp.roll(aeiu, -1, ax_y))       # -> v-face
+        aeiu_north = (north_neighbor_T(aeiu, grid) if north_fold
+                      else jnp.roll(aeiu, -1, ax_y))
+        aeiu_v = 0.5 * (aeiu + aeiu_north)                     # -> v-face
     else:
         aeiu_u = aeiu_v = aeiu
+    if north_fold:
+        # ldftra.f90:783: lbc_lnk(zaeiu,'U',1,zaeiv,'V',1).
+        # This is the same shared U/V ratio exchange used by domqco after its
+        # face construction: U replaces its image half on the pivot row and
+        # V replaces the whole pivot row from the mirrored row below.
+        from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+            nemo_een_ratio_fold_exchange,
+        )
+        aeiu_u, aeiu_v = nemo_een_ratio_fold_exchange(
+            aeiu_u, aeiu_v, aeiu_v, grid, True)[:2]
     aeiu_if_u = 0.5 * (aeiu_u + jnp.roll(aeiu_u, -1, ax_z))   # mk() at iface below k
     aeiu_if_v = 0.5 * (aeiu_v + jnp.roll(aeiu_v, -1, ax_z))
     wslpi_u = 0.5 * (wslpi_kp1 + jnp.roll(wslpi_kp1, -1, ax_x))  # mi(wslpi) -> u-face
-    wslpj_v = 0.5 * (wslpj_kp1 + jnp.roll(wslpj_kp1, -1, ax_y))
+    if north_fold:
+        # ldfslp.f90:338 folds wslpj as 'W' with sign -1: its ghost row is
+        # the NEGATED mirror of the row below the pivot.
+        wslpj_north = north_neighbor_T(wslpj_kp1, grid)
+        wslpj_north = wslpj_north.at[-1].set(-wslpj_north[-1])
+    else:
+        wslpj_north = jnp.roll(wslpj_kp1, -1, ax_y)
+    wslpj_v = 0.5 * (wslpj_kp1 + wslpj_north)
     act_kp1 = act_below
     wumask_uw = (u_mask[:, 1:, jnp.newaxis] * act * jnp.roll(act, -1, ax_x)
                  * act_kp1 * jnp.roll(act_kp1, -1, ax_x))
-    wvmask_vw = (v_mask[1:, :, jnp.newaxis] * act * jnp.roll(act, -1, ax_y)
-                 * act_kp1 * jnp.roll(act_kp1, -1, ax_y))
+    if north_fold:
+        act_north = north_neighbor_T(act, grid)
+        act_kp1_north = north_neighbor_T(act_kp1, grid)
+        wvmask_vw = (v_mask[1:, :, jnp.newaxis] * act * act_north
+                     * act_kp1 * act_kp1_north)
+        # dommsk's compact V pivot row is closed before lbc_lnk; ldf_eiv_trp
+        # consumes the exchanged row, which is open wherever both fold-image
+        # T columns and their cells below are wet.
+        wvmask_vw = wvmask_vw.at[-1].set(
+            act[-1] * act_north[-1] * act_kp1[-1]
+            * act_kp1_north[-1])
+    else:
+        # Legacy cards retain their exact pre-L3 operation schedule.
+        wvmask_vw = (
+            v_mask[1:, :, jnp.newaxis] * act * jnp.roll(act, -1, ax_y)
+            * act_kp1 * jnp.roll(act_kp1, -1, ax_y))
     psi_uw = -(e2u[:, :, jnp.newaxis] * wslpi_u * aeiu_if_u * wumask_uw)
     psi_vw = -(e1v[:, :, jnp.newaxis] * wslpj_v * aeiu_if_v * wvmask_vw)
     psi_uw_top = jnp.roll(psi_uw, +1, ax_z).at[:, :, 0].set(0.0)
     psi_vw_top = jnp.roll(psi_vw, +1, ax_z).at[:, :, 0].set(0.0)
-    u_eiv = psi_uw - psi_uw_top
-    v_eiv = psi_vw - psi_vw_top
+    if north_fold:
+        # ldftra.f90:954-955 pFu - (zpsi(jk) - zpsi(jk+1)); x + u_eiv is then
+        # that subtraction bit for bit, signed zeros included.
+        u_eiv = -(psi_uw_top - psi_uw)
+        v_eiv = -(psi_vw_top - psi_vw)
+    else:
+        u_eiv = psi_uw - psi_uw_top
+        v_eiv = psi_vw - psi_vw_top
     w_eiv_kp1 = ((psi_uw - jnp.roll(psi_uw, +1, ax_x))
                  + (psi_vw - jnp.roll(psi_vw, +1, ax_y)))
     return u_eiv, v_eiv, w_eiv_kp1
@@ -3087,6 +3129,10 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
             kappa_GM, bolus_wslpi_kp1, bolus_wslpj_kp1, e2u, e1v,
             u_mask, v_mask, act, act_below, q.shape, dtype,
             kappa_face_average=gm_bolus_kappa_face_average,
+            # ldf_eiv_trp runs only for ln_ldfeiv (traadv.f90:255-257), the
+            # through-FCT export; L2's zero centred bolus keeps its program.
+            grid=grid,
+            north_fold=north_fold and gm_bolus_advection == "through_fct",
         )
         bolus_transport = (u_eiv, v_eiv, w_eiv_kp1)
         if gm_bolus_advection == "centred":
