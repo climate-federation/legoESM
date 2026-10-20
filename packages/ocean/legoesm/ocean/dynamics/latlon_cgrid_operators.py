@@ -43,7 +43,6 @@ from legoesm.grids.operators_latlon_cgrid import (
     lat_ends_are_poles,  # noqa: F401 — re-export for ocean dynamics call sites
     pad_ns_scalar,
     fold_row,
-    fold_ghost_source_T,
     pad_ns_vector_v,
     pad_lon_cgrid,
     interp_cell_to_uface,
