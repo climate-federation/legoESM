@@ -1746,10 +1746,11 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:415': 'nn_mxlice = 2',
     # round 315 differentiability probe (legoESM statements, measurement only)
     'ocean_model_latlon_cgrid.py:1982': 'rhs = sr(-sr(horizontal_scaled / e3t_div))',
-    # round 317: the drag casts left in the TKE bottom boundary condition
+    # round 317: the drag arguments of the TKE bottom boundary condition
+    # (their float() casts were removed in round 319)
     'ocean_model_latlon_cgrid.py:11751-11755': [
-        'cd0=float(_cfg_b.bottom_drag.bottom_drag_cd0),',
-        'uc0=float(_cfg_b.bottom_drag.bottom_drag_uc0),', 5],
+        'cd0=_cfg_b.bottom_drag.bottom_drag_cd0,',
+        'uc0=_cfg_b.bottom_drag.bottom_drag_uc0,', 5],
     'ocean_pe_latlon_cgrid.py:4302': [('cd0=config.bottom_drag.bottom_drag_cd0,', 1)],
     'ocean_model_latlon_cgrid.py:1995': 'return sr(rhs - sr(vertical_scaled / e3t_div))',
     'ocean_model_latlon_cgrid.py:2677-2679': [
