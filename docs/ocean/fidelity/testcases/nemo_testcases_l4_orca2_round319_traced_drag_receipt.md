@@ -90,8 +90,10 @@ scheme `nemo_linear` (rate = cd0 * uc0).
   (`jobs/plant_onesided.log`); plant file deleted. Earlier plant (still
   valid): the instrument ignoring the viscosity scale fails its test
   (`jobs/plant_inert.log`).
-- A trainer on rung 10 must freeze cd_max, z0 and ke0 out; kappaH_min
-  awaits the user's decision (DECISION_NEEDED).
+- A trainer on rung 10 must freeze cd_max, z0 and ke0 out.
+- DECISION 143 (2026-10-20, user: "Keep fixed, out of training"): the
+  floor kappaH_min is frozen out of every rung-10 trainer at NEMO's value
+  1e-10. Not trained, not moved (recorded in round 320).
 
 Linearity check (`--linearity`, one step, max |change| over all T cells,
 `jobs/lin2_rung10.json`, `jobs/lin2_rung10_neg.json`): state at s = 1 + r
@@ -181,8 +183,8 @@ Units: "run growth" = the instrument's sampled RSS growth during the run, GB
 - For comparison, all fused remat N = 10, process peak: 76 GiB (rung 0) and
   89 GiB (rung 10) — round 317's 82 / 96 GB in decimal units.
 - Section 4's 238 GiB (guard process peak) is a different instrument: the
-  chained per-step probe, which holds every step's pullback during its
-  reverse phase.
+  chained per-step probe. Cause PLAUSIBLE (read off the probe's structure,
+  not measured): it holds every step's pullback during its reverse phase.
 
 ## 4. Rung-10 isoneutral gradient at N = 2, 5, 10
 Round 315's probe, `--rung rung10 --directions 0 --scalars kappa_redi
@@ -253,7 +255,7 @@ round-315 probe 11, round-319 scalar tests 13.
 
 ## OPEN
 - The background floor kappaH_min is one-sided on rung 10 (and in NEMO's
-  own arithmetic): whether a trainer exposes it is the user's decision.
+  own arithmetic): closed by DECISION 143 (frozen out of training at 1e-10).
 - The floor-cell match with NEMO relies on XLA rewriting the reciprocal
   division; the eager form departs by one ulp in 7,634 cells.
 - Floor-cell counts on V4 itself (not measured).
