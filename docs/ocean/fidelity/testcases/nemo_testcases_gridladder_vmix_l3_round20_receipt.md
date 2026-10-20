@@ -367,9 +367,21 @@ completed.  G5, G9, V1-V5, L1 and L2 compare bitwise in every saved leaf to
 their frozen arrays; G6-G8 retain their identical normalized programs and
 inputs.
 
-Landing-gate results for this continuation are recorded below after the final
-reruns.  With every required row exact or at the bar, the preregistered verdict
-is **L3 CERTIFIED**.
+Landing gates used `JAX_ENABLE_X64=1` and the exact `land.sh` `PYTHONPATH`:
+
+- this receipt's explicit citation gate: **PASS**, 38 citations, zero
+  failures, zero unmapped citations, and zero map-audit failures;
+- citation-gate unit suite: **17 passed in 5.15 s**;
+- exact default ORCA2 landing list: **145 passed in 968.18 s**; and
+- private-import ratchet, rerun separately: **6 passed in 4.92 s**.
+
+The first default-list run reported 144 passed and one failed because the
+observer shifted nine source citations retained in the default historical
+receipt.  Those 13 occurrences were re-anchored to their unchanged pinned
+statements; the focused citation suite and the complete 145-test list were
+then rerun to the green results above.  The full L3 file is independently
+**22 passed in 691.00 s**.  With every required row exact or at the bar, the
+preregistered verdict is **L3 CERTIFIED**.
 
 independent review: operator (Claude)
 
