@@ -223,7 +223,12 @@ def first_clearing_source_boundary(
 
 
 def coefficient_factor_owner(arms: dict[str, dict[str, object]]) -> str:
-    """Classify only an exact, upstream-preserving coefficient substitution."""
+    """Classify only an exact, upstream-preserving coefficient substitution.
+
+    When both one-field arms and the pair all collapse, no coefficient factor
+    is unique.  With word-identical live/oracle arrays that is the materialized
+    coefficient/operator composition boundary, not an ``ahmt``/``ahmf`` owner.
+    """
     single_exact = [
         name for name in ("ahmt", "ahmf")
         if arms[name]["untouched_hpg_bit_exact"]
@@ -232,6 +237,8 @@ def coefficient_factor_owner(arms: dict[str, dict[str, object]]) -> str:
     pair_exact = (
         arms["ahmt_ahmf"]["untouched_hpg_bit_exact"]
         and arms["ahmt_ahmf"]["after_ldf_bit_exact"])
+    if len(single_exact) == 2 and pair_exact:
+        return "COEFFICIENT_OPERATOR_COMPOSITION"
     if len(single_exact) == 1:
         return f"COEFFICIENT_{single_exact[0].upper()}"
     if single_exact:

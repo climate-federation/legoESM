@@ -156,6 +156,8 @@ def test_first_clearing_source_boundary_respects_executed_order():
         ({"ahmt"}, "COEFFICIENT_AHMT"),
         ({"ahmf"}, "COEFFICIENT_AHMF"),
         ({"ahmt", "ahmf"}, "COEFFICIENT_NON_UNIQUE"),
+        ({"ahmt", "ahmf", "ahmt_ahmf"},
+         "COEFFICIENT_OPERATOR_COMPOSITION"),
         ({"ahmt_ahmf"}, "COUPLED_COEFFICIENT_FIELDS"),
         (set(), "COEFFICIENT_EXONERATED_OPERATOR_WALK_REQUIRED"),
     ],
