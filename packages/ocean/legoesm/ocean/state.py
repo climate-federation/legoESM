@@ -846,6 +846,10 @@ class LatLonCGridOceanState(NamedTuple):
     # (config-enforced: store_salt_flux rejects AB2/RK3/FCT/SOM).
     salt_flux_u_int: object = None
     salt_flux_v_int: object = None
+    # SWE RK3 rigid-lid pressure potential [m^2 s^-2] on T points (zero
+    # wet-area mean), the gradient removed from the final stage.  Populated
+    # only under ``swe_surface="rigid_lid"``; default None => inert.
+    rigid_lid_phi: object = None
 
 
 class SurfaceTracerForcing(NamedTuple):
@@ -2363,6 +2367,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # carried on the state's {u,v,T,S,eta}_before fields. Default "forward_euler"
     # keeps every existing config bit-identical.
     outer_integrator: str = "forward_euler"
+    # Free-surface treatment of the SWE RK3 program (outer_integrator=
+    # "swe_rk3"): "explicit" is the NEMO-certified explicit free surface;
+    # "rigid_lid" projects every stage onto the non-divergent subspace and
+    # keeps ssh at zero.  No default: the SWE RK3 program refuses None.
+    swe_surface: str | None = None
     # Robert-Asselin(-only) time-filter coefficient rn_atfp for
     # outer_integrator="leapfrog" (NEMO DINO uses the plain RA filter, NOT the
     # Robert-Asselin-Williams variant — dynatf_qco.F90:144 / traatf_qco.F90:209).

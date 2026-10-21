@@ -4,6 +4,7 @@
   "description": "Round-10 diagnosis control: the nu10 no-closure free run from the same record start as the pilot's diagnosis free runs (stored filtered coarse truth state at the end of day 4265, sea level rebalanced as a training window start), twenty years on CUDA/native. Operator's choice (2026-10-15). Twenty-year extension of the round-10 three-year runs (operator, reviewer's measurement 1, 2026-10-15).",
   "control": "nu10",
   "deck": "dg50",
+  "surface": "explicit",
   "closure": "none",
   "free_run": {
     "days": 7300,

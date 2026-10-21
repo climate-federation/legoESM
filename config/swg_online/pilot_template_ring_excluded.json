@@ -3,14 +3,22 @@
   "experiment": "swgonl_pilot_template_ring_excluded",
   "description": "Pilot, a first cheap experiment of candidate template+excluded: one seed, window lengths 1 and 2 days only, training restricted to the first two training years of the 12-year record (days 731-1461), validation and test as the experiment-one contract, and a 20-year CUDA/native free run after each window length after the GPU controls pass the device check. One seed is scored for diagnostics but cannot receive the three-seed held-out gate verdict.",
   "deck": "dg50",
+  "surface": "explicit",
   "objective": "template",
   "wall_ring": "excluded",
+  "training_precision": "fp64",
+  "gradient_checkpointing": true,
+  "target_interval_hours": 1,
   "network": {
     "hidden_channels": 16,
     "hidden_layers": 4,
     "kernel_size": 3,
-    "scales": "maddison_eq6_shallow_water_grid_analogue"
+    "wall_margin_rings": 0,
+    "scales": "maddison_eq6_shallow_water_grid_analogue",
+    "noise_channel": "none",
+    "initial_acceleration_gate": "enforced"
   },
+  "loss": {"kind": "eq7"},
   "seeds": [20261013],
   "dataset": {
     "records": [
@@ -28,7 +36,9 @@
       "validation": [4265, 5111],
       "test": [5141, 5506]
     },
-    "batch_size": 10
+    "batch_size": 10,
+    "cache": "none",
+    "target_filter_sigma_cells": 1.0
   },
   "curriculum": {
     "window_days": [1, 2],

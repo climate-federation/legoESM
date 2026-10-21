@@ -3,14 +3,24 @@
   "experiment": "swgonl_pretrain_template_ring_weighted",
   "description": "Round 13: experiment one's candidate template+weighted (same objective, wall-ring treatment, dataset, curriculum, optimiser and free-run execution), one seed, the network initialised from the offline-pretrained closure (capacity_test architecture (a) fitted to the representable one-hour correction a_S on the round-11 capacity dataset, continued to convergence by scripts/validate/swgonl_round10/pretrain_offline.py) instead of the seed's random initialisation; the optimiser starts fresh. Tests whether offline pretraining initialises online training better than a random start.",
   "deck": "dg50",
+  "surface": "explicit",
   "objective": "template",
   "wall_ring": "weighted",
+  "training_precision": "fp64",
+  "gradient_checkpointing": true,
+  "target_interval_hours": 1,
   "network": {
     "hidden_channels": 16,
     "hidden_layers": 4,
     "kernel_size": 3,
+    "wall_margin_rings": 0,
     "scales": "maddison_eq6_shallow_water_grid_analogue",
+    "noise_channel": "none",
+    "initial_acceleration_gate": "enforced",
     "initial_checkpoint": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round13_pretrain/offline_pretrained_ours.eqx"
+  },
+  "loss": {
+    "kind": "eq7"
   },
   "seeds": [
     20261013
@@ -40,7 +50,9 @@
         5506
       ]
     },
-    "batch_size": 10
+    "batch_size": 10,
+    "cache": "none",
+    "target_filter_sigma_cells": 1.0
   },
   "curriculum": {
     "window_days": [

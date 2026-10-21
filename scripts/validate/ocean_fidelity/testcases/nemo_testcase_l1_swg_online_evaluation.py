@@ -25,14 +25,20 @@ import io
 import json
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_DG50_NAMELIST,
+    SWG_DG50_RL_NAMELIST,
     SWG_MADDISON_NAMELIST,
+    SWG_MADDISON_RL_NAMELIST,
     build_swg_card,
 )
-from legoesm.ocean.fidelity.swg_online_decks import SWG_DG50_NU80_NAMELIST
+from legoesm.ocean.fidelity.swg_online_decks import (
+    SWG_DG50_NU80_NAMELIST,
+    SWG_DG50_NU80_RL_NAMELIST,
+)
 from legoesm.training.swg_online import (  # the one schema, with its writer
     DAILY_MEAN_FIELDS,
     DAILY_MEAN_LABEL,
@@ -94,6 +100,61 @@ DEVICE_CHECK_SCHEMA = "legoesm.swg_online_device_check.v2"
 CONTROL_NAMELISTS = {"nu10": SWG_DG50_NAMELIST,
                      "nu80": SWG_DG50_NU80_NAMELIST}
 
+# The free-surface treatment a score is made on (user decision 2026-10-18: the
+# rigid-lid truth is a different quantity from the explicit one).  Everything
+# surface-dependent lives in this one record: the registered fine truth and its
+# deck, the coarse deck every candidate runs, the no-closure controls and their
+# decks, and the frozen gate.  ``explicit`` is the original scorer, unchanged.
+SURFACES = ("explicit", "rigid_lid")
+RIGID_LID_FINE_TRUTH_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/"
+    "legoesm_runs/dg_rl_gpu_7300d_truth")
+# Rigid-lid frozen CPU controls: the double-gyre driver's single-sampling
+# archives (``run_swg_double_gyre.py --deck dg50-rl|dg50-nu80-rl --surface
+# rigid_lid --mode cpu-scanned --days 7300``), written 2026-10-18.
+RIGID_LID_CONTROL_ROOTS = {
+    "nu10": Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/"
+                 "round18_rigidlid_scores/controls_cpu/dg50-rl"),
+    "nu80": Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/"
+                 "round18_rigidlid_scores/controls_cpu/dg50-nu80-rl"),
+}
+# Frozen manifests of the rigid-lid single-sampling archives (see
+# ``FROZEN_SINGLE_SAMPLING_MANIFESTS``).  Their sampling is end-of-day by the
+# writer's construction (the driver stores the end-of-day state only), NOT
+# shown from the data: a lid archive holds no daily mean to test against.
+RIGID_LID_MANIFEST_SHA256: dict[str, str] = {
+    "nu10": "42d56b170174986f0ad17f1f1ed7b996f761c18d7db5fa53d0d4a74047956081",
+    "nu80": "287b244da0f1173ba11819c110c01f57e551bce5ade6d8bf967ad79bce84f73e",
+    "truth": "59e4fa786e9b18083ea141b0d0cc7d0429c1f8ee0390d7336b873c011dc0eec8",
+}
+
+
+class _Surface(NamedTuple):
+    fine_root: Path
+    fine_namelist: object
+    coarse_namelist: object
+    control_roots: dict
+    control_namelists: dict
+    control_manifest_sha256: dict
+    single_sampling_manifests: frozenset
+
+
+def _surface(surface: str) -> _Surface:
+    """The registered inputs of one surface; refuses anything else."""
+    if surface == "explicit":
+        return _Surface(
+            FINE_TRUTH_ROOT, SWG_MADDISON_NAMELIST, SWG_DG50_NAMELIST,
+            CONTROL_ROOTS, CONTROL_NAMELISTS, EXPECTED_CONTROL_MANIFEST_SHA256,
+            FROZEN_SINGLE_SAMPLING_MANIFESTS)
+    if surface == "rigid_lid":
+        return _Surface(
+            RIGID_LID_FINE_TRUTH_ROOT, SWG_MADDISON_RL_NAMELIST,
+            SWG_DG50_RL_NAMELIST, RIGID_LID_CONTROL_ROOTS,
+            {"nu10": SWG_DG50_RL_NAMELIST, "nu80": SWG_DG50_NU80_RL_NAMELIST},
+            RIGID_LID_MANIFEST_SHA256,
+            frozenset(RIGID_LID_MANIFEST_SHA256.values()))
+    raise ValueError(f"surface must be one of {SURFACES}, got {surface!r}")
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -136,15 +197,20 @@ def _native_array_provider(name: str, arrays: tuple[np.ndarray, ...]):
     return climate.DailyProvider(name, "daily_snapshot", {}, iterate)
 
 
-def window_statistics(arrays: tuple[np.ndarray, ...]) -> dict:
-    """Diagnose one native dg50 (ssh, u, v) window once, candidate or truth."""
+def window_statistics(arrays: tuple[np.ndarray, ...], *,
+                      namelist=SWG_DG50_NAMELIST) -> dict:
+    """Diagnose one native dg50 (ssh, u, v) window once, candidate or truth.
+
+    ``namelist`` is the deck whose step the Courant health is measured with
+    (the rigid-lid deck steps at 10800 s, not 400 s).
+    """
     from legoesm.ocean.fidelity.swg_coarse_graining import native_face_transports
 
     card, geometry = _dg50()
     days = int(arrays[0].shape[0])
     diagnosed = climate.diagnose(
         _native_array_provider("window", arrays), days=days, card=card,
-        namelist=SWG_DG50_NAMELIST, diagnostics="online")
+        namelist=namelist, diagnostics="online")
     ssh, u, v = arrays
     transports = [native_face_transports(
         {"T": ssh[day], "U": u[day], "V": v[day]}, geometry)
@@ -276,7 +342,7 @@ def truth_restrictor(objective: str):
         truncate=FILTER_TRUNCATE)
 
 
-def _fine_truth_manifest(root: Path) -> dict:
+def _fine_truth_manifest(root: Path, surface: str = "explicit") -> dict:
     """The fine truth manifest; a still-running archive is read by its pins."""
     complete = root / "manifest.json"
     path = complete if complete.is_file() else root / "manifest.pending.json"
@@ -284,13 +350,15 @@ def _fine_truth_manifest(root: Path) -> dict:
     if manifest.get("status") not in ("complete", "pending"):
         raise ValueError(f"unusable fine truth manifest status in {path}")
     climate.require_legoesm_deck(
-        manifest.get("namelist", {}), SWG_MADDISON_NAMELIST)
+        manifest.get("namelist", {}), _surface(surface).fine_namelist)
+    if surface == "rigid_lid" and manifest.get("surface") != "rigid_lid":
+        raise ValueError(f"{path}: the rigid-lid truth must record its surface")
     return manifest
 
 
-def fine_truth_pins_digest(root: Path, windows) -> str:
+def fine_truth_pins_digest(root: Path, windows, surface: str = "explicit") -> str:
     """One SHA-256 over every pinned fine-truth day file the windows read."""
-    pins = _fine_truth_manifest(root).get("daily_sha256", {})
+    pins = _fine_truth_manifest(root, surface).get("daily_sha256", {})
     lines = []
     for first, last in windows:
         for day in range(first, last + 1):
@@ -336,7 +404,8 @@ def _admit_day_file(saved, name: str):
 
 
 def _require_end_of_day_snapshots(name: str, snapshot, daily_mean,
-                                  next_daily_mean) -> None:
+                                  next_daily_mean, *,
+                                  rigid_lid: bool = False) -> None:
     """Show from the data that a dual file's snapshot fields are end-of-day.
 
     The day-d end-of-day state lies half a day from the day-d and day-(d+1)
@@ -351,6 +420,12 @@ def _require_end_of_day_snapshots(name: str, snapshot, daily_mean,
     """
     for field, s, m, n in zip(("ssh", "u", "v"), snapshot, daily_mean,
                               next_daily_mean, strict=True):
+        if rigid_lid and field == "ssh":
+            # The lid removes the free surface: SSH is exactly zero in every
+            # sampling, so the nearer-the-average test (0 < 0) cannot apply.
+            if any(np.any(value != 0.0) for value in (s, m, n)):
+                raise ValueError(f"{name}: a rigid-lid ssh must be exactly zero")
+            continue
         if not np.all(np.isfinite(s)):
             continue
         for which, mean in (("its own day's", m), ("the next day's", n)):
@@ -367,14 +442,21 @@ def _require_end_of_day_snapshots(name: str, snapshot, daily_mean,
 
 
 def restrict_fine_truth_window(root: Path, first: int, last: int, *,
-                               objective: str) -> tuple[np.ndarray, ...]:
+                               objective: str, surface: str = "explicit"
+                               ) -> tuple[np.ndarray, ...]:
     """Coarse truth (ssh, u, v) for days first..last from fine SNAPSHOTS.
 
-    The fine truth is a dual archive: each day's snapshot is admitted by its
-    own labels and shown from the data to be an end-of-day state (the check of
-    day ``last`` reads day ``last + 1``'s daily mean).
+    The explicit fine truth is a dual archive: each day's snapshot is admitted
+    by its own labels and shown from the data to be an end-of-day state (the
+    check of day ``last`` reads day ``last + 1``'s daily mean).  The rigid-lid
+    truth is a single-sampling archive, admitted only under its frozen
+    manifest (``RIGID_LID_MANIFEST_SHA256``).
     """
-    pins = _fine_truth_manifest(root).get("daily_sha256", {})
+    pins = _fine_truth_manifest(root, surface).get("daily_sha256", {})
+    single = surface == "rigid_lid"
+    if single and _sha256(root / "manifest.json") \
+            not in _surface(surface).single_sampling_manifests:
+        raise ValueError(f"{root}: the rigid-lid truth manifest is not frozen")
     restrict = truth_restrictor(objective)
     values = {kind: [] for kind in "TUV"}
     previous = None
@@ -387,9 +469,13 @@ def restrict_fine_truth_window(root: Path, first: int, last: int, *,
             if int(saved["day"]) != day:
                 raise ValueError(f"{name}: embedded day differs")
             snapshot, daily_mean = _admit_day_file(saved, name)
-        if daily_mean is None:
+        if single:
+            if daily_mean is not None:
+                raise ValueError(f"{name}: the rigid-lid truth must be a "
+                                 "single-sampling archive")
+        elif daily_mean is None:
             raise ValueError(f"{name}: the fine truth must be a dual archive")
-        if previous is not None:
+        elif previous is not None:
             _require_end_of_day_snapshots(*previous, daily_mean)
         if day > last:
             break
@@ -418,7 +504,8 @@ def _read_admitted_day(root: Path, day: int, pins: dict):
         return _admit_day_file(saved, path.name)
 
 
-def _load_native_window(root: Path, start: int, days: int) -> tuple[np.ndarray, ...]:
+def _load_native_window(root: Path, start: int, days: int, *,
+                        surface: str = "explicit") -> tuple[np.ndarray, ...]:
     """End-of-day (ssh, u, v) of days start..start+days-1, admitted per file.
 
     A dual archive shows every snapshot from the data (the last day's check
@@ -434,7 +521,7 @@ def _load_native_window(root: Path, start: int, days: int) -> tuple[np.ndarray, 
              for day in range(start, start + days)]
     means = [daily_mean for _, daily_mean in files]
     if any(daily_mean is None for daily_mean in means):
-        if _sha256(manifest_path) not in FROZEN_SINGLE_SAMPLING_MANIFESTS:
+        if _sha256(manifest_path) not in _surface(surface).single_sampling_manifests:
             raise ValueError(
                 f"{root}: a single-sampling archive cannot show from its data "
                 "that its fields are end-of-day snapshots; only the frozen "
@@ -446,7 +533,7 @@ def _load_native_window(root: Path, start: int, days: int) -> tuple[np.ndarray, 
         for k, (snapshot, _) in enumerate(files):
             _require_end_of_day_snapshots(
                 f"{root.name}/day{start + k:04d}.npz", snapshot, means[k],
-                means[k + 1])
+                means[k + 1], rigid_lid=surface == "rigid_lid")
     return tuple(np.stack([snapshot[index] for snapshot, _ in files])
                  for index in range(3))
 
@@ -840,6 +927,153 @@ FROZEN_GATE: dict[str, dict] = {
 }
 
 
+# Rigid-lid gate (user decision 2026-10-18), built with ``freeze`` below and
+# pasted here; empty until then.
+# Provenance: measured 2026-10-18 by ``freeze --objective symmetric --surface
+# rigid_lid`` (the procedure above, unchanged) on the work copy at base
+# 3a520bd08, BEFORE any rigid-lid trained model was scored: the rigid-lid fine
+# truth (dg_rl_gpu_7300d_truth, 7300 days, end-of-day snapshots) restricted by
+# the box operator over EVERY complete registered window it pins (9 two-year
+# windows, days 366-6935), and the two CPU no-closure rigid-lid controls
+# (dg50-rl, dg50-nu80-rl; 7300 days, cpu-scanned) on the same windows.
+FROZEN_GATE_RIGID_LID: dict[str, dict] = {
+    "symmetric": {'truth_operator': 'box (exact volume/face-transport restriction)',
+     'windows': [[366, 1095], [1096, 1825], [1826, 2555], [2556, 3285], [3286, 4015], [4016, 4745],
+                 [4746, 5475], [5476, 6205], [6206, 6935]],
+     'fine_truth_pins_sha256': '748624117e3b34286d47afb7eeb11139e62729c9a75f12f3c086405ed4708c68',
+     'control_manifest_sha256': {'nu10': '42d56b170174986f0ad17f1f1ed7b996f761c18d7db5fa53d0d4a74047956081',
+                                 'nu80': '287b244da0f1173ba11819c110c01f57e551bce5ade6d8bf967ad79bce84f73e'},
+     'truth_loo': {'basin_eke_ratio': [0.9610900959386238, 1.0003669707075893, 0.9909312135918806,
+                                       1.0179806557709896, 0.9939254691208825, 0.9338462622477567,
+                                       1.0703517554373105, 1.0390453544444977, 0.9938886262634751],
+                   'ke_spectrum_relative_l1': [0.03547884800647786, 0.028425789920494996,
+                                               0.07023459396345086, 0.041285839898709306,
+                                               0.039455070973015954, 0.056539471366776964,
+                                               0.07852572616830748, 0.0321967458636182,
+                                               0.04367932567480439],
+                   'mean_face_transport_rmse_m3_s': [525209.8385172989, 325832.05019691854,
+                                                     884071.9845857032, 397128.71645527374,
+                                                     538958.8881396615, 681798.2895079067,
+                                                     748279.7181694964, 576223.6329207899,
+                                                     523130.83029323403],
+                   'native_grid_noise_index': [0.4748821353668775, 0.48287151511373294,
+                                               0.47516526225978334, 0.4726116952436087,
+                                               0.4824649859706268, 0.48771991991810815,
+                                               0.4770736620212113, 0.4798681597413841,
+                                               0.4851838176615581],
+                   'top_octave_enstrophy_fraction': [0.11727858105562665, 0.12141344462103316,
+                                                     0.12076647311450674, 0.11728875663133093,
+                                                     0.12041492493357403, 0.128322007335402,
+                                                     0.11484811062346761, 0.12450293435915254,
+                                                     0.12325279153798213],
+                   'top_octave_ke_fraction': [0.008079746874548455, 0.008453600304523298,
+                                              0.00825206076386926, 0.008030760703335565,
+                                              0.008426614476525755, 0.00893271391460479,
+                                              0.008158587262030927, 0.008571100653458626,
+                                              0.008620158582950536],
+                   'wet_eke_map_nrmse': [0.18931155759536952, 0.1564962971382348,
+                                         0.21426139404619213, 0.18702947991458893,
+                                         0.18777999874531992, 0.29561766350056135,
+                                         0.42036982261635325, 0.2251961882614076,
+                                         0.20904812430356337]},
+     'controls': {'nu10': {'basin_eke_ratio': [0.7208284822549654, 0.804213635197104,
+                                               0.7046570250832316, 0.720558707414828,
+                                               0.6599879232277076, 0.7451974807841177,
+                                               0.6581915509172453, 0.7132197704799583,
+                                               0.7205840625371942],
+                           'ke_spectrum_relative_l1': [0.29045441690732465, 0.2134181522918865,
+                                                       0.24820690611610022, 0.23926871449318432,
+                                                       0.28266979636035455, 0.20354100009112847,
+                                                       0.28471796902302576, 0.23715220065324485,
+                                                       0.22687503195048003],
+                           'mean_face_transport_rmse_m3_s': [1329321.4565363762, 879781.0063921154,
+                                                             1211688.1009082308, 1158372.0561871324,
+                                                             1350362.9033190396, 1056098.4461278147,
+                                                             1346272.8188728797, 1232627.5837623496,
+                                                             1126099.9220108541],
+                           'native_grid_noise_index': [0.9130594913548178, 0.936094025530023,
+                                                       0.9243004496462194, 0.9292851465567574,
+                                                       0.9234160590076991, 0.9408589964166664,
+                                                       0.9253978469541669, 0.9223600747042076,
+                                                       0.9297202428595704],
+                           'top_octave_enstrophy_fraction': [0.4296609255541829, 0.4258211276912794,
+                                                             0.4335402963553781,
+                                                             0.43224632604623514,
+                                                             0.4337649669521915, 0.4419070596194105,
+                                                             0.4324221050386894,
+                                                             0.43554975923754236,
+                                                             0.43546583817358725],
+                           'top_octave_ke_fraction': [0.05108443014826329, 0.05407476161336829,
+                                                      0.05297107410881993, 0.052878325975877896,
+                                                      0.052429120545805855, 0.05504015098454456,
+                                                      0.05290988641787254, 0.052697289437626894,
+                                                      0.05346561526652945],
+                           'wet_eke_map_nrmse': [0.3983975862330238, 0.27386670870542773,
+                                                 0.32467562465536604, 0.3322836526496011,
+                                                 0.41685380674113126, 0.3255990688711449,
+                                                 0.4013783740655777, 0.3502549323898132,
+                                                 0.31097958123002856]},
+                  'nu80': {'basin_eke_ratio': [0.4947437095216656, 0.3959938075623122,
+                                               0.3829478830208802, 0.38912404419793367,
+                                               0.4311538128043471, 0.45925346473754597,
+                                               0.4425061608642844, 0.49567663641454524,
+                                               0.45562229796518],
+                           'ke_spectrum_relative_l1': [0.3670323006143636, 0.38422760017065294,
+                                                       0.39422027842857105, 0.42596376166711863,
+                                                       0.34134746637006275, 0.3159557508977545,
+                                                       0.33594802314386835, 0.2778453638445363,
+                                                       0.32591392640838934],
+                           'mean_face_transport_rmse_m3_s': [1484091.7600086739, 1674655.3613111633,
+                                                             1699943.8617860242, 1764267.2695874178,
+                                                             1571230.8894155887, 1484695.664898544,
+                                                             1527075.4253575818, 1404381.213277574,
+                                                             1489761.8942469389],
+                           'native_grid_noise_index': [0.6968885123829498, 0.7068447286878132,
+                                                       0.7055476085906489, 0.6984311952711025,
+                                                       0.7082077437751404, 0.7039984412807543,
+                                                       0.7059926687304559, 0.7039412375678108,
+                                                       0.7121258113162277],
+                           'top_octave_enstrophy_fraction': [0.2924059602849322, 0.2993102453111432,
+                                                             0.29774976915012485,
+                                                             0.2924525680885647,
+                                                             0.30023148625396207,
+                                                             0.2956622081059854, 0.3000112563822987,
+                                                             0.2954219115525572,
+                                                             0.2955036067473297],
+                           'top_octave_ke_fraction': [0.02657190105824281, 0.027899945117388754,
+                                                      0.027649593350749523, 0.02692917885639869,
+                                                      0.02810100371569596, 0.02750715165543746,
+                                                      0.02776820080991745, 0.027581599329510955,
+                                                      0.028176889637144747],
+                           'wet_eke_map_nrmse': [0.6852571736666305, 0.7559108523695343,
+                                                 0.7579618975808721, 0.7741553869279761,
+                                                 0.7153458208989019, 0.6647015684195393,
+                                                 0.6842264162208054, 0.6314717161035637,
+                                                 0.7016310736539547]}},
+     'bars': {'basin_eke_ratio': {'bar': 1.0703517554373105,
+                                  'floor': 0.9338462622477567,
+                                  'half_range': 0.06825274659477693},
+              'ke_spectrum_relative_l1': {'bar': 0.07852572616830748,
+                                          'floor': 0.028425789920494996,
+                                          'half_range': 0.025049968123906245},
+              'mean_face_transport_rmse_m3_s': {'bar': 884071.9845857032,
+                                                'floor': 325832.05019691854,
+                                                'half_range': 279119.96719439235},
+              'native_grid_noise_index': {'bar': 0.48771991991810815,
+                                          'floor': 0.4726116952436087,
+                                          'half_range': 0.00755411233724973},
+              'top_octave_enstrophy_fraction': {'bar': 0.128322007335402,
+                                                'floor': 0.11484811062346761,
+                                                'half_range': 0.006736948355967193},
+              'top_octave_ke_fraction': {'bar': 0.00893271391460479,
+                                         'floor': 0.008030760703335565,
+                                         'half_range': 0.0004509766056346124},
+              'wet_eke_map_nrmse': {'bar': 0.42036982261635325,
+                                    'floor': 0.1564962971382348,
+                                    'half_range': 0.13193676273905924}}},
+}
+
+
 def gate_bars(table: dict[str, list[float]]) -> dict[str, dict]:
     """Window-to-window spread of one candidate's per-window values.
 
@@ -853,16 +1087,19 @@ def gate_bars(table: dict[str, list[float]]) -> dict[str, dict]:
             for metric, values in table.items()}
 
 
-def frozen_gate(objective: str) -> dict:
-    """The frozen record of one explicitly selected objective."""
+def frozen_gate(objective: str, surface: str = "explicit") -> dict:
+    """The frozen record of one explicitly selected objective and surface."""
+    _surface(surface)
     from legoesm.training.swg_online import OBJECTIVE_OPERATORS
 
     if objective not in OBJECTIVE_OPERATORS:
         raise ValueError(f"objective must be one of {OBJECTIVE_OPERATORS}, "
                          f"got {objective!r}")
-    if objective not in FROZEN_GATE:
-        raise ValueError(f"no frozen gate for objective {objective!r}")
-    return FROZEN_GATE[objective]
+    gates = FROZEN_GATE if surface == "explicit" else FROZEN_GATE_RIGID_LID
+    if objective not in gates:
+        raise ValueError(
+            f"no frozen {surface} gate for objective {objective!r}")
+    return gates[objective]
 
 
 def _medians(rows: list[dict]) -> dict[str, float]:
@@ -870,7 +1107,8 @@ def _medians(rows: list[dict]) -> dict[str, float]:
             for metric in SCORE_METRICS}
 
 
-def held_out_gate(seed_scores: dict[str, list[dict]], *, objective: str) -> dict:
+def held_out_gate(seed_scores: dict[str, list[dict]], *, objective: str,
+                  surface: str = "explicit") -> dict:
     """Apply the frozen gate to >= 3 seeds scored on the frozen windows.
 
     Every candidate is summarised by its median over the frozen windows.  The
@@ -883,7 +1121,7 @@ def held_out_gate(seed_scores: dict[str, list[dict]], *, objective: str) -> dict
     TRUTH's own window-to-window spread (``bars``); a control's spread never
     enters (codex round-6 defect 2).
     """
-    frozen = frozen_gate(objective)
+    frozen = frozen_gate(objective, surface)
     windows = len(frozen["windows"])
     if len(seed_scores) < 3:
         raise ValueError("held-out gate requires at least three network seeds")
@@ -896,6 +1134,7 @@ def held_out_gate(seed_scores: dict[str, list[dict]], *, objective: str) -> dict
                          for row in rows)
                for name, rows in seed_scores.items()}
     result = {"objective": objective, "windows": frozen["windows"],
+              **({"surface": surface} if surface != "explicit" else {}),
               "raw_seed_scores": seed_scores,
               "physical_health_by_seed": healthy,
               "physical_health_pass": all(healthy.values())}
@@ -934,17 +1173,18 @@ def held_out_gate(seed_scores: dict[str, list[dict]], *, objective: str) -> dict
     }
 
 
-def truth_as_seed(objective: str) -> list[dict]:
+def truth_as_seed(objective: str, surface: str = "explicit") -> list[dict]:
     """The frozen truth windows as one perfect-model seed (leave-one-out)."""
-    table = frozen_gate(objective)["truth_loo"]
+    table = frozen_gate(objective, surface)["truth_loo"]
     return [{**{metric: table[metric][k] for metric in SCORE_METRICS},
              "physical_health": {"passes": True}}
             for k in range(len(table[SKILL_METRICS[0]]))]
 
 
-def control_as_seed(objective: str, control: str) -> list[dict]:
+def control_as_seed(objective: str, control: str,
+                    surface: str = "explicit") -> list[dict]:
     """One frozen control's windows as a seed (it must fail the gate)."""
-    table = frozen_gate(objective)["controls"][control]
+    table = frozen_gate(objective, surface)["controls"][control]
     return [{**{metric: table[metric][k] for metric in SCORE_METRICS},
              "physical_health": {"passes": True}}
             for k in range(len(table[SKILL_METRICS[0]]))]
@@ -972,61 +1212,70 @@ def collapsed_variance_plant(arrays: tuple[np.ndarray, ...]) -> tuple[np.ndarray
 
 
 def plant_verdicts(truth_window: tuple[np.ndarray, ...], reference: dict, *,
-                   objective: str) -> dict:
+                   objective: str, surface: str = "explicit") -> dict:
     """Score the mandatory plants through the real scorer and the gate."""
-    windows = len(frozen_gate(objective)["windows"])
+    windows = len(frozen_gate(objective, surface)["windows"])
+    namelist = _surface(surface).coarse_namelist
     verdicts = {}
     for name, arrays in (
             ("collapsed_variance", collapsed_variance_plant(truth_window)),
             ("native_checkerboard_0p1_m_s",
              checkerboard_plant(truth_window, 0.1, rotational=False))):
-        score = score_statistics(window_statistics(arrays), reference)
+        score = score_statistics(
+            window_statistics(arrays, namelist=namelist), reference)
         gate = held_out_gate({f"seed{k}": [score] * windows for k in range(3)},
-                             objective=objective)
+                             objective=objective, surface=surface)
         verdicts[name] = {"score": score, "pass": gate["pass"],
                           "variability_pass": gate["variability_pass"],
                           "spectral_health_pass": gate["spectral_health_pass"]}
     return verdicts
 
 
-def available_windows(root: Path = FINE_TRUTH_ROOT) -> list[tuple[int, int]]:
+def available_windows(root: Path | None = None,
+                      surface: str = "explicit") -> list[tuple[int, int]]:
     """Every complete registered window the fine truth pins today, each with
     the following day pinned too (its last snapshot's sampling check)."""
-    completed = int(_fine_truth_manifest(root)["completed_days"])
+    root = _surface(surface).fine_root if root is None else root
+    completed = int(_fine_truth_manifest(root, surface)["completed_days"])
     return registered_windows(
         max(0, (completed - GATE_FIRST_DAY) // GATE_WINDOW_DAYS))
 
 
 def freeze_record(objective: str, *, windows: list[tuple[int, int]],
-                  fine_root: Path = FINE_TRUTH_ROOT,
-                  control_roots: dict[str, Path] | None = None):
+                  fine_root: Path | None = None,
+                  control_roots: dict[str, Path] | None = None,
+                  surface: str = "explicit"):
     """Measure the truth's leave-one-out table and the controls' tables.
 
     Returns the record, the first truth window's coarse arrays (for the
     plants) and the truth climatology every candidate is scored against.
     """
-    control_roots = CONTROL_ROOTS if control_roots is None else control_roots
+    spec = _surface(surface)
+    fine_root = spec.fine_root if fine_root is None else fine_root
+    control_roots = spec.control_roots if control_roots is None else control_roots
     truth, first_window = [], None
     for first, last in windows:
         arrays = restrict_fine_truth_window(
-            fine_root, first, last, objective=objective)
+            fine_root, first, last, objective=objective, surface=surface)
         if first_window is None:
             first_window = arrays
-        truth.append(window_statistics(arrays))
+        truth.append(window_statistics(arrays, namelist=spec.coarse_namelist))
     reference = climatology(truth)
     loo = leave_one_out_scores(truth)
     controls = {}
     for name, root in control_roots.items():
-        if _sha256(root / "manifest.json") != EXPECTED_CONTROL_MANIFEST_SHA256[name]:
+        if _sha256(root / "manifest.json") != spec.control_manifest_sha256[name]:
             raise ValueError(f"{name} control manifest differs from frozen hash")
         controls[name] = [score_statistics(window_statistics(_load_native_window(
-            root, first, last - first + 1)), reference) for first, last in windows]
+            root, first, last - first + 1, surface=surface),
+            namelist=spec.coarse_namelist), reference) for first, last in windows]
     record = {
         "objective": objective,
         "windows": [list(window) for window in windows],
-        "fine_truth_pins_sha256": fine_truth_pins_digest(fine_root, windows),
+        "fine_truth_pins_sha256": fine_truth_pins_digest(
+            fine_root, windows, surface),
         "control_manifest_sha256": {
-            name: EXPECTED_CONTROL_MANIFEST_SHA256[name] for name in controls},
+            name: spec.control_manifest_sha256[name] for name in controls},
         "truth_loo": {metric: [row[metric] for row in loo]
                       for metric in SCORE_METRICS},
         "controls": {name: {metric: [row[metric] for row in rows]
@@ -1042,7 +1291,8 @@ def freeze_record(objective: str, *, windows: list[tuple[int, int]],
 
 def score_free_run(root: Path, *, expected_manifest_sha256: str,
                    reference: dict, windows: list[tuple[int, int]],
-                   expected_namelist=SWG_DG50_NAMELIST) -> list[dict]:
+                   expected_namelist=None,
+                   surface: str = "explicit") -> list[dict]:
     """Score one bound dg50 free run; a non-finite window fails its health.
 
     The driver's whole-run health record (every day, not only the scored
@@ -1053,6 +1303,8 @@ def score_free_run(root: Path, *, expected_manifest_sha256: str,
     if _sha256(root / "manifest.json") != expected_manifest_sha256:
         raise ValueError(f"{root}: manifest differs from its bound SHA-256")
     manifest = json.loads((root / "manifest.json").read_text())
+    coarse = _surface(surface).coarse_namelist
+    expected_namelist = coarse if expected_namelist is None else expected_namelist
     climate.require_legoesm_deck(manifest.get("namelist", {}), expected_namelist)
     whole_run = manifest.get("numerical_health") or {}
     whole_run_ok = (
@@ -1062,9 +1314,12 @@ def score_free_run(root: Path, *, expected_manifest_sha256: str,
                 whole_run.get("maximum_v_courant", 1.0)) < 1.0)
     rows = []
     for first, last in windows:
-        arrays = _load_native_window(root, first, last - first + 1)
+        arrays = _load_native_window(
+            root, first, last - first + 1, surface=surface)
         if all(np.all(np.isfinite(value)) for value in arrays):
-            rows.append(score_statistics(window_statistics(arrays), reference))
+            rows.append(score_statistics(
+                window_statistics(arrays, namelist=expected_namelist),
+                reference))
         else:
             rows.append({"physical_health": {"all_finite": False,
                                              "passes": False}})
@@ -1076,10 +1331,12 @@ def score_free_run(root: Path, *, expected_manifest_sha256: str,
     return rows
 
 
-def admit_control_run(root: Path, manifest_sha256: str, *, control: str) -> dict:
+def admit_control_run(root: Path, manifest_sha256: str, *, control: str,
+                      surface: str = "explicit") -> dict:
     """Admit one CUDA/native no-closure control for the device check."""
-    if control not in CONTROL_NAMELISTS:
-        raise ValueError(f"control must be one of {sorted(CONTROL_NAMELISTS)}")
+    namelists = _surface(surface).control_namelists
+    if control not in namelists:
+        raise ValueError(f"control must be one of {sorted(namelists)}")
     root = Path(root).resolve()
     if _sha256(root / "manifest.json") != manifest_sha256:
         raise ValueError("control manifest differs from its bound SHA-256")
@@ -1092,7 +1349,7 @@ def admit_control_run(root: Path, manifest_sha256: str, *, control: str) -> dict
     if (execution["device"], execution["math_library"]) != ("cuda", "native"):
         raise ValueError("device-check controls must be CUDA/native free runs")
     climate.require_legoesm_deck(
-        manifest.get("namelist", {}), CONTROL_NAMELISTS[control])
+        manifest.get("namelist", {}), namelists[control])
     if not _day_file_pins(manifest):
         raise ValueError("control manifest pins no day files")
     return {"root": str(root), "manifest_sha256": manifest_sha256,
@@ -1100,7 +1357,8 @@ def admit_control_run(root: Path, manifest_sha256: str, *, control: str) -> dict
 
 
 def _device_check_summary(control_rows: dict[str, list[dict]], *,
-                          objective: str, bindings: dict[str, dict]) -> dict:
+                          objective: str, bindings: dict[str, dict],
+                          surface: str = "explicit") -> dict:
     """Build the mechanical device verdict from already scored controls.
 
     Each metric's GPU-minus-CPU difference of window medians must be strictly
@@ -1110,7 +1368,7 @@ def _device_check_summary(control_rows: dict[str, list[dict]], *,
     information only; it is far tighter than two runs of the same model differ
     by sampling.  The pass mark itself is unchanged.
     """
-    frozen = frozen_gate(objective)
+    frozen = frozen_gate(objective, surface)
     if set(control_rows) != set(CONTROL_NAMELISTS) \
             or set(bindings) != set(CONTROL_NAMELISTS):
         raise ValueError("device check requires exactly nu10 and nu80 controls")
@@ -1135,7 +1393,7 @@ def _device_check_summary(control_rows: dict[str, list[dict]], *,
             }
         pass_mark = held_out_gate(
             {f"{control}{index}": rows for index in range(3)},
-            objective=objective)
+            objective=objective, surface=surface)
         reports[control] = {
             "binding": bindings[control], "scores": rows,
             "metrics": metrics, "all_metrics_within_control_half_range": all(
@@ -1147,6 +1405,7 @@ def _device_check_summary(control_rows: dict[str, list[dict]], *,
         and not report["pass_mark_pass"] for report in reports.values())
     return {
         "schema": DEVICE_CHECK_SCHEMA, "objective": objective,
+        **({"surface": surface} if surface != "explicit" else {}),
         "criteria": {
             "metric_tolerance": (
                 "strictly less than the CPU control's own half-range over its "
@@ -1160,25 +1419,29 @@ def _device_check_summary(control_rows: dict[str, list[dict]], *,
 
 
 def device_check(controls: dict[str, tuple[Path, str]], *,
-                 objective: str, fine_root: Path = FINE_TRUTH_ROOT) -> dict:
+                 objective: str, fine_root: Path | None = None,
+                 surface: str = "explicit") -> dict:
     """Score both CUDA controls and compare them with their frozen CPU twins."""
-    frozen = frozen_gate(objective)
+    frozen = frozen_gate(objective, surface)
     windows = [tuple(window) for window in frozen["windows"]]
     record, _, reference = freeze_record(
-        objective, windows=windows, fine_root=fine_root)
+        objective, windows=windows, fine_root=fine_root, surface=surface)
     for key in ("fine_truth_pins_sha256", "truth_loo", "controls"):
         if record[key] != frozen[key]:
             raise ValueError(f"gate inputs drifted from the frozen {key}")
-    bindings = {name: admit_control_run(root, sha, control=name)
+    bindings = {name: admit_control_run(root, sha, control=name, surface=surface)
                 for name, (root, sha) in controls.items()}
     rows = {name: score_free_run(
         root, expected_manifest_sha256=sha, reference=reference, windows=windows,
-        expected_namelist=CONTROL_NAMELISTS[name])
+        expected_namelist=_surface(surface).control_namelists[name],
+        surface=surface)
         for name, (root, sha) in controls.items()}
-    return _device_check_summary(rows, objective=objective, bindings=bindings)
+    return _device_check_summary(
+        rows, objective=objective, bindings=bindings, surface=surface)
 
 
-def admit_device_check(path: Path, sha256: str, *, objective: str) -> dict:
+def admit_device_check(path: Path, sha256: str, *, objective: str,
+                       surface: str = "explicit") -> dict:
     """Admit a byte-bound PASS device record and re-evaluate its verdict."""
     path = Path(path)
     if _sha256(path) != sha256:
@@ -1188,6 +1451,8 @@ def admit_device_check(path: Path, sha256: str, *, objective: str) -> dict:
         raise ValueError(f"device-check schema must be {DEVICE_CHECK_SCHEMA!r}")
     if payload.get("objective") != objective:
         raise ValueError("device-check objective differs from the score request")
+    if payload.get("surface", "explicit") != surface:
+        raise ValueError("device-check surface differs from the score request")
     controls = payload.get("controls")
     if not isinstance(controls, dict) or set(controls) != set(CONTROL_NAMELISTS):
         raise ValueError("device-check record requires exactly nu10 and nu80")
@@ -1201,10 +1466,10 @@ def admit_device_check(path: Path, sha256: str, *, objective: str) -> dict:
         binding = report["binding"]
         bindings[name] = admit_control_run(
             Path(binding.get("root", "")), binding.get("manifest_sha256", ""),
-            control=name)
+            control=name, surface=surface)
         rows[name] = report["scores"]
     expected = _device_check_summary(
-        rows, objective=objective, bindings=bindings)
+        rows, objective=objective, bindings=bindings, surface=surface)
     if payload != expected:
         raise ValueError("device-check record content does not reproduce its verdict")
     if not payload["pass"] or payload["verdict"] != "PASS":
@@ -1214,7 +1479,8 @@ def admit_device_check(path: Path, sha256: str, *, objective: str) -> dict:
 
 def admit_trained_run(root: Path, manifest_sha256: str, *, objective: str,
                       window_days: int,
-                      device_check_record: tuple[Path, str] | None = None) -> dict:
+                      device_check_record: tuple[Path, str] | None = None,
+                      surface: str = "explicit") -> dict:
     """Admit ONE trained-closure free run by its manifest, before scoring.
 
     The manifest, bound by its SHA-256, must follow the one free-run schema
@@ -1235,7 +1501,8 @@ def admit_trained_run(root: Path, manifest_sha256: str, *, objective: str,
         if device_check_record is None:
             raise ValueError(
                 "CUDA trained free run requires an explicit PASS device-check record")
-        admit_device_check(*device_check_record, objective=objective)
+        admit_device_check(
+            *device_check_record, objective=objective, surface=surface)
     request = {"objective": objective, "window_days": window_days}
     stated = {key: closure[key] for key in request}
     if stated != request:
@@ -1258,8 +1525,8 @@ def admit_trained_run(root: Path, manifest_sha256: str, *, objective: str,
 
 def bind_trained_runs(seeds: dict[str, tuple[Path, str]], *, objective: str,
                       window_days: int,
-                      device_check_record: tuple[Path, str] | None = None
-                      ) -> dict[str, dict]:
+                      device_check_record: tuple[Path, str] | None = None,
+                      surface: str = "explicit") -> dict[str, dict]:
     """Refuse anything but three or more DISTINCT, admitted trained runs.
 
     Each run is admitted by ``admit_trained_run``.  Roots (as directories,
@@ -1268,12 +1535,15 @@ def bind_trained_runs(seeds: dict[str, tuple[Path, str]], *, objective: str,
     under different bytes is refused once the windows are loaded
     (``score_trained_closure``).
     """
-    from legoesm.training.swg_online import ADMITTED_WINDOWS_DAYS
+    from legoesm.training.swg_online import (
+        ADMITTED_WINDOWS_DAYS,
+        window_days_admitted,
+    )
 
-    frozen_gate(objective)
-    if type(window_days) is not int or window_days not in ADMITTED_WINDOWS_DAYS:
-        raise ValueError(f"window_days must be one of {ADMITTED_WINDOWS_DAYS}, "
-                         f"got {window_days!r}")
+    frozen_gate(objective, surface)
+    if not window_days_admitted(window_days):
+        raise ValueError(f"window_days must be one of {ADMITTED_WINDOWS_DAYS} "
+                         f"or a longer whole number of days, got {window_days!r}")
     if len(seeds) < 3:
         raise ValueError("held-out gate requires at least three network seeds")
     bound = {}
@@ -1281,7 +1551,7 @@ def bind_trained_runs(seeds: dict[str, tuple[Path, str]], *, objective: str,
         try:
             bound[label] = admit_trained_run(
                 root, sha, objective=objective, window_days=window_days,
-                device_check_record=device_check_record)
+                device_check_record=device_check_record, surface=surface)
         except ValueError as error:
             raise ValueError(f"{label}: {error}") from error
     for key in ("_directory", "manifest_sha256", "network_seed",
@@ -1304,7 +1574,8 @@ def bind_trained_runs(seeds: dict[str, tuple[Path, str]], *, objective: str,
 def score_trained_closure(seeds: dict[str, tuple[Path, str]], *, objective: str,
                           window_days: int,
                           device_check_record: tuple[Path, str] | None = None,
-                          fine_root: Path = FINE_TRUTH_ROOT) -> dict:
+                          fine_root: Path | None = None,
+                          surface: str = "explicit") -> dict:
     """Score >= 3 distinct, explicitly bound trained-closure free runs.
 
     ``seeds`` maps a seed label to (free-run root, its manifest SHA-256); the
@@ -1314,19 +1585,20 @@ def score_trained_closure(seeds: dict[str, tuple[Path, str]], *, objective: str,
     File bytes can differ while data do not, so two seeds whose loaded
     arrays are identical in any scored window are refused before the gate.
     """
-    frozen = frozen_gate(objective)
+    frozen = frozen_gate(objective, surface)
     bindings = bind_trained_runs(seeds, objective=objective,
                                  window_days=window_days,
-                                 device_check_record=device_check_record)
+                                 device_check_record=device_check_record,
+                                 surface=surface)
     windows = [tuple(window) for window in frozen["windows"]]
     record, _, reference = freeze_record(
-        objective, windows=windows, fine_root=fine_root)
+        objective, windows=windows, fine_root=fine_root, surface=surface)
     for key in ("fine_truth_pins_sha256", "truth_loo", "controls"):
         if record[key] != frozen[key]:
             raise ValueError(f"gate inputs drifted from the frozen {key}")
     seed_scores = {name: score_free_run(
         Path(root), expected_manifest_sha256=sha, reference=reference,
-        windows=windows) for name, (root, sha) in seeds.items()}
+        windows=windows, surface=surface) for name, (root, sha) in seeds.items()}
     first_seen = {}
     for name, rows in seed_scores.items():
         for window, row in zip(windows, rows, strict=True):
@@ -1339,31 +1611,35 @@ def score_trained_closure(seeds: dict[str, tuple[Path, str]], *, objective: str,
                     "required")
     return {"schema": "legoesm.swg_online_held_out_gate.v3",
             "objective": objective, "window_days": window_days,
+            **({"surface": surface} if surface != "explicit" else {}),
             "seed_bindings": bindings,
-            "gate": held_out_gate(seed_scores, objective=objective)}
+            "gate": held_out_gate(seed_scores, objective=objective,
+                                  surface=surface)}
 
 
 def score_one_trained_run(root: Path, manifest_sha256: str, *, objective: str,
                           window_days: int,
                           device_check_record: tuple[Path, str] | None = None,
-                          fine_root: Path = FINE_TRUTH_ROOT) -> dict:
+                          fine_root: Path | None = None,
+                          surface: str = "explicit") -> dict:
     """Score one trained run without claiming the three-seed gate verdict."""
     binding = admit_trained_run(
         root, manifest_sha256, objective=objective, window_days=window_days,
-        device_check_record=device_check_record)
-    frozen = frozen_gate(objective)
+        device_check_record=device_check_record, surface=surface)
+    frozen = frozen_gate(objective, surface)
     windows = [tuple(window) for window in frozen["windows"]]
     record, _, reference = freeze_record(
-        objective, windows=windows, fine_root=fine_root)
+        objective, windows=windows, fine_root=fine_root, surface=surface)
     for key in ("fine_truth_pins_sha256", "truth_loo", "controls"):
         if record[key] != frozen[key]:
             raise ValueError(f"gate inputs drifted from the frozen {key}")
     rows = score_free_run(
         root, expected_manifest_sha256=manifest_sha256, reference=reference,
-        windows=windows)
+        windows=windows, surface=surface)
     return {
         "schema": "legoesm.swg_online_single_run_score.v1",
         "objective": objective, "window_days": window_days,
+        **({"surface": surface} if surface != "explicit" else {}),
         # The underscored binding entries (device/inode, the day-file set) are
         # in-process distinctness bookkeeping, not part of the written record.
         "binding": {key: value for key, value in binding.items()
@@ -1375,14 +1651,18 @@ def score_one_trained_run(root: Path, manifest_sha256: str, *, objective: str,
     }
 
 
-def freeze_report(objective: str, *, verify: bool) -> dict:
+def freeze_report(objective: str, *, verify: bool,
+                  surface: str = "explicit") -> dict:
     """Measure (or re-verify) one objective's frozen record and self-checks."""
-    windows = ([tuple(window) for window in frozen_gate(objective)["windows"]]
-               if verify else available_windows())
-    record, first_window, reference = freeze_record(objective, windows=windows)
-    report = {"record": record}
+    windows = ([tuple(window)
+                for window in frozen_gate(objective, surface)["windows"]]
+               if verify else available_windows(surface=surface))
+    record, first_window, reference = freeze_record(
+        objective, windows=windows, surface=surface)
+    report = {"record": record, **(
+        {"surface": surface} if surface != "explicit" else {})}
     if verify:
-        frozen = frozen_gate(objective)
+        frozen = frozen_gate(objective, surface)
         report["verified_equal"] = {
             key: record[key] == frozen[key]
             for key in ("windows", "fine_truth_pins_sha256",
@@ -1390,15 +1670,18 @@ def freeze_report(objective: str, *, verify: bool) -> dict:
                         "bars")}
         report["self_check"] = {
             "truth_passes": held_out_gate(
-                {f"truth{k}": truth_as_seed(objective) for k in range(3)},
-                objective=objective)["pass"],
+                {f"truth{k}": truth_as_seed(objective, surface)
+                 for k in range(3)},
+                objective=objective, surface=surface)["pass"],
             "controls_fail": {name: not held_out_gate(
-                {f"{name}{k}": control_as_seed(objective, name)
-                 for k in range(3)}, objective=objective)["pass"]
-                for name in CONTROL_ROOTS},
+                {f"{name}{k}": control_as_seed(objective, name, surface)
+                 for k in range(3)}, objective=objective,
+                surface=surface)["pass"]
+                for name in _surface(surface).control_roots},
             "plants_fail": {name: not value["pass"] for name, value in
                             plant_verdicts(first_window, reference,
-                                           objective=objective).items()},
+                                           objective=objective,
+                                           surface=surface).items()},
         }
     return report
 
@@ -1413,11 +1696,15 @@ def main(argv=None) -> int:
     freeze = commands.add_parser(
         "freeze", help="measure the truth-spread tables (--verify: the frozen)")
     freeze.add_argument("--objective", required=True)
+    freeze.add_argument("--surface", choices=SURFACES, default="explicit",
+                       help="free-surface treatment of the truth and the runs")
     freeze.add_argument("--verify", action="store_true")
     freeze.add_argument("--output", type=Path, required=True)
     score = commands.add_parser(
         "score", help="score >= 3 trained-closure free runs through the gate")
     score.add_argument("--objective", required=True)
+    score.add_argument("--surface", choices=SURFACES, default="explicit",
+                       help="free-surface treatment of the truth and the runs")
     score.add_argument("--window-days", type=int, required=True,
                        help="training window length every seed must state")
     score.add_argument("--seed", nargs=3, action="append", required=True,
@@ -1428,6 +1715,8 @@ def main(argv=None) -> int:
     one = commands.add_parser(
         "score-run", help="score one pilot run without a three-seed verdict")
     one.add_argument("--objective", required=True)
+    one.add_argument("--surface", choices=SURFACES, default="explicit",
+                       help="free-surface treatment of the truth and the runs")
     one.add_argument("--window-days", type=int, required=True)
     one.add_argument("--run-root", type=Path, required=True)
     one.add_argument("--manifest-sha256", required=True)
@@ -1437,6 +1726,8 @@ def main(argv=None) -> int:
     device = commands.add_parser(
         "device-check", help="compare CUDA controls with frozen CPU controls")
     device.add_argument("--objective", required=True)
+    device.add_argument("--surface", choices=SURFACES, default="explicit",
+                       help="free-surface treatment of the truth and the runs")
     device.add_argument("--control", nargs=3, action="append", required=True,
                         metavar=("NAME", "ROOT", "MANIFEST_SHA256"))
     device.add_argument("--output", type=Path, required=True)
@@ -1453,7 +1744,8 @@ def main(argv=None) -> int:
                       "controls": controls, "provenance": provenance}
             code = 0
         elif args.command == "freeze":
-            report = freeze_report(args.objective, verify=args.verify)
+            report = freeze_report(
+                args.objective, verify=args.verify, surface=args.surface)
             checks = report.get("self_check", {})
             code = 0 if (not args.verify or (
                 all(report["verified_equal"].values())
@@ -1467,6 +1759,7 @@ def main(argv=None) -> int:
             report = score_trained_closure(
                 {label: (Path(root), sha) for label, root, sha in args.seed},
                 objective=args.objective, window_days=args.window_days,
+                surface=args.surface,
                 device_check_record=(None if args.device_check is None else
                                      (Path(args.device_check[0]),
                                       args.device_check[1])))
@@ -1475,6 +1768,7 @@ def main(argv=None) -> int:
             report = score_one_trained_run(
                 args.run_root, args.manifest_sha256,
                 objective=args.objective, window_days=args.window_days,
+                surface=args.surface,
                 device_check_record=(None if args.device_check is None else
                                      (Path(args.device_check[0]),
                                       args.device_check[1])))
@@ -1484,7 +1778,8 @@ def main(argv=None) -> int:
             if set(named) != set(CONTROL_NAMELISTS) \
                     or len(named) != len(args.control):
                 raise ValueError("device-check needs one nu10 and one nu80 control")
-            report = device_check(named, objective=args.objective)
+            report = device_check(
+                named, objective=args.objective, surface=args.surface)
             code = 0 if report["pass"] else 1
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(

@@ -621,10 +621,29 @@ _CERTIFIED_CARD_DIGESTS_ROUND5 = {          # 85607c118588 + rounds 4 and 5
 # against the GYRE lane tip reports added=1 removed=0 changed=0 on GYRE, both
 # tanks and both VORTEX cards, and the companion test below asserts the added
 # field's value on each certified card.
-_CERTIFIED_CARD_DIGESTS = {                 # re-pinned 2026-10-16 (#2009, #1910 config fields)
+_CERTIFIED_CARD_DIGESTS_ORCA2_FOLD_IN = {   # ORCA2 fold-in, 2026-09-30
+    "GYRE-zco": "5850bbcfcd351c29",
+    "LOCK_EXCHANGE-zco": "4ec82201f0fae7bf",
+    "OVERFLOW-zps": "7f1ec89b3e6578f5",
+}
+_CERTIFIED_CARD_DIGESTS_CONFIG_FIELDS = {   # re-pinned 2026-10-16 (#2009, #1910 config fields)
     "GYRE-zco": "56c5171d43504b54",
     "LOCK_EXCHANGE-zco": "1d457b3a02df1407",
     "OVERFLOW-zps": "f92bdb57cecb7129",
+}
+# The SWG rigid-lid option (2026-10-18) adds one field to the shared model
+# configuration, ``swe_surface``, read only by the SWE RK3 program
+# (outer_integrator="swe_rk3", which none of these cards select).  It is
+# None on all three; the companion test below asserts that, and nothing they
+# execute changed.  The lane pinned 9a4b75b3f82538f9 / 3498681f6ad24a0d /
+# 91209a2566aad483 before main's #2009/#1910 fields above existed; the values
+# below are those two additive field sets together, measured on the merged
+# tree.  Removing ``swe_surface`` from the printed configuration reproduces
+# the _CONFIG_FIELDS pins above exactly on all three cards.
+_CERTIFIED_CARD_DIGESTS = {                 # main config fields + swe_surface, 2026-10-19
+    "GYRE-zco": "ec6ce298920c35d3",
+    "LOCK_EXCHANGE-zco": "947c3f0b06c68e6e",
+    "OVERFLOW-zps": "27b808edbe60d840",
 }
 
 
@@ -645,6 +664,8 @@ def test_the_only_config_change_to_a_certified_card_is_the_added_eos_field(case)
     # certified card must keep the metric formula it already ran.
     assert cfg.lateral_viscosity_coefficient_source == "nemo_ldf_c2d"
     assert cfg.eos == "nemo_teos10"
+    # ... and the SWE free-surface selector, inert off the SWE RK3 program.
+    assert cfg.swe_surface is None
 
 
 def _card_digest(card):

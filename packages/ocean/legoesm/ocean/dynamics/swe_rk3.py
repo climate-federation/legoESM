@@ -11,6 +11,8 @@ import inspect
 from typing import NamedTuple
 
 import jax.numpy as jnp
+import numpy as np
+from jax.scipy.fft import dctn, idctn
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.halo_latlon import meridional_periodicity
 from legoesm.grids.latlon import ensure_geometry
@@ -57,6 +59,123 @@ class SWERK3StageEntry(NamedTuple):
 
 
 SWERK3StageOutput = SWERK3StageEntry
+
+SWE_SURFACE_MODES = ("explicit", "rigid_lid")
+
+
+class SWERigidLidGeometry(NamedTuple):
+    """Static closed-rectangle data of the rigid-lid projection."""
+
+    wet_bounds: tuple[int, int, int, int]
+    spacing_m: float
+    laplacian_eigenvalue_m2: object
+
+
+def wet_rectangle_bounds(mask) -> tuple[int, int, int, int]:
+    """Inclusive ``(j0, j1, i0, i1)`` of a mask that is one wet rectangle."""
+    wet = np.asarray(mask, dtype=bool)
+    jj, ii = np.where(wet)
+    if wet.ndim != 2 or jj.size == 0:
+        raise ValueError("projection mask must be a nonempty 2-D rectangle")
+    bounds = int(jj.min()), int(jj.max()), int(ii.min()), int(ii.max())
+    expected = np.zeros_like(wet)
+    expected[bounds[0]:bounds[1] + 1, bounds[2]:bounds[3] + 1] = True
+    if not np.array_equal(wet, expected):
+        raise ValueError("projection mask is not one rectangle")
+    return bounds
+
+
+def swe_rigid_lid_geometry(grid, z_coord) -> SWERigidLidGeometry:
+    """Projection data of one flat, constant-spacing, closed-rectangle card.
+
+    Static (numpy) so the projection itself stays jit- and grad-safe.
+    """
+    geom = ensure_geometry(grid)
+    wet = np.asarray(z_coord.is_active, dtype=bool)
+    if wet.ndim != 3 or wet.shape[-1] != 1:
+        raise ValueError("rigid-lid projection requires exactly one layer")
+    bounds = wet_rectangle_bounds(wet[..., 0])
+    if bounds[0] < 1 or bounds[2] < 1:
+        raise ValueError(
+            "rigid-lid projection requires a land row and column before "
+            "the wet rectangle")
+    spacings = np.concatenate([
+        np.asarray(getattr(geom, name), dtype=np.float64).ravel()
+        for name in ("dx_u", "dy_v", "dx_v", "dy_u")])
+    spacing = float(spacings[0])
+    if not np.isfinite(spacing) or spacing <= 0.0 \
+            or not np.all(spacings == spacing):
+        raise ValueError(
+            "rigid-lid projection requires one constant grid spacing")
+    thickness = np.asarray(z_coord.nemo_e3t_0, dtype=np.float64)[wet]
+    if thickness.size == 0 or not np.all(thickness == thickness[0]):
+        raise ValueError(
+            "rigid-lid projection requires one constant layer thickness")
+    j0, j1, i0, i1 = bounds
+    ny, nx = j1 - j0 + 1, i1 - i0 + 1
+    ky = np.arange(ny, dtype=np.float64)
+    kx = np.arange(nx, dtype=np.float64)
+    eigenvalue = (
+        2.0 * (np.cos(np.pi * ky / ny) - 1.0)[:, None]
+        + 2.0 * (np.cos(np.pi * kx / nx) - 1.0)[None, :]
+    ) / spacing ** 2
+    eigenvalue[0, 0] = 1.0
+    return SWERigidLidGeometry(bounds, spacing, jnp.asarray(eigenvalue))
+
+
+def swe_rigid_lid_projection(u_native, v_native,
+                             geometry: SWERigidLidGeometry):
+    """Project native U/V onto the closed-wall non-divergent subspace.
+
+    Solves the Neumann problem ``lap(phi) = div(u, v)`` on the wet rectangle
+    exactly with a DCT-II (``phi`` has zero wet-area mean, zero on land) and
+    returns ``(u - dphi/dx, v - dphi/dy, phi)``.  ``phi`` carries the input
+    units times metres: a velocity potential [m2 s-1] for velocity input, a
+    pressure potential [m2 s-2] for an acceleration.  Wall faces are never
+    touched, so wall-normal flow stays whatever the input carried (zero on
+    the card).  The operator is the jnp twin of the offline
+    ``closed_wall_divergent_part``.
+    """
+    j0, j1, i0, i1 = geometry.wet_bounds
+    dx = geometry.spacing_m
+    u = jnp.asarray(u_native)
+    v = jnp.asarray(v_native)
+    divergence = (u - jnp.roll(u, 1, axis=1) + v - jnp.roll(v, 1, axis=0)) / dx
+    rhs = divergence[j0:j1 + 1, i0:i1 + 1]
+    rhs = rhs - jnp.mean(rhs)
+    phi_hat = dctn(rhs, type=2, norm="ortho") / geometry.laplacian_eigenvalue_m2
+    phi_hat = phi_hat.at[0, 0].set(0.0)
+    phi = idctn(phi_hat, type=2, norm="ortho")
+    u_div = jnp.zeros_like(u).at[j0:j1 + 1, i0:i1].set(
+        jnp.diff(phi, axis=1) / dx)
+    v_div = jnp.zeros_like(v).at[j0:j1, i0:i1 + 1].set(
+        jnp.diff(phi, axis=0) / dx)
+    phi_full = jnp.zeros_like(u).at[j0:j1 + 1, i0:i1 + 1].set(phi)
+    return u - u_div, v - v_div, phi_full
+
+
+def swe_rigid_lid_stage_output(output, entry, stage, stage_dt, geometry):
+    """Rigid-lid closure of one certified stage output.
+
+    The stage ran on a zero-ssh entry, so its pressure gradient was zero and
+    every other term is the certified program.  Its ssh update (divergence of
+    the non-divergent entry) is round-off; the lid replaces it by exactly
+    zero and keeps the entry's zero-ssh thickness ratios.  The stage velocity
+    is projected; with a non-divergent before-velocity the removed part is
+    ``stage_dt`` times the gradient of the returned pressure potential
+    [m2 s-2].
+    """
+    u_nd, v_nd, potential = swe_rigid_lid_projection(
+        output.u_k, output.v_k, geometry)
+    phi = potential / stage_dt
+    before_u, before_v = output.u_before, output.v_before
+    if stage == 3:
+        before_u, before_v = u_nd, v_nd
+    return output._replace(
+        ssh_k=jnp.zeros_like(output.ssh_k), u_k=u_nd, v_k=v_nd,
+        r3t_k=entry.r3t_k, r3u_k=entry.r3u_k, r3v_k=entry.r3v_k,
+        r3f=entry.r3f, u_before=before_u, v_before=before_v), phi
+
 
 
 def _native_to_u(native):
@@ -125,6 +244,10 @@ def _validate_program(config, z_coord, stage):
     if config.outer_integrator != "swe_rk3":
         raise ValueError(
             "SWE RK3 stage replay requires outer_integrator='swe_rk3'")
+    if config.swe_surface not in SWE_SURFACE_MODES:
+        raise ValueError(
+            "SWE RK3 requires config.swe_surface stated as one of "
+            f"{SWE_SURFACE_MODES}; got {config.swe_surface!r}")
     if stage not in (1, 2, 3):
         raise ValueError(f"unknown SWE RK3 stage {stage!r}; expected 1, 2, or 3")
     if (config.momentum_advection != "vector_invariant"
@@ -405,14 +528,12 @@ def _entry_from_state(state, stress_before, stress_now, grid, z_coord, config):
         u, v, stress_before[0], stress_before[1], stress_now[0], stress_now[1])
 
 
-@_config_periodicity
-def swe_rk3_step(state, dt, surface_forcing, grid, z_coord, config,
-                 stage_runner=None, stage_potential_fn=None):
-    """Advance the shared ocean state with the three-stage SWE RK3 program.
+def _step_boundary(state, surface_forcing, grid, z_coord, config):
+    """Validated stress carry and stage-1 boundary entry of one SWE RK3 step.
 
-    The surface caller supplies grid-native U/V stresses through
-    ``tau_i_native``/``tau_j_native``.  This keeps the shared stage program
-    independent of any testcase-specific analytic forcing formula.
+    Returns ``(state, boundary, now, lid)``; ``lid`` is the projection
+    geometry under ``swe_surface="rigid_lid"`` (state ssh zeroed) and None
+    otherwise.
     """
     _validate_program(config, z_coord, 1)
     if surface_forcing is None:
@@ -438,11 +559,69 @@ def swe_rk3_step(state, dt, surface_forcing, grid, z_coord, config,
         now[0] if state.tau_x_prev is None else jnp.asarray(state.tau_x_prev),
         now[1] if state.tau_y_prev is None else jnp.asarray(state.tau_y_prev),
     )
+    lid = None
+    if config.swe_surface == "rigid_lid":
+        # The lid holds ssh at zero: the boundary entry carries zero ssh and
+        # zero thickness ratios whatever eta the state arrived with.
+        lid = swe_rigid_lid_geometry(grid, z_coord)
+        state = state._replace(
+            eta=state.eta.replace(data=jnp.zeros_like(state.eta.data)))
     boundary = _entry_from_state(state, before, now, grid, z_coord, config)
+    return state, boundary, now, lid
+
+
+def swe_rigid_lid_stage1_phi(state, dt, surface_forcing, grid, z_coord,
+                             config):
+    """Stage-1 pressure potential [m2 s-2] of the certified stage at ``state``.
+
+    The projection potential the rigid-lid stepper computes in stage 1 of a
+    step from ``state`` with no closure: the offline stand-in for the stored
+    ``rigid_lid_phi`` that a stored (ssh, u, v) does not carry.
+    """
+    if config.swe_surface != "rigid_lid":
+        raise ValueError(
+            "stage-1 lid potential requires swe_surface='rigid_lid'")
+    state, boundary, _, lid = _step_boundary(
+        state, surface_forcing, grid, z_coord, config)
+    stage_dt = jnp.asarray(dt, dtype=state.eta.data.dtype) / 3.0
+    output = swe_rk3_stage(
+        boundary, boundary, dt, 1, grid, z_coord, state.land_mask.data, config)
+    return swe_rigid_lid_stage_output(output, boundary, 1, stage_dt, lid)[1]
+
+
+@_config_periodicity
+def swe_rk3_step(state, dt, surface_forcing, grid, z_coord, config,
+                 stage_runner=None, stage_potential_fn=None):
+    """Advance the shared ocean state with the three-stage SWE RK3 program.
+
+    The surface caller supplies grid-native U/V stresses through
+    ``tau_i_native``/``tau_j_native``.  This keeps the shared stage program
+    independent of any testcase-specific analytic forcing formula.
+
+    Under ``swe_surface="rigid_lid"`` the certified stage runs on a zero-ssh
+    entry, but ``stage_potential_fn`` is shown the equivalent sea level
+    ``phi/g`` [m] of the most recent projection in the entry's ``ssh_k``:
+    ``state.rigid_lid_phi`` (the previous step's stage 3) for stage 1, the
+    previous stage's potential for stages 2 and 3, with ``g`` =
+    ``config.constants.g`` (the gravity the stage itself uses).
+    """
+    dtype = state.eta.data.dtype
+    state, boundary, now, lid = _step_boundary(
+        state, surface_forcing, grid, z_coord, config)
+    rigid_lid = lid is not None
+    lid_phi = [state.rigid_lid_phi] if rigid_lid else []
     if stage_runner is None:
         def run(entry, before_entry, stage):
-            potential = (None if stage_potential_fn is None
-                         else stage_potential_fn(entry, stage))
+            potential = None
+            if stage_potential_fn is not None:
+                seen = entry
+                if rigid_lid:
+                    if lid_phi[-1] is None:
+                        raise ValueError(
+                            "rigid-lid closure needs state.rigid_lid_phi")
+                    seen = entry._replace(
+                        ssh_k=lid_phi[-1] / config.constants.g)
+                potential = stage_potential_fn(seen, stage)
             return swe_rk3_stage(
                 entry, before_entry, dt, stage, grid, z_coord,
                 state.land_mask.data, config, potential_f=potential)
@@ -453,12 +632,23 @@ def swe_rk3_step(state, dt, surface_forcing, grid, z_coord, config,
 
         def run(entry, before_entry, stage):
             return stage_runner(entry, dt, stage, before_entry)
+    if rigid_lid:
+        certified_run = run
+
+        def run(entry, before_entry, stage):
+            stage_dt = jnp.asarray(dt, dtype=dtype) / (3.0, 2.0, 1.0)[stage - 1]
+            output, phi = swe_rigid_lid_stage_output(
+                certified_run(entry, before_entry, stage), entry, stage,
+                stage_dt, lid)
+            lid_phi.append(phi)
+            return output
     s1 = run(boundary, boundary, 1)
     s2 = run(s1, boundary, 2)
     s3 = run(s2, boundary, 3)
     u = _native_to_u(s3.u_k)
     v = _native_to_v(s3.v_k)
-    return state._replace(
+    state = state._replace(
         eta=state.eta.replace(data=s3.ssh_k),
         u=state.u.replace(data=u), v=state.v.replace(data=v),
         tau_x_prev=now[0], tau_y_prev=now[1])
+    return state if not rigid_lid else state._replace(rigid_lid_phi=lid_phi[-1])

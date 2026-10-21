@@ -18,23 +18,38 @@ from typing import NamedTuple
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import jax.scipy.fft as jax_fft
 import numpy as np
 from legoesm.grids.operators_latlon_cgrid import (
     compute_vertex_mask,
     curl_vertex_cgrid,
 )
 from legoesm.ml.training import TrainingConfig, create_optimizer
+from legoesm.ocean.diagnostics import (
+    isotropic_energy_spectrum,
+    velocity_to_cell_centre,
+)
 from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
 from legoesm.ocean.dynamics.swe_rk3 import (
+    SWE_SURFACE_MODES,
     _entry_from_state,
+    swe_rigid_lid_geometry,
+    swe_rigid_lid_projection,
+    swe_rigid_lid_stage1_phi,
     swe_rk3_step,
     swe_rotated_potential_forcing,
+    wet_rectangle_bounds,
 )
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_MADDISON_NAMELIST,
+    SWG_MADDISON_RL_NAMELIST,
     swg_surface_wind,
 )
-from legoesm.ocean.fidelity.swg_coarse_graining import shifted_weighted_sum
+from legoesm.ocean.fidelity.swg_coarse_graining import (
+    build_jax_filtered_restrictor,
+    cgrid_geometry,
+    shifted_weighted_sum,
+)
 from legoesm.ocean.state import OceanSurfaceForcing
 from legoesm.training.inert_params import assert_no_inert
 from scipy.fft import dctn, idctn
@@ -48,6 +63,56 @@ OBJECTIVE_OPERATORS = ("symmetric", "template")
 WALL_RING_OPTIONS = ("weighted", "excluded")
 DATASET_GAP_HOURS = 30 * 24
 TEMPLATE_BATCH_SIZE = 10
+
+
+def window_days_admitted(window_days) -> bool:
+    """Whole days: a length of ``ADMITTED_WINDOWS_DAYS`` or longer than all of
+    them (a curriculum extension; whether it fits the splits is
+    ``require_curriculum_windows``)."""
+    return type(window_days) is int and (
+        window_days in ADMITTED_WINDOWS_DAYS
+        or window_days > ADMITTED_WINDOWS_DAYS[-1])
+
+
+def require_curriculum_windows(windows, splits_days,
+                               start_window_days=None) -> None:
+    """Refuse a curriculum other than strictly increasing admitted lengths in
+    which every length beyond ``ADMITTED_WINDOWS_DAYS`` follows all of them
+    and fits ``splits_days`` (``{name: [first_day, last_day]}``): at least
+    one batch of ``TEMPLATE_BATCH_SIZE`` windows in the training split for
+    every starting offset of the training lattice, and in the validation
+    split (the held-out lattice starts at its first hour).  With
+    ``start_window_days`` (the last window length an initial checkpoint was
+    trained at; user decision 2026-10-19) the 1, 2, 4, 8 prefix is not
+    required but the curriculum must start at that length."""
+    if not isinstance(windows, list) or not windows \
+            or not all(window_days_admitted(window) for window in windows) \
+            or windows != sorted(set(windows)):
+        raise ValueError(
+            f"window_days must increase through {ADMITTED_WINDOWS_DAYS} and "
+            "may then continue with longer whole-day lengths")
+    longer = [window for window in windows if window > ADMITTED_WINDOWS_DAYS[-1]]
+    if start_window_days is not None:
+        if windows[0] != start_window_days:
+            raise ValueError(
+                f"window_days {windows} must start at the initial "
+                f"checkpoint's last trained window, {start_window_days} days")
+    elif longer and tuple(windows[:len(ADMITTED_WINDOWS_DAYS)]) \
+            != ADMITTED_WINDOWS_DAYS:
+        raise ValueError(
+            f"window_days {windows} continue past {ADMITTED_WINDOWS_DAYS[-1]} "
+            f"days without starting with {ADMITTED_WINDOWS_DAYS}")
+    for window in longer:
+        window_hours = HOURS_PER_DAY * window
+        for split, offset in (("train", window_hours - 1), ("validation", 0)):
+            first_day, last_day = splits_days[split]
+            span = HOURS_PER_DAY * (last_day - first_day)
+            count = len(range(offset, span - window_hours + 1, window_hours))
+            if count < TEMPLATE_BATCH_SIZE:
+                raise ValueError(
+                    f"the {split} split holds {count} {window}-day windows "
+                    f"(worst starting offset), fewer than one batch of "
+                    f"{TEMPLATE_BATCH_SIZE}")
 # Sea-level-only start balance, the rule registered with the operator's
 # 2026-10-13 ten-start measurement: stop when the closed-wall divergent part
 # of the first-step acceleration is at most this fraction of its rotational
@@ -58,6 +123,15 @@ _V2_SCHEMA = "legoesm-swg-double-gyre-hourly-target-v2"
 _HOURLY_FIELDS = (("ssh", "m"), ("u", "m_s"), ("v", "m_s"))
 # The fine-deck namelist keys that change with the run length alone.
 _RUN_LENGTH_KEYS = frozenset({"nn_itend", "nn_write", "nn_stock"})
+# Rigid-lid streams only (user decision 2026-10-18): the hourly-target program
+# differs from a plain restart by round-off.  Must equal the driver's
+# ``LID_RESTART_TOLERANCE`` (scripts/run/run_swg_double_gyre.py).
+RIGID_LID_RESTART_TOLERANCE = {
+    "kind": "max_abs_relative_to_field_max", "value": 1.0e-12,
+    "applies_to": "rigid_lid"}
+# The registered fine namelist of each surface a stream may be generated on.
+_FINE_NAMELIST_OF_SURFACE = {
+    "explicit": SWG_MADDISON_NAMELIST, "rigid_lid": SWG_MADDISON_RL_NAMELIST}
 # Two evaluations of one fine state (restriction inside the compiled scan and
 # eagerly) differ by at most 5.1e-13 m SSH and 8.9e-16 m/s on CPU and CPU/GPU
 # (round-5 review); 1e-10 of the field's largest magnitude is 300 times that
@@ -77,6 +151,11 @@ class SWGNetworkSpec(NamedTuple):
     ssh_scale_m: float
     velocity_scale_m_s: float
     potential_scale_m3_s2: float
+    wall_margin_rings: int
+    # ponytail: a NamedTuple default keeps the ~30 positional spec call sites
+    # (tests, probes) unchanged; the training driver passes it from its
+    # required ``network.noise_channel`` key, never from this default.
+    noise_channel: bool = False
 
 
 class SWGClosureGeometry(eqx.Module):
@@ -159,6 +238,7 @@ class PinnedHourlySource(NamedTuple):
     last_absolute_hour: int
     daily_sha256: tuple[str, ...]
     truth_run: str
+    surface: str
 
 
 class ShiftedConv2d(eqx.Module):
@@ -292,6 +372,18 @@ def build_closure_geometry(card) -> SWGClosureGeometry:
         wet_bounds=bounds, spacing_m=spacing)
 
 
+def wall_margin_mask(vertex_interior, rings: int):
+    """``vertex_interior`` eroded ``rings`` times with the 4-neighbour
+    stencil; array edges count as 0 and the dtype is the input's."""
+    mask = jnp.asarray(vertex_interior)
+    for _ in range(rings):
+        padded = jnp.pad(mask, 1)
+        mask = jnp.stack((
+            padded[1:-1, 1:-1], padded[:-2, 1:-1], padded[2:, 1:-1],
+            padded[1:-1, :-2], padded[1:-1, 2:])).min(axis=0)
+    return mask
+
+
 class SWGScalarPotentialCNN(eqx.Module):
     """Small residual-free CNN producing one boundary-zero F potential.
 
@@ -303,6 +395,12 @@ class SWGScalarPotentialCNN(eqx.Module):
     cannot leave a noise-only parameter leaf inert.  The final convolution has
     no bias because a spatially constant potential is annihilated by the
     rotated gradient and would therefore be an inert trainable leaf.
+
+    ``spec.noise_channel`` replaces that path with a fifth, LAST input
+    channel ``xi`` (white noise, N(0,1) per T cell, supplied by the caller or
+    drawn from ``key``); the SSH channel then carries no noise and the
+    first-layer weights on ``xi`` are the learned amplitude.  Channels 0-3
+    and every other leaf are those of the four-channel network.
     """
 
     layers: tuple
@@ -316,11 +414,14 @@ class SWGScalarPotentialCNN(eqx.Module):
         if min(spec.ssh_scale_m, spec.velocity_scale_m_s,
                spec.potential_scale_m3_s2) <= 0.0:
             raise ValueError("SWG CNN physical scales must be positive")
+        if spec.wall_margin_rings < 0:
+            raise ValueError("SWG CNN wall_margin_rings must be >= 0")
         keys = jax.random.split(key, spec.hidden_layers + 1)
         padding = spec.kernel_size // 2
         layers = [ShiftedConv2d(
-            4, spec.hidden_channels, spec.kernel_size, padding=padding,
-            key=keys[0], dtype=jnp.float64)]
+            5 if spec.noise_channel else 4, spec.hidden_channels,
+            spec.kernel_size, padding=padding, key=keys[0],
+            dtype=jnp.float64)]
         for layer_key in keys[1:-1]:
             layers.append(ShiftedConv2d(
                 spec.hidden_channels, spec.hidden_channels,
@@ -333,7 +434,9 @@ class SWGScalarPotentialCNN(eqx.Module):
         self.spec = spec
 
     def __call__(self, entry, geometry: SWGClosureGeometry, *, key, noise,
-                 noise_scale):
+                 noise_scale, xi=None):
+        if xi is not None and not self.spec.noise_channel:
+            raise ValueError("xi was given to a network without a noise channel")
         noise = jnp.asarray(noise, dtype=jnp.asarray(entry.ssh_k).dtype)
         if noise.shape != jnp.asarray(entry.ssh_k).shape:
             raise ValueError("closure noise must have the native F/T shape")
@@ -345,19 +448,37 @@ class SWGScalarPotentialCNN(eqx.Module):
         v_t = 0.5 * (v + v_south)
         # The key is structurally live from phase 3 onward.  A caller-provided
         # noise realization remains reparameterizable and reproducible.
-        keyed_noise = noise + noise_scale * jax.random.normal(
-            key, noise.shape, noise.dtype)
-        channels = jnp.stack((
-            jnp.asarray(entry.ssh_k) / self.spec.ssh_scale_m + keyed_noise,
-            u_t / self.spec.velocity_scale_m_s,
-            v_t / self.spec.velocity_scale_m_s,
-            geometry.tmask.astype(u.dtype)), axis=0)
+        if self.spec.noise_channel:
+            # ``noise`` and ``noise_scale`` are not used by this network: the
+            # SSH-channel path is replaced by the xi channel.
+            if xi is None:
+                xi = jax.random.normal(key, noise.shape, noise.dtype)
+            xi = jnp.asarray(xi, dtype=noise.dtype)
+            if xi.shape != noise.shape:
+                raise ValueError("xi must have the native F/T shape")
+            channels = jnp.stack((
+                jnp.asarray(entry.ssh_k) / self.spec.ssh_scale_m,
+                u_t / self.spec.velocity_scale_m_s,
+                v_t / self.spec.velocity_scale_m_s,
+                geometry.tmask.astype(u.dtype), xi), axis=0)
+        else:
+            keyed_noise = noise + noise_scale * jax.random.normal(
+                key, noise.shape, noise.dtype)
+            channels = jnp.stack((
+                jnp.asarray(entry.ssh_k) / self.spec.ssh_scale_m + keyed_noise,
+                u_t / self.spec.velocity_scale_m_s,
+                v_t / self.spec.velocity_scale_m_s,
+                geometry.tmask.astype(u.dtype)), axis=0)
         value = channels
         for layer in self.layers[:-1]:
             value = jax.nn.elu(layer(value))
         potential = self.layers[-1](value)[0]
-        return (self.spec.potential_scale_m3_s2 * potential
-                * geometry.vertex_interior)
+        potential = (self.spec.potential_scale_m3_s2 * potential
+                     * geometry.vertex_interior)
+        if self.spec.wall_margin_rings > 0:
+            potential = potential * wall_margin_mask(
+                geometry.vertex_interior, self.spec.wall_margin_rings)
+        return potential
 
 
 def network_parameter_count(network: SWGScalarPotentialCNN) -> int:
@@ -459,9 +580,9 @@ def eq6_scale_report(network: SWGScalarPotentialCNN, states: tuple,
         "ssh", "u_t", "v_t", "template_input_zeta", "output_potential",
         "output_laplacian")}
     for index, state in enumerate(states):
-        entry = _entry_from_state(
+        entry = _network_entry(_entry_from_state(
             state, tau, tau, card.recipe.grid, card.recipe.z_coord,
-            card.recipe.model_config)
+            card.recipe.model_config), state, card)
         potential = np.asarray(network(
             entry, geometry, key=jax.random.fold_in(key, index),
             noise=jnp.zeros_like(entry.ssh_k), noise_scale=jnp.asarray(0.0)),
@@ -626,6 +747,17 @@ def _admitted_hourly_manifest(root: Path, expected_manifest_sha256: str) -> dict
     return manifest
 
 
+def _stream_surface(manifest: dict) -> str:
+    """The surface a v2 stream was generated on; streams made before the
+    rigid-lid surface existed record none and are explicit."""
+    surface = manifest.get("surface", "explicit")
+    if surface not in SWE_SURFACE_MODES:
+        raise ValueError(
+            f"hourly stream surface must be one of {SWE_SURFACE_MODES}; "
+            f"got {surface!r}")
+    return surface
+
+
 def _truth_run_of(manifest: dict) -> str:
     """Refuse a v2 stream that is not unperturbed, verified fp64 truth.
 
@@ -642,13 +774,18 @@ def _truth_run_of(manifest: dict) -> str:
     if restart.get("perturb_amplitude_m") is not None \
             or "balanced_perturbation" in restart:
         raise ValueError("hourly stream starts from a perturbed restart, not truth")
+    surface = _stream_surface(manifest)
     verification = manifest.get("restart_next_verification") or {}
-    if (verification.get("result") or {}).get("all_equal") is not True:
+    result = verification.get("result") or {}
+    if result.get("all_equal") is not True and not (
+            surface == "rigid_lid" and result.get("within_tolerance") is True
+            and verification.get("tolerance") == RIGID_LID_RESTART_TOLERANCE):
         raise ValueError(
             "hourly stream lacks a passed next-day restart verification")
     if (manifest.get("numerical_health") or {}).get("all_finite") is not True:
         raise ValueError("hourly stream did not record finite numerical health")
-    registered = json.loads(json.dumps(SWG_MADDISON_NAMELIST._asdict()))
+    registered = json.loads(json.dumps(
+        _FINE_NAMELIST_OF_SURFACE[surface]._asdict()))
     namelist = manifest.get("namelist") or {}
     if {key: value for key, value in namelist.items()
             if key not in _RUN_LENGTH_KEYS} \
@@ -743,13 +880,14 @@ def _pinned_source(root: Path, manifest_sha256: str) -> PinnedHourlySource:
         raise ValueError(
             "training dataset sources require v2 stored initial states")
     truth_run = _truth_run_of(manifest)
+    surface = _stream_surface(manifest)
     days = manifest["days"]
     source_day = int(manifest["restart"]["source_day"])
     return PinnedHourlySource(
         str(root.resolve()), manifest_sha256, source_day * HOURS_PER_DAY,
         (source_day + days) * HOURS_PER_DAY,
         tuple(manifest["daily_sha256"][f"day{day:04d}.npz"]
-              for day in range(1, days + 1)), truth_run)
+              for day in range(1, days + 1)), truth_run, surface)
 
 
 def _pinned_day(source: PinnedHourlySource, objective: str, day_index: int):
@@ -830,6 +968,79 @@ def record_start_state(card, chunk_roots, *, objective: str,
             "report": report}}
 
 
+# The recorder's template filter is a Gaussian of one coarse cell (its sigma
+# is the target spacing over the source spacing, in source cells).
+STORED_TARGET_FILTER_SIGMA_CELLS = 1.0
+
+
+def require_target_filter_sigma_cells(sigma_cells, objective: str) -> float:
+    """Validate ``dataset.target_filter_sigma_cells``: a number >= 1.
+
+    Only the ``template`` objective may widen the stored sigma-one filter.
+    """
+    if type(sigma_cells) not in (int, float) or not math.isfinite(sigma_cells) \
+            or sigma_cells < STORED_TARGET_FILTER_SIGMA_CELLS:
+        raise ValueError(
+            "target_filter_sigma_cells must be a finite number >= "
+            f"{STORED_TARGET_FILTER_SIGMA_CELLS}, got {sigma_cells!r}")
+    if sigma_cells > STORED_TARGET_FILTER_SIGMA_CELLS \
+            and objective != "template":
+        raise ValueError(
+            "target_filter_sigma_cells > 1 is defined for the template "
+            f"objective only, not {objective!r}")
+    return float(sigma_cells)
+
+
+def build_target_filter(card, *, sigma_cells: float):
+    """Widen the stored sigma-one-cell template state to ``sigma_cells``.
+
+    Gaussians compose in variance, so the stored state (sigma one coarse
+    cell) gets one more pass of ``sqrt(sigma_cells**2 - 1)`` coarse cells.
+    The pass is the recorder's own filter (the in-scan filtered restrictor
+    of ``swg_coarse_graining``: volume and face-transport extensives, even
+    scalar/tangential and odd normal wall parity, 6-sigma kernel) run with
+    the coarse grid as both source and target (nesting factor one), so no
+    wall rule is re-implemented.  Returns ``filter(ssh, u, v)`` on native
+    float64 arrays; under the rigid lid sea level is returned exactly zero,
+    as the recorder returns it.
+    """
+    if not bool(jax.config.jax_enable_x64):
+        raise RuntimeError(
+            "the target filter requires JAX_ENABLE_X64=1; refusing a silent "
+            "float64 downcast")
+    if not math.isfinite(sigma_cells) \
+            or sigma_cells <= STORED_TARGET_FILTER_SIGMA_CELLS:
+        raise ValueError("the extra target filter needs sigma_cells > 1")
+    extra = math.sqrt(sigma_cells**2 - STORED_TARGET_FILTER_SIGMA_CELLS**2)
+    coarse = cgrid_geometry(card.resolved_namelist)
+    restrict = jax.jit(build_jax_filtered_restrictor(
+        coarse, coarse, sigma_source_cells=extra))
+    lid = _is_rigid_lid(card)
+
+    def widen(ssh, u, v):
+        ssh_f, u_f, v_f = (np.asarray(value, dtype=np.float64) for value in
+                           restrict(jnp.asarray(ssh), jnp.asarray(u),
+                                    jnp.asarray(v)))
+        return (np.zeros_like(ssh_f) if lid else ssh_f), u_f, v_f
+
+    return widen
+
+
+def build_lid_start_projection(card):
+    """Non-divergent projection of native start velocities (rigid lid).
+
+    The stepper's own ``swe_rigid_lid_projection``; ``project(u, v)``.
+    """
+    lid = swe_rigid_lid_geometry(card.recipe.grid, card.recipe.z_coord)
+    project = jax.jit(lambda u, v: swe_rigid_lid_projection(u, v, lid)[:2])
+
+    def apply(u, v):
+        return tuple(np.asarray(value, dtype=np.float64)
+                     for value in project(jnp.asarray(u), jnp.asarray(v)))
+
+    return apply
+
+
 @dataclass(frozen=True)
 class SWGDatasetContract:
     """Validated, split-safe view of content-pinned hourly state records.
@@ -838,6 +1049,13 @@ class SWGDatasetContract:
     same validation (``__post_init__``).  Every window starts from the stored
     state at its start hour with its sea level rebalanced by the registered
     rule; its targets are the stored right endpoints of the same operator.
+
+    ``target_filter_sigma_cells`` (>= 1) widens the template state: 1 serves
+    the stored sigma-one-cell state unchanged (a contract file with no key
+    means 1); a larger value filters every served hour once more on the
+    coarse grid (``build_target_filter``, once at ``preload_memory`` when
+    cached, else per read) and, under the rigid lid, projects window-start
+    velocities non-divergent.  Only the template objective may widen.
     """
 
     objective: str
@@ -847,14 +1065,23 @@ class SWGDatasetContract:
     contract_sha256: str
     batch_size: int
     card: object = field(repr=False, compare=False)
+    target_filter_sigma_cells: float
     _rebalance: object = field(
+        init=False, repr=False, compare=False, default=None)
+    _target_filter: object = field(
+        init=False, repr=False, compare=False, default=None)
+    _start_projection: object = field(
         init=False, repr=False, compare=False, default=None)
     _issued: dict = field(
         init=False, repr=False, compare=False, default_factory=dict)
+    _memory: dict | None = field(
+        init=False, repr=False, compare=False, default=None)
 
     def __post_init__(self):
         if self.objective not in OBJECTIVE_OPERATORS:
             raise ValueError("dataset objective must be symmetric or template")
+        require_target_filter_sigma_cells(
+            self.target_filter_sigma_cells, self.objective)
         if self.batch_size != TEMPLATE_BATCH_SIZE:
             raise ValueError("dataset contract must use batch size 10")
         if tuple(name for name, _, _ in self.splits) \
@@ -880,11 +1107,25 @@ class SWGDatasetContract:
                 raise ValueError("dataset source differs from its pinned manifest")
         if len({source.truth_run for source in self.sources}) != 1:
             raise ValueError("dataset sources come from more than one truth run")
+        if len({source.surface for source in self.sources}) != 1:
+            raise ValueError("dataset sources come from more than one surface")
+        if self.sources[0].surface != self.card.recipe.model_config.swe_surface:
+            raise ValueError(
+                f"dataset surface {self.sources[0].surface!r} differs from "
+                "the card's surface "
+                f"{self.card.recipe.model_config.swe_surface!r}")
         self._validate_coverage()
         grid = tuple(self.card.recipe.initial_state.eta.data.shape)
         if self._stored_state(self.splits[0][1])[0].shape != grid:
             raise ValueError("dataset grid differs from the coarse card")
         object.__setattr__(self, "_rebalance", start_rebalancer(self.card))
+        if self.target_filter_sigma_cells > STORED_TARGET_FILTER_SIGMA_CELLS:
+            object.__setattr__(self, "_target_filter", build_target_filter(
+                self.card, sigma_cells=self.target_filter_sigma_cells))
+            if _is_rigid_lid(self.card):
+                object.__setattr__(
+                    self, "_start_projection",
+                    build_lid_start_projection(self.card))
 
     @staticmethod
     def from_json(path: Path, *, card) -> SWGDatasetContract:
@@ -916,7 +1157,11 @@ class SWGDatasetContract:
             objective=payload.get("objective"), splits=tuple(splits),
             sources=tuple(pins), contract_path=str(path.resolve()),
             contract_sha256=_sha256(path),
-            batch_size=payload.get("batch_size"), card=card)
+            batch_size=payload.get("batch_size"), card=card,
+            # Contracts written before the widened filter carry no key; their
+            # targets are the stored sigma-one-cell state.
+            target_filter_sigma_cells=payload.get(
+                "target_filter_sigma_cells", STORED_TARGET_FILTER_SIGMA_CELLS))
 
     def _validate_coverage(self) -> None:
         ordered = sorted(self.sources, key=lambda source: source.first_absolute_hour)
@@ -958,13 +1203,69 @@ class SWGDatasetContract:
     def _initial(self, source: PinnedHourlySource):
         return _pinned_day(source, self.objective, 0)[1]
 
+    def _served_state(self, hour: int):
+        """The stored state at ``hour``, widened when the contract says so."""
+        state = stored_state_at(self.sources, self.objective, hour)[0]
+        if self._target_filter is None:
+            return state
+        return self._target_filter(*state)
+
     def _stored_state(self, hour: int):
-        return stored_state_at(self.sources, self.objective, hour)[0]
+        if self._memory is None:
+            return self._served_state(hour)
+        if hour not in self._memory:
+            raise ValueError(
+                f"absolute hour {hour} was not preloaded into memory; "
+                "preload_memory covers only the registered windows and "
+                "target interval")
+        return self._memory[hour]
+
+    def preload_memory(self, *, window_days, target_interval_hours: int) -> dict:
+        """Hold every stored hour that ``batches`` can read in host memory.
+
+        Each hour is read once through ``stored_state_at`` (the digest-pinned
+        day files, so every admission check still runs) and copied, so
+        ``batches`` then serves identical float64 arrays without file reads.
+        The hours are the union, over the given window lengths, of the window
+        starts (training: every offset; held-out: the fixed lattice) and
+        their targets ``target_interval_hours, 2 * ..., 24 * w`` later.  A
+        batch needing any other hour raises instead of reading the files.
+        Returns ``{"hours": count, "bytes": array bytes held}``.
+        """
+        window_days = tuple(window_days)
+        if not window_days or not all(
+                window_days_admitted(window) for window in window_days):
+            raise ValueError(
+                "preload windows must be admitted lengths (1, 2, 4, 8 days or a "
+                "curriculum extension beyond 8 days)")
+        interval = require_target_interval_hours(target_interval_hours)
+        wanted = []
+        for name, start_bound, end_bound in self.splits:
+            for window in window_days:
+                window_hours = HOURS_PER_DAY * window
+                leads = np.arange(interval, window_hours + 1, interval)
+                for offset in range(window_hours if name == "train" else 1):
+                    starts = np.arange(start_bound + offset,
+                                       end_bound - window_hours + 1,
+                                       window_hours, dtype=np.int64)
+                    wanted += [starts, (starts[:, None] + leads).ravel()]
+        memory = {}
+        for hour in np.unique(np.concatenate(wanted)):
+            state = tuple(np.array(value) for value in
+                          self._served_state(int(hour)))
+            for value in state:
+                value.flags.writeable = False
+            memory[int(hour)] = state
+        object.__setattr__(self, "_memory", memory)
+        return {"hours": len(memory), "bytes": sum(
+            value.nbytes for state in memory.values() for value in state)}
 
     def start_state(self, absolute_hour: int):
         """One window start: the stored state at ``absolute_hour`` with its
         sea level rebalanced by the registered rule; ``((ssh, u, v), report)``."""
         ssh, u, v = self._stored_state(absolute_hour)
+        if self._start_projection is not None:
+            u, v = self._start_projection(u, v)
         ssh, report = self._rebalance(ssh, u, v)
         return (ssh, u, v), report
 
@@ -975,8 +1276,13 @@ class SWGDatasetContract:
         raise ValueError(f"unknown or leaked dataset split {split!r}")
 
     def batches(self, *, split: str, window_days: int,
+                target_interval_hours: int,
                 epoch: int | None = None, seed: int | None = None):
         """Yield batches of ten non-overlapping windows inside one split.
+
+        The record is hourly; the targets are every ``target_interval_hours``-th
+        stored hour after the window start (hours ``k*interval`` after the
+        start, ``k = 1..24w/interval``), so 1 keeps every hour.
 
         Training draws one starting offset per (seed, window length, epoch)
         and shuffles the windows, as the template redraws both every epoch.
@@ -985,8 +1291,11 @@ class SWGDatasetContract:
         final batch is dropped; a split without one full batch raises.
         """
         start_bound, end_bound = self._split_bounds(split)
-        if window_days not in ADMITTED_WINDOWS_DAYS:
-            raise ValueError("window must be one of 1, 2, 4, or 8 days")
+        if not window_days_admitted(window_days):
+            raise ValueError(
+                f"window must be one of {ADMITTED_WINDOWS_DAYS} days or a "
+                f"longer whole number of days, got {window_days!r}")
+        require_target_interval_hours(target_interval_hours)
         window_hours = HOURS_PER_DAY * window_days
         if split == "train":
             if type(epoch) is not int or epoch < 0 \
@@ -1018,7 +1327,9 @@ class SWGDatasetContract:
             initial = tuple(np.stack([state[index] for state in start_states])
                             for index in range(3))
             hourly = [[self._stored_state(int(start) + lead)
-                       for lead in range(1, window_hours + 1)]
+                       for lead in range(
+                           target_interval_hours, window_hours + 1,
+                           target_interval_hours)]
                       for start in batch_starts]
             target = tuple(np.stack([np.stack([state[index] for state in window])
                                      for window in hourly]) for index in range(3))
@@ -1029,9 +1340,10 @@ class SWGDatasetContract:
 
     def _check_bounds(self, batch: WindowBatch) -> None:
         start_bound, end_bound = self._split_bounds(batch.split)
-        if type(batch.window_days) is not int \
-                or batch.window_days not in ADMITTED_WINDOWS_DAYS:
-            raise ValueError("dataset batch window is not 1, 2, 4, or 8 days")
+        if not window_days_admitted(batch.window_days):
+            raise ValueError(
+                "dataset batch window is not one of "
+                f"{ADMITTED_WINDOWS_DAYS} days or a longer whole number of days")
         window_hours = HOURS_PER_DAY * batch.window_days
         starts = np.asarray(batch.start_absolute_hour, dtype=np.int64)
         if starts.shape != (self.batch_size,):
@@ -1077,6 +1389,70 @@ def coarse_state_from_native(state, ssh, u, v):
         u=state.u.replace(data=u_full), v=state.v.replace(data=v_full))
 
 
+def _is_rigid_lid(card) -> bool:
+    return card.recipe.model_config.swe_surface == "rigid_lid"
+
+
+def require_rigid_lid_zero_ssh(card, ssh) -> None:
+    """Refuse a stored state with non-zero sea level on a rigid-lid card.
+
+    Eager (concrete arrays only).  A no-op on an explicit card.
+    """
+    if _is_rigid_lid(card) and np.any(np.asarray(ssh) != 0.0):
+        raise ValueError(
+            "a rigid-lid stored state must have identically zero ssh")
+
+
+def rigid_lid_start_state(card, state):
+    """``state`` with ``rigid_lid_phi`` set to what the stepper would compute.
+
+    Under the lid a stored (ssh, u, v) carries no pressure potential, which
+    the closure reads as ``phi/g`` ([m], gravity ``constants.g``) in place of
+    sea level.  The stored state's potential is the stage-1 projection
+    potential of the certified stage at that state
+    (``swe_rigid_lid_stage1_phi``: the stepper's own stage-1 computation).
+    Traceable; explicit cards are returned unchanged.
+    """
+    if not _is_rigid_lid(card):
+        return state
+    tau_u, tau_v = swg_surface_wind(card.resolved_namelist)
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jnp.asarray(tau_u), tau_j_native=jnp.asarray(tau_v))
+    phi = swe_rigid_lid_stage1_phi(
+        state, card.dt_s, forcing, card.recipe.grid, card.recipe.z_coord,
+        card.recipe.model_config)
+    return state._replace(rigid_lid_phi=phi)
+
+
+def start_state_from_native(card, ssh, u, v):
+    """The card's state from stored native (ssh, u, v), eager.
+
+    Under the lid: refuses non-zero ssh and carries the derived potential
+    (``rigid_lid_start_state``); explicit cards get ``coarse_state_from_native``
+    of the card's initial state exactly.
+    """
+    require_rigid_lid_zero_ssh(card, ssh)
+    return rigid_lid_start_state(card, coarse_state_from_native(
+        card.recipe.initial_state, ssh, u, v))
+
+
+def _network_entry(entry, state, card):
+    """The closure's stage-entry view of ``state``'s offline entry.
+
+    Explicit: the entry itself (network input = ssh).  Rigid lid: ssh is
+    replaced by the equivalent sea level ``rigid_lid_phi / g``, exactly what
+    ``swe_rk3_step`` shows the closure at stage 1.
+    """
+    if not _is_rigid_lid(card):
+        return entry
+    if state.rigid_lid_phi is None:
+        raise ValueError("a rigid-lid state needs rigid_lid_phi "
+                         "(rigid_lid_start_state)")
+    require_rigid_lid_zero_ssh(card, state.eta.data)
+    return entry._replace(ssh_k=jnp.asarray(state.rigid_lid_phi)
+                          / card.recipe.model_config.constants.g)
+
+
 def load_content_pinned_initial_state(
         card, path: Path, *, manifest_path: Path,
         expected_manifest_sha256: str):
@@ -1101,19 +1477,6 @@ def load_content_pinned_initial_state(
     return coarse_state_from_native(state, ssh, u_native, v_native)
 
 
-def _wet_rectangle(mask: np.ndarray) -> tuple[int, int, int, int]:
-    wet = np.asarray(mask, dtype=bool)
-    jj, ii = np.where(wet)
-    if wet.ndim != 2 or jj.size == 0:
-        raise ValueError("projection mask must be a nonempty 2-D rectangle")
-    bounds = int(jj.min()), int(jj.max()), int(ii.min()), int(ii.max())
-    expected = np.zeros_like(wet)
-    expected[bounds[0]:bounds[1] + 1, bounds[2]:bounds[3] + 1] = True
-    if not np.array_equal(wet, expected):
-        raise ValueError("projection mask is not one rectangle")
-    return bounds
-
-
 def closed_wall_divergent_part(
         u: np.ndarray, v: np.ndarray, mask: np.ndarray, spacing_m: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1132,7 +1495,7 @@ def closed_wall_divergent_part(
         raise ValueError("native U/V and T mask shapes differ")
     if not np.isfinite(spacing_m) or spacing_m <= 0.0:
         raise ValueError("projection spacing must be positive finite")
-    j0, j1, i0, i1 = _wet_rectangle(wet)
+    j0, j1, i0, i1 = wet_rectangle_bounds(wet)
     divergence = (
         u - np.roll(u, 1, axis=1)
         + v - np.roll(v, 1, axis=0)
@@ -1262,8 +1625,9 @@ def initial_closure_acceleration_ratio(
         entry = _entry_from_state(
             state, tau, tau, card.recipe.grid, card.recipe.z_coord,
             card.recipe.model_config)
+        net_entry = _network_entry(entry, state, card)
         potential = network(
-            entry, geometry, key=jax.random.fold_in(key, index),
+            net_entry, geometry, key=jax.random.fold_in(key, index),
             noise=jnp.zeros_like(entry.ssh_k), noise_scale=jnp.asarray(0.0))
         eta = np.asarray(entry.ssh_k, dtype=np.float64)
         h_u = jnp.asarray(live_face_thickness(eta, native_geometry, "U"))
@@ -1333,6 +1697,17 @@ def maddison_half_width_m(basin_length_m: float,
     return 0.5 * float(basin_length_m)
 
 
+def _eq7_scale_and_weights(geometry: SWGClosureGeometry, *,
+                           beta_m1_s1: float, basin_length_m: float,
+                           wall_ring: str):
+    """Eq. 7's prefactor ``1e4/(beta^2 L^2)/(4 L^2)`` and its diagonal ``W``."""
+    half_width = maddison_half_width_m(basin_length_m, geometry)
+    weights = eq7_point_weights(geometry, wall_ring=wall_ring)
+    scale = (1.0e4 / (beta_m1_s1**2 * half_width**2)
+             / (4.0 * half_width**2))
+    return scale, weights
+
+
 def balanced_trajectory_loss(predicted: BalancedTrajectory,
                              target: BalancedTrajectory,
                              geometry: SWGClosureGeometry,
@@ -1358,8 +1733,9 @@ def balanced_trajectory_loss(predicted: BalancedTrajectory,
             raise ValueError("Maddison point loss requires beta and basin length")
         if not np.isfinite(beta_m1_s1) or beta_m1_s1 <= 0.0:
             raise ValueError("Maddison beta must be positive finite")
-        half_width = maddison_half_width_m(basin_length_m, geometry)
-        weights = eq7_point_weights(geometry, wall_ring=wall_ring)
+        scale, weights = _eq7_scale_and_weights(
+            geometry, beta_m1_s1=beta_m1_s1, basin_length_m=basin_length_m,
+            wall_ring=wall_ring)
         if predicted.relative_vorticity_s1.shape \
                 != target.relative_vorticity_s1.shape \
                 or predicted.relative_vorticity_s1.ndim != 4:
@@ -1368,13 +1744,31 @@ def balanced_trajectory_loss(predicted: BalancedTrajectory,
         zeta_error = (predicted.relative_vorticity_s1
                       - target.relative_vorticity_s1)
         weighted_sum = jnp.sum(zeta_error**2 * weights, axis=(-2, -1))
-        scale = (1.0e4 / (beta_m1_s1**2 * half_width**2)
-                 / (4.0 * half_width**2))
         return scale * jnp.mean(weighted_sum)
     if kind != "energy_score":
         raise ValueError(f"unknown SWG balanced loss {kind!r}")
     if normalizers is None:
         raise ValueError("energy_score requires explicit normalizers")
+    return _energy_score(*_energy_score_distances(
+        predicted, target, geometry, normalizers))
+
+
+def _energy_score(observation_distance, pairwise):
+    """Brolly's score from the per-lead distances (unbiased pair term)."""
+    members = observation_distance.shape[0]
+    score_by_lead = (jnp.mean(observation_distance, axis=0)
+                     - jnp.sum(pairwise, axis=(0, 1))
+                     / (2.0 * members * (members - 1)))
+    return jnp.mean(score_by_lead)
+
+
+def _energy_score_distances(predicted: BalancedTrajectory,
+                            target: BalancedTrajectory,
+                            geometry: SWGClosureGeometry,
+                            normalizers: BalancedNormalizers):
+    """Per-lead normalized, area-weighted distances of Brolly's score:
+    ``(members, hours)`` member-to-truth and ``(members, members, hours)``
+    member-to-member (zero on the diagonal, with a zero gradient there)."""
     pred = jnp.stack((
         predicted.relative_vorticity_s1
         / jnp.sqrt(normalizers.relative_vorticity_variance_s2),
@@ -1394,18 +1788,21 @@ def balanced_trajectory_loss(predicted: BalancedTrajectory,
     members = pred.shape[0]
     if members < 2:
         raise ValueError("energy_score requires at least two ensemble members")
+
     def lead_distance(left, right):
-        return jnp.sqrt(jnp.sum(
-            (left - right) ** 2 * weight[:, :, None], axis=(-3, -2, -1)))
+        squares = jnp.sum(
+            (left - right) ** 2 * weight[:, :, None], axis=(-3, -2, -1))
+        # sqrt has an infinite slope at 0: two identical members (the
+        # diagonal) would turn a zero gradient into NaN.
+        positive = squares > 0.0
+        return jnp.where(positive, jnp.sqrt(jnp.where(positive, squares, 1.0)),
+                         0.0)
 
     observation_distance = jax.vmap(
         lambda member: jax.vmap(lead_distance)(member, obs))(pred)
     pairwise = jax.vmap(lambda left: jax.vmap(
         lambda right: jax.vmap(lead_distance)(left, right))(pred))(pred)
-    score_by_lead = (jnp.mean(observation_distance, axis=0)
-                     - jnp.sum(pairwise, axis=(0, 1))
-                     / (2.0 * members * (members - 1)))
-    return jnp.mean(score_by_lead)
+    return observation_distance, pairwise
 
 
 def deterministic_trajectory_loss(
@@ -1444,6 +1841,423 @@ def deterministic_trajectory_loss(
         wall_ring=wall_ring)
 
 
+def diagnose_native_windows(native, geometry: SWGClosureGeometry, *,
+                             objective: str):
+    """``diagnose_native_trajectory`` of each window of ``(windows, hours,
+    y, x)`` native arrays, ``(windows, hours, y, x)`` balanced fields."""
+    if objective not in OBJECTIVE_OPERATORS:
+        raise ValueError(
+            f"objective must be explicitly selected from {OBJECTIVE_OPERATORS}")
+    return jax.vmap(lambda ssh, u, v: diagnose_native_trajectory(
+        (ssh, u, v), geometry, objective=objective))(*native)
+
+
+def _diagnosed_ensemble(predicted_native, target_native,
+                        geometry: SWGClosureGeometry, *, objective: str):
+    """Balanced fields of an ensemble ``(windows, members, hours, y, x)`` and
+    of its ``(windows, hours, y, x)`` target, one diagnostic for both."""
+    if len(predicted_native) != 3 or len(target_native) != 3 \
+            or predicted_native[0].ndim != 5 \
+            or any(value.shape != predicted_native[0].shape
+                   for value in predicted_native) \
+            or any(value.shape != predicted_native[0].shape[:1]
+                   + predicted_native[0].shape[2:] for value in target_native):
+        raise ValueError("ensemble arrays must be (windows,members,hours,y,x) "
+                         "against (windows,hours,y,x)")
+    predicted = jax.vmap(lambda *fields: diagnose_native_windows(
+        fields, geometry, objective=objective), in_axes=1, out_axes=1)(
+        *predicted_native)
+    target = diagnose_native_windows(
+        target_native, geometry, objective=objective)
+    return predicted, target
+
+
+def _window_score_vector(window_predicted, window_target, geometry,
+                         normalizers, members):
+    observation_distance, pairwise = _energy_score_distances(
+        window_predicted, window_target, geometry, normalizers)
+    return jnp.stack((
+        _energy_score(observation_distance, pairwise),
+        jnp.mean(observation_distance),
+        jnp.mean(jnp.sum(pairwise, axis=(0, 1)) / (members * (members - 1)))))
+
+
+def ensemble_trajectory_scores(
+        predicted_native, target_native, geometry: SWGClosureGeometry,
+        normalizers: BalancedNormalizers, *, objective: str):
+    """Brolly energy score of an ensemble and its two collapse monitors.
+
+    ``predicted_native`` holds native (ssh, u, v) arrays of shape ``(windows,
+    members, hours, y, x)``, ``target_native`` ``(windows, hours, y, x)``;
+    both go through the selected objective's diagnostic.  Returns ``(score,
+    member_truth_distance, member_spread)``, means over windows: the score is
+    ``balanced_trajectory_loss(kind="energy_score")`` per window (Eq. 9);
+    ``member_truth_distance`` is the mean normalized, area-weighted distance
+    of a member to the truth, ``member_spread`` the mean distance between two
+    different members (the score is the first minus half the second).
+    """
+    predicted, target = _diagnosed_ensemble(
+        predicted_native, target_native, geometry, objective=objective)
+    members = predicted_native[0].shape[1]
+    scores = jax.vmap(lambda window_predicted, window_target:
+                      _window_score_vector(window_predicted, window_target,
+                                           geometry, normalizers, members))(
+        predicted, target)
+    return tuple(jnp.mean(scores, axis=0))
+
+
+def cell_centred_rotational_velocity(trajectory: BalancedTrajectory,
+                                     geometry: SWGClosureGeometry):
+    """Rotational velocity of ``(..., hours, y, x)`` balanced fields at the T
+    cell centres, ``(u_c, v_c)`` of the shape of the fields: the wet faces
+    padded with the closed west and south wall faces and averaged to the
+    centre, as the scorer's ``_cell_centred``."""
+    u = jnp.where(geometry.umask, trajectory.rotational_u_m_s, 0.0)
+    v = jnp.where(geometry.vmask, trajectory.rotational_v_m_s, 0.0)
+    leading = u.shape[:-2]
+    u = u.reshape((-1,) + u.shape[-2:])
+    v = v.reshape((-1,) + v.shape[-2:])
+    u_c, v_c = jax.vmap(velocity_to_cell_centre)(
+        jnp.concatenate([jnp.zeros_like(u[..., :1]), u], axis=-1),
+        jnp.concatenate([jnp.zeros_like(v[..., :1, :]), v], axis=-2))
+    return (u_c.reshape(leading + u_c.shape[-2:]),
+            v_c.reshape(leading + v_c.shape[-2:]))
+
+
+def window_statistic_terms(predicted: BalancedTrajectory,
+                           target: BalancedTrajectory,
+                           geometry: SWGClosureGeometry):
+    """NRMSE squared of the window-mean vorticity map and of the window EKE map.
+
+    Inputs are the objective's own balanced fields, ``(windows, hours, y,
+    x)``.  Per window, ``(map - truth)^2`` summed over the points / truth
+    squared summed (the arm-E tool's ``Statistic.terms`` form), then the mean
+    over windows: the time-mean (filtered) relative vorticity over the F
+    points (zero on the closed walls), and the EKE map ``0.5 (var(u_c) +
+    var(v_c))`` (population variance over the window's hours) of the
+    cell-centred rotational velocity over the wet T points, centred as the
+    tool's and the scorer's ``_cell_centred``.
+    """
+    def eke(trajectory):
+        u_c, v_c = cell_centred_rotational_velocity(trajectory, geometry)
+        return 0.5 * (jnp.var(u_c, axis=1) + jnp.var(v_c, axis=1))
+
+    def nrmse_squared(candidate, reference, mask):
+        mask = jnp.broadcast_to(mask, candidate.shape)
+        return (jnp.sum(jnp.where(mask, (candidate - reference) ** 2, 0.0),
+                        axis=(-2, -1))
+                / jnp.sum(jnp.where(mask, reference ** 2, 0.0), axis=(-2, -1)))
+
+    vorticity = nrmse_squared(
+        jnp.mean(predicted.relative_vorticity_s1, axis=1),
+        jnp.mean(target.relative_vorticity_s1, axis=1),
+        geometry.vertex_interior)
+    kinetic = nrmse_squared(eke(predicted), eke(target), geometry.tmask)
+    return jnp.mean(vorticity), jnp.mean(kinetic)
+
+
+def window_statistics_trajectory_loss(
+        predicted_native, target_native, geometry: SWGClosureGeometry, *,
+        objective: str, beta_m1_s1: float, basin_length_m: float,
+        wall_ring: str, vorticity_weight: float, eke_weight: float):
+    """Eq. 7 plus ``vorticity_weight`` and ``eke_weight`` times the window
+    statistic terms; returns ``(total, eq7, vorticity_term, eke_term)``.
+
+    The Eq. 7 term is ``deterministic_trajectory_loss`` on the same
+    diagnostic fields; with both weights zero ``total`` is ``eq7`` plus
+    exact zeros.
+    """
+    predicted = diagnose_native_windows(
+        predicted_native, geometry, objective=objective)
+    target = diagnose_native_windows(
+        target_native, geometry, objective=objective)
+    eq7 = balanced_trajectory_loss(
+        predicted, target, geometry, None, kind="point",
+        beta_m1_s1=beta_m1_s1, basin_length_m=basin_length_m,
+        wall_ring=wall_ring)
+    vorticity, kinetic = window_statistic_terms(predicted, target, geometry)
+    return (eq7 + vorticity_weight * vorticity + eke_weight * kinetic,
+            eq7, vorticity, kinetic)
+
+
+# ---------------------------------------------------------------------------
+# NeuralGCM-style terms (Kochkov et al. 2024, arXiv 2311.07222, Methods 7.4):
+# a lead-time-dependent low-pass on the trajectory loss, a spectrum MSE and a
+# bias MSE.  User decisions 2026-10-20.
+
+LEAD_TIME_CUTOFF_PENDING = "PENDING_TWIN_MEASUREMENT"
+
+
+def lead_time_cutoff_table(table) -> tuple[tuple[int, ...], tuple[float, ...]]:
+    """``(lead_hours, cutoff_bands)`` of a ``loss.lead_time_cutoff`` block.
+
+    ``{"lead_hours": [0, h1, ...], "cutoff_band": [k0, k1, ...]}``: entry
+    ``i`` holds from lead ``lead_hours[i]`` until the next listed lead (a
+    left-continuous step: a record at lead ``L`` uses the last entry with
+    ``lead_hours <= L``).  ``lead_hours`` are integers, start at 0 and
+    strictly increase; the bands are finite, non-negative and non-increasing
+    (the filter only ever removes more with lead).  The placeholder string
+    ``PENDING_TWIN_MEASUREMENT`` (the table awaits the twin measurement) and
+    anything else refuse.
+    """
+    if table == LEAD_TIME_CUTOFF_PENDING:
+        raise ValueError(
+            f"loss lead_time_cutoff is {LEAD_TIME_CUTOFF_PENDING!r}: the "
+            "cutoff table comes from a measurement that is not made yet; "
+            "this configuration cannot run until it is replaced by "
+            '{"lead_hours": [...], "cutoff_band": [...]}')
+    if not isinstance(table, dict) \
+            or set(table) != {"lead_hours", "cutoff_band"}:
+        raise ValueError('loss lead_time_cutoff must be {"lead_hours": [...], '
+                         '"cutoff_band": [...]}')
+    leads, bands = table["lead_hours"], table["cutoff_band"]
+    if not isinstance(leads, list) or not isinstance(bands, list) \
+            or not leads or len(leads) != len(bands):
+        raise ValueError("lead_time_cutoff lead_hours and cutoff_band must be "
+                         "equal-length non-empty lists")
+    if any(type(hour) is not int for hour in leads) or leads[0] != 0 \
+            or any(b <= a for a, b in zip(leads, leads[1:], strict=False)):
+        raise ValueError("lead_time_cutoff lead_hours must be integers that "
+                         "start at 0 and strictly increase")
+    if any(type(band) not in (int, float) or not math.isfinite(band)
+           or band < 0 for band in bands) \
+            or any(b > a for a, b in zip(bands, bands[1:], strict=False)):
+        raise ValueError("lead_time_cutoff cutoff_band must be finite, "
+                         "non-negative and non-increasing")
+    return tuple(leads), tuple(float(band) for band in bands)
+
+
+def lead_time_cutoff_bands(table, *, n_records: int,
+                           target_interval_hours: int) -> np.ndarray:
+    """The cutoff band of each of a window's ``n_records`` records; record
+    ``r`` is at lead ``(r + 1) * target_interval_hours`` hours."""
+    lead_hours, bands = lead_time_cutoff_table(table)
+    leads = target_interval_hours * np.arange(1, n_records + 1)
+    return np.asarray(bands)[np.searchsorted(lead_hours, leads, side="right") - 1]
+
+
+def lead_filter_max_band(geometry: SWGClosureGeometry) -> float:
+    """The cutoff at and above which the lead filter keeps every mode: the
+    largest isotropic DCT index radius of the wet T box."""
+    j0, j1, i0, i1 = geometry.wet_bounds
+    return float(math.hypot(j1 - j0, i1 - i0))
+
+
+def lead_filter(field, geometry: SWGClosureGeometry, cutoff_bands, support):
+    """Closed-box spectral low-pass of ``(..., hours, y, x)`` by lead.
+
+    The wet T box of record ``r`` is transformed with the orthonormal DCT-II
+    (Neumann basis, ``jax.scipy.fft.dctn(type=2, norm="ortho")`` over the two
+    trailing axes; the basis of the rigid-lid projection), the coefficients
+    with isotropic mode-index radius ``sqrt(ky^2 + kx^2)`` above
+    ``cutoff_bands[r]`` are zeroed (a sharp cutoff: the filter is linear, so
+    it is differentiable as it is) and the box is transformed back.  The
+    result is multiplied by ``support`` (the field's own wet points) so the
+    wall values the cut would otherwise leak stay zero.  A record whose
+    cutoff reaches ``lead_filter_max_band`` is returned untouched, bit for
+    bit; with every record so, ``field`` itself comes back.
+    """
+    cutoff = np.asarray(cutoff_bands, dtype=np.float64)
+    if cutoff.ndim != 1 or cutoff.shape[0] != field.shape[-3] \
+            or not np.all(np.isfinite(cutoff)) or np.any(cutoff < 0):
+        raise ValueError(
+            f"cutoff_bands must be {field.shape[-3]} finite non-negative "
+            f"numbers (one per record), got shape {cutoff.shape}")
+    full = cutoff >= lead_filter_max_band(geometry)
+    if full.all():
+        return field
+    j0, j1, i0, i1 = geometry.wet_bounds
+    box = (Ellipsis, slice(j0, j1 + 1), slice(i0, i1 + 1))
+    radius = np.hypot(np.arange(j1 - j0 + 1)[:, None],
+                      np.arange(i1 - i0 + 1)[None, :])
+    keep = jnp.asarray(radius[None] <= cutoff[:, None, None], field.dtype)
+    low = jax_fft.idctn(
+        jax_fft.dctn(field[box], type=2, axes=(-2, -1), norm="ortho") * keep,
+        type=2, axes=(-2, -1), norm="ortho")
+    filtered = jnp.where(support, field.at[box].set(low), 0.0)
+    return jnp.where(jnp.asarray(full)[:, None, None], field, filtered)
+
+
+def lead_filtered_trajectory(trajectory: BalancedTrajectory,
+                             geometry: SWGClosureGeometry,
+                             cutoff_bands) -> BalancedTrajectory:
+    """``lead_filter`` of the three balanced fields, each on its own wet
+    points (F points for the vorticity, the U and V faces)."""
+    return BalancedTrajectory(
+        lead_filter(trajectory.relative_vorticity_s1, geometry, cutoff_bands,
+                    geometry.vertex_interior),
+        lead_filter(trajectory.rotational_u_m_s, geometry, cutoff_bands,
+                    geometry.umask),
+        lead_filter(trajectory.rotational_v_m_s, geometry, cutoff_bands,
+                    geometry.vmask))
+
+
+def kinetic_energy_spectra(trajectory: BalancedTrajectory,
+                           geometry: SWGClosureGeometry):
+    """Isotropic KE spectra ``(..., hours, bins)`` of ``(..., hours, y, x)``
+    balanced fields: the scorer's definition, ``isotropic_energy_spectrum``
+    (FFT, mean removed, isotropic shells) of the cell-centred rotational
+    velocity over the wet T box."""
+    u_c, v_c = cell_centred_rotational_velocity(trajectory, geometry)
+    j0, j1, i0, i1 = geometry.wet_bounds
+    leading = u_c.shape[:-2]
+    box = (j1 - j0 + 1, i1 - i0 + 1)
+
+    def flat(values):
+        return values[..., j0:j1 + 1, i0:i1 + 1].reshape((-1,) + box)
+
+    spectra = jax.vmap(lambda u, v: isotropic_energy_spectrum(
+        u, v, geometry.spacing_m)[1])(flat(u_c), flat(v_c))
+    return spectra.reshape(leading + spectra.shape[-1:])
+
+
+def kinetic_energy_spectrum_term(predicted_spectra, target_spectra):
+    """Squared-error mean of the KE spectra over every lead, bin and (window,
+    member) of ``predicted_spectra``; ``target_spectra`` broadcasts against it.
+    A plain squared loss on the spectrum, no per-band normalisation."""
+    return jnp.mean((predicted_spectra - target_spectra) ** 2)
+
+
+def vorticity_bias_term(predicted_zeta, target_zeta,
+                        geometry: SWGClosureGeometry, *, beta_m1_s1: float,
+                        basin_length_m: float, wall_ring: str):
+    """Eq. 7's scale and weights on the squared error of the window-and-lead
+    mean vorticity: ``scale * sum_W (mean_(w,h) (zeta - zeta_C))^2`` for
+    ``(windows, hours, y, x)`` fields.  Never above the Eq. 7 term of the
+    same fields (the mean of the error is inside the square)."""
+    scale, weights = _eq7_scale_and_weights(
+        geometry, beta_m1_s1=beta_m1_s1, basin_length_m=basin_length_m,
+        wall_ring=wall_ring)
+    mean_error = jnp.mean(predicted_zeta - target_zeta, axis=(0, 1))
+    return scale * jnp.sum(mean_error**2 * weights)
+
+
+def neuralgcm_trajectory_loss(
+        predicted_native, target_native, geometry: SWGClosureGeometry, *,
+        objective: str, beta_m1_s1: float, basin_length_m: float,
+        wall_ring: str, cutoff_bands, spectrum_weight: float,
+        bias_weight: float):
+    """Eq. 7 on the lead-filtered vorticity plus ``spectrum_weight`` times the
+    KE-spectrum term plus ``bias_weight`` times the bias term; returns
+    ``(total, eq7, spectrum, bias)``.
+
+    Model and target go through one diagnostic (the objective's).  The Eq. 7
+    and bias terms act on the vorticity after ``lead_filter``; the spectrum
+    term on the unfiltered balanced velocity (the filter would otherwise
+    hide exactly the small scales it constrains).  With every cutoff at
+    ``lead_filter_max_band`` the Eq. 7 term is ``deterministic_trajectory_loss``
+    bit for bit, and with both weights zero ``total`` is it plus exact zeros.
+    """
+    predicted = diagnose_native_windows(
+        predicted_native, geometry, objective=objective)
+    target = diagnose_native_windows(
+        target_native, geometry, objective=objective)
+    zeta_p = lead_filter(predicted.relative_vorticity_s1, geometry,
+                         cutoff_bands, geometry.vertex_interior)
+    zeta_t = lead_filter(target.relative_vorticity_s1, geometry,
+                         cutoff_bands, geometry.vertex_interior)
+    eq7_constants = dict(beta_m1_s1=beta_m1_s1,
+                         basin_length_m=basin_length_m, wall_ring=wall_ring)
+    eq7 = balanced_trajectory_loss(
+        predicted._replace(relative_vorticity_s1=zeta_p),
+        target._replace(relative_vorticity_s1=zeta_t), geometry, None,
+        kind="point", **eq7_constants)
+    spectrum = kinetic_energy_spectrum_term(
+        kinetic_energy_spectra(predicted, geometry),
+        kinetic_energy_spectra(target, geometry))
+    bias = vorticity_bias_term(zeta_p, zeta_t, geometry, **eq7_constants)
+    return (eq7 + spectrum_weight * spectrum + bias_weight * bias,
+            eq7, spectrum, bias)
+
+
+def neuralgcm_ensemble_scores(
+        predicted_native, target_native, geometry: SWGClosureGeometry,
+        normalizers: BalancedNormalizers, *, objective: str, cutoff_bands,
+        spectrum_weight: float):
+    """Energy score of the lead-filtered ensemble plus ``spectrum_weight``
+    times the KE-spectrum term.
+
+    Inputs as ``ensemble_trajectory_scores``.  The three balanced fields of
+    members and truth go through ``lead_filtered_trajectory`` before the
+    score's distances; the spectrum term compares the spectrum of every
+    unfiltered member with the truth's, averaged over members, leads, bins
+    and windows.  Returns ``(total, member_truth_distance, member_spread,
+    energy_score, spectrum)``, means over windows; the three monitors are
+    those of the filtered fields.  With every cutoff at
+    ``lead_filter_max_band`` the first three score entries are
+    ``ensemble_trajectory_scores`` bit for bit.
+    """
+    predicted, target = _diagnosed_ensemble(
+        predicted_native, target_native, geometry, objective=objective)
+    members = predicted_native[0].shape[1]
+    scores = jax.vmap(lambda window_predicted, window_target:
+                      _window_score_vector(
+                          lead_filtered_trajectory(
+                              window_predicted, geometry, cutoff_bands),
+                          lead_filtered_trajectory(
+                              window_target, geometry, cutoff_bands),
+                          geometry, normalizers, members))(predicted, target)
+    energy, distance, spread = jnp.mean(scores, axis=0)
+    spectrum = kinetic_energy_spectrum_term(
+        kinetic_energy_spectra(predicted, geometry),
+        kinetic_energy_spectra(target, geometry)[:, None])
+    return (energy + spectrum_weight * spectrum, distance, spread, energy,
+            spectrum)
+
+
+def balanced_field_second_moments(trajectory: BalancedTrajectory,
+                                  geometry: SWGClosureGeometry) -> np.ndarray:
+    """``(samples, sum, sum of squares)`` of the three balanced fields of a
+    ``(windows, hours, y, x)`` trajectory, float64, shape ``(3, 3)`` (rows:
+    vorticity, rotational u, rotational v), each sample point weighted by
+    the energy score's own normalized area weight (``area_t * tmask``)."""
+    weight = np.asarray(geometry.area_t_m2 * geometry.tmask, dtype=np.float64)
+    weight = weight / weight.sum()
+    out = np.zeros((3, 3))
+    for row, balanced in enumerate((trajectory.relative_vorticity_s1,
+                                 trajectory.rotational_u_m_s,
+                                 trajectory.rotational_v_m_s)):
+        values = np.asarray(balanced, dtype=np.float64)
+        samples = values.shape[0] * values.shape[1]
+        out[row] = (samples, np.sum(values * weight),
+                    np.sum(values ** 2 * weight))
+    return out
+
+
+def normalizers_from_moments(moments: np.ndarray) -> BalancedNormalizers:
+    """Area-weighted variances about the sample-and-area mean from the summed
+    ``balanced_field_second_moments`` of the training split."""
+    samples, total, squares = moments[:, 0], moments[:, 1], moments[:, 2]
+    variance = squares / samples - (total / samples) ** 2
+    if not np.all(np.isfinite(variance)) or np.any(variance <= 0.0):
+        raise ValueError(f"balanced field variances must be positive: {variance}")
+    return BalancedNormalizers(*(float(value) for value in variance))
+
+
+def add_noise_channel(network: SWGScalarPotentialCNN, *, key,
+                      relative_scale: float) -> SWGScalarPotentialCNN:
+    """The five-channel network of a trained four-channel one.
+
+    Every leaf is the trained network's; the first layer gains input channel
+    4 (``xi``) whose weights are i.i.d. normal with standard deviation
+    ``relative_scale`` times the rms of the first layer's SSH-channel
+    (input channel 0) weights.
+    """
+    if network.spec.noise_channel:
+        raise ValueError("network already has a noise channel")
+    first = network.layers[0]
+    ssh_rms = jnp.sqrt(jnp.mean(first.weight[:, 0] ** 2))
+    xi_weight = relative_scale * ssh_rms * jax.random.normal(
+        key, first.weight[:, :1].shape, first.weight.dtype)
+    grown = SWGScalarPotentialCNN(
+        network.spec._replace(noise_channel=True), key=key)
+    first_layer = eqx.tree_at(
+        lambda layer: (layer.weight, layer.bias), grown.layers[0],
+        (jnp.concatenate([first.weight, xi_weight], axis=1), first.bias))
+    return eqx.tree_at(lambda net: net.layers, grown,
+                       (first_layer,) + tuple(network.layers[1:]))
+
+
 def swg_online_step(network, state, stage_noise, key, noise_scale, *,
                     card, geometry: SWGClosureGeometry, forcing):
     """Run one certified RK3 step with an optional traced closure term."""
@@ -1457,31 +2271,71 @@ def swg_online_step(network, state, stage_noise, key, noise_scale, *,
         raise ValueError(
             f"stage noise shape {stage_noise.shape}, expected {expected}")
 
+    xi = None
+    if network.spec.noise_channel:
+        # One white-noise draw per model step, shared by the three RK3 stages;
+        # fold_in(key, 0) is not a stage key (stages are 1, 2, 3).
+        xi = jax.random.normal(jax.random.fold_in(key, 0),
+                               tuple(geometry.tmask.shape), state.eta.data.dtype)
+
     def potential(entry, stage):
         return network(
             entry, geometry, key=jax.random.fold_in(key, stage),
-            noise=stage_noise[stage - 1], noise_scale=noise_scale)
+            noise=stage_noise[stage - 1], noise_scale=noise_scale, xi=xi)
 
     return swe_rk3_step(
         state, card.dt_s, forcing, card.recipe.grid, card.recipe.z_coord,
         card.recipe.model_config, stage_potential_fn=potential)
 
 
-def build_segment_fn(card, geometry: SWGClosureGeometry, *,
-                     window_days: int, checkpoint: bool = True):
-    """Build one fixed-window hourly training segment with closed steady wind."""
-    if window_days not in ADMITTED_WINDOWS_DAYS:
+def require_target_interval_hours(value) -> int:
+    """The spacing in hours of the stored states a window is scored on."""
+    if type(value) is not int or value < 1 or HOURS_PER_DAY % value:
         raise ValueError(
-            f"window_days must be one of {ADMITTED_WINDOWS_DAYS}, got {window_days}")
-    steps_per_hour = int(SECONDS_PER_HOUR / card.dt_s)
-    if steps_per_hour * card.dt_s != SECONDS_PER_HOUR:
-        raise ValueError("SWG timestep must divide one hour exactly")
+            "target_interval_hours must be an integer >= 1 that divides 24, "
+            f"got {value!r}")
+    return value
+
+
+def steps_per_target_interval(dt_s: float, target_interval_hours: int) -> int:
+    """Model steps between two recorded states; refuses a step that does not
+    divide the target interval exactly."""
+    interval_s = require_target_interval_hours(
+        target_interval_hours) * SECONDS_PER_HOUR
+    steps = int(interval_s / dt_s)
+    if steps < 1 or steps * dt_s != interval_s:
+        raise ValueError(
+            f"SWG timestep {dt_s} s must divide the "
+            f"{target_interval_hours}-hour target interval exactly")
+    return steps
+
+
+def window_steps(card, window_days: int, target_interval_hours: int) -> int:
+    """Model steps of one ``window_days`` training window."""
+    return (HOURS_PER_DAY * window_days // target_interval_hours
+            * steps_per_target_interval(card.dt_s, target_interval_hours))
+
+
+def build_segment_fn(card, geometry: SWGClosureGeometry, *,
+                     window_days: int, target_interval_hours: int,
+                     checkpoint: bool = True):
+    """Build one fixed-window training segment with closed steady wind.
+
+    The segment records the model state every ``target_interval_hours`` hours
+    (1 = hourly), ``24 * window_days / target_interval_hours`` records.
+    """
+    if not window_days_admitted(window_days):
+        raise ValueError(
+            f"window_days must be one of {ADMITTED_WINDOWS_DAYS} or a longer "
+            f"whole number of days, got {window_days}")
+    steps_per_record = steps_per_target_interval(
+        card.dt_s, target_interval_hours)
     tau_u, tau_v = swg_surface_wind(card.resolved_namelist)
     forcing = OceanSurfaceForcing(
         tau_i_native=jnp.asarray(tau_u, dtype=jnp.float64),
         tau_j_native=jnp.asarray(tau_v, dtype=jnp.float64))
-    n_hours = 24 * window_days
-    n_steps = n_hours * steps_per_hour
+    n_records = HOURS_PER_DAY * window_days // target_interval_hours
+    n_steps = n_records * steps_per_record
 
     def one_step(network, noise_scale, carry, inputs):
         step_key, stage_noise = inputs
@@ -1504,21 +2358,21 @@ def build_segment_fn(card, geometry: SWGClosureGeometry, *,
             raise ValueError("segment initial state has incomplete wind-stress carry")
         keys = jax.random.split(key, n_steps)
 
-        def one_hour(state, hour):
-            start = hour * steps_per_hour
-            hour_keys = jax.lax.dynamic_slice_in_dim(
-                keys, start, steps_per_hour, axis=0)
-            hour_noise = jax.lax.dynamic_slice_in_dim(
-                noise, start, steps_per_hour, axis=0)
+        def one_record(state, record):
+            start = record * steps_per_record
+            record_keys = jax.lax.dynamic_slice_in_dim(
+                keys, start, steps_per_record, axis=0)
+            record_noise = jax.lax.dynamic_slice_in_dim(
+                noise, start, steps_per_record, axis=0)
             state, _ = jax.lax.scan(
                 lambda carry, values: scanned_step(
                     network, noise_scale, carry, values),
-                state, (hour_keys, hour_noise))
+                state, (record_keys, record_noise))
             native = (state.eta.data, state.u.data[:, 1:, 0],
                       state.v.data[1:, :, 0])
             return state, native
 
-        return jax.lax.scan(one_hour, initial_state, jnp.arange(n_hours))
+        return jax.lax.scan(one_record, initial_state, jnp.arange(n_records))
 
     return raw, eqx.filter_jit(raw)
 
@@ -1665,17 +2519,22 @@ def free_run_closure(closure) -> dict:
         raise ValueError("free-run closure network_seed must be a "
                          "non-negative int")
     window = closure["window_days"]
-    if type(window) is not int or window not in ADMITTED_WINDOWS_DAYS:
+    if not window_days_admitted(window):
         raise ValueError("free-run closure window_days must be one of "
-                         f"{ADMITTED_WINDOWS_DAYS}")
+                         f"{ADMITTED_WINDOWS_DAYS} or a longer whole number "
+                         "of days")
     if closure["objective"] not in OBJECTIVE_OPERATORS:
         raise ValueError(f"free-run closure objective must be one of "
                          f"{OBJECTIVE_OPERATORS}")
     if closure["wall_ring"] not in WALL_RING_OPTIONS:
         raise ValueError(f"free-run closure wall_ring must be one of "
                          f"{WALL_RING_OPTIONS}")
+    # Manifests written before the noise channel existed lack that key (no
+    # channel); every other key is required.
+    spec_keys = (set(SWGNetworkSpec._fields),
+                 set(SWGNetworkSpec._fields) - {"noise_channel"})
     if not isinstance(closure["network_spec"], dict) \
-            or set(closure["network_spec"]) != set(SWGNetworkSpec._fields):
+            or set(closure["network_spec"]) not in spec_keys:
         raise ValueError("free-run closure network_spec must hold exactly the "
                          f"keys {sorted(SWGNetworkSpec._fields)}")
     path = closure["checkpoint_path"]

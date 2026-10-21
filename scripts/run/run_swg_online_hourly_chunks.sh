@@ -46,7 +46,7 @@ while (( day < last_day )); do
   restart=$truth_root/$(printf 'day%04d.npz' "$day")
   verify=$truth_root/$(printf 'day%04d.npz' "$((day + 1))")
   "$here/run_swg_double_gyre_gpu.sh" "$physical_gpu" \
-    --deck maddison --days "$run_days" --restart "$restart" \
+    --deck maddison --surface explicit --days "$run_days" --restart "$restart" \
     --hourly-targets --verify-next "$verify" --output "$output"
   day=$stop
 done

@@ -3,14 +3,22 @@
   "experiment": "swgonl_exp1_template_ring_excluded",
   "description": "Experiment one, candidate template+excluded: fine-filtered start and target, unfiltered model vorticity in Eq. 7, first interior F ring next to the walls given zero weight. One of three candidates; the owner has not chosen the objective or the wall-ring treatment.",
   "deck": "dg50",
+  "surface": "explicit",
   "objective": "template",
   "wall_ring": "excluded",
+  "training_precision": "fp64",
+  "gradient_checkpointing": true,
+  "target_interval_hours": 1,
   "network": {
     "hidden_channels": 16,
     "hidden_layers": 4,
     "kernel_size": 3,
-    "scales": "maddison_eq6_shallow_water_grid_analogue"
+    "wall_margin_rings": 0,
+    "scales": "maddison_eq6_shallow_water_grid_analogue",
+    "noise_channel": "none",
+    "initial_acceleration_gate": "enforced"
   },
+  "loss": {"kind": "eq7"},
   "seeds": [20261013, 20261014, 20261015],
   "dataset": {
     "records": [
@@ -28,7 +36,9 @@
       "validation": [4265, 5111],
       "test": [5141, 5506]
     },
-    "batch_size": 10
+    "batch_size": 10,
+    "cache": "none",
+    "target_filter_sigma_cells": 1.0
   },
   "curriculum": {
     "window_days": [1, 2, 4, 8],

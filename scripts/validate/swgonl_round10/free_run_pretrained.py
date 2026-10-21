@@ -95,7 +95,7 @@ def main(argv=None):
     digest = driver._sha256(pretrained)
     assert digest == receipt["checkpoint"]["sha256"], "pretrained file differs from its receipt"
 
-    card = driver.build_deck_card(config["deck"])
+    card = driver.build_deck_card(config["deck"], config["surface"])
     geometry = build_closure_geometry(card)
     spec, _ = driver.network_spec(config, card, geometry)
     skeleton = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(config["seeds"][0]))

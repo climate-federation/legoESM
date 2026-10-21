@@ -1,0 +1,116 @@
+{
+  "schema": "legoesm-swg-online-training-v3",
+  "experiment": "swgonl_exp9_rigidlid_neuralgcm",
+  "description": "NeuralGCM-style objective (user decisions 2026-10-20; Kochkov et al. 2024, arXiv 2311.07222, Methods 7.4): Eq. 7 on a vorticity low-passed (closed-box DCT-II, sharp isotropic cutoff) with a cutoff that shrinks with lead time, plus a MSE of the kinetic-energy spectrum (the scorer's definition) and a MSE of the batch-and-lead-time mean filtered vorticity; the two added weights are set once so each added term equals the filtered Eq. 7 term on the first training batch of 1-day windows (the run's first stage, at the random initialisation), then frozen and recorded in the run manifest. Trained from scratch (random initialisation, like exp4), on the rigid-lid truth (rigid lid, phi/g input, 3-hour step and 3-hour loss sampling, fp32 training, symmetric objective, wall ring weighted, in-memory data cache, per-step rematerialisation), curriculum 1, 2, 4, 8 days, 5 epochs each. One seed: exp4's first. The lead-time cutoff table (loss.lead_time_cutoff) is the measured subgrid-swap twin predictability schedule (user decisions 2026-10-20: coherence threshold 0.5, streamfunction-swap twins, coherence of the anomalies from the climatological coarse vorticity, cutoff contiguous from k = 1, mean of 8 twin pairs; source round21_neuralgcm/twin_subgrid/schedule_summary.json). The probe's bands (DCT-II over the 79 interior F points) are converted to the loss's 80-point wet-box DCT index by equal wavelength, k_loss = floor(k_probe * 80 / 79); a lead is rounded up to the next measured day (1, 2, 3, 4, 6, 8, 12, 16, 24, 32), so lead hours (24 (d - 1), 24 d] use that day's cutoff, and lead 0 is the full band.",
+  "deck": "dg50-rl",
+  "surface": "rigid_lid",
+  "objective": "symmetric",
+  "wall_ring": "weighted",
+  "training_precision": "fp32",
+  "gradient_checkpointing": true,
+  "target_interval_hours": 3,
+  "network": {
+    "hidden_channels": 16,
+    "hidden_layers": 4,
+    "kernel_size": 3,
+    "wall_margin_rings": 0,
+    "scales": "maddison_eq6_shallow_water_grid_analogue",
+    "noise_channel": "none",
+    "initial_acceleration_gate": "enforced"
+  },
+  "loss": {
+    "kind": "eq7_neuralgcm",
+    "calibration_window_days": 1,
+    "lead_time_cutoff": {
+      "lead_hours": [
+        0,
+        1,
+        25,
+        49,
+        73,
+        97,
+        145,
+        193,
+        289,
+        385,
+        577
+      ],
+      "cutoff_band": [
+        112,
+        70,
+        63,
+        57,
+        54,
+        48,
+        42,
+        27,
+        19,
+        13,
+        9
+      ]
+    }
+  },
+  "seeds": [
+    20261013,
+    20261014,
+    20261015
+  ],
+  "dataset": {
+    "records": [
+      {
+        "root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round16_rigidlid_truth/hourly_dual_12y",
+        "chunk_label": "dual"
+      },
+      {
+        "root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round16_rigidlid_truth/hourly_dual_test_year",
+        "chunk_label": "dual_test"
+      }
+    ],
+    "splits_days": {
+      "train": [
+        731,
+        4235
+      ],
+      "validation": [
+        4265,
+        5111
+      ],
+      "test": [
+        5141,
+        5506
+      ]
+    },
+    "batch_size": 10,
+    "cache": "memory",
+    "target_filter_sigma_cells": 1.0
+  },
+  "curriculum": {
+    "window_days": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "epochs_per_window": 5,
+    "network_between_windows": "carried",
+    "optimiser_between_windows": "reinitialised"
+  },
+  "optimiser": {
+    "optimizer": "adamw",
+    "learning_rate": 0.001,
+    "schedule": "constant",
+    "weight_decay": 0.004,
+    "adam_b1": 0.9,
+    "adam_b2": 0.999,
+    "adam_epsilon": 1e-07,
+    "adam_epsilon_convention": "keras_epsilon_hat",
+    "gradient_clipping": "none"
+  },
+  "free_run": {
+    "days": 7300,
+    "start": "rest",
+    "sampling": "end_of_day_snapshot_and_daily_mean",
+    "device": "cuda",
+    "math_library": "native"
+  }
+}

@@ -78,6 +78,33 @@ def test_resolved_dg50_clock_and_unknown_dispatch():
         driver.resolved_daily_namelist(1, deck="typo")
 
 
+def test_rigid_lid_decks_resolve_and_refuse_the_explicit_surface():
+    fine = driver.resolved_daily_namelist(
+        2, deck="maddison-rl", surface="rigid_lid")
+    assert fine.nn_SWG == 16 and fine.rn_Dt_s == 1800.0
+    assert fine.nn_itend == 2 * 48 and fine.nn_write == fine.nn_stock == 48
+    coarse = driver.resolved_daily_namelist(
+        2, deck="dg50-rl", surface="rigid_lid")
+    assert coarse.nn_SWG == 2 and coarse.rn_Dt_s == 10800.0
+    assert coarse.nn_itend == 2 * 8 and coarse.nn_write == coarse.nn_stock == 8
+    control = driver.resolved_daily_namelist(
+        2, deck="dg50-nu80-rl", surface="rigid_lid")
+    assert control.rn_Lv_m == 80.0 and control.rn_Dt_s == 10800.0
+    assert control._replace(rn_Lv_m=coarse.rn_Lv_m) == coarse
+    for deck in ("maddison-rl", "dg50-rl", "dg50-nu80-rl"):
+        for surface in ("explicit", None):
+            with pytest.raises(ValueError, match="requires surface='rigid_lid'"):
+                driver.resolved_daily_namelist(1, deck=deck, surface=surface)
+    # An explicit-clock deck under the lid is legal.
+    assert driver.resolved_daily_namelist(
+        1, deck="dg50", surface="rigid_lid").rn_Dt_s == 400.0
+    with pytest.raises(SystemExit):
+        driver.main(["--days", "1", "--output", "unused", "--deck", "typo-rl",
+                     "--surface", "rigid_lid"])
+    assert driver.main(["--days", "1", "--output", "unused", "--deck",
+                        "dg50-rl", "--surface", "explicit"]) == 2
+
+
 def test_tiny_cpu_driver_writes_daily_native_state_with_provenance(tmp_path):
     from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_MADDISON_NAMELIST
 
@@ -88,7 +115,7 @@ def test_tiny_cpu_driver_writes_daily_native_state_with_provenance(tmp_path):
         rn_modified_grav_m_s2=1.0e-6, rn_tau_pa=0.0)
     output = tmp_path / "run"
     manifest = driver.run_long(
-        tiny, output, days=1, mode="cpu-certified", commit="a" * 40)
+        tiny, output, days=1, mode="cpu-certified", surface="explicit", commit="a" * 40)
     assert manifest["certified_policy"] is True
     assert manifest["deck_certification"] == (
         "reference evidence on pinned 2026-10-13 toolchain: daily scan exact; "
@@ -337,7 +364,7 @@ def test_run_long_dual_hourly_writer_operators_endpoints_and_t0(
         ocean_model_latlon_cgrid, "LatLonCGridOceanModel", DriftModel)
     namelist = driver.resolved_daily_namelist(1, deck="maddison")
     output = tmp_path / "hourly"
-    driver.run_long(namelist, output, days=1, mode="cpu-scanned",
+    driver.run_long(namelist, output, days=1, mode="cpu-scanned", surface="explicit",
                     commit="a" * 40, hourly_targets=True)
     steps_per_hour = int(driver.SECONDS_PER_HOUR / namelist.rn_Dt_s)
 
@@ -367,6 +394,25 @@ def test_run_long_dual_hourly_writer_operators_endpoints_and_t0(
         assert np.max(np.abs(saved["filtered_ssh_hourly_m"][-1]
                              - reference(24 * steps_per_hour)["box"]["T"])) \
             > 1.0e-4
+
+
+def test_rigid_lid_hourly_targets_run_on_the_fine_rl_deck_with_zero_ssh(tmp_path):
+    # Real 640 x 640 fine deck under the lid, one day of 48 steps of 1800 s.
+    namelist = driver.resolved_daily_namelist(
+        1, deck="maddison-rl", surface="rigid_lid")
+    output = tmp_path / "hourly_lid"
+    manifest = driver.run_long(
+        namelist, output, days=1, mode="cpu-scanned", surface="rigid_lid",
+        commit="a" * 40, hourly_targets=True)
+    assert manifest["schema"] == "legoesm-swg-double-gyre-hourly-target-v2"
+    assert manifest["surface"] == "rigid_lid" and manifest["steps_per_day"] == 48
+    with np.load(output / "day0001.npz") as saved:
+        for operator in ("box", "filtered"):
+            for name in (f"{operator}_ssh_initial_m", f"{operator}_ssh_hourly_m"):
+                assert np.array_equal(saved[name], np.zeros_like(saved[name])), name
+            for field in ("u", "v"):
+                hourly = saved[f"{operator}_{field}_hourly_m_s"]
+                assert np.all(np.isfinite(hourly)) and np.abs(hourly).max() > 1e-4
 
 
 def test_real_dual_hourly_sampler_lowering_has_no_convolution_operation():
@@ -588,6 +634,115 @@ def test_compiled_day_mean_test_restores_precision_policy():
         _LAST_RESTORED)
 
 
+def _tiny_comparison(tmp_path):
+    arrays = {
+        "ssh_m": np.zeros((2, 2)),
+        "u_m_s": np.arange(4.0).reshape(2, 2) + 10.0,
+        "v_m_s": np.arange(4.0).reshape(2, 2) + 20.0,
+    }
+    path = tmp_path / "next.npz"
+    np.savez(path, **arrays)
+    state = _ScanState(
+        _Field(arrays["ssh_m"]),
+        _Field(np.pad(arrays["u_m_s"][:, :, None], ((0, 0), (1, 0), (0, 0)))),
+        _Field(np.pad(arrays["v_m_s"][:, :, None], ((1, 0), (0, 0), (0, 0)))),
+    )
+    return state, path, arrays
+
+
+def _shift_u(state, amount):
+    return state._replace(u=_Field(state.u.data + np.pad(
+        np.full((2, 2, 1), amount), ((0, 0), (1, 0), (0, 0)))))
+
+
+def test_lid_restart_check_accepts_roundoff_and_refuses_real_differences(tmp_path):
+    state, path, arrays = _tiny_comparison(tmp_path)
+    tol = driver.LID_RESTART_TOLERANCE["value"]
+    assert tol == 1.0e-12
+    result = driver.compare_native_state_bitwise(_shift_u(state, 1.0e-15), path, tol)
+    assert result["within_tolerance"] and not result["all_equal"]
+    assert result["u_m_s_unequal"] > 0
+    assert 0.0 < result["u_m_s_relative_max_abs"] < 1.0e-15
+    assert result["ssh_m_relative_max_abs"] == 0.0
+    # 1e-9 against a field of magnitude 13 is refused ...
+    assert not driver.compare_native_state_bitwise(
+        _shift_u(state, 1.0e-9), path, tol)["within_tolerance"]
+    # ... and any ssh difference is refused (the lid's ssh scale is zero).
+    ssh = state._replace(eta=_Field(arrays["ssh_m"] + 1.0e-30))
+    assert not driver.compare_native_state_bitwise(ssh, path, tol)[
+        "within_tolerance"]
+
+
+def test_explicit_restart_check_stays_bitwise(tmp_path):
+    state, path, _ = _tiny_comparison(tmp_path)
+    result = driver.compare_native_state_bitwise(_shift_u(state, 1.0e-15), path)
+    assert not result["within_tolerance"] and not result["all_equal"]
+    assert driver.compare_native_state_bitwise(state, path)["within_tolerance"]
+
+
+def test_lid_manifest_records_tolerance_and_measured_relative_values(
+        tmp_path, monkeypatch):
+    # Real fine lid deck (644 x 644 native), one day.  Run A expects an all-zero
+    # "next day", so it is refused and the pending manifest keeps the record.
+    # Run B expects run A's own final state plus a 1e-15 round-off: accepted.
+    shape = (644, 644)
+    zeros = {"ssh_m": np.zeros(shape), "u_m_s": np.zeros(shape),
+             "v_m_s": np.zeros(shape)}
+    restart = tmp_path / "restart.npz"
+    np.savez(restart, **zeros, day=0, step=0, dt_s=1800.0)
+    nxt = tmp_path / "next.npz"
+    np.savez(nxt, **zeros)
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "status": "complete", "daily_sha256": {
+            restart.name: hashlib.sha256(restart.read_bytes()).hexdigest(),
+            nxt.name: hashlib.sha256(nxt.read_bytes()).hexdigest()}}))
+    namelist = driver.resolved_daily_namelist(
+        1, deck="maddison-rl", surface="rigid_lid")
+    output = tmp_path / "run"
+    seen = []
+    real_compare = driver.compare_native_state_bitwise
+
+    def spy(state, path, *args):
+        seen.append(state)
+        return real_compare(state, path, *args)
+
+    monkeypatch.setattr(driver, "compare_native_state_bitwise", spy)
+
+    def run(out, expected):
+        return driver.run_long(
+            namelist, out, days=1, mode="cpu-scanned", surface="rigid_lid",
+            commit="a" * 40, hourly_targets=True,
+            restart=restart, verify_next=expected)
+
+    with pytest.raises(RuntimeError, match="does not reproduce"):
+        run(output, nxt)
+    record = json.loads(
+        (output / "manifest.pending.json").read_text())["restart_next_verification"]
+    assert record["tolerance"] == {
+        "kind": "max_abs_relative_to_field_max", "value": 1e-12,
+        "applies_to": "rigid_lid"}
+    result = record["result"]
+    assert result["within_tolerance"] is False and result["all_equal"] is False
+    assert result["ssh_m_relative_max_abs"] == 0.0
+    assert result["u_m_s_unequal"] > 0 and result["u_m_s_max_abs"] > 0.0
+    assert result["u_m_s_relative_max_abs"] == float("inf")
+    final = seen[0]
+    close = tmp_path / "close" / "next.npz"
+    close.parent.mkdir()
+    np.savez(close, ssh_m=np.asarray(final.eta.data),
+             u_m_s=np.asarray(final.u.data[:, 1:, 0]) + 1.0e-15,
+             v_m_s=np.asarray(final.v.data[1:, :, 0]))
+    (close.parent / "manifest.json").write_text(json.dumps({
+        "status": "complete", "daily_sha256": {
+            close.name: hashlib.sha256(close.read_bytes()).hexdigest()}}))
+    accepted = run(tmp_path / "run_close", close)
+    result = accepted["restart_next_verification"]["result"]
+    assert accepted["status"] == "complete"
+    assert result["within_tolerance"] is True and result["all_equal"] is False
+    assert result["u_m_s_unequal"] > 0 and result["v_m_s_unequal"] == 0
+    assert 0.0 < result["u_m_s_relative_max_abs"] < 1.0e-12
+
+
 def test_daily_mean_output_refuses_certified_cpu_mode(tmp_path):
     from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_MADDISON_NAMELIST
 
@@ -596,7 +751,7 @@ def test_daily_mean_output_refuses_certified_cpu_mode(tmp_path):
         rn_modified_grav_m_s2=1.0e-6, rn_tau_pa=0.0)
     with pytest.raises(ValueError, match="non-certified gpu-native"):
         driver.run_long(
-            tiny, tmp_path / "run", days=1, mode="cpu-certified",
+            tiny, tmp_path / "run", days=1, mode="cpu-certified", surface="explicit",
             commit="a" * 40, daily_means=True)
 
 
@@ -607,7 +762,7 @@ def test_cpu_profile_records_production_step_cost(tmp_path):
         nn_SWG=1, rn_Dt_s=43_200.0, nn_itend=2, nn_write=2, nn_stock=2,
         rn_modified_grav_m_s2=1.0e-6, rn_tau_pa=0.0)
     manifest = driver.run_long(
-        tiny, tmp_path / "run", days=1, mode="cpu-certified",
+        tiny, tmp_path / "run", days=1, mode="cpu-certified", surface="explicit",
         commit="a" * 40, profile_steps=2)
     assert manifest["profile"]["program"] == "production-python-step-loop"
     assert manifest["profile"]["steps"] == 2
@@ -622,13 +777,13 @@ def test_profile_only_writes_no_trajectory(tmp_path):
         rn_modified_grav_m_s2=1.0e-6, rn_tau_pa=0.0)
     output = tmp_path / "profile"
     manifest = driver.run_long(
-        tiny, output, days=1, mode="cpu-certified", commit="a" * 40, profile_steps=2, profile_only=True)
+        tiny, output, days=1, mode="cpu-certified", surface="explicit", commit="a" * 40, profile_steps=2, profile_only=True)
     assert manifest["profile_only"] is True
     assert manifest["completed_days"] == 0
     assert list(output.iterdir()) == [output / "manifest.json"]
     with pytest.raises(ValueError, match="positive profile_steps"):
         driver.run_long(
-            tiny, tmp_path / "invalid", days=1, mode="cpu-certified",
+            tiny, tmp_path / "invalid", days=1, mode="cpu-certified", surface="explicit",
             commit="a" * 40, profile_only=True)
 
 
@@ -639,7 +794,7 @@ def test_cpu_scanned_mode_uses_certified_policy_and_day_program(tmp_path):
         nn_SWG=1, rn_Dt_s=43_200.0, nn_itend=2, nn_write=2, nn_stock=2,
         rn_modified_grav_m_s2=1.0e-6, rn_tau_pa=0.0)
     manifest = driver.run_long(
-        tiny, tmp_path / "run", days=1, mode="cpu-scanned",
+        tiny, tmp_path / "run", days=1, mode="cpu-scanned", surface="explicit",
         commit="a" * 40)
     assert manifest["certified_policy"] is True
     assert manifest["transcendentals"] == "libm"
@@ -770,3 +925,85 @@ def test_device_memory_statistics_refuses_missing_gpu_peak():
 
     with pytest.raises(RuntimeError, match="peak_bytes_in_use"):
         driver.device_memory_statistics(Device(), required=True)
+
+
+def _tiny_lid_namelist(**changes):
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_MADDISON_NAMELIST
+
+    return SWG_MADDISON_NAMELIST._replace(
+        nn_SWG=1, rn_Dt_s=43_200.0, nn_itend=2, nn_write=2, nn_stock=2,
+        rn_modified_grav_m_s2=1.0e-6, **changes)
+
+
+def _run_tiny(tmp_path, surface, **kwargs):
+    return driver.run_long(
+        _tiny_lid_namelist(rn_tau_pa=0.1), tmp_path / "run", days=1,
+        mode="cpu-certified", surface=surface, commit="a" * 40, **kwargs)
+
+
+def test_rigid_lid_run_stores_the_pressure_potential_only_when_carried(tmp_path):
+    _run_tiny(tmp_path, "rigid_lid")
+    with np.load(tmp_path / "run" / "day0001.npz") as saved:
+        phi = saved["rigid_lid_phi_m2_s2"]
+        assert phi.shape == saved["ssh_m"].shape and phi.dtype == np.float64
+        assert np.all(np.isfinite(phi)) and np.abs(phi).max() > 0.0
+        assert np.all(saved["ssh_m"] == 0.0)
+    shutil.rmtree(tmp_path / "run")
+    _run_tiny(tmp_path, "explicit")
+    with np.load(tmp_path / "run" / "day0001.npz") as saved:
+        assert "rigid_lid_phi_m2_s2" not in saved.files
+
+
+def test_scanned_day_mean_of_the_rigid_lid_potential_is_the_poststep_mean():
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_swg_card,
+        swg_surface_wind,
+    )
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    tiny = _tiny_lid_namelist(rn_tau_pa=0.1)._replace(rn_Dt_s=3600.0)
+    card = build_swg_card(tiny, surface="rigid_lid")
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    tau_u, tau_v = swg_surface_wind(tiny)
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jax.numpy.asarray(tau_u, dtype=jax.numpy.float64),
+        tau_j_native=jax.numpy.asarray(tau_v, dtype=jax.numpy.float64))
+    state = driver.seed_steady_forcing_carry(card.recipe.initial_state, forcing)
+    phis, reference = [], state
+    for _ in range(3):
+        reference = model.step(reference, card.dt_s, surface_forcing=forcing)
+        phis.append(np.asarray(reference.rigid_lid_phi))
+    _, means = driver.build_scanned_day_mean_stepper(
+        model, card.dt_s, forcing, 3)(state)
+    assert len(means) == 4
+    np.testing.assert_allclose(
+        np.asarray(means[-1]), np.mean(phis, axis=0), rtol=0.0, atol=1.0e-15)
+    assert np.any(np.asarray(means[-1]) != phis[-1])
+
+
+def test_rigid_lid_refuses_a_white_ssh_perturbation(tmp_path):
+    with pytest.raises(ValueError, match="no-op under rigid_lid"):
+        _run_tiny(tmp_path, "rigid_lid", restart=tmp_path / "unread.npz",
+                  perturb_amplitude_m=1.0e-6)
+
+
+def test_rigid_lid_refuses_a_restart_with_nonzero_ssh(tmp_path):
+    shape = (44, 44)
+    restarts = {}
+    for name, ssh in (("zero", np.zeros(shape)), ("nonzero", np.full(shape, 1.0e-3))):
+        restarts[name] = tmp_path / f"{name}.npz"
+        np.savez(restarts[name], ssh_m=ssh, u_m_s=np.zeros(shape),
+                 v_m_s=np.zeros(shape), day=0, step=0, dt_s=43_200.0)
+    with pytest.raises(ValueError, match="identically zero ssh"):
+        _run_tiny(tmp_path, "rigid_lid", restart=restarts["nonzero"])
+    assert not (tmp_path / "run").exists()
+    assert _run_tiny(
+        tmp_path, "rigid_lid", restart=restarts["zero"])["status"] == "complete"
+    shutil.rmtree(tmp_path / "run")
+    assert _run_tiny(
+        tmp_path, "explicit", restart=restarts["nonzero"])["status"] == "complete"

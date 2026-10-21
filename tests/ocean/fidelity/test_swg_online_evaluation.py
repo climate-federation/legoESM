@@ -607,7 +607,8 @@ def test_device_check_ratio_arithmetic_on_a_tiny_frozen_gate(tmp_path,
         "bars": {metric: {"bar": 1.0, "floor": 0.0, "half_range": 0.5}
                  for metric in evaluation.SCORE_METRICS},
     }
-    monkeypatch.setattr(evaluation, "frozen_gate", lambda objective: tiny)
+    monkeypatch.setattr(evaluation, "frozen_gate",
+                        lambda objective, surface="explicit": tiny)
     controls = {name: _cuda_control(tmp_path / name, name)
                 for name in evaluation.CONTROL_NAMELISTS}
     bindings = {name: evaluation.admit_control_run(
@@ -978,7 +979,8 @@ def test_fine_truth_renamed_payload_is_refused(tmp_path):
 def test_available_windows_need_the_next_day_pinned(monkeypatch):
     for completed, count in ((1095, 0), (1096, 1), (6935, 8), (6936, 9)):
         monkeypatch.setattr(evaluation, "_fine_truth_manifest",
-                            lambda root, c=completed: {"completed_days": c})
+                            lambda root, surface="explicit", c=completed: {
+                                "completed_days": c})
         assert evaluation.available_windows() == \
             evaluation.registered_windows(count), completed
 
@@ -988,7 +990,7 @@ def test_device_check_and_single_run_commands_write_their_records(
     device_report = {"schema": evaluation.DEVICE_CHECK_SCHEMA,
                      "pass": True, "verdict": "PASS"}
     monkeypatch.setattr(evaluation, "device_check",
-                        lambda controls, objective: device_report)
+                        lambda controls, objective, surface: device_report)
     device_output = tmp_path / "device.json"
     assert evaluation.main([
         "device-check", "--objective", "template",
@@ -1018,3 +1020,141 @@ def test_round5_control_record_is_reproduced_exactly():
     assert scores["basin_eke_ratio"] == 0.7323411189244107
     assert scores["ke_spectrum_relative_l1"] == 0.22300407134605818
     assert scores["native_grid_noise_index"] == 0.9317922221566435
+
+
+# ------------------------------------------------- rigid-lid surface (2026-10-18)
+def test_surface_registry_selects_the_lid_decks_and_refuses_others():
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        SWG_DG50_RL_NAMELIST,
+        SWG_MADDISON_RL_NAMELIST,
+    )
+
+    explicit = evaluation._surface("explicit")
+    assert explicit.coarse_namelist is evaluation.SWG_DG50_NAMELIST
+    assert explicit.control_namelists is evaluation.CONTROL_NAMELISTS
+    lid = evaluation._surface("rigid_lid")
+    assert lid.coarse_namelist is SWG_DG50_RL_NAMELIST
+    assert lid.fine_namelist is SWG_MADDISON_RL_NAMELIST
+    assert lid.coarse_namelist.rn_Dt_s == 10_800.0
+    assert set(lid.control_namelists) == {"nu10", "nu80"}
+    assert lid.control_namelists["nu10"] is SWG_DG50_RL_NAMELIST
+    assert lid.control_namelists["nu80"] == SWG_DG50_RL_NAMELIST._replace(
+        rn_Lv_m=80.0)
+    with pytest.raises(ValueError, match="surface must be one of"):
+        evaluation._surface("free_surface")
+    # the lid has its own frozen gate: an objective frozen only for the
+    # explicit surface is not silently scored on the lid
+    with pytest.raises(ValueError, match="no frozen rigid_lid gate"):
+        evaluation.frozen_gate("template", "rigid_lid")
+
+
+@real_fields
+def test_lid_health_measures_the_courant_number_with_the_lid_step():
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_DG50_RL_NAMELIST
+
+    ssh, u, v = _real_window(days=6)
+    _, geometry = evaluation._dg50()
+    ju, iu = np.argwhere(geometry["mask"]["U"])[40]
+    fast = u.copy()
+    fast[3, ju, iu] = 2.0 * float(geometry["spacing_m"]) \
+        / SWG_DG50_RL_NAMELIST.rn_Dt_s
+    lid = evaluation.window_statistics(
+        (ssh, fast, v), namelist=SWG_DG50_RL_NAMELIST)["physical_health"]
+    assert lid["maximum_courant"] == pytest.approx(2.0, rel=1e-12)
+    assert not lid["passes"]
+    # the same speed on the explicit 400 s clock is a Courant number far below 1
+    explicit = evaluation.window_statistics((ssh, fast, v))["physical_health"]
+    assert explicit["maximum_courant"] < 0.1
+
+
+def test_lid_end_of_day_test_skips_only_the_zero_ssh():
+    rng = np.random.default_rng(0)
+    zero = np.zeros((6, 6))
+    mean, nxt = (rng.normal(size=(2, 6, 6)) for _ in range(2))
+    genuine = 0.5 * (mean + nxt)  # nearer the average of the two means
+    args = ("day0001.npz", (zero, *genuine), (zero, *mean), (zero, *nxt))
+    evaluation._require_end_of_day_snapshots(*args, rigid_lid=True)
+    # the explicit-surface test is unchanged: an all-zero ssh cannot pass it
+    with pytest.raises(ValueError, match="ssh is not an end-of-day"):
+        evaluation._require_end_of_day_snapshots(*args)
+    # velocities are still shown from the data under the lid
+    renamed = ("day0001.npz", (zero, mean[0], genuine[1]), (zero, *mean),
+               (zero, *nxt))
+    with pytest.raises(ValueError, match="u is not an end-of-day"):
+        evaluation._require_end_of_day_snapshots(*renamed, rigid_lid=True)
+    # a lid with a free surface in it is refused, never skipped
+    wet = ("day0001.npz", (zero + 1e-3, *genuine), (zero, *mean), (zero, *nxt))
+    with pytest.raises(ValueError, match="rigid-lid ssh must be exactly zero"):
+        evaluation._require_end_of_day_snapshots(*wet, rigid_lid=True)
+
+
+def test_lid_truth_is_admitted_only_by_its_surface_deck_and_frozen_manifest(
+        tmp_path):
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        SWG_MADDISON_RL_NAMELIST,
+    )
+
+    namelist = json.loads(json.dumps(SWG_MADDISON_RL_NAMELIST._asdict()))
+    manifest = {"status": "complete", "namelist": namelist,
+                "surface": "rigid_lid", "daily_sha256": {}}
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    assert evaluation._fine_truth_manifest(tmp_path, "rigid_lid")[
+        "surface"] == "rigid_lid"
+    # the explicit deck refuses the lid truth, and the lid refuses a record
+    # that does not say it was made under the lid
+    with pytest.raises(RuntimeError, match="deck differs"):  # GateError
+        evaluation._fine_truth_manifest(tmp_path)
+    (tmp_path / "manifest.json").write_text(json.dumps(
+        {**manifest, "surface": "explicit"}))
+    with pytest.raises(ValueError, match="must record its surface"):
+        evaluation._fine_truth_manifest(tmp_path, "rigid_lid")
+    # an unfrozen lid manifest is never read as snapshots
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="manifest is not frozen"):
+        evaluation.restrict_fine_truth_window(
+            tmp_path, 1, 1, objective="symmetric", surface="rigid_lid")
+
+
+def test_device_check_record_is_bound_to_its_surface(tmp_path):
+    record = tmp_path / "device.json"
+    record.write_text(json.dumps({
+        "schema": evaluation.DEVICE_CHECK_SCHEMA, "objective": "symmetric",
+        "controls": {}}))
+    sha = evaluation._sha256(record)
+    with pytest.raises(ValueError, match="surface differs"):
+        evaluation.admit_device_check(
+            record, sha, objective="symmetric", surface="rigid_lid")
+
+
+def test_frozen_lid_gate_is_the_truth_table_derivation_and_lid_pinned():
+    frozen = evaluation.frozen_gate("symmetric", "rigid_lid")
+    windows = [tuple(window) for window in frozen["windows"]]
+    assert len(windows) >= 3
+    assert windows == evaluation.registered_windows(len(windows))
+    assert frozen["bars"] == evaluation.gate_bars(frozen["truth_loo"])
+    assert set(frozen["controls"]) == {"nu10", "nu80"}
+    assert set(frozen["control_manifest_sha256"]) == {"nu10", "nu80"}
+    for name, digest in frozen["control_manifest_sha256"].items():
+        assert evaluation.RIGID_LID_MANIFEST_SHA256[name] == digest
+    assert "truth" in evaluation.RIGID_LID_MANIFEST_SHA256
+    for table in (frozen["truth_loo"], *frozen["controls"].values()):
+        assert set(table) == set(evaluation.SCORE_METRICS)
+        assert all(len(values) == len(windows) for values in table.values())
+    for control in ("nu10", "nu80"):
+        result = evaluation.held_out_gate(
+            _seeds(evaluation.control_as_seed("symmetric", control, "rigid_lid")),
+            objective="symmetric", surface="rigid_lid")
+        assert not result["pass"] and result["surface"] == "rigid_lid"
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "measured 2026-10-18: the scorer's own bar procedure on the rigid-lid truth "
+    "gives a wet_eke_map_nrmse allowance (nu=10 control median 0.3323 minus the "
+    "truth half-range 0.1319 = 0.2003) that the truth's own leave-one-out median "
+    "(0.2090) does not meet, because one truth window (days 4746-5475) is an "
+    "outlier (0.4204).  Pending the user's decision on the rigid-lid bars."))
+def test_frozen_lid_gate_passes_its_own_perfect_model_self_check():
+    truth = evaluation.held_out_gate(
+        _seeds(evaluation.truth_as_seed("symmetric", "rigid_lid")),
+        objective="symmetric", surface="rigid_lid")
+    assert truth["pass"]

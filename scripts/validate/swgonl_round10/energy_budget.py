@@ -244,7 +244,8 @@ def spans(driver, config, card, geometry, nets, forcing, key):
             return seeded(f["ssh_m"], f["u_m_s"], f["v_m_s"])
 
     contract = SWGDatasetContract.from_json(RUN / "dataset_contract.json", card=card)
-    batch = next(contract.batches(split="train", window_days=2, epoch=0, seed=SEED))
+    batch = next(contract.batches(split="train", window_days=2, epoch=0, seed=SEED,
+        target_interval_hours=1))
     train_start = seeded(*(np.asarray(value[0]) for value in batch.initial))
     day4265 = driver.load_config(REPO / "config/swg_online/pilot_template_ring_excluded_day4265.json")
     truth_state, truth_block = driver.resolve_start(day4265, card)

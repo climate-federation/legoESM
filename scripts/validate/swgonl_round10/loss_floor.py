@@ -153,7 +153,8 @@ class Rollouts:
         vtx = jnp.asarray(geometry.vertex_interior)
         template = self.template
         ops = self.ops
-        raw, _ = build_segment_fn(card, geometry, window_days=window_days, checkpoint=False)
+        raw, _ = build_segment_fn(card, geometry, window_days=window_days, checkpoint=False,
+            target_interval_hours=1)
         n_steps = self.n_hours * steps_per_hour
         shape = tuple(geometry.tmask.shape)
 
@@ -331,12 +332,16 @@ def main():
     t0 = time.time()
     for window_days, n_batches in N_BATCHES.items():
         tag = f"w{window_days:02d}"
-        issued = contract.batches(split="train", window_days=window_days, epoch=EPOCH - 1, seed=eb.SEED)
+        issued = contract.batches(split="train", window_days=window_days, epoch=EPOCH - 1, seed=eb.SEED,
+            target_interval_hours=1)
         batches = [next(issued) for _ in range(n_batches)]
         rollouts = Rollouts(card, geometry, forcing, window_days, key)
         projector = Projector(rollouts, geometry)
         _, loss_fn = driver.build_batch_functions(card, geometry, window_days=window_days,
-                                                  objective=config["objective"], wall_ring=config["wall_ring"])
+                                                  objective=config["objective"], wall_ring=config["wall_ring"],
+                                                  training_precision=config["training_precision"],
+                                                      target_interval_hours=1,
+                                                  checkpoint=True)
         networks = {
             "pilot2": nets[window_days],
             "exp1_seed1": load_network(EXP1 / f"{tag}_e05.eqx", spec, optimizer, key, "exp1 seed-1 closure"),

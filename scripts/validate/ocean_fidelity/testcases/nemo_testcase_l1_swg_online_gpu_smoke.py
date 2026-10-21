@@ -267,7 +267,7 @@ def _run_worker(args) -> dict:
                 SWGNetworkSpec(
                     hidden_channels=16, hidden_layers=4, kernel_size=3,
                     ssh_scale_m=1.0, velocity_scale_m_s=1.0,
-                    potential_scale_m3_s2=1.0),
+                    potential_scale_m3_s2=1.0, wall_margin_rings=0),
                 key=jax.random.PRNGKey(20261013))
             tau_u, tau_v = swg_surface_wind(SWG_DG50_NAMELIST)
             forcing = OceanSurfaceForcing(
@@ -286,7 +286,7 @@ def _run_worker(args) -> dict:
                 one_step_lowered, label="closure model step")
 
             _, segment = build_segment_fn(
-                card, geometry, window_days=1, checkpoint=True)
+                card, geometry, window_days=1, checkpoint=True, target_interval_hours=1)
             n_steps = 24 * int(3_600 / card.dt_s)
             noise = jnp.zeros(
                 (n_steps, 3) + tuple(geometry.tmask.shape), dtype=jnp.float64)

@@ -14,10 +14,65 @@ with a fresh optimiser, and the run manifest and training log record the
 extension (from which windows to which, from which commit to which).
 An optional ``network.initial_checkpoint`` (absolute path of a checkpoint in
 this driver's format; no default: absent means the seed's random
-initialisation) initialises the network from that file before the first
+initialisation) lets the curriculum start at that checkpoint's last trained
+window (read from its run's ``training_log.json``; unreadable refuses) instead
+of the 1, 2, 4, 8 prefix.  It initialises the network from that file before the first
 stage, the optimiser starting fresh; the file's SHA-256 is recorded in the
 run manifest and the training log, and a missing, structurally different or
 later changed file refuses the run.
+
+``training_precision`` (``"fp64"`` or ``"fp32"``, required) fixes the
+arithmetic of every training and validation loss and gradient.  With
+``"fp32"`` the float64 master weights are cast to float32 for each call, the
+trajectory, loss and gradient are computed in float32, and the gradient is
+cast back to float64 before the float64 optimiser update; checkpoints, resume
+and the float64 free runs are unchanged.
+
+``gradient_checkpointing`` (``true`` or ``false``, required) selects whether
+the segment rematerialises every production step in the backward pass; the
+loss and gradient are the same either way, ``false`` trading memory for time.
+``dataset.cache`` (``"none"`` or ``"memory"``, required) selects whether
+training holds every stored hour its batches can read in host memory
+(``SWGDatasetContract.preload_memory``, loaded once through the same
+digest-pinned sources) or reads the day files for every batch; batches are
+identical.
+``dataset.target_filter_sigma_cells`` (a number >= 1, required) is the width
+of the template objective's Gaussian target filter in coarse cells.  1 is the
+stored state (the recorder's sigma-one-cell filter) unchanged; a larger value
+filters the stored target and window-start states once more on the coarse grid
+with the recorder's own filter, sigma ``sqrt(value**2 - 1)`` cells, and under
+the rigid lid projects the start velocities non-divergent.  The symmetric
+objective refuses a value above 1.
+
+``network.noise_channel`` (``"none"`` or ``"white_input"``, required) selects
+the network input: ``"white_input"`` adds a fifth channel ``xi`` ~ N(0,1) per
+cell (one draw per model step, shared by the three RK3 stages), whose
+first-layer weights are the learned noise amplitude.  ``loss`` (required) is
+``{"kind": "eq7"}`` (Maddison Eq. 7), ``{"kind": "energy_score", "members": M}``
+(Brolly Eq. 9 over M members per window from the same start with independent
+xi, normalised by the training split's variances of the three balanced
+fields, which needs ``"white_input"`` and replaces Eq. 7) or ``{"kind":
+"eq7_window_statistics", "calibration_window_days": W}`` (Eq. 7 plus the
+NRMSE^2 of the window-mean vorticity map and of the window EKE map, each
+weighted by a constant set once from the first training batch of W-day
+windows so that it equals the Eq. 7 term).  The NeuralGCM-style losses
+(Kochkov et al. 2024, Methods 7.4) are ``{"kind": "eq7_neuralgcm",
+"calibration_window_days": W, "lead_time_cutoff": TABLE}`` (Eq. 7 on a vorticity
+low-passed with a cutoff that shrinks with lead time, plus a KE-spectrum
+MSE and a MSE of the batch-and-lead mean vorticity, the two weights set once
+like the arm-C ones; ``windows_per_call`` must be 10) and ``{"kind":
+"energy_score_neuralgcm", "members": M, "calibration_window_days": W,
+"lead_time_cutoff": TABLE}`` (the energy score of the low-passed fields plus
+the KE-spectrum MSE; needs ``"white_input"``).  ``TABLE`` is ``{"lead_hours":
+[0, ...], "cutoff_band": [...]}`` (``lead_time_cutoff_table``); the string
+``"PENDING_TWIN_MEASUREMENT"`` stands for a table not measured yet and refuses
+at load.  Whatever a loss freezes at the
+start is recorded in the run manifest (``loss_constants``) and read back on
+resume.  ``network.initial_acceleration_gate`` (``"enforced"`` or
+``"recorded_only"``, required) says whether the 1% bar on the initialised
+closure acceleration stops the run; ``"recorded_only"`` needs
+``network.initial_checkpoint`` (a loaded trained network is measured and
+logged, not refused).
 
 ``free-run`` integrates the coarse card from rest with the closure of one
 trained window length (its last checkpoint) on the device and math policy
@@ -37,6 +92,7 @@ and the run manifest records them.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import datetime
 import functools
@@ -52,6 +108,7 @@ import sys
 import tempfile
 import time
 import types
+import warnings
 from pathlib import Path
 
 import equinox as eqx
@@ -62,12 +119,18 @@ import optax
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
 from legoesm.ml.training import save_checkpoint
+from legoesm.ocean.dynamics.swe_rk3 import SWE_SURFACE_MODES
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_DG50_NAMELIST,
+    SWG_DG50_RL_NAMELIST,
     build_swg_card,
     swg_surface_wind,
 )
-from legoesm.ocean.fidelity.swg_online_decks import SWG_DG50_NU80_NAMELIST
+from legoesm.ocean.fidelity.swg_online_decks import (
+    SWG_DG50_NU80_NAMELIST,
+    SWG_DG50_NU80_RL_NAMELIST,
+    require_surface_for_deck,
+)
 from legoesm.ocean.state import OceanSurfaceForcing
 from legoesm.training.swg_online import (
     ADMITTED_WINDOWS_DAYS,
@@ -79,32 +142,49 @@ from legoesm.training.swg_online import (
     FREE_RUN_MANIFEST_SCHEMA,
     HOURS_PER_DAY,
     OBJECTIVE_OPERATORS,
-    SECONDS_PER_HOUR,
     SNAPSHOT_FIELDS,
     SNAPSHOT_LABEL,
     START_REBALANCE_MAX_ITERATIONS,
     START_REBALANCE_TOLERANCE,
     TEMPLATE_BATCH_SIZE,
     WALL_RING_OPTIONS,
+    BalancedNormalizers,
     SWGDatasetContract,
     SWGNetworkSpec,
     SWGOptimizerSettings,
     SWGScalarPotentialCNN,
     WindowBatch,
+    add_noise_channel,
     assert_network_gradients_live,
+    balanced_field_second_moments,
     build_closure_geometry,
     build_segment_fn,
     coarse_state_from_native,
     create_swg_optimizer,
     deterministic_trajectory_loss,
+    diagnose_native_windows,
+    ensemble_trajectory_scores,
     eq6_scale_report,
     free_run_closure,
     initial_closure_acceleration_ratio,
+    lead_time_cutoff_bands,
+    lead_time_cutoff_table,
     maddison_eq6_network_scales,
     maddison_half_width_m,
     network_parameter_count,
+    neuralgcm_ensemble_scores,
+    neuralgcm_trajectory_loss,
+    normalizers_from_moments,
     record_start_state,
+    require_curriculum_windows,
+    require_rigid_lid_zero_ssh,
+    require_target_filter_sigma_cells,
+    rigid_lid_start_state,
+    start_state_from_native,
+    steps_per_target_interval,
     swg_online_step,
+    window_statistics_trajectory_loss,
+    window_steps,
 )
 
 CONFIG_SCHEMA = "legoesm-swg-online-training-v3"
@@ -114,10 +194,46 @@ LOG_SCHEMA = "legoesm-swg-online-training-log-v2"
 PROFILE_SCHEMA = "legoesm-swg-online-training-profile-v1"
 DATASET_SCHEMA = "legoesm-swg-online-dataset-v1"
 SCALE_RULE = "maddison_eq6_shallow_water_grid_analogue"
-DECKS = {"dg50": SWG_DG50_NAMELIST, "dg50-nu80": SWG_DG50_NU80_NAMELIST}
-TRAINING_DECKS = ("dg50",)
-CONTROL_DECKS = {"nu10": "dg50", "nu80": "dg50-nu80"}
+DECKS = {"dg50": SWG_DG50_NAMELIST, "dg50-nu80": SWG_DG50_NU80_NAMELIST,
+         "dg50-rl": SWG_DG50_RL_NAMELIST,
+         "dg50-nu80-rl": SWG_DG50_NU80_RL_NAMELIST}
+TRAINING_DECKS = ("dg50", "dg50-rl")
+# (control, surface) -> deck: the no-closure control of each surface's scorer.
+CONTROL_DECKS = {("nu10", "explicit"): "dg50", ("nu80", "explicit"): "dg50-nu80",
+                 ("nu10", "rigid_lid"): "dg50-rl",
+                 ("nu80", "rigid_lid"): "dg50-nu80-rl"}
 FREE_RUN_SAMPLING = "end_of_day_snapshot_and_daily_mean"
+TRAINING_PRECISIONS = ("fp64", "fp32")
+DATASET_CACHES = ("none", "memory")
+NOISE_CHANNELS = ("none", "white_input")
+# The 1% bar on the initialised closure acceleration is for a seed's random
+# initialisation; a network loaded from a trained file is measured and logged
+# only (the w08 file of the arm configurations measures 10-15 x the wind).
+ACCELERATION_GATES = ("enforced", "recorded_only")
+REPORT_NAMES = {
+    "energy_score": ("energy_score", "member_truth_distance", "member_spread"),
+    "eq7_window_statistics": ("total", "eq7", "vorticity_nrmse2",
+                              "eke_nrmse2"),
+    "eq7_neuralgcm": ("total", "eq7_filtered", "spectrum_mse", "bias_mse"),
+    "energy_score_neuralgcm": ("total", "member_truth_distance",
+                               "member_spread", "energy_score_filtered",
+                               "spectrum_mse")}
+LOSS_KINDS = ("eq7", "energy_score", "eq7_window_statistics", "eq7_neuralgcm",
+              "energy_score_neuralgcm")
+# Losses over an ensemble of members driven by independent xi: they need the
+# noise channel, their own noise streams and the spread monitor (report index
+# 1 member-to-truth distance, 2 member spread).
+ENSEMBLE_LOSS_KINDS = ("energy_score", "energy_score_neuralgcm")
+# The NeuralGCM-style losses (user decisions 2026-10-20): a lead-time
+# low-pass plus a KE-spectrum term (plus a bias term for the Eq. 7 variant).
+NEURALGCM_LOSS_KINDS = ("eq7_neuralgcm", "energy_score_neuralgcm")
+# User decision 2026-10-19 (arm B): the xi first-layer weights start at 1e-2
+# of the SSH-channel weights' rms.  The tag separates their random stream
+# from every other use of PRNGKey(seed).
+NOISE_CHANNEL_INIT_RELATIVE_SCALE = 1.0e-2
+NOISE_CHANNEL_INIT_TAG = 2026_10_19
+# Training and validation draw their ensemble noise from separate streams.
+TRAIN_NOISE_TAG, VALIDATION_NOISE_TAG = 1, 2
 SECONDS_PER_DAY = 86_400
 _OPERATOR_FIELDS = {"symmetric": "box", "template": "filtered"}
 
@@ -160,6 +276,11 @@ def _require_keys(mapping, expected, where: str) -> None:
             f"found {found}")
 
 
+def _validate_surface(surface) -> None:
+    if surface not in SWE_SURFACE_MODES:
+        raise ValueError(f"surface must be one of {SWE_SURFACE_MODES}")
+
+
 def _require_int(value, where: str, *, minimum: int) -> int:
     if type(value) is not int or value < minimum:
         raise ValueError(f"{where} must be an integer >= {minimum}")
@@ -195,33 +316,87 @@ def _validate_free_run(free_run: dict) -> None:
             "cpu+libm or cuda+native")
 
 
+def _validate_loss(loss, noise_channel: str, windows: list) -> None:
+    """The training loss and the network input it needs, both stated."""
+    if not isinstance(loss, dict) or loss.get("kind") not in LOSS_KINDS:
+        raise ValueError(f"loss kind must be one of {LOSS_KINDS}")
+    if loss["kind"] == "eq7":
+        _require_keys(loss, ("kind",), "loss")
+    elif loss["kind"] == "energy_score":
+        _require_keys(loss, ("kind", "members"), "loss")
+        _require_int(loss["members"], "loss members", minimum=2)
+    else:
+        extra = {"eq7_window_statistics": (),
+                 "eq7_neuralgcm": ("lead_time_cutoff",),
+                 "energy_score_neuralgcm": ("members", "lead_time_cutoff")}[
+            loss["kind"]]
+        _require_keys(loss, ("kind", "calibration_window_days") + extra,
+                      "loss")
+        if loss["calibration_window_days"] not in windows:
+            raise ValueError("loss calibration_window_days must be one of the "
+                             f"curriculum's window lengths {windows}")
+        if "members" in extra:
+            _require_int(loss["members"], "loss members", minimum=2)
+        if "lead_time_cutoff" in extra:
+            lead_time_cutoff_table(loss["lead_time_cutoff"])
+    if (loss["kind"] in ENSEMBLE_LOSS_KINDS) != (noise_channel == "white_input"):
+        raise ValueError(
+            "the energy_score loss needs network noise_channel 'white_input' "
+            "(likewise energy_score_neuralgcm) and only the ensemble losses "
+            f"{ENSEMBLE_LOSS_KINDS} train one (an unused xi weight is an "
+            "inert leaf)")
+
+
+def checkpoint_last_window_days(checkpoint: Path) -> int:
+    """The window length (days) ``checkpoint`` was trained at, read from the
+    ``training_log.json`` of the run directory it sits in
+    (``<run>/checkpoints/<file>``); refuses rather than guesses."""
+    log_path = checkpoint.parent.parent / "training_log.json"
+    try:
+        epochs = json.loads(log_path.read_text())["epochs"]
+    except (OSError, ValueError, KeyError) as error:
+        raise ValueError(f"the initial checkpoint's run log {log_path} cannot "
+                         f"be read ({error!r})") from None
+    listed = f"{checkpoint.parent.name}/{checkpoint.name}"
+    windows = [epoch["window_days"] for epoch in epochs
+               if epoch["checkpoint"]["path"] == listed]
+    if len(windows) != 1:
+        raise ValueError(f"{log_path} lists {len(windows)} epochs with "
+                         f"checkpoint {listed} (need exactly one)")
+    return windows[0]
+
+
 def load_config(path: Path) -> dict:
     """Read one training configuration; every key is required, none extra."""
     config = json.loads(Path(path).read_text())
     if config.get("schema") == CONTROL_CONFIG_SCHEMA:
         _require_keys(config, (
             "schema", "experiment", "description", "control", "deck",
-            "closure", "free_run"), "control configuration")
+            "surface", "closure", "free_run"), "control configuration")
         if not isinstance(config["experiment"], str) \
                 or re.fullmatch(r"[a-z0-9_]+", config["experiment"]) is None:
             raise ValueError("experiment must be a lowercase [a-z0-9_] name")
         if not isinstance(config["description"], str) or not config["description"]:
             raise ValueError("description must be a non-empty string")
-        if config["control"] not in CONTROL_DECKS:
-            raise ValueError(f"control must be one of {sorted(CONTROL_DECKS)}")
-        if config["deck"] != CONTROL_DECKS[config["control"]]:
+        _validate_surface(config["surface"])
+        key = (config["control"], config["surface"])
+        if key not in CONTROL_DECKS:
             raise ValueError(
-                f"control {config['control']} requires deck "
-                f"{CONTROL_DECKS[config['control']]!r}")
+                f"(control, surface) must be one of {sorted(CONTROL_DECKS)}")
+        if config["deck"] != CONTROL_DECKS[key]:
+            raise ValueError(
+                f"control {config['control']} on the {config['surface']} "
+                f"surface requires deck {CONTROL_DECKS[key]!r}")
         if config["closure"] != "none":
             raise ValueError("control free runs require closure='none'")
         _validate_free_run(config["free_run"])
         return config
 
     _require_keys(config, (
-        "schema", "experiment", "description", "deck", "objective",
-        "wall_ring", "network", "seeds", "dataset", "curriculum", "optimiser",
-        "free_run"), "configuration")
+        "schema", "experiment", "description", "deck", "surface", "objective",
+        "wall_ring", "training_precision", "gradient_checkpointing",
+        "target_interval_hours", "network", "loss", "seeds", "dataset",
+        "curriculum", "optimiser", "free_run"), "configuration")
     if config["schema"] != CONFIG_SCHEMA:
         raise ValueError(f"configuration schema must be {CONFIG_SCHEMA!r}")
     if not isinstance(config["experiment"], str) \
@@ -231,16 +406,38 @@ def load_config(path: Path) -> dict:
         raise ValueError("description must be a non-empty string")
     if config["deck"] not in TRAINING_DECKS:
         raise ValueError(f"training deck must be one of {TRAINING_DECKS}")
+    _validate_surface(config["surface"])
+    require_surface_for_deck(config["deck"], config["surface"])
     if config["objective"] not in OBJECTIVE_OPERATORS:
         raise ValueError(f"objective must be one of {OBJECTIVE_OPERATORS}")
     if config["wall_ring"] not in WALL_RING_OPTIONS:
         raise ValueError(f"wall_ring must be one of {WALL_RING_OPTIONS}")
+    if config["training_precision"] not in TRAINING_PRECISIONS:
+        raise ValueError(
+            f"training_precision must be one of {TRAINING_PRECISIONS}")
+    if type(config["gradient_checkpointing"]) is not bool:
+        raise ValueError("gradient_checkpointing must be true or false")
+    # A valid interval whose whole number of deck steps fits (refused here,
+    # not mid-run).
+    steps_per_target_interval(
+        DECKS[config["deck"]].rn_Dt_s, config["target_interval_hours"])
 
     network = config["network"]
     _require_keys({key: value for key, value in network.items()
                    if key != "initial_checkpoint"},
                   ("hidden_channels", "hidden_layers", "kernel_size",
-                   "scales"), "network")
+                   "wall_margin_rings", "scales", "noise_channel",
+                   "initial_acceleration_gate"), "network")
+    if network["noise_channel"] not in NOISE_CHANNELS:
+        raise ValueError(f"network noise_channel must be one of {NOISE_CHANNELS}")
+    if network["initial_acceleration_gate"] not in ACCELERATION_GATES:
+        raise ValueError("network initial_acceleration_gate must be one of "
+                         f"{ACCELERATION_GATES}")
+    if network["initial_acceleration_gate"] == "recorded_only" \
+            and "initial_checkpoint" not in network:
+        raise ValueError("initial_acceleration_gate 'recorded_only' needs "
+                         "network initial_checkpoint (a seed's random "
+                         "initialisation must pass the bar)")
     if "initial_checkpoint" in network and (
             not isinstance(network["initial_checkpoint"], str)
             or not Path(network["initial_checkpoint"]).is_absolute()):
@@ -249,6 +446,7 @@ def load_config(path: Path) -> dict:
     _require_int(network["hidden_layers"], "hidden_layers", minimum=1)
     if _require_int(network["kernel_size"], "kernel_size", minimum=1) % 2 != 1:
         raise ValueError("kernel_size must be odd")
+    _require_int(network["wall_margin_rings"], "wall_margin_rings", minimum=0)
     if network["scales"] != SCALE_RULE:
         raise ValueError(f"network scales must be {SCALE_RULE!r}")
 
@@ -263,7 +461,12 @@ def load_config(path: Path) -> dict:
         raise ValueError("seeds must list one or more distinct seeds")
 
     dataset = config["dataset"]
-    _require_keys(dataset, ("records", "splits_days", "batch_size"), "dataset")
+    _require_keys(dataset, ("records", "splits_days", "batch_size", "cache",
+                            "target_filter_sigma_cells"), "dataset")
+    require_target_filter_sigma_cells(
+        dataset["target_filter_sigma_cells"], config["objective"])
+    if dataset["cache"] not in DATASET_CACHES:
+        raise ValueError(f"dataset cache must be one of {DATASET_CACHES}")
     if dataset["batch_size"] != TEMPLATE_BATCH_SIZE:
         raise ValueError(f"batch_size must be {TEMPLATE_BATCH_SIZE}")
     records = dataset["records"]
@@ -293,11 +496,20 @@ def load_config(path: Path) -> dict:
                                "network_between_windows",
                                "optimiser_between_windows"), "curriculum")
     windows = curriculum["window_days"]
-    if not isinstance(windows, list) or not windows \
-            or any(window not in ADMITTED_WINDOWS_DAYS for window in windows) \
-            or windows != sorted(set(windows)):
-        raise ValueError(
-            f"window_days must increase through {ADMITTED_WINDOWS_DAYS}")
+    try:
+        require_curriculum_windows(windows, splits)
+    except ValueError as cold_start_error:
+        if "initial_checkpoint" not in network:
+            raise
+        # Warm start (user decision 2026-10-19): the curriculum may start at
+        # the checkpoint's last trained window instead of the 1, 2, 4, 8 prefix.
+        try:
+            start = checkpoint_last_window_days(Path(network["initial_checkpoint"]))
+        except ValueError as unreadable:
+            raise ValueError(f"{cold_start_error}; and as a warm start: "
+                             f"{unreadable}") from None
+        require_curriculum_windows(windows, splits, start_window_days=start)
+    _validate_loss(config["loss"], network["noise_channel"], windows)
     _require_int(curriculum["epochs_per_window"], "epochs_per_window", minimum=1)
     if curriculum["network_between_windows"] != "carried":
         raise ValueError("network_between_windows must be 'carried'")
@@ -335,7 +547,7 @@ def resolve_start(config: dict, card):
     (ssh, u, v), provenance = record_start_state(
         card, chunks, objective=start["objective"],
         absolute_hour=HOURS_PER_DAY * start["day"])
-    state = coarse_state_from_native(card.recipe.initial_state, ssh, u, v)
+    state = start_state_from_native(card, ssh, u, v)
     return state, _jsonable(start | provenance)
 
 
@@ -398,18 +610,19 @@ def select_device(device: str, math_library: str, physical_gpu: int | None, *,
     }
 
 
-def build_deck_card(deck: str):
+def build_deck_card(deck: str, surface: str):
     """The coarse card of one named deck (after ``select_device``)."""
     if deck not in DECKS:
         raise ValueError(f"deck must be one of {sorted(DECKS)}")
-    return build_swg_card(DECKS[deck])
+    _validate_surface(surface)
+    require_surface_for_deck(deck, surface)
+    return build_swg_card(DECKS[deck], surface=surface)
 
 
 def steps_per_day(card) -> int:
     steps = SECONDS_PER_DAY / card.dt_s
-    if not float(steps).is_integer() \
-            or not float(SECONDS_PER_HOUR / card.dt_s).is_integer():
-        raise ValueError("the coarse timestep must divide one hour")
+    if not float(steps).is_integer():
+        raise ValueError("the coarse timestep must divide one day")
     return int(steps)
 
 
@@ -430,7 +643,9 @@ def network_spec(config: dict, card, geometry) -> tuple:
         kernel_size=network["kernel_size"],
         ssh_scale_m=scales.ssh_scale_m,
         velocity_scale_m_s=scales.velocity_scale_m_s,
-        potential_scale_m3_s2=scales.potential_scale_m3_s2), scales
+        potential_scale_m3_s2=scales.potential_scale_m3_s2,
+        wall_margin_rings=network["wall_margin_rings"],
+        noise_channel=network["noise_channel"] == "white_input"), scales
 
 
 # --------------------------------------------------------------------- dataset
@@ -445,6 +660,8 @@ def complete_chunks(record: dict) -> list[tuple[int, int, Path]]:
     pattern = re.compile(
         rf"{re.escape(record['chunk_label'])}_day(\d{{4}})_to_day(\d{{4}})")
     chunks = []
+    if not Path(record["root"]).is_dir():
+        raise ValueError(f"dataset record root does not exist: {record['root']}")
     for path in sorted(Path(record["root"]).iterdir()):
         match = pattern.fullmatch(path.name)
         manifest_path = path / "manifest.json"
@@ -476,6 +693,8 @@ def write_dataset_contract(config: dict, path: Path) -> dict:
     payload = {
         "schema": DATASET_SCHEMA, "objective": config["objective"],
         "batch_size": config["dataset"]["batch_size"],
+        "target_filter_sigma_cells":
+            float(config["dataset"]["target_filter_sigma_cells"]),
         "window_days": list(ADMITTED_WINDOWS_DAYS),
         "splits": {name: [HOURS_PER_DAY * start, HOURS_PER_DAY * end]
                    for name, (start, end) in splits.items()},
@@ -505,7 +724,9 @@ def check_data(config: dict, *, card) -> dict:
                 sampler = ({"epoch": 0, "seed": config["seeds"][0]}
                            if split == "train" else {})
                 batch = next(contract.batches(
-                    split=split, window_days=window_days, **sampler))
+                    split=split, window_days=window_days,
+                    target_interval_hours=config["target_interval_hours"],
+                    **sampler))
                 rows.append({
                     "split": split, "window_days": window_days,
                     "first_batch_start_hours": [
@@ -517,37 +738,215 @@ def check_data(config: dict, *, card) -> dict:
 
 # ------------------------------------------------------------ batch programs
 
+@contextlib.contextmanager
+def _single_precision_trace():
+    """Trace and run with x64 off: every float64 the card, the segment and
+    the network request becomes float32 (the card is built in float64)."""
+    with jax.enable_x64(False), warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*Explicitly requested dtype.*")
+        yield
+
+
+def _single(tree):
+    return jax.tree.map(
+        lambda leaf: leaf.astype(jnp.float32)
+        if eqx.is_inexact_array(leaf) else leaf, tree)
+
+
+def _in_single_precision(function):
+    """``function`` on float32 copies of the weights and the batch, traced
+    with x64 off; its outputs (loss, gradient) come back as float64."""
+    def run(network, initial, target, key):
+        with _single_precision_trace():
+            result = function(_single(network), _single(initial),
+                              _single(target), key)
+        return jax.tree.map(lambda leaf: leaf.astype(jnp.float64), result)
+
+    return run
+
+
 def build_batch_functions(card, geometry, *, window_days: int,
-                          objective: str, wall_ring: str):
+                          target_interval_hours: int,
+                          objective: str, wall_ring: str,
+                          training_precision: str, checkpoint: bool):
     """Jitted (value-and-grad, value) of the Eq. 7 loss of a window batch.
 
     Every window starts from its (rebalanced) stored state and runs the
     certified segment with the closure at every RK3 stage, zero stage noise
     and zero noise scale; the batch loss is ``deterministic_trajectory_loss``
-    over all windows and hourly endpoints (Eq. 7's mean).
+    over all windows and recorded endpoints, one every
+    ``target_interval_hours`` hours (Eq. 7's mean, equal weights).
+
+    ``training_precision`` ``"fp32"`` makes both functions take the float64
+    master weights and batch, compute the trajectory, loss and gradient in
+    float32 (x64 off for the build, trace and call only) and return them in
+    float64; ``"fp64"`` computes in float64 throughout.
+    ``checkpoint`` is passed to ``build_segment_fn``: ``True`` rematerialises
+    every step in the backward pass, ``False`` keeps
+    the activations (same loss and gradient, more memory, less time).
     """
-    raw, _ = build_segment_fn(
-        card, geometry, window_days=window_days, checkpoint=True)
-    n_steps = window_days * HOURS_PER_DAY * int(SECONDS_PER_HOUR / card.dt_s)
+    programs = build_batch_programs(
+        card, geometry, window_days=window_days,
+        target_interval_hours=target_interval_hours, objective=objective,
+        wall_ring=wall_ring, training_precision=training_precision,
+        checkpoint=checkpoint, loss={"kind": "eq7"}, constants=None)
+    return programs["value_and_grad"], programs["loss"]
+
+
+def build_batch_programs(card, geometry, *, window_days: int,
+                         target_interval_hours: int, objective: str,
+                         wall_ring: str, training_precision: str,
+                         checkpoint: bool, loss: dict, constants):
+    """Jitted ``value_and_grad``, ``loss`` and (non-Eq. 7 losses) ``report``
+    of one window batch, all ``(network, initial, target, key)``.
+
+    ``loss`` is the configuration's ``loss`` block.  ``eq7``: see
+    ``build_batch_functions`` (``constants`` None, no ``report``).
+    ``energy_score``: ``loss["members"]`` rollouts per window from the same
+    start, member ``m`` of window ``w`` driven by the ``(w, m)`` split of
+    ``key``; ``constants`` is the ``BalancedNormalizers``; the loss is the
+    mean over windows of Brolly's energy score and ``report`` the vector
+    ``(score, member_truth_distance, member_spread)``.
+    ``eq7_window_statistics``: the deterministic rollout (``key`` shared);
+    ``constants`` is ``(vorticity_weight, eke_weight)``; the loss is
+    ``window_statistics_trajectory_loss``'s total and ``report`` the vector
+    ``(total, eq7, vorticity_term, eke_term)``.
+    ``eq7_neuralgcm``: the deterministic rollout; ``constants`` is
+    ``(spectrum_weight, bias_weight)``; the loss is
+    ``neuralgcm_trajectory_loss``'s total and ``report`` the vector
+    ``(total, eq7_filtered, spectrum, bias)``; ``loss["lead_time_cutoff"]``
+    is the cutoff table.
+    ``energy_score_neuralgcm``: the ``energy_score`` ensemble;
+    ``constants`` is ``(BalancedNormalizers, spectrum_weight)``; the loss is
+    ``neuralgcm_ensemble_scores``'s total and ``report`` the vector
+    ``(total, member_truth_distance, member_spread, energy_score, spectrum)``.
+    """
+    if training_precision not in TRAINING_PRECISIONS:
+        raise ValueError(
+            f"training_precision must be one of {TRAINING_PRECISIONS}")
+    if type(checkpoint) is not bool:
+        raise ValueError("checkpoint must be true or false")
+    kind = loss["kind"]
+    if kind not in LOSS_KINDS:
+        raise ValueError(f"loss kind must be one of {LOSS_KINDS}")
+    if (kind == "eq7") != (constants is None):
+        raise ValueError("only the Eq. 7 loss takes no loss constants")
+    single = training_precision == "fp32"
+    with _single_precision_trace() if single else contextlib.nullcontext():
+        if single:
+            card = card._replace(recipe=card.recipe._replace(
+                grid=_single(card.recipe.grid),
+                land_mask=_single(card.recipe.land_mask),
+                initial_state=_single(card.recipe.initial_state)))
+            geometry = _single(geometry)
+        raw, _ = build_segment_fn(
+            card, geometry, window_days=window_days,
+            target_interval_hours=target_interval_hours, checkpoint=checkpoint)
+    n_steps = window_steps(card, window_days, target_interval_hours)
+    cutoff_bands = lead_time_cutoff_bands(
+        loss["lead_time_cutoff"],
+        n_records=HOURS_PER_DAY * window_days // target_interval_hours,
+        target_interval_hours=target_interval_hours,
+    ) if kind in NEURALGCM_LOSS_KINDS else None
     template = card.recipe.initial_state
     namelist = card.resolved_namelist
     shape = tuple(geometry.tmask.shape)
+    noise_dtype = jnp.float32 if single else jnp.float64
+    eq7 = dict(objective=objective, beta_m1_s1=namelist.rn_beta_m_s,
+               basin_length_m=namelist.rn_domsiz_m, wall_ring=wall_ring)
 
-    def batch_loss(network, initial, target, key):
-        noise = jnp.zeros((n_steps, 3) + shape, dtype=jnp.float64)
+    def rollout(network, ssh, u, v, key):
+        noise = jnp.zeros((n_steps, 3) + shape, dtype=noise_dtype)
+        state = rigid_lid_start_state(
+            card, coarse_state_from_native(template, ssh, u, v))
+        return raw(network, state, noise, key, jnp.asarray(0.0))[1]
 
-        def rollout(ssh, u, v):
-            state = coarse_state_from_native(template, ssh, u, v)
-            return raw(network, state, noise, key, jnp.asarray(0.0))[1]
+    def ensemble(network, initial, key):
+        windows = initial[0].shape[0]
+        keys = jax.random.split(key, windows * loss["members"]).reshape(
+            (windows, loss["members"]) + key.shape)
+        return jax.vmap(lambda ssh, u, v, member_keys: jax.vmap(
+            lambda member_key: rollout(network, ssh, u, v, member_key))(
+            member_keys))(*initial, keys)
 
-        predicted = jax.vmap(rollout)(*initial)
-        return deterministic_trajectory_loss(
-            predicted, target, geometry, objective=objective,
-            beta_m1_s1=namelist.rn_beta_m_s,
-            basin_length_m=namelist.rn_domsiz_m, wall_ring=wall_ring)
+    def deterministic(network, initial, key):
+        return jax.vmap(lambda ssh, u, v: rollout(
+            network, ssh, u, v, key))(*initial)
 
-    return (eqx.filter_jit(eqx.filter_value_and_grad(batch_loss)),
-            eqx.filter_jit(batch_loss))
+    if kind == "eq7":
+        def batch_loss(network, initial, target, key):
+            return deterministic_trajectory_loss(
+                deterministic(network, initial, key), target, geometry, **eq7)
+        report = None
+    elif kind == "energy_score":
+        def scores(network, initial, target, key):
+            return jnp.stack(ensemble_trajectory_scores(
+                ensemble(network, initial, key), target, geometry, constants,
+                objective=objective))
+
+        def batch_loss(network, initial, target, key):
+            return scores(network, initial, target, key)[0]
+        report = scores
+    elif kind == "energy_score_neuralgcm":
+        def scores(network, initial, target, key):
+            return jnp.stack(neuralgcm_ensemble_scores(
+                ensemble(network, initial, key), target, geometry,
+                constants[0], objective=objective, cutoff_bands=cutoff_bands,
+                spectrum_weight=constants[1]))
+
+        def batch_loss(network, initial, target, key):
+            return scores(network, initial, target, key)[0]
+        report = scores
+    elif kind == "eq7_neuralgcm":
+        def terms(network, initial, target, key):
+            return jnp.stack(neuralgcm_trajectory_loss(
+                deterministic(network, initial, key), target, geometry,
+                cutoff_bands=cutoff_bands, spectrum_weight=constants[0],
+                bias_weight=constants[1], **eq7))
+
+        def batch_loss(network, initial, target, key):
+            return terms(network, initial, target, key)[0]
+        report = terms
+    elif kind == "eq7_window_statistics":
+        def terms(network, initial, target, key):
+            return jnp.stack(window_statistics_trajectory_loss(
+                deterministic(network, initial, key), target, geometry,
+                vorticity_weight=constants[0], eke_weight=constants[1], **eq7))
+
+        def batch_loss(network, initial, target, key):
+            return terms(network, initial, target, key)[0]
+        report = terms
+    else:
+        raise ValueError(f"loss kind must be one of {LOSS_KINDS}")
+
+    programs = {"value_and_grad": eqx.filter_jit(eqx.filter_value_and_grad(
+        batch_loss)), "loss": eqx.filter_jit(batch_loss)}
+    if report is not None:
+        programs["report"] = eqx.filter_jit(report)
+    if single:
+        programs = {name: _in_single_precision(function)
+                    for name, function in programs.items()}
+
+    def zero_lid_ssh(function):
+        # Under the lid the traced start cannot refuse stored sea level;
+        # the concrete batch is refused here (no-op on an explicit card).
+        def run(network, initial, target, key):
+            require_rigid_lid_zero_ssh(card, initial[0])
+            return function(network, initial, target, key)
+        return run
+
+    return {name: zero_lid_ssh(function) for name, function in programs.items()}
+
+
+def require_whole_batch_for_bias(kind: str, windows_per_call: int) -> None:
+    """The ``eq7_neuralgcm`` bias term is the squared window-and-lead mean
+    error of the batch: not a mean of per-part terms, so the batch must be
+    one call (the parts of a split batch would each see their own mean)."""
+    if kind == "eq7_neuralgcm" and windows_per_call != TEMPLATE_BATCH_SIZE:
+        raise ValueError(
+            "the eq7_neuralgcm loss's bias term is the mean error of the "
+            f"whole batch: windows_per_call must be {TEMPLATE_BATCH_SIZE}, "
+            f"got {windows_per_call}")
 
 
 def _parts(batch, windows_per_call: int):
@@ -557,15 +956,27 @@ def _parts(batch, windows_per_call: int):
                tuple(jnp.asarray(value[part]) for value in batch.target))
 
 
-def batch_value_and_grad(value_and_grad, network, batch, key, windows_per_call):
+def _part_keys(key, windows_per_call: int, per_part_keys: bool):
+    """The key of each part: ``key`` itself, or (ensemble noise) ``key``
+    folded with the part's first window so no two parts share a stream."""
+    return [jax.random.fold_in(key, first) if per_part_keys else key
+            for first in range(0, TEMPLATE_BATCH_SIZE, windows_per_call)]
+
+
+def batch_value_and_grad(value_and_grad, network, batch, key, windows_per_call,
+                         *, per_part_keys: bool = False):
     """Batch loss and gradient from equal parts of the ten windows.
 
     Each part's loss is the Eq. 7 mean over its windows, so the mean of the
     parts is the batch's Eq. 7 loss exactly (only the summation order
-    depends on ``windows_per_call``).
+    depends on ``windows_per_call``).  ``per_part_keys`` (stochastic losses)
+    gives every part its own noise stream.
     """
-    results = [value_and_grad(network, initial, target, key)
-               for initial, target in _parts(batch, windows_per_call)]
+    results = [value_and_grad(network, initial, target, part_key)
+               for (initial, target), part_key in zip(
+                   _parts(batch, windows_per_call),
+                   _part_keys(key, windows_per_call, per_part_keys),
+                   strict=True)]
     count = len(results)
     loss = functools.reduce(operator.add, [value for value, _ in results])
     grads = jax.tree.map(lambda *parts: functools.reduce(operator.add, parts),
@@ -573,10 +984,26 @@ def batch_value_and_grad(value_and_grad, network, batch, key, windows_per_call):
     return loss / count, jax.tree.map(lambda leaf: leaf / count, grads)
 
 
-def batch_loss_value(loss_fn, network, batch, key, windows_per_call) -> float:
-    values = [loss_fn(network, initial, target, key)
-              for initial, target in _parts(batch, windows_per_call)]
+def batch_loss_value(loss_fn, network, batch, key, windows_per_call,
+                     *, per_part_keys: bool = False) -> float:
+    values = [loss_fn(network, initial, target, part_key)
+              for (initial, target), part_key in zip(
+                  _parts(batch, windows_per_call),
+                  _part_keys(key, windows_per_call, per_part_keys),
+                  strict=True)]
     return float(functools.reduce(operator.add, values) / len(values))
+
+
+def batch_report(report_fn, network, batch, key, windows_per_call,
+                 *, per_part_keys: bool = False) -> np.ndarray:
+    """Mean over the parts of ``report_fn``'s vector (each part's mean over
+    its windows), so the mean over the batch's ten windows."""
+    values = [np.asarray(report_fn(network, initial, target, part_key))
+              for (initial, target), part_key in zip(
+                  _parts(batch, windows_per_call),
+                  _part_keys(key, windows_per_call, per_part_keys),
+                  strict=True)]
+    return np.mean(values, axis=0)
 
 
 def _require_finite(loss, grads, where: str) -> None:
@@ -587,8 +1014,8 @@ def _require_finite(loss, grads, where: str) -> None:
 
 
 def batch_start_states(card, batch) -> tuple:
-    return tuple(coarse_state_from_native(
-        card.recipe.initial_state, *(value[index] for value in batch.initial))
+    return tuple(start_state_from_native(
+        card, *(value[index] for value in batch.initial))
         for index in range(TEMPLATE_BATCH_SIZE))
 
 
@@ -601,6 +1028,11 @@ def free_run_day(network, card, geometry, *, key):
     (closure at every RK3 stage, zero stage noise, noise scale 0;
     ``network=None`` steps without a closure): ``state -> (end-of-day state,
     (ssh, u, v) arithmetic means of every post-step state of the day)``.
+
+    ``day(state, day_index=0)`` runs model day ``day_index`` (0-based from
+    the free run's start).  A network with the white-noise channel draws
+    fresh ``xi`` every model step: step ``n`` of the run (global, from 0) is
+    keyed ``fold_in(key, n)``, so a free run is reproducible from ``key``.
     """
     tau_u, tau_v = swg_surface_wind(card.resolved_namelist)
     forcing = OceanSurfaceForcing(
@@ -608,16 +1040,26 @@ def free_run_day(network, card, geometry, *, key):
         tau_j_native=jnp.asarray(tau_v, dtype=jnp.float64))
     stage_noise = jnp.zeros((3,) + tuple(geometry.tmask.shape), jnp.float64)
 
-    def step(state, dt_s, surface_forcing):
+    noisy = network is not None and network.spec.noise_channel
+    per_day = steps_per_day(card)
+
+    def step(state, dt_s, surface_forcing, step_index=None):
         if dt_s != card.dt_s:
             raise ValueError("a free-run step must use the card's timestep")
+        step_key = jax.random.fold_in(key, step_index) if noisy else key
         return swg_online_step(
-            network, state, stage_noise, key, jnp.asarray(0.0), card=card,
+            network, state, stage_noise, step_key, jnp.asarray(0.0), card=card,
             geometry=geometry, forcing=surface_forcing)
 
-    return forcing, _double_gyre_driver().build_scanned_day_mean_stepper(
-        types.SimpleNamespace(step=step), card.dt_s, forcing,
-        steps_per_day(card))
+    scanned = _double_gyre_driver().build_scanned_day_mean_stepper(
+        types.SimpleNamespace(step=step), card.dt_s, forcing, per_day)
+
+    def day(state, day_index: int = 0):
+        if not noisy:
+            return scanned(state)
+        return scanned(state, jnp.asarray(day_index * per_day, dtype=jnp.int32))
+
+    return forcing, day
 
 
 def free_run(network, card, geometry, output: Path, *, days: int,
@@ -654,7 +1096,12 @@ def free_run(network, card, geometry, output: Path, *, days: int,
         "integration": ("one jitted scan per model day of swg_online_step "
                         "(certified SWE RK3 step, closure potential at every "
                         "stage, zero stage noise, noise scale 0) in the "
-                        "double-gyre driver's daily-mean stepper"),
+                        "double-gyre driver's daily-mean stepper"
+                        + ("; white-noise input channel: a fresh N(0,1) draw "
+                           "per model step, step n of the run keyed "
+                           "fold_in(PRNGKey(network_seed), n)"
+                           if network is not None
+                           and network.spec.noise_channel else "")),
         "sampling": FREE_RUN_SAMPLING,
         "fields": {"ssh_m": "end-of-day snapshot; T points",
                    "u_m_s": "end-of-day snapshot; native NEMO U record",
@@ -672,7 +1119,7 @@ def free_run(network, card, geometry, output: Path, *, days: int,
     health = None
     started = time.perf_counter()
     for day in range(1, days + 1):
-        state, means = one_day(state)
+        state, means = one_day(state, day - 1)
         jax.block_until_ready(state.eta.data)
         if day == 1:
             first_day_s = time.perf_counter() - started
@@ -701,7 +1148,7 @@ def free_run(network, card, geometry, output: Path, *, days: int,
                      daily_mean_sample_count=np.int64(per_day),
                      **{key: np.asarray(value, dtype=np.float64) for key, value
                         in zip(SNAPSHOT_FIELDS + DAILY_MEAN_FIELDS,
-                               snapshot + tuple(means), strict=True)})
+                               snapshot + tuple(means)[:3], strict=True)})
         temporary.replace(output / name)
         hashes[name] = _sha256(output / name)
         if day % driver.METADATA_CHECKPOINT_DAYS == 0 or day == days:
@@ -731,12 +1178,27 @@ def _archive_incomplete(path: Path) -> None:
 
 # ---------------------------------------------------------------------- train
 
+_LEAD_FILTER_DEFINITION = (
+    "per record, orthonormal DCT-II (jax.scipy.fft.dctn type 2) of the wet T "
+    "box, coefficients with isotropic mode-index radius sqrt(ky^2+kx^2) above "
+    "the record's cutoff band zeroed, inverse transform, wet points kept; "
+    "cutoff of the record at lead L hours = cutoff_band of the last "
+    "lead_hours entry <= L (left-continuous step); a cutoff at or above the "
+    "box's largest radius leaves the record untouched")
+_KE_SPECTRUM_DEFINITION = (
+    "legoesm.ocean.diagnostics.isotropic_energy_spectrum of the cell-centred "
+    "rotational velocity over the wet T box, per record; squared error, "
+    "mean over bins, records, windows (and members), no per-band "
+    "normalisation")
+
+
 def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
               contract_sha256: str, contract: dict, *, seed: int,
               device: dict, windows_per_call: int, commit: str) -> dict:
     namelist = card.resolved_namelist
     half_width = maddison_half_width_m(namelist.rn_domsiz_m, geometry)
     per_day = steps_per_day(card)
+    interval = config["target_interval_hours"]
     pretrained = config["network"].get("initial_checkpoint")
     network_init = "SWGScalarPotentialCNN(spec, key=PRNGKey(seed))"
     initial_checkpoint = {}
@@ -747,7 +1209,16 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
             "path": pretrained, "sha256": _sha256(Path(pretrained))}}
         network_init += ("; weights then loaded from "
                          "network.initial_checkpoint (optimiser fresh)")
-    return _jsonable({
+        if config["network"]["noise_channel"] == "white_input":
+            network_init += (
+                "; the file's four-channel network gains the xi input "
+                "channel (add_noise_channel: weights ~ N(0, (relative_scale "
+                "x rms of the SSH-channel first-layer weights)^2), key = "
+                "fold_in(PRNGKey(seed), tag))")
+            initial_checkpoint["initial_checkpoint"]["noise_channel_init"] = {
+                "relative_scale": NOISE_CHANNEL_INIT_RELATIVE_SCALE,
+                "tag": NOISE_CHANNEL_INIT_TAG}
+    identity = _jsonable({
         "schema": RUN_SCHEMA,
         "run_id": f"{config['experiment']}/seed{seed}",
         "config_sha256": _sha256(config_path),
@@ -758,7 +1229,11 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
             "window_sampler": "SWGDatasetContract.batches(seed=seed, "
                               "epoch=epoch-1): offset per (seed, window, "
                               "epoch), shuffled",
-            "rollout_key": "PRNGKey(seed); inert: zero stage noise, scale 0"},
+            "rollout_key": "PRNGKey(seed); inert: zero stage noise, scale 0"
+            if config["loss"]["kind"] not in ENSEMBLE_LOSS_KINDS else
+            "member (w, m) of a training batch step: split(fold_in(fold_in("
+            "fold_in(fold_in(PRNGKey(seed), 1), window_days), epoch), step), "
+            "part-folded); validation: the same with tag 2, no epoch/step"},
         "legoesm_git_sha": commit,
         "versions": {"jax": jax.__version__, "equinox": eqx.__version__,
                      "optax": optax.__version__, "numpy": np.__version__},
@@ -768,7 +1243,10 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
         "execution": {
             "windows_per_call": windows_per_call,
             "segment": "build_segment_fn(checkpoint=True): rematerialise "
-                       "every production step"},
+                       "every production step"
+            if config["gradient_checkpointing"] else
+            "build_segment_fn(checkpoint=False): keep every production "
+            "step's activations"},
         "card": {"namelist": namelist._asdict(), "dt_s": card.dt_s,
                  "steps_per_day": per_day,
                  "grid_shape": list(geometry.tmask.shape)},
@@ -779,7 +1257,12 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
             "scale_rule": SCALE_RULE, "scales": scales._asdict(),
             "input_channels": ["ssh/ssh_scale (+ zero noise)",
                                "T-centred u/velocity_scale",
-                               "T-centred v/velocity_scale", "wet mask"],
+                               "T-centred v/velocity_scale", "wet mask"]
+            if not spec.noise_channel else
+            ["ssh/ssh_scale", "T-centred u/velocity_scale",
+             "T-centred v/velocity_scale", "wet mask",
+             "xi ~ N(0,1) per T cell: one draw per model step, shared by the "
+             "three RK3 stages"],
             "output": "potential_scale x boundary-zero F-point potential",
             **initial_checkpoint},
         "optimiser": {
@@ -795,7 +1278,9 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
             "half_width_m": half_width,
             "prefactor": 1.0e4 / (namelist.rn_beta_m_s**2 * half_width**2)
             / (4.0 * half_width**2),
-            "reduction": "mean over windows and hourly right endpoints",
+            "reduction": "mean over windows and "
+                         + ("hourly" if interval == 1
+                            else f"{interval}-hourly") + " right endpoints",
             "training_loss_logged": "mean over the epoch's batches, each at "
                                     "its pre-update parameters",
             "validation_loss_logged": "mean over every validation batch of "
@@ -805,24 +1290,97 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
             "splits_hours": contract["splits"],
             "source_count": len(contract["sources"]),
             "operator": _OPERATOR_FIELDS[config["objective"]],
+            "target_filter_sigma_cells":
+                config["dataset"]["target_filter_sigma_cells"],
             "start_state": {
                 "rule": "stored state at the start hour, sea level "
                         "rebalanced (build_start_rebalancer)",
                 "tolerance": START_REBALANCE_TOLERANCE,
                 "max_iterations": START_REBALANCE_MAX_ITERATIONS},
-            "target": "stored right endpoints 1..24w hours later, same "
-                      "operator"},
+            "target": ("stored right endpoints 1..24w hours later, same "
+                       "operator" if interval == 1 else
+                       f"every {interval}th stored hour, {interval}..24w "
+                       "hours after the window start, same operator")},
         "curriculum": config["curriculum"],
         "gates": {
             "initial_closure_acceleration": "initial_closure_acceleration_"
                                             "ratio on the ten starts of the "
-                                            "first training batch, bar 0.01",
+                                            "first training batch, bar 0.01"
+            + ("" if config["network"]["initial_acceleration_gate"]
+               == "enforced" else " (recorded, not enforced: the network is "
+               "loaded from network.initial_checkpoint)"),
             "no_inert": "assert_network_gradients_live on the first "
                         "optimiser step's gradient",
             "finite": "loss and every gradient element at every step"},
         "free_run": config["free_run"] | {"namelist": free_run_namelist(
             card, config["free_run"]["days"])._asdict()},
     })
+    kind = config["loss"]["kind"]
+    if kind == "energy_score":
+        identity["loss"] = {key: identity["loss"][key] for key in (
+            "objective", "wall_ring")} | {
+            "definition": "Brolly (2026) Eq. 9 energy score, "
+                          "balanced_trajectory_loss(kind='energy_score') per "
+                          "window, mean over windows",
+            "members": config["loss"]["members"],
+            "member_start": "the window's stored start state, every member",
+            "normalizers": "training-split area-weighted variances of the "
+                           "three balanced fields (run manifest "
+                           "loss_constants)",
+            "validation_report": ["energy_score", "member_truth_distance",
+                                  "member_spread"]}
+    elif kind == "energy_score_neuralgcm":
+        identity["loss"] = {key: identity["loss"][key] for key in (
+            "objective", "wall_ring")} | {
+            "definition": "Brolly (2026) Eq. 9 energy score of the "
+                          "lead-filtered fields (neuralgcm_ensemble_scores) "
+                          "+ spectrum_weight * MSE of the KE spectrum of "
+                          "each unfiltered member against the truth's, "
+                          "means over windows",
+            "members": config["loss"]["members"],
+            "member_start": "the window's stored start state, every member",
+            "lead_time_filter": _LEAD_FILTER_DEFINITION,
+            "lead_time_cutoff": config["loss"]["lead_time_cutoff"],
+            "ke_spectrum": _KE_SPECTRUM_DEFINITION,
+            "weights": "normalizers: training-split area-weighted variances "
+                       "of the three balanced fields; spectrum_weight set "
+                       "once from the first training batch of "
+                       f"{config['loss']['calibration_window_days']}-day "
+                       "windows so the spectrum term equals the energy-score "
+                       "term, then frozen (run manifest loss_constants)",
+            "validation_report": list(REPORT_NAMES[kind])}
+    elif kind == "eq7_neuralgcm":
+        identity["loss"] = identity["loss"] | {
+            "definition": "Eq. 7 on the lead-filtered vorticity + "
+                          "spectrum_weight * MSE of the KE spectrum (of the "
+                          "unfiltered rotational velocity) + bias_weight * "
+                          "Eq. 7-weighted squared error of the window-and-"
+                          "lead mean of the lead-filtered vorticity "
+                          "(neuralgcm_trajectory_loss)",
+            "lead_time_filter": _LEAD_FILTER_DEFINITION,
+            "lead_time_cutoff": config["loss"]["lead_time_cutoff"],
+            "ke_spectrum": _KE_SPECTRUM_DEFINITION,
+            "bias_batch": "the ten windows of one batch (windows_per_call "
+                          "must be 10)",
+            "weights": "both set once from the first training batch of "
+                       f"{config['loss']['calibration_window_days']}-day "
+                       "windows so each added term equals the filtered "
+                       "Eq. 7 term, then frozen (run manifest "
+                       "loss_constants)",
+            "validation_report": list(REPORT_NAMES[kind])}
+    elif kind == "eq7_window_statistics":
+        identity["loss"] = identity["loss"] | {
+            "definition": "Eq. 7 + vorticity_weight * NRMSE^2(window-mean "
+                          "filtered vorticity map) + eke_weight * "
+                          "NRMSE^2(window EKE map of the filtered rotational "
+                          "velocity), window_statistics_trajectory_loss",
+            "weights": "set once from the first training batch of "
+                       f"{config['loss']['calibration_window_days']}-day "
+                       "windows so each added term equals the Eq. 7 term, "
+                       "then frozen (run manifest loss_constants)",
+            "validation_report": ["total", "eq7", "vorticity_nrmse2",
+                                  "eke_nrmse2"]}
+    return identity
 
 
 def _checkpoint_name(window_days: int, epoch: int) -> str:
@@ -835,12 +1393,15 @@ def _checkpoint_name(window_days: int, epoch: int) -> str:
 # and the commit of the extending code.  Everything else, epochs_per_window
 # included, must be identical.
 _EXTENSION_KEYS = ("config", "config_sha256", "curriculum", "legoesm_git_sha")
+# Written into the manifest after it exists (the extension record, the loss
+# constants measured on the first batch): not part of the run's identity.
+_RECORDED_KEYS = ("curriculum_extensions", "loss_constants")
 
 
 def run_identity(stored: dict) -> dict:
-    """A stored run manifest without its record of curriculum extensions."""
+    """A stored run manifest without what was recorded into it later."""
     return {key: value for key, value in stored.items()
-            if key != "curriculum_extensions"}
+            if key not in _RECORDED_KEYS}
 
 
 def curriculum_extension(stored: dict, identity: dict, log: dict,
@@ -888,6 +1449,167 @@ def curriculum_extension(stored: dict, identity: dict, log: dict,
         "legoesm_git_sha": identity["legoesm_git_sha"]}
 
 
+def initial_network(config: dict, spec, optimizer, *, key):
+    """``(network, optimiser state)`` at the start of a run.
+
+    The seed's random initialisation, or ``network.initial_checkpoint``'s
+    network (its optimiser state is discarded: the first stage starts fresh;
+    a structurally different file raises before any run directory exists).
+    A spec with the white-noise channel loads the file as the four-channel
+    network it holds and grows the channel (``add_noise_channel``, weights
+    ``NOISE_CHANNEL_INIT_RELATIVE_SCALE`` x the SSH-channel weights' rms).
+    """
+    pretrained = config["network"].get("initial_checkpoint")
+    loaded = spec._replace(noise_channel=False) \
+        if pretrained is not None else spec
+    network = SWGScalarPotentialCNN(loaded, key=key)
+    opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))
+    if pretrained is not None:
+        network, _ = load_checkpoint_or_fail(
+            Path(pretrained), (network, opt_state),
+            what="network initial_checkpoint")
+        if spec.noise_channel:
+            network = add_noise_channel(
+                network, key=jax.random.fold_in(key, NOISE_CHANNEL_INIT_TAG),
+                relative_scale=NOISE_CHANNEL_INIT_RELATIVE_SCALE)
+            opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))
+    return network, opt_state
+
+
+def _train_window_batches(contract, config: dict, *, window_days: int,
+                          seed: int, epoch: int = 0):
+    return contract.batches(
+        split="train", window_days=window_days,
+        target_interval_hours=config["target_interval_hours"],
+        epoch=epoch, seed=seed)
+
+
+def _measure_normalizers(config: dict, *, geometry, contract, seed: int):
+    """The energy score's frozen normalizers and their provenance:
+    area-weighted variances of the three balanced fields of the training
+    split's targets (every batch of one epoch of ``curriculum.window_days[0]``
+    windows, the objective's diagnostic); ``(record, BalancedNormalizers)``."""
+    window_days = config["curriculum"]["window_days"][0]
+    diagnose = jax.jit(lambda native: diagnose_native_windows(
+        native, geometry, objective=config["objective"]))
+    moments, batches = np.zeros((3, 3)), 0
+    for batch in _train_window_batches(
+            contract, config, window_days=window_days, seed=seed):
+        moments += balanced_field_second_moments(
+            diagnose(tuple(jnp.asarray(value) for value in batch.target)),
+            geometry)
+        batches += 1
+    normalizers = normalizers_from_moments(moments)
+    return {"normalizers": normalizers._asdict(),
+            "source": {
+                "split": "train", "window_days": window_days,
+                "target_interval_hours": config["target_interval_hours"],
+                "epoch": 0, "seed": seed, "batches": batches,
+                "samples": int(moments[0, 0]),
+                "definition": "area_t*tmask-weighted variance about the "
+                              "sample-and-area mean of the objective's "
+                              "balanced fields (diagnose_native_windows)"}}, \
+        normalizers
+
+
+def measure_loss_constants(config: dict, *, card, geometry, contract, network,
+                           key, seed: int, windows_per_call: int) -> dict:
+    """The constants a non-Eq. 7 loss freezes at the start of a run.
+
+    ``energy_score``: the normalizers (``_measure_normalizers``).
+    ``eq7_window_statistics``: the two weights that make each added term
+    equal the Eq. 7 term on the first training batch of
+    ``calibration_window_days`` windows at the starting network.
+    ``eq7_neuralgcm``: the same for the KE-spectrum and bias terms against
+    the lead-filtered Eq. 7 term.  ``energy_score_neuralgcm``: the
+    ``energy_score`` normalizers plus the one weight that makes the spectrum
+    term equal the filtered energy-score term on that batch (its members
+    drawn with the key of the first training step of that window length).
+    """
+    loss = config["loss"]
+    kind = loss["kind"]
+    if kind == "energy_score":
+        record, _ = _measure_normalizers(
+            config, geometry=geometry, contract=contract, seed=seed)
+        return {"kind": "energy_score", **record}
+    window_days = loss["calibration_window_days"]
+    batch = next(_train_window_batches(
+        contract, config, window_days=window_days, seed=seed))
+    programs_for = functools.partial(
+        build_batch_programs, card, geometry, window_days=window_days,
+        target_interval_hours=config["target_interval_hours"],
+        objective=config["objective"], wall_ring=config["wall_ring"],
+        training_precision=config["training_precision"],
+        checkpoint=config["gradient_checkpointing"], loss=loss)
+    provenance = {
+        "window_days": window_days, "epoch": 0, "seed": seed,
+        "batch": "first training batch, the starting network",
+        "start_absolute_hours": [int(hour) for hour
+                                 in batch.start_absolute_hour]}
+    if kind == "energy_score_neuralgcm":
+        record, normalizers = _measure_normalizers(
+            config, geometry=geometry, contract=contract, seed=seed)
+        step_key = jax.random.fold_in(jax.random.fold_in(jax.random.fold_in(
+            jax.random.fold_in(key, TRAIN_NOISE_TAG), window_days), 1), 0)
+        energy, spectrum = (float(value) for value in batch_report(
+            programs_for(constants=(normalizers, 0.0))["report"], network,
+            batch, step_key, windows_per_call, per_part_keys=True)[3:])
+        if not all(np.isfinite(value) and value > 0.0
+                   for value in (energy, spectrum)):
+            raise RuntimeError("spectrum calibration terms must be positive "
+                               f"and finite, got {energy, spectrum}")
+        return {"kind": kind, **record, "spectrum_weight": energy / spectrum,
+                "calibration": provenance | {
+                    "energy_score_filtered": energy, "spectrum_mse": spectrum}}
+    report = batch_report(programs_for(constants=(0.0, 0.0))["report"],
+                          network, batch, key, windows_per_call)
+    if kind == "eq7_neuralgcm":
+        _, eq7, spectrum, bias = (float(value) for value in report)
+        terms = {"eq7_filtered": eq7, "spectrum_mse": spectrum,
+                 "bias_mse": bias}
+        weights = {"spectrum_weight": eq7 / spectrum,
+                   "bias_weight": eq7 / bias}
+    else:
+        _, eq7, vorticity, kinetic = (float(value) for value in report)
+        terms = {"eq7": eq7, "vorticity_nrmse2": vorticity,
+                 "eke_nrmse2": kinetic}
+        weights = {"vorticity_weight": eq7 / vorticity,
+                   "eke_weight": eq7 / kinetic}
+    if not all(np.isfinite(value) and value > 0.0 for value in terms.values()):
+        raise RuntimeError("loss calibration terms must be positive and "
+                           f"finite, got {terms}")
+    return {"kind": kind, **weights, "calibration": provenance | terms}
+
+
+def frozen_loss_constants(config: dict, manifest_path: Path, *, have_epochs,
+                          **measurement):
+    """The loss constants for ``build_batch_programs`` (None for Eq. 7),
+    measured once and recorded in the run manifest, read back on resume."""
+    kind = config["loss"]["kind"]
+    if kind == "eq7":
+        return None
+    stored = json.loads(manifest_path.read_text())
+    record = stored.get("loss_constants")
+    if record is None:
+        if have_epochs:
+            raise RuntimeError(
+                "epochs are logged but the run manifest records no loss "
+                "constants")
+        record = _jsonable(measure_loss_constants(config, **measurement))
+        _write_json(manifest_path, stored | {"loss_constants": record})
+    if record["kind"] != kind:
+        raise RuntimeError("the manifest's loss constants are for "
+                           f"{record['kind']!r}, not {kind!r}")
+    if kind == "energy_score":
+        return BalancedNormalizers(**record["normalizers"])
+    if kind == "energy_score_neuralgcm":
+        return (BalancedNormalizers(**record["normalizers"]),
+                record["spectrum_weight"])
+    if kind == "eq7_neuralgcm":
+        return (record["spectrum_weight"], record["bias_weight"])
+    return (record["vorticity_weight"], record["eke_weight"])
+
+
 def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
           device: dict, windows_per_call: int, commit: str) -> dict:
     """Run, or resume, one seed of one configuration in ``run_dir``."""
@@ -895,6 +1617,7 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
         raise ValueError(f"seed {seed} is not one of the configuration's seeds")
     if windows_per_call not in (1, 2, 5, 10):
         raise ValueError("windows_per_call must divide the batch of ten")
+    require_whole_batch_for_bias(config["loss"]["kind"], windows_per_call)
     geometry = build_closure_geometry(card)
     spec, scales = network_spec(config, card, geometry)
     settings = SWGOptimizerSettings(**config["optimiser"])
@@ -915,16 +1638,7 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
             windows_per_call=windows_per_call, commit=commit)
 
     key = jax.random.PRNGKey(seed)
-    network = SWGScalarPotentialCNN(spec, key=key)
-    opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))
-    pretrained = config["network"].get("initial_checkpoint")
-    if pretrained is not None:
-        # The file's network replaces the seed's initialisation; its
-        # optimiser state is discarded (the first stage starts fresh).  A
-        # structurally different file raises here, before any run directory.
-        network, _ = load_checkpoint_or_fail(
-            Path(pretrained), (network, opt_state),
-            what="network initial_checkpoint")
+    network, opt_state = initial_network(config, spec, optimizer, key=key)
 
     if manifest_path.is_file():
         stored = json.loads(manifest_path.read_text())
@@ -969,6 +1683,13 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
             raise
         staging.rename(run_dir)
     contract = SWGDatasetContract.from_json(contract_path, card=card)
+    if config["dataset"]["cache"] == "memory":
+        loaded = time.perf_counter()
+        held = contract.preload_memory(
+            window_days=config["curriculum"]["window_days"],
+            target_interval_hours=config["target_interval_hours"])
+        print(f"DATASET_CACHE hours={held['hours']} bytes={held['bytes']} "
+              f"seconds={time.perf_counter() - loaded:.1f}", flush=True)
     log["invocations"].append(invocation | {
         "completed_epochs_at_start": len(log["epochs"])})
     _write_json(log_path, log)
@@ -984,17 +1705,32 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
     windows = config["curriculum"]["window_days"]
     epochs = config["curriculum"]["epochs_per_window"]
     first_step = not log["epochs"]
+    constants = frozen_loss_constants(
+        config, manifest_path, have_epochs=bool(log["epochs"]), card=card,
+        geometry=geometry, contract=contract, network=network, key=key,
+        seed=seed, windows_per_call=windows_per_call)
+    kind = config["loss"]["kind"]
+    stochastic = kind in ENSEMBLE_LOSS_KINDS
+    train_key = jax.random.fold_in(key, TRAIN_NOISE_TAG)
+    validation_key = jax.random.fold_in(key, VALIDATION_NOISE_TAG)
 
     for window_days in windows:
-        value_and_grad = loss_fn = None
+        value_and_grad = loss_fn = report_fn = None
         for epoch in range(1, epochs + 1):
             if (window_days, epoch) in done:
                 continue
             if value_and_grad is None:
-                value_and_grad, loss_fn = build_batch_functions(
+                programs = build_batch_programs(
                     card, geometry, window_days=window_days,
+                    target_interval_hours=config["target_interval_hours"],
                     objective=config["objective"],
-                    wall_ring=config["wall_ring"])
+                    wall_ring=config["wall_ring"],
+                    training_precision=config["training_precision"],
+                    checkpoint=config["gradient_checkpointing"],
+                    loss=config["loss"], constants=constants)
+                value_and_grad, loss_fn = (
+                    programs["value_and_grad"], programs["loss"])
+                report_fn = programs.get("report")
                 update = _update_function(optimizer)
             if epoch == 1:
                 opt_state = optimizer.init(
@@ -1002,21 +1738,32 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
             if first_step:
                 log["gates"] = _start_gates(
                     network, contract, card, geometry, scales,
-                    window_days=window_days, seed=seed, key=key)
+                    window_days=window_days, seed=seed, key=key,
+                    target_interval_hours=config["target_interval_hours"])
                 _write_json(log_path, log)
-                if not log["gates"]["initial_closure_acceleration"]["passes"]:
+                if config["network"]["initial_acceleration_gate"] \
+                        == "recorded_only":
+                    log["gates"]["initial_closure_acceleration"][
+                        "enforced"] = False
+                    _write_json(log_path, log)
+                elif not log["gates"]["initial_closure_acceleration"]["passes"]:
                     raise RuntimeError(
                         "initial closure acceleration exceeds 1% of the wind "
                         "acceleration on the first batch's ten starts")
             started = time.perf_counter()
             losses = []
             for step, batch in enumerate(contract.batches(
-                    split="train", window_days=window_days, epoch=epoch - 1,
-                    seed=seed)):
+                    split="train", window_days=window_days,
+                    target_interval_hours=config["target_interval_hours"],
+                    epoch=epoch - 1, seed=seed)):
                 if batch.split != "train" or batch.window_days != window_days:
                     raise RuntimeError("contract issued a mislabelled batch")
+                step_key = jax.random.fold_in(jax.random.fold_in(
+                    jax.random.fold_in(train_key, window_days), epoch), step) \
+                    if stochastic else key
                 loss, grads = batch_value_and_grad(
-                    value_and_grad, network, batch, key, windows_per_call)
+                    value_and_grad, network, batch, step_key, windows_per_call,
+                    per_part_keys=stochastic)
                 where = f"window {window_days} d, epoch {epoch}, step {step}"
                 _require_finite(loss, grads, where)
                 if first_step:
@@ -1027,10 +1774,35 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
                     first_step = False
                 network, opt_state = update(network, grads, opt_state)
                 losses.append(float(loss))
-            validation = [
-                batch_loss_value(loss_fn, network, batch, key, windows_per_call)
-                for batch in contract.batches(
-                    split="validation", window_days=window_days)]
+            if report_fn is None:
+                validation = [
+                    batch_loss_value(
+                        loss_fn, network, batch, key, windows_per_call)
+                    for batch in contract.batches(
+                        split="validation", window_days=window_days,
+                        target_interval_hours=config["target_interval_hours"])]
+                validation_report = {}
+            else:
+                # One pass per batch: the report's first entry is the loss.
+                reports = [batch_report(
+                    report_fn, network, batch,
+                    jax.random.fold_in(jax.random.fold_in(
+                        validation_key, window_days), index),
+                    windows_per_call, per_part_keys=stochastic)
+                    for index, batch in enumerate(contract.batches(
+                        split="validation", window_days=window_days,
+                        target_interval_hours=config["target_interval_hours"]))]
+                validation = [report[0] for report in reports]
+                means = np.mean(reports, axis=0)
+                validation_report = {"validation_report": dict(zip(
+                    REPORT_NAMES[kind], (float(x) for x in means),
+                    strict=True))}
+                if stochastic:
+                    # Collapse monitor: spread near the member-to-truth
+                    # distance is a calibrated ensemble, near 0 a collapsed one.
+                    validation_report["validation_report"][
+                        "spread_over_member_truth_distance"] = float(
+                        means[2] / means[1])
             name = _checkpoint_name(window_days, epoch)
             save_checkpoint((network, opt_state), run_dir / name)
             log["epochs"].append({
@@ -1040,6 +1812,7 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
                 "train_loss_per_batch": losses,
                 "validation_loss": float(np.mean(validation)),
                 "validation_windows": TEMPLATE_BATCH_SIZE * len(validation),
+                **validation_report,
                 "wall_seconds": time.perf_counter() - started,
                 "checkpoint": {"path": name,
                                "sha256": _sha256(run_dir / name)}})
@@ -1154,10 +1927,12 @@ def _update_function(optimizer):
 
 
 def _start_gates(network, contract, card, geometry, scales, *,
-                 window_days: int, seed: int, key) -> dict:
+                 window_days: int, seed: int, key,
+                 target_interval_hours: int) -> dict:
     """Round-6 acceleration bar and the Eq. 6 report on the first batch."""
     batch = next(contract.batches(
-        split="train", window_days=window_days, epoch=0, seed=seed))
+        split="train", window_days=window_days,
+        target_interval_hours=target_interval_hours, epoch=0, seed=seed))
     states = batch_start_states(card, batch)
     return {
         "start_absolute_hours": [int(hour) for hour in batch.start_absolute_hour],
@@ -1190,6 +1965,7 @@ def profile(config: dict, *, card, device: dict, windows_per_call: int) -> dict:
     count at offset zero, an upper bound), the same for validation.  The
     free-run day is timed only on the free runs' configured device.
     """
+    require_whole_batch_for_bias(config["loss"]["kind"], windows_per_call)
     geometry = build_closure_geometry(card)
     spec, _ = network_spec(config, card, geometry)
     key = jax.random.PRNGKey(config["seeds"][0])
@@ -1199,15 +1975,29 @@ def profile(config: dict, *, card, device: dict, windows_per_call: int) -> dict:
     update = _update_function(optimizer)
     shape = tuple(geometry.tmask.shape)
     rest = np.zeros((TEMPLATE_BATCH_SIZE,) + shape)
+    # The compiled programs' cost does not depend on the loss constants.
+    stochastic = config["loss"]["kind"] in ENSEMBLE_LOSS_KINDS
+    placeholder_constants = {
+        "eq7": None, "energy_score": BalancedNormalizers(1.0, 1.0, 1.0),
+        "eq7_window_statistics": (1.0, 1.0), "eq7_neuralgcm": (1.0, 1.0),
+        "energy_score_neuralgcm": (BalancedNormalizers(1.0, 1.0, 1.0), 1.0),
+    }[config["loss"]["kind"]]
     splits = config["dataset"]["splits_days"]
     epochs = config["curriculum"]["epochs_per_window"]
     rows = []
     for window_days in config["curriculum"]["window_days"]:
-        value_and_grad, loss_fn = build_batch_functions(
+        programs = build_batch_programs(
             card, geometry, window_days=window_days,
-            objective=config["objective"], wall_ring=config["wall_ring"])
-        target = np.zeros((TEMPLATE_BATCH_SIZE, HOURS_PER_DAY * window_days)
-                          + shape)
+            target_interval_hours=config["target_interval_hours"],
+            objective=config["objective"], wall_ring=config["wall_ring"],
+            training_precision=config["training_precision"],
+            checkpoint=config["gradient_checkpointing"],
+            loss=config["loss"], constants=placeholder_constants)
+        value_and_grad, loss_fn = programs["value_and_grad"], programs["loss"]
+        target = np.zeros(
+            (TEMPLATE_BATCH_SIZE,
+             HOURS_PER_DAY * window_days // config["target_interval_hours"])
+            + shape)
         batch = WindowBatch((rest,) * 3, (target,) * 3,
                             np.zeros(TEMPLATE_BATCH_SIZE, dtype=np.int64),
                             "profile", window_days)
@@ -1216,13 +2006,15 @@ def profile(config: dict, *, card, device: dict, windows_per_call: int) -> dict:
         for label in ("first_s", "step_s"):
             started = time.perf_counter()
             loss, grads = batch_value_and_grad(
-                value_and_grad, network, batch, key, windows_per_call)
+                value_and_grad, network, batch, key, windows_per_call,
+                per_part_keys=stochastic)
             stepped, _ = update(network, grads, opt_state)
             jax.block_until_ready(jax.tree.leaves(stepped))
             timings[label] = time.perf_counter() - started
         for label in ("forward_first_s", "forward_s"):
             started = time.perf_counter()
-            batch_loss_value(loss_fn, network, batch, key, windows_per_call)
+            batch_loss_value(loss_fn, network, batch, key, windows_per_call,
+                             per_part_keys=stochastic)
             timings[label] = time.perf_counter() - started
         train_batches = (splits["train"][1] - splits["train"][0]) \
             // window_days // TEMPLATE_BATCH_SIZE
@@ -1315,7 +2107,7 @@ def main(argv=None) -> int:
         else:
             math_library = "native" if args.device == "cuda" else "libm"
             device = select_device(args.device, math_library, args.physical_gpu)
-        card = build_deck_card(config["deck"])
+        card = build_deck_card(config["deck"], config["surface"])
         if args.command == "free-run":
             if config["schema"] == CONTROL_CONFIG_SCHEMA:
                 if args.seed is not None or args.window_days is not None \

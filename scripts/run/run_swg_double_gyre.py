@@ -66,15 +66,23 @@ def configure_runtime_device(
     }
 
 
-def resolved_daily_namelist(days: int, *, deck: str = "maddison"):
-    """Return a supported double-gyre deck resolved for a number of days."""
+def resolved_daily_namelist(days: int, *, deck: str = "maddison",
+                            surface: str | None = None):
+    """Return a supported double-gyre deck resolved for a number of days.
+
+    A rigid-lid-only deck (``*-rl``) requires ``surface="rigid_lid"``.
+    """
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         SWG_DG50_NAMELIST,
+        SWG_DG50_RL_NAMELIST,
         SWG_MADDISON_NAMELIST,
+        SWG_MADDISON_RL_NAMELIST,
     )
     from legoesm.ocean.fidelity.swg_online_decks import (
         SWG_DG50_NU80_NAMELIST,
+        SWG_DG50_NU80_RL_NAMELIST,
         SWG_DG3125_NAMELIST,
+        require_surface_for_deck,
     )
 
     if type(days) is not int or days <= 0:
@@ -84,9 +92,13 @@ def resolved_daily_namelist(days: int, *, deck: str = "maddison"):
         "dg50": SWG_DG50_NAMELIST,
         "dg50-nu80": SWG_DG50_NU80_NAMELIST,
         "dg3125": SWG_DG3125_NAMELIST,
+        "maddison-rl": SWG_MADDISON_RL_NAMELIST,
+        "dg50-rl": SWG_DG50_RL_NAMELIST,
+        "dg50-nu80-rl": SWG_DG50_NU80_RL_NAMELIST,
     }
     if deck not in decks:
         raise ValueError(f"unsupported double-gyre deck {deck!r}")
+    require_surface_for_deck(deck, surface)
     selected = decks[deck]
     dt_s = selected.rn_Dt_s
     steps_per_day = SECONDS_PER_DAY / dt_s
@@ -180,8 +192,22 @@ def admit_listed_snapshot(path: Path) -> dict:
     }
 
 
-def compare_native_state_bitwise(state, path: Path) -> dict:
-    """Compare a stepped fine state with an admitted uninterrupted snapshot."""
+# Rigid-lid-only restart check (user decision 2026-10-18): the hourly-target
+# program differs from a plain restart by round-off (max |du| 2.6e-15 m/s);
+# the bitwise cause is deferred.  Explicit runs stay strictly bitwise.
+LID_RESTART_TOLERANCE = {
+    "kind": "max_abs_relative_to_field_max", "value": 1.0e-12,
+    "applies_to": "rigid_lid"}
+
+
+def compare_native_state_bitwise(
+        state, path: Path, relative_tolerance: float | None = None) -> dict:
+    """Compare a stepped fine state with an admitted uninterrupted snapshot.
+
+    ``all_equal`` is always the bitwise flag.  ``within_tolerance`` equals it
+    unless ``relative_tolerance`` is given, in which case every field needs
+    max|actual - expected| <= relative_tolerance * max|expected|.
+    """
     with np.load(path, allow_pickle=False) as saved:
         required = {"ssh_m", "u_m_s", "v_m_s"}
         missing = required - set(saved.files)
@@ -195,7 +221,7 @@ def compare_native_state_bitwise(state, path: Path) -> dict:
         "u_m_s": np.asarray(state.u.data[:, 1:, 0]),
         "v_m_s": np.asarray(state.v.data[1:, :, 0]),
     }
-    result = {"all_equal": True}
+    result = {"all_equal": True, "within_tolerance": True}
     for name in actual:
         if actual[name].shape != expected[name].shape:
             raise ValueError(f"comparison shape differs for {name}")
@@ -208,10 +234,18 @@ def compare_native_state_bitwise(state, path: Path) -> dict:
         result[f"{name}_max_abs"] = float(
             np.max(np.abs(actual[name] - expected[name])))
         result["all_equal"] = bool(result["all_equal"] and unequal == 0)
+        scale = float(np.max(np.abs(expected[name])))
+        max_abs = result[f"{name}_max_abs"]
+        result[f"{name}_relative_max_abs"] = (
+            max_abs / scale if scale > 0.0
+            else 0.0 if max_abs == 0.0 else float("inf"))
+        ok = (unequal == 0 if relative_tolerance is None
+              else max_abs <= relative_tolerance * scale)
+        result["within_tolerance"] = bool(result["within_tolerance"] and ok)
     return result
 
 
-def build_case(namelist):
+def build_case(namelist, *, surface: str = "explicit"):
     """Return the driver's card, model and steady wind forcing for a deck.
 
     The GPU short ladder builds its case here too, so the 1-10 step scorer
@@ -225,7 +259,7 @@ def build_case(namelist):
     )
     from legoesm.ocean.state import OceanSurfaceForcing
 
-    card = build_swg_card(namelist)
+    card = build_swg_card(namelist, surface=surface)
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
     tau_u, tau_v = swg_surface_wind(namelist)
@@ -268,16 +302,27 @@ def build_scanned_stepper(model, dt_s: float, forcing, n_steps: int):
 
 def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int,
                                    transport_diagnostic=None):
-    """Return one JIT program for exact state and live-transport means."""
+    """Return one JIT program for exact state and live-transport means.
+
+    ``scanned(state)`` steps ``model.step(state, dt_s, surface_forcing=...)``.
+    ``scanned(state, first_step)`` (an int32 scalar, traced: the model step
+    index of the day's first step) also passes ``step_index=`` to
+    ``model.step``, for a model whose step draws fresh noise.
+    """
     import jax
     import jax.numpy as jnp
 
     if type(n_steps) is not int or n_steps <= 0:
         raise ValueError("daily-mean scan n_steps must be a positive integer")
 
-    def scan_body(carry, count):
-        state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv = carry
-        state = model.step(state, dt_s, surface_forcing=forcing)
+    def scan_body(carry, xs):
+        count, step_index = xs
+        state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv, mean_phi = carry
+        if step_index is None:
+            state = model.step(state, dt_s, surface_forcing=forcing)
+        else:
+            state = model.step(
+                state, dt_s, surface_forcing=forcing, step_index=step_index)
         ssh = state.eta.data
         u = state.u.data[:, 1:, 0]
         v = state.v.data[1:, :, 0]
@@ -291,25 +336,50 @@ def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int,
             qu, qv = transport_diagnostic(ssh, u, v)
             mean_qu = (mean_qu * old_count + qu) / count
             mean_qv = (mean_qv * old_count + qv) / count
-        return (state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv), None
+        if state.rigid_lid_phi is not None:
+            mean_phi = (mean_phi * old_count + state.rigid_lid_phi) / count
+        return (state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv, mean_phi), None
 
     @jax.jit
-    def scanned(state):
+    def scanned(state, first_step=None):
         means = (
             jnp.zeros_like(state.eta.data),
             jnp.zeros_like(state.u.data[:, 1:, 0]),
             jnp.zeros_like(state.v.data[1:, :, 0]),
             jnp.zeros_like(state.u.data[:, 1:, 0]),
             jnp.zeros_like(state.v.data[1:, :, 0]),
+            (jnp.zeros(()) if state.rigid_lid_phi is None
+             else jnp.zeros_like(state.rigid_lid_phi)),
         )
         counts = jnp.arange(1, n_steps + 1, dtype=state.eta.data.dtype)
-        (state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv), _ = jax.lax.scan(
-            scan_body, (state, *means), counts)
-        if transport_diagnostic is None:
-            return state, (mean_ssh, mean_u, mean_v)
-        return state, (mean_ssh, mean_u, mean_v, mean_qu, mean_qv)
+        indices = None if first_step is None else (
+            first_step + jnp.arange(n_steps, dtype=jnp.int32))
+        (state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv, mean_phi), _ = (
+            jax.lax.scan(scan_body, (state, *means), (counts, indices)))
+        result = (mean_ssh, mean_u, mean_v)
+        if transport_diagnostic is not None:
+            result += (mean_qu, mean_qv)
+        if state.rigid_lid_phi is not None:
+            result += (mean_phi,)
+        return state, result
 
     return scanned
+
+
+def zero_ssh_restrictor(restrictor):
+    """A restrictor whose sea level is exactly zero (rigid-lid targets).
+
+    The fine lid ssh is identically zero, but the restrictors form sea level
+    as volume/area minus the reference depth, which leaves 1e-13 m round-off
+    (measured: box 1.8e-14, filtered 2.1e-13 m); that is not a sea level.
+    """
+    import jax.numpy as jnp
+
+    def restrict(eta, u_native, v_native):
+        ssh, u, v = restrictor(eta, u_native, v_native)
+        return jnp.zeros_like(ssh), u, v
+
+    return restrict
 
 
 def build_dual_coarse_sampler(restrictors):
@@ -595,6 +665,7 @@ def apply_balanced_vorticity_perturbation(state, namelist, amplitude_s_1: float)
 
 def run_long(
         namelist, output: Path, *, days: int, mode: str, commit: str,
+        surface: str,
         profile_steps: int = 0, compare_days: int = 0,
         daily_means: bool = False,
         restart: Path | None = None,
@@ -665,7 +736,7 @@ def run_long(
         raise FileExistsError(f"refusing to overwrite output directory {output}")
     wall_started = time.perf_counter()
 
-    card, model, forcing = build_case(namelist)
+    card, model, forcing = build_case(namelist, surface=surface)
     state = card.recipe.initial_state
     restart_provenance = None
     if perturb_amplitude_m is not None and restart is None:
@@ -674,6 +745,11 @@ def run_long(
         raise ValueError("unknown perturbation kind")
     if perturb_kind != "white-ssh" and perturb_amplitude_m is None:
         raise ValueError("non-default perturbation kind requires --perturb")
+    if (surface == "rigid_lid" and perturb_amplitude_m is not None
+            and perturb_kind == "white-ssh"):
+        raise ValueError(
+            "white-ssh perturbation is a no-op under rigid_lid (ssh is "
+            "projected out); use balanced-vorticity")
     if restart is not None:
         if hourly_targets:
             restart_admission = admit_listed_snapshot(restart)
@@ -683,6 +759,9 @@ def run_long(
             state, forcing, restart, dt_s=card.dt_s,
             perturb_amplitude_m=(
                 perturb_amplitude_m if perturb_kind == "white-ssh" else None))
+        if surface == "rigid_lid" and np.any(np.asarray(state.eta.data) != 0.0):
+            raise ValueError(
+                "rigid_lid restart requires a snapshot with identically zero ssh")
         restart_provenance["manifest_admission"] = restart_admission
         restart_provenance["perturb_kind"] = perturb_kind
         if perturb_kind == "balanced-vorticity":
@@ -736,6 +815,10 @@ def run_long(
                     source_geometry, target_geometry,
                     sigma_source_cells=sigma_source_cells),
             }
+            if surface == "rigid_lid":
+                hourly_restrictors = {
+                    name: zero_ssh_restrictor(restrictor)
+                    for name, restrictor in hourly_restrictors.items()}
             hourly_stepper = build_scanned_hourly_target_stepper(
                 model, card.dt_s, forcing, int(steps_per_hour_f),
                 hourly_restrictors)
@@ -774,6 +857,7 @@ def run_long(
             if daily_means else "legoesm-swg-double-gyre-daily-v1"),
         "legoesm_git_sha": commit,
         "mode": mode,
+        "surface": surface,
         "certified_policy": certified_policy,
         "deck_certification": (
             "reference evidence on pinned 2026-10-13 toolchain: daily scan "
@@ -804,6 +888,8 @@ def run_long(
             None if verify_next is None else {
                 "path": str(verify_next.resolve()),
                 "admission": next_admission,
+                "tolerance": (LID_RESTART_TOLERANCE
+                              if surface == "rigid_lid" else None),
                 "result": None,
             }),
         "numerical_health": None,
@@ -902,6 +988,9 @@ def run_long(
                 "u_m_s": np.asarray(state.u.data[:, 1:, 0], dtype=np.float64),
                 "v_m_s": np.asarray(state.v.data[1:, :, 0], dtype=np.float64),
             })
+            if state.rigid_lid_phi is not None:
+                arrays["rigid_lid_phi_m2_s2"] = np.asarray(
+                    state.rigid_lid_phi, dtype=np.float64)
         daily_health = numerical_health(state, namelist)
         previous_health = manifest["numerical_health"]
         manifest["numerical_health"] = {
@@ -935,6 +1024,9 @@ def run_long(
                 "v_daily_mean_transport_m3_s": np.asarray(
                     means[4], dtype=np.float64),
             })
+            if state.rigid_lid_phi is not None:
+                arrays["rigid_lid_phi_daily_mean_m2_s2"] = np.asarray(
+                    means[-1], dtype=np.float64)
         if hourly is not None:
             source_day = (0 if restart_provenance is None else
                           restart_provenance["source_day"])
@@ -957,9 +1049,12 @@ def run_long(
                             hourly_initial[operator_index][field_index],
                             dtype=np.float64)
         if day == 1 and verify_next is not None:
-            comparison = compare_native_state_bitwise(state, verify_next)
+            comparison = compare_native_state_bitwise(
+                state, verify_next,
+                LID_RESTART_TOLERANCE["value"] if surface == "rigid_lid"
+                else None)
             manifest["restart_next_verification"]["result"] = comparison
-            if not comparison["all_equal"]:
+            if not comparison["within_tolerance"]:
                 _write_json_atomic(
                     pending_path,
                     manifest | {"status": "refused", "completed_days": 0,
@@ -1001,8 +1096,12 @@ def main(argv=None) -> int:
     parser.add_argument("--days", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
-        "--deck", choices=("maddison", "dg50", "dg50-nu80", "dg3125"),
-                        default="maddison")
+        "--deck", choices=("maddison", "dg50", "dg50-nu80", "dg3125",
+                           "maddison-rl", "dg50-rl", "dg50-nu80-rl"),
+        default="maddison")
+    parser.add_argument(
+        "--surface", choices=("explicit", "rigid_lid"), required=True,
+        help="SWE RK3 free-surface treatment; the certified card is explicit")
     parser.add_argument("--restart", type=Path)
     parser.add_argument("--perturb", type=float,
                         help="perturbation amplitude: m for white SSH, s^-1 for balanced")
@@ -1042,10 +1141,12 @@ def main(argv=None) -> int:
             gpu_device=args.gpu_device)
         from legoesm.ocean.fidelity.provenance import git_sha
 
-        namelist = resolved_daily_namelist(args.days, deck=args.deck)
+        namelist = resolved_daily_namelist(
+            args.days, deck=args.deck, surface=args.surface)
         manifest = run_long(
             namelist, args.output, days=args.days, mode=args.mode,
             commit=git_sha(), gpu_device=args.gpu_device,
+            surface=args.surface,
             profile_steps=args.profile_steps,
             compare_days=args.compare_days, daily_means=args.daily_means,
             restart=args.restart, perturb_amplitude_m=args.perturb,

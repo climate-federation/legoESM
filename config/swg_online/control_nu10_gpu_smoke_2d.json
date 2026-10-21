@@ -4,6 +4,7 @@
   "description": "Two-day CUDA/native smoke of the frozen nu=10 no-closure control choices.",
   "control": "nu10",
   "deck": "dg50",
+  "surface": "explicit",
   "closure": "none",
   "free_run": {
     "days": 2,

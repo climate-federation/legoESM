@@ -1,0 +1,16 @@
+{
+  "schema": "legoesm-swg-online-control-v1",
+  "experiment": "swgonl_control_nu10_rl_gpu",
+  "description": "Twenty-year no-closure rigid-lid dg50-rl nu=10 reference rerun from rest with daily snapshots and daily means on CUDA/native for the registered device check.",
+  "control": "nu10",
+  "deck": "dg50-rl",
+  "surface": "rigid_lid",
+  "closure": "none",
+  "free_run": {
+    "days": 7300,
+    "start": "rest",
+    "sampling": "end_of_day_snapshot_and_daily_mean",
+    "device": "cuda",
+    "math_library": "native"
+  }
+}

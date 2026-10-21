@@ -4,6 +4,8 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import math
+import types
 from pathlib import Path
 
 import equinox as eqx
@@ -15,16 +17,26 @@ import pytest
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ml.training import TrainingConfig, create_optimizer
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
-from legoesm.ocean.dynamics.swe_rk3 import _entry_from_state, swe_rk3_step
+from legoesm.ocean.dynamics.swe_rk3 import (
+    _entry_from_state,
+    swe_rk3_stage,
+    swe_rk3_step,
+)
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_DG50_NAMELIST,
     SWG_MADDISON_NAMELIST,
+    SWG_MADDISON_RL_NAMELIST,
     build_swg_card,
     swg_surface_wind,
+)
+from legoesm.ocean.fidelity.swg_coarse_graining import (
+    cgrid_geometry,
+    filtered_restrict_cgrid,
 )
 from legoesm.ocean.state import OceanSurfaceForcing
 from legoesm.training import swg_online
 from legoesm.training.swg_online import (
+    RIGID_LID_RESTART_TOLERANCE,
     START_REBALANCE_MAX_ITERATIONS,
     START_REBALANCE_TOLERANCE,
     BalancedNormalizers,
@@ -46,12 +58,18 @@ from legoesm.training.swg_online import (
     create_swg_optimizer,
     deterministic_trajectory_loss,
     eq6_scale_report,
+    eq7_point_weights,
     initial_closure_acceleration_ratio,
     load_content_pinned_hourly_segment,
     load_content_pinned_initial_state,
     maddison_eq6_network_scales,
     network_parameter_count,
+    require_target_filter_sigma_cells,
+    require_target_interval_hours,
+    steps_per_target_interval,
+    stored_state_at,
     swg_online_step,
+    wall_margin_mask,
 )
 
 # A 1,000 km square dg50-physics card (20x20 wet cells) keeps the synthetic
@@ -81,7 +99,7 @@ def online_case():
     spec = SWGNetworkSpec(
         hidden_channels=8, hidden_layers=2, kernel_size=3,
         ssh_scale_m=1.0, velocity_scale_m_s=1.0,
-        potential_scale_m3_s2=1.0)
+        potential_scale_m3_s2=1.0, wall_margin_rings=0)
     network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(8))
     return card, geometry, forcing, entry, network
 
@@ -133,6 +151,99 @@ def test_network_args_are_traced_without_retrace(online_case):
     compiled(changed, zero.at[20, 20].set(1.0e-6),
              jax.random.PRNGKey(1)).block_until_ready()
     assert len(traces) == 1
+
+
+def test_wall_margin_mask_erodes_with_the_four_neighbour_stencil():
+    rectangle = np.zeros((7, 8), dtype=bool)
+    rectangle[1:6, 1:7] = True
+    ring_1 = np.zeros_like(rectangle)
+    ring_1[2:5, 2:6] = True
+    ring_2 = np.zeros_like(rectangle)
+    ring_2[3, 3:5] = True
+    for rings, expected in ((0, rectangle), (1, ring_1), (2, ring_2)):
+        eroded = wall_margin_mask(jnp.asarray(rectangle), rings)
+        assert eroded.dtype == jnp.bool_
+        assert np.array_equal(np.asarray(eroded), expected)
+    assert wall_margin_mask(jnp.asarray(rectangle), 3).sum() == 0
+
+    hole = np.ones((5, 5), dtype=bool)
+    hole[2, 2] = False
+    expected = np.zeros_like(hole)
+    expected[1:4, 1:4] = True
+    expected[1, 2] = expected[3, 2] = expected[2, 1] = expected[2, 3] = False
+    expected[2, 2] = False
+    assert np.array_equal(np.asarray(wall_margin_mask(jnp.asarray(hole), 1)),
+                          expected)
+
+    floats = jnp.asarray(rectangle, dtype=jnp.float64)
+    assert wall_margin_mask(floats, 1).dtype == jnp.float64
+    assert np.array_equal(np.asarray(wall_margin_mask(floats, 2)), ring_2)
+    jitted = jax.jit(wall_margin_mask, static_argnums=1)
+    assert np.array_equal(np.asarray(jitted(jnp.asarray(rectangle), 2)), ring_2)
+
+
+def _margin_networks(online_case, rings):
+    _, _, _, _, network = online_case
+    spec = network.spec._replace(wall_margin_rings=rings)
+    return SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(8))
+
+
+def _potential(network, entry, geometry):
+    return network(
+        entry, geometry, key=jax.random.PRNGKey(1),
+        noise=jnp.zeros_like(entry.ssh_k), noise_scale=jnp.asarray(0.0))
+
+
+def test_wall_margin_zeroes_the_potential_on_the_first_rings_only(online_case):
+    _, geometry, _, entry, _ = online_case
+    plain = _potential(_margin_networks(online_case, 0), entry, geometry)
+    margin = _potential(_margin_networks(online_case, 2), entry, geometry)
+    interior = np.asarray(geometry.vertex_interior, dtype=bool)
+    keep_1 = np.asarray(wall_margin_mask(geometry.vertex_interior, 1))
+    keep_2 = np.asarray(wall_margin_mask(geometry.vertex_interior, 2))
+    j0, j1, i0, i1 = geometry.wet_bounds
+    assert keep_2.sum() == (j1 - j0 - 4) * (i1 - i0 - 4)
+    plain, margin = np.asarray(plain), np.asarray(margin)
+    assert np.all(margin[~keep_2] == 0.0)
+    assert np.array_equal(margin[keep_2], plain[keep_2])
+    assert np.any(plain[interior & ~keep_1] != 0.0)
+    assert np.any(plain[keep_1 & ~keep_2] != 0.0)
+    with pytest.raises(ValueError, match="wall_margin_rings"):
+        _margin_networks(online_case, -1)
+
+
+def test_wall_margin_closure_acceleration_vanishes_next_to_every_wall(
+        online_case):
+    card, geometry, _, entry, _ = online_case
+    grid, z_coord = card.recipe.grid, card.recipe.z_coord
+    config = card.recipe.model_config
+    mask = card.recipe.initial_state.land_mask.data
+
+    def acceleration(rings):
+        potential = _potential(
+            _margin_networks(online_case, rings), entry, geometry)
+
+        def stage(potential_f):
+            return swe_rk3_stage(entry, entry, card.dt_s, 3, grid, z_coord,
+                                 mask, config, potential_f=potential_f)
+
+        base, closed = stage(None), stage(potential)
+        return (np.asarray(closed.u_k - base.u_k) / card.dt_s,
+                np.asarray(closed.v_k - base.v_k) / card.dt_s)
+
+    j0, j1, i0, i1 = geometry.wet_bounds
+    wall_rows = [j0, j0 + 1, j1 - 1, j1]
+    wall_columns = [i0, i0 + 1, i1 - 1, i1]
+    plain_u, plain_v = acceleration(0)
+    assert np.any(plain_u[wall_rows[:2]] != 0.0)
+    assert np.any(plain_u[wall_rows[2:]] != 0.0)
+    assert np.any(plain_v[:, wall_columns[:2]] != 0.0)
+    assert np.any(plain_v[:, wall_columns[2:]] != 0.0)
+    margin_u, margin_v = acceleration(2)
+    assert np.all(margin_u[wall_rows] == 0.0)
+    assert np.all(margin_v[:, wall_columns] == 0.0)
+    assert np.any(margin_u[j0 + 2:j1 - 1] != 0.0)
+    assert np.any(margin_v[:, i0 + 2:i1 - 1] != 0.0)
 
 
 def test_point_and_energy_losses_share_interface_and_plants_fail(online_case):
@@ -571,14 +682,17 @@ _CHUNKS = (("train_a", 0, 11), ("train_b", 11, 11),
 
 
 def _write_contract(path: Path, sources, *, objective="template",
-                    splits=None) -> Path:
-    path.write_text(json.dumps({
+                    splits=None, target_filter_sigma_cells=None) -> Path:
+    payload = {
         "schema": "legoesm-swg-online-dataset-v1", "objective": objective,
         "batch_size": 10, "window_days": [1, 2, 4, 8],
         "splits": splits or _SPLITS,
         "sources": [{"root": str(root), "manifest_sha256": digest}
                     for root, digest in sources],
-    }, sort_keys=True))
+    }
+    if target_filter_sigma_cells is not None:
+        payload["target_filter_sigma_cells"] = target_filter_sigma_cells
+    path.write_text(json.dumps(payload, sort_keys=True))
     return path
 
 
@@ -606,7 +720,7 @@ def test_contract_batches_start_from_rebalanced_stored_states(dataset):
     contract, card = dataset["contract"], dataset["card"]
     umask, vmask = dataset["masks"]
     batch = next(contract.batches(
-        split="train", window_days=1, epoch=0, seed=12))
+        split="train", window_days=1, epoch=0, seed=12, target_interval_hours=1))
     assert batch.initial[0].shape == (10,) + umask.shape
     assert batch.target[0].shape == (10, 24) + umask.shape
     rebalance = build_start_rebalancer(
@@ -635,7 +749,7 @@ def test_training_sampler_redraws_offset_per_window_and_epoch(dataset):
         return np.concatenate([batch.start_absolute_hour for batch in
                                contract.batches(split="train",
                                                 window_days=window_days,
-                                                epoch=epoch, seed=seed)])
+                                                epoch=epoch, seed=seed, target_interval_hours=1)])
 
     one_day = {epoch: starts(1, epoch, 7) for epoch in range(6)}
     for values in one_day.values():
@@ -658,25 +772,25 @@ def test_training_sampler_redraws_offset_per_window_and_epoch(dataset):
 def test_heldout_splits_use_one_fixed_chronological_lattice(dataset):
     contract = dataset["contract"]
     first = [batch.start_absolute_hour for batch in
-             contract.batches(split="validation", window_days=1)]
+             contract.batches(split="validation", window_days=1, target_interval_hours=1)]
     again = [batch.start_absolute_hour for batch in
-             contract.batches(split="validation", window_days=1)]
+             contract.batches(split="validation", window_days=1, target_interval_hours=1)]
     assert np.array_equal(np.concatenate(first),
                           np.arange(1248, 1488 - 24 + 1, 24))
     assert np.array_equal(np.concatenate(again), np.concatenate(first))
     with pytest.raises(ValueError, match="epoch and seed must be None"):
         next(contract.batches(split="validation", window_days=1, epoch=0,
-                              seed=1))
+                              seed=1, target_interval_hours=1))
     with pytest.raises(ValueError, match="integer epoch and seed"):
-        next(contract.batches(split="train", window_days=1))
+        next(contract.batches(split="train", window_days=1, target_interval_hours=1))
     with pytest.raises(ValueError, match="unknown or leaked"):
-        next(contract.batches(split="holdout", window_days=1))
+        next(contract.batches(split="holdout", window_days=1, target_interval_hours=1))
 
 
 def test_a_split_without_one_full_batch_raises(dataset):
     with pytest.raises(ValueError, match="fewer than one batch"):
         next(dataset["contract"].batches(
-            split="train", window_days=4, epoch=0, seed=0))
+            split="train", window_days=4, epoch=0, seed=0, target_interval_hours=1))
 
 
 def test_shared_restart_hour_uses_the_inscan_record_within_round_off(
@@ -793,6 +907,91 @@ _CONTRACT_PLANTS = {
 }
 
 
+def _lid_stream(m, *, within=True, tolerance=RIGID_LID_RESTART_TOLERANCE,
+                namelist=SWG_MADDISON_RL_NAMELIST):
+    """Edit a chunk manifest into a rigid-lid stream as the driver records it."""
+    m["surface"] = "rigid_lid"
+    m["namelist"] = json.loads(json.dumps(namelist._asdict()))
+    m["restart_next_verification"] = {
+        "result": {"all_equal": False, "within_tolerance": within},
+        "tolerance": None if tolerance is None else dict(tolerance)}
+
+
+@pytest.fixture(scope="module")
+def lid_card():
+    return build_swg_card(_SMALL_NAMELIST, surface="rigid_lid")
+
+
+def _every_chunk(edit):
+    return lambda name: edit
+
+
+def test_rigid_lid_stream_is_admitted_with_its_recorded_tolerance(
+        tmp_path, lid_card):
+    path = _plant_dataset(tmp_path, lid_card, "lid",
+                          chunk_edit=_every_chunk(_lid_stream))
+    contract = SWGDatasetContract.from_json(path, card=lid_card)
+    assert {source.surface for source in contract.sources} == {"rigid_lid"}
+
+
+@pytest.mark.parametrize("plant,message", [
+    ("lid, outside tolerance", "verification"),
+    ("lid, tolerance not recorded", "verification"),
+    ("lid, another tolerance", "verification"),
+    ("lid stream on the explicit namelist", "fine deck"),
+    ("unknown surface", "surface must be"),
+])
+def test_rigid_lid_stream_refusals(tmp_path, lid_card, plant, message):
+    def edit(m):
+        _lid_stream(m)
+        if plant == "lid, outside tolerance":
+            _lid_stream(m, within=False)
+        elif plant == "lid, tolerance not recorded":
+            _lid_stream(m, tolerance=None)
+        elif plant == "lid, another tolerance":
+            _lid_stream(m, tolerance={**RIGID_LID_RESTART_TOLERANCE,
+                                      "value": 1.0e-9})
+        elif plant == "lid stream on the explicit namelist":
+            _lid_stream(m, namelist=SWG_MADDISON_NAMELIST)
+        else:
+            m["surface"] = "ocean"
+    path = _plant_dataset(tmp_path, lid_card, "lid",
+                          chunk_edit=_every_chunk(edit))
+    with pytest.raises(ValueError, match=message):
+        SWGDatasetContract.from_json(path, card=lid_card)
+
+
+def test_explicit_stream_never_takes_the_round_off_tolerance(
+        tmp_path, small_card):
+    def edit(m):
+        m["restart_next_verification"] = {
+            "result": {"all_equal": False, "within_tolerance": True},
+            "tolerance": dict(RIGID_LID_RESTART_TOLERANCE)}
+    path = _plant_dataset(tmp_path, small_card, "explicit",
+                          chunk_edit=_every_chunk(edit))
+    with pytest.raises(ValueError, match="verification"):
+        SWGDatasetContract.from_json(path, card=small_card)
+
+
+def test_contract_refuses_a_card_of_another_surface(
+        tmp_path, small_card, lid_card):
+    lid = _plant_dataset(tmp_path, lid_card, "lid",
+                         chunk_edit=_every_chunk(_lid_stream))
+    with pytest.raises(ValueError, match="differs from the card's surface"):
+        SWGDatasetContract.from_json(lid, card=small_card)
+    explicit = _plant_dataset(tmp_path, small_card, "explicit")
+    with pytest.raises(ValueError, match="differs from the card's surface"):
+        SWGDatasetContract.from_json(explicit, card=lid_card)
+
+
+def test_contract_refuses_mixed_surfaces(tmp_path, lid_card):
+    path = _plant_dataset(
+        tmp_path, lid_card, "mixed",
+        chunk_edit=lambda name: _lid_stream if name == "train_a" else None)
+    with pytest.raises(ValueError, match="more than one surface"):
+        SWGDatasetContract.from_json(path, card=lid_card)
+
+
 @pytest.mark.parametrize("plant", sorted(_CONTRACT_PLANTS))
 def test_contract_refuses_each_planted_violation(tmp_path, small_card, plant):
     kwargs, message = _CONTRACT_PLANTS[plant]
@@ -838,8 +1037,8 @@ def test_day_file_plants_raise_when_the_day_is_read(
 def test_batch_membership_is_bound_to_the_issued_arrays(dataset):
     contract = dataset["contract"]
     train = next(contract.batches(
-        split="train", window_days=1, epoch=0, seed=3))
-    validation = next(contract.batches(split="validation", window_days=1))
+        split="train", window_days=1, epoch=0, seed=3, target_interval_hours=1))
+    validation = next(contract.batches(split="validation", window_days=1, target_interval_hours=1))
     contract.validate_batch_membership(train)
     contract.validate_batch_membership(validation)
     plants = {
@@ -885,9 +1084,9 @@ def test_day_files_are_hashed_once_while_cached(dataset, monkeypatch):
         return original(path)
 
     monkeypatch.setattr(swg_online, "_sha256", counting)
-    next(contract.batches(split="train", window_days=1, epoch=0, seed=5))
+    next(contract.batches(split="train", window_days=1, epoch=0, seed=5, target_interval_hours=1))
     first = len(hashed)
-    next(contract.batches(split="train", window_days=1, epoch=0, seed=5))
+    next(contract.batches(split="train", window_days=1, epoch=0, seed=5, target_interval_hours=1))
     assert first > 0
     assert len(hashed) == first
 
@@ -977,7 +1176,7 @@ def test_segment_builder_rejects_unregistered_windows_and_has_live_gradients(
         online_case):
     card, geometry, _, entry, network = online_case
     with pytest.raises(ValueError, match="window_days"):
-        build_segment_fn(card, geometry, window_days=16)
+        build_segment_fn(card, geometry, window_days=3, target_interval_hours=1)
 
     # The first-step gate probes the actual stage seam.  A spatial objective is
     # used instead of an integrated potential, whose constant mode is correctly
@@ -1006,8 +1205,8 @@ def test_network_gradient_gate_rejects_one_poisoned_component():
 
 def test_zero_closure_four_and_eight_day_compositions_match(online_case):
     card, geometry, _, _, _ = online_case
-    _, four_day = build_segment_fn(card, geometry, window_days=4)
-    _, eight_day = build_segment_fn(card, geometry, window_days=8)
+    _, four_day = build_segment_fn(card, geometry, window_days=4, target_interval_hours=1)
+    _, eight_day = build_segment_fn(card, geometry, window_days=8, target_interval_hours=1)
     steps_per_day = 24 * int(3_600 / card.dt_s)
     noise4 = jnp.zeros((4 * steps_per_day, 3) + geometry.tmask.shape)
     noise8 = jnp.zeros((8 * steps_per_day, 3) + geometry.tmask.shape)
@@ -1044,7 +1243,7 @@ def test_shifted_network_matches_previous_equinox_forward_and_gradient_on_real_s
     spec = SWGNetworkSpec(
         hidden_channels=16, hidden_layers=4, kernel_size=3,
         ssh_scale_m=1.0, velocity_scale_m_s=1.0,
-        potential_scale_m3_s2=1.0)
+        potential_scale_m3_s2=1.0, wall_margin_rings=0)
     key = jax.random.PRNGKey(20261013)
     shifted = SWGScalarPotentialCNN(spec, key=key)
     keys = jax.random.split(key, spec.hidden_layers + 1)
@@ -1116,7 +1315,7 @@ def test_shifted_network_preserves_ten_state_initial_acceleration():
         expected_manifest_sha256=(
             "aaec7f829d7530a275c07a263cd96185a4fa6245be411c63626156e35fa65d2c"))
         for day in (731, 771, 811, 851, 891, 931, 971, 1011, 1051, 1091))
-    spec = SWGNetworkSpec(16, 4, 3, 1.0, 1.0, 1.0)
+    spec = SWGNetworkSpec(16, 4, 3, 1.0, 1.0, 1.0, 0)
     network = SWGScalarPotentialCNN(
         spec, key=jax.random.PRNGKey(20261013))
     result = initial_closure_acceleration_ratio(
@@ -1163,12 +1362,12 @@ def test_real_data_one_optimizer_step_has_no_inert_leaf():
     spec = SWGNetworkSpec(
         hidden_channels=16, hidden_layers=4, kernel_size=3,
         ssh_scale_m=1.0, velocity_scale_m_s=1.0,
-        potential_scale_m3_s2=1.0)
+        potential_scale_m3_s2=1.0, wall_margin_rings=0)
     network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(20261013))
     initialization = initial_closure_acceleration_ratio(
         network, (initial,), card, geometry, key=jax.random.PRNGKey(20261013))
     assert initialization["passes"], initialization
-    _, segment = build_segment_fn(card, geometry, window_days=1)
+    _, segment = build_segment_fn(card, geometry, window_days=1, target_interval_hours=1)
     n_steps = 24 * int(3_600 / card.dt_s)
     noise = jnp.zeros((n_steps, 3) + geometry.tmask.shape, dtype=jnp.float64)
 
@@ -1308,7 +1507,7 @@ def test_eq6_scale_report_measures_what_the_network_reads(online_case):
     scales = maddison_eq6_network_scales(card, geometry)
     spec = SWGNetworkSpec(8, 2, 3, scales.ssh_scale_m,
                           scales.velocity_scale_m_s,
-                          scales.potential_scale_m3_s2)
+                          scales.potential_scale_m3_s2, 0)
     network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(3))
     u, v = _streamfunction_flow(geometry, 3.0e5)
     wet = np.asarray(geometry.tmask, dtype=bool)
@@ -1345,3 +1544,938 @@ def test_eq6_scale_report_measures_what_the_network_reads(online_case):
             spec._replace(potential_scale_m3_s2=1.0),
             key=jax.random.PRNGKey(3)),
             (state,), card, geometry, scales, key=jax.random.PRNGKey(4))
+
+
+# ----------------------------------------------------- target interval (3 h)
+
+def test_target_interval_batches_are_every_third_stored_hour_from_the_start(
+        dataset):
+    contract = dataset["contract"]
+    for split, extra in (("train", {"epoch": 0, "seed": 12}), ("validation", {})):
+        hourly = next(contract.batches(
+            split=split, window_days=1, target_interval_hours=1, **extra))
+        sparse = next(contract.batches(
+            split=split, window_days=1, target_interval_hours=3, **extra))
+        assert hourly.target[0].shape[1] == 24 and sparse.target[0].shape[1] == 8
+        assert np.array_equal(hourly.start_absolute_hour,
+                              sparse.start_absolute_hour)
+        for new, old in zip(sparse.initial, hourly.initial, strict=True):
+            assert np.array_equal(new, old)
+        # Hours 3, 6, ..., 24 after the start: indices 2, 5, ... of 1..24.
+        for new, old in zip(sparse.target, hourly.target, strict=True):
+            assert np.array_equal(new, old[:, 2::3])
+        contract.validate_batch_membership(sparse)
+
+
+@pytest.mark.parametrize("interval", [0, 5, 48, -1, 2.0, "3", True, None])
+def test_target_interval_must_be_an_integer_dividing_a_day(dataset, interval):
+    with pytest.raises(ValueError, match="target_interval_hours"):
+        require_target_interval_hours(interval)
+    with pytest.raises(ValueError, match="target_interval_hours"):
+        next(dataset["contract"].batches(
+            split="validation", window_days=1, target_interval_hours=interval))
+    with pytest.raises(ValueError, match="target_interval_hours"):
+        build_segment_fn(dataset["card"], build_closure_geometry(
+            dataset["card"]), window_days=1, target_interval_hours=interval)
+
+
+def test_target_interval_must_be_a_whole_number_of_model_steps():
+    assert steps_per_target_interval(400.0, 1) == 9
+    assert steps_per_target_interval(10_800.0, 3) == 1
+    assert steps_per_target_interval(3_600.0, 3) == 3
+    for dt_s, interval in ((10_800.0, 1), (4_000.0, 3), (7_200.0, 1)):
+        with pytest.raises(ValueError, match="must divide"):
+            steps_per_target_interval(dt_s, interval)
+    card = types.SimpleNamespace(dt_s=10_800.0)
+    with pytest.raises(ValueError, match="must divide"):
+        build_segment_fn(card, None, window_days=1, target_interval_hours=1)
+
+
+def test_three_hour_rollout_records_exactly_the_three_hourly_states(dataset):
+    card = dataset["card"]
+    geometry = build_closure_geometry(card)
+    _, hourly = build_segment_fn(
+        card, geometry, window_days=1, target_interval_hours=1)
+    _, sparse = build_segment_fn(
+        card, geometry, window_days=1, target_interval_hours=3)
+    key, scale = jax.random.PRNGKey(5), jnp.asarray(0.0)
+    steps = 24 * int(3_600 / card.dt_s)
+    start = card.recipe.initial_state
+    # A moving start so the records are not identically the rest state.
+    start = start._replace(u=start.u.replace(
+        data=start.u.data.at[10:14, 10:14].set(1.0e-2)))
+    noise = jnp.zeros((steps, 3) + tuple(geometry.tmask.shape))
+    state_h, records_h = hourly(None, start, noise, key, scale)
+    state_3, records_3 = sparse(None, start, noise, key, scale)
+    assert records_h[1].shape[0] == 24 and records_3[1].shape[0] == 8
+    assert np.any(np.asarray(records_h[1][0]) != np.asarray(records_h[1][-1]))
+    for new, old in zip(records_3, records_h, strict=True):
+        assert np.array_equal(np.asarray(new), np.asarray(old)[2::3])
+    assert np.array_equal(np.asarray(state_3.u.data), np.asarray(state_h.u.data))
+    with pytest.raises(ValueError, match="segment noise shape"):
+        sparse(None, start, noise[:-1], key, scale)
+
+
+@pytest.mark.parametrize("days,bound", [(1, 0.13), (2, 0.06), (4, 0.03), (8, 0.012)])
+def test_three_hour_loss_is_the_same_plain_mean_over_a_subsample(
+        online_case, days, bound):
+    """Eq. 7 here is ``prefactor * mean over (windows, hours)`` of the weighted
+    squared vorticity error: equal weights, no end-point half weights, so the
+    3-hour loss is the same mean over every third sample and only approximates
+    the hourly loss (exactly equal only for an error constant in time).  The
+    samples at hours 3, 6, ... sit one hour later on average than hours 1, 2,
+    ..., so an error growing in time reads high by about 2 h / window; the
+    bounds are the measured 11.4/5.3/2.3/0.9 % for an error growing as
+    ``1 - exp(-t/72 h)`` squared, rounded up."""
+    card, geometry, _, _, _ = online_case
+    shape = tuple(geometry.tmask.shape)
+    pattern = np.zeros(shape)
+    pattern[20:30, 20:30] = 1.0
+    hours = np.arange(1, 24 * days + 1)
+    amplitude = 1.0e-6 * (1.0 - np.exp(-hours / 72.0))   # smooth error growth
+    zeta_error = amplitude[None, :, None, None] * pattern[None, None]
+
+    def loss(error):
+        zeros = jnp.zeros(error.shape)
+        return float(balanced_trajectory_loss(
+            BalancedTrajectory(jnp.asarray(error), zeros, zeros),
+            BalancedTrajectory(zeros, zeros, zeros), geometry, None,
+            kind="point", **_eq7(card)))
+
+    hourly = loss(zeta_error)
+    sparse = loss(zeta_error[:, 2::3])
+    # The code's rule, restated by hand: scale * mean_t sum_x W e^2.
+    namelist = card.resolved_namelist
+    half = 0.5 * namelist.rn_domsiz_m
+    scale = 1.0e4 / (namelist.rn_beta_m_s**2 * half**2) / (4.0 * half**2)
+    weights = np.asarray(eq7_point_weights(geometry, wall_ring="weighted"))
+    by_hand = scale * np.mean(
+        np.sum(zeta_error[:, 2::3]**2 * weights, axis=(-2, -1)))
+    assert sparse == pytest.approx(by_hand, rel=1.0e-12)
+    # Equal weights: one hour's error moves the mean by exactly 1/N of its term.
+    bumped = zeta_error.copy()
+    bumped[:, 5] *= 2.0
+    term = scale * np.sum(zeta_error[:, 5]**2 * weights) * 3.0
+    assert loss(bumped) - hourly == pytest.approx(term / hours.size, rel=1.0e-9)
+    # Smooth trajectory: the subsampled mean tracks the hourly one.
+    assert sparse != hourly
+    assert 0.0 < sparse / hourly - 1.0 < bound
+    # A time-constant error is the case where the two are exactly equal.
+    constant = np.broadcast_to(zeta_error[:, -1:], zeta_error.shape).copy()
+    assert loss(constant[:, 2::3]) == pytest.approx(loss(constant), rel=1.0e-12)
+
+
+# ----------------------------------------------------------- memory cache
+
+def _same_batch(left, right):
+    assert np.array_equal(left.start_absolute_hour, right.start_absolute_hour)
+    assert (left.split, left.window_days) == (right.split, right.window_days)
+    for new, old in zip(left.initial + left.target,
+                        right.initial + right.target, strict=True):
+        assert new.dtype == old.dtype == np.float64
+        assert np.array_equal(new, old)
+
+
+def test_memory_cache_serves_the_batches_of_the_file_reading_contract(dataset):
+    plain = SWGDatasetContract.from_json(
+        dataset["path"], card=dataset["card"])
+    cached = SWGDatasetContract.from_json(
+        dataset["path"], card=dataset["card"])
+    held = cached.preload_memory(window_days=(1, 2), target_interval_hours=3)
+    assert held["hours"] > 0 and held["bytes"] > 0
+    compared = 0
+    for interval in (3, 1):
+        for window in (1, 2):
+            for split, kwargs in (
+                    [("train", {"epoch": epoch, "seed": seed})
+                     for epoch in range(6) for seed in (7, 12)]
+                    + [("validation", {}), ("test", {})]):
+                try:
+                    expected = list(plain.batches(
+                        split=split, window_days=window,
+                        target_interval_hours=interval, **kwargs))
+                except ValueError:                  # no full batch of this size
+                    continue
+                if interval != 3 and split != "train":
+                    # Training starts take every hour, so every hour is held;
+                    # a held-out lattice holds only its start + 3k hours.
+                    with pytest.raises(ValueError, match="not preloaded"):
+                        list(cached.batches(
+                            split=split, window_days=window,
+                            target_interval_hours=interval, **kwargs))
+                    continue
+                served = list(cached.batches(
+                    split=split, window_days=window,
+                    target_interval_hours=interval, **kwargs))
+                assert len(served) == len(expected) > 0
+                for new, old in zip(served, expected, strict=True):
+                    _same_batch(new, old)
+                    cached.validate_batch_membership(new)
+                compared += len(served)
+    assert compared >= 20
+
+
+def test_memory_cache_reads_no_file_after_preloading(dataset, monkeypatch):
+    cached = SWGDatasetContract.from_json(
+        dataset["path"], card=dataset["card"])
+    cached.preload_memory(window_days=(1,), target_interval_hours=1)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a day file was read after preloading")
+
+    monkeypatch.setattr(swg_online, "_load_pinned_day", refuse)
+    monkeypatch.setattr(swg_online, "stored_state_at", refuse)
+    batch = next(cached.batches(split="train", window_days=1, epoch=0,
+                                seed=12, target_interval_hours=1))
+    assert batch.target[0].shape[1] == 24
+    next(cached.batches(split="validation", window_days=1,
+                        target_interval_hours=1))
+
+
+def test_memory_cache_keeps_the_digest_check_of_every_day_file(
+        tmp_path, small_card):
+    geometry = build_closure_geometry(small_card)
+    masks = (np.asarray(geometry.umask), np.asarray(geometry.vmask))
+    sources = [(tmp_path / name, _write_chunk(
+        tmp_path / name, source_day=day, days=days, masks=masks,
+        truth_run=tmp_path / "truth")) for name, day, days in _CHUNKS]
+    contract = SWGDatasetContract.from_json(
+        _write_contract(tmp_path / "contract.json", sources), card=small_card)
+    swg_online._load_pinned_day.cache_clear()
+    with (tmp_path / "train_a" / "day0003.npz").open("ab") as damaged:
+        damaged.write(b"x")
+    with pytest.raises(ValueError, match="digest differs"):
+        contract.preload_memory(window_days=(1,), target_interval_hours=1)
+    assert contract._memory is None
+
+
+def test_memory_preload_admits_curriculum_extension_windows(dataset):
+    contract = SWGDatasetContract.from_json(
+        dataset["path"], card=dataset["card"])
+    short = contract.preload_memory(window_days=(1,), target_interval_hours=1)
+    longer = contract.preload_memory(window_days=(1, 16),
+                                     target_interval_hours=1)
+    assert longer["hours"] >= short["hours"] > 0
+
+
+@pytest.mark.parametrize("windows", [(), (3,), (5,)])
+def test_memory_preload_refuses_unregistered_windows(dataset, windows):
+    contract = SWGDatasetContract.from_json(
+        dataset["path"], card=dataset["card"])
+    with pytest.raises(ValueError, match="preload windows"):
+        contract.preload_memory(window_days=windows, target_interval_hours=1)
+    with pytest.raises(ValueError, match="target_interval_hours"):
+        contract.preload_memory(window_days=(1,), target_interval_hours=5)
+
+
+# ------------------------------------------------- widened template target filter
+
+def _wave(shape, hour, phase):
+    """A 7-cell-wavelength diagonal wave that depends on the absolute hour."""
+    j, i = np.indices(shape)
+    return np.cos(2.0 * np.pi * (i + 2.0 * j) / 7.0 + 0.1 * hour + phase)
+
+
+def _wave_edit(masks, tmask, *, with_ssh):
+    """``_write_chunk`` day edit: hour-dependent wave velocities (divergent,
+    nonzero next to the walls) and, on an explicit card, sea level."""
+    umask, vmask = masks
+
+    def edit(day, arrays):
+        hours = arrays["absolute_hour"]
+        for prefix, scale in _OPERATOR_SCALE.items():
+            def make(hour):
+                return (1.0e-3 * scale * _wave(umask.shape, hour, 0.0) * umask,
+                        1.0e-3 * scale * _wave(umask.shape, hour, 1.3) * vmask,
+                        (1.0e-3 * scale * _wave(umask.shape, hour, 2.1) * tmask
+                         if with_ssh else np.zeros(umask.shape)))
+            hourly = [make(int(hour)) for hour in hours]
+            for index, name in enumerate(("u_hourly_m_s", "v_hourly_m_s",
+                                          "ssh_hourly_m")):
+                arrays[f"{prefix}{name}"] = np.stack(
+                    [state[index] for state in hourly])
+            if f"{prefix}u_initial_m_s" in arrays:
+                start = make(int(hours[0]) - 1)
+                for index, name in enumerate(("u_initial_m_s", "v_initial_m_s",
+                                              "ssh_initial_m")):
+                    arrays[f"{prefix}{name}"] = start[index]
+    return edit
+
+
+def _wave_sources(root: Path, card, *, lid=False):
+    geometry = build_closure_geometry(card)
+    masks = (np.asarray(geometry.umask), np.asarray(geometry.vmask))
+    edit = _wave_edit(masks, np.asarray(geometry.tmask), with_ssh=not lid)
+    return [(root / name, _write_chunk(
+        root / name, source_day=day, days=days, masks=masks,
+        truth_run=root / "truth", day_edit=edit,
+        manifest_edit=_lid_stream if lid else None))
+        for name, day, days in _CHUNKS]
+
+
+def _wave_contract(root: Path, card, *, sigma, lid=False):
+    """The synthetic wave record under a contract naming ``sigma`` (``None``:
+    a contract file with no filter key, as before the key existed)."""
+    sources = _wave_sources(root, card, lid=lid)
+    return SWGDatasetContract.from_json(_write_contract(
+        root / "contract.json", sources, target_filter_sigma_cells=sigma),
+        card=card)
+
+
+@pytest.fixture(scope="module")
+def wave_record(tmp_path_factory, small_card):
+    """One wave record, read under a contract with no key, 1.0 and 2.0."""
+    root = tmp_path_factory.mktemp("swg_wave")
+    sources = _wave_sources(root, small_card)
+    return {key: SWGDatasetContract.from_json(_write_contract(
+        root / f"contract_{key}.json", sources,
+        target_filter_sigma_cells=None if key == "unkeyed" else key),
+        card=small_card) for key in ("unkeyed", 1.0, 2.0)}
+
+
+def _batch(contract, **changes):
+    arguments = dict(split="train", window_days=1,
+                     target_interval_hours=1) | changes
+    if arguments["split"] == "train":
+        arguments = dict(epoch=0, seed=12) | arguments
+    return next(contract.batches(**arguments))
+
+
+def test_target_filter_one_is_the_stored_state_bit_for_bit(wave_record):
+    stored, one = wave_record["unkeyed"], wave_record[1.0]
+    assert stored.target_filter_sigma_cells == one.target_filter_sigma_cells \
+        == 1.0
+    assert stored._target_filter is None and one._target_filter is None
+    for window in (1, 2):
+        _same_batch(_batch(one, window_days=window),
+                    _batch(stored, window_days=window))
+    _same_batch(_batch(one, split="validation"),
+                _batch(stored, split="validation"))
+    # the record is non-trivial: the wave is what the batch carries
+    assert np.abs(_batch(one).target[1]).max() > 1.0e-3
+
+
+def test_target_filter_two_is_the_recorder_filter_then_sigma_sqrt_three(
+        wave_record, small_card):
+    contract, narrow_contract = wave_record[2.0], wave_record[1.0]
+    coarse = cgrid_geometry(small_card.resolved_namelist)
+    batch, narrow = _batch(contract), _batch(narrow_contract)
+    assert np.array_equal(batch.start_absolute_hour, narrow.start_absolute_hour)
+    checked = 0
+    for k, start in enumerate(np.asarray(batch.start_absolute_hour)[:3]):
+        for lead in (1, 12, 24):
+            ssh, u, v = (np.asarray(x) for x in stored_state_at(
+                contract.sources, "template", int(start) + lead)[0])
+            expected = filtered_restrict_cgrid(
+                {"T": ssh, "U": u, "V": v}, coarse, coarse,
+                sigma_source_cells=math.sqrt(2.0**2 - 1.0))
+            for index, key in enumerate("TUV"):
+                served = batch.target[index][k, lead - 1]
+                scale = np.abs(expected[key]).max()
+                assert scale > 1.0e-5
+                # eta is rebuilt from volume / area - depth (4 km), so its
+                # round-off is 1e-10 of this wave; velocities are at 1e-13
+                assert np.abs(served - expected[key]).max() <= 1.0e-9 * scale
+                # and it is not the stored sigma-one state
+                assert np.abs(served - narrow.target[index][k, lead - 1]).max() \
+                    > 0.1 * scale
+            checked += 1
+    assert checked == 9
+    # wall parity: wall-normal velocity stays exactly zero on the wall faces
+    umask = np.asarray(build_closure_geometry(small_card).umask)
+    assert np.all(batch.target[1][..., ~umask] == 0.0)
+
+
+def test_target_filter_runs_once_at_preload_and_batches_do_not_change(
+        wave_record):
+    plain = wave_record[2.0]
+    cached = dataclasses.replace(plain)
+    cached.preload_memory(window_days=(1,), target_interval_hours=1)
+    for split, kwargs in (("train", {"epoch": 1, "seed": 7}),
+                          ("validation", {}), ("test", {})):
+        _same_batch(_batch(cached, split=split, **kwargs),
+                    _batch(plain, split=split, **kwargs))
+
+
+@pytest.mark.parametrize("sigma", [0.5, 0.0, -1.5, float("nan"),
+                                   float("inf"), True, "2", None])
+def test_target_filter_refuses_values_below_one_and_non_numbers(sigma):
+    with pytest.raises(ValueError, match="target_filter_sigma_cells"):
+        require_target_filter_sigma_cells(sigma, "template")
+
+
+def test_target_filter_above_one_is_refused_under_the_symmetric_objective(
+        wave_record):
+    assert require_target_filter_sigma_cells(1.0, "symmetric") == 1.0
+    with pytest.raises(ValueError, match="template objective only"):
+        require_target_filter_sigma_cells(1.5, "symmetric")
+    with pytest.raises(ValueError, match="template objective only"):
+        dataclasses.replace(wave_record[2.0], objective="symmetric")
+    with pytest.raises(ValueError, match="target_filter_sigma_cells"):
+        dataclasses.replace(wave_record[2.0], target_filter_sigma_cells=0.9)
+
+
+@pytest.fixture(scope="module")
+def fine_and_coarse():
+    return (cgrid_geometry(SWG_MADDISON_NAMELIST),
+            cgrid_geometry(SWG_DG50_NAMELIST))
+
+
+def _two_pass_and_single(fields, fine, coarse, sigma_total):
+    stored = filtered_restrict_cgrid(
+        fields, fine, coarse, sigma_source_cells=8.0)
+    two = filtered_restrict_cgrid(
+        stored, coarse, coarse,
+        sigma_source_cells=math.sqrt(sigma_total**2 - 1.0))
+    single = filtered_restrict_cgrid(
+        fields, fine, coarse, sigma_source_cells=8.0 * sigma_total)
+    return stored, two, single
+
+
+def _interior(array, sigma_total):
+    # the 80 x 80 wet rectangle starts at index 1; keep the kernel radius + 2
+    margin = int(math.ceil(6.0 * sigma_total)) + 2
+    return array[1 + margin:81 - margin, 1 + margin:81 - margin]
+
+
+def _relative_rms_difference(two, single, sigma_total):
+    return {key: float(
+        np.sqrt(np.mean((_interior(two[key], sigma_total)
+                         - _interior(single[key], sigma_total))**2))
+        / np.sqrt(np.mean(_interior(single[key], sigma_total)**2)))
+        for key in "TUV"}
+
+
+@pytest.mark.parametrize("sigma_total", [1.5, 2.0])
+def test_second_coarse_pass_composes_with_the_sigma_one_filter_on_smooth_fields(
+        fine_and_coarse, sigma_total):
+    """Relative rms difference, away from the walls, between the two-stage
+    field (fine sigma 8 cells, then the coarse pass) and one fine pass of
+    sigma_total, for plane waves of 4..32 coarse cells.  Measured (CPU, x64):
+    at most 2.3e-7."""
+    fine, coarse = fine_and_coarse
+    yy, xx = np.meshgrid(np.arange(644) + 0.5, np.arange(644) + 0.5,
+                         indexing="ij")
+    worst = 0.0
+    for wavelength in (4, 6, 8, 16, 32):
+        wave = np.cos(2.0 * np.pi * (xx + yy)
+                      / (8.0 * wavelength * math.sqrt(2.0)))
+        fields = {"T": 1.0e-3 * wave * fine["mask"]["T"],
+                  "U": 1.0e-2 * wave * fine["mask"]["U"],
+                  "V": 1.0e-2 * np.roll(wave, 3, 0) * fine["mask"]["V"]}
+        stored, two, single = _two_pass_and_single(
+            fields, fine, coarse, sigma_total)
+        errors = _relative_rms_difference(two, single, sigma_total)
+        print(f"smooth sigma={sigma_total} lambda={wavelength}: {errors}")
+        worst = max(worst, *errors.values())
+        # the sigma-one state alone is a different field (non-vacuous)
+        narrow = _relative_rms_difference(stored, single, sigma_total)
+        assert max(narrow.values()) > 1.0e3 * max(errors.values())
+    assert worst < 1.0e-6
+
+
+@pytest.mark.parametrize("sigma_total", [1.5, 2.0])
+def test_second_coarse_pass_gives_white_noise_the_single_pass_spectrum(
+        fine_and_coarse, sigma_total):
+    """White noise filtered at sigma one, then at sqrt(sigma_total**2 - 1),
+    has the power of one fine pass of sigma_total in every radial band of the
+    interior.  Measured band-power ratios (8 seeds, CPU, x64): within 1.4e-4
+    at 1.5 and 3.8e-6 at 2; the sigma-one state alone is 1.07 to 157 times
+    (1.5) too powerful."""
+    fine, coarse = fine_and_coarse
+    margin = int(math.ceil(6.0 * sigma_total)) + 2
+    taper = np.hanning(80 - 2 * margin)
+    window = np.outer(taper, taper)
+    edges = [0.0, 0.05, 0.1, 0.2, 0.3, 0.5]            # cycles per coarse cell
+    frequency = np.fft.fftfreq(80 - 2 * margin)
+    radial = np.hypot(*np.meshgrid(frequency, frequency, indexing="ij"))
+
+    def bands(array):
+        power = np.abs(np.fft.fft2(_interior(array, sigma_total) * window))**2
+        return np.array([power[(radial >= lo) & (radial < hi)].sum()
+                         for lo, hi in zip(edges[:-1], edges[1:])])
+
+    rng = np.random.default_rng(1)
+    total = {"stored": 0.0, "two": 0.0, "single": 0.0}
+    errors = []
+    for _ in range(8):
+        fields = {"T": 1.0e-3 * rng.normal(size=(644, 644)) * fine["mask"]["T"],
+                  "U": 1.0e-2 * rng.normal(size=(644, 644)) * fine["mask"]["U"],
+                  "V": 1.0e-2 * rng.normal(size=(644, 644)) * fine["mask"]["V"]}
+        stored, two, single = _two_pass_and_single(
+            fields, fine, coarse, sigma_total)
+        errors.append(max(_relative_rms_difference(
+            two, single, sigma_total).values()))
+        for name, out in (("stored", stored), ("two", two), ("single", single)):
+            total[name] = total[name] + bands(out["T"])
+    ratio = total["two"] / total["single"]
+    print(f"white sigma={sigma_total}: band ratios {ratio}, "
+          f"stored/single {total['stored'] / total['single']}, "
+          f"pointwise relative rms {max(errors):.3e}")
+    assert np.max(np.abs(ratio - 1.0)) < 1.0e-3
+    assert max(errors) < 1.0e-3
+    assert (total["stored"] / total["single"]).max() > 1.05    # non-vacuous
+
+
+def _lid_divergence(card, u, v):
+    """Native-face divergence over the wet rectangle, the projection's own."""
+    geometry = build_closure_geometry(card)
+    j0, j1, i0, i1 = geometry.wet_bounds
+    u, v = np.asarray(u), np.asarray(v)
+    divergence = (u - np.roll(u, 1, axis=1) + v - np.roll(v, 1, axis=0)) \
+        / geometry.spacing_m
+    return divergence[j0:j1 + 1, i0:i1 + 1]
+
+
+def test_rigid_lid_window_starts_are_non_divergent_after_the_wider_filter(
+        tmp_path, lid_card):
+    contract = _wave_contract(tmp_path / "wide", lid_card, sigma=2.0, lid=True)
+    hour = int(_batch(contract, target_interval_hours=3).start_absolute_hour[0])
+    (ssh, u, v), _ = contract.start_state(hour)
+    served = contract._stored_state(hour)
+    # the filtered wave stays divergent; the projection removes the divergence
+    unprojected = _lid_divergence(lid_card, served[1], served[2])
+    assert np.abs(unprojected).max() > 1.0e-9
+    assert np.abs(_lid_divergence(lid_card, u, v)).max() \
+        < 1.0e-9 * np.abs(unprojected).max()
+    assert np.all(ssh == 0.0)
+    geometry = build_closure_geometry(lid_card)
+    assert np.abs(u - served[1]).max() > 0.0
+    assert np.all(u[~np.asarray(geometry.umask)] == 0.0)
+    # a contract at sigma one does not project: its starts are stored as is
+    plain = _wave_contract(tmp_path / "plain", lid_card, sigma=1.0, lid=True)
+    assert plain._start_projection is None
+    assert np.abs(_lid_divergence(
+        lid_card, *plain._stored_state(hour)[1:])).max() > 1.0e-9
+
+
+def test_rigid_lid_targets_are_filtered_but_not_projected(tmp_path, lid_card):
+    contract = _wave_contract(tmp_path, lid_card, sigma=2.0, lid=True)
+    batch = _batch(contract, target_interval_hours=3)
+    assert np.all(batch.target[0] == 0.0)               # lid: exactly zero ssh
+    assert np.abs(_lid_divergence(
+        lid_card, batch.target[1][0, 0], batch.target[2][0, 0])).max() > 1.0e-9
+
+
+def test_rigid_lid_filter_keeps_a_nondivergent_state_nondivergent(lid_card):
+    """Gaussians commute with the divergence, so the widened start needs the
+    projection only as a round-off guard: a non-divergent stored flow comes
+    out at ~1e-22 1/s and the projection moves it by ~1e-18 m/s (measured on
+    the 80 x 80 dg50 lid card; this test uses the 20 x 20 card)."""
+    geometry = build_closure_geometry(lid_card)
+    u, v = _streamfunction_flow(geometry, 3.0e5)
+    scale = max(np.abs(u).max(), np.abs(v).max())
+    assert np.abs(_lid_divergence(lid_card, u, v)).max() < 1.0e-12 * scale
+    for sigma in (1.5, 2.0):
+        ssh, u_wide, v_wide = swg_online.build_target_filter(
+            lid_card, sigma_cells=sigma)(np.zeros(u.shape), u, v)
+        assert np.all(ssh == 0.0)
+        assert np.abs(u_wide - u).max() > 1.0e-2 * scale     # it did smooth
+        assert np.abs(_lid_divergence(lid_card, u_wide, v_wide)).max() \
+            < 1.0e-12 * scale
+        u_proj, _ = swg_online.build_lid_start_projection(lid_card)(
+            u_wide, v_wide)
+        assert np.abs(u_proj - u_wide).max() < 1.0e-12 * scale
+
+
+def test_window_lengths_beyond_eight_days_are_admitted_whole_days_only(dataset):
+    admitted = swg_online.window_days_admitted
+    assert [w for w in range(0, 40) if admitted(w)] == [1, 2, 4, 8] + list(
+        range(9, 40))
+    assert not any(admitted(w) for w in (True, 16.0, "16", None, -8))
+    # A longer window reaches the batch sampler, which then refuses it only
+    # for lack of a full batch in this small record, not as an unknown length.
+    with pytest.raises(ValueError, match="fewer than one batch"):
+        next(dataset["contract"].batches(
+            split="validation", window_days=16, target_interval_hours=1))
+    with pytest.raises(ValueError, match="window must be one of"):
+        next(dataset["contract"].batches(
+            split="validation", window_days=5, target_interval_hours=1))
+
+
+def test_curriculum_windows_extend_the_prefix_and_must_fit_the_splits():
+    require = swg_online.require_curriculum_windows
+    rigid_lid = {"train": [731, 4235], "validation": [4265, 5111],
+                 "test": [5141, 5506]}
+    for windows in ([1, 2, 4, 8], [4], [1, 2], [8], [1, 2, 4, 8, 16],
+                    [1, 2, 4, 8, 16, 32]):
+        require(windows, rigid_lid)
+    for windows, match in (
+            ([8, 16], "without starting with"),
+            ([1, 2, 4, 16], "without starting with"),
+            ([1, 2, 4, 8, 32, 16], "window_days must increase"),
+            ([1, 2, 4, 8, 16, 16], "window_days must increase"),
+            ([1, 2, 4, 8, 12.0], "window_days must increase"),
+            ([1, 2, 4, 8, 6], "window_days must increase"),
+            ([1, 2, 4, 8, True], "window_days must increase"),
+            ((1, 2, 4, 8), "window_days must increase"),
+            ([], "window_days must increase")):
+        with pytest.raises(ValueError, match=match):
+            require(windows, rigid_lid)
+    # 32 d: the validation split holds 26 windows, the test split 11.
+    short_validation = rigid_lid | {"validation": [4265, 4265 + 9 * 32]}
+    with pytest.raises(ValueError, match="validation split holds 9 32-day"):
+        require([1, 2, 4, 8, 16, 32], short_validation)
+    require([1, 2, 4, 8, 16], short_validation)
+    # Train: the worst starting offset of the 32-day lattice needs 352 days.
+    with pytest.raises(ValueError, match="train split holds 9 32-day"):
+        require([1, 2, 4, 8, 32], rigid_lid | {"train": [0, 351]})
+    require([1, 2, 4, 8, 32], rigid_lid | {"train": [0, 352]})
+    # Warm start: no prefix, but the first length is the checkpoint's window.
+    for windows, start in (([8, 16, 32], 8), ([16, 32], 16), ([8], 8)):
+        require(windows, rigid_lid, start_window_days=start)
+    with pytest.raises(ValueError, match="must start at the initial checkpoint"):
+        require([16, 32], rigid_lid, start_window_days=8)
+    with pytest.raises(ValueError, match="train split holds 9 32-day"):
+        require([8, 32], rigid_lid | {"train": [0, 351]}, start_window_days=8)
+
+
+
+# ------------------------------------------- noise channel, ensembles, statistics
+
+def _golden_entry(online_case):
+    """The non-trivial entry the golden numbers were taken on."""
+    _, geometry, _, entry, _ = online_case
+    shape = tuple(geometry.tmask.shape)
+    rng = np.random.default_rng(3)
+    return entry._replace(
+        ssh_k=jnp.asarray(0.1 * rng.standard_normal(shape)),
+        u_k=jnp.asarray(0.05 * rng.standard_normal(shape)),
+        v_k=jnp.asarray(0.05 * rng.standard_normal(shape)))
+
+
+def test_network_without_the_noise_channel_is_the_committed_network_bit_for_bit(
+        online_case):
+    """Golden numbers taken from the code before the channel existed (commit
+    41f446411's tree, same seed, entry, step keys, 3-hour segment)."""
+    card, geometry, forcing, _, network = online_case
+    shape = tuple(geometry.tmask.shape)
+    assert network.spec.noise_channel is False
+    assert network.layers[0].weight.shape[1] == 4
+    assert network_parameter_count(network) == 952
+    entry = _golden_entry(online_case)
+    for scale, total, squares in ((0.0, 367.11772655224945, 23.090433558619793),
+                                  (0.3, 362.51731705021484, 26.335005038850692)):
+        potential = network(entry, geometry, key=jax.random.PRNGKey(1),
+                            noise=jnp.zeros(shape), noise_scale=jnp.asarray(scale))
+        assert float(jnp.sum(potential)) == pytest.approx(total, rel=1.0e-13)
+        assert float(jnp.sum(potential ** 2)) == pytest.approx(squares, rel=1.0e-13)
+    state = card.recipe.initial_state._replace(
+        tau_x_prev=forcing.tau_i_native, tau_y_prev=forcing.tau_j_native)
+    step = jax.jit(lambda s, k: swg_online_step(
+        network, s, jnp.zeros((3,) + shape), k, jnp.asarray(0.0), card=card,
+        geometry=geometry, forcing=forcing))
+    for index in range(2):
+        state = step(state, jax.random.PRNGKey(10 + index))
+    assert float(jnp.sum(state.u.data ** 2)) == pytest.approx(
+        7.647777307345999e-05, rel=1.0e-12)
+    assert float(jnp.sum(state.v.data ** 2)) == pytest.approx(
+        3.8012558668868516e-08, rel=1.0e-12)
+    assert float(jnp.sum(state.eta.data ** 2)) == pytest.approx(
+        7.011463941915811e-06, rel=1.0e-12)
+    raw, _ = build_segment_fn(card, geometry, window_days=1, target_interval_hours=3)
+    records = raw(network, state, jnp.zeros(
+        (swg_online.window_steps(card, 1, 3), 3) + shape),
+        jax.random.PRNGKey(5), jnp.asarray(0.0))[1]
+    for field, expected in zip(records, (25.47094486475052, 0.5989961645432657,
+                                         0.26443312569959987), strict=True):
+        assert float(jnp.sum(field ** 2)) == pytest.approx(expected, rel=1.0e-12)
+
+
+def _channel_network(online_case, seed=8):
+    spec = online_case[4].spec._replace(noise_channel=True)
+    return SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(seed))
+
+
+def test_noise_channel_network_reads_xi_as_a_fifth_channel_not_through_ssh(
+        online_case):
+    _, geometry, _, _, plain = online_case
+    entry = _golden_entry(online_case)
+    network = _channel_network(online_case)
+    shape = tuple(geometry.tmask.shape)
+    assert network.layers[0].weight.shape[1] == 5
+    assert network_parameter_count(network) == 952 + 8 * 9
+    xi = jax.random.normal(jax.random.PRNGKey(2), shape)
+
+    def potential(xi_value, noise=jnp.zeros(shape), scale=0.0):
+        return network(entry, geometry, key=jax.random.PRNGKey(1), noise=noise,
+                       noise_scale=jnp.asarray(scale), xi=xi_value)
+
+    base = potential(xi)
+    # xi matters; the old SSH-noise path (noise, noise_scale) no longer does.
+    assert np.any(np.asarray(potential(2.0 * xi)) != np.asarray(base))
+    assert np.array_equal(np.asarray(potential(
+        xi, noise=jnp.ones(shape), scale=5.0)), np.asarray(base))
+    # Without xi the network draws it from the key: reproducible, key-dependent.
+    drawn = network(entry, geometry, key=jax.random.PRNGKey(1),
+                    noise=jnp.zeros(shape), noise_scale=jnp.asarray(0.0))
+    again = network(entry, geometry, key=jax.random.PRNGKey(1),
+                    noise=jnp.zeros(shape), noise_scale=jnp.asarray(0.0))
+    other = network(entry, geometry, key=jax.random.PRNGKey(2),
+                    noise=jnp.zeros(shape), noise_scale=jnp.asarray(0.0))
+    assert np.array_equal(np.asarray(drawn), np.asarray(again))
+    assert np.any(np.asarray(drawn) != np.asarray(other))
+    with pytest.raises(ValueError, match="xi must have"):
+        potential(jnp.zeros((3, 3)))
+    with pytest.raises(ValueError, match="without a noise channel"):
+        plain(entry, geometry, key=jax.random.PRNGKey(1), noise=jnp.zeros(shape),
+              noise_scale=jnp.asarray(0.0), xi=xi)
+
+
+class _StageSpy:
+    """A closure that records the xi each RK3 stage hands it."""
+
+    spec = types.SimpleNamespace(noise_channel=True)
+
+    def __init__(self, shape):
+        self.shape = shape
+        self.xi = []
+
+    def __call__(self, entry, geometry, *, key, noise, noise_scale, xi):
+        self.xi.append(np.asarray(xi))
+        return jnp.zeros(self.shape)
+
+
+def test_xi_is_one_draw_per_step_shared_by_the_three_stages_and_seeded(
+        online_case):
+    card, geometry, forcing, _, _ = online_case
+    shape = tuple(geometry.tmask.shape)
+    state = card.recipe.initial_state._replace(
+        tau_x_prev=forcing.tau_i_native, tau_y_prev=forcing.tau_j_native)
+
+    def draws(key):
+        spy = _StageSpy(shape)
+        swg_online_step(spy, state, jnp.zeros((3,) + shape), key,
+                        jnp.asarray(0.0), card=card, geometry=geometry,
+                        forcing=forcing)
+        return spy.xi
+
+    first = draws(jax.random.PRNGKey(4))
+    assert len(first) == 3
+    assert np.array_equal(first[0], first[1]) and np.array_equal(first[0], first[2])
+    # Seeded: exactly the documented stream; N(0,1) per T cell.
+    expected = jax.random.normal(
+        jax.random.fold_in(jax.random.PRNGKey(4), 0), shape, state.eta.data.dtype)
+    assert np.array_equal(first[0], np.asarray(expected))
+    assert abs(first[0].mean()) < 0.05 and abs(first[0].std() - 1.0) < 0.05
+    # Reproducible for one step key, fresh for the next step's key.
+    assert np.array_equal(draws(jax.random.PRNGKey(4))[0], first[0])
+    next_key = jax.random.split(jax.random.PRNGKey(4), 2)[1]
+    assert np.any(draws(next_key)[0] != first[0])
+
+
+def test_channel_segment_is_seeded_and_members_of_one_start_differ(online_case):
+    card, geometry, forcing, _, _ = online_case
+    shape = tuple(geometry.tmask.shape)
+    network = swg_online.add_noise_channel(
+        online_case[4], key=jax.random.PRNGKey(3), relative_scale=1.0)
+    state = card.recipe.initial_state._replace(
+        tau_x_prev=forcing.tau_i_native, tau_y_prev=forcing.tau_j_native)
+    raw, _ = build_segment_fn(card, geometry, window_days=1, target_interval_hours=3)
+    noise = jnp.zeros((swg_online.window_steps(card, 1, 3), 3) + shape)
+
+    def run(key):
+        return raw(network, state, noise, key, jnp.asarray(0.0))[1]
+
+    members = [run(jax.random.PRNGKey(seed)) for seed in (1, 2)]
+    again = run(jax.random.PRNGKey(1))
+    assert all(np.array_equal(np.asarray(a), np.asarray(b))
+               for a, b in zip(members[0], again, strict=True))
+    assert np.any(np.asarray(members[0][1]) != np.asarray(members[1][1]))
+
+
+def test_add_noise_channel_keeps_every_trained_leaf_and_scales_the_new_weights(
+        online_case):
+    _, geometry, _, _, plain = online_case
+    entry = _golden_entry(online_case)
+    shape = tuple(geometry.tmask.shape)
+    key = jax.random.PRNGKey(6)
+    grown = swg_online.add_noise_channel(plain, key=key, relative_scale=1.0e-2)
+    assert grown.spec == plain.spec._replace(noise_channel=True)
+    old, new = plain.layers[0].weight, grown.layers[0].weight
+    assert new.shape == old.shape[:1] + (5,) + old.shape[2:]
+    assert np.array_equal(np.asarray(new[:, :4]), np.asarray(old))
+    assert np.array_equal(np.asarray(grown.layers[0].bias),
+                          np.asarray(plain.layers[0].bias))
+    for grown_layer, plain_layer in zip(grown.layers[1:], plain.layers[1:],
+                                        strict=True):
+        assert np.array_equal(np.asarray(grown_layer.weight),
+                              np.asarray(plain_layer.weight))
+    rms = float(jnp.sqrt(jnp.mean(old[:, 0] ** 2)))
+    expected = 1.0e-2 * rms * np.asarray(jax.random.normal(
+        key, old[:, :1].shape, old.dtype))
+    assert np.array_equal(np.asarray(new[:, 4:]), expected)
+    # With xi = 0 the grown network is the trained one.
+    call = dict(key=jax.random.PRNGKey(1), noise=jnp.zeros(shape),
+                noise_scale=jnp.asarray(0.0))
+    np.testing.assert_allclose(
+        np.asarray(grown(entry, geometry, xi=jnp.zeros(shape), **call)),
+        np.asarray(plain(entry, geometry, **call)), rtol=1.0e-12, atol=1.0e-14)
+    with pytest.raises(ValueError, match="already has"):
+        swg_online.add_noise_channel(grown, key=key, relative_scale=1.0e-2)
+
+
+def test_every_leaf_of_the_channel_network_carries_gradient_including_xi_weights(
+        online_case):
+    """One energy-score step on a two-member ensemble: the first-layer xi
+    weights, and every other leaf, are live (the driver's gate)."""
+    card, geometry, forcing, _, _ = online_case
+    shape = tuple(geometry.tmask.shape)
+    network = swg_online.add_noise_channel(
+        online_case[4], key=jax.random.PRNGKey(3), relative_scale=1.0e-2)
+    state = card.recipe.initial_state._replace(
+        tau_x_prev=forcing.tau_i_native, tau_y_prev=forcing.tau_j_native)
+    raw, _ = build_segment_fn(card, geometry, window_days=1, target_interval_hours=3)
+    noise = jnp.zeros((swg_online.window_steps(card, 1, 3), 3) + shape)
+    target = tuple(jnp.full((1, 8) + shape, 1.0e-3) for _ in range(3))
+
+    def loss(net):
+        members = jnp.stack([jnp.stack(raw(
+            net, state, noise, jax.random.PRNGKey(seed), jnp.asarray(0.0))[1])
+            for seed in (1, 2)])           # (members, 3 fields, hours, y, x)
+        predicted = tuple(members[:, field][None] for field in range(3))
+        return swg_online.ensemble_trajectory_scores(
+            predicted, target, geometry, BalancedNormalizers(1.0, 1.0, 1.0),
+            objective="symmetric")[0]
+
+    _, grads = eqx.filter_value_and_grad(loss)(network)
+    assert_network_gradients_live(grads)
+    xi_gradient = np.asarray(grads.layers[0].weight[:, 4:])
+    assert np.all(np.isfinite(xi_gradient)) and np.any(xi_gradient != 0.0)
+
+
+def test_energy_score_of_the_ensemble_is_the_existing_function_and_its_monitors(
+        online_case):
+    _, geometry, _, _, _ = online_case
+    shape = (2, 3, 4) + tuple(geometry.tmask.shape)         # windows, members, hours
+    rng = np.random.default_rng(5)
+    scale = 1.0e-2
+    predicted = tuple(jnp.asarray(scale * rng.standard_normal(shape))
+                      for _ in range(3))
+    target = tuple(jnp.asarray(scale * rng.standard_normal(
+        (2, 4) + tuple(geometry.tmask.shape))) for _ in range(3))
+    normalizers = BalancedNormalizers(2.0e-9, 3.0e-6, 4.0e-6)
+    score, member_truth, spread = swg_online.ensemble_trajectory_scores(
+        predicted, target, geometry, normalizers, objective="symmetric")
+    # The existing function, window by window, on the objective's diagnostic.
+    per_window = []
+    for window in range(2):
+        window_predicted = swg_online.diagnose_native_windows(
+            tuple(field[window] for field in predicted), geometry,
+            objective="symmetric")
+        window_target = swg_online.diagnose_native_windows(
+            tuple(field[window][None] for field in target), geometry,
+            objective="symmetric")
+        per_window.append(float(balanced_trajectory_loss(
+            window_predicted, jax.tree.map(lambda x: x[0], window_target),
+            geometry, normalizers, kind="energy_score")))
+    assert float(score) == pytest.approx(np.mean(per_window), rel=1.0e-12)
+    # The monitors are the two terms of the score: score = distance - spread/2.
+    assert float(score) == pytest.approx(
+        float(member_truth) - 0.5 * float(spread), rel=1.0e-10)
+    assert float(spread) > 0.0 and float(member_truth) > 0.0
+    with pytest.raises(ValueError, match="windows,members,hours"):
+        swg_online.ensemble_trajectory_scores(
+            tuple(field[:, 0] for field in predicted), target, geometry,
+            normalizers, objective="symmetric")
+
+
+def test_energy_score_of_identical_members_is_their_rms_distance_with_finite_gradient(
+        online_case):
+    """Two coinciding members: the pair term is exactly 0, the score is the
+    normalized area-weighted RMS distance to the truth -- here sqrt(3) for a
+    unit offset in all three fields -- and the gradient has no NaN."""
+    _, geometry, _, _, _ = online_case
+    shape = (2, 1) + tuple(geometry.tmask.shape)
+    ones = jnp.ones(shape)
+    predicted = BalancedTrajectory(ones, ones, ones)
+    target = BalancedTrajectory(jnp.zeros(shape[1:]), jnp.zeros(shape[1:]),
+                                jnp.zeros(shape[1:]))
+    unit = BalancedNormalizers(1.0, 1.0, 1.0)
+    score = balanced_trajectory_loss(
+        predicted, target, geometry, unit, kind="energy_score")
+    assert float(score) == pytest.approx(math.sqrt(3.0), rel=1.0e-14)
+
+    def loss(value):
+        fields = BalancedTrajectory(value, value, value)
+        return balanced_trajectory_loss(
+            fields, target, geometry, unit, kind="energy_score")
+
+    gradient = np.asarray(jax.grad(loss)(ones))
+    assert np.all(np.isfinite(gradient)) and np.any(gradient != 0.0)
+
+
+def test_balanced_variances_are_area_weighted_about_the_sample_and_area_mean(
+        online_case):
+    _, geometry, _, _, _ = online_case
+    rng = np.random.default_rng(9)
+    shape = (3, 4) + tuple(geometry.tmask.shape)
+    fields = [rng.standard_normal(shape) * s + m
+              for s, m in ((2.0e-6, 1.0e-7), (3.0e-2, -1.0e-3), (5.0e-2, 4.0e-3))]
+    trajectories = [BalancedTrajectory(*(jnp.asarray(f[window:window + 1])
+                                         for f in fields))
+                    for window in range(3)]
+    moments = sum(swg_online.balanced_field_second_moments(t, geometry)
+                  for t in trajectories)
+    normalizers = swg_online.normalizers_from_moments(moments)
+    weight = np.asarray(geometry.area_t_m2 * geometry.tmask)
+    weight = weight / weight.sum()
+    for field, value in zip(fields, normalizers, strict=True):
+        mean = np.sum(field * weight, axis=(-2, -1)).mean()
+        expected = np.mean(np.sum((field - mean) ** 2 * weight, axis=(-2, -1)))
+        assert value == pytest.approx(expected, rel=1.0e-9)
+    with pytest.raises(ValueError, match="must be positive"):
+        swg_online.normalizers_from_moments(np.zeros((3, 3)) + 1.0)
+
+
+def test_window_statistic_terms_are_nrmse_squared_of_the_mean_and_eke_maps(
+        online_case):
+    _, geometry, _, _, _ = online_case
+    rng = np.random.default_rng(11)
+    shape = (2, 6) + tuple(geometry.tmask.shape)
+    zeta = jnp.asarray(rng.standard_normal(shape)) * geometry.vertex_interior
+    ru = jnp.asarray(rng.standard_normal(shape)) * geometry.umask
+    rv = jnp.asarray(rng.standard_normal(shape)) * geometry.vmask
+    truth = BalancedTrajectory(zeta + 0.3 * geometry.vertex_interior, ru, rv)
+
+    def terms(candidate):
+        return [float(x) for x in swg_online.window_statistic_terms(
+            candidate, truth, geometry)]
+
+    assert terms(truth) == [0.0, 0.0]
+    # Every field scaled by (1 + e): the mean map is off by e (NRMSE^2 = e^2),
+    # the EKE map (quadratic in velocity) by (1+e)^2 - 1.
+    e = 0.1
+    vorticity, kinetic = terms(BalancedTrajectory(
+        truth.relative_vorticity_s1 * (1 + e), ru * (1 + e), rv * (1 + e)))
+    assert vorticity == pytest.approx(e ** 2, rel=1.0e-10)
+    assert kinetic == pytest.approx(((1 + e) ** 2 - 1) ** 2, rel=1.0e-10)
+    # A time-constant velocity error changes no EKE; a time-constant vorticity
+    # offset changes the mean map and nothing else.
+    constant = BalancedTrajectory(
+        truth.relative_vorticity_s1, ru + 5.0 * geometry.umask, rv)
+    assert terms(constant)[1] == pytest.approx(0.0, abs=1.0e-20)
+    offset = BalancedTrajectory(truth.relative_vorticity_s1 + 0.2, ru, rv)
+    assert terms(offset)[0] > 0.0 and terms(offset)[1] == pytest.approx(
+        0.0, abs=1.0e-20)
+
+
+def test_window_statistics_loss_with_zero_weights_is_eq7_and_weights_add_the_terms(
+        online_case):
+    card, geometry, _, _, _ = online_case
+    rng = np.random.default_rng(13)
+    shape = (2, 3) + tuple(geometry.tmask.shape)
+    scale = 1.0e-2
+    predicted = tuple(jnp.asarray(scale * rng.standard_normal(shape)) for _ in range(3))
+    target = tuple(jnp.asarray(scale * rng.standard_normal(shape)) for _ in range(3))
+    common = dict(objective="symmetric", beta_m1_s1=card.resolved_namelist.rn_beta_m_s,
+                  basin_length_m=card.resolved_namelist.rn_domsiz_m,
+                  wall_ring="weighted")
+    eq7 = deterministic_trajectory_loss(predicted, target, geometry, **common)
+    zero, eq7_again, vorticity, kinetic = swg_online.window_statistics_trajectory_loss(
+        predicted, target, geometry, vorticity_weight=0.0, eke_weight=0.0, **common)
+    assert float(zero) == float(eq7) == float(eq7_again)
+    total, _, _, _ = swg_online.window_statistics_trajectory_loss(
+        predicted, target, geometry, vorticity_weight=2.0, eke_weight=3.0, **common)
+    assert float(total) == pytest.approx(
+        float(eq7) + 2.0 * float(vorticity) + 3.0 * float(kinetic), rel=1.0e-13)

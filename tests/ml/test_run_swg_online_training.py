@@ -9,6 +9,7 @@ import json
 import shutil
 import types
 from pathlib import Path
+from typing import NamedTuple
 
 import equinox as eqx
 import jax
@@ -22,11 +23,14 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     swg_surface_wind,
 )
 from legoesm.ocean.state import OceanSurfaceForcing
+from legoesm.training import swg_online
 from legoesm.training.swg_online import (
     DAILY_MEAN_FIELDS,
+    SECONDS_PER_HOUR,
     SNAPSHOT_FIELDS,
     SWGOptimizerSettings,
     SWGScalarPotentialCNN,
+    assert_network_gradients_live,
     build_closure_geometry,
     build_segment_fn,
     coarse_state_from_native,
@@ -55,7 +59,11 @@ records = _load("swg_online_record_writer",
 evaluation = _load(
     "swg_online_evaluation", _ROOT / "scripts/validate/ocean_fidelity/"
     "testcases/nemo_testcase_l1_swg_online_evaluation.py")
-CONFIGS = sorted((_ROOT / "config/swg_online").glob("exp1_*.json"))
+CONFIGS = sorted(path for path in (_ROOT / "config/swg_online").glob("exp1_*.json")
+                 if "_day4265" not in path.name)
+EXP1_WEIGHTED = _ROOT / "config/swg_online/exp1_template_ring_weighted.json"
+EXP2_WALL_MARGIN = _ROOT / "config/swg_online/exp2_wallmargin2_template_ring_weighted.json"
+EXP2_BIGNET = _ROOT / "config/swg_online/exp2_bignet_h6k5_template_ring_weighted.json"
 PILOT = _ROOT / "config/swg_online/pilot_template_ring_excluded.json"
 CONTROL_CONFIGS = {
     name: _ROOT / f"config/swg_online/control_{name}_gpu.json"
@@ -88,6 +96,7 @@ def test_committed_configs_are_the_three_candidates_of_the_template_procedure():
     assert len({config["experiment"] for config in loaded.values()}) == 3
     for name, config in loaded.items():
         assert config["objective"] in name and config["wall_ring"] in name
+        assert config["training_precision"] == "fp64"
         assert config["experiment"] == "swgonl_exp1_" + name[5:-5]
         assert config["curriculum"] == {
             "window_days": [1, 2, 4, 8], "epochs_per_window": 5,
@@ -110,7 +119,9 @@ def test_committed_configs_are_the_three_candidates_of_the_template_procedure():
         assert len(config["seeds"]) >= 3
         assert config["network"] == {
             "hidden_channels": 16, "hidden_layers": 4, "kernel_size": 3,
-            "scales": driver.SCALE_RULE}
+            "wall_margin_rings": 0, "scales": driver.SCALE_RULE,
+            "noise_channel": "none", "initial_acceleration_gate": "enforced"}
+        assert config["loss"] == {"kind": "eq7"}
         # Daily means beside the snapshots.  The candidate chosen for the full
         # experiment (template, wall ring weighted) runs its free runs on the
         # GPU with native math (user decision 2026-10-14, after the GPU
@@ -123,6 +134,60 @@ def test_committed_configs_are_the_three_candidates_of_the_template_procedure():
             "device": "cuda" if chosen else "cpu",
             "math_library": "native" if chosen else "libm"}
         assert config["deck"] == "dg50"
+
+
+def test_exp2_arm_configs_differ_from_experiment_one_only_in_their_arm():
+    base = driver.load_config(EXP1_WEIGHTED)
+    wall = driver.load_config(EXP2_WALL_MARGIN)
+    big = driver.load_config(EXP2_BIGNET)
+    assert wall["experiment"] == "swgonl_exp2_wallmargin2_template_ring_weighted"
+    assert big["experiment"] == "swgonl_exp2_bignet_h6k5_template_ring_weighted"
+    for config, arm in ((wall, "Arm A"), (big, "Arm B")):
+        assert config["description"].startswith(
+            f"{arm} of the 2026-10-16 decision (user chose both arms): ")
+        assert config["description"].endswith(base["description"])
+    assert wall == base | {
+        "experiment": wall["experiment"], "description": wall["description"],
+        "network": base["network"] | {"wall_margin_rings": 2}}
+    assert big == base | {
+        "experiment": big["experiment"], "description": big["description"],
+        "network": base["network"] | {"hidden_layers": 6, "kernel_size": 5}}
+    assert wall["network"]["wall_margin_rings"] == 2
+    assert big["network"]["wall_margin_rings"] == 0
+
+
+def test_load_config_refuses_a_missing_or_negative_wall_margin(tmp_path):
+    config = json.loads(EXP1_WEIGHTED.read_text())
+    path = tmp_path / "config.json"
+    del config["network"]["wall_margin_rings"]
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="wall_margin_rings"):
+        driver.load_config(path)
+    config["network"]["wall_margin_rings"] = -1
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="wall_margin_rings must be an integer >= 0"):
+        driver.load_config(path)
+
+
+def test_wall_margin_reaches_the_spec_and_the_run_manifest(small_card, one_window):
+    config = driver.load_config(EXP2_WALL_MARGIN)
+    spec, _ = driver.network_spec(
+        config, small_card, build_closure_geometry(small_card))
+    assert spec.wall_margin_rings == 2
+    manifest = json.loads(
+        (one_window["folder"] / "run/run_manifest.json").read_text())
+    assert manifest["config"]["network"]["wall_margin_rings"] == 0
+    assert manifest["network"]["spec"]["wall_margin_rings"] == 0
+
+
+def test_free_run_refuses_a_changed_wall_margin(one_window, small_card):
+    config = copy.deepcopy(one_window["config"])
+    config["network"]["wall_margin_rings"] = 1
+    with pytest.raises(ValueError, match="not this configuration"):
+        driver.run_free_run(
+            config, one_window["path"], card=small_card, seed=11,
+            run_dir=one_window["folder"] / "run", window_days=1, device=CPU,
+            commit="0" * 40)
 
 
 def test_pilot_restricts_seeds_windows_and_training_years_by_its_own_keys():
@@ -153,6 +218,7 @@ def test_gpu_control_configs_name_the_frozen_control_choices_exactly():
             "description": config["description"],
             "control": name,
             "deck": "dg50" if name == "nu10" else "dg50-nu80",
+            "surface": "explicit",
             "closure": "none",
             "free_run": {
                 "days": 7300, "start": "rest",
@@ -167,12 +233,68 @@ def test_gpu_control_configs_name_the_frozen_control_choices_exactly():
         "device": "cuda", "math_library": "native"}
 
 
+def test_rigid_lid_gpu_control_configs_name_the_lid_controls_exactly():
+    for name, deck in (("nu10", "dg50-rl"), ("nu80", "dg50-nu80-rl")):
+        config = driver.load_config(
+            _ROOT / f"config/swg_online/control_{name}_rl_gpu.json")
+        assert config == {
+            "schema": driver.CONTROL_CONFIG_SCHEMA,
+            "experiment": f"swgonl_control_{name}_rl_gpu",
+            "description": config["description"],
+            "control": name, "deck": deck, "surface": "rigid_lid",
+            "closure": "none",
+            "free_run": {
+                "days": 7300, "start": "rest",
+                "sampling": "end_of_day_snapshot_and_daily_mean",
+                "device": "cuda", "math_library": "native"},
+        }
+        # Only the viscosity differs from the lid clock; a control never mixes
+        # its surface with the other surface's deck.
+        assert driver.DECKS[deck].rn_Dt_s == 10_800.0
+        assert driver.DECKS[deck].rn_Lv_m == (10.0 if name == "nu10" else 80.0)
+        for edit in ({"surface": "explicit"},
+                     {"deck": "dg50" if name == "nu10" else "dg50-nu80"}):
+            with pytest.raises(ValueError):
+                _refuse(config | edit)
+
+
+def _refuse(config):
+    import tempfile
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "control.json"
+        path.write_text(json.dumps(config))
+        driver.load_config(path)
+
+
 @pytest.mark.parametrize("edit,match", [
     (lambda c: c.pop("objective"), "exactly the keys"),
     (lambda c: c.pop("wall_ring"), "exactly the keys"),
     (lambda c: c.update(extra=1), "exactly the keys"),
     (lambda c: c.update(objective="auto"), "objective"),
     (lambda c: c.update(wall_ring=None), "wall_ring"),
+    (lambda c: c.pop("training_precision"), "exactly the keys"),
+    (lambda c: c.update(training_precision="fp16"), "training_precision"),
+    (lambda c: c.update(training_precision="FP32"), "training_precision"),
+    (lambda c: c.update(training_precision=32), "training_precision"),
+    (lambda c: c.pop("gradient_checkpointing"), "exactly the keys"),
+    (lambda c: c.update(gradient_checkpointing="yes"), "gradient_checkpointing"),
+    (lambda c: c.update(gradient_checkpointing=1), "gradient_checkpointing"),
+    (lambda c: c["dataset"].pop("cache"), "exactly the keys"),
+    (lambda c: c["dataset"].update(cache="disk"), "cache"),
+    (lambda c: c["dataset"].update(cache=True), "cache"),
+    (lambda c: c["dataset"].pop("target_filter_sigma_cells"),
+     "exactly the keys"),
+    (lambda c: c["dataset"].update(target_filter_sigma_cells=0.5),
+     "target_filter_sigma_cells"),
+    (lambda c: c["dataset"].update(target_filter_sigma_cells=True),
+     "target_filter_sigma_cells"),
+    (lambda c: c["dataset"].update(target_filter_sigma_cells="2"),
+     "target_filter_sigma_cells"),
+    (lambda c: c["dataset"].update(target_filter_sigma_cells=float("nan")),
+     "target_filter_sigma_cells"),
+    # CONFIGS[0] is the symmetric candidate: it may not widen the filter.
+    (lambda c: c["dataset"].update(target_filter_sigma_cells=1.5),
+     "template objective only"),
     (lambda c: c["optimiser"].pop("adam_epsilon_convention"), "exactly"),
     (lambda c: c["optimiser"].update(schedule="warmup_cosine"), "constant"),
     (lambda c: c["optimiser"].update(gradient_clipping="global_norm"), "none"),
@@ -193,6 +315,17 @@ def test_gpu_control_configs_name_the_frozen_control_choices_exactly():
     (lambda c: c["free_run"].update(device="tpu"), r"cpu\+libm"),
     (lambda c: c["free_run"].update(math_library="fast"), r"cpu\+libm"),
     (lambda c: c.update(deck="maddison"), "deck"),
+    (lambda c: c.update(surface="free"), "surface"),
+    (lambda c: c.pop("surface"), "exactly the keys"),
+    (lambda c: c.pop("target_interval_hours"), "exactly the keys"),
+    (lambda c: c.update(target_interval_hours=0), "target_interval_hours"),
+    (lambda c: c.update(target_interval_hours=5), "target_interval_hours"),
+    (lambda c: c.update(target_interval_hours="3"), "target_interval_hours"),
+    (lambda c: c.update(target_interval_hours=True), "target_interval_hours"),
+    (lambda c: c.update(target_interval_hours=2.0), "target_interval_hours"),
+    # dg50 steps at 400 s: 3 h is 27 steps, 8 h is not a divisor of a day.
+    (lambda c: c.update(target_interval_hours=16), "target_interval_hours"),
+    (lambda c: c.update(deck="dg50-rl", surface="rigid_lid"), "must divide"),
 ])
 def test_config_refuses_missing_extra_and_unknown_choices(tmp_path, edit, match):
     config = json.loads(CONFIGS[0].read_text())
@@ -201,6 +334,23 @@ def test_config_refuses_missing_extra_and_unknown_choices(tmp_path, edit, match)
     path.write_text(json.dumps(config))
     with pytest.raises(ValueError, match=match):
         driver.load_config(path)
+
+
+def test_rigid_lid_training_deck_requires_the_lid(tmp_path):
+    config = json.loads(CONFIGS[0].read_text())
+    config.update(deck="dg50-rl", surface="rigid_lid", target_interval_hours=3)
+    path = tmp_path / "lid.json"
+    path.write_text(json.dumps(config))
+    assert driver.load_config(path)["deck"] == "dg50-rl"
+    card = driver.build_deck_card("dg50-rl", "rigid_lid")
+    assert card.dt_s == 10_800.0
+    assert card.recipe.model_config.swe_surface == "rigid_lid"
+    config["surface"] = "explicit"
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="requires surface='rigid_lid'"):
+        driver.load_config(path)
+    with pytest.raises(ValueError, match="requires surface='rigid_lid'"):
+        driver.build_deck_card("dg50-rl", "explicit")
 
 
 def test_driver_refuses_to_start_without_a_configuration_file(tmp_path, capsys):
@@ -511,11 +661,11 @@ def test_logged_first_loss_is_eq7_of_the_first_batch_recomputed(
     contract = driver.SWGDatasetContract.from_json(
         run / "dataset_contract.json", card=small_card)
     batch = next(contract.batches(split="train", window_days=1, epoch=0,
-                                  seed=11))
+                                  seed=11, target_interval_hours=1))
     geometry = build_closure_geometry(small_card)
     spec, _ = driver.network_spec(config, small_card, geometry)
     network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(11))
-    _, segment = build_segment_fn(small_card, geometry, window_days=1)
+    _, segment = build_segment_fn(small_card, geometry, window_days=1, target_interval_hours=1)
     noise = jnp.zeros((24, 3) + tuple(geometry.tmask.shape))
     hourly = [segment(network, coarse_state_from_native(
         small_card.recipe.initial_state, *(value[k] for value in batch.initial)),
@@ -557,7 +707,8 @@ def test_first_step_gradient_gates_stop_the_run(
     config = _config(record)
     path = _write_config(tmp_path / "config.json", config)
 
-    def planted(value_and_grad, network, batch, key, windows_per_call):
+    def planted(value_and_grad, network, batch, key, windows_per_call,
+                **_):
         grads = jax.tree.map(lambda leaf: jnp.full_like(leaf, gradient),
                              eqx.filter(network, eqx.is_inexact_array))
         return jnp.asarray(loss), grads
@@ -918,7 +1069,8 @@ def test_real_chunks_build_the_contract_and_pass_the_start_gates(
     network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(seed))
     gates = driver._start_gates(network, contract, card, geometry, scales,
                                 window_days=1, seed=seed,
-                                key=jax.random.PRNGKey(seed))
+                                key=jax.random.PRNGKey(seed),
+                                target_interval_hours=1)
     hours = np.asarray(gates["start_absolute_hours"])
     assert hours.size == 10 and len(set(hours)) == 10
     assert hours.min() >= 731 * 24 and hours.max() + 24 <= 761 * 24
@@ -1012,7 +1164,7 @@ def test_record_start_is_the_datasets_window_start_bit_for_bit(
     contract_path = tmp_path / "contract.json"
     driver.write_dataset_contract(config, contract_path)
     contract = driver.SWGDatasetContract.from_json(contract_path, card=small_card)
-    batch = next(contract.batches(split="validation", window_days=1))
+    batch = next(contract.batches(split="validation", window_days=1, target_interval_hours=1))
     assert int(batch.start_absolute_hour[0]) == 52 * 24
     state, block = driver.resolve_start(driver.load_config(path), small_card)
     for index, field in enumerate((state.eta.data, state.u.data[:, 1:, 0],
@@ -1249,6 +1401,10 @@ def test_extension_refuses_anything_but_appended_windows(
     config["curriculum"]["epochs_per_window"] = 3
     refused(config, _write_config(tmp_path / "b.json", config), "differs in",
             run)
+    run, config = _extension(one_window, tmp_path / "h")
+    config["network"]["wall_margin_rings"] = 1
+    refused(config, _write_config(tmp_path / "h.json", config), "differs in",
+            run)
     # The same windows under a new description: an ordinary changed
     # configuration.  A removed window, a replaced window or a reordered
     # list: not an extension.
@@ -1382,3 +1538,1704 @@ def test_without_initial_checkpoint_the_seed_initialises_as_before(
         == log["epochs"][0]["train_loss_per_batch"]
     assert seeded_log["epochs"][0]["checkpoint"]["sha256"] \
         == log["epochs"][0]["checkpoint"]["sha256"]
+
+
+# ------------------------------------------------------- training precision
+
+EXP3_FP32 = _ROOT / "config/swg_online/exp3_symmetric_ring_weighted_fp32.json"
+EXP1_SYMMETRIC = _ROOT / "config/swg_online/exp1_symmetric_ring_weighted.json"
+
+
+def test_every_committed_training_config_states_its_training_precision():
+    trained_configs = [
+        path for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
+        if "network" in json.loads(path.read_text())]
+    assert len(trained_configs) >= 17
+    precisions = {path.name: driver.load_config(path)["training_precision"]
+                  for path in trained_configs}
+    assert precisions.pop(EXP3_FP32.name) == "fp32"
+    assert precisions.pop(EXP4_TEMPLATE.name) == "fp32"
+    assert precisions.pop(EXP4_SYMMETRIC.name) == "fp32"
+    assert precisions.pop(EXP5_TEMPLATE.name) == "fp32"
+    assert precisions.pop(EXP5_SYMMETRIC.name) == "fp32"
+    for path in EXP6:
+        assert precisions.pop(path.name) == "fp32"
+    assert precisions.pop(EXP4_SYMMETRIC_LONG.name) == "fp32"
+    assert precisions.pop(EXP7.name) == "fp32"
+    assert precisions.pop(EXP8.name) == "fp32"
+    assert precisions.pop(EXP9.name) == "fp32"
+    assert precisions.pop(EXP9_LONG.name) == "fp32"
+    assert precisions.pop(EXP10.name) == "fp32"
+    for seed_copy in EXP10_SEEDS:
+        assert precisions.pop(seed_copy.name) == "fp32"
+    assert set(precisions.values()) == {"fp64"}
+
+
+EXP5_SYMMETRIC = _ROOT / "config/swg_online/exp5_rigidlid_symmetric_fast.json"
+EXP5_TEMPLATE = _ROOT / "config/swg_online/exp5_rigidlid_template_fast.json"
+EXP6 = tuple(_ROOT / f"config/swg_online/exp6_rigidlid_template_{tag}.json"
+             for tag in ("sigma1p5", "sigma2"))
+EXP4_TEMPLATE = _ROOT / "config/swg_online/exp4_rigidlid_template_ring_weighted_fp32.json"
+EXP4_SYMMETRIC = _ROOT / "config/swg_online/exp4_rigidlid_symmetric_ring_weighted_fp32.json"
+EXP4_SYMMETRIC_LONG = EXP4_SYMMETRIC.with_name(
+    "exp4_rigidlid_symmetric_ring_weighted_fp32_long.json")
+RIGID_LID_TRUTH = ("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                   "swgonl_rounds/round16_rigidlid_truth/")
+
+
+def test_every_committed_training_config_states_its_target_interval():
+    trained_configs = [
+        path for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
+        if "network" in json.loads(path.read_text())]
+    intervals = {path.name: driver.load_config(path)["target_interval_hours"]
+                 for path in trained_configs}
+    assert intervals.pop(EXP4_TEMPLATE.name) == 3
+    assert intervals.pop(EXP4_SYMMETRIC.name) == 3
+    assert intervals.pop(EXP5_TEMPLATE.name) == 3
+    assert intervals.pop(EXP5_SYMMETRIC.name) == 3
+    for path in EXP6:
+        assert intervals.pop(path.name) == 3
+    assert intervals.pop(EXP4_SYMMETRIC_LONG.name) == 3
+    assert intervals.pop(EXP7.name) == 3
+    assert intervals.pop(EXP8.name) == 3
+    assert intervals.pop(EXP9.name) == 3
+    assert intervals.pop(EXP9_LONG.name) == 3
+    assert intervals.pop(EXP10.name) == 3
+    for seed_copy in EXP10_SEEDS:
+        assert intervals.pop(seed_copy.name) == 3
+    assert len(intervals) >= 17 and set(intervals.values()) == {1}
+
+
+@pytest.mark.parametrize("parent,child,experiment", [
+    (EXP1_WEIGHTED, EXP4_TEMPLATE,
+     "swgonl_exp4_rigidlid_template_ring_weighted_fp32"),
+    (EXP3_FP32, EXP4_SYMMETRIC,
+     "swgonl_exp4_rigidlid_symmetric_ring_weighted_fp32")])
+def test_exp4_rigid_lid_configs_differ_from_their_parent_only_as_decided(
+        parent, child, experiment):
+    base, new = driver.load_config(parent), driver.load_config(child)
+    prefix = ("Rigid-lid training on the rigid-lid truth (user decisions "
+              "2026-10-18: rigid lid, phi/g input, 3-hour step and 3-hour "
+              "loss sampling, both objectives): ")
+    assert new["description"].startswith(prefix + base["description"])
+    assert "PLACEHOLDERS" in new["description"]
+    records = [{"root": RIGID_LID_TRUTH + name, "chunk_label": label}
+               for name, label in (("hourly_dual_12y", "dual"),
+                                   ("hourly_dual_test_year", "dual_test"))]
+    assert new == base | {
+        "experiment": new["experiment"], "description": new["description"],
+        "deck": "dg50-rl", "surface": "rigid_lid", "training_precision": "fp32",
+        "target_interval_hours": 3,
+        "dataset": base["dataset"] | {"records": records}}
+    assert new["experiment"] == experiment
+    assert new["free_run"]["device"] == "cuda" \
+        and new["free_run"]["math_library"] == "native"
+
+
+@pytest.mark.parametrize("config_path", [EXP4_TEMPLATE, EXP4_SYMMETRIC])
+def test_exp4_refuses_to_load_data_until_the_rigid_lid_truth_exists(
+        config_path, tmp_path):
+    config = driver.load_config(config_path)
+    for index, record in enumerate(config["dataset"]["records"]):
+        record["root"] = str(tmp_path / f"missing_record_{index}")
+        with pytest.raises(ValueError, match="record root does not exist"):
+            driver.complete_chunks(record)
+    card = driver.build_deck_card(config["deck"], config["surface"])
+    with pytest.raises(ValueError, match="record root does not exist"):
+        driver.check_data(config, card=card)
+
+
+def test_exp3_is_the_symmetric_candidate_in_single_precision_on_the_gpu():
+    exp3 = driver.load_config(EXP3_FP32)
+    symmetric = driver.load_config(EXP1_SYMMETRIC)
+    template = driver.load_config(EXP1_WEIGHTED)
+    assert exp3["experiment"] == "swgonl_exp3_symmetric_ring_weighted_fp32"
+    assert exp3["description"] == (
+        "Next run after the 2026-10-17 decision (user: symmetric objective "
+        "next, single-precision training, GPU free runs): "
+        + symmetric["description"].replace(
+            "One of three candidates; the owner has not chosen the objective, "
+            "and the wall-ring treatment for this candidate is also open.",
+            "Wall ring weighted, as in the full experiment (user decision "
+            "2026-10-15)."))
+    assert exp3 == symmetric | {
+        "experiment": exp3["experiment"], "description": exp3["description"],
+        "training_precision": "fp32",
+        "free_run": symmetric["free_run"] | {
+            "device": "cuda", "math_library": "native"}}
+    assert exp3["network"]["wall_margin_rings"] == 0
+    assert exp3 | {key: template[key] for key in (
+        "experiment", "description", "objective", "training_precision")} \
+        == template
+
+
+def _parent_batch_functions(card, geometry, *, window_days, objective,
+                            wall_ring):
+    """``build_batch_functions`` as it was before ``training_precision``."""
+    raw, _ = build_segment_fn(
+        card, geometry, window_days=window_days, checkpoint=True, target_interval_hours=1)
+    n_steps = (window_days * driver.HOURS_PER_DAY
+               * int(SECONDS_PER_HOUR / card.dt_s))
+    template = card.recipe.initial_state
+    namelist = card.resolved_namelist
+    shape = tuple(geometry.tmask.shape)
+
+    def batch_loss(network, initial, target, key):
+        noise = jnp.zeros((n_steps, 3) + shape, dtype=jnp.float64)
+
+        def rollout(ssh, u, v):
+            state = coarse_state_from_native(template, ssh, u, v)
+            return raw(network, state, noise, key, jnp.asarray(0.0))[1]
+
+        predicted = jax.vmap(rollout)(*initial)
+        return deterministic_trajectory_loss(
+            predicted, target, geometry, objective=objective,
+            beta_m1_s1=namelist.rn_beta_m_s,
+            basin_length_m=namelist.rn_domsiz_m, wall_ring=wall_ring)
+
+    return (eqx.filter_jit(eqx.filter_value_and_grad(batch_loss)),
+            eqx.filter_jit(batch_loss))
+
+
+@pytest.fixture(scope="module")
+def precision_steps(small_card):
+    """One optimiser step of ten random one-day windows, three ways: the
+    parent code path, ``"fp64"`` and ``"fp32"`` (built with a spy on the
+    jitted functions that records their arguments and traced bodies)."""
+    card = small_card
+    geometry = build_closure_geometry(card)
+    config = driver.load_config(EXP1_SYMMETRIC)
+    spec, _ = driver.network_spec(config, card, geometry)
+    key = jax.random.PRNGKey(11)
+    network = SWGScalarPotentialCNN(spec, key=key)
+    optimizer = create_swg_optimizer(SWGOptimizerSettings(**config["optimiser"]))
+    shape = tuple(geometry.tmask.shape)
+    rng = np.random.default_rng(3)
+    batch = driver.WindowBatch(
+        tuple(1.0e-3 * rng.normal(size=(10,) + shape) for _ in range(3)),
+        tuple(1.0e-3 * rng.normal(size=(10, 24) + shape) for _ in range(3)),
+        np.arange(10), "train", 1)
+    options = {"window_days": 1, "objective": config["objective"],
+               "wall_ring": config["wall_ring"]}
+    update = driver._update_function(optimizer)
+
+    def step(functions):
+        loss, grads = driver.batch_value_and_grad(
+            functions[0], network, batch, key, 10)
+        opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))
+        stepped, _ = update(network, grads, opt_state)
+        return {"loss": loss, "grads": grads, "network": stepped}
+
+    traced, calls = [], []
+    real_filter_jit = eqx.filter_jit
+
+    def spy(function):
+        jitted = real_filter_jit(function)
+        traced.append(function)
+
+        def call(*args):
+            calls.append(sorted({
+                str(leaf.dtype) for leaf in jax.tree.leaves(
+                    eqx.filter(args, eqx.is_inexact_array))}))
+            return jitted(*args)
+        return call
+
+    eqx.filter_jit = spy
+    try:
+        functions32 = driver.build_batch_functions(
+            card, geometry, training_precision="fp32", checkpoint=True, **options,
+            target_interval_hours=1)
+    finally:
+        eqx.filter_jit = real_filter_jit
+    return {
+        "parent": step(_parent_batch_functions(card, geometry, **options)),
+        "fp64": step(driver.build_batch_functions(
+            card, geometry, training_precision="fp64", checkpoint=True, **options,
+            target_interval_hours=1)),
+        "fp32": step(functions32), "traced": traced[-1], "calls": calls,
+        "network": network, "batch": batch, "key": key, "card": card,
+        "geometry": geometry}
+
+
+def test_fp64_training_precision_reproduces_the_parent_step_bit_for_bit(
+        precision_steps):
+    parent, fp64 = precision_steps["parent"], precision_steps["fp64"]
+    assert float(fp64["loss"]) == float(parent["loss"]) > 0.0
+    for name in ("grads", "network"):
+        for new, old in zip(
+                jax.tree.leaves(eqx.filter(fp64[name], eqx.is_inexact_array)),
+                jax.tree.leaves(eqx.filter(parent[name], eqx.is_inexact_array)),
+                strict=True):
+            assert new.dtype == jnp.float64
+            assert np.array_equal(np.asarray(new), np.asarray(old))
+
+
+def test_fp32_step_keeps_float64_masters_and_matches_float64_closely(
+        precision_steps):
+    fp32, fp64 = precision_steps["fp32"], precision_steps["fp64"]
+    assert fp32["loss"].dtype == jnp.float64
+    for tree in (fp32["grads"], fp32["network"]):
+        assert {leaf.dtype for leaf in jax.tree.leaves(
+            eqx.filter(tree, eqx.is_inexact_array))} == {jnp.dtype("float64")}
+    assert float(fp32["loss"]) != float(fp64["loss"])
+    assert float(fp32["loss"]) == pytest.approx(float(fp64["loss"]), rel=1.0e-5)
+    new = np.concatenate([np.ravel(leaf) for leaf in jax.tree.leaves(
+        eqx.filter(fp32["grads"], eqx.is_inexact_array))])
+    old = np.concatenate([np.ravel(leaf) for leaf in jax.tree.leaves(
+        eqx.filter(fp64["grads"], eqx.is_inexact_array))])
+    assert np.max(np.abs(new - old)) < 1.0e-4 * np.max(np.abs(old))
+
+
+def _jaxpr_float64_use(jaxpr):
+    """Walk ``jaxpr`` and every jaxpr nested in its equations (scan bodies,
+    calls): ``(produced, carried, consumed, primitives)`` are the primitives
+    with a float64 result, the dtypes of every scan's carry, the primitives
+    without a nested jaxpr that read a float64 value, and all primitives."""
+    produced, carried, consumed, primitives = set(), set(), set(), set()
+
+    def is64(var):
+        return str(var.aval.dtype) == "float64"
+
+    def visit(inner):
+        inner = getattr(inner, "jaxpr", inner)
+        for equation in inner.eqns:
+            name = equation.primitive.name
+            nested = [item for param in equation.params.values()
+                      for item in (param if isinstance(param, (list, tuple))
+                                   else (param,))
+                      if hasattr(getattr(item, "jaxpr", item), "eqns")]
+            primitives.add(name)
+            if any(is64(var) for var in equation.outvars):
+                produced.add(name)
+            if not nested and any(is64(var) for var in equation.invars
+                                  if hasattr(var, "aval")):
+                consumed.add(name)
+            if name == "scan":
+                first = equation.params["num_consts"]
+                carried.update(
+                    str(var.aval.dtype) for var in
+                    equation.invars[first:first + equation.params["num_carry"]])
+            for item in nested:
+                visit(item)
+
+    visit(jaxpr)
+    return produced, carried, consumed, primitives
+
+
+def test_fp32_trace_holds_loss_state_scan_and_network_in_float32(
+        precision_steps):
+    assert precision_steps["calls"] == [["float32"]]
+    batch, traced = precision_steps["batch"], precision_steps["traced"]
+
+    with driver._single_precision_trace():
+        arguments = (driver._single(precision_steps["network"]),
+                     driver._single(tuple(map(jnp.asarray, batch.initial))),
+                     driver._single(tuple(map(jnp.asarray, batch.target))),
+                     precision_steps["key"])
+        loss = jax.make_jaxpr(traced)(*arguments)
+        gradient = jax.make_jaxpr(eqx.filter_value_and_grad(traced))(*arguments)
+    # The card's float64 constants (grid metrics, layer thicknesses) enter the
+    # trace as closed-over values read only by a conversion to float32: no
+    # operation produces a float64 value and every scan carries float32.
+    for jaxpr in (loss, gradient):
+        produced, carried, consumed, primitives = _jaxpr_float64_use(jaxpr)
+        assert produced == set()
+        assert carried == {"float32"}
+        assert consumed <= {"convert_element_type"}
+        assert {"scan", "dot_general"} <= primitives
+    assert jax.config.jax_enable_x64
+
+
+def test_free_runs_stay_float64_after_single_precision_training(
+        precision_steps):
+    card, geometry = precision_steps["card"], precision_steps["geometry"]
+    assert jax.config.jax_enable_x64
+    network = precision_steps["fp32"]["network"]
+    forcing, one_day = driver.free_run_day(
+        network, card, geometry, key=jax.random.PRNGKey(11))
+    state = driver._double_gyre_driver().seed_steady_forcing_carry(
+        card.recipe.initial_state, forcing)
+    state, means = one_day(state)
+    assert {str(array.dtype) for array in (
+        state.eta.data, state.u.data, state.v.data, *means)} == {"float64"}
+    assert {leaf.dtype for leaf in jax.tree.leaves(eqx.filter(
+        network, eqx.is_inexact_array))} == {jnp.dtype("float64")}
+
+
+def test_a_changed_training_precision_is_a_changed_run(one_window, small_card):
+    manifest = json.loads(
+        (one_window["folder"] / "run/run_manifest.json").read_text())
+    assert manifest["config"]["training_precision"] == "fp64"
+    config = copy.deepcopy(one_window["config"])
+    config["training_precision"] = "fp32"
+    path = _write_config(one_window["folder"] / "single.json", config)
+    with pytest.raises(RuntimeError, match="differs in"):
+        driver.train(config, path, card=small_card, seed=11,
+                     run_dir=one_window["folder"] / "run", device=CPU,
+                     windows_per_call=10, commit="0" * 40)
+    with pytest.raises(ValueError, match="not this configuration"):
+        driver.run_free_run(
+            config, path, card=small_card, seed=11,
+            run_dir=one_window["folder"] / "run", window_days=1, device=CPU,
+            commit="0" * 40)
+
+
+def test_build_batch_functions_refuses_an_unknown_training_precision(
+        small_card):
+    with pytest.raises(ValueError, match="training_precision"):
+        driver.build_batch_functions(
+            small_card, build_closure_geometry(small_card), window_days=1,
+            objective="template", wall_ring="weighted",
+            training_precision="bf16", checkpoint=True, target_interval_hours=1)
+
+
+# ----------------------------------------- rigid-lid deck at a 3-hour step
+
+@pytest.fixture(scope="module")
+def lid_card():
+    return driver.build_deck_card("dg50-rl", "rigid_lid")
+
+
+def test_rigid_lid_deck_free_run_day_is_eight_steps_of_three_hours(lid_card):
+    assert lid_card.dt_s == 10_800.0 and driver.steps_per_day(lid_card) == 8
+    namelist = driver.free_run_namelist(lid_card, 2)
+    assert (namelist.nn_itend, namelist.nn_write, namelist.nn_stock) == (16, 8, 8)
+    geometry = build_closure_geometry(lid_card)
+    key = jax.random.PRNGKey(0)
+    forcing, one_day = driver.free_run_day(None, lid_card, geometry, key=key)
+    start = driver._double_gyre_driver().seed_steady_forcing_carry(
+        lid_card.recipe.initial_state, forcing)
+    end, means = one_day(start)
+    stage_noise = jnp.zeros((3,) + tuple(geometry.tmask.shape), jnp.float64)
+    state = start
+    for _ in range(8):
+        state = driver.swg_online_step(
+            None, state, stage_noise, key, jnp.asarray(0.0), card=lid_card,
+            geometry=geometry, forcing=forcing)
+    for new, old in ((end.u.data, state.u.data), (end.v.data, state.v.data)):
+        np.testing.assert_allclose(np.asarray(new), np.asarray(old),
+                                   rtol=1.0e-10, atol=1.0e-14)
+    assert float(jnp.abs(end.u.data).max()) > 0.0       # the wind spun it up
+    assert len(means) == 4     # ssh, u, v and the lid potential phi
+
+
+@pytest.mark.parametrize("objective", ["symmetric", "template"])
+def test_rigid_lid_three_hour_training_rollout_has_live_gradients(
+        lid_card, objective):
+    """Two one-day windows on the rigid-lid dg50 deck: the jitted batch loss
+    and its gradient over 8 three-hourly records (phi/g closure input)."""
+    config = driver.load_config(
+        EXP4_SYMMETRIC if objective == "symmetric" else EXP4_TEMPLATE)
+    assert config["objective"] == objective
+    geometry = build_closure_geometry(lid_card)
+    spec, _ = driver.network_spec(config, lid_card, geometry)
+    network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(3))
+    value_and_grad, loss_fn = driver.build_batch_functions(
+        lid_card, geometry, window_days=1,
+        target_interval_hours=config["target_interval_hours"],
+        objective=objective, wall_ring=config["wall_ring"],
+        training_precision="fp64", checkpoint=True)
+    rng = np.random.default_rng(4)
+    template = lid_card.recipe.initial_state
+    u_shape = tuple(template.u.data[:, 1:, 0].shape)
+    v_shape = tuple(template.v.data[1:, :, 0].shape)
+
+    def native(*lead):
+        return (np.zeros(lead + tuple(template.eta.data.shape)),
+                1.0e-3 * rng.normal(size=lead + u_shape),
+                1.0e-3 * rng.normal(size=lead + v_shape))
+
+    initial, target = native(2), native(2, 8)
+    key = jax.random.PRNGKey(1)
+    loss, grads = value_and_grad(
+        network, tuple(map(jnp.asarray, initial)),
+        tuple(map(jnp.asarray, target)), key)
+    assert np.isfinite(float(loss)) and float(loss) > 0.0
+    assert_network_gradients_live(grads)       # finite and non-zero, every leaf
+    assert len(jax.tree.leaves(eqx.filter(grads, eqx.is_inexact_array))) == 9
+    value = loss_fn(network, tuple(map(jnp.asarray, initial)),
+                    tuple(map(jnp.asarray, target)), key)
+    assert float(value) == pytest.approx(float(loss), rel=1.0e-10)
+    # Hourly targets do not fit a 3-hourly rollout.
+    wrong = native(2, 24)
+    with pytest.raises(ValueError, match="share"):
+        loss_fn(network, tuple(map(jnp.asarray, initial)),
+                tuple(map(jnp.asarray, wrong)), key)
+
+
+def test_rigid_lid_free_run_writes_whole_day_dual_files(tmp_path, lid_card):
+    geometry = build_closure_geometry(lid_card)
+    manifest = driver.free_run(
+        None, lid_card, geometry, tmp_path / "free", days=2,
+        closure={"kind": "none", "control": "nu10"}, commit="0" * 40,
+        device=CPU, start=(None, "rest"))
+    assert manifest["status"] == "complete" and manifest["steps_per_day"] == 8
+    assert manifest["namelist"]["nn_write"] == 8
+    for day in (1, 2):
+        saved = np.load(tmp_path / "free" / f"day{day:04d}.npz")
+        assert int(saved["step"]) == 8 * day and int(saved["day"]) == day
+        assert float(saved["dt_s"]) == 10_800.0
+        assert int(saved["daily_mean_sample_count"]) == 8
+        assert set(driver.SNAPSHOT_FIELDS + driver.DAILY_MEAN_FIELDS) \
+            <= set(saved.files)
+
+
+# ------------------------------------------- gradient checkpointing and cache
+
+def test_every_committed_training_config_states_checkpointing_and_cache():
+    trained_configs = [
+        path for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
+        if "network" in json.loads(path.read_text())]
+    states = {}
+    for path in trained_configs:
+        config = driver.load_config(path)
+        states[path.name] = (config["gradient_checkpointing"],
+                             config["dataset"]["cache"])
+    # The arms keep checkpointing: 16 and 32 days have no measured no-checkpoint
+    # peak (exp5 stopped at 8) and arm B holds 8 members per window.
+    assert states.pop(EXP7.name) == (True, "memory")
+    assert states.pop(EXP8.name) == (True, "memory")
+    assert states.pop(EXP9.name) == (True, "memory")
+    assert states.pop(EXP9_LONG.name) == (True, "memory")
+    assert states.pop(EXP10.name) == (True, "memory")
+    for seed_copy in EXP10_SEEDS:
+        assert states.pop(seed_copy.name) == (True, "memory")
+    assert states.pop(EXP5_SYMMETRIC.name) == (False, "memory")
+    assert states.pop(EXP5_TEMPLATE.name) == (False, "memory")
+    for path in EXP6:
+        assert states.pop(path.name) == (False, "memory")
+    assert len(states) >= 17 and set(states.values()) == {(True, "none")}
+
+
+@pytest.mark.parametrize("parent,child,experiment", [
+    (EXP4_TEMPLATE, EXP5_TEMPLATE,
+     "swgonl_exp5_rigidlid_template_fast"),
+    (EXP4_SYMMETRIC, EXP5_SYMMETRIC,
+     "swgonl_exp5_rigidlid_symmetric_fast")])
+def test_exp5_fast_configs_differ_from_exp4_only_as_decided(
+        parent, child, experiment):
+    base, new = driver.load_config(parent), driver.load_config(child)
+    assert new["description"] == (
+        "Speed-up of exp4 (user 2026-10-18): in-memory record cache and no "
+        "gradient checkpointing; numerically identical training. "
+        + base["description"])
+    assert new == base | {
+        "experiment": experiment, "description": new["description"],
+        "gradient_checkpointing": False,
+        "dataset": base["dataset"] | {"cache": "memory"}}
+
+
+_REMAT = {"checkpoint", "remat", "remat2"}
+
+
+@pytest.fixture(scope="module")
+def unrematerialised_step(precision_steps):
+    """The ``precision_steps`` fp64 step again with both ``checkpoint``
+    values, and the primitives of each build's loss and gradient programs."""
+    card, geometry = precision_steps["card"], precision_steps["geometry"]
+    batch, network = precision_steps["batch"], precision_steps["network"]
+    key = precision_steps["key"]
+    options = {"window_days": 1, "objective": "template",
+               "wall_ring": "excluded", "training_precision": "fp64",
+               "target_interval_hours": 1}
+    arguments = (network, tuple(map(jnp.asarray, batch.initial)),
+                 tuple(map(jnp.asarray, batch.target)), key)
+    built, primitives = {}, {}
+    for checkpoint in (True, False):
+        value_and_grad, loss_fn = driver.build_batch_functions(
+            card, geometry, checkpoint=checkpoint, **options)
+        built[checkpoint] = driver.batch_value_and_grad(
+            value_and_grad, network, batch, key, 10)
+        primitives[checkpoint] = set().union(*(
+            _jaxpr_float64_use(jax.make_jaxpr(function)(*arguments))[3]
+            for function in (value_and_grad, loss_fn)))
+    return built, primitives
+
+
+def test_checkpoint_flag_changes_the_program_not_the_step(
+        unrematerialised_step):
+    built, primitives = unrematerialised_step
+    assert _REMAT & primitives[True]            # the detector sees remat
+    assert not _REMAT & primitives[False]       # and it is gone when off
+    loss_on, grads_on = built[True]
+    loss_off, grads_off = built[False]
+    assert float(loss_on) > 0.0
+    assert float(loss_off) == pytest.approx(float(loss_on), rel=1.0e-14)
+    on = np.concatenate([np.ravel(leaf) for leaf in jax.tree.leaves(
+        eqx.filter(grads_on, eqx.is_inexact_array))])
+    off = np.concatenate([np.ravel(leaf) for leaf in jax.tree.leaves(
+        eqx.filter(grads_off, eqx.is_inexact_array))])
+    assert np.max(np.abs(on)) > 0.0
+    assert np.max(np.abs(on - off)) <= 1.0e-14 * np.max(np.abs(on))
+
+
+@pytest.mark.parametrize("checkpoint", [1, "false", None])
+def test_build_batch_functions_refuses_a_non_boolean_checkpoint(
+        small_card, checkpoint):
+    with pytest.raises(ValueError, match="checkpoint"):
+        driver.build_batch_functions(
+            small_card, build_closure_geometry(small_card), window_days=1,
+            objective="template", wall_ring="weighted",
+            training_precision="fp64", checkpoint=checkpoint,
+            target_interval_hours=1)
+
+
+def test_memory_cache_training_reproduces_the_file_reading_run_bit_for_bit(
+        one_window, small_card, tmp_path, capsys):
+    config = copy.deepcopy(one_window["config"])
+    assert config["dataset"]["cache"] == "none"
+    config["dataset"]["cache"] = "memory"
+    path = _write_config(tmp_path / "config.json", config)
+    log = driver.train(config, path, card=small_card, seed=11,
+                       run_dir=tmp_path / "run", device=CPU,
+                       windows_per_call=10, commit="0" * 40)
+    assert "DATASET_CACHE hours=" in capsys.readouterr().out
+    assert log["status"] == "complete"
+    reference = json.loads(
+        (one_window["folder"] / "run/training_log.json").read_text())["epochs"]
+    keys = ("window_days", "epoch", "optimizer_steps", "train_loss_mean",
+            "train_loss_per_batch", "validation_loss", "checkpoint")
+    assert [{key: entry[key] for key in keys} for entry in log["epochs"]] \
+        == [{key: entry[key] for key in keys} for entry in reference]
+    for entry in reference:
+        name = entry["checkpoint"]["path"]
+        assert driver._sha256(tmp_path / "run" / name) \
+            == driver._sha256(one_window["folder"] / "run" / name)
+
+
+# ------------------------------------------------ widened template target filter
+
+def test_every_committed_training_config_states_its_target_filter_width():
+    widths = {path.name: driver.load_config(path)["dataset"][
+        "target_filter_sigma_cells"]
+        for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
+        if "network" in json.loads(path.read_text())}
+    assert widths.pop(EXP6[0].name) == 1.5
+    assert widths.pop(EXP6[1].name) == 2.0
+    assert len(widths) >= 17 and set(widths.values()) == {1.0}
+
+
+@pytest.mark.parametrize("path,experiment,sigma,shown", [
+    (EXP6[0], "swgonl_exp6_rigidlid_template_sigma1p5", 1.5, "1.5"),
+    (EXP6[1], "swgonl_exp6_rigidlid_template_sigma2", 2.0, "2")])
+def test_exp6_configs_differ_from_exp5_template_only_in_the_filter_width(
+        path, experiment, sigma, shown):
+    base, new = driver.load_config(EXP5_TEMPLATE), driver.load_config(path)
+    prefix = (f"Wider target filter (user 2026-10-18): template objective "
+              f"with the Gaussian target smoothed to sigma = {shown} coarse "
+              "cells by a second coarse-grid pass; otherwise exp5 template. ")
+    stale = " The dataset roots below are PLACEHOLDERS"
+    assert "PLACEHOLDERS" in base["description"]
+    assert new["description"].startswith(prefix + "Speed-up of exp4")
+    assert "PLACEHOLDERS" not in new["description"]
+    assert new["description"] == prefix + base["description"].split(stale)[0]
+    assert new == base | {
+        "experiment": experiment, "description": new["description"],
+        "dataset": base["dataset"] | {"target_filter_sigma_cells": sigma}}
+    assert new["objective"] == "template" and new["surface"] == "rigid_lid"
+
+
+def test_contract_names_the_target_filter_width_and_check_data_reads_it(
+        tmp_path, small_card, record):
+    for sigma in (1.0, 1.5):
+        config = _config(record)
+        config["dataset"]["target_filter_sigma_cells"] = sigma
+        payload = driver.write_dataset_contract(
+            config, tmp_path / f"contract_{sigma}.json")
+        assert payload["target_filter_sigma_cells"] == sigma
+        contract = driver.SWGDatasetContract.from_json(
+            tmp_path / f"contract_{sigma}.json", card=small_card)
+        assert contract.target_filter_sigma_cells == sigma
+        assert (contract._target_filter is None) == (sigma == 1.0)
+    # a wider filter is a different contract, hence a different run identity
+    assert driver._sha256(tmp_path / "contract_1.0.json") \
+        != driver._sha256(tmp_path / "contract_1.5.json")
+    config["dataset"]["target_filter_sigma_cells"] = 1.5
+    report = driver.check_data(config, card=small_card)
+    assert len(report["batches"]) == 6
+
+
+def test_committed_long_config_extends_exp4_symmetric_and_refuses_what_does_not_fit(
+        tmp_path):
+    """The long rigid-lid configuration is exp4 symmetric with the 16- and
+    32-day windows appended; a curriculum past eight days must start with
+    1/2/4/8 and fit the splits."""
+    base = driver.load_config(EXP4_SYMMETRIC)
+    long = driver.load_config(EXP4_SYMMETRIC_LONG)
+    assert base["curriculum"]["window_days"] == [1, 2, 4, 8]
+    assert long["curriculum"]["window_days"] == [1, 2, 4, 8, 16, 32]
+    assert long | {"description": base["description"],
+                   "curriculum": base["curriculum"]} == base
+    for name, edit, match in (
+            ("no prefix", lambda c: c["curriculum"].update(
+                window_days=[8, 16]), "without starting with"),
+            ("unordered", lambda c: c["curriculum"].update(
+                window_days=[1, 2, 4, 8, 32, 16]), "window_days must increase"),
+            ("no room for a batch", lambda c: c["dataset"]["splits_days"].update(
+                validation=[4265, 4265 + 9 * 32]),
+             "validation split holds 9 32-day")):
+        config = copy.deepcopy(long)
+        edit(config)
+        path = tmp_path / f"{name.replace(' ', '_')}.json"
+        path.write_text(json.dumps(config))
+        with pytest.raises(ValueError, match=match):
+            driver.load_config(path)
+
+
+# ------------------------------- arms B and C: noise channel, energy score, statistics
+
+EXP7 = _ROOT / "config/swg_online/exp7_rigidlid_energy_score_m8.json"
+EXP8 = _ROOT / "config/swg_online/exp8_rigidlid_window_stats.json"
+EXP9 = _ROOT / "config/swg_online/exp9_rigidlid_neuralgcm.json"
+EXP10 = _ROOT / "config/swg_online/exp10_rigidlid_energy_score_neuralgcm_m8.json"
+EXP10_SEEDS = [_ROOT / f"config/swg_online/exp10_rigidlid_energy_score_neuralgcm_m8_seed{seed}.json"
+               for seed in (20261014, 20261015)]
+
+
+def test_exp10_seed_copies_differ_only_in_seed_and_start_network():
+    base = json.loads(EXP10.read_text())
+    for seed, path in zip((20261014, 20261015), EXP10_SEEDS):
+        copy_ = json.loads(path.read_text())
+        assert copy_["seeds"] == [seed]
+        assert copy_["network"]["initial_checkpoint"].endswith(
+            f"seed{seed}/checkpoints/w08_e05.eqx")
+        for key in ("seeds", "description"):
+            copy_.pop(key)
+            base.pop(key, None)
+        copy_["network"].pop("initial_checkpoint")
+        reference = json.loads(EXP10.read_text())
+        for key in ("seeds", "description"):
+            reference.pop(key)
+        reference["network"].pop("initial_checkpoint")
+        assert copy_ == reference
+W08_CHECKPOINT = (
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/"
+    "round17_rigidlid/swgonl_exp4_rigidlid_symmetric_ring_weighted_fp32/"
+    "seed20261013/checkpoints/w08_e05.eqx")
+
+
+def test_every_committed_training_config_states_its_loss_and_noise_channel():
+    trained_configs = [
+        path for path in sorted((_ROOT / "config/swg_online").glob("*.json"))
+        if "network" in json.loads(path.read_text())]
+    seen = {path.name: (driver.load_config(path)["loss"],
+                        driver.load_config(path)["network"]["noise_channel"],
+                        driver.load_config(path)["network"][
+                            "initial_acceleration_gate"])
+            for path in trained_configs}
+    # The arms load the trained w08 file, whose closure is 10-15 x the wind
+    # acceleration; every other configuration keeps the 1% bar enforced.
+    assert seen.pop(EXP7.name) == (
+        {"kind": "energy_score", "members": 8}, "white_input", "recorded_only")
+    assert seen.pop(EXP8.name) == (
+        {"kind": "eq7_window_statistics", "calibration_window_days": 8}, "none",
+        "recorded_only")
+    # The NeuralGCM-style arms carry the measured cutoff table (exp9 trains
+    # from scratch, so its 1% bar is enforced).
+    assert seen.pop(EXP9_LONG.name) == seen[EXP9.name]
+    assert seen.pop(EXP9.name) == (
+        {"kind": "eq7_neuralgcm", "calibration_window_days": 1,
+         "lead_time_cutoff": MEASURED_TABLE}, "none", "enforced")
+    for seed_copy in EXP10_SEEDS:
+        assert seen.pop(seed_copy.name) == seen[EXP10.name]
+    assert seen.pop(EXP10.name) == (
+        {"kind": "energy_score_neuralgcm", "members": 8,
+         "calibration_window_days": 8, "lead_time_cutoff": MEASURED_TABLE},
+        "white_input", "recorded_only")
+    assert len(seen) >= 17
+    assert {json.dumps(value) for value in seen.values()} == {
+        json.dumps(({"kind": "eq7"}, "none", "enforced"))}
+
+
+@pytest.mark.parametrize("path,loss", [
+    (EXP7, {"kind": "energy_score", "members": 8}),
+    (EXP8, {"kind": "eq7_window_statistics", "calibration_window_days": 8})])
+def test_committed_arm_configs_differ_from_the_long_config_only_in_the_arm(
+        path, loss):
+    long = driver.load_config(EXP4_SYMMETRIC_LONG)
+    arm = driver.load_config(path)
+    differing = sorted(key for key in long if long[key] != arm[key])
+    assert differing == sorted([
+        "experiment", "description", "network", "loss", "seeds", "dataset",
+        "curriculum"])
+    assert arm["curriculum"] == long["curriculum"] | {"window_days": [8, 16, 32]}
+    assert arm["loss"] == loss
+    assert arm["network"]["initial_checkpoint"] == W08_CHECKPOINT
+    arm_keys = ("noise_channel", "initial_checkpoint",
+                "initial_acceleration_gate")
+    assert {key: value for key, value in arm["network"].items()
+            if key not in arm_keys} \
+        == {key: value for key, value in long["network"].items()
+            if key not in arm_keys}
+    assert arm["network"]["initial_acceleration_gate"] == "recorded_only"
+    assert arm["seeds"] == [20261013]
+    assert arm["dataset"]["cache"] == "memory"
+    assert arm["dataset"] | {"cache": "none"} == long["dataset"]
+    assert arm["gradient_checkpointing"] is True
+    # Warm start (user decision 2026-10-19): from the w08 checkpoint's window.
+    assert arm["curriculum"]["window_days"] == [8, 16, 32]
+    assert (arm["surface"], arm["objective"], arm["training_precision"],
+            arm["target_interval_hours"]) == (
+        "rigid_lid", "symmetric", "fp32", 3)
+
+
+def _fake_run(tmp_path, windows=(1, 2, 4, 8), log=True):
+    """A run directory whose training log lists w<NN>_e01 for each window."""
+    run = tmp_path / "run"
+    (run / "checkpoints").mkdir(parents=True)
+    if log:
+        (run / "training_log.json").write_text(json.dumps({"epochs": [
+            {"window_days": w, "checkpoint": {
+                "path": f"checkpoints/w{w:02d}_e01.eqx"}} for w in windows]}))
+    return run / "checkpoints" / "w08_e01.eqx"
+
+
+@pytest.mark.parametrize("windows,match", [
+    ([8, 16, 32], None),
+    ([8, 16], None),
+    ([16, 32], "must start at the initial checkpoint's last trained window, "
+               "8 days"),
+    ([1, 2, 4, 8, 16, 32], None),     # the cold-start rule still holds
+    ([4, 8, 16], "must start at the initial checkpoint's last trained"),
+    ([8, 6], "window_days must increase")])
+def test_warm_start_curriculum_starts_at_the_checkpoints_last_window(
+        tmp_path, windows, match):
+    config = copy.deepcopy(driver.load_config(EXP8))
+    config["network"]["initial_checkpoint"] = str(_fake_run(tmp_path))
+    config["curriculum"]["window_days"] = windows
+    path = tmp_path / "warm.json"
+    path.write_text(json.dumps(config))
+    if match is None:
+        assert driver.load_config(path)["curriculum"]["window_days"] == windows
+    else:
+        with pytest.raises(ValueError, match=match):
+            driver.load_config(path)
+
+
+def test_cold_start_curriculum_beyond_eight_days_still_needs_the_prefix(tmp_path):
+    config = copy.deepcopy(driver.load_config(EXP4_SYMMETRIC_LONG))
+    assert "initial_checkpoint" not in config["network"]
+    config["curriculum"]["window_days"] = [8, 16, 32]
+    path = tmp_path / "cold.json"
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="without starting with"):
+        driver.load_config(path)
+
+
+@pytest.mark.parametrize("kwargs,match", [
+    ({"log": False}, "run log .* cannot be read"),
+    ({"windows": (1, 2, 4)}, "lists 0 epochs with checkpoint checkpoints/w08"),
+])
+def test_warm_start_refuses_an_unreadable_checkpoint_run(
+        tmp_path, kwargs, match):
+    config = copy.deepcopy(driver.load_config(EXP8))
+    config["network"]["initial_checkpoint"] = str(_fake_run(tmp_path, **kwargs))
+    config["curriculum"]["window_days"] = [8, 16, 32]
+    path = tmp_path / "unreadable.json"
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match=match):
+        driver.load_config(path)
+
+
+@pytest.mark.parametrize("edit,match", [
+    (lambda c: c["network"].update(noise_channel="gaussian"),
+     "noise_channel must be one of"),
+    (lambda c: c["network"].pop("noise_channel"), "must hold exactly the keys"),
+    (lambda c: c.pop("loss"), "must hold exactly the keys"),
+    (lambda c: c.update(loss={"kind": "crps"}), "loss kind must be one of"),
+    (lambda c: c.update(loss={"kind": "eq7", "members": 8}),
+     "loss must hold exactly the keys"),
+    (lambda c: c.update(loss={"kind": "energy_score", "members": 1}),
+     "members must be an integer >= 2"),
+    (lambda c: c.update(loss={"kind": "energy_score", "members": 8}),
+     "energy_score loss needs network noise_channel"),
+    (lambda c: c.update(loss={"kind": "eq7_window_statistics",
+                              "calibration_window_days": 3}),
+     "calibration_window_days must be one of the curriculum"),
+    (lambda c: c.update(loss={"kind": "eq7_window_statistics"}),
+     "loss must hold exactly the keys"),
+    (lambda c: c["network"].update(noise_channel="white_input"),
+     "energy_score loss needs network noise_channel"),
+    (lambda c: c["network"].update(initial_acceleration_gate="off"),
+     "initial_acceleration_gate must be one of"),
+    (lambda c: c["network"].pop("initial_acceleration_gate"),
+     "must hold exactly the keys"),
+    (lambda c: c["network"].update(initial_acceleration_gate="recorded_only"),
+     "needs network initial_checkpoint")])
+def test_load_config_refuses_an_inconsistent_loss_or_noise_channel(
+        tmp_path, edit, match):
+    config = copy.deepcopy(driver.load_config(EXP4_SYMMETRIC))
+    edit(config)
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match=match):
+        driver.load_config(path)
+
+
+@pytest.fixture(scope="module")
+def lid_geometry(lid_card):
+    return build_closure_geometry(lid_card)
+
+
+def _lid_batch(lid_card, windows=2, hours=8):
+    rng = np.random.default_rng(4)
+    template = lid_card.recipe.initial_state
+    u_shape = tuple(template.u.data[:, 1:, 0].shape)
+    v_shape = tuple(template.v.data[1:, :, 0].shape)
+
+    def native(*lead):
+        return (np.zeros(lead + tuple(template.eta.data.shape)),
+                1.0e-3 * rng.normal(size=lead + u_shape),
+                1.0e-3 * rng.normal(size=lead + v_shape))
+
+    return (tuple(map(jnp.asarray, native(windows))),
+            tuple(map(jnp.asarray, native(windows, hours))))
+
+
+def _programs(lid_card, lid_geometry, loss, constants, **changes):
+    config = driver.load_config(EXP4_SYMMETRIC)
+    return driver.build_batch_programs(
+        lid_card, lid_geometry, window_days=1,
+        target_interval_hours=config["target_interval_hours"],
+        objective="symmetric", wall_ring=config["wall_ring"],
+        training_precision="fp64", checkpoint=True, loss=loss,
+        constants=constants, **changes)
+
+
+def _channel(lid_card, lid_geometry, scale, seed=3):
+    config = driver.load_config(EXP7)
+    spec, _ = driver.network_spec(config, lid_card, lid_geometry)
+    four = SWGScalarPotentialCNN(
+        spec._replace(noise_channel=False), key=jax.random.PRNGKey(seed))
+    return swg_online.add_noise_channel(
+        four, key=jax.random.PRNGKey(seed + 1), relative_scale=scale)
+
+
+def test_energy_score_programs_run_members_that_differ_and_every_leaf_is_live(
+        lid_card, lid_geometry):
+    network = _channel(lid_card, lid_geometry, 1.0)
+    loss = {"kind": "energy_score", "members": 3}
+    normalizers = swg_online.BalancedNormalizers(1.0e-10, 1.0e-6, 1.0e-6)
+    programs = _programs(lid_card, lid_geometry, loss, normalizers)
+    initial, target = _lid_batch(lid_card)
+    key = jax.random.PRNGKey(1)
+    value, grads = programs["value_and_grad"](network, initial, target, key)
+    assert np.isfinite(float(value)) and float(value) > 0.0
+    assert_network_gradients_live(grads)        # includes the xi weights
+    assert np.any(np.asarray(grads.layers[0].weight[:, 4:]) != 0.0)
+    score, member_truth, spread = (float(x) for x in programs["report"](
+        network, initial, target, key))
+    assert score == pytest.approx(float(value), rel=1.0e-12)
+    assert score == pytest.approx(member_truth - 0.5 * spread, rel=1.0e-9)
+    assert spread > 1.0e-6 * member_truth       # the members differ
+    # Seeded: the same key gives the same ensemble; another key another one.
+    again = float(programs["loss"](network, initial, target, key))
+    other = float(programs["loss"](network, initial, target,
+                                   jax.random.PRNGKey(2)))
+    assert again == float(value) and other != again
+    # Without xi weights the members coincide: no spread (the monitor reads 0).
+    silent = _channel(lid_card, lid_geometry, 0.0)
+    assert float(programs["report"](silent, initial, target, key)[2]) \
+        < 1.0e-6 * spread
+    # Only the energy score takes members; the Eq. 7 loss takes no constants.
+    with pytest.raises(ValueError, match="takes no loss constants"):
+        _programs(lid_card, lid_geometry, {"kind": "eq7"}, normalizers)
+    with pytest.raises(ValueError, match="loss kind"):
+        _programs(lid_card, lid_geometry, {"kind": "crps"}, normalizers)
+
+
+def test_window_statistics_programs_with_zero_weights_are_eq7_bit_for_bit(
+        precision_steps):
+    """Against the parent code path (``_parent_batch_functions``, written
+    before the loss choice existed): loss and every gradient leaf equal."""
+    s = precision_steps
+    config = driver.load_config(EXP1_SYMMETRIC)
+    loss = {"kind": "eq7_window_statistics", "calibration_window_days": 1}
+    options = dict(
+        window_days=1, target_interval_hours=1, objective=config["objective"],
+        wall_ring=config["wall_ring"], training_precision="fp64",
+        checkpoint=True)
+    zero = driver.build_batch_programs(
+        s["card"], s["geometry"], loss=loss, constants=(0.0, 0.0), **options)
+    eq7 = driver.build_batch_programs(
+        s["card"], s["geometry"], loss={"kind": "eq7"}, constants=None, **options)
+    for programs in (zero, eq7):
+        value, grads = driver.batch_value_and_grad(
+            programs["value_and_grad"], s["network"], s["batch"], s["key"], 10)
+        assert float(value) == float(s["parent"]["loss"]) > 0.0
+        assert all(np.array_equal(np.asarray(a), np.asarray(b)) for a, b in zip(
+            jax.tree.leaves(grads), jax.tree.leaves(s["parent"]["grads"]),
+            strict=True))
+    # Weighted: the total is Eq. 7 plus the weighted terms the report shows.
+    total, eq7_term, vorticity, kinetic = driver.batch_report(
+        zero["report"], s["network"], s["batch"], s["key"], 10)
+    assert total == eq7_term == float(s["parent"]["loss"])
+    assert vorticity > 0.0 and kinetic > 0.0
+    weighted = driver.build_batch_programs(
+        s["card"], s["geometry"], loss=loss, constants=(2.0, 3.0), **options)
+    value, grads = driver.batch_value_and_grad(
+        weighted["value_and_grad"], s["network"], s["batch"], s["key"], 10)
+    assert float(value) == pytest.approx(
+        eq7_term + 2.0 * vorticity + 3.0 * kinetic, rel=1.0e-12)
+    assert_network_gradients_live(grads)
+    assert float(value) != float(s["parent"]["loss"])
+
+
+def test_free_run_with_the_noise_channel_draws_fresh_seeded_xi_each_step(
+        lid_card, lid_geometry):
+    key = jax.random.PRNGKey(7)
+    network = _channel(lid_card, lid_geometry, 1.0)
+    forcing, one_day = driver.free_run_day(
+        network, lid_card, lid_geometry, key=key)
+    start = driver._double_gyre_driver().seed_steady_forcing_carry(
+        lid_card.recipe.initial_state, forcing)
+    stage_noise = jnp.zeros((3,) + tuple(lid_geometry.tmask.shape))
+    per_day = driver.steps_per_day(lid_card)
+    assert per_day == 8
+
+    def steps(first, step_key):
+        state = start
+        for index in range(first, first + per_day):
+            state = driver.swg_online_step(
+                network, state, stage_noise, step_key(index), jnp.asarray(0.0),
+                card=lid_card, geometry=lid_geometry, forcing=forcing)
+        return np.asarray(state.u.data)
+
+    # The compiled day is eight steps, step n keyed fold_in(key, n) ...
+    day, _ = one_day(start)
+    np.testing.assert_allclose(
+        np.asarray(day.u.data), steps(0, lambda n: jax.random.fold_in(key, n)),
+        rtol=1.0e-10, atol=1.0e-14)
+    # ... a later day continues the stream (steps 8..15) rather than repeating it
+    later, _ = one_day(start, 1)
+    np.testing.assert_allclose(
+        np.asarray(later.u.data),
+        steps(per_day, lambda n: jax.random.fold_in(key, n)),
+        rtol=1.0e-10, atol=1.0e-14)
+    scale = np.abs(np.asarray(day.u.data)).max()
+    assert np.abs(np.asarray(later.u.data) - np.asarray(day.u.data)).max() \
+        > 1.0e-3 * scale
+    # ... and a frozen step key (the same xi every step) is another day.
+    assert np.abs(steps(0, lambda n: key) - np.asarray(day.u.data)).max() \
+        > 1.0e-3 * scale
+    # Seeded: the same key gives the same day; another key another.
+    repeat, _ = one_day(start)
+    assert np.array_equal(np.asarray(day.u.data), np.asarray(repeat.u.data))
+    _, other_day = driver.free_run_day(
+        network, lid_card, lid_geometry, key=jax.random.PRNGKey(8))
+    assert np.abs(np.asarray(other_day(start)[0].u.data)
+                  - np.asarray(day.u.data)).max() > 1.0e-3 * scale
+
+
+class _Field(NamedTuple):
+    data: jax.Array
+
+
+class _State(NamedTuple):
+    eta: _Field
+    u: _Field
+    v: _Field
+    rigid_lid_phi: object = None
+
+
+class _IndexModel:
+    """Adds 0.5 to eta per step, or the step index when it is given."""
+
+    def step(self, state, dt_s, surface_forcing, step_index=None):
+        added = 0.5 if step_index is None else step_index.astype(jnp.float64)
+        return state._replace(eta=_Field(state.eta.data + added))
+
+
+def test_day_mean_stepper_passes_global_step_indices_only_when_asked():
+    state = _State(_Field(jnp.zeros((4, 4))), _Field(jnp.zeros((4, 5, 1))),
+                   _Field(jnp.zeros((5, 4, 1))))
+    stepper = driver._double_gyre_driver().build_scanned_day_mean_stepper(
+        _IndexModel(), 1.0, None, 3)
+    plain, _ = stepper(state)
+    assert np.all(np.asarray(plain.eta.data) == 1.5)        # no index passed
+    indexed, means = stepper(state, jnp.asarray(10, dtype=jnp.int32))
+    assert np.all(np.asarray(indexed.eta.data) == 10 + 11 + 12)
+    # The daily mean sees each post-step eta: 10, 21, 33.
+    assert np.allclose(np.asarray(means[0]), (10 + 21 + 33) / 3.0)
+
+
+def _textured(card):
+    """A day edit that gives the synthetic record's velocities a smooth
+    spatial structure.  The plain record's flow is uniform inside the basin
+    (balanced vorticity and rotational velocity identically zero, so no
+    variance and no statistic to measure); the same factor on every chunk and
+    on the start arrays keeps overlapping hours equal."""
+    ny, nx = np.asarray(card.recipe.land_mask).shape
+    factor = 1.0 + 0.5 * np.sin(2.0 * np.pi * np.arange(nx) / nx)[None, :] \
+        * np.cos(2.0 * np.pi * np.arange(ny) / ny)[:, None]
+
+    def edit(day, arrays):
+        for name in list(arrays):
+            if "_u_" in name or "_v_" in name:
+                arrays[name] = arrays[name] * factor
+    return edit
+
+
+@pytest.fixture(scope="module")
+def textured_record(tmp_path_factory, small_card):
+    root = tmp_path_factory.mktemp("swg_textured") / "record"
+    geometry = build_closure_geometry(small_card)
+    masks = (np.asarray(geometry.umask), np.asarray(geometry.vmask))
+    for first, days in ((0, 11), (11, 11), (52, 20), (102, 20)):
+        records._write_chunk(
+            root / f"dual_day{first:04d}_to_day{first + days:04d}",
+            source_day=first, days=days, masks=masks,
+            truth_run=root.parent / "truth", day_edit=_textured(small_card))
+    return root
+
+
+def _arm_config(record, loss, noise_channel, **changes):
+    config = _config(record, **changes)
+    config["curriculum"].update(window_days=[1], epochs_per_window=2)
+    config["network"]["noise_channel"] = noise_channel
+    config["loss"] = loss
+    return config
+
+
+ENERGY_SEED = 11
+
+
+@pytest.fixture(scope="module")
+def energy_run(tmp_path_factory, small_card, textured_record, trained):
+    folder = tmp_path_factory.mktemp("swg_energy")
+    config = _arm_config(textured_record, {"kind": "energy_score", "members": 2},
+                         "white_input")
+    # As in production: the file of a trained four-channel network, whose
+    # closure is far above the random-initialisation bar (recorded only).
+    config["network"]["initial_checkpoint"] = str(
+        trained["folder"] / "run" / "checkpoints" / "w01_e02.eqx")
+    config["network"]["initial_acceleration_gate"] = "recorded_only"
+    path = _write_config(folder / "config.json", config)
+    log = driver.train(config, path, card=small_card, seed=ENERGY_SEED,
+                       run_dir=folder / "run", device=CPU,
+                       windows_per_call=10, commit="0" * 40)
+    return {"folder": folder, "config": config, "path": path, "log": log}
+
+
+def test_energy_score_run_freezes_normalizers_and_logs_the_collapse_monitor(
+        energy_run, small_card):
+    run = energy_run["folder"] / "run"
+    log = energy_run["log"]
+    assert log["status"] == "complete"
+    assert log["gates"]["first_step_no_inert"]["passed"]
+    manifest = json.loads((run / "run_manifest.json").read_text())
+    constants = manifest["loss_constants"]
+    assert constants["kind"] == "energy_score"
+    assert all(value > 0.0 for value in constants["normalizers"].values())
+    assert constants["source"]["split"] == "train"
+    assert constants["source"]["window_days"] == 1
+    assert manifest["network"]["input_channels"][-1].startswith("xi ~ N(0,1)")
+    assert manifest["network"]["spec"]["noise_channel"] is True
+    assert manifest["loss"]["members"] == 2
+    for entry in log["epochs"]:
+        report = entry["validation_report"]
+        assert report["energy_score"] == entry["validation_loss"]
+        assert report["member_spread"] > 0.0
+        assert report["spread_over_member_truth_distance"] == pytest.approx(
+            report["member_spread"] / report["member_truth_distance"])
+        assert np.isfinite(entry["train_loss_mean"])
+    # The normalizers are the training split's own: recompute independently.
+    contract = driver.SWGDatasetContract.from_json(
+        run / "dataset_contract.json", card=small_card)
+    geometry = build_closure_geometry(small_card)
+    moments = np.zeros((3, 3))
+    for batch in contract.batches(
+            split="train", window_days=1, epoch=0, seed=ENERGY_SEED,
+            target_interval_hours=1):
+        moments += swg_online.balanced_field_second_moments(
+            swg_online.diagnose_native_windows(
+                tuple(jnp.asarray(v) for v in batch.target), geometry,
+                objective=energy_run["config"]["objective"]), geometry)
+    expected = swg_online.normalizers_from_moments(moments)
+    assert tuple(constants["normalizers"].values()) == pytest.approx(
+        tuple(expected), rel=1.0e-9)
+
+
+def test_energy_score_run_resumes_with_the_recorded_normalizers(
+        energy_run, small_card, tmp_path):
+    run = tmp_path / "run"
+    shutil.copytree(energy_run["folder"] / "run", run)
+    before = json.loads((run / "run_manifest.json").read_text())
+    log = driver.train(
+        energy_run["config"], energy_run["path"], card=small_card,
+        seed=ENERGY_SEED, run_dir=run, device=CPU, windows_per_call=10,
+        commit="0" * 40)
+    assert log["status"] == "complete"
+    assert json.loads((run / "run_manifest.json").read_text()) == before
+    # Epochs but no recorded constants: refused, never silently re-measured.
+    stripped = {key: value for key, value in before.items()
+                if key != "loss_constants"}
+    (run / "run_manifest.json").write_text(json.dumps(stripped))
+    with pytest.raises(RuntimeError, match="records no loss constants"):
+        driver.frozen_loss_constants(
+            energy_run["config"], run / "run_manifest.json", have_epochs=True)
+    # A manifest of another loss is refused too.
+    wrong = before | {"loss_constants": {"kind": "eq7_window_statistics"}}
+    (run / "run_manifest.json").write_text(json.dumps(wrong))
+    with pytest.raises(RuntimeError, match="loss constants are for"):
+        driver.frozen_loss_constants(
+            energy_run["config"], run / "run_manifest.json", have_epochs=True)
+
+
+def test_energy_score_free_run_is_admitted_with_the_channel_in_its_spec(
+        energy_run, small_card):
+    run_dir = energy_run["folder"] / "run"
+    manifest = driver.run_free_run(
+        energy_run["config"], energy_run["path"], card=small_card,
+        seed=ENERGY_SEED, run_dir=run_dir, window_days=1, device=CPU,
+        commit="0" * 40)
+    closure = manifest["closure"]
+    assert closure["network_spec"]["noise_channel"] is True
+    assert "white-noise input channel" in manifest["integration"]
+    assert manifest["numerical_health"]["all_finite"]
+    assert swg_online.admit_free_run_closure(manifest) == closure
+    # Manifests written before the channel existed lack the key: still admitted.
+    legacy = copy.deepcopy(manifest)
+    del legacy["closure"]["network_spec"]["noise_channel"]
+    assert swg_online.admit_free_run_closure(legacy)
+    extra = copy.deepcopy(manifest)
+    extra["closure"]["network_spec"]["amplitude"] = 1.0
+    with pytest.raises(ValueError, match="network_spec must hold exactly"):
+        swg_online.admit_free_run_closure(extra)
+
+
+@pytest.fixture(scope="module")
+def statistics_run(tmp_path_factory, small_card, textured_record):
+    folder = tmp_path_factory.mktemp("swg_statistics")
+    config = _arm_config(
+        textured_record,
+        {"kind": "eq7_window_statistics", "calibration_window_days": 1},
+        "none")
+    path = _write_config(folder / "config.json", config)
+    log = driver.train(config, path, card=small_card, seed=11,
+                       run_dir=folder / "run", device=CPU,
+                       windows_per_call=10, commit="0" * 40)
+    return {"folder": folder, "config": config, "path": path, "log": log}
+
+
+def test_window_statistics_run_sets_the_weights_once_from_the_first_batch(
+        statistics_run, small_card):
+    run = statistics_run["folder"] / "run"
+    log = statistics_run["log"]
+    assert log["status"] == "complete"
+    manifest = json.loads((run / "run_manifest.json").read_text())
+    constants = manifest["loss_constants"]
+    calibration = constants["calibration"]
+    # Each added term equals the Eq. 7 term on the first batch.
+    assert constants["vorticity_weight"] * calibration["vorticity_nrmse2"] \
+        == pytest.approx(calibration["eq7"], rel=1.0e-12)
+    assert constants["eke_weight"] * calibration["eke_nrmse2"] \
+        == pytest.approx(calibration["eq7"], rel=1.0e-12)
+    # ... recomputed independently on the contract's first batch and the
+    # seed's network.
+    config = statistics_run["config"]
+    contract = driver.SWGDatasetContract.from_json(
+        run / "dataset_contract.json", card=small_card)
+    batch = next(contract.batches(split="train", window_days=1, epoch=0,
+                                  seed=11, target_interval_hours=1))
+    assert calibration["start_absolute_hours"] == [
+        int(hour) for hour in batch.start_absolute_hour]
+    geometry = build_closure_geometry(small_card)
+    spec, _ = driver.network_spec(config, small_card, geometry)
+    network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(11))
+    programs = driver.build_batch_programs(
+        small_card, geometry, window_days=1, target_interval_hours=1,
+        objective=config["objective"], wall_ring=config["wall_ring"],
+        training_precision="fp64", checkpoint=True, loss=config["loss"],
+        constants=(0.0, 0.0))
+    _, eq7, vorticity, kinetic = driver.batch_report(
+        programs["report"], network, batch, jax.random.PRNGKey(11), 10)
+    assert calibration["eq7"] == pytest.approx(eq7, rel=1.0e-9)
+    assert calibration["vorticity_nrmse2"] == pytest.approx(vorticity, rel=1.0e-9)
+    assert calibration["eke_nrmse2"] == pytest.approx(kinetic, rel=1.0e-9)
+    # Frozen: every logged epoch's total is built from those same weights.
+    for entry in log["epochs"]:
+        report = entry["validation_report"]
+        assert report["total"] == pytest.approx(
+            report["eq7"] + constants["vorticity_weight"]
+            * report["vorticity_nrmse2"] + constants["eke_weight"]
+            * report["eke_nrmse2"], rel=1.0e-9)
+        assert report["total"] == pytest.approx(entry["validation_loss"], rel=1.0e-12)
+    assert manifest["loss"]["weights"].startswith("set once")
+    assert log["gates"]["first_step_no_inert"]["passed"]
+
+
+def test_window_statistics_run_resumes_with_the_recorded_weights(
+        statistics_run, small_card, tmp_path):
+    run = tmp_path / "run"
+    shutil.copytree(statistics_run["folder"] / "run", run)
+    before = json.loads((run / "run_manifest.json").read_text())
+    driver.train(
+        statistics_run["config"], statistics_run["path"], card=small_card,
+        seed=11, run_dir=run, device=CPU, windows_per_call=10, commit="0" * 40)
+    assert json.loads((run / "run_manifest.json").read_text()) == before
+    # The recorded keys are not part of the run's identity.
+    assert driver.run_identity(before) == {
+        key: value for key, value in before.items() if key != "loss_constants"}
+
+
+def test_noise_channel_run_starts_from_a_four_channel_checkpoint(
+        tmp_path, small_card, record, trained):
+    """A finished deterministic network's file seeds the channel network:
+    trained leaves identical, xi weights at 1e-2 of the SSH-channel rms."""
+    checkpoint = trained["folder"] / "run" / "checkpoints" / "w01_e02.eqx"
+    config = _arm_config(
+        record, {"kind": "energy_score", "members": 2}, "white_input")
+    config["network"]["initial_checkpoint"] = str(checkpoint)
+    geometry = build_closure_geometry(small_card)
+    spec, _ = driver.network_spec(config, small_card, geometry)
+    optimizer = create_swg_optimizer(SWGOptimizerSettings(**config["optimiser"]))
+    key = jax.random.PRNGKey(11)
+    network, opt_state = driver.initial_network(config, spec, optimizer, key=key)
+    four_spec = spec._replace(noise_channel=False)
+    four = SWGScalarPotentialCNN(four_spec, key=key)
+    loaded, _ = driver.load_checkpoint_or_fail(
+        checkpoint, (four, optimizer.init(eqx.filter(four, eqx.is_inexact_array))),
+        what="test")
+    assert network.layers[0].weight.shape[1] == 5
+    assert np.array_equal(np.asarray(network.layers[0].weight[:, :4]),
+                          np.asarray(loaded.layers[0].weight))
+    rms = float(jnp.sqrt(jnp.mean(loaded.layers[0].weight[:, 0] ** 2)))
+    xi_weights = np.asarray(network.layers[0].weight[:, 4:])
+    assert 0.3e-2 * rms < xi_weights.std() < 3.0e-2 * rms
+    assert eqx.tree_equal(opt_state, optimizer.init(
+        eqx.filter(network, eqx.is_inexact_array)))
+    # The identity records how the channel was grown.
+    assert driver.NOISE_CHANNEL_INIT_RELATIVE_SCALE == 1.0e-2
+    # A wrong file is refused before anything is built.
+    config["network"]["initial_checkpoint"] = str(tmp_path / "missing.eqx")
+    with pytest.raises(FileNotFoundError):
+        driver.initial_network(config, spec, optimizer, key=key)
+
+
+def test_a_loaded_network_may_start_past_the_acceleration_bar_only_when_recorded(
+        tmp_path, small_card, record):
+    """The bar is for a seed's random initialisation: a network loaded from a
+    file whose closure is far above it is refused when the gate is
+    enforced and starts, with the measurement logged, when recorded_only."""
+    config = _arm_config(record, {"kind": "eq7"}, "none")
+    geometry = build_closure_geometry(small_card)
+    spec, _ = driver.network_spec(config, small_card, geometry)
+    optimizer = create_swg_optimizer(SWGOptimizerSettings(**config["optimiser"]))
+    network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(11))
+    loud = eqx.tree_at(lambda n: n.layers[-1].weight, network,
+                       network.layers[-1].weight * 100.0)
+    checkpoint = tmp_path / "loud.eqx"
+    driver.save_checkpoint(
+        (loud, optimizer.init(eqx.filter(loud, eqx.is_inexact_array))), checkpoint)
+    config["network"]["initial_checkpoint"] = str(checkpoint)
+    config["curriculum"].update(epochs_per_window=1)
+    path = _write_config(tmp_path / "enforced.json", config)
+    with pytest.raises(RuntimeError, match="initial closure acceleration"):
+        driver.train(config, path, card=small_card, seed=11,
+                     run_dir=tmp_path / "enforced", device=CPU,
+                     windows_per_call=10, commit="0" * 40)
+    config["network"]["initial_acceleration_gate"] = "recorded_only"
+    path = _write_config(tmp_path / "recorded.json", config)
+    log = driver.train(config, path, card=small_card, seed=11,
+                       run_dir=tmp_path / "recorded", device=CPU,
+                       windows_per_call=10, commit="0" * 40)
+    gate = log["gates"]["initial_closure_acceleration"]
+    assert log["status"] == "complete" and len(log["epochs"]) == 1
+    assert gate["enforced"] is False and gate["passes"] is False
+    assert gate["maximum_ratio"] > 0.1
+
+
+# --------------------- NeuralGCM-style losses: exp9 (Eq. 7) and exp10 (energy)
+
+FULL_BAND_TABLE = {"lead_hours": [0], "cutoff_band": [1000]}
+# 3-hour records of a 1-day window: leads 3 | 6, 9 | 12 .. 24.
+LID_TABLE = {"lead_hours": [0, 6, 12], "cutoff_band": [1000, 8, 4]}
+PENDING = "PENDING_TWIN_MEASUREMENT"
+
+
+def _with_table(path, tmp_path, table=LID_TABLE):
+    config = json.loads(path.read_text())
+    config["loss"]["lead_time_cutoff"] = table
+    target = tmp_path / path.name
+    target.write_text(json.dumps(config))
+    return target
+
+
+# Measured twin schedule (psi swap, anomaly coherence >= 0.5, mean of 8 pairs;
+# probe band * 80 / 79 floored); lead 0 full band, lead rounded up to a day.
+MEASURED_TABLE = {
+    "lead_hours": [0, 1, 25, 49, 73, 97, 145, 193, 289, 385, 577],
+    "cutoff_band": [112, 70, 63, 57, 54, 48, 42, 27, 19, 13, 9]}
+
+
+@pytest.mark.parametrize("path", [EXP9, EXP10])
+def test_committed_neuralgcm_configs_carry_the_measured_cutoff_table(path):
+    assert driver.load_config(path)["loss"]["lead_time_cutoff"] \
+        == MEASURED_TABLE
+
+
+def test_exp9_is_the_exp4_symmetric_recipe_from_scratch_with_the_new_loss(
+        tmp_path):
+    parent = driver.load_config(EXP4_SYMMETRIC)
+    arm = driver.load_config(_with_table(EXP9, tmp_path))
+    assert sorted(key for key in parent if parent[key] != arm[key]) == [
+        "dataset", "description", "experiment", "loss"]
+    assert arm["loss"] == {"kind": "eq7_neuralgcm", "calibration_window_days": 1,
+                           "lead_time_cutoff": LID_TABLE}
+    assert arm["seeds"] == parent["seeds"] == [20261013, 20261014, 20261015]
+    assert arm["dataset"] == parent["dataset"] | {"cache": "memory"}
+    # From scratch: no checkpoint, the 1% bar enforced, the 1, 2, 4, 8 days.
+    assert "initial_checkpoint" not in arm["network"]
+    assert arm["network"] == parent["network"]
+    assert arm["curriculum"] == parent["curriculum"]
+    assert arm["curriculum"]["window_days"] == [1, 2, 4, 8]
+
+
+def test_exp10_is_exp7_with_only_the_loss_changed(tmp_path):
+    parent = driver.load_config(EXP7)
+    arm = driver.load_config(_with_table(EXP10, tmp_path))
+    assert sorted(key for key in parent if parent[key] != arm[key]) == [
+        "description", "experiment", "loss"]
+    assert arm["loss"] == {
+        "kind": "energy_score_neuralgcm", "members": 8,
+        "calibration_window_days": 8, "lead_time_cutoff": LID_TABLE}
+    assert arm["loss"]["members"] == parent["loss"]["members"]
+
+
+@pytest.mark.parametrize("edit,match", [
+    (lambda c: c["loss"].pop("lead_time_cutoff"),
+     "loss must hold exactly the keys"),
+    (lambda c: c["loss"].update(lead_time_cutoff=PENDING),
+     "PENDING_TWIN_MEASUREMENT"),
+    (lambda c: c["loss"].update(lead_time_cutoff={"lead_hours": [0]}),
+     "lead_time_cutoff must be"),
+    (lambda c: c["loss"].update(
+        lead_time_cutoff={"lead_hours": [0, 6], "cutoff_band": [4, 8]}),
+     "non-increasing"),
+    (lambda c: c["loss"].update(calibration_window_days=3),
+     "calibration_window_days must be one of the curriculum"),
+    (lambda c: c["loss"].update(members=8), "loss must hold exactly the keys"),
+    (lambda c: c["network"].update(noise_channel="white_input"),
+     "energy_score loss needs network noise_channel"),
+    (lambda c: c["loss"].update(kind="eq7_neuralgcm_v2"),
+     "loss kind must be one of")])
+def test_load_config_refuses_an_inconsistent_eq7_neuralgcm_loss(
+        tmp_path, edit, match):
+    config = copy.deepcopy(driver.load_config(_with_table(EXP9, tmp_path)))
+    edit(config)
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match=match):
+        driver.load_config(path)
+
+
+@pytest.mark.parametrize("edit,match", [
+    (lambda c: c["loss"].pop("lead_time_cutoff"),
+     "loss must hold exactly the keys"),
+    (lambda c: c["loss"].pop("members"), "loss must hold exactly the keys"),
+    (lambda c: c["loss"].update(members=1), "members must be an integer >= 2"),
+    (lambda c: c["network"].update(noise_channel="none"),
+     "energy_score loss needs network noise_channel"),
+    (lambda c: c["loss"].update(lead_time_cutoff=PENDING),
+     "PENDING_TWIN_MEASUREMENT")])
+def test_load_config_refuses_an_inconsistent_energy_score_neuralgcm_loss(
+        tmp_path, edit, match):
+    config = copy.deepcopy(driver.load_config(_with_table(EXP10, tmp_path)))
+    edit(config)
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match=match):
+        driver.load_config(path)
+
+
+def _deterministic_network(lid_card, lid_geometry, seed=3):
+    config = driver.load_config(EXP4_SYMMETRIC)
+    spec, _ = driver.network_spec(config, lid_card, lid_geometry)
+    return SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(seed))
+
+
+def _bits(tree_a, tree_b):
+    return all(np.array_equal(np.asarray(a), np.asarray(b)) for a, b in zip(
+        jax.tree.leaves(tree_a), jax.tree.leaves(tree_b), strict=True))
+
+
+def test_eq7_neuralgcm_programs_at_the_full_band_are_the_eq7_programs_bit_for_bit(
+        lid_card, lid_geometry):
+    network = _deterministic_network(lid_card, lid_geometry)
+    initial, target = _lid_batch(lid_card)
+    key = jax.random.PRNGKey(1)
+    loss = {"kind": "eq7_neuralgcm", "calibration_window_days": 1,
+            "lead_time_cutoff": FULL_BAND_TABLE}
+    parent = _programs(lid_card, lid_geometry, {"kind": "eq7"}, None)
+    zero = _programs(lid_card, lid_geometry, loss, (0.0, 0.0))
+    p_value, p_grads = parent["value_and_grad"](network, initial, target, key)
+    value, grads = zero["value_and_grad"](network, initial, target, key)
+    assert float(value) == float(p_value) > 0.0 and _bits(grads, p_grads)
+    total, eq7, spectrum, bias = (float(x) for x in zero["report"](
+        network, initial, target, key))
+    # (the report is another compiled program than value_and_grad: same
+    # arithmetic, last-bit freedom)
+    assert total == eq7 and spectrum > 0.0 and bias > 0.0
+    assert eq7 == pytest.approx(float(p_value), rel=1.0e-13)
+    # Weighted: the total adds the two terms; every trainable leaf is live.
+    weighted = _programs(lid_card, lid_geometry, loss, (2.0, 3.0))
+    value, grads = weighted["value_and_grad"](network, initial, target, key)
+    assert float(value) == pytest.approx(
+        eq7 + 2.0 * spectrum + 3.0 * bias, rel=1.0e-12)
+    assert_network_gradients_live(grads)
+    # A narrower cutoff table is a different loss (the lead filter reaches the
+    # compiled program), and a missing table is refused, not defaulted.
+    narrow = _programs(lid_card, lid_geometry, loss | {
+        "lead_time_cutoff": LID_TABLE}, (0.0, 0.0))
+    assert float(narrow["loss"](network, initial, target, key)) \
+        < float(p_value)
+    with pytest.raises(ValueError, match="PENDING_TWIN_MEASUREMENT"):
+        _programs(lid_card, lid_geometry,
+                  loss | {"lead_time_cutoff": PENDING}, (1.0, 1.0))
+    with pytest.raises(ValueError, match="takes no loss constants"):
+        _programs(lid_card, lid_geometry, loss, None)
+
+
+def test_energy_score_neuralgcm_programs_at_the_full_band_match_the_energy_score(
+        lid_card, lid_geometry):
+    network = _channel(lid_card, lid_geometry, 1.0)
+    initial, target = _lid_batch(lid_card)
+    key = jax.random.PRNGKey(1)
+    normalizers = swg_online.BalancedNormalizers(1.0e-10, 1.0e-6, 1.0e-6)
+    parent = _programs(lid_card, lid_geometry,
+                       {"kind": "energy_score", "members": 3}, normalizers)
+    loss = {"kind": "energy_score_neuralgcm", "members": 3,
+            "calibration_window_days": 1, "lead_time_cutoff": FULL_BAND_TABLE}
+    zero = _programs(lid_card, lid_geometry, loss, (normalizers, 0.0))
+    p_value, p_grads = parent["value_and_grad"](network, initial, target, key)
+    value, grads = zero["value_and_grad"](network, initial, target, key)
+    assert float(value) == float(p_value) > 0.0 and _bits(grads, p_grads)
+    total, distance, spread, energy, spectrum = (float(x) for x in zero[
+        "report"](network, initial, target, key))
+    assert total == energy and spectrum > 0.0
+    assert energy == pytest.approx(float(p_value), rel=1.0e-13)
+    assert (distance, spread) == tuple(
+        float(x) for x in parent["report"](network, initial, target, key)[1:])
+    weighted = _programs(lid_card, lid_geometry, loss, (normalizers, 5.0))
+    value, grads = weighted["value_and_grad"](network, initial, target, key)
+    assert float(value) == pytest.approx(energy + 5.0 * spectrum, rel=1.0e-12)
+    assert_network_gradients_live(grads)        # includes the xi weights
+    narrow = _programs(lid_card, lid_geometry,
+                       loss | {"lead_time_cutoff": LID_TABLE},
+                       (normalizers, 0.0))
+    assert float(narrow["loss"](network, initial, target, key)) \
+        < float(p_value)
+
+
+def test_the_bias_term_needs_the_whole_batch_in_one_call(tmp_path, small_card,
+                                                         textured_record):
+    for kind in ("eq7", "energy_score", "eq7_window_statistics",
+                 "energy_score_neuralgcm"):
+        for per_call in (1, 2, 5, 10):
+            driver.require_whole_batch_for_bias(kind, per_call)
+    driver.require_whole_batch_for_bias("eq7_neuralgcm", 10)
+    for per_call in (1, 2, 5):
+        with pytest.raises(ValueError, match="windows_per_call must be 10"):
+            driver.require_whole_batch_for_bias("eq7_neuralgcm", per_call)
+    config = _arm_config(
+        textured_record, {"kind": "eq7_neuralgcm", "calibration_window_days": 1,
+                          "lead_time_cutoff": SMALL_TABLE}, "none")
+    path = _write_config(tmp_path / "config.json", config)
+    with pytest.raises(ValueError, match="windows_per_call must be 10"):
+        driver.train(config, path, card=small_card, seed=11,
+                     run_dir=tmp_path / "run", device=CPU, windows_per_call=5,
+                     commit="0" * 40)
+    assert not (tmp_path / "run").exists()
+
+
+SMALL_TABLE = {"lead_hours": [0, 6, 12], "cutoff_band": [1000, 8, 4]}
+
+
+@pytest.fixture(scope="module")
+def neuralgcm_eq7_run(tmp_path_factory, small_card, textured_record):
+    folder = tmp_path_factory.mktemp("swg_neuralgcm_eq7")
+    config = _arm_config(
+        textured_record,
+        {"kind": "eq7_neuralgcm", "calibration_window_days": 1,
+         "lead_time_cutoff": SMALL_TABLE}, "none")
+    path = _write_config(folder / "config.json", config)
+    log = driver.train(config, path, card=small_card, seed=11,
+                       run_dir=folder / "run", device=CPU,
+                       windows_per_call=10, commit="0" * 40)
+    return {"folder": folder, "config": config, "path": path, "log": log}
+
+
+def test_eq7_neuralgcm_run_sets_both_weights_once_and_records_them(
+        neuralgcm_eq7_run, small_card):
+    run = neuralgcm_eq7_run["folder"] / "run"
+    log = neuralgcm_eq7_run["log"]
+    assert log["status"] == "complete"
+    assert log["gates"]["first_step_no_inert"]["passed"]
+    manifest = json.loads((run / "run_manifest.json").read_text())
+    constants = manifest["loss_constants"]
+    calibration = constants["calibration"]
+    # Each added term equals the filtered Eq. 7 term on the first batch.
+    assert constants["spectrum_weight"] * calibration["spectrum_mse"] \
+        == pytest.approx(calibration["eq7_filtered"], rel=1.0e-12)
+    assert constants["bias_weight"] * calibration["bias_mse"] \
+        == pytest.approx(calibration["eq7_filtered"], rel=1.0e-12)
+    # ... recomputed independently on the contract's first batch.
+    config = neuralgcm_eq7_run["config"]
+    contract = driver.SWGDatasetContract.from_json(
+        run / "dataset_contract.json", card=small_card)
+    batch = next(contract.batches(split="train", window_days=1, epoch=0,
+                                  seed=11, target_interval_hours=1))
+    assert calibration["start_absolute_hours"] == [
+        int(hour) for hour in batch.start_absolute_hour]
+    geometry = build_closure_geometry(small_card)
+    spec, _ = driver.network_spec(config, small_card, geometry)
+    network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(11))
+    programs = driver.build_batch_programs(
+        small_card, geometry, window_days=1, target_interval_hours=1,
+        objective=config["objective"], wall_ring=config["wall_ring"],
+        training_precision="fp64", checkpoint=True, loss=config["loss"],
+        constants=(0.0, 0.0))
+    _, eq7, spectrum, bias = driver.batch_report(
+        programs["report"], network, batch, jax.random.PRNGKey(11), 10)
+    assert calibration["eq7_filtered"] == pytest.approx(eq7, rel=1.0e-9)
+    assert calibration["spectrum_mse"] == pytest.approx(spectrum, rel=1.0e-9)
+    assert calibration["bias_mse"] == pytest.approx(bias, rel=1.0e-9)
+    # Frozen: every logged epoch's total is built from those same weights.
+    for entry in log["epochs"]:
+        report = entry["validation_report"]
+        assert report["total"] == pytest.approx(
+            report["eq7_filtered"]
+            + constants["spectrum_weight"] * report["spectrum_mse"]
+            + constants["bias_weight"] * report["bias_mse"], rel=1.0e-9)
+        assert report["total"] == pytest.approx(
+            entry["validation_loss"], rel=1.0e-12)
+        assert np.isfinite(entry["train_loss_mean"])
+    assert manifest["loss"]["lead_time_cutoff"] == SMALL_TABLE
+    assert manifest["loss"]["weights"].startswith("both set once")
+
+
+def test_eq7_neuralgcm_run_resumes_with_the_recorded_weights_or_refuses(
+        neuralgcm_eq7_run, small_card, tmp_path):
+    run = tmp_path / "run"
+    shutil.copytree(neuralgcm_eq7_run["folder"] / "run", run)
+    before = json.loads((run / "run_manifest.json").read_text())
+    driver.train(
+        neuralgcm_eq7_run["config"], neuralgcm_eq7_run["path"], card=small_card,
+        seed=11, run_dir=run, device=CPU, windows_per_call=10, commit="0" * 40)
+    assert json.loads((run / "run_manifest.json").read_text()) == before
+    stripped = {key: value for key, value in before.items()
+                if key != "loss_constants"}
+    (run / "run_manifest.json").write_text(json.dumps(stripped))
+    with pytest.raises(RuntimeError, match="records no loss constants"):
+        driver.frozen_loss_constants(
+            neuralgcm_eq7_run["config"], run / "run_manifest.json",
+            have_epochs=True)
+    wrong = before | {"loss_constants": {"kind": "eq7_window_statistics"}}
+    (run / "run_manifest.json").write_text(json.dumps(wrong))
+    with pytest.raises(RuntimeError, match="loss constants are for"):
+        driver.frozen_loss_constants(
+            neuralgcm_eq7_run["config"], run / "run_manifest.json",
+            have_epochs=True)
+    # A changed cutoff table is a changed run: the stored identity differs.
+    changed = copy.deepcopy(neuralgcm_eq7_run["config"])
+    changed["loss"]["lead_time_cutoff"] = {
+        "lead_hours": [0, 6, 12], "cutoff_band": [1000, 8, 3]}
+    path = _write_config(tmp_path / "changed.json", changed)
+    (run / "run_manifest.json").write_text(json.dumps(before))
+    with pytest.raises(RuntimeError, match="refusing to resume"):
+        driver.train(changed, path, card=small_card, seed=11, run_dir=run,
+                     device=CPU, windows_per_call=10, commit="0" * 40)
+
+
+@pytest.fixture(scope="module")
+def neuralgcm_energy_run(tmp_path_factory, small_card, textured_record,
+                         trained):
+    folder = tmp_path_factory.mktemp("swg_neuralgcm_energy")
+    config = _arm_config(
+        textured_record,
+        {"kind": "energy_score_neuralgcm", "members": 2,
+         "calibration_window_days": 1, "lead_time_cutoff": SMALL_TABLE},
+        "white_input")
+    config["network"]["initial_checkpoint"] = str(
+        trained["folder"] / "run" / "checkpoints" / "w01_e02.eqx")
+    config["network"]["initial_acceleration_gate"] = "recorded_only"
+    path = _write_config(folder / "config.json", config)
+    log = driver.train(config, path, card=small_card, seed=ENERGY_SEED,
+                       run_dir=folder / "run", device=CPU,
+                       windows_per_call=10, commit="0" * 40)
+    return {"folder": folder, "config": config, "path": path, "log": log}
+
+
+def test_energy_score_neuralgcm_run_freezes_normalizers_and_the_spectrum_weight(
+        neuralgcm_energy_run, energy_run, small_card):
+    run = neuralgcm_energy_run["folder"] / "run"
+    log = neuralgcm_energy_run["log"]
+    assert log["status"] == "complete"
+    assert log["gates"]["first_step_no_inert"]["passed"]   # xi weights too
+    manifest = json.loads((run / "run_manifest.json").read_text())
+    constants = manifest["loss_constants"]
+    assert constants["kind"] == "energy_score_neuralgcm"
+    # The normalizers are the energy-score arm's: same machinery, same data.
+    arm_b = json.loads((energy_run["folder"] / "run" / "run_manifest.json"
+                        ).read_text())["loss_constants"]
+    assert constants["normalizers"] == arm_b["normalizers"]
+    calibration = constants["calibration"]
+    assert constants["spectrum_weight"] * calibration["spectrum_mse"] \
+        == pytest.approx(calibration["energy_score_filtered"], rel=1.0e-12)
+    # ... recomputed independently: the first batch, the first training
+    # step's noise key, the starting network (the loaded file plus xi).
+    config = neuralgcm_energy_run["config"]
+    contract = driver.SWGDatasetContract.from_json(
+        run / "dataset_contract.json", card=small_card)
+    batch = next(contract.batches(split="train", window_days=1, epoch=0,
+                                  seed=ENERGY_SEED, target_interval_hours=1))
+    assert calibration["start_absolute_hours"] == [
+        int(hour) for hour in batch.start_absolute_hour]
+    geometry = build_closure_geometry(small_card)
+    spec, _ = driver.network_spec(config, small_card, geometry)
+    optimizer = create_swg_optimizer(SWGOptimizerSettings(**config["optimiser"]))
+    key = jax.random.PRNGKey(ENERGY_SEED)
+    network, _ = driver.initial_network(config, spec, optimizer, key=key)
+    step_key = key
+    for part in (driver.TRAIN_NOISE_TAG, 1, 1, 0):
+        step_key = jax.random.fold_in(step_key, part)
+    programs = driver.build_batch_programs(
+        small_card, geometry, window_days=1, target_interval_hours=1,
+        objective=config["objective"], wall_ring=config["wall_ring"],
+        training_precision="fp64", checkpoint=True, loss=config["loss"],
+        constants=(swg_online.BalancedNormalizers(**constants["normalizers"]),
+                   0.0))
+    report = driver.batch_report(programs["report"], network, batch, step_key,
+                                 10, per_part_keys=True)
+    assert calibration["energy_score_filtered"] == pytest.approx(
+        report[3], rel=1.0e-9)
+    assert calibration["spectrum_mse"] == pytest.approx(report[4], rel=1.0e-9)
+    for entry in log["epochs"]:
+        report = entry["validation_report"]
+        assert report["total"] == pytest.approx(
+            report["energy_score_filtered"]
+            + constants["spectrum_weight"] * report["spectrum_mse"],
+            rel=1.0e-9)
+        assert report["total"] == pytest.approx(
+            entry["validation_loss"], rel=1.0e-12)
+        assert report["member_spread"] > 0.0
+        assert report["spread_over_member_truth_distance"] == pytest.approx(
+            report["member_spread"] / report["member_truth_distance"])
+    assert manifest["loss"]["members"] == 2
+    assert manifest["loss"]["lead_time_cutoff"] == SMALL_TABLE
+    assert manifest["network"]["spec"]["noise_channel"] is True
+
+
+EXP9_LONG = _ROOT / "config/swg_online/exp9_rigidlid_neuralgcm_long.json"
+
+
+def test_exp9_long_extends_only_the_curriculum():
+    base = json.loads(EXP9.read_text())
+    long = json.loads(EXP9_LONG.read_text())
+    assert long["curriculum"]["window_days"] == [1, 2, 4, 8, 16, 32]
+    assert base["curriculum"]["window_days"] == [1, 2, 4, 8]
+    for config in (base, long):
+        config.pop("description")
+        config["curriculum"].pop("window_days")
+    assert long == base

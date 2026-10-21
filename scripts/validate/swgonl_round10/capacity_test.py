@@ -130,6 +130,8 @@ class ResidualPotentialCNN(eqx.Module):
     spec: SWGNetworkSpec = eqx.field(static=True)
 
     def __init__(self, spec: SWGNetworkSpec, *, convolutions: int, key):
+        if spec.wall_margin_rings != 0:
+            raise ValueError("the residual capacity network has no wall margin")
         keys = jax.random.split(key, convolutions + 1)
         width, k, pad = spec.hidden_channels, spec.kernel_size, spec.kernel_size // 2
         convs = [ShiftedConv2d(4, width, k, padding=pad, key=keys[0])]

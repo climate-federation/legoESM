@@ -37,6 +37,7 @@ PROFILE_NETWORK_SPEC = SWGNetworkSpec(
     ssh_scale_m=1.0,
     velocity_scale_m_s=1.0,
     potential_scale_m3_s2=1.0,
+    wall_margin_rings=0,
 )
 
 
@@ -82,7 +83,7 @@ def run_profile(window_days: int, mode: str, objective_operator: str,
     network = SWGScalarPotentialCNN(
         PROFILE_NETWORK_SPEC, key=jax.random.PRNGKey(20261013))
     _, segment = build_segment_fn(
-        card, geometry, window_days=window_days, checkpoint=True)
+        card, geometry, window_days=window_days, checkpoint=True, target_interval_hours=1)
     n_steps = window_days * 24 * int(3_600 / card.dt_s)
     noise = jnp.zeros((n_steps, 3) + geometry.tmask.shape, dtype=jnp.float64)
     key = jax.random.PRNGKey(311)
@@ -169,8 +170,7 @@ def run_profile(window_days: int, mode: str, objective_operator: str,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--window-days", type=int, choices=(1, 2, 4, 8),
-                        required=True)
+    parser.add_argument("--window-days", type=int, required=True)
     parser.add_argument("--mode", choices=("forward", "reverse"), required=True)
     parser.add_argument("--objective", choices=("symmetric", "template"),
                         required=True)

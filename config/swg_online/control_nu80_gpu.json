@@ -4,6 +4,7 @@
   "description": "Twenty-year no-closure dg50 nu=80 reference rerun from rest with daily snapshots and daily means on CUDA/native for the registered device check.",
   "control": "nu80",
   "deck": "dg50-nu80",
+  "surface": "explicit",
   "closure": "none",
   "free_run": {
     "days": 7300,

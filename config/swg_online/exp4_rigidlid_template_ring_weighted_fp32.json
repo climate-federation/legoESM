@@ -1,0 +1,87 @@
+{
+  "schema": "legoesm-swg-online-training-v3",
+  "experiment": "swgonl_exp4_rigidlid_template_ring_weighted_fp32",
+  "description": "Rigid-lid training on the rigid-lid truth (user decisions 2026-10-18: rigid lid, phi/g input, 3-hour step and 3-hour loss sampling, both objectives): Experiment one, candidate template+weighted: fine-filtered start and target, unfiltered model vorticity in Eq. 7, every interior F point weighted as Eq. 7 is written (first ring next to the walls included). One of three candidates; the owner has not chosen the objective or the wall-ring treatment. Free runs on CUDA/native (user decision 2026-10-14; the GPU controls passed the v2 device check). The dataset roots below are PLACEHOLDERS for the rigid-lid truth to be generated (round16_rigidlid_truth does not exist yet); training refuses to load until the records exist.",
+  "deck": "dg50-rl",
+  "surface": "rigid_lid",
+  "objective": "template",
+  "wall_ring": "weighted",
+  "training_precision": "fp32",
+  "gradient_checkpointing": true,
+  "target_interval_hours": 3,
+  "network": {
+    "hidden_channels": 16,
+    "hidden_layers": 4,
+    "kernel_size": 3,
+    "wall_margin_rings": 0,
+    "scales": "maddison_eq6_shallow_water_grid_analogue",
+    "noise_channel": "none",
+    "initial_acceleration_gate": "enforced"
+  },
+  "loss": {
+    "kind": "eq7"
+  },
+  "seeds": [
+    20261013,
+    20261014,
+    20261015
+  ],
+  "dataset": {
+    "records": [
+      {
+        "root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round16_rigidlid_truth/hourly_dual_12y",
+        "chunk_label": "dual"
+      },
+      {
+        "root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round16_rigidlid_truth/hourly_dual_test_year",
+        "chunk_label": "dual_test"
+      }
+    ],
+    "splits_days": {
+      "train": [
+        731,
+        4235
+      ],
+      "validation": [
+        4265,
+        5111
+      ],
+      "test": [
+        5141,
+        5506
+      ]
+    },
+    "batch_size": 10,
+    "cache": "none",
+    "target_filter_sigma_cells": 1.0
+  },
+  "curriculum": {
+    "window_days": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "epochs_per_window": 5,
+    "network_between_windows": "carried",
+    "optimiser_between_windows": "reinitialised"
+  },
+  "optimiser": {
+    "optimizer": "adamw",
+    "learning_rate": 0.001,
+    "schedule": "constant",
+    "weight_decay": 0.004,
+    "adam_b1": 0.9,
+    "adam_b2": 0.999,
+    "adam_epsilon": 1e-07,
+    "adam_epsilon_convention": "keras_epsilon_hat",
+    "gradient_clipping": "none"
+  },
+  "free_run": {
+    "days": 7300,
+    "start": "rest",
+    "sampling": "end_of_day_snapshot_and_daily_mean",
+    "device": "cuda",
+    "math_library": "native"
+  }
+}

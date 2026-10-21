@@ -232,7 +232,16 @@ def _card_digest(card):
 
 
 def test_parameterisation_keeps_shipped_card_digest_byte_identical(card):
-    assert _card_digest(card) == "98da41949102ca1b"
+    # f9d46bfd08f23702 until main's #2009/#1910 configuration fields moved it
+    # to 98da41949102ca1b; the SWG rigid-lid option (2026-10-18) then added
+    # ``swe_surface`` to the shared configuration (the lane's own pin before
+    # the fold was 1e7e4c763668798e).  The card states "explicit", the
+    # program it always ran, and its ten-step velocities are byte-equal to
+    # the previous tip's (tests/ocean/unit/test_swg_rigid_lid.py).  Removing
+    # ``swe_surface`` from the printed configuration reproduces
+    # 98da41949102ca1b exactly.
+    assert _card_digest(card) == "097f1867a6369634"
+    assert card.recipe.model_config.swe_surface == "explicit"
 
 
 def test_maddison_geometry_honours_domsiz_and_fixed_wind_period():
