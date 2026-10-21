@@ -16,18 +16,18 @@ Review-remediation commit: `945f885f94`
 Remediation receipt and citation commits: `73bb58474f`, `31d3095311`,
 `f742ed19df`
 
-Status: **STOPPED — REVIEW HOLD REMEDIATED; ACQUISITION_NEEDED.**  L6 is the certified L4b
-card plus ORCA2 interior temperature/salinity damping in NEMO's stage-3
-position.  Its exact local controls and read-only acquisition preflight pass.
-The first operator acquisition was refused after its smoke run; its build was
-moved aside and no record was admitted.  The corrected tool again stops before
-building or executing NEMO unless the operator supplies the acknowledgement.
-There is no L6 record, score, bar verdict, or certification.
+Resume scoring and order-control commit: `b8149cd7a1`
+
+Status: **LANDED — L6 CERTIFIED.**  L6 is the certified L4b card plus ORCA2
+interior temperature/salinity damping in NEMO's stage-3 position.  The
+operator's admitted kt 1--10 record, both trajectory labels, every available
+full-depth row, the kt-1 stage records, and both selected trend records are all
+exact or at the preregistered bar.
 
 - codex review: operator
-- independent review: operator (Claude HOLD reproduced and remediated; re-review pending)
-- NEMO execution: operator-only; not run here
-- scoring: not run; no L6 record exists
+- independent review: operator (Claude HOLD reproduced and remediated)
+- NEMO execution: operator-only; no NEMO execution in this resume
+- scoring: complete from a clean tree
 
 ## 1. Survey and frozen inputs
 
@@ -109,13 +109,17 @@ now uses traced binary64 non-unit rates and non-power-of-two values and proves
 the two-rounding result bit for bit; all checked gradients remain finite.
 
 The original “moved call fails” discriminator was only standalone NumPy
-arithmetic, not a model run; that claim is retracted.  The replacement
-one-step test runs the ordinary compiled L6 model with no test trace and
-inexact per-cell T/S offsets, then recompiles the same production step with
-the inner product-rounding guard planted out.  The resulting T/S state differs,
-so reverting the guard makes the one-step control fail.  The source-order
-selection still pins damping after the certified L4b composition.  This
-feature adds no division or square root and no new zero-operand gradient site.
+arithmetic, not a model run; that claim is retracted.  The replacement uses
+the ordinary compiled L4b and L6 model traces on the same random, per-cell
+INEXACT T/S state.  It requires L6's live pre-damping source to equal L4b's
+live composed source bit for bit, and requires the final live source to equal
+`nemo_source_round(pre + nemo_source_round(resto * (target - Kbb)))` bit for
+bit.  Its runtime plant leaves the production call text present but defers
+geothermal until after damping; the pre-source assertion fails and the final
+composed source changes.  Thus execution, not source-text order, pins damping
+after geothermal.  A separate ordinary one-step plant removes the inner
+product-rounding guard and changes the returned T/S state.  This feature adds
+no division or square root and no new zero-operand gradient site.
 
 The card and loader plants reject missing certified L4b, BBL, incompatible
 forcing rank, a non-exact deck delta, a changed `resto.nc`, or failure to vary
@@ -124,6 +128,12 @@ the L6 model requires the caller's positive step and rejects a missing or stale
 stamp before compilation.  Thus a scorer cannot silently reuse the stored
 kt=1 target at kt=2.  The corrected focused and shared-sponge battery passed
 29 / 29 tests in 188.91 seconds.
+
+The admitted-record gate runs the shared damping implementation through an
+actual JIT with all seven operands traced as binary64 arrays.  It fails if the
+JIT call is removed, if any recorded operand is closed over instead of traced,
+if x64 is removed, or if the L6 damping wire is removed.  The kt-2 wire-removal
+plant moves both temperature and salinity rows.
 
 ## 3. Inherited-card preservation
 
@@ -135,6 +145,9 @@ snapshots retain their recorded source commits.  Candidate snapshots stamp
 `64bcc0c9e6dccb6353b235c4d360eacf82da5edc`.  A planted L2 mutation was
 refused with `IDENTITY_PLANT_REFUSED`.  Evidence is under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round55/merge_identity`.
+The clean scoring commit retains the same packages tree
+`bff737b887e4205cfe8efbf4504c1adc436933e9`; the resume changes only the scorer,
+tests, and this receipt, so all 19 zero-difference reports remain applicable.
 
 ## 4. Acquisition boundary
 
@@ -183,11 +196,61 @@ with exit status 66 before `build_target`:
 REFUSE: L6 acquisition: ACQUISITION_NEEDED: --run is operator-only (set NEMO_OPERATOR_ACK=L6_R55_OPERATOR)
 ```
 
-The target and corrected evidence directory remain absent.  NEMO was not built
-or run during remediation.  The operator command is
-`NEMO_OPERATOR_ACK=L6_R55_OPERATOR run.sh --run`.
+The operator then ran the corrected tool from commit `3c0c35711d`.  It admitted
+three identical kt 1--10 damping and geothermal inventories, writer-free
+boundary output, and restarts covering every scored kt 2--10.  Damping is
+correctly inert at kt 1 because target equals Kbb, then acts on all 5,871
+positive-restoring wet cells for both tracers at every kt 2--10.  The accepted
+record is
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round55/oracle_l6_r55`.
+The acquisition log SHA-256 is
+`0c2eb6aa6876bdbb9f56261612313e6ceea9a098f94ecffeb651737a388b6a56`.
+Its final line is:
 
-## 5. Gates and ASKED / UNASKED
+```text
+L6_ACQUISITION_PASS steps=1..10 twins=3 evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round55/oracle_l6_r55
+```
+
+NEMO was not built or run in this resume.
+
+## 5. Clean-tree L6 score
+
+All five score files stamp clean commit
+`b8149cd7a14c970146a6d046b8cb606548a1dc85` and packages tree
+`bff737b887e4205cfe8efbf4504c1adc436933e9`.  CPU, x64, production JIT, the
+admitted restart roots, and step-specific damping targets were used.
+
+| label / record | coverage | exact / at bar | unequal words |
+|---|---:|---:|---:|
+| INDEPENDENT surface | kt 1--10 | 70 / 70 exact | 0 |
+| INDEPENDENT full/partial/dry depth | restarts kt 2--10 | 34 exact, 36 / 36 at bar | 3 |
+| GIVEN-NEMO-ENTRY surface | direct + two-step outputs kt 1--10 | 70 / 70 exact | 0 |
+| GIVEN-NEMO-ENTRY full/partial/dry depth | restarts kt 2--10 | 34 exact, 36 / 36 at bar | 3 |
+| stage surface | kt 1, stages 1--3 | 21 / 21 exact | 0 |
+| stage full/partial/dry depth | kt 1, stages 1--3 | 12 / 12 exact | 0 |
+| geothermal wet-bottom trend | kt 1--10 | 164,330 / 164,330 cells exact | 0 |
+| damping wet-cell T/S statements | kt 1--10 | 8,611,040 / 8,611,040 cells exact | 0 |
+
+The three nonexact full-depth words in each trajectory label are temperature:
+two full-cell words at kt 9 and one at kt 10.  Their largest normalized error
+is `5.803808481195575e-20`, well below the fixed `1e-15` bar.  Every partial
+cell and dry slot is exact.  The geothermal record has 16,433 wet columns per
+step, including five zero-flux wet columns.  The damping record has 430,552 wet
+cells per tracer per step and canonical zero dry slots.
+
+Score SHA-256 hashes:
+
+```text
+86ddf2f4e1369b133ab4f1b9fd225140a1dbdd76b3dca41a0eccdd64c42249e2  l6_independent_kt1_10.json
+4ad8b149fde4f8dd9bdbacf1fc88e00ca7d056b02c6d232c66c37b0c8ebbb135  l6_given_entry_kt1_10.json
+81d8842ff320a1c62959c6eb5f615340fa584999c90b5828abcc62ca44a7ced2  l6_stages_kt1.json
+88ae64815ef48f5a7a9625c9507d491aadf74e283f06f245d56987e626c33082  l6_geothermal_kt1_10.json
+9f5e40ecb9275a8f63afe1393999453aa2df8353a1e22d13f11b7fb59dde66af  l6_damping_kt1_10.json
+```
+
+L6 is therefore **CERTIFIED: damping after geothermal in NEMO's order**.
+
+## 6. Gates and ASKED / UNASKED
 
 The explicit citation gate found 16 citations in this corrected receipt with
 zero unmapped citations, zero failures, zero failing map-audit entries, and all
@@ -203,15 +266,16 @@ SHA-pin the existing on-disk `resto.nc`; extend existing shared mechanisms;
 add L4b-plus-damping in NEMO's selected order; keep BBL off; add exact JIT,
 traced-input, x64, gradient, deck, validation, and call-position controls;
 preserve every inherited two-step card; commit the ladder acquisition tool;
-run its seven-item preflight; invoke its operator-only `--run` boundary; and
-stop without scoring.
+run its seven-item preflight; admit the operator record; restore trace-based
+runtime order assertions with a moved-call plant; score both labels through kt
+10 at every available depth; score the kt-1 stages and both trend records; and
+certify only because every row is exact or at the fixed bar.
 
 UNASKED and not done: fetch or vendor inputs; execute, build, or alter NEMO;
-create, admit, or score an L6 record; claim an L6 bar verdict or certification;
 enable BBL; relax any fidelity bar; push; post to GitHub; or perform an author
 review.  Independent review remains with the operator.
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/gridladder_r55/repo
-ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/gridladder_r55/repo/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l6_orca2dmp/run.sh --run with NEMO_OPERATOR_ACK=L6_R55_OPERATOR
+ACQUISITION_NEEDED: NONE
 DECISION_NEEDED: NONE
-ROUND_STATUS: STOPPED_FOR_RECORD — review hold remediated and preflighted; operator acquisition needed; not scored
+ROUND_STATUS: LANDED — L6 CERTIFIED: damping after geothermal in NEMO's order; both labels and every recorded depth are exact or at bar
