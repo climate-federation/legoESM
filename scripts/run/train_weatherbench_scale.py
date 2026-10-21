@@ -67,6 +67,8 @@ class ScaleConfig(NamedTuple):
     adjoint_steps: int = 0
     # Scenes the start-of-run reachability freeze probes (None = every one).
     probe_scenes: int | None = None
+    # Rolling mid-epoch checkpoint every n training steps (0 = epoch ends only).
+    checkpoint_every_steps: int = 20
 
 
 # Scenes used for the POST-TRAINING reachability report.  A subsample, not the
@@ -97,6 +99,50 @@ def _checkpoint_paths(out_dir, epoch):
 
     base = os.path.join(out_dir, f"epoch_{epoch:04d}")
     return base + ".eqx", base + ".opt.eqx", base + ".frozen.json"
+
+
+def _partial_paths(out_dir):
+    """The rolling mid-epoch checkpoint: parameters, optimizer state, and the
+    manifest (written last) naming the epoch, the steps done and their losses."""
+    import os
+
+    base = os.path.join(out_dir, "partial")
+    return base + ".eqx", base + ".opt.eqx", base + ".json"
+
+
+def _read_partial(out_dir, epoch, n_samples, expect_fp, content):
+    """``(manifest, params_path, opt_path)`` of a mid-epoch checkpoint that
+    continues ``epoch``, or None.  One for another epoch is stale (that epoch
+    completed, or never started) and is ignored; one written by a differently
+    configured run, or on different samples, is a hard error, as for an epoch
+    checkpoint."""
+    import json as _json
+    import os
+
+    pp, op, mp = _partial_paths(out_dir)
+    try:
+        with open(mp) as fh:
+            obj = _json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not (isinstance(obj, dict) and obj.get("epoch") == epoch):
+        return None
+    if not (_manifest_is_valid(obj, expect_keys=expect_fp)
+            and obj["fingerprint"] == expect_fp
+            and _content_matches(obj, content)):
+        raise RuntimeError(
+            f"resume: {mp} continues epoch {epoch} but was written by a run "
+            "configured differently or on different samples. Start a fresh "
+            "output directory, or re-run with the original settings.")
+    step, losses, skipped = obj.get("step"), obj.get("losses"), obj.get("skipped")
+    if (isinstance(step, bool) or not isinstance(step, int)
+            or not 0 < step < n_samples
+            or not isinstance(losses, list) or not isinstance(skipped, int)
+            or len(losses) + skipped != step
+            or not (os.path.exists(pp) and os.path.exists(op))):
+        raise RuntimeError(f"resume: {mp} is malformed or its state files "
+                           "are missing")
+    return obj, pp, op
 
 
 def _manifest_is_valid(obj, expect_keys=None):
@@ -682,7 +728,15 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
                    dest="probe_scenes",
                    help="Scenes the start-of-run reachability probe reads "
                         "(spread evenly over the shard). Default: all.")
+    p.add_argument("--checkpoint-every-steps", type=int, default=20,
+                   dest="checkpoint_every_steps",
+                   help="Save a rolling mid-epoch checkpoint every n steps so "
+                        "a walltime kill loses at most n steps (0 = only at "
+                        "epoch ends). Single logical trainer only.")
     a = p.parse_args(argv)
+    if a.checkpoint_every_steps < 0:
+        raise SystemExit("--checkpoint-every-steps must be >= 0, got "
+                         f"{a.checkpoint_every_steps}")
     if a.adjoint_steps < 0:
         raise SystemExit(f"--adjoint-steps must be >= 0, got {a.adjoint_steps}")
     if a.probe_scenes is not None and a.probe_scenes < 1:
@@ -707,6 +761,7 @@ def build_scale_config_from_args(argv=None) -> ScaleConfig:
         training_core=a.training_core, n_days=a.n_days,
         column_devices=a.column_devices,
         adjoint_steps=a.adjoint_steps, probe_scenes=a.probe_scenes,
+        checkpoint_every_steps=a.checkpoint_every_steps,
     )
 
 
@@ -1236,6 +1291,30 @@ def _main(argv=None):
                 log.info("resume: already at the requested %d epochs -- "
                          "nothing to do", cfg.n_epochs)
 
+    # Mid-epoch resume: a rolling checkpoint that continues ``start_epoch``
+    # replaces the epoch-end state.  Single logical trainer only: under MPI
+    # data parallelism each rank holds its own running losses.
+    start_step, start_losses, start_skipped, _partial_opt = 0, [], 0, None
+    if cfg.resume and nproc == 1 and start_epoch < cfg.n_epochs:
+        _part = _read_partial(
+            cfg.out_dir, start_epoch, len(local),
+            _run_fingerprint(cfg, yml, warmup, roll_steps,
+                             len(local) * nproc, nproc), _probe_content)
+        if _part is not None:
+            _pm_, _ppath, _partial_opt = _part
+            if (resumed_frozen is not None
+                    and set(_pm_["frozen"]) != resumed_frozen):
+                raise RuntimeError(
+                    f"resume: the mid-epoch checkpoint's frozen set differs "
+                    "from the epoch checkpoint's")
+            params = eqx.tree_deserialise_leaves(_ppath, params)
+            resumed_frozen = set(_pm_["frozen"])
+            start_step = int(_pm_["step"])
+            start_losses = [float(x) for x in _pm_["losses"]]
+            start_skipped = int(_pm_["skipped"])
+            log.info("resume: epoch %d continues after step %d/%d from %s",
+                     start_epoch, start_step, len(local), _ppath)
+
     # A reachability probe longer than one job link continues where the last
     # link stopped (single logical trainer only: under MPI data parallelism
     # each rank would need its own saved partial measurement).
@@ -1256,7 +1335,8 @@ def _main(argv=None):
         # list on its own. Agree BEFORE the first collective (the freeze
         # probe), or a disagreeing process would hang the others.
         _assert_processes_agree(
-            [start_epoch, -1 if resumed_frozen is None else len(resumed_frozen),
+            [start_epoch, start_step,
+             -1 if resumed_frozen is None else len(resumed_frozen),
              _crc_names(resumed_frozen or ()),
              -1 if _probe_resume is None else _probe_resume[0]],
             "resume point, restored frozen set or probe progress")
@@ -1429,7 +1509,9 @@ def _main(argv=None):
     _fingerprint = _run_fingerprint(cfg, yml, warmup, roll_steps,
                                     len(local) * nproc, nproc)
     opt_state = optimizer.init(arr)
-    if start_epoch > 0:
+    if _partial_opt is not None:
+        opt_state = eqx.tree_deserialise_leaves(_partial_opt, opt_state)
+    elif start_epoch > 0:
         # The moments AND the schedule step live here; restoring parameters
         # without this is a cold restart wearing a resumed run's name.
         opt_state = eqx.tree_deserialise_leaves(
@@ -1535,10 +1617,37 @@ def _main(argv=None):
                             "frozen": frozen_names,
                             "fingerprint": _fingerprint})))
 
+    _every = int(cfg.checkpoint_every_steps)
+
+    def on_step(epoch, n_done, losses, n_skipped, cur_arr, cur_opt_state):
+        if (nproc != 1 or not _every or n_done % _every
+                or n_done >= len(local)):
+            return
+        if column_mesh is not None:
+            cur_arr, cur_opt_state = jax.device_get((cur_arr, cur_opt_state))
+        if rank != 0:
+            return
+        from legoesm.ml.training import checkpoint_view
+        ppath, opath, mpath = _partial_paths(cfg.out_dir)
+        # The manifest goes last and names the epoch, so a kill between the
+        # writes leaves either the previous partial or a stale one resume skips.
+        _atomic_write(mpath, lambda t: pathlib.Path(t).write_text("{}"))
+        _atomic_write(ppath, lambda t: eqx.tree_serialise_leaves(
+            t, checkpoint_view(eqx.combine(cur_arr, _static_h))))
+        _atomic_write(opath, lambda t: eqx.tree_serialise_leaves(
+            t, cur_opt_state))
+        _atomic_write(mpath, lambda t: pathlib.Path(t).write_text(json.dumps({
+            "schema": _MANIFEST_SCHEMA, "frozen": frozen_names,
+            "fingerprint": _fingerprint, "epoch": int(epoch),
+            "step": int(n_done), "losses": [float(x) for x in losses],
+            "skipped": int(n_skipped), **_content_payload(_probe_content)})))
+
     arr, opt_state, history = mpi_data_parallel_training_loop(
         loss_fn, arr, opt_state, optimizer, local, cfg.n_epochs, nproc,
         on_epoch=on_epoch, start_epoch=start_epoch,
-        place=None if column_mesh is None else place_sample)
+        place=None if column_mesh is None else place_sample,
+        on_step=on_step, start_step=start_step, start_losses=start_losses,
+        start_skipped=start_skipped)
     params = eqx.combine(arr, static)
     log.info("training done: final loss=%.6f", history[-1] if history else float("nan"))
 

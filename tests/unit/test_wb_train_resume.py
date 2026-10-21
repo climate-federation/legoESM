@@ -586,3 +586,146 @@ def test_partial_probe_counts_as_chain_progress(tmp_path, capsys):
     (sub / "probe_progress.json").write_text("{}")
     mod.print_latest_complete_signature(str(tmp_path))
     assert "probe_progress.json" in capsys.readouterr().out
+
+
+# --- mid-epoch resume ------------------------------------------------------
+def _mid_epoch_setup():
+    import jax.numpy as jnp
+    import optax
+
+    samples = [jnp.asarray(float(i) + 1.0) for i in range(4)]
+    n_epochs = 3
+
+    def loss_fn(p, sample):
+        return jnp.sum((p["w"] * sample - 3.0) ** 2)
+
+    def fresh():
+        sched = optax.warmup_cosine_decay_schedule(
+            0.0, 0.1, warmup_steps=2, decay_steps=n_epochs * len(samples))
+        return optax.adamw(sched, weight_decay=1e-4)
+
+    return samples, n_epochs, loss_fn, fresh, {"w": jnp.asarray(0.5)}
+
+
+def _snap_at(epoch, step):
+    got = {}
+
+    def on_step(e, n, losses, skipped, p, s):
+        if (e, n) == (epoch, step):
+            got.update(p=p, s=s, losses=list(losses), skipped=skipped)
+    return got, on_step
+
+
+def test_a_run_cut_mid_epoch_matches_an_uninterrupted_one():
+    """Killed after step 2 of epoch 1 and resumed from that step's state: the
+    final parameters AND the reported epoch-1 mean must equal the straight
+    run's, so a walltime kill costs only the steps since the last save."""
+    from legoesm.training.data_parallel import mpi_data_parallel_training_loop
+
+    samples, n_epochs, loss_fn, fresh, p0 = _mid_epoch_setup()
+    opt = fresh()
+    straight, _s, h_straight = mpi_data_parallel_training_loop(
+        loss_fn, p0, opt.init(p0), opt, samples, n_epochs, 1)
+
+    got, on_step = _snap_at(1, 2)
+    opt = fresh()
+    _p, _s, h_first = mpi_data_parallel_training_loop(
+        loss_fn, p0, opt.init(p0), opt, samples, 2, 1, on_step=on_step)
+    resumed, _s2, h_rest = mpi_data_parallel_training_loop(
+        loss_fn, got["p"], got["s"], opt, samples, n_epochs, 1,
+        start_epoch=1, start_step=2, start_losses=got["losses"],
+        start_skipped=got["skipped"])
+
+    assert float(resumed["w"]) == pytest.approx(float(straight["w"]), rel=1e-12)
+    assert h_rest[0] == pytest.approx(h_straight[1], rel=1e-12)
+    assert len(h_rest) == n_epochs - 1
+
+
+def test_resuming_mid_epoch_without_skipping_the_done_steps_differs():
+    """Control: replaying the already-taken steps (start_step ignored) moves
+    the parameters, so the test above measures the skip."""
+    from legoesm.training.data_parallel import mpi_data_parallel_training_loop
+
+    samples, n_epochs, loss_fn, fresh, p0 = _mid_epoch_setup()
+    opt = fresh()
+    straight, _s, _h = mpi_data_parallel_training_loop(
+        loss_fn, p0, opt.init(p0), opt, samples, n_epochs, 1)
+    got, on_step = _snap_at(1, 2)
+    opt = fresh()
+    mpi_data_parallel_training_loop(
+        loss_fn, p0, opt.init(p0), opt, samples, 2, 1, on_step=on_step)
+    replayed, _s2, _h2 = mpi_data_parallel_training_loop(
+        loss_fn, got["p"], got["s"], opt, samples, n_epochs, 1, start_epoch=1)
+    assert float(replayed["w"]) != pytest.approx(float(straight["w"]), rel=1e-6)
+
+
+@pytest.mark.parametrize("step,losses,skipped", [(4, [], 0), (2, [1.0], 0)])
+def test_the_loop_refuses_an_inconsistent_mid_epoch_start(step, losses, skipped):
+    from legoesm.training.data_parallel import mpi_data_parallel_training_loop
+
+    samples, _n, loss_fn, fresh, p0 = _mid_epoch_setup()
+    opt = fresh()
+    with pytest.raises(ValueError):
+        mpi_data_parallel_training_loop(
+            loss_fn, p0, opt.init(p0), opt, samples, 3, 1, start_epoch=1,
+            start_step=step, start_losses=losses, start_skipped=skipped)
+
+
+def _write_partial(d, **over):
+    import numpy as np
+
+    pp, op, mp = mod._partial_paths(str(d))
+    pathlib.Path(pp).write_bytes(b"p")
+    pathlib.Path(op).write_bytes(b"o")
+    content = (7, np.asarray([[1.0, 2.0, 3.0]]))
+    obj = {"schema": mod._MANIFEST_SCHEMA, "frozen": ["a"],
+           "fingerprint": {"k": 1}, "epoch": 2, "step": 3,
+           "losses": [0.1, 0.2], "skipped": 1,
+           **mod._content_payload(content)}
+    obj.update(over)
+    pathlib.Path(mp).write_text(json.dumps(obj))
+    return content
+
+
+def test_a_matching_partial_is_read(tmp_path):
+    content = _write_partial(tmp_path)
+    obj, pp, op = mod._read_partial(str(tmp_path), 2, 10, {"k": 1}, content)
+    assert (obj["step"], obj["skipped"], obj["losses"]) == (3, 1, [0.1, 0.2])
+
+
+def test_a_partial_for_another_epoch_or_mid_write_is_ignored(tmp_path):
+    content = _write_partial(tmp_path)
+    assert mod._read_partial(str(tmp_path), 3, 10, {"k": 1}, content) is None
+    pathlib.Path(mod._partial_paths(str(tmp_path))[2]).write_text("{}")
+    assert mod._read_partial(str(tmp_path), 2, 10, {"k": 1}, content) is None
+    assert mod._read_partial(str(tmp_path / "none"), 2, 10, {"k": 1},
+                             content) is None
+
+
+@pytest.mark.parametrize("over,fp", [
+    ({}, {"k": 2}),                         # config drift
+    ({"content_crc": 8}, {"k": 1}),         # different samples
+    ({"step": 5}, {"k": 1}),                # losses + skipped != step
+    ({"step": True}, {"k": 1}),             # bool is not a step
+])
+def test_a_mismatched_partial_for_this_epoch_fails_loudly(tmp_path, over, fp):
+    content = _write_partial(tmp_path, **over)
+    with pytest.raises(RuntimeError):
+        mod._read_partial(str(tmp_path), 2, 10, fp, content)
+
+
+def test_a_partial_missing_its_state_files_fails_loudly(tmp_path):
+    import os
+
+    content = _write_partial(tmp_path)
+    os.remove(mod._partial_paths(str(tmp_path))[1])
+    with pytest.raises(RuntimeError):
+        mod._read_partial(str(tmp_path), 2, 10, {"k": 1}, content)
+
+
+def test_the_checkpoint_cadence_flag():
+    assert mod.build_scale_config_from_args([]).checkpoint_every_steps == 20
+    assert mod.build_scale_config_from_args(
+        ["--checkpoint-every-steps", "0"]).checkpoint_every_steps == 0
+    with pytest.raises(SystemExit):
+        mod.build_scale_config_from_args(["--checkpoint-every-steps", "-1"])
