@@ -1529,6 +1529,10 @@ class OceanPartialCellCoordinate(NamedTuple):
     # every other card leaves them None and is bit-identical.
     nemo_ldf_ahmt: jnp.ndarray | None = None
     nemo_ldf_ahmf: jnp.ndarray | None = None; nemo_r3t_stored_product: bool = False  # card-selected, see _nemo_r3t_product  # noqa: E501,E702
+    # Static NEMO ``rnfmsk`` and its resolved ``namsbc_rnf`` scalars.  Only a
+    # card carrying both reads them; None elsewhere is inert.
+    nemo_rnf_mouth_mask: jnp.ndarray | None = None
+    nemo_rnf_mouth_config: object | None = None
 
 
 def create_partial_cell_coordinate(
@@ -1734,6 +1738,8 @@ def create_partial_cell_coordinate(
         nemo_een_barotropic=getattr(
             z_coord, "nemo_een_barotropic", None), nemo_r3t_stored_product=getattr(z_coord, "nemo_r3t_stored_product", False) is True,  # noqa: E501
         nemo_e3t_jpk=getattr(z_coord, "nemo_e3t_jpk", None),
+        nemo_rnf_mouth_mask=getattr(z_coord, "nemo_rnf_mouth_mask", None),
+        nemo_rnf_mouth_config=getattr(z_coord, "nemo_rnf_mouth_config", None),
     )
 
 
@@ -1817,6 +1823,8 @@ def create_full_step_coordinate(
         nemo_een_barotropic=getattr(
             z_coord, "nemo_een_barotropic", None), nemo_r3t_stored_product=getattr(z_coord, "nemo_r3t_stored_product", False) is True,  # noqa: E501
         nemo_e3t_jpk=getattr(z_coord, "nemo_e3t_jpk", None),
+        nemo_rnf_mouth_mask=getattr(z_coord, "nemo_rnf_mouth_mask", None),
+        nemo_rnf_mouth_config=getattr(z_coord, "nemo_rnf_mouth_config", None),
     )
 
 

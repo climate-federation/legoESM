@@ -3,6 +3,7 @@
 from legoesm.ocean.physics.vertical_mixing.config import (
     VerticalMixingConfig,
     ConstantVerticalMixingConfig,
+    RiverMouthMixingConfig,
     RichardsonVerticalMixingConfig,
     KPPConfig,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "uniform_iwm_forcing",
     "VerticalMixingConfig",
     "ConstantVerticalMixingConfig",
+    "RiverMouthMixingConfig",
     "RichardsonVerticalMixingConfig",
     "KPPConfig",
     "VerticalMixingOutput",

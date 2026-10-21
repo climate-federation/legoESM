@@ -114,6 +114,58 @@ def _nemo_surface_tmask(state, z_coord):
     return state.land_mask.data
 
 
+def nemo_river_mouth_heat_diffusivity(
+    avt,
+    rnfmsk,
+    wmask,
+    *,
+    rn_avt_rnf: float,
+    nkrnf: int,
+):
+    """Apply NEMO ``zdf_phy``'s river-mouth ``avt`` statement.
+
+    Arrays carry only the interior W levels, so axis index zero is NEMO
+    ``jk=2``.  ``nkrnf`` retains NEMO's one-based W-level number.
+    Source-rounding preserves the written left-to-right association of
+    ``avt + 2 * rn_avt_rnf * rnfmsk * wmask``.
+    """
+
+    if nkrnf < 0:
+        raise ValueError("nkrnf must be nonnegative")
+    avt = jnp.asarray(avt)
+    rnfmsk = jnp.asarray(rnfmsk, dtype=avt.dtype)
+    wmask = jnp.asarray(wmask, dtype=avt.dtype)
+    if rnfmsk.shape != avt.shape[:-1]:
+        raise ValueError(
+            f"rnfmsk shape {rnfmsk.shape} != avt horizontal shape {avt.shape[:-1]}")
+    if wmask.shape != avt.shape:
+        raise ValueError(f"wmask shape {wmask.shape} != avt shape {avt.shape}")
+    from legoesm.core.source_rounding import nemo_source_round
+    sr = nemo_source_round
+    two = jnp.asarray(2.0, dtype=avt.dtype)
+    coeff = jnp.asarray(rn_avt_rnf, dtype=avt.dtype)
+    increment = sr(sr(sr(two * coeff) * rnfmsk[..., None]) * wmask)
+    level_mask = jnp.arange(avt.shape[-1]) < max(nkrnf - 1, 0)
+    return sr(avt + jnp.where(level_mask, increment, jnp.zeros_like(increment)))
+
+
+def _nemo_river_mouth_nkrnf(z_coord, depth_m: float) -> int:
+    """NEMO ``sbc_rnf_init``'s one-based ``nkrnf`` loop."""
+
+    if depth_m <= 0.0:
+        return 0
+    gdepw = np.abs(np.asarray(z_coord.z_half_ref, dtype=np.float64))
+    jpkm1 = int(z_coord.n_levels)
+    if gdepw.shape != (jpkm1 + 1,):
+        raise ValueError(
+            "river-mouth mixing needs a one-dimensional W-depth ladder of "
+            f"length n_levels+1; got {gdepw.shape}")
+    nkrnf = 2
+    while nkrnf != jpkm1 and gdepw[nkrnf] < depth_m:
+        nkrnf += 1
+    return nkrnf
+
+
 def compute_vertical_K_profiles(
     state,
     z_coord: "OceanZStarCoordinate",
@@ -346,6 +398,27 @@ def compute_vertical_K_profiles(
         else:
             K_v_total = K_v_total + K_vmix
             A_v_total = A_v_total + A_vmix
+
+    # ORCA2-built ppsrc zdfphy.f90:347-372: copy the closure first, then add
+    # river-mouth heat diffusivity, before EVD (:359), DDM (:362) and IWM
+    # (:372).  The branch is Python-static, so every default-off caller retains
+    # the same JAX program.
+    _rnf_cfg = getattr(z_coord, "nemo_rnf_mouth_config", None)
+    if _rnf_cfg is not None and _rnf_cfg.enabled:
+        _rnfmsk = getattr(z_coord, "nemo_rnf_mouth_mask", None)
+        if _rnfmsk is None:
+            raise ValueError(
+                "nemo_rnf_mouth_config.enabled=True requires "
+                "z_coord.nemo_rnf_mouth_mask")
+        if _wet_if is None:
+            raise ValueError(
+                "nemo_rnf_mouth_config.enabled=True requires the partial-cell "
+                "wet W mask")
+        K_v_total = nemo_river_mouth_heat_diffusivity(
+            K_v_total, _rnfmsk, _wet_if,
+            rn_avt_rnf=_rnf_cfg.diffusivity_m2_s,
+            nkrnf=_nemo_river_mouth_nkrnf(z_coord, _rnf_cfg.depth_m),
+        )
 
     conv = physics_config.convection
     if conv.scheme == "enhanced_diffusion":

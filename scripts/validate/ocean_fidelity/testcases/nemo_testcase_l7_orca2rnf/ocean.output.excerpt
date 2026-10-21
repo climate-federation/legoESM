@@ -1,0 +1,7 @@
+       specific river mouths treatment            ln_rnf_mouth =  T
+       river mouth additional Kz                  rn_avt_rnf   =    1.0000000000000000E-003
+       depth of river mouth additional mixing     rn_hrnf      =    15.000000000000000
+   ==>>>   Specific treatment used in vicinity of river mouths :
+             - Increase Kz in surface layers (if rn_hrnf > 0 )
+               by    1.0000000000000000E-003  m2/s  over            2  w-levels
+          read socoefr0 (rec:      1) in ./runoff_core_monthly.nc ok

@@ -180,6 +180,19 @@ class ConstantVerticalMixingConfig(NamedTuple):
     N_ref: float = 5.24e-3        # Gregg (2003) reference stratification N_0 [1/s]
 
 
+class RiverMouthMixingConfig(NamedTuple):
+    """NEMO ``ln_rnf_mouth`` additive heat diffusivity.
+
+    The horizontal ``rnfmsk`` is grid data and lives on the vertical
+    coordinate as ``nemo_rnf_mouth_mask``.  These three fields are the resolved
+    ``namsbc_rnf`` choices; defaults keep the contribution absent.
+    """
+
+    enabled: bool = False
+    depth_m: float = 0.0
+    diffusivity_m2_s: float = 0.0
+
+
 class RichardsonVerticalMixingConfig(NamedTuple):
     """Pacanowski & Philander (1981) Richardson-number dependent mixing."""
     K_0: float = 5e-3    # Maximum diffusivity [m^2/s]

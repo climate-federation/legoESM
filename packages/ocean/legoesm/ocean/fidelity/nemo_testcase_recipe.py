@@ -37,6 +37,7 @@ from legoesm.ocean.physics.convection.config import (
 )
 from legoesm.ocean.physics.shortwave_penetration import ShortwavePenetrationConfig
 from legoesm.ocean.physics.lateral_mixing.mle import MLEConfig
+from legoesm.ocean.physics.vertical_mixing.config import RiverMouthMixingConfig
 from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.vertical import (
     NemoEENBarotropicOperands,
@@ -3878,6 +3879,17 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         nemo_e3t_jpk=(jnp.asarray(dom["e3t_jpk"], dtype=jnp.float64)
                       if case in _ORCA2V_CASES else None),
     )
+    if case in _ORCA2L_RNF_CASES:
+        z_coord = z_coord._replace(
+            nemo_rnf_mouth_mask=jnp.asarray(
+                _orca2l7_rnf_mask(root / "runoff_core_monthly.nc"),
+                dtype=jnp.float64),
+            nemo_rnf_mouth_config=RiverMouthMixingConfig(
+                enabled=True,
+                depth_m=_ORCA2L7_RNF_FIELDS["namsbc_rnf.rn_hrnf"],
+                diffusivity_m2_s=_ORCA2L7_RNF_FIELDS[
+                    "namsbc_rnf.rn_avt_rnf"],
+            ))
 
     if _ORCA2G_LDF[case]:
         # nn_ahm_ijk_t = -30: ldfdyn.f90:348-353 reads the file, :387-390 masks.
@@ -4232,6 +4244,17 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
         ("ln_zdfddm" if card.case in _ORCA2V_DDM_CASES else "ln_zdfddm=F"): (
             _orca2v3_ddm_selected(vm.ddm) if card.case in _ORCA2V_DDM_CASES
             else not vm.ddm.enabled),
+        ("ln_rnf_mouth" if card.case in _ORCA2L_RNF_CASES
+         else "ln_rnf_mouth=unselected"): (
+            ((card.recipe.z_coord.nemo_rnf_mouth_config.enabled,
+              card.recipe.z_coord.nemo_rnf_mouth_config.depth_m,
+              card.recipe.z_coord.nemo_rnf_mouth_config.diffusivity_m2_s,
+              card.recipe.z_coord.nemo_rnf_mouth_mask is not None) ==
+             (True, _ORCA2L7_RNF_FIELDS["namsbc_rnf.rn_hrnf"],
+              _ORCA2L7_RNF_FIELDS["namsbc_rnf.rn_avt_rnf"], True))
+            if card.case in _ORCA2L_RNF_CASES else
+            (getattr(card.recipe.z_coord, "nemo_rnf_mouth_config", None) is None
+             and getattr(card.recipe.z_coord, "nemo_rnf_mouth_mask", None) is None)),
         **({"ln_zdfiwm": _orca2v4_iwm_selected(vm)
             and card.recipe.iwm_forcing is not None}
            if card.case in _ORCA2V_IWM_CASES else {}),
@@ -4801,13 +4824,15 @@ _ORCA2G_SI3_CASES = ("ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg",
                      "ORCA2G8-ldf", "ORCA2G9-tadv",
                      "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm",
                      "ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L1-bbl",
-                     "ORCA2L2-iso", "ORCA2L3-eiv", "ORCA2L5-mle")
+                     "ORCA2L2-iso", "ORCA2L3-eiv", "ORCA2L5-mle",
+                     "ORCA2L7-rnf")
 _ORCA2V_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
-                 "ORCA2V5-havtb")
-_ORCA2V_EVD_CASES = ("ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
-_ORCA2V_DDM_CASES = ("ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb")
-_ORCA2V_IWM_CASES = ("ORCA2V4-iwm", "ORCA2V5-havtb")
-_ORCA2V_HAVTB_CASES = ("ORCA2V5-havtb",)
+                 "ORCA2V5-havtb", "ORCA2L7-rnf")
+_ORCA2V_EVD_CASES = ("ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb",
+                     "ORCA2L7-rnf")
+_ORCA2V_DDM_CASES = ("ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L7-rnf")
+_ORCA2V_IWM_CASES = ("ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L7-rnf")
+_ORCA2V_HAVTB_CASES = ("ORCA2V5-havtb", "ORCA2L7-rnf")
 # ORCA2L1 (lane B, DECISION 138): certified G5 plus ORCA2's bottom boundary
 # layer, verbatim ORCA2_OMIP_L4/EXP00/namelist_cfg:268-272 (tra_bbl_init
 # trabbl.f90:527; bbl :357 at stage 3, stprk3_stg.f90:560; tra_bbl :154 ->
@@ -4846,6 +4871,36 @@ _ORCA2L5_MLE_RESOLVED_FIELDS: dict[str, object] = {
     "namtra_mle.nn_conv": 0,
     "namtra_mle.rn_rho_c_mle": 0.01,
 }
+# ORCA2L7 (lane B, Decisions 141/146): certified V5 plus the one
+# ``ln_rnf_mouth`` heat-diffusivity contribution in zdf_phy.
+_ORCA2L_RNF_CASES = ("ORCA2L7-rnf",)
+_ORCA2L7_RNF_FIELDS: dict[str, object] = {
+    "namsbc_rnf.ln_rnf_mouth": True,
+    "namsbc_rnf.rn_hrnf": 15.0,
+    "namsbc_rnf.rn_avt_rnf": 1.0e-3,
+}
+
+
+def _orca2l7_rnf_mask(path: Path) -> np.ndarray:
+    """Read ORCA2's static ``sn_cnf`` field exactly once (record 1)."""
+
+    try:
+        import netCDF4  # noqa: N813
+    except ImportError as exc:
+        raise ImportError("netCDF4 is required to build the ORCA2 L7 card") from exc
+    if not path.is_file():
+        raise FileNotFoundError(f"missing ORCA2 river-mouth input: {path}")
+    with netCDF4.Dataset(path, "r") as ds:
+        if "socoefr0" not in ds.variables:
+            raise ValueError(f"{path} has no socoefr0 river-mouth field")
+        variable = ds.variables["socoefr0"]
+        if variable.dimensions != ("y", "x"):
+            raise ValueError(
+                "ORCA2 sn_cnf must be the static two-dimensional socoefr0 "
+                f"field, got dimensions {variable.dimensions}")
+        return np.asarray(variable[:], dtype=np.float64)
+
+
 _ORCA2G_LDF_OFF_FIELDS: dict[str, object] = {
     "namtra_ldf.ln_traldf_off": True,
     "namtra_ldf.ln_traldf_lap": False,
@@ -4969,6 +5024,7 @@ for _rung_table in (_ORCA2G_JPK, _ORCA2G_ZDF_FACES, _ORCA2G_TRA_ZDF_ROUNDED,
     _rung_table["ORCA2L2-iso"] = _rung_table["ORCA2G5-ice"]
     _rung_table["ORCA2L3-eiv"] = _rung_table["ORCA2G9-tadv"]
     _rung_table["ORCA2L5-mle"] = _rung_table["ORCA2G9-tadv"]
+    _rung_table["ORCA2L7-rnf"] = _rung_table["ORCA2V5-havtb"]
 _ORCA2G_UNMEASURED["ORCA2V1-tke"] = ORCA2V1_UNMEASURED
 _ORCA2G_UNMEASURED["ORCA2V2-evd"] = ORCA2V1_UNMEASURED
 _ORCA2G_UNMEASURED["ORCA2V3-ddm"] = ORCA2V1_UNMEASURED
@@ -4985,6 +5041,11 @@ _ORCA2G_UNMEASURED["ORCA2L5-mle"] = (
     "nemo_post_si3_surface_records",
     "l5_record_not_admitted",
     "mixed_layer_eddies",
+)
+_ORCA2G_UNMEASURED["ORCA2L7-rnf"] = (
+    "nemo_post_si3_surface_records",
+    "l7_record_not_admitted",
+    "river_mouth_mixing",
 )
 
 
@@ -5263,6 +5324,12 @@ def build_orca2l5_mle_card(deck_root: str | Path) -> NEMOTestcaseCard:
     return build_orca2g1_flat_card(deck_root, "ORCA2L5-mle")
 
 
+def build_orca2l7_rnf_card(deck_root: str | Path) -> NEMOTestcaseCard:
+    """L7: certified V5 plus ORCA2's river-mouth heat diffusivity."""
+
+    return build_orca2g1_flat_card(deck_root, "ORCA2L7-rnf")
+
+
 def build_orca2g6_vec_card(deck_root: str | Path) -> NEMOTestcaseCard:
     """G6: certified G5 plus ORCA2's vector-form momentum advection."""
 
@@ -5311,6 +5378,7 @@ __all__ = (
     "build_orca2l2_iso_card",
     "build_orca2l3_eiv_card",
     "build_orca2l5_mle_card",
+    "build_orca2l7_rnf_card",
     "nemo_havtb_shape",
     "ORCA2V1_UNMEASURED",
     "build_orca2g6_vec_card",

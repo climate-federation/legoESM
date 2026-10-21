@@ -577,7 +577,7 @@ def test_round21_config_census():
         "ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg",
         "ORCA2G8-ldf", "ORCA2G9-tadv", "ORCA2V1-tke", "ORCA2V2-evd",
         "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L1-bbl",
-        "ORCA2L2-iso", "ORCA2L3-eiv", "ORCA2L5-mle",
+        "ORCA2L2-iso", "ORCA2L3-eiv", "ORCA2L5-mle", "ORCA2L7-rnf",
     }
     assert set(recipe._ORCA2G_JPK) == expected_cards
     assert set(recipe._ORCA2L_MLE_CASES) == {"ORCA2L5-mle"}
@@ -615,6 +615,8 @@ def test_round21_config_census():
         assert getattr(
             getattr(card.recipe.model_config, "physics", None), "mle", None
         ) is None, case
+        assert getattr(card.recipe.z_coord, "nemo_rnf_mouth_config", None) is None, case
+        assert getattr(card.recipe.z_coord, "nemo_rnf_mouth_mask", None) is None, case
 
 
 
