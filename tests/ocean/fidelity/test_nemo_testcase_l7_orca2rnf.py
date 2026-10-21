@@ -226,6 +226,16 @@ def test_all_comparable_l7_and_v5_nemo_outputs_are_bit_identical():
     assert result.returncode == 0, result.stdout + result.stderr
     report = json.loads(result.stdout)
     assert report["status"] == "PASS_L7_V5_NEMO_IDENTITY"
+    assert report["selector_identity"] == {
+        "l7_off_vs_l7_on_raw_identical_ocean_restarts": 5,
+        "l7_off_vs_v5_on_raw_identical_ocean_restarts": 5,
+        "l7_ref_boundary": False,
+        "l7_twin_b": True,
+        "note": ("the archived V5 reference and twin decks both select river-mouth "
+                 "mixing; they are not an OFF/ON deck pair"),
+        "v5_ref_100step": True,
+        "v5_twin_b": True,
+    }
     assert report["totals"] == {
         "all_restart_files": 25,
         "history_files": 20,

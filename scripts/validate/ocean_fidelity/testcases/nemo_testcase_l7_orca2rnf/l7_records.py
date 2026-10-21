@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import struct
 import tempfile
 from pathlib import Path
@@ -197,6 +198,14 @@ def _audit_failed_observer(path: Path) -> dict:
     return report
 
 
+def _river_selector(path: Path) -> bool:
+    match = re.search(r"^\s*ln_rnf_mouth\s*=\s*\.(true|false)\.",
+                      path.read_text(), flags=re.IGNORECASE | re.MULTILINE)
+    if match is None:
+        raise ValueError(f"ln_rnf_mouth is absent: {path}")
+    return match.group(1).lower() == "true"
+
+
 def compare_v5_evidence(l7_root: Path, v5_root: Path, *, plant: bool = False) -> dict:
     """Fail-closed identity census of every comparable L7/V5 NEMO output."""
     l7_root, v5_root = Path(l7_root), Path(v5_root)
@@ -277,6 +286,28 @@ def compare_v5_evidence(l7_root: Path, v5_root: Path, *, plant: bool = False) ->
         broken.append(str(path.relative_to(l7_root)))
     failed_observer = _audit_failed_observer(
         l7_root / "smoke_2step" / "oracle_l7_rnf_kt00000001.bin")
+    selectors = {
+        "l7_ref_boundary": _river_selector(l7_root / "ref_boundary" / "namelist_cfg"),
+        "l7_twin_b": _river_selector(l7_root / "twin_b" / "namelist_cfg"),
+        "v5_ref_100step": _river_selector(v5_root / "ref_100step" / "namelist_cfg"),
+        "v5_twin_b": _river_selector(v5_root / "twin_b" / "namelist_cfg"),
+    }
+    if selectors != {"l7_ref_boundary": False, "l7_twin_b": True,
+                     "v5_ref_100step": True, "v5_twin_b": True}:
+        raise ValueError(f"unexpected archived river selectors: {selectors}")
+    for kt in range(2, 11, 2):
+        restart = f"ORCA2G1_{kt:08d}_restart.nc"
+        _require_same_file(l7_root / "ref_boundary" / restart,
+                           l7_root / "twin_b" / restart)
+        _require_same_file(l7_root / "ref_boundary" / restart,
+                           v5_root / "ref_100step" / restart)
+    report["selector_identity"] = {
+        **selectors,
+        "l7_off_vs_l7_on_raw_identical_ocean_restarts": 5,
+        "l7_off_vs_v5_on_raw_identical_ocean_restarts": 5,
+        "note": ("the archived V5 reference and twin decks both select river-mouth "
+                 "mixing; they are not an OFF/ON deck pair"),
+    }
     report["noncomparable"] = {
         "l7_observer": broken,
         "l7_observer_reason": "fourth field is 825840 values, not header's 867008",
