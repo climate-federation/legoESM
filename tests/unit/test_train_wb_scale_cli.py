@@ -397,7 +397,9 @@ def test_every_epoch_writes_all_three_checkpoint_files():
                     if isinstance(n, ast.FunctionDef) and n.name == "on_epoch")
     writes = [n for n in ast.walk(on_epoch)
               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-              and n.func.id == "_atomic_write"]
+              and n.func.id == "_atomic_write"
+              and not (isinstance(n.args[0], ast.Name)
+                       and n.args[0].id == "_history_path")]
     assert len(writes) == 3, (
         f"on_epoch must write parameters, optimizer state and the frozen list "
         f"atomically; found {len(writes)} atomic write(s)")

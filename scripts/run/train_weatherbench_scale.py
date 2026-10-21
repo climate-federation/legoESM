@@ -101,13 +101,38 @@ def _checkpoint_paths(out_dir, epoch):
     return base + ".eqx", base + ".opt.eqx", base + ".frozen.json"
 
 
-def _partial_paths(out_dir):
-    """The rolling mid-epoch checkpoint: parameters, optimizer state, and the
-    manifest (written last) naming the epoch, the steps done and their losses."""
+def _partial_manifest_path(out_dir):
     import os
 
-    base = os.path.join(out_dir, "partial")
-    return base + ".eqx", base + ".opt.eqx", base + ".json"
+    return os.path.join(out_dir, "partial.json")
+
+
+def _save_partial(out_dir, manifest, write_params, write_opt):
+    """Write one rolling mid-epoch checkpoint generation.
+
+    The state files carry the epoch and step in their names and the manifest,
+    replaced last, names them; the previous generation is deleted only after
+    that.  A kill at any point leaves a manifest whose files exist, so it never
+    costs more than the steps since the previous save.
+    """
+    import glob
+    import json as _json
+    import os
+    import pathlib as _pathlib
+
+    tag = f"partial.e{int(manifest['epoch']):04d}.s{int(manifest['step']):06d}"
+    names = {"params_file": tag + ".eqx", "opt_file": tag + ".opt.eqx"}
+    _atomic_write(os.path.join(out_dir, names["params_file"]), write_params)
+    _atomic_write(os.path.join(out_dir, names["opt_file"]), write_opt)
+    payload = _json.dumps({**manifest, **names})
+    _atomic_write(_partial_manifest_path(out_dir),
+                  lambda t: _pathlib.Path(t).write_text(payload))
+    for f in glob.glob(os.path.join(out_dir, "partial.e*.eqx")):
+        if os.path.basename(f) not in names.values():
+            try:
+                os.remove(f)
+            except OSError:
+                pass
 
 
 def _read_partial(out_dir, epoch, n_samples, expect_fp, content):
@@ -119,7 +144,7 @@ def _read_partial(out_dir, epoch, n_samples, expect_fp, content):
     import json as _json
     import os
 
-    pp, op, mp = _partial_paths(out_dir)
+    mp = _partial_manifest_path(out_dir)
     try:
         with open(mp) as fh:
             obj = _json.load(fh)
@@ -135,14 +160,18 @@ def _read_partial(out_dir, epoch, n_samples, expect_fp, content):
             "configured differently or on different samples. Start a fresh "
             "output directory, or re-run with the original settings.")
     step, losses, skipped = obj.get("step"), obj.get("losses"), obj.get("skipped")
+    pf, of = obj.get("params_file"), obj.get("opt_file")
     if (isinstance(step, bool) or not isinstance(step, int)
             or not 0 < step < n_samples
             or not isinstance(losses, list) or not isinstance(skipped, int)
             or len(losses) + skipped != step
-            or not (os.path.exists(pp) and os.path.exists(op))):
+            or not (isinstance(pf, str) and isinstance(of, str))
+            or os.path.basename(pf) != pf or os.path.basename(of) != of
+            or not (os.path.exists(os.path.join(out_dir, pf))
+                    and os.path.exists(os.path.join(out_dir, of)))):
         raise RuntimeError(f"resume: {mp} is malformed or its state files "
                            "are missing")
-    return obj, pp, op
+    return obj, os.path.join(out_dir, pf), os.path.join(out_dir, of)
 
 
 def _manifest_is_valid(obj, expect_keys=None):
@@ -248,6 +277,17 @@ def print_latest_complete_signature(root):
         except OSError:
             continue
         path = _checkpoint_paths(d, ep)[2]
+        cand = (st.st_mtime_ns, f"{path}:{st.st_mtime_ns}:{st.st_size}")
+        if best is None or cand[0] > best[0]:
+            best = cand
+    # A mid-epoch checkpoint is resumable progress too, or an epoch longer
+    # than one link would stop the chain despite saved steps.
+    for d in [root] + [os.path.join(root, x) for x in children]:
+        path = _partial_manifest_path(d)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
         cand = (st.st_mtime_ns, f"{path}:{st.st_mtime_ns}:{st.st_size}")
         if best is None or cand[0] > best[0]:
             best = cand
@@ -1294,12 +1334,19 @@ def _main(argv=None):
     # Mid-epoch resume: a rolling checkpoint that continues ``start_epoch``
     # replaces the epoch-end state.  Single logical trainer only: under MPI
     # data parallelism each rank holds its own running losses.
+    # Every process reads the files on its own; a failure is held until the
+    # processes have compared outcomes, so one cannot raise while the rest
+    # wait in a collective.
     start_step, start_losses, start_skipped, _partial_opt = 0, [], 0, None
+    _partial_err = None
     if cfg.resume and nproc == 1 and start_epoch < cfg.n_epochs:
-        _part = _read_partial(
-            cfg.out_dir, start_epoch, len(local),
-            _run_fingerprint(cfg, yml, warmup, roll_steps,
-                             len(local) * nproc, nproc), _probe_content)
+        try:
+            _part = _read_partial(
+                cfg.out_dir, start_epoch, len(local),
+                _run_fingerprint(cfg, yml, warmup, roll_steps,
+                                 len(local) * nproc, nproc), _probe_content)
+        except RuntimeError as _e:
+            _part, _partial_err = None, _e
         if _part is not None:
             _pm_, _ppath, _partial_opt = _part
             if (resumed_frozen is not None
@@ -1307,7 +1354,10 @@ def _main(argv=None):
                 raise RuntimeError(
                     f"resume: the mid-epoch checkpoint's frozen set differs "
                     "from the epoch checkpoint's")
-            params = eqx.tree_deserialise_leaves(_ppath, params)
+            try:
+                params = eqx.tree_deserialise_leaves(_ppath, params)
+            except Exception as _e:   # noqa: BLE001 -- re-raised after agreement
+                _partial_err = RuntimeError(f"resume: cannot load {_ppath}: {_e}")
             resumed_frozen = set(_pm_["frozen"])
             start_step = int(_pm_["step"])
             start_losses = [float(x) for x in _pm_["losses"]]
@@ -1329,17 +1379,21 @@ def _main(argv=None):
         log.info("resume: reachability probe continues after %d of %d scenes",
                  _probe_resume[0], len(local))
 
+    if _partial_err is not None and place_rep is None:
+        raise _partial_err
     if place_rep is not None:
         params = place_rep(params)
         # Every process read the checkpoint/probe files and built its sample
         # list on its own. Agree BEFORE the first collective (the freeze
         # probe), or a disagreeing process would hang the others.
         _assert_processes_agree(
-            [start_epoch, start_step,
+            [start_epoch, start_step, int(_partial_err is not None),
              -1 if resumed_frozen is None else len(resumed_frozen),
              _crc_names(resumed_frozen or ()),
              -1 if _probe_resume is None else _probe_resume[0]],
             "resume point, restored frozen set or probe progress")
+        if _partial_err is not None:
+            raise _partial_err
         _rel = _assert_samples_agree(local, "training samples",
                                      _SAMPLE_AGREE_RTOL)
         log.info("training samples agree across processes (largest relative "
@@ -1598,8 +1652,16 @@ def _main(argv=None):
             _row = {"epoch": int(epoch), "train_loss": float(mean_loss),
                     "val_loss": None if val_loss is None else float(val_loss),
                     "params": _physical_params(eqx.combine(cur_arr, _static_h))}
-            with open(_history_path, "a") as _fh:
-                _fh.write(json.dumps(_row) + "\n")
+            # A link killed after this row but before the manifest replays the
+            # epoch, so the row is replaced rather than appended twice.
+            _rows = []
+            if os.path.exists(_history_path):
+                with open(_history_path) as _fh:
+                    _rows = [ln for ln in _fh if ln.strip()
+                             and json.loads(ln).get("epoch") != int(epoch)]
+            _rows.append(json.dumps(_row) + "\n")
+            _atomic_write(_history_path, lambda t: pathlib.Path(t).write_text(
+                "".join(_rows)))
             ppath, opath, fpath = _checkpoint_paths(cfg.out_dir, epoch)
             # Parameters, optimizer state and the trainable set together --
             # any one of them missing makes the other two unresumable.
@@ -1628,19 +1690,15 @@ def _main(argv=None):
         if rank != 0:
             return
         from legoesm.ml.training import checkpoint_view
-        ppath, opath, mpath = _partial_paths(cfg.out_dir)
-        # The manifest goes last and names the epoch, so a kill between the
-        # writes leaves either the previous partial or a stale one resume skips.
-        _atomic_write(mpath, lambda t: pathlib.Path(t).write_text("{}"))
-        _atomic_write(ppath, lambda t: eqx.tree_serialise_leaves(
-            t, checkpoint_view(eqx.combine(cur_arr, _static_h))))
-        _atomic_write(opath, lambda t: eqx.tree_serialise_leaves(
-            t, cur_opt_state))
-        _atomic_write(mpath, lambda t: pathlib.Path(t).write_text(json.dumps({
-            "schema": _MANIFEST_SCHEMA, "frozen": frozen_names,
-            "fingerprint": _fingerprint, "epoch": int(epoch),
-            "step": int(n_done), "losses": [float(x) for x in losses],
-            "skipped": int(n_skipped), **_content_payload(_probe_content)})))
+        _save_partial(
+            cfg.out_dir,
+            {"schema": _MANIFEST_SCHEMA, "frozen": frozen_names,
+             "fingerprint": _fingerprint, "epoch": int(epoch),
+             "step": int(n_done), "losses": [float(x) for x in losses],
+             "skipped": int(n_skipped), **_content_payload(_probe_content)},
+            lambda t: eqx.tree_serialise_leaves(
+                t, checkpoint_view(eqx.combine(cur_arr, _static_h))),
+            lambda t: eqx.tree_serialise_leaves(t, cur_opt_state))
 
     arr, opt_state, history = mpi_data_parallel_training_loop(
         loss_fn, arr, opt_state, optimizer, local, cfg.n_epochs, nproc,
