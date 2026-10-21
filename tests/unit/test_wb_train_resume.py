@@ -753,6 +753,8 @@ def test_a_partial_for_another_epoch_is_ignored(tmp_path):
     ({"step": 5}, _FP),                     # losses + skipped != step
     ({"step": True}, _FP),                  # bool is not a step
     ({"params_file": "../x.eqx"}, _FP),     # outside the run directory
+    ({"losses": [None, 0.2]}, _FP),         # not numbers
+    ({"skipped": True}, _FP),               # bool is not a count
 ])
 def test_a_mismatched_partial_for_this_epoch_fails_loudly(tmp_path, over, fp):
     _save(tmp_path, 1.5)

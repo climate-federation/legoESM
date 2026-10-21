@@ -163,7 +163,10 @@ def _read_partial(out_dir, epoch, n_samples, expect_fp, content):
     pf, of = obj.get("params_file"), obj.get("opt_file")
     if (isinstance(step, bool) or not isinstance(step, int)
             or not 0 < step < n_samples
-            or not isinstance(losses, list) or not isinstance(skipped, int)
+            or not isinstance(losses, list)
+            or not all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                       for x in losses)
+            or isinstance(skipped, bool) or not isinstance(skipped, int)
             or len(losses) + skipped != step
             or not (isinstance(pf, str) and isinstance(of, str))
             or os.path.basename(pf) != pf or os.path.basename(of) != of
@@ -905,6 +908,12 @@ def _column_placers(mesh, n_lat: int, ncol: int):
 _SAMPLE_AGREE_RTOL = 1e-9
 
 
+def _file_crc(path) -> int:
+    import zlib
+    with open(path, "rb") as fh:
+        return zlib.crc32(fh.read())
+
+
 def _crc_names(names) -> int:
     import zlib
     return zlib.crc32(",".join(sorted(names)).encode())
@@ -1338,7 +1347,7 @@ def _main(argv=None):
     # processes have compared outcomes, so one cannot raise while the rest
     # wait in a collective.
     start_step, start_losses, start_skipped, _partial_opt = 0, [], 0, None
-    _partial_err = None
+    _partial_err, _partial_crc = None, (0, 0)
     if cfg.resume and nproc == 1 and start_epoch < cfg.n_epochs:
         try:
             _part = _read_partial(
@@ -1349,21 +1358,23 @@ def _main(argv=None):
             _part, _partial_err = None, _e
         if _part is not None:
             _pm_, _ppath, _partial_opt = _part
-            if (resumed_frozen is not None
-                    and set(_pm_["frozen"]) != resumed_frozen):
-                raise RuntimeError(
-                    f"resume: the mid-epoch checkpoint's frozen set differs "
-                    "from the epoch checkpoint's")
             try:
+                if (resumed_frozen is not None
+                        and set(_pm_["frozen"]) != resumed_frozen):
+                    raise RuntimeError(
+                        "resume: the mid-epoch checkpoint's frozen set "
+                        "differs from the epoch checkpoint's")
                 params = eqx.tree_deserialise_leaves(_ppath, params)
+                _partial_crc = (_file_crc(_ppath), _file_crc(_partial_opt))
+                resumed_frozen = set(_pm_["frozen"])
+                start_step = int(_pm_["step"])
+                start_losses = [float(x) for x in _pm_["losses"]]
+                start_skipped = int(_pm_["skipped"])
+                log.info("resume: epoch %d continues after step %d/%d from "
+                         "%s", start_epoch, start_step, len(local), _ppath)
             except Exception as _e:   # noqa: BLE001 -- re-raised after agreement
-                _partial_err = RuntimeError(f"resume: cannot load {_ppath}: {_e}")
-            resumed_frozen = set(_pm_["frozen"])
-            start_step = int(_pm_["step"])
-            start_losses = [float(x) for x in _pm_["losses"]]
-            start_skipped = int(_pm_["skipped"])
-            log.info("resume: epoch %d continues after step %d/%d from %s",
-                     start_epoch, start_step, len(local), _ppath)
+                _partial_err = RuntimeError(
+                    f"resume: cannot restore {_ppath}: {_e}")
 
     # A reachability probe longer than one job link continues where the last
     # link stopped (single logical trainer only: under MPI data parallelism
@@ -1388,6 +1399,7 @@ def _main(argv=None):
         # probe), or a disagreeing process would hang the others.
         _assert_processes_agree(
             [start_epoch, start_step, int(_partial_err is not None),
+             *_partial_crc,
              -1 if resumed_frozen is None else len(resumed_frozen),
              _crc_names(resumed_frozen or ()),
              -1 if _probe_resume is None else _probe_resume[0]],
@@ -1563,14 +1575,24 @@ def _main(argv=None):
     _fingerprint = _run_fingerprint(cfg, yml, warmup, roll_steps,
                                     len(local) * nproc, nproc)
     opt_state = optimizer.init(arr)
+    _opt_err = None
     if _partial_opt is not None:
-        opt_state = eqx.tree_deserialise_leaves(_partial_opt, opt_state)
+        try:
+            opt_state = eqx.tree_deserialise_leaves(_partial_opt, opt_state)
+        except Exception as _e:   # noqa: BLE001 -- re-raised after agreement
+            _opt_err = RuntimeError(f"resume: cannot load {_partial_opt}: {_e}")
     elif start_epoch > 0:
         # The moments AND the schedule step live here; restoring parameters
         # without this is a cold restart wearing a resumed run's name.
         opt_state = eqx.tree_deserialise_leaves(
             _checkpoint_paths(cfg.out_dir, start_epoch - 1)[1], opt_state)
+    if _opt_err is not None and place_rep is None:
+        raise _opt_err
     if place_rep is not None:
+        _assert_processes_agree([int(_opt_err is not None)],
+                                "mid-epoch optimizer state restore")
+        if _opt_err is not None:
+            raise _opt_err
         opt_state = place_rep(opt_state)
         _assert_processes_agree([len(frozen_names), _crc_names(frozen_names)],
                                 "frozen parameter set")
@@ -1657,8 +1679,15 @@ def _main(argv=None):
             _rows = []
             if os.path.exists(_history_path):
                 with open(_history_path) as _fh:
-                    _rows = [ln for ln in _fh if ln.strip()
-                             and json.loads(ln).get("epoch") != int(epoch)]
+                    for ln in (x for x in _fh if x.strip()):
+                        try:
+                            _ep_ln = json.loads(ln).get("epoch")
+                        except ValueError:
+                            log.warning("history: dropping unreadable line "
+                                        "%r", ln[:80])
+                            continue
+                        if _ep_ln != int(epoch):
+                            _rows.append(ln if ln.endswith("\n") else ln + "\n")
             _rows.append(json.dumps(_row) + "\n")
             _atomic_write(_history_path, lambda t: pathlib.Path(t).write_text(
                 "".join(_rows)))
