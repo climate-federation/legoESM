@@ -13,6 +13,9 @@ Receipt and citation re-anchor commits: `a4f0eb3224`, `2e72445e10`
 
 Review-remediation commit: `945f885f94`
 
+Remediation receipt and citation commits: `73bb58474f`, `31d3095311`,
+`f742ed19df`
+
 Status: **STOPPED — REVIEW HOLD REMEDIATED; ACQUISITION_NEEDED.**  L6 is the certified L4b
 card plus ORCA2 interior temperature/salinity damping in NEMO's stage-3
 position.  Its exact local controls and read-only acquisition preflight pass.
@@ -186,10 +189,14 @@ or run during remediation.  The operator command is
 
 ## 5. Gates and ASKED / UNASKED
 
-The original landing gates are recorded in the commit history; the remediation
-gate results are recorded below after rerunning them on this corrected receipt.
-No trajectory scorer or fidelity-bar gate is invoked because no L6 record
-exists.
+The explicit citation gate found 16 citations in this corrected receipt with
+zero unmapped citations, zero failures, zero failing map-audit entries, and all
+nine self-test plants firing.  Its shifted `tradmp` citation plant exited
+nonzero.  The exact ORCA2 default landing suite from `claude_rounds/land.sh`
+passed 145 / 145 in 1044.56 seconds under CPU, x64, and the landing package
+path; this includes the private-import ratchet at 6 / 6 and both ORCA2
+parallel-receipt checks.  No trajectory scorer or fidelity-bar gate is invoked
+because no L6 record exists.
 
 ASKED and completed: survey the running deck and compiled Oracle; verify and
 SHA-pin the existing on-disk `resto.nc`; extend existing shared mechanisms;
