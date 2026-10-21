@@ -163,6 +163,93 @@ def test_l4b_guard_accepts_only_geothermal_after_certified_l2(cards):
             bbl_diffusive_option=1))
 
 
+def test_one_step_l4b_is_l2_plus_one_bottom_geothermal_source(cards):
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.freshwater import FreshwaterForcing
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    l2, l4b = cards
+    state = l2.recipe.initial_state
+    zero = jnp.zeros_like(state.eta.data)
+    one = jnp.ones_like(state.eta.data)
+    freshwater = FreshwaterForcing(
+        precip=zero, evap=zero, runoff=zero, ice_fw=zero, restoring=zero)
+    forcing = OceanSurfaceForcing(
+        sw_down=one, q_net=one, tau_x=zero, tau_y=zero, salt_flux=zero,
+        chl=0.1 * one, taum=zero, ice_concentration=zero,
+        tau_i_native=zero, tau_j_native=zero,
+        runoff_tracer_content=(zero, zero), q_nonsolar=one,
+        ice_ocean_top_drag_rCdu=zero, salt_flux_sfx=zero,
+        geothermal_heat_flux_mwm2=one)
+    hooks = _NEMOWSRK3TestHooks(expose_live_stage_operands=True)
+
+    def observed_step(card):
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=hooks)
+        return jax.device_get(model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=forcing))
+
+    l2_trace, l4b_trace = observed_step(l2), observed_step(l4b)
+    l2_sources, l2_thickness = l2_trace.stage_tracer_sources
+    l4b_sources, l4b_thickness = l4b_trace.stage_tracer_sources
+
+    def assert_bits_equal(got, want):
+        np.testing.assert_array_equal(
+            np.asarray(got).view(np.uint64), np.asarray(want).view(np.uint64))
+
+    for got, want in zip(jax.tree_util.tree_leaves(l4b_thickness),
+                         jax.tree_util.tree_leaves(l2_thickness)):
+        assert_bits_equal(got, want)
+    for stage in (0, 1):
+        for tracer in (0, 1):
+            assert_bits_equal(l4b_sources[stage][tracer], l2_sources[stage][tracer])
+    assert_bits_equal(
+        l4b_trace.stage3_composed_source[1],
+        l2_trace.stage3_composed_source[1])
+    assert l4b_trace.stage3_before_geothermal is not None
+    assert_bits_equal(
+        l4b_trace.stage3_before_geothermal[0],
+        l2_trace.stage3_composed_source[0])
+    assert_bits_equal(
+        l4b_trace.stage3_before_geothermal[1],
+        l2_trace.stage3_composed_source[1])
+
+    active = jnp.asarray(l4b.recipe.z_coord.is_active)
+    source_unequal = (
+        np.asarray(l4b_trace.stage3_composed_source[0]).view(np.uint64)
+        != np.asarray(l4b_trace.stage3_before_geothermal[0]).view(np.uint64))
+    wet = np.asarray(active) > 0.5
+    bottom = np.zeros_like(wet)
+    jj, ii = np.nonzero(wet.any(axis=-1))
+    kb = wet.sum(axis=-1) - 1
+    bottom[jj, ii, kb[jj, ii]] = True
+    np.testing.assert_array_equal(source_unequal, bottom)
+
+    explicit_unequal = (
+        np.asarray(l4b_trace.stage3_explicit_temperature).view(np.uint64)
+        != np.asarray(l2_trace.stage3_explicit_temperature).view(np.uint64))
+    np.testing.assert_array_equal(explicit_unequal, bottom)
+
+    for name in ("S", "u", "v", "eta"):
+        assert_bits_equal(
+            getattr(l4b_trace.state_after, name).data,
+            getattr(l2_trace.state_after, name).data)
+    l2_t = np.asarray(l2_trace.state_after.T.data)
+    l4b_t = np.asarray(l4b_trace.state_after.T.data)
+    unequal = l4b_t.view(np.uint64) != l2_t.view(np.uint64)
+    # The producing stage-3 source is bottom-only (asserted exactly above).
+    # The subsequent implicit vertical solve legitimately carries that signal
+    # upward within each heated wet column; it must not reach a dry cell, and
+    # every wet bottom cell must remain observably changed.
+    assert not np.any(unequal[~wet])
+    assert np.all(unequal[bottom])
+
+
 def test_ordered_stage3_add_is_exact_jit_traced_x64_and_gradient_finite():
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,

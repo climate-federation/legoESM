@@ -1,0 +1,12 @@
+          no explicit diffusion                   ln_traldf_OFF   =  F
+          laplacian operator                      ln_traldf_lap   =  T
+          iso-neutral Madec operator              ln_traldf_iso   =  T
+             use the Method of Stab. Correction   ln_traldf_msc   =  T
+          type of time-space variation            nn_aht_ijk_t    =           20
+             lateral diffusive velocity (if cst)  rn_Ud           =    1.7999999999999999E-002  m/s
+             lateral diffusive length   (if cst)  rn_Ld           =    200000.00000000000       m
+       Eddy Induced Velocity (eiv) param.         ln_ldfeiv     =  F
+       Apply a geothermal heating at ocean bottom   ln_trabbc     =  F
+       type of geothermal flux                      nn_geoflx     =            2
+           bottom boundary layer flag          ln_trabbl  =  F
+       Apply relaxation   or not       ln_tradmp   =  F

@@ -2380,6 +2380,9 @@ class _NEMOWSLiveOperandTrace(NamedTuple):
     barotropic_correction_geometry: object
     stage_outputs: object
     stage_tracer_sources: object
+    stage3_composed_source: object
+    stage3_before_geothermal: object
+    stage3_explicit_temperature: object
 
 
 def _nemo_qsr_stage3_rate(
@@ -7230,6 +7233,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_live_stage_qco = None
         _nemo_ws_live_tke_entry = None
         _nemo_ws_live_tke_statement_trace = None
+        _nemo_ws_stage3_before_geothermal = None
         _nemo_ws_live_operator_operands = [
             _nemo_ws_stage1_operator_operands, None, None]
         _nemo_ws_tracer_content_rhs = None
@@ -10608,6 +10612,10 @@ class LatLonCGridOceanModel:
                         if _qgh_rate is None:
                             raise ValueError(
                                 "L4b ordered geothermal has no stage-3 rate")
+                        _nemo_ws_stage3_before_geothermal = (
+                            _stage_source_rates[2][0] + dT_gm * active_3d,
+                            _stage_source_rates[2][1] + dS_gm * active_3d,
+                        )
                         _ordered_stage3 = _nemo_stage3_ldf_then_geothermal(
                             _stage_source_rates[2][0],
                             _stage_source_rates[2][1],
@@ -10618,6 +10626,7 @@ class LatLonCGridOceanModel:
                             _stage_source_rates[2][0] + dT_gm * active_3d,
                             _stage_source_rates[2][1] + dS_gm * active_3d,
                         )
+                        _nemo_ws_stage3_before_geothermal = _ordered_stage3
                     _ws_stage_source_rates = (
                         _stage_source_rates[0],
                         _stage_source_rates[1],
@@ -11676,13 +11685,17 @@ class LatLonCGridOceanModel:
                      state_new.eta.data),
                 ),
                 # WRITE-only: the per-stage tracer source rates the stage
-                # helper consumes, each with the live top-cell thickness that
-                # stage divided by, so a gate can bind on the PRODUCTION
-                # statement instead of re-implementing it.
+                # helper receives before its live LDF/geothermal composition,
+                # each with the live top-cell thickness that stage divided by.
+                # The composed stage-3 source is exposed separately below so
+                # existing runoff gates retain their original payload.
                 stage_tracer_sources=(
                     _stage_source_rates,
                     (h_k_old, _h_live_one_third, _h_live_one_half),
                 ),
+                stage3_composed_source=_ws_stage_source_rates[2],
+                stage3_before_geothermal=_nemo_ws_stage3_before_geothermal,
+                stage3_explicit_temperature=T_corrected,
             )
         if not _apply_implicit_vmix:
             # Faithful AB2 path: return the explicit-only state plus the

@@ -19,6 +19,8 @@ readonly G5_TOOL=$G5_DIR/run.sh G5_RECORDS=$G5_DIR/g5_records.py
 readonly G5_DECK=$G5_DIR/namelist_cfg ICE_DECK=$G5_DIR/namelist_ice_cfg
 readonly RENDER=$here/l4b_deck.py L2_CHECKER=$L2_DIR/l2_records.py
 readonly BBC_CHECKER=$L4_DIR/l4_records.py PATCH=$L4_DIR/trabbc_round53.patch
+readonly REAL_LOG_DECK=$here/l2_r17_twin_a_namelist.resolved
+readonly REAL_LOG_EXCERPT=$here/l2_r17_twin_a_ocean.output.excerpt
 readonly BASE_TRABBC=$NEMO_ROOT/src/OCE/TRA/trabbc.F90
 readonly REC_SOURCE_NAME=ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1
 readonly REC_SOURCE=$NEMO_ROOT/cfgs/$REC_SOURCE_NAME
@@ -28,6 +30,7 @@ readonly TARGET_NAME=ORCA2L4B_ISO_BBC_R54
 readonly TARGET=$NEMO_ROOT/cfgs/$TARGET_NAME
 readonly INPUT_ROOT=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round21/oracle_g4_r21/p6_a
 readonly G5_RECORD=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round31/oracle_g5_r31/twin_a
+readonly L2_ACTING_RECORD=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round17/oracle_l2_r17/twin_a
 readonly QGH_SOURCE=/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0/geothermal_heating.nc
 readonly EVIDENCE=${EVIDENCE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round54/oracle_l4b_r54}
 readonly SMOKE=$EVIDENCE/smoke_2step REF=$EVIDENCE/ref_100step
@@ -40,6 +43,10 @@ readonly RENDERED_DECK_SHA=43a61a692b1a844b57d16580d47e7407c1e61ccbe873b29f1f195
 readonly L2_CHECKER_SHA=656f9d4829884a5d06f939c69ebf9a1e6c720fe34d94c859be325c51e142338e
 readonly BBC_CHECKER_SHA=2435c5a31ebdd2db250f3ff104c9e0834dd08a03bd83be1d0541e6cdb02f9d2e
 readonly PATCH_SHA=dd98dfca4051cec8dd4814edd71c3bc2717ad599af3a4a9b7e086495f2f68453
+readonly REAL_LOG_DECK_SHA=1f17514a3fec391872ef594cd60418b5916a8098e944a63c2153f8ee4cfe3745
+readonly REAL_LOG_EXCERPT_SHA=a9f777470fe7ec4a9d2ff4fa0b4cfb48449384359ec6a17466037d8fca50ab23
+readonly L2_STAGE_SHA=37fc7d2e294e8c4f42e398675fb99c13a8294c39bca037199637afe6d525168d
+readonly L2_ENTRY_SHA=fb94a04852a7acfd8f1108021cb63b1574bf055e52a8e6306b3a642d38bc84e3
 readonly BASE_TRABBC_SHA=28fd28c51c0616d7429600318148bfccebefb458d0db81c2f48f688714b9c2ab
 readonly REF_BIN_SHA=e8ebf4ae617f7aa61475776fcbe96b09e04bf09e7b846af39166bee1155808c7
 readonly REC_BIN_SHA=41cd9a63844218e7c37e75708813649603b80df0366102b8ce3e340f89a60275
@@ -133,11 +140,20 @@ for key in ('nn_geoflx','nn_aht_ijk_t','rn_Ud','rn_Ld'):
     d=number(deck, rf'^\s*{key}\s*=\s*([^!,\s]+)')
     o=number(log, rf'{key}\s*=\s*([^\s]+)')
     if d != o: raise SystemExit(f'{key}: deck {d!r} != log {o!r}')
-required=('ln_traldf_OFF       = F','ln_traldf_lap       = T','ln_traldf_iso       = T',
-          'ln_traldf_msc       = T','ln_ldfeiv           = F','ln_trabbl           = F',
-          'ln_tradmp           = F','Apply a geothermal heating at ocean bottom','variable geothermal heat flux')
-for phrase in required:
-    if phrase not in log: raise SystemExit(f'missing resolved selection {phrase!r}')
+flags=('ln_traldf_OFF','ln_traldf_lap','ln_traldf_iso','ln_traldf_msc',
+       'ln_ldfeiv','ln_trabbc','ln_trabbl','ln_tradmp')
+expected={}
+for flag in flags:
+    match=re.search(rf'^\s*{flag}\s*=\s*\.(true|false)\.', deck, re.I|re.M)
+    if match is None: raise SystemExit(f'missing deck logical {flag!r}')
+    val='T' if match.group(1).lower() == 'true' else 'F'
+    expected[flag]=val
+    if re.search(rf'{flag}\s*=\s*{val}\s*$', log, re.I|re.M) is None:
+        raise SystemExit(f'missing resolved selection {flag}={val}')
+if 'Apply a geothermal heating at ocean bottom' not in log:
+    raise SystemExit('missing geothermal selection banner')
+if expected['ln_trabbc'] == 'T' and 'variable geothermal heat flux' not in log:
+    raise SystemExit('missing variable geothermal heat flux banner')
 PY
 }
 
@@ -176,6 +192,13 @@ PY
   [[ "$(sha "$rendered")" == "$RENDERED_DECK_SHA" ]] || fail 'rendered L4b deck changed'
   schedule_ok 2 2 "$FSBC" && schedule_ok 100 20 "$FSBC" && schedule_ok 10 10 "$FSBC" || fail 'bad schedule'
   ! schedule_ok 10 9 "$FSBC" || fail 'schedule plant accepted'
+  mkdir "$scratch/real_log"; cp "$REAL_LOG_DECK" "$scratch/real_log/namelist_cfg"
+  cp "$REAL_LOG_EXCERPT" "$scratch/real_log/ocean.output"
+  check_numeric_log "$scratch/real_log" || fail 'real L2 round-17 log excerpt rejected'
+  sed -E 's/(ln_tradmp[[:space:]]*=[[:space:]]*)F[[:space:]]*$/\1T/' \
+    "$REAL_LOG_EXCERPT" >"$scratch/real_log/ocean.output"
+  ! check_numeric_log "$scratch/real_log" >/dev/null 2>&1 \
+    || fail 'real-log flipped-flag plant accepted'
 
   # 4 reader/writer schema and exact EOF, with a truncation plant.
   write_synthetic "$scratch/layout" 1; PYTHONPATH=$PYPATH python "$BBC_CHECKER" check-records "$scratch/layout" 1
@@ -189,6 +212,20 @@ PY
   PYTHONPATH=$PYPATH python "$BBC_CHECKER" check-records "$scratch/layout" 2
   rm -- "$scratch/layout/oracle_geothermal_kt00000002.bin"
   ! PYTHONPATH=$PYPATH python "$BBC_CHECKER" check-records "$scratch/layout" 2 >/dev/null 2>&1 || fail 'inventory plant accepted'
+  mkdir "$scratch/acting" "$scratch/writer_free"
+  ln -s "$L2_ACTING_RECORD/oracle_rktracer_stage3_kt00000001.bin" \
+    "$scratch/acting/oracle_rktracer_stage3_kt00000001.bin"
+  ln -s "$L2_ACTING_RECORD/oracle_step_entry_kt00000002.bin" \
+    "$scratch/acting/oracle_step_entry_kt00000002.bin"
+  printf '1\n' >"$scratch/acting/time.step"; printf '1\n' >"$scratch/writer_free/time.step"
+  write_synthetic "$scratch/acting" 1
+  check_acting_scope "$scratch/acting" "$scratch/writer_free" \
+    || fail 'smoke-only acting scope rejected writer-free reference'
+  ! check_acting "$scratch/writer_free" >/dev/null 2>&1 \
+    || fail 'writer-free reference unexpectedly passed acting checks'
+  : >"$scratch/writer_free/oracle_forbidden.bin"
+  ! check_acting_scope "$scratch/acting" "$scratch/writer_free" >/dev/null 2>&1 \
+    || fail 'writer-free reference inventory plant accepted'
 
   # 6 output viability below an absent parent; regular-file parent is refused.
   path_ok "$EVIDENCE" || fail 'evidence path not writable/spacious'
@@ -202,13 +239,15 @@ PY
   fi
   mkdir "$scratch/occupied"; ! absent "$scratch/occupied" || fail 'occupied-path plant accepted'
   trap - RETURN; rm -rf -- "$scratch"
-  printf 'L4B_PREFLIGHT_7_OF_7_PASS plants=7/7 evidence_parent_absent=%s\n' "$([[ ! -e "$EVIDENCE" ]] && printf true || printf false)"
+  printf 'L4B_PREFLIGHT_7_OF_7_PASS plants=7/7 checker_functions=2/2 evidence_parent_absent=%s target_absent=%s\n' \
+    "$([[ ! -e "$EVIDENCE" ]] && printf true || printf false)" \
+    "$([[ ! -e "$TARGET" ]] && printf true || printf false)"
 }
 
 preflight() {
   local required want
   [[ -z "$(git -C "$repo" status --porcelain --untracked-files=all)" ]] || fail 'commit exact acquisition tool first'
-  for required in "$G5_TOOL" "$G5_RECORDS" "$G5_DECK" "$ICE_DECK" "$RENDER" "$L2_CHECKER" "$BBC_CHECKER" "$PATCH" "$BASE_TRABBC" "$REF_BIN" "$REC_SOURCE/BLD/bin/nemo.exe" "$QGH_SOURCE"; do
+  for required in "$G5_TOOL" "$G5_RECORDS" "$G5_DECK" "$ICE_DECK" "$RENDER" "$L2_CHECKER" "$BBC_CHECKER" "$PATCH" "$REAL_LOG_DECK" "$REAL_LOG_EXCERPT" "$BASE_TRABBC" "$REF_BIN" "$REC_SOURCE/BLD/bin/nemo.exe" "$QGH_SOURCE" "$L2_ACTING_RECORD/oracle_rktracer_stage3_kt00000001.bin" "$L2_ACTING_RECORD/oracle_step_entry_kt00000002.bin"; do
     [[ -f "$required" ]] || fail "missing $required"
   done
   [[ "$(sha "$QGH_SOURCE")" == e369762f068a7fbc1561be310fb8ded844233da37e6a0c6ffc10805e4996fffb ]] || fail 'geothermal input changed'
@@ -218,6 +257,10 @@ preflight() {
      && "$(sha "$L2_CHECKER")" == "$L2_CHECKER_SHA" \
      && "$(sha "$BBC_CHECKER")" == "$BBC_CHECKER_SHA" \
      && "$(sha "$PATCH")" == "$PATCH_SHA" \
+     && "$(sha "$REAL_LOG_DECK")" == "$REAL_LOG_DECK_SHA" \
+     && "$(sha "$REAL_LOG_EXCERPT")" == "$REAL_LOG_EXCERPT_SHA" \
+     && "$(sha "$L2_ACTING_RECORD/oracle_rktracer_stage3_kt00000001.bin")" == "$L2_STAGE_SHA" \
+     && "$(sha "$L2_ACTING_RECORD/oracle_step_entry_kt00000002.bin")" == "$L2_ENTRY_SHA" \
      && "$(sha "$BASE_TRABBC")" == "$BASE_TRABBC_SHA" \
      && "$(sha "$REF_BIN")" == "$REF_BIN_SHA" \
      && "$(sha "$REC_SOURCE/BLD/bin/nemo.exe")" == "$REC_BIN_SHA" ]] \
@@ -273,14 +316,19 @@ check_acting() { # run directory
   PYTHONPATH=$PYPATH python "$BBC_CHECKER" check-records "$1" "$acting_steps"
 }
 
+check_acting_scope() { # smoke directory, writer-free reference directory
+  check_acting "$1"
+  [[ -d "$2" && -z "$(find "$2" -maxdepth 1 -name 'oracle_*' -print -quit)" ]]
+}
+
 admit() { # steps
   local steps=$1 run_dir rel restart_step restart_name
   [[ -d "$SMOKE" && -d "$REF" ]] || fail 'smoke or writer-free boundary missing'
   for run_dir in "$SMOKE" "$REF"; do
     check_deck "$run_dir/namelist_cfg"; check_numeric_log "$run_dir"
     PYTHONPATH=$PYPATH python "$BBC_CHECKER" check-log "$run_dir/ocean.output" "$run_dir/namelist_cfg"
-    check_acting "$run_dir"
   done
+  check_acting_scope "$SMOKE" "$REF" || fail 'smoke/reference acting scope failed'
   for run_dir in "$TWIN_A" "$TWIN_B" "$TWIN_C"; do
     check_deck "$run_dir/namelist_cfg"; check_numeric_log "$run_dir"
     PYTHONPATH=$PYPATH python "$BBC_CHECKER" check-log "$run_dir/ocean.output" "$run_dir/namelist_cfg"

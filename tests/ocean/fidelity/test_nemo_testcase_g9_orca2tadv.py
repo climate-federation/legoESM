@@ -140,7 +140,9 @@ def test_g9_card_is_g5_plus_fct2_and_the_folded_transport_vmask(tmp_path):
     for field, value, row in (("tracer_advection", "none", "ln_traadv_fct"),
                               ("rk3_stage_transport_raw_vmask", False, "stage transport vmask"),
                               ("rk3_stage_transport_fold_exchanges", False,
-                               "stage transport fold exchanges")):
+                               "stage transport fold exchanges"),
+                              ("rk3_stage_transport_stored_r3uv", False,
+                               "stage transport stored r3u/r3v")):
         planted = g9._replace(recipe=g9.recipe._replace(model_config=c9._replace(**{field: value})))
         assert recipe._orca2g1_selector_failures(planted) == [row]
 

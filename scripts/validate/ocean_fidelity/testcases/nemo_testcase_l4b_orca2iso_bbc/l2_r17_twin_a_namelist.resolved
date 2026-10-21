@@ -1,0 +1,12 @@
+ln_traldf_OFF = .false.
+ln_traldf_lap = .true.
+ln_traldf_iso = .true.
+ln_traldf_msc = .true.
+nn_aht_ijk_t = 20
+rn_Ud = 0.018
+rn_Ld = 200.e+3
+ln_ldfeiv = .false.
+ln_trabbc = .false.
+nn_geoflx = 2
+ln_trabbl = .false.
+ln_tradmp = .false.
