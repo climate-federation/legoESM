@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
 from tests.ocean.fidelity.test_nemo_testcase_v1_orca2tke import (
     CARD_FILES,
@@ -29,6 +30,12 @@ from tests.ocean.fidelity.test_nemo_testcase_v1_orca2tke import (
 L2 = CASES / "nemo_testcase_l2_orca2iso"
 L4B = CASES / "nemo_testcase_l4b_orca2iso_bbc"
 RUN = L4B / "run.sh"
+L4B_RECORD = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round54/"
+    "oracle_l4b_r54/twin_a")
+needs_l4b_record = pytest.mark.skipif(
+    not (L4B_RECORD / "oracle_geothermal_kt00000001.bin").is_file(),
+    reason="no admitted L4b record")
 
 
 def _module(name: str, path: Path):
@@ -94,6 +101,14 @@ def test_acquisition_entrypoint_has_all_modes_and_no_pipefail_grep_trap():
                   "check_numeric_log", "check_acting", "G5_RECORDS"):
         assert token in text
     assert "| grep -q" not in text
+    admit_start = text.index("admit() {")
+    admit = text[admit_start:text.index("\npreflight\n", admit_start)]
+    assert 'check_acting "$SMOKE"\n' in admit
+    assert 'check_acting_scope "$SMOKE" "$REF" ||' not in admit
+    preflight = text[
+        text.index("seven_item_preflight() {"):text.index("\npreflight() {")
+    ]
+    assert "trap 'rm -rf -- \"$scratch\"' EXIT" in preflight
 
 
 @pytest.fixture(scope="module")
@@ -219,6 +234,13 @@ def test_one_step_l4b_is_l2_plus_one_bottom_geothermal_source(cards):
         l4b_trace.stage3_before_geothermal[1],
         l2_trace.stage3_composed_source[1])
 
+    assert l4b_trace.stage3_geothermal_rate is not None
+    expected_composed = nemo_source_round(
+        l4b_trace.stage3_before_geothermal[0]
+        + l4b_trace.stage3_geothermal_rate)
+    assert_bits_equal(
+        l4b_trace.stage3_composed_source[0], expected_composed)
+
     active = jnp.asarray(l4b.recipe.z_coord.is_active)
     source_unequal = (
         np.asarray(l4b_trace.stage3_composed_source[0]).view(np.uint64)
@@ -287,3 +309,47 @@ def test_ordered_stage3_add_is_exact_jit_traced_x64_and_gradient_finite():
     assert all(np.isfinite(np.asarray(value)).all() for value in gradients)
     for value in gradients:
         np.testing.assert_array_equal(np.asarray(value), np.ones((1,), np.float64))
+
+
+@needs_l4b_record
+def test_l4b_record_is_exact_under_jit_traced_inputs_and_x64(
+    monkeypatch,
+):
+    scorer = _module(
+        "l4b_ladder_score",
+        CASES / "nemo_testcase_g2_orca2bathy_ladder.py",
+    )
+    real_jit = jax.jit
+    traced_calls = []
+
+    def recording_jit(fun, *jit_args, **jit_kwargs):
+        compiled = real_jit(fun, *jit_args, **jit_kwargs)
+
+        def recorded(*args, **kwargs):
+            traced_calls.append(tuple(
+                (np.shape(arg), np.asarray(arg).dtype) for arg in args))
+            return compiled(*args, **kwargs)
+
+        return recorded
+
+    monkeypatch.setattr(jax, "jit", recording_jit)
+    exact = scorer.run(
+        L4B_RECORD, arm="geothermal", kt_from=1, kt_to=1,
+        allow_dirty=True, case="ORCA2L4b-iso-bbc",
+    )
+    assert exact["jit"] is True
+    assert exact["traced_inputs"] == ["e3t_Kmm", "heatflow_mwm2"]
+    assert any(
+        len(call) == 2
+        and len(call[0][0]) == 3 and len(call[1][0]) == 2
+        and call[0][1] == call[1][1] == np.dtype(np.float64)
+        for call in traced_calls
+    )
+    assert exact["per_kt"][0]["trend_row"]["n_unequal"] == 0
+
+    removed = scorer.run(
+        L4B_RECORD, arm="geothermal", kt_from=1, kt_to=1,
+        allow_dirty=True, without_geothermal=True,
+        case="ORCA2L4b-iso-bbc",
+    )
+    assert removed["per_kt"][0]["trend_row"]["n_unequal"] == 16_428

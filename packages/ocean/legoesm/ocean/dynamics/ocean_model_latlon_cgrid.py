@@ -2382,6 +2382,7 @@ class _NEMOWSLiveOperandTrace(NamedTuple):
     stage_tracer_sources: object
     stage3_composed_source: object
     stage3_before_geothermal: object
+    stage3_geothermal_rate: object
     stage3_explicit_temperature: object
 
 
@@ -10613,8 +10614,12 @@ class LatLonCGridOceanModel:
                             raise ValueError(
                                 "L4b ordered geothermal has no stage-3 rate")
                         _nemo_ws_stage3_before_geothermal = (
-                            _stage_source_rates[2][0] + dT_gm * active_3d,
-                            _stage_source_rates[2][1] + dS_gm * active_3d,
+                            nemo_source_round(
+                                _stage_source_rates[2][0]
+                                + dT_gm * active_3d),
+                            nemo_source_round(
+                                _stage_source_rates[2][1]
+                                + dS_gm * active_3d),
                         )
                         _ordered_stage3 = _nemo_stage3_ldf_then_geothermal(
                             _stage_source_rates[2][0],
@@ -11695,6 +11700,7 @@ class LatLonCGridOceanModel:
                 ),
                 stage3_composed_source=_ws_stage_source_rates[2],
                 stage3_before_geothermal=_nemo_ws_stage3_before_geothermal,
+                stage3_geothermal_rate=_qgh_rate,
                 stage3_explicit_temperature=T_corrected,
             )
         if not _apply_implicit_vmix:

@@ -162,7 +162,7 @@ seven_item_preflight() {
   local scratch rendered truncated occupied_file
   scratch=$(mktemp -d "$repo/.l4b-preflight.XXXXXX") \
     || fail 'cannot create preflight scratch directory'
-  trap 'rm -rf -- "$scratch"' RETURN
+  trap 'rm -rf -- "$scratch"' EXIT
 
   # 1 source context and syntax, plus a syntax plant.
   cp "$BASE_TRABBC" "$scratch/trabbc.F90"; patch -s -d "$scratch" -p0 <"$PATCH"
@@ -242,7 +242,7 @@ PY
     for run_dir in "$SMOKE" "$REF" "$TWIN_A" "$TWIN_B" "$TWIN_C"; do absent "$run_dir" || fail "run exists: $run_dir"; done
   fi
   mkdir "$scratch/occupied"; ! absent "$scratch/occupied" || fail 'occupied-path plant accepted'
-  trap - RETURN; rm -rf -- "$scratch"
+  trap - EXIT; rm -rf -- "$scratch"
   printf 'L4B_PREFLIGHT_7_OF_7_PASS plants=7/7 checker_functions=2/2 evidence_parent_absent=%s target_absent=%s\n' \
     "$([[ ! -e "$EVIDENCE" ]] && printf true || printf false)" \
     "$([[ ! -e "$TARGET" ]] && printf true || printf false)"
@@ -332,7 +332,9 @@ admit() { # steps
     check_deck "$run_dir/namelist_cfg"; check_numeric_log "$run_dir"
     PYTHONPATH=$PYPATH python "$BBC_CHECKER" check-log "$run_dir/ocean.output" "$run_dir/namelist_cfg"
   done
-  check_acting_scope "$SMOKE" "$REF" || fail 'smoke/reference acting scope failed'
+  check_acting "$SMOKE"
+  [[ -z "$(find "$REF" -maxdepth 1 -name 'oracle_*' -print -quit)" ]] \
+    || fail 'writer-free reference contains an oracle record'
   for run_dir in "$TWIN_A" "$TWIN_B" "$TWIN_C"; do
     check_deck "$run_dir/namelist_cfg"; check_numeric_log "$run_dir"
     PYTHONPATH=$PYPATH python "$BBC_CHECKER" check-log "$run_dir/ocean.output" "$run_dir/namelist_cfg"
