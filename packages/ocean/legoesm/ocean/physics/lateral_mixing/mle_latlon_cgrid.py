@@ -54,6 +54,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import ensure_geometry
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     compute_face_masks_3d,
@@ -61,6 +62,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     gradient_y_cgrid,
     interp_cell_to_uface,
     interp_cell_to_vface,
+    pad_ns_scalar,
+    pad_ns_vector_v,
 )
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import neumann_fill_cgrid
 from legoesm.ocean.physics.lateral_mixing.mle import (
@@ -174,8 +177,8 @@ def mle_tracer_tendency_latlon_cgrid(
     *,
     rho0: float = constants.rho_ocean,
     grav: float = constants.g,
+    omega: float | None = None,
     return_horizontal_transport: bool = False,
-    return_bolus_transport: bool = False,
 ):
     """Fox-Kemper MLE bolus tracer tendency on the lat-lon C-grid (NEMO nn_mle=1).
 
@@ -218,6 +221,10 @@ def mle_tracer_tendency_latlon_cgrid(
     (dT_dt, dS_dt) : each (n_lat, n_lon, nlev) [degC/s], [PSU/s].
     """
     nlev = T.shape[-1]
+    if cfg.through_fct and cfg.no_mle_in_convection:
+        raise ValueError(
+            "through_fct with no_mle_in_convection=True requires the stage "
+            "rn2 operand; the staged route must not silently substitute N2=0")
     geom = ensure_geometry(grid)
     # Face metrics (NEMO e1u/e2u/e1v/e2v) — bit-exact with the operator metrics.
     e1u = geom.dx_u                                   # (n_lat, n_lon+1) zonal spacing
@@ -254,6 +261,7 @@ def mle_tracer_tendency_latlon_cgrid(
         ref_depth_m=cfg.ref_depth_m,
         rho0=rho0,
         grav=grav,
+        nemo_association=cfg.nemo_association,
     )                                                 # zmld, bm both (n_lat, n_lon)
 
     # Neumann-fill bm / zmld so the face gradients and face MLD across a
@@ -275,14 +283,35 @@ def mle_tracer_tendency_latlon_cgrid(
         [zmld_filled[0:1], H_v_int, zmld_filled[-1:]], axis=0)          # (n_lat+1, n_lon)
 
     # --- Streamfunction magnitude (NEMO nn_mle=1) ---
-    rc_f = mle_coefficient(cfg.ce, cfg.lat_ref_deg)   # constant scalar [s/m]
-    dbm_dx_u = gradient_x_cgrid(bm_filled, grid)      # (n_lat, n_lon+1) = (bm_E-bm_W)/e1u
-    dbm_dy_v = gradient_y_cgrid(bm_filled, grid)      # (n_lat+1, n_lon) = (bm_N-bm_S)/e2v
+    rc_f = mle_coefficient(
+        cfg.ce, cfg.lat_ref_deg, omega=omega,
+        nemo_association=cfg.nemo_association)       # constant scalar [s/m]
     cap_u = jnp.minimum(cfg.max_grid_scale_m, e1u)    # min(111 km, e1u)
     cap_v = jnp.minimum(cfg.max_grid_scale_m, e2v)
-    # Psi = rc_f · H² · width · dbm · cap (shared kernel, #518 item 9).
-    psim_u = mle_streamfunction_magnitude(rc_f, H_u, e2u, dbm_dx_u, cap_u)  # (n_lat, n_lon+1)
-    psim_v = mle_streamfunction_magnitude(rc_f, H_v, e1v, dbm_dy_v, cap_v)  # (n_lat+1, n_lon)
+    if cfg.nemo_association:
+        # tramle.f90:301-305 uses the stored metric ratio followed by the raw
+        # buoyancy difference, not width*(difference/spacing).
+        sr = nemo_source_round
+        bm_w = jnp.roll(bm_filled, 1, axis=1)
+        dbm_u_int = sr(bm_filled - bm_w)
+        dbm_u = jnp.concatenate([dbm_u_int, dbm_u_int[:, :1]], axis=1)
+        dbm_v_int = sr(bm_filled[1:] - bm_filled[:-1])
+        zrow = jnp.zeros_like(bm_filled[:1])
+        dbm_v = jnp.concatenate([zrow, dbm_v_int, zrow], axis=0)
+        e2_e1u = sr(e2u / e1u)
+        e1_e2v = sr(e1v / e2v)
+        psim_u = sr(sr(sr(sr(rc_f * H_u) * H_u) * e2_e1u) * dbm_u)
+        psim_u = sr(psim_u * cap_u)
+        psim_v = sr(sr(sr(sr(rc_f * H_v) * H_v) * e1_e2v) * dbm_v)
+        psim_v = sr(psim_v * cap_v)
+    else:
+        dbm_dx_u = gradient_x_cgrid(bm_filled, grid)
+        dbm_dy_v = gradient_y_cgrid(bm_filled, grid)
+        # Psi = rc_f · H² · width · dbm · cap (shared kernel, #518 item 9).
+        psim_u = mle_streamfunction_magnitude(
+            rc_f, H_u, e2u, dbm_dx_u, cap_u)
+        psim_v = mle_streamfunction_magnitude(
+            rc_f, H_v, e1v, dbm_dy_v, cap_v)
 
     # --- Convection gate (NEMO nn_conv=1): no MLE where a neighbour column is
     # statically unstable.  NEMO gates on the ML-INTEGRATED N^2 (zn2), NOT the
@@ -307,9 +336,6 @@ def mle_tracer_tendency_latlon_cgrid(
     # --- W-grid structure function and streamfunction (length nlev+1) ---
     # gdepw at cell centres -> interpolate to u/v faces (matches NEMO's
     # 0.5*(gdepw[i+1]+gdepw[i]) face depth), then mu(gdepw_face / H_face).
-    gdepw = _gdepw_w(dz_live)                          # (n_lat, n_lon, nlev+1)
-    gdepw_u = interp_cell_to_uface(gdepw)              # (n_lat, n_lon+1, nlev+1)
-    gdepw_v = interp_cell_to_vface(gdepw, grid)        # (n_lat+1, n_lon, nlev+1)
     inv_Hu = 1.0 / jnp.maximum(H_u, _EPS_DIV)
     inv_Hv = 1.0 / jnp.maximum(H_v, _EPS_DIV)
     # Per-level face wet masks (partial-cell aware): a face is wet at level k iff
@@ -319,8 +345,33 @@ def mle_tracer_tendency_latlon_cgrid(
     u_face_act3 = u_face_act3 * u_mask[:, :, jnp.newaxis]
     v_face_act3 = v_face_act3 * v_mask[:, :, jnp.newaxis]
     # mu at the nlev+1 W-interfaces (mu=0 at the surface k=0 and at/below ML base).
-    mu_u = mle_vertical_structure(gdepw_u * inv_Hu[:, :, jnp.newaxis])  # (n_lat, n_lon+1, nlev+1)
-    mu_v = mle_vertical_structure(gdepw_v * inv_Hv[:, :, jnp.newaxis])  # (n_lat+1, n_lon, nlev+1)
+    if cfg.nemo_association:
+        # tramle.f90:333-338: stretch reference gdepw_1d in each neighbour,
+        # add the pair, then multiply by inverse face MLD.
+        sr = nemo_source_round
+        gdepw_ref = jnp.abs(jnp.asarray(z_coord.z_half_ref))
+        live_gdepw = sr(jacobian[..., None] * gdepw_ref)
+        west = jnp.roll(live_gdepw, 1, axis=1)
+        depth_u_int = sr(live_gdepw + west)
+        depth_u = jnp.concatenate([depth_u_int, depth_u_int[:, :1]], axis=1)
+        depth_v_int = sr(live_gdepw[1:] + live_gdepw[:-1])
+        depth_v = jnp.concatenate(
+            [2.0 * live_gdepw[:1], depth_v_int, 2.0 * live_gdepw[-1:]],
+            axis=0)
+        zu = sr(1.0 - sr(depth_u * inv_Hu[..., None]))
+        zv = sr(1.0 - sr(depth_v * inv_Hv[..., None]))
+        zu2, zv2 = sr(zu * zu), sr(zv * zv)
+        r5_21 = 5.0 / 21.0
+        mu_u = jnp.maximum(
+            0.0, sr(sr(1.0 - zu2) * sr(1.0 + sr(r5_21 * zu2))))
+        mu_v = jnp.maximum(
+            0.0, sr(sr(1.0 - zv2) * sr(1.0 + sr(r5_21 * zv2))))
+    else:
+        gdepw = _gdepw_w(dz_live)
+        gdepw_u = interp_cell_to_uface(gdepw)
+        gdepw_v = interp_cell_to_vface(gdepw, grid)
+        mu_u = mle_vertical_structure(gdepw_u * inv_Hu[:, :, jnp.newaxis])
+        mu_v = mle_vertical_structure(gdepw_v * inv_Hv[:, :, jnp.newaxis])
     # Psi_uw[k] = psim_u · mu_u[k] · (wet u-face at the level BELOW the interface).
     # Interface k sits above T-level k, so it is active iff T-level k is a wet
     # face (NEMO multiplies by wumask(jk+1)·wumask(1)).  Surface interface k=0
@@ -342,6 +393,10 @@ def mle_tracer_tendency_latlon_cgrid(
     # or psim is zero, but a partial-cell step face must be hard-zeroed.
     utr_u = utr_u * u_face_act3
     vtr_v = vtr_v * v_face_act3
+    if cfg.nemo_association:
+        vtr_v = pad_ns_vector_v(vtr_v[1:-1], grid)
+        v_fold_act3 = pad_ns_scalar(v_face_act3[1:-1], grid)
+        vtr_v = jnp.where(v_fold_act3 > 0.5, vtr_v, 0.0)
     if cfg.bolus_cfl_cap > 0.0:
         raise NotImplementedError(
             "MLEConfig.bolus_cfl_cap > 0 needs the timestep dt, which is not "
@@ -420,6 +475,4 @@ def mle_tracer_tendency_latlon_cgrid(
     # the cap, mirroring bbl_adv's host-applied transport-CFL guard.
     # The tendency is already zero on dry cells (inv_vol = 0 there); no final
     # mask multiply (codex: divide by the live volume, do not mask the result).
-    if return_bolus_transport:
-        return dT_dt, dS_dt, (utr_u, vtr_v, W_w)
     return dT_dt, dS_dt

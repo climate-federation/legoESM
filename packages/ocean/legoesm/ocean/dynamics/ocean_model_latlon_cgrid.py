@@ -2033,7 +2033,10 @@ def _nemo_cen2_tracer_rhs(
     horizontal_sum = sr(delta_u + delta_v)
     r1_e1e2t = sr(1.0 / jnp.asarray(grid.area_T)[..., None])
     horizontal_scaled = sr(horizontal_sum * r1_e1e2t)
-    rhs = sr(-sr(horizontal_scaled / e3t_kmm))
+    # Gradient-only guard: e3t is 0 on dry cells, whose 0/0 is masked later
+    # but would turn the reverse pass NaN; wet divisions are unchanged.
+    e3t_div = jnp.where(e3t_kmm == 0.0, 1.0, e3t_kmm)
+    rhs = sr(-sr(horizontal_scaled / e3t_div))
 
     tracer_w_sum = sr(tracer[..., :-1] + tracer[..., 1:])
     tmask_kmm = jnp.broadcast_to(jnp.asarray(tmask_kmm), tracer.shape)
@@ -2046,7 +2049,7 @@ def _nemo_cen2_tracer_rhs(
     )
     vertical_difference = sr(flux_w[..., :-1] - flux_w[..., 1:])
     vertical_scaled = sr(vertical_difference * r1_e1e2t)
-    return sr(rhs - sr(vertical_scaled / e3t_kmm))
+    return sr(rhs - sr(vertical_scaled / e3t_div))
 
 
 def _nemo_stage_corrected_velocity(
@@ -2755,18 +2758,20 @@ def _nemo_ws_rk3_tracer_pair_step(
     ):
         if stage_qco_weights is not None and concentration_rhs is not None:
             q_before, q_rhs, q_after = stage_qco_weights[stage_index]
+            # Gradient-only: 1 on the lanes the where below discards.
+            q_after = jnp.where(active_3d > 0.5, q_after[..., None], 1.0)
             rhs = _source_order_sum(
                 concentration_rhs, source_rate, source_terms)
             if stage_tracer_written_order:
                 r = nemo_source_round
                 out = r(r(r(q_before[..., None] * base)
                           + r(r(stage_dt * q_rhs[..., None]) * rhs))
-                        / q_after[..., None])
+                        / q_after)
             else:
                 out = (
                     q_before[..., None] * base
                     + stage_dt * q_rhs[..., None] * rhs
-                ) / q_after[..., None]
+                ) / q_after
             return jnp.where(active_3d > 0.5, out, base)
         out = (
             h_k_old * base - stage_dt * flux_div
@@ -10450,10 +10455,12 @@ class LatLonCGridOceanModel:
             _zfu_mle, _zfv_mle = mle_tracer_tendency_latlon_cgrid(
                 _T_stage2, _S_stage2, _mle_rhop, _mle_n2,
                 state.land_mask.data, state.u_mask.data, state.v_mask.data,
-                _zc, _qt_12[..., 0], _grid, _mle_cfg,
+                _zc, (_qt_12 if _qt_12.ndim == 2 else _qt_12[..., 0]),
+                _grid, _mle_cfg,
                 h_k=_h_s3_kmm,
                 rho0=_cfg_b.constants.rho_0,
                 grav=_cfg_b.constants.g,
+                omega=_cfg_b.constants.Omega,
                 return_horizontal_transport=True,
             )
             _nemo_ws_stage_transport_geometry, _ = (
@@ -13830,10 +13837,16 @@ class LatLonCGridOceanModel:
                     # removal and the bottom-drag add (dynzdf.f90:156-167):
                     # deposited just before the solve, below
                     _rnd = nemo_source_round
+
+                    def _top_div(e3):
+                        # Gradient-only: 1 on zero-thickness (masked) faces.
+                        d = _rnd(e3 * _r0)
+                        return jnp.where(d == 0.0, 1.0, d)
+
                     _zdf_top_stress = (
-                        _rnd(_rnd(_rnd(dt_mom * _tau_i_u) / _rnd(_e3u1 * _r0))
+                        _rnd(_rnd(_rnd(dt_mom * _tau_i_u) / _top_div(_e3u1))
                              * state.u_mask.data),
-                        _rnd(_rnd(_rnd(dt_mom * _tau_j_v) / _rnd(_e3v1 * _r0))
+                        _rnd(_rnd(_rnd(dt_mom * _tau_j_v) / _top_div(_e3v1))
                              * state.v_mask.data))
                 else:
                     u_solve_in = state.u.data.at[..., 0].add(

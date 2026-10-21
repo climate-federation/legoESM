@@ -3953,6 +3953,7 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
             mld_uv="min",
             no_mle_in_convection=False,
             through_fct=True,
+            nemo_association=True,
         ) if case in _ORCA2L_MLE_CASES else None),
         # ln_zdfevd = F: the ORCA2 identity carries ORCA2's enhanced
         # vertical diffusion, which this deck switches off; V2 keeps it
@@ -4197,12 +4198,13 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
         ("ln_mle" if card.case in _ORCA2L_MLE_CASES else "ln_mle=F"): (
             ((cfg.physics.mle.ce, cfg.physics.mle.lat_ref_deg,
               cfg.physics.mle.rho_c_mle, cfg.physics.mle.mld_uv,
+              cfg.physics.mle.ref_depth_m, cfg.physics.mle.max_grid_scale_m,
               cfg.physics.mle.no_mle_in_convection,
-              cfg.physics.mle.through_fct) ==
+              cfg.physics.mle.through_fct, cfg.physics.mle.nemo_association) ==
              (_ORCA2L5_MLE_RESOLVED_FIELDS["namtra_mle.rn_ce"],
               _ORCA2L5_MLE_RESOLVED_FIELDS["namtra_mle.rn_lat"],
               _ORCA2L5_MLE_RESOLVED_FIELDS["namtra_mle.rn_rho_c_mle"],
-              "min", False, True))
+              "min", 10.0, 111.0e3, False, True, True))
             if card.case in _ORCA2L_MLE_CASES else cfg.physics.mle is None),
         ("ln_lin" if _ORCA2G_DRG.get(card.case) else "ln_drg_OFF"): (
             _nemo_linear_bottom_drag(cfg) == cfg

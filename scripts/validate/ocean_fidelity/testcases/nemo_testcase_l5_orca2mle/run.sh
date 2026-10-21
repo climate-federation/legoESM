@@ -156,11 +156,14 @@ preflight() {
   tmp=$(mktemp -d /tmp/orca2l5-preflight.XXXXXX); trap 'rm -rf -- "$tmp"' RETURN
 
   # 1. Exact transform, continuation refusal, compiler syntax.
-  "$PY" "$INSTRUMENT" "$PP_SOURCE" "$tmp/tramle.f90"
-  "$FC" -ffree-line-length-none -fsyntax-only -I"$ORCA2/BLD/inc" -J"$tmp" "$tmp/tramle.f90" \
+  "$PY" "$INSTRUMENT" "$SOURCE" "$tmp/tramle.f90"
+  "$FC" -cpp -ffree-line-length-none -fsyntax-only -I"$ORCA2/BLD/inc" -J"$tmp" "$tmp/tramle.f90" \
     || fail 'instrumented tramle syntax failed'
-  if "$PY" "$INSTRUMENT" --plant-after-continuation "$PP_SOURCE" "$tmp/continued.f90" >/dev/null 2>&1; then
+  if "$PY" "$INSTRUMENT" --plant-after-continuation "$SOURCE" "$tmp/continued.f90" >/dev/null 2>&1; then
     fail "continued-'&' insertion plant was accepted"
+  fi
+  if "$PY" "$INSTRUMENT" --plant-nested-before "$SOURCE" "$tmp/nested.f90" >/dev/null 2>&1; then
+    fail 'nested before-copy plant was accepted'
   fi
 
   # 2. makenemo reference must be the first token in ref_cfgs.txt.
@@ -180,10 +183,10 @@ preflight() {
 
   # 4. Record layout/canonicalization and observer-literal plants.
   "$PY" "$READER" --selftest || fail 'record layout selftest failed'
-  if "$PY" "$INSTRUMENT" --plant-short-literal "$PP_SOURCE" "$tmp/short.f90" >/dev/null 2>&1; then
+  if "$PY" "$INSTRUMENT" --plant-short-literal "$SOURCE" "$tmp/short.f90" >/dev/null 2>&1; then
     fail 'short character-literal plant was accepted'
   fi
-  if "$PY" "$INSTRUMENT" --plant-raw-observer "$PP_SOURCE" "$tmp/raw.f90" >/dev/null 2>&1; then
+  if "$PY" "$INSTRUMENT" --plant-raw-observer "$SOURCE" "$tmp/raw.f90" >/dev/null 2>&1; then
     fail 'raw undefined-cell observer plant was accepted'
   fi
 

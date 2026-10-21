@@ -372,3 +372,30 @@ def test_rounded_thickness_is_refused_without_the_literal_solver():
         implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
             x, x, x, x, jnp.ones((1, 1, 2)), x, jnp.ones((1, 1, 2)), 1.0,
             jnp.ones((1, 1, 3), bool), rounded_thickness=True)
+
+
+def test_nemo_ordered_solve_reverse_gradient_is_finite_with_a_zero_pivot():
+    """Dry-column zero pivots must not poison the masked reverse pass."""
+    from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
+        _nemo_ordered_solve,
+    )
+
+    rng = np.random.default_rng(316)
+    wet = jnp.asarray([1.0, 0.0])[:, None]
+    lower = jnp.asarray(rng.uniform(-0.4, -0.1, (2, 4))) * wet
+    upper = jnp.asarray(rng.uniform(-0.4, -0.1, (2, 4))) * wet
+    diagonal = (1.0 - lower - upper) * wet
+    rhs = jnp.asarray(rng.uniform(-1.0, 1.0, (2, 4))) * wet
+
+    def loss(d, b):
+        x = _nemo_ordered_solve(lower, d, upper, b)
+        return jnp.sum(jnp.where(wet > 0.5, x, 0.0) ** 2)
+
+    for gradient in jax.jit(jax.grad(
+            loss, argnums=(0, 1)))(diagonal, rhs):
+        assert np.all(np.isfinite(np.asarray(gradient)))
+    np.testing.assert_array_equal(
+        np.asarray(_nemo_ordered_solve(
+            lower, diagonal, upper, rhs))[0],
+        np.asarray(_nemo_ordered_solve(
+            lower[:1], diagonal[:1], upper[:1], rhs[:1]))[0])

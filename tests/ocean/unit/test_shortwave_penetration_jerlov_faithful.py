@@ -265,6 +265,33 @@ def test_rgb_routes_every_exponential_through_precision_policy(monkeypatch):
     assert np.all(np.isfinite(np.asarray(result)))
 
 
+def test_nemo_rgb_reverse_gradient_is_finite_on_zero_thickness_dry_levels():
+    """Round-316 C2: dry levels above qsr_ext_lev divide by one in VJP."""
+    cfg = ShortwavePenetrationConfig(
+        scheme="nemo_qsr_rgb", rgb_chl_profile="morel_berthon",
+        nemo_time_step_s=10800.0,
+    )
+    wet = jnp.asarray([[1.0, 0.0, 0.0]], dtype=jnp.float64)
+    e3 = jnp.asarray([[5.0, 0.0, 0.0]], dtype=jnp.float64)
+
+    def loss(thickness):
+        result = shortwave_module.shortwave_penetration_rgb_tendency(
+            jnp.asarray([120.0], dtype=jnp.float64),
+            jnp.asarray([0.2], dtype=jnp.float64),
+            thickness,
+            wet,
+            cfg,
+            gdepw_bottom_live=jnp.cumsum(thickness, axis=-1),
+            gdepw_ref=jnp.asarray([0.0, 5.0, 15.0, 35.0], dtype=jnp.float64),
+            e3t_ref=jnp.asarray([5.0, 10.0, 20.0], dtype=jnp.float64),
+        )
+        return jnp.sum(result)
+
+    gradient = np.asarray(jax.jit(jax.grad(loss))(e3))
+    assert np.all(np.isfinite(gradient))
+    assert gradient[0, 0] != 0.0
+
+
 def test_water_type_plumbing_changes_profile():
     # Type I (clear, zeta2=23) penetrates deeper than type III (turbid, zeta2=7.9)
     # -> less heating in the top layer for type I.

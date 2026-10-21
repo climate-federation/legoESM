@@ -2,12 +2,14 @@
 
 Status: **ACQUISITION_NEEDED**.  This round surveyed mixed-layer eddies,
 river-mouth mixing, and (for the record only) interior tracer damping.  It
-selected L5 as mixed-layer eddies on certified G9, committed the card and
-acquisition tool, and ran only the tool's read-only preflight.  Codex did not
-build or run NEMO, and no record was scored.
+selected L5 as mixed-layer eddies on certified G9.  Independent build review
+held the first acquisition before a record existed; its hypotheses were
+reproduced and corrected here.  Codex did not build or run NEMO, and no record
+was admitted or scored.
 
-The frozen preregistration is commit `18498bec4a`.  The L5 implementation and
-exact acquisition tool are commit `acda81beb9`.
+The frozen preregistration is commit `18498bec4a`.  The first L5
+implementation is commit `acda81beb9`; this continuation supersedes its
+observer and numerical-association claims.
 
 ## Survey
 
@@ -30,7 +32,9 @@ horizontal transport at
 read reference-first and experiment-second at
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/tramle.f90:643-648`; the selected constant-f
 coefficient is formed at
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/tramle.f90:696-697`.
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/tramle.f90:697`.  In particular, the divisor is
+evaluated left to right using NEMO's card-bound `omega`; the former receipt's
+two-line citation did not establish that expression.
 
 `tra_adv_trp` calls EIV and then MLE only at stage 3, evaluating the EOS at
 the Kmm tracer state before MLE, at
@@ -40,9 +44,10 @@ vertical transport from the augmented horizontal pair at
 tracer advection and needs certified G9, not G5 or L3.  It consumes live
 tracers, density, geometry, metrics, and masks; it has no external input file.
 
-The feature is compiled into the existing binaries: the round-20 L3 smoke log
-prints the complete `tra_mle_init` group and its flag-off verdict, and the
-compiled source above contains the called RK3 routine.  legoESM already had
+The round-20 L3 smoke log prints the complete `tra_mle_init` group and its
+flag-off verdict, and the compiled source above contains the called RK3
+routine.  This establishes availability in the inherited build, not that the
+round-21 observer tool was safe or ready.  legoESM already had
 the Fox-Kemper diagnosis and C-grid transport construction.  L5 extends that
 operator with a `through_fct` route, suppresses its former standalone centred
 tendency on that route, adds its existing U/V transports to the existing
@@ -95,6 +100,50 @@ full-column climatology program yet.
 The proposed order is therefore: L5 MLE on G9; L6 river-mouth mixing on G5;
 interior damping remains unassigned pending lane-A coordination.
 
+## Build-review continuation
+
+The independent review evidence was copied before use to
+`gridladder_vmix_rounds/round21/review_reproduced_codex_r21/`.  The review's
+first hypothesis reproduced on the real source: the BEFORE snapshot was
+nested under an `iom_use` branch, while the non-XIOS `iom_use` implementation
+returns false at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/iom.f90:1551-1553`; the AFTER
+block could consequently write and deallocate arrays which were never
+allocated.  The instrument now inserts BEFORE ahead of that branch, validates
+that placement, and refuses a nested-BEFORE plant.  Its preflight transforms
+the real `src/OCE/TRA/tramle.F90` input and compiles the result with
+preprocessing enabled.
+
+The remaining hypotheses also reproduced on the captured real operands:
+using legoESM's rotation rate gave `rc_f=0.24057633572`, versus NEMO's
+`0.24057253898`; substituting only NEMO's rate was still one ulp away because
+the association differed.  The former compact V mask erased all 16 nonzero
+fold-row deltas.  Before the statement-order correction, 5,409 of 8,502 U
+words, 5,786 of 8,748 interior V words, and 5,653 of 16,433 wet-column mean
+buoyancies differed.  The committed NumPy statement reference now evaluates
+the captured NEMO operands in source order and pins complete SHA-256 values for
+U, V, MLD, and mean buoyancy.  The production path is bit-identical to it,
+including 16 nonzero fold-row V transports.
+
+ORCA2 round 316's group-A change (`fae1fe1a42b9`) was imported first: only
+discarded dry `q_after` and zero dry `e3t_kmm` divisors are replaced by one.
+Reproduction falsified round 20's “complete three-source sequence” inference:
+group A alone reduced, but did not eliminate, the nonfinite gradient.  JAX's
+de-optimized NaN trace then stopped in the below-blue-level shortwave scan,
+and the round-316 zero-pivot unit witness independently returned four
+nonfinite entries for each differentiated vertical-solver operand.  The
+matching later round-316 forward-neutral guards were therefore also imported:
+dry pivots in the literal vertical solve, zero top-face surface-stress
+thickness, and the shortwave divisor.  The first shortwave import covered only
+levels below the blue cutoff; the equation walker then reproduced round 316
+C2's 12,518 zero-thickness dry levels above that cutoff, so the complete C2
+predicate also requires `ze3t != 0`.  No TKE or internal-wave path is selected
+by G9.
+
+With those actual G9 dependencies guarded, the round-20 stamped one-step T/S
+loss with respect to initial T is finite on both G9 and G9+L2.  The forward
+state remains pinned to the pre-import G9 and L3 two-step hashes; the guards
+change no selected wet operand or forward value.
+
 ## L5 implementation and controls
 
 The L5 card binds every resolved `namtra_mle` value, requires
@@ -107,20 +156,28 @@ compute and discard a second tendency.
 The exact x64 traced transport test pins 18 nonzero U transport words, zero V
 transport words in its zonal-front fixture, and an exact zero source-ordered
 U sum.  The production one-step control removes only L5 MLE and pins the
-resulting unequal-bit counts as 24,588 T cells, 21,880 S cells, and zero u, v,
+resulting unequal-bit counts as 24,584 T cells, 21,878 S cells, and zero u, v,
 or SSH cells.  Thus deleting the stage-3 wiring fails while the tracer-only
-scope remains non-vacuous.  The focused card/operator run passed; the existing
-MLE unit file also passed.  No new division or square root was added: the L5
-route reuses the existing guarded MLE diagnosis and adds no new NaN-gradient
-source.
+scope remains non-vacuous.  L5 alone selects the new NEMO-association option;
+the ORCA1 and MPAS defaults and coefficient word remain unchanged.
+
+The selector now binds the 10 m reference depth and 111 km scale cap as well
+as every namelist field.  The staged route refuses
+`no_mle_in_convection=True`, because it does not receive the required N2
+operand, and the unused bolus-transport return was removed.  A committed
+control censuses G5-G9, V1-V5, L1-L3, L5, and every non-ladder testcase
+dispatcher, proves L5 is the sole MLE selector, and pins the complete two-step
+G9 and L3 states to hashes measured at `9039513ff729`.  The shared guard tests
+separately pin live derivatives and forward equality; every non-L5 card is
+structurally unable to enter the NEMO-association route.
 
 ## Acquisition preflight
 
 The committed entry point defaults to read-only preflight and reserves
-`--run` for the operator.  At clean `bedbcf650e`, while both target
-configurations and the evidence parent were absent, it reported:
-
-`L5_PREFLIGHT_OK checklist=7 plants=all_refused`
+`--run` for the operator.  The earlier `bedbcf650e` “tool ready” claim is
+withdrawn: that preflight transformed preprocessed source and did not detect
+the nested allocation bug.  The corrected preflight uses the real source and
+adds the nested-BEFORE refusal before reporting success.
 
 The seven checks cover: exact `tramle` insertion plus compiler syntax; a real
 `makenemo` reference; every rendered clock; strict six-frame layout and
@@ -136,30 +193,14 @@ until that record is admitted.
 ## Landing gates
 
 All landing gates used `JAX_ENABLE_X64=1`, the exact `land.sh` `PYTHONPATH`,
-and CPU JAX.  At the final substantive tip:
-
-- this receipt's explicit citation gate: **PASS**, 19 citations, zero
-  failures, zero unmapped citations, and zero map-audit failures;
-- citation-gate unit suite: **17 passed in 5.25 s**;
-- L5 card/operator suite, including the exact jitted transport and production
-  one-step controls: **16 passed in 188.89 s**;
-- exact default ORCA2 landing list: **145 passed in 1000.10 s**;
-- private-import ratchet, rerun separately: **6 passed in 5.16 s**; and
-- acquisition preflight: `L5_PREFLIGHT_OK checklist=7 plants=all_refused` at
-  `bedbcf650e`.
-
-The first default-list attempt reported 140 passed and five failed.  All five
-were the same legacy-card compatibility defect: cards with `physics=None`
-reached the new MLE selector before doing any physics.  The selector now treats
-that legacy shape as MLE-off.  The five exact failures then passed in 634.29 s,
-and the complete default list above passed from the clean committed tip.  No
+and CPU JAX.  Final gate results are recorded at the clean committed tip.  No
 NEMO command was run and no record was scored.
 
 independent review: operator (Claude)
 
 codex review: operator
 
-COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/vmix_r21-504231288
-ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/vmix_r21-504231288/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l5_orca2mle/run.sh --run
+COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r21/repo
+ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r21/repo/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l5_orca2mle/run.sh --run
 DECISION_NEEDED: NONE
-ROUND_STATUS: STOPPED_FOR_RECORD — L5 built and preflighted; acquisition needed; record not acquired or scored
+ROUND_STATUS: STOPPED_FOR_RECORD — review fixes and preflight complete; acquisition needed; record not acquired or scored

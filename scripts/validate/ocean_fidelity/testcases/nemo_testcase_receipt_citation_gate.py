@@ -8645,9 +8645,11 @@ CITATION_MAP = {
         'NAMELIST/namtra_mle/',
         'IF(lwm) WRITE ( numond, namtra_mle )', 6,
     ],
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/tramle.f90:696-697': [
-        ('ELSEIF( nn_mle == 1 ) THEN', 5),
-        'rc_f = rn_ce /', 2,
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/tramle.f90:697':
+        'rc_f = rn_ce /',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/iom.f90:1551-1553': [
+        'LOGICAL FUNCTION iom_use( cdname )',
+        'iom_use = .FALSE.', 3,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:254-263': [
         'IF( kstg == 3 ) THEN',

@@ -1201,3 +1201,87 @@ def test_nemo_ws_split_freeze_hooks_compose_to_the_freeze_arm():
     live = _lock_model().step(entry, dt=card.dt_s)
     eta_arm = _lock_model(H(freeze_stage_hpg_eta=True)).step(entry, dt=card.dt_s)
     assert float(np.abs(np.asarray(eta_arm.u.data) - np.asarray(live.u.data)).max()) > 0.0
+
+
+def test_nemo_cen2_tracer_rhs_reverse_gradient_is_finite_on_dry_cells():
+    """The round-316 group-A divisor guard preserves the wet derivative."""
+    set_policy(PrecisionPolicy.fp64())
+    rng = np.random.default_rng(316)
+    ny, nx, nz = 3, 4, 2
+    base = create_latlon_grid(ny, nx, dtype=jnp.float64)
+    grid = SimpleNamespace(
+        **base._asdict(),
+        area_T=jnp.asarray(rng.uniform(1.0e5, 9.0e6, (ny, nx))),
+    )
+    tmask = np.ones((ny, nx, nz))
+    tmask[0, 0, 1] = 0.0
+    tracer = jnp.asarray(rng.uniform(-3.0, 37.0, (ny, nx, nz)))
+    p_u = jnp.asarray(rng.uniform(-8.0e5, 8.0e5, (ny, nx + 1, nz)))
+    p_v = jnp.asarray(rng.uniform(-8.0e5, 8.0e5, (ny + 1, nx, nz)))
+    p_w = jnp.asarray(np.pad(
+        rng.uniform(-2.0e3, 2.0e3, (ny, nx, nz - 1)),
+        ((0, 0), (0, 0), (1, 1)),
+    ))
+    e3t = jnp.asarray(rng.uniform(0.2, 250.0, (ny, nx, nz)) * tmask)
+    tm = jnp.asarray(tmask)
+
+    def loss(tr, h):
+        rhs = model_module._nemo_cen2_tracer_rhs(
+            tr, p_u, p_v, p_w, h, tm, grid)
+        return jnp.sum(jnp.where(tm > 0.5, rhs, 0.0) ** 2)
+
+    grads = jax.jit(jax.grad(loss, argnums=(0, 1)))(tracer, e3t)
+    for gradient in grads:
+        assert np.all(np.isfinite(np.asarray(gradient)))
+
+    # On wet cells e3t is only the divisor, so the unguarded derivative is
+    # dL/de3t = -2*rhs**2/e3t.  This fails if the guard stops a live tangent.
+    wet = tmask > 0.5
+    rhs = np.asarray(model_module._nemo_cen2_tracer_rhs(
+        tracer, p_u, p_v, p_w, e3t, tm, grid))
+    ref = np.where(
+        wet,
+        -2.0 * rhs ** 2 / np.where(wet, np.asarray(e3t), 1.0),
+        0.0,
+    )
+    assert np.all(np.abs(ref[wet]) > 0.0)
+    np.testing.assert_allclose(
+        np.asarray(grads[1])[wet], ref[wet], rtol=1.0e-13, atol=0.0)
+    direction = jnp.asarray(rng.standard_normal(e3t.shape) * tmask)
+    jvp = jax.jit(
+        lambda h, v: jax.jvp(
+            lambda x: loss(tracer, x), (h,), (v,)
+        )[1]
+    )(e3t, direction)
+    np.testing.assert_allclose(
+        float(jvp), float(np.sum(ref * np.asarray(direction))),
+        rtol=1.0e-13, atol=0.0)
+
+
+def test_nemo_ws_q_after_reverse_gradient_is_finite_on_dry_cells():
+    """The other group-A guard keeps a discarded dry q_after out of VJP."""
+    base = jnp.asarray([[[2.0], [3.0]]], dtype=jnp.float64)
+    active = jnp.asarray([[[1.0], [0.0]]], dtype=jnp.float64)
+    q_after = jnp.asarray([[1.25, 0.0]], dtype=jnp.float64)
+    q_before = jnp.asarray([[0.75, 0.0]], dtype=jnp.float64)
+    q_rhs = jnp.asarray([[1.0, 0.0]], dtype=jnp.float64)
+    zeros = jnp.zeros_like(base)
+    ones = jnp.ones_like(base)
+
+    def loss(tracer, after):
+        out = model_module._nemo_ws_rk3_tracer_pair_step(
+            tracer, tracer, "none", ones, ones,
+            jnp.ones((1, 2, 2), dtype=tracer.dtype),
+            ones, ones, ones, ones, object(), 3.0, active,
+            stage_source_rates=((zeros, zeros),) * 3,
+            stage_qco_weights=((q_before, q_rhs, after),) * 3,
+            stage_tracer_written_order=True,
+            stop_after_stage=1,
+        )[0]
+        return jnp.sum(jnp.where(active > 0.5, out, 0.0) ** 2)
+
+    dbase, dafter = jax.jit(jax.grad(loss, argnums=(0, 1)))(base, q_after)
+    assert np.all(np.isfinite(np.asarray(dbase)))
+    assert np.all(np.isfinite(np.asarray(dafter)))
+    expected = np.asarray(q_before[0, 0] * base[0, 0, 0] / q_after[0, 0])
+    assert float(np.asarray(dbase)[0, 0, 0]) == 2.0 * expected * 0.75 / 1.25

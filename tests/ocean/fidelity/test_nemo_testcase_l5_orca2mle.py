@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import inspect
 import pickle
 import subprocess
 from pathlib import Path
@@ -34,6 +36,10 @@ def _module(name: str, path: Path):
 
 
 INSTRUMENT = _module("instrument_tramle", L5 / "instrument_tramle.py")
+STATEMENT_REF = _module("mle_statement_reference", L5 / "mle_statement_reference.py")
+REVIEW_CAPTURE = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/"
+    "round21/review_reproduced_codex_r21/l5_capture.npz")
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -107,16 +113,23 @@ def test_l5_acquisition_is_fail_closed_and_numeric():
 
 
 @pytest.mark.skipif(
-    not (ORCA2.parent / "BLD/ppsrc/nemo/tramle.f90").is_file(),
-    reason="no compiled NEMO tree")
+    not (ORCA2.parents[2] / "src/OCE/TRA/tramle.F90").is_file(),
+    reason="no NEMO source tree")
 def test_l5_observer_zero_first_defined_domain():
-    source = (ORCA2.parent / "BLD/ppsrc/nemo/tramle.f90").read_text()
+    source = (ORCA2.parents[2] / "src/OCE/TRA/tramle.F90").read_text()
     instrumented = INSTRUMENT.instrument(source)
     INSTRUMENT.validate(instrumented)
     assert "zfield(:,:,:) = 0._wp" in instrumented
     assert "IF( llwet ) zfield(ji,jj,jk) = pfield(ji,jj,jk)" in instrumented
     planted = instrumented.replace("l5_canon_3d(pFu,'U')", "pFu", 1)
     with pytest.raises(ValueError, match="canonical"):
+        INSTRUMENT.validate(planted)
+    planted = instrumented.replace(
+        INSTRUMENT.BEFORE + INSTRUMENT.BODY_ANCHOR,
+        INSTRUMENT.BODY_ANCHOR + INSTRUMENT.BEFORE,
+        1,
+    )
+    with pytest.raises(ValueError, match="nested"):
         INSTRUMENT.validate(planted)
 
 
@@ -141,9 +154,10 @@ def test_l5_card_changes_only_existing_mle_selector(cards):
     assert changed and all(key == "physics.mle" or key.startswith("physics.mle.")
                            for key in changed)
     mle = c5.physics.mle
-    assert (mle.ce, mle.lat_ref_deg, mle.rho_c_mle, mle.mld_uv,
-            mle.no_mle_in_convection, mle.through_fct) == (
-        0.06, 20.0, 0.01, "min", False, True)
+    assert (mle.ce, mle.lat_ref_deg, mle.rho_c_mle, mle.ref_depth_m,
+            mle.max_grid_scale_m, mle.mld_uv, mle.no_mle_in_convection,
+            mle.through_fct, mle.nemo_association) == (
+        0.06, 20.0, 0.01, 10.0, 111.0e3, "min", False, True, True)
     assert c5.gm_redi is None and c5.tracer_advection == "fct2"
     for name in ("grid", "z_coord", "initial_state"):
         assert pickle.dumps(getattr(g9.recipe, name)) == pickle.dumps(
@@ -154,8 +168,9 @@ def test_l5_card_changes_only_existing_mle_selector(cards):
 
 @pytest.mark.parametrize("change", [
     {"ce": 0.07}, {"lat_ref_deg": 21.0}, {"rho_c_mle": 0.02},
+    {"ref_depth_m": 11.0}, {"max_grid_scale_m": 110.0e3},
     {"mld_uv": "avg"}, {"no_mle_in_convection": True},
-    {"through_fct": False},
+    {"through_fct": False}, {"nemo_association": False},
 ])
 def test_l5_selector_refuses_each_mle_wiring_plant(cards, change):
     l5 = cards[1]
@@ -175,6 +190,74 @@ def test_l5_model_requires_fct_ws_route(cards):
         LatLonCGridOceanModel(
             run.grid, run.z_coord,
             run.model_config._replace(tracer_advection="none"))
+
+
+def test_l5_rotation_rate_is_card_constant_and_legacy_call_is_unchanged(cards):
+    from legoesm.ocean.physics.lateral_mixing.mle import mle_coefficient
+
+    omega = cards[1].recipe.model_config.constants.Omega
+    nemo = np.float64(mle_coefficient(
+        0.06, 20.0, omega=omega, nemo_association=True))
+    legacy = np.float64(mle_coefficient(0.06, 20.0))
+    assert nemo.view(np.uint64).item() == 0x3FCECB14B9A0B306
+    assert legacy.view(np.uint64).item() == 0x3FCECB34931005E8
+
+
+@pytest.mark.skipif(not REVIEW_CAPTURE.is_file(), reason="no preserved real L5 capture")
+def test_l5_real_operands_match_statement_reference_bit_for_bit(cards):
+    from legoesm.ocean.physics.lateral_mixing.mle import mle_mld_and_buoyancy
+    from legoesm.ocean.physics.lateral_mixing.mle_latlon_cgrid import (
+        mle_tracer_tendency_latlon_cgrid,
+    )
+
+    assert hashlib.sha256(REVIEW_CAPTURE.read_bytes()).hexdigest() == (
+        "12ff643eec84e03e53683b62513ebca0efc628526d7ad610316110bba2799dd6"
+    )
+    d = np.load(REVIEW_CAPTURE)
+    ref_u, ref_v, ref_mld, ref_bm = STATEMENT_REF.nemo_mle_transport_reference(d)
+    expected_hashes = {
+        "u": "0e93b06e5d92951ac5a6462f9c03287684a72b30bdf315c4813d316987ab105e",
+        "v": "2b3a390c267a476e7d2e5c309590af42bf8026196c4ab9a0c67f1403d4f5f3b4",
+        "mld": "210aaa6af659cec45ff0987286053d1604ef0fe9244d041547d66e3ac10f0226",
+        "bm": "73d547f15e707453f14b09a6cf60d05e045e5bcbad4ec4f1948ee9bc9c95e332",
+    }
+    for name, array in (("u", ref_u), ("v", ref_v), ("mld", ref_mld), ("bm", ref_bm)):
+        assert hashlib.sha256(np.ascontiguousarray(array).tobytes()).hexdigest() == expected_hashes[name]
+
+    run = cards[1].recipe
+    cfg = run.model_config
+    rho, hk, wet = (jnp.asarray(d[k]) for k in ("in2", "in6", "is_active"))
+    mld, bm, _ = mle_mld_and_buoyancy(
+        rho, hk, wet,
+        z_faces=jnp.abs(run.z_coord.z_half_ref),
+        z_centers_ref=jnp.abs(run.z_coord.t_depth_ref),
+        rho_c_mle=cfg.physics.mle.rho_c_mle,
+        ref_depth_m=cfg.physics.mle.ref_depth_m,
+        rho0=cfg.constants.rho_0,
+        grav=cfg.constants.g,
+        nemo_association=True,
+    )
+    wet2 = np.asarray(d["in3"]) > 0.0
+    got_mld = np.where(wet2, np.asarray(mld), 0.0)
+    got_bm = np.where(wet2, np.asarray(bm), 0.0)
+    assert np.array_equal(got_mld.view(np.uint64), ref_mld.view(np.uint64))
+    assert np.array_equal(got_bm.view(np.uint64), ref_bm.view(np.uint64))
+
+    T, S, mask, um, vm = (jnp.asarray(d[k]) for k in
+                           ("in0", "in1", "in3", "in4", "in5"))
+    n2 = jnp.zeros((*T.shape[:-1], T.shape[-1] - 1), dtype=T.dtype)
+    got_u, got_v = mle_tracer_tendency_latlon_cgrid(
+        T, S, rho, n2, mask, um, vm, run.z_coord,
+        jnp.asarray(d["stretch_half0"]), run.grid, cfg.physics.mle,
+        h_k=hk, rho0=cfg.constants.rho_0, grav=cfg.constants.g,
+        omega=cfg.constants.Omega, return_horizontal_transport=True,
+    )
+    got_u, got_v = np.asarray(got_u), np.asarray(got_v)
+    assert np.array_equal(got_u.view(np.uint64), ref_u.view(np.uint64))
+    assert np.array_equal(got_v.view(np.uint64), ref_v.view(np.uint64))
+    assert np.count_nonzero(got_u) == 8502
+    assert np.count_nonzero(got_v) == 8764
+    assert np.count_nonzero(got_v[-1]) == 16
 
 
 def test_l5_jitted_traced_x64_transport_is_exact_and_nonzero():
@@ -212,10 +295,21 @@ def test_l5_jitted_traced_x64_transport_is_exact_and_nonzero():
     assert np.count_nonzero(ubits) == 18
     assert np.count_nonzero(vbits) == 0
     assert np.asarray(jnp.sum(u)).view(np.uint64).item() == 0
+    with pytest.raises(ValueError, match="stage rn2 operand"):
+        mle_tracer_tendency_latlon_cgrid(
+            T, S, make_eos_fn()(T, S, jnp.zeros_like(T)),
+            jnp.zeros((*T.shape[:-1], T.shape[-1] - 1), dtype=T.dtype),
+            mask, um, vm, zc, J, geom,
+            cfg._replace(no_mle_in_convection=True),
+            return_horizontal_transport=True,
+        )
 
 
 G9_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
                  "gridladder_rounds/round46/oracle_g9_r46/twin_a")
+G5_CONTROL_RECORD = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
+    "round31/oracle_g5_r31/twin_a")
 
 
 @pytest.mark.skipif(not G9_RECORD.is_dir(), reason="no admitted G9 record")
@@ -247,4 +341,67 @@ def test_l5_jitted_traced_x64_step_consumes_mle_transport(cards):
         != np.asarray(getattr(outputs[1], name).data).view(np.uint64)))
         for name in ("T", "S", "u", "v", "eta"))
     print("L5 staged MLE exact unequal counts", counts)
-    assert counts == (24588, 21880, 0, 0, 0)
+    assert counts == (24584, 21878, 0, 0, 0)
+
+
+@pytest.mark.skipif(not G5_CONTROL_RECORD.is_dir(), reason="no admitted G5 record")
+def test_round21_other_cards_keep_their_two_step_values_and_program(tmp_path):
+    """Census all cards; bit-pin the only two non-L5 routes reaching the guard."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+
+    import sys
+    sys.path[:0] = [str(CASES), str(CASES / "nemo_testcase_g5_orca2ice")]
+    import g5_records as g5
+
+    expected_cards = {
+        "ORCA2G1-flat", "ORCA2G1b-vec", "ORCA2G2-zps", "ORCA2G3-ts",
+        "ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg",
+        "ORCA2G8-ldf", "ORCA2G9-tadv", "ORCA2V1-tke", "ORCA2V2-evd",
+        "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L1-bbl",
+        "ORCA2L2-iso", "ORCA2L3-eiv", "ORCA2L5-mle",
+    }
+    assert set(recipe._ORCA2G_JPK) == expected_cards
+    assert set(recipe._ORCA2L_MLE_CASES) == {"ORCA2L5-mle"}
+    assert {case for case, on in recipe._ORCA2G_TADV.items() if on} == {
+        "ORCA2G9-tadv", "ORCA2L3-eiv", "ORCA2L5-mle"}
+    non_ladder = {
+        "LOCK_EXCHANGE-zco", "OVERFLOW-zps", "GYRE-zco", "ORCA2-zps",
+        "VORTEX-zco", "VORTEX_VEC-zco", "VORTEX-15km-zco",
+        "VORTEX_VEC-15km-zco", "VORTEX-10km-zco",
+        "VORTEX_VEC-10km-zco", "VORTEX_SMT-zps", "VORTEX_SMT_VEC-zps",
+        "VORTEX_SMT1_VEC-zps", "VORTEX_SMT2_VEC-zps",
+        "VORTEX_SMT3_VEC-zps", "VORTEX_SMT4_VEC-zps",
+    }
+    dispatch = inspect.getsource(recipe.build_nemo_testcase_card)
+    assert all(f'"{case}"' in dispatch for case in non_ladder)
+    assert non_ladder.isdisjoint(recipe._ORCA2L_MLE_CASES)
+
+    # No other card can execute the L5 association path.  G9 and L3 do execute
+    # the shared group-A dry-cell guard, so pin their complete two-step ocean
+    # state to hashes measured at the unmodified 9039513ff729 baseline.
+    controls = {
+        "ORCA2G9-tadv": (
+            CASES / "nemo_testcase_g9_orca2tadv",
+            "d5e168b95f9023c249242e83fe32a4f660649c92dd26ff0b988a193207649ae4"),
+        "ORCA2L3-eiv": (
+            CASES / "nemo_testcase_l3_orca2eiv",
+            "9c83d48f76cfbae1905d82d2c5466ff87f84026fc8e8c8d9fbd0060f05745fea"),
+    }
+    for case, (deck, expected) in controls.items():
+        card_tmp = tmp_path / case.lower()
+        card_tmp.mkdir()
+        root = _root(card_tmp, deck)
+        card = recipe.build_nemo_testcase_card(case, deck_root=root)
+        run = card.recipe
+        model = LatLonCGridOceanModel(run.grid, run.z_coord, run.model_config)
+        state = run.initial_state
+        for kt in (1, 2):
+            fresh, surface = g5.nemo_supplied_forcing(card, G5_CONTROL_RECORD, kt)
+            state = model.step(
+                state, card.dt_s, freshwater=fresh, surface_forcing=surface)
+            jax.block_until_ready(state.T.data)
+        digest = hashlib.sha256()
+        for name in ("T", "S", "u", "v", "eta"):
+            digest.update(np.ascontiguousarray(
+                np.asarray(getattr(state, name).data)).tobytes())
+        assert digest.hexdigest() == expected, case

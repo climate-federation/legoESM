@@ -325,8 +325,14 @@ def _nemo_ordered_solve(
     if rhs.ndim < 1 or rhs.shape[-1] < 1:
         raise ValueError("NEMO literal tridiagonal solve needs at least one row")
     nlev = rhs.shape[-1]
+
+    def pivot(d):
+        # Gradient-only: a zero pivot (dry column) divides by 1; its forward
+        # inf/NaN is masked by every caller, but the reverse pass would not be.
+        return jnp.where(d == 0.0, jnp.ones_like(d), d)
+
     if nlev == 1:
-        return rhs / diagonal
+        return rhs / pivot(diagonal)
 
     diag_inputs = tuple(jnp.moveaxis(x, -1, 0) for x in (
         lower[..., 1:], diagonal[..., 1:], upper[..., :-1]))
@@ -335,7 +341,7 @@ def _nemo_ordered_solve(
         current_lower, current_diagonal, previous_upper = operands
         product = jax.lax.optimization_barrier(
             current_lower * previous_upper)
-        quotient = jax.lax.optimization_barrier(product / previous)
+        quotient = jax.lax.optimization_barrier(product / pivot(previous))
         current = jax.lax.optimization_barrier(
             current_diagonal - quotient)
         return current, current
@@ -352,7 +358,7 @@ def _nemo_ordered_solve(
         source, current_lower, previous_diagonal = operands
         # NEMO writes division before multiplication in both routines.
         quotient = jax.lax.optimization_barrier(
-            current_lower / previous_diagonal)
+            current_lower / pivot(previous_diagonal))
         product = jax.lax.optimization_barrier(
             _round_the_multiply(quotient * previous))
         current = jax.lax.optimization_barrier(source - product)
@@ -362,7 +368,7 @@ def _nemo_ordered_solve(
     work = jnp.concatenate(
         [rhs[..., :1], jnp.moveaxis(work_rows, 0, -1)], axis=-1)
 
-    terminal = work[..., -1] / eliminated[..., -1]
+    terminal = work[..., -1] / pivot(eliminated[..., -1])
     reverse_inputs = tuple(
         jnp.moveaxis(x[..., :-1][..., ::-1], -1, 0)
         for x in (work, upper, eliminated))
@@ -373,7 +379,7 @@ def _nemo_ordered_solve(
             _round_the_multiply(current_upper * next_value))
         numerator = jax.lax.optimization_barrier(source - product)
         current = jax.lax.optimization_barrier(
-            numerator / current_diagonal)
+            numerator / pivot(current_diagonal))
         return current, current
 
     _, reverse_rows = jax.lax.scan(
