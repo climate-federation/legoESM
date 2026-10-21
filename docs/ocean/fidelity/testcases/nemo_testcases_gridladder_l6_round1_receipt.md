@@ -212,6 +212,6 @@ enable BBL; relax any fidelity bar; push; post to GitHub; or perform an author
 review.  Independent review remains with the operator.
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/gridladder_r55/repo
-ACQUISITION_NEEDED: NEMO_OPERATOR_ACK=L6_R55_OPERATOR scripts/validate/ocean_fidelity/testcases/nemo_testcase_l6_orca2dmp/run.sh --run
+ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/gridladder_r55/repo/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l6_orca2dmp/run.sh --run with NEMO_OPERATOR_ACK=L6_R55_OPERATOR
 DECISION_NEEDED: NONE
-ROUND_STATUS: STOPPED — review hold remediated and preflighted; operator acquisition needed; not scored
+ROUND_STATUS: STOPPED_FOR_RECORD — review hold remediated and preflighted; operator acquisition needed; not scored
