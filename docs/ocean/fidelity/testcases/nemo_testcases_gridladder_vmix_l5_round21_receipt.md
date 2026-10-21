@@ -193,8 +193,25 @@ until that record is admitted.
 ## Landing gates
 
 All landing gates used `JAX_ENABLE_X64=1`, the exact `land.sh` `PYTHONPATH`,
-and CPU JAX.  Final gate results are recorded at the clean committed tip.  No
-NEMO command was run and no record was scored.
+and CPU JAX.  The focused L5/review suite passed 26 tests, including the real
+captured-operand statement reference, north-fold row, every L5 selector plant,
+observer placement, and the complete two-step G9/L3 value controls.  The
+unchanged legacy ORCA1/MPAS MLE suites passed 67 tests; the shortwave and
+literal-implicit guard batch passed 30 tests.
+
+The exact historical one-step loss witnesses printed
+`G9 T-loss finite=True dT_nonfinite=0 of=799200 wet_nonfinite=0
+dT_nonzero=430537` and the corresponding G9+L2 result with
+`dT_nonzero=430550`.  Their complete logs and the before witnesses are pinned
+by `gridladder_vmix_rounds/round21/review_reproduced_codex_r21/MANIFEST.sha256`.
+
+The heading-scoped citation gate passed all 20 citations with zero failures,
+zero map-audit failures, and every planted control firing.  The complete
+default landing gate then passed 145 tests, and the private-import ratchet
+passed independently, 6 tests.  The writer-free entry point printed
+`L5_PREFLIGHT_OK checklist=7 plants=all_refused`; it transformed and
+syntax-checked the real source while leaving both targets and the acquisition
+evidence root absent.  No NEMO command was run and no record was scored.
 
 independent review: operator (Claude)
 
