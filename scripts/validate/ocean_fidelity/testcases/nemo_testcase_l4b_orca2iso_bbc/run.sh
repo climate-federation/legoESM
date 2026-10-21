@@ -158,8 +158,9 @@ PY
 }
 
 seven_item_preflight() {
-  local scratch=$repo/.l4b-preflight-$$ rendered truncated occupied_file
-  absent "$scratch" || fail "scratch exists: $scratch"; mkdir "$scratch"
+  local scratch rendered truncated occupied_file
+  scratch=$(mktemp -d "$repo/.l4b-preflight.XXXXXX") \
+    || fail 'cannot create preflight scratch directory'
   trap 'rm -rf -- "$scratch"' RETURN
 
   # 1 source context and syntax, plus a syntax plant.
@@ -212,13 +213,13 @@ PY
   PYTHONPATH=$PYPATH python "$BBC_CHECKER" check-records "$scratch/layout" 2
   rm -- "$scratch/layout/oracle_geothermal_kt00000002.bin"
   ! PYTHONPATH=$PYPATH python "$BBC_CHECKER" check-records "$scratch/layout" 2 >/dev/null 2>&1 || fail 'inventory plant accepted'
-  mkdir "$scratch/acting" "$scratch/writer_free"
+  write_synthetic "$scratch/acting" 1
+  mkdir "$scratch/writer_free"
   ln -s "$L2_ACTING_RECORD/oracle_rktracer_stage3_kt00000001.bin" \
     "$scratch/acting/oracle_rktracer_stage3_kt00000001.bin"
   ln -s "$L2_ACTING_RECORD/oracle_step_entry_kt00000002.bin" \
     "$scratch/acting/oracle_step_entry_kt00000002.bin"
   printf '1\n' >"$scratch/acting/time.step"; printf '1\n' >"$scratch/writer_free/time.step"
-  write_synthetic "$scratch/acting" 1
   check_acting_scope "$scratch/acting" "$scratch/writer_free" \
     || fail 'smoke-only acting scope rejected writer-free reference'
   ! check_acting "$scratch/writer_free" >/dev/null 2>&1 \
