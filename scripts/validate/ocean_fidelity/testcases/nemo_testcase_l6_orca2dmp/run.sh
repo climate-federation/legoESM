@@ -235,9 +235,11 @@ PY
     || fail 'real-log flipped-flag plant accepted'
   mkdir "$scratch/stamped_log"
   cp "$scratch/stamped_smoke" "$scratch/stamped_log/namelist_cfg"
-  sed -E 's/(ln_tradmp[[:space:]]*=[[:space:]]*)F[[:space:]]*$/\1T/' \
+  sed -E \
+    -e 's/(ln_tradmp[[:space:]]*=[[:space:]]*)F[[:space:]]*$/\1T/' \
+    -e 's/(ln_trabbc[[:space:]]*=[[:space:]]*)F[[:space:]]*$/\1T/' \
     "$REAL_LOG_EXCERPT" >"$scratch/stamped_log/ocean.output"
-  printf '\n nn_zdmp = 0\n T and S newtonian relaxation\n resto.nc\n' \
+  printf '\n nn_zdmp = 0\n Apply a geothermal heating at ocean bottom\n variable geothermal heat flux\n T and S newtonian relaxation\n resto.nc\n' \
     >>"$scratch/stamped_log/ocean.output"
   check_numeric_log "$scratch/stamped_log" \
     || fail 'STAMPED_RENDERED_DECK numeric/logical check rejected'
