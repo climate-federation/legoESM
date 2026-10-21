@@ -1573,6 +1573,7 @@ def build_orca2_damping_for_step(
         gamma=jnp.asarray(rate, dtype=jnp.float64),
         T_ref=jnp.asarray(temperature, dtype=jnp.float64),
         S_ref=jnp.asarray(salinity, dtype=jnp.float64),
+        nemo_kt=int(kt),
     )
 
 

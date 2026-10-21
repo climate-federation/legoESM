@@ -725,7 +725,10 @@ def apply_sponge_tracer_relaxation(
         dT = dT * mask_b
         dS = dS * mask_b
     if nemo_written_source:
-        return nemo_source_round(dT_dt + dT), nemo_source_round(dS_dt + dS)
+        return (
+            nemo_source_round(dT_dt + nemo_source_round(dT)),
+            nemo_source_round(dS_dt + nemo_source_round(dS)),
+        )
     return dT_dt + dT, dS_dt + dS
 
 

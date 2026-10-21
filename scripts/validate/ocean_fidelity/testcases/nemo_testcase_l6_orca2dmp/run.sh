@@ -23,6 +23,7 @@ readonly BBC_CHECKER=$L4_DIR/l4_records.py BBC_PATCH=$L4_DIR/trabbc_round53.patc
 readonly DMP_CHECKER=$here/l6_records.py DMP_PATCH=$here/tradmp_round55.patch
 readonly REAL_LOG_DECK=$L4B_DIR/l2_r17_twin_a_namelist.resolved
 readonly REAL_LOG_EXCERPT=$L4B_DIR/l2_r17_twin_a_ocean.output.excerpt
+readonly ROUND54_LOG=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round54/oracle_l4b_r54/smoke_2step/ocean.output
 readonly BASE_TRABBC=$NEMO_ROOT/src/OCE/TRA/trabbc.F90
 readonly BASE_TRADMP=$NEMO_ROOT/src/OCE/TRA/tradmp.F90
 readonly REC_SOURCE_NAME=ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1
@@ -47,10 +48,11 @@ readonly RENDERED_DECK_SHA=ae06dfabee3731cd35b6a4d5d2d4b304bd13802db98fac0fca484
 readonly L2_CHECKER_SHA=656f9d4829884a5d06f939c69ebf9a1e6c720fe34d94c859be325c51e142338e
 readonly BBC_CHECKER_SHA=2435c5a31ebdd2db250f3ff104c9e0834dd08a03bd83be1d0541e6cdb02f9d2e
 readonly BBC_PATCH_SHA=dd98dfca4051cec8dd4814edd71c3bc2717ad599af3a4a9b7e086495f2f68453
-readonly DMP_CHECKER_SHA=593a4d0cca4ef4795e87d0c320e9a5373171db97f6b3b747483a8356b3eee873
+readonly DMP_CHECKER_SHA=65663cf68060dee301287f5f55d3054ea49e31c8c1ebf5a5af9d2db5137ce5ae
 readonly DMP_PATCH_SHA=84261d0f888107a2b0c207b220daf2ab6d941ef3f82b3d63b9294d887988b031
 readonly REAL_LOG_DECK_SHA=1f17514a3fec391872ef594cd60418b5916a8098e944a63c2153f8ee4cfe3745
 readonly REAL_LOG_EXCERPT_SHA=a9f777470fe7ec4a9d2ff4fa0b4cfb48449384359ec6a17466037d8fca50ab23
+readonly ROUND54_LOG_SHA=2c0f12d11a9f920d36367b8afc6ce74861d9a333940d736cdec15b5259337e8a
 readonly L2_STAGE_SHA=37fc7d2e294e8c4f42e398675fb99c13a8294c39bca037199637afe6d525168d
 readonly L2_ENTRY_SHA=fb94a04852a7acfd8f1108021cb63b1574bf055e52a8e6306b3a642d38bc84e3
 readonly BASE_TRABBC_SHA=28fd28c51c0616d7429600318148bfccebefb458d0db81c2f48f688714b9c2ab
@@ -113,20 +115,23 @@ for kt in range(1, steps + 1):
 PY
 }
 
-write_dmp_synthetic() { # directory steps
-  python -I - "$1" "$2" <<'PY'
+write_dmp_synthetic() { # directory steps [inert-kt2]
+  python -I - "$1" "$2" "${3:-acting}" <<'PY'
 import pathlib, struct, sys
 import numpy as np
-root, steps = pathlib.Path(sys.argv[1]), int(sys.argv[2]); root.mkdir(parents=True, exist_ok=True)
+root, steps, mode = pathlib.Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+root.mkdir(parents=True, exist_ok=True)
 magic = b'NEMO_L6_DMP__1  '; n = 8
 wet = np.array([1.,1.,0.,1.,1.,0.,1.,1.]); rate = np.array([1.,2.,0.,3.,4.,0.,5.,6.]) * 1e-6
-fields=[wet,rate]
-for scale in (1.,2.):
-    target=np.arange(n,dtype=np.float64)*scale; before=target+wet*scale
-    rhs0=np.arange(n,dtype=np.float64); rhs1=rhs0+rate*(target-before)
-    fields.extend((target*wet,before*wet,rhs0*wet,rhs1*wet))
-payload=np.asarray(fields,dtype=np.float64)
 for kt in range(1, steps + 1):
+    fields=[wet,rate]
+    for scale in (1.,2.):
+        target=np.arange(n,dtype=np.float64)*scale
+        inert = kt == 1 or mode == 'inert-kt2'
+        before=target if inert else target+wet*scale
+        rhs0=np.arange(n,dtype=np.float64); rhs1=rhs0+rate*(target-before)
+        fields.extend((target*wet,before*wet,rhs0*wet,rhs1*wet))
+    payload=np.asarray(fields,dtype=np.float64)
     (root / f'oracle_damping_kt{kt:08d}.bin').write_bytes(
         magic + struct.pack('=10i', 1, kt, 2, 3, 4, 2, 2, 2, 64, 10)
         + payload.tobytes())
@@ -239,12 +244,21 @@ PY
     -e 's/(ln_tradmp[[:space:]]*=[[:space:]]*)F[[:space:]]*$/\1T/' \
     -e 's/(ln_trabbc[[:space:]]*=[[:space:]]*)F[[:space:]]*$/\1T/' \
     "$REAL_LOG_EXCERPT" >"$scratch/stamped_log/ocean.output"
-  printf '\n nn_zdmp = 0\n Apply a geothermal heating at ocean bottom\n variable geothermal heat flux\n T and S newtonian relaxation\n resto.nc\n' \
+  printf '\n nn_zdmp = 0\n Apply a geothermal heating at ocean bottom\n variable geothermal heat flux\n tracer damping as specified by mask\n read resto (rec:      1) in resto.nc ok\n' \
     >>"$scratch/stamped_log/ocean.output"
   check_numeric_log "$scratch/stamped_log" \
     || fail 'STAMPED_RENDERED_DECK numeric/logical check rejected'
   PYTHONPATH=$PYPATH python "$DMP_CHECKER" check-log \
     "$scratch/stamped_log/ocean.output" "$scratch/stamped_log/namelist_cfg"
+  sed -E 's/(ln_tradmp[[:space:]]*=[[:space:]]*)F[[:space:]]*$/\1T/' \
+    "$ROUND54_LOG" >"$scratch/round54_damping_off.log"
+  ! PYTHONPATH=$PYPATH python "$DMP_CHECKER" check-log \
+    "$scratch/round54_damping_off.log" "$scratch/stamped_log/namelist_cfg" \
+    >"$scratch/round54_check.out" 2>&1 \
+    || fail 'round-54 damping-off log plant accepted'
+  grep -F 'ocean.output lacks active damping banner' \
+    "$scratch/round54_check.out" >/dev/null \
+    || fail 'round-54 log was refused for the wrong reason'
 
   # 4 reader/writer schema and exact EOF, with a truncation plant.
   write_synthetic "$scratch/layout" 1; write_dmp_synthetic "$scratch/layout" 1
@@ -259,6 +273,10 @@ PY
   rm -rf -- "$scratch/layout"; write_synthetic "$scratch/layout" 2; write_dmp_synthetic "$scratch/layout" 2
   PYTHONPATH=$PYPATH python "$BBC_CHECKER" check-records "$scratch/layout" 2
   PYTHONPATH=$PYPATH python "$DMP_CHECKER" check-records "$scratch/layout" 2
+  write_dmp_synthetic "$scratch/inert_kt2" 2 inert-kt2
+  ! PYTHONPATH=$PYPATH python "$DMP_CHECKER" check-records \
+    "$scratch/inert_kt2" 2 >/dev/null 2>&1 \
+    || fail 'inert kt=2 damping plant accepted'
   rm -- "$scratch/layout/oracle_damping_kt00000002.bin"
   ! PYTHONPATH=$PYPATH python "$DMP_CHECKER" check-records "$scratch/layout" 2 >/dev/null 2>&1 || fail 'inventory plant accepted'
   write_synthetic "$scratch/acting" 1; write_dmp_synthetic "$scratch/acting" 1
@@ -288,7 +306,7 @@ PY
   fi
   mkdir "$scratch/occupied"; ! absent "$scratch/occupied" || fail 'occupied-path plant accepted'
   trap - EXIT; rm -rf -- "$scratch"
-  printf 'L6_PREFLIGHT_7_OF_7_PASS plants=7/7 checker_functions=3/3 evidence_parent_absent=%s target_absent=%s\n' \
+  printf 'L6_PREFLIGHT_7_OF_7_PASS plants=7/7 l6_specific_plants=3/3 checker_functions=3/3 evidence_parent_absent=%s target_absent=%s\n' \
     "$([[ ! -e "$EVIDENCE" ]] && printf true || printf false)" \
     "$([[ ! -e "$TARGET" ]] && printf true || printf false)"
 }
@@ -296,7 +314,7 @@ PY
 preflight() {
   local required want
   [[ -z "$(git -C "$repo" status --porcelain --untracked-files=all)" ]] || fail 'commit exact acquisition tool first'
-  for required in "$G5_TOOL" "$G5_RECORDS" "$G5_DECK" "$ICE_DECK" "$RENDER" "$L2_CHECKER" "$BBC_CHECKER" "$BBC_PATCH" "$DMP_CHECKER" "$DMP_PATCH" "$REAL_LOG_DECK" "$REAL_LOG_EXCERPT" "$BASE_TRABBC" "$BASE_TRADMP" "$REF_BIN" "$REC_SOURCE/BLD/bin/nemo.exe" "$QGH_SOURCE" "$RESTO_SOURCE" "$L2_ACTING_RECORD/oracle_rktracer_stage3_kt00000001.bin" "$L2_ACTING_RECORD/oracle_step_entry_kt00000002.bin"; do
+  for required in "$G5_TOOL" "$G5_RECORDS" "$G5_DECK" "$ICE_DECK" "$RENDER" "$L2_CHECKER" "$BBC_CHECKER" "$BBC_PATCH" "$DMP_CHECKER" "$DMP_PATCH" "$REAL_LOG_DECK" "$REAL_LOG_EXCERPT" "$ROUND54_LOG" "$BASE_TRABBC" "$BASE_TRADMP" "$REF_BIN" "$REC_SOURCE/BLD/bin/nemo.exe" "$QGH_SOURCE" "$RESTO_SOURCE" "$L2_ACTING_RECORD/oracle_rktracer_stage3_kt00000001.bin" "$L2_ACTING_RECORD/oracle_step_entry_kt00000002.bin"; do
     [[ -f "$required" ]] || fail "missing $required"
   done
   [[ "$(sha "$QGH_SOURCE")" == e369762f068a7fbc1561be310fb8ded844233da37e6a0c6ffc10805e4996fffb ]] || fail 'geothermal input changed'
@@ -311,6 +329,7 @@ preflight() {
      && "$(sha "$DMP_PATCH")" == "$DMP_PATCH_SHA" \
      && "$(sha "$REAL_LOG_DECK")" == "$REAL_LOG_DECK_SHA" \
      && "$(sha "$REAL_LOG_EXCERPT")" == "$REAL_LOG_EXCERPT_SHA" \
+     && "$(sha "$ROUND54_LOG")" == "$ROUND54_LOG_SHA" \
      && "$(sha "$L2_ACTING_RECORD/oracle_rktracer_stage3_kt00000001.bin")" == "$L2_STAGE_SHA" \
      && "$(sha "$L2_ACTING_RECORD/oracle_step_entry_kt00000002.bin")" == "$L2_ENTRY_SHA" \
      && "$(sha "$BASE_TRABBC")" == "$BASE_TRABBC_SHA" \

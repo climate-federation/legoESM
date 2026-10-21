@@ -165,6 +165,8 @@ def test_climatology_and_resto_inputs_are_exact_and_step_varying(cards):
     kt1 = recipe.build_orca2_damping_for_step(root, tmask, kt=1, dt_s=l6.dt_s)
     kt2 = recipe.build_orca2_damping_for_step(root, tmask, kt=2, dt_s=l6.dt_s)
     _assert_bits_equal(kt1.gamma, l6.recipe.tracer_damping.gamma)
+    assert kt1.nemo_kt == l6.recipe.tracer_damping.nemo_kt == 1
+    assert kt2.nemo_kt == 2
     _assert_bits_equal(kt1.T_ref, l6.recipe.initial_state.T.data)
     _assert_bits_equal(kt1.S_ref, l6.recipe.initial_state.S.data)
     assert np.any(np.asarray(kt2.T_ref).view(np.uint64)
@@ -175,22 +177,47 @@ def test_climatology_and_resto_inputs_are_exact_and_step_varying(cards):
     assert rate.max() == np.float64(1.1574074074074073e-05)
 
 
-def test_one_step_l6_is_l4b_plus_final_damping_statement(cards):
+def test_l6_model_refuses_a_stale_damping_target(cards):
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
-        _NEMOWSRK3TestHooks,
+    )
+
+    _, l6, root = cards
+    model = LatLonCGridOceanModel(
+        l6.recipe.grid, l6.recipe.z_coord, l6.recipe.model_config)
+    with pytest.raises(ValueError, match=r"target kt=1, requested kt=2"):
+        model.step(
+            l6.recipe.initial_state, dt=l6.dt_s,
+            sponge=l6.recipe.tracer_damping, nemo_kt=2)
+    tmask = np.asarray(l6.recipe.z_coord.is_active) > 0.5
+    kt2 = recipe.build_orca2_damping_for_step(
+        root, tmask, kt=2, dt_s=l6.dt_s)
+    with pytest.raises(ValueError, match="requires nemo_kt"):
+        model.step(l6.recipe.initial_state, dt=l6.dt_s, sponge=kt2)
+
+
+def test_one_step_l6_guard_changes_the_untraced_production_result(
+        cards, monkeypatch):
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
     )
     from legoesm.ocean.freshwater import FreshwaterForcing
     from legoesm.ocean.state import OceanSurfaceForcing
 
-    l4b, l6, _ = cards
+    _, l6, _ = cards
     base = l6.recipe.initial_state
     rate = l6.recipe.tracer_damping.gamma
-    wet_damped = (rate > 0.0).astype(jnp.float64)
+    wet_damped = np.asarray(rate) > 0.0
+    rng = np.random.default_rng(7)
+    dT = np.where(wet_damped, rng.normal(0.0, 0.3, wet_damped.shape), 0.0)
+    dS = np.where(wet_damped, rng.normal(0.0, 0.05, wet_damped.shape), 0.0)
     state = base._replace(
-        T=base.T.replace(data=base.T.data + wet_damped),
-        S=base.S.replace(data=base.S.data - 2.0 * wet_damped),
+        T=base.T.replace(data=base.T.data + jnp.asarray(dT)),
+        S=base.S.replace(data=base.S.data + jnp.asarray(dS)),
     )
+    assert np.all(np.asarray(rate)[wet_damped] != 1.0)
+    assert np.any(dT[wet_damped] != np.float64(dT[wet_damped][0]))
     zero = jnp.zeros_like(state.eta.data)
     one = jnp.ones_like(state.eta.data)
     freshwater = FreshwaterForcing(
@@ -202,35 +229,33 @@ def test_one_step_l6_is_l4b_plus_final_damping_statement(cards):
         runoff_tracer_content=(zero, zero), q_nonsolar=one,
         ice_ocean_top_drag_rCdu=zero, salt_flux_sfx=zero,
         geothermal_heat_flux_mwm2=one)
-    hooks = _NEMOWSRK3TestHooks(expose_live_stage_operands=True)
 
-    def observed(card, sponge):
+    def ordinary_step():
         model = LatLonCGridOceanModel(
-            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-            _nemo_ws_test_hooks=hooks)
+            l6.recipe.grid, l6.recipe.z_coord, l6.recipe.model_config)
         return jax.device_get(model.step(
-            state, dt=card.dt_s, freshwater=freshwater,
-            surface_forcing=forcing, sponge=sponge))
+            state, dt=l6.dt_s, freshwater=freshwater,
+            surface_forcing=forcing, sponge=l6.recipe.tracer_damping,
+            nemo_kt=1))
 
-    l4b_trace = observed(l4b, None)
-    l6_trace = observed(l6, l6.recipe.tracer_damping)
-    assert l6_trace.stage3_before_damping is not None
-    assert l6_trace.stage3_damping_rate is not None
-    for got, want in zip(l6_trace.stage3_before_damping,
-                         l4b_trace.stage3_composed_source):
-        _assert_bits_equal(got, want)
-    expected_t = nemo_source_round(
-        l6_trace.stage3_before_damping[0]
-        + l6.recipe.tracer_damping.gamma
-        * (l6.recipe.tracer_damping.T_ref - state.T.data))
-    expected_s = nemo_source_round(
-        l6_trace.stage3_before_damping[1]
-        + l6.recipe.tracer_damping.gamma
-        * (l6.recipe.tracer_damping.S_ref - state.S.data))
-    _assert_bits_equal(l6_trace.stage3_composed_source[0], expected_t)
-    _assert_bits_equal(l6_trace.stage3_composed_source[1], expected_s)
-    assert np.any(np.asarray(l6_trace.stage3_composed_source[0]).view(np.uint64)
-                  != np.asarray(l6_trace.stage3_before_damping[0]).view(np.uint64))
+    guarded = ordinary_step()
+
+    def unguarded(l4b_t, l4b_s, T_kbb, S_kbb, sponge):
+        gamma = sponge.gamma.astype(T_kbb.dtype)
+        dT_dmp = gamma * (sponge.T_ref.astype(T_kbb.dtype) - T_kbb)
+        dS_dmp = gamma * (sponge.S_ref.astype(S_kbb.dtype) - S_kbb)
+        return (nemo_source_round(l4b_t + dT_dmp),
+                nemo_source_round(l4b_s + dS_dmp))
+
+    monkeypatch.setattr(
+        model_module, "_nemo_stage3_l4b_then_damping", unguarded)
+    planted = ordinary_step()
+    unequal = sum(
+        np.count_nonzero(
+            np.asarray(getattr(guarded, name).data).view(np.uint64)
+            != np.asarray(getattr(planted, name).data).view(np.uint64))
+        for name in ("T", "S"))
+    assert unequal > 0
 
 
 def test_ordered_damping_add_is_jit_traced_x64_and_gradient_finite():
@@ -248,24 +273,29 @@ def test_ordered_damping_add_is_jit_traced_x64_and_gradient_finite():
         sponge = SpongeForcing(gamma=gamma, T_ref=T_ref, S_ref=S_ref)
         return _nemo_stage3_l4b_then_damping(l4b_t, l4b_s, T, S, sponge)
 
-    args = tuple(jnp.asarray([x], dtype=jnp.float64) for x in (
-        0.0, 7.0, 2.0, 3.0, 1.0, 3.0, 5.0))
+    rng = np.random.default_rng(1)
+    shape = (4096,)
+    args_np = (
+        rng.normal(0.0, 1.0e-6, shape),
+        rng.normal(0.0, 1.0e-7, shape),
+        rng.normal(10.0, 5.0, shape),
+        rng.normal(35.0, 1.0, shape),
+        rng.uniform(1.0e-12, 1.1574074074074073e-5, shape),
+        rng.normal(10.0, 5.0, shape),
+        rng.normal(35.0, 1.0, shape),
+    )
+    args = tuple(jnp.asarray(x, dtype=jnp.float64) for x in args_np)
     got_t, got_s = jax.jit(kernel)(*args)
-    _assert_bits_equal(got_t, np.asarray([1.0], dtype=np.float64))
-    _assert_bits_equal(got_s, np.asarray([9.0], dtype=np.float64))
-
-    # Position discriminator: LDF(1e16), BBC(-1e16), then DMP(+1) is one;
-    # moving DMP before BBC loses the unit in binary64 and produces zero.
-    correct = np.float64(
-        (np.float64(1.0e16) + np.float64(-1.0e16)) + np.float64(1.0))
-    moved = np.float64(
-        (np.float64(1.0e16) + np.float64(1.0)) + np.float64(-1.0e16))
-    assert correct == 1.0 and moved == 0.0
+    l4b_t, l4b_s, T, S, gamma, T_ref, S_ref = args_np
+    expected_t = l4b_t + gamma * (T_ref - T)
+    expected_s = l4b_s + gamma * (S_ref - S)
+    _assert_bits_equal(got_t, expected_t)
+    _assert_bits_equal(got_s, expected_s)
 
     def scalar_sum(x):
         values = list(args)
-        values[2] = jnp.asarray([x], dtype=jnp.float64)
+        values[2] = values[2].at[0].set(x)
         out = kernel(*values)
         return out[0][0] + out[1][0]
 
-    assert np.isfinite(np.asarray(jax.grad(scalar_sum)(2.0)))
+    assert np.isfinite(np.asarray(jax.grad(scalar_sum)(args_np[2][0])))

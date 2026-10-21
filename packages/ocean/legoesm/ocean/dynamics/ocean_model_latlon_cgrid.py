@@ -14806,6 +14806,7 @@ class LatLonCGridOceanModel:
              freshwater=None, surface_forcing=None,
              sponge=None, *, grid=None,
              vertex_mask=None, t_seconds=None,
+             nemo_kt=None,
              external_tracer_rate=None,
              _shortwave_tendency_test_delta=None,
              _vertical_K_test_override=None,
@@ -14894,6 +14895,18 @@ class LatLonCGridOceanModel:
                 "step_checked(), or drive the run via integrate()/"
                 "integrate_scan() which thread it automatically."
             )
+        if self.config.rk3_stage3_damping_after_geothermal_nemo_order:
+            target_kt = None if sponge is None else sponge.nemo_kt
+            if (isinstance(nemo_kt, bool)
+                    or not isinstance(nemo_kt, (int, np.integer))
+                    or nemo_kt < 1):
+                raise ValueError(
+                    "L6 ordered damping requires nemo_kt=<positive step> so "
+                    "a stale time-interpolated target cannot be reused")
+            if target_kt != nemo_kt:
+                raise ValueError(
+                    f"L6 damping target is stale: target kt={target_kt!r}, "
+                    f"requested kt={nemo_kt!r}")
         if (external_tracer_rate is not None
                 and getattr(self.config, "outer_integrator", "forward_euler")
                 not in ("leapfrog", "nemo_mlf")):
