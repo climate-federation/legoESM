@@ -133,10 +133,14 @@ nonzero-mask acquisition record conforming.
 All Python/JAX tests use CPU JAX, `JAX_ENABLE_X64=1`, and the exact `land.sh`
 `PYTHONPATH`.
 
-- Focused L7 tests: **PENDING**.
-- Heading-scoped receipt citation gate: **PENDING**.
-- Exact default landing gate: **PENDING**.
-- Independent private-import ratchet: **PENDING**.
+- Focused L7 tests: **8 passed in 574.51 seconds**, including the real
+  one-/ten-step production trajectory, exhaustive evidence census, planted
+  evidence mismatch, actual gfortran writer harness, and short-field plant.
+- Heading-scoped receipt citation gate: **PASS**, 5 citations, zero failures,
+  zero unmapped citations, zero map-audit failures; every planted control
+  fired.
+- Exact default landing gate: **145 passed in 998.06 seconds**.
+- Independent private-import ratchet: **6 passed in 5.07 seconds**.
 
 independent review: operator (Claude)
 
