@@ -282,9 +282,9 @@ ceaa304fa4ea8ece0edf4bd4db15f5aa1e71245365839dcee32ac9d55cf9a081  l4b_stages_kt1
 325dad32e95a20a2f8c2e9bde3a477c45a8e045a07e6c5dd2ee8cd810caa6d75  l4b_geothermal_kt1_10.json
 ```
 
-The operator's post-fix review measured all 18 inherited cards unchanged:
-1,818 boolean flips, every guard still firing, and 36/36 two-step identities
-per card. This resume changes only a private write-only observer payload on the
+The operator's post-fix review flipped every boolean on all 18 inherited cards
+(1,818 flips, every guard still firing) and measured 36/36 two-step identities
+on 5 cards (G9, L4, L1, L2, L3). This resume changes only a private write-only observer payload on the
 L4b-selected branch; inherited selectors and state returns are unchanged. The
 merge-identity unit probe and its one-bit plant remain passing.
 
