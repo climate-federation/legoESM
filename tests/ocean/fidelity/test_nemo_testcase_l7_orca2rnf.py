@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import pickle
 import subprocess
 import sys
@@ -13,7 +14,6 @@ import jax.numpy as jnp
 import netCDF4
 import numpy as np
 import pytest
-
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
@@ -23,6 +23,7 @@ from legoesm.ocean.physics.vertical_mixing.k_profiles import (
     compute_vertical_K_profiles,
     nemo_river_mouth_heat_diffusivity,
 )
+
 from tests.ocean.fidelity.test_nemo_testcase_v1_orca2tke import (
     CARD_FILES,
     CASES,
@@ -38,6 +39,10 @@ IWM = INPUTS / "zdfiwm_forcing_orca2.nc"
 TOOL = CASES / "nemo_testcase_l7_orca2rnf"
 V5_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
                  "gridladder_vmix_rounds/round15/oracle_v5_r15/twin_a")
+V5_EVIDENCE = V5_RECORD.parent
+L7_EVIDENCE = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                   "gridladder_vmix_rounds/round22/oracle_l7_r22")
+FC = Path("/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran")
 
 
 @pytest.fixture(autouse=True)
@@ -175,8 +180,8 @@ def test_real_zero_mask_is_exact_identity_but_position_plant_fires(cards):
 
 @pytest.mark.skipif(not V5_RECORD.is_dir(), reason="no admitted V5 record")
 @pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 value contract")
-def test_one_step_v5_versus_l7_real_mask_is_bit_identical():
-    """Production jitted step: actual record is identity; synthetic plant above acts."""
+def test_one_and_ten_step_v5_versus_l7_real_mask_are_bit_identical():
+    """Production jitted trajectory: actual mask is identity at steps 1 and 10."""
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 
     sys.path[:0] = [str(CASES), str(CASES / "nemo_testcase_g5_orca2ice")]
@@ -186,23 +191,60 @@ def test_one_step_v5_versus_l7_real_mask_is_bit_identical():
     run = l7.recipe
     base_z = run.z_coord._replace(
         nemo_rnf_mouth_config=None, nemo_rnf_mouth_mask=None)
-    fresh, surface = g5.nemo_supplied_forcing(l7, V5_RECORD, 1)
-    surface = surface._replace(
-        ice_mean_thickness_hm_i=g5.read_v1_hm_i(V5_RECORD, 1))
-
-    def step(z_coord):
+    def trajectory(z_coord):
         model = LatLonCGridOceanModel(
             run.grid, z_coord, run.model_config, iwm_forcing=run.iwm_forcing)
-        return jax.device_get(jax.jit(
+        step = jax.jit(
             lambda state, fw, sf: model.step(
                 state, l7.dt_s, freshwater=fw, surface_forcing=sf)
-        )(run.initial_state, fresh, surface))
+        )
+        state, snapshots = run.initial_state, {}
+        for kt in range(1, 11):
+            fresh, surface = g5.nemo_supplied_forcing(l7, V5_RECORD, kt)
+            surface = surface._replace(
+                ice_mean_thickness_hm_i=g5.read_v1_hm_i(V5_RECORD, kt))
+            state = step(state, fresh, surface)
+            if kt in (1, 10):
+                snapshots[kt] = jax.device_get(state)
+        return snapshots
 
-    base, selected = step(base_z), step(run.z_coord)
-    for name in ("T", "S", "u", "v", "eta"):
-        assert np.array_equal(
-            np.asarray(getattr(base, name).data).view(np.uint64),
-            np.asarray(getattr(selected, name).data).view(np.uint64)), name
+    base, selected = trajectory(base_z), trajectory(run.z_coord)
+    for kt in (1, 10):
+        for name in ("T", "S", "u", "v", "eta"):
+            assert np.array_equal(
+                np.asarray(getattr(base[kt], name).data).view(np.uint64),
+                np.asarray(getattr(selected[kt], name).data).view(np.uint64)), (kt, name)
+
+
+@pytest.mark.skipif(not L7_EVIDENCE.is_dir() or not V5_EVIDENCE.is_dir(),
+                    reason="no admitted L7/V5 evidence")
+def test_all_comparable_l7_and_v5_nemo_outputs_are_bit_identical():
+    reader = TOOL / "l7_records.py"
+    command = [sys.executable, str(reader), "--compare-v5-evidence",
+               str(L7_EVIDENCE), str(V5_EVIDENCE)]
+    result = subprocess.run(command, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(result.stdout)
+    assert report["status"] == "PASS_L7_V5_NEMO_IDENTITY"
+    assert report["totals"] == {
+        "all_restart_files": 25,
+        "history_files": 20,
+        "standard_records": 369,
+        "twin_restart_files": 13,
+    }
+    assert report["noncomparable"]["l7_observer_reproduction"] == {
+        "actual_bytes": 27415020,
+        "expected_bytes": 27744364,
+        "fourth_field_values": 825840,
+        "header_shape": [184, 152, 31],
+        "header_values": 867008,
+        "river_minus_closure_min_first_interior_count": -930748.7023730353,
+        "river_minus_closure_unequal_first_interior_count": 31143,
+    }
+    planted = subprocess.run(command + ["--plant-evidence-record"],
+                             capture_output=True, text=True)
+    assert planted.returncode != 0
+    assert "files differ" in planted.stderr
 
 
 def test_acquisition_tool_is_guarded_and_observer_controls_fire(tmp_path):
@@ -217,6 +259,8 @@ def test_acquisition_tool_is_guarded_and_observer_controls_fire(tmp_path):
         'check_values "$REAL_LOG"', 'check_values "$target_deck"',
         '--check-acting "$SMOKE/$RECORD"', "steps <= 10",
         "smoke -> writer-free boundary -> twins A/B/C",
+        '--layout-harness "$scratch/l7_layout_harness.f90"',
+        "short-field Fortran writer plant was accepted",
     ):
         assert required in text, required
     assert "| grep -q" not in text
@@ -234,6 +278,8 @@ def test_acquisition_tool_is_guarded_and_observer_controls_fire(tmp_path):
         capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
     rendered = good.read_text()
+    assert "DIMENSION(Nis0:Nie0,Njs0:Nje0,jpk), INTENT(in) :: pfield" in rendered
+    assert "DIMENSION(jpi,jpj,jpk) :: zfield" in rendered
     assert rendered.index("l7_closure(:,:,:)") < rendered.index(
         "avt(ji,jj,jk) = avt(ji,jj,jk) + 2._wp")
     river = rendered.index("l7_river(:,:,:)")
@@ -248,3 +294,23 @@ def test_acquisition_tool_is_guarded_and_observer_controls_fire(tmp_path):
             [sys.executable, str(instrument), plant, str(source),
              str(tmp_path / "plant.f90")], capture_output=True, text=True)
         assert result.returncode != 0, plant
+    if FC.is_file():
+        harness = tmp_path / "layout.f90"
+        result = subprocess.run(
+            [sys.executable, str(instrument), "--layout-harness", str(harness)],
+            capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+        executable = tmp_path / "layout"
+        result = subprocess.run(
+            [str(FC), "-ffree-line-length-none", str(harness), "-o", str(executable)],
+            capture_output=True, text=True)
+        assert result.returncode == 0, result.stdout + result.stderr
+        good_record, short_record = tmp_path / "good.bin", tmp_path / "short.bin"
+        assert subprocess.run([str(executable), str(good_record)]).returncode == 0
+        assert subprocess.run(
+            [sys.executable, str(reader), "--check", str(good_record)]).returncode == 0
+        assert subprocess.run(
+            [str(executable), str(short_record), "short"]).returncode == 0
+        assert subprocess.run(
+            [sys.executable, str(reader), "--check", str(short_record)],
+            capture_output=True).returncode != 0

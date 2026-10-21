@@ -197,7 +197,18 @@ PY
   sed -E 's/^( *nn_itend *= *).*/\1 3/' "$target_deck" >"$scratch/bad-clock"
   if check_namelist_clock "$scratch/bad-clock"; then fail 'odd run-length plant accepted'; fi
 
-  # 4. Exact binary layout and acting-control selftest.
+  # 4. Compile and run the actual observer write sequence, then prove the
+  # reader accepts its full fields and refuses the planted short fourth field.
+  "$PY" "$INSTRUMENT" --layout-harness "$scratch/l7_layout_harness.f90"
+  "$FC" -ffree-line-length-none "$scratch/l7_layout_harness.f90" \
+    -o "$scratch/l7_layout_harness" || fail 'layout harness compile failed'
+  "$scratch/l7_layout_harness" "$scratch/layout-good.bin"
+  "$PY" "$READER" --check "$scratch/layout-good.bin" \
+    || fail 'actual Fortran observer layout was refused'
+  "$scratch/l7_layout_harness" "$scratch/layout-short.bin" short
+  if "$PY" "$READER" --check "$scratch/layout-short.bin" >/dev/null 2>&1; then
+    fail 'short-field Fortran writer plant was accepted'
+  fi
   "$PY" "$READER" --selftest || fail 'record reader selftest failed'
 
   # 5. Numeric/logical checks run on a real committed excerpt and stamped deck.
@@ -219,14 +230,14 @@ PY
   if cmp -s "$scratch/target-smoke" "$scratch/admit/namelist_cfg"; then fail 'altered deck plant accepted'; fi
 
   # 7. Target config and evidence root are absent unless explicitly admitting.
-  if [[ "$mode" != --admit-existing ]]; then
+  if [[ "$mode" == --run ]]; then
     require_absent "$TARGET" || fail "target config exists: $TARGET"
     require_absent "$EVIDENCE" || fail "evidence exists: $EVIDENCE"
-    mkdir "$scratch/existing-target"
-    if require_absent "$scratch/existing-target"; then fail 'existing-target plant accepted'; fi
-  else
+  elif [[ "$mode" == --admit-existing ]]; then
     [[ -x "$TARGET/BLD/bin/nemo.exe" && -d "$EVIDENCE" ]] || fail 'existing acquisition incomplete'
   fi
+  mkdir "$scratch/existing-target"
+  if require_absent "$scratch/existing-target"; then fail 'existing-target plant accepted'; fi
   printf 'L7_PREFLIGHT_OK checklist=7 plants=all_refused commit=%s\n' "$(git -C "$repo" rev-parse HEAD)"
 }
 
