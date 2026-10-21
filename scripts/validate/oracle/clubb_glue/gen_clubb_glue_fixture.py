@@ -21,7 +21,7 @@ CASES = ("15000", "100")
 # Per-column record order written by main.F90 (one line each).
 FIELDS = ("sfc", "thlm", "rtm", "thv", "rho", "exner", "p", "du", "dv", "dT",
           "dqv", "dqc", "alst", "deepcu", "aist", "cloud_frac")
-KEEP = ("sfc", "thlm", "rtm", "du", "dv", "dT", "dqv", "dqc")
+KEEP = ("sfc", "thlm", "rtm", "du", "dv", "dT", "dqv", "dqc", "aist")
 INPUTS = ("lat", "ps", "p_half", "p_full", "T", "qv", "qc", "qi", "u", "v",
           "z_full", "z_half", "shf", "E", "lhf", "taux", "tauy", "rtp2", "dt",
           "pref_mid")

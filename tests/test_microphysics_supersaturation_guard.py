@@ -62,7 +62,9 @@ from tests import _ratchet_audit as ra
 # guard); adding one requires editing this line, which forces the reviewer to
 # read the reason string. Mirrors the grow-only baseline pattern in
 # ``tests/test_dispatch_hardening.py``.
-BASELINE_EXEMPT = frozenset({"sdm", "fast_sbm", "none"})
+BASELINE_EXEMPT = frozenset({"sdm", "fast_sbm", "none",
+                             # faithful ESCOMP kessler_run port (no guard)
+                             "kessler"})
 
 _FACTORY_FN = "_get_microphysics_fn"
 _MIN_SCHEMES = 8  # discovery sanity floor (10 today)
@@ -439,7 +441,7 @@ def test_selftest_wrong_default_is_flagged() -> None:
 
 
 def test_selftest_compliant_config_passes() -> None:
-    assert classify_config("kessler", _GoodConfig()) is None
+    assert classify_config("morrison", _GoodConfig()) is None
 
 
 def test_selftest_short_exempt_reason_is_flagged(monkeypatch) -> None:

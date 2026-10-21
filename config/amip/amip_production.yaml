@@ -183,11 +183,21 @@ morrison_warm_rain_incloud: true   # CAM6 MG2 in-cloud warm rain (user decision
                                    # evaporation only in the precipitating
                                    # clear air, rain sedimenting the post-
                                    # source state, two-sided number re-adjust.
+                                   # Since 2026-10-19 also CAM6 MG2 TWO-MOMENT
+                                   # SNOW (user decision): the run carries the
+                                   # snow number N_s (tracer slot [9]); MG2
+                                   # riming, Bergeron onto snow, sublimation,
+                                   # self-aggregation, melt above +2 C, fall
+                                   # speeds, snow sedimenting the post-source
+                                   # state.
+morrison_ice_snow_d_auto: 500.0e-6 # CAM6 MG2 micro_mg_dcs = 500 um ice->snow
+                                   # size (namelist_defaults_cam.xml:1244;
+                                   # user decision 2026-10-19, was 250 um).
 morrison_sed_cfl_substeps: true  # MG2 micro_mg2_0.F90 sedimentation loop:
                                  # nstep = 1 + int(max V dt/dz) per column,
                                  # so precipitation crosses >1 layer per 600 s.
-                                 # Rain sediments the POST-source state as MG2
-                                 # (:2204, via warm_rain_incloud); ice/snow/
+                                 # Rain and snow sediment the POST-source state
+                                 # as MG2 (:2204, via warm_rain_incloud); ice/
                                  # graupel still sediment PRE-source pools.
 morrison_sed_cfl_substeps_strict: false # the abort path is an equinox error_if,
                                         # i.e. a host callback, and the GPU lane

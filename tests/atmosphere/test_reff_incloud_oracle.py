@@ -41,6 +41,7 @@ import pytest
 
 from legoesm.atmosphere.physics.clouds.cloud_fraction import compute_cloud_properties
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
+from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
 
 _FIX = Path(__file__).parent / "oracle_fixtures" / "reff_incloud.npz"
 _TOL = 1e-10  # user-approved oracle-match tolerance (max relative error, fp64)
@@ -70,7 +71,8 @@ def _max_rel(ours, ref, mask):
 
 
 def test_liquid_reff_pairs_incloud_number_with_mg2_incloud_water(z):
-    props = compute_cloud_properties(**_kwargs(z), n_cloud_in_cloud=True)
+    props = compute_cloud_properties(**_kwargs(z), n_cloud_in_cloud=True,
+                                     clubb_config=CLUBBConfig())
     ours = np.asarray(props.r_eff_liq) * 1e6  # m -> um (oracle EFFC units)
     m = (z["q_c"] > 1.0e-14) & (z["q_c"] / z["lcldm"] <= _MG2_QC_CAP)
     # the fixture exercises both halves of lcldm = max(ast, mincld) and ast != cover
@@ -81,7 +83,8 @@ def test_liquid_reff_pairs_incloud_number_with_mg2_incloud_water(z):
 
 
 def test_ice_reff_matches_mg2_effi(z):
-    props = compute_cloud_properties(**_kwargs(z), n_cloud_in_cloud=True)
+    props = compute_cloud_properties(**_kwargs(z), n_cloud_in_cloud=True,
+                                     clubb_config=CLUBBConfig())
     ours = np.asarray(props.r_eff_ice) * 1e6
     m = (z["q_i"] > 1.0e-14) & (z["ni_adj"] == 0.0) & (z["q_i"] / z["lcldm"] <= _MG2_QC_CAP)
     rel = _max_rel(ours, z["effi_mg2"], m)
@@ -94,7 +97,8 @@ def test_reff_gradient_finite(z):
     def loss(q_c, n_c, alst):
         p = compute_cloud_properties(**{**kw, "q_cloud": q_c, "n_cloud": n_c,
                                         "cloud_fraction_override": alst},
-                                     n_cloud_in_cloud=True)
+                                     n_cloud_in_cloud=True,
+                                     clubb_config=CLUBBConfig())
         return jnp.sum(p.r_eff_liq) + jnp.sum(p.lwp / p.r_eff_liq)
 
     grads = jax.grad(loss, argnums=(0, 1, 2))(kw["q_cloud"], kw["n_cloud"],

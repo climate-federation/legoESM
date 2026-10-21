@@ -75,9 +75,13 @@ kw = dict(T=jnp.asarray(S("T")), p_full=jnp.asarray(p_full), q_v=jnp.asarray(S("
           cloud_fraction_override=jnp.asarray(S("alst")), lat=jnp.asarray(lat),
           conv_mass_flux_up=jnp.asarray(mf), conv_icwmr=jnp.asarray(icw),
           p_half=jnp.asarray(p_half))
-props = compute_cloud_properties(**kw, n_cloud_in_cloud=True)
+from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig  # noqa: E402
+CLUBB = CLUBBConfig()  # CAM top_lev cut on aist (clubb_intr.F90:2535)
+props = compute_cloud_properties(**kw, n_cloud_in_cloud=True, clubb_config=CLUBB)
 aist = cam6_ice_stratus_fraction(kw["q_v"], kw["T"], kw["p_full"], kw["q_ice"], kw["lat"],
-                                 ccfg, kw["p_half"][:, :-1])
+                                 ccfg, kw["p_half"][:, :-1],
+                                 trop_cloud_top_press=CLUBB.trop_cloud_top_press,
+                                 trop_cloud_taper_lnp_width=CLUBB.trop_cloud_taper_lnp_width)
 ast = np.asarray(jnp.maximum(jnp.clip(kw["cloud_fraction_override"], 0.0, 1.0), aist))
 rho = np.asarray(compute_rho(jnp.maximum(kw["T"], 1.0), kw["p_full"], kw["q_v"]))
 

@@ -279,38 +279,20 @@ class TestMicrophysicsParams:
         assert_param_grad_ok(loss, 2.2, "Kessler accretion_coeff")
 
     def test_kessler_evaporation_coeff(self):
-        # ``rain_evaporation`` applies a donor-cap ``min(rate, q_r/dt)``
-        # that saturates whenever the un-capped rate exceeds the
-        # available rain inventory per timestep.  Probe in the regime
-        # ``rate < q_r/dt`` (tiny rain budget) so the cap is *inactive*
-        # and the evap_coeff gradient is not killed by the ``min``
-        # branch.  Verifies the parameter is reachable when the donor
-        # cap is not saturated — confirming the "BUG" is by-design
-        # donor-positivity, not a vanishing-gradient bug.
-        ncol, nlev = 2, 8
-        # Subsaturated column with very small q_r so the donor cap
-        # ``rate ≤ q_r / dt`` is never active.
-        q_r_tiny = 1e-12  # rate ∝ q_r^0.525 ≈ 1e-6 << q_r/dt is wrong
-                          # — actually rate ∝ q_r^0.525 = 1e-6, q_r/dt
-                          # = 3e-15 → still capped.  Use a tiny
-                          # evap_coeff probe instead.
-        T, q_v, hydro, p_full, p_half, rho, dz = _moist_microphys_column(
-            q_c=5e-3, q_r=q_r_tiny,
-        )
-        q_sat = saturation_mixing_ratio(T, p_full)
-        q_v_dry = 0.5 * q_sat
+        # The faithful ESCOMP kessler_run port has no evaporation coefficient
+        # (KW78 eq. 2.14 is hard-coded), so a traced value must raise rather
+        # than become an inert trainable leaf.
+        T, q_v, hydro, p_full, p_half, rho, dz = _moist_microphys_column()
 
         def loss(c):
             cfg = KesslerConfig()._replace(evaporation_coeff=c)
             out = kessler_microphysics(
-                T, q_v_dry, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
+                T, q_v, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
             )
             return jnp.sum(out.dq_v_dt ** 2)
 
-        # Probe at evap_coeff = 1e-12 so ``rate = 1e-12 · 0.5 ·
-        # (1e-12)^0.525 ≈ 1e-19`` << ``q_r / dt = 3.3e-15`` and the
-        # donor cap stays in the *un*-capped branch.
-        assert_param_grad_ok(loss, 1e-12, "Kessler evaporation_coeff")
+        with pytest.raises(ValueError, match="evaporation_coeff"):
+            jax.grad(loss)(1.0)
 
     def test_seifert_beheng_k_au(self):
         T, q_v, hydro, p_full, p_half, rho, dz = _moist_microphys_column()

@@ -844,6 +844,7 @@ def _call_radiation_backend(
     conv_icwmr: jnp.ndarray | None = None,
     clear_sky_toa: bool = False,
     column_mesh=None,
+    clubb_config=None,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -1034,6 +1035,7 @@ def _call_radiation_backend(
             conv_mass_flux_up=conv_mass_flux_up,
             conv_icwmr=conv_icwmr,
             p_half=p_half,
+            clubb_config=clubb_config,
         )
         if cloud_config.cap_floor_on:
             from legoesm.atmosphere.physics.clouds.cloud_fraction import apply_cap_cloud_floor
@@ -1228,6 +1230,7 @@ def make_radiation_physics(
     nc_from_aerosol: bool = False,
     activation_config=None,
     use_clubb_cloud_fraction: bool = False,
+    clubb_config=None,
 ) -> Callable:
     """Create a physics function for radiation matching a model's signature.
 
@@ -1352,7 +1355,8 @@ def make_radiation_physics(
                                             column_mesh=column_mesh,
                                             nc_from_aerosol=nc_from_aerosol,
                                             activation_config=activation_config,
-                                            use_clubb_cloud_fraction=use_clubb_cloud_fraction)
+                                            use_clubb_cloud_fraction=use_clubb_cloud_fraction,
+                                            clubb_config=clubb_config)
     elif model_type == "nonhydrostatic":
         return _make_nonhydrostatic_radiation(radiation_config, rrtmgp_solver,
                                                ml_ozone_coefs=ml_ozone_coefs)
@@ -1370,13 +1374,15 @@ def make_radiation_physics(
             sfc_emissivity_override=sfc_emissivity_override,
             use_clubb_cloud_fraction=use_clubb_cloud_fraction,
             column_mesh=column_mesh,
+            clubb_config=clubb_config,
         )
     elif model_type == "mpas":
         return _make_mpas_radiation(radiation_config, rrtmgp_solver,
                                      ml_ozone_coefs=ml_ozone_coefs,
                                      column_mesh=column_mesh,
                                      nc_from_aerosol=nc_from_aerosol,
-                                     use_clubb_cloud_fraction=use_clubb_cloud_fraction)
+                                     use_clubb_cloud_fraction=use_clubb_cloud_fraction,
+                                     clubb_config=clubb_config)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -1397,6 +1403,7 @@ def _make_hydrostatic_radiation(
     nc_from_aerosol: bool = False,
     activation_config=None,
     use_clubb_cloud_fraction: bool = False,
+    clubb_config=None,
 ) -> Callable:
     """Create radiation physics_fn for any hydrostatic model.
 
@@ -1819,6 +1826,7 @@ def _make_hydrostatic_radiation(
             solar_spectral_fraction=_ssf_ext,
             tsi=_tsi_ext,
             clear_sky_toa=_clr_sky_fused,
+            clubb_config=clubb_config,
         )
 
         # #843 lean-lane clear-sky second pass: SAME column state and
@@ -2684,6 +2692,7 @@ def _make_spectral_pe_radiation(
     sfc_emissivity_override: jnp.ndarray | float | None = None,
     use_clubb_cloud_fraction: bool = False,
     column_mesh=None,
+    clubb_config=None,
 ) -> Callable:
     """Create radiation physics_fn for SpectralPEModel.
 
@@ -2940,6 +2949,7 @@ def _make_spectral_pe_radiation(
             conv_mass_flux_up=_conv_mf_col,
             conv_icwmr=_conv_icwmr_col,
             column_mesh=column_mesh,
+            clubb_config=clubb_config,
         )
 
         # Reshape heating rate back to (n_lat, n_lon, nlev)

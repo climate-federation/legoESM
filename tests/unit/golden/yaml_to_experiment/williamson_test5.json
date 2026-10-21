@@ -267,7 +267,7 @@
   "morrison_fall_a_i": 700.0,
   "morrison_flavor": "mg",
   "morrison_hom_ice_nuc_N": 1000000.0,
-  "morrison_ice_snow_d_auto": 0.00025,
+  "morrison_ice_snow_d_auto": null,
   "morrison_k_au": 600.0,
   "morrison_rime_coeff": 1.0,
   "morrison_sed_cfl_substeps": true,

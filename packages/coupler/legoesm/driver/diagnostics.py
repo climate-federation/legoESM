@@ -287,6 +287,7 @@ class DiagnosticCollector:
         vcoord=None,
         surface_stability_scheme: str = "dyer1974",
         surface_bulk_scheme: str = "constant",
+        clubb_config=None,
     ):
         self.nlev = nlev
         self.sigma_full = sigma_full
@@ -327,6 +328,9 @@ class DiagnosticCollector:
         # fractional cloud fraction (issue #689).  ``None`` (cloud scheme
         # 'none') => ``clt`` is not published.
         self._cloud_config = cloud_config
+        # The run's resolved CLUBBConfig (cam6_clubb only): its top cuts the
+        # ice-stratus fraction exactly as radiation and MG2 do.
+        self._clubb_config = clubb_config
         # Set by ``feed_cmip_accumulators_native`` (MPAS lane) when it derives
         # clwvi/clivi from the RADIATION cloud diagnosis (floor included).
         # The cube lane's :meth:`collect` integrates the PROGNOSTIC condensate
@@ -896,6 +900,7 @@ class DiagnosticCollector:
             conv_mass_flux_up=jnp.reshape(
                 jnp.asarray(conv_mass_flux_up), (ncol, nlev + 1)),
             conv_icwmr=jnp.reshape(jnp.asarray(conv_icwmr), (ncol, nlev)),
+            clubb_config=self._clubb_config,
         )
 
     def _clt_percent(self, T, p_s, q_v, q_c, q_i=None, *, cloud_fraction=None,

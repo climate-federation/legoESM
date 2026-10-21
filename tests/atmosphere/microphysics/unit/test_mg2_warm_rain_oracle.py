@@ -41,7 +41,8 @@ HARD_LIMIT = dict(
     saturation_sharpness=1.0e14, ice_sigmoid_sharpness=1.0e6,
     nuc_rh_sharpness=1.0e9, nuc_T_sharpness=1.0e6,
     homogeneous_freeze_sharpness=1.0e6, hom_freeze_T_sharpness=1.0e6,
-    hom_ice_nuc_sharpness=1.0e9, melt_sharpness=1.0e6)
+    hom_ice_nuc_sharpness=1.0e9, melt_sharpness=1.0e6,
+    mg2_ice_slope_log_width=0.0, mg2_qi_limit_width=0.0)
 
 
 def _fx():

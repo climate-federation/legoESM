@@ -63,6 +63,7 @@ from legoesm.atmosphere.physics.convection.integration import (
 from legoesm.atmosphere.physics.turbulence.integration import (
     get_turbulence_fn,
     make_turbulence_physics,
+    resolved_clubb_config,
     turbulence_carry_field,
 )
 from legoesm.atmosphere.physics.microphysics.integration import (
@@ -770,6 +771,10 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             "fraction CLUBB diagnosed in the same sub-step); got "
             f"turbulence.scheme={config.turbulence.scheme!r}, "
             f"cld_macmic_num_steps={_n_macmic}.")
+    # The run's resolved CLUBBConfig (None unless CLUBB runs): the cam6_clubb
+    # ice-stratus fraction is cut at CLUBB's top (clubb_intr.F90:2535) in
+    # radiation and MG2 alike.
+    _clubb_cfg = resolved_clubb_config(config.turbulence)
     if config.radiation.scheme != "none":
         tagged_fns.append((
             make_radiation_physics(
@@ -777,6 +782,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 nc_from_aerosol=_nc_from_aerosol,
                 activation_config=_activation_cfg,
                 use_clubb_cloud_fraction=_use_clubb_cf,
+                clubb_config=_clubb_cfg,
             ),
             False,
             None,
@@ -819,6 +825,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             make_microphysics_physics(
                 config.microphysics, model_type, _dt_sub,
                 cloud_config=config.radiation.cloud_config,
+                clubb_config=_clubb_cfg,
                 relvar_from_clubb=(
                     _clubb_liquid_partition_on(config.turbulence)
                     and getattr(getattr(config.microphysics,
@@ -1532,6 +1539,7 @@ def _make_spectral_pe_combined(
             sfc_albedo_override=sfc_albedo_override,
             sfc_emissivity_override=sfc_emissivity_override,
             use_clubb_cloud_fraction=config.radiation.use_clubb_cloud_fraction,
+            clubb_config=resolved_clubb_config(config.turbulence),
         ), False, None))
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(config.convection, "spectral_pe", dt), True, "conv_prog_profile"))

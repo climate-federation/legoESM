@@ -21,7 +21,7 @@ are quoted here so a future change of behaviour shows up as a diff rather than
 as a silent re-tune of an assertion.
 
     scheme          hard=False  hard=True   (RH after 1 step from RH0 = 1.4)
-    kessler            1.0589      1.0000
+    kessler            1.0589      1.0000   (pre-port surrogate; now exempt)
     seifert_beheng     1.0589      1.0000
     morrison           1.0589      1.0000
     thompson           1.0589      1.0000
@@ -62,7 +62,6 @@ import numpy as np
 import pytest
 from legoesm.atmosphere.physics.microphysics.config import (
     HARD_SAT_GUARD_SCHEMES,
-    KesslerConfig,
     MicrophysicsMLEmulatorConfig,
     MorrisonConfig,
     P3Config,
@@ -70,7 +69,6 @@ from legoesm.atmosphere.physics.microphysics.config import (
     SundqvistConfig,
     ThompsonConfig,
 )
-from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
 from legoesm.atmosphere.physics.microphysics.ml_emulator import (
     MicrophysicsEmulator,
     ml_microphysics,
@@ -98,7 +96,6 @@ _P0 = 90000.0
 _RH0 = 1.4
 
 _SCHEMES = {
-    "kessler": (kessler_microphysics, KesslerConfig),
     "sundqvist": (sundqvist_microphysics, SundqvistConfig),
     "seifert_beheng": (seifert_beheng_microphysics, SeifertBehengConfig),
     "morrison": (morrison_microphysics, MorrisonConfig),
@@ -336,9 +333,11 @@ def test_ml_emulator_guard_gradient_is_finite_through_the_gate():
 
 def test_guard_conserves_moist_enthalpy_in_the_bulk_schemes():
     """c_pd*T + L_v*q_v is conserved by the adjustment (the identity the shared
-    core promises). Checked on Kessler at step 1 with no rain formed yet, so
-    condensation is the only active vapour term."""
-    fn, cfg_cls = _SCHEMES["kessler"]
+    core promises). Checked on Seifert-Beheng at step 1 with no rain formed
+    yet, so condensation is the only active vapour term.  (Kessler, the
+    original subject, is now the faithful ESCOMP kessler_run port, which has
+    no guard: HARD_SAT_GUARD_EXEMPT.)"""
+    fn, cfg_cls = _SCHEMES["seifert_beheng"]
     T, q_v, hyd, p_full, p_half, rho, dz = _column()
     cfg = cfg_cls(hard_saturation_adjustment=True)
     out = fn(T, q_v, hyd, p_full, p_half, rho, dz, _DT, cfg)

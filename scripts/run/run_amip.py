@@ -1041,7 +1041,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         dest="clubb_trop_cloud_top_press",
                         help="CLUBB upper domain limit [Pa] (CAM "
                              "trop_cloud_top_press): mixing tapered to zero "
-                             "above it. Default: the scheme's own 0 = no limit.")
+                             "above it. Default: the scheme's own (CAM6 100 Pa).")
     for _f, _leaf in {**ZM_SCALAR_FIELDS, **CLUBB_SCALAR_FIELDS}.items():
         _cls = ("ZhangMcFarlaneConfig" if _f.startswith("zm_")
                 else "CLUBBParams")
@@ -2135,6 +2135,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Multiplier on the kk2000 autoconversion rate "
                              "(CAM6 MG2-style; 1.0 = unscaled, <1 keeps "
                              "more cloud liquid). kk2000 only.")
+    parser.add_argument("--morrison-ice-snow-d-auto", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_ice_snow_d_auto"],
+                        dest="morrison_ice_snow_d_auto",
+                        help="Morrison ice->snow autoconversion size DCS [m] "
+                             "(unset = the flavor's DCS: SAM 250e-6, mg = CAM6 "
+                             "MG2 micro_mg_dcs 500e-6; an explicit value always "
+                             "wins).")
     parser.add_argument("--morrison-accre-enhan-fact", type=float,
                         default=ExperimentConfig._field_defaults[
                             "morrison_accre_enhan_fact"],
@@ -2903,6 +2911,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_flavor=args.morrison_flavor,
         morrison_warm_rain_scheme=args.morrison_warm_rain_scheme,
         morrison_autocon_fact=args.morrison_autocon_fact,
+        morrison_ice_snow_d_auto=args.morrison_ice_snow_d_auto,
         morrison_accre_enhan_fact=args.morrison_accre_enhan_fact,
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
         morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,

@@ -143,7 +143,7 @@ def test_prognostic_clubb_conserves_column_water(dt, p_top):
     np.testing.assert_allclose(dW, evap, rtol=1e-9, atol=0.0)
 
 
-_OFF = CLUBBConfig(prognostic=True, clubb_dt=CLUBB_DT)   # no cutoff (CAM top_lev = 1)
+_OFF = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True, clubb_dt=CLUBB_DT)   # no cutoff (CAM top_lev = 1)
 
 
 def test_prognostic_clubb_leaves_the_state_above_the_cutoff_alone():

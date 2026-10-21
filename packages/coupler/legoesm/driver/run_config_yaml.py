@@ -316,13 +316,12 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # hard saturation-adjustment trigger + heating cap -> _resolve_microphysics
     # (physics_pipeline, via apply_microphysics_experiment_flags; the MPAS
     # post-step drain reads the same threaded sub-config in model_driver).
-    # One flat scalar serves ALL SEVEN guarded schemes -- the five bulk
-    # warm-rain ones plus the Sundqvist diagnostic scheme and the ML emulator,
+    # One flat scalar serves ALL SIX guarded schemes -- the four bulk
+    # microphysics ones (morrison, p3, seifert_beheng, thompson) plus the
+    # Sundqvist diagnostic scheme and the ML emulator,
     # which gained the same guard when it was made uniform (only the active
     # scheme's sub-config is built, so one scalar is unambiguous). Keep this
     # block in step with microphysics/config.HARD_SAT_GUARD_SCHEMES.
-    "atm.micro.KesslerConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
-    "atm.micro.KesslerConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.MorrisonConfig.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",
     "atm.micro.MorrisonConfig.hard_sat_max_heating_K": "hard_sat_max_heating_K",
     "atm.micro.P3Config.hard_sat_adjust_threshold": "hard_sat_adjust_threshold",

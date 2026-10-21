@@ -12,11 +12,13 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.smooth import smooth_clamp, smooth_min
 from legoesm.thermo import (
     mixing_ratio_to_specific_humidity,
     saturation_mixing_ratio,
     saturation_mixing_ratio_ice,
     saturation_specific_humidity,
+    saturation_specific_humidity_ice,
 )
 
 # Default condensation/autoconversion sigmoid sharpness (used in signatures).
@@ -812,6 +814,7 @@ _MG2_PGAM_MIN = 2.0
 _MG2_DROP_DIAM_MAX = 50.0e-6   # [m] -> lambda lower bound (pgam+1)/50 um
 _MG2_DROP_DIAM_MIN = 2.0e-6    # [m] -> lambda upper bound (pgam+1)/2 um
 _MG2_MIN_MEAN_MASS_LIQ = 1.0e-20   # [kg]
+_MG2_PGAM_UNSET = -100.0       # pgam where qcic <= qsmall (:419, "likely to cause an error")
 # --- CAM6 MG2 rain processes (micro_mg_utils.F90) ---
 _MG2_BEHENG_SELFCOLL = 8.0     # self_collection_rain nragg = -8 nric qric rho (:1359, Beheng 1994)
 _MG2_EVAP_CLOUD_QMIN = 1.0e-6  # evaporate_sublimate_precip: dum=0 if qcic+qiic < 1e-6 (:1468)
@@ -885,6 +888,16 @@ def mg2_size_bounded_nc(q_c_ic, N_c_ic, rho):
     so ``lambda = (pi/6 rho_w (pgam+1)(pgam+2)(pgam+3) ncic/qcic)^(1/3)`` stays
     in ``(pgam+1)/[50 um, 2 um]``.  Elsewhere ``N_c_ic`` is returned unchanged.
     """
+    return mg2_size_dist_liq(q_c_ic, N_c_ic, rho)[0]
+
+
+def mg2_size_dist_liq(q_c_ic, N_c_ic, rho):
+    """MG2 ``size_dist_param_liq`` (micro_mg_utils.F90:376-422):
+    ``(N_c_ic_adjusted, pgam, lamc)`` with the number per-VOLUME, see
+    :func:`mg2_size_bounded_nc`.  ``lamc`` is the slope clipped to
+    ``(pgam+1)/[50 um, 2 um]``; where ``qcic <= qsmall`` MG2 sets ``pgam=-100``
+    and ``lamc=0`` and so does this.
+    """
     active = q_c_ic > MG2_QSMALL
     q_safe = jnp.where(active, q_c_ic, 1.0)
     pgam = 1.0 - _MG2_PGAM_A * jnp.exp(-_MG2_PGAM_B * N_c_ic)
@@ -898,7 +911,9 @@ def mg2_size_bounded_nc(q_c_ic, N_c_ic, rho):
     nc_kg = jnp.where(lam < lam_lo, lam_lo ** 3 * q_safe / shape,
                       jnp.where(lam > lam_hi, lam_hi ** 3 * q_safe / shape,
                                 nc_kg))
-    return jnp.where(active, nc_kg * rho, N_c_ic)
+    return (jnp.where(active, nc_kg * rho, N_c_ic),
+            jnp.where(active, pgam, _MG2_PGAM_UNSET),
+            jnp.where(active, jnp.clip(lam, lam_lo, lam_hi), 0.0))
 
 
 def mg2_inprecip_rain(q_r, N_r, rho, precip_frac, lamr_min, lamr_max):
@@ -969,17 +984,274 @@ def rain_evaporation_mg2(q_v, q_sat, T, p, rho, q_ric, lamr, n0r, lcldm,
     dv, mu, sc = _air_transport_props(T, p, rho)
     arn = config.fall_a_r * safe_pow(
         config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXPONENT)
-    cons34 = _VENT_CONS_OFFSET + config.fall_b_r / 2.0
-    cons9 = math.gamma(cons34)
     dqsdt = constants.L_v * q_sat / (constants.R_v * T ** 2)  # latent-ok: MG2 oracle constant (calc_ab, xxlv)
     ab = 1.0 + dqsdt * constants.L_v / constants.c_pd  # latent-ok: MG2 oracle constant (calc_ab, xxlv)
-    eps = (2.0 * jnp.pi * n0r * dv
-           * (config.rain_vent_f1 / (lam * lam)
-              + config.rain_vent_f2 * cons9
-              * safe_pow(arn * rho / mu, 0.5) * safe_pow(sc, 1.0 / 3.0)
-              * safe_pow(lam, -cons34)))
+    eps = _mg2_vent_eps(n0r, lam, arn, config.fall_b_r, config.rain_vent_f1,
+                        config.rain_vent_f2, rho, dv, mu, sc)
     pre = jnp.minimum(eps * (qclr - q_sat) / ab * am_evp_st, 0.0)
     return jnp.where(active, -pre, 0.0)
+
+
+def _mg2_vent_eps(n0_vol, lam, a_fall, b_fall, f1, f2, rho, dv, mu, sc):
+    """MG2 diffusion + ventilation ``eps`` of a precipitating species
+    (``evaporate_sublimate_precip`` / ``bergeron_process_snow``,
+    micro_mg_utils.F90:1487-1491, :1505-1509, :1574-1578)::
+
+        eps = 2 pi n0 rho Dv (f1/lam^2 + f2 (a rho/mu)^1/2 Sc^1/3
+                              Gamma(5/2+b/2) / lam^(5/2+b/2))
+
+    ``n0_vol`` is the PER-VOLUME intercept (MG2's per-kg ``n0`` times rho);
+    ``a_fall`` is the density-corrected fall-speed coefficient (``arn``/``asn``).
+    """
+    cons = _VENT_CONS_OFFSET + b_fall / 2.0
+    return (2.0 * jnp.pi * n0_vol * dv
+            * (f1 / (lam * lam)
+               + f2 * math.gamma(cons)
+               * safe_pow(a_fall * rho / mu, 0.5) * safe_pow(sc, 1.0 / 3.0)
+               * safe_pow(lam, -cons)))
+
+
+# --- CAM6 MG2 two-moment SNOW (micro_mg_utils.F90 / micro_mg2_0.F90,
+# cam_cesm2_1_rel_60 a03b84b7).  Snow number N_s is PER-MASS [#/kg] as in MG2;
+# rho_snow / lams_min / lams_max / fall_a_s / fall_b_s / snow_vent_f1,f2 /
+# snow_aggregation_eii are the MorrisonConfig fields the "mg" flavour resolves
+# to MG2's rhosn=250, lam_bnd_snow=1/[2000,10] um, as=11.72, bs=0.41,
+# f1s=0.86, f2s=0.28, eii=0.5. ---
+MG2_QSIC_MAX = 0.01            # in-precip snow cap [kg/kg] (micro_mg2_0.F90:1363, :2766)
+MG2_SNOWMELT_OFFSET_K = 2.0    # snowmelt = tmelt + 2 K: all snow melts above it (:329)
+_MG2_SNOW_VT_CAP = 1.2         # ums, uns <= 1.2*rhof [m/s] (:1407-1408, :2189-2190)
+_MG2_STOKES_DIV = 9.0          # accrete_cloud_water_snow Stokes number dc0^2 uns rhow lams/(9 mu) (:1133)
+_MG2_ECI_KNEE = 0.4            # eci = St^2/(St+0.4)^2, Thompson et al. 2004 (:1134)
+_MG2_NSAGG_DENOM = 4.0 * 720.0  # snow_self_aggregation -1108 eii/(4*720 rhosn) (:1072)
+
+
+def mg2_snow_slope(q_sic, N_sic, config):
+    """MG2 ``size_dist_param_basic(mg_snow_props, qsic, nsic, lams)``
+    (micro_mg_utils.F90:481-516): where ``qsic > qsmall``,
+    ``lams = (pi rhosn nsic/qsic)^(1/3)``; outside ``[lams_min, lams_max]`` it
+    is set to the bound and ``nsic`` re-adjusted to match.  ``lams = 0`` (and
+    ``nsic`` untouched) elsewhere.  Returns ``(nsic, lams)``, per-mass number.
+    """
+    return _mg2_size_dist_basic(q_sic, N_sic, config.rho_snow * jnp.pi,
+                                config.lams_min, config.lams_max)
+
+
+def _mg2_size_dist_basic(q, N, shape, lam_min, lam_max, min_mean_mass=None,
+                         log_width=0.0):
+    """MG2 ``size_dist_param_basic`` for an exponential PSD (eff_dim 3,
+    micro_mg_utils.F90:481-516) -> ``(N_adj, lam)``; see :func:`mg2_snow_slope`.
+    ``min_mean_mass`` caps ``N <= q/min_mean_mass`` first (the ice props).
+    ``log_width > 0`` replaces the hard slope clamp by a LogSumExp clamp of
+    ``ln lam`` of that width, with ``N`` re-adjusted to the smooth slope
+    everywhere; ``0`` is MG2's hard clamp."""
+    active = q > MG2_QSMALL
+    q_safe = jnp.where(active, q, 1.0)
+    if min_mean_mass is not None:
+        N = jnp.minimum(N, q_safe / min_mean_mass)
+    if log_width > 0.0:
+        arg = shape * N / q_safe
+        tiny = jnp.finfo(jnp.result_type(arg)).tiny
+        ln_raw = jnp.log(jnp.where(arg > tiny, arg, tiny)) / 3.0
+        lam = jnp.exp(smooth_clamp(ln_raw, math.log(lam_min), math.log(lam_max),
+                                   1.0 / log_width))
+        n_adj = lam ** 3 * q_safe / shape
+    else:
+        lam_raw = safe_pow(shape * N / q_safe, 1.0 / 3.0)
+        lam = jnp.clip(lam_raw, lam_min, lam_max)
+        n_adj = jnp.where((lam_raw < lam_min) | (lam_raw > lam_max),
+                          lam ** 3 * q_safe / shape, N)
+    return (jnp.where(active, n_adj, N), jnp.where(active, lam, 0.0))
+
+
+def mg2_inprecip_snow(q_s, N_s, precip_frac, config):
+    """MG2 in-precip snow ``(qsic, nsic, lams, n0s)`` (micro_mg2_0.F90:
+    1358-1375 then :1400-1401): ``qsic = min(qs/precip_frac, 0.01)``,
+    ``nsic = max(ns/precip_frac, 0)``, both 0 where ``qsic < qsmall``, then
+    :func:`mg2_snow_slope`; ``n0s = nsic*lams``.  Per-mass numbers."""
+    q_sic = jnp.minimum(q_s / precip_frac, MG2_QSIC_MAX)
+    small = q_sic < MG2_QSMALL
+    q_sic = jnp.where(small, 0.0, q_sic)
+    N_sic = jnp.maximum(jnp.where(small, 0.0, N_s / precip_frac), 0.0)
+    N_sic, lams = mg2_snow_slope(q_sic, N_sic, config)
+    return q_sic, N_sic, lams, N_sic * lams
+
+
+def mg2_snow_rhof_asn(rho, config):
+    """MG2 ``rhof = (rhosu/rho)^0.54`` and ``asn = as*rhof``
+    (micro_mg2_0.F90:940-944)."""
+    rhof = safe_pow(config.rho_su / jnp.clip(rho, _RHO_FLOOR), _FALL_RHO_EXPONENT)
+    return rhof, config.fall_a_s * rhof
+
+
+def mg2_snow_fall_speeds(lams, rho, config):
+    """MG2 snow mass- and number-weighted fall speeds ``(ums, uns)``
+    (micro_mg2_0.F90:1403-1413 provisional, :2186-2199 final)::
+
+        ums = min(asn Gamma(4+bs)/(6 lams^bs), 1.2 rhof)
+        uns = min(asn Gamma(1+bs)/lams^bs,     1.2 rhof)
+
+    where ``lams > 0``, else 0."""
+    rhof, asn = mg2_snow_rhof_asn(rho, config)
+    on = lams > 0.0
+    lam_b = safe_pow(jnp.where(on, lams, 1.0), config.fall_b_s)
+    cap = _MG2_SNOW_VT_CAP * rhof
+    ums = jnp.minimum(asn * math.gamma(4.0 + config.fall_b_s) / (6.0 * lam_b), cap)
+    uns = jnp.minimum(asn * math.gamma(1.0 + config.fall_b_s) / lam_b, cap)
+    return jnp.where(on, ums, 0.0), jnp.where(on, uns, 0.0)
+
+
+def mg2_snow_self_aggregation(q_sic, N_sic, T, rho, config):
+    """MG2 ``snow_self_aggregation`` (micro_mg_utils.F90:1052-1078), in-precip
+    per-mass number rate [#/kg/s], NEGATIVE (a sink)::
+
+        nsagg = -1108 eii/(4*720 rhosn) asn qsic nsic rho
+                ((qsic/nsic)/(rhosn pi))^((bs-1)/3)
+
+    where ``qsic >= qsmall`` and ``T <= T_freeze``, else 0."""
+    active = (q_sic >= MG2_QSMALL) & (T <= constants.T_freeze)
+    q = jnp.where(active, q_sic, 1.0)
+    n = jnp.where(active, N_sic, 1.0)
+    _, asn = mg2_snow_rhof_asn(rho, config)
+    rs = config.rho_snow
+    nsagg = (-_NSAGG_CONS15_PREFACTOR * config.snow_aggregation_eii
+             / (_MG2_NSAGG_DENOM * rs) * asn * q * n * rho
+             * ((q / n) * (1.0 / (rs * jnp.pi))) ** ((config.fall_b_s - 1.0) / 3.0))
+    return jnp.where(active, nsagg, 0.0)
+
+
+def mg2_accrete_cloud_water_snow(T, rho, mu, uns, q_cic, N_cic, q_sic, pgam,
+                                 lamc, lams, n0s, config):
+    """MG2 ``accrete_cloud_water_snow`` (micro_mg_utils.F90:1087-1151): riming
+    of cloud droplets by snow, in-cloud ``(psacws [kg/kg/s], npsacws)``::
+
+        dc0 = (pgam+1)/lamc;  St = dc0^2 uns rhow lams/(9 mu)
+        eci = clip(St^2/(St+0.4)^2, 0, 1)
+        rate = pi/4 asn rho n0s eci Gamma(bs+3)/lams^(bs+3)
+        psacws = rate qcic,  npsacws = rate ncic
+
+    where ``qsic >= qsmall``, ``T <= T_freeze`` and ``qcic >= qsmall``.
+    ``uns`` is the PROVISIONAL in-precip snow number fall speed, ``pgam/lamc``
+    from :func:`mg2_size_dist_liq`; ``N_cic`` in whatever units the caller wants
+    ``npsacws`` in."""
+    active = ((q_sic >= MG2_QSMALL) & (T <= constants.T_freeze)
+              & (q_cic >= MG2_QSMALL))
+    lc = jnp.where(active, lamc, 1.0)
+    ls = jnp.where(active, lams, 1.0)
+    _, asn = mg2_snow_rhof_asn(rho, config)
+    dc0 = (pgam + 1.0) / lc
+    st = dc0 * dc0 * uns * constants.rho_water * ls / (_MG2_STOKES_DIV * mu)
+    eci = jnp.clip(st * st / ((st + _MG2_ECI_KNEE) * (st + _MG2_ECI_KNEE)),
+                   0.0, 1.0)
+    bs = config.fall_b_s
+    rate = (jnp.pi / 4.0 * asn * rho * n0s * eci * math.gamma(bs + 3.0)
+            / ls ** (bs + 3.0))
+    return (jnp.where(active, rate * q_cic, 0.0),
+            jnp.where(active, rate * N_cic, 0.0))
+
+
+def mg2_snow_vent_eps(n0s, lams, T, p, rho, config):
+    """MG2 snow diffusion+ventilation ``eps`` (:func:`_mg2_vent_eps` with the
+    snow PSD, per-mass ``n0s``) and the air viscosity ``mu``, the pair the snow
+    sublimation / Bergeron kernels and :func:`mg2_accrete_cloud_water_snow`
+    consume."""
+    dv, mu, sc = _air_transport_props(T, p, rho)
+    _, asn = mg2_snow_rhof_asn(rho, config)
+    lam = jnp.where(lams > 0.0, lams, 1.0)
+    eps = _mg2_vent_eps(n0s * rho, lam, asn, config.fall_b_s,
+                        config.snow_vent_f1, config.snow_vent_f2, rho, dv, mu, sc)
+    return jnp.where(lams > 0.0, eps, 0.0), mu
+
+
+def _mg2_calc_ab_ice(T, q_sat_i):
+    """MG2 ``calc_ab(t, qvi, xxls)`` (micro_mg_utils.F90:361-373)."""
+    dqsdt = constants.L_s * q_sat_i / (constants.R_v * T ** 2)  # latent-ok: MG2 oracle constant (xxls)
+    return 1.0 + dqsdt * constants.L_s / constants.c_pd  # latent-ok: MG2 oracle constant (xxls)
+
+
+def mg2_bergeron_snow(T, q_cic, q_sic, q_sat, q_sat_i, eps_s):
+    """MG2 ``bergeron_process_snow`` (micro_mg_utils.F90:1541-1586), in-cloud
+    liquid -> snow rate ``bergs = eps (qvl - qvi)/ab`` [kg/kg/s] where
+    ``qsic >= qsmall``, ``qcic >= qsmall`` and ``T < T_freeze`` (times
+    micro_mg_berg_eff_factor = 1, the CAM6 namelist value)."""
+    active = ((q_sic >= MG2_QSMALL) & (q_cic >= MG2_QSMALL)
+              & (T < constants.T_freeze))
+    bergs = eps_s * (q_sat - q_sat_i) / _mg2_calc_ab_ice(T, q_sat_i)
+    return jnp.where(active, bergs, 0.0)
+
+
+def mg2_snow_sublimation(q_v, q_sat, q_sat_i, T, eps_s, q_sic, lcldm,
+                         precip_frac, q_cic, q_iic):
+    """MG2 snow sublimation ``prds`` (``evaporate_sublimate_precip``,
+    micro_mg_utils.F90:1460-1530), IN-PRECIP, <= 0 [kg/kg/s] (grid value =
+    ``prds*precip_frac``).  Only in the precipitating clear air: ``dum = lcldm``
+    unless ``qcic+qiic < 1e-6``; where ``precip_frac > dum`` and
+    ``qsic >= qsmall``: ``qclr = (q - dum qvl)/(1 - dum)``,
+    ``prds = min(eps (qclr - qvi)/ab (precip_frac - dum), 0)/precip_frac``."""
+    dum = jnp.where(q_cic + q_iic < _MG2_EVAP_CLOUD_QMIN, 0.0, lcldm)
+    active = (precip_frac > dum) & (q_sic >= MG2_QSMALL)
+    one_m_dum = jnp.where(active, 1.0 - dum, 1.0)
+    qclr = (q_v - dum * q_sat) / one_m_dum
+    prds = eps_s * (qclr - q_sat_i) / _mg2_calc_ab_ice(T, q_sat_i)
+    prds = jnp.minimum(prds * (precip_frac - dum), 0.0) / precip_frac
+    return jnp.where(active, prds, 0.0)
+
+
+def mg2_precip_sublimation_limiter(q_v, T, p, pre, prds, ice_sublim, vap_dep,
+                                   mnuccd, dt):
+    """MG2 limit on rain evaporation + snow and ice sublimation
+    (micro_mg2_0.F90:1805-1850), all GRID rates [kg/kg/s] with MG2's signs
+    (``pre``, ``prds``, ``ice_sublim`` <= 0; ``vap_dep``, ``mnuccd`` >= 0).
+
+    Where they sum below -1e-20 and the end-of-step humidity
+    ``q - (ice_sublim + vap_dep + mnuccd + pre + prds) dt`` would exceed liquid
+    saturation at the end-of-step temperature, the three are replaced by their
+    share (``dum1 = pre/sum``, ``dum2 = prds/sum``, ``1 - dum1 - dum2``) of the
+    one-step adjustment to saturation from the state after deposition and
+    nucleation: rain to LIQUID saturation, snow and ice to ICE saturation,
+    each ``min((qtmp - qsat)/(1 + L^2 qsat/(c_p R_v ttmp^2)), 0)/dt``.
+    Returns ``(pre, prds, ice_sublim)``."""
+    tot = pre + prds + ice_sublim
+    on = tot < -1.0e-20
+    cp = constants.c_pd
+    qtmp = q_v - (ice_sublim + vap_dep + mnuccd + pre + prds) * dt
+    ttmp = T + (pre * constants.L_v  # latent-ok: MG2 oracle constant (xxlv)
+                + (prds + vap_dep + ice_sublim + mnuccd)
+                * constants.L_s) * dt / cp  # latent-ok: MG2 oracle constant (xxls)
+    on = on & (qtmp > saturation_specific_humidity(ttmp, p))
+    den = jnp.where(on, tot, -1.0)
+    dum1 = pre / den
+    dum2 = prds / den
+    qtmp = q_v - (vap_dep + mnuccd) * dt
+    ttmp = T + ((vap_dep + mnuccd) * constants.L_s) * dt / cp  # latent-ok: MG2 oracle constant (xxls)
+    qvn = saturation_specific_humidity(ttmp, p)
+    dum = jnp.minimum((qtmp - qvn) / (1.0 + constants.L_v ** 2 * qvn  # latent-ok: MG2 oracle constant (xxlv_squared)
+                                      / (cp * constants.R_v * ttmp ** 2)), 0.0)
+    pre_n = dum * dum1 / dt
+    qvn = saturation_specific_humidity_ice(ttmp, p)
+    dum = jnp.minimum((qtmp - qvn) / (1.0 + constants.L_s ** 2 * qvn  # latent-ok: MG2 oracle constant (xxls_squared)
+                                      / (cp * constants.R_v * ttmp ** 2)), 0.0)
+    prds_n = dum * dum2 / dt
+    ice_n = dum * (1.0 - dum1 - dum2) / dt
+    return (jnp.where(on, pre_n, pre), jnp.where(on, prds_n, prds),
+            jnp.where(on, ice_n, ice_sublim))
+
+
+def mg2_instant_snow_melt(T, q_s, N_s):
+    """MG2 instantaneous snow melting above ``snowmelt = T_freeze + 2 K``
+    (micro_mg2_0.F90:1147-1169 before the processes, :2538-2566 after
+    sedimentation): where ``T > snowmelt`` and ``q_s > 0`` the fraction
+    ``dum = 1``, or, if melting all of it would cool the air below snowmelt,
+    ``dum = clip((T - snowmelt) c_p/(L_f q_s), 0, 1)``.  Returns the melted
+    ``(mass, number) = (dum q_s, dum N_s)`` [kg/kg, #/kg]."""
+    t_melt = constants.T_freeze + MG2_SNOWMELT_OFFSET_K
+    active = (T > t_melt) & (q_s > 0.0)
+    q = jnp.where(active, q_s, 1.0)
+    whole = T - constants.L_f / constants.c_pd * q < t_melt  # latent-ok: MG2 oracle constant (xlf)
+    frac = jnp.where(
+        whole, jnp.clip((T - t_melt) * constants.c_pd / constants.L_f / q,  # latent-ok: MG2 oracle constant (xlf)
+                        0.0, 1.0), 1.0)
+    return (jnp.where(active, frac * q_s, 0.0),
+            jnp.where(active, frac * N_s, 0.0))
 
 # --- Seifert & Beheng (2001) warm-rain UNIVERSAL FUNCTIONS ---
 # Faithful transcription of the gSAM M2005 IRAIN=1 path
@@ -1034,6 +1306,10 @@ _RHO_FLOOR = 0.1                 # air-density floor in PSD/fall-speed divisions
 _FALL_RHO_EXPONENT = 0.54        # (rho_su/rho)^0.54 fall-speed density correction
 _VENT_CONS_OFFSET = 2.5          # 5/2 in ventilation gamma argument 5/2 + b/2
 _BIGG_MNUCCR_PREFACTOR = 20.0    # Bigg freezing mass prefactor (20 pi^2 rho_w)
+# Bigg rain freezing only below -4 C: CAM6 MG2 heterogeneous_rain_freezing
+# ``t < 269.15`` (micro_mg_utils.F90:1273), SAM M2005 ``T3D < 269.15``
+# (module_mp_graupel.F90:3296), WRF M2005 likewise.
+_BIGG_T_MAX_K = 269.15
 _UMR_FALL_CAP = 9.1              # rain mass-weighted fall-speed cap [m/s]
 _UMG_FALL_CAP = 20.0             # graupel mass-weighted fall-speed cap [m/s]
 _VDIFF_C1, _VDIFF_C2, _VDIFF_C3 = 1.2, 0.95, 0.08  # Wisner two-PSD VDIFF coeffs
@@ -1399,7 +1675,7 @@ def rain_freezing_bigg(q_r, N_r, T, rho, config, dt=None):
     module_mp_graupel.f90:3251-3257)::
 
         LAMR   = (π·ρ_w·N_r/(ρ·q_r))^⅓        (N_r per-VOLUME ⇒ /ρ; clamped)
-        X      = exp(AIMM·(T₀−T)) − 1          (T<T₀ only; AIMM=0.66/K, BIMM=100)
+        X      = exp(AIMM·(T₀−T)) − 1          (T<269.15 K only; AIMM=0.66/K, BIMM=100)
         MNUCCR = 20·π²·ρ_w·BIMM·(N_r/ρ)·X / LAMR^6     (mass [kg/kg/s])
         NNUCCR = π·N_r·BIMM·X / LAMR^3                 (number [/m³/s], per-vol)
 
@@ -1424,7 +1700,8 @@ def rain_freezing_bigg(q_r, N_r, T, rho, config, dt=None):
     nnuccr = jnp.pi * nr_pos * bimm * x / lamr3
     mnuccr = (_BIGG_MNUCCR_PREFACTOR * jnp.pi ** 2 * constants.rho_water * bimm
               * (nr_pos / jnp.clip(rho, _RHO_FLOOR)) * x / (lamr3 * lamr3))
-    gate = (qr_pos > 1.0e-14) & (dT_sc > 0.0)            # supercooled rain only
+    # supercooled rain below -4 C only (SAM/MG2 T < 269.15 K)
+    gate = (qr_pos > 1.0e-14) & (T < _BIGG_T_MAX_K)
     mnuccr = jnp.where(gate, mnuccr, 0.0)
     nnuccr = jnp.where(gate, nnuccr, 0.0)
     if dt is not None:
@@ -1440,6 +1717,97 @@ def rain_freezing_bigg(q_r, N_r, T, rho, config, dt=None):
         mnuccr = mnuccr * scale
         nnuccr = nnuccr * scale
     return mnuccr, nnuccr
+
+
+_MG2_ICE_AC_TIME_S = 180.0     # ice_autoconversion ac_time [s] (micro_mg_utils.F90:873)
+_FERRIER_ICE_NUMBER_DENOM = 6.0 * _MG2_ICE_AC_TIME_S   # Gamma(4) * ac_time
+_MG2_ICE_D_MIN_M = 1.0e-6      # ice_lambda_bounds = 1/[2 dcs, 1 um] (micro_mg_utils.F90:294)
+_MG2_MIN_MEAN_MASS_ICE = 1.0e-20  # min_mean_mass_ice [kg] (micro_mg_utils.F90:174)
+
+
+def mg2_ice_slope(q_i, N_i, rho_ice, dcs, log_width=0.0):
+    """MG2 ``size_dist_param_basic(mg_ice_props, qiic, niic, lami)``
+    (micro_mg2_0.F90:1333) -> ``(niic, lami)``: ``N_i <= q_i/1e-20 kg``, then
+    ``lami = (pi rhoi N_i/q_i)^(1/3)`` held inside ``1/[2 dcs, 1 um]`` with
+    ``N_i`` re-adjusted to the bound.  Per-mass number; ``lami = 0`` where
+    ``q_i <= qsmall``.
+
+    KNOWN DIFFERENCE (RULE 5): MG2 clamps ``lami`` with a hard ``if``; with
+    ``log_width > 0`` (``MorrisonConfig.mg2_ice_slope_log_width``) the clamp
+    is a LogSumExp clamp of ``ln lami`` and ``niic`` follows the smooth slope
+    everywhere, so ``lami``/``niic`` and the Ferrier rates differ from MG2
+    near the bounds (measured gaps: tests/atmosphere/microphysics/unit/
+    test_mg2_ice_snow_oracle.py).  ``log_width = 0`` recovers MG2 exactly.
+    No invariant is lost: the slope stays inside the bounds to O(width).
+    Default width 0.01 approved by user 2026-10-21."""
+    return _mg2_size_dist_basic(jnp.clip(q_i, 0.0), jnp.clip(N_i, 0.0),
+                                rho_ice * jnp.pi, 1.0 / (2.0 * dcs),
+                                1.0 / _MG2_ICE_D_MIN_M, _MG2_MIN_MEAN_MASS_ICE,
+                                log_width=log_width)
+
+
+def mg2_qi_conservation_ratio(q_avail, src, snk, dt, omsm, width=0.0):
+    """MG2 conservation of qi (micro_mg2_0.F90:1717-1735): the factor on the
+    ice sinks ``snk`` (autoconversion + sublimation) so that they take at most
+    ``q_avail + src dt``, x omsm.  MG2: ``ratio = (q_avail/dt + src)/snk *
+    omsm`` where ``(snk - src) dt > q_avail``, else 1.
+
+    KNOWN DIFFERENCE (RULE 5): with ``width > 0``
+    (``MorrisonConfig.mg2_qi_limit_width``) the factor is the LogSumExp
+    smooth minimum of 1 and that ratio, which never exceeds the hard
+    ``min(1, ratio)``, so q_i still cannot go negative; it trims the sinks by
+    up to ``width ln 2`` where the ratio is near 1 and is 1 to rounding far
+    from it (measured gaps: test_mg2_ice_snow_oracle.py).  ``width = 0`` is
+    MG2's hard form exactly.  Default width 0.01 approved by user 2026-10-21."""
+    # sinks below 1e-30 kg/kg/s: ratio >= q/dt/1e-30 >> 1 either way, so the
+    # sentinel keeps fp32 r finite without changing the factor (1).
+    has = snk > 1.0e-30
+    r = jnp.where(has, (q_avail / dt + src) / jnp.where(has, snk, 1.0) * omsm,
+                  1.0e30)
+    if width > 0.0:
+        return smooth_min(jnp.ones_like(r), r, 1.0 / width)
+    return jnp.where((snk - src) * dt > q_avail, r, 1.0)
+
+
+def ice_autoconversion_mg2(q_i, N_i, lami, dcs, T):
+    """MG2 ``ice_autoconversion`` (Ferrier 1994; micro_mg_utils.F90:859-901)
+    ``(prci [kg/kg/s], nprci [#/kg/s])`` where ``q_i > 1e-14`` and
+    ``T <= T_freeze``::
+
+        d = lami dcs;  nprci = n0i/(lami 180) exp(-d) = N_i/180 exp(-d)
+        prci  = (rhoi pi/6)/lami^3 nprci (((d+3) d+6) d+6)
+              = q_i/1080 exp(-d) (((d+3) d+6) d+6)
+
+    the mass rate in the 1/lami^3-free form (q_i = rhoi pi N_i/lami^3 for the
+    exponential PSD), which stays finite as N_i -> 0 in fp32."""
+    qi = jnp.clip(q_i, 0.0)
+    on = (qi > 1.0e-14) & (T <= constants.T_freeze)
+    d_rat = lami * dcs
+    prci = ((qi / _FERRIER_ICE_NUMBER_DENOM) * jnp.exp(-d_rat)
+            * (((d_rat + 3.0) * d_rat + 6.0) * d_rat + 6.0))
+    nprci = jnp.clip(N_i, 0.0) / _MG2_ICE_AC_TIME_S * jnp.exp(-d_rat)
+    return jnp.where(on, prci, 0.0), jnp.where(on, nprci, 0.0)
+
+
+def rain_freezing_bigg_mg2(q_ric, N_ric, lamr, T, rho, precip_frac, config):
+    """CAM6 MG2 ``heterogeneous_rain_freezing`` (micro_mg_utils.F90:1257-1285)
+    on the in-precip rain of :func:`mg2_inprecip_rain` (``N_ric`` per-VOLUME,
+    size-adjusted; ``lamr`` its slope), returned as GRID rates
+    ``(mnuccr*precip_frac [kg/kg/s], nnuccr*precip_frac*rho [#/m^3/s])``::
+
+        nnuccr = pi nric bimm (exp(aimm (T_freeze - T)) - 1)/lamr^3
+        mnuccr = nnuccr 20 pi rhow/lamr^3
+
+    where ``T < 269.15 K`` and ``qric >= qsmall``.  No internal clamp: the
+    MG2 rain mass/number limiters bound it (micro_mg2_0.F90:1660-1709)."""
+    active = (T < _BIGG_T_MAX_K) & (q_ric >= MG2_QSMALL)
+    lam3 = jnp.where(active, lamr, 1.0) ** 3
+    nnuccr = (jnp.pi * (N_ric / rho) * config.bigg_bimm
+              * (jnp.exp(config.bigg_aimm * (constants.T_freeze - T)) - 1.0)
+              / lam3)
+    mnuccr = nnuccr * _BIGG_MNUCCR_PREFACTOR * jnp.pi * constants.rho_water / lam3
+    return (jnp.where(active, mnuccr * precip_frac, 0.0),
+            jnp.where(active, nnuccr * precip_frac * rho, 0.0))
 
 
 def snow_deposition_m2005(q_v, q_s, N_s, q_sat_i, T, p, rho, config, dt=None):

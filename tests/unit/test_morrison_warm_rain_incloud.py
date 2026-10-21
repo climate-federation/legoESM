@@ -333,11 +333,16 @@ def _mpas_physics(incloud, turb="clubb", n=2):
     from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
     from legoesm.atmosphere.physics.radiation import RadiationConfig
     from legoesm.atmosphere.physics.turbulence import TurbulenceConfig
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
     cfg = PhysicsConfig(
         radiation=RadiationConfig(scheme="none",
                                   cloud_config=CloudConfig(scheme="cam6_clubb")),
         convection=ConvectionConfig(scheme="none"),
-        turbulence=TurbulenceConfig(scheme=turb),
+        # kk2000_cam6 needs CLUBB's per-cell relvar: prognostic CLUBB with
+        # its liquid partition
+        turbulence=(TurbulenceConfig(scheme="clubb", liquid_partition=True,
+                                     clubb=CLUBBConfig(prognostic=True))
+                    if turb == "clubb" else TurbulenceConfig(scheme=turb)),
         microphysics=MicrophysicsConfig(
             scheme="morrison",
             morrison=MorrisonConfig(warm_rain_scheme="kk2000_cam6",
@@ -367,7 +372,9 @@ def test_lane_guard_needs_clubb_and_the_subcycle():
         _mpas_physics(True, turb="tke", n=2)
     with pytest.raises(ValueError, match="cld_macmic_num_steps>=2"):
         _mpas_physics(True, turb="clubb", n=1)
-    assert callable(_mpas_physics(False, turb="tke", n=1)[0])
+    # kk2000_cam6 without CLUBB's relvar is refused at construction
+    with pytest.raises(ValueError, match="per-cell relvar"):
+        _mpas_physics(False, turb="tke", n=1)
     # CAM6 ast needs the run's cam6_clubb cloud config for aist
     from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig
     from legoesm.atmosphere.physics.microphysics.integration import (
@@ -381,9 +388,15 @@ def test_lane_guard_needs_clubb_and_the_subcycle():
     # the MPAS-only lane requirement fails at BUILD time, before any step
     cc6 = __import__("legoesm.atmosphere.physics.clouds.config",
                      fromlist=["CloudConfig"]).CloudConfig(scheme="cam6_clubb")
-    assert callable(make_microphysics_physics(mc, "mpas", 60.0, cloud_config=cc6))
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+    # aist is cut at CLUBB's top: the run's CLUBBConfig is required
+    with pytest.raises(ValueError, match="needs the run's CLUBBConfig"):
+        make_microphysics_physics(mc, "mpas", 60.0, cloud_config=cc6)
+    assert callable(make_microphysics_physics(mc, "mpas", 60.0, cloud_config=cc6,
+                                              clubb_config=CLUBBConfig()))
     with pytest.raises(ValueError, match="MPAS lane only"):
-        make_microphysics_physics(mc, "hydrostatic", 60.0, cloud_config=cc6)
+        make_microphysics_physics(mc, "hydrostatic", 60.0, cloud_config=cc6,
+                                  clubb_config=CLUBBConfig())
     with pytest.raises(ValueError, match="MPAS lane only"):
         _mpas_physics_hydrostatic()
 
@@ -401,11 +414,12 @@ def test_microphysics_reads_clubbs_cloud_fraction_from_the_same_substep(monkeypa
     real_upd = ti._carry_update_with_cloud_fraction
     real_micro = mi.morrison_microphysics
     real_aist = mi.cam6_ice_stratus_fraction
-    aists = []
+    aists, aist_kw = [], []
 
     def aist(*a, **k):
         out = real_aist(*a, **k)
         aists.append(np.asarray(out))
+        aist_kw.append(k)
         return out
 
     def upd(carry_field, carry_val, turb_out):
@@ -425,12 +439,21 @@ def test_microphysics_reads_clubbs_cloud_fraction_from_the_same_substep(monkeypa
     tr = dict(state.tracers)
     tr["q_i"] = state.T.replace(data=1.0e-5 * top, name="q_i", units="kg/kg")
     tr["q_v"] = tr["q_v"].replace(data=jnp.maximum(tr["q_v"].data, 2.0e-3 * top))
+    # the MG2 mode carries the snow number (refused without it)
+    tr["N_s"] = state.T.replace(data=jnp.zeros_like(state.T.data), name="N_s",
+                                units="1/kg")
     state = state._replace(tracers=tr)
     fn, cfg = _mpas_physics(True, n=2)
     ps = init_physics_state(*state.T.data.shape, cfg)
     ps = ps._replace(cloud_fraction=jnp.full(state.T.data.shape, 0.123))
     fn(state, mesh, sigma, phys_state=ps)
     assert len(written) == len(read) == len(aists) == 2
+    # the run's CLUBB top reaches aist (clubb_intr.F90:2535 cut)
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+    _c = CLUBBConfig()
+    assert all(k == dict(trop_cloud_top_press=_c.trop_cloud_top_press,
+                         trop_cloud_taper_lnp_width=_c.trop_cloud_taper_lnp_width)
+               for k in aist_kw)
     for w, r, ai in zip(written, read, aists):
         np.testing.assert_array_equal(
             np.maximum(np.clip(w.reshape(r.shape), 0.0, 1.0), ai), r)
@@ -537,3 +560,32 @@ def test_production_deck_selects_incloud_and_threads_it():
     cfg.validate_strict()
     assert thread_morrison_scalars(cfg, "morrison", MorrisonConfig()
                                    ).warm_rain_incloud is True
+
+
+def test_pipeline_lanes_refuse_kk2000_cam6_and_the_column_lane_does_not():
+    """The FV/spectral pipeline has no CLUBB relvar hand-off, so kk2000_cam6
+    is refused at build; the MPAS column loop builds its microphysics through
+    make_physics (guarded above) and must not be refused here."""
+    from legoesm.driver.config import ExperimentConfig, GridConfig
+    from legoesm.driver.physics_pipeline import _resolve_microphysics
+    kw = dict(microphysics="morrison", morrison_warm_rain_scheme="kk2000_cam6")
+    with pytest.raises(ValueError, match="per-cell relvar"):
+        _resolve_microphysics(ExperimentConfig(**kw))
+    cfg = ExperimentConfig(grid=GridConfig(grid_type="mpas"), **kw)
+    assert cfg.column_loop_lane
+    assert _resolve_microphysics(cfg)[1].warm_rain_scheme == "kk2000_cam6"
+
+
+@pytest.mark.parametrize("model_type",
+                         ["nonhydrostatic", "plane", "mpas_nh", "spectral_pe"])
+def test_relvar_flag_is_refused_on_lanes_that_never_forward_it(model_type):
+    """Only the hydrostatic/mpas bridge forwards PhysicsState.relvar; elsewhere
+    relvar_from_clubb=True must not satisfy the kk2000_cam6 guard."""
+    from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig
+    from legoesm.atmosphere.physics.microphysics.integration import (
+        make_microphysics_physics,
+    )
+    mc = MicrophysicsConfig(scheme="morrison",
+                            morrison=_cfg(warm_rain_scheme="kk2000_cam6"))
+    with pytest.raises(ValueError, match="only the hydrostatic/mpas lane"):
+        make_microphysics_physics(mc, model_type, 600.0, relvar_from_clubb=True)

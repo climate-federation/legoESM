@@ -639,14 +639,17 @@ def test_new_config_fields_sit_at_the_tuple_end():
     # The sedimentation trio is no longer LAST: the in-run cloud-water budget
     # appended ``publish_qc_budget`` after it, which is the correct end-append,
     # so the trio is pinned where it now sits rather than at the tail.
-    assert MorrisonConfig._fields[-9:-6] == (
+    assert MorrisonConfig._fields[-11:-8] == (
         "sed_cfl_substeps", "sed_cfl_substeps_max", "sed_cfl_substeps_strict")
-    assert MorrisonConfig._fields[-6] == "publish_qc_budget"
+    assert MorrisonConfig._fields[-8] == "publish_qc_budget"
     # main end-appended its four warm-rain fields after it; the branch then
     # moved liquid_from_closure from mid-tuple to the very end.
-    assert MorrisonConfig._fields[-5:] == (
+    assert MorrisonConfig._fields[-7:-2] == (
         "autocon_fact", "accre_enhan_fact", "kk2000_cam6_relvar",
         "warm_rain_incloud", "liquid_from_closure")
+    # then the two RULE 5 widths of the MG2 ice limits (2026-10-21).
+    assert MorrisonConfig._fields[-2:] == (
+        "mg2_ice_slope_log_width", "mg2_qi_limit_width")
     # ``morrison_do_graupel`` end-appended after the block (2026-09-24).
     # ExperimentConfig then end-appended the two land canopy smoothing widths
     # (2026-09-30); main appended Morrison warm-rain + ZM/CLUBB tunables

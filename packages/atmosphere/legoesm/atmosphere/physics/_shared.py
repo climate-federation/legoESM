@@ -102,8 +102,16 @@ def compute_heights_from_sigma(T, p_half, q_v=None):
     z_half : array (ncol, nlev+1)
         Height at half levels [m] (surface = 0).
     """
-    dz = compute_layer_dz(T, p_half, q_v)
+    return heights_from_layer_dz(compute_layer_dz(T, p_half, q_v))
 
+
+def heights_from_layer_dz(dz):
+    """Full- and half-level heights [m] from layer thicknesses ``dz``.
+
+    ``dz`` is ``(ncol, nlev)``, TOA-first.  Half levels are the running sum of
+    the thicknesses below (surface = 0); full levels are the midpoint of the
+    two bounding half levels.  Returns ``(z_full, z_half)``.
+    """
     # Integrate from surface upward.  Use ``jnp.pad`` to append the
     # surface (z=0) boundary instead of allocating a fresh
     # ``jnp.zeros((ncol, 1))`` and concatenating — single Pad HLO op

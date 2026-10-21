@@ -59,7 +59,7 @@ HARD_SAT_GUARD_DEFAULTS = {
 # Schemes carrying the guard (kept sorted; used in the fail-loud messages below
 # and asserted against the factory by the ratchet).
 HARD_SAT_GUARD_SCHEMES = (
-    "kessler", "ml_emulator", "morrison", "p3", "seifert_beheng",
+    "ml_emulator", "morrison", "p3", "seifert_beheng",
     "sundqvist", "thompson",
 )
 # SHRINK-ONLY exemptions.  Each reason was verified in the scheme's own source,
@@ -96,6 +96,15 @@ HARD_SAT_GUARD_EXEMPT = {
         "the bulk saturation curve on top of it would be inconsistent with the "
         "resolved spectrum and break the WRF FSBM-2 oracle match."
     ),
+    "kessler": (
+        "Kessler is the faithful port of ESCOMP atmos_phys0_31_000 "
+        "kessler_run (user decision 2026-10-19: the scheme named Kessler must "
+        "BE the oracle). The oracle has no hard-adjustment guard: its own "
+        "Durran-Klemp (1983) adjustment max(prod, -q_c) removes the full "
+        "linearised supersaturation in every CFL subcycle. KesslerConfig keeps "
+        "the three guard fields only so an old deck fails loudly: "
+        "kessler.py::_require_oracle_defaults raises on any non-default value."
+    ),
     "none": (
         "microphysics='none' has NO scheme function at all -- "
         "_get_microphysics_fn returns (name, None, None) and the physics "
@@ -110,16 +119,16 @@ __param_spec__ = {
         "scheme_key": "atm.micro.KesslerConfig",
         "excluded": {
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "evaporation_coeff": "not in the oracle (ESCOMP atmos_phys0_31_000 kessler_run): a non-default or traced value raises",
+            "rain_fall_speed": "not in the oracle (ESCOMP atmos_phys0_31_000 kessler_run): a non-default or traced value raises",
+            "hard_sat_adjust_threshold": "not in the oracle (ESCOMP atmos_phys0_31_000 kessler_run): a non-default or traced value raises",
+            "hard_sat_max_heating_K": "not in the oracle (ESCOMP atmos_phys0_31_000 kessler_run): a non-default or traced value raises",
         },
         "params": {
             # PRIMARY warm-rain knobs (Kessler 1969).
             "autoconversion_threshold": {"units": "kg/kg", "bounds": (0.0001, 0.003), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Kessler (1969)", "shape": None},
             "autoconversion_rate": {"units": "1/s", "bounds": (0.0001, 0.01), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "Kessler (1969)", "shape": None},
             "accretion_coeff": {"units": "1", "bounds": (0.5, 6.6), "tunable_tier": 1, "transform": "sigmoid", "category": "accretion", "reference": "Kessler (1969)", "shape": None},
-            "evaporation_coeff": {"units": "1", "bounds": (0.1, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "evaporation", "reference": "Kessler (1969)", "shape": None},
-            "rain_fall_speed": {"units": "m/s", "bounds": (1.0, 15.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Kessler (1969)", "shape": None},
-            "hard_sat_adjust_threshold": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
-            "hard_sat_max_heating_K": {"units": "K", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
         },
     },
     "MicrophysicsMLEmulatorConfig": {
@@ -168,6 +177,8 @@ __param_spec__ = {
             "lamr_min": "numerics: solver/smoothing/tolerance/iteration parameter",
             "lams_min": "numerics: solver/smoothing/tolerance/iteration parameter",
             "melt_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "mg2_ice_slope_log_width": "numerics: solver/smoothing/tolerance/iteration parameter",
+            "mg2_qi_limit_width": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_T_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "nuc_rh_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
             "saturation_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
@@ -527,6 +538,34 @@ class SeifertBehengConfig(NamedTuple):
     hard_sat_max_heating_K: float = 5.0         # per-step latent-heating cap [K]
 
 
+# Unset Morrison DCS per flavour [m] (MorrisonConfig.ice_snow_d_auto=None,
+# resolved by resolve_morrison_flavor): SAM clice_snow_Dauto, CAM6 MG2
+# micro_mg_dcs (namelist_defaults_cam.xml:1244).
+SAM_DCS_M = 250.0e-6
+MG2_DCS_M = 500.0e-6
+
+
+def resolve_unset_ice_snow_d_auto(cfg):
+    """THE resolution of an unset Morrison DCS: by flavour (sam 250 um, mg
+    500 um); an explicit value is returned unchanged.  Used by the scheme
+    (resolve_morrison_flavor) and by the trainable collector's seed."""
+    if cfg.ice_snow_d_auto is not None:
+        return cfg
+    if cfg.morrison_flavor == "mg":
+        return cfg._replace(ice_snow_d_auto=MG2_DCS_M)
+    if cfg.morrison_flavor == "sam":
+        return cfg._replace(ice_snow_d_auto=SAM_DCS_M)
+    return cfg      # unknown flavour: resolve_morrison_flavor raises
+
+
+# Unset (None) spec'd fields -> the resolver that gives their value from a
+# config instance.  The trainable collector seeds from it (the class default
+# when no run config is passed, i.e. the default "mg" flavour), and the
+# param-spec gate requires these fields to be classified.
+__param_unset_defaults__ = {
+    "MorrisonConfig": {"ice_snow_d_auto": resolve_unset_ice_snow_d_auto}}
+
+
 class MorrisonConfig(NamedTuple):
     """Configuration for Morrison double-moment (ice+liquid)."""
     # Reference flavor. "mg" (DEFAULT, for GLOBAL/GCM runs) = E3SM/CESM
@@ -766,7 +805,10 @@ class MorrisonConfig(NamedTuple):
     #     "dropped — single-moment snow" note here was stale).
     #   "heuristic" = the legacy constant-rate agg_coeff·q_i·f_ice.
     ice_to_snow_scheme: str = "m2005_autoconv"
-    ice_snow_d_auto: float = 250.0e-6   # SAM DCS [m] (clice_snow_Dauto)
+    # DCS [m]; None = the flavour's (resolve_morrison_flavor at scheme entry):
+    # SAM clice_snow_Dauto 250 um, mg = CAM6 MG2 micro_mg_dcs 500 um
+    # (namelist_defaults_cam.xml:1244).  An explicit value always wins.
+    ice_snow_d_auto: float | None = None
     # Aggregation (heuristic ice→snow rate)
     agg_coeff: float = 1e-3          # Ice-to-snow aggregation rate [1/s]
     # Melting
@@ -1016,6 +1058,12 @@ class MorrisonConfig(NamedTuple):
     # model's only liquid source; ``ExperimentConfig.validate_strict`` refuses
     # that pairing rather than letting it run.
     liquid_from_closure: bool = False
+    # RULE 5 smoothing widths of two CAM6 MG2 limits (0 = MG2's hard form;
+    # values approved by user 2026-10-21, see the KNOWN DIFFERENCE in _warm_rain.py):
+    # LogSumExp width of the ice-slope clamp in ln(lami) (mg2_ice_slope) and
+    # of the qi-conservation factor (mg2_qi_conservation_ratio).
+    mg2_ice_slope_log_width: float = 0.01
+    mg2_qi_limit_width: float = 1.0e-2
 
 
 # Hard ceiling of ``sed_cfl_substeps_max`` wherever it is set (leaf, applier,
@@ -1370,7 +1418,8 @@ def apply_microphysics_experiment_flags(
             )
         scheme_config = scheme_config._replace(subgrid_autoconversion=True)
     if hard_saturation_adjustment:
-        if "hard_saturation_adjustment" not in fields:
+        if ("hard_saturation_adjustment" not in fields
+                or scheme not in HARD_SAT_GUARD_SCHEMES):
             raise ValueError(
                 f"hard_saturation_adjustment=True is not supported by the "
                 f"{scheme!r} microphysics scheme; use one of "
@@ -1525,7 +1574,11 @@ def apply_microphysics_experiment_flags(
         for _leaf, _val in morrison_scalars.items():
             if _val is None:
                 continue
-            _cur = float(getattr(scheme_config, _leaf))
+            _cur = getattr(scheme_config, _leaf)
+            if _cur is None:        # an unset leaf (DCS): any value applies
+                _updates[_leaf] = float(_val)
+                continue
+            _cur = float(_cur)
             # rel_tol absorbs float32-host round-trip noise
             # (float32(1e-3) != 1e-3 exactly) so a stored config that merely
             # round-tripped through a narrower dtype does not force a

@@ -12,9 +12,9 @@ The CLUBB core is replaced on BOTH sides by the same prescribed increments
 comparison covers exactly the host glue: the theta-l / total-water map into
 CLUBB (clubb_intr.F90:1546-1550), the surface heat-flux lower BC (:1781), the
 map back to T (:2048-2051, 2159-2160), the water reset/return above clubbtop
-and the column energy fixer (:2042-2150), for 8 RFMIP-based columns and CLUBB
-tops of 15000 Pa (old production deck) and 100 Pa (CAM6 namelist, production
-since 2026-10-20).  Both sides get
+and the column energy fixer (:2042-2150), and the ice-stratus cut above top_lev
+(:2535), for 8 RFMIP-based columns and CLUBB tops of 15000 Pa (old production
+deck) and 100 Pa (CAM6 namelist, production since 2026-10-20).  Both sides get
 CAM's rho_ds = pdel/(g dz).
 
 Metric: per field, max |ours - oracle| / max |oracle| over the case
@@ -67,7 +67,8 @@ def run_glue(fx, case, width, monkeypatch, T=None, q_c=None):
         z = jnp.zeros_like(state.thlm)
         return new, dict(cloud_frac=flip(jnp.minimum(c("cf_out"), 1.0)),
                          rcm=flip(c("rcm_out")), wpthvp=jnp.zeros_like(state.wp2),
-                         Kh_zt=z, Kh_zm=jnp.zeros_like(state.wp2))
+                         Kh_zt=z, Kh_zm=jnp.zeros_like(state.wp2),
+                         rcp2_zt=z)  # relvar input; not compared here
 
     monkeypatch.setattr(C, "advance_clubb_core", fake_core)
     dt = float(fx["in/dt"])
@@ -129,10 +130,11 @@ def test_heat_bc_and_energy_fixer_target_share_the_cam_convention(fix, path,
     def fake_core(state, forcing, **kw):
         z = jnp.zeros_like(state.thlm)
         return state, dict(cloud_frac=z, rcm=z, wpthvp=jnp.zeros_like(state.wp2),
-                           Kh_zt=z, Kh_zm=jnp.zeros_like(state.wp2))
+                           Kh_zt=z, Kh_zm=jnp.zeros_like(state.wp2),
+                           rcp2_zt=z)  # relvar input; not compared here
 
     monkeypatch.setattr(C, "advance_clubb_core", fake_core)
-    cfg = C.CLUBBConfig(prognostic=True)
+    cfg = C.CLUBBConfig(prognostic=True, trop_cloud_top_press=0.0)
     sfc = {} if path == "bulk" else dict(
         sfc_wpthlp=jnp.full((ncol,), 0.05), sfc_wprtp=jnp.full((ncol,), 4e-5),
         sfc_upwp=jnp.full((ncol,), -0.05), sfc_vpwp=jnp.full((ncol,), 0.01))
@@ -205,3 +207,62 @@ def test_production_clubb_top_is_cam6_and_an_ab_arm():
                            / "amip_production.yaml").read_text())
     assert deck["clubb_trop_cloud_top_press"] == 100.0
     assert _module("top_press_scm_ab")._P_CUT == 15000.0
+
+
+def _aist(fx, top, width):
+    """Our cam6 ice-stratus fraction on the fixture's INPUT state (the state
+    the oracle assembles cloud fraction on); ``top = 0`` = no cut."""
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+        cam6_ice_stratus_fraction,
+    )
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    g = lambda k: jnp.asarray(fx[f"in/{k}"])  # noqa: E731
+    return cam6_ice_stratus_fraction(
+        g("qv"), g("T"), g("p_full"), g("qi"), g("lat"),
+        CloudConfig(scheme="cam6_clubb"), g("p_half")[:, :-1],
+        trop_cloud_top_press=top, trop_cloud_taper_lnp_width=width)
+
+
+def _aist_top_error(fx, case, width):
+    """Field-normalised max error of our cut aist against CAM's top_lev cut
+    (clubb_intr.F90:2535 ``aist(:,:top_lev-1) = 0``): the oracle's aist above
+    top_lev, our UNCUT aist at and below it (the aist curves themselves are a
+    separate finding, outside this cut)."""
+    top_lev = int(fx[f"{case}/in/top_lev"])          # 0-based first CLUBB level
+    orc = fx[f"{case}/oracle/aist"]
+    uncut = np.asarray(_aist(fx, 0.0, _HARD))
+    ref = np.where(np.arange(orc.shape[1]) < top_lev, orc, uncut)
+    ours = np.asarray(_aist(fx, float(case), width))
+    return float(np.max(np.abs(ours - ref)) / max(np.max(np.abs(orc)), 1e-300))
+
+
+@pytest.mark.parametrize("case", ["15000", "100"])
+def test_aist_is_cut_at_the_clubb_top_as_cam(fix, case):
+    top_lev = int(fix[f"{case}/in/top_lev"])
+    assert np.all(fix[f"{case}/oracle/aist"][:, :top_lev] == 0.0)
+    err = _aist_top_error(fix, case, _HARD)
+    assert err <= _TOL, f"top {case} Pa: aist cut error {err}"
+
+
+def test_aist_cut_is_exercised_by_the_fixture(fix):
+    """Non-vacuity: at 15000 Pa the uncut aist above top_lev is far from 0."""
+    top_lev = int(fix["15000/in/top_lev"])
+    assert np.max(np.asarray(_aist(fix, 0.0, _HARD))[:, :top_lev]) > 0.1
+
+
+def test_aist_cut_gradient_is_finite_on_the_fixture_columns(fix):
+    """jax.grad of the cut aist w.r.t. T and q_i at the production width."""
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+        cam6_ice_stratus_fraction,
+    )
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    g = lambda k: jnp.asarray(fix[f"in/{k}"])  # noqa: E731
+    for dt in (jnp.float64, jnp.float32):
+        def loss(T, qi):
+            return jnp.sum(cam6_ice_stratus_fraction(
+                g("qv").astype(dt), T, g("p_full").astype(dt), qi,
+                g("lat").astype(dt), CloudConfig(scheme="cam6_clubb"),
+                g("p_half")[:, :-1].astype(dt), trop_cloud_top_press=15000.0,
+                trop_cloud_taper_lnp_width=0.15))
+        gT, gq = jax.grad(loss, argnums=(0, 1))(g("T").astype(dt), g("qi").astype(dt))
+        assert np.all(np.isfinite(np.asarray(gT))) and np.all(np.isfinite(np.asarray(gq)))

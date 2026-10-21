@@ -276,6 +276,18 @@ _WB_NEURAL_KEYS = frozenset({
 })
 
 
+def _pinned_morrison_config(active: set, param_fixed: dict) -> dict | None:
+    """``{scheme_key: MorrisonConfig}`` as the run builds it from the deck
+    pins, when Morrison is active; None otherwise."""
+    key = "atm.micro.MorrisonConfig"
+    if key not in active:
+        return None
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from legoesm.core.param_overrides import apply_param_overrides
+    return {key: apply_param_overrides(MorrisonConfig(),
+                                       dict(param_fixed.get(key, {})))}
+
+
 def _pinned_trainable_names(param_fixed: dict) -> set:
     """Deck-pinned fields that are ALSO registered trainable parameters.
 
@@ -633,6 +645,10 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
                             grid, "subgrid_topo_stddev", None) is not None,
                         param_fixed=_param_fixed)
                     | _pinned_trainable_names(_param_fixed))),
+                # the run's Morrison config (deck pins, e.g. a flavour) so an
+                # unset-able field (DCS) seeds where the run resolves it
+                scheme_configs=_pinned_morrison_config(
+                    _active, _param_fixed),
             )
             params = AIMIPTrainableBundle(
                 classical=params, schemes=_scheme_params)

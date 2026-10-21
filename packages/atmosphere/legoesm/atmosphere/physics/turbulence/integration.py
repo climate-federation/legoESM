@@ -145,6 +145,14 @@ def materialize_sub_config(config: TurbulenceConfig) -> TurbulenceConfig:
     return config
 
 
+def resolved_clubb_config(config: TurbulenceConfig):
+    """The ``CLUBBConfig`` dispatch will run, or ``None`` unless
+    ``config.scheme == "clubb"``.  Consumers of CLUBB's top (the cam6_clubb
+    ice-stratus cut in radiation, MG2 and the CMOR cloud diagnostics) read it
+    from here, so they see the same config the closure runs with."""
+    return materialize_sub_config(config).clubb if config.scheme == "clubb" else None
+
+
 def get_turbulence_fn(config: TurbulenceConfig):
     """Select the turbulence backend based on config.scheme."""
     if config.scheme == "smagorinsky":

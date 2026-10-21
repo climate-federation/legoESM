@@ -76,11 +76,11 @@ def _run(config, col, dt=300.0, pass_qc=True, *, on=None):
         lat=jnp.zeros((_NCOL,)))                  # equator [rad]
 
 
-_OFF = CLUBBConfig(prognostic=True)
+_OFF = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True)
 # The kernel config no longer carries the selector (it is a dispatch flag on
 # TurbulenceConfig; the kernel keys on q_c being supplied), so the two arms are
 # the same tunables and differ only in whether _run hands over q_c.
-_ON = CLUBBConfig(prognostic=True)
+_ON = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True)
 _ON_IDS = {id(_ON)}
 
 

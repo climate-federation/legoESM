@@ -3,13 +3,19 @@
 Part A (CLUBB qclvar -> relvar): the CLUBB-core trajectories of
 ``tests/atmosphere/oracle_fixtures/clubb_core_cam.npz`` are regenerated with
 the Fortran core (``scripts/validate/oracle/clubb_core``, run with
-``CLUBB_FIXTURE_PDF=1`` so the post-advance Fortran ``pdf_params`` are also
-recorded; this script asserts the regenerated states equal the committed
-fixture bit for bit).  ``relvar_oracle.F90`` then evaluates, on those Fortran
-PDF components and the Fortran in-layer ``rcm``, the oracle's own lines:
-``rcp2`` (CLUBB pdf_closure_module.F90 r8099 :1048-1050, :1072-1074), and
-``qclvar = min(1, rcp2)`` / ``relvar`` (CAM clubb_intr.F90 cam_cesm2_1_rel_60
-:1998, :2416-2425, deep_scheme = 'ZM').  Edge rows exercise every branch.
+``CLUBB_FIXTURE_PDF=1`` on a build_oracle.sh build, so the Fortran
+``pdf_params`` and CLUBB's own ``qclvar_out`` are also recorded; this script
+asserts the regenerated states equal the committed fixture bit for bit).
+``s{n}/qclvar_out`` is the closure on state ``s_n`` (clubb_release sets it
+after its advances, :1437 -> :1501), i.e. what CAM's r8099 core sets before
+its advances (:1150 -> :1798) on the step LEAVING ``s_n``.
+``relvar_oracle.F90`` then evaluates the oracle's own lines: ``rcp2`` from the
+Fortran PDF components (CLUBB pdf_closure_module.F90 r8099 :1048-1050,
+:1072-1074; a transcription cross-check, printed against the captured value),
+and ``qclvar = min(1, qclvar_out)`` / ``relvar`` (CAM clubb_intr.F90
+cam_cesm2_1_rel_60 :1998, :2416-2425, deep_scheme = 'ZM') from the CAPTURED
+``qclvar_out`` and the Fortran in-layer ``rcm`` of the same state.  Edge rows
+exercise every branch.
 
 Part B (MG2 consumption of a per-level relvar): the six tier-1 warm columns of
 ``morrison_mg2_warm_rain`` through the whole ``micro_mg_tend`` (CAM
@@ -73,10 +79,10 @@ def _git(path, *args):
                           text=True, check=True).stdout.strip()
 
 
-def _run_relvar(build, rows):
+def _run_relvar(build, rows, mode=""):
     fin, fout = build / "relvar_in.txt", build / "relvar_out.txt"
     np.savetxt(fin, rows, fmt="%.17e", header=str(len(rows)), comments="")
-    subprocess.run([str(build / "relvar_oracle"), str(fin), str(fout)], check=True)
+    subprocess.run([str(build / "relvar_oracle"), str(fin), str(fout), mode], check=True)
     out = np.loadtxt(fout, ndmin=2)
     assert out.shape == (len(rows), 2), out.shape
     return out[:, 0], out[:, 1]
@@ -98,8 +104,14 @@ def part_a(pdf_npz, build, fx):
         for n in range(1, n_steps + 1):
             cols = [new[f"{case}/s{n}/pdf/{k}"][0] for k in PDF]
             rcm = new[f"{case}/s{n}/rcm"][0]
-            rows = np.stack(cols + [rcm], axis=1)
-            rcp2, relvar = _run_relvar(build, rows)
+            qclvar_out = new[f"{case}/s{n}/qclvar_out"][0]
+            rows = np.stack(cols + [rcm, qclvar_out], axis=1)
+            rcp2, relvar = _run_relvar(build, rows, "qclvar")
+            d = np.abs(rcp2 - qclvar_out)
+            print(f"{case} s{n}: transcribed rcp2 vs captured qclvar_out "
+                  f"max abs {d.max():.3e}, field-norm "
+                  f"{d.max() / max(np.abs(qclvar_out).max(), 1e-300):.3e}")
+            fx[f"{case}/s{n}/qclvar_out"] = qclvar_out
             fx[f"{case}/s{n}/rcp2"] = rcp2
             fx[f"{case}/s{n}/relvar"] = relvar
     rcp2, relvar = _run_relvar(build, EDGE_ROWS)

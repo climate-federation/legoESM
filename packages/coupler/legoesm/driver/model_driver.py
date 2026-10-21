@@ -39,6 +39,7 @@ from legoesm.driver.physics_pipeline import (
     gwd_config_for,
     mean_grid_spacing_m,
     moisture_registry_for,
+    registry_scheme_config,
     turbulence_config_for,
     validate_microphysics_tracer_slots,
 )
@@ -1683,11 +1684,12 @@ class ModelDriver:
         self._persistent_cgrid = False
         self.tracers: dict[str, jax.Array] = {}
         self.tracer_registry: TracerRegistry = moisture_registry_for(
-            config.microphysics)
+            config.microphysics, registry_scheme_config(config))
         validate_microphysics_tracer_slots(
             config.microphysics,
             self.tracer_registry.n_tracers,
             context="ModelDriver tracer registry",
+            scheme_config=registry_scheme_config(config),
         )
         self.get_sst_sic = None
         # Seasonal insolation offset (days): align model day 0 to
@@ -2333,6 +2335,7 @@ class ModelDriver:
             self.config.microphysics,
             have_slots,
             context=context,
+            scheme_config=registry_scheme_config(self.config),
         )
 
     def _preflight_land_inputs(self) -> None:
@@ -5292,6 +5295,15 @@ class ModelDriver:
         # ``cloud_scheme == 'none'`` => ``None`` => clt not published.
         _cloud_scheme = getattr(self.config, "cloud_scheme", "none")
         diag_cloud_config = None
+        diag_clubb_config = None
+        if _cloud_scheme == "cam6_clubb":
+            # CLUBB's top cuts the ice-stratus fraction in clt / clivi exactly
+            # as in radiation and MG2 (clubb_intr.F90:2535).
+            from legoesm.atmosphere.physics.turbulence.integration import (
+                resolved_clubb_config,
+            )
+            diag_clubb_config = resolved_clubb_config(
+                turbulence_config_for(self.config))
         if _cloud_scheme != "none":
             from legoesm.atmosphere.physics.clouds.config import (
                 build_cloud_config,
@@ -5339,6 +5351,7 @@ class ModelDriver:
             cmip_resolution_deg=self.config.output.cmip_resolution_deg,
             start_year=self.config.start_year,
             cloud_config=diag_cloud_config,
+            clubb_config=diag_clubb_config,
             # tas 2 m profile uses the SAME MOST bulk scheme and stable-branch
             # functions as the surface fluxes (defaults are byte-identical:
             # "constant" keeps the historical coare3 profile stand-in).
@@ -8809,10 +8822,30 @@ class ModelDriver:
                                   jnp.asarray(d[f"trc_{_k}"]), part, "cell")
                               if _mpi else jnp.asarray(d[f"trc_{_k}"])),
                         name=_k, dims=("nCells", "nlev"),
-                        units=("1/kg" if _k in ("N_c", "N_r", "N_i")
+                        units=("1/kg" if _k in ("N_c", "N_r", "N_i", "N_s")
                                else "kg/kg"))
                     for _k in _names
                 })
+                # Schema-growth migration (grow-only allowlist, as for the
+                # PhysicsState fields): tracers ADDED after a checkpoint
+                # format was in production.  N_s (CAM6 MG2 two-moment snow,
+                # user decision 2026-10-20): zero, so MG2's snow size limit
+                # treats the carried snow as the largest allowed flakes until
+                # new snow adds number.  Without the seed the restart silently
+                # ran single-moment snow.
+                _NEW_OPTIONAL_TRACERS = frozenset({"N_s"})
+                _seed = [n for n in self.tracer_registry.names
+                         if n not in _names and n in _NEW_OPTIONAL_TRACERS]
+                if _seed:
+                    logger.info(
+                        "  MPAS restart checkpoint predates tracer(s) %s — "
+                        "seeding them with zeros.", _seed)
+                    _ref = self.state.tracers[_names[0]].data
+                    self.state = self.state._replace(tracers={
+                        **self.state.tracers,
+                        **{_k: Field(data=jnp.zeros_like(_ref), name=_k,
+                                     dims=("nCells", "nlev"), units="1/kg")
+                           for _k in _seed}})
             # Multilayer (Richards) land columns (MPAS port): stage the
             # ``land_ml_<field>`` arrays into carry_aux and reuse the shared
             # fail-loud restore (#730 exact-field-set contract).  Under MPI the

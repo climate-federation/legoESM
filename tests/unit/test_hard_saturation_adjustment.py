@@ -541,7 +541,7 @@ def test_all_guarded_configs_carry_the_fields():
         HARD_SAT_GUARD_SCHEMES, MicrophysicsConfig,
     )
     top = MicrophysicsConfig()
-    assert len(HARD_SAT_GUARD_SCHEMES) == 7
+    assert len(HARD_SAT_GUARD_SCHEMES) == 6   # kessler: exempt (faithful port)
     for name in HARD_SAT_GUARD_SCHEMES:
         cfg = getattr(top, name)
         assert cfg.hard_saturation_adjustment is False, name
@@ -549,7 +549,9 @@ def test_all_guarded_configs_carry_the_fields():
         assert cfg.hard_sat_max_heating_K == pytest.approx(5.0), name
 
 
-def test_kessler_scheme_threads_flag_and_bounds_heating():
+def test_kessler_rejects_the_guard_flag():
+    """Kessler is the faithful ESCOMP kessler_run port, which has no hard
+    adjustment guard: setting the flag raises instead of being inert."""
     from legoesm.atmosphere.physics.microphysics.kessler import (
         kessler_microphysics,
     )
@@ -560,44 +562,15 @@ def test_kessler_scheme_threads_flag_and_bounds_heating():
     T = jnp.array([[200.0, 230.0, 260.0, 285.0]])
     p = jnp.full((ncol, nlev), _P_TIBET)
     rho = p / (constants.R_d * T)
-    q_v = jnp.full((ncol, nlev), 0.03)         # super-saturated at cold levels
+    q_v = jnp.full((ncol, nlev), 0.03)
     dz = jnp.full((ncol, nlev), 500.0)
     p_half = jnp.concatenate([p, 1.01 * p[:, -1:]], axis=1)
     z = jnp.zeros((ncol, nlev))
-    hydro = HydrometeorState(
-        q_c=z, q_r=z, q_i=z, q_s=z, q_g=z,
-        N_c=jnp.full((ncol, nlev), 1.0e8), N_r=z, N_i=z,
-    )
-    dt = 100.0
-    out_off = kessler_microphysics(T, q_v, hydro, p, p_half, rho, dz, dt,
-                                   KesslerConfig())
-    out_off2 = kessler_microphysics(
-        T, q_v, hydro, p, p_half, rho, dz, dt,
-        KesslerConfig(hard_saturation_adjustment=False))
-    out_on = kessler_microphysics(
-        T, q_v, hydro, p, p_half, rho, dz, dt,
-        KesslerConfig(hard_saturation_adjustment=True))
-    # Flag off == default config, byte-for-byte.
-    assert jnp.array_equal(out_off.dq_v_dt, out_off2.dq_v_dt)
-    # The flag changes the result (it is wired in).
-    assert not jnp.array_equal(out_off.dq_v_dt, out_on.dq_v_dt)
-    # The hard path's per-step latent heating is bounded (no detonation): the
-    # saturation-adjustment contribution alone heats <= the cap.  (Kessler's
-    # dT_dt also includes rain evaporation cooling, so bound the condensation
-    # part via dq_v.)  Here q_c starts at 0 so condensation = -dq_v_sat > 0.
-    assert jnp.all(out_on.dq_v_dt * dt >= -(_DEFAULT_MAX_HEATING_K
-                                            * _C_PD / _L_V) - 1e-9)
-    # The hard path removes strictly LESS vapour per step than the smooth path's
-    # cold-cell over-condensation (rate-limited) -> leaves >= as much vapour.
-    q_v_off = q_v + out_off.dq_v_dt * dt
-    q_v_on = q_v + out_on.dq_v_dt * dt
-    assert jnp.all(q_v_on >= q_v_off - 1e-6)
-    # Both paths conserve c_pd*T + L_v*q_v (warm, no ice).
-    for out in (out_off, out_on):
-        h0 = _C_PD * T + _L_V * q_v
-        h1 = _C_PD * (T + out.dT_dt * dt) + _L_V * (q_v + out.dq_v_dt * dt)
-        np.testing.assert_allclose(np.asarray(h1), np.asarray(h0),
-                                   rtol=1e-9, atol=1e-3)
+    hydro = HydrometeorState(q_c=z, q_r=z, q_i=z, q_s=z, q_g=z,
+                             N_c=z, N_r=z, N_i=z)
+    with pytest.raises(ValueError, match="hard_saturation_adjustment"):
+        kessler_microphysics(T, q_v, hydro, p, p_half, rho, dz, 100.0,
+                             KesslerConfig(hard_saturation_adjustment=True))
 
 
 @pytest.mark.parametrize("ice_curve", [False, True])

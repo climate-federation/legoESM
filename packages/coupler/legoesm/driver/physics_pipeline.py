@@ -4130,16 +4130,32 @@ def required_microphysics_tracer_slots(
 def moisture_registry_for(scheme_name: str, scheme_config=None):
     """The driver's tracer registry for a microphysics scheme: the
     warm-rain trio unless the scheme needs the ice/number slots, then the
-    full nine.  ONE selector for the MPAS lane's driver and the fv3_duo
+    full nine (ten, + the snow number N_s, for Morrison's CAM6 MG2 mode --
+    pass the run's ``scheme_config``, :func:`registry_scheme_config`).  ONE
+    selector for the MPAS lane's driver and the fv3_duo
     column model's slot list, so both carry the same names in the same
     order (the duo's q_<i> is a slot index)."""
     from legoesm.core.tracers import (
         make_full_moisture_registry, make_moisture_registry)
     warm = make_moisture_registry()
-    if required_microphysics_tracer_slots(scheme_name, scheme_config) \
-            > warm.n_tracers:
-        return make_full_moisture_registry()
+    need = required_microphysics_tracer_slots(scheme_name, scheme_config)
+    if need > warm.n_tracers:
+        return make_full_moisture_registry(
+            snow_number=need > make_full_moisture_registry().n_tracers)
     return warm
+
+
+def registry_scheme_config(config):
+    """The run's resolved scheme config leaf for ``config.microphysics`` (the
+    flat ``morrison_*`` rows threaded in, as every lane builds it), i.e. what
+    :func:`moisture_registry_for` keys the optional slots on (Morrison's CAM6
+    MG2 mode carries the snow number).  ``None`` for ``microphysics='none'``."""
+    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    leaf = getattr(MicrophysicsConfig(scheme=config.microphysics),
+                   config.microphysics, None)
+    if leaf is None:
+        return None
+    return thread_morrison_scalars(config, config.microphysics, leaf)
 
 
 def validate_microphysics_tracer_slots(
@@ -4197,8 +4213,6 @@ def thread_morrison_scalars(config, scheme, micro_config):
          getattr(config, "morrison_k_au", None)),
         ("morrison_fall_a_i", "fall_a_i",
          getattr(config, "morrison_fall_a_i", None)),
-        ("morrison_ice_snow_d_auto", "ice_snow_d_auto",
-         getattr(config, "morrison_ice_snow_d_auto", None)),
         ("morrison_hom_ice_nuc_N", "hom_ice_nuc_N",
          getattr(config, "morrison_hom_ice_nuc_N", None)),
         ("morrison_autocon_fact", "autocon_fact",
@@ -4210,6 +4224,11 @@ def thread_morrison_scalars(config, scheme, micro_config):
                 float(_val), float(_ExpCfg._field_defaults[_exp_name]),
                 rel_tol=1e-6, abs_tol=0.0):
             _touched[_leaf_name] = float(_val)
+    # DCS: an explicit value always wins; unset (None) stays unset on the leaf
+    # and resolves by flavour at scheme entry (resolve_morrison_flavor).
+    _dcs = getattr(config, "morrison_ice_snow_d_auto", None)
+    if _dcs is not None:
+        _touched["ice_snow_d_auto"] = float(_dcs)
     # Flavor is a string selector, not a float: forward only when it deviates
     # from the leaf default ("mg"), mirroring the touched-scalar rule so a
     # default config stays byte-identical on Morrison and silent elsewhere.
@@ -4386,6 +4405,14 @@ def _resolve_microphysics(config):
     # forwarded, so a non-Morrison scheme with untouched defaults stays
     # silent and a Morrison config at defaults is byte-identical.
     micro_config = thread_morrison_scalars(config, scheme, micro_config)
+    if scheme == "morrison" and not config.column_loop_lane:
+        # This pipeline has no CLUBB relvar hand-off; the column-loop lane
+        # runs make_physics instead, whose factory applies the same guard.
+        from legoesm.atmosphere.physics.microphysics.integration import (
+            require_relvar_for_kk2000_cam6,
+        )
+        require_relvar_for_kk2000_cam6(
+            MicrophysicsConfig(scheme="morrison", morrison=micro_config), False)
 
     if scheme == "ml_emulator":
         from legoesm.atmosphere.physics.microphysics.ml_emulator import (
@@ -4614,7 +4641,7 @@ def turbulence_config_for(config):
             tc = tc._replace(liquid_partition=True)
         # CLUBB's upper domain limit (CAM ``trop_cloud_top_press``), same
         # threading and the same refusal as the prognostic flag.  None (default)
-        # => byte-identical: the scheme's own 0.0 (off) stands.
+        # => the scheme's own default stands (CLUBBConfig, CAM6 100 Pa).
         _ctp = getattr(config, "clubb_trop_cloud_top_press", None)
         if _ctp is not None:
             if tc.scheme != "clubb":

@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=16G
 # Regenerate tests/atmosphere/oracle_fixtures/clubb_mg2_relvar.npz.
-#   sbatch --export=ALL,WT=<legoESM checkout>,CLUBB_ROOT=<built clubb_release>,CAM=<CAM cam_cesm2_1_rel_60> run.sh
+#   sbatch --export=ALL,WT=<legoESM checkout>,CLUBB_ROOT=<build_oracle.sh build>,CAM=<CAM cam_cesm2_1_rel_60> run.sh
 set -euo pipefail
 : "${WT:?}" "${CLUBB_ROOT:?}" "${CAM:?}"
 LEGO_PY=${LEGO_PY:-/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python}

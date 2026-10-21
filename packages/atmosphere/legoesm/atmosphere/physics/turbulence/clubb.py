@@ -8,49 +8,49 @@ one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
 being absorbed here section by section (see the table of contents below); the
 CAM-default model-flag values are recorded as comments at the end of the file.
 
-Table of contents (sections, in order; flag reference table at line 7174)
+Table of contents (sections, in order; flag reference table at line 7175)
 -----------------------------------------------------------------------------
-  1. [line  351] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
-  2. [line  472] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
+  1. [line  352] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
+  2. [line  473] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
       model flags fixed at CAM defaults — reference table at file end)
-  3. [line  774] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
+  3. [line  775] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
       ``make_clubb_grid[_from_levels]`` / ``flip_vertical``)
-  4. [line  1105] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
+  4. [line  1106] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
       the canonical ``legoesm.thermo`` curves)
-  5. [line  1159] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
+  5. [line  1160] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
       ``calc_brunt_vaisala_freq_sqd``)
-  6. [line  1333] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
+  6. [line  1334] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
       ``set_Lscale_max``)
-  7. [line  1781] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
-  8. [line  1909] Mass-conserving hole filling (``fill_holes_vertical`` /
+  7. [line  1782] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
+  8. [line  1910] Mass-conserving hole filling (``fill_holes_vertical`` /
       ``fill_holes_wp2_from_horz_tke``)
-  9. [line  2090] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
+  9. [line  2091] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
       ``compute_skewness_diagnostics``)
-  10. [line  2278] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
-  11. [line  2359] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
+  10. [line  2279] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
+  11. [line  2360] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
       cloud-fraction closure)
-  12. [line  2681] ADG1 PDF moment integrals + buoyancy-flux assembly
+  12. [line  2682] ADG1 PDF moment integrals + buoyancy-flux assembly
       (``calc_pdf_higher_order_moments`` / ``calc_pdf_xprcp_fluxes`` /
       ``calc_xpthvp_terms``) + the two-level-set reconciliation
       (``calc_trapezoid_zt`` / ``calc_trapezoid_zm`` / ``clip_rcm`` /
       ``compute_cloud_cover``). Every routine in this section is
       grid-agnostic: CAM evaluates the closure once per level set, so all
       regridding is the caller's.
-  13. [line  3042] Moment-advance building blocks + the xp2_xpyp / windm advances
+  13. [line  3043] Moment-advance building blocks + the xp2_xpyp / windm advances
       (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
       ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
-  14. [line  3936] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
+  14. [line  3937] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
       ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
-  15. [line  4001] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
+  15. [line  4002] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
       ``clip_skewness``)
-  16. [line  4674] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
+  16. [line  4675] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
       ``calc_turb_adv_range``)
-  17. [line  4954] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
+  17. [line  4955] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
       coupling + ``solve_xm_wpxp_with_single_lhs``)
-  18. [line  5328] Core orchestration (``compute_clubb_diagnostics`` /
+  18. [line  5329] Core orchestration (``compute_clubb_diagnostics`` /
       ``compute_pdf_closure`` / ``calc_sfc_varnce`` / ``advance_clubb_core`` +
       the ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  19. [line  6086] Scheme entries (``clubb_turbulence`` diagnostic default /
+  19. [line  6090] Scheme entries (``clubb_turbulence`` diagnostic default /
       ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
       ``integrate_clubb_column`` SCM driver)
 
@@ -133,6 +133,7 @@ from legoesm.atmosphere.physics._shared import (
 )
 from legoesm.atmosphere.physics.clouds.cloud_fraction import (
     cam_chem_tropopause_level,
+    trop_cloud_top_taper,
 )
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
@@ -673,11 +674,11 @@ class CLUBBConfig(NamedTuple):
         CAM's ``ref_pres`` namelist knob of the same name ("Troposphere cloud
         physics will be done only below the top defined by this pressure"),
         which ``clubb_intr.F90`` applies to CLUBB by slicing every column at
-        ``top_lev = trop_cloud_top_lev``. Default 0.0 = OFF (CAM's own code
-        default, ``protected :: trop_cloud_top_press = 0._r8``; CAM's
-        build-namelist supplies 1 hPa, which is above every current lid here
-        and would be inert anyway) — a static Python feature gate, so
-        existing runs are byte-identical. A 32-level WeatherBench arm
+        ``top_lev = trop_cloud_top_lev``. Default 100 Pa = the CAM6
+        build-namelist value (namelist_defaults_cam.xml:1295
+        ``<trop_cloud_top_press> 1.D2``, cam_cesm2_1_rel_60).  0.0 = OFF (CAM's
+        bare code default ``protected :: trop_cloud_top_press = 0._r8``,
+        ref_pres.F90:34) is a static Python feature gate. A 32-level WeatherBench arm
         measured a stratospheric state excursion from the diagnostic phase-1
         scheme (2026-08-17); setting this to ~5000 Pa confines the scheme to
         below 50 hPa there. Unlike CAM's hard subcolumn slice, the taper is
@@ -704,7 +705,7 @@ class CLUBBConfig(NamedTuple):
     prognostic: bool = False
     cloud_buoyancy: bool = True
     cloud_source: str = "native"
-    trop_cloud_top_press: float = 0.0
+    trop_cloud_top_press: float = 100.0
     trop_cloud_taper_lnp_width: float = 0.15
     # Multiplier on the DIAGNOSED sub-grid variances entering the PDF closure
     # (both variances and their covariance, so the correlation is preserved).
@@ -5935,6 +5936,10 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         wm_zm, wm_zt, rho_ds_zm, rho_ds_zt, invrs_rho_ds_zm, invrs_rho_ds_zt,
         pdf["w_1_zm"], pdf["w_2_zm"], pdf["varnce_w_1_zm"], pdf["varnce_w_2_zm"],
         pdf["mixt_frac_zm"], dt, gr, config)
+    # CAM's rcm_out: the pre-advance in-layer rcm clipped against the advanced
+    # rtm (advance_clubb_core_module.F90 clip_rcm after advance_xm_wpxp);
+    # clubb_intr pairs it with qclvar in relvar (:2424).
+    rcm_out = clip_rcm(rtm, pdf["rcm"])
 
     # ---- (4) advance_xp2_xpyp: rtp2/thlp2/rtpthlp/up2/vp2 (uses pre-wp2_wp3 wp2) ----
     rtp2, thlp2, rtpthlp, up2, vp2 = advance_xp2_xpyp(
@@ -5998,7 +6003,11 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
 
     diagnostics = dict(
         cloud_frac=pdf_post["cloud_frac"], rcm=pdf_post["rcm"],
-        rcm_grid=pdf_post["rcm_grid"], rcp2_zt=pdf_post["rcp2_zt"],
+        rcm_grid=pdf_post["rcm_grid"],
+        # CAM's qclvar: rcp2_zt of the PRE-advance closure (CLUBB_CESM r8099
+        # advance_clubb_core_module.F90:1150 -> :1798, before the advances).
+        rcp2_zt=pdf["rcp2_zt"],
+        rcm_out=rcm_out,
         wpthvp=pdf_post["wpthvp"], Kh_zt=diag["Kh_zt"], Kh_zm=diag["Kh_zm"])
     return new_state, diagnostics
 
@@ -6344,21 +6353,44 @@ _CAM6_RELVARMAX = 10.0        # relvarmax, deep_scheme /= 'CLUBB_SGS' (CAM6 ZM, 
 _CAM6_RELVAR_MIN = 1.0e-3     # relvar lower clip (:2425)
 
 
+@jax.custom_jvp
+def _square_over(a, q):
+    """``a**2 / q`` as ``(a/q)*a``."""
+    return (a / q) * a
+
+
+@_square_over.defjvp
+def _square_over_jvp(primals, tangents):
+    # Autodiff of a/q forms a/q**2, and q**2 underflows to 0 in fp32 at
+    # q ~ 1e-30 (gradient -inf); d/dq = -(a/q)**2 stays representable down
+    # to q ~ 1e-38 (fp32 subnormal), where the true derivative itself overflows.
+    a, q = primals
+    da, dq = tangents
+    x = a / q
+    return x * a, 2.0 * x * da - x * x * dq
+
+
 def cam6_relvar(rcm, rcp2):
     """CAM6 relative cloud-water variance ``relvar`` handed to MG2.
 
     ``clubb_intr.F90:1998, 2421-2425``: ``qclvar = min(1, rcp2_zt)``,
     ``relvar = relvarmax`` by default and, where ``rcm /= 0`` and
     ``qclvar /= 0``, ``min(relvarmax, max(0.001, rcm**2/qclvar))``.  ``rcm``
-    is the cloud liquid CLUBB leaves on the host (CAM's ``rcm`` after the
-    clubbtop reset, the value its ptend writes), ``rcp2`` the closure's
-    ``r_c'^2`` on the same levels.
+    is CAM's ``rcm`` after the clubbtop reset: the pre-advance ``rcm_out``
+    below clubbtop, the host liquid at and above it; ``rcp2`` the
+    pre-advance closure's ``r_c'^2`` (CAM's ``qclvar_out``) on the same levels.
     """
     qclvar = jnp.minimum(_CAM6_QCLVAR_MAX, rcp2)
     has = (rcm != 0.0) & (qclvar != 0.0)
-    ratio = rcm ** 2 / jnp.where(has, qclvar, 1.0)
-    return jnp.where(
-        has, jnp.clip(ratio, _CAM6_RELVAR_MIN, _CAM6_RELVARMAX), _CAM6_RELVARMAX)
+    # Branches picked by products, never by the ratio: at qclvar ~1e-30 in
+    # fp32 rcm**2/qclvar overflows and the clip-region VJP was 0*inf = NaN.
+    rcm2 = rcm * rcm
+    hi = (rcm2 >= _CAM6_RELVARMAX * qclvar) & (qclvar > 0.0)
+    lo = (rcm2 <= _CAM6_RELVAR_MIN * qclvar) | (qclvar < 0.0)
+    q_safe = jnp.where(has & ~hi & ~lo, qclvar, 1.0)
+    ratio = _square_over(rcm, q_safe)
+    out = jnp.where(hi, _CAM6_RELVARMAX, jnp.where(lo, _CAM6_RELVAR_MIN, ratio))
+    return jnp.where(has, out, _CAM6_RELVARMAX)
 
 
 # clubb_intr.F90:2043 (cam_cesm2_1_rel == cesm2_2_rel): a level whose rtp2 is
@@ -6685,6 +6717,8 @@ def clubb_step(
         # REPLACES the host liquid, matching the reference; the seeding above is
         # what makes that reversible rather than a one-way ratchet.
         dq_c_dt = (rcm_new - q_c) / dt
+        # relvar's rcm (clubb_intr.F90:2424): rcm_out, host liquid above clubbtop
+        rcm_relvar = flip_vertical(diags["rcm_out"])
     else:
         T_new = flip_vertical(new_state.thlm) * exner  # thl ~ theta, no liquid
         q_new = flip_vertical(new_state.rtm)
@@ -6711,10 +6745,8 @@ def clubb_step(
         # by the surface fluxes, or into the bottom layer if that would dry a
         # level below clubbtop (CAM apply_to_surface).  Heat: the column
         # energy fixer in the caller closes it below clubbtop (2138-2150).
-        w = jax.nn.sigmoid(
-            (jnp.log(jnp.clip(p_full, 1.0, None))
-             - jnp.log(config.trop_cloud_top_press))
-            / config.trop_cloud_taper_lnp_width)
+        w = trop_cloud_top_taper(p_full, config.trop_cloud_top_press,
+                                 config.trop_cloud_taper_lnp_width)
         dp_g = (p_half[:, 1:] - p_half[:, :-1]) / constants.g
         spread = w / jnp.sum(dp_g * w, axis=1, keepdims=True)  # [kg/m2]^-1
 
@@ -6731,11 +6763,13 @@ def clubb_step(
         removed_water = jnp.sum(dp_g * (1.0 - keep) * (dq_v_dt + dq_c_dt),
                                 axis=1, keepdims=True)
         dq_c_dt = keep * dq_c_dt
+        if liquid_partition:
+            rcm_relvar = q_c + keep * (rcm_relvar - q_c)
         dq_v_dt = return_removed_water(
             keep * dq_v_dt, removed_water, dp_g, q_v, dt, below)
         diags = dict(diags, clubbtop=clubbtop)
     if liquid_partition:
-        diags = dict(diags, dq_c_dt=dq_c_dt)
+        diags = dict(diags, dq_c_dt=dq_c_dt, rcm_relvar=rcm_relvar)
     # KE removed by the momentum mixing + surface stress -> heat [K/s,
     # +warming] (review 2026-10-10 F14; CAM6 clubb_do_energyfix=.true.):
     # exact for the host update u += dt*du, T += dt*dT of this call.
@@ -6920,6 +6954,7 @@ def clubb_turbulence_prognostic(
         Kh_full = flip_vertical(diags["Kh_zt"])
         cloud_frac_a = diags["cloud_frac"]
         rcp2_a = diags["rcp2_zt"]
+        rcm_relvar_a = diags.get("rcm_relvar")
         dq_c_dt = diags.get("dq_c_dt")
     else:
         dt_sub = dt / n_sub
@@ -6974,6 +7009,8 @@ def clubb_turbulence_prognostic(
         # states the host never sees.
         cloud_frac_a = diag_stk["cloud_frac"][-1]
         rcp2_a = diag_stk["rcp2_zt"][-1]
+        rcm_relvar_a = (diag_stk["rcm_relvar"][-1] if "rcm_relvar" in diag_stk
+                        else None)
 
     # With an injected tiled flux, report the surface diagnostics as the INJECTED
     # dynamic values directly (Louis-equivalent), rather than clubb_step's
@@ -7021,15 +7058,14 @@ def clubb_turbulence_prognostic(
     # mixing no longer maintains.  Porting the exclusion, not just the formula.
     cloud_fraction_td = flip_vertical(cloud_frac_a)
     if config.trop_cloud_top_press > 0.0:
-        cloud_fraction_td = cloud_fraction_td * jax.nn.sigmoid(
-            (jnp.log(jnp.clip(p_full, 1.0, None))
-             - jnp.log(config.trop_cloud_top_press))
-            / config.trop_cloud_taper_lnp_width)
-    # MG2's relvar from the liquid CLUBB leaves on the host and the closure's
-    # rcp2 of the same (final) sub-step; only with the liquid partition, where
-    # that liquid is CLUBB's (CAM always partitions).
+        cloud_fraction_td = cloud_fraction_td * trop_cloud_top_taper(
+            p_full, config.trop_cloud_top_press,
+            config.trop_cloud_taper_lnp_width)
+    # MG2's relvar from the final sub-step's rcm_out and qclvar, both CAM's
+    # pre-advance timing (not the post-advance host liquid); only with the
+    # liquid partition (CAM always partitions).
     relvar = (None if dq_c_dt is None
-              else cam6_relvar(q_c + dt * dq_c_dt, flip_vertical(rcp2_a)))
+              else cam6_relvar(rcm_relvar_a, flip_vertical(rcp2_a)))
     output = TurbulenceOutput(
         du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, dq_v_dt=dq_v_dt,
         Km=Kh_full, Kh=Kh_full, shflx=shflx, lhflx=lhflx,

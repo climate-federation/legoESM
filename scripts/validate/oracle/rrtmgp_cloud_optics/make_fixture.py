@@ -123,6 +123,7 @@ def main():
     names, cols = build_columns()
     S = lambda key: np.stack([c[key] for c in cols])  # noqa: E731
 
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
     ccfg = production_cloud_config()
     p_half = S("p_half")
     props = compute_cloud_properties(
@@ -131,7 +132,7 @@ def main():
         q_ice=jnp.asarray(S("q_i")), n_ice=jnp.asarray(S("n_i")), n_cloud=jnp.asarray(S("n_ccn")),
         conv_precip=None, cloud_fraction_override=jnp.asarray(S("alst")),
         lat=jnp.asarray(np.array([c["lat"] for c in cols])), conv_mass_flux_up=None,
-        conv_icwmr=None, p_half=jnp.asarray(p_half))
+        conv_icwmr=None, p_half=jnp.asarray(p_half), clubb_config=CLUBBConfig())
     cpl, cpi = (np.asarray(a) for a in subcolumns.in_cloud_paths(
         props.cloud_fraction, props.lwp, props.iwp))
     r_liq, r_ice = np.asarray(props.r_eff_liq), np.asarray(props.r_eff_ice)

@@ -1838,6 +1838,9 @@ def make_aimip_classical_spectral_physics(
     from legoesm.atmosphere.physics.radiation.integration import (
         make_radiation_physics,
     )
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        resolved_clubb_config,
+    )
     non_rad_cfg = PhysicsConfig(
         radiation=RadiationConfig(scheme="none"),
         convection=conv_cfg,
@@ -1870,6 +1873,8 @@ def make_aimip_classical_spectral_physics(
         sfc_emissivity_override=_sfc_emissivity_override,
         use_clubb_cloud_fraction=rad_cfg.use_clubb_cloud_fraction,
         column_mesh=column_mesh,
+        # cam6_clubb: CLUBB's top cuts aist (clubb_intr.F90:2535).
+        clubb_config=resolved_clubb_config(turb_cfg),
     )
 
     def non_rad_fn(state, grid_, sigma_coord, phys_state=None, forcing=None):

@@ -571,11 +571,14 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
     moist = any(getattr(config, k) != "none"
                 for k in ("microphysics", "convection", "turbulence"))
     from legoesm.driver.physics_pipeline import (
-        moisture_registry_for, validate_microphysics_tracer_slots)
-    registry = moisture_registry_for(config.microphysics)
+        moisture_registry_for, registry_scheme_config,
+        validate_microphysics_tracer_slots)
+    _scheme_cfg = registry_scheme_config(config)
+    registry = moisture_registry_for(config.microphysics, _scheme_cfg)
     validate_microphysics_tracer_slots(
         config.microphysics, registry.n_tracers,
-        context="fv3_duo column lane tracer slots")
+        context="fv3_duo column lane tracer slots",
+        scheme_config=_scheme_cfg)
     if bundle.ctx_np.get("ectx") is None:
         raise ValueError("fv3_duo column lane needs the duo ext bundle "
                          "(ctx['ectx'] with amat6) for the c2l column winds")

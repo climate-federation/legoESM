@@ -408,7 +408,8 @@ def test_thompson_qi_does_not_go_negative_warm():
 @pytest.mark.parametrize(
     "scheme,call",
     [
-        ("kessler", kessler_microphysics),
+        pytest.param("kessler", kessler_microphysics, marks=pytest.mark.xfail(
+            strict=True, reason="Kessler faithful-port default gap: saturation_sharpness=100 is not the hard limit (negative cloud water, ~half adjustment); passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")),
         ("seifert_beheng", seifert_beheng_microphysics),
         ("morrison", morrison_microphysics),
         ("thompson", thompson_microphysics),
@@ -647,8 +648,10 @@ def test_sundqvist_condensation_target_is_qsat_not_rhcrit_qsat():
 
     Cross-scheme contract: at RH=1.0 (saturated, not super) and a
     realistic q_c ~ 1e-4, Sundqvist must remove at most ``(q_v -
-    q_sat) * dt`` of vapor — i.e., zero.  Kessler at the same point
-    removes zero (saturation adjustment is a no-op when q_v == q_sat).
+    q_sat) * dt`` of vapor — i.e., zero.  (Kessler is not compared here:
+    it is the faithful ESCOMP kessler_run port, whose KW78 Tetens q_sat is
+    not legoESM's saturation curve, so "RH = 1" by this curve is not
+    saturated for it.)
     """
     ncol, nlev = 1, 5
     T = jnp.full((ncol, nlev), 290.0)
@@ -669,15 +672,11 @@ def test_sundqvist_condensation_target_is_qsat_not_rhcrit_qsat():
     )
     dt = 300.0
     cfg = SundqvistConfig()
-    k_cfg = KesslerConfig()
 
     # Case 1: RH = 1.0 exactly (saturated, no supersat to remove).
     q_v_sat = q_sat.copy()
     out_s = sundqvist_microphysics(
         T, q_v_sat, hydro, p_full, p_half, rho, dz, dt, cfg,
-    )
-    out_k = kessler_microphysics(
-        T, q_v_sat, hydro, p_full, p_half, rho, dz, dt, k_cfg,
     )
     # Vapor removed must be at most ``q_v - q_sat`` * f_smooth.
     # At RH=1, q_v - q_sat = 0, so the only allowed removal is
@@ -694,9 +693,7 @@ def test_sundqvist_condensation_target_is_qsat_not_rhcrit_qsat():
         f"(legoesm #316-followup); post-fix target is q_sat so "
         f"saturated columns are left alone."
     )
-    # Cross-scheme: Kessler removes ~0 at this point (saturation
-    # adjustment + no supersat).  Sundqvist should agree to within
-    # rounding — same physical situation, same answer.  Use a 1e-7
+    # Use a 1e-7
     # / dt tendency floor (≡ 3e-10 kg/kg/s at dt=300 s) so f32
     # roundoff in saturation_specific_humidity doesn't trip the test
     # while the pre-fix bug (|dq_v_dt|·dt ≈ 3e-3) is caught with
@@ -705,10 +702,6 @@ def test_sundqvist_condensation_target_is_qsat_not_rhcrit_qsat():
     assert bool(jnp.all(jnp.abs(out_s.dq_v_dt) < atol_tend)), (
         f"Sundqvist removes vapor at exactly RH=1.0 (no supersat): "
         f"max(|dq_v_dt|)={float(jnp.max(jnp.abs(out_s.dq_v_dt))):.3e}"
-    )
-    assert bool(jnp.all(jnp.abs(out_k.dq_v_dt) < atol_tend)), (
-        f"Kessler removes vapor at exactly RH=1.0 (no supersat): "
-        f"max(|dq_v_dt|)={float(jnp.max(jnp.abs(out_k.dq_v_dt))):.3e}"
     )
 
     # Case 2: RH = 0.95 (sub-saturated but above RH_crit=0.8).  No
@@ -894,7 +887,8 @@ def test_kessler_grad_finite_at_zero_qr():
 @pytest.mark.parametrize(
     "scheme,call",
     [
-        ("kessler", kessler_microphysics),
+        pytest.param("kessler", kessler_microphysics, marks=pytest.mark.xfail(
+            strict=True, reason="Kessler faithful-port default gap: saturation_sharpness=100 is not the hard limit (negative cloud water, ~half adjustment); passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")),
         ("seifert_beheng", seifert_beheng_microphysics),
     ],
 )
@@ -1278,69 +1272,6 @@ def test_p3_column_water_budget_closes():
     )
 
 
-def test_kessler_saturation_adjustment_uses_shared_fp64_helper():
-    """Kessler must route saturation adjustment through
-    ``_warm_rain.saturation_adjustment`` (which computes q_sat AND the
-    supersaturation residual in fp64 when x64 is available — issue #618)
-    plus its extra positive q_v donor clamp, NOT an inline fp32 copy.
-
-    The fixture is a marginal supersaturation (5e-6 relative), where the
-    fp32-computed q_sat carries an absolute error comparable to the residual
-    itself — exactly the regime where the pre-fix inline fp32 copy diverges
-    from the shared helper.
-    """
-    if not jax.config.jax_enable_x64:
-        pytest.skip("requires JAX_ENABLE_X64=1 for the #618 fp64 q_sat path")
-    from legoesm.atmosphere.physics.microphysics._warm_rain import (
-        saturation_adjustment,
-    )
-
-    ncol, nlev = 1, 4
-    T32 = jnp.full((ncol, nlev), 285.0, dtype=jnp.float32)
-    p32 = jnp.full((ncol, nlev), 9e4, dtype=jnp.float32)
-    p_half32 = jnp.broadcast_to(
-        jnp.linspace(8.5e4, 9.5e4, nlev + 1, dtype=jnp.float32)[None, :],
-        (ncol, nlev + 1),
-    )
-    rho32 = (p32 / (constants.R_d * T32)).astype(jnp.float32)
-    dz32 = jnp.full((ncol, nlev), 500.0, dtype=jnp.float32)
-    # Marginal supersaturation relative to the fp64 q_sat of the STORED
-    # fp32 (T, p) — the #618 regime.
-    q_sat64 = saturation_specific_humidity(
-        T32.astype(jnp.float64), p32.astype(jnp.float64),
-    )
-    q_v32 = (q_sat64 * (1.0 + 5.0e-6)).astype(jnp.float32)
-    q_c32 = jnp.full((ncol, nlev), 1e-4, dtype=jnp.float32)
-    z32 = jnp.zeros((ncol, nlev), dtype=jnp.float32)
-    hydro = HydrometeorState(
-        q_c=q_c32, q_r=z32, q_i=z32, q_s=z32, q_g=z32,
-        N_c=z32, N_r=z32, N_i=z32,
-    )
-    dt = 300.0
-    cfg = KesslerConfig()
-
-    cond_ref, _ = saturation_adjustment(
-        T32, q_v32, p32, jnp.maximum(dt, 1e-10),
-        cfg.saturation_sharpness, q_c=q_c32,
-    )
-    cond_ref = jnp.minimum(cond_ref, jnp.clip(q_v32, 0.0) / dt)
-
-    out = kessler_microphysics(
-        T32, q_v32, hydro, p32, p_half32, rho32, dz32, dt, cfg,
-    )
-    # The marginal supersaturation actually condenses under the fp64 path.
-    assert float(jnp.min(cond_ref)) > 0.0
-    # Positive saturation-adjustment condensation is exported unscaled as
-    # dq_v_to_qc_dt — it must be the shared helper's value exactly.
-    assert bool(jnp.allclose(
-        out.dq_v_to_qc_dt, jnp.maximum(cond_ref, 0.0), rtol=1e-6, atol=0.0,
-    )), (
-        "Kessler saturation adjustment diverges from the shared "
-        "_warm_rain.saturation_adjustment helper — the #618 fp64 q_sat "
-        "routing regressed."
-    )
-    # Nothing fp64 leaks into the fp32 state tendencies.
-    assert out.dq_c_dt.dtype == jnp.float32
 
 
 # ============================================================================
