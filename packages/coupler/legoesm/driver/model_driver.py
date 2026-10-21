@@ -580,16 +580,23 @@ def warn_sed_substeps_unreported(cfg, lane: str = "current",
     return True
 
 
-def _evap_sfc_slot() -> int:
-    """Index of ``evap_sfc`` (the column's surface water flux) in the MPAS
-    ``_sfc_diag`` tuple, derived from the SHARED slot contract like
-    ``_sed_substeps_slot`` -- never hand-counted."""
+def _sfc_diag_slot(key: str) -> int:
+    """Index of *key* in the MPAS ``_sfc_diag`` tuple, derived from the
+    SHARED slot contract like ``_sed_substeps_slot`` -- never hand-counted."""
     from legoesm.core.state import (
         MPAS_SFC_DIAG_BASE_KEYS,
         MPAS_SFC_DIAG_EXTRA_KEYS,
     )
+    if key in MPAS_SFC_DIAG_BASE_KEYS:
+        return MPAS_SFC_DIAG_BASE_KEYS.index(key)
     return (len(MPAS_SFC_DIAG_BASE_KEYS)
-            + MPAS_SFC_DIAG_EXTRA_KEYS.index("evap_sfc"))
+            + MPAS_SFC_DIAG_EXTRA_KEYS.index(key))
+
+
+def _evap_sfc_slot() -> int:
+    """Index of ``evap_sfc`` (the column's surface water flux) in the MPAS
+    ``_sfc_diag`` tuple."""
+    return _sfc_diag_slot("evap_sfc")
 
 
 def land_snowfall_from_sfc_diag(sfc_diag, precip):
@@ -1017,7 +1024,10 @@ class _MPASSfcFluxAccum:
     # per step per slot and is what makes the budget answerable at all.
     # 13 = evap_sfc (the column's surface water flux): accumulated like hfls
     # so CMOR evspsbl and the moisture closure get the same window MEAN.
-    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 13)
+    # 8/9 = sw_down_sfc / lw_down_sfc: CMOR rsds/rlds, and with slots 0/1
+    # the upwelling pair rsus/rlus (down - net).  Strongly diurnal, so a
+    # fixed-clock snapshot would carry the #1353 defect under a mean label.
+    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13)
     #: The slots the column energy budget reads (sw/lw net sfc, lw_up, sw_up,
     #: sw_dn, hfss, hfls).  After the first radiation call every one of them
     #: is non-None on EVERY step (the MPAS model holds the last radiation
@@ -10446,6 +10456,19 @@ class ModelDriver:
         # CMOR output, byte-identical) in the default configuration.
         rsutcs = _sfc_slot(10)
         rlutcs = _sfc_slot(11)
+        # Surface radiation: the downwelling pair the land tile reads, and
+        # the upwelling pair as down minus the ``+into surface`` net from the
+        # same radiation call (net = down - up, radiation/integration.py).
+        # Published only when the physics exports the downwelling slots; a
+        # net flux is never published under a down/up CMOR name.
+        rsds = _sfc_slot(_sfc_diag_slot("sw_down_sfc"))
+        rlds = _sfc_slot(_sfc_diag_slot("lw_down_sfc"))
+        _sw_net = _sfc_slot(_sfc_diag_slot("sw_net_sfc"))
+        _lw_net = _sfc_slot(_sfc_diag_slot("lw_net_sfc"))
+        rsus = (None if rsds is None or _sw_net is None
+                else np.asarray(rsds) - np.asarray(_sw_net))
+        rlus = (None if rlds is None or _lw_net is None
+                else np.asarray(rlds) - np.asarray(_lw_net))
         lat_deg = np.degrees(np.asarray(self.grid.latCell))
         # Interval-mean flux fields carry their averaging window so the
         # feed can calendar-bin them at the interval MIDPOINT (#1353
@@ -10517,6 +10540,10 @@ class ModelDriver:
             evspsbl=evspsbl,
             rsutcs=rsutcs,
             rlutcs=rlutcs,
+            rsds=rsds,
+            rsus=rsus,
+            rlds=rlds,
+            rlus=rlus,
             wap=wap,
             flux_interval_days=_flux_days,
         )

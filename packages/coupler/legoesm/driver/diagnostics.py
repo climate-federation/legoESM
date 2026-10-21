@@ -1680,6 +1680,10 @@ class DiagnosticCollector:
         evspsbl=None,
         rsutcs=None,
         rlutcs=None,
+        rsds=None,
+        rsus=None,
+        rlds=None,
+        rlus=None,
         wap=None,
         flux_interval_days=None,
         include_state=True,
@@ -1764,6 +1768,11 @@ class DiagnosticCollector:
             CMOR sign as rsut/rlut] from the clouds-off second radiation pass
             (``--clear-sky-diag``, #843).  Interval means like the other flux
             fields; absent (None) keeps the output byte-identical.
+        rsds, rsus, rlds, rlus : array, shape ``(nCells,)``, optional
+            Surface downwelling / upwelling SW and LW flux [W/m2, CMOR
+            ``positive`` down for rsds/rlds, up for rsus/rlus], from the
+            radiation call's own surface fluxes (the caller derives the
+            upwelling pair as down minus the ``+into surface`` net).
         q_c, q_i : array, shape ``(nCells, nlev)``, optional
             CLOUD liquid / CLOUD ice mixing ratio [kg/kg] (the tracers the
             radiation's cloud diagnosis consumes — NOT the precipitating
@@ -1841,7 +1850,7 @@ class DiagnosticCollector:
         # Flux-field name sets (Amon spatial / daily / zonal) used to split
         # the PHASE-2 commits between the two calendar bins.
         _FLUX_2D = ("pr", "rlut", "rsut", "rsdt", "hfss", "hfls", "evspsbl",
-                    "rsutcs", "rlutcs")
+                    "rsutcs", "rlutcs", "rsds", "rsus", "rlds", "rlus")
         _FLUX_DAILY = ("pr",)
         _FLUX_ZONAL = ("precip",)
 
@@ -1886,6 +1895,10 @@ class DiagnosticCollector:
         evspsbl_np = None if evspsbl is None else np.asarray(evspsbl, dtype=_f64)
         rsutcs_np = None if rsutcs is None else np.asarray(rsutcs, dtype=_f64)
         rlutcs_np = None if rlutcs is None else np.asarray(rlutcs, dtype=_f64)
+        rsds_np = None if rsds is None else np.asarray(rsds, dtype=_f64)
+        rsus_np = None if rsus is None else np.asarray(rsus, dtype=_f64)
+        rlds_np = None if rlds is None else np.asarray(rlds, dtype=_f64)
+        rlus_np = None if rlus is None else np.asarray(rlus, dtype=_f64)
 
         # Shape contract — validated UP FRONT so BOTH the spatial regrid AND the
         # zonal binning are transactional.  A malformed optional input raises
@@ -1909,6 +1922,10 @@ class DiagnosticCollector:
             ("evspsbl", evspsbl_np, (_ncol,)),
             ("rsutcs", rsutcs_np, (_ncol,)),
             ("rlutcs", rlutcs_np, (_ncol,)),
+            ("rsds", rsds_np, (_ncol,)),
+            ("rsus", rsus_np, (_ncol,)),
+            ("rlds", rlds_np, (_ncol,)),
+            ("rlus", rlus_np, (_ncol,)),
             ("q_v", q_v_np, (_ncol, _nlev)),
             ("q_c", q_c_np, (_ncol, _nlev)),
             ("q_i", q_i_np, (_ncol, _nlev)),
@@ -1961,6 +1978,10 @@ class DiagnosticCollector:
                 ('evspsbl', evspsbl_np),
                 ('rsutcs', rsutcs_np),
                 ('rlutcs', rlutcs_np),
+                ('rsds', rsds_np),
+                ('rsus', rsus_np),
+                ('rlds', rlds_np),
+                ('rlus', rlus_np),
             ):
                 if _src is None or (not include_state and _name not in _FLUX_2D):
                     continue

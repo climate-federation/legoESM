@@ -1696,3 +1696,105 @@ class TestClearSkyRadiationFactory:
         # Trajectory neutrality under the real optics.
         np.testing.assert_array_equal(np.asarray(t.dT_dt.data),
                                       np.asarray(_run(False).dT_dt.data))
+
+
+class TestSurfaceRadiationFeed:
+    """Surface radiation (rsds/rsus/rlds/rlus) from the ``_sfc_diag`` slots:
+    the downwelling pair is slots 8/9 (the fluxes the interactive land reads),
+    the upwelling pair is down minus the net slots 0/1 (``+into surface``, so
+    ``net = down - up``) — all from the SAME radiation call."""
+
+    SW_NET, LW_NET, SW_DN, LW_DN = 150.0, -60.0, 200.0, 300.0
+
+    def _fake(self, mesh, dc, *, with_down, via_accum):
+        import types
+
+        from legoesm.driver.model_driver import _MPASSfcFluxAccum
+
+        sigma_full = np.linspace(0.05, 0.98, NLEV)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+
+        def _field(a):
+            return types.SimpleNamespace(data=np.asarray(a))
+
+        def _slots(sw_net, lw_net, sw_dn, lw_dn):
+            sfc = [None] * 14
+            sfc[0] = _field(np.full(n, sw_net))
+            sfc[1] = _field(np.full(n, lw_net))
+            sfc[2] = _field(np.full(n, 2.0e-5))
+            if with_down:
+                sfc[8] = _field(np.full(n, sw_dn))
+                sfc[9] = _field(np.full(n, lw_dn))
+            return tuple(sfc)
+
+        acc = None
+        if via_accum:
+            # Two per-step samples whose MEAN is the class constant; the
+            # end-of-interval snapshot (below) is deliberately different.
+            acc = _MPASSfcFluxAccum()
+            acc.add(_slots(self.SW_NET - 10, self.LW_NET - 10,
+                           self.SW_DN - 10, self.LW_DN - 10))
+            acc.add(_slots(self.SW_NET + 10, self.LW_NET + 10,
+                           self.SW_DN + 10, self.LW_DN + 10))
+        snap = _slots(self.SW_NET + 99, self.LW_NET + 99,
+                      self.SW_DN + 99, self.LW_DN + 99) if via_accum else \
+            _slots(self.SW_NET, self.LW_NET, self.SW_DN, self.LW_DN)
+        u_edge = np.zeros((int(mesh.nEdges), NLEV))
+        ns = types.SimpleNamespace(
+            diagnostics=dc,
+            grid=mesh,
+            config=types.SimpleNamespace(
+                output=types.SimpleNamespace(diag_days=1.0)),
+            state=types.SimpleNamespace(
+                u=_field(u_edge), T=_field(f["T"]), p_s=_field(f["p_s"]),
+                phis=_field(f["phis"]), tracers=None, v=None,
+            ),
+            model=types.SimpleNamespace(_sfc_diag=snap),
+        )
+        if acc is not None:
+            ns._mpas_sfc_accum = acc
+        return _as_driver(ns)
+
+    @pytest.mark.parametrize("via_accum", [False, True])
+    def test_four_surface_fluxes_published(self, mesh, via_accum):
+        from legoesm.driver.model_driver import ModelDriver
+
+        dc, _ = _make_collector(mesh)
+        fake = self._fake(mesh, dc, with_down=True, via_accum=via_accum)
+        ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        # Interval MEAN when the accumulator runs (the +/-10 samples average
+        # to the constant, the +99 snapshot must not leak through).
+        np.testing.assert_allclose(out["field_2d_rsds"], self.SW_DN, rtol=1e-6)
+        np.testing.assert_allclose(out["field_2d_rlds"], self.LW_DN, rtol=1e-6)
+        np.testing.assert_allclose(out["field_2d_rsus"],
+                                   self.SW_DN - self.SW_NET, rtol=1e-6)
+        np.testing.assert_allclose(out["field_2d_rlus"],
+                                   self.LW_DN - self.LW_NET, rtol=1e-6)
+        # CMOR signs: every surface flux non-negative; rlus = sigma T^4-like.
+        for k in ("rsds", "rsus", "rlds", "rlus"):
+            assert np.all(out[f"field_2d_{k}"] >= 0.0), k
+
+    def test_without_downwelling_slots_publishes_none(self, mesh):
+        """A physics path that exports only the NET pair (no slots 8/9)
+        must not publish a surface-radiation field — never a net flux under
+        a downwelling/upwelling CMOR name."""
+        from legoesm.driver.model_driver import ModelDriver
+
+        dc, _ = _make_collector(mesh)
+        fake = self._fake(mesh, dc, with_down=False, via_accum=False)
+        ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        for k in ("rsds", "rsus", "rlds", "rlus"):
+            assert f"field_2d_{k}" not in out, k
+        assert "field_2d_pr" in out
+
+    def test_downwelling_slots_are_accumulated(self):
+        """The per-step accumulator must average slots 8/9 like every other
+        flux slot — a snapshot at a fixed clock time keeps the full diurnal
+        pattern under a ``time: mean`` label (#1353)."""
+        from legoesm.driver.model_driver import _MPASSfcFluxAccum
+
+        assert 8 in _MPASSfcFluxAccum.SLOTS
+        assert 9 in _MPASSfcFluxAccum.SLOTS
