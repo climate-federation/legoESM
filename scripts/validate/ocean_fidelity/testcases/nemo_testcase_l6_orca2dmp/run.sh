@@ -21,8 +21,8 @@ readonly G5_DECK=$G5_DIR/namelist_cfg ICE_DECK=$G5_DIR/namelist_ice_cfg
 readonly RENDER=$here/l6_deck.py L2_CHECKER=$L2_DIR/l2_records.py
 readonly BBC_CHECKER=$L4_DIR/l4_records.py BBC_PATCH=$L4_DIR/trabbc_round53.patch
 readonly DMP_CHECKER=$here/l6_records.py DMP_PATCH=$here/tradmp_round55.patch
-readonly REAL_LOG_DECK=$here/l2_r17_twin_a_namelist.resolved
-readonly REAL_LOG_EXCERPT=$here/l2_r17_twin_a_ocean.output.excerpt
+readonly REAL_LOG_DECK=$L4B_DIR/l2_r17_twin_a_namelist.resolved
+readonly REAL_LOG_EXCERPT=$L4B_DIR/l2_r17_twin_a_ocean.output.excerpt
 readonly BASE_TRABBC=$NEMO_ROOT/src/OCE/TRA/trabbc.F90
 readonly BASE_TRADMP=$NEMO_ROOT/src/OCE/TRA/tradmp.F90
 readonly REC_SOURCE_NAME=ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1
