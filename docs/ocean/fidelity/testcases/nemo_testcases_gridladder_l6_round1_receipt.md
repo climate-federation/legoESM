@@ -11,14 +11,18 @@ Implementation and acquisition-tool commits: `11c7147545`, `3583affb12`,
 
 Receipt and citation re-anchor commits: `a4f0eb3224`, `2e72445e10`
 
-Status: **STOPPED — L6 BUILT; ACQUISITION_NEEDED.**  L6 is the certified L4b
+Review-remediation commit: `945f885f94`
+
+Status: **STOPPED — REVIEW HOLD REMEDIATED; ACQUISITION_NEEDED.**  L6 is the certified L4b
 card plus ORCA2 interior temperature/salinity damping in NEMO's stage-3
 position.  Its exact local controls and read-only acquisition preflight pass.
-Codex invoked `--run`; the operator guard stopped before building or executing
-NEMO.  There is no L6 record, score, bar verdict, or certification.
+The first operator acquisition was refused after its smoke run; its build was
+moved aside and no record was admitted.  The corrected tool again stops before
+building or executing NEMO unless the operator supplies the acknowledgement.
+There is no L6 record, score, bar verdict, or certification.
 
 - codex review: operator
-- independent review: operator (Claude)
+- independent review: operator (Claude HOLD reproduced and remediated; re-review pending)
 - NEMO execution: operator-only; not run here
 - scoring: not run; no L6 record exists
 
@@ -88,25 +92,35 @@ validator requires the certified L4b composition and rejects either BBL arm.
 The ordinary stage-10c tracer-sponge route is withheld for L6.  At stage 3,
 production first constructs the certified L4b T/S source, then calls the shared
 relaxation kernel with full-rank `resto` and the current-step T/S targets.  The
-kernel materializes NEMO's final Krhs assignment with `nemo_source_round`.
+kernel materializes both binary64 roundings in NEMO's final Krhs assignment:
+the damping product is rounded before the final addition is rounded.
 Trace fields expose the live pre-damping source and damping rate without
 changing the production state.
 
-The one-step production test runs L4b and L6 through the same live WS-RK3
-observer.  For T and S it proves bitwise that the L6 pre-damping source is the
-L4b composed source and that the consumed result is exactly
-`nemo_source_round(L4b + resto * (target - Kbb))`.  The standalone JIT test
-uses traced binary64 state, targets, and rate.  Its rounding discriminator is
-`(1e16 + -1e16) + 1 == 1`, while moving damping before geothermal gives
-`(1e16 + 1) + -1e16 == 0`; therefore a moved call fails.  All checked gradients
-are finite.  This feature adds no division or square root and no new
-zero-operand gradient site.
+The independent review falsified the original exactness claim with the test
+trace disabled: XLA fused the damping multiply and final add on this CPU.  The
+supplied random-array probe found 229,255 temperature and 226,838 salinity
+words unequal out of 808,080 under JIT, while eager execution had zero.  With
+the product-rounding guard, both JIT counts are zero.  The standalone JIT test
+now uses traced binary64 non-unit rates and non-power-of-two values and proves
+the two-rounding result bit for bit; all checked gradients remain finite.
+
+The original “moved call fails” discriminator was only standalone NumPy
+arithmetic, not a model run; that claim is retracted.  The replacement
+one-step test runs the ordinary compiled L6 model with no test trace and
+inexact per-cell T/S offsets, then recompiles the same production step with
+the inner product-rounding guard planted out.  The resulting T/S state differs,
+so reverting the guard makes the one-step control fail.  The source-order
+selection still pins damping after the certified L4b composition.  This
+feature adds no division or square root and no new zero-operand gradient site.
 
 The card and loader plants reject missing certified L4b, BBL, incompatible
 forcing rank, a non-exact deck delta, a changed `resto.nc`, or failure to vary
-the interpolated target across steps.  The focused L6 file passed 7 / 7 tests
-in 449.84 seconds.  The selected L4b regression and merge-probe unit tests
-passed 4 / 4 in 9.16 seconds; the shared sponge tests passed 10 / 10.
+the interpolated target across steps.  Each target now carries its NEMO step;
+the L6 model requires the caller's positive step and rejects a missing or stale
+stamp before compilation.  Thus a scorer cannot silently reuse the stored
+kt=1 target at kt=2.  The corrected focused and shared-sponge battery passed
+29 / 29 tests in 188.91 seconds.
 
 ## 3. Inherited-card preservation
 
@@ -130,38 +144,52 @@ and write only NEMO-defined wet cells.
 
 The preflight executes whitespace-tolerant numeric/logical checks on both a
 committed excerpt of a real L2 `ocean.output` and a STAMPED rendered L6 deck.
+For L6 it now requires the active-mask damping banner and the successful
+record-1 `resto.nc` read, not the generic initialization text also emitted with
+damping disabled.  A SHA-pinned round-54 damping-off log is refused.
 It executes `check_acting` only on the smoke and as its own statement, proves
 the writer-free boundary has no observer records, contains no `cmd | grep -q`
 under `pipefail`, and removes collision-safe scratch with an `EXIT` trap.  All
-seven planted violations fire.  From clean commit `64bcc0c9e6`, default
-preflight ended:
+seven checklist plants fire.  The synthetic writer now emits an inert kt=1
+payload, which passes, followed by an acting kt=2 payload; a separate inert
+kt=2 plant is refused.
+
+The first operator acquisition reached the two-step smoke and was refused
+because the old checker incorrectly required kt=1 to act.  The retained smoke
+record proves all 430,552 wet cells have target equal to before and no RHS
+changes at kt=1, while kt=2 changes all 5,871 cells with positive `resto` for
+both tracers.  The failed evidence is under
+`gridladder_rounds/round55/oracle_l6_r55_failed1`; its build was moved to
+`cfgs/ORCA2L6_DMP_R55_failed1`, leaving the acquisition target free.  No failed
+payload was admitted as an L6 record.
+
+From clean remediation commit `945f885f94`, default preflight ended:
 
 ```text
 L2_ISO_ACTING ldf_wet_nonzero=860708 ldf_dry_nonzero=0 completed_tracer_unequal=861013 entry_T_unequal=430464 entry_S_unequal=430549 entry_u_unequal=0 entry_v_unequal=0 entry_ssh_unequal=0 barotropic_checked=False barotropic_unequal=0 pass=True
-L6_PREFLIGHT_7_OF_7_PASS plants=7/7 checker_functions=3/3 evidence_parent_absent=true target_absent=true
-L6_PREFLIGHT_OK commit=64bcc0c9e6dccb6353b235c4d360eacf82da5edc reference=ORCA2G5_OMIP_L4_R31REF_FIX1 record_target=ORCA2L6_DMP_R55
+L6_PREFLIGHT_7_OF_7_PASS plants=7/7 l6_specific_plants=3/3 checker_functions=3/3 evidence_parent_absent=true target_absent=true
+L6_PREFLIGHT_OK commit=945f885f9407479f32b59bc549705158357c0a95 reference=ORCA2G5_OMIP_L4_R31REF_FIX1 record_target=ORCA2L6_DMP_R55
 WOULD_RUN smoke, writer-free boundary, twins A/B/C into /data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round55/oracle_l6_r55
 ```
 
-Codex then invoked `run.sh --run`.  It reran the complete preflight and stopped
+Codex then invoked `run.sh --run` without the operator acknowledgement.  It
+reran the complete preflight and stopped
 with exit status 66 before `build_target`:
 
 ```text
 REFUSE: L6 acquisition: ACQUISITION_NEEDED: --run is operator-only (set NEMO_OPERATOR_ACK=L6_R55_OPERATOR)
 ```
 
-The target and evidence directory remain absent.  NEMO was not built or run.
+The target and corrected evidence directory remain absent.  NEMO was not built
+or run during remediation.  The operator command is
+`NEMO_OPERATOR_ACK=L6_R55_OPERATOR run.sh --run`.
 
 ## 5. Gates and ASKED / UNASKED
 
-The explicit gate found 16 citations in this receipt and 17 in the
-preregistration, with zero unmapped citations, zero failures, zero failing
-map-audit entries, and all nine self-test plants firing in each run.  The
-required citation-gate file passed 17 / 17.  The exact default ORCA2 landing
-suite from `claude_rounds/land.sh` passed 145 / 145 in 1019.78 seconds with
-x64 and the landing environment; that total includes the private-import
-ratchet at 6 / 6 and both ORCA2 parallel-receipt checks.  No trajectory scorer
-or fidelity-bar gate was invoked because no L6 record exists.
+The original landing gates are recorded in the commit history; the remediation
+gate results are recorded below after rerunning them on this corrected receipt.
+No trajectory scorer or fidelity-bar gate is invoked because no L6 record
+exists.
 
 ASKED and completed: survey the running deck and compiled Oracle; verify and
 SHA-pin the existing on-disk `resto.nc`; extend existing shared mechanisms;
@@ -176,7 +204,7 @@ create, admit, or score an L6 record; claim an L6 bar verdict or certification;
 enable BBL; relax any fidelity bar; push; post to GitHub; or perform an author
 review.  Independent review remains with the operator.
 
-COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/gridladder_r55-269571393
-ACQUISITION_NEEDED: operator must run the committed L6 acquisition entry point with NEMO_OPERATOR_ACK=L6_R55_OPERATOR
+COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/gridladder_r55/repo
+ACQUISITION_NEEDED: NEMO_OPERATOR_ACK=L6_R55_OPERATOR scripts/validate/ocean_fidelity/testcases/nemo_testcase_l6_orca2dmp/run.sh --run
 DECISION_NEEDED: NONE
-ROUND_STATUS: STOPPED — L6 built and preflighted; operator acquisition needed; not scored
+ROUND_STATUS: STOPPED — review hold remediated and preflighted; operator acquisition needed; not scored
