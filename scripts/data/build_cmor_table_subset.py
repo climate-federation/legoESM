@@ -83,6 +83,7 @@ WANTED: Dict[str, tuple] = {
     ),
     "Ofx": ("areacello", "deptho", "masscello", "sftof", "thkcello", "volcello"),
     "SImon": ("siconc", "sitemptop", "sithick", "siu", "siv"),
+    "LImon": ("snw",),
 }
 
 # Coordinate axes we need the ``requested`` level lists / scalar values for.

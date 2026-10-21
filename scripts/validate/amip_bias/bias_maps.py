@@ -46,6 +46,11 @@ CERES = f"{_ROOT}/observation_CERES-EBAF/mon"
 GPCP = f"{_ROOT}/observation_GPCP/mon"
 ESACCI = f"{_ROOT}/observation_ESACCI-CLOUD/mon"
 ERA5 = f"{_ROOT}/reanalysis_ERA5/mon"
+# ERA5 fields staged under bb1596 (the shared input tree above is read-only):
+# snw = ERA5 monthly snow depth of water equivalent x 1000 [kg m-2], 1 deg,
+# 1979-2025, built with cdo from /pool/data/ERA5/E5/sf/an/1M/141 (ice
+# sheets sit at the ERA5 10 m cap, so their bias is not meaningful).
+ERA5_BB = "/work/bb1596/b309178/diffESM/obs/reanalysis_ERA5/mon"
 
 _spec = importlib.util.spec_from_file_location("rb", _DIR / "regional_bias.py")
 rb = importlib.util.module_from_spec(_spec)
@@ -61,6 +66,7 @@ SPEC = {
     "prw": (ERA5, "ERA5", "YlGnBu", 10.0, "kg m-2"),
     "evspsbl": (ERA5, "ERA5", "YlGnBu", 3.0, "mm day-1"),
     "pr": (GPCP, "GPCP", "YlGnBu", 3.0, "mm day-1"),
+    "snw": (ERA5_BB, "ERA5", "Blues", 200.0, "kg m-2"),
 }
 
 # display scaling applied to BOTH model and reference before plotting, for
@@ -351,7 +357,7 @@ def main(argv=None):
     ap.add_argument("--run", required=True)
     ap.add_argument("--vars", nargs="+",
                     default=["albedo", "rsut", "rlut", "clt", "tas", "prw",
-                             "evspsbl", "pr"])
+                             "evspsbl", "pr", "snw"])
     ap.add_argument("--out", default=".")
     ap.add_argument("--no-section", action="store_true")
     args = ap.parse_args(argv)

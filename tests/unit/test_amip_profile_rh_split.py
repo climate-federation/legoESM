@@ -184,3 +184,32 @@ def test_on_columns_holds_the_fill_outside_the_measured_range(kern):
     p_full = np.array([120000.0, 1000.0])          # below the base, above the top
     assert np.all(kern._on_columns(plev, prof, p_full, fill=0.0) == 0.0)
     assert np.all(kern._on_columns(plev, prof, p_full, fill=1.0) == 1.0)
+
+
+def test_land_only_region_refuses_to_score_without_a_land_mask(rb):
+    """A desert box is LAND cells only; with no fx sftlf the tool must stop,
+    not silently average coastal ocean into a land temperature bias."""
+    import pytest as _pt
+    name = next(iter(rb.LAND_ONLY))
+    assert name in rb.REGIONS
+    with _pt.raises(SystemExit, match="land-only"):
+        rb._region_valid(name, None)
+    land = np.zeros((2, 2), bool)
+    assert rb._region_valid(name, land) is land
+    assert rb._region_valid("GLOBAL", None) is None
+
+
+def test_land_mask_refuses_a_grid_that_differs_from_the_field(rb, tmp_path, monkeypatch):
+    xr = pytest.importorskip("xarray")
+    run = tmp_path / "run" / "cmor" / "fx"
+    run.mkdir(parents=True)
+    lat, lon = np.array([-45.0, 45.0]), np.array([90.0, 270.0])
+    xr.Dataset({"sftlf": (("lat", "lon"), np.array([[100.0, 0.0], [60.0, 40.0]]))},
+               coords={"lat": lat, "lon": lon}).to_netcdf(
+        run / "sftlf_fx_legoESM-1-0_amip_r1i1p1f1_gn.nc")
+    monkeypatch.setattr(rb, "ROOT", str(tmp_path))
+    mask = rb._land_mask("run", lat, lon)
+    assert mask.tolist() == [[True, False], [True, False]]      # > 50 %
+    with pytest.raises(SystemExit, match="grid differs"):
+        rb._land_mask("run", lat + 1.0, lon)
+    assert rb._land_mask("norun", lat, lon) is None

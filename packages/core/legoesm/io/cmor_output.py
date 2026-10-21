@@ -131,6 +131,7 @@ _TABLE_REALM: Dict[str, str] = {
     "Oyr": "ocean",
     "Ofx": "ocean",
     "SImon": "seaIce",
+    "LImon": "landIce",
     "SIyr": "seaIce",
     "fx": "atmos",
 }

@@ -46,7 +46,7 @@ _TABLE_DIR = Path(__file__).resolve().parent / "cmor_tables"
 
 # Official CMIP6 table IDs legoESM writes into.
 CMIP6_TABLE_IDS: Tuple[str, ...] = (
-    "Amon", "day", "CFday", "fx", "Lmon", "Omon", "Ofx", "SImon",
+    "Amon", "day", "CFday", "fx", "Lmon", "Omon", "Ofx", "SImon", "LImon",
 )
 
 # Legacy table aliases kept so pre-existing callers/tests keep working.
