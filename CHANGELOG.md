@@ -5,6 +5,16 @@ All notable changes to legoESM. Format roughly follows
 
 ## Unreleased
 
+### Added
+
+- **Orchestrator provenance env vars.** `build_run_manifest()` now reads
+  `LEGOESM_RUNNER_TAG` / `LEGOESM_RUNNER_PATCHES` (comma-separated list);
+  when set, they take precedence over the caller's per-script defaults, so a
+  downstream orchestrator (e.g. legoESM-ocean-runners' `run.sh`) can identify
+  itself and its patch chain on every lane — including the atmosphere driver
+  path, which passes neither field. No schema change: populating the optional
+  `reproducibility.runner_tag` / `patches` fields is not a bump.
+
 ### Changed
 
 - **License: MIT.** legoESM is now released under the MIT License, replacing

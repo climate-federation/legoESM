@@ -78,6 +78,43 @@ def test_optional_provenance_fields_are_threaded() -> None:
     assert m["result"]["model_weights_provenance"] == {"checkpoint": "physics.eqx"}
 
 
+def test_env_var_runner_provenance_overrides_caller_defaults(monkeypatch) -> None:
+    """Orchestrator env vars (LEGOESM_RUNNER_TAG/_PATCHES) win over the
+    caller's per-script defaults — the orchestrator sits above the entry
+    script, whose identity stays in [run].command_line."""
+    monkeypatch.setenv(
+        "LEGOESM_RUNNER_TAG",
+        "ocean-runners@legoesm-294495454a29 template=3d_idealized/baroclinic_gyre",
+    )
+    monkeypatch.setenv(
+        "LEGOESM_RUNNER_PATCHES",
+        "001-libm-lazy-load.patch, , 002-omip-core2-extensions.patch",
+    )
+    m = build_run_manifest(
+        _sample_config(), runner_tag="run_omip_core2", patches=["local.patch"]
+    )
+    assert m["reproducibility"]["runner_tag"] == (
+        "ocean-runners@legoesm-294495454a29 template=3d_idealized/baroclinic_gyre"
+    )
+    # Comma list parsed, whitespace stripped, empty entries dropped.
+    assert m["reproducibility"]["patches"] == [
+        "001-libm-lazy-load.patch",
+        "002-omip-core2-extensions.patch",
+    ]
+
+
+def test_env_var_runner_provenance_absent_keeps_caller_values(monkeypatch) -> None:
+    """Without the env vars (or with empty values) the caller's runner_tag
+    and patches pass through unchanged."""
+    monkeypatch.delenv("LEGOESM_RUNNER_TAG", raising=False)
+    monkeypatch.setenv("LEGOESM_RUNNER_PATCHES", "")  # set-but-empty = unset
+    m = build_run_manifest(
+        _sample_config(), runner_tag="run_omip_core2", patches=["p.patch"]
+    )
+    assert m["reproducibility"]["runner_tag"] == "run_omip_core2"
+    assert m["reproducibility"]["patches"] == ["p.patch"]
+
+
 def test_dataset_provenance_entry_shape_and_checksum(tmp_path: Path) -> None:
     """Entry records identity + cheap integrity facts; sha256 is opt-in."""
     import hashlib

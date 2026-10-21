@@ -493,6 +493,13 @@ def build_run_manifest(
         so the run can be rebuilt.
     command_line
         The invoking command; defaults to ``" ".join(sys.argv)``.
+    runner_tag, patches
+        Free-form downstream-orchestrator identity and the patch chain it
+        applied, recorded under ``[reproducibility]``.  When the env vars
+        ``LEGOESM_RUNNER_TAG`` / ``LEGOESM_RUNNER_PATCHES`` (comma-separated
+        list) are set, they take precedence over the caller's values: the
+        orchestrator sits above the entry-point script, and the script
+        identity stays recorded in ``[run].command_line``.
     state_digest
         Filled after N steps by the reproduce/checkpoint path; ``None`` at start.
     config_kind
@@ -502,6 +509,17 @@ def build_run_manifest(
     from legoesm._version import __version__
 
     kind = config_kind or detect_config_kind(config)
+
+    # Downstream orchestrators (e.g. legoESM-ocean-runners' run.sh) identify
+    # themselves via env vars. An explicitly-set value wins over the caller's
+    # per-script defaults: the orchestrator sits above the entry script, and
+    # the script identity remains in [run].command_line.
+    env_runner_tag = os.environ.get("LEGOESM_RUNNER_TAG", "")
+    if env_runner_tag:
+        runner_tag = env_runner_tag
+    env_patches = os.environ.get("LEGOESM_RUNNER_PATCHES", "")
+    if env_patches:
+        patches = [p.strip() for p in env_patches.split(",") if p.strip()]
 
     # Provenance of the IMPORTED package — the code that runs — not the CWD.
     # If the CWD is a legoesm checkout at a different HEAD (launcher cd-ed into
