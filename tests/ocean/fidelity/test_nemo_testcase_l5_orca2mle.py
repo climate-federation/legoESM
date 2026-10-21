@@ -37,6 +37,10 @@ def _module(name: str, path: Path):
 
 INSTRUMENT = _module("instrument_tramle", L5 / "instrument_tramle.py")
 STATEMENT_REF = _module("mle_statement_reference", L5 / "mle_statement_reference.py")
+RECORDS = _module(
+    "l5_records",
+    CASES / "nemo_testcase_l3_orca2eiv" / "l3_records.py",
+)
 REVIEW_CAPTURE = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/"
     "round21/review_reproduced_codex_r21/l5_capture.npz")
@@ -307,6 +311,9 @@ def test_l5_jitted_traced_x64_transport_is_exact_and_nonzero():
 
 G9_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
                  "gridladder_rounds/round46/oracle_g9_r46/twin_a")
+L5_RECORD = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+    "gridladder_vmix_rounds/round21/oracle_l5_r21/twin_a")
 G5_CONTROL_RECORD = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
     "round31/oracle_g5_r31/twin_a")
@@ -391,6 +398,101 @@ def test_l5_jitted_traced_x64_step_consumes_mle_transport(cards):
         for name in ("T", "S", "u", "v", "eta"))
     print("L5 staged MLE exact unequal counts", counts)
     assert counts == (24584, 21878, 0, 0, 0)
+
+
+@pytest.mark.skipif(not L5_RECORD.is_dir(), reason="no admitted L5 record")
+def test_l5_record_jitted_traced_x64_transport_and_wiring(cards):
+    """The jitted fp64 L5 step matches its record and needs every L5 wire."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSL5MLETransportTrace,
+        _NEMOWSRK3TestHooks,
+    )
+    import sys
+    sys.path[:0] = [str(CASES), str(CASES / "nemo_testcase_g5_orca2ice")]
+    import g5_records as g5
+    from nemo_testcase_phase3_trajectory_gate import comparison_masks
+
+    l5 = cards[1]
+    run = l5.recipe
+    assert jax.config.jax_enable_x64
+    assert not jax.config.jax_disable_jit
+    assert get_policy().compute == np.dtype(np.float64)
+    fw, sf = g5.nemo_supplied_forcing(l5, L5_RECORD, 1)
+
+    def compiled_step(model):
+        return jax.device_get(jax.jit(
+            lambda state, fresh, surface: model.step(
+                state, l5.dt_s, freshwater=fresh, surface_forcing=surface)
+        )(run.initial_state, fw, sf))
+
+    observed = compiled_step(LatLonCGridOceanModel(
+        run.grid, run.z_coord, run.model_config,
+        iwm_forcing=run.iwm_forcing,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_l5_mle_transport=True),
+    ))
+    assert isinstance(observed.mass_flux_w, _NEMOWSL5MLETransportTrace)
+    witness_paths = [
+        L5_RECORD.parent / f"twin_{label}" / "oracle_l5_mle_kt00000001.bin"
+        for label in "abc"
+    ]
+    witness_bytes = [path.read_bytes() for path in witness_paths]
+    assert witness_bytes[0] == witness_bytes[1] == witness_bytes[2]
+    record = RECORDS.read(L5_RECORD / "oracle_l5_mle_kt00000001.bin")
+    nlev = run.z_coord.n_levels
+    record_shape = tuple(int(record[name]) for name in ("nx", "ny", "nz"))
+    record_wet = RECORDS.defined_masks(
+        L5_RECORD / "mesh_mask.nc", record_shape)
+
+    for point, card_slice in (("u", (slice(None), slice(1, None))),
+                              ("v", (slice(1, None), slice(None)))):
+        wet = np.ascontiguousarray(np.swapaxes(
+            record_wet[point.upper()][2:-2, 2:-2, :nlev], 0, 1))
+        for boundary in ("before", "delta", "after"):
+            name = f"{boundary}_{point}"
+            raw = np.asarray(record[name])[2:-2, 2:-2]
+            assert not np.any(raw[..., nlev:]), name
+            ref = np.ascontiguousarray(np.swapaxes(raw[..., :nlev], 0, 1))
+            got = np.asarray(getattr(observed.mass_flux_w, name))[card_slice]
+            for label, mask in (("wet", wet), ("dry", ~wet)):
+                classes = comparison_masks(ref, got, mask)
+                assert not np.any(classes["normal_difference"]), (name, label)
+                assert not np.any(classes["flushed_subnormal"]), (name, label)
+            if boundary == "delta":
+                assert np.count_nonzero(ref[wet]) > 0, point
+                assert not np.any(ref[~wet].view(np.uint64)), point
+
+    stage = g5.read_step(L5_RECORD, 1, [L5_RECORD], nlev)
+    for field, key in (("T", "3_tn_all_aa"), ("S", "3_sn_all_aa")):
+        ref = stage[key]
+        got = np.asarray(getattr(observed, field).data)
+        classes = comparison_masks(ref, got, np.ones(ref.shape, dtype=bool))
+        assert not np.any(classes["normal_difference"]), field
+
+    # Each plant removes a distinct L5 production wire after construction,
+    # then executes the same jitted step with traced state and forcing leaves.
+    cfg = run.model_config
+    mle = cfg.physics.mle
+    plants = {
+        "without_mle": None,
+        "without_stage3_fct_route": mle._replace(through_fct=False),
+        "without_nemo_association": mle._replace(nemo_association=False),
+    }
+    for name, planted_mle in plants.items():
+        planted = LatLonCGridOceanModel(
+            run.grid, run.z_coord, cfg, iwm_forcing=run.iwm_forcing)
+        planted.config = cfg._replace(
+            physics=cfg.physics._replace(mle=planted_mle))
+        after = compiled_step(planted)
+        counts = {}
+        for field, key in (("T", "3_tn_all_aa"), ("S", "3_sn_all_aa")):
+            ref = stage[key]
+            got = np.asarray(getattr(after, field).data)
+            classes = comparison_masks(ref, got, np.ones(ref.shape, dtype=bool))
+            counts[field] = int(classes["normal_difference"].sum())
+        print(name, counts)
+        assert counts["T"] > 0 and counts["S"] > 0, name
 
 
 @pytest.mark.skipif(not G5_CONTROL_RECORD.is_dir(), reason="no admitted G5 record")

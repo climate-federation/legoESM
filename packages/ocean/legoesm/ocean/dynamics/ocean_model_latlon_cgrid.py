@@ -1218,6 +1218,17 @@ class _NEMOWSL3EIVTransportTrace(NamedTuple):
     after_v: object
 
 
+class _NEMOWSL5MLETransportTrace(NamedTuple):
+    """Private post-step side output of L5's literal stage-3 transports."""
+
+    before_u: object
+    before_v: object
+    delta_u: object
+    delta_v: object
+    after_u: object
+    after_v: object
+
+
 class _NEMOWSRK3TestHooks(NamedTuple):
     """Private causal controls; never part of a constructible model config."""
 
@@ -1766,6 +1777,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # ldftra.f90:954-955.  These are the volume transports passed to the
     # stage-3 WZV/FCT path, not the metric-free generic mass-flux diagnostic.
     expose_l3_eiv_transport: bool = False
+    # Passive trace of the exact pFu/pFv statement boundary around
+    # tra_mle_trp at tramle.f90:344-348.  Like the L3 trace, this is attached
+    # only after the ordinary compiled step has completed.
+    expose_l5_mle_transport: bool = False
     # One-variable causal arm paired with the seam above.  Replace only the
     # T/S arrays entering the ordinary implicit ZDF solve; production leaves
     # this None.  The gate supplies a source-reconstructed NEMO pre-ZDF seed.
@@ -3504,9 +3519,14 @@ class LatLonCGridOceanModel:
             self._nemo_ws_test_hooks.expose_l3_eiv_transport)
         if not isinstance(_l3_eiv_transport_exposure, bool):
             raise ValueError("expose_l3_eiv_transport must be bool")
-        if _fct_input_exposure and _l3_eiv_transport_exposure:
+        _l5_mle_transport_exposure = (
+            self._nemo_ws_test_hooks.expose_l5_mle_transport)
+        if not isinstance(_l5_mle_transport_exposure, bool):
+            raise ValueError("expose_l5_mle_transport must be bool")
+        if sum((_fct_input_exposure, _l3_eiv_transport_exposure,
+                _l5_mle_transport_exposure)) > 1:
             raise ValueError(
-                "stage-3 FCT and L3 EIV transport exposures share the "
+                "stage-3 FCT, L3 EIV and L5 MLE transport exposures share the "
                 "mass_flux_w diagnostic slot")
         _config_input = config or LatLonCGridOceanConfig.from_flat()
         _oracle_endpoint_diagnostic_eos_bypass = bool(
@@ -6245,6 +6265,8 @@ class LatLonCGridOceanModel:
             self._nemo_ws_test_hooks.expose_stage3_fct_inputs)
         _l3_eiv_transport_exposure = (
             self._nemo_ws_test_hooks.expose_l3_eiv_transport)
+        _l5_mle_transport_exposure = (
+            self._nemo_ws_test_hooks.expose_l5_mle_transport)
         if self._nemo_ws_test_hooks.omit_barotropic_substep_drag:
             _cfg_b = _cfg_b._replace(barotropic_drag_substep=False)
         _top_drag_rCdu = (
@@ -7228,6 +7250,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_advection_content_rhs = None
         _nemo_ws_fct_input_trace = None
         _nemo_ws_l3_eiv_transport_trace = None
+        _nemo_ws_l5_mle_transport_trace = None
         _nemo_ws_zdf_eta_kmm = None
         _nemo_ws_zdf_stage_pair = None
         _nemo_ws_process_qco = None
@@ -10463,7 +10486,8 @@ class LatLonCGridOceanModel:
                 omega=_cfg_b.constants.Omega,
                 return_horizontal_transport=True,
             )
-            _nemo_ws_stage_transport_geometry, _ = (
+            (_nemo_ws_stage_transport_geometry,
+             _mle_trace) = (
                 _nemo_ws_add_stage3_bolus(
                     _nemo_ws_stage_transport_geometry,
                     _zfu_mle, _zfv_mle,
@@ -10482,8 +10506,11 @@ class LatLonCGridOceanModel:
                     stored_kmm_level=(
                         2 if _cfg_b.rk3_stage_tracer_wzv_stored_kmm_ratios
                         else 0),
+                    return_trace=_l5_mle_transport_exposure,
                 )
             )
+            if _l5_mle_transport_exposure:
+                _nemo_ws_l5_mle_transport_trace = _mle_trace
 
         if _cfg_b.tracer_advection == "som":
             # SOM (Prather 1986): Second Order Moments advection (#210).
@@ -11558,6 +11585,17 @@ class LatLonCGridOceanModel:
             state_new = state_new._replace(
                 mass_flux_w=_NEMOWSL3EIVTransportTrace(
                     *_nemo_ws_l3_eiv_transport_trace))
+        if _l5_mle_transport_exposure:
+            if _nemo_ws_l5_mle_transport_trace is None:
+                raise ValueError(
+                    "L5 MLE transport exposure did not reach tra_mle_trp")
+            if state_new.mass_flux_w is not None:
+                raise ValueError(
+                    "L5 MLE transport exposure requires the unused "
+                    "mass_flux_w diagnostic slot")
+            state_new = state_new._replace(
+                mass_flux_w=_NEMOWSL5MLETransportTrace(
+                    *_nemo_ws_l5_mle_transport_trace))
 
         # NEMO's after-SSH slot is written HERE, not in the compiled step
         # wrapper, because the wrapper is not the only way in: the OMIP scan
@@ -14895,7 +14933,8 @@ class LatLonCGridOceanModel:
                         _nemo_stage1_zad_eta_after_override))
                 return result._replace(state_after=state_after)
             if (self._nemo_ws_test_hooks.expose_stage3_fct_inputs
-                    or self._nemo_ws_test_hooks.expose_l3_eiv_transport):
+                    or self._nemo_ws_test_hooks.expose_l3_eiv_transport
+                    or self._nemo_ws_test_hooks.expose_l5_mle_transport):
                 # The diagnostic payload can alter XLA fusion in the traced
                 # step even though it is attached only after the computation.
                 # Pair that payload with an independently compiled ordinary
