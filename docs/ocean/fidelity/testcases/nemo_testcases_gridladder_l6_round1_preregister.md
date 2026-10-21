@@ -11,11 +11,11 @@ prepare a WRITE-only acquisition, but Codex may not execute NEMO or score L6.
 ## Frozen survey
 
 The exact ORCA2 deck selection is `ln_tradmp=T`, `nn_zdmp=0`, and inherited
-`cn_resto='resto.nc'` (`ORCA2_OMIP_L4/EXP00/namelist_cfg:326-329` and
+`cn_resto='resto.nc'` (`cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:326-329` and
 `cfgs/SHARED/namelist_ref:1012-1018`).  The damping target is the
 same monthly potential-temperature and salinity climatology already used by
 G3 and above: `votemper` and `vosaline`, cyclic yearly, with record-time
-interpolation enabled (`ORCA2_OMIP_L4/EXP00/namelist_cfg:44-55`).
+interpolation enabled (`cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:44-55`).
 
 The executed source initializes `tra_dmp`, reads the target fields, and reads
 `resto` from `cn_resto`
@@ -50,7 +50,7 @@ The file contains one binary64 `resto(z=31,y=148,x=180)` variable; only the
 
 legoESM already owns both required mechanisms.  The climatology reader and
 ORCA_R2 alterations are centralized in
-`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1454-1539`,
+`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1454-1524`,
 and the shared full-rank tracer-relaxation kernel is
 `packages/ocean/legoesm/ocean/dynamics/ocean_tendency_common.py:655-729`.
 L6 must extend those paths; it may not add a second damping formula or a

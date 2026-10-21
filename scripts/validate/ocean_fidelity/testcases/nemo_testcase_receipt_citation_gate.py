@@ -349,6 +349,8 @@ FILES = {
         REPO / "packages/ocean/legoesm/ocean/vertical.py",
     "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py":
         REPO / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py",
+    "packages/ocean/legoesm/ocean/dynamics/ocean_tendency_common.py":
+        REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_tendency_common.py",
     "tests/ocean/unit/test_gm_redi_latlon_cgrid.py":
         REPO / "tests/ocean/unit/test_gm_redi_latlon_cgrid.py",
     "tests/ocean/fidelity/test_nemo_testcase_l2_orca2iso.py":
@@ -1873,6 +1875,12 @@ CITATION_MAP = {
         "isecsbc = nsec_year + nsec1jan000 + NINT( ( 0.5*REAL(kn_fsbc-1,wp)", 6],
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/fldread.f90:235-246": [
         "IF( sd(jf)%ln_tint ) THEN", "sd(jf)%fnow(:,:,:) = ztintb", 12],
+    "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1454-1524": [
+        "def build_orca2_ts_at_step(",
+        "return (np.where(tmask, temperature, 0.0), np.where(tmask, salinity, 0.0))", 71],
+    "packages/ocean/legoesm/ocean/dynamics/ocean_tendency_common.py:655-729": [
+        "def apply_sponge_tracer_relaxation(",
+        "return dT_dt + dT, dS_dt + dS", 75],
     # --- GRIDLADDER round 53 (L4 geothermal preregistration) ---
     "ORCA2_OMIP_L4/EXP00/namelist_cfg:256,257,259,263": [
         "ln_trabbc   = .true.",
