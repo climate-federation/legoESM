@@ -86,8 +86,12 @@ LAND_PCT = 50.0
 
 
 def _load_model(run, var):
-    fs = sorted(glob.glob(
-        f"{ROOT}/{run}/cmor/Amon/{var}_Amon_legoESM-1-0_amip_r1i1p1f1_gn*.nc"))
+    """The run's monthly CMOR file for ``var`` from whichever monthly table
+    holds it (Amon; LImon for snw; SImon for siconc), newest file."""
+    fs = []
+    for tbl in ("Amon", "LImon", "SImon"):
+        fs += sorted(glob.glob(
+            f"{ROOT}/{run}/cmor/{tbl}/{var}_{tbl}_legoESM-1-0_amip_r1i1p1f1_gn*.nc"))
     if not fs:
         return None
     try:

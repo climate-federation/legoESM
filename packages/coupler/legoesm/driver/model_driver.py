@@ -10241,7 +10241,8 @@ class ModelDriver:
         )
 
     def _mpas_surface_temperatures(self, day, diag, u_east, v_north):
-        """Shared native whole-cell tas and skin ts for both sample cadences."""
+        """Shared native whole-cell tas, skin ts and prescribed sea-ice
+        fraction sic (None without a forcing) for both sample cadences."""
         state = self.state
         q_v = (state.tracers["q_v"].data
                if state.tracers is not None and "q_v" in state.tracers else None)
@@ -10254,12 +10255,14 @@ class ModelDriver:
         # drops the whole CMOR feed.
         tas = None
         ts = None
+        sic = None
         _get_sst_sic = getattr(self, "get_sst_sic", None)
         if _get_sst_sic is not None:
             try:
                 _sst, _sic = _get_sst_sic(day)
                 _sst = jnp.asarray(_sst).reshape(-1)
                 _sic = jnp.asarray(_sic).reshape(-1)
+                sic = _sic
                 # Report tas off the SAME ice surface the radiation +
                 # turbulence saw: the per-cell prognostic skin when the
                 # feature is on, else the constant T_ice.  Otherwise the
@@ -10299,7 +10302,7 @@ class ModelDriver:
                         "lowest model level as the tas proxy.", exc)
                     self._logged_tas2m_fallback = True
                 tas = None
-        return (state.T.data[..., -1] if tas is None else tas), ts
+        return (state.T.data[..., -1] if tas is None else tas), ts, sic
 
     def _mpas_cmip_native_kwargs(self, day: float, diag,
                                  u_override=None, *, state_only=False) -> dict:
@@ -10344,8 +10347,20 @@ class ModelDriver:
         u_east, v_north = _cell_winds(
             state, self.grid,
             u_override=u_override)
-        tas, ts = ModelDriver._mpas_surface_temperatures(
+        tas, ts, sic = ModelDriver._mpas_surface_temperatures(
             self, day, diag, u_east, v_north)
+        # CMOR siconc [%] from the prescribed AMIP forcing (unmasked, like the
+        # cube collect() path); snw [kg/m2] is the interactive land's snow
+        # water equivalent, published as a mean WHERE LAND via the native
+        # land fraction (the collector does the land-weighted regrid).
+        siconc = None if sic is None else np.asarray(sic) * 100.0
+        _lml = getattr(self, "_land_ml_state", None)
+        _f_land = getattr(self, "_f_land", None)
+        snw = None
+        land_fraction = None
+        if _lml is not None and _f_land is not None:
+            snw = np.asarray(_lml.snow_depth).reshape(-1)
+            land_fraction = np.asarray(_f_land).reshape(-1)
 
         # Pressure vertical velocity, for the subsidence the scorecard could
         # previously only guess at.  Built from the SAME halo-refreshed edge
@@ -10544,6 +10559,9 @@ class ModelDriver:
             rsus=rsus,
             rlds=rlds,
             rlus=rlus,
+            siconc=siconc,
+            snw=snw,
+            land_fraction=land_fraction,
             wap=wap,
             flux_interval_days=_flux_days,
         )

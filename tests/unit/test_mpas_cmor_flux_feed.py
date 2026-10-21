@@ -1798,3 +1798,111 @@ class TestSurfaceRadiationFeed:
 
         assert 8 in _MPASSfcFluxAccum.SLOTS
         assert 9 in _MPASSfcFluxAccum.SLOTS
+
+
+class TestSeaIceSnowFeed:
+    """Prescribed sea-ice concentration (SImon siconc) and the land's snow
+    water equivalent (LImon snw, a mean WHERE LAND) reach the CMOR feed as
+    state samples, and land-ice is a registered output table."""
+
+    SIC, SNW = 0.4, 50.0
+
+    def _fake(self, mesh, dc, *, with_land):
+        import types
+
+        sigma_full = np.linspace(0.05, 0.98, NLEV)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        latc = np.asarray(mesh.latCell)
+
+        def _field(a):
+            return types.SimpleNamespace(data=np.asarray(a))
+
+        u_edge = np.zeros((int(mesh.nEdges), NLEV))
+        f_land = (latc > 0.0).astype(float)           # land = NH, sea = SH
+        ns = types.SimpleNamespace(
+            diagnostics=dc,
+            grid=mesh,
+            config=types.SimpleNamespace(T_ice=271.35),
+            get_sst_sic=lambda day: (np.full(n, 280.0), np.full(n, self.SIC)),
+            state=types.SimpleNamespace(
+                u=_field(u_edge), T=_field(f["T"]), p_s=_field(f["p_s"]),
+                phis=_field(f["phis"]), tracers=None, v=None,
+            ),
+            model=types.SimpleNamespace(_sfc_diag=None),
+        )
+        if with_land:
+            ns._land_ml_state = types.SimpleNamespace(
+                snow_depth=np.where(f_land > 0, self.SNW, 0.0))
+            ns._f_land = f_land
+        return _as_driver(ns), f_land
+
+    def test_siconc_and_snw_published(self, mesh):
+        from legoesm.driver.model_driver import ModelDriver
+
+        dc, _ = _make_collector(mesh)
+        fake, f_land = self._fake(mesh, dc, with_land=True)
+        ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_2d_siconc"], 100.0 * self.SIC,
+                                   rtol=1e-9)
+        snw = out["field_2d_snw"][0]
+        f_t = dc._regrid_to_latlon_2d(f_land)
+        # Mean WHERE LAND: exactly the land value wherever the target cell
+        # has any land, missing (NaN -> 1e20 in the file) where it has none.
+        land_t = f_t > 0.0
+        assert land_t.any() and (~land_t).any()
+        np.testing.assert_allclose(snw[land_t], self.SNW, rtol=1e-9)
+        assert np.all(np.isnan(snw[~land_t]))
+
+    def test_no_land_model_publishes_no_snw(self, mesh):
+        from legoesm.driver.model_driver import ModelDriver
+
+        dc, _ = _make_collector(mesh)
+        fake, _ = self._fake(mesh, dc, with_land=False)
+        ModelDriver._feed_mpas_cmip_accumulators(fake, day=15.0)
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        assert "field_2d_snw" not in out
+        assert "field_2d_siconc" in out
+
+    def test_snw_without_land_fraction_is_refused(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        with pytest.raises(ValueError, match="land_fraction"):
+            dc.feed_cmip_accumulators_native(day=15.0, **f,
+                                             snw=np.full(n, 1.0))
+        assert dc._spatial_monthly._max_count_ever == 0
+
+    def test_land_ice_table_registered_and_written(self, mesh, tmp_path):
+        xr = pytest.importorskip("xarray")
+        from legoesm.io.cmor_output import (
+            CFWriter, CMOR_TABLES, lookup_cmor_entry, table_realm)
+
+        assert "LImon" in CMOR_TABLES
+        assert table_realm("LImon") == "landIce"
+        tbl, entry = lookup_cmor_entry("snw")
+        assert tbl == "LImon"
+        assert entry["cell_methods"] == "area: mean where land time: mean"
+
+        dc, _ = _make_collector(mesh)
+        dc.cf_writer = CFWriter(
+            output_dir=tmp_path, experiment_id="amip",
+            model_id="legoESM", ref_date="1979-01-01")
+        nlat, nlon = dc._cmip_nlat, dc._cmip_nlon
+        snw = np.full((1, nlat, nlon), 50.0)
+        snw[0, 0, :] = np.nan                      # a no-land row
+        dc._write_cmip_data({
+            "months": [(0, 1)],
+            "field_2d_snw": snw,
+            "field_2d_siconc": np.full((1, nlat, nlon), 40.0),
+        })
+        snw_files = sorted(tmp_path.rglob("snw_LImon_*.nc"))
+        sic_files = sorted(tmp_path.rglob("siconc_SImon_*.nc"))
+        assert snw_files and sic_files
+        with xr.open_dataset(snw_files[0], mask_and_scale=False) as ds:
+            assert ds["snw"].attrs["units"] == "kg m-2"
+            fill = np.float32(1.0e20)          # CMIP6 sentinel in the var dtype
+            assert ds["snw"].attrs["_FillValue"] == fill
+            assert np.all(ds["snw"].values[0, 0, :] == fill)
+            assert np.allclose(ds["snw"].values[0, 1:, :], 50.0)
