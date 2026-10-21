@@ -2099,7 +2099,7 @@ CITATION_MAP = {
         '&                /          ( 1._wp + r3t(ji,jj,Kaa) )', 3],
     'ocean_model_latlon_cgrid.py:2765-2769': [
         'if stage_tracer_written_order:',
-        '/ q_after[..., None])', 5],
+        '/ q_after)', 5],
     'ocean_model_latlon_cgrid.py:8965-8967': [
         'stage_qco_weights=_tracer_qco_weights,',
         '_cfg_b.rk3_stage_tracer_written_order),', 3],
