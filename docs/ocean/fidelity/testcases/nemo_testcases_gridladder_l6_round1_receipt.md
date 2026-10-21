@@ -256,10 +256,15 @@ The explicit citation gate found 16 citations in this corrected receipt with
 zero unmapped citations, zero failures, zero failing map-audit entries, and all
 nine self-test plants firing.  Its shifted `tradmp` citation plant exited
 nonzero.  The exact ORCA2 default landing suite from `claude_rounds/land.sh`
-passed 145 / 145 in 1044.56 seconds under CPU, x64, and the landing package
+passed 145 / 145 in 1058.33 seconds under CPU, x64, and the landing package
 path; this includes the private-import ratchet at 6 / 6 and both ORCA2
-parallel-receipt checks.  No trajectory scorer or fidelity-bar gate is invoked
-because no L6 record exists.
+parallel-receipt checks.  All 10 focused L6 tests passed across the split
+foreground runs: the trace/order plant in 546.43 seconds, the ordinary
+guard-removal plant in 177.81 seconds, and the remaining eight L6 controls plus
+both merge-identity tests in 11.61 seconds.  The admitted-record JIT/traced/x64
+and damping-wire test was also isolated and passed in 7.74 seconds.  The
+default citation-map audit was re-anchored after the L6 scorer extension and
+is green from clean commit `369e35725c`.
 
 ASKED and completed: survey the running deck and compiled Oracle; verify and
 SHA-pin the existing on-disk `resto.nc`; extend existing shared mechanisms;
