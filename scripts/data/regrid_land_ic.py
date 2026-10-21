@@ -282,6 +282,16 @@ def _calibrated_hydraulics(surfdata: str, grid, soil_dz):
     return land_cfg.hydraulics
 
 
+def _run_hydraulics_clm(clm_surfdata: str, grid):
+    """Per-column van-Genuchten hydraulics exactly as the AMIP run builds them
+    from its CLM surfdata (``clm_surfdata_path``): the same loader and the same
+    builder, on the target columns."""
+    from legoesm.land.clm_surface_map import clm_hydraulics_config, load_clm_surface
+    lat, lon = _cols_rad(grid)
+    return clm_hydraulics_config(
+        load_clm_surface(clm_surfdata, np.degrees(lat), np.degrees(lon)))
+
+
 def _era5_field(path, var):
     """(values (n,), lat_rad (n,), lon_rad (n,), times) of a one-step ERA5 nc.
 
@@ -406,12 +416,20 @@ def main_era5_soil_t(args) -> int:
             raise SystemExit(f"ERA5 soil water spans {swvl.min():.3f}-"
                              f"{swvl.max():.3f}, outside {lo}-{hi}; refusing.")
         stamp = json.loads(str(src["soil_hydraulics_json"]))
-        if (stamp.get("retention_curve") != "clapp_hornberger"
-                or stamp.get("parameter_source") != "surfdata_cosby"):
-            raise SystemExit("the IC's hydraulics stamp is not the surfdata "
-                             f"Cosby / Clapp-Hornberger pair ({stamp}); the "
-                             "rebuilt matric potential would not match it.")
-        hyd = _calibrated_hydraulics(args.surfdata, grid, src["soil_dz"])
+        if args.soil_w_hydraulics == "clm-map":
+            # The run converts the file's water onto THESE hydraulics at load
+            # (restart.convert_ic_soil_water): clip into their range so no
+            # column is refused as drier than the run's floor.
+            hyd = _run_hydraulics_clm(args.clm_surfdata, grid)
+            hyd_desc = f"clm-map van Genuchten from {pathlib.Path(args.clm_surfdata).name}"
+        else:
+            if (stamp.get("retention_curve") != "clapp_hornberger"
+                    or stamp.get("parameter_source") != "surfdata_cosby"):
+                raise SystemExit("the IC's hydraulics stamp is not the surfdata "
+                                 f"Cosby / Clapp-Hornberger pair ({stamp}); the "
+                                 "rebuilt matric potential would not match it.")
+            hyd = _calibrated_hydraulics(args.surfdata, grid, src["soil_dz"])
+            hyd_desc = "surfdata Cosby Clapp-Hornberger (the IC's stamp)"
         theta, psi, dist_w, n_clip = era5_soil_water(
             src["theta_soil"], src["psi_soil"], src["soil_dz"], lat, lon,
             replace, glat, glon, swvl, src_land, hyd)
@@ -427,11 +445,12 @@ def main_era5_soil_t(args) -> int:
             "soil_w_source": "ERA5 swvl1-4 (GRIB params 39,40,41,42)",
             "soil_w_files": {v: {"path": str(f), "md5": md5(f)}
                              for f, v in zip(args.era5_soil_w, _ERA5_SWVL_VARS)},
+            "soil_w_hydraulics": hyd_desc,
             "soil_w_choices": (
                 "same donors and depth-overlap as T_soil; theta clipped to the "
-                "Richards dry floor / Cosby theta_sat of the calibrated column; "
-                "psi = psi_from_theta (clapp_hornberger) of the clipped theta; "
-                "glacier columns keep the source IC"),
+                "Richards dry floor / theta_sat of the chosen hydraulics "
+                f"({hyd_desc}); psi = psi_from_theta of the clipped theta on "
+                "those hydraulics; glacier columns keep the source IC"),
             "soil_w_n_clipped_cells": n_clip,
         })
     if s_fields:
@@ -487,6 +506,16 @@ def main(argv=None) -> int:
                          "is taken from ERA5 too (depth-overlap, clipped to the "
                          "solver's admissible range, matric potential rebuilt "
                          "with the model's retention curve).")
+    ap.add_argument("--soil-w-hydraulics", choices=("surfdata-cosby", "clm-map"),
+                    help="with --era5-soil-w (required): whose dry floor / "
+                         "saturation the ERA5 soil water is clipped into. "
+                         "'clm-map' = the hydraulics the AMIP run builds from "
+                         "its CLM surfdata (van Genuchten, needs --clm-surfdata); "
+                         "'surfdata-cosby' = the offline land spin-up's Cosby "
+                         "hydraulics from --surfdata. A state below the RUN's "
+                         "floor is refused at load, so pick the run's.")
+    ap.add_argument("--clm-surfdata", help="the run's clm_surfdata_path "
+                                           "(for --soil-w-hydraulics clm-map)")
     ap.add_argument("--era5-snow", metavar="SD",
                     help="with --era5-soil-t: ERA5 sd netCDF (snow depth of "
                          "water equivalent [m], same grid and instant). Snow of "
@@ -527,6 +556,10 @@ def main(argv=None) -> int:
         if args.stamp_only or args.source_soil_hydraulics:
             ap.error("--era5-soil-t takes a stamped --source; --stamp-only / "
                      "--source-soil-hydraulics apply to regridding or stamping")
+        if args.era5_soil_w and args.soil_w_hydraulics is None:
+            ap.error("--era5-soil-w needs --soil-w-hydraulics")
+        if args.soil_w_hydraulics == "clm-map" and not args.clm_surfdata:
+            ap.error("--soil-w-hydraulics clm-map needs --clm-surfdata")
         return main_era5_soil_t(args)
     if args.era5_soil_w or args.era5_snow:
         ap.error("--era5-soil-w / --era5-snow extend --era5-soil-t")
