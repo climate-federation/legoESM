@@ -64,14 +64,14 @@ from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
 CASE = "ORCA2G2-zps"
 CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice",
          "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf", "ORCA2G9-tadv",
-         "ORCA2L4-bbc", "ORCA2L4b-iso-bbc",
+         "ORCA2L4-bbc", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp",
          "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
          "ORCA2V5-havtb", "ORCA2L1-bbl", "ORCA2L2-iso", "ORCA2L3-eiv")
 # G5's record build (ORCA2-lane frames); V1 = that build + one hm_i writer;
 # V2/V3/V4/V5 = V1's record binary with the ORCA2 vertical-mixing switches.
 # L1/L2/L4 use G5's record surface-input format.
 ICE_CASES = ("ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf",
-             "ORCA2G9-tadv", "ORCA2L4-bbc", "ORCA2L4b-iso-bbc",
+             "ORCA2G9-tadv", "ORCA2L4-bbc", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp",
              "ORCA2V1-tke", "ORCA2V2-evd",
              "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L1-bbl",
              "ORCA2L2-iso", "ORCA2L3-eiv")
@@ -95,7 +95,7 @@ ARMS = ("geometry", "independent", "given_entry", "stages", "operators",
         "barotropic_exit",
         "zdf_replay", "substeps", "trazdf_replay", "rhs_frame",
         "restart_independent", "carried", "stp2d_terms",
-        "tke_mixing_length", "ddm_kt1", "geothermal")
+        "tke_mixing_length", "ddm_kt1", "geothermal", "damping")
 # stage exposures of one step: the private hook that returns it, and the
 # level-1 NEMO frame fields (u, v, T, S, ssh) it must equal
 EXPOSURES = {
@@ -882,6 +882,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         without_hpg_fold_geometry: bool = False,
         without_vector_raw_vmask: bool = False,
         without_geothermal: bool = False,
+        without_damping: bool = False,
         record_step_entry: bool = False,
         without_recorded_external: bool = False,
         case: str = CASE) -> dict:
@@ -918,7 +919,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     card = recipe.build_nemo_testcase_card(case, deck_root=root)
     cfg, z, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
     if case in FORCED:
-        require(arm in ("independent", "given_entry", "geothermal")
+        require(arm in ("independent", "given_entry", "geothermal", "damping")
                 or (arm in ("stages", "operators", "barotropic_exit", "carried",
                             "stp2d_terms")
                     and case in ICE_CASES)
@@ -955,9 +956,10 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     l2_controls = (without_l2_metric, without_l2_eos80, without_l2_north_fold,
                    without_l2_native_face_reference, without_l2_kmm_face_geometry,
                    without_l2_a33_source_ordering, without_l2_stored_face_ratios)
-    require(not any(l2_controls) or case in ("ORCA2L2-iso", "ORCA2L4b-iso-bbc"),
-            "L2 controls are registered only for ORCA2L2-iso/L4b")
-    if case in ("ORCA2L2-iso", "ORCA2L4b-iso-bbc"):
+    require(not any(l2_controls) or case in (
+        "ORCA2L2-iso", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp"),
+        "L2 controls are registered only for ORCA2L2-iso/L4b/L6")
+    if case in ("ORCA2L2-iso", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp"):
         require(recipe._orca2l2_isoneutral_selected(cfg.gm_redi),
                 "the L2 card no longer selects its complete isoneutral path")
         gm = cfg.gm_redi
@@ -981,7 +983,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     if without_vector_raw_vmask:          # G6 ROUND-2 PAIR HALF
         cfg = cfg._replace(rk3_vector_raw_vmask=False)
     if without_geothermal:                # L4 ROUND-1 wiring-removal plant
-        require(case in ("ORCA2L4-bbc", "ORCA2L4b-iso-bbc")
+        require(case in ("ORCA2L4-bbc", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp")
                 and cfg.rk3_stage3_geothermal_nemo_written,
                 "the geothermal plant requires the selected L4 card")
         cfg = cfg._replace(
@@ -1190,9 +1192,18 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             return {}
         freshwater, surface = (g4 if case == "ORCA2G4-sbc" else g5).nemo_supplied_forcing(
             card, root, kt)
+        result = {"freshwater": freshwater, "surface_forcing": surface}
         if case in TKE_CASES:
             surface = surface._replace(ice_mean_thickness_hm_i=g5.read_v1_hm_i(root, kt))
-        return {"freshwater": freshwater, "surface_forcing": surface}
+            result["surface_forcing"] = surface
+        if case == "ORCA2L6-dmp":
+            tmask = np.asarray(z.is_active) > 0.5
+            result.update(
+                sponge=recipe.build_orca2_damping_for_step(
+                    root, tmask, kt=kt, dt_s=card.dt_s),
+                nemo_kt=kt,
+            )
+        return result
 
     def step(state, kt):
         t0 = time.time()
@@ -1200,8 +1211,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         return new, round(time.time() - t0, 1)
 
     if arm == "geothermal":
-        require(case in ("ORCA2L4-bbc", "ORCA2L4b-iso-bbc"),
-                "the geothermal arm is L4/L4b-only")
+        require(case in ("ORCA2L4-bbc", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp"),
+                "the geothermal arm is L4/L4b/L6-only")
         import importlib.util
         from legoesm.ocean.physics.geothermal import (
             nemo_geothermal_bottom_heating_tendency,
@@ -1250,6 +1261,75 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 "zero_heatflow_wet_columns": int(np.count_nonzero(wet & (qgh == 0.0))),
                 "trend_row": trend_row,
             })
+        return out
+
+    if arm == "damping":
+        require(case == "ORCA2L6-dmp", "the damping arm is L6-only")
+        import importlib.util
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            _nemo_stage3_l4b_then_damping,
+        )
+        from legoesm.ocean.sponge import SpongeForcing
+
+        module_path = HERE / "nemo_testcase_l6_orca2dmp" / "l6_records.py"
+        spec = importlib.util.spec_from_file_location("l6_records_score", module_path)
+        records = importlib.util.module_from_spec(spec)
+        require(spec.loader is not None, f"cannot load {module_path}")
+        spec.loader.exec_module(records)
+
+        def kernel(l4b_t, l4b_s, T, S, gamma, T_ref, S_ref):
+            sponge = SpongeForcing(
+                gamma=gamma, T_ref=T_ref, S_ref=S_ref, nemo_kt=1)
+            return _nemo_stage3_l4b_then_damping(
+                l4b_t, l4b_s, T, S, sponge)
+
+        compiled = jax.jit(kernel)
+        out["label"] = (
+            "GIVEN-NEMO-OPERANDS: recorded live L4b source, Kbb tracers, "
+            "resto, and interpolated target")
+        out["jit"] = True
+        out["traced_inputs"] = [
+            "temperature_l4b_source", "salinity_l4b_source",
+            "temperature_Kbb", "salinity_Kbb", "resto",
+            "temperature_target", "salinity_target",
+        ]
+        out["input_dtypes"] = []
+        for kt in range(kt_from, kt_to + 1):
+            header, fields = records.decode(
+                root / f"oracle_damping_kt{kt:08d}.bin", kt)
+            wet, gamma = fields[:2]
+            T_ref, T, T_l4b, T_after = fields[2:6]
+            S_ref, S, S_l4b, S_after = fields[6:10]
+            inputs = tuple(jnp.asarray(value) for value in (
+                T_l4b, S_l4b, T, S, gamma, T_ref, S_ref))
+            out["input_dtypes"].append([str(value.dtype) for value in inputs])
+            candidate_t, candidate_s = (
+                (jnp.asarray(T_l4b), jnp.asarray(S_l4b))
+                if without_damping else compiled(*inputs))
+            defined = wet > 0.0
+            rows = [
+                bit_rows(f"damping.kt{kt}.temperature_rhs", T_after,
+                         np.asarray(candidate_t), defined),
+                bit_rows(f"damping.kt{kt}.salinity_rhs", S_after,
+                         np.asarray(candidate_s), defined),
+            ]
+            out["per_kt"].append({
+                "kt": kt,
+                "wet_cells": int(np.count_nonzero(defined)),
+                "positive_resto_cells": int(np.count_nonzero(defined & (gamma > 0.0))),
+                "temperature_acted": int(np.count_nonzero(
+                    defined & (T_after.view(np.uint64) != T_l4b.view(np.uint64)))),
+                "salinity_acted": int(np.count_nonzero(
+                    defined & (S_after.view(np.uint64) != S_l4b.view(np.uint64)))),
+                "rows": rows,
+            })
+        out["without_damping"] = bool(without_damping)
+        out["gate_pass"] = bool(
+            not without_damping
+            and all(dtype == "float64" for row in out["input_dtypes"] for dtype in row)
+            and all(not score["n_unequal"] and not score["dry_card_nonzero"]
+                    for point in out["per_kt"] for score in point["rows"])
+        )
         return out
 
     if arm == "ddm_kt1":
@@ -1530,11 +1610,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             if record_step_entry and not without_recorded_external:
                 hooks = {**hooks,
                          "stage_barotropic_output_override": recorded_external}
-            kwargs = {}
-            if case in FORCED:
-                fw, sf = (g4 if case == "ORCA2G4-sbc" else g5).nemo_supplied_forcing(
-                    card, root, kt)
-                kwargs = {"freshwater": fw, "surface_forcing": sf}
+            kwargs = forcing(kt)
             st = jax.device_get(LatLonCGridOceanModel(
                 card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
                 _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hooks)).step(
@@ -2118,6 +2194,8 @@ def main(argv=None) -> int:
                     help="G6 round-2 pair half: compact vector V mask")
     ap.add_argument("--without-geothermal", action="store_true",
                     help="L4 round-1 plant: remove the selected stage-3 BBC wire")
+    ap.add_argument("--without-damping", action="store_true",
+                    help="L6 plant: remove the selected stage-3 damping wire")
     ap.add_argument("--record-step-entry", action="store_true",
                     help="G9 round-6: seed a recorded kt>=2 entry and external handoff")
     ap.add_argument("--without-recorded-external", action="store_true",
@@ -2149,6 +2227,7 @@ def main(argv=None) -> int:
               without_hpg_fold_geometry=a.without_hpg_fold_geometry,
               without_vector_raw_vmask=a.without_vector_raw_vmask,
               without_geothermal=a.without_geothermal,
+              without_damping=a.without_damping,
               record_step_entry=a.record_step_entry,
               without_recorded_external=a.without_recorded_external,
               case=a.case)
@@ -2236,6 +2315,13 @@ def main(argv=None) -> int:
                   f"{row['n_unequal']}/{row['n_wet']} max {row['max_abs']:.3e}; "
                   f"dry card/nemo {row['dry_card_nonzero']}/{row['dry_nemo_nonzero']}")
         return 1 if bad else 0
+    if a.arm == "damping":
+        for point in out["per_kt"]:
+            for row in point["rows"]:
+                print(f"{row['name']}: unequal {row['n_unequal']}/{row['n_wet']} "
+                      f"max {row['max_abs']:.3e}; dry card/nemo "
+                      f"{row['dry_card_nonzero']}/{row['dry_nemo_nonzero']}")
+        return 0 if out["gate_pass"] else 1
     if a.arm == "substeps":
         f = out["first_unequal"]
         print("SUBSTEPS first unequal operand:", f and (f["name"], f["n_unequal"]))

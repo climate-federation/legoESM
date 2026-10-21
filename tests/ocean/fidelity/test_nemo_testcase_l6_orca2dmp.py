@@ -32,6 +32,13 @@ L4B = CASES / "nemo_testcase_l4b_orca2iso_bbc"
 L6 = CASES / "nemo_testcase_l6_orca2dmp"
 RUN = L6 / "run.sh"
 RESTO = INPUTS / "resto.nc"
+L6_RECORD = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round55/"
+    "oracle_l6_r55/twin_a")
+needs_l6_record = pytest.mark.skipif(
+    not (L6_RECORD / "oracle_damping_kt00000002.bin").is_file(),
+    reason="admitted L6 operator record is unavailable",
+)
 
 
 def _module(name: str, path: Path):
@@ -256,6 +263,148 @@ def test_one_step_l6_guard_changes_the_untraced_production_result(
             != np.asarray(getattr(planted, name).data).view(np.uint64))
         for name in ("T", "S"))
     assert unequal > 0
+
+
+def test_one_step_l6_trace_pins_l4b_then_damping_order(cards, monkeypatch):
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.freshwater import FreshwaterForcing
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    l4b, l6, _ = cards
+    base = l6.recipe.initial_state
+    rate = np.asarray(l6.recipe.tracer_damping.gamma)
+    wet_damped = rate > 0.0
+    rng = np.random.default_rng(55)
+    inexact_state = base._replace(
+        T=base.T.replace(data=base.T.data + jnp.asarray(np.where(
+            wet_damped, rng.normal(0.0, 0.3, wet_damped.shape), 0.0))),
+        S=base.S.replace(data=base.S.data + jnp.asarray(np.where(
+            wet_damped, rng.normal(0.0, 0.05, wet_damped.shape), 0.0))),
+    )
+    zero = jnp.zeros_like(inexact_state.eta.data)
+    one = jnp.ones_like(inexact_state.eta.data)
+    freshwater = FreshwaterForcing(
+        precip=zero, evap=zero, runoff=zero, ice_fw=zero, restoring=zero)
+    forcing = OceanSurfaceForcing(
+        sw_down=one, q_net=one, tau_x=zero, tau_y=zero, salt_flux=zero,
+        chl=0.1 * one, taum=zero, ice_concentration=zero,
+        tau_i_native=zero, tau_j_native=zero,
+        runoff_tracer_content=(zero, zero), q_nonsolar=one,
+        ice_ocean_top_drag_rCdu=zero, salt_flux_sfx=zero,
+        geothermal_heat_flux_mwm2=one)
+    hooks = _NEMOWSRK3TestHooks(expose_live_stage_operands=True)
+
+    def observed(card, sponge):
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=hooks)
+        kwargs = {"sponge": sponge, "nemo_kt": 1} if sponge is not None else {}
+        return jax.device_get(model.step(
+            inexact_state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=forcing, **kwargs))
+
+    l4b_trace = observed(l4b, None)
+
+    def assert_nemo_order(trace):
+        assert trace.stage3_before_damping is not None
+        assert trace.stage3_damping_rate is not None
+        for got, want in zip(trace.stage3_before_damping,
+                             l4b_trace.stage3_composed_source):
+            _assert_bits_equal(got, want)
+        refs = (l6.recipe.tracer_damping.T_ref,
+                l6.recipe.tracer_damping.S_ref)
+        fields = (inexact_state.T.data, inexact_state.S.data)
+        for got, before, field, ref in zip(
+                trace.stage3_composed_source, trace.stage3_before_damping,
+                fields, refs):
+            damping = nemo_source_round(
+                l6.recipe.tracer_damping.gamma * (ref - field))
+            _assert_bits_equal(got, nemo_source_round(before + damping))
+
+    correct = observed(l6, l6.recipe.tracer_damping)
+    assert_nemo_order(correct)
+
+    real_damping = model_module._nemo_stage3_l4b_then_damping
+    deferred_geothermal = {}
+
+    def ldf_only(stage_t, stage_s, dT_ldf, dS_ldf, geothermal_t, active_3d):
+        deferred_geothermal["temperature"] = geothermal_t
+        return (
+            nemo_source_round(stage_t + dT_ldf * active_3d),
+            nemo_source_round(stage_s + dS_ldf * active_3d),
+        )
+
+    def damping_then_geothermal(l4b_t, l4b_s, T_kbb, S_kbb, sponge):
+        damped_t, damped_s = real_damping(
+            l4b_t, l4b_s, T_kbb, S_kbb, sponge)
+        return (
+            nemo_source_round(damped_t + deferred_geothermal["temperature"]),
+            damped_s,
+        )
+
+    # This changes runtime association while leaving the production call text
+    # present: damping executes on the post-LDF source, then geothermal is added.
+    monkeypatch.setattr(
+        model_module, "_nemo_stage3_ldf_then_geothermal", ldf_only)
+    monkeypatch.setattr(
+        model_module, "_nemo_stage3_l4b_then_damping", damping_then_geothermal)
+    moved = observed(l6, l6.recipe.tracer_damping)
+    with pytest.raises(AssertionError):
+        assert_nemo_order(moved)
+    assert any(np.any(np.asarray(a).view(np.uint64)
+                      != np.asarray(b).view(np.uint64))
+               for a, b in zip(moved.stage3_composed_source,
+                               correct.stage3_composed_source))
+
+
+@needs_l6_record
+def test_l6_record_is_exact_under_jit_traced_inputs_and_x64(monkeypatch):
+    scorer = _module(
+        "l6_ladder_score",
+        CASES / "nemo_testcase_g2_orca2bathy_ladder.py",
+    )
+    real_jit = jax.jit
+    traced_calls = []
+
+    def recording_jit(fun, *jit_args, **jit_kwargs):
+        compiled = real_jit(fun, *jit_args, **jit_kwargs)
+
+        def recorded(*args, **kwargs):
+            traced_calls.append(tuple(
+                (np.shape(arg), np.asarray(arg).dtype) for arg in args))
+            return compiled(*args, **kwargs)
+
+        return recorded
+
+    monkeypatch.setattr(jax, "jit", recording_jit)
+    exact = scorer.run(
+        L6_RECORD, arm="damping", kt_from=2, kt_to=2,
+        allow_dirty=True, case="ORCA2L6-dmp",
+    )
+    assert exact["jit"] is True
+    assert exact["traced_inputs"] == [
+        "temperature_l4b_source", "salinity_l4b_source",
+        "temperature_Kbb", "salinity_Kbb", "resto",
+        "temperature_target", "salinity_target",
+    ]
+    assert len(traced_calls) == 1 and len(traced_calls[0]) == 7
+    assert all(shape == (839_040,) and dtype == np.dtype(np.float64)
+               for shape, dtype in traced_calls[0])
+    assert exact["gate_pass"] is True
+    assert all(row["n_unequal"] == 0
+               for row in exact["per_kt"][0]["rows"])
+
+    removed = scorer.run(
+        L6_RECORD, arm="damping", kt_from=2, kt_to=2,
+        allow_dirty=True, without_damping=True, case="ORCA2L6-dmp",
+    )
+    assert removed["gate_pass"] is False
+    assert all(row["n_unequal"] > 0
+               for row in removed["per_kt"][0]["rows"])
 
 
 def test_ordered_damping_add_is_jit_traced_x64_and_gradient_finite():
