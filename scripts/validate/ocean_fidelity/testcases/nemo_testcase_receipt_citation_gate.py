@@ -2983,9 +2983,9 @@ CITATION_MAP = {
     'advection.py:2139-2140': [
         ('if return_nemo_beta_trace:', 5),
         'return alpha_u_full, alpha_v, alpha_vert_face, beta_trace', 2],
-    'ocean_model_latlon_cgrid.py:14935-14951': [
+    'ocean_model_latlon_cgrid.py:14935-14952': [
         'if (self._nemo_ws_test_hooks.expose_stage3_fct_inputs',
-        'return state_after._replace(mass_flux_w=diagnostic)', 17],
+        'return state_after._replace(mass_flux_w=diagnostic)', 18],
     # --- ORCA2 round 136: passive literal tracer-ZDF source walk --------
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:180-195': [
         "IF( cdtype == 'TRA' .AND. jn == jp_tem ) THEN",
