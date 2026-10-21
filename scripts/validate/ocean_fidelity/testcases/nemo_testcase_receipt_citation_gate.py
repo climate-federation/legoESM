@@ -8682,13 +8682,12 @@ CITATION_MAP = {
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:541-588': [
         'SUBROUTINE rnf_mouth',
-        'sn_cnf%clvar',
-        'IF( l_clo_rnf )   CALL clo_rnf( rnfmsk )', 48,
+        'sn_cnf%clvar', 48,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:296-372': [
         'SUBROUTINE zdf_phy( kt, Kbb, Kmm, Krhs )',
         'avt(ji,jj,jk) = avt(ji,jj,jk) + 2._wp * rn_avt_rnf',
-        ('IF( ln_zdfiwm )   CALL zdf_iwm', 2), 77,
+        77,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:347-372': [
         '!* start from turbulent closure values',
