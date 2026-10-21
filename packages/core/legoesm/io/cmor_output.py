@@ -130,6 +130,7 @@ _TABLE_REALM: Dict[str, str] = {
     "Omon": "ocean",
     "Oyr": "ocean",
     "Ofx": "ocean",
+    "Oday": "ocean",
     "SImon": "seaIce",
     "LImon": "landIce",
     "SIyr": "seaIce",
@@ -687,6 +688,8 @@ _DAILY_VARIABLE_REMAP: Dict[str, _DailyRemap] = {
     "rsut": _DailyRemap("rsut", "CFday"),
     "ua850": _DailyRemap("ua", "day", plev_pa=85_000.0),
     "va850": _DailyRemap("va", "day", plev_pa=85_000.0),
+    "zg850": _DailyRemap("zg", "day", plev_pa=85_000.0),
+    "tos": _DailyRemap("tos", "Oday"),
 }
 
 

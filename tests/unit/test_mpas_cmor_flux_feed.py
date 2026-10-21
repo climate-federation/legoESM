@@ -17,6 +17,7 @@ import pytest
 from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.driver.diagnostics import DiagnosticCollector
+from legoesm.io.cmor_output import CMIP6_PLEV19
 from legoesm.grids.factory import create_grid
 
 NLEV = 6
@@ -1906,3 +1907,65 @@ class TestSeaIceSnowFeed:
             assert ds["snw"].attrs["_FillValue"] == fill
             assert np.all(ds["snw"].values[0, 0, :] == fill)
             assert np.allclose(ds["snw"].values[0, 1:, :], 50.0)
+
+
+class TestGeopotentialSstDailyFeed:
+    """zg (plev19 monthly, 850 hPa daily), tos (Omon monthly, Oday daily) and
+    daily rlut reach the accumulators and the CMIP6 files."""
+
+    def _feed(self, dc, mesh, sigma_full, day=15.0):
+        f = _base_fields(mesh, sigma_full)
+        n = f["p_s"].shape[0]
+        # Height falls with sigma: ~ -8 km * ln(sigma), surface at phis/g = 0.
+        zg = -8000.0 * np.log(sigma_full)[None, :] * np.ones((n, 1))
+        return dc.feed_cmip_accumulators_native(
+            day=day, **f, zg=zg, tos=np.full(n, 290.0), rlut=np.full(n, 238.0),
+            u_east=np.zeros((n, NLEV)), v_north=np.zeros((n, NLEV)),
+            flux_interval_days=1.0)
+
+    def test_monthly_zg_and_tos(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        assert self._feed(dc, mesh, sigma_full) is True
+        out = dc._spatial_monthly.finalize(min_sample_fraction=0)
+        np.testing.assert_allclose(out["field_2d_tos"], 290.0, rtol=1e-9)
+        zg = out["field_3d_zg"][0]                       # (lat, lon, plev)
+        assert zg.shape[-1] == len(CMIP6_PLEV19)
+        col = zg[zg.shape[0] // 2, 0, :]
+        finite = np.isfinite(col)
+        assert finite.sum() >= 3
+        # plev19 is sorted ascending in pressure in the file axis: height
+        # must not increase with pressure (equal only where the bounded
+        # interpolation clamps above the model top / below the ground).
+        p = np.sort(CMIP6_PLEV19)[finite]
+        d = np.diff(col[finite]) * np.diff(p)
+        assert np.all(d <= 0.0) and np.sum(d < 0.0) >= 3
+
+    def test_daily_rlut_tos_zg850_bins(self, mesh):
+        dc, sigma_full = _make_collector(mesh)
+        self._feed(dc, mesh, sigma_full)
+        daily = dc._spatial_daily._data
+        # Interval-mean flux rlut bins to the covered day (15), like pr;
+        # the state samples tos / zg850 to the endpoint day (16).
+        assert "rlut" in daily.get((0, 15), {})
+        assert "tos" in daily.get((0, 16), {}) and "zg850" in daily.get((0, 16), {})
+        _sum, _n = daily[(0, 16)]["zg850"][:2]       # bucket = [sum, count, ...]
+        zg850 = np.asarray(_sum) / _n
+        assert np.nanmax(np.abs(zg850 - (-8000.0 * np.log(0.85)))) < 300.0
+
+    def test_daily_files_use_oday_and_day_tables(self, mesh, tmp_path):
+        xr = pytest.importorskip("xarray")
+        from legoesm.io.cmor_output import CFWriter
+        dc, sigma_full = _make_collector(mesh)
+        dc.cf_writer = CFWriter(output_dir=tmp_path, experiment_id="amip",
+                                model_id="legoESM", ref_date="1979-01-01")
+        for d in (15.0, 16.0):
+            self._feed(dc, mesh, sigma_full, day=d)
+        dc.finalize_cmip_daily(current_day=17.0)
+        tos_files = sorted(tmp_path.rglob("tos_Oday_*.nc"))
+        zg_files = sorted(tmp_path.rglob("zg_day_*.nc"))
+        rlut_files = sorted(tmp_path.rglob("rlut_day_*.nc"))
+        assert tos_files and zg_files and rlut_files
+        with xr.open_dataset(zg_files[0]) as ds:
+            assert float(ds["plev"].values.ravel()[0]) == 85000.0
+        with xr.open_dataset(tos_files[0]) as ds:
+            assert ds["tos"].attrs["units"] == "K"

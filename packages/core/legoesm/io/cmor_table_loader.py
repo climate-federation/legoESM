@@ -47,6 +47,7 @@ _TABLE_DIR = Path(__file__).resolve().parent / "cmor_tables"
 # Official CMIP6 table IDs legoESM writes into.
 CMIP6_TABLE_IDS: Tuple[str, ...] = (
     "Amon", "day", "CFday", "fx", "Lmon", "Omon", "Ofx", "SImon", "LImon",
+    "Oday",
 )
 
 # Legacy table aliases kept so pre-existing callers/tests keep working.
@@ -188,6 +189,7 @@ ALEVEL_EMITTED_ON_PLEV: Tuple[str, ...] = ("cli", "clw")
 UNITS_DEVIATIONS: Dict[Tuple[str, str], str] = {
     ("Omon", "tos"): "K",
     ("Omon", "tosga"): "K",
+    ("Oday", "tos"): "K",
 }
 
 

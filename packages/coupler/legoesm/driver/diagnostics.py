@@ -1687,6 +1687,8 @@ class DiagnosticCollector:
         siconc=None,
         snw=None,
         land_fraction=None,
+        zg=None,
+        tos=None,
         wap=None,
         flux_interval_days=None,
         include_state=True,
@@ -1783,6 +1785,13 @@ class DiagnosticCollector:
             where land``) and the native land fraction [0-1] it is averaged
             with: the published value is regrid(snw*f)/regrid(f), missing
             where the target cell has no land.  Both or neither.
+        zg : array, shape ``(nCells, nlev)``, optional
+            Geopotential height [m] on model levels (the dycore's own
+            geopotential over g); published on plev19 (Amon) and sliced at
+            850 hPa for the daily table like ua/va.
+        tos : array, shape ``(nCells,)``, optional
+            Sea-surface temperature [K] (Omon monthly, Oday daily), the
+            prescribed AMIP SST on this lane, unmasked like siconc.
         q_c, q_i : array, shape ``(nCells, nlev)``, optional
             CLOUD liquid / CLOUD ice mixing ratio [kg/kg] (the tracers the
             radiation's cloud diagnosis consumes — NOT the precipitating
@@ -1861,7 +1870,7 @@ class DiagnosticCollector:
         # the PHASE-2 commits between the two calendar bins.
         _FLUX_2D = ("pr", "rlut", "rsut", "rsdt", "hfss", "hfls", "evspsbl",
                     "rsutcs", "rlutcs", "rsds", "rsus", "rlds", "rlus")
-        _FLUX_DAILY = ("pr",)
+        _FLUX_DAILY = ("pr", "rlut")
         _FLUX_ZONAL = ("precip",)
 
         # Coerce to a numeric float array (``dtype=float64``): a non-numeric
@@ -1913,6 +1922,8 @@ class DiagnosticCollector:
         snw_np = None if snw is None else np.asarray(snw, dtype=_f64)
         f_land_np = (None if land_fraction is None
                      else np.asarray(land_fraction, dtype=_f64))
+        zg_np = None if zg is None else np.asarray(zg, dtype=_f64)
+        tos_np = None if tos is None else np.asarray(tos, dtype=_f64)
         if (snw_np is None) != (f_land_np is None):
             raise ValueError(
                 "feed_cmip_accumulators_native: snw and land_fraction must be "
@@ -1947,6 +1958,8 @@ class DiagnosticCollector:
             ("siconc", siconc_np, (_ncol,)),
             ("snw", snw_np, (_ncol,)),
             ("land_fraction", f_land_np, (_ncol,)),
+            ("tos", tos_np, (_ncol,)),
+            ("zg", zg_np, (_ncol, _nlev)),
             ("q_v", q_v_np, (_ncol, _nlev)),
             ("q_c", q_c_np, (_ncol, _nlev)),
             ("q_i", q_i_np, (_ncol, _nlev)),
@@ -1989,6 +2002,7 @@ class DiagnosticCollector:
                 ('tas', tas_field),
                 ('ts', ts_field),
                 ('siconc', siconc_np),
+                ('tos', tos_np),
                 ('ps', p_s_np),
                 ('pr', precip_np),   # CMOR kg/m2/s — native, no conversion
                 ('psl', psl),
@@ -2121,6 +2135,7 @@ class DiagnosticCollector:
                 # rest, so subsidence becomes a published field instead of a
                 # continuity guess made downstream from monthly-mean winds.
                 ('wap', None if wap is None else np.asarray(wap)),
+                ('zg', zg_np),
             ):
                 if _src is None or not include_state:
                     continue
@@ -2134,12 +2149,13 @@ class DiagnosticCollector:
             # Daily: reuse the regridded 2-D fields + 850 hPa winds sliced from
             # the 3-D arrays (same index convention as collect()).
             if self._spatial_daily is not None:
-                for _name in ("tas", "pr", "psl"):
+                for _name in ("tas", "pr", "psl", "rlut", "tos"):
                     if _name in fields_2d:
                         daily_2d[_name] = fields_2d[_name]
                 _plev_sorted = np.sort(CMIP6_PLEV19)
                 _idx850 = int(np.argmin(np.abs(_plev_sorted - 85000.0)))
-                for _src_name, _dst in (("ua", "ua850"), ("va", "va850")):
+                for _src_name, _dst in (("ua", "ua850"), ("va", "va850"),
+                                        ("zg", "zg850")):
                     if (_src_name in fields_3d
                             and fields_3d[_src_name].shape[2] > _idx850):
                         daily_2d[_dst] = fields_3d[_src_name][:, :, _idx850]
