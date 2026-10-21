@@ -1,11 +1,11 @@
 # GRIDLADDER-VMIX L5 round 21 receipt — ORCA2 mixed-layer eddies
 
-Status: **ACQUISITION_NEEDED**.  This round surveyed mixed-layer eddies,
+Status: **L5 CERTIFIED**.  This round surveyed mixed-layer eddies,
 river-mouth mixing, and (for the record only) interior tracer damping.  It
 selected L5 as mixed-layer eddies on certified G9.  Independent build review
 held the first acquisition before a record existed; its hypotheses were
-reproduced and corrected here.  Codex did not build or run NEMO, and no record
-was admitted or scored.
+reproduced and corrected here.  The operator subsequently acquired the
+preregistered record; Codex did not build or run NEMO.
 
 The frozen preregistration is commit `18498bec4a`.  The first L5
 implementation is commit `acda81beb9`; this continuation supersedes its
@@ -223,3 +223,60 @@ COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r
 ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r21/repo/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l5_orca2mle/run.sh --run
 DECISION_NEEDED: NONE
 ROUND_STATUS: STOPPED_FOR_RECORD — review fixes and preflight complete; acquisition needed; record not acquired or scored
+
+## Continuation (Codex, 2026-10-20) — admitted-record score and L5 certification
+
+The operator ran the committed preflight and acquisition at
+`9bd35acb5c41a2a0676d578d0db61a8ac80b512e`.  The preflight reported
+`L5_PREFLIGHT_OK checklist=7 plants=all_refused`; the admitted acquisition
+reported `L5_ACQUISITION_PASS twins=3 steps=1..10 reference_completed=21` and
+placed its evidence in
+`gridladder_vmix_rounds/round21/oracle_l5_r21`.  Codex invoked no NEMO build or
+run command.
+
+The final package score was made from a clean tree at
+`43071fbf2f8e3629ecd82580b78ee2d8aa4f85cb`, package tree
+`30c8006304061932c84eaacb6a31d33fd1cee13f`; both score records stamp an empty
+dirty string.  They are
+`gridladder_vmix_rounds/round21/codex_clean_score_43071fbf2f/independent.json`
+and `gridladder_vmix_rounds/round21/codex_clean_score_43071fbf2f/given.json`.
+
+Both preregistered labels score every held step, kt 1 through 10.  Each label
+has 241 full-depth stage/restart rows; the independent label additionally has
+five exact kt-1 entry-admission rows.  The kt-1 comparisons use the stage
+records and kt 2 onward use the acquired restarts.  Every ocean value and bit
+is exact, and every dry value is exact.  The only dry bit differences are
+signed zero: 207,218 for the independent label and 213,822 for the given
+label.  Both labels have zero ordinary value differences, zero D127 flush
+classes, zero nonfinite classes, and maximum normalized error zero.  This
+covers full-depth T, S, u, and v plus the two-dimensional SSH, barotropic, and
+current-history fields.  Every row is therefore exact or at the declared bar:
+**L5 CERTIFIED**.
+
+The three acquired MLE witnesses have the identical SHA-256
+`d306fb9e76d6a1e5a80557f19d139a8e28c2e5ff72711095ad0a774f745aa3f8`.
+Against the admitted mesh, the transport changes 8,464 wet U cells and 8,764
+wet V cells while every dry transport word is positive zero.  The committed
+record test compares the complete before/delta/after U and V frames at full
+depth, then proves that applying that exact transport produces the acquired
+stage-3 T and S.  Removing MLE or its stage-3 FCT route changes 24,584 T and
+21,878 S words; removing the NEMO numerical association changes 16,964 T and
+13,524 S words.  The predicted mixed-layer eddy transport is thus active in
+the selected wet cells and causes the acquired tracer change.
+
+That record test executes the production step under an outer `jax.jit`, passes
+the prognostic state and forcing as traced arguments, requires x64, and runs
+all three wiring removals through the same compiled path.  The complete L5
+file passed 23 tests.  Its standing controls retain the frozen two-step G5-G9,
+V1-V5, and L1-L3 selections and the frozen GYRE, DINO, full ORCA2, SMT,
+VORTEX, OMT, and rung-0 programs; the shared-arithmetic G9 and L3 routes also
+retain their complete two-step values.
+
+independent review: operator (Claude)
+
+codex review: operator
+
+COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r21/repo
+ACQUISITION_NEEDED: NONE
+DECISION_NEEDED: NONE
+ROUND_STATUS: L5 CERTIFIED — both labels exact/at bar through kt 10 at full depth; MLE transport and caused T/S change exact
