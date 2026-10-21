@@ -16,13 +16,14 @@ Citation re-anchor commit: `6b6c43efe6`
 
 Independent-review repair commits: `ff080c094c`, `b8c68d344b`
 
-Status: **STOPPED FOR RECORD — L4b is implemented and preregistered, but is
-not scored or certified.** The operator stopped the first acquisition during
-its first `makenemo`, before any NEMO run or record, because independent review
-returned HOLD. The incomplete build was moved to
-`cfgs/ORCA2L4B_ISO_BBC_R54_stopped1`; it is not evidence. The review findings
-below are repaired, but an operator must run the exact `--run` command in the
-final machine lines before any later round may admit or score a record.
+Resume repair commit: `288311ef9b`
+
+Status: **L4b CERTIFIED.** The operator acquisition completed steps 1--10 in
+three byte-identical twins. This resume admitted that existing record without
+running NEMO, repaired three review controls without changing a model value,
+and scored both labels, every available full-depth row, wet/dry partitions,
+kt-1 stages, and the geothermal trend bitwise exact. The earlier stopped-build
+status below is retained as history and is superseded by section 6.
 
 - codex review: operator
 - independent review: operator (Claude)
@@ -199,7 +200,7 @@ entries, and all nine self-test plants fired. The default receipt gate found
 No trajectory scorer or fidelity bar was invoked because there is no admitted
 L4b record.
 
-## 5. ASKED / UNASKED
+## 5. ASKED / UNASKED (pre-acquisition history)
 
 ASKED and completed: merge lane B; list and resolve every conflict; measure
 all inherited two-step cards before and after L4b; add the L2-plus-geothermal
@@ -215,7 +216,104 @@ record; claim a bar verdict or certification; begin Decision 146 interior T/S
 damping; relax any fidelity bar; push; or post an external review. Review is
 reserved for the operator named above.
 
+## 6. Resume: admitted record and review repairs
+
+The operator reported
+`L4B_ACQUISITION_PASS steps=1..10 twins=3` for
+`gridladder_rounds/round54/oracle_l4b_r54`. Codex did not build or run NEMO.
+From clean commit `288311ef9ba02aff02e4cc47e29fb5379e96edcc`,
+`--admit-existing` reran the exact deck and log checks, acting checks, all
+three record inventories, raw twin identity, and restart passivity. It ended:
+
+```text
+L4_GEOTHERMAL_RECORDS_PASS steps=1..10 sha256=875764008fa6e2dfb021b125df9e23cf349a55f45ac26d948274bbbf4abef2df
+PASS_G5_ADMISSION unequal_rows=None
+L4B_ACQUISITION_PASS steps=1..10 twins=3 evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round54/oracle_l4b_r54
+```
+
+The repaired admission calls the smoke's acting check as its own statement,
+outside any conditional command. A temporary smoke holding the real deck,
+log, and timestep but no `oracle_*` records was refused with status 66 and did
+not print an acquisition pass. Preflight scratch now has an `EXIT` cleanup
+trap. Two consecutive deliberate preflight refusals both reached the occupied
+target check and each left no `.l4b-preflight.*` directory.
+
+The stage-3 observer now exposes the live compiled post-LDF source and the live
+geothermal rate. The production test requires the composed temperature source
+to equal `nemo_source_round(post_ldf + qgh_rate)` bit for bit. This binds the
+executed order at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:734-740`, not merely the set of
+cells that changed. Moving geothermal before LDF at the call site while leaving
+the helper intact made the test fail at 697 words; the correct order passes.
+The trace-only repair does not alter the production state.
+
+The admitted-record test runs the geothermal statement through an actual JIT,
+records that the live `e3t_Kmm` and `heatflow_mwm2` arrays are runtime
+arguments, requires both to be binary64, and matches the recorded trend with
+zero unequal cells. Removing the geothermal production wire changes all
+16,428 nonzero-flux wet columns. Removing JIT, closing over either input, or
+using binary32 makes the same test fail its execution-wiring assertions.
+
+## 7. Clean-tree L4b score
+
+All four score files stamp commit
+`288311ef9ba02aff02e4cc47e29fb5379e96edcc` and packages tree
+`c7d5d819ea76c18c34a90b285e940cfae2acd149`. CPU, x64, production JIT, the
+admitted three restart roots, and the preregistered entries were used.
+
+| label / record | coverage | exact | unequal |
+|---|---:|---:|---:|
+| INDEPENDENT surface | kt 1--10 | 70 / 70 | 0 |
+| INDEPENDENT full/partial/dry depth | restarts kt 2--10 | 36 / 36 | 0 |
+| GIVEN-NEMO-ENTRY surface | direct + two-step outputs kt 1--10 | 119 / 119 | 0 |
+| GIVEN-NEMO-ENTRY full/partial/dry depth | every available restart row | 64 / 64 | 0 |
+| stage surface | kt 1, stages 1--3 | 21 / 21 | 0 |
+| stage full/partial/dry depth | kt 1, stages 1--3 | 12 / 12 | 0 |
+| geothermal wet-bottom trend | kt 1--10, 16,433 wet columns each | 164,330 / 164,330 cells | 0 |
+| geothermal dry slots | kt 1--10 | all canonical zero | 0 |
+
+Each geothermal step has 16,428 nonzero-flux wet columns and five zero-flux
+wet columns. Every maximum absolute difference is 0.0. Score SHA-256 hashes:
+
+```text
+52256fa6092ae38a56fd479ba61777d72022ec4e91cb18792e9c7381a63c6d09  l4b_independent_kt1_10.json
+581b0bbd8c762ea795a504292ef8589d36a6a515b524530b3ae4266625d7fbe0  l4b_given_entry_kt1_10.json
+ceaa304fa4ea8ece0edf4bd4db15f5aa1e71245365839dcee32ac9d55cf9a081  l4b_stages_kt1.json
+325dad32e95a20a2f8c2e9bde3a477c45a8e045a07e6c5dd2ee8cd810caa6d75  l4b_geothermal_kt1_10.json
+```
+
+The operator's post-fix review measured all 18 inherited cards unchanged:
+1,818 boolean flips, every guard still firing, and 36/36 two-step identities
+per card. This resume changes only a private write-only observer payload on the
+L4b-selected branch; inherited selectors and state returns are unchanged. The
+merge-identity unit probe and its one-bit plant remain passing.
+
+L4b therefore clears the exact bar and is **CERTIFIED: geothermal after
+standard isoneutral diffusion in NEMO's order**. Decision 144's ladder
+precondition for a later ORCA2 import is satisfied. Decision 146 interior T/S
+damping is not started in this round.
+
+## 8. Resume gates and disposition
+
+- codex review: operator
+- independent review: operator (Claude)
+- NEMO execution in this resume: none
+- focused tests: pending final gate run
+- receipt citation gate: pending final gate run
+- default gate and private-import ratchet: pending final gate run
+
+ASKED and completed: repair all three reviewed controls with plants; admit the
+operator record; score both labels through kt 10 at full available depth,
+wet/dry, stages, and geothermal trend; keep inherited-card identity; add a
+JIT/traced/x64 admitted-record test; and certify only on exact rows.
+
+UNASKED and not done: rerun NEMO; alter a model value; change any fidelity bar;
+import geothermal into the full ORCA2 card; start Decision 146 damping; push.
+
+UNVERIFIED: none in the L4b certification claim. Final repository gates are
+recorded below after they run.
+
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/gridladder_r54/repo
-ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/gridladder_r54/repo/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l4b_orca2iso_bbc/run.sh --run
+ACQUISITION_NEEDED: NONE
 DECISION_NEEDED: NONE
-ROUND_STATUS: STOPPED_FOR_RECORD — L4b implemented and preflighted; operator acquisition is required before admission, scoring, or certification
+ROUND_STATUS: LANDED — L4b CERTIFIED: both labels, every recorded depth, wet/dry cells, kt-1 stages, and geothermal trends are bitwise exact
