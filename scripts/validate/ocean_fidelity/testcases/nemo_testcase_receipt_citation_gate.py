@@ -5893,7 +5893,7 @@ CITATION_MAP = {
         'route_gm_redi_stage3_source: bool = False', 4],
     'ocean_model_latlon_cgrid.py:10608-10632': [
         ('elif _tti == "rk3_ws":', 2),
-        ('_stage_source_rates[2][1] + dS_gm * active_3d,', 2), 21],
+        ('_stage_source_rates[2][1] + dS_gm * active_3d,', 2), 25],
     # Decision 90 added nine stated lines INSIDE this block (the slow-forcing
     # depth average, which this call now states rather than defaulting), so
     # the pinned extent grows with it: 88 -> 98, same two symbols.
