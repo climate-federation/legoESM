@@ -755,6 +755,7 @@ def test_a_partial_for_another_epoch_is_ignored(tmp_path):
     ({"params_file": "../x.eqx"}, _FP),     # outside the run directory
     ({"losses": [None, 0.2]}, _FP),         # not numbers
     ({"skipped": True}, _FP),               # bool is not a count
+    ({"losses": [0.1, 0.2, 0.3, 0.4], "skipped": -1}, _FP),   # negative skips
 ])
 def test_a_mismatched_partial_for_this_epoch_fails_loudly(tmp_path, over, fp):
     _save(tmp_path, 1.5)
@@ -763,6 +764,17 @@ def test_a_mismatched_partial_for_this_epoch_fails_loudly(tmp_path, over, fp):
         {**json.loads(pathlib.Path(mp).read_text()), **over}))
     with pytest.raises(RuntimeError):
         mod._read_partial(str(tmp_path), 2, 10, fp, _content())
+
+
+def test_a_non_finite_saved_loss_fails_loudly(tmp_path):
+    _save(tmp_path, 1.5)
+    mp = mod._partial_manifest_path(str(tmp_path))
+    txt = pathlib.Path(mp).read_text().replace('"losses": [0.1, 0.2]',
+                                                '"losses": [NaN, 0.2]')
+    assert "NaN" in txt
+    pathlib.Path(mp).write_text(txt)
+    with pytest.raises(RuntimeError):
+        mod._read_partial(str(tmp_path), 2, 10, _FP, _content())
 
 
 def test_a_partial_missing_its_state_files_fails_loudly(tmp_path):

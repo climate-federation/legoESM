@@ -142,6 +142,7 @@ def _read_partial(out_dir, epoch, n_samples, expect_fp, content):
     configured run, or on different samples, is a hard error, as for an epoch
     checkpoint."""
     import json as _json
+    import math
     import os
 
     mp = _partial_manifest_path(out_dir)
@@ -165,8 +166,9 @@ def _read_partial(out_dir, epoch, n_samples, expect_fp, content):
             or not 0 < step < n_samples
             or not isinstance(losses, list)
             or not all(isinstance(x, (int, float)) and not isinstance(x, bool)
-                       for x in losses)
+                       and math.isfinite(x) for x in losses)
             or isinstance(skipped, bool) or not isinstance(skipped, int)
+            or skipped < 0
             or len(losses) + skipped != step
             or not (isinstance(pf, str) and isinstance(of, str))
             or os.path.basename(pf) != pf or os.path.basename(of) != of
@@ -1347,7 +1349,7 @@ def _main(argv=None):
     # processes have compared outcomes, so one cannot raise while the rest
     # wait in a collective.
     start_step, start_losses, start_skipped, _partial_opt = 0, [], 0, None
-    _partial_err, _partial_crc = None, (0, 0)
+    _partial_err, _partial_crc = None, (0, 0, 0)
     if cfg.resume and nproc == 1 and start_epoch < cfg.n_epochs:
         try:
             _part = _read_partial(
@@ -1365,7 +1367,10 @@ def _main(argv=None):
                         "resume: the mid-epoch checkpoint's frozen set "
                         "differs from the epoch checkpoint's")
                 params = eqx.tree_deserialise_leaves(_ppath, params)
-                _partial_crc = (_file_crc(_ppath), _file_crc(_partial_opt))
+                import zlib as _zlib
+                _partial_crc = (
+                    _file_crc(_ppath), _file_crc(_partial_opt),
+                    _zlib.crc32(json.dumps(_pm_, sort_keys=True).encode()))
                 resumed_frozen = set(_pm_["frozen"])
                 start_step = int(_pm_["step"])
                 start_losses = [float(x) for x in _pm_["losses"]]
@@ -1681,7 +1686,10 @@ def _main(argv=None):
                 with open(_history_path) as _fh:
                     for ln in (x for x in _fh if x.strip()):
                         try:
-                            _ep_ln = json.loads(ln).get("epoch")
+                            _obj = json.loads(ln)
+                            if not isinstance(_obj, dict):
+                                raise ValueError("not an object")
+                            _ep_ln = _obj.get("epoch")
                         except ValueError:
                             log.warning("history: dropping unreadable line "
                                         "%r", ln[:80])
