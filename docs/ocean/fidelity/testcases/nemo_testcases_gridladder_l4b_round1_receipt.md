@@ -14,6 +14,8 @@ Implementation and acquisition-tool commits: `f0549b581d`, `376a6e6ee6`
 
 Citation re-anchor commit: `6b6c43efe6`
 
+Independent-review repair commits: `ff080c094c`, `b8c68d344b`
+
 Status: **STOPPED FOR RECORD — L4b is implemented and preregistered, but is
 not scored or certified.** The operator stopped the first acquisition during
 its first `makenemo`, before any NEMO run or record, because independent review
@@ -151,6 +153,20 @@ scope only while the reference has no `oracle_*` file. A planted reference
 record is refused. The corrected preflight result is recorded below after the
 review-fix commit. It creates no acquisition directory; neither `--run` nor
 `--admit-existing` is invoked by Codex.
+
+The first corrected invocation failed closed inside item 5 because the
+preflight pre-created the synthetic acting directory before its writer did.
+No acquisition path was created. Commit `b8c68d344b` corrected that internal
+scratch ordering and changed the scratch root to collision-safe `mktemp`. From
+a clean tree, with both evidence and target independently confirmed absent,
+the default invocation then produced:
+
+```text
+L2_ISO_ACTING ldf_wet_nonzero=860708 ldf_dry_nonzero=0 completed_tracer_unequal=861013 entry_T_unequal=430464 entry_S_unequal=430549 entry_u_unequal=0 entry_v_unequal=0 entry_ssh_unequal=0 barotropic_checked=False barotropic_unequal=0 pass=True
+L4B_PREFLIGHT_7_OF_7_PASS plants=7/7 checker_functions=2/2 evidence_parent_absent=true target_absent=true
+L4B_PREFLIGHT_OK commit=b8c68d344b72fc3a15999a821cdd3c4fc061f49a reference=ORCA2G5_OMIP_L4_R31REF_FIX1 record_target=ORCA2L4B_ISO_BBC_R54
+WOULD_RUN smoke, writer-free boundary, twins A/B/C into /data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round54/oracle_l4b_r54
+```
 
 ## 4. Tests and gates
 
