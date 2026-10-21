@@ -9,6 +9,8 @@ Preregistration commit: `3e11d8c805`
 Implementation and acquisition-tool commits: `11c7147545`, `3583affb12`,
 `64bcc0c9e6`
 
+Receipt and citation re-anchor commits: `a4f0eb3224`, `2e72445e10`
+
 Status: **STOPPED — L6 BUILT; ACQUISITION_NEEDED.**  L6 is the certified L4b
 card plus ORCA2 interior temperature/salinity damping in NEMO's stage-3
 position.  Its exact local controls and read-only acquisition preflight pass.
@@ -152,10 +154,14 @@ The target and evidence directory remain absent.  NEMO was not built or run.
 
 ## 5. Gates and ASKED / UNASKED
 
-The final citation gate explicitly scanned this receipt and the required
-citation-gate test passed.  The default ORCA2 landing suite and private-import
-ratchet passed with x64 and the landing environment.  No trajectory scorer or
-fidelity-bar gate was invoked because no L6 record exists.
+The explicit gate found 16 citations in this receipt and 17 in the
+preregistration, with zero unmapped citations, zero failures, zero failing
+map-audit entries, and all nine self-test plants firing in each run.  The
+required citation-gate file passed 17 / 17.  The exact default ORCA2 landing
+suite from `claude_rounds/land.sh` passed 145 / 145 in 1019.78 seconds with
+x64 and the landing environment; that total includes the private-import
+ratchet at 6 / 6 and both ORCA2 parallel-receipt checks.  No trajectory scorer
+or fidelity-bar gate was invoked because no L6 record exists.
 
 ASKED and completed: survey the running deck and compiled Oracle; verify and
 SHA-pin the existing on-disk `resto.nc`; extend existing shared mechanisms;
