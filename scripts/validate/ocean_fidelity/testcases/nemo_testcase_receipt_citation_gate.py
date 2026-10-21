@@ -1880,7 +1880,7 @@ CITATION_MAP = {
         "return (np.where(tmask, temperature, 0.0), np.where(tmask, salinity, 0.0))", 71],
     "packages/ocean/legoesm/ocean/dynamics/ocean_tendency_common.py:655-732": [
         "def apply_sponge_tracer_relaxation(",
-        "return dT_dt + dT, dS_dt + dS", 75],
+        "return dT_dt + dT, dS_dt + dS", 78],
     # --- GRIDLADDER round 53 (L4 geothermal preregistration) ---
     "ORCA2_OMIP_L4/EXP00/namelist_cfg:256,257,259,263": [
         "ln_trabbc   = .true.",
