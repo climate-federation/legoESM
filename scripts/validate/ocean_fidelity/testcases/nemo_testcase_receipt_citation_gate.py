@@ -8669,6 +8669,17 @@ CITATION_MAP = {
         'cl_rnfile = TRIM( cn_dir )//TRIM( sn_cnf%clname )',
         "CALL lbc_lnk( 'rnf_mouth'", 20,
     ],
+    # --- lane B round 22: L7 river-mouth mixing ---
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:159-171': [
+        '&namsbc_rnf',
+        "sn_cnf      = 'runoff_core_monthly'", 13,
+    ],
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:36':
+        'ln_closea    = .false.',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:347-372': [
+        '!* start from turbulent closure values',
+        'IF( ln_zdfiwm )   CALL zdf_iwm', 26,
+    ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90:142':
         'SUBROUTINE tra_dmp(',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90:181-194': [
