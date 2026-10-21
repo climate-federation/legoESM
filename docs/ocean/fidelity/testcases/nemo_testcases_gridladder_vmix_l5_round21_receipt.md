@@ -166,10 +166,12 @@ as every namelist field.  The staged route refuses
 `no_mle_in_convection=True`, because it does not receive the required N2
 operand, and the unused bolus-transport return was removed.  A committed
 control censuses G5-G9, V1-V5, L1-L3, L5, and every non-ladder testcase
-dispatcher, proves L5 is the sole MLE selector, and pins the complete two-step
-G9 and L3 states to hashes measured at `9039513ff729`.  The shared guard tests
-separately pin live derivatives and forward equality; every non-L5 card is
-structurally unable to enter the NEMO-association route.
+dispatcher, proves L5 is the sole MLE selector, and pins every non-L5 resolved
+model program to hashes measured at `9039513ff729`.  The two non-L5 routes
+which reach changed shared arithmetic, G9 and L3, additionally pin their
+complete two-step states to that baseline.  The direct guard tests pin live
+derivatives and forward equality; every other card retains the identical
+program and cannot enter the NEMO-association route.
 
 ## Acquisition preflight
 

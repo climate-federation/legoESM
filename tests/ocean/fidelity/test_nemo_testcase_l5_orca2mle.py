@@ -310,6 +310,55 @@ G9_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
 G5_CONTROL_RECORD = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
     "round31/oracle_g5_r31/twin_a")
+PHASE3 = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3")
+ORCA2_INPUT_DECK = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+OTHER_ORCA2_PROGRAM_ROOTS = {
+    "ORCA2G5-ice": G5_CONTROL_RECORD,
+    "ORCA2G6-vec": PHASE3 / "gridladder_rounds/round36/oracle_g6_r36/twin_a",
+    "ORCA2G7-drg": PHASE3 / "gridladder_rounds/round41/oracle_g7_r41/twin_a",
+    "ORCA2G8-ldf": PHASE3 / "gridladder_rounds/round45/oracle_g8_r45/twin_a",
+    "ORCA2G9-tadv": PHASE3 / "gridladder_rounds/round46/oracle_g9_r46/twin_a",
+    "ORCA2V1-tke": PHASE3 / "gridladder_vmix_rounds/round1/oracle_v1_r1/twin_a",
+    "ORCA2V2-evd": PHASE3 / "gridladder_vmix_rounds/round12/oracle_v2_r12/twin_a",
+    "ORCA2V3-ddm": PHASE3 / "gridladder_vmix_rounds/round13/oracle_v3_r13/twin_a",
+    "ORCA2V4-iwm": PHASE3 / "gridladder_vmix_rounds/round14/oracle_v4_r14/twin_a",
+    "ORCA2V5-havtb": PHASE3 / "gridladder_vmix_rounds/round15/oracle_v5_r15/twin_a",
+    "ORCA2L1-bbl": PHASE3 / "gridladder_vmix_rounds/round16/oracle_l1_r16/twin_a",
+    "ORCA2L2-iso": PHASE3 / "gridladder_vmix_rounds/round17/oracle_l2_r17/twin_a",
+    "ORCA2L3-eiv": PHASE3 / "gridladder_vmix_rounds/round20/oracle_l3_r20/twin_a",
+}
+OTHER_PROGRAM_HASHES_AT_9039513 = {
+    "ORCA2G5-ice": "a18a471582b3ae85ded987caf928db93f651e70e8150bed6825c76f311583cc8",
+    "ORCA2G6-vec": "de77253d194cc9e8edb56ddafad1491cd591adcfb77ea321255a5c84503a1baa",
+    "ORCA2G7-drg": "8664ff1901ab99e88399496769bc65eb10f92963ae6310b93c77982c03fe8f4d",
+    "ORCA2G8-ldf": "e31d8a0b36e4627c3eb61debf7f828ed3cfea76f73fe99bbcd02d6fdbe200d1e",
+    "ORCA2G9-tadv": "89e98e7fe5fb28aa20c794237665f214beb479e980c9e512236031a208c04c21",
+    "ORCA2V1-tke": "48d5eb1e6b3d09197839e9d1028e195a70abcdbf1fbb2f0ae942a314b824f678",
+    "ORCA2V2-evd": "824ee5f546f5106d051476574c69b63d55c4c97c1079ea9b45f3a8107f6f449b",
+    "ORCA2V3-ddm": "06d89fb358e9846f1828db6d7a7a2d962e243ef308d3132d06c128f89417af1c",
+    "ORCA2V4-iwm": "68cd8ed2f399392b3ab7b34c77d73ee1114789af89a37d5370fb24aba41a1b97",
+    "ORCA2V5-havtb": "68cd8ed2f399392b3ab7b34c77d73ee1114789af89a37d5370fb24aba41a1b97",
+    "ORCA2L1-bbl": "d0ddd05f2f294b707fa5176b0416aef3556673e4f85b072e52264fc5c0838091",
+    "ORCA2L2-iso": "71c21ad9604116b2eaa6e09164199d42dffdfb32ae6cae4a9964f1fe0402f453",
+    "ORCA2L3-eiv": "131db293410a90d7cd0e79cfa23e8ee02f79c28e3a7f9cbb1284db233e20b1f4",
+    "LOCK_EXCHANGE-zco": "1b1fcbbde395d226d48ddd0ba2cab00ecd1ebf2ecb4a68e3809d3ea2638a6d19",
+    "OVERFLOW-zps": "40c46c0f3f3054184518a7da2f43302a68f55118251cdc369200b5aa27f10214",
+    "GYRE-zco": "ae6aed2e3c3c5e2d428ee4d3ada3db7b58aee1d0a80b1da2737dcdebee370afe",
+    "ORCA2-zps": "6bf153d931cce0d9ca41d879bf9462dab8a85488f1dbc03681d20947c0c50a7f",
+    "VORTEX-zco": "4d4cb267e633879ba888edf67786913e6e256975c77a8cc5e234186f64d3031b",
+    "VORTEX_VEC-zco": "2daba59aa11e98dc952a012bf1f45fdd7cadfa1998a97fb421729b92052a2c12",
+    "VORTEX-15km-zco": "4d4cb267e633879ba888edf67786913e6e256975c77a8cc5e234186f64d3031b",
+    "VORTEX_VEC-15km-zco": "2daba59aa11e98dc952a012bf1f45fdd7cadfa1998a97fb421729b92052a2c12",
+    "VORTEX-10km-zco": "4d4cb267e633879ba888edf67786913e6e256975c77a8cc5e234186f64d3031b",
+    "VORTEX_VEC-10km-zco": "2daba59aa11e98dc952a012bf1f45fdd7cadfa1998a97fb421729b92052a2c12",
+    "VORTEX_SMT-zps": "4d4cb267e633879ba888edf67786913e6e256975c77a8cc5e234186f64d3031b",
+    "VORTEX_SMT_VEC-zps": "2daba59aa11e98dc952a012bf1f45fdd7cadfa1998a97fb421729b92052a2c12",
+    "VORTEX_SMT1_VEC-zps": "5be0648aa6eea1817346d040d9ef991bf875f9b640b31ebc2792cacc2096a4ee",
+    "VORTEX_SMT2_VEC-zps": "d538d4a146e74470b655bb1d496cef05a3cb2b347b6710b3eeb3d01316b6a7db",
+    "VORTEX_SMT3_VEC-zps": "ff71c950ec7e90955123ca6de525ab6892d677392c9aea945c8382a449a1a019",
+    "VORTEX_SMT4_VEC-zps": "ef32c0cee68bf111d0e31e36558e4a79522032cf952ae673a44a74b899e26a85",
+}
 
 
 @pytest.mark.skipif(not G9_RECORD.is_dir(), reason="no admitted G9 record")
@@ -345,8 +394,10 @@ def test_l5_jitted_traced_x64_step_consumes_mle_transport(cards):
 
 
 @pytest.mark.skipif(not G5_CONTROL_RECORD.is_dir(), reason="no admitted G5 record")
-def test_round21_other_cards_keep_their_two_step_values_and_program(tmp_path):
-    """Census all cards; bit-pin the only two non-L5 routes reaching the guard."""
+def test_round21_other_cards_keep_baseline_programs_and_affected_two_step_values(
+    tmp_path,
+):
+    """Pin every non-L5 program and the touched routes' complete two-step state."""
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 
     import sys
@@ -376,9 +427,30 @@ def test_round21_other_cards_keep_their_two_step_values_and_program(tmp_path):
     assert all(f'"{case}"' in dispatch for case in non_ladder)
     assert non_ladder.isdisjoint(recipe._ORCA2L_MLE_CASES)
 
+    # Full resolved-program census against the pre-review tip.  This includes
+    # every requested G/V/L control and every non-ladder public dispatch.
+    assert set(OTHER_PROGRAM_HASHES_AT_9039513) == (
+        set(OTHER_ORCA2_PROGRAM_ROOTS) | non_ladder)
+    for case, expected in OTHER_PROGRAM_HASHES_AT_9039513.items():
+        if case in OTHER_ORCA2_PROGRAM_ROOTS:
+            root = OTHER_ORCA2_PROGRAM_ROOTS[case]
+        elif case == "ORCA2-zps":
+            root = ORCA2_INPUT_DECK
+        else:
+            root = None
+        if root is not None and not root.is_dir():
+            pytest.skip(f"missing immutable control deck {root}")
+        card = recipe.build_nemo_testcase_card(case, deck_root=root)
+        digest = hashlib.sha256(
+            pickle.dumps(card.recipe.model_config)).hexdigest()
+        assert digest == expected, case
+        assert getattr(
+            getattr(card.recipe.model_config, "physics", None), "mle", None
+        ) is None, case
+
     # No other card can execute the L5 association path.  G9 and L3 do execute
-    # the shared group-A dry-cell guard, so pin their complete two-step ocean
-    # state to hashes measured at the unmodified 9039513ff729 baseline.
+    # the shared group-A dry-cell guard, so also pin their complete two-step
+    # ocean state to hashes measured at the unmodified 9039513ff729 baseline.
     controls = {
         "ORCA2G9-tadv": (
             CASES / "nemo_testcase_g9_orca2tadv",
