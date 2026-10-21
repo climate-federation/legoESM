@@ -76,6 +76,14 @@ _ERA5_STL_VARS = ("var139", "var170", "var183", "var236")
 _ERA5_LSM_VAR = "var172"
 # Refuse a soil temperature outside this range [K]: catches degC or a wrong param.
 _ERA5_STL_RANGE_K = (180.0, 340.0)
+# ERA5 volumetric soil water swvl1..swvl4 (params 39-42) and snow depth of
+# water equivalent sd (param 141, m): the --era5-soil-w / --era5-snow extras.
+_ERA5_SWVL_VARS = ("var39", "var40", "var41", "var42")
+_ERA5_SD_VAR = "var141"
+# swvl is a fraction; small negatives are regridding artefacts (clipped later),
+# anything beyond this is a wrong field.  sd is capped by ECMWF at 10 m on ice.
+_ERA5_SWVL_RANGE = (-0.05, 1.0)
+_ERA5_SD_RANGE_M = (0.0, 10.5)
 
 
 def overlap_weights(soil_dz, bounds=_ERA5_SOIL_BOUNDS_M) -> np.ndarray:
@@ -94,6 +102,35 @@ def overlap_weights(soil_dz, bounds=_ERA5_SOIL_BOUNDS_M) -> np.ndarray:
     return w / w.sum(axis=1, keepdims=True)
 
 
+def _era5_land_donors(dst_lat, dst_lon, replace, src_lat, src_lon, src_land):
+    """(replaced column indices, their nearest ERA5 LAND point, distance [km]
+    for every column, NaN where not replaced)."""
+    from legoesm.coupler.grid_remap import nearest_column_map
+
+    from legoesm import constants
+    idx = np.flatnonzero(replace)
+    near = nearest_column_map(src_lat, src_lon, dst_lat[idx], dst_lon[idx],
+                              src_valid=src_land)
+    cosd = (np.sin(dst_lat[idx]) * np.sin(src_lat[near])
+            + np.cos(dst_lat[idx]) * np.cos(src_lat[near])
+            * np.cos(dst_lon[idx] - src_lon[near]))
+    dist = np.full(dst_lat.shape[0], np.nan)
+    dist[idx] = np.arccos(np.clip(cosd, -1.0, 1.0)) * constants.R_earth / 1e3
+    return idx, near, dist
+
+
+def era5_soil_profile(x_ic, soil_dz, dst_lat, dst_lon, replace,
+                      src_lat, src_lon, layers, src_land):
+    """Replace ``x_ic`` on ``replace`` columns with the depth-mapped ERA5
+    4-layer profile ``layers`` (4, n_src) of the nearest ERA5 LAND point.
+    Returns the new (ncol, n_layers) field and the donor distance [km]."""
+    idx, near, dist = _era5_land_donors(dst_lat, dst_lon, replace,
+                                        src_lat, src_lon, src_land)
+    x = np.array(x_ic, dtype=np.float64, copy=True)
+    x[idx] = np.asarray(layers, np.float64)[:, near].T @ overlap_weights(soil_dz).T
+    return x, dist
+
+
 def era5_soil_temperature(T_ic, soil_dz, dst_lat, dst_lon, replace,
                           src_lat, src_lon, stl, src_land):
     """Replace ``T_ic`` on ``replace`` columns with depth-mapped ERA5 soil T.
@@ -103,19 +140,55 @@ def era5_soil_temperature(T_ic, soil_dz, dst_lat, dst_lon, replace,
     (ncol, n_layers) temperature and the donor great-circle distance [km] for
     every column (NaN where not replaced).
     """
-    from legoesm import constants
-    from legoesm.coupler.grid_remap import nearest_column_map
+    return era5_soil_profile(T_ic, soil_dz, dst_lat, dst_lon, replace,
+                             src_lat, src_lon, stl, src_land)
+
+
+def era5_soil_water(theta_ic, psi_ic, soil_dz, dst_lat, dst_lon, replace,
+                    src_lat, src_lon, swvl, src_land, hydraulics):
+    """Replace soil water on ``replace`` columns with depth-mapped ERA5 swvl1-4.
+
+    The mapped water content is clipped into the Richards solver's own
+    admissible range for that (column, layer) -- its dry floor
+    ``theta_from_psi(psi_dry_floor)`` and the Cosby ``theta_sat`` -- and the
+    matric potential is recomputed from it with the model's retention curve,
+    so the pair (theta, psi) is consistent on load.  Returns (theta, psi,
+    donor distance [km], number of clipped (column, layer) cells).
+    """
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_hydraulics import psi_from_theta, theta_from_psi
+    theta, dist = era5_soil_profile(theta_ic, soil_dz, dst_lat, dst_lon, replace,
+                                    src_lat, src_lon, swvl, src_land)
+    lo = np.asarray(theta_from_psi(psi_dry_floor(hydraulics), hydraulics), np.float64)
+    hi = np.asarray(hydraulics.theta_sat, np.float64)
     idx = np.flatnonzero(replace)
-    near = nearest_column_map(src_lat, src_lon, dst_lat[idx], dst_lon[idx],
-                              src_valid=src_land)
-    T = np.array(T_ic, dtype=np.float64, copy=True)
-    T[idx] = np.asarray(stl, np.float64)[:, near].T @ overlap_weights(soil_dz).T
-    cosd = (np.sin(dst_lat[idx]) * np.sin(src_lat[near])
-            + np.cos(dst_lat[idx]) * np.cos(src_lat[near])
-            * np.cos(dst_lon[idx] - src_lon[near]))
-    dist = np.full(T.shape[0], np.nan)
-    dist[idx] = np.arccos(np.clip(cosd, -1.0, 1.0)) * constants.R_earth / 1e3
-    return T, dist
+    raw = theta[idx]
+    clipped = np.clip(raw, np.broadcast_to(lo, theta.shape)[idx],
+                      np.broadcast_to(hi, theta.shape)[idx])
+    n_clipped = int(np.sum(clipped != raw))
+    theta[idx] = clipped
+    psi = np.array(psi_ic, dtype=np.float64, copy=True)
+    psi_all = np.asarray(psi_from_theta(theta, hydraulics), np.float64)
+    psi[idx] = psi_all[idx]
+    return theta, psi, dist, n_clipped
+
+
+def era5_snow(snow_ic, age_ic, dst_lat, dst_lon, replace,
+              src_lat, src_lon, sd_m, src_land):
+    """Replace the snow water equivalent [kg/m2] on ``replace`` columns with
+    ERA5 ``sd`` [m of water] of the nearest ERA5 LAND point.  A column that
+    gains snow it did not have starts with age 0 (fresh); otherwise the source
+    age is kept.  Returns (snow_depth, snow_age, donor distance [km])."""
+    from legoesm import constants
+    idx, near, dist = _era5_land_donors(dst_lat, dst_lon, replace,
+                                        src_lat, src_lon, src_land)
+    snow = np.array(snow_ic, dtype=np.float64, copy=True)
+    age = np.array(age_ic, dtype=np.float64, copy=True)
+    new = np.asarray(sd_m, np.float64)[near] * constants.rho_water
+    fresh = (new > 0.0) & (snow[idx] <= 0.0)
+    snow[idx] = new
+    age[idx] = np.where(fresh, 0.0, age[idx])
+    return snow, age, dist
 
 
 def _cols_rad(grid) -> tuple[np.ndarray, np.ndarray]:
@@ -147,8 +220,7 @@ def _ic_grid(grid_type: str, resolution: int):
     C24, measured 2026-10-10).
     """
     if grid_type == "fv3_duo":
-        from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
-            build_duo_column_mesh)
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import build_duo_column_mesh
         from legoesm.grids.factory import create_fv3_duo_grid
         bnd = create_fv3_duo_grid(resolution)
         return build_duo_column_mesh(bnd.ctx_np, bnd.n, bnd.ng)
@@ -192,6 +264,24 @@ def _land_and_glacier(surfdata: str, grid, ncol: int):
     return frac > 0.0, np.asarray(glacier_mask(gsd)).ravel()
 
 
+def _calibrated_hydraulics(surfdata: str, grid, soil_dz):
+    """Per-(column, layer) soil hydraulics exactly as the run builds them: the
+    surfdata texture remapped to the CALIBRATED soil grid by the run's loader,
+    through the Cosby pedotransfer.  Refuses a grid that differs from the IC's
+    stamped column."""
+    from legoesm.land.boundary_data import init_land_surface_data
+    from legoesm.land.config import MultiLayerLandConfig, biophysics_lmip_two_leaf_setup
+    from legoesm.land.soil_grid import make_soil_grid
+    cal = biophysics_lmip_two_leaf_setup()["soil_grid"]
+    dz = np.asarray(make_soil_grid(cal).dz, np.float64)
+    if dz.shape != np.shape(soil_dz) or not np.allclose(dz, soil_dz):
+        raise SystemExit("the IC's soil column differs from the calibrated "
+                         "column; refusing to derive hydraulics for it.")
+    land_cfg, _, _ = init_land_surface_data(
+        surfdata, grid, MultiLayerLandConfig(soil_grid=cal), 0.0)
+    return land_cfg.hydraulics
+
+
 def _era5_field(path, var):
     """(values (n,), lat_rad (n,), lon_rad (n,), times) of a one-step ERA5 nc.
 
@@ -215,7 +305,8 @@ def _era5_field(path, var):
 
 
 def main_era5_soil_t(args) -> int:
-    """Replace ONLY the soil temperature of an IC already on the target grid.
+    """Replace the soil temperature (and, with --era5-soil-w / --era5-snow,
+    the soil water and snow) of an IC already on the target grid.
 
     Non-glacier land columns take ERA5 stl1-4 from the files' single time step
     (nearest ERA5 land point, lsm >= 0.5; depth-overlap onto the IC's stamped
@@ -238,12 +329,15 @@ def main_era5_soil_t(args) -> int:
     replace = land & ~glacier
 
     fields = [_era5_field(f, v) for f, v in zip(args.era5_soil_t, _ERA5_STL_VARS)]
+    w_fields = ([_era5_field(f, v) for f, v in zip(args.era5_soil_w, _ERA5_SWVL_VARS)]
+                if args.era5_soil_w else [])
+    s_fields = [_era5_field(args.era5_snow, _ERA5_SD_VAR)] if args.era5_snow else []
     lsm, llat, llon, _ = _era5_field(args.era5_lsm, _ERA5_LSM_VAR)
     glat, glon = fields[0][1], fields[0][2]
-    for _, a, o, _ in fields[1:] + [(None, llat, llon, None)]:
+    for _, a, o, _ in fields[1:] + w_fields + s_fields + [(None, llat, llon, None)]:
         if not (np.array_equal(a, glat) and np.array_equal(o, glon)):
             raise SystemExit("ERA5 soil layers / land-sea mask are not on one grid.")
-    times = {tuple(f[3]) for f in fields}
+    times = {tuple(f[3]) for f in fields + w_fields + s_fields}
     if len(times) != 1:
         raise SystemExit(f"ERA5 soil layers are at different times: {times}.")
     ftime = next(iter(times))
@@ -302,6 +396,67 @@ def main_era5_soil_t(args) -> int:
     })
     out = {k: src[k] for k in src.files}
     out["T_soil"] = T.astype(src["T_soil"].dtype)
+    src_land = lsm >= _ERA5_LAND_LSM_MIN
+    if w_fields:
+        swvl = np.stack([f[0] for f in w_fields])
+        if not np.all(np.isfinite(swvl)):
+            raise SystemExit("ERA5 soil water has non-finite values; refusing.")
+        lo, hi = _ERA5_SWVL_RANGE
+        if swvl.min() < lo or swvl.max() > hi:
+            raise SystemExit(f"ERA5 soil water spans {swvl.min():.3f}-"
+                             f"{swvl.max():.3f}, outside {lo}-{hi}; refusing.")
+        stamp = json.loads(str(src["soil_hydraulics_json"]))
+        if (stamp.get("retention_curve") != "clapp_hornberger"
+                or stamp.get("parameter_source") != "surfdata_cosby"):
+            raise SystemExit("the IC's hydraulics stamp is not the surfdata "
+                             f"Cosby / Clapp-Hornberger pair ({stamp}); the "
+                             "rebuilt matric potential would not match it.")
+        hyd = _calibrated_hydraulics(args.surfdata, grid, src["soil_dz"])
+        theta, psi, dist_w, n_clip = era5_soil_water(
+            src["theta_soil"], src["psi_soil"], src["soil_dz"], lat, lon,
+            replace, glat, glon, swvl, src_land, hyd)
+        if not (np.all(np.isfinite(theta)) and np.all(np.isfinite(psi))):
+            raise SystemExit("soil water / matric potential non-finite after "
+                             "the ERA5 replacement; refusing.")
+        out["theta_soil"] = theta.astype(src["theta_soil"].dtype)
+        out["psi_soil"] = psi.astype(src["psi_soil"].dtype)
+        print(f"soil water: replaced {int(replace.sum())} columns from ERA5 "
+              f"swvl1-4; {n_clip} (column, layer) cells clipped into the "
+              "solver's [dry floor, theta_sat] range")
+        meta.update({
+            "soil_w_source": "ERA5 swvl1-4 (GRIB params 39,40,41,42)",
+            "soil_w_files": {v: {"path": str(f), "md5": md5(f)}
+                             for f, v in zip(args.era5_soil_w, _ERA5_SWVL_VARS)},
+            "soil_w_choices": (
+                "same donors and depth-overlap as T_soil; theta clipped to the "
+                "Richards dry floor / Cosby theta_sat of the calibrated column; "
+                "psi = psi_from_theta (clapp_hornberger) of the clipped theta; "
+                "glacier columns keep the source IC"),
+            "soil_w_n_clipped_cells": n_clip,
+        })
+    if s_fields:
+        sd = s_fields[0][0]
+        if not np.all(np.isfinite(sd)):
+            raise SystemExit("ERA5 snow depth has non-finite values; refusing.")
+        lo, hi = _ERA5_SD_RANGE_M
+        if sd.min() < lo or sd.max() > hi:
+            raise SystemExit(f"ERA5 snow depth spans {sd.min():.2f}-{sd.max():.2f} m, "
+                             f"outside {lo}-{hi} m; refusing.")
+        snow, age, _ = era5_snow(src["snow_depth"], src["snow_age"], lat, lon,
+                                 replace, glat, glon, sd, src_land)
+        out["snow_depth"] = snow.astype(src["snow_depth"].dtype)
+        out["snow_age"] = age.astype(src["snow_age"].dtype)
+        print(f"snow: replaced {int(replace.sum())} columns from ERA5 sd; "
+              f"{int(np.sum(snow[replace] > 0))} of them carry snow")
+        meta.update({
+            "snow_source": "ERA5 sd (GRIB param 141) x rho_water",
+            "snow_files": {_ERA5_SD_VAR: {"path": str(args.era5_snow),
+                                          "md5": md5(args.era5_snow)}},
+            "snow_choices": (
+                "nearest ERA5 land point; snow_age 0 where the column gains "
+                "snow it did not have, else the source age; glacier columns "
+                "keep the source IC"),
+        })
     out["metadata_json"] = np.str_(json.dumps(meta))
     np.savez_compressed(args.out, **out)
     print(f"wrote {args.out}")
@@ -326,6 +481,16 @@ def main(argv=None) -> int:
                          "-seltimestep,1). Switches to SOIL-T mode: --source is "
                          "an IC already on the target grid and ONLY its soil "
                          "temperature is replaced on non-glacier land columns.")
+    ap.add_argument("--era5-soil-w", nargs=4, metavar="SWVL",
+                    help="with --era5-soil-t: ERA5 swvl1..swvl4 netCDFs (same "
+                         "grid and instant). Soil water of the replaced columns "
+                         "is taken from ERA5 too (depth-overlap, clipped to the "
+                         "solver's admissible range, matric potential rebuilt "
+                         "with the model's retention curve).")
+    ap.add_argument("--era5-snow", metavar="SD",
+                    help="with --era5-soil-t: ERA5 sd netCDF (snow depth of "
+                         "water equivalent [m], same grid and instant). Snow of "
+                         "the replaced columns is taken from ERA5 (x rho_water).")
     ap.add_argument("--era5-time", help="the instant the --era5-soil-t files "
                                        "must hold (e.g. 1979-01-01T00:00); "
                                        "required with --era5-soil-t")
@@ -363,6 +528,8 @@ def main(argv=None) -> int:
             ap.error("--era5-soil-t takes a stamped --source; --stamp-only / "
                      "--source-soil-hydraulics apply to regridding or stamping")
         return main_era5_soil_t(args)
+    if args.era5_soil_w or args.era5_snow:
+        ap.error("--era5-soil-w / --era5-snow extend --era5-soil-t")
     if not args.stamp_only:
         missing = [f for f in ("surfdata", "target_grid", "target_resolution",
                                "source_soil_column")
@@ -436,8 +603,8 @@ def main(argv=None) -> int:
 
     # The soil-column stamp: her template's own column, computed by the model's
     # own grid builder, never typed in by hand.
-    from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
     from legoesm.land.config import biophysics_lmip_two_leaf_setup
+    from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
     cal_grid = biophysics_lmip_two_leaf_setup()["soil_grid"]
     n_str, d_str, g_str = args.source_soil_column.split(",")
     attested = SoilGridConfig(n_layers=int(n_str), total_depth=float(d_str),
