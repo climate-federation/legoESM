@@ -13874,18 +13874,18 @@ class LatLonCGridOceanModel:
                     # added in the second recurrence, AFTER the barotropic
                     # removal and the bottom-drag add (dynzdf.f90:156-167):
                     # deposited just before the solve, below
-                    _rnd = nemo_source_round
-
-                    def _top_div(e3):
-                        # Gradient-only: 1 on zero-thickness (masked) faces.
-                        d = _rnd(e3 * _r0)
-                        return jnp.where(d == 0.0, 1.0, d)
-
+                    # Preserve all NEMO source-rounding associations here.
+                    # The helper changes only the divisor on closed faces;
+                    # their mask discards the corresponding forward value.
+                    # Its separate unit test exercises that reverse path.
+                    #
                     _zdf_top_stress = (
-                        _rnd(_rnd(_rnd(dt_mom * _tau_i_u) / _top_div(_e3u1))
-                             * state.u_mask.data),
-                        _rnd(_rnd(_rnd(dt_mom * _tau_j_v) / _top_div(_e3v1))
-                             * state.v_mask.data))
+                        _nemo_zdf_top_stress_source(
+                            dt_mom, _tau_i_u, _e3u1, _r0,
+                            state.u_mask.data),
+                        _nemo_zdf_top_stress_source(
+                            dt_mom, _tau_j_v, _e3v1, _r0,
+                            state.v_mask.data))
                 else:
                     u_solve_in = state.u.data.at[..., 0].add(
                         dt_mom * _tau_i_u / (_r0 * jnp.maximum(_dz0u, 1e-10)))
@@ -17896,3 +17896,12 @@ def _nemo_sh2_eta(tke_cfg, *, prognostic, eta_now, eta_step_entry):
                          "entry eta (eta_step_entry) when a stage eta_now is "
                          "supplied")
     return eta_step_entry
+
+
+def _nemo_zdf_top_stress_source(dt_mom, stress, e3_face, rho0, face_mask):
+    """NEMO dynzdf top-stress RHS with a closed-face AD divisor."""
+    r = nemo_source_round
+    divisor = r(e3_face * rho0)
+    # Gradient-only: the face mask discards zero-thickness closed faces.
+    divisor = jnp.where(divisor == 0.0, 1.0, divisor)
+    return r(r(r(dt_mom * stress) / divisor) * face_mask)

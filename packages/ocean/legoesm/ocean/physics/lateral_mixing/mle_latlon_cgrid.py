@@ -299,7 +299,9 @@ def mle_tracer_tendency_latlon_cgrid(
         zrow = jnp.zeros_like(bm_filled[:1])
         dbm_v = jnp.concatenate([zrow, dbm_v_int, zrow], axis=0)
         e2_e1u = sr(e2u / e1u)
-        e1_e2v = sr(e1v / e2v)
+        # Gradient-only: the closed south V row has e1v=e2v=0, and the
+        # boundary padding below overwrites that row in the forward pass.
+        e1_e2v = sr(e1v / jnp.where(e2v == 0.0, 1.0, e2v))
         psim_u = sr(sr(sr(sr(rc_f * H_u) * H_u) * e2_e1u) * dbm_u)
         psim_u = sr(psim_u * cap_u)
         psim_v = sr(sr(sr(sr(rc_f * H_v) * H_v) * e1_e2v) * dbm_v)

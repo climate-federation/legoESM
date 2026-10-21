@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import pickle
 import subprocess
+import sys
 from pathlib import Path
 
 import jax
@@ -37,6 +38,9 @@ def _module(name: str, path: Path):
 
 INSTRUMENT = _module("instrument_tramle", L5 / "instrument_tramle.py")
 STATEMENT_REF = _module("mle_statement_reference", L5 / "mle_statement_reference.py")
+CERTIFIED_VALUES = _module(
+    "certified_card_values", L5 / "certified_card_values.py"
+)
 RECORDS = _module(
     "l5_records",
     CASES / "nemo_testcase_l3_orca2eiv" / "l3_records.py",
@@ -263,6 +267,22 @@ def test_l5_real_operands_match_statement_reference_bit_for_bit(cards):
     assert np.count_nonzero(got_v) == 8764
     assert np.count_nonzero(got_v[-1]) == 16
 
+    def transport_loss(stretch):
+        u_transport, v_transport = mle_tracer_tendency_latlon_cgrid(
+            T, S, rho, n2, mask, um, vm, run.z_coord,
+            stretch, run.grid, cfg.physics.mle,
+            h_k=hk, rho0=cfg.constants.rho_0, grav=cfg.constants.g,
+            omega=cfg.constants.Omega, return_horizontal_transport=True,
+        )
+        return jnp.sum(u_transport * u_transport) + jnp.sum(
+            v_transport * v_transport)
+
+    stretch_gradient = np.asarray(jax.jit(jax.grad(transport_loss))(
+        jnp.asarray(d["stretch_half0"])))
+    assert stretch_gradient.shape[1] == 180
+    assert np.all(np.isfinite(stretch_gradient))
+    assert np.count_nonzero(stretch_gradient) > 0
+
 
 def test_l5_jitted_traced_x64_transport_is_exact_and_nonzero():
     from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
@@ -309,6 +329,60 @@ def test_l5_jitted_traced_x64_transport_is_exact_and_nonzero():
         )
 
 
+def test_l5_closed_south_v_metric_has_finite_live_stretch_gradient():
+    """The NEMO metric ratio must not differentiate through south-row 0/0."""
+    from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.physics.lateral_mixing.mle import MLEConfig
+    from legoesm.ocean.physics.lateral_mixing.mle_latlon_cgrid import (
+        mle_tracer_tendency_latlon_cgrid,
+    )
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    grid = create_latlon_grid(3, 4)
+    geom = ensure_geometry(grid)
+    zero_south = geom._replace(
+        dx_v=geom.dx_v.at[0].set(0.0),
+        dy_v=geom.dy_v.at[0].set(0.0),
+    )
+    safe_south = zero_south._replace(dy_v=zero_south.dy_v.at[0].set(1.0))
+    zc = create_ocean_z_star(3, 300.0, 100.0, 100.0)
+    mask = jnp.ones((3, 4), dtype=jnp.float64)
+    um, vm = compute_face_masks(mask, grid)
+    T = jnp.array([[[18., 18., 4.], [18., 18., 4.],
+                    [8., 8., 4.], [8., 8., 4.]]]*3)
+    S = jnp.full_like(T, 35.0)
+    rho = make_eos_fn()(T, S, jnp.zeros_like(T))
+    n2 = jnp.zeros((*T.shape[:-1], T.shape[-1] - 1), dtype=T.dtype)
+    cfg = MLEConfig(
+        no_mle_in_convection=False, through_fct=True,
+        nemo_association=True)
+    stretch = jnp.ones_like(mask)
+
+    def transport(jacobian, geometry):
+        return mle_tracer_tendency_latlon_cgrid(
+            T, S, rho, n2, mask, um, vm, zc, jacobian, geometry, cfg,
+            omega=grid.omega,
+            return_horizontal_transport=True)
+
+    guarded = jax.jit(lambda x: transport(x, zero_south))(stretch)
+    reference = jax.jit(lambda x: transport(x, safe_south))(stretch)
+    for got, expected in zip(guarded, reference):
+        np.testing.assert_array_equal(
+            np.asarray(got).view(np.uint64),
+            np.asarray(expected).view(np.uint64))
+
+    def loss(jacobian):
+        u_transport, v_transport = transport(jacobian, zero_south)
+        return jnp.sum(u_transport * u_transport) + jnp.sum(
+            v_transport * v_transport)
+
+    gradient = jax.jit(jax.grad(loss))(stretch)
+    assert np.all(np.isfinite(np.asarray(gradient)))
+    assert np.count_nonzero(np.asarray(gradient)) > 0
+
+
 G9_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
                  "gridladder_rounds/round46/oracle_g9_r46/twin_a")
 L5_RECORD = Path(
@@ -335,7 +409,7 @@ OTHER_ORCA2_PROGRAM_ROOTS = {
     "ORCA2L2-iso": PHASE3 / "gridladder_vmix_rounds/round17/oracle_l2_r17/twin_a",
     "ORCA2L3-eiv": PHASE3 / "gridladder_vmix_rounds/round20/oracle_l3_r20/twin_a",
 }
-OTHER_PROGRAM_HASHES_AT_9039513 = {
+OTHER_CONFIG_PICKLE_HASHES_AT_9039513 = {
     "ORCA2G5-ice": "a18a471582b3ae85ded987caf928db93f651e70e8150bed6825c76f311583cc8",
     "ORCA2G6-vec": "de77253d194cc9e8edb56ddafad1491cd591adcfb77ea321255a5c84503a1baa",
     "ORCA2G7-drg": "8664ff1901ab99e88399496769bc65eb10f92963ae6310b93c77982c03fe8f4d",
@@ -366,7 +440,6 @@ OTHER_PROGRAM_HASHES_AT_9039513 = {
     "VORTEX_SMT3_VEC-zps": "ff71c950ec7e90955123ca6de525ab6892d677392c9aea945c8382a449a1a019",
     "VORTEX_SMT4_VEC-zps": "ef32c0cee68bf111d0e31e36558e4a79522032cf952ae673a44a74b899e26a85",
 }
-
 
 @pytest.mark.skipif(not G9_RECORD.is_dir(), reason="no admitted G9 record")
 def test_l5_jitted_traced_x64_step_consumes_mle_transport(cards):
@@ -496,15 +569,8 @@ def test_l5_record_jitted_traced_x64_transport_and_wiring(cards):
 
 
 @pytest.mark.skipif(not G5_CONTROL_RECORD.is_dir(), reason="no admitted G5 record")
-def test_round21_other_cards_keep_baseline_programs_and_affected_two_step_values(
-    tmp_path,
-):
-    """Pin every non-L5 program and the touched routes' complete two-step state."""
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
-
-    import sys
-    sys.path[:0] = [str(CASES), str(CASES / "nemo_testcase_g5_orca2ice")]
-    import g5_records as g5
+def test_round21_config_census():
+    """Pin every non-L5 resolved configuration pickle."""
 
     expected_cards = {
         "ORCA2G1-flat", "ORCA2G1b-vec", "ORCA2G2-zps", "ORCA2G3-ts",
@@ -529,11 +595,11 @@ def test_round21_other_cards_keep_baseline_programs_and_affected_two_step_values
     assert all(f'"{case}"' in dispatch for case in non_ladder)
     assert non_ladder.isdisjoint(recipe._ORCA2L_MLE_CASES)
 
-    # Full resolved-program census against the pre-review tip.  This includes
-    # every requested G/V/L control and every non-ladder public dispatch.
-    assert set(OTHER_PROGRAM_HASHES_AT_9039513) == (
+    # Full resolved-model-configuration pickle census against the pre-review
+    # tip.  These are configuration hashes, not compiled step programs.
+    assert set(OTHER_CONFIG_PICKLE_HASHES_AT_9039513) == (
         set(OTHER_ORCA2_PROGRAM_ROOTS) | non_ladder)
-    for case, expected in OTHER_PROGRAM_HASHES_AT_9039513.items():
+    for case, expected in OTHER_CONFIG_PICKLE_HASHES_AT_9039513.items():
         if case in OTHER_ORCA2_PROGRAM_ROOTS:
             root = OTHER_ORCA2_PROGRAM_ROOTS[case]
         elif case == "ORCA2-zps":
@@ -550,32 +616,16 @@ def test_round21_other_cards_keep_baseline_programs_and_affected_two_step_values
             getattr(card.recipe.model_config, "physics", None), "mle", None
         ) is None, case
 
-    # No other card can execute the L5 association path.  G9 and L3 do execute
-    # the shared group-A dry-cell guard, so also pin their complete two-step
-    # ocean state to hashes measured at the unmodified 9039513ff729 baseline.
-    controls = {
-        "ORCA2G9-tadv": (
-            CASES / "nemo_testcase_g9_orca2tadv",
-            "d5e168b95f9023c249242e83fe32a4f660649c92dd26ff0b988a193207649ae4"),
-        "ORCA2L3-eiv": (
-            CASES / "nemo_testcase_l3_orca2eiv",
-            "9c83d48f76cfbae1905d82d2c5466ff87f84026fc8e8c8d9fbd0060f05745fea"),
-    }
-    for case, (deck, expected) in controls.items():
-        card_tmp = tmp_path / case.lower()
-        card_tmp.mkdir()
-        root = _root(card_tmp, deck)
-        card = recipe.build_nemo_testcase_card(case, deck_root=root)
-        run = card.recipe
-        model = LatLonCGridOceanModel(run.grid, run.z_coord, run.model_config)
-        state = run.initial_state
-        for kt in (1, 2):
-            fresh, surface = g5.nemo_supplied_forcing(card, G5_CONTROL_RECORD, kt)
-            state = model.step(
-                state, card.dt_s, freshwater=fresh, surface_forcing=surface)
-            jax.block_until_ready(state.T.data)
-        digest = hashlib.sha256()
-        for name in ("T", "S", "u", "v", "eta"):
-            digest.update(np.ascontiguousarray(
-                np.asarray(getattr(state, name).data)).tobytes())
-        assert digest.hexdigest() == expected, case
+
+
+@pytest.mark.parametrize("case", tuple(CERTIFIED_VALUES.EXPECTED))
+def test_round21_certified_card_two_step_values(case):
+    """Run each certified card in a fresh compiler process and pin its bits."""
+    root = CERTIFIED_VALUES.ROOTS[case]
+    if not root.is_dir():
+        pytest.skip(f"missing immutable certified record {root}")
+    result = subprocess.run(
+        [sys.executable, str(L5 / "certified_card_values.py"), case],
+        capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == f"{case} {CERTIFIED_VALUES.EXPECTED[case]}"

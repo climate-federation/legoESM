@@ -1285,3 +1285,35 @@ def test_nemo_ws_q_after_reverse_gradient_is_finite_on_dry_cells():
     assert np.all(np.isfinite(np.asarray(dafter)))
     expected = np.asarray(q_before[0, 0] * base[0, 0, 0] / q_after[0, 0])
     assert float(np.asarray(dbase)[0, 0, 0]) == 2.0 * expected * 0.75 / 1.25
+
+
+def test_nemo_zdf_top_stress_reverse_gradient_is_finite_on_closed_faces():
+    """The top-stress divisor guard removes the closed-face 0/0 VJP."""
+    stress = jnp.asarray([0.25, 0.0], dtype=jnp.float64)
+    e3_face = jnp.asarray([5.0, 0.0], dtype=jnp.float64)
+    face_mask = jnp.asarray([1.0, 0.0], dtype=jnp.float64)
+    dt_mom = jnp.asarray(10800.0, dtype=jnp.float64)
+    rho0 = jnp.asarray(1026.0, dtype=jnp.float64)
+
+    def loss(tau, thickness):
+        source = model_module._nemo_zdf_top_stress_source(
+            dt_mom, tau, thickness, rho0, face_mask)
+        return jnp.sum(source * source)
+
+    source = jax.jit(model_module._nemo_zdf_top_stress_source)(
+        dt_mom, stress, e3_face, rho0, face_mask)
+    expected_wet = (dt_mom * stress[0]) / (e3_face[0] * rho0)
+    np.testing.assert_array_equal(
+        np.asarray(source), np.asarray([expected_wet, 0.0]))
+    gradients = jax.jit(jax.grad(loss, argnums=(0, 1)))(stress, e3_face)
+    assert all(np.all(np.isfinite(np.asarray(value))) for value in gradients)
+    assert all(float(np.asarray(value)[1]) == 0.0 for value in gradients)
+
+    # Non-vacuity: the reverted raw divisor has a nonfinite closed-face VJP.
+    def unguarded(tau, thickness):
+        r = model_module.nemo_source_round
+        source_raw = r(r(r(dt_mom * tau) / r(thickness * rho0)) * face_mask)
+        return jnp.sum(source_raw * source_raw)
+
+    raw_gradients = jax.grad(unguarded, argnums=(0, 1))(stress, e3_face)
+    assert any(np.any(~np.isfinite(np.asarray(value))) for value in raw_gradients)

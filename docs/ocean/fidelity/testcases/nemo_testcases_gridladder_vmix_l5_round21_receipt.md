@@ -166,12 +166,14 @@ as every namelist field.  The staged route refuses
 `no_mle_in_convection=True`, because it does not receive the required N2
 operand, and the unused bolus-transport return was removed.  A committed
 control censuses G5-G9, V1-V5, L1-L3, L5, and every non-ladder testcase
-dispatcher, proves L5 is the sole MLE selector, and pins every non-L5 resolved
-model program to hashes measured at `9039513ff729`.  The two non-L5 routes
-which reach changed shared arithmetic, G9 and L3, additionally pin their
-complete two-step states to that baseline.  The direct guard tests pin live
-derivatives and forward equality; every other card retains the identical
-program and cannot enter the NEMO-association route.
+dispatcher, proves L5 is the sole MLE selector, and pins 29 non-L5 resolved
+model-configuration pickles to hashes measured at `9039513ff729`.  Those
+hashes are configuration pickles, not compiled step programs.  Every RK3 card
+runs the guarded vertical solver; its top-stress guard is forward-neutral on
+the masked faces.  G9 and L3 additionally reach the earlier group-A tracer
+guards and pin their complete two-step states to that baseline.  Direct guard
+tests pin live derivatives and forward equality; only L5 can enter the MLE
+NEMO-association route.
 
 ## Acquisition preflight
 
@@ -266,11 +268,26 @@ the selected wet cells and causes the acquired tracer change.
 
 That record test executes the production step under an outer `jax.jit`, passes
 the prognostic state and forcing as traced arguments, requires x64, and runs
-all three wiring removals through the same compiled path.  The complete L5
-file passed 23 tests.  Its standing controls retain the frozen two-step G5-G9,
-V1-V5, and L1-L3 selections and the frozen GYRE, DINO, full ORCA2, SMT,
-VORTEX, OMT, and rung-0 programs; the shared-arithmetic G9 and L3 routes also
+all three wiring removals through the same compiled path.  At that
+continuation, the complete L5 file passed 23 tests.  Its standing controls
+retain the frozen G5-G9, V1-V5,
+and L1-L3 selections and the frozen GYRE, DINO, full ORCA2, SMT, VORTEX, OMT,
+and rung-0 resolved model configurations; the group-A G9 and L3 routes also
 retain their complete two-step values.
+
+## Post-certification gradient re-check
+
+The closed south V-row metric ratio now substitutes one only for its zero
+denominator before division; padding still overwrites that row, so this is a
+gradient-only change.  A live-stretch-gradient test covers both the real
+ORCA2 row and a synthetic closed row and fails with the guard reverted.  The
+already forward-neutral top-stress divisor guard now has its own closed-face
+reverse-gradient test, including an unguarded non-finite control.
+
+The L5 file passed all 38 tests in isolated compiler workers.  Its committed
+two-step value validator replays G5-G9, V1-V5, and L1-L3 plus L5 from their
+own admitted forcing records.  All 14 complete `T`, `S`, `u`, `v`, and `eta`
+state digests remain bit-identical to the pre-change `353b24265796` baseline.
 
 independent review: operator (Claude)
 
