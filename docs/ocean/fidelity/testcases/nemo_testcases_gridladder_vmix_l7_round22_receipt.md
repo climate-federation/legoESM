@@ -99,11 +99,18 @@ remain absent.  No acquisition record exists and no score was produced.
 ## Landing gates
 
 All tests use `JAX_ENABLE_X64=1`, CPU JAX, and the exact `land.sh`
-`PYTHONPATH`.  The focused L7 file passed seven tests, including the full
-one-step control and all acquisition plants.  The exhaustive merge-identity
-batch passed 15 tests as stated above.  The per-receipt citation gate, its
-mandatory pytest wrapper, the default landing gate, and the private-import
-ratchet are recorded at the final committed tip after citation re-anchoring.
+`PYTHONPATH`.  The focused L7 file passed seven tests in 176.14 seconds,
+including the full one-step control and all acquisition plants.  The
+exhaustive merge-identity batch passed 15 tests as stated above.
+
+The heading-scoped receipt gate passed all six citations with zero failures,
+zero unmapped citations, zero map-audit failures, and every planted control
+firing.  This round's insertions shifted 19 older citation-map keys and two
+citations in the default audited receipt; every pin was re-anchored before the
+mandatory citation wrapper passed all 17 tests.  The exact default landing
+gate then passed all 145 tests in 1028.50 seconds.  Its included private-import
+ratchet passed, and the independent invocation passed all six tests in 5.02
+seconds.
 
 independent review: operator (Claude)
 
