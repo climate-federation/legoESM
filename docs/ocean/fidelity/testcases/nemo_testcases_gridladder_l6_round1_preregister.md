@@ -11,22 +11,25 @@ prepare a WRITE-only acquisition, but Codex may not execute NEMO or score L6.
 ## Frozen survey
 
 The exact ORCA2 deck selection is `ln_tradmp=T`, `nn_zdmp=0`, and inherited
-`cn_resto='resto.nc'` (`ORCA2_OMIP_L4/EXP00/namelist_cfg:326-330` and
-`ORCA2_OMIP_L4/EXPREF/namelist_ref:1012-1019`).  The damping target is the
+`cn_resto='resto.nc'` (`ORCA2_OMIP_L4/EXP00/namelist_cfg:326-329` and
+`cfgs/SHARED/namelist_ref:1012-1018`).  The damping target is the
 same monthly potential-temperature and salinity climatology already used by
 G3 and above: `votemper` and `vosaline`, cyclic yearly, with record-time
 interpolation enabled (`ORCA2_OMIP_L4/EXP00/namelist_cfg:44-55`).
 
 The executed source initializes `tra_dmp`, reads the target fields, and reads
-`resto` from `cn_resto` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90:256-310`).
+`resto` from `cn_resto`
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90:266-270` and `:284-307`).
 At each call it updates every real level and both tracers as
 `Krhs = Krhs + resto * (target - Kbb)` for `nn_zdmp=0`
-(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90:142-195`).  `dta_tsd` obtains the
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90:181` and `:188-194`).  `dta_tsd` obtains the
 two surrounding climatology records through `fld_read`, applies ORCA_R2's
 hand alterations, and masks the copied fields
-(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/dtatsd.f90:186-263,307-310`); `fld_read`
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/dtatsd.f90:212`, `:219`, `:229-253`,
+`:261-262`, and `:308-309`); `fld_read`
 forms the before/after weights from the model clock and preserves the written
-multiply-add order (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/fldread.f90:200-246`).
+multiply-add order (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/fldread.f90:200-205` and
+`:235-246`).
 
 The stage-3 order is `tra_ldf`, `tra_bbc`, `tra_bbl`, then `tra_dmp`
 (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:734-740`).  L6 selects LDF,
@@ -47,9 +50,9 @@ The file contains one binary64 `resto(z=31,y=148,x=180)` variable; only the
 
 legoESM already owns both required mechanisms.  The climatology reader and
 ORCA_R2 alterations are centralized in
-`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1418-1490`,
+`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1454-1539`,
 and the shared full-rank tracer-relaxation kernel is
-`packages/ocean/legoesm/ocean/dynamics/ocean_tendency_common.py:654-721`.
+`packages/ocean/legoesm/ocean/dynamics/ocean_tendency_common.py:655-729`.
 L6 must extend those paths; it may not add a second damping formula or a
 second climatology implementation.
 

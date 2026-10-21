@@ -264,7 +264,7 @@ while all defined wet values retain their exact bytes.  The reader requires
 canonical +0 outside that domain and the twin scorer byte-compares only the
 same wet U/V masks.  legoESM has no NEMO halo cells and holds zero on excluded
 dry faces by its production face-mask multiplication at
-`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:468-475`.
+`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:486-493`.
 The synthetic plants prove that garbage in an excluded cell is canonicalized
 away, while the same garbage in a defined wet cell still separates the twins.
 
@@ -425,9 +425,9 @@ order:
    cells before its mask at
    `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2738-2748`.
 2. The vertical CEN2 tracer divergence divides by `e3t_kmm == 0` on dry cells
-   at `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2027`.
+   at `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2045`.
 3. The horizontal CEN2 tracer divergence makes the same dry-cell division at
-   `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2014`.
+   `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2032`.
 
 Each forward non-finite value is later masked, but its transpose receives a
 zero cotangent and produces NaN.  No L2-only source was found.  ORCA2 round
