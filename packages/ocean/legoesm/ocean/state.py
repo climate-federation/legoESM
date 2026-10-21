@@ -3412,6 +3412,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # (stprk3_stg.f90:734-740).  This selector defers the geothermal add to
     # that boundary; validation permits it only with the certified L2 form.
     rk3_stage3_geothermal_after_ldf_nemo_order: bool = False
+    # ORCA2 L6's full-column T/S damping.  NEMO adds ``tra_dmp`` after
+    # ``tra_ldf``, ``tra_bbc`` and the off-on-this-rung ``tra_bbl`` call.
+    # When selected, the ordinary stage-10c sponge path is withheld and the
+    # same shared relaxation kernel writes the stage-3 Krhs at this boundary.
+    rk3_stage3_damping_after_geothermal_nemo_order: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

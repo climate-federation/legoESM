@@ -27,6 +27,7 @@ def test_case_census_covers_both_certified_lanes_exactly():
             ("flat", "zps", "ts", "sbc", "ice", "vec", "drg", "ldf", "tadv"),
             start=1)),
         "ORCA2L4-bbc",
+        "ORCA2L4b-iso-bbc",
     }
     assert set(probe.LANE_B_CASES) == {
         "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",

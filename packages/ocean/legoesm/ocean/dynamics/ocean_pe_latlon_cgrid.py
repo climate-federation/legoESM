@@ -6176,9 +6176,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     _sponge_implicit = (sponge is not None
                         and bool(getattr(config, "sponge_forcing_implicit",
                                          False)))
+    _sponge_stage3_damping = (
+        sponge is not None
+        and bool(getattr(
+            config, "rk3_stage3_damping_after_geothermal_nemo_order", False)))
     du_dt, dv_dt, dT_dt, dS_dt, diag_sponge_u, diag_sponge_v = _bc_sponge_relaxation(
         du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid,
-        include_tracers=not _sponge_implicit,
+        include_tracers=not (_sponge_implicit or _sponge_stage3_damping),
     )
     tracer_source = None
     if _sponge_implicit:

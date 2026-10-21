@@ -40,6 +40,7 @@ from typing import Callable, Optional, Tuple
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ocean.eos import compute_hydrostatic_pressure
 from legoesm.ocean.freshwater import (
     virtual_salt_flux,
@@ -660,6 +661,7 @@ def apply_sponge_tracer_relaxation(
     mask: Optional[jnp.ndarray] = None,
     *,
     expand_gamma_axis: int = -1,
+    nemo_written_source: bool = False,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Apply tracer sponge relaxation ``+γ·(ref - q)``.
 
@@ -695,6 +697,10 @@ def apply_sponge_tracer_relaxation(
         tracer arrays.  Use ``-1`` for both lat-lon C-grid (axis after
         lat/lon) and MPAS (axis after nCells).  Ignored for a full-rank
         per-cell gamma.
+    nemo_written_source : bool, default False
+        Materialize the final ``Krhs = Krhs + gamma * (ref - q)`` statement
+        with :func:`nemo_source_round`.  This is the ORCA2 ``tra_dmp`` arm;
+        the default leaves every existing sponge caller bit-identical.
 
     Returns
     -------
@@ -718,6 +724,8 @@ def apply_sponge_tracer_relaxation(
         mask_b = jnp.expand_dims(mask, expand_gamma_axis)
         dT = dT * mask_b
         dS = dS * mask_b
+    if nemo_written_source:
+        return nemo_source_round(dT_dt + dT), nemo_source_round(dS_dt + dS)
     return dT_dt + dT, dS_dt + dS
 
 

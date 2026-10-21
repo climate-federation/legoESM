@@ -71,6 +71,11 @@ class NEMORecipe(NamedTuple):
     # runs NEMO's wave-driven mixing.  None everywhere else, so every
     # existing recipe is unchanged.
     iwm_forcing: object = None
+    # Full-column tracer damping supplied by cards whose deck selects
+    # ``tra_dmp``.  The stored target is the kt=1 field; multi-step drivers
+    # refresh its T/S references with the card's climatology helper each step.
+    # None everywhere else, preserving all inherited execution paths.
+    tracer_damping: object = None
 
 
 @dataclass(frozen=True)

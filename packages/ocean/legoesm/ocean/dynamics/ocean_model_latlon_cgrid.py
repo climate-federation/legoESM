@@ -100,6 +100,7 @@ from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
 )
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     ab2_blend,
+    apply_sponge_tracer_relaxation,
     depth_average_to_faces,
     depth_mean,
 )
@@ -166,6 +167,23 @@ def _nemo_stage3_ldf_then_geothermal(
     t_after_ldf = nemo_source_round(stage_t + dT_ldf * active_3d)
     s_after_ldf = nemo_source_round(stage_s + dS_ldf * active_3d)
     return nemo_source_round(t_after_ldf + geothermal_t), s_after_ldf
+
+
+def _nemo_stage3_l4b_then_damping(
+    l4b_t, l4b_s, T_kbb, S_kbb, sponge,
+):
+    """Add L6's ``tra_dmp`` write after the complete L4b source.
+
+    The relaxation arithmetic stays in the shared sponge kernel; its
+    NEMO-written arm materializes the final Krhs assignment.  ``sponge`` is a
+    full-rank ``SpongeForcing`` carrying ORCA2's ``resto`` and interpolated
+    T/S climatology.
+    """
+
+    return apply_sponge_tracer_relaxation(
+        l4b_t, l4b_s, T_kbb, S_kbb, sponge,
+        mask=None, expand_gamma_axis=-1, nemo_written_source=True,
+    )
 
 
 def mass_flux_fields(u_field, v_field, w_field, mfu_data, mfv_data, mfw_data):
@@ -2383,6 +2401,8 @@ class _NEMOWSLiveOperandTrace(NamedTuple):
     stage3_composed_source: object
     stage3_before_geothermal: object
     stage3_geothermal_rate: object
+    stage3_before_damping: object
+    stage3_damping_rate: object
     stage3_explicit_temperature: object
 
 
@@ -4057,6 +4077,14 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "rk3_stage3_geothermal_after_ldf_nemo_order requires "
                 "rk3_stage3_geothermal_nemo_written")
+        if config.rk3_stage3_damping_after_geothermal_nemo_order:
+            if not config.rk3_stage3_geothermal_after_ldf_nemo_order:
+                raise ValueError(
+                    "rk3_stage3_damping_after_geothermal_nemo_order requires "
+                    "the certified L4b ordered composition")
+            if (config.bbl_adv_option != 0
+                    or config.bbl_diffusive_option != 0):
+                raise ValueError("L6 ordered damping does not support tra_bbl")
         if _phys is not None and _phys.shortwave_penetration is not None:
             from legoesm.ocean.physics.shortwave_penetration import (
                 SHORTWAVE_PENETRATION_SCHEMES,
@@ -7235,6 +7263,8 @@ class LatLonCGridOceanModel:
         _nemo_ws_live_tke_entry = None
         _nemo_ws_live_tke_statement_trace = None
         _nemo_ws_stage3_before_geothermal = None
+        _nemo_ws_stage3_before_damping = None
+        _nemo_ws_stage3_damping_rate = None
         _nemo_ws_live_operator_operands = [
             _nemo_ws_stage1_operator_operands, None, None]
         _nemo_ws_tracer_content_rhs = None
@@ -10647,6 +10677,40 @@ class LatLonCGridOceanModel:
                             (*_stage3_krhs_terms[0], dT_gm * active_3d),
                             (*_stage3_krhs_terms[1], dS_gm * active_3d),
                         )
+                if _cfg_b.rk3_stage3_damping_after_geothermal_nemo_order:
+                    if sponge is None:
+                        raise ValueError(
+                            "L6 ordered damping needs a full-rank "
+                            "SpongeForcing")
+                    if (sponge.gamma.ndim != state.T.data.ndim
+                            or sponge.T_ref.shape != state.T.data.shape
+                            or sponge.S_ref.shape != state.S.data.shape
+                            or sponge.u_ref is not None
+                            or sponge.v_ref is not None):
+                        raise ValueError(
+                            "L6 ordered damping requires full-rank gamma/T/S "
+                            "with no momentum sponge")
+                    _nemo_ws_stage3_before_damping = (
+                        _ws_stage_source_rates[2][0],
+                        _ws_stage_source_rates[2][1],
+                    )
+                    _nemo_ws_stage3_damping_rate = (
+                        jnp.asarray(sponge.gamma, dtype=state.T.data.dtype)
+                        * (jnp.asarray(sponge.T_ref, dtype=state.T.data.dtype)
+                           - state.T.data),
+                        jnp.asarray(sponge.gamma, dtype=state.S.data.dtype)
+                        * (jnp.asarray(sponge.S_ref, dtype=state.S.data.dtype)
+                           - state.S.data),
+                    )
+                    _ordered_stage3 = _nemo_stage3_l4b_then_damping(
+                        *_nemo_ws_stage3_before_damping,
+                        state.T.data, state.S.data, sponge,
+                    )
+                    _ws_stage_source_rates = (
+                        _ws_stage_source_rates[0],
+                        _ws_stage_source_rates[1],
+                        _ordered_stage3,
+                    )
                 _bbl_context = None
                 if ((_cfg_b.bbl_adv_option == 2
                      or _cfg_b.bbl_diffusive_option == 1)
@@ -11701,6 +11765,8 @@ class LatLonCGridOceanModel:
                 stage3_composed_source=_ws_stage_source_rates[2],
                 stage3_before_geothermal=_nemo_ws_stage3_before_geothermal,
                 stage3_geothermal_rate=_qgh_rate,
+                stage3_before_damping=_nemo_ws_stage3_before_damping,
+                stage3_damping_rate=_nemo_ws_stage3_damping_rate,
                 stage3_explicit_temperature=T_corrected,
             )
         if not _apply_implicit_vmix:

@@ -1,0 +1,58 @@
+--- tradmp.F90
++++ tradmp.F90
+@@ -91,8 +91,12 @@
+       !
+       INTEGER ::   ji, jj, jk, jn   ! dummy loop indices
++      INTEGER ::   l6_unit, l6_ios
+       REAL(wp), DIMENSION(T2D(nn_hls),jpk,jpts)     ::  zts_dta
+       REAL(wp), DIMENSION(:,:,:)  , ALLOCATABLE ::  zwrk
+       REAL(wp), DIMENSION(:,:,:,:), ALLOCATABLE ::  ztrdts
++      REAL(wp), DIMENSION(:,:,:,:), ALLOCATABLE ::  l6_obs
++      CHARACTER(len=16)  :: l6_magic
++      CHARACTER(len=256) :: l6_path
+       !!----------------------------------------------------------------------
+       !
+       IF( ln_timing )   CALL timing_start('tra_dmp')
+@@ -112,14 +116,35 @@
+          sclim(ji,jj,jk) = zts_dta(ji,jj,jk,jp_sal)
+       END_3D
+       !
++      ALLOCATE( l6_obs(jpi,jpj,jpkm1,10) )
++      l6_obs(:,:,:,:) = 0._wp
+       SELECT CASE ( nn_zdmp )     !==  type of damping  ==!
+       !
+       CASE( 0 )                        !*  newtonian damping throughout the water column  *!
+          DO jn = 1, jpts
+             DO_3D( 0, 0, 0, 0, 1, jpkm1 )
++               IF( tmask(ji,jj,jk) > 0._wp ) THEN
++                  l6_obs(ji,jj,jk,1) = tmask(ji,jj,jk)
++                  l6_obs(ji,jj,jk,2) = resto(ji,jj,jk)
++                  l6_obs(ji,jj,jk,3+4*(jn-1)) = zts_dta(ji,jj,jk,jn)
++                  l6_obs(ji,jj,jk,4+4*(jn-1)) = pts(ji,jj,jk,jn,Kbb)
++                  l6_obs(ji,jj,jk,5+4*(jn-1)) = pts(ji,jj,jk,jn,Krhs)
++               ENDIF
+                pts(ji,jj,jk,jn,Krhs) = pts(ji,jj,jk,jn,Krhs)           &
+                   &                  + resto(ji,jj,jk) * ( zts_dta(ji,jj,jk,jn) - pts(ji,jj,jk,jn,Kbb) )
++               IF( tmask(ji,jj,jk) > 0._wp )   l6_obs(ji,jj,jk,6+4*(jn-1)) = pts(ji,jj,jk,jn,Krhs)
+             END_3D
+          END DO
++         IF( lwp ) THEN
++            l6_magic = 'NEMO_L6_DMP__1'
++            WRITE(l6_path,'("oracle_damping_kt",I8.8,".bin")') kt
++            OPEN( NEWUNIT=l6_unit, FILE=TRIM(l6_path), STATUS='NEW', ACTION='WRITE', &
++               &  ACCESS='STREAM', FORM='UNFORMATTED', IOSTAT=l6_ios )
++            IF( l6_ios /= 0 )   CALL ctl_stop( 'tra_dmp: cannot create round-55 damping record' )
++            WRITE(l6_unit) l6_magic
++            WRITE(l6_unit) 1, kt, Kbb, Kmm, Krhs, jpi, jpj, jpkm1, STORAGE_SIZE(0._wp), 10
++            WRITE(l6_unit) l6_obs
++            CLOSE(l6_unit)
++         ENDIF
+          !
+       CASE ( 1 )                       !*  no damping in the turbocline (avt > 5 cm2/s)  *!
+@@ -148,5 +173,6 @@
+          !
+       END SELECT
+       !
++      DEALLOCATE( l6_obs )
+       ! outputs (clem trunk)
+       IF( iom_use('hflx_dmp_cea') .OR. iom_use('sflx_dmp_cea') ) THEN

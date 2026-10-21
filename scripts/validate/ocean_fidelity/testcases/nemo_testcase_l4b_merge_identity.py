@@ -25,6 +25,7 @@ ROOTS = {
     "ORCA2G8-ldf": PHASE3 / "gridladder_rounds/round45/oracle_g8_r45/twin_a",
     "ORCA2G9-tadv": PHASE3 / "gridladder_rounds/round46/oracle_g9_r46/twin_a",
     "ORCA2L4-bbc": PHASE3 / "gridladder_rounds/round53/oracle_l4_r53/twin_a",
+    "ORCA2L4b-iso-bbc": PHASE3 / "gridladder_rounds/round54/oracle_l4b_r54/twin_a",
     "ORCA2V1-tke": PHASE3 / "gridladder_vmix_rounds/round1/oracle_v1_r1/twin_a",
     "ORCA2V2-evd": PHASE3 / "gridladder_vmix_rounds/round12/oracle_v2_r12/twin_a",
     "ORCA2V3-ddm": PHASE3 / "gridladder_vmix_rounds/round13/oracle_v3_r13/twin_a",
@@ -35,7 +36,7 @@ ROOTS = {
     "ORCA2L3-eiv": PHASE3 / "gridladder_vmix_rounds/round20/oracle_l3_r20/twin_a",
 }
 LANE_A_CASES = tuple(case for case in ROOTS if case.startswith("ORCA2G")) + (
-    "ORCA2L4-bbc",
+    "ORCA2L4-bbc", "ORCA2L4b-iso-bbc",
 )
 LANE_B_CASES = tuple(case for case in ROOTS if case.startswith("ORCA2V")) + (
     "ORCA2L1-bbl", "ORCA2L2-iso", "ORCA2L3-eiv",
