@@ -298,9 +298,18 @@ damping is not started in this round.
 - codex review: operator
 - independent review: operator (Claude)
 - NEMO execution in this resume: none
-- focused tests: pending final gate run
-- receipt citation gate: pending final gate run
-- default gate and private-import ratchet: pending final gate run
+- focused tests: the admitted-record JIT/traced/x64 gate passed 1 / 1 in
+  11.05 seconds; the observer-layout gate passed; and the correct production
+  one-step gate passed 1 / 1 in 377.89 seconds. The moved-call plant failed
+  that same bitwise composition assertion at 697 words.
+- receipt citation gate: PASS from clean commit
+  `ac1c27101edae4b2062226c052e5056e45253c73`; one citation found, zero
+  failures, zero unmapped citations, zero failing map-audit entries, and all
+  nine self-test plants fired. The observer insertion required 77 mechanical
+  line-pin moves plus one expanded-extent and one unique-endpoint repair.
+- default gate and private-import ratchet: the exact ORCA2 test list from
+  `claude_rounds/land.sh` passed 145 / 145 in 1580.29 seconds from the same
+  clean commit. Its six private-import tests all passed.
 
 ASKED and completed: repair all three reviewed controls with plants; admit the
 operator record; score both labels through kt 10 at full available depth,
@@ -310,8 +319,7 @@ JIT/traced/x64 admitted-record test; and certify only on exact rows.
 UNASKED and not done: rerun NEMO; alter a model value; change any fidelity bar;
 import geothermal into the full ORCA2 card; start Decision 146 damping; push.
 
-UNVERIFIED: none in the L4b certification claim. Final repository gates are
-recorded below after they run.
+UNVERIFIED: none in the L4b certification claim or repository gates.
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/gridladder_r54/repo
 ACQUISITION_NEEDED: NONE
