@@ -2149,7 +2149,7 @@ class DiagnosticCollector:
             # Daily: reuse the regridded 2-D fields + 850 hPa winds sliced from
             # the 3-D arrays (same index convention as collect()).
             if self._spatial_daily is not None:
-                for _name in ("tas", "pr", "psl", "rlut", "tos"):
+                for _name in ("tas", "pr", "psl", "ps", "rlut", "tos"):
                     if _name in fields_2d:
                         daily_2d[_name] = fields_2d[_name]
                 _plev_sorted = np.sort(CMIP6_PLEV19)

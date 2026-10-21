@@ -686,6 +686,8 @@ class _DailyRemap(NamedTuple):
 # is a DATA change and out of scope for this metadata fix.
 _DAILY_VARIABLE_REMAP: Dict[str, _DailyRemap] = {
     "rsut": _DailyRemap("rsut", "CFday"),
+    # Daily ps is a CFday variable too (the day table has none).
+    "ps": _DailyRemap("ps", "CFday"),
     "ua850": _DailyRemap("ua", "day", plev_pa=85_000.0),
     "va850": _DailyRemap("va", "day", plev_pa=85_000.0),
     "zg850": _DailyRemap("zg", "day", plev_pa=85_000.0),

@@ -1969,3 +1969,22 @@ class TestGeopotentialSstDailyFeed:
             assert float(ds["plev"].values.ravel()[0]) == 85000.0
         with xr.open_dataset(tos_files[0]) as ds:
             assert ds["tos"].attrs["units"] == "K"
+
+
+class TestDailySurfacePressure:
+    def test_daily_ps_is_written_to_cfday(self, mesh, tmp_path):
+        """CMIP6 has no daily ps in the day table; it goes to CFday."""
+        xr = pytest.importorskip("xarray")
+        from legoesm.io.cmor_output import CFWriter
+        dc, sigma_full = _make_collector(mesh)
+        dc.cf_writer = CFWriter(output_dir=tmp_path, experiment_id="amip",
+                                model_id="legoESM", ref_date="1979-01-01")
+        f = _base_fields(mesh, sigma_full)
+        for d in (15.0, 16.0):
+            dc.feed_cmip_accumulators_native(day=d, **f)
+        assert "ps" in dc._spatial_daily._data[(0, 16)]
+        dc.finalize_cmip_daily(current_day=17.0)
+        files = sorted(tmp_path.rglob("ps_CFday_*.nc"))
+        assert files and not list(tmp_path.rglob("ps_day_*.nc"))
+        with xr.open_dataset(files[0]) as ds:
+            np.testing.assert_allclose(ds["ps"].values, 1.0e5, rtol=1e-6)
