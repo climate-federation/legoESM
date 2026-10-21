@@ -2107,10 +2107,10 @@ CITATION_MAP = {
         ('resume=(', 3),
         'else (2, *_nemo_ws_stage_tracers)),', 6],
     'state.py:3263': ('rk3_stage_tracer_written_order: bool = False', 1),
-    'nemo_testcase_recipe.py:4457-4462': [
+    'nemo_testcase_recipe.py:4480-4485': [
         "# NEMO's written stage-1/2 tracer update (stprk3_stg.f90:503-505; G4 round",
         ('"ORCA2G4-sbc": True', 6), 6],
-    'nemo_testcase_recipe.py:3996': (
+    'nemo_testcase_recipe.py:4008': (
         'rk3_stage_tracer_written_order=_ORCA2G_TRA_STAGE_ORDER[case],', 1),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:678-680': [
         'ts(ji,jj,jk,jn,Kaa) = (        ( 1._wp + r3t(ji,jj,Kbb) )*ts(ji,jj,jk,jn,Kbb )',
@@ -2246,19 +2246,19 @@ CITATION_MAP = {
         ("CALL iom_get( inum, jpdom_global, 'e3f_0'  , e3f_3d, cd_type = 'F', psgn = 1._wp, kfill = jpfillcopy )", 1),
         10],
     'tripole.py:453': ('def create_tripole_grid(', 1),
-    'nemo_testcase_recipe.py:1292': ('def _orca2_masks(bottom_level: np.ndarray, strait_shlat: np.ndarray):', 1),
-    'nemo_testcase_recipe.py:1273': ('def _orca2_depth_ladder(e3t_1d: np.ndarray, e3w_1d: np.ndarray):', 1),
+    'nemo_testcase_recipe.py:1293': ('def _orca2_masks(bottom_level: np.ndarray, strait_shlat: np.ndarray):', 1),
+    'nemo_testcase_recipe.py:1274': ('def _orca2_depth_ladder(e3t_1d: np.ndarray, e3w_1d: np.ndarray):', 1),
     'vertical.py:293': ('def nemo_fe3mask_from_tmask(tmask, *, grid=None):', 1),
     'vertical.py:922': ('class NemoEENBarotropicOperands(NamedTuple):', 1),
     'vertical.py:685': ('def nemo_qco_resolved_mesh_operands(', 1),
     'ocean_model_latlon_cgrid.py:4731': ('_nemo_filter_alpha = config.barotropic.nemo_barotropic_filter_alpha', 1),
-    'nemo_testcase_recipe.py:3801': ('def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -> NEMOTestcaseCard:', 1),
-    'nemo_testcase_recipe.py:3616': ('def read_orca2g1_deck(', 1),
-    'nemo_testcase_recipe.py:3734': ('def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:', 1),
-    'nemo_testcase_recipe.py:3722': ('def _orca2g1_auto_substeps(dom: dict[str, np.ndarray], deck: ORCA2G1Deck) -> int:', 1),
-    'nemo_testcase_recipe.py:4272': ('def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:', 1),
+    'nemo_testcase_recipe.py:3802': ('def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -> NEMOTestcaseCard:', 1),
+    'nemo_testcase_recipe.py:3617': ('def read_orca2g1_deck(', 1),
+    'nemo_testcase_recipe.py:3735': ('def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:', 1),
+    'nemo_testcase_recipe.py:3723': ('def _orca2g1_auto_substeps(dom: dict[str, np.ndarray], deck: ORCA2G1Deck) -> int:', 1),
+    'nemo_testcase_recipe.py:4295': ('def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:', 1),
     'vertical.py:1127': ('nemo_e3w_source="mesh_reference", allow_single_level: bool = False,', 1),
-    'nemo_testcase_recipe.py:3867': ('allow_single_level=_ORCA2G_JPK[case] == 2,   # jpk = 2: one wet level', 1),
+    'nemo_testcase_recipe.py:3868': ('allow_single_level=_ORCA2G_JPK[case] == 2,   # jpk = 2: one wet level', 1),
     # --- GRIDLADDER round 1 (G1 survey) END ---
     # --- GRIDLADDER round 2 (G1 ladders, pivot-row vor_een) ---
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domzgr.f90:575': ('mbkt(:,:) = MAX( k_bot(:,:) , 1 )', 1),
@@ -2742,10 +2742,10 @@ CITATION_MAP = {
         'NAMELIST/namdrg/ ln_drg_OFF, ln_lin',
         "CALL ctl_stop( 'zdf_drg_init: Choose ONE type of drag coef in namdrg' )", 31],
     # --- ORCA2 round 176: the independent rung-0 entry guard ---
-    'nemo_testcase_recipe.py:1424-1464': [
+    'nemo_testcase_recipe.py:1425-1465': [
         'def apply_orca2_hand_alterations(temperature, salinity):',
         'No driver exposes it.', 41],
-    'nemo_testcase_recipe.py:1696-1697': [
+    'nemo_testcase_recipe.py:1697-1698': [
         'temperature, salinity = build_orca2_initial_ts(',
         'temperature_path, salinity_path, tmask)', 2],
     'ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/dtatsd.f90:218-254': [
@@ -3925,12 +3925,12 @@ CITATION_MAP = {
     'OVERFLOW_OMIP_L1/EXP00/namelist_cfg:89': 'ln_dynvor_ens = .true.',
     'overflow_kt1_10/namelist_cfg:86': 'ln_dynadv_up3 = .true.',
     'overflow_kt1_10/namelist_cfg:92': 'ln_dynvor_ens = .true.',
-    'nemo_testcase_recipe.py:3084':
+    'nemo_testcase_recipe.py:3085':
         'if (cfg.momentum_advection != "vector_invariant"',
     'ocean_pe_latlon_cgrid.py:5580': ('if _mom_adv == "flux_form":', 2),
     'ocean_pe_latlon_cgrid.py:5598': (
         '_bc_horizontal_momentum_advection_flux_form(', 2),
-    'nemo_testcase_recipe.py:3087':
+    'nemo_testcase_recipe.py:3088':
         'requires ln_dynadv_vec=.true. with nn_dynkeg=0',
     # --- ORCA2 round 57: acquired OVERFLOW UP3 source-order walk ---
     'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:157-166': [
@@ -5866,7 +5866,7 @@ CITATION_MAP = {
     # Decision 90 added nine stated lines INSIDE this block (the slow-forcing
     # depth average, which this call now states rather than defaulting), so
     # the pinned extent grows with it: 88 -> 98, same two symbols.
-    'nemo_testcase_recipe.py:604-701': [
+    'nemo_testcase_recipe.py:605-702': [
         'return LatLonCGridOceanConfig.from_flat(',
         'gm_redi=None,', 98],
     # --- round 66: admitted content operands and Krhs/LDF walk ---
@@ -6126,7 +6126,7 @@ CITATION_MAP = {
     # --- decision 36: RK3 face-native shear on the GYRE identity card ---
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:168': (
         'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 1),
-    'nemo_testcase_recipe.py:443-445': [
+    'nemo_testcase_recipe.py:444-446': [
         'tke_shear_production="nemo_face_native_now2"',
         ('tke_shear_metric_source="nemo_qco_live_face"', 2), 3],
     'ocean_model_latlon_cgrid.py:12413-12430': [
@@ -6683,7 +6683,7 @@ CITATION_MAP = {
         '-7.e+3_wp/e3w(ji,jj,jk,Kmm)* ABS( zai )  )',
         'zbj = MIN( zbw , -100._wp* ABS( zaj ) , '
         '-7.e+3_wp/e3w(ji,jj,jk,Kmm)* ABS( zaj )  )', 2],
-    'vertical.py:1963': ('def compute_ocean_jacobian(', 1),
+    'vertical.py:1971': ('def compute_ocean_jacobian(', 1),
     'ocean_model_latlon_cgrid.py:7389-7393': [
         'transport_velocity = (', ('* _ws_stage_v_mask,', 1), 5],
     'ocean_model_latlon_cgrid.py:9335': ('_g2 = _nemo_ws_stage_transport(', 1),
@@ -7212,7 +7212,7 @@ CITATION_MAP = {
     # added eighteen lines above this anchor, so 311 became 329; decision 35
     # added nine lines above it and round 56 removed two; decision 36 added
     # fifteen more lines above it, so it is now 351.
-    'nemo_testcase_recipe.py:682': [
+    'nemo_testcase_recipe.py:683': [
         ('zdf_baroclinic_only=True,', 2), ('zdf_baroclinic_only=True,', 2), 1],
     'provenance.py:106': 'def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:',
     'cpp_GYRE_BARE.fcm:1': 'key_linssh key_vco_1d  key_RK3',
@@ -7259,7 +7259,7 @@ CITATION_MAP = {
     # inserted the initial-state helper above the THIRD anchor only, moving it
     # 1411 -> 1493; later card additions moved all three to their current
     # merged locations without changing the anchor text.
-    'nemo_testcase_recipe.py:376,632,3068': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    'nemo_testcase_recipe.py:377,633,3069': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',
@@ -8678,7 +8678,7 @@ CITATION_MAP = {
         'ln_closea    = .false.',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:347-372': [
         '!* start from turbulent closure values',
-        'IF( ln_zdfiwm )   CALL zdf_iwm', 26,
+        ('IF( ln_zdfiwm )   CALL zdf_iwm', 2), 26,
     ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90:142':
         'SUBROUTINE tra_dmp(',
