@@ -47,9 +47,15 @@ GPCP = "/work/bd1179/b309141/climateeval_input/observation_GPCP/mon"
 REF_MIN_YEAR = 1979
 
 # TOA fluxes: CERES only (ERA5 has no rsut/rlut here).  Cloud state: ERA5.
+# Surface energy terms, staged under bb1596 from the Levante ERA5 pool (the shared
+# input tree above is read-only and has none): monthly 1979-2025 at 1 deg,
+# W m-2, hfss/hfls sign-flipped to CMOR positive-upward, ts = ERA5 skt [K].
+ERA5_BB = "/work/bb1596/b309178/diffESM/obs/reanalysis_ERA5/mon"
 _SOURCE = {"rsut": CERES, "rlut": CERES, "rsutcs": CERES, "rlutcs": CERES,
            "clt": ERA5, "lwp": ERA5, "clivi": ERA5, "prw": ERA5, "pr": GPCP,
-           "tas": ERA5, "evspsbl": ERA5}
+           "tas": ERA5, "evspsbl": ERA5,
+           "rsds": ERA5_BB, "rsus": ERA5_BB, "rlds": ERA5_BB, "rlus": ERA5_BB,
+           "hfss": ERA5_BB, "hfls": ERA5_BB, "ts": ERA5_BB, "snw": ERA5_BB}
 
 # Display scale: the water fluxes are stored in kg m-2 s-1 on BOTH sides, so
 # the difference is ~1e-5 and prints as 0.00 at two decimals.  Scale to mm/day
@@ -320,7 +326,8 @@ def main(runs, ctl=None):
         rows = {}
         land = None
         for var in ("rsut", "rlut", "rsutcs", "rlutcs",
-                    "clt", "lwp", "clivi", "prw", "pr", "evspsbl", "tas"):
+                    "clt", "lwp", "clivi", "prw", "pr", "evspsbl", "tas",
+                    "rsds", "rsus", "rlds", "rlus", "hfss", "hfls", "ts"):
             md = _load_model(run, var)
             if md is None and var == "lwp":
                 # The runs publish clwvi (TOTAL condensed water path) and

@@ -67,6 +67,9 @@ SPEC = {
     "evspsbl": (ERA5, "ERA5", "YlGnBu", 3.0, "mm day-1"),
     "pr": (GPCP, "GPCP", "YlGnBu", 3.0, "mm day-1"),
     "snw": (ERA5_BB, "ERA5", "Blues", 200.0, "kg m-2"),
+    "rsds": (ERA5_BB, "ERA5", "YlOrRd", 60.0, "W m-2"),
+    "rlds": (ERA5_BB, "ERA5", "inferno", 40.0, "W m-2"),
+    "hfss": (ERA5_BB, "ERA5", "RdYlBu_r", 40.0, "W m-2"),
 }
 
 # display scaling applied to BOTH model and reference before plotting, for
@@ -357,7 +360,7 @@ def main(argv=None):
     ap.add_argument("--run", required=True)
     ap.add_argument("--vars", nargs="+",
                     default=["albedo", "rsut", "rlut", "clt", "tas", "prw",
-                             "evspsbl", "pr", "snw"])
+                             "evspsbl", "pr", "snw", "rsds", "rlds", "hfss"])
     ap.add_argument("--out", default=".")
     ap.add_argument("--no-section", action="store_true")
     args = ap.parse_args(argv)
