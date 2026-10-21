@@ -122,6 +122,7 @@ def values(text):
     return out
 g5=pathlib.Path(sys.argv[1]).read_text(); l2=values(load(sys.argv[2]).render_text(g5)); l4b=values(pathlib.Path(sys.argv[3]).read_text())
 changed={k:(l2.get(k),l4b.get(k)) for k in l2.keys()|l4b.keys() if l2.get(k)!=l4b.get(k)}
+for run_key in ('namrun.nn_itend','namrun.nn_stock','namrun.nn_stocklist'): changed.pop(run_key, None)  # stamped per run by render_deck
 want={'nambbc.ln_trabbc':('.false.','.true.'),'nambbc.nn_geoflx':(None,'2'),'nambbc.cn_dir':(None,"'./'"),'nambbc.sn_qgh':(None,"'geothermal_heating.nc',-12.,'heatflow',.false.,.true.,'yearly','','',''")}
 if changed != want: raise SystemExit(f'L4b is not L2 plus BBC exactly: {changed!r}')
 PY
@@ -190,6 +191,8 @@ PY
 
   # 3 exact rendered deck and all schedules, with an odd-stock plant.
   rendered=$scratch/namelist_cfg; render_base "$rendered"; check_deck "$rendered"
+  render_deck "$scratch/stamped_smoke" 2 "$(pad10 2)"; check_deck "$scratch/stamped_smoke"
+  render_deck "$scratch/stamped_ref" 100 '2,4,6,8,10,12,14,16,18,20'; check_deck "$scratch/stamped_ref"
   [[ "$(sha "$rendered")" == "$RENDERED_DECK_SHA" ]] || fail 'rendered L4b deck changed'
   schedule_ok 2 2 "$FSBC" && schedule_ok 100 20 "$FSBC" && schedule_ok 10 10 "$FSBC" || fail 'bad schedule'
   ! schedule_ok 10 9 "$FSBC" || fail 'schedule plant accepted'
