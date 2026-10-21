@@ -8676,6 +8676,20 @@ CITATION_MAP = {
     ],
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:36':
         'ln_closea    = .false.',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:289-526': [
+        'SUBROUTINE sbc_rnf_init( Kmm )',
+        'CALL rnf_mouth', 238,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:541-588': [
+        'SUBROUTINE rnf_mouth',
+        'sn_cnf%clvar',
+        'IF( l_clo_rnf )   CALL clo_rnf( rnfmsk )', 48,
+    ],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:296-372': [
+        'SUBROUTINE zdf_phy( kt, Kbb, Kmm, Krhs )',
+        'avt(ji,jj,jk) = avt(ji,jj,jk) + 2._wp * rn_avt_rnf',
+        ('IF( ln_zdfiwm )   CALL zdf_iwm', 2), 77,
+    ],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:347-372': [
         '!* start from turbulent closure values',
         ('IF( ln_zdfiwm )   CALL zdf_iwm', 2), 26,
