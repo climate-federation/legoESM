@@ -219,3 +219,29 @@ def test_waiter_on_a_later_load_trusts_the_job_heartbeat(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sb.time, "sleep", poll)
     assert sb._wb_build_or_wait(lambda: "val", tmp_path / ".val", 1, 2) == "val"
+
+
+def test_retry_in_the_same_step_clears_the_old_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("SLURM_JOB_ID", "47")
+    monkeypatch.setattr(sb, "_CACHE_POLL_S", 0)
+
+    def boom():
+        raise OSError("transient")
+
+    with pytest.raises(OSError):
+        sb._wb_build_or_wait(boom, tmp_path / ".b", 0, 2)
+    assert sb._wb_build_or_wait(lambda: "ok", tmp_path / ".b", 0, 2) == "ok"
+    assert sb._wb_build_or_wait(lambda: "ok", tmp_path / ".b", 1, 2) == "ok"
+
+
+def test_land_fraction_alone_gets_the_local_flux_store(tmp_path, monkeypatch):
+    _write_store(tmp_path / "src.zarr", var_2d=("surface_pressure", "land_sea_mask"))
+    _write_store(tmp_path / "flux.zarr", var_3d=(), var_2d=("land_sea_mask",))
+    times = xr.open_zarr(str(tmp_path / "src.zarr")).time.values.astype("datetime64[ns]")
+    monkeypatch.setattr(sb, "_training_sample_indices", lambda *a: iter([(2015, 2, 3)]))
+    era5 = _cfg(tmp_path / "src.zarr", flux_zarr=str(tmp_path / "flux.zarr"))
+    _, _, flux_l, _ = sb._wb_local_stores(
+        SimpleNamespace(), {"cache_dir": str(tmp_path / "cache")}, era5,
+        era5._replace(load_land_frac=True), times, 4, 1, 0, 1)
+    assert flux_l is not None and "land_sea_mask" in flux_l
+    assert str(tmp_path / "cache") in flux_l.encoding.get("source", str(tmp_path / "cache"))

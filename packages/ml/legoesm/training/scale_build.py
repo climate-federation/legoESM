@@ -277,6 +277,7 @@ def _wb_build_or_wait(build, base, rank, nproc):
     beat = base.parent / f".heartbeat.{tag}"
     if rank == 0:
         _start_job_heartbeat(beat)
+        failed.unlink(missing_ok=True)   # an earlier attempt in this step
         try:
             out = build()
         except BaseException as exc:
@@ -348,7 +349,8 @@ def _wb_local_stores(cfg, yml, era5_cfg, sst_cfg, times, snaps_per_day,
     cloud_l = (local[era5_cfg.cloud_zarr or state]
                if era5_cfg.load_cloud_condensate else None)
     flux_l = (local[sst_cfg.flux_zarr or state]
-              if sst_cfg.load_surface_fluxes else None)
+              if sst_cfg.load_surface_fluxes or sst_cfg.load_land_frac
+              else None)
     return ds_l, cloud_l, flux_l, at
 
 
