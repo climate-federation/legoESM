@@ -8,7 +8,7 @@ experiment:
   tier: tier2
   complexity: primitive_equation
   extent: idealized
-  maturity: structurally_validated
+  maturity: run_tested
   description: >
     Lock-exchange gravity current (Petersen 2015): a density front collapses
     into two opposing gravity currents. RPE growth quantifies spurious
