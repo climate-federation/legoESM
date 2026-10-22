@@ -11,6 +11,8 @@ Implementation/acquisition commits: `ce9636bc1f`, `28fefb1eaa`,
 
 Receipt/citation re-anchor commit: `e111ccce8a`
 
+Review-gap and L8 citation-map commits: `738c136797`, `0131fd4439`
+
 Status: **L8 CERTIFIED.**  The operator acquired and admitted the complete
 ten-step record.  From clean commit `738c136797`, both trajectory labels,
 every available full-depth row, every stage-3 record boundary, and every
@@ -161,12 +163,17 @@ No NEMO build or run was performed by this round agent.
 
 ## 5. Landing gates
 
-After re-anchoring 73 citation-map lines and 18 audited-receipt lines, the
-explicit citation gate passed 17 / 17 tests in 5.40 seconds.  The exact ORCA2
-default gate from `claude_rounds/land.sh` then passed 145 / 145 tests in
-993.72 seconds under CPU, x64, and the landing package path.  That total
-includes the private-import ratchet at 6 / 6 and both ORCA2 parallel-receipt
-checks.  No bar was changed and no test was skipped to obtain these results.
+From clean commit `0131fd4439`, the receipt-specific citation gate found all
+15 recognized L8 citations, with zero unmapped citations, zero endpoint
+failures, and zero global map-audit failures; all 9 self-test plants fired.
+Shifting the L8 stage-3 citation by two lines produced
+`SYMBOL-NOT-AT-LINE` and the required nonzero exit.
+
+The exact ORCA2 default gate from `claude_rounds/land.sh` then passed
+145 / 145 tests in 1025.26 seconds under CPU, x64, and the prescribed landing
+package path.  That total includes the private-import ratchet at 6 / 6 and
+both ORCA2 parallel-receipt checks.  No bar was changed and no test was
+skipped to obtain these results.
 
 ## 6. Clean certification score
 
