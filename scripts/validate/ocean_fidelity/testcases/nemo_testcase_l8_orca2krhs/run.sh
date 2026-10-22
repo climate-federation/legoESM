@@ -116,7 +116,7 @@ PY
     -e 's/(ln_trabbl[[:space:]]*=[[:space:]]*)F/\1T/' \
     -e 's/(ln_trabbc[[:space:]]*=[[:space:]]*)F/\1T/' \
     -e 's/(ln_traadv_fct[[:space:]]*=[[:space:]]*)F/\1T/' "$scratch/stamped.output"
-  printf '\n nn_fct_h = 2\n nn_fct_v = 2\n nn_bbl_ldf = 1\n nn_bbl_adv = 0\n rn_ahtbbl = 1000.0\n rn_gambbl = 10.0\n nn_geoflx = 2\n nn_zdmp = 0\n' >>"$scratch/stamped.output"
+  printf '\n ln_traadv_fct = T\n ln_traldf_lap = T\n ln_traldf_iso = T\n ln_traldf_msc = T\n ln_ldfeiv = F\n ln_trabbc = T\n ln_trabbl = T\n ln_tradmp = T\n nn_fct_h = 2\n nn_fct_v = 2\n nn_bbl_ldf = 1\n nn_bbl_adv = 0\n rn_ahtbbl = 1000.0\n rn_gambbl = 10.0\n nn_geoflx = 2\n nn_zdmp = 0\n' >>"$scratch/stamped.output"
   check_log "$scratch/stamped.output" "$stamped"
   sed -i -E 's/(ln_trabbc[[:space:]]*=[[:space:]]*)T/\1F/' "$scratch/stamped.output"
   ! check_log "$scratch/stamped.output" "$stamped" >/dev/null 2>&1 || fail 'log flag plant accepted'
