@@ -109,12 +109,14 @@ only finite/nonzero. Fixed in `6a4bd97b6`; no forward value changes.
   without the frozen list -> 3 fail; pre-check removed -> 2 fail;
   restored, 0 dirty lines. Item 3's gate fails on a sign flip (ratio
   -1 -> off by 200 %); the old assertion passed one.
-- Default gate (split, `gates/resume_default_*.log`): citation-gate test,
-  private-import ratchet, TKE terms, freshwater closure (a: run
-  interrupted at the stage face-mask file by the 10-minute call limit;
-  the files before it all passed), prognostic barotropic + ORCA2 parallel
-  receipt + round-322 tests 21 passed (b), recipe 25 passed (c), stage
-  face mask (d): RESULT_PENDING.
+- Default gate (land.sh list, split, `gates/resume_default_{a,b,c,d}*.log`):
+  citation-gate test + private-import ratchet + TKE terms + freshwater
+  closure 110, prognostic barotropic + ORCA2 parallel receipt + round-322
+  tests 21, recipe 25, stage face mask 2 = 158 passed, 0 failed.
+- Receipt citation gate on this receipt: PASS, 2 citations, 0 failures,
+  0 unmapped (`gates/resume_citation_gate.log`).
+- Pre-existing, unchanged: parameter-spec drift, shortwave spec,
+  seeded-default tolerance (same as base, above).
 
 ## Review
 
