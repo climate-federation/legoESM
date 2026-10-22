@@ -105,7 +105,7 @@ class ParamMeta(NamedTuple):
     field: str                   # NamedTuple field name
     module: str                  # dotted module path
     config_class: str
-    default: float
+    default: float | None        # None only for an explicit_only parameter
     bounds: tuple                # (lo, hi) scalar, or (lo_tuple, hi_tuple)
     tunable_tier: int
     transform: str
@@ -114,6 +114,7 @@ class ParamMeta(NamedTuple):
     reference: str
     shape_key: str | None        # dimension key for array params (else None)
     legacy_name: str | None
+    explicit_only: bool = False  # never tier-selected; needs include + init value
 
 
 def _load_spec(module_path: str):
@@ -176,6 +177,11 @@ def build_registry(skipped: list[str] | None = None) -> list[ParamMeta]:
                         f"{module_path}.{cls_name}.{field} is in __param_spec__ but is "
                         f"not a defaulted NamedTuple field"
                     )
+                explicit_only = bool(p.get("explicit_only", False))
+                if defaults[field] is None and not explicit_only:
+                    raise ValueError(
+                        f"{module_path}.{cls_name}.{field} has no library default; "
+                        f"spec it explicit_only so a run must give its start value")
                 out.append(
                     ParamMeta(
                         scheme_key=scheme_key,
@@ -183,7 +189,8 @@ def build_registry(skipped: list[str] | None = None) -> list[ParamMeta]:
                         field=field,
                         module=module_path,
                         config_class=cls_name,
-                        default=float(defaults[field]),
+                        default=(None if defaults[field] is None
+                                 else float(defaults[field])),
                         bounds=tuple(p["bounds"]),
                         tunable_tier=int(p["tunable_tier"]),
                         transform=p["transform"],
@@ -192,6 +199,7 @@ def build_registry(skipped: list[str] | None = None) -> list[ParamMeta]:
                         reference=p["reference"],
                         shape_key=p.get("shape"),
                         legacy_name=p.get("legacy_name"),
+                        explicit_only=explicit_only,
                     )
                 )
     return out
@@ -378,7 +386,17 @@ def build_trainable_params(
             continue
         if meta.qualified_name in exclude_set:
             continue
-        selected = (1 <= meta.tunable_tier <= level) or (meta.qualified_name in include_set)
+        if meta.explicit_only:
+            # Trained only when a run names it AND gives its start value; a tier
+            # threshold never reaches it.
+            if meta.qualified_name not in include_set:
+                continue
+            if init_values is None or meta.qualified_name not in init_values:
+                raise ValueError(
+                    f"{meta.qualified_name!r} is explicit_only: pass its start "
+                    f"value in init_values alongside include")
+        selected = ((1 <= meta.tunable_tier <= level and not meta.explicit_only)
+                    or (meta.qualified_name in include_set))
         if meta.tunable_tier == 0:
             # tier 0 is fixed for GRADIENT training and cannot be reached via
             # `include`; only the explicit derivative-free opt-in admits it.

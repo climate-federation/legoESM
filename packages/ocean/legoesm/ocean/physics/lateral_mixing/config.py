@@ -67,6 +67,7 @@ __param_spec__ = {
             "resfn_gamma": {"units": "1", "bounds": (1.0, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Hallberg 2013 (Ocean Modelling 72, 92) resolution function: grid points per deformation radius at half-suppression", "shape": None},
             "resfn_cbcl_ms": {"units": "m s-1", "bounds": (0.5, 5.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "Hallberg 2013 / Chelton et al. 1998 (JPO 28, 433): fixed first-baroclinic gravity-wave speed for L_d = c/|f|", "shape": None},
             "redi_aht0": {"units": "m2 s-1", "bounds": (500.0, 10000.0), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "NEMO 5.0.1 ldftra.F90:415-441 nn_aht_ijk_t=21 (Treguier 1997 scaling); aht0 = 1/2*rn_Ud*rn_Ld; ORCA1 = 900 (0.5*0.018 m/s*100 km); bounds as the eddy-induced aei0", "shape": None},
+            "kappa_redi_diffusive_velocity": {"units": "m s-1", "bounds": (0.0033, 0.03), "tunable_tier": 2, "transform": "sigmoid", "category": "lateral_mixing", "reference": "NEMO rn_Ud (DECISION 149): mode 20 aht = 1/2 rn_Ud max(e1,e2), aht0 = 1/2 rn_Ud rn_Ld (ldftra.f90:354-357); bounds = kappa_Redi's (330, 3000) m2/s at ORCA2's rn_Ld = 200 km; ORCA2 0.018", "shape": None, "explicit_only": True},
         },
     },
 }

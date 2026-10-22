@@ -1525,6 +1525,15 @@ def _orca2_iwm_forcing(path, surface_tmask: np.ndarray, lat_t, lon_t):
     )
 
 
+# DECISION 149: parameters a rung-10 trainer must pass as ``exclude``. Since
+# round 320 the card runs mode 20, whose coefficient comes from rn_Ud; the
+# kappa_Redi scalar only records the nominal aht0 (gradient exactly 0, round 319
+# traced-scalar scan). rn_Ud is trained instead, only when a run names it.
+ORCA2_RUNG10_FROZEN_PARAMS = {
+    "ocean.lat.gm_redi.kappa_Redi": "inert on rung 10 since round 320 (mode 20 reads rn_Ud)",
+}
+
+
 def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     """Build the source-file-driven ORCA2+SI3 card through ocean kt=1 entry.
 
@@ -4183,6 +4192,7 @@ __all__ = (
     "apply_orca2_hand_alterations",
     "build_orca2_initial_ts",
     "build_orca2_zps_card",
+    "ORCA2_RUNG10_FROZEN_PARAMS",
     "build_orca2g1_flat_card",
     "read_orca2g1_deck",
     "orca2g1_initial_ssh",
