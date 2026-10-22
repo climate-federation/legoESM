@@ -154,15 +154,21 @@ L3: refused at construction, no number.
 - DECISION: L3 with L8 on rung 10. (1) keep L3 off until a ladder rung
   certifies L8 + L3 (lane A or B); (2) widen L8's guard to admit L3's block
   and measure under D122 (uncertified composition). Pick 1.
-- Rounds 319/322 gradient tests on the selected card: result in Gates.
 - Every rung-10 step caller must now pass tra_dmp's step target; a future
   rung-10 trainer must too (the gradient probe shows how).
 
 ## Gates (x64, CPU; logs `orca2_rounds/round323/gates/`)
 
-- ORCA2 selection tests (rounds 300-323, excluding 319/322): 143 + 18 passed
-  after fixes (first run: 12 failed, 10 errors, all from the selection: no
-  damping target passed, or expectations of the round-322 card).
-- Default gate (land.sh list): private-import ratchet 6, TKE terms 71,
-  recipe 25, freshwater 16, prognostic barotropic 8, ORCA2 parallel
-  receipt 2 = 128 passed; remainder below.
+- ORCA2 selection/gradient tests (rounds 300-323): 143 + 18 + 25 (rounds
+  319/322 gradients, 2000.75 s) passed after fixes. First run on the
+  selected card: 12 failed, 10 errors, all from the selection (no damping
+  target passed, or expectations of the round-322 card).
+- Default gate (land.sh list): citation-gate test 17, private-import
+  ratchet 6, TKE terms 71, recipe 25, freshwater 16, stage face mask 2,
+  prognostic barotropic 8, ORCA2 parallel receipt 2 = 147 passed, 0 failed.
+- Receipt citation gate on this receipt: PASS, 6 citations, 0 failures
+  (`gates/citation_gate_receipt.json`). Imports shifted 85 + 11 map
+  anchors: re-anchored rigidly by round 321's tool; the top-stress entry
+  follows lane B's helper; seven spans WIDENED/narrowed (commit message).
+
+codex review: operator
