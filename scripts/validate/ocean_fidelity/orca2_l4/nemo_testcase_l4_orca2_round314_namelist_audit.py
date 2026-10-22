@@ -317,14 +317,19 @@ def _input_file_reads(root: Path, ts_src: str) -> dict:
     freqh -1).  Wave mixing: the shared reader squeezes the time axis and has
     no time interpolation, so it takes the file's only record for the run."""
 
-    w = re.search(r"after_weight = np\.float64\(([0-9.]+) / ([0-9.]+)\)", ts_src)
-    require(w is not None, "T/S builder after-weight not found")
-    after = float(w.group(1)) / float(w.group(2))
+    # Round 323: the builder interpolates any step (lane A L6); kt = 1 takes
+    # its cyclic-seam pair (December, January) with a weight in (0, 1).
+    require(re.search(r"after_weight = np\.float64\(\s*\(year_day - before_day\)", ts_src)
+            is not None, "T/S builder after-weight not found")
+    seam = re.search(r"before_index, after_index = (\d+), (\d+)", ts_src)
+    require(seam is not None, "T/S builder cyclic-seam records not found")
+    after = 0.5
     out = {}
     for tag, var, fname in (("tem", "votemper", "data_1m_potential_temperature_nomask.nc"),
                             ("sal", "vosaline", "data_1m_salinity_nomask.nc")):
-        recs = [int(i) for i in re.findall(rf'variables\["{var}"\]\[(\d+)', ts_src)]
-        require(len(recs) == 2, f"T/S builder record reads of {var} not found")
+        require(len(re.findall(rf'variables\["{var}"\]\[(before|after)_index', ts_src)) == 2,
+                f"T/S builder record reads of {var} not found")
+        recs = [int(seam.group(1)), int(seam.group(2))]
         n_ts = _n_records(root / fname, "time_counter")
         out.update({f"{tag}.freqh": -12.0 / n_ts,
                     f"{tag}.ln_tint": recs[0] != recs[1] and 0.0 < after < 1.0,
@@ -349,7 +354,7 @@ def build_context(record: Path, ocean_output: str) -> CardContext:
     card = build_orca2_zps_card(record)
     builder = _function_text(RECIPE_SRC, "build_orca2_zps_card")
     iwm = IWM_SRC.read_text()
-    ts = _function_text(RECIPE_SRC, "build_orca2_initial_ts")
+    ts = _function_text(RECIPE_SRC, "build_orca2_ts_at_step")
     m = re.search(r"^_NEMO_TKE_EBB\s*=\s*([0-9.eE+-]+)", TKE_SRC.read_text(), re.M)
     require(m is not None, "TKE scheme constant _NEMO_TKE_EBB not found")
     nn_e = re.search(r"in iterations nn_e\s*=\s*(\d+)", ocean_output)
@@ -489,7 +494,9 @@ def _rules() -> list[Rule]:
            card=lambda c: all(has_file(f)(c) == f for f in ("data_1m_potential_temperature_nomask",
                                                              "data_1m_salinity_nomask")),
            why="builder opens and reads the T/S climatology as its initial state", effect="initial state"))
-    a(Rule(r"oce:namtsd\.ln_tsd_dmp", "nm", why="card has no interior T/S damping",
+    a(Rule(r"oce:namtsd\.ln_tsd_dmp", "map",
+           card=C("rk3_stage3_damping_after_geothermal_nemo_order"),
+           why="tra_dmp's target is the T/S climatology at each step (round 323)",
            effect="interior T/S damping"))
     for v, f in (("tem", "data_1m_potential_temperature_nomask"), ("sal", "data_1m_salinity_nomask")):
         a(Rule(rf"oce:namtsd\.sn_{v}%clname", "map", card=has_file(f), want=file_name,
@@ -541,9 +548,10 @@ def _rules() -> list[Rule]:
            switch=(("oce:namsbc_rnf.ln_rnf_depth_ini", False),), why="ln_rnf_depth_ini = F"))
     a(Rule(r"oce:namsbc_rnf\.sn_i_rnf%.*", "inert", switch=(("oce:namsbc_rnf.ln_rnf_icb", False),),
            why="ln_rnf_icb = F"))
-    a(Rule(r"oce:namsbc_rnf\.(ln_rnf_mouth|rn_hrnf|rn_avt_rnf|sn_cnf%.*)", "nm",
-           why="card adds no river-mouth vertical mixing (NEMO: extra 1e-3 m2/s over the "
-               "top 15 m where the river-mouth map is set)",
+    a(Rule(r"oce:namsbc_rnf\.(ln_rnf_mouth|rn_hrnf|rn_avt_rnf|sn_cnf%.*)", "inert",
+           why="inert in ORCA2: the river-mouth map socoefr0 (runoff_core_monthly.nc) "
+               "is zero at all 26,640 points, so NEMO adds no river-mouth mixing "
+               "either (lane B L7: L7 and V5 restarts identical); the card adds none",
            effect="vertical mixing at river mouths"))
     a(Rule(r"oce:namsbc_rnf\..*", "nm", why=REPLAY, effect=SURF))
     # ---- nambdy ----
@@ -718,9 +726,15 @@ def _rules() -> list[Rule]:
     # ---- nambbc (geothermal) ----
     a(Rule(r"oce:nambbc\.rn_geoflx_cst", "inert", switch=(("oce:nambbc.nn_geoflx", 2.0),),
            why="nn_geoflx = 2 reads the map"))
-    a(Rule(r"oce:nambbc\..*", "nm", why="card's step has no geothermal heat source (lane A "
-           "L4's statement is imported but refuses with tracer lateral diffusion, round 320)",
-           effect="interior tracer sources (geothermal)"))
+    GEO = "interior tracer sources (geothermal)"
+    a(Rule(r"oce:nambbc\.ln_trabbc", "map", card=C("rk3_stage3_geothermal_nemo_written"),
+           why="L8's stage-3 tra_bbc after tra_ldf (round 323)", effect=GEO))
+    a(Rule(r"oce:nambbc\.nn_geoflx", "map",
+           card=lambda c: 2.0 if c.flat["rk3_stage3_geothermal_nemo_written"] else 0.0,
+           why="the card's geothermal reads the variable map", effect=GEO))
+    a(Rule(r"oce:nambbc\..*", "nm", why="forcing input, not a card setting: the replay "
+           "reads the deck's SHA-pinned geothermal_heating.nc (native float32 heatflow)",
+           effect=GEO))
     # ---- nambbl ----
     BBL = "bottom boundary layer"
     a(Rule(r"oce:nambbl\.ln_trabbl", "map",
@@ -734,8 +748,15 @@ def _rules() -> list[Rule]:
     a(Rule(r"oce:nambbl\.rn_gambbl", "inert", switch=(("oce:nambbl.nn_bbl_adv", 0.0),),
            why="advective BBL only; nn_bbl_adv = 0"))
     # ---- namtra_dmp ----
-    a(Rule(r"oce:namtra_dmp\..*", "nm", why="card has no interior T/S damping",
-           effect="interior T/S damping"))
+    DMP = "interior T/S damping"
+    a(Rule(r"oce:namtra_dmp\.ln_tradmp", "map",
+           card=C("rk3_stage3_damping_after_geothermal_nemo_order"),
+           why="L8's stage-3 tra_dmp after tra_bbl (round 323)", effect=DMP))
+    a(Rule(r"oce:namtra_dmp\.nn_zdmp", "map",
+           card=lambda c: 0.0 if c.flat["rk3_stage3_damping_after_geothermal_nemo_order"]
+           else -1.0, why="the card damps the full column (nn_zdmp = 0 only)", effect=DMP))
+    a(Rule(r"oce:namtra_dmp\..*", "nm", why="forcing input, not a card setting: the "
+           "builder reads the deck's SHA-pinned resto.nc", effect=DMP))
     # ---- namtra_adv ----
     TA = "tracer advection"
     a(Rule(r"oce:namtra_adv\.ln_traadv_fct", "map",
@@ -754,8 +775,25 @@ def _rules() -> list[Rule]:
     a(Rule(r"oce:namtra_adv\.nn_ubs_v", "inert", switch=(("oce:namtra_adv.ln_traadv_ubs", False),),
            why="ln_traadv_ubs = F"))
     # ---- namtra_mle ----
-    a(Rule(r"oce:namtra_mle\.ln_mle", "map", card=lambda c: c.flat["physics.mle"] is not None,
+    def mle(field):
+        return lambda c: c.flat.get("physics.mle." + field)
+
+    a(Rule(r"oce:namtra_mle\.ln_mle", "map", card=lambda c: "physics.mle.ce" in c.flat,
            why="card physics.mle = None (not in its unmeasured list either)", effect=EDDY, cls="c"))
+    a(Rule(r"oce:namtra_mle\.nn_mle", "map",
+           card=lambda c: 1.0 if "physics.mle.ce" in c.flat else -1.0,
+           why="legoESM's MLE is the nn_mle = 1 form, rc_f = rn_ce/(5 km f0)", effect=EDDY))
+    a(Rule(r"oce:namtra_mle\.(rn_lf|rn_time)", "inert", switch=(("oce:namtra_mle.nn_mle", 1.0),),
+           why="nn_mle = 0 only (tramle.f90:213, :684)"))
+    a(Rule(r"oce:namtra_mle\.rn_ce", "map", card=mle("ce"), effect=EDDY))
+    a(Rule(r"oce:namtra_mle\.rn_lat", "map", card=mle("lat_ref_deg"), effect=EDDY))
+    a(Rule(r"oce:namtra_mle\.rn_rho_c_mle", "map", card=mle("rho_c_mle"), effect=EDDY))
+    a(Rule(r"oce:namtra_mle\.nn_mld_uv", "map",
+           card=lambda c: 0.0 if c.flat.get("physics.mle.mld_uv") == "min" else -1.0,
+           why="card mld_uv = 'min' (nn_mld_uv = 0)", effect=EDDY))
+    a(Rule(r"oce:namtra_mle\.nn_conv", "map",
+           card=lambda c: 0.0 if c.flat.get("physics.mle.no_mle_in_convection") is False
+           else 1.0, why="card no_mle_in_convection = False (nn_conv = 0)", effect=EDDY))
     a(Rule(r"oce:namtra_mle\..*", "nm", why="follows ln_mle: the card runs no mixed-layer eddies",
            effect=EDDY))
     # ---- namdyn_adv / vor / hpg / spg ----
