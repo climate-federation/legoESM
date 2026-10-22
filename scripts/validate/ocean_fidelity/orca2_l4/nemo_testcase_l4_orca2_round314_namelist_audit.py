@@ -779,7 +779,7 @@ def _rules() -> list[Rule]:
         return lambda c: c.flat.get("physics.mle." + field)
 
     a(Rule(r"oce:namtra_mle\.ln_mle", "map", card=lambda c: "physics.mle.ce" in c.flat,
-           why="card physics.mle = None (not in its unmeasured list either)", effect=EDDY, cls="c"))
+           why="card physics.mle: lane B L5's block (round 323)", effect=EDDY, cls="c"))
     a(Rule(r"oce:namtra_mle\.nn_mle", "map",
            card=lambda c: 1.0 if "physics.mle.ce" in c.flat else -1.0,
            why="legoESM's MLE is the nn_mle = 1 form, rc_f = rn_ce/(5 km f0)", effect=EDDY))
