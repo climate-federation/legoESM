@@ -7,6 +7,7 @@ the shared lat-lon C-grid model; this module contains no solver or oracle I/O.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from pathlib import Path
 from typing import NamedTuple
