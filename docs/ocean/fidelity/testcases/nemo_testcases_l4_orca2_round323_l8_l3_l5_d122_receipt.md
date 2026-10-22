@@ -213,5 +213,13 @@ L3: refused at construction, no number.
   (`gates/citation_gate_receipt.json`). Imports shifted 85 + 11 map
   anchors: re-anchored rigidly by round 321's tool; the top-stress entry
   follows lane B's helper; seven spans WIDENED/narrowed (commit message).
+- After the codex-HOLD fix (`1e08281cd`, map re-anchor `a0cf6cd21`):
+  step-path tests 3 passed (`gates/step_paths_final.log`) + gradient 1
+  passed (`gates/step_paths_grad.log`); default gate 145 + 2 = 147 passed
+  (`default_gate_e1.log`, `default_gate_e2.log`); private-import ratchet
+  inside it; three map anchors shifted rigidly by +7 lines; receipt
+  citation gate PASS, 6 citations, 0 failures (`citation_gate_receipt_r2.log`).
+  The round-319/322 gradient tests were not re-run: their raw traced step
+  path is untouched.
 
 codex review: operator
