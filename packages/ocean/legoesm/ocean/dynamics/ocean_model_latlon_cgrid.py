@@ -5471,6 +5471,18 @@ class LatLonCGridOceanModel:
                     raise ValueError(
                         "NEMO rk3_ws GM requires the complete staged "
                         "Treguier/nemo_iso_lap/bolus-through-fct composition")
+            # DECISION 147: L3's stage-3 bolus is certified only on G9's
+            # stage-3 Krhs tracer route; without it the FCT reads the bolus
+            # in its vertical velocity but not its horizontal transports
+            # (round 321: 7.0e-5 m/s continuity residual).
+            if (_ws_gm_redi is not None
+                    and getattr(_ws_gm_redi, "gm_bolus_advection", "") == "through_fct"
+                    and getattr(_ws_gm_redi, "slope_scheme", "") == "nemo_iso_lap"
+                    and not config.rk3_stage3_tracer_krhs_nemo_order):
+                raise ValueError(
+                    "NEMO rk3_ws eddy-induced velocity (GM bolus through FCT) "
+                    "requires rk3_stage3_tracer_krhs_nemo_order (the stage-3 "
+                    "Krhs tracer route)")
         if (config.momentum_flux_scheme == "nemo_up3"
                 and _mom_ti_for_ws != "rk3_ws"):
             # S-47 (docs/ocean/fidelity/nemo_branch_isomorphism_map.md):
@@ -10334,6 +10346,12 @@ class LatLonCGridOceanModel:
                         if _nemo_ws_stage_transport_geometry is None:
                             raise ValueError(
                                 "staged GM bolus requires materialized WS transports")
+                        # DECISION 147 backstop: config may change after
+                        # construction.
+                        if not _cfg_b.rk3_stage3_tracer_krhs_nemo_order:
+                            raise ValueError(
+                                "NEMO rk3_ws eddy-induced velocity requires "
+                                "rk3_stage3_tracer_krhs_nemo_order")
                         # traadv.f90:254-258 calls ldf_eiv_trp at stage 3 only.
                         # NEMO changes ONLY pFu/pFv, then calls wzv again with
                         # np_transport (traadv.f90:296).  Preserve the
