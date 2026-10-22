@@ -11,6 +11,7 @@ import pytest
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ocean.fidelity.nemo_testcase_recipe import orca2_l3_eiv_gm_redi
 
+from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round323_l8_l3_l5_d122_gate import without_selection  # noqa: E501
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
             "round5/acquisition/orca1ice_surface_entry_every_step_a_np2")
 
@@ -23,7 +24,8 @@ def rung10():
     from scripts.validate.ocean_fidelity.orca2_l4 import (
         nemo_testcase_l4_orca2_round1_ladder_gate as gate,
     )
-    card = gate.card_fields(ROOT)[1]
+    # Round 322's card: round 323's L8 guard would refuse L3 first.
+    card = without_selection(gate.card_fields(ROOT)[1])
     fields = gate.assemble_surface_fields(ROOT, 1)
     kw = dict(zip(("freshwater", "surface_forcing"),
                   gate._surface_forcings(card, ROOT, fields, 1)))

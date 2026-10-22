@@ -59,9 +59,13 @@ def _one_step(card, monkeypatch):
     surface = surface._replace(
         chl=jax.numpy.full(shape, 0.1), q_nonsolar=zero, salt_flux_sfx=zero,
         ice_concentration=zero, runoff_tracer_content=(zero, zero),
-        ice_ocean_top_drag_rCdu=zero)
+        ice_ocean_top_drag_rCdu=zero, geothermal_heat_flux_mwm2=zero)
+    from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round1_ladder_gate import (  # noqa: E501
+        damping_step_kwargs,
+    )
     trace = jax.device_get(model.step(
-        r.initial_state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+        r.initial_state, card.dt_s, freshwater=freshwater, surface_forcing=surface,
+        **damping_step_kwargs(card, DECK, 1)))
     assert isinstance(trace, m._NEMOWSTracerZDFTrace)
     wet = np.asarray(r.z_coord.is_active, dtype=np.float64)[..., 1:]
     return trace.solve, avs, wet

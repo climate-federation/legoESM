@@ -125,12 +125,12 @@ def test_rung10_explicit_rn_ud_gradient_at_n1_matches_preregistered_value():
         init_values={RN_UD: ORCA2_RN_UD}, dtype=jnp.float64)
     raw_step = type(model).__dict__["_step_jitted"].__wrapped__
 
-    def step(state, raw, dt, fw, sf):
+    def step(state, raw, dt, fw, sf, sponge=None):
         tp = TrainablePhysicsParams(raw_values=raw, constraints=params.constraints)
         m = copy.copy(model)
         m.config = base._replace(gm_redi=apply_param_overrides(
             base.gm_redi, tp.to_overrides()[GM]))
-        return raw_step(m, m._seed_tke_preclosure_carry(state), dt, fw, sf)
+        return raw_step(m, m._seed_tke_preclosure_carry(state), dt, fw, sf, sponge)
 
     losses, _ = probe.make_losses(model, card.recipe.z_coord)
     rev = probe.chain_reverse(jax.jit(step), state0, dict(params.raw_values), forcing, (1,),

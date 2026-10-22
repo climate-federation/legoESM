@@ -68,10 +68,11 @@ def step_body(model):
     raw = type(model).__dict__["_step_jitted"].__wrapped__
     base_cfg, base_z = model.config, model.z_coord
 
-    def step(state, s, dt, freshwater, surface):
+    def step(state, s, dt, freshwater, surface, sponge=None):
         m = copy.copy(model)
         m.config, m.z_coord = scaled(base_cfg, base_z, s)
-        return raw(m, m._seed_tke_preclosure_carry(state), dt, freshwater, surface)
+        return raw(m, m._seed_tke_preclosure_carry(state), dt, freshwater, surface,
+                   sponge)
 
     return step
 
@@ -92,6 +93,11 @@ def moved_counts(a, b) -> dict:
         if n:
             out[jax.tree_util.keystr(path)] = n
     return out
+
+
+def _damping(entry, kt):
+    """tra_dmp's step-kt target, when the forcing entry carries one."""
+    return {"sponge": entry[2], "nemo_kt": kt} if len(entry) > 2 else {}
 
 
 def _model(rung):
@@ -139,7 +145,8 @@ def scan(rung: str, rel: float, steps: int, log=print) -> dict:
 
     t0 = time.time()
     prod = jax.device_get(model.step(state0, card.dt_s, freshwater=forcing[0][0],
-                                     surface_forcing=forcing[0][1]))
+                                     surface_forcing=forcing[0][1],
+                                     **_damping(forcing[0], 1)))
     base = run(ones)
     log(f"[{time.time() - t0:7.1f}s] base")
     result = {"rung": rung, "rel": rel, "steps": steps, "dt_s": card.dt_s,
@@ -185,7 +192,8 @@ def linearity(rung: str, keys, rel: float, log=print) -> dict:
     jtan = jax.jit(lambda st, t, *a: jax.jvp(lambda s: body(st, s, *a), (ones,), (t,))[1])
     base = jax.device_get(jstep(state0, ones, *args))
     prod = jax.device_get(model.step(state0, card.dt_s, freshwater=forcing[0][0],
-                                     surface_forcing=forcing[0][1]))
+                                     surface_forcing=forcing[0][1],
+                                     **_damping(forcing[0], 1)))
     out = {"rung": rung, "rel": rel, "worktree": worktree_stamp(allow_dirty=True),
            "parity_vs_production": moved_counts(prod, base), "keys": {}}
     log("parity vs production:", out["parity_vs_production"])

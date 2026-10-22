@@ -161,8 +161,10 @@ def build(rung: str):
     if rung == "rung10":
         _, card = rung10_gate.card_fields(root)
         state = card.recipe.initial_state
-        forcing = [rung10_gate._surface_forcings(
-            card, root, rung10_gate.assemble_surface_fields(root, kt), kt)
+        # A card running tra_dmp carries its step-kt target as a third item.
+        forcing = [(*rung10_gate._surface_forcings(
+            card, root, rung10_gate.assemble_surface_fields(root, kt), kt),
+            *rung10_gate.damping_step_kwargs(card, root, kt).values())[:3]
             for kt in range(1, steps + 1)]
     else:
         card = prior._selected_card(rung, root)
@@ -193,6 +195,11 @@ def make_losses(model, z_coord):
     return {"ssh": loss_ssh, "T": loss_t}, tmask
 
 
+def _damping(dmp, kt):
+    """model.step's tra_dmp arguments for a forcing entry that carries them."""
+    return {"sponge": dmp[0], "nemo_kt": kt} if dmp else {}
+
+
 def traced_step(model):
     """The production jitted step body with traced scales (one jax.jit)."""
 
@@ -201,11 +208,11 @@ def traced_step(model):
     raw = type(model).__dict__["_step_jitted"].__wrapped__
     base_cfg, base_z = model.config, model.z_coord
 
-    def step(state, s, dt, freshwater, surface):
+    def step(state, s, dt, freshwater, surface, sponge=None):
         m = copy.copy(model)
         m.config, m.z_coord = scaled_parts(base_cfg, base_z, s)
         state = m._seed_tke_preclosure_carry(state)
-        return raw(m, state, dt, freshwater, surface)
+        return raw(m, state, dt, freshwater, surface, sponge)
 
     return jax.jit(step)
 
@@ -223,11 +230,11 @@ def traceability(model, state0, forcing, dt) -> dict:
     import jax.numpy as jnp
 
     step = traced_step(model)
-    fw, sf = forcing[0]
+    fw, sf, *dmp = forcing[0]
     out = {}
     for key in SCALARS:
         try:
-            jax.eval_shape(step, state0, {key: jnp.float64(1.0)}, dt, fw, sf)
+            jax.eval_shape(step, state0, {key: jnp.float64(1.0)}, dt, fw, sf, *dmp)
             out[key] = {"traceable": True}
         except (jax.errors.ConcretizationTypeError,
                 jax.errors.TracerBoolConversionError,
@@ -289,10 +296,10 @@ def chain_reverse(step, state0, scales, forcing, n_list, losses, dt, log=print,
     jax.clear_caches()
     pullbacks, state, at_n = [], state0, {}
     for n in range(1, max(n_list) + 1):
-        fw, sf = forcing[n - 1]
+        fw, sf, *dmp = forcing[n - 1]
         t0 = time.perf_counter()
-        def one(st, sc, fw=fw, sf=sf):
-            return step(st, sc, dt, fw, sf)
+        def one(st, sc, fw=fw, sf=sf, dmp=tuple(dmp)):
+            return step(st, sc, dt, fw, sf, *dmp)
 
         # remat: keep only the step input; the backward recomputes the step
         state, pb = jax.vjp(jax.checkpoint(one) if remat else one, state, scales)
@@ -358,13 +365,13 @@ def chain_forward(step, state0, scales, forcing, n_list, losses, dt,
     want_jvp = tangent_state is not None or tangent_scales is not None
     out = {}
     for n in range(1, max(n_list) + 1):
-        fw, sf = forcing[n - 1]
+        fw, sf, *dmp = forcing[n - 1]
         if want_jvp:
             # the scale tangent enters every step; the state tangent is carried
-            state, ts = jax.jvp(lambda st, sc: step(st, sc, dt, fw, sf),
+            state, ts = jax.jvp(lambda st, sc: step(st, sc, dt, fw, sf, *dmp),
                                 (state, scales), (ts, tsc))
         else:
-            state = step(state, scales, dt, fw, sf)
+            state = step(state, scales, dt, fw, sf, *dmp)
         if n in n_list:
             for name, loss in losses.items():
                 if want_jvp:
@@ -421,8 +428,9 @@ def measure(rung: str, n_dirs: int, full_sweep: bool, output: Path | None = None
     t0 = time.perf_counter()
     prod, st = [], state0
     for n in range(1, max(n_list) + 1):
-        fw, sf = forcing[n - 1]
-        st = model.step(st, dt, freshwater=fw, surface_forcing=sf)
+        fw, sf, *dmp = forcing[n - 1]
+        st = model.step(st, dt, freshwater=fw, surface_forcing=sf,
+                        **_damping(dmp, n))
         prod.append(jax.device_get(st))
     result["production_forward_s"] = time.perf_counter() - t0
     result["production_losses"] = {f"{k}@{n}": float(f(prod[n - 1]))
@@ -438,8 +446,8 @@ def measure(rung: str, n_dirs: int, full_sweep: bool, output: Path | None = None
     t0 = time.perf_counter()
     st, parity = state0, []
     for n in range(1, max(n_list) + 1):
-        fw, sf = forcing[n - 1]
-        st = step(st, ones, dt, fw, sf)
+        fw, sf, *dmp = forcing[n - 1]
+        st = step(st, ones, dt, fw, sf, *dmp)
         a, b = jax.device_get(st), prod[n - 1]
         bad = [jax.tree_util.keystr(p) for (p, x), y in zip(
             jax.tree_util.tree_leaves_with_path(a), jax.tree_util.tree_leaves(b))
@@ -609,8 +617,9 @@ def _rebuilt_fd(key, cfg, z, new_model, state0, forcing, n_list, losses, dt, eps
         vals = {}
         try:
             for n in range(1, max(n_list) + 1):
-                fw, sf = forcing[n - 1]
-                st = mm.step(st, dt, freshwater=fw, surface_forcing=sf)
+                fw, sf, *dmp = forcing[n - 1]
+                st = mm.step(st, dt, freshwater=fw, surface_forcing=sf,
+                             **_damping(dmp, n))
                 if n in n_list:
                     vals.update({(k, n): float(f(st)) for k, f in losses.items()})
         except jax.errors.JaxRuntimeError as error:

@@ -33,6 +33,7 @@ from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round318_fo
     selected_card,
 )
 
+from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round323_l8_l3_l5_d122_gate import without_selection  # noqa: E501
 DECK = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
 ALL = ("rung10", "rung0", "omt0", "omt1", "omt2", "omt3", "omt4")
 
@@ -43,7 +44,8 @@ def cards():
         pytest.skip("ORCA2 input deck is unavailable")
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     return {
-        "rung10": build_orca2_zps_card(DECK),
+        # Round 322's card; round 323's L8 route is tested in its own file.
+        "rung10": without_selection(build_orca2_zps_card(DECK)),
         "rung0": rung0.build_rung0_card(DECK),
         "omt0": omt0.build_omt0_card(DECK),
         "omt1": omt1.build_omt1_card(DECK),
