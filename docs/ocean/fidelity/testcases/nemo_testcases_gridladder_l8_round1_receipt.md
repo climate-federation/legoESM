@@ -1,4 +1,4 @@
-# Grid ladder rung L8 — round 1 design/build receipt (gridladder_r56, Codex)
+# Grid ladder rung L8 — round 1 certification receipt (gridladder_r56, Codex)
 
 Date: 2026-10-22
 
@@ -11,14 +11,15 @@ Implementation/acquisition commits: `ce9636bc1f`, `28fefb1eaa`,
 
 Receipt/citation re-anchor commit: `e111ccce8a`
 
-Status: **ACQUISITION_NEEDED.**  This round designed and built L8 and ran its
-committed preflight only.  It did not build or execute NEMO and did not score
-or certify L8.
+Status: **L8 CERTIFIED.**  The operator acquired and admitted the complete
+ten-step record.  From clean commit `738c136797`, both trajectory labels,
+every available full-depth row, every stage-3 record boundary, and every
+selected term record are exact or at the fixed bar.
 
 - codex review: operator
 - independent review: operator (Claude)
-- NEMO execution: operator-only; not run
-- scoring: not run
+- NEMO execution: operator-only; admitted record supplied by the operator
+- scoring: complete from a clean tree
 
 ## 1. Oracle statement order and selected BBL arm
 
@@ -71,6 +72,14 @@ L8, so the final walker alone owns the BBL position
 The final production call materializes all seven boundaries and then forms the
 existing NEMO-written ZDF content
 (`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2868-2904`).
+The original six L8 tests did not prove that call-site ordering: their move
+plants supplied reordered operands directly to the walker helper.  The review
+correctly identified that moving the live BBL group after DMP still passed all
+six.  The added one-step production-route test spies on the live geothermal,
+BBL, damping, and walker calls.  It requires group 3 to be the exact geothermal
+rate object with empty salinity, group 4 to be the exact BBL result with
+nonzero T and S only at bottom cells, and group 5 to equal the two live
+`gamma * (target - Kbb)` rates bit for bit.
 
 The ordered walker uses only rounded additions, with no new division, square
 root, or guard.  Its JIT gradient test is finite.  A full ORCA2 one-step L8
@@ -90,12 +99,17 @@ The preregistered INEXACT binary64 operands and expected boundary words are:
 | BBL | `0x1.792a95b49c117p+27` | `-0x1.190154c195a03p+32` |
 | DMP | `-0x1.0452f7986b12bp+33` | `-0x1.90d3a1f935e2cp+33` |
 
-The test checks every temperature and salinity boundary bit for bit under JIT,
-not merely the final sum.  Its planted LDF/BBC move and BBL/DMP move both fire
-(`tests/ocean/fidelity/test_nemo_testcase_l8_orca2krhs.py:80-114`).  Card
-plants separately remove four required selectors and are rejected; the
-ordinary one-step test exercises the complete selected route
-(`tests/ocean/fidelity/test_nemo_testcase_l8_orca2krhs.py:151-200`).
+The original test checks every temperature and salinity boundary bit for bit
+under JIT, not merely the final sum.  Its planted LDF/BBC and BBL/DMP moves are
+helper-only controls (`tests/ocean/fidelity/test_nemo_testcase_l8_orca2krhs.py:80-114`),
+so the earlier receipt's statement that they pinned the live call position is
+retracted.  Card plants separately remove four required selectors and are
+rejected; the ordinary one-step test exercises the complete selected route
+(`tests/ocean/fidelity/test_nemo_testcase_l8_orca2krhs.py:151-200`).  The new
+production-route spy passed on the selected call site in 205.66 seconds.  The
+exact call-site plant moving BBL after DMP then failed at the group-4 BBL
+identity assertion in 205.96 seconds; restoring the call made the full focused
+battery pass 10 / 10 in 309.65 seconds.
 
 The final focused L8 run passed 6 / 6 tests in 114.99 seconds under CPU and
 x64.  The earlier 40-test combined G9/L4b/L6/L8 regression attempt completed
@@ -137,6 +151,14 @@ L8_PREFLIGHT_7_OF_7_PASS plants=3/3 compiled_gfortran_layout=true real_log=true 
 WOULD_RUN smoke -> writer-free boundary -> three twins into /data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round56/oracle_l8_r56
 ```
 
+The operator then ran that exact acquisition.  Its admitted final line was:
+
+```text
+L8_ACQUISITION_PASS steps=1..10 twins=3 evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round56/oracle_l8_r56
+```
+
+No NEMO build or run was performed by this round agent.
+
 ## 5. Landing gates
 
 After re-anchoring 73 citation-map lines and 18 audited-receipt lines, the
@@ -146,18 +168,68 @@ default gate from `claude_rounds/land.sh` then passed 145 / 145 tests in
 includes the private-import ratchet at 6 / 6 and both ORCA2 parallel-receipt
 checks.  No bar was changed and no test was skipped to obtain these results.
 
-## 6. ASKED / UNASKED
+## 6. Clean certification score
+
+The score ran from clean commit `738c13679724536b70975ac80110050076a774cd`;
+its packages tree is `db06c1e1514fade4fb59ee756eb7eedde101fdef`, identical
+to the acquisition's package code.  The independent label is bit-exact at
+kt 1--10 for SSH, barotropic U/V, three-dimensional U/V/T/S, every available
+full and partial depth, and every dry cell.  The given-NEMO-entry label at
+entries 1, 3, 5, 7, and 9 and its two-step results at kt 2, 4, 6, 8, and 10
+are also bit-exact at full depth.  All stage-1, stage-2, and stage-3 kt-1
+surface and full-depth rows are bit-exact.
+
+The JIT/traced/x64 L8 record gate scores the recorded LDF, BBC, BBL, and DMP
+boundaries for T and S at kt 1--10: all 80 rows have zero wet unequal cells
+out of 430,552 and zero dry writes.  Its three wiring-removal controls each
+make the gate fail when JIT, traced inputs, or x64 is removed.  The geothermal
+record has zero unequal bottom tendencies out of 16,433 wet columns at every
+kt.  The damping record has zero unequal T and S cells out of 430,552 wet
+cells and zero dry writes at every kt.
+
+Score SHA-256 hashes:
+
+```text
+f60cba0ea7885ca48f1e8040d86b555e4d99dc9e318225a89b2beea183dc89f6  l8_independent_kt1_10.json
+d2081f712888dda66d4320043893e0c5c0aca4a4968ffa8e00e9c7e14f30235a  l8_given_entry_kt1_10.json
+0440eec583415f8667bb1b5f66a3bdf62e1cebb12886a1238dda06b9f0fcb4d0  l8_stages_kt1.json
+2cccb926070fcb471abf537c5f998e48439fa9542f9e77305d983c9a4f85b816  l8_krhs_kt1_10.json
+c4c22458648ab3b0b3eec5298e7a175411f8af3254da473cf6d4b4139a7d1017  l8_geothermal_kt1_10.json
+80143e2ae669753957df22ea4df95525c7bbef7e043613a13621f16fec0ba80a  l8_damping_kt1_10.json
+```
+
+Every row is exact, hence every row is at or better than the preregistered
+bar.  L8 is therefore **CERTIFIED: the stage-3 Krhs route carries diffusive
+BBL, standard isoneutral diffusion, geothermal heating, and interior damping
+in NEMO's order.**
+
+## 7. Inherited-card preservation
+
+The extended merge-identity probe compares every certified card in both lanes:
+G1--G9, L4, L4b, L6, V1--V5, and L1--L3.  Baseline snapshots use clean
+pre-L8 commit `f32c3be7ac9d`; candidate snapshots use clean commit
+`738c136797`.  Across 20 cards and 772 state leaves after each of two
+production steps, `different_count=0`.  All 20 address-normalized one-step
+JAX programs have identical SHA-256 hashes and lengths.  A planted one-bit L2
+leaf digest was refused.  Evidence is under
+`gridladder_rounds/round56/merge_identity`.
+
+## 8. ASKED / UNASKED
 
 ASKED and completed: trace the running Oracle and selected BBL branch; state
 the exact order; build the G9+L1+L2+L4b+L6 L8 card; make only that exact
 composition legal; preserve all old routes; add bit-position call-order
 controls, a finite-gradient control, a production one-step control, and the
-committed ladder acquisition; execute its clean preflight.
+committed ladder acquisition; execute its clean preflight; close the
+production-route and inherited-card review gaps; admit the operator record;
+score both labels through kt 10 at full depth; score all three kt-1 stages and
+the BBL, geothermal, and damping records; and certify only because every row
+is exact or at the fixed bar.
 
-UNASKED and not done: build, run, or alter NEMO; acquire a record; score L8;
-relax a fidelity bar; push; post to GitHub; or perform an author review.
+UNASKED and not done: build, run, or alter NEMO; relax a fidelity bar; push;
+post to GitHub; or perform an author review.
 
-COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/gridladder_r56-672930488
-ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/gridladder_r56-672930488/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l8_orca2krhs/run.sh --run (operator-only; NEMO_OPERATOR_ACK=L8_R56_OPERATOR)
+COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/gridladder_r56/repo
+ACQUISITION_NEEDED: NONE
 DECISION_NEEDED: NONE
-ROUND_STATUS: STOPPED_FOR_RECORD — L8 design/build and clean seven-item preflight complete; no NEMO run and no score
+ROUND_STATUS: LANDED — L8 CERTIFIED; both labels, every recorded depth, all stage boundaries, and all selected term records are exact or at bar
