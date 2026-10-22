@@ -306,3 +306,25 @@ def test_one_step_l8_production_route_passes_bbc_bbl_dmp_by_identity(
         gamma * (jnp.asarray(sponge.S_ref) - state.S.data))
     np.testing.assert_array_equal(np.asarray(groups[5][0][0]), expected_t)
     np.testing.assert_array_equal(np.asarray(groups[5][1][0]), expected_s)
+
+
+@pytest.mark.skipif(not (L8_RECORD / "oracle_rktracer_stage3_kt00000001.bin").is_file(),
+                    reason="no admitted round-56 L8 record")
+def test_l8_live_term_arm_scores_model_operators_not_recorded_increments():
+    ladder = _module(
+        "l8_live_ladder_score",
+        Path(__file__).parents[3] / "scripts/validate/ocean_fidelity/testcases/"
+        "nemo_testcase_g2_orca2bathy_ladder.py",
+    )
+    scored = ladder.run(
+        L8_RECORD, arm="l8_live_krhs", kt_from=1, kt_to=1,
+        allow_dirty=True, case="ORCA2L8-krhs")
+
+    assert scored["label"].startswith("LIVE-MODEL-TERMS:")
+    assert scored["gate_pass"] is True
+    rows = scored["per_kt"][0]["rows"]
+    assert all(row["at_bar"] and not row["dry_card_nonzero"] for row in rows)
+    assert all(row["n_unequal"] == 0 for row in rows[:6])  # adv/SBC/QSR
+    unequal = [row for row in rows if row["n_unequal"]]
+    assert unequal and unequal[0]["name"].endswith("ldf_T")
+    assert max(row["normalised"] for row in rows) <= ladder.BAR

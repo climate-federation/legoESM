@@ -97,7 +97,7 @@ ARMS = ("geometry", "independent", "given_entry", "stages", "operators",
         "barotropic_exit",
         "zdf_replay", "substeps", "trazdf_replay", "rhs_frame",
         "restart_independent", "carried", "stp2d_terms",
-        "tke_mixing_length", "ddm_kt1", "geothermal", "damping", "l8_krhs")
+        "tke_mixing_length", "ddm_kt1", "geothermal", "damping", "l8_krhs", "l8_live_krhs")
 # stage exposures of one step: the private hook that returns it, and the
 # level-1 NEMO frame fields (u, v, T, S, ssh) it must equal
 EXPOSURES = {
@@ -925,7 +925,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     cfg, z, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
     if case in FORCED:
         require(arm in ("independent", "given_entry", "geothermal", "damping",
-                        "l8_krhs")
+                        "l8_krhs", "l8_live_krhs")
                 or (arm in ("stages", "operators", "barotropic_exit", "carried",
                             "stp2d_terms")
                     and case in ICE_CASES)
@@ -1272,6 +1272,98 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             })
         return out
 
+    if arm == "l8_live_krhs":
+        require(case == "ORCA2L8-krhs", "the live Krhs arm is L8-only")
+        import importlib.util
+        from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as cgrid
+
+        module_path = HERE / "nemo_testcase_l8_orca2krhs" / "l8_records.py"
+        spec = importlib.util.spec_from_file_location(
+            "l8_live_records_score", module_path)
+        records = importlib.util.module_from_spec(spec)
+        require(spec.loader is not None, f"cannot load {module_path}")
+        spec.loader.exec_module(records)
+
+        captured = []
+        original_walk = cgrid._nemo_stage3_l8_krhs_walk
+
+        def collect(*values):
+            captured.append(tuple(
+                (np.array(values[2 * index]), np.array(values[2 * index + 1]))
+                for index in range(7)))
+
+        def observed_walk(adv_t, adv_s, *term_groups):
+            result = original_walk(adv_t, adv_s, *term_groups)
+            jax.debug.callback(
+                collect,
+                *(value for pair in result[2] for value in pair),
+                ordered=True,
+            )
+            return result
+
+        observed_model = LatLonCGridOceanModel(
+            card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing)
+
+        out.update({
+            "label": (
+                "LIVE-MODEL-TERMS: observed compiled L8 stage-3 boundaries; "
+                "carried state from the unobserved ordinary production step"),
+            "jit": True,
+            "traced_inputs": True,
+            "x64": True,
+            "input_dtypes": [],
+        })
+        wet_inner = np.asarray(z.is_active) > 0.5
+        state = s0
+        for kt in range(1, kt_to + 1):
+            step_forcing = forcing(kt)
+            cgrid._nemo_stage3_l8_krhs_walk = original_walk
+            state_after = jax.device_get(model.step(
+                state, dt=card.dt_s, **step_forcing))
+            before = len(captured)
+            try:
+                cgrid._nemo_stage3_l8_krhs_walk = observed_walk
+                jax.device_get(observed_model.step(
+                    state, dt=card.dt_s, **step_forcing))
+            finally:
+                cgrid._nemo_stage3_l8_krhs_walk = original_walk
+            require(len(captured) == before + 1,
+                    f"kt {kt}: live L8 boundary observer did not fire once")
+            boundaries = captured[-1]
+            state = state_after
+            if kt < kt_from:
+                continue
+            header, fields = records.decode(
+                root / f"oracle_rktracer_stage3_kt{kt:08d}.bin", kt)
+            jpi, jpj, jpk = header[7:10]
+            wet3 = np.zeros((jpj, jpi, jpk), dtype=bool)
+            wet3[2:-2, 2:-2, :nk] = wet_inner
+            wet = wet3.transpose(1, 0, 2).ravel(order="F")
+            rows = []
+            for index, boundary in enumerate(
+                    ("advection", "sbc", "qsr", "ldf", "bbc", "bbl", "dmp")):
+                for tracer, offset in (("T", 0), ("S", 1)):
+                    live = np.asarray(boundaries[index][offset])
+                    out["input_dtypes"].append(str(live.dtype))
+                    full = np.zeros((jpj, jpi, jpk), dtype=np.float64)
+                    full[2:-2, 2:-2, :nk] = live
+                    candidate = full.transpose(1, 0, 2).ravel(order="F")
+                    row = bit_rows(
+                        f"l8_live_krhs.kt{kt}.{boundary}_{tracer}",
+                        fields[f"{boundary}_{tracer}"], candidate, wet)
+                    row["at_bar"] = bool(
+                        row["normalised"] <= BAR
+                        and not row["dry_card_nonzero"])
+                    rows.append(row)
+            out["per_kt"].append({"kt": kt, "rows": rows})
+        out["gate_pass"] = bool(
+            out["jit"] and out["traced_inputs"] and out["x64"]
+            and all(dtype == "float64" for dtype in out["input_dtypes"])
+            and all(row["at_bar"] for point in out["per_kt"]
+                    for row in point["rows"])
+        )
+        return out
+
     if arm == "l8_krhs":
         require(case == "ORCA2L8-krhs", "the Krhs tail arm is L8-only")
         import importlib.util
@@ -1296,8 +1388,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         kernel = tail if without_l8_jit else jax.jit(tail)
         out.update({
             "label": (
-                "GIVEN-NEMO-OPERANDS: recorded LDF boundary and exact "
-                "BBC/BBL/DMP increments"),
+                "RECORDED-INCREMENT REPLAY: recorded LDF boundary and "
+                "recorded BBC/BBL/DMP increments"),
             "jit": not without_l8_jit,
             "traced_inputs": not without_l8_traced_inputs,
             "x64": not without_l8_x64,
@@ -2418,13 +2510,13 @@ def main(argv=None) -> int:
                       f"max {row['max_abs']:.3e}; dry card/nemo "
                       f"{row['dry_card_nonzero']}/{row['dry_nemo_nonzero']}")
         return 0 if out["gate_pass"] else 1
-    if a.arm == "l8_krhs":
+    if a.arm in ("l8_krhs", "l8_live_krhs"):
         for point in out["per_kt"]:
             for row in point["rows"]:
                 print(f"{row['name']}: unequal {row['n_unequal']}/{row['n_wet']} "
                       f"max {row['max_abs']:.3e}; dry card/nemo "
                       f"{row['dry_card_nonzero']}/{row['dry_nemo_nonzero']}")
-        print(f"L8_RECORD_WIRING jit={out['jit']} "
+        print(f"L8_TERM_WIRING arm={a.arm} jit={out['jit']} "
               f"traced_inputs={out['traced_inputs']} x64={out['x64']} "
               f"pass={out['gate_pass']}")
         return 0 if out["gate_pass"] else 1

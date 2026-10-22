@@ -16,7 +16,9 @@ Review-gap and L8 citation-map commits: `738c136797`, `0131fd4439`
 Status: **L8 CERTIFIED.**  The operator acquired and admitted the complete
 ten-step record.  From clean commit `738c136797`, both trajectory labels,
 every available full-depth row, every stage-3 record boundary, and every
-selected term record are exact or at the fixed bar.
+selected term record are exact or at the fixed bar.  The trajectory rows are
+bit-exact; a later live-term audit corrects the term-boundary classification
+from exact to AT-BAR-NOT-EXACT without changing any model value.
 
 - codex review: operator
 - independent review: operator (Claude)
@@ -175,7 +177,7 @@ package path.  That total includes the private-import ratchet at 6 / 6 and
 both ORCA2 parallel-receipt checks.  No bar was changed and no test was
 skipped to obtain these results.
 
-## 6. Clean certification score
+## 6. Clean certification score and live-term correction
 
 The score ran from clean commit `738c13679724536b70975ac80110050076a774cd`;
 its packages tree is `db06c1e1514fade4fb59ee756eb7eedde101fdef`, identical
@@ -186,13 +188,33 @@ entries 1, 3, 5, 7, and 9 and its two-step results at kt 2, 4, 6, 8, and 10
 are also bit-exact at full depth.  All stage-1, stage-2, and stage-3 kt-1
 surface and full-depth rows are bit-exact.
 
-The JIT/traced/x64 L8 record gate scores the recorded LDF, BBC, BBL, and DMP
-boundaries for T and S at kt 1--10: all 80 rows have zero wet unequal cells
-out of 430,552 and zero dry writes.  Its three wiring-removal controls each
-make the gate fail when JIT, traced inputs, or x64 is removed.  The geothermal
-record has zero unequal bottom tendencies out of 16,433 wet columns at every
-kt.  The damping record has zero unequal T and S cells out of 430,552 wet
-cells and zero dry writes at every kt.
+The original JIT/traced/x64 `l8_krhs` arm starts from NEMO's recorded LDF
+boundary and feeds NEMO's recorded BBC, BBL, and DMP increments to the ordered
+walker.  Its 80 zero-unequal rows and its JIT/traced/x64 removal controls prove
+the walker wiring only; they do **not** test the model's own isoneutral, BBL,
+or damping terms.  Calling those rows exact model-term comparisons is
+retracted.  The geothermal record separately remains exact at all 16,433 wet
+columns per step, and the isolated damping record remains exact over 430,552
+wet cells per tracer per step, with zero dry writes.
+
+The added `l8_live_krhs` arm advances the actual L8 card, passively observes
+the seven compiled stage-3 boundaries, carries the state from a separately
+compiled unobserved ordinary step, and compares those model-produced boundaries
+directly with NEMO's boundary record.  All 140 T/S rows at kt 1--10 are
+**AT-BAR-NOT-EXACT** with zero dry writes.  The first scattered differences
+appear at the isoneutral-diffusion boundary and carry through BBC, BBL, and DMP:
+temperature has 3--25 unequal wet words per step and salinity 0--7.  At kt 10,
+the advection boundary itself has 3 unequal T words and 6 unequal S words,
+which are carried forward before the additional LDF differences.  The maximum
+is 32 ulps except for 1024 ulps in one near-zero salinity cell; maximum
+normalized error is `6.372895144965704e-17`, safely inside the unchanged
+`1e-15` bar.  Reassociation in the inherited isoneutral and FCT operators is a
+**PLAUSIBLE**, not established, cause of these last-bit differences.
+
+The two bit-exact trajectory labels do not discriminate a BBL/damping call
+swap at kt 1--2: damping is inert at kt 1, and the completed trajectory sees
+the final accumulator rather than the intermediate boundary positions.  Only
+the NEMO term-boundary record discriminates that swap.
 
 Score SHA-256 hashes:
 
@@ -203,12 +225,13 @@ d2081f712888dda66d4320043893e0c5c0aca4a4968ffa8e00e9c7e14f30235a  l8_given_entry
 2cccb926070fcb471abf537c5f998e48439fa9542f9e77305d983c9a4f85b816  l8_krhs_kt1_10.json
 c4c22458648ab3b0b3eec5298e7a175411f8af3254da473cf6d4b4139a7d1017  l8_geothermal_kt1_10.json
 80143e2ae669753957df22ea4df95525c7bbef7e043613a13621f16fec0ba80a  l8_damping_kt1_10.json
+4cd634f0acb0f8a0c56ed43b8766eb9fb55388510cec305cb39b1672c2b500a0  l8_live_krhs_kt1_10.json
 ```
 
-Every row is exact, hence every row is at or better than the preregistered
-bar.  L8 is therefore **CERTIFIED: the stage-3 Krhs route carries diffusive
-BBL, standard isoneutral diffusion, geothermal heating, and interior damping
-in NEMO's order.**
+Every trajectory row is exact and every live term-boundary row is at the
+preregistered bar.  L8 therefore remains **CERTIFIED: the stage-3 Krhs route
+carries diffusive BBL, standard isoneutral diffusion, geothermal heating, and
+interior damping in NEMO's order.**
 
 ## 7. Inherited-card preservation
 
@@ -230,8 +253,9 @@ controls, a finite-gradient control, a production one-step control, and the
 committed ladder acquisition; execute its clean preflight; close the
 production-route and inherited-card review gaps; admit the operator record;
 score both labels through kt 10 at full depth; score all three kt-1 stages and
-the BBL, geothermal, and damping records; and certify only because every row
-is exact or at the fixed bar.
+the BBL, geothermal, and damping records; add a live-model term arm and its
+direct test; correct the term rows from exact to AT-BAR-NOT-EXACT; and certify
+only because every row is exact or at the fixed bar.
 
 UNASKED and not done: build, run, or alter NEMO; relax a fidelity bar; push;
 post to GitHub; or perform an author review.
@@ -239,4 +263,4 @@ post to GitHub; or perform an author review.
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/gridladder_r56/repo
 ACQUISITION_NEEDED: NONE
 DECISION_NEEDED: NONE
-ROUND_STATUS: LANDED — L8 CERTIFIED; both labels, every recorded depth, all stage boundaries, and all selected term records are exact or at bar
+ROUND_STATUS: LANDED — L8 CERTIFIED; both trajectory labels are exact and all live model-term boundaries are at bar
