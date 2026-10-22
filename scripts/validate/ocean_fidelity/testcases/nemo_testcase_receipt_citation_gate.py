@@ -2942,7 +2942,7 @@ CITATION_MAP = {
     'advection.py:2139-2140': [
         ('if return_nemo_beta_trace:', 5),
         'return alpha_u_full, alpha_v, alpha_vert_face, beta_trace', 2],
-    'ocean_model_latlon_cgrid.py:15305-15322': [
+    'ocean_model_latlon_cgrid.py:15312-15329': [
         'if (self._nemo_ws_test_hooks.expose_stage3_fct_inputs',
         'return state_after._replace(mass_flux_w=diagnostic)', 18],
     # --- ORCA2 round 136: passive literal tracer-ZDF source walk --------
@@ -2972,7 +2972,7 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:11984-11991': [
         'if _return_tracer_zdf_trace:',
         ('solve=_nemo_ws_vertical_solve_trace,', 2), 8],
-    'ocean_model_latlon_cgrid.py:15292-15304': [
+    'ocean_model_latlon_cgrid.py:15299-15311': [
         ('if self._nemo_ws_test_hooks.tracer_zdf_trace:', 1),
         ('return result._replace(state_after=state_after)', 4), 13],
     # --- ORCA2 round 129: split-explicit boundary association walk -------
@@ -6164,7 +6164,7 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:15007-15012': [
         'if _tke_coeff_new is not None:',
         'tke_avt=Field(data=_tke_coeff_new.K_H', 6],
-    'ocean_model_latlon_cgrid.py:15229-15244': [
+    'ocean_model_latlon_cgrid.py:15236-15251': [
         '# ``step`` is the production-compiled entry point even when a caller',
         ('_nemo_stage1_zad_eta_after_override))', 1), 16],
     'state.py:621-625': [
