@@ -49,11 +49,22 @@ which sits at 0.55 of the range.
 - P1 no tier returns rn_Ud: CONFIRMED (core, extended, aggressive).
 - P2 explicit request with 0.018 returns exactly rn_Ud (seed round-trips
   to 1e-12); without a start value it raises: CONFIRMED.
-- P3, P4 rung-10 gradient: PENDING (below).
+- P3 rung-10 gradient finite and nonzero: CONFIRMED.
+- P4 equals -4.5e-5 within 1 %, negative: CONFIRMED, -4.5137e-5 (0.3 %
+  from -4.5e-5; 0.09 % from round 321's -4.5179e-5, measured there with
+  L3 selected).
 
 ## Rung-10 gradient (N = 1, T loss)
 
-PENDING: measured after this receipt's commit (compile ~25 min).
+Shipped rung-10 card (L2), rn_Ud requested explicitly with start value
+0.018 and spliced from the collector's raw leaf into the production step
+body; round 315's T loss and reverse chain; tree `b9a5ad49c` (clean)
+(`orca2_rounds/round322/grad_rung10.log`, 1216 s).
+
+- dL/d(raw leaf) = -1.656732e-05; finite, nonzero.
+- Per relative change of rn_Ud: -4.513749e-05.
+- Run detached (setsid) and checked from the foreground: one reverse
+  compile exceeds the 10-minute foreground call limit.
 
 ## Gates (x64, CPU; logs `orca2_rounds/round322/gates/`)
 
@@ -63,7 +74,17 @@ PENDING: measured after this receipt's commit (compile ~25 min).
   same 5 fail at base `721d42140` (spec-module drift, a shortwave spec,
   a seeded-default tolerance, two atmosphere loader scans). One of them
   shrank: the shortwave spec's orphan list loses its `float | None` field.
-- Round-322 tests (without the gradient): 7 passed.
+- Round-322 tests: 7 passed without the gradient; the gradient test
+  1 passed.
+- Non-vacuity: with the collector's explicit-only rule disabled, 3 fail
+  (extended and aggressive tiers return rn_Ud; a request without a start
+  value builds); restored, 0 dirty lines (`nonvacuity_collector.log`).
+- Receipt citation gate on this receipt: PASS, 2 citations, 0 failures,
+  0 unmapped, 0 map entries failing.
+- Default gate (land.sh list, split; private-import ratchet included):
+  citation-gate test 17, private-import ratchet 6, TKE terms 71, recipe +
+  freshwater closure 41, stage face mask 2, prognostic barotropic 8,
+  ORCA2 parallel receipt 2 = 147 passed, 0 failed.
 
 ## Review
 
