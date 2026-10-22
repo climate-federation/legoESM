@@ -132,7 +132,8 @@ PY
   # 5. Smoke -> writer-free boundary -> three twins, every twin <= 10 steps.
   (( 2 % 2 == 0 && 10 <= 10 )) || fail 'bad schedule'
   grep -F 'check_acting "$SMOKE"' "$here/run.sh" >/dev/null || fail 'smoke acting statement missing'
-  ! grep -F 'check_acting "$REF"' "$here/run.sh" >/dev/null || fail 'acting leaked to reference'
+  ! awk '!/grep -F/ {print}' "$here/run.sh" | grep -F 'check_acting "$REF"' >/dev/null \
+    || fail 'acting leaked to reference'
 
   # 6. Output viability; 7. fresh target/run paths.
   path_ok "$EVIDENCE" || fail 'evidence parent not writable'
