@@ -218,6 +218,12 @@ stays DIFFERS, its three coefficient rows NOT-MODELLED).
 - Consequence: this round's D122 gate's L3 arm on rung 10 now refuses at
   construction (that arm ran the route-off composition the guard forbids).
 - DECISION 145 (rn_Ud trainable entry) still waits on the user.
+- Resume-2 gates (x64, CPU; `gates/resume2_*`): the guard shifted 52
+  citation-map anchors in the model file; re-anchored (round-320 tool, one
+  straddling range by hand). Receipt citation gate PASS, 5 citations,
+  0 failures, 0 map entries failing. Default gate (land.sh list, private-
+  import ratchet included) 17 + 6 + 71 + 25 + 16 + 2 + 8 + 2 = 147 passed,
+  0 failed.
 
 ## Review
 
