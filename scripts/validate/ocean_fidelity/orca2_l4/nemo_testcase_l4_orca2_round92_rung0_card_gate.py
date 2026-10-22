@@ -110,6 +110,16 @@ def build_rung0_card(deck_root: Path):
         rk3_stage3_tracer_nemo_stored_thickness=False,
         # G5's stage-3 salt statement reads the recorded sfx (round 304).
         rk3_stage3_salt_nemo_written=False,
+        # Round 323: the shipped card's L8 stage-3 Krhs walk (geothermal,
+        # damping, BBL in Krhs) stated off; this deck runs none of them
+        # (ln_trabbc = ln_tradmp = ln_trabbl = F).
+        rk3_stage3_tracer_krhs_nemo_order=False,
+        rk3_stage3_geothermal_nemo_written=False,
+        rk3_stage3_geothermal_after_ldf_nemo_order=False,
+        rk3_stage3_damping_after_geothermal_nemo_order=False,
+        rk3_stage3_l8_nemo_order=False,
+        bbl_nemo_stage3_krhs=False,
+        bbl_nemo_pivot_ghost=False,
     )
     root = Path(deck_root)
     temperature, salinity = build_orca2_initial_ts(
@@ -139,6 +149,7 @@ def build_rung0_card(deck_root: Path):
         physics_config=physics,
         initial_state=state,
         iwm_forcing=None,
+        tracer_damping=None,
     )
     # This is deliberately gate-local until the internal record admits.  The
     # shipped card and its six SI3 selectors remain untouched.

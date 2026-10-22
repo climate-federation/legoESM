@@ -40,7 +40,7 @@ ARM_PIECES = {"control": (), "L8": ("L8",), "L8L3": ("L8", "L3"),
               "L8L5": ("L8", "L5"), "L8L3L5": ("L8", "L3", "L5")}
 ARMS = (*ARM_PIECES, "D122")
 # This round's selection, frozen after measuring (receipt).
-D122_SELECTED = {rung: () for rung in RUNGS} | {"rung10": ()}
+D122_SELECTED = {rung: () for rung in RUNGS} | {"rung10": ("L8", "L5")}
 
 
 def with_pieces(cfg, pieces):
@@ -57,6 +57,32 @@ def with_pieces(cfg, pieces):
     if "L5" in pieces:
         cfg = cfg._replace(physics=cfg.physics._replace(mle=orca2_l5_mle()))
     return cfg
+
+
+# The rung-10 values before this round's selection (round 322's card).
+PRE_SELECTION = {
+    "rk3_stage3_tracer_krhs_nemo_order": False,
+    "rk3_stage3_geothermal_nemo_written": False,
+    "rk3_stage3_geothermal_after_ldf_nemo_order": False,
+    "rk3_stage3_damping_after_geothermal_nemo_order": False,
+    "rk3_stage3_l8_nemo_order": False,
+    "bbl_nemo_stage3_krhs": False,
+    "bbl_nemo_pivot_ghost": False,
+    "rk3_end_of_stage_pivot_fold": True,
+    "bbl_adv_option": 0, "bbl_diffusive_option": 1,
+    "bbl_aht_m2_s": 1000.0, "bbl_gamma_s": 0.0,
+}
+
+
+def without_selection(card):
+    """Rung 10 as round 322 shipped it: this round's selectors reverted."""
+    cfg = card.recipe.model_config
+    cfg = cfg._replace(**PRE_SELECTION,
+                       physics=cfg.physics._replace(mle=None))
+    return card._replace(
+        recipe=card.recipe._replace(model_config=cfg, physics_config=cfg.physics,
+                                    tracer_damping=None),
+        bbl_gamma_s=0.0)
 
 
 def shipped_pieces(cfg):
@@ -85,8 +111,9 @@ def selected_card(card, *, arm: str, rung: str):
                 f"{rung}: D122 needs the selected card, found {shipped}")
         return card
     if shipped:
-        raise GateError(f"{rung}: rebuild of the pre-selection control for "
-                        f"{shipped} is not written")
+        card = without_selection(card)
+        cfg = card.recipe.model_config
+        require(shipped_pieces(cfg) == (), f"{rung}: control rebuild kept pieces")
     require(cfg.gm_redi == orca2_l2_isoneutral_gm_redi() or rung != "rung10",
             "rung 10 control must carry round 320's L2")
     pieces = tuple(p for p in ARM_PIECES[arm] if p in DECK_PIECES[rung])

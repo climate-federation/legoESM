@@ -2067,6 +2067,15 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     # nn_aht_ijk_t = 20, rn_Ud = 0.018 (EXP00 namelist_cfg:300-307), EOS-80
     # slopes.  Rung 0 and the OMT cards still state their own block.
     model_config = model_config._replace(gm_redi=orca2_l2_isoneutral_gm_redi())
+    # ORCA2 round 323 (Decision 122): lane A rung L8's stage-3 Krhs walk with
+    # the diffusive BBL, geothermal (ln_trabbc, nn_geoflx = 2) and full-column
+    # damping (ln_tradmp, nn_zdmp = 0) in NEMO's order (EXP00
+    # namelist_cfg:256-273, :325-330), and lane B rung L5's mixed-layer
+    # eddies (ln_mle, namelist_cfg:310-313).  The step needs the deck's
+    # geothermal_heating.nc and, each step, tra_dmp's target (sponge, nemo_kt).
+    model_config = model_config._replace(
+        **orca2_l8_krhs_selection(),
+        physics=model_config.physics._replace(mle=orca2_l5_mle()))
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
@@ -2076,6 +2085,8 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         initial_state=state,
         iwm_forcing=_orca2_iwm_forcing(
             iwm_path, tmask[..., 0], metric["gphit"], metric["glamt"]),
+        tracer_damping=build_orca2_damping_for_step(
+            root, tmask, kt=1, dt_s=10800.0),
     )
     card = NEMOTestcaseCard(
         "ORCA2-zps",
@@ -2086,7 +2097,7 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         0,
         1,
         1000.0,
-        0.0,
+        10.0,   # rn_gambbl, read and inert with nn_bbl_adv = 0
         surface_boundary_condition="ncar_core_sbcblk",
         surface_input_operator="nemo_fld_read",
         unmeasured_features=(
@@ -3290,7 +3301,7 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         "LOCK_EXCHANGE-zco": ("nemo_ab3am4", 1, 0, 0.0, 0, 0.0),
         "OVERFLOW-zps": ("nemo_boxcar1_ab3", 3, 2, 20.0, 0, 1000.0),
         "GYRE-zco": ("nemo_ab3am4", 50, 0, 0.0, 0, 0.0),
-        "ORCA2-zps": ("nemo_ab3am4", 65, 0, 0.0, 1, 1000.0),
+        "ORCA2-zps": ("nemo_ab3am4", 65, 0, 10.0, 1, 1000.0),  # rn_gambbl = 10 (record ocean.output:1266; inert, nn_bbl_adv = 0)
         "VORTEX-zco": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
         # The vector-EEN deck differs from the flux deck only in the momentum
         # scheme set, so every row this table checks is the same row.
