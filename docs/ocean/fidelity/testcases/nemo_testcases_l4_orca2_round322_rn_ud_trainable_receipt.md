@@ -40,9 +40,14 @@ which sits at 0.55 of the range.
 - The collector refuses any spec'd field without a library default unless
   it is `explicit_only` (rn_Ud's config field is unset by default; each
   card sets it).
-- The rung-10 freeze is a declared exclude list next to the card; no
-  rung-10 trainer exists yet, so it binds only a trainer that passes it.
-  NO GATE beyond the test that the list drops kappa_Redi and keeps rn_Ud.
+- The rung-10 freeze is applied by the rung-10 trainer entry
+  (`build_orca2_rung10_trainable_params`, resume `6a4bd97b6`): it always
+  excludes the card's frozen list and refuses a request naming a frozen
+  parameter. A plain request at any tier on rung 10 never returns
+  kappa_Redi. The generic collector does not see the card, so a caller
+  bypassing the entry is still not stopped: NO GATE for that.
+- An explicit rn_Ud request is checked before any skip: no start value,
+  inactive scheme, or also excluded -> refused (`6a4bd97b6`).
 
 ## Predictions (PREREG_nemo_testcases_l4_orca2_round322.md)
 
@@ -86,6 +91,31 @@ body; round 315's T loss and reverse chain; tree `b9a5ad49c` (clean)
   freshwater closure 41, stage face mask 2, prognostic barotropic 8,
   ORCA2 parallel receipt 2 = 147 passed, 0 failed.
 
+## Resume (codex HOLD, three items)
+
+Reproduced all three on `1e6e1347e` (codex log): explicit extended
+request returned rn_Ud and kappa_Redi; an rn_Ud request with its scheme
+inactive and no start value returned nothing; the gradient test gated
+only finite/nonzero. Fixed in `6a4bd97b6`; no forward value changes.
+
+- Item 1: rung-10 entry applies the frozen list (above).
+- Item 2: explicit requests validated first (above).
+- Item 3: the gradient test asserts dL/dln(rn_Ud) within 1 % of the
+  preregistered -4.5e-5 (P4). Re-run through the rung-10 entry on
+  `6a4bd97b6`: 1 passed (1365 s), dL/d(raw) = -1.656732e-05,
+  dL/dln(rn_Ud) = -4.513749e-05, both unchanged
+  (`orca2_rounds/round322/resume_gradient_gate.log`).
+- Non-vacuity (`orca2_rounds/round322/nonvacuity_resume.log`): entry
+  without the frozen list -> 3 fail; pre-check removed -> 2 fail;
+  restored, 0 dirty lines. Item 3's gate fails on a sign flip (ratio
+  -1 -> off by 200 %); the old assertion passed one.
+- Default gate (split, `gates/resume_default_*.log`): citation-gate test,
+  private-import ratchet, TKE terms, freshwater closure (a: run
+  interrupted at the stage face-mask file by the 10-minute call limit;
+  the files before it all passed), prognostic barotropic + ORCA2 parallel
+  receipt + round-322 tests 21 passed (b), recipe 25 passed (c), stage
+  face mask (d): RESULT_PENDING.
+
 ## Review
 
 - codex review: operator.
@@ -98,5 +128,8 @@ body; round 315's T loss and reverse chain; tree `b9a5ad49c` (clean)
   the tier selects nothing.
 - UNASKED: the spec gate now treats `float | None` fields as eligible
   (needed to spec rn_Ud at all; never forces one into a spec).
-- UNASKED: the freeze is a declared list consumed by tests, not wired into
-  a trainer (none exists for rung 10).
+- UNASKED (resume): the freeze is wired through a new rung-10 trainer
+  entry in the training collector module (the ocean package may not
+  import training), not inside the generic collector.
+- UNASKED (resume): the pre-check refuses an unreachable request only for
+  explicit_only parameters; other `include` names keep today's behaviour.
