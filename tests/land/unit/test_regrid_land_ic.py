@@ -567,3 +567,92 @@ def test_warm_era5_soil_is_ice_consistent_with_freeze_thaw_on():
         assert bool(jnp.all(liq >= cfg.theta_liq_residual_frac * theta - 1e-12))
         C = compute_apparent_heat_capacity(Tc, theta, hyd, cfg)
         assert bool(jnp.all(jnp.isfinite(C))) and bool(jnp.all(C >= sensible_floor))
+
+
+def _hydraulics_for(ncol, nlay):
+    """Per-(column, layer) Clapp-Hornberger hydraulics with a known theta_sat."""
+    import jax.numpy as jnp
+    theta_sat = jnp.full((ncol, nlay), 0.40)
+    return SoilHydraulicsConfig(
+        retention_curve="clapp_hornberger", theta_r=0.0,
+        theta_sat=theta_sat, psi_sat=jnp.full((ncol, nlay), -0.3),
+        b_ch=jnp.full((ncol, nlay), 5.0), K_sat=jnp.full((ncol, nlay), 1e-6))
+
+
+def test_era5_soil_water_maps_clips_and_rebuilds_psi():
+    """ERA5 soil water lands on land columns only, is clipped into the
+    solver's admissible range, and psi is the model's own curve of the
+    clipped theta.  Fails if theta is not clipped or psi is left stale."""
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_hydraulics import psi_from_theta, theta_from_psi
+    rg = _load("scripts/data/regrid_land_ic.py", "_rg")
+    src_lat = np.deg2rad(np.array([10.0, 10.0]))
+    src_lon = np.deg2rad(np.array([0.0, 1.0]))          # 0 = ocean, 1 = land
+    src_land = np.array([False, True])
+    # Land donor: layer 1 saturated beyond theta_sat (0.6), layer 4 bone dry.
+    swvl = np.array([[0.9, 0.6], [0.9, 0.3], [0.9, 0.2], [0.9, 0.0]])
+    dst_lat = np.deg2rad(np.array([10.0, 50.0]))
+    dst_lon = np.deg2rad(np.array([0.1, 20.0]))
+    replace = np.array([True, False])
+    nlay = _DZ.size
+    hyd = _hydraulics_for(2, nlay)
+    theta_ic = np.full((2, nlay), 0.25)
+    psi_ic = np.full((2, nlay), -1.0)
+    theta, psi, dist, n_clip = rg.era5_soil_water(
+        theta_ic, psi_ic, _DZ, dst_lat, dst_lon, replace,
+        src_lat, src_lon, swvl, src_land, hyd)
+    lo = np.asarray(theta_from_psi(psi_dry_floor(hyd), hyd))
+    assert n_clip > 0
+    assert theta[0, 0] == pytest.approx(0.40)                 # clipped to theta_sat
+    assert theta[0, -1] == pytest.approx(lo[0, -1])           # raised to the dry floor
+    assert np.all(theta[0] >= lo[0] - 1e-12) and np.all(theta[0] <= 0.40 + 1e-12)
+    np.testing.assert_allclose(psi[0], np.asarray(psi_from_theta(theta, hyd))[0],
+                               rtol=1e-6)
+    np.testing.assert_array_equal(theta[1], theta_ic[1])      # untouched column
+    np.testing.assert_array_equal(psi[1], psi_ic[1])
+    assert np.isnan(dist[1]) and 95.0 < dist[0] < 105.0
+
+
+def test_era5_snow_takes_land_donor_and_resets_age_for_new_snow():
+    from legoesm import constants
+    rg = _load("scripts/data/regrid_land_ic.py", "_rg")
+    src_lat = np.deg2rad(np.array([10.0, 10.0, 60.0]))
+    src_lon = np.deg2rad(np.array([0.0, 1.0, 0.0]))
+    src_land = np.array([False, True, True])
+    sd_m = np.array([9.0, 0.05, 0.0])                # ocean (ignored), land, land
+    dst_lat = np.deg2rad(np.array([10.0, 60.0, -70.0]))
+    dst_lon = np.deg2rad(np.array([0.1, 0.1, 0.0]))
+    replace = np.array([True, True, False])          # land, land, glacier
+    snow_ic = np.array([0.0, 30.0, 15000.0])
+    age_ic = np.array([5.0e5, 2.0e5, 1.0e5])
+    snow, age, dist = rg.era5_snow(snow_ic, age_ic, dst_lat, dst_lon, replace,
+                                   src_lat, src_lon, sd_m, src_land)
+    assert snow[0] == pytest.approx(0.05 * constants.rho_water)
+    assert age[0] == 0.0                              # new snow: fresh
+    assert snow[1] == 0.0 and age[1] == 2.0e5         # melted away, age kept
+    assert snow[2] == 15000.0 and age[2] == 1.0e5     # glacier untouched
+    assert np.isnan(dist[2])
+
+
+def test_era5_soil_water_respects_a_van_genuchten_residual_floor():
+    """With the run's CLM-map hydraulics (van Genuchten, theta_r > 0) a near-dry
+    ERA5 profile is lifted to that floor, so the run's loader will not refuse
+    the column.  Fails if the clip ignores theta_r."""
+    import jax.numpy as jnp
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_hydraulics import theta_from_psi
+    rg = _load("scripts/data/regrid_land_ic.py", "_rg")
+    hyd = SoilHydraulicsConfig(
+        retention_curve="van_genuchten", theta_r=jnp.full((1, 1), 0.08),
+        theta_sat=jnp.full((1, 1), 0.42), alpha_vg=jnp.full((1, 1), 3.0),
+        n_vg=jnp.full((1, 1), 1.5), K_sat=jnp.full((1, 1), 1e-6))
+    src_lat = np.deg2rad(np.array([25.0])); src_lon = np.deg2rad(np.array([10.0]))
+    swvl = np.full((4, 1), 0.001)                       # ERA5 Sahara
+    theta, psi, _, n_clip = rg.era5_soil_water(
+        np.full((1, _DZ.size), 0.2), np.full((1, _DZ.size), -1.0), _DZ,
+        src_lat, src_lon, np.array([True]), src_lat, src_lon, swvl,
+        np.array([True]), hyd)
+    lo = float(np.asarray(theta_from_psi(psi_dry_floor(hyd), hyd)).ravel()[0])
+    assert lo > 0.08 and n_clip == _DZ.size
+    np.testing.assert_allclose(theta[0], lo, rtol=1e-9)
+    assert np.all(np.isfinite(psi))
