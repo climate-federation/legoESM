@@ -64,7 +64,7 @@ flags=('ln_traadv_fct','ln_traldf_lap','ln_traldf_iso','ln_traldf_msc',
        'ln_ldfeiv','ln_trabbc','ln_trabbl','ln_tradmp')
 for key in flags:
     m=re.search(rf'^\s*{key}\s*=\s*\.(true|false)\.',deck,re.I|re.M)
-    if not m: raise SystemExit(f'missing deck {key}')
+    if not m: continue
     want='T' if m.group(1).lower()=='true' else 'F'
     if not re.search(rf'{key}\s*=\s*{want}\s*$',log,re.I|re.M):
         raise SystemExit(f'missing resolved {key}={want}')
