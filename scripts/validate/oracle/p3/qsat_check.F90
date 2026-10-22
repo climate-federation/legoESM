@@ -1,5 +1,5 @@
 ! Prints the lego_sat stub's liquid/ice saturation specific humidity for (T,p) pairs
-! read from argv1, so harness.py can verify the stub against legoesm.thermo.
+! read from argv1, so make_fixture.py can verify the stub against legoesm.thermo.
 program qsat_check
   use lego_sat, only: qsl_lego, qsi_lego
   implicit none

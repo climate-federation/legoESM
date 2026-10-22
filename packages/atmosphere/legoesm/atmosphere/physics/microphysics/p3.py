@@ -1,55 +1,65 @@
-"""P3 (Predicted Particle Properties) microphysics -- faithful port of gSAM P3.
+"""P3 (Predicted Particle Properties) microphysics -- faithful port of WRF P3.
 
-Port of ``p3_main`` of gSAM 1.8.8 ``SRC/MICRO_P3/module_mp_p3.f90`` (P3 v3.1.14,
-Morrison & Milbrandt 2015) with its lookup table ``p3_lookup_table_1.dat-v4.1``,
-in the configuration gSAM ships (``micro_params.f90`` defaults, which every
-shipped gSAM case keeps): ONE free ice category, SPECIFIED cloud-droplet number
-(``log_predictNc=.false.``, ``Nc0`` = ``P3Config.Nc_0``), Khairoutdinov-Kogan
-(2000) warm rain (``iWarmRainScheme=3``), Meyers et al. (1992) deposition /
-condensation-freezing nucleation (``do_meyers=.true.``, ice-nucleation scheme 1),
-``MaxTotalIceNumber`` = 20 /cm^3, no sub-grid cloud fraction (``scpf_on=.false.``),
-calibration factors ``clbfact_dep = clbfact_sub = 1``.
+Port of ``p3_main`` of WRF v4.8.0 ``phys/module_mp_p3.F`` (P3 v4.5.2, Morrison &
+Milbrandt 2015; https://github.com/wrf-model/WRF tag v4.8.0, SHA
+06d4240ae989cc3e50af412bb472df3d9048783c) with its lookup table
+``run/p3_lookupTable_1.dat-v5.4_2momI``, in the configuration WRF runs for
+``mp_physics = 50`` (``P3_1CATEGORY``, ``mp_p3_wrapper_wrf``): ONE free ice
+category with 2-moment ice (prognostic total mass, number, rime mass and rime
+volume), SPECIFIED cloud-droplet number (``log_predictNc=.false.``; ``nccnst`` =
+``P3Config.Nc_0``), Khairoutdinov-Kogan (2000) warm rain (``iparam = 3``), Cooper
+(1986) deposition / condensation-freezing nucleation, ``max_total_Ni`` = 2000 /L,
+no sub-grid cloud fraction (``scpf_on=.false.``), calibration factors
+``clbfact_dep = clbfact_sub = 1``.
 
-Oracle provenance: http://rossby.msrc.sunysb.edu/GSAM/gsam1.8.8.tar.gz (sha256
-0e9ea4a37f4daca5051cc4018cc95bbc5583159c7c27d7d05d1104fae4ed270c; gSAM has no git
-tag/SHA).  ``tests/atmosphere/microphysics/unit/test_p3_oracle.py`` compares this
-module with the RUNNING oracle (``scripts/validate/oracle/p3/``) at max relative
-error <= 1e-10 in fp64.
+``tests/atmosphere/microphysics/unit/test_p3_oracle.py`` compares this module with
+the RUNNING oracle (``scripts/validate/oracle/p3/``) at max relative error
+<= 1e-10 in fp64.
 
-What is ported, in the oracle's order (line numbers are module_mp_p3.f90):
+What is ported, in the oracle's order (line numbers are module_mp_p3.F):
 
-1. entry clipping of sub-``qsmall`` / evaporating condensate (2218-2266);
+1. entry clipping of sub-``qsmall`` / evaporating condensate (2316-2414);
 2. per level: cloud and rain size distributions with their lambda limiters
    (``get_cloud_dsd2`` / ``get_rain_dsd2``), the total-Ni cap, the ice lookup
    table (``find_lookupTable_indices_1a/1b``, ``access_lookup_table[_coll]``,
-   bulk rime density, ice lambda limiter), collection of cloud and rain by ice
-   (with shedding above freezing), ice self-collection, melting, wet growth and
+   bulk rime density, ice number limiter), collection of cloud and rain by ice
+   (shedding above freezing), ice self-collection, melting, wet growth and
    shedding, rime density (Cober & List), immersion freezing of cloud and rain,
    semi-analytic condensation / evaporation / deposition / sublimation with the
-   rain ventilation table, Meyers nucleation, specified-Nc droplet activation,
+   rain ventilation table, Cooper nucleation, specified-Nc droplet activation,
    KK2000 autoconversion / accretion, rain self-collection and breakup, the
-   saturation-adjustment limits and the mass-conservation limiters, the state
-   update and the end-of-step clipping (2295-4002);
+   saturation-adjustment limits, the cloud / rain / ice / vapour conservation
+   limiters, the state update with rime densification on melting, and the
+   end-of-level clipping (2449-3925);
 3. cloud, rain and ice sedimentation with the oracle's adaptive (CFL) sub-steps
-   (4031-4496), homogeneous freezing below 236.15 K (4519-4652) and the final
-   consistency checks (4665-4866).
+   (3972-4496), homogeneous freezing below 233.15 K (4528-4610) and the final
+   consistency checks (4722-4895).
 
-Not ported (not reachable in the configuration above): predicted Nc and
-aerosol activation, SB2001 / Beheng warm rain, Cooper / scheme-2/3 ice
-nucleation, multi-category ice (table 2, ice-ice collection, Hallett-Mossop),
-the sub-grid cloud / precipitation fraction (SCPF), the first-time-step
-(``it <= 1``) saturation adjustment, predicted supersaturation, and the
-diagnostic outputs (reflectivity, effective radii, precipitation types).
+Not ported (not reachable for ``mp_physics = 50``): predicted Nc and aerosol
+activation (``mp_physics = 51``), triple-moment ice (53), multi-category ice
+(52: lookup table 2, ice-ice collection, Hallett-Mossop), SB2001 / Beheng /
+Kogan warm rain (``iparam`` 1, 2, 4), the sub-grid cloud / precipitation
+fraction (SCPF), predicted supersaturation, the first-time-step (``it <= 1``)
+saturation adjustment, and the diagnostic outputs (reflectivity, effective
+radii, visibility, precipitation types).
 
-Interface glue (the tier-2 audit harness's, which the oracle match certifies):
-levels are top-down here (surface at ``[:, -1]``), bottom-up in the oracle;
-``N_c`` and ``N_r`` are per m^3 here (per kg in the oracle, x rho), ``N_i`` per
-kg in both; potential temperature uses P3's own ``rgas/cp``; the beginning-of-
-step state equals the input state (``th_old = th``, ``qv_old = qv``: this
-operator-split interface has no dynamical forcing to pass), and the step is not
-the first (``it = 2``).  The saturation curves are legoESM's (``legoesm.thermo``
-specific humidity), as fed to the oracle by the audit; ``e0`` (melting, wet
-growth) stays the oracle's own SAM ``esatw`` at the freezing point.
+Interface glue (the oracle-fixture harness's, which the oracle match
+certifies): levels are top-down here (surface at ``[:, -1]``), bottom-up in the
+oracle; ``N_c`` and ``N_r`` are per m^3 here and per kg in the oracle (converted
+with the INPUT ``rho``; P3 itself uses its own dry density ``p/(R_d T)``, as WRF
+P3 does), ``N_i`` per kg in both; potential temperature uses P3's ``rd/cp``; the
+beginning-of-step state equals the input state (``th_old = th``,
+``qv_old = qv``: this operator-split interface carries no previous-step state),
+and the step is not the first (``it = 2``).  KNOWN DEVIATION in a coupled run:
+WRF carries ``th_old`` / ``qv_old`` as state from the previous microphysics
+call, so its supersaturation-forcing term (``aaa``) includes the dynamics
+tendency since then; here that part is zero and only its Bergeron part
+remains.  The oracle match certifies the port under the same zero forcing,
+not this term.  The thermodynamic constants
+(``cp``, ``g``, ``rd``, ``rv``, the latent heats) and the saturation curves are
+legoESM's (``legoesm.constants``, ``legoesm.thermo`` specific humidity), fed to
+the oracle by the fixture harness; ``e0`` (melting, wet growth) stays the
+oracle's own ``polysvp1`` at the freezing point.
 
 Slot reuse in HydrometeorState / MicrophysicsOutput::
 
@@ -61,14 +71,18 @@ condition (piecewise differentiable, exactly the oracle).  The three gates that
 already had a smoothing field keep it and reduce to the oracle at their hard
 limit: the nucleation temperature gate (``ice_sigmoid_sharpness``), the
 nucleation ice-supersaturation gate (``cooper_supi_sharpness``) and the melting
-temperature gate (``melt_sharpness``).  The sedimentation sub-step loop is an
-``equinox.internal.while_loop(kind="checkpointed")`` (unbounded, exact; reverse
-mode only, no forward-mode jvp).
+temperature gate (``melt_sharpness``).  At exactly a gate's threshold a
+sigmoid is 0.5 at every sharpness while WRF's strict comparison is 0 or 1, so
+the hard-limit match holds off the thresholds (measure-zero inputs).  The oracle's data-dependent
+sedimentation sub-step loop runs on the Morrison scheme's fixed-maximum
+machinery (``MorrisonConfig`` default ``sed_cfl_substeps_max``, chunked
+``fori_loop``, the strict path's ``equinox.error_if`` + NaN poison): a column
+that needs more sub-steps than the maximum is an error, never a clamp.
 
 References
 ----------
 - Morrison, H. & Milbrandt, J. A. (2015). J. Atmos. Sci., 72, 287-311.
-- Meyers, M. P., DeMott, P. J. & Cotton, W. R. (1992). J. Appl. Meteor., 31, 708-721.
+- Cooper, W. A. (1986). Meteor. Monogr., 21, 29-32.
 - Khairoutdinov, M. & Kogan, Y. (2000). Mon. Wea. Rev., 128, 229-243.
 """
 
@@ -79,7 +93,7 @@ import math
 from pathlib import Path
 from typing import NamedTuple
 
-import equinox.internal as eqxi
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -93,7 +107,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     autoconversion_kk2000,
     hard_saturation_blend,
 )
-from legoesm.atmosphere.physics.microphysics.config import P3Config
+from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig, P3Config
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
     MicrophysicsOutput,
@@ -102,10 +116,10 @@ from legoesm.atmosphere.physics.microphysics.output import (
 __physics_contract__ = {
     "summary": (
         "P3 (Predicted Particle Properties; Morrison & Milbrandt 2015): faithful "
-        "port of gSAM 1.8.8 module_mp_p3.f90 p3_main (v3.1.14) with lookup table "
-        "v4.1 in gSAM's default configuration -- one free ice category with "
+        "port of WRF v4.8.0 module_mp_p3.F p3_main (P3 v4.5.2) with lookup table "
+        "v5.4_2momI for mp_physics=50 -- one free 2-moment ice category with "
         "prognostic rime mass and volume, specified droplet number, KK2000 warm "
-        "rain, Meyers nucleation, adaptive sedimentation; oracle-tested to 1e-10."
+        "rain, Cooper nucleation, adaptive sedimentation; oracle-tested to 1e-10."
     ),
     "inputs": {
         "T": "K", "q_v": "kg/kg", "hydrometeors.q_c": "kg/kg",
@@ -114,7 +128,8 @@ __physics_contract__ = {
         "hydrometeors.q_g": "m^3/kg_air (P3 rime volume B_rim)",
         "hydrometeors.N_c": "1/m^3 (not read: specified Nc)",
         "hydrometeors.N_r": "1/m^3", "hydrometeors.N_i": "1/kg",
-        "p_full": "Pa", "rho": "kg/m^3", "dz": "m", "dt": "s",
+        "p_full": "Pa", "rho": "kg/m^3 (N_c/N_r unit conversion only)",
+        "dz": "m", "dt": "s",
     },
     "outputs": {
         "dT_dt": "K/s", "dq_v_dt": "kg/kg/s", "dq_c_dt": "kg/kg/s",
@@ -126,22 +141,22 @@ __physics_contract__ = {
     },
     "sign_convention": (
         "z up; surface at [:, -1].  Tendencies are (state after the P3 step - "
-        "input state)/dt, as the oracle's mtend+stend.  Latent heating uses "
-        "L_v (vapour-liquid), L_v+L_f (vapour-ice), L_f (liquid-ice), each "
-        "divided by c_pd, as P3 with gSAM's latent heats.  Precipitation >= 0 "
-        "into the surface removes water from the column."
+        "input state)/dt.  Latent heating uses L_v (vapour-liquid), L_v+L_f "
+        "(vapour-ice), L_f (liquid-ice), each divided by c_pd, as WRF P3 with "
+        "legoESM's latent heats.  Precipitation >= 0 into the surface removes "
+        "water from the column."
     ),
     "conserves": ["none"],
     "differentiable": True,
-    "reference": "Morrison & Milbrandt (2015), J. Atmos. Sci. 72, 287-311; gSAM 1.8.8 MICRO_P3",
+    "reference": "Morrison & Milbrandt (2015), J. Atmos. Sci. 72, 287-311; WRF v4.8.0 module_mp_p3.F",
     "idealized_test": (
         "tests/atmosphere/microphysics/unit/test_p3_oracle.py -- whole-call "
-        "match to the running gSAM P3 oracle (fixture p3.npz) on six columns "
+        "match to the running WRF P3 oracle (fixture p3.npz) on six columns "
         "and 226 nucleation points at dt 20 s and 300 s."
     ),
 }
 
-# --- P3 mathematical constants (module_mp_p3.f90:167-171) ---
+# --- P3 mathematical constants (p3_init, module_mp_p3.F:179-183) ---
 # P3 truncates pi; the oracle match needs P3's own value (math.pi leaves
 # 1.1e-9 relative in mi0, cons3 and every PSD moment).
 _P3_PI = 3.14159265
@@ -150,100 +165,96 @@ _SXTH = 1.0 / 6.0
 _PIOV3 = _P3_PI * _THRD
 _PIOV6 = _P3_PI * _SXTH
 
-# --- P3 physical parameters (p3_init, module_mp_p3.f90:197-253) ---
-_EP_2 = 0.622                     # const-ok: P3 qsat0 prefactor (module_mp_p3.f90:2648), not R_d/R_v
-_RHOSUR_P = 100000.0              # rhosur = 100000/(rd*T_freeze) numerator [Pa] (203)
-_RHOSUI_P = 60000.0               # rhosui = 60000/(rd*253.15) numerator [Pa] (204)
+# --- P3 physical parameters (p3_init, module_mp_p3.F:186-284) ---
+_MAX_TOTAL_NI = 2000.0e3          # max_total_Ni [1/m^3]
+_EP_2 = 0.622                     # const-ok: P3 qsat0 prefactor (melting/wet growth), not R_d/R_v
+_RHOSUR_P = 100000.0              # rhosur = 100000/(rd*T_freeze) numerator [Pa]
+_RHOSUI_P = 60000.0               # rhosui = 60000/(rd*253.15) numerator [Pa]
 _RHOSUI_T = 253.15                # rhosui temperature [K]
 _F1R = 0.78                       # rain ventilation coefficients
 _F2R = 0.32
-_CPW = 4218.0                     # P3 liquid-water heat capacity [J/kg/K]
+_D_R_MAX = 0.002                  # inv_Drmax = 1/0.002: max rain mean diameter [m]
 _QSMALL = 1.0e-14                 # minimum prognostic mass [kg/kg]
 _NSMALL = 1.0e-16                 # minimum prognostic number [1/kg]
 _BIMM = 2.0                       # Barklie & Gokhale (1959) immersion freezing
 _AIMM = 0.65
+_RHO_ICE_NUC = 900.0              # mi0 density [kg/m^3]
+_ICE_NUC_RADIUS = 1.0e-6          # mi0 radius [m]
+_MI0 = 4.0 * _PIOV3 * _RHO_ICE_NUC * _ICE_NUC_RADIUS ** 3
 _ECI = 0.5                        # cloud-ice collection efficiency
 _ERI = 1.0                        # rain-ice collection efficiency
 _BCN = 2.0                        # Stokes fall-speed exponent
-_NMLTRATIO = 0.5                  # rain number from melting / ice number lost
-_ICE_NUC_RADIUS = 1.0e-6          # micro_params IceNucleiRadius [m]
-_RHO_ICE_NUC = 900.0              # mi0 density (module_mp_p3.f90:233) [kg/m^3]
-_MI0 = 4.0 * _PIOV3 * _RHO_ICE_NUC * _ICE_NUC_RADIUS ** 3
-_MAX_TOTAL_NI = 20.0e6            # micro_params MaxTotalIceNumber [1/m^3]
-_RHO_RIME_DEFAULT = 400.0         # rhorime_c without Cober-List riming [kg/m^3]
-_ICEFALL_FUDGE = 1.0              # micro_params icefall_fudge
-_MU_R = 0.0                       # mu_r_constant (module_mp_p3.f90:213)
-_CLBFACT_DEP = 1.0                # gSAM microphysics.f90:840-841
+_NMLTRATIO = 1.0                  # rain number from melting / ice number lost
+_E0 = 6.11239921 * 100.0          # e0 = polysvp1 at the freezing point [Pa] (its liquid a0)
+_MU_R = 0.0                       # mu_r_constant
+_DSD_DROP_SIZE = 25.0e-6          # cons3 drop radius [m]
+_ACT_DROP_SIZE = 1.0e-6           # cons7 drop radius [m]
+_RHO_RIME_DEFAULT = 400.0         # rhorime_c without Cober-List riming [kg/m^3] (p3_main:2290)
+_CLBFACT_DEP = 1.0                # mp_p3_wrapper_wrf clbfact_dep / clbfact_sub
 _CLBFACT_SUB = 1.0
 
 # --- P3 rate-law coefficients (p3_main) ---
-_MU_AIR_A = 1.496e-6              # air viscosity mu = A T^1.5/(T+120)  (2205, 2385)
+_MU_AIR_A = 1.496e-6              # air viscosity mu = A T^1.5/(T+120)
 _MU_AIR_T = 120.0
-_DV_A = 8.794e-5                  # vapour diffusivity dv = A T^1.81/p   (2386)
+_DV_A = 8.794e-5                  # vapour diffusivity dv = A T^1.81/p
 _DV_EXP = 1.81
-_KAP_A = 1.414e3                  # thermal conductivity kap = A mu      (2393)
-_EII_T_LO = 253.15                # aggregation efficiency ramp (2395-2402)
-_EII_T_HI = 268.15
-_EII_LO = 0.1
-_EII_RAMP = 0.9
-_EII_DT = 15.0
-_EIIF_FR_LO = 0.6                 # Eii_fact rime-fraction ramp (2466-2478)
+_KAP_A = 1.414e3                  # thermal conductivity kap = A mu
+_EII_T_LO = 253.15                # aggregation efficiency ramp (2548-2554)
+_EII_LO = 0.001
+_EII_HI = 0.3
+_EII_DT = 20.0
+_EIIF_FR_LO = 0.6                 # Eii_fact rime-fraction ramp (2665-2677)
 _EIIF_FR_HI = 0.9
 _EIIF_FR_WIDTH = 0.3
-_SHED_DROP_INV_MASS = 1.923e6     # 1/(mass of a 1 mm drop) [1/kg] (2510, 2679)
-_WETGROWTH_QMIN = 1.0e-6          # qc+qr threshold for wet growth (2669)
-_SHED_MIN = 1.0e-10               # shedding thresholds (2678, 2680)
-_RIME_ITC_MAX = -0.001            # Cober-List iTc cap (2725)
-_RIME_RI_A = 0.5e6                # Ri = -(0.5e6 D_c) V_impact / Tc       (2735)
+_SHED_DROP_INV_MASS = 1.923e6     # 1/(mass of a 1 mm drop) [1/kg]
+_WETGROWTH_QMIN = 1.0e-6          # qc+qr threshold for wet growth
+_SHED_MIN = 1.0e-10               # shedding thresholds
+_RIME_ITC_MAX = -0.001            # Cober-List iTc cap
+_RIME_RI_A = 0.5e6                # Ri = -(0.5e6 D_c) V_impact / Tc
 _RIME_RI_MIN = 1.0
 _RIME_RI_MAX = 12.0
 _RIME_RI_SPLIT = 8.0
-_RIME_C0 = 0.051                  # rho_rime = (0.051+0.114 Ri-0.0055 Ri^2) 1000 (2739)
+_RIME_C0 = 0.051                  # rho_rime = (0.051+0.114 Ri-0.0055 Ri^2) 1000
 _RIME_C1 = 0.114
 _RIME_C2 = 0.0055
 _RIME_SCALE = 1000.0
-_RIME_HI0 = 611.0                 # rho_rime = 611+72.25 (Ri-8)            (2745)
+_RIME_HI0 = 611.0                 # rho_rime = 611+72.25 (Ri-8)
 _RIME_HI1 = 72.25
-_T_IMMERSION = 269.15             # immersion freezing below -4 C (2780, 2818)
-_T_HOMOG = 236.15                 # homogeneous freezing below -37 C (4535, 4589)
-_EVAP_QMIN = 1.0e-12              # instant evaporation/sublimation (3022-3047)
+_T_IMMERSION = 269.15             # immersion freezing at or below -4 C
+_T_HOMOG = 233.15                 # homogeneous freezing below -40 C (4540, 4578)
+_EVAP_QMIN = 1.0e-12              # instant evaporation/sublimation
 _EVAP_SUPMIN = -0.001
-_XX_MIN = 1.0e-20                 # (2997)
-_MEYERS_A = -0.639                # Meyers et al. (1992) (3086)
-_MEYERS_B = 0.1296
-_PER_LITRE = 1000.0
-_NUC_MIN = 1.0e-20                # N_nuc threshold (3093)
-_ACT_SUPMIN = 1.0e-6              # specified-Nc activation (3460)
-_AUTO_QCMIN = 1.0e-8              # autoconversion qc threshold (3520)
-_RAIN_D_BREAKUP = 280.0e-6        # breakup threshold (3631)
-_BREAKUP_EXP = 2300.0             # (3643)
-_KR_RAIN_SC = 5.78                # rain self-collection, iparam 3 (3649)
-_DSD_DROP_SIZE = 25.0e-6          # cons3 drop radius [m] (249)
-_ACT_DROP_SIZE = 1.0e-6           # cons7 drop radius [m] (253)
-_CLIP_DRY_QMAX = 1.0e-8           # entry clipping (2225-2264)
+_XX_MIN = 1.0e-20
+_NUC_MIN = 1.0e-20                # N_nuc threshold
+_ACT_SUPMIN = 1.0e-6              # specified-Nc activation
+_AUTO_QCMIN = 1.0e-8              # autoconversion qc threshold
+_RAIN_D_BREAKUP = 280.0e-6        # breakup threshold
+_BREAKUP_EXP = 2300.0
+_KR_RAIN_SC = 5.78                # rain self-collection, iparam 3
+_CLIP_DRY_QMAX = 1.0e-8           # entry clipping
 _CLIP_DRY_SUP = -0.1
-_NUC_POSSIBLE_SUP = -0.05         # nucleation-possible gate (2218, 2307)
-_SAT_TINY = 1.0e-20               # conservation-limiter floors (3702-3750)
-_SED_DT_MIN = 1.0e-4              # sedimentation sub-step loop (4060)
-_NI_MIN_SUM = 1.0e-20             # impose_max_total_Ni (6948)
-_RHO_RIME_BMIN = 1.0e-15          # calc_bulkRhoRime birim threshold (6904)
-# cloud DSD (get_cloud_dsd2, 6725-6802)
+_NUC_POSSIBLE_SUP = -0.05         # nucleation-possible gate
+_SAT_TINY = 1.0e-20               # conservation-limiter floors
+_SED_DT_MIN = 1.0e-4              # sedimentation sub-step loop
+_NI_MIN_SUM = 1.0e-20             # impose_max_total_Ni
+_RHO_RIME_BMIN = 1.0e-15          # calc_bulkRhoRime birim threshold
+# cloud DSD (get_cloud_dsd2)
 _MUC_A = 0.0005714
 _MUC_B = 0.2714
 _MUC_MIN = 2.0
 _MUC_MAX = 15.0
 _LAMC_MIN = 2.5e4
 _LAMC_MAX = 1.0e6
-# rain DSD (get_rain_dsd2, 6806-6883)
+# rain DSD (get_rain_dsd2)
 _LAMR_MAX = 1.0e5
-_LAMR_MIN = 1250.0
-# ice table indices (find_lookupTable_indices_1a/1b, 6452-6563)
+_LAMR_MIN = 1.0 / _D_R_MAX
+# ice table indices (find_lookupTable_indices_1a/1b)
 _ISIZE = 50
 _RIMSIZE = 4
 _DENSIZE = 5
 _RCOLLSIZE = 30
 _QI_IDX_OFF = 18.0
-_QI_IDX_SCALE = 4.13599
+_QI_IDX_SCALE = 3.444606
 _QI_IDX_SHIFT = 10.0
 _RHOP_SPLIT = 650.0
 _RHOP_LO0 = 50.0
@@ -252,7 +263,7 @@ _RHOP_HI_SCALE = 0.004
 _RHOP_HI_IDX = 4.0
 _QR_IDX_OFF = 5.0
 _QR_IDX_SCALE = 10.70415
-# rain table indices (find_lookupTable_indices_3, 6678-6721)
+# rain table indices (find_lookupTable_indices_3)
 _RTAB_SPLIT = 195.0e-6
 _RTAB_LO_OFF = 5.0
 _RTAB_INV_LO = 0.1
@@ -261,7 +272,7 @@ _RTAB_HI_BASE = 20.0
 _RTAB_LO_MAX = 20.0
 _RTAB_HI_MAX = 300.0
 _RTAB_JJ_MAX = 10.0
-# rain fall-speed table generation (p3_init, 563-627)
+# rain fall-speed table generation (p3_init 640-686)
 _RT_N = 300
 _RT_NBIN = 10000
 _RT_DD = 2.0                      # bin width [um]
@@ -280,24 +291,18 @@ _RT_N_SMALL = 20                  # rain-table bins: 20 small (10 um), then 280 
 _RT_N_MAX = 299                   # last interpolation index (300 bins)
 _UM = 1.0e-6                      # micrometre [m]
 _M_TO_UM = 1.0e6
-_RTAB_HI_SCALE = _THRD * 0.1       # rain-table index step above 195 um (6704)
-_ITAB_NCOL, _COLL_NCOL = 17, 8    # columns per itab / itabcoll row in the v4.1 file
-_P0 = 1.0e5                       # theta reference pressure [Pa] (audit driver glue)
+_KG_TO_G = 1000.0
+_RTAB_HI_SCALE = _THRD * 0.1       # rain-table index step above 195 um
+_ITAB_NCOL, _COLL_NCOL = 17, 5    # columns per itab / itabcoll row in the v5.4_2momI file
+_ITAB_NVAL = 14                   # tabsize
+_P0 = 1.0e5                       # theta reference pressure [Pa]
 _INV_P0 = 1.0e-5
-_RHOFAC_EXP = 0.54                # air-density fall-speed correction exponent (2203-2204)
-_STOKES = 18.0                    # Stokes drag: acn = g*rhow/(18*mu) (2206)
-_HET_GAMMA_A = 7.0                # immersion freezing gamma(7+mu_c) (2792)
-# SAM saturation vapour pressure over water at the freezing point: P3's e0
-# (polysvp1 at the freezing point with doSAMsvp=.true. -> 100*esatw, gSAM SRC/sat.f90).
-_ESATW_E0 = 6.1121                # [hPa]
-_ESATW_A1 = 17.502
-_ESATW_T0 = 273.16                # [K]
-_ESATW_T1 = 32.19                 # [K]
-_E0 = 100.0 * (_ESATW_E0 * math.exp(
-    _ESATW_A1 * (constants.T_freeze - _ESATW_T0) / (constants.T_freeze - _ESATW_T1)))
+_RHOFAC_EXP = 0.54                # air-density fall-speed correction exponent
+_STOKES = 18.0                    # Stokes drag: acn = g*rhow/(18*mu)
+_HET_GAMMA_A = 7.0                # immersion freezing gamma(7+mu_c)
+_CM3_PER_M3 = 1.0e-6
 
-# P3 thermodynamic constants from gSAM's params (legoESM values, as fed to the
-# oracle): cp, rd, rv, g, lcond, lfus; xxls = lcond+lfus, xlf = xxls-xxlv.
+# P3 thermodynamic constants (legoESM values, as fed to the oracle).
 _CP = constants.c_pd
 _INV_CP = 1.0 / _CP
 _RD = constants.R_d
@@ -308,6 +313,8 @@ _XXLS = _XXLV + constants.L_f
 _XLF = _XXLS - _XXLV
 _RHOW = constants.rho_water
 _INV_RHOW = 1.0 / _RHOW
+_CPW = constants.c_pw
+_RHO_ICE_BULK = constants.rho_ice  # rime densification target on melting (917 in P3)
 _T0 = constants.T_freeze
 _RHOSUR = _RHOSUR_P / (_RD * _T0)
 _RHOSUI = _RHOSUI_P / (_RD * _RHOSUI_T)
@@ -323,18 +330,20 @@ _G_MUR2 = math.gamma(_MU_R + 2.0)
 _G_MUR4 = math.gamma(_MU_R + 4.0)
 _G_MUR7 = math.gamma(7.0 + _MU_R)
 
-# Number of checkpoints of the reverse-mode sub-step loop: memory/recompute
-# trade-off only (the forward values are identical for any value).
-_SED_CHECKPOINTS = 16
+# Sedimentation sub-step loop: the Morrison scheme's fixed maximum (its
+# ``sed_cfl_substeps_max`` default) and chunk length (``output._SED_CHUNK``;
+# cost only, the values are identical for any chunk length).
+_SED_SUBSTEPS_MAX = MorrisonConfig._field_defaults["sed_cfl_substeps_max"]
+_SED_CHUNK = 8
 
-P3_LOOKUP_TABLE_VERSION = "4.1"
-P3_LOOKUP_TABLE_NAME = "p3_lookup_table_1.dat-v4.1"
-# Not vendored: fetched on first use and cached.  WRF v4.2 ships the same file
-# byte for byte as the gSAM 1.8.8 tarball's RUNDATA copy (sha256 below, also
-# pinned in the oracle fixture's meta).
-P3_LOOKUP_TABLE_URL = ("https://raw.githubusercontent.com/wrf-model/WRF/v4.2/run/"
+P3_LOOKUP_TABLE_VERSION = "5.4_2momI"
+P3_LOOKUP_TABLE_NAME = "p3_lookupTable_1.dat-v5.4_2momI"
+# Not vendored: fetched on first use and cached (the repo's P3 table policy).
+# The URL is the oracle's own file, WRF v4.8.0 run/ (sha256 below, also pinned
+# in the oracle fixture's meta).
+P3_LOOKUP_TABLE_URL = ("https://raw.githubusercontent.com/wrf-model/WRF/v4.8.0/run/"
                        + P3_LOOKUP_TABLE_NAME)
-P3_LOOKUP_TABLE_SHA256 = "5253e3a1aa7caa630a86cdbba549e256a2bbc56a608de5763db832e49cb65a7e"
+P3_LOOKUP_TABLE_SHA256 = "be1ab6fb03481e376e47c6c79d808af5d8ab069f2b242931e9c54801bad4ae84"
 _FETCH_TIMEOUT_S = 60.0
 
 
@@ -389,26 +398,15 @@ def p3_lookup_table_path() -> Path:
         part.unlink(missing_ok=True)
     return path
 
-# P3Config fields with NO counterpart in gSAM P3: the faithful port does not
-# read them, so a non-default value raises instead of being silently ignored.
-P3_FIELDS_WITHOUT_ORACLE_COUNTERPART = (
-    "k_au", "x_star", "k_ac", "k_sc", "D_eq", "breakup_sharpness", "a_v_r",
-    "b_v_r", "evap_coeff", "saturation_sharpness", "autoconversion_sharpness",
-    "N_i0", "cooper_a", "cooper_T_act", "dep_coeff", "q_i_min_growth",
-    "rime_coeff", "rain_rime_coeff", "agg_coeff", "melt_rate", "a_v_i",
-    "b_v_i", "c_rim_fallspeed", "rho_ice_ref", "rho_rim_accrete", "rho_ice",
-    "homogeneous_ice_supersaturation",
-)
-
 
 class P3Tables(NamedTuple):
     """P3 lookup tables (numpy, fp64).
 
-    itab     : (densize=5, rimsize=4, isize=50, 12)  ice table (p3_init 352-371)
-    itabcoll : (5, 4, 50, rcollsize=30, 2)  log10 of the ice-rain collection
-               table (p3_init 374-380)
+    itab     : (densize=5, rimsize=4, isize=50, 14)  ice table (p3_init 361-368)
+    itabcoll : (5, 4, 50, rcollsize=30, 2)  ice-rain collection table, stored
+               as log10 in the file and read as is (p3_init 370-376)
     vn, vm, revap : (300,)  rain number- and mass-weighted fall speed and
-               ventilation tables at mu_r = 0 (p3_init 563-627; the oracle's
+               ventilation tables at mu_r = 0 (p3_init 640-686; the oracle's
                ten mu_r columns are identical because mu_r_constant = 0)
     """
     itab: np.ndarray
@@ -419,11 +417,11 @@ class P3Tables(NamedTuple):
 
 
 def read_p3_lookup_table_1(path=None):
-    """Read ``p3_lookup_table_1.dat-v4.1`` as p3_init does (module_mp_p3.f90:325-384).
+    """Read ``p3_lookupTable_1.dat-v5.4_2momI`` as p3_init does (module_mp_p3.F:343-376).
 
-    Raises ``ValueError`` on a version other than 4.1 (p3_init stops there for
-    model='WRF') or a malformed size.  Returns ``(itab, itabcoll)``; itabcoll is
-    ``log10(max(value, 1e-90))`` as in p3_init.
+    Raises ``ValueError`` on a version other than 5.4_2momI (p3_init stops
+    there for model='WRF') or a malformed size.  Returns ``(itab, itabcoll)``.
+    ``path=None`` reads the cached table (:func:`p3_lookup_table_path`).
     """
     if path is None:
         path = p3_lookup_table_path()
@@ -431,24 +429,24 @@ def read_p3_lookup_table_1(path=None):
         head = f.readline().split()
         if len(head) < 2 or head[1] != P3_LOOKUP_TABLE_VERSION:
             raise ValueError(
-                f"P3 lookup table {path} has version {head[1:]!r}; P3 v3.1.14 "
+                f"P3 lookup table {path} has version {head[1:]!r}; P3 v4.5.2 "
                 f"needs v{P3_LOOKUP_TABLE_VERSION}")
         vals = np.array(f.read().split(), dtype=np.float64)
-    n_itab, n_coll = _ITAB_NCOL, _COLL_NCOL
-    blk = _ISIZE * n_itab + _ISIZE * _RCOLLSIZE * n_coll
+    blk = _ISIZE * _ITAB_NCOL + _ISIZE * _RCOLLSIZE * _COLL_NCOL
     if vals.size != _DENSIZE * _RIMSIZE * blk:
         raise ValueError(f"P3 lookup table {path}: {vals.size} values, expected "
                          f"{_DENSIZE * _RIMSIZE * blk}")
     vals = vals.reshape(_DENSIZE, _RIMSIZE, blk)
-    rows = vals[:, :, :_ISIZE * n_itab].reshape(_DENSIZE, _RIMSIZE, _ISIZE, n_itab)
-    itab = np.concatenate([rows[..., 4:12], rows[..., 13:17]], axis=-1)
-    coll = vals[:, :, _ISIZE * n_itab:].reshape(_DENSIZE, _RIMSIZE, _ISIZE, _RCOLLSIZE, n_coll)
-    itabcoll = np.log10(np.maximum(coll[..., 5:7], 1.0e-90))
+    rows = vals[:, :, :_ISIZE * _ITAB_NCOL].reshape(_DENSIZE, _RIMSIZE, _ISIZE, _ITAB_NCOL)
+    itab = rows[..., 3:3 + _ITAB_NVAL].copy()
+    coll = vals[:, :, _ISIZE * _ITAB_NCOL:].reshape(_DENSIZE, _RIMSIZE, _ISIZE, _RCOLLSIZE,
+                                                     _COLL_NCOL)
+    itabcoll = coll[..., 3:5].copy()
     return itab, itabcoll
 
 
 def _rain_tables():
-    """vn/vm/revap tables at mu_r = mu_r_constant = 0 (p3_init 563-627),
+    """vn/vm/revap tables at mu_r = mu_r_constant = 0 (p3_init 640-686),
     sequential sums like the oracle's kk loop."""
     mu_r = _MU_R
     jj = np.arange(1, _RT_N + 1, dtype=np.float64)
@@ -457,10 +455,10 @@ def _rain_tables():
     lamr = (mu_r + 1) / dm
     dd = _RT_DD
     kk = np.arange(1, _RT_NBIN + 1, dtype=np.float64)
-    dia = (kk * dd - dd * 0.5) * 1.0e-6
+    dia = (kk * dd - dd * 0.5) * _UM
     amg = _PIOV6 * _RT_RHO_DROP * dia ** 3
-    amg = amg * 1000.0
-    d_um = dia * 1.0e6
+    amg = amg * _KG_TO_G
+    d_um = dia * _M_TO_UM
     vt = np.where(d_um <= _RT_D1, _RT_A1 * amg ** (2.0 * _THRD),
                   np.where(d_um < _RT_D2, _RT_A2 * amg ** _THRD,
                            np.where(d_um < _RT_D3, _RT_A3 * amg ** _SXTH, _RT_VMAX)))
@@ -472,11 +470,11 @@ def _rain_tables():
     def seq(a):          # sequential sum over the PSD bins, as the kk loop
         return np.cumsum(a, axis=1)[:, -1]
 
-    dum1 = seq(vt * p0 * e * dd * 1.0e-6)
-    dum2 = seq(p0 * e * dd * 1.0e-6)
-    dum3 = seq(vt * p3 * e * dd * 1.0e-6)
-    dum4 = seq(p3 * e * dd * 1.0e-6)
-    dum5 = seq((vt * dia) ** 0.5 * p1 * e * dd * 1.0e-6)
+    dum1 = seq(vt * p0 * e * dd * _UM)
+    dum2 = seq(p0 * e * dd * _UM)
+    dum3 = seq(vt * p3 * e * dd * _UM)
+    dum4 = seq(p3 * e * dd * _UM)
+    dum5 = seq((vt * dia) ** 0.5 * p1 * e * dd * _UM)
     dum2 = np.maximum(dum2, _RT_FLOOR)
     dum4 = np.maximum(dum4, _RT_FLOOR)
     dum5 = np.maximum(dum5, _RT_FLOOR)
@@ -492,18 +490,6 @@ def p3_lookup_tables(path: str | None = None) -> P3Tables:
     itab, itabcoll = read_p3_lookup_table_1(path)
     vn, vm, revap = _rain_tables()
     return P3Tables(itab=itab, itabcoll=itabcoll, vn=vn, vm=vm, revap=revap)
-
-
-def check_p3_config(config: P3Config) -> None:
-    """Raise if a P3Config field without a gSAM P3 counterpart is changed."""
-    default = P3Config()
-    bad = [f for f in P3_FIELDS_WITHOUT_ORACLE_COUNTERPART
-           if getattr(config, f) != getattr(default, f)]
-    if bad:
-        raise ValueError(
-            "P3 is a faithful port of gSAM P3; these P3Config fields belonged to "
-            f"the former surrogate and have no gSAM P3 counterpart: {bad}. "
-            "Leave them at their defaults.")
 
 
 # ---------------------------------------------------------------- helpers
@@ -542,7 +528,7 @@ def _ftrunc(x):
 
 
 def _ice_indices(qitot, nitot, qirim, rhop):
-    """find_lookupTable_indices_1a (module_mp_p3.f90:6452-6523)."""
+    """find_lookupTable_indices_1a (module_mp_p3.F:6316-6370)."""
     dum1 = (jnp.log10(qitot / nitot) + _QI_IDX_OFF) * _QI_IDX_SCALE - _QI_IDX_SHIFT
     dumi = _ftrunc(dum1)
     dum1 = jnp.maximum(jnp.minimum(dum1, float(_ISIZE)), 1.0)
@@ -560,7 +546,7 @@ def _ice_indices(qitot, nitot, qirim, rhop):
 
 
 def _rain_coll_index(qr, nr):
-    """find_lookupTable_indices_1b (6527-6563)."""
+    """find_lookupTable_indices_1b (6374-6410)."""
     ok = (qr >= _QSMALL) & (nr > 0.0)
     qs = jnp.where(ok, qr, 1.0)
     ns = jnp.where(ok, nr, 1.0)
@@ -573,7 +559,7 @@ def _rain_coll_index(qr, nr):
 
 
 def _access(tab, idx):
-    """access_lookup_table (5265-5303); tab (5,4,50) for one table index."""
+    """access_lookup_table (5205-5243); tab (5,4,50) for one table index."""
     jj, ii, i, d1, d4, d5 = idx
 
     def a(J, I2, I3):
@@ -591,7 +577,7 @@ def _access(tab, idx):
 
 
 def _access_coll(tab, idx, dumj, dum3):
-    """access_lookup_table_coll (5306-5374); tab (5,4,50,30) for one index."""
+    """access_lookup_table_coll (5246-5314); tab (5,4,50,30) for one index."""
     jj, ii, i, d1, d4, d5 = idx
 
     def a(J, I2, I3, J4):
@@ -616,14 +602,15 @@ def _access_coll(tab, idx, dumj, dum3):
 
 
 def _rain_table_interp(tab, mu_r, lamr):
-    """find_lookupTable_indices_3 (6678-6721) + the caller's interpolation
-    (2929-2938, 4237-4254); the mu_r axis is fixed (mu_r = 0, both columns
-    equal, so the mu_r interpolation returns the first column exactly)."""
+    """find_lookupTable_indices_3 (6589-6632) + the caller's interpolation;
+    the mu_r axis is fixed (mu_r = 0, both columns equal, so the mu_r
+    interpolation returns the first column exactly)."""
     dum1 = (mu_r + 1.0) / lamr
     lo = dum1 <= _RTAB_SPLIT
-    r_lo = jnp.minimum(jnp.maximum((dum1 * 1.0e6 + _RTAB_LO_OFF) * _RTAB_INV_LO, 1.0), _RTAB_LO_MAX)
-    r_hi = jnp.minimum(jnp.maximum((dum1 * _M_TO_UM - _RTAB_SPLIT_UM) * _RTAB_HI_SCALE + _RTAB_HI_BASE,
-                                   _RTAB_HI_BASE), _RTAB_HI_MAX)
+    r_lo = jnp.minimum(jnp.maximum((dum1 * _M_TO_UM + _RTAB_LO_OFF) * _RTAB_INV_LO, 1.0),
+                       _RTAB_LO_MAX)
+    r_hi = jnp.minimum(jnp.maximum((dum1 * _M_TO_UM - _RTAB_SPLIT_UM) * _RTAB_HI_SCALE
+                                   + _RTAB_HI_BASE, _RTAB_HI_BASE), _RTAB_HI_MAX)
     rdumii = jnp.where(lo, r_lo, r_hi)
     dumii = jnp.where(lo, jnp.minimum(jnp.maximum(_ftrunc(r_lo), 1), _RT_N_SMALL),
                       jnp.minimum(jnp.maximum(_ftrunc(r_hi), _RT_N_SMALL), _RT_N_MAX))
@@ -636,13 +623,12 @@ def _rain_table_interp(tab, mu_r, lamr):
 
 
 def _cloud_dsd(qc, nc, rho, mask):
-    """get_cloud_dsd2 (6725-6802), iCF = 1, mu_c from Nc (dofix_pgam=F).
-    Returns (nc, mu_c, lamc, cdist, cdist1); outside ``mask`` the oracle's
-    values (nc unchanged, lamc = cdist = cdist1 = 0; mu_c = 2 placeholder,
-    never read there)."""
+    """get_cloud_dsd2 (6635-6701), iSCF = 1, iparam = 3.  Returns
+    (nc, mu_c, lamc, cdist, cdist1); outside ``mask`` the oracle's values (nc
+    unchanged, mu_c = lamc = cdist = cdist1 = 0)."""
     qcs = jnp.where(mask, qc, 1.0)
     ncl = jnp.maximum(jnp.where(mask, nc, 1.0) * 1.0, _NSMALL)
-    mu_c = _MUC_A * (ncl * 1.0e-6 * rho) + _MUC_B
+    mu_c = _MUC_A * (ncl * _CM3_PER_M3 * rho) + _MUC_B
     mu_c = 1.0 / (mu_c ** 2) - 1.0
     mu_c = jnp.minimum(jnp.maximum(mu_c, _MUC_MIN), _MUC_MAX)
     lamc = (_CONS1 * ncl * (mu_c + 3.0) * (mu_c + 2.0) * (mu_c + 1.0) / qcs) ** _THRD
@@ -654,15 +640,15 @@ def _cloud_dsd(qc, nc, rho, mask):
     nc_lim = 6.0 * lamc ** 3 * qcs / (_P3_PI * _RHOW * (mu_c + 3.0) * (mu_c + 2.0) * (mu_c + 1.0))
     ncl = jnp.where(lo | hi, nc_lim, ncl)
     cdist = ncl * (mu_c + 1.0) / lamc
+    cdist1 = ncl / _gamma(mu_c + 1.0)
     nc_new = ncl / 1.0
-    cdist1 = nc_new / _gamma(mu_c + 1.0)
     z = jnp.zeros_like(qc)
-    return (jnp.where(mask, nc_new, nc), jnp.where(mask, mu_c, _MUC_MIN),
+    return (jnp.where(mask, nc_new, nc), jnp.where(mask, mu_c, z),
             jnp.where(mask, lamc, z), jnp.where(mask, cdist, z), jnp.where(mask, cdist1, z))
 
 
 def _rain_dsd(qr, nr, mask):
-    """get_rain_dsd2 (6806-6883), iPF = 1, mu_r = 0.  Returns
+    """get_rain_dsd2 (6705-6780), iSPF = 1, mu_r = 0.  Returns
     (nr, lamr, cdistr, logn0r) with the oracle's zeros outside ``mask``."""
     qrs = jnp.where(mask, qr, 1.0)
     nrl = jnp.maximum(jnp.where(mask, nr, 1.0) * 1.0, _NSMALL)
@@ -677,15 +663,15 @@ def _rain_dsd(qr, nr, mask):
                      - math.log(_G_MUR4)) / _CONS1
     nrl = jnp.where(lo | hi, nr_lim, nrl)
     logn0r = jnp.log10(nrl) + (mu_r + 1.0) * jnp.log10(lamr) - math.log10(_G_MUR1)
+    cdistr = nrl / _G_MUR1
     nr_new = nrl / 1.0
-    cdistr = nr_new / _G_MUR1
     z = jnp.zeros_like(qr)
     return (jnp.where(mask, nr_new, nr), jnp.where(mask, lamr, z),
             jnp.where(mask, cdistr, z), jnp.where(mask, logn0r, z))
 
 
 def _bulk_rho_rime(qi_tot, qi_rim, bi_rim, mask, rho_min, rho_max):
-    """calc_bulkRhoRime (6887-6933); returns (qi_rim, bi_rim, rho_rime),
+    """calc_bulkRhoRime (6784-6830); returns (qi_rim, bi_rim, rho_rime),
     qi_rim/bi_rim unchanged outside ``mask``."""
     has_b = bi_rim >= _RHO_RIME_BMIN
     bs = jnp.where(has_b, bi_rim, 1.0)
@@ -708,7 +694,7 @@ def _bulk_rho_rime(qi_tot, qi_rim, bi_rim, mask, rho_min, rho_max):
 
 
 def _impose_max_total_ni(nitot, inv_rho, mask):
-    """impose_max_total_Ni (6937-6959), nCat = 1."""
+    """impose_max_total_Ni (6833-6855), nCat = 1."""
     m = mask & (nitot >= _NI_MIN_SUM)
     dum = _div(_MAX_TOTAL_NI * inv_rho, jnp.where(m, nitot, 1.0))
     return jnp.where(m, nitot * jnp.minimum(dum, 1.0), nitot)
@@ -727,23 +713,29 @@ def _ice_table_lookup(itab, qitot, nitot, qirim, birim, mask, cfg, idx_list):
     return nitot, qirim, birim, idx, vals
 
 
+def _ice_number_limiter(nitot, qitot, f09, f10, mask):
+    """nitot = min(nitot, f1pr09*qitot); nitot = max(nitot, f1pr10*qitot)."""
+    nitot = jnp.where(mask, jnp.minimum(nitot, f09 * qitot), nitot)
+    return jnp.where(mask, jnp.maximum(nitot, f10 * qitot), nitot)
+
+
 def _sediment(fields0, rho, inv_rho, inv_dzq, dt, present, speeds):
-    """The oracle's sedimentation sub-step loop (4047-4127 / 4211-4315 /
-    4341-4490) for one species, all columns at once.
+    """The oracle's sedimentation sub-step loop (3995-4469) for one species,
+    all columns at once, on the Morrison scheme's fixed-maximum machinery.
 
     ``fields0`` : tuple of (ncol, nlev) arrays, the first is the mass.
     ``speeds(fields) -> (fields, V_list, V_q)`` recomputes the fall speeds and
     applies the per-sub-step state adjustments (lambda limiters etc.);
     ``V_list[m]`` multiplies ``fields[m]`` in the flux; ``V_q`` sets the CFL.
-    Whole-column fluxes equal the oracle's moving-bottom-pointer loop: below the
-    lowest level holding mass every flux is exactly zero.
-    Returns (fields, accumulated surface mass flux x dt [kg/m^2]).
+    Whole-column fluxes equal the oracle's moving-bottom-pointer loop: outside
+    the oracle's [k_qxbot-1, k_qxtop] window every flux is exactly zero (no
+    mass there, so no fall speed).  At most ``_SED_SUBSTEPS_MAX`` sub-steps
+    run (in chunks of ``_SED_CHUNK``, skipping chunks once every column is
+    done); returns (fields, accumulated surface mass flux x dt [kg/m^2],
+    overflow) where ``overflow`` is True if any column still had time left.
     """
     dt_left0 = jnp.where(present, dt, 0.0).astype(rho.dtype)
     prt0 = jnp.zeros(rho.shape[0], rho.dtype)
-
-    def cond(c):
-        return jnp.any(c[1] > _SED_DT_MIN)
 
     def body(c):
         fields, dt_left, prt = c
@@ -764,22 +756,30 @@ def _sediment(fields0, rho, inv_rho, inv_dzq, dt, present, speeds):
         dt_left = jnp.where(active[:, 0], dt_left - dt_sub, dt_left)
         return tuple(out), dt_left, prt
 
-    fields, _, prt = eqxi.while_loop(cond, body, (tuple(fields0), dt_left0, prt0),
-                                     kind="checkpointed", checkpoints=_SED_CHECKPOINTS)
-    return fields, prt
+    def chunk(_, c):
+        return jax.lax.cond(
+            jnp.any(c[1] > _SED_DT_MIN),
+            lambda cc: jax.lax.fori_loop(0, _SED_CHUNK, lambda j, x: body(x), cc),
+            lambda cc: cc, c)
+
+    fields, dt_left, prt = jax.lax.fori_loop(
+        0, -(-_SED_SUBSTEPS_MAX // _SED_CHUNK), chunk, (tuple(fields0), dt_left0, prt0))
+    return fields, prt, jnp.any(dt_left > _SED_DT_MIN)
 
 
 # ---------------------------------------------------------------- P3 step
 def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
             config: P3Config = P3Config(), tables: P3Tables | None = None):
-    """One gSAM P3 step on (ncol, nlev) top-down columns.
+    """One WRF P3 step on (ncol, nlev) top-down columns.
 
-    Returns ``(state, prt_liq, prt_sol)``: ``state`` a dict of the post-step
-    T, q_v, q_c, N_c [1/m^3], q_r, N_r [1/m^3], q_i, q_rim, N_i [1/kg], B_rim;
+    ``rho`` (the caller's air density) converts N_c / N_r between per m^3 and
+    per kg only; P3's processes use its own ``p/(R_d T)``.  Returns
+    ``(state, prt_liq, prt_sol)``: ``state`` a dict of the post-step T, q_v,
+    q_c, N_c [1/m^3], q_r, N_r [1/m^3], q_i, q_rim, N_i [1/kg], B_rim;
     ``prt_liq`` / ``prt_sol`` the oracle's surface precipitation rates [m/s
-    liquid-equivalent].
+    liquid-equivalent].  Raises (``equinox.error_if``; NaN outputs and
+    gradients) if a column needs more sedimentation sub-steps than the maximum.
     """
-    check_p3_config(config)
     tb = tables if tables is not None else p3_lookup_tables()
     dtype = T.dtype
     itab = jnp.asarray(tb.itab, dtype)
@@ -791,11 +791,11 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
     pres = p_full
     odt = 1.0 / dt
     inv_dzq = 1.0 / dz
-    inv_rho = 1.0 / rho
     nccnst = config.Nc_0
     inv_rho_rime_max = 1.0 / config.rho_rim_max
+    bsmall = _QSMALL * inv_rho_rime_max
 
-    # --- interface glue (driver) + p3_main set-up (2097-2211) ---
+    # --- interface glue (driver) + p3_main set-up (2287-2297) ---
     th = T * (_P0 / pres) ** (_RD / _CP)
     tmparr1 = (pres * _INV_P0) ** (_RD * _INV_CP)
     invexn = 1.0 / tmparr1
@@ -811,18 +811,19 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
     nitot = hydrometeors.N_i
     birim = hydrometeors.q_g
 
-    qvs = _qsat_liq(t_old, pres)
-    qvi = _qsat_ice(t_old, pres)
+    # --- k_loop_1 (2323-2411) ---
+    rho_p = pres / (_RD * t)
+    inv_rho = 1.0 / rho_p
+    qvs = _qsat_liq(jnp.maximum(t_old, 1.0), pres)
+    qvi = _qsat_ice(jnp.maximum(t_old, 1.0), pres)
     ssat = qv_old - qvs
     sup = qv_old / qvs - 1.0
     supi = qv_old / qvi - 1.0
     rhofacr = (_RHOSUR * inv_rho) ** _RHOFAC_EXP
-    rhofaci = _ICEFALL_FUDGE * (_RHOSUI * inv_rho) ** _RHOFAC_EXP
+    rhofaci = (_RHOSUI * inv_rho) ** _RHOFAC_EXP
     mu_air = _MU_AIR_A * t ** 1.5 / (t + _MU_AIR_T)
     acn = _G * _RHOW / (_STOKES * mu_air)
     nc = nccnst * inv_rho
-
-    # --- entry clipping (2225-2264) ---
     c1 = (qc < _QSMALL) | ((qc < _CLIP_DRY_QMAX) & (sup < _CLIP_DRY_SUP))
     qv = jnp.where(c1, qv + qc, qv)
     th = jnp.where(c1, th - invexn * qc * _XXLV * _INV_CP, th)
@@ -839,20 +840,21 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
     qitot, nitot, qirim, birim = (jnp.where(c3, 0.0, x) for x in (qitot, nitot, qirim, birim))
     c4 = (qitot >= _QSMALL) & (qitot < _CLIP_DRY_QMAX) & (t >= _T0)
     qr = jnp.where(c4, qr + qitot, qr)
+    nr = jnp.where(c4, nr + nitot, nr)
     th = jnp.where(c4, th - invexn * qitot * _XLF * _INV_CP, th)
     qitot, nitot, qirim, birim = (jnp.where(c4, 0.0, x) for x in (qitot, nitot, qirim, birim))
     qv_cld = qv          # compute_SCPF with scpf off: Qv_cld = Qv
 
-    # --- level classes (2298-2309, 2377-2382) ---
+    # --- level classes (2449-2528) ---
     exitlevel = ~((qc >= _QSMALL) | (qr >= _QSMALL) | (qitot >= _QSMALL))
     dry = ((t < _T0) & (supi < _NUC_POSSIBLE_SUP)) | ((t >= _T0) & (sup < _NUC_POSSIBLE_SUP))
     proc = ~(exitlevel & dry)        # levels that reach label 444
     full = ~exitlevel                # levels that run every process
 
-    # --- time/space varying physical variables (2385-2402) ---
+    # --- time/space varying physical variables (2531-2554) ---
     mu = _MU_AIR_A * t ** 1.5 / (t + _MU_AIR_T)
     dv = _DV_A * t ** _DV_EXP / pres
-    sc = mu / (rho * dv)
+    sc = mu / (rho_p * dv)
     dum = 1.0 / (_RV * t ** 2)
     dqsdt = _XXLV * qvs * dum
     dqsidt = _XXLS * qvi * dum
@@ -860,27 +862,27 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
     abi = 1.0 + dqsidt * _XXLS * _INV_CP
     kap = _KAP_A * mu
     eii = jnp.where(t < _EII_T_LO, _EII_LO,
-                    jnp.where(t < _EII_T_HI, _EII_LO + (t - _EII_T_LO) / _EII_DT * _EII_RAMP, 1.0))
+                    jnp.where(t < _T0, _EII_LO + (t - _EII_T_LO) * (_EII_HI - _EII_LO) / _EII_DT,
+                              _EII_HI))
 
-    # --- size distributions and the total-Ni cap (2405-2415) ---
+    # --- size distributions and the total-Ni cap (2556-2566) ---
     has_qc = qc >= _QSMALL
     has_qr = qr >= _QSMALL
     cmask = full & has_qc
-    nc, mu_c, lamc, cdist, cdist1 = _cloud_dsd(qc, nc, rho, cmask)
+    nc, mu_c, lamc, cdist, cdist1 = _cloud_dsd(qc, nc, rho_p, cmask)
     rmask = full & has_qr
     nr, lamr, cdistr, logn0r = _rain_dsd(qr, nr, rmask)
     nitot = _impose_max_total_ni(nitot, inv_rho, full)
 
-    # --- ice lookup table (2419-2480) ---
+    # --- ice lookup table (2570-2677) ---
     imask = full & (qitot >= _QSMALL)
     nr = jnp.where(imask, jnp.maximum(nr, _NSMALL), nr)
     nitot, qirim, birim, idx, (f1pr02, f1pr03, f1pr04, f1pr05, f1pr09, f1pr10, f1pr14) = \
         _ice_table_lookup(itab, qitot, nitot, qirim, birim, imask, config, (1, 2, 3, 4, 6, 7, 9))
     dumj, dum3 = _rain_coll_index(qr, nr)
-    f1pr07 = jnp.where(has_qr, _access_coll(itabcoll[..., 0], idx, dumj, dum3), 0.0)
-    f1pr08 = jnp.where(has_qr, _access_coll(itabcoll[..., 1], idx, dumj, dum3), 0.0)
-    nitot = jnp.where(imask, jnp.minimum(nitot, f1pr09 * nitot), nitot)
-    nitot = jnp.where(imask, jnp.maximum(nitot, f1pr10 * nitot), nitot)
+    f1pr07 = _access_coll(itabcoll[..., 0], idx, dumj, dum3)
+    f1pr08 = _access_coll(itabcoll[..., 1], idx, dumj, dum3)
+    nitot = _ice_number_limiter(nitot, qitot, f1pr09, f1pr10, imask)
     qis = jnp.where(imask, qitot, 1.0)
     frim = qirim / qis
     eii_fact = jnp.where(
@@ -889,34 +891,38 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
                   jnp.where(frim < _EIIF_FR_HI, 1.0 - (frim - _EIIF_FR_LO) / _EIIF_FR_WIDTH, 0.0)),
         1.0)
 
-    # --- collection of droplets and rain by ice (2498-2549) ---
-    col_c = rhofaci * f1pr04 * qc * _ECI * rho * nitot * 1.0
+    # --- collection of droplets and rain by ice (2697-2748) ---
+    col_c = rhofaci * f1pr04 * qc * _ECI * rho_p * nitot * 1.0
     qccol = jnp.where(imask & has_qc & (t <= _T0), col_c, 0.0)
     qcshd = jnp.where(imask & has_qc & (t > _T0), col_c, 0.0)
     ncshdc = qcshd * _SHED_DROP_INV_MASS
-    qrcol = jnp.where(imask & has_qr & (t <= _T0),
-                      10.0 ** (f1pr08 + logn0r) * rho * rhofaci * _ERI * nitot * 1.0 * (1.0 - 0.0),
+    rcol = imask & has_qr
+    qrcol = jnp.where(rcol & (t <= _T0),
+                      10.0 ** (f1pr08 + logn0r) * rho_p * rhofaci * _ERI * nitot * 1.0 * (1.0 - 0.0),
                       0.0)
-    nrcol = jnp.where(imask & has_qr,
-                      10.0 ** (f1pr07 + logn0r) * rho * rhofaci * _ERI * nitot * 1.0 * (1.0 - 0.0),
+    nrcol = jnp.where(rcol,
+                      10.0 ** (f1pr07 + logn0r) * rho_p * rhofaci * _ERI * nitot * 1.0 * (1.0 - 0.0),
                       0.0)
 
-    # --- self-collection of ice (2636-2638) ---
-    nislf = jnp.where(imask, f1pr03 * rho * eii * eii_fact * rhofaci * nitot, 0.0)
+    # --- self-collection of ice (2840-2842) ---
+    nislf = jnp.where(imask, f1pr03 * rho_p * eii * eii_fact * rhofaci * nitot * nitot * 1.0, 0.0)
 
-    # --- melting (2647-2661); T gate smoothed by melt_sharpness ---
+    # --- melting (2851-2865); T gate smoothed by melt_sharpness ---
     qsat0 = _EP_2 * _E0 / (pres - _E0)
-    vent = f1pr05 + f1pr14 * sc ** _THRD * (rhofaci * rho / mu) ** 0.5
+    vent = f1pr05 + f1pr14 * sc ** _THRD * (rhofaci * rho_p / mu) ** 0.5
     melt_gate = jax.nn.sigmoid(config.melt_sharpness * (t - _T0))
-    qimlt = ((vent * ((t - _T0) * kap - rho * _XXLV * dv * (qsat0 - qv_cld)) * 2.0 * _P3_PI / _XLF
+    qimlt = ((vent * ((t - _T0) * kap - rho_p * _XXLV * dv * (qsat0 - qv_cld)) * 2.0 * _P3_PI / _XLF
               + 0.0) * nitot)
     qimlt = jnp.where(imask, jnp.maximum(qimlt, 0.0), 0.0) * melt_gate
     nimlt = qimlt * (nitot / qis)
 
-    # --- wet growth and shedding (2669-2690) ---
+    # --- wet growth and shedding (2873-2894) ---
     wet = imask & (qc + qr >= _WETGROWTH_QMIN) & (t < _T0)
-    qwgrth = ((vent * 2.0 * _P3_PI * (rho * _XXLV * dv * (qsat0 - qv_cld) - (t - _T0) * kap)
-               / (_XLF + _CPW * (t - _T0))) * nitot)
+    # Unit denominator outside the oracle's branch: L_f + c_pw (T - T0) is 0
+    # near 194 K, and an unselected 0/0 would still poison reverse-mode AD.
+    den_w = jnp.where(wet, _XLF + _CPW * (t - _T0), 1.0)
+    qwgrth = ((vent * 2.0 * _P3_PI * (rho_p * _XXLV * dv * (qsat0 - qv_cld) - (t - _T0) * kap)
+               / den_w) * nitot)
     qwgrth = jnp.where(wet, jnp.maximum(qwgrth, 0.0), 0.0)
     dumw = jnp.maximum(0.0, (qccol + qrcol) - qwgrth)
     shed = wet & (dumw >= _SHED_MIN)
@@ -929,13 +935,13 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
                     jnp.where(shed2, qrcol - dumw * qrcol * dum1w, qrcol))
     log_wetgrowth = shed
 
-    # --- ice relaxation timescale (2696-2702) ---
-    epsi = jnp.where(imask & (t < _T0), (vent * 2.0 * _P3_PI * rho * dv) * nitot, 0.0)
+    # --- ice relaxation timescale (2900-2906) ---
+    epsi = jnp.where(imask & (t < _T0), (vent * 2.0 * _P3_PI * rho_p * dv) * nitot, 0.0)
     epsi_tot = 0.0 + epsi
 
-    # --- rime density, Cober & List (2721-2765) ---
-    # (the oracle's "keep the previous level's rhorime_c" case needs qccol > 0
-    # with qc < qsmall, which cannot happen: qccol > 0 needs qc >= qsmall)
+    # --- rime density, Cober & List (2925-2969) ---
+    # (the oracle's "keep the previous level's rhorime_c" case needs qccol >=
+    # qsmall with qc < qsmall, which cannot happen: qccol > 0 needs qc >= qsmall)
     rime = (qccol >= _QSMALL) & (t < _T0) & has_qc
     vtrmi1 = f1pr02 * rhofaci
     itc = 1.0 / jnp.minimum(_RIME_ITC_MAX, t - _T0)
@@ -950,26 +956,27 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
                        _RIME_HI0 + _RIME_HI1 * (ri - _RIME_RI_SPLIT))
     rhorime_c = jnp.where(rime, rho_cl, _RHO_RIME_DEFAULT)
 
-    # --- immersion freezing of cloud (2780-2811) and rain (2818-2852) ---
+    # --- immersion freezing of cloud (2984-3015) and rain (3021-3043) ---
     het_c = cmask & (t <= _T_IMMERSION)
     dumh = (1.0 / lamc_s) ** 3
     tmpdbl1 = jnp.exp(_AIMM * (_T0 - t))
-    qcheti = jnp.where(het_c, _CONS6 * cdist1 * _gamma(_HET_GAMMA_A + mu_c) * tmpdbl1 * dumh ** 2, 0.0)
-    ncheti = jnp.where(het_c, _CONS5 * cdist1 * _gamma(mu_c + 4.0) * tmpdbl1 * dumh, 0.0)
+    tmp1h = cdist1 * tmpdbl1
+    qcheti = jnp.where(het_c, _CONS6 * _gamma(_HET_GAMMA_A + mu_c) * tmp1h * dumh ** 2, 0.0)
+    ncheti = jnp.where(het_c, _CONS5 * _gamma(mu_c + 4.0) * tmp1h * dumh, 0.0)
     het_r = rmask & (t <= _T_IMMERSION)
     cds = jnp.where(het_r, cdistr, 1.0)
     lrs = jnp.where(het_r, lamr, 1.0)
     tq1 = jnp.exp(jnp.log(cds) + math.log(_G_MUR7) - 6.0 * jnp.log(lrs))
     tq2 = jnp.exp(jnp.log(cds) + math.log(_G_MUR4) - 3.0 * jnp.log(lrs))
-    qrheti = jnp.where(het_r, _CONS6 * tq1 * tmpdbl1 * 1.0, 0.0)
-    nrheti = jnp.where(het_r, _CONS5 * tq2 * tmpdbl1 * 1.0, 0.0)
+    qrheti = jnp.where(het_r, _CONS6 * (tq1 * tmpdbl1) * 1.0, 0.0)
+    nrheti = jnp.where(het_r, _CONS5 * (tq2 * tmpdbl1) * 1.0, 0.0)
 
-    # --- condensation/evaporation, deposition/sublimation (2927-3065) ---
+    # --- condensation/evaporation, deposition/sublimation (3114-3255) ---
     lr_s = jnp.where(rmask, lamr, 1.0)
     vdum = _rain_table_interp(revap_tab, _MU_R, lr_s)
-    epsr = jnp.where(rmask, 2.0 * _P3_PI * cdistr * rho * dv
-                     * (_F1R * _G_MUR2 / lr_s + _F2R * (rho / mu) ** 0.5 * sc ** _THRD * vdum), 0.0)
-    epsc = jnp.where(cmask, 2.0 * _P3_PI * rho * dv * cdist, 0.0)
+    epsr = jnp.where(rmask, 2.0 * _P3_PI * cdistr * rho_p * dv
+                     * (_F1R * _G_MUR2 / lr_s + _F2R * (rho_p / mu) ** 0.5 * sc ** _THRD * vdum), 0.0)
+    epsc = jnp.where(cmask, 2.0 * _P3_PI * rho_p * dv * cdist, 0.0)
     cold = t < _T0
     oabi = 1.0 / abi
     xx = jnp.where(cold, epsc + epsr + epsi_tot * (1.0 + _XXLS * _INV_CP * dqsdt) * oabi,
@@ -984,42 +991,41 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
     xx = _floor(xx, _XX_MIN)
     oxx = _div(1.0, xx)
     ssat_cld = ssat
+    ssat_r = ssat
     expf = 1.0 - jnp.exp(-(xx * dt))
     qccon = jnp.where(cmask,
                       (aaa * epsc * oxx + (ssat_cld * 1.0 - aaa * oxx) * odt * epsc * oxx * expf) / ab,
                       0.0)
     qrcon = jnp.where(rmask,
-                      (aaa * epsr * oxx + (ssat * 1.0 - aaa * oxx) * odt * epsr * oxx * expf) / ab,
+                      (aaa * epsr * oxx + (ssat_r * 1.0 - aaa * oxx) * odt * epsr * oxx * expf) / ab,
                       0.0)
     qccon = jnp.where(full & (sup < _EVAP_SUPMIN) & (qc < _EVAP_QMIN), -qc * odt, qccon)
     qrcon = jnp.where(full & (sup < _EVAP_SUPMIN) & (qr < _EVAP_QMIN), -qr * odt, qrcon)
     evc = qccon < 0.0
     qcevp = jnp.where(evc, -qccon, 0.0)
-    qccon = jnp.where(evc, 0.0, qccon)
+    qccon = jnp.where(evc, 0.0, jnp.minimum(qccon, qv * odt))
     evr = qrcon < 0.0
     qrevp = jnp.where(evr, -qrcon, 0.0)
     nrevp = jnp.where(evr, qrevp * (nr / jnp.where(evr, qr, 1.0)), 0.0)
-    qrcon = jnp.where(evr, 0.0, qrcon)
+    qrcon = jnp.where(evr, 0.0, jnp.minimum(qrcon, qv * odt))
     qidep = jnp.where(imask & cold,
                       (aaa * epsi * oxx + (ssat_cld * 1.0 - aaa * oxx) * odt * epsi * oxx * expf) * oabi
                       + (qvs - dumqvi) * epsi * oabi, 0.0)
     qidep = jnp.where(full & (supi < _EVAP_SUPMIN) & (qitot < _EVAP_QMIN), -qitot * odt, qidep)
     sub = qidep < 0.0
-    qisub = jnp.where(sub, jnp.minimum(-qidep * _CLBFACT_SUB, qitot * dt), 0.0)
+    qisub = jnp.where(sub, jnp.minimum(-qidep * _CLBFACT_SUB, qitot * odt), 0.0)
     nisub = jnp.where(sub, qisub * (nitot / jnp.where(sub, qitot, 1.0)), 0.0)
-    qidep = jnp.where(sub, 0.0, qidep * _CLBFACT_DEP)
+    qidep = jnp.where(sub, 0.0, jnp.minimum(qidep * _CLBFACT_DEP, qv * odt))
+    # levels that skip to label 444 run none of the above
+    qccon, qcevp, qrcon, qrevp, nrevp, qidep, qisub, nisub = (
+        jnp.where(full, x, 0.0) for x in (qccon, qcevp, qrcon, qrevp, nrevp, qidep, qisub, nisub))
 
     # ==================== label 444: every level in ``proc`` ====================
-    # --- Meyers deposition/condensation-freezing nucleation (3080-3115);
+    # --- Cooper (1986) deposition/condensation-freezing nucleation (3268-3289);
     #     T and supi gates smoothed by ice_sigmoid_sharpness / cooper_supi_sharpness ---
     nuc_gate = (jax.nn.sigmoid(config.ice_sigmoid_sharpness * (config.cooper_T_nuc - t))
                 * jax.nn.sigmoid(config.cooper_supi_sharpness * (supi - config.cooper_supi_min)))
-    # exponent clipped one e-fold above the N_i_nuc_max cap: the min() below
-    # still returns the cap exactly there (value-identical), and exp cannot
-    # overflow into 0*inf in the reverse pass (fp32, supi > ~6.9)
-    arg = _MEYERS_A + _MEYERS_B * 100.0 * supi
-    arg_max = jnp.log(config.N_i_nuc_max / _PER_LITRE) + 1.0
-    dumn = jnp.exp(jnp.where(arg < arg_max, arg, arg_max)) * _PER_LITRE * inv_rho
+    dumn = config.N_i0 * jnp.exp(config.cooper_a * (_T0 - t)) * inv_rho
     dumn = jnp.minimum(dumn, config.N_i_nuc_max * inv_rho * 1.0)
     n_nuc = jnp.maximum(0.0, (dumn - nitot) * odt)
     q_nuc = jnp.maximum(0.0, (dumn - nitot) * _MI0 * odt)
@@ -1027,7 +1033,7 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
     ninuc = jnp.where(nuc_on, n_nuc, 0.0) * nuc_gate
     qinuc = jnp.where(nuc_on, q_nuc, 0.0) * nuc_gate
 
-    # --- droplet activation, specified Nc, it > 1 (3460-3469) ---
+    # --- droplet activation, specified Nc, it > 1 (3299-3307) ---
     duma = nccnst * inv_rho * _CONS7 - qc
     duma = jnp.maximum(0.0, duma * 1.0)
     dumqvs = _qsat_liq(t, pres)
@@ -1036,11 +1042,11 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
     duma = jnp.maximum(0.0, jnp.minimum(duma, (qv_cld - dumqvs) / ab_a))
     qcnuc = jnp.where(proc & (sup > _ACT_SUPMIN), duma * odt * 1.0, 0.0)
 
-    # --- KK2000 autoconversion (3520-3571) and accretion (3595-3622) ---
-    au = proc & (qc >= _AUTO_QCMIN)
+    # --- KK2000 autoconversion (3358-3412) and accretion (3436-3468) ---
+    au = proc & (qc * 1.0 >= _AUTO_QCMIN)
     qcs = jnp.where(au, qc, 1.0)
     ncs = jnp.where(au, nc, 1.0)
-    prc, _, _ = autoconversion_kk2000(qcs * 1.0, ncs * 1.0 * rho, rho, dt)
+    prc, _, _ = autoconversion_kk2000(qcs * 1.0, ncs * 1.0 * rho_p, rho_p, dt)
     qcaut = jnp.where(au, prc * 1.0, 0.0)
     ncautr = qcaut * _CONS3
     ncautc = jnp.where(au, qcaut * ncs / qcs, 0.0)
@@ -1052,7 +1058,7 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
     ncacc = jnp.where(qcacc == 0.0, 0.0, ncacc)
     qcacc = jnp.where(ncacc == 0.0, 0.0, qcacc)
 
-    # --- rain self-collection and breakup (3628-3652) ---
+    # --- rain self-collection and breakup (3474-3500) ---
     sr = proc & has_qr
     nr = jnp.where(sr, jnp.maximum(nr, _NSMALL), nr)
     nrs = jnp.where(sr, nr, 1.0)
@@ -1062,69 +1068,95 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
     dum2r = jnp.where(sr, (qrs / (_P3_PI * _RHOW * nrs)) ** _THRD, 0.0)
     brk = jnp.where(dum2r < _RAIN_D_BREAKUP, 1.0,
                     2.0 - jnp.exp(_BREAKUP_EXP * (dum2r - _RAIN_D_BREAKUP)))
-    nrslf = jnp.where(sr, brk * _KR_RAIN_SC * nrs * 1.0 * qrs * 1.0 * rho * 1.0, 0.0)
+    nrslf = jnp.where(sr, brk * _KR_RAIN_SC * nrs * 1.0 * qrs * 1.0 * rho_p * 1.0, 0.0)
 
-    # --- saturation-adjustment limits (3665-3705) ---
-    qcon_satadj = (qv - dumqvs) / (1.0 + _XXLV ** 2 * dumqvs / (_CP * _RV * t ** 2)) * odt
+    # --- saturation-adjustment limits (3511-3563) ---
+    qcon_satadj = (qv_cld - dumqvs) / (1.0 + _XXLV ** 2 * dumqvs / (_CP * _RV * t ** 2)) * odt * 1.0
     tmp1 = qccon + qrcon + qcnuc
-    lim_c = (tmp1 > 0.0) & (tmp1 > qcon_satadj)
+    zero_c = (tmp1 > 0.0) & (qcon_satadj < 0.0)
+    lim_c = ~zero_c & (tmp1 > 0.0) & (tmp1 > qcon_satadj)
     ratio = jnp.minimum(1.0, _div(jnp.maximum(0.0, qcon_satadj), jnp.where(lim_c, tmp1, 1.0)))
-    qccon, qrcon, qcnuc = (jnp.where(lim_c, x * ratio, x) for x in (qccon, qrcon, qcnuc))
+    qccon, qrcon, qcnuc = (jnp.where(zero_c, 0.0, jnp.where(lim_c, x * ratio, x))
+                           for x in (qccon, qrcon, qcnuc))
     evs = qcevp + qrevp
-    lim_e = ~lim_c & (evs > 0.0)
+    lim_e = ~zero_c & ~lim_c & (evs > 0.0)
     ratio = jnp.minimum(1.0, _div(jnp.maximum(0.0, -qcon_satadj), jnp.where(lim_e, evs, 1.0)))
     qcevp, qrevp, nrevp = (jnp.where(lim_e, x * ratio, x) for x in (qcevp, qrevp, nrevp))
 
-    dumqvi2 = _qsat_ice(t, pres)
-    qdep_satadj = (qv - dumqvi2) / (1.0 + _XXLS ** 2 * dumqvi2 / (_CP * _RV * t ** 2)) * odt
-    tmp1 = qidep + qinuc + 0.0 + 0.0
-    lim_d = (tmp1 > 0.0) & (tmp1 > qdep_satadj)
+    qv_tmp = qv_cld + (-qcnuc - qccon - qrcon + qcevp + qrevp) * dt
+    t_tmp = t + (qcnuc + qccon + qrcon - qcevp - qrevp) * _XXLV * _INV_CP * dt
+    dumqvi2 = _qsat_ice(t_tmp, pres)
+    qdep_satadj = (qv_tmp - dumqvi2) / (1.0 + _XXLS ** 2 * dumqvi2 / (_CP * _RV * t_tmp ** 2)) \
+        * odt * 1.0
+    tmp1 = qidep + qinuc
+    zero_d = (tmp1 > 0.0) & (qdep_satadj < 0.0)
+    lim_d = ~zero_d & (tmp1 > 0.0) & (tmp1 > qdep_satadj)
     ratio = jnp.minimum(1.0, _div(jnp.maximum(0.0, qdep_satadj), jnp.where(lim_d, tmp1, 1.0)))
-    qidep, qinuc = (jnp.where(lim_d, x * ratio, x) for x in (qidep, qinuc))
+    qidep, qinuc, ninuc = (jnp.where(zero_d, 0.0, jnp.where(lim_d, x * ratio, x))
+                           for x in (qidep, qinuc, ninuc))
     dums = _floor(qisub, _SAT_TINY)
-    qisub = qisub * jnp.minimum(1.0, _div(jnp.maximum(0.0, -qdep_satadj), _floor(qisub, _SAT_TINY)))
-    nisub = nisub * jnp.minimum(1.0, _div(qisub, dums))
+    qisub_l = qisub * jnp.minimum(1.0, _div(jnp.maximum(0.0, -qdep_satadj), _floor(qisub, _SAT_TINY)))
+    nisub_l = nisub * jnp.minimum(1.0, _div(qisub_l, dums))
+    qisub = jnp.where(zero_d, qisub, qisub_l)
+    nisub = jnp.where(zero_d, nisub, nisub_l)
 
-    # --- mass-conservation limiters (3714-3758) ---
+    # --- mass-conservation limiters (3567-3640) ---
     sinks = (qcaut + qcacc + qccol + qcevp + 0.0 + qcheti + qcshd) * dt
     sources = qc + (qccon + qcnuc) * dt
     lim = (sinks > sources) & (sinks >= _SAT_TINY)
     ratio = _div(sources, jnp.where(lim, sinks, 1.0))
-    qcaut, qcacc, qcevp, qccol, qcheti, qcshd = (
-        jnp.where(lim, x * ratio, x) for x in (qcaut, qcacc, qcevp, qccol, qcheti, qcshd))
+    qcaut, qcacc, qcevp, qccol, qcheti, qcshd, ncautc, ncacc, ncheti = (
+        jnp.where(lim, x * ratio, x)
+        for x in (qcaut, qcacc, qcevp, qccol, qcheti, qcshd, ncautc, ncacc, ncheti))
     sinks = (qrevp + qrcol + 0.0 + qrheti + 0.0) * dt
     sources = qr + (qrcon + qcaut + qcacc + qimlt + qcshd) * dt
     lim = (sinks > sources) & (sinks >= _SAT_TINY)
     ratio = _div(sources, jnp.where(lim, sinks, 1.0))
-    qrevp, qrcol, qrheti = (jnp.where(lim, x * ratio, x) for x in (qrevp, qrcol, qrheti))
+    qrevp, qrcol, qrheti, nrevp, nrcol, nrheti = (
+        jnp.where(lim, x * ratio, x) for x in (qrevp, qrcol, qrheti, nrevp, nrcol, nrheti))
     sinks = (qisub + qimlt) * dt
-    sources = qitot + (qidep + qinuc + 0.0 + 0.0 + qrcol + qccol + 0.0 + qrheti + 0.0 + qcheti
-                       + 0.0) * dt
+    sources = qitot + (qidep + qinuc + qrcol + qccol + 0.0 + qrheti + 0.0 + qcheti + 0.0) * dt
     lim = (sinks > sources) & (sinks >= _SAT_TINY)
     ratio = _div(sources, jnp.where(lim, sinks, 1.0))
-    qisub, qimlt = (jnp.where(lim, x * ratio, x) for x in (qisub, qimlt))
+    qisub, qimlt, nisub, nimlt = (
+        jnp.where(lim, x * ratio, x) for x in (qisub, qimlt, nisub, nimlt))
+    sinks = (qccon + qrcon + qcnuc + qidep + qinuc) * dt
+    sources = qv + (qcevp + qrevp + qisub) * dt
+    lim = (sinks > sources) & (sinks >= _SAT_TINY)
+    ratio = _div(sources, jnp.where(lim, sinks, 1.0))
+    qccon, qrcon, qcnuc, qidep, qinuc, ninuc = (
+        jnp.where(lim, x * ratio, x) for x in (qccon, qrcon, qcnuc, qidep, qinuc, ninuc))
 
-    # --- state update and end-of-step clipping (3766-3914), ``proc`` levels ---
+    # --- state update and end-of-level clipping (3750-3925), ``proc`` levels ---
+    has_i = qitot >= _QSMALL
+    qis2 = jnp.where(has_i, qitot, 1.0)
+    rimevolume = jnp.where(has_i, birim / qis2, 0.0)
+    rimefraction = jnp.where(has_i, qirim / qis2, 0.0)
     qc_u = qc + (-0.0 - qcheti - qccol - qcshd) * dt
     qr_u = qr + (-qrcol + qimlt - 0.0 - qrheti + qcshd - 0.0) * dt
     nr_u = nr + (-nrcol - 0.0 - nrheti + _NMLTRATIO * nimlt + nrshdr + ncshdc) * dt
-    has_i = qitot >= _QSMALL
-    qis2 = jnp.where(has_i, qitot, 1.0)
-    birim_u = jnp.where(has_i, birim - ((qisub + qimlt) / qis2) * dt * birim, birim)
-    qirim_u = jnp.where(has_i, qirim - ((qisub + qimlt) * qirim / qis2) * dt, qirim)
-    qitot_u = jnp.where(has_i, qitot - (qisub + qimlt) * dt, qitot)
+    birim_u = birim - ((qisub + qimlt) * dt * rimevolume)
+    qirim_u = qirim - ((qisub + qimlt) * dt * rimefraction)
+    qitot_u = qitot - (qisub + qimlt) * dt
     dumi = (qrcol + qccol + 0.0 + qrheti + 0.0 + qcheti + 0.0) * dt
-    qitot_u = qitot_u + (qidep + qinuc + 0.0 + 0.0) * dt + dumi
+    qitot_u = qitot_u + (qidep + qinuc) * dt + dumi
     qirim_u = qirim_u + dumi
     birim_u = birim_u + (qrcol * inv_rho_rime_max + qccol / rhorime_c
                          + (0.0 + qrheti + 0.0 + qcheti + 0.0) * inv_rho_rime_max) * dt
-    nitot_u = nitot + (ninuc + 0.0 + 0.0 - nimlt - nisub - nislf + 0.0 + nrheti + 0.0 + ncheti
-                       + 0.0) * dt
+    nitot_u = nitot + (ninuc - nimlt - nisub - nislf + 0.0 + nrheti + 0.0 + ncheti + 0.0) * dt
     neg = qirim_u < 0.0
     qirim_u = jnp.where(neg, 0.0, qirim_u)
     birim_u = jnp.where(neg, 0.0, birim_u)
     qirim_u = jnp.where(log_wetgrowth, qitot_u, qirim_u)
     birim_u = jnp.where(log_wetgrowth, qirim_u * inv_rho_rime_max, birim_u)
+    # densification of rime mass on melting (3837-3841)
+    dens = (qitot_u >= _QSMALL) & (birim_u >= bsmall) & (qimlt > 0.0)
+    bs_ = jnp.where(dens, birim_u, 1.0)
+    rho_b = qirim_u / bs_
+    q_bm = jnp.where(dens, qitot_u + qimlt * dt, 1.0)
+    # unselected levels get a unit denominator (their 0/0 would NaN the reverse pass)
+    den_b = jnp.where(dens, rho_b + (_RHO_ICE_BULK - rho_b) * qimlt * dt / q_bm, 1.0)
+    birim_u = jnp.where(dens, qirim_u / den_b, birim_u)
     qv_u = qv + (-qidep + qisub - qinuc) * dt
     th_u = th + invexn * ((qidep - qisub + qinuc) * _XXLS * _INV_CP
                           + (qrcol + qccol + 0.0 + qcheti + 0.0 + qrheti + 0.0 - qimlt)
@@ -1150,8 +1182,9 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
     th_u = jnp.where(k3, th_u - invexn * qitot_u * _XXLS * _INV_CP, th_u)
     qitot_u, nitot_u, qirim_u, birim_u = (jnp.where(k3, 0.0, x)
                                           for x in (qitot_u, nitot_u, qirim_u, birim_u))
+    qv_u = jnp.maximum(0.0, qv_u)
     nitot_u = _impose_max_total_ni(nitot_u, inv_rho, proc)
-    # log_hydrometeorsPresent after the process loop (3889-3911, 4021)
+    # log_hydrometeorsPresent after the process loop (3897-3914, 3970)
     present = jnp.any(proc & ~(k1 & k2 & k3), axis=1, keepdims=True)
 
     def upd(new, old):
@@ -1162,11 +1195,11 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
     nitot, birim = upd(nitot_u, nitot), upd(birim_u, birim)
     qv, th = upd(qv_u, qv), upd(th_u, th)
 
-    # ==================== sedimentation (4031-4496) ====================
+    # ==================== sedimentation (3984-4495) ====================
     def cloud_speeds(f):
         qc_, nc_ = f
-        m = qc_ > _QSMALL
-        nc_, mu_c_, lamc_, _, _ = _cloud_dsd(qc_, nc_, rho, m)
+        m = qc_ * 1.0 > _QSMALL
+        nc_, mu_c_, lamc_, _, _ = _cloud_dsd(qc_, nc_, rho_p, m)
         lam = jnp.where(m, lamc_, 1.0)
         v = jnp.where(m, acn * _gamma(4.0 + _BCN + mu_c_) * (1.0 / lam ** _BCN)
                       / _gamma(mu_c_ + 4.0), 0.0)
@@ -1174,7 +1207,7 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
 
     def rain_speeds(f):
         qr_, nr_ = f
-        m = qr_ > _QSMALL
+        m = qr_ * 1.0 > _QSMALL
         nr_ = jnp.where(m, jnp.maximum(nr_, _NSMALL), nr_)
         nr_, lamr_, _, _ = _rain_dsd(qr_, nr_, m)
         lam = jnp.where(m, lamr_, 1.0)
@@ -1184,28 +1217,29 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
 
     def ice_speeds(f):
         qi_, ni_, qir_, bir_ = f
-        m = qi_ > _QSMALL
+        m = qi_ >= _QSMALL
         ni_, qir_, bir_, _, (f01, f02, f09, f10) = _ice_table_lookup(
             itab, qi_, ni_, qir_, bir_, m, config, (0, 1, 6, 7))
-        ni_ = jnp.where(m, jnp.minimum(ni_, f09 * ni_), ni_)
-        ni_ = jnp.where(m, jnp.maximum(ni_, f10 * ni_), ni_)
+        ni_ = _ice_number_limiter(ni_, qi_, f09, f10, m)
         vq = jnp.where(m, f02 * rhofaci, 0.0)
         vn = jnp.where(m, f01 * rhofaci, 0.0)
         return (qi_, ni_, qir_, bir_), (vq, vn, vq, vq), vq
 
     pcol = present[:, 0]
-    (qc, nc), acc_c = _sediment((qc, nc), rho, inv_rho, inv_dzq, dt,
-                                pcol & jnp.any(qc * 1.0 >= _QSMALL, axis=1), cloud_speeds)
-    (qr, nr), acc_r = _sediment((qr, nr), rho, inv_rho, inv_dzq, dt,
-                                pcol & jnp.any(qr * 1.0 >= _QSMALL, axis=1), rain_speeds)
-    (qitot, nitot, qirim, birim), acc_i = _sediment(
-        (qitot, nitot, qirim, birim), rho, inv_rho, inv_dzq, dt,
+    (qc, nc), acc_c, over_c = _sediment((qc, nc), rho_p, inv_rho, inv_dzq, dt,
+                                        pcol & jnp.any(qc * 1.0 >= _QSMALL, axis=1),
+                                        cloud_speeds)
+    (qr, nr), acc_r, over_r = _sediment((qr, nr), rho_p, inv_rho, inv_dzq, dt,
+                                        pcol & jnp.any(qr * 1.0 >= _QSMALL, axis=1),
+                                        rain_speeds)
+    (qitot, nitot, qirim, birim), acc_i, over_i = _sediment(
+        (qitot, nitot, qirim, birim), rho_p, inv_rho, inv_dzq, dt,
         pcol & jnp.any(qitot >= _QSMALL, axis=1), ice_speeds)
     prt_liq = acc_c * _INV_RHOW * odt
     prt_liq = prt_liq + acc_r * _INV_RHOW * odt
     prt_sol = 0.0 + acc_i * _INV_RHOW * odt
 
-    # ==================== homogeneous freezing (4519-4652) ====================
+    # ==================== homogeneous freezing (4528-4610) ====================
     for is_cloud in (True, False):
         qx, nx = (qc, nc) if is_cloud else (qr, nr)
         hf = present & (qx >= _QSMALL) & (t < _T_HOMOG)
@@ -1214,15 +1248,15 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
         qitot = jnp.where(hf, qitot + qx, qitot)
         birim = jnp.where(hf, birim + qx * inv_rho_rime_max, birim)
         nitot = jnp.where(hf, nitot + nn, nitot)
-        th = jnp.where(hf, th + th / t * qx * _XLF * _INV_CP, th)
+        th = jnp.where(hf, th + invexn * qx * _XLF * _INV_CP, th)
         if is_cloud:
             qc, nc = jnp.where(hf, 0.0, qc), jnp.where(hf, 0.0, nc)
         else:
             qr, nr = jnp.where(hf, 0.0, qr), jnp.where(hf, 0.0, nr)
 
-    # ==================== final checks (4665-4866) ====================
+    # ==================== final checks (4722-4895) ====================
     fc = present & (qc * 1.0 >= _QSMALL)
-    nc_f, _, _, _, _ = _cloud_dsd(qc, nc, rho, fc)
+    nc_f, _, _, _, _ = _cloud_dsd(qc, nc, rho_p, fc)
     gone = present & ~fc
     qv = jnp.where(gone, qv + qc, qv)
     th = jnp.where(gone, th - invexn * qc * _XXLV * _INV_CP, th)
@@ -1240,8 +1274,7 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
     nr = jnp.where(fi, jnp.maximum(nr, _NSMALL), nr)
     nitot, qirim, birim, _, (g09, g10) = _ice_table_lookup(
         itab, qitot, nitot, qirim, birim, fi, config, (6, 7))
-    nitot = jnp.where(fi, jnp.minimum(nitot, g09 * nitot), nitot)
-    nitot = jnp.where(fi, jnp.maximum(nitot, g10 * nitot), nitot)
+    nitot = _ice_number_limiter(nitot, qitot, g09, g10, fi)
     rsmall = fi & (qirim < _QSMALL)
     qirim = jnp.where(rsmall, 0.0, qirim)
     birim = jnp.where(rsmall, 0.0, birim)
@@ -1254,6 +1287,19 @@ def p3_step(T, q_v, hydrometeors: HydrometeorState, p_full, rho, dz, dt,
     T_new = th * (pres * _INV_P0) ** (_RD / _CP)
     state = dict(T=T_new, q_v=qv, q_c=qc, N_c=nc * rho, q_r=qr, N_r=nr * rho,
                  q_i=qitot, q_rim=qirim, N_i=nitot, B_rim=birim)
+    # A column that needs more sedimentation sub-steps than the fixed maximum
+    # is an error (the Morrison strict path): equinox error_if on every output,
+    # plus a NaN poison so jit(grad(...)) and outputs that do not descend from
+    # sedimentation cannot drop the check.
+    overflow = over_c | over_r | over_i
+    leaves = (state, prt_liq, prt_sol)
+    leaves = eqx.error_if(
+        leaves, overflow,
+        "P3 sedimentation: a column needs more CFL sub-steps than the fixed "
+        f"maximum {_SED_SUBSTEPS_MAX} (MorrisonConfig default "
+        "sed_cfl_substeps_max); shorten the physics step")
+    poison = jnp.where(overflow, jnp.nan, 1.0).astype(dtype)
+    state, prt_liq, prt_sol = jax.tree_util.tree_map(lambda x: x * poison, leaves)
     return state, prt_liq, prt_sol
 
 
@@ -1268,7 +1314,7 @@ def p3_microphysics(
     dt: float,
     config: P3Config = P3Config(),
 ) -> MicrophysicsOutput:
-    """gSAM P3 tendencies, ``(state after the P3 step - input state) / dt``.
+    """WRF P3 tendencies, ``(state after the P3 step - input state) / dt``.
 
     Parameters
     ----------
@@ -1277,7 +1323,7 @@ def p3_microphysics(
         [m^3/kg], N_c and N_r per m^3, N_i per kg); the input N_c is not
         read (specified droplet number) and dN_c_dt resets it.
     p_full, p_half : (ncol, nlev), (ncol, nlev+1) pressure [Pa] (p_half unused)
-    rho : (ncol, nlev) air density [kg/m^3]
+    rho : (ncol, nlev) air density [kg/m^3] (N_c / N_r unit conversion only)
     dz : (ncol, nlev) layer thickness [m]
     dt : physics time step [s]
     config : P3Config
@@ -1293,7 +1339,7 @@ def p3_microphysics(
     dT_dt = (s["T"] - T) * odt
     dq_v_dt = (s["q_v"] - q_v) * odt
     dq_c_dt = (s["q_c"] - hydrometeors.q_c) * odt
-    # Opt-in repo-wide super-saturation guard (not part of gSAM P3; default
+    # Opt-in repo-wide super-saturation guard (not part of WRF P3; default
     # OFF => not traced, oracle path unchanged).  Same shared implementation
     # and post-step placement as ml_emulator: drain what the P3 step leaves
     # above hard_sat_adjust_threshold * q_sat onto the liquid curve,

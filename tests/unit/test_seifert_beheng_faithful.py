@@ -128,7 +128,7 @@ def test_simplified_autoconv_is_a_departure_qc_squared_not_qc_fourth():
 # --- Morrison dispatch reaches the faithful path -------------------------------
 
 
-def _morrison_column(scheme):
+def _morrison_column(scheme, **kw):
     from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
     from legoesm.atmosphere.physics.microphysics.morrison import (
         morrison_microphysics,
@@ -151,20 +151,30 @@ def _morrison_column(scheme):
     )
     return morrison_microphysics(
         T, q_v, hydro, p_full, p_half, rho, dz, 20.0,
-        MorrisonConfig(warm_rain_scheme=scheme),
+        MorrisonConfig(warm_rain_scheme=scheme, **kw),
     )
 
 
 def test_morrison_warm_rain_scheme_sb2001_selects_faithful_and_differs():
     """``warm_rain_scheme="seifert_beheng_sb2001"`` runs, stays finite, and gives
-    a materially different rain tendency than both the simplified proxy and
-    kk2000 — proving the faithful path is actually reached, not dead code."""
+    a materially different rain tendency than kk2000 -- proving the faithful
+    path is actually reached, not dead code.  ``"seifert_beheng"`` (formerly a
+    proxy) now runs the SAME law: bitwise identical outputs."""
     out_faith = _morrison_column("seifert_beheng_sb2001")
-    out_proxy = _morrison_column("seifert_beheng")
+    out_sb = _morrison_column("seifert_beheng")
     out_kk = _morrison_column("kk2000")
     assert bool(jnp.all(jnp.isfinite(out_faith.dq_r_dt)))
-    assert not bool(jnp.allclose(out_faith.dq_r_dt, out_proxy.dq_r_dt, rtol=1e-3))
+    for f in ("dT_dt", "dq_v_dt", "dq_c_dt", "dq_r_dt", "dN_r_dt"):
+        assert bool(jnp.array_equal(getattr(out_faith, f), getattr(out_sb, f))), f
     assert not bool(jnp.allclose(out_faith.dq_r_dt, out_kk.dq_r_dt, rtol=1e-3))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("k_au", 1.0e3), ("x_star", 3.0e-10), ("k_ac", 6.0),
+    ("autoconversion_sharpness", 100.0)])
+def test_morrison_seifert_beheng_refuses_proxy_fields(field, value):
+    with pytest.raises(ValueError, match="no counterpart"):
+        _morrison_column("seifert_beheng", **{field: value})
 
 
 def test_morrison_warm_rain_scheme_raises_on_unknown():

@@ -48,8 +48,10 @@ def test_sets_follow_the_resolved_options():
     assert resolved_inactive_fields(_cfg(), subgrid_orography=False) == _MICRO
     assert resolved_inactive_fields(
         _cfg("kk2000_cam6"), subgrid_orography=False) == _MICRO
+    # "seifert_beheng" runs SB2001 as gSAM does since the 2026-10-20 oracle
+    # port: k_au/k_ac/x_star are read by no law.
     assert resolved_inactive_fields(
-        _cfg("seifert_beheng"), subgrid_orography=False) == _KK
+        _cfg("seifert_beheng"), subgrid_orography=False) == _MICRO | _KK
     assert resolved_inactive_fields(
         _cfg("seifert_beheng_sb2001"), subgrid_orography=False) == _MICRO | _KK
     assert _HTOPO not in resolved_inactive_fields(
@@ -72,13 +74,15 @@ def test_frozen_names_leave_the_core_trainable_set():
     assert not (frozen & set(cut.raw_values))
     assert set(full.raw_values) - set(cut.raw_values) == core_frozen
     # tier 1 (user decision 2026-10-14): the kk2000 knobs are core and stay
-    # trainable under kk2000; under seifert_beheng they leave, k_au/k_ac stay
+    # trainable under kk2000; under seifert_beheng they leave, and k_au/k_ac
+    # (read by no law since the 2026-10-20 oracle port) leave too
     assert _KK <= set(cut.raw_values)
     sb = _cfg("seifert_beheng")
     cut_sb = build_trainable_params(
         active_scheme_keys=keys, tier="core", exclude=tuple(sorted(
             resolved_inactive_fields(sb, subgrid_orography=True))))
-    assert set(full.raw_values) - set(cut_sb.raw_values) == _KK | {_HTOPO}
+    assert set(full.raw_values) - set(cut_sb.raw_values) == (
+        _KK | core_frozen)
 
 
 def _morrison_out(cfg):
@@ -104,15 +108,24 @@ def _morrison_out(cfg):
 
 
 def test_morrison_sb_knobs_unread_under_kk2000():
-    """One knob at a time: bitwise inert under kk2000, each one moves the
-    output under seifert_beheng (the control that the fixture can see it)."""
+    """One knob at a time: bitwise inert under kk2000 and seifert_beheng_sb2001,
+    REFUSED under seifert_beheng (which runs SB2001 as gSAM does since the
+    2026-10-20 oracle port; the knobs have no gSAM counterpart).  Control that
+    the fixture can see a warm-rain change: kk2000 vs SB2001 differ."""
+    import pytest
+    assert not np.array_equal(
+        _morrison_out(MorrisonConfig(warm_rain_scheme="kk2000")),
+        _morrison_out(MorrisonConfig(warm_rain_scheme="seifert_beheng_sb2001")))
     for knob in ("k_au", "k_ac", "x_star"):
-        for law, moves in (("kk2000", False), ("seifert_beheng", True)):
+        for law in ("kk2000", "seifert_beheng_sb2001"):
             base = MorrisonConfig(warm_rain_scheme=law)
             a = _morrison_out(base)
             b = _morrison_out(base._replace(
                 **{knob: 2.0 * getattr(base, knob)}))
-            assert (not np.array_equal(a, b)) is moves, (knob, law)
+            assert np.array_equal(a, b), (knob, law)
+        base = MorrisonConfig(warm_rain_scheme="seifert_beheng")
+        with pytest.raises(ValueError, match="no counterpart"):
+            _morrison_out(base._replace(**{knob: 2.0 * getattr(base, knob)}))
 
 
 def test_morrison_kk2000_knobs_unread_under_seifert_beheng():

@@ -10,9 +10,7 @@
 program mg2_driver
   use micro_mg_utils, only: r8
   use micro_mg2_0, only: micro_mg_init, micro_mg_tend
-#ifdef REAL_WVSAT
   use wv_sat_methods, only: wv_sat_methods_init
-#endif
   implicit none
   real(r8), parameter :: g = 9.80616_r8, rair = 287.05_r8, rh2o = 461.51_r8
   real(r8), parameter :: cpair = 1004.64_r8, tmelt = 273.15_r8
@@ -42,9 +40,7 @@ program mg2_driver
   call get_command_argument(2, fout)
   call get_command_argument(3, aflag)
   uni = (trim(aflag) == 'T')
-#ifdef REAL_WVSAT
   call wv_sat_methods_init(r8, tmelt, 273.16_r8, 373.16_r8, 20._r8, rair/rh2o, err)
-#endif
   open(10, file=trim(fin), status='old')
   read(10, *) ncol, nlev, dt
   allocate(inp(nlev, 18), allout(ncol, nlev, 15), allprect(ncol))

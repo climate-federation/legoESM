@@ -1005,7 +1005,7 @@ def make_physics_config(
         )
     # IN-SCHEME liquid super-saturation guard (the IFS/SAM "no liquid
     # super-saturation" half; the ice half is the Koop/Kärcher homogeneous-
-    # freezing allowance, which lives inside morrison/thompson/p3 and needs no
+    # freezing allowance, which lives inside morrison/thompson and needs no
     # switch here).  Threaded through the SHARED
     # ``apply_microphysics_experiment_flags`` so a scheme that cannot carry the
     # flag raises instead of silently ignoring it — never a private copy of

@@ -199,6 +199,9 @@ end module zm_microphysics
 !               phase qsat: qsat_water as mode 1; qsat = CAM's wv_sat_svp_trans
 !               (unmodified) over the legoESM Tetens/Clausius-Clapeyron curves
 !               (patch W1, index 91), then mode 1's smooth conversion.
+!  sat_mode 6 = what the port does since zm_conv_evap moved to CAM's own qsat:
+!               qsat_water as mode 1; qsat = CESM2.1 (mode 2: estblf on the 1-K
+!               table of the Goff-Gratch svp_trans, svp_to_qsat).
 module wv_saturation
   use shr_kind_mod, only: r8 => shr_kind_r8
   use wv_sat_methods, only: wv_sat_methods_init, wv_sat_svp_water, wv_sat_svp_trans, &
@@ -301,7 +304,7 @@ contains
   elemental subroutine qsat_water(t, p, es, qs)
     real(r8), intent(in) :: t, p
     real(r8), intent(out) :: es, qs
-    if (sat_mode == 1 .or. sat_mode == 5) then
+    if (sat_mode == 1 .or. sat_mode == 5 .or. sat_mode == 6) then
        call lego_qsat(t, p, es, qs)
     else if (sat_mode == 3) then
        call tetens_hard(t, p, es, qs)

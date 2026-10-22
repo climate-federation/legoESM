@@ -535,13 +535,14 @@ def test_experiment_float_overrides_thread_and_raise():
 
 def test_all_guarded_configs_carry_the_fields():
     """Every scheme in HARD_SAT_GUARD_SCHEMES -- now including the Sundqvist
-    diagnostic scheme and the ML emulator, not just the five bulk warm-rain
-    schemes -- carries the three fields with the SAME defaults."""
+    diagnostic scheme and the ML emulator -- carries the three fields with the
+    SAME defaults.  seifert_beheng left the list: it runs gSAM's exact
+    satadj_liquid (HARD_SAT_GUARD_EXEMPT) and refuses the fields."""
     from legoesm.atmosphere.physics.microphysics.config import (
         HARD_SAT_GUARD_SCHEMES, MicrophysicsConfig,
     )
     top = MicrophysicsConfig()
-    assert len(HARD_SAT_GUARD_SCHEMES) == 6   # kessler: exempt (faithful port)
+    assert len(HARD_SAT_GUARD_SCHEMES) == 5   # kessler, seifert_beheng: exempt (faithful ports)
     for name in HARD_SAT_GUARD_SCHEMES:
         cfg = getattr(top, name)
         assert cfg.hard_saturation_adjustment is False, name
@@ -642,3 +643,21 @@ def test_mpas_poststep_hook_jit_matches_eager_and_compiles_once(ice_curve):
     assert not compiles, f"{len(compiles)} compiles on a repeated call"
     assert "_dq_hs) = _mpas_hard_saturation_poststep_jit(" in inspect.getsource(
         ModelDriver._run_column)
+
+
+@pytest.mark.parametrize("scheme", ["kessler", "seifert_beheng"])
+def test_faithful_ports_refuse_the_guard_at_config_build(scheme):
+    """User decision 2026-10-21: the faithful Kessler and Seifert-Beheng ports
+    refuse --hard-saturation-adjustment when the config is BUILT (shared
+    helper), not at run time inside the kernel."""
+    from legoesm.atmosphere.physics.microphysics.config import (
+        HARD_SAT_GUARD_EXEMPT, HARD_SAT_GUARD_SCHEMES, MicrophysicsConfig,
+        apply_microphysics_experiment_flags,
+    )
+    assert scheme in HARD_SAT_GUARD_EXEMPT and scheme not in HARD_SAT_GUARD_SCHEMES
+    leaf = getattr(MicrophysicsConfig(scheme=scheme), scheme)
+    with pytest.raises(ValueError, match="hard_saturation_adjustment=True is not supported"):
+        apply_microphysics_experiment_flags(
+            leaf, scheme, hard_saturation_adjustment=True)
+    # without the flag the same call builds the config unchanged
+    assert apply_microphysics_experiment_flags(leaf, scheme) == leaf

@@ -38,12 +38,9 @@ from legoesm.atmosphere.physics.convection.config import (
     SBMConfig, DCAConfig, KuoConfig,
 )
 from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
-from legoesm.atmosphere.physics.microphysics.seifert_beheng import (
-    seifert_beheng_microphysics,
-)
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
 from legoesm.atmosphere.physics.microphysics.config import (
-    KesslerConfig, SeifertBehengConfig, MorrisonConfig,
+    KesslerConfig, MorrisonConfig,
 )
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 from legoesm.atmosphere.physics.turbulence.smagorinsky import smagorinsky_turbulence
@@ -294,32 +291,10 @@ class TestMicrophysicsParams:
         with pytest.raises(ValueError, match="evaporation_coeff"):
             jax.grad(loss)(1.0)
 
-    def test_seifert_beheng_k_au(self):
-        T, q_v, hydro, p_full, p_half, rho, dz = _moist_microphys_column()
-        # Need positive N_c to drive autoconversion.
-        hydro = hydro._replace(N_c=jnp.full(hydro.q_c.shape, 1e8))
-
-        def loss(k):
-            cfg = SeifertBehengConfig()._replace(k_au=k)
-            out = seifert_beheng_microphysics(
-                T, q_v, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
-            )
-            return jnp.sum(out.dq_c_dt ** 2)
-
-        assert_param_grad_ok(loss, 6e2, "SeifertBeheng k_au")
-
-    def test_seifert_beheng_k_ac(self):
-        T, q_v, hydro, p_full, p_half, rho, dz = _moist_microphys_column()
-        hydro = hydro._replace(N_c=jnp.full(hydro.q_c.shape, 1e8))
-
-        def loss(k):
-            cfg = SeifertBehengConfig()._replace(k_ac=k)
-            out = seifert_beheng_microphysics(
-                T, q_v, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
-            )
-            return jnp.sum(out.dq_c_dt ** 2)
-
-        assert_param_grad_ok(loss, 5.25, "SeifertBeheng k_ac")
+    # test_seifert_beheng_k_au / _k_ac removed 2026-10-20: the stand-alone
+    # seifert_beheng scheme is gSAM M2005 (oracle port) and has no k_au/k_ac;
+    # it refuses them (tests/atmosphere/microphysics/unit/
+    # test_gsam_sb_liquid_oracle.py) and AIMIP freezes them out.
 
     def test_morrison_dep_coeff(self):
         # Cold column for ice deposition path.

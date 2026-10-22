@@ -1065,10 +1065,10 @@ def test_p3_melt_drains_qi_and_qrim():
 
 
 def test_p3_no_ice_above_nucleation_temperature():
-    """Ice formation should be negligible above cooper_T_act."""
+    """Ice formation should be negligible in a warm (above-freezing) column."""
     cfg = P3Config()
     ncol, nlev = 1, 10
-    T = jnp.full((ncol, nlev), cfg.cooper_T_act + 10.0)  # warm column
+    T = jnp.full((ncol, nlev), 275.0)  # warm column (the former cooper_T_act + 10 K)
     p_full = jnp.full((ncol, nlev), 5e4)
     p_half = jnp.broadcast_to(
         jnp.linspace(4e4, 6e4, nlev + 1)[None, :], (ncol, nlev + 1),
@@ -1089,16 +1089,16 @@ def test_p3_no_ice_above_nucleation_temperature():
     out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, 300.0, cfg)
     # Pre-fix: Cooper nucleation in P3 had no f_ice gate (same bug as
     # morrison.py / thompson.py).  dN_i_dt reached ~28 / kg / s at
-    # T = cooper_T_act + 25 K even though dq_i_dt stayed ~0 because no
+    # 25 K above the former cooper_T_act even though dq_i_dt stayed ~0 because no
     # ice mass had nucleated yet (the bug only shows up in dN_i_dt
     # until the ice number sources downstream physics).
     max_ice_form = float(jnp.max(out.dq_i_dt))
     assert max_ice_form <= 1e-12, (
-        f"P3: ice forms above cooper_T_act, max dq_i_dt = {max_ice_form:.2e}"
+        f"P3: ice forms in a warm column, max dq_i_dt = {max_ice_form:.2e}"
     )
     max_N_i_nuc = float(jnp.max(out.dN_i_dt))
     assert max_N_i_nuc <= 1e-3, (
-        f"P3: dN_i_dt = {max_N_i_nuc:.2e} /kg/s above cooper_T_act — "
+        f"P3: dN_i_dt = {max_N_i_nuc:.2e} /kg/s in a warm column — "
         "Cooper nucleation needs the f_ice gate."
     )
 
@@ -1216,7 +1216,7 @@ def test_p3_column_water_budget_closes():
 
     Mass-bearing tendencies in P3: ``dq_v + dq_c + dq_r + dq_i``.
     ``dq_rim`` is excluded: the rime mass is PART of the total ice q_i
-    (gSAM P3 qirim <= qitot), so adding it double-counts.  ``dB_rim_dt`` is
+    (WRF P3 qirim <= qitot), so adding it double-counts.  ``dB_rim_dt`` is
     volume per kg air, not a mass.  Mass closure in a closed column:
 
         ∫ (dq_v + dq_c + dq_r + dq_i) dp/g + precip = 0

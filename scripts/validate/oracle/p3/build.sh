@@ -1,35 +1,31 @@
 #!/bin/bash
-# Build the gSAM 1.8.8 P3 oracle driver used by make_fixture.py.
+# Build the WRF v4.8.0 P3 oracle driver used by make_fixture.py.
 #
-# Usage: bash build.sh <gsam1.8.8.tar.gz> <build_dir>
+# Usage: PYTHONPATH=<legoESM packages> bash build.sh <WRF checkout> <build_dir>
 #
-# The tarball is http://rossby.msrc.sunysb.edu/GSAM/gsam1.8.8.tar.gz
-# (sha256 0e9ea4a37f4daca5051cc4018cc95bbc5583159c7c27d7d05d1104fae4ed270c; gSAM
-# has no git tag/SHA, the tarball hash is the pin).  Extracts the P3 sources,
-# the lookup table and the three case soundings into <build_dir>/src, applies
-# patch_p3.py (legoESM saturation + diag dumps + compile fixes) and compiles
-# p3_driver + qsat_check with gfortran in fp64 (-fdefault-real-8
-# -fdefault-double-8), exactly as the tier-2 p3_microphysics audit did.
+# Oracle: https://github.com/wrf-model/WRF tag v4.8.0
+# (SHA 06d4240ae989cc3e50af412bb472df3d9048783c), phys/module_mp_p3.F (P3 v4.5.2)
+# and run/p3_lookupTable_1.dat-v5.4_2momI (the table p3_init requests for
+# 2-moment ice).  patch_p3.py writes the legoESM-fed scratch copy (legoESM
+# constants + saturation, process-rate dumps); it is compiled with gfortran in
+# fp64 (-fdefault-real-8 -fdefault-double-8), as the tier-1/2 oracle fixtures are.
 # Compute: run inside a SLURM job, not on a login node.
 set -euo pipefail
-TAR=$(readlink -f "$1"); B=$(readlink -m "$2")
+WRF=$(readlink -f "$1"); B=$(readlink -m "$2")
 HERE=$(cd "$(dirname "$0")" && pwd)
-echo "0e9ea4a37f4daca5051cc4018cc95bbc5583159c7c27d7d05d1104fae4ed270c  $TAR" | sha256sum -c -
-mkdir -p "$B/src"
-tar xzf "$TAR" -C "$B/src" --strip-components=1 \
-  gSAM1.8.8/SRC/MICRO_P3/module_mp_p3.f90 gSAM1.8.8/SRC/MICRO_P3/micro_params.f90 \
-  gSAM1.8.8/SRC/sat.f90 gSAM1.8.8/RUNDATA/p3_lookup_table_1.dat-v4.1 \
-  gSAM1.8.8/CASES/RCE/snd_300K gSAM1.8.8/CASES/DYCOMS_RF01/snd gSAM1.8.8/CASES/MC3E/snd
-python3 "$HERE/patch_p3.py" "$B/src/SRC/MICRO_P3" "$B"
+test "$(git -C "$WRF" rev-parse HEAD)" = "06d4240ae989cc3e50af412bb472df3d9048783c"
+echo "716950a3081ec4e338c9a918d26ec80f7ee0e40b3e284283f070423237f6a3c6  $WRF/phys/module_mp_p3.F" | sha256sum -c -
+echo "be1ab6fb03481e376e47c6c79d808af5d8ab069f2b242931e9c54801bad4ae84  $WRF/run/p3_lookupTable_1.dat-v5.4_2momI" | sha256sum -c -
+mkdir -p "$B/lookup"
+cp -f "$WRF/run/p3_lookupTable_1.dat-v5.4_2momI" "$B/lookup/"
+python3 "$HERE/patch_p3.py" "$WRF/phys/module_mp_p3.F" "$B"
 gfortran --version | head -1
-FF="-O0 -g -fdefault-real-8 -fdefault-double-8 -ffree-line-length-none -fno-range-check -fbacktrace -cpp -I$HERE"
+FF="-O0 -g -fdefault-real-8 -fdefault-double-8 -ffree-line-length-none -fno-range-check -fbacktrace -cpp"
 cd "$B"
-gfortran $FF -c micro_params_lego.f90
 gfortran $FF -c "$HERE/stubs_lego.F90"
-gfortran $FF -c src/SRC/sat.f90
-gfortran $FF -c module_mp_p3_lego.f90
+gfortran $FF -ffree-form -c module_mp_p3_lego.F
 gfortran $FF -c "$HERE/p3_driver.F90"
-gfortran $FF -o p3_driver p3_driver.o module_mp_p3_lego.o sat.o stubs_lego.o micro_params_lego.o
+gfortran $FF -o p3_driver p3_driver.o module_mp_p3_lego.o stubs_lego.o
 gfortran $FF -c "$HERE/qsat_check.F90"
 gfortran $FF -o qsat_check qsat_check.o stubs_lego.o
 test -x p3_driver && test -x qsat_check && echo BUILD_OK

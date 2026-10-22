@@ -74,3 +74,19 @@ class TestSmoothApproximations:
         ]:
             grad = jax.grad(fn)(x)
             assert jnp.isfinite(grad), f"{fn_name} has non-finite gradient at x=0"
+
+
+def test_infinite_sharpness_is_the_exact_hard_limit():
+    import math
+    x = jnp.array([-2.0, -1e-30, 0.0, 1e-30, 3.0])
+    y = jnp.array([1.0, 0.0, 0.0, -1.0, 5.0])
+    inf = math.inf
+    assert jnp.array_equal(sigmoid_switch(x, inf), (x >= 0).astype(x.dtype))
+    assert jnp.array_equal(smooth_max(x, y, inf), jnp.maximum(x, y))
+    assert jnp.array_equal(smooth_min(x, y, inf), jnp.minimum(x, y))
+    assert jnp.array_equal(smooth_relu(x, inf), jnp.maximum(x, 0.0))
+    assert jnp.array_equal(smooth_clamp(x, -1.0, 1.0, inf), jnp.clip(x, -1.0, 1.0))
+    import numpy as np
+    assert jnp.array_equal(sigmoid_switch(x, np.float64(inf)), (x >= 0).astype(x.dtype))
+    # a traced sharpness still takes the smooth path
+    assert float(jax.jit(lambda s: sigmoid_switch(jnp.array(0.0), s))(10.0)) == 0.5

@@ -170,9 +170,9 @@ def test_ice_melts_above_freezing():
     hp = hp._replace(q_i=q_i_uniform)
     out_m, out_p = _run_both(T, q_v, hm, hp, p_full, p_half, rho, dz)
 
-    # p3 is not checked here: with N_i = 0 input the gSAM P3 oracle itself
-    # melts at ~1e-17 kg/kg/s (melting scales with the floored ice number) and
-    # leaves no rain at these levels; the faithful port matches it.
+    # p3 is not checked here: the exclusion was measured on the earlier gSAM P3
+    # port (with N_i = 0 input it melts at ~1e-17 kg/kg/s and leaves no rain at
+    # these levels).  The WRF P3 port's melting is pinned by its oracle test.
     for label, out in [("morrison", out_m)]:
         warm_mask = T[0] > constants.T_freeze
         if jnp.any(warm_mask):

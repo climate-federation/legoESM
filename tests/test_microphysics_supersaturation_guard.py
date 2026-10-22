@@ -62,7 +62,9 @@ from tests import _ratchet_audit as ra
 # guard); adding one requires editing this line, which forces the reviewer to
 # read the reason string. Mirrors the grow-only baseline pattern in
 # ``tests/test_dispatch_hardening.py``.
-BASELINE_EXEMPT = frozenset({"sdm", "fast_sbm", "none",
+# seifert_beheng: added 2026-10-20 by the gSAM oracle port (the scheme runs
+# gSAM's exact satadj_liquid every call and refuses the opt-in guard).
+BASELINE_EXEMPT = frozenset({"sdm", "fast_sbm", "none", "seifert_beheng",
                              # faithful ESCOMP kessler_run port (no guard)
                              "kessler"})
 
@@ -311,6 +313,7 @@ def test_exempt_reasons_name_symbols_that_actually_run() -> None:
         "sdm": [("sdm/condensation.py", "integrate_radius"),
                 ("sdm/condensation.py", "saturation_vapor_pressure"),
                 ("sdm/column.py", "relative_humidity")],
+        "seifert_beheng": [("seifert_beheng.py", "saturation_adjustment_gsam")],
         "fast_sbm": [
             ("fast_sbm/supersaturation.py", "integrate_supersaturation"),
             ("fast_sbm/condensation_driver.py", "integrate_supersaturation"),

@@ -20,7 +20,8 @@ program mg2_snow_procs
        snow_self_aggregation, accrete_cloud_water_snow, bergeron_process_snow, &
        evaporate_sublimate_precip, heterogeneous_rain_freezing, ice_autoconversion, rhosn
   use micro_mg2_0, only: micro_mg_init
-  use wv_sat_methods, only: qsat_water => wv_sat_qsat_water, qsat_ice => wv_sat_qsat_ice
+  use wv_sat_methods, only: qsat_water => wv_sat_qsat_water, qsat_ice => wv_sat_qsat_ice, &
+       wv_sat_methods_init
   implicit none
   real(r8), parameter :: g = 9.80616_r8, rair = 287.05_r8, rh2o = 461.51_r8
   real(r8), parameter :: cpair = 1004.64_r8, tmelt = 273.15_r8
@@ -35,6 +36,7 @@ program mg2_snow_procs
        ums, uns, nsagg, pgam, lamc, psacws, npsacws, bergs, prds, qric, nric, lamr, n0r, &
        mnuccr, nnuccr, lami, n0i, niic, prci, nprci, pre, am
   call get_command_argument(1, fin); call get_command_argument(2, fout)
+  call wv_sat_methods_init(r8, tmelt, 273.16_r8, 373.16_r8, 20._r8, rair/rh2o, err)
   call get_command_argument(3, adcs); read(adcs, *) dcs
   call micro_mg_init(kind=r8, gravit=g, rair=rair, rh2o=rh2o, cpair=cpair, &
        tmelt_in=tmelt, latvap=latvap, latice=latice, rhmini_in=0.8_r8, &

@@ -45,7 +45,7 @@ def test_helper_follows_scheme_pins_and_orography():
     assert ap.aimip_inactive_fields(**kw, subgrid_orography=True) == (
         cloud | _SB | {_HTOPO})
     assert ap.aimip_inactive_fields(**kw, subgrid_orography=False,
-                                    param_fixed=_PIN_SB) == cloud | _KK
+                                    param_fixed=_PIN_SB) == cloud | _KK | _SB
     assert ap.aimip_inactive_fields(
         cloud_scheme="xu_randall", microphysics="sundqvist", gwd="none",
         subgrid_orography=True) == frozenset()
@@ -119,7 +119,9 @@ def test_scale_build_freezes_by_resolved_warm_rain_law(monkeypatch):
     kk = names({})
     assert not (kk & _SB) and _KK <= kk
     sb = names(_PIN_SB)                    # the deck pins the SB law
-    assert not (sb & _KK) and _SB <= sb
+    # k_au/k_ac/x_star are read by no law since the 2026-10-20 oracle port
+    # ("seifert_beheng" runs SB2001 as gSAM does), so they leave here too.
+    assert not (sb & _KK) and not (sb & _SB)
 
 
 def _array_knobs(classical):

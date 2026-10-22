@@ -11,11 +11,10 @@ constituents legoESM carries).  stubs.F90 supplies CAM infrastructure;
 patch_wv_sat.py (W1) lets CAM's own wv_sat_svp_trans run on legoESM's curves.
 
 Variant (the tier-1 audit's V1, oracle_audit/zm_deep_convection, with the
-evaporation's qsat moved to CAM's mixed-phase form): legoESM constants
-(physconst mode 1), legoESM's water saturation curve reproduced in Fortran
-for qsat_water and, for zm_conv_evap's qsat, CAM's svp_trans liquid->ice
-blend over legoESM's Tetens / Clausius-Clapeyron curves (wv_saturation
-sat_mode 5), and the ientropy Brent solve tightened to tol 1e-11 K / EPS
+evaporation's qsat moved to CAM's own): legoESM constants (physconst mode 1),
+legoESM's water saturation curve reproduced in Fortran for qsat_water and, for
+zm_conv_evap's qsat, CAM's unmodified table qsat (estblf on the 1-K table of
+the Goff-Gratch svp_trans; wv_saturation sat_mode 6), and the ientropy Brent solve tightened to tol 1e-11 K / EPS
 1e-15 so it converges to the root the port's Newton solve finds.  Heights are the port's own (compute_column_geometry, the CAM-SE
 geopotential_t form).  Everything else is the stock CAM code path.
 
@@ -48,7 +47,7 @@ REAL_COLS = os.path.join(REPO, "tests", "atmosphere", "hydrostatic", "unit", "fi
                          "zm_cam6_real_zero_humidity_columns.npz")
 DT = 1800.0  # CAM6 physics step (ztodt)
 # V1: (const_mode, sat_mode, ientropy tol [K], ientropy EPS)
-VARIANT = (1, 5, 1e-11, 1e-15)
+VARIANT = (1, 6, 1e-11, 1e-15)
 # convtran1 tracers: (fixture key, legoESM tracer name, oracle output name)
 TRACERS = (("qc", "q_c", "dqc_convtran"), ("qi", "q_i", "dqi_convtran"),
            ("nc", "N_c", "dnc_convtran"), ("ni", "N_i", "dni_convtran"),

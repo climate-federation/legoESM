@@ -1183,8 +1183,12 @@ def resolved_inactive_fields(physics_config, *,
     reads, from the BUILT config (the ``_inactive_keys`` pattern; the
     ``assert_no_inert`` gate on the first gradient catches the rest).
 
-    * Morrison ``k_au``/``k_ac``/``x_star``: read only by the
-      ``warm_rain_scheme == "seifert_beheng"`` branch (morrison.py).
+    * Morrison ``k_au``/``k_ac``/``x_star``: read by no warm-rain law (the
+      former ``"seifert_beheng"`` proxy now runs SB2001 as gSAM does and
+      refuses them, morrison.py), so always inactive under Morrison.
+    * every spec'd ``SeifertBehengConfig`` knob but ``Nc_0``: the stand-alone
+      ``seifert_beheng`` scheme is gSAM M2005 and refuses them
+      (seifert_beheng.py).
     * Morrison ``autocon_fact``/``accre_enhan_fact``: read only by the two
       kk2000 laws, ``"kk2000"`` and ``"kk2000_cam6"`` (morrison.py); neither
       Seifert-Beheng law reads them.
@@ -1194,10 +1198,16 @@ def resolved_inactive_fields(physics_config, *,
     """
     out = set()
     micro = getattr(physics_config, "microphysics", None)
-    if (getattr(micro, "scheme", None) == "morrison"
-            and micro.morrison.warm_rain_scheme != "seifert_beheng"):
+    if getattr(micro, "scheme", None) == "morrison":
         out |= {f"atm.micro.MorrisonConfig.{f}"
                 for f in ("k_au", "k_ac", "x_star")}
+    if getattr(micro, "scheme", None) == "seifert_beheng":
+        # The scheme is gSAM M2005 (liquid only, SB2001), which reads only
+        # Nc_0 and refuses every other SeifertBehengConfig field.
+        from legoesm.atmosphere.physics.microphysics import config as _mcfg
+        out |= {f"atm.micro.SeifertBehengConfig.{f}"
+                for f in _mcfg.__param_spec__["SeifertBehengConfig"]["params"]
+                if f != "Nc_0"}
     if (getattr(micro, "scheme", None) == "morrison"
             and micro.morrison.warm_rain_scheme not in _KK2000_WARM_RAIN):
         out |= {f"atm.micro.MorrisonConfig.{f}"

@@ -1,31 +1,32 @@
-"""Generate tests/atmosphere/microphysics/oracle_fixtures/p3.npz by RUNNING gSAM P3.
+"""Generate tests/atmosphere/microphysics/oracle_fixtures/p3.npz by RUNNING WRF P3.
 
-Oracle: gSAM 1.8.8 SRC/MICRO_P3/module_mp_p3.f90 (P3 v3.1.14), lookup table
-RUNDATA/p3_lookup_table_1.dat-v4.1, from the tarball
-http://rossby.msrc.sunysb.edu/GSAM/gsam1.8.8.tar.gz (sha256
-0e9ea4a37f4daca5051cc4018cc95bbc5583159c7c27d7d05d1104fae4ed270c), built by
-build.sh (fp64, legoESM saturation + constants, process-rate dumps).  The gSAM
-defaults are used (micro_params.f90): do_meyers=T, iWarmRainScheme=3 (KK2000),
-log_predictNc=F, Nc0=100 /cm^3, MaxTotalIceNumber=20e6 /m^3,
-iIceNucleationScheme=1, nCat=1, scpf off, clbfact_dep=clbfact_sub=1.
+Oracle: WRF v4.8.0 (https://github.com/wrf-model/WRF, tag v4.8.0, SHA
+06d4240ae989cc3e50af412bb472df3d9048783c) phys/module_mp_p3.F (P3 v4.5.2) with
+run/p3_lookupTable_1.dat-v5.4_2momI, built by build.sh (fp64, legoESM
+saturation + constants, process-rate dumps).  Configuration: WRF
+mp_physics = 50 (P3_1CATEGORY) as mp_p3_wrapper_wrf runs it -- one 2-moment ice
+category, specified droplet number (nccnst = 200 /cm^3, p3_init), KK2000 warm
+rain (iparam = 3), Cooper (1986) nucleation, max_total_Ni = 2000 /L, no
+sub-grid cloud fraction, clbfact_dep = clbfact_sub = 1.
 
-Usage (inside a SLURM job, after ``bash build.sh <tar> <build>``)::
+Usage (inside a SLURM job, after ``bash build.sh <WRF> <build>``)::
 
-    PYTHONPATH=<legoESM packages> python make_fixture.py --build <build> --out p3.npz
+    PYTHONPATH=<legoESM packages> python make_fixture.py --build <build> \
+        --cases <dir holding RCE/snd_300K, DYCOMS_RF01/snd, MC3E/snd> --out p3.npz
 
-Harness glue (the tier-2 p3_microphysics audit's, unchanged): level order is
-top-down here and bottom-up in the driver (model='WRF'); N_c, N_r are per m^3
-here and per kg in the oracle (x rho); th = T*(1e5/p)**(rgas/cp) with P3's own
-rgas/cp, th_old = th, qv_old = qv (no dynamical forcing), uzpl = 0, it = 2.
+Harness glue (the tier-2 p3_microphysics audit's): level order is top-down
+here and bottom-up in the driver (model='WRF'); N_c, N_r are per m^3 here and
+per kg in the oracle (/ rho, the input air density); th = T*(1e5/p)**(R_d/c_pd)
+with the patched module's rd/cp, th_old = th, qv_old = qv (no dynamical
+forcing), uzpl = 0, it = 2.
 
-Input columns: the audit's five (trop_deep, sc_dycoms, midlat_strat from gSAM's
-own case soundings; arctic_mixed and edge analytic), a ``coverage`` column built
-here to exercise the processes the audit columns leave at zero (activation,
-wet growth and shedding, immersion and homogeneous freezing, sublimation incl.
-the instant branch, instant cloud evaporation, the total-Ni cap), and the
-audit's 226 single-level nucleation points (one column each).  Every case is
-run at dt = 20 s (run_scm_rce_campaign: 600 s / 30 substeps) and the columns
-also at dt = 300 s (sedimentation sub-steps and the conservation limiters bind).
+Input columns: the tier-2 audit's five (trop_deep, sc_dycoms, midlat_strat from
+the gSAM 1.8.8 case soundings that audit used -- sounding files only, read as
+data, sha256 recorded in the fixture; arctic_mixed and edge analytic), the
+``coverage`` column (one process family per level), and 226 single-level
+nucleation points (one column each).  Every case runs at dt = 20 s
+(run_scm_rce_campaign: 600 s / 30 substeps); the columns also at dt = 300 s
+(sedimentation sub-steps and the conservation limiters bind).
 """
 from __future__ import annotations
 
@@ -45,20 +46,20 @@ from legoesm.thermo import saturation_specific_humidity as _qsl  # noqa: E402
 from legoesm.thermo import saturation_specific_humidity_ice as _qsi  # noqa: E402
 
 KAP = C.R_d / C.c_pd
-NC_SPEC = 1.0e8          # gSAM P3 default specified Nc0 = 100 /cm^3 (micro_params.f90)
+NC_SPEC = 2.0e8          # WRF P3 specified nccnst = 200 /cm^3 (p3_init); input N_c is not read
 DTS = (20.0, 300.0)
 IN_FIELDS = ("p", "rho", "dz", "T", "q_v", "q_c", "N_c", "q_r", "N_r", "q_i",
              "q_rim", "N_i", "B_rim")
 OVARS = ["T", "qv", "qc", "nc", "qr", "nr", "qi", "qirim", "ni", "birim"]
-MT = ["m_qt", "m_nc", "m_qr", "m_nr", "m_qi", "m_ni", "m_qirim", "m_birim"]
-ST = ["s_qt", "s_nc", "s_qr", "s_nr", "s_qi", "s_ni", "s_qirim", "s_birim"]
 DIAG = ["qccon", "qcevp", "qrcon", "qrevp", "qcaut", "qcacc", "ncautr", "nrslf", "qccol",
         "qrcol", "nrcol", "qidep", "qisub", "qinuc", "ninuc", "nislf", "qimlt", "nimlt",
         "qcheti", "qrheti", "qcshd", "qwgrth", "rhorime_c", "nccol", "nrevp", "qcnuc",
         "ncheti", "qchomi", "qrhomi", "nrheti", "ncautc", "ncacc", "nisub", "epsi_tot",
-        "qinuc23", "ncshdc"]
-OUT_FIELDS = OVARS + MT + ST + DIAG
-TARBALL_SHA256 = "0e9ea4a37f4daca5051cc4018cc95bbc5583159c7c27d7d05d1104fae4ed270c"
+        "nrshdr", "ncshdc"]
+OUT_FIELDS = OVARS + DIAG
+WRF_TAG, WRF_SHA = "v4.8.0", "06d4240ae989cc3e50af412bb472df3d9048783c"
+TABLE = "p3_lookupTable_1.dat-v5.4_2momI"
+CASE_FILES = ("RCE/snd_300K", "DYCOMS_RF01/snd", "MC3E/snd")
 
 
 def qsl(T, p):
@@ -118,7 +119,9 @@ def trop_deep(orc):
             h["q_i"][k] = 1e-3; h["q_rim"][k] = 6e-4; h["B_rim"][k] = 6e-4 / 600.0
             h["N_i"][k] = 5e3
         elif Tk > 225.0:
-            qv[k] = 1.05 * qsi(Tk, pk); h["q_i"][k] = 3e-4; h["N_i"][k] = 1e5
+            # 1.06, not 1.05: off the 0.05 nucleation gate (an input ON a hard
+            # threshold measures saturation rounding, not P3)
+            qv[k] = 1.06 * qsi(Tk, pk); h["q_i"][k] = 3e-4; h["N_i"][k] = 1e5
             h["q_rim"][k] = 3e-5; h["B_rim"][k] = 3e-5 / 300.0
             if 233.0 < Tk < 236.0:
                 h["q_c"][k] = 2e-5
@@ -239,7 +242,8 @@ def edge(orc):
 
 def coverage(orc):
     """Built here (bottom-up, one process family per level) for the processes
-    the audit columns leave at zero."""
+    the audit columns leave at zero; the top two levels put warm rain above a
+    level colder than -40 C so sedimented rain freezes homogeneously."""
     lv = [  # (p, T, qv factor, qv curve, q_c, q_r, D_r, q_i, N_i, q_rim, rho_rim)
         (95000., 290.0, 0.90, "l", 0.0, 5e-4, 1.0e-3, 0.0, 0.0, 0.0, 0.0),     # evaporating rain
         (92500., 288.0, 1.005, "l", 5e-4, 3e-4, 1.0e-3, 0.0, 0.0, 0.0, 0.0),  # condensation on cloud + rain
@@ -258,6 +262,8 @@ def coverage(orc):
         (30000., 225.0, 1.30, "i", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),       # nucleation at the cap
         (20000., 215.0, 1.10, "i", 0.0, 0.0, 0.0, 1e-6, 5e4, 0.0, 0.0),       # deposition
         (15000., 210.0, 1.00, "i", 0.0, 0.0, 0.0, 2e-6, 3e7, 0.0, 0.0),       # total-Ni cap
+        (14000., 232.0, 0.90, "i", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),       # receives rain -> homogeneous freezing
+        (13000., 272.0, 0.95, "l", 0.0, 5e-4, 1.0e-3, 0.0, 0.0, 0.0, 0.0),   # warm rain above (no immersion freezing)
     ]
     a = np.array([[r[0], r[1], r[2], 0.0 if r[3] == "l" else 1.0] + list(r[4:]) for r in lv])
     p, T, fq, ice = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
@@ -299,17 +305,17 @@ def run_oracle(build, inp, dt, tag):
     ncol, nlev = inp["T"].shape
     fin = os.path.join(build, f"in_{tag}.txt")
     fout = os.path.join(build, f"out_{tag}.txt")
-    look = os.path.join(build, "src", "RUNDATA")
+    look = os.path.join(build, "lookup")
     with open(fin, "w") as f:
-        # ncol nlev dt it do_meyers iWarm predictNc Nc0 MaxTotalIceNumber iIceNuc
-        f.write(f"{ncol} {nlev} {dt!r} 2 1 3 0 100.0 20000000.0 1\n{look}\n")
+        # ncol nlev dt it kappa
+        f.write(f"{ncol} {nlev} {dt!r} 2 {KAP!r}\n{look}\n")
         for c in range(ncol):
             for k in range(nlev - 1, -1, -1):
                 rho = inp["rho"][c, k]
-                vals = [inp["p"][c, k], rho, inp["dz"][c, k], inp["T"][c, k], inp["q_v"][c, k],
-                        inp["q_c"][c, k], inp["N_c"][c, k] / rho, inp["q_r"][c, k],
-                        inp["N_r"][c, k] / rho, inp["q_i"][c, k], inp["q_rim"][c, k],
-                        inp["N_i"][c, k], inp["B_rim"][c, k]]
+                vals = [inp["p"][c, k], inp["dz"][c, k], inp["T"][c, k], inp["q_v"][c, k],
+                        inp["q_c"][c, k], inp["q_r"][c, k], inp["N_r"][c, k] / rho,
+                        inp["q_i"][c, k], inp["q_rim"][c, k], inp["N_i"][c, k],
+                        inp["B_rim"][c, k]]
                 f.write(" ".join(f"{v:.17e}" for v in vals) + "\n")
     r = subprocess.run([os.path.join(build, "p3_driver"), fin, fout],
                        capture_output=True, text=True, cwd=build)
@@ -345,10 +351,16 @@ def build_cases(orc):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build", required=True)
+    ap.add_argument("--cases", required=True,
+                    help="directory holding RCE/snd_300K, DYCOMS_RF01/snd, MC3E/snd")
+    ap.add_argument("--wrf", required=True, help="WRF v4.8.0 checkout (provenance only)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     build = os.path.abspath(a.build)
-    orc = os.path.join(build, "src", "CASES")
+    orc = os.path.abspath(a.cases)
+    head = subprocess.run(["git", "-C", a.wrf, "rev-parse", "HEAD"], capture_output=True,
+                          text=True, check=True).stdout.strip()
+    assert head == WRF_SHA, head
     # instrument check: the lego_sat stub vs legoesm.thermo
     TP = np.array([(T, p) for T in np.arange(185.0, 315.0, 2.5) for p in (5e3, 2e4, 5e4, 8e4, 1.02e5)])
     np.savetxt(os.path.join(build, "qsat_pts.txt"), TP, fmt="%.17e")
@@ -369,19 +381,22 @@ def main():
             for k, v in o.items():
                 fx[f"out_{name}_dt{dt:g}_{k}"] = v
     meta = dict(
-        oracle="gSAM 1.8.8 SRC/MICRO_P3/module_mp_p3.f90 (P3 v3.1.14)",
-        tarball="http://rossby.msrc.sunysb.edu/GSAM/gsam1.8.8.tar.gz",
-        tarball_sha256=TARBALL_SHA256,
-        module_mp_p3_sha256=sha256(os.path.join(build, "src", "SRC", "MICRO_P3", "module_mp_p3.f90")),
-        lookup_table_1_sha256=sha256(os.path.join(build, "src", "RUNDATA", "p3_lookup_table_1.dat-v4.1")),
-        patched_module_sha256=sha256(os.path.join(build, "module_mp_p3_lego.f90")),
-        config=dict(do_meyers=True, iWarmRainScheme=3, log_predictNc=False, Nc0_per_cc=100.0,
-                    MaxTotalIceNumber=20.0e6, iIceNucleationScheme=1, nCat=1, scpf_on=False,
-                    clbfact_dep=1.0, clbfact_sub=1.0, it=2, model="WRF"),
-        glue="th=T*(1e5/p)**(rgas/cp); th_old=th; qv_old=qv; uzpl=0; N_c,N_r per kg = per m3 / rho",
+        oracle="WRF v4.8.0 phys/module_mp_p3.F (P3 v4.5.2), mp_physics=50 (P3_1CATEGORY)",
+        repo="https://github.com/wrf-model/WRF", tag=WRF_TAG, sha=WRF_SHA,
+        module_mp_p3_sha256=sha256(os.path.join(a.wrf, "phys", "module_mp_p3.F")),
+        lookup_table_1_sha256=sha256(os.path.join(build, "lookup", TABLE)),
+        patched_module_sha256=sha256(os.path.join(build, "module_mp_p3_lego.F")),
+        case_soundings_sha256={c: sha256(os.path.join(orc, c)) for c in CASE_FILES},
+        case_soundings_source="gSAM 1.8.8 CASES (tier-2 p3_microphysics audit inputs)",
+        config=dict(nCat=1, trplMomI=False, log_predictNc=False, nccnst_per_m3=2.0e8,
+                    iparam=3, max_total_Ni_per_m3=2.0e6, scpf_on=False, clbfact_dep=1.0,
+                    clbfact_sub=1.0, it=2, model="WRF", typeDiags_ON=False),
+        glue="legoESM constants (cp, g, rd, xxlv) and saturation (qv_sat) patched into the "
+             "oracle; th=T*(1e5/p)**(R_d/c_pd); th_old=th; qv_old=qv; uzpl=0; ssat=0; "
+             "N_r per kg = per m3 / rho_in",
         compiler=subprocess.run(["gfortran", "--version"], capture_output=True,
                                 text=True).stdout.split("\n")[0],
-        flags="-O0 -fdefault-real-8 -fdefault-double-8",
+        flags="-O0 -fdefault-real-8 -fdefault-double-8 -ffree-form -cpp",
         qsat_stub_vs_thermo_max_rel=dict(liquid=rel_l, ice=rel_i),
         cases=sorted(cases), dts=list(DTS), nuc_dts=[DTS[0]],
         out_fields=OUT_FIELDS,

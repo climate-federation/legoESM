@@ -25,6 +25,18 @@ ADDRESSED
 - Melt/freeze number-routing comments made to agree with the double-moment
   branches (freeze_N_to_graupel = SAM NNUCCR; dN_g_melt = NGMLTG).
 
+SATURATION ADJUSTMENT (sam flavour, oracle port 2026-10-19)
+- ``morrison_flavor="sam"`` runs gSAM's ``satadj_liquid`` (two-sided liquid
+  adjustment, :func:`_warm_rain.saturation_adjustment_gsam`; its switches are
+  smooth by default and exact at the hard limit, RULE 5) BEFORE the
+  process rates, as gSAM's micro_proc does; every rate sees the adjusted
+  state.  Oracle-pinned (adjustment points and the whole-call T, q_v of five
+  warm columns) by tests/atmosphere/microphysics/unit/
+  test_gsam_satadj_liquid_oracle.py.  The rest of the sam flavour is NOT YET
+  FAITHFUL to M2005 as a whole: the departures below, no cloud-droplet
+  settling, no small-amount removal, no number reset at clamped slopes, the
+  smooth ice-phase switches, and Bigg rain freezing above -4 C.
+
 KNOWN, DELIBERATE departures (documented where they occur)
 - Sedimentation acts on the PRE-source pools: every species is sedimented
   from its input mixing ratio with the same-step in-column sinks RESERVED
@@ -51,19 +63,22 @@ References
 
 from __future__ import annotations
 
+import functools
 import math
 
-import equinox as eqx
 import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.thermo import saturation_specific_humidity as _saturation_specific_humidity
+from legoesm.thermo import saturation_specific_humidity_goff_gratch as _qsat_water_goff_gratch
 from legoesm.thermo import saturation_specific_humidity_ice as _saturation_specific_humidity_ice
+from legoesm.thermo import saturation_specific_humidity_ice_goff_gratch as _qsat_ice_goff_gratch
 from legoesm.thermo import homogeneous_freezing_rh_factor as _homogeneous_freezing_rh_factor
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
+    saturation_adjustment_gsam,
     effective_Nc,
-    autoconversion_sb,
     autoconversion_sb2001,
     autoconversion_kk2000,
     autoconversion_kk2000_cam6,
@@ -76,7 +91,6 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     mg2_var_coef,
     self_collection_rain_mg2,
     rain_evaporation_mg2,
-    accretion,
     accretion_sb2001,
     accretion_kk2000,
     self_collection_breakup,
@@ -122,6 +136,8 @@ from legoesm.atmosphere.physics.microphysics.config import (
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
     MicrophysicsOutput,
+    apply_sedimentation_poison,
+    sedimentation_overflow_guard,
     sedimentation_tendency,
 )
 
@@ -173,6 +189,47 @@ _NUC_RH_ICE_THRESHOLD = 1.08     # ice-nucleation RH_ice gate
 _NUC_RH_LIQ_THRESHOLD = 0.999    # liquid-nucleation RH_liq gate
 _MG2_OMSM = 1.0 - 1.0e-5           # MG2 limiter round-off margin omsm, micro_mg_utils.F90:117
 _MG2_ACCRETION_VARCOEF_EXP = 1.15  # MG2 accrete_cloud_water_rain var_coef(relvar, 1.15), micro_mg_utils.F90:1317
+
+# MorrisonConfig fields with no counterpart in gSAM's satadj_liquid: under the
+# sam flavour they must stay at their defaults (setting one raises).
+_NO_GSAM_SATADJ_COUNTERPART = (
+    "saturation_sharpness", "hard_saturation_adjustment",
+    "hard_sat_adjust_threshold", "hard_sat_max_heating_K", "liquid_from_closure")
+
+
+def _reject_fields_without_gsam_counterpart(config: MorrisonConfig) -> None:
+    """Raise if a sam-flavour config sets a field gSAM's adjustment lacks."""
+    bad = [f for f in _NO_GSAM_SATADJ_COUNTERPART
+           if getattr(config, f) != MorrisonConfig._field_defaults[f]]
+    if bad:
+        raise ValueError(
+            f"morrison_flavor='sam' runs gSAM's liquid saturation adjustment "
+            f"(satadj_liquid), which has no counterpart for {bad}; leave them "
+            f"at their defaults "
+            f"({ {f: MorrisonConfig._field_defaults[f] for f in bad} }).")
+
+
+# MorrisonConfig fields read only by the former "seifert_beheng" proxy rates;
+# SB2001 as gSAM runs it has no counterpart for them.
+_SB_PROXY_FIELDS = ("k_au", "x_star", "k_ac", "autoconversion_sharpness")
+
+
+def _reject_sb_proxy_fields(config: MorrisonConfig) -> None:
+    """Raise if ``warm_rain_scheme="seifert_beheng"`` sets a proxy coefficient."""
+    bad = []
+    for f in _SB_PROXY_FIELDS:
+        try:    # a traced (trained) value is never "the default"
+            differs = bool(getattr(config, f) != MorrisonConfig._field_defaults[f])
+        except jax.errors.ConcretizationTypeError:
+            differs = True
+        if differs:
+            bad.append(f)
+    if bad:
+        raise ValueError(
+            "warm_rain_scheme='seifert_beheng' runs SB2001 as gSAM M2005 runs "
+            f"it, which has no counterpart for {bad}; leave them at their "
+            "defaults.")
+
 
 def resolve_morrison_flavor(config: MorrisonConfig) -> MorrisonConfig:
     """Resolve ``morrison_flavor`` into the concrete parameter set.
@@ -300,6 +357,21 @@ def morrison_microphysics(
     # on the config string — no traced control flow).
     config = resolve_morrison_flavor(config)
     ncol, nlev = T.shape
+    # sam flavour: gSAM's micro_proc puts the state on the liquid saturation
+    # curve (satadj_liquid, condensing OR evaporating cloud) BEFORE the M2005
+    # process rates (microphysics.f90:743), so every rate below sees the
+    # adjusted state and the scheme's own smooth condensation is off.  The
+    # adjustment increment is added to the returned tendencies at the end.
+    gsam_satadj = config.morrison_flavor == "sam"
+    if gsam_satadj:
+        _reject_fields_without_gsam_counterpart(config)
+        T_in, q_v_in, q_c_in = T, q_v, hydrometeors.q_c
+        T, q_v, q_c_adj = saturation_adjustment_gsam(
+            T, q_v, hydrometeors.q_c, p_full,
+            excess_sharpness=config.gsam_satadj_excess_sharpness,
+            qc_floor_sharpness=config.gsam_satadj_qc_floor_sharpness,
+            p_min_width_pa=config.gsam_satadj_p_min_width_pa)
+        hydrometeors = hydrometeors._replace(q_c=q_c_adj)
     q_c = hydrometeors.q_c
     q_r = hydrometeors.q_r
     q_i = hydrometeors.q_i
@@ -345,6 +417,17 @@ def morrison_microphysics(
         q_r = jnp.maximum(q_r + minstsm, 0.0)
         N_r = jnp.maximum(N_r + ninstsm * rho, 0.0)   # N_r per-volume
     sharpness = config.saturation_sharpness
+    # Saturation curves: the CAM6 MG2 mode uses MG2's own qsat_water/qsat_ice,
+    # CAM's Goff-Gratch (micro_mg2_0.F90:113-115, :909-916); other modes keep
+    # the shared Tetens / Clausius-Clapeyron curves.  Static Python gate.
+    if config.warm_rain_incloud:
+        qsat_water_fn = functools.partial(_qsat_water_goff_gratch,
+                                          cap_sharpness=config.cam_qsat_cap_sharpness)
+        qsat_ice_fn = functools.partial(_qsat_ice_goff_gratch,
+                                        cap_sharpness=config.cam_qsat_cap_sharpness)
+    else:
+        qsat_water_fn = _saturation_specific_humidity
+        qsat_ice_fn = _saturation_specific_humidity_ice
 
     N_c_eff = effective_Nc(
         N_c, config.Nc_0,
@@ -361,6 +444,7 @@ def morrison_microphysics(
         hard_adjust=config.hard_saturation_adjustment,
         hard_threshold=config.hard_sat_adjust_threshold,
         hard_max_heating_K=config.hard_sat_max_heating_K,
+        sat_fn=qsat_water_fn,
     )
     # CAM6 arrangement: when the turbulence closure already diagnosed this
     # layer's cloud liquid and handed it to the host, MG2 carries NO
@@ -381,7 +465,7 @@ def morrison_microphysics(
     # ``q_sat`` is untouched -- rain evaporation, the sub-grid cloud-fraction
     # closure and the ice branch all still read it.  Static Python gate on a
     # config bool, the documented feature-gating exception to ``jnp.where``.
-    if config.liquid_from_closure:
+    if config.liquid_from_closure or gsam_satadj:
         condensation = jnp.zeros_like(condensation)
     # Sub-grid in-cloud closure (Morrison & Gettelman 2008): evaluate the
     # warm-rain rates on the IN-CLOUD water q_c/cf and scale back by cf, so the
@@ -461,15 +545,13 @@ def morrison_microphysics(
             fact=config.accre_enhan_fact * mg2_var_coef(
                 _relvar, _MG2_ACCRETION_VARCOEF_EXP,
                 q_c.dtype)) * cf_eff
-    elif config.warm_rain_scheme == "seifert_beheng":
-        dq_c_au, dN_r_au, x_c = autoconversion_sb(
-            q_c_ic, N_c_ic, rho, config.k_au, config.x_star,
-            config.autoconversion_sharpness,
-        )
-        dq_c_au = dq_c_au * cf_eff
-        dN_r_au = dN_r_au * cf_eff
-        dq_c_ac = accretion(q_c_ic, q_r_ic, rho, config.k_ac) * cf_eff
-    elif config.warm_rain_scheme == "seifert_beheng_sb2001":
+    elif config.warm_rain_scheme in ("seifert_beheng", "seifert_beheng_sb2001"):
+        # "seifert_beheng" was a simplified proxy (k_au*q_c^2 onset sigmoid,
+        # bilinear k_ac accretion); the scheme of that name IS SB2001 as gSAM
+        # M2005 runs it, so both names run the same law and the proxy's
+        # coefficients (no gSAM counterpart) must stay at their defaults.
+        if config.warm_rain_scheme == "seifert_beheng":
+            _reject_sb_proxy_fields(config)
         # Seifert & Beheng (2001) as gSAM M2005 runs it (IRAIN=1,
         # module_mp_graupel.f90:1830-1844, :1955-1962): rate gates, droplet
         # shape nu DIAGNOSED from N_c and the droplet-slope clamp on N_c
@@ -492,8 +574,9 @@ def morrison_microphysics(
     else:
         raise ValueError(
             f"Unknown warm_rain_scheme: {config.warm_rain_scheme!r}; choose "
-            f"'kk2000' (SAM M2005 default), 'kk2000_cam6' (CAM6 MG2), 'seifert_beheng' (simplified "
-            f"proxy) or 'seifert_beheng_sb2001' (SB2001 as gSAM M2005 runs it)."
+            f"'kk2000' (SAM M2005 default), 'kk2000_cam6' (CAM6 MG2), or "
+            f"'seifert_beheng' / 'seifert_beheng_sb2001' (both SB2001 as gSAM "
+            f"M2005 runs it)."
         )
     # Rain self-collection + breakup. "sb2001" (SAM NRAGG) self-collects
     # ~5580× faster than the legacy k_sc=1e-3 sigmoid form, so rain coalesces
@@ -553,7 +636,7 @@ def morrison_microphysics(
     #    (module_mp_graupel.f90:3387-3398).
     # Target number kc2 = min(N_i0·exp(cooper_a·(T_f−T)), N_i_nuc_max)/ρ
     # (canonical Cooper 0.005 L⁻¹ = N_i0=5 m⁻³ base; cap 500 L⁻¹).
-    q_sat_i = _saturation_specific_humidity_ice(T, p_full)
+    q_sat_i = qsat_ice_fn(T, p_full)
     # DEPOSITION target only. IFS/SAM homogeneous-freezing allowance: pristine
     # air below 235 K may hold ice supersaturation up to rh_homo (gSAM
     # cloud.f90), withdrawn where cloud ice is already present at scheme entry (the cloud.f90 qci gate; see thermo.homogeneous_freezing_rh_factor). The NUCLEATION gates below
@@ -1490,7 +1573,7 @@ def morrison_microphysics(
             q_v, T, p_full, -evaporation,
             prds if mg2_snow else jnp.zeros_like(prds),
             jnp.minimum(dq_i_dep, 0.0), jnp.maximum(dq_i_dep, 0.0), dq_i_nuc,
-            dt)
+            dt, cap_sharpness=config.cam_qsat_cap_sharpness)
         evaporation = -_pre
         if mg2_snow:
             prds = _prds
@@ -1820,32 +1903,19 @@ def morrison_microphysics(
         sed_substeps_required = jnp.maximum(
             jnp.maximum(_req_r, _req_i), jnp.maximum(_req_s, _req_g))
         if config.sed_cfl_substeps_strict:
-            # equinox error_if: a custom_jvp puts the check outside AD, so the
-            # gate is jit- and gradient-safe (equinox/_errors.py).  It is
-            # attached to the SEDIMENTATION TENDENCIES and surface fluxes, not
-            # only to the diagnostic count: a caller that discards the count
-            # let XLA eliminate the check as dead code (codex 2026-09-22
-            # reproduced exactly that, under jit AND under grad).
-            _overflow = jnp.any(sed_substeps_required > _nsub_max)
-            (sed_substeps_required, sed_r, sed_i, sed_s, sed_g,
-             precip_r, precip_i, precip_s, precip_g) = eqx.error_if(
+            # Strict gate + NaN poison (see ``sedimentation_overflow_guard``):
+            # the abort rides on the sedimentation tendencies and surface
+            # fluxes, and ``_sed_poison`` multiplies EVERY returned field.
+            ((sed_substeps_required, sed_r, sed_i, sed_s, sed_g,
+              precip_r, precip_i, precip_s, precip_g),
+             _sed_poison) = sedimentation_overflow_guard(
+                sed_substeps_required, _nsub_max,
                 (sed_substeps_required, sed_r, sed_i, sed_s, sed_g,
                  precip_r, precip_i, precip_s, precip_g),
-                _overflow,
                 "Morrison sedimentation: a column needs more CFL sub-steps "
                 f"than MorrisonConfig.sed_cfl_substeps_max={_nsub_max} (the "
                 "loop clamps and the species falls slower than its terminal "
                 "speed); shorten the physics sub-step or raise the cap")
-            # ``error_if`` alone is not enough: its check sits OUTSIDE AD (a
-            # custom_jvp), so ``jit(grad(f))`` keeps the gradient and drops
-            # the abort, and a caller reading an output that does not descend
-            # from sedimentation (``dq_v_dt``) never touches it at all (codex
-            # 2026-09-22 reproduced both).  ``_sed_poison`` is exactly 1.0
-            # unless the cap is exceeded and multiplies EVERY returned field
-            # below, so the guard is a real data dependency of every consumer
-            # and of its derivative: on overflow the outputs and their
-            # gradients are NaN, which no caller can silently ignore.
-            _sed_poison = jnp.where(_overflow, jnp.nan, 1.0)
     else:
         sed_substeps_required = None
     # NUMBER sedimentation (so the rain/ice number falls WITH the mass and the
@@ -2264,6 +2334,13 @@ def morrison_microphysics(
     # surface flux from ``sedimentation_tendency`` so column water
     # conservation holds exactly when the CFL limiter fires.
     precipitation = precip_r + precip_i + precip_s + precip_g
+    if gsam_satadj:
+        # The pre-rate saturation adjustment, as a tendency (enthalpy
+        # c_pd*T + L_v*q_v and q_v + q_c conserved by construction).
+        condensation = (hydrometeors.q_c - q_c_in) / dt
+        dT_dt = dT_dt + (T - T_in) / dt
+        dq_v_dt = dq_v_dt + (q_v - q_v_in) / dt
+        dq_c_dt = dq_c_dt + condensation
 
     # (No placeholder outputs here — every MicrophysicsOutput field below is
     # a computed tendency, so no dtype pin is needed; a former bare
@@ -2313,33 +2390,7 @@ def morrison_microphysics(
             "bergeron_snow": -bergs,
         })
     if _sed_poison is not None:
-        # Strict mode: every FLOAT field carries the overflow guard (the
-        # count stays a usable integer).  Static Python branch -- the
-        # non-strict graph is untouched.  BOTH a multiply and an add: the
-        # multiply propagates the poison into derivatives, the add reaches a
-        # field that is structurally ZERO (dN_c_dt with predict_Nc=False),
-        # where a multiply alone still leaves 0 * NaN unevaluated in some
-        # simplifications.  Residual, documented limit: a loss reading ONLY a
-        # field that does not depend on the differentiated input at all has
-        # no AD path, so jit(grad) of it returns zeros with no abort -- the
-        # forward value is NaN and the reported count still shows the
-        # overflow (codex 2026-09-22).  A ``where`` would be bit-neutral on
-        # the clean path (the ADD turns -0.0 into +0.0; the multiply by 1.0
-        # does not) but its
-        # DERIVATIVE on overflow is 0, not NaN, which is the silent failure
-        # this guard exists to prevent; strict and non-strict arms are not
-        # claimed bit-identical (GLM 2026-09-22).
-        _bias = jnp.where(jnp.isnan(_sed_poison), jnp.nan, 0.0)
-        # ``qc_budget`` is a dict of arrays, not an array: ``jnp.asarray`` on a
-        # dict raises, so filter on type BEFORE probing the dtype.  The budget
-        # is a diagnostic and carries no gradient the guard needs to poison.
-        def _is_float_array(v):
-            if v is None or isinstance(v, dict):
-                return False
-            return jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating)
-
-        out = out._replace(**{
-            _k: getattr(out, _k) * _sed_poison + _bias
-            for _k in out._fields
-            if _is_float_array(getattr(out, _k))})
+        # Strict mode: every FLOAT field carries the overflow guard.  Static
+        # Python branch -- the non-strict graph is untouched.
+        out = apply_sedimentation_poison(out, _sed_poison)
     return out

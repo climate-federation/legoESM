@@ -2,9 +2,8 @@
 
 Oracle: ESCOMP/CAM ``cam_cesm2_1_rel_60`` (commit
 a03b84b7c4e34f965b115686f22a043b85739e56), ``src/physics/cam/micro_mg2_0.F90``
-(full ``micro_mg_tend``) and ``micro_mg_utils.F90`` compiled UNMODIFIED with a
-``wv_sat_methods`` stub that reproduces legoESM's saturation curve (see
-``wv_sat_legoesm.F90``).  Settings are CAM6 + CLUBB: precip_frac_method
+(full ``micro_mg_tend``), ``micro_mg_utils.F90`` and ``wv_sat_methods.F90``
+(CAM's Goff-Gratch saturation) compiled UNMODIFIED.  Settings are CAM6 + CLUBB: precip_frac_method
 'in_cloud', allow_sed_supersat=.false., microp_uniform=.false., nccons with
 the column droplet number, legoESM's constants (``mg2_driver.F90``).
 
@@ -261,7 +260,8 @@ def main(argv=None):
         fx[f"pt_out_{k}"] = po[:, i]
     meta = dict(
         oracle="ESCOMP/CAM", tag="cam_cesm2_1_rel_60", sha=_git(a.cam, "rev-parse", "HEAD"),
-        files=["src/physics/cam/micro_mg2_0.F90", "src/physics/cam/micro_mg_utils.F90"],
+        files=["src/physics/cam/micro_mg2_0.F90", "src/physics/cam/micro_mg_utils.F90",
+               "src/physics/cam/wv_sat_methods.F90"],
         gfortran=subprocess.run(["gfortran", "--version"], capture_output=True,
                                 text=True).stdout.split("\n")[0],
         legoesm_sha=_git(HERE, "rev-parse", "HEAD"),

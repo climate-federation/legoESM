@@ -27,7 +27,8 @@ from legoesm import constants
 from legoesm.thermo import (
     saturation_mixing_ratio,
     saturation_vapor_pressure,
-    saturation_vapor_pressure_ice,
+    saturation_vapor_pressure_goff_gratch,
+    saturation_vapor_pressure_ice_goff_gratch,
 )
 
 _w_sat_jit = jax.jit(saturation_mixing_ratio)
@@ -46,20 +47,27 @@ def qsat_pa(t, p_pa):
 
 
 def qsat_trans_pa(t, p_pa):
-    """CAM ``qsat`` (wv_saturation.F90), the call in ``zm_conv_evap``:
-    ``wv_sat_svp_trans`` (wv_sat_methods.F90:326-361, ttrice = 20 K) written
-    out line for line over the shared water / ice curves, then the shared
-    smooth ``e -> w`` conversion and ``q = w/(1 + w)``."""
-    ttrice = 20.0   # wv_saturation.F90:82
-    t, p = float(t), float(p_pa)
-    es = float(saturation_vapor_pressure(np.float64(t))) if t >= tfreez - ttrice else 0.0
-    if t < tfreez:
-        esice = float(saturation_vapor_pressure_ice(np.float64(t)))
-        weight = 1.0 if (tfreez - t) > ttrice else (tfreez - t) / ttrice
-        es = weight * esice + (1.0 - weight) * es
-    w = eps1 * es / (np.logaddexp(p - es - 1.0, 0.0) + 1.0)
-    w = 1.0 - np.logaddexp(20.0 * (1.0 - w), 0.0) / 20.0
-    return w / (1.0 + w)
+    """CAM ``qsat`` (wv_saturation.F90:458-503), the call in ``zm_conv_evap``,
+    written out line for line: ``estblf`` (:306-321) on the 1-K table
+    ``estbl(i) = svp_trans(tmin + i - 1)`` (:216-226) of ``wv_sat_svp_trans``
+    (wv_sat_methods.F90:326-361, ttrice = 20 K) over CAM's Goff-Gratch water /
+    ice curves, then ``wv_sat_svp_to_qsat`` (:180-193)."""
+    ttrice, tmin, tmax = 20.0, 127.16, 375.16   # wv_saturation.F90:79-82
+
+    def svp_trans(tt):
+        es = float(saturation_vapor_pressure_goff_gratch(np.float64(tt))) \
+            if tt >= tfreez - ttrice else 0.0
+        if tt < tfreez:
+            esice = float(saturation_vapor_pressure_ice_goff_gratch(np.float64(tt)))
+            weight = 1.0 if (tfreez - tt) > ttrice else (tfreez - tt) / ttrice
+            es = weight * esice + (1.0 - weight) * es
+        return es
+    t_tmp = max(min(float(t), tmax) - tmin, 0.0)
+    i = int(t_tmp)
+    weight = t_tmp - math.trunc(t_tmp)
+    es = (1.0 - weight) * svp_trans(tmin + i) + weight * svp_trans(tmin + i + 1)
+    p = float(p_pa)
+    return 1.0 if p - es <= 0.0 else eps1 * es / (p - (1.0 - eps1) * es)
 
 
 def qsat_hpa(t, p_hpa):

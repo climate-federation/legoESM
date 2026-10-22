@@ -77,3 +77,139 @@ def test_goff_differentiable():
     g = jax.grad(lambda t: saturation_mixing_ratio_goff(
         jnp.array([t]), jnp.array([1.0e5]))[0])(295.0)
     assert np.isfinite(float(g)) and float(g) > 0.0
+
+
+def test_cam_goff_gratch_saturated_branch_and_gradients():
+    """CAM ``wv_sat_svp_to_qsat`` (wv_sat_methods.F90:180-193) at the default
+    (smooth, RULE 5) cap, away from ``e_sat = p``: q_sat = 1 where e_sat >> p
+    and the epsilo/omeps form where e_sat << p, both to rounding.  The values
+    themselves are checked against the RUNNING Fortran in the MG2 oracle
+    fixtures; here reverse-mode AD is finite in fp64 and fp32."""
+    from legoesm import constants
+    from legoesm.thermo import (
+        saturation_specific_humidity_goff_gratch,
+        saturation_specific_humidity_ice_goff_gratch,
+        saturation_vapor_pressure_goff_gratch,
+    )
+    T = jnp.array([300.0, 300.0])
+    p = jnp.array([1000.0, 1.0e5])                 # e_sat(300 K) ~ 3.5e3 Pa
+    q = np.asarray(saturation_specific_humidity_goff_gratch(T, p))
+    assert q[0] == 1.0
+    es = float(saturation_vapor_pressure_goff_gratch(T)[1])
+    eps = constants.epsilon
+    assert q[1] == pytest.approx(eps * es / (1.0e5 - (1.0 - eps) * es), rel=1e-15)
+    for fn in (saturation_specific_humidity_goff_gratch,
+               saturation_specific_humidity_ice_goff_gratch):
+        for dt in (jnp.float64, jnp.float32):
+            g = jax.grad(lambda t: jnp.sum(fn(t, jnp.full(3, 8.0e4, dt))))(
+                jnp.array([200.0, 250.0, 270.0], dt))
+            assert bool(jnp.all(jnp.isfinite(g))) and bool(jnp.all(g > 0.0))
+
+
+# --- RULE 5: CAM q_sat = 1 cap (limiter class), smooth by default ---
+_CAP_CASES = [(600.0, 1.0e5), (50.0, 60.0), (99.5, 100.0), (100.0, 100.0), (150.0, 100.0)]
+
+
+def _cam_svp_to_qsat(es, p):
+    from legoesm import constants
+    eps = constants.epsilon
+    return 1.0 if p - es <= 0.0 else eps * es / (p - (1.0 - eps) * es)
+
+
+@pytest.mark.parametrize("es,p", _CAP_CASES)
+def test_cam_qsat_cap_hard_limit_is_cam(es, p):
+    import math
+    jax.config.update("jax_enable_x64", True)
+
+    from legoesm.thermo import _specific_humidity_from_esat_cam
+    got = float(_specific_humidity_from_esat_cam(jnp.float64(es), jnp.float64(p),
+                                                 cap_sharpness=math.inf))
+    assert got == _cam_svp_to_qsat(es, p)  # bitwise: same IEEE ops as CAM
+
+
+# Default-sharpness departure from CAM, per case (KNOWN DIFFERENCE).
+_CAP_DEFAULT_GAP = {
+    (600.0, 1.0e5): 0.0, (50.0, 60.0): 0.0, (99.5, 100.0): -1.0731362096172425e-05,
+    (100.0, 100.0): -1.1139510508489936e-03, (150.0, 100.0): 0.0,
+}
+
+
+@pytest.mark.parametrize("es,p", _CAP_CASES)
+def test_cam_qsat_cap_default_gap_is_pinned(es, p):
+    from legoesm.thermo import _specific_humidity_from_esat_cam
+    jax.config.update("jax_enable_x64", True)
+    gap = (float(_specific_humidity_from_esat_cam(jnp.float64(es), jnp.float64(p)))
+           - _cam_svp_to_qsat(es, p))
+    assert gap == pytest.approx(_CAP_DEFAULT_GAP[(es, p)], rel=1e-6, abs=1e-12)
+
+
+@pytest.mark.parametrize("es,p", _CAP_CASES)
+def test_cam_qsat_cap_default_gradients(es, p):
+    from jax.test_util import check_grads
+
+    from legoesm.thermo import _specific_humidity_from_esat_cam
+    jax.config.update("jax_enable_x64", True)
+    check_grads(_specific_humidity_from_esat_cam, (jnp.float64(es), jnp.float64(p)),
+                order=2, modes=("rev",))
+
+
+# --- RULE 5: CAM qsat-table [tmin, tmax] clamp (limiter class), smooth by default ---
+# Relative departure of the default from CAM's hard clamp, per (T [K], p [Pa]).
+_CLAMP_DEFAULT_REL_GAP = {
+    (100.0, 6.0e4): 7.227809275300596e-13,
+    (127.16, 6.0e4): 0.312004834823652,
+    (130.0, 6.0e4): 0.018059983190437317,
+    (250.0, 6.0e4): 0.0,
+    (374.0, 1.0e6): -0.009976601552033509,
+    (375.16, 1.0e6): -0.025094240926450913,
+    (400.0, 1.0e6): -5.91245026142207e-13,
+    (300.0, 3.0e3): 0.0,  # p < e_sat: CAM's q = 1 (the cap, not the clamp)
+}
+
+
+def _cam_table_qsat(T, p):
+    """CAM qsat (wv_saturation.F90:458-503) on the 1-K svp_trans table."""
+    import math
+
+    from legoesm import constants
+    from legoesm.thermo import saturation_vapor_pressure_trans
+    tmin, tmax = 127.16, 375.16
+    t = max(min(T, tmax) - tmin, 0.0)
+    i = math.floor(t)
+    w = t - i
+    e0 = float(saturation_vapor_pressure_trans(jnp.float64(tmin + i)))
+    e1 = float(saturation_vapor_pressure_trans(jnp.float64(tmin + i + 1)))
+    es = (1.0 - w) * e0 + w * e1
+    eps = constants.epsilon
+    return 1.0 if p - es <= 0.0 else eps * es / (p - (1.0 - eps) * es)
+
+
+@pytest.mark.parametrize("T,p", list(_CLAMP_DEFAULT_REL_GAP))
+def test_cam_table_clamp_hard_limit_is_cam(T, p):
+    import math
+
+    from legoesm.thermo import saturation_specific_humidity_cam_table
+    jax.config.update("jax_enable_x64", True)
+    got = float(saturation_specific_humidity_cam_table(jnp.float64(T), jnp.float64(p),
+                                                       clamp_sharpness=math.inf,
+                                                       cap_sharpness=math.inf))
+    assert got == _cam_table_qsat(T, p)  # bitwise
+
+
+@pytest.mark.parametrize("T,p", list(_CLAMP_DEFAULT_REL_GAP))
+def test_cam_table_clamp_default_gap_is_pinned(T, p):
+    from legoesm.thermo import saturation_specific_humidity_cam_table
+    jax.config.update("jax_enable_x64", True)
+    ref = _cam_table_qsat(T, p)
+    rel = float(saturation_specific_humidity_cam_table(jnp.float64(T), jnp.float64(p))) / ref - 1.0
+    assert rel == pytest.approx(_CLAMP_DEFAULT_REL_GAP[(T, p)], rel=1e-6, abs=1e-12)
+
+
+@pytest.mark.parametrize("T", [126.0, 127.16 + 5.0e-5, 200.3, 375.16 - 5.0e-5, 376.0])
+def test_cam_table_clamp_default_gradients(T):
+    from jax.test_util import check_grads
+
+    from legoesm.thermo import saturation_specific_humidity_cam_table
+    jax.config.update("jax_enable_x64", True)
+    check_grads(lambda t: saturation_specific_humidity_cam_table(t, jnp.float64(1.0e6)),
+                (jnp.float64(T),), order=2, modes=("rev",), eps=1e-4)

@@ -1,12 +1,12 @@
 """P3 / warm-rain ACCRETION oracle-faithfulness tests.
 
-The accretion rate wired into P3 (and Morrison's non-KK2000 path, Seifert-Beheng,
-Thompson) is the simplified bilinear SURROGATE :func:`accretion`::
+The accretion rate wired into Morrison's non-KK2000 path, Seifert-Beheng and
+Thompson is the simplified bilinear SURROGATE :func:`accretion`::
 
     dq_c_ac = k_ac * q_c * q_r * rho * gamma_norm        (k_ac default 5.25)
 
 It is NOT faithful to the published Khairoutdinov-Kogan (2000) accretion used by
-gSAM P3 and SAM-M2005.  The gSAM P3 oracle (``module_mp_p3.f90:3615``, the
+WRF P3 and SAM-M2005.  The WRF v4.8.0 P3 oracle (``module_mp_p3.F:3460``, the
 default iparam=3 / KK2000 path; in a single column with the sub-grid cloud/precip
 fractions off, ``SCF=iSCF=SPF=iSPF=1`` and ``dum2=SPF-SPF_clr=1``) is::
 
@@ -20,8 +20,7 @@ DEPARTURES of the wired surrogate from the KK2000 oracle, each canaried below:
   (1) coefficient ``k_ac`` (5.25) vs the published 67;
   (2) BILINEAR ``q_c*q_r`` (product exponent 1) vs KK2000 ``(q_c*q_r)^1.15``;
   (3) a spurious ``rho`` factor — KK2000 has NO density dependence;
-  (4) an optional ``gamma_norm`` PSD-shape modifier absent from KK2000 (P3 passes
-      the default 1.0, so P3 itself does not incur (4) — verified end-to-end).
+  (4) an optional ``gamma_norm`` PSD-shape modifier absent from KK2000.
 
 The faithful :func:`accretion_kk2000` reproduced here is the SINGLE-COLUMN,
 fractions-off MASS-rate reduction of the Fortran — the algebraic iparam=3 branch
@@ -34,7 +33,7 @@ departure).  ``safe_pow`` clips negatives and keeps the fractional power AD-safe
 (at ``q_c*q_r=0`` the ``^1.15`` branch already has a finite ZERO slope —
 ``d/dx x^1.15 = 1.15*x^0.15 -> 0`` — so it is not a singular-slope fix).
 
-P3 itself now runs the gated KK2000 accretion of the gSAM oracle (p3.py, 
+P3 itself now runs the gated KK2000 accretion of the WRF P3 oracle (p3.py,
 pinned end-to-end by test_p3_oracle.py); the end-to-end surrogate pins that
 lived here were removed with the surrogate.
 
@@ -52,16 +51,15 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     accretion,
     accretion_kk2000,
 )
-from legoesm.atmosphere.physics.microphysics.config import P3Config
 
 jax.config.update("jax_enable_x64", True)
 
-# gSAM P3 KK2000 accretion oracle constants (module_mp_p3.f90:3615), typed from
+# WRF P3 KK2000 accretion oracle constants (module_mp_p3.F:3460), typed from
 # the Fortran, NOT the module — identical to SAM-M2005 module_mp_graupel.f90:1952.
 _O_KK2000_ACC_COEFF = 67.0
 _O_KK2000_ACC_EXP = 1.15
-_O_K_AC_DEFAULT = 5.25          # P3Config.k_ac default (surrogate coefficient)
-_O_QSMALL = 1.0e-14            # Fortran accretion gate qc,qr >= qsmall (module_mp_p3.f90)
+_O_K_AC_DEFAULT = 5.25          # surrogate k_ac default (Seifert-Beheng / Thompson)
+_O_QSMALL = 1.0e-14            # Fortran accretion gate qc,qr >= qsmall (module_mp_p3.F)
 
 
 # --- surrogate FORM pinned to round-off -------------------------------------
@@ -87,8 +85,7 @@ def test_accretion_negative_inputs_clip_to_zero():
 def test_accretion_gamma_norm_is_a_departure_from_kk2000():
     """DEPARTURE (4): the generic helper multiplies by a ``gamma_norm`` PSD-shape
     modifier absent from KK2000 — a non-unit value rescales the rate linearly.
-    P3 passes the default 1.0 (so P3 does not incur this departure; the
-    end-to-end pin below confirms the P3 contribution carries no gamma factor)."""
+    Seifert-Beheng passes the default 1.0; Thompson passes its own gamma."""
     args = (jnp.array(1.0e-3), jnp.array(2.0e-4), jnp.array(1.0), _O_K_AC_DEFAULT)
     base = float(accretion(*args))
     assert float(accretion(*args, gamma_norm=2.5)) == pytest.approx(2.5 * base, rel=1e-12)
@@ -126,8 +123,7 @@ def test_departure_spurious_rho_factor():
 def test_departure_coefficient():
     """At a reference state (rho=1) the surrogate coefficient 5.25 differs from the
     published 67, and the combined form differs materially from the oracle."""
-    assert P3Config().k_ac == _O_K_AC_DEFAULT
-    assert P3Config().k_ac != _O_KK2000_ACC_COEFF
+    assert _O_K_AC_DEFAULT != _O_KK2000_ACC_COEFF
     q_c, q_r = jnp.array(1.0e-3), jnp.array(2.0e-4)
     surrogate = float(accretion(q_c, q_r, jnp.array(1.0), _O_K_AC_DEFAULT))
     oracle = float(_kk2000_oracle(q_c, q_r))
@@ -137,7 +133,7 @@ def test_departure_coefficient():
 # --- the FAITHFUL form pinned to the P3 oracle ------------------------------
 
 def test_accretion_kk2000_matches_p3_oracle():
-    """accretion_kk2000 == 67*(q_c*q_r)^1.15 (module_mp_p3.f90:3615) to round-off,
+    """accretion_kk2000 == 67*(q_c*q_r)^1.15 (module_mp_p3.F:3460) to round-off,
     across a range of states — a cross-source check that the repo's faithful form
     matches the on-disk P3 Fortran (identical to SAM-M2005:1952)."""
     q_c = jnp.array([1.0e-3, 2.0e-3, 5.0e-4, 3.0e-3])
