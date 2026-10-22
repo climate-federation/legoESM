@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -62,7 +63,10 @@ def test_store_groups_follow_the_loader_store_choice():
     assert set(g) == {"S", "A"}
     assert "land_sea_mask" in g["S"][1]
     assert g["A"][0] == sb._ERA5_CACHE_CLOUD_VARS
-    assert g["A"][1] == sb._ERA5_CACHE_FLUX_VARS
+    assert g["A"][1] == sb._ERA5_CACHE_FLUX_VARS + ("land_sea_mask",)
+    # land fraction alone still caches the flux store's mask (codex review)
+    g3 = sb._era5_store_groups(base, base._replace(load_land_frac=True))
+    assert g3["A"][1] == ("land_sea_mask",)
     # flux_zarr == "" means "fluxes come from the state store" (codex review)
     g2 = sb._era5_store_groups(base, base._replace(load_surface_fluxes=True, flux_zarr=""))
     assert set(sb._ERA5_CACHE_FLUX_VARS) <= set(g2["S"][1])
@@ -141,7 +145,7 @@ def test_builder_marks_ready_and_waiter_proceeds(tmp_path, monkeypatch):
     monkeypatch.setenv("SLURM_JOB_ID", "42")
     monkeypatch.setattr(sb, "_CACHE_POLL_S", 0)
     assert sb._wb_build_or_wait(lambda: "built", tmp_path / ".b", 0, 2) == "built"
-    assert (tmp_path / ".b.ready.42.0").exists()
+    assert (tmp_path / ".b.ready.42.0.0").exists()
     assert sb._wb_build_or_wait(lambda: "read", tmp_path / ".b", 1, 2) == "read"
 
 
@@ -161,7 +165,7 @@ def test_silent_builder_times_out(tmp_path, monkeypatch):
     monkeypatch.setenv("SLURM_JOB_ID", "44")
     monkeypatch.setattr(sb, "_CACHE_POLL_S", 0)
     monkeypatch.setattr(sb, "_CACHE_STALE_S", 5)
-    beat = tmp_path / ".b.heartbeat.44.0"
+    beat = tmp_path / ".heartbeat.44.0.0"
     beat.touch()
     old = beat.stat().st_mtime - 60
     os.utime(beat, (old, old))
@@ -188,3 +192,30 @@ def test_gate_rejects_one_ulp(other):
 def test_gate_rejects_dtype_change():
     with pytest.raises(RuntimeError, match="dtype"):
         sb._assert_same_sample((np.zeros(2, np.float32),), (np.zeros(2, np.float64),))
+
+
+def test_requeue_ignores_the_previous_attempts_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("SLURM_JOB_ID", "45")
+    monkeypatch.setattr(sb, "_CACHE_POLL_S", 0)
+    (tmp_path / ".b.failed.45.0.0").write_text("old attempt")
+    monkeypatch.setenv("SLURM_RESTART_COUNT", "1")
+    assert sb._wb_build_or_wait(lambda: "ok", tmp_path / ".b", 0, 2) == "ok"
+    assert sb._wb_build_or_wait(lambda: "ok", tmp_path / ".b", 1, 2) == "ok"
+
+
+def test_waiter_on_a_later_load_trusts_the_job_heartbeat(tmp_path, monkeypatch):
+    # rank 0 is alive (job heartbeat fresh) but reaches this load only after
+    # the waiter has waited longer than the stale limit (GLM review)
+    monkeypatch.setenv("SLURM_JOB_ID", "46")
+    monkeypatch.setattr(sb, "_CACHE_STALE_S", 1)
+    real_sleep, polls = time.sleep, []
+
+    def poll(_):
+        polls.append(1)
+        (tmp_path / ".heartbeat.46.0.0").touch()      # rank 0 still alive
+        real_sleep(0.6)
+        if len(polls) == 4:                            # > 2 s after start
+            (tmp_path / ".val.ready.46.0.0").touch()
+
+    monkeypatch.setattr(sb.time, "sleep", poll)
+    assert sb._wb_build_or_wait(lambda: "val", tmp_path / ".val", 1, 2) == "val"

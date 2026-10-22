@@ -205,6 +205,10 @@ def _era5_store_groups(era5_cfg, sst_cfg):
         add(era5_cfg.cloud_zarr or state, _ERA5_CACHE_CLOUD_VARS)
     if sst_cfg.load_surface_fluxes:
         add(sst_cfg.flux_zarr or state, (), _ERA5_CACHE_FLUX_VARS)
+    if sst_cfg.load_surface_fluxes or sst_cfg.load_land_frac:
+        # the loader falls back to the flux store for the land mask when the
+        # state store lacks it; a store without it is simply not given one
+        add(sst_cfg.flux_zarr or state, (), ("land_sea_mask",))
     return groups
 
 
@@ -232,10 +236,31 @@ def _ensure_era5_store_cache(era5_cfg, path, pv, sv, stamps, root):
                               time_selection=idx.tolist(), fingerprint=fp)
 
 
+_HEARTBEAT_STARTED = set()
+
+
+def _start_job_heartbeat(beat):
+    """Rank 0 touches ``beat`` every _CACHE_HEARTBEAT_S for the rest of the
+    process: liveness is per JOB, so a rank waiting on a later load (training
+    then validation) never mistakes a busy rank 0 for a dead one."""
+    if beat in _HEARTBEAT_STARTED:
+        return
+    _HEARTBEAT_STARTED.add(beat)
+    beat.parent.mkdir(parents=True, exist_ok=True)
+    beat.touch()
+
+    def _beat():
+        while True:
+            time.sleep(_CACHE_HEARTBEAT_S)
+            beat.touch()
+
+    threading.Thread(target=_beat, daemon=True).start()
+
+
 def _wb_build_or_wait(build, base, rank, nproc):
     """Rank 0 runs ``build``; other ranks wait for it, then run it themselves
     (a complete cache returns at once). Waiters fail loudly when the builder
-    reports failure or its heartbeat goes stale."""
+    reports failure or rank 0's job heartbeat goes stale."""
     if nproc <= 1:
         return build()
     job = os.environ.get("SLURM_JOB_ID")
@@ -244,26 +269,19 @@ def _wb_build_or_wait(build, base, rank, nproc):
             "the ERA5 cache needs SLURM_JOB_ID to coordinate ranks in a "
             "multi-process run; launch with srun or set "
             "LEGOESM_ERA5_LOCAL_CACHE=0.")
-    tag = f"{job}.{os.environ.get('SLURM_STEP_ID', '0')}"
-    ready, failed, beat = (base.with_name(f"{base.name}.{k}.{tag}")
-                           for k in ("ready", "failed", "heartbeat"))
+    # a requeued job keeps its id; the restart count keeps its markers fresh
+    tag = (f"{job}.{os.environ.get('SLURM_STEP_ID', '0')}."
+           f"{os.environ.get('SLURM_RESTART_COUNT', '0')}")
+    ready, failed = (base.with_name(f"{base.name}.{k}.{tag}")
+                     for k in ("ready", "failed"))
+    beat = base.parent / f".heartbeat.{tag}"
     if rank == 0:
-        base.parent.mkdir(parents=True, exist_ok=True)
-        beat.touch()
-        stop = threading.Event()
-
-        def _beat():
-            while not stop.wait(_CACHE_HEARTBEAT_S):
-                beat.touch()
-
-        threading.Thread(target=_beat, daemon=True).start()
+        _start_job_heartbeat(beat)
         try:
             out = build()
         except BaseException as exc:
             failed.write_text(repr(exc))
             raise
-        finally:
-            stop.set()
         ready.touch()
         return out
     t0 = time.time()
@@ -276,8 +294,9 @@ def _wb_build_or_wait(build, base, rank, nproc):
         last = beat.stat().st_mtime if beat.exists() else t0
         if time.time() - last > _CACHE_STALE_S:
             raise RuntimeError(
-                f"rank 0's ERA5 cache build went silent (no heartbeat at "
-                f"{beat} for {_CACHE_STALE_S} s); it probably died.")
+                f"rank 0 went silent (no heartbeat at {beat} for "
+                f"{_CACHE_STALE_S} s) while building the ERA5 cache; it "
+                "probably died.")
         time.sleep(_CACHE_POLL_S)
 
 
