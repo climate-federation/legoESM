@@ -24,8 +24,13 @@ the cluster launch; the data-parallel gradient average is unit-tested separately
 from __future__ import annotations
 
 import calendar
+import hashlib
 import importlib.util
+import json
 import math
+import os
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -143,6 +148,215 @@ def _sharded_indices(cfg, yml, times, snaps_per_day, stride, rank, nproc):
     return idx[start:start + per]
 
 
+# --- local ERA5 snapshot cache (deck ``cache_dir``) --------------------------
+# Variables a WB sample reads beyond the TrainingERA5Config defaults, measured
+# with an xarray __getitem__ probe on the CAM6 deck (cloud + fluxes on),
+# 2026-10-22. A variable missing here does not silently change training: the
+# first-sample gate compares a cache-built sample against a remote-built one.
+_ERA5_CACHE_EXTRA_STATE_VARS = (
+    "2m_temperature", "land_sea_mask", "sea_surface_temperature")
+_ERA5_CACHE_CLOUD_VARS = (
+    "specific_cloud_liquid_water_content", "specific_cloud_ice_water_content")
+_ERA5_CACHE_FLUX_VARS = (
+    "mean_eastward_turbulent_surface_stress",
+    "mean_northward_turbulent_surface_stress",
+    "mean_surface_latent_heat_flux",
+    "mean_surface_sensible_heat_flux",
+    "mean_surface_downward_long_wave_radiation_flux",
+    "mean_surface_downward_short_wave_radiation_flux",
+    "mean_surface_net_long_wave_radiation_flux",
+    "mean_surface_net_short_wave_radiation_flux",
+)
+_CACHE_HEARTBEAT_S = 60      # builder touches its heartbeat this often
+_CACHE_STALE_S = 15 * 60     # waiters give up when the heartbeat is this old
+_CACHE_POLL_S = 30
+
+
+def wb_era5_cache_root(yml):
+    """The deck's ``cache_dir`` as an absolute path, or None (no cache).
+
+    A relative path resolves against the repo root of the running code, never
+    the working directory. ``LEGOESM_ERA5_LOCAL_CACHE=0`` switches it off.
+    """
+    root = yml.get("cache_dir")
+    if not root or os.environ.get("LEGOESM_ERA5_LOCAL_CACHE") == "0":
+        return None
+    p = Path(root)
+    return p if p.is_absolute() else _REPO / p
+
+
+def _era5_store_groups(era5_cfg, sst_cfg):
+    """``{store path: (pressure vars, surface vars)}`` a sample reads.
+
+    Mirrors load_era5_slice's store choice: an empty cloud/flux store path
+    means "read it from the state store".
+    """
+    groups = {}
+
+    def add(path, pv=(), sv=()):
+        p0, s0 = groups.get(path, ((), ()))
+        groups[path] = (p0 + tuple(v for v in pv if v not in p0),
+                        s0 + tuple(v for v in sv if v not in s0))
+
+    state = era5_cfg.zarr_store
+    add(state, era5_cfg.pressure_variables,
+        tuple(era5_cfg.surface_variables) + _ERA5_CACHE_EXTRA_STATE_VARS)
+    if era5_cfg.load_cloud_condensate:
+        add(era5_cfg.cloud_zarr or state, _ERA5_CACHE_CLOUD_VARS)
+    if sst_cfg.load_surface_fluxes:
+        add(sst_cfg.flux_zarr or state, (), _ERA5_CACHE_FLUX_VARS)
+    return groups
+
+
+def _ensure_era5_store_cache(era5_cfg, path, pv, sv, stamps, root):
+    """Window-scoped local copy of ``path`` at exactly ``stamps``."""
+    from legoesm.training.era5_to_state import (
+        ensure_local_cache, open_era5_zarr)
+
+    rt = np.asarray(open_era5_zarr(path).time.values, dtype="datetime64[ns]")
+    idx = np.searchsorted(rt, stamps)
+    hit = idx < len(rt)
+    if not (hit.all() and np.array_equal(rt[idx], stamps)):
+        raise ValueError(
+            f"ERA5 store {path} lacks {int((~hit).sum()) or 'some'} of the "
+            "requested analysis times; it cannot be cached for this deck.")
+    fp = hashlib.sha256(json.dumps({
+        "store": path, "pressure": list(pv), "surface": list(sv),
+        "levels": [float(lv) for lv in era5_cfg.levels],
+        "times": stamps.astype("int64").tolist(),
+    }).encode()).hexdigest()
+    cfg = era5_cfg._replace(
+        zarr_store=path, pressure_variables=tuple(pv),
+        surface_variables=tuple(sv))
+    return ensure_local_cache(cfg, root / f"era5_{fp[:16]}",
+                              time_selection=idx.tolist(), fingerprint=fp)
+
+
+def _wb_build_or_wait(build, base, rank, nproc):
+    """Rank 0 runs ``build``; other ranks wait for it, then run it themselves
+    (a complete cache returns at once). Waiters fail loudly when the builder
+    reports failure or its heartbeat goes stale."""
+    if nproc <= 1:
+        return build()
+    job = os.environ.get("SLURM_JOB_ID")
+    if not job:
+        raise RuntimeError(
+            "the ERA5 cache needs SLURM_JOB_ID to coordinate ranks in a "
+            "multi-process run; launch with srun or set "
+            "LEGOESM_ERA5_LOCAL_CACHE=0.")
+    tag = f"{job}.{os.environ.get('SLURM_STEP_ID', '0')}"
+    ready, failed, beat = (base.with_name(f"{base.name}.{k}.{tag}")
+                           for k in ("ready", "failed", "heartbeat"))
+    if rank == 0:
+        base.parent.mkdir(parents=True, exist_ok=True)
+        beat.touch()
+        stop = threading.Event()
+
+        def _beat():
+            while not stop.wait(_CACHE_HEARTBEAT_S):
+                beat.touch()
+
+        threading.Thread(target=_beat, daemon=True).start()
+        try:
+            out = build()
+        except BaseException as exc:
+            failed.write_text(repr(exc))
+            raise
+        finally:
+            stop.set()
+        ready.touch()
+        return out
+    t0 = time.time()
+    while True:
+        if failed.exists():
+            raise RuntimeError(
+                f"rank 0 failed to build the ERA5 cache: {failed.read_text()}")
+        if ready.exists():
+            return build()
+        last = beat.stat().st_mtime if beat.exists() else t0
+        if time.time() - last > _CACHE_STALE_S:
+            raise RuntimeError(
+                f"rank 0's ERA5 cache build went silent (no heartbeat at "
+                f"{beat} for {_CACHE_STALE_S} s); it probably died.")
+        time.sleep(_CACHE_POLL_S)
+
+
+def _store_size_gb(path):
+    return sum(f.stat().st_size for f in Path(path).rglob("*")
+               if f.is_file()) / 1e9
+
+
+def _wb_local_stores(cfg, yml, era5_cfg, sst_cfg, times, snaps_per_day,
+                     stride, rank, nproc):
+    """Local ``(ds, cloud_ds, flux_ds, at)`` replacing the remote stores, or
+    None when the deck names no cache. ``at`` maps a remote time index to its
+    position in the local state store; every mapping is verified by timestamp.
+    """
+    root = wb_era5_cache_root(yml)
+    if root is None:
+        return None
+    from legoesm.training.era5_to_state import open_era5_zarr
+
+    all_idx = sorted({i for _, a, b in _training_sample_indices(
+        cfg, yml, times, snaps_per_day, stride) for i in (a, b)})
+    if not all_idx:
+        return None
+    stamps = times[np.asarray(all_idx)]
+    groups = _era5_store_groups(era5_cfg, sst_cfg)
+    tag = hashlib.sha256(json.dumps([
+        sorted((k, list(v[0]), list(v[1])) for k, v in groups.items()),
+        [float(lv) for lv in era5_cfg.levels],
+        stamps.astype("int64").tolist()]).encode()).hexdigest()[:16]
+    logger.info("ERA5 local cache at %s: %d snapshots from %d store(s)",
+                root, len(stamps), len(groups))
+    paths = _wb_build_or_wait(
+        lambda: {p: _ensure_era5_store_cache(era5_cfg, p, pv, sv, stamps, root)
+                 for p, (pv, sv) in groups.items()},
+        root / f".build_{tag}", rank, nproc)
+    if rank == 0:
+        for p, c in paths.items():
+            logger.info("ERA5 cache %s -> %s (%.1f GB)", p, c, _store_size_gb(c))
+    local = {p: open_era5_zarr(str(c)) for p, c in paths.items()}
+    ds_l = local[era5_cfg.zarr_store]
+    lt = np.asarray(ds_l.time.values, dtype="datetime64[ns]")
+    pos = np.minimum(np.searchsorted(lt, stamps), len(lt) - 1)
+    if not np.array_equal(lt[pos], stamps):
+        raise RuntimeError(
+            f"ERA5 cache {paths[era5_cfg.zarr_store]} does not hold every "
+            "requested analysis time; delete it and rerun.")
+    at = dict(zip(all_idx, pos.tolist())).__getitem__
+    state = era5_cfg.zarr_store
+    cloud_l = (local[era5_cfg.cloud_zarr or state]
+               if era5_cfg.load_cloud_condensate else None)
+    flux_l = (local[sst_cfg.flux_zarr or state]
+              if sst_cfg.load_surface_fluxes else None)
+    return ds_l, cloud_l, flux_l, at
+
+
+def _assert_same_sample(remote, cached):
+    """Hard error unless a cache-built sample equals the remote-built one
+    exactly (structure, dtype, shape, every value; NaN == NaN)."""
+    import jax
+
+    ra, rt = jax.tree.flatten(remote)
+    ca, ct = jax.tree.flatten(cached)
+    if rt != ct:
+        raise RuntimeError(
+            "ERA5 cache gate: the cache-built sample has a different "
+            "structure than the remote-built one.")
+    for k, (a, b) in enumerate(zip(ra, ca)):
+        a, b = np.asarray(a), np.asarray(b)
+        same = (a.dtype == b.dtype and a.shape == b.shape and np.array_equal(
+            a, b, equal_nan=a.dtype.kind in "fc"))
+        if not same:
+            raise RuntimeError(
+                f"ERA5 cache gate: leaf {k} of the first sample differs "
+                f"between cache and remote store (dtype {a.dtype}/{b.dtype}, "
+                f"shape {a.shape}/{b.shape}). Set LEGOESM_ERA5_LOCAL_CACHE=0 "
+                "to train from the remote store.")
+    logger.info("ERA5 cache gate passed: first sample identical to remote.")
+
+
 def _sample_to_host(sample):
     """Pull a built ``(ic, target, forcing)`` off-device to host numpy leaves.
 
@@ -232,7 +446,7 @@ def build_latlon_config(cfg, yml):
 # like ``learning_rate`` would silently reintroduce exactly that.
 _WB_CONSUMED_TOP_KEYS = frozenset({
     "classical", "convection", "dt", "era5_cadence_hours",
-    "era5_cloud_condensate", "era5_cloud_zarr", "era5_flux_zarr",
+    "cache_dir", "era5_cloud_condensate", "era5_cloud_zarr", "era5_flux_zarr",
     "era5_surface_fluxes", "era5_zarr", "eval_years",
     "grad_accum", "grad_clip_norm", "gravity_wave_drag", "loss", "lr",
     "microphysics", "n_epochs", "n_lat", "n_lon", "n_training_days",
@@ -243,7 +457,7 @@ _WB_CONSUMED_TOP_KEYS = frozenset({
 # Deck metadata this trainer never reads but the decks legitimately carry
 # (documentation / other tooling).  Kept OUT of the consumed set so the
 # distinction stays visible; anything here is tolerated, not honoured.
-_WB_METADATA_TOP_KEYS = frozenset({"grid", "cache_dir"})
+_WB_METADATA_TOP_KEYS = frozenset({"grid"})
 # Exactly the keys _spectral_pe_config + the dt lookup read from the
 # ``spectral`` block.  ``si_substep`` (typo) silently reverting a deck to the
 # unstable full step is the same defect class as the inert lr.
@@ -1324,21 +1538,32 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     _micro = str(_cl.get("microphysics", "none"))
 
 
-    samples = []
-    for year, i_ic, i_tg in _sharded_indices(
-            cfg, yml, times, snaps_per_day, stride, rank, nproc):
-        s_ic = load_era5_slice(era5_cfg, i_ic, ds=ds, cloud_ds=cloud_ds)
-        s_tg = load_era5_slice(era5_cfg, i_tg, ds=ds, cloud_ds=cloud_ds)
+    def build(year, i_ic, i_tg, ds, cloud_ds, flux_ds, at):
+        s_ic = load_era5_slice(era5_cfg, at(i_ic), ds=ds, cloud_ds=cloud_ds)
+        s_tg = load_era5_slice(era5_cfg, at(i_tg), ds=ds, cloud_ds=cloud_ds)
         # ERA5-derived terrain (no elevation file on the training lane)
         tp = era5_terrain_product(s_ic, grid)
         ic = era5_to_spectral_carry(s_ic, grid, sigma, target_phis=tp, microphysics=_micro)
         target = era5_to_spectral_carry(s_tg, grid, sigma, target_phis=tp, microphysics=_micro)
+        sst_src = load_era5_slice(sst_cfg, at(i_ic), ds=ds, flux_ds=flux_ds)
+        # times stays the REMOTE calendar: i_ic is always a remote index
+        forcing = build_spectral_forcing(sst_src, grid, times[i_ic], year)
+        return (ic, target, forcing)
+
+    mine = list(_sharded_indices(
+        cfg, yml, times, snaps_per_day, stride, rank, nproc))
+    src = (ds, cloud_ds, flux_ds, int)
+    local = _wb_local_stores(cfg, yml, era5_cfg, sst_cfg, times,
+                             snaps_per_day, stride, rank, nproc)
+    if local is not None and mine:
+        _assert_same_sample(build(*mine[0], *src), build(*mine[0], *local))
+        src = local
+    samples = []
+    for year, i_ic, i_tg in mine:
+        sample = build(year, i_ic, i_tg, *src)
         if not samples:
             validate_carry_holds_scheme(
-                ic, _micro, context=f"WB {cfg.mode} arm initial condition")
-        sst_src = load_era5_slice(sst_cfg, i_ic, ds=ds, flux_ds=flux_ds)
-        forcing = build_spectral_forcing(sst_src, grid, times[i_ic], year)
-        sample = (ic, target, forcing)
+                sample[0], _micro, context=f"WB {cfg.mode} arm initial condition")
         samples.append(_sample_to_host(sample) if host_resident else sample)
     return samples
 
@@ -1406,15 +1631,14 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
         "sfc_tau_y": "sfc_tauy_override",
     }
 
-    samples = []
-    for year, i_ic, i_tg in _sharded_indices(
-            cfg, yml, times, snaps_per_day, stride, rank, nproc):
-        s_ic = load_era5_slice(era5_cfg, i_ic, ds=ds, cloud_ds=cloud_ds)
-        s_tg = load_era5_slice(era5_cfg, i_tg, ds=ds, cloud_ds=cloud_ds)
+    def build(year, i_ic, i_tg, ds, cloud_ds, flux_ds, at):
+        global _WARNED_ERA5_FLUX_HOLD_FIXED
+        s_ic = load_era5_slice(era5_cfg, at(i_ic), ds=ds, cloud_ds=cloud_ds)
+        s_tg = load_era5_slice(era5_cfg, at(i_tg), ds=ds, cloud_ds=cloud_ds)
         tp = era5_terrain_product(s_ic, grid)
         ic = era5_to_latlon_carry(s_ic, grid, sigma, target_phis=tp, microphysics=_micro)
         target = era5_to_latlon_carry(s_tg, grid, sigma, target_phis=tp, microphysics=_micro)
-        sst_src = load_era5_slice(sst_cfg, i_ic, ds=ds, flux_ds=flux_ds)
+        sst_src = load_era5_slice(sst_cfg, at(i_ic), ds=ds, flux_ds=flux_ds)
         sst = regrid_2d_to_gaussian(sst_src.sst, sst_src.lat, sst_src.lon, grid)
         # Prescribed surface planes the slice carries (spectral names),
         # regridded exactly like sst, then renamed to the driver-path
@@ -1439,7 +1663,19 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
             o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
             o3_top_vmr=getattr(driver, "_o3_top_vmr", None),
             **plane_kwargs)
-        sample = (ic, target, forcing)
+        return (ic, target, forcing)
+
+    mine = list(_sharded_indices(
+        cfg, yml, times, snaps_per_day, stride, rank, nproc))
+    src = (ds, cloud_ds, flux_ds, int)
+    local = _wb_local_stores(cfg, yml, era5_cfg, sst_cfg, times,
+                             snaps_per_day, stride, rank, nproc)
+    if local is not None and mine:
+        _assert_same_sample(build(*mine[0], *src), build(*mine[0], *local))
+        src = local
+    samples = []
+    for year, i_ic, i_tg in mine:
+        sample = build(year, i_ic, i_tg, *src)
         samples.append(_sample_to_host(sample) if host_resident else sample)
     return samples
 
