@@ -699,21 +699,30 @@ def solve_snow_node_soil_thermal(
     surface_conductance: jnp.ndarray | None = None,
     layer_source: jnp.ndarray | None = None,
     n_substeps: int = 1,
+    *,
+    snow_cover: jnp.ndarray,
+    empty_cover_swe: float,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Soil heat diffusion with ONE snow thermal node over the BULK snowpack.
 
     The bulk pack (``snow_swe`` [kg/m2], one SWE reservoir) becomes a single
     node stacked on the soil and solved in the same implicit system
-    (:func:`solve_snow_soil_thermal` with one layer and whole-cell cover, as
-    CLM5 solves its snow and soil together):
+    (:func:`solve_snow_soil_thermal` with one layer on the snow-covered
+    fraction ``snow_cover`` [0-1], as CLM5 solves its snow and soil together:
+    ``f*G`` enters the node, ``(1-f)*G`` the soil top, the interface
+    conductance is f-weighted):
 
     * ``T_snow`` [K] is the SNOW-SURFACE temperature; the ground heat flux
       ``G_surface`` acts on it (explicit; a semi-implicit
       ``surface_conductance`` is refused);
     * heat capacity ``c_ice * snow_swe`` [J/m2/K] (the bucket holds no liquid);
-    * the whole pack's resistance ``R_s = (snow_swe/rho_s)/k_s`` [m2 K/W] lies
-      between that surface node and the top soil node, in series with the top
-      soil half-layer.  ``rho_s`` is the fixed bulk density
+    * the whole pack's resistance over the covered area
+      ``R_s = (snow_swe/f/rho_s)/k_s`` [m2 K/W] lies between that surface node
+      and the top soil node, in series with the top soil half-layer (the pack
+      is ``snow_swe/f`` thick where it lies, as in
+      ``snow_column.snow_thermal_props``; ``empty_cover_swe`` is the limit of
+      ``snow_swe/f`` as the pack empties: ``snow_depth_crit`` for the tanh
+      cover, 0 for ``f = 1``).  ``rho_s`` is the fixed bulk density
       ``snow_bulk_density_kg_m3``; ``k_s`` is Jordan (1991).  A node at the
       pack MID-depth would expose the surface to only half of ``R_s``.
 
@@ -743,11 +752,14 @@ def solve_snow_node_soil_thermal(
         layer_source=layer_source, n_substeps=n_substeps)
     swe = jnp.maximum(snow_swe, 0.0)
     rho_s = thermal_config.snow_bulk_density_kg_m3
-    R_snow = swe / rho_s / snow_thermal_conductivity(rho_s)       # [m2 K/W]
+    on_cover = (snow_cover > 0.0) & (swe > 0.0)
+    swe_cov = jnp.where(on_cover, swe / jnp.where(on_cover, snow_cover, 1.0),
+                        empty_cover_swe)                           # [kg/m2]
+    R_snow = swe_cov / rho_s / snow_thermal_conductivity(rho_s)   # [m2 K/W]
     C_snow = constants.c_pi * swe                                  # [J/m2/K]
     T_snow_cov, T_soil_cov = solve_snow_soil_thermal(
         T_snow[:, None], C_snow[:, None], jnp.zeros_like(T_soil[:, :0]),
-        R_snow, jnp.ones_like(swe), T_soil, theta, grid, hydro_config,
+        R_snow, snow_cover, T_soil, theta, grid, hydro_config,
         thermal_config, G_surface, dt, layer_source=layer_source,
         n_substeps=n_substeps)
     covered = swe > 0.0

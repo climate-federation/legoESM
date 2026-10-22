@@ -14585,7 +14585,8 @@ class ModelDriver:
                 _p_low0 = 0.5 * (_ph0[..., -1] + _ph0[..., -2])
                 from legoesm.land.multilayer_land import land_skin_temperature
                 _T_land0 = jnp.asarray(
-                    land_skin_temperature(self._land_ml_state)).reshape(-1)
+                    land_skin_temperature(self._land_ml_state,
+                                          self.physics.land_ml_cfg)).reshape(-1)
                 _qsat0 = _satmr0(_T_land0, _p_low0)
                 _land_qsfc_cells = (
                     _q_air0 + _land_beta_cells * (_qsat0 - _q_air0))
@@ -18575,7 +18576,8 @@ class ModelDriver:
                 # of the flatten the land init used).
                 from legoesm.land.multilayer_land import land_skin_temperature
                 T_land = jnp.asarray(
-                    land_skin_temperature(self._land_ml_state)
+                    land_skin_temperature(self._land_ml_state,
+                                          self.physics.land_ml_cfg)
                 ).reshape(self.state.T.data[..., -1].shape).astype(_sd)
             else:
                 T_land = self.state.T.data[..., -1].astype(_sd)
