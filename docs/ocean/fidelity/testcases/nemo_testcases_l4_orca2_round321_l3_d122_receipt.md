@@ -2,7 +2,8 @@
 
 Date: 2026-10-20 (Claude round; codex review: operator).
 
-Status: **STOPPED_FOR_DECISION** (import landed default-off; selection held).
+Status: **LANDED** (import default-off; DECISION 147 guard landed; L3 stays off
+on rung 10 until rung 10 runs the stage-3 Krhs route).
 
 ## Verdict
 
@@ -194,6 +195,30 @@ stays DIFFERS, its three coefficient rows NOT-MODELLED).
   aht0 lines); default gate (land.sh list) 17 + 6 + 71 + 25 + 16 + 2 + 8 +
   2 = 147 passed, 0 failed; the two fixed test files 53 passed.
 
+## Resume 2 (2026-10-22, DECISION 147: add the guard)
+
+- Model construction now refuses the staged eddy-induced velocity (GM
+  bolus through FCT, nemo_iso_lap, rk3_ws) unless the stage-3 Krhs tracer
+  route is on; a trace-time backstop at the stage-3 bolus addition refuses
+  the same when the config is changed after construction. Raise only; no
+  value path touched.
+- Plants (`tests/ocean/fidelity/test_orca2_round321_l3_krhs_guard.py`,
+  2 passed): rung 10 with L3 and the route off raises at construction; with
+  the route on it constructs; the shipped rung 10 constructs; dropping the
+  route after construction raises at trace. Non-vacuity: each guard
+  disabled in turn fails its own test (1 failed, 1 passed, twice);
+  restored, 0 dirty lines beyond the change.
+- Lane B's L3 card (route on), scratch clone of lane B at `de1adde51a` with
+  the same guard applied: builds; two steps (L3 record forcing kt 1-2)
+  give T, S, u, v, ssh bit-identical to the unguarded clone (10/10 arrays);
+  lane B's L3 test file 22 passed (`orca2_rounds/round321/laneb_d147/`).
+- Other cards: round-320 selection, card constructibility, bolus-through-FCT
+  and recipe tests 87 passed; one failure (dispatch-hardening, a land
+  module's lost guard) is identical at HEAD, not from this change.
+- Consequence: this round's D122 gate's L3 arm on rung 10 now refuses at
+  construction (that arm ran the route-off composition the guard forbids).
+- DECISION 145 (rn_Ud trainable entry) still waits on the user.
+
 ## Review
 
 - codex review: operator.
@@ -206,3 +231,6 @@ stays DIFFERS, its three coefficient rows NOT-MODELLED).
   dropped (no value change; needed by this branch).
 - UNASKED (resume): two test expectations updated to the narrowed refusal
   message (tests only).
+- ASKED (resume 2, DECISION 147): the construction guard and trace backstop.
+- UNASKED (resume 2): the guard keys on the bolus-through-FCT selection on
+  rk3_ws, not on kappa_GM != 0 (matches the trace route; no card changes).
