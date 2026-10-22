@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +27,7 @@ ROOTS = {
     "ORCA2G9-tadv": PHASE3 / "gridladder_rounds/round46/oracle_g9_r46/twin_a",
     "ORCA2L4-bbc": PHASE3 / "gridladder_rounds/round53/oracle_l4_r53/twin_a",
     "ORCA2L4b-iso-bbc": PHASE3 / "gridladder_rounds/round54/oracle_l4b_r54/twin_a",
+    "ORCA2L6-dmp": PHASE3 / "gridladder_rounds/round55/oracle_l6_r55/twin_a",
     "ORCA2V1-tke": PHASE3 / "gridladder_vmix_rounds/round1/oracle_v1_r1/twin_a",
     "ORCA2V2-evd": PHASE3 / "gridladder_vmix_rounds/round12/oracle_v2_r12/twin_a",
     "ORCA2V3-ddm": PHASE3 / "gridladder_vmix_rounds/round13/oracle_v3_r13/twin_a",
@@ -36,7 +38,7 @@ ROOTS = {
     "ORCA2L3-eiv": PHASE3 / "gridladder_vmix_rounds/round20/oracle_l3_r20/twin_a",
 }
 LANE_A_CASES = tuple(case for case in ROOTS if case.startswith("ORCA2G")) + (
-    "ORCA2L4-bbc", "ORCA2L4b-iso-bbc",
+    "ORCA2L4-bbc", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp",
 )
 LANE_B_CASES = tuple(case for case in ROOTS if case.startswith("ORCA2V")) + (
     "ORCA2L1-bbl", "ORCA2L2-iso", "ORCA2L3-eiv",
@@ -59,6 +61,16 @@ def _digest(value) -> dict[str, object]:
         "shape": list(array.shape),
         "nbytes": int(array.nbytes),
         "sha256": hashlib.sha256(array.view(np.uint8)).hexdigest(),
+    }
+
+
+def _program_digest(text: str) -> dict[str, object]:
+    normalized = re.sub(r" at 0x[0-9a-f]+", " at 0xADDR", text)
+    encoded = normalized.encode()
+    return {
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "nbytes": len(encoded),
+        "lines": len(normalized.splitlines()),
     }
 
 
@@ -93,8 +105,8 @@ def snapshot(repo: Path, case: str) -> dict[str, object]:
         import g5_records as forcing_reader
 
     state = spec.initial_state
-    leaves: dict[str, dict[str, object]] = {}
-    for kt in (1, 2):
+
+    def step_kwargs(kt: int):
         kwargs = {}
         if forced:
             freshwater, surface = forcing_reader.nemo_supplied_forcing(
@@ -104,7 +116,22 @@ def snapshot(repo: Path, case: str) -> dict[str, object]:
                     ice_mean_thickness_hm_i=forcing_reader.read_v1_hm_i(
                         root, kt))
             kwargs = {"freshwater": freshwater, "surface_forcing": surface}
-        state = jax.device_get(model.step(state, card.dt_s, **kwargs))
+        if case == "ORCA2L6-dmp":
+            tmask = np.asarray(spec.z_coord.is_active) > 0.5
+            kwargs.update(
+                sponge=recipe.build_orca2_damping_for_step(
+                    root, tmask, kt=kt, dt_s=card.dt_s),
+                nemo_kt=kt,
+            )
+        return kwargs
+
+    first_kwargs = step_kwargs(1)
+    step_program = _program_digest(str(jax.make_jaxpr(
+        lambda value: model.step(value, card.dt_s, **first_kwargs))(state)))
+    leaves: dict[str, dict[str, object]] = {}
+    for kt in (1, 2):
+        state = jax.device_get(model.step(
+            state, card.dt_s, **step_kwargs(kt)))
         for path, leaf in jax.tree_util.tree_flatten_with_path(state)[0]:
             leaves[f"kt{kt}:{jax.tree_util.keystr(path)}"] = _digest(leaf)
 
@@ -119,6 +146,7 @@ def snapshot(repo: Path, case: str) -> dict[str, object]:
         "git_sha": sha,
         "deck_root": str(root),
         "steps": 2,
+        "step_program": step_program,
         "leaf_count": len(leaves),
         "leaves": leaves,
     }
@@ -139,6 +167,7 @@ def compare(reference: Path, candidate: Path, *, plant: bool) -> dict[str, objec
         name for name in names
         if ref["leaves"].get(name) != got["leaves"].get(name)
     ]
+    program_identical = ref.get("step_program") == got.get("step_program")
     report = {
         "format": "nemo-testcase-l4b-merge-identity-report-v1",
         "case": ref["case"],
@@ -147,10 +176,13 @@ def compare(reference: Path, candidate: Path, *, plant: bool) -> dict[str, objec
         "leaf_count": len(names),
         "different_count": len(different),
         "first_differences": different[:8],
+        "reference_step_program": ref.get("step_program"),
+        "candidate_step_program": got.get("step_program"),
+        "step_program_identical": program_identical,
         "plant": plant,
-        "bit_identical": not different,
+        "bit_identical": not different and program_identical,
     }
-    if different:
+    if different or not program_identical:
         raise RuntimeError(json.dumps(report, sort_keys=True))
     return report
 

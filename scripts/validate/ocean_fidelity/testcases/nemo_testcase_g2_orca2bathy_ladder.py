@@ -65,6 +65,7 @@ CASE = "ORCA2G2-zps"
 CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice",
          "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf", "ORCA2G9-tadv",
          "ORCA2L4-bbc", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp",
+         "ORCA2L8-krhs",
          "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
          "ORCA2V5-havtb", "ORCA2L1-bbl", "ORCA2L2-iso", "ORCA2L3-eiv")
 # G5's record build (ORCA2-lane frames); V1 = that build + one hm_i writer;
@@ -72,6 +73,7 @@ CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice",
 # L1/L2/L4 use G5's record surface-input format.
 ICE_CASES = ("ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf",
              "ORCA2G9-tadv", "ORCA2L4-bbc", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp",
+             "ORCA2L8-krhs",
              "ORCA2V1-tke", "ORCA2V2-evd",
              "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L1-bbl",
              "ORCA2L2-iso", "ORCA2L3-eiv")
@@ -95,7 +97,7 @@ ARMS = ("geometry", "independent", "given_entry", "stages", "operators",
         "barotropic_exit",
         "zdf_replay", "substeps", "trazdf_replay", "rhs_frame",
         "restart_independent", "carried", "stp2d_terms",
-        "tke_mixing_length", "ddm_kt1", "geothermal", "damping")
+        "tke_mixing_length", "ddm_kt1", "geothermal", "damping", "l8_krhs")
 # stage exposures of one step: the private hook that returns it, and the
 # level-1 NEMO frame fields (u, v, T, S, ssh) it must equal
 EXPOSURES = {
@@ -883,6 +885,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         without_vector_raw_vmask: bool = False,
         without_geothermal: bool = False,
         without_damping: bool = False,
+        without_l8_jit: bool = False,
+        without_l8_traced_inputs: bool = False,
+        without_l8_x64: bool = False,
         record_step_entry: bool = False,
         without_recorded_external: bool = False,
         case: str = CASE) -> dict:
@@ -919,7 +924,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     card = recipe.build_nemo_testcase_card(case, deck_root=root)
     cfg, z, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
     if case in FORCED:
-        require(arm in ("independent", "given_entry", "geothermal", "damping")
+        require(arm in ("independent", "given_entry", "geothermal", "damping",
+                        "l8_krhs")
                 or (arm in ("stages", "operators", "barotropic_exit", "carried",
                             "stp2d_terms")
                     and case in ICE_CASES)
@@ -957,9 +963,10 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                    without_l2_native_face_reference, without_l2_kmm_face_geometry,
                    without_l2_a33_source_ordering, without_l2_stored_face_ratios)
     require(not any(l2_controls) or case in (
-        "ORCA2L2-iso", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp"),
-        "L2 controls are registered only for ORCA2L2-iso/L4b/L6")
-    if case in ("ORCA2L2-iso", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp"):
+        "ORCA2L2-iso", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp", "ORCA2L8-krhs"),
+        "L2 controls are registered only for ORCA2L2-iso/L4b/L6/L8")
+    if case in ("ORCA2L2-iso", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp",
+                "ORCA2L8-krhs"):
         require(recipe._orca2l2_isoneutral_selected(cfg.gm_redi),
                 "the L2 card no longer selects its complete isoneutral path")
         gm = cfg.gm_redi
@@ -983,7 +990,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     if without_vector_raw_vmask:          # G6 ROUND-2 PAIR HALF
         cfg = cfg._replace(rk3_vector_raw_vmask=False)
     if without_geothermal:                # L4 ROUND-1 wiring-removal plant
-        require(case in ("ORCA2L4-bbc", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp")
+        require(case in ("ORCA2L4-bbc", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp",
+                         "ORCA2L8-krhs")
                 and cfg.rk3_stage3_geothermal_nemo_written,
                 "the geothermal plant requires the selected L4 card")
         cfg = cfg._replace(
@@ -1196,7 +1204,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         if case in TKE_CASES:
             surface = surface._replace(ice_mean_thickness_hm_i=g5.read_v1_hm_i(root, kt))
             result["surface_forcing"] = surface
-        if case == "ORCA2L6-dmp":
+        if case in ("ORCA2L6-dmp", "ORCA2L8-krhs"):
             tmask = np.asarray(z.is_active) > 0.5
             result.update(
                 sponge=recipe.build_orca2_damping_for_step(
@@ -1211,8 +1219,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         return new, round(time.time() - t0, 1)
 
     if arm == "geothermal":
-        require(case in ("ORCA2L4-bbc", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp"),
-                "the geothermal arm is L4/L4b/L6-only")
+        require(case in ("ORCA2L4-bbc", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp",
+                         "ORCA2L8-krhs"),
+                "the geothermal arm is L4/L4b/L6/L8-only")
         import importlib.util
         from legoesm.ocean.physics.geothermal import (
             nemo_geothermal_bottom_heating_tendency,
@@ -1263,8 +1272,86 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             })
         return out
 
+    if arm == "l8_krhs":
+        require(case == "ORCA2L8-krhs", "the Krhs tail arm is L8-only")
+        import importlib.util
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            _nemo_stage3_l8_krhs_walk,
+        )
+
+        module_path = HERE / "nemo_testcase_l8_orca2krhs" / "l8_records.py"
+        spec = importlib.util.spec_from_file_location("l8_records_score", module_path)
+        records = importlib.util.module_from_spec(spec)
+        require(spec.loader is not None, f"cannot load {module_path}")
+        spec.loader.exec_module(records)
+
+        def tail(ldf_t, ldf_s, bbc_t, bbc_s, bbl_t, bbl_s, dmp_t, dmp_s):
+            empty = ((), ())
+            return _nemo_stage3_l8_krhs_walk(
+                ldf_t, ldf_s, empty, empty, empty,
+                ((bbc_t,), ()), ((bbl_t,), (bbl_s,)),
+                ((dmp_t,), (dmp_s,)),
+            )[2]
+
+        kernel = tail if without_l8_jit else jax.jit(tail)
+        out.update({
+            "label": (
+                "GIVEN-NEMO-OPERANDS: recorded LDF boundary and exact "
+                "BBC/BBL/DMP increments"),
+            "jit": not without_l8_jit,
+            "traced_inputs": not without_l8_traced_inputs,
+            "x64": not without_l8_x64,
+            "input_dtypes": [],
+        })
+        wet_inner = np.asarray(z.is_active) > 0.5
+        for kt in range(kt_from, kt_to + 1):
+            header, fields = records.decode(
+                root / f"oracle_rktracer_stage3_kt{kt:08d}.bin", kt)
+            jpi, jpj, jpk = header[7:10]
+            wet3 = np.zeros((jpj, jpi, jpk), dtype=bool)
+            wet3[2:-2, 2:-2, :nk] = wet_inner
+            wet = wet3.transpose(1, 0, 2).ravel(order="F")
+            inputs_np = []
+            for tracer in ("T", "S"):
+                left = fields[f"ldf_{tracer}"]
+                for boundary in ("bbc", "bbl", "dmp"):
+                    right = fields[f"{boundary}_{tracer}"]
+                    inputs_np.append(right - left)
+                    left = right
+            # Reorder T tail followed by S tail into the kernel signature.
+            bbc_t, bbl_t, dmp_t, bbc_s, bbl_s, dmp_s = inputs_np
+            dtype = jnp.float32 if without_l8_x64 else jnp.float64
+            inputs = tuple(jnp.asarray(value, dtype=dtype) for value in (
+                fields["ldf_T"], fields["ldf_S"],
+                bbc_t, bbc_s, bbl_t, bbl_s, dmp_t, dmp_s,
+            ))
+            out["input_dtypes"].append([str(value.dtype) for value in inputs])
+            if without_l8_traced_inputs:
+                boundaries = (tail(*inputs) if without_l8_jit else
+                              jax.jit(lambda: tail(*inputs))())
+            else:
+                boundaries = kernel(*inputs)
+            rows = []
+            # Empty groups 0..2 leave boundary 3 at the recorded LDF value.
+            for index, boundary in enumerate(("ldf", "bbc", "bbl", "dmp"), 3):
+                for tracer, offset in (("T", 0), ("S", 1)):
+                    rows.append(bit_rows(
+                        f"l8_krhs.kt{kt}.{boundary}_{tracer}",
+                        fields[f"{boundary}_{tracer}"],
+                        np.asarray(boundaries[index][offset]), wet))
+            out["per_kt"].append({"kt": kt, "rows": rows})
+        out["gate_pass"] = bool(
+            out["jit"] and out["traced_inputs"] and out["x64"]
+            and all(dtype == "float64" for row in out["input_dtypes"]
+                    for dtype in row)
+            and all(not row["n_unequal"] and not row["dry_card_nonzero"]
+                    for point in out["per_kt"] for row in point["rows"])
+        )
+        return out
+
     if arm == "damping":
-        require(case == "ORCA2L6-dmp", "the damping arm is L6-only")
+        require(case in ("ORCA2L6-dmp", "ORCA2L8-krhs"),
+                "the damping arm is L6/L8-only")
         import importlib.util
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             _nemo_stage3_l4b_then_damping,
@@ -2196,6 +2283,12 @@ def main(argv=None) -> int:
                     help="L4 round-1 plant: remove the selected stage-3 BBC wire")
     ap.add_argument("--without-damping", action="store_true",
                     help="L6 plant: remove the selected stage-3 damping wire")
+    ap.add_argument("--without-l8-jit", action="store_true",
+                    help="L8 record plant: bypass the compiled Krhs walk")
+    ap.add_argument("--without-l8-traced-inputs", action="store_true",
+                    help="L8 record plant: close over every recorded operand")
+    ap.add_argument("--without-l8-x64", action="store_true",
+                    help="L8 record plant: demote every operand to float32")
     ap.add_argument("--record-step-entry", action="store_true",
                     help="G9 round-6: seed a recorded kt>=2 entry and external handoff")
     ap.add_argument("--without-recorded-external", action="store_true",
@@ -2228,6 +2321,9 @@ def main(argv=None) -> int:
               without_vector_raw_vmask=a.without_vector_raw_vmask,
               without_geothermal=a.without_geothermal,
               without_damping=a.without_damping,
+              without_l8_jit=a.without_l8_jit,
+              without_l8_traced_inputs=a.without_l8_traced_inputs,
+              without_l8_x64=a.without_l8_x64,
               record_step_entry=a.record_step_entry,
               without_recorded_external=a.without_recorded_external,
               case=a.case)
@@ -2321,6 +2417,16 @@ def main(argv=None) -> int:
                 print(f"{row['name']}: unequal {row['n_unequal']}/{row['n_wet']} "
                       f"max {row['max_abs']:.3e}; dry card/nemo "
                       f"{row['dry_card_nonzero']}/{row['dry_nemo_nonzero']}")
+        return 0 if out["gate_pass"] else 1
+    if a.arm == "l8_krhs":
+        for point in out["per_kt"]:
+            for row in point["rows"]:
+                print(f"{row['name']}: unequal {row['n_unequal']}/{row['n_wet']} "
+                      f"max {row['max_abs']:.3e}; dry card/nemo "
+                      f"{row['dry_card_nonzero']}/{row['dry_nemo_nonzero']}")
+        print(f"L8_RECORD_WIRING jit={out['jit']} "
+              f"traced_inputs={out['traced_inputs']} x64={out['x64']} "
+              f"pass={out['gate_pass']}")
         return 0 if out["gate_pass"] else 1
     if a.arm == "substeps":
         f = out["first_unequal"]

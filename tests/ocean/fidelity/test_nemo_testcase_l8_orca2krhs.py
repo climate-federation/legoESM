@@ -22,6 +22,9 @@ G9 = CASES / "nemo_testcase_g9_orca2tadv"
 L8 = CASES / "nemo_testcase_l8_orca2krhs"
 RUN = L8 / "run.sh"
 RESTO = INPUTS / "resto.nc"
+L8_RECORD = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
+    "round56/oracle_l8_r56/twin_a")
 
 
 def _module(name: str, path: Path):
@@ -131,6 +134,32 @@ def test_l8_order_is_jitted_and_has_finite_gradient():
     assert np.isfinite(np.asarray(value)) and np.isfinite(np.asarray(grad))
 
 
+@pytest.mark.skipif(not (L8_RECORD / "oracle_rktracer_stage3_kt00000001.bin").is_file(),
+                    reason="no admitted round-56 L8 record")
+def test_l8_record_requires_jit_traced_inputs_and_x64():
+    ladder = _module(
+        "l8_ladder_score",
+        Path(__file__).parents[3] / "scripts/validate/ocean_fidelity/testcases/"
+        "nemo_testcase_g2_orca2bathy_ladder.py",
+    )
+
+    def score(**plants):
+        return ladder.run(
+            L8_RECORD, arm="l8_krhs", kt_from=1, kt_to=1,
+            allow_dirty=True, case="ORCA2L8-krhs", **plants)
+
+    selected = score()
+    assert selected["gate_pass"] is True
+    assert all(row["n_unequal"] == row["dry_card_nonzero"] == 0
+               for point in selected["per_kt"] for row in point["rows"])
+    for plant in (
+        {"without_l8_jit": True},
+        {"without_l8_traced_inputs": True},
+        {"without_l8_x64": True},
+    ):
+        assert score(**plant)["gate_pass"] is False
+
+
 @pytest.fixture(scope="module")
 def l8_card(tmp_path_factory):
     if (not all((INPUTS / name).is_file() for name in CARD_FILES)
@@ -198,3 +227,82 @@ def test_one_step_l8_route_executes_with_finite_tracers(l8_card):
     correct = step()
     assert all(np.isfinite(np.asarray(getattr(correct, name).data)).all()
                for name in ("T", "S"))
+
+
+def test_one_step_l8_production_route_passes_bbc_bbl_dmp_by_identity(
+    l8_card, monkeypatch,
+):
+    """The live finalizer, not only the walker helper, owns NEMO's order."""
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as cgrid
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.freshwater import FreshwaterForcing
+    from legoesm.ocean.physics import bbl_adv
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    state = l8_card.recipe.initial_state
+    zero = jnp.zeros_like(state.eta.data)
+    one = jnp.ones_like(state.eta.data)
+    freshwater = FreshwaterForcing(
+        precip=zero, evap=zero, runoff=zero, ice_fw=zero, restoring=zero)
+    forcing = OceanSurfaceForcing(
+        sw_down=one, q_net=one, tau_x=zero, tau_y=zero, salt_flux=zero,
+        chl=0.1 * one, taum=zero, ice_concentration=zero,
+        tau_i_native=zero, tau_j_native=zero,
+        runoff_tracer_content=(zero, zero), q_nonsolar=one,
+        ice_ocean_top_drag_rCdu=zero, salt_flux_sfx=zero,
+        geothermal_heat_flux_mwm2=one)
+    sponge = l8_card.recipe.tracer_damping
+    captured = {}
+
+    original_bbc = cgrid._nemo_stage3_ldf_then_geothermal
+    original_bbl = bbl_adv.apply_bbl_diffusive_tendency
+    original_walk = cgrid._nemo_stage3_l8_krhs_walk
+
+    def spy_bbc(*args, **kwargs):
+        captured.setdefault("geothermal_rates", []).append(args[4])
+        return original_bbc(*args, **kwargs)
+
+    def spy_bbl(*args, **kwargs):
+        result = original_bbl(*args, **kwargs)
+        captured["bbl"] = result
+        return result
+
+    def spy_walk(adv_t, adv_s, *groups):
+        captured["groups"] = groups
+        return original_walk(adv_t, adv_s, *groups)
+
+    monkeypatch.setattr(cgrid, "_nemo_stage3_ldf_then_geothermal", spy_bbc)
+    monkeypatch.setattr(bbl_adv, "apply_bbl_diffusive_tendency", spy_bbl)
+    monkeypatch.setattr(cgrid, "_nemo_stage3_l8_krhs_walk", spy_walk)
+    model = LatLonCGridOceanModel(
+        l8_card.recipe.grid, l8_card.recipe.z_coord,
+        l8_card.recipe.model_config)
+    model.prime_step_caches(state)
+    model._step_impl(
+        state, dt=l8_card.dt_s, freshwater=freshwater,
+        surface_forcing=forcing, sponge=sponge)
+
+    groups = captured["groups"]
+    # zero-based group 3/4/5 are BBC, BBL and DMP at the production call.
+    # The first composition call receives BBC; the second uses zero BBC to
+    # isolate LDF.  The walker must receive the first call's exact object.
+    assert groups[3][0][0] is captured["geothermal_rates"][0]
+    assert groups[3][1] == ()
+    assert groups[4][0][0] is captured["bbl"][0]
+    assert groups[4][1][0] is captured["bbl"][1]
+    bbl_t, bbl_s = (np.asarray(groups[4][i][0]) for i in (0, 1))
+    wet = np.asarray(l8_card.recipe.z_coord.is_active) > 0.5
+    bottom = wet & ~np.concatenate(
+        (wet[..., 1:], np.zeros_like(wet[..., :1])), axis=-1)
+    assert np.any(bbl_t) and np.any(bbl_s)
+    assert not np.any((bbl_t != 0.0) & ~bottom)
+    assert not np.any((bbl_s != 0.0) & ~bottom)
+    gamma = jnp.asarray(sponge.gamma, dtype=state.T.data.dtype)
+    expected_t = cgrid.nemo_source_round(
+        gamma * (jnp.asarray(sponge.T_ref) - state.T.data))
+    expected_s = cgrid.nemo_source_round(
+        gamma * (jnp.asarray(sponge.S_ref) - state.S.data))
+    np.testing.assert_array_equal(np.asarray(groups[5][0][0]), expected_t)
+    np.testing.assert_array_equal(np.asarray(groups[5][1][0]), expected_s)

@@ -28,6 +28,7 @@ def test_case_census_covers_both_certified_lanes_exactly():
             start=1)),
         "ORCA2L4-bbc",
         "ORCA2L4b-iso-bbc",
+        "ORCA2L6-dmp",
     }
     assert set(probe.LANE_B_CASES) == {
         "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
@@ -42,6 +43,9 @@ def test_compare_is_exact_and_one_bit_plant_fires(tmp_path):
     snapshot = {
         "case": "ORCA2G1-flat",
         "git_sha": "a" * 40,
+        "step_program": {
+            "sha256": "c" * 64, "nbytes": 10, "lines": 1,
+        },
         "leaves": {
             "kt1:.T": {
                 "dtype": "<f8", "shape": [1], "nbytes": 8,
@@ -59,5 +63,11 @@ def test_compare_is_exact_and_one_bit_plant_fires(tmp_path):
     assert report["bit_identical"] is True
     assert report["leaf_count"] == 1
     assert report["different_count"] == 0
+    assert report["step_program_identical"] is True
     with pytest.raises(RuntimeError, match='"different_count": 1'):
         probe.compare(reference, candidate, plant=True)
+    changed = json.loads(text)
+    changed["step_program"]["sha256"] = "d" * 64
+    candidate.write_text(json.dumps(changed))
+    with pytest.raises(RuntimeError, match='"step_program_identical": false'):
+        probe.compare(reference, candidate, plant=False)
