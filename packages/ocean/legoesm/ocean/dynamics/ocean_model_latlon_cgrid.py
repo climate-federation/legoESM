@@ -3913,6 +3913,23 @@ class LatLonCGridOceanModel:
         return self.rigid_lid_data
 
     @staticmethod
+    def _check_l3_krhs_route(config) -> None:
+        # DECISION 147: L3's stage-3 bolus is certified only on G9's
+        # stage-3 Krhs tracer route; without it the FCT reads the bolus
+        # in its vertical velocity but not its horizontal transports
+        # (round 321: 7.0e-5 m/s continuity residual).
+        _gm = getattr(config, "gm_redi", None)
+        if (config.tracer_time_integrator == "rk3_ws"
+                and _gm is not None
+                and getattr(_gm, "gm_bolus_advection", "") == "through_fct"
+                and getattr(_gm, "slope_scheme", "") == "nemo_iso_lap"
+                and not config.rk3_stage3_tracer_krhs_nemo_order):
+            raise ValueError(
+                "NEMO rk3_ws eddy-induced velocity (GM bolus through FCT) "
+                "requires rk3_stage3_tracer_krhs_nemo_order (the stage-3 "
+                "Krhs tracer route)")
+
+    @staticmethod
     def _validate_config(
         config: LatLonCGridOceanConfig,
     ) -> LatLonCGridOceanConfig:
@@ -5471,18 +5488,7 @@ class LatLonCGridOceanModel:
                     raise ValueError(
                         "NEMO rk3_ws GM requires the complete staged "
                         "Treguier/nemo_iso_lap/bolus-through-fct composition")
-            # DECISION 147: L3's stage-3 bolus is certified only on G9's
-            # stage-3 Krhs tracer route; without it the FCT reads the bolus
-            # in its vertical velocity but not its horizontal transports
-            # (round 321: 7.0e-5 m/s continuity residual).
-            if (_ws_gm_redi is not None
-                    and getattr(_ws_gm_redi, "gm_bolus_advection", "") == "through_fct"
-                    and getattr(_ws_gm_redi, "slope_scheme", "") == "nemo_iso_lap"
-                    and not config.rk3_stage3_tracer_krhs_nemo_order):
-                raise ValueError(
-                    "NEMO rk3_ws eddy-induced velocity (GM bolus through FCT) "
-                    "requires rk3_stage3_tracer_krhs_nemo_order (the stage-3 "
-                    "Krhs tracer route)")
+            LatLonCGridOceanModel._check_l3_krhs_route(config)
         if (config.momentum_flux_scheme == "nemo_up3"
                 and _mom_ti_for_ws != "rk3_ws"):
             # S-47 (docs/ocean/fidelity/nemo_branch_isomorphism_map.md):
@@ -14752,6 +14758,9 @@ class LatLonCGridOceanModel:
         # faithful avm_k/avt_k lifetime and a bare step fails on its first
         # closure call.
         state = self._seed_tke_preclosure_carry(state)
+        # Eager, every call: ``self`` is a static jit argument, so a config
+        # edited after the first trace would reuse the cached executable.
+        self._check_l3_krhs_route(self.config)
         if self.config.barotropic.barotropic_solver == "rigid_lid":
             # Eager fail-fast (host-side, before the jitted body): the rigid-lid
             # streamfunction solve is single-rank only.  The in-body guard runs

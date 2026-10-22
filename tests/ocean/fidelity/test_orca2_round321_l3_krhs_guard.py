@@ -56,6 +56,27 @@ def test_l3_backstop_refuses_when_route_dropped_after_construction(
         gm_redi=orca2_l3_eiv_gm_redi(), rk3_stage3_tracer_krhs_nemo_order=True)
     model = _model(card, cfg)
     model.config = cfg._replace(rk3_stage3_tracer_krhs_nemo_order=False)
-    with pytest.raises(ValueError, match="eddy-induced velocity requires"):
+    with pytest.raises(ValueError, match="eddy-induced velocity"):
         jax.make_jaxpr(lambda s: model.step(s, card.dt_s, **kw))(
             card.recipe.initial_state)
+
+
+def test_l3_refuses_when_route_dropped_after_first_trace(rung10) -> None:
+    # ``self`` is a static jit argument: a post-trace config edit hits the
+    # cached trace, so the refusal must run on every step call.  BBL off
+    # only so the route-on first trace composes (stage3_krhs_terms refuses
+    # the diffusive BBL).
+    card, kw = rung10
+    cfg = card.recipe.model_config._replace(
+        gm_redi=orca2_l3_eiv_gm_redi(), rk3_stage3_tracer_krhs_nemo_order=True,
+        bbl_diffusive_option=0)
+    model = _model(card, cfg)
+
+    def trace():  # fresh callable: make_jaxpr caches on function identity
+        return jax.make_jaxpr(lambda s: model.step(s, card.dt_s, **kw))(
+            card.recipe.initial_state)
+
+    trace()
+    model.config = cfg._replace(rk3_stage3_tracer_krhs_nemo_order=False)
+    with pytest.raises(ValueError, match="eddy-induced velocity"):
+        trace()
