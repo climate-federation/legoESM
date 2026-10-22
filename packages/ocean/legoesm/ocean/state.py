@@ -3417,6 +3417,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # When selected, the ordinary stage-10c sponge path is withheld and the
     # same shared relaxation kernel writes the stage-3 Krhs at this boundary.
     rk3_stage3_damping_after_geothermal_nemo_order: bool = False
+    # ORCA2 L8's complete stage-3 tracer Krhs walk.  This is deliberately a
+    # separate, default-false composition selector: only the certified G9 +
+    # L1 + L2 + L4b + L6 card may combine FCT with the diffusive BBL and the
+    # ordered LDF/BBC/DMP writes.  Appended to preserve positional callers.
+    rk3_stage3_l8_nemo_order: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

@@ -147,9 +147,9 @@ def test_g9_card_is_g5_plus_fct2_and_the_folded_transport_vmask(tmp_path):
         assert recipe._orca2g1_selector_failures(planted) == [row]
 
 
-def test_only_g9_and_its_l3_composition_select_tracer_advection():
+def test_only_g9_and_its_compositions_select_tracer_advection():
     assert [c for c, on in recipe._ORCA2G_TADV.items() if on] == [
-        "ORCA2G9-tadv", "ORCA2L3-eiv"]
+        "ORCA2G9-tadv", "ORCA2L3-eiv", "ORCA2L8-krhs"]
     assert set(recipe._ORCA2G_TADV) == set(recipe._ORCA2G_JPK)
     for table in (recipe._ORCA2G_ZDF_FACES, recipe._ORCA2G_TRA_ZDF_ROUNDED,
                   recipe._ORCA2G_UE_RHS_ASCENDING, recipe._ORCA2G_ZDF_STAGE_R3U,

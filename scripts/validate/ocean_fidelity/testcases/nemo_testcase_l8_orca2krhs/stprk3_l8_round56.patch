@@ -1,0 +1,60 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -648,7 +648,7 @@
+          ts(:,:,:,jn,Krhs) = 0._wp                                                ! set tracer trends to zero (:,:,:) needed otherwise it does not work (?)
+       END DO
+-      IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) THEN
+-         l1_filename = 'oracle_rktracer_stage3_kt00000001.bin'
++      IF( lwp .AND. .NOT.ln_tile .AND. kstg == 3 ) THEN
++         WRITE(l1_filename,'("oracle_rktracer_stage3_kt",I8.8,".bin")') kstp
+          OPEN( NEWUNIT=l2_tracer_unit, FILE=TRIM(l1_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
+             &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=l2_tracer_ios )
+          IF( l2_tracer_ios /= 0 )   CALL ctl_stop( 'stp_RK3_stg: cannot open L2 stage-3 tracer dump' )
+@@ -681,5 +681,5 @@
+          !
+          CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs, zFu, zFv, zFw, kstg )   ! horizontal & vertical advection
+-         IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
++         IF( lwp .AND. .NOT.ln_tile .AND. kstg == 3 ) &
+             & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
+             & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+@@ -689,5 +689,5 @@
+          !
+          CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs,                kstg )   ! surface boundary condition
+-         IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
++         IF( lwp .AND. .NOT.ln_tile .AND. kstg == 3 ) &
+             & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
+             & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+@@ -790,21 +790,30 @@
+             ENDIF
+-            IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
++            IF( lwp .AND. .NOT.ln_tile .AND. kstg == 3 ) &
+                & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
+                & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+                                CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )  ! lateral mixing
+-            IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
++            IF( lwp .AND. .NOT.ln_tile .AND. kstg == 3 ) &
+                & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
+                & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+             IF( ln_trabbc  )   CALL tra_bbc( kstp,      Kmm, ts, Krhs )  ! bottom heat flux
++            IF( lwp .AND. .NOT.ln_tile .AND. kstg == 3 ) &
++               & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
++               & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+             IF( ln_trabbl  )   CALL tra_bbl( kstp, Kbb, Kmm, ts, Krhs )  ! advective (and/or diffusive) bottom boundary layer scheme
++            IF( lwp .AND. .NOT.ln_tile .AND. kstg == 3 ) &
++               & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
++               & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+             IF( ln_tradmp  )   CALL tra_dmp( kstp, Kbb, Kmm, ts, Krhs )  ! internal damping trends
++            IF( lwp .AND. .NOT.ln_tile .AND. kstg == 3 ) &
++               & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
++               & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+ 
+             IF( ln_zdfmfc  )   CALL tra_mfc( kstp, Kbb,      ts, Krhs )  ! Mass Flux Convection
+             IF( ln_zdfosm  ) THEN
+                                CALL tra_osm( kstp,      Kmm, ts, Krhs )  ! OSMOSIS non-local tracer fluxes ==> RHS
+             ENDIF
+             !
+             !           !== TRA time integration + ZDF  ==!   
+             !
+                                CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )  ! vertical mixing and after tracer fields
+-            IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) THEN
++            IF( lwp .AND. .NOT.ln_tile .AND. kstg == 3 ) THEN
