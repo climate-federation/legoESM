@@ -106,6 +106,20 @@ from a clean worktree at `439644db6`.
 | L8 | given entry | 0.16859778 | 0.20181174 | 3.59975e-3 | 2.26667e-3 |
 | L8 + L5 | given entry | 0.16859636 | 0.20181106 | 3.53214e-3 | 2.26284e-3 |
 
+These stage-3 maxima cover rank 0's half of the domain only: NEMO wrote
+stage frames for rank 0 alone (399,600 of 799,200 T points). The
+full-domain kt-10 ENTRY state (after nine steps; both ranks' restart) is
+worse:
+
+| state | label | max sea level (m) | max T (K) | RMS T (K) | RMS S |
+|---|---|---:|---:|---:|---:|
+| before | independent | 0.30894856 | 0.26943755 | 4.53977e-3 | 2.77907e-3 |
+| L8 + L5 | independent | 0.30894873 | 0.26943744 | 4.33878e-3 | 2.75744e-3 |
+| before | given entry | 0.32475297 | 0.26947497 | 4.53999e-3 | 2.77914e-3 |
+| L8 + L5 | given entry | 0.32475315 | 0.26947486 | 4.33901e-3 | 2.75751e-3 |
+
+(`arms/rung10_<label>_{control,L8L5}.json`, kt 10 `entry` rows.)
+
 L3: refused at construction, no number.
 
 ## Predictions (PREREG_nemo_testcases_l4_orca2_round323.md)
@@ -129,6 +143,30 @@ L3: refused at construction, no number.
   model equals the traced step (0 leaves). Peak 67.7 GiB.
 - Every round-316 guard is present in each merged function (counts
   unchanged in all five files; lane B adds one in the MLE path).
+
+## Public run paths carry the damping target (codex HOLD fix)
+
+- `step_checked` forwards the step number; `integrate` and `integrate_scan`
+  take per-step inputs (surface forcing, freshwater, damping target) and the
+  first step's NEMO number. The scan carries a step counter (traced, one
+  trace) and feeds the inputs as scan operands; every target's stamp is
+  checked against `nemo_kt0 + i` before the scan. No input given: the old
+  code paths run unchanged.
+- Rung 10's first step writes NEMO's cross-window barotropic history (absent
+  = the cold-start ramp); a zero seed would change step 1, so the scan path
+  takes that step outside the loop when the history is absent.
+- Rung 10, 3 steps, vs the ladder's own model and step call
+  (`test_orca2_round323_step_paths.py`): `integrate` bit-identical on every
+  leaf. `integrate_scan` bit-identical on every prognostic leaf; the
+  write-only vertical-velocity diagnostic `w` differs by 2.7e-20 m/s (kt 2)
+  and 8.5e-22 m/s (kt 3). Nothing reads `w` back. A one-step scan and an
+  outer jit of the same step match exactly (`steppaths/w_localise.log`),
+  so it comes from XLA compiling the step inside a multi-trip loop. Cause
+  inside the step not located.
+- Stale or missing target refused on step, step_checked, integrate,
+  integrate_scan (host check) and on a traced counter whose target it did
+  not select.
+- Gradient, kt 2-3 both inside the scan, T loss w.r.t. T: 0 non-finite of 799,200, max |dL/dT| 2.44e-4 (4,560 s, ~112 GB resident).
 
 ## Round-314 audit rows that change
 
@@ -154,8 +192,13 @@ L3: refused at construction, no number.
 - DECISION: L3 with L8 on rung 10. (1) keep L3 off until a ladder rung
   certifies L8 + L3 (lane A or B); (2) widen L8's guard to admit L3's block
   and measure under D122 (uncertified composition). Pick 1.
-- Every rung-10 step caller must now pass tra_dmp's step target; a future
+- Every rung-10 step caller must pass tra_dmp's step target; a future
   rung-10 trainer must too (the gradient probe shows how).
+- The stale-target guard compares caller-supplied step numbers: the
+  target's stamp against the step number the caller passes (the scan path:
+  each entry's stamp against `nemo_kt0 + i`, before the scan). It cannot
+  know the true model time. The raw traced step (`_step_jitted`, used by
+  the gradient probe) skips the guard entirely.
 
 ## Gates (x64, CPU; logs `orca2_rounds/round323/gates/`)
 

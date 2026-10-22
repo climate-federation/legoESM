@@ -15197,13 +15197,20 @@ class LatLonCGridOceanModel:
             )
         if self.config.rk3_stage3_damping_after_geothermal_nemo_order:
             target_kt = None if sponge is None else sponge.nemo_kt
-            if (isinstance(nemo_kt, bool)
+            if isinstance(nemo_kt, jax.core.Tracer):
+                # integrate_scan's carried step counter: the target must be
+                # the one that counter selected (stamps checked on host).
+                if target_kt is not nemo_kt:
+                    raise ValueError(
+                        "L6 damping target is stale: a traced step counter "
+                        "needs the target selected by that counter")
+            elif (isinstance(nemo_kt, bool)
                     or not isinstance(nemo_kt, (int, np.integer))
                     or nemo_kt < 1):
                 raise ValueError(
                     "L6 ordered damping requires nemo_kt=<positive step> so "
                     "a stale time-interpolated target cannot be reused")
-            if target_kt != nemo_kt:
+            elif target_kt != nemo_kt:
                 raise ValueError(
                     f"L6 damping target is stale: target kt={target_kt!r}, "
                     f"requested kt={nemo_kt!r}")
@@ -17471,6 +17478,7 @@ class LatLonCGridOceanModel:
         sponge=None,
         *,
         t_seconds=None,
+        nemo_kt=None,
     ) -> LatLonCGridOceanState:
         """Advance one timestep with host-side runtime validation."""
         if not self._cfl_checked:
@@ -17478,7 +17486,8 @@ class LatLonCGridOceanModel:
             self._cfl_checked = True
         state_new = self.step(state, dt, freshwater=freshwater,
                               surface_forcing=surface_forcing,
-                              sponge=sponge, t_seconds=t_seconds)
+                              sponge=sponge, t_seconds=t_seconds,
+                              nemo_kt=nemo_kt)
         if self.config.runtime_checks.enable_runtime_checks:
             self._assert_runtime_invariants(state_new)
         return state_new
@@ -17580,6 +17589,9 @@ class LatLonCGridOceanModel:
         dt: float,
         save_every: int = 1,
         t0_seconds: float = 0.0,
+        *,
+        step_inputs=None,
+        nemo_kt0=None,
     ) -> tuple[LatLonCGridOceanState, list[LatLonCGridOceanState]]:
         """Integrate forward for a given duration.
 
@@ -17592,6 +17604,12 @@ class LatLonCGridOceanModel:
             Time step [seconds].
         save_every : int
             Save state every N steps.
+        step_inputs : sequence of dict or None
+            Per-step ``step`` keyword arguments (``freshwater``,
+            ``surface_forcing``, ``sponge``), one entry per step.
+        nemo_kt0 : int or None
+            NEMO step number of the first step; step ``i`` passes
+            ``nemo_kt = nemo_kt0 + i`` (ordered damping needs it).
 
         Returns
         -------
@@ -17623,6 +17641,10 @@ class LatLonCGridOceanModel:
         state = seed_salt_flux_carry(
             state, getattr(self.config, "store_salt_flux", False))
 
+        if step_inputs is not None and len(step_inputs) < n_steps:
+            raise ValueError(
+                f"step_inputs has {len(step_inputs)} entries for {n_steps} steps")
+
         trajectory = [state]
         step_fn = self.step_checked if self.config.runtime_checks.enable_runtime_checks else self.step
         # Thread the traced elapsed model time ONLY when the equilibrium tide is
@@ -17632,11 +17654,12 @@ class LatLonCGridOceanModel:
         _tf = getattr(self.config, "tidal_forcing", None)
         _tide_on = _tf is not None and _tf.enabled
         for i in range(n_steps):
+            kw = {} if step_inputs is None else dict(step_inputs[i])
+            if nemo_kt0 is not None:
+                kw["nemo_kt"] = nemo_kt0 + i
             if _tide_on:
-                state = step_fn(state, dt,
-                                t_seconds=jnp.asarray(t0_seconds + i * dt))
-            else:
-                state = step_fn(state, dt)
+                kw["t_seconds"] = jnp.asarray(t0_seconds + i * dt)
+            state = step_fn(state, dt, **kw)
             if (i + 1) % save_every == 0:
                 trajectory.append(state)
 
@@ -17961,6 +17984,9 @@ class LatLonCGridOceanModel:
         n_steps: int,
         dt: float,
         t0_seconds: float = 0.0,
+        *,
+        step_inputs=None,
+        nemo_kt0=None,
     ) -> tuple[LatLonCGridOceanState, LatLonCGridOceanState]:
         """Integrate using jax.lax.scan (differentiable).
 
@@ -17969,6 +17995,16 @@ class LatLonCGridOceanModel:
         state : LatLonCGridOceanState
         n_steps : int
         dt : float
+        step_inputs : sequence of dict or None
+            Per-step ``step`` keyword arguments (``freshwater``,
+            ``surface_forcing``, ``sponge``), exactly ``n_steps`` entries
+            with one pytree structure; stacked and fed as scan operands, with
+            the step counter carried through the scan (traced, one trace).
+        nemo_kt0 : int or None
+            NEMO step number of the first step.  With ordered damping each
+            entry's ``sponge.nemo_kt`` must equal ``nemo_kt0 + i`` (checked
+            before the scan) and step ``i`` receives that target with the
+            carried counter as its traced ``nemo_kt``.
 
         Returns
         -------
@@ -17987,6 +18023,10 @@ class LatLonCGridOceanModel:
         """
         _tf = getattr(self.config, "tidal_forcing", None)
         _tide_on = _tf is not None and _tf.enabled
+        if step_inputs is not None or nemo_kt0 is not None:
+            return self._integrate_scan_inputs(
+                state, n_steps, dt, t0_seconds, step_inputs, nemo_kt0,
+                _tide_on)
         # seed_scan_carry probes the step via jax.eval_shape — with the tide
         # on it must probe the SAME (t-threaded) signature, both so the shape
         # discovery follows the tide-on trace and so the step()'s eager
@@ -18016,6 +18056,76 @@ class LatLonCGridOceanModel:
         final_state, trajectory = jax.lax.scan(
             scan_fn, state, xs=None, length=n_steps,
         )
+        return final_state, trajectory
+
+    def _integrate_scan_inputs(self, state, n_steps, dt, t0_seconds,
+                               step_inputs, nemo_kt0, tide_on):
+        """``integrate_scan`` with per-step inputs and a carried step counter."""
+        step_inputs = [dict(kw) for kw in (step_inputs or [{}] * n_steps)]
+        if len(step_inputs) != n_steps:
+            raise ValueError(
+                f"step_inputs has {len(step_inputs)} entries for {n_steps} steps")
+        damping = self.config.rk3_stage3_damping_after_geothermal_nemo_order
+        if damping:
+            if (isinstance(nemo_kt0, bool)
+                    or not isinstance(nemo_kt0, (int, np.integer))
+                    or nemo_kt0 < 1):
+                raise ValueError(
+                    "L6 ordered damping requires nemo_kt0=<positive step> so "
+                    "a stale time-interpolated target cannot be reused")
+            for i, kw in enumerate(step_inputs):
+                sponge = kw.get("sponge")
+                target_kt = None if sponge is None else sponge.nemo_kt
+                if target_kt != nemo_kt0 + i:
+                    raise ValueError(
+                        f"L6 damping target is stale: step {i} target "
+                        f"kt={target_kt!r}, requested kt={nemo_kt0 + i!r}")
+                kw["sponge"] = sponge._replace(nemo_kt=None)
+
+        def eager_kwargs(i):
+            kw = dict(step_inputs[i])
+            if damping:
+                kw["sponge"] = kw["sponge"]._replace(nemo_kt=nemo_kt0 + i)
+            if nemo_kt0 is not None:
+                kw["nemo_kt"] = nemo_kt0 + i
+            if tide_on:
+                kw["t_seconds"] = jnp.asarray(t0_seconds + i * dt)
+            return kw
+
+        # A cold-start bt_hist (None = NEMO's ll_init ramp) cannot be seeded
+        # without changing step 1, so that step runs outside the scan.
+        first_steps = []
+        if state.bt_hist is None and jax.eval_shape(
+                lambda s: self.step(s, dt, **eager_kwargs(0)),
+                state).bt_hist is not None:
+            state = self.step(state, dt, **eager_kwargs(0))
+            first_steps.append(state)
+        i0 = len(first_steps)
+        if i0 == n_steps:
+            return state, jax.tree.map(lambda a: a[None], state)
+        state = self.seed_scan_carry(state, dt, **eager_kwargs(i0))
+        # Scan operands, not closure constants: a captured forcing would be
+        # constant-folded and round differently from the standalone step.
+        stacked = jax.tree.map(lambda *xs: jnp.stack(xs), *step_inputs[i0:])
+
+        def scan_fn(carry, kw):
+            st, i = carry
+            if nemo_kt0 is not None:
+                kw["nemo_kt"] = nemo_kt0 + i
+            if damping:
+                kw["sponge"] = kw["sponge"]._replace(nemo_kt=kw["nemo_kt"])
+            if tide_on:
+                kw["t_seconds"] = t0_seconds + dt * i
+            new_state = self.step(st, dt, **kw)
+            return (new_state, i + 1), new_state
+
+        (final_state, _), trajectory = jax.lax.scan(
+            scan_fn, (state, jnp.asarray(i0, dtype=jnp.int32)), xs=stacked,
+            length=n_steps - i0)
+        if first_steps:
+            trajectory = jax.tree.map(
+                lambda a, b: jnp.concatenate([a[None], b]),
+                first_steps[0], trajectory)
         return final_state, trajectory
 
 
