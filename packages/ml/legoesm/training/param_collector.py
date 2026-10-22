@@ -378,6 +378,21 @@ def build_trainable_params(
             )
     include_set, exclude_set = set(include), set(exclude)
     tier0_set = set(include_tier0)
+    # An explicit_only parameter is trained only when named WITH its start
+    # value; check every such request before any skip can drop it silently.
+    for name in include:
+        meta = by_name[name]
+        if not meta.explicit_only:
+            continue
+        if init_values is None or name not in init_values:
+            raise ValueError(
+                f"{name!r} is explicit_only: pass its start value in "
+                f"init_values alongside include")
+        if name in exclude_set or (active_scheme_keys is not None
+                                   and meta.scheme_key not in active_scheme_keys):
+            raise ValueError(
+                f"{name!r} is explicitly requested but not reachable: it is "
+                f"excluded or its scheme {meta.scheme_key!r} is not active")
 
     raw: dict[str, jax.Array] = {}
     constraints: list[ParamConstraint] = []
@@ -386,15 +401,8 @@ def build_trainable_params(
             continue
         if meta.qualified_name in exclude_set:
             continue
-        if meta.explicit_only:
-            # Trained only when a run names it AND gives its start value; a tier
-            # threshold never reaches it.
-            if meta.qualified_name not in include_set:
-                continue
-            if init_values is None or meta.qualified_name not in init_values:
-                raise ValueError(
-                    f"{meta.qualified_name!r} is explicit_only: pass its start "
-                    f"value in init_values alongside include")
+        if meta.explicit_only and meta.qualified_name not in include_set:
+            continue  # a tier threshold never reaches it
         selected = ((1 <= meta.tunable_tier <= level and not meta.explicit_only)
                     or (meta.qualified_name in include_set))
         if meta.tunable_tier == 0:
@@ -438,3 +446,20 @@ def build_trainable_params(
                 f"parameter: the name is not in the registry, its scheme is "
                 f"not active, or its tier is outside this selection.")
     return TrainablePhysicsParams(raw_values=raw, constraints=constraints)
+
+
+def build_orca2_rung10_trainable_params(**kwargs) -> TrainablePhysicsParams:
+    """:func:`build_trainable_params` for the ORCA2 rung-10 card: the card's
+    frozen parameters (DECISION 149) are always excluded, and naming one in
+    ``include``/``include_tier0``/``init_values`` is refused."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import ORCA2_RUNG10_FROZEN_PARAMS
+
+    frozen = set(ORCA2_RUNG10_FROZEN_PARAMS)
+    asked = (set(kwargs.get("include", ())) | set(kwargs.get("include_tier0", ()))
+             | set(kwargs.get("init_values") or ()))
+    if asked & frozen:
+        raise ValueError(
+            f"{sorted(asked & frozen)} frozen on ORCA2 rung 10: "
+            f"{[ORCA2_RUNG10_FROZEN_PARAMS[n] for n in sorted(asked & frozen)]}")
+    kwargs["exclude"] = tuple(kwargs.get("exclude", ())) + tuple(sorted(frozen))
+    return build_trainable_params(**kwargs)
