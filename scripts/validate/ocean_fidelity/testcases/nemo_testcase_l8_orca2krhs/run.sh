@@ -23,7 +23,8 @@ readonly SOURCE_NAME=ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1
 readonly SOURCE=$NEMO_ROOT/cfgs/$SOURCE_NAME
 readonly REF_NAME=ORCA2G5_OMIP_L4_R31REF_FIX1
 readonly REF_BIN=$NEMO_ROOT/cfgs/$REF_NAME/BLD/bin/nemo.exe
-readonly TARGET_NAME=ORCA2L8_KRHS_R56 TARGET=$NEMO_ROOT/cfgs/$TARGET_NAME
+readonly TARGET_NAME=ORCA2L8_KRHS_R56
+readonly TARGET=$NEMO_ROOT/cfgs/$TARGET_NAME
 readonly INPUT_ROOT=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round21/oracle_g4_r21/p6_a
 readonly QGH=/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0/geothermal_heating.nc
 readonly RESTO=/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0/resto.nc
