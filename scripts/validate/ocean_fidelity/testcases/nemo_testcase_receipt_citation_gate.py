@@ -124,6 +124,17 @@ _OVERFLOW_R62ZDF_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo")
 _ORCA2V1 = NEMO / "cfgs/ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo"
 FILES = {
+    # --- GRIDLADDER round 56 (L8 composed stage-3 tracer RHS) ---
+    "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _ORCA2_COMPILED / "stprk3_stg.f90"),
+    "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90": (
+        _ORCA2_COMPILED / "trabbl.f90"),
+    "tests/ocean/fidelity/test_nemo_testcase_l8_orca2krhs.py": (
+        REPO / "tests/ocean/fidelity/test_nemo_testcase_l8_orca2krhs.py"),
+    "scripts/validate/ocean_fidelity/testcases/"
+    "nemo_testcase_l8_orca2krhs/l8_records.py": (
+        REPO / "scripts/validate/ocean_fidelity/testcases/"
+        "nemo_testcase_l8_orca2krhs/l8_records.py"),
     # --- GRIDLADDER round 55 (L6 interior damping) ---
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90": (
         _ORCA2_COMPILED / "tradmp.f90"),
@@ -1839,6 +1850,85 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- GRIDLADDER round 56 (L8 composed stage-3 tracer RHS) ---
+    "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:600-645": [
+        "!==  T-S Tracers  ==!",
+        "CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs",
+        46,
+    ],
+    "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:700-749": [
+        "CASE ( 3 )        !==  Stage 3  ==!   add all left over RHS terms",
+        "CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )",
+        50,
+    ],
+    "cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:260-307": [
+        ("!___________!_________________________!___________________!___________!"
+         "_____________!________!___________!__________________!__________!"
+         "_______________!", 4),
+        "rn_Ld        = 200.e+3",
+        48,
+    ],
+    "cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:325-329": [
+        ("!-----------------------------------------------------------------------", 47),
+        "nn_zdmp  =    0",
+        5,
+    ],
+    "cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:265-273": [
+        ("!-----------------------------------------------------------------------", 35),
+        ("/", 55),
+        9,
+    ],
+    "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:176-202": [
+        "IF( l_trdtra )   THEN                         !* Save the T-S input trends",
+        ("ENDIF", 3),
+        27,
+    ],
+    "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:242-268": [
+        ("!", 126),
+        "END SUBROUTINE tra_bbl_dif",
+        27,
+    ],
+    "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4952-4986": [
+        '_ORCA2G_SI3_CASES = ("ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg",',
+        '"namtra_dmp.nn_zdmp": 0,',
+        35,
+    ],
+    "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:5105-5134": [
+        "_ORCA2G_UE_RHS_ASCENDING, _ORCA2G_ZDF_STAGE_R3U,",
+        '_ORCA2G_UNMEASURED["ORCA2L8-krhs"] = ORCA2L8_UNMEASURED',
+        30,
+    ],
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4088-4163": [
+        "# NEMO applies geothermal BBC after tracer LDF in stage 3",
+        '"G9+L1+L2+L4b+L6 composition")',
+        76,
+    ],
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2738-2767": [
+        (")", 749),
+        ("return fd_a, fd_b, rhs_a, rhs_b, fct_activity, fct_inputs", 1),
+        30,
+    ],
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2868-2904": [
+        "return a2, b2",
+        ("content_b = sr(sr(e3t_bb * tr_b) + sr(dt_h * krhs_b))", 2),
+        37,
+    ],
+    "tests/ocean/fidelity/test_nemo_testcase_l8_orca2krhs.py:80-114": [
+        'assert \'check_acting "$REF"\' not in operational',
+        "_, _, moved = _nemo_stage3_l8_krhs_walk(adv, adv, *planted)",
+        35,
+    ],
+    "tests/ocean/fidelity/test_nemo_testcase_l8_orca2krhs.py:151-200": [
+        "selected = score()",
+        ("LatLonCGridOceanModel,", 2),
+        50,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/"
+    "nemo_testcase_l8_orca2krhs/l8_records.py:14-74": [
+        'MAGIC = b"NEMO_L2_RKTR3_1 "',
+        "return expected",
+        61,
+    ],
     # --- GRIDLADDER round 55 (L6 interior damping) ---
     "cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:44-55": [
         "&namtsd", "sn_sal = 'data_1m_salinity_nomask'", 12],
@@ -2197,7 +2287,7 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:678-680': [
         'ts(ji,jj,jk,jn,Kaa) = (        ( 1._wp + r3t(ji,jj,Kbb) )*ts(ji,jj,jk,jn,Kbb )',
         '&                /          ( 1._wp + r3t(ji,jj,Kaa) )', 3],
-    'nemo_testcase_g2_orca2bathy_ladder.py:1208-1211': [
+    'nemo_testcase_g2_orca2bathy_ladder.py:1216-1219': [
         'def step(state, kt):',
         'return new, round(time.time() - t0, 1)', 4],
     # --- GRIDLADDER round 23 (G4 round 6 receipt) ---
