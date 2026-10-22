@@ -36,6 +36,7 @@ from legoesm.ocean.physics.convection.config import (
 )
 from legoesm.ocean.physics.shortwave_penetration import ShortwavePenetrationConfig
 from legoesm.ocean.state import LatLonCGridOceanConfig
+from legoesm.ocean.sponge import SpongeForcing
 from legoesm.ocean.vertical import (
     NemoEENBarotropicOperands,
     nemo_fe3mask_from_tmask,
@@ -1444,16 +1445,27 @@ def apply_orca2_hand_alterations(temperature, salinity):
         red_sea_t[..., k0 - 1:k1] = np.float64(value)
 
 
-def build_orca2_initial_ts(
+_ORCA2_MONTH_CENTRES_DAY = np.asarray(
+    (15.5, 45.0, 74.5, 105.0, 135.5, 166.0,
+     196.5, 227.5, 258.0, 288.5, 319.0, 349.5),
+    dtype=np.float64,
+)
+_ORCA2_YEAR_DAYS = np.float64(365.0)
+_ORCA2_SECONDS_PER_DAY = np.float64(86400.0)
+
+
+def build_orca2_ts_at_step(
     temperature_path,
     salinity_path,
     tmask,
     *,
+    kt: int,
+    dt_s: float,
     apply_hand_alterations: bool = True,
 ):
-    """ORCA2's independent initial temperature and salinity, as NEMO builds it.
+    """ORCA2's time-interpolated T/S climatology for one NEMO step.
 
-    The executed order is the compiled one: read the monthly input files, do
+    The executed order is the compiled one: select the two monthly records, do
     ``fldread``'s two-record time interpolation, apply the ORCA_R2 hand
     alterations (``dtatsd.f90:218-253``), then mask.  The z/zps branch
     (``dtatsd.f90:307-310``) masks AFTER the copy, which is why the alterations
@@ -1466,25 +1478,106 @@ def build_orca2_initial_ts(
     is what NEMO executes.
     """
 
+    if isinstance(kt, bool) or not isinstance(kt, (int, np.integer)) or kt < 1:
+        raise ValueError(f"kt must be a positive integer, got {kt!r}")
+    if not np.isfinite(dt_s) or dt_s <= 0.0:
+        raise ValueError(f"dt_s must be finite and positive, got {dt_s!r}")
+
     import netCDF4  # noqa: N813
 
-    # fld_read.F90:181-227: at kt=1 (0.0625 d), December and January are
-    # centred at -15.5 and +15.5 d.  Preserve the source multiply-add order.
-    after_weight = np.float64(249.0 / 496.0)
+    # fldread.f90:200-246 uses the half-step date of the current call.  The
+    # no-leap ORCA2 records are centred in each calendar month; extend the
+    # December/January pair across the cyclic yearly seam.
+    elapsed_day = np.float64((np.float64(kt) - np.float64(0.5))
+                             * np.float64(dt_s) / _ORCA2_SECONDS_PER_DAY)
+    year_day = np.float64(elapsed_day % _ORCA2_YEAR_DAYS)
+    after_slot = int(np.searchsorted(
+        _ORCA2_MONTH_CENTRES_DAY, year_day, side="right"))
+    if after_slot == 0:
+        before_index, after_index = 11, 0
+        before_day, after_day = np.float64(-15.5), np.float64(15.5)
+    elif after_slot == 12:
+        before_index, after_index = 11, 0
+        before_day, after_day = np.float64(349.5), np.float64(380.5)
+    else:
+        before_index, after_index = after_slot - 1, after_slot
+        before_day = _ORCA2_MONTH_CENTRES_DAY[before_index]
+        after_day = _ORCA2_MONTH_CENTRES_DAY[after_index]
+    after_weight = np.float64(
+        (year_day - before_day) / (after_day - before_day))
     before_weight = np.float64(1.0) - after_weight
     with netCDF4.Dataset(temperature_path, "r") as ds:
-        t_dec = np.asarray(ds.variables["votemper"][11, :30], dtype=np.float64)
-        t_jan = np.asarray(ds.variables["votemper"][0, :30], dtype=np.float64)
+        t_before = np.asarray(
+            ds.variables["votemper"][before_index, :30], dtype=np.float64)
+        t_after = np.asarray(
+            ds.variables["votemper"][after_index, :30], dtype=np.float64)
     with netCDF4.Dataset(salinity_path, "r") as ds:
-        s_dec = np.asarray(ds.variables["vosaline"][11, :30], dtype=np.float64)
-        s_jan = np.asarray(ds.variables["vosaline"][0, :30], dtype=np.float64)
-    temperature = np.moveaxis(before_weight * t_dec + after_weight * t_jan, 0, -1)
-    salinity = np.moveaxis(before_weight * s_dec + after_weight * s_jan, 0, -1)
+        s_before = np.asarray(
+            ds.variables["vosaline"][before_index, :30], dtype=np.float64)
+        s_after = np.asarray(
+            ds.variables["vosaline"][after_index, :30], dtype=np.float64)
+    temperature = np.moveaxis(
+        before_weight * t_before + after_weight * t_after, 0, -1)
+    salinity = np.moveaxis(
+        before_weight * s_before + after_weight * s_after, 0, -1)
 
     if apply_hand_alterations:
         apply_orca2_hand_alterations(temperature, salinity)
 
     return (np.where(tmask, temperature, 0.0), np.where(tmask, salinity, 0.0))
+
+
+def build_orca2_initial_ts(
+    temperature_path,
+    salinity_path,
+    tmask,
+    *,
+    apply_hand_alterations: bool = True,
+):
+    """ORCA2's kt=1 independent initial T/S, retained as the stable API."""
+
+    return build_orca2_ts_at_step(
+        temperature_path, salinity_path, tmask,
+        kt=1, dt_s=10800.0,
+        apply_hand_alterations=apply_hand_alterations,
+    )
+
+
+_ORCA2_RESTO_SHA256 = (
+    "f4b6aec4695f984eab3a3ad9f2efdcf80d19180cf5f55aa4a93e3f45639b8634")
+
+
+def build_orca2_damping_for_step(
+    deck_root: str | Path, tmask, *, kt: int, dt_s: float,
+) -> SpongeForcing:
+    """Build ORCA2 ``tra_dmp`` inputs from the SHA-pinned local products."""
+
+    import netCDF4  # noqa: N813
+
+    root = Path(deck_root)
+    resto_path = root / "resto.nc"
+    if not resto_path.is_file():
+        raise FileNotFoundError(f"missing ORCA2 damping file: {resto_path}")
+    if hashlib.sha256(resto_path.read_bytes()).hexdigest() != _ORCA2_RESTO_SHA256:
+        raise ValueError(f"ORCA2 damping file has wrong SHA-256: {resto_path}")
+    with netCDF4.Dataset(resto_path, "r") as ds:
+        ds.set_auto_maskandscale(False)
+        raw = np.asarray(ds.variables["resto"][:30], dtype=np.float64)
+    rate = np.moveaxis(raw, 0, -1)
+    if rate.shape != np.asarray(tmask).shape:
+        raise ValueError(
+            f"resto shape {rate.shape!r} != tracer mask {np.asarray(tmask).shape!r}")
+    temperature, salinity = build_orca2_ts_at_step(
+        root / "data_1m_potential_temperature_nomask.nc",
+        root / "data_1m_salinity_nomask.nc",
+        tmask, kt=kt, dt_s=dt_s, apply_hand_alterations=True,
+    )
+    return SpongeForcing(
+        gamma=jnp.asarray(rate, dtype=jnp.float64),
+        T_ref=jnp.asarray(temperature, dtype=jnp.float64),
+        S_ref=jnp.asarray(salinity, dtype=jnp.float64),
+        nemo_kt=int(kt),
+    )
 
 
 # --- ORCA2 internal-wave mixing (NEMO zdfiwm; de Lavergne et al. 2020) ---

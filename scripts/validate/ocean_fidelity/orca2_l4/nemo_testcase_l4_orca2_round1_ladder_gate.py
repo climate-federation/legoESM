@@ -828,7 +828,45 @@ def _surface_forcings(
         # (zdfdrg.f90:187).  Read only by implicit_ice_ocean_top_drag.
         ice_ocean_top_drag_rCdu=jnp.asarray(fields["rCdU_ice"]),
     )
+    if card.recipe.model_config.rk3_stage3_geothermal_nemo_written:
+        # tra_bbc reads sn_qgh once (nn_geoflx = 2, yearly climatology).
+        surface = surface._replace(geothermal_heat_flux_mwm2=jnp.asarray(
+            read_geothermal_heatflow(deck_root, shape)))
     return freshwater, surface
+
+
+# ORCA2_ICE_v5.0.0 geothermal_heating.nc, the file every ORCA2 deck links.
+GEOTHERMAL_SHA256 = (
+    "e369762f068a7fbc1561be310fb8ded844233da37e6a0c6ffc10805e4996fffb")
+
+
+def read_geothermal_heatflow(deck_root: Path, shape) -> np.ndarray:
+    """The deck's SHA-pinned heatflow, native float32 widened exactly."""
+    import netCDF4
+
+    path = Path(deck_root) / "geothermal_heating.nc"
+    require(hashlib.sha256(path.read_bytes()).hexdigest() == GEOTHERMAL_SHA256,
+            f"geothermal file has the wrong SHA-256: {path}")
+    with netCDF4.Dataset(path) as dataset:
+        variable = dataset.variables["heatflow"]
+        variable.set_auto_maskandscale(False)
+        native = np.asarray(variable[0])
+    require(native.dtype == np.float32 and native.shape == tuple(shape),
+            f"heatflow {native.dtype} {native.shape} is not float32 {shape}")
+    return native.astype(np.float64)
+
+
+def damping_step_kwargs(card, deck_root: Path, kt: int) -> dict:
+    """tra_dmp's time-interpolated target for step kt, when the card runs it."""
+    if not card.recipe.model_config.rk3_stage3_damping_after_geothermal_nemo_order:
+        return {}
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_orca2_damping_for_step,
+    )
+
+    tmask = np.asarray(card.recipe.z_coord.is_active) > 0.5
+    return {"sponge": build_orca2_damping_for_step(
+        deck_root, tmask, kt=kt, dt_s=card.dt_s), "nemo_kt": kt}
 
 
 # The unbuilt statements this ladder is allowed to stop on, each keyed by the
@@ -1073,6 +1111,7 @@ def candidate_trajectory(
                 dt=card.dt_s,
                 freshwater=freshwater,
                 surface_forcing=surface,
+                **damping_step_kwargs(card, deck_root, kt),
             )
         except (NotImplementedError, ValueError) as exc:
             # An explicitly UNBUILT statement, named by the production code.

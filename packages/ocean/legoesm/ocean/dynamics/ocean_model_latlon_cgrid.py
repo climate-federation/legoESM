@@ -100,6 +100,7 @@ from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
 )
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     ab2_blend,
+    apply_sponge_tracer_relaxation,
     depth_average_to_faces,
     depth_mean,
 )
@@ -150,6 +151,62 @@ MASS_FLUX_UNITS = "m^2/s"
 MASS_FLUX_W_UNITS = "m/s"
 MASS_FLUX_W_DIMS = ("lat", "lon", "level_interface")
 MASS_FLUX_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w")
+
+
+def _nemo_stage3_ldf_then_geothermal(
+    stage_t, stage_s, dT_ldf, dS_ldf, geothermal_t, active_3d,
+):
+    """Add L4b's stage-3 tracer terms in NEMO call order.
+
+    ``stprk3_stg.f90:734-740`` calls ``tra_ldf`` and then ``tra_bbc``.
+    Materialize both Krhs writes so XLA cannot reassociate geothermal ahead
+    of lateral diffusion.  There is no new division or square root here; the
+    two already-certified kernels produce ``d*_ldf`` and ``geothermal_t``.
+    """
+
+    t_after_ldf = nemo_source_round(stage_t + dT_ldf * active_3d)
+    s_after_ldf = nemo_source_round(stage_s + dS_ldf * active_3d)
+    return nemo_source_round(t_after_ldf + geothermal_t), s_after_ldf
+
+
+def _nemo_stage3_l4b_then_damping(
+    l4b_t, l4b_s, T_kbb, S_kbb, sponge,
+):
+    """Add L6's ``tra_dmp`` write after the complete L4b source.
+
+    The relaxation arithmetic stays in the shared sponge kernel; its
+    NEMO-written arm materializes the final Krhs assignment.  ``sponge`` is a
+    full-rank ``SpongeForcing`` carrying ORCA2's ``resto`` and interpolated
+    T/S climatology.
+    """
+
+    return apply_sponge_tracer_relaxation(
+        l4b_t, l4b_s, T_kbb, S_kbb, sponge,
+        mask=None, expand_gamma_axis=-1, nemo_written_source=True,
+    )
+
+
+def _nemo_stage3_l8_krhs_walk(adv_t, adv_s, *term_groups):
+    """Materialize L8's seven stage-3 tracer ``Krhs`` boundaries.
+
+    ``term_groups`` is the six post-advection NEMO calls, each a pair of
+    tuples of temperature/salinity writes: SBC, QSR, LDF, BBC, BBL and DMP.
+    Returning every boundary makes statement position a bitwise-testable
+    property rather than merely checking the (partly commutative) final sum.
+    """
+
+    if len(term_groups) != 6:
+        raise ValueError("L8 needs SBC, QSR, LDF, BBC, BBL and DMP groups")
+    sr = nemo_source_round
+    t_value, s_value = adv_t, adv_s
+    boundaries = [(t_value, s_value)]
+    for t_terms, s_terms in term_groups:
+        for term in t_terms:
+            t_value = sr(t_value + term)
+        for term in s_terms:
+            s_value = sr(s_value + term)
+        boundaries.append((t_value, s_value))
+    return t_value, s_value, tuple(boundaries)
 
 
 def mass_flux_fields(u_field, v_field, w_field, mfu_data, mfv_data, mfw_data):
@@ -2367,6 +2424,12 @@ class _NEMOWSLiveOperandTrace(NamedTuple):
     barotropic_correction_geometry: object
     stage_outputs: object
     stage_tracer_sources: object
+    stage3_composed_source: object
+    stage3_before_geothermal: object
+    stage3_geothermal_rate: object
+    stage3_before_damping: object
+    stage3_damping_rate: object
+    stage3_explicit_temperature: object
 
 
 def _nemo_qsr_stage3_rate(
@@ -2425,6 +2488,8 @@ def _nemo_ws_rk3_tracer_pair_step(
     stage_qco_weights=None,
     stage_tracer_written_order: bool = False,
     stage3_content_written_order=None,
+    bbl_stage3_krhs: bool = False,
+    bbl_stage3_r3t_stretch=None,
     stop_after_stage: int = 3,
     resume=None,
     stage3_advection_content_override=None,
@@ -2434,6 +2499,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     return_fct_inputs: bool = False,
     fct_nemo_fold_exchange: bool = False,
     stage3_krhs_terms=None,
+    stage3_l8_krhs_terms=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """NEMO key_RK3 tracer stage program (Wicker--Skamarock form).
 
@@ -2465,15 +2531,23 @@ def _nemo_ws_rk3_tracer_pair_step(
         raise ValueError("stage_transport_geometry must contain exactly 3 stages")
     if stop_after_stage not in (1, 2, 3):
         raise ValueError("stop_after_stage must be 1, 2, or 3")
-    if stage3_krhs_terms is not None and (
+    krhs_route = stage3_krhs_terms is not None or stage3_l8_krhs_terms is not None
+    if krhs_route and (
             tracer_advection not in ("ppm_fct", "fct2")
             or stage3_content_written_order is None
             or stage3_advection_content_override is not None
-            or bbl_context is not None or return_fct_activity
+            or (bbl_context is not None and stage3_l8_krhs_terms is None)
+            or return_fct_activity
             or return_fct_inputs):
         raise ValueError(
             "stage3_krhs_terms needs FCT, stage3_content_written_order and "
-            "no BBL, content override or FCT side output")
+            "no BBL outside L8, content override or FCT side output")
+    if stage3_l8_krhs_terms is not None and (
+            stage3_krhs_terms is not None or bbl_context is None
+            or not bbl_stage3_krhs or len(stage3_l8_krhs_terms) != 5):
+        raise ValueError(
+            "stage3_l8_krhs_terms needs its exclusive diffusive-BBL route "
+            "and exactly SBC, QSR, LDF, BBC and DMP groups")
     if stage_source_rates is None:
         zero_a = jnp.zeros_like(tr_a)
         zero_b = jnp.zeros_like(tr_b)
@@ -2490,6 +2564,8 @@ def _nemo_ws_rk3_tracer_pair_step(
         if resume_stage not in (1, 2) or resume_stage >= stop_after_stage:
             raise ValueError(
                 "resume must hand in stage 1 or 2, below stop_after_stage")
+
+    stage3_krhs = {}
 
     def _flux_pair(a_val, b_val, stage_dt, stage_index, h_after):
         fct_activity = None
@@ -2564,7 +2640,7 @@ def _nemo_ws_rk3_tracer_pair_step(
         else:
             literal_transports = None
             fct_implicit_w = wi_stage
-            if stage3_krhs_terms is not None and stage_index == 2:
+            if krhs_route and stage_index == 2:
                 if zfu_stage is None or zfv_stage is None:
                     raise ValueError(
                         "NEMO literal FCT requires stage zFu/zFv")
@@ -2596,11 +2672,11 @@ def _nemo_ws_rk3_tracer_pair_step(
                     return_fct_inputs and stage_index == 2),
                 fct_nemo_fold_exchange=fct_nemo_fold_exchange,
                 return_fct_nemo_rhs=(
-                    stage3_krhs_terms is not None and stage_index == 2),
+                    krhs_route and stage_index == 2),
                 fct_nemo_literal_transports=literal_transports,
             )
             rhs_a = rhs_b = None
-            if stage3_krhs_terms is not None and stage_index == 2:
+            if krhs_route and stage_index == 2:
                 (dh_a, dv_a, rhs_a), (dh_b, dv_b, rhs_b) = pair_result
             elif return_fct_activity and stage_index == 2:
                 (dh_a, dv_a), (dh_b, dv_b), fct_activity = pair_result
@@ -2626,8 +2702,18 @@ def _nemo_ws_rk3_tracer_pair_step(
             )
             (adv_option, diffusive_option, geom, diffusive_geom,
              area, dy_u, dx_v, gamma_s, aht_m2_s, rho0,
-             nemo_reference_geometry, bbl_grid, bbl_eos_form) = bbl_context
-            if diffusive_option == 1:
+             nemo_reference_geometry, bbl_grid, bbl_eos_form,
+             bbl_pivot_ghost) = bbl_context
+            if diffusive_option == 1 and bbl_stage3_krhs:
+                # trabbl.f90:412: gdept_1d(mbkt)*(1+r3t(Kmm)), r3t(Kmm) the
+                # stored stage-3 ratio, not a ratio of thickness sums.
+                if bbl_stage3_r3t_stretch is None:
+                    raise ValueError(
+                        "bbl_nemo_stage3_krhs needs the stage-3 1+r3t(Kmm) "
+                        "(rk3_stage3_tracer_nemo_stored_thickness)")
+                live_bottom_depth = nemo_source_round(
+                    diffusive_geom.dep_bot_ref * bbl_stage3_r3t_stretch)
+            elif diffusive_option == 1:
                 # trabbl.F90:348 reads gdept(bottom,Kmm).  Under key_qco that
                 # is gdept_0(bottom)*(1+r3t(Kmm)); the stage thickness sum is
                 # H*(1+r3t), so this ratio is the identical stage stretch.
@@ -2662,10 +2748,31 @@ def _nemo_ws_rk3_tracer_pair_step(
                     tr_a, tr_b, diffusive_geom,
                     bottom_depth_m=live_bottom_depth, rho_0=rho0,
                     grid=bbl_grid, eos_form=bbl_eos_form,
+                    pivot_ghost=bbl_pivot_ghost,
                 )
+            if diffusive_option == 1 and bbl_stage3_krhs:
+                if adv_option != 0 or stage3_content_written_order is None:
+                    raise ValueError(
+                        "bbl_nemo_stage3_krhs needs bbl_adv_option=0 and the "
+                        "stage-3 written order (rk3_stage3_heat_nemo_written)")
+                # stprk3_stg.f90:739 -> trabbl.f90:249-256: the trend joins
+                # Krhs (the surface terms already in it), divided by e3t(Kmm).
+                bbl_base = (
+                    (jnp.zeros_like(tr_a), jnp.zeros_like(tr_b))
+                    if stage3_l8_krhs_terms is not None
+                    else stage_source_rates[2])
+                stage3_krhs["ab"] = apply_bbl_diffusive_tendency(
+                    bbl_base[0], bbl_base[1],
+                    tr_a, tr_b, stage3_content_written_order[1], area,
+                    diffusive_geom, ahu_bbl, ahv_bbl, grid=bbl_grid,
+                    pivot_ghost=bbl_pivot_ghost,
+                )
+                return fd_a, fd_b, rhs_a, rhs_b, fct_activity, fct_inputs
+            if diffusive_option == 1:
                 bbl_a, bbl_b = apply_bbl_diffusive_tendency(
                     bbl_a, bbl_b, tr_a, tr_b, h_stage, area,
                     diffusive_geom, ahu_bbl, ahv_bbl, grid=bbl_grid,
+                    pivot_ghost=bbl_pivot_ghost,
                 )
             # tra_bbl adds a concentration tendency to Krhs using Kbb tracers
             # and Kmm volume (stprk3_stg.F90:588; trabbl.F90:129-136,243-284).
@@ -2771,7 +2878,22 @@ def _nemo_ws_rk3_tracer_pair_step(
     if stage3_advection_content_override is not None:
         advection_content_a, advection_content_b = (
             stage3_advection_content_override)
-    if stage3_krhs_terms is not None:
+    if stage3_l8_krhs_terms is not None:
+        # stprk3_stg.f90:604-740: adv, SBC, QSR, LDF, BBC, BBL, DMP.
+        # The BBL term is produced above from a zero Krhs so this helper owns
+        # every write boundary and cannot silently move it around BBC/DMP.
+        e3t_bb, e3t_mm = stage3_content_written_order
+        bbl_ab = stage3_krhs["ab"]
+        krhs_a, krhs_b, _ = _nemo_stage3_l8_krhs_walk(
+            rhs2_a, rhs2_b, *stage3_l8_krhs_terms[:4],
+            ((bbl_ab[0],), (bbl_ab[1],)),
+            stage3_l8_krhs_terms[4],
+        )
+        sr = nemo_source_round
+        dt_h = sr(dt * e3t_mm)
+        content_a = sr(sr(e3t_bb * tr_a) + sr(dt_h * krhs_a))
+        content_b = sr(sr(e3t_bb * tr_b) + sr(dt_h * krhs_b))
+    elif stage3_krhs_terms is not None:
         # stprk3_stg.f90:604 zeroes Krhs; tra_adv (:637), tra_sbc_RK3 (:645)
         # and tra_qsr (:717) add to it in that order; trazdf.f90:284-289 forms
         # e3t(Kbb)*T(Kbb) + (p2dt*e3t(Kmm))*Krhs, each product and sum rounded.
@@ -2801,8 +2923,9 @@ def _nemo_ws_rk3_tracer_pair_step(
         content_b = sr(sr(e3t_bb * tr_b) - sr(dt * fd2_b)
                        if stage3_advection_content_override is None
                        else advection_content_b)
-        content_a = sr(content_a + sr(dt_h * stage_source_rates[2][0]))
-        content_b = sr(content_b + sr(dt_h * stage_source_rates[2][1]))
+        krhs_a, krhs_b = stage3_krhs.get("ab", stage_source_rates[2])
+        content_a = sr(content_a + sr(dt_h * krhs_a))
+        content_b = sr(content_b + sr(dt_h * krhs_b))
     else:
         content_a = (advection_content_a
                      + dt * h_one_half * stage_source_rates[2][0])
@@ -3985,23 +4108,81 @@ class LatLonCGridOceanModel:
             )
 
         # NEMO applies geothermal BBC after tracer LDF in stage 3
-        # (stprk3_stg.f90:734-740).  The literal geothermal path currently
-        # joins the G5 stage-3 source assembly, before this model's separate
-        # tracer-diffusion increment.  Likewise, the G9 written-Krhs list is a
-        # closed list of heat/runoff/solar terms and would omit geothermal.
-        # Refuse both unreproduced orderings instead of silently running them.
+        # (stprk3_stg.f90:734-740).  L4 keeps the original no-LDF placement;
+        # L4b alone defers the add to the ordered LDF boundary below.  The G9
+        # written-Krhs list remains unsupported because it also brings FCT.
         if config.rk3_stage3_geothermal_nemo_written:
-            if config.rk3_stage3_tracer_krhs_nemo_order:
+            if (config.rk3_stage3_tracer_krhs_nemo_order
+                    and not config.rk3_stage3_l8_nemo_order):
                 raise ValueError(
                     "rk3_stage3_geothermal_nemo_written is not supported with "
                     "rk3_stage3_tracer_krhs_nemo_order: the written stage-3 "
                     "Krhs term list does not yet carry tra_bbc")
-            if (config.K_h > 0.0 or config.K_bih > 0.0
-                    or config.gm_redi is not None):
+            _after_ldf = config.rk3_stage3_geothermal_after_ldf_nemo_order
+            _has_ldf = (config.K_h > 0.0 or config.K_bih > 0.0
+                        or config.gm_redi is not None)
+            if _has_ldf and not _after_ldf:
                 raise ValueError(
                     "rk3_stage3_geothermal_nemo_written is not supported with "
                     "tracer lateral diffusion: NEMO applies tra_ldf before "
-                    "tra_bbc, while this path would add diffusion afterward")
+                    "tra_bbc; select the L4b ordered composition")
+            if _after_ldf:
+                _gm = config.gm_redi
+                _is_l2 = (
+                    config.K_h == 0.0 and config.K_bih == 0.0
+                    and _gm is not None
+                    and _gm.kappa_GM == 0.0
+                    and _gm.slope_scheme == "nemo_iso_lap"
+                    and _gm.msc_stabilize
+                    and _gm.implicit_K33
+                    and _gm.redi_coefficient == "constant"
+                    and not _gm.treguier.enabled
+                    and _gm.gm_bolus_advection == "centred"
+                )
+                if not _is_l2:
+                    raise ValueError(
+                        "rk3_stage3_geothermal_after_ldf_nemo_order requires "
+                        "the certified L2 standard-isoneutral selection")
+                if ((config.bbl_adv_option != 0
+                     or config.bbl_diffusive_option != 0)
+                        and not config.rk3_stage3_l8_nemo_order):
+                    raise ValueError(
+                        "L4b ordered geothermal does not support tra_bbl")
+        elif config.rk3_stage3_geothermal_after_ldf_nemo_order:
+            raise ValueError(
+                "rk3_stage3_geothermal_after_ldf_nemo_order requires "
+                "rk3_stage3_geothermal_nemo_written")
+        if config.rk3_stage3_damping_after_geothermal_nemo_order:
+            if not config.rk3_stage3_geothermal_after_ldf_nemo_order:
+                raise ValueError(
+                    "rk3_stage3_damping_after_geothermal_nemo_order requires "
+                    "the certified L4b ordered composition")
+            if ((config.bbl_adv_option != 0
+                 or config.bbl_diffusive_option != 0)
+                    and not config.rk3_stage3_l8_nemo_order):
+                raise ValueError("L6 ordered damping does not support tra_bbl")
+        if config.rk3_stage3_l8_nemo_order:
+            _l8_required = (
+                config.rk3_stage3_tracer_krhs_nemo_order,
+                config.rk3_stage3_heat_nemo_written,
+                config.rk3_stage3_salt_nemo_written,
+                config.rk3_stage3_tracer_nemo_stored_thickness,
+                config.rk3_stage3_geothermal_nemo_written,
+                config.rk3_stage3_geothermal_after_ldf_nemo_order,
+                config.rk3_stage3_damping_after_geothermal_nemo_order,
+                config.bbl_nemo_stage3_krhs,
+                config.bbl_nemo_pivot_ghost,
+            )
+            if (not all(_l8_required)
+                    or config.tracer_advection != "fct2"
+                    or config.bbl_adv_option != 0
+                    or config.bbl_diffusive_option != 1
+                    or config.bbl_aht_m2_s != 1000.0
+                    or config.bbl_gamma_s != 10.0
+                    or not _is_l2):
+                raise ValueError(
+                    "rk3_stage3_l8_nemo_order requires the exact certified "
+                    "G9+L1+L2+L4b+L6 composition")
         if _phys is not None and _phys.shortwave_penetration is not None:
             from legoesm.ocean.physics.shortwave_penetration import (
                 SHORTWAVE_PENETRATION_SCHEMES,
@@ -7209,6 +7390,9 @@ class LatLonCGridOceanModel:
         _nemo_ws_live_stage_qco = None
         _nemo_ws_live_tke_entry = None
         _nemo_ws_live_tke_statement_trace = None
+        _nemo_ws_stage3_before_geothermal = None
+        _nemo_ws_stage3_before_damping = None
+        _nemo_ws_stage3_damping_rate = None
         _nemo_ws_live_operator_operands = [
             _nemo_ws_stage1_operator_operands, None, None]
         _nemo_ws_tracer_content_rhs = None
@@ -8804,6 +8988,7 @@ class LatLonCGridOceanModel:
                     None if _rnf_content is None else _rnf_content[1],
                     _h_s3_kmm))
 
+            _qgh_rate = None
             if _cfg_b.rk3_stage3_geothermal_nemo_written:
                 # stprk3_stg.f90:734-739 calls tra_bbc after tra_ldf and before
                 # tra_bbl.  L4 inherits G5's OFF selections for both neighbors,
@@ -8827,8 +9012,9 @@ class LatLonCGridOceanModel:
                     rho_0=_cfg_b.rho_0,
                     c_sw=_cfg_b.physics.constants.c_sw,
                 )
-                _stage3_T_written = nemo_source_round(
-                    _stage3_T_written + _qgh_rate)
+                if not _cfg_b.rk3_stage3_geothermal_after_ldf_nemo_order:
+                    _stage3_T_written = nemo_source_round(
+                        _stage3_T_written + _qgh_rate)
 
             if _cfg_b.rk3_stage3_tracer_krhs_nemo_order:
                 # The same stage-3 terms, kept apart so they add onto the FCT
@@ -10596,16 +10782,38 @@ class LatLonCGridOceanModel:
             elif _tti == "rk3_ws":
                 _ws_stage_source_rates = _stage_source_rates
                 _stage3_krhs_terms_live = _stage3_krhs_terms
+                _stage3_l8_krhs_terms = None
                 if _cfg_b.gm_redi is not None:
+                    if _cfg_b.rk3_stage3_geothermal_after_ldf_nemo_order:
+                        if _qgh_rate is None:
+                            raise ValueError(
+                                "L4b ordered geothermal has no stage-3 rate")
+                        _nemo_ws_stage3_before_geothermal = (
+                            nemo_source_round(
+                                _stage_source_rates[2][0]
+                                + dT_gm * active_3d),
+                            nemo_source_round(
+                                _stage_source_rates[2][1]
+                                + dS_gm * active_3d),
+                        )
+                        _ordered_stage3 = _nemo_stage3_ldf_then_geothermal(
+                            _stage_source_rates[2][0],
+                            _stage_source_rates[2][1],
+                            dT_gm, dS_gm, _qgh_rate, active_3d,
+                        )
+                    else:
+                        _ordered_stage3 = (
+                            _stage_source_rates[2][0] + dT_gm * active_3d,
+                            _stage_source_rates[2][1] + dS_gm * active_3d,
+                        )
+                        _nemo_ws_stage3_before_geothermal = _ordered_stage3
                     _ws_stage_source_rates = (
                         _stage_source_rates[0],
                         _stage_source_rates[1],
-                        (
-                            _stage_source_rates[2][0] + dT_gm * active_3d,
-                            _stage_source_rates[2][1] + dS_gm * active_3d,
-                        ),
+                        _ordered_stage3,
                     )
-                    if _stage3_krhs_terms is not None:
+                    if (_stage3_krhs_terms is not None
+                            and not _cfg_b.rk3_stage3_l8_nemo_order):
                         # stprk3_stg.f90:717,734,749: stage 3 adds QSR,
                         # then tra_ldf, then hands the completed Krhs to
                         # tra_zdf.  G9 has the written Krhs tuple but no LDF;
@@ -10615,6 +10823,63 @@ class LatLonCGridOceanModel:
                             (*_stage3_krhs_terms[0], dT_gm * active_3d),
                             (*_stage3_krhs_terms[1], dS_gm * active_3d),
                         )
+                if _cfg_b.rk3_stage3_damping_after_geothermal_nemo_order:
+                    if sponge is None:
+                        raise ValueError(
+                            "L6 ordered damping needs a full-rank "
+                            "SpongeForcing")
+                    if (sponge.gamma.ndim != state.T.data.ndim
+                            or sponge.T_ref.shape != state.T.data.shape
+                            or sponge.S_ref.shape != state.S.data.shape
+                            or sponge.u_ref is not None
+                            or sponge.v_ref is not None):
+                        raise ValueError(
+                            "L6 ordered damping requires full-rank gamma/T/S "
+                            "with no momentum sponge")
+                    _nemo_ws_stage3_before_damping = (
+                        _ws_stage_source_rates[2][0],
+                        _ws_stage_source_rates[2][1],
+                    )
+                    _nemo_ws_stage3_damping_rate = (
+                        jnp.asarray(sponge.gamma, dtype=state.T.data.dtype)
+                        * (jnp.asarray(sponge.T_ref, dtype=state.T.data.dtype)
+                           - state.T.data),
+                        jnp.asarray(sponge.gamma, dtype=state.S.data.dtype)
+                        * (jnp.asarray(sponge.S_ref, dtype=state.S.data.dtype)
+                           - state.S.data),
+                    )
+                    _ordered_stage3 = _nemo_stage3_l4b_then_damping(
+                        *_nemo_ws_stage3_before_damping,
+                        state.T.data, state.S.data, sponge,
+                    )
+                    _ws_stage_source_rates = (
+                        _ws_stage_source_rates[0],
+                        _ws_stage_source_rates[1],
+                        _ordered_stage3,
+                    )
+                if _cfg_b.rk3_stage3_l8_nemo_order:
+                    if (_stage3_krhs_terms is None or _qgh_rate is None
+                            or _cfg_b.gm_redi is None or sponge is None):
+                        raise ValueError(
+                            "L8 stage-3 order needs live G9/L2/L4b/L6 terms")
+                    _zero_l8 = jnp.zeros_like(state.T.data)
+                    _ldf_t, _ldf_s = _nemo_stage3_ldf_then_geothermal(
+                        _zero_l8, _zero_l8, dT_gm, dS_gm, _zero_l8,
+                        active_3d)
+                    _dmp_t, _dmp_s = _nemo_stage3_l4b_then_damping(
+                        _zero_l8, _zero_l8, state.T.data, state.S.data,
+                        sponge)
+                    # The G9 tuple carries SBC's individual qns/runoff writes
+                    # followed by QSR for temperature; salinity has SBC only.
+                    _stage3_l8_krhs_terms = (
+                        (_stage3_krhs_terms[0][:-1],
+                         _stage3_krhs_terms[1]),
+                        ((_stage3_krhs_terms[0][-1],), ()),
+                        ((_ldf_t,), (_ldf_s,)),
+                        ((_qgh_rate,), ()),
+                        ((_dmp_t,), (_dmp_s,)),
+                    )
+                    _stage3_krhs_terms_live = None
                 _bbl_context = None
                 if ((_cfg_b.bbl_adv_option == 2
                      or _cfg_b.bbl_diffusive_option == 1)
@@ -10664,6 +10929,7 @@ class LatLonCGridOceanModel:
                             _raw_bbl.e1v, _raw_bbl.e2v,
                             _raw_bbl.umask, _raw_bbl.vmask,
                             aht_m2_s=_cfg_b.bbl_aht_m2_s, grid=_grid,
+                            pivot_ghost=_cfg_b.bbl_nemo_pivot_ghost,
                         )
                     _bbl_context = (
                         _cfg_b.bbl_adv_option,
@@ -10679,6 +10945,7 @@ class LatLonCGridOceanModel:
                         _nemo_bbl_geometry,
                         _grid,
                         _cfg_b.eos,
+                        _cfg_b.bbl_nemo_pivot_ghost,
                     )
                 _ws_tracer_result = _nemo_ws_rk3_tracer_pair_step(
                     # NEMO's stage ladder always restarts from ts(Kbb).
@@ -10708,7 +10975,11 @@ class LatLonCGridOceanModel:
                         else "one_step"),
                     stage_source_rates=_ws_stage_source_rates,
                     stage3_content_written_order=_stage3_e3t,
+                    bbl_stage3_krhs=_cfg_b.bbl_nemo_stage3_krhs,
+                    bbl_stage3_r3t_stretch=(
+                        _stretch_s3_kmm if _cfg_b.bbl_nemo_stage3_krhs else None),
                     stage3_krhs_terms=_stage3_krhs_terms_live,
+                    stage3_l8_krhs_terms=_stage3_l8_krhs_terms,
                     # The written-order selector belongs to the weighted
                     # stage-1/2 call; this stage-3 finalizer has no weights.
                     bbl_context=_bbl_context,
@@ -11653,13 +11924,20 @@ class LatLonCGridOceanModel:
                      state_new.eta.data),
                 ),
                 # WRITE-only: the per-stage tracer source rates the stage
-                # helper consumes, each with the live top-cell thickness that
-                # stage divided by, so a gate can bind on the PRODUCTION
-                # statement instead of re-implementing it.
+                # helper receives before its live LDF/geothermal composition,
+                # each with the live top-cell thickness that stage divided by.
+                # The composed stage-3 source is exposed separately below so
+                # existing runoff gates retain their original payload.
                 stage_tracer_sources=(
                     _stage_source_rates,
                     (h_k_old, _h_live_one_third, _h_live_one_half),
                 ),
+                stage3_composed_source=_ws_stage_source_rates[2],
+                stage3_before_geothermal=_nemo_ws_stage3_before_geothermal,
+                stage3_geothermal_rate=_qgh_rate,
+                stage3_before_damping=_nemo_ws_stage3_before_damping,
+                stage3_damping_rate=_nemo_ws_stage3_damping_rate,
+                stage3_explicit_temperature=T_corrected,
             )
         if not _apply_implicit_vmix:
             # Faithful AB2 path: return the explicit-only state plus the
@@ -14706,6 +14984,7 @@ class LatLonCGridOceanModel:
              freshwater=None, surface_forcing=None,
              sponge=None, *, grid=None,
              vertex_mask=None, t_seconds=None,
+             nemo_kt=None,
              external_tracer_rate=None,
              _shortwave_tendency_test_delta=None,
              _vertical_K_test_override=None,
@@ -14797,6 +15076,18 @@ class LatLonCGridOceanModel:
                 "step_checked(), or drive the run via integrate()/"
                 "integrate_scan() which thread it automatically."
             )
+        if self.config.rk3_stage3_damping_after_geothermal_nemo_order:
+            target_kt = None if sponge is None else sponge.nemo_kt
+            if (isinstance(nemo_kt, bool)
+                    or not isinstance(nemo_kt, (int, np.integer))
+                    or nemo_kt < 1):
+                raise ValueError(
+                    "L6 ordered damping requires nemo_kt=<positive step> so "
+                    "a stale time-interpolated target cannot be reused")
+            if target_kt != nemo_kt:
+                raise ValueError(
+                    f"L6 damping target is stale: target kt={target_kt!r}, "
+                    f"requested kt={nemo_kt!r}")
         if (external_tracer_rate is not None
                 and getattr(self.config, "outer_integrator", "forward_euler")
                 not in ("leapfrog", "nemo_mlf")):

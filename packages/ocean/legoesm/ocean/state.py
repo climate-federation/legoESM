@@ -2386,6 +2386,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     # independently, even though the certified ORCA2 deck selects only ldf=1.
     bbl_diffusive_option: int = 0
     bbl_aht_m2_s: float = 0.0
+    # The diffusive BBL trend is added to stage 3's concentration Krhs, after
+    # the surface terms and before tra_zdf (stprk3_stg.f90:739,
+    # trabbl.f90:249-256), with e3t(Kmm) as its divisor.  False folds it into
+    # the stage flux divergence as content.  Needs the stage-3 written order.
+    bbl_nemo_stage3_krhs: bool = False
+    # The diffusive BBL's north neighbour of a stored T-pivot row is NEMO's
+    # fold ghost, the mirror of the row below (lbcnfd.f90:588-590).  False
+    # mirrors the pivot row itself.
+    bbl_nemo_pivot_ghost: bool = False
     ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar) — also the
     #   Adams-Bashforth ε for the OUTER integrator (Veros AB_eps=0.1).
     # Outer (baroclinic) time integrator. "forward_euler" (default) = the existing
@@ -3394,6 +3403,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     # selected path requires OceanSurfaceForcing.geothermal_heat_flux_mwm2;
     # False leaves every pre-L4 card's pytree and JAX program unchanged.
     rk3_stage3_geothermal_nemo_written: bool = False
+    # ORCA2 L4b composes the geothermal statement with standard isoneutral
+    # diffusion.  NEMO adds tra_ldf to stage-3 Krhs first, then tra_bbc
+    # (stprk3_stg.f90:734-740).  This selector defers the geothermal add to
+    # that boundary; validation permits it only with the certified L2 form.
+    rk3_stage3_geothermal_after_ldf_nemo_order: bool = False
+    # ORCA2 L6's full-column T/S damping.  NEMO adds ``tra_dmp`` after
+    # ``tra_ldf``, ``tra_bbc`` and the off-on-this-rung ``tra_bbl`` call.
+    # When selected, the ordinary stage-10c sponge path is withheld and the
+    # same shared relaxation kernel writes the stage-3 Krhs at this boundary.
+    rk3_stage3_damping_after_geothermal_nemo_order: bool = False
+    # ORCA2 L8's complete stage-3 tracer Krhs walk.  This is deliberately a
+    # separate, default-false composition selector: only the certified G9 +
+    # L1 + L2 + L4b + L6 card may combine FCT with the diffusive BBL and the
+    # ordered LDF/BBC/DMP writes.  Appended to preserve positional callers.
+    rk3_stage3_l8_nemo_order: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
