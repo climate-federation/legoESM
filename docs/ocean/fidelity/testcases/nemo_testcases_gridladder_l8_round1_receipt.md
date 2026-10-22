@@ -188,6 +188,10 @@ entries 1, 3, 5, 7, and 9 and its two-step results at kt 2, 4, 6, 8, and 10
 are also bit-exact at full depth.  All stage-1, stage-2, and stage-3 kt-1
 surface and full-depth rows are bit-exact.
 
+The live-term correction ran from clean commit
+`9e3590e2d45eaf860afac77758ce96cd093b572c`; its packages tree is still
+`db06c1e1514fade4fb59ee756eb7eedde101fdef`, so no model value changed.
+
 The original JIT/traced/x64 `l8_krhs` arm starts from NEMO's recorded LDF
 boundary and feeds NEMO's recorded BBC, BBL, and DMP increments to the ordered
 walker.  Its 80 zero-unequal rows and its JIT/traced/x64 removal controls prove
@@ -225,7 +229,7 @@ d2081f712888dda66d4320043893e0c5c0aca4a4968ffa8e00e9c7e14f30235a  l8_given_entry
 2cccb926070fcb471abf537c5f998e48439fa9542f9e77305d983c9a4f85b816  l8_krhs_kt1_10.json
 c4c22458648ab3b0b3eec5298e7a175411f8af3254da473cf6d4b4139a7d1017  l8_geothermal_kt1_10.json
 80143e2ae669753957df22ea4df95525c7bbef7e043613a13621f16fec0ba80a  l8_damping_kt1_10.json
-4cd634f0acb0f8a0c56ed43b8766eb9fb55388510cec305cb39b1672c2b500a0  l8_live_krhs_kt1_10.json
+22b944170099f453b04855fc339ea42afdec0afb13ee37146033da534efe04b6  l8_live_krhs_kt1_10.json
 ```
 
 Every trajectory row is exact and every live term-boundary row is at the
