@@ -8,6 +8,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import xarray as xr
+
+
+@pytest.fixture(autouse=True)
+def _fresh_attempt_counts(monkeypatch):
+    monkeypatch.setattr(sb, "_BUILD_ATTEMPTS", {})
 from legoesm.training import scale_build as sb
 from legoesm.training.era5_to_state import TrainingERA5Config
 
@@ -145,7 +150,7 @@ def test_builder_marks_ready_and_waiter_proceeds(tmp_path, monkeypatch):
     monkeypatch.setenv("SLURM_JOB_ID", "42")
     monkeypatch.setattr(sb, "_CACHE_POLL_S", 0)
     assert sb._wb_build_or_wait(lambda: "built", tmp_path / ".b", 0, 2) == "built"
-    assert (tmp_path / ".b.ready.42.0.0").exists()
+    assert (tmp_path / ".b.ready.42.0.0.0").exists()
     assert sb._wb_build_or_wait(lambda: "read", tmp_path / ".b", 1, 2) == "read"
 
 
@@ -197,7 +202,7 @@ def test_gate_rejects_dtype_change():
 def test_requeue_ignores_the_previous_attempts_failure(tmp_path, monkeypatch):
     monkeypatch.setenv("SLURM_JOB_ID", "45")
     monkeypatch.setattr(sb, "_CACHE_POLL_S", 0)
-    (tmp_path / ".b.failed.45.0.0").write_text("old attempt")
+    (tmp_path / ".b.failed.45.0.0.0").write_text("old attempt")
     monkeypatch.setenv("SLURM_RESTART_COUNT", "1")
     assert sb._wb_build_or_wait(lambda: "ok", tmp_path / ".b", 0, 2) == "ok"
     assert sb._wb_build_or_wait(lambda: "ok", tmp_path / ".b", 1, 2) == "ok"
@@ -215,13 +220,14 @@ def test_waiter_on_a_later_load_trusts_the_job_heartbeat(tmp_path, monkeypatch):
         (tmp_path / ".heartbeat.46.0.0").touch()      # rank 0 still alive
         real_sleep(0.6)
         if len(polls) == 4:                            # > 2 s after start
-            (tmp_path / ".val.ready.46.0.0").touch()
+            (tmp_path / ".val.ready.46.0.0.0").touch()
 
     monkeypatch.setattr(sb.time, "sleep", poll)
     assert sb._wb_build_or_wait(lambda: "val", tmp_path / ".val", 1, 2) == "val"
 
 
-def test_retry_in_the_same_step_clears_the_old_failure(tmp_path, monkeypatch):
+def test_retry_in_the_same_step_ignores_the_old_failure(tmp_path, monkeypatch):
+    # waiter reaches the retry BEFORE rank 0 does (codex round 3)
     monkeypatch.setenv("SLURM_JOB_ID", "47")
     monkeypatch.setattr(sb, "_CACHE_POLL_S", 0)
 
@@ -230,7 +236,17 @@ def test_retry_in_the_same_step_clears_the_old_failure(tmp_path, monkeypatch):
 
     with pytest.raises(OSError):
         sb._wb_build_or_wait(boom, tmp_path / ".b", 0, 2)
-    assert sb._wb_build_or_wait(lambda: "ok", tmp_path / ".b", 0, 2) == "ok"
+    with pytest.raises(RuntimeError, match="transient"):
+        sb._wb_build_or_wait(lambda: None, tmp_path / ".b", 1, 2)
+    (tmp_path / ".heartbeat.47.0.0").touch()
+    polls = []
+
+    def rank0_retries_meanwhile(_):
+        polls.append(1)
+        if len(polls) == 1:
+            assert sb._wb_build_or_wait(lambda: "ok", tmp_path / ".b", 0, 2) == "ok"
+
+    monkeypatch.setattr(sb.time, "sleep", rank0_retries_meanwhile)
     assert sb._wb_build_or_wait(lambda: "ok", tmp_path / ".b", 1, 2) == "ok"
 
 

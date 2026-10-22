@@ -237,6 +237,10 @@ def _ensure_era5_store_cache(era5_cfg, path, pv, sv, stamps, root):
 
 
 _HEARTBEAT_STARTED = set()
+# Per-(base, rank) call count: every rank calls in the same order, so the
+# count names one attempt across ranks and an earlier attempt's markers can
+# never be read as this one's.
+_BUILD_ATTEMPTS: dict = {}
 
 
 def _start_job_heartbeat(beat):
@@ -272,12 +276,13 @@ def _wb_build_or_wait(build, base, rank, nproc):
     # a requeued job keeps its id; the restart count keeps its markers fresh
     tag = (f"{job}.{os.environ.get('SLURM_STEP_ID', '0')}."
            f"{os.environ.get('SLURM_RESTART_COUNT', '0')}")
-    ready, failed = (base.with_name(f"{base.name}.{k}.{tag}")
-                     for k in ("ready", "failed"))
     beat = base.parent / f".heartbeat.{tag}"
+    attempt = _BUILD_ATTEMPTS.get((base, rank), 0)
+    _BUILD_ATTEMPTS[(base, rank)] = attempt + 1
+    ready, failed = (base.with_name(f"{base.name}.{k}.{tag}.{attempt}")
+                     for k in ("ready", "failed"))
     if rank == 0:
         _start_job_heartbeat(beat)
-        failed.unlink(missing_ok=True)   # an earlier attempt in this step
         try:
             out = build()
         except BaseException as exc:
