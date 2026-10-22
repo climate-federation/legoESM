@@ -9,6 +9,8 @@ Preregistration commit: `12483a8c59`
 Implementation/acquisition commits: `ce9636bc1f`, `28fefb1eaa`,
 `bf01715c57`, `d710262489`, `98feff346e`
 
+Receipt/citation re-anchor commit: `e111ccce8a`
+
 Status: **ACQUISITION_NEEDED.**  This round designed and built L8 and ran its
 committed preflight only.  It did not build or execute NEMO and did not score
 or certify L8.
@@ -135,7 +137,16 @@ L8_PREFLIGHT_7_OF_7_PASS plants=3/3 compiled_gfortran_layout=true real_log=true 
 WOULD_RUN smoke -> writer-free boundary -> three twins into /data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round56/oracle_l8_r56
 ```
 
-## 5. ASKED / UNASKED
+## 5. Landing gates
+
+After re-anchoring 73 citation-map lines and 18 audited-receipt lines, the
+explicit citation gate passed 17 / 17 tests in 5.40 seconds.  The exact ORCA2
+default gate from `claude_rounds/land.sh` then passed 145 / 145 tests in
+993.72 seconds under CPU, x64, and the landing package path.  That total
+includes the private-import ratchet at 6 / 6 and both ORCA2 parallel-receipt
+checks.  No bar was changed and no test was skipped to obtain these results.
+
+## 6. ASKED / UNASKED
 
 ASKED and completed: trace the running Oracle and selected BBL branch; state
 the exact order; build the G9+L1+L2+L4b+L6 L8 card; make only that exact
