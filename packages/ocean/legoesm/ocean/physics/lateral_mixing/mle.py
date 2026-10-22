@@ -35,6 +35,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round
 
 # --- Fox-Kemper MLE fixed constants (NEMO 5.0.1 TRA/tramle.F90) ---
 # Vertical-structure factor 5/21 in mu(z) = (1-zeta^2)(1 + 5/21 zeta^2).
@@ -63,6 +64,7 @@ __param_spec__ = {
             # Numerics guards: grid-scale cap and the optional bolus-CFL clamp.
             "max_grid_scale_m": "numerics: min(111 km, e1u) grid-scale cap",
             "bolus_cfl_cap": "numerics: optional |w_mle| Courant clamp (0 = off = oracle)",
+            "nemo_association": "numerics: NEMO statement association and reductions",
         },
         "params": {
             # The single FK efficiency knob (NEMO rn_ce); typical 0.06-0.08.
@@ -100,6 +102,11 @@ class MLEConfig(NamedTuple):
     bolus_cfl_cap : float
         If > 0, cap |w_mle| so the bolus vertical Courant number stays below this
         fraction (stability guard; 0 = off = oracle behaviour).
+    through_fct : bool
+        Route the diagnosed volume transports through the model's tracer
+        advection program.  ``False`` retains the standalone centred-flux
+        tendency; the ORCA2 L5 card selects ``True`` because NEMO adds MLE to
+        the stage-3 transports before its FCT limiter.
     """
     ce: float = 0.06
     lat_ref_deg: float = 20.0
@@ -109,9 +116,17 @@ class MLEConfig(NamedTuple):
     no_mle_in_convection: bool = True
     max_grid_scale_m: float = 111.0e3
     bolus_cfl_cap: float = 0.0
+    through_fct: bool = False
+    nemo_association: bool = False
 
 
-def mle_coefficient(ce: float, lat_ref_deg: float) -> float | jnp.ndarray:
+def mle_coefficient(
+    ce: float,
+    lat_ref_deg: float,
+    *,
+    omega: float | None = None,
+    nemo_association: bool = False,
+) -> float | jnp.ndarray:
     """NEMO nn_mle=1 coefficient ``rc_f = rn_ce / (5 km * 2*Omega*sin(rn_lat))``.
 
     Constant (uses the reference latitude, not local f) so the streamfunction is
@@ -130,6 +145,13 @@ def mle_coefficient(ce: float, lat_ref_deg: float) -> float | jnp.ndarray:
     # ``lat_ref_deg`` is a FIXED reference latitude (excluded-tier convention,
     # never traced), so f0 is built with pure-Python ``math`` and stays a plain
     # Python float — ``jnp.sin`` of a traced angle would be unnecessary here.
+    if nemo_association:
+        if omega is None:
+            raise ValueError("nemo_association requires the card's omega")
+        # tramle.f90:697, verbatim left-to-right denominator association.
+        rad = 3.141592653589793 / 180.0
+        return ce / (_RC_F_LENGTH_SCALE_M * 2.0 * float(omega)
+                     * math.sin(rad * lat))
     f0 = 2.0 * float(constants.Omega) * math.sin(math.radians(lat))
     # Do NOT cast ``ce``: it is the registered tunable (MLEConfig.ce, tier-2,
     # SPEC_MODULES, transform=sigmoid).  A prior ``float(ce)`` raised
@@ -189,6 +211,7 @@ def mle_mld_and_buoyancy(
     ref_depth_m: float = 10.0,
     rho0: float = constants.rho_ocean,
     grav: float = constants.g,
+    nemo_association: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """MLE mixed-layer depth + ML-mean buoyancy (NEMO tramle.F90, integer level).
 
@@ -306,10 +329,29 @@ def mle_mld_and_buoyancy(
     first = jnp.where(has, first, jnp.sum((wet > 0.5).astype(jnp.int32), axis=-1))
     in_ml = (lvl_row < first[..., jnp.newaxis]) & (wet > 0.5)
     in_ml = in_ml.astype(rho_pot.dtype)
-    zmld = jnp.sum(in_ml * dz_live, axis=-1)                          # (...)
-    dz_top = dz_live[..., 0]
-    b_int = grav * jnp.sum(in_ml * ((rho0 - rho_pot) / rho0) * dz_live, axis=-1)
-    bm = b_int / jnp.maximum(jnp.maximum(dz_top, zmld), 1e-10)        # (...)
+    if nemo_association:
+        # tramle.f90:248-255: this is a vertical recurrence, not a tree sum.
+        sr = nemo_source_round
+        zmld = jnp.zeros_like(rho_pot[..., 0])
+        b_int = jnp.zeros_like(zmld)
+        rho0_a = jnp.asarray(rho0, dtype=rho_pot.dtype)
+        r1_rho0 = sr(1.0 / rho0_a)
+        for k in range(nlev):
+            zc = sr(dz_live[..., k] * in_ml[..., k])
+            zmld = sr(zmld + zc)
+            drho = sr(rho0_a - rho_pot[..., k])
+            b_int = sr(b_int + sr(sr(zc * drho) * r1_rho0))
+        dz_top = dz_live[..., 0]
+        divisor = jnp.maximum(dz_top, zmld)
+        divisor = jnp.where(wet[..., 0] > 0.5, divisor, 1.0)
+        bm = sr(sr(jnp.asarray(grav, dtype=rho_pot.dtype) * b_int)
+                / divisor)
+    else:
+        zmld = jnp.sum(in_ml * dz_live, axis=-1)                      # (...)
+        dz_top = dz_live[..., 0]
+        b_int = grav * jnp.sum(
+            in_ml * ((rho0 - rho_pot) / rho0) * dz_live, axis=-1)
+        bm = b_int / jnp.maximum(jnp.maximum(dz_top, zmld), 1e-10)    # (...)
     # MLD/buoyancy are diagnostic gates -> stop gradient so AD users do not treat
     # threshold motion as a smooth control path (the bolus magnitude through bm/H
     # stays differentiable in T,S elsewhere).  ``in_ml`` is returned so the

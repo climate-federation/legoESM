@@ -2813,6 +2813,45 @@ def orca2_l3_eiv_gm_redi():
         redi_flux_stored_face_ratios=True, eddy_induced_velocity=True)
 
 
+def orca2_l8_krhs_selection() -> dict[str, object]:
+    """Lane A rung L8's certified stage-3 Krhs selectors (gridladder ce9636bc1f).
+
+    zero Krhs -> tra_adv -> tra_sbc -> tra_qsr -> tra_ldf -> tra_bbc ->
+    tra_bbl -> tra_dmp (stprk3_stg.f90:600-749); ORCA2's diffusive BBL
+    (nn_bbl_ldf = 1, rn_ahtbbl = 1000, rn_gambbl = 10, read and inert with
+    nn_bbl_adv = 0).  The card must also carry L2, FCT and the stage-3
+    written order, as the model's L8 guard requires.
+    """
+
+    return {
+        "rk3_stage3_tracer_krhs_nemo_order": True,
+        "rk3_stage3_geothermal_nemo_written": True,
+        "rk3_stage3_geothermal_after_ldf_nemo_order": True,
+        "rk3_stage3_damping_after_geothermal_nemo_order": True,
+        "rk3_stage3_l8_nemo_order": True,
+        "bbl_nemo_stage3_krhs": True,
+        "bbl_nemo_pivot_ghost": True,
+        "rk3_end_of_stage_pivot_fold": True,
+        "bbl_adv_option": 0, "bbl_diffusive_option": 1,
+        "bbl_aht_m2_s": 1000.0, "bbl_gamma_s": 10.0,
+    }
+
+
+def orca2_l5_mle():
+    """Lane B rung L5's certified mixed-layer eddies (gridladder-vmix 43071fbf2).
+
+    &namtra_mle as ORCA2 resolves it (ln_mle = T over namelist_ref's
+    nn_mle = 1, rn_ce = 0.06, rn_lat = 20, rn_rho_c_mle = 0.01, nn_mld_uv =
+    0, nn_conv = 0), through NEMO's stage-3 FCT transports.
+    """
+    from legoesm.ocean.physics.lateral_mixing.mle import MLEConfig
+
+    return MLEConfig(
+        ce=0.06, lat_ref_deg=20.0, rho_c_mle=0.01, ref_depth_m=10.0,
+        mld_uv="min", no_mle_in_convection=False, max_grid_scale_m=111.0e3,
+        through_fct=True, nemo_association=True)
+
+
 # --- rung SMT-4 (decision 93): ORCA2 rung 0's namdyn_ldf ----------
 # Decision 93 replaces ORCA2's unavailable file-backed coefficient only with
 # mode 20. ldfdyn.f90:311/:342-346 evaluates 0.5*rn_Uv*MAX(e1,e2).
