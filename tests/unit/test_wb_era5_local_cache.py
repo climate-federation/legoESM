@@ -244,4 +244,4 @@ def test_land_fraction_alone_gets_the_local_flux_store(tmp_path, monkeypatch):
         SimpleNamespace(), {"cache_dir": str(tmp_path / "cache")}, era5,
         era5._replace(load_land_frac=True), times, 4, 1, 0, 1)
     assert flux_l is not None and "land_sea_mask" in flux_l
-    assert str(tmp_path / "cache") in flux_l.encoding.get("source", str(tmp_path / "cache"))
+    assert flux_l.sizes["time"] == 2      # the window copy, not the 24-step remote
