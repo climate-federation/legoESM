@@ -225,6 +225,30 @@ stays DIFFERS, its three coefficient rows NOT-MODELLED).
   import ratchet included) 17 + 6 + 71 + 25 + 16 + 2 + 8 + 2 = 147 passed,
   0 failed.
 
+## Resume 3 (2026-10-22, codex review r321b HOLD: cached backstop)
+
+- Codex's gap reproduced: the model is a static jit argument, so after a
+  route-on trace, dropping the route and stepping again reused the cached
+  step and did not raise.
+- Fix: the construction check is now one helper called at construction
+  AND on every eager step() call (integrate and integrate_scan go through
+  step()). The trace backstop stays for direct inner-step drivers. Raise
+  only.
+- Plant added: rung 10 with L3, route on (BBL off so the route-on trace
+  composes), trace, drop the route, trace again with a fresh callable.
+  Previous commit: DID NOT RAISE (1 failed, 2 passed); this fix: 3 passed
+  (`orca2_rounds/round321/resume3_plant_{before,after}_fix.log`).
+- Forward unchanged: shipped rung-10 step program identical modulo
+  callback addresses; one step T, S, u, v, ssh bit-identical, 5/5
+  (`orca2_rounds/round321/resume3/`).
+- Gates (x64, CPU; `gates/resume3_*`): 53 citation-map anchors re-anchored
+  (round-320 tool, clean in 1 pass). Receipt citation gate PASS, 5
+  citations, 0 failures, 0 map entries failing. Default gate (land.sh
+  list, private-import ratchet included) 17 + 6 + 71 + 25 + 16 + 2 + 8 + 2
+  = 147 passed, 0 failed; guard plants 3 passed.
+- Choices: UNASKED (resume 3): the plant turns the diffusive BBL off on
+  its trace target only (test-only, so the route-on trace composes).
+
 ## Review
 
 - codex review: operator.
