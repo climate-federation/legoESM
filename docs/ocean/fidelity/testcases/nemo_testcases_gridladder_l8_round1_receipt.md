@@ -122,6 +122,10 @@ as a G9 composition, and later hit the documented per-process compiler limit.
 After that test correction, the two isolated heavy G9 controls passed in
 96.01 and 167.07 seconds.  No inherited production selector was changed.
 
+After the live-term correction, the complete L8 focused file passed 9 / 9 in
+470.67 seconds.  Its new test requires the live arm to be exact through QSR,
+first differ at `ldf_T`, remain inside the fixed bar, and report no dry writes.
+
 ## 4. Acquisition boundary and preflight result
 
 The committed acquisition entry point defaults to `--preflight-only` and has
@@ -176,6 +180,13 @@ The exact ORCA2 default gate from `claude_rounds/land.sh` then passed
 package path.  That total includes the private-import ratchet at 6 / 6 and
 both ORCA2 parallel-receipt checks.  No bar was changed and no test was
 skipped to obtain these results.
+
+After the correction, the same 145-test default gate was rerun in three
+synchronous chunks and passed 25 / 25, 94 / 94, and 26 / 26.  The first chunk
+includes the private-import ratchet at 6 / 6 and both ORCA2 parallel-receipt
+checks.  The receipt-specific gate again found all 15 citations with zero
+failures and zero global map-audit failures; its shifted-citation plant exited
+nonzero.
 
 ## 6. Clean certification score and live-term correction
 
