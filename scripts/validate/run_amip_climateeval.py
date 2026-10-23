@@ -371,7 +371,8 @@ def main(argv: list[str] | None = None) -> int:
           f"HTML report written to {html_path}")
     if args.share:
         # Model id is the same for every run, so default the prefix to the run
-        # folder plus a UTC timestamp, so re-shares and same-named runs never collide.
+        # folder plus a UTC timestamp (minute precision: two shares within the
+        # same minute still collide).
         from datetime import datetime, timezone
         from climateeval._cli import _share_report
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%MZ")
