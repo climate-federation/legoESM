@@ -5170,6 +5170,13 @@ def experiment_config_to_dict(config: ExperimentConfig) -> dict:
     return d
 
 
+def _lists_to_tuples(cls, kwargs: dict) -> dict:
+    """JSON stores tuple fields as lists; restore tuples so a round-trip is ==."""
+    return {k: tuple(v) if isinstance(v, list)
+            and "tuple" in str(cls.__annotations__.get(k, "")) else v
+            for k, v in kwargs.items()}
+
+
 def experiment_config_from_dict(d: dict, *, strict: bool = False) -> ExperimentConfig:
     """Reconstruct ExperimentConfig from a dict (e.g. loaded from JSON).
 
@@ -5212,18 +5219,16 @@ def experiment_config_from_dict(d: dict, *, strict: bool = False) -> ExperimentC
                 filtered_eval = {
                     k: v for k, v in sub_d['evaluation'].items() if k in known_eval
                 }
-                # ``suites`` is a tuple field; JSON round-trips it as a list, so
-                # coerce back so the reconstructed config == the original.
-                if isinstance(filtered_eval.get('suites'), list):
-                    filtered_eval['suites'] = tuple(filtered_eval['suites'])
-                sub_d['evaluation'] = EvaluationConfig(**filtered_eval)
+                sub_d['evaluation'] = EvaluationConfig(
+                    **_lists_to_tuples(EvaluationConfig, filtered_eval))
             known_sub = set(cls._fields)
             filtered = {k: v for k, v in sub_d.items() if k in known_sub}
-            sub_values[key] = cls(**filtered)
+            sub_values[key] = cls(**_lists_to_tuples(cls, filtered))
 
     # Filter top-level fields
     known = set(ExperimentConfig._fields)
-    filtered = {k: v for k, v in d.items() if k in known}
+    filtered = _lists_to_tuples(
+        ExperimentConfig, {k: v for k, v in d.items() if k in known})
     filtered.update(sub_values)
 
     # Legacy migration: ``morrison_dep_coeff`` was declared 1e-8 (1e5 OFF the
@@ -5264,13 +5269,16 @@ def config_to_dict(config) -> dict:
     ``driver`` uses, so that layer no longer reaches up into
     ``forcing.amip_config`` for serialization (federation carve, Step 3).
     """
-    d = config._asdict()
-    # Runtime-only injection — never serialized (see experiment_config_to_dict).
-    if "turbulence_override" in d:
-        d["turbulence_override"] = None
-    for key, val in d.items():
-        if hasattr(val, "_asdict"):
-            d[key] = val._asdict()
+    if isinstance(config, ExperimentConfig):
+        d = experiment_config_to_dict(config)
+    else:
+        d = config._asdict()
+        # Runtime-only injection — never serialized (see experiment_config_to_dict).
+        if "turbulence_override" in d:
+            d["turbulence_override"] = None
+        for key, val in d.items():
+            if hasattr(val, "_asdict"):
+                d[key] = val._asdict()
     # Schema marker: dicts written by the current codec are exempt from
     # legacy migrations on load (see experiment_config_from_dict — v2 gates
     # the morrison_dep_coeff 1e-8 rewrite to UNMARKED legacy dicts, so a
