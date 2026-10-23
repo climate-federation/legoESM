@@ -1952,7 +1952,7 @@ CITATION_MAP = {
     ],
     "tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:184-255": [
         "def test_l9_live_eiv_executes_before_l8_finalizer(l9_card, monkeypatch):",
-        "state, dt=l9_card.dt_s, freshwater=freshwater,",
+        ("state, dt=l9_card.dt_s, freshwater=freshwater,", 2),
         72,
     ],
     "tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:262-280": [
@@ -2409,7 +2409,7 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:678-680': [
         'ts(ji,jj,jk,jn,Kaa) = (        ( 1._wp + r3t(ji,jj,Kbb) )*ts(ji,jj,jk,jn,Kbb )',
         '&                /          ( 1._wp + r3t(ji,jj,Kaa) )', 3],
-    'nemo_testcase_g2_orca2bathy_ladder.py:1216-1219': [
+    'nemo_testcase_g2_orca2bathy_ladder.py:1227-1230': [
         'def step(state, kt):',
         'return new, round(time.time() - t0, 1)', 4],
     # --- GRIDLADDER round 23 (G4 round 6 receipt) ---
