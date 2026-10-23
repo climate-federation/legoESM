@@ -1723,6 +1723,11 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # ORCA2 round 325 (DECISION 151): &namtra_eiv as rung 10 now runs it.
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:319': 'nn_aei_ijk_t  = 21',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:322-323': [
+        'rn_Ue        = 0.03', 'rn_Le        = 200.e+3', 2],
+    'ORCA2_OMIP_L4/EXP00/namelist_ref:980': 'ln_eke_equ    =.false.',
     # ORCA2 round 324 (DECISION 150): rCdU_ice -> rCdU_top.
     'ICE/iceupdate.F90:369': 'tmod_io(ji,jj) = rho0 * drag_io(ji,jj) * SQRT( zmodt )',
     'ICE/iceupdate.F90:391': 'rCdU_ice(ji,jj) = -r1_rho0 * tmod_io(ji,jj) * at_i(ji,jj) * tmask(ji,jj,1)',
