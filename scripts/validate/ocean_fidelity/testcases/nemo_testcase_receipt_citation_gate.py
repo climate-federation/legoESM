@@ -1497,6 +1497,9 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
         "/stprk3_stg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/dynzdf.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynadv.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
         "/dynadv.f90"),
@@ -4449,6 +4452,23 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:402-420': [
         'CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )',
         'L2_RK_STAGE2_TERM_DUMP', 19],
+    # ORCA2 round 328: stage-3 enters dyn_zdf before tracer transport, then
+    # executes the vector-form explicit update and split-explicit drag blocks.
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90:488-555': [
+        'CASE ( 3 )',
+        'CALL tra_adv_trp', 68],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:116-181': [
+        'zDt_2 = rDt * 0.5_wp',
+        'ENDIF', 66],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:187-346': [
+        '!                    !**  tridiagonal matrix construction  **!    diagonal (zwd), lower (zwi), upper (zws)',
+        'puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - zws(ji,jk) * puu(ji,jj,jk+1,Kaa) ) / zwd(ji,jk)', 160],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:356-520': [
+        '!              !==  Vertical diffusion on v  ==!',
+        'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - zws(ji,jk) * pvv(ji,jj,jk+1,Kaa) ) / zwd(ji,jk)', 165],
+    'ocean_model_latlon_cgrid.py:14876-14885': [
+        'u_new = implicit_vertical_diffusion_ocean_momentum_dispatch(',
+        'implicit_w=nemo_aimp_momentum_w_v)', 10],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynadv.f90:134-138': [
         ('SELECT CASE( n_dynadv )', 1),
         'CALL dyn_zad', 5],
