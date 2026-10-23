@@ -1391,7 +1391,14 @@ def validate_carry_holds_scheme(carry, microphysics: str, *, context: str) -> in
     return validate_microphysics_tracer_slots(microphysics, have, context=context)
 
 
-def _era5_config(cfg, yml):
+def wb_ic_microphysics(mode, yml):
+    """The microphysics scheme the WB initial state is seeded for: the deck's
+    ``classical.microphysics`` on the physics arm, ``"none"`` otherwise."""
+    cl = dict(yml.get("classical", {})) if mode == "physics" else {}
+    return str(cl.get("microphysics", "none"))
+
+
+def wb_era5_config(cfg, yml):
     """The ERA5 store config for a training run.
 
     ``era5_cloud_condensate: true`` in the campaign YAML pulls cloud liquid and
@@ -1518,8 +1525,8 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     # fields only: asking it for condensate would re-read the cloud store per
     # sample for data it throws away) is the one that carries the prescribed
     # surface planes.
-    sst_cfg = _era5_config(cfg, yml)._replace(load_cloud_condensate=False)
-    era5_cfg = _era5_config(cfg, yml)._replace(
+    sst_cfg = wb_era5_config(cfg, yml)._replace(load_cloud_condensate=False)
+    era5_cfg = wb_era5_config(cfg, yml)._replace(
         load_surface_fluxes=False, load_land_frac=False)
     surface_fluxes = sst_cfg.load_surface_fluxes
     flux_ds = None
@@ -1560,8 +1567,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     # nowhere to put one, so seeding it would make the forecast carry
     # structurally different from the initial condition it is scored against.
     # Carrying turbulence energy across steps on this path is separate work.
-    _cl = dict(yml.get("classical", {})) if cfg.mode == "physics" else {}
-    _micro = str(_cl.get("microphysics", "none"))
+    _micro = wb_ic_microphysics(cfg.mode, yml)
 
 
     def build(year, i_ic, i_tg, ds, cloud_ds, flux_ds, at):
@@ -1621,7 +1627,7 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
 
     global _WARNED_ERA5_FLUX_HOLD_FIXED
 
-    era5_cfg = _era5_config(cfg, yml)
+    era5_cfg = wb_era5_config(cfg, yml)
     ds = open_era5_zarr(era5_cfg.zarr_store)
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
     snaps_per_day = 24 // era5_cfg.dt_hours
@@ -1640,8 +1646,7 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
     flux_ds = None
     if sst_cfg.load_surface_fluxes:
         flux_ds = open_era5_zarr(sst_cfg.flux_zarr) if sst_cfg.flux_zarr else ds
-    _cl = dict(yml.get("classical", {})) if cfg.mode == "physics" else {}
-    _micro = str(_cl.get("microphysics", "none"))
+    _micro = wb_ic_microphysics(cfg.mode, yml)
 
     config = build_latlon_config(cfg, yml)
     driver = _driver_for_ctx(config)
