@@ -2637,6 +2637,11 @@ def _thermo_v2(
         pond_captured_melt_m_liquid = (
             pond_captured_m_liquid * melt_fraction_of_capture
         )
+        # Rain the ponds cannot take (snow-blocked, or no ice before this
+        # step) runs off to the ocean instead of vanishing.
+        rain_uncaptured_m_liquid = jnp.where(
+            ice_mask & (~snow_blocks), 0.0, rain_m_liquid,
+        )
 
         pond_area_new, pond_depth_new, drain_to_ocean_m, refreeze_m = step_ponds(
             pond_area, pond_depth_dil,
@@ -2777,9 +2782,11 @@ def _thermo_v2(
             pond_captured_melt_m_liquid * constants.rho_water * conc_new / dt
         )
         pond_drain_per_cell = pond_drain_to_ocean_kg_s * conc_new
-        # Rain over the ice fraction is collected by the ponds (captured or
-        # drained) — no separate runoff channel needed.
-        rain_runoff_per_cell = jnp.zeros_like(h_new)
+        # Rain over the ice fraction is collected by the ponds where they can
+        # form; the rest runs off to the ocean (per-ice-area -> per-cell).
+        rain_runoff_per_cell = (
+            rain_uncaptured_m_liquid * constants.rho_water * conc_new / dt
+        )
     else:
         pond_drain_per_cell = pond_drain_to_ocean_kg_s  # zero array
         # No pond scheme: rain falling on the ice fraction runs off directly to
@@ -2820,7 +2827,8 @@ def _thermo_v2(
         # NOTE: open-water snowfall is intentionally NOT included here — the
         # ocean tile delivers it via ``precip_total`` (F11; see snow step).
         + pond_drain_per_cell
-        # Rain runoff over the ice fraction (no-pond path; zero when ponds on).
+        # Rain runoff over the ice fraction (all of it without ponds; the
+        # share the ponds could not take with ponds on).
         + rain_runoff_per_cell
         + snow_off_fw_per_cell
         + fw_from_lead_freeze_per_cell

@@ -44,6 +44,11 @@ def _run(cfg, forcing, h_snow0=0.0, h0=2.0, conc0=0.9):
     )
 
 
+def _pond_kg_per_cell(out):
+    return float((out["pond_area"] * out["pond_depth"] * out["conc"])[0, 0]
+                 ) * constants.rho_water
+
+
 def test_snow_off_snowfall_on_ice_reaches_ocean_with_melt_heat():
     cfg = SeaIceConfig()
     assert not cfg.snow.enabled
@@ -66,3 +71,26 @@ def test_snow_off_no_phantom_snow_without_precipitation_flag():
     dry = _run(cfg, _forcing(0.0, 0.0))
     assert float(off["freshwater_to_ocean"][0, 0]) == pytest.approx(
         float(dry["freshwater_to_ocean"][0, 0]), abs=1e-18)
+
+
+@pytest.mark.parametrize("h_snow0, h0, conc0",
+                         [(0.0, 2.0, 0.9), (0.3, 2.0, 0.9), (0.0, 0.0, 0.0)])
+def test_ponds_on_rain_on_ice_is_conserved(h_snow0, h0, conc0):
+    """Rain over the ice fraction ends up in the pond or in the ocean.
+
+    ``h_snow0 = 0.3`` m is above the snow-blocking depth, so ponds take
+    nothing and the rain must run off to the ocean.  ``h0 = conc0 = 0`` is
+    ice newly frozen in an open lead this step: no pond can exist yet.
+    """
+    cfg = SeaIceConfig()
+    cfg = cfg._replace(ponds=cfg.ponds._replace(enabled=True))
+    rain = 2.0e-4
+    wet = _run(cfg, _forcing(rain, 0.0), h_snow0=h_snow0, h0=h0, conc0=conc0)
+    dry = _run(cfg, _forcing(0.0, 0.0), h_snow0=h_snow0, h0=h0, conc0=conc0)
+    conc = float(wet["conc"][0, 0])
+    assert conc > 0.0
+    d_fw = float(wet["freshwater_to_ocean"][0, 0] - dry["freshwater_to_ocean"][0, 0])
+    d_pond = (_pond_kg_per_cell(wet) - _pond_kg_per_cell(dry)) / DT
+    assert d_fw + d_pond == pytest.approx(rain * conc, rel=1e-10)
+    if h_snow0 > cfg.ponds.snow_block_threshold:
+        assert d_pond == 0.0
