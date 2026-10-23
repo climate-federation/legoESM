@@ -309,6 +309,11 @@ is exact or inside the preregistered bar. L9 is therefore **CERTIFIED: L8 plus
 the complete L3 eddy-induced transport enters FCT before the seven ordered
 stage-3 Krhs boundaries.**
 
+Operator note (landing review): the preregistered eddy-velocity helper pin was replaced by the
+production-boundary test after the build review found the separate L9 branch arithmetically identical
+to L3's lines (branch deleted). The uncited exploratory score `l9_live_terms_kt1.json`, scored from a
+dirty tree, was renamed `UNCITED_dirty_tree_l9_live_terms_kt1.json` in the evidence directory.
+
 ## 8. Final certification gates
 
 All final gates used `JAX_PLATFORMS=cpu`, `JAX_ENABLE_X64=1`, and the exact
