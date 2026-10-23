@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
+import inspect
 import struct
 import sys
 from pathlib import Path
@@ -14,6 +16,8 @@ SCRIPT_DIR = ROOT / "scripts/validate/ocean_fidelity/testcases"
 SCRIPT = SCRIPT_DIR / "nemo_testcase_l2_gyre_hires_round20_stage1.py"
 ACQUISITION_DIR = (
     SCRIPT_DIR / "nemo_testcase_l2_gyre_hires_round20_stage1")
+ROUND21_DIR = (
+    SCRIPT_DIR / "nemo_testcase_l2_gyre_hires_round21_ldf")
 
 
 def _load_module():
@@ -42,6 +46,50 @@ def test_envelope_score_and_one_ulp_plant_fire():
     moved = module.envelope_score(planted, scalar, vector, mask)
     assert moved["legoesm_minus_scalar"]["unequal_words"] == 1
     assert moved["clears_four_times_twin"]
+
+
+def test_cancellation_sensitive_coefficient_plant_moves_one_word_one_ulp():
+    module = _load_module()
+    pair = (
+        np.ones((2, 2, 30), dtype=np.float64),
+        np.full((2, 2, 30), 3.0, dtype=np.float64),
+    )
+    tiny = np.nextafter(0.0, 1.0)
+    hpg_u = np.zeros((2, 2, 31), dtype=np.float64)
+    ldf_u = np.zeros((2, 2, 31), dtype=np.float64)
+    hpg_u[0, 1, 0] = 1.0
+    ldf_u[0, 1, 0] = tiny
+    family = {
+        "after_hpg_u": hpg_u,
+        "after_ldf_u": ldf_u,
+        "after_hpg_v": np.zeros((2, 2, 31), dtype=np.float64),
+        "after_ldf_v": np.zeros((2, 2, 31), dtype=np.float64),
+    }
+    planted, control = (
+        module._plant_cancellation_sensitive_coefficient_one_ulp(
+            pair, family))
+    assert control["field"] == "ahmf"
+    assert control["index_j_i_k"] == [0, 1, 0]
+    assert control["selected_output_face"] == "u"
+    assert control["coefficient_movement"]["unequal_words"] == 1
+    assert control["coefficient_movement"]["max_ulp"] == 1
+    np.testing.assert_array_equal(planted[0], pair[0])
+    assert planted[1][0, 1, 0] == np.nextafter(3.0, np.inf)
+
+
+def test_stage1_routes_smagorinsky_override_into_initial_tendency_call():
+    """The factor arm must reach stage 1, not only RK stages 2 and 3."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    source = inspect.getsource(LatLonCGridOceanModel._step_impl)
+    initial_call = source.index("_tend_result = self.tendencies(")
+    initial_end = source.index(
+        "return_nemo_operator_components=_want_rhs_components)", initial_call)
+    initial_source = source[initial_call:initial_end]
+    assert "nemo_smagorinsky_coefficient_override=(" in initial_source
+    assert ".smagorinsky_coefficient_override)" in initial_source
 
 
 def test_envelope_uses_registered_four_times_maximum():
@@ -100,6 +148,35 @@ def test_first_clearing_source_boundary_respects_executed_order():
     assert result is not None
     assert (result["boundary"], result["term"], result["field"]) == (
         "after_ldf", "lateral_diffusion", "v")
+
+
+@pytest.mark.parametrize(
+    ("exact", "expected"),
+    [
+        ({"ahmt"}, "COEFFICIENT_AHMT"),
+        ({"ahmf"}, "COEFFICIENT_AHMF"),
+        ({"ahmt", "ahmf"}, "COEFFICIENT_NON_UNIQUE"),
+        ({"ahmt", "ahmf", "ahmt_ahmf"},
+         "COEFFICIENT_OPERATOR_COMPOSITION"),
+        ({"ahmt_ahmf"}, "COUPLED_COEFFICIENT_FIELDS"),
+        (set(), "COEFFICIENT_EXONERATED_OPERATOR_WALK_REQUIRED"),
+    ],
+)
+def test_coefficient_owner_requires_exact_one_factor_collapse(exact, expected):
+    module = _load_module()
+    arms = {
+        name: {
+            "untouched_hpg_bit_exact": True,
+            "after_ldf_bit_exact": name in exact,
+        }
+        for name in ("ahmt", "ahmf", "ahmt_ahmf")
+    }
+    assert module.coefficient_factor_owner(arms) == expected
+
+    arms["ahmt"]["untouched_hpg_bit_exact"] = False
+    if expected == "COEFFICIENT_AHMT":
+        assert module.coefficient_factor_owner(arms) == (
+            "COEFFICIENT_EXONERATED_OPERATOR_WALK_REQUIRED")
 
 
 def test_active_level_mapping_drops_only_nemo_closed_jpk(monkeypatch):
@@ -200,6 +277,16 @@ def test_trace_source_boundary_maps_owned_faces():
     assert mapped["v"].shape == (2, 3, 2)
 
 
+def test_run_uses_source_order_arm_only_for_cumulative_family():
+    """The acquired NEMO cumulatives must not use ordinary legoESM order."""
+    module = _load_module()
+    source = inspect.getsource(module.run)
+    assert '"stage1-source-order", None' in source
+    assert "live_operands = source_order_trace.operator_operands[0]" in source
+    assert "live_operands = trace.operator_operands[0]" not in source
+    assert "source_order_trace.state_after, ordinary" in source
+
+
 def test_operator_acquisition_is_single_rank_passive_and_creates_parent():
     run = (ACQUISITION_DIR / "run.sh").read_text(encoding="utf-8")
     assert "RANKS must be 1" in run
@@ -229,3 +316,39 @@ def test_writer_patch_has_five_source_ordered_cumulative_frames():
     positions = [patch.find(header) for header in headers]
     assert all(position >= 0 for position in positions)
     assert positions == sorted(positions)
+
+
+def test_round21_writer_captures_post_ldf_dyn_coefficients(tmp_path):
+    source = Path(
+        "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/"
+        "cfgs/GYRE_OMIP_L2_P3/MY_SRC/stprk3.F90")
+    if not source.is_file():
+        pytest.skip("local NEMO P3 writer source is unavailable")
+    target = tmp_path / "stprk3.F90"
+    target.write_bytes(source.read_bytes())
+    with (ROUND21_DIR / "stprk3_round21.patch").open("rb") as patch:
+        import subprocess
+
+        result = subprocess.run(
+            ["patch", "-s", "--fuzz=0", str(target)], stdin=patch,
+            check=False, capture_output=True)
+    assert result.returncode == 0, result.stderr.decode()
+    text = target.read_text(encoding="utf-8")
+    ldf = "CALL ldf_dyn( kstp, Nbb )"
+    dump = "CALL r21_dump_ahm( kstp, Nbb )"
+    assert text.index(ldf) < text.index(dump) < text.index("CALL stp_2D")
+    assert "WRITE(iunit) ahmt(:,:,:), ahmf(:,:,:)" in text
+    assert "GYRE_R21_WRITE" in text
+
+
+def test_round21_operator_recipe_is_one_rank_passive_and_creates_parent():
+    run = (ROUND21_DIR / "run.sh").read_text(encoding="utf-8")
+    assert "RANKS must be 1" in run
+    assert "mkdir -p \"$(dirname -- \"$EVIDENCE\")\"" in run
+    assert "./makenemo -r \"$SOURCE_NAME\" -n \"$TARGET_NAME\" -d 'OCE'" in run
+    assert "export GYRE_R21_WRITE=$enabled" in run
+    assert "run_nemo control 0" in run
+    assert "run_nemo instrumented 1" in run
+    assert "REFUSE_WRITER_MOVED_TRAJECTORY" in run
+    assert "mpirun -np 1" in run
+    assert "rg " not in run

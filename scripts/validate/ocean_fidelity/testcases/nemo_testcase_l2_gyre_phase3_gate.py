@@ -74,6 +74,30 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def state_pytree_sha256(state) -> tuple[str, int]:
+    """Hash every state leaf with path, dtype, shape, and exact C-order bytes.
+
+    This is deliberately stronger than the field-wise NEMO residual rows:
+    those rows cover five oracle fields plus the external-mode velocity pair,
+    while this receipt boundary must prove that an imported configuration
+    merge leaves *every* prognostic and carried state word unchanged.
+    """
+    import jax
+
+    digest = hashlib.sha256()
+    leaves = jax.tree_util.tree_flatten_with_path(state)[0]
+    for path, value in leaves:
+        array = np.ascontiguousarray(np.asarray(value))
+        digest.update(jax.tree_util.keystr(path).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(array.dtype.str.encode("ascii"))
+        digest.update(b"\0")
+        digest.update(json.dumps(array.shape, separators=(",", ":")).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(array.view(np.uint8))
+    return digest.hexdigest(), len(leaves)
+
+
 def require_scalar_math_roots(*roots: Path) -> list[dict]:
     """Fail closed unless every selected root has the certified v2 kt=2 entry."""
     name = "oracle_step_entry_kt00000002.bin"
@@ -1182,7 +1206,13 @@ def run(
                 baro_row["reason"] = (
                     "downstream full-state consistency; inputs are not bit-identical")
             baro_rows.append(baro_row)
-        barotropic_state_steps.append({"kt": kt, "rows": baro_rows})
+        state_sha256_after_step, state_leaf_count = state_pytree_sha256(next_state)
+        barotropic_state_steps.append({
+            "kt": kt,
+            "rows": baro_rows,
+            "state_sha256_after_step": state_sha256_after_step,
+            "state_leaf_count": state_leaf_count,
+        })
         debt_components = [
             row["name"].rsplit(".", 1)[-1]
             for row in baro_rows if row["status"] == "DEBT"

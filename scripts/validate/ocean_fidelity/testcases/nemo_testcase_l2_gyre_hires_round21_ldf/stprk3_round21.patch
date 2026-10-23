@@ -1,0 +1,30 @@
+--- stprk3.F90
++++ stprk3.F90
+@@ -199,0 +200 @@
++      IF( l_ldfdyn_time )   CALL r21_dump_ahm( kstp, Nbb )
+@@ -410,0 +412,25 @@
++
++
++   SUBROUTINE r21_dump_ahm( kstp, klevel )
++      INTEGER, INTENT(in) :: kstp, klevel
++      INTEGER :: iunit, ios, env_status
++      CHARACTER(LEN=16) :: magic
++      CHARACTER(LEN=96) :: filename
++      CHARACTER(LEN=8) :: enabled
++      CALL get_environment_variable('GYRE_R21_WRITE', enabled, status=env_status)
++      IF( env_status /= 0 .OR. TRIM(enabled) /= '1' )   RETURN
++      IF( kstp /= nit000 )   RETURN
++      IF( .NOT.lwp )   RETURN
++      IF( STORAGE_SIZE( 1._wp ) /= 64 )   &
++         &   CALL ctl_stop( 'round-21 AHM dump requires 64-bit wp' )
++      WRITE(filename,'("oracle_ahm_kt",I8.8,".bin")') kstp
++      OPEN( NEWUNIT=iunit, FILE=TRIM(filename), ACCESS='STREAM', &
++         &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE', IOSTAT=ios )
++      IF( ios /= 0 )   CALL ctl_stop( 'cannot open round-21 AHM file' )
++      magic = 'NEMO_L4_AHMTF__1'
++      WRITE(iunit) magic, 1, kstp, klevel, jpi, jpj, jpk, &
++         &         STORAGE_SIZE(1._wp)
++      WRITE(iunit) ahmt(:,:,:), ahmf(:,:,:)
++      CLOSE(iunit)
++      WRITE(numout,*) 'GYRE_R21_AHM_DUMP ', kstp, klevel, TRIM(filename)
++   END SUBROUTINE r21_dump_ahm
