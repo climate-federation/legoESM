@@ -77,7 +77,7 @@ SHA-256 `44b388ff81617cda…`.  Every other card is unchanged (S1).
 
 ## Gates
 
-- Receipt citation gate on this receipt: see the machine line below.
+- Receipt citation gate on this receipt: PASS, 4 citations, 0 unmapped, 0 failures, 0 map-audit failures (prereg: PASS, 3/0/0).
 - Default battery (landing set): 31 + 96 + 20 = 147 passed (the third part
   printed `20 passed in 565.08s`; its 598 s wrapper timeout fired during
   interpreter exit).  New and earlier comparison-card tests: 26 passed.
