@@ -209,12 +209,6 @@ def _nemo_stage3_l8_krhs_walk(adv_t, adv_s, *term_groups):
     return t_value, s_value, tuple(boundaries)
 
 
-def _nemo_stage3_l9_eiv_transport(base_u, base_v, eiv_u, eiv_v):
-    """Apply L9's stage-3 EIV transport at NEMO's pre-``Krhs`` boundary."""
-
-    return base_u + eiv_u, base_v + eiv_v
-
-
 def mass_flux_fields(u_field, v_field, w_field, mfu_data, mfv_data, mfw_data):
     """Wrap the tracer-advecting mass fluxes as the three ``mass_flux_*`` Fields.
 
@@ -10546,12 +10540,8 @@ class LatLonCGridOceanModel:
                             [jnp.zeros_like(v_eiv[:1]), v_eiv], axis=0)
                         _zfu_before = stage3[7]
                         _zfv_before = stage3[8]
-                        if _cfg_b.rk3_stage3_l9_eiv_nemo_order:
-                            stage3[7], stage3[8] = _nemo_stage3_l9_eiv_transport(
-                                stage3[7], stage3[8], zfu_eiv, zfv_eiv)
-                        else:
-                            stage3[7] = stage3[7] + zfu_eiv   # ldftra.f90:954
-                            stage3[8] = stage3[8] + zfv_eiv   # ldftra.f90:955
+                        stage3[7] = stage3[7] + zfu_eiv   # ldftra.f90:954
+                        stage3[8] = stage3[8] + zfv_eiv   # ldftra.f90:955
                         if _l3_eiv_transport_exposure:
                             _nemo_ws_l3_eiv_transport_trace = (
                                 _zfu_before, _zfv_before,

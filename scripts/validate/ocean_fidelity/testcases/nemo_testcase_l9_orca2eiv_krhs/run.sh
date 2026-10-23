@@ -25,8 +25,7 @@ readonly RENDER=$here/l9_deck.py READER=$here/l9_records.py
 readonly INSTRUMENT=$L3/instrument_ldftra.py LAYOUT=$here/layout_writer.f90
 readonly STAGE_PATCH=$L8/stprk3_l8_round56.patch
 readonly BBC_PATCH=$L4/trabbc_round53.patch DMP_PATCH=$L6/tradmp_round55.patch
-readonly REAL_DECK=$here/../nemo_testcase_l4b_orca2iso_bbc/l2_r17_twin_a_namelist.resolved
-readonly REAL_LOG=$here/../nemo_testcase_l4b_orca2iso_bbc/l2_r17_twin_a_ocean.output.excerpt
+readonly REAL_LOG=$here/l3_r20_smoke_ocean.output.excerpt
 readonly INPUT_ROOT=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round21/oracle_g4_r21/p6_a
 readonly QGH=/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0/geothermal_heating.nc
 readonly RESTO=/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0/resto.nc
@@ -47,6 +46,27 @@ export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 readonly PYPATH=$repo/packages/core:$repo/packages/ocean:$repo/packages/atmosphere:$repo/packages/coupler:$repo/packages/ice:$repo/packages/land:$repo/packages/ml:$repo/packages/tools:$repo/src
 scratch=
+created_target=0
+evidence_created=0
+declare -a created_runs=()
+
+cleanup() {
+  local rc=$? path
+  trap - EXIT
+  set +e
+  [[ -z "$scratch" || ! -e "$scratch" ]] || rm -rf -- "$scratch"
+  if [[ $rc -ne 0 && $mode == --run ]]; then
+    for path in "${created_runs[@]}"; do
+      [[ ! -e "$path" ]] || rm -rf -- "$path"
+    done
+    [[ $created_target -eq 0 || ! -e "$TARGET" ]] || rm -rf -- "$TARGET"
+    [[ $evidence_created -eq 0 || ! -e "$EVIDENCE" ]] || rm -rf -- "$EVIDENCE"
+    printf 'L9_FAILED_RUN_CLEANED target=%s runs=%s\n' \
+      "$TARGET" "${#created_runs[@]}" >&2
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
 
 absent() { [[ ! -e "$1" ]]; }
 ref_is_listed() { awk -v n="$1" '$1==n {found=1} END{exit !found}' "$NEMO_ROOT/cfgs/ref_cfgs.txt"; }
@@ -79,12 +99,20 @@ render_deck() { # path itend stocklist
   check_clock "$1" || fail "bad rendered deck $1"
 }
 
-check_log() { # log deck: whitespace-tolerant logical/numeric comparison
-  "$PY" - "$1" "$2" <<'PY'
+check_log() { # log deck [l3]: whitespace-tolerant logical/numeric comparison
+  "$PY" - "$1" "$2" "${3:-full}" <<'PY'
 import re,sys
-log=open(sys.argv[1],errors='replace').read(); deck=open(sys.argv[2]).read()
+log=open(sys.argv[1],errors='replace').read(); deck=open(sys.argv[2]).read(); scope=sys.argv[3]
 flags=('ln_traadv_fct','ln_traldf_lap','ln_traldf_iso','ln_traldf_msc',
-       'ln_ldfeiv','ln_eke_equ','ln_trabbc','ln_trabbl','ln_tradmp')
+       'ln_ldfeiv','ln_trabbc','ln_trabbl','ln_tradmp')
+numbers=('nn_fct_h','nn_fct_v','nn_bbl_ldf','nn_bbl_adv','rn_ahtbbl',
+         'rn_gambbl','nn_aht_ijk_t','rn_Ud','rn_Ld','nn_aei_ijk_t','rn_Ue',
+         'rn_Le','nn_geoflx','nn_zdmp')
+if scope == 'l3':
+    flags=flags[:5]
+    numbers=('nn_fct_h','nn_fct_v','nn_aht_ijk_t','rn_Ud','rn_Ld',
+             'nn_aei_ijk_t','rn_Ue','rn_Le')
+elif scope != 'full': raise SystemExit(f'unknown log-check scope: {scope}')
 for key in flags:
     d=re.findall(rf'^\s*{key}\s*=\s*\.(true|false)\.',deck,re.I|re.M)
     if not d: continue
@@ -92,14 +120,34 @@ for key in flags:
     got=re.findall(rf'{key}\s*=\s*([TF])\s*$',log,re.I|re.M)
     if not got or got[-1].upper()!=want: raise SystemExit(f'{key}: {got} != {want}')
 number=r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eEdD][+-]?\d+)?'
-for key in ('nn_fct_h','nn_fct_v','nn_bbl_ldf','nn_bbl_adv','rn_ahtbbl',
-            'rn_gambbl','nn_aht_ijk_t','rn_Ue','rn_Le','nn_aht_ijk_t','rn_Ud',
-            'rn_Ld','nn_geoflx','nn_zdmp'):
+for key in numbers:
     d=re.findall(rf'^\s*{key}\s*=\s*({number})',deck,re.I|re.M)
     if not d: continue
     got=re.findall(rf'{key}\s*=\s*({number})',log,re.I|re.M)
     cv=lambda x: float(x.replace('d','e').replace('D','E'))
     if not got or cv(got[-1])!=cv(d[-1]): raise SystemExit(f'{key}: {got} != {d[-1]}')
+eke=re.findall(r'^\s*ln_eke_equ\s*=\s*\.(true|false)\.',deck,re.I|re.M)
+if eke and eke[-1].lower() == 'false' and re.search(
+        r'GEOMETRIC eddy energy equation to be computed\s+ln_eke_equ\s*=\s*T\s*$',
+        log,re.I|re.M):
+    raise SystemExit('false ln_eke_equ printed an acting GEOMETRIC line')
+PY
+}
+
+check_source_order() { # compiled traadv, compiled/scratch stprk3_stg
+  "$PY" - "$1" "$2" <<'PY'
+import re,sys
+adv=open(sys.argv[1]).read(); stg=open(sys.argv[2]).read()
+if not re.search(r'IF\(\s*ln_ldfeiv.*?CALL\s+ldf_eiv_trp.*?CALL\s+wzv',adv,re.I|re.S):
+    raise SystemExit('EIV order')
+pats=(r'ts\(:,:,:,jn,Krhs\)\s*=\s*0',r'CALL\s+tra_adv\s*\(',
+      r'CALL\s+tra_sbc_RK3\s*\(',r'CALL\s+tra_qsr\s*\(',
+      r'CALL\s+tra_ldf\s*\(',r'CALL\s+tra_bbc\s*\(',
+      r'CALL\s+tra_bbl\s*\(',r'CALL\s+tra_dmp\s*\(',r'CALL\s+tra_zdf\s*\(')
+matches=[re.search(x,stg,re.I) for x in pats]
+if any(match is None for match in matches): raise SystemExit('missing stage call')
+p=[match.start() for match in matches]
+if p != sorted(p): raise SystemExit('stage order')
 PY
 }
 
@@ -116,7 +164,6 @@ preflight() {
   local stamped f
   [[ -z "$(git -C "$repo" status --porcelain --untracked-files=all)" ]] || fail 'commit exact acquisition tool first'
   scratch=$(mktemp -d "$repo/.l9-preflight.XXXXXX") || fail 'cannot create scratch'
-  trap 'rm -rf -- "$scratch"' EXIT
 
   # 1. Apply and syntax-check every patched NEMO file; continuation plant.
   cp "$SOURCE/MY_SRC/stprk3_stg.F90" "$scratch/stprk3_stg.F90"
@@ -136,20 +183,21 @@ preflight() {
   fi
 
   # The live call graph: EIV augments stage-3 transport before Krhs is cleared;
-  # the remaining calls keep L8's exact order. A moved-call plant is refused.
-  "$PY" - "$ORCA2/BLD/ppsrc/nemo/traadv.f90" "$ORCA2/BLD/ppsrc/nemo/stprk3_stg.f90" <<'PY'
-import re,sys
-adv=open(sys.argv[1]).read(); stg=open(sys.argv[2]).read()
-if not re.search(r'IF\(\s*ln_ldfeiv.*?CALL\s+ldf_eiv_trp.*?CALL\s+wzv',adv,re.I|re.S): raise SystemExit('EIV order')
-pats=(r'ts\(:,:,:,jn,Krhs\)\s*=\s*0',r'CALL\s+tra_adv\s*\(',r'CALL\s+tra_sbc_RK3\s*\(',r'CALL\s+tra_qsr\s*\(',r'CALL\s+tra_ldf\s*\(',r'CALL\s+tra_bbc\s*\(',r'CALL\s+tra_bbl\s*\(',r'CALL\s+tra_dmp\s*\(',r'CALL\s+tra_zdf\s*\(')
-p=[re.search(x,stg,re.I).start() for x in pats]
-if p!=sorted(p): raise SystemExit('stage order')
-bad=[*p]; bad[5],bad[6]=bad[6],bad[5]
-try:
-    if bad!=sorted(bad): raise ValueError
-except ValueError: pass
-else: raise SystemExit('moved-call plant did not fire')
+  # the remaining calls keep L8's exact order. Mutate the real source text by
+  # moving tra_bbl before tra_bbc and prove the same checker refuses it.
+  check_source_order "$ORCA2/BLD/ppsrc/nemo/traadv.f90" \
+    "$ORCA2/BLD/ppsrc/nemo/stprk3_stg.f90" || fail 'compiled source order refused'
+  "$PY" - "$ORCA2/BLD/ppsrc/nemo/stprk3_stg.f90" "$scratch/moved-stprk3_stg.f90" <<'PY'
+import sys
+text=open(sys.argv[1]).read()
+bbc='            IF( ln_trabbc  )   CALL tra_bbc( kstp,      Kmm, ts, Krhs )  ! bottom heat flux\n'
+bbl='            IF( ln_trabbl  )   CALL tra_bbl( kstp, Kbb, Kmm, ts, Krhs )  ! advective (and/or diffusive) bottom boundary layer scheme\n'
+if text.count(bbc) != 1 or text.count(bbl) != 1: raise SystemExit('mutation anchors')
+text=text.replace(bbc, '__L9_BBC__\n').replace(bbl, bbc).replace('__L9_BBC__\n', bbl)
+open(sys.argv[2],'w').write(text)
 PY
+  ! check_source_order "$ORCA2/BLD/ppsrc/nemo/traadv.f90" \
+    "$scratch/moved-stprk3_stg.f90" || fail 'moved-call source plant accepted'
 
   # 2. makenemo -r must name a listed reference; plant a false name.
   ref_is_listed "$REF_CFG" || fail "$REF_CFG not listed in ref_cfgs.txt"
@@ -187,38 +235,13 @@ PY
   sed '0,/WRITE(l2_tracer_unit) l4_canon_3d/d' "$scratch/stprk3_stg.F90" >"$scratch/missing-stage.F90"
   ! check_writers "$scratch/missing-stage.F90" "$scratch/ldftra.f90" || fail 'missing stage frame accepted'
 
-  # Whitespace-tolerant checker on a real committed excerpt and stamped L9 deck.
-  check_log "$REAL_LOG" "$REAL_DECK"
-  stamped=$scratch/stamped.output
-  cp "$REAL_LOG" "$stamped"
-  cat >>"$stamped" <<'LOG'
- ln_traadv_fct = T
- ln_traldf_lap = T
- ln_traldf_iso = T
- ln_traldf_msc = T
- ln_ldfeiv = T
- ln_eke_equ = F
- ln_trabbc = T
- ln_trabbl = T
- ln_tradmp = T
- nn_fct_h = 2
- nn_fct_v = 2
- nn_bbl_ldf = 1
- nn_bbl_adv = 0
- rn_ahtbbl = 1000.0
- rn_gambbl = 10.0
- nn_aei_ijk_t = 21
- rn_Ue = 2.9999999999999999E-002
- rn_Le = 200000.0
- nn_aht_ijk_t = 20
- rn_Ud = 0.018
- rn_Ld = 200000.0
- nn_geoflx = 2
- nn_zdmp = 0
-LOG
-  check_log "$stamped" "$scratch/smoke"
-  sed -i -E 's/(ln_ldfeiv[[:space:]]*=[[:space:]]*)T/\1F/' "$stamped"
-  ! check_log "$stamped" "$scratch/smoke" >/dev/null 2>&1 || fail 'log plant accepted'
+  # The exact checker runs against real L3 NEMO output and the stamped L9 deck.
+  # L3 covers the common and EIV selections; an in-place source-value plant is
+  # refused without appending any invented log line.
+  check_log "$REAL_LOG" "$scratch/smoke" l3
+  stamped=$scratch/bad-real.output
+  sed -E 's/(ln_ldfeiv[[:space:]]*=[[:space:]]*)T/\1F/' "$REAL_LOG" >"$stamped"
+  ! check_log "$stamped" "$scratch/smoke" l3 >/dev/null 2>&1 || fail 'log plant accepted'
 
   # Smoke-only acting call, schedule, output paths, and fresh targets/runs.
   (( 2 % 2 == 0 && 10 <= 10 )) || fail 'bad schedule'
@@ -256,7 +279,9 @@ build_target() {
 }
 
 stage_run() { # binary dir itend stocklist
-  absent "$2" || fail "run exists: $2"; mkdir -p "$2"
+  absent "$2" || fail "run exists: $2"
+  created_runs+=("$2")
+  mkdir -p "$2"
   local f; for f in "${INPUT_FILES[@]}"; do cp "$INPUT_ROOT/$f" "$2/$f"; done
   cp "$QGH" "$2/geothermal_heating.nc"; cp "$RESTO" "$2/resto.nc"
   cp "$G9/namelist_ice_cfg" "$2/namelist_ice_cfg"
@@ -314,7 +339,10 @@ if [[ $mode == --admit-existing ]]; then
 fi
 [[ $mode == --run ]] || { printf 'WOULD_RUN smoke -> writer-free boundary -> three twins into %s\n' "$EVIDENCE"; exit; }
 [[ ${NEMO_OPERATOR_ACK:-} == L9_R57_OPERATOR ]] || fail 'ACQUISITION_NEEDED: set NEMO_OPERATOR_ACK=L9_R57_OPERATOR'
-build_target; mkdir -p "$EVIDENCE"
+created_target=1
+build_target
+[[ -e "$EVIDENCE" ]] || evidence_created=1
+mkdir -p "$EVIDENCE"
 run_one "$TARGET/BLD/bin/nemo.exe" "$SMOKE" 2 "$(pad10 2)" done
 check_acting "$SMOKE"
 run_one "$REF_BIN" "$REF" 100 '2,4,6,8,10,12,14,16,18,20' boundary

@@ -1,0 +1,17 @@
+# Verbatim selected lines from the real NEMO L3 smoke output:
+# /data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_vmix_rounds/round20/oracle_l3_r20/smoke_2step/ocean.output
+# Complete source SHA-256: d0d5fdd5d142e2352a77d142f0025df219dcd30d14b31e29c3710ccbc50e4bda
+# Source lines: 1030, 1035, 1037, 1043-1045, 1058, 1060-1062, 1161-1163.
+          laplacian operator                      ln_traldf_lap   =  T
+          iso-neutral Madec operator              ln_traldf_iso   =  T
+             use the Method of Stab. Correction   ln_traldf_msc   =  T
+          type of time-space variation            nn_aht_ijk_t    =           20
+             lateral diffusive velocity (if cst)  rn_Ud           =    1.7999999999999999E-002  m/s
+             lateral diffusive length   (if cst)  rn_Ld           =    200000.00000000000       m
+       Eddy Induced Velocity (eiv) param.         ln_ldfeiv     =  T
+          type of time-space variation            nn_aei_ijk_t  =           21
+          lateral diffusive velocity (if cst)     rn_Ue         =    2.9999999999999999E-002  m/s
+          lateral diffusive length   (if cst)     rn_Le         =    200000.00000000000       m
+       Flux Corrected Transport scheme           ln_traadv_fct =  T
+             horizontal 2nd/4th order               nn_fct_h   =            2
+             vertical   2nd/4th order               nn_fct_v   =            2

@@ -85,27 +85,18 @@ def test_l9_acquisition_is_operator_only_and_fail_closed():
                   'check_acting "$SMOKE"', "gfortran",
                   "L9_PREFLIGHT_7_OF_7_PASS"):
         assert token in text
-    assert "trap 'rm -rf -- \"$scratch\"' EXIT" in text
+    assert "trap cleanup EXIT" in text
+    assert '[[ $created_target -eq 0 || ! -e "$TARGET" ]]' in text
+    assert 'for path in "${created_runs[@]}"' in text
     operational = "\n".join(line for line in text.splitlines()
                             if "grep -F" not in line)
     assert 'check_acting "$REF"' not in operational
 
 
-def test_l9_pins_eiv_then_every_krhs_position_with_inexact_words():
+def test_l9_pins_every_krhs_position_with_inexact_words():
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         _nemo_stage3_l8_krhs_walk,
-        _nemo_stage3_l9_eiv_transport,
     )
-
-    u_words = [float.fromhex(value) for value in (
-        "0x1.64d6a9b31f28fp+31", "-0x1.921fb54442d18p+29")]
-    v_words = [float.fromhex(value) for value in (
-        "-0x1.3bd3cc9be45dep+28", "0x1.0c6f7a0b5ed8dp+30")]
-    u, v = jax.jit(_nemo_stage3_l9_eiv_transport)(
-        *(jnp.asarray([x], dtype=jnp.float64)
-          for x in (u_words[0], v_words[0], u_words[1], v_words[1])))
-    assert np.asarray(u).item().hex() == "0x1.004ebc620e749p+31"
-    assert np.asarray(v).item().hex() == "0x1.7af50dc8cb82bp+29"
 
     words = [float.fromhex(value) for value in (
         "0x1.8484bbe636a7cp+25", "0x1.80c4d885778a5p+25",
@@ -166,18 +157,16 @@ def test_l9_selector_relaxes_l8_only_for_exact_l3(l9_card):
             LatLonCGridOceanModel._validate_config(planted)
 
 
-def test_l9_order_helpers_are_jitted_and_gradient_finite():
+def test_l9_krhs_order_helper_is_jitted_and_gradient_finite():
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         _nemo_stage3_l8_krhs_walk,
-        _nemo_stage3_l9_eiv_transport,
     )
 
     def scalar(x):
-        u, v = _nemo_stage3_l9_eiv_transport(x, 3.1, -0.7, x * 0.2)
         groups = tuple(((jnp.asarray([value]),), (jnp.asarray([value]),))
                        for value in (0.2, -3.0, 7.0, 11.0, -13.0, x))
         t, s, _ = _nemo_stage3_l8_krhs_walk(
-            jnp.asarray([u]), jnp.asarray([v]), *groups)
+            jnp.asarray([x - 0.7]), jnp.asarray([3.1 + x * 0.2]), *groups)
         return t[0] + s[0]
 
     x = jnp.asarray(0.1, dtype=jnp.float64)
@@ -193,6 +182,8 @@ def test_l9_live_eiv_executes_before_l8_finalizer(l9_card, monkeypatch):
     from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as cgrid
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
+        _NEMOWSL3EIVTransportTrace,
+        _NEMOWSRK3TestHooks,
     )
     from legoesm.ocean.freshwater import FreshwaterForcing
     from legoesm.ocean.state import OceanSurfaceForcing
@@ -210,28 +201,44 @@ def test_l9_live_eiv_executes_before_l8_finalizer(l9_card, monkeypatch):
         ice_ocean_top_drag_rCdu=zero, salt_flux_sfx=zero,
         geothermal_heat_flux_mwm2=one)
     calls = []
-    original_eiv = cgrid._nemo_stage3_l9_eiv_transport
+    eiv_wzv_inputs = []
+    original_wzv = cgrid.nemo_qco_wzv_operands
     original_walk = cgrid._nemo_stage3_l8_krhs_walk
 
-    def spy_eiv(*args):
-        calls.append("eiv")
-        return original_eiv(*args)
+    def spy_wzv(*args, **kwargs):
+        override = kwargs.get("volume_transport_override")
+        if override is not None:
+            calls.append("eiv_wzv")
+            eiv_wzv_inputs.append(override)
+        return original_wzv(*args, **kwargs)
 
     def spy_walk(*args):
         calls.append("krhs")
         return original_walk(*args)
 
-    monkeypatch.setattr(cgrid, "_nemo_stage3_l9_eiv_transport", spy_eiv)
+    monkeypatch.setattr(cgrid, "nemo_qco_wzv_operands", spy_wzv)
     monkeypatch.setattr(cgrid, "_nemo_stage3_l8_krhs_walk", spy_walk)
     model = LatLonCGridOceanModel(
         l9_card.recipe.grid, l9_card.recipe.z_coord,
-        l9_card.recipe.model_config)
+        l9_card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_l3_eiv_transport=True))
     model.prime_step_caches(state)
     result = model._step_impl(
         state, dt=l9_card.dt_s, freshwater=freshwater,
         surface_forcing=forcing, sponge=l9_card.recipe.tracer_damping)
 
-    assert calls == ["eiv", "krhs"]
+    assert calls[-2:] == ["eiv_wzv", "krhs"]
+    assert len(eiv_wzv_inputs) >= 1
+    assert isinstance(result.mass_flux_w, _NEMOWSL3EIVTransportTrace)
+    trace = result.mass_flux_w
+    assert np.count_nonzero(np.asarray(trace.delta_u)) > 0
+    assert np.count_nonzero(np.asarray(trace.delta_v)) > 0
+    for got, expected in zip(
+            eiv_wzv_inputs[-1], (trace.after_u, trace.after_v)):
+        np.testing.assert_array_equal(
+            np.asarray(got).view(np.uint64),
+            np.asarray(expected).view(np.uint64))
     assert all(np.isfinite(np.asarray(getattr(result, name).data)).all()
                for name in ("T", "S"))
 
