@@ -169,7 +169,8 @@ def measure(deck_root: Path, frames_root: Path, independent_json: Path,
         require(payload["label"] == label, f"{label}: ladder label moved")
         require(payload["rung"] == "rung10" and payload["arm"] == "mxlice",
                 f"{label}: not the current rung-10 mxlice arm")
-        require(payload["status"] == "RUNG_MEASURED", f"{label}: ladder did not complete")
+        require(payload["status"] == "PASS_R276_SOURCE_LADDER",
+                f"{label}: ladder did not complete")
 
     base = build_orca2_zps_card(deck_root)
     card = rung10.comparison_card(base)
