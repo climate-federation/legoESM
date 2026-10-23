@@ -196,6 +196,17 @@ Decision-150 drag strictly improve or become bit-identical.
 - Resume-2 per-receipt citation gate: PASS, 6 citations found and 0 failures.
 - Resume-2 default landing battery and private-import ratchet: 147 passed in
   1,401.47 s; the ratchet's 6 tests are included in that count.
+- Resume-3 focused battery: 22 passed (the 21 round-328 fixture/admission/
+  cleanup tests plus round 326's config-root-normalised ELF calibration).
+- Resume-3 clean-commit non-running preflight: `PREFLIGHT_READY` at
+  `f77ae176f7d3`; all 10 preflight plants fired, all 140 inherited outputs
+  matched, all three patched/writer Fortran units compiled, and the
+  same-program census remained 412 preprocessed units / 424 normalized
+  objects. The first attempt refused before compilation on a stale unified-
+  diff hunk count; `f77ae176f7d3` contains the corrected patch header.
+- Resume-3 per-receipt citation gate: PASS, 8 citations found and 0 failures.
+- Resume-3 default landing battery and private-import ratchet: 147 passed in
+  990.27 s; the ratchet's 6 tests are included in that count.
 
 Choices: stopping for the absent record is **ASKED**. Recording every
 source-order matrix boundary, rather than only entry/exit, was an **UNASKED**
