@@ -174,7 +174,6 @@ class TestAntisymmetry:
         )
 
 
-
 class TestPVFluxEnergyWork:
     """The energy-conserving PV flux does no work (Ringler 2010 Eq. 49):
     Σ_e dc·dv · F_e · F_q(e) = 0 with F = h_edge·u, for any u, h and PV.
