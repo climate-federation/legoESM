@@ -46,9 +46,12 @@ Status: **LANDED-pending** (operator review + push gate).
 
 `decide7_drag.json`: `PASS_R278_D122_DECISION`.
 
-- The three away rows (independent): kt-1 stage-1 and stage-2 and kt-2
-  entry sea-level RMS, each worse by 5e-5 relative (0.0125766 ->
-  0.0125773 m); the same rows' max error falls 0.0198 -> 0.0155 m. That
+- The three away rows (independent), sea-level RMS (operator correction
+  after review, recomputed from `arms/rung10_independent_{control,drag}.json`):
+  kt-1 stage-1 0.0125766 -> 0.0125773 m (+5.4e-5 relative), max 0.0198 ->
+  0.0155 m; kt-1 stage-2 0.0125765 -> 0.0125772 m (+5.6e-5), max 0.0219 ->
+  0.0155 m; kt-2 entry 0.0121515 -> 0.0121568 m (+4.35e-4), max 0.0283 ->
+  0.0156 m. That
   label's sea level is dominated by the card's own kt-1 entry sea level
   (0.0155 m max, unchanged). Not a lean away.
 - Given entry's new first non-bit row, kt-1 stage-1 v: 2,032 unequal
