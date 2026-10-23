@@ -261,7 +261,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                               "public-read, not just this report.")
     parser.add_argument("--share-name", default=None,
                          help="Report prefix on Swift for --share (default: the "
-                              "run folder, i.e. the parent of --cmor-dir).")
+                              "run folder, i.e. the parent of --cmor-dir, plus a UTC "
+                              "timestamp, e.g. amip_run4_20261023T1530Z).")
     return parser
 
 
@@ -369,9 +370,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Report covers {len(db_paths)}/{len(suites)} suites; "
           f"HTML report written to {html_path}")
     if args.share:
-        # Model id is the same for every run, so default the prefix to the run folder.
+        # Model id is the same for every run, so default the prefix to the run
+        # folder plus a UTC timestamp, so re-shares and same-named runs never collide.
+        from datetime import datetime, timezone
         from climateeval._cli import _share_report
-        _share_report(html_path, args, default_name=Path(args.cmor_dir).resolve().parent.name)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%MZ")
+        _share_report(html_path, args,
+                      default_name=f"{Path(args.cmor_dir).resolve().parent.name}_{stamp}")
     return 0
 
 

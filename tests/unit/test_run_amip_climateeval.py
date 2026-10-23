@@ -315,7 +315,8 @@ def _run_main_with_fakes(monkeypatch, tmp_path, extra_args):
 def test_main_share_publishes_with_run_folder_as_default_name(monkeypatch, tmp_path):
     rc, shared = _run_main_with_fakes(monkeypatch, tmp_path, ["--share"])
     assert rc == 0
-    assert shared["default_name"] == "my_run"
+    import re
+    assert re.fullmatch(r"my_run_\d{8}T\d{4}Z", shared["default_name"]), shared["default_name"]
     assert shared["html"] == tmp_path / "out" / "climateeval_report.html"
 
 
