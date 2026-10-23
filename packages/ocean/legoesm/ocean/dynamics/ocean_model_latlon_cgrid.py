@@ -209,6 +209,12 @@ def _nemo_stage3_l8_krhs_walk(adv_t, adv_s, *term_groups):
     return t_value, s_value, tuple(boundaries)
 
 
+def _nemo_stage3_l9_eiv_transport(base_u, base_v, eiv_u, eiv_v):
+    """Apply L9's stage-3 EIV transport at NEMO's pre-``Krhs`` boundary."""
+
+    return base_u + eiv_u, base_v + eiv_v
+
+
 def mass_flux_fields(u_field, v_field, w_field, mfu_data, mfv_data, mfw_data):
     """Wrap the tracer-advecting mass fluxes as the three ``mass_flux_*`` Fields.
 
@@ -4031,6 +4037,23 @@ class LatLonCGridOceanModel:
         return self.rigid_lid_data
 
     @staticmethod
+    def _check_l3_krhs_route(config) -> None:
+        # DECISION 147: L3's stage-3 bolus is certified only on G9's
+        # stage-3 Krhs tracer route; without it the FCT reads the bolus
+        # in its vertical velocity but not its horizontal transports
+        # (round 321: 7.0e-5 m/s continuity residual).
+        _gm = getattr(config, "gm_redi", None)
+        if (config.tracer_time_integrator == "rk3_ws"
+                and _gm is not None
+                and getattr(_gm, "gm_bolus_advection", "") == "through_fct"
+                and getattr(_gm, "slope_scheme", "") == "nemo_iso_lap"
+                and not config.rk3_stage3_tracer_krhs_nemo_order):
+            raise ValueError(
+                "NEMO rk3_ws eddy-induced velocity (GM bolus through FCT) "
+                "requires rk3_stage3_tracer_krhs_nemo_order (the stage-3 "
+                "Krhs tracer route)")
+
+    @staticmethod
     def _validate_config(
         config: LatLonCGridOceanConfig,
     ) -> LatLonCGridOceanConfig:
@@ -4106,21 +4129,46 @@ class LatLonCGridOceanModel:
                     "tra_bbc; select the L4b ordered composition")
             if _after_ldf:
                 _gm = config.gm_redi
-                _is_l2 = (
+                _l2_gm = _gm
+                if (config.rk3_stage3_l9_eiv_nemo_order and _gm is not None):
+                    _l2_gm = _gm._replace(
+                        kappa_GM=0.0,
+                        treguier=_gm.treguier._replace(enabled=False),
+                        gm_bolus_advection="centred",
+                        gm_bolus_kappa_face_average=False,
+                        treguier_vertical_reduction_evaluation="tree",
+                        treguier_sqrt_evaluation="guarded_floor",
+                    )
+                _has_l2_base = (
                     config.K_h == 0.0 and config.K_bih == 0.0
-                    and _gm is not None
-                    and _gm.kappa_GM == 0.0
-                    and _gm.slope_scheme == "nemo_iso_lap"
-                    and _gm.msc_stabilize
-                    and _gm.implicit_K33
-                    and _gm.redi_coefficient == "constant"
-                    and not _gm.treguier.enabled
-                    and _gm.gm_bolus_advection == "centred"
+                    and _l2_gm is not None
+                    and _l2_gm.kappa_GM == 0.0
+                    and _l2_gm.slope_scheme == "nemo_iso_lap"
+                    and _l2_gm.msc_stabilize
+                    and _l2_gm.implicit_K33
+                    and _l2_gm.redi_coefficient == "constant"
+                    and not _l2_gm.treguier.enabled
+                    and _l2_gm.gm_bolus_advection == "centred"
                 )
-                if not _is_l2:
+                _is_l2 = _has_l2_base and not config.rk3_stage3_l9_eiv_nemo_order
+                _is_l9_eiv = (
+                    config.rk3_stage3_l9_eiv_nemo_order
+                    and _has_l2_base
+                    and _gm is not None
+                    and _gm.kappa_GM == 3000.0
+                    and _gm.treguier.enabled
+                    and _gm.treguier.aei0 == 3000.0
+                    and _gm.treguier.kappa_min == 0.0
+                    and _gm.gm_bolus_advection == "through_fct"
+                    and _gm.gm_bolus_kappa_face_average
+                    and _gm.treguier_vertical_reduction_evaluation == "nemo_left"
+                    and _gm.treguier_sqrt_evaluation == "nemo_forward_exact"
+                )
+                if not (_is_l2 or _is_l9_eiv):
                     raise ValueError(
                         "rk3_stage3_geothermal_after_ldf_nemo_order requires "
-                        "the certified L2 standard-isoneutral selection")
+                        "the certified L2 selection, or L9's exact L3 EIV "
+                        "extension")
                 if ((config.bbl_adv_option != 0
                      or config.bbl_diffusive_option != 0)
                         and not config.rk3_stage3_l8_nemo_order):
@@ -4157,10 +4205,17 @@ class LatLonCGridOceanModel:
                     or config.bbl_diffusive_option != 1
                     or config.bbl_aht_m2_s != 1000.0
                     or config.bbl_gamma_s != 10.0
-                    or not _is_l2):
+                    or not (_is_l2 or _is_l9_eiv)):
                 raise ValueError(
                     "rk3_stage3_l8_nemo_order requires the exact certified "
-                    "G9+L1+L2+L4b+L6 composition")
+                    "G9+L1+L2+L4b+L6 composition, optionally with L9's exact "
+                    "L3 EIV extension")
+        if config.rk3_stage3_l9_eiv_nemo_order:
+            if (not config.rk3_stage3_l8_nemo_order or not _is_l9_eiv):
+                raise ValueError(
+                    "rk3_stage3_l9_eiv_nemo_order requires the complete L8 "
+                    "composition plus the exact certified L3 EIV selection")
+        LatLonCGridOceanModel._check_l3_krhs_route(config)
         if _phys is not None and _phys.shortwave_penetration is not None:
             from legoesm.ocean.physics.shortwave_penetration import (
                 SHORTWAVE_PENETRATION_SCHEMES,
@@ -10476,6 +10531,9 @@ class LatLonCGridOceanModel:
                         if _nemo_ws_stage_transport_geometry is None:
                             raise ValueError(
                                 "staged GM bolus requires materialized WS transports")
+                        # DECISION 147 backstop: config may change after
+                        # construction or an outer driver may call _step_impl.
+                        LatLonCGridOceanModel._check_l3_krhs_route(_cfg_b)
                         # traadv.f90:254-258 calls ldf_eiv_trp at stage 3 only.
                         # NEMO changes ONLY pFu/pFv, then calls wzv again with
                         # np_transport (traadv.f90:296).  Preserve the
@@ -10488,8 +10546,12 @@ class LatLonCGridOceanModel:
                             [jnp.zeros_like(v_eiv[:1]), v_eiv], axis=0)
                         _zfu_before = stage3[7]
                         _zfv_before = stage3[8]
-                        stage3[7] = stage3[7] + zfu_eiv   # ldftra.f90:954
-                        stage3[8] = stage3[8] + zfv_eiv   # ldftra.f90:955
+                        if _cfg_b.rk3_stage3_l9_eiv_nemo_order:
+                            stage3[7], stage3[8] = _nemo_stage3_l9_eiv_transport(
+                                stage3[7], stage3[8], zfu_eiv, zfv_eiv)
+                        else:
+                            stage3[7] = stage3[7] + zfu_eiv   # ldftra.f90:954
+                            stage3[8] = stage3[8] + zfv_eiv   # ldftra.f90:955
                         if _l3_eiv_transport_exposure:
                             _nemo_ws_l3_eiv_transport_trace = (
                                 _zfu_before, _zfv_before,
@@ -14961,6 +15023,9 @@ class LatLonCGridOceanModel:
         # faithful avm_k/avt_k lifetime and a bare step fails on its first
         # closure call.
         state = self._seed_tke_preclosure_carry(state)
+        # Eager, every call: ``self`` is a static jit argument, so a config
+        # edited after the first trace would reuse the cached executable.
+        self._check_l3_krhs_route(self.config)
         if self.config.barotropic.barotropic_solver == "rigid_lid":
             # Eager fail-fast (host-side, before the jitted body): the rigid-lid
             # streamfunction solve is single-rank only.  The in-body guard runs
