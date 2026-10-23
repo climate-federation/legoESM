@@ -1242,8 +1242,8 @@ def build_run_manifest(
     command_line
         The invoking command; defaults to ``" ".join(sys.argv)``.
     runner_tag, patches
-        Free-form downstream-orchestrator identity and the patch chain it
-        applied, recorded under ``[reproducibility]``.  When the env vars
+        The entry script's tag (the key into ``RUNNER_REPLAY_SPECS``) and the
+        patch chain applied, recorded under ``[reproducibility]``.  When
         ``LEGOESM_RUNNER_PATCHES`` (comma-separated list) is set, it replaces
         the caller's patches.  ``LEGOESM_RUNNER_TAG`` is recorded separately
         as ``[reproducibility].orchestrator_tag``; ``runner_tag`` is never
