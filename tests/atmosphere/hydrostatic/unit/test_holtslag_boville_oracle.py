@@ -353,3 +353,22 @@ def test_grad_matches_finite_difference():
     g_fd = float((loss(T_sfc + eps) - loss(T_sfc - eps)) / (2 * eps))
     rel = abs(g_ad - g_fd) / (abs(g_fd) + 1e-8)
     assert rel < 1e-4, f"AD grad {g_ad:.6e} vs FD {g_fd:.6e} (rel {rel:.2e})"
+
+
+def test_float32_prognostics_with_float64_column_inputs(fx):
+    """The coupled lane under x64 hands float64 pressures/heights/surface fields
+    next to float32 winds/T/q (#2110); the solve must follow the winds' dtype
+    instead of raising on mixed dtypes."""
+    f32 = {k: jnp.asarray(fx[f"in_{k}"], jnp.float32) for k in ("T", "q", "u", "v")}
+    f64 = {k: jnp.asarray(fx[f"in_{k}"], jnp.float64)
+           for k in ("p_full", "p_half", "zm", "zi")}
+    T64, q64 = f32["T"].astype(jnp.float64), f32["q"].astype(jnp.float64)
+    rho = compute_rho(T64, f64["p_full"], q_v=q64)
+    out = holtslag_boville_turbulence(
+        f32["u"], f32["v"], f32["T"], f32["q"], f64["p_full"], f64["p_half"],
+        f64["zm"], f64["zi"], T64[:, -1], q64[:, -1], rho, float(fx["dt"]),
+        HoltslagBovilleConfig(),
+        pref_mid=jnp.asarray(fx["in_pref_mid"], jnp.float64))
+    assert out.du_dt.dtype == jnp.float32 and out.dv_dt.dtype == jnp.float32
+    for arr in (out.du_dt, out.dv_dt, out.dT_dt, out.dq_v_dt):
+        assert jnp.all(jnp.isfinite(arr))
