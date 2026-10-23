@@ -2076,6 +2076,12 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     model_config = model_config._replace(
         **orca2_l8_krhs_selection(),
         physics=model_config.physics._replace(mle=orca2_l5_mle()))
+    # ORCA2 round 325 (Decision 122, DECISION 151): lane A rung L9 = L8 plus
+    # L3's eddy-induced velocity (gridladder e4f204272d): &namtra_eiv
+    # ln_ldfeiv = T, nn_aei_ijk_t = 21, rn_Ue = 0.03, rn_Le = 200 km (EXP00
+    # namelist_cfg:317-323), ln_eke_equ = F (namelist_ref:980).
+    model_config = model_config._replace(
+        gm_redi=orca2_l3_eiv_gm_redi(), rk3_stage3_l9_eiv_nemo_order=True)
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
