@@ -9,6 +9,7 @@ PROGRAM dynzdf_round328_layout_fixture
    CHARACTER(LEN=64) :: filename
    REAL(wp) :: puu(3,2,jpk,3), pvv(3,2,jpk,3), avm(4,3,jpk)
    REAL(wp) :: puub(3,2), pvvb(3,2), pbot(4,3), ptop(4,3)
+   REAL(wp) :: r3u_kaa(3,2), r3v_kaa(3,2)
    REAL(wp) :: utau(3,2), vtau(3,2), urow(3,jpkm1), vrow(3,jpkm1)
    REAL(wp) :: lower(3,jpkm1), diagonal(3,jpkm1), upper(3,jpkm1)
    REAL(wp) :: stage_t(3,2,jpk), stage_s(3,2,jpk)
@@ -25,8 +26,9 @@ PROGRAM dynzdf_round328_layout_fixture
       avm(ji,jj,jk)=REAL(100*jk+10*jj+ji,wp)
    END DO; END DO; END DO
    puub=7._wp; pvvb=8._wp; pbot=9._wp; ptop=10._wp
+   r3u_kaa=0.01_wp; r3v_kaa=0.02_wp
    utau=11._wp; vtau=12._wp
-   CALL r328_begin(1,1,2,3,3,puu,pvv,avm,puub,pvvb,pbot,ptop,utau,vtau)
+   CALL r328_begin(1,1,2,3,3,puu,pvv,avm,r3u_kaa,r3v_kaa,puub,pvvb,pbot,ptop,utau,vtau)
    DO phase=1,4; DO jj=1,2
       urow=REAL(100*phase+jj,wp); vrow=urow+0.25_wp
       CALL r328_state_row(phase,jj,urow,vrow)
@@ -41,11 +43,17 @@ PROGRAM dynzdf_round328_layout_fixture
       urow=REAL(9000+100*component+jj,wp)
       CALL r328_solve_row(component,jj,urow)
    END DO; END DO
+   ! Raw dyn_zdf output can retain -0.0 at dry cells.  The admitted frame
+   ! below models l4_canon_3d by writing those same dry slots as +0.0.
+   puu(3,2,jpkm1,3)=-0._wp
+   pvv(2,2,jpkm1,3)=-0._wp
    CALL r328_finish(puu,pvv,3)
 
    stage_t=0._wp; stage_s=0._wp; stage_u=0._wp; stage_v=0._wp; stage_ssh=0._wp
    stage_u(:,:,1:jpkm1)=puu(:,:,1:jpkm1,3)
    stage_v(:,:,1:jpkm1)=pvv(:,:,1:jpkm1,3)
+   stage_u(3,2,jpkm1)=0._wp
+   stage_v(2,2,jpkm1)=0._wp
    IF(rank == 0) THEN
       filename='oracle_step_entry_kt00000002.bin'
    ELSE

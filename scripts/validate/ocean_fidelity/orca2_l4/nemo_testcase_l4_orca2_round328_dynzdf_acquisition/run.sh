@@ -61,16 +61,27 @@ readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
 scratch=
 created_target=0
 created_run=0
+run_completed=0
 cleanup() {
-  local rc=$?
+  local rc=$? refused
   trap - EXIT
   set +e
   [[ -z "$scratch" || ! -e "$scratch" ]] || rm -rf -- "$scratch"
   if [[ $rc -ne 0 ]]; then
-    [[ $created_run -eq 0 || ! -e "$TARGET_RUN" ]] || rm -rf -- "$TARGET_RUN"
+    if [[ $created_run -ne 0 && $run_completed -eq 1 && -e "$TARGET_RUN" ]]; then
+      refused=$EVIDENCE/refused/$(basename "$TARGET_RUN")_admission_refused_$(date -u +%Y%m%dT%H%M%SZ)_$$
+      if mkdir -p -- "$EVIDENCE/refused" && mv -- "$TARGET_RUN" "$refused"; then
+        printf 'R328_ADMISSION_REFUSED_OUTPUTS_KEPT %s\n' "$refused" >&2
+      else
+        printf 'R328_ADMISSION_REFUSED_OUTPUTS_LEFT_IN_PLACE %s\n' "$TARGET_RUN" >&2
+      fi
+    else
+      [[ $created_run -eq 0 || ! -e "$TARGET_RUN" ]] || rm -rf -- "$TARGET_RUN"
+    fi
     [[ $created_target -eq 0 || ! -e "$TARGET_ROOT" ]] || rm -rf -- "$TARGET_ROOT"
-    [[ $created_run -eq 0 && $created_target -eq 0 ]] \
-      || printf 'R328_FAILED_RUN_CLEANED target=%s run=%s\n' "$created_target" "$created_run" >&2
+    [[ $created_run -eq 0 && $created_target -eq 0 ]] || \
+      printf 'R328_FAILED_INVOCATION_HANDLED target=%s run=%s completed=%s\n' \
+        "$created_target" "$created_run" "$run_completed" >&2
   fi
   exit "$rc"
 }
@@ -95,7 +106,8 @@ check_echo() {
   echo_has "$1" nn_it000 1 && echo_has "$1" nn_itend 10 && echo_has "$1" ln_tile F \
     && echo_has "$1" ln_drgimp T && echo_has "$1" ln_drgice_imp T \
     && echo_has "$1" ln_dynadv_vec T && echo_has "$1" ln_dynspg_ts T \
-    && echo_has "$1" ln_zad_Aimp F
+    && echo_has "$1" ln_zad_Aimp F && echo_has "$1" nn_mxlice 2 \
+    && echo_has "$1" jpl 1
 }
 nml_int() {
   sed -E 's/!.*//' "$1" | grep -E "^[[:space:]]*$2[[:space:]]*=" | tail -n 1 \
@@ -191,6 +203,10 @@ plant_must_refuse namelist check_namelist "$plants/namelist_cfg"
 check_echo "$EXCERPT" || refuse 'real ocean.output excerpt lacks frozen selectors'
 sed -E 's/(ln_zad_Aimp[[:space:]]*=[[:space:]]*)F/\1T/' "$EXCERPT" >"$plants/ocean.output"
 plant_must_refuse echo check_echo "$plants/ocean.output"
+sed -E 's/(nn_mxlice[[:space:]]*=[[:space:]]*)2/\1 0/' "$EXCERPT" >"$plants/ocean.output.mxlice"
+plant_must_refuse echo-mxlice check_echo "$plants/ocean.output.mxlice"
+sed -E 's/(jpl[[:space:]]*=[[:space:]]*)1/\1 5/' "$EXCERPT" >"$plants/ocean.output.jpl"
+plant_must_refuse echo-jpl check_echo "$plants/ocean.output.jpl"
 # Checklist (4)+(5): compiled exact writer layout, every expected frame, A4,
 # and one-ULP A5 plants. The imported round-326 test proves ELF root-only normalisation.
 "$PY" -m pytest -q -p no:cacheprovider "$TEST" \
@@ -339,5 +355,6 @@ cp "$manifest"/* "$TARGET_RUN/"
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>run.user.time.log
 )
 grep 'STOP 0' "$TARGET_RUN/run.user.stdout.log" >/dev/null || refuse 'NEMO did not report STOP 0'
+run_completed=1
 check_echo "$TARGET_RUN/ocean.output" || refuse 'run selectors changed'
 admit

@@ -32,6 +32,7 @@ MATRIX_PHASES = ("base_zdf", "after_zad", "after_ldf", "bottom_diag", "top_diag"
 MATRIX_TERMS = ("low", "diag", "up")
 EXPECTED_ORDER = (
     "before_u", "before_v", "rhs_u", "rhs_v", "avm_input",
+    "r3u_kaa", "r3v_kaa",
     "barotropic_u", "barotropic_v", "rCdU_bot", "rCdU_top", "utauU", "vtauV",
     *(f"{phase}_{component}" for phase in STATE_PHASES for component in "uv"),
     *(f"{component}_{phase}_{term}" for component in "uv"
@@ -69,7 +70,7 @@ def _expected_extent(name: str, header: dict[str, int]) -> tuple[int, int, int]:
         return nx + 1, ny + 1, nz + 1
     if name in {"rCdU_bot", "rCdU_top"}:
         return nx + 1, ny + 1, 1
-    if name in {"barotropic_u", "barotropic_v", "utauU", "vtauV"}:
+    if name in {"r3u_kaa", "r3v_kaa", "barotropic_u", "barotropic_v", "utauU", "vtauV"}:
         return nx, ny, 1
     return nx, ny, nz
 
@@ -171,11 +172,20 @@ def _endpoint_check(record: dict, state_path: Path, *, kt: int, stage: int | Non
             and h["nz"] < dims["nz"], f"dyn_zdf endpoint lies outside {label} frame")
     expected_u = state["u"][i0:i0 + h["nx"], j0:j0 + h["ny"], :h["nz"]]
     expected_v = state["v"][i0:i0 + h["nx"], j0:j0 + h["ny"], :h["nz"]]
+    # Canonical frames write every dry cell as +0.0, while the raw dyn_zdf
+    # endpoint can retain -0.0 there.  Use each frame's nonzero support as its
+    # own wet mask so A4 does not reject an otherwise correct record.
+    wet_u = expected_u != 0.0
+    wet_v = expected_v != 0.0
     if plant:
-        expected_u = _one_ulp(expected_u)
-    require(not _changed(record["fields"]["corrected_u"], expected_u),
+        wet_index = np.flatnonzero(wet_u)
+        require(bool(wet_index.size), f"admitted {label} U endpoint has no wet cells")
+        expected_u = expected_u.copy()
+        expected_u.flat[wet_index[0]] = np.nextafter(
+            expected_u.flat[wet_index[0]], np.float64(np.inf))
+    require(not _changed(record["fields"]["corrected_u"][wet_u], expected_u[wet_u]),
             f"corrected_u differs from the admitted {label} endpoint")
-    require(not _changed(record["fields"]["corrected_v"], expected_v),
+    require(not _changed(record["fields"]["corrected_v"][wet_v], expected_v[wet_v]),
             f"corrected_v differs from the admitted {label} endpoint")
 
 

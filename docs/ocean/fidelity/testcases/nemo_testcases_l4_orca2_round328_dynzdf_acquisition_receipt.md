@@ -7,8 +7,9 @@ Base: `735cab5ba22e`
 Disposition: **ACQUISITION_NEEDED; no NEMO run, model, card, or configuration
 change**
 
-independent review: operator (Claude), **HOLD**; all seven confirmed findings
-are addressed below for operator rereview
+independent review: operator (Claude), initial seven findings **FIXED** on
+rereview; one new signed-zero defect **CONFIRMED** and repaired below, together
+with the two requested Argon checks
 
 codex review: operator
 
@@ -51,7 +52,8 @@ The committed acquisition is
 It re-runs the admitted round-326 two-rank trajectory with additions-only,
 write-only hooks and records, in source order:
 
-1. `before`, `Krhs`, `avm`, barotropic U/V, bottom/top `rCdU`, and stress;
+1. `before`, `Krhs`, `avm`, after-level `r3u`/`r3v`, barotropic U/V,
+   bottom/top `rCdU`, and stress;
 2. explicit update, barotropic subtraction, bottom RHS, and top RHS;
 3. U and V lower/diagonal/upper matrices after base ZDF, ZAD, LDF, bottom drag,
    and top drag; and
@@ -107,6 +109,39 @@ non-running mode. The operator alone may invoke `--run`.
 The receipt's earlier UNASKED matrix-boundary instrument choice is now approved
 by the operator ruling: the acquisition records every boundary the walk needs
 and no `wi` or diagnostic-only channel beyond that walk.
+
+## Resume-2 repair of the confirmed signed-zero defect
+
+The earlier A4 endpoint check compared all raw `corrected_u/v` bits against
+canonical stage/entry frames. That was wrong on dry cells: the frame writer
+initialises its canonical view to positive zero and only copies wet cells,
+whereas `dyn_zdf` can retain negative zeros in its raw arrays. The operator
+measured 178--642 such dry negative zeros per field and rank in the round-326
+kt-10 restarts, so the prior gate would have refused a correct acquisition.
+
+A4 now compares each endpoint only on the corresponding admitted frame's wet
+support. The compiled writer fixture carries raw negative zero at dry U and V
+cells while its canonical frames carry positive zero; the clean record passes.
+The endpoint plant changes one nonzero frame cell by exactly one ULP and still
+refuses, so the repair does not make the endpoint check vacuous.
+
+An admission refusal after a completed `STOP 0` run now preserves the entire
+run by moving it to a timestamped, clearly named directory below
+`round328/acquisition/refused/`. A failed build or a run that crashes before
+`STOP 0` still has its partial target and run directories deleted. Executable
+tests exercise both cleanup branches and retain the completed run's record.
+
+Argon operand ruling: `r3u(:,:,Kaa)` and `r3v(:,:,Kaa)` are now recorded at
+`dyn_zdf` entry. They are required: in the compiled QCO program the U matrix's
+after-level `e3u` divisor expands through `r3u(Kaa)` within
+`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:187-349`, and
+the corresponding V divisor expands through `r3v(Kaa)` within
+`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:356-517`.
+The exact-layout reader and fixture require both new 2-D fields.
+
+The whitespace-tolerant real-log checker now also requires `nn_mxlice = 2`
+and `jpl = 1`. Both verbatim lines are committed in the pinned round-326
+`ocean.output` excerpt, and separate wrong-value plants prove each check fires.
 
 ## Fix disposition
 

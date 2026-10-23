@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -20,6 +21,7 @@ STUBS = ACQ / "dynzdf_round328_fixture_stubs.F90"
 HARNESS = ACQ / "dynzdf_round328_layout_fixture.F90"
 PATCHES = (ACQ / "dynzdf_round328.patch", ACQ / "stprk3_stg_round328.patch")
 GFORTRAN = Path("/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran")
+RUN_SH = ACQ / "run.sh"
 
 
 @pytest.fixture(scope="module")
@@ -43,8 +45,69 @@ def test_compiled_exact_writer_layout_passes(record_dir: Path) -> None:
     h, fields = first["header"], first["fields"]
     assert fields["avm_input"].shape == (h["nx"] + 1, h["ny"] + 1, h["nz"] + 1)
     assert fields["rCdU_bot"].shape == (h["nx"] + 1, h["ny"] + 1, 1)
+    assert fields["r3u_kaa"].shape == (h["nx"], h["ny"], 1)
+    assert fields["r3v_kaa"].shape == (h["nx"], h["ny"], 1)
     assert fields["before_u"].shape == (h["nx"], h["ny"], h["nz"])
     assert "wi_input" not in fields
+
+
+@pytest.mark.skipif(not GFORTRAN.exists(), reason="NEMO gfortran toolchain absent")
+def test_a4_ignores_raw_negative_zero_only_at_frame_dry_cells(record_dir: Path) -> None:
+    record = gate.read_record(record_dir / gate.record_name(0))["fields"]
+    _, state = gate.read_admitted_state(
+        record_dir / "oracle_stage_kt00000001_s3.bin", kt=1, stage=3)
+    raw_u, frame_u = record["corrected_u"][2, 1, -1], state["u"][2, 1, -2]
+    raw_v, frame_v = record["corrected_v"][1, 1, -1], state["v"][1, 1, -2]
+    assert raw_u == frame_u == raw_v == frame_v == 0.0
+    assert np.signbit(raw_u) and np.signbit(raw_v)
+    assert not np.signbit(frame_u) and not np.signbit(frame_v)
+    assert gate.run_gate(record_dir, "a" * 40)["status"] == "PASS_R328_DYNZDF_STRUCTURE"
+
+
+@pytest.mark.skipif(not GFORTRAN.exists(), reason="NEMO gfortran toolchain absent")
+def test_a4_wet_cell_one_ulp_plant_refuses(record_dir: Path) -> None:
+    with pytest.raises(gate.GateError, match="corrected_u differs"):
+        gate.run_gate(record_dir, "a" * 40, "endpoint")
+
+
+def _cleanup_function() -> str:
+    text = RUN_SH.read_text()
+    start = text.index("cleanup() {")
+    end = text.index("\n}\ntrap cleanup EXIT", start) + 2
+    return text[start:end]
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_cleanup_keeps_only_completed_run_on_admission_refusal(
+        tmp_path: Path, completed: bool) -> None:
+    evidence = tmp_path / "evidence"
+    target_run = evidence / "active_run"
+    target_root = tmp_path / "target_cfg"
+    scratch = tmp_path / "scratch"
+    target_run.mkdir(parents=True)
+    target_root.mkdir()
+    scratch.mkdir()
+    (target_run / "record.bin").write_bytes(b"correct record")
+    script = "\n".join((
+        _cleanup_function(),
+        f"scratch={shlex.quote(str(scratch))}",
+        f"TARGET_RUN={shlex.quote(str(target_run))}",
+        f"TARGET_ROOT={shlex.quote(str(target_root))}",
+        f"EVIDENCE={shlex.quote(str(evidence))}",
+        "created_target=1", "created_run=1",
+        f"run_completed={int(completed)}",
+        "false", "cleanup",
+    ))
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True)
+    assert result.returncode == 1
+    assert not target_run.exists() and not target_root.exists() and not scratch.exists()
+    kept = list((evidence / "refused").glob("active_run_admission_refused_*/record.bin"))
+    if completed:
+        assert len(kept) == 1
+        assert kept[0].read_bytes() == b"correct record"
+        assert "R328_ADMISSION_REFUSED_OUTPUTS_KEPT" in result.stderr
+    else:
+        assert not kept
 
 
 PLANT_REASONS = {

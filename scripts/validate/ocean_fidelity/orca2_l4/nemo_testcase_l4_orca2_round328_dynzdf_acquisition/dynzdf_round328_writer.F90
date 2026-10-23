@@ -18,6 +18,7 @@ MODULE dynzdf_round328_writer
    REAL(wp), ALLOCATABLE, SAVE :: before_u(:,:,:), before_v(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: rhs_u(:,:,:), rhs_v(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: avm_in(:,:,:)
+   REAL(wp), ALLOCATABLE, SAVE :: r3u_kaa_in(:,:), r3v_kaa_in(:,:)
    REAL(wp), ALLOCATABLE, SAVE :: baro_u(:,:), baro_v(:,:)
    REAL(wp), ALLOCATABLE, SAVE :: rcdu_bot_in(:,:), rcdu_top_in(:,:)
    REAL(wp), ALLOCATABLE, SAVE :: utau_in(:,:), vtau_in(:,:)
@@ -74,9 +75,10 @@ CONTAINS
    END SUBROUTINE put3
 
    SUBROUTINE r328_begin(kt, Kbb, Kmm, Krhs, Kaa, puu, pvv, pavm, &
-      & puub, pvvb, pbot, ptop, putau, pvtau)
+      & pr3u_kaa, pr3v_kaa, puub, pvvb, pbot, ptop, putau, pvtau)
       INTEGER, INTENT(in) :: kt, Kbb, Kmm, Krhs, Kaa
       REAL(wp), INTENT(in) :: puu(:,:,:,:), pvv(:,:,:,:), pavm(:,:,:)
+      REAL(wp), INTENT(in) :: pr3u_kaa(:,:), pr3v_kaa(:,:)
       REAL(wp), INTENT(in) :: puub(:,:), pvvb(:,:), pbot(:,:), ptop(:,:)
       REAL(wp), INTENT(in) :: putau(:,:), pvtau(:,:)
       lactive = kt == nit000 .AND. Kbb == 1 .AND. Kmm == 2 .AND. Krhs == 3 .AND. Kaa == 3
@@ -88,6 +90,7 @@ CONTAINS
       ALLOCATE(before_u(nx,ny,jpkm1), before_v(nx,ny,jpkm1), &
          & rhs_u(nx,ny,jpkm1), rhs_v(nx,ny,jpkm1), &
          & avm_in(nx+1,ny+1,jpk), &
+         & r3u_kaa_in(nx,ny), r3v_kaa_in(nx,ny), &
          & baro_u(nx,ny), baro_v(nx,ny), &
          & rcdu_bot_in(nx+1,ny+1), rcdu_top_in(nx+1,ny+1), &
          & utau_in(nx,ny), vtau_in(nx,ny), &
@@ -99,6 +102,8 @@ CONTAINS
       rhs_u=puu(ntsi:ntei,ntsj:ntej,1:jpkm1,Krhs)
       rhs_v=pvv(ntsi:ntei,ntsj:ntej,1:jpkm1,Krhs)
       avm_in=pavm(ntsi:ntei+1,ntsj:ntej+1,1:jpk)
+      r3u_kaa_in=pr3u_kaa(ntsi:ntei,ntsj:ntej)
+      r3v_kaa_in=pr3v_kaa(ntsi:ntei,ntsj:ntej)
       baro_u=puub(ntsi:ntei,ntsj:ntej) ; baro_v=pvvb(ntsi:ntei,ntsj:ntej)
       rcdu_bot_in=pbot(ntsi:ntei+1,ntsj:ntej+1)
       rcdu_top_in=ptop(ntsi:ntei+1,ntsj:ntej+1)
@@ -177,10 +182,11 @@ CONTAINS
       magic='NEMO_L4_R328ZDF'
       WRITE(nunit) magic
       WRITE(nunit) 1,nkt,3,nkbb,nkmm,nkrhs,nkaa,narea-1,nx,ny,jpkm1,ntsi,ntsj, &
-         & STORAGE_SIZE(1._wp),53
+         & STORAGE_SIZE(1._wp),55
       CALL put3('before_u',before_u,ntsi,ntsj); CALL put3('before_v',before_v,ntsi,ntsj)
       CALL put3('rhs_u',rhs_u,ntsi,ntsj); CALL put3('rhs_v',rhs_v,ntsi,ntsj)
       CALL put3('avm_input',avm_in,ntsi,ntsj)
+      CALL put2('r3u_kaa',r3u_kaa_in,ntsi,ntsj); CALL put2('r3v_kaa',r3v_kaa_in,ntsi,ntsj)
       CALL put2('barotropic_u',baro_u,ntsi,ntsj); CALL put2('barotropic_v',baro_v,ntsi,ntsj)
       CALL put2('rCdU_bot',rcdu_bot_in,ntsi,ntsj); CALL put2('rCdU_top',rcdu_top_in,ntsi,ntsj)
       CALL put2('utauU',utau_in,ntsi,ntsj); CALL put2('vtauV',vtau_in,ntsi,ntsj)
@@ -196,7 +202,7 @@ CONTAINS
       CALL put3('corrected_u',puu(ntsi:ntei,ntsj:ntej,1:jpkm1,Kaa),ntsi,ntsj)
       CALL put3('corrected_v',pvv(ntsi:ntei,ntsj:ntej,1:jpkm1,Kaa),ntsi,ntsj)
       CLOSE(nunit); nunit=-1; lactive=.FALSE.
-      DEALLOCATE(before_u,before_v,rhs_u,rhs_v,avm_in,baro_u,baro_v, &
+      DEALLOCATE(before_u,before_v,rhs_u,rhs_v,avm_in,r3u_kaa_in,r3v_kaa_in,baro_u,baro_v, &
          & rcdu_bot_in,rcdu_top_in,utau_in,vtau_in,state_u,state_v,matrix,solve_u,solve_v)
    END SUBROUTINE r328_finish
 
