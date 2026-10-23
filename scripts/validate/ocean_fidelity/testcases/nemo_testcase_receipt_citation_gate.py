@@ -1730,9 +1730,9 @@ FILES = {
 CITATION_MAP = {
     # ORCA2 round 326 (DECISION 154): TKE nn_mxlice = 2 reads SI3's hm_i.
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:621-622': [
-        'zmxlm(ji,1) = ( ( 1._wp - fr_i(ji,jj) ) * zraug * taum(ji,jj) + &',
+        ('zmxlm(ji,1) = ( ( 1._wp - fr_i(ji,jj) ) * zraug * taum(ji,jj) + &', 1),
         '&                      fr_i(ji,jj)   * hm_i(ji,jj) * 2._wp ) * tmask(ji,jj,1)', 2],
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icevar.f90:186': 'hm_i(ji,jj) = vt_i(ji,jj) * z1_at_i',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icevar.f90:186': ('hm_i(ji,jj) = vt_i(ji,jj) * z1_at_i', 1),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icestp.f90:186': 'IF( MOD( kt-1, nn_fsbc ) == 0 ) THEN   ! Ice time step',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icestp.f90:260': 'CALL ice_var_agg(2)',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:151': 'CALL sbc        ( kstp, Nbb, Nbb )                ! Sea Boundary Condition (including sea-ice)',
