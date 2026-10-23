@@ -1945,15 +1945,20 @@ CITATION_MAP = {
         "volume_transport_override=(stage3[7], stage3[8]),",
         32,
     ],
-    "tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:96-178": [
+    "tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:99-181": [
         "def test_l9_pins_every_krhs_position_with_inexact_words():",
         "assert np.isfinite(np.asarray(grad))",
         83,
     ],
-    "tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:181-243": [
+    "tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:184-255": [
         "def test_l9_live_eiv_executes_before_l8_finalizer(l9_card, monkeypatch):",
-        'for name in ("T", "S"))',
-        63,
+        "state, dt=l9_card.dt_s, freshwater=freshwater,",
+        72,
+    ],
+    "tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:262-280": [
+        "def test_l9_live_term_arm_scores_eiv_and_krhs_boundaries():",
+        "assert max(row[\"normalised\"] for row in rows) <= ladder.BAR",
+        19,
     ],
     "scripts/validate/ocean_fidelity/testcases/"
     "nemo_testcase_l9_orca2eiv_krhs/run.sh:335-353": [
