@@ -281,7 +281,11 @@ def pv_edge(q_vertex, mesh):
 def pv_flux_energy_conserving(u_edge, h_cell, q_vertex, mesh):
     """Energy-conserving PV flux (Ringler 2010, Eq. 49).
 
-    F_q(e) = Σ_{e'} w(e,e') * q_avg(e') * h_edge(e') * u(e')
+    F_q(e) = Σ_{e'} w(e,e') * ½(q_e(e) + q_e(e')) * h_edge(e') * u(e')
+
+    The PV must be the symmetric pair average (MPAS ``workpv``); a
+    one-sided ``q_e(e')`` breaks the skew-symmetry that cancels the
+    Coriolis work.
 
     Parameters
     ----------
@@ -305,7 +309,7 @@ def pv_flux_energy_conserving(u_edge, h_cell, q_vertex, mesh):
     # Gather quantities at stencil edges
     u_g = u_edge[eoe_safe]
     h_g = h_e[eoe_safe]
-    q_g = q_e[eoe_safe]
+    q_g = 0.5 * (q_e[None, :] + q_e[eoe_safe])
 
     flux = jnp.sum(woe * q_g * h_g * u_g * mask, axis=0)
     return flux
@@ -711,7 +715,7 @@ def pv_flux_energy_conserving_3d(
 
     u_g = u_edge_3d[eoe_safe]   # (maxEdges2, nEdges, nlev)
     h_g = h_e[eoe_safe]
-    q_g = q_e[eoe_safe]
+    q_g = 0.5 * (q_e[None, :, :] + q_e[eoe_safe])  # symmetric pair average
 
     return jnp.sum(woe[:, :, None] * q_g * h_g * u_g * mask[:, :, None], axis=0)
 
