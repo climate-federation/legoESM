@@ -7,7 +7,7 @@ Base: `735cab5ba22e`
 Disposition: **ACQUISITION_NEEDED; no NEMO run, model, card, or configuration
 change**
 
-Independent review: operator (Claude).
+independent review: operator (Claude)
 
 ## Answer
 
