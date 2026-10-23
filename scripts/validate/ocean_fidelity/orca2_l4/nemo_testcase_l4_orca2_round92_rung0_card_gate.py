@@ -118,6 +118,8 @@ def build_rung0_card(deck_root: Path):
         rk3_stage3_geothermal_after_ldf_nemo_order=False,
         rk3_stage3_damping_after_geothermal_nemo_order=False,
         rk3_stage3_l8_nemo_order=False,
+        # Round 325: L9's eddy-induced velocity stated off (ln_ldfeiv = F).
+        rk3_stage3_l9_eiv_nemo_order=False,
         bbl_nemo_stage3_krhs=False,
         bbl_nemo_pivot_ghost=False,
     )
