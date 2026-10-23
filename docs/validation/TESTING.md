@@ -273,7 +273,7 @@ export JAX_PLATFORMS=cpu   # needed on Apple Silicon when the mps extra is insta
 JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/test_*.py --timeout=300 \
     --tb=short -q -n 4 --dist loadfile
 
-# SFNO restart tests (x64; they skip in the fp32 unit run)
+# SFNO restart tests (CI runs them in their own x64 step)
 JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/unit/test_sfno_refuses_latlon_start.py \
     tests/unit/test_latlon_face_wind_restart.py --timeout=600 --tb=short -q
 
