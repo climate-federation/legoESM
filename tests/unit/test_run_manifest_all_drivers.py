@@ -164,3 +164,30 @@ def test_non_root_process_raises_when_root_write_failed(tmp_path, monkeypatch,
         assert restart.write_run_manifest_on_root(
             tmp_path, {"runner": "x"}, config_kind="land") is None
     assert not (tmp_path / "run_manifest.json").exists()
+
+
+@pytest.mark.parametrize("lane", ["fesom_b1_unforced", "fesom_b4_core2_forced"])
+def test_fesom_lanes_write_a_valid_manifest(tmp_path, lane):
+    from types import SimpleNamespace
+
+    from legoesm.ocean.config import FesomRunRecord, ocean_config_from_dict
+    from legoesm.ocean.dynamics.ocean_model_fesom import FesomOceanConfig
+    from scripts.run import run_omip_core2
+
+    args = SimpleNamespace(
+        emp_freshwater=True, dm2dc=False, sw_rgb_chl=True,
+        prognostic_sea_ice=False, sss_restore=True,
+        sss_restore_channel="water_flux", runoff=False,
+        nemo_monthly_init=True, woa_init=False)
+    model = SimpleNamespace(config=FesomOceanConfig(
+        dt=1800.0, vertical_coordinate="zstar"))
+    run_omip_core2._write_fesom_manifest(
+        tmp_path, args, model, lane, n_steps=48, dt=1800.0, total_days=1.0)
+    m = _manifest(tmp_path / "run_manifest.json")
+    assert m["config"]["config_kind"] == "ocean"
+    assert m["reproducibility"]["runner_tag"] == "run_omip_core2"
+    rec = ocean_config_from_dict(m["config"]["resolved_config"])
+    assert isinstance(rec, FesomRunRecord)
+    assert rec.lane == lane and rec.n_steps == 48 and rec.total_days == 1.0
+    assert rec.runtime_config == model.config
+    assert rec.sss_restore_channel == "water_flux" and rec.nemo_monthly_init

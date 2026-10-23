@@ -480,6 +480,16 @@ def test_manifest_summary_reads_the_flat_fesom_layout(tmp_path):
     assert "note" not in s
 
 
+def test_manifest_summary_reads_the_canonical_commit(tmp_path):
+    """The canonical writer (every lane since #2102, FESOM included) records
+    the commit under legoESM.commit, not git_sha."""
+    snap = _write_manifest(tmp_path / "canon", {
+        "legoESM": {"commit": "fed789"},
+        "run": {"command_line": "scripts/run/run_omip_core2.py --grid fesom"},
+        "reproducibility": {"git_dirty": False}})
+    assert m._manifest_summary(snap)["git_sha"] == "fed789"
+
+
 def test_manifest_summary_says_so_when_no_command_line_is_recorded(tmp_path):
     snap = _write_manifest(tmp_path / "bare", {"lane": "mystery"})
     s = m._manifest_summary(snap)

@@ -164,7 +164,8 @@ def _manifest_summary(snapshot_path):
            "manifest_layout": "nested" if run else ("flat" if argv else "unknown"),
            "command_line": cmd,
            "git_dirty": repro.get("git_dirty"),
-           "git_sha": repro.get("git_sha", m.get("git_sha")),
+           "git_sha": repro.get("git_sha", m.get("git_sha",
+                                (m.get("legoESM") or {}).get("commit"))),
            "legoesm_version": repro.get("legoesm_version"),
            "creation_time": run.get("creation_time", m.get("creation_time"))}
     if out["command_line"] is None:

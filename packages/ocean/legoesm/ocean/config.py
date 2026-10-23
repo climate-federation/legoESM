@@ -609,6 +609,30 @@ class OceanRunRecord(NamedTuple):
     smoke: bool = False
 
 
+class FesomRunRecord(NamedTuple):
+    """FESOM lane identity recorded in ``run_manifest.json`` (#2102).
+
+    ``runtime_config`` is the lane's ``FesomOceanConfig``; the other fields are
+    the run controls the FESOM lanes of ``run_omip_core2.py`` recorded in their
+    former hand-written manifest, so routing them through the canonical writer
+    drops none of that provenance.
+    """
+    runtime_config: object
+    lane: str
+    n_steps: int
+    dt_seconds: float
+    total_days: float
+    emp_freshwater: bool = False
+    dm2dc: bool = False
+    sw_rgb_chl: bool = False
+    prognostic_sea_ice: bool = False
+    sss_restore: bool = False
+    sss_restore_channel: str | None = None
+    runoff: bool = False
+    nemo_monthly_init: bool = False
+    woa_init: bool = False
+
+
 # Run-control fields the ocean YAML can drive, mapped to the
 # ``run_omip_core2.py`` argparse ``dest`` they set.  Used by
 # :func:`resolve_ocean_run_controls` so YAML ``time``/``output``/``grid``
