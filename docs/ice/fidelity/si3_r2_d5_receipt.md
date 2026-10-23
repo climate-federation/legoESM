@@ -13,7 +13,7 @@ This round executes rung **D5** of the SI3 sea-ice fidelity ladder (`docs/ice/fi
 * **Committed unit & gradient tests:** `tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:55-486`
 * **Evidence artifacts under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round2/`:**
   * `d5_platform_probe_cpu.json` SHA-256: `c91a4fa8eb4f905c6ca4e8c521200aa202dca29794e8b36b5b242144cbe7d7d9`
-  * `d5_platform_probe_gpu.json` SHA-256: `d80d0247d46a791b6558e6be83d5cc2348c04896ae39763e8a53d6dc5a361e18`
+  * `d5_platform_probe_gpu.json` SHA-256: `10e2df24563920c8b4eb0f0b4c31bb2584fb6d3d248cff3a8233f9efcaaff93c`
 
 ---
 
@@ -80,13 +80,37 @@ We added the selectable SI3 statement flag `_nemo_zdf_layer_reciprocals: bool = 
 | `kt = 5860` `POST_ZDF.e_i[0]` | `0x41af05f35b2c5d49` (`260241837.5866492`) | CPU: `765562252607` ULP (`8.538e-5`, `D5_PLATFORM_FLOOR`)<br>GPU: `0` ULP (`0.0`) | CPU: unchanged (`D5_PLATFORM_FLOOR`)<br>GPU: `0x41af05f35b2c5d49` (**`0` ULP, `0.0`**) |
 | `kt = 5867` `POST_ZDF.e_s[0]` (`h_s = 5e-324 m`, subnormal) | `0x419afe4be6272c4d` (`113218297.59641379`) | CPU: `214286246759502` ULP (`0.02820`, `D5_PLATFORM_FLOOR`)<br>GPU: `718` ULP (`9.442e-14`) | CPU: unchanged (`D5_PLATFORM_FLOOR`)<br>GPU: `0x419afe4be6272c4d` (**`0` ULP, `0.0`**) |
 
-Across all 26 subnormal ZDF-entry steps (`kt = 5842..5867`) on GPU, `POST_ZDF` over-bar rows drop from **`57` to `1`** (the single remaining row is `kt = 5857 POST_ZDF.e_i` at `65` ULPs, `norm_err = 2.3979871819044075e-15`, caused by a 2-ULP entry-bridge difference in `ENTRY.e_i[0]` from `(e_i * 3.0) / v_i` vs `(e_i / v_i) * 3.0`; when `_si3_zdf_bl99_step` is called with the exact `oracle_si3_zdf_inputs.bin` operand at `kt = 5857`, all `POST_ZDF` outputs are `0` ULPs). In the boundary gate (`tests/ocean/fidelity/test_nemo_si3thd_phase2_gate.py:208-219`), closing `kt = 5` and `kt = 6` `POST_ZDF` advances the first over-bar step from `kt = 5` (`kt5.POST_ZDF.e_s`) to `kt = 7` (`kt7.POST_DH.e_i`, `sweep_steps_examined = 7`).
+Across all 26 subnormal ZDF-entry steps (`kt = 5842..5867`) on GPU, `POST_ZDF` over-bar rows drop from **`58` to `1`** (the single remaining row is `kt = 5857 POST_ZDF.e_i` at `65` ULPs, `norm_err = 7.251983965966999e-15`, caused by a 2-ULP entry-bridge difference in `ENTRY.e_i[0]` from `(e_i * 3.0) / v_i` vs `(e_i / v_i) * 3.0`; when `_si3_zdf_bl99_step` is called with the exact `oracle_si3_zdf_inputs.bin` operand at `kt = 5857`, all `POST_ZDF` outputs are `0` ULPs), and all-stage over-bar rows in `kt = 5842..5867` drop from **`280` to `17`**. In the boundary gate (`tests/ocean/fidelity/test_nemo_si3thd_phase2_gate.py:208-219`), closing `kt = 5` and `kt = 6` `POST_ZDF` advances the first over-bar step from `kt = 5` (`kt5.POST_ZDF.e_s`) to `kt = 7` (`kt7.POST_DH.e_i`, `sweep_steps_examined = 7`).
 
 ---
 
 ## 4. Stage D: Full-Year (8,760-Step) C1D Exact-Entry Rescore
 
-`scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:329-618` re-scores all `8,760` steps (`621,960` stage-field rows) of `C1D_OMIP_L3` before (`_nemo_zdf_layer_reciprocals=False`) vs after (`_nemo_zdf_layer_reciprocals=True`) on the production CPU x64 path (`d5_platform_probe_cpu.json`):
+`scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:329-618` re-scores all `8,760` steps (`621,960` stage-field rows) of `C1D_OMIP_L3` before (`_nemo_zdf_layer_reciprocals=False`) vs after (`_nemo_zdf_layer_reciprocals=True`) on both GPU (`d5_platform_probe_gpu.json`, where subnormals are preserved) and CPU (`d5_platform_probe_cpu.json`, where `kt = 5842..5867` hit `D5_PLATFORM_FLOOR`):
+
+### GPU (`Tesla V100S-PCIE-32GB`, `SUBNORMAL_PRESERVED`) Full-Year Rescore
+
+| Stage | Over-bar rows before (`False`) | Over-bar rows after (`True`) | Net delta | Touched rows (`ulp_change > 0`) | Closed to `AT-BAR` | Opened to `DEBT` | Moved to `0` ULP vs oracle | Moved from `0` ULP vs oracle |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `ENTRY` | `0` | `0` | `0` | `0` | `0` | `0` | `0` | `0` |
+| `POST_ZDF` | `2,070` | `471` | **`-1,599`** | `9,932` | `1,646` | `47` | `6,474` | `498` |
+| `POST_DH` | `4,608` | `2,905` | **`-1,703`** | `9,463` | `1,776` | `73` | `5,920` | `557` |
+| `POST_TEMP1` | `4,608` | `2,905` | **`-1,703`** | `9,463` | `1,776` | `73` | `5,920` | `557` |
+| `POST_SAL` | `4,615` | `2,907` | **`-1,708`** | `9,540` | `1,782` | `74` | `5,964` | `564` |
+| `POST_TEMP2` | `4,615` | `2,907` | **`-1,708`** | `9,540` | `1,782` | `74` | `5,964` | `564` |
+| `POST_DO` | `7,256` | `5,340` | **`-1,916`** | `9,609` | `2,003` | `87` | `6,045` | `569` |
+| `EXIT` | `7,256` | `5,340` | **`-1,916`** | `9,609` | `2,003` | `87` | `6,045` | `569` |
+| **Total (`621,960` rows)** | **`35,028`** | **`22,775`** | **`-12,253`** | **`67,156`** (`6,314` steps) | **`12,768`** | **`515`** | **`42,332`** | **`3,878`** |
+
+On GPU (`67,156 + 554,804 == 621,960`), the `0.02510099530281747` subnormal-snow defect at `kt = 5860 POST_ZDF.e_s` is completely eliminated (`597` ULPs / `7.883635078992678e-14` before -> **`0` ULPs / `0.0`** after), and the maximum normalised error across the entire 8,760-step year is `2.5926465229707996e-08` (`kt = 4943 POST_DO.e_s`). On GPU touched rows:
+* `POST_ZDF.e_s` (`5,932` changed): `713` closed to `AT-BAR`, `3` opened, `3,163` moved to `0` ULP, `max_ulp: 869 -> 103`.
+* `POST_ZDF.t_su` (`3,027` changed): `530` closed to `AT-BAR`, `1` opened, `2,588` moved to `0` ULP, `max_ulp: 329 -> 39`.
+* `POST_ZDF.e_i` (`973` changed): `403` closed to `AT-BAR`, `43` opened, `723` moved to `0` ULP, `max_ulp: 1,636 -> 505`.
+* `POST_DH.h_s` / `POST_TEMP1.h_s` / `POST_SAL.h_s` / `POST_TEMP2.h_s` (`145` changed each): `36` closed to `AT-BAR`, `0` opened, `133` moved to `0` ULP, `max_ulp: 205,883 -> 55`.
+* `POST_DO.e_s` / `EXIT.e_s` (`5,177` changed each): `876` closed to `AT-BAR`, `38` opened, `3,123` moved to `0` ULP, `max_ulp: 202,506 -> 61`.
+* `POST_DO.v_s` / `EXIT.v_s` (`142` changed each): `34` closed to `AT-BAR`, `0` opened, `132` moved to `0` ULP, `max_ulp: 185,295 -> 49`.
+
+### CPU (`x86_64`, `D5_PLATFORM_FLOOR`) Full-Year Rescore
 
 | Stage | Over-bar rows before (`False`) | Over-bar rows after (`True`) | Net delta | Touched rows (`ulp_change > 0`) | Closed to `AT-BAR` | Opened to `DEBT` | Moved to `0` ULP vs oracle | Moved from `0` ULP vs oracle |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
