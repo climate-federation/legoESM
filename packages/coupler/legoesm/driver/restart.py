@@ -1244,8 +1244,9 @@ def build_run_manifest(
     runner_tag, patches
         The entry script's tag (the key into ``RUNNER_REPLAY_SPECS``) and the
         patch chain applied, recorded under ``[reproducibility]``.  When
-        ``LEGOESM_RUNNER_PATCHES`` (comma-separated list) is set, it replaces
-        the caller's patches.  ``LEGOESM_RUNNER_TAG`` is recorded separately
+        ``LEGOESM_RUNNER_PATCHES`` (comma-separated list) is set, its entries
+        are appended to the caller's patches (caller first, duplicates and
+        blank entries dropped).  ``LEGOESM_RUNNER_TAG`` is recorded separately
         as ``[reproducibility].orchestrator_tag``; ``runner_tag`` is never
         overridden, because replay and the one-run-per-directory check key
         on it.
@@ -1264,9 +1265,13 @@ def build_run_manifest(
     # keys the replay specs and the one-run-per-directory check, so it must
     # stay the entry script's tag.
     orchestrator_tag = os.environ.get("LEGOESM_RUNNER_TAG", "")
-    env_patches = os.environ.get("LEGOESM_RUNNER_PATCHES", "")
+    # Orchestrator patches are appended to the run's own (run first, deduped);
+    # blank entries are ignored, so a blank env var is a no-op.
+    env_patches = [p.strip() for p in
+                   os.environ.get("LEGOESM_RUNNER_PATCHES", "").split(",")
+                   if p.strip()]
     if env_patches:
-        patches = [p.strip() for p in env_patches.split(",") if p.strip()]
+        patches = list(dict.fromkeys([*(patches or []), *env_patches]))
 
     # Provenance of the IMPORTED package — the code that runs — not the CWD.
     # If the CWD is a legoesm checkout at a different HEAD (launcher cd-ed into

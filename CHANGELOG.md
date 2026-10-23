@@ -9,8 +9,8 @@ All notable changes to legoESM. Format roughly follows
 
 - **Orchestrator provenance env vars.** `build_run_manifest()` now reads
   `LEGOESM_RUNNER_TAG` into a new `reproducibility.orchestrator_tag` field and
-  `LEGOESM_RUNNER_PATCHES` (comma-separated list, replaces the caller's
-  patches), so a downstream orchestrator (e.g. legoESM-ocean-runners'
+  `LEGOESM_RUNNER_PATCHES` (comma-separated list, appended to the caller's
+  patches, duplicates and blanks dropped), so a downstream orchestrator (e.g. legoESM-ocean-runners'
   `run.sh`) can identify itself and its patch chain on every lane.
   `runner_tag` is left as the entry script's tag: replay specs and the
   one-run-per-directory check key on it. No schema bump: validation accepts
