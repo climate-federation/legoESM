@@ -60,6 +60,36 @@ Status: **STOPPED — ACQUISITION_NEEDED** (acquisition committed, preflight gre
   perturbation found): 9 passed.
 - Predictions A1-A4 frozen in `PREREG_nemo_testcases_l4_orca2_round326.md`.
 
+## Resume: operator review before any NEMO run (Argon RUN, codex HOLD)
+
+All seven codex findings verified as real, then fixed; NEMO still not run.
+
+- Same program: the build stays fresh (round 5's tree is not reused or
+  touched), then refused unless arch, cpp keys and bld.cfg match round 5's
+  (name substituted) and all 412 other preprocessed sources and 424 other
+  objects are byte-identical; zdftke may differ only by the patch's two
+  inserted lines, plus the new writer. Preflight shows today's cpp and
+  compiler reproduce round 5's zdftke.f90 and zdftke.o byte for byte; a -O2
+  compile and a planted icevar.f90 are refused. Unit test: seven planted
+  differences refused.
+- Admission now refuses on A2 (fr_i/taum), A3 (even-step hm_i) and A4
+  (all-zero or >= 20 m hm_i), each with a plant; nine gate plants in all.
+  Prereg amendment records it (predictions unchanged).
+- Log checks run on a committed verbatim excerpt of round 5's ocean.output,
+  pinned by that file's SHA-256; the new run's own echo is checked too.
+- EXIT trap removes only this invocation's scratch (beside the evidence,
+  never /tmp) and, on a failed `--run`, the target config and run directory
+  it created. The three /tmp directories from the first preflight removed.
+- makenemo's edit of the shared cfgs/work_cfgs.txt is stated in the README;
+  the run refuses if any line but the target's changed.
+- Refuses below 150 GB available memory (preflight and just before mpirun);
+  mpirun timeout 900 s (round 5: 13 s).
+- No-argument invocation is the read-only preflight; `--run` is explicit.
+- Removing the A2, A3 or object-comparison refusal makes its test fail
+  (shown, then restored).
+- Preflight re-run: rc 0, 11 plants fired, PASS_SAME_PROGRAM on the dry
+  tree, no scratch left (`gates/preflight2.log`). Gate test 22 passed.
+
 ## Round-314 audit row
 
 - nn_mxlice stays DIFFERS (b:D135); reason now names DECISION 154's pending
@@ -74,8 +104,13 @@ Status: **STOPPED — ACQUISITION_NEEDED** (acquisition committed, preflight gre
   offered for revert.
 - Also record fr_i, taum and the surface mask as cross-checks — UNASKED,
   instrument choice; offered for revert.
-- fr_i/taum mismatch and even-step identity are reported, not refused —
-  UNASKED, instrument choice; offered for revert.
+- fr_i/taum mismatch, even-step identity and A4 now refuse — ASKED
+  (operator, resume item 2).
+- Fresh build plus byte-level comparison, rather than reusing round 5's
+  build tree — ASKED (resume item 1 offered either; reuse would write into
+  round 5's evidence tree).
+- mpirun timeout 900 s — UNASKED value (operator asked for a timeout);
+  offered for change.
 - Audit reason text names D154 — text only, no configuration.
 
 ## OPEN
