@@ -86,7 +86,13 @@ Status: **STOPPED — ACQUISITION_NEEDED** (acquisition committed, preflight gre
 ## Gates (x64, CPU; logs `orca2_rounds/round326/gates/`)
 
 - New gate test 9 passed; audit test 9 passed; preflight rc 0.
-- Default gate, private-import ratchet and this receipt's citation gate:
-  see the final commit's log lines below.
+- Default gate (land.sh list), split for the 10-minute cap: citation-gate
+  test + private-import ratchet 23 passed (`default_gate_1.log`); TKE terms +
+  recipe 96 passed (`default_gate_2.log`); freshwater + stage face mask +
+  ORCA2 parallel receipt 20 passed (`default_gate_3.log`); prognostic
+  barotropic 8 passed (`default_gate_4.log`) = 147 passed, 0 failed.
+- Receipt citation gate on this receipt: PASS, 6 citations, 0 failures
+  (`citation_gate_receipt.log`); on the preregistration: PASS
+  (`citation_gate_prereg.log`).
 
 codex review: operator
