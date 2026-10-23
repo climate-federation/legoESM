@@ -136,8 +136,15 @@ numerical artifact.  No NEMO run occurred.
 
 ## Validation and review
 
-Validation results are recorded in the round-327 evidence directory.  No
-`packages/` file changed, so model trajectories cannot move.
+The per-receipt citation gate found `2` citations, `0` unmapped citations,
+`0` failures, and `0` map-audit failures.  Shifting either new citation by
+two lines made its plant exit nonzero.  The landing environment's default
+ORCA2 battery passed `147 / 147` in `1117.62 s`: receipt citation, private
+cross-import, TKE terms, ORCA2 recipe, freshwater closure, stage-face rank,
+prognostic barotropic state, and ORCA2 parallel-receipt tests.  Logs and JSON
+are under `orca2_rounds/round327/gates/`.  No `packages/` file changed, so
+model trajectories cannot move and the DINO month trajectory gate is not
+applicable.
 
 independent review: operator (Claude)
 
