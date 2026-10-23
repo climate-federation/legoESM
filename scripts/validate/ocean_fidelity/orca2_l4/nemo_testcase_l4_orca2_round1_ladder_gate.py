@@ -335,7 +335,7 @@ def _pair(text: str, name: str) -> tuple[float, float]:
 def record_initial_ice(record_run: Path):
     """SI3's initial ice exactly as the record's ocean.output resolved it.
 
-    ice_istate_init echoes &namini (iceistate.f90:510-530) and then zeroes the
+    ice_istate_init echoes &namini (iceistate.f90:518-530) and then zeroes the
     pond fraction/depth when ln_pnd = F (:551-553); ice_istate forms the pond
     concentration as rn_apd_ini * a_i (:324,335).  Refuses unless the run used
     the analytic initialisation (ln_iceini = T, nn_iceini_file = 0).

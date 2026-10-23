@@ -1783,7 +1783,7 @@ CITATION_MAP = {
     'ocean_pe_latlon_cgrid.py:4303': [('cd0=config.bottom_drag.bottom_drag_cd0,', 1)],
     # round 319: the cast-free cd0 argument; DECISION 142 at the card run length
     'ocean_model_latlon_cgrid.py:12390': [('cd0=_cfg_b.bottom_drag.bottom_drag_cd0,', 1)],
-    'nemo_testcase_recipe.py:2101': [('2920,  # DECISION 142 (user, 2026-10-20): one year, deliberate', 1)],
+    'nemo_testcase_recipe.py:2144': [('2920,  # DECISION 142 (user, 2026-10-20): one year, deliberate', 1)],
     # round 319 review: the background diffusivity floor against NEMO's avt statement
     'tke.py:2309': 'K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)',
     'tke.py:2165': 'pdlr = jnp.maximum(0.1, ri_cri / jnp.maximum(ri_cri, zri))',
@@ -2531,12 +2531,12 @@ CITATION_MAP = {
     'vertical.py:922': ('class NemoEENBarotropicOperands(NamedTuple):', 1),
     'vertical.py:685': ('def nemo_qco_resolved_mesh_operands(', 1),
     'ocean_model_latlon_cgrid.py:4960': ('_nemo_filter_alpha = config.barotropic.nemo_barotropic_filter_alpha', 1),
-    'nemo_testcase_recipe.py:4056': ('def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:', 1),
-    'nemo_testcase_recipe.py:3957': ('def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:', 1),
-    'nemo_testcase_recipe.py:4005': ('def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:', 1),
-    'nemo_testcase_recipe.py:4269': ('def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:', 1),
+    'nemo_testcase_recipe.py:4099': ('def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:', 1),
+    'nemo_testcase_recipe.py:4000': ('def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:', 1),
+    'nemo_testcase_recipe.py:4048': ('def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:', 1),
+    'nemo_testcase_recipe.py:4312': ('def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:', 1),
     'vertical.py:1127': ('nemo_e3w_source="mesh_reference", allow_single_level: bool = False,', 1),
-    'nemo_testcase_recipe.py:4119': ('allow_single_level=True,               # jpk = 2: one wet level', 1),
+    'nemo_testcase_recipe.py:4162': ('allow_single_level=True,               # jpk = 2: one wet level', 1),
     # --- GRIDLADDER round 1 (G1 survey) END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
@@ -2733,7 +2733,7 @@ CITATION_MAP = {
     'nemo_testcase_recipe.py:1428-1479': [
         'def apply_orca2_hand_alterations(temperature, salinity):',
         'is what NEMO executes.', 52],
-    'nemo_testcase_recipe.py:1762-1763': [
+    'nemo_testcase_recipe.py:1834-1835': [
         'temperature, salinity = build_orca2_initial_ts(',
         'temperature_path, salinity_path, tmask)', 2],
     'ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/dtatsd.f90:218-254': [
@@ -3936,12 +3936,12 @@ CITATION_MAP = {
     'OVERFLOW_OMIP_L1/EXP00/namelist_cfg:89': 'ln_dynvor_ens = .true.',
     'overflow_kt1_10/namelist_cfg:86': 'ln_dynadv_up3 = .true.',
     'overflow_kt1_10/namelist_cfg:92': 'ln_dynvor_ens = .true.',
-    'nemo_testcase_recipe.py:3430':
+    'nemo_testcase_recipe.py:3473':
         'if (cfg.momentum_advection != "vector_invariant"',
     'ocean_pe_latlon_cgrid.py:5598': ('if _mom_adv == "flux_form":', 2),
     'ocean_pe_latlon_cgrid.py:5616': (
         '_bc_horizontal_momentum_advection_flux_form(', 2),
-    'nemo_testcase_recipe.py:3433':
+    'nemo_testcase_recipe.py:3476':
         'requires ln_dynadv_vec=.true. with nn_dynkeg=0',
     # --- ORCA2 round 57: acquired OVERFLOW UP3 source-order walk ---
     'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:157-166': [
@@ -4333,9 +4333,14 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iceistate.f90:442-459': [
         'snwice_mass  (:,:) = tmask(:,:,1) * SUM',
         'ssh(:,:,Kbb) = ssh(:,:,Kbb) - zsshadj', 18],
-    'nemo_testcase_recipe.py:1762-1796': [
+    'nemo_testcase_recipe.py:1834-1839': [
         'temperature, salinity = build_orca2_initial_ts(',
-        'initial_ssh = np.where(surface_wet, -ssh_adjustment, 0.0)', 35],
+        'metric["e1t"] * metric["e2t"], ORCA2_DECK_INITIAL_ICE)', 6],
+    # --- ORCA2 round 329: the record's own SI3 initial ice (DECISION 157) ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iceistate.f90:324':
+        'zapnd_ini(:,:) = rn_apd_ini_n * zmsk(:,:) * zat_i_ini(:,:)',
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iceistate.f90:343-346': [
+        'IF ( .NOT.ln_pnd ) THEN', ('zhlid_ini(:,:) = 0._wp', 1), 4],
     # --- ORCA2 card round 4: returned surface record is root-rank only ---
     'ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo/stprk3.f90:396-400': [
         ('IF( .NOT.lwp ) RETURN', 5),
@@ -7288,7 +7293,7 @@ CITATION_MAP = {
     # inserted the initial-state helper above the THIRD anchor only, moving it
     # 1411 -> 1493; later card additions moved all three to their current
     # merged locations without changing the anchor text.
-    'nemo_testcase_recipe.py:380,636,3414': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    'nemo_testcase_recipe.py:380,636,3457': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',
