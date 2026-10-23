@@ -159,3 +159,20 @@ ice-mass SSH state at `nemo_testcase_recipe.py:1762-1796`.  The exact
 owner-output replay measured above confirms that this pre-step boundary owns
 the first independent excess; no certified ladder rung constructs that
 initial SI3 identity.
+
+## Operator amendments after independent review (Claude LAND, Argon LAND)
+
+- **Why the two initial ice masses differ — now CONFIRMED (was PLAUSIBLE).** The rung-10 record's NEMO run uses a
+  one-category, ponds-off initial ice (its ocean.output: jpl = 1 at :702, ln_pnd = F at :785, rn_hts_ini 0.2/0.1,
+  rn_hti_ini 2.5/1.0, rn_ati_ini 0.997/0.8 at :835-837, "sea level adjusted by -0.108914 m" at :855), while the
+  card hard-codes ORCA2's five-category, ponds-on reference values (concentration 0.9, thickness 2.0/1.0, snow 0.2,
+  ponds). Recomputing ati*(rho_i*h + rho_s*hs) on the card's ice mask gives -0.09343505872684969 m with the card's
+  values and -0.10891439254081828 m with the record's, bit-exact (Claude review). Density, area, mask and category
+  count are not the cause.
+- **Next target corrected.** At given-entry kt 1 stage 3, u (74,603 cells, max 9.07e-6 m/s) and v (77,790 cells,
+  2.46e-5 m/s) depart together with T (8,843 cells, 1.97e-7 K) and S (6,194 cells, 2.43e-8); "T first" above is only
+  the field-order tie-break. NEMO's stage 3 runs dyn_zdf (stprk3_stg.f90:506) before the tracer calls (:555 on), so
+  the next walk starts at dyn_zdf in source order.
+- **Controls.** The owner label and the SSH replay are partly tautological and the plants mutate only the
+  classifier's input; the result rests on the measured entry rows, a single unique signed offset, and the
+  all-and-only-wet partition (recomputed independently by both reviewers).
