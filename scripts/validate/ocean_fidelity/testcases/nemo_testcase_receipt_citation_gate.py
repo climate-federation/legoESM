@@ -149,6 +149,8 @@ FILES = {
         _ORCA2_COMPILED / "icedyn_adv_pra.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/icedyn_rdgrft.f90": (
         _ORCA2_COMPILED / "icedyn_rdgrft.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/icedyn_rhg_evp.f90": (
+        _ORCA2_COMPILED / "icedyn_rhg_evp.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/icethd.f90": _ORCA2_COMPILED / "icethd.f90",
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/icethd_sal.f90": (
         _ORCA2_COMPILED / "icethd_sal.f90"),
@@ -194,8 +196,12 @@ FILES = {
         REPO / "docs/ocean/fidelity/testcases/nemo_testcases_l3dyn_phase2_receipt.md"),
     "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase6_receipt.md": (
         REPO / "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase6_receipt.md"),
+    "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_scalarmath_v2_receipt.md": (
+        REPO / "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_scalarmath_v2_receipt.md"),
     "docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_phase2_manifest.md": (
         REPO / "docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_phase2_manifest.md"),
+    "src/SAS/sbcssm.F90": NEMO / "src/SAS/sbcssm.F90",
+    "src/OCE/SBC/sbcssm.F90": NEMO / "src/OCE/SBC/sbcssm.F90",
     # --- SI3 ladder round 1 survey/design END ---
     # ORCA2 round 311: G1b's build (P5) and G8's build (R31FULLENTRY_FIX1).
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90": NEMO / "cfgs/ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90",
@@ -1863,6 +1869,15 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceupdate.f90:145-216': [
         'zqsr = ( 1._wp - at_i_b(ji,jj) ) * qsr_oce(ji,jj)',
         'tn_ice(ji,jj,jl) = t_su(ji,jj,jl)', 72],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:269-283': [
+        '! Ice strength',
+        'zsshdyn(:,:) = ice_var_sshdyn( ssh_m, snwice_mass, snwice_mass_b)', 15],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icevar.f90:1075-1090': [
+        'IF( ln_ice_embd ) THEN',
+        ('ice_var_sshdyn(:,:) = pssh(:,:)', 2), 16],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:247-258': [
+        'IF( ln_ice_embd ) THEN',
+        'DEALLOCATE( zpice )', 12],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:606-629': [
         ('SELECT CASE( nn_mxlice )', 1), 'fr_i(ji,jj)   * zmaxice', 24],
     'packages/ice/legoesm/ice/state.py:33-75': [
@@ -1909,6 +1924,15 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icedyn_rdgrft.f90:341-384': [
         'DO WHILE( iterate_ridging > 0 .AND. iter < jp_itermax )',
         'iter = iter + 1', 44],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icedyn_rdgrft.f90:1077-1114': [
+        'CASE ( np_strh79 )',
+        ("CALL lbc_lnk( 'icedyn_rdgrft', strength, 'T', 1.0_wp )", 2), 38],
+    'src/SAS/sbcssm.F90:87-121': [
+        'IF ( l_sasread ) THEN',
+        'ssh_m(:,:) = sf_ssm_2d(jf_ssh)%fnow(:,:,1) * tmask(:,:,1)', 35],
+    'src/OCE/SBC/sbcssm.F90:128-173': [
+        'ELSEIF( MOD( kt - 2 , nn_fsbc ) == 0 ) THEN',
+        'frq_m(:,:) = frq_m(:,:) * zcoef', 46],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icethd_sal.f90:357-414': [
         ('IF( h_i_1d(ji) >= rn_sal_himin', 1), ('jc = jk', 1), 58],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icethd_pnd.f90:203-237': [
@@ -1992,6 +2016,12 @@ CITATION_MAP = {
     'docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase6_receipt.md:180-208': [
         '## Full-year exact-entry result',
         'NEMO-exactly-zero rows.', 29],
+    'docs/ocean/fidelity/testcases/nemo_testcases_l3thd_scalarmath_v2_receipt.md:30-36': [
+        'Rung 3.5b remains **AT-BAR, not bit-identical**.',
+        'disclosed at bar.', 7],
+    'docs/ocean/fidelity/testcases/nemo_testcases_l3thd_scalarmath_v2_receipt.md:30-43': [
+        'Rung 3.5b remains **AT-BAR, not bit-identical**.',
+        'not accepted or silently compared here.', 14],
     'docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_phase2_manifest.md:136-143': [
         '## Phase-2c icebergs-off VARIANT handoff', 'labelled `VARIANT`.', 8],
     # --- SI3 ladder round 1 survey/design END ---
@@ -8736,7 +8766,7 @@ UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
 _NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm)"
          r"|[A-Za-z0-9_./]*(?:namelist_cfg|namelist_ref|namelist_ice_cfg|namelist_ice_ref|ocean\.output)"
          r"|sette/(?:input_ORCA2_SAS_ICE\.cfg|sette_fetch_inputs\.sh)"
-         r"|docs/ocean/fidelity/testcases/(?:nemo_testcases_l3dyn_phase2_receipt|nemo_testcases_l3thd_phase6_receipt|nemo_testcases_l4_orca2_phase2_manifest)\.md")
+         r"|docs/ocean/fidelity/testcases/(?:nemo_testcases_l3dyn_phase2_receipt|nemo_testcases_l3thd_phase6_receipt|nemo_testcases_l3thd_scalarmath_v2_receipt|nemo_testcases_l4_orca2_phase2_manifest)\.md")
 _SPAN = re.compile(r"`([^`\n]+)`")
 _FULL = re.compile(rf"^(?P<f>{_NAME}):(?P<l>\d[\d,\-]*)$")
 _ONLY = re.compile(rf"^(?P<f>{_NAME})$")
