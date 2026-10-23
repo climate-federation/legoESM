@@ -1244,10 +1244,11 @@ def build_run_manifest(
     runner_tag, patches
         Free-form downstream-orchestrator identity and the patch chain it
         applied, recorded under ``[reproducibility]``.  When the env vars
-        ``LEGOESM_RUNNER_TAG`` / ``LEGOESM_RUNNER_PATCHES`` (comma-separated
-        list) are set, they take precedence over the caller's values: the
-        orchestrator sits above the entry-point script, and the script
-        identity stays recorded in ``[run].command_line``.
+        ``LEGOESM_RUNNER_PATCHES`` (comma-separated list) is set, it replaces
+        the caller's patches.  ``LEGOESM_RUNNER_TAG`` is recorded separately
+        as ``[reproducibility].orchestrator_tag``; ``runner_tag`` is never
+        overridden, because replay and the one-run-per-directory check key
+        on it.
     state_digest
         Filled after N steps by the reproduce/checkpoint path; ``None`` at start.
     config_kind
@@ -1259,12 +1260,10 @@ def build_run_manifest(
     kind = config_kind or detect_config_kind(config)
 
     # Downstream orchestrators (e.g. legoESM-ocean-runners' run.sh) identify
-    # themselves via env vars. An explicitly-set value wins over the caller's
-    # per-script defaults: the orchestrator sits above the entry script, and
-    # the script identity remains in [run].command_line.
-    env_runner_tag = os.environ.get("LEGOESM_RUNNER_TAG", "")
-    if env_runner_tag:
-        runner_tag = env_runner_tag
+    # themselves via env vars.  Their tag goes in its own field: runner_tag
+    # keys the replay specs and the one-run-per-directory check, so it must
+    # stay the entry script's tag.
+    orchestrator_tag = os.environ.get("LEGOESM_RUNNER_TAG", "")
     env_patches = os.environ.get("LEGOESM_RUNNER_PATCHES", "")
     if env_patches:
         patches = [p.strip() for p in env_patches.split(",") if p.strip()]
@@ -1298,6 +1297,7 @@ def build_run_manifest(
         "legoESM": legoesm_section,
         "reproducibility": {
             "runner_tag": runner_tag,
+            "orchestrator_tag": orchestrator_tag,
             "python_version": platform.python_version(),
             "jax_version": _get_jax_version(),
             "jax_x64_enabled": _get_jax_x64(),

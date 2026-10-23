@@ -8,12 +8,13 @@ All notable changes to legoESM. Format roughly follows
 ### Added
 
 - **Orchestrator provenance env vars.** `build_run_manifest()` now reads
-  `LEGOESM_RUNNER_TAG` / `LEGOESM_RUNNER_PATCHES` (comma-separated list);
-  when set, they take precedence over the caller's per-script defaults, so a
-  downstream orchestrator (e.g. legoESM-ocean-runners' `run.sh`) can identify
-  itself and its patch chain on every lane — including the atmosphere driver
-  path, which passes neither field. No schema change: populating the optional
-  `reproducibility.runner_tag` / `patches` fields is not a bump.
+  `LEGOESM_RUNNER_TAG` into a new `reproducibility.orchestrator_tag` field and
+  `LEGOESM_RUNNER_PATCHES` (comma-separated list, replaces the caller's
+  patches), so a downstream orchestrator (e.g. legoESM-ocean-runners'
+  `run.sh`) can identify itself and its patch chain on every lane.
+  `runner_tag` is left as the entry script's tag: replay specs and the
+  one-run-per-directory check key on it. No schema bump: validation accepts
+  the added optional key.
 - **`run_omip_core2.py` short-run flags.** `--days` runs for a day
   budget instead of the standard `--years` / `--smoke` budget (short tests
   that are not the 10-day smoke), `--synthetic-forcing` explicitly opts in

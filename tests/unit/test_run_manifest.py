@@ -79,9 +79,8 @@ def test_optional_provenance_fields_are_threaded() -> None:
 
 
 def test_env_var_runner_provenance_overrides_caller_defaults(monkeypatch) -> None:
-    """Orchestrator env vars (LEGOESM_RUNNER_TAG/_PATCHES) win over the
-    caller's per-script defaults — the orchestrator sits above the entry
-    script, whose identity stays in [run].command_line."""
+    """LEGOESM_RUNNER_PATCHES replaces the caller's patches; LEGOESM_RUNNER_TAG
+    lands in orchestrator_tag and leaves the replay-keyed runner_tag alone."""
     monkeypatch.setenv(
         "LEGOESM_RUNNER_TAG",
         "ocean-runners@legoesm-294495454a29 template=3d_idealized/baroclinic_gyre",
@@ -93,7 +92,8 @@ def test_env_var_runner_provenance_overrides_caller_defaults(monkeypatch) -> Non
     m = build_run_manifest(
         _sample_config(), runner_tag="run_omip_core2", patches=["local.patch"]
     )
-    assert m["reproducibility"]["runner_tag"] == (
+    assert m["reproducibility"]["runner_tag"] == "run_omip_core2"
+    assert m["reproducibility"]["orchestrator_tag"] == (
         "ocean-runners@legoesm-294495454a29 template=3d_idealized/baroclinic_gyre"
     )
     # Comma list parsed, whitespace stripped, empty entries dropped.
@@ -112,6 +112,7 @@ def test_env_var_runner_provenance_absent_keeps_caller_values(monkeypatch) -> No
         _sample_config(), runner_tag="run_omip_core2", patches=["p.patch"]
     )
     assert m["reproducibility"]["runner_tag"] == "run_omip_core2"
+    assert m["reproducibility"]["orchestrator_tag"] == ""
     assert m["reproducibility"]["patches"] == ["p.patch"]
 
 
