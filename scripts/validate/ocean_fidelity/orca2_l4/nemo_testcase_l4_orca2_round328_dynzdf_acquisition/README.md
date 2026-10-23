@@ -15,10 +15,14 @@ scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_
 ```
 
 Only the operator may acquire it, using `--run`. The script pins the parent
-binary and `dynzdf.F90`, compiles the patched units, enforces the 150-GB memory
-rule, proves the patch is additions-only, checks the D150/vector/split-explicit
-selectors, compares every inherited frame and trajectory product byte for
-byte, and requires all eight admission plants to fire. Evidence is written to
+binary, `dynzdf.F90`, and the record build's own `stprk3_stg.F90`; compiles the
+patched units and an exact-layout gfortran fixture; enforces the 150-GB memory
+rule; proves both patches are additions-only; checks the
+D150/vector/split-explicit/ZAD selectors; compares every inherited deterministic
+frame and terminal restart byte for byte; and requires all nine admission
+plants to fire.  Its same-program gate compares both observer units and uses
+round 326's config-root-normalised ELF comparison for every other object.
+Evidence is written to
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round328/acquisition/orca1ice_dynzdf_kt1_np2`.
 
 After interruption, `--admit-existing` performs only the immutable passivity

@@ -1,0 +1,12 @@
+# Verbatim selected lines from the real admitted NEMO round-326 record:
+# /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/acquisition/orca1ice_tke_hmi_10step_np2/ocean.output
+# Complete source SHA-256: b1e6c021d79013f3303582034350574fae2f0b1e68c976caf3af4061ac51a80f
+# Source lines: 234, 235, 259, 983, 1112, 1113, 1330, 1378.
+       number of the first time step   nn_it000        =            1
+       number of the last time step    nn_itend        =           10
+       Tiling (T) or not (F)                ln_tile    =  F
+          Courant number targeted application   ln_zad_Aimp =  F
+       implicit friction                         ln_drgimp   =  T
+       implicit ice-ocean drag                   ln_drgice_imp  = T
+       Vector form: 2nd order centered scheme           ln_dynadv_vec  =  T
+       Free surface with time splitting       ln_dynspg_ts  =  T

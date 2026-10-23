@@ -14,7 +14,7 @@
           ztrdv(:,:,:) = pvv(T2D(0),:,Krhs)
        ENDIF
        !
-+      CALL r328_begin(kt,Kbb,Kmm,Krhs,Kaa,puu,pvv,avm,wi,uu_b(:,:,Kaa), &
++      CALL r328_begin(kt,Kbb,Kmm,Krhs,Kaa,puu,pvv,avm,uu_b(:,:,Kaa), &
 +         & vv_b(:,:,Kaa),rCdU_bot,rCdU_top,utauU,vtauV)
        !                                               ! ================= !
        DO_1Dj( 0, 0 )                                  !  i-k slices loop  !
