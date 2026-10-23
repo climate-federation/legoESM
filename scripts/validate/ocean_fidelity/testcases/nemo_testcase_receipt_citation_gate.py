@@ -4463,9 +4463,15 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:187-349': [
         ('!                    !**  tridiagonal matrix construction  **!    diagonal (zwd), lower (zwi), upper (zws)', 1),
         'puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - zws(ji,jk) * puu(ji,jj,jk+1,Kaa) ) / zwd(ji,jk)', 163],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:193,195': [
+        ('(e3w_1d(jk  ) *(1._wp+r3u(ji,jj,Kmm)))', 1),
+        ('(e3w_1d(jk+1) *(1._wp+r3u(ji,jj,Kmm)))', 1), 2],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:356-517': [
         ('!                    !**  tridiagonal matrix construction  **!    diagonal (zwd), lower (zwi), upper (zws)', 2),
         'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - zws(ji,jk) * pvv(ji,jj,jk+1,Kaa) ) / zwd(ji,jk)', 162],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:362,364': [
+        ('(e3w_1d(jk  ) *(1._wp+r3v(ji,jj,Kmm)))', 1),
+        ('(e3w_1d(jk+1) *(1._wp+r3v(ji,jj,Kmm)))', 1), 2],
     'ocean_model_latlon_cgrid.py:14876-14885': [
         'u_new = implicit_vertical_diffusion_ocean_momentum_dispatch(',
         'implicit_w=nemo_aimp_momentum_w_v)', 10],
