@@ -58,3 +58,22 @@ def test_comparison_card_selects_only_the_top_drag(vortex):
     assert got._replace(recipe=card.recipe) == card
     with pytest.raises(ladder.GateError, match="DECISION 133"):
         ladder.comparison_card(got)
+
+
+def test_round324_arms_move_only_rung10_drag(vortex):
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round1_ladder_gate as ladder,
+        nemo_testcase_l4_orca2_round324_top_drag_d122_gate as gate,
+    )
+    card = vortex[0]
+    assert gate.selected_card(card, arm="drag", rung="rung10") == \
+        ladder.comparison_card(card)
+    for rung in gate.RUNGS:
+        assert gate.selected_card(card, arm="control", rung=rung) is card
+        if rung != "rung10":
+            assert gate.selected_card(card, arm="drag", rung=rung) is card
+    with pytest.raises(gate.GateError):
+        gate.selected_card(card, arm="D122", rung="rung10")
+    with pytest.raises(gate.GateError, match="shipped card selects"):
+        gate.selected_card(ladder.comparison_card(card), arm="control",
+                           rung="rung10")
