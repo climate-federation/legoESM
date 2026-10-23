@@ -147,6 +147,12 @@ def _run_turb(fn, cfg, d):
     )
 
 
+def _gwd_kw(gwd, d):
+    """CAM6 gw_oro (``mcfarlane``) needs the reference interface pressures
+    (CAM pref_edge); these test columns use their own first column."""
+    return {"p_ref_half": d["p_half"][0]} if gwd is mcfarlane_gwd else {}
+
+
 # ===========================================================================
 # SIGN
 # ===========================================================================
@@ -174,12 +180,19 @@ def test_sign_gwd_momentum_sink(gwd, mk):
     out = gwd(
         d["u"], d["v"], d["T"], d["p_full"], d["p_half"],
         d["z_full"], d["z_half"], d["rho"], d["lat"], DT, mk(),
+        **_gwd_kw(gwd, d),
     )
     # Drag opposes the wind: du/dt * u <= 0 everywhere (strict momentum sink).
     assert jnp.max(out.du_dt * d["u"]) <= 1e-9
     assert jnp.max(out.dv_dt * d["v"]) <= 1e-9
-    # Frictional heating is non-negative (KE -> heat).
-    assert jnp.min(out.dT_dt) >= -1e-12
+    # Frictional heating is non-negative (KE -> heat).  CAM6 gw_oro adds the
+    # zero-column-sum eddy diffusion of dse, so for mcfarlane only the
+    # column-integrated heating carries a sign.
+    if gwd is mcfarlane_gwd:
+        dpg = (d["p_half"][:, 1:] - d["p_half"][:, :-1]) / constants.g
+        assert jnp.min(jnp.sum(dpg * out.dT_dt, axis=1)) >= -1e-12
+    else:
+        assert jnp.min(out.dT_dt) >= -1e-12
     # Column dissipation is positive-definite.
     assert jnp.all(out.eps_gwd >= -1e-9)
     # And the wave actually broke (non-trivial test).
@@ -199,6 +212,22 @@ def test_conservation_closed_column(name):
     # Surface fluxes must be ~zero (closed column precondition).
     assert jnp.allclose(out.shflx, 0.0, atol=1e-8)
     assert jnp.allclose(out.lhflx, 0.0, atol=1e-8)
+
+    if name == "holtslag_boville":
+        # CAM compute_vdiff invariants (oracle-ported): layer mass dp/g;
+        # dry static energy + KE (frictional heating returns the KE removed),
+        # water and momentum.
+        m = (d["p_half"][:, 1:] - d["p_half"][:, :-1]) / constants.g
+        u1, v1 = d["u"] + DT * out.du_dt, d["v"] + DT * out.dv_dt
+        dke = 0.5 * (u1 ** 2 + v1 ** 2 - d["u"] ** 2 - d["v"] ** 2)
+        e0 = jnp.sum(m * constants.c_pd * d["T"], axis=1)
+        de = jnp.sum(m * (constants.c_pd * DT * out.dT_dt + dke), axis=1) / e0
+        assert jnp.max(jnp.abs(de)) < 1e-12, f"{name}: DSE+KE not conserved"
+        dq = jnp.sum(m * out.dq_v_dt, axis=1) * DT / jnp.sum(m * d["q_v"], axis=1)
+        assert jnp.max(jnp.abs(dq)) < 1e-12, f"{name}: water not conserved"
+        du = jnp.sum(m * out.du_dt, axis=1) * DT
+        assert jnp.max(jnp.abs(du)) < 1e-9, f"{name}: momentum not conserved"
+        return
 
     exner = (d["p_full"] / constants.p_ref) ** constants.kappa
     rdz = d["rho"] * jnp.abs(d["z_half"][:, :-1] - d["z_half"][:, 1:])
@@ -252,7 +281,16 @@ def test_conservation_gwd_ke_to_heat(gwd, mk):
     out = gwd(
         d["u"], d["v"], d["T"], d["p_full"], d["p_half"],
         d["z_full"], d["z_half"], d["rho"], d["lat"], DT, mk(),
+        **_gwd_kw(gwd, d),
     )
+    if gwd is mcfarlane_gwd:
+        # CAM6 closes the column in pressure mass (dp/g): the KE removed
+        # returns as dttke and the dse eddy diffusion sums to zero there.
+        dpg = (d["p_half"][:, 1:] - d["p_half"][:, :-1]) / constants.g
+        heat = jnp.sum(dpg * constants.c_pd * out.dT_dt, axis=1)
+        ke = -jnp.sum(dpg * (d["u"] * out.du_dt + d["v"] * out.dv_dt), axis=1)
+        np.testing.assert_allclose(np.array(heat), np.array(ke), rtol=1e-8, atol=1e-10)
+        return
     dz = jnp.abs(d["z_half"][:, :-1] - d["z_half"][:, 1:])
     heat_int = jnp.sum(d["rho"] * constants.c_pd * out.dT_dt * dz, axis=1)
     np.testing.assert_allclose(np.array(heat_int), np.array(out.eps_gwd), rtol=1e-8, atol=1e-10)
@@ -316,7 +354,7 @@ def test_diff_gwd_params_finite_match_fd(gwd, mk, params):
             out = gwd(
                 d["u"], d["v"], d["T"], d["p_full"], d["p_half"],
                 d["z_full"], d["z_half"], d["rho"], d["lat"], DT,
-                cfg._replace(**{param: pv}),
+                cfg._replace(**{param: pv}), **_gwd_kw(gwd, d),
             )
             return jnp.sum(out.du_dt ** 2 + out.dT_dt ** 2)
         return loss
@@ -352,7 +390,7 @@ def test_jit_vmap_consistency_turb(name):
 
 
 def test_gwd_no_nan_in_reversed_flow():
-    """McFarlane hard U_proj>0 mask must not leak NaN gradients at reversal."""
+    """McFarlane must not leak NaN gradients at a critical level (reversal)."""
     d = _base_column(2, 40, theta_top=500.0, theta_sfc=290.0, u_top=-10.0, u_sfc=25.0)
     d["lat"] = jnp.zeros(2)
 
@@ -360,12 +398,13 @@ def test_gwd_no_nan_in_reversed_flow():
         out = mcfarlane_gwd(
             d["u"], d["v"], d["T"], d["p_full"], d["p_half"],
             d["z_full"], d["z_half"], d["rho"], d["lat"], DT,
-            McFarlaneConfig(G_0=g0),
+            McFarlaneConfig(G_0=g0), p_ref_half=d["p_half"][0],
         )
         return jnp.sum(out.du_dt ** 2)
     out = mcfarlane_gwd(
         d["u"], d["v"], d["T"], d["p_full"], d["p_half"],
         d["z_full"], d["z_half"], d["rho"], d["lat"], DT, McFarlaneConfig(),
+        p_ref_half=d["p_half"][0],
     )
     assert not bool(jnp.any(jnp.isnan(out.du_dt)))
     g = jax.grad(loss)(0.5)

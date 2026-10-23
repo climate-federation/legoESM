@@ -297,7 +297,7 @@ def _parse_args():
              "which restores the velocity null mode. 'een_metric' = METRIC-"
              "COMPLETE EEN (folds NEMO's e1v/r1_e1u + e2u/r1_e2v scale factors "
              "into ffu/ffv exactly, matching NEMO dyn_cor_2D) — the more NEMO-"
-             "faithful choice (node 16; DINO default). NB it is a ~1% high-lat "
+             "faithful choice (node 16; DINO default). NB it is a ~1%% high-lat "
              "correction and does NOT cure the |lat|~68deg 2dx eta runaway.",
     )
     p.add_argument(
@@ -969,6 +969,18 @@ def main():
 
         # --- Restart from a previous snapshot (lat-lon only) ---
         if args.restart_from is not None:
+            # Continuing from a snapshot needs the code that wrote it: its
+            # run's manifest sits in <output-dir>/, one level above
+            # snapshots/ (or beside a copied snapshot).  Before the load.
+            from legoesm.driver.restart import (
+                collective_version_drift_gate,
+                restart_version_drift,
+            )
+            _rs = Path(args.restart_from)
+            collective_version_drift_gate(
+                lambda: restart_version_drift(
+                    _rs, [_rs.parent, _rs.parent.parent]),
+                f"restart {_rs}")
             restart = _load_restart(args.restart_from)
             state = _apply_restart_arrays(state, restart, grid_kind)
             print(f"[restart] Applied restart at "
@@ -982,6 +994,28 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     snapshot_dir = args.output_dir / "snapshots"
     snapshot_dir.mkdir(exist_ok=True)
+    # Run manifest (every process calls it; a failed write aborts the run),
+    # before the run metadata, so a refused continuation leaves both as
+    # they were.
+    from legoesm.driver.restart import (
+        dataset_provenance_entry,
+        record_final_state_digest,
+        write_run_manifest_on_root,
+    )
+    manifest_path = write_run_manifest_on_root(
+        args.output_dir,
+        {"runner": "run_dino", "dino_config": dataclasses.asdict(cfg),
+         "runtime_config": model.config, "grid_kind": grid_kind,
+         "n_levels": int(z.n_levels), "dt_seconds": float(dt),
+         "cli_args": vars(args)},
+        config_kind="ocean",
+        runner_tag="run_dino",
+        rng_seeds={"master": int(args.seed)},
+        dataset_provenance=(
+            [dataset_provenance_entry(args.restart_from,
+                                      dataset_id="restart_from")]
+            if args.restart_from is not None else []),
+    )
     _save_run_metadata(args, cfg, grid, z, args.output_dir, grid_kind)
 
     # Time loop
@@ -1176,6 +1210,10 @@ def main():
     print(f"  SYPD:         {sypd:.1f}")
     print(f"  Mcells/s:     {mcells_s:.1f}")
     print(f"Done. Wall time: {wall:.1f}s. Snapshots: {snapshot_idx + 1}")
+    # Sharded multicontroller state is not host-addressable: digest only the
+    # single-controller run.
+    if manifest_path is not None and not args.multicontroller:
+        record_final_state_digest(manifest_path, state)
 
     _write_timing_jsonl(args, {
         "script": "run_dino",

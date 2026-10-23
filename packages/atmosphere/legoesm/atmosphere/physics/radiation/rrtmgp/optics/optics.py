@@ -295,6 +295,8 @@ class RRTMOptics(optics_base.OpticsScheme):
         r_eff_liq,
         r_eff_ice,
         ibnd=ibnd,
+        # LW clouds are absorption-only (RTE-RRTMGP 1scl / CAM6 RRTMG LW).
+        absorption_only=is_lw,
     )
 
   def cloud_properties_fn(

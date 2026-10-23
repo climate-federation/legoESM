@@ -723,6 +723,10 @@ class DINOConfig:
     # traldf_iso zA11/zA22 face thickness. The generic default retains the
     # historical T-point Jacobian; the two NEMO cards consume live QCO faces.
     gm_redi_flux_face_thickness_evaluation: str = "tpoint_jacobian"
+    # traldf_iso final T-point divisor. The generic default preserves the
+    # reference/Jacobian thickness; the two NEMO cards select live e3t(Kmm)
+    # independently of their horizontal face-thickness selection.
+    gm_redi_divisor_thickness_evaluation: str = "reference_jacobian"
     # Static Redi coefficient arithmetic. Generic cards preserve the grouped
     # equatorial-kappa*cos(lat) path; the two NEMO cards use ldf_c2d literally.
     gm_redi_horizontal_evaluation: str = "cosine_scaled"
@@ -864,8 +868,12 @@ class DINOConfig:
     rigid_lid_dt_mom_ratio: float = 9.0
     # Barotropic averaging filter (explicit_substep only): "cosine"
     # (legacy) | "power_law" | "box" | "nemo_boxcar_centred" (dynspg_ts
-    # ln_bt_fw=F + nn_bt_flt=1 — the DINO namelist selection).
+    # ln_bt_fw=F + nn_bt_flt=2 — the DINO namelist selection).
     barotropic_time_filter: str = "cosine"
+    # NEMO namdyn_spg rn_bt_alpha.  The NEMO DINO cards state the deck's 0.0
+    # explicitly even though nn_bt_flt=2 takes the hard-coded coefficient arm.
+    # None is an unset sentinel, never a physical fallback.
+    nemo_barotropic_filter_alpha: float | None = None
     # In-substep barotropic Coriolis (node 16): "avg" (legacy 4-pt average,
     # which annihilates the 2Δx checkerboard -> spurious deep-equatorial jet)
     # | "een" (NEMO dyn_spg_ts::dyn_cor_2D enstrophy-conserving EEN
@@ -1423,6 +1431,7 @@ DINO_RECIPES: dict[str, dict] = {
         "gm_redi_slope_metric_evaluation": "nemo_reciprocal",
         "gm_redi_slope_face_thickness_evaluation": "nemo_qco_live",
         "gm_redi_flux_face_thickness_evaluation": "nemo_qco_live",
+        "gm_redi_divisor_thickness_evaluation": "nemo_qco_live",
         "gm_redi_horizontal_evaluation": "nemo_metric_literal",
         "gm_redi_vertical_skew_evaluation": "nemo_literal",
         "gm_redi_a33_evaluation": "nemo_literal",
@@ -1629,6 +1638,7 @@ DINO_RECIPES: dict[str, dict] = {
         "nemo_prognostic_barotropic_state": False,
         "barotropic_solver": "explicit_substep",
         "barotropic_time_filter": "nemo_boxcar_centred",
+        "nemo_barotropic_filter_alpha": 0.0,
         # namdyn_vor: ln_dynvor_een — enstrophy-conserving EEN barotropic
         # Coriolis (node 16; cures the deep-equatorial jet velocity null mode).
         # "een_metric" = METRIC-COMPLETE: folds NEMO's e1v/r1_e1u + e2u/r1_e2v
@@ -3668,6 +3678,12 @@ def dino_lat_lon_model_config(
             "unknown DINOConfig.gm_redi_flux_face_thickness_evaluation "
             f"{cfg.gm_redi_flux_face_thickness_evaluation!r}; expected "
             "'tpoint_jacobian' or 'nemo_qco_live'")
+    if cfg.gm_redi_divisor_thickness_evaluation not in (
+            "reference_jacobian", "nemo_qco_live"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_divisor_thickness_evaluation "
+            f"{cfg.gm_redi_divisor_thickness_evaluation!r}; expected "
+            "'reference_jacobian' or 'nemo_qco_live'")
     if cfg.gm_redi_horizontal_evaluation not in (
             "cosine_scaled", "nemo_metric_literal"):
         raise ValueError(
@@ -3787,6 +3803,8 @@ def dino_lat_lon_model_config(
                 cfg.gm_redi_slope_face_thickness_evaluation),
             redi_flux_face_thickness_evaluation=(
                 cfg.gm_redi_flux_face_thickness_evaluation),
+            redi_divisor_thickness_evaluation=(
+                cfg.gm_redi_divisor_thickness_evaluation),
             kappa_redi_horizontal_evaluation=(
                 cfg.gm_redi_horizontal_evaluation),
             redi_vertical_skew_evaluation=(
@@ -3837,6 +3855,8 @@ def dino_lat_lon_model_config(
                 cfg.gm_redi_slope_face_thickness_evaluation),
             redi_flux_face_thickness_evaluation=(
                 cfg.gm_redi_flux_face_thickness_evaluation),
+            redi_divisor_thickness_evaluation=(
+                cfg.gm_redi_divisor_thickness_evaluation),
             redi_vertical_skew_evaluation=(
                 cfg.gm_redi_vertical_skew_evaluation),
             redi_a33_evaluation=cfg.gm_redi_a33_evaluation,
@@ -3902,6 +3922,8 @@ def dino_lat_lon_model_config(
                         cfg.gm_redi_slope_face_thickness_evaluation),
                     redi_flux_face_thickness_evaluation=(
                         cfg.gm_redi_flux_face_thickness_evaluation),
+                    redi_divisor_thickness_evaluation=(
+                        cfg.gm_redi_divisor_thickness_evaluation),
                     kappa_redi_horizontal_evaluation=(
                         cfg.gm_redi_horizontal_evaluation),
                     redi_vertical_skew_evaluation=(
@@ -4065,6 +4087,7 @@ def dino_lat_lon_model_config(
         barotropic_solver=cfg.barotropic_solver,
         barotropic_implicit_theta_eta=cfg.barotropic_implicit_theta_eta,
         barotropic_time_filter=cfg.barotropic_time_filter,
+        nemo_barotropic_filter_alpha=cfg.nemo_barotropic_filter_alpha,
         barotropic_coriolis=cfg.barotropic_coriolis,
         barotropic_coriolis_split=cfg.barotropic_coriolis_split,
         # BarotropicConfig fields (#1226; see the DINOConfig docstrings).

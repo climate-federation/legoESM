@@ -4868,6 +4868,25 @@ def _load_restart(restart_path, template_state, grid_type=None,
 # Time loop
 # ===========================================================================
 
+def _final_digest_trees(state, jra55_state) -> list:
+    """The final prognostic state the run manifest's digest covers: the ocean,
+    plus the sea ice when the run carries it (``_run_omip_loop`` leaves it in
+    ``jra55_state["ice_state_final"]``).  An ocean-only run's digest is
+    unchanged."""
+    ice = (jra55_state or {}).get("ice_state_final")
+    return [state] if ice is None else [state, ice]
+
+
+def _gather_final_ice(jra55_state, gather_ice) -> None:
+    """Gather the final sea ice in place for rank 0's digest, as the ocean
+    state is (a collective: call on every process; ice presence is the same
+    on all of them)."""
+    if (gather_ice is not None and jra55_state is not None
+            and jra55_state.get("ice_state_final") is not None):
+        jra55_state["ice_state_final"] = gather_ice(
+            jra55_state["ice_state_final"])
+
+
 def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                    diag_every, label="",
                    restoring_targets=None, restoring_tau_s=None,
@@ -5370,6 +5389,11 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             jax.block_until_ready(state.T.data)
         wall = time.time() - t0
         ok = not blown_up and _check_finite(state, grid_type)
+        if ice_state is not None:
+            # Final prognostic sea ice (only this block-scan path carries it)
+            # for the caller's run-manifest digest; the 5-tuple return is a
+            # pinned contract, so it travels in jra55_state.
+            jra55_state["ice_state_final"] = ice_state
         return state, diag, wall, ok, blowup_info
     # --------------------------------------------------------------------
 
@@ -6552,6 +6576,17 @@ def run_omip_single(grid_type: str, args) -> dict:
             and model._tke_prognostic_active():
         state = model.seed_scan_carry(state, dt)
     if args.restart is not None:
+        # Continuing from a restart needs the code that wrote it: its run's
+        # manifest sits in <output>/<grid>/<res>/, one level above restarts/
+        # (or beside a copied restart).  Every process, before the load.
+        from legoesm.driver.restart import (
+            collective_version_drift_gate,
+            restart_version_drift,
+        )
+        _rs = Path(args.restart)
+        collective_version_drift_gate(
+            lambda: restart_version_drift(_rs, [_rs.parent, _rs.parent.parent]),
+            f"restart {_rs}")
         _state_built = state
         state, restart_day, restart_step = _load_restart(
             args.restart, state, grid_type=grid_type,
@@ -6735,6 +6770,51 @@ def run_omip_single(grid_type: str, args) -> dict:
         print(f"  Config saved: {config_path}")
     except Exception as e:
         print(f"  Warning: could not save config: {e}")
+
+    # Run manifest: the resolved runtime config + run controls, hashed and
+    # recorded for `legoesm reproduce`.  Every process calls it; a failed write
+    # aborts the run.  Input paths are the explicit flags (defaulted paths
+    # resolved inside loaders are not recorded here).
+    from legoesm.driver.restart import (
+        dataset_provenance_entry,
+        record_final_state_digest,
+        write_run_manifest_on_root,
+    )
+    manifest_path = write_run_manifest_on_root(
+        config_dir,
+        {
+            "runner": "run_omip",
+            "runtime_config": model.config,
+            "run_config": run_config._asdict(),
+            "grid_type": grid_type,
+            "resolution": resolution,
+            "n_levels": int(z_coord.n_levels),
+            "dt_seconds": float(dt),
+            "days": float(args.days),
+            "forcing_mode": getattr(args, "forcing_mode", "restoring"),
+            "initial_condition": run_config_json["initial_condition"],
+            "cli_args": vars(args),
+        },
+        config_kind="ocean",
+        runner_tag="run_omip",
+        rng_seeds={"master": int(run_config.seed)},
+        dataset_provenance=[
+            dataset_provenance_entry(pth, dataset_id=did)
+            for did, pth in (
+                ("bathymetry", args.bathymetry),
+                ("woa_t", args.woa_t),
+                ("woa_s", args.woa_s),
+                ("jra55_cache", getattr(args, "jra55_cache", None)),
+                ("runoff_file", getattr(args, "runoff_file", None)),
+                ("sss_target_file", getattr(args, "sss_target_file", None)),
+                ("iwm_forcing_file", getattr(args, "iwm_forcing_file", None)),
+                ("dz_ref_file", getattr(args, "dz_ref_file", None)),
+                ("tripole_mesh", getattr(args, "tripole_mesh", None)),
+                ("ic_from_fesom_mesh", getattr(args, "ic_from_fesom_mesh", None)),
+            )
+            if pth
+        ],
+    )
 
     # Restart cadence — only wired for the JRA55 path for now (the
     # restoring path is fast enough that re-running from scratch is
@@ -6946,7 +7026,8 @@ def run_omip_single(grid_type: str, args) -> dict:
                 tracer_advection=str(model.config.tracer_advection),
                 nlev=int(args.nlev),
                 halo_depth=halo_depth_for_config(model.config))
-            spmd_step = make_sharded_mpas_ocean_step(model, _layout)
+            spmd_step = make_sharded_mpas_ocean_step(model, _layout,
+                                                     land_mask=state.land_mask.data)
             spmd_gather = partial(gather_state_mpas_ocean_spmd, layout=_layout)
             spmd_gather_ice = spmd_gather      # generic pytree gather
             spmd_shard_stack = partial(shard_cell_stack_spmd, layout=_layout)
@@ -6966,7 +7047,8 @@ def run_omip_single(grid_type: str, args) -> dict:
                       f"{_nd} devices across {jax.process_count()} process(es) "
                       f"({jax.default_backend()}); cells/device={_layout.cells_per}, "
                       f"local incl. halo={_layout.max_lc}, ppermute rounds="
-                      f"{len(_layout.ppermute_perms)}.")
+                      f"{len(_layout.ppermute_perms)}, land-fill band capacity="
+                      f"{spmd_step.land_fill_band_capacity}.")
         elif jax.process_index() == 0:
             print("  SPMD (mpas): single device visible — flag is a no-op.")
     # Disarm the process-global SPMD backend on EVERY exit of the loop (a
@@ -7002,6 +7084,7 @@ def run_omip_single(grid_type: str, args) -> dict:
             # staggered v layout, not the sharded v_lower carry.  Every rank
             # dispatches this gather (it is a collective); only rank 0 writes.
             state = spmd_gather(state)
+            _gather_final_ice(jra55_state, spmd_gather_ice)
     finally:
         if run_config.enable_mpas_spmd and spmd_step is not None:
             from legoesm.parallel.voronoi_spmd_ocean import disarm_mpas_ocean_spmd
@@ -7091,6 +7174,10 @@ def run_omip_single(grid_type: str, args) -> dict:
         _collective_root_io(write_final_snapshot)
     elif _io_rank:
         write_final_snapshot()
+
+    if manifest_path is not None:
+        record_final_state_digest(manifest_path,
+                                  *_final_digest_trees(state, jra55_state))
 
     ALL_RESULTS.append(results)
     return results

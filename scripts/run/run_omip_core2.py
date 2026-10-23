@@ -3330,7 +3330,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
 
 def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      nemo_domain_cfg: str | None = None,
-                     lloyd_iterations: int = 20, woa_init: bool = False,
+                     lloyd_iterations: int = 50, woa_init: bool = False,
                      woa_t=None, woa_s=None, flat_bottom: bool = False,
                      A_h=None, B_h=None, K_bih=None, C_smag_lap=None,
                      pgf_scheme=None, tracer_advection=None, bottom_drag_r=None,
@@ -3371,6 +3371,9 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
     mesh, z_coord, config, _model0, _ = run_omip._create_setup(
         "mpas", f"ico{level}", nlev, H_max,
         physics_preset="full", water_type="II",
+        # --mpas-lloyd reaches the mesh builder (it was dropped here, so every
+        # run built _create_setup's default 50 whatever the flag said).
+        mpas_lloyd=lloyd_iterations,
         dz_ref_override=dz_ref_override,
         # KPP boundary-layer-depth sensitivity override (Ri_crit / Cv).  None
         # -> _create_setup builds the default KPPConfig (byte-identical to the
@@ -4658,8 +4661,9 @@ def _source_revision_drift_note(parent_sha, this_sha) -> str | None:
     SHA describes only part of the running code, so equality of two such
     strings is not equality of the code.
 
-    Pure function of the two strings so it is directly testable; ``main`` only
-    prints the result.
+    Pure function of the two strings so it is directly testable; ``main``
+    hands the result to ``_refuse_restart_source_drift``, which refuses the
+    resume on it (a warning with ``LEGOESM_ALLOW_VERSION_DRIFT=1``).
     """
     unknown = {None, "", _SOURCE_REV_UNAVAILABLE}
     if parent_sha in unknown or this_sha in unknown:
@@ -4671,14 +4675,26 @@ def _source_revision_drift_note(parent_sha, this_sha) -> str | None:
         return (f"[warn] --restart-from was written at source revision "
                 f"{parent_sha[:20]} but this leg is running {this_sha[:20]}: "
                 "the model code changed between legs.  The state and "
-                "configuration still validated, so the resume proceeds — but "
-                "attribute results to BOTH revisions.")
+                "configuration validated, but the resume is refused unless "
+                "LEGOESM_ALLOW_VERSION_DRIFT=1; if allowed, attribute results "
+                "to BOTH revisions.")
     why = _revision_ambiguity(this_sha)
     if why:
         return (f"[warn] both legs report {this_sha}, but that string does not "
                 f"pin the code: {why}  Matching markers do not prove matching "
                 "source.")
     return None
+
+
+def _refuse_restart_source_drift(parent_sha, this_sha, path) -> None:
+    """Version-drift rule for ``--restart-from`` (reproducibility decision 3):
+    a restart written by other or unidentifiable code (unknown, mismatched,
+    dirty or mixed-tree revision) is refused on every process unless
+    ``LEGOESM_ALLOW_VERSION_DRIFT`` is set, which downgrades it to a warning."""
+    from legoesm.driver.restart import collective_version_drift_gate
+    note = _source_revision_drift_note(parent_sha, this_sha)
+    collective_version_drift_gate(lambda: [note] if note else [],
+                                  f"restart {path}")
 
 
 def _revision_ambiguity(rev) -> str | None:
@@ -6335,8 +6351,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--mpas-level", type=int, default=6,
                    help="MPAS Voronoi subdivision level (nCells=10*4^level+2): "
                         "5~230km, 6~115km (~ORCA1), 7~58km. For --grid mpas.")
-    p.add_argument("--mpas-lloyd", type=int, default=20,
-                   help="MPAS Lloyd-relaxation iterations at mesh build. For --grid mpas.")
+    p.add_argument("--mpas-lloyd", type=int, default=50,
+                   help="MPAS Lloyd-relaxation iterations at mesh build. For "
+                        "--grid mpas. Default 50 = the mesh every run built "
+                        "before this flag was forwarded (user 2026-10-12).")
     p.add_argument("--cube-Ah", type=float, default=None,
                    help="cube horizontal viscosity A_h override [m^2/s].")
     p.add_argument("--cube-hyperdiff", type=float, default=None,
@@ -7566,6 +7584,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "Lets --C-smag-lap "
                         "be cranked high to damp WBC jets WITHOUT self-CFL at the "
                         "sharp jet. ~0.125 is a safe 2-D Laplacian cap.")
+    p.add_argument("--synthetic-forcing", action="store_true",
+                   help="Use synthetic forcing (no real CORE-II data needed). "
+                        "Explicit opt-in for testing and development only — "
+                        "never the default (a silent fallback would corrupt "
+                        "the NEMO comparison invisibly).")
+    p.add_argument("--forcing-scale", type=float, default=1.0,
+                   help="Scale surface forcing by this factor (default 1.0). "
+                        "Useful for sensitivity tests or reducing cold-start shock.")
+    p.add_argument("--days", type=float, default=None,
+                   help="Run for this many days (overrides --years and --smoke). "
+                        "Useful for short tests that are not the standard 10-day smoke.")
     p.add_argument("--nudge-woa-tau-days", type=float, default=0.0,
                    help="Nudge T,S toward WOA with this timescale [days] from a "
                         "rest start -- gradual cold-start spinup that avoids the "
@@ -7676,6 +7705,15 @@ def main() -> int:
         raise SystemExit(
             "--relative-winds/--wind-vfac is not wired for --grid cubed_sphere "
             "(parked); supported grids: tripole / latlon_bathy / mpas.")
+    # NEMO's SCRIP weights target the eORCA1 tripole; on latlon_bathy /
+    # cubed_sphere / mpas the shared sampler raises only at the first forcing
+    # step, after the model build (user 2026-10-15, decisions 8 + 6) -- refuse
+    # every non-tripole grid here instead.
+    if args.grid != "tripole" and args.forcing_remap != "bilinear":
+        raise SystemExit(
+            f"--forcing-remap {args.forcing_remap} is wired for --grid tripole "
+            f"only (NEMO's weight files target eORCA1), not --grid "
+            f"{args.grid}.  Use --forcing-remap bilinear.")
 
     # --spmd-persistent-state combo validation (scaling-M2): fail BEFORE the
     # jax.distributed bootstrap / any expensive setup.
@@ -9010,13 +9048,13 @@ def main() -> int:
         chl_clim = load_nemo_chl_monthly(
             grid, app_grid_type, lat2d, lon2d, chl_file=args.chl_file,
                                          chl_remap=args.chl_remap)
-    # allow_synthetic=False: this NEMO-faithful pipeline MUST use the real
-    # 6-hourly CORE-II nyf.zarr; a silent fallback to 365 daily synthetic forcing
-    # would corrupt the comparison invisibly. --forcing-path (set via --config
-    # forcing.path) threads the staged data dir into the loader's cache_dir so a
-    # fetch-then-run workflow finds it (#376).
+    # allow_synthetic=False by default: this NEMO-faithful pipeline MUST use the
+    # real 6-hourly CORE-II nyf.zarr; a silent fallback to 365 daily synthetic
+    # forcing would corrupt the comparison invisibly. --forcing-path (set via
+    # --config forcing.path) threads the staged data dir into the loader's
+    # cache_dir so a fetch-then-run workflow finds it (#376).
     forcing = load_core2_nyf(
-        allow_synthetic=False,
+        allow_synthetic=args.synthetic_forcing,
         cache_dir=(Path(args.forcing_path) if args.forcing_path else None),
     )
     n_rec = int(forcing.u10.shape[0])
@@ -9150,7 +9188,10 @@ def main() -> int:
 
     dt = float(args.dt)
     ramp_s = float(args.forcing_ramp_days) * _SEC_PER_DAY
-    total_days = 10.0 if args.smoke else args.years * 365.0
+    if args.days is not None:
+        total_days = float(args.days)
+    else:
+        total_days = 10.0 if args.smoke else args.years * 365.0
     n_steps = int(total_days * _SEC_PER_DAY / dt)
     diag_every = max(1, int(args.diag_every_days * _SEC_PER_DAY / dt))
     steps_per_year = int(365.0 * _SEC_PER_DAY / dt)
@@ -9285,13 +9326,13 @@ def main() -> int:
     # resumes silently.  Recorded always, via _source_revision() — which scopes
     # the query to THIS script's checkout, marks a dirty tree, and returns
     # _SOURCE_REV_UNAVAILABLE instead of silently omitting the field.
-    # DELIBERATELY A WARNING, NOT AN ABORT: chaining a multi-day production run
-    # across a bug fix is a legitimate and expected workflow, and a hard error
-    # would make the feature unusable exactly when it matters.  The state
-    # itself is still validated by the config fingerprint; this line makes the
-    # code drift visible in the log and in the archive so a scorecard is never
-    # attributed to the wrong revision.  It is provenance, NOT a proof of
-    # identical code — see ocean.restart's SCOPE OF THE GUARANTEE.
+    # A resume across a source change is REFUSED (reproducibility decision 3,
+    # approved 2026-10-12; it was a warning before): chaining a production run
+    # across a bug fix stays possible, but explicitly, with
+    # LEGOESM_ALLOW_VERSION_DRIFT=1 (then a warning).  The state itself is
+    # still validated by the config fingerprint.  The revision is provenance,
+    # NOT a proof of identical code — see ocean.restart's SCOPE OF THE
+    # GUARANTEE.
     _restart_src_sha = None
     if args.restart_save or args.restart_from:
         _restart_src_sha = _source_revision()
@@ -9356,10 +9397,8 @@ def main() -> int:
         # Source-revision drift: three DISTINCT outcomes (unknown / mismatch /
         # equal-but-dirty), decided by the pure helper so the logic is unit
         # tested rather than only exercised by a full driver run.
-        _drift_note = _source_revision_drift_note(_rs_meta.get("sha"),
-                                                  _restart_src_sha)
-        if _drift_note:
-            print(_drift_note, flush=True)
+        _refuse_restart_source_drift(_rs_meta.get("sha"), _restart_src_sha,
+                                     _rs_path)
         start_step = int(_rs_meta["step"])
         if start_step >= n_steps:
             # Never exit silently "already at target" (CLAUDE.md run-target
@@ -9414,9 +9453,8 @@ def main() -> int:
     # reference. The hashed payload is an OceanRunRecord = runtime config + the
     # run controls (dt, total days, grid, mesh, output, forcing, IC) that live
     # OUTSIDE model.config — so two runs that differ only in dt/grid/output get
-    # distinct config_hashes (codex review HIGH). Best-effort: a provenance-write
-    # failure never aborts a long integration.
-    # Process-0 only under --distributed (every process shares one output dir).
+    # distinct config_hashes (codex review HIGH). A failed write aborts the run
+    # (2026-10-12 decision). Process 0 writes under --distributed.
     #
     # Resolve the CORE-II cache the run will actually read, so the manifest
     # records the forcing rather than the flag.  --forcing-path wins; otherwise
@@ -9428,52 +9466,50 @@ def main() -> int:
         from legoesm.ocean.forcing import core2_nyf_cache_dir
         _resolved_forcing_path = str(core2_nyf_cache_dir())
     print(f"[setup] CORE-II forcing cache: {_resolved_forcing_path}")
-    manifest_path = None
-    if _is_io_proc():
-        try:
-            from legoesm.driver.restart import (
-                dataset_provenance_entry,
-                write_run_manifest,
+    # Every process calls the writer (process 0 writes, all raise on failure):
+    # a run without its manifest is not reconstructible, so it does not start.
+    from legoesm.driver.restart import (
+        dataset_provenance_entry,
+        write_run_manifest_on_root,
+    )
+    from legoesm.ocean.config import OceanRunRecord
+    run_record = OceanRunRecord(
+        runtime_config=model.config,
+        grid=str(args.grid),
+        mesh=str(args.mesh),
+        nlev=int(args.nlev),
+        dt_seconds=float(dt),
+        total_days=float(total_days),
+        output_path=str(args.output),
+        forcing="core2_nyf",
+        # RESOLVED, not the flag.  An empty string here used to mean
+        # "the default", and the default silently changed from the raw
+        # CORE-II winds to the bias-corrected ones -- so every manifest
+        # written before this recorded nothing about which forcing the
+        # run actually used, and the loader's own provenance line is
+        # swallowed by the `| tail` most arm scripts pipe through.
+        forcing_path=str(_resolved_forcing_path),
+        woa_init=bool(args.woa_init),
+        woa_t=str(args.woa_t or ""),
+        woa_s=str(args.woa_s or ""),
+        latlon_res=str(args.latlon_res),
+        smoke=bool(args.smoke),
+    )
+    manifest_path = write_run_manifest_on_root(
+        out_dir, run_record, config_kind="ocean",
+        runner_tag="run_omip_core2",
+        dataset_provenance=[
+            dataset_provenance_entry(pth, dataset_id=did)
+            for did, pth in (
+                ("core2_forcing", _resolved_forcing_path),
+                ("woa_t", args.woa_t),
+                ("woa_s", args.woa_s),
             )
-            from legoesm.ocean.config import OceanRunRecord
-            run_record = OceanRunRecord(
-                runtime_config=model.config,
-                grid=str(args.grid),
-                mesh=str(args.mesh),
-                nlev=int(args.nlev),
-                dt_seconds=float(dt),
-                total_days=float(total_days),
-                output_path=str(args.output),
-                forcing="core2_nyf",
-                # RESOLVED, not the flag.  An empty string here used to mean
-                # "the default", and the default silently changed from the raw
-                # CORE-II winds to the bias-corrected ones -- so every manifest
-                # written before this recorded nothing about which forcing the
-                # run actually used, and the loader's own provenance line is
-                # swallowed by the `| tail` most arm scripts pipe through.
-                forcing_path=str(_resolved_forcing_path),
-                woa_init=bool(args.woa_init),
-                woa_t=str(args.woa_t or ""),
-                woa_s=str(args.woa_s or ""),
-                latlon_res=str(args.latlon_res),
-                smoke=bool(args.smoke),
-            )
-            manifest_path = write_run_manifest(
-                out_dir, run_record, config_kind="ocean",
-                runner_tag="run_omip_core2",
-                dataset_provenance=[
-                    dataset_provenance_entry(pth, dataset_id=did)
-                    for did, pth in (
-                        ("core2_forcing", _resolved_forcing_path),
-                        ("woa_t", args.woa_t),
-                        ("woa_s", args.woa_s),
-                    )
-                    if pth
-                ],
-            )
-            print(f"[setup] wrote run manifest {manifest_path}")
-        except Exception as _exc:  # noqa: BLE001 — provenance is best-effort
-            print(f"[warn] run manifest not written: {type(_exc).__name__}: {_exc}")
+            if pth
+        ],
+    )
+    if manifest_path is not None:
+        print(f"[setup] wrote run manifest {manifest_path}")
 
     _csv_cols = ["step", "day", "mean_sst_C", "mean_sss", "max_abs_u",
                  "max_abs_v", "umax_lat", "umax_lon", "umax_lev", "steps_per_s"]
@@ -9942,6 +9978,15 @@ def main() -> int:
                 "an integrator slot mid-block that the restart neither records "
                 "nor continues.  Run the restartable leg on the host Python "
                 "loop (omit --scan-block).")
+        if args.forcing_remap != "bilinear":
+            # The on-device forcing stack is bilinear by construction and this
+            # branch returns before the host loop reads --forcing-remap, so
+            # nemo_scrip here would SILENTLY run bilinear (user 2026-10-14, 4a).
+            raise SystemExit(
+                f"[scan] --forcing-remap {args.forcing_remap} is not applied on "
+                "the --scan-block fast path (the on-device forcing stack is "
+                "bilinear only); use the host Python loop (omit --scan-block) "
+                "or --forcing-remap bilinear.")
         from legoesm.ocean.coupler.omip2_applicator import (
             build_core2_forcing_device_stack, build_omip2_scan_block_fn,
         )
@@ -10300,6 +10345,11 @@ def main() -> int:
         if ramp < 1.0:
             sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
                              q_net=sf.q_net * ramp, sw_down=sf.sw_down * ramp)
+        if args.forcing_scale != 1.0:
+            sf = sf._replace(tau_x=sf.tau_x * args.forcing_scale,
+                             tau_y=sf.tau_y * args.forcing_scale,
+                             q_net=sf.q_net * args.forcing_scale,
+                             sw_down=sf.sw_down * args.forcing_scale)
         # Surface chlorophyll for THIS step (calendar-month slice); attaching it
         # switches the PE step to NEMO's RGB penetration.  NOT ramped — Chl is a
         # fixed optical climatology, independent of the dynamical spin-up ramp.
@@ -10343,7 +10393,10 @@ def main() -> int:
         ice_resp = None
         if ice_config is not None:
             from legoesm.ocean.coupler import sample_omip2_forcing
-            forc_ice = sample_omip2_forcing(forcing, it, grid, app_grid_type)
+            # SAME remap as the ocean forcing above (F19 residual): under
+            # --forcing-remap nemo_scrip the ice must not see bilinear fields.
+            forc_ice = sample_omip2_forcing(forcing, it, grid, app_grid_type,
+                                            forcing_remap=args.forcing_remap)
             if _dm2dc_win is not None:
                 # SAME diurnal SW modulation the ocean forcing gets (codex r1
                 # #2): the ice tile must not integrate the raw daily-mean SW

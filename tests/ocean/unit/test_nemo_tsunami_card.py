@@ -515,3 +515,25 @@ def test_partial_cell_ab2_plant_unscoped_outer_path_fires():
     good = _partial_cell_periodic_ab2(True, False)
     bad = _partial_cell_periodic_ab2(True, False, unwrap=True)
     assert bad != good
+
+
+def test_periodic_card_keeps_the_closed_south_external_mode_bundle_off(card):
+    """TSUNAMI selects the literal continuity/transport fields the closed-south
+    external-mode bundle keys on; its y-wrap alone must keep the bundle off,
+    and the bundle's closed-south face depths must refuse a periodic scope."""
+    import jax.numpy as jnp
+
+    from legoesm.grids.halo_latlon import meridional_periodicity
+    from legoesm.ocean.dynamics import barotropic_latlon_cgrid as bt
+
+    cfg = card.recipe.model_config
+    assert cfg.meridionally_periodic is True
+    assert bt.nemo_literal_external_mode_active(cfg) is False
+    # Even a card that selects the flux-form bundle stays off while y-periodic.
+    selected = cfg._replace(barotropic=cfg.barotropic._replace(
+        nemo_literal_external_mode_flux_form=True))
+    assert bt.nemo_literal_external_mode_active(selected) is False
+    assert bt.nemo_literal_external_mode_active(
+        selected._replace(meridionally_periodic=False)) is True
+    with meridional_periodicity(True), pytest.raises(ValueError, match="periodic"):
+        bt._nemo_literal_reference_face_depths(card.recipe.z_coord, jnp.float64)

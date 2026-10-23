@@ -85,3 +85,18 @@ def test_pipeline_fills_bechtold_dx_from_grid():
     explicit = build_physics_pipeline(
         grid, sigma, _cfg(convection="bechtold", bechtold_dx_m=50e3))
     assert explicit.convection_config.dx_m == 50e3
+
+
+def test_tile_pipeline_builds_without_tile_cell_areas():
+    """#1967: the tiled-cube lane builds physics on a shape-only tile view
+    that has no cell areas; the Bechtold spacing fill read them for every
+    scheme and crashed the lane before its first step."""
+    from legoesm.driver.tiled_operator_split_step import (
+        build_tile_step_unified)
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    _, pipe = build_tile_step_unified(
+        create_cubed_sphere(8), create_sigma_coordinate(8),
+        _cfg(convection="none"), 2)
+    assert pipe.adapter.ncol == 16  # built at tile ncol, not global

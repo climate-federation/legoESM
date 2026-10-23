@@ -4,9 +4,10 @@ Covers the routing contract that connects the turbulence WRITE side
 (TurbulenceOutput.cloud_fraction) to the radiation READ side
 (compute_cloud_properties cloud_fraction_override) through PhysicsState:
 
-  * ``_carry_update_with_cloud_fraction`` returns a MULTI-FIELD dict (carry +
-    cloud_fraction) only when the scheme diagnosed a cf, else the bare carry
-    (byte-identical) — this is what combined.py merges into PhysicsState;
+  * ``_carry_update_with_cloud_fraction`` returns a MULTI-FIELD dict: the
+    carry, the diagnosed PBL height ``pblh`` (always; CAM pbuf pblh, read by
+    ZM one step later) and ``cloud_fraction`` when the scheme diagnosed one —
+    this is what combined.py merges into PhysicsState;
   * the static gate raises LOUDLY on misconfiguration (flag set without a
     cf-producing diagnostic-CLUBB closure) — never a silent no-op;
   * the READ side is wired for hydrostatic only (non-hydrostatic raises);
@@ -41,12 +42,14 @@ def _turb_out(cf):
 
 
 class TestCarryPackaging:
-    def test_no_cf_returns_bare_carry(self):
-        """Scheme without a PDF cloud closure (cf None) => bare carry value, the
-        pre-feature (value, not dict) contract."""
+    def test_no_cf_returns_carry_and_pblh(self):
+        """Scheme without a PDF cloud closure (cf None) => the carry and the
+        diagnosed PBL height, no cloud_fraction key."""
         carry = jnp.ones((2, 3))
-        out = _carry_update_with_cloud_fraction("tke", carry, _turb_out(None))
-        assert out is carry  # identity: byte-identical path
+        tout = _turb_out(None)
+        out = _carry_update_with_cloud_fraction("tke", carry, tout)
+        assert isinstance(out, dict) and set(out) == {"tke", "pblh"}
+        assert out["tke"] is carry and out["pblh"] is tout.h_pbl
 
     def test_cf_returns_multifield_dict(self):
         """CLUBB (cf set) => dict co-locating the carry AND cloud_fraction so
@@ -55,16 +58,16 @@ class TestCarryPackaging:
         cf = jnp.full((2, 3), 0.3)
         out = _carry_update_with_cloud_fraction("tke", carry, _turb_out(cf))
         assert isinstance(out, dict)
-        assert set(out) == {"tke", "cloud_fraction"}
+        assert set(out) == {"tke", "cloud_fraction", "pblh"}
         assert bool(jnp.array_equal(out["tke"], carry))
         assert bool(jnp.array_equal(out["cloud_fraction"], cf))
 
     def test_cf_with_none_carry_field_only_cloud_fraction(self):
         """A diagnostic scheme with no prognostic carry still hands back the
-        cloud fraction (single-key dict)."""
+        cloud fraction and the PBL height."""
         cf = jnp.full((2, 3), 0.2)
         out = _carry_update_with_cloud_fraction(None, None, _turb_out(cf))
-        assert isinstance(out, dict) and set(out) == {"cloud_fraction"}
+        assert isinstance(out, dict) and set(out) == {"cloud_fraction", "pblh"}
 
 
 def _cfg(turbulence="clubb", clubb=None, use_clubb_cf=True):

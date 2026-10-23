@@ -188,12 +188,11 @@ FORCINGS: dict[str, ForcingSpec] = {
         # loader (external.py) reads a gridded 'aod'. The ICON Kinne
         # aeropt_kinne_sw_b14 files ARE gridded+directly read but are DKRZ-
         # preprocessed, not published on ESGF as such.
-        adapter_note="run scripts/data/adapt_cmip6_aerosol.py --in "
-                     "<MACv2SP.nc> --out <aod.nc> for an IDEALIZED simple-plume "
-                     "550nm AOD (structural, NOT the reference mo_simple_plumes "
-                     "magnitudes; no SSA/asy). Production MACv2-SP needs the "
-                     "reference Fortran routine, or fetch the ICON Kinne aeropt "
-                     "files from a DKRZ mirror.",
+        adapter_note="run scripts/data/adapt_cmip6_aerosol.py --macv2sp "
+                     "<MACv2.0-SP_v1.nc> --macv1-dir <MACv1 g30_*> --band-template "
+                     "<aeropt_kinne_sw_b14_*_MACv1.nc> --out-dir <dir> --years 1850 "
+                     "2014 (reference mo_simple_plumes column port on the MACv1 "
+                     "pre-industrial background; writes the tot + fin products).",
     ),
 }
 

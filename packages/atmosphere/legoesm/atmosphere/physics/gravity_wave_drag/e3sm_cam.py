@@ -335,7 +335,7 @@ def gw_prof(
 # gw_oro_src: McFarlane orographic source
 # ---------------------------------------------------------------------------
 
-def _source_direction(usrc: jax.Array, vsrc: jax.Array):
+def source_direction(usrc: jax.Array, vsrc: jax.Array):
     """Source-wind magnitude and unit vector, safe at zero wind.
 
     ``sqrt`` has an infinite derivative at 0, so ``sqrt(u**2 + v**2)`` returns a
@@ -394,7 +394,7 @@ def gw_oro_src(
         u, v, rho_mid, hdsp, pint, dpm, zm, nm,
     )
 
-    mag, xv, yv = _source_direction(usrc, vsrc)
+    mag, xv, yv = source_direction(usrc, vsrc)
 
     # Project winds onto source direction.
     ubm = u * xv[:, None] + v * yv[:, None]             # (ncol, nlev)
@@ -514,7 +514,7 @@ def gw_cm_src(
     gather = lambda a, idx: jnp.take(a, idx, axis=1)   # (ncol,) dynamic gather
     usrc = 0.5 * (gather(u, klo_i) + gather(u, kbot_i))
     vsrc = 0.5 * (gather(v, klo_i) + gather(v, kbot_i))
-    mag, xv, yv = _source_direction(usrc, vsrc)
+    mag, xv, yv = source_direction(usrc, vsrc)
 
     ubm = u * xv[:, None] + v * yv[:, None]
     ubi = _interface_proj(ubm, mag)
@@ -652,7 +652,7 @@ def gw_beres_src(
     # --- Source-wind direction from the 700 hPa winds (E3SM uses u(:,k700)).
     u700 = jnp.take(u, k700_i, axis=1)                     # (ncol,)
     v700 = jnp.take(v, k700_i, axis=1)
-    mag700, xv, yv = _source_direction(u700, v700)
+    mag700, xv, yv = source_direction(u700, v700)
 
     ubm = u * xv[:, None] + v * yv[:, None]                # (ncol, nlev)
     ubi = _interface_proj(ubm, mag700)                     # (ncol, nlev+1)
@@ -1233,8 +1233,17 @@ _PALPH_HPA = (
 _ALPHA_MIN_PER_S = 1.0e-6
 
 
-def newtonian_alpha_profile(pint: jax.Array) -> jax.Array:
+def newtonian_alpha_profile(
+    pint: jax.Array,
+    alpha0_per_day=_ALPHA0_PER_DAY,
+    palph_hpa=_PALPH_HPA,
+) -> jax.Array:
     """E3SM height-dependent Newtonian-cooling coefficient at interfaces.
+
+    ``alpha0_per_day`` / ``palph_hpa`` default to E3SM's table; CAM6's
+    gw_init table (Wehrbein & Leovy 1982) is passed by ``mcfarlane``, whose
+    ``pint`` is the reference ``pref_edge`` (CAM gw_init) — the same
+    end-clamped linear interpolation as CAM's lininterp (extrap bndry).
 
     Faithful to gw_drag.F90:315-342: convert ``alpha0`` to 1/s, floor at
     ``1e-6``, convert ``palph`` hPa->Pa, then linearly interpolate (in
@@ -1244,9 +1253,9 @@ def newtonian_alpha_profile(pint: jax.Array) -> jax.Array:
     The interpolation is differentiable (``jnp.interp``); the table itself
     is the published radiative-damping profile.
     """
-    palph_pa = jnp.asarray(_PALPH_HPA, dtype=pint.dtype) * 1.0e2  # hPa -> Pa
+    palph_pa = jnp.asarray(palph_hpa, dtype=pint.dtype) * 1.0e2  # hPa -> Pa
     alpha0_s = jnp.maximum(
-        jnp.asarray(_ALPHA0_PER_DAY, dtype=pint.dtype) / 86400.0,
+        jnp.asarray(alpha0_per_day, dtype=pint.dtype) / 86400.0,
         _ALPHA_MIN_PER_S,
     )
     # jnp.interp requires increasing xp; palph_pa is already increasing.

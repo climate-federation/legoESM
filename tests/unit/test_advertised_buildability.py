@@ -63,7 +63,7 @@ def _cfg(**physics) -> ExperimentConfig:
     config = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
         dycore=DycoreConfig(
-            energy_fixer=False,  # unwired lane opts out (F15 V8-A)
+            energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
             model_type="hydrostatic", discretization="cdgrid",
         ),
         **physics,
@@ -197,7 +197,7 @@ class TestDataDrivenRowsBuildable:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="gaussian", resolution=8, nlev=nlev),
             dycore=DycoreConfig(
-                energy_fixer=False,  # unwired lane opts out (F15 V8-A)
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="hydrostatic", discretization="u_cast",
             ),
         )

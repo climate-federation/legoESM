@@ -1420,15 +1420,18 @@ class TestSpectralMpasForcingActive:
             assert "ACTIVE" in line, (
                 f"{label!r} should be ACTIVE (forcing now consumed): {line!r}")
 
-    def test_energy_fixer_opt_out_only_off_mpas(self, tmp_path):
-        """Off MPAS the deck opts out of the dycore energy fixer explicitly
-        (review F15: run_amip refuses it on unwired lanes); MPAS keeps it."""
-        (tmp_path / "g").mkdir()
-        (tmp_path / "v").mkdir()
+    def test_energy_fixer_opt_out_only_on_spectral(self, tmp_path):
+        """On the spectral lane the deck opts out of the dycore energy fixer
+        explicitly (review F15: run_amip refuses it on unwired lanes); the
+        wired MPAS and lat-lon lanes keep it (F15b)."""
+        for d in ("g", "v", "l"):
+            (tmp_path / d).mkdir()
         assert "--no-energy-fixer" in self._run(
             tmp_path / "g", "gaussian", "spectral", 21)
         assert "--no-energy-fixer" not in self._run(
             tmp_path / "v", "voronoi", "mpas", 4)
+        assert "--no-energy-fixer" not in self._run(
+            tmp_path / "l", "latlon", "latlon_cgrid", 24)
 
     def test_gaussian_spectral_rrtmg_forcing_active(self, tmp_path):
         out = self._run(tmp_path, "gaussian", "spectral", 21)
@@ -1448,6 +1451,12 @@ class TestSpectralMpasForcingActive:
                       if "Solar TSI" in ln), None)
         assert solar is not None and "ACTIVE" in solar, (
             f"cubed_sphere solar should be ACTIVE: {solar!r}")
+        # The deck hands run_amip the production reference AOD (user
+        # decision 2026-10-15: 0.05 -> 0.03, the run_amip default).
+        block = out.split("[deck] Command:", 1)[1].split(
+            "[deck] Forcing-channel activity", 1)[0]
+        toks = [t.strip() for t in block.split("\\\n")]
+        assert toks[toks.index("--aerosol-reference-aod") + 1] == "0.03"
 
     def test_voronoi_mpas_rrtmg_forcing_active(self, tmp_path):
         out = self._run(tmp_path, "voronoi", "mpas", 4)

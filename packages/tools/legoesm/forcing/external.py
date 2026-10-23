@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from functools import lru_cache
+from types import SimpleNamespace
 from typing import NamedTuple
 
 import jax.numpy as jnp
@@ -31,6 +32,7 @@ from legoesm.forcing.time_utils import (
 )
 
 from legoesm import constants
+from legoesm.forcing.amip import regrid_monthly_latlon_to_grid
 
 logger = logging.getLogger(__name__)
 
@@ -547,8 +549,19 @@ def _load_monthly_zonal_anchored(
         ds.close()
         raise ValueError(f"Variable {varname!r} not found in {path!r}")
     var = ds[varname]
-    data = np.asarray(var.values, dtype=np.float64)
     dims = list(var.dims)
+    lon_name = next((n for n in ("lon", "longitude") if n in dims), None)
+    if lon_name is not None and dims.index(lon_name) > 0:
+        # Zonal mean one leading-axis slab at a time: the same per-element
+        # nanmean as on the whole array, without holding a full-resolution
+        # float64 copy (a 1850-2014 1x1-degree 14-band file is ~22 GB that way).
+        ax = dims.index(lon_name) - 1
+        data = np.stack([
+            np.nanmean(np.asarray(var.isel({dims[0]: i}).values, dtype=np.float64), axis=ax)
+            for i in range(var.sizes[dims[0]])])
+        dims.remove(lon_name)
+    else:
+        data = np.asarray(var.values, dtype=np.float64)
 
     if "lat" in ds:
         lat = np.asarray(ds["lat"].values, dtype=np.float64)
@@ -563,7 +576,7 @@ def _load_monthly_zonal_anchored(
         mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
         first_date = None
 
-    # Average over longitude to produce a zonal mean.
+    # Average over longitude to produce a zonal mean (lon-leading layout).
     for lname in ("lon", "longitude"):
         if lname in dims:
             ax = dims.index(lname)
@@ -587,6 +600,56 @@ def _load_monthly_zonal_anchored(
     ds.close()
 
     return mid_days, first_date, lat, data
+
+
+@lru_cache(maxsize=4)
+def _load_monthly_latlon_anchored(path: str, varname: str, band: str = "gray"):
+    """Longitude-resolved twin of :func:`_load_monthly_zonal_anchored` for a
+    ``(time, [band,] lat, lon)`` file (e.g. the Kinne / MACv2-SP aerosol files):
+    the SW band axis is collapsed per time record exactly as there
+    (:func:`_collapse_sw_bands`, flat mean without edges) but longitude is
+    KEPT.  Longitude is mapped to ``[0, 360)`` and sorted, as the AMIP SST
+    loader does before :func:`legoesm.forcing.amip.regrid_monthly_latlon_to_grid`.
+
+    Returns ``(mid_days, first_date, lat, lon, data)`` with ``data`` of shape
+    ``(ntime, nlat, nlon)`` float64, or ``None`` when ``varname`` has no
+    longitude dimension (a zonal file has nothing to resolve).
+    """
+    ds = _open_forcing_dataset(path)
+    if varname not in ds.data_vars:
+        ds.close()
+        raise ValueError(f"Variable {varname!r} not found in {path!r}")
+    var = ds[varname]
+    dims = list(var.dims)
+    lon_name = next((n for n in ("lon", "longitude") if n in dims), None)
+    if lon_name is None:
+        ds.close()
+        return None
+    lat_name = "lat" if "lat" in dims else "latitude"
+    if dims[0] != "time" or dims[-2:] != [lat_name, lon_name]:
+        ds.close()
+        raise ValueError(
+            f"{path!r}: {varname} dims {tuple(dims)} are not (time, ..., "
+            f"{lat_name}, {lon_name}); the longitude-resolved loader reads only "
+            "that layout.")
+
+    def _record(i):
+        slab = np.asarray(var.isel(time=i).values, dtype=np.float64)
+        sdims = dims[1:]
+        for d in sdims[:-2][::-1]:
+            collapsed = _collapse_sw_bands(ds, slab, sdims, d, band)
+            slab = (np.nanmean(slab, axis=sdims.index(d))
+                    if collapsed is None else collapsed)
+            sdims = [x for x in sdims if x != d]
+        return slab
+
+    data = np.stack([_record(i) for i in range(var.sizes["time"])])
+    lat = np.asarray(ds[lat_name].values, dtype=np.float64)
+    lon = np.asarray(ds[lon_name].values, dtype=np.float64) % 360.0
+    order = np.argsort(lon)
+    mid_days, first_date = _read_time_axis(ds)
+    ds.close()
+    return mid_days, first_date, lat, lon[order], data[:, :, order]
 
 
 @lru_cache(maxsize=16)
@@ -2035,8 +2098,9 @@ class AerosolConfig(NamedTuple):
     volcanic_path: str = ""
     volcanic_scale: float = 1.0
     volcanic_lw_enabled: bool = False
-    # Optional separate AOD file for the AOD->CCN proxy (e.g. FINE-mode Kinne
-    # while ``path`` is fine+coarse for radiation).  "" = use ``path``.
+    # Optional separate AOD file for the AOD->CCN proxy.  "" = use ``path``.
+    # The Andreae (2009) fit the proxy inverts was built on TOTAL (fine +
+    # coarse) AOT, so the production launchers point it at the total file.
     ccn_path: str = ""
     # Calendar year of simulation day 0.  Required for the non-cyclic
     # dispatch in :func:`get_aerosol_at_time` so multi-year volcanic
@@ -2060,7 +2124,8 @@ def _reference_aerosol_profile(lat_grid: jnp.ndarray, config: AerosolConfig) -> 
 
 def get_aerosol_at_time(config: AerosolConfig, day: float,
                          lat_grid: jnp.ndarray | None = None,
-                         band: str = "gray"):
+                         band: str = "gray",
+                         lon_grid: jnp.ndarray | None = None):
     """Return aerosol optical depth at a given simulation day.
 
     Parameters
@@ -2073,6 +2138,12 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
     band : str
         Band collapse of a per-band ``config.path`` file with SW band edges:
         "gray" (solar-weighted, radiation) or "vis" (550 nm band, CCN).
+    lon_grid : jax array or None
+        Model grid longitudes [radians], same shape as ``lat_grid``.  When
+        given and ``config.path`` has a longitude dimension, the file is read
+        longitude-resolved and regridded bilinearly to the columns with the
+        AMIP SST/SIC regridder (:func:`legoesm.forcing.amip.
+        regrid_monthly_latlon_to_grid`) instead of zonally averaged.
 
     Returns
     -------
@@ -2081,7 +2152,11 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
     """
     if not config.enabled:
         return None
+    if lon_grid is not None and lat_grid is None:
+        raise ValueError("get_aerosol_at_time: lon_grid needs lat_grid")
     if config.path:
+        latlon = (None if lon_grid is None else
+                  _load_monthly_latlon_anchored(config.path, "aod", band))
         # Dispatch cyclic (12-month climatology) vs non-cyclic
         # (multi-year, e.g. real CMIP6 input4MIPs aerosol).  Keyed on
         # ``len(mid_days) > 12``; ``config.start_year`` maps the
@@ -2089,9 +2164,12 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
         # anchor is present.  Without this dispatch, a 36-year aerosol
         # file would be sampled cyclically (mod 365.25), throwing away
         # interannual evolution.
-        mid_days, first_date, lat, data = _load_monthly_zonal_anchored(
-            config.path, "aod", band,
-        )
+        if latlon is not None:
+            mid_days, first_date, lat, lon, data = latlon
+        else:
+            mid_days, first_date, lat, data = _load_monthly_zonal_anchored(
+                config.path, "aod", band,
+            )
         if len(mid_days) > 12:
             file_day = _simday_to_file_day(day, config.start_year, first_date)
             aod_interp = _interp_monthly_noncyclic(
@@ -2104,7 +2182,12 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
                 mid_days, data, first_date,
             )
             aod_interp = _interp_monthly_cyclic(mid_anchored, data_anchored, day)
-        if lat_grid is not None:
+        if latlon is not None:
+            cols = SimpleNamespace(grid_lat=np.asarray(lat_grid).ravel(),
+                                   grid_lon=np.asarray(lon_grid).ravel())
+            base_aod = jnp.asarray(regrid_monthly_latlon_to_grid(
+                aod_interp[None], lat, lon, cols)[0]).reshape(jnp.shape(lat_grid))
+        elif lat_grid is not None:
             base_aod = _interp_zonal_to_grid(lat, aod_interp, lat_grid)
             # Kinne aerosol files may have extra dimensions (level, band).
             # Sum over all trailing dims to get total column AOD (issue #178).

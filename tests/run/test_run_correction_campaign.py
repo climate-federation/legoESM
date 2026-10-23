@@ -1414,7 +1414,9 @@ def _stub_campaign_main_io(monkeypatch):
                                                             (lambda d, day, dt: None)))
     monkeypatch.setattr(e2s, "load_era5_time_mean",
                         lambda cfg, idx, **kw: SimpleNamespace(lat=jnp.zeros(2)))
-    monkeypatch.setattr(cae, "select_era5_regrid", lambda canon: (lambda slc, g, s: object()))
+    monkeypatch.setattr(cae, "select_era5_regrid",
+                        lambda canon: (lambda slc, g, s, target_phis: object()))
+    monkeypatch.setattr(rcc, "_model_terrain_phis", lambda cfg: None)
     monkeypatch.setattr(cr, "column_state_from_carry", lambda carry: object())
     monkeypatch.setattr(rcc, "resolve_orographic_phis", lambda forcing, provider: None)
     # The launch pre-flights (iters 389-391) run in the preamble BEFORE the resume/
@@ -2780,6 +2782,7 @@ def test_make_base_driver_builder_cmip_builds_real_driver():
 def test_build_correction_campaign_checkpoint_passthrough():
     """build_correction_campaign forwards checkpoint_callback + start_round to
     run_correction_campaign (the restart wiring main() uses)."""
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.grids.vertical import create_sigma_coordinate
 
@@ -2808,6 +2811,9 @@ def test_build_correction_campaign_checkpoint_passthrough():
         area_weights=jnp.ones((8, 16)), n_iterations=1,
         les_config=ColumnLESConfig(regime=_SMALL_REGIME),
         run_les_fn=_mock_run_les, n_worst=1,
+        # Resume contract: the config is promoted FROM the field, as the CLI's
+        # _load_single_resume does (a scalar C_K with an array field is refused).
+        initial_clubb=CLUBBLiteConfig(C_K=init_field.reshape(-1)),
         initial_field=init_field, start_round=7, checkpoint_callback=ckpt,
         accept_only_if_improved=False)
 
@@ -2835,6 +2841,7 @@ def test_build_correction_campaign_mpas_resume_accumulates_on_cells():
     initial_field (nCells,) is the round-0 base, so every non-worst CELL keeps it
     and the worst CELL is corrected ON TOP — the (ncol,)-field accumulation +
     grid.grid_shape_2d=(nCells,) resume path is grid-agnostic."""
+    from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.grids.voronoi import create_voronoi_mesh
 
@@ -2856,6 +2863,7 @@ def test_build_correction_campaign_mpas_resume_accumulates_on_cells():
         les_config=ColumnLESConfig(
             regime=_SMALL_REGIME, diagnosis_method="clubb_coefficient"),
         run_les_fn=_mock_run_les_sheared, n_worst=1,
+        initial_clubb=CLUBBLiteConfig(C_K=init_field),   # promoted FROM the field
         initial_field=init_field, start_round=7,
         checkpoint_callback=lambda r, res, f: calls.append((r, np.asarray(f).copy())),
         accept_only_if_improved=False)

@@ -26,7 +26,7 @@
 # tracer advection, runoff/SSS-restoring, ice, bottom drag, geothermal, iwm.
 # WHAT CANNOT MATCH (grid-intrinsic, list them with every result):
 #   tripole: --mesh eORCA1.2, --ew-cyclic-overlap, --C-smag-lap, --pgf-scheme
-#   MPAS   : --mpas-level 7, --mpas-lloyd 20, --mpas-vmix (not --tripole-vmix)
+#   MPAS   : --mpas-level 7, --mpas-lloyd 50, --mpas-vmix (not --tripole-vmix)
 #
 # SPLIT into one job PER ARM so they run in PARALLEL: sequential was
 # ~11.5h + ~11.5h = 23h against a 24h walltime, and the second arm's

@@ -396,25 +396,31 @@ def test_lindzen_grad_jit_vmap():
 def test_mcfarlane_finite_sign_heating_breaking():
     u, v, T, pf, ph, zf, zh, rho = _idealized_column()
     out = mcfarlane_gwd(u, v, T, pf, ph, zf, zh, rho, jnp.zeros(1), 1800.0,
-                        McFarlaneConfig(h_topo=500.0))
+                        McFarlaneConfig(h_topo=500.0), p_ref_half=ph[0])
     _assert_finite_and_bounded(out)
     _assert_drag_opposes_flow(out, u)
-    _assert_heating_nonneg(out)
+    # CAM6 heating = local KE return (>= 0) + zero-flux eddy diffusion of dse
+    # (redistributes, can be < 0 locally), so the invariant is the COLUMN
+    # heating, which equals the column KE loss and must be >= 0.
+    dpg = (ph[:, 1:] - ph[:, :-1]) / C.g
+    col_heat = float(jnp.sum(C.c_pd * dpg * out.dT_dt))
+    assert col_heat > 0.0, f"column frictional heating {col_heat:.3e} <= 0"
 
 
 def test_mcfarlane_momentum_sink_bounded_by_launch():
     u, v, T, pf, ph, zf, zh, rho = _idealized_column()
     cfg = McFarlaneConfig(h_topo=500.0)
-    out = mcfarlane_gwd(u, v, T, pf, ph, zf, zh, rho, jnp.zeros(1), 1800.0, cfg)
+    out = mcfarlane_gwd(u, v, T, pf, ph, zf, zh, rho, jnp.zeros(1), 1800.0, cfg,
+                        p_ref_half=ph[0])
     rho_sfc = float(rho[0, -1])
     U_sfc = float(jnp.abs(u[0, -1]))
     N = _surface_brunt_vaisala(T, pf, zf)
     # McFarlane / E3SM gw_oro_src launch: G_0 * rho * N * k * h_eff^2 * U with
-    # the Froude-number displacement cap h_eff^2 = min(h^2, fcrit2*(U/N)^2),
-    # then clipped to tau_max.
+    # the Froude-number displacement cap h_eff^2 = min(h^2, fcrit2*(U/N)^2)
+    # (CAM6: no upper clip on tau0; the effgw_oro = 0.125 efficiency only
+    # lowers the deposited stress further).
     h_eff_sq = min(cfg.h_topo ** 2, cfg.fcrit2 * (U_sfc / N) ** 2)
-    tau0 = min(cfg.G_0 * rho_sfc * N * cfg.k_wave * h_eff_sq * U_sfc,
-               cfg.tau_max)
+    tau0 = cfg.G_0 * rho_sfc * N * cfg.k_wave * h_eff_sq * U_sfc
     mom = _column_momentum(out, rho, zh)
     assert mom <= 1e-9, "column momentum is a source, not a sink"
     assert abs(mom) <= tau0 * (1.0 + 1e-6), (
@@ -437,16 +443,14 @@ def test_mcfarlane_froude_cap_active():
     # deeper-average (larger here, u_jet aloft).  The Froude-cap property
     # under test is orthogonal to the source-averaging choice.
     tall = McFarlaneConfig(h_topo=5000.0, use_depth_averaged_source=False)
-    out = mcfarlane_gwd(u, v, T, pf, ph, zf, zh, rho, jnp.zeros(1), 1800.0, tall)
+    out = mcfarlane_gwd(u, v, T, pf, ph, zf, zh, rho, jnp.zeros(1), 1800.0, tall,
+                        p_ref_half=ph[0])
     mom = abs(_column_momentum(out, rho, zh))
     # Uncapped launch (raw h^2) would be enormous; the Froude cap holds the
     # column sink below the capped launch, which is ~ (U/N)^2/h^2 smaller.
     raw_tau0 = tall.G_0 * rho_sfc * N * tall.k_wave * tall.h_topo ** 2 * U_sfc
-    capped_tau0 = min(
-        tall.G_0 * rho_sfc * N * tall.k_wave
-        * (tall.fcrit2 * (U_sfc / N) ** 2) * U_sfc,
-        tall.tau_max,
-    )
+    capped_tau0 = (tall.G_0 * rho_sfc * N * tall.k_wave
+                   * (tall.fcrit2 * (U_sfc / N) ** 2) * U_sfc)
     assert capped_tau0 < 0.05 * raw_tau0, "Froude cap not reducing the launch"
     assert mom <= capped_tau0 * (1.0 + 1e-6), (
         f"column sink {mom:.3e} exceeds Froude-capped launch {capped_tau0:.3e}"
@@ -456,7 +460,7 @@ def test_mcfarlane_froude_cap_active():
 def test_mcfarlane_critical_level_absorption():
     u, v, T, pf, ph, zf, zh, rho = _idealized_column(u_profile="critical")
     out = mcfarlane_gwd(u, v, T, pf, ph, zf, zh, rho, jnp.zeros(1), 1800.0,
-                        McFarlaneConfig(h_topo=500.0))
+                        McFarlaneConfig(h_topo=500.0), p_ref_half=ph[0])
     assert jnp.all(jnp.isfinite(out.du_dt)), "NaN at critical level"
     du = np.array(out.du_dt[0])
     u0 = np.array(u[0])
@@ -503,7 +507,7 @@ def test_mcfarlane_sharp_reversal_absorption():
     u = jnp.where(z_full < 20000.0, 15.0, -15.0)[None, :]
     out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full[None, :],
                         z_half[None, :], rho, jnp.zeros(1), 1800.0,
-                        McFarlaneConfig(h_topo=500.0))
+                        McFarlaneConfig(h_topo=500.0), p_ref_half=p_half[0])
     assert jnp.all(jnp.isfinite(out.du_dt)), "NaN at sharp critical level"
     du = np.array(out.du_dt[0])
     u0 = np.array(u[0])
@@ -525,13 +529,14 @@ def test_mcfarlane_grad_jit_vmap():
     u, v, T, pf, ph, zf, zh, rho = _idealized_column()
     cfg = McFarlaneConfig(h_topo=500.0)
     fn = lambda uu: mcfarlane_gwd(uu, v, T, pf, ph, zf, zh, rho, jnp.zeros(1),
-                                  1800.0, cfg)
+                                  1800.0, cfg, p_ref_half=ph[0])
     _assert_grad_finite_nonzero(lambda uu: jnp.sum(fn(uu).du_dt ** 2), u)
     eager = fn(u)
     jitted = jax.jit(fn)(u)
     np.testing.assert_allclose(np.array(jitted.du_dt), np.array(eager.du_dt),
                                rtol=1e-12, atol=1e-15)
-    _assert_real_vmap_parity(mcfarlane_gwd, cfg)
+    _assert_real_vmap_parity(
+        functools.partial(mcfarlane_gwd, p_ref_half=ph[0]), cfg)
 
 
 # ===========================================================================

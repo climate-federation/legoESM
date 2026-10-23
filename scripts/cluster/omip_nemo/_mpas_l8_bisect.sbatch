@@ -29,7 +29,7 @@ export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' 
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 R=$ROOT/results/omip_nemo
-BASE="--grid mpas --mpas-level 8 --mpas-lloyd 20 --nemo-vertical
+BASE="--grid mpas --mpas-level 8 --mpas-lloyd 50 --nemo-vertical
   --dm2dc --sw-rgb-chl --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5
   --sss-restore-bound-mmday 4 
   --years 0.0000685 --snapshot-every-days 1

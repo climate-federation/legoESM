@@ -101,6 +101,11 @@ M_H2O = 18.01528        # [g/mol] water
 # ==============================================================================
 epsilon = R_d / R_v              # Molecular weight ratio (~0.622)
 
+# CAM6 Goff-Gratch saturation reference temperatures (ESCOMP/CAM
+# cam_cesm2_1_rel_60, used by thermo.saturation_*_goff_gratch).
+T_triple_cam = 273.16           # [K] h2otrip = shr_const_mod.F90:37 SHR_CONST_TKTRIP
+T_boil_cam = 373.16             # [K] tboil, wv_saturation.F90:71
+
 # ==============================================================================
 # Cloud-microphysics material properties
 # (diffusional droplet growth: Super-Droplet Method, bin/bulk condensation)

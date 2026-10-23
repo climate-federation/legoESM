@@ -33,7 +33,7 @@ why this is done offline from one saved state.
 
 Usage (needs a compute node — it builds a level-7 mesh):
     python scripts/validate/ocean_fidelity/mpas_treguier_kappa_operators.py \
-        --restart <path/to/restart.npz> --level 7 --lloyd 20
+        --restart <path/to/restart.npz> --level 7 --lloyd 50
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--restart", required=True)
     p.add_argument("--level", type=int, default=7)
-    p.add_argument("--lloyd", type=int, default=20)
+    p.add_argument("--lloyd", type=int, default=50)
     p.add_argument("--s-max", type=float, default=1.0e-2)
     p.add_argument("--aei0", type=float, default=900.0)
     p.add_argument("--map", default=None,

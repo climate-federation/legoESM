@@ -11,7 +11,8 @@
    the state BEFORE the evaporation step, so the evaporation below sees
    ``T + heat/cp*dt`` and ``q + dqdt*dt``;
 3. ``zm_conv_evap`` -- Sundqvist rain evaporation with snow/melt fusion
-   heating (``cldfrc_fice``), on the updated state;
+   heating (``cldfrc_fice``), on the updated state, against CAM's mixed-phase
+   ``qsat`` (``svp_trans`` blend to ice between 0 and -20 degC);
 4. ``momtran`` -- Richter-Rasch convective momentum transport with the
    Boville-Bretherton kinetic-energy dissipation heating.
 
@@ -20,19 +21,22 @@ CAM6 has NO cloud-base mass-flux carry: ``mb`` is diagnosed every step, so
 ``mb`` [kg/m^2/s] at ``[:, -1]`` for diagnostics only (zeros aloft), which
 keeps the orchestrator's uniform carry schema.
 
-Not wired (host contract): the oracle also runs ``convtran`` on cloud
-liquid/ice.  ``_zm_cam6.convtran`` is ported and pinned, but this scheme
-receives no ``q_c``/``q_i`` and ``ConvectionOutput`` has no signed cloud
-transport slot (``dq_c_conv_dt`` is a non-negative source), so that call is
-left out.  Departures inside the kernels are listed in ``_zm_cam6``.
+5. ``convtran`` -- convective transport of the CAM6 ``convtran1``
+   constituents the host carries (``CONVTRAN1_TRACERS``; ``tracers=``), on the
+   input state, returned as signed column-conserving tendencies in
+   ``ConvectionOutput.tracer_transport``.  ``tracers=None`` or ``config.transport_cloud_tracers=False`` transports nothing.
+
+Departures inside the kernels are listed in ``_zm_cam6``.
 
 The rain field ``dq_r_conv_dt`` is CAM's ``ntprprd``: the NET divergence of
 the falling-precipitation flux (``prdprec - evpprec``), negative where rain
 from above evaporates.  It column-integrates to the surface rain and is not
 a per-layer condensate source; hosts must sum it (the bridges do, or refuse).
 
-Host inputs the oracle has that the convection contract lacks: ``pblh``
-(PBL height; ``None`` -> ``pbl_top_pa`` launch bound), the total cloud
+Host inputs beyond the convection contract: ``pblh`` (PBL height; the
+hydrostatic/MPAS bridge passes the turbulence scheme's lagged
+``PhysicsState.pblh``, CAM's pbuf ``pblh``; ``None`` -> ``pbl_top_pa``
+launch bound), the total cloud
 fraction for the evaporation (``cld_frac``; ``None`` -> 0, i.e. CAM's
 ``(1 - cldfrc)`` factor at its maximum), and ``land_frac``, which is required
 unless ``config.land_fraction == "none"`` (an explicit aquaplanet: ocean
@@ -47,6 +51,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.atmosphere.physics.convection._zm_cam6 import (
     Q_MIN_VAPOR,
+    convtran,
     momtran,
     zm_conv_evap,
     zm_convr,
@@ -57,7 +62,13 @@ from legoesm.atmosphere.physics.convection.mass_flux import compute_column_geome
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 
 
-__all__ = ("zhang_mcfarlane_convection",)
+__all__ = ("CONVTRAN1_TRACERS", "zhang_mcfarlane_convection")
+
+# CAM6 constituents with ``is_convtran1`` (micro_mg_cam.F90:416-435, MG2) that
+# zm_conv_intr.F90:829-846 transports with ``convtran``, mapped to legoESM
+# tracer names: CLDLIQ, CLDICE, NUMLIQ, NUMICE, RAINQM, SNOWQM, NUMRAI.  CAM's
+# NUMSNO has no legoESM tracer.
+CONVTRAN1_TRACERS = ("q_c", "q_i", "N_c", "N_i", "q_r", "q_s", "N_r")
 
 
 __physics_contract__ = {
@@ -71,6 +82,7 @@ __physics_contract__ = {
         "u": "m/s", "v": "m/s",
         "conv_prog_profile": "unused (CAM6 ZM carries no state)",
         "dt": "s", "land_frac": "1", "cld_frac": "1", "pblh": "m",
+        "tracers": "kg/kg or 1/kg (CAM6 convtran1 constituents, optional)",
     },
     "outputs": {
         "dT_dt": "K/s", "dq_v_dt": "kg/kg/s",
@@ -87,6 +99,8 @@ __physics_contract__ = {
                         "interfaces, top->bottom, bottom face 0)",
         "icwmr": "kg/kg (CAM ICWMRDP: in-cloud updraft condensate, 0 outside "
                  "convecting columns)",
+        "tracer_transport": "tracer units/s (convtran; signed, column-"
+                            "conserving; None without tracers)",
     },
     "sign_convention": (
         "z up; surface at [:, -1]. dT_dt > 0 warms (includes the fusion "
@@ -129,6 +143,7 @@ def zhang_mcfarlane_convection(
     cld_frac: jax.Array | None = None,
     pblh: jax.Array | None = None,
     pref_edge: jax.Array | None = None,
+    tracers: dict | None = None,
 ) -> tuple[ConvectionOutput, jax.Array]:
     """CAM6 Zhang-McFarlane deep convection tendencies for one step.
 
@@ -153,6 +168,9 @@ def zhang_mcfarlane_convection(
         Reference interface pressures ``(nlev+1,)`` [Pa]; CAM's
         40 hPa convection cap is fixed from these once.  ``None`` -> the cap
         follows each column's own interfaces (see ``_zm_cam6.zm_convr``).
+    tracers : dict, optional
+        ``{name: (ncol, nlev)}`` moist tracers to transport with ``convtran``
+        (the host passes the ``CONVTRAN1_TRACERS`` it carries).
     """
     ncol, nlev = T.shape
     dtype = T.dtype
@@ -213,6 +231,15 @@ def zhang_mcfarlane_convection(
     else:
         du_dt_conv = dv_dt_conv = None
 
+    transport = None
+    if tracers is not None and config.transport_cloud_tracers:
+        # zm_conv_intr.F90:842: convtran on state1 (ZM's T/Q/U/V updates do
+        # not touch these constituents, so this is the input state).
+        transport = {
+            name: convtran(jnp.asarray(c, dtype).reshape(ncol, nlev), conv.mu, conv.md,
+                           conv.du, conv.eu, conv.ed, conv.dp, conv.jt, conv.maxg, conv.msg)
+            for name, c in tracers.items()}
+
     out = ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
@@ -234,6 +261,7 @@ def zhang_mcfarlane_convection(
         mass_flux_up=jnp.concatenate(
             [conv.mc * 100.0 / constants.g, jnp.zeros((ncol, 1), dtype)], axis=1),
         icwmr=jnp.where(conv.ideep[:, None], conv.ql, 0.0),
+        tracer_transport=transport,
     )
     mb_kg = conv.mb * 100.0 / constants.g
     conv_prog_profile_new = jnp.zeros_like(conv_prog_profile).at[:, -1].set(mb_kg)

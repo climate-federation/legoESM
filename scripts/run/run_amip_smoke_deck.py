@@ -520,7 +520,7 @@ def main(argv: list[str] | None = None) -> int:
         cmd += [
             "--aerosol-forcing", "external",
             "--aerosol-file", str(files["aerosol"]),
-            "--aerosol-reference-aod", "0.05",
+            "--aerosol-reference-aod", "0.03",
         ]
     # Aerosol-CCN + dynamic albedo run through the coupled physics
     # pipeline, which only the cubed-sphere / lat-lon paths use — the
@@ -550,13 +550,15 @@ def main(argv: list[str] | None = None) -> int:
               f"(radiation={args.radiation!r}, "
               f"grid={args.grid_type}/{args.discretization}; needs "
               "rrtmg + cubed_sphere/latlon).")
-    # The dycore energy fixer runs on MPAS only here (F15, vote V11-C);
-    # elsewhere the open sink is accepted explicitly, as in run_rce.py.
+    # The dycore energy fixer runs on every lane here but spectral (F15b);
+    # there the open sink is accepted explicitly, as in run_rce.py.
     # An --extra that picks the lane or the fixer decides it instead (the
     # FV3-duo column lane runs the fixer; run_amip refuses unwired lanes).
     _extra_keys = {a.split("=")[0] for a in (args.extra or [])}
-    if not _mpas and not _extra_keys & {
-            "--discretization", "--fv3-duo-column-lane",
+    _spectral = (args.grid_type == "gaussian"
+                 or args.discretization == "spectral")
+    if _spectral and not _extra_keys & {
+            "--discretization", "--column-lane", "--fv3-duo-column-lane",
             "--energy-fixer", "--no-energy-fixer"}:
         cmd.append("--no-energy-fixer")
     # ``volcanic_active`` requires ``aerosol_active`` (see top of main()

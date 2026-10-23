@@ -135,7 +135,8 @@ Ice supersaturation is physical and expected: gSAM `MICRO_SAM1MOM/cloud.f90`
 `rh_homo = 2.583 - T/207.8` (~1.45 at 235 K, ~1.67 at 190 K) before
 homogeneous freezing, withdrawing the allowance where cloud ice already exists.
 That ramp is implemented in `thermo.homogeneous_freezing_rh_factor` and applied
-to the DEPOSITION target (not the nucleation gate) in morrison/thompson/p3; it
+to the DEPOSITION target (not the nucleation gate) in morrison/thompson (the
+WRF P3 port has no `rh_homo` allowance); it
 is on by default and disabled per scheme with
 `homogeneous_ice_supersaturation=False`.
 

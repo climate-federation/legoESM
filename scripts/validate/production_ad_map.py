@@ -264,13 +264,21 @@ def main(argv=None):
         from legoesm.training.aimip_params import (
             _splice_scheme_overrides,
             aimip_active_scheme_keys,
+            resolved_inactive_fields,
         )
+        from legoesm.training.inert_params import assert_no_inert
         from legoesm.training.param_collector import build_trainable_params
         keys = aimip_active_scheme_keys(exp["phys_cfg"])
+        # the production trainable set: knobs the resolved options never read
+        # are frozen out by name, the rest must carry gradient (gate below)
+        frozen = resolved_inactive_fields(
+            exp["phys_cfg"], subgrid_orography=getattr(
+                drv.grid, "subgrid_topo_stddev", None) is not None)
         tp = build_trainable_params(active_scheme_keys=keys, tier="core",
-                                    dtype=jnp.float64)
+                                    dtype=jnp.float64,
+                                    exclude=tuple(sorted(frozen)))
         print(f"active scheme keys: {sorted(keys)}; {len(tp.raw_values)} "
-              "core parameters", flush=True)
+              f"core parameters; frozen out: {sorted(frozen)}", flush=True)
 
         def f(raw):
             trial = type(tp)(raw_values=raw, constraints=tp.constraints)
@@ -288,15 +296,23 @@ def main(argv=None):
             np.shape(x))) for k, x in raw0.items()}
         if not a.per_knob:
             grad_check(f, raw0, dv, 1e-3, "physics_wrt_core_params")
-            return 0
+        # per knob: reverse AD vs central FD at two steps (forward-mode jvp
+        # is unavailable: the shared Thomas solver is a custom_vjp).  FD
+        # stable in h and != AD -> the graph drops a dependence (stop_gradient,
+        # degenerate branch, custom_vjp); FD that moves with h -> a kink.
         fj = jax.jit(f)
-        for k in sorted(raw0):   # per knob: AD vs central FD at h = 1e-3
-            hk = 1e-3
-            up = dict(raw0, **{k: raw0[k] + hk})
-            dn = dict(raw0, **{k: raw0[k] - hk})
-            fd = float((fj(up) - fj(dn)) / (2 * hk))
+        for k in (sorted(raw0) if a.per_knob else ()):
+            fds = []
+            for hk in (1e-2, 1e-4):
+                up = dict(raw0, **{k: raw0[k] + hk})
+                dn = dict(raw0, **{k: raw0[k] - hk})
+                fds.append(float((fj(up) - fj(dn)) / (2 * hk)))
             ad = float(np.sum(np.asarray(g[k])))
-            print(f"PARAMFD {k} ad={ad:.6e} fd={fd:.6e}", flush=True)
+            print(f"PARAMFD {k} ad={ad:.6e} fd1e-2={fds[0]:.6e} "
+                  f"fd1e-4={fds[1]:.6e}", flush=True)
+        # gate LAST, so the diagnostics above are printed for a dead knob too
+        assert_no_inert(g)
+        print("NO_INERT_GATE passed", flush=True)
     elif a.stage == "dycore":
         tm = model.mass_target(state0)
 

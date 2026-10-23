@@ -1,6 +1,6 @@
 """Differentiable production MPAS step / segment (review F9, design D3 subset).
 
-The production AMIP deck runs ``ModelDriver._run_mpas``: an eager per-step
+The production AMIP deck runs ``ModelDriver._run_column``: an eager per-step
 Python loop that ``jax.grad`` cannot enter.  Its per-step core is already pure
 (``MPASPrimitiveEquationModel.step_pure``: RK dynamics, operator-split physics,
 dry-mass fixer, positivity), so nothing is re-implemented here.

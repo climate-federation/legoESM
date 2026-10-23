@@ -100,7 +100,6 @@ atm.turb.TurbulentEDMFConfig.Pr_t: 0.3098366946
 atm.turb.TurbulentEDMFConfig.a_updraft: 0.05171694792
 atm.turb.TurbulentEDMFConfig.entrainment_rate: 0.001894258515
 atm.turb.TurbulentEDMFConfig.l_mix_max: 210.4144629
-atm.turb.TurbulentEDMFConfig.parcel_dT: 0.3328939937
 
 # --- YSUConfig ---
 atm.turb.YSUConfig.Pr_t: 0.5206585342

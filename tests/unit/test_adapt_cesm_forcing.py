@@ -62,6 +62,30 @@ def test_volcanic_gets_cf_time_and_the_loader_anchors_it(tmp_path):
     assert len(mid) == 24
 
 
+def test_eth_volcanic_without_date_is_dated_from_its_month_index(tmp_path):
+    """ETH v4 ``CMIP_ECHAM6_radiation_v4.nc``: no ``date``, float 1-based
+    ``month`` index "month starting from 1850 01" (index 1 = 1850-01)."""
+    m = _mod()
+    eth = _volc_ds().drop_vars("date").isel(month=slice(12, None))  # 1850-01..1851-12
+    eth = eth.assign_coords(month=("month", np.arange(1.0, 25.0),
+                                   {"units": "month starting from 1850 01"}))
+    out = m.adapt_volcanic(eth, 1851, 1851)
+    assert out.sizes["time"] == 12
+    t = out["time"].values
+    assert t[0] == pytest.approx(365.0 + 15.5)             # 1851-01 mid-month
+    assert t[-1] == pytest.approx(365.0 + 334 + 15.5)      # 1851-12
+    assert float(out["ext_sun"].isel(time=0).mean()) == 24.0   # source index 12
+    path = tmp_path / "eth.nc"
+    out.to_netcdf(path)
+    from legoesm.forcing.external import _load_volcanic_auto_anchored
+    _, first_date, _, _ = _load_volcanic_auto_anchored(str(path))
+    assert (first_date.year, first_date.month) == (1851, 1)
+    for units in ("1", "month starting from 1850 13"):
+        bad = eth.assign_coords(month=("month", np.arange(1.0, 25.0), {"units": units}))
+        with pytest.raises(ValueError, match="month starting from"):
+            m.adapt_volcanic(bad, 1851, 1851)
+
+
 def test_volcanic_rejects_gaps_and_empty_windows():
     m = _mod()
     with pytest.raises(ValueError, match="no records"):
@@ -69,6 +93,12 @@ def test_volcanic_rejects_gaps_and_empty_windows():
     gap = _volc_ds().isel(month=[0, 1, 3])
     with pytest.raises(ValueError, match="consecutive"):
         m.adapt_volcanic(gap, 1849, 1849)
+    with pytest.raises(ValueError, match="not all of"):
+        m.adapt_volcanic(_volc_ds(), 1851, 1852)       # file ends 1851-12
+    bad_date = _volc_ds()
+    bad_date["date"] = bad_date["date"] - 100          # months 0..11
+    with pytest.raises(ValueError, match="outside 1..12"):
+        m.adapt_volcanic(bad_date, 1850, 1850)
 
 
 def _ozone_ds():

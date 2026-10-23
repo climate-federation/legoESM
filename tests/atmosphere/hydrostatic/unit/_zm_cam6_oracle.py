@@ -24,7 +24,12 @@ import numpy as np
 from scipy.optimize import brentq
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_vapor_pressure
+from legoesm.thermo import (
+    saturation_mixing_ratio,
+    saturation_vapor_pressure,
+    saturation_vapor_pressure_goff_gratch,
+    saturation_vapor_pressure_ice_goff_gratch,
+)
 
 _w_sat_jit = jax.jit(saturation_mixing_ratio)
 
@@ -39,6 +44,30 @@ def qsat_pa(t, p_pa):
     """
     w = float(_w_sat_jit(np.float64(t), np.float64(p_pa)))
     return w / (1.0 + w)
+
+
+def qsat_trans_pa(t, p_pa):
+    """CAM ``qsat`` (wv_saturation.F90:458-503), the call in ``zm_conv_evap``,
+    written out line for line: ``estblf`` (:306-321) on the 1-K table
+    ``estbl(i) = svp_trans(tmin + i - 1)`` (:216-226) of ``wv_sat_svp_trans``
+    (wv_sat_methods.F90:326-361, ttrice = 20 K) over CAM's Goff-Gratch water /
+    ice curves, then ``wv_sat_svp_to_qsat`` (:180-193)."""
+    ttrice, tmin, tmax = 20.0, 127.16, 375.16   # wv_saturation.F90:79-82
+
+    def svp_trans(tt):
+        es = float(saturation_vapor_pressure_goff_gratch(np.float64(tt))) \
+            if tt >= tfreez - ttrice else 0.0
+        if tt < tfreez:
+            esice = float(saturation_vapor_pressure_ice_goff_gratch(np.float64(tt)))
+            weight = 1.0 if (tfreez - tt) > ttrice else (tfreez - tt) / ttrice
+            es = weight * esice + (1.0 - weight) * es
+        return es
+    t_tmp = max(min(float(t), tmax) - tmin, 0.0)
+    i = int(t_tmp)
+    weight = t_tmp - math.trunc(t_tmp)
+    es = (1.0 - weight) * svp_trans(tmin + i) + weight * svp_trans(tmin + i + 1)
+    p = float(p_pa)
+    return 1.0 if p - es <= 0.0 else eps1 * es / (p - (1.0 - eps1) * es)
 
 
 def qsat_hpa(t, p_hpa):
@@ -726,7 +755,7 @@ def zm_conv_evap(t0, pmid0, pdel0, q0, prdprec0, cldfrc0, deltat, prec_in, ke):
     ntprprd, ntsnprd, tend_s, tend_q = _arr(pver), _arr(pver), _arr(pver), _arr(pver)
     evpvint = 0.0
     for k in range(1, pver + 1):
-        qs = qsat_pa(t[k], pmid[k])
+        qs = qsat_trans_pa(t[k], pmid[k])
         fice, fsnow_conv = cldfrc_fice(t[k])
         if t[k] > tfreez:
             flxsntm = 0.0

@@ -197,14 +197,18 @@ def weno5_node_to_face_for_rrtmgp(
 
   # Deal with boundaries.  Here, assume a possible Dirichlet lower BC and a
   # Neumann upper BC.
-  # These two `if`s only deal with the face value on the halos, not interior
-  # faces.  Note: we really should be assigning the lower BC to the wall-face,
-  # not a halo node, but let's fix that up later.
   hw = 1  # Assumed halo width.
   if f_lower_bc is not None:
-    # Assign value in the halo ...
+    # Dirichlet value on the wall face x_{hw-1/2} (face index hw), the bottom
+    # face of the first interior cell.  For RRTMGP this is the surface level
+    # (tlev at the surface).  The CAM6 host sets it from the surface upward LW,
+    # tint(pverp) = (lwup/stebol)**0.25 (rrtmg_state.F90), i.e. T_sfc for a
+    # unit-emissivity surface.
+    # The halo face (index 0) keeps the value it had before this fix.
     f_face_plus = f_face_plus.at[:, :, 0].set(f_lower_bc)
     f_face_minus = f_face_minus.at[:, :, 0].set(f_lower_bc)
+    f_face_plus = f_face_plus.at[:, :, hw].set(f_lower_bc)
+    f_face_minus = f_face_minus.at[:, :, hw].set(f_lower_bc)
 
   if neumann_upper_bc:
     f_face_minus = f_face_minus.at[:, :, -hw].set(f_node[:, :, -hw - 1])

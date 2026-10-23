@@ -1624,7 +1624,8 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
     def _tile_tendency(u_d_t, v_d_t, T_t, p_s_t, phis_t,
                        cosa_c_t, dxe_t, dye_t, ar_t, gc, fco_t, cosau_t,
                        dx_t, dy_t, ca_t, sa_t, cap_t, sap_t, offs,
-                       q_pack_t=None, column_physics_fn=None):
+                       q_pack_t=None, column_physics_fn=None,
+                       surface_fn=None, T_sfc_t=None):
         # ---- cc winds: dgrid_to_center_vector for B/thermo (within-face, NO
         #      halo); interp_corner_to_center (batched) for vertical advection.
         u_cell, v_cell = dgrid_to_center_vector(u_d_t, v_d_t)  # (1, nl, nl, nlev)
@@ -1760,6 +1761,15 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
         adiabatic = adiabatic + kappa * T_t * v_dot_grad_lnps
         dT_dt = horiz_adv_T + vert_adv_T + adiabatic
 
+        # Injected surface exchange: lowest-level cc winds from the SAME
+        # corner->centre transform the cell-centre exit state uses.
+        dq_v_sfc = None
+        if surface_fn is not None:
+            dT_sfc, dq_v_sfc = surface_fn(
+                T_t, p_s_t, None if q_pack_t is None else q_pack_t[..., 0],
+                u_cc_va[..., -1], v_cc_va[..., -1], T_sfc_t)
+            dT_dt = dT_dt + dT_sfc
+
         if q_pack_t is None:
             return du_d_dt, dv_d_dt, dT_dt, dp_s_dt
 
@@ -1781,6 +1791,8 @@ def _build_hydro_tile_tendency_fns(coord, cdgrid, nl: int, nlev: int,
         vert_adv_q = jnp.moveaxis(vadv_q_lead, 0, -1)     # (1, nl, nl, nlev, nt)
         dT_k, dq_v, dq_c, dq_r = column_physics_fn(
             T_t, p_s_t, q_pack_t[..., 0], q_pack_t[..., 1], q_pack_t[..., 2])
+        if dq_v_sfc is not None:
+            dq_v = dq_v + dq_v_sfc
         phys_pack = jnp.stack([dq_v, dq_c, dq_r], axis=-1)  # (1, nl, nl, nlev, 3)
         dq_pack = dq_horiz + vert_adv_q + phys_pack
         return du_d_dt, dv_d_dt, dT_dt + dT_k, dp_s_dt, dq_pack
@@ -2311,7 +2323,7 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
         mesh, cdgrid, coord, n: int, kt: int, nlev: int, *,
         p_floor: float, dt: float,
         sponge_sigma: float = 0.0, sponge_tau_sec: float = 0.0,
-        column_physics_fn=None, fix_mass: bool = False):
+        column_physics_fn=None, fix_mass: bool = False, surface_fn=None):
     """Blocked-I/O tiled SSP-RK3 STEP on a ``(6, kt, kt)`` mesh — the
     PRODUCTION (closed-loop) variant of the step stages above.
 
@@ -2329,6 +2341,11 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
     ``phis``, ``q_pack``) plain global shapes sharded over the same axes.
     ``fix_mass=True`` appends the serial post-step telescoping dry-mass
     fixer in-stage (one extra psum/step).  ``dt`` [s] static (closed over).
+
+    ``surface_fn`` (optional): ``surface_fn(T_t, p_s_t, q_v_t | None,
+    u_low, v_low, T_sfc_t) -> (dT, dq_v | None)`` added to every RK stage's
+    tendency; the step then takes ``T_sfc`` cc ``(6, n, n)`` (read-only,
+    not returned): ``step(..., T_sfc=...)``.
     """
     from legoesm.parallel.cubesphere_exchange import (
         make_tiled_pad_body, make_tiled_pad_vector_body)
@@ -2342,6 +2359,7 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
     _dt = float(dt)
     _phys = column_physics_fn
     _moist = _phys is not None
+    _sfc = surface_fn
     _fix_mass = bool(fix_mass)
     acc = conservation_accumulator()
 
@@ -2373,7 +2391,8 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
     co = P("face", "tile_i", "tile_j")             # cc 2D
     cz5 = P("face", "tile_i", "tile_j", None, None)  # q_pack cc 5D
 
-    state_specs = (cz, cz, cz, co, co) + ((cz5,) if _moist else ())
+    state_specs = ((cz, cz, cz, co, co) + ((cz5,) if _moist else ())
+                   + ((co,) if _sfc is not None else ()))
     out_state_specs = (cz, cz, cz, co) + ((cz5,) if _moist else ())
 
     @partial(shard_map, mesh=mesh,
@@ -2392,6 +2411,9 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
         else:
             u_d, v_d, T, p_s, phis = args[:5]
             rest = args[5:]
+        T_sfc = None
+        if _sfc is not None:
+            T_sfc, rest = rest[0], rest[1:]
         (cosa_c, dxe, dye, ar, c00, c01, c10, c11, fco, cosau,
          dx_, dy_, ca, sa, capf, sapf, offs) = rest
 
@@ -2414,7 +2436,8 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
         if _moist:
             def _F(s):
                 return _tile_tendency(s[0], s[1], s[2], s[3], phis, *mt,
-                                      q_pack_t=s[4], column_physics_fn=_phys)
+                                      q_pack_t=s[4], column_physics_fn=_phys,
+                                      surface_fn=_sfc, T_sfc_t=T_sfc)
 
             ud3, vd3, T3, ps3, q3 = _ssp_rk3_tile_step(
                 (u_d, v_d, T, p_s, q), _F, _dt)
@@ -2425,7 +2448,8 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
             out_rest = (q3,)
         else:
             def _F(s):
-                return _tile_tendency(s[0], s[1], s[2], s[3], phis, *mt)
+                return _tile_tendency(s[0], s[1], s[2], s[3], phis, *mt,
+                                      surface_fn=_sfc, T_sfc_t=T_sfc)
 
             ud3, vd3, T3, ps3 = _ssp_rk3_tile_step(
                 (u_d, v_d, T, p_s), _F, _dt)
@@ -2441,7 +2465,11 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
 
     blk = kt * (nl + 1)
 
-    def step(u_d, v_d, T, p_s, phis, q=None):
+    def step(u_d, v_d, T, p_s, phis, q=None, T_sfc=None):
+        if (_sfc is not None) != (T_sfc is not None):
+            raise ValueError(
+                "make_tiled_fv3_hydrostatic_step_blocked_2d: T_sfc must be "
+                "passed iff surface_fn was given.")
         if _moist != (q is not None):
             raise ValueError(
                 "make_tiled_fv3_hydrostatic_step_blocked_2d: q_pack must be "
@@ -2452,7 +2480,10 @@ def make_tiled_fv3_hydrostatic_step_blocked_2d(
                       v_d=(v_d, (blk, blk, nlev)), T=(T, (n, n, nlev)),
                       p_s=(p_s, (n, n)), phis=(phis, (n, n)),
                       **({"q": (q, (n, n, nlev, 3))} if _moist else {}))
-        args = (u_d, v_d, T, p_s, phis) + ((q,) if _moist else ())
+        if _sfc is not None:
+            _check_shapes(n, T_sfc=(T_sfc, (n, n)))
+        args = ((u_d, v_d, T, p_s, phis) + ((q,) if _moist else ())
+                + ((T_sfc,) if _sfc is not None else ()))
         return _step_body(*args,
                           cosa_corner, dx_edge_y, dy_edge_x, area,
                           gc00, gc01, gc10, gc11, f_corner, cosa_u,

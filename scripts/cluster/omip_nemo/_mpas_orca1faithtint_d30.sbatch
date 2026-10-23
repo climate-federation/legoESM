@@ -114,7 +114,7 @@ JAX_PLATFORMS=cpu $PY -m pytest -q tests/ocean/unit/test_core2_corrected_cache_d
 rc=${PIPESTATUS[0]}; [ $rc -eq 0 ] || { echo "FATAL: gate rc=$rc"; exit 1; }
 
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas \
-  --mpas-level 7 --mpas-lloyd 20 --mpas-vmix tke --K-zeta-bih 0 \
+  --mpas-level 7 --mpas-lloyd 50 --mpas-vmix tke --K-zeta-bih 0 \
   --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
   --tke-kappa-convention veros_sqrte \
   --dt 150 --nemo-vertical --partial-cell --pgf-scheme ${PGF:-smc03} \

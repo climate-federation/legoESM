@@ -1419,7 +1419,7 @@ def test_column_surface_kinematic_fluxes_cesm_water_at_the_constant_it_charges()
     _, _, sh, lh, _ = compute_surface_fluxes(
         jnp.atleast_1d(u[-1]), jnp.atleast_1d(v[-1]), jnp.atleast_1d(T[-1]),
         jnp.atleast_1d(q[-1]), jnp.atleast_1d(sst), jnp.atleast_1d(q_sfc),
-        jnp.atleast_1d(rho), cfg)
+        jnp.atleast_1d(rho), cfg, t_bot=jnp.atleast_1d(T[-1]))
     assert float(lh[0]) > 1.0
     np.testing.assert_allclose(float(w_qv), float(lh[0] / (rho * constants.L_v)), rtol=1e-12)
     exner_inv = (constants.p_ref / p_s) ** constants.kappa

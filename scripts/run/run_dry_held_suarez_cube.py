@@ -59,7 +59,7 @@ def main():
         # Self-contained default: no site paths, no external files.
         cfg = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=args.n),
-            dycore=DycoreConfig(energy_fixer=False),  # not wired here (F15, vote V11-C)
+            dycore=DycoreConfig(energy_fixer=False),  # HS benchmark = dycore + forcing, no fixer (F15b vote V4)
         )
     else:
         # strict=True: a dropped key here would silently run a DIFFERENT

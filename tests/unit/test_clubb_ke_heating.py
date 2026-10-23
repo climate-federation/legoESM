@@ -116,10 +116,16 @@ def test_clubb_returns_its_ke_loss_as_heat(prognostic, monkeypatch):
 
     dt <= clubb_dt keeps the prognostic path at one sub-step, so the momentum
     tendency is identical with the heating on or off (it cannot feed back
-    within the step) and the comparison isolates the closure."""
+    within the step) and the comparison isolates the closure.  The prognostic
+    column energy fixer (CAM clubb_do_energyfix, test_clubb_column_budget.py)
+    would return the same column total in BOTH arms, so it is zeroed here in
+    both to isolate the local heating."""
     kw = _column()
     dt = 150.0
-    cfg_on = CLUBBConfig(prognostic=prognostic, clubb_dt=300.0)
+    cfg_on = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=prognostic, clubb_dt=300.0)
+    monkeypatch.setattr(clubb_mod, "column_energy_fixer_heating",
+                        lambda r, m, w: jnp.zeros_like(w * r[..., None]))
+    jax.clear_caches()
     on = _run(kw, cfg_on, dt)
     off = _run(kw, cfg_on, dt, heating=False, monkeypatch=monkeypatch)
     np.testing.assert_array_equal(np.asarray(on.du_dt), np.asarray(off.du_dt))
@@ -138,7 +144,7 @@ def test_ke_heating_is_differentiable(prognostic, monkeypatch):
     gradient (d/du of the column heating differs from the heating-off path)."""
     kw = _column(ncol=2, nlev=16)
     dt = 150.0
-    cfg = CLUBBConfig(prognostic=prognostic, clubb_dt=300.0)
+    cfg = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=prognostic, clubb_dt=300.0)
 
     def loss(u, heating):
         out = _run(dict(kw, u=u), cfg, dt, heating, monkeypatch)

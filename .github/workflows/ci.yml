@@ -183,6 +183,15 @@ jobs:
             --tb=short -q -n 4 --dist loadfile
         shell: bash
         timeout-minutes: 30
+      - name: SFNO restart tests (x64)
+        # The unit tier runs in fp32, where these skip: Gaussian grids need
+        # JAX_ENABLE_X64.  Without this step they never execute in CI.
+        env:
+          JAX_ENABLE_X64: "1"
+        run: |
+          python -m pytest tests/unit/test_sfno_refuses_latlon_start.py \
+            tests/unit/test_latlon_face_wind_restart.py \
+            --timeout=600 --tb=short -q
       - name: FV3-native grid fidelity tests (phase 1)
         # Source-derived FV3 gnomonic_ed oracle + static grid-provenance
         # gates. tests/grids/ has no other CI job; without this step the

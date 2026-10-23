@@ -11,7 +11,8 @@
 3. The MPAS turbulence bridge applies the two switches (the height switch also
    hands the solver the potential temperature at the input height, COARE's
    dry-adiabatic correction): with
-   ``ocean_q_sfc_saline`` the ocean q_sfc it uses is 0.98*q_sat(SST, p_s),
+   ``ocean_q_sfc_saline`` the ocean q_sfc it uses is 0.98*q_sat(SST, p_s)
+   (saturation SPECIFIC humidity),
    and with ``z_ref_model_level`` its latent flux drops -- checked by CALLING
    the bridge with a spy on compute_surface_fluxes.  Fails when the bridge
    ignores the switches.
@@ -102,12 +103,17 @@ def test_mpas_bridge_applies_both_switches():
 
     off = run(False, False)
     assert off["z_ref"] is None
-    np.testing.assert_allclose(off["q_sfc"], np.asarray(
-        saturation_mixing_ratio(sst, sigma.pressure_at_full(p_s)[:, -1])), rtol=1e-12)
+    # fresh-water base: saturation SPECIFIC humidity (water convention part
+    # B, f547b56f3; this expectation had stayed on the mixing ratio)
+    from legoesm.thermo import saturation_specific_humidity
+    np.testing.assert_allclose(off["q_sfc"], np.asarray(saturation_specific_humidity(
+        sst, sigma.pressure_at_full(p_s)[:, -1])), rtol=1e-12)
     sal = run(False, True)
     ocean = f_land < 0.5
+    # SPECIFIC humidity, as the air humidity it is differenced with (CESM
+    # ssq = 0.98 x saturation specific humidity); the mixing ratio was +1.5 %
     np.testing.assert_allclose(sal["q_sfc"][ocean], 0.98 * np.asarray(
-        saturation_mixing_ratio(sst, p_s))[ocean], rtol=1e-6)   # blend round-off
+        saturation_specific_humidity(sst, p_s))[ocean], rtol=1e-6)   # blend round-off
     # the LAND cells' humidity is untouched by the ocean switch (codex P1)
     np.testing.assert_array_equal(sal["q_sfc"][~ocean], off["q_sfc"][~ocean])
     hgt = run(True, False)

@@ -21,7 +21,9 @@ _ATM_TEMPLATES = _REPO_ROOT / "config" / "templates" / "atmosphere"
 
 
 def _template_paths() -> list[Path]:
-    return sorted(_ATM_TEMPLATES.glob("*.yaml"))
+    return sorted([*_ATM_TEMPLATES.glob("*.yaml"),
+                   *(_ATM_TEMPLATES.parent / "2d").glob("*.yaml"),
+                   *(_REPO_ROOT / "config").glob("williamson_test*.yaml")])
 
 
 def _matrix_case_pairs() -> set[tuple[str, str]]:
@@ -34,7 +36,10 @@ def _matrix_case_pairs() -> set[tuple[str, str]]:
 
 class TestAtmosphereTemplates:
     def test_templates_exist(self):
-        assert _template_paths(), f"no atmosphere setup templates under {_ATM_TEMPLATES}"
+        names = {p.name for p in _template_paths()}
+        assert {"held_suarez.yaml", "baroclinic_wave.yaml", "williamson2_sw.yaml",
+                "williamson_test2.yaml",
+                "williamson_test5.yaml"} <= names, names
 
     @pytest.mark.parametrize("path", _template_paths(), ids=lambda p: p.name)
     def test_validates_and_runs(self, path):

@@ -306,3 +306,67 @@ def test_as_dict_respects_declared_finite_bounds() -> None:
                 f"{name} ({transform}) -> {arr.reshape(-1)[:3]} escaped declared "
                 f"bounds [{lo}, {hi}] at raw={sign:+}e4"
             )
+
+
+@pytest.mark.parametrize("cfg_kw,expect", [
+    (None, 500.0e-6),                                   # class default (mg)
+    ({"morrison_flavor": "mg"}, 500.0e-6),
+    ({"morrison_flavor": "sam"}, 250.0e-6),
+    ({"morrison_flavor": "sam", "ice_snow_d_auto": 300.0e-6}, 300.0e-6),
+])
+def test_unset_dcs_seed_follows_the_run_flavour(cfg_kw, expect) -> None:
+    """The trainable Morrison DCS starts where the run's scheme resolves it:
+    500 um under mg, 250 um under sam, an explicit value as given (the same
+    resolver as resolve_morrison_flavor)."""
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    key = "atm.micro.MorrisonConfig"
+    p = build_trainable_params(
+        tier="extended", active_scheme_keys={key},
+        scheme_configs=None if cfg_kw is None else {key: MorrisonConfig(**cfg_kw)})
+    np.testing.assert_allclose(
+        float(p.as_dict()[f"{key}.ice_snow_d_auto"]), expect, rtol=1e-5)
+
+
+def test_scheme_configs_refuses_wrong_type_and_unreached_scheme() -> None:
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MorrisonConfig, ThompsonConfig)
+    key = "atm.micro.MorrisonConfig"
+    with pytest.raises(TypeError, match="not the MorrisonConfig"):
+        build_trainable_params(tier="extended", active_scheme_keys={key},
+                               scheme_configs={key: ThompsonConfig()})
+    with pytest.raises(ValueError, match="reached no trainable"):
+        build_trainable_params(
+            tier="extended", active_scheme_keys={key},
+            scheme_configs={key: MorrisonConfig(),
+                            "atm.micro.ThompsonConfig": ThompsonConfig()})
+
+
+def test_wrong_config_type_refused_even_when_dcs_not_seeded() -> None:
+    from legoesm.atmosphere.physics.microphysics.config import ThompsonConfig
+    key = "atm.micro.MorrisonConfig"
+    with pytest.raises(TypeError, match="not the MorrisonConfig"):
+        build_trainable_params(tier="extended", active_scheme_keys={key},
+                               exclude=(f"{key}.ice_snow_d_auto",),
+                               scheme_configs={key: ThompsonConfig()})
+
+
+def test_wb_aimip_bundle_seeds_dcs_from_the_deck_pins() -> None:
+    """scale_build's run config: a deck pinning the sam flavour seeds 250 um."""
+    from legoesm.training.scale_build import _pinned_morrison_config
+    key = "atm.micro.MorrisonConfig"
+    for pins, expect in (({}, 500.0e-6), ({"morrison_flavor": "sam"}, 250.0e-6)):
+        p = build_trainable_params(
+            tier="extended", active_scheme_keys={key},
+            scheme_configs=_pinned_morrison_config({key}, {key: pins}))
+        np.testing.assert_allclose(
+            float(p.as_dict()[f"{key}.ice_snow_d_auto"]), expect, rtol=1e-5)
+    assert _pinned_morrison_config({"atm.micro.KesslerConfig"}, {}) is None
+
+
+def test_unresolvable_unset_dcs_is_a_clear_error() -> None:
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    key = "atm.micro.MorrisonConfig"
+    with pytest.raises(ValueError, match="resolver gives no value"):
+        build_trainable_params(
+            tier="extended", active_scheme_keys={key},
+            scheme_configs={key: MorrisonConfig(morrison_flavor="other")})

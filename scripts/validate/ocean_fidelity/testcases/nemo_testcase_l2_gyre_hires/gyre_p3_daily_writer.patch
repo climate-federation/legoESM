@@ -1,0 +1,13 @@
+--- a/stprk3.F90
++++ b/stprk3.F90
+@@ -86,7 +86,9 @@
+       !
+       ! Lane-1 certified oracle: exact step-entry Nbb state.  This is a
+       ! write-only instrument; no prognostic array is assigned here.
+-      IF( lwp .AND. kstp >= nit000 .AND. kstp <= nit000 + 59 ) THEN
++      ! The daily copy writes day-boundary states at kt=1,25,...,721.
++      IF( lwp .AND. kstp >= nit000 .AND. kstp <= nit000 + 720 .AND. &
++         & ( kstp == nit000 .OR. MOD( kstp - nit000, 24 ) == 0 ) ) THEN
+          IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'lane1 trajectory requires 64-bit wp' )
+          WRITE(cl_traj,'("oracle_step_entry_kt",I8.8,".bin")') kstp
+          OPEN( NEWUNIT=itraj, FILE=TRIM(cl_traj), ACCESS='STREAM', FORM='UNFORMATTED', &

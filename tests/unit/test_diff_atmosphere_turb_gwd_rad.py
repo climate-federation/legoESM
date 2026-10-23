@@ -218,7 +218,17 @@ def _gwd_leaf(scheme):
     from legoesm.atmosphere.physics.gravity_wave_drag.integration import get_gwd_fn
 
     _name, fn, cfg = get_gwd_fn(GravityWaveDragConfig(scheme=scheme))
+    if scheme == "mcfarlane":
+        # CAM6 gw_oro needs the reference interfaces (CAM pref_edge).
+        import functools
+        fn = functools.partial(fn, p_ref_half=_gwd_p_ref_half())
     return fn, cfg
+
+
+def _gwd_p_ref_half():
+    """The fixture's sigma interfaces at 1e5 Pa (CAM pref_edge)."""
+    col = _gwd_column()
+    return col["p_half"][0] / col["p_s"][0] * 1.0e5
 
 
 class TestGWDLeafGrad:
@@ -823,7 +833,8 @@ class TestGWDCompositeGrad:
 
         def loss(u):
             out, _spec = fn(*_gwd_args(col, u=u), 300.0, cfg, None,
-                            h_topo_col=jnp.full((ncol,), 400.0))
+                            h_topo_col=jnp.full((ncol,), 400.0),
+                            mcfarlane_kwargs={"p_ref_half": _gwd_p_ref_half()})
             return jnp.sum(out.du_dt ** 2)
 
         grad = jax.grad(loss)(col["u"])
@@ -848,7 +859,8 @@ class TestGWDCompositeGrad:
 
         def loss(spectrum_in):
             out, spec_new = fn(*_gwd_args(col), 300.0, cfg, spectrum_in,
-                               h_topo_col=jnp.full((ncol,), 400.0))
+                               h_topo_col=jnp.full((ncol,), 400.0),
+                               mcfarlane_kwargs={"p_ref_half": _gwd_p_ref_half()})
             return jnp.sum(spec_new ** 2) + jnp.sum(out.du_dt ** 2)
 
         grad = jax.grad(loss)(spec)

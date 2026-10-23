@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+from legoesm import constants
 from legoesm.atmosphere.physics._shared import exner_function
 from legoesm.timestepping.tridiagonal import thomas_solve_batched
 
@@ -275,3 +276,122 @@ def diagnostic_heat_flux_full(
     return jnp.concatenate(
         [flux_half[:, :1], flux_interior, flux_half[:, -1:]], axis=1,
     )
+
+
+def cam_compute_vdiff(
+    u: jax.Array,
+    v: jax.Array,
+    s: jax.Array,
+    q: jax.Array,
+    T: jax.Array,
+    p_half: jax.Array,
+    kvm_half: jax.Array,
+    kvh_half: jax.Array,
+    cgh_half: jax.Array,
+    cgs_half: jax.Array,
+    taux: jax.Array,
+    tauy: jax.Array,
+    shflx: jax.Array,
+    qflx: jax.Array,
+    dt: float,
+    qmincg: float,
+):
+    """CAM ``diffusion_solver.F90::compute_vdiff`` for a K-closure without ISS.
+
+    Port of the CAM ``cam_cesm2_1_rel_60`` solver path that
+    ``vertical_diffusion.F90::vertical_diffusion_tend`` runs for
+    ``eddy_scheme='HB'`` (``do_iss=.false.``, no turbulent mountain stress,
+    no Beljaars drag, no molecular diffusion, one constituent, ``kvq = kvh``):
+
+    * pressure metrics from ``Coords1D(pint)``: ``mid = (ifc_k + ifc_k+1)/2``,
+      ``del``, ``dst = mid_k - mid_k-1``; interface density
+      ``rhoi = pint / (R_d * tint)`` with ``tint`` the mean of the two
+      adjacent full-level ``T`` (``vertical_diffusion.F90`` l.867-912);
+    * ``u, v``: explicit surface stress ``u_bot += dt g/dp_bot * taux``, then
+      the implicit solve with ``kvm (g rhoi)^2``;
+    * frictional KE dissipation heating ``dtk`` from the pre/post-diffusion
+      winds and the surface stress, added to ``s`` (the non-Beljaars branch);
+    * ``s``: explicit countergradient flux divergence of ``rhoi kvh cgh``,
+      ``s_bot += dt g/dp_bot * shflx``, implicit solve with ``kvh``;
+    * ``q``: explicit constituent countergradient ``(qflx rrho) rhoi kvh cgs``
+      with CAM's whole-column rollback when any level falls below ``qmincg``,
+      then ``q_bot += dt g/dp_bot * qflx`` and the implicit solve.
+
+    Arrays are top-first (index 0 = model top, -1 = lowest layer), shape
+    ``(ncol, nlev)``; the interface arrays ``*_half`` hold the ``nlev-1``
+    INTERIOR interfaces (``[j]`` between full levels ``j`` and ``j+1``) -- the
+    model-top and surface interface diffusivities are zero in CAM's K-closure
+    path, so their boundary terms vanish identically.  ``taux, tauy`` [N/m2]
+    and ``shflx`` [W/m2] / ``qflx`` [kg/m2/s] are positive into the
+    atmosphere (upward fluxes, stress on the air).  ``s`` is the dry static
+    energy ``c_p T + g z`` [J/kg].  Returns ``(u, v, s, q)`` after the step.
+
+    The tridiagonal system is CAM's ``fin_vol_lu_decomp`` operator
+    (``diffusion_operator`` + ``deriv_diag``, ``lmult_as_diag(-dt)``,
+    ``add_to_diag(1)``); it is solved with the shared batched Thomas solver
+    instead of CAM's bottom-up LU sweep (identical in exact arithmetic).
+    """
+    g = constants.g
+    R = constants.R_d
+    dt = jnp.asarray(dt, dtype=u.dtype)
+
+    # --- Coords1D(pint) (coords_1d.F90) ---
+    mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    rdel = 1.0 / (p_half[:, 1:] - p_half[:, :-1])
+    rdst = 1.0 / (mid[:, 1:] - mid[:, :-1])           # (ncol, nlev-1)
+
+    # --- interior-interface density and (g rhoi)^2 ---
+    tint = 0.5 * (T[:, 1:] + T[:, :-1])
+    rhoi = p_half[:, 1:-1] / (R * tint)                # (ncol, nlev-1)
+    dpidz_sq = (g * rhoi) ** 2
+    rrho = R * T[:, -1] / mid[:, -1]
+    tmpi2 = dt * dpidz_sq * rdst
+    tmp1 = dt * g * rdel[:, -1]
+
+    def _zeros_col(x):
+        return jnp.zeros((x.shape[0], 1), x.dtype)
+
+    def solve(phi, K):
+        """CAM fin_vol_lu_decomp(coef_q_diff=K*dpidz_sq) %left_div(phi)."""
+        d = K * dpidz_sq
+        spr = d * rdst * rdel[:, :-1]      # row j, coupling to j+1
+        sub = d * rdst * rdel[:, 1:]       # row j+1, coupling to j
+        spr_r = jnp.concatenate([spr, _zeros_col(spr)], axis=1)
+        sub_r = jnp.concatenate([_zeros_col(sub), sub], axis=1)
+        diag = (-spr_r - sub_r) * (-dt) + 1.0
+        return thomas_solve_batched(sub_r * (-dt), diag, spr_r * (-dt), phi)
+
+    def flux_div(F, scale=1.0):
+        """dt * rdel * g * scale * (F_{k+1} - F_k), zero boundary-interface flux."""
+        Fi = jnp.concatenate([_zeros_col(F), F, _zeros_col(F)], axis=1)
+        return dt * rdel * g * scale * (Fi[:, 1:] - Fi[:, :-1])
+
+    # --- momentum (do_iss = .false.) ---
+    dinp_u = u[:, 1:] - u[:, :-1]
+    dinp_v = v[:, 1:] - v[:, :-1]
+    u_new = solve(u.at[:, -1].add(tmp1 * taux), kvm_half)
+    v_new = solve(v.at[:, -1].add(tmp1 * tauy), kvm_half)
+
+    # --- frictional KE dissipation (non-Beljaars branch) ---
+    tmpi1_bot = 0.5 * dt * g * ((-u_new[:, -1] - u[:, -1]) * taux
+                                + (-v_new[:, -1] - v[:, -1]) * tauy)
+    dout_u = u_new[:, 1:] - u_new[:, :-1]
+    dout_v = v_new[:, 1:] - v_new[:, :-1]
+    tmpi1_int = 0.25 * tmpi2 * kvm_half * (
+        dout_u ** 2 + dout_v ** 2 + dout_u * dinp_u + dout_v * dinp_v)
+    tmpi1 = jnp.concatenate([_zeros_col(u), tmpi1_int, tmpi1_bot[:, None]], axis=1)
+    dtk = (tmpi1[:, 1:] + tmpi1[:, :-1]) * rdel
+
+    # --- dry static energy ---
+    s1 = s + dtk
+    s1 = s1 + flux_div(rhoi * kvh_half * cgh_half)
+    s1 = s1.at[:, -1].add(tmp1 * shflx)
+    s_new = solve(s1, kvh_half)
+
+    # --- constituent countergradient with whole-column rollback ---
+    q1 = q + flux_div(rhoi * kvh_half * cgs_half, (qflx * rrho)[:, None])
+    ok = jnp.all(q1 >= qmincg, axis=1, keepdims=True)
+    q1 = jnp.where(ok, q1, q)
+    q1 = q1.at[:, -1].add(tmp1 * qflx)
+    q_new = solve(q1, kvh_half)
+    return u_new, v_new, s_new, q_new

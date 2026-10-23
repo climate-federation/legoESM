@@ -28,7 +28,7 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 OUT=$ROOT/results/omip_nemo/mpas_${SRC}_15d
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas \
-  --mpas-level 7 --mpas-lloyd 20 --mpas-vmix tke \
+  --mpas-level 7 --mpas-lloyd 50 --mpas-vmix tke \
   --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
   --tke-kappa-convention veros_sqrte \
   --dt 150 --nemo-vertical --partial-cell \

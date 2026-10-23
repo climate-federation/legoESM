@@ -39,52 +39,47 @@ from legoesm.grids.vertical import compute_geopotential
 # top level (re-enters their __init__ mid-load, breaks isolated pytest; CLAUDE.md).
 
 
-def energy_consistent_moisture_floor(q_v_raw, T):
-    """Floor ``q_v`` at zero while conserving moist static energy.
+def energy_consistent_moisture_floor(q_v_raw, T, weight):
+    """Floor ``q_v`` at zero conserving column water AND moist static energy.
 
     Issue #323.  The per-step physics tracer update
     ``q_v_raw = q_v + dt * dq_v_dt`` can go negative when the combined
     convective (SBM) + microphysical (Kessler) vapour sink exceeds the
-    available vapour in a column.  A plain ``max(q_v_raw, 0)`` floor
-    truncates the vapour sink but leaves the matching condensation latent
-    heat already added to ``T`` in full, injecting spurious heat that
-    accumulates under organised convection and drives the wind blow-up.
+    available vapour in a cell, while the matching condensation latent heat
+    is already in ``T``.  A plain ``max(q_v_raw, 0)`` leaves that phantom
+    heat (the kessler+sbm wind blow-up) AND creates the clipped vapour.
 
-    This floors ``q_v`` AND removes the latent heat tied to the clipped
-    (un-removed) vapour, so the floor is moist-static-energy neutral::
+    This borrows the deficit from the column's positive vapour
+    (:func:`conservative_positive_clip`, the same borrow as the default floor)
+    and books the latent heat of every cell's vapour change::
 
-        deficit = max(-q_v_raw, 0)            # vapour the sink could not remove
-        q_v_out = q_v_raw + deficit = max(q_v_raw, 0)
-        T_out   = T - (L_v / c_pd) * deficit
+        q_v_out = conservative_positive_clip(q_v_raw, weight)[0]
+        T_out   = T - (L_v / c_pd) * (q_v_out - q_v_raw)
 
-    Hence ``c_pd*T_out + L_v*q_v_out == c_pd*T + L_v*q_v_raw`` to roundoff
-    (the map is piecewise-linear in ``q_v_raw``), whereas the plain floor
-    leaves a residual ``+L_v*deficit`` of spurious energy.
+    so ``c_pd*T + L_v*q_v`` is unchanged in EVERY cell (to roundoff): the
+    clipped cell cools by ``L_v*deficit`` (its phantom condensation heat is
+    removed, as before), and the donor cells whose vapour is borrowed warm
+    by ``L_v`` times what they give (the vapour the sink could not remove
+    where it ran out is removed where it exists, with its condensation
+    heat).  This is a numerical energy correction, not a modelled process.
+    The default borrow (T untouched) conserves only the COLUMN energy.
 
-    Scope / limitations (deliberate; this targets the *energy* blow-up).
-    ------------------------------------------------------------------
-    * **Conserves moist static energy, NOT total water.**  It does not touch
-      ``q_c``/``q_r``: if the over-removed vapour had been routed to condensate
-      (``dq_c > 0``), that condensate is still created, so column total water
-      ``q_v + q_c + q_r`` rises by ``deficit``.  Removing the spurious *heat*
-      is what stops the wind blow-up; full total-water closure needs a
-      per-scheme limiter that caps each scheme's vapour sink AND its matching
-      condensate/rain source together (a larger change, see Issue #323).
-    * **First-order latent-heat attribution.**  ``deficit`` is taken from the
-      *summed* ``dq_v_dt``, which also carries non-condensational sinks
-      (turbulent mixing, surface evaporation) that release no latent heat.
-      Attributing the whole overshoot to condensation slightly over-cools
-      when those are present.  This is a good approximation for the
-      condensation-dominated drying it is meant for (kessler+sbm) and is why
-      it is opt-in (default off) rather than always on.
+    Water: column ``sum(weight*q_v)`` is conserved wherever the column's
+    total is positive.  A net-negative column has nothing to borrow from and
+    is zeroed (the borrow's minimum-creation choice); the water that creates
+    is paid by cooling, so energy still closes there.  ``q_c``/``q_r`` are
+    untouched (their own floors run separately).
 
-    Pure ``jnp``; differentiable (subgradient at the ``q_v_raw = 0`` kink).
-    Returns ``(q_v_out, T_out)`` with the dtypes of the inputs preserved by
-    the caller's downstream ``_match_dtype`` cast.
+    First-order attribution: the whole overshoot is treated as condensation
+    even if part of the summed ``dq_v_dt`` is non-condensational (mixing,
+    evaporation).  Opt-in (default off).
+
+    ``weight`` is the per-layer mass weight along the trailing (vertical)
+    axis, as for :func:`conservative_positive_clip`.  Pure ``jnp``;
+    differentiable.  Returns ``(q_v_out, T_out)``.
     """
-    deficit = jnp.maximum(-q_v_raw, 0.0)
-    q_v_out = q_v_raw + deficit
-    T_out = T - (constants.L_v / constants.c_pd) * deficit  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention; surface gap booked by surface_layer.latent_enthalpy_correction)
+    q_v_out = conservative_positive_clip(q_v_raw, weight, axis=-1)[0]
+    T_out = T - (constants.L_v / constants.c_pd) * (q_v_out - q_v_raw)  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention; surface gap booked by surface_layer.latent_enthalpy_correction)
     return q_v_out, T_out
 
 
@@ -131,8 +126,9 @@ _FLOOR_LATENT_COEF = {
 def energy_consistent_water_floor(tracers, T):
     """Hard-floor every water tracer to zero, conserving frozen MSE.
 
-    Generalises :func:`energy_consistent_moisture_floor` (vapour only) to the
-    condensate species.  Each species is floored ``q_out = max(q_raw, 0)``; the
+    The hard-floor, all-species form of the per-cell MSE bookkeeping in
+    :func:`energy_consistent_moisture_floor` (which borrows the vapour instead
+    of creating it).  Each species is floored ``q_out = max(q_raw, 0)``; the
     per-cell temperature is corrected by ``dT = -(coef/c_pd)*deficit`` with
     ``coef`` from :data:`_FLOOR_LATENT_COEF`, so the model's frozen MSE
     ``c_pd*T + L_v*q_v − L_f*(q_i+q_s+q_g)`` is unchanged pointwise (vapour
@@ -1845,6 +1841,35 @@ def energy_fixer_dT(e_before, e_after, mass) -> jax.Array:
     a lane under MPI reduces the three integrals with ``global_sum_mpi``.
     """
     return (e_before - e_after) / (constants.c_pd * mass)
+
+
+def gridded_energy_fixer_dT(pre, post, grid, sigma_coord,
+                            owned_mask=None) -> jax.Array:
+    """:func:`energy_fixer_dT` for the structured lanes (lat-lon C-grid, cube
+    C-D grid), serial and distributed.
+
+    ``pre`` / ``post`` are the window's start / end as ``(T, u, v, p_s,
+    phis)`` cell-centre arrays (level axis last; ``u``/``v`` the cell-centre
+    winds the physics reads, KE = 0.5*(u^2+v^2), the duo-lane form, vote
+    F15b-V1).  The three global integrals go through ONE
+    :func:`batch_global_area_sums` call -- the reduction the lanes' own mass
+    fixers use (serial, MPI allreduce-SUM, lat-band / tile SPMD psum, cube
+    face GSPMD), all AD-safe.  ``owned_mask`` as for that call (the
+    owned-face MPI segment lane).
+    """
+    acc = conservation_accumulator()
+
+    def _col(T, u, v, p_s, phis):
+        ph = sigma_coord.pressure_at_half(p_s)
+        dp = ph[..., 1:] - ph[..., :-1]
+        e = dycore_column_energy(T, 0.5 * (u * u + v * v), dp, phis, p_s)
+        return e, jnp.sum(dp.astype(acc), axis=-1) / constants.g
+
+    e0, _ = _col(*pre)
+    e1, m1 = _col(*post)
+    s0, s1, sm = batch_global_area_sums([e0, e1, m1], grid,
+                                        owned_mask=owned_mask)
+    return energy_fixer_dT(s0, s1, sm)
 
 
 def voronoi_energy_fixer_dT(state_pre, state_post, mesh, sigma_coord, area,

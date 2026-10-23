@@ -249,7 +249,8 @@ class TestMcFarlane:
         ncol, nlev = 4, 10
         u, v, T, p_full, p_half, z_full, z_half, rho, lat = _make_columns(ncol, nlev)
         config = McFarlaneConfig()
-        out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config)
+        out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config,
+                            p_ref_half=p_half[0])
         assert out.du_dt.shape == (ncol, nlev)
         assert out.eps_gwd.shape == (ncol,)
 
@@ -257,7 +258,8 @@ class TestMcFarlane:
         ncol, nlev = 4, 10
         u, v, T, p_full, p_half, z_full, z_half, rho, lat = _make_columns(ncol, nlev)
         config = McFarlaneConfig()
-        out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config)
+        out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config,
+                            p_ref_half=p_half[0])
         total = float(jnp.sum(jnp.abs(out.du_dt)))
         assert total > 0.0
 
@@ -265,7 +267,8 @@ class TestMcFarlane:
         ncol, nlev = 4, 10
         u, v, T, p_full, p_half, z_full, z_half, rho, lat = _make_columns(ncol, nlev)
         config = McFarlaneConfig()
-        out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config)
+        out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config,
+                            p_ref_half=p_half[0])
         assert jnp.all(jnp.isfinite(out.du_dt))
         assert jnp.all(jnp.isfinite(out.dT_dt))
 
@@ -284,7 +287,8 @@ class TestMcFarlane:
         ncol, nlev = 4, 20
         u, v, T, p_full, p_half, z_full, z_half, rho, lat = _make_columns(ncol, nlev)
         config = McFarlaneConfig()
-        out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config)
+        out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config,
+                            p_ref_half=p_half[0])
         assert jnp.all(out.eps_gwd >= -1e-9), (
             f"orographic GWD must be dissipative (eps_gwd >= 0); got {out.eps_gwd}"
         )
@@ -299,7 +303,8 @@ class TestMcFarlane:
         config = McFarlaneConfig()
 
         def loss(u_in):
-            out = mcfarlane_gwd(u_in, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config)
+            out = mcfarlane_gwd(u_in, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config,
+                            p_ref_half=p_half[0])
             return jnp.sum(out.du_dt ** 2 + out.dv_dt ** 2)
 
         g = jax.grad(loss)(u)
@@ -312,7 +317,8 @@ class TestMcFarlane:
         u = jnp.full((ncol, nlev), 0.1)
         v = jnp.full((ncol, nlev), 0.1)
         config = McFarlaneConfig(min_wind=2.0)
-        out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config)
+        out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config,
+                            p_ref_half=p_half[0])
         max_drag = float(jnp.max(jnp.abs(out.du_dt)))
         # Should be very small (min_wind suppression)
         assert max_drag < 1e-3
@@ -756,7 +762,8 @@ class TestIntegration:
             microphysics=MicrophysicsConfig(scheme="none"),
             gravity_wave_drag=GravityWaveDragConfig(scheme="rayleigh"),
         )
-        physics_fn = make_physics(config, model_type="hydrostatic", dt=300.0)
+        physics_fn = make_physics(config, model_type="hydrostatic", dt=300.0,
+                                  surface_bulk_coeffs=None)
         tendencies, _ = physics_fn(state, grid, sigma)
 
         assert tendencies.du_dt.data.shape == (6, n, n, nlev)

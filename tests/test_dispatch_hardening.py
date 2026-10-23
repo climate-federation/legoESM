@@ -154,6 +154,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # bare ``else`` silently fell back to the energy-conserving PV flux).
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/compressible_euler_mpas.py", "mpas_compressible_euler_slow_tendencies"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py", "mpas_hydrostatic_tendencies"),
+        # Vertical-filter form selection: a misspelled tracer name raises even
+        # with the filter off, never sits silently unused.
+        ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/primitive_eq_mpas.py", "validate_vert4_flux_form_tracers"),
         ("packages/atmosphere/legoesm/atmosphere/dynamics/gcm/shallow_water_mpas.py", "mpas_shallow_water_tendencies"),
         ("packages/atmosphere/legoesm/atmosphere/physics/clouds/cloud_fraction.py", "compute_cloud_properties"),
         ("packages/atmosphere/legoesm/atmosphere/physics/combined.py", "make_physics"),

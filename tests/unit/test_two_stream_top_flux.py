@@ -115,3 +115,27 @@ def test_solver_night_column_is_finite_and_dark(lid_solution):
     assert np.all(o["sw_flux_down"][night] == 0.0)
     assert np.all(o["sw_heating_rate"][night] == 0.0)
     assert o["lw_heating_rate"][night, 0] < -1e-7
+
+
+# ---------------------------------------------------------------------------
+# Sun just above the horizon (oracle audit radiation_boundary_inputs /
+# rrtmgp_gas_optics_rte): the 0.01 cos(zenith) floor is for the slant path
+# only.  The incident beam is projected with the TRUE cos(zenith), as RTE's
+# sw_solver_2stream does (flux_dir(top) = inc_flux_dir * mu0).  With the floor
+# on the incident flux too, a column at cos z = 0.005 received S_0*0.01 (+6.8
+# W/m2) and one at 0.002 received 5x its insolation.
+# ---------------------------------------------------------------------------
+def test_terminator_incident_flux_uses_true_cos_zenith():
+    from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+    cols = _lid_columns()
+    mu = jnp.asarray([0.5, 0.005, 0.002])
+    cols = {k: (jnp.concatenate([v, v[:1]]) if k != "cos_zenith" else mu)
+            for k, v in cols.items()}
+    out = RRTMGP.from_legoesm_config(RRTMGPConfig()).solve_columns(**cols)
+    top = np.asarray(out.sw_flux_down)[:, 0]          # TOA-first: index 0 = top face
+    per_mu = top / np.asarray(mu)
+    # identical per unit cos z (the solar constant x spectral weights), so the
+    # terminator columns get exactly S_0-scaled-by-cos z, not the floored 0.01
+    rel = np.max(np.abs(per_mu[1:] - per_mu[0]) / per_mu[0])
+    assert rel <= 1e-10, (rel, top)

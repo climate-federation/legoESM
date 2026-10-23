@@ -1,0 +1,20 @@
+--- dynadv.F90
++++ dynadv.F90
+@@ -20,6 +20,7 @@
+    USE dynkeg          ! kinetic energy gradient          (dyn_keg      routine)
+    USE dynzad          ! vertical advection               (dyn_zad      routine)
+    USE zdf_oce,  ONLY : ln_zad_Aimp
++   USE gyre_r14_budget, ONLY : r14_after_keg, r14_after_zad
+    !
+    USE in_out_manager  ! I/O manager
+    USE lib_mpp         ! MPP library
+@@ -79,7 +80,9 @@
+       CASE( np_VEC_c2  )                                                         != vector form =!
+          !                                                                             !* horizontal gradient of kinetic energy
+          CALL dyn_keg     ( kt, nn_dynkeg     , Kmm, puu, pvv, Krhs )
++         CALL r14_after_keg( pvv(:,:,1,Krhs) )
+          CALL dyn_zad     ( kt                , Kmm, puu, pvv, Krhs )                  !* vertical advection
++         CALL r14_after_zad( pvv(:,:,1,Krhs) )
+          !
+       CASE( np_FLX_c2  )                                                         !=  flux form  =!
+          CALL dyn_adv_cen2( kt                , Kmm, puu, pvv, Krhs, pau, pav, paw )   !* 2nd order centered scheme

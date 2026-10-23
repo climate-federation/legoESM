@@ -253,8 +253,7 @@ def _build_ck_atm_config(c_k: float, *, resolution: int, nlev: int, days: int,
     return ExperimentConfig(
         grid=GridConfig(grid_type=str(grid_type), resolution=resolution, nlev=nlev),
         dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
-                            discretization="finite_volume",
-                            energy_fixer=False),  # not wired here (F15, vote V11-C)
+                            discretization="finite_volume"),
         output=OutputConfig(diag_days=max(days, 1)), radiation=radiation, days=days,
         turbulence="clubb_lite", land_mask_path=land_mask_path,
         turbulence_override=TurbulenceConfig(

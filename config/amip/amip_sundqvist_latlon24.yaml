@@ -5,18 +5,11 @@
 # amip_production_latlon24.yaml 2026-10-10; kept for the #869 record.  A CAM6
 # lat-lon deck comes with the composable-physics work.
 #
-# KNOWN validate_strict FAILURES (main 6b89c213c7; this deck is asserted-failing in
-# test_config_yaml_builds_and_validates_strict) — not fixed here:
-#   1. sigma_layout l30_trop_logstrat (inherited) needs nlev >= 28; nlev is 20
-#   2. land_update_seconds > 0 is MPAS-lane only
-#   3. land_calibrated_physics=True is MPAS-lane only
-#   4. mpas_land_lapse_K_per_km / mpas_land_beta are MPAS-lane knobs
-#   5. mpas_land_beta_soil is an MPAS-lane flag
-#   6. mpas_qv_smooth_del4_m4s is an MPAS-lane knob
-#   7. mpas_ice_skin_prognostic is an MPAS-lane knob
-#   8. hard_sat_ice_curve=True requires an MPAS grid
-#   9. dycore.mpas_sponge_del2_top_layers is hydrostatic-MPAS only
-# All but 1 are inherited MPAS-lane keys from amip_sundqvist_l36.yaml.
+# Runs on the lat-lon COLUMN lane (column_lane below; repaired 2026-10-14):
+# the shared column loop over the lat-lon C-grid dycore, so the inherited
+# L36 land, sea-ice skin, ice-curve and cloud-overlap settings take effect
+# here with their L36 values.  Before this the deck failed validate_strict
+# (12 errors) and those settings could not run on the lat-lon lane.
 # -----------------------------------------------------------------------------
 # Was the lat-lon lane of the then-production AMIP (the cubed-sphere C12 lane was
 # amip_production.yaml).  Two lane-critical pins, validated on the 2026-07-08
@@ -37,13 +30,25 @@
 include: amip_sundqvist_l36.yaml
 grid_type: latlon
 discretization: latlon_cgrid
-energy_fixer: false                  # dycore energy fixer not wired on this lane (review 2026-10-10 F15, vote V11-C): the open sink is recorded, not implied
+energy_fixer: true                   # dycore energy fixer, now wired on this lane (review 2026-10-10 F15, vote F15b-V6)
 # The base deck's van_leer vertical advection is wired into the MPAS sigma lane
 # only (validate_strict refuses it elsewhere); this lane keeps upwind.
 mpas_vert_advection_scheme: upwind
 resolution: 24            # n_lat (n_lon = 2*n_lat)
 nlev: 20
 use_polar_filter: true
+column_lane: true
+# The inherited l30_trop_logstrat layout needs nlev >= 28; 20 levels use the
+# standard layout.
+sigma_layout: standard
+# The inherited MPAS-only knobs, off: the Voronoi q_v smoother and the MPAS
+# top sponge do not exist on this lane.
+mpas_qv_smooth_del4_m4s: 0.0
+mpas_sponge_del2_top_layers: 0
+# The lat-lon lane's q_v del4, made explicit: the pipeline lane applies 0.5x
+# the dycore hyperdiffusion (hyperdiff_scale * (min(dx)/2)^4 / 1 day) every
+# step; at n_lat 24 that is 0.5 * 1.0245e14 m^4/s.
+latlon_qv_smooth_del4_m4s: 5.1226869594672555e13
 # #1029: SB81 energy-consistent omega/p conversion, named explicitly (RULE 3).
 # Active only with hybrid levels; this deck inherits sigma, so it is inert here.
 sb81_omega_conversion: true

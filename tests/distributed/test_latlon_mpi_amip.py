@@ -108,7 +108,7 @@ def test_latlon_mpi_amip_runs_and_gathers_global(_latlon_band_backend):
             vertical_coord="hybrid",
         ),
         dycore=DycoreConfig(
-            energy_fixer=False,  # unwired lane opts out (F15)
+            energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
             discretization="finite_volume", dt=600.0,
             time_integrator="ssp_rk3_scan",
         ),

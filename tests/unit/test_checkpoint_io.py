@@ -98,7 +98,10 @@ def test_the_real_classical_skeleton_has_fifty_knobs():
     again, this fails and the message gets updated with it."""
     from legoesm.training.aimip_params import AIMIPClassicalParams
 
-    assert len(AIMIPClassicalParams.from_defaults().raw_values) == 50
+    # 49 since 2026-10-19: the CAM6 gw_oro port removed McFarlane's launch
+    # clip, so the ``mcfarlane_tau_max`` knob is gone (checkpoints written
+    # before that date fail with the legible message above).
+    assert len(AIMIPClassicalParams.from_defaults().raw_values) == 49
 
 
 def test_a_truncated_file_is_also_actionable(tmp_path):

@@ -34,8 +34,8 @@ def mg2_size_bounded_ncic(qcic, ncic, rho):
     """size_dist_param_liq (micro_mg_utils.F90:432-472, size_dist_param_basic
     :478-513): MG2 resets ncic [#/kg] so the mean diameter of the gamma PSD
     stays in [2, 50] um (and mean mass >= 1e-20 kg) before autoconversion.
-    NOT ported (a kernel-level step that applies at cf = 1 too); used only to
-    report how often it binds."""
+    Ported in the kk2000_cam6 kernel (oracle audit 2026-10-19), so the MG2
+    law below applies it too."""
     if not qcic > QSMALL:
         return ncic
     pgam = 1.0 - 0.7 * math.exp(-0.008 * 1.0e-6 * ncic * rho)
@@ -55,10 +55,11 @@ def mg2_oracle(qc, qr, qi, nc_vol, cf, rho, *, law, relvar=10.0,
                accre_enhan=1.0, predict_nc=False):
     """Grid-mean prc, pra [kg/kg/s] and nprc1 [#/m3/s], MG2 line by line.
 
-    ``law="mg2"`` is kk2000_liq_autoconversion; ``law="sam"`` swaps in the
-    SAM M2005 KK2000 mass law (1350 qc^2.47 Nc^-1.79, no icsmall gate) inside
-    the SAME MG2 in-cloud wrapper.  ``pra`` omits MG2's var_coef(relvar,1.15)
-    (dropped by our accretion; applied by the caller when comparing)."""
+    ``law="mg2"`` is size_dist_param_liq + kk2000_liq_autoconversion and
+    accrete_cloud_water_rain WITH var_coef(relvar, 1.15); ``law="sam"`` swaps
+    in the SAM M2005 KK2000 mass law (1350 qc^2.47 Nc^-1.79, no icsmall gate,
+    no droplet-number reset) and the SAM accretion (no var_coef) inside the
+    SAME MG2 in-cloud wrapper."""
     ncol, nlev = qc.shape
     prc = np.zeros_like(qc)
     pra = np.zeros_like(qc)
@@ -79,13 +80,16 @@ def mg2_oracle(qc, qr, qi, nc_vol, cf, rho, *, law, relvar=10.0,
             if qric < QSMALL:
                 qric = 0.0
             if law == "mg2":
+                ncic = mg2_size_bounded_ncic(qcic, ncic, rho[i, k])
                 p = (_var_coef(relvar, 2.47) * 0.01 * 1350.0 * qcic ** 2.47
                      * (ncic * 1.0e-6 * rho[i, k]) ** (-1.1)
                      if qcic >= ICSMALL else 0.0)
+                vc = _var_coef(relvar, 1.15)
             else:
                 p = (1350.0 * qcic ** 2.47 * (ncic * 1.0e-6 * rho[i, k]) ** (-1.79)
                      if qcic > 0.0 else 0.0)
-            a = (accre_enhan * 67.0 * (qcic * qric) ** 1.15
+                vc = 1.0
+            a = (accre_enhan * vc * 67.0 * (qcic * qric) ** 1.15
                  if (qric >= QSMALL and qcic >= QSMALL) else 0.0)
             prc[i, k] = p * lcldm[k]
             pra[i, k] = a * lcldm[k]
@@ -173,8 +177,9 @@ def test_rates_match_the_mg2_transcription(scheme, law, relvar):
 
 def test_precip_fraction_inheritance_cannot_move_a_warm_rain_rate():
     """MG2 'in_cloud' only rewrites precip_frac where qc < qsmall (and
-    qi < qsmall), where qcic = 0; so the port uses precip_frac = lcldm.
-    The oracle keeps the inheritance; switching it off moves no rate."""
+    qi < qsmall), where qcic = 0; so autoconversion and accretion never see
+    the inheritance (it matters for evaporation, self-collection and the
+    number re-adjustment, which the port now computes with it)."""
     cf, qc, qr, qi, rho = _columns()
     nc = np.full(qc.shape, 7.0e7)
     full = mg2_oracle(qc, qr, qi, nc, cf, rho, law="mg2")
@@ -195,11 +200,15 @@ def test_size_bound_transcription_binds_both_ways():
     assert mg2_size_bounded_ncic(3e-4, 1e8, 1.0) == 1e8
 
 
-def test_mg2_accretion_varcoef_is_the_one_dropped_factor():
-    """Documented departure: MG2 multiplies pra by var_coef(relvar, 1.15)
-    (~1.007 at relvar 10); ours does not.  Pin its size so it is visible."""
+def test_mg2_accretion_varcoef_is_applied_by_kk2000_cam6():
+    """MG2 multiplies pra by var_coef(relvar, 1.15) (~1.007 at relvar 10,
+    >1.05 at relvar 1); the kk2000_cam6 branch now applies it."""
+    from legoesm.atmosphere.physics.microphysics._warm_rain import mg2_var_coef
     assert abs(_var_coef(10.0, 1.15) - 1.0) < 0.01
-    assert _var_coef(1.0, 1.15) > 1.05          # a real bias at small relvar
+    assert _var_coef(1.0, 1.15) > 1.05          # a real factor at small relvar
+    for r in (0.5, 1.0, 2.0, 10.0):
+        assert abs(float(mg2_var_coef(r, 1.15, jnp.float64)) - _var_coef(r, 1.15)
+                   ) <= 1e-13 * _var_coef(r, 1.15)
 
 
 def test_prognostic_droplet_number_is_rescaled_in_cloud():
@@ -232,20 +241,21 @@ def test_prognostic_droplet_number_is_rescaled_in_cloud():
                                     "seifert_beheng_sb2001"])
 @pytest.mark.parametrize("predict_nc", [False, True])
 def test_cf_one_is_bitwise_the_grid_mean_path(scheme, predict_nc):
-    """cf = 1 everywhere reproduces the switch-off result bit for bit, on the
-    domain q_c in {0} U [1e-18, 5e-3], q_r in {0} U [1e-18, 0.01)."""
+    """cf = 1 everywhere reproduces the switch-off autoconversion and
+    accretion bit for bit, on the domain q_c in {0} U [1e-18, 5e-3], q_r in
+    {0} U [1e-18, 0.01) (dt = 1e-3 s: no limiter binds).  The rest of the
+    output differs by design: the switch is also the CAM6 MG2 rain mode
+    (clear-air evaporation, post-source rain sedimentation, MG2 limiters)."""
     _, qc, qr, qi, rho = _columns()
     qr = np.where(qr < QSMALL, 0.0, qr)
     qc = np.where(qc < QSMALL, 0.0, np.minimum(qc, 5e-3))
     nc = np.full(qc.shape, 8.0e7) if predict_nc else None
     kw = dict(warm_rain_scheme=scheme, predict_Nc=predict_nc)
-    off = _run(_cfg(**kw), None, qc, qr, qi, rho, dt=60.0, N_c=nc)
+    off = _run(_cfg(**kw), None, qc, qr, qi, rho, N_c=nc)
     on = _run(_cfg(warm_rain_incloud=True, **kw), np.ones_like(qc), qc, qr,
-              qi, rho, dt=60.0, N_c=nc)
-    la, lb = jax.tree_util.tree_leaves(off), jax.tree_util.tree_leaves(on)
-    assert len(la) == len(lb)
-    for a, b in zip(la, lb):
-        a, b = np.asarray(a), np.asarray(b)
+              qi, rho, N_c=nc)
+    for k in ("autoconversion", "accretion"):
+        a, b = np.asarray(off.qc_budget[k]), np.asarray(on.qc_budget[k])
         assert a.dtype == b.dtype and a.shape == b.shape
         np.testing.assert_array_equal(a, b)
 
@@ -323,11 +333,16 @@ def _mpas_physics(incloud, turb="clubb", n=2):
     from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
     from legoesm.atmosphere.physics.radiation import RadiationConfig
     from legoesm.atmosphere.physics.turbulence import TurbulenceConfig
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
     cfg = PhysicsConfig(
         radiation=RadiationConfig(scheme="none",
                                   cloud_config=CloudConfig(scheme="cam6_clubb")),
         convection=ConvectionConfig(scheme="none"),
-        turbulence=TurbulenceConfig(scheme=turb),
+        # kk2000_cam6 needs CLUBB's per-cell relvar: prognostic CLUBB with
+        # its liquid partition
+        turbulence=(TurbulenceConfig(scheme="clubb", liquid_partition=True,
+                                     clubb=CLUBBConfig(prognostic=True))
+                    if turb == "clubb" else TurbulenceConfig(scheme=turb)),
         microphysics=MicrophysicsConfig(
             scheme="morrison",
             morrison=MorrisonConfig(warm_rain_scheme="kk2000_cam6",
@@ -357,7 +372,9 @@ def test_lane_guard_needs_clubb_and_the_subcycle():
         _mpas_physics(True, turb="tke", n=2)
     with pytest.raises(ValueError, match="cld_macmic_num_steps>=2"):
         _mpas_physics(True, turb="clubb", n=1)
-    assert callable(_mpas_physics(False, turb="tke", n=1)[0])
+    # kk2000_cam6 without CLUBB's relvar is refused at construction
+    with pytest.raises(ValueError, match="per-cell relvar"):
+        _mpas_physics(False, turb="tke", n=1)
     # CAM6 ast needs the run's cam6_clubb cloud config for aist
     from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig
     from legoesm.atmosphere.physics.microphysics.integration import (
@@ -371,9 +388,15 @@ def test_lane_guard_needs_clubb_and_the_subcycle():
     # the MPAS-only lane requirement fails at BUILD time, before any step
     cc6 = __import__("legoesm.atmosphere.physics.clouds.config",
                      fromlist=["CloudConfig"]).CloudConfig(scheme="cam6_clubb")
-    assert callable(make_microphysics_physics(mc, "mpas", 60.0, cloud_config=cc6))
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+    # aist is cut at CLUBB's top: the run's CLUBBConfig is required
+    with pytest.raises(ValueError, match="needs the run's CLUBBConfig"):
+        make_microphysics_physics(mc, "mpas", 60.0, cloud_config=cc6)
+    assert callable(make_microphysics_physics(mc, "mpas", 60.0, cloud_config=cc6,
+                                              clubb_config=CLUBBConfig()))
     with pytest.raises(ValueError, match="MPAS lane only"):
-        make_microphysics_physics(mc, "hydrostatic", 60.0, cloud_config=cc6)
+        make_microphysics_physics(mc, "hydrostatic", 60.0, cloud_config=cc6,
+                                  clubb_config=CLUBBConfig())
     with pytest.raises(ValueError, match="MPAS lane only"):
         _mpas_physics_hydrostatic()
 
@@ -391,11 +414,12 @@ def test_microphysics_reads_clubbs_cloud_fraction_from_the_same_substep(monkeypa
     real_upd = ti._carry_update_with_cloud_fraction
     real_micro = mi.morrison_microphysics
     real_aist = mi.cam6_ice_stratus_fraction
-    aists = []
+    aists, aist_kw = [], []
 
     def aist(*a, **k):
         out = real_aist(*a, **k)
         aists.append(np.asarray(out))
+        aist_kw.append(k)
         return out
 
     def upd(carry_field, carry_val, turb_out):
@@ -415,12 +439,21 @@ def test_microphysics_reads_clubbs_cloud_fraction_from_the_same_substep(monkeypa
     tr = dict(state.tracers)
     tr["q_i"] = state.T.replace(data=1.0e-5 * top, name="q_i", units="kg/kg")
     tr["q_v"] = tr["q_v"].replace(data=jnp.maximum(tr["q_v"].data, 2.0e-3 * top))
+    # the MG2 mode carries the snow number (refused without it)
+    tr["N_s"] = state.T.replace(data=jnp.zeros_like(state.T.data), name="N_s",
+                                units="1/kg")
     state = state._replace(tracers=tr)
     fn, cfg = _mpas_physics(True, n=2)
     ps = init_physics_state(*state.T.data.shape, cfg)
     ps = ps._replace(cloud_fraction=jnp.full(state.T.data.shape, 0.123))
     fn(state, mesh, sigma, phys_state=ps)
     assert len(written) == len(read) == len(aists) == 2
+    # the run's CLUBB top reaches aist (clubb_intr.F90:2535 cut)
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+    _c = CLUBBConfig()
+    assert all(k == dict(trop_cloud_top_press=_c.trop_cloud_top_press,
+                         trop_cloud_taper_lnp_width=_c.trop_cloud_taper_lnp_width)
+               for k in aist_kw)
     for w, r, ai in zip(written, read, aists):
         np.testing.assert_array_equal(
             np.maximum(np.clip(w.reshape(r.shape), 0.0, 1.0), ai), r)
@@ -527,3 +560,32 @@ def test_production_deck_selects_incloud_and_threads_it():
     cfg.validate_strict()
     assert thread_morrison_scalars(cfg, "morrison", MorrisonConfig()
                                    ).warm_rain_incloud is True
+
+
+def test_pipeline_lanes_refuse_kk2000_cam6_and_the_column_lane_does_not():
+    """The FV/spectral pipeline has no CLUBB relvar hand-off, so kk2000_cam6
+    is refused at build; the MPAS column loop builds its microphysics through
+    make_physics (guarded above) and must not be refused here."""
+    from legoesm.driver.config import ExperimentConfig, GridConfig
+    from legoesm.driver.physics_pipeline import _resolve_microphysics
+    kw = dict(microphysics="morrison", morrison_warm_rain_scheme="kk2000_cam6")
+    with pytest.raises(ValueError, match="per-cell relvar"):
+        _resolve_microphysics(ExperimentConfig(**kw))
+    cfg = ExperimentConfig(grid=GridConfig(grid_type="mpas"), **kw)
+    assert cfg.column_loop_lane
+    assert _resolve_microphysics(cfg)[1].warm_rain_scheme == "kk2000_cam6"
+
+
+@pytest.mark.parametrize("model_type",
+                         ["nonhydrostatic", "plane", "mpas_nh", "spectral_pe"])
+def test_relvar_flag_is_refused_on_lanes_that_never_forward_it(model_type):
+    """Only the hydrostatic/mpas bridge forwards PhysicsState.relvar; elsewhere
+    relvar_from_clubb=True must not satisfy the kk2000_cam6 guard."""
+    from legoesm.atmosphere.physics.microphysics import MicrophysicsConfig
+    from legoesm.atmosphere.physics.microphysics.integration import (
+        make_microphysics_physics,
+    )
+    mc = MicrophysicsConfig(scheme="morrison",
+                            morrison=_cfg(warm_rain_scheme="kk2000_cam6"))
+    with pytest.raises(ValueError, match="only the hydrostatic/mpas lane"):
+        make_microphysics_physics(mc, model_type, 600.0, relvar_from_clubb=True)

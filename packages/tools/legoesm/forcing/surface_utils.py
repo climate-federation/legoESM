@@ -553,11 +553,12 @@ def prognostic_ice_skin_temperature(
     T_new = jnp.clip(T_new, _ICE_SKIN_FLOOR_K, T_melt_surface_K)
     return jnp.where(sic > 0.0, T_new, T_freeze_K)
 
-# NOTE: the model has a SECOND tropopause: the CAM6 aist cloud switch
-# (rhminis/rhmaxis) uses the analytic 25000 - 15000 cos^2(lat) Pa surface
-# (clouds/cloud_fraction.py cam6_tropopause_analytic, CAM's last fallback).
-# This WMO locator places volcanic aerosol only; unifying the two (CAM tries
-# twmo first) is an open follow-up.
+# NOTE: the model has OTHER tropopauses (clouds/cloud_fraction.py): the CAM6
+# aist cloud switch (rhminis/rhmaxis) uses the analytic 25000 - 15000
+# cos^2(lat) Pa surface (cam6_tropopause_analytic), and CLUBB's clubbtop uses
+# CAM's chemistry tropopause (cam_chem_tropopause_level: twmo + polar rule,
+# that surface as fallback).  This WMO locator places volcanic aerosol only;
+# unifying them is an open follow-up.
 def wmo_tropopause_pressure(p_full_col: jnp.ndarray, temp_col: jnp.ndarray,
                             p_bot: float = 5.0e4,
                             p_top: float = 5.0e3) -> jnp.ndarray:

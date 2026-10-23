@@ -381,9 +381,9 @@ def main():
     config = ExperimentConfig(
         grid=GridConfig(grid_type=grid_type, resolution=N, nlev=NLEV),
         dycore=DycoreConfig(discretization=discretization, dt=DT,
-                            # the dycore energy fixer runs on MPAS only here
-                            # (F15, vote V11-C); elsewhere the open sink is recorded
-                            energy_fixer=(discretization == "mpas")),
+                            # the dycore energy fixer runs on every lane here
+                            # but spectral (F15b); there the open sink is recorded
+                            energy_fixer=(discretization != "spectral")),
     )
     model = create_atmosphere_dycore(config, grid, sigma)
     HYPERDIFF = compute_diffusion(grid, config.dycore).hyperdiff

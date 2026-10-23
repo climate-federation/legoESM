@@ -1,6 +1,6 @@
 """Differentiable MPAS step exported from the production run loop (review F9).
 
-``ModelDriver.export_mpas_step`` hands back the closures ``_run_mpas`` builds;
+``ModelDriver.export_mpas_step`` hands back the closures ``_run_column`` builds;
 ``mpas_diff_step.mpas_segment`` advances them as a pure function.  Pinned:
 
 * the segment reproduces the eager run loop BITWISE over a window that

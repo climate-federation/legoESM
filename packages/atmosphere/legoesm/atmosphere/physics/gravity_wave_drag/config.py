@@ -171,9 +171,8 @@ __param_spec__ = {
             "directional_spread": {"units": "1", "bounds": (0.25, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "McFarlane (1987) multi-directional spreading factor", "shape": None},
             # --- source activation / clips / tendency limiters ---
             "min_wind": {"units": "m/s", "bounds": (0.5, 6.0), "tunable_tier": 2, "transform": "sigmoid", "category": "orographic", "reference": "McFarlane (1987) minimum source-level wind", "shape": None},
-            "tau_max": {"units": "Pa", "bounds": (1.0, 50.0), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "McFarlane scheme launch-stress clip", "shape": None},
-            "tndmax_per_day": {"units": "m/s/day", "bounds": (100.0, 1000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common tendency ceiling (orographic)", "shape": None},
-            "umcfac": {"units": "1", "bounds": (0.1, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common umcfac no-reversal limiter", "shape": None},
+            "tndmax_per_day": {"units": "m/s/day", "bounds": (100.0, 1000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "CAM6 gw_common tndmax = 400 m/s/day (cam_cesm2_1_rel_60)", "shape": None},
+            "umcfac": {"units": "1", "bounds": (0.1, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "CAM6 gw_common umcfac no-reversal limiter", "shape": None},
         },
     },
     "PrognosticSpectralConfig": {
@@ -289,10 +288,10 @@ class LindzenConfig(NamedTuple):
 
 
 class McFarlaneConfig(NamedTuple):
-    """Configuration for smoothed McFarlane (1987) orographic GWD.
+    """Configuration for the CAM6 ``gw_oro`` orographic GWD (``mcfarlane``).
 
-    Extends the Lindzen approach with explicit launch flux control
-    and directional spreading.
+    Defaults are the CAM6 (cam_cesm2_1_rel_60) values; see ``mcfarlane.py``
+    for the algorithm and the smoothing fields' hard-switch limits.
 
     Fields
     ------
@@ -320,13 +319,10 @@ class McFarlaneConfig(NamedTuple):
         Sigmoid sharpness for the smooth ``U > min_wind`` activation
         (default 20.0).  Higher values approach a hard step.
     softmin_sharpness : float
-        Sigmoid sharpness of the saturation-cap blend (default 50.0).  Feeds
-        ``jax.nn.sigmoid(sat_sharpness*excess)`` to blend toward ``tau_sat``
-        when ``tau_carry`` exceeds it; higher values give a sharper cap at the
-        cost of larger gradients near the kink.
-    tau_max : float
-        Upper clip on launch stress [Pa] (default 10.0).  Operationally
-        protects against runaway stress in pathological columns.
+        Sigmoid sharpness of the saturation-cap blend (default 50.0): the
+        smooth form of CAM's ``tau = min(taudmp, tausat)``, blending toward
+        ``tausat`` with ``sigmoid(softmin_sharpness*(taudmp/tausat - 1))``;
+        exact ``min`` as the sharpness -> inf.
     fcrit2 : float
         Critical Froude number squared (default 1.0, CAM ``fcrit2``).  Used in
         the McFarlane (1987) / E3SM ``gw_oro_src`` displacement-height cap
@@ -351,9 +347,7 @@ class McFarlaneConfig(NamedTuple):
         the scalar ``config.h_topo`` fallback — because quadrupling a uniform
         500 m pseudo-mountain would silently quadruple drag over OCEAN (no
         landfrac factor in this scheme).  ``True`` on the scalar fallback
-        still raises for the same reason.  Skill retune of
-        ``G_0``/``directional_spread``/``tau_max`` against real SSO remains
-        owed (AMIP A/B 2026-07-17: stable, maxΔu ~0.6 m/s, tau_max-capped).
+        still raises for the same reason.
     use_depth_averaged_source : bool
         When ``True`` the source ``rho``/``N``/``U`` and the wave direction
         come from E3SM's dp-weighted low-level averages over the levels the
@@ -372,29 +366,21 @@ class McFarlaneConfig(NamedTuple):
         deposition).  ``True`` DEFAULT since 2026-07-17 (AMIP A/B: stable,
         small deltas; oracle behavior).
     crit_level_sharpness : float
-        Sigmoid sharpness [s/m] for the smooth critical-level filter
-        (default 10.0).  The orographic wave (phase speed ``c = 0``) has its
-        critical level where the source-projected wind ``U_proj`` reverses sign
-        (at ``U_proj = 0``); the smooth gate ramps in as ``U_proj`` drops toward
-        ``crit_level_floor`` (default +0.5 m/s), i.e. marginally BEFORE the true
-        reversal.  This reproduces the E3SM ``where ubmc*(ubi_above - c) > 0``
-        test (gw_common.F90:492) that the earlier ``|U_proj|`` saturation
-        stress silently dropped, letting waves transmit through and
-        accelerate a reversed jet.  Higher values approach a hard cutoff.  This
-        smooth gate handles the differentiable absorption of the carried stress;
-        the deposited drag additionally carries a HARD ``U_proj > 0`` positivity
-        mask in the scheme body so the VECTOR sink ``u*du_dt + v*dv_dt <= 0`` is
-        enforced STRICTLY (componentwise ``du_dt*u`` can be >0 for oblique winds).
+        Sigmoid sharpness [s/m] of the smooth critical-level test (default
+        10.0).  CAM6 zeroes the saturation stress of a layer whose interface
+        projected winds ``ubi`` differ in sign (gw_common.F90 ``(ubmc > 0)
+        .eqv. (ubi(k+1) > c)``, c = 0), so the residual stress is DEPOSITED
+        in that layer.  Each sign test is relaxed to
+        ``sigmoid(crit_level_sharpness*(ubi - crit_level_floor))`` and the
+        two are combined as a smooth XNOR multiplying ``tausat``; the hard
+        limit (sharpness -> inf, floor -> 0) is CAM's test exactly.
     crit_level_floor : float
-        Signed source-projected wind ``U_proj`` [m/s] (NOT a magnitude) at which
-        the smooth critical-level gate is half-on (default 0.5).  As ``U_proj``
-        drops toward and below this, the gate attenuates the CARRIED stress (not
-        ``tau_sat``), driving the propagated wave stress toward ~0.
+        Offset [m/s] of the two smoothed sign tests (default 0.5); CAM's
+        phase speed ``c = 0`` is the hard limit ``crit_level_floor -> 0``.
     tndmax_per_day : float
-        Absolute ceiling on ``|du/dt|`` [m/s/day] (default 500.0, CAM
-        ``tndmax`` for orographic-only; gw_common.F90:161).  Caps
-        physically-implausible accelerations in thin, low-density upper
-        layers where ``stress / (rho*dz)`` blows up.
+        Absolute ceiling on ``|du/dt|`` [m/s/day] (default 400.0, CAM6
+        ``tndmax = 400/86400`` in cam_cesm2_1_rel_60 gw_common.F90, applied
+        to the summed tendency with ``gw_apply_tndmax = .true.``).
     umcfac : float
         Maximum fraction of ``|c - U_proj|`` the wind may change per step
         (default 0.5, CAM ``umcfac``; gw_common.F90:642).  Prevents the
@@ -409,13 +395,12 @@ class McFarlaneConfig(NamedTuple):
     directional_spread: float = 1.0
     min_wind_sharpness: float = 20.0
     softmin_sharpness: float = 50.0
-    tau_max: float = 10.0
     fcrit2: float = 1.0
     use_e3sm_hdsp: bool | str = "auto"
     use_depth_averaged_source: bool = True
     crit_level_sharpness: float = 10.0
     crit_level_floor: float = 0.5
-    tndmax_per_day: float = 500.0
+    tndmax_per_day: float = 400.0
     umcfac: float = 0.5
 
 

@@ -1303,7 +1303,7 @@ def scalar_del2_cell_3d(q_cell_3d, mesh):
     is then a convex combination of the old stencil values (all edge weights
     positive on the orthogonal dual).  The caller enforces the bound;
     :func:`scalar_del2_cell_cfl_factor` returns ``g_max`` (see the MPAS q_v
-    smoother's setup guard in ``_run_mpas``).
+    smoother's setup guard in ``_run_column``).
 
     NOTE: this is UNWEIGHTED (mixing-ratio, not mass-weighted).  A
     mass-weighted ``div(dp*grad q)/dp`` would conserve ``sum_c A_c dp_c q_c``

@@ -14214,7 +14214,9 @@ def developed_vertical_day240_sensitivity(
                     target_e3t = np.array(vertical["e3t_after"], copy=True)
                     target_content = np.array(
                         vertical["content_T"], copy=True)
-                    replace = np.zeros(6, dtype=np.bool_)
+                    target_content_s = np.array(
+                        vertical["content_S"], copy=True)
+                    replace = np.zeros(7, dtype=np.bool_)
                     if name != "fixed_disabled":
                         replace[:] = True
                     if name.startswith("fixed_complete_K_e3w"):
@@ -14256,6 +14258,7 @@ def developed_vertical_day240_sensitivity(
                         tracer_e3w=jnp.asarray(target_e3w),
                         tracer_e3t=jnp.asarray(target_e3t),
                         temperature_content=jnp.asarray(target_content),
+                        salinity_content=jnp.asarray(target_content_s),
                         replace=jnp.asarray(replace),
                     )
                     identity_reference = probe.state_after

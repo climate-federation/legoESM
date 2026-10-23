@@ -52,6 +52,7 @@ export JAX_ENABLE_X64=1
 
 # machine forcing/IC paths (defines AMIP_PATH_FLAGS)
 source config/amip/amip_production.sh
+amip_require_forcing_files || exit 3   # aerosol / CCN / volcanic staged?
 
 echo "sha=$(git rev-parse --short HEAD)$([ -n "$(git status --porcelain)" ] && echo -dirty)  host=$(hostname)  $(date -u)"
 nvidia-smi --query-gpu=name --format=csv,noheader || true

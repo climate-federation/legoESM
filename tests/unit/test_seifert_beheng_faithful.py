@@ -35,8 +35,6 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     autoconversion_sb2001,
     accretion,
     accretion_sb2001,
-    _SB2001_X_STAR_KG,
-    _SB2001_NU_CLOUD,
 )
 from legoesm.atmosphere.physics.microphysics.config import SeifertBehengConfig
 
@@ -47,19 +45,6 @@ jax.config.update("jax_enable_x64", True)
 # --- Independent numpy transcriptions of the gSAM IRAIN=1 oracle ---------------
 
 
-def _gsam_prc_irain1(q_c, q_r, n_c_perm3, rho, nu):
-    """gSAM autoconversion PRC (module_mp_graupel.f90:1835-1841), rewritten in
-    legoESM per-VOLUME N_c units (gSAM ``rho·nc3d/1e6`` → ``N_c/1e6``)."""
-    tau = 1.0 - q_c / (q_c + q_r)                        # gSAM ``dum``
-    phi_au = 600.0 * tau ** 0.68 * (1.0 - tau ** 0.68) ** 3
-    return (
-        9.44e9 / (20.0 * 2.6e-7)
-        * (nu + 2.0) * (nu + 4.0) / (nu + 1.0) ** 2
-        * (rho * q_c / 1000.0) ** 4 / (n_c_perm3 / 1.0e6) ** 2
-        * (1.0 + phi_au / (1.0 - tau) ** 2) * 1000.0 / rho
-    )
-
-
 def _gsam_pra_irain1(q_c, q_r, rho):
     """gSAM accretion PRA (module_mp_graupel.f90:1960-1962)."""
     tau = 1.0 - q_c / (q_c + q_r)
@@ -67,54 +52,11 @@ def _gsam_pra_irain1(q_c, q_r, rho):
     return 5.78e3 * rho / 1000.0 * q_c * q_r * phi_ac
 
 
-# --- Autoconversion: matches gSAM IRAIN=1 to machine precision -----------------
-
-
-def test_autoconversion_sb2001_matches_gsam_irain1():
-    q_c, q_r, N_c, rho, nu = 8.0e-4, 2.0e-4, 1.0e8, 1.1, 1.0
-    dq_c_au, dN_r_au, x_c = autoconversion_sb2001(
-        jnp.array(q_c), jnp.array(q_r), jnp.array(N_c), jnp.array(rho), nu=nu,
-    )
-    assert float(dq_c_au) == pytest.approx(
-        _gsam_prc_irain1(q_c, q_r, N_c, rho, nu), rel=1e-9)
-    # Number closure: newborn drops carry x_* (SB2001) ⇒ dN_r·x_* = dq·rho.
-    assert float(dN_r_au) == pytest.approx(
-        float(dq_c_au) * rho / _SB2001_X_STAR_KG, rel=1e-12)
-    assert float(x_c) == pytest.approx(q_c * rho / N_c, rel=1e-12)
-
-
-def test_autoconversion_sb2001_matches_gsam_over_a_tau_sweep():
-    """The phi_au universal function is exercised across the full rain-fraction
-    range (tau from cloud-rich to rain-rich)."""
-    N_c, rho, nu = 1.0e8, 1.1, _SB2001_NU_CLOUD
-    for tau in (0.05, 0.2, 0.5, 0.8, 0.95):
-        # tau = q_r/(q_c+q_r); fix total condensate at 1e-3.
-        q_tot = 1.0e-3
-        q_r = tau * q_tot
-        q_c = q_tot - q_r
-        dq, _, _ = autoconversion_sb2001(
-            jnp.array(q_c), jnp.array(q_r), jnp.array(N_c), jnp.array(rho), nu=nu)
-        assert float(dq) == pytest.approx(
-            _gsam_prc_irain1(q_c, q_r, N_c, rho, nu), rel=1e-9), f"tau={tau}"
-
-
-def test_autoconversion_sb2001_default_nu_is_gsam_fixed_pgam_value():
-    """The default nu is gSAM's fixed-pgam value (pgam_fixed=10.3, Geoffroy
-    et al. 2010), obtained by interpolating the gSAM dnu table
-    (module_mp_graupel.f90:1685-1687): nu = dnu(10)+0.3·(dnu(11)−dnu(10))
-    = 0.397+0.3·(0.512−0.397) = 0.4315 — NOT an arbitrary nu=1. gSAM's DEFAULT
-    (dofix_pgam=.false.) instead diagnoses pgam spatially, so this fixed default
-    is an explicit approximation the caller can override."""
-    dnu10, dnu11 = 0.397, 0.512          # gSAM dnu table entries
-    nu_gsam_fixed = dnu10 + (10.3 - 10.0) * (dnu11 - dnu10)
-    assert _SB2001_NU_CLOUD == pytest.approx(nu_gsam_fixed, rel=1e-9)
-    assert _SB2001_NU_CLOUD == pytest.approx(0.4315, abs=1e-6)
-    # Shape factor from the gSAM-fixed nu, distinct from the old arbitrary nu=1
-    # value (3.75).
-    shape = (_SB2001_NU_CLOUD + 2.0) * (_SB2001_NU_CLOUD + 4.0) / (
-        _SB2001_NU_CLOUD + 1.0) ** 2
-    assert shape == pytest.approx(5.2582, abs=1e-3)
-    assert abs(shape - 3.75) > 1.0
+# --- Autoconversion vs the RUNNING oracle -------------------------------------
+# PRC/NPRC1/PRA with gSAM's diagnosed droplet shape are pinned against the
+# compiled gSAM M2005 by tests/atmosphere/microphysics/unit/
+# test_sb2001_warm_rain_oracle.py (the fixed-nu re-derivation tests that lived
+# here were superseded when the default became gSAM's diagnosed shape).
 
 
 # --- Accretion: matches gSAM IRAIN=1 to machine precision ----------------------
@@ -158,13 +100,16 @@ def test_simplified_autoconv_is_a_departure_qc_squared_not_qc_fourth():
     proves the proxy is a genuine (not cosmetic) departure — if someone rewires
     ``autoconversion_sb`` to the faithful form this canary goes red."""
     N_c, rho = 1.0e6, 1.1        # clean N_c so x_c ≫ x_* ⇒ simplified onset ≈ 1
+    # The faithful law at 100 cm^-3: at 1 cm^-3 gSAM's droplet-slope clamp
+    # resets N_c in proportion to q_c, which turns q_c^4/N_c^2 into q_c^2.
+    N_c_faithful = 1.0e8
     cfg = SeifertBehengConfig()
 
     def faithful(q_c):
         # Hold tau fixed at 0.2 (q_r = 0.25·q_c) ⇒ only the q_c^4 factor varies.
         dq, _, _ = autoconversion_sb2001(
             jnp.array(q_c), jnp.array(0.25 * q_c),
-            jnp.array(N_c), jnp.array(rho))
+            jnp.array(N_c_faithful), jnp.array(rho))
         return float(dq)
 
     def simplified(q_c):
@@ -183,7 +128,7 @@ def test_simplified_autoconv_is_a_departure_qc_squared_not_qc_fourth():
 # --- Morrison dispatch reaches the faithful path -------------------------------
 
 
-def _morrison_column(scheme):
+def _morrison_column(scheme, **kw):
     from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
     from legoesm.atmosphere.physics.microphysics.morrison import (
         morrison_microphysics,
@@ -206,20 +151,30 @@ def _morrison_column(scheme):
     )
     return morrison_microphysics(
         T, q_v, hydro, p_full, p_half, rho, dz, 20.0,
-        MorrisonConfig(warm_rain_scheme=scheme),
+        MorrisonConfig(warm_rain_scheme=scheme, **kw),
     )
 
 
 def test_morrison_warm_rain_scheme_sb2001_selects_faithful_and_differs():
     """``warm_rain_scheme="seifert_beheng_sb2001"`` runs, stays finite, and gives
-    a materially different rain tendency than both the simplified proxy and
-    kk2000 — proving the faithful path is actually reached, not dead code."""
+    a materially different rain tendency than kk2000 -- proving the faithful
+    path is actually reached, not dead code.  ``"seifert_beheng"`` (formerly a
+    proxy) now runs the SAME law: bitwise identical outputs."""
     out_faith = _morrison_column("seifert_beheng_sb2001")
-    out_proxy = _morrison_column("seifert_beheng")
+    out_sb = _morrison_column("seifert_beheng")
     out_kk = _morrison_column("kk2000")
     assert bool(jnp.all(jnp.isfinite(out_faith.dq_r_dt)))
-    assert not bool(jnp.allclose(out_faith.dq_r_dt, out_proxy.dq_r_dt, rtol=1e-3))
+    for f in ("dT_dt", "dq_v_dt", "dq_c_dt", "dq_r_dt", "dN_r_dt"):
+        assert bool(jnp.array_equal(getattr(out_faith, f), getattr(out_sb, f))), f
     assert not bool(jnp.allclose(out_faith.dq_r_dt, out_kk.dq_r_dt, rtol=1e-3))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("k_au", 1.0e3), ("x_star", 3.0e-10), ("k_ac", 6.0),
+    ("autoconversion_sharpness", 100.0)])
+def test_morrison_seifert_beheng_refuses_proxy_fields(field, value):
+    with pytest.raises(ValueError, match="no counterpart"):
+        _morrison_column("seifert_beheng", **{field: value})
 
 
 def test_morrison_warm_rain_scheme_raises_on_unknown():

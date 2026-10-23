@@ -370,12 +370,13 @@ def test_atomic_write_leaves_no_temp_file(tmp_path: Path) -> None:
 def test_manifest_for_a_shipped_config(tmp_path: Path) -> None:
     """End-to-end: a real config -> manifest whose resolved_config rebuilds it.
 
-    Mirrors what ``legoesm run`` writes at startup for config/williamson_test2.
+    Mirrors what ``legoesm run`` writes at startup for the Held-Suarez template.
     """
     from legoesm.config import Config
 
-    ec = Config.from_yaml("config/williamson_test2.yaml").to_experiment_config()
-    path = write_run_manifest(tmp_path, ec, command_line="legoesm run williamson_test2.yaml")
+    ec = Config.from_yaml(
+        "config/templates/3d_idealized/held_suarez.yaml").to_experiment_config()
+    path = write_run_manifest(tmp_path, ec, command_line="legoesm run held_suarez.yaml")
     m = read_run_manifest(path)
     assert experiment_config_from_dict(m["config"]["resolved_config"]) == ec
     assert m["config"]["config_hash"]  # non-empty sha256

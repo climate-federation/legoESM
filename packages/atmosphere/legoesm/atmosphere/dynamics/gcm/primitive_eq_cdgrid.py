@@ -45,6 +45,7 @@ from legoesm.core.conservation import (
     zero_mean_tendency,
     fix_ps_mass,
     fix_ps_mass_target,
+    gridded_energy_fixer_dT,
 )
 from legoesm.core.operators import (
     global_integral,
@@ -273,6 +274,16 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # instead of the in-RK3 advective -(u·∇q) form.  Fixes the cube
         # column-water non-conservation / day-150 blow-up.  Default False keeps
         # the advective path bit-exact.  Appended last (positional ABI).
+    energy_fixer: bool = False
+        # CAM-style dycore total-energy fixer (check_energy_fix, review
+        # 2026-10-10 F15): at the END of a dynamics-only step (after the
+        # sponge / vorticity damping / p_s damping / mass fixer / Rayleigh
+        # post-steps, vote F15b-V2; before the tracer floor, whose hard-floor
+        # latent correction is moist) the window's total-energy change
+        # comes back as a uniform heating (``gridded_energy_fixer_dT``).
+        # Refused with physics inside the RK stages (that window would count
+        # the physics heating).  False on the raw dycore; the driver sets it
+        # from ``DycoreConfig.energy_fixer`` (default True).  Appended last.
 
 
 def validate_corner_div_damp_nord(nord: int) -> None:
@@ -1597,13 +1608,27 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         physics_fn=None,
         target_mass=None,
         phys_state=None,
+        energy_pre=None,
     ) -> tuple:
         """Advance one time step with D-grid prognostic winds.
+
+        ``energy_pre``: the energy fixer's window START as cell-centre
+        ``(T, u, v, p_s, phis)`` -- the cc caller's own state, so the
+        cc -> D -> cc round trip's KE change is inside the closed window;
+        ``None`` = the D-grid input's cell-centre view.
 
         Returns ``(state_new, phys_state_out)``.  ``phys_state_out`` is
         the input carry when no carry/physics is active; see
         :meth:`step` for the per-RK-stage carry semantics.
         """
+        if self.config.energy_fixer and physics_fn is not None:
+            # physics rides INSIDE the RK stages here, so the window's energy
+            # change would include the physics heating (latent release read
+            # as a dycore gain and cooled away): refuse, never mis-fix
+            raise ValueError(
+                "CDGridPrimitiveEquationModel: energy_fixer=True needs a "
+                "dynamics-only step (physics_fn=None, the driver's operator "
+                "split); physics inside the RK stages would be fixed away")
         state = cast_pytree(state, None, "compute")
         cdgrid = self.cdgrid
 
@@ -2001,6 +2026,22 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         if self.config.moisture_flux_form and state_new.tracers is not None:
             state_new = self._flux_form_moisture_substep(state, state_new, dt)
 
+        if self.config.energy_fixer:
+            # --- Dycore energy fixer (CAM check_energy_fix, F15): the whole
+            # dynamics window's energy change returns as a uniform heating
+            # [K, +warming].  Global sums as the mass fixer above.  BEFORE
+            # the tracer floor: the hard-floor path's latent-heat T
+            # correction is a moist-energy fix this dry fixer must not undo.
+            def _cc(s):
+                h = fv3_to_hydrostatic(s, cdgrid)
+                return (h.T.data, h.u.data, h.v.data, h.p_s.data, h.phis.data)
+            _dT_fix = gridded_energy_fixer_dT(
+                _cc(state) if energy_pre is None else energy_pre,
+                _cc(state_new), self.grid, self.sigma_coord)
+            state_new = state_new._replace(T=state_new.T.replace(
+                data=state_new.T.data
+                + _dT_fix.astype(state_new.T.data.dtype)))
+
         # Prognostic tracer floor: advective tracer transport is not
         # positive-definite, so clamp q >= 0 AFTER the RK update (the physics
         # adapters clip their INPUT; this is the prognostic floor the moist
@@ -2098,7 +2139,9 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         )
         fv3_new, phys_state_out = self._step_fv3(
             fv3_state, dt, physics_fn=physics_fn, target_mass=target_mass,
-            phys_state=phys_state)
+            phys_state=phys_state,
+            energy_pre=(state.T.data, _u_in, _v_in, state.p_s.data,
+                        state.phis.data))
         return fv3_to_hydrostatic(fv3_new, self.cdgrid), phys_state_out
 
     def step_cell_centre(self, state, dt, physics_fn=None,

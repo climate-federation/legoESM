@@ -280,6 +280,14 @@ class TestConvectionGrad:
                 v=state.v.replace(data=v_data),
             )
 
+        # GFDL moist_conv (dca) adjusts only supersaturated levels, so the
+        # shared 80 % RH state leaves it correctly OFF; scale the humidity to
+        # 1.05x the fixture's saturation mixing ratio so moist_conv acts.
+        if scheme == "dca":
+            q_v = state.tracers["q_v"]
+            state = state._replace(tracers={
+                **state.tracers, "q_v": q_v.replace(data=q_v.data * (1.05 / 0.8))})
+
         def loss(T_data):
             s = state._replace(T=state.T.replace(data=T_data))
             tend, _ = conv_fn(s, self.grid, self.sigma)

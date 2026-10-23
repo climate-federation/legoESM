@@ -84,8 +84,7 @@ def build_amip_clubb_lite_config(
         grid=GridConfig(grid_type=str(grid_type), resolution=int(resolution),
                         nlev=int(nlev)),
         dycore=DycoreConfig(
-            dt=float(dt), model_type="hydrostatic", discretization="finite_volume",
-            energy_fixer=False),   # not wired on lat-lon (F15, vote V11-C)
+            dt=float(dt), model_type="hydrostatic", discretization="finite_volume"),
         output=OutputConfig(diag_days=_diag_days),
         radiation=radiation,
         turbulence="clubb_lite",

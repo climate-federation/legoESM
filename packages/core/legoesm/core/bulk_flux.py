@@ -1389,6 +1389,19 @@ def ocean_surface_q_sat(
 # --- CESM coupler air-sea flux law (cime5.6.47 shr_flux_mod.F90) ---
 # ``seq_flux_atmocn_minwind`` namelist default (CESM2 namelist_defaults_cam.xml).
 _CESM_MINWIND = 0.5
+# ``flux_max_iteration`` as the CESM2.1 driver sets it (cime5.6.47
+# namelist_definition_drv.xml ``flux_max_iteration`` = 5 for cesm, passed to
+# ``shr_flux_adjust_constants`` by seq_flux_mct.F90); the module default of 2
+# in shr_flux_mod.F90 is overridden.  With ``flux_convergence = 0.0`` (f09)
+# every one of the 5 passes runs.  A loop count: never config / trainable.
+_CESM_FLUX_MAX_ITER = 5
+# --- cold-air-outbreak wind enhancement (Mahrt & Sun 1995, MWR) ---
+# shr_flux_mod.F90 module PARAMETERS ``alpha``, ``maxscl``, ``td0``; switched on
+# by ``coldair_outbreak_mod`` = .true. (CESM2.1 default for cesm,
+# namelist_definition_drv.xml).
+_CESM_COA_ALPHA = 1.4      # wind-scaling slope [K^-1/2 m/s]
+_CESM_COA_MAXSCL = 2.0     # maximum wind scaling factor [-]
+_CESM_COA_TD0 = -10.0      # tbot - ts at which the scaling starts [K]
 
 
 def _sam_cdn(u10: jnp.ndarray) -> jnp.ndarray:
@@ -1419,12 +1432,13 @@ def compute_sam_oceflx_fluxes(
     z_bot: jnp.ndarray | float,
     exner_sfc: jnp.ndarray | float = 1.0,
     wd: jnp.ndarray | float = 0.0,
-    n_iter: int = 2,
+    n_iter: int | None = None,
     *,
     variant: str = "sam",
     minwind: float = _CESM_MINWIND,
     return_2m: bool = False,
     z_diag: float = 2.0,
+    t_bot: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, ...]:
     """SAM ocean surface fluxes — faithful port of ``oceflx.f90`` (CESM1).
 
@@ -1437,9 +1451,13 @@ def compute_sam_oceflx_fluxes(
       (``seq_flux_atmocn_minwind``, CESM2 default 0.5 m/s), NO floor inside
       ``cdn``, and the moist ``cp = c_pd (1 + cpvir ssq)`` = ``c_pd + (c_pv -
       c_pd) q_sfc`` on the sensible heat.  Stability iteration, coefficients
-      and flux algebra are otherwise identical (``flux_con_tol = 0``,
-      ``flux_con_max_iter = 2`` -> exactly ``n_iter = 2`` passes;
-      ``gust_fac = 0``; cold-air-outbreak modification off).  ``ssq`` is
+      and flux algebra are otherwise identical.  The CESM2.1 driver settings
+      are the defaults: ``flux_max_iteration = 5`` with ``flux_convergence =
+      0`` (f09) -> ``n_iter = 5`` passes; ``gust_fac = 0``; and the
+      cold-air-outbreak wind enhancement ON (``coldair_outbreak_mod``: where
+      ``t_bot - T_sfc < -10 K`` the wind is scaled by ``min(1 + 1.4
+      sqrt(|t_bot - T_sfc + 10|)/vmag, 2)``), which needs the ABSOLUTE
+      lowest-level air temperature ``t_bot`` (required).  ``ssq`` is
       taken from ``q_sfc`` (the caller's saturation curve and salinity
       factor; CESM's own ``0.98 * 640380/exp(5107.4/T)`` fit is NOT
       re-derived here).  With ``return_2m=True`` the CESM ``tref`` 2 m
@@ -1494,8 +1512,13 @@ def compute_sam_oceflx_fluxes(
     wd : array or float
         Gust-enhancement wind [m/s] added in quadrature to ``vmag``
         (SAM ``wd``, default 0).
-    n_iter : int
-        Number of MO stability iterations (SAM uses 2).
+    n_iter : int or None
+        Number of MO stability iterations.  None = the oracle's: 2 for
+        ``"sam"``, 5 for ``"cesm"`` (CESM2.1 ``flux_max_iteration``).
+    t_bot : array or None
+        ``"cesm"`` only, REQUIRED there: lowest-level ABSOLUTE air
+        temperature [K] (CESM ``tbot``), read by the cold-air-outbreak
+        wind enhancement.  Ignored by ``"sam"``.
 
     Returns
     -------
@@ -1516,6 +1539,13 @@ def compute_sam_oceflx_fluxes(
     z_ref = 10.0
     umin = 1.0 if variant == "sam" else minwind
     _cdn = _sam_cdn if variant == "sam" else _cesm_cdn
+    if n_iter is None:
+        n_iter = 2 if variant == "sam" else _CESM_FLUX_MAX_ITER
+    if variant == "cesm" and t_bot is None:
+        raise ValueError(
+            "compute_sam_oceflx_fluxes(variant='cesm') needs t_bot, the "
+            "absolute lowest-level air temperature: CESM2.1's cold-air-"
+            "outbreak wind enhancement (coldair_outbreak_mod) reads tbot - ts.")
 
     # Safe sqrt (+eps) so the calm-wind (u=v=wd=0) reverse-mode gradient
     # stays finite — bare sqrt(0) gives a 0·inf NaN even though the value
@@ -1524,6 +1554,17 @@ def compute_sam_oceflx_fluxes(
     vmag = jnp.maximum(
         umin, jnp.sqrt(u_atm ** 2 + v_atm ** 2 + wd ** 2 + 1e-12)
     )
+    if variant == "cesm":
+        # shr_flux_atmOcn cold-air-outbreak block (use_coldair_outbreak_mod):
+        # tdiff = tbot - ts; where tdiff < td0 both vmag and vmag_old (the
+        # stress denominator, the same array here since gust_fac = 0) are
+        # scaled by vscl.
+        tdiff = t_bot - T_sfc
+        vscl = jnp.minimum(
+            1.0 + _CESM_COA_ALPHA * (jnp.abs(tdiff - _CESM_COA_TD0) ** 0.5
+                                     / jnp.abs(vmag)),
+            _CESM_COA_MAXSCL)
+        vmag = jnp.where(tdiff < _CESM_COA_TD0, vmag * vscl, vmag)
     theta_sfc = T_sfc / exner_sfc             # surface potential temperature
     delt = theta_atm - theta_sfc             # SAM thbot - ts (pot-T diff)
     delq = q_atm - q_sfc                      # spec-humidity diff
@@ -1552,7 +1593,19 @@ def compute_sam_oceflx_fluxes(
     q_star = ren * delq
 
     # --- MO stability iterations (SAM does 2) ---
+    # CESM: ``do while (abs((ustar-ustar_prev)/ustar) > flux_con_tol .and.
+    # iter < flux_con_max_iter)`` with flux_con_tol = 0 (f09): a column stops
+    # iterating once ustar repeats EXACTLY, keeping that pass's values (which
+    # can differ from a further pass when the stability flag still flips).
+    u_star_prev = 2.0 * u_star
+    going = True
+    hol = psixh = jnp.zeros_like(u_star)
+    rh = rhn
     for _ in range(n_iter):
+        if variant == "cesm":
+            going = going & (u_star != u_star_prev)
+            u_star_prev = u_star
+            old = (rdn, u_star, t_star, q_star, hol, stable, rh, psixh)
         hol = (
             karman * G * z_bot
             * (t_star / theta_atm + q_star / (1.0 / eps_v + q_atm))
@@ -1580,6 +1633,10 @@ def compute_sam_oceflx_fluxes(
         u_star = rd * vmag
         t_star = rh * delt
         q_star = re * delq
+        if variant == "cesm":
+            rdn, u_star, t_star, q_star, hol, stable, rh, psixh = (
+                jnp.where(going, new, prev) for new, prev in zip(
+                    (rdn, u_star, t_star, q_star, hol, stable, rh, psixh), old))
 
     # --- fluxes (legoESM upward-positive W/m²) ---
     tau = rho * u_star ** 2

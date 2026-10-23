@@ -157,7 +157,7 @@ def _mock_step_unified_rad_counting(*args, **kwargs):
 _OPTIONAL_CARRY_FIELDS = (
     "q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
     "tke", "qke", "gwd_spectrum", "cloud_fraction", "land_ml", "w_land", "snow",
-    "budget_ledger_accum",
+    "budget_ledger_accum", "precip_frozen_prev", "precip_frozen_accum",
 )
 
 
@@ -2061,12 +2061,16 @@ class TestQvSmoothingGate:
                 "(that call is what crashes lat-lon on grid.halo_interp_offsets)")
 
         q = jnp.array([[-1.0, 2.0, 0.0, 0.5]])
+        dsigma = jnp.array([0.1, 0.2, 0.3, 0.4])
         # grid deliberately has NO halo_interp_offsets — mimics a lat-lon grid.
         statics = SimpleNamespace(
-            qv_smooth_coeff=0.0, dt=100.0, grid=object(), hyperdiffusion_3d=_boom)
+            qv_smooth_coeff=0.0, dt=100.0, grid=object(),
+            hyperdiffusion_3d=_boom, dsigma=dsigma)
         out = _apply_qv_smoothing(q, statics)
-        # operator skipped; only the positivity floor applied.
-        assert jnp.array_equal(out, jnp.maximum(q, 0.0))
+        # operator skipped; only the column-conserving positivity floor.
+        assert bool((out >= 0.0).all())
+        assert jnp.sum(out * dsigma) == pytest.approx(
+            float(jnp.sum(q * dsigma)), rel=1e-12)
 
     def test_nonzero_coeff_is_bit_identical_to_former_nested_max(self):
         from types import SimpleNamespace
@@ -2080,14 +2084,20 @@ class TestQvSmoothingGate:
             seen["grid"] = grid
             return jnp.full_like(field, 1.0e-3)  # arbitrary ∇⁴ tendency
 
-        q = jnp.array([[0.01, -0.002, 0.5, 3.0e-4]])
+        q = jnp.array([[0.01, -0.2, 0.5, 3.0e-4]])
+        dsigma = jnp.array([0.1, 0.2, 0.3, 0.4])
         dt, coeff, grid = 90.0, 0.25, object()
         statics = SimpleNamespace(
-            qv_smooth_coeff=coeff, dt=dt, grid=grid, hyperdiffusion_3d=_hd)
+            qv_smooth_coeff=coeff, dt=dt, grid=grid, hyperdiffusion_3d=_hd,
+            dsigma=dsigma)
         out = _apply_qv_smoothing(q, statics)
-        # Former inline form: max(q + dt*hyperdiffusion_3d(q, grid, coeff), 0).
-        expected = jnp.maximum(q + dt * jnp.full_like(q, 1.0e-3), 0.0)
-        assert jnp.array_equal(out, expected)
+        # q + dt*hyperdiffusion_3d(q, grid, coeff), then the column-conserving
+        # floor (a plain max(., 0) would add the clipped water).
+        smoothed = q + dt * jnp.full_like(q, 1.0e-3)
+        assert bool((smoothed < 0.0).any())
+        assert bool((out >= 0.0).all())
+        assert jnp.sum(out * dsigma) == pytest.approx(
+            float(jnp.sum(smoothed * dsigma)), rel=1e-12)
         # The real operator was invoked with the configured coeff + grid.
         assert seen["coeff"] == coeff and seen["grid"] is grid
 

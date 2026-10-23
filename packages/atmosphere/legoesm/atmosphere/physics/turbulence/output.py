@@ -70,6 +70,10 @@ class TurbulenceOutput(NamedTuple):
         NOT feed the tendencies (those come from the flux DIVERGENCE / implicit solve)
         and so cannot change any run. Consumed only by the LES-suite Q1 diagnostic
         score (``les_suite`` compares it to the LES flux at the LES mean state).
+    relvar : jax.Array or None
+        Optional CAM6 relative cloud-water variance ``rcm**2/qclvar`` [-] for
+        MG2 (``clubb_intr.F90:2416-2425``), shape (ncol, nlev).  Produced only
+        by prognostic CLUBB with the liquid partition; ``None`` otherwise.
     """
     du_dt: jax.Array
     dv_dt: jax.Array
@@ -88,3 +92,4 @@ class TurbulenceOutput(NamedTuple):
     # positive up]: the prescribed tile water or lhflx / L_v(T_sfc).  The water
     # ledgers and CMOR evspsbl read THIS, never lhflx / L_v.
     evap_sfc: jax.Array | None = None
+    relvar: jax.Array | None = None

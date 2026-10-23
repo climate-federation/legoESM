@@ -105,7 +105,7 @@ def setup_driver(args):
     the TRAINABLE config (MOST z0 + Farquhar stomata + prescribed carbon)."""
     cfg = ExperimentConfig(
         grid=GridConfig(resolution=args.resolution, nlev=args.nlev),
-        dycore=DycoreConfig(dt=args.dt, energy_fixer=False),  # not wired here (F15, vote V11-C)
+        dycore=DycoreConfig(dt=args.dt),
         output=OutputConfig(diag_days=1),
         days=1, dataset="analytical", radiation="gray",
         land_mask_path=args.land_mask_file,

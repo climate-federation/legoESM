@@ -216,7 +216,7 @@ class TestCoupledResumeStatePersistence(unittest.TestCase):
     def setUpClass(cls):
         import tempfile
         cls._tmp = tempfile.TemporaryDirectory()
-        # slab_simple has land, so the lagged runoff channel is genuinely
+        # slab_simple has land, so the lagged surface water flux is genuinely
         # nonzero — the round-trip equality below is not vacuous.
         cls.driver = _make_driver("slab_simple", days=1,
                                   output_dir=cls._tmp.name)
@@ -234,7 +234,11 @@ class TestCoupledResumeStatePersistence(unittest.TestCase):
         ref = self.driver._last_sfc_response
         self.assertIsNotNone(ref)
         self.assertIsNotNone(self.driver._sst_mean_init)
-        self.assertTrue(bool(jnp.any(ref.river_runoff_flux != 0.0)))
+        # Non-vacuity: the buffer carries a live land-sourced channel.  Not
+        # the river runoff: after this 1-day run the slab bucket sits at
+        # ~75 of W_max=150 kg/m2 and runoff is exactly 0 everywhere (job
+        # 10331261) -- the surface water flux is the channel that is live.
+        self.assertTrue(bool(jnp.any(ref.surface_mass_flux != 0.0)))
 
         resumed = _make_driver("slab_simple", days=1)  # fresh: lag buffer None
         self.assertIsNone(resumed._last_sfc_response)

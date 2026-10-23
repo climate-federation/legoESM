@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
+import logging
+
 import jax
 import numpy as np
 
@@ -35,6 +37,8 @@ from legoesm.io.state_digest import compute_state_digest, pytree_state_digest
 # Lazy imports to avoid circular dependency:
 #   io.restart → driver.config → driver.__init__ → model_driver → io.restart
 # We import ExperimentConfig and its serializer at function level instead.
+logger = logging.getLogger(__name__)
+
 _ExperimentConfig = None
 _experiment_config_to_dict = None
 
@@ -135,15 +139,30 @@ def detect_config_kind(config) -> str:
     return "atmosphere"
 
 
+# Kinds serialized with the recursive tagged NamedTuple codec (it lives in
+# ``legoesm.ocean.config`` but is component-agnostic).  "land" and "coupled"
+# records are plain dicts of a runner's resolved config + run controls.
+_TAGGED_CONFIG_KINDS = ("ocean", "land", "coupled")
+
+
+def _check_config_kind(kind: str) -> None:
+    if kind != "atmosphere" and kind not in _TAGGED_CONFIG_KINDS:
+        raise ValueError(
+            f"unknown run-manifest config_kind {kind!r}; expected 'atmosphere' "
+            f"or one of {_TAGGED_CONFIG_KINDS}")
+
+
 def _serialize_config(config, kind: str) -> dict:
-    if kind == "ocean":
+    _check_config_kind(kind)
+    if kind in _TAGGED_CONFIG_KINDS:
         from legoesm.ocean.config import ocean_config_to_dict
         return ocean_config_to_dict(config)
     return _config_to_dict_any(config)
 
 
 def _deserialize_config(resolved: dict, kind: str):
-    if kind == "ocean":
+    _check_config_kind(kind)
+    if kind in _TAGGED_CONFIG_KINDS:
         from legoesm.ocean.config import ocean_config_from_dict
         return ocean_config_from_dict(resolved)
     from legoesm.driver.config import experiment_config_from_dict
@@ -190,16 +209,32 @@ def config_hash_matches(stored_hash: str, stored_resolved: dict, config,
     # False, and bricked every older run directory even with the new flag at
     # its default (codex round 2 on that PR, reproduced).
     try:
-        current = _serialize_config(config, kind)
-        defaults = _serialize_config(type(config)(), kind)
+        # a manifest written before a key rename spells it the old way
+        current = _stored_spelling(_serialize_config(config, kind),
+                                   stored_resolved)
+        if hashlib.sha256(json.dumps(current, sort_keys=True).encode(
+                "utf-8")).hexdigest() == stored_hash:
+            return True
+        defaults = _stored_spelling(_serialize_config(type(config)(), kind),
+                                    stored_resolved)
+        accepted: list[str] = []
         restricted = _restrict_to_stored_shape(current, stored_resolved,
-                                               defaults)
+                                               defaults, accepted)
         if restricted is _REFUSE:
             return False          # a NEW field sits at a NON-default value
         if restricted == current:
             return False          # nothing grew; the hash mismatch is real
         text = json.dumps(restricted, sort_keys=True)
-        return hashlib.sha256(text.encode("utf-8")).hexdigest() == stored_hash
+        ok = hashlib.sha256(text.encode("utf-8")).hexdigest() == stored_hash
+        if ok:
+            # A new field at today's default is NOT proof it matches the old
+            # behaviour (a fix whose default changes the physics passes this
+            # test) -- so name every field accepted this way.
+            logger.warning(
+                "config_hash_matches: accepted stored manifest by schema-growth "
+                "tolerance; fields absent from the manifest and taken at "
+                "today's defaults: %s", ", ".join(sorted(accepted)))
+        return ok
     except Exception:
         return False  # cannot prove schema growth: fail closed (strict)
 
@@ -213,7 +248,24 @@ def config_hash_matches(stored_hash: str, stored_resolved: dict, config,
 _REFUSE = object()
 
 
-def _restrict_to_stored_shape(current, stored, defaults):
+def _stored_spelling(cur, stored):
+    """*cur* with every renamed key (config.RENAMED_CONFIG_KEYS) spelled the
+    old way where *stored* (at the same depth) spells it so."""
+    if not (isinstance(cur, dict) and isinstance(stored, dict)):
+        return cur
+    from legoesm.driver.config import RENAMED_CONFIG_KEYS
+    old_of = {new: old for old, new in RENAMED_CONFIG_KEYS.items()}
+    out = {}
+    for k, v in cur.items():
+        # a manifest spelling the key both ways (equal values) hashes both
+        names = [n for n in (k, old_of.get(k)) if n in stored] or [k]
+        for n in names:
+            out[n] = _stored_spelling(v, stored.get(n))
+    return out
+
+
+def _restrict_to_stored_shape(current, stored, defaults, accepted=None,
+                              _path=""):
     """Project *current* onto the key shape *stored* has, AT ANY DEPTH.
 
     Returns the projection, or :data:`_REFUSE` when a key present in *current*
@@ -231,7 +283,8 @@ def _restrict_to_stored_shape(current, stored, defaults):
     out = {}
     for k, v in current.items():
         if k in stored:
-            sub = _restrict_to_stored_shape(v, stored[k], defaults.get(k))
+            sub = _restrict_to_stored_shape(v, stored[k], defaults.get(k),
+                                            accepted, f"{_path}{k}.")
             if sub is _REFUSE:
                 return _REFUSE
             out[k] = sub
@@ -239,6 +292,8 @@ def _restrict_to_stored_shape(current, stored, defaults):
         # A key the manifest never stored: tolerated ONLY as a schema default.
         if k not in defaults or v != defaults[k]:
             return _REFUSE
+        if accepted is not None:
+            accepted.append(f"{_path}{k}")
     return out
 
 
@@ -264,6 +319,18 @@ def _get_jax_x64() -> bool:
 
 def _get_platform_tag() -> str:
     return f"{platform.system().lower()}-{platform.machine()}"
+
+
+def file_sha256(path) -> str | None:
+    """SHA-256 of the file at *path* (relative paths against the current
+    directory), or ``None`` when it is not a readable file."""
+    try:
+        p = Path(path)
+        if not p.is_file():
+            return None
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+    except (OSError, TypeError, ValueError):
+        return None
 
 
 def _package_anchor() -> Path:
@@ -343,6 +410,686 @@ def _meta_path(checkpoint_path: Path) -> Path:
 # invalidates resume-into-existing-dir for every older manifest — populating an
 # already-present optional field (e.g. dataset_provenance) is NOT a bump.
 RUN_MANIFEST_SCHEMA_VERSION = 1
+
+#: Environment variable that lets a driver continue a restart chain on code that
+#: may differ from the code that wrote it.  Values "1"/"true"/"yes" enable.
+ALLOW_VERSION_DRIFT_ENV = "LEGOESM_ALLOW_VERSION_DRIFT"
+
+
+def version_drift_allowed(environ=None) -> bool:
+    env = os.environ if environ is None else environ
+    return str(env.get(ALLOW_VERSION_DRIFT_ENV, "")).strip().lower() in (
+        "1", "true", "yes")
+
+
+def version_drift(recorded_commit: str, recorded_dirty: bool = False,
+                  recorded_patches=()) -> list[str]:
+    """Reasons the IMPORTED code may differ from the code that wrote a record.
+
+    Empty list = no drift.  Until the uncommitted diff itself is recorded, a
+    dirty tree or an applied patch on EITHER side counts as drift: the commit
+    alone cannot prove the code matched.  An unknown commit on either side
+    also counts (fail closed).
+    """
+    cur = git_provenance(_package_anchor())
+    reasons = []
+    if not recorded_commit:
+        reasons.append("the recorded legoESM commit is unknown")
+    if not cur.commit:
+        reasons.append("the imported legoESM is not a git checkout "
+                       "(commit unknown)")
+    if recorded_commit and cur.commit and recorded_commit != cur.commit:
+        reasons.append(f"recorded commit {recorded_commit[:12]} != imported "
+                       f"commit {cur.commit[:12]}")
+    if recorded_dirty:
+        reasons.append("the recorded run had uncommitted changes")
+    if cur.dirty:
+        reasons.append(f"the imported tree {cur.root} has uncommitted changes")
+    if recorded_patches:
+        reasons.append(f"the recorded run applied patches "
+                       f"{list(recorded_patches)}")
+    return reasons
+
+
+def refuse_version_drift(reasons: list[str], what: str) -> None:
+    """Raise ``RuntimeError`` when *reasons* is non-empty, unless
+    ``LEGOESM_ALLOW_VERSION_DRIFT`` is set (then only warn)."""
+    if not reasons:
+        return
+    detail = "; ".join(reasons)
+    if version_drift_allowed():
+        # ponytail: logged only -- the override is not written into the new
+        # manifest; record it there once the environment block (P1) lands.
+        logger.warning(f"Continuing from {what} despite version drift "
+                       f"({ALLOW_VERSION_DRIFT_ENV} set): {detail}")
+        return
+    raise RuntimeError(
+        f"Refusing to continue from {what}: the code may differ from the code "
+        f"that wrote it ({detail}). Commit and use the same commit, or set "
+        f"{ALLOW_VERSION_DRIFT_ENV}=1 to continue anyway (see "
+        f"docs/architecture/reproducibility.md).")
+
+
+def manifest_file_version_drift(path) -> list[str]:
+    """:func:`manifest_version_drift` for a manifest FILE; an unreadable or
+    schema-invalid manifest proves nothing about the code, so it is drift."""
+    try:
+        manifest = read_run_manifest(path)
+        validate_run_manifest(manifest)
+    except Exception as exc:  # noqa: BLE001 — becomes a refusal reason
+        return [f"{path} is not a valid run manifest ({exc})"]
+    return manifest_version_drift(manifest)
+
+
+def collective_version_drift_gate(reasons_fn, what: str) -> None:
+    """:func:`collective_root_gate` on the version-drift refusal."""
+    collective_root_gate(
+        lambda: refuse_version_drift(reasons_fn(), what), f"version drift: {what}")
+
+
+def _mpi_world():
+    """mpi4py COMM_WORLD when this run already uses MPI with >1 rank, else None."""
+    mpi = sys.modules.get("mpi4py.MPI")  # only if this run already uses MPI
+    if (mpi is not None and mpi.Is_initialized()
+            and mpi.COMM_WORLD.Get_size() > 1):
+        return mpi.COMM_WORLD
+    return None
+
+
+def world_size() -> int:
+    """Processes in this run: JAX multi-controller or mpi4py, whichever is larger."""
+    comm = _mpi_world()
+    return max(int(jax.process_count()), comm.Get_size() if comm is not None else 1)
+
+
+def restart_version_drift(path, manifest_dirs) -> list[str]:
+    """Version-drift reasons for continuing from the restart file *path*.
+
+    The run that wrote it left its ``run_manifest.json`` in one of
+    *manifest_dirs* (the first one holding a manifest is used).  No manifest
+    there means the writing code is unknown, which counts as drift.  A missing
+    restart is left to the loader to report.
+    """
+    path = Path(path)
+    if not path.exists():
+        return []
+    dirs = [Path(d) for d in manifest_dirs]
+    for d in dirs:
+        if (d / RUN_MANIFEST_FILENAME).is_file():
+            return manifest_file_version_drift(d / RUN_MANIFEST_FILENAME)
+    where = ("beside the checkpoint" if dirs == [path.parent]
+             else f"in {', '.join(str(d) for d in dirs)}")
+    return [f"no {RUN_MANIFEST_FILENAME} {where}, so the code that wrote it "
+            f"is unknown ({path}; copy the writing run's "
+            f"{RUN_MANIFEST_FILENAME} there)"]
+
+
+def collective_root_gate(fn, what: str) -> None:
+    """Call on EVERY process at the same point, before rank-local work.
+
+    Process 0 runs ``fn()``; whether it raised is broadcast (JAX
+    multi-controller or mpi4py, whichever this run uses) so a refusal or
+    failure raises on every process instead of stranding the others in a
+    collective.
+    """
+    comm = None
+    if jax.process_count() > 1:
+        root = jax.process_index() == 0
+    else:
+        comm = _mpi_world()
+        root = comm is None or comm.Get_rank() == 0
+    error = None
+    if root:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 — re-raised after the vote
+            error = exc
+    failed = error is not None
+    if jax.process_count() > 1:
+        from jax.experimental import multihost_utils
+        failed = bool(int(np.asarray(multihost_utils.broadcast_one_to_all(
+            np.asarray(int(failed), dtype=np.int32), is_source=root))))
+    elif comm is not None:
+        failed = comm.bcast(failed, root=0)
+    if error is not None:
+        raise error
+    if failed:
+        raise RuntimeError(f"refused on process 0 ({what})")
+
+
+def resolved_config_record(config, kind: str | None = None) -> dict:
+    """*config* exactly as a manifest's ``config.resolved_config`` stores it."""
+    return _json_safe(_serialize_config(config, kind or detect_config_kind(config)))
+
+
+def manifest_version_drift(manifest: dict) -> list[str]:
+    """:func:`version_drift` against a run manifest's recorded provenance."""
+    repro = manifest.get("reproducibility") or {}
+    dirty, patches = repro.get("git_dirty"), repro.get("patches")
+    reasons = []
+    if not isinstance(dirty, bool):
+        reasons.append(f"the manifest does not record 'git_dirty' ({dirty!r})")
+    if not isinstance(patches, list):
+        reasons.append(f"the manifest does not record 'patches' ({patches!r})")
+    return reasons + version_drift(
+        (manifest.get("legoESM") or {}).get("commit", ""),
+        dirty is True, patches or [])
+_MISSING = "<absent>"
+
+
+def config_drift_rows(stored: dict, rebuilt: dict, prefix: str = "") -> list:
+    """(dotted_field, stored, rebuilt) for every field that differs;
+    ``<absent>`` marks a field present on one side only."""
+    rows = []
+    for k in sorted(set(stored) | set(rebuilt)):
+        a, b = stored.get(k, _MISSING), rebuilt.get(k, _MISSING)
+        if isinstance(a, dict) and isinstance(b, dict):
+            rows += config_drift_rows(a, b, f"{prefix}{k}.")
+        elif json.dumps(a, sort_keys=True) != json.dumps(b, sort_keys=True):
+            rows.append((f"{prefix}{k}", a, b))   # JSON text: NaN equals NaN
+    return rows
+
+
+# Entries every lane writes into ``config.resolved_physics``.
+RESOLVED_PHYSICS_KEYS = ("convection", "microphysics", "turbulence",
+                         "gravity_wave_drag", "radiation", "cloud", "land",
+                         "land_albedo", "solar", "ozone", "aerosol", "ghg",
+                         "rollout", "turbulence_override",
+                         "gravity_wave_drag_override")
+
+
+def resolved_physics_record(configs: dict) -> dict:
+    """``{name: scheme *Config}`` as a manifest's ``config.resolved_physics``
+    stores it: every NamedTuple level tagged with its type, so a scheme swap
+    or a renamed field shows up, not only a changed value."""
+    from legoesm.ocean.config import ocean_config_to_dict
+    return _json_safe({k: ocean_config_to_dict(v) for k, v in configs.items()})
+
+
+def physics_config_from_record(obj):
+    """Rebuild a scheme config from its :func:`resolved_physics_record` entry,
+    strictly: a missing or extra field, a non-``legoesm`` type, or an array
+    stored only as a summary is an error, never filled or dropped."""
+    if isinstance(obj, dict) and "__array_summary__" in obj:
+        raise ValueError("an array-valued config leaf is recorded only as a "
+                         "summary and cannot be replayed")
+    if isinstance(obj, dict) and "__type__" in obj:
+        import importlib
+        module, _, qualname = obj["__type__"].partition(":")
+        if not module.startswith("legoesm."):
+            raise ValueError(f"refusing to rebuild non-legoesm type {obj['__type__']!r}")
+        cls = importlib.import_module(module)
+        for part in qualname.split("."):
+            cls = getattr(cls, part)
+        if not (isinstance(cls, type) and issubclass(cls, tuple)
+                and hasattr(cls, "_fields")
+                and cls.__module__.startswith("legoesm.")):
+            raise ValueError(f"{obj['__type__']!r} is not a legoesm config type")
+        fields = {k: v for k, v in obj.items() if k != "__type__"}
+        if set(fields) != set(cls._fields):
+            raise ValueError(
+                f"{obj['__type__']}: recorded fields differ from today's code "
+                f"(missing {sorted(set(cls._fields) - set(fields))}, "
+                f"extra {sorted(set(fields) - set(cls._fields))})")
+        return cls(**{k: physics_config_from_record(v) for k, v in fields.items()})
+    if isinstance(obj, dict):
+        return {k: physics_config_from_record(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [physics_config_from_record(v) for v in obj]
+    return obj
+
+
+def physics_closure_rows(recorded: dict, current: dict) -> list:
+    """Rows where *current* resolved physics differs from *recorded*; empty
+    when equal.  Equality is on canonical JSON text, so a NaN leaf compares
+    equal to itself."""
+    if json.dumps(recorded, sort_keys=True) == json.dumps(current, sort_keys=True):
+        return []
+    return config_drift_rows(recorded, current) or [("resolved_physics", recorded, current)]
+
+
+def format_drift_rows(rows: list) -> str:
+    return "\n".join(f"  {k}: recorded={a!r} -> now={b!r}" for k, a, b in rows)
+
+
+# ---------------------------------------------------------------------------
+# Replay of component-runner manifests (ocean / land / DINO / coupled).
+# A runner builds its configuration through script code (forcing, IC, grids),
+# so ``legoesm reproduce`` reruns the recording script with its recorded
+# command line and VERIFIES that the rerun resolves to the same record; it never
+# injects values (docs/architecture/reproducibility.md).
+# ---------------------------------------------------------------------------
+
+#: Set by ``legoesm reproduce`` in the rerun's environment: the reference
+#: run manifest the rerun must resolve to, and the rerun's output root.
+REPRODUCE_REFERENCE_ENV = "LEGOESM_REPRODUCE_REFERENCE"
+REPRODUCE_OUTPUT_ENV = "LEGOESM_REPRODUCE_OUTPUT"
+
+
+class RunnerReplaySpec(NamedTuple):
+    """How ``legoesm reproduce`` reruns one component runner.
+
+    ``output_flags``: spellings of the runner's output-directory flag (the
+    first is appended when the recorded command line has none).
+    ``manifest_depth``: directory levels from the run's output root down to
+    the directory holding its manifest.
+    ``rewritten_keys``: dotted ``resolved_config`` keys that reproduce rewrites
+    (the first is the output directory), ignored when comparing a rerun with
+    its reference.
+    ``continuation_keys``: dotted ``resolved_config`` keys a continuation into
+    the same directory may change (resume/restart flags, run length, output
+    and checkpoint frequency, wallclock budget, output path); any other
+    difference is refused.
+    ``restart_input_ids``: ``dataset_provenance`` ids of restart inputs, which
+    a continuation legitimately changes.
+    ``extra_rewrites``: ``(flags, resolved_config key)`` pairs reproduce also
+    rewrites, to the recorded value of that key (``run_omip --grid all``
+    writes one manifest per grid; its replay runs that grid only).  Their
+    ``cli_args`` keys belong in ``rewritten_keys``.
+    ``no_digest_keys``: dotted ``resolved_config`` keys that, when true, mean
+    the run records no final digest, so ``--check`` is refused up front.
+    ``relocated_outputs``: ``(flags, resolved_config key)`` pairs of further
+    output-file flags; when recorded, replay points them at the same file
+    name inside the rerun's output directory (their keys belong in
+    ``rewritten_keys``).
+    ``refuse_argv_flags``: command-line flags whose run cannot be replayed into
+    a fresh directory (``run_coupled --resume`` continues from the output
+    directory's own checkpoint).
+    ``refuse_true_keys``: dotted ``resolved_config`` keys that, when true,
+    refuse the same way (the option set from a config file).
+    ``companion_manifests``: ``(path under the run's output root, resolved
+    config key)`` pairs of further manifests whose final digests ``--check``
+    also compares; the key names the companion's configuration in this
+    record, which identifies it.
+    """
+    script: str
+    output_flags: tuple
+    manifest_depth: int
+    rewritten_keys: tuple
+    continuation_keys: tuple
+    restart_input_ids: tuple = ()
+    extra_rewrites: tuple = ()
+    no_digest_keys: tuple = ()
+    relocated_outputs: tuple = ()
+    refuse_argv_flags: tuple = ()
+    refuse_true_keys: tuple = ()
+    companion_manifests: tuple = ()
+
+
+RUNNER_REPLAY_SPECS = {
+    "run_lmip": RunnerReplaySpec(
+        script="run_lmip.py",
+        output_flags=("--output",),
+        manifest_depth=0,
+        rewritten_keys=("cli_args.output",),
+        continuation_keys=(
+            "cli_args.output", "cli_args.days", "cli_args.restart_from",
+            "cli_args.checkpoint_days", "cli_args.diag_interval",
+            "cli_args.max_wallclock_seconds", "cli_args.restart_buffer_seconds",
+            "run_config.max_wallclock_seconds",
+            "run_config.restart_buffer_seconds"),
+        restart_input_ids=("restart_from",)),
+    "run_omip": RunnerReplaySpec(
+        script="run_omip.py",
+        output_flags=("--output",),
+        manifest_depth=2,                       # <output>/<grid>/<resolution>
+        rewritten_keys=("cli_args.output", "cli_args.grid"),
+        # Not continuation controls: --diag-every (it also sets the JRA55
+        # forcing block size) and --quick (it changes other defaults too).
+        continuation_keys=(
+            "cli_args.output", "cli_args.days", "days", "cli_args.restart",
+            "cli_args.checkpoint_days", "cli_args.no_final_snapshot",
+            "cli_args.max_wallclock_seconds",
+            "cli_args.restart_buffer_seconds",
+            "run_config.max_wallclock_seconds",
+            "run_config.restart_buffer_seconds"),
+        extra_rewrites=((("--grid",), "grid_type"),)),
+    "run_dino": RunnerReplaySpec(
+        script="run_dino.py",
+        output_flags=("--output-dir",),
+        manifest_depth=0,
+        rewritten_keys=("cli_args.output_dir", "cli_args.timing_jsonl"),
+        continuation_keys=(
+            "cli_args.output_dir", "cli_args.days", "cli_args.allow_multiyear",
+            "cli_args.restart_from", "cli_args.snapshot_every_days",
+            "cli_args.timing_jsonl"),
+        restart_input_ids=("restart_from",),
+        no_digest_keys=("cli_args.multicontroller",),
+        relocated_outputs=((("--timing-jsonl",), "cli_args.timing_jsonl"),)),
+    "run_coupled": RunnerReplaySpec(
+        script="run_coupled.py",
+        output_flags=("--output", "-o"),
+        manifest_depth=1,                       # <output>/coupled/
+        rewritten_keys=("cli_args.output",),
+        # diag_days is the atmosphere-ocean coupling interval here: science.
+        continuation_keys=(
+            "cli_args.output", "cli_args.days", "cli_args.resume",
+            "cli_args.checkpoint_days", "cli_args.max_wallclock_hours",
+            "atmosphere.days", "atmosphere.output.checkpoint_days",
+            "atmosphere.output.max_wallclock_seconds"),
+        refuse_argv_flags=("--resume",),
+        refuse_true_keys=("cli_args.resume",),
+        companion_manifests=(("run_manifest.json", "atmosphere"),)),
+}
+
+
+def rewrite_flag_argv(argv, flags, value) -> list:
+    """*argv* with every occurrence of the flag *flags* (``--flag v`` or
+    ``--flag=v``) set to *value*; the first spelling is appended when absent.
+    Raises ``ValueError`` on a form it cannot rewrite safely (a flag without a
+    value, an abbreviated long flag, an attached short-flag value, ``-o=v``)."""
+    out, found, i = [], False, 0
+    longs = [f for f in flags if f.startswith("--")]
+    shorts = [f for f in flags if not f.startswith("--")]
+    rest: list = []
+    while i < len(argv):
+        tok = str(argv[i])
+        if tok == "--":                       # positionals only from here on
+            rest = [str(a) for a in argv[i:]]
+            break
+        name, eq, _ = tok.partition("=")
+        if name in flags:
+            if eq and name in shorts:   # argparse keeps the "=" for -o=v
+                raise ValueError(f"short flag with '=' {tok!r} in the recorded "
+                                 f"command line; cannot rewrite {flags[0]} "
+                                 f"safely")
+            if eq:
+                out.append(f"{name}={value}")
+            elif i + 1 < len(argv):
+                out += [tok, str(value)]
+                i += 1
+            else:
+                raise ValueError(f"{tok} has no value in the recorded command line")
+            found = True
+        elif name.startswith("--") and len(name) > 2 and any(
+                f.startswith(name) for f in longs):
+            raise ValueError(f"abbreviated flag {tok!r} in the recorded command "
+                             f"line; cannot rewrite {flags[0]} safely")
+        elif any(tok.startswith(f) and tok != f for f in shorts):
+            raise ValueError(f"attached short flag {tok!r} in the recorded "
+                             f"command line; cannot rewrite {flags[0]} safely")
+        else:
+            out.append(tok)
+        i += 1
+    if not found:
+        out += [flags[0], str(value)]
+    return out + rest
+
+
+def matching_argv_flags(argv, flags) -> list:
+    """The tokens of *argv* that set one of *flags*, in any spelling argparse
+    accepts: exact, ``--flag=v``, or an abbreviated long flag.  Any prefix
+    counts, so this assumes no other option of the runner shares it (an
+    ambiguous prefix would have failed the recorded run's own parsing)."""
+    found = []
+    for tok in map(str, argv):
+        if tok == "--":
+            break
+        name = tok.split("=", 1)[0]
+        if any(name == f or (name.startswith("--") and len(name) > 2
+                             and f.startswith(name)) for f in flags):
+            found.append(tok)
+    return found
+
+
+def unreplayable_reasons(manifest: dict, spec: "RunnerReplaySpec") -> list:
+    """Why *manifest*'s run cannot be replayed into a fresh directory: the
+    ``spec.refuse_argv_flags`` its command line sets, and the
+    ``spec.refuse_true_keys`` its resolved config holds true (the same
+    options set from a config file rather than the command line)."""
+    why = matching_argv_flags(((manifest.get("run") or {}).get("argv")
+                               or [])[1:], spec.refuse_argv_flags)
+    if why:
+        return why          # the resolved keys would repeat the same fact
+    resolved = (manifest.get("config") or {}).get("resolved_config") or {}
+    for key in spec.refuse_true_keys:
+        node = resolved
+        for part in key.split("."):
+            node = node.get(part) if isinstance(node, dict) else None
+        if node:
+            why.append(f"{key}={node!r}")
+    return why
+
+
+def runner_script_path(script: str) -> Path:
+    """``scripts/run/<script>`` of the IMPORTED legoESM checkout."""
+    for parent in _package_anchor().resolve().parents:
+        cand = parent / "scripts" / "run" / script
+        if cand.is_file():
+            return cand
+    raise FileNotFoundError(f"scripts/run/{script} not found above "
+                            f"{_package_anchor()}")
+
+
+def _without_keys(tree, dotted_keys) -> dict:
+    """Deep copy of the dict *tree* with each dotted key removed (if present)."""
+    out = json.loads(json.dumps(tree))
+    for key in dotted_keys:
+        node, parts = out, key.split(".")
+        for part in parts[:-1]:
+            node = node.get(part) if isinstance(node, dict) else None
+        if isinstance(node, dict):
+            node.pop(parts[-1], None)
+    return out
+
+
+def manifest_closure_rows(recorded: dict, current: dict, *, ignore_keys=(),
+                          ignore_dataset_ids=()) -> list:
+    """Rows where manifest *current* differs from *recorded* in what defines
+    the run: the resolved configuration (minus *ignore_keys*), the applied
+    ``--params`` values, the resolved physics record, and each input's path
+    and size.  Empty when they agree."""
+    def view(m):
+        cfg, res = m.get("config") or {}, m.get("result") or {}
+        return {
+            "resolved_config": _without_keys(cfg.get("resolved_config") or {},
+                                             ignore_keys),
+            "params_applied": cfg.get("params_applied") or {},
+            "resolved_physics": cfg.get("resolved_physics"),
+            "inputs": inputs(res.get("dataset_provenance") or []),
+        }
+
+    def inputs(entries):
+        out: dict = {}
+        for d in entries:
+            if d.get("id") not in ignore_dataset_ids:
+                out.setdefault(str(d.get("id")), []).append(
+                    {"path": d.get("path"), "size_bytes": d.get("size_bytes")})
+        return {k: v[0] if len(v) == 1 else
+                sorted(v, key=lambda e: json.dumps(e, sort_keys=True))
+                for k, v in out.items()}
+    return physics_closure_rows(_json_safe(view(recorded)), _json_safe(view(current)))
+
+
+def _runner_tag(manifest: dict) -> str:
+    return (manifest.get("reproducibility") or {}).get("runner_tag", "")
+
+
+def _check_reproduce_reference(manifest: dict, directory: Path) -> None:
+    """Under ``legoesm reproduce`` (env set): refuse unless *manifest* -- built,
+    not yet written -- resolves to the reference run's record, including its
+    runner and config kind."""
+    ref_path = os.environ.get(REPRODUCE_REFERENCE_ENV)
+    out_root = os.environ.get(REPRODUCE_OUTPUT_ENV)
+    if not ref_path and not out_root:
+        return
+    if not (ref_path and out_root):
+        raise RuntimeError(f"reproduce: set both {REPRODUCE_REFERENCE_ENV} and "
+                           f"{REPRODUCE_OUTPUT_ENV}, or neither; refusing")
+    root, here = Path(out_root).resolve(), Path(directory).resolve()
+    if here != root and root not in here.parents:
+        raise RuntimeError(
+            f"reproduce: this rerun writes into {here}, outside the rerun "
+            f"output {root}; the output flag was not rewritten, refusing")
+    try:
+        reference = read_run_manifest(ref_path)
+        validate_run_manifest(reference)
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        raise RuntimeError(f"reproduce: reference manifest {ref_path} is "
+                           f"unreadable or invalid ({exc}); refusing") from exc
+    for what, a, b in (
+            ("runner", _runner_tag(reference), _runner_tag(manifest)),
+            ("config kind", reference["config"].get("config_kind"),
+             manifest["config"].get("config_kind"))):
+        if a != b:
+            raise RuntimeError(f"reproduce: the reference {ref_path} is a "
+                               f"{a!r} {what}, this run is {b!r}; refusing")
+    refuse_version_drift(manifest_version_drift(reference),
+                         f"the reference manifest {ref_path}")
+    spec = RUNNER_REPLAY_SPECS.get(_runner_tag(manifest))
+    why = unreplayable_reasons(reference, spec) if spec else []
+    if why:
+        raise RuntimeError(f"reproduce: the reference run was launched with "
+                           f"{', '.join(why)}, which cannot be replayed into a "
+                           f"fresh directory; refusing")
+    rows = manifest_closure_rows(
+        reference, manifest,
+        ignore_keys=spec.rewritten_keys if spec else ())
+    if rows:
+        raise RuntimeError(
+            f"reproduce: this rerun does not resolve to the reference run's "
+            f"record {ref_path} ({len(rows)} fields); refusing to run:\n"
+            + format_drift_rows(rows))
+
+
+def reproduce_reference_root() -> tuple | None:
+    """Under ``legoesm reproduce``: ``(reference manifest, reference output
+    root)``; ``None`` otherwise.  An unreadable reference or one without a
+    replay spec is refused."""
+    ref_path = os.environ.get(REPRODUCE_REFERENCE_ENV)
+    if not ref_path:
+        return None
+    try:
+        reference = read_run_manifest(ref_path)
+        validate_run_manifest(reference)
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        raise RuntimeError(f"reproduce: reference manifest {ref_path} is "
+                           f"unreadable or invalid ({exc}); refusing") from exc
+    spec = RUNNER_REPLAY_SPECS.get(_runner_tag(reference))
+    if spec is None:
+        raise RuntimeError(f"reproduce: reference {ref_path} has no replay "
+                           f"spec; refusing")
+    root = Path(ref_path).resolve().parent
+    for _ in range(spec.manifest_depth):
+        root = root.parent
+    return reference, root
+
+
+def read_companion_manifest(ref_path, manifest: dict, spec, name: str,
+                            key: str) -> tuple:
+    """``(path, manifest)`` of reference *manifest*'s companion *name* (read
+    from *ref_path*): under the output directory the run recorded, else under
+    the output root the record's location implies (a copy of the whole run);
+    in each, the live record and then its archived predecessors.
+    A candidate counts only when it was written by the same code (commit) and
+    its resolved configuration is the record's ``resolved_config[key]``, and
+    it belongs to the record's runner: tagged with it, or untagged with a
+    record of that runner beside it (written before the tag existed).  Among
+    those, the one carrying the digest the record paired wins.
+    ``ValueError`` when no candidate counts."""
+    def recorded(tree, dotted):
+        for part in dotted.split("."):
+            tree = tree.get(part) if isinstance(tree, dict) else None
+        return tree
+
+    resolved = (manifest.get("config") or {}).get("resolved_config") or {}
+    root = Path(ref_path).resolve().parent
+    for _ in range(spec.manifest_depth):
+        root = root.parent
+    roots = []
+    out = (recorded(resolved, spec.rewritten_keys[0])
+           if spec.rewritten_keys else None)
+    cwd = (manifest.get("run") or {}).get("cwd")
+    if isinstance(out, str) and out and isinstance(cwd, str):
+        roots.append((Path(cwd) / out).resolve())
+    roots.append(root)
+    commit = (manifest.get("legoESM") or {}).get("commit")
+    tag = _runner_tag(manifest)
+    # The record's own place under its output root (coupled/ for run_coupled):
+    # an untagged companion counts only with such a record beside it (a run
+    # written before companions were tagged).
+    rel_dir = Path(ref_path).resolve().parent.relative_to(root)
+    expected = recorded(resolved, key)
+    reasons = []
+    # Under each root the live record, then its archived predecessors (a
+    # continuation archives the record it replaces), newest first.
+    stem = Path(name).stem
+    candidates = []
+    for r in dict.fromkeys(roots):
+        candidates.append(r / name)
+        candidates += sorted((r / name).parent.glob(f"{stem}.prev-*.json"),
+                             reverse=True)
+    # The atmosphere record whose digest this record paired is the one;
+    # without a pair (or a match), the first identical candidate.
+    paired = ((manifest.get("result") or {}).get("companion_state_digests")
+              or {}).get(name)
+    found = []
+    for path in candidates:
+        try:
+            m = read_run_manifest(path)
+            validate_run_manifest(m)
+        except Exception as exc:  # noqa: BLE001 — try the next candidate
+            reasons.append(f"{path}: {exc}")
+            continue
+        if (m.get("legoESM") or {}).get("commit") != commit:
+            reasons.append(f"{path}: written by other code")
+            continue
+        m_tag = _runner_tag(m)
+        if m_tag != tag and not (
+                not m_tag and (path.parent / rel_dir / name).exists()):
+            reasons.append(f"{path}: not written for a {tag} run")
+            continue
+        # A nested record carries type tags the top-level one does not
+        # (type-only differences are left to the same-commit check above).
+        rows = [r for r in config_drift_rows(
+                    expected if isinstance(expected, dict) else {},
+                    m["config"].get("resolved_config") or {})
+                if r[0].rsplit(".", 1)[-1] != "__type__"]
+        if rows:
+            reasons.append(f"{path}: records another configuration than this "
+                           f"run's {key} ({len(rows)} fields)")
+            continue
+        if paired and (m.get("result") or {}).get("state_digest") == paired:
+            return path, m
+        found.append((path, m))
+    if found:
+        return found[0]
+    raise ValueError("; ".join(reasons))
+
+
+def _check_continuation(old: dict, manifest: dict, old_path: Path) -> None:
+    """A run into a directory that already holds a run's manifest continues
+    THAT run: refuse when anything but the continuation controls differs.
+    Execution facts outside the configuration (process and device count,
+    host) are not compared: a continuation may run on other hardware.
+    Manifests written before command lines were recorded (no ``run.argv``)
+    get only the version-drift gate; so does a directory where neither run's
+    continuation controls are classified in :data:`RUNNER_REPLAY_SPECS`.  A
+    classified run on either side refuses a change of runner or config kind."""
+    if not isinstance((old.get("run") or {}).get("argv"), list):
+        return
+    spec = RUNNER_REPLAY_SPECS.get(_runner_tag(manifest))
+    if spec is None and _runner_tag(old) not in RUNNER_REPLAY_SPECS:
+        return
+    for what, a, b in (
+            ("runner", _runner_tag(old), _runner_tag(manifest)),
+            ("config kind", (old.get("config") or {}).get("config_kind"),
+             manifest["config"].get("config_kind"))):
+        if a != b:
+            raise RuntimeError(f"{old_path} records a {a!r} {what}, this run "
+                               f"is {b!r}; one output directory holds one run")
+    if spec is None:
+        return
+    rows = manifest_closure_rows(
+        old, manifest, ignore_keys=spec.continuation_keys,
+        ignore_dataset_ids=spec.restart_input_ids)
+    if rows:
+        raise RuntimeError(
+            f"{old_path} records a different run than this one ({len(rows)} "
+            f"fields); one output directory holds one run. Use a new output "
+            f"directory:\n" + format_drift_rows(rows))
+
+
 RUN_MANIFEST_FILENAME = "run_manifest.json"
 
 
@@ -476,6 +1223,7 @@ def build_run_manifest(
     state_digest: str | None = None,
     config_kind: str | None = None,
     params_applied: dict | None = None,
+    resolved_physics: dict | None = None,
 ) -> dict:
     """Assemble the run-manifest dict (no file I/O; reads git provenance).
 
@@ -558,6 +1306,7 @@ def build_run_manifest(
             "platform": _get_platform_tag(),
             "git_dirty": prov.dirty,  # imported package's repo, not the CWD
             "patches": list(patches) if patches else [],
+            "n_processes": world_size(),
         },
         "config": {
             "config_kind": kind,
@@ -569,6 +1318,11 @@ def build_run_manifest(
             # run -- only which FILE was passed, whose contents may since have
             # changed. Empty dict when no --params were given.
             "params_applied": dict(params_applied) if params_applied else {},
+            # Scheme configs resolved by the driver itself (coupled: the
+            # ocean/land/tile/... configs built in setup), when the caller
+            # has them at write time; the atmosphere records its own later.
+            **({"resolved_physics": resolved_physics_record(resolved_physics)}
+               if resolved_physics is not None else {}),
         },
         "result": {
             "state_digest": state_digest,
@@ -580,6 +1334,14 @@ def build_run_manifest(
             "command_line": (
                 command_line if command_line is not None else " ".join(sys.argv)
             ),
+            # The exact command line and launch directory, so `legoesm
+            # reproduce` can rerun a component runner (relative paths in argv
+            # resolve against cwd).
+            "argv": list(sys.argv),
+            "cwd": os.getcwd(),
+            # The launched script's content, so a replay can prove it reruns
+            # the same script (None when argv[0] is not a file).
+            "script_sha256": file_sha256(sys.argv[0]),
             "creation_time": datetime.now(timezone.utc).isoformat(),
         },
     }
@@ -588,12 +1350,15 @@ def build_run_manifest(
     return _json_safe(raw)
 
 
-def write_run_manifest(directory, config, *, exclusive: bool = False, **kwargs) -> Path:
+def write_run_manifest(directory, config, *, exclusive: bool = False,
+                       manifest: dict | None = None, **kwargs) -> Path:
     """Write ``run_manifest.json`` into *directory* and return its path.
 
     Call this at every run start (driver ``setup()`` / ``cmd_run``), not only at
     checkpoint time, so an interrupted or crashed run is still reconstructible.
-    Extra keyword arguments are forwarded to :func:`build_run_manifest`.
+    Extra keyword arguments are forwarded to :func:`build_run_manifest`;
+    *manifest* writes an already-built manifest instead (*config* is then
+    unused).
 
     The content is always written atomically (temp file then link/rename), so a
     reader never observes a half-written manifest.  With ``exclusive=True`` the
@@ -604,7 +1369,11 @@ def write_run_manifest(directory, config, *, exclusive: bool = False, **kwargs) 
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    manifest = build_run_manifest(config, **kwargs)  # already JSON-normalised
+    if manifest is not None and kwargs:
+        raise TypeError(f"write_run_manifest: manifest= given, so "
+                        f"{sorted(kwargs)} would be ignored")
+    if manifest is None:
+        manifest = build_run_manifest(config, **kwargs)  # already JSON-normalised
     path = directory / RUN_MANIFEST_FILENAME
     # PID-unique temp so concurrent writers never clobber each other's scratch.
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
@@ -619,6 +1388,115 @@ def write_run_manifest(directory, config, *, exclusive: bool = False, **kwargs) 
         if tmp.exists():
             tmp.unlink()
     return path
+
+
+def write_run_manifest_on_root(directory, config, **kwargs) -> Path | None:
+    """Write the manifest from process 0; raise on EVERY process if it failed.
+
+    Call on every process at the same point (with mpi4py imported on all of
+    them or on none), before any rank-local work that
+    can raise.  Single-process runs reduce to :func:`write_run_manifest`.  Under
+    multi-process JAX or mpi4py the outcome is broadcast
+    (:func:`collective_root_gate`) so a failed write or a refusal aborts all
+    processes instead of leaving the others to hang in the next collective.
+
+    Before writing, under ``legoesm reproduce`` the built manifest must resolve
+    to the reference run's record (:func:`_check_reproduce_reference`).
+    An existing manifest (a resume or rerun into the same directory) must come
+    from the same code (version-drift rule) and record the same run apart from
+    its continuation controls (:func:`_check_continuation`); it is then
+    archived by a hard link to ``run_manifest.prev-<UTC time>-<pid>.json``
+    while it stays live, and the new manifest replaces it atomically.  A fresh
+    directory's manifest is created atomic-exclusively, so of two concurrent
+    starts one creates it and the other checks it.  This is not a run lock:
+    two starts that both pass the check of one record may both proceed, and
+    the second's record can replace the first's unarchived (both are legal
+    continuations of the checked record); two runs *active at once* in one
+    directory still collide on
+    every output, including the final digest (see ModelDriver's manifest
+    docstring; an active-run lease is a separate, driver-wide feature).
+    Returns the path on process 0, ``None`` elsewhere.
+    """
+    written: list[Path] = []
+    manifest: dict = {}
+
+    def _refuse_unless_continuation(checked: bytes, old: Path) -> None:
+        """Version-drift rule (as ModelDriver's resume) and continuation rule
+        for the existing record *checked* (its bytes)."""
+        try:
+            old_m = json.loads(checked)
+            validate_run_manifest(old_m)
+        except Exception as exc:  # noqa: BLE001 — becomes a refusal reason
+            refuse_version_drift(
+                [f"{old} is not a valid run manifest ({exc})"],
+                f"the run manifest at {old}")
+            return
+        refuse_version_drift(manifest_version_drift(old_m),
+                             f"the run manifest at {old}")
+        _check_continuation(old_m, manifest, old)
+
+    def root_work():
+        nonlocal manifest
+        try:
+            manifest = build_run_manifest(config, **kwargs)
+            try:
+                _check_reproduce_reference(manifest, Path(directory))
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"{exc}\n(this run is checked as a `legoesm reproduce` "
+                    f"rerun because {REPRODUCE_REFERENCE_ENV} / "
+                    f"{REPRODUCE_OUTPUT_ENV} are set; unset them if it is "
+                    f"not one)") from exc
+            old = Path(directory) / RUN_MANIFEST_FILENAME
+            stem = old.name.removesuffix(".json")
+            for _attempt in range(100):
+                if written:
+                    break
+                try:
+                    written.append(write_run_manifest(
+                        directory, config, exclusive=True, manifest=manifest))
+                    break
+                except FileExistsError:
+                    pass
+                # A resume or rerun into a directory that already holds a
+                # run's record: check it in place, archive it by a hard link
+                # (the record stays live, so the slot is never empty and a
+                # concurrent start always meets a record to check), confirm
+                # the archived bytes are the checked ones, then replace the
+                # record atomically.  A record that changed since the check
+                # is checked again on the next pass.  Not a run lock: two
+                # starts that each pass the check may both proceed (each is a
+                # legal continuation of the same record).
+                try:
+                    checked = old.read_bytes()
+                except FileNotFoundError:
+                    continue  # gone meanwhile; retry the exclusive create
+                _refuse_unless_continuation(checked, old)
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                prev = old.with_name(f"{stem}.prev-{stamp}-{os.getpid()}.json")
+                try:
+                    os.link(old, prev)
+                except FileNotFoundError:
+                    continue
+                try:
+                    if prev.read_bytes() != checked:
+                        prev.unlink()     # changed since the check: recheck
+                        continue
+                    written.append(write_run_manifest(
+                        directory, config, manifest=manifest))
+                except BaseException:
+                    prev.unlink(missing_ok=True)   # the record is still live
+                    raise
+            if not written:
+                raise RuntimeError(f"{old} kept reappearing; gave up after "
+                                   f"100 attempts")
+        except Exception as exc:  # noqa: BLE001 — re-raised on every process
+            raise RuntimeError(
+                f"run manifest not written to {directory}: {exc}") from exc
+
+    collective_root_gate(root_work,
+                         f"run manifest write failed on process 0 for {directory}")
+    return written[0] if written else None
 
 
 def read_run_manifest(path) -> dict:
@@ -693,7 +1571,8 @@ def validate_run_manifest(manifest: dict) -> None:
 
 
 def record_state_digest(manifest_path, state_digest: str, *,
-                        corner_fill_traced: list[str] | None = None) -> Path:
+                        corner_fill_traced: list[str] | None = None,
+                        companion_digests: dict | None = None) -> Path:
     """Record the post-run final ``state_digest`` into an existing manifest.
 
     The run-start manifest is otherwise immutable; this is the single sanctioned
@@ -703,6 +1582,9 @@ def record_state_digest(manifest_path, state_digest: str, *,
     digest set — provenance (config/env) is never touched, only the result.
     ``corner_fill_traced`` records the cube-vertex fill modes the run's halo
     fills traced with (the mode is a process global read at trace time).
+    ``companion_digests`` records the final digests of the run's companion
+    manifests at this moment (``result.companion_state_digests``), so the
+    pair stays together when either record is later archived or updated.
     """
     manifest_path = Path(manifest_path)
     if manifest_path.is_dir():
@@ -712,11 +1594,62 @@ def record_state_digest(manifest_path, state_digest: str, *,
     manifest["result"]["state_digest"] = state_digest
     if corner_fill_traced is not None:
         manifest["result"]["corner_fill_traced"] = list(corner_fill_traced)
+    if companion_digests is not None:
+        manifest["result"]["companion_state_digests"] = dict(companion_digests)
     tmp = manifest_path.with_name(f"{manifest_path.name}.{os.getpid()}.tmp")
     with open(tmp, "w") as f:
         json.dump(_json_safe(manifest), f, indent=2, sort_keys=True)
     tmp.replace(manifest_path)
     return manifest_path
+
+
+def record_resolved_physics(manifest_path, record: dict) -> Path:
+    """Store ``config.resolved_physics`` in an existing manifest.
+
+    A manifest that already holds a DIFFERENT record (a resume whose physics
+    resolved differently from the run that wrote it) is refused: one output
+    directory holds one run.  An equal record is left untouched.
+    """
+    manifest_path = Path(manifest_path)
+    if manifest_path.is_dir():
+        manifest_path = manifest_path / RUN_MANIFEST_FILENAME
+    manifest = read_run_manifest(manifest_path)
+    validate_run_manifest(manifest)
+    existing = manifest["config"].get("resolved_physics")
+    if existing is not None:
+        rows = physics_closure_rows(existing, record)
+        if rows:
+            raise RuntimeError(
+                f"{manifest_path} records different resolved physics than this "
+                f"run resolved ({len(rows)} fields); refusing to mix two runs' "
+                f"physics in one directory:\n" + format_drift_rows(rows))
+        return manifest_path
+    manifest["config"]["resolved_physics"] = record
+    tmp = manifest_path.with_name(f"{manifest_path.name}.{os.getpid()}.tmp")
+    with open(tmp, "w") as f:
+        json.dump(_json_safe(manifest), f, indent=2, sort_keys=True)
+    tmp.replace(manifest_path)
+    return manifest_path
+
+
+def record_final_state_digest(manifest_path, *trees,
+                              companion_digests: dict | None = None
+                              ) -> str | None:
+    """Best-effort: digest the final state *trees* into an existing manifest.
+
+    The run has already finished, so a digest failure (e.g. a non-addressable
+    sharded leaf) is reported, not raised; ``reproduce --check`` then reports
+    the missing reference honestly.
+    """
+    try:
+        digest = pytree_state_digest(*trees)
+        record_state_digest(manifest_path, digest,
+                            companion_digests=companion_digests)
+    except Exception as exc:  # noqa: BLE001 — provenance after a completed run
+        print(f"[warn] state_digest not recorded: {type(exc).__name__}: {exc}")
+        return None
+    print(f"[done] recorded state_digest {digest[:16]}... in {manifest_path}")
+    return digest
 
 
 def recorded_state_digest(manifest: dict) -> str:

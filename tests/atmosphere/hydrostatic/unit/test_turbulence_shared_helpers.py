@@ -19,11 +19,16 @@ shift XLA fusion by ~1e-12, so tolerances are rtol 1e-10 under x64):
 
 from __future__ import annotations
 
+from legoesm import constants
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.atmosphere.physics._shared import louis_stability_functions
+from legoesm.atmosphere.physics._shared import (
+    louis_stability_functions,
+    surface_buoyancy_flux,
+)
 from legoesm.atmosphere.physics.turbulence.pbl_height import (
     first_crossing_height,
 )
@@ -315,3 +320,14 @@ def test_implicit_diffusion_grad_finite():
     g = jax.grad(loss)(K_half)
     assert bool(jnp.all(jnp.isfinite(g)))
     assert float(jnp.max(jnp.abs(g))) > 0.0
+
+
+def test_surface_buoyancy_flux_adds_the_virtual_moisture_term():
+    """(w'theta_v')_s = (w'theta')_s + (R_v/R_d - 1) theta (w'q')_s."""
+    wth = jnp.array([0.1, 0.0, -0.02])
+    wq = jnp.array([0.0, 4e-5, 4e-5])
+    th = jnp.array([300.0, 300.0, 290.0])
+    got = np.asarray(surface_buoyancy_flux(wth, wq, th))
+    exp = np.asarray(wth) + (constants.R_v / constants.R_d - 1.0) * np.asarray(th) * np.asarray(wq)
+    np.testing.assert_allclose(got, exp, rtol=1e-6)
+    assert got[1] > 0.0                                    # moisture alone is buoyant

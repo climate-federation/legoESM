@@ -96,7 +96,8 @@ def _reference(cfg, state, mesh, sigma, ps, dt, n):
     for _ in range(n):
         t_t, tke = turb(state_m, mesh, sigma, phys_state=ps_m)
         state_m = _advance(state_m, t_t, dt / n)
-        ps_m = update_physics_state(ps_m, {"tke": tke})
+        # multi-field carry (tke + the published pblh) merges as combined.py does
+        ps_m = update_physics_state(ps_m, tke if isinstance(tke, dict) else {"tke": tke})
         t_m = micro(state_m, mesh, sigma)
         state_m = _advance(state_m, t_m, dt / n)
         dT = dT + (t_t.dT_dt.data + t_m.dT_dt.data) / n
@@ -272,7 +273,7 @@ def test_validation_cli_and_amip_round_trip():
     with pytest.raises(ValueError, match="cld_macmic_num_steps"):
         make_physics(_cfg(), model_type="mpas", dt=1.0, cld_macmic_num_steps=0)
     with pytest.raises(ValueError, match="cld_macmic_num_steps"):
-        make_physics(_cfg(), model_type="spectral_pe", dt=1.0, cld_macmic_num_steps=2)
+        make_physics(_cfg(), model_type="nonhydrostatic", dt=1.0, cld_macmic_num_steps=2)
     with pytest.raises(ValueError, match="both are 'none'"):
         make_physics(PhysicsConfig(turbulence=TurbulenceConfig(scheme="none"),
                                    microphysics=MicrophysicsConfig(scheme="none")),

@@ -19,8 +19,8 @@ DEPARTURES / NUMERICS (locked + labeled):
   * the plume w-eq ``d(w²)/dz = 2(B−ε·w²)`` (β=0, b=1) is a simplification of SST07 Eq. 15
     (β=0.15, b=0.5); ``M = a_u·ρ·w_u`` is a compressible extension of SST07 ``M ≈ a_u·w_u``,
     then CFL-capped; constant ε (vs SST07 Eq. 16 ~c_ε[1/z+1/(z*−z)]); tuned surface init
-    (w_u(0)=max(w_min, 2.5·u*) is a friction-velocity proxy, NOT the convective scale w*; fixed
-    parcel_dT) — exercised via the config canary
+    (w_u(0)=max(w_min, 2.5·u*) is a friction-velocity proxy, NOT the convective scale w*);
+    the surface scalar excess is SST07 Eq. 17 (α·flux/σ_w) — exercised via the config canary
     and the live-vs-inactive MF contrast;
   * inactive-plume idealized case: no surface flux + non-buoyant column ⇒ the plume-environment
     anomaly φ_u−φ_env→0 ⇒ the scalar MF FLUX (and its tendency) vanishes — because the anomaly
@@ -46,7 +46,10 @@ from legoesm.atmosphere.physics.turbulence.config import (
 )
 from legoesm.atmosphere.physics.turbulence.edmf import (
     _EDMF_WSTAR_COEFF,
+    _SIGMA_W_COEFF,
+    _SIGMA_W_WSTAR3_COEFF,
     _mass_flux_tendency,
+    _updraft_surface_excess,
     edmf_turbulence,
 )
 from legoesm.atmosphere.physics.turbulence.integration import get_turbulence_fn
@@ -113,7 +116,8 @@ def _state(grid, theta_top=300.0, theta_sfc=300.0, u_top=0.0, u_sfc=0.0, tke_val
     return u, v, T, q_v, tke, rho
 
 
-def _run(cfg, grid=None, dt=300.0, no_surface_flux=False, **state_kw):
+def _run(cfg, grid=None, dt=300.0, no_surface_flux=False, dry_surface=False,
+         **state_kw):
     grid = grid if grid is not None else _grid()
     p_full, p_half, z_full, z_half = grid
     u, v, T, q_v, tke, rho = _state(grid, **state_kw)
@@ -124,7 +128,8 @@ def _run(cfg, grid=None, dt=300.0, no_surface_flux=False, **state_kw):
         q_sfc = jnp.asarray(np.asarray(q_v)[:, -1])
     else:
         T_sfc = jnp.full((u.shape[0],), float(np.asarray(T)[0, -1]) + 2.0)
-        q_sfc = saturation_mixing_ratio(T_sfc, p_half[:, -1])
+        q_sfc = (jnp.asarray(np.asarray(q_v)[:, -1]) if dry_surface
+                 else saturation_mixing_ratio(T_sfc, p_half[:, -1]))
     out, tke_new = edmf_turbulence(
         u, v, T, q_v, tke, p_full, p_half, z_full, z_half, T_sfc, q_sfc, rho, dt, cfg,
     )
@@ -209,7 +214,8 @@ def test_edmf_config_defaults():
     # MF part
     assert c.a_updraft == 0.1            # updraft area fraction
     assert c.entrainment_rate == 1e-3    # CONSTANT ε [1/m] (vs SST07 Eq. 16 ~c_ε[1/z+1/(z*−z)])
-    assert c.parcel_dT == 0.5            # FIXED surface θ-excess [K] (vs SST07 Eq. 17 flux-derived)
+    assert c.surface_excess_prefactor == 1.0   # SST07 Eq. 17 α (LES ~1)
+    assert (_SIGMA_W_COEFF, _SIGMA_W_WSTAR3_COEFF) == (1.3, 0.6)  # SST07 Eq. 7
     assert c.w_updraft_min == 0.1
     assert c.updraft_deactivation_sharpness == 20.0
     assert c.n_updrafts == 1             # single bulk plume (unused field; SST07 dry-CBL scope)
@@ -256,36 +262,36 @@ def test_departure_edmf_ED_Km_independent_of_stratification():
 
 
 def test_edmf_mass_flux_scalar_transport_live_vs_inactive():
-    """The MF scalar transport is LIVE: a buoyant (parcel_dT>0) plume changes the tendency.
+    """The MF scalar transport is LIVE under surface heating and OFF without it.
 
-    ED is identical between the two runs (same TKE / grid / winds), so any difference in dT_dt is
-    PURELY the mass-flux transport. With parcel_dT=0 and no surface flux the plume-environment
-    ANOMALY φ_u−φ_env→0 ⇒ the scalar MF FLUX M(φ_u−φ) — and its divergence, the tendency —
-    vanishes; this is because the ANOMALY vanishes, NOT because the mass flux M→0 (M stays
-    nonzero; the scan can even reduce w_u below w_updraft_min). With parcel_dT>0 it transports heat.
+    SST07 Eq. 17: the updraft starts at φ(z1) + α·(w'φ')_s/σ_w.  With a heated surface the
+    excess (and so the plume's heat transport) scales with α; ED diffusivities do not depend on
+    α.  With no surface flux the excess is zero, the plume-environment ANOMALY φ_u−φ_env
+    vanishes, and the tendency no longer depends on the plume (M stays nonzero, so the updraft
+    area fraction changes M but not the result).
     """
     grid = _grid()
-    cfg_live = TurbulentEDMFConfig(parcel_dT=1.0)
-    cfg_inactive = TurbulentEDMFConfig(parcel_dT=0.0)
-    out_live, _, _ = _run(cfg_live, grid=grid, theta_top=300.0, theta_sfc=300.0,
-                          no_surface_flux=True)
-    out_inact, _, _ = _run(cfg_inactive, grid=grid, theta_top=300.0, theta_sfc=300.0,
-                           no_surface_flux=True)
-    # the no-flux construction genuinely zeroes the surface heat/moisture flux
-    assert np.max(np.abs(np.asarray(out_live.shflx))) < 1e-6
-    assert np.max(np.abs(np.asarray(out_live.lhflx))) < 1e-6
-    # ED diffusivities identical (parcel_dT does not touch the ED part)
-    assert np.allclose(np.asarray(out_live.Km), np.asarray(out_inact.Km), rtol=1e-12)
-    # the buoyant plume transports heat; the non-buoyant one does not
-    dT_live = np.asarray(out_live.dT_dt)
-    dT_inact = np.asarray(out_inact.dT_dt)
-    assert not np.allclose(dT_live, dT_inact)
-    assert np.max(np.abs(dT_inact)) < np.max(np.abs(dT_live))
+    out_a, _, _ = _run(TurbulentEDMFConfig(surface_excess_prefactor=1.0), grid=grid,
+                       u_top=8.0, u_sfc=5.0)
+    out_b, _, _ = _run(TurbulentEDMFConfig(surface_excess_prefactor=1.5), grid=grid,
+                       u_top=8.0, u_sfc=5.0)
+    assert np.all(np.asarray(out_a.shflx) > 1.0)              # surface genuinely heats
+    assert np.allclose(np.asarray(out_a.Km), np.asarray(out_b.Km), rtol=1e-12)
+    assert not np.allclose(np.asarray(out_a.dT_dt), np.asarray(out_b.dT_dt))
+    # unforced: the plume carries no anomaly, so its area fraction cannot matter
+    off = [_run(TurbulentEDMFConfig(a_updraft=a), grid=grid, no_surface_flux=True)[0]
+           for a in (0.05, 0.3)]
+    assert np.max(np.abs(np.asarray(off[0].shflx))) < 1e-6
+    assert np.max(np.abs(np.asarray(off[0].lhflx))) < 1e-6
+    for f in ("dT_dt", "dq_v_dt"):
+        x0, x1 = np.asarray(getattr(off[0], f)), np.asarray(getattr(off[1], f))
+        scale = np.max(np.abs(np.asarray(getattr(out_a, f))))   # heated-run tendency
+        assert np.max(np.abs(x0 - x1)) <= 1e-9 * scale, f
 
 
 def test_edmf_inactive_plume_idealized():
     """Idealized (contract): neutral, no-flux column ⇒ zero scalar MF transport, tiny tendency."""
-    cfg = TurbulentEDMFConfig(parcel_dT=0.0)
+    cfg = TurbulentEDMFConfig()
     out, _, _ = _run(cfg, theta_top=300.0, theta_sfc=300.0, u_top=0.0, u_sfc=0.0,
                      no_surface_flux=True)
     assert np.max(np.abs(np.asarray(out.shflx))) < 1e-6   # genuinely no surface heat flux
@@ -301,3 +307,77 @@ def test_dispatch_unknown_turbulence_raises():
     """Dispatch hardening: an unknown turbulence scheme raises ValueError."""
     with pytest.raises(ValueError, match="[Uu]nknown turbulence scheme"):
         get_turbulence_fn(TurbulenceConfig(scheme="not_a_scheme"))
+
+
+def test_edmf_plume_surface_flux_is_part_of_the_surface_flux():
+    """ED + MF at the surface equals the physical surface flux (SST07 Eq. 5).
+    Heated, dry surface (no moisture flux, so no latent enthalpy term): the
+    column's mass-weighted (rho*dz, the scheme's own weights) theta tendency
+    equals shflx/(c_pd*Pi_1) to round-off, with an active plume (prefactor 1.5
+    vs 1 changes the profile but not the column total).  Before, the plume's
+    bottom flux a*rho*w*(theta_u - theta) was added on top of the surface flux."""
+    totals = []
+    for alpha in (1.0, 1.5):
+        out, _, inp = _run(TurbulentEDMFConfig(surface_excess_prefactor=alpha),
+                           grid=_grid(), dry_surface=True,
+                           u_top=8.0, u_sfc=5.0)
+        p_full, z_half, rho = (np.asarray(inp[5]), np.asarray(inp[8]),
+                               np.asarray(inp[9]))
+        assert np.max(np.abs(np.asarray(out.lhflx))) < 1e-9
+        shflx = np.asarray(out.shflx)
+        assert np.all(shflx > 1.0)
+        exner_1 = (p_full[:, -1] / constants.p_ref) ** constants.kappa
+        w = rho * np.clip(np.abs(z_half[:, :-1] - z_half[:, 1:]), 1.0, None)
+        dtheta = np.asarray(out.dT_dt) / (p_full / constants.p_ref) ** constants.kappa
+        budget = (w * dtheta).sum(-1)
+        expected = shflx / (constants.c_pd * exner_1)
+        assert np.allclose(budget, expected, rtol=1e-9, atol=0.0), (budget, expected)
+        totals.append(dtheta)
+    assert not np.allclose(totals[0], totals[1])   # the plume is active
+
+
+def test_updraft_surface_excess_is_sst07_eq17_with_buoyancy_wstar():
+    """SST07 Eq. 17 + Eq. 7 (Holtslag & Moeng 1991), transcribed independently in NumPy.
+
+    theta_u - theta = alpha (w'theta')_s / sigma_w, q_u - q = alpha (w'q')_s / sigma_w,
+    sigma_w = max(w_min, 1.3 (u*^3 + 0.6 w*^3 z/z*)^(1/3) (1 - z/z*)^(1/2)),
+    w*^3 = (g/theta_v) (w'theta_v')_s z* with the BUOYANCY flux (user decision 2026-10-16).
+    Columns: dry heating, moist heating (moisture raises w*), shallow PBL (sigma_w floor),
+    surface cooling (no excess)."""
+    cfg = TurbulentEDMFConfig(surface_excess_prefactor=1.7)
+    wth = np.array([0.1, 0.1, 0.1, -0.02])
+    wq = np.array([0.0, 5e-5, 5e-5, 5e-5])
+    th = np.full(4, 300.0)
+    thv = th * (1.0 + (1.0 / constants.epsilon - 1.0) * 0.01)
+    ust = np.array([0.3, 0.3, 0.05, 0.3])
+    z1 = np.full(4, 30.0)
+    zs = np.array([1000.0, 1000.0, 30.0, 1000.0])
+    d_th, d_q = (np.asarray(x) for x in _updraft_surface_excess(
+        jnp.asarray(wth), jnp.asarray(wq), jnp.asarray(th), jnp.asarray(thv),
+        jnp.asarray(ust), jnp.asarray(z1), jnp.asarray(zs), cfg))
+    wthv = wth + (constants.R_v / constants.R_d - 1.0) * th * wq
+    wstar3 = constants.g / thv * np.maximum(wthv, 0.0) * zs
+    r = np.minimum(z1 / zs, 1.0)
+    sw = 1.3 * np.cbrt(ust ** 3 + 0.6 * wstar3 * r) * np.sqrt(np.maximum(1.0 - r, 1e-6))
+    sw = np.maximum(sw, cfg.w_updraft_min)
+    on = wth > 0.0
+    np.testing.assert_allclose(d_th, np.where(on, 1.7 * wth / sw, 0.0), rtol=1e-12)
+    np.testing.assert_allclose(d_q, np.where(on, 1.7 * wq / sw, 0.0), rtol=1e-12)
+    assert d_th[1] < d_th[0]                       # moisture flux raises w*, shrinks the excess
+    assert sw[2] == cfg.w_updraft_min              # PBL top at z1: the floor binds
+    assert d_th[3] == 0.0 and d_q[3] == 0.0        # surface cooling: no excess
+
+
+def test_edmf_plume_heat_leak_below_one_percent_of_surface_flux():
+    """The MF part transports theta and converts with each layer's Exner factor, so the
+    column HEAT it receives differs from the surface flux.  Cap (user decision 2026-10-16):
+    under 1 % of the surface flux at the default prefactor; a heat-carrying plume is a
+    follow-up.  Dry heated surface, so no latent enthalpy term."""
+    out, _, inp = _run(TurbulentEDMFConfig(), grid=_grid(), dry_surface=True,
+                       u_top=8.0, u_sfc=5.0)
+    z_half, rho = np.asarray(inp[8]), np.asarray(inp[9])
+    w = rho * np.clip(np.abs(z_half[:, :-1] - z_half[:, 1:]), 1.0, None)   # scheme's weights
+    heat = (w * np.asarray(out.dT_dt)).sum(-1) * constants.c_pd
+    shflx = np.asarray(out.shflx)
+    assert np.all(shflx > 1.0)
+    assert np.all(np.abs(heat - shflx) < 0.01 * shflx), (heat, shflx)

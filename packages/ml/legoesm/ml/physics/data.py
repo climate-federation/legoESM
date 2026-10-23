@@ -86,10 +86,11 @@ def capture_physics_teacher_snapshot(
 ) -> PhysicsTeacherDataset:
     """Capture one joint teacher snapshot from a running ModelDriver."""
     ad = driver.physics.adapter
-    T = driver.state.T.data
-    u = driver.state.u.data
-    v = driver.state.v.data
-    p_s = driver.state.p_s.data
+    st = driver.cell_centre_state()
+    T = st.T.data
+    u = st.u.data
+    v = st.v.data
+    p_s = st.p_s.data
     q_v = driver.q_v
     q_c = driver.q_c
     q_r = driver.q_r

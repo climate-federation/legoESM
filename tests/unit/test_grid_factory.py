@@ -79,7 +79,7 @@ def test_atmosphere_component_builds_on_a_factory_grid() -> None:
     config = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
         dycore=DycoreConfig(
-            energy_fixer=False,  # unwired lane opts out (F15)
+            energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
             model_type="shallow_water", discretization="centered", dt=300.0
         ),
         days=1,

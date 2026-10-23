@@ -56,11 +56,9 @@ def test_none_scheme_short_circuits():
 def test_mcfarlane_scalars_reach_the_leaf():
     got = gwd_config_for(_cfg(
         gravity_wave_drag="mcfarlane",
-        mcfarlane_tau_max=4.0,
         mcfarlane_k_wave=1.0e-4,
         mcfarlane_directional_spread=0.5,
     ))
-    assert got.mcfarlane.tau_max == 4.0
     assert got.mcfarlane.k_wave == 1.0e-4
     assert got.mcfarlane.directional_spread == 0.5
 
@@ -79,31 +77,31 @@ def test_composite_scheme_carries_both_tuned_leaves():
     """'mcfarlane+hines' runs BOTH kernels — both overlays must apply."""
     got = gwd_config_for(_cfg(
         gravity_wave_drag="mcfarlane+hines",
-        mcfarlane_tau_max=6.0,
+        mcfarlane_directional_spread=0.6,
         hines_total_rms_wind=1.5,
     ))
     assert got.scheme == "mcfarlane+hines"
-    assert got.mcfarlane.tau_max == 6.0
+    assert got.mcfarlane.directional_spread == 0.6
     assert got.hines.total_rms_wind == 1.5
 
 
 def test_explicit_override_wins_verbatim():
     """An injected full config is never second-guessed by the overlay."""
     inj = GravityWaveDragConfig(scheme="mcfarlane")
-    inj = inj._replace(mcfarlane=inj.mcfarlane._replace(tau_max=99.0))
+    inj = inj._replace(mcfarlane=inj.mcfarlane._replace(directional_spread=3.0))
     got = gwd_config_for(_cfg(
         gravity_wave_drag="mcfarlane",
         gravity_wave_drag_override=inj,
-        mcfarlane_tau_max=4.0,   # must NOT win over the override
+        mcfarlane_directional_spread=0.4,   # must NOT win over the override
     ))
     assert got is inj
-    assert got.mcfarlane.tau_max == 99.0
+    assert got.mcfarlane.directional_spread == 3.0
 
 
 def test_other_leaves_untouched():
     """Overlaying mcfarlane/hines leaves the other scheme leaves at defaults."""
     got = gwd_config_for(_cfg(gravity_wave_drag="mcfarlane",
-                              mcfarlane_tau_max=4.0))
+                              mcfarlane_directional_spread=0.4))
     bare = GravityWaveDragConfig(scheme="mcfarlane")
     assert got.rayleigh == bare.rayleigh
     assert got.lindzen == bare.lindzen
@@ -116,9 +114,9 @@ def test_resolve_gwd_uses_the_resolver():
     from legoesm.driver.physics_pipeline import _resolve_gwd
 
     fn, kernel_cfg = _resolve_gwd(_cfg(gravity_wave_drag="mcfarlane",
-                                       mcfarlane_tau_max=4.0))
+                                       mcfarlane_directional_spread=0.4))
     assert fn is not None
-    assert kernel_cfg.tau_max == 4.0
+    assert kernel_cfg.directional_spread == 0.4
 
 
 def test_cli_round_trip():
@@ -130,16 +128,14 @@ def test_cli_round_trip():
         parser.parse_args(["--dataset", "analytical"]), parser))
     assert d.hines_total_rms_wind == 2.0
     assert d.hines_Fmax == 0.1
-    assert d.mcfarlane_tau_max == 10.0
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical",
         "--hines-total-rms-wind", "1.2", "--hines-fmax", "0.05",
-        "--mcfarlane-tau-max", "4.0", "--mcfarlane-k-wave", "1.0e-4",
+        "--mcfarlane-k-wave", "1.0e-4",
     ]), parser))
     assert cfg.hines_total_rms_wind == 1.2
     assert cfg.hines_Fmax == 0.05
-    assert cfg.mcfarlane_tau_max == 4.0
     assert cfg.mcfarlane_k_wave == 1.0e-4
     assert gwd_config_for(cfg).hines.total_rms_wind == 1.2
 
@@ -206,7 +202,6 @@ def test_physics_state_seed_honours_a_nested_override():
     ("hines_total_rms_wind", -1.0),
     ("hines_total_rms_wind", 0.0),
     ("hines_Fmax", -0.1),
-    ("mcfarlane_tau_max", float("nan")),
     ("mcfarlane_k_wave", float("inf")),
     ("mcfarlane_directional_spread", -1.0),
 ])
@@ -243,6 +238,6 @@ def test_kernel_buildable_for_every_wired_scheme(scheme):
     )
     name, fn, _kcfg = get_gwd_fn(gwd_config_for(_cfg(
         gravity_wave_drag=scheme, hines_total_rms_wind=1.5,
-        mcfarlane_tau_max=6.0)))
+        mcfarlane_directional_spread=0.6)))
     assert fn is not None
     assert name

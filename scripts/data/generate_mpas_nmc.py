@@ -104,6 +104,8 @@ def _make_model(config: dict):
         anchor_mass_to_initial=dycore.fix_mass and dycore.conservation_fixer,
         time_integrator=MPASPrimitiveEquationConfig().time_integrator,
         nu_vert4_T=dycore.mpas_nu_vert4_T,
+        vert4_flux_form_tracers=tuple(dycore.mpas_vert4_flux_form_tracers),
+        vert4_log_form_tracers=tuple(dycore.mpas_vert4_log_form_tracers),
     )
     return mesh, sigma, MPASPrimitiveEquationModel(mesh, sigma, model_config)
 

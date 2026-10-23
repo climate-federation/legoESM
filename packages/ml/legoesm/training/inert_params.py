@@ -132,6 +132,34 @@ PRESCRIBED_SURFACE_LEAF_MARKERS = (
 )
 
 
+# The subset of those markers that only shape the turbulent surface EXCHANGE
+# (bulk coefficients, roughness, stability functions and their spatial fields):
+# inert when the training surface setting is "none".  Albedo and emissivity are
+# absent because radiation still reads them.
+NO_SURFACE_FLUX_LEAF_MARKERS = (
+    "surface_Cd_neutral",
+    "surface_Ch_neutral",
+    "surface_z0",
+    "surface_z0h_z0_ratio",
+    "surface_most_unstable_gamma",
+    "surface_most_stable_beta",
+    # spatial exchange fields only; the spatial albedo/emissivity stay live
+    "fields['Cd_neutral']",
+    "fields['Ch_neutral']",
+    "fields['z0']",
+    "['C_H']",
+    "['C_E']",
+)
+
+
+def no_surface_flux_frozen_names(params) -> list:
+    """Sorted keystr names of the surface-exchange leaves in ``params``."""
+    arrays = eqx.partition(params, eqx.is_inexact_array)[0]
+    return sorted(
+        nm for nm in _leaf_names(arrays)
+        if any(m in nm for m in NO_SURFACE_FLUX_LEAF_MARKERS))
+
+
 def prescribed_surface_frozen_names(params) -> list:
     """Sorted keystr names of the classical-surface leaves in ``params``.
 
@@ -143,6 +171,21 @@ def prescribed_surface_frozen_names(params) -> list:
     return sorted(
         nm for nm in _leaf_names(arrays)
         if any(m in nm for m in PRESCRIBED_SURFACE_LEAF_MARKERS))
+
+
+def surface_policy_frozen_names(yml, params):
+    """``(names, reason)`` of the surface leaves a WB deck freezes by policy:
+    every classical surface leaf when ERA5 fluxes are prescribed, the
+    exchange leaves only when ``classical.surface_bulk`` is "none", else
+    ``([], None)``."""
+    if bool(yml.get("era5_surface_fluxes", False)):
+        return (prescribed_surface_frozen_names(params),
+                "ERA5 surface fluxes prescribed")
+    if str((yml.get("classical") or {}).get(
+            "surface_bulk", "constant")) == "none":
+        return (no_surface_flux_frozen_names(params),
+                "classical.surface_bulk='none'")
+    return [], None
 
 
 def apply_forced_freeze(params, frozen_names, forced_names):
@@ -162,7 +205,8 @@ def apply_forced_freeze(params, frozen_names, forced_names):
 
 
 def measure_leaf_reachability(value_and_grad_fn, params, samples, *,
-                              n_probe=4, reduce=None, device_put=True):
+                              n_probe=4, reduce=None, device_put=True,
+                              resume_state=None, on_scene=None):
     """Largest |gradient| each leaf reaches over ``n_probe`` samples.
 
     ``value_and_grad_fn(arr, sample) -> (loss, grad)`` for one sample, with
@@ -173,6 +217,9 @@ def measure_leaf_reachability(value_and_grad_fn, params, samples, *,
     counts only those.  Every sample nonetheless contributes what it can prove
     about CONNECTIVITY (see the loop below), which can only keep a parameter
     trainable, never freeze one.
+
+    ``device_put`` may also be a callable ``sample -> placed sample`` (a
+    sharded placement); ``True`` means ``jax.device_put``.
 
     With ``device_put`` each sample is moved to the device just before its
     evaluation and released after, exactly as the training loop stages them —
@@ -185,15 +232,38 @@ def measure_leaf_reachability(value_and_grad_fn, params, samples, *,
     below — a collective that some ranks skip on their way to a rank-local
     raise hangs the job instead of failing it.
 
+    ``resume_state=(n_done, absmax, n_used)`` skips the first ``n_done``
+    samples and continues from their saved per-process measurement;
+    ``on_scene(n_done, absmax, n_used)`` is called after every sample so a
+    caller can persist that state (a probe longer than one job link).
+
     Returns ``(absmax, names, n_used)``.
     """
     arr, _static = eqx.partition(params, eqx.is_inexact_array)
     names = _leaf_names(arr)
     absmax = [0.0] * len(names)
     n_used = 0
-    for sample in samples[:n_probe]:
-        loss, grad = value_and_grad_fn(
-            arr, jax.device_put(sample) if device_put else sample)
+    n_done = 0
+    if resume_state is not None:
+        n_done, absmax, n_used = resume_state
+        absmax = [float(a) for a in absmax]
+        if len(absmax) != len(names):
+            raise ValueError(
+                f"reachability probe: saved progress has {len(absmax)} leaves, "
+                f"this parameter tree has {len(names)}")
+    place = (device_put if callable(device_put)
+             else jax.device_put if device_put else (lambda s: s))
+    import logging
+    import time
+    for i_s, sample in enumerate(samples[:n_probe]):
+        if i_s < n_done:
+            continue
+        _t0 = time.perf_counter()
+        loss, grad = value_and_grad_fn(arr, place(sample))
+        jax.block_until_ready(grad)
+        logging.getLogger(__name__).info(
+            "reachability probe scene %d/%d %.1f s", i_s + 1,
+            len(samples[:n_probe]), time.perf_counter() - _t0)
         leaves = jax.tree.leaves(grad)
         finite = [bool(jnp.all(jnp.isfinite(g))) for g in leaves]
         usable = bool(jnp.isfinite(loss)) and all(finite)
@@ -222,8 +292,10 @@ def measure_leaf_reachability(value_and_grad_fn, params, samples, *,
                 "about the scene, not the parameters); %d leaf/leaves were "
                 "non-finite on it and are kept as REACHABLE",
                 sum(1 for f in finite if not f))
-            continue
-        n_used += 1
+        else:
+            n_used += 1
+        if on_scene is not None:
+            on_scene(i_s + 1, list(absmax), n_used)
     if reduce is not None:
         absmax, n_used = reduce(absmax, n_used)
     if n_used == 0:
@@ -332,7 +404,8 @@ def probe_indices(n_samples, n_probe):
 
 
 def freeze_unreachable(params, value_and_grad_fn, samples, *, n_probe=None,
-                       num_processes=1, comm=None, device_put=True):
+                       num_processes=1, comm=None, device_put=True,
+                       resume_state=None, on_scene=None):
     """Split ``params`` into (trainable, frozen) by measured reachability.
 
     The probe samples are spread across ``samples`` (see :func:`probe_indices`)
@@ -361,7 +434,8 @@ def freeze_unreachable(params, value_and_grad_fn, samples, *, n_probe=None,
     probe = [samples[i] for i in probe_indices(len(samples), n_probe)]
     absmax, names, n_used = measure_leaf_reachability(
         value_and_grad_fn, params, probe, n_probe=len(probe),
-        reduce=mpi_max_reduce(num_processes, comm), device_put=device_put)
+        reduce=mpi_max_reduce(num_processes, comm), device_put=device_put,
+        resume_state=resume_state, on_scene=on_scene)
     spec = trainable_filter_spec(params, absmax, names)
     trainable, frozen = eqx.partition(params, spec)
     frozen_names = [nm for nm, m in zip(names, absmax) if not m > 0.0]

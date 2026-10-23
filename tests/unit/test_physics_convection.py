@@ -317,8 +317,14 @@ def test_precipitation_non_negative(scheme):
 
 @pytest.mark.parametrize("scheme", ["sbm", "dca"])
 def test_cape_reduction(scheme):
-    """Applying convection tendencies should reduce CAPE."""
-    T, q_v, p_full, p_half = _make_unstable_column()
+    """Applying convection tendencies should reduce CAPE.
+
+    DCA gets the supersaturated column: GFDL moist_conv (run on both,
+    2026-10-19) leaves the subsaturated one untouched."""
+    if scheme == "dca":
+        T, q_v, p_full, p_half = _make_saturated_unstable_column()
+    else:
+        T, q_v, p_full, p_half = _make_unstable_column()
     out = _call_scheme(scheme, T, q_v, p_full, p_half, dt=300.0)
 
     T_base = T[:, -1]
@@ -720,7 +726,13 @@ def test_drying_in_unstable_column(scheme):
     )
 
 
-@pytest.mark.parametrize("scheme", ["sbm", "dca", "mass_flux", "edmf"])
+# sbm is not listed: on this column Isca's qe_moist_convection (run on it,
+# 2026-10-19) takes the "shallower" branch and leaves the upper half untouched;
+# the SBM port matches it (tests/atmosphere/test_sbm_qe_oracle.py).  dca is not
+# listed: GFDL moist_conv (run on this column and on _make_saturated_unstable_column,
+# 2026-10-19) adjusts nothing in the upper half; the port matches it
+# (tests/atmosphere/test_dca_moist_conv_oracle.py).
+@pytest.mark.parametrize("scheme", ["mass_flux", "edmf"])
 def test_upper_trop_warming_in_unstable_column(scheme):
     """Convection in an unstable column should warm SOMEWHERE in the column.
 

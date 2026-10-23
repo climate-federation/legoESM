@@ -14,6 +14,14 @@ All notable changes to legoESM. Format roughly follows
   itself and its patch chain on every lane — including the atmosphere driver
   path, which passes neither field. No schema change: populating the optional
   `reproducibility.runner_tag` / `patches` fields is not a bump.
+- **`run_omip_core2.py` short-run flags.** `--days` runs for a day
+  budget instead of the standard `--years` / `--smoke` budget (short tests
+  that are not the 10-day smoke), `--synthetic-forcing` explicitly opts in
+  to synthetic forcing (default stays real CORE-II data — a silent
+  fallback would corrupt the NEMO comparison invisibly), and
+  `--forcing-scale` scales surface forcing amplitude (sensitivity tests /
+  cold-start shock reduction). Contributed from the
+  legoESM-ocean-runners tripole-OMIP orchestration lane.
 
 ### Changed
 

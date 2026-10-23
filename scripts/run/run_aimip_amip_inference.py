@@ -208,7 +208,8 @@ def main():
         open_arco_era5, ozone_vmr_at_date, regrid_monthly_forcing_to_gaussian,
     )
     from legoesm.training.aimip_params import (
-        AIMIPClassicalParams, make_aimip_classical_spectral_physics,
+        AIMIPClassicalParams, aimip_spatial_unread_fields,
+        make_aimip_classical_spectral_physics,
     )
     from legoesm.training.campaign_driver import parse_bool_flag
     from legoesm.training.aimip_spatial import era5_land_fraction, grid_with_zm_land_fraction
@@ -278,7 +279,13 @@ def main():
         ds_o3 = open_arco_era5()       # historical ERA5 ozone (ARCO)
 
         # --- trained classical model (spatial_surface=True per ace2 config) ---
-        template = AIMIPClassicalParams.from_defaults(spatial_surface=True)
+        template = AIMIPClassicalParams.from_defaults(
+            spatial_surface=True,
+            # fields the trained schemes never read are not in the checkpoint
+            spatial_unread=aimip_spatial_unread_fields(
+                turbulence=str(cfg["aimip_turbulence"]),
+                surface_bulk_scheme=str(
+                    cfg.get("aimip_surface_bulk_scheme", "constant"))))
         params = load_checkpoint(template, args.ckpt)
         non_rad_fn, rad_fn = make_aimip_classical_spectral_physics(
             params, grid, dt,

@@ -25,6 +25,10 @@ atmosphere:
   time_integrator: ssp_rk3
   dt_seconds: 450
   hyperdiff_scale: 0.0
+  # Keep the cube winds in D staggering between steps (#1028): the per-step
+  # cell-centre round trip is a measured eddy damper.  Runs on 1/2/3/6
+  # devices (face mesh); sub-face tiling and multi-process refuse it at start.
+  persistent_dgrid: true
 conservation:
   fix_mass: true
 time:

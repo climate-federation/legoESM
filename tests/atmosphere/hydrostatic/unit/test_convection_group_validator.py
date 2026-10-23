@@ -118,8 +118,11 @@ def _stable_dry_column(ncol: int = 2, nlev: int = 24):
 
 
 # Schemes whose parcel needs a level of neutral buoyancy inside the column
-# (KF: cloud-top search; CAM6 ZM: buoyan_dilute tentative-top search).
-_LNB_SCHEMES = ("kain_fritsch", "zhang_mcfarlane")
+# (KF: cloud-top search; CAM6 ZM: buoyan_dilute tentative-top search; SBM =
+# Isca qe_moist_convection: a parcel still buoyant at the model top leaves
+# kLZB = 0 and the oracle writes outside its arrays -- its binary aborts on
+# ``_column()`` -- so the port returns NaN there).
+_LNB_SCHEMES = ("kain_fritsch", "zhang_mcfarlane", "sbm")
 
 
 def _capped_column(
@@ -264,7 +267,7 @@ SCHEME_NAMES = [
 
 @pytest.mark.parametrize("name", SCHEME_NAMES)
 def test_tier1_outputs_finite_and_shaped(name):
-    T, q, pf, ph, u, v = _column()
+    T, q, pf, ph, u, v = _capped_column() if name in _LNB_SCHEMES else _column()
     ncol, nlev = T.shape
     w = jnp.full((ncol, nlev), 0.05)               # gentle resolved ascent
     mc = jnp.full((ncol, nlev), 2.0e-6)            # +moisture convergence
@@ -301,7 +304,7 @@ def test_tier1_outputs_finite_and_shaped(name):
 def test_tier2_cloud_water_source_non_negative(name):
     """The convective condensate source handed to microphysics must be >= 0
     for EVERY scheme (documented invariant of ConvectionOutput)."""
-    T, q, pf, ph, u, v = _column()
+    T, q, pf, ph, u, v = _capped_column() if name in _LNB_SCHEMES else _column()
     ncol, nlev = T.shape
     w = jnp.full((ncol, nlev), 0.05)
     mc = jnp.full((ncol, nlev), 2.0e-6)
@@ -382,7 +385,7 @@ def test_tier2_mass_flux_schemes_net_dry(name):
 def test_tier3_total_water_conserved(name):
     """∫(dq_v + dq_c) dp/g ≈ 0: every kg of vapor removed reappears as
     in-column cloud water (nothing precipitates in-scheme)."""
-    T, q, pf, ph, u, v = _column()
+    T, q, pf, ph, u, v = _capped_column() if name in _LNB_SCHEMES else _column()
     ncol, nlev = T.shape
     mc = jnp.full((ncol, nlev), 3.0e-6)
     out = _all_schemes(T, q, pf, ph, u, v, None, mc)[name]()
@@ -546,30 +549,22 @@ def test_tier3_kf_vapor_stays_nonnegative(dt, q_scale):
         f"KF column-water residual {water} at dt={dt}, q_scale={q_scale}"
 
 
-def test_tier3_sbm_conserves_water_but_not_instantaneous_mse():
-    """SBM (Betts-Miller) conserves column total water EXACTLY (the cloud-water
-    source is the rescaled column-net drying) but does NOT instantaneously
-    conserve column MSE: it relaxes T→T_ref and q→q_ref INDEPENDENTLY, so
-    c_p dT + L_v dq ≠ 0 per step.  The enthalpy correction (sbm.py Newton
-    iteration) is applied to the REFERENCE PROFILE, not the tendencies — this
-    is the documented BM design, so SBM is excluded from the MSE tier.  We
-    pin both facts here (codex review-1 #5)."""
-    T, q, pf, ph, u, v = _column()
+def test_tier3_sbm_conserves_water_and_mse():
+    """SBM (Isca qe_moist_convection) closes column total water (the cloud-water
+    source is the column precipitation Pq = column drying) AND column moist
+    enthalpy: the deep branch either shifts T_ref uniformly to close it or
+    rescales dq so that Pq = Pt; the shallower branch zeroes both integrals.
+    (The replaced surrogate left a Newton residual of 1-3 % here.)"""
+    T, q, pf, ph, u, v = _capped_column()
     out = _run_sbm(T, q, pf, ph)
     dp = _dp(ph)
-    # total water conserved to machine precision
     net_water = _col_int(out.dq_v_dt + out.dq_c_conv_dt, dp)
     assert jnp.all(jnp.abs(net_water) < 1e-12), \
         f"SBM total-water not conserved: {net_water}"
-    # MSE residual is small but non-zero (~1-3% of column heating) — NOT
-    # conserved instantaneously, as the BM design implies.
     mse = _col_int(C_PD * out.dT_dt + L_V * out.dq_v_dt, dp)
-    heat = _col_int(jnp.abs(C_PD * out.dT_dt), dp) + 1e-9
-    rel = jnp.abs(mse) / heat
-    assert jnp.all(rel > 5e-3), \
-        f"SBM unexpectedly MSE-conserving (rel={rel}); revisit exclusion"
-    assert jnp.all(rel < 0.1), \
-        f"SBM MSE residual implausibly large (rel={rel})"
+    heat = _col_int(jnp.abs(C_PD * out.dT_dt), dp)
+    assert jnp.all(heat > 0.0)
+    assert jnp.all(jnp.abs(mse) <= 1e-10 * heat), f"SBM MSE residual {mse / heat}"
 
 
 def test_tier3_kuo_consumes_supplied_convergence():
@@ -611,9 +606,9 @@ def _scalar_loss(out):
 _GRAD_CASES = {
     "sbm": (7200.0, lambda T, q, pf, ph, u, v, w, mc, x:
             _scalar_loss(_run_sbm(T, q, pf, ph, tau_c=x))),                 # tau_c [s]
-    "dca_manabe": (10.0, lambda T, q, pf, ph, u, v, w, mc, x:
-                   _scalar_loss(_run_dca_manabe(
-                       T, q, pf, ph, instability_blend_sharpness=x))),       # blend sharpness
+    # dca_manabe is not probed: GFDL moist_conv adjusts to a tolerance and has
+    # no rate or slope prefactor; its only float is the CAPE gate, whose
+    # gradient tests/unit/test_cape_trigger_gradient.py covers.
     "dca_ahmed_neelin": (0.6, lambda T, q, pf, ph, u, v, w, mc, x:
                          _scalar_loss(_run_dca_ahmed(T, q, pf, ph, a_mm_per_hr=x))),  # slope a
     "zhang_mcfarlane": (3600.0, lambda T, q, pf, ph, u, v, w, mc, x:
@@ -740,7 +735,7 @@ def test_tier4_grad_through_state_finite(name):
 
 @pytest.mark.parametrize("name", SCHEME_NAMES)
 def test_tier4_jit_matches_eager(name):
-    T, q, pf, ph, u, v = _column()
+    T, q, pf, ph, u, v = _capped_column() if name in _LNB_SCHEMES else _column()
     ncol, nlev = T.shape
     w = jnp.full((ncol, nlev), 0.05)
     mc = jnp.full((ncol, nlev), 3.0e-6)

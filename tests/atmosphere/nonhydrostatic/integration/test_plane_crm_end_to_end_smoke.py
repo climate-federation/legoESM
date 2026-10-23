@@ -1368,6 +1368,7 @@ def test_plane_crm_production_scale_132x132_one_hour_envelope(tmp_path):
     )
 
 
+@pytest.mark.xfail(strict=True, reason="Kessler faithful-port default gap: saturation_sharpness=100 is not the hard limit (negative cloud water, ~half adjustment); passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")
 def test_plane_crm_dt20_van_leer_stability_smoke(tmp_path):
     """iter-183 regression: the new production combination
     (dt=20 + Van Leer + beta=0.2) must run stably with radiation.

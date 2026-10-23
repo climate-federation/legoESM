@@ -13,7 +13,8 @@ reference INDEPENDENTLY in numpy and pins the JAX leaf at rel 1e-12:
   (Lscale ramp toward ``max_coeff_value`` where ``Lscale_zm < threshold``
   AND ``zm > altitude_threshold``)
 * ``compute_C6_C7_Skw_fnc`` — advance_xm_wpxp_module.F90:640-700 composition
-  (C6rt/C6thl skewness fn then Lscale damping; C7 skewness fn undamped)
+  (C6rt/C6thl/C7 skewness fn then Lscale damping; C7 damping at
+  advance_xm_wpxp_module.F90:741-745)
 * ``wp2_term_dp1_rhs``      — advance_wp2_wp3_module.F90 (the
   ``l_damp_wp2_using_em = .false.`` CAM branch:
   ``+ (C1_Skw_fnc*invrs_tau)*threshold`` interior, boundary zeros)
@@ -128,7 +129,11 @@ def test_compute_C6_C7_skw_fnc_fortran_composition():
         _skw_fnc_mirror(cols(p.C6thl), cols(p.C6thlb), cols(p.C6thlc), Skw),
         cols(p.C6thl_Lscale0), cols(p.altitude_threshold),
         cols(p.wpxp_L_thresh), Lscale, np.asarray(gr.zm))
-    want_c7 = _skw_fnc_mirror(cols(p.C7), cols(p.C7b), cols(p.C7c), Skw)
+    want_c7 = _damp_mirror(
+        cols(p.C7),
+        _skw_fnc_mirror(cols(p.C7), cols(p.C7b), cols(p.C7c), Skw),
+        cols(p.C7_Lscale0), cols(p.altitude_threshold),
+        cols(p.wpxp_L_thresh), Lscale, np.asarray(gr.zm))
     assert np.allclose(np.asarray(C6rt), want_rt, rtol=1e-12, atol=0.0)
     assert np.allclose(np.asarray(C6thl), want_thl, rtol=1e-12, atol=0.0)
     assert np.allclose(np.asarray(C7), want_c7, rtol=1e-12, atol=0.0)

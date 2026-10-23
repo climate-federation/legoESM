@@ -77,7 +77,7 @@ def literal_accumulators(eta, z_coord, dtype, *, grid,
 
     from legoesm.core.source_rounding import nemo_source_round
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-        _nemo_een_south_ff_copy,
+        _nemo_south_copy_fill,
     )
     from legoesm.ocean.vertical import nemo_e3f_0vor_from_tmask
 
@@ -142,7 +142,7 @@ def literal_accumulators(eta, z_coord, dtype, *, grid,
 
     q_south = shift(q, 0, 1)
     if south_ff_copy:
-        ff_south = _nemo_een_south_ff_copy(ff)
+        ff_south = _nemo_south_copy_fill(ff)
         q_south = b(ff_south[..., None] / shift(e3f, 0, 1))
 
     def triad(a, c, d):

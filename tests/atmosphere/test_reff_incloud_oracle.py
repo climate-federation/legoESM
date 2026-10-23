@@ -1,0 +1,108 @@
+"""Oracle match: radiation droplet/ice effective radius on CAM6 MG2's in-cloud footing.
+
+Production path (MPAS ``_run_column``): ``radiation.integration._make_hydrostatic_radiation``
+physics_fn overrides the droplet number with the aerosol-activated (specified, IN-CLOUD)
+number and calls ``_call_radiation_backend(..., n_cloud_in_cloud=True)`` ->
+``compute_cloud_properties``.  CAM6 forms REL from that kind of number (MG2 ``nccons``)
+with the in-cloud water ``qc / max(ast, mincld)``; before #1521 was fixed legoESM paired it
+with the grid-mean q_c, so r_eff came out low by cf^(1/3).
+
+Fixture ``oracle_fixtures/reff_incloud.npz``: outputs from RUNNING CAM cam_cesm2_1_rel_60
+(a03b84b7c4e34f965b115686f22a043b85739e56) micro_mg2_0.F90 L877-879, 2739-2768,
+2772-2808, 2811-2865 verbatim with micro_mg_utils.F90 compiled unmodified (dcs = 500e-6),
+plus legoESM's droplet PSD (WRF v4.6.1 module_mp_morr_two_moment.F L3918-3949, 4024-4029,
+legoESM rho_w and moist density) evaluated by the same driver on MG2's in-cloud water and
+number.  Inputs: the 5 tier-1 CAM6-L32 columns with ast < mincld edge levels and a deep
+convective mass flux (so the radiative cover differs from ast).  Production CloudConfig
+(amip_production.yaml, resolved through run_amip + model_driver) is stored in the fixture.
+Generator: scripts/validate/oracle/reff_incloud/{build.sh,oracle_driver.F90,make_fixture.py}.
+
+Excluded levels, each a named divergence outside this fix (not ported, user decision):
+  * no liquid (grid-mean q_c <= 1e-14, legoESM's gate; MG2 gates the in-cloud value at
+    1e-18 and falls back to 10 um, legoESM to ``CloudConfig.r_eff_liq``);
+  * MG2's 5 g/kg in-cloud cap binds (q_c/lcldm > 5e-3), absent in legoESM's radiation PSD;
+  * ice: MG2's ice-slope bounds adjust the number (``ni_adj``), absent in legoESM (the
+    RRTMGP table clip bounds the size downstream).
+The liquid PSD itself is M2005, not MG2's exponential Martin fit (``effc_mg2``, not asserted).
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import jax
+
+jax.config.update("jax_enable_x64", True)
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from legoesm.atmosphere.physics.clouds.cloud_fraction import compute_cloud_properties
+from legoesm.atmosphere.physics.clouds.config import CloudConfig
+from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+
+_FIX = Path(__file__).parent / "oracle_fixtures" / "reff_incloud.npz"
+_TOL = 1e-10  # user-approved oracle-match tolerance (max relative error, fp64)
+_MG2_QC_CAP = 5.0e-3  # micro_mg2_0.F90:2762 (excluded divergence, see docstring)
+
+
+@pytest.fixture(scope="module")
+def z():
+    return np.load(_FIX)
+
+
+def _kwargs(z):
+    cfg = CloudConfig(**json.loads(str(z["meta"]))["cloud_config"])
+    return dict(
+        T=jnp.asarray(z["T"]), p_full=jnp.asarray(z["p_full"]), q_v=jnp.asarray(z["q_v"]),
+        dp=jnp.asarray(np.diff(z["p_half"], axis=1)), config=cfg,
+        q_cloud=jnp.asarray(z["q_c"]), q_ice=jnp.asarray(z["q_i"]),
+        n_ice=jnp.asarray(z["n_i"]), n_cloud=jnp.asarray(z["n_ccn"]),
+        cloud_fraction_override=jnp.asarray(z["alst"]), lat=jnp.asarray(z["lat"]),
+        conv_mass_flux_up=jnp.asarray(z["conv_mass_flux_up"]),
+        conv_icwmr=jnp.asarray(z["conv_icwmr"]), p_half=jnp.asarray(z["p_half"]))
+
+
+def _max_rel(ours, ref, mask):
+    assert mask.sum() > 0
+    return float(np.max(np.abs(ours[mask] - ref[mask]) / np.abs(ref[mask])))
+
+
+def test_liquid_reff_pairs_incloud_number_with_mg2_incloud_water(z):
+    props = compute_cloud_properties(**_kwargs(z), n_cloud_in_cloud=True,
+                                     clubb_config=CLUBBConfig())
+    ours = np.asarray(props.r_eff_liq) * 1e6  # m -> um (oracle EFFC units)
+    m = (z["q_c"] > 1.0e-14) & (z["q_c"] / z["lcldm"] <= _MG2_QC_CAP)
+    # the fixture exercises both halves of lcldm = max(ast, mincld) and ast != cover
+    assert np.any(m & (z["ast"] < 1.0e-4)) and np.any(m & (z["ast"] > 0.05))
+    assert np.any(m & (np.asarray(props.cloud_fraction) > z["ast"] + 1e-6))
+    rel = _max_rel(ours, z["effc_wrf"], m)
+    assert rel <= _TOL, f"r_eff_liq max rel {rel:.3e} > {_TOL}"
+
+
+def test_ice_reff_matches_mg2_effi(z):
+    props = compute_cloud_properties(**_kwargs(z), n_cloud_in_cloud=True,
+                                     clubb_config=CLUBBConfig())
+    ours = np.asarray(props.r_eff_ice) * 1e6
+    m = (z["q_i"] > 1.0e-14) & (z["ni_adj"] == 0.0) & (z["q_i"] / z["lcldm"] <= _MG2_QC_CAP)
+    rel = _max_rel(ours, z["effi_mg2"], m)
+    assert rel <= _TOL, f"r_eff_ice max rel {rel:.3e} > {_TOL}"
+
+
+def test_reff_gradient_finite(z):
+    kw = _kwargs(z)
+
+    def loss(q_c, n_c, alst):
+        p = compute_cloud_properties(**{**kw, "q_cloud": q_c, "n_cloud": n_c,
+                                        "cloud_fraction_override": alst},
+                                     n_cloud_in_cloud=True,
+                                     clubb_config=CLUBBConfig())
+        return jnp.sum(p.r_eff_liq) + jnp.sum(p.lwp / p.r_eff_liq)
+
+    grads = jax.grad(loss, argnums=(0, 1, 2))(kw["q_cloud"], kw["n_cloud"],
+                                               kw["cloud_fraction_override"])
+    for g in grads:
+        assert np.all(np.isfinite(np.asarray(g)))
+    assert np.any(np.asarray(grads[2]) != 0.0)  # r_eff now depends on the cloud fraction

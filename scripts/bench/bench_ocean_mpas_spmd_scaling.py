@@ -207,9 +207,11 @@ def main() -> int:
             tracer_advection=str(config.tracer_advection), nlev=args.nlev,
             halo_depth=(halo_depth_for_config(config) if args.halo_depth is None
                         else int(args.halo_depth)))
-        spmd_step = make_sharded_mpas_ocean_step(model, layout)
+        spmd_step = make_sharded_mpas_ocean_step(model, layout,
+                                                 land_mask=state.land_mask.data)
         state = shard_state_mpas_ocean_spmd(state, layout)
         rounds = len(layout.ppermute_perms)
+        fill_cap = spmd_step.land_fill_band_capacity
         cells_per = int(layout.cells_per)
         # The sharded geometry stacks cross the timing helper's jit as an
         # ARGUMENT: closed over, they are outer-trace constants jax cannot
@@ -220,6 +222,7 @@ def main() -> int:
             return spmd_step(st, args.dt, aux=aux)
     else:
         rounds, cells_per, aux = 0, n_cells_orig, None
+        fill_cap = config.land_fill_band_capacity
 
         def advance(st, aux=None):   # timed_scan_blocks calls 1-arg when aux is None
             return model.step(st, args.dt)
@@ -318,6 +321,7 @@ def main() -> int:
                "pcg_variant": str(config.barotropic_implicit_pcg_variant),
                "pcg_fixed_iters": int(config.barotropic_implicit_pcg_fixed_iters),
                "pcg_precond": str(config.barotropic_implicit_pcg_precond),
+               "land_fill_band_capacity": fill_cap,
                "pcg_poly_sweeps": int(config.barotropic_implicit_pcg_poly_sweeps),
                "halo_depth": (int(layout.halo_depth) if nd > 1 else None),
                "pcg_solver_path": ("fixed_iter_pcg" if nd > 1 else "stock_cg_to_tol"),

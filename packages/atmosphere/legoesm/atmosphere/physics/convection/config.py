@@ -142,8 +142,8 @@ __param_spec__ = {
         "scheme_key": "atm.conv.DCAConfig",
         "excluded": {
             "cape_sharpness": "numerics: sigmoid sharpness on the CAPE gate",
-            "instability_blend_sharpness": "numerics: sigmoid sharpness on the per-pair superadiabatic blend",
-            "mixing_fraction": "numerics: per-iteration adjustment fraction (default 1.0 at domain boundary, not sigmoid-tunable)",
+            "instability_blend_sharpness": "inert: belonged to the replaced pairwise sweep; the GFDL moist_conv port has no counterpart and raises on a non-default value",
+            "mixing_fraction": "inert: belonged to the replaced pairwise sweep; the GFDL moist_conv port has no counterpart and raises on a non-default value",
         },
         "params": {
             "cape_threshold": {"units": "J/kg", "bounds": (33.0, 300.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "trainable since the trigger gained a straight-through gradient (_triggers.py); was tier 0 / AD-unreachable per #1417. Original: Manabe et al. (1965) moist adjustment", "shape": None},
@@ -279,7 +279,7 @@ __param_spec__ = {
     "SBMConfig": {
         "scheme_key": "atm.conv.SBMConfig",
         "excluded": {
-            "cloud_mask_sharpness": "numerics: sigmoid sharpness on the cloud-layer (T_moist - T) mask",
+            "cloud_mask_sharpness": "inert: belonged to the replaced T_moist >= T layer mask; the Isca qe_moist_convection port has no such mask and raises on a non-default value",
             "smooth_trigger_sharpness": "numerics: sigmoid sharpness on the smooth CAPE trigger",
         },
         "params": {
@@ -331,7 +331,7 @@ __param_spec__ = {
         "scheme_key": "atm.conv.ZhangMcFarlaneConfig",
         "excluded": {
             "limcnv_p_pa": "numerics/domain: convection top cap (40 hPa reference interface), not a closure knob",
-            "pbl_top_pa": "measurement convention: launch-search bound standing in for the host's missing pblh",
+            "pbl_top_pa": "measurement convention: launch-search bound for callers with no pblh carry",
             "parcel_tpert": "default 0 = disabled/off (PBL temperature perturbation; CAM6 CLUBB path has none)",
         },
         "params": {
@@ -360,9 +360,10 @@ class SBMConfig(NamedTuple):
     rh_ref : float
         Reference relative humidity for moisture profile (default 0.7).
     cape_threshold : float
-        Minimum CAPE [J/kg] to trigger convection (default 70.0).
+        Minimum CAPE [J/kg] to trigger convection (default 70.0).  The Isca
+        oracle convects whenever CAPE > 0 (threshold 0).
     smooth_trigger_sharpness : float
-        Sigmoid sharpness for smooth trigger [1/(J/kg)] (default 0.01).
+        Sigmoid sharpness for smooth trigger [1/(J/kg)] (default 0.1).
     """
     tau_c: float = 7200.0
     rh_ref: float = 0.7
@@ -372,12 +373,10 @@ class SBMConfig(NamedTuple):
     # — gating leaks).  0.1 gives ``sigmoid(-7) ≈ 9e-4`` (effectively 0)
     # while preserving smoothness near the threshold.
     smooth_trigger_sharpness: float = 0.1
-    # Sigmoid sharpness for the cloud-layer mask (T_moist - T) [1/K].
-    # Hard ``T_moist >= T`` boolean masks kill ``jax.grad`` through layer
-    # top/bottom transitions; the smoothed sigmoid keeps gradients alive.
-    # 5/K gives ~0.5 at T_moist == T and ~0.01 at T_moist - T = -1 K, which
-    # is sharp enough to behave like a hard mask in forward integration but
-    # differentiable for training.
+    # INERT since the Isca qe_moist_convection port (2026-10-19): this was the
+    # sigmoid sharpness of the replaced per-level ``T_moist >= T`` layer mask.
+    # The oracle's convecting layer is kLZB..surface; sbm_convection raises
+    # if this is set to anything but its default.
     cloud_mask_sharpness: float = 5.0
 
 
@@ -480,9 +479,8 @@ class DCAConfig(NamedTuple):
 
     Two variants are routed by the ``variant`` field:
 
-    * ``variant="manabe"`` (default): the Manabe-Smagorinsky-Strickler
-      (1965) pairwise moist-adiabatic adjustment (the historical legoESM
-      ``dca`` scheme).  Behaviour of all existing configs is unchanged.
+    * ``variant="manabe"`` (default): Manabe moist convective adjustment,
+      a port of GFDL atmos_phys 2021.02 ``moist_conv`` (see ``dca.py``).
     * ``variant="ahmed_neelin"``: the Ahmed-Neelin-Adames (2020)
       lower-tropospheric-buoyancy (B_L) precipitation-buoyancy closure
       (see :class:`AhmedNeelinDCAConfig`).
@@ -492,29 +490,19 @@ class DCAConfig(NamedTuple):
     variant : str
         ``"manabe"`` (default) or ``"ahmed_neelin"``.
     n_iterations : int
-        (Manabe only) Number of bottom-to-top adjustment sweeps per call
-        (default 3).  A single sweep only partially relaxes a deep column
-        toward the moist adiabat, so one call per physics step leaves the
-        free troposphere several K too cold under steady radiative
-        cooling; free-tropospheric ``mean|T - T_moist|`` falls
-        monotonically with sweeps (≈9.0/8.4/7.3/5.5 K at 1/3/5/10) with
-        the column maximum temperature unchanged (the simultaneous pair
-        solve keeps every sweep enthalpy-conserving and bounded).
+        INERT (belonged to the replaced pairwise sweep; ``moist_conv`` iterates
+        to its own tolerance).  Must stay 3; anything else raises.
     mixing_fraction : float
-        (Manabe only) Fraction of adjustment applied per iteration
-        (default 1.0).
+        INERT (replaced pairwise sweep).  Must stay 1.0; anything else raises.
     cape_threshold : float
-        (Manabe only) Minimum CAPE [J/kg] to trigger convection (default
-        100.0).  Columns with CAPE below this are not adjusted.
+        (Manabe only) Threshold [J/kg] of the CAPE gate on the adjustment
+        (default 100.0).  The gate has no counterpart in ``moist_conv``; a
+        negative threshold with a hard sharpness disables it.
     cape_sharpness : float
-        (Manabe only) Sigmoid sharpness [1/(J/kg)] for smooth CAPE gating
+        (Manabe only) Sigmoid sharpness [1/(J/kg)] of the CAPE gate
         (default 0.1).
     instability_blend_sharpness : float
-        (Manabe only) Dimensionless sigmoid sharpness on the
-        superadiabatic-instability metric controlling per-pair adjustment
-        blending inside the ``lax.scan`` sweep (default 10.0).  Lifted
-        from a hardcoded literal so the trigger transition width is
-        tunable.
+        INERT (replaced pairwise sweep).  Must stay 10.0; anything else raises.
     ahmed_neelin : AhmedNeelinDCAConfig
         Sub-configuration for the ``variant="ahmed_neelin"`` closure.
     """
@@ -723,16 +711,21 @@ class ZhangMcFarlaneConfig(NamedTuple):
         Convection is capped at the interface where the reference pressure
         crosses this value [Pa] (40 hPa, zm_conv_intr.F90:334).
     pbl_top_pa : float
-        DEPARTURE: the host does not carry the PBL height ``pblh`` that the
-        oracle's ``pblt`` launch-level bound needs, so the max-MSE launch
-        search is restricted to levels with ``p >= pbl_top_pa`` [Pa] unless
-        ``pblh`` is passed explicitly.
+        Fallback for callers that pass no PBL height ``pblh`` (no
+        ``PhysicsState.pblh`` carry): the max-MSE launch search is then
+        restricted to levels with ``p >= pbl_top_pa`` [Pa] instead of the
+        oracle's ``pblt``.  The hydrostatic/MPAS bridge passes the carried
+        ``pblh``, so this bound is not used there.
     parcel_tpert : float
         PBL temperature perturbation ``tpert`` [K] added to the parcel; 0 on
         the CAM6 CLUBB path (no scheme writes ``tpert`` there).
     enable_cmt : bool
         Run ``momtran`` (convective momentum transport + KE-dissipation
         heating); when False ``du_dt_conv``/``dv_dt_conv`` are ``None``.
+    transport_cloud_tracers : bool
+        Run ``convtran`` on the carried CAM6 convtran1 tracers
+        (``zm_conv_intr.F90:829-846``); when False they are not transported
+        and ``tracer_transport`` is ``None``.
     """
     c0_lnd: float = 0.0075
     c0_ocn: float = 0.03
@@ -749,6 +742,7 @@ class ZhangMcFarlaneConfig(NamedTuple):
     pbl_top_pa: float = 7.0e4
     parcel_tpert: float = 0.0
     enable_cmt: bool = True
+    transport_cloud_tracers: bool = True
     # Column land fraction policy (static, closure-time).  "required": the host
     # must pass ``land_frac`` (it picks c0_lnd vs c0_ocn per column); a missing
     # one raises instead of silently treating every column as ocean.  "none":

@@ -185,9 +185,11 @@ def test_held_suarez_through_the_contract_is_the_twin_bitwise(dry):
     dyn, col, ic = dry
     post = dyn.step(ic, DT)
     amat6, lat6, wv6 = stack_held_suarez_metrics(col.grid.ctx_np)
-    twin = apply_held_suarez_step_sixface_jax(
-        post["state"], post["press"], col._tab, amat6, lat6, wv6, dt=DT,
-        n=N, ng=NG, km=KM, strat=True)
+    # jit, as the column lane's physics apply is: an eager twin rounds
+    # differently (op-by-op, no FMA contraction) at the last bit.
+    twin = jax.jit(lambda st, pr: apply_held_suarez_step_sixface_jax(
+        st, pr, col._tab, amat6, lat6, wv6, dt=DT,
+        n=N, ng=NG, km=KM, strat=True))(post["state"], post["press"])
     out = col.step(col.from_bundle(ic), DT,
                    physics_fn=_held_suarez_physics(col))
     for k in ("u", "v", "pt"):
@@ -461,7 +463,7 @@ def _driver_cfg(tmp_path, **over):
     dycore = DycoreConfig(
         model_type="hydrostatic", discretization="fv3_duo",
         dt=over.pop("dt", 1920.0),
-        fv3_duo_column_lane=over.pop("column", True),
+        column_lane=over.pop("column", True),
         # the lane identities compare WITHOUT the energy fixer (the closed
         # lane does not run it and refuses True; F15)
         energy_fixer=over.pop("energy_fixer", False))
@@ -492,7 +494,8 @@ def test_driver_column_lane_is_the_closed_lane_bitwise(tmp_path):
     dt), and the state the driver ends on is the column view."""
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
         FV3DuoColumnModel, FV3DuoColumnState)
-    col = _run_driver(tmp_path / "col")
+    # the closed lane has no surface exchange: compare without it
+    col = _run_driver(tmp_path / "col", surface_bulk_scheme="none")
     assert isinstance(col.model, FV3DuoColumnModel)
     assert isinstance(col.state, FV3DuoColumnState)
     assert col.grid is col.model.mesh and col.sigma is col.model.sigma_coord
@@ -506,6 +509,7 @@ def test_driver_column_lane_is_the_closed_lane_bitwise(tmp_path):
                       do_pert=True)["state"]["pt"])).max() > 0.0
 
 
+@pytest.mark.xfail(strict=True, reason="Kessler faithful-port default gap: saturation_sharpness=100 is not the hard limit (negative cloud water, ~half adjustment); passes at the hard limit; known difference: the smooth default is kept because differentiability is never traded for oracle fidelity (user decision 2026-10-20)")
 def test_driver_column_lane_kessler_equals_the_closed_lane(tmp_path):
     """Kessler through the MPAS lane's own physics package on the column
     model vs the closed lane's bridge, same IC, same dt: the two runs
@@ -517,7 +521,8 @@ def test_driver_column_lane_kessler_equals_the_closed_lane(tmp_path):
     drift is the dycore's own on both lanes (the moist arm creates ~7e-7
     of global water per step under pure advection -- a closed-lane
     finding), so it is asserted EQUAL between the lanes, not zero."""
-    col = _run_driver(tmp_path / "col", microphysics="kessler")
+    col = _run_driver(tmp_path / "col", microphysics="kessler",
+                      surface_bulk_scheme="none")
     closed = _run_driver(tmp_path / "closed", column=False,
                          microphysics="kessler")
     _assert_bundle_equal(col.state.native, closed.state, rel=1e-12)
@@ -595,7 +600,7 @@ def _walk_bundle(b):
 
 
 @pytest.mark.parametrize("phys", [
-    dict(),
+    dict(surface_bulk_scheme="none"),
     dict(microphysics="kessler"),
     dict(microphysics="kessler", turbulence="mynn25"),
 ])
@@ -634,7 +639,8 @@ def test_driver_column_lane_restart_is_bitwise(tmp_path, phys):
         for k in ("u", "T", "p_s", "phis", "state_delp", "state_u",
                   "press_ps", "q_0", "q_2", "omga", "fv3duo_hs6",
                   "fv3duo_tracer_names") + (
-                      ("physstate_prng_key",) if phys else ()):
+                      ("physstate_prng_key",)
+                      if phys != dict(surface_bulk_scheme="none") else ()):
             assert k in d.files, k
         assert [str(n) for n in d["fv3duo_tracer_names"]] == \
             list(drv_a.model.tracer_names)
@@ -661,7 +667,7 @@ def test_driver_column_lane_restart_is_bitwise(tmp_path, phys):
     # the physics carry: bitwise A == B on every persisted field (the
     # carry exists only when a physics package runs) ...
     ps_a, ps_b = drv_a._mpas_phys_state, drv_b._mpas_phys_state
-    if not phys:
+    if phys == dict(surface_bulk_scheme="none"):
         assert ps_a is None and ps_b is None and not ps_mid
     else:
         assert ps_a is not None and ps_b is not None and ps_mid
@@ -1072,7 +1078,7 @@ def test_m6_multilayer_land_and_rrtmgp_run_on_the_duo_columns(tmp_path, monkeypa
         land_surface_scheme="simple_seb",
         # main b602fc9d9: the per-step two-leaf parameter refresh is on by
         # default and refuses simple_seb (it has no rebuild for it)
-        mpas_land_params_refresh=False)
+        land_params_refresh=False)
     drv = ModelDriver(cfg, output_dir=tmp_path)
     drv.setup()
     mesh = drv.model.mesh
@@ -1117,8 +1123,8 @@ def _land_stress_cfg(tmp_path, monkeypatch, *, stress, days, **over):
         tmp_path, days=days, radiation="rrtmgp", turbulence="louis",
         land_mask_path="synthetic.nc", use_multilayer_land=True,
         multilayer_n_layers=6, multilayer_soil_depth=2.5,
-        land_surface_scheme="simple_seb", mpas_land_params_refresh=False,
-        mpas_land_beta_soil=True, mpas_land_stress_from_land=stress, **over)
+        land_surface_scheme="simple_seb", land_params_refresh=False,
+        land_beta_soil=True, land_stress_from_land=stress, **over)
 
 
 def test_land_stress_from_land_reaches_the_boundary_layer_on_the_duo_columns(
@@ -1128,7 +1134,7 @@ def test_land_stress_from_land_reaches_the_boundary_layer_on_the_duo_columns(
     the land stress reaches the boundary layer (the winds differ from the
     bulk-stress run of the same deck, finite), and the driver publishes the
     land's own |stress| on land columns and nothing on pure-ocean ones."""
-    from legoesm.driver.config import resolve_mpas_land_stress_from_land
+    from legoesm.driver.config import resolve_land_stress_from_land
     from legoesm.driver.model_driver import ModelDriver
     days = 3 * 600.0 / 86400.0
     runs = {}
@@ -1137,7 +1143,7 @@ def test_land_stress_from_land_reaches_the_boundary_layer_on_the_duo_columns(
         d.mkdir()
         cfg = _land_stress_cfg(d, monkeypatch, stress=stress, days=days,
                                dt=600.0, rad_update_steps=1)
-        assert resolve_mpas_land_stress_from_land(cfg) is (tag == "on")
+        assert resolve_land_stress_from_land(cfg) is (tag == "on")
         drv = ModelDriver(cfg, output_dir=d)
         drv.setup()
         assert drv.run() == "COMPLETED"
@@ -1156,6 +1162,31 @@ def test_land_stress_from_land_reaches_the_boundary_layer_on_the_duo_columns(
     assert np.isfinite(tau).all()
     assert tau[land].max() > 0.0 and np.all(tau[~land] == 0.0)
     assert getattr(off, "_land_stress_last", None) is None
+
+
+def test_checkpoint_radiation_cadence_is_judged_on_the_clamped_dt(
+        tmp_path, monkeypatch):
+    """D-REX-1 alignment is a property of the steps the run TAKES: the
+    requested 1920 s clamps (CFL) to 600 s on C12, so one-day checkpoints
+    are 144 steps.  Radiation every 4 steps aligns (setup passes, though 45
+    requested-dt steps would not); every 5 does not (setup refuses, naming
+    the effective dt, though 45 requested-dt steps would align)."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    def drv(name, rus):
+        d = tmp_path / name
+        d.mkdir()
+        c = _land_stress_cfg(d, monkeypatch, stress=None, days=1,
+                             dt=1920.0, rad_update_steps=rus)
+        return ModelDriver(
+            c._replace(output=c.output._replace(checkpoint_days=1)),
+            output_dir=d)
+    ok = drv("ok", 4)
+    ok.setup()
+    assert ok.config.dycore.dt == 600.0
+    with pytest.raises(ValueError,
+                       match=r"144 steps at dt=600 s.*rad_update_steps=5"):
+        drv("bad", 5).setup()
 
 
 def test_land_stress_rides_the_duo_column_checkpoint(tmp_path, monkeypatch):

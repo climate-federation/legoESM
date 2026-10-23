@@ -72,14 +72,15 @@ def _run(config, col, dt=300.0, pass_qc=True, *, on=None):
     return clubb_turbulence_prognostic(
         col["u"], col["v"], col["T"], col["q_v"], moments,
         col["p_full"], col["p_half"], col["z_full"], col["z_half"],
-        col["T_sfc"], col["q_sfc"], col["rho"], dt, config, **kw)
+        col["T_sfc"], col["q_sfc"], col["rho"], dt, config, **kw,
+        lat=jnp.zeros((_NCOL,)))                  # equator [rad]
 
 
-_OFF = CLUBBConfig(prognostic=True)
+_OFF = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True)
 # The kernel config no longer carries the selector (it is a dispatch flag on
 # TurbulenceConfig; the kernel keys on q_c being supplied), so the two arms are
 # the same tunables and differ only in whether _run hands over q_c.
-_ON = CLUBBConfig(prognostic=True)
+_ON = CLUBBConfig(trop_cloud_top_press=0.0, prognostic=True)
 _ON_IDS = {id(_ON)}
 
 
@@ -92,13 +93,19 @@ def test_default_is_off_and_emits_no_liquid():
     assert out.dq_c_dt is None
 
 
-def test_off_path_is_bit_identical_to_the_historical_bridge():
+def test_off_path_is_bit_identical_to_the_historical_bridge(monkeypatch):
     """Nothing about an existing run changes: the off path is the old formula.
 
     The historical bridge is ``q_v_new = rtm``, ``T_new = thlm*exner``.  Recompute
     it here from the advanced moments and demand bitwise equality, so a future
     edit to the partition branch cannot leak into runs that never asked for it.
+    The wrapper's column energy fixer (CAM clubb_do_energyfix, pinned in
+    test_clubb_column_budget.py) is not part of the bridge and is zeroed.
     """
+    from legoesm.atmosphere.physics.turbulence import clubb as clubb_mod
+    monkeypatch.setattr(clubb_mod, "column_energy_fixer_heating",
+                        lambda r, m, w: jnp.zeros_like(w * r[..., None]))
+    jax.clear_caches()
     col = _column()
     out, packed = _run(_OFF, col)
     from legoesm.atmosphere.physics.turbulence.clubb import (
@@ -165,7 +172,7 @@ def test_liquid_is_replaced_not_accumulated():
         wet["u"], wet["v"], wet["T"], wet["q_v"], moments,
         wet["p_full"], wet["p_half"], wet["z_full"], wet["z_half"],
         wet["T_sfc"], wet["q_sfc"], wet["rho"], dt, _ON, q_c=wet["q_c"])
-    rcm = np.asarray(flip_vertical(diags["rcm_grid"]))
+    rcm = np.asarray(flip_vertical(diags["rcm"]))
     # 1 ULP, not exact: the host applies a TENDENCY, so the value round-trips
     # through q_c + dt*(rcm - q_c)/dt rather than being assigned.
     np.testing.assert_allclose(q_c_final, rcm, rtol=1e-15, atol=1e-20)
@@ -184,7 +191,8 @@ def test_liquid_is_replaced_not_accumulated():
 
 
 def test_vapour_stays_non_negative():
-    """``q_v = rt - rcm`` is safe because the closure clips rcm against rt."""
+    """``q_v = rt - rcm`` on this column stays non-negative.  Not guaranteed in
+    general: the in-layer rcm CAM hands over is not clipped against rt."""
     col = _column(q_c_amp=3.0e-4)
     dt = 300.0
     out, _ = _run(_ON, col, dt=dt)
@@ -215,18 +223,23 @@ def test_moist_static_energy_round_trip_is_exact_without_cloud():
 
 
 def test_latent_heat_accompanies_the_condensate():
-    """Condensing liquid must warm the column by ``L_v/c_pd`` times its mass.
+    """Condensing liquid warms the column by ``L_v/c_pd`` times its mass.
 
     The temperature and water halves of the partition are a single
-    transformation; this pins the coefficient, so a sign flip or a stray
-    ``exner`` on the latent term fails here rather than as a slow climate drift.
+    transformation.  CAM's host map (clubb_intr.F90:2048-2051) puts the
+    latent heat through the Exner function, ``T = exner*(thlm + L_v/c_pd
+    rcm)``, so locally the warming is ``exner*L_v/c_pd*rcm``; the column
+    energy fixer returns the ``(1 - exner)`` share uniformly per unit mass
+    (CAM 2138-2150), so the column total is exactly ``L_v*rcm``.  This pins
+    both, so a sign flip, a missing or doubled ``exner`` fails here rather than
+    as a slow climate drift.
     """
     col = _column(q_c_amp=0.0)
     dt = 300.0
     out_off, packed_off = _run(_OFF, col, dt=dt)
     out_on, packed_on = _run(_ON, col, dt=dt)
     from legoesm.atmosphere.physics.turbulence.clubb import (
-        flip_vertical, unpack_clubb_moments,
+        exner_function, flip_vertical, unpack_clubb_moments,
     )
     # Same seeding (q_c == 0), so the advanced moments are identical and the ONLY
     # difference between the two outputs is the outbound split.
@@ -239,8 +252,15 @@ def test_latent_heat_accompanies_the_condensate():
     dT = np.asarray(out_on.dT_dt - out_off.dT_dt) * dt
     dq = np.asarray(out_on.dq_v_dt - out_off.dq_v_dt) * dt
     np.testing.assert_allclose(dq, -rcm, rtol=1e-12, atol=1e-18)
-    np.testing.assert_allclose(
-        dT, (constants.L_v / constants.c_pd) * rcm, rtol=1e-12, atol=1e-12)
+    exner = np.asarray(exner_function(col["p_full"]))
+    # Fixer share: the same heating at every level (equal-dp column here).
+    fix = dT - exner * (constants.L_v / constants.c_pd) * rcm
+    np.testing.assert_allclose(fix, fix[:, :1] * np.ones_like(fix),
+                               rtol=1e-12, atol=1e-12)
+    dp = np.diff(np.asarray(col["p_half"]), axis=1)
+    np.testing.assert_allclose(np.sum(dp * constants.c_pd * dT, axis=1),
+                               np.sum(dp * constants.L_v * rcm, axis=1),
+                               rtol=1e-12)
 
 
 def test_sub_cycle_carries_the_liquid_between_steps():
@@ -252,7 +272,7 @@ def test_sub_cycle_carries_the_liquid_between_steps():
     difference must live where the cloud is.
     """
     from legoesm.atmosphere.physics.turbulence.clubb import (
-        clubb_step, flip_vertical, virtual_temperature,
+        clubb_step, flip_vertical,
     )
     col = _column(q_c_amp=2.0e-4)
     dt = 1200.0
@@ -275,12 +295,11 @@ def test_sub_cycle_carries_the_liquid_between_steps():
     from legoesm.atmosphere.physics.turbulence.clubb import unpack_clubb_moments
     m = unpack_clubb_moments(m)
     for _ in range(n_sub):
-        tv = jnp.maximum(virtual_temperature(T_c, q_c_col), cfg_n.T0 * 0.5)
-        rho_c = col["p_full"] / (constants.R_d * tv)
+        # Host density held through the sub-cycle (CAM rho_ds once, before nadv).
         du, dv, dT, dq, m, dg = clubb_step(
             u_c, v_c, T_c, q_c_col, m, col["p_full"], col["p_half"],
             col["z_full"], col["z_half"], col["T_sfc"], col["q_sfc"],
-            rho_c, dts, cfg_n, q_c=ql)
+            col["rho"], dts, cfg_n, q_c=ql)
         u_c = u_c + dts * du
         v_c = v_c + dts * dv
         T_c = T_c + dts * dT
@@ -330,11 +349,14 @@ def test_non_mpas_lanes_refuse_the_lever():
     )
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
     tc = TurbulenceConfig(scheme="clubb", clubb=_ON, liquid_partition=True)
-    for lane in ("hydrostatic", "nonhydrostatic", "spectral_pe"):
+    for lane in ("hydrostatic", "nonhydrostatic"):
         with pytest.raises(NotImplementedError, match="liquid_partition"):
             make_turbulence_physics(tc, model_type=lane)
-    # The wired lane builds.
+    # The wired lanes build (spectral_pe routes dq_c_dt too; its
+    # prognostic-closure and tracer requirements are pinned in
+    # test_spectral_macmic_subcycle.py).
     make_turbulence_physics(tc, model_type="mpas")
+    make_turbulence_physics(tc, model_type="spectral_pe")
 
 
 def test_a_non_clubb_scheme_refuses_the_lever():
@@ -363,16 +385,14 @@ def test_a_non_clubb_scheme_refuses_the_lever():
             model_type="mpas", cld_macmic_num_steps=3)
 
 
-def test_partition_uses_the_grid_mean_liquid_not_the_in_cloud_one():
-    """The tracer written back must be GRID-MEAN water, not in-cloud water.
+def test_partition_hands_the_host_the_in_layer_liquid_as_cam_does():
+    """The tracer written back is CLUBB's rcm AFTER the cloud-cover overwrite.
 
-    ``compute_cloud_cover`` converts the closure's grid-mean ``rcm`` into the
-    IN-LAYER value by dividing by a vertical cloud fraction <= 1 (the reference
-    keeps the two as separate outputs; this port overwrites one with the other).
-    The in-cloud value is therefore the LARGER number and is no longer bounded
-    by total water the way ``clip_rcm`` bounded the grid mean, so writing it into
-    a grid-mean host tracer would both overstate the liquid and let ``q_v = rt -
-    rcm`` go negative.  This pins the right key.
+    With ``l_use_cloud_cover = .true.`` the reference overwrites rcm with
+    ``rcm_in_layer`` (pdf_closure_module.F90:4340-4348) and CAM writes that rcm
+    into the host liquid (clubb_intr.F90 cesm2_1_rel 1991, 2159-2160; user
+    decision 2026-10-19).  The in-layer value is the grid mean divided by a
+    vertical cloud fraction <= 1 at cloud edges, so the two keys differ there.
     """
     from legoesm.atmosphere.physics.turbulence.clubb import (
         clubb_step, flip_vertical,
@@ -389,7 +409,7 @@ def test_partition_uses_the_grid_mean_liquid_not_the_in_cloud_one():
     in_cloud = np.asarray(flip_vertical(diags["rcm"]))
     applied = np.asarray(col["q_c"] + dt * out.dq_c_dt)
     # 1 ULP for the same reason as above: this is a tendency round trip.
-    np.testing.assert_allclose(applied, grid, rtol=1e-15, atol=1e-20)
+    np.testing.assert_allclose(applied, in_cloud, rtol=1e-15, atol=1e-20)
     # And the two really are different, or this test proves nothing.  They agree
     # in the cloud INTERIOR by construction -- compute_cloud_cover rewrites only
     # the levels at a cloud top, a cloud base or an isolated cloudy layer -- so
@@ -789,19 +809,17 @@ def test_helper_sets_AND_clears_the_flag():
         ).liquid_from_closure is True
 
 
-def test_mixed_phase_liquid_sink_survives_the_gate():
-    """The WBF sink is the NEGATIVE branch, and it must not be switched off.
+def test_closure_gate_removes_the_evaporation_branch_too():
+    """Under the closure the saturation adjustment is off for BOTH signs.
 
-    ``wbf_scheme="emergent"`` (the default) has no explicit Bergeron rate: the
-    mixed-phase cloud-water sink IS the evaporative branch of the saturation
-    adjustment, firing as ice deposition draws vapour below liquid saturation.
-    CAM's residual block is guarded by ``qtmp > qvn``
-    (micro_mg2_0.F90:2700), i.e. positive supersaturation only, so it has no
-    evaporation branch to switch off either.  An earlier version of the gate
-    zeroed the signed rate and deleted this sink outright.
+    MG2 under CLUBB has no cloud-water condensation or evaporation term
+    (every qctend write in micro_mg2_0.F90 is a process sink, droplet
+    sedimentation, melt, homogeneous freezing or the CLUBB-disabled residual;
+    measured: MG2 qctend = -prc - pra + qcsedten to 1e-22 on the oracle-audit
+    columns).  User decision 2026-10-19 (oracle audit): the negative branch,
+    previously kept as the ``wbf_scheme="emergent"`` mixed-phase sink, goes.
 
-    NON-VACUITY: the sink must be LARGE here, so a gate that removed it would
-    change the number rather than leave it near zero.
+    NON-VACUITY: the branch is LARGE in the control here.
     """
     import jax.numpy as jnp
     from legoesm import constants
@@ -831,18 +849,15 @@ def test_mixed_phase_liquid_sink_survives_the_gate():
     def _run(cfg):
         return morrison_microphysics(
             one(T), one(q_v), hm, one(p), jnp.full((1, 2), p), one(rho),
-            one(260.0), dt, cfg)
+            one(260.0), dt, cfg._replace(publish_qc_budget=True))
 
     off = _run(MorrisonConfig())
     on = _run(MorrisonConfig(liquid_from_closure=True))
-
-    # The sink is large on the unmodified scheme...
-    assert float(off.dq_c_dt[0, 0]) < -1.0e-8, (
-        "no mixed-phase liquid sink in the control, so this test could not "
-        "detect one being deleted")
-    # ...and the gate must not have touched it: no positive supersaturation
-    # here, so there is nothing for the gate to remove.
-    assert float(on.dq_c_dt[0, 0]) == float(off.dq_c_dt[0, 0])
+    assert float(off.qc_budget["condensation"][0, 0]) < -1.0e-8, (
+        "no evaporation branch in the control, so this test could not detect "
+        "it being removed")
+    assert float(on.qc_budget["condensation"][0, 0]) == 0.0
+    assert float(on.dq_c_dt[0, 0]) > float(off.dq_c_dt[0, 0])
 
 
 def test_gate_removes_the_latent_heating_with_the_water():
@@ -973,9 +988,8 @@ def test_host_liquid_above_the_cloud_top_cutoff_is_left_alone():
 
 
 def test_retained_liquid_above_the_cutoff_never_drives_vapour_negative():
-    """The moment mixing is not tapered above the cutoff, so it can take a
-    liquid-laden top layer's total water below the liquid kept there; the
-    retained liquid must then shrink, not leave q_v negative."""
+    """A liquid-laden top layer above the cutoff: the host state there is
+    kept (CAM top_lev), and neither q_v nor q_c may go negative."""
     col = _column()
     q_c = np.zeros((_NCOL, _NLEV))
     q_c[:, 0] = 1.0e-4                       # rt(top) >> rt(below): mixing dries it

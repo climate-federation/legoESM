@@ -92,6 +92,9 @@ class NEMOModelRecipeConfig:
     barotropic_solver: str = "explicit_substep"
     n_barotropic_substeps: int = 30
     barotropic_time_filter: str = "cosine"
+    # NEMO namdyn_spg rn_bt_alpha.  None is an unset sentinel; a NEMO card
+    # selecting a NEMO time filter must state the value read from its deck.
+    nemo_barotropic_filter_alpha: float | None = None
     # "rk3" = Shu-Osher SSP; "rk3_ws" = NEMO stprk3 Wicker-Skamarock (stage
     # dt/3, dt/2, dt from u0; LDF stages 1&3 only) — the GYRE card selects ws.
     momentum_time_integrator: str = "rk3"
@@ -411,6 +414,10 @@ def nemo_lat_lon_model_config(
             "slope_metric_evaluation": "nemo_reciprocal",
             "slope_face_thickness_evaluation": "nemo_qco_live",
             "slope_depth_evaluation": "nemo_qco_live_literal",
+            # GYRE did not select round 237's live tra_ldf divisor. State the
+            # reference/Jacobian arm explicitly so its certified path never
+            # depends on the library default.
+            "redi_divisor_thickness_evaluation": "reference_jacobian",
             "redi_a33_evaluation": "nemo_literal",
         } if _gyre_ldfslp else {})
         gm_redi_cfg = GMRediConfig(
@@ -475,6 +482,7 @@ def nemo_lat_lon_model_config(
         barotropic_slow_forcing_depth_evaluation="nemo_literal",
         n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_time_filter=cfg.barotropic_time_filter,
+        nemo_barotropic_filter_alpha=cfg.nemo_barotropic_filter_alpha,
         momentum_time_integrator=cfg.momentum_time_integrator,
         adaptive_implicit_vertadv=cfg.adaptive_implicit_vertadv,
         implicit_vertical_mixing=cfg.implicit_vertical_mixing,
@@ -755,9 +763,12 @@ def nemo_gyre_initial_T_S(depth_pos_m):
 def nemo_gyre_seasonal_cosines(t_seconds: float = 0.0):
     """NEMO GYRE seasonal phase factors ``(zcos_sais1, zcos_sais2)``.
 
-    Reproduces ``usrdef_sbc`` (nn_leapy=30, 360-day year).  ``t_seconds`` is model
-    time since start; the solar (qsr) uses ``zcos_sais1`` and the restoring
-    target (T*) uses ``zcos_sais2``.
+    Reproduces ``usrdef_sbc`` (nn_leapy=30, 360-day year).  NEMO subtracts
+    completed calendar years before evaluating the seasonal phase
+    (compiled ``usrdef_sbc.f90:92,105-106``); the first/last step of a year
+    therefore uses hours 1/8640.  ``t_seconds`` is model time since start; the
+    solar (qsr) uses ``zcos_sais1`` and the restoring target (T*) uses
+    ``zcos_sais2``.
     """
     import jax.numpy as jnp
     from legoesm.core.source_rounding import nemo_source_round as sr
@@ -765,6 +776,15 @@ def nemo_gyre_seasonal_cosines(t_seconds: float = 0.0):
     value = jnp.asarray(t_seconds, dtype=jnp.float64)
     rpi = jnp.asarray(np.pi, dtype=value.dtype)
     ztime = sr(value / sr(jnp.asarray(60.0, value.dtype) * 60.0))
+    year_hours = sr(
+        jnp.asarray(24.0, value.dtype)
+        * jnp.asarray(_NEMO_GYRE_YEAR_DAYS, value.dtype)
+    )
+    completed_years = jnp.maximum(
+        jnp.ceil(sr(ztime / year_hours)) - jnp.asarray(1.0, value.dtype),
+        jnp.asarray(0.0, value.dtype),
+    )
+    ztime = sr(ztime - sr(completed_years * year_hours))
     ztimemax1 = sr(sr(sr(5.0 * 30.0) + 21.0) * 24.0)
     ztimemin1 = sr(
         ztimemax1 + sr(sr(24.0 * _NEMO_GYRE_YEAR_DAYS) / 2.0)
@@ -966,6 +986,7 @@ _NEMO_GYRE_CARD_CONFIG = NEMOModelRecipeConfig(
     # WINDOW (NEMO carries them across windows in SAVE arrays) — 2/120 substeps
     # lower-order each step, slightly more dissipative.
     barotropic_time_filter="nemo_ab3am4",
+    nemo_barotropic_filter_alpha=0.07,
     # NEMO dynhpg hpg_zco e3w-weighted trapezoid (t_depth_ref = exact gdept is
     # carried by the GYRE coordinate). Closes part of the hpg amplitude gap
     # (single-step ratio vs utrd_hpg: 0.9656 -> 0.9702); the remaining ~3%

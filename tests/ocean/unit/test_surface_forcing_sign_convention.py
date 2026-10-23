@@ -177,3 +177,42 @@ def test_native_ocean_stress_applies_nemo_coastal_unmasking_literally():
     np.testing.assert_array_equal(np.asarray(tau_v), expected_v)
     assert np.any(expected_u == 2.0), "control has no doubled coastal U face"
     assert np.any(expected_v == 2.0), "control has no doubled coastal V face"
+
+
+def _fold_case(seed=3):
+    """A T-pivot fold on a small grid, every cell and face wet."""
+    z, _, _, _, _, jac = _fields()
+    rng = np.random.default_rng(seed)
+    tau_i = jnp.asarray(rng.normal(size=(N_LAT, N_LON)))
+    tau_j = jnp.asarray(rng.normal(size=(N_LAT, N_LON)))
+    perm = (N_LON - np.arange(N_LON)) % N_LON
+    fold = SimpleNamespace(is_active=True, fold_j=N_LAT - 1, pivot_row_stored=True,
+                           perm_T=perm, perm_v=perm, perm_u=None, perm_f=None)
+    grid = SimpleNamespace(fold=fold)
+    masks = dict(cell_mask=jnp.ones((N_LAT, N_LON)), u_mask=jnp.ones((N_LAT, N_LON + 1)),
+                 v_mask=jnp.ones((N_LAT + 1, N_LON)))
+    return z, jac, OceanSurfaceForcing(tau_i_native=tau_i, tau_j_native=tau_j), grid, masks, perm
+
+
+def test_pivot_row_v_stress_reads_nemos_vector_halo():
+    """sbcmod.F90:548-551 folds vtau with sign -1, so :559 averages the
+    pivot row with -vtau(pivot-1) mirrored; the scalar rule mirrors the
+    face below.  Only the pivot-row V faces move."""
+    z, jac, forcing, grid, masks, perm = _fold_case()
+    off = surface_stress_faces(forcing, jnp.float64, z, jac, grid, **masks)
+    on = surface_stress_faces(forcing, jnp.float64, z, jac, grid,
+                              nemo_fold_vector_sign=True, **masks)
+    tj = np.asarray(forcing.tau_j_native)
+    np.testing.assert_array_equal(np.asarray(on[1])[-1], 0.5 * (tj[-1] - tj[-2][perm]))
+    assert np.all(np.asarray(on[1])[-1] != np.asarray(off[1])[-1])
+    np.testing.assert_array_equal(np.asarray(on[1])[:-1], np.asarray(off[1])[:-1])
+    np.testing.assert_array_equal(np.asarray(on[0]), np.asarray(off[0]))
+
+
+def test_pivot_row_v_stress_refuses_without_a_fold_or_masks():
+    z, jac, forcing, grid, masks, _ = _fold_case()
+    with np.testing.assert_raises_regex(ValueError, "T-pivot north fold"):
+        surface_stress_faces(forcing, jnp.float64, z, jac, SimpleNamespace(fold=None),
+                             nemo_fold_vector_sign=True, **masks)
+    with np.testing.assert_raises_regex(ValueError, "needs the NEMO masks"):
+        surface_stress_faces(forcing, jnp.float64, z, jac, grid, nemo_fold_vector_sign=True)

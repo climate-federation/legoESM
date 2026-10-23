@@ -365,3 +365,8 @@ def test_dynamic_ocean_config_wires_smag_cap_and_implicit_barotropic(tmp_path):
     assert ocfg.lateral_viscosity.smag_cfl_safety == 0.125
     # Implicit Crank-Nicolson barotropic solver (BarotropicConfig).
     assert ocfg.barotropic.barotropic_solver == "implicit_cn"
+    # Decision 90: the RK3 card states its slow-forcing depth average (the
+    # step raises when unset), and the model runs the driver's own card.
+    assert (ocfg.barotropic.barotropic_slow_forcing_depth_evaluation
+            == "min_rule_live")
+    assert ocfg == drv._build_latlon_ocean_config()

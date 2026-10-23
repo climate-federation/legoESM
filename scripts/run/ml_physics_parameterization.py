@@ -147,7 +147,7 @@ def _make_base_config(args: argparse.Namespace, output_dir: Path) -> ExperimentC
             p_top_Pa=200.0,
             stretching=2.0,
         ),
-        dycore=DycoreConfig(dt=args.dt, energy_fixer=False),  # not wired here (F15, vote V11-C)
+        dycore=DycoreConfig(dt=args.dt),
         output=OutputConfig(
             output_dir=str(output_dir),
             diag_days=args.diag_days,

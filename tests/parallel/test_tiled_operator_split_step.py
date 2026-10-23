@@ -112,6 +112,9 @@ def _mock_step_unified(need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
         w_land=None, snow=None,
         tke=None, qke=None, gwd_spectrum=None,
         cloud_fraction=None, budget_ledger=None,
+        # Column-local momentum tendency: the shared tail adds dt*du/dt*dv to
+        # the winds, so the tiled-vs-serial parity covers them too.
+        du_dt=-1e-5 * u + 1e-6 * jnp.cos(lat_b), dv_dt=-1e-5 * v,
     )
     # Held refresh only when need_rad fires (mirrors step_unified's cond).
     held_new = tuple(

@@ -51,7 +51,7 @@ def _make_config(
             stretching=2.0,
         ),
         dycore=DycoreConfig(
-            energy_fixer=False,  # unwired lane opts out (F15)
+            energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
             model_type="hydrostatic",
             discretization="cdgrid",
             dt=600.0,

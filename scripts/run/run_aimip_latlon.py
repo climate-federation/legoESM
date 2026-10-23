@@ -170,8 +170,6 @@ def build_latlon_config(args):
         "--days", "1",
         "--dataset", "analytical",   # IC/forcing replaced by ERA5 below
         "--ic", "standard",
-        # the dycore energy fixer is not wired on lat-lon (F15, vote V11-C)
-        "--no-energy-fixer",
     ]
     parsed = ra.build_arg_parser().parse_args(argv)
     # Land surface model.  This lane builds its ExperimentConfig from a FIXED

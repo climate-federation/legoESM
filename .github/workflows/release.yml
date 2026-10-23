@@ -1,0 +1,87 @@
+name: release
+
+# Publishes all nine workspace distributions (legoesm + the eight legoesm-*
+# members) to PyPI when a version tag is pushed. Uses PyPI trusted publishing:
+# each project lists this repository, this workflow file and its own
+# environment as a trusted publisher: `pypi` for legoesm, `pypi-legoesm-<member>`
+# for each member (PyPI refuses one pending publisher config for two projects).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tag must equal the package version
+        run: |
+          python - <<'EOF'
+          import os, sys, tomllib, pathlib
+          tag = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          paths = [pathlib.Path("pyproject.toml"), *sorted(pathlib.Path("packages").glob("*/pyproject.toml"))]
+          bad = {str(p): v for p in paths if (v := tomllib.loads(p.read_text())["project"]["version"]) != tag}
+          if bad:
+              sys.exit(f"tag {tag} != version in {bad}")
+          EOF
+      - run: python -m pip install uv
+      - run: uv build --all-packages -o dist
+      - name: Expect 9 wheels and 9 sdists
+        run: test "$(ls dist/*.whl | wc -l)" = 9 && test "$(ls dist/*.tar.gz | wc -l)" = 9
+      - name: Install the wheels in a clean venv and import them
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install dist/*.whl
+          cd /tmp && /tmp/smoke/bin/python -c "import legoesm.atmosphere, legoesm.ocean, legoesm.land, legoesm.ice, legoesm.coupler"
+          /tmp/smoke/bin/legoesm --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # Members first, root meta-package last, so `pip install legoesm` never sees
+  # the root before the members it depends on. One upload per job: the publish
+  # action does not support running twice in one job. skip-existing lets a
+  # re-run finish a release that failed part-way.
+  publish-members:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        member: [core, atmosphere, ocean, land, ice, coupler, ml, tools]
+    environment: pypi-legoesm-${{ matrix.member }}
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - run: find dist -type f ! -name 'legoesm[-_]${{ matrix.member }}-[0-9]*' -delete && ls dist && test "$(ls dist | wc -l)" = 2
+      # Pinned by commit (v1.14.2): this step holds the publishing token.
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        with:
+          skip-existing: true
+
+  publish-root:
+    needs: publish-members
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - run: find dist -type f ! -name 'legoesm-[0-9]*' -delete && ls dist && test "$(ls dist | wc -l)" = 2
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        with:
+          skip-existing: true

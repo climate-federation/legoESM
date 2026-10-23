@@ -52,7 +52,7 @@ def require_surface_radiation_aux(aux, *, radiation_active: bool,
 
     Gated on the atmosphere CONFIG, not on bare key presence: zero IS the
     physically correct forcing for a dry run or ``radiation="none"``, and
-    ``_run_mpas`` stashes each key only when its source produced one
+    ``_run_column`` stashes each key only when its source produced one
     (model_driver.py:5795-5802).  An unconditional "require all three keys"
     check would raise on those legitimate coupled runs.
 
@@ -68,8 +68,11 @@ def require_surface_radiation_aux(aux, *, radiation_active: bool,
     if radiation_active:
         missing += [k for k in ("held_sw_net_sfc", "held_lw_net_sfc")
                     if aux.get(k) is None]
-    if precip_active and aux.get("seg_precip") is None:
-        missing.append("seg_precip")
+    if precip_active:
+        # the segment-mean FROZEN part too (F29): the surface snowfall is the
+        # atmosphere's own phase partition, never a temperature re-split
+        missing += [k for k in ("seg_precip", "seg_precip_frozen")
+                    if aux.get(k) is None]
     if not missing:
         return
     raise RuntimeError(
@@ -80,6 +83,23 @@ def require_surface_radiation_aux(aux, *, radiation_active: bool,
         "the reconstructed lw_down is a plausible sigma*T_sfc**4). Populate "
         "the held fields in that lane, or run a lane that does (the compiled "
         "single-device lane).")
+
+
+def require_precip_frozen(precip_frozen, consumer: str):
+    """``precip_frozen`` (the atmosphere's frozen surface precipitation,
+    review 2026-10-10 F29) or a ``ValueError`` naming ``consumer`` when the
+    physics did not publish it -- the land/snow consumers take their
+    snowfall from the atmosphere's own phase partition, never from a
+    temperature re-split of the total."""
+    if precip_frozen is None:
+        raise ValueError(
+            f"{consumer}: the physics publishes surface precipitation but "
+            "not its frozen part (precip_frozen), so the snowfall cannot "
+            "take the atmosphere's own rain/snow partition (F29). Use a "
+            "microphysics/convection scheme that publishes it (every "
+            "physical scheme does; the ML microphysics emulators and neural "
+            "physics do not).")
+    return precip_frozen
 
 
 class AtmToSurface(NamedTuple):

@@ -27,15 +27,21 @@ Departures from the oracle (all documented, measured where numeric):
   ``legoesm.thermo.saturation_specific_humidity`` (same expression over the
   shared Tetens curve, smooth cap) per CLAUDE.md.  The curve difference is
   measured in ``tests/atmosphere/hydrostatic/unit/test_zm_cam6_oracle.py``.
+  ``zm_conv_evap`` uses CAM's own ``qsat``
+  (``legoesm.thermo.saturation_specific_humidity_cam_table``): the 1-K table
+  of the Goff-Gratch ``svp_trans`` water->ice blend (0 to -20 degC), linearly
+  interpolated, with CAM's e->q conversion (its clamp and q = 1 cap smooth
+  by default, RULE 5).
 * Constants come from ``legoesm.constants`` (CAM's liquid/vapour heat
   capacities, dry gas constant, epsilon and vapour gas constant differ in
   the third or fourth significant figure).
 * Divisions the Fortran performs only on gathered deep columns are guarded
   (``_safe_div``) so non-deep columns stay finite under reverse-mode AD;
   the guarded branch is never selected on a deep column.
-* The Fortran ``pblt`` needs ``pblh``; when the host cannot supply it the
-  launch-level search is bounded by ``pbl_top_pa`` instead (see
-  ``zm_convr``).
+* The Fortran ``pblt`` needs ``pblh``; the hydrostatic/MPAS bridge passes
+  the turbulence scheme's lagged ``PhysicsState.pblh`` as CAM does.  A caller
+  without that carry (``pblh=None``) gets the launch-level search bounded by
+  ``pbl_top_pa`` instead (see ``zm_convr``).
 * ``limcnv``: CAM fixes the 40 hPa cap from the REFERENCE interface
   pressures once at init; hosts without a reference vertical coordinate
   (``pref_edge=None``) get it from each column's own interfaces instead.
@@ -58,7 +64,11 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_specific_humidity, saturation_vapor_pressure
+from legoesm.thermo import (
+    saturation_specific_humidity,
+    saturation_specific_humidity_cam_table,
+    saturation_vapor_pressure,
+)
 from legoesm.atmosphere.physics.convection._zm_dilute import (
     invert_entropy,
     moist_entropy,
@@ -903,7 +913,8 @@ def zm_convr(t, qh, p_full, p_half, z, zf, landfrac, dt, *, pblh, tpert,
 
     ``pblh`` is the PBL height [m] (``None`` -> the launch-level search is
     bounded by ``pbl_top_pa`` [Pa] instead of the Fortran ``pblt``, a
-    documented departure because the host does not carry ``pblh``).
+    documented departure for callers without the ``PhysicsState.pblh``
+    carry).
 
     ``pref_edge`` are the REFERENCE interface pressures [Pa] (``nlev+1``, top
     first): CAM caps deep convection at the interface where they cross
@@ -1046,7 +1057,10 @@ def zm_conv_evap(t, pmid, pdel, q, prdprec, cldfrc, deltat, prec, *, ke):
     ncol, nlev = t.shape
     dtype = t.dtype
     g, latvap, latice, tmelt = constants.g, constants.L_v, constants.L_f, constants.T_freeze
-    qs = saturation_specific_humidity(t, pmid)
+    # CAM ``call qsat(t, pmid, es, qs)`` (zm_conv.F90:1484): the svp_trans
+    # liquid->ice blended Goff-Gratch table, not the water-only qsat_water of
+    # the plume.
+    qs = saturation_specific_humidity_cam_table(t, pmid)
     _, fsnow_conv = cldfrc_fice(t)
 
     def body(carry, xk):

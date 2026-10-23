@@ -154,6 +154,11 @@ class TestConvectionADSafety:
     ], ids=["sbm", "dca", "kuo"])
     def test_grad_finite_in_non_convecting_column(self, scheme_fn, config):
         T, q_v, p_full, p_half = _stable_dry_column()
+        if scheme_fn is sbm_convection:
+            # Isca qe_moist_convection stops (FATAL "get_lcl_temp: value to
+            # low") on a q = 1e-12 parcel at 250 K -- the port returns NaN
+            # there; its dry, non-convecting column is q = 0.
+            q_v = jnp.zeros_like(q_v)
 
         def loss(qv):
             return self._scheme_loss(scheme_fn, config, T, qv, p_full, p_half)

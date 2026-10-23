@@ -1,0 +1,47 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -88,8 +88,14 @@
+       !
+       INTEGER  ::   ji, jj, jk, jn, jtile    ! dummy loop indices
+       INTEGER  ::   l1_unit, l1_ios, l2_tracer_unit, l2_tracer_ios
++      INTEGER  ::   r17_unit, r17_ios
++      INTEGER  ::   r17_env_status
++      LOGICAL  ::   r17_write
+       CHARACTER(LEN=96) :: l1_filename
+       CHARACTER(LEN=16) :: l1_magic
++      CHARACTER(LEN=96) :: r17_filename
++      CHARACTER(LEN=16) :: r17_magic
++      CHARACTER(LEN=8) :: r17_env
+       REAL(wp) ::   ze3Tb, ze3Tr, z1_e3t     ! local scalars
+       REAL(wp) ::   ze3Sb, ze3Sr             !   -      -
+ #if ! defined key_PSYCLONE_2p5p0
+@@ -106,4 +112,6 @@
+       IF( ln_timing )   CALL timing_start('stp_RK3_stg')
++      CALL get_environment_variable('GYRE_R17_WRITE', r17_env, status=r17_env_status)
++      r17_write = r17_env_status == 0 .AND. TRIM(r17_env) == '1'
+       !
+       IF( kstp == nit000 ) THEN
+          IF(lwp) WRITE(numout,*)
+@@ -396,7 +404,22 @@
+             IF( lwp .AND. kstp == nit000 .AND. kstg == 2 )   WRITE(l1_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+             !
+             !                             !* Coriolis / vorticity       ==> 3D RHS
++            IF( r17_write .AND. lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
++               WRITE(r17_filename,'("oracle_r17_stage3_vor_kt",I8.8,".bin")') kstp
++               OPEN( NEWUNIT=r17_unit, FILE=TRIM(r17_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++                  &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=r17_ios )
++               IF( r17_ios /= 0 )   CALL ctl_stop( 'stp_RK3_stg: cannot open round-17 stage-3 vorticity dump' )
++               r17_magic = 'NEMO_L2_R17VOR1'
++               WRITE(r17_unit) r17_magic, 1, kstp, kstg, Kbb, Kmm, Krhs, Kaa, &
++                  & jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++               WRITE(r17_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
++            ENDIF
+             CALL    dyn_vor( kstp,      Kmm, uu, vv, Krhs )
++            IF( r17_write .AND. lwp .AND. kstp == nit000 .AND. kstg == 3 ) THEN
++               WRITE(r17_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
++               CLOSE(r17_unit)
++               WRITE(numout,*) 'GYRE_R17_STAGE3_VORTICITY_DUMP ', kstp, Kmm, Krhs, TRIM(r17_filename)
++            ENDIF
+             IF( lwp .AND. kstp == nit000 .AND. kstg == 2 )   WRITE(l1_unit) uu(:,:,:,Krhs), vv(:,:,:,Krhs)
+             !
+             !                             !* advection (VIF or FF)      ==> 3D RHS

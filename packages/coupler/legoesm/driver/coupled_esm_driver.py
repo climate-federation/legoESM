@@ -204,11 +204,18 @@ class CoupledESMDriver:
         lake_config=None,
         ocean_grid=None,
         output_dir=None,
+        *,
+        expected_resolved_physics: dict | None = None,
+        atm_manifest_runner_tag: str | None = None,
     ):
         self.atm_config = atm_config
         self.coupled_cfg = coupled_config or CoupledConfig()
         validate_air_sea_consistency(atm_config, coupler_config)
-        self._atm = ModelDriver(atm_config, output_dir=output_dir)
+        # expected_resolved_physics: the atmosphere record a reproduce rerun
+        # must resolve to (ModelDriver refuses before stepping otherwise).
+        self._atm = ModelDriver(atm_config, output_dir=output_dir,
+                                expected_resolved_physics=expected_resolved_physics,
+                                manifest_runner_tag=atm_manifest_runner_tag)
         # This driver's _build_atm_forcing READS held_sw_net_sfc /
         # held_lw_net_sfc / seg_precip out of the atmosphere's _carry_aux, so
         # atmosphere lanes that never write them must refuse to run rather
@@ -498,7 +505,6 @@ class CoupledESMDriver:
             idealized_bathymetry_latlon_cgrid,
             rest_state_latlon_cgrid_ocean,
         )
-        from legoesm.ocean.state import LatLonCGridOceanConfig
         from legoesm.ocean.vertical import create_ocean_z_star
 
         cfg = self.coupled_cfg
@@ -526,38 +532,7 @@ class CoupledESMDriver:
             self._init_tripole_dynamic_ocean()
             return
 
-        # The 3D ocean needs the full LatLonCGridOceanConfig; build a default
-        # one if the caller passed a SimpleOceanConfig.
-        _oc = cfg.ocean_config
-        if not isinstance(_oc, LatLonCGridOceanConfig):
-            _oc = LatLonCGridOceanConfig.from_flat()
-        # Force the OMIP-validated cold-start stack (the defaults
-        # explicit_substep barotropic + euler momentum give O(30 m/s) day-1
-        # transients on a WOA/strat cold start; see omip_latlon_75lev_solved /
-        # omip_rk3_coldstart_solve).  C_smag_lap + smag_cfl_safety are the
-        # CFL-capped Laplacian-Smagorinsky eddy viscosity that damps the
-        # geostrophic-adjustment transient off the (rest-velocity) WOA density
-        # field — WITHOUT it the standalone ocean blows up from the WOA IC alone
-        # (max|u| 21 m/s, eta 84 m in 2 h, NaN by 10 h; the OMIP latlon
-        # cold-start recipe uses exactly --C-smag-lap 3.0 --smag-cfl-safety
-        # 0.125; see omip_smag_cap_stabilizer).
-        # replace_flat routes the flat names into their nested sub-configs
-        # (barotropic_solver -> BarotropicConfig #640; C_smag_lap /
-        # smag_cfl_safety -> LateralViscosityConfig #661) exactly like the
-        # hand-nested ``_replace`` it replaced — leaf-identical by probe.
-        ocfg = _oc.replace_flat(
-            barotropic_solver="implicit_cn",
-            momentum_time_integrator="rk3",
-            pgf_scheme="smc03",
-            implicit_vertical_mixing=True,
-            # Additive Laplacian-Smagorinsky (the "none" lateral-friction
-            # closure); force scheme="none" so a caller-supplied om4p25/qg_leith
-            # config does not trip the model's "no additive A_h/C_smag with a
-            # closure scheme" validation (codex LOW).
-            lateral_friction_scheme="none",
-            C_smag_lap=3.0,
-            smag_cfl_safety=0.125,
-        )
+        ocfg = self._build_latlon_ocean_config()
 
         if cfg.ocean_dt_s <= 0.0:
             raise ValueError(
@@ -683,6 +658,55 @@ class CoupledESMDriver:
             f"nlev={cfg.ocean_nlev}, ocean_dt={cfg.ocean_dt_s}s, "
             f"barotropic={ocfg.barotropic.barotropic_solver}, "
             f"momentum={ocfg.momentum_time_integrator}, pgf={ocfg.pgf_scheme}")
+
+    def _build_latlon_ocean_config(self):
+        """The lat-lon 3-D ocean card: ``coupled_cfg.ocean_config`` (default
+        ``LatLonCGridOceanConfig``) with the OMIP-validated cold-start stack
+        forced on.  Pure config, no grid or data, so a deck test can build it."""
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+
+        # The 3D ocean needs the full LatLonCGridOceanConfig; build a default
+        # one if the caller passed a SimpleOceanConfig.
+        _oc = self.coupled_cfg.ocean_config
+        if not isinstance(_oc, LatLonCGridOceanConfig):
+            _oc = LatLonCGridOceanConfig.from_flat()
+        # Force the OMIP-validated cold-start stack (the defaults
+        # explicit_substep barotropic + euler momentum give O(30 m/s) day-1
+        # transients on a WOA/strat cold start; see omip_latlon_75lev_solved /
+        # omip_rk3_coldstart_solve).  C_smag_lap + smag_cfl_safety are the
+        # CFL-capped Laplacian-Smagorinsky eddy viscosity that damps the
+        # geostrophic-adjustment transient off the (rest-velocity) WOA density
+        # field — WITHOUT it the standalone ocean blows up from the WOA IC alone
+        # (max|u| 21 m/s, eta 84 m in 2 h, NaN by 10 h; the OMIP latlon
+        # cold-start recipe uses exactly --C-smag-lap 3.0 --smag-cfl-safety
+        # 0.125; see omip_smag_cap_stabilizer).
+        # replace_flat routes the flat names into their nested sub-configs
+        # (barotropic_solver -> BarotropicConfig #640; C_smag_lap /
+        # smag_cfl_safety -> LateralViscosityConfig #661) exactly like the
+        # hand-nested ``_replace`` it replaced — leaf-identical by probe.
+        return _oc.replace_flat(
+            barotropic_solver="implicit_cn",
+            momentum_time_integrator="rk3",
+            pgf_scheme="smc03",
+            implicit_vertical_mixing=True,
+            # Additive Laplacian-Smagorinsky (the "none" lateral-friction
+            # closure); force scheme="none" so a caller-supplied om4p25/qg_leith
+            # config does not trip the model's "no additive A_h/C_smag with a
+            # closure scheme" validation (codex LOW).
+            lateral_friction_scheme="none",
+            C_smag_lap=3.0,
+            smag_cfl_safety=0.125,
+            # Decision 90: a card on the RK3 momentum program STATES how the
+            # slow forcing is depth-averaged onto the barotropic faces (the
+            # field has no default and the step raises when it is unset).
+            # min_rule_live = legoESM's own per-level minimum of the two live
+            # thicknesses, the only form that existed when this cold-start
+            # stack was validated; this card does not carry NEMO's prognostic
+            # external mode that NEMO's reference-thickness statement pairs
+            # with.  Differs from 'nemo_literal' only over partial cells.
+            # Majority vote 2026-10-11 (Claude, GLM-5.2, codex).
+            barotropic_slow_forcing_depth_evaluation="min_rule_live",
+        )
 
     def _build_tripole_ocean_config(self):
         """The OMIP-validated tripole ``LatLonCGridOceanConfig`` — cloned VERBATIM
@@ -1670,10 +1694,12 @@ class CoupledESMDriver:
             surface_temperature_for_lw_boundary,
         )
 
-        state = self._atm.state
+        state = self._atm.cell_centre_state()
         # Low-level winds/T/q/p_s for the ocean surface stress + bulk turbulent
         # fluxes.  Three atm-state layouts:
-        #   * cube/latlon  -> cell-centered u/v/T/p_s Fields, read directly.
+        #   * cube/latlon  -> cell-centered u/v/T/p_s Fields, read directly
+        #     (a lat-lon C-grid run carries face winds; this is their
+        #     cell-centre average).
         #   * MPAS/voronoi -> edge-normal velocity (state.v is None); Perot-
         #     reconstruct the cell-centered (zonal, meridional) winds.
         #   * SPECTRAL     -> the state is spectral COEFFICIENTS, so synthesize
@@ -1840,13 +1866,14 @@ class CoupledESMDriver:
         lw_down = (lw_net_sfc + lw_up_sfc) / jnp.maximum(eps_sfc, 0.01)
 
         precip_total = jnp.maximum(seg_precip, 0.0)
-        # Smooth snow fraction (Wigmosta 1994 / Dai 2008) via shared helper —
-        # single source of truth with the earth-system driver. Replaces the
-        # prior hard step, which killed d(snow)/d(T_low) and miscounted
-        # mixed-phase precip in the 0–4 °C band.
-        from legoesm.forcing.surface_utils import snow_fraction
-        snow_frac = snow_fraction(T_low, constants.T_freeze)
-        precip_snow = precip_total * snow_frac
+        # Snowfall = the atmosphere's OWN segment-mean frozen surface flux
+        # (review 2026-10-10 F29, the MPAS land's rule), bounded by the total:
+        # no temperature re-split, so the fusion heat the atmosphere booked is
+        # the one the surface receives.  require_surface_radiation_aux refuses
+        # a lane that does not publish it while precip is active.
+        _frozen = aux.get("seg_precip_frozen")
+        precip_snow = (jnp.zeros_like(precip_total) if _frozen is None
+                       else jnp.clip(_frozen, 0.0, precip_total))
 
         # Cosine zenith — route through the atmosphere's seasonal insolation seam (iter
         # 449/461) so the coupler's ocean/surface insolation runs the SAME season as the
@@ -2658,10 +2685,23 @@ class CoupledESMDriver:
             from legoesm.diagnostics.column_integrals import column_water_vapor
             from legoesm.diagnostics.water_budget import atm_moisture_residual
             atm_area = getattr(self._atm.grid, "grid_area", None)
+            _st = self._atm.state
+            if hasattr(_st, "vor_hat"):
+                # SPECTRAL: the state is coefficients with no p_s field; grid
+                # p_s and the grid-space q_v exactly as _build_atm_forcing
+                # reads them (zeros on a dry run, whose tracers are None).
+                from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
+                    spectral_pe_to_grid,
+                )
+                _f = spectral_pe_to_grid(_st, self._atm.grid, self._atm.sigma)
+                _ps = _f["p_s"]
+                _qv = (getattr(_st, "tracers", None) or {}).get("q_v")
+                _qv = (jnp.zeros_like(_f["T"]) if _qv is None
+                       else getattr(_qv, "data", _qv))
+            else:
+                _ps, _qv = _st.p_s.data, self._atm.q_v
             cwv_now = column_water_vapor(
-                self._atm.q_v,
-                self._atm.state.p_s.data,
-                jnp.asarray(self._atm.sigma.dsigma),
+                _qv, _ps, jnp.asarray(self._atm.sigma.dsigma),
             )
             if self._cwv_prev is not None:
                 diag["water_atm_residual_kg_m2_s_global"] = float(
@@ -2866,6 +2906,22 @@ class CoupledESMDriver:
     #       behavior (explicit in load_coupled_checkpoint, not silent).
     _CKPT_VERSION = 3
 
+    def resolved_component_configs(self) -> dict:
+        """The component configs this driver resolved in ``setup()`` (the run
+        manifest's ``config.resolved_physics`` for a coupled run)."""
+        from legoesm.coupler.lake.config import LakeConfig
+        from legoesm.ice.config import SeaIceConfig
+        ocean_model = getattr(self, "_ocean_model", None)
+        return {
+            "ocean": (ocean_model.config if ocean_model is not None
+                      else self.coupled_cfg.ocean_config),
+            "land": getattr(self, "_land_cfg", None),
+            "tile": getattr(self, "_tile_config", None),
+            "coupler": getattr(self, "_coupler_cfg", None),
+            "sea_ice": self._ice_config or SeaIceConfig(),
+            "lake": self._lake_config or LakeConfig(),
+        }
+
     def save_checkpoint(self, step: int, day: float) -> None:
         """Save atmosphere + ocean + surface + CO2 state."""
         self._atm.save_checkpoint(step, day)
@@ -2873,6 +2929,14 @@ class CoupledESMDriver:
         # Save coupled state alongside the atmosphere checkpoint.
         elapsed_day = day - self.atm_config.start_day
         coupled_path = self.output_dir / f"coupled_day_{int(elapsed_day):04d}.npz"
+        arrays = self.coupled_checkpoint_arrays()
+        if arrays:
+            np.savez(coupled_path, **arrays)
+            logger.info(f"  Coupled checkpoint: {coupled_path.name}")
+
+    def coupled_checkpoint_arrays(self) -> dict:
+        """Every non-atmosphere array a coupled checkpoint saves (also what the
+        coupled run manifest's final digest covers)."""
         arrays = {}
         # Provenance for load-time validation (version + ocean grid shape so a
         # checkpoint from a different ocean_grid / config is caught, not silently
@@ -2931,13 +2995,11 @@ class CoupledESMDriver:
         if self._sst_mean_init is not None:
             arrays["sst_mean_init"] = np.asarray(
                 self._sst_mean_init, dtype=np.float64)
-
-        if arrays:
-            np.savez(coupled_path, **arrays)
-            logger.info(f"  Coupled checkpoint: {coupled_path.name}")
+        return arrays
 
     def load_coupled_checkpoint(self, step_day: float,
-                               checkpoint_dir: str | Path | None = None) -> None:
+                               checkpoint_dir: str | Path | None = None,
+                               *, required: bool = False) -> None:
         """Load coupled state saved alongside an atmosphere checkpoint.
 
         Parameters
@@ -2953,6 +3015,13 @@ class CoupledESMDriver:
         base = Path(checkpoint_dir) if checkpoint_dir is not None else self.output_dir
         coupled_path = base / f"coupled_day_{int(step_day):04d}.npz"
         if not coupled_path.exists():
+            if required:
+                # A resume without it would restart ocean/land/ice/CO2 from
+                # their initial state under a continued atmosphere.
+                raise RuntimeError(
+                    f"No coupled checkpoint at {coupled_path} for the "
+                    f"atmosphere checkpoint being resumed; refusing to resume "
+                    f"with freshly initialised ocean/surface state.")
             logger.warning(f"No coupled checkpoint at {coupled_path}")
             return
 

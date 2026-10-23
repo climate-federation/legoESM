@@ -27,6 +27,7 @@ from legoesm.driver.config import (
 )
 from legoesm.driver.model_driver import ModelDriver
 from legoesm.land.state import MultiLayerLandState
+from tests._land_surfdata import require_surfdata
 
 
 def _fake_surface_map(path, lat_deg, lon_deg):
@@ -65,6 +66,11 @@ def _small_cfg(**over):
         land_mask_path="synthetic.nc",
         use_multilayer_land=True,
         multilayer_n_layers=6, multilayer_soil_depth=2.5,
+        # The default two-leaf canopy refuses to start without the harmonized
+        # per-PFT surfdata: point it at the real file and FAIL (never skip)
+        # when it is missing -- the user's decision for the MPAS land port
+        # tests (0e87622ab), applied here.
+        surfdata_path=require_surfdata(),
     )
     base.update(over)
     return ExperimentConfig(**base)

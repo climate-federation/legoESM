@@ -23,7 +23,7 @@ include: cmip_tuned_physics.yaml
 # --- run orchestration (identical to the slab twin) ---
 preset: slab_richards
 grid: latlon
-energy_fixer: false                  # dycore energy fixer not wired on this lane (review 2026-10-10 F15, vote V11-C): the open sink is recorded, not implied
+energy_fixer: true                   # dycore energy fixer, now wired on this lane (review 2026-10-10 F15, vote F15b-V6)
 resolution: 24
 nlev: 20
 # hybrid B(eta)=eta**2: holds all of ETOPO (exponent 3 carries negative layer

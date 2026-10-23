@@ -1,333 +1,271 @@
 #!/usr/bin/env python
-"""IDEALIZED simple-plume anthropogenic aerosol -> a gridded AOD for testing.
+"""MACv2-SP anthropogenic aerosol on the Kinne MACv1 pre-industrial background
+-> monthly per-band column aerosol optics files for 1850-2014.
 
-*** NOT the reference MACv2-SP. ***  The official input4MIPs guidance is that the
-gridded MACv2-SP forcing MUST be computed with the reference ``mo_simple_plumes``
-Fortran routine — use that for production.  This script is a SIMPLIFIED,
-STRUCTURAL approximation (a rotated asymmetric-Gaussian plume + annual/seasonal
-scaling + Angstrom slope) for idealized runs, smoke tests, and the deck plumbing;
-its geometry and seasonal handling are DELIBERATELY simpler than the paper's
-(Stevens et al. 2017, GMD 10, 433-476), and its magnitudes are NOT validated
-against the reference.  Do not present its output as the CMIP6 MACv2-SP forcing.
+Port of the REFERENCE routine ``sp_aop_profile`` (``mo_simple_plumes_v1.f90``,
+input4MIPs ``MPI-M-MACv2-SP-1-0`` v20170201; Stevens et al. 2017, GMD 10,
+433-452) in COLUMN form, plus the background composition MPI-ESM1.2 used in
+CMIP6 (plumes superimposed on the Kinne 2013 MACv1 natural aerosol).
 
-``download_cmip6_forcing.py --channels aerosol`` fetches the MACv2-SP
-(``MPI-M-MACv2SP-1-0``) parameter file (plume centres/widths/rotations/AOD +
-annual/feature weights).  The AMIP loader (``forcing/external.py``,
-``AerosolConfig``) wants a gridded ``aod(time, lat, lon)`` [dimensionless,
-550 nm] which it zonal-averages to a column AOD; this evaluates the simplified
-plumes onto a lat-lon grid to produce that field.  Per-band SSA / asymmetry are
-NOT produced here (they would feed ``RRTMGPConfig.aerosol_ssa_bands/
-aerosol_g_bands`` from PR #1276); only the 550 nm column AOD is written.
-The vertical profile (integrates to the column AOD anyway) and the Twomey
-cloud-droplet effect are out of scope.  Structural behaviour (plume location,
-E/W asymmetry, annual + seasonal scaling, Angstrom slope) is unit-tested;
-faithful magnitudes require the reference routine.
+Kept from the reference, term by term:
+- per-feature rotated Gaussians with East/West widths selected on the sign of
+  the (wrapped) longitude offset; one +-360 wrap when |dlon| exceeds 180 deg
+  (260 deg for plume 1, Europe).  Longitudes are taken in the reference's
+  0-360 convention (its driver reads a T63 0-360 grid): the 260 deg wrap is not
+  convention-invariant, so the -180..180 MACv1 grid is mapped to 0-360 first.
+- time weights ``year_weight(FLOOR(year_fr)-1849) * ann_cycle(feature,
+  FLOOR(frac(year_fr)*52)+1)``, applied per feature before the feature sum.
+- AOD(lambda) = cw_an * exp(-angstrom*ln(lambda/550)); ssa(lambda) and
+  asy(lambda) from ``lfactor = min(1, 700/lambda)``; ssa AOD-weighted and asy
+  scattering-weighted across plumes.
+Dropped, each because it is a no-op for a column product: the beta-function
+vertical profile (normalised over the host's levels, so it sums to 1 on any
+terrain-following column whose levels sit above the surface) and the
+orography mask (all such levels are above ground).  Not produced: the Twomey
+factor ``dNovrN``; the model derives CCN from the fine-mode 550 nm AOD instead.
+
+Products (layout of the staged ``aeropt_kinne_sw_b14_{tot,fin}_*_MACv1.nc``):
+``aod/ssa/asy(time, lnwl=14, lat, lon)`` with ``wl1_sun/wl2_sun`` band edges.
+- fin(Y, m) = MACv1 pre-industrial fine (g30_pre_9999) + MACv2-SP plumes(Y, m)
+- tot(Y, m) = fin(Y, m) + MACv1 coarse (g30_cor_2000)
+Each month's plume time weights are the mean of daily samples taken at 12 UTC.
+Optics are evaluated at each band's representative wavelength ``lnwl``.
 
 Usage::
 
-    python scripts/data/adapt_cmip6_aerosol.py --in MACv2.0-SP_v1.nc \\
-        --out data/cmip6_forcing/aerosol_macv2sp.nc \\
-        --resolution 96 --year 2000
-
-Consume with ``run_amip_smoke_deck.py --aerosol-forcing external --aerosol-file
-<out>``.
+    python scripts/data/adapt_cmip6_aerosol.py --macv2sp MACv2.0-SP_v1.nc \\
+        --macv1-dir raw_macv1 --band-template aeropt_kinne_sw_b14_fin_1979-2014_MACv1.nc \\
+        --out-dir data/cmip6_forcing --years 1850 2014
 """
 
 from __future__ import annotations
 
 import argparse
+import calendar
+import datetime as dt
+import hashlib
 from pathlib import Path
 
 import numpy as np
 
-# Monthly mid-point "days since 0000-01-01" for the output time axis + seasonal
-# cycle.  ``15.5 + 30.4375*m`` (30.4375 = 365.25/12) — the SAME convention the
-# synthetic ``generate_amip_forcing.make_aerosol_clim`` uses and the loader's
-# cyclic monthly interpolation (``_cyclic_phase_anchor``) is validated against.
-_MONTH_MID_DOY = 15.5 + 30.4375 * np.arange(12)
-_DAYS_PER_YEAR = 365.0
-_REF_WAVELENGTH_NM = 550.0
+NTIMES = 52            # reference: annual cycle resolved weekly
+FIRST_YEAR = 1850      # reference: year_weight(1) is 1850
+_LAMBDA_REF_NM = 550.0
+_LFACTOR_NM = 700.0
+_PER_PLUME = ("plume_lat", "plume_lon", "aod_spmx", "ssa550", "asy550", "angstrom")
+_PER_FEATURE = ("sig_lon_E", "sig_lon_W", "sig_lat_E", "sig_lat_W", "theta", "ftr_weight")
 
 
-def _rotated_asymmetric_gaussian(dlon, dlat, theta, sig_lon_e, sig_lon_w,
-                                 sig_lat_n, sig_lat_s):
-    """One MACv2-SP plume-feature spatial shape, normalised to a peak of 1.
+def read_plumes(ds) -> dict:
+    """Plume parameters from an opened MACv2.0-SP Dataset, oriented by dimension
+    NAME: per-plume ``(np,)``, per-feature ``(nf, np)``, ``year_weight (nyears,
+    np)`` with masked years as NaN, ``ann_cycle (nf, 52, np)``."""
+    def arr(name, *dims):
+        return np.asarray(ds[name].transpose(*dims).values, dtype=np.float64)
 
-    Rotate the offset from the plume centre by ``theta`` into the plume frame,
-    then a 2-D Gaussian whose longitudinal width differs east/west of the centre
-    and whose latitudinal width differs north/south (Stevens et al. 2017: the
-    plumes trail off asymmetrically downwind).  ``dlon``/``dlat`` broadcast over
-    the grid.
-    """
-    ct, st = np.cos(theta), np.sin(theta)
-    x = dlon * ct + dlat * st          # along-plume (rotated lon)
-    y = -dlon * st + dlat * ct         # cross-plume (rotated lat)
-    sig_x = np.where(x >= 0.0, sig_lon_e, sig_lon_w)
-    sig_y = np.where(y >= 0.0, sig_lat_n, sig_lat_s)
-    return np.exp(-0.5 * (x / sig_x) ** 2 - 0.5 * (y / sig_y) ** 2)
-
-
-def _seasonal_weight(doy, phase_doy, amplitude):
-    """Per-plume seasonal cycle: ``1 + amplitude*cos(2*pi*(doy-phase)/365)``,
-    clipped at 0 (a plume cannot contribute a negative AOD)."""
-    return np.clip(
-        1.0 + amplitude * np.cos(2.0 * np.pi * (doy - phase_doy) / _DAYS_PER_YEAR),
-        0.0, None)
-
-
-def evaluate_plume_aod(lon_deg, lat_deg, plumes, year: int, doy: float) -> np.ndarray:
-    """550 nm anthropogenic AOD on the (lon, lat) grid for one (year, day).
-
-    ``plumes`` is a list of dicts, one per plume, each with: ``lon``, ``lat``,
-    ``theta`` [rad], ``sig_lon_e/w``, ``sig_lat_n/s`` [deg], ``aod`` (peak 550 nm
-    AOD), ``features`` (list of ``(weight, dtheta, seasonal_phase_doy,
-    seasonal_amplitude)``), and ``year_weight`` (a dict ``year -> factor`` OR a
-    ``(years, factors)`` table).  Returns ``aod(lat, lon)`` >= 0.
-    """
-    lon = np.asarray(lon_deg, dtype=np.float64)
-    lat = np.asarray(lat_deg, dtype=np.float64)
-    lon2d, lat2d = np.meshgrid(lon, lat)               # (nlat, nlon)
-    total = np.zeros_like(lon2d, dtype=np.float64)
-    for p in plumes:
-        # Positive-finite widths + finite peak: a zero/NaN width would divide by
-        # zero into NaN AOD (which np.clip does NOT repair) and leak into the
-        # written field. Fail loudly instead.
-        for _k in ("sig_lon_e", "sig_lon_w", "sig_lat_n", "sig_lat_s"):
-            _s = p[_k]
-            if not (np.isfinite(_s) and _s > 0.0):
-                raise ValueError(f"plume width {_k}={_s!r} must be positive and "
-                                 f"finite (zero/NaN divides into NaN AOD).")
-        if not np.isfinite(p["aod"]):
-            raise ValueError(f"plume peak aod={p['aod']!r} must be finite.")
-        yw = _year_factor(p["year_weight"], year)
-        if yw == 0.0:
-            continue
-        # shortest signed longitude offset (wrap at +-180).
-        dlon = ((lon2d - p["lon"] + 180.0) % 360.0) - 180.0
-        dlat = lat2d - p["lat"]
-        shape = np.zeros_like(total)
-        for (fw, dtheta, phase, amp) in p["features"]:
-            g = _rotated_asymmetric_gaussian(
-                dlon, dlat, p["theta"] + dtheta,
-                p["sig_lon_e"], p["sig_lon_w"], p["sig_lat_n"], p["sig_lat_s"])
-            shape = shape + fw * g * _seasonal_weight(doy, phase, amp)
-        total = total + p["aod"] * yw * shape
-    result = np.clip(total, 0.0, None)
-    # Backstop: np.clip preserves NaN and +Inf, so a non-finite anywhere upstream
-    # (year factor, feature weight/phase/amp, plume position/rotation, grid coords,
-    # or an overflow) would leak into the written AOD. One check catches them all.
-    if not np.all(np.isfinite(result)):
-        raise ValueError("evaluated AOD is non-finite — check year weights, "
-                         "seasonal amplitude/phase, plume position/rotation, or "
-                         "the lon/lat grid.")
-    return result
+    p = {k: arr(k, "plume_number") for k in _PER_PLUME}
+    p.update({k: arr(k, "plume_feature", "plume_number") for k in _PER_FEATURE})
+    p["year_weight"] = arr("year_weight", "years", "plume_number")
+    p["ann_cycle"] = arr("ann_cycle", "plume_feature", "year_fr", "plume_number")
+    p["years"] = np.asarray(ds["years"].values)
+    if p["years"][0] != FIRST_YEAR or np.any(np.diff(p["years"]) != 1):
+        raise ValueError(f"years must run 1850,1851,... (got {p['years'][:3]}...)")
+    if p["ann_cycle"].shape[1] != NTIMES:
+        raise ValueError(f"ann_cycle has {p['ann_cycle'].shape[1]} times, expected {NTIMES}")
+    for k, v in p.items():
+        if k != "year_weight" and not np.all(np.isfinite(v)):
+            raise ValueError(f"{k} has non-finite values")
+    for k in ("sig_lon_E", "sig_lon_W", "sig_lat_E", "sig_lat_W"):
+        if not np.all(p[k] > 0):
+            raise ValueError(f"{k} must be positive (a zero width divides into NaN AOD)")
+    return p
 
 
-def _year_factor(year_weight, year: int) -> float:
-    """Annual scaling for a plume: a dict lookup, a ``(years, factors)`` table
-    (linearly interpolated + end-clamped), or a bare scalar."""
-    if isinstance(year_weight, dict):
-        return float(year_weight.get(year, 0.0))
-    if isinstance(year_weight, (tuple, list)) and len(year_weight) == 2:
-        years, factors = np.asarray(year_weight[0]), np.asarray(year_weight[1])
-        return float(np.interp(year, years, factors))
-    return float(year_weight)
+def time_weights(p: dict, year_fr: float) -> np.ndarray:
+    """Reference ``set_time_weight``: anthropogenic weight ``(nf, np)``."""
+    iyear = int(np.floor(year_fr)) - FIRST_YEAR
+    iweek = int(np.floor((year_fr - np.floor(year_fr)) * NTIMES))
+    if not (0 <= iyear < p["year_weight"].shape[0] and 0 <= iweek < NTIMES):
+        raise ValueError(f"year_fr {year_fr} outside the MACv2-SP time axis")
+    yw = p["year_weight"][iyear]
+    if not np.all(np.isfinite(yw)):
+        raise ValueError(f"year {int(np.floor(year_fr))} has no MACv2-SP year_weight")
+    return yw[None, :] * p["ann_cycle"][:, iweek, :]
 
 
-def spectral_aod_scale(wavelength_nm: float, angstrom: float) -> float:
-    """Angstrom-law scale from 550 nm AOD to another wavelength:
-    ``(lambda/550)^(-alpha)``."""
-    return float((wavelength_nm / _REF_WAVELENGTH_NM) ** (-angstrom))
+def month_time_weights(p: dict, year: int, month: int) -> np.ndarray:
+    """Monthly mean of the reference time weights sampled daily at 12 UTC
+    (``year_fr`` = year + elapsed fraction of the Gregorian year)."""
+    ndays = 366 if calendar.isleap(year) else 365
+    doy0 = dt.date(year, month, 1).timetuple().tm_yday - 1
+    nd = calendar.monthrange(year, month)[1]
+    return np.mean([time_weights(p, year + (doy0 + d + 0.5) / ndays)
+                    for d in range(nd)], axis=0)
 
 
-# ---------------------------------------------------------------------------
-# Build the deck AOD field (monthly climatology for a year)
-# ---------------------------------------------------------------------------
+def feature_gaussians(p: dict, lat, lon) -> np.ndarray:
+    """Per-feature, per-plume Gaussian shapes ``(nf, np, *lat.shape)``;
+    ``lat``/``lon`` in degrees, any longitude convention (mapped to 0-360)."""
+    lat = np.asarray(lat, dtype=np.float64)[None, None]
+    lon = np.mod(np.asarray(lon, dtype=np.float64), 360.0)[None, None]
+    ex = (Ellipsis,) + (None,) * (lat.ndim - 2)
+    dlat = lat - p["plume_lat"][None, :][ex]
+    dlon = lon - p["plume_lon"][None, :][ex]
+    lim = np.where(np.arange(p["plume_lat"].size) == 0, 260.0, 180.0)[None, :][ex]
+    dlon = np.where(np.abs(dlon) > lim, dlon - np.copysign(360.0, dlon), dlon)
+    east = dlon > 0.0
+    a = 0.5 / np.where(east, p["sig_lon_E"][ex], p["sig_lon_W"][ex]) ** 2
+    b = 0.5 / np.where(east, p["sig_lat_E"][ex], p["sig_lat_W"][ex]) ** 2
+    ct, st = np.cos(p["theta"][ex]), np.sin(p["theta"][ex])
+    lon_r = ct * dlon + st * dlat
+    lat_r = -st * dlon + ct * dlat
+    return np.exp(-(a * lon_r ** 2 + b * lat_r ** 2))
 
-def build_aod_climatology(plumes, year: int, nlat: int, nlon: int) -> tuple:
-    """12-month ``aod(time, lat, lon)`` climatology for ``year`` on a regular
-    lat-lon grid.  Returns ``(mid_days, lat, lon, aod)``."""
-    lat = np.linspace(-89.0, 89.0, nlat)
-    lon = np.linspace(0.0, 360.0, nlon, endpoint=False)
-    aod = np.stack(
-        [evaluate_plume_aod(lon, lat, plumes, year, float(doy))
-         for doy in _MONTH_MID_DOY], axis=0)           # (12, nlat, nlon)
-    return _MONTH_MID_DOY.copy(), lat, lon, aod
+
+def column_aod550(p: dict, tw: np.ndarray, gauss: np.ndarray) -> np.ndarray:
+    """Reference ``cw_an``: per-plume column 550 nm AOD ``(np, ...)``."""
+    ex = (Ellipsis,) + (None,) * (gauss.ndim - 2)
+    return p["aod_spmx"][ex] * np.sum((tw * p["ftr_weight"])[ex] * gauss, axis=0)
 
 
-def to_dataset(mid_days, lat, lon, aod) -> object:
-    """Wrap ``(mid_days, lat, lon, aod)`` in the loader's aerosol Dataset schema
-    (``aod(time, lat, lon)``, monthly noleap climatology)."""
+def plume_band_sums(p: dict, cw: np.ndarray, lambdas_nm) -> tuple:
+    """Plume-summed ``(aod, aod*ssa, aod*ssa*asy)`` per band ``(nb, ...)``."""
+    ex = (Ellipsis,) + (None,) * (cw.ndim - 1)
+    lam = np.asarray(lambdas_nm, dtype=np.float64)[:, None]               # (nb, 1)
+    lf = np.minimum(1.0, _LFACTOR_NM / lam)
+    ssa = p["ssa550"] * lf ** 4 / (p["ssa550"] * lf ** 4 + (1.0 - p["ssa550"]) * lf)
+    asy = p["asy550"] * np.sqrt(lf)
+    lfac = np.exp(-p["angstrom"] * np.log(lam / _LAMBDA_REF_NM))           # (nb, np)
+    aod = lfac[ex] * cw[None]                                              # (nb, np, ...)
+    return (aod.sum(1), (aod * ssa[ex]).sum(1), (aod * (ssa * asy)[ex]).sum(1))
+
+
+def column_optics(sums) -> tuple:
+    """``(aod, ssa, asy)`` from summed ``(aod, sca, asc)``; reference zero-AOD
+    limits ssa -> 1, asy -> 0."""
+    aod, sca, asc = sums
+    ssa = np.where(aod > 0, sca / np.where(aod > 0, aod, 1.0), 1.0)
+    asy = np.where(sca > 0, asc / np.where(sca > 0, sca, 1.0), 0.0)
+    return aod, ssa, asy
+
+
+def component_sums(aod, ssa, asy) -> tuple:
+    return aod, aod * ssa, aod * ssa * asy
+
+
+def _read_macv1(path: Path, lnwl) -> tuple:
+    """MACv1 ``(aod, ssa, asy)`` as ``(12, nb, lat, lon)`` float64, its lat/lon;
+    the record order must be the template's ``lnwl`` (from the ncecat history)."""
+    import re
+    import netCDF4
+
+    with netCDF4.Dataset(path) as nc:
+        wl = [int(w) for w in re.findall(r"_(\d{5})nm\.nc", nc.history)]
+        if wl != [int(round(w)) for w in lnwl]:
+            raise ValueError(f"{path}: record wavelengths {wl} != band template {list(lnwl)}")
+        out = tuple(np.asarray(nc[k][:], dtype=np.float64).transpose(1, 0, 2, 3)
+                    for k in ("aod", "ssa", "asy"))
+        return out, np.asarray(nc["lat"][:]), np.asarray(nc["lon"][:])
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def build(macv2sp: Path, macv1_dir: Path, band_template: Path, out_dir: Path,
+          first_year: int, last_year: int) -> tuple[Path, Path]:
+    import netCDF4
     import xarray as xr
 
-    return xr.Dataset(
-        data_vars={"aod": (("time", "lat", "lon"), aod,
-                           {"units": "1",
-                            "long_name": "MACv2-SP anthropogenic AOD @ 550 nm"})},
-        coords={
-            "time": ("time", np.asarray(mid_days, dtype=np.float64),
-                     {"units": "days since 0000-01-01 00:00:00",
-                      "calendar": "noleap"}),
-            "lat": ("lat", np.asarray(lat, dtype=np.float64),
-                    {"units": "degrees_north"}),
-            "lon": ("lon", np.asarray(lon, dtype=np.float64),
-                    {"units": "degrees_east"}),
-        },
-        attrs={"source": "scripts/data/adapt_cmip6_aerosol.py (MACv2-SP simple "
-                         "plume, Stevens et al. 2017; from-spec, unvalidated vs "
-                         "reference)"},
-    )
+    with xr.open_dataset(macv2sp, decode_times=False) as ds:
+        p = read_plumes(ds)
+    if first_year > last_year:
+        raise ValueError(f"--years {first_year} {last_year}: first after last")
+    for y in range(first_year, last_year + 1):
+        time_weights(p, y + 0.5)        # refuses years off the MACv2-SP axis or masked
+    with netCDF4.Dataset(band_template) as t:
+        lnwl = np.asarray(t["lnwl"][:], dtype=np.float64)
+        edges = {k: np.asarray(t[k][:]) for k in ("wl1_sun", "wl2_sun")}
+    pre, lat, lon = _read_macv1(macv1_dir / "g30_pre_9999.nc", lnwl)
+    cor, lat_c, lon_c = _read_macv1(macv1_dir / "g30_cor_2000.nc", lnwl)
+    if not (np.array_equal(lat, lat_c) and np.array_equal(lon, lon_c)):
+        raise ValueError("MACv1 pre-industrial and coarse grids differ")
+    gauss = feature_gaussians(p, *np.meshgrid(lat, lon, indexing="ij"))
+
+    span = f"{first_year}-{last_year}"
+    paths = {k: out_dir / f"aeropt_macv2sp_sw_b14_{k}_{span}_MACv1bg.nc" for k in ("fin", "tot")}
+    # Written under a temporary name and renamed on completion: the launchers
+    # select these filenames, so a failed build must not leave a partial file there.
+    tmp = {k: v.with_name(v.name + ".partial") for k, v in paths.items()}
+    files = {k: netCDF4.Dataset(v, "w", format="NETCDF4") for k, v in tmp.items()}
+    ref = dt.date(first_year, 1, 1)
+    src = {"macv2sp": (macv2sp, _sha256(macv2sp)),
+           "pre": (macv1_dir / "g30_pre_9999.nc", None), "cor": (macv1_dir / "g30_cor_2000.nc", None)}
+    var = {}
+    for kind, nc in files.items():
+        nc.createDimension("time", None)
+        nc.createDimension("lnwl", lnwl.size)
+        nc.createDimension("lat", lat.size)
+        nc.createDimension("lon", lon.size)
+        v = nc.createVariable("time", "f8", ("time",))
+        v.units, v.calendar, v.long_name = f"days since {first_year}-01-01 00:00:00", "standard", "mid-month time"
+        for name, val, units in (("lnwl", lnwl, "nm"), ("lat", lat, "degrees_north"),
+                                 ("lon", lon, "degrees_east")):
+            nc.createVariable(name, "f4", (name,))[:] = val
+            nc[name].units = units
+        for name in ("wl1_sun", "wl2_sun"):
+            nc.createVariable(name, "f4", ("lnwl",))[:] = edges[name]
+            nc[name].units = "um"
+        for name in ("aod", "ssa", "asy"):
+            var[kind, name] = nc.createVariable(
+                name, "f4", ("time", "lnwl", "lat", "lon"), zlib=True, complevel=2,
+                chunksizes=(1, lnwl.size, lat.size, lon.size))
+            var[kind, name].units = "1"
+        nc.title = (f"MACv2-SP anthropogenic plumes (Stevens et al. 2017) on the Kinne MACv1 "
+                    f"pre-industrial {'fine' if kind == 'fin' else 'fine + coarse'} background, "
+                    f"{lnwl.size} RRTMG-SW bands, monthly {span}")
+        nc.source = (f"MACv2.0-SP_v1.nc (input4MIPs MPI-M-MACv2-SP-1-0 v20170201, sha256 "
+                     f"{src['macv2sp'][1]}) + MACv1 g30_pre_9999.nc"
+                     + (" + g30_cor_2000.nc" if kind == "tot" else ""))
+        nc.history = f"built {dt.date.today()} by scripts/data/adapt_cmip6_aerosol.py"
+    k = 0
+    for y in range(first_year, last_year + 1):
+        for m in range(1, 13):
+            cw = column_aod550(p, month_time_weights(p, y, m), gauss)
+            fin = [a + b for a, b in zip(plume_band_sums(p, cw, lnwl),
+                                         component_sums(*(x[m - 1] for x in pre)))]
+            tot = [a + b for a, b in zip(fin, component_sums(*(x[m - 1] for x in cor)))]
+            a0, b0 = dt.date(y, m, 1), dt.date(y + (m == 12), m % 12 + 1, 1)
+            for kind, sums in (("fin", fin), ("tot", tot)):
+                files[kind]["time"][k] = (a0 - ref).days + (b0 - a0).days / 2.0
+                for name, val in zip(("aod", "ssa", "asy"), column_optics(sums)):
+                    var[kind, name][k] = val
+            k += 1
+        print(y, flush=True)
+    for nc in files.values():
+        nc.close()
+    for k in paths:
+        tmp[k].replace(paths[k])
+    return paths["fin"], paths["tot"]
 
 
-# ---------------------------------------------------------------------------
-# Read MACv2-SP parameters
-# ---------------------------------------------------------------------------
-
-def read_macv2sp_plumes(ds, *, plume_map: dict | None = None) -> list:
-    """Extract the plume parameter list from an opened MACv2-SP Dataset.
-
-    FAILS CLOSED: every parameter that DEFINES a plume (centre, rotation, the
-    four widths, the peak AOD, the annual-weight table, the feature weights) MUST
-    be present — a missing one raises, never a silently-invented default (an
-    unnoticed default is garbage physics, codex review).
-
-    Orientation is resolved by DIMENSION NAME, not array shape, so a transposed
-    (or square) table can never be silently mis-axised: every per-plume variable
-    must carry the plume dimension of ``plume_lat``, and ``year_weight`` must
-    carry both that plume dimension and the ``years`` dimension.  A non-finite
-    value in any required array also raises.
-
-    The reference file's 12-month ``time_weight`` seasonal table is DELIBERATELY
-    NOT consumed: this simplified evaluator's single-cosine seasonal surrogate
-    (``_seasonal_weight``) does not faithfully map onto it, so reading it would be
-    a fidelity bug.  File-derived plumes are therefore annual-mean shapes
-    (seasonal amplitude 0); the cosine surrogate is reachable only via the
-    ``evaluate_plume_aod`` dict API for idealized runs.
-
-    ``plume_map`` overrides the variable-name mapping (MACv2-SP releases differ;
-    inspect with ``--list-vars``) — keys are the logical names ``lat lon theta
-    aod sig_lon_e sig_lon_w sig_lat_n sig_lat_s ftr_weight years year_weight``.
-    """
-    names = {
-        "lat": "plume_lat", "lon": "plume_lon", "theta": "plume_theta",
-        "aod": "aod_spmx", "sig_lon_e": "sig_lon_E", "sig_lon_w": "sig_lon_W",
-        "sig_lat_n": "sig_lat_N", "sig_lat_s": "sig_lat_S",
-        "ftr_weight": "ftr_weight", "years": "years", "year_weight": "year_weight",
-    }
-    if plume_map:
-        names.update(plume_map)
-
-    def _da(key, *, required):
-        v = names.get(key)
-        if not v or v not in ds.variables:
-            if required:
-                raise ValueError(
-                    f"MACv2-SP file lacks required variable {v!r} (logical "
-                    f"{key!r}); this is a simplified plume evaluator — check the "
-                    f"file/version, pass --list-vars, or use the reference "
-                    f"mo_simple_plumes routine for the production forcing.")
-            return None
-        return ds[v]
-
-    lat_da = _da("lat", required=True)
-    plume_dim = lat_da.dims[0]
-    n = lat_da.sizes[plume_dim]
-
-    def _plume_first(key):
-        """Required per-plume array, transposed so the plume axis leads (by NAME,
-        not shape) — refuses any array not carrying the plume dimension."""
-        da = _da(key, required=True)
-        if plume_dim not in da.dims:
-            raise ValueError(
-                f"{names[key]!r} has dims {da.dims}, which do not include the "
-                f"plume dimension {plume_dim!r}; refusing to guess the axis order.")
-        arr = np.asarray(da.transpose(plume_dim, ...).values, dtype=np.float64)
-        if not np.all(np.isfinite(arr)):
-            raise ValueError(f"{names[key]!r} contains non-finite values.")
-        return arr
-
-    lat = np.asarray(lat_da.values, dtype=np.float64)
-    if not np.all(np.isfinite(lat)):
-        raise ValueError("plume_lat contains non-finite values.")
-    lon, theta, aod = _plume_first("lon"), _plume_first("theta"), _plume_first("aod")
-    sig_lon_e, sig_lon_w = _plume_first("sig_lon_e"), _plume_first("sig_lon_w")
-    sig_lat_n, sig_lat_s = _plume_first("sig_lat_n"), _plume_first("sig_lat_s")
-    ftr_w = _plume_first("ftr_weight")             # (n,) or (n, nfeatures)
-
-    years_da = _da("years", required=True)
-    year_dim = years_da.dims[0]
-    years = np.asarray(years_da.values, dtype=np.float64)
-    if not np.all(np.isfinite(years)):
-        raise ValueError("years contains non-finite values.")
-    if years.size > 1 and not np.all(np.diff(years) > 0.0):
-        raise ValueError("years must be strictly increasing (the annual factor "
-                         "is np.interp'd, which needs an ascending x axis).")
-    yw_da = _da("year_weight", required=True)
-    if plume_dim not in yw_da.dims or year_dim not in yw_da.dims:
-        raise ValueError(
-            f"year_weight has dims {yw_da.dims}; expected both the plume "
-            f"dimension {plume_dim!r} and the year dimension {year_dim!r}.")
-    year_w = np.asarray(yw_da.transpose(year_dim, plume_dim).values,
-                        dtype=np.float64)          # (nyr, n) — oriented by name
-    if not np.all(np.isfinite(year_w)):
-        raise ValueError("year_weight contains non-finite values.")
-
-    plumes = []
-    for i in range(n):
-        nf = ftr_w.shape[1] if ftr_w.ndim == 2 else 1
-        feats = []
-        for f in range(nf):
-            fw = float(ftr_w[i, f]) if ftr_w.ndim == 2 else float(ftr_w[i])
-            # dtheta/phase/amp = 0: the file carries no surrogate this simplified
-            # evaluator faithfully consumes (see docstring).
-            feats.append((fw, 0.0, 0.0, 0.0))
-        plumes.append({
-            "lon": float(lon[i]), "lat": float(lat[i]), "theta": float(theta[i]),
-            "sig_lon_e": float(sig_lon_e[i]), "sig_lon_w": float(sig_lon_w[i]),
-            "sig_lat_n": float(sig_lat_n[i]), "sig_lat_s": float(sig_lat_s[i]),
-            "aod": float(aod[i]), "features": feats,
-            "year_weight": (years, year_w[:, i]),
-        })
-    return plumes
-
-
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--in", dest="in_file", type=Path, required=True,
-                   help="MACv2-SP parameter file (MACv2.0-SP_v1.nc).")
-    p.add_argument("--out", type=Path, required=True,
-                   help="Output gridded AOD NetCDF (deck --aerosol-file).")
-    p.add_argument("--year", type=int, default=2000,
-                   help="Year for the annual scaling (default 2000).")
-    p.add_argument("--resolution", type=int, default=96,
-                   help="Number of latitudes (nlon = 2*nlat). Default 96.")
-    p.add_argument("--list-vars", action="store_true",
-                   help="Print the MACv2-SP file's variables and exit.")
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--macv2sp", type=Path, required=True, help="MACv2.0-SP_v1.nc")
+    p.add_argument("--macv1-dir", type=Path, required=True,
+                   help="directory with MACv1 g30_pre_9999.nc and g30_cor_2000.nc")
+    p.add_argument("--band-template", type=Path, required=True,
+                   help="staged aeropt_kinne_sw_b14_*_MACv1.nc: lnwl + wl1_sun/wl2_sun")
+    p.add_argument("--out-dir", type=Path, required=True)
+    p.add_argument("--years", type=int, nargs=2, required=True, metavar=("FIRST", "LAST"))
     return p.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    import xarray as xr
-
-    args = parse_args(argv)
-    with xr.open_dataset(args.in_file, decode_times=False) as ds:
-        if args.list_vars:
-            print("MACv2-SP variables:", list(ds.variables))
-            return 0
-        plumes = read_macv2sp_plumes(ds)
-    nlat = args.resolution
-    mid_days, lat, lon, aod = build_aod_climatology(plumes, args.year, nlat,
-                                                    2 * nlat)
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    to_dataset(mid_days, lat, lon, aod).to_netcdf(args.out)
-    print(f"Wrote {args.out} (12-month AOD climatology for {args.year}, "
-          f"{nlat}x{2 * nlat}; peak AOD {aod.max():.3f})")
-    print("Consume: run_amip_smoke_deck.py --aerosol-forcing external "
-          f"--aerosol-file {args.out}")
-    print("NOTE: from-specification MACv2-SP (Stevens 2017); validate vs the "
-          "reference sp_aop / real parameter file before production use.")
+def main(argv=None) -> int:
+    a = parse_args(argv)
+    for path in build(a.macv2sp, a.macv1_dir, a.band_template, a.out_dir, *a.years):
+        print("wrote", path)
     return 0
 
 

@@ -25,18 +25,21 @@ def test_fcrit2_couples_launch_cap_and_saturation():
     z_full = -7500.0 * jnp.log(p_full / 1000e2)
     z_half = -7500.0 * jnp.log(jnp.clip(p_half, 1.0, None) / 1000e2)
     rho = p_full / (constants.R_d * T)
-    h_topo = jnp.full((ncol,), 800.0)
+    # sgh = 400 m -> CAM displacement hdsp = 2*sgh = 800 m, hdsp^2 = 6.4e5,
+    # below fcrit2*(U/N)^2 ~ 9.1e5 even at fcrit2 = 0.5 (cap inactive).
+    h_topo = jnp.full((ncol,), 400.0)
     lat = jnp.zeros((ncol,))
     kw = dict(u=u, v=v, T=T, p_full=p_full, p_half=p_half,
               z_full=z_full, z_half=z_half, rho=rho, lat=lat,
               dt=600.0)
     kw["h_topo_col"] = h_topo
+    kw["p_ref_half"] = p_half[0]
     out1 = mcfarlane_gwd(config=McFarlaneConfig(fcrit2=1.0), **kw)
     outh = mcfarlane_gwd(config=McFarlaneConfig(fcrit2=0.5), **kw)
     du1, duh = out1.du_dt, outh.du_dt
     assert jnp.all(jnp.isfinite(du1)) and jnp.all(jnp.isfinite(duh))
     # DISCRIMINANT: this fixture keeps the launch Froude cap INACTIVE
-    # (h^2 = 6.4e5 < fcrit2*(U/N)^2 at both values), so the OLD launch-only
+    # (hdsp^2 = 6.4e5 < fcrit2*(U/N)^2 at both values), so the OLD launch-only
     # wiring gives fcrit2 NO effect at all; with the oracle coupling the
     # halved saturation ceiling forces MORE breaking/deposition and the drag
     # must CHANGE (it increases here — lower ceiling, same launch).

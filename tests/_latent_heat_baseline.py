@@ -56,7 +56,7 @@ LATENT_BUDGET: dict[str, int] = {
     'packages/core/legoesm/core/bulk_flux.py': 1,
     'packages/coupler/legoesm/coupler/mpas_adapter.py': 1,
     'packages/coupler/legoesm/driver/compiled_segments.py': 1,
-    'packages/coupler/legoesm/driver/model_driver.py': 3,
+    'packages/coupler/legoesm/driver/model_driver.py': 2,
     'packages/coupler/legoesm/driver/physics_pipeline.py': 3,
     'packages/ice/legoesm/ice/config.py': 1,
     'packages/ice/legoesm/ice/constants_config.py': 2,

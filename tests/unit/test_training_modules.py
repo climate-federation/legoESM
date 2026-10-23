@@ -1081,8 +1081,12 @@ class TestTrainingAPISignatures:
         from legoesm.training.sfno_dycore_coupling import make_sfno_step_unified
 
         class MockSFNOPhysics:
-            def __call__(self, T, u, v, q_v, p_s, phis, dt):
-                del u, v, q_v, phis, dt
+            spatial_embedding = False
+            era5_surface_fluxes = False
+
+            def __call__(self, T, u, v, q_v, p_s, phis, dt,
+                         land_frac=None, sfc_fluxes=None):
+                del u, v, q_v, phis, dt, land_frac, sfc_fluxes
                 return PhysicsOutput(**_zero_physics_output(T, p_s))
 
         step = make_sfno_step_unified(MockSFNOPhysics(), mode="replacement")

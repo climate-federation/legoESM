@@ -145,6 +145,14 @@ def materialize_sub_config(config: TurbulenceConfig) -> TurbulenceConfig:
     return config
 
 
+def resolved_clubb_config(config: TurbulenceConfig):
+    """The ``CLUBBConfig`` dispatch will run, or ``None`` unless
+    ``config.scheme == "clubb"``.  Consumers of CLUBB's top (the cam6_clubb
+    ice-stratus cut in radiation, MG2 and the CMOR cloud diagnostics) read it
+    from here, so they see the same config the closure runs with."""
+    return materialize_sub_config(config).clubb if config.scheme == "clubb" else None
+
+
 def get_turbulence_fn(config: TurbulenceConfig):
     """Select the turbulence backend based on config.scheme."""
     if config.scheme == "smagorinsky":
@@ -257,30 +265,18 @@ def _read_turb_carry(phys_state, carry_field, ncol, nlev, scheme_config, dtype):
     return carry if carry.shape == (ncol, nlev) else floor
 
 
-def _prognostic_clubb_rad_kwargs(carry_field, phys_state, nCells, nlev, dtype):
-    """Radheating kwargs for the ``turb_fn`` call, prognostic CLUBB only.
+def _prognostic_clubb_lat_kwargs(carry_field, lat_fn):
+    """``{"lat": lat_fn()}`` [rad, (ncol,)] for prognostic CLUBB, else ``{}``.
 
-    Returns ``{"rad_dT_dt": array}`` when the resolved scheme is prognostic
-    CLUBB (``carry_field == "clubb_moments"``, a STATIC build-time decision)
-    and the host hands a ``phys_state`` whose cached ``rad_heating`` slot is
-    populated; otherwise ``{}`` so every other scheme and the diagnostic
-    CLUBB path stay byte-identical (their kernels do not accept the kwarg).
-    The decision never depends on array values, only on ``carry_field`` and
-    None-ness, so it is a pure Python branch resolved at trace time.
-
-    CACHE LAG NOTE: ``combined.py`` updates ``PhysicsState.rad_heating`` AFTER
-    the turbulence step runs, so the array seen here is from the PRECEDING
-    radiation solve (one step stale).  That is the documented contract: the
-    thlp2 budget's radiative source term uses the latest cached heating
-    available at turbulence time.
+    Prognostic CLUBB locates CAM's chemistry tropopause (its ``clubbtop``),
+    whose polar rule and fallback need the column latitudes; it raises when
+    they are missing.  ``lat_fn`` is only called for that scheme, so other
+    kernels (which do not accept the kwarg) and grids stay untouched.  A
+    static build-time decision on ``carry_field``, never on array values.
     """
     if carry_field != "clubb_moments":
         return {}
-    rad_heating = (getattr(phys_state, "rad_heating", None)
-                   if phys_state is not None else None)
-    if rad_heating is None:
-        return {}
-    return {"rad_dT_dt": jnp.asarray(rad_heating, dtype=dtype).reshape(nCells, nlev)}
+    return {"lat": lat_fn()}
 
 
 from legoesm.atmosphere.physics._shared import (
@@ -488,17 +484,22 @@ def _carry_update_with_cloud_fraction(carry_field, carry_val, turb_out):
     (``carry_field`` -> ``carry_val``: tke / qke / clubb_moments) is co-located
     under its own key so it still evolves across the step.
 
-    Schemes with no PDF cloud closure leave ``cloud_fraction=None`` -> we return
-    the plain ``carry_val``, byte-identical to the pre-existing (bare value, not
-    dict) contract.  combined.py only merges the dict when ``field_name`` (the
-    registered carry field) is not None, which holds for every cf-producing
-    scheme today (CLUBB carries ``tke``); a diagnostic scheme that ever set cf
-    with ``carry_field=None`` would need combined.py's ``field_name is not None``
-    guard relaxed for the dict branch first.
+    The diagnosed PBL height ``turb_out.h_pbl`` is always published as
+    ``pblh`` (CAM's pbuf ``pblh``, written by clubb_intr.F90:2616): deep
+    convection reads it one step lagged for its launch-level bound
+    (convect_deep.F90:266).  Schemes with no PDF cloud closure leave
+    ``cloud_fraction=None`` and publish only ``pblh`` plus their carry; a PDF
+    closure that also returns ``relvar`` (prognostic CLUBB) publishes it next
+    to ``cloud_fraction`` for MG2.
+    combined.py only merges the dict when ``field_name`` (the registered carry
+    field) is not None, which holds for every scheme (turbulence_carry_field
+    never returns None).
     """
-    if turb_out.cloud_fraction is None:
-        return carry_val
-    updates = {"cloud_fraction": turb_out.cloud_fraction}
+    updates = {"pblh": turb_out.h_pbl}
+    if turb_out.cloud_fraction is not None:
+        updates["cloud_fraction"] = turb_out.cloud_fraction
+        if turb_out.relvar is not None:
+            updates["relvar"] = turb_out.relvar
     if carry_field is not None and carry_val is not None:
         updates[carry_field] = carry_val
     return updates
@@ -574,7 +575,9 @@ def make_turbulence_physics(
         # vapour tendency that has had that liquid removed. Only the MPAS lane
         # routes it to a tracer today; dropping it on a lane that cannot would
         # destroy exactly that much water every step, silently. Refuse instead.
-        if turbulence_config.liquid_partition:
+        # The spectral_pe bridge routes it too, so only this refusal exempts
+        # it; the saline refusal below still applies there.
+        if model_type != "spectral_pe" and turbulence_config.liquid_partition:
             raise NotImplementedError(
                 "TurbulenceConfig.liquid_partition returns a cloud-liquid tendency "
                 f"(TurbulenceOutput.dq_c_dt) that the {model_type!r} turbulence "
@@ -722,6 +725,8 @@ def _make_hydrostatic_turbulence(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, step_config,
+                **_prognostic_clubb_lat_kwargs(
+                    carry_field, lambda: jnp.reshape(grid.lat, (ncol,))),
             )
             tke_out = tke_new
         else:
@@ -939,7 +944,7 @@ def _make_mpas_turbulence(
         #   1. ``forcing["beta_land"]`` — TRACED per-cell root-zone beta_soil
         #      from the interactive multilayer land (#1312 phase 2b; one-step
         #      lag, updated by the driver loop each step without retrace).
-        #   2. the STATIC ``land_beta`` build-time knob (mpas_land_beta).
+        #   2. the STATIC ``land_beta`` build-time knob (land_beta).
         # Both gates are static Python ``if``s (dict-key membership is part
         # of the forcing pytree structure; the knob is a build-time closure
         # const — the JAX feature-gating exception): defaults keep these
@@ -979,7 +984,7 @@ def _make_mpas_turbulence(
                     "forcing['beta_land'] (traced per-cell beta_soil) "
                     "requires the land fraction to be threaded into the "
                     "turbulence factory (make_physics f_land=...); the "
-                    "driver must pass f_land whenever mpas_land_beta_soil "
+                    "driver must pass f_land whenever land_beta_soil "
                     "is enabled."
                 )
             from legoesm.atmosphere.physics.turbulence.surface_layer import (
@@ -999,11 +1004,17 @@ def _make_mpas_turbulence(
         if getattr(_surf, "ocean_q_sfc_saline", False):
             # Sea water at the SURFACE pressure (the coupled lane's convention)
             # for the ocean fraction: replace that fraction's fresh-water share
-            # of the blend; the land share is untouched.
+            # of the blend; the land share is untouched.  SPECIFIC humidity,
+            # like the air humidity it is differenced with (CESM ssq = 0.98 x
+            # saturation specific humidity): the saturation curve's MIXING
+            # RATIO is converted before the salinity factor.
             from legoesm.core.bulk_flux import ocean_surface_q_sat
-            _q_ocean = ocean_surface_q_sat(
-                T_sfc, p_s.reshape(nCells), thermo_convention=_surf.thermo_convention,
-                bulk_scheme=_surf.bulk_scheme, saline_factor=_Q_SAT_SALINE_FACTOR)
+            from legoesm.thermo import mixing_ratio_to_specific_humidity
+            _q_ocean = _Q_SAT_SALINE_FACTOR * mixing_ratio_to_specific_humidity(
+                ocean_surface_q_sat(
+                    T_sfc, p_s.reshape(nCells),
+                    thermo_convention=_surf.thermo_convention,
+                    bulk_scheme=_surf.bulk_scheme))
             _fo = (1.0 - jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
                    if f_land is not None else 1.0)
             q_sfc = q_sfc + _fo * (_q_ocean - _q_sfc_fresh)
@@ -1043,7 +1054,7 @@ def _make_mpas_turbulence(
                 surface_fluxes_at_lowest_level,
             )
             _fl = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
-            # ``forcing["T_sfc_ocean"]`` (mpas_ocean_flux_on_ocean_surface,
+            # ``forcing["T_sfc_ocean"]`` (ocean_flux_on_ocean_surface,
             # #1320): the non-land fraction's bulk call sees the ocean/ice
             # surface instead of the land-blended T_sfc/q_sfc, whose land skin
             # and land humidity belong to the fraction the land model already
@@ -1056,12 +1067,14 @@ def _make_mpas_turbulence(
             else:
                 _T_bulk = jnp.asarray(_T_oc, dtype=T_sfc.dtype).reshape(nCells)
                 if getattr(_surf, "ocean_q_sfc_saline", False):
+                    # Specific humidity, as the blended path's ocean share.
                     from legoesm.core.bulk_flux import ocean_surface_q_sat
-                    _q_bulk = ocean_surface_q_sat(
-                        _T_bulk, p_s.reshape(nCells),
-                        thermo_convention=_surf.thermo_convention,
-                        bulk_scheme=_surf.bulk_scheme,
-                        saline_factor=_Q_SAT_SALINE_FACTOR)
+                    from legoesm.thermo import mixing_ratio_to_specific_humidity
+                    _q_bulk = _Q_SAT_SALINE_FACTOR * mixing_ratio_to_specific_humidity(
+                        ocean_surface_q_sat(
+                            _T_bulk, p_s.reshape(nCells),
+                            thermo_convention=_surf.thermo_convention,
+                            bulk_scheme=_surf.bulk_scheme))
                 else:
                     _q_bulk = saturation_specific_humidity(_T_bulk, p_full_col[:, -1])
             # Through the shared helper rather than an inline copy: this
@@ -1106,7 +1119,7 @@ def _make_mpas_turbulence(
                 (1.0 - _fl) * _lh + _fl * _lh_land,
                 _us,
             )
-            # ``forcing["taumag_land"]`` (mpas_land_stress_from_land): the land
+            # ``forcing["taumag_land"]`` (land_stress_from_land): the land
             # model's stress replaces the bulk (ocean-roughness) stress over the
             # land fraction, with ``taumag_land_valid`` (a land step has
             # succeeded for the column; the driver carries the last valid value
@@ -1151,13 +1164,16 @@ def _make_mpas_turbulence(
         if _liquid_partition:
             _sfc_kw = dict(_sfc_kw, q_c=_qc_col)
 
-        # Radiative-heating kwargs: prognostic CLUBB only, and only when the
-        # host cached a rad_heating.  CACHE LAG: combined.py refreshes the
-        # cache AFTER turbulence, so this is the PRECEDING radiation solve's
-        # heating.  {} (no kwarg at all) for every other scheme and the
-        # diagnostic CLUBB path — their turb_fn signatures do not accept it.
-        _rad_kw = _prognostic_clubb_rad_kwargs(
-            carry_field, phys_state, nCells, nlev, _state_dtype)
+        # No radiative thlp2 source is handed to CLUBB: CAM6 applies it only
+        # under clubb_cloudtop_cooling (do_cldcool), default .false.
+        # (namelist_defaults_cam.xml cesm2_1_rel :1200; clubb_intr.F90 :1935).
+
+        def _mesh_lat():
+            if not hasattr(mesh, "latCell"):
+                raise ValueError(
+                    "prognostic CLUBB needs cell latitudes (mesh.latCell) for "
+                    "CAM's chemistry tropopause; this mesh has none.")
+            return jnp.reshape(jnp.asarray(mesh.latCell), (nCells,))
 
         if needs_tke:
             tke_in = _read_turb_carry(
@@ -1166,7 +1182,8 @@ def _make_mpas_turbulence(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, step_config,
-                **_sfc_kw, **_rad_kw,
+                **_sfc_kw,
+                **_prognostic_clubb_lat_kwargs(carry_field, _mesh_lat),
             )
             tke_out = tke_new
         else:
@@ -1258,6 +1275,216 @@ def _make_mpas_turbulence(
         return None
 
     physics_fn.reset_state = reset_state
+    return physics_fn
+
+
+def make_surface_bulk_physics(C_H: float, C_E: float,
+                              latent: bool = True) -> Callable:
+    """Constant-coefficient surface exchange for the MPAS-style column lanes
+    when NO turbulence scheme runs: the same law as the lat-lon/cube pipeline
+    (:func:`~legoesm.atmosphere.physics.turbulence.surface_layer.constant_bulk_surface_fluxes`
+    + :func:`~legoesm.atmosphere.physics.turbulence.surface_layer.bottom_layer_surface_kick`),
+    applied to the lowest layer.  Heat and moisture only, no surface stress
+    (the pipeline's bulk path applies none either).
+
+    Signature ``(state, mesh, sigma_coord, forcing, phys_state) ->
+    HydrostaticTendencies``; the surface temperature is the lane's
+    ``forcing["T_sfc"]`` (any shape that reshapes to ``p_s``), else a
+    prescribed ``phys_state.surface_T_sfc_override`` (the single-column
+    model's prescribed skin, as the turbulence schemes read it).
+    Edge winds are reconstructed to cells (Perot); a state carrying cell
+    winds (``state.v`` present: the FV3-duo column view, a cell-centred
+    lat-lon state) hands them over directly.  A dry deck
+    (``latent=False``, or no ``q_v`` tracer) exchanges sensible heat only.
+    """
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        bottom_layer_surface_kick, constant_bulk_surface_fluxes)
+
+    def physics_fn(state, mesh, sigma_coord, forcing=None, phys_state=None):
+        _valid = None      # per-column mask: a prescribed skin exists
+        if forcing is not None and forcing.get("T_sfc") is not None:
+            T_sfc_in = forcing["T_sfc"]
+        elif getattr(phys_state, "surface_T_sfc_override", None) is not None:
+            from legoesm.atmosphere.physics.physics_state import (
+                SFC_T_OVERRIDE_VALID_MIN)
+            T_sfc_in = phys_state.surface_T_sfc_override
+            _valid = T_sfc_in > SFC_T_OVERRIDE_VALID_MIN
+        else:
+            raise ValueError(
+                "surface bulk exchange needs a surface temperature (the "
+                "lane's forcing['T_sfc'] or a prescribed "
+                "phys_state.surface_T_sfc_override); none was given. Pass "
+                "surface_bulk_coeffs=None for no surface exchange.")
+        T = state.T.data
+        p_s = state.p_s.data
+        if state.v is not None:
+            u_low, v_low = state.u.data[..., -1], state.v.data[..., -1]
+        else:
+            from legoesm.grids.voronoi import reconstruct_cell_velocity
+            u_cell, v_cell = reconstruct_cell_velocity(state.u.data, mesh)
+            u_low, v_low = u_cell[:, -1], v_cell[:, -1]
+        # A dry deck carries no vapour: sensible heat only.
+        _moist = (latent and state.tracers is not None
+                  and "q_v" in state.tracers)
+        T_sfc = jnp.asarray(T_sfc_in).reshape(p_s.shape)
+        if _valid is not None:
+            # No prescribed skin in a column (the sentinel): no exchange there.
+            _valid = _valid.reshape(p_s.shape)
+            T_sfc = jnp.where(_valid, T_sfc, T[..., -1])
+        if _moist:
+            _qv_raw = state.tracers["q_v"]
+            _qv = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+            q_low = _qv[..., -1]
+        else:
+            q_low = jnp.zeros_like(T[..., -1])
+        shflx, lhflx = constant_bulk_surface_fluxes(
+            T[..., -1], q_low, u_low, v_low,
+            sigma_coord.pressure_at_full(p_s)[..., -1], p_s, T_sfc, C_H, C_E)
+        if not _moist:
+            lhflx = jnp.zeros_like(lhflx)
+        if _valid is not None:
+            shflx = jnp.where(_valid, shflx, 0.0)
+            lhflx = jnp.where(_valid, lhflx, 0.0)
+        dT_low, dq_low, evap = bottom_layer_surface_kick(
+            shflx, lhflx, T_sfc, sigma_coord.layer_thickness_dp(p_s)[..., -1])
+        dT = jnp.zeros_like(T).at[..., -1].set(dT_low.astype(T.dtype))
+        tracer_tends = None
+        if _moist:
+            dq = jnp.zeros_like(_qv).at[..., -1].set(dq_low.astype(_qv.dtype))
+            tracer_tends = {"q_v": (
+                _qv_raw.replace(data=dq, name="dq_v_dt_sfc_bulk")
+                if hasattr(_qv_raw, "replace") else dq)}
+        zero_ps = jnp.zeros_like(p_s)
+        return HydrostaticTendencies(
+            du_dt=state.u.replace(data=jnp.zeros_like(state.u.data),
+                                  name="du_dt_sfc_bulk"),
+            dv_dt=(None if state.v is None else state.v.replace(
+                data=jnp.zeros_like(state.v.data), name="dv_dt_sfc_bulk")),
+            dT_dt=state.T.replace(data=dT, name="dT_dt_sfc_bulk"),
+            dp_s_dt=state.p_s.replace(data=zero_ps, name="dp_s_dt_sfc_bulk"),
+            dphis_dt=state.phis.replace(data=zero_ps,
+                                        name="dphis_dt_sfc_bulk"),
+            tracer_tendencies=tracer_tends,
+            shflx_sfc=state.p_s.replace(data=shflx, name="shflx_sfc_bulk",
+                                        units="W/m^2"),
+            lhflx_sfc=state.p_s.replace(data=lhflx, name="lhflx_sfc_bulk",
+                                        units="W/m^2"),
+            evap_sfc=state.p_s.replace(data=evap, name="evap_sfc_bulk",
+                                       units="kg/m^2/s"),
+        )
+
+    physics_fn._wants_forcing = True
+    physics_fn._wants_phys_state_ro = True
+    return physics_fn
+
+
+def make_column_surface_bulk_fn(sigma_coord, C_H: float, C_E: float):
+    """Raw-array surface hook for the tiled cube step:
+    ``fn(T, p_s, q_v | None, u_low, v_low, T_sfc) -> (dT, dq_v | None)``,
+    the same law as :func:`make_surface_bulk_physics` (lowest layer, no
+    stress).  ``q_v=None`` (a dry lane): sensible heat only.
+    """
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        bottom_layer_surface_kick, constant_bulk_surface_fluxes)
+
+    def fn(T, p_s, q_v, u_low, v_low, T_sfc):
+        q_low = (jnp.zeros_like(T[..., -1]) if q_v is None else q_v[..., -1])
+        shflx, lhflx = constant_bulk_surface_fluxes(
+            T[..., -1], q_low, u_low, v_low,
+            sigma_coord.pressure_at_full(p_s)[..., -1], p_s, T_sfc, C_H, C_E)
+        if q_v is None:
+            lhflx = jnp.zeros_like(lhflx)
+        dT_low, dq_low, _ = bottom_layer_surface_kick(
+            shflx, lhflx, T_sfc, sigma_coord.layer_thickness_dp(p_s)[..., -1])
+        dT = jnp.zeros_like(T).at[..., -1].set(dT_low.astype(T.dtype))
+        if q_v is None:
+            return dT, None
+        return dT, jnp.zeros_like(q_v).at[..., -1].set(dq_low.astype(q_v.dtype))
+
+    return fn
+
+
+def make_spectral_surface_bulk_physics(C_H: float, C_E: float,
+                                       latent: bool = True) -> Callable:
+    """:func:`make_surface_bulk_physics` for the spectral PE lane.
+
+    Signature ``(state, grid, sigma_coord, grid_fields=None, forcing=None)
+    -> SpectralHydrostaticState``; ``forcing["T_sfc"]`` is the lane's
+    per-step (flattened) blended surface temperature.  No ``q_v`` tracer (or
+    ``latent=False``): sensible heat only.
+    """
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        bottom_layer_surface_kick, constant_bulk_surface_fluxes)
+
+    def physics_fn(state, grid, sigma_coord, grid_fields=None, forcing=None,
+                   phys_state=None):
+        _valid = None      # per-column mask: a prescribed skin exists
+        if forcing is not None and forcing.get("T_sfc") is not None:
+            T_sfc_in = forcing["T_sfc"]
+        elif getattr(phys_state, "surface_T_sfc_override", None) is not None:
+            from legoesm.atmosphere.physics.physics_state import (
+                SFC_T_OVERRIDE_VALID_MIN)
+            T_sfc_in = phys_state.surface_T_sfc_override
+            _valid = T_sfc_in > SFC_T_OVERRIDE_VALID_MIN
+        else:
+            raise ValueError(
+                "surface bulk exchange needs a surface temperature (the "
+                "lane's forcing['T_sfc'] or a prescribed "
+                "phys_state.surface_T_sfc_override); none was given. Pass "
+                "surface_bulk_coeffs=None for no surface exchange.")
+        fields = grid_fields
+        if fields is None:
+            fields = spectral_pe_to_grid(state, grid, sigma_coord)
+        T, p_s = fields["T"], fields["p_s"]
+        _moist = (latent and state.tracers is not None
+                  and "q_v" in state.tracers)
+        if _moist:
+            _qv_raw = state.tracers["q_v"]
+            _qv = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+            q_low = _qv.reshape(T.shape)[..., -1]
+        else:
+            q_low = jnp.zeros_like(T[..., -1])
+        T_sfc = jnp.asarray(T_sfc_in).reshape(p_s.shape)
+        if _valid is not None:
+            # No prescribed skin in a column (the sentinel): no exchange there.
+            _valid = _valid.reshape(p_s.shape)
+            T_sfc = jnp.where(_valid, T_sfc, T[..., -1])
+        shflx, lhflx = constant_bulk_surface_fluxes(
+            T[..., -1], q_low, fields["u"][..., -1], fields["v"][..., -1],
+            sigma_coord.pressure_at_full(p_s)[..., -1], p_s, T_sfc, C_H, C_E)
+        if not _moist:
+            lhflx = jnp.zeros_like(lhflx)
+        if _valid is not None:
+            shflx = jnp.where(_valid, shflx, 0.0)
+            lhflx = jnp.where(_valid, lhflx, 0.0)
+        dT_low, dq_low, _ = bottom_layer_surface_kick(
+            shflx, lhflx, T_sfc, sigma_coord.layer_thickness_dp(p_s)[..., -1])
+        dT = jnp.zeros_like(T).at[..., -1].set(dT_low.astype(T.dtype))
+        tracers_tend = None
+        if state.tracers is not None:
+            tracers_tend = {}
+            for name, template in state.tracers.items():
+                _d = template.data if hasattr(template, "data") else template
+                arr = jnp.zeros_like(_d)
+                if name == "q_v" and _moist:
+                    arr = arr.reshape(T.shape).at[..., -1].set(
+                        dq_low.astype(_d.dtype)).reshape(_d.shape)
+                tracers_tend[name] = (template.replace(data=arr)
+                                      if hasattr(template, "replace") else arr)
+        zero_3d = jnp.zeros_like(state.vor_hat.data)
+        return SpectralHydrostaticState(
+            vor_hat=state.vor_hat.replace(data=zero_3d),
+            div_hat=state.div_hat.replace(data=zero_3d),
+            T_hat=state.T_hat.replace(data=sh_analysis_3d(grid, dT)),
+            lnps_hat=state.lnps_hat.replace(
+                data=jnp.zeros_like(state.lnps_hat.data)),
+            phis_hat=state.phis_hat.replace(
+                data=jnp.zeros_like(state.phis_hat.data)),
+            tracers=tracers_tend,
+        )
+
+    physics_fn._wants_forcing = True
+    physics_fn._wants_phys_state_ro = True
     return physics_fn
 
 
@@ -1452,6 +1679,24 @@ def _make_spectral_pe_turbulence(
     scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
     needs_tke = turbulence_scheme_traits(scheme_name).carries_energy
     carry_field = turbulence_carry_field(scheme_name, scheme_config)
+    # CLUBB liquid partition (CAM clubb_intr): the closure is SEEDED with the
+    # host cloud liquid and returns its own diagnosed liquid as ``dq_c_dt``,
+    # paired with a vapour tendency that has had exactly that water removed.
+    # Both halves are routed below; the pair conserves total water and the
+    # condensation heating already rides ``dT_dt``. Static Python (build-time)
+    # so a state that cannot hold the pair is refused before any trace.
+    _liquid_partition = (bool(turbulence_config.liquid_partition)
+                         and scheme_name == "clubb")
+    if _liquid_partition and carry_field != "clubb_moments":
+        # Only the prognostic closure takes the host liquid (clubb.py's
+        # ``clubb_turbulence_prognostic`` has the ``q_c`` argument; the
+        # diagnostic entry does not), so a diagnostic selection would seed
+        # nothing and write its rcm back over a tracer the closure never saw.
+        raise ValueError(
+            "TurbulenceConfig.liquid_partition needs the PROGNOSTIC CLUBB closure "
+            "(CLUBBConfig.prognostic=True): the diagnostic entry point takes "
+            f"no host cloud liquid. Resolved carry={carry_field!r}, "
+            f"scheme={scheme_name!r}.")
     if carry_field == "qke":
         # MYNN-2.5 stays refused on this lane. The mechanism below is not
         # carry-specific, so it would probably work -- but "probably" is not a
@@ -1516,6 +1761,24 @@ def _make_spectral_pe_turbulence(
         # and its surface latent flux was evaluated against q_v = 0, i.e.
         # the largest moisture gradient the bulk formula can produce.
         # Clipped at zero on the way in, matching the microphysics bridge.
+        _qc_col = None
+        if _liquid_partition:
+            # BOTH halves, as on the MPAS bridge: the vapour block below
+            # substitutes zeros for a missing 'q_v', so a state carrying
+            # liquid but no vapour would evaporate liquid into a tendency
+            # nothing applies -- water destroyed, silently.
+            _missing = [n for n in ("q_v", "q_c")
+                        if state.tracers is None or n not in state.tracers]
+            if _missing:
+                raise ValueError(
+                    "TurbulenceConfig.liquid_partition exchanges water between the "
+                    f"vapour and liquid tracers, and {_missing} is not carried "
+                    "by this spectral state. Both must exist, or the half that "
+                    "is missing is destroyed. Carry them, or switch the "
+                    "partition off.")
+            _qc_raw = state.tracers["q_c"]
+            _qc_col = (_qc_raw.data if hasattr(_qc_raw, "data")
+                       else _qc_raw).reshape(ncol, nlev)
         if state.tracers is not None and "q_v" in state.tracers:
             _qv_raw = state.tracers["q_v"]
             _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
@@ -1560,18 +1823,23 @@ def _make_spectral_pe_turbulence(
                     "select diagnostic CLUBB.")
             tke_in = _read_turb_carry(
                 phys_state, carry_field, ncol, nlev, scheme_config, _state_dtype)
+            _liq_kw = {"q_c": _qc_col} if _liquid_partition else {}
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half_col, z_full, z_half,
-                T_sfc, q_sfc, rho, dt, step_config,
+                T_sfc, q_sfc, rho, dt, step_config, **_liq_kw,
+                # Gaussian latitudes [rad] (n_lat,), lat-major like the columns.
+                **_prognostic_clubb_lat_kwargs(
+                    carry_field, lambda: jnp.repeat(grid.lat, n_lon)),
             )
             tke_out = tke_new
         else:
             # No land-flux hand-over on this lane (see the hydrostatic closure).
+            _liq_kw = {"q_c": _qc_col} if _liquid_partition else {}
             turb_out = turb_fn(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half_col, z_full, z_half,
-                T_sfc, q_sfc, rho, dt, step_config,
+                T_sfc, q_sfc, rho, dt, step_config, **_liq_kw,
             )
 
         # Reshape tendencies to grid space
@@ -1615,10 +1883,23 @@ def _make_spectral_pe_turbulence(
         tracers_tend = None
         if state.tracers is not None:
             dq_v_dt = turb_out.dq_v_dt.reshape(n_lat, n_lon, nlev)
+            if _liquid_partition and turb_out.dq_c_dt is None:
+                raise ValueError(
+                    "TurbulenceConfig.liquid_partition is on but the closure "
+                    "returned no cloud-liquid tendency (dq_c_dt is None); the "
+                    "vapour tendency has already had that liquid removed, so "
+                    "routing only the vapour half would destroy it.")
+            dq_c_dt = (turb_out.dq_c_dt.reshape(n_lat, n_lon, nlev)
+                       if _liquid_partition else None)
             tracers_tend = {}
             for name, template in state.tracers.items():
                 if name == "q_v":
                     arr = dq_v_dt
+                elif name == "q_c" and dq_c_dt is not None:
+                    # Paired with the vapour tendency above: together they
+                    # conserve total water, so this must land wherever that
+                    # one did.
+                    arr = dq_c_dt
                 elif hasattr(template, "data"):
                     arr = jnp.zeros_like(template.data)
                 else:

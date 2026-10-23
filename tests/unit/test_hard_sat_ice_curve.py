@@ -296,7 +296,7 @@ def test_validate_refuses_non_mpas_ice_curve():
     cfg = _ice_curve_cfg(
         grid=GridConfig(grid_type="cubed_sphere", resolution=1, nlev=8),
         dycore=DycoreConfig(dt=600.0, discretization="centered"))
-    with pytest.raises(ValueError, match="requires an MPAS grid"):
+    with pytest.raises(ValueError, match="requires the column loop"):
         cfg.validate_strict()
 
 

@@ -161,6 +161,15 @@ def main():
         clubb_cfg = getattr(materialize_sub_config(turb), "clubb", None)
         if clubb_cfg is None:
             raise SystemExit("no CLUBB sub-config on this deck")
+        # CAM's chemistry tropopause, found once from the host state before
+        # the sub-cycle, as clubb_turbulence_prognostic does (a CLUBB top > 0
+        # needs it, clubb_intr.F90:1611).
+        _top_kw = {}
+        if clubb_cfg.trop_cloud_top_press > 0.0:
+            from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+                cam_chem_tropopause_level)
+            _top_kw = {"troplev": cam_chem_tropopause_level(
+                T, p_full, p_half, jnp.asarray(mesh.latCell).reshape(nCells))}
         dt_phys = float(config.dycore.dt) * int(getattr(config, "physics_update_steps", 1) or 1)
         moments = unpack_clubb_moments(jnp.asarray(moments_packed))
         _ns = max(1, int(a.clubb_nsub))
@@ -175,7 +184,7 @@ def main():
               f"(the run's physics step is {dt_phys:.1f} s)")
         for _i in range(_ns):
             out = clubb_step(_u, _v, _T, _q, _m, p_full, p_half, z_full, z_half,
-                             T_sfc, q_sfc, _rho, _dts, clubb_cfg,
+                             T_sfc, q_sfc, _rho, _dts, clubb_cfg, **_top_kw,
                              **({} if _ql is None else {"q_c": _ql}))
             _du, _dv, _dT, _dq, _m, diags = out
             if _ql is not None:
@@ -224,7 +233,7 @@ def main():
             for _i in range(_ns):
                 _du, _dv, _dT, _dq, _m, _dg = clubb_step(
                     _u, _v, _T, _q, _m, p_full, p_half, z_full, z_half,
-                    T_sfc, q_sfc, _rho, _dts, clubb_cfg, q_c=_ql)
+                    T_sfc, q_sfc, _rho, _dts, clubb_cfg, q_c=_ql, **_top_kw)
                 _ql = _ql + _dts * _dg["dq_c_dt"]
                 if _i < _ns - 1:
                     _u = _u + _dts * _du; _v = _v + _dts * _dv
@@ -280,11 +289,15 @@ def main():
         cf_override = jnp.asarray(_carried_cf).reshape(nCells, nlev)
         print(f"[{a.label}] using the CARRIED CLUBB cloud fraction as the optics override")
 
+    from legoesm.atmosphere.physics.turbulence.integration import resolved_clubb_config
+    _clubb_run = resolved_clubb_config(turb)     # cam6_clubb: aist top cut
+
     def props(cfg):
         return compute_cloud_properties(
             T, p_full, q_v, dp, cfg, q_cloud=q_c, q_ice=q_i,
             n_ice=n_i, n_cloud=n_c, cloud_fraction_override=cf_override,
-            p_half=p_half, lat=jnp.asarray(mesh.latCell).reshape(nCells))
+            p_half=p_half, lat=jnp.asarray(mesh.latCell).reshape(nCells),
+            clubb_config=_clubb_run)
 
     cp = props(ccfg)
     lwp = np.asarray(cp.lwp); iwp = np.asarray(cp.iwp)
@@ -318,7 +331,8 @@ def main():
         cp_p = compute_cloud_properties(
             T, p_full, q_v, dp, ccfg, q_cloud=_qcp_new, q_ice=q_i,
             n_ice=n_i, n_cloud=n_c, cloud_fraction_override=cf_override,
-            p_half=p_half, lat=jnp.asarray(mesh.latCell).reshape(nCells))
+            p_half=p_half, lat=jnp.asarray(mesh.latCell).reshape(nCells),
+            clubb_config=_clubb_run)
         lwp_p = np.asarray(cp_p.lwp); reff_p = np.asarray(cp_p.r_eff_liq)
         LWP_p = float(np.sum(A * lwp_p.sum(axis=1)))
         tau_p = 1.5 * lwp_p / (RHO_W * np.maximum(reff_p, 1e-12))

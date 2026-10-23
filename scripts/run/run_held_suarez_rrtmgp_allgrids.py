@@ -35,7 +35,7 @@ GRID_CONFIGS = {
         ),
         dycore=DycoreConfig(
             model_type="hydrostatic", discretization="cdgrid",
-            energy_fixer=False,  # not wired here (F15, vote V11-C)
+            energy_fixer=False,  # HS benchmark: no fixer (F15b vote V4)
             dt=600.0, hyperdiff_scale=1.0, div_damp_scale=1.0,
             conservation_fixer=True, fix_mass=True,
         ),
@@ -47,7 +47,7 @@ GRID_CONFIGS = {
         ),
         dycore=DycoreConfig(
             model_type="hydrostatic", discretization="latlon_fv",
-            energy_fixer=False,  # not wired here (F15, vote V11-C)
+            energy_fixer=False,  # HS benchmark: no fixer (F15b vote V4)
             dt=600.0, hyperdiff_scale=1.0, div_damp_scale=1.0,
             conservation_fixer=True, fix_mass=True,
         ),
@@ -59,7 +59,7 @@ GRID_CONFIGS = {
         ),
         dycore=DycoreConfig(
             model_type="hydrostatic", discretization="spectral",
-            energy_fixer=False,  # not wired here (F15, vote V11-C)
+            energy_fixer=False,  # not wired on spectral (F15b)
             dt=900.0, hyperdiff_scale=1.0, div_damp_scale=1.0,
         ),
     ),

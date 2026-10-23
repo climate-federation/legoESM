@@ -22,8 +22,6 @@ pytestmark = pytest.mark.tier2  # intermediate: AMIP smoke, mass+energy gates
 
 from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig, OutputConfig
 from legoesm.driver.model_driver import ModelDriver
-from legoesm.core.operators import global_integral
-from legoesm.core.field import Field
 
 
 @pytest.mark.slow
@@ -45,18 +43,16 @@ class TestConservationBaseline:
         driver = ModelDriver(cfg, output_dir=out)
         driver.setup()
 
-        # Record initial mass
-        p_s_f = Field(driver.state.p_s.data, name="p_s",
-                      dims=("face", "x", "y"), units="Pa")
-        initial_mass = float(global_integral(p_s_f, driver.grid))
+        # Record initial DRY mass -- the integral the fixer holds (F13,
+        # review 2026-10-10): the total p_s integral legitimately moves by
+        # the column water precipitation and evaporation add or remove.
+        dsigma = driver.sigma.dsigma
+        initial_mass = float(driver._segment_dry_mass_target(dsigma))
 
         status = driver.run()
         assert status == "COMPLETED", f"Run failed: {status}"
 
-        # Final mass
-        p_s_f2 = Field(driver.state.p_s.data, name="p_s",
-                       dims=("face", "x", "y"), units="Pa")
-        final_mass = float(global_integral(p_s_f2, driver.grid))
+        final_mass = float(driver._segment_dry_mass_target(dsigma))
 
         return driver, out, initial_mass, final_mass
 
@@ -88,7 +84,11 @@ class TestConservationBaseline:
         tracker = driver.diagnostics.moisture_tracker
         assert len(tracker.column_water) >= 2
         assert all(np.isfinite(v) for v in tracker.column_water)
-        assert all(np.isfinite(v) for v in tracker.residual)
+        # The first sample has no tendency, so its closure residual is NaN by
+        # contract (MoistureBudgetTracker.update: "NaN, not zero"); every
+        # later sample must close to a finite number.
+        assert np.isnan(tracker.residual[0])
+        assert all(np.isfinite(v) for v in tracker.residual[1:])
 
     def test_moisture_budget_summary(self, run_result):
         """Moisture budget summary is well-formatted."""

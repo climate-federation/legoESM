@@ -286,7 +286,7 @@ def _run_mpas_source():
 
     from legoesm.driver.model_driver import ModelDriver
 
-    return inspect.getsource(ModelDriver._run_mpas)
+    return inspect.getsource(ModelDriver._run_column)
 
 
 def test_the_production_lane_carries_the_hold_count_out_of_the_land_step():

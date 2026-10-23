@@ -102,8 +102,16 @@ def compute_heights_from_sigma(T, p_half, q_v=None):
     z_half : array (ncol, nlev+1)
         Height at half levels [m] (surface = 0).
     """
-    dz = compute_layer_dz(T, p_half, q_v)
+    return heights_from_layer_dz(compute_layer_dz(T, p_half, q_v))
 
+
+def heights_from_layer_dz(dz):
+    """Full- and half-level heights [m] from layer thicknesses ``dz``.
+
+    ``dz`` is ``(ncol, nlev)``, TOA-first.  Half levels are the running sum of
+    the thicknesses below (surface = 0); full levels are the midpoint of the
+    two bounding half levels.  Returns ``(z_full, z_half)``.
+    """
     # Integrate from surface upward.  Use ``jnp.pad`` to append the
     # surface (z=0) boundary instead of allocating a fresh
     # ``jnp.zeros((ncol, 1))`` and concatenating — single Pad HLO op
@@ -276,6 +284,22 @@ def ke_dissipation_heating(u, v, du_dt, dv_dt, dt):
              + dv_dt * (v + 0.5 * dt * dv_dt)) / constants.c_pd
 
 
+def column_energy_fixer_heating(residual, layer_mass, weight):
+    """Heating [K/s] that removes a column energy residual (CAM ``se_dis``).
+
+        dT/dt_k = -residual * w_k / (c_pd * sum_j layer_mass_j * w_j)
+
+    ``residual`` [W/m2, + = energy created], ``layer_mass`` [kg/m2] (dp/g),
+    ``weight`` >= 0 per level (where the fix may act; uniform per unit mass
+    where it is 1).  Exact: ``sum(c_pd * dT/dt * layer_mass) == -residual``.
+    CAM6 ``clubb_intr`` ``clubb_do_energyfix``: the imbalance spread evenly
+    per unit mass over the depth where CLUBB is active.
+    """
+    return -(residual[..., None] * weight
+             / (constants.c_pd * jnp.sum(layer_mass * weight, axis=-1,
+                                         keepdims=True)))
+
+
 def broadcast_column_param(value, like):
     """Broadcast a config coefficient over a column field's vertical dimension.
 
@@ -366,6 +390,16 @@ def exner_to_pressure(exner):
     """
     inverse_poisson_exponent = 1.0 / constants.kappa
     return constants.p_ref * exner ** inverse_poisson_exponent
+
+
+def surface_buoyancy_flux(wtheta_s, wq_s, theta):
+    """Kinematic surface buoyancy (virtual potential temperature) flux [K m/s].
+
+    ``(w'theta_v')_s = (w'theta')_s + (R_v/R_d - 1) theta (w'q')_s`` with
+    ``R_v/R_d - 1 = 1/epsilon - 1`` (E3SM ``zvir``); kinematic fluxes
+    positive upward, ``theta`` the lowest-level potential temperature [K].
+    """
+    return wtheta_s + (1.0 / constants.epsilon - 1.0) * theta * wq_s
 
 
 def buoyancy_coefficient(theta, *, gravity=None):

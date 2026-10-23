@@ -246,8 +246,13 @@ def _make_dynamic_driver(days=4, output_dir=None, nlev=4):
         output=OutputConfig(diag_days=1, checkpoint_days=0),
         radiation="gray", convection="none", days=days,
     )
+    # Decision 90: an RK3 ocean card must STATE the slow-forcing depth
+    # average; this restart test states the pre-decision default.
+    _ocn = LatLonCGridOceanConfig()
+    _ocn = _ocn._replace(barotropic=_ocn.barotropic._replace(
+        barotropic_slow_forcing_depth_evaluation="min_rule_live"))
     coupled_cfg = CoupledConfig(
-        ocean_mode="dynamic", ocean_config=LatLonCGridOceanConfig(),
+        ocean_mode="dynamic", ocean_config=_ocn,
         ocean_nlev=nlev, ocean_dt_s=300.0, ocean_ic="rest",
     )
     driver = CoupledESMDriver(atm_config, coupled_cfg, output_dir=output_dir)

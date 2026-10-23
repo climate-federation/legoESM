@@ -604,12 +604,14 @@ def _sample_forcing_latlon(forcing, idx_t, dst_lat_deg, dst_lon_deg):
     return out
 
 
-def _sample_forcing_points(forcing, idx_t, lat_pts_deg, lon_pts_deg,
-                           method: str = "nearest"):
-    """Sample the forcing channels at a set of points (cube / MPAS / tripole
-    cell centres).  ``method``: "nearest" (legacy) or "bilinear" (the tripole
-    default — see :func:`_bilinear_point_maps` for why nearest-neighbour onto
-    a finer structured grid prints zonal forcing bands)."""
+def _sample_forcing_points(forcing, idx_t, lat_pts_deg, lon_pts_deg, *,
+                           method: str):
+    """Sample the forcing channels at a set of points (cube / MPAS / FESOM /
+    tripole cell centres).  ``method`` (REQUIRED, no default — a default here
+    was how MPAS/FESOM silently got a different remap than the tripole, F20):
+    "bilinear" (what every model grid uses — see :func:`_bilinear_point_maps`
+    for why nearest-neighbour onto a finer grid prints zonal forcing bands),
+    "nearest", or "nemo_weights"."""
     if method not in ("nearest", "bilinear", "nemo_weights"):
         raise ValueError(f"_sample_forcing_points: unknown method {method!r}")
     _uniform = {"bilinear": _bilinear_interp_to_points,
@@ -701,8 +703,15 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
     Shared by :func:`compute_omip2_surface_forcing` (momentum/heat) and
     :func:`compute_omip2_freshwater_forcing` (P - E) so both see the SAME
     spatially-sampled fields.  ``latlon``/``latlon_regional`` use the
-    conservative regrid onto the regular T grid; ``tripole``/``cubed_sphere``/
-    ``mpas`` use nearest-neighbour onto the (possibly 2-D / 1-D) cell centres.
+    conservative regrid onto the regular T grid; every point-sampled grid
+    (``tripole``/``cubed_sphere``/``mpas``/``fesom``) uses the SAME 4-point
+    bilinear sample at its cell centres / nodes, so the cross-grid OMIP
+    comparison is not confounded by the forcing remap (review 2026-10-10 F20:
+    MPAS/FESOM/cube were nearest-neighbour while the tripole was bilinear).
+    Measured on CORE-II NYF day means (probe
+    ``scripts/validate/ocean_fidelity/omip_forcing_remap_integrals.py``): the ocean
+    area integral of precip / sw_down after either point sampling is within
+    0.4% of the first-order conservative integral, so no renormalisation.
     """
     if forcing_remap not in ("bilinear", "nemo_scrip"):
         raise ValueError(
@@ -738,25 +747,29 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
         shp = lat_pts.shape
         forc = _sample_forcing_points(
             forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
+            method="bilinear",
         )
         return {k: v.reshape(shp) for k, v in forc.items()}
     if grid_type in ("mpas", "mpas_regional"):
         lat_pts = np.degrees(np.asarray(grid.latCell))
         lon_pts = np.degrees(np.asarray(grid.lonCell))
-        return _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts)
+        return _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts,
+                                      method="bilinear")
     if grid_type == "fesom":
         # FESOM triangular mesh: 1-D PAIRED node (lat, lon) points (radians
-        # on the FesomOceanGrid facade) — same nearest-neighbour treatment
-        # as the MPAS Voronoi cell centres.
+        # on the FesomOceanGrid facade) — same bilinear treatment as the
+        # MPAS Voronoi cell centres and the tripole.
         lat_pts = np.degrees(np.asarray(grid.lat))
         lon_pts = np.degrees(np.asarray(grid.lon))
-        return _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts)
+        return _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts,
+                                      method="bilinear")
     raise NotImplementedError(
         f"_sample_omip2_forcing does not support grid_type={grid_type!r}"
     )
 
 
-def sample_omip2_forcing(forcing, idx_t, grid, grid_type):
+def sample_omip2_forcing(forcing, idx_t, grid, grid_type,
+                         forcing_remap="bilinear"):
     """Public wrapper for :func:`_sample_omip2_forcing`.
 
     Returns the CORE-II / JRA forcing channels (``u10``, ``v10``, ``T_air`` [K],
@@ -767,8 +780,13 @@ def sample_omip2_forcing(forcing, idx_t, grid, grid_type):
     coupler driver (e.g. the prognostic sea-ice glue in
     ``scripts/run/run_omip_core2.py``) can populate an ``AtmToSurface`` from the
     identical sampled fields rather than re-deriving the regrid (cross-module
-    callers must not import the private ``_sample_omip2_forcing``)."""
-    return _sample_omip2_forcing(forcing, idx_t, grid, grid_type)
+    callers must not import the private ``_sample_omip2_forcing``).
+
+    ``forcing_remap`` MUST be the value the ocean forcing uses, so the ice and
+    the ocean see the same sampled fields (review 2026-10-10 F19 residual: the
+    prognostic ice saw bilinear while the ocean saw ``nemo_scrip``)."""
+    return _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
+                                 forcing_remap=forcing_remap)
 
 
 def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,

@@ -12,7 +12,7 @@ experiment:
   tier: tier1
   complexity: primitive_equation
   extent: global
-  maturity: experimental
+  maturity: structurally_validated
   description: >
     NEMO-BENCH-inspired performance benchmark: flat-bottom all-ocean box,
     zero analytic forcing, per-point unique ICs (MPI/sharding bug

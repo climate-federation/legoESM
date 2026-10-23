@@ -465,11 +465,17 @@ class TestMultilayerLandTile:
         from legoesm.land.soil_grid import SoilGridConfig
         from legoesm.land.multilayer_land import init_multilayer_land_state
         from legoesm.land.surface_params import LandSurfaceParams
+        from legoesm.land.surface_scheme import SimpleSEBConfig
         pipe, _ = _pipeline(land=True)
         ncol = 6 * N_CS * N_CS
+        # The params below are BULK-surface LandSurfaceParams (z0, albedo_veg),
+        # so the scheme is the bulk SimpleSEB: the two-leaf canopy default
+        # reads canopy height / roughness ratio instead and ignores z0 (the
+        # driver refuses that pairing; here it would make d/dz0 exactly 0).
         cfg = MultiLayerLandConfig(
             soil_grid=SoilGridConfig(n_layers=6, total_depth=2.0),
-            bulk_scheme="most")           # MOST -> z0 matters
+            bulk_scheme="most",           # MOST -> z0 matters
+            surface_scheme=SimpleSEBConfig())
         c = lambda v: jnp.full(ncol, v)   # keep traced (z0 is the grad target)
         pipe.land_ml_cfg = cfg
         pipe.land_ml_lat = jnp.zeros(ncol)

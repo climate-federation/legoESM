@@ -882,8 +882,13 @@ def solve_sw(
   # ``zenith`` may be a scalar (single-column) or an array with a column
   # dimension, e.g. shape ``(ncol, 1)``.  To avoid division-by-zero in
   # ``exp(-tau / cos(zenith))`` for nighttime columns (cos(zenith) ~ 0),
-  # we clamp the zenith used in the solve to at most ~89.4 degrees
-  # (cos > 0.01).  After the solve, nighttime columns are zeroed out.
+  # we clamp the zenith used in the slant path (exp(-tau/mu) and the
+  # two-stream R/T) to at most ~89.4 degrees (cos > 0.01).  The incident
+  # beam is projected with the TRUE cos(zenith), as RTE does
+  # (sw_solver_2stream: flux_dir(top) = inc_flux_dir * mu0); projecting it
+  # with the floored value gave a sun just above the horizon up to
+  # S_0*(0.01 - cos z) extra insolation.  After the solve, nighttime columns
+  # are zeroed out.
   _ZENITH_MAX = jnp.arccos(jnp.asarray(0.01, dtype=temperature.dtype))  # coeff-ok: min cos(zenith) floor
   safe_zenith = jnp.minimum(zenith, _ZENITH_MAX)
 
@@ -931,6 +936,7 @@ def solve_sw(
         sfc_albedo_direct=sfc_albedo_dir,
         zenith=safe_zenith,
         use_scan=use_scan,
+        mu_incident=jnp.cos(zenith),
     )
 
     sw_fluxes = monochromatic_two_stream.sw_transport(
