@@ -1,0 +1,60 @@
+"""ORCA2 round 324 (DECISION 150): the ice-ocean top drag needs NEMO's record.
+
+Selecting ``implicit_ice_ocean_top_drag`` without the recorded rCdU_ice
+(iceupdate.F90:391) must refuse on every public run path.  VORTEX carries the
+G5 path at small cost; the ORCA2 comparison card is the ladder's helper.
+"""
+
+from __future__ import annotations
+
+import jax.numpy as jnp
+import pytest
+
+from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
+
+
+@pytest.fixture(scope="module")
+def vortex():
+    card = recipe.build_nemo_testcase_card("VORTEX-zco")
+    cfg = recipe._nemo_linear_bottom_drag(card.recipe.model_config)._replace(
+        implicit_ice_ocean_top_drag=True)
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.state import OceanSurfaceForcing
+    model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
+    zero = jnp.zeros_like(card.recipe.initial_state.eta.data)
+    # A full surface forcing with the one record absent.
+    return card, model, OceanSurfaceForcing(tau_x=zero, tau_y=zero)
+
+
+PATHS = {
+    "step": lambda m, s, dt, sf: m.step(s, dt, surface_forcing=sf),
+    "step_no_forcing": lambda m, s, dt, sf: m.step(s, dt),
+    "step_checked": lambda m, s, dt, sf: m.step_checked(s, dt, surface_forcing=sf),
+    "integrate": lambda m, s, dt, sf: m.integrate(
+        s, dt, dt, step_inputs=[{"surface_forcing": sf}]),
+    "integrate_no_inputs": lambda m, s, dt, sf: m.integrate(s, dt, dt),
+    "integrate_scan": lambda m, s, dt, sf: m.integrate_scan(
+        s, 1, dt, step_inputs=[{"surface_forcing": sf}]),
+    "integrate_scan_no_inputs": lambda m, s, dt, sf: m.integrate_scan(s, 1, dt),
+}
+
+
+@pytest.mark.parametrize("path", sorted(PATHS))
+def test_top_drag_without_record_refuses_on_every_run_path(vortex, path):
+    card, model, sf = vortex
+    with pytest.raises(ValueError, match="requires the recorded"):
+        PATHS[path](model, card.recipe.initial_state, card.dt_s, sf)
+
+
+def test_comparison_card_selects_only_the_top_drag(vortex):
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round1_ladder_gate as ladder,
+    )
+    card = vortex[0]
+    cfg = card.recipe.model_config
+    assert not cfg.implicit_ice_ocean_top_drag
+    got = ladder.comparison_card(card)
+    assert got.recipe.model_config == cfg._replace(implicit_ice_ocean_top_drag=True)
+    assert got._replace(recipe=card.recipe) == card
+    with pytest.raises(ladder.GateError, match="DECISION 133"):
+        ladder.comparison_card(got)

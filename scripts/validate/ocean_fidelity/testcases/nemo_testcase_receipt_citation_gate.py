@@ -195,6 +195,9 @@ FILES = {
     # GYRE's own run log and its own compiled branch, so a GYRE resolved value
     # cannot bind to OVERFLOW's ocean.output or to LOCK's ppsrc.
     "LDF/ldfslp.F90": _OCE / "LDF/ldfslp.F90",
+    # ORCA2 round 324: the ice-ocean top-drag coefficient and its consumer.
+    "ICE/iceupdate.F90": NEMO / "src/ICE/iceupdate.F90",
+    "ZDF/zdfdrg.F90": _OCE / "ZDF/zdfdrg.F90",
     "domqco.F90": _OCE / "DOM/domqco.F90",
     # ORCA2 round 1 binds its first non-bit entry field to the compiled branch
     # that executes the category-summed initial snow/ice load adjustment.
@@ -1720,6 +1723,10 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # ORCA2 round 324 (DECISION 150): rCdU_ice -> rCdU_top.
+    'ICE/iceupdate.F90:369': 'tmod_io(ji,jj) = rho0 * drag_io(ji,jj) * SQRT( zmodt )',
+    'ICE/iceupdate.F90:391': 'rCdU_ice(ji,jj) = -r1_rho0 * tmod_io(ji,jj) * at_i(ji,jj) * tmask(ji,jj,1)',
+    'ZDF/zdfdrg.F90:126': 'rCdU_top(ji,jj) = rCdU_ice(ji,jj)',
     # ORCA2 round 313: V4's internal-wave mixing and V3's double diffusion (D122).
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:302': 'ln_traldf_msc   = .true.',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:393': 'ln_zdfddm   = .true.',

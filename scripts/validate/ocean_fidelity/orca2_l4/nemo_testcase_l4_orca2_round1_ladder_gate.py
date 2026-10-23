@@ -266,6 +266,24 @@ def card_fields(deck_root: Path) -> tuple[dict[str, np.ndarray], object]:
     return fields, card
 
 
+def comparison_card(card):
+    """Rung 10 as the NEMO comparison runs it (DECISION 150).
+
+    NEMO's record runs the implicit ice-ocean top drag (ln_drgice_imp = T):
+    rCdU_ice = -r1_rho0*tmod_io*at_i (iceupdate.F90:369, :391) becomes
+    rCdU_top (zdfdrg.F90:126).  The card cannot compute it (no SI3 ice
+    velocity), so only this harness selects the G5 path, and the step reads
+    the recorded rCdU_ice that ``_surface_forcings`` passes.  The shipped card
+    keeps the switch off (DECISION 133).
+    """
+    cfg = card.recipe.model_config
+    require(not cfg.implicit_ice_ocean_top_drag,
+            "the shipped rung-10 card selects the ice-ocean top drag "
+            "(DECISION 133 keeps it off)")
+    return card._replace(recipe=card.recipe._replace(
+        model_config=cfg._replace(implicit_ice_ocean_top_drag=True)))
+
+
 _FORTRAN_REAL = re.compile(r"^[-0-9.eE+*/ ]+$")
 
 
@@ -1292,7 +1310,7 @@ def run_gate(
         trajectory = candidate_trajectory(
             deck_root,
             orca1ice_root,
-            card,
+            comparison_card(card),
             max_step=max_step,
             bridge_ssh=initial_mode == "decision52-bridge",
             external_mode_association=external_mode_association,
