@@ -311,7 +311,25 @@ stage-3 Krhs boundaries.**
 
 ## 8. Final certification gates
 
-FINAL_GATE_RESULTS_PENDING
+All final gates used `JAX_PLATFORMS=cpu`, `JAX_ENABLE_X64=1`, and the exact
+`PYTHONPATH` from `claude_rounds/land.sh`.
+
+- The receipt-specific gate found 22 citations, 0 unmapped citations, 0
+  endpoint failures, and 0 global map-audit failures; all 9 self-test controls
+  fired. Shifting the new direct-score citation by 2 lines exited 1.
+- The focused L9 file passed 8 / 8 in 545.38 seconds, including the six fast
+  source-order/selector/finite-gradient controls, the full production route,
+  and the admitted-record direct score.
+- The exact unsplit ORCA2 default gate from `claude_rounds/land.sh` passed
+  145 / 145 in 1118.50 seconds (18 minutes 38 seconds). Its citation-gate
+  pytest passed 17 / 17, its private-import ratchet passed 6 / 6, and both
+  ORCA2 parallel-receipt tests passed 2 / 2.
+- The private-import ratchet rerun alone passed 6 / 6 in 5.29 seconds. The
+  D127 comparison-mask regression passed 2 / 2 selected tests in 0.42 seconds
+  (19 deselected).
+
+No gate was relaxed or skipped. No NEMO command was run during scoring or
+certification.
 
 ## 9. ASKED / UNASKED
 
