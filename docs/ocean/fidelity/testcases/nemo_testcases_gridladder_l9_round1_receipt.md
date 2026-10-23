@@ -30,7 +30,7 @@ the ordinary U/V/W tracer transport in the live non-Shuman branch: it calls
 `tra_adv_trp` at line 555, then computes selected BBL coefficients at line 560
 (`cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:555`,
 `cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:560`). The former
-`:568-582` citation was the disabled `ln_shuman` branch and is retracted.
+range 568--582 was the disabled `ln_shuman` branch and is retracted.
 
 Inside `tra_adv_trp`, after the bottom transport slots are zeroed, stage 3
 alone calls `ldf_eiv_trp`
@@ -78,20 +78,20 @@ The former L8 refusal is relaxed only for L9's complete L3 selection:
 bolus-through-FCT, face averaging, `nemo_left`, and `nemo_forward_exact`.
 Partial EIV, missing L8, missing Krhs routing, and any other L8+EIV composition
 remain refused
-(`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4124-4212`).
+(`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4130-4218`).
 
 Decision 147 is preserved independently of L9. Construction validation,
 every eager `step()` call, and the live inner EIV path all refuse staged EIV
 without the stage-3 Krhs route
-(`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4034-4048`,
-`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10521-10544`,
-`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:15010-15018`).
+(`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4040-4054`,
+`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10527-10554`,
+`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:15020-15028`).
 
 L9 now runs the already-certified L3 production statements directly; the
 redundant L9-only helper and branch were deleted. The two U/V additions feed
 the existing W recomputation, which consumes those exact augmented arrays
 before the existing L8 Krhs walker executes
-(`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10535-10562`).
+(`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10541-10572`).
 No arithmetic or configuration changed: the deleted L9 arm was textually and
 arithmetically identical to these L3 statements.
 

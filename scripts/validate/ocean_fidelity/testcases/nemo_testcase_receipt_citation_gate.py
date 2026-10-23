@@ -1872,9 +1872,9 @@ CITATION_MAP = {
         11,
     ],
     "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:555":
-        "CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )",
+        ("CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )", 1),
     "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:560":
-        "IF( kstg == 3 .AND. ln_trabbl )   CALL bbl( kstp, nit000, Kbb, Kmm )",
+        ("IF( kstg == 3 .AND. ln_trabbl )   CALL bbl( kstp, nit000, Kbb, Kmm )", 1),
     "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:248-265": [
         ("DO jj = ntsj-( nn_hls), ntej+(  nn_hls-1 ) ; DO ji = ntsi-( nn_hls), ntei+(  nn_hls-1)", 2),
         ("ENDIF", 5),
@@ -1920,30 +1920,30 @@ CITATION_MAP = {
         "rk3_stage3_l9_eiv_nemo_order: bool = False",
         8,
     ],
-    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4124-4212": [
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4130-4218": [
         "if _after_ldf:",
         "LatLonCGridOceanModel._check_l3_krhs_route(config)",
         89,
     ],
-    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4034-4048": [
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4040-4054": [
         "def _check_l3_krhs_route(config) -> None:",
         '"Krhs tracer route)")',
         15,
     ],
-    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10521-10544": [
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10527-10554": [
         "if _want_bolus:",
         "stage3[8] = stage3[8] + zfv_eiv   # ldftra.f90:955",
-        24,
+        28,
     ],
-    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:15010-15018": [
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:15020-15028": [
         "# A direct eager step is also a valid cold-start driver.",
         "self._check_l3_krhs_route(self.config)",
         9,
     ],
-    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10535-10562": [
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10541-10572": [
         "stage3 = list(_nemo_ws_stage_transport_geometry[2])",
         "volume_transport_override=(stage3[7], stage3[8]),",
-        28,
+        32,
     ],
     "tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:96-178": [
         "def test_l9_pins_every_krhs_position_with_inexact_words():",
@@ -1957,7 +1957,7 @@ CITATION_MAP = {
     ],
     "scripts/validate/ocean_fidelity/testcases/"
     "nemo_testcase_l9_orca2eiv_krhs/run.sh:335-353": [
-        ("preflight", 1),
+        ("preflight", 6),
         ("admit \"$steps\"", 3),
         19,
     ],

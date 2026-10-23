@@ -209,6 +209,12 @@ def _nemo_stage3_l8_krhs_walk(adv_t, adv_s, *term_groups):
     return t_value, s_value, tuple(boundaries)
 
 
+# L9 deliberately has no separate transport helper: it runs the already
+# certified L3 additions at their production site before L8's Krhs walk.
+# Keep this spacer so established compiled-source citation lines stay stable.
+#
+#
+#
 def mass_flux_fields(u_field, v_field, w_field, mfu_data, mfv_data, mfw_data):
     """Wrap the tracer-advecting mass fluxes as the three ``mass_flux_*`` Fields.
 
@@ -10540,6 +10546,10 @@ class LatLonCGridOceanModel:
                             [jnp.zeros_like(v_eiv[:1]), v_eiv], axis=0)
                         _zfu_before = stage3[7]
                         _zfv_before = stage3[8]
+                        # L9 uses these same L3 statements.  There is no L9
+                        # arithmetic arm to diverge from the certified path.
+                        # Keep the additions at this single production site.
+                        #
                         stage3[7] = stage3[7] + zfu_eiv   # ldftra.f90:954
                         stage3[8] = stage3[8] + zfv_eiv   # ldftra.f90:955
                         if _l3_eiv_transport_exposure:
