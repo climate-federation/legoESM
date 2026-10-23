@@ -197,6 +197,6 @@ change any other configuration, fidelity bar, existing card, or two-step
 value; push; post to GitHub; or perform an author review.
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/gridladder_r57-37096084
-ACQUISITION_NEEDED: NEMO_OPERATOR_ACK=L9_R57_OPERATOR /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/gridladder_r57-37096084/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l9_orca2eiv_krhs/run.sh --run
+ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/gridladder_r57-37096084/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l9_orca2eiv_krhs/run.sh --run (requires NEMO_OPERATOR_ACK=L9_R57_OPERATOR)
 DECISION_NEEDED: NONE
 ROUND_STATUS: STOPPED_FOR_RECORD — L9 is built and preflighted; operator acquisition is required before any score or certification
