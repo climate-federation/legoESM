@@ -1,0 +1,10 @@
+# Verbatim selected lines from the real NEMO round-5 record output:
+# /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/acquisition/orca1ice_surface_entry_every_step_a_np2/ocean.output
+# Complete source SHA-256: dbf5604b5bab93d5be84ba4707db9f7f754ffe5e63c1eb8a6754222d64a17572
+# Source lines: 234, 259, 513, 1024, 1025, 1027.
+       number of the first time step   nn_it000        =            1
+       Tiling (T) or not (F)                ln_tile    =  F
+       frequency update of sbc (and ice)             nn_fsbc       =            2
+       mixing length type                          nn_mxl    =            3
+          surface mixing length = F(stress) or not    ln_mxl0   =  T
+       type of scaling under sea-ice               nn_mxlice =            2

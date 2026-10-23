@@ -37,3 +37,12 @@ Frozen 2026-10-23, before any measurement (Claude round).
 The comparison-harness selection, D122 on seven pairs and the N = 1 gradient
 check are preregistered when the record is admitted; no prediction is made
 here about their numbers.
+
+## Amendment (2026-10-23, operator review, before any NEMO run)
+
+Codex's review of the acquisition found A2-A4 were reported, not enforced.
+Predictions and thresholds are unchanged; admission now REFUSES on each
+falsifier: fr_i/taum unequal (A2), even-step hm_i unequal (A3), hm_i zero
+on every ice-covered wet point or >= 20 m (A4), each with a plant. The build
+must also be round 5's program plus the observer (preprocessed sources and
+objects byte-identical except zdftke's insertions and the writer).

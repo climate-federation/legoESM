@@ -6,16 +6,23 @@ One file per rank per step (kt 1..10, ranks 0 and 1), written by
 nn_mxlice = 2 branch reads ``hm_i`` (zdftke.f90:620-623).  Every name, extent
 and payload length is read out of the file.  The gate refuses on structural
 defects, on a selector other than ORCA2's (nn_mxlice 2, ln_mxl0 T, nn_fsbc 2),
-and on a negative or non-finite thickness.  It REPORTS, never refuses on, two
-statements the preregistration predicts: fr_i and taum equal the round-5
-surface frames bit for bit, and each even step's hm_i equals the previous odd
+and on every preregistered validity check (A2-A4): a negative, non-finite,
+all-zero (on ice-covered wet points) or >= 20 m thickness; fr_i or taum unequal
+to the round-5 surface frames; an even step's hm_i unequal to the previous odd
 step's (hm_i is assigned only by ice_var_agg(2), icevar.f90:186, on ice steps,
-icestp.f90:186).
+icestp.f90:186).  Admission needs the surface frames; without them the status
+is PASS_STRUCTURE_ONLY, never an admission.
+
+``--same-program`` proves a fresh build is round 5's program except the
+observer: build config identical (config name substituted), every
+preprocessed source and object byte-identical except zdftke (whose only
+difference is the patch's inserted lines) and the writer (new).
 """
 
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import io
 import json
@@ -38,7 +45,12 @@ EXPECTED_ORDER = ("hm_i", "fr_i", "taum", "tmask_1")
 N_STEPS = 10
 RANKS = (0, 1)
 HALO = 2
-PLANTS = ("header", "field-order", "truncation", "stamp", "content")
+PLANTS = ("header", "field-order", "truncation", "stamp", "content",
+          "hm-zero", "hm-thick", "even-step", "surface")
+HM_I_MAX_M = 20.0  # preregistration A4: max below 20 m
+OBSERVER_UNIT = "zdftke"
+WRITER_UNIT = "zdftke_round326_writer"
+BUILD_CONFIG_FILES = ("arch_nemo.fcm", "cpp.fcm", "bld.cfg")
 ROUND5_RUN = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/"
     "acquisition/orca1ice_surface_entry_every_step_a_np2")
@@ -171,6 +183,34 @@ def even_step_identity(records) -> dict[str, object]:
     return {"rows": rows, "holds": all(r["unequal_vs_previous_odd"] == 0 for r in rows)}
 
 
+def thickness_check(records) -> dict[str, object]:
+    hm_max = max(float(r["fields"]["hm_i"].max()) for r in records.values())
+    ice_wet = sum(int(np.count_nonzero(
+        (owned(r["fields"]["hm_i"]) > 0) & (owned(r["fields"]["fr_i"]) > 0)
+        & (owned(r["fields"]["tmask_1"]) > 0))) for r in records.values())
+    require(ice_wet > 0, "hm_i is zero on every ice-covered wet point (A4)")
+    require(hm_max < HM_I_MAX_M, f"hm_i max {hm_max} m >= {HM_I_MAX_M} m (A4)")
+    return {"hm_i_max_m": hm_max, "ice_covered_wet_points_with_hm_i": ice_wet}
+
+
+def _plant_fields(records, plant: str | None) -> None:
+    def bump(key, field):
+        values = records[key]["fields"][field].copy()
+        values[HALO, HALO] += 1.0e-3
+        records[key]["fields"][field] = values
+    if plant == "hm-zero":
+        for record in records.values():
+            record["fields"]["hm_i"] = np.zeros_like(record["fields"]["hm_i"])
+    elif plant == "hm-thick":
+        values = records[(0, 2)]["fields"]["hm_i"].copy()
+        values[HALO, HALO] = HM_I_MAX_M
+        records[(0, 2)]["fields"]["hm_i"] = values
+    elif plant == "even-step":
+        bump((1, 4), "hm_i")
+    elif plant == "surface":
+        bump((1, 3), "fr_i")
+
+
 def run_gate(root: Path, *, expect_commit: str | None = None,
              plant: str | None = None, surface_root: Path | None = None) -> dict:
     require(plant is None or plant in PLANTS, f"unknown plant {plant}")
@@ -182,32 +222,92 @@ def run_gate(root: Path, *, expect_commit: str | None = None,
     if expect_commit is not None:
         require(produced == expect_commit, f"producer commit {produced} != {expect_commit}")
     records = load(root, plant=plant)
+    _plant_fields(records, plant)
     result = {
-        "format": "nemo-testcase-l4-orca2-round326-hmi-v1",
-        "status": "PASS_R326_HMI_ADMISSION",
+        "format": "nemo-testcase-l4-orca2-round326-hmi-v2",
+        "status": "PASS_STRUCTURE_ONLY",
         "root": str(root),
         "producer_commit": produced,
         "records": {record_name(kt, rank): r["sha256"]
                     for (rank, kt), r in sorted(records.items())},
+        "thickness": thickness_check(records),
         "even_step_identity": even_step_identity(records),
     }
+    require(result["even_step_identity"]["holds"],
+            "an even step's hm_i differs from the previous odd step's (A3)")
     if surface_root is not None:
-        result["surface_cross_check"] = surface_cross_check(records, surface_root)
+        cross = surface_cross_check(records, surface_root)
+        require(cross["fr_i_taum_bit_equal"],
+                "fr_i/taum differ from the round-5 surface frames (A2)")
+        result["surface_cross_check"] = cross
+        result["status"] = "PASS_R326_HMI_ADMISSION"
     return result
+
+
+def _regular_files(root: Path) -> set[str]:
+    return {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+
+
+def _observer_only(ref: list[str], new: list[str], inserted: list[str]) -> None:
+    added: list[str] = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ref, new, autojunk=False).get_opcodes():
+        require(tag in ("equal", "insert"),
+                f"{OBSERVER_UNIT}.f90 {tag}s round-5 lines {i1 + 1}-{i2}")
+        added += new[j1:j2] if tag == "insert" else []
+    require(added == inserted,
+            f"{OBSERVER_UNIT}.f90 inserts {added!r}, patch inserts {inserted!r}")
+
+
+def same_program(new_bld: Path, ref_bld: Path, patch: Path, *,
+                 new_cfg: str, ref_cfg: str) -> dict:
+    for name in BUILD_CONFIG_FILES:
+        want = (ref_bld / name).read_text().replace(ref_cfg, new_cfg)
+        require((new_bld / name).read_text() == want, f"build config differs: {name}")
+    inserted = [line[1:] for line in patch.read_text().splitlines()
+                if line.startswith("+") and not line.startswith("+++")]
+    counts = {}
+    for sub, observer, writer in (("ppsrc", f"nemo/{OBSERVER_UNIT}.f90", f"nemo/{WRITER_UNIT}.f90"),
+                                  ("obj", f"{OBSERVER_UNIT}.o", f"{WRITER_UNIT}.o")):
+        ref_files, new_files = _regular_files(ref_bld / sub), _regular_files(new_bld / sub)
+        require(new_files - ref_files == {writer},
+                f"{sub}: new build adds {sorted(new_files - ref_files)}, expected only {writer}")
+        require(not ref_files - new_files, f"{sub}: new build lacks {sorted(ref_files - new_files)}")
+        for rel in sorted(ref_files - {observer}):
+            require((ref_bld / sub / rel).read_bytes() == (new_bld / sub / rel).read_bytes(),
+                    f"{sub}/{rel} differs from round 5")
+        if sub == "ppsrc":
+            _observer_only((ref_bld / sub / observer).read_text().splitlines(),
+                           (new_bld / sub / observer).read_text().splitlines(), inserted)
+        counts[sub] = len(ref_files) - 1
+    return {"status": "PASS_SAME_PROGRAM", "identical_ppsrc": counts["ppsrc"],
+            "identical_obj": counts["obj"], "observer_inserted_lines": inserted}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--root", type=Path)
+    parser.add_argument("--same-program", type=Path, metavar="NEW_BLD")
+    parser.add_argument("--reference-bld", type=Path)
+    parser.add_argument("--patch", type=Path)
+    parser.add_argument("--new-cfg")
+    parser.add_argument("--reference-cfg")
     parser.add_argument("--expect-commit")
     parser.add_argument("--plant", choices=PLANTS)
     parser.add_argument("--surface-root", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
-        result = run_gate(args.root, expect_commit=args.expect_commit,
-                          plant=args.plant, surface_root=args.surface_root)
-    except (GateError, OSError, ValueError) as error:
+        if args.same_program is not None:
+            require(None not in (args.reference_bld, args.patch, args.new_cfg, args.reference_cfg),
+                    "--same-program needs --reference-bld, --patch, --new-cfg, --reference-cfg")
+            result = same_program(args.same_program, args.reference_bld, args.patch,
+                                  new_cfg=args.new_cfg, ref_cfg=args.reference_cfg)
+        else:
+            require(args.root is not None and args.surface_root is not None,
+                    "admission needs --root and --surface-root")
+            result = run_gate(args.root, expect_commit=args.expect_commit,
+                              plant=args.plant, surface_root=args.surface_root)
+    except (GateError, OSError, ValueError, KeyError) as error:
         print(f"STATUS {'PLANT-FIRED' if args.plant else 'REFUSE'}: {error}")
         return 2
     rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"

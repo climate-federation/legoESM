@@ -2,13 +2,16 @@
 
 Synthetic records are written in the writer's exact byte layout (names and
 order taken from the committed Fortran source), admitted, and each plant the
-launcher runs is shown to refuse.  The surface cross-check runs on the real
-round-5 surface frames: records carrying those frames' fr_i/taum report 0
-unequal points, a perturbed record reports the perturbation.
+launcher runs is shown to refuse for its own reason.  Admission (A2) runs on
+the real round-5 surface frames.  The same-program check is exercised on
+synthetic build trees, each planted difference refused.  The committed
+ocean.output excerpt is pinned to the real round-5 output.
 """
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import struct
 from pathlib import Path
@@ -81,17 +84,40 @@ def _root(tmp_path: Path, source=None) -> Path:
     return tmp_path
 
 
-def test_synthetic_record_admitted_and_even_steps_reported(tmp_path):
+ROUND5_REQUIRED = os.environ.get("R326_REQUIRE_ROUND5") == "1"
+needs_round5 = pytest.mark.skipif(not gate.ROUND5_RUN.is_dir() and not ROUND5_REQUIRED,
+                                  reason="round-5 record absent")
+
+
+def _round5_source(kt, rank):
+    name = (f"oracle_ocean_surface_input_kt{kt:08d}.bin" if rank == 0 else
+            f"oracle_ocean_surface_input_rank{rank:04d}_kt{kt:08d}.bin")
+    return ladder.read_surface_fields(gate.ROUND5_RUN / name, kt, rank)
+
+
+def test_synthetic_record_structure_only_without_surface(tmp_path):
     result = gate.run_gate(_root(tmp_path), expect_commit="a" * 40)
-    assert result["status"] == "PASS_R326_HMI_ADMISSION"
+    assert result["status"] == "PASS_STRUCTURE_ONLY"
     assert result["even_step_identity"]["holds"] is True
+    assert result["thickness"]["ice_covered_wet_points_with_hm_i"] > 0
     assert len(result["records"]) == 20
 
 
-@pytest.mark.parametrize("plant", gate.PLANTS)
+PLANT_REASONS = {
+    "header": "nn_mxlice=2", "field-order": "array order", "truncation": "truncated",
+    "stamp": "producer commit", "content": "negative hm_i", "hm-zero": "zero on every",
+    "hm-thick": ">= 20.0 m", "even-step": "even step", "surface": "round-5 surface",
+}
+
+
+def test_plant_reasons_cover_every_plant():
+    assert set(PLANT_REASONS) == set(gate.PLANTS)
+
+
+@pytest.mark.parametrize("plant", sorted(set(gate.PLANTS) - {"surface"}))
 def test_every_plant_refuses(tmp_path, plant):
     root = _root(tmp_path)
-    with pytest.raises(gate.GateError):
+    with pytest.raises(gate.GateError, match=re.escape(PLANT_REASONS[plant])):
         gate.run_gate(root, expect_commit="a" * 40, plant=plant)
 
 
@@ -102,23 +128,100 @@ def test_missing_frame_refuses(tmp_path):
         gate.run_gate(root)
 
 
-@pytest.mark.skipif(not gate.ROUND5_RUN.is_dir(), reason="round-5 record absent")
-def test_surface_cross_check_on_round5_frames(tmp_path):
-    def source(kt, rank):
-        name = (f"oracle_ocean_surface_input_kt{kt:08d}.bin" if rank == 0 else
-                f"oracle_ocean_surface_input_rank{rank:04d}_kt{kt:08d}.bin")
-        return ladder.read_surface_fields(gate.ROUND5_RUN / name, kt, rank)
-
-    root = _root(tmp_path, source)
-    check = gate.run_gate(root, surface_root=gate.ROUND5_RUN)["surface_cross_check"]
-    assert check["fr_i_taum_bit_equal"] is True
-    assert sum(r["wet_ice_points"] for r in check["rows"]) > 0
+@needs_round5
+def test_admission_on_round5_frames_and_surface_plants(tmp_path):
+    root = _root(tmp_path, _round5_source)
+    result = gate.run_gate(root, surface_root=gate.ROUND5_RUN)
+    assert result["status"] == "PASS_R326_HMI_ADMISSION"
+    assert result["surface_cross_check"]["fr_i_taum_bit_equal"] is True
+    with pytest.raises(gate.GateError, match=PLANT_REASONS["surface"]):
+        gate.run_gate(root, surface_root=gate.ROUND5_RUN, plant="surface")
     path = root / gate.record_name(3, 1)
-    record = gate.read_record(path)
-    fields = dict(record["fields"])
-    fields["fr_i"] = fields["fr_i"].copy()
-    fields["fr_i"][5, 7] += 1.0e-3
+    fields = dict(gate.read_record(path)["fields"])
+    fields["taum"] = fields["taum"].copy()
+    fields["taum"][5, 7] += 1.0e-3
     _write(path, 3, 1, fields)
-    check = gate.run_gate(root, surface_root=gate.ROUND5_RUN)["surface_cross_check"]
-    assert check["fr_i_taum_bit_equal"] is False
-    assert [r["fr_i_unequal"] for r in check["rows"] if (r["rank"], r["kt"]) == (1, 3)] == [1]
+    with pytest.raises(gate.GateError, match=PLANT_REASONS["surface"]):
+        gate.run_gate(root, surface_root=gate.ROUND5_RUN)
+
+
+PATCH = ACQ / "zdftke_round326.patch"
+INSERTED = [l[1:] for l in PATCH.read_text().splitlines() if l.startswith("+") and not l.startswith("+++")]
+
+
+def _bld(root: Path, cfg: str, observer: list[str], writer: bool) -> Path:
+    (root / "ppsrc/nemo").mkdir(parents=True)
+    (root / "obj").mkdir()
+    for name in gate.BUILD_CONFIG_FILES:
+        (root / name).write_text(f"dir::root /cfgs/{cfg}/BLD\n%FCFLAGS -O3\n")
+    (root / "ppsrc/nemo/icevar.f90").write_text("hm_i = vt_i * z1_at_i\n")
+    (root / "ppsrc/nemo/zdftke.f90").write_text("\n".join(observer) + "\n")
+    (root / "obj/icevar.o").write_bytes(b"\x7fELF icevar")
+    (root / "obj/zdftke.o").write_bytes(b"\x7fELF zdftke" + bytes(writer))
+    if writer:
+        (root / "ppsrc/nemo/zdftke_round326_writer.f90").write_text("MODULE w\n")
+        (root / "obj/zdftke_round326_writer.o").write_bytes(b"\x7fELF w")
+    return root
+
+
+REF_TKE = ["MODULE zdftke", "   USE zdfmxl", "      CALL tke_tke( a )", "      CALL tke_avn( a )"]
+NEW_TKE = REF_TKE[:2] + [INSERTED[0]] + REF_TKE[2:3] + [INSERTED[1]] + REF_TKE[3:]
+
+
+def _pair(tmp_path):
+    ref = _bld(tmp_path / "ref", "R5", REF_TKE, False)
+    new = _bld(tmp_path / "new", "R326", NEW_TKE, True)
+    return ref, new
+
+
+def _same(new, ref):
+    return gate.same_program(new, ref, PATCH, new_cfg="R326", ref_cfg="R5")
+
+
+def test_same_program_passes_observer_only(tmp_path):
+    ref, new = _pair(tmp_path)
+    assert len(INSERTED) == 2
+    assert _same(new, ref)["status"] == "PASS_SAME_PROGRAM"
+
+
+@pytest.mark.parametrize("plant, reason", [
+    ("other-source", "ppsrc/nemo/icevar.f90 differs"),
+    ("other-object", "obj/icevar.o differs"),
+    ("flags", "build config differs: arch_nemo.fcm"),
+    ("observer-edit", "zdftke.f90 replaces"),
+    ("observer-extra", "zdftke.f90 inserts"),
+    ("extra-unit", "new build adds"),
+    ("missing-unit", "new build lacks"),
+])
+def test_same_program_refuses_planted_difference(tmp_path, plant, reason):
+    ref, new = _pair(tmp_path)
+    if plant == "other-source":
+        (new / "ppsrc/nemo/icevar.f90").write_text("hm_i = 2 * vt_i * z1_at_i\n")
+    elif plant == "other-object":
+        (new / "obj/icevar.o").write_bytes(b"\x7fELF icevar2")
+    elif plant == "flags":
+        (new / "arch_nemo.fcm").write_text("dir::root /cfgs/R326/BLD\n%FCFLAGS -O2\n")
+    elif plant == "observer-edit":
+        (new / "ppsrc/nemo/zdftke.f90").write_text("\n".join(NEW_TKE).replace("tke_tke( a )", "tke_tke( b )") + "\n")
+    elif plant == "observer-extra":
+        (new / "ppsrc/nemo/zdftke.f90").write_text("\n".join(NEW_TKE + ["      x = 1"]) + "\n")
+    elif plant == "extra-unit":
+        (new / "ppsrc/nemo/extra.f90").write_text("x\n")
+    elif plant == "missing-unit":
+        (new / "obj/icevar.o").unlink()
+    with pytest.raises(gate.GateError, match=re.escape(reason)):
+        _same(new, ref)
+
+
+EXCERPT = ACQ / "round5_ocean.output.excerpt"
+
+
+@needs_round5
+def test_committed_excerpt_is_verbatim_round5_output():
+    text = EXCERPT.read_text().splitlines()
+    source = gate.ROUND5_RUN / "ocean.output"
+    digest = re.search(r"SHA-256: ([0-9a-f]{64})", "\n".join(text)).group(1)
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == digest
+    numbers = [int(n) for n in re.findall(r"\d+", next(l for l in text if l.startswith("# Source lines")))]
+    lines = source.read_text().splitlines()
+    assert [l for l in text if not l.startswith("#")] == [lines[n - 1] for n in numbers]

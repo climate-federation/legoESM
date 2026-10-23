@@ -4,9 +4,12 @@
 # Re-runs the rung-10 ten-step record (round 5, ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY)
 # with one write-only hook in zdf_tke, just before tke_avn, whose nn_mxlice = 2
 # branch reads hm_i (zdftke.f90:620-623).  One file per rank per step, kt 1..10.
+# Same program: after the build, every preprocessed source and object must equal
+# round 5's except zdftke (patch insertions only) and the new writer.
 # Admission: every restart, surface frame and step-entry frame byte-identical to
-# round 5, then the gate (five plants must fire first).  The operator runs this
-# file; the agent does not invoke makenemo or mpirun.
+# round 5, then the gate (its plants must fire first).  The operator runs this
+# file; the agent does not invoke makenemo or mpirun.  Default mode is the
+# read-only preflight; --run must be explicit.
 set -Eeuo pipefail
 
 refuse_unexpected() {
@@ -17,7 +20,7 @@ refuse_unexpected() {
 }
 trap refuse_unexpected ERR
 
-readonly MODE=${1:---run}
+readonly MODE=${1:---preflight-only}
 case "$MODE" in
   --run|--preflight-only|--admit-existing) ;;
   *) printf 'REFUSE: usage: %s [--run|--preflight-only|--admit-existing]\n' "$0" >&2; exit 64 ;;
@@ -45,6 +48,29 @@ readonly GATE=$here/../nemo_testcase_l4_orca2_round326_hmi_gate.py
 readonly TEST=$REPO/tests/ocean/fidelity/test_orca2_round326_hmi_gate.py
 readonly PREREG=$REPO/docs/ocean/fidelity/testcases/PREREG_nemo_testcases_l4_orca2_round326.md
 readonly SOURCE_TKE=$NEMO_ROOT/src/OCE/ZDF/zdftke.F90
+readonly EXCERPT=$here/round5_ocean.output.excerpt
+readonly CONDA=/home/dbalwada/miniconda3/envs/nemo-build
+readonly MEM_MIN_GB=150       # MEMORY RULE (standing note 2026-10-18)
+readonly RUN_TIMEOUT_S=900    # round 5's run took 13.4 s wall
+readonly FPP_KEYS='-Dkey_si3 -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3'
+
+scratch=
+created_target=0
+created_run=0
+cleanup() {  # removes only what this invocation created
+  local rc=$?
+  trap - EXIT
+  set +e
+  [[ -z "$scratch" || ! -e "$scratch" ]] || rm -rf -- "$scratch"
+  if [[ $rc -ne 0 ]]; then
+    [[ $created_run -eq 0 || ! -e "$TARGET_RUN" ]] || rm -rf -- "$TARGET_RUN"
+    [[ $created_target -eq 0 || ! -e "$TARGET_ROOT" ]] || rm -rf -- "$TARGET_ROOT"
+    [[ $created_run -eq 0 && $created_target -eq 0 ]] \
+      || printf 'R326_FAILED_RUN_CLEANED target=%s run=%s\n' "$created_target" "$created_run" >&2
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
 
 cd "$REPO"
 if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
@@ -93,6 +119,24 @@ free_ok() {  # (6) free_ok <path> [kB, default 8 GB] on the nearest existing anc
   (( $(df -Pk "$p" | awk 'NR==2 {print $4}') >= need ))
 }
 check_absent() { [[ ! -e "$1" ]]; }  # (7)
+mem_ok() {  # mem_ok <GB>: free -g "available" column
+  (( $(free -g | awk '$1 == "Mem:" {print $7}') >= $1 ))
+}
+same_program() {  # same_program <new BLD> [json]
+  "$PY" "$GATE" --same-program "$1" --reference-bld "$SOURCE_ROOT/BLD" --patch "$TKE_PATCH" \
+    --new-cfg "$TARGET_CFG" --reference-cfg "$SOURCE_CFG" ${2:+--output "$2"}
+}
+fpp() {  # fpp <in.F90> <out.f90>: the arch file's %CPP + %FPPFLAGS and the cpp keys
+  ( cd "$(dirname "$1")" && cpp -Dkey_nosignedzero -P -traditional $FPP_KEYS \
+      -I "$SOURCE_ROOT/WORK" -I "$SOURCE_ROOT/BLD/inc" "$(basename "$1")" -o "$2" )
+}
+compile_like_round5() {  # compile_like_round5 <in.f90> <out.o> [extra flags]
+  local fc fcflags
+  fc=$(awk '$1 == "%FC" {$1 = ""; print}' "$SOURCE_ROOT/BLD/arch_nemo.fcm")
+  fcflags=$(awk '$1 == "%FCFLAGS" {$1 = ""; print}' "$SOURCE_ROOT/BLD/arch_nemo.fcm")
+  ( cd "$scratch/mod" && $fc $fcflags ${3:-} -I"$CONDA/include" -I "$scratch/mod" \
+      -J "$scratch/mod_out" "$1" -o "$2" )
+}
 
 plant_must_refuse() {  # plant_must_refuse <label> <cmd...>
   local label=$1; shift
@@ -103,7 +147,8 @@ plant_must_refuse() {  # plant_must_refuse <label> <cmd...>
 for path in "$TKE_PATCH" "$WRITER" "$GATE" "$TEST" "$PREREG" "$SOURCE_TKE" \
   "$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm" "$SOURCE_ROOT/BLD/bin/nemo.exe" "$SOURCE_RUN/nemo" \
   "$SOURCE_RUN/deck_files.sha256" "$SOURCE_RUN/input_files.sha256" \
-  "$SOURCE_RUN/ocean.output" "$SOURCE_RUN/namelist_cfg"; do
+  "$SOURCE_RUN/ocean.output" "$SOURCE_RUN/namelist_cfg" "$EXCERPT" \
+  "$SOURCE_ROOT/BLD/arch_nemo.fcm" "$SOURCE_ROOT/BLD/ppsrc/nemo/zdftke.f90" "$SOURCE_ROOT/BLD/obj/zdftke.o"; do
   [[ -f "$path" ]] || { printf 'REFUSE: missing input %s\n' "$path" >&2; exit 64; }
 done
 pin 2e78c1a215e4a7ee51dab4b3b19ef446cceb1ef8e5ad9380dd7c482d37e10397 "$SOURCE_TKE" 'source zdftke'
@@ -113,7 +158,11 @@ pin 51da69b494a10fa3c3b119018329a94d963f1fe3e59b6834ea936055ab0df2b9 "$SOURCE_RU
 pin 3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5 "$SOURCE_RUN/input_files.sha256" 'input manifest'
 [[ ! -e "$SOURCE_ROOT/MY_SRC/zdftke.F90" ]] || { printf 'REFUSE: source config carries its own zdftke\n' >&2; exit 66; }
 
-plants=$(mktemp -d /tmp/orca2-r326-plants.XXXXXX)
+command -v timeout >/dev/null || { printf 'REFUSE: no timeout binary\n' >&2; exit 64; }
+# Scratch beside the evidence (never /tmp); removed by the EXIT trap.
+mkdir -p "$(dirname "$EVIDENCE")"
+scratch=$(mktemp -d "$(dirname "$EVIDENCE")/.r326-scratch.XXXXXX")
+plants=$scratch/plants; mkdir "$plants" "$scratch/mod" "$scratch/mod_out"
 # (1) syntax/continuation: real patch passes, a planted insert after '&' refuses.
 check_no_continuation_insert "$TKE_PATCH" || { printf 'REFUSE: patch inserts after a continuation\n' >&2; exit 66; }
 printf ' x = a + &\n+ CALL planted()\n' >"$plants/cont.patch"
@@ -125,19 +174,26 @@ plant_must_refuse ref-cfg check_ref_cfg ORCA2_OMIP_L4
 check_namelist "$SOURCE_RUN/namelist_cfg" || { printf 'REFUSE: namelist breaks nn_itend/nn_stock/nn_fsbc rules\n' >&2; exit 65; }
 sed -E 's/^([[:space:]]*nn_itend[[:space:]]*=[[:space:]]*)[0-9]+/\19/' "$SOURCE_RUN/namelist_cfg" >"$plants/namelist_cfg"
 plant_must_refuse namelist check_namelist "$plants/namelist_cfg"
-# Resolved selectors in the REAL ocean.output (LOG-CHECK note), and a plant.
-check_echo "$SOURCE_RUN/ocean.output" || { printf 'REFUSE: source run echo lacks nn_mxlice=2/ln_mxl0=T/nn_fsbc=2/nn_mxl=3/ln_tile=F/nn_it000=1\n' >&2; exit 65; }
-sed -E 's/(nn_mxlice[[:space:]]*=[[:space:]]*)2/\10/' "$SOURCE_RUN/ocean.output" >"$plants/ocean.output"
+# Resolved selectors on the COMMITTED real ocean.output excerpt (LOG-CHECK
+# note), whose recorded source SHA must still match round 5's output; a plant.
+[[ "$(sha256sum "$SOURCE_RUN/ocean.output" | awk '{print $1}')" == \
+   "$(sed -nE 's/^# Complete source SHA-256: ([0-9a-f]{64})$/\1/p' "$EXCERPT")" ]] \
+  || { printf 'REFUSE: round-5 ocean.output no longer matches the committed excerpt\n' >&2; exit 65; }
+check_echo "$EXCERPT" || { printf 'REFUSE: excerpt lacks nn_mxlice=2/ln_mxl0=T/nn_fsbc=2/nn_mxl=3/ln_tile=F/nn_it000=1\n' >&2; exit 65; }
+sed -E 's/(nn_mxlice[[:space:]]*=[[:space:]]*)2/\10/' "$EXCERPT" >"$plants/ocean.output"
 plant_must_refuse echo check_echo "$plants/ocean.output"
 # (4)+(5) reader/writer layout and frame census: the committed test writes the
 # writer's byte layout from its Fortran source and proves the gate's plants.
-"$PY" -m pytest -q -p no:cacheprovider "$TEST"
+R326_REQUIRE_ROUND5=1 "$PY" -m pytest -q -p no:cacheprovider "$TEST"
 # (6) disk, evaluated without creating the evidence directory.
-for mount in /tmp "$EVIDENCE" "$NEMO_ROOT"; do
+for mount in "$EVIDENCE" "$NEMO_ROOT"; do
   free_ok "$mount" || { printf 'REFUSE: %s has under 8 GB free\n' "$mount" >&2; exit 67; }
 done
 free_ok "$EVIDENCE/not/created/yet" || { printf 'REFUSE: disk check fails on a missing parent\n' >&2; exit 67; }
-plant_must_refuse disk free_ok /tmp 999999999999999
+plant_must_refuse disk free_ok "$NEMO_ROOT" 999999999999999
+# Memory (MEMORY RULE): checked here and again just before mpirun.
+mem_ok "$MEM_MIN_GB" || { printf 'REFUSE: under %s GB memory available\n' "$MEM_MIN_GB" >&2; exit 67; }
+plant_must_refuse memory mem_ok 999999
 # (7) target config and run directory absent (not required in --admit-existing).
 if [[ "$MODE" != --admit-existing ]]; then
   check_absent "$TARGET_ROOT" && check_absent "$TARGET_RUN" || {
@@ -148,21 +204,48 @@ plant_must_refuse target-exists check_absent "$SOURCE_RUN"
 # (1) gfortran syntax proof of the patched zdftke and the writer.
 removed=$(awk '/^--- / {next} /^-/ {n++} END {print n+0}' "$TKE_PATCH")
 [[ "$removed" -eq 0 ]] || { printf 'REFUSE: additions-only patch removes %s lines\n' "$removed" >&2; exit 66; }
-dry=$(mktemp -d /tmp/orca2-r326-tke.XXXXXX)
+dry=$scratch/dry; mkdir "$dry"
 cp "$SOURCE_TKE" "$dry/zdftke.F90"
 cp "$WRITER" "$dry/zdftke_round326_writer.F90"
 patch -s --fuzz=0 -p0 -d "$dry" <"$TKE_PATCH"
 [[ "$(grep -Fc 'CALL r326_write(' "$dry/zdftke.F90")" -eq 1 ]] || { printf 'REFUSE: writer call count changed\n' >&2; exit 66; }
 [[ "$(grep -Fc 'CALL tke_avn(' "$dry/zdftke.F90")" -eq 1 ]] || { printf 'REFUSE: closure call count changed\n' >&2; exit 66; }
-syntax=$(mktemp -d /tmp/orca2-r326-syntax.XXXXXX)
+syntax=$scratch/syntax; mkdir "$syntax"
 cp "$SOURCE_ROOT"/BLD/inc/*.mod "$syntax/"
+cp "$SOURCE_ROOT"/BLD/inc/*.mod "$scratch/mod/"
 for unit in zdftke_round326_writer zdftke; do
-  cpp -Dkey_si3 -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3 -P -traditional \
-    -I "$SOURCE_ROOT/WORK" -I "$SOURCE_ROOT/BLD/inc" \
-    "$dry/$unit.F90" -o "$syntax/$unit.f90"
+  fpp "$dry/$unit.F90" "$syntax/$unit.f90"
   "$FC" -fsyntax-only -ffree-line-length-none -I "$syntax" -J "$syntax" "$syntax/$unit.f90"
   printf 'SYNTAX_PROOF_PASS %s.f90\n' "$unit"
 done
+# Same program (codex finding 1). (a) The preprocessing command reproduces
+# round 5's zdftke.f90 byte for byte from today's unpatched source.
+fpp "$SOURCE_TKE" "$scratch/zdftke_unpatched.f90"
+cmp -s "$scratch/zdftke_unpatched.f90" "$SOURCE_ROOT/BLD/ppsrc/nemo/zdftke.f90" \
+  || { printf 'REFUSE: preprocessing no longer reproduces round 5 zdftke.f90\n' >&2; exit 66; }
+# (b) Today's toolchain with round 5's arch flags reproduces round 5's object
+# byte for byte; a flag plant (-O2) must not.
+compile_like_round5 "$SOURCE_ROOT/BLD/ppsrc/nemo/zdftke.f90" "$scratch/zdftke.o"
+cmp -s "$scratch/zdftke.o" "$SOURCE_ROOT/BLD/obj/zdftke.o" \
+  || { printf 'REFUSE: toolchain no longer reproduces round 5 zdftke.o\n' >&2; exit 66; }
+compile_like_round5 "$SOURCE_ROOT/BLD/ppsrc/nemo/zdftke.f90" "$scratch/zdftke_O2.o" -O2
+plant_must_refuse toolchain cmp -s "$scratch/zdftke_O2.o" "$SOURCE_ROOT/BLD/obj/zdftke.o"
+# (c) The post-build check passes a dry build tree that is round 5's plus the
+# observer, and refuses the same tree with one other unit planted.
+dry_bld=$scratch/dry_bld; mkdir "$dry_bld"
+cp -as "$SOURCE_ROOT/BLD/ppsrc" "$dry_bld/ppsrc"
+cp -as "$SOURCE_ROOT/BLD/obj" "$dry_bld/obj"
+for name in arch_nemo.fcm cpp.fcm bld.cfg; do
+  sed "s|$SOURCE_CFG|$TARGET_CFG|g" "$SOURCE_ROOT/BLD/$name" >"$dry_bld/$name"
+done
+rm -f "$dry_bld/ppsrc/nemo/zdftke.f90"
+cp "$syntax/zdftke.f90" "$dry_bld/ppsrc/nemo/zdftke.f90"
+cp "$syntax/zdftke_round326_writer.f90" "$dry_bld/ppsrc/nemo/zdftke_round326_writer.f90"
+: >"$dry_bld/obj/zdftke_round326_writer.o"
+same_program "$dry_bld"
+rm -f "$dry_bld/ppsrc/nemo/icevar.f90"
+{ cat "$SOURCE_ROOT/BLD/ppsrc/nemo/icevar.f90"; printf '! planted\n'; } >"$dry_bld/ppsrc/nemo/icevar.f90"
+plant_must_refuse same-program same_program "$dry_bld"
 if [[ "$MODE" == --preflight-only ]]; then
   printf 'ORCA2_ROUND326_HMI_PREFLIGHT_READY %s\n' "$TARGET_RUN"
   exit 0
@@ -181,8 +264,8 @@ admit() {
       cmp -s "$SOURCE_RUN/$name" "$TARGET_RUN/$name" || { printf 'REFUSE: frame changed: %s\n' "$name" >&2; exit 69; }
     done
   done
-  for plant in header field-order truncation stamp content; do
-    if "$PY" "$GATE" --root "$TARGET_RUN" --expect-commit "$COMMIT" \
+  for plant in header field-order truncation stamp content hm-zero hm-thick even-step surface; do
+    if "$PY" "$GATE" --root "$TARGET_RUN" --expect-commit "$COMMIT" --surface-root "$SOURCE_RUN" \
       --plant "$plant" >"$TARGET_RUN/round326_${plant}_plant.log" 2>&1; then
       printf 'REFUSE: %s plant stayed green\n' "$plant" >&2; exit 71
     fi
@@ -202,13 +285,17 @@ if [[ "$MODE" == --admit-existing ]]; then
   exit 0
 fi
 
-manifest=$(mktemp -d /tmp/orca2-r326-manifest.XXXXXX)
+manifest=$scratch/manifest; mkdir "$manifest"
 printf '%s\n' "$COMMIT" >"$manifest/producer_commit.txt"
 sha256sum "$TKE_PATCH" "$WRITER" "$GATE" "$TEST" "$PREREG" "$SOURCE_TKE" \
   "$SOURCE_ROOT/BLD/ppsrc/nemo/zdftke.f90" "$SOURCE_ROOT/BLD/ppsrc/nemo/icevar.f90" \
   "$SOURCE_ROOT/BLD/ppsrc/nemo/icestp.f90" >"$manifest/toolchain.sha256"
 
+# makenemo also rewrites the shared cfgs/work_cfgs.txt (deletes, then appends,
+# the target's own line); refuse if any other line changes.
+cp "$NEMO_ROOT/cfgs/work_cfgs.txt" "$scratch/work_cfgs.before"
 cd "$NEMO_ROOT"
+created_target=1
 ./makenemo -r "$REFERENCE_CFG" -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 while IFS= read -r -d '' source; do cp -a "$source" "$TARGET_ROOT/EXP00/$(basename "$source")"; done \
   < <(find "$SOURCE_ROOT/EXP00" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
@@ -224,24 +311,31 @@ touch "$TARGET_ROOT/MY_SRC/"*.F90
 grep 'NEMO_L4_HMI_1' "$TARGET_ROOT/BLD/ppsrc/nemo/zdftke_round326_writer.f90" >/dev/null || {
   printf 'REFUSE: compiled writer is absent\n' >&2; exit 68;
 }
+diff <(grep -v "^$TARGET_CFG " "$scratch/work_cfgs.before") \
+     <(grep -v "^$TARGET_CFG " "$NEMO_ROOT/cfgs/work_cfgs.txt") >/dev/null \
+  || { printf 'REFUSE: work_cfgs.txt changed beyond the target line\n' >&2; exit 68; }
+same_program "$TARGET_ROOT/BLD" "$manifest/same_program.json"
 nm -D "$BINARY" >"$manifest/nm_dynamic.txt"
 if grep '_ZGV' "$manifest/nm_dynamic.txt" >/dev/null; then printf 'REFUSE: vector math symbol present\n' >&2; exit 68; fi
 
 mkdir -p "$EVIDENCE"
+created_run=1
 mkdir "$TARGET_RUN"
 while read -r digest name; do cp -a "$SOURCE_RUN/$name" "$TARGET_RUN/$name"; done <"$SOURCE_RUN/deck_files.sha256"
 while read -r digest name; do cp -a "$SOURCE_RUN/$name" "$TARGET_RUN/$name"; done <"$SOURCE_RUN/input_files.sha256"
 cp "$SOURCE_RUN/deck_files.sha256" "$SOURCE_RUN/input_files.sha256" "$TARGET_RUN/"
 cp "$BINARY" "$TARGET_RUN/nemo"
-cp "$manifest"/producer_commit.txt "$manifest"/toolchain.sha256 "$TARGET_RUN/"
+cp "$manifest"/producer_commit.txt "$manifest"/toolchain.sha256 "$manifest"/same_program.json "$TARGET_RUN/"
 ( cd "$TARGET_RUN" && sha256sum -c deck_files.sha256 >/dev/null && sha256sum -c input_files.sha256 >/dev/null )
 
 (
   cd "$TARGET_RUN"
   printf 'RUN_STARTED_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >run.user.time.log
   started=$SECONDS
+  mem_ok "$MEM_MIN_GB" || { printf 'REFUSE: under %s GB memory available\n' "$MEM_MIN_GB" >&2; exit 67; }
+  free -g >run.user.memory.log
   set +e
-  mpirun -np 2 --oversubscribe ./nemo >run.user.stdout.log 2>&1
+  timeout --kill-after=60 "$RUN_TIMEOUT_S" mpirun -np 2 --oversubscribe ./nemo >run.user.stdout.log 2>&1
   rc=$?
   set -e
   [[ "$rc" -eq 0 ]] || { printf 'REFUSE: mpirun exited %s\n' "$rc" >&2; exit 69; }
@@ -249,6 +343,7 @@ cp "$manifest"/producer_commit.txt "$manifest"/toolchain.sha256 "$TARGET_RUN/"
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>run.user.time.log
 )
 grep 'STOP 0' "$TARGET_RUN/run.user.stdout.log" >/dev/null || { printf 'REFUSE: NEMO did not report STOP 0\n' >&2; exit 69; }
+check_echo "$TARGET_RUN/ocean.output" || { printf 'REFUSE: run echo lacks the round-5 selectors\n' >&2; exit 69; }
 [[ "$(grep -c 'ORCA2_R326_TKE_HMI' "$TARGET_RUN/ocean.output" || true)" -ge 10 ]] || {
   printf 'REFUSE: writer did not report ten steps on rank 0\n' >&2; exit 69; }
 admit
