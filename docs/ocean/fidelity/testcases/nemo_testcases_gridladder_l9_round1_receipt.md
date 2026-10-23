@@ -8,6 +8,8 @@ Preregistration commit: `a174af33e1`
 
 Implementation/acquisition commit: `e4f204272d`
 
+Receipt/citation commits: `a27eba2567`, `6afb3af28d`
+
 Status: **STOPPED FOR RECORD.** L9 is designed, implemented, guarded, tested,
 and has a clean passing acquisition preflight. NEMO was not built or run, no
 record was admitted, no trajectory was scored, and L9 is not certified.
@@ -166,7 +168,22 @@ PREFLIGHT_EXIT=0
 
 No NEMO target, run directory, record, or score was created.
 
-## 5. ASKED / UNASKED
+## 5. Landing gates
+
+The receipt-specific citation gate found all 21 L9 citations, with 0 unmapped
+citations, 0 endpoint failures, and 0 global map-audit failures; all 9
+self-test controls fired. Shifting the stage-order citation by 2 lines
+produced `SYMBOL-NOT-AT-LINE` and exited 1. The mandatory citation-gate pytest
+file passed 17 / 17 in 5.58 seconds.
+
+The exact ORCA2 default gate from `claude_rounds/land.sh` passed 145 / 145 in
+996.24 seconds (16 minutes 36 seconds) under CPU, x64, and the prescribed
+landing package path. That total includes the private-import ratchet at 6 / 6
+and both ORCA2 parallel-receipt checks. The private-import ratchet was also
+rerun alone and passed 6 / 6 in 4.97 seconds. No gate was relaxed, skipped, or
+given a longer timeout.
+
+## 6. ASKED / UNASKED
 
 ASKED and completed: read the executed Oracle path with L8 and L3 selected;
 state and cite the exact order; build L9 as L8 plus ORCA2's complete L3 EIV;
