@@ -126,6 +126,13 @@ All seven codex findings verified as real, then fixed; NEMO still not run.
   restored).
 - Not checked: the operator's actual new objects (deleted by the failed
   run's cleanup); the gate checks them on the next `--run`.
+- Resume-2 gates: preflight rc 0, 11 plants fired, PASS_SAME_PROGRAM on the
+  dry tree (`gates/preflight3.log`); citation-gate test + private-import
+  ratchet + round-326 gate test 46 passed; TKE terms + recipe 96 passed;
+  freshwater + stage face mask + ORCA2 parallel receipt 20 passed;
+  prognostic barotropic 8 passed = 170 passed, 0 failed
+  (`gates/default_gate3_*.log`). Receipt citation gate: 6 citations,
+  0 failures (`gates/citation_gate_receipt3.log`).
 
 ## Round-314 audit row
 
