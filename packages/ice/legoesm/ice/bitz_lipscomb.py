@@ -352,15 +352,31 @@ def p07_conductivity(T_K, S, constants: IceConstantsConfig):
     )
 
 
-def _radiation(h_i, h_s, qtr_top, T_surface):
+def _radiation(
+    h_i,
+    h_s,
+    qtr_top,
+    T_surface,
+    *,
+    _nemo_zdf_layer_reciprocals: bool = True,
+):
     """SSL transmission/absorption, `icethd_zdf_bl99.F90:143-230`."""
 
     del T_surface  # nn_qtrice=0 in the resolved deck
     dtype = h_i.dtype
     js = jnp.arange(1, 4, dtype=dtype)
     ji = jnp.arange(1, 4, dtype=dtype)
-    dzs = jnp.maximum(h_s, _H_MIN)[..., None] / 3.0
-    dzi = jnp.maximum(h_i, _H_MIN)[..., None] / 3.0
+    if _nemo_zdf_layer_reciprocals:
+        r1_nlay = 1.0 / 3.0
+        dzs = jnp.where(
+            h_s > 0.0, jnp.maximum(_H_MIN, h_s) * r1_nlay, 0.0
+        )[..., None]
+        dzi = jnp.where(
+            h_i > 0.0, jnp.maximum(_H_MIN, h_i) * r1_nlay, 0.0
+        )[..., None]
+    else:
+        dzs = jnp.maximum(h_s, _H_MIN)[..., None] / 3.0
+        dzi = jnp.maximum(h_i, _H_MIN)[..., None] / 3.0
     snow_fraction = h_s / (
         h_s + _SNOW_FRACTION_DEPTH
     )  # nn_snwfra=2, icevar.F90:1598-1599
@@ -397,6 +413,7 @@ def _si3_zdf_bl99_step(
     _nemo_branch_ranges: bool = True,
     _nemo_snow_temperature_bounds: bool = True,
     _nemo_eos_order: bool = True,
+    _nemo_zdf_layer_reciprocals: bool = True,
 ) -> SI3ZDFResult:
     """Iterative 3+3-layer BL99/P07 solve for the resolved ORCA1 arm.
 
@@ -437,11 +454,29 @@ def _si3_zdf_bl99_step(
     qsr = jnp.asarray(forcing.qsr_ice, dtype=dtype)
     qtr_top = jnp.asarray(forcing.qtr_ice_top, dtype=dtype)
     T_bottom = jnp.asarray(forcing.t_bottom, dtype=dtype)
-    ab_s, ab_i, qtr_bottom = _radiation(h_ice, h_snow, qtr_top, T_surface)
+    ab_s, ab_i, qtr_bottom = _radiation(
+        h_ice,
+        h_snow,
+        qtr_top,
+        T_surface,
+        _nemo_zdf_layer_reciprocals=_nemo_zdf_layer_reciprocals,
+    )
 
     dz_i = jnp.maximum(h_ice, _H_MIN) / 3.0
     dz_s = jnp.maximum(h_snow, _H_MIN) / 3.0
     snow_present = h_snow > 0.0
+    ice_present = h_ice > 0.0
+    r1_nlay = 1.0 / 3.0
+    zh_i_pos = jnp.maximum(_H_MIN, h_ice) * r1_nlay
+    zh_s_pos = jnp.maximum(_H_MIN, h_snow) * r1_nlay
+    zh_i = jnp.where(ice_present, zh_i_pos, 0.0)
+    z1_h_i = jnp.where(ice_present, 1.0 / zh_i_pos, 0.0)
+    zh_s = jnp.where(snow_present, zh_s_pos, 0.0)
+    z1_h_s = jnp.where(snow_present, 1.0 / zh_s_pos, 0.0)
+    isnow = jnp.where(snow_present, 1.0, 0.0)
+    inverse_rho_ice = 1.0 / constants.rho_ice
+    inverse_rho_snow = 1.0 / constants.rho_snow
+    inverse_c_ice = 1.0 / constants.c_ice
 
     def body(_iteration, carry):
         Tsu, Tsu_previous, Ti, Ts, qns, converged, iterations = carry
@@ -453,19 +488,40 @@ def _si3_zdf_bl99_step(
         k0 = p07_conductivity(Ti[..., 0], S_layers[..., 0], constants)
         km = p07_conductivity(Ti_iface, S_iface, constants)
         kb = p07_conductivity(T_bottom, S_layers[..., -1], constants)
-        k_i = jnp.concatenate([k0[..., None], km, kb[..., None]], axis=-1) / dz_i[..., None]
-        k_s_bulk = jnp.full_like(k_i, constants.k_snow) / dz_s[..., None]
-        k_si = constants.k_snow * (k_i[..., 0] * dz_i) / (
-            0.5 * ((k_i[..., 0] * dz_i) * dz_s + constants.k_snow * dz_i)
-        )
+        tcond_i = jnp.concatenate([k0[..., None], km, kb[..., None]], axis=-1)
+        if _nemo_zdf_layer_reciprocals:
+            # Written order of `icethd_zdf_bl99.F90:170-186,331-346,365-375`:
+            # layer thicknesses use `* r1_nlay_{i,s}` and conductances/eta
+            # multiply by the precomputed reciprocals `z1_h_{i,s}`.
+            k_i = tcond_i * z1_h_i[..., None]
+            k_s_bulk = jnp.broadcast_to(
+                (constants.k_snow * z1_h_s)[..., None], k_i.shape
+            )
+            k_si = (
+                isnow * constants.k_snow * k0
+                / (0.5 * (k0 * zh_s + constants.k_snow * zh_i_pos))
+            )
+        else:
+            k_i = tcond_i / dz_i[..., None]
+            k_s_bulk = jnp.full_like(k_i, constants.k_snow) / dz_s[..., None]
+            k_si = constants.k_snow * (k_i[..., 0] * dz_i) / (
+                0.5 * ((k_i[..., 0] * dz_i) * dz_s + constants.k_snow * dz_i)
+            )
         k_s = k_s_bulk.at[..., -1].set(k_si)
         k_i = k_i.at[..., 0].set(jnp.where(snow_present, k_si, k_i[..., 0]))
 
         ci = constants.c_ice + _BRINE_HEAT_CAPACITY_FACTOR * S_layers / jnp.maximum(
             (Ti - constants.T0) * (T_i_old - constants.T0), _EPS10
         )
-        eta_i = dt / (constants.rho_ice * dz_i[..., None] * ci)
-        eta_s = dt / (constants.rho_snow * dz_s[..., None] * constants.c_ice)
+        if _nemo_zdf_layer_reciprocals:
+            eta_i = (dt * inverse_rho_ice * z1_h_i[..., None]) / ci
+            eta_s = jnp.broadcast_to(
+                (dt * inverse_rho_snow * inverse_c_ice * z1_h_s)[..., None],
+                Ti.shape,
+            )
+        else:
+            eta_i = dt / (constants.rho_ice * dz_i[..., None] * ci)
+            eta_s = dt / (constants.rho_snow * dz_s[..., None] * constants.c_ice)
 
         qns_new = qns + dqns * (Tsu - Tsu_previous)
         fnet = qsr - qtr_top + qns_new
@@ -623,14 +679,31 @@ def _si3_zdf_bl99_step(
     )
     e_s = snow_enthalpy_from_temperature(Ts, constants)
 
-    # Interface conductive diagnostics, `icethd_zdf_bl99.F90:743-761`.
-    k_top_i = p07_conductivity(Ti[..., 0], S_layers[..., 0], constants) / dz_i
-    k_base_i = p07_conductivity(T_bottom, S_layers[..., -1], constants) / dz_i
-    k_top = jnp.where(
-        snow_present,
-        constants.k_snow / dz_s,
-        k_top_i,
-    )
+    # Interface conductive diagnostics, `icethd_zdf_bl99.F90:820-824`.
+    if _nemo_zdf_layer_reciprocals:
+        k_top_i = (
+            p07_conductivity(Ti[..., 0], S_layers[..., 0], constants) * z1_h_i
+        )
+        k_base_i = (
+            p07_conductivity(T_bottom, S_layers[..., -1], constants) * z1_h_i
+        )
+        k_top = jnp.where(
+            snow_present,
+            constants.k_snow * z1_h_s,
+            k_top_i,
+        )
+    else:
+        k_top_i = (
+            p07_conductivity(Ti[..., 0], S_layers[..., 0], constants) / dz_i
+        )
+        k_base_i = (
+            p07_conductivity(T_bottom, S_layers[..., -1], constants) / dz_i
+        )
+        k_top = jnp.where(
+            snow_present,
+            constants.k_snow / dz_s,
+            k_top_i,
+        )
     T_first = jnp.where(snow_present, Ts[..., 0], Ti[..., 0])
     qcn_top = 2.0 * k_top * (Tsu - T_first)
     qcn_bottom = 2.0 * k_base_i * (Ti[..., -1] - T_bottom)
@@ -1038,6 +1111,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                            _nemo_eos_order: bool = True,
                            _nemo_snow_sublimation_order: bool = True,
                            _nemo_snow_remap: bool = True,
+                           _nemo_zdf_layer_reciprocals: bool = True,
                            ) -> SI3StepTrace:
     """Execute the selected `ice_thd` chain and retain every oracle boundary."""
 
@@ -1047,6 +1121,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         _nemo_branch_ranges=_zdf_branch_ranges,
         _nemo_snow_temperature_bounds=_nemo_snow_temperature_bounds,
         _nemo_eos_order=_nemo_eos_order,
+        _nemo_zdf_layer_reciprocals=_nemo_zdf_layer_reciprocals,
     )
     post_zdf = state._replace(T_surface=zdf.T_surface, e_ice=zdf.e_ice,
                               e_snow=zdf.e_snow)
