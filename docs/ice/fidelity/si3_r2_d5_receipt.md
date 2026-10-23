@@ -19,7 +19,7 @@ This round executes rung **D5** of the SI3 sea-ice fidelity ladder (`docs/ice/fi
   * `gpu_nvidia_smi_after.txt` SHA-256: `af76586d8e9d0257eaa8b4e259080df666f0ad50054fe427e0f784245dd0f472`
 
 ### Idle-GPU Provenance (`CUDA_VISIBLE_DEVICES=1`)
-Before launching the GPU probe, `nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv` and `nvidia-smi --query-compute-apps=pid,used_memory --format=csv` were recorded to `gpu_nvidia_smi_before.txt`, showing GPU 0 occupied by another job (`pid = 3784548`, `868 MiB`) and GPU 1 completely idle (`0 MiB`, `0 %`, zero compute apps on GPU 1). The probe was pinned exclusively to GPU 1 via `CUDA_VISIBLE_DEVICES=1`. Immediately after completion, the same queries were recorded to `gpu_nvidia_smi_after.txt`, confirming GPU 1 returned to `0 MiB` (`5 %` transient cooldown) with zero compute apps on GPU 1.
+Before launching the GPU probe, `nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv` and `nvidia-smi --query-compute-apps=pid,used_memory --format=csv` were recorded to `gpu_nvidia_smi_before.txt`, showing GPU 0 occupied by another job (`pid = 3784548`, `24,706 MiB`, GPU 0 at `56 %` utilization) and GPU 1 completely idle (`0 MiB`, `0 %`, zero compute apps on GPU 1). The probe was pinned exclusively to GPU 1 via `CUDA_VISIBLE_DEVICES=1`. Immediately after completion, the same queries were recorded to `gpu_nvidia_smi_after.txt`, confirming GPU 1 returned to `0 MiB` (`5 %` transient cooldown) with zero compute apps on GPU 1.
 
 ---
 
@@ -57,7 +57,7 @@ On `x86_64` CPU (`JAX_PLATFORMS=cpu`, both with default `XLA_FLAGS=""` and with 
 
 ## 3. Stage C: BL99 Layer-Reciprocal & Frozen-Conductivity Transcription on the Subnormal-Preserving Platform (GPU)
 
-On `Tesla V100S-PCIE-32GB` (`cuda:0`), IEEE-754 gradual underflow is preserved (`SUBNORMAL_PRESERVED`) and `h_s > 0.0` evaluates to `True` (`isnow = 1.0`) for all 26 steps `kt = 5842..5867`. However, before the statement fix (`_nemo_zdf_layer_reciprocals=False`), `_si3_zdf_bl99_step` still disagreed with NEMO across `kt = 5841..5867` (`57` over-bar `POST_ZDF` rows and `80` nonzero-ULP `POST_ZDF` rows in `kt = 5842..5867`) and across snow-free melting steps (`kt = 4242..5778`, where `POST_DH..EXIT` accumulated `18,280` over-bar rows from `qcn_ice_top_1d`).
+On `Tesla V100S-PCIE-32GB` (`cuda:0`), IEEE-754 gradual underflow is preserved (`SUBNORMAL_PRESERVED`) and `h_s > 0.0` evaluates to `True` (`isnow = 1.0`) for all 26 steps `kt = 5842..5867`. However, before the statement fix (`_nemo_zdf_layer_reciprocals=False`), `_si3_zdf_bl99_step` still disagreed with NEMO across `kt = 5841..5867` (`58` over-bar `POST_ZDF` rows and `81` nonzero-ULP `POST_ZDF` rows in `kt = 5842..5867`) and across snow-free melting steps (`kt = 4242..5778`, where `POST_DH..EXIT` accumulated `18,280` over-bar rows from `qcn_ice_top_1d`).
 
 ### Statement Departures in `icethd_zdf_bl99` (NEMO vs legoESM)
 
@@ -176,6 +176,10 @@ Every touched row in `d5_platform_probe_cpu.json` is accounted for by stage and 
   * `szv_i`: `1,253` changed, `1,183` closed, `5` opened, `298` moved to `0` ULP.
   * `v_i`: `1,213` changed, `1,178` closed, `4` opened, `715` moved to `0` ULP.
   * `v_s`: `124` changed, `26` closed, `7` opened, `92` moved to `0` ULP (max ULP on touched rows `184,731,394 -> 92,348`).
+
+### Operator note on reviewer-measured numbers
+
+The `1,811 / 7,385` snow-temperature counts, the `26,202` POST_ZDF rows and the `1,625 -> 0` over-bar result quoted in 4.4 were measured by the operator's independent Claude review, not by this round's committed probe. Its probe scripts and output are kept, uncommitted, under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round2/operator_review_claude/` (`si3r2_*.py`, `si3r2_bridge_probe_out.json`). The next D5 round must reproduce them with a committed probe before relying on them.
 
 ### 4.4 Next D5 Items (Upstream Entry-Input Mismatches, Recorded for Next Round)
 
