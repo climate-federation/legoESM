@@ -2605,8 +2605,8 @@ def dry_run_check_inputs(config: ExperimentConfig,
     for name, value in entries:
         if not value or (name == "topography" and value in _TOPOGRAPHY_BUILTINS):
             status = "not used"
-        elif os.path.exists(checkpoint_path(value)
-                            if name == "aimip_classical_checkpoint" else value):
+        elif (os.path.isfile(checkpoint_path(value))
+              if name == "aimip_classical_checkpoint" else os.path.exists(value)):
             status = "found"
         else:
             status = "MISSING"
