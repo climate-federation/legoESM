@@ -4186,21 +4186,46 @@ class LatLonCGridOceanModel:
                     "tra_bbc; select the L4b ordered composition")
             if _after_ldf:
                 _gm = config.gm_redi
-                _is_l2 = (
+                _l2_gm = _gm
+                if (config.rk3_stage3_l9_eiv_nemo_order and _gm is not None):
+                    _l2_gm = _gm._replace(
+                        kappa_GM=0.0,
+                        treguier=_gm.treguier._replace(enabled=False),
+                        gm_bolus_advection="centred",
+                        gm_bolus_kappa_face_average=False,
+                        treguier_vertical_reduction_evaluation="tree",
+                        treguier_sqrt_evaluation="guarded_floor",
+                    )
+                _has_l2_base = (
                     config.K_h == 0.0 and config.K_bih == 0.0
-                    and _gm is not None
-                    and _gm.kappa_GM == 0.0
-                    and _gm.slope_scheme == "nemo_iso_lap"
-                    and _gm.msc_stabilize
-                    and _gm.implicit_K33
-                    and _gm.redi_coefficient == "constant"
-                    and not _gm.treguier.enabled
-                    and _gm.gm_bolus_advection == "centred"
+                    and _l2_gm is not None
+                    and _l2_gm.kappa_GM == 0.0
+                    and _l2_gm.slope_scheme == "nemo_iso_lap"
+                    and _l2_gm.msc_stabilize
+                    and _l2_gm.implicit_K33
+                    and _l2_gm.redi_coefficient == "constant"
+                    and not _l2_gm.treguier.enabled
+                    and _l2_gm.gm_bolus_advection == "centred"
                 )
-                if not _is_l2:
+                _is_l2 = _has_l2_base and not config.rk3_stage3_l9_eiv_nemo_order
+                _is_l9_eiv = (
+                    config.rk3_stage3_l9_eiv_nemo_order
+                    and _has_l2_base
+                    and _gm is not None
+                    and _gm.kappa_GM == 3000.0
+                    and _gm.treguier.enabled
+                    and _gm.treguier.aei0 == 3000.0
+                    and _gm.treguier.kappa_min == 0.0
+                    and _gm.gm_bolus_advection == "through_fct"
+                    and _gm.gm_bolus_kappa_face_average
+                    and _gm.treguier_vertical_reduction_evaluation == "nemo_left"
+                    and _gm.treguier_sqrt_evaluation == "nemo_forward_exact"
+                )
+                if not (_is_l2 or _is_l9_eiv):
                     raise ValueError(
                         "rk3_stage3_geothermal_after_ldf_nemo_order requires "
-                        "the certified L2 standard-isoneutral selection")
+                        "the certified L2 selection, or L9's exact L3 EIV "
+                        "extension")
                 if ((config.bbl_adv_option != 0
                      or config.bbl_diffusive_option != 0)
                         and not config.rk3_stage3_l8_nemo_order):
@@ -4237,10 +4262,16 @@ class LatLonCGridOceanModel:
                     or config.bbl_diffusive_option != 1
                     or config.bbl_aht_m2_s != 1000.0
                     or config.bbl_gamma_s != 10.0
-                    or not _is_l2):
+                    or not (_is_l2 or _is_l9_eiv)):
                 raise ValueError(
                     "rk3_stage3_l8_nemo_order requires the exact certified "
-                    "G9+L1+L2+L4b+L6 composition")
+                    "G9+L1+L2+L4b+L6 composition, optionally with L9's exact "
+                    "L3 EIV extension")
+        if config.rk3_stage3_l9_eiv_nemo_order:
+            if (not config.rk3_stage3_l8_nemo_order or not _is_l9_eiv):
+                raise ValueError(
+                    "rk3_stage3_l9_eiv_nemo_order requires the complete L8 "
+                    "composition plus the exact certified L3 EIV selection")
         if _phys is not None and _phys.shortwave_penetration is not None:
             from legoesm.ocean.physics.shortwave_penetration import (
                 SHORTWAVE_PENETRATION_SCHEMES,

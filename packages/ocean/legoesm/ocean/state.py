@@ -3418,6 +3418,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # L1 + L2 + L4b + L6 card may combine FCT with the diffusive BBL and the
     # ordered LDF/BBC/DMP writes.  Appended to preserve positional callers.
     rk3_stage3_l8_nemo_order: bool = False
+    # ORCA2 L9 is the certified L8 composition plus L3's staged Treguier
+    # eddy-induced velocity.  The extra selector keeps L8's exact-composition
+    # refusal binding for every other EIV variant and leaves all prior cards
+    # on their existing path.  Appended to preserve positional callers.
+    rk3_stage3_l9_eiv_nemo_order: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
