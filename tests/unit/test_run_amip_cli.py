@@ -1937,7 +1937,7 @@ def test_aimip_classical_overrides_spectral_refused(tmp_path):
     args = parser.parse_args(["--dataset", "analytical",
                               "--discretization", "spectral",
                               "--aimip-classical-checkpoint", ckpt])
-    with pytest.raises(SystemExit, match="spectral"):
+    with pytest.raises(SystemExit, match="AIMIP-classical forces tiedtke"):
         _apply_aimip_classical_overrides(args)
 
 
@@ -5567,6 +5567,15 @@ def test_dry_run_reports_missing_aimip_checkpoint_before_loading(tmp_path, capsy
     assert main(_DRY_BASE + ["--aimip-classical-checkpoint", gone]) == 1
     out = capsys.readouterr().out
     assert "MISSING" in out and gone in out
+
+
+def test_dry_run_keeps_aimip_spectral_refusal(tmp_path):
+    from scripts.run.run_amip import main
+    gone = str(tmp_path / "no_such_aimip.eqx")
+    with pytest.raises(SystemExit, match="AIMIP-classical forces tiedtke"):
+        main(["--grid-type", "gaussian", "--discretization", "spectral",
+              "--dataset", "analytical", "--dry-run",
+              "--aimip-classical-checkpoint", gone])
 
 
 def test_dry_run_exit_code_reaches_the_shell(tmp_path):

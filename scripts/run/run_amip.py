@@ -3588,22 +3588,21 @@ def _apply_aimip_classical_overrides(
     args.clouds = "xu_randall"
     if args.microphysics == "none":
         args.microphysics = "sundqvist"
-    if getattr(args, "dry_run", False):
-        # --dry-run only checks that the checkpoint FILE exists
-        # (DRY_RUN_ARG_INPUTS); loading it would fail before that report.
-        return args
-    from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
-    from legoesm.training.aimip_params import AIMIPClassicalParams
-    _p = load_checkpoint_or_fail(
-        args.aimip_classical_checkpoint, AIMIPClassicalParams.from_defaults(),
-        what="--aimip-classical-checkpoint")
-    _cc = _p.to_cloud_config()
-    args.cloud_q_c_diagnostic = float(_cc.q_c_diagnostic)
-    args.cloud_rh_crit = float(_cc.rh_crit)
-    args._aimip_params = _p
-    print(f"AIMIP-classical: forced tiedtke/louis/mcfarlane/xu_randall + "
-          f"microphysics={args.microphysics} + "
-          f"loaded trained params from {args.aimip_classical_checkpoint}")
+    # --dry-run only checks that the checkpoint FILE exists
+    # (DRY_RUN_ARG_INPUTS); loading it would fail before that report.
+    if not getattr(args, "dry_run", False):
+        from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
+        from legoesm.training.aimip_params import AIMIPClassicalParams
+        _p = load_checkpoint_or_fail(
+            args.aimip_classical_checkpoint, AIMIPClassicalParams.from_defaults(),
+            what="--aimip-classical-checkpoint")
+        _cc = _p.to_cloud_config()
+        args.cloud_q_c_diagnostic = float(_cc.q_c_diagnostic)
+        args.cloud_rh_crit = float(_cc.rh_crit)
+        args._aimip_params = _p
+        print(f"AIMIP-classical: forced tiedtke/louis/mcfarlane/xu_randall + "
+              f"microphysics={args.microphysics} + "
+              f"loaded trained params from {args.aimip_classical_checkpoint}")
     # AIMIP-classical was trained on lat-lon C-grid PE; the trained per-scheme
     # leaves inject onto the finite-volume PhysicsPipeline (cubed_sphere /
     # latlon).  The MPAS and spectral backends are off-design and differ:
