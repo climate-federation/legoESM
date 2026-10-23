@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -146,10 +147,17 @@ def run_stage_a_subnormal_probe(*, plant_zero_input: bool = False) -> dict:
         and add_bits == expected_bits
         and prod_bits == expected_bits
     )
-    daz_flushes_input = (
+    # Note: `x * 1.0` and `x + 0.0` have a subnormal result (`5e-324`), so they
+    # flush to `0.0` under output flush-to-zero (FTZ) alone even when input
+    # denormals-are-zero (DAZ) is off.  Only the Stage B `h_s > 0.0` predicate
+    # (whose boolean/1.0 output is normal) isolates input flushing (DAZ), while
+    # `(2^-1022) * (2^-52)` from normal inputs isolates output flushing (FTZ).
+    ftz_or_daz_flushes_mul_add = (
         mul_bits == "0x0000000000000000" and add_bits == "0x0000000000000000"
     )
-    ftz_flushes_output = prod_bits == "0x0000000000000000"
+    ftz_flushes_output = (
+        not plant_zero_input and prod_bits == "0x0000000000000000"
+    )
 
     return {
         "input_x_float": float(x_np),
@@ -166,13 +174,53 @@ def run_stage_a_subnormal_probe(*, plant_zero_input: bool = False) -> dict:
         "jit_produce_subnormal_out_bits": prod_bits,
         "identity_preserves_bits": id_bits == expected_bits,
         "arithmetic_preserves_subnormal": arithmetic_preserves,
+        "ftz_or_daz_flushes_mul_add": ftz_or_daz_flushes_mul_add,
+        "ftz_flushes_subnormal_output": ftz_flushes_output,
+    }
+
+
+def classify_ftz_daz(
+    stage_a: dict,
+    stage_b: dict,
+    *,
+    plant_invalid_daz_from_mul_add: bool = False,
+) -> dict:
+    """Classify FTZ (output flushing) and DAZ (input flushing) from Stages A & B.
+
+    - ``ftz_flushes_subnormal_output`` comes from Stage A ``(2^-1022) * (2^-52)``
+      (normal inputs producing a subnormal output).
+    - ``daz_flushes_subnormal_input`` comes ONLY from Stage B's ``h_s > 0.0``
+      predicate on positive subnormal inputs (boolean/normal output, which FTZ
+      alone cannot flush).  ``x * 1.0`` and ``x + 0.0`` have subnormal outputs
+      and flush under FTZ alone, so they cannot classify DAZ.
+    """
+    ftz_flushes_output = bool(stage_a["ftz_flushes_subnormal_output"])
+    if plant_invalid_daz_from_mul_add:
+        daz_flushes_input = bool(
+            stage_a["jit_mul_one_out_bits"] == "0x0000000000000000"
+            and stage_a["jit_add_zero_out_bits"] == "0x0000000000000000"
+        )
+    else:
+        daz_flushes_input = bool(
+            stage_b.get("inputs_are_positive_subnormal", False)
+            and stage_b["predicate_all_false"]
+        )
+
+    if stage_a["arithmetic_preserves_subnormal"] and stage_b["predicate_all_true"]:
+        ftz_daz_mode = "IEEE754_GRADUAL_UNDERFLOW"
+    elif ftz_flushes_output and daz_flushes_input:
+        ftz_daz_mode = "FTZ_DAZ_FLUSH_TO_ZERO"
+    elif ftz_flushes_output and not daz_flushes_input:
+        ftz_daz_mode = "FTZ_ONLY_FLUSH_TO_ZERO"
+    elif daz_flushes_input and not ftz_flushes_output:
+        ftz_daz_mode = "DAZ_ONLY_FLUSH_TO_ZERO"
+    else:
+        ftz_daz_mode = "PARTIAL_OR_PLANTED_SUBNORMAL_FLUSH"
+
+    return {
         "daz_flushes_subnormal_input": daz_flushes_input,
         "ftz_flushes_subnormal_output": ftz_flushes_output,
-        "ftz_daz_mode": (
-            "IEEE754_GRADUAL_UNDERFLOW"
-            if arithmetic_preserves
-            else "FTZ_DAZ_FLUSH_TO_ZERO"
-        ),
+        "ftz_daz_mode": ftz_daz_mode,
     }
 
 
@@ -638,6 +686,7 @@ def run_probe(
         "jax_version": jax.__version__,
         "jaxlib_version": jax.lib.__version__,
         "x64_enabled": bool(jax.config.jax_enable_x64),
+        "xla_flags": os.environ.get("XLA_FLAGS", ""),
     }
 
     stage_a = run_stage_a_subnormal_probe(
@@ -701,10 +750,18 @@ def run_probe(
                     "jit_isnow_bits": _u64_hex(isnow_val.ravel()[0]),
                 }
 
+    inputs_are_positive_subnormal = bool(
+        len(subnormal_steps) > 0
+        and all(
+            0.0 < s["entry_h_s_float"] < tiny_normal
+            for s in stage_b_steps.values()
+        )
+    )
     stage_b = {
         "subnormal_zdf_entry_step_count": len(subnormal_steps),
         "first_subnormal_kt": subnormal_steps[0] if subnormal_steps else None,
         "last_subnormal_kt": subnormal_steps[-1] if subnormal_steps else None,
+        "inputs_are_positive_subnormal": inputs_are_positive_subnormal,
         "predicate_true_count": pred_true_count,
         "predicate_all_true": (
             pred_true_count == len(subnormal_steps) and len(subnormal_steps) > 0
@@ -712,8 +769,18 @@ def run_probe(
         "predicate_all_false": (
             pred_true_count == 0 and len(subnormal_steps) > 0
         ),
+        "daz_flushes_subnormal_input": bool(
+            inputs_are_positive_subnormal
+            and pred_true_count == 0
+            and len(subnormal_steps) > 0
+        ),
         "sampled_steps": stage_b_steps,
     }
+    ftz_daz_classification = classify_ftz_daz(stage_a, stage_b)
+    stage_a["daz_flushes_subnormal_input"] = ftz_daz_classification[
+        "daz_flushes_subnormal_input"
+    ]
+    stage_a["ftz_daz_mode"] = ftz_daz_classification["ftz_daz_mode"]
 
     before_arm = _evaluate_subnormal_window_arm(
         subnormal_records,

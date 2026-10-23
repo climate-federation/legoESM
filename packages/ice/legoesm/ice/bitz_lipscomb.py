@@ -479,7 +479,17 @@ def _si3_zdf_bl99_step(
     inverse_c_ice = 1.0 / constants.c_ice
 
     def body(_iteration, carry):
-        Tsu, Tsu_previous, Ti, Ts, qns, converged, iterations = carry
+        (
+            Tsu,
+            Tsu_previous,
+            Ti,
+            Ts,
+            qns,
+            k_i_frozen,
+            k_s_frozen,
+            converged,
+            iterations,
+        ) = carry
         active = ~converged
 
         # P07 conductivity at the four ice interfaces (top, 2 interior, base).
@@ -651,6 +661,8 @@ def _si3_zdf_bl99_step(
         Ti = jnp.where(active[..., None], Ti_candidate, Ti)
         Ts = jnp.where(active[..., None], Ts_candidate, Ts)
         qns = jnp.where(active, qns_new, qns)
+        k_i_frozen = jnp.where(active[..., None], k_i, k_i_frozen)
+        k_s_frozen = jnp.where(active[..., None], k_s, k_s_frozen)
         iterations = jnp.where(just_converged, _iteration + 1, iterations)
         return (
             Tsu,
@@ -658,39 +670,53 @@ def _si3_zdf_bl99_step(
             Ti,
             Ts,
             qns,
+            k_i_frozen,
+            k_s_frozen,
             converged | just_converged,
             iterations,
         )
 
+    kappa_shape = T_i_old.shape[:-1] + (4,)
     init = (
         T_surface,
         T_surface_input,
         T_i_old,
         T_s_old,
         qns_initial,
+        jnp.zeros(kappa_shape, dtype=dtype),
+        jnp.zeros(kappa_shape, dtype=dtype),
         jnp.zeros_like(h_ice, dtype=bool),
         jnp.full_like(h_ice, _maximum_iterations, dtype=jnp.int32),
     )
-    Tsu, _, Ti, Ts, qns, _, iterations = jax.lax.fori_loop(
-        0, _maximum_iterations, body, init
-    )
+    (
+        Tsu,
+        _,
+        Ti,
+        Ts,
+        qns,
+        k_i_frozen,
+        k_s_frozen,
+        _,
+        iterations,
+    ) = jax.lax.fori_loop(0, _maximum_iterations, body, init)
     e_i = ice_enthalpy_from_temperature(
         Ti, S_layers, constants, _nemo_order=_nemo_eos_order
     )
     e_s = snow_enthalpy_from_temperature(Ts, constants)
 
-    # Interface conductive diagnostics, `icethd_zdf_bl99.F90:820-824`.
+    # Interface conductive diagnostics, `icethd_zdf_bl99.F90:820-824`
+    # (`C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:782-784`): NEMO reuses
+    # the iteration-frozen `zkappa_s(ji,0)`, `zkappa_i(ji,0)`, and
+    # `zkappa_i(ji,nlay_i)` from the last unconverged Picard iterate (`:321-343`).
     if _nemo_zdf_layer_reciprocals:
-        k_top_i = (
-            p07_conductivity(Ti[..., 0], S_layers[..., 0], constants) * z1_h_i
+        zg1 = 2.0
+        zg1s = 2.0
+        qcn_bottom = (
+            -k_i_frozen[..., -1] * zg1 * (T_bottom - Ti[..., -1])
         )
-        k_base_i = (
-            p07_conductivity(T_bottom, S_layers[..., -1], constants) * z1_h_i
-        )
-        k_top = jnp.where(
-            snow_present,
-            constants.k_snow * z1_h_s,
-            k_top_i,
+        qcn_top = (
+            -isnow * k_s_frozen[..., 0] * zg1s * (Ts[..., 0] - Tsu)
+            - (1.0 - isnow) * k_i_frozen[..., 0] * zg1 * (Ti[..., 0] - Tsu)
         )
     else:
         k_top_i = (
@@ -704,9 +730,9 @@ def _si3_zdf_bl99_step(
             constants.k_snow / dz_s,
             k_top_i,
         )
-    T_first = jnp.where(snow_present, Ts[..., 0], Ti[..., 0])
-    qcn_top = 2.0 * k_top * (Tsu - T_first)
-    qcn_bottom = 2.0 * k_base_i * (Ti[..., -1] - T_bottom)
+        T_first = jnp.where(snow_present, Ts[..., 0], Ti[..., 0])
+        qcn_top = 2.0 * k_top * (Tsu - T_first)
+        qcn_bottom = 2.0 * k_base_i * (Ti[..., -1] - T_bottom)
     return SI3ZDFResult(
         Tsu, Ti, Ts, e_i, e_s, qns, qtr_bottom, qcn_top, qcn_bottom, iterations
     )

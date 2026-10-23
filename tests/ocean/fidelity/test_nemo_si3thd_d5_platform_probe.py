@@ -102,8 +102,93 @@ def test_d5_zdf_layer_reciprocals_statement_is_bit_exact_and_fails_when_reverted
     assert probe_module._u64_hex(zeta_s_nemo) == "0x402f37c77f84d1ee"
     assert probe_module._u64_hex(zeta_s_legacy) == "0x402f37c77f84d1ef"
 
-    # 2. Pin kt = 5841 bit-for-bit against the NEMO oracle on both CPU and GPU
-    steps = _load_step_operands(probe_module, (5841, 5860))
+    # 2. Pin kt = 5841 bit-for-bit against the NEMO oracle on both CPU and GPU,
+    #    and kt = 4242 post-solve conductive flux (iteration-frozen zkappa,
+    #    icethd_zdf_bl99.f90:782-784) against oracle_si3_dh_operands.bin and POST_DH.
+    steps = _load_step_operands(probe_module, (4242, 5841, 5860))
+    dh_ops = probe_module.year_gate._read_dh_operands(
+        ORACLE_V2_ROOT / "oracle_si3_dh_operands.bin"
+    )
+    frames_4242, exact_in_4242 = steps[4242]
+    entry_4242 = probe_module.year_gate._exact_1d_entry(frames_4242)
+    jax_entry_4242 = jax.tree.map(
+        lambda v: jnp.asarray(v, dtype=jnp.float64), entry_4242
+    )
+    forcing_4242 = probe_module.year_gate._forcing(exact_in_4242, jnp.float64)
+    trace_fixed_4242 = bl_mod.si3_column_step_arrays(
+        jax_entry_4242,
+        forcing_4242,
+        card.dt_seconds,
+        c,
+        _nemo_zdf_layer_reciprocals=True,
+    )
+    trace_rev_4242 = bl_mod.si3_column_step_arrays(
+        jax_entry_4242,
+        forcing_4242,
+        card.dt_seconds,
+        c,
+        _nemo_zdf_layer_reciprocals=False,
+    )
+    zdf_fixed_4242 = _si3_zdf_bl99_step(
+        jax_entry_4242.e_ice,
+        jax_entry_4242.e_snow,
+        jax_entry_4242.S_layers,
+        jax_entry_4242.h_ice,
+        jax_entry_4242.h_snow,
+        jax_entry_4242.T_surface,
+        forcing_4242,
+        card.dt_seconds,
+        c,
+        _nemo_zdf_layer_reciprocals=True,
+    )
+    zdf_rev_4242 = _si3_zdf_bl99_step(
+        jax_entry_4242.e_ice,
+        jax_entry_4242.e_snow,
+        jax_entry_4242.S_layers,
+        jax_entry_4242.h_ice,
+        jax_entry_4242.h_snow,
+        jax_entry_4242.T_surface,
+        forcing_4242,
+        card.dt_seconds,
+        c,
+        _nemo_zdf_layer_reciprocals=False,
+    )
+    zq_oracle_4242 = np.asarray([dh_ops[4242][0]["zq_top"]], dtype=np.float64)
+    zq_fixed_4242 = np.asarray(
+        (
+            zdf_fixed_4242.qns_ice
+            + forcing_4242.qsr_ice
+            - forcing_4242.qtr_ice_top
+            - zdf_fixed_4242.qcn_ice_top
+        )
+        * card.dt_seconds,
+        dtype=np.float64,
+    ).ravel()
+    zq_rev_4242 = np.asarray(
+        (
+            zdf_rev_4242.qns_ice
+            + forcing_4242.qsr_ice
+            - forcing_4242.qtr_ice_top
+            - zdf_rev_4242.qcn_ice_top
+        )
+        * card.dt_seconds,
+        dtype=np.float64,
+    ).ravel()
+    assert probe_module._ulp_diff(zq_fixed_4242, zq_oracle_4242) == 0
+    assert probe_module._ulp_diff(zq_rev_4242, zq_oracle_4242) > 100_000_000
+    hi_oracle_4242 = np.asarray(frames_4242[2]["h_i"], dtype=np.float64).ravel()
+    hi_fixed_4242 = np.asarray(
+        trace_fixed_4242.post_dh.h_ice, dtype=np.float64
+    ).ravel()
+    hi_rev_4242 = np.asarray(
+        trace_rev_4242.post_dh.h_ice, dtype=np.float64
+    ).ravel()
+    assert probe_module._ulp_diff(hi_fixed_4242, hi_oracle_4242) == 0
+    assert probe_module._ulp_diff(hi_rev_4242, hi_oracle_4242) == 140889
+    _, hi_rev_norm_4242 = probe_module.year_gate._normalised_error(
+        hi_oracle_4242, hi_rev_4242
+    )
+    assert hi_rev_norm_4242 > probe_module.phase2.BAR
     frames_5841, exact_in_5841 = steps[5841]
     entry_5841 = probe_module.year_gate._exact_1d_entry(frames_5841)
     jax_entry_5841 = jax.tree.map(
@@ -373,20 +458,237 @@ def test_d5_zdf_gradients_are_finite_and_reverse_equals_forward_with_literal_for
         assert float(jnp.linalg.norm(planted_grad)) > 0.0
 
 
-def test_d5_non_si3_callers_are_bit_identical() -> None:
-    """Legacy non-SI3 callers in bitz_lipscomb.py remain bit-for-bit unchanged."""
+def _parent_commit_bitz_lipscomb_conduction_step(
+    q_layers, h, S, F_top, T_bottom_K, dt, *, plant_reciprocal_dz: bool = False
+):
+    """Exact parent-commit (59fd8f2395) implementation of bitz_lipscomb_conduction_step."""
+    n = q_layers.shape[-1]
+    S_b = jnp.broadcast_to(
+        S[..., None] if S.ndim == h.ndim else S, q_layers.shape
+    )
+    if plant_reciprocal_dz:
+        dz = jnp.maximum(h, bl_mod._H_MIN) * (1.0 / n)
+    else:
+        dz = jnp.maximum(h, bl_mod._H_MIN) / n
+    dz_e = dz[..., None]
+    T_old = bl_mod.ice_temperature_from_enthalpy(q_layers, S_b)
+    c_i = bl_mod.ice_specific_heat(T_old, S_b)
+    k_c = bl_mod.ice_thermal_conductivity(T_old, S_b)
+    k_iface = (
+        2.0
+        * k_c[..., :-1]
+        * k_c[..., 1:]
+        / (k_c[..., :-1] + k_c[..., 1:])
+    )
+    heat_cap = bl_mod.canonical_constants.rho_ice * c_i * dz_e / dt
+    if plant_reciprocal_dz:
+        g_int = k_iface * (1.0 / dz_e)
+        g_bot = 2.0 * k_c[..., -1] * (1.0 / dz)
+    else:
+        g_int = k_iface / dz_e
+        g_bot = 2.0 * k_c[..., -1] / dz
+    zero = jnp.zeros_like(heat_cap[..., :1])
+    a = jnp.concatenate([zero, -g_int], axis=-1)
+    c = jnp.concatenate([-g_int, zero], axis=-1)
+    g_up = jnp.concatenate([zero, g_int], axis=-1)
+    g_dn = jnp.concatenate([g_int, zero], axis=-1)
+    b = heat_cap + g_up + g_dn
+    b = b.at[..., -1].add(g_bot)
+    d = heat_cap * T_old
+    d = d.at[..., 0].add(F_top)
+    d = d.at[..., -1].add(g_bot * T_bottom_K)
+    T_new = bl_mod.thomas_solve(a, b, c, d)
+    q_new = q_layers + bl_mod.canonical_constants.rho_ice * c_i * (
+        T_new - T_old
+    )
+    F_bottom = g_bot * (T_new[..., -1] - T_bottom_K)
+    return q_new, T_new, F_bottom
+
+
+def test_d5_non_si3_callers_are_bit_identical(monkeypatch) -> None:
+    """Non-SI3 callers match parent-commit behaviour bit-for-bit and fail on planted changes."""
+    from functools import partial
+    from legoesm.ice import (
+        BrineConfig,
+        SeaIceConfig,
+        SnowConfig,
+        init_dynamic_ice_state,
+        step_sea_ice,
+    )
+    from legoesm.ice.scm import IceColumnModel, cold_polar_forcing
+
+    # 1. Compare bitz_lipscomb_conduction_step bit-for-bit against parent commit
+    #    on both thick ice (h=1.8 m), kt=5841 ice thickness
+    #    (h=0.5877349091111249 m, where `h / 3` vs `h * (1.0 / 3.0)` differs by
+    #    1 ULP), and clamped thin ice (h=1e-3 m).
     q_layers = jnp.asarray([[-2.8e8, -2.7e8, -2.5e8]], dtype=jnp.float64)
-    h = jnp.asarray([1.8], dtype=jnp.float64)
     s = jnp.asarray([5.0], dtype=jnp.float64)
     f_top = jnp.asarray([-25.0], dtype=jnp.float64)
     t_bot = jnp.asarray([271.35], dtype=jnp.float64)
-    q_new, t_new, f_bot = bitz_lipscomb_conduction_step(
-        q_layers, h, s, f_top, t_bot, 3600.0
+
+    for h_val in (1.8, 0.5877349091111249, 1.0e-3):
+        h = jnp.asarray([h_val], dtype=jnp.float64)
+        got = bitz_lipscomb_conduction_step(
+            q_layers, h, s, f_top, t_bot, 3600.0
+        )
+        parent_ref = _parent_commit_bitz_lipscomb_conduction_step(
+            q_layers, h, s, f_top, t_bot, 3600.0
+        )
+        for g_arr, p_arr in zip(got, parent_ref, strict=True):
+            assert g_arr.dtype == p_arr.dtype == jnp.float64
+            assert bool(jnp.all(jnp.isfinite(g_arr)))
+            np.testing.assert_array_equal(
+                np.asarray(g_arr).view(np.uint64),
+                np.asarray(p_arr).view(np.uint64),
+            )
+
+    # Planted change 1: planting the SI3 reciprocal `dz = h * (1/3)` into the
+    # non-SI3 `bitz_lipscomb_conduction_step` on `h = 0.5877349091111249 m`
+    # MUST fail the bit-for-bit check against the parent-commit behaviour.
+    h_inexact = jnp.asarray([0.5877349091111249], dtype=jnp.float64)
+    got_inexact = bitz_lipscomb_conduction_step(
+        q_layers, h_inexact, s, f_top, t_bot, 3600.0
     )
-    assert q_new.dtype == t_new.dtype == f_bot.dtype == jnp.float64
-    assert bool(jnp.all(jnp.isfinite(q_new)))
-    assert bool(jnp.all(jnp.isfinite(t_new)))
-    assert bool(jnp.all(jnp.isfinite(f_bot)))
+    planted_recip = _parent_commit_bitz_lipscomb_conduction_step(
+        q_layers,
+        h_inexact,
+        s,
+        f_top,
+        t_bot,
+        3600.0,
+        plant_reciprocal_dz=True,
+    )
+    with pytest.raises(AssertionError):
+        for g_arr, pl_arr in zip(got_inexact, planted_recip, strict=True):
+            np.testing.assert_array_equal(
+                np.asarray(g_arr).view(np.uint64),
+                np.asarray(pl_arr).view(np.uint64),
+            )
+
+    # 2. Compare non-SI3 `step_sea_ice` (both default slab and dynamic-v2 paths)
+    #    and `IceColumnModel` bit-for-bit with `_nemo_zdf_layer_reciprocals=True`
+    #    (shipped) vs `_nemo_zdf_layer_reciprocals=False` (parent-commit flag).
+    orig_rad = bl_mod._radiation
+    orig_zdf = bl_mod._si3_zdf_bl99_step
+    orig_col = bl_mod.si3_column_step_arrays
+
+    def _run_non_si3_paths():
+        scm = IceColumnModel.create(
+            ncol=2, dt=3600.0, forcing=cold_polar_forcing(ncol=2)
+        )
+        resp_slab = scm.step()
+        slab_bits = (
+            np.asarray(scm.state.h_ice.data, dtype=np.float64).view(np.uint64),
+            np.asarray(scm.state.T_ice.data, dtype=np.float64).view(np.uint64),
+            np.asarray(scm.state.concentration.data, dtype=np.float64).view(
+                np.uint64
+            ),
+            np.asarray(resp_slab.T_sfc, dtype=np.float64).view(np.uint64),
+            np.asarray(resp_slab.lhflx, dtype=np.float64).view(np.uint64),
+        )
+
+        cfg_v2 = SeaIceConfig(
+            snow=SnowConfig(enabled=True),
+            brine=BrineConfig(enabled=True),
+        )
+        dyn_state = init_dynamic_ice_state((2,))
+        forcing_v2 = cold_polar_forcing(ncol=2)
+        sst = jnp.full((2,), 271.35, dtype=jnp.float64)
+        zero_vel = jnp.zeros((2,), dtype=jnp.float64)
+        new_dyn, resp_v2 = step_sea_ice(
+            dyn_state, forcing_v2, sst, zero_vel, zero_vel, cfg_v2, 1.0, 3600.0
+        )
+        v2_bits = (
+            np.asarray(new_dyn.h_ice.data, dtype=np.float64).view(np.uint64),
+            np.asarray(new_dyn.h_snow.data, dtype=np.float64).view(np.uint64),
+            np.asarray(new_dyn.T_ice.data, dtype=np.float64).view(np.uint64),
+            np.asarray(new_dyn.S_ice.data, dtype=np.float64).view(np.uint64),
+            np.asarray(resp_v2.T_sfc, dtype=np.float64).view(np.uint64),
+        )
+        return slab_bits + v2_bits
+
+    bits_flag_on = _run_non_si3_paths()
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            bl_mod,
+            "_radiation",
+            partial(orig_rad, _nemo_zdf_layer_reciprocals=False),
+        )
+        mp.setattr(
+            bl_mod,
+            "_si3_zdf_bl99_step",
+            partial(orig_zdf, _nemo_zdf_layer_reciprocals=False),
+        )
+        mp.setattr(
+            bl_mod,
+            "si3_column_step_arrays",
+            partial(orig_col, _nemo_zdf_layer_reciprocals=False),
+        )
+        bits_flag_off = _run_non_si3_paths()
+
+    for arr_on, arr_off in zip(bits_flag_on, bits_flag_off, strict=True):
+        np.testing.assert_array_equal(arr_on, arr_off)
+
+    # Planted change 2: a 1-ULP perturbation on any non-SI3 caller output MUST
+    # fail the bit-for-bit equality check.
+    planted_bits = list(bits_flag_off)
+    perturbed = planted_bits[0].copy()
+    perturbed[0] += np.uint64(1)
+    planted_bits[0] = perturbed
+    with pytest.raises(AssertionError):
+        for arr_on, arr_pl in zip(bits_flag_on, planted_bits, strict=True):
+            np.testing.assert_array_equal(arr_on, arr_pl)
+
+
+def test_d5_ftz_daz_classification_distinguishes_ftz_only_from_daz(
+    probe_module,
+) -> None:
+    """Verify DAZ is classified ONLY from the Stage B `h_s > 0` predicate, not `x*1.0`/`x+0.0`."""
+    # Synthetic FTZ-only platform: `x*1.0`, `x+0.0`, and `a*b` flush subnormal
+    # outputs to 0, but `h_s > 0.0` (normal boolean output) is True because
+    # subnormal inputs are NOT flushed on input (DAZ=0).
+    ftz_only_stage_a = {
+        "arithmetic_preserves_subnormal": False,
+        "ftz_flushes_subnormal_output": True,
+        "jit_mul_one_out_bits": "0x0000000000000000",
+        "jit_add_zero_out_bits": "0x0000000000000000",
+        "jit_produce_subnormal_out_bits": "0x0000000000000000",
+    }
+    ftz_only_stage_b = {
+        "inputs_are_positive_subnormal": True,
+        "predicate_all_true": True,
+        "predicate_all_false": False,
+    }
+    classified_ftz_only = probe_module.classify_ftz_daz(
+        ftz_only_stage_a, ftz_only_stage_b
+    )
+    assert classified_ftz_only["ftz_flushes_subnormal_output"] is True
+    assert classified_ftz_only["daz_flushes_subnormal_input"] is False
+    assert classified_ftz_only["ftz_daz_mode"] == "FTZ_ONLY_FLUSH_TO_ZERO"
+
+    # Planted control: the old invalid DAZ formula (from `x*1.0` and `x+0.0`)
+    # falsely reports `daz_flushes_subnormal_input=True` under FTZ-only and
+    # MUST fail the FTZ-only check.
+    planted_invalid = probe_module.classify_ftz_daz(
+        ftz_only_stage_a,
+        ftz_only_stage_b,
+        plant_invalid_daz_from_mul_add=True,
+    )
+    with pytest.raises(AssertionError):
+        assert planted_invalid["daz_flushes_subnormal_input"] is False
+
+    # When `h_s > 0.0` flushes positive subnormal inputs to False, DAZ is True:
+    ftz_daz_stage_b = {
+        "inputs_are_positive_subnormal": True,
+        "predicate_all_true": False,
+        "predicate_all_false": True,
+    }
+    classified_ftz_daz = probe_module.classify_ftz_daz(
+        ftz_only_stage_a, ftz_daz_stage_b
+    )
+    assert classified_ftz_daz["ftz_flushes_subnormal_output"] is True
+    assert classified_ftz_daz["daz_flushes_subnormal_input"] is True
+    assert classified_ftz_daz["ftz_daz_mode"] == "FTZ_DAZ_FLUSH_TO_ZERO"
 
 
 def test_d5_platform_probe_and_planted_controls(probe_module) -> None:
@@ -421,6 +723,7 @@ def test_d5_platform_probe_and_planted_controls(probe_module) -> None:
         assert report["platform_disposition"] == "D5_PLATFORM_FLOOR"
         assert stage_a["ftz_daz_mode"] == "FTZ_DAZ_FLUSH_TO_ZERO"
         assert stage_a["daz_flushes_subnormal_input"] is True
+        assert stage_b["daz_flushes_subnormal_input"] is True
         assert stage_a["ftz_flushes_subnormal_output"] is True
         assert stage_b["predicate_all_false"] is True
         assert (
@@ -433,6 +736,8 @@ def test_d5_platform_probe_and_planted_controls(probe_module) -> None:
         assert report["platform_disposition"] == "SUBNORMAL_PRESERVED"
         assert stage_a["ftz_daz_mode"] == "IEEE754_GRADUAL_UNDERFLOW"
         assert stage_a["arithmetic_preserves_subnormal"] is True
+        assert stage_a["daz_flushes_subnormal_input"] is False
+        assert stage_b["daz_flushes_subnormal_input"] is False
         assert stage_b["predicate_all_true"] is True
         assert stage_c["before_statement_fix"]["over_bar_post_zdf_count"] == 57
         assert stage_c["after_statement_fix"]["over_bar_post_zdf_count"] == 1
@@ -450,6 +755,7 @@ def test_d5_platform_probe_and_planted_controls(probe_module) -> None:
         allow_dirty=True,
     )
     assert planted_zero["stage_a_subnormal_probe"]["input_x_bits"] == "0x0000000000000000"
+    assert planted_zero["stage_a_subnormal_probe"]["ftz_flushes_subnormal_output"] is False
     assert planted_zero["platform_disposition"] == "D5_PLATFORM_FLOOR"
 
     planted_flush = probe_module.run_probe(
@@ -458,6 +764,8 @@ def test_d5_platform_probe_and_planted_controls(probe_module) -> None:
         allow_dirty=True,
     )
     assert planted_flush["stage_b_predicate_probe"]["predicate_true_count"] == 0
+    assert planted_flush["stage_b_predicate_probe"]["inputs_are_positive_subnormal"] is False
+    assert planted_flush["stage_b_predicate_probe"]["daz_flushes_subnormal_input"] is False
     assert planted_flush["platform_disposition"] == "D5_PLATFORM_FLOOR"
 
     planted_revert = probe_module.run_probe(
