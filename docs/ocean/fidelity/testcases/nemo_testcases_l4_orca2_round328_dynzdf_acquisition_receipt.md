@@ -178,6 +178,16 @@ Decision-150 drag strictly improve or become bit-identical.
 - Evidence root reserved at
   `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round328/`.
 - No production result exists and no NEMO executable was run in this round.
+- Resume-2 focused battery: 22 passed (the 21 round-328 fixture/admission/
+  cleanup tests plus round 326's config-root-normalised ELF calibration).
+- Resume-2 clean-commit non-running preflight: `PREFLIGHT_READY` at
+  `5941c6635fc8`; all 10 preflight plants fired, all 140 inherited outputs
+  matched, all three patched/writer Fortran units compiled, and the
+  same-program census remained 412 preprocessed units / 424 normalized
+  objects.
+- Resume-2 per-receipt citation gate: PASS, 6 citations found and 0 failures.
+- Resume-2 default landing battery and private-import ratchet: 147 passed in
+  1,401.47 s; the ratchet's 6 tests are included in that count.
 
 Choices: stopping for the absent record is **ASKED**. Recording every
 source-order matrix boundary, rather than only entry/exit, was an **UNASKED**
