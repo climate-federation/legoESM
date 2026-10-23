@@ -369,6 +369,7 @@ def test_float32_prognostics_with_float64_column_inputs(fx):
         f64["zm"], f64["zi"], T64[:, -1], q64[:, -1], rho, float(fx["dt"]),
         HoltslagBovilleConfig(),
         pref_mid=jnp.asarray(fx["in_pref_mid"], jnp.float64))
-    assert out.du_dt.dtype == jnp.float32 and out.dv_dt.dtype == jnp.float32
+    for arr in (out.du_dt, out.dv_dt, out.dT_dt, out.dq_v_dt):
+        assert arr.dtype == jnp.float32
     for arr in (out.du_dt, out.dv_dt, out.dT_dt, out.dq_v_dt):
         assert jnp.all(jnp.isfinite(arr))

@@ -305,7 +305,9 @@ def holtslag_boville_turbulence(
     # Heat BC: shflx plus the legoESM latent-enthalpy term (user decision
     # 2026-09-28; zero when the surface charged the constant L_v).
     shflx_bc = shflx + latent_enthalpy_correction(lhflx, sflx_q)
-    s_dse = cpair * T + g * z_full
+    # In the winds' precision, as the solve (#2110): s_new - s_dse then
+    # cancels the rounding of s exactly as in a uniform-precision run.
+    s_dse = (cpair * T + g * z_full).astype(u.dtype)
     u_new, v_new, s_new, q_new = cam_compute_vdiff(
         u, v, s_dse, q_v, T, p_half, hb.Km_half, hb.Kh_half,
         hb.cgh_half, hb.cgs_half, tau_x, tau_y, shflx_bc, sflx_q, dt,
