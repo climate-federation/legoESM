@@ -257,9 +257,10 @@ mpi-nightly,claude-code-review}.yml`).
 `pytest tests/` collects about 58,000 tests. That is far more than CI runs, and it
 can take most of a day on a laptop. To check a change against what CI checks, run
 the test steps of `.github/workflows/ci.yml` directly. Use the precision each job
-sets: the unit tier and the restart and integration smoke jobs run fp32; the
-Fortran-fidelity job (top-level tests, SFNO restart, FV3 native grid) and the
-visual-regression job set `JAX_ENABLE_X64=1`.
+sets: the unit tier and the restart and integration smoke jobs run fp32 by default
+(but `test_zarr_checkpoint.py` enables x64 itself at import); the Fortran-fidelity
+job (top-level tests, SFNO restart, FV3 native grid) and the visual-regression job
+set `JAX_ENABLE_X64=1`.
 
 ```bash
 export JAX_PLATFORMS=cpu   # needed on Apple Silicon when the mps extra is installed
@@ -271,6 +272,10 @@ export JAX_PLATFORMS=cpu   # needed on Apple Silicon when the mps extra is insta
 # top-level-fidelity-tests (x64)
 JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/test_*.py --timeout=300 \
     --tb=short -q -n 4 --dist loadfile
+
+# SFNO restart tests (x64; they skip in the fp32 unit run)
+JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/unit/test_sfno_refuses_latlon_start.py \
+    tests/unit/test_latlon_face_wind_restart.py --timeout=600 --tb=short -q
 
 # restart-smoke
 .venv/bin/python -m pytest tests/unit/test_cmor_experiments_restart.py \
