@@ -26,9 +26,9 @@ Inside that call it forms `Kaa = Kbb + rDt*Krhs`, subtracts the barotropic
 velocity, then adds bottom and top drag RHS terms at
 `ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:116-181`.
 It next constructs and solves the U matrix at
-`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:187-346`
+`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:187-349`
 and the V matrix at
-`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:356-520`.
+`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:356-517`.
 
 Certified ladder coverage: **none** for this statement-level ORCA2 boundary.
 The current rung-10 card carries the completed stage states, TKE/`avm`, the
