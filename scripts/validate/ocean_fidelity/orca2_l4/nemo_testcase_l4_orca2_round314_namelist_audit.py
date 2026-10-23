@@ -603,8 +603,9 @@ def _rules() -> list[Rule]:
     a(Rule(r"oce:namzdf_tke\.ln_mxl0", "map", card=lambda c: c.flat[T + "tke_mxl_choice"] == 3,
            why="choice 3 carries the surface stress anchor", effect=VM))
     a(Rule(r"oce:namzdf_tke\.nn_mxlice", "map", card=lambda c: float(c.flat[T + "nemo_mxlice"]),
-           why="needs SI3's mean ice thickness, which the card does not compute; "
-               "DECISION 154's comparison waits for the round-326 hm_i record", effect=VM,
+           why="off on the shipped card: it needs SI3's mean ice thickness, which the "
+               "card does not compute (D135); the rung-10 NEMO comparison runs it with "
+               "the recorded hm_i (D154, round 326)", effect=VM,
            cls="b:D135"))
     a(Rule(r"oce:namzdf_tke\.rn_mxlice", "inert", switch=(("oce:namzdf_tke.nn_mxlice", 2.0),),
            why="read only by nn_mxlice = 1; NEMO runs 2"))
