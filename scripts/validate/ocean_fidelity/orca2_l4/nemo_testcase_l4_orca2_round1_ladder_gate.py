@@ -15,6 +15,7 @@ stops fail-closed until both MPI slabs exist for the surface and entry records.
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import re
@@ -275,13 +276,64 @@ def comparison_card(card):
     velocity), so only this harness selects the G5 path, and the step reads
     the recorded rCdU_ice that ``_surface_forcings`` passes.  The shipped card
     keeps the switch off (DECISION 133).
+
+    DECISION 154: TKE's under-ice surface mixing length, nn_mxlice = 2
+    (zdftke.f90:620-623), reads SI3's hm_i, which the card cannot compute
+    either; ``_surface_forcings`` passes round 326's admitted record.  The
+    shipped card keeps nn_mxlice = 0 (DECISION 135).
     """
     cfg = card.recipe.model_config
     require(not cfg.implicit_ice_ocean_top_drag,
             "the shipped rung-10 card selects the ice-ocean top drag "
             "(DECISION 133 keeps it off)")
-    return card._replace(recipe=card.recipe._replace(
-        model_config=cfg._replace(implicit_ice_ocean_top_drag=True)))
+    mixing = cfg.physics.vertical_mixing
+    require(mixing.tke.nemo_mxlice == 0,
+            "the shipped rung-10 card selects nn_mxlice = 2 "
+            "(DECISION 135 keeps it 0)")
+    physics = cfg.physics._replace(vertical_mixing=mixing._replace(
+        tke=mixing.tke._replace(nemo_mxlice=2)))
+    return card._replace(recipe=card.recipe._replace(model_config=cfg._replace(
+        implicit_ice_ocean_top_drag=True, physics=physics)))
+
+
+ROUND326_HMI_RUN = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/"
+    "acquisition/orca1ice_tke_hmi_10step_np2")
+
+
+@functools.lru_cache(maxsize=1)
+def _admitted_hm_i_records():
+    """Round 326's hm_i record, admitted by its gate (A2-A4) before any use."""
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round326_hmi_gate as r326,
+    )
+
+    admission = r326.run_gate(ROUND326_HMI_RUN, surface_root=r326.ROUND5_RUN)
+    require(admission["status"] == "PASS_R326_HMI_ADMISSION",
+            f"hm_i record not admitted: {admission['status']}")
+    records = r326.load(ROUND326_HMI_RUN)
+    require({r326.record_name(kt, rank): r["sha256"]
+             for (rank, kt), r in records.items()} == admission["records"],
+            "hm_i records changed after admission")
+    return {key: {f: r326.owned(r["fields"][f]) for f in ("hm_i", "fr_i")}
+            for key, r in records.items()}
+
+
+def recorded_hm_i(kt: int, fr_i: np.ndarray) -> np.ndarray:
+    """hm_i as zdf_tke read it at kt, both ranks assembled as the surface frames.
+
+    The record is written in zdf_tke just before tke_avn at kt, so it is the
+    value NEMO used at kt; its fr_i must equal the frame's bit for bit.
+    """
+    records = _admitted_hm_i_records()
+    require((0, kt) in records, f"no admitted hm_i record for kt {kt}")
+    got = {f: np.concatenate([records[(0, kt)][f], records[(1, kt)][f]], axis=1)
+           for f in ("hm_i", "fr_i")}
+    require(got["fr_i"].shape == fr_i.shape
+            and np.array_equal(got["fr_i"].view(np.uint64),
+                               np.asarray(fr_i, dtype=np.float64).view(np.uint64)),
+            f"kt {kt}: hm_i record's fr_i is not the surface frame's")
+    return got["hm_i"]
 
 
 _FORTRAN_REAL = re.compile(r"^[-0-9.eE+*/ ]+$")
@@ -845,6 +897,11 @@ def _surface_forcings(
         # SI3's recorded rCdU_ice; rCdU_top = rCdU_ice with no cavity
         # (zdfdrg.f90:187).  Read only by implicit_ice_ocean_top_drag.
         ice_ocean_top_drag_rCdu=jnp.asarray(fields["rCdU_ice"]),
+        # SI3's hm_i as zdf_tke read it at kt; read only by nn_mxlice = 2.
+        ice_mean_thickness_hm_i=(
+            jnp.asarray(recorded_hm_i(kt, fields["fr_i"]))
+            if card.recipe.model_config.physics.vertical_mixing.tke.nemo_mxlice == 2
+            else None),
     )
     if card.recipe.model_config.rk3_stage3_geothermal_nemo_written:
         # tra_bbc reads sn_qgh once (nn_geoflx = 2, yearly climatology).

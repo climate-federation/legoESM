@@ -46,3 +46,31 @@ falsifier: fr_i/taum unequal (A2), even-step hm_i unequal (A3), hm_i zero
 on every ice-covered wet point or >= 20 m (A4), each with a plant. The build
 must also be round 5's program plus the observer (preprocessed sources and
 objects byte-identical except zdftke's insertions and the writer).
+
+## Amendment 2 (2026-10-23, record admitted, frozen before any arm is measured)
+
+The operator's `--run` admitted the record (`PASS_R326_HMI_ADMISSION`); the
+gate re-run here reproduces it and all nine plants fire. A1-A4: CONFIRMED
+(fr_i/taum 0 unequal points, even-step identity on all 10 rows, hm_i max
+2.797 m, 37,784 ice-covered wet points with hm_i > 0).
+
+Comparison harness: the ladder's `comparison_card` selects nn_mxlice = 2
+(model's existing V1 statement, zdftke.f90:620-623); `_surface_forcings` passes
+the admitted hm_i for kt (written just before tke_avn at kt) and refuses unless
+the record's fr_i equals the frame's bit for bit. Shipped card: nn_mxlice = 0.
+Arms (both drag on): control = comparison card with nn_mxlice 0 (round 325's),
+mxlice = comparison card. Rung 0 / OMT-1..4: both arms the shipped card.
+
+- M1 D122 (c)+(d) PASS on all seven pairs, D139 recomputed; rung 0 / OMT-1..4
+  rows identical between arms (0 differing rows). Falsifier: any exact row
+  lost, or a first over-bar row moving away.
+- M2 rung 10, both labels: kt-1 entry, stage-1 and stage-2 rows bit-identical
+  between arms (TKE's coefficients are first used at stage 3); kt-1 stage-3 T
+  differs. Falsifier: a kt-1 stage-1/2 row differs, or no kt-1 stage-3 row does.
+- M3 rung 10 kt-10 full-domain RMS T error falls in both labels (control
+  ~1.102e-3 K). Falsifier: it rises in either label.
+- M4 N = 1 gradients on the comparison card (T loss w.r.t. initial T and
+  w.r.t. rn_Ud): 0 non-finite; reverse = forward within 1e-12 relative.
+- M5 refusal: nn_mxlice = 2 without hm_i refuses on step, step_checked,
+  integrate and integrate_scan (with and without forcing); removing the
+  refusal makes that test fail.

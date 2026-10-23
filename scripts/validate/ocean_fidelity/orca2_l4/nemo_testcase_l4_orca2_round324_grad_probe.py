@@ -94,6 +94,8 @@ SPONGE = {k: v for k, v in rung10_gate.damping_step_kwargs(card, root, 1).items(
           if k == "sponge"}
 res["implicit_ice_ocean_top_drag"] = bool(cfg.implicit_ice_ocean_top_drag)
 res["rCdU_ice_passed"] = forcing[0][1].ice_ocean_top_drag_rCdu is not None
+res["nn_mxlice"] = int(cfg.physics.vertical_mixing.tke.nemo_mxlice)
+res["hm_i_passed"] = forcing[0][1].ice_mean_thickness_hm_i is not None
 res["damping_target_kt"] = None if not SPONGE else SPONGE["sponge"].nemo_kt
 res["geothermal_forced"] = forcing[0][1].geothermal_heat_flux_mwm2 is not None
 res["rn_ud"] = float(cfg.gm_redi.kappa_redi_diffusive_velocity)
