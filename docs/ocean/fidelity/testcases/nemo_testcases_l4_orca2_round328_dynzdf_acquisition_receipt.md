@@ -128,9 +128,14 @@ Decision-150 drag strictly improve or become bit-identical.
 - HOLD-repair direct battery: 18 passed (compiled exact-layout writer, clean
   record, all nine plants, both-observer same-program plants, and the imported
   config-root-normalised ELF test).
+- Clean-commit non-running preflight: PASS at `7c52fa74b`; all 8 preflight
+  plants fired, 140 deterministic round-5/round-326 files matched, all 3
+  patched/writer units passed syntax, and the same-program census found 412
+  identical preprocessed units and 424 identical normalized objects. Log
+  `gates/preflight_hold_repair.log` SHA-256
+  `49e2cdfb722ddd3f411c1bbec3705151e659081538be23be438e92517359f737`.
 - The earlier preflight hash and 157-test count are superseded by this HOLD
-  repair. The repaired clean-commit preflight and landing gates are recorded
-  here after they run.
+  repair. The repaired landing-gate count is recorded after it runs.
 - Evidence root reserved at
   `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round328/`.
 - No production result exists and no NEMO executable was run in this round.
