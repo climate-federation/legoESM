@@ -70,3 +70,14 @@ def test_wb_loss_config_refuses_unimplemented_settings(setting):
     with pytest.raises(ValueError, match="does not implement"):
         make_loss_config(None, {"loss": setting})
     make_loss_config(None, {"loss": {"w_crps_T": 0.5}})   # supported: no raise
+
+
+def test_crps_zero_residual_scale_uses_the_mse_floor():
+    """A zero residual scale is floored exactly like the MSE term
+    (scale^2 >= 1e-30), so the loss stays finite."""
+    cfg = LossConfig(**_OFF, w_crps_T=1.0, residual_normalize=True,
+                     T_resid_scale=0.0, level_weighting="uniform")
+    loss = float(carry_mse(_carry(e3=2.0), _carry(), SIGMA, config=cfg))
+    lev_w = np.asarray(level_weights(SIGMA, config=cfg))
+    assert np.isfinite(loss)
+    np.testing.assert_allclose(loss, 2.0 * np.mean(lev_w) / 1e-15, rtol=1e-6)

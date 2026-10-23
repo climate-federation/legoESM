@@ -467,8 +467,9 @@ def carry_mse(
     # = |error|, as in ``neural_gcm_spectral``: normalised by scale (not
     # scale^2), level-weighted like the MSE and bias terms above.
     if getattr(config, "residual_normalize", False):
-        T_s, wind_s, q_s, ps_s = (config.T_resid_scale, config.wind_resid_scale,
-                                  config.q_resid_scale, config.ps_resid_scale)
+        # sqrt of the floored squared scales above: same zero-scale guard.
+        T_s, wind_s, q_s, ps_s = (T_norm ** 0.5, wind_norm ** 0.5,
+                                  q_norm ** 0.5, ps_norm ** 0.5)
     elif config.normalize_by_scale:
         T_s, wind_s, q_s, ps_s = (config.T_scale, config.wind_scale,
                                   config.q_scale, config.ps_scale)
