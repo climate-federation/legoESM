@@ -88,7 +88,7 @@ Decision-150 drag strictly improve or become bit-identical.
 - Acquisition gate test: 10 passed (clean record plus all nine plants).
 - Non-running preflight: PASS; `gates/preflight.log` SHA-256
   `59d25e16665f8dad0d318f16c45f60a5c489945d726a1b0a02c3a670bd955148`.
-- Landing suite: 156 passed (citation gate, private-import ratchet, TKE and
+- Landing suite: 157 passed (citation gate, private-import ratchet, TKE and
   recipe, freshwater, stage-face mask, prognostic barotropic state, ORCA2
   parallel receipt, and this acquisition gate).
 - Evidence root reserved at
