@@ -1871,11 +1871,10 @@ CITATION_MAP = {
         "CALL ldf_eke_eiv( kstp, Nbb )",
         11,
     ],
-    "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:568-582": [
-        "IF( ln_shuman ) THEN                     ! Shuman averaging",
-        ("IF( kstg == 3 .AND. ln_trabbl )   CALL bbl", 2),
-        15,
-    ],
+    "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:555":
+        "CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )",
+    "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:560":
+        "IF( kstg == 3 .AND. ln_trabbl )   CALL bbl( kstp, nit000, Kbb, Kmm )",
     "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:248-265": [
         ("DO jj = ntsj-( nn_hls), ntej+(  nn_hls-1 ) ; DO ji = ntsi-( nn_hls), ntei+(  nn_hls-1)", 2),
         ("ENDIF", 5),
@@ -1921,57 +1920,52 @@ CITATION_MAP = {
         "rk3_stage3_l9_eiv_nemo_order: bool = False",
         8,
     ],
-    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4130-4218": [
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4124-4212": [
         "if _after_ldf:",
         "LatLonCGridOceanModel._check_l3_krhs_route(config)",
         89,
     ],
-    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4040-4054": [
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4034-4048": [
         "def _check_l3_krhs_route(config) -> None:",
         '"Krhs tracer route)")',
         15,
     ],
-    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10527-10551": [
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10521-10544": [
         "if _want_bolus:",
-        "stage3[7], stage3[8], zfu_eiv, zfv_eiv)",
-        25,
+        "stage3[8] = stage3[8] + zfv_eiv   # ldftra.f90:955",
+        24,
     ],
-    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:15020-15028": [
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:15010-15018": [
         "# A direct eager step is also a valid cold-start driver.",
         "self._check_l3_krhs_route(self.config)",
         9,
     ],
-    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:212-215": [
-        "def _nemo_stage3_l9_eiv_transport(base_u, base_v, eiv_u, eiv_v):",
-        "return base_u + eiv_u, base_v + eiv_v",
-        4,
-    ],
-    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10541-10572": [
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10535-10562": [
         "stage3 = list(_nemo_ws_stage_transport_geometry[2])",
         "volume_transport_override=(stage3[7], stage3[8]),",
-        32,
+        28,
     ],
-    "tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:91-189": [
-        'assert \'check_acting "$REF"\' not in operational',
+    "tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:96-178": [
+        "def test_l9_pins_every_krhs_position_with_inexact_words():",
         "assert np.isfinite(np.asarray(grad))",
-        99,
+        83,
     ],
-    "tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:192-245": [
+    "tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:181-243": [
         "def test_l9_live_eiv_executes_before_l8_finalizer(l9_card, monkeypatch):",
-        ("surface_forcing=forcing, sponge=l9_card.recipe.tracer_damping)", 2),
-        54,
+        'for name in ("T", "S"))',
+        63,
     ],
     "scripts/validate/ocean_fidelity/testcases/"
-    "nemo_testcase_l9_orca2eiv_krhs/run.sh:310-325": [
-        ("preflight", 6),
+    "nemo_testcase_l9_orca2eiv_krhs/run.sh:335-353": [
+        ("preflight", 1),
         ("admit \"$steps\"", 3),
-        16,
+        19,
     ],
     "scripts/validate/ocean_fidelity/testcases/"
-    "nemo_testcase_l9_orca2eiv_krhs/run.sh:115-239": [
+    "nemo_testcase_l9_orca2eiv_krhs/run.sh:163-262": [
         "preflight() {",
         "L9_PREFLIGHT_7_OF_7_PASS plants=all_refused",
-        125,
+        100,
     ],
     # --- GRIDLADDER round 56 (L8 composed stage-3 tracer RHS) ---
     "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:600-645": [

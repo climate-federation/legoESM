@@ -17,9 +17,10 @@ L9.
 
 ORCA2 computes the standard isoneutral slope once from the before tracer state,
 then refreshes the time-varying eddy coefficient before the RK stages
-(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:184-194`).  During stage 3 it first
-forms the ordinary U/V/W tracer transports and calls `tra_adv_trp`
-(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:568-582`).
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:184-194`). During stage 3 the live
+non-Shuman branch calls `tra_adv_trp`, then computes selected BBL coefficients
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:555`,
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:560`).
 
 Inside that call, after the bottom transport slots are zeroed, NEMO calls the
 eddy-induced-transport routine only at stage 3

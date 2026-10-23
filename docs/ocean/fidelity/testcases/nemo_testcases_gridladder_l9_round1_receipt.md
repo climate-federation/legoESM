@@ -10,6 +10,8 @@ Implementation/acquisition commit: `e4f204272d`
 
 Receipt/citation commits: `a27eba2567`, `6afb3af28d`
 
+HOLD repair commit: `f644ffd530`
+
 Status: **STOPPED FOR RECORD.** L9 is designed, implemented, guarded, tested,
 and has a clean passing acquisition preflight. NEMO was not built or run, no
 record was admitted, no trajectory was scored, and L9 is not certified.
@@ -24,8 +26,11 @@ record was admitted, no trajectory was scored, and L9 is not certified.
 ORCA2 computes the standard-isoneutral slope and then refreshes its
 time-varying eddy coefficient before the Runge--Kutta stages
 (`cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:184-194`). Stage 3 next forms
-the ordinary U/V/W tracer transport and calls `tra_adv_trp`
-(`cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:568-582`).
+the ordinary U/V/W tracer transport in the live non-Shuman branch: it calls
+`tra_adv_trp` at line 555, then computes selected BBL coefficients at line 560
+(`cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:555`,
+`cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:560`). The former
+`:568-582` citation was the disabled `ln_shuman` branch and is retracted.
 
 Inside `tra_adv_trp`, after the bottom transport slots are zeroed, stage 3
 alone calls `ldf_eiv_trp`
@@ -73,30 +78,27 @@ The former L8 refusal is relaxed only for L9's complete L3 selection:
 bolus-through-FCT, face averaging, `nemo_left`, and `nemo_forward_exact`.
 Partial EIV, missing L8, missing Krhs routing, and any other L8+EIV composition
 remain refused
-(`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4130-4218`).
+(`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4124-4212`).
 
 Decision 147 is preserved independently of L9. Construction validation,
 every eager `step()` call, and the live inner EIV path all refuse staged EIV
 without the stage-3 Krhs route
-(`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4040-4054`,
-`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10527-10551`,
-`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:15020-15028`).
+(`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4034-4048`,
+`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10521-10544`,
+`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:15010-15018`).
 
-On L9, the stage-3 transport helper performs only the two NEMO-ordered U/V
-additions. The existing W recomputation then consumes those exact augmented
-operands before the existing L8 Krhs walker executes
-(`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:212-215`,
-`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10541-10572`).
-No division, square root, new forward branch, or gradient-only guard was
-introduced.
+L9 now runs the already-certified L3 production statements directly; the
+redundant L9-only helper and branch were deleted. The two U/V additions feed
+the existing W recomputation, which consumes those exact augmented arrays
+before the existing L8 Krhs walker executes
+(`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:10535-10562`).
+No arithmetic or configuration changed: the deleted L9 arm was textually and
+arithmetically identical to these L3 statements.
 
-## 3. Bit-position and production controls
+## 3. Bit-position, production controls, and mutation proof
 
-The x64 JIT position control uses INEXACT binary64 operands. EIV maps
-`0x1.64d6a9b31f28fp+31 + -0x1.921fb54442d18p+29` to
-`0x1.004ebc620e749p+31`, and
-`-0x1.3bd3cc9be45dep+28 + 0x1.0c6f7a0b5ed8dp+30` to
-`0x1.7af50dc8cb82bp+29`. The seven Krhs operand/accumulated pairs are:
+The x64 JIT position control retains the seven L8 Krhs
+operand/accumulated pairs:
 
 | position | operand | accumulated word |
 |---|---|---|
@@ -108,27 +110,24 @@ The x64 JIT position control uses INEXACT binary64 operands. EIV maps
 | BBL | `0x1.792a95b49c117p+27` | `-0x1.190154c195a03p+32` |
 | DMP | `-0x1.0452f7986b12bp+33` | `-0x1.90d3a1f935e2cp+33` |
 
-Temperature and salinity are pinned bit for bit at every boundary. Each of
-the six adjacent-call swaps changes a displaced boundary and fails. Four
-selector plants fail, including a partial face-averaging selection and the
-Decision 147 route removal. The same test file proves ordinary and
-gradient-transformed forward bits identical and the gradient finite
-(`tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:91-189`).
+Temperature and salinity remain pinned bit for bit at every L8 boundary. Each
+of the six adjacent-call swaps changes a displaced boundary and fails. Four
+selector plants fail, including partial face averaging and removal of the
+Decision 147 route; JIT/gradient forward bits remain identical and gradients
+finite (`tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:96-178`).
 
-The full one-step ORCA2 production test observes the selected live path. Its
-call list is exactly `["eiv", "krhs"]`; produced temperature and salinity are
-finite. It then mutates the already-constructed model's Krhs selector and
-proves the eager Decision 147 refusal still fires before cached execution
-(`tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:192-245`).
-
-Final focused results under CPU, x64, and the landing `PYTHONPATH` were 6
-passed / 1 deselected in 7.50 seconds for the fast section and 1 passed / 6
-deselected in 204.47 seconds for the live section. Before the final guard was
-added, the same live route passed in 189.91 seconds. The focused inherited
-recipe/L8/L3 regression passed 32 / 32 selected tests in 24.68 seconds; one
-unrelated existing GYRE message-regex test was deselected after the identical
-failure was reproduced at the starting commit. No production result or
-selector was changed to hide that pre-existing mismatch.
+The full one-step ORCA2 production test now observes the exact live arrays at
+the production W-recomputation boundary. It requires nonzero EIV U/V deltas,
+pins the W input arrays bit for bit to the post-EIV arrays, and proves this
+boundary is immediately before the L8 Krhs walk; finite T/S and the eager
+Decision 147 refusal remain checked
+(`tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:181-243`).
+The unmutated test passed in 214.13 seconds. In separate scratch package copies,
+discarding both production additions failed at the nonzero-delta assertion in
+203.97 seconds, and moving both additions after W recomputation failed with
+410,769 U-array bit mismatches in 204.48 seconds. These were source mutations,
+not helper substitutions; both exited 1. The fast section passed 6 / 6 selected
+tests in 7.60 seconds.
 
 ## 4. Acquisition and preflight
 
@@ -137,7 +136,7 @@ requires `NEMO_OPERATOR_ACK=L9_R57_OPERATOR`. Its schedule is a 2-step acting
 smoke, a writer-free 100-step reference boundary, and three independently
 staged twins ending at one even step between 2 and 10. `check_acting` is its
 own statement on the smoke only
-(`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l9_orca2eiv_krhs/run.sh:310-325`).
+(`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l9_orca2eiv_krhs/run.sh:335-353`).
 
 The combined reader requires every complete L8 stage boundary for all smoke
 steps and L3's EIV transport witness at kt 1. Both observers carry full
@@ -146,24 +145,29 @@ outside XIOS-false branches. The preflight compiles a real gfortran writer
 covering both exact streams and proves exact EOF rejection.
 
 The seven-part preflight checks all 4 patched Fortran sources, a continued-line
-instrumentation plant, a live moved-call plant, the listed reference, every
-possible clock deck, both binary layouts, writer completeness, whitespace-
-tolerant selections against one real committed `ocean.output` excerpt and one
-stamped L9 deck, smoke-only acting scope, output viability, and fresh target
-and run paths. Every control has a planted failure. Scratch is created inside
-the repository and removed by an `EXIT` trap
-(`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l9_orca2eiv_krhs/run.sh:115-239`).
+instrumentation plant, a real scratch-source mutation moving `tra_bbl` before
+`tra_bbc`, the listed reference, every possible clock deck, both binary
+layouts, writer completeness, smoke-only acting scope, output viability, and
+fresh target/run paths. The log checker now checks `nn_aei_ijk_t` once, removes
+the duplicate `nn_aht_ijk_t`, and does not require the impossible false
+`ln_eke_equ` echo; it instead refuses an acting GEOMETRIC line when the stamped
+deck selects false. Preflight runs that checker against the stamped L9 deck and
+a committed excerpt copied verbatim from the real L3 round-20 smoke output
+(source SHA-256 `d0d5fdd5d142e2352a77d142f0025df219dcd30d14b31e29c3710ccbc50e4bda`),
+then proves a mutated real line is refused. No invented log line is appended.
+The `EXIT` trap removes only the target and run paths created by a failed
+`--run`, so a failed operator attempt is retryable without manual deletion
+outside this acquisition's output
+(`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l9_orca2eiv_krhs/run.sh:163-262`).
 
-The first preflight found and refused a cleanup lifetime defect after printing
-the seven check results: function-local `scratch` was unbound at process exit.
-The path was moved to script scope, the abandoned scratch was removed, and the
-complete clean-tree preflight was rerun. It exited 0 and left no scratch:
+The repaired complete clean-tree preflight exited 0 and left no scratch. The
+standalone `stage order` line is the expected rejection from the real-source
+mutation plant:
 
 ```text
 L9_RECORD_SELFTEST_OK combined_layout=true truncation_refused=true
 L9_PREFLIGHT_7_OF_7_PASS plants=all_refused compiled_gfortran_layout=true patched_syntax=4 real_log=true stamped_deck=true
 WOULD_RUN smoke -> writer-free boundary -> three twins into /data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round57/oracle_l9_r57
-PREFLIGHT_EXIT=0
 ```
 
 No NEMO target, run directory, record, or score was created.
@@ -196,7 +200,7 @@ UNASKED and not done: build or run NEMO; admit or score a record; certify L9;
 change any other configuration, fidelity bar, existing card, or two-step
 value; push; post to GitHub; or perform an author review.
 
-COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/gridladder_r57-37096084
-ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/gridladder_r57-37096084/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l9_orca2eiv_krhs/run.sh --run (requires NEMO_OPERATOR_ACK=L9_R57_OPERATOR)
+COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/gridladder_r57/repo
+ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/gridladder_r57/repo/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l9_orca2eiv_krhs/run.sh --run (requires NEMO_OPERATOR_ACK=L9_R57_OPERATOR)
 DECISION_NEEDED: NONE
 ROUND_STATUS: STOPPED_FOR_RECORD — L9 is built and preflighted; operator acquisition is required before any score or certification
