@@ -1873,7 +1873,7 @@ CITATION_MAP = {
     ],
     "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:568-582": [
         "IF( ln_shuman ) THEN                     ! Shuman averaging",
-        "IF( kstg == 3 .AND. ln_trabbl )   CALL bbl",
+        ("IF( kstg == 3 .AND. ln_trabbl )   CALL bbl", 2),
         15,
     ],
     "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:248-265": [
@@ -1882,7 +1882,7 @@ CITATION_MAP = {
         18,
     ],
     "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:938-955": [
-        "zpsi_uw(:,:,:) = 0._wp",
+        ("zpsi_uw(:,:,:) = 0._wp", 2),
         "pFv(ji,jj,jk) = pFv(ji,jj,jk) - ( zpsi_vw(ji,jj,1) - zpsi_vw(ji,jj,2) )",
         18,
     ],
@@ -1897,13 +1897,13 @@ CITATION_MAP = {
         8,
     ],
     "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:182-202": [
-        "IF( nn_bbl_ldf == 1 ) THEN",
+        ("IF( nn_bbl_ldf == 1 ) THEN", 1),
         ("ENDIF", 3),
         21,
     ],
     "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/trabbl.f90:249-264": [
         "DO jn = 1, kjpt                                     ! tracer loop",
-        "* r1_e1e2t(ji,jj) / (e3t_3d(ji,jj,ik)",
+        ("END DO   ;   END DO", 2),
         16,
     ],
     "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4078-4087": [
@@ -2014,20 +2014,20 @@ CITATION_MAP = {
     "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4961-4997": [
         '_ORCA2G_SI3_CASES = ("ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg",',
         '"namtra_dmp.nn_zdmp": 0,',
-        35,
+        37,
     ],
     "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:5116-5146": [
         "_ORCA2G_UE_RHS_ASCENDING, _ORCA2G_ZDF_STAGE_R3U,",
         '_ORCA2G_UNMEASURED["ORCA2L8-krhs"] = ORCA2L8_UNMEASURED',
-        30,
+        31,
     ],
     "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:4111-4218": [
         "# NEMO applies geothermal BBC after tracer LDF in stage 3",
-        '"G9+L1+L2+L4b+L6 composition")',
-        76,
+        "LatLonCGridOceanModel._check_l3_krhs_route(config)",
+        108,
     ],
     "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:2744-2773": [
-        (")", 749),
+        (")", 750),
         ("return fd_a, fd_b, rhs_a, rhs_b, fct_activity, fct_inputs", 1),
         30,
     ],
@@ -6207,7 +6207,7 @@ CITATION_MAP = {
     # two pinned endpoint statements are one line further apart than before.
     'ocean_model_latlon_cgrid.py:10133-10658': [
         'T_mid = state_new.T.data',
-        'S_mid = S_mid + dt * dS_gm * active_3d', 519],
+        'S_mid = S_mid + dt * dS_gm * active_3d', 526],
     'ocean_model_latlon_cgrid.py:10944-10993': [
         ('_nemo_ws_rk3_tracer_pair_step(', 3),
         'return_final_content=True,', 50],  # L8 adds stage3_l8_krhs_terms=
