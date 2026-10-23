@@ -258,7 +258,8 @@ mpi-nightly,claude-code-review}.yml`).
 can take most of a day on a laptop. To check a change against what CI checks, run
 the test steps of `.github/workflows/ci.yml` directly. Use the precision each job
 sets: the unit tier and the restart and integration smoke jobs run fp32 by default
-(but `test_zarr_checkpoint.py` enables x64 itself at import); the Fortran-fidelity
+(but some unit modules, e.g. `test_zarr_checkpoint.py`, enable x64 at import,
+so unit-run precision depends on collection order); the Fortran-fidelity
 job (top-level tests, SFNO restart, FV3 native grid) and the visual-regression job
 set `JAX_ENABLE_X64=1`.
 
