@@ -87,6 +87,8 @@ class TestExperimentConfigJSON:
         )
         d = json.loads(json.dumps(experiment_config_to_dict(cfg)))
         assert experiment_config_from_dict(d) == cfg
+        d = json.loads(json.dumps(amip_config_to_dict(cfg)))  # checkpoint codec
+        assert amip_config_from_dict(d) == cfg
 
     def test_file_save_load_roundtrip(self):
         cfg = ExperimentConfig(

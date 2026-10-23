@@ -5269,13 +5269,16 @@ def config_to_dict(config) -> dict:
     ``driver`` uses, so that layer no longer reaches up into
     ``forcing.amip_config`` for serialization (federation carve, Step 3).
     """
-    d = config._asdict()
-    # Runtime-only injection — never serialized (see experiment_config_to_dict).
-    if "turbulence_override" in d:
-        d["turbulence_override"] = None
-    for key, val in d.items():
-        if hasattr(val, "_asdict"):
-            d[key] = val._asdict()
+    if isinstance(config, ExperimentConfig):
+        d = experiment_config_to_dict(config)
+    else:
+        d = config._asdict()
+        # Runtime-only injection — never serialized (see experiment_config_to_dict).
+        if "turbulence_override" in d:
+            d["turbulence_override"] = None
+        for key, val in d.items():
+            if hasattr(val, "_asdict"):
+                d[key] = val._asdict()
     # Schema marker: dicts written by the current codec are exempt from
     # legacy migrations on load (see experiment_config_from_dict — v2 gates
     # the morrison_dep_coeff 1e-8 rewrite to UNMARKED legacy dicts, so a
