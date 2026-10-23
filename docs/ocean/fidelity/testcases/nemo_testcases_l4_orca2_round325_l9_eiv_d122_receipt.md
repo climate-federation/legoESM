@@ -192,8 +192,13 @@ tests and docs only).
   passed; rounds 321, 324: 12 passed.
 - Gradient tests on the shipped card (L3 on): round 319 13 passed
   (`long_grad319.log`); round 322 12 passed, including its rn_Ud gate
-  (within 1 % of -4.5e-5; `long_grad322.log`). Round 323 step paths: 3
-  passed; its kt 2-3 scan gradient: see `long_steppaths.log`.
+  (within 1 % of -4.5e-5; `long_grad322.log`). Round 323 step paths (L3
+  on): 3 passed (`long_steppaths.log`); its kt 2-3 scan gradient aborted
+  inside XLA compilation in that combined run (SIGABRT, no message, 67 GB
+  resident), as round 323's own first combined attempt did; run alone it
+  passed: 0 non-finite, max |dL/dT| 2.4446e-4 (round 323: 2.44e-4), 4,824 s,
+  peak 117 GB, the only large process (`step_paths_grad.log`). Abort cause
+  not located.
 - Default gate (land.sh list), split for the 10-minute cap: TKE terms +
   recipe 96 passed (`default_gate_1.log`, whose 3 citation failures were the
   shifted anchors), citation-gate test 17 + private-import ratchet 6 passed
@@ -202,6 +207,8 @@ tests and docs only).
   barotropic 8 passed (`default_gate_3.log`) = 147 passed, 0 failed.
 - Citation re-anchor (round 321's tool vs `1da92cbf3`): 62 map lines and
   17 lines of the GYRE round-8 receipt, rigid shifts.
-- Receipt citation gate on this receipt: see `citation_gate_receipt.log`.
+- Receipt citation gate on this receipt: PASS, 5 citations, 0 failures
+  (`citation_gate_receipt_final.log`). Citation-gate test + private-import
+  ratchet after the map entries: 23 passed (`default_gate_1c.log`).
 
 codex review: operator
