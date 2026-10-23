@@ -94,3 +94,15 @@ def test_ponds_on_rain_on_ice_is_conserved(h_snow0, h0, conc0):
     assert d_fw + d_pond == pytest.approx(rain * conc, rel=1e-10)
     if h_snow0 > cfg.ponds.snow_block_threshold:
         assert d_pond == 0.0
+
+
+@pytest.mark.parametrize("h_snow0", [0.0, 0.3])
+def test_ponds_on_no_phantom_rain_without_precipitation_flag(h_snow0):
+    cfg = SeaIceConfig()
+    cfg = cfg._replace(ponds=cfg.ponds._replace(enabled=True))
+    off = _run(cfg, _forcing(2.0e-4, 0.0, has_precip=0.0), h_snow0=h_snow0)
+    dry = _run(cfg, _forcing(0.0, 0.0), h_snow0=h_snow0)
+    assert float(off["freshwater_to_ocean"][0, 0]) == pytest.approx(
+        float(dry["freshwater_to_ocean"][0, 0]), abs=1e-18)
+    assert _pond_kg_per_cell(off) == pytest.approx(_pond_kg_per_cell(dry),
+                                                   abs=1e-15)

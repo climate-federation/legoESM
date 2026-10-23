@@ -2605,10 +2605,11 @@ def _thermo_v2(
     #     H₂O); converting to ice-thickness via ``rho_water/rho_ice``
     #     gives mass-equivalent ice gain.
     if config.ponds.enabled:
+        # Same precipitation gate as the snow and no-pond rain paths.
         rain_m_liquid = jnp.maximum(
             (forcing.precip_total - forcing.precip_snow) * dt / constants.rho_water,
             0.0,
-        )
+        ) * jnp.asarray(forcing.has_precipitation, dtype=h_new.dtype)
         # Surface-melt thickness is in *layer* meters (snow, ice).
         # Ponds collect liquid-water equivalent — convert with the
         # density ratio before passing to ``step_ponds``.
