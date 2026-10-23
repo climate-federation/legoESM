@@ -96,7 +96,17 @@ m/s; independent RMS T 7.74538e-4 -> 1.27272e-5 K.
 
 ## Gradients (N = 1, comparison card: drag on, nn_mxlice = 2)
 
-GRADIENTS_PENDING
+- Probe at clean `d5376302a` (`grad/grad_rung10_n1_mxlice_drag_on.json`):
+  stamps drag on, rCdU_ice passed, nn_mxlice = 2, hm_i passed; 2,633 s,
+  peak 73.4 GiB (one process; memory rule held).
+- T loss w.r.t. initial T: 0 non-finite entries (sea-level loss also 0);
+  one T direction reverse vs forward 1.2e-14 relative (sea level 2.3e-15).
+- rn_Ud: reverse -4.5118108e-5, forward equal to 7.5e-16, best FD 9.2e-7
+  (round 325, nn_mxlice 0: -4.5118105e-5). Sea-level loss: exactly 0 at one
+  step, as before.
+- Traced and production steps bit-identical (0 leaves); rebuilt-at-1e-4
+  model equals the traced step (0 leaves).
+- No model function touched, so every round-316 guard is unchanged.
 
 ## Predictions (`PREREG_nemo_testcases_l4_orca2_round326.md`, amendment 2)
 
@@ -104,7 +114,7 @@ GRADIENTS_PENDING
 - M2 kt-1 stage-1/2 identical, stage 3 differs: CONFIRMED.
 - M3 kt-10 RMS T falls in both labels: CONFIRMED (1.10e-3 -> 2.1e-5 and
   3.5e-7 K).
-- M4 gradients: GRADIENTS_VERDICT.
+- M4 gradients: CONFIRMED (0 non-finite; gaps 1.2e-14 and 7.5e-16).
 - M5 refusal plant: CONFIRMED.
 
 ## Round-314 audit row
@@ -139,6 +149,15 @@ GRADIENTS_PENDING
 
 ## Gates (x64, CPU; logs `orca2_rounds/round326/gates/`)
 
-GATES_PENDING
+- New tests (round 326 replay + round 324 file): 18 passed
+  (`new_tests.log`); plant with the refusal removed: 7 failed
+  (`plant_refusal_removed.log`); audit test 9 passed (`audit_test_r326b.log`).
+- Default gate (land.sh list), split for the 10-minute cap: citation-gate
+  test + private-import ratchet + round-326 gate test 46 passed
+  (`default_gate4_1.log`); TKE terms + recipe 96 passed (`_2`); freshwater
+  + stage face mask + ORCA2 parallel receipt 20 passed (`_3`); prognostic
+  barotropic 8 passed (`_4`) = 170 passed, 0 failed.
+- Receipt citation gate on this receipt: PASS, 6 citations, 0 failures
+  (`citation_gate_receipt_d122.log`).
 
 codex review: operator
