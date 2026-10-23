@@ -2599,16 +2599,14 @@ def dry_run_check_inputs(config: ExperimentConfig,
     """Print found / MISSING / not used for every input file; 0 if none missing."""
     entries = [(f, getattr(config, f)) for f in DRY_RUN_CONFIG_INPUTS]
     entries += [(f, getattr(args, f, None)) for f in DRY_RUN_ARG_INPUTS]
+    from legoesm.ml.checkpoint_io import checkpoint_path
     missing = []
     print("[run_amip] --dry-run: input files")
     for name, value in entries:
         if not value or (name == "topography" and value in _TOPOGRAPHY_BUILTINS):
             status = "not used"
-        elif os.path.exists(value) or (
-                # load_checkpoint_or_fail resolves a suffix-less path to .eqx
-                name == "aimip_classical_checkpoint"
-                and Path(value).suffix == ""
-                and os.path.exists(value + ".eqx")):
+        elif os.path.exists(checkpoint_path(value)
+                            if name == "aimip_classical_checkpoint" else value):
             status = "found"
         else:
             status = "MISSING"

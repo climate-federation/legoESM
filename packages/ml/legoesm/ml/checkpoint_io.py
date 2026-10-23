@@ -36,6 +36,15 @@ class CheckpointStructureError(RuntimeError):
     """A checkpoint's pytree does not match the current model skeleton."""
 
 
+def checkpoint_path(path) -> Path:
+    """The file :func:`load_checkpoint_or_fail` opens for ``path``.
+
+    equinox resolves a suffix-less path to ``.eqx`` (_serialisation._with_suffix).
+    """
+    path = Path(path)
+    return path.with_suffix(".eqx") if path.suffix == "" else path
+
+
 def load_checkpoint_or_fail(path, skeleton: Any, *, what: str = "") -> Any:
     """Deserialise ``path`` into ``skeleton``, or raise a message a human can act on.
 
@@ -73,11 +82,8 @@ def load_checkpoint_or_fail(path, skeleton: Any, *, what: str = "") -> Any:
     import equinox as eqx
     import jax.tree_util as jtu
 
-    path = Path(path)
-    # equinox resolves a suffix-less path to ``.eqx`` (_serialisation._with_suffix);
-    # opening the handle ourselves would otherwise break that (codex).
-    if path.suffix == "":
-        path = path.with_suffix(".eqx")
+    # Opening the handle ourselves would otherwise break equinox's suffix rule (codex).
+    path = checkpoint_path(path)
     try:
         # Deserialise from an OPEN HANDLE, not the path, so the trailing bytes
         # can be checked below. equinox reads leaves POSITIONALLY and stops at
