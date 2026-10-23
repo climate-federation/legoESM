@@ -2795,6 +2795,15 @@ def _thermo_v2(
             forcing.precip_total - forcing.precip_snow, 0.0,
         ) * jnp.asarray(forcing.has_precipitation, dtype=h_new.dtype)
         rain_runoff_per_cell = rain_rate * conc_new
+    # Snow off: snowfall on the ice fraction has no pack to enter, so it goes
+    # straight to the ocean (+ve into ocean) and the ocean pays its latent heat
+    # of fusion (+ve extraction).  Same ``conc_new`` frame and precipitation
+    # gate as the rain runoff above.
+    if config.snow.enabled:
+        snow_off_fw_per_cell = jnp.zeros_like(h_new)
+    else:
+        snow_off_fw_per_cell = forcing.precip_snow * jnp.asarray(
+            forcing.has_precipitation, dtype=h_new.dtype) * conc_new
     fw_from_lead_freeze_per_cell = -delta_V_lead_freeze * config.rho_ice / dt
     # Snow-ice flooding draws seawater ``(rho_ice - rho_snow)*ΔV_white`` [kg/m^2
     # per ice area] into the snow pores; the ocean LOSES that water (negative
@@ -2813,6 +2822,7 @@ def _thermo_v2(
         + pond_drain_per_cell
         # Rain runoff over the ice fraction (no-pond path; zero when ponds on).
         + rain_runoff_per_cell
+        + snow_off_fw_per_cell
         + fw_from_lead_freeze_per_cell
         + fw_from_flooding_per_cell
         # Orphaned ice/snow/pond mass from fully-ablated cells (11b) — sent
@@ -2853,6 +2863,7 @@ def _thermo_v2(
         F_ocean * conc * ocean_heat_scale
         + _lead_latent_sign * delta_V_lead_freeze * config.rho_ice * config.L_f / dt
         + refreeze_ice_m * config.rho_ice * config.L_f / dt * conc_new
+        + snow_off_fw_per_cell * config.L_f
         # Surplus surface-melt heat from a melt-out step warms the ocean
         # (ocean GAINS -> NEGATIVE extraction); previously this energy was
         # dropped on the floor (finding #6).
