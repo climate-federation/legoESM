@@ -1952,7 +1952,7 @@ CITATION_MAP = {
     ],
     "tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:184-255": [
         "def test_l9_live_eiv_executes_before_l8_finalizer(l9_card, monkeypatch):",
-        ("state, dt=l9_card.dt_s, freshwater=freshwater,", 2),
+        "surface_forcing=forcing, sponge=l9_card.recipe.tracer_damping)",
         72,
     ],
     "tests/ocean/fidelity/test_nemo_testcase_l9_orca2eiv_krhs.py:262-280": [
