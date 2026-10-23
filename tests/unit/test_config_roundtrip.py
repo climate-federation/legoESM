@@ -76,6 +76,18 @@ class TestExperimentConfigJSON:
         assert restored.output.evaluation.suites == (
             "Tier1_sanity_checks", "Tier2_atmosphere_monthly")
 
+    def test_tuple_fields_survive_json(self):
+        """Every tuple-annotated field comes back a tuple after json (#2116)."""
+        cfg = ExperimentConfig(
+            dycore=DycoreConfig(mpas_vert4_flux_form_tracers=("q_c",),
+                                mpas_vert4_log_form_tracers=("q_v", "q_i")),
+            output=OutputConfig(budget_ledger_sigma_band=(0.2, 0.8),
+                                evaluation=EvaluationConfig(suites=("a", "b"))),
+            clubb_q_flux_scale_sigma_band=(0.3, 0.9),
+        )
+        d = json.loads(json.dumps(experiment_config_to_dict(cfg)))
+        assert experiment_config_from_dict(d) == cfg
+
     def test_file_save_load_roundtrip(self):
         cfg = ExperimentConfig(
             grid=GridConfig(resolution=96, nlev=60),
