@@ -179,7 +179,6 @@ def main(argv=None, ds=None):
 
     import equinox as eqx
     import yaml
-    from legoesm.training.era5_to_state import TrainingERA5Config
     from legoesm.training.neural_gcm_spectral import (
         carry_to_spectral_state,
         spectral_state_to_carry,
@@ -237,19 +236,16 @@ def main(argv=None, ds=None):
     # --- ERA5 cases (ICs + forcing + WB2-grid verification) ---
     # The eval's surface forcing must match training: the prescribed-flux
     # planes and the land fraction are loaded iff the deck (and mode) ask.
-    from legoesm.training.scale_build import wb_aerosol_spec, wb_needs_land_frac
-    era5_cfg = TrainingERA5Config(dt_hours=cadence)._replace(
-        zarr_store=yml["era5_zarr"],
-        load_surface_fluxes=bool(yml.get("era5_surface_fluxes", False)),
-        load_land_frac=wb_needs_land_frac(cfg.mode, yml))
-    if "era5_flux_zarr" in yml:   # "" = the state store, as in training
-        era5_cfg = era5_cfg._replace(flux_zarr=str(yml["era5_flux_zarr"] or ""))
+    from legoesm.training.scale_build import (
+        wb_aerosol_spec, wb_era5_config, wb_ic_microphysics)
+    era5_cfg = wb_era5_config(cfg, yml)
     cases = build_forecast_cases(
         era5_cfg, grid, sigma,
         leads_hours=cfg.leads_hours, eval_year=eval_year, n_inits=cfg.n_inits,
         init_stride_hours=cfg.init_stride_hours,
         resolution_deg=cfg.resolution_deg, ds=ds,
-        aerosol=(wb_aerosol_spec(yml) if cfg.mode == "physics" else None))
+        aerosol=(wb_aerosol_spec(yml) if cfg.mode == "physics" else None),
+        microphysics=wb_ic_microphysics(cfg.mode, yml))
     log.info("WB2 eval: mode=%s year=%d inits=%d leads=%s res=%.3gdeg dt=%.1fs",
              cfg.mode, eval_year, len(cases), list(cfg.leads_hours),
              cfg.resolution_deg, dt)

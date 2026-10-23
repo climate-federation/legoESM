@@ -136,6 +136,7 @@ def build_forecast_cases(
     era5_cfg, grid, sigma, *, leads_hours, eval_year, n_inits,
     init_stride_hours, resolution_deg, ds=None, smoothing_passes=4,
     aerosol=None,
+    microphysics="none", cloud_ds=None,
 ):
     """Build the WB2 forecast-eval cases for one eval year.
 
@@ -160,6 +161,14 @@ def build_forecast_cases(
     ds : xarray.Dataset, optional
         Pre-opened ERA5 dataset (network-free tests). ``None`` opens
         ``era5_cfg.zarr_store``.
+    smoothing_passes : int
+        Diffusion passes of the ERA5 terrain target (``era5_terrain_product``).
+    microphysics : str
+        Scheme the initial state is seeded for, as in training
+        (``scale_build.wb_ic_microphysics``).
+    cloud_ds : xarray.Dataset, optional
+        Pre-opened condensate store; ``None`` opens ``era5_cfg.cloud_zarr``
+        when ``era5_cfg.load_cloud_condensate``.
 
     Returns
     -------
@@ -169,6 +178,7 @@ def build_forecast_cases(
         ``forcing_base`` dict).
     """
     from legoesm.training.era5_to_state import (
+        era5_terrain_product,
         era5_to_spectral_carry,
         load_era5_slice,
         open_era5_zarr,
@@ -196,6 +206,8 @@ def build_forecast_cases(
     # The prescribed-surface-flux store, opened ONCE for every init (the
     # training loader does the same); a land fraction alone comes from the
     # state store and needs no remote open.
+    if cloud_ds is None and era5_cfg.load_cloud_condensate:
+        cloud_ds = open_era5_zarr(era5_cfg.cloud_zarr)
     flux_ds = None
     if era5_cfg.load_surface_fluxes:
         # flux_zarr == "" means "read the fluxes from the state store".
@@ -217,15 +229,13 @@ def build_forecast_cases(
                 f"init {k} (time index {i_ic}) is beyond the ERA5 store "
                 f"(n_times={n_times}); reduce --n-inits or --init-stride-hours.")
 
-        ic_slice = load_era5_slice(era5_cfg, i_ic, ds=ds, flux_ds=flux_ds)
-        # ``smoothing_passes`` is exposed (default 4 = unchanged) so the
-        # orography treatment can be SWEPT. The ERA5 phis is smoothed to be
-        # representable at the model truncation and ``p_s`` is hydrostatically
-        # reconciled to it, and that reconciliation was measured to account for
-        # 76% of the fixed 6 h surface-pressure offset — so varying it is the
-        # perturbation test for that attribution.
+        ic_slice = load_era5_slice(era5_cfg, i_ic, ds=ds, cloud_ds=cloud_ds,
+                                   flux_ds=flux_ds)
+        # The training loader's IC recipe (terrain target + seeded scheme), so
+        # a trained model is scored from the state it was trained from.
+        tp = era5_terrain_product(ic_slice, grid, passes=smoothing_passes)
         init_carry = era5_to_spectral_carry(
-            ic_slice, grid, sigma, smoothing_passes=smoothing_passes)
+            ic_slice, grid, sigma, target_phis=tp, microphysics=microphysics)
         init_state = carry_to_spectral_state(init_carry, grid)
 
         # The SAME forcing the training loader builds (prescribed SST, and
