@@ -1528,6 +1528,78 @@ def build_orca2_ts_at_step(
     return (np.where(tmask, temperature, 0.0), np.where(tmask, salinity, 0.0))
 
 
+class ORCA2InitialIce(NamedTuple):
+    """SI3 ``&namini`` analytic initial ice, each pair (north, south).
+
+    ``pond_concentration`` is the pond area per cell (NEMO's zapnd_ini =
+    rn_apd_ini * a_i, iceistate.F90:324,335; zero when ln_pnd = F, :343-346).
+    """
+
+    thres_sst: float
+    ice_concentration: tuple[float, float]
+    ice_thickness_m: tuple[float, float]
+    snow_thickness_m: tuple[float, float]
+    pond_concentration: tuple[float, float]
+    pond_depth_m: tuple[float, float]
+
+
+# The ORCA2 deck's five-category, ponds-on initial ice (a_p = .2*a_i, h_p = .05 m).
+ORCA2_DECK_INITIAL_ICE = ORCA2InitialIce(
+    thres_sst=2.0,
+    ice_concentration=(0.9, 0.9),
+    ice_thickness_m=(2.0, 1.0),
+    snow_thickness_m=(0.2, 0.2),
+    pond_concentration=(0.18, 0.18),
+    pond_depth_m=(0.05, 0.05),
+)
+
+
+def orca2_initial_ice_ssh(temperature, salinity, tmask, f_t, e1e2t,
+                          ice: ORCA2InitialIce) -> np.ndarray:
+    """Initial SSH after SI3's levitating initial snow+ice+pond mass.
+
+    iceistate.F90:262-291 creates one-category ice from the surface T/S and
+    hemisphere, :309-393 distributes it over jpl categories while conserving
+    volume, and :398-427 removes the globally averaged snow+ice+pond mass
+    from SSH.
+    """
+
+    surface_s = salinity[..., 0]
+    surface_t = temperature[..., 0]
+    freezing_t = (
+        -0.0575
+        + 1.710523e-3 * np.sqrt(surface_s)
+        - 2.154996e-4 * surface_s
+    ) * surface_s
+    surface_wet = tmask[..., 0]
+    initial_ice = (((surface_t - freezing_t) * surface_wet < ice.thres_sst)
+                   & surface_wet)
+    north = f_t >= 0.0
+
+    def hemisphere(pair):
+        return np.where(north, pair[0], pair[1])
+
+    snow_ice_pond_mass = np.where(
+        initial_ice,
+        hemisphere(ice.ice_concentration) * (
+            constants.rho_snow * hemisphere(ice.snow_thickness_m)
+            + constants.rho_ice * hemisphere(ice.ice_thickness_m))
+        + constants.rho_water * hemisphere(ice.pond_concentration)
+        * hemisphere(ice.pond_depth_m),
+        0.0,
+    )
+    # dom_uniq (domutl.F90:91-121) excludes the duplicated right half of the
+    # T-fold row from glob_2Dsum.  On this de-haloed T-fold, the retained
+    # half is i < n_lon/2.  With the deck ice the exact reduction below
+    # reproduces the source-produced -0.09343505872684969 m adjustment.
+    unique_t = np.ones(surface_wet.shape, dtype=np.float64)
+    unique_t[-1, surface_wet.shape[1] // 2 :] = 0.0
+    ssh_adjustment = np.sum(
+        snow_ice_pond_mass / NEMO_CONSTANTS_CONFIG.rho_0 * e1e2t * unique_t
+    ) / np.sum(e1e2t * surface_wet * unique_t)
+    return np.where(surface_wet, -ssh_adjustment, 0.0)
+
+
 def build_orca2_initial_ts(
     temperature_path,
     salinity_path,
@@ -1762,38 +1834,9 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     temperature, salinity = build_orca2_initial_ts(
         temperature_path, salinity_path, tmask)
 
-    # iceistate.F90:262-291 creates one-category ice from the surface T/S and
-    # hemisphere, :309-393 distributes it over jpl=5 while conserving volume,
-    # and :398-427 removes the globally averaged snow+ice+pond mass from SSH.
-    # The resolved pond arm is live (a_p=.2*a_i, h_p=.05 m), so it contributes
-    # 9 kg m-2 wherever initial ice exists; omitting it misses the oracle SSH.
-    surface_s = salinity[..., 0]
-    surface_t = temperature[..., 0]
-    freezing_t = (
-        -0.0575
-        + 1.710523e-3 * np.sqrt(surface_s)
-        - 2.154996e-4 * surface_s
-    ) * surface_s
-    surface_wet = tmask[..., 0]
-    initial_ice = ((surface_t - freezing_t) * surface_wet < 2.0) & surface_wet
-    ice_thickness = np.where(np.asarray(grid.f_T) >= 0.0, 2.0, 1.0)
-    snow_ice_pond_mass = np.where(
-        initial_ice,
-        0.9 * (constants.rho_snow * 0.2 + constants.rho_ice * ice_thickness)
-        + constants.rho_water * 0.18 * 0.05,
-        0.0,
-    )
-    # dom_uniq (domutl.F90:91-121) excludes the duplicated right half of the
-    # T-fold row from glob_2Dsum.  On this de-haloed 180-column T-fold, the
-    # retained half is i=0:89.  The exact reduction below reproduces the
-    # source-produced -0.09343505872684969 m adjustment.
-    unique_t = np.ones(surface_wet.shape, dtype=np.float64)
-    unique_t[-1, grid.n_lon // 2 :] = 0.0
-    area = metric["e1t"] * metric["e2t"]
-    ssh_adjustment = np.sum(
-        snow_ice_pond_mass / NEMO_CONSTANTS_CONFIG.rho_0 * area * unique_t
-    ) / np.sum(area * surface_wet * unique_t)
-    initial_ssh = np.where(surface_wet, -ssh_adjustment, 0.0)
+    initial_ssh = orca2_initial_ice_ssh(
+        temperature, salinity, tmask, np.asarray(grid.f_T),
+        metric["e1t"] * metric["e2t"], ORCA2_DECK_INITIAL_ICE)
 
     state = rest_state_latlon_cgrid_ocean(
         grid,

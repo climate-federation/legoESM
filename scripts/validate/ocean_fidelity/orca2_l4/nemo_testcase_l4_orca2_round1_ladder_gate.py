@@ -277,6 +277,11 @@ def comparison_card(card):
     the recorded rCdU_ice that ``_surface_forcings`` passes.  The shipped card
     keeps the switch off (DECISION 133).
 
+    DECISION 157: rung 10's initial SSH is lowered by the record's own SI3
+    initial ice (one category, ponds off), read from its ocean.output; the
+    shipped card keeps ORCA2's five-category ponds-on ice.  Other cases carry
+    no SI3 initial ice and keep their SSH.
+
     DECISION 154: TKE's under-ice surface mixing length, nn_mxlice = 2
     (zdftke.f90:620-623), reads SI3's hm_i, which the card cannot compute
     either; ``_surface_forcings`` passes round 326's admitted record.  The
@@ -292,8 +297,91 @@ def comparison_card(card):
             "(DECISION 135 keeps it 0)")
     physics = cfg.physics._replace(vertical_mixing=mixing._replace(
         tke=mixing.tke._replace(nemo_mxlice=2)))
-    return card._replace(recipe=card.recipe._replace(model_config=cfg._replace(
-        implicit_ice_ocean_top_drag=True, physics=physics)))
+    recipe = card.recipe._replace(model_config=cfg._replace(
+        implicit_ice_ocean_top_drag=True, physics=physics))
+    if card.case == "ORCA2-zps":
+        recipe = recipe._replace(initial_state=record_initial_ice_state(card))
+    return card._replace(recipe=recipe)
+
+
+# The rung-10 record: its own SI3 initial ice (DECISION 157) is read from here.
+RUNG10_RECORD_RUN = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/"
+    "acquisition/orca1ice_surface_entry_every_step_a_np2")
+
+_NAMELIST_ECHO = r"\b{}\s*=\s*(\S+)(?:[ \t]+(\S+))?[ \t]*$"
+
+
+def _echo(text: str, name: str) -> tuple[str, ...]:
+    hits = re.findall(_NAMELIST_ECHO.format(re.escape(name)), text, re.M)
+    require(len(hits) == 1,
+            f"record ocean.output echoes {name} {len(hits)} times, not once")
+    return tuple(v for v in hits[0] if v)
+
+
+def _logical(text: str, name: str) -> bool:
+    (value,) = _echo(text, name)
+    require(value in ("T", "F"), f"record {name} = {value} is not a logical")
+    return value == "T"
+
+
+def _pair(text: str, name: str) -> tuple[float, float]:
+    got = _echo(text, name)
+    require(len(got) == 2, f"record {name} is not a north/south pair: {got}")
+    return float(got[0]), float(got[1])
+
+
+@functools.lru_cache(maxsize=1)
+def record_initial_ice(record_run: Path):
+    """SI3's initial ice exactly as the record's ocean.output resolved it.
+
+    ice_istate_init echoes &namini (iceistate.f90:510-530) and then zeroes the
+    pond fraction/depth when ln_pnd = F (:551-553); ice_istate forms the pond
+    concentration as rn_apd_ini * a_i (:324,335).  Refuses unless the run used
+    the analytic initialisation (ln_iceini = T, nn_iceini_file = 0).
+    """
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import ORCA2InitialIce
+
+    path = record_run / "ocean.output"
+    require(path.is_file(), f"record initial-ice settings unreadable: {path}")
+    text = path.read_text(encoding="utf-8", errors="strict")
+    require(_logical(text, "ln_iceini"), "record ln_iceini is not T")
+    require(_echo(text, "nn_iceini_file") == ("0",),
+            "record does not use the analytic initial ice (nn_iceini_file)")
+    ponds = _logical(text, "ln_pnd")
+    (thres,) = _echo(text, "rn_thres_sst")
+    ati = _pair(text, "rn_ati_ini")
+    apd = _pair(text, "rn_apd_ini") if ponds else (0.0, 0.0)
+    hpd = _pair(text, "rn_hpd_ini") if ponds else (0.0, 0.0)
+    require(not ponds or _pair(text, "rn_hld_ini") == (0.0, 0.0),
+            "record pond lids are not represented by the card's ice mass")
+    ice = ORCA2InitialIce(
+        thres_sst=float(thres),
+        ice_concentration=ati,
+        ice_thickness_m=_pair(text, "rn_hti_ini"),
+        snow_thickness_m=_pair(text, "rn_hts_ini"),
+        pond_concentration=(apd[0] * ati[0], apd[1] * ati[1]),
+        pond_depth_m=hpd,
+    )
+    (jpl,) = _echo(text, "jpl")
+    return ice, int(jpl)
+
+
+def record_initial_ice_state(card):
+    """The card's initial state with SSH lowered by the record's initial ice."""
+    import jax.numpy as jnp
+
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import orca2_initial_ice_ssh
+
+    ice, _ = record_initial_ice(RUNG10_RECORD_RUN)
+    state = card.recipe.initial_state
+    z = card.recipe.z_coord
+    ssh = orca2_initial_ice_ssh(
+        np.asarray(state.T.data), np.asarray(state.S.data),
+        np.asarray(z.is_active), np.asarray(card.recipe.grid.f_T),
+        np.asarray(z.nemo_e1e2t), ice)
+    return state._replace(eta=state.eta.replace(
+        data=jnp.asarray(ssh, dtype=jnp.float64)))
 
 
 ROUND326_HMI_RUN = Path(
