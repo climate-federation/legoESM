@@ -15,8 +15,10 @@ is PASS_STRUCTURE_ONLY, never an admission.
 
 ``--same-program`` proves a fresh build is round 5's program except the
 observer: build config identical (config name substituted), every
-preprocessed source and object byte-identical except zdftke (whose only
-difference is the patch's inserted lines) and the writer (new).
+preprocessed source byte-identical and every object byte-identical in every
+ELF section once its embedded source directory is round 5's, except zdftke
+(whose only difference is the patch's inserted lines) and the writer (new).
+Every differing file is listed, not only the first.
 """
 
 from __future__ import annotations
@@ -258,6 +260,53 @@ def _observer_only(ref: list[str], new: list[str], inserted: list[str]) -> None:
             f"{OBSERVER_UNIT}.f90 inserts {added!r}, patch inserts {inserted!r}")
 
 
+def _elf_view(blob: bytes, root: bytes, ref_root: bytes) -> tuple:
+    """Path-normalised view of an ELF64-LE relocatable object: the header (minus
+    e_shoff) and every section's header fields and contents byte-exact, except
+    (a) merged-string sections, compared as their string sequence with the
+    config root written as round 5's (gfortran stores the absolute .f90 path in
+    runtime-error strings, and the 8-byte alignment re-pads when its length
+    changes), and (b) symbol values that point into such a section, compared as
+    the string they name."""
+    require(blob[:6] == b"\x7fELF\x02\x01" and blob[16] == 1, "not an ELF64-LE relocatable")
+    shoff, = struct.unpack_from("<Q", blob, 0x28)
+    shentsize, shnum, shstrndx = struct.unpack_from("<HHH", blob, 0x3A)
+    heads = [struct.unpack_from("<IIQQQQIIQQ", blob, shoff + k * shentsize) for k in range(shnum)]
+    body = [blob[h[4]:h[4] + h[5]] if h[1] != 8 else b"" for h in heads]
+    strings = {k: body[k].replace(root, ref_root) for k, h in enumerate(heads)
+               if h[1] == 1 and h[2] & 0x30 == 0x30}  # PROGBITS, SHF_MERGE|SHF_STRINGS
+
+    def name(table: int, at: int) -> bytes:
+        return body[table][at:body[table].index(b"\0", at)]
+
+    view = [blob[:0x28] + blob[0x30:0x40]]
+    for k, (nm, kind, flags, addr, _off, size, link, info, align, entsize) in enumerate(heads):
+        content: object = body[k]
+        if k in strings:
+            content = [x for x in strings[k].split(b"\0") if x]
+        elif kind == 2:  # SYMTAB
+            content = []
+            for at in range(0, size, 24):
+                st_name, st_info, st_other, ndx, value, st_size = struct.unpack_from("<IBBHQQ", body[k], at)
+                if ndx in strings:
+                    value = name(ndx, value).replace(root, ref_root)
+                content.append((st_name, st_info, st_other, ndx, value, st_size))
+        view.append((name(shstrndx, nm), kind, flags, addr, link, info, align, entsize,
+                     size if kind == 8 else None, content))
+    return tuple(view)
+
+
+def objects_equal(ref: bytes, new: bytes, ref_root: bytes, new_root: bytes) -> bool:
+    """Bytes equal, or equal ELF views (code, data, relocations exact; only the
+    embedded config root may differ, see _elf_view)."""
+    if ref == new:
+        return True
+    try:
+        return _elf_view(ref, ref_root, ref_root) == _elf_view(new, new_root, ref_root)
+    except (GateError, struct.error, ValueError, IndexError):
+        return False
+
+
 def same_program(new_bld: Path, ref_bld: Path, patch: Path, *,
                  new_cfg: str, ref_cfg: str) -> dict:
     for name in BUILD_CONFIG_FILES:
@@ -265,6 +314,7 @@ def same_program(new_bld: Path, ref_bld: Path, patch: Path, *,
         require((new_bld / name).read_text() == want, f"build config differs: {name}")
     inserted = [line[1:] for line in patch.read_text().splitlines()
                 if line.startswith("+") and not line.startswith("+++")]
+    ref_src, new_src = f"{ref_bld.parent}/".encode(), f"{new_bld.parent}/".encode()
     counts = {}
     for sub, observer, writer in (("ppsrc", f"nemo/{OBSERVER_UNIT}.f90", f"nemo/{WRITER_UNIT}.f90"),
                                   ("obj", f"{OBSERVER_UNIT}.o", f"{WRITER_UNIT}.o")):
@@ -272,9 +322,12 @@ def same_program(new_bld: Path, ref_bld: Path, patch: Path, *,
         require(new_files - ref_files == {writer},
                 f"{sub}: new build adds {sorted(new_files - ref_files)}, expected only {writer}")
         require(not ref_files - new_files, f"{sub}: new build lacks {sorted(ref_files - new_files)}")
+        bad = []
         for rel in sorted(ref_files - {observer}):
-            require((ref_bld / sub / rel).read_bytes() == (new_bld / sub / rel).read_bytes(),
-                    f"{sub}/{rel} differs from round 5")
+            ref, new = (ref_bld / sub / rel).read_bytes(), (new_bld / sub / rel).read_bytes()
+            same = objects_equal(ref, new, ref_src, new_src) if sub == "obj" else ref == new
+            bad += [] if same else [rel]
+        require(not bad, f"{sub}: {len(bad)} differ from round 5: {' '.join(f'{sub}/{r}' for r in bad)}")
         if sub == "ppsrc":
             _observer_only((ref_bld / sub / observer).read_text().splitlines(),
                            (new_bld / sub / observer).read_text().splitlines(), inserted)

@@ -13,9 +13,17 @@ three origins) and fp64 payload in Fortran order. File
 
 Same program: the build is fresh from today's NEMO tree, then refused unless
 it is round 5's program plus the observer: build config (arch, cpp keys,
-bld.cfg; config name substituted) identical, every preprocessed source and
-every object byte-identical to round 5's `BLD/` except `zdftke` (its only
-difference is the patch's inserted lines) and the new writer. Preflight shows
+bld.cfg; config name substituted) identical, every preprocessed source
+byte-identical to round 5's `BLD/`, and every object identical section by
+section except `zdftke` (its only difference is the patch's inserted lines)
+and the new writer. Objects are compared with the config root normalised:
+gfortran stores each source's absolute path in runtime-error strings, so a
+build under another config name differs only there (string sections re-pad,
+string-label symbol offsets shift); code, data and relocations stay
+byte-exact. Every differing file is listed. `object_path_probe.sh OUT`
+recompiles all 425 round-5 objects at round 5's path (all byte-identical)
+and under a renamed config root (311 differ in bytes, 0 after
+normalisation; an -O2 build and a flipped code byte refused). Preflight shows
 today's cpp and toolchain reproduce round 5's `zdftke.f90`/`zdftke.o` byte for
 byte (a -O2 plant differs) and that the check refuses a planted unit.
 
@@ -40,6 +48,7 @@ The default mode is the read-only preflight; `--run` must be explicit.
 Files: `zdftke_round326_writer.F90`, `zdftke_round326.patch` (additions only,
 against `src/OCE/ZDF/zdftke.F90`), `round5_ocean.output.excerpt` (verbatim
 lines of round 5's ocean.output with its SHA-256; the log checks run on it),
-`run.sh` (`--preflight-only` default, `--run`, `--admit-existing`), gate
+`run.sh` (`--preflight-only` default, `--run`, `--admit-existing`),
+`object_path_probe.sh` (gfortran only; no makenemo, no NEMO), gate
 `../nemo_testcase_l4_orca2_round326_hmi_gate.py`, test
 `tests/ocean/fidelity/test_orca2_round326_hmi_gate.py`.

@@ -96,6 +96,37 @@ All seven codex findings verified as real, then fixed; NEMO still not run.
 - Preflight re-run: rc 0, 11 plants fired, PASS_SAME_PROGRAM on the dry
   tree, no scratch left (`gates/preflight2.log`). Gate test 22 passed.
 
+## Resume 2: operator `--run` refused at the same-program gate (no NEMO run)
+
+- The build finished; all 412 other preprocessed sources matched round 5;
+  the gate then refused on the first object compared (ablmod) and the
+  failed run removed the build.
+- Cause: the config's absolute path is stored inside the objects, not a code
+  difference. gfortran writes each source's full path into its runtime-error
+  messages; 311 of round 5's 425 objects carry round 5's config name, and the
+  new name is 4 characters shorter.
+- Evidence (gfortran only, no makenemo, no NEMO;
+  `object_path_probe.sh`, log `gates/object_path_probe.log`): today's
+  compiler with round 5's flags reproduces all 425 round-5 objects byte for
+  byte at round 5's path (so no timestamp, flag or compiler drift); under a
+  renamed config root 311 differ, and in each only the merged-string
+  section (path text plus its 8-byte re-padding) and the string-label
+  offsets in the symbol table change. Code, data and relocations are
+  byte-identical. Every compile line in the operator's build log used round
+  5's flags.
+- Gate change: objects are now compared section by section with the config
+  root normalised (strings compared as strings, string-label symbols as the
+  string they name, everything else byte-exact), and every differing file is
+  listed. Under it 425 of 425 match; an -O2 build and a flipped code byte
+  are refused.
+- New test compiles a unit under two config roots: passes; a changed string
+  literal, a different optimisation level and a flipped code byte refuse.
+  Removing the path substitution, the string-sequence compare, the symbol
+  resolution, or the whole section compare each makes it fail (shown, then
+  restored).
+- Not checked: the operator's actual new objects (deleted by the failed
+  run's cleanup); the gate checks them on the next `--run`.
+
 ## Round-314 audit row
 
 - nn_mxlice stays DIFFERS (b:D135); reason now names DECISION 154's pending
@@ -117,12 +148,16 @@ All seven codex findings verified as real, then fixed; NEMO still not run.
   round 5's evidence tree).
 - mpirun timeout 900 s — UNASKED value (operator asked for a timeout);
   offered for change.
+- Object comparison normalises only the config root (strings and
+  string-label offsets), code bytes exact — ASKED (resume 2: "compare the
+  code-bearing content ... after normalising embedded paths").
 - Audit reason text names D154 — text only, no configuration.
 
 ## OPEN
 
-- Operator runs `run.sh --run` (about one round-79b-sized NEMO run), then the
-  next round does steps 2-5 on the admitted record.
+- Operator re-runs `run.sh --run` (fresh build, about 6 min, then one
+  round-79b-sized NEMO run); the next round does steps 2-5 on the admitted
+  record.
 
 ## Gates (x64, CPU; logs `orca2_rounds/round326/gates/`)
 

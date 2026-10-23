@@ -185,8 +185,8 @@ def test_same_program_passes_observer_only(tmp_path):
 
 
 @pytest.mark.parametrize("plant, reason", [
-    ("other-source", "ppsrc/nemo/icevar.f90 differs"),
-    ("other-object", "obj/icevar.o differs"),
+    ("other-source", "differ from round 5: ppsrc/nemo/icevar.f90"),
+    ("other-object", "differ from round 5: obj/icevar.o"),
     ("flags", "build config differs: arch_nemo.fcm"),
     ("observer-edit", "zdftke.f90 replaces"),
     ("observer-extra", "zdftke.f90 inserts"),
@@ -211,6 +211,51 @@ def test_same_program_refuses_planted_difference(tmp_path, plant, reason):
         (new / "obj/icevar.o").unlink()
     with pytest.raises(gate.GateError, match=re.escape(reason)):
         _same(new, ref)
+
+
+GFORTRAN = Path("/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran")
+UNIT = """SUBROUTINE s(n)
+   INTEGER, INTENT(in) :: n
+   REAL(8), ALLOCATABLE :: a(:)
+   ALLOCATE(a(n))
+   a = 1.d0
+   WRITE(*,*) 'round326 probe', SUM(a)
+END SUBROUTINE s
+"""
+
+
+def _compile(root: Path, source: str = UNIT, flags: tuple[str, ...] = ("-O3",)) -> bytes:
+    """Compile UNIT at <root>/BLD/ppsrc/nemo/s.f90 (absolute path, as makenemo does)."""
+    src = root / "BLD/ppsrc/nemo/s.f90"
+    src.parent.mkdir(parents=True)
+    src.write_text(source)
+    obj = root / "s.o"
+    import subprocess
+    subprocess.run([str(GFORTRAN), "-c", "-fdefault-real-8", *flags, "-funroll-all-loops",
+                    "-fno-tree-vectorize", "-J", str(root), "-o", str(obj), str(src)], check=True)
+    return obj.read_bytes()
+
+
+@pytest.mark.skipif(not GFORTRAN.exists(), reason="NEMO build toolchain absent")
+def test_objects_equal_ignores_only_the_embedded_config_root(tmp_path):
+    # Roots 25 characters apart: the 8-byte-aligned strings after the path move,
+    # so string sections re-pad and string-label symbol values shift.
+    ref_root, new_root = tmp_path / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY", tmp_path / "cfgs/R326"
+    ref, new = _compile(ref_root), _compile(new_root)
+    roots = (f"{ref_root}/".encode(), f"{new_root}/".encode())
+    assert str(ref_root).encode() in ref and ref != new and len(ref) != len(new)
+    assert gate.objects_equal(ref, new, *roots)
+    other = tmp_path / "cfgs/ORCA2_R326HMJ"
+    assert not gate.objects_equal(ref, _compile(other, UNIT.replace("probe", "probf")),
+                                  roots[0], f"{other}/".encode())
+    o2 = tmp_path / "cfgs/ORCA2_R326HMK"
+    assert not gate.objects_equal(ref, _compile(o2, flags=("-O1",)), roots[0], f"{o2}/".encode())
+    names = [sec[0] for sec in gate._elf_view(new, roots[1], roots[0])[1:]]
+    shoff, = struct.unpack_from("<Q", new, 0x28)
+    off = struct.unpack_from("<IIQQQQIIQQ", new, shoff + names.index(b".text") * 64)[4]
+    flipped = bytearray(new)
+    flipped[off] ^= 0xFF
+    assert not gate.objects_equal(ref, bytes(flipped), *roots)
 
 
 EXCERPT = ACQ / "round5_ocean.output.excerpt"
