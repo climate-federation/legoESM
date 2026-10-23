@@ -90,7 +90,7 @@ def test_env_var_runner_provenance_overrides_caller_defaults(monkeypatch) -> Non
         "001-libm-lazy-load.patch, , local.patch, 002-omip-core2-extensions.patch",
     )
     m = build_run_manifest(
-        _sample_config(), runner_tag="run_omip_core2", patches=["local.patch"]
+        _sample_config(), runner_tag="run_omip_core2", patches=["", " local.patch "]
     )
     assert m["reproducibility"]["runner_tag"] == "run_omip_core2"
     assert m["reproducibility"]["orchestrator_tag"] == (

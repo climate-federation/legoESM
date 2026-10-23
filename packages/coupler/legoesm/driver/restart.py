@@ -1266,12 +1266,10 @@ def build_run_manifest(
     # stay the entry script's tag.
     orchestrator_tag = os.environ.get("LEGOESM_RUNNER_TAG", "")
     # Orchestrator patches are appended to the run's own (run first, deduped);
-    # blank entries are ignored, so a blank env var is a no-op.
-    env_patches = [p.strip() for p in
-                   os.environ.get("LEGOESM_RUNNER_PATCHES", "").split(",")
-                   if p.strip()]
-    if env_patches:
-        patches = list(dict.fromkeys([*(patches or []), *env_patches]))
+    # blank entries on either side are ignored, so a blank env var is a no-op.
+    env_patches = os.environ.get("LEGOESM_RUNNER_PATCHES", "").split(",")
+    patches = list(dict.fromkeys(
+        p.strip() for p in [*(patches or []), *env_patches] if p.strip()))
 
     # Provenance of the IMPORTED package — the code that runs — not the CWD.
     # If the CWD is a legoesm checkout at a different HEAD (launcher cd-ed into
