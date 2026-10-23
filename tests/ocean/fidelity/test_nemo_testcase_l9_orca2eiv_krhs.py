@@ -22,6 +22,9 @@ G9 = CASES / "nemo_testcase_g9_orca2tadv"
 L9 = CASES / "nemo_testcase_l9_orca2eiv_krhs"
 RUN = L9 / "run.sh"
 RESTO = INPUTS / "resto.nc"
+L9_RECORD = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
+    "round57/oracle_l9_r57/twin_a")
 
 
 def _module(name: str, path: Path):
@@ -250,3 +253,28 @@ def test_l9_live_eiv_executes_before_l8_finalizer(l9_card, monkeypatch):
         model.step(
             state, dt=l9_card.dt_s, freshwater=freshwater,
             surface_forcing=forcing, sponge=l9_card.recipe.tracer_damping)
+
+
+@pytest.mark.skipif(
+    not (L9_RECORD / "oracle_rktracer_stage3_kt00000001.bin").is_file(),
+    reason="no admitted round-57 L9 record",
+)
+def test_l9_live_term_arm_scores_eiv_and_krhs_boundaries():
+    ladder = _module(
+        "l9_live_ladder_score",
+        Path(__file__).parents[3] / "scripts/validate/ocean_fidelity/testcases/"
+        "nemo_testcase_g2_orca2bathy_ladder.py",
+    )
+    scored = ladder.run(
+        L9_RECORD, arm="l9_live_terms", kt_from=1, kt_to=1,
+        allow_dirty=True, case="ORCA2L9-eiv-krhs")
+
+    assert scored["label"].startswith("LIVE-MODEL-TERMS:")
+    assert scored["gate_pass"] is True
+    rows = scored["per_kt"][0]["rows"]
+    assert len(rows) == 20
+    assert all(row["at_bar"] and not row["dry_card_nonzero"] for row in rows)
+    eiv = [row for row in rows if ".eiv_" in row["name"]]
+    assert len(eiv) == 6
+    assert all(row["n_unequal"] == row["flushed_subnormal"] == 0 for row in eiv)
+    assert max(row["normalised"] for row in rows) <= ladder.BAR

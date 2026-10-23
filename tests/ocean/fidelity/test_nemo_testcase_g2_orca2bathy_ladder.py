@@ -552,3 +552,12 @@ def test_bit_rows_count_wet_points_and_the_plant_fires(ladder):
     assert (r["n_unequal"], r["dry_card_nonzero"], r["max_ulps"]) == (0, 1, 0)
     p = ladder.bit_rows("x", ref, ref, wet, plant=True)
     assert p["n_unequal"] == 1 and p["max_ulps"] == 1
+
+
+def test_bit_rows_applies_the_shared_flushed_subnormal_rule(ladder):
+    ref = np.asarray([np.nextafter(0.0, 1.0), 1.0])
+    cand = np.asarray([0.0, 1.0])
+    row = ladder.bit_rows("x", ref, cand, np.ones(2, dtype=bool))
+    assert row["n_bitwise_unequal"] == 1
+    assert row["flushed_subnormal"] == 1
+    assert row["n_unequal"] == row["max_ulps"] == 0

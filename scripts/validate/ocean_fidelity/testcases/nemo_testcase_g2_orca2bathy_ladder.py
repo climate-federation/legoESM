@@ -65,7 +65,7 @@ CASE = "ORCA2G2-zps"
 CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice",
          "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf", "ORCA2G9-tadv",
          "ORCA2L4-bbc", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp",
-         "ORCA2L8-krhs",
+         "ORCA2L8-krhs", "ORCA2L9-eiv-krhs",
          "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm", "ORCA2V4-iwm",
          "ORCA2V5-havtb", "ORCA2L1-bbl", "ORCA2L2-iso", "ORCA2L3-eiv")
 # G5's record build (ORCA2-lane frames); V1 = that build + one hm_i writer;
@@ -73,7 +73,7 @@ CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice",
 # L1/L2/L4 use G5's record surface-input format.
 ICE_CASES = ("ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg", "ORCA2G8-ldf",
              "ORCA2G9-tadv", "ORCA2L4-bbc", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp",
-             "ORCA2L8-krhs",
+             "ORCA2L8-krhs", "ORCA2L9-eiv-krhs",
              "ORCA2V1-tke", "ORCA2V2-evd",
              "ORCA2V3-ddm", "ORCA2V4-iwm", "ORCA2V5-havtb", "ORCA2L1-bbl",
              "ORCA2L2-iso", "ORCA2L3-eiv")
@@ -97,7 +97,8 @@ ARMS = ("geometry", "independent", "given_entry", "stages", "operators",
         "barotropic_exit",
         "zdf_replay", "substeps", "trazdf_replay", "rhs_frame",
         "restart_independent", "carried", "stp2d_terms",
-        "tke_mixing_length", "ddm_kt1", "geothermal", "damping", "l8_krhs", "l8_live_krhs")
+        "tke_mixing_length", "ddm_kt1", "geothermal", "damping", "l8_krhs",
+        "l8_live_krhs", "l9_live_terms")
 # stage exposures of one step: the private hook that returns it, and the
 # level-1 NEMO frame fields (u, v, T, S, ssh) it must equal
 EXPOSURES = {
@@ -516,6 +517,7 @@ def read_stp2d_terms(path: Path, kt: int, nk: int) -> dict[str, np.ndarray]:
 def bit_rows(name: str, ref, cand, wet, *, plant=False) -> dict:
     """Bitwise census on NEMO's wet points (dry points reported apart):
     unequal count, max |difference|, max ulps, worst level and cell."""
+    from nemo_testcase_phase3_trajectory_gate import comparison_masks
     from nemo_testcase_state_ulp_probe import ulp_distance
     ref, cand = np.asarray(ref, np.float64), np.array(cand, np.float64)
     wet = np.asarray(wet, bool)
@@ -524,15 +526,21 @@ def bit_rows(name: str, ref, cand, wet, *, plant=False) -> dict:
     if plant:
         cand[tuple(np.argwhere(wet & (ref != 0))[0])] = np.nextafter(
             cand[tuple(np.argwhere(wet & (ref != 0))[0])], np.inf)
-    unequal = (cand.view(np.uint64) != ref.view(np.uint64)) & wet
-    d = np.where(wet, np.abs(cand - ref), 0.0)
+    masks = comparison_masks(ref, cand, wet)
+    bitwise_unequal = (cand.view(np.uint64) != ref.view(np.uint64)) & wet
+    unequal = masks["normal_difference"]
+    d = np.where(unequal, np.abs(cand - ref), 0.0)
     scale = float(np.max(np.abs(ref[wet]), initial=0.0))
     worst = tuple(int(i) for i in np.unravel_index(int(np.argmax(d)), d.shape))
     first = np.argwhere(unequal)
+    ulps = ulp_distance(cand[wet], ref[wet])
+    normal_flat = unequal[wet]
     return {"name": name, "n_wet": int(wet.sum()), "n_unequal": int(unequal.sum()),
+            "n_bitwise_unequal": int(bitwise_unequal.sum()),
+            "flushed_subnormal": int(masks["flushed_subnormal"].sum()),
             "max_abs": float(d.max()), "ref_max_abs": scale,
             "normalised": float(d.max()) / scale if scale else 0.0,
-            "max_ulps": int(np.max(ulp_distance(cand[wet], ref[wet]), initial=0)),
+            "max_ulps": int(np.max(ulps[normal_flat], initial=0)),
             "worst_cell": worst, "first_cell": first[0].tolist() if first.size else None,
             "levels_touched": (sorted({int(i) + 1 for i in first[:, -1]})
                                if first.size and ref.ndim == 3 else None),
@@ -925,7 +933,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     cfg, z, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
     if case in FORCED:
         require(arm in ("independent", "given_entry", "geothermal", "damping",
-                        "l8_krhs", "l8_live_krhs")
+                        "l8_krhs", "l8_live_krhs", "l9_live_terms")
                 or (arm in ("stages", "operators", "barotropic_exit", "carried",
                             "stp2d_terms")
                     and case in ICE_CASES)
@@ -985,13 +993,16 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         if without_l2_stored_face_ratios:
             gm = gm._replace(redi_flux_stored_face_ratios=False)
         cfg = cfg._replace(gm_redi=gm)
+    if case == "ORCA2L9-eiv-krhs":
+        require(recipe._orca2l3_eiv_selected(cfg.gm_redi),
+                "the L9 card no longer selects its complete L3 EIV path")
     if without_hpg_fold_geometry:         # G6 ROUND-2 PAIR HALF
         cfg = cfg._replace(nemo_hpg_sco_fold_geometry=False)
     if without_vector_raw_vmask:          # G6 ROUND-2 PAIR HALF
         cfg = cfg._replace(rk3_vector_raw_vmask=False)
     if without_geothermal:                # L4 ROUND-1 wiring-removal plant
         require(case in ("ORCA2L4-bbc", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp",
-                         "ORCA2L8-krhs")
+                         "ORCA2L8-krhs", "ORCA2L9-eiv-krhs")
                 and cfg.rk3_stage3_geothermal_nemo_written,
                 "the geothermal plant requires the selected L4 card")
         cfg = cfg._replace(
@@ -1125,7 +1136,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
 
     def all_level_rows(kt, state):
         path = restart_path(roots, kt)
-        if path is None and case == "ORCA2L3-eiv" and kt == 1:
+        if path is None and case in ("ORCA2L3-eiv", "ORCA2L9-eiv-krhs") and kt == 1:
             frame = read_step(kt)
             cand, rows = card_levels(state), {}
             for f, name in (("u", "uu"), ("v", "vv"),
@@ -1204,7 +1215,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         if case in TKE_CASES:
             surface = surface._replace(ice_mean_thickness_hm_i=g5.read_v1_hm_i(root, kt))
             result["surface_forcing"] = surface
-        if case in ("ORCA2L6-dmp", "ORCA2L8-krhs"):
+        if case in ("ORCA2L6-dmp", "ORCA2L8-krhs", "ORCA2L9-eiv-krhs"):
             tmask = np.asarray(z.is_active) > 0.5
             result.update(
                 sponge=recipe.build_orca2_damping_for_step(
@@ -1220,8 +1231,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
 
     if arm == "geothermal":
         require(case in ("ORCA2L4-bbc", "ORCA2L4b-iso-bbc", "ORCA2L6-dmp",
-                         "ORCA2L8-krhs"),
-                "the geothermal arm is L4/L4b/L6/L8-only")
+                         "ORCA2L8-krhs", "ORCA2L9-eiv-krhs"),
+                "the geothermal arm is L4/L4b/L6/L8/L9-only")
         import importlib.util
         from legoesm.ocean.physics.geothermal import (
             nemo_geothermal_bottom_heating_tendency,
@@ -1272,12 +1283,17 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             })
         return out
 
-    if arm == "l8_live_krhs":
-        require(case == "ORCA2L8-krhs", "the live Krhs arm is L8-only")
+    if arm in ("l8_live_krhs", "l9_live_terms"):
+        expected_case = ("ORCA2L8-krhs" if arm == "l8_live_krhs"
+                         else "ORCA2L9-eiv-krhs")
+        require(case == expected_case, f"the {arm} arm requires {expected_case}")
         import importlib.util
         from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as cgrid
 
-        module_path = HERE / "nemo_testcase_l8_orca2krhs" / "l8_records.py"
+        module_path = HERE / (
+            "nemo_testcase_l8_orca2krhs/l8_records.py"
+            if arm == "l8_live_krhs"
+            else "nemo_testcase_l9_orca2eiv_krhs/l9_records.py")
         spec = importlib.util.spec_from_file_location(
             "l8_live_records_score", module_path)
         records = importlib.util.module_from_spec(spec)
@@ -1302,11 +1318,14 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             return result
 
         observed_model = LatLonCGridOceanModel(
-            card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing)
+            card.recipe.grid, z, cfg, iwm_forcing=card.recipe.iwm_forcing,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_l3_eiv_transport=(arm == "l9_live_terms")))
+        observed_model.prime_step_caches(s0)
 
         out.update({
             "label": (
-                "LIVE-MODEL-TERMS: observed compiled L8 stage-3 boundaries; "
+                "LIVE-MODEL-TERMS: observed compiled L8/L9 stage-3 boundaries; "
                 "carried state from the unobserved ordinary production step"),
             "jit": True,
             "traced_inputs": True,
@@ -1323,17 +1342,25 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             before = len(captured)
             try:
                 cgrid._nemo_stage3_l8_krhs_walk = observed_walk
-                jax.device_get(observed_model.step(
+                observed = jax.device_get(observed_model.step(
                     state, dt=card.dt_s, **step_forcing))
+                jax.effects_barrier()
             finally:
                 cgrid._nemo_stage3_l8_krhs_walk = original_walk
-            require(len(captured) == before + 1,
-                    f"kt {kt}: live L8 boundary observer did not fire once")
+            # The EIV trace hook deliberately runs an independently compiled
+            # ordinary reference after the diagnostic graph (step():15129-44).
+            # Its second Krhs capture is the production arithmetic boundary.
+            expected_captures = 2 if arm == "l9_live_terms" else 1
+            require(len(captured) == before + expected_captures,
+                    f"kt {kt}: live L8 boundary observer fired "
+                    f"{len(captured) - before} times, expected "
+                    f"{expected_captures}")
             boundaries = captured[-1]
             state = state_after
             if kt < kt_from:
                 continue
-            header, fields = records.decode(
+            l8_records = records if arm == "l8_live_krhs" else records.L8
+            header, fields = l8_records.decode(
                 root / f"oracle_rktracer_stage3_kt{kt:08d}.bin", kt)
             jpi, jpj, jpk = header[7:10]
             wet3 = np.zeros((jpj, jpi, jpk), dtype=bool)
@@ -1349,12 +1376,33 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                     full[2:-2, 2:-2, :nk] = live
                     candidate = full.transpose(1, 0, 2).ravel(order="F")
                     row = bit_rows(
-                        f"l8_live_krhs.kt{kt}.{boundary}_{tracer}",
+                        f"{arm}.kt{kt}.{boundary}_{tracer}",
                         fields[f"{boundary}_{tracer}"], candidate, wet)
                     row["at_bar"] = bool(
                         row["normalised"] <= BAR
                         and not row["dry_card_nonzero"])
                     rows.append(row)
+            if arm == "l9_live_terms" and kt == 1:
+                trace = observed.mass_flux_w
+                eiv = records.L3.read(root / "oracle_l3_eiv_kt00000001.bin")
+                for point, card_slice in (
+                        ("u", (slice(None), slice(1, None))),
+                        ("v", (slice(1, None), slice(None)))):
+                    wet_face = cls[point]["full"] | cls[point]["partial"]
+                    for boundary in ("before", "delta", "after"):
+                        ref = np.ascontiguousarray(np.swapaxes(
+                            np.asarray(eiv[f"{boundary}_{point}"])[
+                                2:-2, 2:-2, :nk], 0, 1))
+                        live = np.asarray(getattr(trace, f"{boundary}_{point}"))[
+                            card_slice]
+                        out["input_dtypes"].append(str(live.dtype))
+                        row = bit_rows(
+                            f"l9_live_terms.kt1.eiv_{boundary}_{point}",
+                            ref, live, wet_face)
+                        row["at_bar"] = bool(
+                            row["normalised"] <= BAR
+                            and not row["dry_card_nonzero"])
+                        rows.append(row)
             out["per_kt"].append({"kt": kt, "rows": rows})
         out["gate_pass"] = bool(
             out["jit"] and out["traced_inputs"] and out["x64"]
@@ -1442,8 +1490,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         return out
 
     if arm == "damping":
-        require(case in ("ORCA2L6-dmp", "ORCA2L8-krhs"),
-                "the damping arm is L6/L8-only")
+        require(case in ("ORCA2L6-dmp", "ORCA2L8-krhs", "ORCA2L9-eiv-krhs"),
+                "the damping arm is L6/L8/L9-only")
         import importlib.util
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             _nemo_stage3_l4b_then_damping,
@@ -2510,13 +2558,13 @@ def main(argv=None) -> int:
                       f"max {row['max_abs']:.3e}; dry card/nemo "
                       f"{row['dry_card_nonzero']}/{row['dry_nemo_nonzero']}")
         return 0 if out["gate_pass"] else 1
-    if a.arm in ("l8_krhs", "l8_live_krhs"):
+    if a.arm in ("l8_krhs", "l8_live_krhs", "l9_live_terms"):
         for point in out["per_kt"]:
             for row in point["rows"]:
                 print(f"{row['name']}: unequal {row['n_unequal']}/{row['n_wet']} "
                       f"max {row['max_abs']:.3e}; dry card/nemo "
                       f"{row['dry_card_nonzero']}/{row['dry_nemo_nonzero']}")
-        print(f"L8_TERM_WIRING arm={a.arm} jit={out['jit']} "
+        print(f"LIVE_TERM_WIRING arm={a.arm} jit={out['jit']} "
               f"traced_inputs={out['traced_inputs']} x64={out['x64']} "
               f"pass={out['gate_pass']}")
         return 0 if out["gate_pass"] else 1
