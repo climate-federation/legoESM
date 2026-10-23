@@ -256,7 +256,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help="Publish the HTML report to DKRZ Swift as a public "
                               "link (needs a valid ~/.swiftenv from `swift-token new`).")
     parser.add_argument("--share-container", default=None,
-                         help="Swift container for --share (default: climateeval).")
+                         help="Swift container for --share (default: climateeval). "
+                              "WARNING: sharing makes the WHOLE container "
+                              "public-read, not just this report.")
     parser.add_argument("--share-name", default=None,
                          help="Report prefix on Swift for --share (default: the "
                               "run folder, i.e. the parent of --cmor-dir).")
