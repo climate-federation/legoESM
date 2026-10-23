@@ -103,3 +103,14 @@ No configuration value of any shipped card moved.
   dyn_zdf walk waits for round 328's acquisition.
 
 UNVERIFIED: identical row metrics between labels are not an array diff.
+
+## Operator addendum (codex review HOLD: unstamped provenance of S1)
+
+The operator re-ran S1 with git-stamped trees: base `735cab5ba22e1a3201961fcb81d4aab1546f20da` and
+round `999aef71f6b393b50aa3dcf39258c3275865178b` (both clean), the same probe
+(`orca2_rounds/round329/jaxpr/probe.py`), runner and per-job SHAs in
+`orca2_rounds/round329/jaxpr_stamped/` (`one.sh`, `provenance.txt`, `done.txt`). All eight outputs
+(normalized one-step programs of rung 0, OMT-0..4 and rung 10, and the rung-10 three-step values) are byte-identical
+between base and round; output hashes in `outputs.sha256` (SHA-256 of that file begins `8934f2e9923993b2`).
+Reviews: codex LAND on substance (refactor faithful, entry closure exactly zero, kt-10 table and D122 recomputed,
+gradients, choices) with this provenance HOLD, now closed; Argon LAND.
