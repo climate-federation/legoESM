@@ -32,6 +32,10 @@ from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round320_l2
 
 from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round323_l8_l3_l5_d122_gate import without_selection  # noqa: E501
 
+from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round325_l9_eiv_d122_gate import (  # noqa: E501
+    without_l3,
+)
+
 DECK = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
 
 
@@ -42,8 +46,9 @@ def cards():
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     return {
         # The card as round 322 shipped it; round 323's selection is tested
-        # in test_orca2_round323_selection.py.
-        "rung10": without_selection(build_orca2_zps_card(DECK)),
+        # in test_orca2_round323_selection.py, round 325's L3 in
+        # test_orca2_round325_selection.py.
+        "rung10": without_selection(without_l3(build_orca2_zps_card(DECK))),
         "rung0": rung0.build_rung0_card(DECK),
         "omt0": omt0.build_omt0_card(DECK),
         "omt1": omt1.build_omt1_card(DECK),
