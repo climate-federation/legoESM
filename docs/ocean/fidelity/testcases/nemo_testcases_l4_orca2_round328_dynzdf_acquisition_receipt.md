@@ -85,7 +85,12 @@ Decision-150 drag strictly improve or become bit-identical.
 - Writer plus patched NEMO units: syntax proof passed with the round-326 build
   modules and compiler; the patch contains 18 write-only calls and no removed
   source line.
-- Acquisition gate test: 9 passed (clean record plus all eight plants).
+- Acquisition gate test: 10 passed (clean record plus all nine plants).
+- Non-running preflight: PASS; `gates/preflight.log` SHA-256
+  `59d25e16665f8dad0d318f16c45f60a5c489945d726a1b0a02c3a670bd955148`.
+- Landing suite: 156 passed (citation gate, private-import ratchet, TKE and
+  recipe, freshwater, stage-face mask, prognostic barotropic state, ORCA2
+  parallel receipt, and this acquisition gate).
 - Evidence root reserved at
   `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round328/`.
 - No production result exists and no NEMO executable was run in this round.
