@@ -1,6 +1,12 @@
 # ORCA2 round 326 — no record carries SI3's ice thickness for TKE's under-ice mixing length (DECISION 154): acquisition written
 
-Date: 2026-10-23 (Claude round; codex review: operator).
+Date: 2026-10-23 (Claude round; - Resume gates (after the codex-HOLD fixes): citation-gate test +
+  private-import ratchet + round-326 gate test 45 passed
+  (`default_gate2_1.log`); TKE terms + recipe 96 passed; freshwater + stage
+  face mask 18 passed; prognostic barotropic 8 passed = 167 passed, 0
+  failed. Receipt and preregistration citation gates: PASS, 0 failures.
+
+codex review: operator).
 
 Status: **STOPPED — ACQUISITION_NEEDED** (acquisition committed, preflight green).
 
@@ -129,5 +135,11 @@ All seven codex findings verified as real, then fixed; NEMO still not run.
 - Receipt citation gate on this receipt: PASS, 6 citations, 0 failures
   (`citation_gate_receipt.log`); on the preregistration: PASS
   (`citation_gate_prereg.log`).
+
+- Resume gates (after the codex-HOLD fixes): citation-gate test +
+  private-import ratchet + round-326 gate test 45 passed
+  (`default_gate2_1.log`); TKE terms + recipe 96 passed; freshwater + stage
+  face mask 18 passed; prognostic barotropic 8 passed = 167 passed, 0
+  failed. Receipt and preregistration citation gates: PASS, 0 failures.
 
 codex review: operator
