@@ -463,6 +463,28 @@ def carry_mse(
         bias_ps = _lat_weighted_mean(dp, lat_weights)
         loss = loss + config.w_bias_ps * bias_ps ** 2 / ps_norm
 
+    # Grid-space CRPS, deterministic (M=1) limit of the almost-fair estimator
+    # = |error|, as in ``neural_gcm_spectral``: normalised by scale (not
+    # scale^2), level-weighted like the MSE and bias terms above.
+    if getattr(config, "residual_normalize", False):
+        T_s, wind_s, q_s, ps_s = (config.T_resid_scale, config.wind_resid_scale,
+                                  config.q_resid_scale, config.ps_resid_scale)
+    elif config.normalize_by_scale:
+        T_s, wind_s, q_s, ps_s = (config.T_scale, config.wind_scale,
+                                  config.q_scale, config.ps_scale)
+    else:
+        T_s = wind_s = q_s = ps_s = 1.0
+    if config.w_crps_T > 0.0:
+        loss = loss + config.w_crps_T * _lat_weighted_mean(jnp.abs(dT) * lev_w, lat_weights) / T_s
+    if config.w_crps_u > 0.0:
+        loss = loss + config.w_crps_u * _lat_weighted_mean(jnp.abs(du) * lev_w, lat_weights) / wind_s
+    if config.w_crps_v > 0.0:
+        loss = loss + config.w_crps_v * _lat_weighted_mean(jnp.abs(dv) * lev_w, lat_weights) / wind_s
+    if config.w_crps_q > 0.0:
+        loss = loss + config.w_crps_q * _lat_weighted_mean(jnp.abs(dq) * lev_w, lat_weights) / q_s
+    if config.w_crps_ps > 0.0:
+        loss = loss + config.w_crps_ps * _lat_weighted_mean(jnp.abs(dp), lat_weights) / ps_s
+
     # Radiation-flux supervision (TOA + surface) — shared helper, only
     # active when a ``w_flux_*`` / ``w_bias_flux_*`` weight is >0.
     if _any_flux_weight(config):

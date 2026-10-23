@@ -635,7 +635,19 @@ def make_loss_config(cfg, yml):
     valid = set(LossConfig()._fields)
     kwargs = {k: (tuple(v) if isinstance(v, list) else v)
               for k, v in lb.items() if k in valid}
-    return LossConfig(**kwargs)
+    lc = LossConfig(**kwargs)
+    # The WB objective (combined_loss on one deterministic rollout) has no
+    # persistence-normalised or ensemble branch; refuse rather than ignore.
+    unsupported = [name for name, on in (
+        ("persistence_normalize", lc.persistence_normalize),
+        ("ensemble_size > 1", lc.ensemble_size > 1),
+        ("w_afcrps > 0", lc.w_afcrps > 0.0),
+    ) if on]
+    if unsupported:
+        raise ValueError(
+            f"WeatherBench training does not implement {unsupported}; these "
+            "loss settings would be silently ignored. Remove them from the deck.")
+    return lc
 
 
 def _spectral_pe_config(yml):
