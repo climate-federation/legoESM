@@ -645,8 +645,9 @@ def _rules() -> list[Rule]:
            card=lambda c: c.flat[D + "bottom_drag_scheme"] != "nemo_linear", effect="bottom drag"))
     a(Rule(r"oce:namdrg\.ln_drgimp", "map", card=C("zdf_drag_in_matrix"), effect="bottom drag"))
     a(Rule(r"oce:namdrg\.ln_drgice_imp", "map", card=C("implicit_ice_ocean_top_drag"),
-           why="ice-ocean top drag left off until the card computes its own ice-ocean "
-               "coefficient (rounds 305-306)", effect="ice-ocean drag", cls="b:D133"))
+           why="off on the shipped card: it cannot compute rCdU_ice without SI3 ice "
+               "velocity (D133); the rung-10 NEMO comparison runs it with the recorded "
+               "coefficient (D150, round 324)", effect="ice-ocean drag", cls="b:D133"))
     a(Rule(r"oce:namdrg_bot\.rn_cd0", "map", card=C(D + "bottom_drag_cd0"), effect="bottom drag"))
     a(Rule(r"oce:namdrg_bot\.rn_uc0", "map", card=C(D + "bottom_drag_uc0"), effect="bottom drag"))
     a(Rule(r"oce:namdrg_bot\.(rn_cdmax|rn_ke0|rn_z0)", "inert", switch=(("oce:namdrg.ln_lin", True),),
