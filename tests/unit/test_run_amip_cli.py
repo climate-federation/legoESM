@@ -5569,6 +5569,14 @@ def test_dry_run_reports_missing_aimip_checkpoint_before_loading(tmp_path, capsy
     assert "MISSING" in out and gone in out
 
 
+def test_dry_run_finds_suffixless_aimip_checkpoint(tmp_path, capsys):
+    from scripts.run.run_amip import main
+    (tmp_path / "epoch_0019.eqx").write_bytes(b"")
+    assert main(_DRY_BASE + ["--aimip-classical-checkpoint",
+                             str(tmp_path / "epoch_0019")]) == 0
+    assert "MISSING" not in capsys.readouterr().out
+
+
 def test_dry_run_keeps_aimip_spectral_refusal(tmp_path):
     from scripts.run.run_amip import main
     gone = str(tmp_path / "no_such_aimip.eqx")
