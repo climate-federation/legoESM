@@ -203,6 +203,10 @@ FILES = {
     # that executes the category-summed initial snow/ice load adjustment.
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90": (
         _ORCA2_COMPILED / "iceistate.f90"),
+    # ORCA2 round 327 binds the inherited entry owner to the exact build that
+    # produced the admitted one-category trajectory.
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iceistate.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iceistate.f90"),
     # ORCA2 round 78 binds the turbulence mixing-length floor to the compiled
     # two-arm rmxl_min choice this deck's ln_zdfiwm selects.
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90": (
@@ -4325,6 +4329,13 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:442-459': [
         'snwice_mass  (:,:) = tmask(:,:,1) * SUM',
         'ssh(:,:,Kbb) = ssh(:,:,Kbb) - zsshadj', 18],
+    # --- ORCA2 round 327: exact producer and independent-card entry owner ---
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iceistate.f90:442-459': [
+        'snwice_mass  (:,:) = tmask(:,:,1) * SUM',
+        'ssh(:,:,Kbb) = ssh(:,:,Kbb) - zsshadj', 18],
+    'nemo_testcase_recipe.py:1762-1796': [
+        'temperature, salinity = build_orca2_initial_ts(',
+        'initial_ssh = np.where(surface_wet, -ssh_adjustment, 0.0)', 35],
     # --- ORCA2 card round 4: returned surface record is root-rank only ---
     'ORCA2_ORCA1ICE_OMIP_L4_R3SURFACE/BLD/ppsrc/nemo/stprk3.f90:396-400': [
         ('IF( .NOT.lwp ) RETURN', 5),
