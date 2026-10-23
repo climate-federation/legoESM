@@ -2,17 +2,18 @@
 
 Status: **SURVEY AND DESIGN ONLY**; no model code, NEMO build, run, or acquisition.
 ORCA2 inherits the complete SI3 reference ice deck: 5 categories, 10 ice and 5 snow layers.
-Its ice step is every 2 ocean steps: 21,600 s from `rn_Dt=10800` and `nn_fsbc=2`.
+Coupled ORCA2 steps ice every 21,600 s; ORCA2_SAS_ICE instead steps it every 10,800 s.
 The active stack is H79+aEVP(100), Prather, ridge+raft, BL99/P07, salinity-4, and level ponds.
 Lane 3 already built narrow one-category Prather, C-grid aEVP, ridge/raft, and 3+3 BL99 cards.
-Those cards are reusable, but no complete lane-3 rung is bit-identical and four ownership debts remain.
-The production ORCA2 card is a fold-aware `LatLonCGridGeometry`; current ice dynamics rejects that type.
+Those cards are reusable, but no complete lane-3 rung is bit-identical and five debts remain.
+The SI3 arms themselves hard-code one category and doubly periodic halos; that blocks the tripole grid.
 Current ORCA2 ocean fidelity replays NEMO's post-surface ice fields, so legoESM SI3 is not exercised.
-Recommendation: close lane-3 debts first, then add one ORCA2 selector or coupling boundary per rung.
+Recommendation: close the C1D snow-branch defect, then start O1; gate only composing dynamics rungs on D1-D4.
 Every proposed oracle record is write-only, versioned, binary64, source-stamped, and scored offline.
 The forward bar is normalized pointwise `1e-15`; exact equality is reported separately and never implied.
-The design does not include ICE_AGRIF: no selected ORCA2 key or mechanism requires AGRIF.
-Implementation is blocked on the numbered decisions in the final table.
+ORCA2_SAS acquisition also needs a user-approved, hash-pinned `SAS_v5.0.0.tar.gz` source.
+ICE_AGRIF stays excluded: no selected ORCA2 key or mechanism requires AGRIF.
+Implementation is blocked on Decision 1; later acquisition is blocked on the data-source decision.
 
 ## 1. Executed ORCA2 SI3 identity
 
@@ -38,6 +39,7 @@ are `key_si3 key_qco key_vco_1d3d key_RK3`
 | Strength / redistribution | H79 on (`pstar=2e4`, `crhg=20`), R75/constant off, strength smoothing on; linear redistribution on (`murdg=3` inert), exponential participation on (`astar=.03`, linear off, `gstar=.15` inert); `csrdg=.5`; ridging on (`hstar=25`, porosity `.3`, snow survival `.5`, pond survival `1`); rafting on (`hraft=.75`, `craft=5`, snow survival `.5`, pond survival `1`) (`cfgs/ORCA2_OMIP_L4/EXP00/namelist_ice_ref:76-103`). |
 | Rheology / transport | EVP and adaptive EVP on; EAP/VP off; creep limit `2e-9`, eccentricity 2, 100 subcycles, elastic ratio `.333`, convergence check 0. Prather on; UMx off (`nn_UMx=5` inert) (`cfgs/ORCA2_OMIP_L4/EXP00/namelist_ice_ref:108-131`). |
 | Ice surface | `Cd_io=.005`; snow fraction method 2; snow blow `.66`; category flux distribution `-1`; conduction flux and its emulator off; transmitted-solar method 0 (GM77) (`cfgs/ORCA2_OMIP_L4/EXP00/namelist_ice_ref:136-150`). |
+| Ocean/air coupling convention | Ice is **levitating**, not embedded (`ln_ice_embd=.false.`), so SI3 does not add local ice pressure/mass/salt loading to the ocean (`cfgs/ORCA2_OMIP_L4/EXP00/namelist_ref:199`). Ice-air drag, heat and moisture use the constant arm with `Cd_ia=Ce_ia=Ch_ia=1.4e-3` (`cfgs/ORCA2_OMIP_L4/EXP00/namelist_ref:259-262`). O2 owns the levitating initialization branch; O7 owns the constant-coefficient surface step, and later rungs only inherit them. |
 | Thermodynamics | Thickness growth/melt, lateral melt, open-water growth, and lead-heat melt all on. BL99 and P07 conductivity on, U64 off; snow conductivity `.31`; attenuation `kappa_i=1`, `kappa_s=10`, melting/dry snow `7/10`; convergence diagnostic off (`cfgs/ORCA2_OMIP_L4/EXP00/namelist_ice_ref:157-174`). |
 | Lateral/open water | `beta=1`, `dmin=8 m`; new ice `.1 m`; frazil collection off (inactive defaults `maxfraz=1`, `vfraz=.417`, `Cfraz=5`) (`cfgs/ORCA2_OMIP_L4/EXP00/namelist_ice_ref:179-194`). |
 | Salinity | Scheme 4; flushing and drainage on; `simin=.1`, new-ice fraction `.75`, minimum drainage thickness `.1`; VC19 liquidus 2; maximum 50 drainage and 5 flushing subcycles; flush rate `.3`, critical brine volume `.05`; RJW scheme 1 (`alpha=.03`, `Rc=8`); sanity check off. Scheme-1/2 and GN/CW parameters are read but inactive (`cfgs/ORCA2_OMIP_L4/EXP00/namelist_ice_ref:199-236`). |
@@ -46,6 +48,30 @@ are `key_si3 key_qco key_vco_1d3d key_RK3`
 
 The copied `namelist_ice_cfg` is intentionally cited by absence: it contains
 only section comments and terminator (`cfgs/ORCA2_OMIP_L4/EXP00/namelist_ice_cfg:22-84`).
+
+### ORCA2_SAS staging data and cadence
+
+The shipped SETTE manifest requires both `ORCA2_ICE_v5.0.0.tar.gz` and
+`SAS_v5.0.0.tar.gz` (`sette/input_ORCA2_SAS_ICE.cfg:1-2`).  A filesystem census
+found the former archive but no SAS archive or extracted `sas_grid_*` files;
+the ORCA2_ICE archive also contains no `sas_grid_*` member.  Those fields are
+the prescribed ocean state read by the SAS deck
+(`cfgs/ORCA2_SAS_ICE/EXPREF/namelist_ref:398-404`).  The official SETTE fetcher
+constructs the versioned filename and downloads it from the NEMO JASMIN store
+(`sette/sette_fetch_inputs.sh:39-46`).
+
+**DATA-SOURCE DECISION (not taken):** before any O-rung acquisition, approve
+fetching exactly `SAS_v5.0.0.tar.gz` from
+`https://gws-access.jasmin.ac.uk/public/nemo/sette_inputs/r5.0.0/`, then pin the
+URL, byte size, raw-archive SHA-256 and extracted-member SHA-256 manifest in the
+receipt.  The pick is the official archive, not generating substitute SAS
+fields or assuming they are in `ORCA2_ICE_v5.0.0.tar.gz`.
+
+The SAS deck explicitly sets `rn_Dt=10800` and `nn_fsbc=1`, hence a 10,800 s
+ice step (`cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg:28`,
+`cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg:61`).  Coupled ORCA2 uses `nn_fsbc=2`
+and a 21,600 s ice step.  C0 below owns that cadence change; C1 no longer
+bundles it with the live-flux swap.
 
 ### One executed ice step, in source order
 
@@ -67,6 +93,22 @@ fields `qsr`, `qns`, `emp`, `sfx`, `fr_i`, `tn_ice`, and snow/ice mass
 ice/ocean stress and `rCdU_ice`; TKE option `nn_mxlice=2` uses `fr_i` and the
 mean `hm_i` to set the under-ice mixing length
 (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:606-629`).
+
+Two other ocean modules mention ice cover but do not add SI3 ladder owners.
+Surface salinity restoring is active (`nn_sssr=2`), but `nn_sssr_ice=1` makes
+its `fr_i`-dependent branch false, so the restoring coefficient stays one
+everywhere (`cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:151-156`,
+`cfgs/ORCA2_OMIP_L4/EXP00/namelist_ref:446-458`,
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcssr.f90:166-174`).  It is therefore an
+**inert ice-cover consumer** for this identity.  Icebergs would interpolate
+`fr_i` at each berg (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/icbutl.f90:168-173`), and
+the shipped deck turns icebergs on
+(`cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:204-206`), but the accepted ORCA2 card
+and record are the one-variable `ln_icebergs=.false.` variant selected by user
+Decision 7
+(`docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_phase2_manifest.md:136-143`).
+Icebergs are therefore **excluded**, not silently inherited from the shipped
+deck.
 
 ## 2. Gap map from lane 3 to ORCA2
 
@@ -90,24 +132,31 @@ lateral melt (`docs/ocean/fidelity/testcases/nemo_testcases_l2_gyre_merge_si3_20
 | Salinity-4 drainage/flushing | **MISSING.** Generic bulk brine is not the 10-layer SI3 salt-content program. | Implement VC19 liquidus, RJW drainage, flushing and their bounded subcycles. Lane 3 only built salinity-2. |
 | Level ponds with lids/albedo | **EXISTS-SIMILAR.** Generic package ponds are CESM-style; current state has area/depth but no lid volume. | Implement SI3 level ponds, rain, lids, category pond/lid volume, advection/ridging/remap and albedo coupling. Lane 3 selected ponds off. |
 | `ice_cor`, equivalents, aggregation | **PARTIAL.** Narrow ADV2D/RHEO cards contain source corrections; generic production path uses different clamps. | Promote source ordering across 5 categories and both post-dynamics/post-thermo stages, including layer salt/energy/pond conservation. |
-| SI3 atmosphere/bulk surface flux | **PARTIAL.** Lane-3 constant-coefficient bulk/albedo gate was AT-BAR, not bit-identical: 16,512/227,760 binary64 rows differed (`docs/ocean/fidelity/testcases/nemo_testcases_l3thd_scalarmath_v2_receipt.md:30-36`). | ORCA2 uses its live bulk forcing and pond/category albedo; preserve the prior card and extend selectors. |
+| SI3 atmosphere/bulk surface flux | **PARTIAL.** Lane-3 constant-coefficient bulk/albedo gate was AT-BAR, not bit-identical: 16,512/227,760 binary64 rows differed (`docs/ocean/fidelity/testcases/nemo_testcases_l3thd_scalarmath_v2_receipt.md:30-36`). | O7 must own the whole executed ice-atmosphere surface step: `blk_ice_1`, `ice_alb`, `blk_ice_2`, and `ice_flx_other`, including the resolved 1.4e-3 coefficients. The calls and thermodynamic inputs/outputs are source-ordered at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/icestp.f90:203-250`, `ORCA2_OMIP_L4/BLD/ppsrc/nemo/icesbc.f90:139-166`, and `ORCA2_OMIP_L4/BLD/ppsrc/nemo/icesbc.f90:201-264`; `ice_flx_other` then forms bottom/lead heat terms (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/icesbc.f90:440-570`). |
 | Ocean exchange and implicit drag | **PARTIAL.** Generic coupler exchange exists, but the ORCA2 fidelity gate currently replays 35 NEMO post-surface inputs including heat, water, salt, `fr_i`, snow/ice mass and `rCdU_ice` (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_phase2b_exchange_gate.py:27-52`). | Build source-convention `ice_update_flx/tau`; replace replay in two rungs so flux and drag ownership do not move together. |
 | Under-ice TKE | **EXISTS-SIMILAR** in the certified ocean V1 implementation, but not driven by live ice. | Supply live category-summed `fr_i` and `hm_i`, then select `nn_mxlice=2`; score TKE at its first consumer. |
 | Restart / diagnostics | **PARTIAL.** Each lane-3 card has a versioned restart carry. | One unified full-state schema plus category-layer moments and exact before-level/cadence state is missing. |
 
-### Grid verdict: transport yes, dynamics no
+### Grid verdict: the narrow SI3 arms are periodic, not tripolar
 
 The ocean card reads the actual domain and constructs `create_tripole_grid`
 with the ORCA fold convention (`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1622-1629`,
 `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1676-1689`); the card explicitly names the unmeasured five-category layered
 Prather state (`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2091-2107`).
-The resulting type is `LatLonCGridGeometry`.  `grid_supports_ice_transport`
-admits that type, while `grid_supports_ice_dynamics` admits only cubed-sphere,
-regular lat-lon and Voronoi (`packages/ice/legoesm/ice/sea_ice.py:89-121`).
-The step guard consequently rejects EVP/mEVP or strain ridging on the ORCA2
-grid (`packages/ice/legoesm/ice/sea_ice.py:329-362`).  Therefore the package
-**cannot run ORCA2 SI3 dynamics today**; its existing tripole transport is
-donor-cell rather than the required Prather program.
+The resulting type is `LatLonCGridGeometry`.  The generic production path has
+a type guard for strain dynamics (`packages/ice/legoesm/ice/sea_ice.py:89-121`,
+`packages/ice/legoesm/ice/sea_ice.py:329-362`), but that guard is **not the
+binding blocker for the fidelity arms**, which are called directly by their
+cards.  The aEVP arm hard-codes a two-cell halo and exactly one category
+(`packages/ice/legoesm/ice/dynamics.py:101-103`), then rebuilds both horizontal
+halos with `mode="wrap"`
+(`packages/ice/legoesm/ice/dynamics.py:809-822`).  The SI3 Prather arm likewise
+implements an ICE_ADV2D bi-periodic halo
+(`packages/ice/legoesm/ice/transport.py:1610-1615`).  Thus neither arm can
+represent ORCA2's cyclic east-west seam plus north fold today.  O4/O5 must
+replace those arm-local periodic assumptions with the existing fold-aware
+geometry operations and extend the carried state to five categories; changing
+only the generic guard would still run the wrong halo program.
 
 ## 3. Proposed ladder
 
@@ -129,24 +178,42 @@ has `abs(L-N)/max(abs(N),1) <= 1e-15`; exact-unequal counts remain published.
 Any first failure is DEBT, not a relaxed bar. Size estimates below are
 uncompressed planning ranges, not acquisition commitments.
 
+The O rungs separate **operator admission** from **composition**. O1-O16 replay
+the exact NEMO input at each named source boundary, so upstream drift cannot
+hide a first owner; only O17 advances the complete live deck. O1-O6 replay
+NEMO's completed ice-surface stress/flux products. O7 alone replays raw
+meteorology and computes the air-ice surface step. O8-O16 replay O7's exact
+outputs while admitting their own stage. O17 and all C rungs compute the O7
+surface products live. Dynamics are off for O7-O16, so their thermodynamic
+admission does not compose D1-D4. This forcing disposition is part of every
+record header and a mismatch fails admission.
+
 | Rung | NEMO deck and keys | Exactly one new piece / legoESM work | Required record, bar, estimated size |
 |---:|---|---|---|
 | D1 | `tests/ICE_ADV1D`, shipped SAS keys `key_si3 key_xios key_linssh key_vco_1d`; retain the lane-3 Prather overlay, 40 x 2 s. | Close **restart-moment ownership** in the existing `ICEAdv1DCard`, no new algorithm. | Reuse entry/step/restart record; add moment pre/post-correction provenance. Exact local moment replay and `1e-15` full trajectory; about 20 MiB. |
 | D2 | `tests/ICE_ADV2D`, same keys; Prather overlay, 485 x 1200 s. | Close the **before-level / `snwice_mass` input contract**, then run the existing 2-D Prather card unchanged. | All extensive fields, five moments per field, odd/even sweep boundary and restart. Exact local replay, `1e-15` trajectory; 4–8 GiB. |
-| D3 | ICE_ADV2D_RHG work case derived from shipped ICE_ADV2D, same keys, lane-3 aEVP/H79 overlay. | Close **aEVP stress-carry trajectory**; retain existing C-grid solver and record. | Outer-step entry, strength, selected aEVP subcycles, U/V/stress exit, Prather exit. Exact local operations, `1e-15` trajectory; 2–5 GiB with sparse subcycle frames. |
-| D4 | `tests/ICE_RHEO`, same SAS keys; retain lane-3 H79+aEVP+Prather+ridge/raft overlay, 720 x 30 s. | Close the **step-2 full-dynamics divergence** in the existing RHEO card. | Rheology, advection, ridge/raft iteration, correction and completed-step/restart boundaries. Exact pure stages, `1e-15` trajectory; 10–25 GiB. |
-| D5 | `cfgs/C1D/EXP_SASICE`, `key_si3 key_RK3 key_vco_1d3d key_linssh`, lane-3 3+3/salinity-2/pond-off overlay, 8,760 x 3600 s. | Reopen and close the **retained BL99 source-arithmetic debt** only if Decision 1 selects debt-first. | Reuse the 621,960-row year record; retain every ZDF/DH/TEMP/SAL/DO stage. Exact statement probes, `1e-15` trajectory; existing record plus under 1 GiB. |
-| O1 | `cfgs/ORCA2_SAS_ICE`, `key_si3 key_linssh key_vco_1d3d key_xios key_RK3`; one-step diagnostic overlay with dynamics/thermo off. | Add **full ORCA2 SI3 state/restart schema**: jpl5, 10+5 energy/salt, age, pond/lid, moments, HFN bounds. | Initial/read/aggregate/restart state and seam/fold halos; exact bridge and restart, about 1 GiB. |
-| O2 | ORCA2_SAS_ICE with only Prather active. | Add **Prather across cyclic seam and north fold** for the O1 field registry. | Both sweep orders, halo exchanges and all moments each step; exact local seam/fold replay, `1e-15` 100-step trajectory; 10–20 GiB. |
-| O3 | ORCA2_SAS_ICE with H79+aEVP+Prather, ridge/thermo off. | Add **curvilinear tripole aEVP dynamics** and no-slip fold/halo ordering. | Metrics, masks, strength, selected 100-subcycle frames, velocity/stress and transport stages; exact local, `1e-15` trajectory; 15–30 GiB. |
-| O4 | ORCA2_SAS_ICE dynamics on, thermo off. | Add **five-category SI3 ridging/rafting** including linear redistribution. | Participation, donor/receiver transfers, each repeat, all extensive conservation channels, post-dynamics `ice_cor`; exact local, `1e-15` trajectory; 15–30 GiB. |
-| O5 | ORCA2_SAS_ICE with salinity-1, ponds/lateral off diagnostic overlay. | Generalize **BL99/P07 vertical thermodynamics to jpl5 and 10+5 layers**. | Per-category ZDF/DH/TEMP/open-water stages and tridiagonal/Picard state; exact local, `1e-15` trajectory; 20–40 GiB. |
-| O6 | ORCA2_SAS_ICE with salinity-4 enabled, ponds/lateral still off. | Add **salinity-4 VC19/RJW drainage and flushing**. | Layer salt/brine, each bounded subcycle, salt flux and temperature reconversion; exact local, `1e-15` trajectory; 10–20 GiB. |
-| O7 | ORCA2_SAS_ICE plus default lateral melt, ponds still off. | Add **lateral melt**. | `ice_thd_da` entry/exit and heat/freshwater diagnostics; bit-exact pure replay, `1e-15` trajectory; 2–5 GiB. |
-| O8 | ORCA2_SAS_ICE plus default ITD path, ponds still off. | Add **SI3 HFN ITD remap and post-thermo correction**. | Category boundary crossings, remap fluxes, all conserved extents, `ice_cor(kt,2)`; exact local, `1e-15`; 10–20 GiB. |
-| O9 | Unmodified ORCA2_SAS_ICE reference ice deck. | Add **level ponds with rain, lids and pond albedo**. | Pond/lid growth, drainage/flush/freeze, advection/ridging/remap channels and albedo; exact local, `1e-15`; 10–20 GiB. |
-| O10 | Unmodified ORCA2_SAS_ICE, 100 x 10800 s, `nn_fsbc=1`. | Add **full-deck composition/cadence**; no new physics implementation. | Complete call-order frames, exchange outputs and restart for all 100 steps; `1e-15`, exact count separate; 40–80 GiB. |
-| C1 | Coupled certified ORCA2 ocean card, production `nn_fsbc=2`; keep NEMO `rCdU_ice` replay. | Replace **replayed ice heat/freshwater/salt/cover fields** with live O10 `ice_update_flx`. | Pre-surface, post-flux, ocean first-consumer and 21,600-s ice carry; existing ocean bar plus SI3 `1e-15`; 20–40 GiB for the short admission window. |
+| D3 | ICE_ADV2D_RHG plus `tests/ICE_RHEO`, retaining their lane-3 H79+aEVP overlays. | Close **one shared carried-stress trajectory debt**, not two. RHEO's completed-step-2 first owner is `stress1_i` from the same C-grid aEVP arm (`docs/ocean/fidelity/testcases/nemo_testcases_l3dyn_phase2_receipt.md:856-866`), while exact-input aEVP is byte-exact and the long growth is only a measured amplification of an fp64-scale carried seed (`docs/ocean/fidelity/testcases/nemo_testcases_l3dyn_phase2_receipt.md:1629-1649`). | One cross-card register: outer entry, selected subcycles, U/V/stresses, Prather exit and completed boundary; 2–8 GiB. |
+| D4 | `tests/ICE_RHEO`, after D3's stress carry is controlled. | Close the distinct **active redistribution/restart-moment ownership** debt. Its active-window owner is `sxxe_l01` at `3.492459543785742e-9`, about six orders above the stress-order row (`docs/ocean/fidelity/testcases/nemo_testcases_l3dyn_phase2_receipt.md:872-884`). | Ridge/raft inputs, iterations, all five moments and restart; 10–25 GiB. |
+| D5 | `cfgs/C1D/EXP_SASICE`, `key_si3 key_RK3 key_vco_1d3d key_linssh`, lane-3 3+3/salinity-2/pond-off overlay, 8,760 x 3600 s. | Close the **positive-subnormal-snow branch defect** first under recommended Decision 1. NEMO carries `5e-324 m` snow into its snow-present ZDF branch while XLA enters the zero-snow branch; the largest row is `0.02510099530281747` (`docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase6_receipt.md:194-209`). | Reuse the 621,960-row year record and retain ZDF/DH/TEMP/SAL/DO stages; existing record plus under 1 GiB. |
+| O1 | ORCA2_SAS_ICE, dynamics/thermo off, exact NEMO state injected. | Add the **full ORCA2 SI3 state/restart schema** only: jpl5, 10+5 energy/salt, age, pond/lid, five moments and HFN bounds. No SST initialization or thickness fit. | Read/aggregate/restart state and seam/fold halos; exact bridge/restart; about 1 GiB. |
+| O2 | Same diagnostic deck, initialized from the recorded SST/SSS and namelist scalars. | Add the **SST/freezing-point and hemisphere-dependent scalar initial state**, including the levitating-ice initial SSH branch. NEMO masks and assigns the scalar state before category fitting (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:309-338`) and adjusts SSH differently for levitating ice (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:440-460`). | SST/SSS, freeze point, mask, scalar ice/snow/pond state and SSH adjustment; about 1–2 GiB. |
+| O3 | Same diagnostic deck, O2 scalar state as exact input. | Add the **initial HFN thickness-distribution fit** (`ice_var_itd`) separately from state construction (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:354-364`). | Category fit inputs/outputs, layer initialization and conservation; about 1–2 GiB. |
+| O4 | ORCA2_SAS_ICE with Prather only; dynamics/thermo otherwise off. | Add **five-category Prather across the cyclic seam and north fold**, replacing the periodic arm-local halo. D1 and D2 gate composition, but exact-input seam/fold admission can proceed. | Both sweep orders, fold/seam exchanges and every moment; 10–20 GiB. |
+| O5 | ORCA2_SAS_ICE diagnostic overlay: `ln_dynALL=T`, `ln_dynRHGADV=F`, `ln_ridging=F`, `ln_rafting=F`, `ln_icethd=F`. | Add **curvilinear tripole H79+aEVP** and no-slip fold/halo ordering. This keeps the production `dynALL` statements; it does not select `dynRHGADV`, whose source also calls non-production `Hpiling` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/icedyn.f90:187-201`). Both redistribution flags are explicitly false, and the record must prove `ice_dyn_rdgrft` contributes no redistribution before O6. D3 gates composition. | Metrics, masks, strength, selected 100-subcycle frames, velocity/stress and post-advection boundary; 15–30 GiB. |
+| O6 | ORCA2_SAS_ICE `dynALL`, thermodynamics off, production ridging and rafting restored. | Add **five-category ridging/rafting plus post-dynamics correction**, including linear redistribution. D4 gates composition. | Participation, transfers, repeats, conservation channels and `ice_cor(kt,1)`; 15–30 GiB. |
+| O7 | ORCA2_SAS_ICE bulk surface step; dynamics/thermo state held at exact input. | Add the complete **ice-atmosphere surface step**: `blk_ice_1`, pond/category `ice_alb`, `blk_ice_2`, and `ice_flx_other`. This rung owns computed raw atmospheric forcing and `Cd_ia=Ce_ia=Ch_ia=1.4e-3`; prior O rungs replay its products. | Raw meteorology, coefficient fields, stress, albedo, heat/mass fluxes and lead/bottom terms; 10–20 GiB. |
+| O8 | Exact-input thermodynamic stage replay; full `ice_thd` not yet advanced. | Add **frazil collection bookkeeping** from the always-called `ice_thd_frazil`, even though collection is disabled. | Frazil inputs, `ht_i_new`, `fraz_frac`; 1–2 GiB. |
+| O9 | Exact-input per-category stage replay, salinity-1, ponds/lateral off. | Generalize **BL99/P07 ZDF, thickness growth/melt and temperature updates** to jpl5 and 10+5 layers. It does not claim a full thermodynamic trajectory. | ZDF/DH/TEMP entry/exits and Picard/tridiagonal state; 20–40 GiB. |
+| O10 | Exact-input salinity stage replay, salinity-4 enabled. | Add **VC19/RJW drainage and flushing**. | Layer salt/brine, bounded subcycles, salt flux and temperature reconversion; 10–20 GiB. |
+| O11 | Exact-input `ice_thd_da` replay with default lateral melt. | Add **lateral melt**. | Routine entry/exit and heat/freshwater diagnostics; 2–5 GiB. |
+| O12 | Exact-input pond stage replay with production pond selectors. | Add **level ponds, rain, lids and pond albedo state changes**. | Pond/lid growth, drainage/flush/freeze and conservation; 10–20 GiB. |
+| O13 | Exact-input post-category replay. | Add **HFN `ice_itd_rem`** with all energy/salt/pond extents. | Boundary crossings, remap fluxes and conservation; 10–20 GiB. |
+| O14 | Exact-input post-remap replay. | Add **open-water growth and lead-heat melt** in `ice_thd_do`. | New-ice category choice, heat/freshwater/salt changes; 5–10 GiB. |
+| O15 | Exact-input post-open-water replay. | Add **post-thermodynamic `ice_cor(kt,2)`** as its own owner. | All corrected state, zapping/caps and conservation; 5–10 GiB. |
+| O16 | Exact-input post-aggregation replay. | Add **`ice_update_flx`** and its ocean heat, freshwater, salt, cover, temperature and mass outputs. C1 consumes this owned implementation rather than treating it as “no new physics.” | Pre/post aggregation, every returned exchange field and first ocean-format boundary; 5–10 GiB. |
+| O17 | Unmodified ORCA2_SAS_ICE, 100 x 10800 s, `nn_fsbc=1`. | Add **full-deck composition at SAS cadence**; no new operator implementation. This is the first rung that calls the full `ice_thd`, so its unconditional frazil, jpl5 remap, open-water growth and correction have already been admitted at O8/O13/O14/O15 (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/icethd.f90:182-245`). | Complete call-order frames, live O7 forcing, exchange outputs and restart; 40–80 GiB. |
+| C0 | Coupled certified ORCA2 card, still replaying NEMO's post-surface exchange fields and drag. | Change **cadence only**, from SAS `nn_fsbc=1` (10,800 s) to coupled `nn_fsbc=2` (21,600 s). | Ice carry on both ocean steps, cadence gate, before/after levels and restart; 10–20 GiB. |
+| C1 | Same coupled `nn_fsbc=2` card; keep NEMO `rCdU_ice` replay. | Replace **replayed ice heat/freshwater/salt/cover fields** with live O16 `ice_update_flx`; cadence is already owned by C0. | Pre-surface, post-flux and ocean first-consumer; 20–40 GiB. |
 | C2 | Same coupled card; Decision 150 drag replay disabled. | Replace **ice stress and `tmod_io/rCdU_ice` replay** with live `ice_update_tau`. | Relative velocity, stress blend, drag and ocean top-stress first consumer every ocean step; exact local, ocean registered bars unchanged; 10–20 GiB. |
 | C3 | Same coupled card with `nn_mxlice=2` consuming live ice. | Enable **live under-ice TKE length coupling** using `fr_i` and `hm_i`. | Aggregation -> TKE first-consumer frame and short coupled trajectory; exact local owner and inherited ocean/ice bars; 10–20 GiB. |
 
@@ -154,6 +221,12 @@ Rungs D1–D5 reuse the existing lane-3 cards and immutable records rather than
 reacquire them unless admission proves the record lacks the discriminating
 operand. ICE_AGRIF is excluded because none of the above decks or cpp keys
 selects AGRIF and no mechanism in the target call graph depends on it.
+
+O9 cannot be a full-thermodynamics rung followed later by O13: with `jpl=5`
+and thermodynamics on, SI3 always executes frazil, `ice_itd_rem`, `ice_thd_do`
+and `ice_cor(kt,2)` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/icethd.f90:182-245`).
+The stage-replay definition above is deliberate; O17 is the first composition
+of those already admitted stages.
 
 ## 4. Recipe shape
 
@@ -208,17 +281,21 @@ new differentiable path, plus a planted `stop_gradient` violation.
 
 | Decision | Numbered options | Pick |
 |---:|---|---|
-| 1. First implementation track | **1)** D1–D5 debt-first; **2)** begin O1 immediately and carry lane-3 debts as declared dependencies. | **1.** The ORCA2 deck composes all four debt-bearing operators; moving directly to ORCA2 would destroy first-owner attribution. This reopens C1D only by explicit approval. |
-| 2. Shipped-case identity | **1)** retain lane-3 overlays that select the ORCA2-family Prather/aEVP arms; **2)** certify shipped defaults first (UMx/EAP), then add overlay rungs. | **1.** Reuse the established cards and avoid unrelated algorithms; record each overlay as a deck deviation. |
+| 1. First implementation track — **DECISION NEEDED** | **1)** close the C1D positive-subnormal-snow branch defect (D5) first, then start the O rungs, with D1-D4 gating only the dynamics rungs that compose them; **2)** close all D1-D5 first; **3)** start O1 now and carry every debt. | **1.** The 0.025 C1D row is a real branch mismatch, whereas per-stage exact-input replay still assigns first owners despite upstream drift, O7-O16 keep dynamics off, and most remaining dynamics rows are `1e-15`–`1e-14`. In particular the exact-input aEVP arm is bit-exact and its large endpoint was measured only as amplification of an fp64-scale seed (`docs/ocean/fidelity/testcases/nemo_testcases_l3dyn_phase2_receipt.md:1629-1649`). Therefore closing every dynamics trajectory first may never terminate and is not required to begin non-dynamics O rungs. This is a recommendation, not a decision for the user. |
+| 2. Shipped-case identity | **1)** retain lane-3 Prather/aEVP arms, but use O5's explicit production-`dynALL` overlay; **2)** certify shipped UMx/EAP defaults first. | **1.** Reuse the established arms without selecting the `dynRHGADV`/`Hpiling` call graph that production ORCA2 does not execute. |
 | 3. Bars | **1)** exact local replay plus fixed `1e-15` normalized trajectory bar; **2)** choose new mechanism-specific bars now. | **1.** It preserves lane-3 comparability. Any later statistical bar requires preregistered evidence, never retroactive relaxation. |
-| 4. ORCA2_SAS staging | **1)** diagnostic overlays O1–O9, one selector each; **2)** jump to the unmodified full deck. | **1.** It enforces one new owner per rung. |
+| 4. ORCA2_SAS staging | **1)** exact-input operator admissions O1–O16, then full composition O17; **2)** jump to the unmodified full deck. | **1.** It gives initialization, every unconditional thermodynamic child, surface forcing and `ice_update_flx` one first owner. |
 | 5. Record density / storage | **1)** every outer stage and step, sparse selected aEVP/salinity iterations, full detail at first divergence; **2)** dump every inner iteration. | **1.** It retains attribution while avoiding multi-terabyte records. |
-| 6. Coupling order | **1)** fluxes C1, drag C2, under-ice TKE C3; **2)** replace all replay together. | **1.** Decision 150 drag and TKE then remain independently falsifiable. |
+| 6. Coupling order | **1)** cadence C0, fluxes C1, drag C2, under-ice TKE C3; **2)** change cadence and replace all replay together. | **1.** The 10,800 -> 21,600 s cadence change, Decision 150 drag and TKE remain independently falsifiable. |
 | 7. Forward/gradient policy | **1)** literal primal with gradient-only guards; **2)** smooth forward switches. | **1.** Forward fidelity is the target and JAX purity is retained with explicit custom derivatives. |
 | 8. AGRIF | **1)** exclude; **2)** add ICE_AGRIF. | **1.** No target selector or key needs it. |
+| 9. ORCA2_SAS data source — **DATA-SOURCE DECISION, deferred until acquisition** | **1)** fetch official `SAS_v5.0.0.tar.gz` from the versioned NEMO JASMIN SETTE endpoint and pin raw/member hashes; **2)** generate replacement `sas_grid_*` fields and pin that producer. | **1.** It is the exact shipped-case dependency named by SETTE. No fetch is authorized by this design round. |
+| 10. Atmospheric forcing boundary | **1)** replay completed surface products through O6, compute raw meteorology only at O7, replay O7 outputs for O8-O16, then compose live at O17/C; **2)** compute live on every O rung. | **1.** It gives the surface producer one owner while keeping the other exact-input admissions attributable. |
 
 ## Validation and handoff
 
 This round changed documentation and its citation registry only. No oracle
-artifact was produced or requested. Independent review: operator (Claude).
+artifact was produced or requested. The operator's independent Claude review
+was NEEDS-CHANGES; the findings above were verified and dispositioned. Codex
+review: operator.
 The implementation round must not start until Decision 1 is answered.

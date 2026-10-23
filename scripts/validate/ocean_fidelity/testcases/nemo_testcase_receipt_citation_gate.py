@@ -141,6 +141,10 @@ FILES = {
         NEMO / "cfgs/ORCA2_ICE_PISCES/cpp_ORCA2_ICE_PISCES.fcm"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/icestp.f90": _ORCA2_COMPILED / "icestp.f90",
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/icedyn.f90": _ORCA2_COMPILED / "icedyn.f90",
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/icesbc.f90": _ORCA2_COMPILED / "icesbc.f90",
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90": _ORCA2_COMPILED / "iceistate.f90",
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcssr.f90": _ORCA2_COMPILED / "sbcssr.f90",
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/icbutl.f90": _ORCA2_COMPILED / "icbutl.f90",
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/icedyn_adv_pra.f90": (
         _ORCA2_COMPILED / "icedyn_adv_pra.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/icedyn_rdgrft.f90": (
@@ -180,6 +184,18 @@ FILES = {
         REPO / "tests/ice/fidelity/test_si3_jpl1_ridging.py"),
     "tests/ice/unit/test_si3_landfast_l16.py": (
         REPO / "tests/ice/unit/test_si3_landfast_l16.py"),
+    "cfgs/ORCA2_SAS_ICE/EXPREF/namelist_ref": (
+        NEMO / "cfgs/ORCA2_SAS_ICE/EXPREF/namelist_ref"),
+    "cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg": (
+        NEMO / "cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg"),
+    "sette/input_ORCA2_SAS_ICE.cfg": NEMO / "sette/input_ORCA2_SAS_ICE.cfg",
+    "sette/sette_fetch_inputs.sh": NEMO / "sette/sette_fetch_inputs.sh",
+    "docs/ocean/fidelity/testcases/nemo_testcases_l3dyn_phase2_receipt.md": (
+        REPO / "docs/ocean/fidelity/testcases/nemo_testcases_l3dyn_phase2_receipt.md"),
+    "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase6_receipt.md": (
+        REPO / "docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase6_receipt.md"),
+    "docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_phase2_manifest.md": (
+        REPO / "docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_phase2_manifest.md"),
     # --- SI3 ladder round 1 survey/design END ---
     # ORCA2 round 311: G1b's build (P5) and G8's build (R31FULLENTRY_FIX1).
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90": NEMO / "cfgs/ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90",
@@ -1914,6 +1930,70 @@ CITATION_MAP = {
     'tests/ice/unit/test_si3_landfast_l16.py:191-207': [
         'def test_landfast_depth_path_has_finite_nonzero_gradient',
         'jnp.asarray(_PLANT_DEPTH_M, dtype=jnp.float64)', 17],
+    'cfgs/ORCA2_OMIP_L4/EXP00/namelist_ref:199':
+        'ln_ice_embd = .false.',
+    'cfgs/ORCA2_OMIP_L4/EXP00/namelist_ref:259-262': [
+        'ln_Cx_ice_cst = .true.', 'rn_Ch_ia  = 1.4e-3', 4],
+    'cfgs/ORCA2_SAS_ICE/EXPREF/namelist_ref:398-404': [
+        "sn_usp      = 'sas_grid_U'", "sn_frq      = 'sas_grid_T'", 7],
+    'cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg:28':
+        'rn_Dt       = 10800.',
+    'cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg:61':
+        'nn_fsbc     = 1',
+    'cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:151-156': [
+        '&namsbc_ssr', 'rn_sssr_bnd =   4.e0', 6],
+    'cfgs/ORCA2_OMIP_L4/EXP00/namelist_ref:446-458': [
+        '&namsbc_ssr', '>1 = enhanced restoration under ice', 13],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcssr.f90:166-174': [
+        'IF( nn_sssr /= 0 .AND. nn_sssr_ice /= 1 ) THEN',
+        ('END DO   ;   END DO', 2), 9],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icbutl.f90:168-173': [
+        'IF ( PRESENT(pssu) )', 'IF ( PRESENT(pff ) )', 6],
+    'cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:204-206': [
+        '&namberg', 'ln_icebergs = .true.', 3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icestp.f90:203-250': [
+        'Dynamical coupling with the atmosphere', 'CALL ice_sbc_flx( kt, ksbc )', 48],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icesbc.f90:139-166': [
+        ('SELECT CASE( ksbc )', 1), 'vtau_ice(ji,jj) = vtau_ice(ji,jj)', 28],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icesbc.f90:201-264': [
+        'INTEGER, INTENT(in) ::   kt', 'END SUBROUTINE ice_sbc_flx', 64],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icesbc.f90:440-570': [
+        ('SUBROUTINE ice_flx_other', 1), 'END SUBROUTINE ice_flx_other', 131],
+    'packages/ice/legoesm/ice/dynamics.py:101-103': [
+        '_SI3_REQUIRED_HALO = 2', '_SI3_REQUIRED_RN_ISHLAT = 2.0', 3],
+    'packages/ice/legoesm/ice/dynamics.py:809-822': [
+        'def _si3_periodic_halo', 'mode="wrap"', 14],
+    'packages/ice/legoesm/ice/transport.py:1610-1615': [
+        'def _si3_periodic_halo_xy', 'mode="wrap"', 6],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:309-338': [
+        'no ice if (sst - Tfreez) >= thresold', ('END WHERE', 3), 30],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:440-460': [
+        'Adjust ssh and vertical scale factors to snow-ice mass', 'ENDWHERE', 21],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:354-364': [
+        '3) fill fields', ('ENDDO', 3), 11],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icedyn.f90:187-201': [
+        ('SELECT CASE( nice_dyn )', 1), ('CALL ice_var_zapsmall', 1), 15],
+    'sette/input_ORCA2_SAS_ICE.cfg:1-2': [
+        'ORCA2_ICE_v5.0.0.tar.gz', 'SAS_v5.0.0.tar.gz', 2],
+    'sette/sette_fetch_inputs.sh:39-46': [
+        'suff="5.0.0"', 'else', 8],
+    'docs/ocean/fidelity/testcases/nemo_testcases_l3dyn_phase2_receipt.md:856-866': [
+        'The committed first-divergence sweep advances the full dynALL card',
+        'measured attribution.', 11],
+    'docs/ocean/fidelity/testcases/nemo_testcases_l3dyn_phase2_receipt.md:1629-1649': [
+        'CPU/fp64/scalar-libm production JIT is byte-exact',
+        'mechanism claim.', 21],
+    'docs/ocean/fidelity/testcases/nemo_testcases_l3dyn_phase2_receipt.md:872-884': [
+        '### Round-8 active-redistribution measurement',
+        'completed step 8 is first.', 13],
+    'docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase6_receipt.md:194-209': [
+        '| exact-entry statistic | Phase 5 before | Phase 6 after |',
+        'histograms by step, sub-call, and variable.', 16],
+    'docs/ocean/fidelity/testcases/nemo_testcases_l3thd_phase6_receipt.md:180-208': [
+        '## Full-year exact-entry result',
+        'NEMO-exactly-zero rows.', 29],
+    'docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_phase2_manifest.md:136-143': [
+        '## Phase-2c icebergs-off VARIANT handoff', 'labelled `VARIANT`.', 8],
     # --- SI3 ladder round 1 survey/design END ---
     # ORCA2 round 324 (DECISION 150): rCdU_ice -> rCdU_top.
     'ICE/iceupdate.F90:369': 'tmod_io(ji,jj) = rho0 * drag_io(ji,jj) * SQRT( zmodt )',
@@ -8654,7 +8734,9 @@ UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
                     "CITATION_MAP and this gate does not read them")
 
 _NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm)"
-         r"|[A-Za-z0-9_./]*(?:namelist_cfg|namelist_ref|namelist_ice_cfg|namelist_ice_ref|ocean\.output)")
+         r"|[A-Za-z0-9_./]*(?:namelist_cfg|namelist_ref|namelist_ice_cfg|namelist_ice_ref|ocean\.output)"
+         r"|sette/(?:input_ORCA2_SAS_ICE\.cfg|sette_fetch_inputs\.sh)"
+         r"|docs/ocean/fidelity/testcases/(?:nemo_testcases_l3dyn_phase2_receipt|nemo_testcases_l3thd_phase6_receipt|nemo_testcases_l4_orca2_phase2_manifest)\.md")
 _SPAN = re.compile(r"`([^`\n]+)`")
 _FULL = re.compile(rf"^(?P<f>{_NAME}):(?P<l>\d[\d,\-]*)$")
 _ONLY = re.compile(rf"^(?P<f>{_NAME})$")
