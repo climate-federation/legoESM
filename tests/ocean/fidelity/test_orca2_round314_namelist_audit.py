@@ -121,7 +121,6 @@ EXPECTED_DIFFERS = {
     "oce:namrun.nn_itend": "c",
     "oce:namzdf_tke.nn_mxlice": "b:D135",
     "oce:namdrg.ln_drgice_imp": "b:D133",
-    "oce:namtra_eiv.ln_ldfeiv": "c",
 }
 EXPECTED_DIFFERS_EXP00 = {**EXPECTED_DIFFERS, "oce:namberg.ln_icebergs": "b:D7"}
 
@@ -137,9 +136,10 @@ def report():
 def test_rung10_audit_pins_the_round314_table(report):
     assert report["n_keys"] == 1108
     # Round 323: geothermal, damping and MLE rows MATCH; river mouths INERT.
-    assert report["counts"] == {"MATCH": 176, "DIFFERS": 4, "NOT-MODELLED": 665, "INERT": 231,
+    # Round 325: &namtra_eiv (ln_ldfeiv, nn_aei_ijk_t, rn_Ue, rn_Le) MATCH.
+    assert report["counts"] == {"MATCH": 180, "DIFFERS": 3, "NOT-MODELLED": 662, "INERT": 231,
                                 "UNCOMPARED": 32}
-    assert report["counts_exp00"] == {"MATCH": 175, "DIFFERS": 5, "NOT-MODELLED": 665, "INERT": 231,
+    assert report["counts_exp00"] == {"MATCH": 179, "DIFFERS": 4, "NOT-MODELLED": 662, "INERT": 231,
                                       "UNCOMPARED": 32}
     assert not [r["key"] for r in report["rows"] if r["status"] == "MATCH" and r["card"] in ("-", "not built (off)")]
     assert report["selfcheck"]["unexplained"] == []
