@@ -5553,6 +5553,22 @@ def test_dry_run_builtin_topography_is_not_a_file(capsys):
     assert "not used  topography" in capsys.readouterr().out
 
 
+def test_dry_run_reports_missing_ml_stats(tmp_path, capsys):
+    from scripts.run.run_amip import main
+    gone = str(tmp_path / "no_such_stats.npz")
+    assert main(_DRY_BASE + ["--physics-parameterization-stats", gone]) == 1
+    out = capsys.readouterr().out
+    assert "MISSING" in out and gone in out
+
+
+def test_dry_run_reports_missing_aimip_checkpoint_before_loading(tmp_path, capsys):
+    from scripts.run.run_amip import main
+    gone = str(tmp_path / "no_such_aimip.eqx")
+    assert main(_DRY_BASE + ["--aimip-classical-checkpoint", gone]) == 1
+    out = capsys.readouterr().out
+    assert "MISSING" in out and gone in out
+
+
 def test_dry_run_exit_code_reaches_the_shell(tmp_path):
     import subprocess
     gone = str(tmp_path / "no_such_restart.npz")

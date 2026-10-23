@@ -2587,9 +2587,9 @@ DRY_RUN_CONFIG_INPUTS = (
     "topography", "land_mask_path", "albedo_land_path",
     "subgrid_orography_path", "land_ic_path", "clm_surfdata_path",
     "land_cover_surfdata", "surfdata_path", "e3sm_cam_mfcc_table_path",
-    "physics_parameterization_checkpoint",
+    "physics_parameterization_checkpoint", "physics_parameterization_stats",
 )
-DRY_RUN_ARG_INPUTS = ("restart_from", "params")
+DRY_RUN_ARG_INPUTS = ("restart_from", "params", "aimip_classical_checkpoint")
 # Mirrors the driver's terrain dispatch: these names are built-in shapes, not files.
 _TOPOGRAPHY_BUILTINS = ("flat", "gaussian")
 
@@ -3582,17 +3582,21 @@ def _apply_aimip_classical_overrides(
     if getattr(args, "cloud_cap_floor_on", False):
         raise SystemExit("--cloud-cap-floor cannot be combined with --aimip-classical-checkpoint: "
                          "the trained cloud config is prebuilt and would not carry the floor")
-    from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
-    from legoesm.training.aimip_params import AIMIPClassicalParams
-    _p = load_checkpoint_or_fail(
-        args.aimip_classical_checkpoint, AIMIPClassicalParams.from_defaults(),
-        what="--aimip-classical-checkpoint")
     args.convection = "tiedtke"
     args.turbulence = "louis"
     args.gravity_wave_drag = "mcfarlane"
     args.clouds = "xu_randall"
     if args.microphysics == "none":
         args.microphysics = "sundqvist"
+    if getattr(args, "dry_run", False):
+        # --dry-run only checks that the checkpoint FILE exists
+        # (DRY_RUN_ARG_INPUTS); loading it would fail before that report.
+        return args
+    from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
+    from legoesm.training.aimip_params import AIMIPClassicalParams
+    _p = load_checkpoint_or_fail(
+        args.aimip_classical_checkpoint, AIMIPClassicalParams.from_defaults(),
+        what="--aimip-classical-checkpoint")
     _cc = _p.to_cloud_config()
     args.cloud_q_c_diagnostic = float(_cc.q_c_diagnostic)
     args.cloud_rh_crit = float(_cc.rh_crit)
