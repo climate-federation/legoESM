@@ -134,8 +134,12 @@ Decision-150 drag strictly improve or become bit-identical.
   identical preprocessed units and 424 identical normalized objects. Log
   `gates/preflight_hold_repair.log` SHA-256
   `49e2cdfb722ddd3f411c1bbec3705151e659081538be23be438e92517359f737`.
-- The earlier preflight hash and 157-test count are superseded by this HOLD
-  repair. The repaired landing-gate count is recorded after it runs.
+- Per-receipt citation gate: PASS on the clean committed receipt, 6 citations
+  found and 0 failures.
+- Repaired default landing gate plus private-import ratchet: 147 passed in
+  1,035.88 s (receipt citation defaults, private imports, TKE, recipe,
+  freshwater, stage-face mask, prognostic barotropic state, and ORCA2 parallel
+  receipt). The earlier preflight hash and 157-test count are superseded.
 - Evidence root reserved at
   `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round328/`.
 - No production result exists and no NEMO executable was run in this round.
