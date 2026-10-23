@@ -8,7 +8,7 @@ experiment:
   tier: tier2
   complexity: primitive_equation
   extent: channel
-  maturity: structurally_validated
+  maturity: run_tested
   description: >
     ACC-like zonally-reentrant channel (Abernathey-style): wind- and
     buoyancy-forced eddying jet over a Gaussian ridge. Exercises the

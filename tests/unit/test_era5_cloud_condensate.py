@@ -270,16 +270,16 @@ def test_a_warm_rain_scheme_drops_the_ice_loudly(caplog):
 # --- the campaign switch --------------------------------------------------
 
 def test_the_campaign_yaml_turns_it_on_and_picks_the_store():
-    from legoesm.training.scale_build import _era5_config
+    from legoesm.training.scale_build import wb_era5_config
 
-    off = _era5_config(None, {"era5_zarr": "s"})
+    off = wb_era5_config(None, {"era5_zarr": "s"})
     assert off.load_cloud_condensate is False
 
-    on = _era5_config(None, {"era5_zarr": "s", "era5_cloud_condensate": True})
+    on = wb_era5_config(None, {"era5_zarr": "s", "era5_cloud_condensate": True})
     assert on.load_cloud_condensate is True
     assert on.cloud_zarr, "a default condensate store must be configured"
 
-    named = _era5_config(None, {"era5_zarr": "s", "era5_cloud_condensate": True,
+    named = wb_era5_config(None, {"era5_zarr": "s", "era5_cloud_condensate": True,
                                 "era5_cloud_zarr": "gs://elsewhere"})
     assert named.cloud_zarr == "gs://elsewhere"
 
@@ -418,7 +418,7 @@ def test_the_surface_temperature_reload_does_not_touch_the_cloud_store():
            if any(isinstance(a, ast.Name) and a.id == "sst_cfg" for a in n.args)]
     assert len(sst) == 2, f"expected both loaders to use sst_cfg, got {len(sst)}"
     # ...and that config must really have the flag off.
-    from legoesm.training.scale_build import _era5_config
+    from legoesm.training.scale_build import wb_era5_config
 
-    on = _era5_config(None, {"era5_zarr": "s", "era5_cloud_condensate": True})
+    on = wb_era5_config(None, {"era5_zarr": "s", "era5_cloud_condensate": True})
     assert on._replace(load_cloud_condensate=False).load_cloud_condensate is False
