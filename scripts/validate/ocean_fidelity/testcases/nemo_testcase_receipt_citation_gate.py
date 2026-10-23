@@ -216,6 +216,14 @@ FILES = {
         REPO / "packages/ice/legoesm/ice/bitz_lipscomb.py"),
     "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py": (
         REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py"),
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2_gate.py": (
+        REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2_gate.py"),
+    "src/ICE/icevar.F90": NEMO / "src/ICE/icevar.F90",
+    "C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90": (
+        NEMO / "cfgs/C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90"),
+    "src/ICE/icethd_dh.F90": NEMO / "src/ICE/icethd_dh.F90",
+    "C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_dh.f90": (
+        NEMO / "cfgs/C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_dh.f90"),
     "tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py": (
         REPO / "tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py"),
     "tests/ocean/fidelity/test_nemo_si3thd_phase2_gate.py": (
@@ -2055,36 +2063,63 @@ CITATION_MAP = {
     'docs/ice/fidelity/si3_r2_d5_preregister.md:1-74': [
         '# SI3 Ladder Round 2 (`si3_r2`) — Rung D5 Preregistration',
         '- **REFUTE P2**: Either (a) GPU flushes `0x0000000000000001` (`h_s > 0', 74],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:102-112': [
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:103-113': [
         'def _jit_snow_pred(h_s: jax.Array) -> jax.Array:', (')', 43), 11],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:115-176': [
-        'def run_stage_a_subnormal_probe(*, plant_zero_input: bool = False) -> dict:',
-        ('}', 3), 62],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:115-774': [
-        'def run_stage_a_subnormal_probe(*, plant_zero_input: bool = False) -> dict:',
-        ('}', 33), 660],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:329-618': [
-        'def run_year_rescore(', ('}', 25), 290],
-    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:55-216': [
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:116-224': [
+        'def run_stage_a_subnormal_probe(*, plant_zero_input: bool = False) -> ',
+        ('}', 4), 109],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:116-841': [
+        'def run_stage_a_subnormal_probe(*, plant_zero_input: bool = False) -> ',
+        ('}', 34), 726],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:144-224': [
+        'expected_bits = "0x0000000000000001"', ('}', 4), 81],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:377-666': [
+        'def run_year_rescore(', ('}', 26), 290],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:760-783': [
+        'stage_b = {',
+        'stage_a["ftz_daz_mode"] = ftz_daz_classification["ftz_daz_mode"]', 24],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2_gate.py:212-218': [
+        'np.divide(g["e_i"] * 3.0, vi, out=e_i, where=vi > 1.0e-20)',
+        'np.atleast_2d(g["szv_i"] * 3.0 / vi), np.atleast_1d(g["oa_i"]),', 7],
+    'src/ICE/icevar.F90:390':
+        'ze_i             =   e_i (ji,jj,jk,jl) / v_i(ji,jj,jl) * zlay_i       ',
+    'src/ICE/icevar.F90:412-413': [
+        't_s(ji,jj,jk,jl) = rt0 + MAX( -100._wp ,  &',
+        '&               MIN( r1_rcpi*( -r1_rhos*( e_s(ji,jj,jk,jl) / v_s(ji,jj', 2],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90:404':
+        'ze_i             =   e_i (ji,jj,jk,jl) / v_i(ji,jj,jl) * zlay_i       ',
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90:426-427': [
+        't_s(ji,jj,jk,jl) = rt0 + MAX( -100._wp ,  &',
+        '&               MIN( r1_rcpi*( -r1_rhos*( e_s(ji,jj,jk,jl) / v_s(ji,jj', 2],
+    'src/ICE/icethd_dh.F90:498-503': [
+        '! recalculate t_s_1d from e_s_1d', ('ELSE', 6), 6],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_dh.f90:508-513': [
+        '! recalculate t_s_1d from e_s_1d', ('ELSE', 6), 6],
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:55-301': [
         'def test_d5_zdf_layer_reciprocals_statement_is_bit_exact_and_fails_whe',
-        'assert rev_norm_5860 > probe_module.phase2.BAR', 162],
-    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:55-486': [
+        'assert rev_norm_5860 > probe_module.phase2.BAR', 247],
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:55-794': [
         'def test_d5_zdf_layer_reciprocals_statement_is_bit_exact_and_fails_whe',
-        'assert rescore_30["over_bar_after"] < rescore_30["over_bar_before"]', 432],
-    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:219-373': [
+        'assert rescore_30["over_bar_after"] < rescore_30["over_bar_before"]', 740],
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:304-458': [
         'def test_d5_zdf_gradients_are_finite_and_reverse_equals_forward_with_l',
         'assert float(jnp.linalg.norm(planted_grad)) > 0.0', 155],
-    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:376-389': [
-        'def test_d5_non_si3_callers_are_bit_identical() -> None:',
-        'assert bool(jnp.all(jnp.isfinite(f_bot)))', 14],
-    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:392-486': [
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:461-640': [
+        'def _parent_commit_bitz_lipscomb_conduction_step(',
+        'np.testing.assert_array_equal(arr_on, arr_pl)', 180],
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:643-691': [
+        'def test_d5_ftz_daz_classification_distinguishes_ftz_only_from_daz(',
+        'assert classified_ftz_daz["ftz_daz_mode"] == "FTZ_DAZ_FLUSH_TO_ZERO"', 49],
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:694-794': [
         'def test_d5_platform_probe_and_planted_controls(probe_module) -> None:',
-        'assert rescore_30["over_bar_after"] < rescore_30["over_bar_before"]', 95],
+        'assert rescore_30["over_bar_after"] < rescore_30["over_bar_before"]', 101],
     'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:170-186': [
         'IF( h_i_1d(ji) > 0._wp ) THEN', ('ENDIF', 3), 17],
     'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:217-230': [
         'zradtr_s(ji,jk) = zradtr_s(ji,0) * EXP( - zraext_s(ji) * MAX( 0._wp, z',
         ('&                                       * EXP( - rn_kappa_i * MAX( 0._', 2), 14],
+    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:326-348': [
+        ('IF ( .NOT. l_T_converged(ji) ) THEN', 1), ('ENDIF', 10), 23],
     'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:332-341': [
         'zkappa_s(ji,jk) = zghe(ji) * rcnd_s * z1_h_s(ji)',
         'zkappa_i(ji,jk) = zghe(ji) * ztcond_i(ji,jk) * z1_h_i(ji)', 10],
@@ -2099,6 +2134,8 @@ CITATION_MAP = {
     'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:219-232': [
         'zradtr_s(ji,jk) = zradtr_s(ji,0) * EXP( - zraext_s(ji) * MAX( 0._wp, z',
         ('&                                       * EXP( - rn_kappa_i * MAX( 0._', 2), 14],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:321-343': [
+        ('IF ( .NOT. l_T_converged(ji) ) THEN', 1), ('ENDIF', 9), 23],
     'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:327-336': [
         'zkappa_s(ji,jk) = zghe(ji) * rcnd_s * z1_h_s(ji)',
         'zkappa_i(ji,jk) = zghe(ji) * ztcond_i(ji,jk) * z1_h_i(ji)', 10],
@@ -2111,17 +2148,22 @@ CITATION_MAP = {
     'packages/ice/legoesm/ice/bitz_lipscomb.py:280-310': [
         'def bitz_lipscomb_conduction_step(q_layers, h, S, F_top, T_bottom_K, dt):',
         'return q_new, T_new, F_bottom', 31],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:331-340': [
+        'if _nemo_order:',
+        'return jnp.clip(unbounded, constants.T0 - 100.0, constants.T0)', 10],
     'packages/ice/legoesm/ice/bitz_lipscomb.py:355-398': [
         'def _radiation(', 'return ab_s, ab_i, tr_i[..., -1]', 44],
     'packages/ice/legoesm/ice/bitz_lipscomb.py:401-417': [
         'def _si3_zdf_bl99_step(', ') -> SI3ZDFResult:', 17],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:465-524': [
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:436-438': [
+        'T_s_old = snow_temperature_from_enthalpy(', (')', 118), 3],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:465-534': [
         'dz_i = jnp.maximum(h_ice, _H_MIN) / 3.0',
-        'eta_s = dt / (constants.rho_snow * dz_s[..., None] * constants.c_ice)', 60],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:682-712': [
-        '# Interface conductive diagnostics, `icethd_zdf_bl99.F90:820-824`.',
-        (')', 270), 31],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1100-1127': [
+        'eta_s = dt / (constants.rho_snow * dz_s[..., None] * constants.c_ice)', 70],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:660-735': [
+        'Tsu = jnp.where(active, Tsu_candidate, Tsu)',
+        'qcn_bottom = 2.0 * k_base_i * (Ti[..., -1] - T_bottom)', 76],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1126-1153': [
         'def si3_column_step_arrays(state: SI3ColumnArrays,',
         'e_snow=zdf.e_snow)', 28],
     'tests/ocean/fidelity/test_nemo_si3thd_phase2_gate.py:208-219': [
