@@ -45,8 +45,14 @@ def test_compiled_exact_writer_layout_passes(record_dir: Path) -> None:
     h, fields = first["header"], first["fields"]
     assert fields["avm_input"].shape == (h["nx"] + 1, h["ny"] + 1, h["nz"] + 1)
     assert fields["rCdU_bot"].shape == (h["nx"] + 1, h["ny"] + 1, 1)
+    assert fields["r3u_kmm"].shape == (h["nx"], h["ny"], 1)
+    assert fields["r3v_kmm"].shape == (h["nx"], h["ny"], 1)
     assert fields["r3u_kaa"].shape == (h["nx"], h["ny"], 1)
     assert fields["r3v_kaa"].shape == (h["nx"], h["ny"], 1)
+    assert np.all(fields["r3u_kmm"] == 0.03)
+    assert np.all(fields["r3v_kmm"] == 0.04)
+    assert np.all(fields["r3u_kaa"] == 0.01)
+    assert np.all(fields["r3v_kaa"] == 0.02)
     assert fields["before_u"].shape == (h["nx"], h["ny"], h["nz"])
     assert "wi_input" not in fields
 

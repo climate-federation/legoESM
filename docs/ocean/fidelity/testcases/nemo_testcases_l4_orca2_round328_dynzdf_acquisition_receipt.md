@@ -52,7 +52,7 @@ The committed acquisition is
 It re-runs the admitted round-326 two-rank trajectory with additions-only,
 write-only hooks and records, in source order:
 
-1. `before`, `Krhs`, `avm`, after-level `r3u`/`r3v`, barotropic U/V,
+1. `before`, `Krhs`, `avm`, mid- and after-level `r3u`/`r3v`, barotropic U/V,
    bottom/top `rCdU`, and stress;
 2. explicit update, barotropic subtraction, bottom RHS, and top RHS;
 3. U and V lower/diagonal/upper matrices after base ZDF, ZAD, LDF, bottom drag,
@@ -138,6 +138,14 @@ after-level `e3u` divisor expands through `r3u(Kaa)` within
 the corresponding V divisor expands through `r3v(Kaa)` within
 `ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:356-517`.
 The exact-layout reader and fixture require both new 2-D fields.
+
+Resume-3 closes the remaining base-matrix operand gap. The U lower/upper
+coefficients also divide by `r3u(:,:,Kmm)` at
+`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:193,195`, and
+the V coefficients likewise divide by `r3v(:,:,Kmm)` at
+`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:362,364`.
+Both Kmm fields are now recorded next to the Kaa pair on both ranks; the
+reader, exact extents, compiled layout fixture, and admission all require them.
 
 The whitespace-tolerant real-log checker now also requires `nn_mxlice = 2`
 and `jpl = 1`. Both verbatim lines are committed in the pinned round-326

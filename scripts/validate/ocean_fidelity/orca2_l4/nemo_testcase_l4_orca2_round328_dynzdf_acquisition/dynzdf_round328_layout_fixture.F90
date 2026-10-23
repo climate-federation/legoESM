@@ -9,7 +9,7 @@ PROGRAM dynzdf_round328_layout_fixture
    CHARACTER(LEN=64) :: filename
    REAL(wp) :: puu(3,2,jpk,3), pvv(3,2,jpk,3), avm(4,3,jpk)
    REAL(wp) :: puub(3,2), pvvb(3,2), pbot(4,3), ptop(4,3)
-   REAL(wp) :: r3u_kaa(3,2), r3v_kaa(3,2)
+   REAL(wp) :: r3u_kmm(3,2), r3v_kmm(3,2), r3u_kaa(3,2), r3v_kaa(3,2)
    REAL(wp) :: utau(3,2), vtau(3,2), urow(3,jpkm1), vrow(3,jpkm1)
    REAL(wp) :: lower(3,jpkm1), diagonal(3,jpkm1), upper(3,jpkm1)
    REAL(wp) :: stage_t(3,2,jpk), stage_s(3,2,jpk)
@@ -26,9 +26,11 @@ PROGRAM dynzdf_round328_layout_fixture
       avm(ji,jj,jk)=REAL(100*jk+10*jj+ji,wp)
    END DO; END DO; END DO
    puub=7._wp; pvvb=8._wp; pbot=9._wp; ptop=10._wp
+   r3u_kmm=0.03_wp; r3v_kmm=0.04_wp
    r3u_kaa=0.01_wp; r3v_kaa=0.02_wp
    utau=11._wp; vtau=12._wp
-   CALL r328_begin(1,1,2,3,3,puu,pvv,avm,r3u_kaa,r3v_kaa,puub,pvvb,pbot,ptop,utau,vtau)
+   CALL r328_begin(1,1,2,3,3,puu,pvv,avm,r3u_kmm,r3v_kmm,r3u_kaa,r3v_kaa, &
+      & puub,pvvb,pbot,ptop,utau,vtau)
    DO phase=1,4; DO jj=1,2
       urow=REAL(100*phase+jj,wp); vrow=urow+0.25_wp
       CALL r328_state_row(phase,jj,urow,vrow)

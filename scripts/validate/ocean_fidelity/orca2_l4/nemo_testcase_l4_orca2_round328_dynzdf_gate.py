@@ -32,6 +32,7 @@ MATRIX_PHASES = ("base_zdf", "after_zad", "after_ldf", "bottom_diag", "top_diag"
 MATRIX_TERMS = ("low", "diag", "up")
 EXPECTED_ORDER = (
     "before_u", "before_v", "rhs_u", "rhs_v", "avm_input",
+    "r3u_kmm", "r3v_kmm",
     "r3u_kaa", "r3v_kaa",
     "barotropic_u", "barotropic_v", "rCdU_bot", "rCdU_top", "utauU", "vtauV",
     *(f"{phase}_{component}" for phase in STATE_PHASES for component in "uv"),
@@ -70,7 +71,8 @@ def _expected_extent(name: str, header: dict[str, int]) -> tuple[int, int, int]:
         return nx + 1, ny + 1, nz + 1
     if name in {"rCdU_bot", "rCdU_top"}:
         return nx + 1, ny + 1, 1
-    if name in {"r3u_kaa", "r3v_kaa", "barotropic_u", "barotropic_v", "utauU", "vtauV"}:
+    if name in {"r3u_kmm", "r3v_kmm", "r3u_kaa", "r3v_kaa",
+                "barotropic_u", "barotropic_v", "utauU", "vtauV"}:
         return nx, ny, 1
     return nx, ny, nz
 

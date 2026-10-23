@@ -3,7 +3,7 @@
 This operator-only acquisition re-runs the admitted round-326 ten-step,
 two-rank ORCA2 trajectory with additions-only, write-only hooks in `dyn_zdf`.
 It emits one kt=1, stage-3 record per rank. The record contains the input
-viscosity, after-level `r3u`/`r3v`, and drag operands, four RHS boundaries,
+viscosity, mid- and after-level `r3u`/`r3v`, and drag operands, four RHS boundaries,
 the U/V tridiagonal matrix after each source-order construction block, both
 implicit-solve outputs, and the ordinary post-`dyn_zdf` barotropic-correction
 endpoint.
