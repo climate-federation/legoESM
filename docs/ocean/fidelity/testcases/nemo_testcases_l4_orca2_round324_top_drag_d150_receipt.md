@@ -100,7 +100,16 @@ The reviewer's numbers (0.0021 m, 1.58e-3 K, 0.05 m/s; given entry, stage
 
 ## Gradients (drag on, N = 1; `grad/grad_rung10_n1_drag_on.json`)
 
-GRADIENT_RESULTS
+- Comparison card, top drag on, the recorded coefficient passed (probe
+  stamps both); probe at clean `b64385d37`, 2,621 s, peak 70.2 GiB.
+- T loss w.r.t. initial T: 0 non-finite entries (sea-level loss also 0);
+  one T direction reverse vs forward 1.6e-14 (sea level 2.3e-15).
+- rn_Ud: reverse -4.513638e-5, forward equal to 1.7e-15, best FD 2.8e-6
+  (round 323, drag off: -4.51364e-5). Sea-level loss: exactly 0 at one
+  step, as in round 323.
+- Traced and production steps bit-identical (0 leaves); rebuilt-at-1e-4
+  model equals the traced step (0 leaves).
+- No model function touched, so every round-316 guard is unchanged.
 
 ## Predictions (`PREREG_nemo_testcases_l4_orca2_round324.md`)
 
@@ -111,7 +120,7 @@ GRADIENT_RESULTS
   0.3248 -> 0.0071 m).
 - P5 D122 PASS, five non-ice pairs identical: CONFIRMED.
 - P6 given-entry first over-bar equal or later: CONFIRMED (later, toward).
-- P7 gradients: P7_RESULT.
+- P7 gradients: CONFIRMED (0 non-finite; gaps 1.6e-14 and 1.7e-15).
 
 ## Round-314 audit row
 
@@ -140,6 +149,14 @@ GRADIENT_RESULTS
 
 ## Gates (x64, CPU; logs `orca2_rounds/round324/gates/`)
 
-GATES
+- New and adjacent drag tests (round 324 refusal + arms, rounds 304/305
+  drag imports): 29 passed (`new_tests.log`).
+- Default gate (land.sh list), split for the 10-minute cap: citation-gate
+  test, private-import ratchet, TKE terms, recipe 119 passed; prognostic
+  barotropic 8 passed; freshwater, stage face mask, ORCA2 parallel receipt
+  20 passed = 147 passed, 0 failed (`default_gate_1.log`, `_3`, `_4`; the
+  first `_2` attempt hit the cap mid-file under load and was re-run split).
+- Receipt citation gate on this receipt: PASS, 3 citations, 0 failures
+  (`citation_gate_receipt.log`).
 
 codex review: operator
