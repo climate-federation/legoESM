@@ -131,7 +131,9 @@ CONTAINS
       nsolve_count(component)=nsolve_count(component)+1
    END SUBROUTINE r328_solve_row
 
-   SUBROUTINE r328_finish
+   SUBROUTINE r328_finish(puu, pvv, Kaa)
+      REAL(wp), INTENT(in) :: puu(:,:,:,:), pvv(:,:,:,:)
+      INTEGER, INTENT(in) :: Kaa
       INTEGER :: ios, component, phase, term
       CHARACTER(LEN=160) :: filename
       CHARACTER(LEN=24) :: name
@@ -151,7 +153,7 @@ CONTAINS
       magic='NEMO_L4_R328ZDF'
       WRITE(nunit) magic
       WRITE(nunit) 1,nkt,3,nkbb,nkmm,nkrhs,nkaa,narea-1,nx,ny,jpkm1,ntsi,ntsj, &
-         & STORAGE_SIZE(1._wp),52
+         & STORAGE_SIZE(1._wp),54
       CALL put3('before_u',before_u,ntsi,ntsj); CALL put3('before_v',before_v,ntsi,ntsj)
       CALL put3('rhs_u',rhs_u,ntsi,ntsj); CALL put3('rhs_v',rhs_v,ntsi,ntsj)
       CALL put3('avm_input',avm_in,ntsi,ntsj); CALL put3('wi_input',wi_in,ntsi,ntsj)
@@ -167,6 +169,8 @@ CONTAINS
          CALL put3(name,matrix(component,phase,term,:,:,:),ntsi,ntsj)
       END DO; END DO; END DO
       CALL put3('solve_u',solve_u,ntsi,ntsj); CALL put3('solve_v',solve_v,ntsi,ntsj)
+      CALL put3('corrected_u',puu(ntsi:ntei,ntsj:ntej,1:jpkm1,Kaa),ntsi,ntsj)
+      CALL put3('corrected_v',pvv(ntsi:ntei,ntsj:ntej,1:jpkm1,Kaa),ntsi,ntsj)
       CLOSE(nunit); nunit=-1; lactive=.FALSE.
       DEALLOCATE(before_u,before_v,rhs_u,rhs_v,avm_in,wi_in,baro_u,baro_v, &
          & rcdu_bot_in,rcdu_top_in,utau_in,vtau_in,state_u,state_v,matrix,solve_u,solve_v)

@@ -52,14 +52,15 @@ write-only hooks and records, in source order:
 2. explicit update, barotropic subtraction, bottom RHS, and top RHS;
 3. U and V lower/diagonal/upper matrices after base ZDF, ZAD, LDF, bottom drag,
    and top drag; and
-4. both implicit-solve outputs.
+4. both implicit-solve outputs and the ordinary post-`dyn_zdf` barotropic-
+   correction endpoint.
 
 The writer never reads its payload into NEMO state. Admission requires both
 ranks, exact headers/order/extents, finite fp64 payloads, active `avm`, active
 bottom and top matrix changes, an active solve, a producer stamp, and byte
 identity of every inherited oracle frame, restart, and diagnostic NetCDF.
-Eight planted violations (header, order, truncation, stamp, `avm`, bottom,
-top, solve) must refuse before the clean record can pass.
+Nine planted violations (header, order, truncation, stamp, `avm`, bottom,
+top, solve, endpoint) must refuse before the clean record can pass.
 
 The preflight pins the parent `dynzdf.F90` and binary, verifies the D150
 implicit-ice-drag, vector-form and split-explicit selectors, proves the patch

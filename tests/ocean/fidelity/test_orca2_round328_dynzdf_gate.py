@@ -21,6 +21,8 @@ def _write_record(path: Path, rank: int) -> None:
     fields["v_bottom_diag_diag"] += 1.0
     fields["u_top_diag_diag"] += 2.0
     fields["v_top_diag_diag"] += 2.0
+    fields["corrected_u"] += 1.0
+    fields["corrected_v"] += 1.0
     with path.open("wb") as stream:
         stream.write(gate.MAGIC.encode().ljust(16))
         stream.write(struct.pack("=15i", 1, 1, 3, 1, 2, 3, 3, rank, nx, ny, nz, 1, 1, 64, len(fields)))

@@ -5,7 +5,7 @@
     USE in_out_manager ! I/O manager
     USE lib_mpp        ! MPP library
 +   USE dynzdf_round328_writer, ONLY : r328_begin, r328_state_row,  &
-+      & r328_matrix_row, r328_solve_row, r328_finish
++      & r328_matrix_row, r328_solve_row
 +                       ! round-328 WRITE-only kt1 stage-3 recorder
     USE prtctl         ! Print control
     USE timing         ! Timing
@@ -142,7 +142,7 @@
           !
           ! Matrix inversion starting from the first level
           !-----------------------------------------------------------------------
-@@ -518,10 +552,12 @@
+@@ -518,10 +552,11 @@
           DO_2Dik( 0, 0,   jpk-2, 1, -1 )
              pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - zws(ji,jk) * pvv(ji,jj,jk+1,Kaa) ) / zwd(ji,jk)
           END_2D
@@ -151,7 +151,6 @@
           !                                            ! ================= !
        END_1D                                          !  i-k slices loop  !
        !                                               ! ================= !
-+      CALL r328_finish
        !
        IF( l_trddyn )   THEN                      ! save the vertical diffusive trends for further diagnostics
           ztrdu(:,:,:) = ( puu(T2D(0),:,Kaa) - puu(T2D(0),:,Kbb) )*r1_Dt - ztrdu(:,:,:)

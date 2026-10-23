@@ -26,9 +26,9 @@ EXPECTED_ORDER = (
     *(f"{phase}_{component}" for phase in STATE_PHASES for component in "uv"),
     *(f"{component}_{phase}_{term}" for component in "uv"
       for phase in MATRIX_PHASES for term in MATRIX_TERMS),
-    "solve_u", "solve_v",
+    "solve_u", "solve_v", "corrected_u", "corrected_v",
 )
-PLANTS = ("header", "field-order", "truncation", "stamp", "avm", "bottom", "top", "solve")
+PLANTS = ("header", "field-order", "truncation", "stamp", "avm", "bottom", "top", "solve", "endpoint")
 
 
 class GateError(RuntimeError):
@@ -117,6 +117,9 @@ def run_gate(root: Path, expect_commit: str, plant: str | None = None) -> dict:
     if plant == "solve":
         fields["solve_u"] = fields["top_rhs_u"].copy()
         fields["solve_v"] = fields["top_rhs_v"].copy()
+    if plant == "endpoint":
+        fields["corrected_u"] = fields["solve_u"].copy()
+        fields["corrected_v"] = fields["solve_v"].copy()
     for rank, record in records.items():
         f = record["fields"]
         require(bool(np.any(f["avm_input"] != 0.0)), f"rank {rank}: inactive avm channel")
@@ -128,6 +131,8 @@ def run_gate(root: Path, expect_commit: str, plant: str | None = None) -> dict:
                 f"rank {rank}: top drag changes no matrix diagonal")
         require(_changed(f["top_rhs_u"], f["solve_u"]) or _changed(f["top_rhs_v"], f["solve_v"]),
                 f"rank {rank}: implicit solve is inactive")
+        require(_changed(f["solve_u"], f["corrected_u"]) or _changed(f["solve_v"], f["corrected_v"]),
+                f"rank {rank}: post-dyn_zdf barotropic correction is inactive")
     return {
         "format": "nemo-testcase-l4-orca2-round328-dynzdf-v1",
         "status": "PASS_R328_DYNZDF_STRUCTURE",

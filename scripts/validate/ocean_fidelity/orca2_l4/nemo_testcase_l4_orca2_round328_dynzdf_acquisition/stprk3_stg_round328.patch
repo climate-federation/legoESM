@@ -1,0 +1,17 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -32,5 +32,7 @@
+    !
+    USE prtctl         ! print control
++   USE dynzdf_round328_writer, ONLY : r328_finish
++                      ! round-328 WRITE-only post-correction boundary
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -445,5 +447,6 @@
+             vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)
+          END_3D
++         CALL r328_finish(uu,vv,Kaa)
+          !
+ #if ! defined key_PSYCLONE_2p5p0
+          DEALLOCATE( zub, zvb )

@@ -30,6 +30,7 @@ readonly SOURCE_BINARY_SHA=20376f40a78cb1a5491838ff112bfbe738178e4da8da1e43d5bd5
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
 readonly PATCH=$here/dynzdf_round328.patch
+readonly STAGE_PATCH=$here/stprk3_stg_round328.patch
 readonly WRITER=$here/dynzdf_round328_writer.F90
 readonly GATE=$here/../nemo_testcase_l4_orca2_round328_dynzdf_gate.py
 readonly TEST=$REPO/tests/ocean/fidelity/test_orca2_round328_dynzdf_gate.py
@@ -62,7 +63,7 @@ readonly COMMIT=$(git rev-parse HEAD)
 export PYTHONPATH=$REPO:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/atmosphere:$REPO/packages/coupler:$REPO/packages/ice:$REPO/packages/land:$REPO/packages/ml:$REPO/packages/tools:$REPO/src
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
-for path in "$PATCH" "$WRITER" "$GATE" "$TEST" "$PREREG" "$SOURCE_DYNZDF" \
+for path in "$PATCH" "$STAGE_PATCH" "$WRITER" "$GATE" "$TEST" "$PREREG" "$SOURCE_DYNZDF" \
   "$SOURCE_ROOT/BLD/bin/nemo.exe" "$SOURCE_RUN/nemo" "$SOURCE_RUN/ocean.output" \
   "$SOURCE_RUN/deck_files.sha256" "$SOURCE_RUN/input_files.sha256"; do
   [[ -f "$path" ]] || refuse "missing input $path"
@@ -83,7 +84,9 @@ trap 'rm -rf -- "$scratch"' EXIT
 cp "$SOURCE_DYNZDF" "$scratch/dynzdf.F90"
 cp "$WRITER" "$scratch/dynzdf_round328_writer.F90"
 patch -s --fuzz=0 -p0 -d "$scratch" <"$PATCH"
-[[ $(grep -Fc 'CALL r328_' "$scratch/dynzdf.F90") -eq 18 ]] || refuse 'writer call census changed'
+[[ $(grep -Fc 'CALL r328_' "$scratch/dynzdf.F90") -eq 17 ]] || refuse 'writer call census changed'
+cp "$NEMO_ROOT/src/OCE/stprk3_stg.F90" "$scratch/stprk3_stg.F90"
+patch -s --fuzz=0 -p0 -d "$scratch" <"$STAGE_PATCH"
 mkdir "$scratch/mod"
 cpp -Dkey_nosignedzero -Dkey_si3 -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3 -P -traditional \
   -I "$SOURCE_ROOT/WORK" -I "$SOURCE_ROOT/BLD/inc" "$scratch/dynzdf_round328_writer.F90" >"$scratch/writer.f90"
@@ -92,6 +95,10 @@ cpp -Dkey_nosignedzero -Dkey_si3 -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3 -P -traditio
   -I "$SOURCE_ROOT/WORK" -I "$SOURCE_ROOT/BLD/inc" "$scratch/dynzdf.F90" >"$scratch/dynzdf.f90"
 "$FC" -fsyntax-only -ffree-line-length-none -I "$scratch/mod" -I "$SOURCE_ROOT/BLD/inc" \
   -J "$scratch/mod" "$scratch/dynzdf.f90"
+cpp -Dkey_nosignedzero -Dkey_si3 -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3 -P -traditional \
+  -I "$SOURCE_ROOT/WORK" -I "$SOURCE_ROOT/BLD/inc" "$scratch/stprk3_stg.F90" >"$scratch/stprk3_stg.f90"
+"$FC" -fsyntax-only -ffree-line-length-none -I "$scratch/mod" -I "$SOURCE_ROOT/BLD/inc" \
+  -J "$scratch/mod" "$scratch/stprk3_stg.f90"
 "$PY" -m pytest -q -p no:cacheprovider "$TEST"
 plant_must_refuse memory mem_ok 999999
 plant_must_refuse disk free_ok "$NEMO_ROOT" 999999999999999
@@ -110,7 +117,7 @@ admit() {
     name=$(basename "$source")
     cmp -s "$source" "$TARGET_RUN/$name" || refuse "inherited output changed: $name"
   done < <(find "$SOURCE_RUN" -maxdepth 1 -type f \( -name 'oracle_*.bin' -o -name 'ORCA2_*.nc' -o -name 'mesh_mask_*.nc' \) -print0)
-  for plant in header field-order truncation stamp avm bottom top solve; do
+  for plant in header field-order truncation stamp avm bottom top solve endpoint; do
     if "$PY" "$GATE" --record-dir "$TARGET_RUN" --expect-commit "$COMMIT" --plant "$plant" \
       >"$TARGET_RUN/round328_${plant}_plant.log" 2>&1; then
       refuse "$plant plant stayed green"
@@ -132,7 +139,7 @@ fi
 
 manifest=$scratch/manifest; mkdir "$manifest"
 printf '%s\n' "$COMMIT" >"$manifest/producer_commit.txt"
-sha256sum "$PATCH" "$WRITER" "$GATE" "$TEST" "$PREREG" "$SOURCE_DYNZDF" >"$manifest/toolchain.sha256"
+sha256sum "$PATCH" "$STAGE_PATCH" "$WRITER" "$GATE" "$TEST" "$PREREG" "$SOURCE_DYNZDF" >"$manifest/toolchain.sha256"
 cd "$NEMO_ROOT"
 ./makenemo -r "$REFERENCE_CFG" -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 while IFS= read -r -d '' source; do cp -a "$source" "$TARGET_ROOT/EXP00/$(basename "$source")"; done \
@@ -141,8 +148,10 @@ while IFS= read -r -d '' source; do cp -a "$source" "$TARGET_ROOT/MY_SRC/$(basen
   < <(find "$SOURCE_ROOT/MY_SRC" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
 cp "$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm" "$TARGET_ROOT/cpp_$TARGET_CFG.fcm"
 cp "$SOURCE_DYNZDF" "$TARGET_ROOT/MY_SRC/dynzdf.F90"
+cp "$NEMO_ROOT/src/OCE/stprk3_stg.F90" "$TARGET_ROOT/MY_SRC/stprk3_stg.F90"
 cp "$WRITER" "$TARGET_ROOT/MY_SRC/dynzdf_round328_writer.F90"
 patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$PATCH"
+patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$STAGE_PATCH"
 touch "$TARGET_ROOT/MY_SRC/"*.F90
 ./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 [[ -x "$BINARY" ]] || refuse 'build produced no executable'
@@ -151,12 +160,12 @@ grep 'NEMO_L4_R328ZDF' "$TARGET_ROOT/BLD/ppsrc/nemo/dynzdf_round328_writer.f90" 
 # Same-program census: only dynzdf plus the new writer may differ from R326.
 while IFS= read -r -d '' source; do
   name=${source#"$SOURCE_ROOT/BLD/ppsrc/"}
-  case "$name" in nemo/dynzdf.f90) continue ;; esac
+  case "$name" in nemo/dynzdf.f90|nemo/stprk3_stg.f90) continue ;; esac
   cmp -s "$source" "$TARGET_ROOT/BLD/ppsrc/$name" || refuse "preprocessed unit changed: $name"
 done < <(find "$SOURCE_ROOT/BLD/ppsrc" -type f -print0)
 while IFS= read -r -d '' source; do
   name=${source#"$SOURCE_ROOT/BLD/obj/"}
-  case "$name" in dynzdf.o) continue ;; esac
+  case "$name" in dynzdf.o|stprk3_stg.o) continue ;; esac
   cmp -s "$source" "$TARGET_ROOT/BLD/obj/$name" || refuse "object changed: $name"
 done < <(find "$SOURCE_ROOT/BLD/obj" -type f -print0)
 
