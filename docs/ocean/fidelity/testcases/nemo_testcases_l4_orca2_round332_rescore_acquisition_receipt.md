@@ -4,8 +4,9 @@ Date: 2026-10-24
 
 Base: `f2dcf0a8cfff`; preregistration: `77ab00003`; rescore gate:
 `a80e3d0ab`.  Post-review acquisition repair: `c9569b8cf`.
-Final disposition: **ACQUISITION_NEEDED**.  No model or configuration value
-changed, and Codex did not run NEMO.
+Initial disposition: **ACQUISITION_NEEDED**.  The resume-5 disposition below
+supersedes it after admitting the operator's record.  No model or
+configuration value changed, and Codex did not run NEMO.
 
 ## Answer
 
@@ -182,3 +183,99 @@ only from the retained run's recorded manifests.
 The next admissible action is the operator-only acquisition above.  Until it
 is admitted, the vorticity add and the seven TKE cells have proposals, not
 certified owners.
+
+## Resume 5: admitted source-order record and terminal attribution
+
+The operator ran the reviewed launcher with `--run`.  Its retained terminal
+line was:
+
+```text
+ORCA2_ROUND328_TKE332_ACQUISITION_PASS /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round332/acquisition/orca1ice_source_order_kt1_np2
+```
+
+The retained `round332_source_order_admission.json` is
+`PASS_R332_SOURCE_ORDER_ADMISSION`, names producer
+`a00f55b202d566cbfb1a611b378c5359548ce615`, re-admits round 331, and reports
+zero changed bits, zero value-equal bit changes, and zero wet changes on both
+ranks.  Its two source records have SHA-256
+`bbad9acd14d5949fecefd863f97498a2b887862552621f6acd82eae12baeb1d1` and
+`202f05ebefa552e3819be235c5793a2f9d80bf694d0ffa26efd65e6974089797`;
+all fourteen retained-output manifest checks pass.  The record is therefore
+**ADMITTED**.  Resume 5 did not execute NEMO.
+
+### kt 1 stage-1 `v`: all 2,032 words
+
+The entire family is rank-0 global row `j=147`, `i=0..89`, `k=0..29` (2,032
+mask-selected words, first `[147,0,0]`, last `[147,89,29]`).  Every word is a
+dry V-fold target (`vmask=0`), NEMO stores positive zero, and the production
+legoesm result stores negative zero.  There is no nonzero-value difference.
+
+At those exact words the admitted NEMO EEN accumulator before the add contains
+1,620 positive zeros, 315 negative nonzero values, and 97 positive nonzero
+values.  The recorded `zva` is negative zero at all 2,032 words.  The
+accumulator after the add is bit-identical to the accumulator before it at
+all 2,032 words; globally, both ranks have zero before/after changed bits.
+Thus the literal EEN add at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynvor.f90:796-802`, and the
+legoesm add at `ocean_pe_latlon_cgrid.py:3049`, are **CONFIRMED excluded** as
+the first owner.
+
+The first observed owning boundary is instead the end-of-stage V fold: NEMO
+calls the fold at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:795-796` and
+executes its V-point signed assignment at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/lbcnfd.f90:684-717`;
+legoesm's corresponding fold assignment is
+`ocean_model_latlon_cgrid.py:18281-18302`.  A production trace shows the
+legoesm raw stage velocity is positive zero at every target and its final
+folded value is negative zero.  This boundary and the EEN exclusion are
+**CONFIRMED**.  The exact first statement remains **PLAUSIBLE**, however:
+the acquisition did not record NEMO's pre-fold source row, so it cannot
+distinguish NEMO's fold multiplication from a source-row zero sign already
+present immediately before that multiplication.  It therefore does not
+authorize changing the legoESM fold assignment.
+
+### Seven residual `avm/avt` cells
+
+The seven global `[j,i,k]` cells are `[24,7,0]`, `[24,73,0]`,
+`[109,115,0]`, `[113,38,0]`, `[116,112,0]`, `[116,112,1]`, and
+`[121,112,0]`.  Returned TKE remains bit-exact at every wet cell.  At the
+seven cells, candidate-minus-NEMO ULP deltas are respectively:
+
+| quantity | seven ULP deltas in the cell order above |
+|---|---|
+| final `zmxlm` | `+1, +1, -1, +1, -1, -2, -1` |
+| final `zmxld` | `0, +1, 0, 0, -1, 0, 0` |
+| `avm` | `+1, +2, -1, +2, -1, -2, -1` |
+| `avt` | `+1, +2, -1, +2, -1, -1, -1` |
+
+All seven recorded `p_pdlr` values are exact binary64 `0.1`.  Replaying the
+host-binary64 expression `(0.1 * recorded_zmxlm) * sqrt(recorded_en)` equals
+the recorded NEMO `avm` bit for bit at all seven cells; multiplying that
+result by recorded `p_pdlr` equals NEMO `avt` bit for bit at all seven.
+NEMO's viscosity/diffusivity statements are
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:708-719`, and the
+legoesm assembly is `tke.py:2262-2313`.  Therefore the seven `avm/avt`
+residuals are **CONFIRMED not** a difference in NEMO's literal operation order;
+they are a remaining mixing-length transcription difference already present
+in `zmxlm` (and, at two cells, `zmxld`).
+
+The first record-proven owning family is NEMO `CASE (3)`, including the `lup`
+and `ldown` scans and their `MIN`/`SQRT` combine, at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:687-700` versus
+legoesm's scans and combine at `tke.py:904-1022`.  This family assignment is
+**CONFIRMED** by the final mixing-length records.  Which single statement in
+that family first owns all seven cells is still **PLAUSIBLE**, because the
+record contains final `zmxlm/zmxld` but not NEMO's pre-combine `lup` and
+`ldown` arms.  The source-order proposal is therefore to record those two
+arms immediately before NEMO's `zemlm/zemlp` combine, then test one recurrence
+or combine statement—never the already exonerated `avm/avt` assembly.
+
+### Resume-5 decision
+
+No single source-cited statement is confirmed to own the full required
+family.  Consequently Decision 122 is not opened, no model statement lands,
+and production-call-site revert, seven-pair/two-label comparison, DINO-path,
+and rung-10 gradient claims are not eligible.  No configuration changed.
+The terminal status is **STOP_PROPOSAL** with an operator-only `lup/ldown`
+pre-combine acquisition proposal; all prior refusals remain live.

@@ -153,6 +153,8 @@ FILES = {
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/istate.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynvor.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynvor.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/lbcnfd.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/lbcnfd.f90"),
     "nemo_testcase_l4_orca2_round331_tke_gate.py": (
         REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
         "nemo_testcase_l4_orca2_round331_tke_gate.py"),
@@ -1804,6 +1806,25 @@ CITATION_MAP = {
     'tke.py:2262-2287': [
         'kappa_convention = getattr(cfg, "kappa_convention", "gaspar_sqrt2e")',
         'K_M = jnp.minimum(cfg.kappaM_max, K_M)', 26],
+    # ORCA2 round 332 resume 5: admitted source-order walk.
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:795-796': [
+        ("CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:,:       ,Kaa), 'V', -1._wp", 2),
+        "&                       , ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp, ldfull=.TRUE. )", 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/lbcnfd.f90:684-717': [
+        ("CASE ( 'V' )                               ! V-point", 5),
+        ('ptab(jf)%pt4d(ii1,ij1,jk,jl) = psgn(jf) * ptab(jf)%pt4d(ii2,ij2,jk,jl)', 57), 34],
+    'ocean_model_latlon_cgrid.py:18281-18302': [
+        'def _rk3_fold_exchange_top_v(v, grid, v_mask_3d):',
+        'fold.vector_sign_v * v[-2][perm] * v_mask_3d[-2][perm].astype(v.dtype))', 22],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:687-700': [
+        'CASE ( 3 )           ! lup and ldown, |dk[xml]| bounded by e3t :',
+        'zmxld(ji,jk) = zemlp', 14],
+    'tke.py:904-1022': [
+        'l_w = jnp.concatenate([l_sfc[..., None], l_int], axis=-1)  # (..., nlev)',
+        'l_eps = jnp.maximum(jnp.sqrt(lup * ldn), mxl_min)', 119],
+    'tke.py:2262-2313': [
+        'kappa_convention = getattr(cfg, "kappa_convention", "gaspar_sqrt2e")',
+        'K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)', 52],
     # ORCA2 round 331: remaining TKE input and source-order localisation.
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3.f90:183':
         'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )',
