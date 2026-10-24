@@ -3,7 +3,7 @@
 Date: 2026-10-24
 
 Base: `484b60f5b7da`; preregistration: `a69fa0005d23`; acquisition tool:
-`43797c0cfe61`.
+`ba88fcbdb48e`.
 
 Disposition: **STOP_PROPOSAL; ACQUISITION_NEEDED; no model or configuration
 change**.
@@ -142,7 +142,7 @@ violations cover header, order, truncation, stamp, shear, drag, mixing length,
 boundary, matrix, solve, and final output; the semantic plants each move one
 binary64 word by one ULP.
 
-The clean read-only preflight passed at `43797c0cfe61`: 45 tests passed, all 11
+The clean read-only preflight passed at `ba88fcbdb48e`: 45 tests passed, all 11
 preflight plants fired, all 140 inherited deterministic files matched, all six
 writer/patched Fortran units passed syntax, and the same-program census found
 410 identical preprocessed units and 422 identical normalized objects.  Its
