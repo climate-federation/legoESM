@@ -272,13 +272,13 @@ zero, so final fields cannot select one term.
 
 **PLAUSIBLE, not an ownership finding.** For the deepest-interface family the
 first candidates are TKE's bottom boundary/mixing-length route—NEMO's bottom
-energy assignment at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:287-296` and
+energy assignment at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:285-294` and
 final coefficient construction at
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:708-714`, corresponding to legoESM's carried closure and final
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:706-712`, corresponding to legoESM's carried closure and final
 K construction at `tke.py:3551-3641`—or IWM's depth distribution. For the
 interface-0 family the first IWM candidate is the column-depth normalization
 `ht_0*(1+r3t)` followed by the `gdept_1d` ladder at
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:233-275`; legoESM transcribes those
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:234-275`; legoESM transcribes those
 operations at `internal_wave_mixing.py:435-471`. DDM cannot be excluded in
 either family because its NEMO-side boundary was not recorded; its momentum
 addition is `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90:172` and legoESM's is
