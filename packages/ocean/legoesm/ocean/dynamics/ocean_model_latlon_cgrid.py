@@ -12371,9 +12371,9 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "TKE bottom boundary requires both entry-level velocities "
                 "or neither")
-        # zdftke.f90:291-293 reads uu/vv(...,Kbb), not the post-explicit
-        # velocity handed here as ``state``.  The production step already
-        # supplies that stored entry pair as u_now/v_now (Kbb=Kmm at nit000).
+        # zdftke.f90:291-293 reads velocity at Kbb. Passing u_now/v_now is NEMO-
+        # literal on RK3 only: stprk3.f90:183 has Kbb=Kmm=Nbb. Leapfrog differs
+        # (DINO passes Nbb/Nnn; legoESM passes now); the receipt names that debt.
         u_f = state.u.data if u_now is None else u_now
         v_f = state.v.data if v_now is None else v_now
         if (u_f.shape[1] != h_k.shape[1] + 1

@@ -1749,6 +1749,72 @@ class TestNemoBottomTkeVelocityConvention:
         with pytest.raises(ValueError, match="both entry-level velocities"):
             model._tke_bottom_dirichlet(state, u_now=entry_u)
 
+    def test_production_vmix_call_routes_the_entry_velocity(self):
+        """The real vertical-mixing call must bind its entry u/v operands."""
+        from types import MethodType, SimpleNamespace
+
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+
+        class BottomVelocitySeen(Exception):
+            pass
+
+        entry_u = jnp.asarray([[[1.0]]])
+        entry_v = jnp.asarray([[[2.0]]])
+        tke = TKEConfig(
+            prognostic=True,
+            bottom_tke_bc=True,
+            tke_shear_production="nemo_face_native",
+        )
+        physics = SimpleNamespace(
+            vertical_mixing=SimpleNamespace(scheme="tke", tke=tke),
+            convection=SimpleNamespace(scheme="none"),
+        )
+        cfg = SimpleNamespace(
+            physics=physics,
+            eos="linear",
+            eos_linear=None,
+            eos_nemo_seos=None,
+            implicit_ice_ocean_top_drag=False,
+            A_v=1.0e-4,
+            K_v=1.0e-5,
+        )
+
+        def shear_spy(self, state, **kwargs):
+            return jnp.asarray([[[0.0]]])
+
+        def bottom_spy(self, state, **kwargs):
+            raise BottomVelocitySeen(kwargs.get("u_now"), kwargs.get("v_now"))
+
+        model = SimpleNamespace(
+            config=cfg,
+            z_coord=None,
+            _iwm_forcing=None,
+            grid=SimpleNamespace(lat_T=jnp.zeros((1, 1))),
+            _nemo_ws_test_hooks=SimpleNamespace(
+                zdf_momentum_observer=None,
+                tke_rhs_materialization="",
+                tke_rhs_intermediate="",
+            ),
+            _tke_post_mixing_active=lambda: False,
+            _lat_dependent_constant_vmix=lambda: False,
+        )
+        model._tke_step_entry_p_sh2 = MethodType(shear_spy, model)
+        model._tke_bottom_dirichlet = MethodType(bottom_spy, model)
+
+        with pytest.raises(BottomVelocitySeen) as seen:
+            LatLonCGridOceanModel._apply_implicit_vertical_mixing(
+                model,
+                SimpleNamespace(),
+                1.0,
+                None,
+                u_now=entry_u,
+                v_now=entry_v,
+            )
+        assert seen.value.args[0] is entry_u
+        assert seen.value.args[1] is entry_v
+
 
 def test_nn_mxlice2_anchor_is_nemos_case2_and_refuses_missing_inputs():
     """zdftke.f90:620-623 + :635-637: ((1-fr_i)*zraug*taum + fr_i*hm_i*2)*tmask,

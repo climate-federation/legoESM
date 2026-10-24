@@ -129,6 +129,8 @@ FILES = {
     # ORCA2 round 328 Resume-5: the unmodified round-326 record-build chain.
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traadv.f90": (
@@ -1784,6 +1786,8 @@ FILES = {
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
     # ORCA2 round 331: remaining TKE input and source-order localisation.
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3.f90:183':
+        'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )',
     'nemo_testcase_l4_orca2_round331_tke_gate.py:124-146': [
         'def _verify_source_order(record: dict) -> None:',
         'require(bool(np.any(f["matrix_diag"] != 0.0)), "matrix channel is inactive")', 23],
@@ -1956,6 +1960,10 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:13883-13885': [
         'tke_bottom_dirichlet=self._tke_bottom_dirichlet(',
         'u_now=u_now, v_now=v_now),', 3],
+    'ocean_model_latlon_cgrid.py:16856':
+        'u_now=state.u.data, v_now=state.v.data,',
+    'ocean_model_latlon_cgrid.py:17232':
+        'u_now=state.u.data, v_now=state.v.data,',
     'nemo_testcase_recipe.py:2144': [('2920,  # DECISION 142 (user, 2026-10-20): one year, deliberate', 1)],
     # round 319 review: the background diffusivity floor against NEMO's avt statement
     'tke.py:2313': 'K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)',

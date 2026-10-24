@@ -366,3 +366,33 @@ Final disposition: **LANDED-pending operator review, push gate and DINO month
 gate**.  The only production statement landed is the stored-`Kbb` velocity
 operand at the existing TKE bottom boundary.  The next open TKE debt is the
 seven wet `avm/avt` source-order roundings after exact returned energy.
+
+## Resume-4 independent-review closure
+
+Both independent reviews returned **LAND** (Claude and Argon).  This resume
+changes no NEMO source, model arithmetic, selector, recipe, deck, default or
+configuration value.
+
+**Named debt — `TKE_BOTTOM_KBB_LEAPFROG_TIME_LEVEL`.**  The stored-velocity
+statement is NEMO-literal only on the certified RK3 path: the record build
+calls `zdf_phy` with `Kbb=Kmm=Nbb`
+(`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3.f90:183`).  DINO's
+leapfrog build instead passes `(Nbb,Nnn)`
+(`DINO/BLD/ppsrc/nemo/stpmlf.f90:187-193`), so its bottom boundary reads the
+BEFORE-level velocity, while legoESM's two leapfrog production calls still
+pass the now level (`ocean_model_latlon_cgrid.py:16856` and
+`ocean_model_latlon_cgrid.py:17232`).  Round 331 therefore certifies the
+stored entry velocity only for RK3; leapfrog time-level parity remains open.
+
+The debt has no discriminating effect on today's DINO check.  With
+`rn_emin=1e-6`, `Cd0=1e-3` and `ke0=2.5e-3`, the bottom value stays on its
+floor until bottom speed is about `0.5 m/s`; DINO's measured maximum was
+`0.059 m/s`.  Thus the reported 66/66 DINO identity is retained but cannot
+distinguish BEFORE from now velocity.
+
+The new regression test enters the production vertical-mixing method and
+captures the operands at its real bottom-boundary call.  It passes with the
+landed call site.  Removing only `u_now=u_now, v_now=v_now` makes it fail with
+`None is entry_u` (exit 1); restoring the call site gives 74/74 TKE-term tests
+passing.  This closes the direct-helper-test review gap without changing model
+behaviour.
