@@ -283,13 +283,34 @@ def term_localization(candidate: np.ndarray, record: np.ndarray,
     }
 
 
-def recompose_from_closure(closure, diagnostic_closure,
-                           diagnostic_after_ddm, diagnostic_final):
-    """Apply diagnosed DDM then IWM increments to the step's carried closure."""
-    ddm_increment = diagnostic_after_ddm - diagnostic_closure
-    iwm_increment = diagnostic_final - diagnostic_after_ddm
-    return ((np.asarray(closure, dtype=np.float64) + ddm_increment)
-            + iwm_increment)
+def compose_literal_terms(model, card, closure_heat, closure_momentum, active):
+    """Apply the model's certified DDM then IWM statements to its carried TKE K."""
+    import jax
+    import jax.numpy as jnp
+
+    from legoesm.ocean.physics.vertical_mixing.double_diffusion import nemo_zdf_ddm
+    from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import nemo_zdf_iwm
+
+    bundle = model._tke_step_entry_n2_bundle(card.recipe.initial_state)
+    require(bundle.ddm_operands is not None, "TKE bundle lacks DDM operands")
+    require(bundle.iwm_stretch is not None, "TKE bundle lacks IWM stretch")
+    zdt, zds = bundle.ddm_operands
+    vmix = card.recipe.model_config.physics.vertical_mixing
+    after_ddm = nemo_zdf_ddm(
+        jnp.asarray(closure_heat), jnp.asarray(closure_momentum),
+        zdt, zds, bundle.rn2, jnp.asarray(active), vmix.ddm)
+    e3w = np.asarray(card.recipe.z_coord.nemo_e3w_0)
+    e3w_cols = e3w.reshape(-1, e3w.shape[-1])
+    require(np.array_equal(e3w_cols, np.broadcast_to(
+        e3w_cols[:1], e3w_cols.shape)), "nemo_e3w_0 is not column-uniform")
+    final = nemo_zdf_iwm(
+        *after_ddm, card.recipe.iwm_forcing, bundle.rn2,
+        bundle.iwm_stretch, card.recipe.initial_state.H_bathy.data,
+        np.asarray(card.recipe.z_coord.t_depth_ref), e3w_cols[0],
+        jnp.asarray(active), cfg=vmix.iwm,
+        rho_0=card.recipe.model_config.physics.constants.rho_0)
+    return tuple(np.asarray(value, dtype=np.float64)
+                 for value in jax.device_get((*after_ddm, *final)))
 
 
 def _with_vmix_terms(config, *, ddm: bool, iwm: bool):
@@ -396,11 +417,6 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         iwm_forcing=card.recipe.iwm_forcing)
     step_kwargs = rung10.damping_step_kwargs(card, root, 1)
-    sponge = step_kwargs.get("sponge")
-    heat, candidate = _diagnose_profiles(
-        model, card, freshwater, surface, sponge)
-    salt = _diagnose_salt_profile(
-        model, card, freshwater, surface, sponge)
     state_after = jax.device_get(model.step(
         card.recipe.initial_state, card.dt_s, freshwater=freshwater,
         surface_forcing=surface, **step_kwargs))
@@ -410,31 +426,15 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
             "ordinary comparison step did not return its closure avt")
     closure_state = np.asarray(state_after.tke_avm.data, dtype=np.float64)
     closure_heat_state = np.asarray(state_after.tke_avt.data, dtype=np.float64)
-
-    ddm_config = _with_vmix_terms(
-        card.recipe.model_config, ddm=True, iwm=False)
-    closure_config = _with_vmix_terms(
-        card.recipe.model_config, ddm=False, iwm=False)
-    after_ddm_model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, ddm_config)
-    closure_model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, closure_config)
-    heat_after_ddm, after_ddm = _diagnose_profiles(
-        after_ddm_model, card, freshwater, surface, sponge)
-    heat_closure, closure = _diagnose_profiles(
-        closure_model, card, freshwater, surface, sponge)
-    consumed = recompose_from_closure(
-        closure_state, closure, after_ddm, candidate)
-    consumed_after_ddm = recompose_from_closure(
-        closure_state, closure, after_ddm, after_ddm)
-    consumed_heat = recompose_from_closure(
-        closure_heat_state, heat_closure, heat_after_ddm, heat)
     record_avm = assemble_record_avm(records)
-    require(candidate.shape == record_avm.shape,
-            f"model avm {candidate.shape} != record {record_avm.shape}")
     active = np.array(card.recipe.z_coord.is_active[..., 1:], dtype=bool, copy=True)
     active &= np.asarray(card.recipe.z_coord.is_active[..., :-1], dtype=bool)
-    require(active.shape == candidate.shape, "active-interface shape differs")
+    (heat_after_ddm, salt_after_ddm, consumed_after_ddm,
+     consumed_heat, salt, consumed) = compose_literal_terms(
+        model, card, closure_heat_state, closure_state, active)
+    require(consumed.shape == record_avm.shape,
+            f"model avm {consumed.shape} != record {record_avm.shape}")
+    require(active.shape == consumed.shape, "active-interface shape differs")
     row = score(consumed, record_avm, active)
     ice = np.asarray(surface.ice_concentration) > 0.0
     unequal = (bits(consumed) != bits(record_avm)) & active
@@ -446,21 +446,17 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
     else:
         row["first_under_ice_jik"] = None
     row["backend"] = jax.default_backend()
-    row["dtype"] = str(candidate.dtype)
+    row["dtype"] = str(consumed.dtype)
     row["term_localization"] = term_localization(
         consumed, record_avm, consumed_after_ddm, closure_state, active)
-    row["fresh_diagnostic_profile_vs_record"] = score(
-        candidate, record_avm, active)
-    row["state_tke_avm_vs_closure_without_ddm_or_iwm"] = score(
-        closure_state, closure, active)
-    row["profile_phase"] = "ordinary step setup, stopped before implicit solve"
+    row["profile_phase"] = "ordinary step carried TKE closure plus literal DDM/IWM"
 
     tracer_record = read_record_tracer_profiles(root)
     rank0_active = active[:, :tracer_record["avt"].shape[1], :]
     record_avt = tracer_record["avt"][..., 1:-1]
     record_avs = tracer_record["avs"][..., 1:-1]
     record_en = tracer_record["en"][..., 1:-1]
-    require(record_avt.shape == heat[:, :record_avt.shape[1]].shape,
+    require(record_avt.shape == consumed_heat[:, :record_avt.shape[1]].shape,
             "rank-0 avt record differs from the consumed model profile")
     require(record_avs.shape == salt[:, :record_avs.shape[1]].shape,
             "rank-0 avs record differs from the consumed model profile")

@@ -40,17 +40,6 @@ def test_term_localization_separates_iwm_and_ddm_boundaries() -> None:
     assert result["ddm_changes_candidate_at_residual"] == 1
 
 
-def test_recompose_from_closure_applies_ddm_then_iwm() -> None:
-    closure = np.array([1.0, 2.0])
-    diagnostic_closure = np.array([4.0, 8.0])
-    after_ddm = np.array([4.25, 8.5])
-    final = np.array([5.25, 10.5])
-    np.testing.assert_array_equal(
-        replay.recompose_from_closure(
-            closure, diagnostic_closure, after_ddm, final),
-        np.array([2.25, 4.5]))
-
-
 @pytest.fixture(scope="module")
 def record_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Compile and execute the committed harness against the actual writer."""
