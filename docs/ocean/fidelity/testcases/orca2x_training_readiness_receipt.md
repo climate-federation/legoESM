@@ -1,6 +1,7 @@
 # ORCA2X round 2 — training readiness: multi-step rung-10 gradients
 
-Date: 2026-10-24 (Claude round; codex review: operator).
+Date: 2026-10-24 (Claude round; codex review: operator). Revised after
+review (Argon LAND; codex HOLD on claim wording): claims only, no new runs.
 Status: **STOPPED_FOR_DECISION**: measurement only, no model or
 configuration change. The horizon and remat choice are the user's call (below).
 Base `484b60f5b7da`. Preregistration `afaf87cf02` (frozen before any
@@ -13,15 +14,27 @@ except the summary mode). Evidence:
 ## Verdict
 
 - Multi-step rung-10 gradients are usable at every horizon the record
-  allows (N = 1, 2, 5, 10). They are finite everywhere: 0 non-finite
-  cotangents in any initial-state leaf or in rn_Ud, for both losses and in
-  both modes.
-- Reverse mode equals forward mode to <= 3.3e-14 along T_dir0 and to
-  <= 2.6e-11 on rn_Ud at every N. Central differences on rn_Ud agree to
-  <= 1.4e-5.
-- Memory: with per-step remat, N = 10 fits at a 97 GiB whole-process
-  peak. Without remat, N = 2 is the limit (91 GiB). N = 5 and N = 10 do not
-  compile without remat.
+  allows (N = 1, 2, 5, 10), for both losses. No non-finite value anywhere
+  it was looked for: reverse mode checked every initial-state float leaf and
+  rn_Ud; forward mode checked only the two directions it ran, T_dir0 and
+  rn_Ud.
+- Reverse vs forward, worst over N = 1..10, per loss and direction:
+  T loss along T_dir0 <= 3.3e-14; SSH loss along T_dir0 <= 8.3e-13;
+  T loss on rn_Ud <= 1.8e-13; SSH loss on rn_Ud <= 2.6e-11 (at N = 10).
+  Central differences on rn_Ud agree to <= 1.4e-5.
+- Memory: compile residue dominates. After compile the process already
+  holds ~73 GiB, so with per-step remat N = 2, 5, 10 all peak at
+  94-97 GiB (101-104 GB decimal). The run itself adds a flat ~24 GiB.
+- Time grows with N: 134 / 338 / 528 s per fwd+bwd per loss at
+  N = 2 / 5 / 10 (remat), and each horizon's compile takes ~41-43 min.
+- Without remat, N = 2 is the limit (91 GiB); N = 5 and N = 10 do not
+  compile.
+- Training blind spot (Argon, pre-existing, no change now): MLE stops the
+  gradient on the mixed-layer depth and the mixed-layer membership mask
+  (`mle_mld_and_buoyancy` returns both through `jax.lax.stop_gradient`;
+  the mixed-layer buoyancy itself stays differentiable). No gradient flows
+  through mixed-layer depth changes on any card that runs MLE. Whether
+  rung 10 runs MLE was not re-checked this round.
 - No gradient-only guard was needed, so item 3 has nothing to localise.
 
 ## Setup (as asked)
@@ -103,9 +116,11 @@ differs by <= 1.4e-14 relative, as P6 allowed.
 
 ## Predictions (PREREG_orca2x_training_readiness.md)
 
-- P1 no non-finite: CONFIRMED (every N, both losses, both modes that ran).
-- P2 rev vs fwd along T_dir0: CONFIRMED and better than predicted,
-  <= 3.3e-14 at every N. Round 317's 2.6e-5 gap on the pre-L8 card does not
+- P1 no non-finite: CONFIRMED for what was measured (every N, both losses;
+  reverse mode on every leaf, forward mode on T_dir0 and rn_Ud only). P1
+  said "both modes" for every leaf; forward mode never covered that.
+- P2 rev vs fwd along T_dir0: CONFIRMED and better than predicted:
+  T loss <= 3.3e-14, SSH loss <= 8.3e-13 at every N. Round 317's 2.6e-5 gap on the pre-L8 card does not
   appear here; why is not located (different card and composition,
   different instrument).
 - P3 rn_Ud rev vs fwd <= 1e-12: CONFIRMED for T. For SSH at N = 10,
@@ -131,18 +146,23 @@ differs by <= 1.4e-14 relative, as P6 allowed.
 
 ## DECISION_NEEDED: training horizon and remat strategy
 
-1. **Pick:** train with N = 10 and per-step remat. The gradients are
-   clean, memory is 97 GiB per process (24 GiB of it the run), and a
-   fwd+bwd costs ~530 s on the loaded machine. One compile takes ~43 min
-   per horizon. This exceeds 100 GB if "GB" means decimal (104 GB).
-2. N = 2 without remat: 91 GiB (98 GB decimal), 82 s per fwd+bwd. It fits
-   under either unit, but a 6-hour window gives the gradient little
-   dynamics.
-3. N = 1: 44 GiB, 35 s. This is the existing round-330 gradient and has no
-   multi-step dynamics.
+Memory barely depends on N with remat (~73 GiB compile residue + ~24 GiB
+run), so the choice is time per gradient against dynamics in the window.
 
-Deciding factor for 1 vs 2: whether the 100 GB cap is GiB (as `free -g`
-reports) or decimal GB.
+1. **Pick:** N = 10 with per-step remat: 97 GiB (104 GB decimal),
+   528 s per fwd+bwd per loss, compile ~43 min. Longest window the record
+   allows (30 h).
+2. N = 5 with per-step remat: 97 GiB (104 GB decimal), 338 s per
+   fwd+bwd per loss, compile ~42 min. Same memory as N = 10, ~0.64x the
+   time, half the window (15 h).
+3. N = 2 without remat: 91 GiB (98 GB decimal), 82 s per fwd+bwd. The only
+   multi-step option under 100 GB decimal; a 6-hour window gives the
+   gradient little dynamics. (N = 2 with remat: 94 GiB, 134 s — no gain.)
+4. N = 1: 44 GiB, 35 s. The existing round-330 gradient, no multi-step
+   dynamics.
+
+Deciding factor: whether the 100 GB cap is GiB (`free -g`) or decimal GB;
+if GiB, 1 vs 2 is time per step against window length.
 
 ## Gates (x64, CPU; logs `orca2x_rounds/round2/gates/`)
 
