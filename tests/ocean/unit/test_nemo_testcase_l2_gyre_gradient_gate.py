@@ -25,6 +25,10 @@ _GPU_SCRIPT = (
     _REPO / "scripts/validate/ocean_fidelity/testcases/"
     "nemo_testcase_l2_gyre_gradgate_gpu_rows.sh"
 )
+_ROUND9_RUN_SCRIPT = (
+    _REPO / "scripts/validate/ocean_fidelity/testcases/"
+    "nemo_testcase_l2_gyre_gradgate_round9_run.sh"
+)
 _SPEC = importlib.util.spec_from_file_location("gyre_gradient_gate_tested", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None
 G = importlib.util.module_from_spec(_SPEC)
@@ -44,6 +48,18 @@ def test_gpu_runner_continues_every_classified_outcome():
         "GYRE_GRADGATE_GPU_RUNNER_SELF_TEST statuses="
         "REFUTED UNMEASURED VACUOUS RETRACTED CONFIRMED"
     )
+
+
+def test_round9_operator_entrypoint_reaches_fail_closed_runner():
+    result = subprocess.run(
+        [str(_ROUND9_RUN_SCRIPT), "--self-test"],
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip().startswith(
+        "GYRE_GRADGATE_GPU_RUNNER_SELF_TEST statuses=")
 
 
 def test_broken_vjp_plant_flips_passing_row():

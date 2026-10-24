@@ -1382,6 +1382,12 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:13219': 'def _step_jitted(',
     'nemo_testcase_l2_gyre_gradient_gate.py:228': (
         'def build_context(*, transcendentals: str = "libm") -> GYREContext:'),
+    'nemo_testcase_l2_gyre_gradient_gate.py:164': (
+        'def primal_preserving_boundary(production, replay):'),
+    'nemo_testcase_l2_gyre_gradient_gate.py:196': (
+        'def build_observed_primal_preserving_step('),
+    'nemo_testcase_l2_gyre_gradient_gate.py:214': (
+        'production_primals = jax.lax.optimization_barrier(primals)'),
     'nemo_testcase_l2_gyre_gradient_gate.py:277,298,306': [
         'def _production_step(context: GYREContext, state, kt: int):',
         'def gradient_rollout(context: GYREContext, d_t0, n_steps: int):',
