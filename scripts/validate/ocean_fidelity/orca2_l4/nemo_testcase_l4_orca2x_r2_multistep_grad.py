@@ -86,7 +86,7 @@ def setup(n: int):
     for kt in range(1, n + 1):
         fw, sf = gate._surface_forcings(card, root, gate.assemble_surface_fields(root, kt), kt)
         inputs.append({"freshwater": fw, "surface_forcing": sf,
-                       **gate.damping_step_kwargs(card, root, kt)})
+                       "sponge": gate.damping_step_kwargs(card, root, kt)["sponge"]})
         probe.require(inputs[-1]["sponge"].nemo_kt == kt, f"damping target kt {kt}")
     model = LatLonCGridOceanModel(r.grid, r.z_coord, r.model_config, iwm_forcing=r.iwm_forcing)
     base = model.config
