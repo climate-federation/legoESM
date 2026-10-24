@@ -144,6 +144,33 @@ def maykut_untersteiner_albedo(
 # Delta-Eddington two-band albedo (Briegleb & Light 2007 surrogate)
 # ==============================================================================
 
+
+def sea_ice_albedo(
+    scheme: str,
+    albedo_ice: float,
+    T_skin=None,
+    h_ice_m: float | None = None,
+    melt_width_K: float = _T_MELT_WIDTH_K,
+):
+    """Sea-ice albedo a lane's radiation sees, by resolved scheme.
+
+    ``"constant"`` -> the scalar ``albedo_ice``; ``"maykut_untersteiner"`` ->
+    :func:`maykut_untersteiner_albedo` on the prognostic skin with
+    ``albedo_ice`` as the cold end.  Unknown schemes raise.
+    """
+    if scheme == "constant":
+        return albedo_ice
+    if scheme == "maykut_untersteiner":
+        if T_skin is None or h_ice_m is None:
+            raise ValueError(
+                "sea_ice_albedo('maykut_untersteiner') needs the prognostic "
+                "ice skin temperature and slab thickness.")
+        return maykut_untersteiner_albedo(
+            T_skin, h_ice_m, albedo_cold_bare=albedo_ice, T_width=melt_width_K)
+    raise ValueError(
+        f"sea_ice_albedo scheme={scheme!r} unknown; choose 'constant' or "
+        "'maykut_untersteiner' (resolve 'auto' first).")
+
 def _band_albedo_snow(
     melt_fraction: jnp.ndarray,
     h_snow: jnp.ndarray,

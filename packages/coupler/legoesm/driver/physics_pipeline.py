@@ -1040,7 +1040,8 @@ class PhysicsPipeline:
 
     def _tiled_surface_flux(self, u_low, v_low, T_low, q_low, rho_low,
                            sst, sic, T_land, p_s, beta_land=None,
-                           q_sfc_land_override=None, z_low=None, return_water=False):
+                           q_sfc_land_override=None, z_low=None, return_water=False,
+                           T_ice_skin=None):
         """Area-weighted (mosaic) surface turbulent flux over ocean/ice/land.
 
         Used when ``self.surface_tiled`` is True (the active land tile).  The
@@ -1075,7 +1076,8 @@ class PhysicsPipeline:
 
         T_ocean = ad.flatten_2d(sst)
         T_ice_grid = jnp.broadcast_to(
-            jnp.asarray(self.T_ice, dtype=sst.dtype), sst.shape,
+            jnp.asarray(self.T_ice if T_ice_skin is None else T_ice_skin,
+                        dtype=sst.dtype), sst.shape,
         )
 
         # Land tile: soil-moisture-limited effective surface humidity.
@@ -1148,8 +1150,12 @@ class PhysicsPipeline:
                             sfc_evap_override=None,
                             tke=None, qke=None, gwd_spectrum=None,
                             w_land=None, snow=None, land_ml=None,
-                            land_ml_params=None, cloud_fraction=None):
+                            land_ml_params=None, cloud_fraction=None,
+                            T_ice_skin=None):
         """Convection + microphysics + BL exchange with held radiation.
+
+        ``T_ice_skin`` (optional, per column, grid shape) replaces the scalar
+        ``T_ice`` in every surface-temperature blend: the prognostic ice skin.
 
         ``T_land`` is the slab-land skin temperature.  When the land tile
         is active (``self.f_land is not None``) the surface temperature
@@ -1183,7 +1189,8 @@ class PhysicsPipeline:
         shape_3d = T.shape
         shape_2d = p_s.shape
 
-        T_sfc = blend_surface_temperature(sst, sic, self.T_ice)
+        T_sfc = blend_surface_temperature(
+            sst, sic, self.T_ice if T_ice_skin is None else T_ice_skin)
         if self.f_land is not None and T_land is not None:
             T_sfc = self._blend_land(T_sfc, T_land)
 
@@ -1491,7 +1498,7 @@ class PhysicsPipeline:
                         _, _, _shf_c, _lhf_c, _ = self._tiled_surface_flux(
                             _u_low, _v_low, _T_low, _q_low, _rho_low,
                             sst, sic, T_land, p_s,
-                            beta_land=beta_land,
+                            beta_land=beta_land, T_ice_skin=T_ice_skin,
                             q_sfc_land_override=_q_sfc_land_ml,
                             z_low=_lowest_level_height(z_full_col, z_half_col))
                     else:
@@ -2073,6 +2080,7 @@ class PhysicsPipeline:
                     u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
                     rho_col_phys[:, -1], sst, sic, T_land, p_s,
                     beta_land=beta_land, q_sfc_land_override=_q_sfc_land_ml,
+                    T_ice_skin=T_ice_skin,
                     z_low=_lowest_level_height(z_full_col, z_half_col),
                     return_water=True,
                 )
@@ -2604,7 +2612,8 @@ class PhysicsPipeline:
                                sfc_sw_up=None, sfc_sw_down=None,
                                conv_precip=None, land_ml=None, w_land=None,
                                snow=None, land_ml_params=None,
-                               cloud_fraction=None, conv_precip_frozen=None):
+                               cloud_fraction=None, conv_precip_frozen=None,
+                               T_ice_skin=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns ``(dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
@@ -2625,7 +2634,8 @@ class PhysicsPipeline:
         ad = self.adapter
         nlev = self.sigma_full.shape[0]
 
-        T_sfc = blend_surface_temperature(sst, sic, self.T_ice)
+        T_sfc = blend_surface_temperature(
+            sst, sic, self.T_ice if T_ice_skin is None else T_ice_skin)
         if self.dynamic_albedo:
             # Zenith-dependent ocean albedo (Briegleb 1992).  Use the
             # SAME zenith convention as the radiation solver: the
@@ -3075,7 +3085,9 @@ class PhysicsPipeline:
                 # Pre-land ocean/ice blend: the unified non-tiled law
                 # evaluates on the SAME blended T_sfc the atmosphere's
                 # turbulence surface layer sees (inert on the legacy path).
-                T_sfc_ocean=blend_surface_temperature(sst, sic, self.T_ice),
+                T_sfc_ocean=blend_surface_temperature(
+                    sst, sic,
+                    self.T_ice if T_ice_skin is None else T_ice_skin),
             )
             land_ml_new = land_ml
         else:
@@ -3184,7 +3196,37 @@ class PhysicsPipeline:
                          tke=None, qke=None, gwd_spectrum=None,
                          conv_precip=None, land_ml=None, w_land=None,
                          snow=None, land_ml_params=None, cloud_fraction=None,
-                         conv_precip_frozen=None):
+                         conv_precip_frozen=None, ice_T_skin=None):
+
+            if pipeline.ice_skin_prognostic and ice_T_skin is None:
+                raise ValueError(
+                    "ice_skin_prognostic=True but this lane's carry has no "
+                    "ice_T_skin (#2106); the constant T_ice would run "
+                    "silently. Seed the skin in the carry (pack_carry("
+                    "ice_T_skin=...)).")
+            if ice_T_skin is not None:
+                # Melt-dependent sea-ice albedo on the carried skin (scalar
+                # albedo_ice under "constant").
+                from legoesm.ice.shortwave import sea_ice_albedo
+                albedo_ice = sea_ice_albedo(
+                    pipeline.sea_ice_albedo_scheme, albedo_ice,
+                    T_skin=ice_T_skin, h_ice_m=pipeline.ice_thickness_m,
+                    melt_width_K=pipeline.sea_ice_albedo_melt_width_K)
+
+            def _skin_tail(skin, held, physics_out, sic, dt):
+                # Same per-step update as the MPAS column lane: this step's
+                # (fresh or held) radiative net + turbulent fluxes, consumed by
+                # the NEXT step's surface blends.  A 5th return value ONLY when
+                # the skin is on, so every 4-value caller is unchanged.
+                if skin is None:
+                    return ()
+                from legoesm.forcing.surface_utils import advance_ice_skin
+                new = advance_ice_skin(
+                    skin, held[1], held[2], physics_out.shflx,
+                    physics_out.lhflx, sic, dt_s=dt,
+                    h_ice_m=pipeline.ice_thickness_m,
+                    melt_cap_width_K=pipeline.ice_skin_melt_cap_width_K)
+                return (new.astype(skin.dtype),)
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -3203,7 +3245,7 @@ class PhysicsPipeline:
                  land_frac, phis,
                  tke, qke, gwd_spectrum,
                  conv_precip, land_ml, w_land, snow, land_ml_params,
-                 cloud_fraction, conv_precip_frozen) = args
+                 cloud_fraction, conv_precip_frozen, ice_T_skin) = args
                 # land_frac / phis exist for the LEARNED wrappers that share
                 # this step signature (phase 2, part 2); the classical
                 # pipeline does not consume them.
@@ -3233,6 +3275,7 @@ class PhysicsPipeline:
                         snow=snow, land_ml_params=land_ml_params,
                         cloud_fraction=cloud_fraction,
                         conv_precip_frozen=conv_precip_frozen,
+                        T_ice_skin=ice_T_skin,
                     )
 
                 # Radiation-as-forcing: cut radiation's reverse-mode so the
@@ -3265,6 +3308,7 @@ class PhysicsPipeline:
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     w_land=w_land, snow=snow, land_ml=land_ml,
                     land_ml_params=land_ml_params, cloud_fraction=cloud_fraction,
+                    T_ice_skin=ice_T_skin,
                 )
 
                 # Cast to storage dtype so both lax.cond branches match.
@@ -3288,7 +3332,9 @@ class PhysicsPipeline:
                     gwd_spectrum=_carries[2], w_land=_carries[3],
                     snow=_carries[4], cloud_fraction=_carries[5],
                 )
-                return physics_out, new_held, _cast(T_land_new), land_ml_new
+                return ((physics_out, new_held, _cast(T_land_new), land_ml_new)
+                        + _skin_tail(ice_T_skin, new_held, physics_out, sic,
+                                     dt))
 
             def _no_rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -3307,7 +3353,7 @@ class PhysicsPipeline:
                  land_frac, phis,
                  tke, qke, gwd_spectrum,
                  conv_precip, land_ml, w_land, snow, land_ml_params,
-                 cloud_fraction, conv_precip_frozen) = args
+                 cloud_fraction, conv_precip_frozen, ice_T_skin) = args
                 del conv_precip, conv_precip_frozen  # radiation-only inputs
                 del sfc_lw_up, sfc_sw_up, sfc_sw_down  # unused on the no-rad path
                 # land_frac / phis exist for the LEARNED wrappers that share
@@ -3332,6 +3378,7 @@ class PhysicsPipeline:
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     w_land=w_land, snow=snow, land_ml=land_ml,
                     land_ml_params=land_ml_params, cloud_fraction=cloud_fraction,
+                    T_ice_skin=ice_T_skin,
                 )
 
                 # Cast to storage dtype — must match _rad_branch
@@ -3354,7 +3401,9 @@ class PhysicsPipeline:
                 )
                 # multilayer land state (if any) rides through the no-rad sub-steps
                 # unchanged — it advances only on radiation steps (like the slab).
-                return physics_out, new_held, _cast(T_land), land_ml
+                return ((physics_out, new_held, _cast(T_land), land_ml)
+                        + _skin_tail(ice_T_skin, new_held, physics_out, sic,
+                                     dt))
 
             args = (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
                     day_of_year, seconds_of_day, dt,
@@ -3372,7 +3421,7 @@ class PhysicsPipeline:
                     land_frac, phis,
                     tke, qke, gwd_spectrum,
                     conv_precip, land_ml, w_land, snow, land_ml_params,
-                    cloud_fraction, conv_precip_frozen)
+                    cloud_fraction, conv_precip_frozen, ice_T_skin)
 
             # Issue #316 fix: when the caller knows at build time which
             # branch to take, skip the cond — keeps only the live branch
@@ -5385,4 +5434,13 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
                 "explicit frontgf_col."
             )
         pipeline._gwd_takes_frontgf = True
+    # Prognostic ice skin (#2106): the carried per-column skin is advanced in
+    # step_unified and its sea-ice albedo resolved from these.
+    from legoesm.driver.config import resolve_sea_ice_albedo_scheme
+    pipeline.sea_ice_albedo_scheme = resolve_sea_ice_albedo_scheme(config)
+    pipeline.ice_thickness_m = float(config.ice_thickness_m)
+    pipeline.sea_ice_albedo_melt_width_K = float(
+        config.sea_ice_albedo_melt_width_K)
+    pipeline.ice_skin_melt_cap_width_K = float(config.ice_skin_melt_cap_width_K)
+    pipeline.ice_skin_prognostic = bool(config.ice_skin_prognostic)
     return pipeline

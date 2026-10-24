@@ -206,9 +206,17 @@ def test_validate_default_off():
     _mpas_cfg().validate_strict()
 
 
-def test_validate_cdgrid_refuses_ice_skin():
-    with pytest.raises(ValueError, match="MPAS-lane"):
-        _cdgrid_cfg(ice_skin_prognostic=True).validate_strict()
+def test_validate_cdgrid_accepts_ice_skin():
+    # The compiled / per-step / operator-split lanes carry the skin (#2106).
+    _cdgrid_cfg(ice_skin_prognostic=True).validate_strict()
+
+
+def test_validate_spectral_refuses_ice_skin():
+    from legoesm.driver.config import DycoreConfig
+    with pytest.raises(ValueError, match="discretization=.spectral. lane"):
+        _cdgrid_cfg(ice_skin_prognostic=True)._replace(
+            dycore=DycoreConfig(dt=600.0, discretization="spectral")
+        ).validate_strict()
 
 
 def test_validate_refuses_radiation_none():
@@ -388,9 +396,33 @@ def test_validate_melt_albedo_needs_skin():
 
 
 def test_validate_melt_albedo_refuses_inert_width():
+    # auto without the skin resolves to constant: the width would be inert.
     with pytest.raises(ValueError, match="sea_ice_albedo_melt_width_K"):
-        _mpas_cfg(ice_skin_prognostic=True,
+        _mpas_cfg(sea_ice_albedo_melt_width_K=2.0).validate_strict()
+    with pytest.raises(ValueError, match="sea_ice_albedo_melt_width_K"):
+        _mpas_cfg(ice_skin_prognostic=True, sea_ice_albedo_scheme="constant",
                   sea_ice_albedo_melt_width_K=2.0).validate_strict()
+
+
+def test_auto_resolves_per_ice_temperature():
+    from legoesm.driver.config import resolve_sea_ice_albedo_scheme
+    assert _mpas_cfg().sea_ice_albedo_scheme == "auto"
+    assert resolve_sea_ice_albedo_scheme(_mpas_cfg()) == "constant"
+    assert resolve_sea_ice_albedo_scheme(
+        _mpas_cfg(ice_skin_prognostic=True)) == "maykut_untersteiner"
+    assert resolve_sea_ice_albedo_scheme(_mpas_cfg(
+        ice_skin_prognostic=True, sea_ice_albedo_scheme="constant")) \
+        == "constant"
+    # the default without a temperature must not raise
+    _mpas_cfg().validate_strict()
+    _cdgrid_cfg().validate_strict()
+
+
+@pytest.mark.parametrize("bad", [-0.01, float("nan"), float("inf")])
+def test_validate_cap_width_bounds(bad):
+    with pytest.raises(ValueError, match="ice_skin_melt_cap_width_K"):
+        _mpas_cfg(ice_skin_prognostic=True,
+                  ice_skin_melt_cap_width_K=bad).validate_strict()
 
 
 @pytest.mark.parametrize("bad", [0.0, -1.0, float("nan")])
@@ -402,7 +434,7 @@ def test_validate_melt_albedo_width_bounds(bad):
 
 
 def test_validate_cdgrid_refuses_melt_albedo():
-    with pytest.raises(ValueError, match="MPAS-lane"):
+    with pytest.raises(ValueError, match="ice_skin_prognostic=True"):
         _cdgrid_cfg(sea_ice_albedo_scheme="maykut_untersteiner"
                     ).validate_strict()
 
@@ -414,7 +446,8 @@ def test_cli_round_trip_melt_albedo():
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert cfg_default.sea_ice_albedo_scheme == "constant"
+    assert cfg_default.sea_ice_albedo_scheme == "auto"
+    assert cfg_default.ice_skin_melt_cap_width_K == 0.01
     assert cfg_default.sea_ice_albedo_melt_width_K == 1.0
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical",
@@ -422,7 +455,9 @@ def test_cli_round_trip_melt_albedo():
         "--mpas-ice-skin-prognostic",
         "--sea-ice-albedo-scheme", "maykut_untersteiner",
         "--sea-ice-albedo-melt-width-K", "2.5",
+        "--ice-skin-melt-cap-width-K", "0.0",
     ]), parser))
+    assert cfg.ice_skin_melt_cap_width_K == 0.0
     assert cfg.sea_ice_albedo_scheme == "maykut_untersteiner"
     assert cfg.sea_ice_albedo_melt_width_K == 2.5
 
@@ -453,7 +488,12 @@ runpy.run_path(sys.argv[0], run_name="__main__")
 '''
 
 
-def _run_icy(out_dir, extra=(), days=1, start_day=172.0, env_extra=None):
+_MPAS_GRID = ("--grid-type", "voronoi", "--discretization", "mpas",
+              "--resolution", "3")
+
+
+def _run_icy(out_dir, extra=(), days=1, start_day=172.0, env_extra=None,
+             grid=_MPAS_GRID):
     import os
     import subprocess
     import sys
@@ -466,8 +506,7 @@ def _run_icy(out_dir, extra=(), days=1, start_day=172.0, env_extra=None):
     cmd = [sys.executable, "-c", _ICY_RUNNER,
            str(repo / "scripts" / "run" / "run_amip.py"),
            "--dataset", "analytical",
-           "--grid-type", "voronoi", "--discretization", "mpas",
-           "--resolution", "3", "--nlev", "8",
+           *grid, "--nlev", "8",
            "--days", str(days), "--checkpoint-days", "1",
            "--start-day", str(start_day),
            "--radiation", "gray", "--mpas-ice-skin-prognostic",
@@ -495,7 +534,8 @@ def test_end_to_end_melt_albedo_reaches_radiation(tmp_path):
     seed skin (271.35 K) already sits inside the ramp, so the melt scheme
     darkens the ice from step one.  The state must then differ from the
     constant-albedo run — fails if the scheme is wired in but inert."""
-    base = _last_ckpt(_run_icy(tmp_path / "const"))
+    base = _last_ckpt(_run_icy(tmp_path / "const", extra=(
+        "--sea-ice-albedo-scheme", "constant")))
     melt = _last_ckpt(_run_icy(tmp_path / "melt", extra=_MELT))
     sb, sm = np.asarray(base["ice_T_skin"]), np.asarray(melt["ice_T_skin"])
     assert np.all(np.isfinite(sm))
@@ -533,3 +573,121 @@ def test_committed_deck_selects_melt_albedo():
     assert args.sea_ice_albedo_melt_width_K == 1.0
     assert args.ice_skin_prognostic is True
     assert args.albedo_ice == 0.80
+
+
+def test_production_deck_selects_melt_albedo_explicitly():
+    from pathlib import Path
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from scripts.run.run_amip import build_arg_parser
+    deck = (Path(__file__).resolve().parents[2] / "config" / "amip"
+            / "amip_production.yaml")
+    keys = load_yaml_config(deck, build_arg_parser())
+    assert keys["sea_ice_albedo_scheme"] == "maykut_untersteiner"
+    assert keys["sea_ice_albedo_melt_width_K"] == 1.0
+    assert keys["ice_skin_melt_cap_width_K"] == 0.01
+
+
+def test_auto_is_resolved_into_the_recorded_config(tmp_path):
+    """Default "auto" with the skin on: the run records the RESOLVED scheme
+    (experiment_config.json) and logs it — never the word "auto"."""
+    import json
+    out = _run_icy(tmp_path / "auto")
+    cfg = json.loads((out / "experiment_config.json").read_text())
+    cfg = cfg.get("config", cfg)
+    assert cfg["sea_ice_albedo_scheme"] == "maykut_untersteiner"
+    assert "Sea-ice albedo scheme: maykut_untersteiner" in (
+        out / "run.log").read_text()
+    assert "maykut_untersteiner" in (out / "run_manifest.json").read_text()
+
+
+@pytest.mark.parametrize("grid,extra", [
+    (("--grid-type", "latlon", "--discretization", "centered",
+      "--resolution", "8"), ()),
+    (("--grid-type", "cubed_sphere", "--discretization", "centered",
+      "--resolution", "8"), ()),
+    (("--grid-type", "latlon", "--discretization", "centered",
+      "--resolution", "8"), ("--per-step-rollout",)),
+], ids=["latlon_compiled", "cube_compiled", "latlon_per_step"])
+def test_structured_lane_skin_evolves_and_auto_resolves(tmp_path, grid, extra):
+    """Every structured lane carries the shared skin: the default 'auto'
+    scheme resolves to the melt albedo, and the checkpointed skin has moved
+    off its 271.35 K seed under June sun on the sic=1 polar caps."""
+    out = _run_icy(tmp_path / "run", extra=extra, grid=grid)
+    log = (out / "run.log").read_text()
+    assert "Sea-ice albedo scheme: maykut_untersteiner" in log
+    ck = _last_ckpt(out)
+    keys = [k for k in ck.files if k.endswith("ice_T_skin")]
+    assert keys, f"no ice skin in checkpoint: {ck.files}"
+    skin = np.asarray(ck[keys[0]])
+    assert np.all(np.isfinite(skin))
+    assert np.all(skin <= constants.T_freeze + 1e-9)
+    assert float(np.max(np.abs(skin - constants.T_freeze_ocean))) > 1e-3
+
+
+def _skin_step(skin_on, ice_T_skin):
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import build_physics_pipeline
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from tests.unit.test_amip_snow_albedo import NLEV, N_CS, _sigma
+    cfg = ExperimentConfig(radiation="gray", microphysics="none",
+                           diurnal_cycle=False, turbulence="louis",
+                           surface_bulk_scheme="coare3",
+                           ice_skin_prognostic=skin_on)
+    pipe = build_physics_pipeline(create_cubed_sphere(N_CS), _sigma(), cfg)
+    pipe.rad_update_steps = 1
+    ad = pipe.adapter
+    s2 = ad.shape_2d
+    s3 = (*s2, NLEV)
+    held3, held2 = jnp.zeros(s3), jnp.zeros(s2)
+    o3 = jnp.zeros((ad.ncol, NLEV))
+    return pipe.build_step_unified()(
+        jnp.bool_(True),
+        jnp.full(s3, 250.0), jnp.full(s2, 1.0e5),
+        jnp.full(s3, 0.001), jnp.zeros(s3), jnp.zeros(s3),
+        jnp.zeros((ad.ncol,)),
+        jnp.full(s3, 5.0), jnp.zeros(s3),
+        jnp.full(s2, constants.T_freeze_ocean), jnp.ones(s2),
+        jnp.full(s2, 1.2), jnp.full(s2, 1.0),
+        172.0, 43200.0, 600.0,
+        jnp.array([]), constants.S_0, o3, o3,
+        held3, held2, held2, held2, held2, held2,
+        **({} if ice_T_skin is None else {"ice_T_skin": ice_T_skin}))
+
+
+def test_step_unified_refuses_missing_skin_when_prognostic():
+    """A lane whose carry was built without the skin (e.g. an IC builder
+    that never seeds it) must fail, not run the constant T_ice silently."""
+    with pytest.raises(ValueError, match="no ice_T_skin"):
+        _skin_step(True, None)
+
+
+def test_step_unified_advances_the_carried_skin():
+    from tests.unit.test_amip_snow_albedo import SHAPE_2D
+    assert len(_skin_step(False, None)) == 4
+    seed = jnp.full(SHAPE_2D, constants.T_freeze_ocean)
+    ret = _skin_step(True, seed)
+    assert len(ret) == 5
+    new = np.asarray(ret[4])
+    assert new.shape == seed.shape and np.all(np.isfinite(new))
+    assert float(np.max(np.abs(new - constants.T_freeze_ocean))) > 1e-6
+
+
+def test_advance_ice_skin_flux_assembly_and_signs():
+    """F_net_down = sw + lw - sh - lh (radiation +down, turbulence +up);
+    missing turbulent fluxes add nothing; the result keeps T_skin's shape."""
+    from legoesm.forcing.surface_utils import advance_ice_skin
+    T = jnp.full((2, 3), 260.0)
+    sw, lw = jnp.full((2, 3), 100.0), jnp.full((2, 3), -40.0)
+    sh, lh = jnp.full((2, 3), 15.0), jnp.full((2, 3), 5.0)
+    sic = jnp.ones((2, 3))
+    got = advance_ice_skin(T, sw, lw, sh, lh, sic, dt_s=600.0, h_ice_m=2.0)
+    ref = prognostic_ice_skin_temperature(
+        T.reshape(-1), jnp.full(6, 100.0 - 40.0 - 15.0 - 5.0), sic.reshape(-1),
+        600.0, 2.0)
+    assert got.shape == T.shape
+    np.testing.assert_allclose(np.asarray(got).reshape(-1), np.asarray(ref),
+                               rtol=0.0, atol=1e-12)
+    no_turb = advance_ice_skin(T, sw, lw, None, None, sic, dt_s=600.0,
+                               h_ice_m=2.0)
+    # Upward turbulent loss cools: removing it leaves a warmer skin.
+    assert np.all(np.asarray(no_turb) > np.asarray(got))

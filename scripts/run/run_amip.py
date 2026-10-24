@@ -2256,15 +2256,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "prognostic ice skin (default 2.0; bounds "
                              "[0.1, 10]). Requires --mpas-ice-skin-prognostic.")
     parser.add_argument("--sea-ice-albedo-scheme",
-                        choices=("constant", "maykut_untersteiner"),
+                        choices=("auto", "constant", "maykut_untersteiner"),
                         default=None, action=_StoreOneSpelling,
                         dest="sea_ice_albedo_scheme",
-                        help="MPAS lane only: sea-ice shortwave albedo. "
-                             "'constant' (default) = --albedo-ice everywhere; "
-                             "'maykut_untersteiner' = melt ramp on the "
-                             "prognostic ice skin, recomputed every step "
+                        help="Sea-ice shortwave albedo. 'auto' (default) = "
+                             "maykut_untersteiner when the prognostic ice skin "
+                             "is on, else constant (resolved value is logged "
+                             "and recorded); 'constant' = --albedo-ice "
+                             "everywhere; 'maykut_untersteiner' = melt ramp on "
+                             "the prognostic ice skin, recomputed every step "
                              "(albedo-ice when cold, 0.50 at 0 C). Requires "
                              "--mpas-ice-skin-prognostic.")
+    parser.add_argument("--ice-skin-melt-cap-width-K", type=float,
+                        default=None, action=_StoreOneSpelling,
+                        dest="ice_skin_melt_cap_width_K",
+                        help="Width [K] of the smooth 0 C cap on the "
+                             "prognostic ice skin (default 0.01; 0 = hard "
+                             "cap).")
     parser.add_argument("--sea-ice-albedo-melt-width-K", type=float,
                         default=None, action=_StoreOneSpelling,
                         dest="sea_ice_albedo_melt_width_K",
@@ -3050,6 +3058,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             args.sea_ice_albedo_melt_width_K
             if args.sea_ice_albedo_melt_width_K is not None
             else _EXPERIMENT_DEFAULTS.sea_ice_albedo_melt_width_K),
+        ice_skin_melt_cap_width_K=(
+            args.ice_skin_melt_cap_width_K
+            if args.ice_skin_melt_cap_width_K is not None
+            else _EXPERIMENT_DEFAULTS.ice_skin_melt_cap_width_K),
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         cloud_conv_cloud_condensate=args.conv_cloud_condensate,
