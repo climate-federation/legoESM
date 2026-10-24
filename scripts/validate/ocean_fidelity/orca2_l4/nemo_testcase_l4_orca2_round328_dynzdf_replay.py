@@ -291,25 +291,44 @@ def _with_vmix_terms(config, *, ddm: bool, iwm: bool):
         physics=config.physics._replace(vertical_mixing=vmix))
 
 
-def _diagnose_profiles(model, card, surface):
+def _profile_setup(model, card, surface, sponge):
+    state = card.recipe.initial_state
+    bundle = model._tke_step_entry_n2_bundle(state)
+    state_expl, operands = model._step_impl(
+        state, card.dt_s, surface_forcing=surface, sponge=sponge,
+        _apply_implicit_vmix=False,
+        _tke_n2_bundle_override=bundle)
+    return state, bundle, state_expl, operands
+
+
+def _diagnose_profiles(model, card, surface, sponge):
     import jax
 
-    heat, momentum = jax.device_get(model.diagnose_vertical_K(
-        card.recipe.initial_state, card.dt_s, surface_forcing=surface))
+    state, bundle, state_expl, operands = _profile_setup(
+        model, card, surface, sponge)
+    (K_v_phys, A_v_phys, _k33, _surface_tracer_forcing, tke_source,
+     _diss_incr, _tracer_source) = operands
+    tke_old = state.tke.data if state.tke is not None else None
+    heat, momentum = jax.device_get(model._apply_implicit_vertical_mixing(
+        state_expl, card.dt_s, surface,
+        K_v_phys=K_v_phys, A_v_phys=A_v_phys,
+        dt_mom=card.dt_s / model.config.dt_mom_ratio,
+        tke_old=tke_old, tke_source=tke_source,
+        n2_tracers=model._n2_before_advection_tracers(state),
+        n2_tracers_before=model._n2_nemo_before_tracers(state),
+        tke_n2_bundle=bundle, eta_now=state.eta.data,
+        eta_step_entry=state.eta.data, u_now=state.u.data,
+        v_now=state.v.data, return_K_profiles=True))
     return (np.asarray(heat, dtype=np.float64),
             np.asarray(momentum, dtype=np.float64))
 
 
-def _diagnose_salt_profile(model, card, surface):
+def _diagnose_salt_profile(model, card, surface, sponge):
     """Read avs before lateral K33 from the model's own literal solve setup."""
     import jax
 
-    state = card.recipe.initial_state
-    bundle = model._tke_step_entry_n2_bundle(state)
-    state_expl, operands = model._step_impl(
-        state, card.dt_s, surface_forcing=surface,
-        _apply_implicit_vmix=False,
-        _tke_n2_bundle_override=bundle)
+    state, bundle, state_expl, operands = _profile_setup(
+        model, card, surface, sponge)
     (K_v_phys, A_v_phys, _k33, surface_tracer_forcing, tke_source,
      _diss_incr, tracer_source) = operands
     tke_old = state.tke.data if state.tke is not None else None
@@ -364,11 +383,13 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         iwm_forcing=card.recipe.iwm_forcing)
-    heat, candidate = _diagnose_profiles(model, card, surface)
-    salt = _diagnose_salt_profile(model, card, surface)
+    step_kwargs = rung10.damping_step_kwargs(card, root, 1)
+    sponge = step_kwargs.get("sponge")
+    heat, candidate = _diagnose_profiles(model, card, surface, sponge)
+    salt = _diagnose_salt_profile(model, card, surface, sponge)
     state_after = jax.device_get(model.step(
         card.recipe.initial_state, card.dt_s, freshwater=freshwater,
-        surface_forcing=surface, **rung10.damping_step_kwargs(card, root, 1)))
+        surface_forcing=surface, **step_kwargs))
     require(state_after.tke_avm is not None,
             "ordinary comparison step did not return its closure avm")
     closure_state = np.asarray(state_after.tke_avm.data, dtype=np.float64)
@@ -383,8 +404,9 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
     closure_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, closure_config,
         iwm_forcing=card.recipe.iwm_forcing)
-    _, after_ddm = _diagnose_profiles(after_ddm_model, card, surface)
-    _, closure = _diagnose_profiles(closure_model, card, surface)
+    _, after_ddm = _diagnose_profiles(
+        after_ddm_model, card, surface, sponge)
+    _, closure = _diagnose_profiles(closure_model, card, surface, sponge)
     record_avm = assemble_record_avm(records)
     require(candidate.shape == record_avm.shape,
             f"model avm {candidate.shape} != record {record_avm.shape}")
