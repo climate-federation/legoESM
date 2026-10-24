@@ -227,7 +227,7 @@ check_r332_tke_landing() {
     /Vertical eddy viscosity and diffusivity/ {
       if (call_line && !viscosity_line) viscosity_line=NR
     }
-    END { exit !(count==1 && after_select && viscosity_line==call_line+4) }
+    END { exit !(count==1 && after_select && viscosity_line==call_line+3) }
   ' "$1"
 }
 free_ok() {

@@ -9,13 +9,12 @@
     USE tke_round331_writer, ONLY : r331_tke_inputs, r331_after_bc, &
        & r331_after_matrix, r331_after_solve
                       ! round-331 WRITE-only TKE localisation recorder
-@@ -707,6 +709,9 @@
+@@ -707,6 +709,8 @@
              !
           END SELECT
           !
 +         CALL r332_tke_row(Kbb,Kmm,jj,zmxlm(ntsi:ntei,1:jpkm1), &
 +            & zmxld(ntsi:ntei,1:jpkm1),p_pdlr(ntsi:ntei,jj,2:jpkm1))
-+         !
-          !                     !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+         !                     !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
           !                     !  Vertical eddy viscosity and diffusivity  (avm and avt)
           !                     !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
