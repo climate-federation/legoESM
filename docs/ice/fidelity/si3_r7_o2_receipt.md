@@ -95,5 +95,30 @@ fitted-category inputs, run preflight only, and stop at acquisition.
 `UNASKED`: none.
 
 Independent review disposition: Claude review was HOLD/HOLD; every listed
-finding above is confirmed and repaired. Argon's distinct re-review remains
-operator-owned.
+finding above is confirmed and repaired. Argon's three distinct findings are
+addressed below.
+
+## Argon independent-review follow-up
+
+1. The citation gate again audits every `CITATION_MAP` entry on every
+   invocation, exactly as the lane-tip gate does. All stale entries were
+   re-anchored against their current files; the default gate and every SI3
+   per-receipt invocation therefore exercise the same full-map audit.
+2. The `hemisphere-swap` and `stop-gradient` controls now select the private
+   plant arms in `si3_o2_scalar_initial_state`/`si3_o2_step`. They no longer
+   manufacture a bad candidate by swapping the input config or stopping the
+   gate's arguments before the model call. The focused test invokes both plant
+   arms and requires `STATUS PLANT-FIRED` from each.
+3. The six NEMO per-category arrays are **inputs to O2**, not exclusions from
+   its bar. NEMO first fits the scalar state into all `jpl` categories in
+   `src/ICE/iceistate.F90:309-348`; the fit itself includes category-dependent
+   gamma integrals, caps, and snow-to-ice transfer in
+   `src/ICE/icevar.F90:1211-1272`. NEMO then sums the fitted arrays in
+   `src/ICE/iceistate.F90:388-400` and
+   `src/ICE/icevar.F90:122-130`. The O2 operator correspondingly requires
+   `fitted_v_i`, `fitted_v_s`, `fitted_a_i`, `fitted_a_ip`, `fitted_v_ip`, and
+   `fitted_v_il`, checks their `(jpi, jpj, 5)` shape, and sums them in
+   `packages/ice/legoesm/ice/si3_orca2_state.py:2489-2675`. Thus O3 owns the
+   nonlinear fit, while O2's 0-ULP bar still covers `vt_i`, `vt_s`, `at_i`,
+   `at_ip`, `vt_ip`, `vt_il`, `snwice_mass`, and `snwice_mass_b` computed from
+   those exact five-category inputs.

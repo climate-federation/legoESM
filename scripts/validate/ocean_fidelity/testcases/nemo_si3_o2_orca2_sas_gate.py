@@ -936,9 +936,8 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
             fitted_a_ip=state0.a_ip,
             fitted_v_ip=state0.v_ip,
             fitted_v_il=state0.v_il,
-            config=o2_cfg._replace(
-                rn_hti_ini_n=o2_cfg.rn_hti_ini_s, rn_hti_ini_s=o2_cfg.rn_hti_ini_n
-            ),
+            config=o2_cfg,
+            _plant_hemisphere_swap=True,
         )
     elif plant == "ssh-sign-or-div":
         bad_ssh = jnp.where(ssmask == 1.0, ssh_before_kmm + cand_o2.zsshadj, ssh_before_kmm)
@@ -1063,10 +1062,6 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
 
     # Differentiability gate (Plant P6: stop_gradient through O2 scalar initial state + SSH)
     def _o2_loss(sss_in: jax.Array, hti_n_in: jax.Array, v_i_in: jax.Array) -> jax.Array:
-        if plant == "stop-gradient":
-            sss_in = jax.lax.stop_gradient(sss_in)
-            hti_n_in = jax.lax.stop_gradient(hti_n_in)
-            v_i_in = jax.lax.stop_gradient(v_i_in)
         o2_cfg_ad = o2_cfg._replace(rn_hti_ini_n=hti_n_in)
         s_in = state0._replace(v_i=v_i_in)
         s_out, o2_out = si3_o2_step(
@@ -1086,6 +1081,7 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
             ),
             config=cfg,
             o2_init_config=o2_cfg_ad,
+            _plant_stop_gradient=plant == "stop-gradient",
         )
         assert o2_out is not None
         return (

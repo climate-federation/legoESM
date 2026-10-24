@@ -151,9 +151,9 @@ lateral melt (`docs/ocean/fidelity/testcases/nemo_testcases_l2_gyre_merge_si3_20
 ### Grid verdict: the narrow SI3 arms are periodic, not tripolar
 
 The ocean card reads the actual domain and constructs `create_tripole_grid`
-with the ORCA fold convention (`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1622-1629`,
-`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1676-1689`); the card explicitly names the unmeasured five-category layered
-Prather state (`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2091-2107`).
+with the ORCA fold convention (`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1694-1701`,
+`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1748-1761`); the card explicitly names the unmeasured five-category layered
+Prather state (`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2134-2150`).
 The resulting type is `LatLonCGridGeometry`.  The generic production path has
 a type guard for strain dynamics (`packages/ice/legoesm/ice/sea_ice.py:89-121`,
 `packages/ice/legoesm/ice/sea_ice.py:329-362`), but that guard is **not the

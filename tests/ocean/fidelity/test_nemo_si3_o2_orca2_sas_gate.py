@@ -613,14 +613,6 @@ def test_o2_jit_grad_jvp_and_stop_gradient_plant() -> None:
         ssh_in: jax.Array,
         plant_stop: bool = False,
     ) -> jax.Array:
-        if plant_stop:
-            sss_in = jax.lax.stop_gradient(sss_in)
-            hti_n_in = jax.lax.stop_gradient(hti_n_in)
-            hts_n_in = jax.lax.stop_gradient(hts_n_in)
-            ati_n_in = jax.lax.stop_gradient(ati_n_in)
-            apd_n_in = jax.lax.stop_gradient(apd_n_in)
-            hpd_n_in = jax.lax.stop_gradient(hpd_n_in)
-            ssh_in = jax.lax.stop_gradient(ssh_in)
         o2_c = o2_cfg._replace(
             rn_hti_ini_n=hti_n_in,
             rn_hts_ini_n=hts_n_in,
@@ -646,6 +638,7 @@ def test_o2_jit_grad_jvp_and_stop_gradient_plant() -> None:
             fitted_v_ip=state0.v_ip,
             fitted_v_il=state0.v_il,
             config=o2_c,
+            _plant_stop_gradient=plant_stop,
         )
         return (
             jnp.sum(o2_out.t_bo)

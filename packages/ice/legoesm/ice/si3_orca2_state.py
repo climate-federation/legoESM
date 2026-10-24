@@ -2647,6 +2647,13 @@ def si3_o2_scalar_initial_state(
     a_ip_fit = jnp.asarray(fitted_a_ip, dtype=dtype)
     v_ip_fit = jnp.asarray(fitted_v_ip, dtype=dtype)
     v_il_fit = jnp.asarray(fitted_v_il, dtype=dtype)
+    if _plant_stop_gradient:
+        v_i_fit = jax.lax.stop_gradient(v_i_fit)
+        v_s_fit = jax.lax.stop_gradient(v_s_fit)
+        a_i_fit = jax.lax.stop_gradient(a_i_fit)
+        a_ip_fit = jax.lax.stop_gradient(a_ip_fit)
+        v_ip_fit = jax.lax.stop_gradient(v_ip_fit)
+        v_il_fit = jax.lax.stop_gradient(v_il_fit)
     expected_shape = (jpi, jpj, 5)
     for name, arr in (
         ("fitted_v_i", v_i_fit), ("fitted_v_s", v_s_fit),
@@ -2681,6 +2688,9 @@ def si3_o2_scalar_initial_state(
     snwice_mass_b = snwice_mass
     ssh_b0 = jnp.asarray(ssh_before_kbb, dtype=dtype)
     ssh_m0 = jnp.asarray(ssh_before_kmm, dtype=dtype)
+    if _plant_stop_gradient:
+        ssh_b0 = jax.lax.stop_gradient(ssh_b0)
+        ssh_m0 = jax.lax.stop_gradient(ssh_m0)
     if _plant_ssh_sign:
         ssh_delta = -ssh_delta
     ssh_kmm = jnp.where(ssmask_2d == 1.0, sr(ssh_m0 + ssh_delta), ssh_m0)
