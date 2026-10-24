@@ -850,6 +850,8 @@ def run_year_rescore(
                 "_nemo_source_round": False,
                 "_nemo_ice_remap": False,
                 "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_dh_ice_content_accumulation": False,
+                "_nemo_dh_snow_update": False,
                 "_nemo_salprof_factoring": False,
             },
         ),
@@ -861,6 +863,8 @@ def run_year_rescore(
                 "_nemo_source_round": False,
                 "_nemo_ice_remap": False,
                 "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_dh_ice_content_accumulation": False,
+                "_nemo_dh_snow_update": False,
                 "_nemo_salprof_factoring": False,
             },
         ),
@@ -872,6 +876,8 @@ def run_year_rescore(
                 "_nemo_source_round": False,
                 "_nemo_ice_remap": False,
                 "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_dh_ice_content_accumulation": False,
+                "_nemo_dh_snow_update": False,
                 "_nemo_salprof_factoring": False,
             },
         ),
@@ -883,6 +889,8 @@ def run_year_rescore(
                 "_nemo_source_round": False,
                 "_nemo_ice_remap": False,
                 "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_dh_ice_content_accumulation": False,
+                "_nemo_dh_snow_update": False,
                 "_nemo_salprof_factoring": False,
             },
         ),
@@ -894,6 +902,8 @@ def run_year_rescore(
                 "_nemo_source_round": True,
                 "_nemo_ice_remap": False,
                 "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_dh_ice_content_accumulation": False,
+                "_nemo_dh_snow_update": False,
                 "_nemo_salprof_factoring": False,
             },
         ),
@@ -905,6 +915,8 @@ def run_year_rescore(
                 "_nemo_source_round": False,
                 "_nemo_ice_remap": False,
                 "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_dh_ice_content_accumulation": False,
+                "_nemo_dh_snow_update": False,
                 "_nemo_salprof_factoring": False,
             },
         ),
@@ -916,6 +928,8 @@ def run_year_rescore(
                 "_nemo_source_round": True,
                 "_nemo_ice_remap": False,
                 "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_dh_ice_content_accumulation": False,
+                "_nemo_dh_snow_update": False,
                 "_nemo_salprof_factoring": False,
             },
         ),
@@ -927,6 +941,8 @@ def run_year_rescore(
                 "_nemo_source_round": True,
                 "_nemo_ice_remap": False,
                 "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_dh_ice_content_accumulation": False,
+                "_nemo_dh_snow_update": False,
                 "_nemo_salprof_factoring": False,
             },
         ),
@@ -938,6 +954,8 @@ def run_year_rescore(
                 "_nemo_source_round": True,
                 "_nemo_ice_remap": False,
                 "_nemo_dh_ice_density_reciprocal": False,
+                "_nemo_dh_ice_content_accumulation": False,
+                "_nemo_dh_snow_update": False,
                 "_nemo_salprof_factoring": False,
             },
         ),
@@ -949,6 +967,8 @@ def run_year_rescore(
                 "_nemo_source_round": True,
                 "_nemo_ice_remap": True,
                 "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_dh_ice_content_accumulation": False,
+                "_nemo_dh_snow_update": False,
                 "_nemo_salprof_factoring": False,
             },
         ),
@@ -960,6 +980,8 @@ def run_year_rescore(
                 "_nemo_source_round": True,
                 "_nemo_ice_remap": True,
                 "_nemo_dh_ice_density_reciprocal": False,
+                "_nemo_dh_ice_content_accumulation": False,
+                "_nemo_dh_snow_update": False,
                 "_nemo_salprof_factoring": False,
             },
         ),
@@ -971,6 +993,8 @@ def run_year_rescore(
                 "_nemo_source_round": True,
                 "_nemo_ice_remap": True,
                 "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_dh_ice_content_accumulation": False,
+                "_nemo_dh_snow_update": False,
                 "_nemo_salprof_factoring": False,
             },
         ),
@@ -982,6 +1006,8 @@ def run_year_rescore(
                 "_nemo_source_round": True,
                 "_nemo_ice_remap": True,
                 "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_dh_ice_content_accumulation": False,
+                "_nemo_dh_snow_update": False,
                 "_nemo_salprof_factoring": True,
             },
         ),
@@ -993,6 +1019,8 @@ def run_year_rescore(
                 "_nemo_source_round": True,
                 "_nemo_ice_remap": True,
                 "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_dh_ice_content_accumulation": False,
+                "_nemo_dh_snow_update": False,
                 "_nemo_salprof_factoring": True,
             },
         ),
@@ -1004,6 +1032,47 @@ def run_year_rescore(
                 "_nemo_source_round": True,
                 "_nemo_ice_remap": False,
                 "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_dh_ice_content_accumulation": False,
+                "_nemo_dh_snow_update": False,
+                "_nemo_salprof_factoring": True,
+            },
+        ),
+        "r6_step1_ice_content_accumulation": (
+            entries_s2,
+            {
+                "_nemo_zdf_layer_reciprocals": True,
+                "_nemo_glo2eqv_snow_temp": True,
+                "_nemo_source_round": True,
+                "_nemo_ice_remap": True,
+                "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_dh_ice_content_accumulation": True,
+                "_nemo_dh_snow_update": False,
+                "_nemo_salprof_factoring": True,
+            },
+        ),
+        "r6_step1_plus_step2_snow_update": (
+            entries_s2,
+            {
+                "_nemo_zdf_layer_reciprocals": True,
+                "_nemo_glo2eqv_snow_temp": True,
+                "_nemo_source_round": True,
+                "_nemo_ice_remap": True,
+                "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_dh_ice_content_accumulation": True,
+                "_nemo_dh_snow_update": True,
+                "_nemo_salprof_factoring": True,
+            },
+        ),
+        "r6_isolated_step2_snow_update": (
+            entries_s2,
+            {
+                "_nemo_zdf_layer_reciprocals": True,
+                "_nemo_glo2eqv_snow_temp": True,
+                "_nemo_source_round": True,
+                "_nemo_ice_remap": True,
+                "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_dh_ice_content_accumulation": False,
+                "_nemo_dh_snow_update": True,
                 "_nemo_salprof_factoring": True,
             },
         ),
@@ -1097,6 +1166,9 @@ def run_year_rescore(
         "r5_step1_plus_step2_plus_step3_salprof",
         "r5_all_four_items",
         "r5_isolated_step3_salprof",
+        "r6_step1_ice_content_accumulation",
+        "r6_step1_plus_step2_snow_update",
+        "r6_isolated_step2_snow_update",
     )
     r5_remaining_owners: dict[str, dict[str, dict]] = {
         arm_k: {} for arm_k in r5_ranking_arms
@@ -1136,6 +1208,26 @@ def run_year_rescore(
             "r3_baseline_to_r5_isolated_step3_salprof",
             "r3_baseline",
             "r5_isolated_step3_salprof",
+        ),
+        (
+            "r5_baseline_to_r6_step1_ice_content_accumulation",
+            "r5_all_four_items",
+            "r6_step1_ice_content_accumulation",
+        ),
+        (
+            "r6_step1_to_r6_step1_plus_step2_snow_update",
+            "r6_step1_ice_content_accumulation",
+            "r6_step1_plus_step2_snow_update",
+        ),
+        (
+            "r5_baseline_to_r6_step1_plus_step2_snow_update",
+            "r5_all_four_items",
+            "r6_step1_plus_step2_snow_update",
+        ),
+        (
+            "r5_baseline_to_r6_isolated_step2_snow_update",
+            "r5_all_four_items",
+            "r6_isolated_step2_snow_update",
         ),
     )
     r5_transitions: dict[str, dict] = {
@@ -1756,6 +1848,37 @@ def run_year_rescore(
         "remaining_owner_ranking_by_r5_arm": ranked_owners_by_r5_arm,
         "remaining_owner_ranking_after_r5": ranked_owners_by_r5_arm[
             "r5_all_four_items"
+        ],
+        "r6_cumulative_progression_order": [
+            "r5_all_four_items",
+            "r6_step1_ice_content_accumulation",
+            "r6_step1_plus_step2_snow_update",
+        ],
+        "r6_isolated_arms_from_r5": [
+            "r5_all_four_items",
+            "r6_step1_ice_content_accumulation",
+            "r6_isolated_step2_snow_update",
+        ],
+        "r6_transitions": {
+            k: r5_transitions[k]
+            for k in (
+                "r5_baseline_to_r6_step1_ice_content_accumulation",
+                "r6_step1_to_r6_step1_plus_step2_snow_update",
+                "r5_baseline_to_r6_step1_plus_step2_snow_update",
+                "r5_baseline_to_r6_isolated_step2_snow_update",
+            )
+        },
+        "remaining_owner_ranking_by_r6_arm": {
+            k: ranked_owners_by_r5_arm[k]
+            for k in (
+                "r5_all_four_items",
+                "r6_step1_ice_content_accumulation",
+                "r6_step1_plus_step2_snow_update",
+                "r6_isolated_step2_snow_update",
+            )
+        },
+        "remaining_owner_ranking_after_r6": ranked_owners_by_r5_arm[
+            "r6_step1_plus_step2_snow_update"
         ],
     }
 

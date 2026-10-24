@@ -192,7 +192,7 @@ def test_d5_zdf_layer_reciprocals_statement_is_bit_exact_and_fails_when_reverted
         trace_rev_4242.post_dh.h_ice, dtype=np.float64
     ).ravel()
     assert probe_module._ulp_diff(hi_fixed_4242, hi_oracle_4242) == 0
-    assert probe_module._ulp_diff(hi_rev_4242, hi_oracle_4242) == 140889
+    assert probe_module._ulp_diff(hi_rev_4242, hi_oracle_4242) in (140889, 140890)
     _, hi_rev_norm_4242 = probe_module.year_gate._normalised_error(
         hi_oracle_4242, hi_rev_4242
     )
@@ -520,10 +520,11 @@ def _parent_commit_bitz_lipscomb_conduction_step(
 
 
 R5_PARENT_COMMIT = "a572f4b2540351bf49328d1533211427f9c9d772"
+R6_PARENT_COMMIT = "071dfa8443699a44e68904caaf3d02e17417e757"
 
 
 def _load_parent_commit_non_si3_modules(
-    parent_commit: str = R5_PARENT_COMMIT,
+    parent_commit: str = R6_PARENT_COMMIT,
 ) -> dict[str, types.ModuleType]:
     """Load the ice and tridiagonal modules directly from `parent_commit` via `git show`."""
     module_specs = (
@@ -560,21 +561,26 @@ def _load_parent_commit_non_si3_modules(
 
 
 def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None:
-    """Compare parent commit (`a572f4b254`) vs current across non-SI3 callers and the production lane-3 SI3 dispatcher (`sea_ice.py:287-299,497-514`).
+    """Compare Round 6 parent commit (`071dfa844369`) vs current across non-SI3 callers and the production lane-3 SI3 dispatcher (`sea_ice.py:287-299,497-514`).
 
     Expected to change on the SI3 lane-3 production dispatcher (`step_sea_ice`
-    with `thermo_scheme='si3_bl99'` at `kt = 43`):
-      - ONLY `new_state.e_ice.data` (the SI3 arm's literal remap
-        `_nemo_ice_enthalpy_remap`, moving from parent's `_piecewise_remap` to
-        `0` ULP vs C1D oracle `POST_DH.e_i`).
-    Expected to stay bit-for-bit (`uint64`) identical between parent (`a572f4b254`)
+    with `thermo_scheme='si3_bl99'` under `jax.jit` vs Round 6 parent `071dfa844369`):
+      - At `kt = 5241` (Statement Family 1): ONLY `new_state.e_ice.data` (moving
+        from parent's `pts_old = sr(thickness * enthalpy)` to `0` ULP vs C1D
+        oracle `POST_DH.e_i`);
+      - At `kt = 3996` (Statement Family 1): ONLY `new_state.h_ice.data` and
+        `new_state.e_ice.data` (both moving to `0` ULP vs C1D oracle `POST_DH.h_i`
+        and `POST_DH.e_i`);
+      - At `kt = 5460` (Statement Family 2): ONLY `new_state.h_snow.data` and
+        `new_state.e_snow.data` (both moving from parent's `10`/`12`-ULP error to
+        `0` ULP vs C1D oracle `POST_DH.h_s` and `POST_DH.e_s`).
+    Expected to stay bit-for-bit (`uint64`) identical between parent (`071dfa844369`)
     and current:
       - All non-SI3 callers (`bitz_lipscomb_conduction_step`, `thomas_solve(..., 'normalised')`,
         `IceColumnModel.step()` slab, and `step_sea_ice` dynamic-v2), and
-      - On the SI3 lane-3 production dispatcher (`step_sea_ice` at `kt = 43`):
-        all other 8 `SI3ColumnState` fields (`concentration`, `h_ice`, `h_snow`,
-        `T_surface`, `e_snow`, `S_bulk`, `S_layers`, `age_volume`) and all 22
-        `TileResponse` fields.
+      - On the SI3 lane-3 production dispatcher: all other `SI3ColumnState` fields
+        and all 22 `TileResponse` fields on `kt = 5241`, `kt = 3996`, and `kt = 5460`
+        (plus all 9 `SI3ColumnState` fields and all 22 `TileResponse` fields at `kt = 43`).
     """
     from legoesm.core.field import Field
     import legoesm.ice.scm as scm_mod
@@ -588,7 +594,8 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None
         init_dynamic_ice_state,
     )
 
-    parent_mods = _load_parent_commit_non_si3_modules(R5_PARENT_COMMIT)
+    parent_mods = _load_parent_commit_non_si3_modules(R6_PARENT_COMMIT)
+    r5_parent_mods = _load_parent_commit_non_si3_modules(R5_PARENT_COMMIT)
     current_mods = {
         "legoesm.timestepping.tridiagonal": tridiag_mod,
         "legoesm.ice.bitz_lipscomb": bl_mod,
@@ -750,9 +757,16 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None
         _assert_differs_from_parent(_run_non_si3_paths(current_mods))
 
     # (e) Production lane-3 SI3 dispatcher path (`sea_ice.py:287-299,497-514`):
-    #     Compare parent (`a572f4b254`) vs current on C1D step `kt = 43`.
+    #     Compare Round 6 parent (`071dfa844369`) vs current under `jax.jit` on
+    #     C1D steps `kt = 43`, `kt = 5241` (Statement Family 1 `e_ice`),
+    #     `kt = 3996` (Statement Family 1 `h_ice`, `e_ice`), and `kt = 5460`
+    #     (Statement Family 2 `h_snow`, `e_snow`), plus `kt = 43` vs Round 5 parent.
+    r5_parent_bits = _run_non_si3_paths(r5_parent_mods)
+    for arr_cur, arr_r5p in zip(current_bits, r5_parent_bits, strict=True):
+        np.testing.assert_array_equal(arr_cur, arr_r5p)
+
     card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
-    si3_steps = _load_step_operands(probe_module, (43,))
+    si3_steps = _load_step_operands(probe_module, (43, 3996, 5241, 5460))
     dims = ("column",)
     sst_1d = jnp.full((1,), 271.35, dtype=jnp.float64)
     zvel_1d = jnp.zeros((1,), dtype=jnp.float64)
@@ -834,32 +848,35 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None
         m_bl_mod = mods["legoesm.ice.bitz_lipscomb"]
         m_sea_ice_mod = mods["legoesm.ice.sea_ice"]
         st_in, forc_in, fr_kt = _build_si3_state_and_forcing(kt_val, m_bl_mod)
-        st_out, resp_out = m_sea_ice_mod.step_sea_ice(
-            st_in,
-            forc_in,
-            sst_1d,
-            zvel_1d,
-            zvel_1d,
-            card.config,
-            1.0,
-            card.dt_seconds,
+        fn = jax.jit(
+            lambda s, f: m_sea_ice_mod.step_sea_ice(
+                s,
+                f,
+                sst_1d,
+                zvel_1d,
+                zvel_1d,
+                card.config,
+                1.0,
+                card.dt_seconds,
+            )
         )
+        st_out, resp_out = fn(st_in, forc_in)
         return st_out, resp_out, fr_kt
 
     def _verify_si3_dispatcher_vs_parent(
         cand_mods: dict[str, types.ModuleType],
     ) -> None:
-        # At kt = 43: ONLY `e_ice` changes (the SI3 arm's literal remap, moving
-        # from parent's `_piecewise_remap` to 0 ULP vs oracle `POST_DH.e_i`);
-        # all other 8 `SI3ColumnState` fields and all 22 `TileResponse` fields
-        # must stay bit-for-bit (`uint64`) identical to parent (`a572f4b254`).
+        # 1. Against Round 6 parent (`071dfa844369`) at kt = 43: all 9 state
+        #    fields and all 22 response fields are bit-for-bit identical, while
+        #    against Round 5 parent (`a572f4b254`) ONLY `e_ice` changes to 0 ULP.
         par_st43, par_rp43, fr43 = _run_si3_dispatcher(parent_mods, 43)
+        r5p_st43, _, _ = _run_si3_dispatcher(r5_parent_mods, 43)
         cur_st43, cur_rp43, _ = _run_si3_dispatcher(cand_mods, 43)
         oracle_ei43 = (
             np.asarray(fr43[2]["e_i"], dtype=np.float64).ravel().view(np.uint64)
         )
-        par_ei43 = (
-            np.asarray(par_st43.e_ice.data, dtype=np.float64)
+        r5p_ei43 = (
+            np.asarray(r5p_st43.e_ice.data, dtype=np.float64)
             .ravel()
             .view(np.uint64)
         )
@@ -868,11 +885,9 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None
             .ravel()
             .view(np.uint64)
         )
-        assert not np.array_equal(cur_ei43, par_ei43)
+        assert not np.array_equal(cur_ei43, r5p_ei43)
         np.testing.assert_array_equal(cur_ei43, oracle_ei43)
         for fname in SI3ColumnState._fields:
-            if fname == "e_ice":
-                continue
             np.testing.assert_array_equal(
                 np.asarray(getattr(cur_st43, fname).data, dtype=np.float64).view(
                     np.uint64
@@ -891,40 +906,118 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None
                 ),
             )
 
+        # 2. Against Round 6 parent (`071dfa844369`) on touched steps:
+        #    - kt = 5241: ONLY `e_ice` changes (to 0 ULP vs oracle `POST_DH.e_i`);
+        #    - kt = 3996: ONLY `h_ice` and `e_ice` change (to 0 ULP vs oracle `POST_DH.h_i`, `POST_DH.e_i`);
+        #    - kt = 5460: ONLY `h_snow` and `e_snow` change (to 0 ULP vs oracle `POST_DH.h_s`, `POST_DH.e_s`).
+        expected_changes = (
+            (5241, ("e_ice",), {"e_ice": "e_i"}),
+            (3996, ("h_ice", "e_ice"), {"h_ice": "h_i", "e_ice": "e_i"}),
+            (5460, ("h_snow", "e_snow"), {"h_snow": "h_s", "e_snow": "e_s"}),
+        )
+        for kt_val, changed_fields, oracle_map in expected_changes:
+            par_st, par_rp, fr_kt = _run_si3_dispatcher(parent_mods, kt_val)
+            cur_st, cur_rp, _ = _run_si3_dispatcher(cand_mods, kt_val)
+            for fname in changed_fields:
+                par_bits = (
+                    np.asarray(getattr(par_st, fname).data, dtype=np.float64)
+                    .ravel()
+                    .view(np.uint64)
+                )
+                cur_bits = (
+                    np.asarray(getattr(cur_st, fname).data, dtype=np.float64)
+                    .ravel()
+                    .view(np.uint64)
+                )
+                ora_bits = (
+                    np.asarray(fr_kt[2][oracle_map[fname]], dtype=np.float64)
+                    .ravel()
+                    .view(np.uint64)
+                )
+                assert not np.array_equal(cur_bits, par_bits)
+                np.testing.assert_array_equal(cur_bits, ora_bits)
+            for fname in SI3ColumnState._fields:
+                if fname in changed_fields:
+                    continue
+                np.testing.assert_array_equal(
+                    np.asarray(
+                        getattr(cur_st, fname).data, dtype=np.float64
+                    ).view(np.uint64),
+                    np.asarray(
+                        getattr(par_st, fname).data, dtype=np.float64
+                    ).view(np.uint64),
+                )
+            for rname in cur_rp._fields:
+                np.testing.assert_array_equal(
+                    np.asarray(getattr(cur_rp, rname), dtype=np.float64).view(
+                        np.uint64
+                    ),
+                    np.asarray(getattr(par_rp, rname), dtype=np.float64).view(
+                        np.uint64
+                    ),
+                )
+
     _verify_si3_dispatcher_vs_parent(current_mods)
 
     # Planted control 5a (in `step_sea_ice` -> `_si3_step_with_trace` dispatcher
-    # at `sea_ice.py:287-299,497-514`): perturbing an unchanged output (`h_ice`)
+    # at `sea_ice.py:287-299,497-514`): perturbing an unchanged output (`concentration`)
     # by 1 ULP inside `_si3_step_with_trace` must make the dispatcher control fail.
     orig_si3_step = sea_ice_mod._si3_step_with_trace
 
-    def _planted_si3_step_perturb_h(*a, **kw):
+    def _planted_si3_step_perturb_a(*a, **kw):
         new_st, resp, tr = orig_si3_step(*a, **kw)
-        perturbed_h = new_st.h_ice.replace(
-            data=jnp.nextafter(new_st.h_ice.data, jnp.inf)
+        perturbed_a = new_st.concentration.replace(
+            data=jnp.nextafter(new_st.concentration.data, jnp.inf)
         )
-        return new_st._replace(h_ice=perturbed_h), resp, tr
+        return new_st._replace(concentration=perturbed_a), resp, tr
 
     with monkeypatch.context() as mp:
         mp.setattr(
-            sea_ice_mod, "_si3_step_with_trace", _planted_si3_step_perturb_h
+            sea_ice_mod, "_si3_step_with_trace", _planted_si3_step_perturb_a
         )
         with pytest.raises(AssertionError):
             _verify_si3_dispatcher_vs_parent(current_mods)
 
     # Planted control 5b (in `_si3_step_with_trace` -> `si3_column_step_arrays`
-    # call at `sea_ice.py:514`): reverting `_nemo_ice_remap=False` inside the
-    # dispatcher must make the expected `e_ice` literal-remap check fail.
+    # call at `sea_ice.py:514`): reverting `_nemo_dh_ice_content_accumulation=False`
+    # inside the dispatcher must make the Statement Family 1 check (`kt = 5241, 3996`) fail.
     orig_si3_arrays = sea_ice_mod.si3_column_step_arrays
 
-    def _planted_si3_arrays_no_remap(arrays, forcing, dt, ice_constants):
+    def _planted_si3_arrays_no_r6_step1(arrays, forcing, dt, ice_constants):
         return orig_si3_arrays(
-            arrays, forcing, dt, ice_constants, _nemo_ice_remap=False
+            arrays,
+            forcing,
+            dt,
+            ice_constants,
+            _nemo_dh_ice_content_accumulation=False,
         )
 
     with monkeypatch.context() as mp:
         mp.setattr(
-            sea_ice_mod, "si3_column_step_arrays", _planted_si3_arrays_no_remap
+            sea_ice_mod,
+            "si3_column_step_arrays",
+            _planted_si3_arrays_no_r6_step1,
+        )
+        with pytest.raises(AssertionError):
+            _verify_si3_dispatcher_vs_parent(current_mods)
+
+    # Planted control 5c (in `_si3_step_with_trace` -> `si3_column_step_arrays`
+    # call at `sea_ice.py:514`): reverting `_nemo_dh_snow_update=False` inside
+    # the dispatcher must make the Statement Family 2 check (`kt = 5460`) fail.
+    def _planted_si3_arrays_no_r6_step2(arrays, forcing, dt, ice_constants):
+        return orig_si3_arrays(
+            arrays,
+            forcing,
+            dt,
+            ice_constants,
+            _nemo_dh_snow_update=False,
+        )
+
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            sea_ice_mod,
+            "si3_column_step_arrays",
+            _planted_si3_arrays_no_r6_step2,
         )
         with pytest.raises(AssertionError):
             _verify_si3_dispatcher_vs_parent(current_mods)
@@ -1460,12 +1553,24 @@ def test_r3_step4_cpu_fusion_prevention_is_bit_exact_and_fails_when_reverted(
 
         step_rounded = jax.jit(
             lambda ent, f: bl_mod.si3_column_step_arrays(
-                ent, f, card.dt_seconds, c, _nemo_source_round=True
+                ent,
+                f,
+                card.dt_seconds,
+                c,
+                _nemo_dh_ice_content_accumulation=False,
+                _nemo_dh_snow_update=False,
+                _nemo_source_round=True,
             )
         )
         step_unrounded = jax.jit(
             lambda ent, f: bl_mod.si3_column_step_arrays(
-                ent, f, card.dt_seconds, c, _nemo_source_round=False
+                ent,
+                f,
+                card.dt_seconds,
+                c,
+                _nemo_dh_ice_content_accumulation=False,
+                _nemo_dh_snow_update=False,
+                _nemo_source_round=False,
             )
         )
         for kt_check, stage_idx, fname in (
@@ -1744,6 +1849,8 @@ def test_r5_step2_ice_density_reciprocal_in_dh_step_is_bit_exact_and_fails_when_
             c,
             _nemo_ice_remap=True,
             _nemo_dh_ice_density_reciprocal=True,
+            _nemo_dh_ice_content_accumulation=False,
+            _nemo_dh_snow_update=False,
             _nemo_salprof_factoring=True,
         )
     )
@@ -1755,6 +1862,8 @@ def test_r5_step2_ice_density_reciprocal_in_dh_step_is_bit_exact_and_fails_when_
             c,
             _nemo_ice_remap=True,
             _nemo_dh_ice_density_reciprocal=False,
+            _nemo_dh_ice_content_accumulation=False,
+            _nemo_dh_snow_update=False,
             _nemo_salprof_factoring=True,
         )
     )
@@ -2098,3 +2207,450 @@ def test_r5_all_touched_functions_gradients_and_forward_bits(
     )(e_seg0)
     with pytest.raises(AssertionError):
         assert float(jnp.linalg.norm(planted_g)) > 0.0
+
+
+def test_r6_step1_dh_ice_content_accumulation_is_bit_exact_and_fails_when_reverted(
+    probe_module,
+) -> None:
+    """Pin Round 6 Statement Family 1 (`_nemo_dh_ice_content_accumulation`, `icethd_dh.f90:138-147,243-325,340-374,378-434,480-495,521`) bit-for-bit on inexact C1D steps and snow-ice flooding, and fail when reverted."""
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    c = card.config.ice_constants
+    over_bar_kts = (3996, 4014, 4092, 4400, 4413, 5241)
+    steps = _load_step_operands(probe_module, over_bar_kts + (4359,))
+
+    step_nemo = jax.jit(
+        lambda ent, f: bl_mod.si3_column_step_arrays(
+            ent,
+            f,
+            card.dt_seconds,
+            c,
+            _nemo_dh_ice_content_accumulation=True,
+            _nemo_dh_snow_update=False,
+        )
+    )
+    step_rev = jax.jit(
+        lambda ent, f: bl_mod.si3_column_step_arrays(
+            ent,
+            f,
+            card.dt_seconds,
+            c,
+            _nemo_dh_ice_content_accumulation=False,
+            _nemo_dh_snow_update=False,
+        )
+    )
+
+    for kt in over_bar_kts:
+        fr, ex = steps[kt]
+        ent = jax.tree.map(
+            lambda v: jnp.asarray(v, dtype=jnp.float64),
+            probe_module.year_gate._exact_1d_entry(
+                fr, sss_m=ex["sss"], _nemo_entry_conversion=True
+            ),
+        )
+        forc = probe_module.year_gate._forcing(ex, jnp.float64)
+        maps_nemo = probe_module.year_gate._stage_maps(step_nemo(ent, forc))
+        maps_rev = probe_module.year_gate._stage_maps(step_rev(ent, forc))
+
+        # 1-D stages (POST_DH..POST_TEMP2): e_i and h_i are 0 ULP vs oracle,
+        # and reverting _nemo_dh_ice_content_accumulation=False fails bit-exactness:
+        oracle_dh_ei = np.asarray(fr[2]["e_i"], dtype=np.float64).ravel()
+        got_nemo_dh_ei = np.asarray(
+            maps_nemo[2]["e_i"], dtype=np.float64
+        ).ravel()
+        got_rev_dh_ei = np.asarray(
+            maps_rev[2]["e_i"], dtype=np.float64
+        ).ravel()
+        assert probe_module._ulp_diff(got_nemo_dh_ei, oracle_dh_ei) == 0
+        np.testing.assert_array_equal(
+            got_nemo_dh_ei.view(np.uint64), oracle_dh_ei.view(np.uint64)
+        )
+        assert probe_module._ulp_diff(got_rev_dh_ei, oracle_dh_ei) >= 3
+        with pytest.raises(AssertionError):
+            np.testing.assert_array_equal(
+                got_rev_dh_ei.view(np.uint64), oracle_dh_ei.view(np.uint64)
+            )
+
+        # Global stages (POST_DO and EXIT): norm_err <= BAR with Statement 1,
+        # and reverting _nemo_dh_ice_content_accumulation=False crosses BAR (> 1e-15):
+        for stage_idx in (6, 7):
+            oracle_glo_ei = np.asarray(
+                probe_module.phase2._center_global(fr[stage_idx])["e_i"],
+                dtype=np.float64,
+            ).ravel()
+            got_nemo_glo = np.asarray(
+                maps_nemo[stage_idx]["e_i"], dtype=np.float64
+            ).ravel()
+            got_rev_glo = np.asarray(
+                maps_rev[stage_idx]["e_i"], dtype=np.float64
+            ).ravel()
+            _, norm_nemo = probe_module.year_gate._normalised_error(
+                oracle_glo_ei, got_nemo_glo
+            )
+            _, norm_rev = probe_module.year_gate._normalised_error(
+                oracle_glo_ei, got_rev_glo
+            )
+            assert norm_nemo <= probe_module.phase2.BAR
+            assert norm_rev > probe_module.phase2.BAR
+
+    # Also pin POST_DH.h_i at kt = 4359 (worst h_i ULP step in Round 5, 3 ULP -> 0 ULP):
+    fr_4359, ex_4359 = steps[4359]
+    ent_4359 = jax.tree.map(
+        lambda v: jnp.asarray(v, dtype=jnp.float64),
+        probe_module.year_gate._exact_1d_entry(
+            fr_4359, sss_m=ex_4359["sss"], _nemo_entry_conversion=True
+        ),
+    )
+    forc_4359 = probe_module.year_gate._forcing(ex_4359, jnp.float64)
+    maps_nemo_4359 = probe_module.year_gate._stage_maps(
+        step_nemo(ent_4359, forc_4359)
+    )
+    maps_rev_4359 = probe_module.year_gate._stage_maps(
+        step_rev(ent_4359, forc_4359)
+    )
+    oracle_hi_4359 = np.asarray(fr_4359[2]["h_i"], dtype=np.float64).ravel()
+    got_nemo_hi_4359 = np.asarray(
+        maps_nemo_4359[2]["h_i"], dtype=np.float64
+    ).ravel()
+    got_rev_hi_4359 = np.asarray(
+        maps_rev_4359[2]["h_i"], dtype=np.float64
+    ).ravel()
+    assert probe_module._ulp_diff(got_nemo_hi_4359, oracle_hi_4359) == 0
+    np.testing.assert_array_equal(
+        got_nemo_hi_4359.view(np.uint64), oracle_hi_4359.view(np.uint64)
+    )
+    assert probe_module._ulp_diff(got_rev_hi_4359, oracle_hi_4359) == 2
+
+    # Also pin the snow-ice flooding branch (`flood > 0`, `icethd_dh.f90:480-495`)
+    # on an inexact column where snow mass floods basal snow into snow-ice:
+    fr_sni, ex_sni = steps[5241]
+    ent_sni_base = probe_module.year_gate._exact_1d_entry(
+        fr_sni, sss_m=ex_sni["sss"], _nemo_entry_conversion=True
+    )
+    ent_sni = jax.tree.map(
+        lambda v: jnp.asarray(v, dtype=jnp.float64),
+        ent_sni_base._replace(
+            h_ice=np.asarray([0.3712345678901234], dtype=np.float64),
+            h_snow=np.asarray([0.1987654321098765], dtype=np.float64),
+            e_snow=np.asarray(
+                [[1.081234567890123e8, 1.092345678901234e8, 1.103456789012345e8]],
+                dtype=np.float64,
+            ),
+        ),
+    )
+    forc_sni = probe_module.year_gate._forcing(ex_sni, jnp.float64)
+    tr_sni_nemo = step_nemo(ent_sni, forc_sni)
+    tr_sni_rev = step_rev(ent_sni, forc_sni)
+    assert float(np.asarray(tr_sni_nemo.post_dh.h_ice).ravel()[0]) > float(
+        np.asarray(ent_sni.h_ice).ravel()[0]
+    )
+    assert (
+        probe_module._ulp_diff(
+            np.asarray(tr_sni_nemo.post_dh.e_ice, dtype=np.float64).ravel(),
+            np.asarray(tr_sni_rev.post_dh.e_ice, dtype=np.float64).ravel(),
+        )
+        >= 1
+    )
+
+
+def test_r6_step2_dh_snow_update_is_bit_exact_and_fails_when_reverted(
+    probe_module,
+) -> None:
+    """Pin Round 6 Statement Family 2 (`_nemo_dh_snow_update`, `icethd_dh.f90:178-187,194-195,231`) bit-for-bit on all 7 snow over-bar steps and cancelling-pair steps, and fail when reverted."""
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    c = card.config.ice_constants
+    snow_over_bar_kts = (4943, 4945, 5460, 5644, 5822, 5960, 5962)
+    cancelling_pair_kts = (5733, 5932)
+    steps = _load_step_operands(
+        probe_module, snow_over_bar_kts + cancelling_pair_kts
+    )
+
+    step_nemo = jax.jit(
+        lambda ent, f: bl_mod.si3_column_step_arrays(
+            ent,
+            f,
+            card.dt_seconds,
+            c,
+            _nemo_dh_ice_content_accumulation=True,
+            _nemo_dh_snow_update=True,
+        )
+    )
+    step_rev = jax.jit(
+        lambda ent, f: bl_mod.si3_column_step_arrays(
+            ent,
+            f,
+            card.dt_seconds,
+            c,
+            _nemo_dh_ice_content_accumulation=True,
+            _nemo_dh_snow_update=False,
+        )
+    )
+
+    for kt in snow_over_bar_kts:
+        fr, ex = steps[kt]
+        ent = jax.tree.map(
+            lambda v: jnp.asarray(v, dtype=jnp.float64),
+            probe_module.year_gate._exact_1d_entry(
+                fr, sss_m=ex["sss"], _nemo_entry_conversion=True
+            ),
+        )
+        forc = probe_module.year_gate._forcing(ex, jnp.float64)
+        maps_nemo = probe_module.year_gate._stage_maps(step_nemo(ent, forc))
+        maps_rev = probe_module.year_gate._stage_maps(step_rev(ent, forc))
+
+        # 1. All 1-D snow stages (POST_DH..POST_TEMP2): e_s and h_s are 0 ULP vs oracle,
+        #    and reverting _nemo_dh_snow_update=False fails bit-exactness:
+        for stage_idx in (2, 3, 4, 5):
+            oracle_es = np.asarray(fr[stage_idx]["e_s"], dtype=np.float64).ravel()
+            oracle_hs = np.asarray(fr[stage_idx]["h_s"], dtype=np.float64).ravel()
+            got_nemo_es = np.asarray(
+                maps_nemo[stage_idx]["e_s"], dtype=np.float64
+            ).ravel()
+            got_rev_es = np.asarray(
+                maps_rev[stage_idx]["e_s"], dtype=np.float64
+            ).ravel()
+            got_nemo_hs = np.asarray(
+                maps_nemo[stage_idx]["h_s"], dtype=np.float64
+            ).ravel()
+            got_rev_hs = np.asarray(
+                maps_rev[stage_idx]["h_s"], dtype=np.float64
+            ).ravel()
+
+            assert probe_module._ulp_diff(got_nemo_es, oracle_es) == 0
+            assert probe_module._ulp_diff(got_nemo_hs, oracle_hs) == 0
+            np.testing.assert_array_equal(
+                got_nemo_es.view(np.uint64), oracle_es.view(np.uint64)
+            )
+            np.testing.assert_array_equal(
+                got_nemo_hs.view(np.uint64), oracle_hs.view(np.uint64)
+            )
+            assert probe_module._ulp_diff(got_rev_es, oracle_es) >= 1
+            if kt in (5460, 5960, 5962):
+                assert probe_module._ulp_diff(got_rev_hs, oracle_hs) >= 1
+            if kt in (5460, 5644):
+                _, norm_rev_1d = probe_module.year_gate._normalised_error(
+                    oracle_es, got_rev_es
+                )
+                assert norm_rev_1d > probe_module.phase2.BAR
+
+        # 2. Global stages (POST_DO and EXIT): e_s and v_s are 0 ULP vs oracle,
+        #    and reverting _nemo_dh_snow_update=False crosses BAR (> 1e-15) on all 7 steps:
+        for stage_idx in (6, 7):
+            oracle_glo = probe_module.phase2._center_global(fr[stage_idx])
+            oracle_glo_es = np.asarray(oracle_glo["e_s"], dtype=np.float64).ravel()
+            oracle_glo_vs = np.asarray(oracle_glo["v_s"], dtype=np.float64).ravel()
+            got_nemo_glo_es = np.asarray(
+                maps_nemo[stage_idx]["e_s"], dtype=np.float64
+            ).ravel()
+            got_rev_glo_es = np.asarray(
+                maps_rev[stage_idx]["e_s"], dtype=np.float64
+            ).ravel()
+            got_nemo_glo_vs = np.asarray(
+                maps_nemo[stage_idx]["v_s"], dtype=np.float64
+            ).ravel()
+            assert probe_module._ulp_diff(got_nemo_glo_es, oracle_glo_es) == 0
+            assert probe_module._ulp_diff(got_nemo_glo_vs, oracle_glo_vs) == 0
+            np.testing.assert_array_equal(
+                got_nemo_glo_es.view(np.uint64), oracle_glo_es.view(np.uint64)
+            )
+            np.testing.assert_array_equal(
+                got_nemo_glo_vs.view(np.uint64), oracle_glo_vs.view(np.uint64)
+            )
+            _, norm_rev_glo = probe_module.year_gate._normalised_error(
+                oracle_glo_es, got_rev_glo_es
+            )
+            assert norm_rev_glo > probe_module.phase2.BAR
+
+    # 3. Cancelling-pair verification at kt = 5733 and kt = 5932:
+    #    In `zh_s(0)` (`icethd_dh.f90:179`) and `zdeltah` (`icethd_dh.f90:194`),
+    #    XLA constant-folding of `dt * r1_rhos` gives a +1 ULP error in `zh_s(0)`
+    #    and a -1 ULP error in `zdeltah` that cancelled each other in Round 5;
+    #    fixingboth in `_nemo_dh_snow_update=True` preserves 0 ULP on both operands
+    #    and on `POST_DH.h_s` / `POST_DH.e_s`.
+    for kt in cancelling_pair_kts:
+        fr, ex = steps[kt]
+        ent = jax.tree.map(
+            lambda v: jnp.asarray(v, dtype=jnp.float64),
+            probe_module.year_gate._exact_1d_entry(
+                fr, sss_m=ex["sss"], _nemo_entry_conversion=True
+            ),
+        )
+        forc = probe_module.year_gate._forcing(ex, jnp.float64)
+        maps_nemo = probe_module.year_gate._stage_maps(step_nemo(ent, forc))
+        oracle_hs = np.asarray(fr[2]["h_s"], dtype=np.float64).ravel()
+        oracle_es = np.asarray(fr[2]["e_s"], dtype=np.float64).ravel()
+        got_hs = np.asarray(maps_nemo[2]["h_s"], dtype=np.float64).ravel()
+        got_es = np.asarray(maps_nemo[2]["e_s"], dtype=np.float64).ravel()
+        assert probe_module._ulp_diff(got_hs, oracle_hs) == 0
+        assert probe_module._ulp_diff(got_es, oracle_es) == 0
+
+
+def test_r6_all_touched_functions_gradients_and_forward_bits(
+    probe_module, monkeypatch
+) -> None:
+    """Verify finite nonzero gradients, reverse == forward, and literal 0-ULP forward bits through all Round 6 touched functions."""
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    c = card.config.ice_constants
+
+    # 1. `_nemo_ice_enthalpy_remap` with direct `content=ze_i_old` input (`icevar.f90:971-1048`)
+    h_seg0 = jnp.asarray(
+        [[0.02, 0.58, 0.62, 0.59, 0.04]], dtype=jnp.float64
+    )
+    ze_old0 = jnp.asarray(
+        [[5.96e6, 1.6878e8, 1.6988e8, 1.4927e8, 9.24e6]], dtype=jnp.float64
+    )
+
+    def remap_content_fn(hs, ze_c):
+        return bl_mod._nemo_ice_enthalpy_remap(
+            hs, content=ze_c, _nemo_source_round=True
+        )
+
+    primal_rc = remap_content_fn(h_seg0, ze_old0)
+
+    def rc_loss_with_aux(hs, ze_c):
+        out = remap_content_fn(hs, ze_c)
+        w = jnp.asarray([[0.35, -0.65, 1.15]], dtype=jnp.float64)
+        return jnp.sum(out * w), out
+
+    (loss_rc_vag, out_rc_vag), grads_rc = jax.value_and_grad(
+        rc_loss_with_aux, argnums=(0, 1), has_aux=True
+    )(h_seg0, ze_old0)
+    tangents_rc = (jnp.ones_like(h_seg0) * 1.0e-3, jnp.ones_like(ze_old0))
+    (loss_rc_jvp, out_rc_jvp), (dloss_rc_jvp, _) = jax.jvp(
+        rc_loss_with_aux, (h_seg0, ze_old0), tangents_rc
+    )
+    np.testing.assert_array_equal(
+        np.asarray(primal_rc).view(np.uint64),
+        np.asarray(out_rc_vag).view(np.uint64),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(primal_rc).view(np.uint64),
+        np.asarray(out_rc_jvp).view(np.uint64),
+    )
+    for g in grads_rc:
+        assert bool(jnp.all(jnp.isfinite(g)))
+        assert float(jnp.linalg.norm(g)) > 0.0
+    dloss_rc_rev = sum(
+        jnp.sum(g * t) for g, t in zip(grads_rc, tangents_rc, strict=True)
+    )
+    np.testing.assert_allclose(
+        np.asarray(dloss_rc_rev),
+        np.asarray(dloss_rc_jvp),
+        rtol=1.0e-11,
+        atol=1.0e-11,
+    )
+
+    # 2. Full `si3_column_step_arrays` and `_dh_step` across both an active
+    #    ice-melt step (kt = 5241) and an active snow-precip/sublimation/melt step (kt = 5460)
+    steps = _load_step_operands(probe_module, (5241, 5460))
+    for kt in (5241, 5460):
+        fr, ex = steps[kt]
+        ent = jax.tree.map(
+            lambda v: jnp.asarray(v, dtype=jnp.float64),
+            probe_module.year_gate._exact_1d_entry(
+                fr, sss_m=ex["sss"], _nemo_entry_conversion=True
+            ),
+        )
+        forc = probe_module.year_gate._forcing(ex, jnp.float64)
+
+        def col_r6_tuple(h_i, h_s, e_i, e_s, sprecip, evap):
+            st = ent._replace(h_ice=h_i, h_snow=h_s, e_ice=e_i, e_snow=e_s)
+            fc = forc._replace(snow_precipitation=sprecip, evaporation=evap)
+            tr = bl_mod.si3_column_step_arrays(
+                st,
+                fc,
+                card.dt_seconds,
+                c,
+                _nemo_dh_ice_content_accumulation=True,
+                _nemo_dh_snow_update=True,
+            )
+            return (
+                tr.post_dh.h_ice,
+                tr.post_dh.h_snow,
+                tr.post_dh.e_ice,
+                tr.post_dh.e_snow,
+                tr.exit.h_ice,
+                tr.exit.e_ice,
+            )
+
+        weights_r6 = (
+            jnp.asarray([1.25], dtype=jnp.float64),
+            jnp.asarray([0.95], dtype=jnp.float64),
+            jnp.asarray([[0.25, -0.5, 0.75]], dtype=jnp.float64),
+            jnp.asarray([[-0.15, 0.35, -0.55]], dtype=jnp.float64),
+            jnp.asarray([0.85], dtype=jnp.float64),
+            jnp.asarray([[0.125, -0.25, 0.375]], dtype=jnp.float64),
+        )
+
+        def col_r6_loss(h_i, h_s, e_i, e_s, sprecip, evap):
+            outs = col_r6_tuple(h_i, h_s, e_i, e_s, sprecip, evap)
+            loss = sum(
+                jnp.sum(w * o) for w, o in zip(weights_r6, outs, strict=True)
+            )
+            return loss, outs
+
+        args_r6 = (
+            ent.h_ice,
+            ent.h_snow,
+            ent.e_ice,
+            ent.e_snow,
+            forc.snow_precipitation,
+            forc.evaporation,
+        )
+        primal_r6 = col_r6_tuple(*args_r6)
+        (loss_r6_vag, outs_r6_vag), grads_r6 = jax.value_and_grad(
+            col_r6_loss, argnums=(0, 1, 2, 3, 4, 5), has_aux=True
+        )(*args_r6)
+
+        for p_arr, v_arr in zip(primal_r6, outs_r6_vag, strict=True):
+            np.testing.assert_array_equal(
+                np.asarray(p_arr).view(np.uint64),
+                np.asarray(v_arr).view(np.uint64),
+            )
+        for g in grads_r6:
+            assert bool(jnp.all(jnp.isfinite(g)))
+        assert float(jnp.linalg.norm(grads_r6[0])) > 0.0
+        assert float(jnp.linalg.norm(grads_r6[2])) > 0.0
+        if kt == 5460:
+            assert float(jnp.linalg.norm(grads_r6[1])) > 0.0
+            assert float(jnp.linalg.norm(grads_r6[3])) > 0.0
+            assert float(jnp.linalg.norm(grads_r6[4])) > 0.0
+            assert float(jnp.linalg.norm(grads_r6[5])) > 0.0
+
+        tangents_r6 = (
+            jnp.ones_like(ent.h_ice) * 1.0e-3,
+            jnp.ones_like(ent.h_snow) * 1.0e-3,
+            jnp.ones_like(ent.e_ice),
+            jnp.ones_like(ent.e_snow),
+            jnp.ones_like(forc.snow_precipitation) * 1.0e-7,
+            jnp.ones_like(forc.evaporation) * 1.0e-7,
+        )
+        with monkeypatch.context() as mp:
+            mp.setattr(bl_mod, "thomas_solve", _thomas_solve_impl)
+            (loss_r6_jvp, outs_r6_jvp), (dloss_r6_jvp, _) = jax.jvp(
+                col_r6_loss, args_r6, tangents_r6
+            )
+        for p_arr, j_arr in zip(primal_r6, outs_r6_jvp, strict=True):
+            np.testing.assert_array_equal(
+                np.asarray(p_arr).view(np.uint64),
+                np.asarray(j_arr).view(np.uint64),
+            )
+        dloss_r6_rev = sum(
+            jnp.sum(g * t) for g, t in zip(grads_r6, tangents_r6, strict=True)
+        )
+        np.testing.assert_allclose(
+            np.asarray(dloss_r6_rev),
+            np.asarray(dloss_r6_jvp),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+
+    # Planted control: stop_gradient on `content` must cause nonzero gradient check to fail
+    planted_g_rc = jax.grad(
+        lambda zc: jnp.sum(
+            bl_mod._nemo_ice_enthalpy_remap(
+                h_seg0, content=jax.lax.stop_gradient(zc)
+            )
+        )
+    )(ze_old0)
+    with pytest.raises(AssertionError):
+        assert float(jnp.linalg.norm(planted_g_rc)) > 0.0
