@@ -131,6 +131,9 @@ def _verify_source_order(record: dict) -> None:
         ("mxl_hmlp_output", "tke_hmlp_input"),
     ):
         _bits_equal(f[output], f[consumed], f"{output} differs at TKE entry")
+    # A zero shear field is valid at nit000 from rest.  Execution is proved
+    # by the writer's lsh2 flag and complete input-row census; the value gate
+    # therefore checks the producer-to-consumer handoff, not nonzeroness.
     _bits_equal(f["after_bc_en"][:, :, :1], f["matrix_rhs_en"][:, :, :1],
                 "surface TKE changed between boundary and matrix records")
     _bits_equal(f["matrix_rhs_en"][:, :, :1], f["after_solve_en"][:, :, :1],

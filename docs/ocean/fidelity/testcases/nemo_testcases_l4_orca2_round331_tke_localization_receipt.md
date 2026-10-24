@@ -1,12 +1,13 @@
-# ORCA2 round 331 — remaining TKE residual requires a source-order record
+# ORCA2 round 331 — first-step shear diagnosis and stored-velocity TKE boundary
 
 Date: 2026-10-24
 
 Base: `484b60f5b7da`; preregistration: `a69fa0005d23`; acquisition tool:
 `ba88fcbdb48e`.
 
-Disposition: **STOP_PROPOSAL; ACQUISITION_NEEDED; no model or configuration
-change**.
+Initial disposition: **STOP_PROPOSAL; ACQUISITION_NEEDED**.  The resume-3
+disposition at the end supersedes this after admitting the retained record;
+no configuration value changes.
 
 ## Answer
 
@@ -210,3 +211,144 @@ away, and every other card that executes the changed line is measured.  V1 is
 predicted unchanged because its deck disables this bottom boundary.  DINO is
 an explicit cross-card measurement obligation; GPU execution remains
 operator-only.
+
+## Resume-3 diagnosis: the refusal was a checker-premise defect
+
+**CONFIRMED — what the refused check tested.**  At producer commit
+`4e20a8af573e5484d0e331200d20284a8b3c8338`, `_verify_source_order` first
+required the recorded `sh2_output` to equal the value handed to TKE, then
+separately required at least one `sh2_output != 0.0`.  The latter was the
+`REFUSE: shear channel is inactive` premise.  It did not test whether the
+producer and consumer executed; it inferred execution from numerical
+nonzeroness.  The repaired gate keeps the bitwise producer-to-consumer check
+and explicitly admits a zero field at a from-rest first step
+(`nemo_testcase_l4_orca2_round331_tke_gate.py:124-146`).
+
+The observer did not silently preserve its zero initialization.  Its begin
+routine zeros storage and clears `lsh2`, while the `r331_sh2` call copies the
+computed array and sets `lsh2=.TRUE.`
+(`tke_round331_writer.F90:51-78`).  Finish refuses unless that flag is true and
+unless every TKE input, boundary, matrix and solve row was captured
+(`tke_round331_writer.F90:153-161`).  Thus the retained record proves both the
+producer call and the downstream TKE capture ran.
+
+**CONFIRMED — what the retained record holds.**  Rank 0 has 224,547 wet shear
+cells and rank 1 has 189,572, for 414,119 total.  Every wet binary64 value is
+exactly `+0.0`: min `0.0`, max `0.0`, nonzero count `0` on each rank.  Each
+rank's complete `sh2_output` is bit-identical to `tke_sh2_input`.  These are
+real observed zeros, not a missing or wrong array.
+
+**CONFIRMED — NEMO computes rather than skips the channel.**  The record build
+selects TKE (`ln_zdftke`) and initializes it
+(`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:266`).  That makes
+`l_zdfsh2=.TRUE.` under its resolved switches
+(`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:275-278`), and the
+time-step routine calls `zdf_sh2` before `zdf_tke`
+(`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:316-336`).
+`zdf_sh2` executes the `2:jpkm1` shear loop, horizontally averages it, and
+only then explicitly zeroes the surface and bottom output levels
+(`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfsh2.f90:83-119`).
+
+At `nit000`, this is a start from rest: NEMO sets `uu/vv(...,Kbb)=0` and copies
+that stored field to `Kmm`
+(`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/istate.f90:105-140`).  The
+shear formula therefore legitimately evaluates to zero everywhere even though
+it executes.  TKE consumes that live zero in its matrix/RHS
+(`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:411-428`).
+
+Diagnosis: the checker's nonzero premise was wrong; the observer captured the
+right `p_sh2` array.  A focused plant establishes non-vacuity: the untouched
+zero record passes, while moving one handoff word by one ULP refuses.  This is
+**CONFIRMED**, not merely plausible.
+
+## Retained-record readmission
+
+The refused directory was re-admitted with `--admit-existing`; NEMO was not
+rebuilt or rerun.  Admission is pinned to producer commit
+`4e20a8af573e5484d0e331200d20284a8b3c8338`, executable SHA-256
+`ad665a96be3b73ebbe83793c09e7996aba69fd191fb6510288be40d82161b0b3`, and
+rank-record SHA-256 values `920326db...a9a42d` and
+`168076b0...35fc89`.  The canonical retained directory is
+`orca2_rounds/round331/acquisition/orca1ice_tke331_kt1_np2`; its admission
+status is `PASS_R331_TKE_ADMISSION`.  All inherited same-program,
+determinism, reference and semantic plants pass/fail as specified.
+
+## First owning statement and single-statement change
+
+The CPU fp64 production-JIT replay is exact on all 430,552 wet loop cells
+through the recorded boundary, upper/lower/diagonal matrix arrays, and the
+complete RHS.  The baseline first differs after the solve/floor on 926 wet
+values, then on returned energy 901, `avm` 931 and `avt` 929.  Replacing only
+the recorded matrix leaves the solve census at 926; replacing only the
+recorded RHS closes it to zero.  Replaying the literal NEMO recurrence from
+the recorded arrays also reproduces `after_solve` bit-for-bit.  This names the
+RHS boundary, not the Thomas algorithm, as the first owning family.
+
+Inside that boundary, NEMO's bottom TKE condition reads stored `Kbb` velocity
+when it forms `zebot`
+(`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:287-295`).  At this
+first step `Kbb=Kmm=1` and the stored pair is zero.  legoESM instead formed the
+boundary from the already updated solver state.  The single landed production
+statement now passes the existing entry `u_now/v_now` pair into the bottom
+boundary call (`ocean_model_latlon_cgrid.py:13883-13885`).  Its fallback is
+unchanged for direct callers, and an incomplete pair refuses.  No selector,
+constant, deck, recipe or configuration value changed.
+
+The candidate replay confirms the owner.  Boundary, full matrix/RHS,
+solve/floor and returned energy are bit-identical on every wet and every loop
+cell.  Returned `avm` and `avt` improve from 931/929 unequal wet values to
+7/7, with maxima `5.551115123125783e-17` and
+`3.469446951953614e-18`; those seven are downstream source-order rounding,
+not a regression.  Evidence:
+`orca2_rounds/round331/localization/tke_statement_candidate.json`, SHA-256
+`b53a1e14dd43c71c3a48b42010b4f50f3e13c30d6d7ec62741198167da7a78e7`.
+
+## Decision-122/139, cross-card and gradient gates
+
+The pinned baseline is preregistration commit `0f463433e04e`; the candidate is
+`0034a5f2a469`.  All fourteen CPU fp64 production-JIT measurements passed the
+source-ladder gate.  The aggregate result is
+`PASS_R278_D122_DECISION`:
+
+| card / label | touched rows toward / away / equal | exact rows lost | first over-bar |
+|---|---:|---:|---|
+| rung 0 independent | 0 / 0 / 0 | 0 | equal |
+| OMT1--4 independent, each | 0 / 0 / 0 | 0 | equal |
+| rung 10 independent | 183 / 0 / 0 | 0 | equal |
+| rung 10 given NEMO entry | 183 / 0 / 0 | 0 | equal |
+
+For each rung-10 label, 43 moved rows are at kt 1--3 and 140 at kt 4--10;
+there is no away row at any step.  The kt-10 stage-3 sea-level maximum drops
+from `6.930562311546762e-8` to `4.20363743813823e-12` m in both labels.  The
+exact-loss plant fires on all seven pairs.  Aggregate evidence SHA-256:
+`a07f48e7fa44a509af75497e3e5464026cc79e12336b08af7984b102f2fc5fb1`.
+
+V1 does not execute this bottom boundary because its resolved card disables
+it (`nemo_testcase_v1_orca2tke/namelist_cfg:193`).  The NEMO-faithful DINO
+production card does execute it (`dino.py:1287`): three CPU steps are
+bit-identical on all 66 carried leaf/step outputs between the pinned trees.
+The reconstructed default-grid variant refuses before TKE because it lacks
+the now-required raw NEMO depth operands, so it does not execute the changed
+line and is not represented as a passing comparison.  DINO evidence SHA-256:
+`0a5806c70970d5af0d9fedee60a899dcc1ec238c2bb0a67b568f09e193477db9`.
+No GPU was used; the operator retains the month/GPU push gate.
+
+The preregistered rung-10 N=1 candidate gradient check is recorded below in
+the final gate ledger.  It must be complete, finite, reverse/forward
+consistent, and preserve forward parity; otherwise this round is held.
+
+## Resume-3 final gate ledger and disposition
+
+- Gate-premise repair plus plant: pass; focused round-331 tests pass.
+- Retained-output admission: `PASS_R331_TKE_ADMISSION`; no NEMO rerun.
+- Localization: post-solve/returned energy exact; `avm/avt` strictly better.
+- Decision 122/139: seven pairs, both labels, zero exact loss, zero away.
+- Other executing card: faithful DINO 66/66 leaf-steps bit-identical; GPU
+  remains operator-only.
+- No configuration change: **ASKED**.
+- Independent review: operator (Claude).
+
+Final disposition: **LANDED-pending operator review, push gate and DINO month
+gate**.  The only production statement landed is the stored-`Kbb` velocity
+operand at the existing TKE bottom boundary.  The next open TKE debt is the
+seven wet `avm/avt` source-order roundings after exact returned energy.
