@@ -1749,10 +1749,10 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:336':
         'CALL zdf_tke( kt, Kbb, Kmm, sh2, avm_k, avt_k )',
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:348-351': [
-        'DO jk =  2,  jpkm1',
+        ('DO jk =  2,  jpkm1', 1),
         'END DO   ;   END DO   ;   END DO', 4],
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:362-368': [
-        'IF( ln_zdfddm ) THEN',
+        ('IF( ln_zdfddm ) THEN', 2),
         'ENDIF', 7],
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:370-374': [
         '!* wave-induced mixing',
