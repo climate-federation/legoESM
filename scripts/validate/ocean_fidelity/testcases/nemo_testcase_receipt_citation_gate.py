@@ -4497,12 +4497,12 @@ CITATION_MAP = {
     'tke.py:3551-3641': [
         'for _ in range(max(1, int(n_iterations))):',
         ('prandtl_K_M=(preclosure_K_M if _carried_coeffs else None))', 2), 91],
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:285-294': [
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:285-293': [
         'IF( .NOT.ln_drg_OFF ) THEN',
-        'en(ji,jj,mbkt(ji,jj)+1) = MAX( zebot, rn_emin ) * ssmask(ji,jj)', 10],
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:706-712': [
-        'DO jk =  1,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)',
-        'dissl(ji,jj,jk) = zsqen / zmxld(ji,jk)', 7],
+        'en(ji,jj,mbkt(ji,jj)+1) = MAX( zebot, rn_emin ) * ssmask(ji,jj)', 9],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:706-711': [
+        ('DO jk =  1,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)', 2),
+        'dissl(ji,jj,jk) = zsqen / zmxld(ji,jk)', 6],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:234-275': [
         'IF( (ht_0(ji,jj) *(1._wp+r3t(ji,jj,Kmm))) /= 0._wp ) THEN ; zfact1',
         'zfact4(ji,jj) * SQRT( MAX( 0._wp, rn2(ji,jj,jk) ) )', 42],
