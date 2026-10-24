@@ -852,6 +852,7 @@ def test_atm_to_surface_builder_no_precip_zeroes_rain_and_snow():
     atm = R._build_atm_to_surface_core2(forc, ramp=1.0, with_precip=False)
     full = R._build_atm_to_surface_core2(forc, ramp=1.0)
     assert float(jnp.max(jnp.abs(full.precip_total))) > 0.0
+    assert float(jnp.max(jnp.abs(full.precip_snow))) > 0.0
     np.testing.assert_array_equal(np.asarray(atm.precip_total), 0.0)
     np.testing.assert_array_equal(np.asarray(atm.precip_snow), 0.0)
     np.testing.assert_array_equal(np.asarray(atm.sw_down), np.asarray(full.sw_down))
