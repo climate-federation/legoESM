@@ -137,3 +137,6 @@ review sandbox filesystem was read-only.
   Round 3 keys, appended every Round 4 entry, and omitted only the superseded duplicate Round 3 keys; in the `_NAME`
   matcher hunk, retained both Round 4 and Round 5 receipt names. At that conflict the combined map had 2,541 keys
   and zero duplicates; subsequent O1 commits bring the final map to 2,556 keys, still with zero duplicates.
+- Post-rebase parent control: the O1 invariance test's parent pin was re-anchored from the old lane base `a572f4b25403`
+  to the requested landed Round 5 tip `071dfa844369`; otherwise Round 5's intended one-ULP D5 `e_ice` change was
+  incorrectly charged to O1. No assertion, plant, comparison field, tolerance, model, tool, or receipt claim changed.

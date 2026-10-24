@@ -1,7 +1,7 @@
 """Fidelity and invariance tests for SI3 ladder rung O1 (`si3_r4`, `DECISION 159`).
 
 Covers:
-1. Parent (`a572f4b25403`) vs current commit `0`-ULP bit-identity across real
+1. Parent (`071dfa844369`) vs current commit `0`-ULP bit-identity across real
    non-SI3 callers (`bitz_lipscomb_conduction_step`, `IceColumnModel.step`,
    `step_sea_ice` slab and dynamic-v2) and real lane-3 SI3 callers
    (`SI3ColumnState`, `SI3ThermoConfig`, `si3_column_step_arrays`,
@@ -88,7 +88,7 @@ from legoesm.ice.bitz_lipscomb import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TESTCASES_DIR = REPO_ROOT / "scripts/validate/ocean_fidelity/testcases"
 ACQ_DIR = TESTCASES_DIR / "nemo_si3_o1_orca2_sas_acquisition"
-PARENT_COMMIT = "a572f4b25403"
+PARENT_COMMIT = "071dfa8443699a44e68904caaf3d02e17417e757"
 
 SPEC = importlib.util.spec_from_file_location(
     "nemo_si3_o1_orca2_sas_gate",
@@ -151,7 +151,7 @@ def _load_parent_commit_ice_modules(
 
 
 def test_o1_parent_vs_current_non_si3_and_lane3_callers_bit_identical(monkeypatch) -> None:
-    """Real non-SI3 and lane-3 callers (including production `step_sea_ice` + `_si3_step_with_trace`) match parent commit `a572f4b25403` to 0 ULP and fail under Plant P1."""
+    """Real non-SI3 and lane-3 callers (including production `step_sea_ice` + `_si3_step_with_trace`) match rebased parent `071dfa844369` to 0 ULP and fail under Plant P1."""
     import legoesm.ice.bitz_lipscomb as bl_mod
     import legoesm.ice.c1d_omip_l3 as c1d_mod
     import legoesm.ice.itd as itd_mod
