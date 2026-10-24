@@ -132,3 +132,8 @@ review sandbox filesystem was read-only.
   all 0 ULP over 107 field arrays on 16,433 interior, 281 seam and 135 fold wet T cells; 40 restart variables at
   kt 1 and kt 2 at 0 ULP. The old kt2-sss plant was vacuous because all 13,145 wet cells with an ice-free category
   sit above the 0.1333 branch point at both steps; the replacement plant fails on the real record (s_i off by 5 ULP).
+- Rebase conflict report (one file, three hunks): in the `FILES` hunk, kept the landed Round 5 phase2b-year entry and
+  appended every Round 4 file entry; in the `CITATION_MAP` hunk, kept every landed Round 5 entry and its re-anchored
+  Round 3 keys, appended every Round 4 entry, and omitted only the superseded duplicate Round 3 keys; in the `_NAME`
+  matcher hunk, retained both Round 4 and Round 5 receipt names. At that conflict the combined map had 2,541 keys
+  and zero duplicates; subsequent O1 commits bring the final map to 2,556 keys, still with zero duplicates.
