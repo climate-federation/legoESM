@@ -225,11 +225,31 @@ def assemble_record_avm(records: dict[int, dict]) -> np.ndarray:
     return np.concatenate(slabs, axis=0).transpose(1, 0, 2)
 
 
-def model_avm(root: Path, record_avm: np.ndarray) -> dict[str, object]:
+def base_lower_from_avm(avm, dz_after, e3w_now, wet):
+    """The production literal solver's first base-matrix coefficient."""
+    import jax.numpy as jnp
+
+    from legoesm.core.source_rounding import nemo_source_round
+
+    r = nemo_source_round
+    wet_f = jnp.asarray(wet, dtype=jnp.float64)
+    interface_wet = wet_f[..., 1:] * wet_f[..., :-1]
+    zdt2 = jnp.asarray(0.5, dtype=jnp.float64) * jnp.asarray(DT)
+    avm_sum = jnp.asarray(2.0, dtype=jnp.float64) * jnp.asarray(avm)
+    product = r(-zdt2 * avm_sum)
+    denominator = r(jnp.asarray(dz_after)[..., 1:] * jnp.asarray(e3w_now))
+    coefficient = r(product / denominator) * interface_wet
+    return jnp.concatenate([jnp.zeros_like(coefficient[..., :1]), coefficient], axis=-1)
+
+
+def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
     import jax
+    import jax.numpy as jnp
 
     from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.grids.operators_latlon_cgrid import interp_cell_to_uface
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import interp_to_v_points
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     _, shipped = rung10.card_fields(root)
@@ -245,6 +265,7 @@ def model_avm(root: Path, record_avm: np.ndarray) -> dict[str, object]:
     require(state_after.tke_avm is not None,
             "ordinary comparison step did not return its consumed avm")
     candidate = np.asarray(state_after.tke_avm.data, dtype=np.float64)
+    record_avm = assemble_record_avm(records)
     require(candidate.shape == record_avm.shape,
             f"model avm {candidate.shape} != record {record_avm.shape}")
     active = np.array(card.recipe.z_coord.is_active[..., 1:], dtype=bool, copy=True)
@@ -262,7 +283,45 @@ def model_avm(root: Path, record_avm: np.ndarray) -> dict[str, object]:
         row["first_under_ice_jik"] = None
     row["backend"] = jax.default_backend()
     row["dtype"] = str(candidate.dtype)
-    return row
+    candidate_faces = {
+        "u": np.asarray(interp_cell_to_uface(jnp.asarray(candidate)))[:, 1:],
+        "v": np.asarray(interp_to_v_points(
+            jnp.asarray(candidate), card.recipe.grid))[1:],
+    }
+    first_statement = {}
+    for component in COMPONENTS:
+        rank_rows = []
+        for rank in (0, 1):
+            record = records[rank]
+            header, fields = record["header"], record["fields"]
+            nx, ny, nz = (header[name] for name in ("nx", "ny", "nz"))
+            mesh = mesh_fields(root, rank)
+            wet = mesh[f"{component}mask"][..., :nz]
+            r3_kaa = native(fields[f"r3{component}_kaa"])[..., 0]
+            r3_kmm = native(fields[f"r3{component}_kmm"])[..., 0]
+            dz_after = mesh[f"e3{component}_0"][..., :nz] * (
+                np.float64(1.0) + r3_kaa[..., None] * wet)
+            e3w_now = mesh["e3w_1d"][1:nz][None, None, :] * (
+                np.float64(1.0) + r3_kmm[..., None])
+            i0 = rank * nx
+            face_avm = candidate_faces[component][:ny, i0:i0 + nx]
+            actual = np.asarray(jax.jit(base_lower_from_avm)(
+                jnp.asarray(face_avm), jnp.asarray(dz_after),
+                jnp.asarray(e3w_now), jnp.asarray(wet)))
+            expected = native(fields[f"{component}_base_zdf_low"])
+            support = np.zeros_like(wet, dtype=bool)
+            support[..., 1:] = (wet[..., 1:] * wet[..., :-1]) > 0.0
+            scored = score(actual, expected, support)
+            scored["rank"] = rank
+            if scored["first_unequal_jik"] is not None:
+                global_first = list(scored["first_unequal_jik"])
+                global_first[1] += i0
+                scored["first_unequal_global_jik"] = global_first
+            else:
+                scored["first_unequal_global_jik"] = None
+            rank_rows.append(scored)
+        first_statement[component] = rank_rows
+    return {"coefficient": row, "first_base_lower_statement": first_statement}
 
 
 def measure(root: Path, expect_commit: str, expect_tree: str) -> dict[str, object]:
@@ -283,14 +342,13 @@ def measure(root: Path, expect_commit: str, expect_tree: str) -> dict[str, objec
                for rank in (0, 1)}
     replay = {str(rank): replay_rank(records[rank], mesh_fields(root, rank))
               for rank in (0, 1)}
-    record_avm = assemble_record_avm(records)
     return {
         "format": "nemo-testcase-l4-orca2-round328-dynzdf-replay-v1",
         "worktree": stamp,
         "record_admission": admitted,
         "admission_refusals": refusals,
         "rank_replays": replay,
-        "model_avm_vs_record": model_avm(root, record_avm),
+        "model_avm_vs_record": model_avm(root, records),
     }
 
 
