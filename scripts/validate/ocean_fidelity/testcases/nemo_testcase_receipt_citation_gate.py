@@ -1304,6 +1304,17 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM/cpp_GYRE_OMIP_L2_P3_SM.fcm",
     "nemo_testcase_recipe.py":
         REPO / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py",
+    "nemo_testcase_v1_orca2tke/namelist_cfg": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/lanes/"
+        "gridladder_vmix/scripts/validate/ocean_fidelity/testcases/"
+        "nemo_testcase_v1_orca2tke/namelist_cfg"),
+    "gridladder_vmix/nemo_testcase_recipe.py": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/lanes/"
+        "gridladder_vmix/packages/ocean/legoesm/ocean/fidelity/"
+        "nemo_testcase_recipe.py"),
+    "nemo_testcase_l4_orca2_round330_dino_probe.py":
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4"
+             / "nemo_testcase_l4_orca2_round330_dino_probe.py",
     "nemo_testcase_l4_orca2_round226_fct_rhs_walk.py":
         REPO / "scripts/validate/ocean_fidelity/orca2_l4"
              / "nemo_testcase_l4_orca2_round226_fct_rhs_walk.py",
@@ -1775,6 +1786,23 @@ CITATION_MAP = {
     'tke.py:1803-1834': [
         'if bottom_dirichlet is not None:',
         'rhs = jnp.where(is_bottom, _e_bd[..., jnp.newaxis], rhs)', 32],
+    'nemo_testcase_recipe.py:2042': 'bottom_tke_bc=True,',
+    'nemo_testcase_v1_orca2tke/namelist_cfg:193':
+        'ln_drg_OFF  = .true.',
+    'gridladder_vmix/nemo_testcase_recipe.py:5083,5099': [
+        'bottom_tke_bc=False,',
+        't.bottom_tke_bc, t.tke_langmuir_evaluation, t.nemo_mxlice,', 2],
+    'dino.py:1287': '"tke_bottom_bc": True,',
+    'nemo_testcase_l4_orca2_round330_dino_probe.py:88-170': [
+        'def _tke_probe():',
+        'json.dumps(result, indent=2, sort_keys=True) + "\\n", encoding="utf-8")',
+        83],
+    'tke.py:1812-1817': [
+        'if bottom_level is None:',
+        'rhs = rhs.at[..., -1].set(_e_bd)', 6],
+    'tke.py:1664-1670': [
+        '# zd_up(jpkm1) enters zdiag(jpkm1) (zdftke.f90:419) but NOT the',
+        'jnp.zeros_like(literal_up[..., :1])], axis=-1)', 7],
     # ORCA2 round 328 Resume-8: transport writer scope and TKE ownership.
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:121':
         'ALLOCATE( zFu(jpi,jpj,jpk), zFv(jpi,jpj,jpk), zFw(jpi,jpj,jpk) )',
