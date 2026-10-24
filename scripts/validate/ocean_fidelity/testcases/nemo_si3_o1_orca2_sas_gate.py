@@ -1738,7 +1738,12 @@ def admit_evidence_directory(
     wi, wj = first_wet_ij(tmask, interior_only=True, nn_hls=cfg.nn_hls)
     dry_fixture = verify_dry_signed_zero_fixture(state_entry.v_i, tmask, nn_hls=cfg.nn_hls)
 
-    state_kt1 = si3_o1_step(state_entry, tmask=tmask, sss_m=sss_entry, config=cfg)
+    o1_step_jit = jax.jit(
+        lambda step_state, step_tmask, step_sss: si3_o1_step(
+            step_state, tmask=step_tmask, sss_m=step_sss, config=cfg
+        )
+    )
+    state_kt1 = o1_step_jit(state_entry, tmask, sss_entry)
     no_ice_wet = (np.asarray(tmask) != 0.0) & np.any(
         np.asarray(state_kt1.v_i) == 0.0, axis=2
     )
@@ -1753,7 +1758,7 @@ def admit_evidence_directory(
         branch_point = cfg.rn_simin / cfg.rn_sinew
         sss_step2_plant[sss_plant_i, sss_plant_j] = np.nextafter(branch_point, -np.inf)
         sss_step2 = jnp.asarray(sss_step2_plant, dtype=jnp.float64)
-    state_kt2 = si3_o1_step(state_kt1, tmask=tmask, sss_m=sss_step2, config=cfg)
+    state_kt2 = o1_step_jit(state_kt1, tmask, sss_step2)
 
     if plant == "1ulp-state":
         v_np = np.asarray(state_kt1.v_i).copy()
@@ -1844,7 +1849,7 @@ def admit_evidence_directory(
         config=cfg,
         ln_rstart=True,
     )
-    lego_rst_step2 = si3_o1_step(lego_rst_entry, tmask=tmask, sss_m=rst_sss_step2, config=cfg)
+    lego_rst_step2 = o1_step_jit(lego_rst_entry, tmask, rst_sss_step2)
 
     if plant == "rst-1ulp":
         v_rst_np = np.asarray(lego_rst_step2.v_i).copy()
@@ -1917,6 +1922,9 @@ def admit_evidence_directory(
         "binaries_checked": binaries_checked,
         "inputs_checked": inputs_checked,
         "gate_changed_since_run": gate_changed_since_run,
+        "execution_backend": jax.default_backend(),
+        "execution_jit": True,
+        "execution_x64": bool(jax.config.jax_enable_x64),
         "first_wet_t_ij": [wi, wj],
         "sss_m_kt1_sha256": hashlib.sha256(sss_step1_np.tobytes()).hexdigest(),
         "sss_m_kt2_sha256": hashlib.sha256(sss_step2_np.tobytes()).hexdigest(),
