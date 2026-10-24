@@ -1749,7 +1749,7 @@ FILES = {
 CITATION_MAP = {
     # ORCA2 round 328 Resume-6: the admitted final-ZDF frame is rank-0-only.
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/MY_SRC/stprk3.F90:411-422': [
-        'INTEGER, INTENT(in) :: kstp, klevel',
+        ('INTEGER, INTENT(in) :: kstp, klevel', 3),
         "& l4_canon_3d(avs,'T'), l4_canon_3d(en,'T')", 12],
     # ORCA2 round 328 Resume-5: exact zdf_phy observer boundaries.
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:336':

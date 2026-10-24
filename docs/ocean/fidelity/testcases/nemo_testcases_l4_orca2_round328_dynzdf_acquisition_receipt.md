@@ -348,6 +348,54 @@ The direct fixture/same-program battery passes 38 tests. The final validation
 below is performed from a clean committed tree. No NEMO executable was run,
 and no model or configuration changed.
 
+## Resume-6: rank-local admission and semantic refusal plants
+
+The independent Claude and Argon reviews both returned **HOLD** on the same
+rank-reference blocker. Both reviews otherwise confirmed observer placement,
+allocated-array use, same-program proof, checklist coverage, and containment.
+
+**CONFIRMED and corrected.** `oracle_zdf_entry_kt00000001.bin` is rank-0-only:
+the record routine returns when `.NOT.lwp` and then writes the canonical final
+ZDF fields at
+`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/MY_SRC/stprk3.F90:411-422`.
+The repaired gate therefore scores rank-0 final `avm`/`avt`/`avs` against that
+frame, but scores rank-1 final `avm` against rank 1's already admitted
+round-328 `dyn_zdf` `avm_input`. Rank-1 `avt` and `avs` have **no admitted
+reference frame** and are explicitly excluded from final-field scoring. The
+compiled fixture now writes different values on the two ranks and proves the
+rank-1 ZDF `avm` matches only its rank-1 `dyn_zdf` input.
+
+The checksum check now runs before any plant mutation. Boundary 1's one-ULP
+plant reaches the recorded `b1_avm + ddm_max_inc = b2_avm` chain; boundary 2's
+plant reaches `b2_avt + iwm_zav_wave = b3_avt`; boundary 3's plant reaches the
+rank-0 admitted-final bit comparison. The three refusal reasons are therefore
+semantic comparisons, not writer-checksum failures.
+
+Boundary-1 `avs` is the preceding step's value: NEMO copies only `avt_k` and
+`avm_k` at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:348-351`,
+then sets `avs` in the later DDM conditional at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:362-368`.
+The field is now named `b1_avs_previous` and excluded from every score; a test
+changes it arbitrarily while the source-order checks remain green.
+
+The ZDF Python gate imports the existing `dyn_zdf` checksum verifier. Its
+Fortran writer imports the existing checksum functions, and its compiled
+fixture reuses the existing round-328 fixture stubs; the three duplicate
+implementations were removed.
+
+Validation: the clean code commit `9ef69ebe5` reports
+`ORCA2_ROUND328_ZDFPHY_PREFLIGHT_READY`; 40 focused tests pass, all 10 shell
+preflight plants fire, all 140 inherited deterministic files match, seven
+Fortran units pass syntax, and same-program reports 409 identical preprocessed
+units plus 421 identical normalized objects. The final receipt citation gate
+passes 15 citations with zero failures/unmapped/map-audit failures; the default
+landing battery passes 147 tests; the explicit private-import ratchet passes 6
+tests. No NEMO executable was run.
+
+Choices: none. All changes are the two reviewers' requested admission and
+non-vacuity repairs; no model, card, namelist, or configuration value changed.
+
 codex review: operator
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/orca2_r328/repo
