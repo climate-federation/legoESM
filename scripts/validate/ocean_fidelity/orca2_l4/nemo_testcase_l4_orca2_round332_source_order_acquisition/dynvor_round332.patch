@@ -14,7 +14,7 @@
        !
        IF( ln_timing )   CALL timing_start('dyn_vor_3D')
 +      CALL r332_vor_begin(kt,Kmm,Krhs, &
-+         & pvv(ntsi:ntei,ntsj:ntej,1:jpkm1,Krhs))
++         & pvv(ntsi:ntei,ntsj:ntej,1:jpkm1,Krhs),vmask(ntsi:ntei,ntsj:ntej,1:jpkm1))
        !
        IF( l_trddyn ) THEN     !==  trend diagnostics case : split the added trend in two parts  ==!
           !
@@ -23,8 +23,8 @@
                 ENDIF
           END SELECT
 +         IF( kt == nit000 .AND. Kmm == 1 .AND. Krhs == 3 .AND. nvor_scheme == np_EEN ) THEN
-+            ALLOCATE( ztrdu(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0),jpk), ztrdv(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0),jpk) ) ! round-332 replay
-+            ztrdu(:,:,:)=0._wp; ztrdv(:,:,:)=0._wp          ! round-332 replay
++            ALLOCATE( ztrdu(jpi,jpj,jpk), ztrdv(jpi,jpj,jpk) ) ! round-332 replay: vor_een explicit shape
++            ztrdu(:,:,:)=-0._wp; ztrdv(:,:,:)=-0._wp        ! round-332 replay: preserve a negative-zero add
 +            CALL vor_een( kt, Kmm, ntot, puu(:,:,:,Kmm), pvv(:,:,:,Kmm), ztrdu, ztrdv ) ! round-332 replay
 +            CALL r332_vor_add(ztrdv(ntsi:ntei,ntsj:ntej,1:jpkm1))
 +            DEALLOCATE( ztrdu, ztrdv )                       ! round-332 replay

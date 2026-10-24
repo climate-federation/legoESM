@@ -11,7 +11,7 @@ MODULE round332_writer
 
    INTEGER, SAVE :: nkt=-1,nkmm=-1,nkrhs=-1,nx=0,ny=0,nz=0,nrows=0
    LOGICAL, SAVE :: active=.FALSE.,have_add=.FALSE.,have_vor=.FALSE.,written=.FALSE.
-   REAL(wp), ALLOCATABLE, SAVE :: vor_before(:,:,:),vor_add(:,:,:),vor_after(:,:,:)
+   REAL(wp), ALLOCATABLE, SAVE :: vor_before(:,:,:),vor_add(:,:,:),vor_after(:,:,:),vor_mask(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: mxlm(:,:,:),mxld(:,:,:),pdlr(:,:,:)
 
 CONTAINS
@@ -19,24 +19,25 @@ CONTAINS
    SUBROUTINE allocate_arrays
       IF(ALLOCATED(vor_before)) RETURN
       nx=ntei-ntsi+1; ny=ntej-ntsj+1; nz=jpkm1
-      ALLOCATE(vor_before(nx,ny,nz),vor_add(nx,ny,nz),vor_after(nx,ny,nz), &
+      ALLOCATE(vor_before(nx,ny,nz),vor_add(nx,ny,nz),vor_after(nx,ny,nz),vor_mask(nx,ny,nz), &
          & mxlm(nx,ny,nz),mxld(nx,ny,nz),pdlr(nx,ny,nz))
       vor_before=0._wp; vor_add=0._wp; vor_after=0._wp
-      mxlm=0._wp; mxld=0._wp; pdlr=0._wp
+      vor_mask=0._wp; mxlm=0._wp; mxld=0._wp; pdlr=0._wp
    END SUBROUTINE allocate_arrays
 
-   SUBROUTINE r332_vor_begin(kt,Kmm,Krhs,pbefore)
+   SUBROUTINE r332_vor_begin(kt,Kmm,Krhs,pbefore,pvmask)
       INTEGER, INTENT(in) :: kt,Kmm,Krhs
-      REAL(wp), INTENT(in) :: pbefore(:,:,:)
+      REAL(wp), INTENT(in) :: pbefore(:,:,:),pvmask(:,:,:)
       IF(kt /= nit000 .OR. have_vor .OR. active) RETURN
       IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop('round332: requires fp64')
       CALL allocate_arrays
       IF(nkt /= -1 .AND. (nkt /= kt .OR. nkmm /= Kmm)) &
          & CALL ctl_stop('round332: TKE/vorticity indices moved')
-      IF(ANY(SHAPE(pbefore) /= (/nx,ny,nz/))) &
-         & CALL ctl_stop('round332: vorticity before shape')
+      IF(ANY(SHAPE(pbefore) /= (/nx,ny,nz/)) .OR. &
+         & ANY(SHAPE(pvmask) /= (/nx,ny,nz/))) &
+         & CALL ctl_stop('round332: vorticity before/mask shape')
       nkt=kt; nkmm=Kmm; nkrhs=Krhs
-      vor_before=pbefore
+      vor_before=pbefore; vor_mask=pvmask
       active=.TRUE.
    END SUBROUTINE r332_vor_begin
 
@@ -105,10 +106,11 @@ CONTAINS
       IF(ios /= 0) CALL ctl_stop('round332: cannot open record')
       magic='NEMO_L4_R332SO'
       WRITE(unit) magic,1,nkt,nkmm,nkrhs,narea-1,nx,ny,nz,ntsi,ntsj, &
-         & STORAGE_SIZE(1._wp),6
+         & STORAGE_SIZE(1._wp),7
       CALL put3(unit,'stage1_v_before',vor_before,1)
       CALL put3(unit,'stage1_v_add',vor_add,1)
       CALL put3(unit,'stage1_v_after',vor_after,1)
+      CALL put3(unit,'stage1_v_mask',vor_mask,1)
       CALL put3(unit,'tke_zmxlm',mxlm,1)
       CALL put3(unit,'tke_zmxld',mxld,1)
       CALL put3(unit,'tke_pdlr',pdlr,1)

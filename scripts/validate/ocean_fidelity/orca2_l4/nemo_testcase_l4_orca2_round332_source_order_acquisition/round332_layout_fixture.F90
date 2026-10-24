@@ -5,7 +5,7 @@ PROGRAM write_round332_fixture
    INTEGER :: ji,jj,jk,rank
    CHARACTER(LEN=16) :: arg
    REAL(wp) :: rank_offset,add
-   REAL(wp), ALLOCATABLE :: before(:,:,:),added(:,:,:),after(:,:,:)
+   REAL(wp), ALLOCATABLE :: before(:,:,:),added(:,:,:),after(:,:,:),vwet(:,:,:)
    REAL(wp), ALLOCATABLE :: ztsw(:,:),ztse(:,:),ztnw(:,:),ztne(:,:),zwx(:,:)
    REAL(wp), ALLOCATABLE :: row_m(:,:),row_d(:,:),row_p(:,:)
 
@@ -16,6 +16,7 @@ PROGRAM write_round332_fixture
    ALLOCATE(before(ntei-ntsi+1,ntej-ntsj+1,jpkm1))
    ALLOCATE(added(ntei-ntsi+1,ntej-ntsj+1,jpkm1))
    ALLOCATE(after(ntei-ntsi+1,ntej-ntsj+1,jpkm1))
+   ALLOCATE(vwet(ntei-ntsi+1,ntej-ntsj+1,jpkm1))
    ALLOCATE(ztsw(ntsi-1:ntei+1,ntsj-1:ntej+1))
    ALLOCATE(ztse(ntsi-1:ntei+1,ntsj-1:ntej+1))
    ALLOCATE(ztnw(ntsi-1:ntei+1,ntsj-1:ntej+1))
@@ -28,7 +29,11 @@ PROGRAM write_round332_fixture
    ztnw=3._wp+rank_offset
    ztne=4._wp+rank_offset
    zwx=0.125_wp
+   ! This source cell makes the literal zva expression below evaluate to -0.
+   zwx(ntsi-1:ntsi,ntsj:ntsj+1)=0._wp
    before=5._wp+rank_offset
+   vwet=1._wp
+   vwet(2,1,1)=0._wp
    before(1,1,:)=-0._wp
    after=before
    DO jk=1,jpkm1
@@ -42,7 +47,7 @@ PROGRAM write_round332_fixture
          END DO
       END DO
    END DO
-   CALL r332_vor_begin(1,1,3,before)
+   CALL r332_vor_begin(1,1,3,before,vwet)
    CALL r332_vor_add(added)
    CALL r332_vor_done(after)
 

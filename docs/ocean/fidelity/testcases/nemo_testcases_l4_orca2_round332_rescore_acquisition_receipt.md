@@ -97,8 +97,8 @@ exact record-build `dynvor` and `zdftke` units.  At kt 1 on both ranks it will
 record:
 
 1. `pv_rhs` before and after the production EEN call, plus the exact EEN
-   contribution from a second call of the unchanged `vor_een` into zeroed
-   scratch accumulators; and
+   contribution from a second call of the unchanged `vor_een` into
+   negative-zero-initialized scratch accumulators; and
 2. `zmxlm`, `zmxld`, and `p_pdlr` immediately after mixing-length selection
    and before the viscosity construction.
 
@@ -119,6 +119,17 @@ that must refuse.  Its real gfortran fixture writes different data per rank,
 preserves dry negative-zero sign bits, exercises the real writer/reader ABI,
 and proves both wet one-ULP plants reach `REFUSE`.
 
+Resume-4 review repaired four additional acquisition defects.  The replay
+scratch now uses the full 94 by 152 by 31 explicit `vor_een` extents; a
+gfortran `-fcheck=bounds` interface replica accepts those extents and its
+90 by 148 plant refuses.  Scratch starts at negative zero, and the compiled
+fixture proves a negative-zero contribution retains its sign bit.  The record
+now carries the NEMO V-point mask and uses it, rather than the T-column mask,
+for vorticity counts and plants.  Finally, retained round-332 admission reads
+the producer commit and binary digest only from the retained run's own
+single-entry manifests, requires the producer to be a local commit object and
+an ancestor of the admission commit, and verifies the recorded digest.
+
 With the record build's exact flags (`-O3 -funroll-all-loops` and no
 fast-math/FMA option), the rejected per-cell observer changed `vor_een` from
 2,404 to 2,509 disassembly lines.  The repaired separate replay leaves
@@ -128,11 +139,11 @@ immediates (727--729 become 740--742).  The floating-point instruction stream,
 including the production add loop, is otherwise identical.  Admission still
 provides the decisive passivity proof through bitwise output comparisons.
 
-The clean repaired preflight passed: 65 tests; all 140 inherited deterministic
-files matched; the misplaced-TKE plant fired; all eight writer/observer
-Fortran units passed syntax; and the same-program proof found 409 identical
-preprocessed units and 421 identical normalized objects before its
-non-observer source plant refused.  The preflight ran no NEMO executable.
+The clean resume-4 preflight passed: 68 tests; all 140 inherited deterministic
+files matched; the misplaced-TKE and inner-domain-shape plants fired; all eight
+writer/observer Fortran units passed syntax; and the same-program proof found
+409 identical preprocessed units and 421 identical normalized objects before
+its non-observer source plant refused.  The preflight ran no NEMO executable.
 
 Operator command:
 
@@ -153,19 +164,20 @@ Expected evidence directory:
   122 is not opened and no production-call-site, cross-card, or gradient claim
   is eligible.
 - Per-receipt citation gate: PASS, 5 citations, 0 unmapped, 0 failures and 0
-  map-audit failures; required citation-gate pytest: 17 passed.
-- Default ORCA2 landing battery plus the round-332 gate: 168 passed in
-  1,067.09 seconds, including all 6 private-import ratchet tests.
-- Explicit private-import ratchet: 6 passed in 4.83 seconds.
+  map-audit failures; the required citation-gate pytest is included below.
+- Default ORCA2 landing battery: 150 passed in 1,165.53 seconds, including all
+  17 citation-gate and 6 private-import ratchet tests.
+- Explicit private-import ratchet: 6 passed in 5.10 seconds.
 - No configuration value changed: **ASKED**.
 - Stop and extend the reviewed acquisition tools when a record is missing:
   **ASKED and satisfied**.
 
 Independent reviews: **HOLD** (Claude and Argon); every acquisition-tool
 finding above is repaired or converted to a measured, fail-closed admission
-check.  Crashed and refused runs are retained under `refused/`, and
-`--admit-existing` for round 332 requires an explicit producer commit and
-binary SHA-256 pin before it will read one.
+check; Argon separately confirmed that the repaired replay retains `vor_een`'s
+arithmetic.  Crashed and refused runs are retained under `refused/`, and
+`--admit-existing` for round 332 takes its producer commit and binary SHA-256
+only from the retained run's recorded manifests.
 
 The next admissible action is the operator-only acquisition above.  Until it
 is admitted, the vorticity add and the seven TKE cells have proposals, not

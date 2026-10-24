@@ -21,7 +21,7 @@ HEADER_NAMES = (
     "version", "kt", "kmm", "krhs", "rank", "nx", "ny", "nz",
     "ntsi", "ntsj", "real_bits", "n_fields",
 )
-FIELDS = ("stage1_v_before", "stage1_v_add", "stage1_v_after",
+FIELDS = ("stage1_v_before", "stage1_v_add", "stage1_v_after", "stage1_v_mask",
           "tke_zmxlm", "tke_zmxld", "tke_pdlr")
 PLANTS = ("header", "field-order", "truncation", "stamp", "vor", "pdlr")
 OBSERVER_UNITS = ("dynzdf", "stprk3_stg", "dynvor", "zdfphy", "zdftke")
@@ -75,9 +75,16 @@ def read_record(path: Path, plant: str | None = None) -> dict:
             "sha256": hashlib.sha256(raw).hexdigest()}
 
 
-def _verify_semantics(record: dict, wet: np.ndarray) -> dict[str, int]:
+def _verify_semantics(record: dict, tke_wet: np.ndarray) -> dict[str, int]:
     f = record["fields"]
-    require(wet.shape == f["stage1_v_before"].shape, "wet-mask extents moved")
+    vwet = f["stage1_v_mask"] != 0.0
+    require(tke_wet.shape == f["stage1_v_before"].shape,
+            "TKE wet-mask extents moved")
+    require(vwet.shape == f["stage1_v_before"].shape,
+            "v wet-mask extents moved")
+    require(bool(np.all((f["stage1_v_mask"] == 0.0) |
+                        (f["stage1_v_mask"] == 1.0))),
+            "v wet mask is not binary")
     before = np.ascontiguousarray(f["stage1_v_before"]).view(np.uint64)
     added = np.ascontiguousarray(f["stage1_v_add"])
     after = np.ascontiguousarray(f["stage1_v_after"]).view(np.uint64)
@@ -86,28 +93,32 @@ def _verify_semantics(record: dict, wet: np.ndarray) -> dict[str, int]:
             "vorticity source-order addition does not replay bitwise")
     changed = before != after
     value_equal = f["stage1_v_before"] == f["stage1_v_after"]
-    require(bool(np.any(f["tke_zmxlm"][wet] > 0.0)), "wet mixing length channel is inactive")
-    require(bool(np.any(f["tke_zmxld"][wet] > 0.0)), "wet dissipation length channel is inactive")
-    pdlr_wet = wet.copy()
+    require(bool(np.any(f["tke_zmxlm"][tke_wet] > 0.0)),
+            "wet mixing length channel is inactive")
+    require(bool(np.any(f["tke_zmxld"][tke_wet] > 0.0)),
+            "wet dissipation length channel is inactive")
+    pdlr_wet = tke_wet.copy()
     pdlr_wet[:, :, 0] = False
     require(bool(np.all((f["tke_pdlr"][pdlr_wet] >= 0.1) &
                         (f["tke_pdlr"][pdlr_wet] <= 1.0))),
             "wet inverse Prandtl ratio is outside [0.1, 1]")
     return {
         "changed_bits": int(np.count_nonzero(changed)),
-        "wet_changed_bits": int(np.count_nonzero(changed & wet)),
+        "wet_changed_bits": int(np.count_nonzero(changed & vwet)),
         "value_equal_bit_changes": int(np.count_nonzero(changed & value_equal)),
-        "wet_value_equal_bit_changes": int(np.count_nonzero(changed & value_equal & wet)),
+        "wet_value_equal_bit_changes": int(np.count_nonzero(changed & value_equal & vwet)),
     }
 
 
-def _plant(record: dict, plant: str, wet: np.ndarray) -> None:
+def _plant(record: dict, plant: str, tke_wet: np.ndarray) -> None:
     if plant == "vor":
-        index = tuple(np.argwhere(wet)[0])
+        vwet = record["fields"]["stage1_v_mask"] != 0.0
+        require(bool(np.any(vwet)), "vorticity plant lacks a wet v point")
+        index = tuple(np.argwhere(vwet)[0])
         value = record["fields"]["stage1_v_after"][index]
         record["fields"]["stage1_v_after"][index] = np.nextafter(value, np.inf)
     elif plant == "pdlr":
-        candidates = wet & (record["fields"]["tke_pdlr"] == 1.0)
+        candidates = tke_wet & (record["fields"]["tke_pdlr"] == 1.0)
         candidates[:, :, 0] = False
         require(bool(np.any(candidates)), "pdlr plant lacks a wet upper-bound cell")
         index = tuple(np.argwhere(candidates)[0])

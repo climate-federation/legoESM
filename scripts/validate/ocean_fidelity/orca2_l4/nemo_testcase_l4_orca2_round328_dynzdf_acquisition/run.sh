@@ -58,10 +58,6 @@ if [[ "$MODE" == --admit-existing && -n ${R328_EXISTING_RUN:-} ]]; then
     [[ $(dirname "$TARGET_RUN") == "$EVIDENCE/refused" && \
        $(basename "$TARGET_RUN") == orca1ice_source_order_kt1_np2_* ]] \
       || { printf 'REFUSE: retained round-332 run is outside its refused directory\n' >&2; exit 64; }
-    [[ ${R332_RETAINED_PRODUCER:-} =~ ^[0-9a-f]{40}$ ]] \
-      || { printf 'REFUSE: R332_RETAINED_PRODUCER must pin the producer commit\n' >&2; exit 64; }
-    [[ ${R332_RETAINED_BINARY_SHA:-} =~ ^[0-9a-f]{64}$ ]] \
-      || { printf 'REFUSE: R332_RETAINED_BINARY_SHA must pin the binary digest\n' >&2; exit 64; }
     expected_retained=$TARGET_RUN
   else
     printf 'REFUSE: retained admission is unsupported for %s\n' "$ACQ_TARGET" >&2; exit 64
@@ -141,6 +137,7 @@ readonly R332_DYNVOR_PATCH=$R332_DIR/dynvor_round332.patch
 readonly R332_TKE_PATCH=$R332_DIR/zdftke_round332.patch
 readonly R332_WRITER=$R332_DIR/round332_writer.F90
 readonly R332_FIXTURE=$R332_DIR/round332_layout_fixture.F90
+readonly R332_VOR_INTERFACE_FIXTURE=$R332_DIR/round332_vor_interface_fixture.F90
 readonly R332_GATE=$here/../nemo_testcase_l4_orca2_round332_source_order_gate.py
 readonly R332_TEST=$REPO/tests/ocean/fidelity/test_orca2_round332_source_order_gate.py
 readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
@@ -302,8 +299,13 @@ cd "$REPO"
 readonly COMMIT=$(git rev-parse HEAD)
 EXPECTED_PRODUCER=$COMMIT
 if [[ "$TARGET_RUN" != "$DEFAULT_TARGET_RUN" ]]; then
-  [[ -f "$TARGET_RUN/producer_commit.txt" ]] || refuse 'retained run lacks producer commit'
-  EXPECTED_PRODUCER=$(cat "$TARGET_RUN/producer_commit.txt")
+  [[ -f "$TARGET_RUN/producer_commit.txt" &&
+     $(wc -l <"$TARGET_RUN/producer_commit.txt") -eq 1 ]] \
+    || refuse 'retained run lacks its single-entry producer manifest'
+  EXPECTED_PRODUCER=$(awk 'NF == 1 && $1 ~ /^[0-9a-f]{40}$/ {print $1}' \
+    "$TARGET_RUN/producer_commit.txt")
+  [[ $EXPECTED_PRODUCER =~ ^[0-9a-f]{40}$ ]] \
+    || refuse 'retained producer manifest is malformed'
   if [[ "$ACQ_TARGET" == zdfphy ]]; then
     retained_producer=$RETAINED_ZDFPHY_PRODUCER
     retained_binary_sha=$RETAINED_ZDFPHY_BINARY_SHA
@@ -311,11 +313,18 @@ if [[ "$TARGET_RUN" != "$DEFAULT_TARGET_RUN" ]]; then
     retained_producer=$RETAINED_TKE331_PRODUCER
     retained_binary_sha=$RETAINED_TKE331_BINARY_SHA
   else
-    retained_producer=$R332_RETAINED_PRODUCER
-    retained_binary_sha=$R332_RETAINED_BINARY_SHA
+    retained_producer=$EXPECTED_PRODUCER
+    [[ -f "$TARGET_RUN/nemo.sha256" && $(wc -l <"$TARGET_RUN/nemo.sha256") -eq 1 ]] \
+      || refuse 'retained run lacks its single-entry binary digest manifest'
+    retained_binary_sha=$(awk 'NF == 2 && $2 == "nemo" && length($1) == 64 {print $1}' \
+      "$TARGET_RUN/nemo.sha256")
+    [[ $retained_binary_sha =~ ^[0-9a-f]{64}$ ]] \
+      || refuse 'retained binary digest manifest is malformed'
   fi
   [[ "$EXPECTED_PRODUCER" == "$retained_producer" ]] \
     || refuse 'retained run has the wrong producer commit'
+  git cat-file -e "$EXPECTED_PRODUCER^{commit}" 2>/dev/null \
+    || refuse 'retained producer is not a local commit object'
   git merge-base --is-ancestor "$EXPECTED_PRODUCER" "$COMMIT" \
     || refuse 'retained producer is not an ancestor of the admission repair'
   pin "$retained_binary_sha" "$TARGET_RUN/nemo" 'retained acquisition binary'
@@ -365,6 +374,7 @@ if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
 fi
 if [[ "$ACQ_TARGET" == tke332 ]]; then
   for path in "$R332_DYNVOR_PATCH" "$R332_TKE_PATCH" "$R332_WRITER" "$R332_FIXTURE" \
+    "$R332_VOR_INTERFACE_FIXTURE" \
     "$R332_GATE" "$R332_TEST" "$SOURCE_DYNVOR" \
     "$SOURCE_ROOT/BLD/ppsrc/nemo/dynvor.f90"; do
     [[ -f "$path" ]] || refuse "missing round-332 source-order input $path"
@@ -444,6 +454,21 @@ tests=("$TEST")
 [[ "$ACQ_TARGET" != tke332 ]] || tests+=("$TKE_TEST" "$R332_TEST")
 "$PY" -m pytest -q -p no:cacheprovider "${tests[@]}" \
   "$R326_TEST::test_objects_equal_ignores_only_the_embedded_config_root"
+if [[ "$ACQ_TARGET" == tke332 ]]; then
+  vor_fixture_exe=$scratch/round332_vor_interface_fixture
+  "$FC" -O3 -fcheck=bounds \
+    -ffree-line-length-none "$R332_VOR_INTERFACE_FIXTURE" -o "$vor_fixture_exe"
+  "$vor_fixture_exe" >"$scratch/vor-interface.clean.log" 2>&1
+  grep 'R332_VOR_INTERFACE_PASS 94 152 31 T' "$scratch/vor-interface.clean.log" >/dev/null \
+    || refuse 'full-shape vor_een interface fixture did not preserve negative zero'
+  if "$vor_fixture_exe" inner \
+      >"$scratch/vor-interface.inner.log" 2>&1; then
+    refuse 'inner-domain vor_een scratch plant stayed green'
+  fi
+  grep 'vor_een explicit-shape extent mismatch' "$scratch/vor-interface.inner.log" >/dev/null \
+    || refuse 'inner-domain vor_een scratch plant missed extent guard'
+  printf 'PREFLIGHT_PLANT_FIRED vor-een-inner-shape\n'
+fi
 # Checklist (6): disk checks work before the evidence directory exists.
 for mount in "$EVIDENCE" "$NEMO_ROOT"; do
   free_ok "$mount" || refuse "$mount has under 8 GB free"
@@ -755,7 +780,7 @@ if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
 fi
 if [[ "$ACQ_TARGET" == tke332 ]]; then
   sha256sum "$R332_DYNVOR_PATCH" "$R332_TKE_PATCH" "$R332_WRITER" "$R332_FIXTURE" \
-    "$R332_GATE" "$R332_TEST" "$SOURCE_DYNVOR" \
+    "$R332_VOR_INTERFACE_FIXTURE" "$R332_GATE" "$R332_TEST" "$SOURCE_DYNVOR" \
     >>"$manifest/toolchain.sha256"
 fi
 
