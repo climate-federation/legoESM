@@ -19,8 +19,8 @@ case "$MODE" in
 esac
 readonly ACQ_TARGET=${R328_ACQ_TARGET:-dynzdf}
 case "$ACQ_TARGET" in
-  dynzdf|zdfphy) ;;
-  *) printf 'REFUSE: R328_ACQ_TARGET must be dynzdf or zdfphy\n' >&2; exit 64 ;;
+  dynzdf|zdfphy|tke331) ;;
+  *) printf 'REFUSE: R328_ACQ_TARGET must be dynzdf, zdfphy, or tke331\n' >&2; exit 64 ;;
 esac
 
 export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -31,11 +31,16 @@ TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R328ZDF
 readonly SOURCE_ROOT=$NEMO_ROOT/cfgs/$SOURCE_CFG
 readonly BASELINE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/acquisition/orca1ice_surface_entry_every_step_a_np2
 readonly SOURCE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/acquisition/orca1ice_tke_hmi_10step_np2
-readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round328/acquisition
+EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round328/acquisition
 DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_dynzdf_kt1_np2
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R328ZDFPHY
   DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_zdfphy_kt1_np2
+fi
+if [[ "$ACQ_TARGET" == tke331 ]]; then
+  TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R331TKE
+  EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round331/acquisition
+  DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_tke331_kt1_np2
 fi
 TARGET_RUN=$DEFAULT_TARGET_RUN
 if [[ "$MODE" == --admit-existing && -n ${R328_EXISTING_RUN:-} ]]; then
@@ -44,13 +49,17 @@ if [[ "$MODE" == --admit-existing && -n ${R328_EXISTING_RUN:-} ]]; then
     "$EVIDENCE/refused/orca1ice_zdfphy_kt1_np2_admission_refused_20261024T043519Z_4166419" ]] \
     || { printf 'REFUSE: R328_EXISTING_RUN is not the retained zdf_phy run\n' >&2; exit 64; }
 fi
-readonly TARGET_CFG DEFAULT_TARGET_RUN TARGET_RUN
+readonly TARGET_CFG EVIDENCE DEFAULT_TARGET_RUN TARGET_RUN
 readonly TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
 readonly SOURCE_DYNZDF=$NEMO_ROOT/src/OCE/DYN/dynzdf.F90
 readonly SOURCE_STAGE=$SOURCE_ROOT/MY_SRC/stprk3_stg.F90
 readonly SOURCE_ZDFPHY=$NEMO_ROOT/src/OCE/ZDF/zdfphy.F90
 readonly SOURCE_ZDFDDM=$NEMO_ROOT/src/OCE/ZDF/zdfddm.F90
 readonly SOURCE_ZDFIWM=$NEMO_ROOT/src/OCE/ZDF/zdfiwm.F90
+readonly SOURCE_ZDFSH2=$NEMO_ROOT/src/OCE/ZDF/zdfsh2.F90
+readonly SOURCE_ZDFDRG=$NEMO_ROOT/src/OCE/ZDF/zdfdrg.F90
+readonly SOURCE_ZDFMXL=$NEMO_ROOT/src/OCE/ZDF/zdfmxl.F90
+readonly SOURCE_ZDFTKE=$SOURCE_ROOT/MY_SRC/zdftke.F90
 readonly PY=/home/dbalwada/legoESM/.venv/bin/python
 readonly FC=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
 readonly CONDA=/home/dbalwada/miniconda3/envs/nemo-build
@@ -62,6 +71,10 @@ readonly SOURCE_STAGE_SHA=2b1636336acc5a5e3326291801c217f263f8ccc3ca875dbfec0d3b
 readonly SOURCE_ZDFPHY_SHA=76eeec2a280d56c55bec9e59b579e5290623c408c03962d04652e406334b45fd
 readonly SOURCE_ZDFDDM_SHA=27f10278c4ae57a393617cf254cb372efecbf0c26d476afa500199cc0652e544
 readonly SOURCE_ZDFIWM_SHA=413868ce3ac1344539a501f425eaf9c61ffa92423a043fd320a0ebd614704dc6
+readonly SOURCE_ZDFSH2_SHA=c31f062e282b8710a0b565be7aecbc35b8e741b05a96a393402fcd5a737f28f8
+readonly SOURCE_ZDFDRG_SHA=f70dcfc7fa072bad6eeb77b24e8689ea1dfce75808fbf10eddb4c339acf255c2
+readonly SOURCE_ZDFMXL_SHA=3a9caebc8599e6e432bbd33d23bf5ef63f7a291cf093ad077e884162c7a5f732
+readonly SOURCE_ZDFTKE_SHA=2a7f4ce379d5ad48f915a93f35f06ac16da6685df7d502e01b5297ec6738fd31
 readonly SOURCE_BINARY_SHA=20376f40a78cb1a5491838ff112bfbe738178e4da8da1e43d5bd5c3884c72934
 readonly DECK_MANIFEST_SHA=51da69b494a10fa3c3b119018329a94d963f1fe3e59b6834ea936055ab0df2b9
 readonly INPUT_MANIFEST_SHA=3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5
@@ -89,7 +102,16 @@ readonly ZP_WRITER=$ZP_DIR/zdfphy_round328_writer.F90
 readonly ZP_FIXTURE=$ZP_DIR/zdfphy_round328_layout_fixture.F90
 readonly ZP_GATE=$here/../nemo_testcase_l4_orca2_round328_zdf_terms_gate.py
 readonly ZP_TEST=$REPO/tests/ocean/fidelity/test_orca2_round328_zdf_terms_gate.py
-readonly ADMITTED_DYN_RUN=$EVIDENCE/orca1ice_dynzdf_kt1_np2
+readonly ADMITTED_DYN_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round328/acquisition/orca1ice_dynzdf_kt1_np2
+readonly ADMITTED_ZDFPHY_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round328/acquisition/orca1ice_zdfphy_kt1_np2
+readonly TKE_DIR=$here/../nemo_testcase_l4_orca2_round331_tke_acquisition
+readonly TKE_PHY_PATCH=$TKE_DIR/zdfphy_round331.patch
+readonly TKE_PATCH=$TKE_DIR/zdftke_round331.patch
+readonly TKE_WRITER=$TKE_DIR/tke_round331_writer.F90
+readonly TKE_FIXTURE=$TKE_DIR/tke_round331_layout_fixture.F90
+readonly TKE_GATE=$here/../nemo_testcase_l4_orca2_round331_tke_gate.py
+readonly TKE_TEST=$REPO/tests/ocean/fidelity/test_orca2_round331_tke_gate.py
+readonly TKE_PREREG=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round331.md
 readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
 
 scratch=
@@ -177,7 +199,12 @@ fpp() {
       -I "$SOURCE_ROOT/WORK" -I "$SOURCE_ROOT/BLD/inc" "$(basename "$1")" -o "$2" )
 }
 same_program() {
-  if [[ "$ACQ_TARGET" == zdfphy ]]; then
+  if [[ "$ACQ_TARGET" == tke331 ]]; then
+    "$PY" "$TKE_GATE" --same-program "$1" --reference-bld "$SOURCE_ROOT/BLD" \
+      --observer-patch "dynzdf=$PATCH" --observer-patch "stprk3_stg=$STAGE_PATCH" \
+      --observer-patch "zdfphy=$TKE_PHY_PATCH" --observer-patch "zdftke=$TKE_PATCH" \
+      --new-cfg "$TARGET_CFG" --reference-cfg "$SOURCE_CFG" ${2:+--output "$2"}
+  elif [[ "$ACQ_TARGET" == zdfphy ]]; then
     "$PY" "$ZP_GATE" --same-program "$1" --reference-bld "$SOURCE_ROOT/BLD" \
       --observer-patch "dynzdf=$PATCH" --observer-patch "stprk3_stg=$STAGE_PATCH" \
       --observer-patch "zdfphy=$ZP_PATCH" --observer-patch "zdfddm=$ZP_DDM_PATCH" \
@@ -257,12 +284,33 @@ if [[ "$ACQ_TARGET" == zdfphy ]]; then
     [[ -f "$path" ]] || refuse "missing zdf_phy input $path"
   done
 fi
+if [[ "$ACQ_TARGET" == tke331 ]]; then
+  for path in "$TKE_PHY_PATCH" "$TKE_PATCH" "$TKE_WRITER" "$TKE_FIXTURE" \
+    "$TKE_GATE" "$TKE_TEST" "$TKE_PREREG" "$SOURCE_ZDFPHY" "$SOURCE_ZDFSH2" \
+    "$SOURCE_ZDFDRG" "$SOURCE_ZDFMXL" "$SOURCE_ZDFTKE" \
+    "$SOURCE_ROOT/BLD/ppsrc/nemo/zdfphy.f90" \
+    "$SOURCE_ROOT/BLD/ppsrc/nemo/zdfsh2.f90" \
+    "$SOURCE_ROOT/BLD/ppsrc/nemo/zdfdrg.f90" \
+    "$SOURCE_ROOT/BLD/ppsrc/nemo/zdfmxl.f90" \
+    "$SOURCE_ROOT/BLD/ppsrc/nemo/zdftke.f90" \
+    "$ADMITTED_ZDFPHY_RUN/oracle_zdfphy_kt00000001_r0000.bin" \
+    "$ADMITTED_ZDFPHY_RUN/oracle_zdfphy_kt00000001_r0001.bin"; do
+    [[ -f "$path" ]] || refuse "missing round-331 TKE input $path"
+  done
+fi
 pin "$SOURCE_DYNZDF_SHA" "$SOURCE_DYNZDF" 'source dynzdf'
 pin "$SOURCE_STAGE_SHA" "$SOURCE_STAGE" 'round-326 record stprk3_stg'
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   pin "$SOURCE_ZDFPHY_SHA" "$SOURCE_ZDFPHY" 'source zdfphy'
   pin "$SOURCE_ZDFDDM_SHA" "$SOURCE_ZDFDDM" 'source zdfddm'
   pin "$SOURCE_ZDFIWM_SHA" "$SOURCE_ZDFIWM" 'source zdfiwm'
+fi
+if [[ "$ACQ_TARGET" == tke331 ]]; then
+  pin "$SOURCE_ZDFPHY_SHA" "$SOURCE_ZDFPHY" 'source zdfphy'
+  pin "$SOURCE_ZDFSH2_SHA" "$SOURCE_ZDFSH2" 'source zdfsh2'
+  pin "$SOURCE_ZDFDRG_SHA" "$SOURCE_ZDFDRG" 'source zdfdrg'
+  pin "$SOURCE_ZDFMXL_SHA" "$SOURCE_ZDFMXL" 'source zdfmxl'
+  pin "$SOURCE_ZDFTKE_SHA" "$SOURCE_ZDFTKE" 'source zdftke'
 fi
 pin "$SOURCE_BINARY_SHA" "$SOURCE_ROOT/BLD/bin/nemo.exe" 'source build binary'
 pin "$SOURCE_BINARY_SHA" "$SOURCE_RUN/nemo" 'source run binary'
@@ -279,6 +327,9 @@ plants=$scratch/plants; mkdir "$plants" "$scratch/mod"
 patch_files=("$PATCH" "$STAGE_PATCH")
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   patch_files+=("$ZP_PATCH" "$ZP_DDM_PATCH" "$ZP_IWM_PATCH")
+fi
+if [[ "$ACQ_TARGET" == tke331 ]]; then
+  patch_files+=("$TKE_PHY_PATCH" "$TKE_PATCH")
 fi
 for patch_file in "${patch_files[@]}"; do
   check_no_removed_lines "$patch_file" || refuse "observer patch removes a source line: $patch_file"
@@ -308,6 +359,7 @@ plant_must_refuse echo-jpl check_echo "$plants/ocean.output.jpl"
 # and one-ULP A5 plants. The imported round-326 test proves ELF root-only normalisation.
 tests=("$TEST")
 [[ "$ACQ_TARGET" != zdfphy ]] || tests+=("$ZP_TEST")
+[[ "$ACQ_TARGET" != tke331 ]] || tests+=("$TKE_TEST")
 "$PY" -m pytest -q -p no:cacheprovider "${tests[@]}" \
   "$R326_TEST::test_objects_equal_ignores_only_the_embedded_config_root"
 # Checklist (6): disk checks work before the evidence directory exists.
@@ -347,12 +399,25 @@ if [[ "$ACQ_TARGET" == zdfphy ]]; then
   patch -s --fuzz=0 -p0 -d "$dry" <"$ZP_DDM_PATCH"
   patch -s --fuzz=0 -p0 -d "$dry" <"$ZP_IWM_PATCH"
 fi
+if [[ "$ACQ_TARGET" == tke331 ]]; then
+  cp "$SOURCE_ZDFPHY" "$dry/zdfphy.F90"
+  cp "$SOURCE_ZDFTKE" "$dry/zdftke.F90"
+  cp "$TKE_WRITER" "$dry/tke_round331_writer.F90"
+  patch -s --fuzz=0 -p0 -d "$dry" <"$TKE_PHY_PATCH"
+  patch -s --fuzz=0 -p0 -d "$dry" <"$TKE_PATCH"
+fi
 for unit in dynzdf stprk3_stg; do
   check_patched_call_predecessors "$dry/$unit.F90" \
     || refuse "observer call inserted after a continuation: $unit.F90"
 done
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   for unit in zdfphy zdfddm zdfiwm; do
+    check_patched_call_predecessors "$dry/$unit.F90" \
+      || refuse "observer call inserted after a continuation: $unit.F90"
+  done
+fi
+if [[ "$ACQ_TARGET" == tke331 ]]; then
+  for unit in zdfphy zdftke; do
     check_patched_call_predecessors "$dry/$unit.F90" \
       || refuse "observer call inserted after a continuation: $unit.F90"
   done
@@ -367,11 +432,21 @@ if [[ "$ACQ_TARGET" == zdfphy ]]; then
   [[ $(grep -Fc 'CALL r328_zp_iwm_level' "$dry/zdfiwm.F90") -eq 1 ]] \
     || refuse 'zdfiwm writer call census changed'
 fi
+if [[ "$ACQ_TARGET" == tke331 ]]; then
+  [[ $(grep -Fc 'CALL r331_' "$dry/zdfphy.F90") -eq 6 ]] \
+    || refuse 'round-331 zdfphy writer call census changed'
+  [[ $(grep -Fc 'CALL r331_' "$dry/zdftke.F90") -eq 4 ]] \
+    || refuse 'round-331 zdftke writer call census changed'
+fi
 cp "$SOURCE_ROOT"/BLD/inc/*.mod "$scratch/mod/"
 syntax_units=(dynzdf_round328_writer dynzdf stprk3_stg)
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   syntax_units=(dynzdf_round328_writer zdfphy_round328_writer dynzdf \
     stprk3_stg zdfddm zdfiwm zdfphy)
+fi
+if [[ "$ACQ_TARGET" == tke331 ]]; then
+  syntax_units=(dynzdf_round328_writer tke_round331_writer dynzdf \
+    stprk3_stg zdfphy zdftke)
 fi
 for unit in "${syntax_units[@]}"; do
   fpp "$dry/$unit.F90" "$scratch/$unit.f90"
@@ -389,6 +464,7 @@ for name in arch_nemo.fcm cpp.fcm bld.cfg; do
 done
 observer_units=(dynzdf stprk3_stg)
 [[ "$ACQ_TARGET" != zdfphy ]] || observer_units+=(zdfphy zdfddm zdfiwm)
+[[ "$ACQ_TARGET" != tke331 ]] || observer_units+=(zdfphy zdftke)
 for unit in "${observer_units[@]}"; do
   rm -f "$dry_bld/ppsrc/nemo/$unit.f90"
 done
@@ -403,6 +479,14 @@ if [[ "$ACQ_TARGET" == zdfphy ]]; then
   cp "$scratch/zdfphy_round328_writer.f90" \
     "$dry_bld/ppsrc/nemo/zdfphy_round328_writer.f90"
   : >"$dry_bld/obj/zdfphy_round328_writer.o"
+fi
+if [[ "$ACQ_TARGET" == tke331 ]]; then
+  for unit in zdfphy zdftke; do
+    cp "$scratch/$unit.f90" "$dry_bld/ppsrc/nemo/$unit.f90"
+  done
+  cp "$scratch/tke_round331_writer.f90" \
+    "$dry_bld/ppsrc/nemo/tke_round331_writer.f90"
+  : >"$dry_bld/obj/tke_round331_writer.o"
 fi
 same_program "$dry_bld"
 rm -f "$dry_bld/ppsrc/nemo/icevar.f90"
@@ -419,7 +503,30 @@ admit() {
   [[ $(cat "$TARGET_RUN/producer_commit.txt") == "$EXPECTED_PRODUCER" ]] || refuse 'producer commit changed'
   compare_deterministic "$SOURCE_RUN" "$TARGET_RUN" \
     || refuse 'write-only observer changed an inherited deterministic output'
-  if [[ "$ACQ_TARGET" == zdfphy ]]; then
+  if [[ "$ACQ_TARGET" == tke331 ]]; then
+    for rank in 0000 0001; do
+      cmp -s "$ADMITTED_DYN_RUN/oracle_dynzdf_kt00000001_s3_r${rank}.bin" \
+        "$TARGET_RUN/oracle_dynzdf_kt00000001_s3_r${rank}.bin" \
+        || refuse "dyn_zdf record rank $rank differs from its admission"
+    done
+    "$PY" "$GATE" --record-dir "$TARGET_RUN" --expect-commit "$EXPECTED_PRODUCER" \
+      --output "$TARGET_RUN/round331_dynzdf_readmission.json"
+    for plant in header field-order truncation stamp sh2 drag mxl boundary matrix solve final; do
+      if "$PY" "$TKE_GATE" --record-dir "$TARGET_RUN" \
+        --zdf-reference-dir "$ADMITTED_ZDFPHY_RUN" --expect-commit "$EXPECTED_PRODUCER" \
+        --plant "$plant" >"$TARGET_RUN/round331_tke_${plant}_plant.log" 2>&1; then
+        refuse "$plant round-331 TKE plant stayed green"
+      fi
+      grep 'REFUSE:' "$TARGET_RUN/round331_tke_${plant}_plant.log" >/dev/null \
+        || refuse "$plant round-331 TKE plant did not reach its refusal"
+    done
+    "$PY" "$TKE_GATE" --record-dir "$TARGET_RUN" \
+      --zdf-reference-dir "$ADMITTED_ZDFPHY_RUN" --expect-commit "$EXPECTED_PRODUCER" \
+      --output "$TARGET_RUN/round331_tke_admission.json"
+    ( cd "$TARGET_RUN" && sha256sum oracle_dynzdf_*.bin oracle_tke331_*.bin \
+        round331_dynzdf_readmission.json round331_tke_admission.json \
+        round331_tke_*_plant.log >round331_tke_outputs.sha256 )
+  elif [[ "$ACQ_TARGET" == zdfphy ]]; then
     for rank in 0000 0001; do
       cmp -s "$ADMITTED_DYN_RUN/oracle_dynzdf_kt00000001_s3_r${rank}.bin" \
         "$TARGET_RUN/oracle_dynzdf_kt00000001_s3_r${rank}.bin" \
@@ -484,6 +591,12 @@ if [[ "$ACQ_TARGET" == zdfphy ]]; then
     "$SOURCE_ZDFPHY" "$SOURCE_ZDFDDM" "$SOURCE_ZDFIWM" \
     >>"$manifest/toolchain.sha256"
 fi
+if [[ "$ACQ_TARGET" == tke331 ]]; then
+  sha256sum "$TKE_PHY_PATCH" "$TKE_PATCH" "$TKE_WRITER" "$TKE_FIXTURE" \
+    "$TKE_GATE" "$TKE_TEST" "$TKE_PREREG" "$SOURCE_ZDFPHY" \
+    "$SOURCE_ZDFSH2" "$SOURCE_ZDFDRG" "$SOURCE_ZDFMXL" "$SOURCE_ZDFTKE" \
+    >>"$manifest/toolchain.sha256"
+fi
 
 # makenemo rewrites shared work_cfgs.txt; only the target's line may change.
 cp "$NEMO_ROOT/cfgs/work_cfgs.txt" "$scratch/work_cfgs.before"
@@ -508,6 +621,13 @@ if [[ "$ACQ_TARGET" == zdfphy ]]; then
   patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$ZP_DDM_PATCH"
   patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$ZP_IWM_PATCH"
 fi
+if [[ "$ACQ_TARGET" == tke331 ]]; then
+  cp "$SOURCE_ZDFPHY" "$TARGET_ROOT/MY_SRC/zdfphy.F90"
+  cp "$SOURCE_ZDFTKE" "$TARGET_ROOT/MY_SRC/zdftke.F90"
+  cp "$TKE_WRITER" "$TARGET_ROOT/MY_SRC/tke_round331_writer.F90"
+  patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$TKE_PHY_PATCH"
+  patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$TKE_PATCH"
+fi
 touch "$TARGET_ROOT/MY_SRC/"*.F90
 ./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 [[ -x "$BINARY" ]] || refuse 'build produced no executable'
@@ -516,6 +636,10 @@ grep 'NEMO_L4_R328ZDF' "$TARGET_ROOT/BLD/ppsrc/nemo/dynzdf_round328_writer.f90" 
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   grep 'NEMO_L4_R328ZP' "$TARGET_ROOT/BLD/ppsrc/nemo/zdfphy_round328_writer.f90" >/dev/null \
     || refuse 'compiled zdf_phy writer is absent'
+fi
+if [[ "$ACQ_TARGET" == tke331 ]]; then
+  grep 'NEMO_L4_R331TK' "$TARGET_ROOT/BLD/ppsrc/nemo/tke_round331_writer.f90" >/dev/null \
+    || refuse 'compiled round-331 TKE writer is absent'
 fi
 diff <(grep -v "^$TARGET_CFG " "$scratch/work_cfgs.before") \
      <(grep -v "^$TARGET_CFG " "$NEMO_ROOT/cfgs/work_cfgs.txt") >/dev/null \

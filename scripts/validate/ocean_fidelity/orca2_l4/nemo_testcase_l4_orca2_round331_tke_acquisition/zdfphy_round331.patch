@@ -1,0 +1,29 @@
+--- zdfphy.F90
++++ zdfphy.F90
+@@ -40,0 +41,4 @@
++   USE tke_round331_writer, ONLY : r331_begin, r331_sh2, r331_drag, r331_mxl, &
++      & r331_finish
++                     ! round-331 WRITE-only TKE localisation recorder
++
+@@ -263,0 +268,2 @@
++      CALL r331_begin(kt,Kbb,Kmm,Krhs, &
++         & avm_k(ntsi:ntei,ntsj:ntej,2:jpkm1))
+@@ -270,0 +278,2 @@
++         CALL r331_sh2(sh2(ntsi:ntei,ntsj:ntej,2:jpkm1))
++
+@@ -277,0 +287,2 @@
++         CALL r331_drag(1,rCdU_bot(ntsi:ntei,ntsj:ntej))
++
+@@ -278,0 +291,2 @@
++         CALL r331_drag(2,rCdU_top(ntsi:ntei,ntsj:ntej))
++
+@@ -280,0 +296,3 @@
++         CALL r331_mxl(nmln(ntsi:ntei,ntsj:ntej), &
++            & hmlp(ntsi:ntei,ntsj:ntej))
++
+@@ -293,0 +312,5 @@
++         CALL r331_finish(en(ntsi:ntei,ntsj:ntej,1:jpkm1), &
++            & avm_k(ntsi:ntei,ntsj:ntej,2:jpkm1), &
++            & avt_k(ntsi:ntei,ntsj:ntej,2:jpkm1), &
++            & wmask(ntsi:ntei,ntsj:ntej,1:jpkm1))
++

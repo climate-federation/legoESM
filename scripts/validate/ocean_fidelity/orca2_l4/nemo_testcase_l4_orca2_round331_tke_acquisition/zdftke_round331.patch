@@ -1,0 +1,23 @@
+--- zdftke.F90
++++ zdftke.F90
+@@ -60,0 +61,4 @@
++   USE tke_round331_writer, ONLY : r331_tke_inputs, r331_after_bc, &
++      & r331_after_matrix, r331_after_solve
++                     ! round-331 WRITE-only TKE localisation recorder
++
+@@ -254,0 +259,4 @@
++         CALL r331_tke_inputs(jj,p_sh2(ntsi:ntei,jj,2:jpkm1), &
++            & rCdU_bot(ntsi:ntei,jj),rCdU_top(ntsi:ntei,jj), &
++            & nmln(ntsi:ntei,jj),hmlp(ntsi:ntei,jj))
++
+@@ -305,0 +315,2 @@
++         CALL r331_after_bc(jj,en(ntsi:ntei,jj,1:jpkm1))
++
+@@ -452,0 +463,4 @@
++         CALL r331_after_matrix(jj,en(ntsi:ntei,jj,1:jpkm1), &
++            & zdiag(ntsi:ntei,1:jpkm1),zd_up(ntsi:ntei,1:jpkm1), &
++            & zd_lw(ntsi:ntei,1:jpkm1))
++
+@@ -473,0 +488,2 @@
++         CALL r331_after_solve(jj,en(ntsi:ntei,jj,1:jpkm1))
++
