@@ -9,9 +9,11 @@ state:
   the step used for its own tracer transport (populated when
   ``LatLonCGridOceanConfig.store_mass_flux`` is True; the standard tripole
   card sets it).
-* ``state.tke_avt`` — the TKE closure's vertical tracer diffusivity K_H at
-  interior W-levels ``(n_lat, n_lon, nlev-1)`` (written every step on a TKE
-  card).
+* ``state.vmix_K_v`` — the composed vertical tracer diffusivity the step's
+  implicit solve used (closure + EVD + IWM + DDM) at interior W-levels
+  ``(n_lat, n_lon, nlev-1)``; populated when ``store_vmix_K`` is True (the
+  driver's ``--biogeo`` turns it on).  Falls back to ``tke_avt`` on cards
+  that carry NEMO's closure coefficients.
 
 so the BGC sees the physics' own advecting velocities and mixing, with
 first-order operator splitting (the NEMO/TOP arrangement).  Nothing in the
@@ -139,11 +141,15 @@ class TracerTransporter:
             tracers = jax.lax.map(_advect, tracers)
 
         if self.do_vmix:
-            if state_new.tke_avt is None:
+            K_src = getattr(state_new, "vmix_K_v", None)
+            if K_src is None:
+                K_src = getattr(state_new, "tke_avt", None)     # NEMO carried-coefficient cards
+            if K_src is None:
                 raise ValueError(
-                    "TracerTransporter: state.tke_avt is None; the vertical "
-                    "diffusivity is only exported on a TKE card.")
-            K = jnp.maximum(_as_array(state_new.tke_avt, dtype), self.k_bg)
+                    "TracerTransporter: no vertical diffusivity on the state. The "
+                    "card needs LatLonCGridOceanConfig.store_vmix_K=True (the "
+                    "driver's --biogeo sets it) or a TKE card carrying tke_avt.")
+            K = jnp.maximum(_as_array(K_src, dtype), self.k_bg)
             K = K * (act[..., :-1] & act[..., 1:]).astype(dtype)   # no flux across the floor
             dz = jnp.where(act, jnp.maximum(h_new, 1e-3), self.dz_ref.astype(dtype))
             dzh = build_dz_half(dz)

@@ -171,7 +171,7 @@ _RESERVED_KEYS: tuple[str, ...] = ("_time_s", "_step", "_sha")
 # Not writing them makes save and load agree by construction.  Mirrors
 # ``run_omip._RESTART_DIAGNOSTIC_SLOTS`` for the other npz lane.
 DIAGNOSTIC_SLOTS: tuple[str, ...] = (
-    "mass_flux_u", "mass_flux_v", "mass_flux_w",
+    "mass_flux_u", "mass_flux_v", "mass_flux_w", "vmix_K_v",
     "salt_flux_u_int", "salt_flux_v_int")
 
 
@@ -360,6 +360,7 @@ _SLOT_POLICY: dict[str, str] = {
     # consumer ever appears, move the slot to _SLOT_PROGNOSTIC rather than
     # deleting the test.
     "mass_flux_u": _SLOT_DIAGNOSTIC, "mass_flux_v": _SLOT_DIAGNOSTIC,
+    "vmix_K_v": _SLOT_DIAGNOSTIC,
     "mass_flux_w": _SLOT_DIAGNOSTIC,
     # The salt partners of the same capture (#1442), same reasoning, same
     # single constructor.  Main's other archive format lists all five together

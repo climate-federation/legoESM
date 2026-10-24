@@ -100,6 +100,7 @@ _SLOT_KIND = {
     # therefore not persisted -- listed here so the "every slot is decided"
     # ratchet stays closed over them.
     "mass_flux_u": "field", "mass_flux_v": "field", "mass_flux_w": "field",
+    "vmix_K_v": "field",
     "salt_flux_u_int": "field", "salt_flux_v_int": "field",
     # optional Field carries
     "T_som": "field", "S_som": "field",

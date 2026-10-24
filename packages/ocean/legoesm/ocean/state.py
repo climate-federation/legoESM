@@ -822,6 +822,14 @@ class LatLonCGridOceanState(NamedTuple):
     # centres), and cell-centred horizontally, so it shards/scatters exactly
     # like a tracer.  Equals the base ``w_baro`` when GM through-FCT is off.
     mass_flux_w: object = None
+    # Composed vertical TRACER diffusivity the step's implicit solve used
+    # [m^2/s] at interior W-levels ``(n_lat, n_lon, nlev-1)``: closure (TKE/
+    # KPP/...) + EVD + IWM + DDM, wet-masked.  Populated ONLY when
+    # ``LatLonCGridOceanConfig.store_vmix_K`` is True; default None => inert.
+    # Pure diagnostic (same contract as ``mass_flux_*``): consumers that mix
+    # passive tracers outside the step (biogeochemistry/transport.py) read
+    # it so they apply the SAME K the physics applied to T.
+    vmix_K_v: object = None
     # Column-integrated ADVECTIVE SALT flux on u/v faces [psu m^2/s]: the
     # vertical sum over levels of ``mass_flux_* * S_face`` with S_face from
     # the run's OWN tracer scheme (superbee/TVD-limited on the production
@@ -3134,6 +3142,9 @@ class LatLonCGridOceanConfig(NamedTuple):
     # ``zdf_drag_in_matrix`` onward for any caller that passes positionally).
     # ANY new field goes HERE, below this one -- never mid-tuple.
     store_mass_flux: bool = False
+    # Store the composed vertical tracer diffusivity (``state.vmix_K_v``);
+    # pure diagnostic, default off.  See ``store_mass_flux``.
+    store_vmix_K: bool = False
     # Store the column-integrated ADVECTIVE SALT flux the tracer update was
     # evaluated with (the salt analogue of ``store_mass_flux``; gateway exact-
     # salt instrument).  PURE DIAGNOSTIC, off by default; costs TWO 2-D face

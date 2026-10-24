@@ -13961,6 +13961,14 @@ class LatLonCGridOceanModel:
             T=state.T.replace(data=T_new),
             S=state.S.replace(data=S_new),
         )
+        if getattr(_cfg_b, "store_vmix_K", False):
+            # Opt-in diagnostic capture of the composed tracer K_v the solve
+            # above used (closure + EVD + IWM + DDM, wet-masked); None by
+            # default so the carry pytree is unchanged for every existing run.
+            from legoesm.core.field import Field as _FieldKv
+            state_out = state_out._replace(vmix_K_v=_FieldKv(
+                data=K_v_cell, name="vmix_K_v",
+                dims=("lat", "lon", "level"), units="m^2/s"))
         if _tke_coeff_new is not None:
             from legoesm.core.field import Field
             state_out = state_out._replace(

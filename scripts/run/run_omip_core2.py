@@ -1609,7 +1609,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   gm_slope_scheme=None, gm_bolus_advection=None,
                   gm_msc_stabilize=None, eos=None,
                   redi_coefficient=None, redi_aht0=None, gm_slope_positions=None,
-                  store_mass_flux=False, store_salt_flux=False):
+                  store_mass_flux=False, store_salt_flux=False,
+                  store_vmix_K=False):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -1955,6 +1956,10 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         # instead of reconstructing h*u from the post-barotropic velocity.
         # Pure diagnostic -- the trajectory is unchanged.
         _ovr["store_mass_flux"] = True
+    if store_vmix_K:
+        # Operator-split BGC (biogeochemistry/transport.py) mixes its tracers
+        # with the SAME composed K_v the step applied to T. Pure diagnostic.
+        _ovr["store_vmix_K"] = True
     if store_salt_flux:
         # Salt analogue: keep the column-integrated advective SALT flux so the
         # gateway accumulator integrates the model's own limited fluxes
@@ -2121,7 +2126,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
                   ddm=None, vertical_mixing=None,
                   prescribed_flow=None, no_gm_redi=False,
-                  store_mass_flux=False, store_salt_flux=False):
+                  store_mass_flux=False, store_salt_flux=False,
+                  store_vmix_K=False):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -2212,6 +2218,10 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         # the tripole left every supported latlon run silently reconstructing
         # (codex RED 6).
         _ovr["store_mass_flux"] = True
+    if store_vmix_K:
+        # Operator-split BGC (biogeochemistry/transport.py) mixes its tracers
+        # with the SAME composed K_v the step applied to T. Pure diagnostic.
+        _ovr["store_vmix_K"] = True
     if store_salt_flux:
         # Salt analogue, threaded in BOTH builders for the same RED-6 reason.
         _ovr["store_salt_flux"] = True
@@ -8232,10 +8242,11 @@ def main() -> int:
             gm_bolus_advection=args.gm_bolus_advection,
             gm_msc_stabilize=args.gm_msc_stabilize,
             eos=args.eos,
-            store_mass_flux=bool(getattr(args, "gateway_transports",
-                                         False)),
+            store_mass_flux=bool(getattr(args, "gateway_transports", False)
+                                 or getattr(args, "biogeo", "none") != "none"),
             store_salt_flux=bool(getattr(args, "gateway_transports",
                                          False)),
+            store_vmix_K=bool(getattr(args, "biogeo", "none") != "none"),
         )
         app_grid_type = "tripole"
     elif args.grid == "cubed_sphere":
@@ -8443,10 +8454,11 @@ def main() -> int:
             # passes.  "latlon" IS in SUPPORTED_APP_GRIDS, so leaving it out
             # made every supported latlon gateway run fall back to the h*u
             # reconstruction the flag exists to replace (codex RED 6).
-            store_mass_flux=bool(getattr(args, "gateway_transports",
-                                         False)),
+            store_mass_flux=bool(getattr(args, "gateway_transports", False)
+                                 or getattr(args, "biogeo", "none") != "none"),
             store_salt_flux=bool(getattr(args, "gateway_transports",
                                          False)),
+            store_vmix_K=bool(getattr(args, "biogeo", "none") != "none"),
         )
         app_grid_type = "latlon"
 

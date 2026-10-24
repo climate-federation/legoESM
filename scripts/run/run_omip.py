@@ -4597,7 +4597,7 @@ def _join_restart_writer():
 # ``_SLOT_POLICY`` (PR #1444, ``mass_flux_u``/``mass_flux_v`` -> DIAGNOSTIC);
 # this is the older npz lane, which has no such policy table.
 _RESTART_DIAGNOSTIC_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w",
-                             "salt_flux_u_int", "salt_flux_v_int")
+                             "vmix_K_v", "salt_flux_u_int", "salt_flux_v_int")
 
 
 # Restart provenance for the MPAS SPMD lane (module slot: the loop's restart
