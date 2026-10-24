@@ -760,7 +760,7 @@ def test_under_ice_heat_attenuation_reduces_qnet():
 
 
 @pytest.mark.parametrize("snow_tracked", [False, True])
-@pytest.mark.parametrize("phase", ["rain", "snow"])
+@pytest.mark.parametrize("phase", ["rain", "snow", "snow_exceeds_total"])
 def test_core2_prognostic_ice_delivers_precip_once_through_freeze_and_meltout(
         snow_tracked, phase):
     """Water closure of the CORE-II prognostic-ice partition: over one real
@@ -793,7 +793,9 @@ def test_core2_prognostic_ice_delivers_precip_once_through_freeze_and_meltout(
         atm = AtmToSurface(
             sw_down=jnp.array([0.0, 4000.0, 0.0]), lw_down=jnp.full(shape, 200.0),
             precip_total=jnp.full(shape, p),
-            precip_snow=jnp.full(shape, p if phase == "snow" else 0.0),
+            # snow_exceeds_total: regridded snow above the corrected total.
+            precip_snow=jnp.full(shape, {"rain": 0.0, "snow": p,
+                                         "snow_exceeds_total": 1.1 * p}[phase]),
             T_lowest=jnp.array([245.0, 290.0, 255.0]),
             q_lowest=jnp.full(shape, 1e-3), u_lowest=jnp.full(shape, 5.0),
             v_lowest=jnp.zeros(shape), p_lowest=jnp.full(shape, 9.5e4),
@@ -818,7 +820,7 @@ def test_core2_prognostic_ice_delivers_precip_once_through_freeze_and_meltout(
     # Tracked snow on the steady ice cell insulates it, changing basal growth
     # (ice_fw) and lead freeze between the wet and dry step, so that cell's
     # difference is not a precip budget; freeze and melt-out cells carry none.
-    closed = [0, 1] if (phase == "snow" and snow_tracked) else [0, 1, 2]
+    closed = [0, 1] if (phase != "rain" and snow_tracked) else [0, 1, 2]
     np.testing.assert_array_equal(a_post[closed], a_post_dry[closed])
     # The fixture really exercises a freeze and a melt-out.
     assert a_pre[0] == 0.0 and a_post[0] > 0.0
@@ -871,7 +873,7 @@ def test_both_host_loops_withhold_ice_precip_under_no_emp(loop_name):
     assert isinstance(v.value, ast.Name) and v.value.id == "args"
 
 
-def _ridging_rain_step(rain):
+def _ridging_rain_step(rain, conc_scale=1.0):
     """One real multi-category step with convergence ridging (the fixture of
     tests/ice/unit/test_ice_convergence_ridging.py) under uniform rain."""
     from legoesm.grids.latlon import create_latlon_geometry
@@ -887,6 +889,8 @@ def _ridging_rain_step(rain):
                      concentration=st.concentration.replace(data=jnp.full(shape, 0.7)),
                      T_ice=st.T_ice.replace(data=jnp.full(shape, 260.0)))
     st = distribute_dynamic_state_to_categories(st, 5)
+    st = st._replace(concentration=st.concentration.replace(
+        data=st.concentration.data * conc_scale))
     cfg = SeaIceConfig(dynamics="free_drift", transport="none", n_categories=5,
                        itd_remap="lipscomb2001", brine=BrineConfig(enabled=True),
                        ridging=RidgingConfig(enabled=True, closing_scheme="convergence"))
@@ -921,4 +925,27 @@ def test_core2_prognostic_ice_rain_closes_through_ridging():
     a_final = np.asarray(jnp.sum(new.concentration.data, axis=-1))
     # The fixture really ridges: final cover below the forwarding cover.
     assert float(np.max(np.asarray(resp.ice_concentration_precip) - a_final)) > 1e-5
+    np.testing.assert_allclose(wet - dry, rain, rtol=1e-10)
+
+
+def test_core2_prognostic_ice_rain_closes_with_overfilled_cover():
+    """An aggregate cover above 1 entering the step (transport overfill or an
+    overfilled restart) is capped before the thermodynamics, so the cover the
+    ice forwards rain with stays <= 1 and ocean rain still equals the incident
+    rain."""
+    sf0, fw0, _, _ = _open_forcing((8, 12))
+    land = jnp.ones((8, 12))
+
+    def delivered(rain):
+        cfg, atm, new, resp = _ridging_rain_step(rain, conc_scale=1.05 / 0.7)
+        fw, _ = R._blend_prognostic_ice_forcing(
+            sf0, fw0._replace(precip=jnp.full((8, 12), rain)), resp, new,
+            resp.ice_concentration_thermo, land, cfg,
+            constants.alpha_ocean_broadband, atm)
+        return np.asarray(fw.precip + fw.ice_fw), resp
+
+    rain = 2.0e-4
+    wet, resp = delivered(rain)
+    dry, _ = delivered(0.0)
+    assert float(np.max(np.asarray(resp.ice_concentration_precip))) <= 1.0
     np.testing.assert_allclose(wet - dry, rain, rtol=1e-10)

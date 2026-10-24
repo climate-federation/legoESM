@@ -4841,7 +4841,9 @@ def _blend_prognostic_ice_forcing(sf, fw, ice_resp, ice_state, ice_conc_thermo,
     if fw is not None:
         snow = atm_ice.precip_snow * atm_ice.has_precipitation
         a_snow = ice_conc_thermo if ice_config.snow.enabled else conc_post
-        ice_precip = conc_post * (fw.precip - snow) + a_snow * snow
+        # Rain floored at zero like the ice tile's own rain (snow can exceed the
+        # corrected total precip), so ocean + ice still sum to ``fw.precip``.
+        ice_precip = conc_post * jnp.maximum(fw.precip - snow, 0.0) + a_snow * snow
     fw, sf = blend_ice_ocean_forcing(
         open_sf=sf, open_fw=fw, ice_resp=ice_resp,
         ice_concentration=ice_conc_thermo,
