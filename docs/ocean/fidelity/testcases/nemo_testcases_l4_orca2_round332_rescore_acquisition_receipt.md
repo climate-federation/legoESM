@@ -3,7 +3,7 @@
 Date: 2026-10-24
 
 Base: `f2dcf0a8cfff`; preregistration: `77ab00003`; rescore gate:
-`a80e3d0ab`.  Post-review acquisition repair: pending final commit below.
+`a80e3d0ab`.  Post-review acquisition repair: `c9569b8cf`.
 Final disposition: **ACQUISITION_NEEDED**.  No model or configuration value
 changed, and Codex did not run NEMO.
 
@@ -128,6 +128,12 @@ immediates (727--729 become 740--742).  The floating-point instruction stream,
 including the production add loop, is otherwise identical.  Admission still
 provides the decisive passivity proof through bitwise output comparisons.
 
+The clean repaired preflight passed: 65 tests; all 140 inherited deterministic
+files matched; the misplaced-TKE plant fired; all eight writer/observer
+Fortran units passed syntax; and the same-program proof found 409 identical
+preprocessed units and 421 identical normalized objects before its
+non-observer source plant refused.  The preflight ran no NEMO executable.
+
 Operator command:
 
 ```text
@@ -146,10 +152,11 @@ Expected evidence directory:
 - R332-P5: **CONFIRMED**.  With no confirmed single-statement owner, Decision
   122 is not opened and no production-call-site, cross-card, or gradient claim
   is eligible.
-- Per-receipt citation gate: PASS, 4 citations, 0 unmapped, 0 failures and 0
+- Per-receipt citation gate: PASS, 5 citations, 0 unmapped, 0 failures and 0
   map-audit failures; required citation-gate pytest: 17 passed.
-- Default ORCA2 landing battery plus the round-332 gate: 158 passed in
-  1,039.52 seconds, including all 6 private-import ratchet tests.
+- Default ORCA2 landing battery plus the round-332 gate: 168 passed in
+  1,067.09 seconds, including all 6 private-import ratchet tests.
+- Explicit private-import ratchet: 6 passed in 4.83 seconds.
 - No configuration value changed: **ASKED**.
 - Stop and extend the reviewed acquisition tools when a record is missing:
   **ASKED and satisfied**.
