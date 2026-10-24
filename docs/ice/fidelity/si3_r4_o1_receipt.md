@@ -35,8 +35,8 @@ record even though the fields differ. O1 resolves `nn_icesal=4`,
 `rn_simin=0.1`, and `rn_sinew=0.75`. At an icy category NEMO computes `sz_i`
 from `szv_i / (v_i * r1_nlay_i)` and does not consume `sss_m`; at an ice-free
 category it computes `MIN(rn_simin, rn_sinew * sss_m)`
-(`src/ICE/icevar.F90:376-390`; compiled
-`ORCA2_SAS_ICE_O1_REC/BLD/ppsrc/nemo/icevar.f90:376-390`). The branch point is
+(`src/ICE/icevar.F90:362-375`; compiled
+`ORCA2_SAS_ICE_O1_REC/BLD/ppsrc/nemo/icevar.f90:376-389`). The branch point is
 therefore `0.13333333333333333`, far below both real forcing snapshots at the
 scored cells, so both produce `0.1`. Substitution changed no scored bit.
 
@@ -59,7 +59,7 @@ the permanent admission JSON stamps `execution_backend="cpu"`,
 prognostic field, Prather moment, equivalent field, and aggregate on wet
 T/U/V cells, including NEMO-defined cyclic seam and north-fold halos; only
 reduced `A2D(0)` diagnostics remain interior-only
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1266-1367`).
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1261-1357`).
 
 - Continuous bridge `kt=1`: maximum `0` ULP, maximum normalised error `0.0`.
 - Continuous bridge `kt=2`: maximum `0` ULP, maximum normalised error `0.0`.
@@ -75,8 +75,8 @@ There is no first failing production statement: all preregistered bridge,
 restart, seam, and north-fold comparisons are exact. The first failure exists
 only in the deliberate plant and is `s_i`, sourced by NEMO's ice-free
 `sz_i` assignment and layer accumulation
-(`src/ICE/icevar.F90:386-390`; compiled
-`ORCA2_SAS_ICE_O1_REC/BLD/ppsrc/nemo/icevar.f90:386-390`).
+(`src/ICE/icevar.F90:368-375`; compiled
+`ORCA2_SAS_ICE_O1_REC/BLD/ppsrc/nemo/icevar.f90:382-389`).
 
 The permanent `o1_admission.json` SHA-256 is
 `c1c2ea1cb78fe9347e2db9096a39107b7b1c093b0676931aeeee0cff675ca963`.

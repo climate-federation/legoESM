@@ -235,6 +235,8 @@ FILES = {
     "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2b_year_gate.py": (
         REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2b_year_gate.py"),
     "src/ICE/icevar.F90": NEMO / "src/ICE/icevar.F90",
+    "ORCA2_SAS_ICE_O1_REC/BLD/ppsrc/nemo/icevar.f90": (
+        NEMO / "cfgs/ORCA2_SAS_ICE_O1_REC/BLD/ppsrc/nemo/icevar.f90"),
     "C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90": (
         NEMO / "cfgs/C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90"),
     "src/ICE/icethd.F90": NEMO / "src/ICE/icethd.F90",
@@ -9128,7 +9130,7 @@ CITATION_MAP = {
         "WRITE(cl_fname, '(\"o1_si3_records/o1_si3_state_step\", I4.4, \"_rank\", I4.4, \".bin\")') kt, mpprank",
         4,
     ],
-    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1759-1824": [
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1778-1843": [
         "# 5. Score rst_1step (Item 5 & Item 6): NetCDF restart read + 1-step trajectory vs rec_2step step 2",
         'rst_sss_step2 = jnp.asarray(rst_snap_step2["fields"]["sss_m"], dtype=jnp.float64)',
         66,
@@ -9148,16 +9150,58 @@ CITATION_MAP = {
         "CASE(  2 )   ;         CALL ice_stp  ( kt, Kbb, Kmm, nsbc )",
         4,
     ],
-    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1729-1742": [
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1729-1761": [
         "state_entry, cfg = o1_snapshot_to_si3_state(snap_entry)",
-        "state_kt2 = si3_o1_step(state_kt1, tmask=tmask, sss_m=sss_step2, config=cfg)",
-        14,
+        "state_kt2 = o1_step_jit(state_kt1, tmask, sss_step2)",
+        33,
     ],
-    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1811-1833": [
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1830-1852": [
         "rst_snap_entry = stitch_o1_binary_snapshots(",
-        "lego_rst_step2 = si3_o1_step(lego_rst_entry, tmask=tmask, sss_m=rst_sss_step2, config=cfg)",
+        "lego_rst_step2 = o1_step_jit(lego_rst_entry, tmask, rst_sss_step2)",
         23,
     ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1929-1936": [
+        '"sss_m_kt1_sha256": hashlib.sha256(sss_step1_np.tobytes()).hexdigest(),',
+        '"sss_m_kt2_plant_branch_point": cfg.rn_simin / cfg.rn_sinew,',
+        8,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1741-1761": [
+        "o1_step_jit = jax.jit(",
+        "state_kt2 = o1_step_jit(state_kt1, tmask, sss_step2)",
+        21,
+    ],
+    "src/ICE/icevar.F90:362-375": {
+        "anchors": [
+            "ELSEIF( nn_icesal == 4 ) THEN",
+            "s_i(ji,jj,jl) = s_i(ji,jj,jl) + sz_i(ji,jj,jk,jl) * r1_nlay_i",
+            14,
+        ],
+        "routine": "ice_var_glo2eqv",
+    },
+    "ORCA2_SAS_ICE_O1_REC/BLD/ppsrc/nemo/icevar.f90:376-389": {
+        "anchors": [
+            "ELSEIF( nn_icesal == 4 ) THEN",
+            "s_i(ji,jj,jl) = s_i(ji,jj,jl) + sz_i(ji,jj,jk,jl) * r1_nlay_i",
+            14,
+        ],
+        "routine": "ice_var_glo2eqv",
+    },
+    "src/ICE/icevar.F90:368-375": {
+        "anchors": [
+            ("IF ( v_i(ji,jj,jl) > epsi20 ) THEN     !--- icy area", 1),
+            "s_i(ji,jj,jl) = s_i(ji,jj,jl) + sz_i(ji,jj,jk,jl) * r1_nlay_i",
+            8,
+        ],
+        "routine": "ice_var_glo2eqv",
+    },
+    "ORCA2_SAS_ICE_O1_REC/BLD/ppsrc/nemo/icevar.f90:382-389": {
+        "anchors": [
+            ("IF ( v_i(ji,jj,jl) > epsi20 ) THEN     !--- icy area", 1),
+            "s_i(ji,jj,jl) = s_i(ji,jj,jl) + sz_i(ji,jj,jk,jl) * r1_nlay_i",
+            8,
+        ],
+        "routine": "ice_var_glo2eqv",
+    },
     "tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:1112-1122": [
         "# Make one wet category ice-free so the synthetic kt=2 salinity change is",
         "state2 = si3_o1_step(state1, tmask=tmask, sss_m=sss_step2, config=cfg)",
