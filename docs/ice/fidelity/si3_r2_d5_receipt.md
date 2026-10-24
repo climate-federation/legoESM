@@ -10,7 +10,7 @@ This round executes rung **D5** of the SI3 sea-ice fidelity ladder (`docs/ice/fi
   * `oracle_si3_thd_frames.bin` SHA-256: `7fc9df2707a85581075e3c69b26784155151a55640a5693eb32c34fb710ea49b`
   * `oracle_si3_zdf_inputs.bin` SHA-256: `cd1b15c821f19442a840e99c067c640e5146b754fc137a2c81e88856d6ea7efd`
 * **Committed probe:** `scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:144-1949`
-* **Committed unit & gradient tests:** `tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:61-1902`
+* **Committed unit & gradient tests:** `tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:61-2100`
 * **Evidence artifacts under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round2/` (eager `si3_column_step_arrays`; inner `fori_loop` compiled):**
   * `d5_platform_probe_cpu.json` (CPU default, `XLA_FLAGS=""`) SHA-256: `8e9de0b3de4648be43eb40275b6520cf40156ddac308940b736d39f00af9dbcf`
   * `d5_platform_probe_cpu_avx_nofma.json` (CPU FMA disabled, `XLA_FLAGS="--xla_cpu_max_isa=AVX"`) SHA-256: `c8be84fa73ea213136967fba05e5f8821bb2d00c1c1ecdc23e26b14c4bf3aaf9`
@@ -36,7 +36,7 @@ In `scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:1
 * `x_sub * 1.0` and `x_sub + 0.0` have a subnormal mathematical result (`5e-324`), so they flush to `0.0` under output flush-to-zero (`FTZ`) alone even if input denormals-are-zero (`DAZ`) is disabled (`ftz_or_daz_flushes_mul_add`). They therefore cannot classify `DAZ`.
 * `ftz_flushes_subnormal_output` is classified from `_jit_produce_subnormal(2^-1022, 2^-52)`, whose inputs are normal binary64 numbers (`0x0010000000000000` and `0x3cb0000000000000`) and whose product is subnormal (`0x0000000000000001`).
 * `daz_flushes_subnormal_input` is classified **exclusively** from Stage B's `_jit_snow_pred(h_s)` (`h_s > 0.0`) on positive subnormal inputs (`inputs_are_positive_subnormal = True`), because the comparison output is a normal boolean (`True`/`False`, or `1.0`/`0.0` in `_jit_isnow`) that output `FTZ` alone cannot flush.
-* `tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:735-783` verifies that `classify_ftz_daz` distinguishes `FTZ_ONLY_FLUSH_TO_ZERO` (`daz_flushes_subnormal_input = False`) from `FTZ_DAZ_FLUSH_TO_ZERO` (`daz_flushes_subnormal_input = True`) and includes a planted control (`plant_invalid_daz_from_mul_add=True`) proving the former `x * 1.0` / `x + 0.0` rule fails on an `FTZ`-only state.
+* `tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:933-981` verifies that `classify_ftz_daz` distinguishes `FTZ_ONLY_FLUSH_TO_ZERO` (`daz_flushes_subnormal_input = False`) from `FTZ_DAZ_FLUSH_TO_ZERO` (`daz_flushes_subnormal_input = True`) and includes a planted control (`plant_invalid_daz_from_mul_add=True`) proving the former `x * 1.0` / `x + 0.0` rule fails on an `FTZ`-only state.
 
 | Probe metric | CPU (`x86_64`, `cpu:0`, default & `--xla_cpu_max_isa=AVX`) | GPU (`Tesla V100S-PCIE-32GB`, `cuda:0` via `CUDA_VISIBLE_DEVICES=1`) |
 |---|---|---|
@@ -206,17 +206,17 @@ Per the one-statement-per-round rule, the two upstream input mismatches that exp
 
 ## 5. Verification Tests, Planted Controls, and Autodiff Check
 
-`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:61-1902` pins all five required properties:
+`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:61-2100` pins all five required properties:
 1. **One-step bit-exact statement test + revert control (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:61-313`):**
    * Pins the scalar NEMO replay of `zh_s`, `z1_h_s`, `zkappa_s = 1500.0`, and `zeta_s = 0x402f37c77f84d1ee` against legacy `0x402f37c77f84d1ef` (1 ULP), and pins the iteration-frozen `zkappa` conductive-flux transcription (`C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:782-784`) at `kt = 4242` (`zq_top = 0x410e81a8bd7ce42a`, `0` ULP vs `634,976,763` ULP when conductivity is recomputed from post-solve temperatures).
    * Verifies on `kt = 5841` (and `kt = 5860` with snow present) that `_si3_zdf_bl99_step(..., _nemo_zdf_layer_reciprocals=True)` matches NEMO's `POST_ZDF` `t_su`, `e_s`, and `e_i` to **0 ULPs (`0.0`)**, and **fails** when reverted (`_nemo_zdf_layer_reciprocals=False`), jumping to `710..716` ULPs (`norm_err > 9.4e-14 > 1e-15`) at `kt = 5841` and `597` ULPs (`norm_err = 7.883635078992678e-14 > 1e-15`) at `kt = 5860`.
 2. **Autodiff check (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:316-472`):**
    * Evaluates `jax.value_and_grad` through `_si3_zdf_bl99_step` and `_radiation` across clamped-snow (`kt = 5841`), thick-snow (`kt = 1`), and snow-free regimes, verifying that forward outputs under `value_and_grad` (`T_surface`, `e_snow`, `e_ice`, `qcn_ice_top`, `qcn_ice_bottom`) are bit-identical (`0` ULPs) to the standalone primal call, all reverse-mode gradients with respect to `(e_ice, e_snow, h_ice, h_snow, T_surface, qns_ice)` are finite and nonzero, and reverse-mode `jax.grad` matches forward-mode `jax.jvp` to `< 1e-11` relative error. Includes a planted `jax.lax.stop_gradient` control that fires when snow-branch gradients are zeroed.
-3. **Non-SI3 caller bit-for-bit invariance against parent commit + planted code-path controls (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:475-732`):**
+3. **Non-SI3 caller bit-for-bit invariance against parent commit + planted code-path controls (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:475-930`):**
    * Loads the parent-commit (`59fd8f2395ccba60b5b04f3c2c68946835feea12`) modules via `git show` and compares `bitz_lipscomb_conduction_step`, `thomas_solve(..., "normalised")`, `IceColumnModel.step()`, and `step_sea_ice` (both slab and dynamic-v2) bit-for-bit (`uint64`) against the current commit across multiple thicknesses, and proves the test fails (`pytest.raises(AssertionError)`) when any of the four non-SI3 code paths is perturbed.
-4. **FTZ vs DAZ classification test + planted control (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:735-783`):**
+4. **FTZ vs DAZ classification test + planted control (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:933-981`):**
    * Verifies `classify_ftz_daz` reports `daz_flushes_subnormal_input=False` under `FTZ`-only (`x * 1.0 == 0.0` and `x + 0.0 == 0.0` while `h_s > 0.0` is `True`) and proves the planted invalid formula (`plant_invalid_daz_from_mul_add=True`) fails.
-5. **Probe & planted failing controls (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:786-941`):**
+5. **Probe & planted failing controls (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:984-1139`):**
    * Verifies `--plant zero_subnormal_input`, `--plant flush_recorded_operand`, and `--plant revert_statement_fix` all cause `nemo_si3thd_d5_platform_probe.py` to exit with code `1`.
 
 ---

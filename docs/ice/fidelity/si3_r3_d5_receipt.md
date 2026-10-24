@@ -18,7 +18,7 @@ Four ordered steps were preregistered in `docs/ice/fidelity/si3_r3_d5_preregiste
   * `oracle_si3_thd_frames.bin` SHA-256: `7fc9df2707a85581075e3c69b26784155151a55640a5693eb32c34fb710ea49b`
   * `oracle_si3_zdf_inputs.bin` SHA-256: `cd1b15c821f19442a840e99c067c640e5146b754fc137a2c81e88856d6ea7efd`
 * **Committed probe:** `scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:144-1949`
-* **Committed unit & gradient tests:** `tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:61-1902`
+* **Committed unit & gradient tests:** `tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:61-2100`
 * **Evidence artifacts under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round3/` (`jax.jit` evaluation, `worktree.clean = true` at `8ea398af75cdb53adad8f1febeb79d89ab664e97`):**
   * `cpu_default_probe.json` (CPU production JIT, `XLA_FLAGS=""`) SHA-256: `3b500ddf849202a66143bc0cbfa6c4524830a4f00847793415fe7fb4acd36c69`
   * `cpu_nofma_probe.json` (CPU diagnostic JIT, `XLA_FLAGS="--xla_cpu_max_isa=AVX"`) SHA-256: `6a83b03454b6907995084dad93c574a89f757d6d9ea8c5c3ba32436b4ad9d9ca`
@@ -218,20 +218,20 @@ Outside the stated 26-step CPU subnormal floor (`D5_PLATFORM_FLOOR`, `kt = 5842.
 
 ## 6. Verification Tests, Planted Controls, and Autodiff Check
 
-`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:61-1902` pins every Round 2 and Round 3 requirement:
-1. **Step 2 bit-for-bit test + SSS-guard & revert controls (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:944-1067`):**
+`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:61-2100` pins every Round 2 and Round 3 requirement:
+1. **Step 2 bit-for-bit test + SSS-guard & revert controls (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:1142-1265`):**
    * Verifies on `kt = 2` and `kt = 15` (inexact C1D operands) that `_exact_1d_entry(..., _nemo_entry_conversion=True)` reproduces `frames[1]["sz_i"]` and `exact["t_s"]` to **`0` ULPs** and **fails** (`1` ULP) when reverted (`_nemo_entry_conversion=False`).
    * Explicitly exercises both SSS-dependent guards in `_nemo_salprof(s_i, sss)` (`s_i >= 0.5 * rn_sinew * sss` and `s_i <= 3.0 * min(rn_simin, rn_sinew * sss)`) and proves that omitting either guard or hardcoding `3.0 * 0.1` fails.
-2. **Step 3 bit-for-bit test + revert control (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:1070-1167`):**
+2. **Step 3 bit-for-bit test + revert control (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:1268-1365`):**
    * Verifies on `kt = 2`, `15`, and `1334` that `snow_temperature_from_enthalpy(..., _nemo_glo2eqv_snow_temp=True)` reproduces `exact["t_s"]` to **`0` ULPs**, and **fails** when reverted (`_nemo_glo2eqv_snow_temp=False`), pushing `kt = 1334 POST_ZDF.e_s` over the `1e-15` bar (`norm_err = 1.0269e-15 > 1e-15`, `9` ULPs).
-3. **Step 4 CPU fusion-prevention bit-for-bit test across `POST_ZDF` and `POST_DH..EXIT` + revert controls (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:1170-1296`):**
+3. **Step 4 CPU fusion-prevention bit-for-bit test across `POST_ZDF` and `POST_DH..EXIT` + revert controls (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:1368-1494`):**
    * Verifies on `kt = 1`, `3`, `2906`, `4242`, and `5841` that `_si3_zdf_bl99_step(..., _nemo_source_round=True)` matches all `POST_ZDF` fields (`t_su`, `e_i`, `e_s`) to **`0` ULPs** under compiled `@jax.jit`, and **fails** on CPU default JIT when reverted (`_nemo_source_round=False`), pushing `kt = 2906 POST_ZDF.e_s` over the `1e-15` bar (`norm_err = 1.1393e-15 > 1e-15`, `9` ULPs).
    * Verifies on `kt = 3961` (`option2_salinity_profile`), `kt = 2899` (`_piecewise_remap` and `_nemo_snow_enthalpy_remap`), `kt = 4237` (snow surface melt `zq_top` and ice surface melt `zdE`), and `kt = 4738` (ice basal melt `zdE`) that `jax.jit(si3_column_step_arrays)(..., _nemo_source_round=True)` matches the NEMO-exact reference and **fails** (`ulp > 0`) on CPU default JIT when `_nemo_source_round=False`.
-4. **Autodiff & forward-bit preservation across all touched functions (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:316-472`, `tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:1299-1434`):**
+4. **Autodiff & forward-bit preservation across all touched functions (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:316-472`, `tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:1497-1632`):**
    * Verifies `jax.value_and_grad` and `jax.jvp` through `option2_salinity_profile`, `snow_temperature_from_enthalpy`, `ice_temperature_from_enthalpy`, `ice_enthalpy_from_temperature`, `snow_enthalpy_from_temperature`, `p07_conductivity`, `_radiation`, `_si3_zdf_bl99_step`, `_piecewise_remap`, `_nemo_snow_enthalpy_remap`, and `thomas_solve(..., "nemo_unnormalised")`: primal outputs under `value_and_grad` and `jvp` are bit-for-bit (`uint64`) identical (`0` ULP) to direct primal evaluation, all gradients are finite and nonzero, and reverse-mode `jax.grad` matches forward-mode `jax.jvp` to `< 1e-12` relative error.
-5. **Non-SI3 caller bit-for-bit invariance against parent commit (`59fd8f2395`) + code-path planted controls (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:475-732`):**
+5. **Non-SI3 caller bit-for-bit invariance against parent commit (`59fd8f2395`) + code-path planted controls (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:475-930`):**
    * Loads `tridiagonal.py`, `bitz_lipscomb.py`, `snow.py`, `sea_ice.py`, and `scm.py` directly from parent commit `59fd8f2395ccba60b5b04f3c2c68946835feea12` via `git show` (`_load_parent_commit_non_si3_modules`), executes the real non-SI3 callers (`bitz_lipscomb_conduction_step`, `thomas_solve(..., "normalised")`, `IceColumnModel.step()`, and `step_sea_ice` slab and dynamic-v2) on both the parent-commit modules and current-commit modules, asserts bit-for-bit (`uint64`) equality across all outputs, and proves that planting a code-path change in any of those four non-SI3 execution paths (`bitz_lipscomb_conduction_step`, `thomas_solve` unnormalised forward elimination, `simple_bulk_fluxes`, or `update_salinity_and_salt_flux`) causes the comparison to fail (`pytest.raises(AssertionError)`).
-6. **Probe CLI expectations and planted failing controls (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:786-941`):**
+6. **Probe CLI expectations and planted failing controls (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:984-1139`):**
    * Verifies `--expect-step1-exact-snow-temp` and `--expect-zero-post-zdf-over-bar` pass, and that `--plant zero_subnormal_input`, `--plant flush_recorded_operand`, `--plant revert_statement_fix`, and `--plant revert_snow_temp_statement` all cause `nemo_si3thd_d5_platform_probe.py` to exit with code `1`.
 
 ---

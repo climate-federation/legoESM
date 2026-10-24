@@ -475,7 +475,7 @@ def test_d5_zdf_gradients_are_finite_and_reverse_equals_forward_with_literal_for
 def _parent_commit_bitz_lipscomb_conduction_step(
     q_layers, h, S, F_top, T_bottom_K, dt, *, plant_reciprocal_dz: bool = False
 ):
-    """Exact parent-commit (59fd8f2395) implementation of bitz_lipscomb_conduction_step."""
+    """Exact parent-commit (a572f4b254) implementation of bitz_lipscomb_conduction_step."""
     n = q_layers.shape[-1]
     S_b = jnp.broadcast_to(
         S[..., None] if S.ndim == h.ndim else S, q_layers.shape
@@ -519,10 +519,13 @@ def _parent_commit_bitz_lipscomb_conduction_step(
     return q_new, T_new, F_bottom
 
 
+R5_PARENT_COMMIT = "a572f4b2540351bf49328d1533211427f9c9d772"
+
+
 def _load_parent_commit_non_si3_modules(
-    parent_commit: str = "59fd8f2395ccba60b5b04f3c2c68946835feea12",
+    parent_commit: str = R5_PARENT_COMMIT,
 ) -> dict[str, types.ModuleType]:
-    """Load the real non-SI3 modules directly from `parent_commit` via `git show`."""
+    """Load the ice and tridiagonal modules directly from `parent_commit` via `git show`."""
     module_specs = (
         (
             "legoesm.timestepping.tridiagonal",
@@ -556,10 +559,27 @@ def _load_parent_commit_non_si3_modules(
     return loaded
 
 
-def test_d5_non_si3_callers_are_bit_identical(monkeypatch) -> None:
-    """Non-SI3 callers from the parent commit and current commit match bit-for-bit and fail when a non-SI3 code path is changed."""
+def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None:
+    """Compare parent commit (`a572f4b254`) vs current across non-SI3 callers and the production lane-3 SI3 dispatcher (`sea_ice.py:287-299,497-514`).
+
+    Expected to change on the SI3 lane-3 production dispatcher (`step_sea_ice`
+    with `thermo_scheme='si3_bl99'` at `kt = 43`):
+      - ONLY `new_state.e_ice.data` (the SI3 arm's literal remap
+        `_nemo_ice_enthalpy_remap`, moving from parent's `_piecewise_remap` to
+        `0` ULP vs C1D oracle `POST_DH.e_i`).
+    Expected to stay bit-for-bit (`uint64`) identical between parent (`a572f4b254`)
+    and current:
+      - All non-SI3 callers (`bitz_lipscomb_conduction_step`, `thomas_solve(..., 'normalised')`,
+        `IceColumnModel.step()` slab, and `step_sea_ice` dynamic-v2), and
+      - On the SI3 lane-3 production dispatcher (`step_sea_ice` at `kt = 43`):
+        all other 8 `SI3ColumnState` fields (`concentration`, `h_ice`, `h_snow`,
+        `T_surface`, `e_snow`, `S_bulk`, `S_layers`, `age_volume`) and all 22
+        `TileResponse` fields.
+    """
+    from legoesm.core.field import Field
     import legoesm.ice.scm as scm_mod
     import legoesm.ice.sea_ice as sea_ice_mod
+    from legoesm.ice.state import SI3ColumnState
     import legoesm.timestepping.tridiagonal as tridiag_mod
     from legoesm.ice import (
         BrineConfig,
@@ -568,9 +588,7 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch) -> None:
         init_dynamic_ice_state,
     )
 
-    parent_mods = _load_parent_commit_non_si3_modules(
-        "59fd8f2395ccba60b5b04f3c2c68946835feea12"
-    )
+    parent_mods = _load_parent_commit_non_si3_modules(R5_PARENT_COMMIT)
     current_mods = {
         "legoesm.timestepping.tridiagonal": tridiag_mod,
         "legoesm.ice.bitz_lipscomb": bl_mod,
@@ -730,6 +748,186 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch) -> None:
             sea_ice_mod, "update_salinity_and_salt_flux", _planted_brine
         )
         _assert_differs_from_parent(_run_non_si3_paths(current_mods))
+
+    # (e) Production lane-3 SI3 dispatcher path (`sea_ice.py:287-299,497-514`):
+    #     Compare parent (`a572f4b254`) vs current on C1D step `kt = 43`.
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    si3_steps = _load_step_operands(probe_module, (43,))
+    dims = ("column",)
+    sst_1d = jnp.full((1,), 271.35, dtype=jnp.float64)
+    zvel_1d = jnp.zeros((1,), dtype=jnp.float64)
+
+    def _build_si3_state_and_forcing(
+        kt_val: int, m_bl_mod: types.ModuleType
+    ) -> tuple[SI3ColumnState, object, dict]:
+        fr_kt, ex_kt = si3_steps[kt_val]
+        ent_kt = probe_module.year_gate._exact_1d_entry(
+            fr_kt, sss_m=ex_kt["sss"], _nemo_entry_conversion=True
+        )
+        st_kt = SI3ColumnState(
+            concentration=Field(
+                jnp.asarray(ent_kt.concentration, dtype=jnp.float64),
+                name="ice_concentration",
+                dims=dims,
+                units="1",
+            ),
+            h_ice=Field(
+                jnp.asarray(ent_kt.h_ice, dtype=jnp.float64),
+                name="h_ice",
+                dims=dims,
+                units="m",
+            ),
+            h_snow=Field(
+                jnp.asarray(ent_kt.h_snow, dtype=jnp.float64),
+                name="h_snow",
+                dims=dims,
+                units="m",
+            ),
+            T_surface=Field(
+                jnp.asarray(ent_kt.T_surface, dtype=jnp.float64),
+                name="ice_surface_temperature",
+                dims=dims,
+                units="K",
+            ),
+            e_ice=Field(
+                jnp.asarray(ent_kt.e_ice, dtype=jnp.float64),
+                name="ice_layer_enthalpy",
+                dims=dims + ("ice_layer",),
+                units="J/m3",
+            ),
+            e_snow=Field(
+                jnp.asarray(ent_kt.e_snow, dtype=jnp.float64),
+                name="snow_layer_enthalpy",
+                dims=dims + ("snow_layer",),
+                units="J/m3",
+            ),
+            S_bulk=Field(
+                jnp.asarray(ent_kt.S_bulk, dtype=jnp.float64),
+                name="bulk_ice_salinity",
+                dims=dims,
+                units="PSU",
+            ),
+            S_layers=Field(
+                jnp.asarray(ent_kt.S_layers, dtype=jnp.float64),
+                name="ice_layer_salinity",
+                dims=dims + ("ice_layer",),
+                units="PSU",
+            ),
+            age_volume=Field(
+                jnp.asarray(ent_kt.age_volume, dtype=jnp.float64),
+                name="ice_age_volume",
+                dims=dims,
+                units="s",
+            ),
+        )
+        forc_kt = m_bl_mod.SI3SurfaceForcing(
+            *(
+                jnp.asarray(ex_kt[n], dtype=jnp.float64)
+                for n in probe_module.phase2.ZDF_INPUT_NAMES
+            )
+        )
+        return st_kt, forc_kt, fr_kt
+
+    def _run_si3_dispatcher(
+        mods: dict[str, types.ModuleType], kt_val: int
+    ) -> tuple[SI3ColumnState, object, dict]:
+        m_bl_mod = mods["legoesm.ice.bitz_lipscomb"]
+        m_sea_ice_mod = mods["legoesm.ice.sea_ice"]
+        st_in, forc_in, fr_kt = _build_si3_state_and_forcing(kt_val, m_bl_mod)
+        st_out, resp_out = m_sea_ice_mod.step_sea_ice(
+            st_in,
+            forc_in,
+            sst_1d,
+            zvel_1d,
+            zvel_1d,
+            card.config,
+            1.0,
+            card.dt_seconds,
+        )
+        return st_out, resp_out, fr_kt
+
+    def _verify_si3_dispatcher_vs_parent(
+        cand_mods: dict[str, types.ModuleType],
+    ) -> None:
+        # At kt = 43: ONLY `e_ice` changes (the SI3 arm's literal remap, moving
+        # from parent's `_piecewise_remap` to 0 ULP vs oracle `POST_DH.e_i`);
+        # all other 8 `SI3ColumnState` fields and all 22 `TileResponse` fields
+        # must stay bit-for-bit (`uint64`) identical to parent (`a572f4b254`).
+        par_st43, par_rp43, fr43 = _run_si3_dispatcher(parent_mods, 43)
+        cur_st43, cur_rp43, _ = _run_si3_dispatcher(cand_mods, 43)
+        oracle_ei43 = (
+            np.asarray(fr43[2]["e_i"], dtype=np.float64).ravel().view(np.uint64)
+        )
+        par_ei43 = (
+            np.asarray(par_st43.e_ice.data, dtype=np.float64)
+            .ravel()
+            .view(np.uint64)
+        )
+        cur_ei43 = (
+            np.asarray(cur_st43.e_ice.data, dtype=np.float64)
+            .ravel()
+            .view(np.uint64)
+        )
+        assert not np.array_equal(cur_ei43, par_ei43)
+        np.testing.assert_array_equal(cur_ei43, oracle_ei43)
+        for fname in SI3ColumnState._fields:
+            if fname == "e_ice":
+                continue
+            np.testing.assert_array_equal(
+                np.asarray(getattr(cur_st43, fname).data, dtype=np.float64).view(
+                    np.uint64
+                ),
+                np.asarray(getattr(par_st43, fname).data, dtype=np.float64).view(
+                    np.uint64
+                ),
+            )
+        for rname in cur_rp43._fields:
+            np.testing.assert_array_equal(
+                np.asarray(getattr(cur_rp43, rname), dtype=np.float64).view(
+                    np.uint64
+                ),
+                np.asarray(getattr(par_rp43, rname), dtype=np.float64).view(
+                    np.uint64
+                ),
+            )
+
+    _verify_si3_dispatcher_vs_parent(current_mods)
+
+    # Planted control 5a (in `step_sea_ice` -> `_si3_step_with_trace` dispatcher
+    # at `sea_ice.py:287-299,497-514`): perturbing an unchanged output (`h_ice`)
+    # by 1 ULP inside `_si3_step_with_trace` must make the dispatcher control fail.
+    orig_si3_step = sea_ice_mod._si3_step_with_trace
+
+    def _planted_si3_step_perturb_h(*a, **kw):
+        new_st, resp, tr = orig_si3_step(*a, **kw)
+        perturbed_h = new_st.h_ice.replace(
+            data=jnp.nextafter(new_st.h_ice.data, jnp.inf)
+        )
+        return new_st._replace(h_ice=perturbed_h), resp, tr
+
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            sea_ice_mod, "_si3_step_with_trace", _planted_si3_step_perturb_h
+        )
+        with pytest.raises(AssertionError):
+            _verify_si3_dispatcher_vs_parent(current_mods)
+
+    # Planted control 5b (in `_si3_step_with_trace` -> `si3_column_step_arrays`
+    # call at `sea_ice.py:514`): reverting `_nemo_ice_remap=False` inside the
+    # dispatcher must make the expected `e_ice` literal-remap check fail.
+    orig_si3_arrays = sea_ice_mod.si3_column_step_arrays
+
+    def _planted_si3_arrays_no_remap(arrays, forcing, dt, ice_constants):
+        return orig_si3_arrays(
+            arrays, forcing, dt, ice_constants, _nemo_ice_remap=False
+        )
+
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            sea_ice_mod, "si3_column_step_arrays", _planted_si3_arrays_no_remap
+        )
+        with pytest.raises(AssertionError):
+            _verify_si3_dispatcher_vs_parent(current_mods)
 
 
 def test_d5_ftz_daz_classification_distinguishes_ftz_only_from_daz(
