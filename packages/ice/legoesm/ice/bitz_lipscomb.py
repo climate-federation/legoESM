@@ -37,6 +37,7 @@ class SI3SurfaceForcing(NamedTuple):
     qsb_ice_bottom: jax.Array
     fhld: jax.Array
     qlead: jax.Array
+    frq_m: jax.Array | float = 1.0
 
 
 class SI3ZDFResult(NamedTuple):
@@ -1072,7 +1073,7 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             h_precip_raw = (
                 sr(sr(sr(snow_partition * forcing.snow_precipitation) * dt)
                    * inverse_snow_density)
-                / jnp.maximum(a, _EPS10)
+                / a
             )
             h_precip = jnp.where(
                 forcing.snow_precipitation > 0.0, h_precip_raw, 0.0
@@ -1231,10 +1232,7 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             )
             water_specific = sr(constants.c_ocean * ztmelts)
             energy_difference = sr(ice_specific - water_specific)
-            safe_dE = jnp.where(
-                energy_difference != 0.0, energy_difference, -1.0e-20
-            )
-            zfmdt = sr(-surface_energy / safe_dE)
+            zfmdt = sr(-surface_energy / energy_difference)
             zdum_melt = jnp.where(
                 _surface_melt,
                 jnp.where(
@@ -1277,10 +1275,13 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             zh_i_old_layers[k] = zh_i_old_layers[k] + zdum_subl
             icount_layers.append(jnp.where(zh_i_layers[k] > 0.0, 0, 1))
 
-        # Basal growth (`icethd_dh.F90:330-364`; compiled `icethd_dh.f90:340-374`).
+        # Basal heat-flux imbalance (`icethd_dh.F90:119`; compiled
+        # `icethd_dh.f90:129`) and basal growth (`icethd_dh.F90:330-364`;
+        # compiled `icethd_dh.f90:340-374`).
+        frq_m = getattr(forcing, "frq_m", 1.0)
         zf = sr(
             sr(sr(zdf.qcn_ice_bottom + forcing.qsb_ice_bottom) + forcing.fhld)
-            + zdf.qtr_ice_bottom
+            + sr(zdf.qtr_ice_bottom * frq_m)
         )
         S_new = sr(_NEW_ICE_SALINITY_FRACTION * forcing.sss)
         Tm = sr(-constants.liquidus_slope * S_new)
@@ -1334,15 +1335,12 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
                 )
                 water_specific = sr(constants.c_ocean * ztmelts)
                 energy_difference = sr(ice_specific - water_specific)
-                safe_dE = jnp.where(
-                    energy_difference != 0.0, energy_difference, -1.0e-20
-                )
-                zfmdt = sr(-basal_energy / safe_dE)
+                zfmdt = sr(-basal_energy / energy_difference)
                 zdum_basal = jnp.where(
                     layer_active,
                     jnp.where(
                         internal_melt,
-                        -zh_i_layers[k],
+                        jnp.minimum(0.0, -zh_i_layers[k]),
                         jnp.minimum(
                             0.0,
                             jnp.maximum(
@@ -1365,11 +1363,7 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
                         ),
                     ),
                 )
-                zh_i_layers[k] = jnp.where(
-                    internal_melt,
-                    0.0,
-                    jnp.maximum(0.0, zh_i_layers[k] + zdum_basal),
-                )
+                zh_i_layers[k] = jnp.maximum(0.0, zh_i_layers[k] + zdum_basal)
                 h_i_work = jnp.maximum(0.0, h_i_work + zdum_basal)
                 ze_i_old_layers[k] = ze_i_old_layers[k] + sr(
                     zdum_basal * zdf.e_ice[..., k]
@@ -1468,7 +1462,7 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             zdf.qcn_ice_bottom
             + forcing.qsb_ice_bottom
             + forcing.fhld
-            + zdf.qtr_ice_bottom
+            + zdf.qtr_ice_bottom * getattr(forcing, "frq_m", 1.0)
         )
         S_new = _NEW_ICE_SALINITY_FRACTION * forcing.sss
         Tm = -constants.liquidus_slope * S_new

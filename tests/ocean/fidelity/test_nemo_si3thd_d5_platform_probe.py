@@ -2654,3 +2654,124 @@ def test_r6_all_touched_functions_gradients_and_forward_bits(
     )(ze_old0)
     with pytest.raises(AssertionError):
         assert float(jnp.linalg.norm(planted_g_rc)) > 0.0
+
+
+def test_r6_literal_denominators_never_zero_under_record_and_frq_m_scales_qtr_ice_bottom(
+    probe_module,
+) -> None:
+    """Prove `at_i_1d` (`icethd_dh.f90:179`) and `zdE` (`icethd_dh.f90:268,405`) never hit zero across all 8,760 C1D steps, and verify `frq_m` (`icethd_dh.f90:129`)."""
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    c = card.config.ice_constants
+    inv_rho_i = 1.0 / c.rho_ice
+
+    a_vals = []
+    de_vals = []
+    qtr_top_vals = []
+    thd_path = ORACLE_V2_ROOT / "oracle_si3_thd_frames.bin"
+    zin_path = ORACLE_V2_ROOT / "oracle_si3_zdf_inputs.bin"
+    with thd_path.open("rb") as thd_f, zin_path.open("rb") as zin_f:
+        for kt in range(1, card.nsteps + 1):
+            frames = probe_module.phase2._read_thd_step(thd_f, kt)
+            exact = probe_module.phase2._read_zdf_input_step(zin_f, kt)
+            f1 = frames[1]  # POST_ZDF (input to ice_thd_dh)
+            a_k = np.asarray(f1["a_i"], dtype=np.float64).ravel()
+            ei_k = np.asarray(f1["e_i"], dtype=np.float64).ravel()
+            szi_k = np.asarray(f1["sz_i"], dtype=np.float64).ravel()
+            ztmelts_k = -c.liquidus_slope * szi_k
+            zei_k = -ei_k * inv_rho_i
+            zew_k = c.c_ocean * ztmelts_k
+            zde_k = zei_k - zew_k
+            a_vals.append(a_k)
+            de_vals.append(zde_k)
+            qtr_top_vals.append(
+                np.asarray(exact["qtr_ice_top"], dtype=np.float64).ravel()
+            )
+
+    a_all = np.concatenate(a_vals, axis=0)
+    de_all = np.concatenate(de_vals, axis=0)
+    qtr_top_all = np.concatenate(qtr_top_vals, axis=0)
+    assert a_all.shape == (8760,)
+    assert de_all.shape == (8760 * 3,)
+    assert int(np.count_nonzero(a_all == 0.0)) == 0
+    assert float(np.min(a_all)) == pytest.approx(0.9, rel=0.0, abs=1.0e-15)
+    assert float(np.max(a_all)) == pytest.approx(0.9, rel=0.0, abs=1.0e-15)
+    assert int(np.count_nonzero(de_all == 0.0)) == 0
+    assert float(np.max(de_all)) < -2.25e5
+    assert float(np.min(de_all)) < -3.27e5
+    assert int(np.count_nonzero(qtr_top_all != 0.0)) == 1375
+
+    # Planted zero controls must fail the non-zero denominator checks:
+    a_planted = a_all.copy()
+    a_planted[100] = 0.0
+    with pytest.raises(AssertionError):
+        assert int(np.count_nonzero(a_planted == 0.0)) == 0
+    de_planted = de_all.copy()
+    de_planted[200] = 0.0
+    with pytest.raises(AssertionError):
+        assert int(np.count_nonzero(de_planted == 0.0)) == 0
+
+    # Verify `frq_m` (`icethd_dh.f90:129`: `zf_tt = ... + qtr_ice_bot_1d * frq_m_1d`):
+    # In C1D_OMIP_L3 (`sbcssm.f90:183`, `ln_read_frq = .FALSE.`, `ln_leadhfx = .TRUE.`),
+    # `frq_m = 1.0`. At `kt = 1` (`qtr_ice_top == 0.0`), `qtr_ice_bot * frq_m == 0.0`;
+    # at `kt = 4242` (`qtr_ice_top = 31.775 W/m^2`, `qtr_ice_bot = 3.849 W/m^2`),
+    # `frq_m = 1.0` matches oracle `POST_DH.h_i` and `POST_DH.e_i` to 0 ULP, while
+    # perturbing `frq_m = 0.0` or `0.25` fails bit-exactness against the oracle.
+    steps = _load_step_operands(probe_module, (1, 4242))
+    step_fn = jax.jit(
+        lambda s, f: bl_mod.si3_column_step_arrays(
+            s,
+            f,
+            card.dt_seconds,
+            c,
+            _nemo_dh_ice_content_accumulation=True,
+            _nemo_dh_snow_update=True,
+        )
+    )
+    fr1, ex1 = steps[1]
+    ent1 = jax.tree.map(
+        lambda v: jnp.asarray(v, dtype=jnp.float64),
+        probe_module.year_gate._exact_1d_entry(
+            fr1, sss_m=ex1["sss"], _nemo_entry_conversion=True
+        ),
+    )
+    forc1_deck = probe_module.year_gate._forcing(ex1, jnp.float64)
+    tr1_frq1 = step_fn(
+        ent1, forc1_deck._replace(frq_m=jnp.asarray([1.0], dtype=jnp.float64))
+    )
+    tr1_frq0 = step_fn(
+        ent1, forc1_deck._replace(frq_m=jnp.asarray([0.0], dtype=jnp.float64))
+    )
+    np.testing.assert_array_equal(
+        np.asarray(tr1_frq1.post_dh.h_ice).view(np.uint64),
+        np.asarray(tr1_frq0.post_dh.h_ice).view(np.uint64),
+    )
+
+    fr4242, ex4242 = steps[4242]
+    ent4242 = jax.tree.map(
+        lambda v: jnp.asarray(v, dtype=jnp.float64),
+        probe_module.year_gate._exact_1d_entry(
+            fr4242, sss_m=ex4242["sss"], _nemo_entry_conversion=True
+        ),
+    )
+    forc4242 = probe_module.year_gate._forcing(ex4242, jnp.float64)
+    tr4242_frq1 = step_fn(
+        ent4242, forc4242._replace(frq_m=jnp.asarray([1.0], dtype=jnp.float64))
+    )
+    tr4242_frq0 = step_fn(
+        ent4242, forc4242._replace(frq_m=jnp.asarray([0.0], dtype=jnp.float64))
+    )
+    oracle4242_hi = np.asarray(fr4242[2]["h_i"], dtype=np.float64).ravel()
+    oracle4242_ei = np.asarray(fr4242[2]["e_i"], dtype=np.float64).ravel()
+    got4242_hi_1 = np.asarray(tr4242_frq1.post_dh.h_ice, dtype=np.float64).ravel()
+    got4242_ei_1 = np.asarray(tr4242_frq1.post_dh.e_ice, dtype=np.float64).ravel()
+    got4242_hi_0 = np.asarray(tr4242_frq0.post_dh.h_ice, dtype=np.float64).ravel()
+    got4242_ei_0 = np.asarray(tr4242_frq0.post_dh.e_ice, dtype=np.float64).ravel()
+    assert probe_module._ulp_diff(got4242_hi_1, oracle4242_hi) == 0
+    assert probe_module._ulp_diff(got4242_ei_1, oracle4242_ei) == 0
+    assert probe_module._ulp_diff(got4242_hi_0, oracle4242_hi) > 0
+    assert probe_module._ulp_diff(got4242_ei_0, oracle4242_ei) > 0
+    with pytest.raises(AssertionError):
+        np.testing.assert_array_equal(
+            got4242_hi_0.view(np.uint64), oracle4242_hi.view(np.uint64)
+        )
+
