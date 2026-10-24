@@ -179,6 +179,13 @@ if GiB, 1 vs 2 is time per step against window length.
 - Plants (`gates/plants.log`): input split tracing the step numbers -> 1
   test fails; the summary comparison unnormalised -> 1 fails; restored, 6 pass.
 
+- Revision (receipt text only, no code change): citation gate on this
+  receipt PASS, 0 citations, 0 failures (`gates/citation_gate_receipt_rev.log`);
+  citation-gate test + private-import ratchet + TKE terms + probe tests +
+  ORCA2 parallel receipt 103 passed; recipe + freshwater + prognostic
+  barotropic 49 passed. Stage face mask not re-run (12 min, over the
+  10-minute limit; no code changed since its 2 passed).
+
 ## Choices
 
 - ASKED (round prompt): card, losses, rn_Ud via the rung-10 entry,
