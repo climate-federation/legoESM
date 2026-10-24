@@ -1380,30 +1380,30 @@ CITATION_MAP = {
     # --- GYRE gradient-gate round 6: exact program and oracle statements ---
     'nemo_testcase_recipe.py:3351': 'def build_nemo_testcase_card(',
     'ocean_model_latlon_cgrid.py:13219': 'def _step_jitted(',
-    'nemo_testcase_l2_gyre_gradient_gate.py:228': (
+    'nemo_testcase_l2_gyre_gradient_gate.py:231': (
         'def build_context(*, transcendentals: str = "libm") -> GYREContext:'),
-    'nemo_testcase_l2_gyre_gradient_gate.py:164': (
+    'nemo_testcase_l2_gyre_gradient_gate.py:167': (
         'def primal_preserving_boundary(production, replay):'),
-    'nemo_testcase_l2_gyre_gradient_gate.py:196': (
+    'nemo_testcase_l2_gyre_gradient_gate.py:199': (
         'def build_observed_primal_preserving_step('),
-    'nemo_testcase_l2_gyre_gradient_gate.py:214': (
+    'nemo_testcase_l2_gyre_gradient_gate.py:217': (
         'production_primals = jax.lax.optimization_barrier(primals)'),
-    'nemo_testcase_l2_gyre_gradient_gate.py:277,298,306': [
+    'nemo_testcase_l2_gyre_gradient_gate.py:280,301,309': [
         'def _production_step(context: GYREContext, state, kt: int):',
         'def gradient_rollout(context: GYREContext, d_t0, n_steps: int):',
         'def scheduled_rollout(context: GYREContext, d_t0, n_steps: int, schedule: str):',
         3],
-    'nemo_testcase_l2_gyre_gradient_gate.py:562': (
+    'nemo_testcase_l2_gyre_gradient_gate.py:578': (
         'def explicit_stepwise_directional_derivatives('),
-    'nemo_testcase_l2_gyre_gradient_gate.py:456': (
+    'nemo_testcase_l2_gyre_gradient_gate.py:459': (
         'def build_compiled_step_transforms('),
-    'nemo_testcase_l2_gyre_gradient_gate.py:719': (
+    'nemo_testcase_l2_gyre_gradient_gate.py:737': (
         'def unmeasured_agreement(reason: str | None = None) -> dict:'),
-    'nemo_testcase_l2_gyre_gradient_gate.py:514': (
+    'nemo_testcase_l2_gyre_gradient_gate.py:530': (
         'def enforce_step_replay_byte_gate('),
-    'nemo_testcase_l2_gyre_gradient_gate.py:1168': (
+    'nemo_testcase_l2_gyre_gradient_gate.py:1192': (
         'def measure_resources(n_steps: int, schedule: str, *,'),
-    'nemo_testcase_l2_gyre_gradient_gate.py:1334': (
+    'nemo_testcase_l2_gyre_gradient_gate.py:1367': (
         'def classify_resource_row(row: dict) -> str:'),
     'cfgs/GYRE_OMIP_L2_P3_SM/WORK/traadv.F90:295-298': [
         '! FCT at last stage only with RK3', ('ENDIF', 9), 4],

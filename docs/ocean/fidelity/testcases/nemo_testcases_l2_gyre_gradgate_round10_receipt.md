@@ -13,8 +13,10 @@ loss, perturbation, finite-difference step, or bar changed.
 
 ## Frozen protocol and provenance
 
-Round 10 was preregistered at clean commit `52e7e18ee`.  The implementation
-producer is clean commit `91a5fe9440bc26a599944dd59a4fd1f835af7d27`.
+Round 10 was preregistered at clean commit `52e7e18ee`.  The measured CPU
+agreement producer is clean commit
+`91a5fe9440bc26a599944dd59a4fd1f835af7d27`.  Adversarial-review hardening is
+clean commit `c6943d66a54721ec556583019e00f189cb219f3b`.
 Evidence is under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gradgate_rounds/round10/`.
 CPU uses the certified fp64/libm policy.  GPU acquisition selects fp64/native
@@ -67,19 +69,21 @@ artifacts refute it as a cross-backend guarantee.
 ## Materialized production boundary
 
 The explicit transforms at
-`nemo_testcase_l2_gyre_gradient_gate.py:456` now take the separately dispatched,
+`nemo_testcase_l2_gyre_gradient_gate.py:459` now take the separately dispatched,
 blocked production after-state as an argument.  The unchanged step replay
 supplies only its pullback or tangent.  The production after-state is returned
 and propagated as the local primal; the raw replay remains recorded for
 diagnosis.  The explicit reverse/forward composition at
-`nemo_testcase_l2_gyre_gradient_gate.py:562` passes the stored production state
+`nemo_testcase_l2_gyre_gradient_gate.py:578` passes the stored production state
 into every per-step transform.
 
 A hostile direct control makes the replay differ by one ULP.  Eager/JIT VJP
-and JVP boundaries preserve the supplied production bits, while selecting the
-replay as a planted primal changes those bits.  The plant therefore proves the
-boundary check can fail; it does not compare a state with itself without a
-competing arm.
+and JVP boundaries preserve the supplied production bits.  The live certified
+one-step plant shifts every floating boundary leaf by one ULP: both boundary
+reports become non-bitwise, the row is `UNMEASURED`, all three derivative
+fields are null, and the process exits 1.  Its JSON SHA-256 is
+`64608722ee57918b4da66e6860b93f9c4aeabd96464f96fc52c99bb918f6be45`.
+The plant therefore proves the production gate can fail end to end.
 
 ## Certified CPU one-step result
 
@@ -117,6 +121,14 @@ and runs agreement at 1/6/60/360 steps followed by `none`, `uniform`, and
 classification, provenance, memory-ordering, time-scaling, and planted-failure
 checks and exits nonzero unless every required outcome is present.
 
+Each resource reverse now returns the final state produced *inside*
+`jax.value_and_grad(..., has_aux=True)`.  Its executable classifier compares
+that transformed primal byte-for-byte with the separately materialized
+production rollout and refuses the row when they differ.  This closes the
+reviewed gap where an ordinary pre-transform rollout could be exact while the
+timed reverse internally used changed GPU primal bits.  The operator script
+also runs the live boundary-primal plant before resource acquisition.
+
 Run from the clean committed clone root:
 
 ```bash
@@ -131,7 +143,7 @@ Round 9 refused diagnostic and no projection is promoted in their place.
 
 ## Tests and gates
 
-- Direct instrument controls: **52 passed in 8.41 s**.  They include the
+- Direct instrument controls after review: **53 passed in 7.92 s**.  They include the
   hostile one-ULP materialized-primal control, replay-primal plant, doubled-VJP
   plant, directory creation ordering, runner continuation, allocator refusal,
   and memory/time classifiers.
@@ -147,8 +159,14 @@ Round 9 refused diagnostic and no projection is promoted in their place.
   parent process remained alive after the isolated certified one-step child;
   the sole skip is the registered six-step CPU LLVM section-memory limit.
 - Receipt citation gate: PASS with four citations and no unmapped or failing
-  anchors.  Shifting `nemo_testcase_l2_gyre_gradient_gate.py:456` by two lines
+  anchors.  Shifting `nemo_testcase_l2_gyre_gradient_gate.py:459` by two lines
   produces SYMBOL-NOT-AT-LINE and expected exit 1.
+
+Independent adversarial review initially returned HOLD: resource rows did not
+byte-check the primal returned inside the reverse transform, and the boundary
+plant was helper-only.  Commit `c6943d66a` adds the transformed-primal byte
+gate and live one-step plant described above.  Both findings are resolved in
+executable controls; GPU outcomes remain acquisition-dependent.
 
 ## OPEN and choice audit
 

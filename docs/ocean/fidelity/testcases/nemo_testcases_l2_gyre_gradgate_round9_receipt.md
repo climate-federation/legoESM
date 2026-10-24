@@ -138,11 +138,11 @@ projection is substituted for them.
 
 The certified card dispatch is `nemo_testcase_recipe.py:3351`; its production
 step entry is `ocean_model_latlon_cgrid.py:13219`. The two-pytree selector is
-`nemo_testcase_l2_gyre_gradient_gate.py:164`, the shared full-step observed
-boundary begins at `nemo_testcase_l2_gyre_gradient_gate.py:196`, and the
+`nemo_testcase_l2_gyre_gradient_gate.py:167`, the shared full-step observed
+boundary begins at `nemo_testcase_l2_gyre_gradient_gate.py:199`, and the
 production-arm compiler isolation begins at
-`nemo_testcase_l2_gyre_gradient_gate.py:214`. Card construction and boundary
-wiring are asserted at `nemo_testcase_l2_gyre_gradient_gate.py:228`; explicit
+`nemo_testcase_l2_gyre_gradient_gate.py:217`. Card construction and boundary
+wiring are asserted at `nemo_testcase_l2_gyre_gradient_gate.py:231`; explicit
 per-step VJP/JVP composition is
-`nemo_testcase_l2_gyre_gradient_gate.py:562`; resource acquisition begins at
-`nemo_testcase_l2_gyre_gradient_gate.py:1168`.
+`nemo_testcase_l2_gyre_gradient_gate.py:578`; resource acquisition begins at
+`nemo_testcase_l2_gyre_gradient_gate.py:1192`.

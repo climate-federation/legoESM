@@ -31,10 +31,10 @@ measurement without changing the producer.
 
 The only card is the fail-closed `GYRE-zco` dispatch at
 `nemo_testcase_recipe.py:3351`. The harness builds and verifies that card at
-`nemo_testcase_l2_gyre_gradient_gate.py:228`. Every modeled step uses the
+`nemo_testcase_l2_gyre_gradient_gate.py:231`. Every modeled step uses the
 production JIT at `ocean_model_latlon_cgrid.py:13219`; the direct step,
 Decision-49 per-step loop, and schedule entry points are
-`nemo_testcase_l2_gyre_gradient_gate.py:277,298,306`.
+`nemo_testcase_l2_gyre_gradient_gate.py:280,301,309`.
 
 The registered bars remain reverse/forward relative error `1e-9` and
 reverse/central-FD relative error `0.05`; FD step, perturbation, direction, and
@@ -49,7 +49,7 @@ VJP per step in reverse order and one JVP per step in forward order. Each
 transform is evaluated at the stored direct-production boundary. Transformed
 replays are recorded but are never substituted for later production primals;
 the implementation begins at
-`nemo_testcase_l2_gyre_gradient_gate.py:562`.
+`nemo_testcase_l2_gyre_gradient_gate.py:578`.
 
 This distinction is measured, not hidden. On the one-step card, VJP replay
 differs on 18 leaves (largest `1.4210854715202004e-14` in salinity) and JVP
@@ -63,9 +63,9 @@ direct synthetic test keeps forward mode unchanged, doubles reverse mode, and
 must classify REFUTED. Resource rows build
 `jax.jit(jax.value_and_grad(scalar_line))`, discard the cold compile-and-run,
 and time/sample the second blocked execution at
-`nemo_testcase_l2_gyre_gradient_gate.py:1168`. Rows with historical timing
+`nemo_testcase_l2_gyre_gradient_gate.py:1192`. Rows with historical timing
 stamps are executable RETRACTED outcomes, and missing/flat/non-finite sampler
-data are VACUOUS at `nemo_testcase_l2_gyre_gradient_gate.py:1334`. The
+data are VACUOUS at `nemo_testcase_l2_gyre_gradient_gate.py:1367`. The
 constant-time scaling plant and GPU schedule-order plant are direct tests.
 
 ## Production trajectory identity
