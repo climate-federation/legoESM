@@ -1110,3 +1110,68 @@ def test_kpp_cfl_cap_explicit_value_disagreeing_with_dt_raises():
     assert run_omip.with_kpp_cfl_dt(user, 900.0).vertical_mixing.kpp.cfl_cap_dt_s == 900.0
     src = inspect.getsource(run_omip.run_omip_single)
     assert '"kpp_cfl_cap_dt_s": float(run_config.vertical_mixing.kpp.cfl_cap_dt_s)' in src
+
+
+def test_epbl_scheme_takes_the_model_timestep():
+    """ePBL's per-timestep TKE budget must use --dt, not a config default."""
+    args = parse_args(["--grid", "latlon", "--dt", "900",
+                       "--vertical-mixing-scheme", "epbl"])
+    cfg = build_config_from_args(args)
+    assert cfg.vertical_mixing.scheme == "epbl"
+    assert cfg.vertical_mixing.epbl.dt_s == 900.0
+
+
+def test_epbl_scheme_without_dt_raises():
+    args = parse_args(["--grid", "latlon", "--vertical-mixing-scheme", "epbl"])
+    with pytest.raises(ValueError, match="explicit --dt"):
+        build_config_from_args(args)
+
+
+def test_woa_variable_and_month_flags_round_trip():
+    args = parse_args(["--grid", "latlon", "--woa-t-var", "ptemp_an",
+                       "--woa-s-var", "s_an", "--woa-month", "1",
+                       "--monthly-mld-sst"])
+    assert (args.woa_t_var, args.woa_s_var, args.woa_month) == (
+        "ptemp_an", "s_an", 1)
+    assert args.monthly_mld_sst is True
+    d = parse_args(["--grid", "latlon"])
+    assert (d.woa_t_var, d.woa_s_var, d.woa_month, d.monthly_mld_sst) == (
+        None, None, None, False)
+
+
+def test_monthly_writer_month_boundaries_and_means(tmp_path):
+    """Samples are binned by 365-day-calendar month and averaged."""
+    import numpy as np
+    import xarray as xr
+    from types import SimpleNamespace
+
+    from scripts.run.run_omip import MonthlyMldSstWriter
+
+    assert MonthlyMldSstWriter.month_of(1.0) == (0, 1)
+    assert MonthlyMldSstWriter.month_of(31.0) == (0, 1)
+    assert MonthlyMldSstWriter.month_of(32.0) == (0, 2)
+    assert MonthlyMldSstWriter.month_of(365.0) == (0, 12)
+    assert MonthlyMldSstWriter.month_of(366.0) == (1, 1)
+
+    nz = 4
+    zc = SimpleNamespace(z_half_ref=-np.array([0.0, 10.0, 20.0, 40.0, 80.0]))
+    w = MonthlyMldSstWriter(tmp_path / "m.nc", z_coord=zc,
+                            lat_deg=np.array([0.0]), lon_deg=np.array([0.0, 1.0]))
+
+    def st(sst):
+        T = np.full((1, 2, nz), 5.0)
+        T[..., 0] = sst
+        f = lambda a: SimpleNamespace(data=a)
+        return SimpleNamespace(T=f(T), S=f(np.full((1, 2, nz), 35.0)),
+                               land_mask=f(np.array([[1.0, 0.0]])),
+                               H_bathy=f(np.full((1, 2), 80.0)))
+
+    w.add(st(10.0), 30.0)
+    w.add(st(20.0), 31.0)        # still January
+    w.add(st(7.0), 32.0)         # February
+    w.close()
+    ds = xr.open_dataset(tmp_path / "m.nc")
+    assert list(ds.month.values) == [1, 2]
+    assert ds.sst.values[0, 0, 0] == 15.0 and ds.sst.values[1, 0, 0] == 7.0
+    assert np.isnan(ds.sst.values[0, 0, 1])          # land
+    assert np.isfinite(ds.mld.values[0, 0, 0])
