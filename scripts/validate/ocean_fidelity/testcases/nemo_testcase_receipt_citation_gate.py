@@ -9165,6 +9165,79 @@ CITATION_MAP = {
     },
 }
 
+# Round O1 Resume 2 replaced its provisional implementation and rewrote its
+# receipt.  Retire only that round's stale pins, then install small static pins
+# for the corrected receipt.  Other rounds' maps remain untouched.
+_SI3_R4_STALE_PREFIXES = (
+    "packages/ice/legoesm/ice/si3_orca2_state.py:",
+    "packages/ice/legoesm/ice/sea_ice.py:574-634",
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:",
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:",
+    "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round326_hmi_gate.py:",
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/ocean.output.excerpt:",
+    "tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:",
+    "docs/ice/fidelity/si3_r4_o1_preregister.md:27-31",
+)
+for _citation in tuple(CITATION_MAP):
+    if any(_citation.startswith(prefix) for prefix in _SI3_R4_STALE_PREFIXES):
+        CITATION_MAP.pop(_citation)
+
+CITATION_MAP.update({
+    "packages/ice/legoesm/ice/si3_orca2_state.py:1678-1686": [
+        "def si3_rst_from_netcdf_dict(", ") -> SI3State:", 9,
+    ],
+    "packages/ice/legoesm/ice/si3_orca2_state.py:2022-2030": [
+        "def write_si3_netcdf_restart(",
+        '"""Write a NEMO-compatible `*_restart_ice.nc` file using `netCDF4`."""',
+        9,
+    ],
+    "packages/ice/legoesm/ice/si3_orca2_state.py:2090-2099": [
+        "def read_si3_netcdf_restart(",
+        '"""Read a NEMO `*_restart_ice.nc` file and reconstruct `SI3State`."""',
+        10,
+    ],
+    "packages/ice/legoesm/ice/sea_ice.py:590-610": [
+        "if config.si3_orca2 is None:",
+        '"heat/freshwater/salt TileResponse contract is implemented"',
+        21,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:202-206": [
+        "sed -E -i 's/^( *nn_itend *= *).*/\\11/' \"$dst_oce\"",
+        "sed -E -i 's|^(&namini.*)|\\1\\n   nn_iceini_file   = 2|' \"$dst_ice\"",
+        5,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:697-725": [
+        "# Real NEMO IOM convention: a gfortran/NetCDF producer writes Ni_0 x Nj_0",
+        "PY",
+        29,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:949-958": [
+        "local commit_args=()",
+        '         --plant "$adm_plant" >/dev/null 2>&1; then',
+        10,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:1039-1056": [
+        "stage_and_run() {",
+        '      "$run_dir/input_restart/ORCA2_SAS_00000001_restart_ice.nc"',
+        18,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1072-1100": [
+        "def verify_o1_deck_fixture(path: str | Path, plant: str | None = None) -> dict[str, Any]:",
+        'return {"status": "PASS_DERIVED_DECK_FIXTURE", "parsed": expected}',
+        29,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1320-1336": [
+        "def _compare_si3_states_wet_and_full(",
+        'prog_names = tuple(name for name in prog_names if name != "t1_ice")',
+        17,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1622-1650": [
+        "def admit_evidence_directory(",
+        'recorded_commit = "0" * 40',
+        29,
+    ],
+})
+
 
 DEFAULT_RECEIPT = (
     REPO / "docs/ocean/fidelity/testcases"
