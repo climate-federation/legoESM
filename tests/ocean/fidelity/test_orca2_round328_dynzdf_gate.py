@@ -152,7 +152,7 @@ def test_transport_passivity_ignores_only_undefined_zfw(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("completed", [False, True])
-def test_cleanup_keeps_only_completed_run_on_admission_refusal(
+def test_cleanup_keeps_crashed_and_admission_refused_runs(
         tmp_path: Path, completed: bool) -> None:
     evidence = tmp_path / "evidence"
     target_run = evidence / "active_run"
@@ -175,13 +175,12 @@ def test_cleanup_keeps_only_completed_run_on_admission_refusal(
     result = subprocess.run(["bash", "-c", script], text=True, capture_output=True)
     assert result.returncode == 1
     assert not target_run.exists() and not target_root.exists() and not scratch.exists()
-    kept = list((evidence / "refused").glob("active_run_admission_refused_*/record.bin"))
-    if completed:
-        assert len(kept) == 1
-        assert kept[0].read_bytes() == b"correct record"
-        assert "R328_ADMISSION_REFUSED_OUTPUTS_KEPT" in result.stderr
-    else:
-        assert not kept
+    failure_kind = "admission_refused" if completed else "crashed"
+    kept = list((evidence / "refused").glob(
+        f"active_run_{failure_kind}_*/record.bin"))
+    assert len(kept) == 1
+    assert kept[0].read_bytes() == b"correct record"
+    assert f"R328_FAILED_OUTPUTS_KEPT kind={failure_kind}" in result.stderr
 
 
 PLANT_REASONS = {
