@@ -1753,6 +1753,28 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # ORCA2 round 330: the compiled TKE solve topology and literal card fix.
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:222-240': [
+        'REAL(wp), DIMENSION(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0) ,jpk)          , INTENT(in   ) ::   p_sh2',
+        'REAL(wp), DIMENSION(ntsi-(0):ntei+(0),jpk) ::   zpelc, zdiag, zd_up, zd_lw', 19],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:273-276': [
+        'en(ji,jj,1) = MAX( rn_emin0, zbbrau * taum(ji,jj) )',
+        'zd_up(ji,1) = 0._wp', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:287-295': [
+        'IF( .NOT.ln_drg_OFF ) THEN',
+        'en(ji,jj,mbkt(ji,jj)+1) = MAX( zebot, rn_emin ) * ssmask(ji,jj)', 9],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:411-428': [
+        '!* Matrix and right hand side in en',
+        ') * wmask(ji,jj,jk)', 18],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:459-477': [
+        '!* Matrix inversion from level 2',
+        'en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)', 19],
+    'nemo_testcase_recipe.py:1820-1827': [
+        'z_coord = create_partial_cell_coordinate(',
+        'is_active=jnp.asarray(tmask),', 8],
+    'tke.py:1803-1834': [
+        'if bottom_dirichlet is not None:',
+        'rhs = jnp.where(is_bottom, _e_bd[..., jnp.newaxis], rhs)', 32],
     # ORCA2 round 328 Resume-8: transport writer scope and TKE ownership.
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:121':
         'ALLOCATE( zFu(jpi,jpj,jpk), zFv(jpi,jpj,jpk), zFw(jpi,jpj,jpk) )',
