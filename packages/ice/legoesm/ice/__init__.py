@@ -224,3 +224,29 @@ from legoesm.ice.si3_orca2_state import (  # noqa: E402
     write_si3_netcdf_restart,
 )
 
+from legoesm.ice.config import build_si3_orca2_o2_config  # noqa: E402
+from legoesm.ice.si3_orca2_state import (  # noqa: E402
+    SI3O2InitConfig,
+    SI3O2ScalarInitialState,
+    SI3ORCA2O2Forcing,
+    si3_dom_uniq_t_orca2,
+    si3_eos_fzp,
+    si3_glob_2dsum_ddpdd,
+    si3_o2_scalar_initial_state,
+    si3_o2_step,
+)
+
+__all__.extend(
+    (
+        "build_si3_orca2_o2_config",
+        "SI3O2InitConfig",
+        "SI3O2ScalarInitialState",
+        "SI3ORCA2O2Forcing",
+        "si3_dom_uniq_t_orca2",
+        "si3_eos_fzp",
+        "si3_glob_2dsum_ddpdd",
+        "si3_o2_scalar_initial_state",
+        "si3_o2_step",
+    )
+)
+

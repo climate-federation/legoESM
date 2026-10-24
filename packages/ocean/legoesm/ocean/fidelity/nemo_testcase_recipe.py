@@ -4358,3 +4358,141 @@ __all__ = (
 ORCA2_RUNG10_FROZEN_PARAMS = {
     "ocean.lat.gm_redi.kappa_Redi": "inert on rung 10 since round 320 (mode 20 reads rn_Ud)",
 }
+
+
+class ORCA2InitialIce(NamedTuple):
+    """SI3 ``&namini`` analytic initial ice, each pair (north, south).
+
+    Source citation: ``ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:309-460``.
+    """
+
+    thres_sst: float = 2.0
+    ice_concentration: tuple[float, float] = (0.9, 0.9)
+    ice_thickness_m: tuple[float, float] = (2.0, 1.0)
+    snow_thickness_m: tuple[float, float] = (0.2, 0.2)
+    pond_concentration: tuple[float, float] = (0.2 * 0.9, 0.2 * 0.9)
+    pond_depth_m: tuple[float, float] = (0.05, 0.05)
+    lid_depth_m: tuple[float, float] = (0.0, 0.0)
+
+
+ORCA2_DECK_INITIAL_ICE = ORCA2InitialIce()
+
+
+def _ddpdd_sum_2d(arr: np.ndarray) -> np.float64:
+    """NEMO ``glob_2Dsum`` Knuth two-sum reduction (`src/OCE/LBC/lib_mpp.F90:1244-1267`)."""
+    flat = np.asarray(arr, dtype=np.float64).ravel(order="F")
+    hi = np.float64(0.0)
+    lo = np.float64(0.0)
+    for x in flat:
+        t1 = np.float64(hi + x)
+        err = np.float64(t1 - hi)
+        t2 = np.float64(((x - err) + (hi - (t1 - err))) + lo)
+        hi = np.float64(t1 + t2)
+        lo = np.float64(t2 - (hi - t1))
+    return hi
+
+
+def orca2_initial_ice_ssh(
+    temperature: np.ndarray,
+    salinity: np.ndarray,
+    tmask: np.ndarray,
+    f_t: np.ndarray,
+    e1e2t: np.ndarray,
+    ice: ORCA2InitialIce = ORCA2_DECK_INITIAL_ICE,
+    *,
+    ln_teos10: bool = False,
+    smask0_i: np.ndarray | None = None,
+    use_ddpdd: bool = False,
+) -> np.ndarray:
+    """Compute NEMO's initial levitating-ice SSH adjustment on ORCA2.
+
+    ``iceistate.f90:309-338`` creates one-category ice from the surface T/S
+    and hemisphere, ``:354-364`` distributes it over categories while
+    conserving snow, ice, and pond volume, and ``:440-460`` removes the
+    globally averaged snow+ice+pond+lid mass from ``ssh_0`` before ``dom_qco``
+    recomputes the initial scale factors.  For all parameter sets where no
+    category exceeds the snow-to-ice draught limit, the total volume is the
+    initial one-category thickness times concentration, so the SSH adjustment
+    is independent of ``jpl``.
+    """
+
+    surface_s = salinity[..., 0] if salinity.ndim == 3 else salinity
+    surface_t = temperature[..., 0] if temperature.ndim == 3 else temperature
+    if ln_teos10:
+        zs = np.sqrt(np.abs(surface_s) * (1.0 / 35.16504))
+        freezing_t = (
+            (
+                (
+                    (
+                        (1.46873e-03 * zs - 9.64972e-03) * zs
+                        + 2.28348e-02
+                    )
+                    * zs
+                    - 3.12775e-02
+                )
+                * zs
+                + 2.07679e-02
+            )
+            * zs
+            - 5.87701e-02
+        ) * surface_s
+    else:
+        freezing_t = (
+            -0.0575
+            + 1.710523e-3 * np.sqrt(surface_s)
+            - 2.154996e-4 * surface_s
+        ) * surface_s
+    surface_wet = (tmask[..., 0] if tmask.ndim == 3 else tmask).astype(bool)
+    initial_ice = (
+        ((surface_t - freezing_t) * surface_wet < ice.thres_sst)
+        & surface_wet
+    )
+    north = np.asarray(f_t) >= 0.0
+
+    def hemisphere(pair: tuple[float, float]) -> np.ndarray:
+        return np.where(north, pair[0], pair[1])
+
+    snow_ice_pond_mass = np.where(
+        initial_ice,
+        hemisphere(ice.ice_concentration) * (
+            constants.rho_snow * hemisphere(ice.snow_thickness_m)
+            + constants.rho_ice * hemisphere(ice.ice_thickness_m)
+        )
+        + constants.rho_water * hemisphere(ice.pond_concentration) * (
+            hemisphere(ice.pond_depth_m) + hemisphere(ice.lid_depth_m)
+        ),
+        0.0,
+    )
+    area = np.asarray(e1e2t, dtype=np.float64)
+    if smask0_i is None:
+        # dom_uniq (domutl.F90:91-121) excludes the duplicated right half of the
+        # T-fold row from glob_2Dsum.  On this de-haloed 180-column T-fold, the
+        # retained half is i=0:89.
+        unique_t = np.ones(surface_wet.shape, dtype=np.float64)
+        unique_t[-1, surface_wet.shape[1] // 2 :] = 0.0
+        mask_uniq = surface_wet * unique_t
+        weight_uniq = unique_t
+    else:
+        mask_uniq = np.asarray(smask0_i, dtype=np.float64)
+        weight_uniq = mask_uniq
+
+    if use_ddpdd:
+        r1_rho0 = np.float64(1.0) / np.float64(NEMO_CONSTANTS_CONFIG.rho_0)
+        area_sum = _ddpdd_sum_2d(area * mask_uniq)
+        mass_sum = _ddpdd_sum_2d(
+            (snow_ice_pond_mass * r1_rho0) * area * weight_uniq
+        )
+        ssh_adjustment = np.float64(mass_sum / area_sum)
+    else:
+        ssh_adjustment = np.sum(
+            snow_ice_pond_mass / NEMO_CONSTANTS_CONFIG.rho_0 * area * weight_uniq
+        ) / np.sum(area * mask_uniq)
+    return np.where(surface_wet, -ssh_adjustment, 0.0)
+
+
+__all__ = __all__ + (
+    "ORCA2InitialIce",
+    "ORCA2_DECK_INITIAL_ICE",
+    "orca2_initial_ice_ssh",
+)
+

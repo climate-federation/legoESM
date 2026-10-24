@@ -1,0 +1,26 @@
+--- a/icestp.F90
++++ b/icestp.F90
+@@ -77,6 +77,7 @@
+    USE lib_mpp        ! MPP library
+    USE timing         ! Timing
+    USE prtctl         ! Print control
++   USE o2_si3_state_writer, ONLY : o2_write_si3_state_snapshot
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -221,6 +222,7 @@
+          !
+                                         CALL ice_wri( kt )            ! -- Ice outputs
+          !
++         CALL o2_write_si3_state_snapshot( 'step', kt, lrst_ice )
+          IF( lrst_ice )                 CALL ice_rst_write( kt )      ! -- Ice restart file
+          !
+          IF( ln_icectl )                CALL ice_ctl( kt )            ! -- Control checks
+@@ -321,6 +323,7 @@
+       !
+       CALL mpp_sum( 'icestp', ierr )
+       IF( ierr /= 0 )   CALL ctl_stop('STOP', 'ice_init : unable to allocate 1D ice arrays')
++      CALL o2_write_si3_state_snapshot( 'entry', 0, .FALSE. )
+       !
+    END SUBROUTINE ice_init
+ 

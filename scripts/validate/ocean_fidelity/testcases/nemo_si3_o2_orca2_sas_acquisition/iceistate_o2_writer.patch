@@ -1,0 +1,31 @@
+--- a/iceistate.F90
++++ b/iceistate.F90
+@@ -34,6 +34,7 @@
+    USE lib_fortran    ! Fortran routines library
+    USE fldread        ! read input fields
+    USE lbclnk         ! ocean lateral boundary conditions (or mpp link)
++   USE o2_si3_state_writer, ONLY : o2_record_istate_scalars, o2_write_istate_snapshot
+ 
+ # if defined key_agrif
+    USE agrif_oce
+@@ -302,6 +303,8 @@
+             IF ( .NOT.ln_pnd_lids ) THEN
+                zhlid_ini(:,:) = 0._wp
+             ENDIF
++            CALL o2_record_istate_scalars( kt, Kbb, Kmm, ztfrz, zmsk, zht_i_ini, zht_s_ini, zat_i_ini, &
++               &                           zsm_i_ini, ztm_i_ini, zt_su_ini, ztm_s_ini, zapnd_ini, zhpnd_ini, zhlid_ini )
+             
+             !----------------!
+             ! 3) fill fields !
+@@ -425,6 +428,11 @@
+             ssh(:,:,Kmm) = ssh(:,:,Kmm) - zsshadj
+             ssh(:,:,Kbb) = ssh(:,:,Kbb) - zsshadj
+          ENDWHERE
++         CALL o2_write_istate_snapshot( kt, Kbb, Kmm, area, zsshadj, &
++            &                           rn_thres_sst, rn_hti_ini_n, rn_hti_ini_s, rn_hts_ini_n, rn_hts_ini_s, &
++            &                           rn_ati_ini_n, rn_ati_ini_s, rn_smi_ini_n, rn_smi_ini_s, rn_tmi_ini_n, rn_tmi_ini_s, &
++            &                           rn_tsu_ini_n, rn_tsu_ini_s, rn_tms_ini_n, rn_tms_ini_s, rn_apd_ini_n, rn_apd_ini_s, &
++            &                           rn_hpd_ini_n, rn_hpd_ini_s, rn_hld_ini_n, rn_hld_ini_s )
+          !
+       ENDIF
+       !

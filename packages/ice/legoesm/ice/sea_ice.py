@@ -268,7 +268,7 @@ def step_sea_ice(
         # this refusal closes a fail-quiet seam the merge would otherwise have
         # opened.  Routing the liquidus into SI3's bottom boundary is a
         # physics decision for the SI3 lane, not for a merge.
-        if config.thermo_scheme in ("si3_bl99", "si3_orca2_o1"):
+        if config.thermo_scheme in ("si3_bl99", "si3_orca2_o1", "si3_orca2_o2"):
             raise ValueError(
                 "ocean_freezing_temperature_K is not routed into the layered "
                 f"SI3 thermodynamics (thermo_scheme={config.thermo_scheme!r}); pass the "
@@ -278,10 +278,10 @@ def step_sea_ice(
         if liquidus.shape != jnp.shape(ocean_sst):
             raise ValueError("ocean_freezing_temperature_K must have the ocean SST shape")
         config = config._replace(T_freeze_ocean=liquidus)
-    if config.thermo_scheme not in ("zero_layer", "si3_bl99", "si3_orca2_o1"):
+    if config.thermo_scheme not in ("zero_layer", "si3_bl99", "si3_orca2_o1", "si3_orca2_o2"):
         raise ValueError(
             f"Unknown sea-ice thermo_scheme {config.thermo_scheme!r}; expected "
-            "'zero_layer', 'si3_bl99', or 'si3_orca2_o1' (icethd.F90:148-183, icestp.F90:148-224)."
+            "'zero_layer', 'si3_bl99', 'si3_orca2_o1', or 'si3_orca2_o2' (icethd.F90:148-183, icestp.F90:148-224)."
         )
     validate_si3_thermo_config(config)
     if config.thermo_scheme == "si3_bl99":
@@ -363,6 +363,8 @@ def step_sea_ice(
             )
     if config.thermo_scheme == "si3_orca2_o1":
         return _si3_orca2_o1_step_with_trace(state, forcing, config, dt)
+    if config.thermo_scheme == "si3_orca2_o2":
+        return _si3_orca2_o2_step_with_trace(state, forcing, config, dt)
     if config.ridging.enabled and grid is None:
         raise ValueError(
             "ridging.enabled=True requires a grid argument: mechanical "
@@ -606,6 +608,49 @@ def _si3_orca2_o1_step_with_trace(
     # zero-filled TileResponse would therefore be a silent physical choice.
     raise NotImplementedError(
         "SI3 ORCA2 O1 state stepping is available through si3_o1_step, but "
+        "step_sea_ice is refused until the NEMO ice_update_flx forcing and "
+        "heat/freshwater/salt TileResponse contract is implemented"
+    )
+
+
+from legoesm.ice.si3_orca2_state import (  # noqa: E402
+    SI3ORCA2O2Forcing,
+)
+
+
+def _si3_orca2_o2_step_with_trace(
+    state: SI3State,
+    forcing: SI3ORCA2O2Forcing,
+    config: SeaIceConfig,
+    dt: float,
+) -> tuple[SI3State, TileResponse]:
+    """Private fidelity hook executing one O2 ORCA2 SI3 step (`iceistate.F90:83-443`, `icestp.F90:148-224`)."""
+
+    if not isinstance(state, SI3State):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o2' requires SI3State with full ORCA2 "
+            "5-category 10+5-layer enthalpies/salinities and Prather moments"
+        )
+    if not isinstance(forcing, SI3ORCA2O2Forcing):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o2' requires SI3ORCA2O2Forcing carrying "
+            "tmask, sst_m, sss_m, ff_t, gphit, and e1e2t (iceistate.F90:262-430)"
+        )
+    if config.si3_orca2 is None:
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o2' requires an explicit si3_orca2 config; "
+            "the ice time step may not be inferred from the dispatcher dt"
+        )
+    if float(dt) != float(config.si3_orca2.rDt_ice):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o2' requires dt == si3_orca2.rDt_ice "
+            f"({float(dt)!r} != {float(config.si3_orca2.rDt_ice)!r})"
+        )
+
+    # O2 adds only the initialization operator.  The production dispatcher
+    # remains fail-closed until O16 owns NEMO's heat/freshwater/salt response.
+    raise NotImplementedError(
+        "SI3 ORCA2 O2 initialization is available through si3_o2_step, but "
         "step_sea_ice is refused until the NEMO ice_update_flx forcing and "
         "heat/freshwater/salt TileResponse contract is implemented"
     )

@@ -2220,3 +2220,606 @@ __all__ = [
     "write_si3_netcdf_restart",
     "read_si3_netcdf_restart",
 ]
+
+
+__param_spec__["SI3O2InitConfig"] = {
+    "scheme_key": "ice.si3_orca2_o2_init",
+    "excluded": {
+        "rn_thres_sst": "oracle identity: NEMO namini SST freezing threshold [degC]",
+        "rn_hti_ini_n": "oracle identity: NEMO namini NH initial ice thickness [m]",
+        "rn_hti_ini_s": "oracle identity: NEMO namini SH initial ice thickness [m]",
+        "rn_hts_ini_n": "oracle identity: NEMO namini NH initial snow thickness [m]",
+        "rn_hts_ini_s": "oracle identity: NEMO namini SH initial snow thickness [m]",
+        "rn_ati_ini_n": "oracle identity: NEMO namini NH initial ice concentration [1]",
+        "rn_ati_ini_s": "oracle identity: NEMO namini SH initial ice concentration [1]",
+        "rn_smi_ini_n": "oracle identity: NEMO namini NH initial ice salinity [g/kg]",
+        "rn_smi_ini_s": "oracle identity: NEMO namini SH initial ice salinity [g/kg]",
+        "rn_tmi_ini_n": "oracle identity: NEMO namini NH initial ice temperature [K]",
+        "rn_tmi_ini_s": "oracle identity: NEMO namini SH initial ice temperature [K]",
+        "rn_tsu_ini_n": "oracle identity: NEMO namini NH initial surface temperature [K]",
+        "rn_tsu_ini_s": "oracle identity: NEMO namini SH initial surface temperature [K]",
+        "rn_tms_ini_n": "oracle identity: NEMO namini NH initial snow temperature [K]",
+        "rn_tms_ini_s": "oracle identity: NEMO namini SH initial snow temperature [K]",
+        "rn_apd_ini_n": "oracle identity: NEMO namini NH initial pond fraction [1]",
+        "rn_apd_ini_s": "oracle identity: NEMO namini SH initial pond fraction [1]",
+        "rn_hpd_ini_n": "oracle identity: NEMO namini NH initial pond depth [m]",
+        "rn_hpd_ini_s": "oracle identity: NEMO namini SH initial pond depth [m]",
+        "rn_hld_ini_n": "oracle identity: NEMO namini NH initial pond lid depth [m]",
+        "rn_hld_ini_s": "oracle identity: NEMO namini SH initial pond lid depth [m]",
+        "rn_amax_n": "oracle identity: NEMO nampar NH maximum ice concentration [1]",
+        "rn_amax_s": "oracle identity: NEMO nampar SH maximum ice concentration [1]",
+    },
+    "params": {},
+}
+
+
+class SI3O2InitConfig(NamedTuple):
+    """Rung-O2 `&namini` and `&nampar` scalar initial-state configuration.
+
+    Source citations:
+    - `src/ICE/iceistate.F90:453-534` (`ice_istate_init` `&namini` read)
+    - `ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:483-562`
+    - `cfgs/ORCA2_SAS_ICE/EXPREF/namelist_ice_cfg:9-50`
+    - `cfgs/SHARED/namelist_ice_ref:65-95`
+    """
+
+    ln_iceini: bool = True
+    nn_iceini_file: int = 0
+    rn_thres_sst: float = 2.0
+    rn_hti_ini_n: float = 2.0
+    rn_hti_ini_s: float = 1.0
+    rn_hts_ini_n: float = 0.2
+    rn_hts_ini_s: float = 0.2
+    rn_ati_ini_n: float = 0.9
+    rn_ati_ini_s: float = 0.9
+    rn_smi_ini_n: float = 6.3
+    rn_smi_ini_s: float = 6.3
+    rn_tmi_ini_n: float = 270.0
+    rn_tmi_ini_s: float = 270.0
+    rn_tsu_ini_n: float = 270.0
+    rn_tsu_ini_s: float = 270.0
+    rn_tms_ini_n: float = 270.0
+    rn_tms_ini_s: float = 270.0
+    rn_apd_ini_n: float = 0.2
+    rn_apd_ini_s: float = 0.2
+    rn_hpd_ini_n: float = 0.05
+    rn_hpd_ini_s: float = 0.05
+    rn_hld_ini_n: float = 0.0
+    rn_hld_ini_s: float = 0.0
+    rn_amax_n: float = 0.997
+    rn_amax_s: float = 0.997
+    ln_teos10: bool = True
+    ln_ice_embd: bool = False
+    ln_rstart: bool = False
+    nn_hls: int = 2
+    ice_constants: IceConstantsConfig = NEMO_SI3_CONSTANTS_CONFIG
+
+    @classmethod
+    def for_orca2_sas_ice(cls, **overrides: Any) -> "SI3O2InitConfig":
+        """Return the NEMO 5.0.2 `ORCA2_SAS_ICE` rung-O2 `&namini` configuration."""
+        base = cls()
+        return base._replace(**overrides) if overrides else base
+
+    @classmethod
+    def for_orca2_omip_l4(cls, **overrides: Any) -> "SI3O2InitConfig":
+        """Return the NEMO 5.0.2 `ORCA2_OMIP_L4` (`ln_eos80 = .true.`) `&namini` configuration."""
+        base = cls(ln_teos10=False)
+        return base._replace(**overrides) if overrides else base
+
+
+class SI3O2ScalarInitialState(NamedTuple):
+    """Rung-O2 scalar initial state and levitating-ice SSH adjustment (`src/ICE/iceistate.F90:83-443`).
+
+    Source citations:
+    - `src/ICE/iceistate.F90:124-126`, `:203-207`, `:262-304`, `:398-430`
+    - `ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:174-175`, `:252-256`,
+      `:309-338`, `:440-460`
+    """
+
+    t_bo: Field
+    ztfrz: Field
+    zmsk: Field
+    zht_i_ini: Field
+    zht_s_ini: Field
+    zat_i_ini: Field
+    zsm_i_ini: Field
+    ztm_i_ini: Field
+    zt_su_ini: Field
+    ztm_s_ini: Field
+    zapnd_ini: Field
+    zhpnd_ini: Field
+    zhlid_ini: Field
+    rn_amax_2d: Field
+    vt_i: Field
+    vt_s: Field
+    at_i: Field
+    at_ip: Field
+    vt_ip: Field
+    vt_il: Field
+    snwice_mass: Field
+    snwice_mass_b: Field
+    area: Field
+    zsshadj: Field
+    ssh_kbb: Field
+    ssh_kmm: Field
+
+
+class SI3ORCA2O2Forcing(NamedTuple):
+    """Boundary forcing for `SI3State` steps through `step_sea_ice` (`thermo_scheme='si3_orca2_o2'`)."""
+
+    tmask: Field
+    sst_m: Field
+    sss_m: Field
+    ff_t: Field
+    gphit: Field
+    e1e2t: Field
+    ssmask: Field | None = None
+    smask0_i: Field | None = None
+    ssh_before_kbb: Field | None = None
+    ssh_before_kmm: Field | None = None
+    evaporation: Field | None = None
+    apply_halos: bool = False
+
+
+@jax.custom_jvp
+def _safe_sqrt(x: Field) -> Field:
+    """Exact `jnp.sqrt(x)` primal with finite zero tangent at `x <= 0.0`."""
+    return jnp.sqrt(jnp.maximum(x, jnp.asarray(0.0, dtype=x.dtype)))
+
+
+@_safe_sqrt.defjvp
+def _safe_sqrt_jvp(primals: tuple[Field], tangents: tuple[Field]) -> tuple[Field, Field]:
+    (x,) = primals
+    (dx,) = tangents
+    y = _safe_sqrt(x)
+    safe_denom = jnp.where(y > 0.0, 2.0 * y, 1.0)
+    dy = jnp.where(y > 0.0, dx / safe_denom, jnp.zeros_like(dx))
+    return y, dy
+
+
+def si3_dom_uniq_t_orca2(
+    jpi: int = 184,
+    jpj: int = 152,
+    nn_hls: int = 2,
+    *,
+    _plant_omit_nfd_uniq: bool = False,
+) -> Field:
+    """Compute NEMO's `dom_uniq( puniq, 'T' )` uniqueness mask on ORCA2 (`src/OCE/DOM/domutl.F90:91-121`).
+
+    Sets `1.0` on interior points `(Nis0:Nie0, Njs0:Nje0)` that are not
+    overwritten by `lbc_lnk( 'dom_uniq', z2d, 'T', 1._wp )`, and `0.0` on
+    halos and on the duplicated right half of the T-pivot north-fold row
+    (`jj = Nje0 = jpj - nn_hls`, 1-based `ji = jpi / 2 + 2 .. jpi - nn_hls`).
+    """
+    h = int(nn_hls)
+    ni0glo = int(jpi - 2 * h)
+    ji_1based = jnp.arange(1, jpi + 1, dtype=jnp.float64)[:, None]
+    jj_1based = jnp.arange(1, jpj + 1, dtype=jnp.float64)[None, :]
+    mig0 = ji_1based - float(h)
+    mjg0 = jj_1based - float(h)
+    ztst = mig0 + (mjg0 - 1.0) * float(ni0glo)
+    interior = _interior_mask_2d(jpi, jpj, h)
+    z2d = ztst * interior
+    if _plant_omit_nfd_uniq:
+        return interior
+    z2d_linked = si3_lbc_lnk_orca2(
+        z2d, cd_nat="T", psgn=1.0, nn_hls=h, ldfull=True
+    )
+    return jnp.where((interior > 0.0) & (z2d_linked == ztst), 1.0, 0.0)
+
+
+@jax.custom_jvp
+def _si3_glob_2dsum_ddpdd_core(field_int: Field, mask_int: Field) -> Field:
+    """NEMO `glob_2Dsum` double-double Knuth two-sum reduction (`src/OCE/LBC/lib_mpp.F90:1244-1267`)."""
+    sr = nemo_source_round
+    terms_ij = sr(field_int * mask_int)
+    # Fortran loop order: DO jj = Njs0, Nje0 ; DO ji = Nis0, Nie0 -> transpose then C-ravel
+    flat = jnp.transpose(terms_ij, (1, 0)).reshape(-1)
+
+    def _ddpdd_step(
+        carry: tuple[Field, Field], x: Field
+    ) -> tuple[tuple[Field, Field], None]:
+        hi, lo = carry
+        zt1 = sr(x + hi)
+        zerr = sr(zt1 - x)
+        zt2 = sr(sr(sr(hi - zerr) + sr(x - sr(zt1 - zerr))) + lo)
+        hi_new = sr(zt1 + zt2)
+        lo_new = sr(zt2 - sr(hi_new - zt1))
+        return (hi_new, lo_new), None
+
+    zero = jnp.asarray(0.0, dtype=field_int.dtype)
+    (hi_final, _lo_final), _ = jax.lax.scan(_ddpdd_step, (zero, zero), flat)
+    return hi_final
+
+
+@_si3_glob_2dsum_ddpdd_core.defjvp
+def _si3_glob_2dsum_ddpdd_jvp(
+    primals: tuple[Field, Field],
+    tangents: tuple[Field, Field],
+) -> tuple[Field, Field]:
+    f_int, m_int = primals
+    df_int, dm_int = tangents
+    y = _si3_glob_2dsum_ddpdd_core(f_int, m_int)
+    dy = jnp.sum(df_int * m_int + f_int * dm_int)
+    return y, dy
+
+
+def si3_glob_2dsum_ddpdd(
+    field_2d: Field,
+    smask0_i: Field,
+    nn_hls: int = 2,
+) -> Field:
+    """NEMO `glob_2Dsum` double-double Knuth two-sum reduction (`src/OCE/LBC/lib_mpp.F90:1244-1267`).
+
+    Source citations:
+    - `src/OCE/lib_fortran_generic.h90:90-193` (`local_2Dsum`, `glob_2Dsum`)
+    - `ORCA2_OMIP_L4/BLD/ppsrc/nemo/lib_fortran.f90:1505-1531`
+    - `src/OCE/LBC/lib_mpp.F90:1244-1267` (`SUBROUTINE DDPDD`)
+    """
+    h = int(nn_hls)
+    jpi, jpj = field_2d.shape
+    nis0, nie0 = h, jpi - h
+    njs0, nje0 = h, jpj - h
+    return _si3_glob_2dsum_ddpdd_core(
+        field_2d[nis0:nie0, njs0:nje0],
+        smask0_i[nis0:nie0, njs0:nje0],
+    )
+
+
+def si3_eos_fzp(
+    sss_m: Field,
+    *,
+    ln_teos10: bool = True,
+    kbnd: int = 2,
+    nn_hls: int = 2,
+    _plant_wrong_eos: bool = False,
+) -> Field:
+    """Compute NEMO's 2D surface freezing point `eos_fzp` (`src/OCE/TRA/eosbn2.F90:1650-1710`).
+
+    Source citations:
+    - `src/OCE/TRA/eosbn2.F90:69`, `:1650-1710` (`eos_fzp_2d_t`)
+    - `ORCA2_OMIP_L4/BLD/ppsrc/nemo/eosbn2.f90:1787-1848`
+    - `src/ICE/iceistate.F90:125`, `:263`
+    """
+    sr = nemo_source_round
+    sss = jnp.asarray(sss_m, dtype=jnp.float64)
+    dtype = sss.dtype
+    use_teos10 = (not ln_teos10) if _plant_wrong_eos else ln_teos10
+
+    if use_teos10:
+        # r1_S0 = 0.875_wp / 30.76941_wp = 1._wp / 35.16504_wp (`eosbn2.F90:69`)
+        r1_s0 = sr(
+            sr(jnp.asarray(0.875, dtype=dtype))
+            / sr(jnp.asarray(30.76941, dtype=dtype))
+        )
+        zs = sr(_safe_sqrt(sr(jnp.abs(sss) * r1_s0)))
+        c5 = jnp.asarray(1.46873e-03, dtype=dtype)
+        c4 = jnp.asarray(9.64972e-03, dtype=dtype)
+        c3 = jnp.asarray(2.28348e-02, dtype=dtype)
+        c2 = jnp.asarray(3.12775e-02, dtype=dtype)
+        c1 = jnp.asarray(2.07679e-02, dtype=dtype)
+        c0 = jnp.asarray(5.87701e-02, dtype=dtype)
+        p = sr(sr(c5 * zs) - c4)
+        p = sr(sr(p * zs) + c3)
+        p = sr(sr(p * zs) - c2)
+        p = sr(sr(p * zs) + c1)
+        p = sr(sr(p * zs) - c0)
+        pfzp = sr(p * sss)
+    else:
+        # UNESCO / Millero EOS-80 polynomial (`eosbn2.F90:1691-1696`)
+        zs = sr(_safe_sqrt(jnp.maximum(sss, jnp.asarray(0.0, dtype=dtype))))
+        a0 = jnp.asarray(-0.0575, dtype=dtype)
+        a1 = jnp.asarray(1.710523e-3, dtype=dtype)
+        a2 = jnp.asarray(2.154996e-4, dtype=dtype)
+        pfzp = sr(sr(sr(a0 + sr(a1 * zs)) - sr(a2 * sss)) * sss)
+
+    jpi, jpj = sss.shape
+    pad = max(int(nn_hls) - int(kbnd), 0)
+    if pad > 0:
+        bnd_mask = _interior_mask_2d(jpi, jpj, pad)
+        pfzp = pfzp * bnd_mask
+    return pfzp
+
+
+def si3_o2_scalar_initial_state(
+    sst_m: Field,
+    sss_m: Field,
+    tmask: Field,
+    ff_t: Field,
+    gphit: Field,
+    e1e2t: Field,
+    *,
+    ssmask: Field | None = None,
+    smask0_i: Field | None = None,
+    ssh_before_kbb: Field | None = None,
+    ssh_before_kmm: Field | None = None,
+    config: SI3ORCA2StateConfig | SI3O2InitConfig | None = None,
+    hti_n: Field | float | None = None,
+    hti_s: Field | float | None = None,
+    hts_n: Field | float | None = None,
+    hts_s: Field | float | None = None,
+    ati_n: Field | float | None = None,
+    ati_s: Field | float | None = None,
+    apd_n: Field | float | None = None,
+    apd_s: Field | float | None = None,
+    hpd_n: Field | float | None = None,
+    hpd_s: Field | float | None = None,
+    hld_n: Field | float | None = None,
+    hld_s: Field | float | None = None,
+    _plant_wrong_eos: bool = False,
+    _plant_tbo_halo_leak: bool = False,
+    _plant_pond_unscaled: bool = False,
+    _plant_hemisphere_swap: bool = False,
+    _plant_ssh_sign: bool = False,
+    _plant_omit_nfd_uniq: bool = False,
+    _plant_stop_gradient: bool = False,
+) -> SI3O2ScalarInitialState:
+    """Compute the Rung-O2 scalar initial state and levitating-ice SSH adjustment.
+
+    Transcribes NEMO 5.0.2 `src/ICE/iceistate.F90`:
+    1. `t_bo` (`:125-126`, `ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:174-175`):
+       `CALL eos_fzp( sss_m(:,:), t_bo(:,:), kbnd=0 )`
+       `t_bo(:,:) = ( t_bo(:,:) + rt0 ) * smask0(:,:)`
+    2. `rn_amax_2d` (`:203-207`, `iceistate.f90:252-256`):
+       `WHERE( gphit(:,:) >= 0._wp ) ; rn_amax_2d = rn_amax_n ; ELSEWHERE ; rn_amax_2d = rn_amax_s`
+    3. `ztfrz` and `zmsk` (`:263-266`, `iceistate.f90:310-313`):
+       `CALL eos_fzp( sss_m(:,:), ztfrz(:,:), kbnd=nn_hls )`
+       `WHERE( ( sst_m(:,:) - ztfrz(:,:) ) * tmask(:,:,1) >= rn_thres_sst ) ; zmsk = 0 ; ELSEWHERE ; zmsk = tmask(:,:,1)`
+    4. 10-field hemisphere-dependent scalar state (`:275-303`, `iceistate.f90:320-338`):
+       `zht_i_ini`, `zht_s_ini`, `zat_i_ini`, `zsm_i_ini`, `ztm_i_ini`,
+       `zt_su_ini`, `ztm_s_ini`, `zapnd_ini`, `zhpnd_ini`, `zhlid_ini`, with
+       `zapnd_ini(:,:) = zapnd_ini(:,:) * zat_i_ini(:,:)` (`:303`).
+    5. Levitating-ice initial SSH branch (`:398-430`, `iceistate.f90:440-460`):
+       `snwice_mass`, `snwice_mass_b`, `area`, `zsshadj`, `ssh_kbb`, `ssh_kmm`.
+    """
+    sr = nemo_source_round
+    cfg = config if config is not None else SI3O2InitConfig()
+    nn_hls = int(getattr(cfg, "nn_hls", 2))
+    consts: IceConstantsConfig = getattr(
+        cfg, "ice_constants", NEMO_SI3_CONSTANTS_CONFIG
+    )
+    ln_teos10 = bool(getattr(cfg, "ln_teos10", True))
+    ln_ice_embd = bool(getattr(cfg, "ln_ice_embd", False))
+    ln_rstart = bool(getattr(cfg, "ln_rstart", False))
+    rn_thres_sst = float(getattr(cfg, "rn_thres_sst", 2.0))
+
+    sst = jnp.asarray(sst_m, dtype=jnp.float64)
+    sss = jnp.asarray(sss_m, dtype=jnp.float64)
+    if _plant_stop_gradient:
+        sst = jax.lax.stop_gradient(sst)
+        sss = jax.lax.stop_gradient(sss)
+    tmask_2d = jnp.asarray(
+        tmask[..., 0] if jnp.ndim(tmask) == 3 else tmask, dtype=jnp.float64
+    )
+    ff_t_2d = jnp.asarray(ff_t, dtype=jnp.float64)
+    gphit_2d = jnp.asarray(gphit, dtype=jnp.float64)
+    e1e2t_2d = jnp.asarray(e1e2t, dtype=jnp.float64)
+    dtype = sst.dtype
+    jpi, jpj = sst.shape
+
+    interior = _interior_mask_2d(jpi, jpj, nn_hls)
+    smask0 = sr(tmask_2d * interior)
+    ssmask_2d = (
+        jnp.asarray(ssmask, dtype=dtype) if ssmask is not None else tmask_2d
+    )
+    if smask0_i is not None and not _plant_omit_nfd_uniq:
+        smask0_i_2d = jnp.asarray(smask0_i, dtype=dtype)
+    else:
+        uniq_t = si3_dom_uniq_t_orca2(
+            jpi, jpj, nn_hls=nn_hls, _plant_omit_nfd_uniq=_plant_omit_nfd_uniq
+        )
+        smask0_i_2d = sr(ssmask_2d * uniq_t)
+
+    rt0 = sr(jnp.asarray(consts.T0, dtype=dtype))
+
+    # 1. t_bo (`src/ICE/iceistate.F90:125-126`): kbnd=0 on interior, masked by smask0
+    t_bo_degc = si3_eos_fzp(
+        sss,
+        ln_teos10=ln_teos10,
+        kbnd=nn_hls if _plant_tbo_halo_leak else 0,
+        nn_hls=nn_hls,
+        _plant_wrong_eos=_plant_wrong_eos,
+    )
+    if _plant_tbo_halo_leak:
+        t_bo = sr(sr(t_bo_degc + rt0) * tmask_2d)
+    else:
+        t_bo = sr(sr(t_bo_degc + rt0) * smask0)
+
+    # 2. rn_amax_2d (`src/ICE/iceistate.F90:203-207`)
+    amax_n = jnp.asarray(getattr(cfg, "rn_amax_n", 0.997), dtype=dtype)
+    amax_s = jnp.asarray(getattr(cfg, "rn_amax_s", 0.997), dtype=dtype)
+    rn_amax_2d = jnp.where(gphit_2d >= 0.0, amax_n, amax_s)
+
+    # 3. ztfrz and zmsk (`src/ICE/iceistate.F90:263-266`)
+    ztfrz = si3_eos_fzp(
+        sss,
+        ln_teos10=ln_teos10,
+        kbnd=nn_hls,
+        nn_hls=nn_hls,
+        _plant_wrong_eos=_plant_wrong_eos,
+    )
+    thres = sr(jnp.asarray(rn_thres_sst, dtype=dtype))
+    sst_minus_tfrz = sr(sr(sst - ztfrz) * tmask_2d)
+    zmsk = jnp.where(sst_minus_tfrz >= thres, 0.0, tmask_2d)
+
+    # 4. Hemisphere-dependent scalar state (`src/ICE/iceistate.F90:275-303`)
+    def _val(override: Field | float | None, attr: str, default: float) -> Field:
+        v = override if override is not None else getattr(cfg, attr, default)
+        out = jnp.asarray(v, dtype=dtype)
+        return jax.lax.stop_gradient(out) if _plant_stop_gradient else out
+
+    v_hti_n = _val(hti_n, "rn_hti_ini_n", 2.0)
+    v_hti_s = _val(hti_s, "rn_hti_ini_s", 1.0)
+    if _plant_hemisphere_swap:
+        v_hti_n, v_hti_s = v_hti_s, v_hti_n
+    v_hts_n = _val(hts_n, "rn_hts_ini_n", 0.2)
+    v_hts_s = _val(hts_s, "rn_hts_ini_s", 0.2)
+    v_ati_n = _val(ati_n, "rn_ati_ini_n", 0.9)
+    v_ati_s = _val(ati_s, "rn_ati_ini_s", 0.9)
+    v_smi_n = _val(None, "rn_smi_ini_n", 6.3)
+    v_smi_s = _val(None, "rn_smi_ini_s", 6.3)
+    v_tmi_n = _val(None, "rn_tmi_ini_n", 270.0)
+    v_tmi_s = _val(None, "rn_tmi_ini_s", 270.0)
+    v_tsu_n = _val(None, "rn_tsu_ini_n", 270.0)
+    v_tsu_s = _val(None, "rn_tsu_ini_s", 270.0)
+    v_tms_n = _val(None, "rn_tms_ini_n", 270.0)
+    v_tms_s = _val(None, "rn_tms_ini_s", 270.0)
+    v_apd_n = _val(apd_n, "rn_apd_ini_n", 0.2)
+    v_apd_s = _val(apd_s, "rn_apd_ini_s", 0.2)
+    v_hpd_n = _val(hpd_n, "rn_hpd_ini_n", 0.05)
+    v_hpd_s = _val(hpd_s, "rn_hpd_ini_s", 0.05)
+    v_hld_n = _val(hld_n, "rn_hld_ini_n", 0.0)
+    v_hld_s = _val(hld_s, "rn_hld_ini_s", 0.0)
+
+    is_nh = ff_t_2d >= 0.0
+    zht_i_ini = sr(jnp.where(is_nh, v_hti_n, v_hti_s) * zmsk)
+    zht_s_ini = sr(jnp.where(is_nh, v_hts_n, v_hts_s) * zmsk)
+    zat_i_ini = sr(jnp.where(is_nh, v_ati_n, v_ati_s) * zmsk)
+    zsm_i_ini = sr(jnp.where(is_nh, v_smi_n, v_smi_s) * zmsk)
+    ztm_i_ini = sr(jnp.where(is_nh, v_tmi_n, v_tmi_s) * zmsk)
+    zt_su_ini = sr(jnp.where(is_nh, v_tsu_n, v_tsu_s) * zmsk)
+    ztm_s_ini = sr(jnp.where(is_nh, v_tms_n, v_tms_s) * zmsk)
+    zapnd_raw = sr(jnp.where(is_nh, v_apd_n, v_apd_s) * zmsk)
+    if _plant_pond_unscaled:
+        zapnd_ini = zapnd_raw
+    else:
+        zapnd_ini = sr(zapnd_raw * zat_i_ini)
+    zhpnd_ini = sr(jnp.where(is_nh, v_hpd_n, v_hpd_s) * zmsk)
+    zhlid_ini = sr(jnp.where(is_nh, v_hld_n, v_hld_s) * zmsk)
+
+    # 5. Category-conserved volumes (`ice_var_itd` + `ice_var_agg(1)` + `lbc_lnk`,
+    #    `src/ICE/iceistate.F90:311-407`)
+    vt_i_int = sr(zht_i_ini * zat_i_ini)
+    vt_s_int = sr(zht_s_ini * zat_i_ini)
+    at_i = zat_i_ini
+    at_ip = zapnd_ini
+    vt_ip_int = sr(zhpnd_ini * zapnd_ini)
+    vt_il_int = sr(zhlid_ini * zapnd_ini)
+
+    vt_i = vt_i_int
+    vt_s = vt_s_int
+    vt_ip = vt_ip_int
+    vt_il = vt_il_int
+
+    # 6. `snwice_mass` and `snwice_mass_b` (`src/ICE/iceistate.F90:400-401`)
+    rhos_hs = sr(consts.rho_snow * zht_s_ini)
+    rhoi_hi = sr(consts.rho_ice * zht_i_ini)
+    rhow_pnd = sr(canonical_constants.rho_water * sr(vt_ip + vt_il))
+    snwice_mass = sr(tmask_2d * sr(sr(zat_i_ini * sr(rhos_hs + rhoi_hi)) + rhow_pnd))
+    snwice_mass_b = snwice_mass
+
+    # 7. Levitating-ice SSH adjustment (`src/ICE/iceistate.F90:420-430`,
+    #    `ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:450-460`)
+    ssh_b0 = (
+        jnp.asarray(ssh_before_kbb, dtype=dtype)
+        if ssh_before_kbb is not None
+        else jnp.zeros_like(tmask_2d)
+    )
+    ssh_m0 = (
+        jnp.asarray(ssh_before_kmm, dtype=dtype)
+        if ssh_before_kmm is not None
+        else jnp.zeros_like(tmask_2d)
+    )
+    if (not ln_ice_embd) and (not ln_rstart):
+        r1_rho0 = sr(
+            jnp.asarray(1.0, dtype=dtype) / jnp.asarray(consts.rho_ocean, dtype=dtype)
+        )
+        area = si3_glob_2dsum_ddpdd(
+            sr(e1e2t_2d * ssmask_2d), smask0_i_2d, nn_hls
+        )
+        num_mass = si3_glob_2dsum_ddpdd(
+            sr(sr(snwice_mass * r1_rho0) * e1e2t_2d), smask0_i_2d, nn_hls
+        )
+        zsshadj = sr(num_mass / area)
+        adj_sign = 1.0 if _plant_ssh_sign else -1.0
+        ssh_kmm = jnp.where(
+            ssmask_2d == 1.0, sr(ssh_m0 + adj_sign * zsshadj), ssh_m0
+        )
+        ssh_kbb = jnp.where(ssmask_2d == 1.0, ssh_kmm, ssh_b0)
+    else:
+        area = jnp.asarray(0.0, dtype=dtype)
+        zsshadj = jnp.asarray(0.0, dtype=dtype)
+        ssh_kmm = ssh_m0
+        ssh_kbb = ssh_b0
+
+    return SI3O2ScalarInitialState(
+        t_bo=t_bo,
+        ztfrz=ztfrz,
+        zmsk=zmsk,
+        zht_i_ini=zht_i_ini,
+        zht_s_ini=zht_s_ini,
+        zat_i_ini=zat_i_ini,
+        zsm_i_ini=zsm_i_ini,
+        ztm_i_ini=ztm_i_ini,
+        zt_su_ini=zt_su_ini,
+        ztm_s_ini=ztm_s_ini,
+        zapnd_ini=zapnd_ini,
+        zhpnd_ini=zhpnd_ini,
+        zhlid_ini=zhlid_ini,
+        rn_amax_2d=rn_amax_2d,
+        vt_i=vt_i,
+        vt_s=vt_s,
+        at_i=at_i,
+        at_ip=at_ip,
+        vt_ip=vt_ip,
+        vt_il=vt_il,
+        snwice_mass=snwice_mass,
+        snwice_mass_b=snwice_mass_b,
+        area=area,
+        zsshadj=zsshadj,
+        ssh_kbb=ssh_kbb,
+        ssh_kmm=ssh_kmm,
+    )
+
+
+def si3_o2_step(
+    state: SI3State,
+    forcing: SI3ORCA2O2Forcing,
+    *,
+    config: SI3ORCA2StateConfig | None = None,
+    o2_init_config: SI3O2InitConfig | None = None,
+    _plant_stop_gradient: bool = False,
+) -> tuple[SI3State, SI3O2ScalarInitialState]:
+    """Compute the Rung-O2 scalar initial state + levitating-ice SSH and execute one O1/O2 step."""
+    cfg = config if config is not None else SI3ORCA2StateConfig()
+    init_cfg = (
+        o2_init_config
+        if o2_init_config is not None
+        else SI3O2InitConfig(nn_hls=cfg.nn_hls, ice_constants=cfg.ice_constants)
+    )
+    o2_istate = si3_o2_scalar_initial_state(
+        sst_m=forcing.sst_m,
+        sss_m=forcing.sss_m,
+        tmask=forcing.tmask,
+        ff_t=forcing.ff_t,
+        gphit=forcing.gphit,
+        e1e2t=forcing.e1e2t,
+        ssmask=forcing.ssmask,
+        smask0_i=forcing.smask0_i,
+        ssh_before_kbb=forcing.ssh_before_kbb,
+        ssh_before_kmm=forcing.ssh_before_kmm,
+        config=init_cfg,
+        _plant_stop_gradient=_plant_stop_gradient,
+    )
+    new_state = si3_o1_step(
+        state,
+        forcing.tmask,
+        sss_m=forcing.sss_m,
+        config=cfg,
+        apply_halos=forcing.apply_halos,
+        _plant_stop_gradient=_plant_stop_gradient,
+    )
+    return new_state, o2_istate
+
+
+__all__.extend((
+    "SI3O2InitConfig",
+    "SI3O2ScalarInitialState",
+    "SI3ORCA2O2Forcing",
+    "si3_dom_uniq_t_orca2",
+    "si3_glob_2dsum_ddpdd",
+    "si3_eos_fzp",
+    "si3_o2_scalar_initial_state",
+    "si3_o2_step",
+))
+

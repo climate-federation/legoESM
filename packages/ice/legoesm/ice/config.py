@@ -530,7 +530,7 @@ from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig  # noqa: E402,F401
 
 def _validate_si3_orca2_o1_config(config: "SeaIceConfig") -> None:
     """Validate rung-O1 ORCA2 SI3 configuration (`thermo_scheme='si3_orca2_o1'`)."""
-    if config.thermo_scheme != "si3_orca2_o1":
+    if config.thermo_scheme not in {"si3_orca2_o1", "si3_orca2_o2"}:
         return
     orca2_cfg = (
         config.si3_orca2
@@ -570,6 +570,18 @@ def build_si3_orca2_o1_config(
     cfg = si3_orca2 if si3_orca2 is not None else SI3ORCA2StateConfig()
     return SeaIceConfig(
         thermo_scheme="si3_orca2_o1",
+        ice_constants=cfg.ice_constants,
+        si3_orca2=cfg,
+    )
+
+
+def build_si3_orca2_o2_config(
+    si3_orca2: SI3ORCA2StateConfig | None = None,
+) -> SeaIceConfig:
+    """Return the rung-O2 ORCA2 SI3 scalar initial state + SSH `SeaIceConfig`."""
+    cfg = si3_orca2 if si3_orca2 is not None else SI3ORCA2StateConfig()
+    return SeaIceConfig(
+        thermo_scheme="si3_orca2_o2",
         ice_constants=cfg.ice_constants,
         si3_orca2=cfg,
     )

@@ -1,0 +1,111 @@
+# Verbatim selected lines from the real NEMO 5.0.2 ORCA2 record output:
+# Source path: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round8/acquisition/een_per_rank_a_np2/ocean.output
+# Complete source SHA-256: 0dfc44ffc2bbef05fc63bb3c9a4d2204574fb866231110e74aadb926b761ccc3
+# Source lines: 1-50, 53, 684-685, 691, 699-730, 732, 2676-2695.
+
+    CNRS - NERC - Met OFFICE - MERCATOR-ocean - CMCC
+                        NEMO team
+             Ocean General Circulation Model
+                 NEMO version 5.0  (2024) 
+
+            ._      ._      ._      ._      ._    
+        _.-._)`\_.-._)`\_.-._)`\_.-._)`\_.-._)`\_ 
+
+            o         _,           _,             
+             o      .' (        .-' /             
+            o     _/..._'.    .'   /              
+       (    o .-'`      ` '-./  _.'               
+        )    ( o)           ;= <_         (       
+       (      '-.,\\__ __.-;`\   '.        )      
+        )  )       \) |`\ \)  '.   \      (   (   
+       (  (           \_/       '-._\      )   )  
+        )  ) jgs                     `    (   (   
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ 
+
+
+AAAAAAAA
+
+
+ par_kind : wp = Working precision = dp = double-precision
+ ~~~~~~~~                                 ****************
+
+            
+ domain_cfg : domain size read in ORCA_R2_zps_domcfg file
+ ~~~~~~~~~~ 
+                     iom_nf90_open ~~~ open existing file: ORCA_R2_zps_domcfg.nc in READ mode
+                    ---> ORCA_R2_zps_domcfg.nc OK
+                     iom_close ~~~ close file: ORCA_R2_zps_domcfg.nc ok
+    .
+    ==>>>   ORCA configuration 
+    .
+       nn_cfg =            2
+       Ni0glo =          180
+       Nj0glo =          148
+       jpkglo =           31
+    Namelist nammpp
+       jpni and jpnj will be calculated automatically
+       avoid use of mpi_allgather at the north fold  ln_nnogather =  T
+       halo width (applies to both rows and columns)       nn_hls =            2
+       choice of communication method                     nn_comm =            1
+       use delayed global communications?             ln_mppdelay =  T
+                     iom_nf90_open ~~~ open existing file: ORCA_R2_zps_domcfg.nc in READ mode
+                    ---> ORCA_R2_zps_domcfg.nc OK
+
+ mpp_init:
+
+      access = SEQUENTIAL
+
+
+    par_init: ice parameters shared among all the routines
+    ~~~~~~~~
+       Namelist nampar: 
+          number of ice  categories                           jpl       =            5
+          number of ice  layers                               nlay_i    =           10
+          number of snow layers                               nlay_s    =            5
+          virtual ITD param for jpl=1 (T) or not (F)     ln_virtual_itd =  F
+          Ice dynamics       (T) or not (F)                   ln_icedyn =  T
+          Ice thermodynamics (T) or not (F)                   ln_icethd =  T
+          maximum ice concentration for NH                              =   0.99700000000000000     
+          maximum ice concentration for SH                              =   0.99700000000000000     
+
+       ice timestep rDt_ice = nn_fsbc*rn_Dt =    21600.000000000000     
+
+ ice_itd_init: Initialization of ice cat distribution 
+ ~~~~~~~~~~~~
+    Namelist namitd: 
+       Ice categories are defined by a function of rn_himean**(-0.05)    ln_cat_hfn =  T
+          mean ice thickness in the domain                               rn_himean  =    2.0000000000000000     
+       Ice categories are defined by rn_catbnd                           ln_cat_usr =  F
+       minimum ice thickness allowed                                     rn_himin   =   0.10000000000000001     
+       maximum ice thickness allowed                                     rn_himax   =    99.000000000000000     
+
+    ===>>>   resulting thickness category boundaries :
+             hi_max(:)=    0.0000000000000000       0.45401674241555168        1.1293138230836322        2.1414589889479725        3.6705964099155439        99.000000000000000     
+
+ ice_thd_init: Ice Thermodynamics
+ ~~~~~~~~~~~~
+    Namelist namthd:
+       activate ice thick change from top/bot (T) or not (F)                ln_icedH   =  T
+       activate lateral melting (T) or not (F)                              ln_icedA   =  T
+       activate ice growth in open-water (T) or not (F)                     ln_icedO   =  T
+
+           iom_nf90_rp0123d, file: ./ORCA2_00000010_restart_0000.nc, var: sshn written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00000010_restart_0000.nc, var: un written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00000010_restart_0000.nc, var: vn written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00000010_restart_0000.nc, var: tn written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00000010_restart_0000.nc, var: sn written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00000010_restart_0000.nc, var: uu_n written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00000010_restart_0000.nc, var: vv_n written ok
+           iom_nf90_rp0123d, file: ./ORCA2_00000010_restart_0000.nc, var: ssha written ok
+                     iom_close ~~~ close file: ./ORCA2_00000010_restart_0000.nc ok
+
+AAAAAAAA
+
+                     iom_close ~~~ close file: ORCA_R2_zps_domcfg.nc ok
+                     iom_close ~~~ close file: ./zdfiwm_forcing_orca2.nc ok
+                     iom_close ~~~ close file: ./zdfiwm_forcing_orca2.nc ok
+                     iom_close ~~~ close file: ./zdfiwm_forcing_orca2.nc ok
+                     iom_close ~~~ close file: ./zdfiwm_forcing_orca2.nc ok
+                     iom_close ~~~ close file: ./zdfiwm_forcing_orca2.nc ok
+                     iom_close ~~~ close file: ./zdfiwm_forcing_orca2.nc ok
+                     iom_close ~~~ close file: ./geothermal_heating.nc ok
