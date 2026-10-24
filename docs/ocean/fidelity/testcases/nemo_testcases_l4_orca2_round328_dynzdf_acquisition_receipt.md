@@ -309,7 +309,10 @@ The operator's independent Claude review is **HOLD**; its wrong-field finding,
 No Decision-122 arm or model proposal is opened because ownership remains
 unmeasured.
 
-Resume-4 gates: pending final receipt commit.
+Resume-4 gates: per-receipt citation gate PASS (14 citations, 0 unmapped, 0
+failures, 0 map-audit failures); default landing battery 169 passed in
+1,000.32 s; explicit private-import ratchet 6 passed in 4.80 s. The default
+battery includes the expanded 22-test round-328 gate.
 
 codex review: operator
 
