@@ -119,6 +119,9 @@ same-program checks, JIT/JVP/VJP, O1 restart layout, step-2 salinity selection,
 and all admission plants. The O1 regression suite and the imported ORCA2
 round-329 tests also pass. Default receipt-citation and private-import gates,
 plus an explicit citation-gate invocation for every SI3 receipt, gate handoff.
+Post-score verification passes: focused O2 `12/12`; private-import ratchet
+`6/6`; default citation gate and all six SI3 per-receipt invocations each
+report zero failures, zero stale full-map entries, and zero unmapped citations.
 
 `ASKED`: repair all review findings, preserve the O2 bar with exact
 fitted-category inputs, admit the operator-run record, and score it under CPU
