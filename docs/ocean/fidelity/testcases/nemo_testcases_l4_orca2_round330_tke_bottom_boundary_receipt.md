@@ -197,3 +197,19 @@ The faithful-grid solve still carries the `jpkm1` row's upper coefficient into
 the assembled recurrence (`tke.py:1664-1670`), coupling it to the carried
 `jpk` row even though NEMO's terminal assignment never reads `en(jpk)`.  The
 round-330 range fix neither introduces nor repairs that separate topology.
+
+## Operator GPU measurement (DINO), 2026-10-24
+
+The tool's run.sh produced the faithful-grid three-step model values (both arms) and then stopped at the month
+gate because its old-clamp tree was intentionally dirty (the gate's comparator requires a clean checkout). The operator
+re-ran the month gate with a CLEAN tree of the pre-fix base `355880d5b796` as the old arm and the clean candidate
+`0449e69be304` as the new arm, on idle GPU 1 (nvidia-smi before/after in `orca2_rounds/round330/dino/`,
+`month_rerun.sh`, `month_rerun.log`).
+
+- DINO NEMO-faithful 36-level grid, three production steps: 66 of 66 leaf-steps bit-identical old vs new
+  (`old/new_faithful_model_values.json`). CONFIRMED.
+- DINO from-rest month gate, day-30 wet 3-D T rms vs NEMO kt = 960: old 2.056821683e-03 K, new 2.056821683e-03 K
+  (bar 2.244317642e-03 K; certified 2.040288765e-03 K) — identical. CONFIRMED. DINO's NEMO comparison does not move.
+- DINO's default 35-level grid DOES change (7,306 full-depth columns: the deepest TKE row goes from the old pin to the
+  NEMO-literal solve; codex CPU probe above). That grid has no NEMO comparison of its own; the change is the same
+  NEMO-literal bottom topology rung 10 now uses.
