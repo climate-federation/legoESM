@@ -142,6 +142,10 @@ Round 9 refused diagnostic and no projection is promoted in their place.
 - Ten-step trajectory comparison: PASS, 70 rows, zero ULP worsening.
 - Combined direct controls and `tests/ocean/unit/test_nemo_recipe.py`:
   **77 passed in 356.65 s**.
+- Exact three-file push battery (citation tests, recipe tests, full gradient
+  matrix in one pytest process): **52 passed, 1 skipped in 1955.76 s**.  The
+  parent process remained alive after the isolated certified one-step child;
+  the sole skip is the registered six-step CPU LLVM section-memory limit.
 - Receipt citation gate: PASS with four citations and no unmapped or failing
   anchors.  Shifting `nemo_testcase_l2_gyre_gradient_gate.py:456` by two lines
   produces SYMBOL-NOT-AT-LINE and expected exit 1.
