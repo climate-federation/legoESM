@@ -54,6 +54,15 @@ if [[ "$MODE" == --admit-existing && -n ${R328_EXISTING_RUN:-} ]]; then
     expected_retained="$EVIDENCE/refused/orca1ice_zdfphy_kt1_np2_admission_refused_20261024T043519Z_4166419"
   elif [[ "$ACQ_TARGET" == tke331 ]]; then
     expected_retained="$EVIDENCE/refused/orca1ice_tke331_kt1_np2_admission_refused_20261024T103431Z_331969"
+  elif [[ "$ACQ_TARGET" == tke332 ]]; then
+    [[ $(dirname "$TARGET_RUN") == "$EVIDENCE/refused" && \
+       $(basename "$TARGET_RUN") == orca1ice_source_order_kt1_np2_* ]] \
+      || { printf 'REFUSE: retained round-332 run is outside its refused directory\n' >&2; exit 64; }
+    [[ ${R332_RETAINED_PRODUCER:-} =~ ^[0-9a-f]{40}$ ]] \
+      || { printf 'REFUSE: R332_RETAINED_PRODUCER must pin the producer commit\n' >&2; exit 64; }
+    [[ ${R332_RETAINED_BINARY_SHA:-} =~ ^[0-9a-f]{64}$ ]] \
+      || { printf 'REFUSE: R332_RETAINED_BINARY_SHA must pin the binary digest\n' >&2; exit 64; }
+    expected_retained=$TARGET_RUN
   else
     printf 'REFUSE: retained admission is unsupported for %s\n' "$ACQ_TARGET" >&2; exit 64
   fi
@@ -131,6 +140,7 @@ readonly R332_DIR=$here/../nemo_testcase_l4_orca2_round332_source_order_acquisit
 readonly R332_DYNVOR_PATCH=$R332_DIR/dynvor_round332.patch
 readonly R332_TKE_PATCH=$R332_DIR/zdftke_round332.patch
 readonly R332_WRITER=$R332_DIR/round332_writer.F90
+readonly R332_FIXTURE=$R332_DIR/round332_layout_fixture.F90
 readonly R332_GATE=$here/../nemo_testcase_l4_orca2_round332_source_order_gate.py
 readonly R332_TEST=$REPO/tests/ocean/fidelity/test_orca2_round332_source_order_gate.py
 readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
@@ -140,20 +150,20 @@ created_target=0
 created_run=0
 run_completed=0
 cleanup() {
-  local rc=$? refused
+  local rc=$? refused failure_kind
   trap - EXIT
   set +e
   [[ -z "$scratch" || ! -e "$scratch" ]] || rm -rf -- "$scratch"
   if [[ $rc -ne 0 ]]; then
-    if [[ $created_run -ne 0 && $run_completed -eq 1 && -e "$TARGET_RUN" ]]; then
-      refused=$EVIDENCE/refused/$(basename "$TARGET_RUN")_admission_refused_$(date -u +%Y%m%dT%H%M%SZ)_$$
+    if [[ $created_run -ne 0 && -e "$TARGET_RUN" ]]; then
+      failure_kind=crashed
+      [[ $run_completed -eq 0 ]] || failure_kind=admission_refused
+      refused=$EVIDENCE/refused/$(basename "$TARGET_RUN")_${failure_kind}_$(date -u +%Y%m%dT%H%M%SZ)_$$
       if mkdir -p -- "$EVIDENCE/refused" && mv -- "$TARGET_RUN" "$refused"; then
-        printf 'R328_ADMISSION_REFUSED_OUTPUTS_KEPT %s\n' "$refused" >&2
+        printf 'R328_FAILED_OUTPUTS_KEPT kind=%s path=%s\n' "$failure_kind" "$refused" >&2
       else
-        printf 'R328_ADMISSION_REFUSED_OUTPUTS_LEFT_IN_PLACE %s\n' "$TARGET_RUN" >&2
+        printf 'R328_FAILED_OUTPUTS_LEFT_IN_PLACE kind=%s path=%s\n' "$failure_kind" "$TARGET_RUN" >&2
       fi
-    else
-      [[ $created_run -eq 0 || ! -e "$TARGET_RUN" ]] || rm -rf -- "$TARGET_RUN"
     fi
     [[ $created_target -eq 0 || ! -e "$TARGET_ROOT" ]] || rm -rf -- "$TARGET_ROOT"
     [[ $created_run -eq 0 && $created_target -eq 0 ]] || \
@@ -207,6 +217,18 @@ check_no_removed_lines() { [[ $(awk '/^--- / {next} /^-/ {n++} END {print n+0}' 
 check_patched_call_predecessors() {
   awk '{ if ($0 ~ /CALL r(328|331|332)_/ && previous ~ /&[[:space:]]*$/) bad=1; previous=$0 }
        END { exit bad }' "$1"
+}
+check_r332_tke_landing() {
+  awk '
+    /^[[:space:]]*END SELECT[[:space:]]*$/ { last_select=NR }
+    /CALL r332_tke_row\(Kbb,Kmm,jj,zmxlm/ {
+      count++; call_line=NR; after_select=(last_select==NR-2)
+    }
+    /Vertical eddy viscosity and diffusivity/ {
+      if (call_line && !viscosity_line) viscosity_line=NR
+    }
+    END { exit !(count==1 && after_select && viscosity_line==call_line+4) }
+  ' "$1"
 }
 free_ok() {
   local p=$1 need=${2:-8388608}
@@ -285,15 +307,24 @@ if [[ "$TARGET_RUN" != "$DEFAULT_TARGET_RUN" ]]; then
   if [[ "$ACQ_TARGET" == zdfphy ]]; then
     retained_producer=$RETAINED_ZDFPHY_PRODUCER
     retained_binary_sha=$RETAINED_ZDFPHY_BINARY_SHA
-  else
+  elif [[ "$ACQ_TARGET" == tke331 ]]; then
     retained_producer=$RETAINED_TKE331_PRODUCER
     retained_binary_sha=$RETAINED_TKE331_BINARY_SHA
+  else
+    retained_producer=$R332_RETAINED_PRODUCER
+    retained_binary_sha=$R332_RETAINED_BINARY_SHA
   fi
   [[ "$EXPECTED_PRODUCER" == "$retained_producer" ]] \
     || refuse 'retained run has the wrong producer commit'
   git merge-base --is-ancestor "$EXPECTED_PRODUCER" "$COMMIT" \
     || refuse 'retained producer is not an ancestor of the admission repair'
   pin "$retained_binary_sha" "$TARGET_RUN/nemo" 'retained acquisition binary'
+  if [[ "$ACQ_TARGET" == tke332 ]]; then
+    [[ -f "$TARGET_RUN/nemo.sha256" ]] \
+      || refuse 'retained run lacks its binary digest manifest'
+    ( cd "$TARGET_RUN" && sha256sum -c nemo.sha256 >/dev/null ) \
+      || refuse 'retained binary digest manifest changed'
+  fi
 fi
 readonly EXPECTED_PRODUCER
 export PYTHONPATH=$REPO:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/atmosphere:$REPO/packages/coupler:$REPO/packages/ice:$REPO/packages/land:$REPO/packages/ml:$REPO/packages/tools:$REPO/src
@@ -333,7 +364,7 @@ if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
   done
 fi
 if [[ "$ACQ_TARGET" == tke332 ]]; then
-  for path in "$R332_DYNVOR_PATCH" "$R332_TKE_PATCH" "$R332_WRITER" \
+  for path in "$R332_DYNVOR_PATCH" "$R332_TKE_PATCH" "$R332_WRITER" "$R332_FIXTURE" \
     "$R332_GATE" "$R332_TEST" "$SOURCE_DYNVOR" \
     "$SOURCE_ROOT/BLD/ppsrc/nemo/dynvor.f90"; do
     [[ -f "$path" ]] || refuse "missing round-332 source-order input $path"
@@ -468,6 +499,19 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
   else
     [[ $? -eq 1 ]] || refuse 'could not construct combined TKE observer patch'
   fi
+  check_r332_tke_landing "$dry/zdftke.F90" \
+    || refuse 'round-332 TKE observer did not land between END SELECT and viscosity loop'
+  awk '
+    /CALL r332_tke_row\(Kbb,Kmm,jj,zmxlm/ { skip=1; next }
+    skip { skip=0; next }
+    /zemlp = SQRT/ {
+      print "                  CALL r332_tke_row(Kbb,Kmm,jj,zmxlm(ntsi:ntei,1:jpkm1), &"
+      print "                     & zmxld(ntsi:ntei,1:jpkm1),p_pdlr(ntsi:ntei,jj,2:jpkm1))"
+    }
+    { print }
+  ' "$dry/zdftke.F90" >"$plants/zdftke.misplaced.F90"
+  plant_must_refuse tke-observer-misplaced \
+    check_r332_tke_landing "$plants/zdftke.misplaced.F90"
 fi
 for unit in dynzdf stprk3_stg; do
   check_patched_call_predecessors "$dry/$unit.F90" \
@@ -504,7 +548,7 @@ fi
 if [[ "$ACQ_TARGET" == tke332 ]]; then
   check_patched_call_predecessors "$dry/dynvor.F90" \
     || refuse 'observer call inserted after a continuation: dynvor.F90'
-  [[ $(grep -Fc 'CALL r332_vor_' "$dry/dynvor.F90") -eq 4 ]] \
+  [[ $(grep -Fc 'CALL r332_vor_' "$dry/dynvor.F90") -eq 3 ]] \
     || refuse 'round-332 dynvor observer call census changed'
   [[ $(grep -Fc 'CALL r332_tke_row' "$dry/zdftke.F90") -eq 1 ]] \
     || refuse 'round-332 TKE observer call census changed'
@@ -587,6 +631,11 @@ admit() {
   compare_deterministic "$SOURCE_RUN" "$TARGET_RUN" \
     || refuse 'write-only observer changed an inherited deterministic output'
   if [[ "$ACQ_TARGET" == tke332 ]]; then
+    for name in oracle_rhs_kt00000001.bin oracle_stage_kt00000001_s1.bin; do
+      cmp -s "$SOURCE_RUN/$name" "$TARGET_RUN/$name" \
+        || refuse "round-332 observer changed passivity witness $name"
+    done
+    printf 'R332_PASSIVITY_WITNESSES_PASS pv_rhs=oracle_rhs_kt00000001.bin ua_va=oracle_stage_kt00000001_s1.bin\n'
     for rank in 0000 0001; do
       cmp -s "$ADMITTED_DYN_RUN/oracle_dynzdf_kt00000001_s3_r${rank}.bin" \
         "$TARGET_RUN/oracle_dynzdf_kt00000001_s3_r${rank}.bin" \
@@ -594,7 +643,7 @@ admit() {
     done
     "$PY" "$GATE" --record-dir "$TARGET_RUN" --expect-commit "$EXPECTED_PRODUCER" \
       --output "$TARGET_RUN/round332_dynzdf_readmission.json"
-    for plant in header field-order truncation stamp vor mxl; do
+    for plant in header field-order truncation stamp vor pdlr; do
       if "$PY" "$R332_GATE" --record-dir "$TARGET_RUN" \
         --zdf-reference-dir "$ADMITTED_ZDFPHY_RUN" --expect-commit "$EXPECTED_PRODUCER" \
         --plant "$plant" >"$TARGET_RUN/round332_source_${plant}_plant.log" 2>&1; then
@@ -705,7 +754,7 @@ if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
     >>"$manifest/toolchain.sha256"
 fi
 if [[ "$ACQ_TARGET" == tke332 ]]; then
-  sha256sum "$R332_DYNVOR_PATCH" "$R332_TKE_PATCH" "$R332_WRITER" \
+  sha256sum "$R332_DYNVOR_PATCH" "$R332_TKE_PATCH" "$R332_WRITER" "$R332_FIXTURE" \
     "$R332_GATE" "$R332_TEST" "$SOURCE_DYNVOR" \
     >>"$manifest/toolchain.sha256"
 fi
@@ -745,6 +794,8 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
   cp "$R332_WRITER" "$TARGET_ROOT/MY_SRC/round332_writer.F90"
   patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$R332_DYNVOR_PATCH"
   patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$R332_TKE_PATCH"
+  check_r332_tke_landing "$TARGET_ROOT/MY_SRC/zdftke.F90" \
+    || refuse 'built round-332 TKE observer did not land at the intended statement'
 fi
 touch "$TARGET_ROOT/MY_SRC/"*.F90
 ./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
@@ -778,6 +829,7 @@ while read -r digest name; do cp -a "$SOURCE_RUN/$name" "$TARGET_RUN/$name"; don
 cp "$SOURCE_RUN/deck_files.sha256" "$SOURCE_RUN/input_files.sha256" "$TARGET_RUN/"
 cp "$BINARY" "$TARGET_RUN/nemo"
 cp "$manifest"/* "$TARGET_RUN/"
+( cd "$TARGET_RUN" && sha256sum nemo >nemo.sha256 )
 ( cd "$TARGET_RUN" && sha256sum -c deck_files.sha256 >/dev/null && sha256sum -c input_files.sha256 >/dev/null )
 
 (

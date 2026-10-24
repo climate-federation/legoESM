@@ -3,8 +3,9 @@
 Date: 2026-10-24
 
 Base: `f2dcf0a8cfff`; preregistration: `77ab00003`; rescore gate:
-`a80e3d0ab`.  Final disposition: **ACQUISITION_NEEDED**.  No model or
-configuration value changed, and Codex did not run NEMO.
+`a80e3d0ab`.  Post-review acquisition repair: pending final commit below.
+Final disposition: **ACQUISITION_NEEDED**.  No model or configuration value
+changed, and Codex did not run NEMO.
 
 ## Answer
 
@@ -14,15 +15,16 @@ bar, and 1,172 are over bar.  Both rung-10 labels have identical metrics on
 every row.  Their first non-bit row is kt 1 stage 1 `v`: 2,032 unequal
 binary64 words, maximum and RMS exactly zero, hence signed-zero differences.
 
-The first owning statement is **PLAUSIBLE, not CONFIRMED**.  In the executing
-record build, the EEN loop computes `zva` and then adds it to `pv_rhs` at
+The original first-owner assignment is **REFUTED as a required NEMO flip**.
+In the executing record build, the EEN loop computes `zva` and adds it to `pv_rhs` at
 `ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynvor.f90:796-802`.
 legoesm computes the corresponding EEN contribution and adds it to `dv_dt` at
-`ocean_pe_latlon_cgrid.py:3049`.  The admitted round-5, 326, 328 and 331
-records do not contain the accumulator immediately before that add, its
-`zva`, or the result immediately after it.  The certified rung is therefore
-**none**: those records cannot prove that this one statement accounts for all
-2,032 sign bits without moving a nonzero value.
+`ocean_pe_latlon_cgrid.py:3049`.  The admitted round-40 source-order record
+shows instead that NEMO already has positive zero after HPG and changes no `v`
+word at LDF, VOR, KEG, or ZAD on either rank.  The 2,032 stage-output
+differences therefore do not establish a NEMO `vor_een` flip.  The new record
+remains useful to inspect the literal EEN add, but a legitimate no-flip result
+is admissible.
 
 The seven remaining post-TKE `avm/avt` cells are likewise **PLAUSIBLE**.  NEMO
 literally evaluates square root, mixing-length multiplication, independent
@@ -69,12 +71,16 @@ R332-P1 and P2 are **CONFIRMED**.
 
 For both rung-10 labels the admitted entry state is bit-exact.  The kt-1
 stage-1 `T`, `S`, `u`, and `ssh` rows are also bit-exact; `v` is the first
-non-bit row and differs only in zero sign.  Walking the executing NEMO order
-therefore reaches EEN vorticity before any measured nonzero departure.  The
-record build's scalar assignment is a credible single owner, while legoESM's
-array accumulation is its shared counterpart, but subtraction of completed
-stage records cannot reconstruct a signed-zero-sensitive before/add/after
-triple.  R332-P3 remains **PLAUSIBLE** and triggers acquisition.
+non-bit row and differs only in zero sign.  The executing order is HPG, LDF,
+then VOR at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90:139-147`.
+Reading the admitted round-40 records with their committed reader measured,
+for rank 0, 216,291 positive and zero negative zeros after HPG and zero changed
+words at each later boundary; rank 1 measured 254,390 positive and zero
+negative zeros with the same zero-change result.  Thus the signed zeros are
+present before VOR on the NEMO side.  R332-P3's mandatory VOR-flip prediction
+is **REFUTED**; source-order acquisition reports changes but may not require
+one.
 
 Round 331 improved post-TKE `avm/avt` from 931/929 unequal wet cells to 7/7,
 with maxima `5.551115123125783e-17` and `3.469446951953614e-18`.  Exact
@@ -90,27 +96,42 @@ and its round-331 TKE extension.  It adds only write-only observers to the
 exact record-build `dynvor` and `zdftke` units.  At kt 1 on both ranks it will
 record:
 
-1. `pv_rhs` immediately before the EEN `+ zva` statement, the exact `zva`,
-   and `pv_rhs` immediately after it; and
-2. `zmxlm` and `zmxld` at the viscosity construction boundary.
+1. `pv_rhs` before and after the production EEN call, plus the exact EEN
+   contribution from a second call of the unchanged `vor_een` into zeroed
+   scratch accumulators; and
+2. `zmxlm`, `zmxld`, and `p_pdlr` immediately after mixing-length selection
+   and before the viscosity construction.
 
 Admission first re-admits every inherited round-331 boundary and the admitted
-round-328 `dyn_zdf` frames.  It then requires bitwise replay of NEMO's
-before-plus-add result, a value-equal bit change somewhere across the two
-ranks, active mixing-length channels, matching extents, and valid checksums.
-Header, field-order, truncation, stamp, vorticity and mixing-length plants must
-all refuse.
+round-328 `dyn_zdf` frames.  It compares all inherited deterministic outputs,
+and explicitly compares the kt-1 `pv_rhs` and stage-1 `ua/va` frames bit for
+bit against the admitted record.  It then requires bitwise replay of NEMO's
+before-plus-add result, active wet mixing-length channels, wet `p_pdlr` in
+`[0.1,1]`, matching extents, and valid checksums.  Change and value-equal-flip
+counts are reported only.  Header, field-order, truncation, stamp, wet
+one-ULP vorticity, and wet one-ULP `p_pdlr` plants must all print `REFUSE`.
 
-The clean preflight passed at `18af16cce`: 55 tests passed; all inherited
-deterministic files matched (140); all eight writer/observer Fortran units
-passed syntax; the same-program proof found 409 identical preprocessed units
-and 421 identical normalized objects; and its non-observer source plant
-refused.  The preflight ran no NEMO executable.
+The original preflight was a false green because it counted calls without
+checking their post-patch location.  The repaired preflight applies the
+round-331 and round-332 patches in fixed order, checks the patched TKE call is
+between `END SELECT` and the viscosity loop, and has a misplaced-call plant
+that must refuse.  Its real gfortran fixture writes different data per rank,
+preserves dry negative-zero sign bits, exercises the real writer/reader ABI,
+and proves both wet one-ULP plants reach `REFUSE`.
+
+With the record build's exact flags (`-O3 -funroll-all-loops` and no
+fast-math/FMA option), the rejected per-cell observer changed `vor_een` from
+2,404 to 2,509 disassembly lines.  The repaired separate replay leaves
+`vor_een` at 12,739 bytes and 3,217 disassembly lines in both objects; the
+only disassembly differences are three runtime-diagnostic source-line
+immediates (727--729 become 740--742).  The floating-point instruction stream,
+including the production add loop, is otherwise identical.  Admission still
+provides the decisive passivity proof through bitwise output comparisons.
 
 Operator command:
 
 ```text
-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/orca2_r332-93928372/scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round332_source_order_acquisition/run.sh --run
+/data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/orca2_r332/repo/scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round332_source_order_acquisition/run.sh --run
 ```
 
 Expected evidence directory:
@@ -119,8 +140,9 @@ Expected evidence directory:
 ## Gates and disposition
 
 - R332-P1 and P2: **CONFIRMED**.
-- R332-P3 and P4: **PLAUSIBLE; ACQUISITION_NEEDED** because the registered
-  before/add/after and mixing-length operands are absent.
+- R332-P3 mandatory VOR flip: **REFUTED**.  The no-flip path is admissible.
+- R332-P4 and the remaining literal EEN source-order question:
+  **PLAUSIBLE; ACQUISITION_NEEDED** because the registered operands are absent.
 - R332-P5: **CONFIRMED**.  With no confirmed single-statement owner, Decision
   122 is not opened and no production-call-site, cross-card, or gradient claim
   is eligible.
@@ -132,7 +154,11 @@ Expected evidence directory:
 - Stop and extend the reviewed acquisition tools when a record is missing:
   **ASKED and satisfied**.
 
-independent review: operator (Claude)
+Independent reviews: **HOLD** (Claude and Argon); every acquisition-tool
+finding above is repaired or converted to a measured, fail-closed admission
+check.  Crashed and refused runs are retained under `refused/`, and
+`--admit-existing` for round 332 requires an explicit producer commit and
+binary SHA-256 pin before it will read one.
 
 The next admissible action is the operator-only acquisition above.  Until it
 is admitted, the vorticity add and the seven TKE cells have proposals, not

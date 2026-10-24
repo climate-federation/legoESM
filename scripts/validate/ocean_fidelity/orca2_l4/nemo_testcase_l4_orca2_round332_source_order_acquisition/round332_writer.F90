@@ -6,13 +6,13 @@ MODULE round332_writer
    USE lib_mpp, ONLY : ctl_stop
    IMPLICIT NONE
    PRIVATE
-   PUBLIC :: r332_vor_begin, r332_vor_before_cell, r332_vor_after_cell
-   PUBLIC :: r332_vor_done, r332_tke_row
+   PUBLIC :: r332_vor_begin, r332_vor_add, r332_vor_done
+   PUBLIC :: r332_tke_row
 
    INTEGER, SAVE :: nkt=-1,nkmm=-1,nkrhs=-1,nx=0,ny=0,nz=0,nrows=0
-   LOGICAL, SAVE :: active=.FALSE.,have_vor=.FALSE.,written=.FALSE.
+   LOGICAL, SAVE :: active=.FALSE.,have_add=.FALSE.,have_vor=.FALSE.,written=.FALSE.
    REAL(wp), ALLOCATABLE, SAVE :: vor_before(:,:,:),vor_add(:,:,:),vor_after(:,:,:)
-   REAL(wp), ALLOCATABLE, SAVE :: mxlm(:,:,:),mxld(:,:,:)
+   REAL(wp), ALLOCATABLE, SAVE :: mxlm(:,:,:),mxld(:,:,:),pdlr(:,:,:)
 
 CONTAINS
 
@@ -20,39 +20,41 @@ CONTAINS
       IF(ALLOCATED(vor_before)) RETURN
       nx=ntei-ntsi+1; ny=ntej-ntsj+1; nz=jpkm1
       ALLOCATE(vor_before(nx,ny,nz),vor_add(nx,ny,nz),vor_after(nx,ny,nz), &
-         & mxlm(nx,ny,nz),mxld(nx,ny,nz))
+         & mxlm(nx,ny,nz),mxld(nx,ny,nz),pdlr(nx,ny,nz))
       vor_before=0._wp; vor_add=0._wp; vor_after=0._wp
-      mxlm=0._wp; mxld=0._wp
+      mxlm=0._wp; mxld=0._wp; pdlr=0._wp
    END SUBROUTINE allocate_arrays
 
-   SUBROUTINE r332_vor_begin(kt,Kmm,Krhs)
+   SUBROUTINE r332_vor_begin(kt,Kmm,Krhs,pbefore)
       INTEGER, INTENT(in) :: kt,Kmm,Krhs
+      REAL(wp), INTENT(in) :: pbefore(:,:,:)
       IF(kt /= nit000 .OR. have_vor .OR. active) RETURN
       IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop('round332: requires fp64')
       CALL allocate_arrays
       IF(nkt /= -1 .AND. (nkt /= kt .OR. nkmm /= Kmm)) &
          & CALL ctl_stop('round332: TKE/vorticity indices moved')
+      IF(ANY(SHAPE(pbefore) /= (/nx,ny,nz/))) &
+         & CALL ctl_stop('round332: vorticity before shape')
       nkt=kt; nkmm=Kmm; nkrhs=Krhs
+      vor_before=pbefore
       active=.TRUE.
    END SUBROUTINE r332_vor_begin
 
-   SUBROUTINE r332_vor_before_cell(ji,jj,jk,pbefore,padd)
-      INTEGER, INTENT(in) :: ji,jj,jk
-      REAL(wp), INTENT(in) :: pbefore,padd
+   SUBROUTINE r332_vor_add(padd)
+      REAL(wp), INTENT(in) :: padd(:,:,:)
       IF(.NOT.active) RETURN
-      vor_before(ji-ntsi+1,jj-ntsj+1,jk)=pbefore
-      vor_add(ji-ntsi+1,jj-ntsj+1,jk)=padd
-   END SUBROUTINE r332_vor_before_cell
+      IF(have_add .OR. ANY(SHAPE(padd) /= (/nx,ny,nz/))) &
+         & CALL ctl_stop('round332: vorticity replay shape')
+      vor_add=padd
+      have_add=.TRUE.
+   END SUBROUTINE r332_vor_add
 
-   SUBROUTINE r332_vor_after_cell(ji,jj,jk,pafter)
-      INTEGER, INTENT(in) :: ji,jj,jk
-      REAL(wp), INTENT(in) :: pafter
+   SUBROUTINE r332_vor_done(pafter)
+      REAL(wp), INTENT(in) :: pafter(:,:,:)
       IF(.NOT.active) RETURN
-      vor_after(ji-ntsi+1,jj-ntsj+1,jk)=pafter
-   END SUBROUTINE r332_vor_after_cell
-
-   SUBROUTINE r332_vor_done
-      IF(.NOT.active) RETURN
+      IF(.NOT.have_add .OR. ANY(SHAPE(pafter) /= (/nx,ny,nz/))) &
+         & CALL ctl_stop('round332: vorticity after shape')
+      vor_after=pafter
       active=.FALSE.; have_vor=.TRUE.
       CALL maybe_write
    END SUBROUTINE r332_vor_done
@@ -69,9 +71,9 @@ CONTAINS
       WRITE(unit) value
    END SUBROUTINE put3
 
-   SUBROUTINE r332_tke_row(Kbb,Kmm,jj,pmxlm,pmxld)
+   SUBROUTINE r332_tke_row(Kbb,Kmm,jj,pmxlm,pmxld,ppdlr)
       INTEGER, INTENT(in) :: Kbb,Kmm,jj
-      REAL(wp), INTENT(in) :: pmxlm(:,:),pmxld(:,:)
+      REAL(wp), INTENT(in) :: pmxlm(:,:),pmxld(:,:),ppdlr(:,:)
       INTEGER :: j
       IF(written) RETURN
       IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop('round332: requires fp64')
@@ -84,8 +86,10 @@ CONTAINS
       IF(Kbb /= 1) CALL ctl_stop('round332: unexpected TKE before index')
       j=jj-ntsj+1
       IF(j<1 .OR. j>ny .OR. ANY(SHAPE(pmxlm) /= (/nx,nz/)) .OR. &
-         & ANY(SHAPE(pmxld) /= (/nx,nz/))) CALL ctl_stop('round332: mxl row shape')
-      mxlm(:,j,:)=pmxlm; mxld(:,j,:)=pmxld; nrows=nrows+1
+         & ANY(SHAPE(pmxld) /= (/nx,nz/)) .OR. ANY(SHAPE(ppdlr) /= (/nx,nz-1/))) &
+         & CALL ctl_stop('round332: TKE row shape')
+      mxlm(:,j,:)=pmxlm; mxld(:,j,:)=pmxld; pdlr(:,j,2:nz)=ppdlr
+      nrows=nrows+1
       IF(nrows > ny) CALL ctl_stop('round332: duplicate TKE row')
       CALL maybe_write
    END SUBROUTINE r332_tke_row
@@ -101,12 +105,13 @@ CONTAINS
       IF(ios /= 0) CALL ctl_stop('round332: cannot open record')
       magic='NEMO_L4_R332SO'
       WRITE(unit) magic,1,nkt,nkmm,nkrhs,narea-1,nx,ny,nz,ntsi,ntsj, &
-         & STORAGE_SIZE(1._wp),5
+         & STORAGE_SIZE(1._wp),6
       CALL put3(unit,'stage1_v_before',vor_before,1)
       CALL put3(unit,'stage1_v_add',vor_add,1)
       CALL put3(unit,'stage1_v_after',vor_after,1)
       CALL put3(unit,'tke_zmxlm',mxlm,1)
       CALL put3(unit,'tke_zmxld',mxld,1)
+      CALL put3(unit,'tke_pdlr',pdlr,1)
       CLOSE(unit)
       written=.TRUE.
    END SUBROUTINE maybe_write

@@ -22,8 +22,8 @@ HEADER_NAMES = (
     "ntsi", "ntsj", "real_bits", "n_fields",
 )
 FIELDS = ("stage1_v_before", "stage1_v_add", "stage1_v_after",
-          "tke_zmxlm", "tke_zmxld")
-PLANTS = ("header", "field-order", "truncation", "stamp", "vor", "mxl")
+          "tke_zmxlm", "tke_zmxld", "tke_pdlr")
+PLANTS = ("header", "field-order", "truncation", "stamp", "vor", "pdlr")
 OBSERVER_UNITS = ("dynzdf", "stprk3_stg", "dynvor", "zdfphy", "zdftke")
 WRITER_UNITS = ("dynzdf_round328_writer", "tke_round331_writer",
                 "round332_writer")
@@ -75,8 +75,9 @@ def read_record(path: Path, plant: str | None = None) -> dict:
             "sha256": hashlib.sha256(raw).hexdigest()}
 
 
-def _verify_semantics(record: dict) -> None:
+def _verify_semantics(record: dict, wet: np.ndarray) -> dict[str, int]:
     f = record["fields"]
+    require(wet.shape == f["stage1_v_before"].shape, "wet-mask extents moved")
     before = np.ascontiguousarray(f["stage1_v_before"]).view(np.uint64)
     added = np.ascontiguousarray(f["stage1_v_add"])
     after = np.ascontiguousarray(f["stage1_v_after"]).view(np.uint64)
@@ -84,16 +85,33 @@ def _verify_semantics(record: dict) -> None:
     require(bool(np.array_equal(replay, after)),
             "vorticity source-order addition does not replay bitwise")
     changed = before != after
-    require(bool(np.any(changed)), "vorticity observer captured no changed bits")
-    require(bool(np.any(f["tke_zmxlm"] > 0.0)), "mixing length channel is inactive")
-    require(bool(np.any(f["tke_zmxld"] > 0.0)), "dissipation length channel is inactive")
+    value_equal = f["stage1_v_before"] == f["stage1_v_after"]
+    require(bool(np.any(f["tke_zmxlm"][wet] > 0.0)), "wet mixing length channel is inactive")
+    require(bool(np.any(f["tke_zmxld"][wet] > 0.0)), "wet dissipation length channel is inactive")
+    pdlr_wet = wet.copy()
+    pdlr_wet[:, :, 0] = False
+    require(bool(np.all((f["tke_pdlr"][pdlr_wet] >= 0.1) &
+                        (f["tke_pdlr"][pdlr_wet] <= 1.0))),
+            "wet inverse Prandtl ratio is outside [0.1, 1]")
+    return {
+        "changed_bits": int(np.count_nonzero(changed)),
+        "wet_changed_bits": int(np.count_nonzero(changed & wet)),
+        "value_equal_bit_changes": int(np.count_nonzero(changed & value_equal)),
+        "wet_value_equal_bit_changes": int(np.count_nonzero(changed & value_equal & wet)),
+    }
 
 
-def _plant(record: dict, plant: str) -> None:
+def _plant(record: dict, plant: str, wet: np.ndarray) -> None:
     if plant == "vor":
-        record["fields"]["stage1_v_after"][:] = record["fields"]["stage1_v_before"]
-    elif plant == "mxl":
-        record["fields"]["tke_zmxlm"].fill(0.0)
+        index = tuple(np.argwhere(wet)[0])
+        value = record["fields"]["stage1_v_after"][index]
+        record["fields"]["stage1_v_after"][index] = np.nextafter(value, np.inf)
+    elif plant == "pdlr":
+        candidates = wet & (record["fields"]["tke_pdlr"] == 1.0)
+        candidates[:, :, 0] = False
+        require(bool(np.any(candidates)), "pdlr plant lacks a wet upper-bound cell")
+        index = tuple(np.argwhere(candidates)[0])
+        record["fields"]["tke_pdlr"][index] = np.nextafter(1.0, np.inf)
 
 
 def run_gate(root: Path, zdf_reference_dir: Path, expect_commit: str,
@@ -107,36 +125,31 @@ def run_gate(root: Path, zdf_reference_dir: Path, expect_commit: str,
     # The extension must preserve and re-admit every round-331 boundary.
     prior = r331.run_gate(root, zdf_reference_dir, expect_commit)
     records = {}
+    wet_masks = {}
     for rank in (0, 1):
         record = read_record(
             root / record_name(rank), plant=plant if rank == 0 else None)
         require(record["header"]["rank"] == rank, "rank tag moved")
         r331._verify_checksums(record)
         records[rank] = record
-    if plant in ("vor", "mxl"):
-        _plant(records[0], plant)
-    for record in records.values():
-        _verify_semantics(record)
+        prior_record = r331.read_record(root / r331.record_name(rank))
+        wet_masks[rank] = prior_record["fields"]["tke_wmask"] != 0.0
+    if plant in ("vor", "pdlr"):
+        _plant(records[0], plant, wet_masks[0])
+    source_order_counts = {}
+    for rank, record in records.items():
+        source_order_counts[str(rank)] = _verify_semantics(record, wet_masks[rank])
         h = record["header"]
         prior_record = r331.read_record(root / r331.record_name(h["rank"]))
         require((h["nx"], h["ny"], h["nz"]) == (
             prior_record["header"]["nx"], prior_record["header"]["ny"],
-            prior_record["header"]["nz"]), "round-331/332 extents differ")
-    signed_zero_change = False
-    for record in records.values():
-        f = record["fields"]
-        before_bits = np.ascontiguousarray(f["stage1_v_before"]).view(np.uint64)
-        after_bits = np.ascontiguousarray(f["stage1_v_after"]).view(np.uint64)
-        signed_zero_change |= bool(np.any(
-            (before_bits != after_bits) &
-            (f["stage1_v_before"] == f["stage1_v_after"])))
-    require(signed_zero_change,
-            "vorticity boundary captured no value-equal bit change")
+            prior_record["header"]["nz"] + 1), "round-331/332 extents differ")
     return {
         "format": "nemo-testcase-l4-orca2-round332-source-order-v1",
         "status": "PASS_R332_SOURCE_ORDER_ADMISSION",
         "producer_commit": produced,
         "round331_status": prior["status"],
+        "source_order_counts": source_order_counts,
         "records": {record_name(rank): records[rank]["sha256"] for rank in records},
     }
 

@@ -1,18 +1,43 @@
 --- dynvor.F90
 +++ dynvor.F90
-@@ -50,0 +51,3 @@
-+   USE round332_writer, ONLY : r332_vor_begin, r332_vor_before_cell, &
-+      & r332_vor_after_cell, r332_vor_done
+@@ -43,6 +43,8 @@
+    USE sbc_oce,  ONLY : ln_stcor, ln_vortex_force   ! use Stoke-Coriolis force
+    !
+    USE lbclnk         ! ocean lateral boundary conditions (or mpp link)
++   USE round332_writer, ONLY : r332_vor_begin, r332_vor_add, r332_vor_done
 +                     ! round-332 WRITE-only source-order discriminator
-@@ -127,0 +131,2 @@
-+      CALL r332_vor_begin(kt,Kmm,Krhs)
-+
-@@ -201,0 +207,2 @@
-+      CALL r332_vor_done
-+
-@@ -826,0 +834,2 @@
-+            CALL r332_vor_before_cell(ji,jj,jk,pv_rhs(ji,jj,jk),zva)
-+
-@@ -827,0 +837,2 @@
-+            CALL r332_vor_after_cell(ji,jj,jk,pv_rhs(ji,jj,jk))
-+
+    USE prtctl         ! Print control
+    USE in_out_manager ! I/O manager
+    USE lib_mpp        ! MPP library
+@@ -124,6 +126,8 @@
+       !!----------------------------------------------------------------------
+       !
+       IF( ln_timing )   CALL timing_start('dyn_vor_3D')
++      CALL r332_vor_begin(kt,Kmm,Krhs, &
++         & pvv(ntsi:ntei,ntsj:ntej,1:jpkm1,Krhs))
+       !
+       IF( l_trddyn ) THEN     !==  trend diagnostics case : split the added trend in two parts  ==!
+          !
+@@ -197,6 +201,13 @@
+                              CALL vor_een( kt, Kmm, ntot, usd, vsd, puu(:,:,:,Krhs), pvv(:,:,:,Krhs) )   ! add the Stokes-Coriolis trend and vortex force
+                ENDIF
+          END SELECT
++         IF( kt == nit000 .AND. Kmm == 1 .AND. Krhs == 3 .AND. nvor_scheme == np_EEN ) THEN
++            ALLOCATE( ztrdu(T2D(0),jpk), ztrdv(T2D(0),jpk) )
++            ztrdu(:,:,:)=0._wp; ztrdv(:,:,:)=0._wp
++            CALL vor_een( kt, Kmm, ntot, puu(:,:,:,Kmm), pvv(:,:,:,Kmm), ztrdu, ztrdv )
++            CALL r332_vor_add(ztrdv(ntsi:ntei,ntsj:ntej,1:jpkm1))
++            DEALLOCATE( ztrdu, ztrdv )
++         ENDIF
+          !
+       ENDIF
+       !
+@@ -204,6 +215,8 @@
+       IF(sn_cfctl%l_prtctl) CALL prt_ctl( tab3d_1=puu(:,:,:,Krhs), clinfo1=' vor  - Ua: ', mask1=umask,               &
+          &                                tab3d_2=pvv(:,:,:,Krhs), clinfo2=       ' Va: ', mask2=vmask, clinfo3='dyn' )
+       !
++      CALL r332_vor_done( &
++         & pvv(ntsi:ntei,ntsj:ntej,1:jpkm1,Krhs))
+       IF( ln_timing )   CALL timing_stop('dyn_vor_3D')
+       !
+    END SUBROUTINE dyn_vor_3D
