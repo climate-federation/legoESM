@@ -759,19 +759,25 @@ def test_under_ice_heat_attenuation_reduces_qnet():
     assert np.all(q_full < 0.2 * q_open)
 
 
-def test_core2_prognostic_ice_delivers_precip_once_through_freeze_and_meltout():
+@pytest.mark.parametrize("snow_tracked", [False, True])
+@pytest.mark.parametrize("phase", ["rain", "snow"])
+def test_core2_prognostic_ice_delivers_precip_once_through_freeze_and_meltout(
+        snow_tracked, phase):
     """Water closure of the CORE-II prognostic-ice partition: over one real
-    ``step_sea_ice`` call, rain reaching the ocean (direct open-water share +
-    the share the ice tile forwards) equals the incident rain in a cell that
-    freezes from open water, a cell that melts out, and a steady ice cell.
+    ``step_sea_ice`` call, precipitation reaching the ocean (direct open-water
+    share + what the ice tile forwards) plus what the snow pack stores equals
+    the incident precipitation, in a cell that freezes from open water, a cell
+    that melts out, and a steady ice cell; rain and snow, snow tracking on/off.
 
-    Isolated by differencing a rainy and a dry step (everything else equal).
+    Isolated by differencing a wet and a dry step (everything else equal).
     """
     from legoesm.ice import SeaIceConfig, init_dynamic_ice_state, step_sea_ice
-    from legoesm.ice.config import BrineConfig
+    from legoesm.ice.config import BrineConfig, SnowConfig
 
     shape = (3,)
-    cfg = SeaIceConfig(brine=BrineConfig(enabled=True))
+    dt = 3600.0
+    cfg = SeaIceConfig(brine=BrineConfig(enabled=True),
+                       snow=SnowConfig(enabled=snow_tracked))
     st = init_dynamic_ice_state(shape, S_ice_init=4.0)
     st = st._replace(
         h_ice=st.h_ice.replace(data=jnp.array([0.0, 0.005, 2.0])),
@@ -783,10 +789,11 @@ def test_core2_prognostic_ice_delivers_precip_once_through_freeze_and_meltout():
     land = jnp.ones(shape)
     sf0, fw0, _, _ = _open_forcing(shape)
 
-    def delivered(rain):
+    def delivered(p):
         atm = AtmToSurface(
             sw_down=jnp.array([0.0, 4000.0, 0.0]), lw_down=jnp.full(shape, 200.0),
-            precip_total=jnp.full(shape, rain), precip_snow=jnp.zeros(shape),
+            precip_total=jnp.full(shape, p),
+            precip_snow=jnp.full(shape, p if phase == "snow" else 0.0),
             T_lowest=jnp.array([245.0, 290.0, 255.0]),
             q_lowest=jnp.full(shape, 1e-3), u_lowest=jnp.full(shape, 5.0),
             v_lowest=jnp.zeros(shape), p_lowest=jnp.full(shape, 9.5e4),
@@ -795,19 +802,25 @@ def test_core2_prognostic_ice_delivers_precip_once_through_freeze_and_meltout():
             has_radiation=jnp.ones(shape), has_precipitation=jnp.ones(shape),
         )
         new, resp = step_sea_ice(st, atm, sst_K, jnp.zeros(shape),
-                                 jnp.zeros(shape), cfg, U_min=0.0, dt=3600.0)
+                                 jnp.zeros(shape), cfg, U_min=0.0, dt=dt)
         fw, _ = R._blend_prognostic_ice_forcing(
-            sf0, fw0._replace(precip=jnp.full(shape, rain)), resp, new,
+            sf0, fw0._replace(precip=jnp.full(shape, p)), resp, new,
             resp.ice_concentration_thermo, land, cfg,
-            constants.alpha_ocean_broadband)
-        return (np.asarray(fw.precip + fw.ice_fw), np.asarray(
+            constants.alpha_ocean_broadband, atm)
+        pack = (new.h_snow.data * new.concentration.data
+                * cfg.snow.rho_snow / dt)
+        return (np.asarray(fw.precip + fw.ice_fw + pack), np.asarray(
             resp.ice_concentration_thermo), np.asarray(new.concentration.data))
 
-    rain = 2.0e-4
-    wet, a_pre, a_post = delivered(rain)
+    p = 2.0e-4
+    wet, a_pre, a_post = delivered(p)
     dry, _, a_post_dry = delivered(0.0)
-    np.testing.assert_array_equal(a_post, a_post_dry)
+    # Tracked snow on the steady ice cell insulates it, changing basal growth
+    # (ice_fw) and lead freeze between the wet and dry step, so that cell's
+    # difference is not a precip budget; freeze and melt-out cells carry none.
+    closed = [0, 1] if (phase == "snow" and snow_tracked) else [0, 1, 2]
+    np.testing.assert_array_equal(a_post[closed], a_post_dry[closed])
     # The fixture really exercises a freeze and a melt-out.
     assert a_pre[0] == 0.0 and a_post[0] > 0.0
     assert a_pre[1] > 0.0 and a_post[1] == 0.0
-    np.testing.assert_allclose(wet - dry, rain, rtol=1e-10)
+    np.testing.assert_allclose((wet - dry)[closed], p, rtol=1e-10)

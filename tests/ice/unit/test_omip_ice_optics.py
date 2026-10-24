@@ -133,7 +133,7 @@ def _actual_main_blend(sf, response, cfg):
                ice_state=SimpleNamespace(concentration=SimpleNamespace(
                    data=response.ice_concentration_thermo)),
                state=SimpleNamespace(land_mask=SimpleNamespace(data=jnp.ones(shape))),
-               _ice_const=constants,
+               _ice_const=constants, atm_ice=None,
                _blend_prognostic_ice_forcing=runner._blend_prognostic_ice_forcing)
     return eval(compile(ast.Expression(calls[0]), inspect.getsourcefile(runner), "eval"), env)[1]
 

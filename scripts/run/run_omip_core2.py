@@ -3214,7 +3214,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             fw, sf = _blend_prognostic_ice_forcing(
                 sf, fw, ice_resp, ice_state, _ice_conc_pre,
                 state.land_mask.data, ice_config,
-                _const.alpha_ocean_broadband)
+                _const.alpha_ocean_broadband, atm_ice)
         # --- SSS restoring (B4).  Inputs are assembled here, PRE-step, for
         # both channels: the water-flux channel consumes them below (NEMO
         # sbcssr — the flux is computed from the NOW-level SSS and enters the
@@ -4817,23 +4817,30 @@ def _grid_lat2d_deg(grid, grid_type):
 # ===========================================================================
 
 def _blend_prognostic_ice_forcing(sf, fw, ice_resp, ice_state, ice_conc_thermo,
-                                  land_mask, ice_config, alpha_ocean):
+                                  land_mask, ice_config, alpha_ocean, atm_ice):
     """Prognostic-ice open-water/ice partition shared by both host loops.
 
     Heat, SW, stress and evaporation split at the thermodynamics-time cover
-    ``ice_conc_thermo``; the open-water precip share uses the POST-step cover,
-    the frame the ice tile forwards ice-fraction precip in, so the ocean
-    receives exactly ``P`` through freezing and melt-out.
+    ``ice_conc_thermo``.  The direct precip channel carries what the ice tile
+    does not take: the ice forwards rain (and snow, when it tracks none) at the
+    POST-step cover, and stores tracked snow on the thermodynamics-time ice
+    area, so ocean + pack receive exactly ``P`` through freezing and melt-out.
+    Snowfall is the ice tile's own input (``atm_ice``).
     """
     from legoesm.coupler.ocean_forcing import blend_ice_ocean_forcing
     from legoesm.ice import uses_new_physics
     conc_post = ice_state.concentration.data
     if conc_post.ndim > np.asarray(land_mask).ndim:
         conc_post = jnp.sum(conc_post, axis=-1)  # multi-category total
+    ice_precip = None
+    if fw is not None:
+        snow = atm_ice.precip_snow * atm_ice.has_precipitation
+        a_snow = ice_conc_thermo if ice_config.snow.enabled else conc_post
+        ice_precip = conc_post * (fw.precip - snow) + a_snow * snow
     fw, sf = blend_ice_ocean_forcing(
         open_sf=sf, open_fw=fw, ice_resp=ice_resp,
         ice_concentration=ice_conc_thermo,
-        precip_ice_concentration=conc_post,
+        ice_precip=ice_precip,
         ocean_mask=land_mask,
         sw_partition="raw_core2",
         alpha_ocean=float(alpha_ocean),
@@ -10526,7 +10533,7 @@ def main() -> int:
                 fw, sf = _blend_prognostic_ice_forcing(
                     sf, fw, ice_resp, ice_state, _ice_conc_pre,
                     state.land_mask.data, ice_config,
-                    _ice_const.alpha_ocean_broadband)
+                    _ice_const.alpha_ocean_broadband, atm_ice)
             elif fw is not None:
                 # KPP freshwater-buoyancy contract (codex): sf.freshwater is
                 # consumed ONLY by the vertical-mixing surface-buoyancy
