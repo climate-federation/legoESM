@@ -9,6 +9,7 @@ contains no physics repair: a poisoned adjoint is an exit-1 measurement.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import math
@@ -45,7 +46,7 @@ SCHEDULE_ATOL = 1.0e-11
 SCHEDULES = ("none", "uniform", "binomial")
 AGREEMENT_COMPOSITIONS = ("per_step", *SCHEDULES)
 AGREEMENT_STEPS = (1, 6, 60, 360)
-RESOURCE_STEPS = (1, 6)
+RESOURCE_STEPS = (1, 6, 60, 360)
 FIELDS = ("T", "S", "u", "v")
 GPU_NATIVE_POLICY_LABEL = (
     "GPU, XLA transcendentals — not the certified bit-exact policy"
@@ -55,7 +56,7 @@ SCHEDULE_SCOPE = (
     "cold production step followed by a component-agnostic checkpoint "
     "schedule over warm production jitted steps"
 )
-RESOURCE_SCHEMA = "gyre-gradgate-resource-v2-compiled-reverse"
+RESOURCE_SCHEMA = "gyre-gradgate-resource-v3-primal-preserving-boundary"
 REVERSE_TRANSFORM = "jax.jit(jax.value_and_grad(scalar_line))"
 WARM_TIMER_SPAN = (
     "blocked execution of pre-jitted value_and_grad only; sampler start and "
@@ -88,6 +89,7 @@ class GYREContext(NamedTuple):
     model: LatLonCGridOceanModel
     initial_state: object
     surface_forcings: object
+    observed_ad_step: object
     checkpointed_step: object
 
 
@@ -158,6 +160,66 @@ def _load_surface_forcings():
     return module._surface_forcings
 
 
+@jax.custom_jvp
+def primal_preserving_boundary(production, replay):
+    """Return ``production`` while differentiating only through ``replay``.
+
+    Both arguments are equal-structure pytrees.  No value is detached: the
+    custom rule explicitly chooses the replay tangent, whose transpose is the
+    replay pullback, while retaining every bit of the separately evaluated
+    production primal.
+    """
+    return production
+
+
+@primal_preserving_boundary.defjvp
+def _primal_preserving_boundary_jvp(primals, tangents):
+    production, _replay = primals
+    _production_tangent, replay_tangent = tangents
+    return production, replay_tangent
+
+
+def build_primal_preserving_step(
+        production_step, replay_step, *, plant_replay_primal=False):
+    """Build a step with distinct production-primal and replay-AD arms."""
+
+    observed_step = build_observed_primal_preserving_step(
+        production_step, replay_step,
+        plant_replay_primal=plant_replay_primal)
+
+    def bounded_step(*args):
+        return observed_step(*args)[0]
+
+    return bounded_step
+
+
+def build_observed_primal_preserving_step(
+        production_step, replay_step, *, plant_replay_primal=False):
+    """Expose the raw transform replay without composing it as the primal."""
+
+    @jax.custom_jvp
+    def observed_step(*args):
+        production = production_step(*args)
+        replay = replay_step(*args)
+        return production, replay
+
+    @observed_step.defjvp
+    def observed_step_jvp(primals, tangents):
+        # This direct call receives the rule's primal values, so it executes
+        # the ordinary production program before any upstream JVP/VJP can
+        # replace its primal with the transform replay.
+        production = production_step(*primals)
+        replay, replay_tangent = jax.jvp(
+            replay_step, primals, tangents)
+        selected = (
+            replay if plant_replay_primal
+            else primal_preserving_boundary(production, replay)
+        )
+        return (selected, replay), (replay_tangent, replay_tangent)
+
+    return observed_step
+
+
 def build_context(*, transcendentals: str = "libm") -> GYREContext:
     """Build the certified card and prime only production step caches."""
     configure_runtime(transcendentals)
@@ -177,15 +239,23 @@ def build_context(*, transcendentals: str = "libm") -> GYREContext:
     require(initial.T.data.dtype == jnp.float64, "GYRE state is not float64")
     require(card.recipe.z_coord.dz_ref.dtype == jnp.float64,
             "GYRE geometry is not float64")
-    def production_step(state, freshwater, surface):
+    surface_forcings = _load_surface_forcings()
+
+    def production_step(state, kt):
+        freshwater, surface = surface_forcings(card, state, kt)
         return model._step_jitted(state, card.dt_s, freshwater, surface)
 
-    # Reuse Decision 49 from the GYRE gradient-twin lane: preserve a compiled
-    # boundary around every production step and rematerialize that whole step
-    # in reverse mode.  This remains a Python loop (never a scan).
-    checkpointed_step = jax.jit(jax.checkpoint(production_step))
+    # Round-9 user decision: the local AD boundary returns a separately
+    # executed production primal while the unchanged step program supplies its
+    # JVP/pullback. Decision 49 still rematerializes the whole bounded step in
+    # the per-step composition; checkpoint schedules wrap ``ad_step`` later.
+    observed_ad_step = jax.jit(build_observed_primal_preserving_step(
+        production_step, production_step))
+    checkpointed_step = jax.jit(jax.checkpoint(
+        lambda state, kt: observed_ad_step(state, kt)[0]))
     return GYREContext(
-        card, model, initial, _load_surface_forcings(), checkpointed_step)
+        card, model, initial, surface_forcings, observed_ad_step,
+        checkpointed_step)
 
 
 def _score_state(state) -> ScoredState:
@@ -205,6 +275,13 @@ def _production_step(context: GYREContext, state, kt: int):
         state, context.card.dt_s, freshwater, surface)
 
 
+def _ad_production_step(context: GYREContext, state, kt: int, *, remat=False):
+    """Run one production step through the approved local AD boundary."""
+    if remat:
+        return context.checkpointed_step(state, kt)
+    return context.observed_ad_step(state, kt)[0]
+
+
 def production_rollout(context: GYREContext, d_t0, n_steps: int):
     """Campaign-order Python loop; every step calls production ``_step_jitted``."""
     state = _apply_initial_perturbation(context, d_t0)
@@ -217,8 +294,7 @@ def gradient_rollout(context: GYREContext, d_t0, n_steps: int):
     """Twin-Decision-49 Python composition of rematerialized production steps."""
     state = _apply_initial_perturbation(context, d_t0)
     for kt in range(1, n_steps + 1):
-        freshwater, surface = context.surface_forcings(context.card, state, kt)
-        state = context.checkpointed_step(state, freshwater, surface)
+        state = _ad_production_step(context, state, kt, remat=True)
     return state
 
 
@@ -234,14 +310,14 @@ def scheduled_rollout(context: GYREContext, d_t0, n_steps: int, schedule: str):
     # RK3 carry leaves.  A scan cannot change its carry treedef, so the cold
     # step is its own adjoint segment and only the fixed-pytree warm loop is
     # handed to the component-agnostic checkpoint scheduler.
-    state = _production_step(context, state, 1)
+    state = _ad_production_step(context, state, 1)
     if n_steps == 1:
         return state
 
     def body(carry):
         kt, step_state = carry
         next_kt = kt + 1
-        return next_kt, _production_step(context, step_state, next_kt)
+        return next_kt, _ad_production_step(context, step_state, next_kt)
 
     _, state = checkpointed_loop(
         body,
@@ -380,19 +456,28 @@ def build_compiled_step_transforms(context: GYREContext):
     for the cold and warm state pytrees.
     """
 
+    observed_step = context.observed_ad_step
+
     def step_vjp(state, kt, cotangent):
-        replay, pullback = jax.vjp(
-            lambda step_state: _production_step(context, step_state, kt),
+        (selected, replay), pullback = jax.vjp(
+            lambda step_state: observed_step(step_state, kt),
             state,
         )
-        return replay, pullback(cotangent)[0]
+        # Mirror the already-valid output cotangent tree so integer/bool leaves
+        # retain JAX's float0 tangent dtype instead of receiving integer zeros.
+        zero_replay_cotangent = jax.tree_util.tree_map(
+            jnp.zeros_like, cotangent)
+        state_cotangent = pullback(
+            (cotangent, zero_replay_cotangent))[0]
+        return selected, replay, state_cotangent
 
     def step_jvp(state, kt, tangent):
-        return jax.jvp(
-            lambda step_state: _production_step(context, step_state, kt),
+        (selected, replay), (selected_tangent, _replay_tangent) = jax.jvp(
+            lambda step_state: observed_step(step_state, kt),
             (state,),
             (tangent,),
         )
+        return selected, replay, selected_tangent
 
     return jax.jit(step_vjp), jax.jit(step_jvp)
 
@@ -409,29 +494,39 @@ def step_transform_footprint(n_steps: int) -> dict:
         "vjp_step_invocations": n_steps,
         "jvp_step_invocations": n_steps,
         "dynamic_model_step_argument": True,
+        "production_step_traces_per_specialization": 2,
     }
 
 
 def enforce_step_replay_byte_gate(
-        row: dict, vjp_reports: dict, jvp_reports: dict) -> dict:
-    """Refuse derivatives whose transformed step primal changed any bit."""
-    vjp_bitwise = all(
-        report["bitwise_equal"] for report in vjp_reports.values())
-    jvp_bitwise = all(
-        report["bitwise_equal"] for report in jvp_reports.values())
+        row: dict, vjp_boundary_reports: dict, jvp_boundary_reports: dict,
+        vjp_replay_reports: dict, jvp_replay_reports: dict) -> dict:
+    """Require boundary outputs to preserve every production-state bit."""
+    vjp_boundary_bitwise = all(
+        report["bitwise_equal"] for report in vjp_boundary_reports.values())
+    jvp_boundary_bitwise = all(
+        report["bitwise_equal"] for report in jvp_boundary_reports.values())
+    vjp_replay_bitwise = all(
+        report["bitwise_equal"] for report in vjp_replay_reports.values())
+    jvp_replay_bitwise = all(
+        report["bitwise_equal"] for report in jvp_replay_reports.values())
     diagnostics = {
-        "step_vjp_replay_reports": vjp_reports,
+        "step_vjp_boundary_reports": vjp_boundary_reports,
+        "step_vjp_boundary_outputs_bitwise": vjp_boundary_bitwise,
+        "step_jvp_boundary_reports": jvp_boundary_reports,
+        "step_jvp_boundary_outputs_bitwise": jvp_boundary_bitwise,
+        "step_vjp_replay_reports": vjp_replay_reports,
         "step_vjp_replay_used_as_primal": False,
-        "step_vjp_replays_bitwise": vjp_bitwise,
-        "step_jvp_replay_reports": jvp_reports,
+        "step_vjp_replays_bitwise": vjp_replay_bitwise,
+        "step_jvp_replay_reports": jvp_replay_reports,
         "step_jvp_replay_used_as_primal": False,
-        "step_jvp_replays_bitwise": jvp_bitwise,
+        "step_jvp_replays_bitwise": jvp_replay_bitwise,
     }
-    if vjp_bitwise and jvp_bitwise:
+    if vjp_boundary_bitwise and jvp_boundary_bitwise:
         row.update(diagnostics)
         return row
     refused = unmeasured_agreement(
-        "production-step transform replay is not bitwise identical")
+        "production-step local AD boundary changed the production primal")
     refused["refused_derivative_evidence"] = {
         key: row.get(key)
         for key in (
@@ -464,14 +559,18 @@ def explicit_stepwise_directional_derivatives(
         lambda state: loss_at_state(reference, state), states[-1])
     cotangent = objective_pullback(jnp.ones_like(value))[0]
     compiled_step_vjp, compiled_step_jvp = build_compiled_step_transforms(context)
+    boundary_reports = {}
     replay_reports = {}
     for kt in range(n_steps, 0, -1):
         previous = states[kt - 1]
-        replay, cotangent = compiled_step_vjp(
+        selected, replay, cotangent = compiled_step_vjp(
             previous,
             jnp.asarray(kt, dtype=jnp.int32),
             cotangent,
         )
+        jax.block_until_ready(selected)
+        boundary_reports[str(kt)] = state_bitwise_report(
+            states[kt], selected)
         jax.block_until_ready(replay)
         replay_reports[str(kt)] = state_bitwise_report(states[kt], replay)
         jax.block_until_ready(cotangent)
@@ -488,13 +587,17 @@ def explicit_stepwise_directional_derivatives(
         (zero,),
         (jnp.asarray(1.0, dtype=base.dtype),),
     )
+    forward_boundary_reports = {}
     forward_replay_reports = {}
     for kt in range(1, n_steps + 1):
-        replay, tangent = compiled_step_jvp(
+        selected, replay, tangent = compiled_step_jvp(
             states[kt - 1],
             jnp.asarray(kt, dtype=jnp.int32),
             tangent,
         )
+        jax.block_until_ready(selected)
+        forward_boundary_reports[str(kt)] = state_bitwise_report(
+            states[kt], selected)
         jax.block_until_ready(replay)
         forward_replay_reports[str(kt)] = state_bitwise_report(
             states[kt], replay)
@@ -527,7 +630,8 @@ def explicit_stepwise_directional_derivatives(
         "step_transform_compile_footprint": step_transform_footprint(n_steps),
     })
     return enforce_step_replay_byte_gate(
-        row, replay_reports, forward_replay_reports)
+        row, boundary_reports, forward_boundary_reports,
+        replay_reports, forward_replay_reports)
 
 
 def perturbations(context: GYREContext):
@@ -736,6 +840,8 @@ def measure_agreement(n_steps: int, schedule: str, *, plant=False,
         "composition": "explicit per-production-step VJP/JVP composition",
         "schedule_scope": "Decision-49 per-step Python composition",
         "per_step_whole_step_rematerialization": True,
+        "local_ad_boundary": (
+            "separate production primal; unchanged production-step JVP/VJP"),
         "step_transform_compile_footprint": row.get(
             "step_transform_compile_footprint",
             step_transform_footprint(n_steps),
@@ -994,7 +1100,58 @@ def extrapolate_360(schedule: str, baseline_mib: float, peak6_mib: float) -> flo
     return extrapolate_steps(schedule, baseline_mib, peak6_mib, 360)
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def load_agreement_reference(
+        path: Path, *, expect_commit: str, n_steps: int) -> tuple[dict, str]:
+    """Load one immutable per-step row used to judge scheduled gradients."""
+    digest = _sha256(path)
+    row = json.loads(path.read_text(encoding="utf-8"))
+    require(row.get("case") == CASE, "agreement reference has wrong card")
+    require(row.get("steps") == n_steps, "agreement reference has wrong steps")
+    require(row.get("schedule") == "per_step",
+            "agreement reference is not the explicit per-step composition")
+    require(row.get("status") in ("CONFIRMED", "REFUTED"),
+            "agreement reference is not a measured classification")
+    require(row.get("step_vjp_boundary_outputs_bitwise") is True,
+            "agreement reference failed the VJP boundary byte gate")
+    require(row.get("step_jvp_boundary_outputs_bitwise") is True,
+            "agreement reference failed the JVP boundary byte gate")
+    require(row.get("provenance") == {
+        "commit": expect_commit,
+        "dirty": False,
+        "verified_after_measurement": True,
+    }, "agreement reference provenance is not binding")
+    for name in ("forward", "finite_difference"):
+        value = row.get(name)
+        require(isinstance(value, (int, float)) and math.isfinite(value)
+                and value != 0.0,
+                f"agreement reference {name} is not finite and nonzero")
+    return row, digest
+
+
+def bind_resource_classification(row: dict, gradient_agreement: dict) -> dict:
+    """Bind a resource row to both cost validity and unchanged AD bars."""
+    row["resource_status"] = classify_resource_row(row)
+    row["gradient_agreement_status"] = gradient_agreement["status"]
+    row["status"] = (
+        row["resource_status"]
+        if row["resource_status"] != "CONFIRMED"
+        else gradient_agreement["status"]
+    )
+    return row
+
+
 def measure_resources(n_steps: int, schedule: str, *,
+                      agreement_reference: dict,
+                      agreement_reference_path: Path,
+                      agreement_reference_sha256: str,
                       transcendentals: str = "libm"):
     """Measure a compiled reverse and its peak footprint in a fresh process."""
     context = build_context(transcendentals=transcendentals)
@@ -1024,6 +1181,13 @@ def measure_resources(n_steps: int, schedule: str, *,
     if backend == "gpu":
         require_gpu_allocator_instrument()
     identity = runtime_identity()
+    require(agreement_reference.get("backend") == backend,
+            "agreement reference backend differs from resource row")
+    require(
+        agreement_reference.get("measurement_policy_label")
+        == measurement_policy_label(backend, transcendentals),
+        "agreement reference precision policy differs from resource row",
+    )
     device_stats_before = (
         device_memory_stats(jax.devices()[0]) if backend == "gpu" else None)
     after_cold = (
@@ -1048,6 +1212,12 @@ def measure_resources(n_steps: int, schedule: str, *,
     loss_value = float(np.asarray(value))
     gradient_finite = bool(np.all(np.isfinite(gradient_array)))
     gradient_nonzero = bool(np.any(gradient_array != 0.0))
+    scheduled_reverse = float(gradient_array)
+    gradient_agreement = classify_agreement(
+        scheduled_reverse,
+        float(agreement_reference["forward"]),
+        float(agreement_reference["finite_difference"]),
+    )
     row = {
         "resource_schema": RESOURCE_SCHEMA,
         "case": CASE,
@@ -1068,6 +1238,8 @@ def measure_resources(n_steps: int, schedule: str, *,
         "checkpoint_schedule_first_model_step": 2 if n_steps > 1 else None,
         "schedule_primal_bitwise_production": primal_comparison["bitwise"],
         "schedule_primal_comparison": primal_comparison,
+        "local_ad_boundary": (
+            "separate production primal; unchanged production-step JVP/VJP"),
         "cold_compile_and_reverse_wall_seconds": cold_wall_s,
         "warm_reverse_wall_seconds": wall_s,
         "warm_reverse_timer_span": WARM_TIMER_SPAN,
@@ -1075,6 +1247,28 @@ def measure_resources(n_steps: int, schedule: str, *,
         "loss": loss_value,
         "gradient_finite": gradient_finite,
         "gradient_nonzero": gradient_nonzero,
+        "reverse": gradient_agreement["reverse"],
+        "forward": gradient_agreement["forward"],
+        "finite_difference": gradient_agreement["finite_difference"],
+        "rev_fwd_relative_error": gradient_agreement[
+            "rev_fwd_relative_error"],
+        "rev_fd_relative_error": gradient_agreement["rev_fd_relative_error"],
+        "rev_fwd_bar": REVFWD_TOL,
+        "rev_fd_bar": FD_TOL,
+        "gradient_agreement_status": gradient_agreement["status"],
+        "gradient_dot_abs_sum": agreement_reference.get(
+            "gradient_dot_abs_sum"),
+        "gradient_direction_norm_product": agreement_reference.get(
+            "gradient_direction_norm_product"),
+        "rev_fwd_absolute_discrepancy": gradient_agreement[
+            "rev_fwd_absolute_discrepancy"],
+        "rev_fwd_scale_aware_error": (
+            gradient_agreement["rev_fwd_absolute_discrepancy"]
+            / max(float(agreement_reference.get(
+                "gradient_dot_abs_sum") or 0.0), 1.0e-300)
+        ),
+        "agreement_reference": str(agreement_reference_path),
+        "agreement_reference_sha256": agreement_reference_sha256,
         "memory_kind": (
             "host_rss" if backend == "cpu"
             else "jax_allocator_peak_with_gpu1_nvidia_smi_control"),
@@ -1086,7 +1280,7 @@ def measure_resources(n_steps: int, schedule: str, *,
         "memory_increment_mib": memory_peak_mib - memory_baseline_mib,
         "memory_samples": memory_samples,
     }
-    row["status"] = classify_resource_row(row)
+    bind_resource_classification(row, gradient_agreement)
     if backend == "gpu":
         assert device_stats_before is not None and device_stats_after is not None
         peak_growth_mib = (
@@ -1113,6 +1307,7 @@ def measure_resources(n_steps: int, schedule: str, *,
                 "XLA_PYTHON_CLIENT_ALLOCATOR"),
         })
         if peak_growth_mib <= 0.0 or nvidia_increment_mib <= 0.0:
+            row["resource_status"] = "VACUOUS"
             row["status"] = "VACUOUS"
             row["resource_vacuity_reason"] = (
                 "JAX peak and nvidia-smi must both advance during reverse")
@@ -1145,6 +1340,7 @@ def classify_resource_row(row: dict) -> str:
     passed = bool(
         row.get("gradient_finite")
         and row.get("gradient_nonzero")
+        and row.get("schedule_primal_bitwise_production")
         and all(math.isfinite(value) for value in numeric)
         and row["cold_compile_and_reverse_wall_seconds"] > 0.0
         and row["warm_reverse_wall_seconds"] > 0.0
@@ -1154,7 +1350,10 @@ def classify_resource_row(row: dict) -> str:
 
 def resource_row_passes(row: dict) -> bool:
     """Return the fail-closed resource-row verdict used by the CLI."""
-    return classify_resource_row(row) == "CONFIRMED"
+    return (
+        row.get("status") == "CONFIRMED"
+        and classify_resource_row(row) == "CONFIRMED"
+    )
 
 
 def classify_time_scaling(rows: list[dict], *, plant: bool = False) -> dict:
@@ -1206,13 +1405,15 @@ def classify_time_scaling(rows: list[dict], *, plant: bool = False) -> dict:
 
 
 def classify_gpu_resource_suite(rows: list[dict], *, plant: bool = False) -> dict:
-    """Require both GPU samplers to resolve none > binomial > uniform."""
+    """Gate only the preregistered 360-step schedule comparisons."""
     by_schedule = {row.get("schedule"): row for row in rows}
     if set(by_schedule) != set(SCHEDULES) or len(rows) != len(SCHEDULES):
         return {"status": "VACUOUS", "reason": "three schedules required"}
     if any(row.get("backend") != "gpu" for row in rows):
         return {"status": "VACUOUS", "reason": "GPU rows required"}
-    if any(row.get("status") != "CONFIRMED" for row in rows):
+    if {row.get("steps") for row in rows} != {360}:
+        return {"status": "VACUOUS", "reason": "360-step rows required"}
+    if any(classify_resource_row(row) != "CONFIRMED" for row in rows):
         return {"status": "VACUOUS", "reason": "unconfirmed input row"}
     keys = {
         "jax_allocator": "jax_device_memory_increment_mib",
@@ -1235,17 +1436,95 @@ def classify_gpu_resource_suite(rows: list[dict], *, plant: bool = False) -> dic
     evaluated = {key: dict(value) for key, value in increments.items()}
     if plant:
         for values in evaluated.values():
-            values["uniform"] = values["none"]
+            values["binomial"] = values["none"]
     ordering = {
-        sampler: values["none"] > values["binomial"] > values["uniform"]
+        sampler: {
+            "binomial_below_none": values["none"] > values["binomial"],
+            "uniform_below_none": values["none"] > values["uniform"],
+        }
         for sampler, values in evaluated.items()
     }
     return {
-        "status": "CONFIRMED" if all(ordering.values()) else "REFUTED",
+        "status": "CONFIRMED" if all(
+            all(comparisons.values()) for comparisons in ordering.values()
+        ) else "REFUTED",
         "ordering": ordering,
         "increments_mib": increments,
         "evaluated_increments_mib": evaluated,
-        "plant": "uniform_label_uses_none_measurement" if plant else None,
+        "plant": "binomial_label_uses_none_measurement" if plant else None,
+    }
+
+
+def classify_memory_scaling(rows: list[dict], *, plant: bool = False) -> dict:
+    """Gate the preregistered across-window memory claims on both samplers."""
+    expected = {(schedule, steps) for schedule in SCHEDULES
+                for steps in (6, 60, 360)}
+    indexed = {(row.get("schedule"), row.get("steps")): row for row in rows}
+    if len(rows) != 9 or set(indexed) != expected:
+        return {"status": "VACUOUS", "reason": "nine 6/60/360 rows required"}
+    if any(row.get("backend") != "gpu" for row in rows):
+        return {"status": "VACUOUS", "reason": "GPU rows required"}
+    if any(classify_resource_row(row) != "CONFIRMED" for row in rows):
+        return {"status": "VACUOUS", "reason": "invalid resource input row"}
+    keys = {
+        "jax_allocator": "jax_device_memory_increment_mib",
+        "nvidia_smi": "nvidia_smi_memory_increment_mib",
+    }
+    measured = {
+        sampler: {
+            schedule: {
+                steps: indexed[(schedule, steps)].get(key)
+                for steps in (6, 60, 360)
+            }
+            for schedule in SCHEDULES
+        }
+        for sampler, key in keys.items()
+    }
+    values = [
+        value
+        for schedules in measured.values()
+        for windows in schedules.values()
+        for value in windows.values()
+    ]
+    if any(
+        not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0.0
+        for value in values
+    ):
+        return {"status": "VACUOUS", "reason": "unresolved memory increment"}
+    evaluated = {
+        sampler: {
+            schedule: dict(windows)
+            for schedule, windows in schedules.items()
+        }
+        for sampler, schedules in measured.items()
+    }
+    if plant:
+        for schedules in evaluated.values():
+            schedules["none"][360] = schedules["none"][6]
+    predicates = {}
+    for sampler, schedules in evaluated.items():
+        predicates[sampler] = {
+            "none_grows_6_60_360": (
+                schedules["none"][6] < schedules["none"][60]
+                < schedules["none"][360]
+            ),
+            "uniform_below_none_at_360": (
+                schedules["uniform"][360] < schedules["none"][360]
+            ),
+            "binomial_below_none_at_360": (
+                schedules["binomial"][360] < schedules["none"][360]
+            ),
+        }
+    return {
+        "status": "CONFIRMED" if all(
+            all(checks.values()) for checks in predicates.values()
+        ) else "REFUTED",
+        "predicates": predicates,
+        "increments_mib": measured,
+        "evaluated_increments_mib": evaluated,
+        "plant": "flatten_none_360_to_6" if plant else None,
     }
 
 
@@ -1282,7 +1561,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "mode", choices=(
             "agreement", "resources", "time-scaling-suite",
-            "gpu-resource-suite",
+            "gpu-resource-suite", "memory-scaling-suite",
         ))
     parser.add_argument("--steps", type=int, choices=AGREEMENT_STEPS)
     parser.add_argument(
@@ -1290,8 +1569,13 @@ def parse_args(argv=None):
     parser.add_argument(
         "--plant", choices=(
             "broken_vjp", "constant_time", "gpu_ordering",
+            "flat_none_memory",
         ))
     parser.add_argument("--input-row", type=Path, action="append", default=[])
+    parser.add_argument(
+        "--agreement-row", type=Path,
+        help="immutable matching per-step agreement row required by resources",
+    )
     parser.add_argument(
         "--transcendentals", choices=("libm", "native"), default="libm",
         help="libm is the certified CPU policy; GPU rows must select native",
@@ -1313,6 +1597,10 @@ def parse_args(argv=None):
     if args.mode == "resources" and args.schedule == "per_step":
         parser.error(
             "resources mode requires one of the registered checkpoint schedules")
+    if args.mode == "resources" and args.agreement_row is None:
+        parser.error("resources mode requires --agreement-row")
+    if args.mode != "resources" and args.agreement_row is not None:
+        parser.error("--agreement-row is valid only in resources mode")
     if args.mode == "time-scaling-suite":
         if len(args.input_row) < 2:
             parser.error("time-scaling-suite requires at least two --input-row")
@@ -1323,6 +1611,13 @@ def parse_args(argv=None):
             parser.error("gpu-resource-suite requires exactly three --input-row")
         if args.plant not in (None, "gpu_ordering"):
             parser.error("gpu-resource-suite accepts only gpu_ordering plant")
+    if args.mode == "memory-scaling-suite":
+        if len(args.input_row) != 9:
+            parser.error(
+                "memory-scaling-suite requires exactly nine --input-row")
+        if args.plant not in (None, "flat_none_memory"):
+            parser.error(
+                "memory-scaling-suite accepts only flat_none_memory plant")
     return args
 
 
@@ -1336,9 +1631,21 @@ def main(argv=None) -> int:
             args.steps, args.schedule, plant=args.plant == "broken_vjp",
             transcendentals=args.transcendentals)
     elif args.mode == "resources":
+        agreement_reference, agreement_sha256 = load_agreement_reference(
+            args.agreement_row,
+            expect_commit=args.expect_commit,
+            n_steps=args.steps,
+        )
         row = measure_resources(
             args.steps, args.schedule,
+            agreement_reference=agreement_reference,
+            agreement_reference_path=args.agreement_row,
+            agreement_reference_sha256=agreement_sha256,
             transcendentals=args.transcendentals)
+        require(
+            _sha256(args.agreement_row) == agreement_sha256,
+            "agreement reference changed during resource measurement",
+        )
     else:
         input_rows = [
             json.loads(path.read_text(encoding="utf-8"))
@@ -1347,9 +1654,12 @@ def main(argv=None) -> int:
         if args.mode == "time-scaling-suite":
             row = classify_time_scaling(
                 input_rows, plant=args.plant == "constant_time")
-        else:
+        elif args.mode == "gpu-resource-suite":
             row = classify_gpu_resource_suite(
                 input_rows, plant=args.plant == "gpu_ordering")
+        else:
+            row = classify_memory_scaling(
+                input_rows, plant=args.plant == "flat_none_memory")
         row["input_rows"] = [str(path) for path in args.input_row]
     row["provenance"] = require_unchanged_measurement_stamp(provenance)
     row["argv"] = list(sys.argv if argv is None else argv)
@@ -1358,7 +1668,7 @@ def main(argv=None) -> int:
     if args.mode == "agreement":
         return 0 if row["status"] == "CONFIRMED" else 1
     if args.mode == "resources":
-        return 0 if resource_row_passes(row) else 1
+        return 0 if row["status"] == "CONFIRMED" else 1
     return 0 if row["status"] == "CONFIRMED" else 1
 
 

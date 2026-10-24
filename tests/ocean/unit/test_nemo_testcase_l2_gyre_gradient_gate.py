@@ -14,6 +14,7 @@ import jax.numpy as jnp
 import legoesm.ocean.physics.vertical_mixing.tke as tke_mod
 import numpy as np
 import pytest
+from jax import test_util as jtu
 
 _REPO = Path(__file__).resolve().parents[3]
 _SCRIPT = (
@@ -121,6 +122,7 @@ def test_explicit_stepwise_vjp_matches_whole_window_gradient(monkeypatch):
         card: object
         model: object
         surface_forcings: object
+        observed_ad_step: object
 
     class Card(NamedTuple):
         dt_s: float
@@ -133,11 +135,17 @@ def test_explicit_stepwise_vjp_matches_whole_window_gradient(monkeypatch):
     def forcing(_card, state, kt):
         return 0.1 * kt, state.T.data**2
 
+    initial = State(Field(jnp.asarray([0.2, -0.4], dtype=jnp.float64)))
+    card = Card(1.0)
+    model = Model()
+
+    def raw_step(state, kt):
+        freshwater, surface = forcing(card, state, kt)
+        return model._step_jitted(state, card.dt_s, freshwater, surface)
+
     context = Context(
-        State(Field(jnp.asarray([0.2, -0.4], dtype=jnp.float64))),
-        Card(1.0),
-        Model(),
-        forcing,
+        initial, card, model, forcing,
+        jax.jit(G.build_observed_primal_preserving_step(raw_step, raw_step)),
     )
     monkeypatch.setattr(
         G,
@@ -162,8 +170,12 @@ def test_explicit_stepwise_vjp_matches_whole_window_gradient(monkeypatch):
         float(jnp.vdot(expected_gradient, direction)), rel=1e-13)
     assert row["gradient_dot_abs_sum"] == pytest.approx(
         float(jnp.sum(jnp.abs(expected_gradient * direction))), rel=1e-13)
+    assert set(row["step_vjp_boundary_reports"]) == {"1", "2", "3"}
+    assert row["step_vjp_boundary_outputs_bitwise"] is True
     assert set(row["step_vjp_replay_reports"]) == {"1", "2", "3"}
     assert row["step_vjp_replay_used_as_primal"] is False
+    assert set(row["step_jvp_boundary_reports"]) == {"1", "2", "3"}
+    assert row["step_jvp_boundary_outputs_bitwise"] is True
     assert set(row["step_jvp_replay_reports"]) == {"1", "2", "3"}
     assert row["step_jvp_replay_used_as_primal"] is False
     assert row["step_transform_compile_footprint"] == {
@@ -174,6 +186,7 @@ def test_explicit_stepwise_vjp_matches_whole_window_gradient(monkeypatch):
         "vjp_step_invocations": 3,
         "jvp_step_invocations": 3,
         "dynamic_model_step_argument": True,
+        "production_step_traces_per_specialization": 2,
     }
     assert planted["status"] == "REFUTED"
     assert planted["reverse"] == pytest.approx(2.0 * planted["forward"])
@@ -198,6 +211,7 @@ def test_compiled_step_transforms_reuse_cold_and_warm_programs():
         card: Card
         model: object
         surface_forcings: object
+        observed_ad_step: object
 
     class Model:
         def __init__(self):
@@ -217,7 +231,13 @@ def test_compiled_step_transforms_reuse_cold_and_warm_programs():
 
     model = Model()
     cold = State(Field(jnp.asarray([0.2, -0.4], dtype=jnp.float64)), None)
-    context = Context(cold, Card(1.0), model, forcing)
+    def raw_step(state, kt):
+        freshwater, surface = forcing(Card(1.0), state, kt)
+        return model._step_jitted(state, 1.0, freshwater, surface)
+
+    observed = jax.jit(G.build_observed_primal_preserving_step(
+        raw_step, raw_step))
+    context = Context(cold, Card(1.0), model, forcing, observed)
     states = [cold]
     for kt in range(1, 4):
         states.append(G._production_step(context, states[-1], kt))
@@ -226,22 +246,89 @@ def test_compiled_step_transforms_reuse_cold_and_warm_programs():
 
     cotangent = jax.tree_util.tree_map(jnp.ones_like, states[-1])
     for kt in range(3, 0, -1):
-        _replay, cotangent = compiled_vjp(
+        _selected, _replay, cotangent = compiled_vjp(
             states[kt - 1], jnp.asarray(kt, dtype=jnp.int32), cotangent)
         jax.block_until_ready(cotangent)
 
     tangent = State(Field(jnp.ones_like(cold.T.data)), None)
     for kt in range(1, 4):
-        _replay, tangent = compiled_jvp(
+        _selected, _replay, tangent = compiled_jvp(
             states[kt - 1], jnp.asarray(kt, dtype=jnp.int32), tangent)
         jax.block_until_ready(tangent)
 
-    # One trace per transform and per state structure: cold + warm, not one
-    # closure per model step and not one whole-window transform.
-    assert model.traces == 4
+    # VJP/JVP each trace the ordinary production and transformed replay arms
+    # once for each cold/warm pytree specialization.
+    assert model.traces == 8
 
 
-def test_transform_replay_byte_gate_refuses_a_planted_mismatch():
+def test_local_ad_boundary_preserves_primal_and_uses_replay_derivative():
+    @jax.custom_jvp
+    def production_source(value):
+        return value
+
+    @production_source.defjvp
+    def production_source_jvp(primals, tangents):
+        (value,), (value_dot,) = primals, tangents
+        transformed = jnp.nextafter(value, jnp.full_like(value, jnp.inf))
+        return transformed, 3.0 * value_dot
+
+    @jax.custom_jvp
+    def replay_source(value):
+        return jnp.nextafter(value, jnp.full_like(value, jnp.inf))
+
+    @replay_source.defjvp
+    def replay_source_jvp(primals, tangents):
+        (value,), (value_dot,) = primals, tangents
+        replay = jnp.nextafter(value, jnp.full_like(value, jnp.inf))
+        return replay, 7.0 * value_dot
+
+    values = jnp.asarray([-0.0, 1.0], dtype=jnp.float64)
+    direction = jnp.ones_like(values)
+    bounded = G.build_primal_preserving_step(
+        production_source, replay_source)
+    planted = G.build_primal_preserving_step(
+        production_source, replay_source, plant_replay_primal=True)
+
+    ordinary = bounded(values)
+    compiled = jax.jit(bounded)(values)
+    jvp_primal, tangent = jax.jvp(
+        bounded, (values,), (direction,))
+    vjp_primal, pullback = jax.vjp(bounded, values)
+    reverse = pullback(direction)[0]
+    planted_primal, _ = jax.jvp(
+        planted, (values,), (direction,))
+    observed = G.build_observed_primal_preserving_step(
+        production_source, replay_source)
+    (observed_primal, raw_replay), _ = jax.jvp(
+        observed, (values,), (direction,))
+
+    for candidate in (
+        ordinary, compiled, jvp_primal, vjp_primal, observed_primal,
+    ):
+        np.testing.assert_array_equal(
+            np.asarray(candidate).view(np.uint64),
+            np.asarray(values).view(np.uint64),
+        )
+    np.testing.assert_array_equal(np.asarray(tangent), np.full(2, 7.0))
+    np.testing.assert_array_equal(np.asarray(reverse), np.full(2, 7.0))
+    assert G.state_bitwise_report(values, raw_replay)["bitwise_equal"] is False
+    assert G.state_bitwise_report(values, planted_primal)["bitwise_equal"] is False
+
+    smooth = G.build_primal_preserving_step(
+        lambda value: jnp.sin(value) + value**3,
+        lambda value: jnp.sin(value) + value**3,
+    )
+    jtu.check_grads(
+        smooth,
+        (jnp.asarray([0.2, -0.4], dtype=jnp.float64),),
+        order=2,
+        modes=("fwd", "rev"),
+        atol=1.0e-6,
+        rtol=1.0e-6,
+    )
+
+
+def test_transform_boundary_byte_gate_refuses_a_planted_mismatch():
     measured = G.classify_agreement(1.0, 1.0, 1.0)
     measured.update({
         "gradient_dot_abs_sum": 2.0,
@@ -252,8 +339,10 @@ def test_transform_replay_byte_gate_refuses_a_planted_mismatch():
     good = {"1": {"bitwise_equal": True, "mismatch_count": 0}}
     planted = {"1": {"bitwise_equal": False, "mismatch_count": 1}}
 
-    accepted = G.enforce_step_replay_byte_gate(measured.copy(), good, good)
-    refused = G.enforce_step_replay_byte_gate(measured.copy(), planted, good)
+    accepted = G.enforce_step_replay_byte_gate(
+        measured.copy(), good, good, planted, planted)
+    refused = G.enforce_step_replay_byte_gate(
+        measured.copy(), planted, good, good, good)
 
     assert accepted["status"] == "CONFIRMED"
     assert refused["status"] == "UNMEASURED"
@@ -261,11 +350,12 @@ def test_transform_replay_byte_gate_refuses_a_planted_mismatch():
     assert refused["forward"] is None
     assert refused["finite_difference"] is None
     assert refused["error"] == (
-        "production-step transform replay is not bitwise identical")
+        "production-step local AD boundary changed the production primal")
     assert refused["refused_derivative_evidence"]["status"] == "CONFIRMED"
     assert refused["refused_derivative_evidence"]["reverse"] == 1.0
-    assert refused["step_vjp_replays_bitwise"] is False
-    assert refused["step_jvp_replays_bitwise"] is True
+    assert refused["step_vjp_boundary_outputs_bitwise"] is False
+    assert refused["step_jvp_boundary_outputs_bitwise"] is True
+    assert refused["step_vjp_replays_bitwise"] is True
 
 
 def test_gyre_resource_schedule_starts_after_cold_step(monkeypatch):
@@ -275,7 +365,8 @@ def test_gyre_resource_schedule_starts_after_cold_step(monkeypatch):
     assert context.initial_state.tke_avm is not None
     calls = []
 
-    def fake_production_step(_context, state, kt):
+    def fake_ad_production_step(_context, state, kt, *, remat=False):
+        assert remat is False
         calls.append(int(np.asarray(kt)))
         return state._replace(tke=context.initial_state.tke_avm)
 
@@ -287,7 +378,7 @@ def test_gyre_resource_schedule_starts_after_cold_step(monkeypatch):
             carry = body(carry)
         return carry
 
-    monkeypatch.setattr(G, "_production_step", fake_production_step)
+    monkeypatch.setattr(G, "_ad_production_step", fake_ad_production_step)
     monkeypatch.setattr(G, "checkpointed_loop", fake_checkpointed_loop)
     zero = jnp.zeros_like(context.initial_state.T.data)
     result = G.scheduled_rollout(context, zero, 6, "uniform")
@@ -325,8 +416,11 @@ def _healthy_resource_row():
         "schedule": "uniform",
         "backend": "cpu",
         "steps": 6,
+        "status": "CONFIRMED",
+        "resource_status": "CONFIRMED",
         "gradient_finite": True,
         "gradient_nonzero": True,
+        "schedule_primal_bitwise_production": True,
         "loss": 1.0,
         "cold_compile_and_reverse_wall_seconds": 2.0,
         "warm_reverse_wall_seconds": 1.0,
@@ -342,6 +436,7 @@ def _healthy_resource_row():
     [
         ("gradient_finite", False),
         ("gradient_nonzero", False),
+        ("schedule_primal_bitwise_production", False),
         ("loss", np.nan),
         ("warm_reverse_wall_seconds", 0.0),
         ("memory_peak_mib", np.nan),
@@ -351,11 +446,30 @@ def _healthy_resource_row():
 def test_resource_rows_fail_closed(field, bad_value):
     row = _healthy_resource_row()
     row[field] = bad_value
+    row["status"] = G.classify_resource_row(row)
+    assert G.resource_row_passes(row) is False
+
+
+def test_resource_cli_exit_binds_final_gpu_vacuity_status():
+    row = _healthy_resource_row()
+    row["status"] = "VACUOUS"
+    row["resource_vacuity_reason"] = "planted unresolved GPU peak"
+    assert G.classify_resource_row(row) == "CONFIRMED"
     assert G.resource_row_passes(row) is False
 
 
 def test_healthy_resource_row_passes():
     assert G.resource_row_passes(_healthy_resource_row()) is True
+
+
+def test_resource_row_refuses_finite_but_wrong_scheduled_gradient():
+    row = _healthy_resource_row()
+    agreement = G.classify_agreement(2.0, 1.0, 1.0)
+    G.bind_resource_classification(row, agreement)
+    assert row["resource_status"] == "CONFIRMED"
+    assert row["gradient_agreement_status"] == "REFUTED"
+    assert row["status"] == "REFUTED"
+    assert G.resource_row_passes(row) is False
 
 
 @pytest.mark.parametrize(
@@ -495,17 +609,18 @@ def test_per_step_composition_is_agreement_only():
         ])
 
 
-def test_long_windows_are_agreement_only():
+def test_long_windows_are_registered_for_agreement_and_resources():
     args = G.parse_args([
         "agreement", "--steps", "360", "--schedule", "per_step",
         "--expect-commit", "deadbeef", "--output", "/tmp/unused-row.json",
     ])
     assert args.steps == 360
-    with pytest.raises(SystemExit):
-        G.parse_args([
-            "resources", "--steps", "60", "--schedule", "uniform",
-            "--expect-commit", "deadbeef", "--output", "/tmp/unused-row.json",
-        ])
+    resources = G.parse_args([
+        "resources", "--steps", "60", "--schedule", "uniform",
+        "--agreement-row", "/tmp/reference.json",
+        "--expect-commit", "deadbeef", "--output", "/tmp/unused-row.json",
+    ])
+    assert resources.steps == 60
 
 
 def test_peak_sampler_propagates_worker_failure(monkeypatch):
@@ -573,9 +688,10 @@ def test_time_scaling_classifier_and_constant_time_plant():
 
 def _gpu_resource_row(schedule, jax_increment, smi_increment):
     return {
+        **_healthy_resource_row(),
         "backend": "gpu",
         "schedule": schedule,
-        "status": "CONFIRMED",
+        "steps": 360,
         "jax_device_memory_increment_mib": jax_increment,
         "nvidia_smi_memory_increment_mib": smi_increment,
     }
@@ -589,6 +705,19 @@ def test_gpu_resource_ordering_plant_flips():
     ]
     assert G.classify_gpu_resource_suite(rows)["status"] == "CONFIRMED"
     assert G.classify_gpu_resource_suite(rows, plant=True)["status"] == "REFUTED"
+
+
+def test_gpu_memory_scaling_classifier_and_plant():
+    rows = []
+    for schedule, scale in (("none", 10.0), ("uniform", 1.0),
+                            ("binomial", 3.0)):
+        for steps, factor in ((6, 1.0), (60, 2.0), (360, 4.0)):
+            row = _gpu_resource_row(
+                schedule, scale * factor, scale * factor * 1.1)
+            row["steps"] = steps
+            rows.append(row)
+    assert G.classify_memory_scaling(rows)["status"] == "CONFIRMED"
+    assert G.classify_memory_scaling(rows, plant=True)["status"] == "REFUTED"
 
 
 def test_device_memory_stats_requires_allocator_peak_and_live_bytes():

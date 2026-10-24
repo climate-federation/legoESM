@@ -88,9 +88,9 @@ def _measure_gyre_one_step_in_subprocess(output: Path) -> dict:
         text=True,
         timeout=3600,
     )
-    assert result.returncode == 1, (
-        "isolated gyre_nemo_card_1step must refuse its transformed-primal "
-        "byte mismatch:\n"
+    assert result.returncode == 0, (
+        "isolated gyre_nemo_card_1step must pass its primal-preserving local "
+        "AD boundary and unchanged agreement bars:\n"
         f"--- stdout ---\n{result.stdout[-4000:]}\n"
         f"--- stderr ---\n{result.stderr[-4000:]}"
     )
@@ -237,19 +237,18 @@ def test_step_gradient_health(name, tmp_path):
     if name == "gyre_nemo_card_1step":
         row = _measure_gyre_one_step_in_subprocess(
             tmp_path / "gyre_nemo_card_1step.json")
-        assert row["status"] == "UNMEASURED", (
-            "gyre_nemo_card_1step must stay refused until the production-step "
-            "VJP and JVP replays are byte-identical; "
+        assert row["status"] == "CONFIRMED", (
+            "gyre_nemo_card_1step must pass only when the local AD boundary "
+            "preserves production bits and the derivative bars pass; "
             f"measured={row}"
         )
-        assert row["reverse"] is None
-        assert row["forward"] is None
-        assert row["finite_difference"] is None
-        assert row["error"] == (
-            "production-step transform replay is not bitwise identical")
+        assert row["reverse"] is not None
+        assert row["forward"] is not None
+        assert row["finite_difference"] is not None
+        assert row["step_vjp_boundary_outputs_bitwise"] is True
+        assert row["step_jvp_boundary_outputs_bitwise"] is True
         assert row["step_vjp_replays_bitwise"] is False
         assert row["step_jvp_replays_bitwise"] is False
-        assert row["refused_derivative_evidence"]["status"] == "CONFIRMED"
         assert row["case"] == "GYRE-zco"
         assert row["steps"] == 1
         assert row["schedule"] == "uniform"
@@ -264,6 +263,7 @@ def test_step_gradient_health(name, tmp_path):
             "vjp_step_invocations": 1,
             "jvp_step_invocations": 1,
             "dynamic_model_step_argument": True,
+            "production_step_traces_per_specialization": 2,
         }
         return
     config, opts = _variants()[name]
