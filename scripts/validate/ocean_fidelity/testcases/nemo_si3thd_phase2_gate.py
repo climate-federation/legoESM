@@ -200,34 +200,38 @@ def _center_global(frame: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
 
 def _nemo_salprof(
     s_i: np.ndarray,
-    sss_m: np.ndarray | float = 34.0,
+    sss_m: np.ndarray | float | None = None,
     *,
-    rn_sal_gd: float = 4.5,
-    rn_sal_fl: float = 3.5,
+    zsi1: float = 4.5,
+    zsi0: float = 3.5,
     rn_sinew: float = 0.75,
     rn_simin: float = 0.1,
     nlay_i: int = 3,
 ) -> np.ndarray:
-    """Mirror `ice_var_salprof` option-2 profile (`icevar.F90:488-506`)."""
+    """Mirror `ice_var_salprof` option-2 profile (`icevar.F90:471-472,488-506`)."""
 
+    require(sss_m is not None, "missing sea-surface salinity (sss_m)")
     s_i = np.atleast_1d(np.asarray(s_i, dtype=np.float64))
-    sss = np.broadcast_to(
-        np.atleast_1d(np.asarray(sss_m, dtype=np.float64)), s_i.shape
+    sss_arr = np.atleast_1d(np.asarray(sss_m, dtype=np.float64))
+    require(
+        sss_arr.size > 0 and bool(np.all(np.isfinite(sss_arr))),
+        "invalid or non-finite sea-surface salinity (sss_m)",
     )
-    sal_gd = np.float64(rn_sal_gd)
-    sal_fl = np.float64(rn_sal_fl)
+    sss = np.broadcast_to(sss_arr, s_i.shape)
+    sal_si1 = np.float64(zsi1)
+    sal_si0 = np.float64(zsi0)
     sinew = np.float64(rn_sinew)
     simin = np.float64(rn_simin)
     nlay = np.float64(nlay_i)
-    z1_ds = np.float64(1.0) / (sal_gd - sal_fl)
+    z1_ds = np.float64(1.0) / (sal_si1 - sal_si0)
     zalpha = np.where(
-        s_i >= sal_gd,
+        s_i >= sal_si1,
         0.0,
-        np.where(s_i <= sal_fl, 1.0, (sal_gd - s_i) * z1_ds),
+        np.where(s_i <= sal_si0, 1.0, (sal_si1 - s_i) * z1_ds),
     )
-    # Constant profile when SSS is too low (`icevar.F90:495`):
+    # Constant profile when SSS is too low (`icevar.F90:499`):
     zalpha = np.where(s_i >= (np.float64(0.5) * sinew * sss), 0.0, zalpha)
-    # Minimum bulk salinity guard (`icevar.F90:496`):
+    # Minimum bulk salinity guard (`icevar.F90:500`):
     zalpha = np.where(
         s_i <= (nlay * np.minimum(simin, sinew * sss)),
         0.0,
@@ -248,11 +252,12 @@ def _nemo_salprof(
 def _entry_arrays(
     frame,
     *,
-    sss_m: np.ndarray | float = 34.0,
+    sss_m: np.ndarray | float | None = None,
     _nemo_entry_conversion: bool = True,
 ):
     from legoesm.ice.bitz_lipscomb import SI3ColumnArrays
 
+    require(sss_m is not None, "missing sea-surface salinity (sss_m)")
     g = _center_global(frame)
     a, vi, vs = g["a_i"], g["v_i"], g["v_s"]
     # Mirror ice_var_glo2eqv (`icevar.F90:368,374,390,412,488-506`) and
@@ -284,6 +289,11 @@ def _entry_arrays(
 def _forcing(exact):
     import jax.numpy as jnp
     from legoesm.ice.bitz_lipscomb import SI3SurfaceForcing
+
+    require(
+        "sss" in exact and exact["sss"] is not None,
+        "missing sea-surface salinity (sss)",
+    )
 
     def val(x):
         return jnp.asarray(x, dtype=jnp.float64)
@@ -399,7 +409,7 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
         exchange = _read_exchange_step(xchg, 1)
         zdf_input = _read_zdf_input_step(zin, 1)
 
-    entry = _entry_arrays(frames[0])
+    entry = _entry_arrays(frames[0], sss_m=zdf_input.get("sss"))
     rows = []
     geometry = {
         "n_ice_layers": 3, "n_snow_layers": 3, "hti": 2.0, "hts": 0.2,
@@ -418,7 +428,7 @@ def run(*, plant_geometry=False, plant_stage=False, plant_selector=False):
     def compare_step(kt, step_frames, step_input, *, plant):
         """Compare one isolated oracle-entry step in registry/write order."""
 
-        step_entry = _entry_arrays(step_frames[0])
+        step_entry = _entry_arrays(step_frames[0], sss_m=step_input.get("sss"))
         row_start = len(rows)
         # Entry bridge is independently round-tripped to global write format.
         for name, oracle in _center_global(step_frames[0]).items():

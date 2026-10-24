@@ -848,6 +848,9 @@ def run_year_rescore(
                 "_nemo_zdf_layer_reciprocals": False,
                 "_nemo_glo2eqv_snow_temp": False,
                 "_nemo_source_round": False,
+                "_nemo_ice_remap": False,
+                "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_salprof_factoring": False,
             },
         ),
         "r2_baseline": (
@@ -856,6 +859,9 @@ def run_year_rescore(
                 "_nemo_zdf_layer_reciprocals": True,
                 "_nemo_glo2eqv_snow_temp": False,
                 "_nemo_source_round": False,
+                "_nemo_ice_remap": False,
+                "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_salprof_factoring": False,
             },
         ),
         "step2_harness_only": (
@@ -864,6 +870,9 @@ def run_year_rescore(
                 "_nemo_zdf_layer_reciprocals": True,
                 "_nemo_glo2eqv_snow_temp": False,
                 "_nemo_source_round": False,
+                "_nemo_ice_remap": False,
+                "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_salprof_factoring": False,
             },
         ),
         "step3_model_only": (
@@ -872,6 +881,9 @@ def run_year_rescore(
                 "_nemo_zdf_layer_reciprocals": True,
                 "_nemo_glo2eqv_snow_temp": True,
                 "_nemo_source_round": False,
+                "_nemo_ice_remap": False,
+                "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_salprof_factoring": False,
             },
         ),
         "step4_source_round_only": (
@@ -880,6 +892,9 @@ def run_year_rescore(
                 "_nemo_zdf_layer_reciprocals": True,
                 "_nemo_glo2eqv_snow_temp": False,
                 "_nemo_source_round": True,
+                "_nemo_ice_remap": False,
+                "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_salprof_factoring": False,
             },
         ),
         "step2_plus_step3": (
@@ -888,6 +903,9 @@ def run_year_rescore(
                 "_nemo_zdf_layer_reciprocals": True,
                 "_nemo_glo2eqv_snow_temp": True,
                 "_nemo_source_round": False,
+                "_nemo_ice_remap": False,
+                "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_salprof_factoring": False,
             },
         ),
         "step2_plus_step3_plus_step4": (
@@ -896,6 +914,97 @@ def run_year_rescore(
                 "_nemo_zdf_layer_reciprocals": True,
                 "_nemo_glo2eqv_snow_temp": True,
                 "_nemo_source_round": True,
+                "_nemo_ice_remap": False,
+                "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_salprof_factoring": False,
+            },
+        ),
+        "r3_baseline": (
+            entries_s2,
+            {
+                "_nemo_zdf_layer_reciprocals": True,
+                "_nemo_glo2eqv_snow_temp": True,
+                "_nemo_source_round": True,
+                "_nemo_ice_remap": False,
+                "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_salprof_factoring": False,
+            },
+        ),
+        "r3_baseline_true_fdiv": (
+            entries_s2,
+            {
+                "_nemo_zdf_layer_reciprocals": True,
+                "_nemo_glo2eqv_snow_temp": True,
+                "_nemo_source_round": True,
+                "_nemo_ice_remap": False,
+                "_nemo_dh_ice_density_reciprocal": False,
+                "_nemo_salprof_factoring": False,
+            },
+        ),
+        "r5_step1_ice_remap": (
+            entries_s2,
+            {
+                "_nemo_zdf_layer_reciprocals": True,
+                "_nemo_glo2eqv_snow_temp": True,
+                "_nemo_source_round": True,
+                "_nemo_ice_remap": True,
+                "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_salprof_factoring": False,
+            },
+        ),
+        "r5_step1_ice_remap_true_fdiv": (
+            entries_s2,
+            {
+                "_nemo_zdf_layer_reciprocals": True,
+                "_nemo_glo2eqv_snow_temp": True,
+                "_nemo_source_round": True,
+                "_nemo_ice_remap": True,
+                "_nemo_dh_ice_density_reciprocal": False,
+                "_nemo_salprof_factoring": False,
+            },
+        ),
+        "r5_step1_plus_step2_density_reciprocal": (
+            entries_s2,
+            {
+                "_nemo_zdf_layer_reciprocals": True,
+                "_nemo_glo2eqv_snow_temp": True,
+                "_nemo_source_round": True,
+                "_nemo_ice_remap": True,
+                "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_salprof_factoring": False,
+            },
+        ),
+        "r5_step1_plus_step2_plus_step3_salprof": (
+            entries_s2,
+            {
+                "_nemo_zdf_layer_reciprocals": True,
+                "_nemo_glo2eqv_snow_temp": True,
+                "_nemo_source_round": True,
+                "_nemo_ice_remap": True,
+                "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_salprof_factoring": True,
+            },
+        ),
+        "r5_all_four_items": (
+            entries_s2,
+            {
+                "_nemo_zdf_layer_reciprocals": True,
+                "_nemo_glo2eqv_snow_temp": True,
+                "_nemo_source_round": True,
+                "_nemo_ice_remap": True,
+                "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_salprof_factoring": True,
+            },
+        ),
+        "r5_isolated_step3_salprof": (
+            entries_s2,
+            {
+                "_nemo_zdf_layer_reciprocals": True,
+                "_nemo_glo2eqv_snow_temp": True,
+                "_nemo_source_round": True,
+                "_nemo_ice_remap": False,
+                "_nemo_dh_ice_density_reciprocal": True,
+                "_nemo_salprof_factoring": True,
             },
         ),
     }
@@ -979,6 +1088,79 @@ def run_year_rescore(
 
     # Remaining owner ranking accumulator on final arm (`step2_plus_step3_plus_step4`)
     remaining_owners: dict[str, dict] = {}
+    r5_ranking_arms = (
+        "r3_baseline",
+        "r3_baseline_true_fdiv",
+        "r5_step1_ice_remap",
+        "r5_step1_ice_remap_true_fdiv",
+        "r5_step1_plus_step2_density_reciprocal",
+        "r5_step1_plus_step2_plus_step3_salprof",
+        "r5_all_four_items",
+        "r5_isolated_step3_salprof",
+    )
+    r5_remaining_owners: dict[str, dict[str, dict]] = {
+        arm_k: {} for arm_k in r5_ranking_arms
+    }
+    r5_transition_pairs = (
+        (
+            "r3_baseline_to_r5_step1_ice_remap",
+            "r3_baseline",
+            "r5_step1_ice_remap",
+        ),
+        (
+            "r5_step1_true_fdiv_to_r5_step2_reciprocal",
+            "r5_step1_ice_remap_true_fdiv",
+            "r5_step1_plus_step2_density_reciprocal",
+        ),
+        (
+            "r3_baseline_true_fdiv_to_r3_baseline_reciprocal",
+            "r3_baseline_true_fdiv",
+            "r3_baseline",
+        ),
+        (
+            "r5_step1_to_r5_step2_reciprocal",
+            "r5_step1_ice_remap",
+            "r5_step1_plus_step2_density_reciprocal",
+        ),
+        (
+            "r5_step2_to_r5_step3_salprof",
+            "r5_step1_plus_step2_density_reciprocal",
+            "r5_step1_plus_step2_plus_step3_salprof",
+        ),
+        (
+            "r3_baseline_to_r5_all_four_items",
+            "r3_baseline",
+            "r5_all_four_items",
+        ),
+        (
+            "r3_baseline_to_r5_isolated_step3_salprof",
+            "r3_baseline",
+            "r5_isolated_step3_salprof",
+        ),
+    )
+    r5_transitions: dict[str, dict] = {
+        t_name: {
+            "from_arm": a_from,
+            "to_arm": a_to,
+            "changed_rows": 0,
+            "closed_to_at_bar": 0,
+            "opened_to_debt": 0,
+            "moved_to_zero_ulp_vs_oracle": 0,
+            "moved_from_zero_ulp_vs_oracle": 0,
+            "by_stage": {
+                s[1]: {
+                    "changed_rows": 0,
+                    "closed_to_at_bar": 0,
+                    "opened_to_debt": 0,
+                    "moved_to_zero_ulp_vs_oracle": 0,
+                    "moved_from_zero_ulp_vs_oracle": 0,
+                }
+                for s in phase2.STAGES
+            },
+            "by_stage_field": {},
+        }
+        for t_name, a_from, a_to in r5_transition_pairs
+    }
 
     chunk = max(1, nsteps)
     for start in range(0, nsteps, chunk):
@@ -1100,6 +1282,123 @@ def run_year_rescore(
                     got_aft_2d.view(np.uint64) == got_s3_2d.view(np.uint64),
                     axis=-1,
                 )
+                stage_name_cur = phase2.STAGES[stage_idx][1]
+                sf_key_cur = f"{stage_name_cur}.{fname}"
+                for t_name, a_from, a_to in r5_transition_pairs:
+                    g_from, _, n_from, u_from = arm_vecs[a_from]
+                    g_to, _, n_to, u_to = arm_vecs[a_to]
+                    u_diff = _ulp_diff_batch(g_to, g_from)
+                    c_mask = u_diff > 0
+                    c_cnt = int(np.sum(c_mask))
+                    if c_cnt > 0:
+                        cl_cnt = int(
+                            np.sum(
+                                c_mask
+                                & (n_from > phase2.BAR)
+                                & (n_to <= phase2.BAR)
+                            )
+                        )
+                        op_cnt = int(
+                            np.sum(
+                                c_mask
+                                & (n_from <= phase2.BAR)
+                                & (n_to > phase2.BAR)
+                            )
+                        )
+                        m0_cnt = int(
+                            np.sum(c_mask & (u_from > 0) & (u_to == 0))
+                        )
+                        mf0_cnt = int(
+                            np.sum(c_mask & (u_from == 0) & (u_to > 0))
+                        )
+                        tr_rec = r5_transitions[t_name]
+                        tr_rec["changed_rows"] += c_cnt
+                        tr_rec["closed_to_at_bar"] += cl_cnt
+                        tr_rec["opened_to_debt"] += op_cnt
+                        tr_rec["moved_to_zero_ulp_vs_oracle"] += m0_cnt
+                        tr_rec["moved_from_zero_ulp_vs_oracle"] += mf0_cnt
+                        st_tr = tr_rec["by_stage"][stage_name_cur]
+                        st_tr["changed_rows"] += c_cnt
+                        st_tr["closed_to_at_bar"] += cl_cnt
+                        st_tr["opened_to_debt"] += op_cnt
+                        st_tr["moved_to_zero_ulp_vs_oracle"] += m0_cnt
+                        st_tr["moved_from_zero_ulp_vs_oracle"] += mf0_cnt
+                        if sf_key_cur not in tr_rec["by_stage_field"]:
+                            tr_rec["by_stage_field"][sf_key_cur] = {
+                                "changed_rows": 0,
+                                "closed_to_at_bar": 0,
+                                "opened_to_debt": 0,
+                                "moved_to_zero_ulp_vs_oracle": 0,
+                                "moved_from_zero_ulp_vs_oracle": 0,
+                                "max_ulp_before": 0,
+                                "max_ulp_after": 0,
+                            }
+                        sf_tr = tr_rec["by_stage_field"][sf_key_cur]
+                        sf_tr["changed_rows"] += c_cnt
+                        sf_tr["closed_to_at_bar"] += cl_cnt
+                        sf_tr["opened_to_debt"] += op_cnt
+                        sf_tr["moved_to_zero_ulp_vs_oracle"] += m0_cnt
+                        sf_tr["moved_from_zero_ulp_vs_oracle"] += mf0_cnt
+                        sf_tr["max_ulp_before"] = max(
+                            sf_tr["max_ulp_before"], int(np.max(u_from[c_mask]))
+                        )
+                        sf_tr["max_ulp_after"] = max(
+                            sf_tr["max_ulp_after"], int(np.max(u_to[c_mask]))
+                        )
+                kt_vec = np.arange(start + 1, stop + 1, dtype=np.int64)
+                sub_mask = (kt_vec >= 5842) & (kt_vec <= 5867)
+                norm_mask = ~sub_mask
+                for arm_k in r5_ranking_arms:
+                    _, abs_k, norm_k, ulp_k = arm_vecs[arm_k]
+                    for mask_use, o_key in (
+                        (
+                            sub_mask,
+                            "D5_PLATFORM_FLOOR_KT5842_5867_SUBNORMAL_SNOW",
+                        ),
+                        (norm_mask, sf_key_cur),
+                    ):
+                        if not np.any(mask_use):
+                            continue
+                        ob_cnt = int(
+                            np.sum((norm_k > phase2.BAR) & mask_use)
+                        )
+                        nz_cnt = int(np.sum((ulp_k > 0) & mask_use))
+                        if ob_cnt == 0 and nz_cnt == 0:
+                            continue
+                        arm_ow = r5_remaining_owners[arm_k]
+                        if o_key not in arm_ow:
+                            arm_ow[o_key] = {
+                                "owner": o_key,
+                                "over_bar_rows": 0,
+                                "nonzero_ulp_rows": 0,
+                                "max_ulp": 0,
+                                "max_norm_err": 0.0,
+                                "worst_row": None,
+                            }
+                        orec_k = arm_ow[o_key]
+                        orec_k["over_bar_rows"] += ob_cnt
+                        orec_k["nonzero_ulp_rows"] += nz_cnt
+                        orec_k["max_ulp"] = max(
+                            orec_k["max_ulp"], int(np.max(ulp_k[mask_use]))
+                        )
+                        idx_candidates = np.flatnonzero(mask_use)
+                        best_local = int(np.argmax(norm_k[mask_use]))
+                        best_idx = int(idx_candidates[best_local])
+                        cand_norm = float(norm_k[best_idx])
+                        if (
+                            orec_k["worst_row"] is None
+                            or cand_norm > orec_k["max_norm_err"]
+                        ):
+                            orec_k["max_norm_err"] = cand_norm
+                            orec_k["worst_row"] = {
+                                "kt": int(kt_vec[best_idx]),
+                                "stage": stage_name_cur,
+                                "field": fname,
+                                "norm_err": cand_norm,
+                                "max_abs": float(abs_k[best_idx]),
+                                "scale": float(scale_vec[best_idx]),
+                                "max_ulp": int(ulp_k[best_idx]),
+                            }
                 precomputed[(stage_idx, fname)] = {
                     "wanted_2d": wanted_2d,
                     "scale_vec": scale_vec,
@@ -1381,6 +1680,18 @@ def run_year_rescore(
         key=lambda r: (r["over_bar_rows"], r["nonzero_ulp_rows"], r["max_norm_err"]),
         reverse=True,
     )
+    ranked_owners_by_r5_arm = {
+        arm_k: sorted(
+            r5_remaining_owners[arm_k].values(),
+            key=lambda r: (
+                r["over_bar_rows"],
+                r["nonzero_ulp_rows"],
+                r["max_norm_err"],
+            ),
+            reverse=True,
+        )
+        for arm_k in r5_ranking_arms
+    }
 
     return {
         "execution_mode": "jax.jit" if use_jit else "eager",
@@ -1427,6 +1738,25 @@ def run_year_rescore(
             "step4_source_round_only",
         ],
         "remaining_owner_ranking_after_step4": ranked_owners,
+        "r5_cumulative_progression_order": [
+            "r3_baseline",
+            "r5_step1_ice_remap",
+            "r5_step1_plus_step2_density_reciprocal",
+            "r5_step1_plus_step2_plus_step3_salprof",
+            "r5_all_four_items",
+        ],
+        "r5_isolated_arms_from_r3_baseline": [
+            "r3_baseline",
+            "r3_baseline_true_fdiv",
+            "r5_step1_ice_remap",
+            "r5_step1_ice_remap_true_fdiv",
+            "r5_isolated_step3_salprof",
+        ],
+        "r5_transitions": r5_transitions,
+        "remaining_owner_ranking_by_r5_arm": ranked_owners_by_r5_arm,
+        "remaining_owner_ranking_after_r5": ranked_owners_by_r5_arm[
+            "r5_all_four_items"
+        ],
     }
 
 

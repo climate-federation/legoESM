@@ -330,6 +330,7 @@ def _dh_owner_evidence(root: Path, card, *, plant=False,
         )
         _validate_exact_entry_bridge(
             selected[step][0], initialized,
+            sss_m=selected[step][1].get("sss"),
             plant=plant_bridge and step == 5734,
         )
 
@@ -337,7 +338,7 @@ def _dh_owner_evidence(root: Path, card, *, plant=False,
         frames, exact = selected[step]
         state = jax.tree.map(
             lambda value: jnp.asarray(value, dtype=jnp.float64),
-            _exact_1d_entry(frames),
+            _exact_1d_entry(frames, sss_m=exact.get("sss")),
         )
         return jax.device_get(si3_column_step_arrays(
             state, _forcing(exact, jnp.float64), card.dt_seconds,
@@ -634,7 +635,7 @@ def _arithmetic_replay(root: Path, constants, *, plant=False) -> dict[str, objec
                 continue
             entry = jax.tree.map(
                 lambda value: jnp.asarray(value, dtype=jnp.float64),
-                _exact_1d_entry(thermo),
+                _exact_1d_entry(thermo, sss_m=exact.get("sss")),
             )
             zdf = _si3_zdf_bl99_step(
                 entry.e_ice, entry.e_snow, entry.S_layers, entry.h_ice,
@@ -704,6 +705,10 @@ def _arithmetic_replay(root: Path, constants, *, plant=False) -> dict[str, objec
 def _forcing(values, dtype):
     from legoesm.ice.bitz_lipscomb import SI3SurfaceForcing
 
+    phase2.require(
+        "sss" in values and values["sss"] is not None,
+        "missing sea-surface salinity (sss)",
+    )
     return SI3SurfaceForcing(*(
         jnp.asarray(values[name], dtype=dtype) for name in phase2.ZDF_INPUT_NAMES
     ))
@@ -712,11 +717,12 @@ def _forcing(values, dtype):
 def _exact_1d_entry(
     frames,
     *,
-    sss_m: np.ndarray | float = 34.0,
+    sss_m: np.ndarray | float | None = None,
     _nemo_entry_conversion: bool = True,
 ):
     """Bridge NEMO's unchanged registered 1-D thickness operands."""
 
+    phase2.require(sss_m is not None, "missing sea-surface salinity (sss_m)")
     entry = phase2._entry_arrays(
         frames[0], sss_m=sss_m, _nemo_entry_conversion=_nemo_entry_conversion
     )
@@ -726,12 +732,18 @@ def _exact_1d_entry(
     )
 
 
-def _validate_exact_entry_bridge(frames, dh_initialized, *, plant=False) -> None:
+def _validate_exact_entry_bridge(
+    frames,
+    dh_initialized,
+    *,
+    sss_m: np.ndarray | float | None = None,
+    plant: bool = False,
+) -> None:
     """Plantable kt5734 check that quotient reconstruction is not exact."""
 
-    bridged = _exact_1d_entry(frames)
+    bridged = _exact_1d_entry(frames, sss_m=sss_m)
     if plant:
-        bridged = phase2._entry_arrays(frames[0])
+        bridged = phase2._entry_arrays(frames[0], sss_m=sss_m)
     phase2.require(
         np.array_equal(np.asarray(bridged.h_snow),
                        np.atleast_1d(dh_initialized["h_s"]))
@@ -861,7 +873,7 @@ def _operator_sweep(thd_path: Path, zin_path: Path, card, step_function, *,
                 frames = phase2._read_thd_step(thd, kt)
                 exact = phase2._read_zdf_input_step(zin, kt)
                 chunk_frames.append(frames)
-                entries.append(_exact_1d_entry(frames))
+                entries.append(_exact_1d_entry(frames, sss_m=exact.get("sss")))
                 exact_inputs.append(exact)
             batch_entry = jax.tree.map(
                 lambda *values: jnp.asarray(np.concatenate(values, axis=0),
@@ -1052,7 +1064,11 @@ def _scope_ablation_sweep(thd_path: Path, zin_path: Path, card) -> dict[str, obj
             for kt in range(first_step, last_step + 1):
                 chunk_frames.append(phase2._read_thd_step(thd, kt))
                 exact_inputs.append(phase2._read_zdf_input_step(zin, kt))
-                entries.append(_exact_1d_entry(chunk_frames[-1]))
+                entries.append(
+                    _exact_1d_entry(
+                        chunk_frames[-1], sss_m=exact_inputs[-1].get("sss")
+                    )
+                )
             batch_entry = jax.tree.map(
                 lambda *values: jnp.asarray(np.concatenate(values, axis=0),
                                             dtype=jnp.float64),
@@ -1443,7 +1459,7 @@ def _owner_arms(root: Path, card, *, plant_deposition=False,
         frames, exact = selected[step]
         state = jax.tree.map(
             lambda value: jnp.asarray(value, dtype=jnp.float64),
-            _exact_1d_entry(frames),
+            _exact_1d_entry(frames, sss_m=exact.get("sss")),
         )
         return jax.device_get(si3_column_step_arrays(
             state, _forcing(exact, jnp.float64), card.dt_seconds,
@@ -1496,7 +1512,7 @@ def _owner_arms(root: Path, card, *, plant_deposition=False,
         off = phase2._selected_from_arrays(disabled.post_zdf)
         rows = [_arm_row(oracle[name], off[name], on[name], name)
                 for name in ("t_su", "e_i", "e_s")]
-        entry = phase2._entry_arrays(frames[0])
+        entry = phase2._entry_arrays(frames[0], sss_m=exact.get("sss"))
         c = card.config.ice_constants
         unbounded = c.T0 + (
             -np.asarray(entry.e_snow) / c.rho_snow / c.c_ice
@@ -1589,7 +1605,7 @@ def _melt_scaling(root: Path, card) -> dict[str, object]:
             for step in range(first_step, last_step + 1):
                 frames = phase2._read_thd_step(thd, step)
                 exact = phase2._read_zdf_input_step(zin, step)
-                entries.append(_exact_1d_entry(frames))
+                entries.append(_exact_1d_entry(frames, sss_m=exact.get("sss")))
                 exact_inputs.append(exact)
             state = jax.tree.map(
                 lambda *values: jnp.asarray(np.concatenate(values, axis=0),
@@ -1782,7 +1798,8 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
         plant_outlier_attribution=False,
         plant_scope_accounting=False,
         plant_dh_owner=False,
-        plant_entry_bridge=False) -> dict[str, object]:
+        plant_entry_bridge=False,
+        plant_missing_sss=False) -> dict[str, object]:
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ice.bitz_lipscomb import si3_column_step_arrays
     from legoesm.ice.c1d_omip_l3 import (
@@ -1878,7 +1895,13 @@ def run(*, root: Path = REPLAY_ROOT, plant_arithmetic=False,
                 raise phase2.GateError("planted truncated thermodynamics stream")
             frames = phase2._read_thd_step(thd, kt)
             exact_input = phase2._read_zdf_input_step(zin, kt)
-            entry = phase2._entry_arrays(frames[0])
+            if plant_missing_sss and kt == 1:
+                exact_input = {
+                    k: v for k, v in exact_input.items() if k != "sss"
+                }
+            entry = phase2._entry_arrays(
+                frames[0], sss_m=exact_input.get("sss")
+            )
             forcing64 = _forcing(exact_input, jnp.float64)
 
             if kt == 1:
@@ -2135,6 +2158,7 @@ def main() -> None:
     parser.add_argument("--plant-scope-accounting", action="store_true")
     parser.add_argument("--plant-dh-owner", action="store_true")
     parser.add_argument("--plant-entry-bridge", action="store_true")
+    parser.add_argument("--plant-missing-sss", action="store_true")
     args = parser.parse_args()
     for evidence_json in (BASELINE_JSON, BASELINE_OPERATOR_JSON, PHASE3_JSON,
                           PHASE5_JSON):
@@ -2151,7 +2175,8 @@ def main() -> None:
                  plant_outlier_attribution=args.plant_outlier_attribution,
                  plant_scope_accounting=args.plant_scope_accounting,
                  plant_dh_owner=args.plant_dh_owner,
-                 plant_entry_bridge=args.plant_entry_bridge)
+                 plant_entry_bridge=args.plant_entry_bridge,
+                 plant_missing_sss=args.plant_missing_sss)
     rendered = json.dumps(result, indent=2, sort_keys=True)
     if args.json:
         args.json.write_text(rendered + "\n")

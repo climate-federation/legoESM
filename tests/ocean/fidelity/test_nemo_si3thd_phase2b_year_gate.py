@@ -63,13 +63,21 @@ def test_arithmetic_plant_exits_red(gate) -> None:
 
 def test_snow_free_entry_uses_nemo_zero_volume_convention(gate) -> None:
     path = gate.REPLAY_ROOT / "oracle_si3_thd_frames.bin"
+    zin_path = gate.REPLAY_ROOT / "oracle_si3_zdf_inputs.bin"
     found = False
-    with path.open("rb") as stream:
+    with path.open("rb") as stream, zin_path.open("rb") as zin:
         for step in range(1, 8761):
             frames = gate.phase2._read_thd_step(stream, step)
+            exact = gate.phase2._read_zdf_input_step(zin, step)
             center = gate.phase2._center_global(frames[0])
             if center["v_s"] == 0.0:
-                state = gate.phase2._entry_arrays(frames[0])
+                with pytest.raises(
+                    gate.phase2.GateError, match="missing sea-surface salinity"
+                ):
+                    gate.phase2._entry_arrays(frames[0])
+                state = gate.phase2._entry_arrays(
+                    frames[0], sss_m=exact["sss"]
+                )
                 np.testing.assert_array_equal(state.e_snow, np.zeros((1, 3)))
                 assert np.all(np.isfinite(state.e_snow))
                 found = True

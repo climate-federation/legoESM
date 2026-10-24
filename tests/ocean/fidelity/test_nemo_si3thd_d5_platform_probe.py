@@ -116,7 +116,9 @@ def test_d5_zdf_layer_reciprocals_statement_is_bit_exact_and_fails_when_reverted
         ORACLE_V2_ROOT / "oracle_si3_dh_operands.bin"
     )
     frames_4242, exact_in_4242 = steps[4242]
-    entry_4242 = probe_module.year_gate._exact_1d_entry(frames_4242)
+    entry_4242 = probe_module.year_gate._exact_1d_entry(
+        frames_4242, sss_m=exact_in_4242["sss"]
+    )
     jax_entry_4242 = jax.tree.map(
         lambda v: jnp.asarray(v, dtype=jnp.float64), entry_4242
     )
@@ -196,7 +198,9 @@ def test_d5_zdf_layer_reciprocals_statement_is_bit_exact_and_fails_when_reverted
     )
     assert hi_rev_norm_4242 > probe_module.phase2.BAR
     frames_5841, exact_in_5841 = steps[5841]
-    entry_5841 = probe_module.year_gate._exact_1d_entry(frames_5841)
+    entry_5841 = probe_module.year_gate._exact_1d_entry(
+        frames_5841, sss_m=exact_in_5841["sss"]
+    )
     jax_entry_5841 = jax.tree.map(
         lambda v: jnp.asarray(v, dtype=jnp.float64), entry_5841
     )
@@ -256,7 +260,9 @@ def test_d5_zdf_layer_reciprocals_statement_is_bit_exact_and_fails_when_reverted
 
     # 4. Also check kt = 5860 (the 0.02510099530281747 row):
     frames_5860, exact_in_5860 = steps[5860]
-    entry_5860 = probe_module.year_gate._exact_1d_entry(frames_5860)
+    entry_5860 = probe_module.year_gate._exact_1d_entry(
+        frames_5860, sss_m=exact_in_5860["sss"]
+    )
     jax_entry_5860 = jax.tree.map(
         lambda v: jnp.asarray(v, dtype=jnp.float64), entry_5860
     )
@@ -330,7 +336,9 @@ def test_d5_zdf_gradients_are_finite_and_reverse_equals_forward_with_literal_for
         (5841, jnp.asarray([0.0], dtype=jnp.float64)),
     ):
         frames, exact_in = steps[kt]
-        entry = probe_module.year_gate._exact_1d_entry(frames)
+        entry = probe_module.year_gate._exact_1d_entry(
+            frames, sss_m=exact_in["sss"]
+        )
         jax_entry = jax.tree.map(
             lambda v: jnp.asarray(v, dtype=jnp.float64), entry
         )
@@ -946,10 +954,10 @@ def test_r3_step2_harness_entry_conversion_is_bit_exact_and_fails_when_reverted(
     # differ on inexact recorded C1D operands.
     frames_2, exact_2 = steps[2]
     entry_nemo = probe_module.year_gate._exact_1d_entry(
-        frames_2, _nemo_entry_conversion=True
+        frames_2, sss_m=exact_2["sss"], _nemo_entry_conversion=True
     )
     entry_rev = probe_module.year_gate._exact_1d_entry(
-        frames_2, _nemo_entry_conversion=False
+        frames_2, sss_m=exact_2["sss"], _nemo_entry_conversion=False
     )
 
     oracle_szi_2 = np.asarray(frames_2[1]["sz_i"], dtype=np.float64).ravel()
@@ -976,10 +984,10 @@ def test_r3_step2_harness_entry_conversion_is_bit_exact_and_fails_when_reverted(
     # Verify entry `e_s` at kt = 15 (`(e_s / v_s) * 3.0` vs `(e_s * 3.0) / v_s`)
     frames_15, exact_15 = steps[15]
     entry_nemo_15 = probe_module.year_gate._exact_1d_entry(
-        frames_15, _nemo_entry_conversion=True
+        frames_15, sss_m=exact_15["sss"], _nemo_entry_conversion=True
     )
     entry_rev_15 = probe_module.year_gate._exact_1d_entry(
-        frames_15, _nemo_entry_conversion=False
+        frames_15, sss_m=exact_15["sss"], _nemo_entry_conversion=False
     )
     assert (
         probe_module._ulp_diff(
@@ -1070,7 +1078,7 @@ def test_r3_step3_snow_temperature_from_enthalpy_is_bit_exact_and_fails_when_rev
     for kt in (2, 15, 1334):
         frames, exact_in = steps[kt]
         entry = probe_module.year_gate._exact_1d_entry(
-            frames, _nemo_entry_conversion=True
+            frames, sss_m=exact_in["sss"], _nemo_entry_conversion=True
         )
         e_s_jax = jnp.asarray(entry.e_snow, dtype=jnp.float64)
         oracle_ts = np.asarray(exact_in["t_s"], dtype=np.float64).ravel()
@@ -1113,7 +1121,7 @@ def test_r3_step3_snow_temperature_from_enthalpy_is_bit_exact_and_fails_when_rev
     # At kt = 1334, reverting Step 3 alone pushes POST_ZDF.e_s over the 1e-15 bar!
     frames_1334, exact_in_1334 = steps[1334]
     entry_1334 = probe_module.year_gate._exact_1d_entry(
-        frames_1334, _nemo_entry_conversion=True
+        frames_1334, sss_m=exact_in_1334["sss"], _nemo_entry_conversion=True
     )
     jax_entry_1334 = jax.tree.map(
         lambda v: jnp.asarray(v, dtype=jnp.float64), entry_1334
@@ -1166,13 +1174,14 @@ def test_r3_step4_cpu_fusion_prevention_is_bit_exact_and_fails_when_reverted(
     card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
     c = card.config.ice_constants
     steps = _load_step_operands(
-        probe_module, (1, 2, 3, 2899, 2906, 3961, 4237, 4242, 4738, 5841)
+        probe_module,
+        (1, 2, 3, 2899, 2906, 3961, 3963, 4237, 4242, 4738, 5841),
     )
 
     for kt in (1, 3, 2906, 4242, 5841):
         frames, exact_in = steps[kt]
         entry = probe_module.year_gate._exact_1d_entry(
-            frames, _nemo_entry_conversion=True
+            frames, sss_m=exact_in["sss"], _nemo_entry_conversion=True
         )
         jax_entry = jax.tree.map(
             lambda v: jnp.asarray(v, dtype=jnp.float64), entry
@@ -1209,13 +1218,13 @@ def test_r3_step4_cpu_fusion_prevention_is_bit_exact_and_fails_when_reverted(
     # On CPU default JIT (where FMA is enabled unless prevented by nemo_source_round),
     # reverting `_nemo_source_round=False` at kt = 2906 FAILS bit-exactness
     # and exceeds the 1e-15 bar on POST_ZDF.e_s, and reverting `_nemo_source_round=False`
-    # in POST_DH..EXIT changes bits at kt = 2 (option2_salinity_profile),
-    # kt = 2899 (_piecewise_remap), kt = 3961 (_nemo_snow_enthalpy_remap),
+    # in POST_DH..EXIT changes bits at kt = 3963 (option2_salinity_profile),
+    # kt = 2899 (_nemo_ice_enthalpy_remap), kt = 3961 (_nemo_snow_enthalpy_remap),
     # kt = 4237 (_dh_step snow melt), and kt = 4738 (_dh_step ice melt).
     if jax.default_backend() == "cpu" and "--xla_cpu_max_isa=AVX" not in os.environ.get("XLA_FLAGS", ""):
         frames_2906, exact_in_2906 = steps[2906]
         entry_2906 = probe_module.year_gate._exact_1d_entry(
-            frames_2906, _nemo_entry_conversion=True
+            frames_2906, sss_m=exact_in_2906["sss"], _nemo_entry_conversion=True
         )
         jax_entry_2906 = jax.tree.map(
             lambda v: jnp.asarray(v, dtype=jnp.float64), entry_2906
@@ -1262,7 +1271,7 @@ def test_r3_step4_cpu_fusion_prevention_is_bit_exact_and_fails_when_reverted(
             )
         )
         for kt_check, stage_idx, fname in (
-            (3961, 4, "sz_i"),
+            (3963, 4, "sz_i"),
             (2899, 2, "e_i"),
             (3961, 2, "e_s"),
             (4237, 2, "h_s"),
@@ -1272,7 +1281,7 @@ def test_r3_step4_cpu_fusion_prevention_is_bit_exact_and_fails_when_reverted(
             ent_k = jax.tree.map(
                 lambda v: jnp.asarray(v, dtype=jnp.float64),
                 probe_module.year_gate._exact_1d_entry(
-                    fr_k, _nemo_entry_conversion=True
+                    fr_k, sss_m=ex_k["sss"], _nemo_entry_conversion=True
                 ),
             )
             forc_k = probe_module.year_gate._forcing(ex_k, jnp.float64)
@@ -1423,3 +1432,471 @@ def test_r3_all_touched_functions_gradients_and_forward_bits() -> None:
     np.testing.assert_allclose(
         np.asarray(dl_rev), np.asarray(dl_jvp), rtol=1.0e-13, atol=1.0e-13
     )
+
+
+def test_r5_step1_nemo_ice_enthalpy_remap_is_bit_exact_and_fails_when_reverted(
+    probe_module,
+) -> None:
+    """Pin Statement 1 (`_nemo_ice_enthalpy_remap`, `icevar.F90:957-1034`) bit-for-bit on inexact C1D steps and fail when reverted."""
+    import inspect
+
+    sig = inspect.signature(bl_mod._piecewise_remap)
+    assert "_nemo_source_round" not in sig.parameters
+
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    c = card.config.ice_constants
+    steps = _load_step_operands(probe_module, (43, 704, 3898, 4230, 4922))
+
+    step_nemo = jax.jit(
+        lambda ent, f: bl_mod.si3_column_step_arrays(
+            ent,
+            f,
+            card.dt_seconds,
+            c,
+            _nemo_ice_remap=True,
+            _nemo_source_round=True,
+        )
+    )
+    step_rev = jax.jit(
+        lambda ent, f: bl_mod.si3_column_step_arrays(
+            ent,
+            f,
+            card.dt_seconds,
+            c,
+            _nemo_ice_remap=False,
+            _nemo_source_round=True,
+        )
+    )
+
+    for kt in (43, 704, 3898, 4230, 4922):
+        fr, ex = steps[kt]
+        ent = jax.tree.map(
+            lambda v: jnp.asarray(v, dtype=jnp.float64),
+            probe_module.year_gate._exact_1d_entry(
+                fr, sss_m=ex["sss"], _nemo_entry_conversion=True
+            ),
+        )
+        forc = probe_module.year_gate._forcing(ex, jnp.float64)
+        tr_nemo = step_nemo(ent, forc)
+        tr_rev = step_rev(ent, forc)
+
+        oracle_ei = np.asarray(fr[2]["e_i"], dtype=np.float64).ravel()
+        got_nemo_ei = np.asarray(
+            tr_nemo.post_dh.e_ice, dtype=np.float64
+        ).ravel()
+        got_rev_ei = np.asarray(tr_rev.post_dh.e_ice, dtype=np.float64).ravel()
+
+        assert probe_module._ulp_diff(got_nemo_ei, oracle_ei) == 0
+        np.testing.assert_array_equal(
+            got_nemo_ei.view(np.uint64), oracle_ei.view(np.uint64)
+        )
+        assert probe_module._ulp_diff(got_rev_ei, oracle_ei) >= 5
+        with pytest.raises(AssertionError):
+            np.testing.assert_array_equal(
+                got_rev_ei.view(np.uint64), oracle_ei.view(np.uint64)
+            )
+        _, norm_nemo = probe_module.year_gate._normalised_error(
+            oracle_ei, got_nemo_ei
+        )
+        _, norm_rev = probe_module.year_gate._normalised_error(
+            oracle_ei, got_rev_ei
+        )
+        assert norm_nemo == 0.0
+        assert norm_rev > probe_module.phase2.BAR
+
+
+def test_r5_step2_ice_density_reciprocal_in_dh_step_is_bit_exact_and_fails_when_reverted(
+    probe_module,
+) -> None:
+    """Pin Statement 2 (`-e_i * r1_rhoi`, `icethd_dh.F90:254,391`) bit-for-bit at kt=4893 and fail when reverted."""
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    c = card.config.ice_constants
+    steps = _load_step_operands(probe_module, (4893,))
+    fr, ex = steps[4893]
+    ent = jax.tree.map(
+        lambda v: jnp.asarray(v, dtype=jnp.float64),
+        probe_module.year_gate._exact_1d_entry(
+            fr, sss_m=ex["sss"], _nemo_entry_conversion=True
+        ),
+    )
+    forc = probe_module.year_gate._forcing(ex, jnp.float64)
+
+    # Pin the exact zEi = -e_i * r1_rhoi and zdE = zEi - zEw bits at kt = 4893 (layer 1, k=0)
+    ei_1 = float(np.asarray(fr[1]["e_i"], dtype=np.float64).ravel()[0])
+    si_1 = float(np.asarray(fr[1]["sz_i"], dtype=np.float64).ravel()[0])
+    r1_rhoi = np.float64(1.0) / np.float64(c.rho_ice)
+    zei_recip = np.float64(-ei_1) * r1_rhoi
+    zei_fdiv = np.float64(-ei_1) / np.float64(c.rho_ice)
+    zew = np.float64(c.c_ocean) * (
+        np.float64(-c.liquidus_slope) * np.float64(si_1)
+    )
+    zde_recip = zei_recip - zew
+    zde_fdiv = zei_fdiv - zew
+
+    assert probe_module._u64_hex(zei_recip) == "0xc10ee367890ddc03"
+    assert probe_module._u64_hex(zei_fdiv) == "0xc10ee367890ddc02"
+    assert probe_module._u64_hex(zde_recip) == "0xc10edecdb63bb14a"
+    assert probe_module._u64_hex(zde_fdiv) == "0xc10edecdb63bb149"
+
+    step_recip = jax.jit(
+        lambda e, f: bl_mod.si3_column_step_arrays(
+            e,
+            f,
+            card.dt_seconds,
+            c,
+            _nemo_ice_remap=True,
+            _nemo_dh_ice_density_reciprocal=True,
+            _nemo_salprof_factoring=True,
+        )
+    )
+    step_fdiv = jax.jit(
+        lambda e, f: bl_mod.si3_column_step_arrays(
+            e,
+            f,
+            card.dt_seconds,
+            c,
+            _nemo_ice_remap=True,
+            _nemo_dh_ice_density_reciprocal=False,
+            _nemo_salprof_factoring=True,
+        )
+    )
+    maps_recip = probe_module.year_gate._stage_maps(step_recip(ent, forc))
+    maps_fdiv = probe_module.year_gate._stage_maps(step_fdiv(ent, forc))
+
+    oracle_post_dh_ei = np.asarray(fr[2]["e_i"], dtype=np.float64).ravel()
+    got_recip_post_dh_ei = np.asarray(
+        maps_recip[2]["e_i"], dtype=np.float64
+    ).ravel()
+    got_fdiv_post_dh_ei = np.asarray(
+        maps_fdiv[2]["e_i"], dtype=np.float64
+    ).ravel()
+
+    assert (
+        probe_module._ulp_diff(got_recip_post_dh_ei, oracle_post_dh_ei)
+        < probe_module._ulp_diff(got_fdiv_post_dh_ei, oracle_post_dh_ei)
+    )
+    with pytest.raises(AssertionError):
+        np.testing.assert_array_equal(
+            got_fdiv_post_dh_ei.view(np.uint64),
+            got_recip_post_dh_ei.view(np.uint64),
+        )
+
+    # All 6 downstream e_i stages (POST_DH, POST_TEMP1, POST_SAL, POST_TEMP2, POST_DO, EXIT)
+    # differ when reverted to true division at kt = 4893:
+    for stage_idx in (2, 3, 4, 5, 6, 7):
+        arr_r = np.asarray(
+            maps_recip[stage_idx]["e_i"], dtype=np.float64
+        ).ravel()
+        arr_d = np.asarray(
+            maps_fdiv[stage_idx]["e_i"], dtype=np.float64
+        ).ravel()
+        assert probe_module._ulp_diff(arr_r, arr_d) >= 1
+
+
+def test_r5_step3_option2_salinity_profile_factoring_is_bit_exact_and_fails_when_reverted(
+    probe_module,
+) -> None:
+    """Pin Statement 3 (`option2_salinity_profile`, `icevar.F90:504-505,575-576`) bit-for-bit and fail when reverted."""
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    c = card.config.ice_constants
+    steps = _load_step_operands(probe_module, (3961, 3963, 4413))
+
+    step_nemo = jax.jit(
+        lambda e, f: bl_mod.si3_column_step_arrays(
+            e,
+            f,
+            card.dt_seconds,
+            c,
+            _nemo_ice_remap=True,
+            _nemo_dh_ice_density_reciprocal=True,
+            _nemo_salprof_factoring=True,
+        )
+    )
+    step_rev = jax.jit(
+        lambda e, f: bl_mod.si3_column_step_arrays(
+            e,
+            f,
+            card.dt_seconds,
+            c,
+            _nemo_ice_remap=True,
+            _nemo_dh_ice_density_reciprocal=True,
+            _nemo_salprof_factoring=False,
+        )
+    )
+
+    for kt in (3961, 3963, 4413):
+        fr, ex = steps[kt]
+        ent = jax.tree.map(
+            lambda v: jnp.asarray(v, dtype=jnp.float64),
+            probe_module.year_gate._exact_1d_entry(
+                fr, sss_m=ex["sss"], _nemo_entry_conversion=True
+            ),
+        )
+        forc = probe_module.year_gate._forcing(ex, jnp.float64)
+        maps_nemo = probe_module.year_gate._stage_maps(step_nemo(ent, forc))
+        maps_rev = probe_module.year_gate._stage_maps(step_rev(ent, forc))
+
+        for stage_idx in (4, 5):
+            oracle_szi = np.asarray(
+                fr[stage_idx]["sz_i"], dtype=np.float64
+            ).ravel()
+            got_nemo = np.asarray(
+                maps_nemo[stage_idx]["sz_i"], dtype=np.float64
+            ).ravel()
+            got_rev = np.asarray(
+                maps_rev[stage_idx]["sz_i"], dtype=np.float64
+            ).ravel()
+            assert probe_module._ulp_diff(got_nemo, oracle_szi) == 0
+            np.testing.assert_array_equal(
+                got_nemo.view(np.uint64), oracle_szi.view(np.uint64)
+            )
+            assert probe_module._ulp_diff(got_rev, oracle_szi) == 1
+            with pytest.raises(AssertionError):
+                np.testing.assert_array_equal(
+                    got_rev.view(np.uint64), oracle_szi.view(np.uint64)
+                )
+
+
+def test_r5_step4_harness_salprof_zsi1_zsi0_and_missing_sss_refusal(
+    probe_module,
+) -> None:
+    """Pin Statement 4 (`zsi1`/`zsi0` parameter names in `_nemo_salprof` and refusal when `sss_m`/`sss` is absent)."""
+    import inspect
+
+    sig = inspect.signature(probe_module.phase2._nemo_salprof)
+    params = sig.parameters
+    assert "zsi1" in params and params["zsi1"].default == 4.5
+    assert "zsi0" in params and params["zsi0"].default == 3.5
+    assert "rn_sal_gd" not in params
+    assert "rn_sal_fl" not in params
+    assert params["sss_m"].default is None
+
+    # Verify custom zsi1/zsi0 transition behavior and agreement with option2_salinity_profile
+    s_mid = np.asarray([4.1], dtype=np.float64)
+    sss_val = np.asarray([34.0], dtype=np.float64)
+    got_default = probe_module.phase2._nemo_salprof(s_mid, sss_m=sss_val)
+    ref_default = np.asarray(
+        bl_mod.option2_salinity_profile(
+            jnp.asarray(s_mid), jnp.asarray(sss_val)
+        ),
+        dtype=np.float64,
+    )
+    np.testing.assert_array_equal(
+        got_default.view(np.uint64), ref_default.view(np.uint64)
+    )
+
+    # Planted namelist values (5.0, 2.0) differ from NEMO's fixed (4.5, 3.5) at s_i = 4.1:
+    got_planted_namelist = probe_module.phase2._nemo_salprof(
+        s_mid, sss_m=sss_val, zsi1=5.0, zsi0=2.0
+    )
+    with pytest.raises(AssertionError):
+        np.testing.assert_array_equal(
+            got_planted_namelist.view(np.uint64),
+            got_default.view(np.uint64),
+        )
+
+    # Refusal when sss_m / sss is absent or non-finite across all harness entry points:
+    steps = _load_step_operands(probe_module, (1,))
+    fr_1, ex_1 = steps[1]
+    with pytest.raises(
+        probe_module.phase2.GateError, match="missing sea-surface salinity"
+    ):
+        probe_module.phase2._nemo_salprof(s_mid)
+    with pytest.raises(
+        probe_module.phase2.GateError, match="missing sea-surface salinity"
+    ):
+        probe_module.phase2._nemo_salprof(s_mid, sss_m=None)
+    with pytest.raises(
+        probe_module.phase2.GateError,
+        match="invalid or non-finite sea-surface salinity",
+    ):
+        probe_module.phase2._nemo_salprof(s_mid, sss_m=np.nan)
+    with pytest.raises(
+        probe_module.phase2.GateError, match="missing sea-surface salinity"
+    ):
+        probe_module.phase2._entry_arrays(fr_1[0])
+    with pytest.raises(
+        probe_module.phase2.GateError, match="missing sea-surface salinity"
+    ):
+        probe_module.year_gate._exact_1d_entry(fr_1)
+
+    ex_missing_sss = {k: v for k, v in ex_1.items() if k != "sss"}
+    with pytest.raises(
+        probe_module.phase2.GateError, match="missing sea-surface salinity"
+    ):
+        probe_module.phase2._forcing(ex_missing_sss)
+    with pytest.raises(
+        probe_module.phase2.GateError, match="missing sea-surface salinity"
+    ):
+        probe_module.year_gate._forcing(ex_missing_sss, jnp.float64)
+    with pytest.raises(
+        probe_module.phase2.GateError, match="missing sea-surface salinity"
+    ):
+        probe_module.year_gate._exact_1d_entry(
+            fr_1, sss_m=ex_missing_sss.get("sss")
+        )
+
+
+def test_r5_all_touched_functions_gradients_and_forward_bits(
+    probe_module, monkeypatch
+) -> None:
+    """Verify finite nonzero gradients, reverse == forward, and literal 0-ULP forward bits through all Round 5 touched functions."""
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    c = card.config.ice_constants
+
+    # 1. _nemo_ice_enthalpy_remap and option2_salinity_profile
+    h_seg0 = jnp.asarray(
+        [[0.02, 0.58, 0.62, 0.59, 0.04]], dtype=jnp.float64
+    )
+    e_seg0 = jnp.asarray(
+        [[2.98e8, 2.91e8, 2.74e8, 2.53e8, 2.31e8]], dtype=jnp.float64
+    )
+    h_new0 = jnp.sum(h_seg0, axis=-1)
+    s_bulk0 = jnp.asarray([4.123456789012345], dtype=jnp.float64)
+    sss0 = jnp.asarray([34.0], dtype=jnp.float64)
+
+    for fn, args in (
+        (
+            lambda hs, es: bl_mod._nemo_ice_enthalpy_remap(
+                hs, es, _nemo_source_round=True
+            ),
+            (h_seg0, e_seg0),
+        ),
+        (
+            lambda sb, sss: bl_mod.option2_salinity_profile(
+                sb, sss, _nemo_source_round=True, _nemo_salprof_factoring=True
+            ),
+            (s_bulk0, sss0),
+        ),
+    ):
+        primal_direct = fn(*args)
+
+        def loss_with_aux(*xs):
+            out = fn(*xs)
+            w = jnp.asarray([[0.35, -0.65, 1.15]], dtype=jnp.float64)
+            return jnp.sum(out * w), out
+
+        argnums = tuple(range(len(args)))
+        (loss_vag, out_vag), grads = jax.value_and_grad(
+            loss_with_aux, argnums=argnums, has_aux=True
+        )(*args)
+        tangents = tuple(jnp.ones_like(a) * 1.0e-3 for a in args)
+        (loss_jvp, out_jvp), (dloss_jvp, _) = jax.jvp(
+            loss_with_aux, args, tangents
+        )
+
+        np.testing.assert_array_equal(
+            np.asarray(primal_direct).view(np.uint64),
+            np.asarray(out_vag).view(np.uint64),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(primal_direct).view(np.uint64),
+            np.asarray(out_jvp).view(np.uint64),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(loss_vag).view(np.uint64),
+            np.asarray(loss_jvp).view(np.uint64),
+        )
+        for g in grads:
+            assert bool(jnp.all(jnp.isfinite(g)))
+        assert float(jnp.linalg.norm(grads[0])) > 0.0
+        dloss_rev = sum(
+            jnp.sum(g * t) for g, t in zip(grads, tangents, strict=True)
+        )
+        np.testing.assert_allclose(
+            np.asarray(dloss_rev),
+            np.asarray(dloss_jvp),
+            rtol=1.0e-11,
+            atol=1.0e-11,
+        )
+
+    # 2. Full _dh_step and si3_column_step_arrays at an active melt/remap step (kt = 4413)
+    steps = _load_step_operands(probe_module, (4413,))
+    fr, ex = steps[4413]
+    ent = jax.tree.map(
+        lambda v: jnp.asarray(v, dtype=jnp.float64),
+        probe_module.year_gate._exact_1d_entry(
+            fr, sss_m=ex["sss"], _nemo_entry_conversion=True
+        ),
+    )
+    forc = probe_module.year_gate._forcing(ex, jnp.float64)
+
+    def col_tuple(h_i, e_i, s_bulk, qns):
+        st = ent._replace(h_ice=h_i, e_ice=e_i, S_bulk=s_bulk)
+        fc = forc._replace(qns_ice=qns)
+        tr = bl_mod.si3_column_step_arrays(st, fc, card.dt_seconds, c)
+        return (
+            tr.post_dh.h_ice,
+            tr.post_dh.e_ice,
+            tr.post_sal.S_layers,
+            tr.exit.h_ice,
+            tr.exit.e_ice,
+        )
+
+    weights = (
+        jnp.asarray([1.25], dtype=jnp.float64),
+        jnp.asarray([[0.25, -0.5, 0.75]], dtype=jnp.float64),
+        jnp.asarray([[-0.15, 0.35, -0.55]], dtype=jnp.float64),
+        jnp.asarray([0.85], dtype=jnp.float64),
+        jnp.asarray([[0.125, -0.25, 0.375]], dtype=jnp.float64),
+    )
+
+    def col_loss_with_aux(h_i, e_i, s_bulk, qns):
+        outs = col_tuple(h_i, e_i, s_bulk, qns)
+        loss = sum(
+            jnp.sum(w * o) for w, o in zip(weights, outs, strict=True)
+        )
+        return loss, outs
+
+    primal_col = col_tuple(ent.h_ice, ent.e_ice, ent.S_bulk, forc.qns_ice)
+    (loss_col_vag, outs_col_vag), grads_col = jax.value_and_grad(
+        col_loss_with_aux, argnums=(0, 1, 2, 3), has_aux=True
+    )(ent.h_ice, ent.e_ice, ent.S_bulk, forc.qns_ice)
+
+    for p_arr, v_arr in zip(primal_col, outs_col_vag, strict=True):
+        np.testing.assert_array_equal(
+            np.asarray(p_arr).view(np.uint64),
+            np.asarray(v_arr).view(np.uint64),
+        )
+    for g in grads_col:
+        assert bool(jnp.all(jnp.isfinite(g)))
+        assert float(jnp.linalg.norm(g)) > 0.0
+
+    tangents_col = (
+        jnp.ones_like(ent.h_ice) * 1.0e-3,
+        jnp.ones_like(ent.e_ice),
+        jnp.ones_like(ent.S_bulk) * 1.0e-3,
+        jnp.ones_like(forc.qns_ice),
+    )
+    with monkeypatch.context() as mp:
+        mp.setattr(bl_mod, "thomas_solve", _thomas_solve_impl)
+        (loss_col_jvp, outs_col_jvp), (dloss_col_jvp, _) = jax.jvp(
+            col_loss_with_aux,
+            (ent.h_ice, ent.e_ice, ent.S_bulk, forc.qns_ice),
+            tangents_col,
+        )
+    for p_arr, j_arr in zip(primal_col, outs_col_jvp, strict=True):
+        np.testing.assert_array_equal(
+            np.asarray(p_arr).view(np.uint64),
+            np.asarray(j_arr).view(np.uint64),
+        )
+    dloss_col_rev = sum(
+        jnp.sum(g * t) for g, t in zip(grads_col, tangents_col, strict=True)
+    )
+    np.testing.assert_allclose(
+        np.asarray(dloss_col_rev),
+        np.asarray(dloss_col_jvp),
+        rtol=1.0e-10,
+        atol=1.0e-10,
+    )
+
+    # Planted control: stop_gradient must cause nonzero gradient check to fail
+    planted_g = jax.grad(
+        lambda es: jnp.sum(
+            bl_mod._nemo_ice_enthalpy_remap(
+                h_seg0, jax.lax.stop_gradient(es)
+            )
+        )
+    )(e_seg0)
+    with pytest.raises(AssertionError):
+        assert float(jnp.linalg.norm(planted_g)) > 0.0
