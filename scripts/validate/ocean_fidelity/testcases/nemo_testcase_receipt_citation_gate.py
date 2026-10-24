@@ -1252,6 +1252,10 @@ FILES = {
         REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/implicit_solver.py",
     "internal_wave_mixing.py":
         REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/internal_wave_mixing.py",
+    "double_diffusion.py":
+        REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/double_diffusion.py",
+    "k_profiles.py":
+        REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py",
     "tke.py": REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py",
     "shortwave_penetration.py":
         REPO / "packages/ocean/legoesm/ocean/physics/shortwave_penetration.py",
@@ -4481,6 +4485,32 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R328ZDF/BLD/ppsrc/nemo/dynzdf.f90:206-210': [
         'zzwi = - zDt_2 * ( avm(ji+1,jj,jk  )     +  avm(ji,jj,jk  )',
         ('zwi(ji,jk) = zzwi', 1), 5],
+    'k_profiles.py:484-578': [
+        '# NEMO-literal double diffusion (zdfddm)',
+        'cfg=iwm_cfg, rho_0=physics_config.constants.rho_0)', 95],
+    'double_diffusion.py:335-362': [
+        'zds = jnp.where(jnp.abs(zds) <= tiny, tiny, zds)',
+        'avm_new = r(avm + jnp.maximum(heat, salt))', 28],
+    'internal_wave_mixing.py:435-486': [
+        'hz = r(ht_0 * stretch)',
+        'avm = r(avm + zav_wave)', 52],
+    'tke.py:3551-3641': [
+        'for _ in range(max(1, int(n_iterations))):',
+        'prandtl_K_M=(preclosure_K_M if _carried_coeffs else None))', 91],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:287-296': [
+        'IF( .NOT.ln_drg_OFF ) THEN',
+        'en(ji,jj,mbkt(ji,jj)+1) = MAX( zebot, rn_emin ) * ssmask(ji,jj)', 10],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:708-714': [
+        '!* vertical eddy viscosity & diffivity at w-points',
+        'dissl(ji,jj,jk) = zsqen / zmxld(ji,jk)', 7],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:233-275': [
+        'part independent of the level',
+        'zfact4(ji,jj) * SQRT( MAX( 0._wp, rn2(ji,jj,jk) ) )', 43],
+    'internal_wave_mixing.py:435-471': [
+        'hz = r(ht_0 * stretch)',
+        '+ r(zfact4[..., None] * n_pos))', 37],
+    'double_diffusion.py:362':
+        'avm_new = r(avm + jnp.maximum(heat, salt))',
     'ocean_model_latlon_cgrid.py:14876-14885': [
         'u_new = implicit_vertical_diffusion_ocean_momentum_dispatch(',
         'implicit_w=nemo_aimp_momentum_w_v)', 10],

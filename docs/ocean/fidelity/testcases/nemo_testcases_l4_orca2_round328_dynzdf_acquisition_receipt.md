@@ -7,9 +7,8 @@ Base: `735cab5ba22e`
 Disposition: **STOP_PROPOSAL; acquired record admitted and replayed; no model,
 card, or configuration change**
 
-independent review: operator (Claude), initial seven findings **FIXED** on
-rereview; one new signed-zero defect **CONFIRMED** and repaired below, together
-with the two requested Argon checks
+independent review: operator (Claude), Resume-4 **HOLD**; the wrong-field
+comparison is **CONFIRMED** and corrected below
 
 codex review: operator
 
@@ -214,76 +213,107 @@ instrument choice and is now operator-approved; it is the minimum record that
 separates input, drag-diagonal, and Thomas-solve ownership without an
 executable legoESM observer.
 
-## Resume-4: record admitted and kt-1 stage-3 replayed
+## Resume-4: corrected consumed-profile score and term localization
 
-**CONFIRMED.** The acquired record is admitted at producer
-`37fdb2ea181ccd365fd260733139736b0ee5943f`. Both rank records have their
-admitted SHA-256 values (`1f6f5dfbca18f928...` and `e036900af19a49cf...`),
-and all nine refusal plants fire: header, field order, truncation, stamp,
-`avm`, bottom drag, top drag, solve, and endpoint. This supersedes the earlier
-statement that no production result existed. NEMO was not rerun in Resume-4.
+### Retraction and preserved replay result
 
-**CONFIRMED.** Offline replay with NEMO's recorded operands is bit-identical on
-every wet value on both ranks, in source order: vector explicit update,
-barotropic subtraction, bottom RHS, top RHS, and the base-matrix + bottom/top
-diagonal + wind + ordered solve. ZAD and vertical LDF are inactive in this
-resolved program. The replay covers 226,236/226,637 wet rank-0 U/V values and
-186,794/188,538 rank-1 U/V values at each state/solve boundary, with zero
-unequal bits. Therefore no recorded `dyn_zdf` transcription is an owner.
+**CONFIRMED.** The previous Resume-4 `avm` departure is retracted. Commit
+`228faed00` compared `state.tke_avm`, the closure's private `avm_k`, with
+NEMO's final `avm`. NEMO first copies `avm_k`/`avt_k`, then applies double
+diffusion and internal-wave mixing at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:349-350`,
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:363`, and
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:372`. legoESM likewise keeps the
+carried TKE pair separate and composes DDM then IWM in `k_profiles.py:484-578`.
+The old all-414,119 score, its `[1,49,0]` first cell, and the claim that TKE
+alone owned the difference were comparisons of unlike fields.
 
-### First departing statement
+**CONFIRMED.** The record-fed `dyn_zdf` replay remains sound: both ranks are
+bit-identical at the vector explicit update, barotropic subtraction, bottom
+and top RHS, base matrix, drag diagonals, wind, and ordered solve. All ten
+state/solve rows have zero unequal bits on each rank. Replaying NEMO's `avm`
+through legoESM's face interpolation and literal matrix arithmetic is also
+exact for U and V on both ranks. Timing is not an owner: NEMO calls `zdf_phy`
+once on Nbb before the RK stages, and the card uses step-entry shear/N2.
 
-**CONFIRMED.** The comparison card's ordinary production step consumes an
-`avm` that differs from NEMO on all 414,119 active T-grid interfaces (first
-zero-based global cell `[j,i,k]=[1,49,0]`; 80,078 under ice and 334,041 in
-open water; maximum absolute difference 0.014359876509295466 m2/s at
-`[29,4,28]`). Thus the first source-ordered `dyn_zdf` output to depart is U's
-interior lower coefficient `zzwi`, which NEMO evaluates and stores at
-`ORCA2_ORCA1ICE_OMIP_L4_R328ZDF/BLD/ppsrc/nemo/dynzdf.f90:206-210`.
-legoESM's corresponding literal matrix product/division is
-`implicit_solver.py:438-450`.
+### Correct consumed coefficients
 
-With the card's actual `avm`, that first statement differs on all 397,177
-active U lower coefficients: 217,668 on rank 0 and 179,509 on rank 1. The
-first zero-based global cell is `[1,49,1]` (NEMO one-based `(j,i,k)=(2,50,2)`;
-rank 1 first is global `[1,117,1]`). V follows later in NEMO source order and
-differs on all 399,232 active lower coefficients (218,048 + 181,184), with the
-same first global cell. The cells are therefore neither an ice-only subset nor
-a seam/fold-only subset: they are the full active lower-coefficient support.
+**CONFIRMED.** The corrected replay starts from the ordinary step's carried
+TKE `avm_k`/`avt_k`, applies legoESM's certified literal DDM statement
+(`double_diffusion.py:335-362`), then its certified literal IWM statement
+(`internal_wave_mixing.py:435-486`). The resulting consumed `avm` is
+bit-identical at 408,595 of 414,119 wet interfaces and differs at 5,524
+(1.334%). The first unequal cell is `[j,i,k]=[1,119,19]`; 666 are under ice
+and 4,858 are open water. The maximum absolute difference is
+0.012502789085852083 m2/s at `[81,25,28]`.
 
-Certified-rung coverage is **G2 round 2** for the live face/one-dimensional
-interface divisors and literal `dyn_zdf` matrix statement, with **G3 round 3**
-covering its stored Kmm `r3u/r3v` ratio operand. The current comparison card
-already selects both. Record-fed replay being exact rules out those imported
-statements; the departing operand is the upstream TKE-produced `avm`.
+The final rank-0 tracer records are also scored: `avt` differs at 3,389 of
+224,547 wet interfaces and `avs` at 3,388 of 224,547. The recorded TKE energy
+`en` differs at 3,248 of 224,547. These are final-field scores, not ownership
+boundaries.
 
-### Decision 122 disposition
+Using the consumed profile leaves 10,093 unequal first base-lower matrix
+coefficients, not 796,409: U has 2,900 rank-0 plus 2,106 rank-1 inequalities;
+V has 2,941 plus 2,146. The first U inequality is global `[5,54,20]`; the
+first V inequality is the same. NEMO's first U statement remains
+`ORCA2_ORCA1ICE_OMIP_L4_R328ZDF/BLD/ppsrc/nemo/dynzdf.f90:206-210`, but the
+record-fed exact replay proves that statement consumes the departure rather
+than creates it.
 
-**CONFIRMED.** No model change lands. Replacing `avm` with the oracle record
-would be a forbidden bridge, while changing the TKE closure is not a single
-identified cited statement and has no seven-pair Decision-122 card. The
-proposal is to acquire or reuse a passive kt-1 TKE source-order coefficient
-walk and stop at its first non-bit statement; only that single statement may
-then be tested on all seven pairs and both labels. No configuration value
-changed.
+### Owning-term split and bounded stop
 
-Resume-4 evidence:
-`orca2_rounds/round328/replay/dynzdf_replay.json`, SHA-256
-`5e6f06a7655c7a6e5078914afd536949e45d14ca3b6a8ed6cfb622bee8f670ac`.
-The clean stamped replay commit is `23506b9a8bc517edc25f2805bdf9b53519061688`.
-R1--R3 and R5 are **CONFIRMED**. R4 is **CONFIRMED** for non-bit `avm` and its
-first under-ice cell, but its implied ice localization is **REFUTED** by the
-334,041 open-water unequal interfaces.
+**CONFIRMED.** Of the 5,524 final-`avm` residuals, 4,596 are at zero-based
+interface 28 and 282 are at interface 0. At interface 28 the card is larger
+at 4,585/4,596 cells (99.76%); at interface 0 it is larger at 279/282. The
+literal model split changes all 5,524 residual cells in IWM and 5,185 in DDM;
+at interface 28 those counts are 4,596 and 4,564, and at interface 0 they are
+282 and 273. Neither the post-IWM-minus-final nor post-DDM-minus-final test is
+zero, so final fields cannot select one term.
 
-Resume-4 landing gates: per-receipt citation gate PASS (10 citations, 0
-unmapped, 0 failures, 0 map-audit failures); default landing battery 147
-passed (23 + 96 + 28); private-import ratchet 6 passed. The first ratchet
-invocation exposed only core/ocean on `PYTHONPATH` and correctly refused its
-missing namespace sentinels; the complete `packages/*` namespace run passed.
+**PLAUSIBLE, not an ownership finding.** For the deepest-interface family the
+first candidates are TKE's bottom boundary/mixing-length route—NEMO's bottom
+energy assignment at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:287-296` and
+final coefficient construction at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:708-714`, corresponding to legoESM's carried closure and final
+K construction at `tke.py:3551-3641`—or IWM's depth distribution. For the
+interface-0 family the first IWM candidate is the column-depth normalization
+`ht_0*(1+r3t)` followed by the `gdept_1d` ladder at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:233-275`; legoESM transcribes those
+operations at `internal_wave_mixing.py:435-471`. DDM cannot be excluded in
+either family because its NEMO-side boundary was not recorded; its momentum
+addition is `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90:172` and legoESM's is
+`double_diffusion.py:362`.
 
-ORCA2_ROUND328_RECORD_ADMISSION_PASS all_refusals_live
-ORCA2_ROUND328_DYNZDF_OFFLINE_REPLAY_PASS both_ranks_bit_identical_with_record_avm
-ORCA2_ROUND328_FIRST_DEPARTURE_CONFIRMED u_zzwi_global_jik_1_49_1
-ORCA2_ROUND328_STOP_PROPOSAL upstream_tke_avm_no_model_or_configuration_change
+Certified coverage is **V1** for TKE, **V3** for literal double diffusion, and
+**V4** for literal internal-wave mixing. Round 313 imported V3 and V4 onto
+rung 10. Those certifications justify the offline split, but they do not turn
+legoESM-only intermediate values into NEMO observations.
+
+The admitted NEMO record contains final `avm`/`avt`/`avs` but no post-TKE or
+post-DDM coefficient boundary. Therefore the first owning statement for the
+interface-28 and interface-0 families is **UNMEASURED**. The bounded acquisition
+request is
+`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_zdf_terms_acquisition/README.md`:
+record post-TKE, post-DDM, and post-IWM `avm`/`avt`/`avs` on both ranks, plus
+the listed TKE/DDM/IWM operands and one-ULP refusal plants. No NEMO executable
+was run and no model or configuration changed.
+
+### Evidence and disposition
+
+Resume-4 evidence is
+`orca2_rounds/round328/replay/dynzdf_replay_consumed_resume4.json`, SHA-256
+`f449275ba9077cb42885590a4f709e34c189afbe8eefa92772808465321226e4`.
+The clean stamped replay commit is `3e2e5c48974b07a4f65e5ac211c0a19472f92edf`.
+The operator's independent Claude review is **HOLD**; its wrong-field finding,
+5,524 count, level-28 count, level-0 count, and timing ruling are reproduced.
+No Decision-122 arm or model proposal is opened because ownership remains
+unmeasured.
+
+Resume-4 gates: pending final receipt commit.
 
 codex review: operator
+
+COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/orca2_r328/repo
+ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/orca2_r328/repo/scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_zdf_terms_acquisition/README.md
+DECISION_NEEDED: NONE
+ROUND_STATUS: HELD — final coefficients corrected; post-TKE/post-DDM NEMO boundaries required
