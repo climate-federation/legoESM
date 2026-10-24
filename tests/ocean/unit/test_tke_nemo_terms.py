@@ -1387,7 +1387,12 @@ class TestNemoBottomTkeDirichlet:
             cfg=TKEConfig(bottom_tke_bc=True), rho_0=_RHO0,
             n_iterations=3, z_interface=z_int, bottom_dirichlet=bottom_val,
             bottom_level=bl)
+        unpinned = tke_vertical_mixing(
+            u, v, T, S, rho, dz_half, None, tx, ty, dt=3600.0,
+            cfg=TKEConfig(), rho_0=_RHO0, n_iterations=3,
+            z_interface=z_int)
         en = np.asarray(out.tke_new)
+        en_unpinned = np.asarray(unpinned.tke_new)
         bl_np = np.asarray(bl)
         for i in range(bl_np.shape[0]):
             for j in range(bl_np.shape[1]):
@@ -1396,13 +1401,58 @@ class TestNemoBottomTkeDirichlet:
                     assert en[i, j, k] == pytest.approx(7e-4, abs=1e-12), (
                         f"column ({i},{j}): pin did not land at bottom_level={k}")
                 else:
-                    assert en[i, j, -1] != pytest.approx(7e-4, abs=1e-12), (
-                        f"column ({i},{j}): full-depth jpk boundary was "
-                        "incorrectly clamped onto the last solved row")
+                    assert (en[i, j, -1].view(np.uint64)
+                            == en_unpinned[i, j, -1].view(np.uint64)), (
+                        f"column ({i},{j}): full-depth jpk boundary changed "
+                        "the last solved row")
         # The last row of the SHALLOW columns must NOT be pinned (it's above
         # the true seafloor and remains a genuine solved/diffusing row) —
         # distinguishes this from the old unconditional-last-row behaviour.
         assert en[0, 0, -1] != pytest.approx(7e-4, abs=1e-12)
+
+    def test_full_depth_row_is_the_nemo_literal_solve_bit_for_bit(self):
+        """The out-of-solve jpk BC cannot replace solved row jpkm1.
+
+        Every operand is deliberately inexact in binary64.  The expected word
+        is the independently recorded NEMO-source-order solve result, not a
+        tolerance or merely an assertion that the row differs from the BC.
+        """
+        shape = (1, 1, 4)
+
+        def column(values):
+            return jnp.asarray(values, dtype=jnp.float64).reshape(shape)
+
+        cfg = TKEConfig(
+            tke_matrix_evaluation="nemo_literal",
+            tke_solver_evaluation="nemo_literal",
+            dissipation_discretization="nemo_1p5_split",
+            tke_buoyancy_sink="nemo_explicit",
+            nemo_tke_matrix_rhs_source_rounded=True,
+            nemo_tke_solve_source_rounded=True,
+        )
+        solved = jax.jit(lambda: _solve_tke_backward_euler(
+            e_old=column([0.00113, 0.000271, 0.0000793, 0.0000317]),
+            K_M_old=column([0.00123, 0.000891, 0.000456, 0.000237]),
+            K_H_old=column([0.000173, 0.000121, 0.000083, 0.000041]),
+            P_s=column([1.31e-6, 8.7e-7, 4.9e-7, 2.3e-7]),
+            N2=column([1.7e-5, 2.3e-5, 3.1e-5, 4.7e-5]),
+            l_eps=column([7.3, 8.9, 11.7, 13.1]),
+            dz_half=column([9.7, 11.3, 13.9, 17.1]),
+            surface_flux=jnp.zeros((1, 1), dtype=jnp.float64),
+            dt=jnp.float64(2700.0), cfg=cfg,
+            dz_face_surface=jnp.asarray([[5.3]], dtype=jnp.float64),
+            surface_dirichlet=jnp.asarray([[0.000217]], dtype=jnp.float64),
+            surface_bc_level="nemo_z0",
+            K_M_surface=jnp.asarray([[0.000319]], dtype=jnp.float64),
+            bottom_dirichlet=jnp.asarray([[0.0007]], dtype=jnp.float64),
+            bottom_level=jnp.asarray([[shape[-1]]], dtype=jnp.int32),
+            w_active=jnp.ones(shape, dtype=bool),
+            nemo_e3t=jnp.asarray(
+                [[[4.9, 10.1, 12.7, 15.3, 18.9]]], dtype=jnp.float64),
+            dissl_old=column([0.017, 0.023, 0.031, 0.043]),
+        ))()
+        deepest_word = np.asarray(solved)[0, 0, -1].view(np.uint64)
+        assert deepest_word == np.uint64(4535269685926082061)
 
     def test_bottom_level_none_is_byte_identical(self):
         """bottom_level=None keeps the unconditional last-row pin (the prior
