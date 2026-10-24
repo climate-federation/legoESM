@@ -33,6 +33,6 @@ Generic same-program ELF comparison now has one implementation in `scripts/valid
 
 ## Verification and disposition
 
-The regenerated `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round4/o1_preflight_receipt.json` has SHA-256 `47001f07d97259f060c30885cc01d731c875d6fbf0352adf9f19774507b700cc`. Its wet maximum is 0 ULP; dry/halo fixture metrics are `ulp_dry_negzero=0`, `ulp_dry_val=0`, `ulp_halo_val=0`, and `ulp_wet_1ulp=1`.
+The regenerated `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round4/o1_preflight_receipt.json` has SHA-256 `275025cfeca61118fcbec2e06ffb83fe67ab74fa0c270ae5de05c2962564b6ee`. Its wet maximum is 0 ULP; dry/halo fixture metrics are `ulp_dry_negzero=0`, `ulp_dry_val=0`, `ulp_halo_val=0`, and `ulp_wet_1ulp=1`.
 
 All eleven Resume 2 findings are fixed. Choices: `ASKED` = DECISION 153/159 and the explicit permission to refuse incomplete O1 production fluxes; `UNASKED` = none. Independent review remains operator acquisition and GPU spot-check.
