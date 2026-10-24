@@ -140,10 +140,11 @@ Round 9 refused diagnostic and no projection is promoted in their place.
 - Doubled-VJP certified plant: REFUTED with expected process exit 1; clean
   producer stamp rechecked.
 - Ten-step trajectory comparison: PASS, 70 rows, zero ULP worsening.
-- `tests/ocean/unit/test_nemo_recipe.py`: recorded in the final committed test
-  run below.
-- Receipt citation gate and its shifted-citation plant: recorded in the final
-  committed test run below.
+- Combined direct controls and `tests/ocean/unit/test_nemo_recipe.py`:
+  **77 passed in 356.65 s**.
+- Receipt citation gate: PASS with four citations and no unmapped or failing
+  anchors.  Shifting `nemo_testcase_l2_gyre_gradient_gate.py:456` by two lines
+  produces SYMBOL-NOT-AT-LINE and expected exit 1.
 
 ## OPEN and choice audit
 
