@@ -1,5 +1,5 @@
 MODULE dom_oce
-   USE iso_fortran_env, ONLY : real64
+   USE, INTRINSIC :: iso_fortran_env, ONLY : real64
    IMPLICIT NONE
    INTEGER, PARAMETER :: wp=real64, jpk=4, jpkm1=3
    INTEGER :: ntsi=1, ntei=3, ntsj=1, ntej=2, narea=1

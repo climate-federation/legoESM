@@ -1,5 +1,5 @@
 PROGRAM dynzdf_round328_layout_fixture
-   USE iso_fortran_env, ONLY : real64
+   USE, INTRINSIC :: iso_fortran_env, ONLY : real64
    USE dom_oce
    USE dynzdf_round328_writer
    IMPLICIT NONE

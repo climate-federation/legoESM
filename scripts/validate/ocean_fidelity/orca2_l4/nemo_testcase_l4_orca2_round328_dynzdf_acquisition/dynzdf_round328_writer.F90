@@ -3,7 +3,7 @@ MODULE dynzdf_round328_writer
    !! Captured values are never read back into NEMO state.
    USE dom_oce
    USE in_out_manager, ONLY : nit000
-   USE iso_fortran_env, ONLY : int64
+   USE, INTRINSIC :: iso_fortran_env, ONLY : int64
    USE lib_mpp,        ONLY : ctl_stop
    IMPLICIT NONE
    PRIVATE
