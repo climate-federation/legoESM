@@ -336,3 +336,17 @@ prandtl_air = 0.71              # Molecular Prandtl number of air ν/α [-] (DNS
 # Shallow Water Test Case Constants
 # ==============================================================================
 H_MEAN = 1.0e4                  # Mean fluid depth for shallow water [m]
+
+# ---- MARBL port (from ggn/bgc_modelling constants.py) ----
+days_per_year = 365.0
+seconds_per_day = 86400.0
+rho_sw_marbl = 1026.0
+M_C = 12.01
+M_N = 14.0067
+M_P = 30.974
+M_Fe = 55.845
+M_Si = 28.085
+M_SiO2 = 60.08
+M_CaCO3 = 100.09
+V_molar_O2 = 22.3916
+k_Boltzmann_eV = 8.617333262e-5

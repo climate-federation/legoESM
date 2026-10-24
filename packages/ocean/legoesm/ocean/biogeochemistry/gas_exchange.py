@@ -185,3 +185,17 @@ def air_sea_o2_flux(
     k_cm_hr = 0.251 * U10 ** 2 * (Sc / 660.0) ** (-0.5)
     k = k_cm_hr / 3600.0 / 100.0
     return k * (P_atm * o2_saturation(T_surf, S_surf) - O2_surf)
+
+
+def piston_velocity(
+    U10_sqr: jnp.ndarray,
+    schmidt: jnp.ndarray,
+    ice_frac: jnp.ndarray | float = 0.0,
+) -> jnp.ndarray:
+    """Gas transfer velocity [m/s] for any gas: (1 - f_ice) * 0.251 <U10^2> (Sc/660)^-1/2.
+
+    ``U10_sqr`` is the mean of the squared 10-m wind speed [m^2/s^2].  Same
+    Wanninkhof (2014) coefficient as ``gas_transfer_velocity`` (0.251 cm/h per
+    (m/s)^2, converted to s/m); used by the MARBL surface-flux port.
+    """
+    return (1.0 - ice_frac) * (0.251 * 1.0e-2 / 3600.0) * U10_sqr * jnp.sqrt(660.0 / schmidt)

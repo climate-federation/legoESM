@@ -17,7 +17,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from legoesm.ocean.biogeochemistry.carbonate import (
+from legoesm.ocean.biogeochemistry.marbl.carbonate_marbl import (
     carbonate_coefficients,
     carbonate_speciation,
     co3_saturation,
