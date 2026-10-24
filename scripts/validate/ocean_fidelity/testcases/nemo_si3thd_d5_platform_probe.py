@@ -438,8 +438,9 @@ def run_step1_reviewer_reproduction(
         for kt in range(1, nsteps + 1):
             frames = phase2._read_thd_step(thd, kt)
             exact = phase2._read_zdf_input_step(zin, kt)
-            g0 = phase2._center_global(frames[0])
-            snow_active_flags.append(float(g0["v_s"]) > 1.0e-20)
+            snow_active_flags.append(
+                float(np.asarray(frames[1]["h_s"]).ravel()[0]) > 0.0
+            )
             normal_step_flags.append(not (5842 <= kt <= 5867))
             entries_r2.append(
                 year_gate._exact_1d_entry(frames, _nemo_entry_conversion=False)
@@ -468,39 +469,39 @@ def run_step1_reviewer_reproduction(
     )
 
     ts_r2 = np.asarray(
-        jax.jit(
-            lambda e: snow_temperature_from_enthalpy(
-                e,
+        jax.device_get(
+            snow_temperature_from_enthalpy(
+                batch_r2.e_snow,
                 c,
                 _nemo_order=True,
                 _nemo_glo2eqv_snow_temp=False,
                 _nemo_source_round=False,
             )
-        )(batch_r2.e_snow),
+        ),
         dtype=np.float64,
     )
     ts_s2_only = np.asarray(
-        jax.jit(
-            lambda e: snow_temperature_from_enthalpy(
-                e,
+        jax.device_get(
+            snow_temperature_from_enthalpy(
+                batch_s2.e_snow,
                 c,
                 _nemo_order=True,
                 _nemo_glo2eqv_snow_temp=False,
                 _nemo_source_round=False,
             )
-        )(batch_s2.e_snow),
+        ),
         dtype=np.float64,
     )
     ts_s2_s3 = np.asarray(
-        jax.jit(
-            lambda e: snow_temperature_from_enthalpy(
-                e,
+        jax.device_get(
+            snow_temperature_from_enthalpy(
+                batch_s2.e_snow,
                 c,
                 _nemo_order=True,
                 _nemo_glo2eqv_snow_temp=(not plant_corrupt_snow_temp),
                 _nemo_source_round=True,
             )
-        )(batch_s2.e_snow),
+        ),
         dtype=np.float64,
     )
 
@@ -542,6 +543,7 @@ def run_step1_reviewer_reproduction(
     def _eval_post_zdf_arm(
         entries_list,
         *,
+        zdf_layer_reciprocals: bool = True,
         glo2eqv_snow_temp: bool,
         source_round: bool,
     ) -> dict:
@@ -556,23 +558,6 @@ def run_step1_reviewer_reproduction(
             f: {"total": 0, "zero_ulp": 0, "nonzero_ulp": 0, "over_bar": 0, "max_ulp": 0}
             for f in POST_ZDF_SOLVED_FIELDS
         }
-
-        @jax.jit
-        def _run_zdf_chunk(b_entry, b_forcing):
-            return _si3_zdf_bl99_step(
-                b_entry.e_ice,
-                b_entry.e_snow,
-                b_entry.S_layers,
-                b_entry.h_ice,
-                b_entry.h_snow,
-                b_entry.T_surface,
-                b_forcing,
-                card.dt_seconds,
-                c,
-                _nemo_zdf_layer_reciprocals=True,
-                _nemo_glo2eqv_snow_temp=glo2eqv_snow_temp,
-                _nemo_source_round=source_round,
-            )
 
         chunk = 1000
         for start in range(0, nsteps, chunk):
@@ -594,7 +579,22 @@ def run_step1_reviewer_reproduction(
                     for i in range(len(phase2.ZDF_INPUT_NAMES))
                 )
             )
-            zdf_out = jax.device_get(_run_zdf_chunk(b_entry, b_forcing))
+            zdf_out = jax.device_get(
+                _si3_zdf_bl99_step(
+                    b_entry.e_ice,
+                    b_entry.e_snow,
+                    b_entry.S_layers,
+                    b_entry.h_ice,
+                    b_entry.h_snow,
+                    b_entry.T_surface,
+                    b_forcing,
+                    card.dt_seconds,
+                    c,
+                    _nemo_zdf_layer_reciprocals=zdf_layer_reciprocals,
+                    _nemo_glo2eqv_snow_temp=glo2eqv_snow_temp,
+                    _nemo_source_round=source_round,
+                )
+            )
             cand_fields = {
                 "t_su": np.asarray(zdf_out.T_surface, dtype=np.float64),
                 "e_i": np.asarray(zdf_out.e_ice, dtype=np.float64),
@@ -638,16 +638,25 @@ def run_step1_reviewer_reproduction(
 
     post_zdf_r2 = _eval_post_zdf_arm(
         entries_r2,
+        zdf_layer_reciprocals=True,
         glo2eqv_snow_temp=False,
+        source_round=False,
+    )
+    post_zdf_exact_inputs_pre_r2_reciprocals = _eval_post_zdf_arm(
+        entries_s2,
+        zdf_layer_reciprocals=False,
+        glo2eqv_snow_temp=(not plant_corrupt_snow_temp),
         source_round=False,
     )
     post_zdf_exact_inputs_unrounded = _eval_post_zdf_arm(
         entries_s2,
+        zdf_layer_reciprocals=True,
         glo2eqv_snow_temp=(not plant_corrupt_snow_temp),
         source_round=False,
     )
     post_zdf_exact_inputs_source_rounded = _eval_post_zdf_arm(
         entries_s2,
+        zdf_layer_reciprocals=True,
         glo2eqv_snow_temp=(not plant_corrupt_snow_temp),
         source_round=True,
     )
@@ -674,6 +683,7 @@ def run_step1_reviewer_reproduction(
         },
         "normal_steps_post_zdf_26202_rows": {
             "r2_as_shipped": post_zdf_r2,
+            "nemo_exact_inputs_pre_r2_reciprocals": post_zdf_exact_inputs_pre_r2_reciprocals,
             "nemo_exact_inputs_unrounded": post_zdf_exact_inputs_unrounded,
             "nemo_exact_inputs_source_rounded": post_zdf_exact_inputs_source_rounded,
         },
@@ -881,7 +891,6 @@ def run_year_rescore(
         kw = dict(kwargs)
 
         def _make_runner(k_dict):
-            @jax.jit
             def _runner(b_entry, b_forcing):
                 return si3_column_step_arrays(
                     b_entry,
