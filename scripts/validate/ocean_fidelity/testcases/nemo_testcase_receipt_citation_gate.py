@@ -1961,9 +1961,9 @@ CITATION_MAP = {
         'tke_bottom_dirichlet=self._tke_bottom_dirichlet(',
         'u_now=u_now, v_now=v_now),', 3],
     'ocean_model_latlon_cgrid.py:16856':
-        'u_now=state.u.data, v_now=state.v.data,',
+        ('u_now=state.u.data, v_now=state.v.data,', 6),
     'ocean_model_latlon_cgrid.py:17232':
-        'u_now=state.u.data, v_now=state.v.data,',
+        ('u_now=state.u.data, v_now=state.v.data,', 7),
     'nemo_testcase_recipe.py:2144': [('2920,  # DECISION 142 (user, 2026-10-20): one year, deliberate', 1)],
     # round 319 review: the background diffusivity floor against NEMO's avt statement
     'tke.py:2313': 'K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)',
