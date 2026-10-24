@@ -1393,17 +1393,17 @@ CITATION_MAP = {
         'def gradient_rollout(context: GYREContext, d_t0, n_steps: int):',
         'def scheduled_rollout(context: GYREContext, d_t0, n_steps: int, schedule: str):',
         3],
-    'nemo_testcase_l2_gyre_gradient_gate.py:554': (
+    'nemo_testcase_l2_gyre_gradient_gate.py:562': (
         'def explicit_stepwise_directional_derivatives('),
     'nemo_testcase_l2_gyre_gradient_gate.py:456': (
-        'def build_compiled_step_transforms(context: GYREContext):'),
-    'nemo_testcase_l2_gyre_gradient_gate.py:707': (
+        'def build_compiled_step_transforms('),
+    'nemo_testcase_l2_gyre_gradient_gate.py:719': (
         'def unmeasured_agreement(reason: str | None = None) -> dict:'),
-    'nemo_testcase_l2_gyre_gradient_gate.py:506': (
+    'nemo_testcase_l2_gyre_gradient_gate.py:514': (
         'def enforce_step_replay_byte_gate('),
-    'nemo_testcase_l2_gyre_gradient_gate.py:1156': (
+    'nemo_testcase_l2_gyre_gradient_gate.py:1168': (
         'def measure_resources(n_steps: int, schedule: str, *,'),
-    'nemo_testcase_l2_gyre_gradient_gate.py:1322': (
+    'nemo_testcase_l2_gyre_gradient_gate.py:1334': (
         'def classify_resource_row(row: dict) -> str:'),
     'cfgs/GYRE_OMIP_L2_P3_SM/WORK/traadv.F90:295-298': [
         '! FCT at last stage only with RK3', ('ENDIF', 9), 4],

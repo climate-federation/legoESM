@@ -144,5 +144,5 @@ production-arm compiler isolation begins at
 `nemo_testcase_l2_gyre_gradient_gate.py:214`. Card construction and boundary
 wiring are asserted at `nemo_testcase_l2_gyre_gradient_gate.py:228`; explicit
 per-step VJP/JVP composition is
-`nemo_testcase_l2_gyre_gradient_gate.py:554`; resource acquisition begins at
-`nemo_testcase_l2_gyre_gradient_gate.py:1156`.
+`nemo_testcase_l2_gyre_gradient_gate.py:562`; resource acquisition begins at
+`nemo_testcase_l2_gyre_gradient_gate.py:1168`.

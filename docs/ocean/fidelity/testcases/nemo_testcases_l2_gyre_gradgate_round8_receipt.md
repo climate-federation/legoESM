@@ -43,14 +43,14 @@ PRNG keys, perturbation, direction, and FD step remain unchanged.
 
 The Round 6 review blocker is closed in executable code. A row refused before
 derivatives exist now starts from an explicit UNMEASURED record at
-`nemo_testcase_l2_gyre_gradient_gate.py:707`: reverse, forward, FD, and their
+`nemo_testcase_l2_gyre_gradient_gate.py:719`: reverse, forward, FD, and their
 errors are null. A derivative that was actually evaluated as NaN still goes
 through the ordinary agreement classifier and remains REFUTED. Direct controls
 exercise both cases, and the CLI exits nonzero for either non-CONFIRMED status.
 
 Review then exposed a second fail-closed gap. The transformed production-step
 primal checks were recorded but did not affect the verdict. The gate at
-`nemo_testcase_l2_gyre_gradient_gate.py:506` now requires every VJP and JVP
+`nemo_testcase_l2_gyre_gradient_gate.py:514` now requires every VJP and JVP
 replay leaf to be byte-identical. A planted mismatch flips a nominally
 CONFIRMED row to UNMEASURED, nulls every top-level derivative field, preserves
 the values under `refused_derivative_evidence`, and produces a nonzero CLI
@@ -89,7 +89,7 @@ specializations.
 Round 8 constructs one dynamic-time step VJP and one dynamic-time step JVP at
 `nemo_testcase_l2_gyre_gradient_gate.py:456`, then reuses them in the explicit
 production-boundary loop at
-`nemo_testcase_l2_gyre_gradient_gate.py:554`. The one-step JSON records one
+`nemo_testcase_l2_gyre_gradient_gate.py:562`. The one-step JSON records one
 cold-state specialization, one VJP invocation, one JVP invocation, and
 `whole_window_transform_jitted=false`. A direct synthetic trace control over
 three steps observes four traces total: cold plus warm for the VJP and cold
@@ -201,8 +201,8 @@ and no 60-step or 360-step projection is admissible:
 | `binomial` | UNMEASURED | UNMEASURED | UNMEASURED |
 
 The resource producer and fail-closed classifier remain at
-`nemo_testcase_l2_gyre_gradient_gate.py:1156` and
-`nemo_testcase_l2_gyre_gradient_gate.py:1322`. Projections will be written only
+`nemo_testcase_l2_gyre_gradient_gate.py:1168` and
+`nemo_testcase_l2_gyre_gradient_gate.py:1334`. Projections will be written only
 from the operator's valid measured six-step rows; this receipt fabricates none.
 
 ## Tests and gates

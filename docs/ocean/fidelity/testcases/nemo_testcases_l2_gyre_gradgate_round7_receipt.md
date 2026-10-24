@@ -49,7 +49,7 @@ VJP per step in reverse order and one JVP per step in forward order. Each
 transform is evaluated at the stored direct-production boundary. Transformed
 replays are recorded but are never substituted for later production primals;
 the implementation begins at
-`nemo_testcase_l2_gyre_gradient_gate.py:554`.
+`nemo_testcase_l2_gyre_gradient_gate.py:562`.
 
 This distinction is measured, not hidden. On the one-step card, VJP replay
 differs on 18 leaves (largest `1.4210854715202004e-14` in salinity) and JVP
@@ -63,9 +63,9 @@ direct synthetic test keeps forward mode unchanged, doubles reverse mode, and
 must classify REFUTED. Resource rows build
 `jax.jit(jax.value_and_grad(scalar_line))`, discard the cold compile-and-run,
 and time/sample the second blocked execution at
-`nemo_testcase_l2_gyre_gradient_gate.py:1156`. Rows with historical timing
+`nemo_testcase_l2_gyre_gradient_gate.py:1168`. Rows with historical timing
 stamps are executable RETRACTED outcomes, and missing/flat/non-finite sampler
-data are VACUOUS at `nemo_testcase_l2_gyre_gradient_gate.py:1322`. The
+data are VACUOUS at `nemo_testcase_l2_gyre_gradient_gate.py:1334`. The
 constant-time scaling plant and GPU schedule-order plant are direct tests.
 
 ## Production trajectory identity
