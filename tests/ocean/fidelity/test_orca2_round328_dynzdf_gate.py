@@ -40,6 +40,26 @@ def test_term_localization_separates_iwm_and_ddm_boundaries() -> None:
     assert result["ddm_changes_candidate_at_residual"] == 1
 
 
+def test_zdf_term_localization_names_first_boundary_by_level() -> None:
+    shape = (1, 2, 2)
+    records = {}
+    for rank in (0, 1):
+        fields = {name: np.ones((1, 1, 2)) for name in (
+            "tke_wmask", "b1_avm", "b2_avm", "b3_avm")}
+        records[rank] = {"fields": fields}
+    candidates = {
+        "post_tke": np.ones(shape),
+        "post_ddm": np.ones(shape),
+        "post_iwm": np.ones(shape),
+    }
+    candidates["post_tke"][0, 0, 1] = 2.0
+    candidates["post_ddm"][0, 0, 1] = 2.0
+    candidates["post_iwm"][0, 0, 0] = 2.0
+    candidates["post_iwm"][0, 0, 1] = 2.0
+    result = replay.zdf_term_localization(candidates, records, np.ones(shape, bool))
+    assert result["first_unequal_boundary_by_level"] == ["post_iwm", "post_tke"]
+
+
 @pytest.fixture(scope="module")
 def record_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Compile and execute the committed harness against the actual writer."""

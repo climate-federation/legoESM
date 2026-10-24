@@ -25,6 +25,7 @@ from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round1_ladder_gate as rung10,
     nemo_testcase_l4_orca2_round328_dynzdf_gate as admission,
+    nemo_testcase_l4_orca2_round328_zdf_terms_gate as zdf_admission,
 )
 
 DT = np.float64(10800.0)
@@ -283,6 +284,38 @@ def term_localization(candidate: np.ndarray, record: np.ndarray,
     }
 
 
+def assemble_zdf_term_field(records: dict[int, dict], name: str) -> np.ndarray:
+    """Assemble rank-local NEMO (i,j,k) ZDF fields as global (j,i,k)."""
+    return np.concatenate(
+        [records[rank]["fields"][name] for rank in (0, 1)], axis=0
+    ).transpose(1, 0, 2)
+
+
+def zdf_term_localization(candidates: dict[str, np.ndarray],
+                          records: dict[int, dict],
+                          active: np.ndarray) -> dict[str, object]:
+    """Name the first unequal source-order ZDF term boundary at each level."""
+    ordered = (("post_tke", "b1_avm"), ("post_ddm", "b2_avm"),
+               ("post_iwm", "b3_avm"))
+    record_wet = assemble_zdf_term_field(records, "tke_wmask") != 0.0
+    require(record_wet.shape == active.shape, "ZDF record wet-mask shape differs")
+    require(np.array_equal(record_wet, active), "ZDF record/model wet masks differ")
+    rows = {}
+    for boundary, field in ordered:
+        expected = assemble_zdf_term_field(records, field)
+        require(candidates[boundary].shape == expected.shape,
+                f"{boundary} candidate/record shapes differ")
+        rows[boundary] = score(candidates[boundary], expected, active)
+        unequal = (bits(candidates[boundary]) != bits(expected)) & active
+        rows[boundary]["unequal_by_level"] = vertical_counts(unequal)
+    first_by_level = []
+    for level in range(active.shape[-1]):
+        first = next((name for name, _ in ordered
+                      if rows[name]["unequal_by_level"][level] != 0), None)
+        first_by_level.append(first)
+    return {"boundaries": rows, "first_unequal_boundary_by_level": first_by_level}
+
+
 def compose_literal_terms(model, card, closure_heat, closure_momentum, active):
     """Apply the model's certified DDM then IWM statements to its carried TKE K."""
     import jax
@@ -399,7 +432,8 @@ def base_lower_from_avm(avm, dz_after, e3w_now, wet):
     return jnp.concatenate([jnp.zeros_like(coefficient[..., :1]), coefficient], axis=-1)
 
 
-def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
+def model_avm(root: Path, records: dict[int, dict],
+              zdf_records: dict[int, dict] | None = None) -> dict[str, object]:
     import jax
     import jax.numpy as jnp
 
@@ -510,11 +544,18 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
                 scored["first_unequal_global_jik"] = None
             rank_rows.append(scored)
         first_statement[component] = rank_rows
-    return {
+    result = {
         "coefficient": row,
         "tracer_coefficients": tracer_rows,
         "first_base_lower_statement": first_statement,
     }
+    if zdf_records is not None:
+        result["zdf_term_boundaries"] = zdf_term_localization({
+            "post_tke": closure_state,
+            "post_ddm": consumed_after_ddm,
+            "post_iwm": consumed,
+        }, zdf_records, active)
+    return result
 
 
 def measure(root: Path, expect_commit: str, expect_tree: str) -> dict[str, object]:
@@ -533,6 +574,11 @@ def measure(root: Path, expect_commit: str, expect_tree: str) -> dict[str, objec
     require(all(refusals.values()), "one or more admission plants stayed green")
     records = {rank: admission.read_record(root / admission.record_name(rank))
                for rank in (0, 1)}
+    zdf_admitted = zdf_admission.run_gate(root, expect_commit)
+    zdf_records = {
+        rank: zdf_admission.read_record(root / zdf_admission.record_name(rank))
+        for rank in (0, 1)
+    }
     replay = {str(rank): replay_rank(records[rank], mesh_fields(root, rank))
               for rank in (0, 1)}
     return {
@@ -541,7 +587,8 @@ def measure(root: Path, expect_commit: str, expect_tree: str) -> dict[str, objec
         "record_admission": admitted,
         "admission_refusals": refusals,
         "rank_replays": replay,
-        "model_avm_vs_record": model_avm(root, records),
+        "zdf_term_admission": zdf_admitted,
+        "model_avm_vs_record": model_avm(root, records, zdf_records),
     }
 
 
