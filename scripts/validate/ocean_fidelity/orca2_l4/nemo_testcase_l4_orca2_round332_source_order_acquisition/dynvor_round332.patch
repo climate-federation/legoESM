@@ -23,12 +23,12 @@
                 ENDIF
           END SELECT
 +         IF( kt == nit000 .AND. Kmm == 1 .AND. Krhs == 3 .AND. nvor_scheme == np_EEN ) THEN
-+            ALLOCATE( ztrdu(T2D(0),jpk), ztrdv(T2D(0),jpk) )
-+            ztrdu(:,:,:)=0._wp; ztrdv(:,:,:)=0._wp
-+            CALL vor_een( kt, Kmm, ntot, puu(:,:,:,Kmm), pvv(:,:,:,Kmm), ztrdu, ztrdv )
++            ALLOCATE( ztrdu(T2D(0),jpk), ztrdv(T2D(0),jpk) ) ! round-332 replay
++            ztrdu(:,:,:)=0._wp; ztrdv(:,:,:)=0._wp          ! round-332 replay
++            CALL vor_een( kt, Kmm, ntot, puu(:,:,:,Kmm), pvv(:,:,:,Kmm), ztrdu, ztrdv ) ! round-332 replay
 +            CALL r332_vor_add(ztrdv(ntsi:ntei,ntsj:ntej,1:jpkm1))
-+            DEALLOCATE( ztrdu, ztrdv )
-+         ENDIF
++            DEALLOCATE( ztrdu, ztrdv )                       ! round-332 replay
++         ENDIF                                               ! round-332 replay
           !
        ENDIF
        !
