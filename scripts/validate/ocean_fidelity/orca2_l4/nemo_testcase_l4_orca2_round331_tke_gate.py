@@ -36,9 +36,10 @@ EXPECTED_ORDER = (
     "sh2_output", "drag_bottom_output", "drag_top_output",
     "mxl_nmln_output", "mxl_hmlp_output", "tke_sh2_input",
     "tke_drag_bottom_input", "tke_drag_top_input", "tke_nmln_input",
-    "tke_hmlp_input", "after_bc_en", "matrix_rhs_en", "matrix_diag",
-    "matrix_upper", "matrix_lower", "after_solve_en", "after_tke_en",
-    "after_tke_avm", "after_tke_avt", "tke_wmask",
+    "tke_hmlp_input", "tke_avm_input", "tke_dissl_input", "after_bc_en",
+    "matrix_rhs_en", "matrix_diag", "matrix_upper", "matrix_lower",
+    "after_solve_en", "after_tke_en", "after_tke_avm", "after_tke_avt",
+    "tke_wmask",
 )
 TWO_D_FIELDS = {
     "drag_bottom_output", "drag_top_output", "mxl_nmln_output",
@@ -171,8 +172,19 @@ def _plant(record: dict, plant: str) -> None:
         "final": "after_tke_avm",
     }[plant]
     values = record["fields"][name]
-    index = (0, 0, 0)
-    values[index] = np.nextafter(values[index], np.float64(np.inf))
+    wmask = record["fields"]["tke_wmask"] != 0.0
+    if name in TWO_D_FIELDS:
+        wet = wmask[:, :, :1]
+    elif name in {"after_bc_en", "matrix_rhs_en", "after_solve_en"}:
+        wet = np.zeros_like(values, dtype=bool)
+        wet[:, :, :1] = wmask[:, :, :1]
+    else:
+        wet = wmask[:, :, 1:]
+    require(wet.shape == values.shape, f"{name}: wet-mask shape differs")
+    wet_index = np.flatnonzero(wet)
+    require(bool(wet_index.size), f"cannot plant {name} without wet cells")
+    values.flat[wet_index[0]] = np.nextafter(
+        values.flat[wet_index[0]], np.float64(np.inf))
 
 
 def run_gate(root: Path, zdf_reference_dir: Path, expect_commit: str,

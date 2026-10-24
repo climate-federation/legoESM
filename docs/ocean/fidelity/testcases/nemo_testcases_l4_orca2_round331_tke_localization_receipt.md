@@ -123,10 +123,13 @@ existing round-326 `zdftke` observer.  Additions-only observers capture both
 ranks at kt 1:
 
 1. `zdf_sh2`, bottom/top `zdf_drg`, and `zdf_mxl` outputs, followed by a
-   second copy at TKE entry to prove exact handoff;
+   second copy at TKE entry to prove exact handoff, plus entry `avm_k` and
+   `dissl` operands;
 2. `en` after the ordinary top/bottom boundary conditions;
 3. RHS `en` and all three tridiagonal coefficients after matrix construction
-   and any wave-boundary override;
+   and any wave-boundary override; the active Langmuir term lies between the
+   boundary and matrix records and therefore falls inside this after-matrix
+   segment;
 4. `en` immediately after the Thomas solve and floor; and
 5. returned `en`, `avm_k`, `avt_k`, and `wmask` for exact reconciliation with
    the admitted round-328 post-TKE record.
@@ -139,7 +142,7 @@ violations cover header, order, truncation, stamp, shear, drag, mixing length,
 boundary, matrix, solve, and final output; the semantic plants each move one
 binary64 word by one ULP.
 
-The clean read-only preflight passed at `43797c0cfe61`: 44 tests passed, all 10
+The clean read-only preflight passed at `43797c0cfe61`: 45 tests passed, all 11
 preflight plants fired, all 140 inherited deterministic files matched, all six
 writer/patched Fortran units passed syntax, and the same-program census found
 410 identical preprocessed units and 422 identical normalized objects.  Its
@@ -162,7 +165,7 @@ No NEMO executable was run by Codex.
 
 - Preregistered predictions R331-P1 through P4: all **CONFIRMED**.
 - Focused compiled-layout, admission, control, and same-program battery:
-  19 passed; the imported clean preflight battery is 44 passed.
+  20 passed; the imported clean preflight battery is 45 passed.
 - Per-receipt citation gate: PASS, 10 citations, 0 unmapped, 0 failures, and
   0 map-audit failures; the required citation-gate pytest is 17 passed.
 - Default ORCA2 landing battery: 148 passed in 943.01 s, including the

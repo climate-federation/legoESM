@@ -184,7 +184,7 @@ check_no_continuation_insert() {
 }
 check_no_removed_lines() { [[ $(awk '/^--- / {next} /^-/ {n++} END {print n+0}' "$1") -eq 0 ]]; }
 check_patched_call_predecessors() {
-  awk '{ if ($0 ~ /CALL r328_/ && previous ~ /&[[:space:]]*$/) bad=1; previous=$0 }
+  awk '{ if ($0 ~ /CALL r(328|331)_/ && previous ~ /&[[:space:]]*$/) bad=1; previous=$0 }
        END { exit bad }' "$1"
 }
 free_ok() {
@@ -337,6 +337,9 @@ for patch_file in "${patch_files[@]}"; do
 done
 printf ' x = a + &\n+ CALL planted()\n' >"$plants/continuation.patch"
 plant_must_refuse continuation check_no_continuation_insert "$plants/continuation.patch"
+printf 'x = a + &\nCALL r331_planted()\n' >"$plants/observer-continuation.F90"
+plant_must_refuse observer-continuation \
+  check_patched_call_predecessors "$plants/observer-continuation.F90"
 # Checklist (2): makenemo -r must name a registered reference config.
 check_ref_cfg "$REFERENCE_CFG" || refuse "$REFERENCE_CFG not in ref_cfgs.txt"
 plant_must_refuse ref-cfg check_ref_cfg ORCA2_OMIP_L4

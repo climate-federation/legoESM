@@ -18,6 +18,7 @@ MODULE tke_round331_writer
    REAL(wp), ALLOCATABLE, SAVE :: mxl_output(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: sh2_input(:,:,:),drag_input(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: mxl_input(:,:,:)
+   REAL(wp), ALLOCATABLE, SAVE :: avm_input(:,:,:),dissl_input(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: after_bc(:,:,:),matrix(:,:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: after_solve(:,:,:)
 
@@ -57,10 +58,12 @@ CONTAINS
       nx=SIZE(pinterior,1); ny=SIZE(pinterior,2); nz=SIZE(pinterior,3)
       ALLOCATE(sh2_output(nx,ny,nz),drag_output(2,nx,ny), &
          & mxl_output(2,nx,ny),sh2_input(nx,ny,nz),drag_input(2,nx,ny), &
-         & mxl_input(2,nx,ny),after_bc(nx,ny,nz+1), &
+         & mxl_input(2,nx,ny),avm_input(nx,ny,nz),dissl_input(nx,ny,nz), &
+         & after_bc(nx,ny,nz+1), &
          & matrix(4,nx,ny,nz+1),after_solve(nx,ny,nz+1))
       sh2_output=0._wp; drag_output=0._wp; mxl_output=0._wp
       sh2_input=0._wp; drag_input=0._wp; mxl_input=0._wp
+      avm_input=0._wp; dissl_input=0._wp
       after_bc=0._wp; matrix=0._wp; after_solve=0._wp
       nkt=kt; nkbb=Kbb; nkmm=Kmm; nkrhs=Krhs
       ninput=0; nbc=0; nmatrix=0; nsolve=0
@@ -93,18 +96,21 @@ CONTAINS
       lmxl=.TRUE.
    END SUBROUTINE r331_mxl
 
-   SUBROUTINE r331_tke_inputs(jj,psh2,pbottom,ptop,pnmln,phmlp)
+   SUBROUTINE r331_tke_inputs(jj,psh2,pbottom,ptop,pnmln,phmlp,pavm,pdissl)
       INTEGER, INTENT(in) :: jj
       REAL(wp), INTENT(in) :: psh2(:,:),pbottom(:),ptop(:),phmlp(:)
+      REAL(wp), INTENT(in) :: pavm(:,:),pdissl(:,:)
       INTEGER, INTENT(in) :: pnmln(:)
       INTEGER :: j
       IF(.NOT.lactive) RETURN
       j=jj-ntsj+1
       IF(j<1 .OR. j>ny .OR. ANY(SHAPE(psh2) /= (/nx,nz/)) .OR. &
          & SIZE(pbottom)/=nx .OR. SIZE(ptop)/=nx .OR. SIZE(pnmln)/=nx .OR. &
-         & SIZE(phmlp)/=nx) CALL ctl_stop('round331 TKE: input row shape')
+         & SIZE(phmlp)/=nx .OR. ANY(SHAPE(pavm) /= (/nx,nz/)) .OR. &
+         & ANY(SHAPE(pdissl) /= (/nx,nz/))) CALL ctl_stop('round331 TKE: input row shape')
       sh2_input(:,j,:)=psh2; drag_input(1,:,j)=pbottom; drag_input(2,:,j)=ptop
       mxl_input(1,:,j)=REAL(pnmln,wp); mxl_input(2,:,j)=phmlp
+      avm_input(:,j,:)=pavm; dissl_input(:,j,:)=pdissl
       ninput=ninput+1
    END SUBROUTINE r331_tke_inputs
 
@@ -163,7 +169,7 @@ CONTAINS
       IF(ios /= 0) CALL ctl_stop('round331 TKE: cannot open record')
       magic='NEMO_L4_R331TK'
       WRITE(nunit) magic,1,nkt,nkbb,nkmm,nkrhs,narea-1,nx,ny,nz,ntsi,ntsj, &
-         & STORAGE_SIZE(1._wp),20
+         & STORAGE_SIZE(1._wp),22
       CALL put3('sh2_output',sh2_output,2)
       CALL put2('drag_bottom_output',drag_output(1,:,:),1)
       CALL put2('drag_top_output',drag_output(2,:,:),1)
@@ -174,6 +180,8 @@ CONTAINS
       CALL put2('tke_drag_top_input',drag_input(2,:,:),1)
       CALL put2('tke_nmln_input',mxl_input(1,:,:),1)
       CALL put2('tke_hmlp_input',mxl_input(2,:,:),1)
+      CALL put3('tke_avm_input',avm_input,2)
+      CALL put3('tke_dissl_input',dissl_input,2)
       CALL put3('after_bc_en',after_bc,1)
       CALL put3('matrix_rhs_en',matrix(1,:,:,:),1)
       CALL put3('matrix_diag',matrix(2,:,:,:),1)
@@ -186,7 +194,7 @@ CONTAINS
       CALL put3('tke_wmask',pwmask,1)
       CLOSE(nunit); nunit=-1
       DEALLOCATE(sh2_output,drag_output,mxl_output,sh2_input,drag_input,mxl_input, &
-         & after_bc,matrix,after_solve)
+         & avm_input,dissl_input,after_bc,matrix,after_solve)
       lactive=.FALSE.
    END SUBROUTINE r331_finish
 

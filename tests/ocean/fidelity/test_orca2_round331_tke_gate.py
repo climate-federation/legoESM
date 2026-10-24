@@ -66,6 +66,7 @@ def test_real_writer_layout_and_clean_admission(record_dir: Path) -> None:
     assert fields["sh2_output"].shape == (h["nx"], h["ny"], h["nz"])
     assert fields["after_bc_en"].shape == (h["nx"], h["ny"], h["nz"] + 1)
     assert np.array_equal(fields["sh2_output"], fields["tke_sh2_input"])
+    assert np.array_equal(fields["tke_avm_input"], fields["after_tke_avm"])
 
 
 def test_fixture_rank_payloads_are_distinct(record_dir: Path) -> None:
@@ -106,8 +107,34 @@ def test_semantic_plants_are_one_ulp(record_dir: Path) -> None:
         record = gate.read_record(record_dir / gate.record_name(0))
         before = record["fields"][name].copy()
         gate._plant(record, plant)
-        assert np.count_nonzero(
-            record["fields"][name].view(np.uint64) != before.view(np.uint64)) == 1
+        changed = record["fields"][name].view(np.uint64) != before.view(np.uint64)
+        assert np.count_nonzero(changed) == 1
+        wmask = record["fields"]["tke_wmask"] != 0.0
+        if name in gate.TWO_D_FIELDS:
+            wet = wmask[:, :, :1]
+        elif name in {"after_bc_en", "matrix_rhs_en", "after_solve_en"}:
+            wet = np.zeros_like(changed, dtype=bool)
+            wet[:, :, :1] = wmask[:, :, :1]
+        else:
+            wet = wmask[:, :, 1:]
+        assert bool(wet[changed][0])
+
+
+def test_fixture_dry_negative_zero_cannot_hide_plants(record_dir: Path) -> None:
+    record = gate.read_record(record_dir / gate.record_name(0))
+    dry_column = record["fields"]["tke_wmask"][0, 0, :]
+    assert np.all(dry_column == 0.0)
+    assert np.all(np.signbit(dry_column))
+    for plant in ("sh2", "drag", "mxl", "boundary", "matrix", "solve", "final"):
+        name = {
+            "sh2": "sh2_output", "drag": "drag_bottom_output",
+            "mxl": "mxl_nmln_output", "boundary": "after_bc_en",
+            "matrix": "matrix_rhs_en", "solve": "after_solve_en",
+            "final": "after_tke_avm",
+        }[plant]
+        before = record["fields"][name][0, 0, 0].view(np.uint64).copy()
+        gate._plant(record, plant)
+        assert record["fields"][name][0, 0, 0].view(np.uint64) == before
 
 
 def _insertions(path: Path) -> list[str]:
