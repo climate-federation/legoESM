@@ -11,9 +11,8 @@ import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.coupler.ocean_forcing import blend_ice_ocean_forcing
 from legoesm.grids.tripole import create_synthetic_tripole
-from legoesm.ice import SeaIceConfig, step_sea_ice, uses_new_physics
+from legoesm.ice import SeaIceConfig, step_sea_ice
 from legoesm.ice.shortwave import compute_ice_sw, delta_eddington_albedo
 from legoesm.ocean.state import OceanSurfaceForcing
 import scripts.run.run_omip_core2 as runner
@@ -123,14 +122,19 @@ def _actual_main_blend(sf, response, cfg):
     """Execute the real host blend call with real mappers, not a retyped call."""
     tree = ast.parse(inspect.getsource(runner.main))
     calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-             and isinstance(n.func, ast.Name) and n.func.id == "blend_ice_ocean_forcing"]
+             and isinstance(n.func, ast.Name)
+             and n.func.id == "_blend_prognostic_ice_forcing"]
     assert len(calls) == 1
     shape = response.ocean_heat_extraction.shape
+    # fw=None: no precip share, so the post-step cover the helper reads only
+    # needs the right shape.
     env = dict(sf=sf, fw=None, ice_resp=response, ice_config=cfg,
                _ice_conc_pre=response.ice_concentration_thermo,
+               ice_state=SimpleNamespace(concentration=SimpleNamespace(
+                   data=response.ice_concentration_thermo)),
                state=SimpleNamespace(land_mask=SimpleNamespace(data=jnp.ones(shape))),
-               _ice_const=constants, uses_new_physics=uses_new_physics,
-               blend_ice_ocean_forcing=blend_ice_ocean_forcing)
+               _ice_const=constants,
+               _blend_prognostic_ice_forcing=runner._blend_prognostic_ice_forcing)
     return eval(compile(ast.Expression(calls[0]), inspect.getsourcefile(runner), "eval"), env)[1]
 
 
