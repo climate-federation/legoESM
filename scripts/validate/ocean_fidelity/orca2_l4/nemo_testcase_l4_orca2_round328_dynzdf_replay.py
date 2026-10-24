@@ -316,6 +316,14 @@ def zdf_term_localization(candidates: dict[str, np.ndarray],
     return {"boundaries": rows, "first_unequal_boundary_by_level": first_by_level}
 
 
+def score_by_level(actual: np.ndarray, expected: np.ndarray,
+                   support: np.ndarray) -> dict[str, object]:
+    result = score(actual, expected, support)
+    unequal = (bits(np.asarray(actual)) != bits(np.asarray(expected))) & support
+    result["unequal_by_level"] = vertical_counts(unequal)
+    return result
+
+
 def compose_literal_terms(model, card, closure_heat, closure_momentum, active):
     """Apply the model's certified DDM then IWM statements to its carried TKE K."""
     import jax
@@ -555,6 +563,19 @@ def model_avm(root: Path, records: dict[int, dict],
             "post_ddm": consumed_after_ddm,
             "post_iwm": consumed,
         }, zdf_records, active)
+        record_en = assemble_zdf_term_field(zdf_records, "tke_en")
+        model_en = np.asarray(state_after.tke.data, dtype=np.float64)
+        bundle = model._tke_step_entry_n2_bundle(card.recipe.initial_state)
+        model_rn2 = np.asarray(bundle.rn2, dtype=np.float64)
+        record_rn2 = assemble_zdf_term_field(zdf_records, "tke_rn2")
+        require(model_en.shape == record_en.shape == active.shape,
+                "post-TKE energy shape differs from ZDF record")
+        require(model_rn2.shape == record_rn2.shape == active.shape,
+                "TKE rn2 shape differs from ZDF record")
+        result["zdf_tke_operands"] = {
+            "post_solve_en": score_by_level(model_en, record_en, active),
+            "entry_rn2": score_by_level(model_rn2, record_rn2, active),
+        }
     return result
 
 
