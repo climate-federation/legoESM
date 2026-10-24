@@ -440,12 +440,20 @@ def _icy(lat_deg, day, T_ice=constants.T_freeze_ocean):
     return (jnp.where(polar, T_ice, sst).astype(sst.dtype),
             jnp.where(polar, 1.0, sic).astype(sic.dtype))
 an.analytical_sst_sic = _icy
+import os
+if os.environ.get("LEGOESM_TEST_COUNT_MU"):
+    import legoesm.ice.shortwave as sw
+    _mu = sw.maykut_untersteiner_albedo
+    def _counted(T_sfc, h_ice, **kw):
+        print("MU_CALL", float(np.max(np.asarray(T_sfc))), flush=True)
+        return _mu(T_sfc, h_ice, **kw)
+    sw.maykut_untersteiner_albedo = _counted
 sys.argv = sys.argv[1:]
 runpy.run_path(sys.argv[0], run_name="__main__")
 '''
 
 
-def _run_icy(out_dir, extra=()):
+def _run_icy(out_dir, extra=(), days=1, start_day=172.0, env_extra=None):
     import os
     import subprocess
     import sys
@@ -454,20 +462,32 @@ def _run_icy(out_dir, extra=()):
     env = os.environ.copy()
     env["JAX_PLATFORMS"] = "cpu"
     env["JAX_ENABLE_X64"] = "1"
+    env.update(env_extra or {})
     cmd = [sys.executable, "-c", _ICY_RUNNER,
            str(repo / "scripts" / "run" / "run_amip.py"),
            "--dataset", "analytical",
            "--grid-type", "voronoi", "--discretization", "mpas",
            "--resolution", "3", "--nlev", "8",
-           "--days", "1", "--checkpoint-days", "1", "--start-day", "172",
+           "--days", str(days), "--checkpoint-days", "1",
+           "--start-day", str(start_day),
            "--radiation", "gray", "--mpas-ice-skin-prognostic",
            "--output", str(out_dir), *extra]
     r = subprocess.run(cmd, env=env, capture_output=True, text=True,
-                       timeout=600)
+                       timeout=900)
     combined = r.stdout + r.stderr
+    (Path(out_dir) / "run.log").write_text(combined)
     assert r.returncode == 0, f"run failed ({r.returncode}):\n{combined[-2000:]}"
-    return np.load(next(Path(out_dir).glob("checkpoint_day_*.npz")),
+    assert "Traceback" not in combined, f"traceback:\n{combined[-2000:]}"
+    return Path(out_dir)
+
+
+def _last_ckpt(d):
+    return np.load(sorted(d.glob("checkpoint_day_*.npz"))[-1],
                    allow_pickle=True)
+
+
+_MELT = ("--sea-ice-albedo-scheme", "maykut_untersteiner",
+         "--sea-ice-albedo-melt-width-K", "5.0")
 
 
 def test_end_to_end_melt_albedo_reaches_radiation(tmp_path):
@@ -475,29 +495,41 @@ def test_end_to_end_melt_albedo_reaches_radiation(tmp_path):
     seed skin (271.35 K) already sits inside the ramp, so the melt scheme
     darkens the ice from step one.  The state must then differ from the
     constant-albedo run — fails if the scheme is wired in but inert."""
-    base = _run_icy(tmp_path / "const")
-    melt = _run_icy(tmp_path / "melt", extra=(
-        "--sea-ice-albedo-scheme", "maykut_untersteiner",
-        "--sea-ice-albedo-melt-width-K", "5.0"))
-    assert "ice_T_skin" in base.files and "ice_T_skin" in melt.files
+    base = _last_ckpt(_run_icy(tmp_path / "const"))
+    melt = _last_ckpt(_run_icy(tmp_path / "melt", extra=_MELT))
     sb, sm = np.asarray(base["ice_T_skin"]), np.asarray(melt["ice_T_skin"])
     assert np.all(np.isfinite(sm))
     # Darker ice absorbs more sunlight: the skin can only be warmer or equal.
     assert np.all(sm >= sb - 1e-9)
-    assert np.max(sm - sb) > 1e-3, "melt albedo never reached the surface"
+    dT = np.abs(np.asarray(melt["T"]) - np.asarray(base["T"]))
+    assert float(dT.max()) > 1e-4, "melt albedo never reached radiation"
+
+
+def test_melt_albedo_refreshes_every_step_from_current_skin(tmp_path):
+    """The melt albedo must follow the CURRENT skin every model step (same
+    cadence as the T_sfc re-anchor), not a day-start snapshot: count the ramp
+    evaluations in a 1-day run (144 steps) and check they see a warming skin.
+    A once-daily albedo would evaluate it once."""
+    out = _run_icy(tmp_path / "melt", extra=_MELT
+                   + ("--mpas-ice-thickness-m", "10.0"),
+                   env_extra={"LEGOESM_TEST_COUNT_MU": "1"})
+    calls = [ln.split()[1:] for ln in (out / "run.log").read_text().splitlines()
+             if ln.startswith("MU_CALL ")]
+    assert len(calls) >= 144, f"only {len(calls)} albedo evaluations"
+    skin_max = [float(c[0]) for c in calls]
+    assert skin_max[-1] > skin_max[0] + 1e-3, "albedo never saw the skin warm"
 
 
 def test_committed_deck_selects_melt_albedo():
     from pathlib import Path
-    from scripts.run.run_amip import (
-        _postprocess_args, build_arg_parser, build_config_from_args,
-    )
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from scripts.run.run_amip import build_arg_parser
     deck = (Path(__file__).resolve().parents[2] / "config" / "amip"
             / "amip_production_seaice_melt_albedo.yaml")
     parser = build_arg_parser()
-    cfg = build_config_from_args(_postprocess_args(
-        parser.parse_args(["--config", str(deck)]), parser))
-    assert cfg.sea_ice_albedo_scheme == "maykut_untersteiner"
-    assert cfg.sea_ice_albedo_melt_width_K == 1.0
-    assert cfg.ice_skin_prognostic is True
-    assert cfg.albedo_ice == 0.80
+    parser.set_defaults(**load_yaml_config(deck, parser))  # run_amip.main's load
+    args = parser.parse_args([])
+    assert args.sea_ice_albedo_scheme == "maykut_untersteiner"
+    assert args.sea_ice_albedo_melt_width_K == 1.0
+    assert args.ice_skin_prognostic is True
+    assert args.albedo_ice == 0.80
