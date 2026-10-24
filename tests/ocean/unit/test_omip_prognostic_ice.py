@@ -868,3 +868,56 @@ def test_both_host_loops_withhold_ice_precip_under_no_emp(loop_name):
     v = kw.get("with_precip")
     assert isinstance(v, ast.Attribute) and v.attr == "emp_freshwater"
     assert isinstance(v.value, ast.Name) and v.value.id == "args"
+
+
+def _ridging_rain_step(rain):
+    """One real multi-category step with convergence ridging (the fixture of
+    tests/ice/unit/test_ice_convergence_ridging.py) under uniform rain."""
+    from legoesm.grids.latlon import create_latlon_geometry
+    from legoesm.ice import (SeaIceConfig, distribute_dynamic_state_to_categories,
+                             init_dynamic_ice_state, step_sea_ice)
+    from legoesm.ice.config import BrineConfig, RidgingConfig
+    from tests.unit.test_run_omip_core2_ice_categories import _min_forcing
+
+    g = create_latlon_geometry(8, 12)
+    shape = (8, 12)
+    st = init_dynamic_ice_state(shape, S_ice_init=3.0)
+    st = st._replace(h_ice=st.h_ice.replace(data=jnp.full(shape, 0.8)),
+                     concentration=st.concentration.replace(data=jnp.full(shape, 0.7)),
+                     T_ice=st.T_ice.replace(data=jnp.full(shape, 260.0)))
+    st = distribute_dynamic_state_to_categories(st, 5)
+    cfg = SeaIceConfig(dynamics="free_drift", transport="none", n_categories=5,
+                       itd_remap="lipscomb2001", brine=BrineConfig(enabled=True),
+                       ridging=RidgingConfig(enabled=True, closing_scheme="convergence"))
+    atm = _min_forcing(shape)._replace(
+        precip_total=jnp.full(shape, rain), precip_snow=jnp.zeros(shape),
+        has_precipitation=jnp.asarray(1.0))
+    new, resp = step_sea_ice(
+        st, atm, jnp.full(shape, constants.T_freeze_ocean),
+        jnp.broadcast_to(0.5 * jnp.sin(g.lon), shape), jnp.zeros(shape),
+        cfg, U_min=0, dt=1800, grid=g)
+    return cfg, atm, new, resp
+
+
+def test_core2_prognostic_ice_rain_closes_through_ridging():
+    """Ridging after the thermodynamics shrinks the final ice cover below the
+    cover the ice forwarded rain with; the CORE-II split must use the cover the
+    ice reports, so ocean rain still equals the incident rain."""
+    sf0, fw0, _, _ = _open_forcing((8, 12))
+    land = jnp.ones((8, 12))
+
+    def delivered(rain):
+        cfg, atm, new, resp = _ridging_rain_step(rain)
+        fw, _ = R._blend_prognostic_ice_forcing(
+            sf0, fw0._replace(precip=jnp.full((8, 12), rain)), resp, new,
+            resp.ice_concentration_thermo, land, cfg,
+            constants.alpha_ocean_broadband, atm)
+        return np.asarray(fw.precip + fw.ice_fw), new, resp
+
+    rain = 2.0e-4
+    wet, new, resp = delivered(rain)
+    dry, _, _ = delivered(0.0)
+    a_final = np.asarray(jnp.sum(new.concentration.data, axis=-1))
+    # The fixture really ridges: final cover below the forwarding cover.
+    assert float(np.max(np.asarray(resp.ice_concentration_precip) - a_final)) > 1e-5
+    np.testing.assert_allclose(wet - dry, rain, rtol=1e-10)

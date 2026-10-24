@@ -3297,6 +3297,12 @@ def _step_dynamic_v2(
         tau_x_resp = result["tau_x"]
         tau_y_resp = result["tau_y"]
 
+    # Post-thermo aggregate cover: the frame the thermodynamics forwarded
+    # ice-fraction precip (rain, untracked snow) to the ocean in, before the
+    # ITD remap / caps / ridging below change the area.
+    conc_precip_fwd = jnp.clip(
+        jnp.sum(conc, axis=-1) if is_multicat else conc, 0.0, 1.0)
+
     # ---- 5. ITD remap ----
     if is_multicat:
         # Cap the aggregate area BEFORE the ITD remap so neither Lipscomb nor
@@ -3514,6 +3520,7 @@ def _step_dynamic_v2(
         ice_concentration_thermo=jnp.clip(
             (jnp.sum(conc_old, axis=-1) if is_multicat else conc_old),
             0.0, 1.0),
+        ice_concentration_precip=conc_precip_fwd,
     )
 
     new_state = DynamicSeaIceState(

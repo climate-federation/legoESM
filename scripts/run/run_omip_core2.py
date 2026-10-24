@@ -4824,15 +4824,19 @@ def _blend_prognostic_ice_forcing(sf, fw, ice_resp, ice_state, ice_conc_thermo,
     Heat, SW, stress and evaporation split at the thermodynamics-time cover
     ``ice_conc_thermo``.  The direct precip channel carries what the ice tile
     does not take: the ice forwards rain (and snow, when it tracks none) at the
-    POST-step cover, and stores tracked snow on the thermodynamics-time ice
-    area, so ocean + pack receive exactly ``P`` through freezing and melt-out.
+    post-thermo cover it reports (``ice_concentration_precip``, before ridging;
+    the post-step state cover when it reports none), and stores tracked snow on
+    the thermodynamics-time ice area, so ocean + pack receive exactly ``P``
+    through freezing, melt-out and ridging.
     Snowfall is the ice tile's own input (``atm_ice``).
     """
     from legoesm.coupler.ocean_forcing import blend_ice_ocean_forcing
     from legoesm.ice import uses_new_physics
-    conc_post = ice_state.concentration.data
-    if conc_post.ndim > np.asarray(land_mask).ndim:
-        conc_post = jnp.sum(conc_post, axis=-1)  # multi-category total
+    conc_post = ice_resp.ice_concentration_precip
+    if conc_post is None:
+        conc_post = ice_state.concentration.data
+        if conc_post.ndim > np.asarray(land_mask).ndim:
+            conc_post = jnp.sum(conc_post, axis=-1)  # multi-category total
     ice_precip = None
     if fw is not None:
         snow = atm_ice.precip_snow * atm_ice.has_precipitation
