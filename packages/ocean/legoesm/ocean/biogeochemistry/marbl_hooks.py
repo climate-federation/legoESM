@@ -58,17 +58,17 @@ class MARBLRunner(BGCRunner):
     @classmethod
     def from_args(cls, args, state, grid, z_coord, model, area2d):
         shape = tuple(state.T.data.shape)
-        land = np.asarray(state.land_mask.data) > 0.5
+        ocean = np.asarray(state.land_mask.data) > 0.5     # legoESM land_mask: 1 = ocean
         dtype = jnp.float64 if jax.config.jax_enable_x64 else state.T.data.dtype
         if not jax.config.jax_enable_x64:
             print("  WARNING: JAX_ENABLE_X64 is off; MARBL runs in float32", flush=True)
 
         # ---- initial state -------------------------------------------------
         if args.marbl_ic:
-            bgc = _load_ic_netcdf(args.marbl_ic, shape, land, dtype)
+            bgc = _load_ic_netcdf(args.marbl_ic, shape, ocean, dtype)
             print(f"[marbl] 32 tracers from {args.marbl_ic}", flush=True)
         else:
-            bgc = _seed_state(args, shape, land, np.asarray(z_coord.z_full_ref), dtype)
+            bgc = _seed_state(args, shape, ocean, np.asarray(z_coord.z_full_ref), dtype)
         # ---- MARBL column stepper -------------------------------------------
         cfg = MarblConfig()
         every = max(1, int(args.bgc_every))
@@ -88,7 +88,7 @@ class MARBLRunner(BGCRunner):
         r.forcing = _load_forcing(args.marbl_forcing, shape[:2])
         r.dt_bgc = dt_bgc
         r._acc = None; r._n_acc = 0
-        wet = ~land
+        wet = ocean
         print(f"[marbl] CESM2.1 PFT set, {len(TRACER_NAMES)} tracers, source/sink every {every} step(s) "
               f"(dt_bgc = {dt_bgc:.0f} s), xCO2 = {r.xco2} ppmv; surface means PO4 "
               f"{float(np.asarray(bgc.PO4)[..., 0][wet].mean()):.3f}, NO3 "
@@ -175,9 +175,9 @@ class MARBLRunner(BGCRunner):
 
 
 # ----------------------------------------------------------------------------- helpers
-def _seed_state(args, shape, land, z_full_ref, dtype):
+def _seed_state(args, shape, ocean, z_full_ref, dtype):
     nlev = shape[-1]
-    wet = (~land)[..., None]
+    wet = ocean[..., None]
     out = {}
     init = None
     if args.bgc_init_dir:
@@ -210,7 +210,7 @@ def _seed_state(args, shape, land, z_full_ref, dtype):
     return MarblTracers(**{k: jnp.asarray(np.where(wet, out[k], 0.0), dtype) for k in TRACER_NAMES})
 
 
-def _load_ic_netcdf(path, shape, land, dtype):
+def _load_ic_netcdf(path, shape, ocean, dtype):
     import xarray as xr
     ds = xr.open_dataset(path)
     out = {}
@@ -220,7 +220,7 @@ def _load_ic_netcdf(path, shape, land, dtype):
         a = np.asarray(ds[k].values, np.float64)
         if a.shape != shape:
             raise ValueError(f"{path}: {k} has shape {a.shape}, model grid is {shape}")
-        out[k] = jnp.asarray(np.where(np.isfinite(a) & (~land)[..., None], a, 0.0), dtype)
+        out[k] = jnp.asarray(np.where(np.isfinite(a) & ocean[..., None], a, 0.0), dtype)
     return MarblTracers(**out)
 
 

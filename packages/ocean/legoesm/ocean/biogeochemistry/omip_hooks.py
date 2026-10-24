@@ -217,7 +217,7 @@ class BGCRunner:
         payload = {f: np.asarray(getattr(self.bgc, f)) for f in self.fields}
         payload["_step"] = np.asarray(int(step))
         payload["_scheme"] = np.asarray(self.scheme)
-        payload["_pco2_atm"] = np.asarray(float(self.cfg.pCO2_atm))
+        payload["_pco2_atm"] = np.asarray(float(getattr(self.cfg, "pCO2_atm", getattr(self, "xco2", float("nan")))))
         if self._inv0 is not None:
             payload["_inv0"] = np.asarray(self._inv0)
             payload["_vol0"] = np.asarray(float(self._vol0))
