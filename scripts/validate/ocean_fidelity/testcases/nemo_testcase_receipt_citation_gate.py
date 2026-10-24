@@ -135,6 +135,12 @@ FILES = {
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traadv.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfsh2.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfsh2.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfdrg.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfdrg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfmxl.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfmxl.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/MY_SRC/stprk3.F90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/MY_SRC/stprk3.F90"),
     # ORCA2 round 311: G1b's build (P5) and G8's build (R31FULLENTRY_FIX1).
@@ -1764,6 +1770,29 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # ORCA2 round 331: remaining TKE input and source-order localisation.
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:316-336': [
+        ('IF( l_zdfsh2 ) THEN', 1),
+        'CASE( np_TKE )   ;   CALL zdf_tke( kt, Kbb, Kmm, sh2, avm_k, avt_k )', 21],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfsh2.f90:98-112': [
+        '!* 2 x shear production at uw- and vw-points',
+        'p_sh2(ji,jj,jk) = 0.25 *', 15],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfdrg.f90:165-187': [
+        'SELECT CASE( TRIM(cd_topbot) )',
+        'rCdU_top(ji,jj) = rCdU_ice(ji,jj)', 23],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfmxl.f90:109-123': [
+        '! w-level of the mixing and mixed layers',
+        'hmlp(ji,jj) = ((gdepw_1d(iik  ) ) *(1._wp+r3t(ji,jj,Kmm))) * ssmask(ji,jj)', 15],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:500-507': [
+        'IF( nn_etau == 1 ) THEN',
+        'jk = nmln(ji,jj)', 8],
+    'nemo_testcase_recipe.py:416,421-422': [
+        'tke_surface_bc_level="nemo_z0",',
+        'tke_matrix_evaluation="nemo_literal",',
+        'tke_solver_evaluation="nemo_literal",', 3],
+    'tke.py:1845-1857': [
+        'if surface_bc_level not in ("interior_pinned", "nemo_z0"):',
+        '# ---- NEMO z=0 surface row (zdftke.F90:264-269,403-410) ----', 13],
     # ORCA2 round 330: the compiled TKE solve topology and literal card fix.
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:222-240': [
         'REAL(wp), DIMENSION(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0) ,jpk)          , INTENT(in   ) ::   p_sh2',
