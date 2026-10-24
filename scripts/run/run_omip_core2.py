@@ -9286,6 +9286,7 @@ def main() -> int:
         "restart_branch_from_different_config",
         # operator-split BGC (omip_hooks): outside the ocean state; its own sidecar
         "biogeo", "pco2_atm", "bgc_init_dir", "bgc_k_bg", "bgc_diag_every_days", "bgc_every",
+        "marbl_ic", "marbl_forcing", "marbl_batch_size", "marbl_n_iter",
     })
     # Path-valued args are normalised before hashing so an equivalent relative
     # path or symlink cannot false-abort a legitimate chained leg.

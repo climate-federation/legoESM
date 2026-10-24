@@ -45,14 +45,15 @@ from legoesm.ocean.biogeochemistry.transport import TracerTransporter
 _RHO_A = 1.225
 _C_D = 1.3e-3
 
-SCHEMES = ("none", "abiotic", "npzd", "npzd_v2")
+SCHEMES = ("none", "abiotic", "npzd", "npzd_v2", "marbl")
 
 
 def add_arguments(p) -> None:
     g = p.add_argument_group("ocean biogeochemistry (operator-split, outside the physics step)")
     g.add_argument("--biogeo", choices=SCHEMES, default="none",
                    help="BGC scheme: abiotic = DIC+ALK with air-sea CO2; npzd adds NO3/P/Z/D; "
-                        "npzd_v2 = 18 tracers (2 PFTs, NH4, PO4/Si/Fe, DON/DOP, POC/DOC, O2).")
+                        "npzd_v2 = 18 tracers (2 PFTs, NH4, PO4/Si/Fe, DON/DOP, POC/DOC, O2); "
+                        "marbl = the 32-tracer MARBL port (biogeochemistry/marbl, CESM2.1 PFTs).")
     g.add_argument("--pco2-atm", type=float, default=284.0,
                    help="Atmospheric pCO2 [uatm] (default 284 = pre-industrial).")
     g.add_argument("--bgc-init-dir", type=str, default=None,
@@ -65,12 +66,23 @@ def add_arguments(p) -> None:
                    help="Print global inventories / air-sea flux every N days (0 = off).")
     g.add_argument("--bgc-every", type=int, default=1,
                    help="Call the BGC source/sink every N physics steps (transport is every step).")
+    g.add_argument("--marbl-ic", type=str, default=None,
+                   help="MARBL initial state: NetCDF with all 32 tracers on the model grid [mmol/m^3] "
+                        "(scripts/build_marbl_ic.py). Default: DIC/ALK/NO3/PO4/SiO3/O2 from --bgc-init-dir "
+                        "and small uniform seeds for the organic / plankton pools.")
+    g.add_argument("--marbl-forcing", type=str, default=None,
+                   help="Monthly deposition forcing (dust_flux, iron_flux, nox_flux, nhy_flux[, ifrac]) "
+                        "on the model grid, (12, n_lat, n_lon). Default: no deposition.")
+    g.add_argument("--marbl-batch-size", type=int, default=4096)
+    g.add_argument("--marbl-n-iter", type=int, default=50,
+                   help="Carbonate-system solver iterations in the MARBL column step.")
 
 
 class BGCRunner:
     def __init__(self, cfg: BiogeoConfig, bgc: OceanBiogeoState, transporter: TracerTransporter,
                  z_coord, area2d, land_mask_2d, *, every: int, diag_every_days: float):
         self.cfg = cfg
+        self.scheme = getattr(cfg, "scheme", "marbl")
         self.bgc = bgc
         self.tr = transporter
         self.z_coord = z_coord
@@ -90,6 +102,9 @@ class BGCRunner:
     def from_args(cls, args, state, grid, z_coord, model, area2d):
         if getattr(args, "biogeo", "none") == "none":
             return None
+        if args.biogeo == "marbl":
+            from legoesm.ocean.biogeochemistry.marbl_hooks import MARBLRunner
+            return MARBLRunner.from_args(args, state, grid, z_coord, model, area2d)
         cfg = BiogeoConfig(scheme=args.biogeo, pCO2_atm=float(args.pco2_atm))
         shape = tuple(state.T.data.shape)
         bgc = init_biogeo_state(shape, jnp.asarray(z_coord.z_full_ref), cfg)
@@ -201,7 +216,7 @@ class BGCRunner:
         out = self.sidecar(restart_path)
         payload = {f: np.asarray(getattr(self.bgc, f)) for f in self.fields}
         payload["_step"] = np.asarray(int(step))
-        payload["_scheme"] = np.asarray(self.cfg.scheme)
+        payload["_scheme"] = np.asarray(self.scheme)
         payload["_pco2_atm"] = np.asarray(float(self.cfg.pCO2_atm))
         if self._inv0 is not None:
             payload["_inv0"] = np.asarray(self._inv0)
@@ -221,7 +236,7 @@ class BGCRunner:
             src = _legacy
         if not src.exists():
             raise FileNotFoundError(
-                f"--biogeo {self.cfg.scheme}: resuming from {restart_path} but its BGC sidecar "
+                f"--biogeo {self.scheme}: resuming from {restart_path} but its BGC sidecar "
                 f"{src} does not exist. Resume from a leg that ran with BGC, or branch with a "
                 f"fresh BGC state (omit --restart-from for the BGC by deleting the sidecar expectation).")
         d = np.load(src, allow_pickle=False)
@@ -229,8 +244,8 @@ class BGCRunner:
         if st != int(expect_step):
             raise ValueError(f"{src}: BGC step {st} != ocean restart step {expect_step}")
         sch = str(d["_scheme"])
-        if sch != self.cfg.scheme:
-            raise ValueError(f"{src}: scheme {sch!r} != requested {self.cfg.scheme!r}")
+        if sch != self.scheme:
+            raise ValueError(f"{src}: scheme {sch!r} != requested {self.scheme!r}")
         upd = {f: jnp.asarray(d[f], dtype=self.bgc.DIC.dtype) for f in self.fields if f in d.files}
         missing = [f for f in self.fields if f not in d.files]
         if missing:
