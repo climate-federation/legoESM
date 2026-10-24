@@ -296,7 +296,17 @@ def _with_vmix_terms(config, *, ddm: bool, iwm: bool):
 def _profile_phase_config(config):
     """Select the pre-stage profile phase where NEMO calls zdf_phy."""
     return config._replace(
-        rk3_stage3_damping_after_geothermal_nemo_order=False)
+        rk3_stage3_heat_nemo_written=False,
+        rk3_stage3_tracer_nemo_stored_thickness=False,
+        rk3_stage3_salt_nemo_written=False,
+        rk3_stage3_tracer_krhs_nemo_order=False,
+        rk3_stage3_geothermal_nemo_written=False,
+        rk3_stage3_geothermal_after_ldf_nemo_order=False,
+        rk3_stage3_damping_after_geothermal_nemo_order=False,
+        rk3_stage3_l8_nemo_order=False,
+        rk3_stage3_l9_eiv_nemo_order=False,
+        bbl_adv_option=0,
+        bbl_diffusive_option=0)
 
 
 def _profile_setup(model, card, surface):
