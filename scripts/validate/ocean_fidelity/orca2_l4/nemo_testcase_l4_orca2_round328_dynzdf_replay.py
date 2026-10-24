@@ -227,7 +227,6 @@ def assemble_record_avm(records: dict[int, dict]) -> np.ndarray:
 
 def model_avm(root: Path, record_avm: np.ndarray) -> dict[str, object]:
     import jax
-    import jax.numpy as jnp
 
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
@@ -236,13 +235,16 @@ def model_avm(root: Path, record_avm: np.ndarray) -> dict[str, object]:
     _, shipped = rung10.card_fields(root)
     card = rung10.comparison_card(shipped)
     surface_fields = rung10.assemble_surface_fields(root, 1)
-    _, surface = rung10._surface_forcings(card, root, surface_fields, 1)
+    freshwater, surface = rung10._surface_forcings(card, root, surface_fields, 1)
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         iwm_forcing=card.recipe.iwm_forcing)
-    _, candidate = jax.device_get(model.diagnose_vertical_K(
-        card.recipe.initial_state, card.dt_s, surface_forcing=surface))
-    candidate = np.asarray(candidate, dtype=np.float64)
+    state_after = jax.device_get(model.step(
+        card.recipe.initial_state, card.dt_s, freshwater=freshwater,
+        surface_forcing=surface, **rung10.damping_step_kwargs(card, root, 1)))
+    require(state_after.tke_avm is not None,
+            "ordinary comparison step did not return its consumed avm")
+    candidate = np.asarray(state_after.tke_avm.data, dtype=np.float64)
     require(candidate.shape == record_avm.shape,
             f"model avm {candidate.shape} != record {record_avm.shape}")
     active = np.asarray(card.recipe.z_coord.is_active[..., 1:], dtype=bool)
