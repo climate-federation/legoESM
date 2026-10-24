@@ -56,6 +56,9 @@ from legoesm.grids.vertical import make_cam6_l32_levels  # noqa: E402
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "oracle_fixtures", "zm_pblh_cam.npz")
 TOL = 1e-10
+# Fixture-input rebuild: last-digit libm differences across machines (measured
+# worst 2.6e-14 relative, q_v); a real generator change is far larger.
+REBUILD_RTOL = 1e-13
 # fixture key -> legoESM tracer name -> oracle convtran output (make_fixture.TRACERS)
 TRACERS = (("qc", "q_c", "dqc_convtran"), ("qi", "q_i", "dqi_convtran"),
            ("nc", "N_c", "dnc_convtran"), ("ni", "N_i", "dni_convtran"),
@@ -324,7 +327,7 @@ def test_turbulence_publishes_pblh_into_the_physics_state():
 
 def test_fixture_inputs_are_what_the_generator_builds(fx, tmp_path):
     """Direct test of scripts/validate/oracle/zm_pblh/make_fixture.py: its
-    Python side rebuilds the committed inputs exactly, and its oracle-output
+    Python side rebuilds the committed inputs to REBUILD_RTOL, and its oracle-output
     parser reads the driver's record format."""
     import importlib.util
     path = os.path.join(os.path.dirname(__file__), "..", "..", "scripts", "validate",
@@ -335,7 +338,7 @@ def test_fixture_inputs_are_what_the_generator_builds(fx, tmp_path):
     c = mf.build_columns()
     for k in ("T", "q", "p_s", "p_full", "p_half", "u", "v", "cld", "land", "pblh", "pref_edge",
               "qc", "qi", "nc", "ni", "qr", "qs", "nr"):
-        np.testing.assert_array_equal(c[k], fx[k], err_msg=k)
+        np.testing.assert_allclose(c[k], fx[k], rtol=REBUILD_RTOL, atol=0.0, err_msg=k)
     p = tmp_path / "o.txt"
     p.write_text("DIMS 2 3 1\nLIMCNV 6\nF1 cape 2\n1.5\n0.0\nI1 ideep 2\n2\n0\n"
                  "F2 heat 2 3\n1\n2\n3\n4\n5\n6\n")

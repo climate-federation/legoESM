@@ -33,6 +33,9 @@ ROOT = Path(__file__).resolve().parents[4]
 FIXTURE = ROOT / "tests/atmosphere/oracle_fixtures/sundqvist_zhao_carr.npz"
 GENERATOR = ROOT / "scripts/validate/oracle/sundqvist_zhao_carr/make_fixture.py"
 TOL = 1.0e-10
+# Fixture-input rebuild: last-digit libm differences across machines (measured
+# worst 2.6e-14 relative, q_v); a real generator change is far larger.
+REBUILD_RTOL = 1e-13
 HARD = 1.0e12        # sigmoid_sharpness hard-switch limit (tier-2 audit HARD)
 RUNS = ("A", "B", "C")
 
@@ -82,7 +85,7 @@ def _whole_call(fx, run, sharpness=HARD, dtype=jnp.float64, idx=None):
 
 
 def test_fixture_provenance_and_inputs_reproduce():
-    """The committed generator rebuilds the fixture's inputs bit-for-bit."""
+    """The committed generator rebuilds the fixture's inputs to REBUILD_RTOL."""
     fx = _fx()
     meta = json.loads(str(fx["meta"]))
     assert meta["tag"] == "v7.0.1"
@@ -94,7 +97,8 @@ def test_fixture_provenance_and_inputs_reproduce():
     cols = gen.build_columns()
     assert [c["name"] for c in cols] == list(fx["names"])
     for k in gen.COL_FIELDS:
-        np.testing.assert_array_equal(np.stack([c[k] for c in cols]), fx[f"col_{k}"])
+        np.testing.assert_allclose(np.stack([c[k] for c in cols]), fx[f"col_{k}"],
+                                   rtol=REBUILD_RTOL, atol=0.0)
     for run, vals in gen.RUNS.items():
         np.testing.assert_array_equal(np.array(vals), fx[f"run_{run}"])
 

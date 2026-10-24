@@ -616,27 +616,26 @@ def _zm_driver_config(grid_type, resolution, dycore_kw):
         convection="zhang_mcfarlane")
 
 
-@pytest.mark.parametrize("grid_type,resolution,dycore_kw", [
-    ("cubed_sphere", 8, {"dt": 1.0}),
-    ("mpas", 2, {"dt": 600.0, "discretization": "mpas"}),
-], ids=["column_pipeline", "mpas_combined"])
-def test_driver_zm_land_policy_means_the_same_on_every_lane(tmp_path, grid_type, resolution, dycore_kw):
-    """One rule, both driver lanes, on a flat (all-ocean) run: "required"
-    stops at setup, "none" runs to completion.  The cubed-sphere
-    PhysicsPipeline lane refuses ZM outright (it would discard ZM's momentum
-    transport), so there both land policies stop at that refusal."""
+def test_driver_zm_land_policy_on_the_mpas_lane(tmp_path):
+    """On a flat (all-ocean) MPAS run: "required" stops at setup, "none" runs
+    to completion."""
     from legoesm.driver.model_driver import ModelDriver
 
-    cfg = _zm_driver_config(grid_type, resolution, dycore_kw)
+    cfg = _zm_driver_config("mpas", 2, {"dt": 600.0, "discretization": "mpas"})
     assert cfg.zm_land_fraction == "required"
-    if grid_type == "cubed_sphere":
-        for policy in ("required", "none"):
-            with pytest.raises(ValueError, match="convective momentum transport"):
-                ModelDriver(cfg._replace(zm_land_fraction=policy),
-                            output_dir=tmp_path / policy).setup()
-        return
     with pytest.raises(ValueError, match="no land"):
         ModelDriver(cfg, output_dir=tmp_path / "req").setup()
     driver = ModelDriver(cfg._replace(zm_land_fraction="none"), output_dir=tmp_path / "none")
     driver.setup()
     assert driver.run() == "COMPLETED"
+
+
+@pytest.mark.parametrize("policy", ["required", "none"])
+def test_cubed_sphere_pipeline_lane_refuses_zm_for_any_land_policy(tmp_path, policy):
+    """The cubed-sphere PhysicsPipeline lane would discard ZM's momentum
+    transport, so it refuses ZM at setup before any land policy applies."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    cfg = _zm_driver_config("cubed_sphere", 8, {"dt": 1.0})
+    with pytest.raises(ValueError, match="convective momentum transport"):
+        ModelDriver(cfg._replace(zm_land_fraction=policy), output_dir=tmp_path).setup()
