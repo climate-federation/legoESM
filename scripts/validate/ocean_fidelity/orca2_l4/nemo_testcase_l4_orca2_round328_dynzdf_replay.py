@@ -276,6 +276,8 @@ def term_localization(candidate: np.ndarray, record: np.ndarray,
         "record_equals_closure_without_ddm_or_iwm": int(np.count_nonzero(closure_equal)),
         "iwm_changes_candidate_at_residual": int(np.count_nonzero(iwm_changed & unequal)),
         "ddm_changes_candidate_at_residual": int(np.count_nonzero(ddm_changed & unequal)),
+        "iwm_changes_at_residual_by_level": vertical_counts(iwm_changed & unequal),
+        "ddm_changes_at_residual_by_level": vertical_counts(ddm_changed & unequal),
         "iwm_unchanged_at_residual": int(np.count_nonzero(~iwm_changed & unequal)),
         "ddm_unchanged_at_residual": int(np.count_nonzero(~ddm_changed & unequal)),
     }
@@ -291,21 +293,27 @@ def _with_vmix_terms(config, *, ddm: bool, iwm: bool):
         physics=config.physics._replace(vertical_mixing=vmix))
 
 
-def _profile_setup(model, card, surface, sponge):
+def _profile_phase_config(config):
+    """Select the pre-stage profile phase where NEMO calls zdf_phy."""
+    return config._replace(
+        rk3_stage3_damping_after_geothermal_nemo_order=False)
+
+
+def _profile_setup(model, card, surface):
     state = card.recipe.initial_state
     bundle = model._tke_step_entry_n2_bundle(state)
     state_expl, operands = model._step_impl(
-        state, card.dt_s, surface_forcing=surface, sponge=sponge,
+        state, card.dt_s, surface_forcing=surface,
         _apply_implicit_vmix=False,
         _tke_n2_bundle_override=bundle)
     return state, bundle, state_expl, operands
 
 
-def _diagnose_profiles(model, card, surface, sponge):
+def _diagnose_profiles(model, card, surface):
     import jax
 
     state, bundle, state_expl, operands = _profile_setup(
-        model, card, surface, sponge)
+        model, card, surface)
     (K_v_phys, A_v_phys, _k33, _surface_tracer_forcing, tke_source,
      _diss_incr, _tracer_source) = operands
     tke_old = state.tke.data if state.tke is not None else None
@@ -323,12 +331,12 @@ def _diagnose_profiles(model, card, surface, sponge):
             np.asarray(momentum, dtype=np.float64))
 
 
-def _diagnose_salt_profile(model, card, surface, sponge):
+def _diagnose_salt_profile(model, card, surface):
     """Read avs before lateral K33 from the model's own literal solve setup."""
     import jax
 
     state, bundle, state_expl, operands = _profile_setup(
-        model, card, surface, sponge)
+        model, card, surface)
     (K_v_phys, A_v_phys, _k33, surface_tracer_forcing, tke_source,
      _diss_incr, tracer_source) = operands
     tke_old = state.tke.data if state.tke is not None else None
@@ -380,13 +388,16 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
     card = rung10.comparison_card(shipped)
     surface_fields = rung10.assemble_surface_fields(root, 1)
     freshwater, surface = rung10._surface_forcings(card, root, surface_fields, 1)
+    profile_config = _profile_phase_config(card.recipe.model_config)
+    profile_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, profile_config,
+        iwm_forcing=card.recipe.iwm_forcing)
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         iwm_forcing=card.recipe.iwm_forcing)
     step_kwargs = rung10.damping_step_kwargs(card, root, 1)
-    sponge = step_kwargs.get("sponge")
-    heat, candidate = _diagnose_profiles(model, card, surface, sponge)
-    salt = _diagnose_salt_profile(model, card, surface, sponge)
+    heat, candidate = _diagnose_profiles(profile_model, card, surface)
+    salt = _diagnose_salt_profile(profile_model, card, surface)
     state_after = jax.device_get(model.step(
         card.recipe.initial_state, card.dt_s, freshwater=freshwater,
         surface_forcing=surface, **step_kwargs))
@@ -395,16 +406,15 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
     closure_state = np.asarray(state_after.tke_avm.data, dtype=np.float64)
 
     ddm_config = _with_vmix_terms(
-        card.recipe.model_config, ddm=True, iwm=False)
+        profile_config, ddm=True, iwm=False)
     closure_config = _with_vmix_terms(
-        card.recipe.model_config, ddm=False, iwm=False)
+        profile_config, ddm=False, iwm=False)
     after_ddm_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, ddm_config)
     closure_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, closure_config)
-    _, after_ddm = _diagnose_profiles(
-        after_ddm_model, card, surface, sponge)
-    _, closure = _diagnose_profiles(closure_model, card, surface, sponge)
+    _, after_ddm = _diagnose_profiles(after_ddm_model, card, surface)
+    _, closure = _diagnose_profiles(closure_model, card, surface)
     record_avm = assemble_record_avm(records)
     require(candidate.shape == record_avm.shape,
             f"model avm {candidate.shape} != record {record_avm.shape}")
@@ -427,11 +437,14 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
         candidate, record_avm, after_ddm, closure, active)
     row["state_tke_avm_vs_closure_without_ddm_or_iwm"] = score(
         closure_state, closure, active)
+    row["profile_phase"] = (
+        "pre-stage zdf_phy; stage-3 damping disabled only in diagnostic setup")
 
     tracer_record = read_record_tracer_profiles(root)
     rank0_active = active[:, :tracer_record["avt"].shape[1], :]
     record_avt = tracer_record["avt"][..., 1:-1]
     record_avs = tracer_record["avs"][..., 1:-1]
+    record_en = tracer_record["en"][..., 1:-1]
     require(record_avt.shape == heat[:, :record_avt.shape[1]].shape,
             "rank-0 avt record differs from the consumed model profile")
     require(record_avs.shape == salt[:, :record_avs.shape[1]].shape,
@@ -442,6 +455,12 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
         "avs_rank0": score(
             salt[:, :record_avs.shape[1]], record_avs, rank0_active),
     }
+    if state_after.tke is not None:
+        model_en = np.asarray(state_after.tke.data, dtype=np.float64)
+        require(record_en.shape == model_en[:, :record_en.shape[1]].shape,
+                "rank-0 en record differs from the model TKE shape")
+        tracer_rows["en_rank0"] = score(
+            model_en[:, :record_en.shape[1]], record_en, rank0_active)
     candidate_faces = {
         "u": np.asarray(interp_cell_to_uface(jnp.asarray(candidate)))[:, 1:],
         "v": np.asarray(interp_to_v_points(
