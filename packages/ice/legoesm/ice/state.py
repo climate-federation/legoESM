@@ -294,3 +294,14 @@ def distribute_dynamic_state_to_categories(
         pond_depth=_lift(
             state.pond_depth, state.pond_depth.data[..., jnp.newaxis] * occ),
     )
+
+
+from legoesm.ice.si3_orca2_state import (  # noqa: E402,F401
+    SI3AggregatedVars,
+    SI3AllPratherMoments,
+    SI3CategoryBounds,
+    SI3EquivalentVars,
+    SI3PratherMoments,
+    SI3State,
+)
+

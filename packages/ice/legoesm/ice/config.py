@@ -521,3 +521,7 @@ class SeaIceConfig(NamedTuple):
     # NEMO distinguishes the Dalton (Ce) and Stanton (Ch) coefficients even
     # when ORCA1 makes them equal.
     Ce_ice: float = constants.bulk_transfer_ice_default
+
+
+from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig  # noqa: E402,F401
+

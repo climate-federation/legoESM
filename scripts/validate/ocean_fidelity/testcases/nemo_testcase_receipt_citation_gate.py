@@ -248,6 +248,49 @@ FILES = {
     "tests/ocean/fidelity/test_nemo_si3thd_phase2b_year_gate.py": (
         REPO / "tests/ocean/fidelity/test_nemo_si3thd_phase2b_year_gate.py"),
     # --- SI3 ladder round 2, round 3 & round 5 (D5) END ---
+    # --- SI3 ladder round 4 (O1) BEGIN ---
+    "docs/ice/fidelity/si3_r4_o1_preregister.md": (
+        REPO / "docs/ice/fidelity/si3_r4_o1_preregister.md"),
+    "docs/ice/fidelity/si3_r4_o1_receipt.md": (
+        REPO / "docs/ice/fidelity/si3_r4_o1_receipt.md"),
+    "packages/ice/legoesm/ice/si3_orca2_state.py": (
+        REPO / "packages/ice/legoesm/ice/si3_orca2_state.py"),
+    "packages/ice/legoesm/ice/__init__.py": (
+        REPO / "packages/ice/legoesm/ice/__init__.py"),
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh": (
+        REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh"),
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_si3_state_writer.F90": (
+        REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_si3_state_writer.F90"),
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_si3_fixture_stubs.F90": (
+        REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_si3_fixture_stubs.F90"),
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_si3_layout_fixture.F90": (
+        REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_si3_layout_fixture.F90"),
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py": (
+        REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py"),
+    "tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py": (
+        REPO / "tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py"),
+    "scripts/validate/ocean_fidelity/testcases/nemo_testcase_g1_orca2grid/run.sh": (
+        REPO / "scripts/validate/ocean_fidelity/testcases/nemo_testcase_g1_orca2grid/run.sh"),
+    "scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_orca2_tke_boundary_acquisition/run.sh": (
+        REPO / "scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_orca2_tke_boundary_acquisition/run.sh"),
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_phase2_adv2d_gate.py": (
+        REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_phase2_adv2d_gate.py"),
+    "cfgs/ORCA2_SAS_ICE/cpp_ORCA2_SAS_ICE.fcm": (
+        NEMO / "cfgs/ORCA2_SAS_ICE/cpp_ORCA2_SAS_ICE.fcm"),
+    "cfgs/ORCA2_SAS_ICE/EXPREF/namelist_ice_cfg": (
+        NEMO / "cfgs/ORCA2_SAS_ICE/EXPREF/namelist_ice_cfg"),
+    "cfgs/SHARED/namelist_ice_ref": NEMO / "cfgs/SHARED/namelist_ice_ref",
+    "cfgs/ref_cfgs.txt": NEMO / "cfgs/ref_cfgs.txt",
+    "src/ICE/icedyn_adv_pra.F90": NEMO / "src/ICE/icedyn_adv_pra.F90",
+    "src/ICE/iceitd.F90": NEMO / "src/ICE/iceitd.F90",
+    "src/ICE/icerst.F90": NEMO / "src/ICE/icerst.F90",
+    "src/ICE/icestp.F90": NEMO / "src/ICE/icestp.F90",
+    "src/ICE/iceupdate.F90": NEMO / "src/ICE/iceupdate.F90",
+    "src/OCE/LBC/lbc_lnk_pt2pt_generic.h90": (
+        NEMO / "src/OCE/LBC/lbc_lnk_pt2pt_generic.h90"),
+    "src/OCE/LBC/lbc_nfd_generic.h90": (
+        NEMO / "src/OCE/LBC/lbc_nfd_generic.h90"),
+    # --- SI3 ladder round 4 (O1) END ---
     # ORCA2 round 311: G1b's build (P5) and G8's build (R31FULLENTRY_FIX1).
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90": NEMO / "cfgs/ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90",
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynkeg.f90": NEMO / "cfgs/ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynkeg.f90",
@@ -2230,6 +2273,107 @@ CITATION_MAP = {
     'tests/ocean/fidelity/test_nemo_si3thd_phase2b_year_gate.py:64-85': ['def test_snow_free_entry_uses_nemo_zero_volume_convention(gate) -> Non', 'assert found, "seasonal C1D stream never exercised its snow-free state', 22],
     'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:1938-2100': ['def test_r5_all_touched_functions_gradients_and_forward_bits(', 'assert float(jnp.linalg.norm(planted_g)) > 0.0', 163],
     # --- SI3 ladder round 2, round 3 & round 5 (D5) END ---
+    # --- SI3 ladder round 4 (O1) BEGIN ---
+    'docs/ice/fidelity/si3_ladder_design.md:221': '| O1 | ORCA2_SAS_ICE, dynamics/thermo off, exact NEMO state injected. ',
+    'cfgs/ORCA2_SAS_ICE/cpp_ORCA2_SAS_ICE.fcm:1': 'bld::tool::fppkeys   key_si3 key_linssh key_vco_1d3d key_xios key_RK3',
+    'docs/ice/fidelity/si3_r4_o1_preregister.md:1-76': ['# SI3 Ladder Rung O1 (`si3_r4`) — Preregistration', '- Item 7 (whitespace-tolerant log check & `EXIT` trap): planted `E R R', 76],
+    'packages/ice/legoesm/ice/si3_orca2_state.py:1-2001': ['"""Selectable full ORCA2 SI3 state, category bounds, aggregation, halo', (']', 175), 2001],
+    'packages/ice/legoesm/ice/state.py:299-306': ['from legoesm.ice.si3_orca2_state import (  # noqa: E402,F401', (')', 102), 8],
+    'packages/ice/legoesm/ice/config.py:526': 'from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig  # noqa: E',
+    'packages/ice/legoesm/ice/itd.py:769-772': ['from legoesm.ice.si3_orca2_state import (  # noqa: E402,F401', (')', 283), 4],
+    'packages/ice/legoesm/ice/__init__.py:199-221': ['from legoesm.ice.si3_orca2_state import (  # noqa: E402', (')', 17), 23],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:1-630': ['#!/usr/bin/env bash', 'printf \'ACQUISITION_DONE %s\\n\' "$EVIDENCE"', 630],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1-1162': ['#!/usr/bin/env python3', 'raise SystemExit(main())', 1162],
+    'scripts/validate/ocean_fidelity/testcases/nemo_testcase_g1_orca2grid/run.sh:1-382': ['#!/usr/bin/env bash', ('admit', 18), 382],
+    'scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_orca2_tke_boundary_acquisition/run.sh:1-903': ['#!/usr/bin/env bash', ('finalize_existing', 3), 903],
+    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:1-947': [('MODULE icethd_zdf_BL99', 1), 'END MODULE icethd_zdf_BL99', 947],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_phase2_adv2d_gate.py:1-120': ['#!/usr/bin/env python3', (')', 43), 120],
+    'packages/ice/legoesm/ice/si3_orca2_state.py:73-597': ['class SI3ORCA2StateConfig(NamedTuple):', (')', 154), 525],
+    'packages/ice/legoesm/ice/si3_orca2_state.py:73-135': ['class SI3ORCA2StateConfig(NamedTuple):', ('return base._replace(**overrides) if overrides else base', 2), 63],
+    'cfgs/ORCA2_SAS_ICE/EXPREF/namelist_ice_cfg:1-84': [('!!>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>', 1), ('/', 20), 84],
+    'cfgs/SHARED/namelist_ice_ref:22-258': ['&nampar         !   Generic parameters', ('/', 40), 237],
+    'packages/ice/legoesm/ice/si3_orca2_state.py:120-135': ['def for_lane3_c1d(cls, **overrides: Any) -> "SI3ORCA2StateConfig":', ('return base._replace(**overrides) if overrides else base', 2), 16],
+    'packages/ice/legoesm/ice/si3_orca2_state.py:150-210': ['class SI3PratherMoments(NamedTuple):', (')', 50), 61],
+    'src/ICE/icedyn_adv_pra.F90:36-46': ['REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:)   ::   sxice, syice, sxx', 'REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:)   ::   sxvl , syvl , sxx', 11],
+    'src/ICE/icedyn_adv_pra.F90:1145-1200': [('SUBROUTINE adv_pra_init', 1), 'END SUBROUTINE adv_pra_init', 56],
+    'packages/ice/legoesm/ice/si3_orca2_state.py:314-597': ['class SI3State(NamedTuple):', (')', 154), 284],
+    'packages/ice/legoesm/ice/si3_orca2_state.py:401-597': ['def from_column_state(', (')', 154), 197],
+    'packages/ice/legoesm/ice/si3_orca2_state.py:600-738': ['def _hfn_bisection_primal(', ('return SI3CategoryBounds(hi_max=hi_max, hi_mean=hi_mean)', 2), 139],
+    'src/ICE/iceitd.F90:715-769': ['IF(lwp) THEN                  ! control print', 'END SUBROUTINE ice_itd_init', 55],
+    'src/ICE/iceitd.F90:736-761': ['SELECT CASE( nice_catbnd )', 'hi_max(jpl) = rn_himax        ! set to a big value to ensure that all ', 26],
+    'src/ICE/iceitd.F90:757-759': ['DO jl = 1, jpl                ! mean thickness by category', ('END DO', 23), 3],
+    'src/ICE/iceitd.F90:761': 'hi_max(jpl) = rn_himax        ! set to a big value to ensure that all ',
+    'packages/ice/legoesm/ice/si3_orca2_state.py:761-1026': ['def si3_var_salprof(', (')', 373), 266],
+    'src/ICE/icevar.F90:255-428': ['SUBROUTINE ice_var_glo2eqv( kn )', 'END SUBROUTINE ice_var_glo2eqv', 174],
+    'src/ICE/icevar.F90:454-534': [('SUBROUTINE ice_var_salprof', 1), ('END SUBROUTINE ice_var_salprof', 1), 81],
+    'src/ICE/icevar.F90:1564-1587': ['SUBROUTINE ice_var_snwfra_3d( ph_s, pa_s_fra )', 'END SUBROUTINE ice_var_snwfra_3d', 24],
+    'src/ICE/icevar.F90:290-303': [('DO jl = 1, jpl', 4), ('END_2D', 8), 14],
+    'src/ICE/icevar.F90:344-379': ['IF( nn_icesal == 1 .OR. nn_icesal == 3 ) THEN', ('ENDIF', 18), 36],
+    'src/ICE/icevar.F90:384-402': [('zlay_i = REAL( nlay_i , wp )    ! number of layers', 2), ('END DO', 8), 19],
+    'src/ICE/icevar.F90:407-419': ['zlay_s = REAL( nlay_s , wp )', ('END DO', 10), 13],
+    'src/ICE/icevar.F90:315-339': ['h_ip(ji,jj,jl) = v_ip(ji,jj,jl) * z1_a_ip', ('ENDIF', 15), 25],
+    'packages/ice/legoesm/ice/si3_orca2_state.py:1029-1213': ['def si3_var_agg(', 'return new_mass, snwice_mass_prev, fmass', 185],
+    'packages/ice/legoesm/ice/si3_orca2_state.py:1029-1184': ['def si3_var_agg(', (')', 428), 156],
+    'src/ICE/icevar.F90:105-252': ['SUBROUTINE ice_var_agg( kn )', 'END SUBROUTINE ice_var_agg', 148],
+    'packages/ice/legoesm/ice/si3_orca2_state.py:741-750': ['def fortran_sum_categories(arr: Field, axis: int = -1) -> Field:', 'return acc', 10],
+    'packages/ice/legoesm/ice/si3_orca2_state.py:1187-1213': ['def si3_update_snwice_mass(', 'return new_mass, snwice_mass_prev, fmass', 27],
+    'src/ICE/iceupdate.F90:189-194': [('DO_2D( nn_hls, nn_hls, nn_hls, nn_hls )', 1), ('END_2D', 5), 6],
+    'src/ICE/iceupdate.F90:459-472': ['IF( id1 > 0 ) THEN                       ! fields exist', ('ENDIF', 13), 14],
+    'packages/ice/legoesm/ice/si3_orca2_state.py:1216-1442': ['def si3_lbc_lnk_orca2(', (')', 539), 227],
+    'src/OCE/LBC/lbc_lnk_pt2pt_generic.h90:99-243': ['DO jn = 1, 4   ! 4 sides', ('ENDIF', 12), 145],
+    'src/OCE/LBC/lbc_nfd_generic.h90:22-191': ["IF( c_NFtype == 'T' ) THEN            ! *  North fold  T-point pivot", "ENDIF   ! c_NFtype == 'T'", 170],
+    'src/OCE/LBC/lbc_nfd_generic.h90:25-79': [("CASE ( 'T' , 'W' )                         ! T-, W-point", 1), ('END DO   ;   END DO', 1), 55],
+    'src/OCE/LBC/lbc_nfd_generic.h90:80-124': [("CASE ( 'U' )                               ! U-point", 1), ('END DO   ;   END DO', 2), 45],
+    'src/OCE/LBC/lbc_nfd_generic.h90:125-162': [("CASE ( 'V' )                               ! V-point", 1), ('END DO   ;   END DO', 3), 38],
+    'src/ICE/icedyn_adv_pra.F90:438-482': [("&                          , sxxice, 'T', 1._wp, syyice, 'T',  1._wp, ", 1), ('!', 211), 45],
+    'src/ICE/icedyn_adv_pra.F90:1246-1356': ["CALL iom_get( numrir, jpdom_auto, 'sxice' , sxice , psgn = -1._wp )", ('ELSE', 29), 111],
+    'src/ICE/icerst.F90:281-282': ["CALL iom_get( numrir, jpdom_auto, 'u_ice', u_ice, cd_type = 'U', psgn ", "CALL iom_get( numrir, jpdom_auto, 'v_ice', v_ice, cd_type = 'V', psgn ", 2],
+    'packages/ice/legoesm/ice/si3_orca2_state.py:1445-1976': ['def si3_o1_step(', (')', 739), 532],
+    'packages/ice/legoesm/ice/si3_orca2_state.py:1445-1522': ['def si3_o1_step(', (')', 552), 78],
+    'src/ICE/icestp.F90:96-238': ['SUBROUTINE ice_stp( kt, Kbb, Kmm, ksbc )', ('END SUBROUTINE ice_stp', 1), 143],
+    'src/ICE/icestp.F90:167': 'IF( ln_icedyn .AND. .NOT.ln_c1d )   &',
+    'src/ICE/icestp.F90:206': 'IF( ln_icethd )                CALL ice_thd( kt )            ! -- Ice ',
+    'src/ICE/icestp.F90:182': 'CALL ice_var_glo2eqv(2)       ! h_i and h_s for ice albedo calculation',
+    'src/ICE/icestp.F90:183': 'CALL ice_var_agg(1)           ! at_i for coupling',
+    'src/ICE/icestp.F90:184': ('CALL store_fields             ! Store now ice values', 2),
+    'src/ICE/icestp.F90:388-426': [('SUBROUTINE store_fields', 1), 'END SUBROUTINE store_fields', 39],
+    'src/ICE/icestp.F90:210': ('CALL ice_var_glo2eqv(2)', 2),
+    'src/ICE/icestp.F90:211': 'CALL ice_var_agg(2)',
+    'src/ICE/icestp.F90:213': 'CALL ice_update_flx( kt )     ! -- Update ocean surface mass, heat and',
+    'packages/ice/legoesm/ice/si3_orca2_state.py:1542-1976': ['def si3_rst_to_netcdf_dict(', (')', 739), 435],
+    'src/ICE/icerst.F90:111-197': ['SUBROUTINE ice_rst_write( kt )', 'END SUBROUTINE ice_rst_write', 87],
+    'src/ICE/icerst.F90:200-378': ['SUBROUTINE ice_rst_read( Kbb, Kmm, Kaa )', ('ENDIF', 25), 179],
+    'src/ICE/icedyn_adv_pra.F90:1203-1503': ['SUBROUTINE adv_pra_rst( cdrw, kt )', 'END SUBROUTINE adv_pra_rst', 301],
+    'src/ICE/iceupdate.F90:438-484': ['SUBROUTINE update_rst( cdrw, kt )', 'END SUBROUTINE update_rst', 47],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:61-69': ['mode=${1:---preflight-only}', 'esac', 9],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:272-528': ['run_preflight() {', ('}', 60), 257],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:541-630': ['# ---- Operator-only --run mode ----', 'printf \'ACQUISITION_DONE %s\\n\' "$EVIDENCE"', 90],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:535-539': ['if [[ "$mode" == --admit-existing ]]; then', ('fi', 70), 5],
+    'cfgs/ref_cfgs.txt:8': 'ORCA2_SAS_ICE OCE ICE NST SAS',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:23-26': ['readonly ORCA2_BUNDLE=/data/abyssal/dbalwada/nemo-testcases-l4/inputs/', 'readonly SAS_BUNDLE_SHA256=ee00646832ea89f468d0f01bf537ed231d21f23bba7', 4],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:286-298': ['local actual_orca2_sha actual_sas_sha', 'tar -ztf "$SAS_BUNDLE" >> "$scratch/bundles.toc"', 13],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:95-104': ['check_free_ram_gb() {', ('}', 17), 10],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:106-121': ['check_free_disk_kb() {', ('}', 20), 16],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:30': 'readonly RUN_TIMEOUT_SEC=${RUN_TIMEOUT_SEC:-1800}',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:612': 'timeout "$RUN_TIMEOUT_SEC" mpirun -np 1 --oversubscribe ./nemo > run.u',
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:74-93': ['cleanup_on_exit() {', ('trap cleanup_on_exit EXIT', 1), 20],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_si3_state_writer.F90:1-251': [('MODULE o1_si3_state_writer', 1), 'END MODULE o1_si3_state_writer', 251],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_si3_state_writer.F90:6': 'USE, INTRINSIC :: iso_fortran_env, ONLY : int32, real64',
+    'src/ICE/icestp.F90:116-124': ['INTEGER, INTENT(in) ::   kt       ! ocean time step', "IF( ln_timing )   CALL timing_start('icestp')", 9],
+    'src/ICE/icestp.F90:220-228': ['IF( ln_icediachk )             CALL ice_drift_wri( kt )      ! -- Diag', 'ENDIF   ! End sea-ice time step only', 9],
+    'src/ICE/icestp.F90:295-300': ['CALL ice_var_glo2eqv(1)', 'CALL ice_update_init             ! ice surface boundary condition', 6],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_si3_fixture_stubs.F90:1-87': [('MODULE par_oce', 1), 'REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: sxage, syage, sxxage, syyag', 87],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_si3_layout_fixture.F90:1-271': [('PROGRAM o1_si3_layout_fixture', 1), 'END PROGRAM o1_si3_layout_fixture', 271],
+    'tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:1-552': ['"""Fidelity and invariance tests for SI3 ladder rung O1 (`si3_r4`, `DE', 'assert float(jnp.linalg.norm(grad_planted.v_i)) == 0.0', 552],
+    'tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:143-323': ['def test_o1_parent_vs_current_non_si3_and_lane3_callers_bit_identical(', (')', 147), 181],
+    'tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:326-353': ['def test_o1_hfn_category_bounds_zero_ulp_vs_nemo502() -> None:', '_assert_zero_ulp(bounds.hi_mean, expected_hi_mean, "hi_mean")', 28],
+    'tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:356-371': ['def test_o1_self_test_and_all_plants_fire() -> None:', 'gate.run_self_test(plant=plant_name)', 16],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:922-1047': ['def run_self_test(plant: str | None = None) -> dict[str, Any]:', ('}', 47), 126],
+    'tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:374-399': ['def test_o1_lane3_column_state_bridge_roundtrip() -> None:', '_assert_zero_ulp(col.T_surface, col_back.T_surface, "col.T_surface")', 26],
+    'tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:402-459': ['def test_o1_compiled_gfortran_layout_fixture_and_plants(tmp_path: Path', 'gate.verify_layout_fixture(records_dir, plant=plant_name)', 58],
+    'tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:462-482': ['def test_o1_ocean_output_log_verifier_and_plants(tmp_path: Path) -> No', 'gate.verify_ocean_output_log(excerpt, plant=plant_name)', 21],
+    'tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:485-552': ['def test_o1_jit_grad_jvp_and_stop_gradient_plant() -> None:', 'assert float(jnp.linalg.norm(grad_planted.v_i)) == 0.0', 68],
+    # --- SI3 ladder round 4 (O1) END ---
     # ORCA2 round 324 (DECISION 150): rCdU_ice -> rCdU_top.
     'ICE/iceupdate.F90:369': 'tmod_io(ji,jj) = rho0 * drag_io(ji,jj) * SQRT( zmodt )',
     'ICE/iceupdate.F90:391': 'rCdU_ice(ji,jj) = -r1_rho0 * tmod_io(ji,jj) * at_i(ji,jj) * tmask(ji,jj,1)',
@@ -8970,9 +9114,11 @@ UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
 
 _NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm)"
          r"|[A-Za-z0-9_./]*(?:namelist_cfg|namelist_ref|namelist_ice_cfg|namelist_ice_ref|ocean\.output)"
+         r"|cfgs/ref_cfgs\.txt"
          r"|sette/(?:input_ORCA2_SAS_ICE\.cfg|sette_fetch_inputs\.sh)"
+         r"|scripts/validate/ocean_fidelity/testcases/[A-Za-z0-9_./]+/run\.sh"
          r"|docs/ocean/fidelity/testcases/(?:nemo_testcases_l3dyn_phase2_receipt|nemo_testcases_l3thd_phase6_receipt|nemo_testcases_l3thd_scalarmath_v2_receipt|nemo_testcases_l4_orca2_phase2_manifest)\.md"
-         r"|docs/ice/fidelity/(?:si3_ladder_design|si3_r2_d5_preregister|si3_r2_d5_receipt|si3_r3_d5_preregister|si3_r3_d5_receipt|si3_r5_d5_preregister|si3_r5_d5_receipt)\.md")
+         r"|docs/ice/fidelity/(?:si3_ladder_design|si3_r2_d5_preregister|si3_r2_d5_receipt|si3_r3_d5_preregister|si3_r3_d5_receipt|si3_r4_o1_preregister|si3_r4_o1_receipt|si3_r5_d5_preregister|si3_r5_d5_receipt)\.md")
 _SPAN = re.compile(r"`([^`\n]+)`")
 _FULL = re.compile(rf"^(?P<f>{_NAME}):(?P<l>\d[\d,\-]*)$")
 _ONLY = re.compile(rf"^(?P<f>{_NAME})$")

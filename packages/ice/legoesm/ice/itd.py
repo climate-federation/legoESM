@@ -764,3 +764,10 @@ def lipscomb_2001_remap(
     if V_pond_new is not None:
         result["V_pond"] = jnp.maximum(Vp_f.reshape(full_shape), 0.0)
     return result
+
+
+from legoesm.ice.si3_orca2_state import (  # noqa: E402,F401
+    SI3CategoryBounds,
+    si3_hfn_category_bounds,
+)
+

@@ -1,0 +1,20 @@
+--- a/icedyn_adv_pra.F90
++++ b/icedyn_adv_pra.F90
+@@ -31,6 +31,17 @@
+ 
+    PUBLIC   ice_dyn_adv_pra   ! called by icedyn_adv
+    PUBLIC   adv_pra_init      ! called by icedyn_adv
++   PUBLIC   sxice, syice, sxxice, syyice, sxyice
++   PUBLIC   sxsn , sysn , sxxsn , syysn , sxysn
++   PUBLIC   sxa  , sya  , sxxa  , syya  , sxya
++   PUBLIC   sxsal, sysal, sxxsal, syysal, sxysal
++   PUBLIC   sxage, syage, sxxage, syyage, sxyage
++   PUBLIC   sxc0 , syc0 , sxxc0 , syyc0 , sxyc0
++   PUBLIC   sxe  , sye  , sxxe  , syye  , sxye
++   PUBLIC   sxsi , sysi , sxxsi , syysi , sxysi
++   PUBLIC   sxap , syap , sxxap , syyap , sxyap
++   PUBLIC   sxvp , syvp , sxxvp , syyvp , sxyvp
++   PUBLIC   sxvl , syvl , sxxvl , syyvl , sxyvl
+ 
+    ! Moments for advection
+    REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:)   ::   sxice, syice, sxxice, syyice, sxyice   ! ice thickness
