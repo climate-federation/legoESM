@@ -120,8 +120,8 @@ Mechanism (CONFIRMED; reviewer finding reproduced, `jobs/floor_cells_rung10.json
 step; control: recorded step = unrecorded step, 0 values differ; the
 recorded closure output = stored diffusivity in all 414,119 wet cells).
 The round's earlier "the floor ties the other branch" was wrong.
-- Statement: `tke.py:2309` floors K_M / Pr, with Pr = 1 / pdlr
-  (`tke.py:2165`, `tke.py:2166`). In the 16,444 cells within 0.1 % above the
+- Statement: `tke.py:2313` floors K_M / Pr, with Pr = 1 / pdlr
+  (`tke.py:2169`, `tke.py:2170`). In the 16,444 cells within 0.1 % above the
   floor, Pr = 10 exactly, so pdlr = 0.1 (its floor). With NEMO's forced
   constants the TKE branch's minimum is 0.1 x 1e-3 x sqrt(1e-10) x 0.1 =
   1e-10, the floor, in exact arithmetic.

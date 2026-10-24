@@ -26,7 +26,7 @@ CPU, fp64, x64, production JIT, libm policy.
 | A | same | `ocean_model_latlon_cgrid.py:2573-2575` and the inactive alternate combine, masked at `ocean_model_latlon_cgrid.py:2581` | `q_after` = 1 on the lanes that where discards (same mask) |
 | B | `9900ba02269a` | `implicit_solver.py:363-382` (and the other two divisions in the same literal solve) | divide by 1 where the pivot is exactly 0 |
 | B | same | `ocean_model_latlon_cgrid.py:13455` (top-face surface stress, U and V) | divide by 1 where `e3 * rho0 == 0` |
-| C | `99f37662a54c` | `internal_wave_mixing.py:444`, `tke.py:1082`, `tke.py:3647` | the shared `safe_sqrt` (double where) |
+| C | `99f37662a54c` | `internal_wave_mixing.py:444`, `tke.py:1082`, `tke.py:3654` | the shared `safe_sqrt` (double where) |
 | C, C2 | same, `C2` below | `shortwave_penetration.py:561` | divide by 1 below the blue level (discarded) and, C2, on zero-thickness dry levels |
 | FIX 2 | `984cbbbb6e72` | `ocean_pe_latlon_cgrid.py:4294-4298`, `ocean_pe_latlon_cgrid.py:4375-4379` | the five `float()` casts dropped |
 

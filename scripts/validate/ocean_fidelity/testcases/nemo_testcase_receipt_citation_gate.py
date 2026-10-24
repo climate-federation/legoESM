@@ -1765,12 +1765,12 @@ CITATION_MAP = {
         'en(ji,jj,mbkt(ji,jj)+1) = MAX( zebot, rn_emin ) * ssmask(ji,jj)', 9],
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:411-428': [
         '!* Matrix and right hand side in en',
-        ') * wmask(ji,jj,jk)', 18],
+        (') * wmask(ji,jj,jk)', 2), 18],
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:459-477': [
         '!* Matrix inversion from level 2',
         'en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)', 19],
     'nemo_testcase_recipe.py:1820-1827': [
-        'z_coord = create_partial_cell_coordinate(',
+        ('z_coord = create_partial_cell_coordinate(', 2),
         'is_active=jnp.asarray(tmask),', 8],
     'tke.py:1803-1834': [
         'if bottom_dirichlet is not None:',
@@ -1860,9 +1860,9 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:12390': [('cd0=_cfg_b.bottom_drag.bottom_drag_cd0,', 1)],
     'nemo_testcase_recipe.py:2144': [('2920,  # DECISION 142 (user, 2026-10-20): one year, deliberate', 1)],
     # round 319 review: the background diffusivity floor against NEMO's avt statement
-    'tke.py:2309': 'K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)',
-    'tke.py:2165': 'pdlr = jnp.maximum(0.1, ri_cri / jnp.maximum(ri_cri, zri))',
-    'tke.py:2166': 'return 1.0 / pdlr',
+    'tke.py:2313': 'K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)',
+    'tke.py:2169': 'pdlr = jnp.maximum(0.1, ri_cri / jnp.maximum(ri_cri, zri))',
+    'tke.py:2170': 'return 1.0 / pdlr',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:405':
         'p_pdlr(ji,jj,jk) = MAX(  0.1_wp,  ri_cri / MAX( ri_cri , zri )  )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:708': 'zav   = rn_ediff * zmxlm(ji,jk) * zsqen',
@@ -1889,7 +1889,7 @@ CITATION_MAP = {
         'avm_product / lower_denominator) * interface_wet', 13],
     'internal_wave_mixing.py:444': 'n_pos = safe_sqrt(n2_pos)',
     'tke.py:1082': 'safe_sqrt((jnp.asarray(2.0, e.dtype) * e) / zrn2),',
-    'tke.py:3647': 'dissl_new = safe_sqrt(tke_curr) / l_eps_final',
+    'tke.py:3654': 'dissl_new = safe_sqrt(tke_curr) / l_eps_final',
     'shortwave_penetration.py:561': '/ jnp.where((jk <= nkB) & (ze3t != 0.0), ze3t, c(1.0)))',
     # round 314 namelist audit
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:21': 'nn_itend    =    5840',
@@ -4559,7 +4559,7 @@ CITATION_MAP = {
     'internal_wave_mixing.py:435-486': [
         'hz = r(ht_0 * stretch)',
         'avm = r(avm + zav_wave)', 52],
-    'tke.py:3551-3641': [
+    'tke.py:3558-3648': [
         'for _ in range(max(1, int(n_iterations))):',
         ('prandtl_K_M=(preclosure_K_M if _carried_coeffs else None))', 2), 91],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:285-293': [
