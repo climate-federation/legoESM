@@ -4358,10 +4358,3 @@ __all__ = (
 ORCA2_RUNG10_FROZEN_PARAMS = {
     "ocean.lat.gm_redi.kappa_Redi": "inert on rung 10 since round 320 (mode 20 reads rn_Ud)",
 }
-
-
-__all__ = __all__ + (
-    "ORCA2InitialIce",
-    "ORCA2_DECK_INITIAL_ICE",
-    "orca2_initial_ice_ssh",
-)

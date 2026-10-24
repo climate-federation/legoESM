@@ -910,14 +910,25 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
             _plant_wrong_eos=True,
         )
     elif plant == "tbo-halo-leak":
-        bad_tbo = np.asarray(cand_o2.t_bo).copy()
-        bad_tbo[wi, wj] = np.nextafter(bad_tbo[wi, wj], np.inf)
-        cand_o2 = cand_o2._replace(t_bo=jnp.asarray(bad_tbo))
-    elif plant == "pond-unscaled":
-        unscaled_apnd = jnp.where(
-            ff_t >= 0.0, o2_cfg.rn_apd_ini_n * cand_o2.zmsk, o2_cfg.rn_apd_ini_s * cand_o2.zmsk
+        cand_o2 = si3_o2_scalar_initial_state(
+            sst_m=sst_m, sss_m=sss_m, tmask=tmask, ssmask=ssmask,
+            smask0_i=smask0_i, e1e2t=e1e2t, ff_t=ff_t, gphit=gphit,
+            ssh_before_kbb=ssh_before_kbb, ssh_before_kmm=ssh_before_kmm,
+            fitted_v_i=state0.v_i, fitted_v_s=state0.v_s,
+            fitted_a_i=state0.a_i, fitted_a_ip=state0.a_ip,
+            fitted_v_ip=state0.v_ip, fitted_v_il=state0.v_il,
+            config=o2_cfg, _plant_tbo_halo_leak=True,
         )
-        cand_o2 = cand_o2._replace(zapnd_ini=unscaled_apnd)
+    elif plant == "pond-unscaled":
+        cand_o2 = si3_o2_scalar_initial_state(
+            sst_m=sst_m, sss_m=sss_m, tmask=tmask, ssmask=ssmask,
+            smask0_i=smask0_i, e1e2t=e1e2t, ff_t=ff_t, gphit=gphit,
+            ssh_before_kbb=ssh_before_kbb, ssh_before_kmm=ssh_before_kmm,
+            fitted_v_i=state0.v_i, fitted_v_s=state0.v_s,
+            fitted_a_i=state0.a_i, fitted_a_ip=state0.a_ip,
+            fitted_v_ip=state0.v_ip, fitted_v_il=state0.v_il,
+            config=o2_cfg, _plant_pond_unscaled=True,
+        )
     elif plant == "hemisphere-swap":
         cand_o2 = si3_o2_scalar_initial_state(
             sst_m=sst_m,
@@ -940,18 +951,25 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
             _plant_hemisphere_swap=True,
         )
     elif plant == "ssh-sign-or-div":
-        bad_ssh = jnp.where(ssmask == 1.0, ssh_before_kmm + cand_o2.zsshadj, ssh_before_kmm)
-        cand_o2 = cand_o2._replace(ssh_kmm=bad_ssh, ssh_kbb=bad_ssh)
-    elif plant == "dom-uniq-fold":
-        # Omit north-fold T-pivot deduplication on row jpj - nn_hls - 1
-        bad_smask0_i = jnp.zeros_like(ssmask)
-        bad_smask0_i = bad_smask0_i.at[
-            cfg.nn_hls : -cfg.nn_hls, cfg.nn_hls : -cfg.nn_hls
-        ].set(
-            ssmask[cfg.nn_hls : -cfg.nn_hls, cfg.nn_hls : -cfg.nn_hls]
+        cand_o2 = si3_o2_scalar_initial_state(
+            sst_m=sst_m, sss_m=sss_m, tmask=tmask, ssmask=ssmask,
+            smask0_i=smask0_i, e1e2t=e1e2t, ff_t=ff_t, gphit=gphit,
+            ssh_before_kbb=ssh_before_kbb, ssh_before_kmm=ssh_before_kmm,
+            fitted_v_i=state0.v_i, fitted_v_s=state0.v_s,
+            fitted_a_i=state0.a_i, fitted_a_ip=state0.a_ip,
+            fitted_v_ip=state0.v_ip, fitted_v_il=state0.v_il,
+            config=o2_cfg, _plant_ssh_sign=True,
         )
-        bad_area = si3_glob_2dsum_ddpdd(e1e2t * ssmask, bad_smask0_i, nn_hls=cfg.nn_hls)
-        cand_o2 = cand_o2._replace(area=bad_area)
+    elif plant == "dom-uniq-fold":
+        cand_o2 = si3_o2_scalar_initial_state(
+            sst_m=sst_m, sss_m=sss_m, tmask=tmask, ssmask=ssmask,
+            smask0_i=smask0_i, e1e2t=e1e2t, ff_t=ff_t, gphit=gphit,
+            ssh_before_kbb=ssh_before_kbb, ssh_before_kmm=ssh_before_kmm,
+            fitted_v_i=state0.v_i, fitted_v_s=state0.v_s,
+            fitted_a_i=state0.a_i, fitted_a_ip=state0.a_ip,
+            fitted_v_ip=state0.v_ip, fitted_v_il=state0.v_il,
+            config=o2_cfg, _plant_omit_nfd_uniq=True,
+        )
 
     ref_fields = {fname: getattr(ref_o2, fname) for fname in _O2_SCALAR_STATE_FIELDS}
     o2_cmp = _compare_o2_scalar_state_against_recipe_and_ref(

@@ -184,3 +184,17 @@ changing the selected rung or 0-ULP bar:
 - Every O1 acquisition helper and plant remains in force, including the NEMO
   restart-layout fixture, step-2 salinity perturbation, restart-disable check,
   restart-step-name check, and missing SAS ocean-restart check.
+
+## Claude re-review correction before acquisition (2026-10-24)
+
+- The planned ORCA2 round-329 helper reuse and its P1 arm are withdrawn. O2 no
+  longer calls `orca2_initial_ice_ssh`; its SSH statement runs in
+  `si3_o2_scalar_initial_state`. Cherry-pick `11db3ee221` is rebased out in
+  full because the ORCA2 lane owns that code.
+- The four O2 formula plants `tbo-halo-leak`, `pond-unscaled`,
+  `ssh-sign-or-div`, and `dom-uniq-fold` must select their corresponding
+  private switches in `si3_o2_scalar_initial_state`; manufacturing altered
+  gate outputs is not an admissible plant.
+- The NEMO-literal shared `nemo_eos_fzp` remains selected for O2. Whether its
+  two pre-existing callers retain parent rounding is pending a user decision;
+  this round measures but does not choose that compatibility policy.

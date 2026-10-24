@@ -8,9 +8,9 @@ acquisition/admission tool, and runs only the read-only preflight. Neither
 `makenemo` nor `mpirun` was run.
 
 The landed O1 contract is preserved. The O2 implementation is based on lane
-tip `042c7bd74c2944dab8c39318687ab0cef54f9d2b`; ORCA2 round-329 commit
-`02acc8a1b10f2cc8511a6ba4d7fc233b34d73299` was then imported by cherry-pick
-as `11db3ee221` rather than copied.
+tip `042c7bd74c2944dab8c39318687ab0cef54f9d2b`. The unrelated ORCA2
+round-329 cherry-pick `11db3ee221` was rebased out; it is not an ancestor of
+this branch, and O2 does not import or call `orca2_initial_ice_ssh`.
 
 ## Review repairs
 
@@ -25,9 +25,9 @@ All eight Claude findings were reproduced and repaired:
    inputs from the O1 entry record, then transcribes only the category sums,
    snow/ice/pond/lid mass, and SSH reduction
    (`src/ICE/iceistate.F90:388-427`). O3 still owns the category fit.
-3. `ORCA2InitialIce` and `orca2_initial_ice_ssh` are the cherry-picked ORCA2
-   implementation: fields and the `ice` argument have no defaults, and the
-   deck pond concentration is the literal `(0.18, 0.18)`.
+3. O2's levitating-ice SSH calculation is implemented only in the selectable
+   SI3 production path. The ORCA2 lane's round-329 helper has no O2 caller and
+   is not carried on this branch.
 4. The ponds-off and lids-off branches are implemented literally
    (`src/ICE/iceistate.F90:295-304`) and directly tested with nonzero pond/lid
    inputs.
@@ -90,9 +90,13 @@ round-329 tests also pass. Default receipt-citation and private-import gates are
 required before handoff, plus an explicit citation-gate invocation for every
 SI3 receipt.
 
-`ASKED`: repair all eight review findings, preserve the O2 bar with exact
+`ASKED`: repair all review findings, preserve the O2 bar with exact
 fitted-category inputs, run preflight only, and stop at acquisition.
 `UNASKED`: none.
+
+`CHOICES — PENDING USER DECISION`: keep the shared NEMO-literal
+`nemo_eos_fzp` change for now. Do not yet decide whether the pre-existing
+ice-shelf and OMIP-driver callers should retain their parent rounding.
 
 Independent review disposition: Claude review was HOLD/HOLD; every listed
 finding above is confirmed and repaired. Argon's three distinct findings are
@@ -122,3 +126,33 @@ addressed below.
    nonlinear fit, while O2's 0-ULP bar still covers `vt_i`, `vt_s`, `at_i`,
    `at_ip`, `vt_ip`, `vt_il`, `snwice_mass`, and `snwice_mass_b` computed from
    those exact five-category inputs.
+
+## Claude re-review follow-up
+
+1. `tbo-halo-leak`, `pond-unscaled`, `ssh-sign-or-div`, and `dom-uniq-fold`
+   now call `si3_o2_scalar_initial_state` with, respectively,
+   `_plant_tbo_halo_leak`, `_plant_pond_unscaled`, `_plant_ssh_sign`, and
+   `_plant_omit_nfd_uniq`. The focused test records selection of each private
+   model switch and requires the resulting production-code-path candidate to
+   fail with `STATUS PLANT-FIRED`; no gate-side output is forged.
+2. Commit `11db3ee221` was removed with `git rebase --onto dc0da32e48
+   11db3ee221`. Its ORCA2 preregistration, D122 gate, tests, and 141-line
+   ladder-gate addition are absent; `git merge-base --is-ancestor 11db3ee221
+   HEAD` returns `1`.
+3. Parent/current caller measurement used parent `dc0da32e48` and CPU fp64.
+   The OMIP-driver input was 4,001 surface salinities from 0 through 40 PSU at
+   0.01-PSU spacing. Its Celsius `nemo_eos_fzp` boundary changed at 29/4,001
+   values (maximum 2 ULP; maximum absolute change
+   `4.440892098500626e-16` °C), while the real
+   `_ice_freezing_temperature_K` return changed at 0/4,001 values (0 ULP).
+   The ice-shelf input was 101 eight-level columns: base salinity 30 through
+   35 PSU plus a 0 through 0.8 PSU vertical gradient, 200-m levels,
+   `zmin=150 m`, `zmax=750 m`, and `fwf=5e-4 kg m-2 s-1`. Its internal
+   depth-adjusted freezing point changed at 9/808 values (maximum 1 ULP;
+   maximum absolute change `4.440892098500626e-16` °C), while the real
+   `isf_prescribed_melt_tendencies` outputs changed at 0/808 `dT_dt`, 0/808
+   `dS_dt`, and 0/101 `eta_dot` values (all 0 ULP). Across the combined 4,809
+   salinity values, the literal multiply-by-reciprocal square-root operand
+   differed from the parent division at 757 values. The shared change remains
+   selected pending the user decision above; no caller-specific rounding
+   policy was implemented.

@@ -5,17 +5,15 @@ Covers:
    (`bitz_lipscomb_conduction_step`, `IceColumnModel.step`, `step_sea_ice` dynamic-v2),
    real lane-3 SI3 callers (`step_sea_ice(thermo_scheme='si3_bl99')`, `_si3_step_with_trace`,
    `linear_remap`), rung-O1 callers (`step_sea_ice(thermo_scheme='si3_orca2_o1')`, `si3_o1_step`),
-   and the ORCA2 round-329 recipe function `orca2_initial_ice_ssh`, plus failing code-path
-   plants (`Plant P1`).
+   plus failing code-path plants (`Plant P1`).
 2. `0`-ULP exactness of `si3_eos_fzp` (`ln_teos10=True` and `ln_eos80=True`) against
    NEMO 5.0.2 `src/OCE/TRA/eosbn2.F90:1674-1696` and `t_bo` interior masking (`smask0`) at
    `src/ICE/iceistate.F90:125-126`.
 3. `0`-ULP exactness of `si3_dom_uniq_t_orca2` (`src/OCE/DOM/domutl.F90:91-121`) and
    `si3_glob_2dsum_ddpdd` (`src/OCE/LBC/lib_mpp.F90:1244-1267`, `lib_fortran.f90:1505-1531`),
    including `r1_rho0` multiplication vs division by `rho0`.
-4. `0`-ULP exactness of `si3_o2_scalar_initial_state` and `0`-ULP agreement with the reused
-   `orca2_initial_ice_ssh` recipe (`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py`),
-   plus failing plants (`P2, P3, P4, P6`).
+4. `0`-ULP exactness of `si3_o2_scalar_initial_state`, plus failing production-code-path
+   plants (`P2, P3, P4, P6`).
 5. Compiled `gfortran` 4-rank layout fixture (`o2_si3_layout_fixture.F90` linked against
    `o2_si3_state_writer.F90`, exercising both `O2SI3I01` and `O1SI3R01`) and failing plants (`P5`).
 6. Whitespace-tolerant `ocean.output` log verifier (`verify_ocean_output_log`) and plants.
@@ -81,10 +79,6 @@ from legoesm.ice import (
     write_si3_netcdf_restart,
 )
 from legoesm.ice.bitz_lipscomb import bitz_lipscomb_conduction_step
-from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-    ORCA2_DECK_INITIAL_ICE,
-    orca2_initial_ice_ssh,
-)
 from tests.ocean.fidelity.test_nemo_si3_o1_orca2_sas_gate import (
     _write_o1_binary_snapshot,
 )
@@ -93,7 +87,6 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 TESTCASES_DIR = REPO_ROOT / "scripts/validate/ocean_fidelity/testcases"
 ACQ_DIR = TESTCASES_DIR / "nemo_si3_o2_orca2_sas_acquisition"
 PARENT_COMMIT = "042c7bd74c2944dab8c39318687ab0cef54f9d2b"
-ORCA2_RECIPE_COMMIT = "02acc8a1b10f2cc8511a6ba4d7fc233b34d73299"
 
 SPEC = importlib.util.spec_from_file_location(
     "nemo_si3_o2_orca2_sas_gate",
@@ -120,7 +113,7 @@ def _assert_zero_ulp(a, b, label: str = "") -> None:
 def _load_parent_commit_modules(
     parent_commit: str = PARENT_COMMIT,
 ) -> dict[str, types.ModuleType]:
-    """Load `packages/ice/legoesm/ice/*` from `parent_commit` and `nemo_testcase_recipe.py` from `ORCA2_RECIPE_COMMIT` via `git show`."""
+    """Load the parent commit's `packages/ice/legoesm/ice/*` via `git show`."""
     module_specs = (
         ("legoesm.ice.constants_config", parent_commit, "packages/ice/legoesm/ice/constants_config.py"),
         ("legoesm.ice.si3_orca2_state", parent_commit, "packages/ice/legoesm/ice/si3_orca2_state.py"),
@@ -132,11 +125,6 @@ def _load_parent_commit_modules(
         ("legoesm.ice.sea_ice", parent_commit, "packages/ice/legoesm/ice/sea_ice.py"),
         ("legoesm.ice.c1d_omip_l3", parent_commit, "packages/ice/legoesm/ice/c1d_omip_l3.py"),
         ("legoesm.ice.scm", parent_commit, "packages/ice/legoesm/ice/scm.py"),
-        (
-            "legoesm.ocean.fidelity.nemo_testcase_recipe",
-            ORCA2_RECIPE_COMMIT,
-            "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py",
-        ),
     )
     loaded: dict[str, types.ModuleType] = {}
     saved_sys = {name: sys.modules.get(name) for name, _, _ in module_specs}
@@ -171,7 +159,6 @@ def test_o2_parent_vs_current_all_callers_bit_identical(monkeypatch) -> None:
     import legoesm.ice.sea_ice as sea_ice_mod
     import legoesm.ice.si3_orca2_state as o1_mod
     import legoesm.ice.state as state_mod
-    import legoesm.ocean.fidelity.nemo_testcase_recipe as recipe_mod
 
     parent_mods = _load_parent_commit_modules(PARENT_COMMIT)
 
@@ -307,34 +294,7 @@ def test_o2_parent_vs_current_all_callers_bit_identical(monkeypatch) -> None:
         sea_ice_mod, "_si3_orca2_o1_step_with_trace", original_o1_dispatch
     )
 
-    # 5. ORCA2 round-329 `orca2_initial_ice_ssh` default (ln_eos80) bit-identity
-    inp_o2 = gate.build_synthetic_orca2_o2_inputs()
-    sst_np = np.asarray(inp_o2["sst_m"], dtype=np.float64)[..., None]
-    sss_np = np.asarray(inp_o2["sss_m"], dtype=np.float64)[..., None]
-    tmask_np = np.asarray(inp_o2["tmask"], dtype=bool)[..., None]
-    ssmask_np = np.asarray(inp_o2["ssmask"], dtype=np.float64)
-    e1e2t_np = np.asarray(inp_o2["e1e2t"], dtype=np.float64)
-    ff_t_np = np.asarray(inp_o2["ff_t"], dtype=np.float64)
-
-    p_recipe = parent_mods["legoesm.ocean.fidelity.nemo_testcase_recipe"].orca2_initial_ice_ssh(
-        temperature=sst_np,
-        salinity=sss_np,
-        tmask=tmask_np,
-        f_t=ff_t_np,
-        e1e2t=e1e2t_np,
-        ice=parent_mods["legoesm.ocean.fidelity.nemo_testcase_recipe"].ORCA2_DECK_INITIAL_ICE,
-    )
-    c_recipe = orca2_initial_ice_ssh(
-        temperature=sst_np,
-        salinity=sss_np,
-        tmask=tmask_np,
-        f_t=ff_t_np,
-        e1e2t=e1e2t_np,
-        ice=ORCA2_DECK_INITIAL_ICE,
-    )
-    _assert_zero_ulp(p_recipe, c_recipe, "orca2_initial_ice_ssh")
-
-    # 6. Plant P1: code-path perturbations in O1 step and `orca2_initial_ice_ssh` MUST fail _assert_zero_ulp
+    # 5. Plant P1: a code-path perturbation in O1 MUST fail _assert_zero_ulp.
     orig_o1_step = o1_mod.si3_o1_step
 
     def _planted_o1_step(*args, **kwargs):
@@ -345,27 +305,6 @@ def test_o2_parent_vs_current_all_callers_bit_identical(monkeypatch) -> None:
     with pytest.raises(AssertionError, match="max ULP = 1 != 0"):
         planted_o1 = o1_mod.si3_o1_step(state0_o1, tmask=tmask, sss_m=34.2, config=cfg_o1)
         _assert_zero_ulp(p_o1_st.v_i, planted_o1.v_i, "planted_o1_v_i")
-
-    orig_recipe = recipe_mod.orca2_initial_ice_ssh
-
-    def _planted_recipe(*args, **kwargs):
-        res = orig_recipe(*args, **kwargs).copy()
-        wi, wj = gate.first_wet_ij(tmask_np[..., 0], interior_only=True, nn_hls=2)
-        res[wi, wj] = np.nextafter(res[wi, wj], np.inf)
-        return res
-
-    monkeypatch.setattr(recipe_mod, "orca2_initial_ice_ssh", _planted_recipe)
-    with pytest.raises(AssertionError, match="max ULP = 1 != 0"):
-        planted_rec = recipe_mod.orca2_initial_ice_ssh(
-            temperature=sst_np,
-            salinity=sss_np,
-            tmask=tmask_np,
-            f_t=ff_t_np,
-            e1e2t=e1e2t_np,
-            ice=ORCA2_DECK_INITIAL_ICE,
-        )
-        _assert_zero_ulp(p_recipe, planted_rec, "planted_recipe_ssh")
-
 
 def test_o2_eos_fzp_teos10_and_eos80_zero_ulp_vs_nemo502() -> None:
     """`si3_eos_fzp` matches NEMO 5.0.2 `src/OCE/TRA/eosbn2.F90:1674-1696` for both `ln_teos10` and `ln_eos80` to 0 ULP."""
@@ -485,8 +424,8 @@ def test_o2_dom_uniq_t_and_glob_2dsum_ddpdd_zero_ulp() -> None:
     _assert_zero_ulp([zssh_mul], [o2_state.zsshadj], "zsshadj_r1_rho0_ddpdd")
 
 
-def test_o2_self_test_exact_category_inputs_and_all_plants_fire() -> None:
-    """`run_self_test` passes at 0 ULP with exact fitted-category inputs and all plants fire."""
+def test_o2_self_test_exact_category_inputs_and_all_plants_fire(monkeypatch) -> None:
+    """Every plant fires; the four reviewed physics plants select model-owned switches."""
     report = gate.run_self_test(plant=None)
     assert report["status"] == "PASS"
     assert report["max_ulp"] == 0
@@ -495,6 +434,22 @@ def test_o2_self_test_exact_category_inputs_and_all_plants_fire() -> None:
     assert report["o2_scalar_fields_checked"] == 24
     assert report["prather_arrays_checked"] == 55
 
+    switch_by_plant = {
+        "tbo-halo-leak": "_plant_tbo_halo_leak",
+        "pond-unscaled": "_plant_pond_unscaled",
+        "ssh-sign-or-div": "_plant_ssh_sign",
+        "dom-uniq-fold": "_plant_omit_nfd_uniq",
+    }
+    original = gate.si3_o2_scalar_initial_state
+    selected_switches: list[str] = []
+
+    def _record_model_switch(*args, **kwargs):
+        selected_switches.extend(
+            name for name in switch_by_plant.values() if kwargs.get(name) is True
+        )
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(gate, "si3_o2_scalar_initial_state", _record_model_switch)
     for plant_name in (
         "1ulp-istate",
         "1ulp-ssh",
@@ -512,6 +467,8 @@ def test_o2_self_test_exact_category_inputs_and_all_plants_fire() -> None:
     ):
         with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):
             gate.run_self_test(plant=plant_name)
+        if plant_name in switch_by_plant:
+            assert switch_by_plant[plant_name] in selected_switches
 
 
 def test_o2_compiled_gfortran_layout_fixture_and_plants(tmp_path: Path) -> None:
