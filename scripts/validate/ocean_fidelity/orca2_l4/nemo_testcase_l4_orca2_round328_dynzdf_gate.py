@@ -260,27 +260,30 @@ def _observer_only(ref: list[str], new: list[str], inserted: list[str], unit: st
     require(added == inserted, f"{unit}.f90 insertions differ from its committed patch")
 
 
-def same_program(new_bld: Path, ref_bld: Path, patches: tuple[Path, Path], *,
-                 new_cfg: str, ref_cfg: str) -> dict:
-    """Round-326's program plus only the two observer patches and writer."""
+def same_program_observers(
+        new_bld: Path, ref_bld: Path, observer_patches: dict[str, Path],
+        writer_units: tuple[str, ...], *, new_cfg: str, ref_cfg: str) -> dict:
+    """Prove a build differs only by named observer insertions and writers."""
     for name in BUILD_CONFIG_FILES:
         want = (ref_bld / name).read_text().replace(ref_cfg, new_cfg)
         require((new_bld / name).read_text() == want, f"build config differs: {name}")
     inserted = {
         unit: [line[1:] for line in patch.read_text().splitlines()
                if line.startswith("+") and not line.startswith("+++")]
-        for unit, patch in zip(OBSERVER_UNITS, patches, strict=True)
+        for unit, patch in observer_patches.items()
     }
     ref_root, new_root = f"{ref_bld.parent}/".encode(), f"{new_bld.parent}/".encode()
     counts: dict[str, int] = {}
-    for sub, writer in (("ppsrc", f"nemo/{WRITER_UNIT}.f90"),
-                        ("obj", f"{WRITER_UNIT}.o")):
+    for sub, writers in (
+            ("ppsrc", {f"nemo/{unit}.f90" for unit in writer_units}),
+            ("obj", {f"{unit}.o" for unit in writer_units})):
         ref_files, new_files = _regular_files(ref_bld / sub), _regular_files(new_bld / sub)
-        require(new_files - ref_files == {writer},
-                f"{sub}: new build adds {sorted(new_files - ref_files)}, expected only {writer}")
+        require(new_files - ref_files == writers,
+                f"{sub}: new build adds {sorted(new_files - ref_files)}, "
+                f"expected only {sorted(writers)}")
         require(not ref_files - new_files, f"{sub}: new build lacks {sorted(ref_files - new_files)}")
-        observers = ({f"nemo/{unit}.f90" for unit in OBSERVER_UNITS} if sub == "ppsrc"
-                     else {f"{unit}.o" for unit in OBSERVER_UNITS})
+        observers = ({f"nemo/{unit}.f90" for unit in observer_patches} if sub == "ppsrc"
+                     else {f"{unit}.o" for unit in observer_patches})
         bad = []
         for rel in sorted(ref_files - observers):
             ref, new = (ref_bld / sub / rel).read_bytes(), (new_bld / sub / rel).read_bytes()
@@ -289,7 +292,7 @@ def same_program(new_bld: Path, ref_bld: Path, patches: tuple[Path, Path], *,
         require(not bad, f"{sub}: {len(bad)} differ from round 326: "
                 + " ".join(f"{sub}/{rel}" for rel in bad))
         if sub == "ppsrc":
-            for unit in OBSERVER_UNITS:
+            for unit in observer_patches:
                 rel = f"nemo/{unit}.f90"
                 _observer_only((ref_bld / sub / rel).read_text().splitlines(),
                                (new_bld / sub / rel).read_text().splitlines(),
@@ -297,7 +300,16 @@ def same_program(new_bld: Path, ref_bld: Path, patches: tuple[Path, Path], *,
         counts[sub] = len(ref_files) - len(observers)
     return {"status": "PASS_SAME_PROGRAM_R326_PLUS_OBSERVERS",
             "identical_ppsrc": counts["ppsrc"], "identical_obj": counts["obj"],
-            "observer_units": list(OBSERVER_UNITS)}
+            "observer_units": list(observer_patches),
+            "writer_units": list(writer_units)}
+
+
+def same_program(new_bld: Path, ref_bld: Path, patches: tuple[Path, Path], *,
+                 new_cfg: str, ref_cfg: str) -> dict:
+    """Round-326's program plus only the two dyn_zdf observers and writer."""
+    return same_program_observers(
+        new_bld, ref_bld, dict(zip(OBSERVER_UNITS, patches, strict=True)),
+        (WRITER_UNIT,), new_cfg=new_cfg, ref_cfg=ref_cfg)
 
 
 def main() -> int:

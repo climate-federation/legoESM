@@ -1,14 +1,21 @@
 # Round-328 ZDF term-boundary acquisition
 
-Status: `ACQUISITION_NEEDED`. This is an operator-only, additions-only record
-request. It must reuse the admitted round-328 two-rank kt-1 trajectory and must
-not change any namelist, model option, timestep, decomposition, or input.
+Status: `ACQUISITION_NEEDED`. This directory now contains the operator-only,
+additions-only acquisition. Its `run.sh` selects the `zdfphy` target in the
+previously reviewed round-328 `dyn_zdf` acquisition base; the shared script
+retains the record build's `MY_SRC` (including `stprk3_stg`), input deck,
+two-rank kt-1 trajectory, refusal retention, EXIT trap, `work_cfgs.txt` guard,
+150-GB memory guard, timeout, and default read-only preflight. It does not
+change a namelist, model option, timestep, decomposition, or input.
 
-Instrument `zdf_phy` at these source-ordered boundaries on both ranks:
+The additions-only observers instrument `zdf_phy` at these source-ordered
+boundaries on both ranks in the record build's compiled
+`BLD/ppsrc/nemo/zdfphy.f90`:
 
-1. immediately after `zdf_tke` and the `avt_k`/`avm_k` copies into `avt`/`avm`;
-2. immediately after `zdf_ddm`; and
-3. immediately after `zdf_iwm`, before `zdf_mxl_turb` and the `lbc_lnk` call.
+1. after `zdf_tke` at line 336 and the `avt_k`/`avm_k` copies at lines 348–351;
+2. after the `zdf_ddm` block at lines 362–368; and
+3. after `zdf_iwm` at lines 370–372, before `zdf_mxl_turb` at line 374 and
+   `lbc_lnk` at line 380.
 
 At every boundary write the native fp64 `avm`, `avt`, and `avs` arrays for
 `jk=2:jpkm1`. At boundary 1 also write `en`, `avm_k`, `avt_k`, `rn2`, `r3t(Kmm)`,
@@ -24,9 +31,24 @@ oracle frames and terminal restarts. One-ULP plants in each of the three
 plants, must refuse. The clean record must reproduce the already admitted
 final `avm`/`avt`/`avs` bits before it may be used.
 
-The scorer must compare legoESM's carried TKE closure, post-DDM profile, and
-post-IWM profile separately. It must report the first unequal boundary and
-statement for the zero-based `k=28` family and `k=0` family independently.
-Until this record exists, ownership below `zdf_phy` is `UNMEASURED`.
+The gate imports the configuration-root-normalised same-program proof from the
+`dyn_zdf` gate. The real writer drives the committed gfortran layout fixture.
+The gate admits both ranks only after the inherited `dyn_zdf` record and all
+deterministic ocean/restart outputs remain identical, the post-IWM wet-cell
+`avm`/`avt`/`avs` bits reproduce the admitted final record, and the header,
+field-order, truncation, producer, and three boundary one-ULP plants refuse.
 
-No NEMO executable was run while writing this request.
+Operators run the read-only preflight by default:
+
+```sh
+scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_zdf_terms_acquisition/run.sh
+```
+
+After it reports `ORCA2_ROUND328_ZDFPHY_PREFLIGHT_READY`, the operator-only
+NEMO acquisition mode is:
+
+```sh
+scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_zdf_terms_acquisition/run.sh --run
+```
+
+No NEMO executable was run while building or preflighting this acquisition.

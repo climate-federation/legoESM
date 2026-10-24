@@ -314,9 +314,43 @@ failures, 0 map-audit failures); default landing battery 169 passed in
 1,000.32 s; explicit private-import ratchet 6 passed in 4.80 s. The default
 battery includes the expanded 22-test round-328 gate.
 
+## Resume-5: operator-ready ZDF term-boundary acquisition
+
+The bounded request is now an executable operator acquisition, not a README
+description. Its thin `run.sh` selects a `zdfphy` target in the existing
+round-328 `dyn_zdf` acquisition, importing that tool's configuration-root-
+normalised same-program proof and retaining its record-build `MY_SRC`,
+including `stprk3_stg`. The default mode is read-only; only an operator may
+invoke `--run` or `--admit-existing`.
+
+The additions-only observers match the compiled record build. Boundary 1 is
+after the TKE call at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:336` and coefficient
+copies at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:348-351`.
+Boundary 2 is after the complete DDM conditional at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:362-368`.
+Boundary 3 is after IWM and before `zdf_mxl_turb` at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:370-374`; it is also
+before the later lateral boundary exchange at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:380`.
+
+The actual writer supplies the committed gfortran layout fixture. Admission
+requires both ranks; exact header, field order, extents, checksums, and finite
+fp64 payloads; the producer commit; unchanged inherited deterministic files;
+byte-identical re-admission of the existing `dyn_zdf` record; and wet-cell bit
+identity of final `avm`, `avt`, and `avs` against the already admitted record.
+Header, field-order, truncation, producer, and one-ULP plants at all three
+boundaries must refuse. Dry signed-zero differences are accepted, while the
+fixture proves a wet one-ULP change refuses.
+
+The direct fixture/same-program battery passes 38 tests. The final validation
+below is performed from a clean committed tree. No NEMO executable was run,
+and no model or configuration changed.
+
 codex review: operator
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/orca2_r328/repo
-ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/orca2_r328/repo/scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_zdf_terms_acquisition/README.md
+ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/orca2_r328/repo/scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_zdf_terms_acquisition/run.sh --run
 DECISION_NEEDED: NONE
-ROUND_STATUS: HELD — final coefficients corrected; post-TKE/post-DDM NEMO boundaries required
+ROUND_STATUS: STOPPED_FOR_RECORD — operator-only zdf_phy boundary acquisition ready

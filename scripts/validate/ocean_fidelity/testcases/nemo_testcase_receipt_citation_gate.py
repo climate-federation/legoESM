@@ -126,6 +126,9 @@ _OVERFLOW_R56UP3_COMPILED = (
 _OVERFLOW_R62ZDF_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo")
 FILES = {
+    # ORCA2 round 328 Resume-5: the unmodified round-326 record-build chain.
+    "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90"),
     # ORCA2 round 311: G1b's build (P5) and G8's build (R31FULLENTRY_FIX1).
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90": NEMO / "cfgs/ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90",
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynkeg.f90": NEMO / "cfgs/ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynkeg.f90",
@@ -1742,6 +1745,20 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # ORCA2 round 328 Resume-5: exact zdf_phy observer boundaries.
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:336':
+        'CALL zdf_tke( kt, Kbb, Kmm, sh2, avm_k, avt_k )',
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:348-351': [
+        'DO jk =  2,  jpkm1',
+        'END DO   ;   END DO   ;   END DO', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:362-368': [
+        'IF( ln_zdfddm ) THEN',
+        'ENDIF', 7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:370-374': [
+        '!* wave-induced mixing',
+        'CALL zdf_mxl_turb( kt, Kmm )', 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:380':
+        "CALL lbc_lnk( 'zdfphy', avm, 'W', 1.0_wp )",
     # ORCA2 round 326 (DECISION 154): TKE nn_mxlice = 2 reads SI3's hm_i.
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:621-622': [
         ('zmxlm(ji,1) = ( ( 1._wp - fr_i(ji,jj) ) * zraug * taum(ji,jj) + &', 1),

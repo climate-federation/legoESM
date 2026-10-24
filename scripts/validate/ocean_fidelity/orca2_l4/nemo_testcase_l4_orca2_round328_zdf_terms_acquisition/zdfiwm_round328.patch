@@ -1,0 +1,7 @@
+--- zdfiwm.F90
++++ zdfiwm.F90
+@@ -31,0 +32,2 @@
++   USE zdfphy_round328_writer, ONLY : r328_zp_iwm_level
++                     ! round-328 WRITE-only IWM operand recorder
+@@ -253,0 +256 @@
++         CALL r328_zp_iwm_level(jk,zav_wave,zemx_iwm,zReb)
