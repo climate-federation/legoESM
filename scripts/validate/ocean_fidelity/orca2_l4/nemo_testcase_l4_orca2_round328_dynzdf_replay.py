@@ -247,7 +247,7 @@ def model_avm(root: Path, record_avm: np.ndarray) -> dict[str, object]:
     candidate = np.asarray(state_after.tke_avm.data, dtype=np.float64)
     require(candidate.shape == record_avm.shape,
             f"model avm {candidate.shape} != record {record_avm.shape}")
-    active = np.asarray(card.recipe.z_coord.is_active[..., 1:], dtype=bool)
+    active = np.array(card.recipe.z_coord.is_active[..., 1:], dtype=bool, copy=True)
     active &= np.asarray(card.recipe.z_coord.is_active[..., :-1], dtype=bool)
     require(active.shape == candidate.shape, "active-interface shape differs")
     row = score(candidate, record_avm, active)
