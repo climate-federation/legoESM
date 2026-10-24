@@ -1,0 +1,18 @@
+--- dynvor.F90
++++ dynvor.F90
+@@ -50,0 +51,3 @@
++   USE round332_writer, ONLY : r332_vor_begin, r332_vor_before_cell, &
++      & r332_vor_after_cell, r332_vor_done
++                     ! round-332 WRITE-only source-order discriminator
+@@ -127,0 +131,2 @@
++      CALL r332_vor_begin(kt,Kmm,Krhs)
++
+@@ -201,0 +207,2 @@
++      CALL r332_vor_done
++
+@@ -808,0 +816,2 @@
++            CALL r332_vor_before_cell(ji,jj,jk,pv_rhs(ji,jj,jk),zva)
++
+@@ -809,0 +819,2 @@
++            CALL r332_vor_after_cell(ji,jj,jk,pv_rhs(ji,jj,jk))
++

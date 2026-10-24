@@ -1,0 +1,8 @@
+--- zdftke.F90
++++ zdftke.F90
+@@ -57,0 +58,2 @@
++   USE round332_writer, ONLY : r332_tke_row
++                     ! round-332 WRITE-only mixing-length discriminator
+@@ -721,0 +724,2 @@
++         CALL r332_tke_row(Kbb,Kmm,jj,zmxlm(ntsi:ntei,1:jpkm1),zmxld(ntsi:ntei,1:jpkm1))
++

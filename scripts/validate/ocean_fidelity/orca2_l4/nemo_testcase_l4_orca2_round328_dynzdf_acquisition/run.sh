@@ -19,8 +19,8 @@ case "$MODE" in
 esac
 readonly ACQ_TARGET=${R328_ACQ_TARGET:-dynzdf}
 case "$ACQ_TARGET" in
-  dynzdf|zdfphy|tke331) ;;
-  *) printf 'REFUSE: R328_ACQ_TARGET must be dynzdf, zdfphy, or tke331\n' >&2; exit 64 ;;
+  dynzdf|zdfphy|tke331|tke332) ;;
+  *) printf 'REFUSE: R328_ACQ_TARGET must be dynzdf, zdfphy, tke331, or tke332\n' >&2; exit 64 ;;
 esac
 
 export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -42,6 +42,11 @@ if [[ "$ACQ_TARGET" == tke331 ]]; then
   EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round331/acquisition
   DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_tke331_kt1_np2
 fi
+if [[ "$ACQ_TARGET" == tke332 ]]; then
+  TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R332SO
+  EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round332/acquisition
+  DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_source_order_kt1_np2
+fi
 TARGET_RUN=$DEFAULT_TARGET_RUN
 if [[ "$MODE" == --admit-existing && -n ${R328_EXISTING_RUN:-} ]]; then
   TARGET_RUN=$(realpath -e -- "$R328_EXISTING_RUN")
@@ -58,6 +63,7 @@ fi
 readonly TARGET_CFG EVIDENCE DEFAULT_TARGET_RUN TARGET_RUN
 readonly TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
 readonly SOURCE_DYNZDF=$NEMO_ROOT/src/OCE/DYN/dynzdf.F90
+readonly SOURCE_DYNVOR=$NEMO_ROOT/src/OCE/DYN/dynvor.F90
 readonly SOURCE_STAGE=$SOURCE_ROOT/MY_SRC/stprk3_stg.F90
 readonly SOURCE_ZDFPHY=$NEMO_ROOT/src/OCE/ZDF/zdfphy.F90
 readonly SOURCE_ZDFDDM=$NEMO_ROOT/src/OCE/ZDF/zdfddm.F90
@@ -73,6 +79,7 @@ readonly MEM_MIN_GB=150
 readonly RUN_TIMEOUT_S=900
 readonly FPP_KEYS='-Dkey_si3 -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3'
 readonly SOURCE_DYNZDF_SHA=4489773bb4cafe46123cfd658b1561188215c9ce0db11f6859fb27cb019bb174
+readonly SOURCE_DYNVOR_SHA=099199229bae9c7dbc666f0f53d93c2e5adec7f03f4d54d23d8f28d27a7e57d1
 readonly SOURCE_STAGE_SHA=2b1636336acc5a5e3326291801c217f263f8ccc3ca875dbfec0d3b789d911e5b
 readonly SOURCE_ZDFPHY_SHA=76eeec2a280d56c55bec9e59b579e5290623c408c03962d04652e406334b45fd
 readonly SOURCE_ZDFDDM_SHA=27f10278c4ae57a393617cf254cb372efecbf0c26d476afa500199cc0652e544
@@ -120,6 +127,12 @@ readonly TKE_FIXTURE=$TKE_DIR/tke_round331_layout_fixture.F90
 readonly TKE_GATE=$here/../nemo_testcase_l4_orca2_round331_tke_gate.py
 readonly TKE_TEST=$REPO/tests/ocean/fidelity/test_orca2_round331_tke_gate.py
 readonly TKE_PREREG=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round331.md
+readonly R332_DIR=$here/../nemo_testcase_l4_orca2_round332_source_order_acquisition
+readonly R332_DYNVOR_PATCH=$R332_DIR/dynvor_round332.patch
+readonly R332_TKE_PATCH=$R332_DIR/zdftke_round332.patch
+readonly R332_WRITER=$R332_DIR/round332_writer.F90
+readonly R332_GATE=$here/../nemo_testcase_l4_orca2_round332_source_order_gate.py
+readonly R332_TEST=$REPO/tests/ocean/fidelity/test_orca2_round332_source_order_gate.py
 readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
 
 scratch=
@@ -192,7 +205,7 @@ check_no_continuation_insert() {
 }
 check_no_removed_lines() { [[ $(awk '/^--- / {next} /^-/ {n++} END {print n+0}' "$1") -eq 0 ]]; }
 check_patched_call_predecessors() {
-  awk '{ if ($0 ~ /CALL r(328|331)_/ && previous ~ /&[[:space:]]*$/) bad=1; previous=$0 }
+  awk '{ if ($0 ~ /CALL r(328|331|332)_/ && previous ~ /&[[:space:]]*$/) bad=1; previous=$0 }
        END { exit bad }' "$1"
 }
 free_ok() {
@@ -207,7 +220,13 @@ fpp() {
       -I "$SOURCE_ROOT/WORK" -I "$SOURCE_ROOT/BLD/inc" "$(basename "$1")" -o "$2" )
 }
 same_program() {
-  if [[ "$ACQ_TARGET" == tke331 ]]; then
+  if [[ "$ACQ_TARGET" == tke332 ]]; then
+    "$PY" "$R332_GATE" --same-program "$1" --reference-bld "$SOURCE_ROOT/BLD" \
+      --observer-patch "dynzdf=$PATCH" --observer-patch "stprk3_stg=$STAGE_PATCH" \
+      --observer-patch "dynvor=$R332_DYNVOR_PATCH" \
+      --observer-patch "zdfphy=$TKE_PHY_PATCH" --observer-patch "zdftke=$scratch/tke_combined.patch" \
+      --new-cfg "$TARGET_CFG" --reference-cfg "$SOURCE_CFG" ${2:+--output "$2"}
+  elif [[ "$ACQ_TARGET" == tke331 ]]; then
     "$PY" "$TKE_GATE" --same-program "$1" --reference-bld "$SOURCE_ROOT/BLD" \
       --observer-patch "dynzdf=$PATCH" --observer-patch "stprk3_stg=$STAGE_PATCH" \
       --observer-patch "zdfphy=$TKE_PHY_PATCH" --observer-patch "zdftke=$TKE_PATCH" \
@@ -299,7 +318,7 @@ if [[ "$ACQ_TARGET" == zdfphy ]]; then
     [[ -f "$path" ]] || refuse "missing zdf_phy input $path"
   done
 fi
-if [[ "$ACQ_TARGET" == tke331 ]]; then
+if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
   for path in "$TKE_PHY_PATCH" "$TKE_PATCH" "$TKE_WRITER" "$TKE_FIXTURE" \
     "$TKE_GATE" "$TKE_TEST" "$TKE_PREREG" "$SOURCE_ZDFPHY" "$SOURCE_ZDFSH2" \
     "$SOURCE_ZDFDRG" "$SOURCE_ZDFMXL" "$SOURCE_ZDFTKE" \
@@ -313,6 +332,13 @@ if [[ "$ACQ_TARGET" == tke331 ]]; then
     [[ -f "$path" ]] || refuse "missing round-331 TKE input $path"
   done
 fi
+if [[ "$ACQ_TARGET" == tke332 ]]; then
+  for path in "$R332_DYNVOR_PATCH" "$R332_TKE_PATCH" "$R332_WRITER" \
+    "$R332_GATE" "$R332_TEST" "$SOURCE_DYNVOR" \
+    "$SOURCE_ROOT/BLD/ppsrc/nemo/dynvor.f90"; do
+    [[ -f "$path" ]] || refuse "missing round-332 source-order input $path"
+  done
+fi
 pin "$SOURCE_DYNZDF_SHA" "$SOURCE_DYNZDF" 'source dynzdf'
 pin "$SOURCE_STAGE_SHA" "$SOURCE_STAGE" 'round-326 record stprk3_stg'
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
@@ -320,12 +346,15 @@ if [[ "$ACQ_TARGET" == zdfphy ]]; then
   pin "$SOURCE_ZDFDDM_SHA" "$SOURCE_ZDFDDM" 'source zdfddm'
   pin "$SOURCE_ZDFIWM_SHA" "$SOURCE_ZDFIWM" 'source zdfiwm'
 fi
-if [[ "$ACQ_TARGET" == tke331 ]]; then
+if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
   pin "$SOURCE_ZDFPHY_SHA" "$SOURCE_ZDFPHY" 'source zdfphy'
   pin "$SOURCE_ZDFSH2_SHA" "$SOURCE_ZDFSH2" 'source zdfsh2'
   pin "$SOURCE_ZDFDRG_SHA" "$SOURCE_ZDFDRG" 'source zdfdrg'
   pin "$SOURCE_ZDFMXL_SHA" "$SOURCE_ZDFMXL" 'source zdfmxl'
   pin "$SOURCE_ZDFTKE_SHA" "$SOURCE_ZDFTKE" 'source zdftke'
+fi
+if [[ "$ACQ_TARGET" == tke332 ]]; then
+  pin "$SOURCE_DYNVOR_SHA" "$SOURCE_DYNVOR" 'source dynvor'
 fi
 pin "$SOURCE_BINARY_SHA" "$SOURCE_ROOT/BLD/bin/nemo.exe" 'source build binary'
 pin "$SOURCE_BINARY_SHA" "$SOURCE_RUN/nemo" 'source run binary'
@@ -343,8 +372,11 @@ patch_files=("$PATCH" "$STAGE_PATCH")
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   patch_files+=("$ZP_PATCH" "$ZP_DDM_PATCH" "$ZP_IWM_PATCH")
 fi
-if [[ "$ACQ_TARGET" == tke331 ]]; then
+if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
   patch_files+=("$TKE_PHY_PATCH" "$TKE_PATCH")
+fi
+if [[ "$ACQ_TARGET" == tke332 ]]; then
+  patch_files+=("$R332_DYNVOR_PATCH" "$R332_TKE_PATCH")
 fi
 for patch_file in "${patch_files[@]}"; do
   check_no_removed_lines "$patch_file" || refuse "observer patch removes a source line: $patch_file"
@@ -378,6 +410,7 @@ plant_must_refuse echo-jpl check_echo "$plants/ocean.output.jpl"
 tests=("$TEST")
 [[ "$ACQ_TARGET" != zdfphy ]] || tests+=("$ZP_TEST")
 [[ "$ACQ_TARGET" != tke331 ]] || tests+=("$TKE_TEST")
+[[ "$ACQ_TARGET" != tke332 ]] || tests+=("$TKE_TEST" "$R332_TEST")
 "$PY" -m pytest -q -p no:cacheprovider "${tests[@]}" \
   "$R326_TEST::test_objects_equal_ignores_only_the_embedded_config_root"
 # Checklist (6): disk checks work before the evidence directory exists.
@@ -417,12 +450,19 @@ if [[ "$ACQ_TARGET" == zdfphy ]]; then
   patch -s --fuzz=0 -p0 -d "$dry" <"$ZP_DDM_PATCH"
   patch -s --fuzz=0 -p0 -d "$dry" <"$ZP_IWM_PATCH"
 fi
-if [[ "$ACQ_TARGET" == tke331 ]]; then
+if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
   cp "$SOURCE_ZDFPHY" "$dry/zdfphy.F90"
   cp "$SOURCE_ZDFTKE" "$dry/zdftke.F90"
   cp "$TKE_WRITER" "$dry/tke_round331_writer.F90"
   patch -s --fuzz=0 -p0 -d "$dry" <"$TKE_PHY_PATCH"
   patch -s --fuzz=0 -p0 -d "$dry" <"$TKE_PATCH"
+fi
+if [[ "$ACQ_TARGET" == tke332 ]]; then
+  cp "$SOURCE_DYNVOR" "$dry/dynvor.F90"
+  cp "$R332_WRITER" "$dry/round332_writer.F90"
+  patch -s --fuzz=0 -p0 -d "$dry" <"$R332_DYNVOR_PATCH"
+  patch -s --fuzz=0 -p0 -d "$dry" <"$R332_TKE_PATCH"
+  { cat "$TKE_PATCH"; cat "$R332_TKE_PATCH"; } >"$scratch/tke_combined.patch"
 fi
 for unit in dynzdf stprk3_stg; do
   check_patched_call_predecessors "$dry/$unit.F90" \
@@ -434,7 +474,7 @@ if [[ "$ACQ_TARGET" == zdfphy ]]; then
       || refuse "observer call inserted after a continuation: $unit.F90"
   done
 fi
-if [[ "$ACQ_TARGET" == tke331 ]]; then
+if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
   for unit in zdfphy zdftke; do
     check_patched_call_predecessors "$dry/$unit.F90" \
       || refuse "observer call inserted after a continuation: $unit.F90"
@@ -450,11 +490,19 @@ if [[ "$ACQ_TARGET" == zdfphy ]]; then
   [[ $(grep -Fc 'CALL r328_zp_iwm_level' "$dry/zdfiwm.F90") -eq 1 ]] \
     || refuse 'zdfiwm writer call census changed'
 fi
-if [[ "$ACQ_TARGET" == tke331 ]]; then
+if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
   [[ $(grep -Fc 'CALL r331_' "$dry/zdfphy.F90") -eq 6 ]] \
     || refuse 'round-331 zdfphy writer call census changed'
   [[ $(grep -Fc 'CALL r331_' "$dry/zdftke.F90") -eq 4 ]] \
     || refuse 'round-331 zdftke writer call census changed'
+fi
+if [[ "$ACQ_TARGET" == tke332 ]]; then
+  check_patched_call_predecessors "$dry/dynvor.F90" \
+    || refuse 'observer call inserted after a continuation: dynvor.F90'
+  [[ $(grep -Fc 'CALL r332_vor_' "$dry/dynvor.F90") -eq 4 ]] \
+    || refuse 'round-332 dynvor observer call census changed'
+  [[ $(grep -Fc 'CALL r332_tke_row' "$dry/zdftke.F90") -eq 1 ]] \
+    || refuse 'round-332 TKE observer call census changed'
 fi
 cp "$SOURCE_ROOT"/BLD/inc/*.mod "$scratch/mod/"
 syntax_units=(dynzdf_round328_writer dynzdf stprk3_stg)
@@ -465,6 +513,10 @@ fi
 if [[ "$ACQ_TARGET" == tke331 ]]; then
   syntax_units=(dynzdf_round328_writer tke_round331_writer dynzdf \
     stprk3_stg zdfphy zdftke)
+fi
+if [[ "$ACQ_TARGET" == tke332 ]]; then
+  syntax_units=(dynzdf_round328_writer tke_round331_writer round332_writer \
+    dynzdf stprk3_stg dynvor zdfphy zdftke)
 fi
 for unit in "${syntax_units[@]}"; do
   fpp "$dry/$unit.F90" "$scratch/$unit.f90"
@@ -483,6 +535,8 @@ done
 observer_units=(dynzdf stprk3_stg)
 [[ "$ACQ_TARGET" != zdfphy ]] || observer_units+=(zdfphy zdfddm zdfiwm)
 [[ "$ACQ_TARGET" != tke331 ]] || observer_units+=(zdfphy zdftke)
+[[ "$ACQ_TARGET" != tke332 ]] || observer_units+=(zdfphy zdftke)
+[[ "$ACQ_TARGET" != tke332 ]] || observer_units+=(dynvor)
 for unit in "${observer_units[@]}"; do
   rm -f "$dry_bld/ppsrc/nemo/$unit.f90"
 done
@@ -498,13 +552,19 @@ if [[ "$ACQ_TARGET" == zdfphy ]]; then
     "$dry_bld/ppsrc/nemo/zdfphy_round328_writer.f90"
   : >"$dry_bld/obj/zdfphy_round328_writer.o"
 fi
-if [[ "$ACQ_TARGET" == tke331 ]]; then
+if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
   for unit in zdfphy zdftke; do
     cp "$scratch/$unit.f90" "$dry_bld/ppsrc/nemo/$unit.f90"
   done
   cp "$scratch/tke_round331_writer.f90" \
     "$dry_bld/ppsrc/nemo/tke_round331_writer.f90"
   : >"$dry_bld/obj/tke_round331_writer.o"
+fi
+if [[ "$ACQ_TARGET" == tke332 ]]; then
+  cp "$scratch/dynvor.f90" "$dry_bld/ppsrc/nemo/dynvor.f90"
+  cp "$scratch/round332_writer.f90" \
+    "$dry_bld/ppsrc/nemo/round332_writer.f90"
+  : >"$dry_bld/obj/round332_writer.o"
 fi
 same_program "$dry_bld"
 rm -f "$dry_bld/ppsrc/nemo/icevar.f90"
@@ -521,7 +581,31 @@ admit() {
   [[ $(cat "$TARGET_RUN/producer_commit.txt") == "$EXPECTED_PRODUCER" ]] || refuse 'producer commit changed'
   compare_deterministic "$SOURCE_RUN" "$TARGET_RUN" \
     || refuse 'write-only observer changed an inherited deterministic output'
-  if [[ "$ACQ_TARGET" == tke331 ]]; then
+  if [[ "$ACQ_TARGET" == tke332 ]]; then
+    for rank in 0000 0001; do
+      cmp -s "$ADMITTED_DYN_RUN/oracle_dynzdf_kt00000001_s3_r${rank}.bin" \
+        "$TARGET_RUN/oracle_dynzdf_kt00000001_s3_r${rank}.bin" \
+        || refuse "dyn_zdf record rank $rank differs from its admission"
+    done
+    "$PY" "$GATE" --record-dir "$TARGET_RUN" --expect-commit "$EXPECTED_PRODUCER" \
+      --output "$TARGET_RUN/round332_dynzdf_readmission.json"
+    for plant in header field-order truncation stamp vor mxl; do
+      if "$PY" "$R332_GATE" --record-dir "$TARGET_RUN" \
+        --zdf-reference-dir "$ADMITTED_ZDFPHY_RUN" --expect-commit "$EXPECTED_PRODUCER" \
+        --plant "$plant" >"$TARGET_RUN/round332_source_${plant}_plant.log" 2>&1; then
+        refuse "$plant round-332 source-order plant stayed green"
+      fi
+      grep 'REFUSE:' "$TARGET_RUN/round332_source_${plant}_plant.log" >/dev/null \
+        || refuse "$plant round-332 source-order plant did not reach its refusal"
+    done
+    "$PY" "$R332_GATE" --record-dir "$TARGET_RUN" \
+      --zdf-reference-dir "$ADMITTED_ZDFPHY_RUN" --expect-commit "$EXPECTED_PRODUCER" \
+      --output "$TARGET_RUN/round332_source_order_admission.json"
+    ( cd "$TARGET_RUN" && sha256sum oracle_dynzdf_*.bin oracle_tke331_*.bin \
+        oracle_r332_source_*.bin round332_dynzdf_readmission.json \
+        round332_source_order_admission.json round332_source_*_plant.log \
+        >round332_source_order_outputs.sha256 )
+  elif [[ "$ACQ_TARGET" == tke331 ]]; then
     for rank in 0000 0001; do
       cmp -s "$ADMITTED_DYN_RUN/oracle_dynzdf_kt00000001_s3_r${rank}.bin" \
         "$TARGET_RUN/oracle_dynzdf_kt00000001_s3_r${rank}.bin" \
@@ -609,10 +693,15 @@ if [[ "$ACQ_TARGET" == zdfphy ]]; then
     "$SOURCE_ZDFPHY" "$SOURCE_ZDFDDM" "$SOURCE_ZDFIWM" \
     >>"$manifest/toolchain.sha256"
 fi
-if [[ "$ACQ_TARGET" == tke331 ]]; then
+if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
   sha256sum "$TKE_PHY_PATCH" "$TKE_PATCH" "$TKE_WRITER" "$TKE_FIXTURE" \
     "$TKE_GATE" "$TKE_TEST" "$TKE_PREREG" "$SOURCE_ZDFPHY" \
     "$SOURCE_ZDFSH2" "$SOURCE_ZDFDRG" "$SOURCE_ZDFMXL" "$SOURCE_ZDFTKE" \
+    >>"$manifest/toolchain.sha256"
+fi
+if [[ "$ACQ_TARGET" == tke332 ]]; then
+  sha256sum "$R332_DYNVOR_PATCH" "$R332_TKE_PATCH" "$R332_WRITER" \
+    "$R332_GATE" "$R332_TEST" "$SOURCE_DYNVOR" \
     >>"$manifest/toolchain.sha256"
 fi
 
@@ -639,12 +728,18 @@ if [[ "$ACQ_TARGET" == zdfphy ]]; then
   patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$ZP_DDM_PATCH"
   patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$ZP_IWM_PATCH"
 fi
-if [[ "$ACQ_TARGET" == tke331 ]]; then
+if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
   cp "$SOURCE_ZDFPHY" "$TARGET_ROOT/MY_SRC/zdfphy.F90"
   cp "$SOURCE_ZDFTKE" "$TARGET_ROOT/MY_SRC/zdftke.F90"
   cp "$TKE_WRITER" "$TARGET_ROOT/MY_SRC/tke_round331_writer.F90"
   patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$TKE_PHY_PATCH"
   patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$TKE_PATCH"
+fi
+if [[ "$ACQ_TARGET" == tke332 ]]; then
+  cp "$SOURCE_DYNVOR" "$TARGET_ROOT/MY_SRC/dynvor.F90"
+  cp "$R332_WRITER" "$TARGET_ROOT/MY_SRC/round332_writer.F90"
+  patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$R332_DYNVOR_PATCH"
+  patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$R332_TKE_PATCH"
 fi
 touch "$TARGET_ROOT/MY_SRC/"*.F90
 ./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
@@ -655,9 +750,13 @@ if [[ "$ACQ_TARGET" == zdfphy ]]; then
   grep 'NEMO_L4_R328ZP' "$TARGET_ROOT/BLD/ppsrc/nemo/zdfphy_round328_writer.f90" >/dev/null \
     || refuse 'compiled zdf_phy writer is absent'
 fi
-if [[ "$ACQ_TARGET" == tke331 ]]; then
+if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
   grep 'NEMO_L4_R331TK' "$TARGET_ROOT/BLD/ppsrc/nemo/tke_round331_writer.f90" >/dev/null \
     || refuse 'compiled round-331 TKE writer is absent'
+fi
+if [[ "$ACQ_TARGET" == tke332 ]]; then
+  grep 'NEMO_L4_R332SO' "$TARGET_ROOT/BLD/ppsrc/nemo/round332_writer.f90" >/dev/null \
+    || refuse 'compiled round-332 source-order writer is absent'
 fi
 diff <(grep -v "^$TARGET_CFG " "$scratch/work_cfgs.before") \
      <(grep -v "^$TARGET_CFG " "$NEMO_ROOT/cfgs/work_cfgs.txt") >/dev/null \
