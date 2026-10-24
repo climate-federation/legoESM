@@ -389,7 +389,7 @@ Validation: the clean code commit `9ef69ebe5` reports
 preflight plants fire, all 140 inherited deterministic files match, seven
 Fortran units pass syntax, and same-program reports 409 identical preprocessed
 units plus 421 identical normalized objects. The final receipt citation gate
-passes 15 citations with zero failures/unmapped/map-audit failures; the default
+passes 28 citations with zero failures/unmapped/map-audit failures; the default
 landing battery passes 147 tests; the explicit private-import ratchet passes 6
 tests. No NEMO executable was run.
 
