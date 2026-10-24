@@ -127,7 +127,9 @@ def test_semantic_plants_are_one_ulp_and_wet(
 @pytest.mark.parametrize("plant", ["vor", "pdlr"])
 def test_cli_semantic_plants_reach_refuse(record_dir: Path, plant: str) -> None:
     result = subprocess.run([
-        sys.executable, str(Path(gate.__file__)), "--record-dir", str(record_dir),
+        sys.executable, "-m",
+        "scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round332_source_order_gate",
+        "--record-dir", str(record_dir),
         "--zdf-reference-dir", str(record_dir), "--expect-commit", "a" * 40,
         "--plant", plant,
     ], check=False, text=True, capture_output=True)
