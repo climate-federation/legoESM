@@ -64,7 +64,8 @@ fi
 
 [[ -x "$PYTHON" ]] || refuse "missing Python environment: $PYTHON"
 [[ -f "$GATE" ]] || refuse "run from the legoESM repository root; missing $GATE"
-[[ -d "$EVIDENCE_DIR" ]] || refuse "evidence directory does not exist: $EVIDENCE_DIR"
+mkdir -p -- "$EVIDENCE_DIR"
+[[ -d "$EVIDENCE_DIR" ]] || refuse "could not create evidence directory: $EVIDENCE_DIR"
 [[ -z "$(git status --porcelain)" ]] || refuse "producer worktree is not clean"
 readonly COMMIT=$(git rev-parse HEAD)
 
@@ -149,6 +150,8 @@ else:
         1 if int(steps) == 1 else 2), row
     assert footprint["vjp_step_invocations"] == int(steps), row
     assert footprint["jvp_step_invocations"] == int(steps), row
+    assert row["step_boundary_primal_source"] == (
+        "separately materialized production _step_jitted output"), row
     assert row["step_vjp_boundary_outputs_bitwise"] is True, row
     assert row["step_jvp_boundary_outputs_bitwise"] is True, row
 print(status)

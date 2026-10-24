@@ -29,6 +29,10 @@ _ROUND9_RUN_SCRIPT = (
     _REPO / "scripts/validate/ocean_fidelity/testcases/"
     "nemo_testcase_l2_gyre_gradgate_round9_run.sh"
 )
+_ROUND10_RUN_SCRIPT = (
+    _REPO / "scripts/validate/ocean_fidelity/testcases/"
+    "nemo_testcase_l2_gyre_gradgate_round10_run.sh"
+)
 _SPEC = importlib.util.spec_from_file_location("gyre_gradient_gate_tested", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None
 G = importlib.util.module_from_spec(_SPEC)
@@ -60,6 +64,27 @@ def test_round9_operator_entrypoint_reaches_fail_closed_runner():
     )
     assert result.stdout.strip().startswith(
         "GYRE_GRADGATE_GPU_RUNNER_SELF_TEST statuses=")
+
+
+def test_round10_operator_entrypoint_reaches_fail_closed_runner():
+    result = subprocess.run(
+        [str(_ROUND10_RUN_SCRIPT), "--self-test"],
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip().startswith(
+        "GYRE_GRADGATE_GPU_RUNNER_SELF_TEST statuses=")
+
+
+def test_gpu_runner_creates_evidence_directory_before_acquisition():
+    source = _GPU_SCRIPT.read_text(encoding="utf-8")
+    create = source.index('mkdir -p -- "$EVIDENCE_DIR"')
+    existence_check = source.index(
+        '[[ -d "$EVIDENCE_DIR" ]] || refuse "could not create evidence directory')
+    first_row = source.index("run_row()")
+    assert create < existence_check < first_row
 
 
 def test_broken_vjp_plant_flips_passing_row():
@@ -263,18 +288,70 @@ def test_compiled_step_transforms_reuse_cold_and_warm_programs():
     cotangent = jax.tree_util.tree_map(jnp.ones_like, states[-1])
     for kt in range(3, 0, -1):
         _selected, _replay, cotangent = compiled_vjp(
-            states[kt - 1], jnp.asarray(kt, dtype=jnp.int32), cotangent)
+            states[kt - 1], jnp.asarray(kt, dtype=jnp.int32), states[kt],
+            cotangent)
         jax.block_until_ready(cotangent)
 
     tangent = State(Field(jnp.ones_like(cold.T.data)), None)
     for kt in range(1, 4):
         _selected, _replay, tangent = compiled_jvp(
-            states[kt - 1], jnp.asarray(kt, dtype=jnp.int32), tangent)
+            states[kt - 1], jnp.asarray(kt, dtype=jnp.int32), states[kt],
+            tangent)
         jax.block_until_ready(tangent)
 
     # VJP/JVP each trace the ordinary production and transformed replay arms
     # once for each cold/warm pytree specialization.
     assert model.traces == 8
+
+
+def test_compiled_step_transform_uses_materialized_production_primal():
+    class Field(NamedTuple):
+        data: jax.Array
+
+        def replace(self, **changes):
+            return self._replace(**changes)
+
+    class State(NamedTuple):
+        T: Field
+
+    class Context(NamedTuple):
+        observed_ad_step: object
+
+    @jax.custom_jvp
+    def replay_source(value):
+        return jnp.nextafter(value, jnp.full_like(value, jnp.inf))
+
+    @replay_source.defjvp
+    def replay_source_jvp(primals, tangents):
+        (value,), (value_dot,) = primals, tangents
+        return replay_source(value), value_dot
+
+    def mismatching_observed_step(state, _kt):
+        replay = State(Field(replay_source(state.T.data)))
+        return replay, replay
+
+    state = State(Field(jnp.asarray([-0.0, 1.0], dtype=jnp.float64)))
+    production_after = State(Field(jnp.asarray([-0.0, 2.0], dtype=jnp.float64)))
+    cotangent = State(Field(jnp.ones_like(state.T.data)))
+    tangent = State(Field(jnp.ones_like(state.T.data)))
+    context = Context(jax.jit(mismatching_observed_step))
+
+    compiled_vjp, compiled_jvp = G.build_compiled_step_transforms(context)
+    vjp_selected, vjp_replay, _ = compiled_vjp(
+        state, jnp.asarray(1, dtype=jnp.int32), production_after, cotangent)
+    jvp_selected, jvp_replay, _ = compiled_jvp(
+        state, jnp.asarray(1, dtype=jnp.int32), production_after, tangent)
+    planted_vjp, planted_jvp = G.build_compiled_step_transforms(
+        context, plant_replay_primal=True)
+    vjp_plant, _, _ = planted_vjp(
+        state, jnp.asarray(1, dtype=jnp.int32), production_after, cotangent)
+    jvp_plant, _, _ = planted_jvp(
+        state, jnp.asarray(1, dtype=jnp.int32), production_after, tangent)
+
+    for selected in (vjp_selected, jvp_selected):
+        assert G.states_bitwise_equal(selected, production_after)
+    for replay in (vjp_replay, jvp_replay, vjp_plant, jvp_plant):
+        assert not G.states_bitwise_equal(replay, production_after)
 
 
 def test_local_ad_boundary_preserves_primal_and_uses_replay_derivative():

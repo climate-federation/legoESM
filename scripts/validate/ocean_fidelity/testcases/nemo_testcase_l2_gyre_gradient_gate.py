@@ -453,18 +453,23 @@ def loss_at_state(reference: LossReference, state):
     return jnp.mean(jnp.stack(scores))
 
 
-def build_compiled_step_transforms(context: GYREContext):
+def build_compiled_step_transforms(
+        context: GYREContext, *, plant_replay_primal: bool = False):
     """Build reusable one-production-step VJP and JVP executables.
 
     ``kt`` is a dynamic argument, so a multi-step rollout does not create one
     transform closure per forcing time.  JAX specializes these functions only
-    for the cold and warm state pytrees.
+    for the cold and warm state pytrees.  ``production_after`` is the already
+    materialized result of the separately dispatched production JIT.  It is
+    passed through as the local boundary primal; the transform replay supplies
+    derivatives only.  This avoids asking a backend's VJP lowering to
+    reproduce the standalone production kernel's last bits.
     """
 
     observed_step = context.observed_ad_step
 
-    def step_vjp(state, kt, cotangent):
-        (selected, replay), pullback = jax.vjp(
+    def step_vjp(state, kt, production_after, cotangent):
+        (_transformed_selected, replay), pullback = jax.vjp(
             lambda step_state: observed_step(step_state, kt),
             state,
         )
@@ -474,14 +479,17 @@ def build_compiled_step_transforms(context: GYREContext):
             jnp.zeros_like, cotangent)
         state_cotangent = pullback(
             (cotangent, zero_replay_cotangent))[0]
+        selected = replay if plant_replay_primal else production_after
         return selected, replay, state_cotangent
 
-    def step_jvp(state, kt, tangent):
-        (selected, replay), (selected_tangent, _replay_tangent) = jax.jvp(
+    def step_jvp(state, kt, production_after, tangent):
+        (_transformed_selected, replay), (
+            selected_tangent, _replay_tangent) = jax.jvp(
             lambda step_state: observed_step(step_state, kt),
             (state,),
             (tangent,),
         )
+        selected = replay if plant_replay_primal else production_after
         return selected, replay, selected_tangent
 
     return jax.jit(step_vjp), jax.jit(step_jvp)
@@ -571,6 +579,7 @@ def explicit_stepwise_directional_derivatives(
         selected, replay, cotangent = compiled_step_vjp(
             previous,
             jnp.asarray(kt, dtype=jnp.int32),
+            states[kt],
             cotangent,
         )
         jax.block_until_ready(selected)
@@ -598,6 +607,7 @@ def explicit_stepwise_directional_derivatives(
         selected, replay, tangent = compiled_step_jvp(
             states[kt - 1],
             jnp.asarray(kt, dtype=jnp.int32),
+            states[kt],
             tangent,
         )
         jax.block_until_ready(selected)
@@ -633,6 +643,8 @@ def explicit_stepwise_directional_derivatives(
         "rev_fwd_scale_aware_error": (
             discrepancy / max(dot_abs_sum, 1.0e-300)),
         "step_transform_compile_footprint": step_transform_footprint(n_steps),
+        "step_boundary_primal_source": (
+            "separately materialized production _step_jitted output"),
     })
     return enforce_step_replay_byte_gate(
         row, boundary_reports, forward_boundary_reports,
