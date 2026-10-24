@@ -32,12 +32,19 @@ readonly SOURCE_ROOT=$NEMO_ROOT/cfgs/$SOURCE_CFG
 readonly BASELINE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/acquisition/orca1ice_surface_entry_every_step_a_np2
 readonly SOURCE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/acquisition/orca1ice_tke_hmi_10step_np2
 readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round328/acquisition
-TARGET_RUN=$EVIDENCE/orca1ice_dynzdf_kt1_np2
+DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_dynzdf_kt1_np2
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R328ZDFPHY
-  TARGET_RUN=$EVIDENCE/orca1ice_zdfphy_kt1_np2
+  DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_zdfphy_kt1_np2
 fi
-readonly TARGET_CFG TARGET_RUN
+TARGET_RUN=$DEFAULT_TARGET_RUN
+if [[ "$MODE" == --admit-existing && -n ${R328_EXISTING_RUN:-} ]]; then
+  TARGET_RUN=$(realpath -e -- "$R328_EXISTING_RUN")
+  [[ "$ACQ_TARGET" == zdfphy && "$TARGET_RUN" == \
+    "$EVIDENCE/refused/orca1ice_zdfphy_kt1_np2_admission_refused_20261024T043519Z_4166419" ]] \
+    || { printf 'REFUSE: R328_EXISTING_RUN is not the retained zdf_phy run\n' >&2; exit 64; }
+fi
+readonly TARGET_CFG DEFAULT_TARGET_RUN TARGET_RUN
 readonly TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
 readonly SOURCE_DYNZDF=$NEMO_ROOT/src/OCE/DYN/dynzdf.F90
 readonly SOURCE_STAGE=$SOURCE_ROOT/MY_SRC/stprk3_stg.F90
@@ -59,6 +66,8 @@ readonly SOURCE_BINARY_SHA=20376f40a78cb1a5491838ff112bfbe738178e4da8da1e43d5bd5
 readonly DECK_MANIFEST_SHA=51da69b494a10fa3c3b119018329a94d963f1fe3e59b6834ea936055ab0df2b9
 readonly INPUT_MANIFEST_SHA=3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c49cc36bbd17e5
 readonly OCEAN_OUTPUT_SHA=b1e6c021d79013f3303582034350574fae2f0b1e68c976caf3af4061ac51a80f
+readonly RETAINED_ZDFPHY_PRODUCER=30cb3f2a81866381cbca2a0d8b36d01ac1794d4a
+readonly RETAINED_ZDFPHY_BINARY_SHA=aa16dbf74e4e5bae05df0903038ea71e29f1adf9ab5d9be9752f1d3079dfb684
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
@@ -185,7 +194,11 @@ compare_deterministic() {
   while IFS= read -r -d '' source; do
     name=$(basename "$source")
     [[ -f "$candidate/$name" ]] || return 1
-    cmp -s "$source" "$candidate/$name" || return 1
+    if [[ "$name" == oracle_transport_*.bin ]]; then
+      compare_transport_defined "$source" "$candidate/$name" || return 1
+    else
+      cmp -s "$source" "$candidate/$name" || return 1
+    fi
     count=$((count+1))
   done < <(find "$reference" -maxdepth 1 -type f \
     \( -name 'oracle_*.bin' -o -name 'ORCA2_00000010_restart*.nc' \) -print0)
@@ -193,10 +206,35 @@ compare_deterministic() {
   printf 'DETERMINISTIC_PASSIVITY_PASS %s files=%s\n' "$candidate" "$count"
 }
 
+compare_transport_defined() {
+  local reference=$1 candidate=$2 size payload defined
+  [[ -f "$reference" && -f "$candidate" ]] || return 1
+  size=$(stat -c %s "$reference")
+  [[ $(stat -c %s "$candidate") -eq $size && $size -gt 48 ]] || return 1
+  payload=$((size - 48))
+  (( payload % 24 == 0 )) || return 1
+  defined=$((48 + 2 * payload / 3))
+  # MY_SRC/stprk3_stg.F90:323-350: with ln_dynadv_vec=T, zFu/zFv are
+  # defined here but zFw is only computed later by tra_adv.F90:267-312.
+  # Compare the header and the two defined records; any such change refuses.
+  cmp -s -n "$defined" "$reference" "$candidate"
+}
+
 cd "$REPO"
 [[ -z $(git status --porcelain --untracked-files=all) ]] \
   || refuse 'acquisition requires a clean committed tree'
 readonly COMMIT=$(git rev-parse HEAD)
+EXPECTED_PRODUCER=$COMMIT
+if [[ "$TARGET_RUN" != "$DEFAULT_TARGET_RUN" ]]; then
+  [[ -f "$TARGET_RUN/producer_commit.txt" ]] || refuse 'retained run lacks producer commit'
+  EXPECTED_PRODUCER=$(cat "$TARGET_RUN/producer_commit.txt")
+  [[ "$EXPECTED_PRODUCER" == "$RETAINED_ZDFPHY_PRODUCER" ]] \
+    || refuse 'retained run has the wrong producer commit'
+  git merge-base --is-ancestor "$EXPECTED_PRODUCER" "$COMMIT" \
+    || refuse 'retained producer is not an ancestor of the admission repair'
+  pin "$RETAINED_ZDFPHY_BINARY_SHA" "$TARGET_RUN/nemo" 'retained zdf_phy binary'
+fi
+readonly EXPECTED_PRODUCER
 export PYTHONPATH=$REPO:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/atmosphere:$REPO/packages/coupler:$REPO/packages/ice:$REPO/packages/land:$REPO/packages/ml:$REPO/packages/tools:$REPO/src
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
@@ -378,7 +416,7 @@ fi
 
 admit() {
   local plant
-  [[ $(cat "$TARGET_RUN/producer_commit.txt") == "$COMMIT" ]] || refuse 'producer commit changed'
+  [[ $(cat "$TARGET_RUN/producer_commit.txt") == "$EXPECTED_PRODUCER" ]] || refuse 'producer commit changed'
   compare_deterministic "$SOURCE_RUN" "$TARGET_RUN" \
     || refuse 'write-only observer changed an inherited deterministic output'
   if [[ "$ACQ_TARGET" == zdfphy ]]; then
@@ -387,17 +425,17 @@ admit() {
         "$TARGET_RUN/oracle_dynzdf_kt00000001_s3_r${rank}.bin" \
         || refuse "dyn_zdf record rank $rank differs from its admission"
     done
-    "$PY" "$GATE" --record-dir "$TARGET_RUN" --expect-commit "$COMMIT" \
+    "$PY" "$GATE" --record-dir "$TARGET_RUN" --expect-commit "$EXPECTED_PRODUCER" \
       --output "$TARGET_RUN/round328_dynzdf_readmission.json"
     for plant in header field-order truncation stamp boundary1 boundary2 boundary3; do
-      if "$PY" "$ZP_GATE" --record-dir "$TARGET_RUN" --expect-commit "$COMMIT" \
+      if "$PY" "$ZP_GATE" --record-dir "$TARGET_RUN" --expect-commit "$EXPECTED_PRODUCER" \
         --plant "$plant" >"$TARGET_RUN/round328_zdfphy_${plant}_plant.log" 2>&1; then
         refuse "$plant zdf_phy plant stayed green"
       fi
       grep 'REFUSE:' "$TARGET_RUN/round328_zdfphy_${plant}_plant.log" >/dev/null \
         || refuse "$plant zdf_phy plant did not reach its refusal"
     done
-    "$PY" "$ZP_GATE" --record-dir "$TARGET_RUN" --expect-commit "$COMMIT" \
+    "$PY" "$ZP_GATE" --record-dir "$TARGET_RUN" --expect-commit "$EXPECTED_PRODUCER" \
       --output "$TARGET_RUN/round328_zdfphy_admission.json"
     ( cd "$TARGET_RUN" && sha256sum oracle_dynzdf_*.bin oracle_zdfphy_*.bin \
         round328_dynzdf_readmission.json round328_zdfphy_admission.json \
@@ -420,9 +458,18 @@ admit() {
 }
 
 if [[ "$MODE" == --admit-existing ]]; then
-  [[ -x "$BINARY" && -x "$TARGET_RUN/nemo" ]] || refuse 'existing target lacks its binary'
-  cmp -s "$BINARY" "$TARGET_RUN/nemo" || refuse 'staged binary differs'
+  if [[ "$TARGET_RUN" == "$DEFAULT_TARGET_RUN" ]]; then
+    [[ -x "$BINARY" && -x "$TARGET_RUN/nemo" ]] || refuse 'existing target lacks its binary'
+    cmp -s "$BINARY" "$TARGET_RUN/nemo" || refuse 'staged binary differs'
+  else
+    [[ -x "$TARGET_RUN/nemo" ]] || refuse 'retained run lacks its binary'
+    [[ ! -e "$DEFAULT_TARGET_RUN" ]] || refuse 'canonical admission target already exists'
+  fi
   admit
+  if [[ "$TARGET_RUN" != "$DEFAULT_TARGET_RUN" ]]; then
+    mv -- "$TARGET_RUN" "$DEFAULT_TARGET_RUN"
+    printf 'R328_RETAINED_OUTPUTS_ADMITTED %s\n' "$DEFAULT_TARGET_RUN"
+  fi
   exit 0
 fi
 

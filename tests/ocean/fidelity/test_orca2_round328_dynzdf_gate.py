@@ -99,6 +99,38 @@ def _cleanup_function() -> str:
     return text[start:end]
 
 
+def _transport_compare_function() -> str:
+    text = RUN_SH.read_text()
+    start = text.index("compare_transport_defined() {")
+    end = text.index("\n}\n", start) + 2
+    return text[start:end]
+
+
+def _run_transport_compare(reference: Path, candidate: Path) -> int:
+    script = "\n".join((
+        _transport_compare_function(),
+        f"compare_transport_defined {shlex.quote(str(reference))} "
+        f"{shlex.quote(str(candidate))}",
+    ))
+    return subprocess.run(["bash", "-c", script]).returncode
+
+
+def test_transport_passivity_ignores_only_undefined_zfw(tmp_path: Path) -> None:
+    # Writer layout is a 48-byte header followed by equal zFu, zFv, zFw records.
+    reference = tmp_path / "reference.bin"
+    candidate = tmp_path / "candidate.bin"
+    original = bytes(range(48)) + bytes(range(48, 96))
+    reference.write_bytes(original)
+    changed = bytearray(original)
+    changed[80] ^= 1  # third record (zFw), unset at this writer boundary
+    candidate.write_bytes(changed)
+    assert _run_transport_compare(reference, candidate) == 0
+
+    changed[48] ^= 1  # first record (zFu), a production-consumed operand
+    candidate.write_bytes(changed)
+    assert _run_transport_compare(reference, candidate) != 0
+
+
 @pytest.mark.parametrize("completed", [False, True])
 def test_cleanup_keeps_only_completed_run_on_admission_refusal(
         tmp_path: Path, completed: bool) -> None:
