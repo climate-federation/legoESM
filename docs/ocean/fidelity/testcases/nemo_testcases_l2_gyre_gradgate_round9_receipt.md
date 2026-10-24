@@ -36,11 +36,12 @@ boundaries, not physics, configuration, clipping, a guard, or `stop_gradient`.
 | P3/P4: GPU 1 one-day, 10-day, 60-day agreement and three-schedule resource rows | operator has not run the committed script | UNMEASURED |
 
 The first implementation prediction was **REFUTED and retained**. At commit
-`a747cf1a7`, the custom rule selected the production arm but XLA commoned/fused
-that arm inside reverse lowering: the VJP boundary differed on 18 leaves while
-the JVP boundary was bit-identical. Its derivative evidence was already on bar,
-but the binding row correctly became UNMEASURED. The discriminator added only
-optimization barriers around the separately executed production arm. At commit
+`a747cf1a7`, the custom rule selected the production arm but an XLA
+reverse-lowering optimization interaction made the VJP boundary differ on 18
+leaves while the JVP boundary was bit-identical. Its derivative evidence was
+already on bar, but the binding row correctly became UNMEASURED. The
+discriminator added only optimization barriers around the separately executed
+production arm, preventing cross-boundary optimization. At commit
 `a7318c2bb`, both selected boundary outputs became bit-identical while the raw
 VJP/JVP replays retained their expected 18/7-leaf last-bit differences.
 
