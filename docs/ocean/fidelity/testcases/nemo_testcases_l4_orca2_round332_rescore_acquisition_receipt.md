@@ -124,6 +124,10 @@ Expected evidence directory:
 - R332-P5: **CONFIRMED**.  With no confirmed single-statement owner, Decision
   122 is not opened and no production-call-site, cross-card, or gradient claim
   is eligible.
+- Per-receipt citation gate: PASS, 4 citations, 0 unmapped, 0 failures and 0
+  map-audit failures; required citation-gate pytest: 17 passed.
+- Default ORCA2 landing battery plus the round-332 gate: 158 passed in
+  1,039.52 seconds, including all 6 private-import ratchet tests.
 - No configuration value changed: **ASKED**.
 - Stop and extend the reviewed acquisition tools when a record is missing:
   **ASKED and satisfied**.
