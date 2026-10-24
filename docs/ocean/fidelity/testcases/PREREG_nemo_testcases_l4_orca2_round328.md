@@ -51,3 +51,28 @@ the passive completed stage-2 state.  It names the first non-bit statement,
 its cell subset, NEMO and legoESM lines, and certified-rung coverage.  A model
 change remains forbidden unless one cited statement passes Decision 122 on all
 seven pairs, both labels, with Decision-150 drag enabled.
+
+## Resume-4 offline-replay predictions
+
+Frozen 2026-10-23 after the operator produced the passive record and before
+reading any of its numerical payloads.  Source inspection is permitted; the
+predictions below are not measurements.
+
+- R1 admission reproduces `PASS_R328_DYNZDF_STRUCTURE`, including both ranks,
+  the inherited-frame passivity checks, active channels, and all planted
+  refusals.
+- R2 the vector explicit update, barotropic subtraction, bottom-drag RHS, and
+  top-drag RHS reproduce their recorded boundaries bit for bit when replayed
+  from the record's own operands.  Falsifier: one unequal wet value at any of
+  those four boundaries.
+- R3 the base ZDF matrix and ordered solve reproduce bit for bit when replayed
+  with the record's own `avm`, Kmm/Kaa ratios, masks, and grid metrics.
+  Falsifier: one unequal wet matrix or solve value.
+- R4 the current comparison card's model-produced `avm` is not bit-identical
+  to the recorded `avm`; its first unequal active interface occurs under ice.
+  Falsifier: all active interfaces are bit-identical, or every unequal active
+  interface is ice-free.
+- R5 if R2--R4 hold, the first departing input to `dyn_zdf` is the TKE-produced
+  `avm`, while no statement inside the recorded `dyn_zdf` walk is an owner.
+  The result is a proposal only: no model or configuration change lands
+  without a single cited statement and a fresh Decision-122 seven-pair card.
