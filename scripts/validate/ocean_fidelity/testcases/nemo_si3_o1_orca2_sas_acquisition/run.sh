@@ -45,6 +45,7 @@ readonly PRA_PATCH=$here/icedyn_adv_pra_o1_public.patch
 readonly STP_PATCH=$here/icestp_o1_writer.patch
 readonly STUBS_F90=$here/o1_si3_fixture_stubs.F90
 readonly FIXTURE_F90=$here/o1_si3_layout_fixture.F90
+readonly NEMO_RST_FIXTURE_F90=$here/o1_nemo_restart_fixture.F90
 readonly NML_CFG=$here/namelist_cfg
 readonly NML_ICE_CFG=$here/namelist_ice_cfg
 readonly LOG_EXCERPT=$here/ocean.output.excerpt
@@ -201,7 +202,7 @@ render_rst_namelists() {
   sed -E -i 's/^( *nn_itend *= *).*/\11/' "$dst_oce"
   # cn_icerst_in is declared in &nampar (src/ICE/icestp.F90:341-342);
   # nn_iceini_file is declared in &namini (src/ICE/iceistate.F90:465-470).
-  sed -E -i 's|^(&nampar.*)|\1\n   cn_icerst_in     = "ORCA2_SAS_00000001_restart_ice"|' "$dst_ice"
+  sed -E -i 's|^(&nampar.*)|\1\n   cn_icerst_in     = "ORCA2_SAS_00000001_restart_ice"\n   cn_icerst_indir  = "./input_restart"\n   cn_icerst_out    = "restart_ice_o1_output"\n   cn_icerst_outdir = "./output_restart"|' "$dst_ice"
   sed -E -i 's|^(&namini.*)|\1\n   nn_iceini_file   = 2|' "$dst_ice"
 }
 
@@ -346,7 +347,10 @@ allowed_oce_diff = {"nn_itend", "nn_stock", "nn_write"}
 if deck_kind == "2step":
     allowed_ice_diff = {"ln_icedyn", "ln_icethd"}
 elif deck_kind == "rst_1step":
-    allowed_ice_diff = {"ln_icedyn", "ln_icethd", "cn_icerst_in", "nn_iceini_file"}
+    allowed_ice_diff = {
+        "ln_icedyn", "ln_icethd", "cn_icerst_in", "cn_icerst_indir",
+        "cn_icerst_out", "cn_icerst_outdir", "nn_iceini_file",
+    }
 else:
     raise SystemExit(f"STATUS PLANT-FIRED: unknown deck_kind={deck_kind!r}")
 
@@ -365,6 +369,14 @@ if deck_kind == "rst_1step":
         raise SystemExit("STATUS PLANT-FIRED: rst_1step requires nn_iceini_file=2 in &namini")
     if cfg_ice_vars.get("cn_icerst_in", "").strip("\"'") != "ORCA2_SAS_00000001_restart_ice":
         raise SystemExit("STATUS PLANT-FIRED: rst_1step requires cn_icerst_in='ORCA2_SAS_00000001_restart_ice' in &nampar")
+    expected_paths = {
+        "cn_icerst_indir": "./input_restart",
+        "cn_icerst_out": "restart_ice_o1_output",
+        "cn_icerst_outdir": "./output_restart",
+    }
+    for key, expected in expected_paths.items():
+        if cfg_ice_vars.get(key, "").strip("\"'") != expected:
+            raise SystemExit(f"STATUS PLANT-FIRED: rst_1step requires {key}={expected!r}")
 
 # Verify cn_domcfg and every sn_* file stem + weights file exists in the tarballs
 domcfg_stem = cfg_oce_vars["cn_domcfg"].strip("\"'")
@@ -457,13 +469,6 @@ for txt, token, label in required_source_anchors:
     if token not in txt:
         raise SystemExit(f"STATUS PLANT-FIRED: missing source anchor {token!r} in {label}")
 
-# Render the O1-deck equivalent excerpt (ln_icedyn = F, ln_icethd = F) for O1 log check
-o1_lines = []
-for l in body:
-    l2 = re.sub(r"(ln_icedyn\s*=\s*)T", r"\g<1>F", l)
-    l2 = re.sub(r"(ln_icethd\s*=\s*)T", r"\g<1>F", l2)
-    o1_lines.append(l2)
-(pathlib.Path(scratch_p) / "ocean.output.o1_rendered").write_text("\n".join(o1_lines) + "\n", encoding="utf-8")
 PY
 }
 
@@ -580,7 +585,7 @@ run_preflight() {
   export TMPDIR=$scratch
 
   # Preconditions: required files and NEMO reference tree
-  for f in "$WRITER_F90" "$PRA_PATCH" "$STP_PATCH" "$STUBS_F90" "$FIXTURE_F90" \
+  for f in "$WRITER_F90" "$PRA_PATCH" "$STP_PATCH" "$STUBS_F90" "$FIXTURE_F90" "$NEMO_RST_FIXTURE_F90" \
            "$NML_CFG" "$NML_ICE_CFG" "$LOG_EXCERPT" "$GATE_PY" \
            "$SHIPPED_PRA" "$SHIPPED_STP" "$SHIPPED_ITD" "$SHIPPED_DOM" "$SHIPPED_SAS_GCM" \
            "$SHIPPED_NML_REF" "$SHIPPED_NML_ICE_REF" \
@@ -610,7 +615,7 @@ run_preflight() {
     printf 'REFUSE: source patches must be strictly additive\n' >&2
     exit 66
   fi
-  for f90 in "$WRITER_F90" "$STUBS_F90" "$FIXTURE_F90"; do
+  for f90 in "$WRITER_F90" "$STUBS_F90" "$FIXTURE_F90" "$NEMO_RST_FIXTURE_F90"; do
     check_intrinsic_use "$f90"
   done
   # Plant 1c: bare USE iso_fortran_env without INTRINSIC
@@ -689,6 +694,36 @@ run_preflight() {
   ( cd "$scratch/fixture_run" && "$scratch/o1_si3_layout_fixture.exe" )
   "$PY" "$GATE_PY" --verify-layout-fixture "$scratch/fixture_run/o1_si3_records" > "$scratch/layout_fixture.json"
 
+  # Real NEMO IOM convention: a gfortran/NetCDF producer writes Ni_0 x Nj_0
+  # without halos; the legoESM reader must allocate and apply ORCA2 lbc_lnk.
+  mkdir -p "$scratch/nemo_restart_fixture"
+  "$FC" -O2 -I "$NEMO_INC" "$NEMO_RST_FIXTURE_F90" \
+    -L "$(dirname "$NEMO_INC")/lib" -Wl,-rpath,"$(dirname "$NEMO_INC")/lib" \
+    -lnetcdff -lnetcdf -o "$scratch/o1_nemo_restart_fixture.exe"
+  ( cd "$scratch/nemo_restart_fixture" && "$scratch/o1_nemo_restart_fixture.exe" )
+  "$PY" - "$scratch/nemo_restart_fixture/nemo_writer_layout_restart.nc" <<'PY'
+import pathlib
+import sys
+import jax.numpy as jnp
+import netCDF4
+from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig, read_si3_netcdf_restart
+
+p = pathlib.Path(sys.argv[1])
+with netCDF4.Dataset(p) as ds:
+    if len(ds.dimensions["x"]) != 180 or len(ds.dimensions["y"]) != 148:
+        raise SystemExit("STATUS PLANT-FIRED: fixture is not NEMO halo-free 180x148")
+cfg = SI3ORCA2StateConfig.for_orca2_sas_ice()
+tmask = jnp.ones((184, 152), dtype=jnp.float64)
+state = read_si3_netcdf_restart(p, tmask=tmask, config=cfg, ln_rstart=True)
+if state.v_i.shape != (184, 152, 5):
+    raise SystemExit(f"STATUS PLANT-FIRED: expanded restart shape {state.v_i.shape}")
+expected = 1.0 + 0.001 + 0.000001 + 0.000000001
+if abs(float(state.v_i[2, 2, 0]) - expected) > 1.0e-14:
+    raise SystemExit("STATUS PLANT-FIRED: NEMO payload did not map to true interior")
+if float(state.v_i[0, 20, 0]) == 0.0:
+    raise SystemExit("STATUS PLANT-FIRED: ORCA2 lbc_lnk halo was not applied")
+PY
+
   # ---- Checklist Item 5: all expected frames written + ASCII-only check + plants ----
   for lf_plant in rank-collapse wrong-offset truncation bad-magic missing-frame field-swap; do
     if "$PY" "$GATE_PY" --verify-layout-fixture "$scratch/fixture_run/o1_si3_records" --plant "$lf_plant" >"$scratch/lf_${lf_plant}.log" 2>&1; then
@@ -698,7 +733,7 @@ run_preflight() {
     grep -F "STATUS PLANT-FIRED" "$scratch/lf_${lf_plant}.log" >/dev/null
   done
 
-  for ascii_target in "$WRITER_F90" "$PRA_PATCH" "$STP_PATCH" "$STUBS_F90" "$FIXTURE_F90" "$NML_CFG" "$NML_ICE_CFG"; do
+  for ascii_target in "$WRITER_F90" "$PRA_PATCH" "$STP_PATCH" "$STUBS_F90" "$FIXTURE_F90" "$NEMO_RST_FIXTURE_F90" "$NML_CFG" "$NML_ICE_CFG"; do
     check_ascii_only "$ascii_target"
   done
   printf '! UTF-8 em-dash plant: —\n' > "$scratch/utf8_plant.F90"
@@ -731,24 +766,11 @@ run_preflight() {
     exit 72
   fi
 
-  verify_excerpt_provenance_and_deck_independence "$LOG_EXCERPT" "$scratch" "none"
-  if verify_excerpt_provenance_and_deck_independence "$LOG_EXCERPT" "$scratch" "excerpt-sha-mismatch" >"$scratch/exc_plant.log" 2>&1; then
-    printf 'REFUSE: Plant 7b (excerpt SHA mismatch) did not fail\n' >&2
-    exit 72
-  fi
-  grep -F "STATUS PLANT-FIRED" "$scratch/exc_plant.log" >/dev/null
-
-  "$PY" "$GATE_PY" --verify-log "$LOG_EXCERPT" --expect-icedyn T --expect-icethd T >/dev/null
-  "$PY" "$GATE_PY" --verify-log "$scratch/ocean.output.o1_rendered" --expect-icedyn F --expect-icethd F > "$scratch/log_check.json"
-  sed -E 's/=/   =    /g' "$scratch/ocean.output.o1_rendered" > "$scratch/ocean.output.spaced"
-  "$PY" "$GATE_PY" --verify-log "$scratch/ocean.output.spaced" --expect-icedyn F --expect-icethd F >/dev/null
-  if "$PY" "$GATE_PY" --verify-log "$LOG_EXCERPT" --expect-icedyn F --expect-icethd F >"$scratch/log_wrong_dyn.log" 2>&1; then
-    printf 'REFUSE: Plant 7c (wrong ln_icedyn/ln_icethd in log) did not fail\n' >&2
-    exit 72
-  fi
-  grep -F "STATUS PLANT-FIRED" "$scratch/log_wrong_dyn.log" >/dev/null
-  for log_plant in error-token missing-aaa wrong-jpl wrong-flag; do
-    if "$PY" "$GATE_PY" --verify-log "$scratch/ocean.output.o1_rendered" --plant "$log_plant" >"$scratch/log_${log_plant}.log" 2>&1; then
+  # No O1 SAS ocean.output exists on disk.  This is explicitly a namelist/source
+  # derived fixture, never transformed output from an unrelated ORCA2 run.
+  "$PY" "$GATE_PY" --verify-deck-fixture "$LOG_EXCERPT" > "$scratch/log_check.json"
+  for log_plant in error-token missing-line wrong-jpl wrong-flag; do
+    if "$PY" "$GATE_PY" --verify-deck-fixture "$LOG_EXCERPT" --plant "$log_plant" >"$scratch/log_${log_plant}.log" 2>&1; then
       printf 'REFUSE: Plant 7d (log plant %s) did not fail\n' "$log_plant" >&2
       exit 72
     fi
@@ -835,7 +857,8 @@ run_preflight() {
     printf 'REFUSE: Plant 7f completed subshell did not exit non-zero\n' >&2
     exit 72
   fi
-  if ! find "$scratch/trap_test/refused" -name RUN_COMPLETE | grep -q RUN_COMPLETE; then
+  find "$scratch/trap_test/refused" -name RUN_COMPLETE > "$scratch/trap_test/run_complete.paths"
+  if ! grep RUN_COMPLETE "$scratch/trap_test/run_complete.paths" >/dev/null; then
     printf 'REFUSE: Plant 7f EXIT trap did not retain completed run in refused/\n' >&2
     exit 72
   fi
@@ -889,12 +912,11 @@ report = {
         "6a_disk_floor_nonexistent_parent",
         "6b_ram_floor_150gb",
         "7a_existing_target_dir",
-        "7b_excerpt_provenance_sha",
-        "7c_log_wrong_icedyn_icethd",
-        "7d_log_error_token",
-        "7e_log_missing_aaa",
-        "7f_log_wrong_jpl",
-        "7g_log_wrong_flag",
+        "7b_derived_o1_deck_fixture_disclaimer",
+        "7c_log_error_token",
+        "7d_log_missing_derived_line",
+        "7e_log_wrong_jpl",
+        "7f_log_wrong_flag",
         "7h_same_program_non_observer_mutation",
         "7i_exit_trap_failed_build_cleanup_and_completed_retained_in_refused",
         "gate_1ulp_state_first_wet_cell",
@@ -916,7 +938,7 @@ PY
 }
 
 admit_all() {
-  local expect_commit=$1
+  local expect_commit=${1:-}
   if [[ -d "$TARGET_REF_ROOT/BLD" && -d "$TARGET_REC_ROOT/BLD" ]]; then
     "$PY" "$GATE_PY" --same-program "$TARGET_REC_ROOT/BLD" \
       --reference-bld "$TARGET_REF_ROOT/BLD" \
@@ -924,12 +946,15 @@ admit_all() {
       --new-cfg "$TARGET_REC_CFG" --reference-cfg "$TARGET_REF_CFG" \
       --json "$EVIDENCE/manifest/same_program.json"
   fi
+  local commit_args=()
+  if [[ -n "$expect_commit" ]]; then
+    commit_args=(--expect-commit "$expect_commit")
+  fi
   "$PY" "$GATE_PY" --admit-evidence "$EVIDENCE" \
-    --expect-commit "$expect_commit" \
-    --json "$EVIDENCE/o1_admission.json"
+    "${commit_args[@]}" --json "$EVIDENCE/o1_admission.json"
   for adm_plant in stamp same-program binary-sha input-sha missing-complete missing-stop0 ref-rec-diff 1ulp-state rst-missing rst-1ulp; do
     if "$PY" "$GATE_PY" --admit-evidence "$EVIDENCE" \
-         --expect-commit "$expect_commit" \
+         "${commit_args[@]}" \
          --plant "$adm_plant" >/dev/null 2>&1; then
       printf 'REFUSE: admission plant %s did not fail\n' "$adm_plant" >&2
       exit 72
@@ -948,8 +973,7 @@ if [[ "$mode" == --admit-existing ]]; then
     printf 'REFUSE: missing %s/manifest/producer_commit.txt\n' "$EVIDENCE" >&2
     exit 65
   }
-  existing_commit=$(tr -d '[:space:]' < "$EVIDENCE/manifest/producer_commit.txt")
-  admit_all "$existing_commit"
+  admit_all
   printf 'ACQUISITION_ADMITTED %s\n' "$EVIDENCE"
   exit 0
 fi
@@ -969,7 +993,8 @@ ACTIVE_RUN_DIR="$EVIDENCE"
 cp "$NEMO_ROOT/cfgs/work_cfgs.txt" "$EVIDENCE/manifest/work_cfgs.before"
 printf '%s\n' "$COMMIT" > "$EVIDENCE/manifest/producer_commit.txt"
 sha256sum "$ORCA2_BUNDLE" "$SAS_BUNDLE" "$WRITER_F90" "$PRA_PATCH" "$STP_PATCH" \
-  "$NML_CFG" "$NML_ICE_CFG" "$GATE_PY" > "$EVIDENCE/manifest/inputs.sha256"
+  "$NML_CFG" "$NML_ICE_CFG" > "$EVIDENCE/manifest/inputs.sha256"
+sha256sum "$GATE_PY" > "$EVIDENCE/manifest/gate.sha256"
 
 tar -ztf "$ORCA2_BUNDLE" > "$EVIDENCE/manifest/bundles.toc"
 tar -ztf "$SAS_BUNDLE" >> "$EVIDENCE/manifest/bundles.toc"
@@ -1020,12 +1045,15 @@ stage_and_run() {
   check_free_ram_gb "$MIN_FREE_RAM_GB"
   check_free_disk_kb "$run_dir" "$MIN_FREE_DISK_KB"
   mkdir -p "$run_dir/o1_si3_records"
+  printf '%s\n' "$COMMIT" > "$run_dir/RUN_PRODUCER_COMMIT"
   cp -L "$SHIPPED_NML_REF" "$run_dir/namelist_ref"
   cp -L "$SHIPPED_NML_ICE_REF" "$run_dir/namelist_ice_ref"
   if [[ "$is_rst_run" -eq 1 ]]; then
     render_rst_namelists "$NML_CFG" "$NML_ICE_CFG" "$run_dir/namelist_cfg" "$run_dir/namelist_ice_cfg"
     verify_namelists_and_stems "$run_dir/namelist_cfg" "$run_dir/namelist_ice_cfg" "$EVIDENCE/manifest/bundles.toc" "none" "rst_1step"
-    cp "$EVIDENCE/rec_2step/ORCA2_SAS_00000001_restart_ice.nc" "$run_dir/ORCA2_SAS_00000001_restart_ice.nc"
+    mkdir -p "$run_dir/input_restart" "$run_dir/output_restart"
+    cp "$EVIDENCE/rec_2step/ORCA2_SAS_00000001_restart_ice.nc" \
+      "$run_dir/input_restart/ORCA2_SAS_00000001_restart_ice.nc"
   else
     cp "$NML_CFG" "$run_dir/namelist_cfg"
     cp "$NML_ICE_CFG" "$run_dir/namelist_ice_cfg"

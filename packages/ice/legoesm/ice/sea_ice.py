@@ -565,9 +565,7 @@ def _si3_step_with_trace(state: SI3ColumnState,
 
 from legoesm.ice.si3_orca2_state import (  # noqa: E402
     SI3ORCA2Forcing,
-    SI3ORCA2StateConfig,
     SI3State,
-    si3_o1_step,
 )
 
 
@@ -589,49 +587,28 @@ def _si3_orca2_o1_step_with_trace(
             "thermo_scheme='si3_orca2_o1' requires SI3ORCA2Forcing carrying "
             "tmask and optional sss_m at the icestp entry boundary (icestp.F90:148-224)"
         )
-    orca2_cfg = (
-        config.si3_orca2
-        if config.si3_orca2 is not None
-        else SI3ORCA2StateConfig(
-            rDt_ice=float(dt), ice_constants=config.ice_constants
+    if config.si3_orca2 is None:
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o1' requires an explicit si3_orca2 config; "
+            "the ice time step may not be inferred from the dispatcher dt"
         )
+    orca2_cfg = config.si3_orca2
+    if float(dt) != float(orca2_cfg.rDt_ice):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o1' requires dt == si3_orca2.rDt_ice "
+            f"({float(dt)!r} != {float(orca2_cfg.rDt_ice)!r})"
+        )
+
+    # O1 deliberately exposes only the restart/state operator (`si3_o1_step`).
+    # Even with dynamics and thermodynamics disabled, NEMO ice_update_flx returns
+    # atmospheric/open-water heat, freshwater, and salt terms (iceupdate.F90:
+    # 115-161); SI3ORCA2Forcing does not yet carry that forcing contract.  A
+    # zero-filled TileResponse would therefore be a silent physical choice.
+    raise NotImplementedError(
+        "SI3 ORCA2 O1 state stepping is available through si3_o1_step, but "
+        "step_sea_ice is refused until the NEMO ice_update_flx forcing and "
+        "heat/freshwater/salt TileResponse contract is implemented"
     )
-    new_state = si3_o1_step(
-        state,
-        forcing.tmask,
-        sss_m=forcing.sss_m,
-        config=orca2_cfg,
-        apply_halos=forcing.apply_halos,
-    )
-    agg = new_state.aggregated
-    z = jnp.zeros_like(agg.at_i)
-    one = jnp.ones_like(agg.at_i)
-    evap = forcing.evaporation if forcing.evaporation is not None else z
-    response = TileResponse(
-        T_sfc=agg.tm_su,
-        albedo=one * config.albedo_ice,
-        emissivity=one * config.emissivity_ice,
-        z0=one * config.z0_ice,
-        q_surface=z,
-        shflx=z,
-        lhflx=evap * config.ice_constants.latent_sublimation,
-        tau_x=z,
-        tau_y=z,
-        lw_up=z,
-        u_ocean_sfc=new_state.u_ice,
-        v_ocean_sfc=new_state.v_ice,
-        co2_flux=z,
-        freshwater_flux=-new_state.snwice_fmass,
-        ocean_heat_extraction=z,
-        ocean_stress_x=z,
-        ocean_stress_y=z,
-        surface_mass_flux=evap * agg.at_i,
-        lhflx_exchange=evap * config.ice_constants.latent_sublimation * agg.at_i,
-        salt_flux=z,
-        T_rad=agg.tm_su,
-        ice_concentration_thermo=state.aggregated.at_i,
-    )
-    return new_state, response
 
 
 

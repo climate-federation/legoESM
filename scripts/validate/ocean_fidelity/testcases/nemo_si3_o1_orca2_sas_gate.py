@@ -50,9 +50,8 @@ from legoesm.ice.si3_orca2_state import (
     si3_var_glo2eqv,
     write_si3_netcdf_restart,
 )
-from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round326_hmi_gate import (
-     BUILD_CONFIG_FILES,
-    _elf_view,
+from scripts.validate.ocean_fidelity.same_program import (
+    BUILD_CONFIG_FILES,
     objects_equal,
 )
 
@@ -444,13 +443,22 @@ def wet_mask_for_field(
     tmask: np.ndarray | jax.Array,
     umask: np.ndarray | jax.Array | None = None,
     vmask: np.ndarray | jax.Array | None = None,
+    *,
+    nn_hls: int = 2,
 ) -> np.ndarray:
-    """Return the appropriate 2D wet mask (`tmask`, `umask`, or `vmask`) for a field."""
+    """Return the defined interior wet cells for a T-, U-, or V-point field."""
     if fname == "u_ice" and umask is not None:
-        return np.asarray(umask, dtype=np.float64)
-    if fname == "v_ice" and vmask is not None:
-        return np.asarray(vmask, dtype=np.float64)
-    return np.asarray(tmask, dtype=np.float64)
+        mask = np.asarray(umask, dtype=np.float64).copy()
+    elif fname == "v_ice" and vmask is not None:
+        mask = np.asarray(vmask, dtype=np.float64).copy()
+    else:
+        mask = np.asarray(tmask, dtype=np.float64).copy()
+    if nn_hls:
+        mask[:nn_hls, :] = 0.0
+        mask[-nn_hls:, :] = 0.0
+        mask[:, :nn_hls] = 0.0
+        mask[:, -nn_hls:] = 0.0
+    return mask
 
 
 def verify_dry_signed_zero_fixture(
@@ -461,7 +469,7 @@ def verify_dry_signed_zero_fixture(
 ) -> dict[str, Any]:
     """Prove that a dry `-0.0` (and dry nonzero perturbation) is ignored by wet-masked scoring while a wet `-0.0` / 1-ULP perturbation at the first wet cell fires."""
     base = np.asarray(arr, dtype=np.float64).copy()
-    mask = np.asarray(mask_2d, dtype=np.float64)
+    mask = wet_mask_for_field("fixture", mask_2d, nn_hls=nn_hls)
     wi, wj = first_wet_ij(mask, interior_only=True, nn_hls=nn_hls)
     di, dj = first_dry_ij(mask, interior_only=True, nn_hls=nn_hls)
 
@@ -477,6 +485,14 @@ def verify_dry_signed_zero_fixture(
             f"STATUS PLANT-FIRED: dry cell perturbation leaked into wet-masked score "
             f"(ulp_negzero={ulp_dry_negzero}, ulp_val={ulp_dry_val}, norm={norm_dry_val})"
         )
+
+    # Halo values are likewise undefined after a file read and must not score.
+    halo_perturbed = base.copy()
+    halo_idx = (0, 0) + (0,) * (base.ndim - 2)
+    halo_perturbed[halo_idx] = -777.0
+    ulp_halo_val = max_ulp_diff(base, halo_perturbed, mask=mask)
+    if ulp_halo_val != 0:
+        raise ValueError("STATUS PLANT-FIRED: halo perturbation leaked into wet score")
 
     # 2. Wet -0.0 vs +0.0 at first wet cell must fire under strict_signed_zero=True.
     wet_zero_a = base.copy()
@@ -504,6 +520,7 @@ def verify_dry_signed_zero_fixture(
         "first_dry_ij": [di, dj],
         "ulp_dry_negzero": ulp_dry_negzero,
         "ulp_dry_val": ulp_dry_val,
+        "ulp_halo_val": ulp_halo_val,
         "ulp_wet_negzero": ulp_wet_negzero,
         "ulp_wet_1ulp": ulp_wet_1ulp,
     }
@@ -1052,6 +1069,37 @@ def verify_ocean_output_log(
     return {"status": "PASS", "parsed": parsed}
 
 
+def verify_o1_deck_fixture(path: str | Path, plant: str | None = None) -> dict[str, Any]:
+    """Verify only log lines derivable from the committed O1 namelist deck."""
+    text = Path(path).read_text(encoding="utf-8")
+    if "DERIVED O1 DECK FIXTURE; NOT NEMO RUN EVIDENCE" not in text:
+        raise ValueError("STATUS PLANT-FIRED: derived-fixture disclaimer missing")
+    if plant == "error-token":
+        text += "\n E R R O R\n"
+    elif plant == "missing-line":
+        text = re.sub(r"^.*nlay_s.*$", "", text, flags=re.M)
+    elif plant == "wrong-jpl":
+        text = re.sub(r"(jpl\s*=\s*)5", r"\g<1>3", text)
+    elif plant == "wrong-flag":
+        text = re.sub(r"(ln_cat_hfn\s*=\s*)T", r"\g<1>F", text)
+    if re.search(r"E\s+R\s+R\s+O\s+R", text):
+        raise ValueError("STATUS PLANT-FIRED: fixture contains E R R O R")
+
+    expected = {
+        "jpl": "5", "nlay_i": "10", "nlay_s": "5",
+        "ln_virtual_itd": "F", "ln_icedyn": "F", "ln_icethd": "F",
+        "ln_cat_hfn": "T", "rn_himean": "2.0000000000000000",
+    }
+    for name, value in expected.items():
+        match = re.search(rf"\b{re.escape(name)}\s*=\s*([^\s!]+)", text)
+        if not match or match.group(1) != value:
+            raise ValueError(
+                f"STATUS PLANT-FIRED: derived fixture {name}="
+                f"{None if not match else match.group(1)!r}, expected {value!r}"
+            )
+    return {"status": "PASS_DERIVED_DECK_FIXTURE", "parsed": expected}
+
+
 def build_synthetic_orca2_o1_state(
     config: SI3ORCA2StateConfig | None = None,
 ) -> tuple[SI3State, jax.Array, jax.Array, jax.Array]:
@@ -1278,15 +1326,20 @@ def _compare_si3_states_wet_and_full(
     *,
     check_fmass: bool = False,
     check_prather: bool = True,
+    score_t1_ice: bool = False,
+    nn_hls: int = 2,
 ) -> dict[str, Any]:
-    """Compare two `SI3State` instances over wet cells (`tmask`/`umask`/`vmask`) and full arrays."""
+    """Compare only NEMO-defined wet interior cells; report full-grid ULP diagnostically."""
     prog_names = _PROG_FIELDS + (("snwice_fmass",) if check_fmass else ())
+    if not score_t1_ice:
+        # icerst.F90:329 defines t1_ice only for ln_cpl; O1 has ln_cpl=.false.
+        prog_names = tuple(name for name in prog_names if name != "t1_ice")
     max_ulp_wet = 0
     max_ulp_full = 0
     max_norm_wet = 0.0
 
     for fname in prog_names:
-        m = wet_mask_for_field(fname, tmask, umask, vmask)
+        m = wet_mask_for_field(fname, tmask, umask, vmask, nn_hls=nn_hls)
         a_arr = getattr(expected, fname)
         b_arr = getattr(actual, fname)
         ulp_w = max_ulp_diff(a_arr, b_arr, mask=m)
@@ -1295,7 +1348,7 @@ def _compare_si3_states_wet_and_full(
         max_ulp_wet = max(max_ulp_wet, ulp_w)
         max_ulp_full = max(max_ulp_full, ulp_f)
         max_norm_wet = max(max_norm_wet, norm_w)
-        if ulp_w != 0 or ulp_f != 0 or norm_w > 1e-15:
+        if ulp_w != 0 or norm_w > 1e-15:
             raise ValueError(
                 f"STATUS PLANT-FIRED: prognostic field {fname} wet_ULP={ulp_w}, "
                 f"full_ULP={ulp_f}, wet_norm={norm_w:.3e}"
@@ -1308,13 +1361,14 @@ def _compare_si3_states_wet_and_full(
             for mname in SI3PratherMoments._fields:
                 a_arr = getattr(grp1, mname)
                 b_arr = getattr(grp2, mname)
-                ulp_w = max_ulp_diff(a_arr, b_arr, mask=tmask)
+                wet_t = wet_mask_for_field(mname, tmask, nn_hls=nn_hls)
+                ulp_w = max_ulp_diff(a_arr, b_arr, mask=wet_t)
                 ulp_f = max_ulp_diff(a_arr, b_arr)
-                norm_w = max_normalized_diff(a_arr, b_arr, mask=tmask)
+                norm_w = max_normalized_diff(a_arr, b_arr, mask=wet_t)
                 max_ulp_wet = max(max_ulp_wet, ulp_w)
                 max_ulp_full = max(max_ulp_full, ulp_f)
                 max_norm_wet = max(max_norm_wet, norm_w)
-                if ulp_w != 0 or ulp_f != 0 or norm_w > 1e-15:
+                if ulp_w != 0 or norm_w > 1e-15:
                     raise ValueError(
                         f"STATUS PLANT-FIRED: Prather moment {group_name}.{mname} "
                         f"wet_ULP={ulp_w}, full_ULP={ulp_f}, wet_norm={norm_w:.3e}"
@@ -1323,13 +1377,14 @@ def _compare_si3_states_wet_and_full(
     for eq_name in expected.equivalent._fields:
         a_arr = getattr(expected.equivalent, eq_name)
         b_arr = getattr(actual.equivalent, eq_name)
-        ulp_w = max_ulp_diff(a_arr, b_arr, mask=tmask)
+        wet_t = wet_mask_for_field(eq_name, tmask, nn_hls=nn_hls)
+        ulp_w = max_ulp_diff(a_arr, b_arr, mask=wet_t)
         ulp_f = max_ulp_diff(a_arr, b_arr)
-        norm_w = max_normalized_diff(a_arr, b_arr, mask=tmask)
+        norm_w = max_normalized_diff(a_arr, b_arr, mask=wet_t)
         max_ulp_wet = max(max_ulp_wet, ulp_w)
         max_ulp_full = max(max_ulp_full, ulp_f)
         max_norm_wet = max(max_norm_wet, norm_w)
-        if ulp_w != 0 or ulp_f != 0 or norm_w > 1e-15:
+        if ulp_w != 0 or norm_w > 1e-15:
             raise ValueError(
                 f"STATUS PLANT-FIRED: equivalent field {eq_name} wet_ULP={ulp_w}, "
                 f"full_ULP={ulp_f}, wet_norm={norm_w:.3e}"
@@ -1338,13 +1393,14 @@ def _compare_si3_states_wet_and_full(
     for agg_name in expected.aggregated._fields:
         a_arr = getattr(expected.aggregated, agg_name)
         b_arr = getattr(actual.aggregated, agg_name)
-        ulp_w = max_ulp_diff(a_arr, b_arr, mask=tmask)
+        wet_t = wet_mask_for_field(agg_name, tmask, nn_hls=nn_hls)
+        ulp_w = max_ulp_diff(a_arr, b_arr, mask=wet_t)
         ulp_f = max_ulp_diff(a_arr, b_arr)
-        norm_w = max_normalized_diff(a_arr, b_arr, mask=tmask)
+        norm_w = max_normalized_diff(a_arr, b_arr, mask=wet_t)
         max_ulp_wet = max(max_ulp_wet, ulp_w)
         max_ulp_full = max(max_ulp_full, ulp_f)
         max_norm_wet = max(max_norm_wet, norm_w)
-        if ulp_w != 0 or ulp_f != 0 or norm_w > 1e-15:
+        if ulp_w != 0 or norm_w > 1e-15:
             raise ValueError(
                 f"STATUS PLANT-FIRED: aggregated field {agg_name} wet_ULP={ulp_w}, "
                 f"full_ULP={ulp_f}, wet_norm={norm_w:.3e}"
@@ -1372,22 +1428,26 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
 
     state1 = si3_o1_step(state0, tmask=tmask, config=cfg)
 
-    # Verify production step_sea_ice dispatch with thermo_scheme='si3_orca2_o1'
+    # Production dispatch must refuse until the NEMO ice_update_flx response
+    # contract exists; direct si3_o1_step remains the O1 state operator.
     sea_ice_cfg = build_si3_orca2_o1_config(cfg)
     z2 = jnp.zeros_like(tmask)
-    state1_via_dispatch, _resp = step_sea_ice(
-        state0,
-        SI3ORCA2Forcing(tmask=tmask),
-        z2,
-        z2,
-        z2,
-        sea_ice_cfg,
-        0.1,
-        cfg.rDt_ice,
-    )
-    _compare_si3_states_wet_and_full(
-        state1, state1_via_dispatch, tmask, umask, vmask, check_fmass=True
-    )
+    try:
+        step_sea_ice(
+            state0,
+            SI3ORCA2Forcing(tmask=tmask),
+            z2,
+            z2,
+            z2,
+            sea_ice_cfg,
+            0.1,
+            cfg.rDt_ice,
+        )
+    except NotImplementedError as exc:
+        if "ice_update_flx" not in str(exc):
+            raise
+    else:
+        raise ValueError("STATUS PLANT-FIRED: production SI3 dispatcher silently returned fluxes")
 
     dry_fixture = verify_dry_signed_zero_fixture(state1.v_i, tmask, nn_hls=cfg.nn_hls)
 
@@ -1485,6 +1545,7 @@ def _verify_sha256_manifest(
     manifest_path: Path,
     *,
     label: str,
+    plant_mismatch: bool = False,
 ) -> int:
     """Verify a `<sha256>  <path>` manifest file."""
     if not manifest_path.is_file():
@@ -1497,13 +1558,15 @@ def _verify_sha256_manifest(
     if not lines:
         raise ValueError(f"STATUS PLANT-FIRED: empty manifest {manifest_path}")
     checked = 0
-    for line in lines:
+    for line_number, line in enumerate(lines):
         parts = line.split(None, 1)
         if len(parts) != 2 or not re.fullmatch(r"[0-9a-f]{64}", parts[0]):
             raise ValueError(
                 f"STATUS PLANT-FIRED: malformed {label} entry {line!r} in {manifest_path}"
             )
         expected_sha, target_str = parts[0], parts[1].strip()
+        if plant_mismatch and line_number == 0:
+            expected_sha = "0" * 64
         target_path = Path(target_str)
         if not target_path.is_file():
             raise ValueError(
@@ -1519,11 +1582,17 @@ def _verify_sha256_manifest(
     return checked
 
 
-def _verify_run_completion_and_logs(run_dir: Path, run_label: str) -> dict[str, Any]:
+def _verify_run_completion_and_logs(
+    run_dir: Path,
+    run_label: str,
+    *,
+    plant_missing_complete: bool = False,
+    plant_missing_stop0: bool = False,
+) -> dict[str, Any]:
     """Verify `RUN_COMPLETE`, `ocean.output`, and `run.user.stdout.log` in `run_dir`."""
     if not run_dir.is_dir():
         raise ValueError(f"STATUS PLANT-FIRED: missing run directory {run_dir}")
-    if not (run_dir / "RUN_COMPLETE").is_file():
+    if plant_missing_complete or not (run_dir / "RUN_COMPLETE").is_file():
         raise ValueError(f"STATUS PLANT-FIRED: missing RUN_COMPLETE in {run_label} ({run_dir})")
     ocean_out = run_dir / "ocean.output"
     if not ocean_out.is_file():
@@ -1537,6 +1606,8 @@ def _verify_run_completion_and_logs(run_dir: Path, run_label: str) -> dict[str, 
             f"STATUS PLANT-FIRED: missing run.user.stdout.log in {run_label} ({run_dir})"
         )
     stdout_text = stdout_log.read_text(encoding="utf-8", errors="replace")
+    if plant_missing_stop0:
+        stdout_text = re.sub(r"STOP\s+0\b", "STOP 1", stdout_text)
     if not re.search(r"STOP\s+0\b", stdout_text):
         raise ValueError(
             f"STATUS PLANT-FIRED: missing STOP 0 in {run_label}/run.user.stdout.log"
@@ -1567,8 +1638,6 @@ def admit_evidence_directory(
     if not commit_file.is_file():
         raise ValueError(f"STATUS PLANT-FIRED: missing {commit_file}")
     recorded_commit = commit_file.read_text(encoding="utf-8").strip()
-    if plant == "stamp":
-        recorded_commit = "0" * 40
     if not re.fullmatch(r"[0-9a-f]{40}", recorded_commit):
         raise ValueError(
             f"STATUS PLANT-FIRED: malformed producer commit {recorded_commit!r}"
@@ -1577,6 +1646,8 @@ def admit_evidence_directory(
         raise ValueError(
             f"STATUS PLANT-FIRED: producer commit {recorded_commit} != expected {expect_commit.strip()}"
         )
+    if plant == "stamp":
+        recorded_commit = "0" * 40
 
     same_prog_path = manifest_dir / "same_program.json"
     if not same_prog_path.is_file():
@@ -1589,28 +1660,44 @@ def admit_evidence_directory(
             f"STATUS PLANT-FIRED: same_program.json status={same_prog_data.get('status')!r}"
         )
 
-    if plant == "binary-sha":
-        raise ValueError("STATUS PLANT-FIRED: binaries.sha256 SHA mismatch (planted)")
-    if plant == "input-sha":
-        raise ValueError("STATUS PLANT-FIRED: inputs.sha256 SHA mismatch (planted)")
     binaries_checked = _verify_sha256_manifest(
-        manifest_dir / "binaries.sha256", label="binaries.sha256"
+        manifest_dir / "binaries.sha256", label="binaries.sha256",
+        plant_mismatch=plant == "binary-sha",
     )
     inputs_checked = _verify_sha256_manifest(
-        manifest_dir / "inputs.sha256", label="inputs.sha256"
+        manifest_dir / "inputs.sha256", label="inputs.sha256",
+        plant_mismatch=plant == "input-sha",
     )
 
+    # The gate is provenance, but is intentionally outside inputs.sha256 so a
+    # repaired admission gate can re-admit retained producer evidence.
+    gate_manifest = manifest_dir / "gate.sha256"
+    gate_changed_since_run = None
+    if gate_manifest.is_file():
+        gate_parts = gate_manifest.read_text(encoding="utf-8").strip().split(None, 1)
+        if len(gate_parts) != 2 or not re.fullmatch(r"[0-9a-f]{64}", gate_parts[0]):
+            raise ValueError("STATUS PLANT-FIRED: malformed gate.sha256")
+        current_gate = Path(gate_parts[1])
+        gate_changed_since_run = (
+            not current_gate.is_file()
+            or hashlib.sha256(current_gate.read_bytes()).hexdigest() != gate_parts[0]
+        )
+
     # 2. Completion markers and log checks on all three runs (ref_2step, rec_2step, rst_1step)
-    if plant == "missing-complete":
-        raise ValueError("STATUS PLANT-FIRED: missing RUN_COMPLETE in rst_1step (planted)")
-    if plant == "missing-stop0":
-        raise ValueError("STATUS PLANT-FIRED: missing STOP 0 in rst_1step/run.user.stdout.log (planted)")
     for rdir, rlabel in (
         (ref_dir, "ref_2step"),
         (rec_dir, "rec_2step"),
         (rst_dir, "rst_1step"),
     ):
-        _verify_run_completion_and_logs(rdir, rlabel)
+        run_stamp = rdir / "RUN_PRODUCER_COMMIT"
+        if not run_stamp.is_file() or run_stamp.read_text(encoding="utf-8").strip() != recorded_commit:
+            raise ValueError(f"STATUS PLANT-FIRED: producer stamp mismatch in {rlabel}")
+        _verify_run_completion_and_logs(
+            rdir,
+            rlabel,
+            plant_missing_complete=plant == "missing-complete" and rlabel == "rst_1step",
+            plant_missing_stop0=plant == "missing-stop0" and rlabel == "rst_1step",
+        )
 
     # 3. Reference vs instrumented restart byte-identity (steps 1 and 2)
     for step in (1, 2):
@@ -1668,16 +1755,21 @@ def admit_evidence_directory(
     rst_records = rst_dir / "o1_si3_records"
     rst_entry_files = sorted(rst_records.glob("o1_si3_state_entry_rank*.bin"))
     rst_step1_files = sorted(rst_records.glob("o1_si3_state_step0001_rank*.bin"))
-    rst_nc = rst_dir / "ORCA2_SAS_00000001_restart_ice.nc"
+    rst_nc = rst_dir / "output_restart/ORCA2_SAS_00000001_restart_ice_o1_output.nc"
+    rst_input = rst_dir / "input_restart/ORCA2_SAS_00000001_restart_ice.nc"
+    producer_restart = rec_dir / "ORCA2_SAS_00000001_restart_ice.nc"
     if (
         plant == "rst-missing"
         or not rst_entry_files
         or not rst_step1_files
         or not rst_nc.is_file()
+        or not rst_input.is_file()
     ):
         raise ValueError(
             "STATUS PLANT-FIRED: missing binary state records or restart NetCDF in rst_1step"
         )
+    if rst_input.resolve() == rst_nc.resolve() or rst_input.read_bytes() != producer_restart.read_bytes():
+        raise ValueError("STATUS PLANT-FIRED: restart input/output isolation or copied-input hash failed")
 
     rst_snap_entry = stitch_o1_binary_snapshots(
         [read_o1_binary_snapshot(p) for p in rst_entry_files]
@@ -1750,11 +1842,14 @@ def admit_evidence_directory(
                 raw = raw.T
             elif raw.ndim == 3 and dims == ("numcat", "y", "x"):
                 raw = np.transpose(raw, (2, 1, 0))
-            m = (
-                wet_mask_for_field(vname, tmask, umask, vmask)
-                if raw.ndim >= 2
-                else None
-            )
+            exp_arr = np.asarray(exp_arr)
+            if raw.ndim >= 2 and exp_arr.shape[:2] == np.asarray(tmask).shape:
+                h = cfg.nn_hls
+                exp_arr = exp_arr[h:-h, h:-h, ...]
+                m_full = wet_mask_for_field(vname, tmask, umask, vmask, nn_hls=h)
+                m = m_full[h:-h, h:-h]
+            else:
+                m = None
             ulp_nc = max_ulp_diff(exp_arr, raw, mask=m)
             if ulp_nc != 0:
                 raise ValueError(
@@ -1767,6 +1862,7 @@ def admit_evidence_directory(
         "producer_commit": recorded_commit,
         "binaries_checked": binaries_checked,
         "inputs_checked": inputs_checked,
+        "gate_changed_since_run": gate_changed_since_run,
         "first_wet_t_ij": [wi, wj],
         "dry_signed_zero_fixture": dry_fixture,
         "max_ulp_kt1": cmp_kt1["max_ulp_wet"],
@@ -1784,6 +1880,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="SI3 Rung O1 gate and verifier.")
     parser.add_argument("--verify-layout-fixture", type=Path, default=None)
     parser.add_argument("--verify-log", type=Path, default=None)
+    parser.add_argument("--verify-deck-fixture", type=Path, default=None)
     parser.add_argument("--expect-icedyn", choices=("T", "F"), default=None)
     parser.add_argument("--expect-icethd", choices=("T", "F"), default=None)
     parser.add_argument("--same-program", type=Path, default=None)
@@ -1802,6 +1899,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.verify_layout_fixture is not None:
             report = verify_layout_fixture(args.verify_layout_fixture, plant=args.plant)
+        elif args.verify_deck_fixture is not None:
+            report = verify_o1_deck_fixture(args.verify_deck_fixture, plant=args.plant)
         elif args.verify_log is not None:
             exp_dyn = None if args.expect_icedyn is None else (args.expect_icedyn == "T")
             exp_thd = None if args.expect_icethd is None else (args.expect_icethd == "T")

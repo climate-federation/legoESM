@@ -47,6 +47,19 @@ _ZSI0 = 3.5
 _ZSI1 = 4.5
 _HI_MAX_SENTINEL = 999.99
 
+# Fixed NEMO 5.0.2 SI3 coefficients.  These are oracle-source constants, not
+# legoESM tuning parameters: iceitd.F90:721-761, icevar.F90:477-532 and
+# icevar.F90:1578-1601 in the shipped source tree.
+_HFN_BISECTION_LOWER_M = 0.05
+_HFN_ALPHA = 0.05
+_SALPROF_CONSTANT_G_PER_KG = 2.30
+_SALPROF_EXPONENT_NUMERATOR = 0.407
+_SALPROF_EXPONENT_OFFSET = 0.573
+_SALPROF_AMPLITUDE = 1.6
+_SNOW_FRACTION_EXPONENT = -0.2
+_LANE3_REFERENCE_SALINITY = canonical_constants.S_ocean_ref
+_ORCA2_RN_HIMAX_M = 99.0
+
 __param_spec__ = {
     "SI3ORCA2StateConfig": {
         "scheme_key": "ice.si3_orca2_state",
@@ -89,7 +102,7 @@ class SI3ORCA2StateConfig(NamedTuple):
     rn_simin: float = 0.1
     rn_sinew: float = 0.75
     rn_himean: float = 2.0
-    rn_himax: float = 99.0
+    rn_himax: float = _ORCA2_RN_HIMAX_M
     opt_hips: int = 0
     ln_pnd: bool = True
     ln_pnd_LEV: bool = True
@@ -402,7 +415,7 @@ class SI3State(NamedTuple):
         cls,
         col: SI3ColumnState,
         tmask: Field | None = None,
-        sss_m: Field | float = 34.0,
+        sss_m: Field | float = _LANE3_REFERENCE_SALINITY,
         config: SI3ORCA2StateConfig | None = None,
     ) -> "SI3State":
         """Promote a lane-3 1-category `SI3ColumnState` into `SI3State` (`jpl = 1`)."""
@@ -457,7 +470,6 @@ class SI3State(NamedTuple):
         z3 = jnp.zeros((jpi, jpj, 1), dtype=dtype)
         interior_3d = _interior_mask_2d(jpi, jpj, cfg.nn_hls)[:, :, None]
         t_si_init = jnp.where(interior_3d, jnp.full_like(z3, cfg.ice_constants.T0), 0.0)
-        t1_ice_init = jnp.full_like(z3, cfg.ice_constants.T0)
         bounds = si3_hfn_category_bounds(
             jpl=1,
             rn_himean=cfg.rn_himean,
@@ -532,7 +544,9 @@ class SI3State(NamedTuple):
             e_i=e_i,
             szv_i=szv_i,
             cnd_ice=z3,
-            t1_ice=t1_ice_init,
+            # iceistate.F90:134-135 initializes the coupling diagnostic from
+            # the first ice layer, not from rt0.
+            t1_ice=eqv.t_i[:, :, 0, :],
             t_si=t_si_init,
             snwice_mass=snwice_mass,
             snwice_mass_b=snwice_mass_b,
@@ -648,7 +662,7 @@ def _hfn_bisection_primal(
             h_prev = h_curr
         return jnp.stack(h_max_vals), jnp.stack(h_mean_vals), zhm
 
-    init_z1 = jnp.asarray(0.05, dtype=jnp.float64)
+    init_z1 = jnp.asarray(_HFN_BISECTION_LOWER_M, dtype=jnp.float64)
     init_z2 = jnp.asarray(100.0, dtype=jnp.float64)
     init_zhm = jnp.asarray(0.0, dtype=jnp.float64)
     init_zhmax = jnp.asarray(0.0, dtype=jnp.float64)
@@ -687,7 +701,7 @@ def si3_hfn_category_bounds(
     jpl: int = 5,
     rn_himean: float | Field = 2.0,
     opt_hips: int = 0,
-    rn_himax: float | Field = 99.0,
+    rn_himax: float | Field = _ORCA2_RN_HIMAX_M,
 ) -> SI3CategoryBounds:
     """Compute SI3 category thickness bounds `hi_max(0:jpl)` and `hi_mean(1:jpl)`.
 
@@ -723,8 +737,10 @@ def si3_hfn_category_bounds(
     sr = nemo_source_round
     himean_f64 = jnp.asarray(rn_himean, dtype=jnp.float64)
     himax_f64 = jnp.asarray(rn_himax, dtype=jnp.float64)
-    zalpha = jnp.asarray(0.05, dtype=jnp.float64)
-    inv_zalpha = jnp.asarray(np.float64(np.float32(1.0)) / np.float64(0.05), dtype=jnp.float64)
+    zalpha = jnp.asarray(_HFN_ALPHA, dtype=jnp.float64)
+    inv_zalpha = jnp.asarray(
+        np.float64(np.float32(1.0)) / np.float64(_HFN_ALPHA), dtype=jnp.float64
+    )
     zhmax = sr(3.0 * himean_f64)
     zhmax_p1_pow = sr(jnp.power(sr(zhmax + 1.0), zalpha))
 
@@ -815,13 +831,18 @@ def si3_var_salprof(
         return s_i, sz_out
 
     if cfg.nn_icesal == 3:
-        s_out = jnp.full_like(s_i, 2.30)
+        s_out = jnp.full_like(s_i, _SALPROF_CONSTANT_G_PER_KG)
         rpi = jnp.asarray(float(canonical_constants.PI), dtype=dtype)
         layers = []
         for jk in range(1, nlay_i + 1):
             ztmp1 = sr(jnp.asarray(float(jk) - 0.5, dtype=dtype) * r1_nlay_i)
-            exponent = sr(0.407 / sr(0.573 + ztmp1))
-            ztmp2 = sr(1.6 * sr(1.0 - jnp.cos(sr(rpi * jnp.power(ztmp1, exponent)))))
+            exponent = sr(
+                _SALPROF_EXPONENT_NUMERATOR / sr(_SALPROF_EXPONENT_OFFSET + ztmp1)
+            )
+            ztmp2 = sr(
+                _SALPROF_AMPLITUDE
+                * sr(1.0 - jnp.cos(sr(rpi * jnp.power(ztmp1, exponent))))
+            )
             layers.append(jnp.full((jpi, jpj, jpl), ztmp2, dtype=dtype))
         sz_out = jnp.stack(layers, axis=2)
         return s_out, sz_out
@@ -847,7 +868,10 @@ def si3_var_snwfra_3d(
     if cfg.nn_snwfra == 0:
         raw = jnp.where(h_s > 0.0, 1.0, 0.0)
     elif cfg.nn_snwfra == 1:
-        raw = sr(1.0 - jnp.exp(sr(sr(-0.2 * consts.rho_snow) * h_s)))
+        raw = sr(
+            1.0
+            - jnp.exp(sr(sr(_SNOW_FRACTION_EXPONENT * consts.rho_snow) * h_s))
+        )
     elif cfg.nn_snwfra == 2:
         raw = sr(h_s / sr(h_s + canonical_constants.snow_cover_depth_nemo))
     else:
@@ -1684,7 +1708,45 @@ def si3_rst_from_netcdf_dict(
         raise ValueError(
             "ice_rst_read: v_i is needed to read the restart file (src/ICE/icerst.F90:369)"
         )
-    v_i = jnp.asarray(rst["v_i"], dtype=jnp.float64)
+    # iom_nf90 writes no halo points: file dimensions are Ni_0 x Nj_0, while
+    # SI3 allocates jpi x jpj arrays.  iom_get reads the payload into
+    # Nis0:Nie0,Njs0:Nje0 and then calls lbc_lnk (iom.F90:1347-1432).  Accept
+    # either that real NEMO layout or an already-expanded in-memory mapping,
+    # but refuse every other shape instead of guessing an orientation.
+    tmask_arr = jnp.asarray(tmask, dtype=jnp.float64)
+    if tmask_arr.ndim != 2:
+        raise ValueError(f"ice_rst_read: tmask must be 2-D, got {tmask_arr.shape}")
+    full_xy = tuple(int(n) for n in tmask_arr.shape)
+    halo = int(cfg.nn_hls)
+    file_xy = (
+        full_xy[0] - 2 * halo,
+        full_xy[1] - 2 * halo,
+    ) if halo > 0 else full_xy
+
+    def _expand_file_halos(name: str, value: Any) -> jax.Array:
+        arr = jnp.asarray(value, dtype=jnp.float64)
+        if arr.ndim < 2:
+            return arr
+        spatial = tuple(int(n) for n in arr.shape[:2])
+        if spatial == full_xy:
+            return arr
+        if spatial != file_xy or halo <= 0:
+            raise ValueError(
+                f"ice_rst_read: {name} spatial shape {spatial} is neither NEMO's "
+                f"halo-free {file_xy} nor allocated {full_xy}"
+            )
+        expanded = jnp.zeros(full_xy + arr.shape[2:], dtype=arr.dtype)
+        return expanded.at[
+            halo : full_xy[0] - halo,
+            halo : full_xy[1] - halo,
+            ...,
+        ].set(arr)
+
+    rst_full = {
+        name: (_expand_file_halos(name, value) if np.asarray(value).ndim >= 2 else value)
+        for name, value in rst.items()
+    }
+    v_i = _expand_file_halos("v_i", rst["v_i"])
     jpi, jpj, jpl = v_i.shape
     if jpl != cfg.jpl:
         raise ValueError(
@@ -1716,23 +1778,23 @@ def si3_rst_from_netcdf_dict(
             "(src/ICE/icerst.F90:241-255)"
         )
 
-    v_s = jnp.asarray(rst["v_s"], dtype=jnp.float64)
-    sv_i = jnp.asarray(rst["sv_i"], dtype=jnp.float64)
-    a_i = jnp.asarray(rst["a_i"], dtype=jnp.float64)
-    t_su = jnp.asarray(rst["t_su"], dtype=jnp.float64)
-    u_ice = jnp.asarray(rst["u_ice"], dtype=jnp.float64)
-    v_ice = jnp.asarray(rst["v_ice"], dtype=jnp.float64)
+    v_s = jnp.asarray(rst_full["v_s"], dtype=jnp.float64)
+    sv_i = jnp.asarray(rst_full["sv_i"], dtype=jnp.float64)
+    a_i = jnp.asarray(rst_full["a_i"], dtype=jnp.float64)
+    t_su = jnp.asarray(rst_full["t_su"], dtype=jnp.float64)
+    u_ice = jnp.asarray(rst_full["u_ice"], dtype=jnp.float64)
+    v_ice = jnp.asarray(rst_full["v_ice"], dtype=jnp.float64)
 
-    if "oa_i" in rst:
-        oa_i = jnp.asarray(rst["oa_i"], dtype=jnp.float64)
+    if "oa_i" in rst_full:
+        oa_i = jnp.asarray(rst_full["oa_i"], dtype=jnp.float64)
     else:
         oa_i = jnp.zeros_like(v_i)
 
-    if "a_ip" in rst:
-        a_ip = jnp.asarray(rst["a_ip"], dtype=jnp.float64)
-        v_ip = jnp.asarray(rst["v_ip"], dtype=jnp.float64)
-        if "v_il" in rst and cfg.ln_pnd_lids:
-            v_il = jnp.asarray(rst["v_il"], dtype=jnp.float64)
+    if "a_ip" in rst_full:
+        a_ip = jnp.asarray(rst_full["a_ip"], dtype=jnp.float64)
+        v_ip = jnp.asarray(rst_full["v_ip"], dtype=jnp.float64)
+        if "v_il" in rst_full and cfg.ln_pnd_lids:
+            v_il = jnp.asarray(rst_full["v_il"], dtype=jnp.float64)
         else:
             v_il = jnp.zeros_like(v_i)
     else:
@@ -1742,14 +1804,14 @@ def si3_rst_from_netcdf_dict(
 
     e_s = jnp.stack(
         [
-            jnp.asarray(rst[f"e_s_l{jk:02d}"], dtype=jnp.float64)
+            jnp.asarray(rst_full[f"e_s_l{jk:02d}"], dtype=jnp.float64)
             for jk in range(1, cfg.nlay_s + 1)
         ],
         axis=2,
     )
     e_i = jnp.stack(
         [
-            jnp.asarray(rst[f"e_i_l{jk:02d}"], dtype=jnp.float64)
+            jnp.asarray(rst_full[f"e_i_l{jk:02d}"], dtype=jnp.float64)
             for jk in range(1, cfg.nlay_i + 1)
         ],
         axis=2,
@@ -1758,7 +1820,7 @@ def si3_rst_from_netcdf_dict(
     if "szv_i_l01" in rst:
         szv_i = jnp.stack(
             [
-                jnp.asarray(rst[f"szv_i_l{jk:02d}"], dtype=jnp.float64)
+                jnp.asarray(rst_full[f"szv_i_l{jk:02d}"], dtype=jnp.float64)
                 for jk in range(1, cfg.nlay_i + 1)
             ],
             axis=2,
@@ -1773,14 +1835,17 @@ def si3_rst_from_netcdf_dict(
         )
 
     cnd_ice = (
-        jnp.asarray(rst["cnd_ice"], dtype=jnp.float64)
-        if ("cnd_ice" in rst and cfg.ln_cpl)
+        jnp.asarray(rst_full["cnd_ice"], dtype=jnp.float64)
+        if ("cnd_ice" in rst_full and cfg.ln_cpl)
         else jnp.zeros_like(v_i)
     )
     t1_ice = (
-        jnp.asarray(rst["t1_ice"], dtype=jnp.float64)
-        if ("t1_ice" in rst and cfg.ln_cpl)
-        else jnp.full_like(v_i, consts.T0)
+        jnp.asarray(rst_full["t1_ice"], dtype=jnp.float64)
+        if ("t1_ice" in rst_full and cfg.ln_cpl)
+        # With ln_cpl=F, icerst.F90:327-338 never reads or initializes t1_ice.
+        # Keep a deterministic carrier value, but callers/gates must treat it
+        # as undefined (it is not a restart-certified field in this branch).
+        else jnp.zeros_like(v_i)
     )
     # `diag_set0` (`src/ICE/icestp.F90:281, 488`): t_si(A2D(0), 1:jpl) = rt0
     interior_3d = _interior_mask_2d(jpi, jpj, cfg.nn_hls)[:, :, None]
@@ -1798,11 +1863,11 @@ def si3_rst_from_netcdf_dict(
         for attr_name, suffix in _PRATHER_3D_FAMILIES:
             if f"sx{suffix}" in rst:
                 fam_dict[attr_name] = SI3PratherMoments(
-                    sx=jnp.asarray(rst[f"sx{suffix}"], dtype=jnp.float64),
-                    sy=jnp.asarray(rst[f"sy{suffix}"], dtype=jnp.float64),
-                    sxx=jnp.asarray(rst[f"sxx{suffix}"], dtype=jnp.float64),
-                    syy=jnp.asarray(rst[f"syy{suffix}"], dtype=jnp.float64),
-                    sxy=jnp.asarray(rst[f"sxy{suffix}"], dtype=jnp.float64),
+                    sx=jnp.asarray(rst_full[f"sx{suffix}"], dtype=jnp.float64),
+                    sy=jnp.asarray(rst_full[f"sy{suffix}"], dtype=jnp.float64),
+                    sxx=jnp.asarray(rst_full[f"sxx{suffix}"], dtype=jnp.float64),
+                    syy=jnp.asarray(rst_full[f"syy{suffix}"], dtype=jnp.float64),
+                    sxy=jnp.asarray(rst_full[f"sxy{suffix}"], dtype=jnp.float64),
                 )
             else:
                 fam_dict[attr_name] = getattr(pr_zeros, attr_name)
@@ -1813,35 +1878,35 @@ def si3_rst_from_netcdf_dict(
                 fam_dict[attr_name] = SI3PratherMoments(
                     sx=jnp.stack(
                         [
-                            jnp.asarray(rst[f"sx{suffix}_l{jk:02d}"], dtype=jnp.float64)
+                            jnp.asarray(rst_full[f"sx{suffix}_l{jk:02d}"], dtype=jnp.float64)
                             for jk in range(1, nlay + 1)
                         ],
                         axis=2,
                     ),
                     sy=jnp.stack(
                         [
-                            jnp.asarray(rst[f"sy{suffix}_l{jk:02d}"], dtype=jnp.float64)
+                            jnp.asarray(rst_full[f"sy{suffix}_l{jk:02d}"], dtype=jnp.float64)
                             for jk in range(1, nlay + 1)
                         ],
                         axis=2,
                     ),
                     sxx=jnp.stack(
                         [
-                            jnp.asarray(rst[f"sxx{suffix}_l{jk:02d}"], dtype=jnp.float64)
+                            jnp.asarray(rst_full[f"sxx{suffix}_l{jk:02d}"], dtype=jnp.float64)
                             for jk in range(1, nlay + 1)
                         ],
                         axis=2,
                     ),
                     syy=jnp.stack(
                         [
-                            jnp.asarray(rst[f"syy{suffix}_l{jk:02d}"], dtype=jnp.float64)
+                            jnp.asarray(rst_full[f"syy{suffix}_l{jk:02d}"], dtype=jnp.float64)
                             for jk in range(1, nlay + 1)
                         ],
                         axis=2,
                     ),
                     sxy=jnp.stack(
                         [
-                            jnp.asarray(rst[f"sxy{suffix}_l{jk:02d}"], dtype=jnp.float64)
+                            jnp.asarray(rst_full[f"sxy{suffix}_l{jk:02d}"], dtype=jnp.float64)
                             for jk in range(1, nlay + 1)
                         ],
                         axis=2,
@@ -1859,7 +1924,6 @@ def si3_rst_from_netcdf_dict(
         opt_hips=cfg.opt_hips,
         rn_himax=cfg.rn_himax,
     )
-    tmask_arr = jnp.asarray(tmask, dtype=jnp.float64)
     base_state = SI3State(
         v_i=v_i,
         v_s=v_s,
@@ -1929,9 +1993,9 @@ def si3_rst_from_netcdf_dict(
         kn=1,
         config=cfg,
     )
-    if "snwice_mass" in rst and "snwice_mass_b" in rst:
-        snwice_mass = jnp.asarray(rst["snwice_mass"], dtype=jnp.float64)
-        snwice_mass_b = jnp.asarray(rst["snwice_mass_b"], dtype=jnp.float64)
+    if ln_rstart and "snwice_mass" in rst_full and "snwice_mass_b" in rst_full:
+        snwice_mass = jnp.asarray(rst_full["snwice_mass"], dtype=jnp.float64)
+        snwice_mass_b = jnp.asarray(rst_full["snwice_mass_b"], dtype=jnp.float64)
         snwice_fmass = jnp.zeros_like(snwice_mass)
     else:
         snwice_mass, snwice_mass_b, snwice_fmass = si3_update_snwice_mass(
@@ -1973,15 +2037,38 @@ def write_si3_netcdf_restart(
         state, kt=kt, config=cfg, write_prather=write_prather
     )
     jpi, jpj, jpl = state.v_i.shape
+    halo = int(cfg.nn_hls)
+    if halo > 0:
+        if 2 * halo >= jpi or 2 * halo >= jpj:
+            raise ValueError(
+                f"Cannot strip nn_hls={halo} from restart grid {(jpi, jpj)}"
+            )
+        ni_0, nj_0 = jpi - 2 * halo, jpj - 2 * halo
+    else:
+        ni_0, nj_0 = jpi, jpj
+
+    def _without_halos(arr: np.ndarray) -> np.ndarray:
+        if arr.ndim < 2 or halo == 0:
+            return arr
+        if arr.shape[:2] != (jpi, jpj):
+            raise ValueError(
+                f"Restart field spatial shape {arr.shape[:2]} != state grid {(jpi, jpj)}"
+            )
+        return arr[halo : jpi - halo, halo : jpj - halo, ...]
 
     with netCDF4.Dataset(out_path, "w", format="NETCDF4_CLASSIC") as ds:
-        ds.createDimension("x", jpi)
-        ds.createDimension("y", jpj)
+        # iom_nf90.F90:135-154,729-760 writes Ni_0 x Nj_0 payloads and records
+        # zero file halos, even though the live Fortran arrays are jpi x jpj.
+        ds.createDimension("x", ni_0)
+        ds.createDimension("y", nj_0)
         ds.createDimension("numcat", jpl)
         ds.createDimension("time_counter", None)
+        ds.setncattr("DOMAIN_size_local", np.asarray((ni_0, nj_0), dtype=np.int32))
+        ds.setncattr("DOMAIN_halo_size_start", np.asarray((0, 0), dtype=np.int32))
+        ds.setncattr("DOMAIN_halo_size_end", np.asarray((0, 0), dtype=np.int32))
 
         for name, val in rst_dict.items():
-            arr = np.asarray(val, dtype=np.float64)
+            arr = _without_halos(np.asarray(val, dtype=np.float64))
             if arr.ndim == 0:
                 var = ds.createVariable(name, "f8", ())
                 var[...] = arr
@@ -2015,6 +2102,20 @@ def read_si3_netcdf_restart(
     cfg = config if config is not None else SI3ORCA2StateConfig()
     rst_dict: dict[str, np.ndarray] = {}
     with netCDF4.Dataset(Path(path), "r") as ds:
+        if "x" not in ds.dimensions or "y" not in ds.dimensions:
+            raise ValueError("NEMO ice restart is missing x/y dimensions")
+        file_xy = (len(ds.dimensions["x"]), len(ds.dimensions["y"]))
+        full_xy = tuple(int(n) for n in np.asarray(tmask).shape)
+        halo = int(cfg.nn_hls)
+        expected_no_halo = (
+            full_xy[0] - 2 * halo,
+            full_xy[1] - 2 * halo,
+        ) if halo > 0 else full_xy
+        if file_xy not in (expected_no_halo, full_xy):
+            raise ValueError(
+                f"NEMO ice restart x/y={file_xy} does not match halo-free "
+                f"{expected_no_halo} or allocated {full_xy}"
+            )
         for name, var in ds.variables.items():
             raw = np.asarray(var[...], dtype=np.float64)
             dims = tuple(var.dimensions)

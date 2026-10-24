@@ -36,7 +36,6 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
-import re
 import shutil
 import struct
 import subprocess
@@ -535,27 +534,19 @@ def test_o1_compiled_gfortran_layout_fixture_and_plants(tmp_path: Path) -> None:
             gate.verify_layout_fixture(records_dir, plant=plant_name)
 
 
-def test_o1_ocean_output_log_verifier_and_plants(tmp_path: Path) -> None:
-    """Verify whitespace-tolerant `ocean.output` log checking and its plants."""
+def test_o1_derived_deck_fixture_and_plants(tmp_path: Path) -> None:
+    """Verify the non-evidence O1 deck fixture and its plants."""
     excerpt = ACQ_DIR / "ocean.output.excerpt"
-    res = gate.verify_ocean_output_log(
-        excerpt, expect_icedyn=True, expect_icethd=True, plant=None
-    )
-    assert res["status"] == "PASS"
-    assert res["parsed"]["jpl"] == 5
-    assert res["parsed"]["nlay_i"] == 10
-    assert res["parsed"]["nlay_s"] == 5
+    res = gate.verify_o1_deck_fixture(excerpt)
+    assert res["status"] == "PASS_DERIVED_DECK_FIXTURE"
 
     spaced = tmp_path / "ocean.output.spaced"
     spaced.write_text(excerpt.read_text(encoding="ascii").replace("=", "   =    "))
-    res_spaced = gate.verify_ocean_output_log(
-        spaced, expect_icedyn=True, expect_icethd=True, plant=None
-    )
-    assert res_spaced["status"] == "PASS"
+    assert gate.verify_o1_deck_fixture(spaced)["status"] == "PASS_DERIVED_DECK_FIXTURE"
 
-    for plant_name in ("error-token", "missing-aaa", "wrong-jpl", "wrong-flag"):
+    for plant_name in ("error-token", "missing-line", "wrong-jpl", "wrong-flag"):
         with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):
-            gate.verify_ocean_output_log(excerpt, plant=plant_name)
+            gate.verify_o1_deck_fixture(excerpt, plant=plant_name)
 
 
 def test_o1_jit_grad_jvp_and_stop_gradient_plant() -> None:
@@ -628,34 +619,36 @@ def test_o1_jit_grad_jvp_and_stop_gradient_plant() -> None:
     assert float(jnp.linalg.norm(grad_planted.v_i)) == 0.0
 
 
-def test_o1_production_step_sea_ice_selects_full_si3_state_and_validates_config() -> None:
-    """`step_sea_ice` selects full `SI3State` via `thermo_scheme='si3_orca2_o1'` (`build_si3_orca2_o1_config`) and rejects invalid state/forcing/config combinations."""
+def test_o1_production_step_sea_ice_refuses_missing_flux_contract_and_validates_dt() -> None:
+    """O1 exposes its state operator directly and refuses an invented production flux response."""
     cfg = SI3ORCA2StateConfig.for_orca2_sas_ice()
     state0, tmask, umask, vmask = gate.build_synthetic_orca2_o1_state(cfg)
     sea_cfg = build_si3_orca2_o1_config(cfg)
     z2 = jnp.zeros_like(tmask)
-    evap = jnp.full_like(tmask, 1.2e-6)
+    si3_o1_step(state0, tmask=tmask, sss_m=34.2, config=cfg)
+    with pytest.raises(NotImplementedError, match="ice_update_flx"):
+        step_sea_ice(
+            state0,
+            SI3ORCA2Forcing(tmask=tmask, sss_m=34.2),
+            z2,
+            z2,
+            z2,
+            sea_cfg,
+            0.1,
+            cfg.rDt_ice,
+        )
 
-    state1_direct = si3_o1_step(state0, tmask=tmask, sss_m=34.2, config=cfg)
-    state1_dispatch, resp = step_sea_ice(
-        state0,
-        SI3ORCA2Forcing(tmask=tmask, sss_m=34.2, evaporation=evap),
-        z2,
-        z2,
-        z2,
-        sea_cfg,
-        0.1,
-        cfg.rDt_ice,
-    )
-    gate._compare_si3_states_wet_and_full(
-        state1_direct, state1_dispatch, tmask, umask, vmask, check_fmass=True
-    )
-    _assert_zero_ulp(resp.T_sfc, state1_direct.aggregated.tm_su, "resp.T_sfc")
-    _assert_zero_ulp(
-        resp.lhflx,
-        evap * sea_cfg.ice_constants.latent_sublimation,
-        "resp.lhflx",
-    )
+    with pytest.raises(ValueError, match="dt == si3_orca2.rDt_ice"):
+        step_sea_ice(
+            state0,
+            SI3ORCA2Forcing(tmask=tmask),
+            z2,
+            z2,
+            z2,
+            sea_cfg,
+            0.1,
+            cfg.rDt_ice + 1.0,
+        )
 
     # Wrong state type refused
     with pytest.raises(ValueError, match="requires SI3State"):
@@ -766,6 +759,43 @@ def test_o1_restart_reader_nemo_parity_t_si_reset_layer_refusal_and_r1_nlay_i() 
     )
     _assert_zero_ulp(reloaded_sal.szv_i, expected_szv, "szv_i_r1_nlay_i_mul")
     assert gate.max_ulp_diff(reloaded_sal.szv_i, np.full_like(expected_szv, div_val)) == 1
+
+
+def test_o1_restart_optional_fields_follow_nemo_branching() -> None:
+    """`t1_ice`, update mass, pond lids, and their scorer follow NEMO branches."""
+    cfg = SI3ORCA2StateConfig.for_orca2_sas_ice()
+    state, tmask, umask, vmask = gate.build_synthetic_orca2_o1_state(cfg)
+    rst = si3_rst_to_netcdf_dict(state, kt=1, config=cfg)
+
+    # ln_cpl=F leaves t1_ice undefined in icerst.F90:329; it is not scored.
+    rst["t1_ice"] = np.full_like(rst["v_i"], 123.0)
+    uncoupled = si3_rst_from_netcdf_dict(rst, tmask=tmask, config=cfg, ln_rstart=False)
+    _assert_zero_ulp(uncoupled.t1_ice, np.zeros_like(uncoupled.t1_ice), "uncoupled.t1")
+    changed_t1 = uncoupled._replace(t1_ice=jnp.ones_like(uncoupled.t1_ice))
+    gate._compare_si3_states_wet_and_full(
+        uncoupled, changed_t1, tmask, umask, vmask, score_t1_ice=False
+    )
+    with pytest.raises(ValueError, match="t1_ice"):
+        gate._compare_si3_states_wet_and_full(
+            uncoupled, changed_t1, tmask, umask, vmask, score_t1_ice=True
+        )
+
+    # update_rst('READ') is gated by ln_rstart (iceupdate.F90:453).
+    rst["snwice_mass"] = np.full_like(rst["snwice_mass"], 9876.0)
+    fresh = si3_rst_from_netcdf_dict(rst, tmask=tmask, config=cfg, ln_rstart=False)
+    restarted = si3_rst_from_netcdf_dict(rst, tmask=tmask, config=cfg, ln_rstart=True)
+    assert not np.any(np.asarray(fresh.snwice_mass) == 9876.0)
+    assert np.all(np.asarray(restarted.snwice_mass)[2:-2, 2:-2] == 9876.0)
+
+    # v_il exists only under a_ip and ln_pnd_lids (icerst.F90:322-328).
+    no_lids = cfg._replace(ln_pnd_lids=False)
+    without_lids = si3_rst_from_netcdf_dict(rst, tmask=tmask, config=no_lids)
+    _assert_zero_ulp(without_lids.v_il, np.zeros_like(without_lids.v_il), "v_il.no_lids")
+    no_pond = dict(rst)
+    no_pond.pop("a_ip")
+    no_pond.pop("v_ip")
+    without_pond = si3_rst_from_netcdf_dict(no_pond, tmask=tmask, config=cfg)
+    _assert_zero_ulp(without_pond.v_il, np.zeros_like(without_pond.v_il), "v_il.no_a_ip")
 
 
 def test_o1_same_program_and_objects_equal_plants(tmp_path: Path) -> None:
@@ -960,23 +990,29 @@ def test_o1_admit_evidence_directory_scores_rst_1step_and_refuses_all_plants(
     state2 = si3_o1_step(state1, tmask=tmask, sss_m=sss, config=cfg)
 
     ev = tmp_path / "evidence"
-    for sub in ("manifest", "ref_2step/o1_si3_records", "rec_2step/o1_si3_records", "rst_1step/o1_si3_records"):
+    for sub in ("manifest", "ref_2step/o1_si3_records", "rec_2step/o1_si3_records", "rst_1step/o1_si3_records", "rst_1step/input_restart", "rst_1step/output_restart"):
         (ev / sub).mkdir(parents=True, exist_ok=True)
 
-    # Render O1 log (`ln_icedyn =  F`, `ln_icethd =  F`)
-    exc_body = [
-        l
-        for l in (ACQ_DIR / "ocean.output.excerpt").read_text(encoding="utf-8").splitlines()
-        if not l.startswith("#")
-    ]
-    o1_log = "\n".join(
-        re.sub(r"(ln_icethd\s*=\s*)T", r"\g<1>F", re.sub(r"(ln_icedyn\s*=\s*)T", r"\g<1>F", l))
-        for l in exc_body
-    ) + "\n"
+    o1_log = """AAAAAAAA
+Ni0glo = 180
+Nj0glo = 148
+nn_hls = 2
+jpl = 5
+nlay_i = 10
+nlay_s = 5
+ln_virtual_itd = F
+ln_icedyn = F
+ln_icethd = F
+ln_cat_hfn = T
+rn_himean = 2.0
+AAAAAAAA
+"""
+    commit_hex = "a" * 40
     for rdir in (ev / "ref_2step", ev / "rec_2step", ev / "rst_1step"):
         (rdir / "ocean.output").write_text(o1_log, encoding="utf-8")
         (rdir / "run.user.stdout.log").write_text("NEMO run ok\nSTOP 0\n", encoding="utf-8")
         (rdir / "RUN_COMPLETE").write_text("ok\n", encoding="utf-8")
+        (rdir / "RUN_PRODUCER_COMMIT").write_text(commit_hex + "\n", encoding="utf-8")
 
     # Write NetCDF restarts for step 1 and step 2
     write_si3_netcdf_restart(ev / "rec_2step/ORCA2_SAS_00000001_restart_ice.nc", state1, kt=1, config=cfg)
@@ -988,6 +1024,10 @@ def test_o1_admit_evidence_directory_scores_rst_1step_and_refuses_all_plants(
     shutil.copy2(
         ev / "rec_2step/ORCA2_SAS_00000002_restart_ice.nc",
         ev / "ref_2step/ORCA2_SAS_00000002_restart_ice.nc",
+    )
+    shutil.copy2(
+        ev / "rec_2step/ORCA2_SAS_00000001_restart_ice.nc",
+        ev / "rst_1step/input_restart/ORCA2_SAS_00000001_restart_ice.nc",
     )
 
     # Write rec_2step binary records
@@ -1063,11 +1103,13 @@ def test_o1_admit_evidence_directory_scores_rst_1step_and_refuses_all_plants(
         cfg=cfg,
     )
     write_si3_netcdf_restart(
-        ev / "rst_1step/ORCA2_SAS_00000001_restart_ice.nc", rst_step1, kt=1, config=cfg
+        ev / "rst_1step/output_restart/ORCA2_SAS_00000001_restart_ice_o1_output.nc",
+        rst_step1,
+        kt=1,
+        config=cfg,
     )
 
     # Write manifests
-    commit_hex = "a" * 40
     (ev / "manifest/producer_commit.txt").write_text(commit_hex + "\n", encoding="utf-8")
     (ev / "manifest/same_program.json").write_text(
         json.dumps({"status": "PASS_SAME_PROGRAM"}) + "\n", encoding="utf-8"
@@ -1102,28 +1144,12 @@ def test_o1_admit_evidence_directory_scores_rst_1step_and_refuses_all_plants(
             gate.admit_evidence_directory(ev, plant=plant_name, expect_commit=commit_hex)
 
 
-def test_o1_committed_ocean_output_excerpt_provenance() -> None:
-    """Verify `ocean.output.excerpt` provenance headers and verbatim line match when source file is present."""
+def test_o1_committed_log_fixture_is_explicitly_deck_derived() -> None:
+    """The committed fixture is namelist-derived and never rewritten run evidence."""
     excerpt = ACQ_DIR / "ocean.output.excerpt"
-    lines = excerpt.read_text(encoding="utf-8").splitlines()
-    headers = [l for l in lines if l.startswith("#")]
-    body = [l for l in lines if not l.startswith("#")]
-
-    src_m = next(re.search(r"^#\s*Source path:\s*(.+)$", l) for l in headers if "Source path:" in l)
-    sha_m = next(re.search(r"^#\s*Complete source SHA-256:\s*([0-9a-f]{64})\s*$", l) for l in headers if "SHA-256:" in l)
-    rng_m = next(re.search(r"^#\s*Source lines:\s*(.+)$", l) for l in headers if "Source lines:" in l)
-
-    src_path = Path(src_m.group(1).strip())
-    if src_path.is_file():
-        assert hashlib.sha256(src_path.read_bytes()).hexdigest() == sha_m.group(1)
-        nums: list[int] = []
-        for part in rng_m.group(1).rstrip(".").split(","):
-            part = part.strip()
-            if "-" in part:
-                a, b = part.split("-", 1)
-                nums.extend(range(int(a), int(b) + 1))
-            else:
-                nums.append(int(part))
-        src_lines = src_path.read_text(encoding="utf-8").splitlines()
-        assert body == [src_lines[n - 1] for n in nums]
-
+    text = excerpt.read_text(encoding="utf-8")
+    assert "NOT NEMO RUN EVIDENCE" in text
+    assert gate.verify_o1_deck_fixture(excerpt)["status"] == "PASS_DERIVED_DECK_FIXTURE"
+    for plant in ("error-token", "missing-line", "wrong-jpl", "wrong-flag"):
+        with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):
+            gate.verify_o1_deck_fixture(excerpt, plant=plant)
