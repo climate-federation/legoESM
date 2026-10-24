@@ -1318,7 +1318,7 @@ AAAAAAAA
         "rst-missing",
         "rst-1ulp",
         "rst-step-name",
-        "kt2-sss-step1",
+        "kt2-sss-perturb",
         "ocean-restart-missing",
     ):
         with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):

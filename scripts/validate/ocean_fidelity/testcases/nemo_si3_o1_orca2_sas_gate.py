@@ -1731,14 +1731,28 @@ def admit_evidence_directory(
     umask = jnp.asarray(snap_entry["fields"]["umask"], dtype=jnp.float64)
     vmask = jnp.asarray(snap_entry["fields"]["vmask"], dtype=jnp.float64)
     sss_entry = jnp.asarray(snap_entry["fields"]["sss_m"], dtype=jnp.float64)
-    sss_step2 = jnp.asarray(snap_step2["fields"]["sss_m"], dtype=jnp.float64)
-    if plant == "kt2-sss-step1":
-        sss_step2 = jnp.asarray(snap_step1["fields"]["sss_m"], dtype=jnp.float64)
+    sss_step1_np = np.asarray(snap_step1["fields"]["sss_m"], dtype=np.float64)
+    sss_step2_np = np.asarray(snap_step2["fields"]["sss_m"], dtype=np.float64)
+    sss_step2 = jnp.asarray(sss_step2_np, dtype=jnp.float64)
 
     wi, wj = first_wet_ij(tmask, interior_only=True, nn_hls=cfg.nn_hls)
     dry_fixture = verify_dry_signed_zero_fixture(state_entry.v_i, tmask, nn_hls=cfg.nn_hls)
 
     state_kt1 = si3_o1_step(state_entry, tmask=tmask, sss_m=sss_entry, config=cfg)
+    no_ice_wet = (np.asarray(tmask) != 0.0) & np.any(
+        np.asarray(state_kt1.v_i) == 0.0, axis=2
+    )
+    sss_plant_i, sss_plant_j = first_wet_ij(
+        no_ice_wet, interior_only=True, nn_hls=cfg.nn_hls
+    )
+    if plant == "kt2-sss-perturb":
+        # icevar.f90:376-389 consumes sss_m only in an ice-free category for
+        # nn_icesal=4.  Put the kt=2 value one ULP below the MIN branch point;
+        # this must change the scored s_i/sz_i result from rn_simin.
+        sss_step2_plant = sss_step2_np.copy()
+        branch_point = cfg.rn_simin / cfg.rn_sinew
+        sss_step2_plant[sss_plant_i, sss_plant_j] = np.nextafter(branch_point, -np.inf)
+        sss_step2 = jnp.asarray(sss_step2_plant, dtype=jnp.float64)
     state_kt2 = si3_o1_step(state_kt1, tmask=tmask, sss_m=sss_step2, config=cfg)
 
     if plant == "1ulp-state":
@@ -1904,6 +1918,14 @@ def admit_evidence_directory(
         "inputs_checked": inputs_checked,
         "gate_changed_since_run": gate_changed_since_run,
         "first_wet_t_ij": [wi, wj],
+        "sss_m_kt1_sha256": hashlib.sha256(sss_step1_np.tobytes()).hexdigest(),
+        "sss_m_kt2_sha256": hashlib.sha256(sss_step2_np.tobytes()).hexdigest(),
+        "sss_m_kt1_kt2_different_elements": int(
+            np.count_nonzero(sss_step1_np.view(np.uint64) != sss_step2_np.view(np.uint64))
+        ),
+        "sss_m_kt1_kt2_max_abs": float(np.max(np.abs(sss_step1_np - sss_step2_np))),
+        "sss_m_kt2_plant_ij": [sss_plant_i, sss_plant_j],
+        "sss_m_kt2_plant_branch_point": cfg.rn_simin / cfg.rn_sinew,
         "dry_signed_zero_fixture": dry_fixture,
         "max_ulp_kt1": cmp_kt1["max_ulp_wet"],
         "max_ulp_kt2": cmp_kt2["max_ulp_wet"],

@@ -1074,7 +1074,7 @@ admit_all() {
   fi
   "$PY" "$GATE_PY" --admit-evidence "$EVIDENCE" \
     "${commit_args[@]}" --json "$EVIDENCE/o1_admission.json"
-  for adm_plant in stamp same-program binary-sha input-sha missing-complete missing-stop0 ref-rec-diff 1ulp-state rst-missing rst-1ulp rst-step-name kt2-sss-step1 ocean-restart-missing; do
+  for adm_plant in stamp same-program binary-sha input-sha missing-complete missing-stop0 ref-rec-diff 1ulp-state rst-missing rst-1ulp rst-step-name kt2-sss-perturb ocean-restart-missing; do
     if "$PY" "$GATE_PY" --admit-evidence "$EVIDENCE" \
          "${commit_args[@]}" \
          --plant "$adm_plant" >/dev/null 2>&1; then
@@ -1095,7 +1095,7 @@ if [[ "$mode" == --admit-existing ]]; then
     printf 'REFUSE: missing %s/manifest/producer_commit.txt\n' "$EVIDENCE" >&2
     exit 65
   }
-  admit_all
+  admit_all "$(<"$EVIDENCE/manifest/producer_commit.txt")"
   printf 'ACQUISITION_ADMITTED %s\n' "$EVIDENCE"
   exit 0
 fi
