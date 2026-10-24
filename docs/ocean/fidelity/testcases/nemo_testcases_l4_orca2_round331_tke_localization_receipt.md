@@ -333,9 +333,15 @@ line and is not represented as a passing comparison.  DINO evidence SHA-256:
 `0a5806c70970d5af0d9fedee60a899dcc1ec238c2bb0a67b568f09e193477db9`.
 No GPU was used; the operator retains the month/GPU push gate.
 
-The preregistered rung-10 N=1 candidate gradient check is recorded below in
-the final gate ledger.  It must be complete, finite, reverse/forward
-consistent, and preserve forward parity; otherwise this round is held.
+The preregistered rung-10 N=1 candidate gradient check is complete.  Forward
+parity has zero non-bit leaves; both reverse rows have zero non-finite initial
+temperature entries and empty non-finite cotangent-leaf maps.  Reverse versus
+forward relative errors are `1.819369557262068e-14` for the T direction,
+`1.3868976507379975e-15` for the SSH direction, and
+`1.501929835492298e-15` for `rn_ud`'s T loss (`rn_ud` reverse
+`-4.51170448705634e-5`).  The construction rebuild has zero non-bit traced
+leaves.  Peak RSS was 73.40 GiB.  Evidence SHA-256:
+`9c1f6452a3dbd3760ae593b4504c851a99683a2dd854ee730f2d3e547a9a903c`.
 
 ## Resume-3 final gate ledger and disposition
 
@@ -345,6 +351,14 @@ consistent, and preserve forward parity; otherwise this round is held.
 - Decision 122/139: seven pairs, both labels, zero exact loss, zero away.
 - Other executing card: faithful DINO 66/66 leaf-steps bit-identical; GPU
   remains operator-only.
+- Rung-10 N=1 gradient: complete, finite, forward parity bit-identical, and
+  reverse/forward consistent.
+- Focused resume-3 functional gates: 28 passed; citation gate: 22 citations,
+  0 unmapped, 0 failures, 0 map-audit failures; shifted-citation plant fired;
+  citation pytest: 17 passed.
+- Default ORCA2 landing battery: 149 passed in 1464.81 s, including the
+  six-test private-import ratchet.  Log SHA-256
+  `9ed91b2fdadb61da54454e2c91a1242d856ec8c4cfb4f021263fda6a69ff5896`.
 - No configuration change: **ASKED**.
 - Independent review: operator (Claude).
 
