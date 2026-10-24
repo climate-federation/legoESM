@@ -2217,9 +2217,1278 @@ def read_si3_netcdf_restart(
     )
 
 
+# ==============================================================================
+# Rung O3: Full-state ORCA2 SI3 Prather advection (`icedyn_adv_pra.f90`,
+# `icedyn_adv.f90`, `icedyn.f90`, `icestp.f90`).
+# ==============================================================================
+
+from legoesm.ice.transport import (  # noqa: E402
+    si3_active_mask_2d,
+    si3_adv_x,
+    si3_adv_y,
+    si3_hbig_pra,
+    si3_hsnow_pra,
+    si3_icemax2d_pra,
+    si3_icemax3d_pra,
+    si3_var_zapneg,
+    si3_var_zapsmall,
+)
+
+# Fixed NEMO 5.0.2 SI3 Prather advection literals (`icedyn_adv_pra.f90:138-141`,
+# `icedyn_adv.f90:92`, `icedyn.f90:155-171`).
+_SI3_PRA_ZERO = 0.0
+_SI3_PRA_ONE = 1.0
+_SI3_PRA_ICE_PRESENCE = 1.0e-10
+_SI3_PRA_CFL_TWO_CYCLE_THRESHOLD = 0.5
+_SI3_PRA_CFL_THREE_CYCLE_THRESHOLD = 1.5
+_si3_active_mask_2d = si3_active_mask_2d
+
+
+class SI3ORCA2AdvectionGrid(NamedTuple):
+    """ORCA2 horizontal C-grid metrics and surface masks for SI3 Prather advection.
+
+    Source citations:
+    - `ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn_adv_pra.f90:133-150,233-261,370-397,440-443`
+    - `ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn.f90:222-223`
+    """
+
+    e1u: Field
+    e2v: Field
+    r1_e1u: Field
+    r1_e2v: Field
+    e2u: Field
+    e1v: Field
+    e1e2t: Field
+    r1_e1e2t: Field
+    tmask: Field
+    umask: Field
+    vmask: Field
+
+    @classmethod
+    def from_metrics(
+        cls,
+        *,
+        e1u: Field,
+        e2v: Field,
+        e2u: Field,
+        e1v: Field,
+        e1e2t: Field,
+        tmask: Field,
+        umask: Field | None = None,
+        vmask: Field | None = None,
+        r1_e1u: Field | None = None,
+        r1_e2v: Field | None = None,
+        r1_e1e2t: Field | None = None,
+    ) -> "SI3ORCA2AdvectionGrid":
+        """Construct `SI3ORCA2AdvectionGrid` with source-rounded reciprocal metrics."""
+        sr = nemo_source_round
+        e1u_f = jnp.asarray(e1u, dtype=jnp.float64)
+        e2v_f = jnp.asarray(e2v, dtype=jnp.float64)
+        e2u_f = jnp.asarray(e2u, dtype=jnp.float64)
+        e1v_f = jnp.asarray(e1v, dtype=jnp.float64)
+        e1e2t_f = jnp.asarray(e1e2t, dtype=jnp.float64)
+        tmask_f = jnp.asarray(tmask, dtype=jnp.float64)
+        umask_f = (
+            tmask_f if umask is None else jnp.asarray(umask, dtype=jnp.float64)
+        )
+        vmask_f = (
+            tmask_f if vmask is None else jnp.asarray(vmask, dtype=jnp.float64)
+        )
+        r1_e1u_f = (
+            sr(jnp.reciprocal(e1u_f))
+            if r1_e1u is None
+            else jnp.asarray(r1_e1u, dtype=jnp.float64)
+        )
+        r1_e2v_f = (
+            sr(jnp.reciprocal(e2v_f))
+            if r1_e2v is None
+            else jnp.asarray(r1_e2v, dtype=jnp.float64)
+        )
+        r1_e1e2t_f = (
+            sr(jnp.reciprocal(e1e2t_f))
+            if r1_e1e2t is None
+            else jnp.asarray(r1_e1e2t, dtype=jnp.float64)
+        )
+        return cls(
+            e1u=e1u_f,
+            e2v=e2v_f,
+            r1_e1u=r1_e1u_f,
+            r1_e2v=r1_e2v_f,
+            e2u=e2u_f,
+            e1v=e1v_f,
+            e1e2t=e1e2t_f,
+            r1_e1e2t=r1_e1e2t_f,
+            tmask=tmask_f,
+            umask=umask_f,
+            vmask=vmask_f,
+        )
+
+
+class SI3AdvectionDiagnostics(NamedTuple):
+    """Diagnostics produced by one ORCA2 SI3 Prather advection step (`icestp.f90`, `icedyn_adv.f90`, `icedyn_adv_pra.f90`)."""
+
+    diag_adv_mass: Field
+    diag_adv_salt: Field
+    diag_adv_heat: Field
+    wfx_res: Field
+    hfx_res: Field
+    sfx_res: Field
+    diag_trp_vi: Field
+    diag_trp_vs: Field
+    diag_trp_ei: Field
+    diag_trp_es: Field
+    diag_trp_sv: Field
+    diag_heat: Field
+    diag_sice: Field
+    diag_vice: Field
+    diag_vsnw: Field
+    diag_vpnd: Field
+    diag_aice: Field
+    ato_i_post_adv: Field
+    ato_i_post_dyn: Field
+    zcfl: Field
+    icycle: Field
+
+
+def _moments_to_tuple(
+    fam: SI3PratherMoments,
+) -> tuple[Field, Field, Field, Field, Field]:
+    return fam.sx, fam.sy, fam.sxx, fam.syy, fam.sxy
+
+
+def _tuple_to_moments(
+    tup: tuple[Field, Field, Field, Field, Field],
+) -> SI3PratherMoments:
+    return SI3PratherMoments(
+        sx=tup[0],
+        sy=tup[1],
+        sxx=tup[2],
+        syy=tup[3],
+        sxy=tup[4],
+    )
+
+
+def si3_dyn_adv_pra_orca2(
+    kt: int,
+    u_ice: Field,
+    v_ice: Field,
+    h_i: Field,
+    h_s: Field,
+    h_ip: Field,
+    ato_i: Field,
+    v_i: Field,
+    v_s: Field,
+    sv_i: Field,
+    oa_i: Field,
+    a_i: Field,
+    a_ip: Field,
+    v_ip: Field,
+    v_il: Field,
+    e_s: Field,
+    e_i: Field,
+    szv_i: Field,
+    prather: SI3AllPratherMoments,
+    grid: SI3ORCA2AdvectionGrid,
+    *,
+    config: SI3ORCA2StateConfig | None = None,
+    hi_max_top: float | Field = _ORCA2_RN_HIMAX_M,
+    subcycles: int | None = None,
+    wfx_res: Field | None = None,
+    hfx_res: Field | None = None,
+    sfx_res: Field | None = None,
+    diag_adv_mass: Field | None = None,
+    diag_adv_salt: Field | None = None,
+    diag_adv_heat: Field | None = None,
+    _plant_invert_sweep_order: bool = False,
+    _plant_perturb_hbig_cap: bool = False,
+    _plant_omit_subcycle_lbc: bool = False,
+    _plant_omit_donor_readjust: bool = False,
+    _plant_corrupt_receiver_flux: bool = False,
+    _plant_wrong_nfd_sign: bool = False,
+) -> tuple[
+    Field,
+    Field,
+    Field,
+    Field,
+    Field,
+    Field,
+    Field,
+    Field,
+    Field,
+    Field,
+    Field,
+    Field,
+    SI3AllPratherMoments,
+    Field,
+    Field,
+    Field,
+    Field,
+    Field,
+    Field,
+    Field,
+    Field,
+]:
+    """Execute `ice_dyn_adv_pra` on ORCA2 (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn_adv_pra.f90:70-510`).
+
+    Transcribes:
+    - CFL evaluation and `icycle in {1, 2, 3}` (`:133-138`)
+    - Face transport `zudy = pu_ice * e2u`, `zvdx = pv_ice * e1v` (`:149-150`)
+    - Subcycle loop `DO jt = 1, icycle` (`:156-498`):
+      - `zati1` (`:159`), `ihls` (`:161-163`)
+      - 9-point maxima `icemax2D_pra` (`zh_i, zh_s, zh_ip, zs_i`) and
+        `icemax3D_pra` (`ze_i, ze_s, zsz_i`) (`:172-213`)
+      - Pre-advection `zdiag_adv_mass, zdiag_adv_heat, zdiag_adv_salt` (`:216-229`)
+      - Extensive packing `z0* = p* * e1e2t` on `A2D(ihls+1)` (`:233-261`)
+      - Alternating sweep `MOD((kt-1)/nn_fsbc, 2) == MOD(jt-1, 2)` (`:267-367`)
+      - Intensive recovery `p* = z0* * r1_e1e2t * tmask` on `A2D(ihls)` (`:370-397`)
+      - Post-advection `diag_adv_mass, diag_adv_heat, diag_adv_salt` (`:400-417`)
+      - `Hbig_pra` (`:421-422`) and `Hsnow_pra` (`:425`) per category `jl = 1..jpl`
+      - `ice_var_zapneg` (`:435`)
+      - Open-water `pato_i` update (`:438-443`)
+      - `lbc_lnk(..., ldfull = .TRUE.)` on all transported fields, their five
+        Prather moments (`psgn = -1` for `sx, sy`; `+1` for `sxx, syy, sxy`),
+        `pato_i`, and `wfx_res, hfx_res, sfx_res` (`:450-494`).
+    """
+    cfg = config if config is not None else SI3ORCA2StateConfig(ln_icedyn=True)
+    if kt < 1 or cfg.nn_fsbc < 1:
+        raise ValueError("si3_dyn_adv_pra_orca2 requires kt >= 1 and nn_fsbc >= 1")
+    sr = nemo_source_round
+    consts = cfg.ice_constants
+    jpi, jpj, jpl = v_i.shape
+    dtype = v_i.dtype
+    nn_hls = int(cfg.nn_hls)
+    interior_2d = _si3_active_mask_2d(jpi, jpj, nn_hls, 0)
+
+    rDt_ice = jnp.asarray(cfg.rDt_ice, dtype=dtype)
+    r1_Dt_ice = sr(_SI3_PRA_ONE / rDt_ice)
+    rhoi_f = jnp.asarray(consts.rho_ice, dtype=dtype)
+    rhos_f = jnp.asarray(consts.rho_snow, dtype=dtype)
+    rhow_f = jnp.asarray(canonical_constants.rho_water, dtype=dtype)
+    epsi10 = jnp.asarray(_SI3_PRA_ICE_PRESENCE, dtype=dtype)
+
+    if wfx_res is None:
+        wfx_res = jnp.zeros((jpi, jpj), dtype=dtype)
+    if hfx_res is None:
+        hfx_res = jnp.zeros((jpi, jpj), dtype=dtype)
+    if sfx_res is None:
+        sfx_res = jnp.zeros((jpi, jpj), dtype=dtype)
+    if diag_adv_mass is None:
+        diag_adv_mass = jnp.zeros((jpi, jpj), dtype=dtype)
+    if diag_adv_salt is None:
+        diag_adv_salt = jnp.zeros((jpi, jpj), dtype=dtype)
+    if diag_adv_heat is None:
+        diag_adv_heat = jnp.zeros((jpi, jpj), dtype=dtype)
+
+    # CFL and subcycle count (`icedyn_adv_pra.f90:133-138`)
+    cfl_u = jnp.max(sr(sr(jnp.abs(u_ice) * rDt_ice) * grid.r1_e1u))
+    cfl_v = jnp.max(sr(sr(jnp.abs(v_ice) * rDt_ice) * grid.r1_e2v))
+    zcfl = jnp.maximum(cfl_u, cfl_v)
+    if subcycles is None:
+        cfl_host = float(zcfl)
+        icycle = (
+            3
+            if cfl_host > _SI3_PRA_CFL_THREE_CYCLE_THRESHOLD
+            else 2
+            if cfl_host > _SI3_PRA_CFL_TWO_CYCLE_THRESHOLD
+            else 1
+        )
+    else:
+        if subcycles not in (1, 2, 3):
+            raise ValueError(f"subcycles must be 1, 2, or 3; got {subcycles}")
+        icycle = int(subcycles)
+
+    zdt = sr(rDt_ice / jnp.asarray(float(icycle), dtype=dtype))
+    zudy = sr(u_ice * grid.e2u)
+    zvdx = sr(v_ice * grid.e1v)
+
+    pnd_active = bool(cfg.ln_pnd_LEV or cfg.ln_pnd_TOPO)
+    sal4_active = cfg.nn_icesal == 4
+
+    for jt in range(1, icycle + 1):
+        # `zati1(:,:) = SUM( pa_i(Nis0:Nie0,Njs0:Nje0,:), dim=3 )` (`:159`)
+        zati1 = jnp.where(
+            interior_2d, fortran_sum_categories(a_i, axis=-1), _SI3_PRA_ZERO
+        )
+        ihls = 0 if icycle == 1 else max(0, nn_hls - jt)
+        mask_ihls = _si3_active_mask_2d(jpi, jpj, nn_hls, ihls)
+        mask_ihls_p1 = _si3_active_mask_2d(jpi, jpj, nn_hls, ihls + 1)
+
+        # 9-point neighborhood maxima (`:172-213`)
+        zhi_max = si3_icemax2d_pra(ihls, h_i, nn_hls=nn_hls)
+        zhs_max = si3_icemax2d_pra(ihls, h_s, nn_hls=nn_hls)
+        if pnd_active:
+            zhip_max = si3_icemax2d_pra(ihls, h_ip, nn_hls=nn_hls)
+        else:
+            zhip_max = jnp.zeros_like(h_ip)
+
+        vi_ge_eps = (v_i >= epsi10)[:, :, None, :]
+        vi_safe_4d = jnp.where(vi_ge_eps, v_i[:, :, None, :], _SI3_PRA_ONE)
+        ze_i = jnp.where(vi_ge_eps, sr(e_i / vi_safe_4d), _SI3_PRA_ZERO)
+
+        vs_ge_eps = (v_s >= epsi10)[:, :, None, :]
+        vs_safe_4d = jnp.where(vs_ge_eps, v_s[:, :, None, :], _SI3_PRA_ONE)
+        ze_s = jnp.where(vs_ge_eps, sr(e_s / vs_safe_4d), _SI3_PRA_ZERO)
+
+        zei_max = si3_icemax3d_pra(ihls, ze_i, nn_hls=nn_hls)
+        zes_max = si3_icemax3d_pra(ihls, ze_s, nn_hls=nn_hls)
+
+        if sal4_active:
+            zsz_i = jnp.where(vi_ge_eps, sr(szv_i / vi_safe_4d), _SI3_PRA_ZERO)
+            zszi_max = si3_icemax3d_pra(ihls, zsz_i, nn_hls=nn_hls)
+            zsi_max = jnp.zeros_like(v_i)
+        else:
+            vi_ge_3d = v_i >= epsi10
+            vi_safe_3d = jnp.where(vi_ge_3d, v_i, _SI3_PRA_ONE)
+            zs_i = jnp.where(vi_ge_3d, sr(sv_i / vi_safe_3d), _SI3_PRA_ZERO)
+            zsi_max = si3_icemax2d_pra(ihls, zs_i, nn_hls=nn_hls)
+            zszi_max = jnp.zeros_like(szv_i)
+
+        # Pre-advection diagnostics per category on `A2D(0)` (`:216-229`)
+        zdiag_adv_mass = sr(
+            sr(sr(sr(v_i * rhoi_f) + sr(v_s * rhos_f)) + sr(v_ip * rhow_f))
+            + sr(v_il * rhow_f)
+        )
+        sum_ei_pre = fortran_sum_categories(e_i, axis=2)
+        sum_es_pre = fortran_sum_categories(e_s, axis=2)
+        zdiag_adv_heat = sr(sr(-sum_ei_pre) - sum_es_pre)
+        if sal4_active:
+            sum_szv_pre = fortran_sum_categories(szv_i, axis=2)
+            zdiag_adv_salt = sr(sum_szv_pre * rhoi_f)
+        else:
+            zdiag_adv_salt = sr(sv_i * rhoi_f)
+
+        # Pack extensives on `A2D(ihls+1)` (`:233-261`)
+        m_p1_3d = mask_ihls_p1[..., None]
+        m_p1_4d = mask_ihls_p1[:, :, None, None]
+        e1e2t_3d = grid.e1e2t[..., None]
+        e1e2t_4d = grid.e1e2t[:, :, None, None]
+
+        zarea_init = jnp.where(mask_ihls_p1, grid.e1e2t, _SI3_PRA_ZERO)
+        z0ice = jnp.where(m_p1_3d, sr(v_i * e1e2t_3d), _SI3_PRA_ZERO)
+        z0snw = jnp.where(m_p1_3d, sr(v_s * e1e2t_3d), _SI3_PRA_ZERO)
+        z0ai = jnp.where(m_p1_3d, sr(a_i * e1e2t_3d), _SI3_PRA_ZERO)
+        z0oi = jnp.where(m_p1_3d, sr(oa_i * e1e2t_3d), _SI3_PRA_ZERO)
+        z0es = jnp.where(m_p1_4d, sr(e_s * e1e2t_4d), _SI3_PRA_ZERO)
+        z0ei = jnp.where(m_p1_4d, sr(e_i * e1e2t_4d), _SI3_PRA_ZERO)
+        if sal4_active:
+            z0si = jnp.where(m_p1_4d, sr(szv_i * e1e2t_4d), _SI3_PRA_ZERO)
+            z0smi = jnp.zeros_like(sv_i)
+        else:
+            z0smi = jnp.where(m_p1_3d, sr(sv_i * e1e2t_3d), _SI3_PRA_ZERO)
+            z0si = jnp.zeros_like(szv_i)
+        if pnd_active:
+            z0ap = jnp.where(m_p1_3d, sr(a_ip * e1e2t_3d), _SI3_PRA_ZERO)
+            z0vp = jnp.where(m_p1_3d, sr(v_ip * e1e2t_3d), _SI3_PRA_ZERO)
+            z0vl = jnp.where(m_p1_3d, sr(v_il * e1e2t_3d), _SI3_PRA_ZERO)
+        else:
+            z0ap = jnp.zeros_like(a_ip)
+            z0vp = jnp.zeros_like(v_ip)
+            z0vl = jnp.zeros_like(v_il)
+
+        x_first = (((kt - 1) // cfg.nn_fsbc) % 2) == ((jt - 1) % 2)
+        if _plant_invert_sweep_order:
+            x_first = not x_first
+
+        def _sweep_pair(
+            content_in: Field,
+            fam_in: SI3PratherMoments,
+        ) -> tuple[Field, SI3PratherMoments]:
+            m_tup = _moments_to_tuple(fam_in)
+            if x_first:
+                zarea_mid, c_mid, m_mid = si3_adv_x(
+                    ihls,
+                    zdt,
+                    zudy,
+                    _SI3_PRA_ONE,
+                    zarea_init,
+                    content_in,
+                    m_tup,
+                    e1e2t=grid.e1e2t,
+                    tmask=grid.tmask,
+                    nn_hls=nn_hls,
+                    _plant_omit_donor_readjust=_plant_omit_donor_readjust,
+                    _plant_corrupt_receiver_flux=_plant_corrupt_receiver_flux,
+                )
+                _, c_out, m_out = si3_adv_y(
+                    ihls,
+                    zdt,
+                    zvdx,
+                    _SI3_PRA_ZERO,
+                    zarea_mid,
+                    c_mid,
+                    m_mid,
+                    e1e2t=grid.e1e2t,
+                    tmask=grid.tmask,
+                    nn_hls=nn_hls,
+                    _plant_omit_donor_readjust=_plant_omit_donor_readjust,
+                    _plant_corrupt_receiver_flux=_plant_corrupt_receiver_flux,
+                )
+            else:
+                zarea_mid, c_mid, m_mid = si3_adv_y(
+                    ihls,
+                    zdt,
+                    zvdx,
+                    _SI3_PRA_ONE,
+                    zarea_init,
+                    content_in,
+                    m_tup,
+                    e1e2t=grid.e1e2t,
+                    tmask=grid.tmask,
+                    nn_hls=nn_hls,
+                    _plant_omit_donor_readjust=_plant_omit_donor_readjust,
+                    _plant_corrupt_receiver_flux=_plant_corrupt_receiver_flux,
+                )
+                _, c_out, m_out = si3_adv_x(
+                    ihls,
+                    zdt,
+                    zudy,
+                    _SI3_PRA_ZERO,
+                    zarea_mid,
+                    c_mid,
+                    m_mid,
+                    e1e2t=grid.e1e2t,
+                    tmask=grid.tmask,
+                    nn_hls=nn_hls,
+                    _plant_omit_donor_readjust=_plant_omit_donor_readjust,
+                    _plant_corrupt_receiver_flux=_plant_corrupt_receiver_flux,
+                )
+            return c_out, _tuple_to_moments(m_out)
+
+        z0ice, m_ice = _sweep_pair(z0ice, prather.ice)
+        z0snw, m_sn = _sweep_pair(z0snw, prather.sn)
+        z0ai, m_a = _sweep_pair(z0ai, prather.a)
+        z0oi, m_age = _sweep_pair(z0oi, prather.age)
+        z0es, m_c0 = _sweep_pair(z0es, prather.c0)
+        z0ei, m_e = _sweep_pair(z0ei, prather.e)
+        if sal4_active:
+            z0si, m_si = _sweep_pair(z0si, prather.si)
+            m_sal = prather.sal
+        else:
+            z0smi, m_sal = _sweep_pair(z0smi, prather.sal)
+            m_si = prather.si
+        if pnd_active:
+            z0ap, m_ap = _sweep_pair(z0ap, prather.ap)
+            z0vp, m_vp = _sweep_pair(z0vp, prather.vp)
+            z0vl, m_vl = _sweep_pair(z0vl, prather.vl)
+        else:
+            m_ap = prather.ap
+            m_vp = prather.vp
+            m_vl = prather.vl
+
+        # Recover intensives on `A2D(ihls)` (`:370-397`)
+        m_ihls_3d = mask_ihls[..., None]
+        m_ihls_4d = mask_ihls[:, :, None, None]
+        r1_area_3d = grid.r1_e1e2t[..., None]
+        r1_area_4d = grid.r1_e1e2t[:, :, None, None]
+        tmask_3d = grid.tmask[..., None]
+        tmask_4d = grid.tmask[:, :, None, None]
+
+        v_i = jnp.where(m_ihls_3d, sr(sr(z0ice * r1_area_3d) * tmask_3d), v_i)
+        v_s = jnp.where(m_ihls_3d, sr(sr(z0snw * r1_area_3d) * tmask_3d), v_s)
+        oa_i = jnp.where(m_ihls_3d, sr(sr(z0oi * r1_area_3d) * tmask_3d), oa_i)
+        a_i = jnp.where(m_ihls_3d, sr(sr(z0ai * r1_area_3d) * tmask_3d), a_i)
+        e_s = jnp.where(m_ihls_4d, sr(sr(z0es * r1_area_4d) * tmask_4d), e_s)
+        e_i = jnp.where(m_ihls_4d, sr(sr(z0ei * r1_area_4d) * tmask_4d), e_i)
+        if sal4_active:
+            szv_i = jnp.where(
+                m_ihls_4d, sr(sr(z0si * r1_area_4d) * tmask_4d), szv_i
+            )
+        else:
+            sv_i = jnp.where(
+                m_ihls_3d, sr(sr(z0smi * r1_area_3d) * tmask_3d), sv_i
+            )
+        if pnd_active:
+            a_ip = jnp.where(
+                m_ihls_3d, sr(sr(z0ap * r1_area_3d) * tmask_3d), a_ip
+            )
+            v_ip = jnp.where(
+                m_ihls_3d, sr(sr(z0vp * r1_area_3d) * tmask_3d), v_ip
+            )
+            v_il = jnp.where(
+                m_ihls_3d, sr(sr(z0vl * r1_area_3d) * tmask_3d), v_il
+            )
+
+        # Post-advection `diag_adv_*` accumulation on `A2D(0)` (`:400-417`)
+        for jl in range(jpl):
+            mass_post = sr(
+                sr(
+                    sr(sr(v_i[:, :, jl] * rhoi_f) + sr(v_s[:, :, jl] * rhos_f))
+                    + sr(v_ip[:, :, jl] * rhow_f)
+                )
+                + sr(v_il[:, :, jl] * rhow_f)
+            )
+            dmass = sr(sr(mass_post - zdiag_adv_mass[:, :, jl]) * r1_Dt_ice)
+            diag_adv_mass = jnp.where(
+                interior_2d, sr(diag_adv_mass + dmass), diag_adv_mass
+            )
+
+            sum_ei_post = fortran_sum_categories(e_i[:, :, :, jl], axis=2)
+            sum_es_post = fortran_sum_categories(e_s[:, :, :, jl], axis=2)
+            heat_post = sr(sr(-sum_ei_post) - sum_es_post)
+            dheat = sr(sr(heat_post - zdiag_adv_heat[:, :, jl]) * r1_Dt_ice)
+            diag_adv_heat = jnp.where(
+                interior_2d, sr(diag_adv_heat + dheat), diag_adv_heat
+            )
+
+            if sal4_active:
+                sum_szv_post = fortran_sum_categories(szv_i[:, :, :, jl], axis=2)
+                salt_post = sr(sum_szv_post * rhoi_f)
+            else:
+                salt_post = sr(sv_i[:, :, jl] * rhoi_f)
+            dsalt = sr(sr(salt_post - zdiag_adv_salt[:, :, jl]) * r1_Dt_ice)
+            diag_adv_salt = jnp.where(
+                interior_2d, sr(diag_adv_salt + dsalt), diag_adv_salt
+            )
+
+            # `Hbig_pra` (`:421-422`) and `Hsnow_pra` (`:425`) interleaved per category `jl`
+            (
+                v_i_jl,
+                v_s_jl,
+                a_i_jl,
+                a_ip_jl,
+                v_ip_jl,
+                sv_i_jl,
+                e_s_jl,
+                e_i_jl,
+                szv_i_jl,
+                wfx_res,
+                hfx_res,
+                sfx_res,
+            ) = si3_hbig_pra(
+                ihls,
+                rDt_ice,
+                zhi_max[:, :, jl],
+                zhs_max[:, :, jl],
+                zhip_max[:, :, jl],
+                zsi_max[:, :, jl],
+                zes_max[:, :, :, jl],
+                zei_max[:, :, :, jl],
+                zszi_max[:, :, :, jl],
+                v_i[:, :, jl],
+                v_s[:, :, jl],
+                a_i[:, :, jl],
+                a_ip[:, :, jl],
+                v_ip[:, :, jl],
+                sv_i[:, :, jl],
+                e_s[:, :, :, jl],
+                e_i[:, :, :, jl],
+                szv_i[:, :, :, jl],
+                wfx_res,
+                hfx_res,
+                sfx_res,
+                nn_hls=nn_hls,
+                nn_icesal=cfg.nn_icesal,
+                ln_pnd_LEV=cfg.ln_pnd_LEV,
+                ln_pnd_TOPO=cfg.ln_pnd_TOPO,
+                hi_max_top=hi_max_top,
+                rhoi=consts.rho_ice,
+                rhos=consts.rho_snow,
+                _plant_perturb_hbig_cap=_plant_perturb_hbig_cap,
+            )
+            (
+                v_i_jl,
+                v_s_jl,
+                a_i_jl,
+                a_ip_jl,
+                e_s_jl,
+                wfx_res,
+                hfx_res,
+            ) = si3_hsnow_pra(
+                ihls,
+                rDt_ice,
+                v_i_jl,
+                v_s_jl,
+                a_i_jl,
+                a_ip_jl,
+                e_s_jl,
+                wfx_res,
+                hfx_res,
+                nn_hls=nn_hls,
+                rho0=consts.rho_ocean,
+                rhoi=consts.rho_ice,
+                rhos=consts.rho_snow,
+            )
+            v_i = v_i.at[:, :, jl].set(v_i_jl)
+            v_s = v_s.at[:, :, jl].set(v_s_jl)
+            a_i = a_i.at[:, :, jl].set(a_i_jl)
+            a_ip = a_ip.at[:, :, jl].set(a_ip_jl)
+            v_ip = v_ip.at[:, :, jl].set(v_ip_jl)
+            sv_i = sv_i.at[:, :, jl].set(sv_i_jl)
+            e_s = e_s.at[:, :, :, jl].set(e_s_jl)
+            e_i = e_i.at[:, :, :, jl].set(e_i_jl)
+            szv_i = szv_i.at[:, :, :, jl].set(szv_i_jl)
+
+        # `ice_var_zapneg` (`:435`)
+        (
+            v_i,
+            v_s,
+            sv_i,
+            oa_i,
+            a_i,
+            a_ip,
+            v_ip,
+            v_il,
+            e_s,
+            e_i,
+            szv_i,
+            wfx_res,
+            hfx_res,
+            sfx_res,
+        ) = si3_var_zapneg(
+            ihls,
+            rDt_ice,
+            v_i,
+            v_s,
+            sv_i,
+            oa_i,
+            a_i,
+            a_ip,
+            v_ip,
+            v_il,
+            e_s,
+            e_i,
+            szv_i,
+            wfx_res,
+            hfx_res,
+            sfx_res,
+            nn_hls=nn_hls,
+            nn_icesal=cfg.nn_icesal,
+            rhoi=consts.rho_ice,
+            rhos=consts.rho_snow,
+            rhow=canonical_constants.rho_water,
+        )
+
+        # Open-water fraction `pato_i` update on `A2D(0)` (`:438-443`)
+        zati2 = fortran_sum_categories(a_i, axis=-1)
+        da = sr(zati2 - zati1)
+        div_u = sr(zudy - jnp.roll(zudy, 1, axis=0))
+        div_v = sr(zvdx - jnp.roll(zvdx, 1, axis=1))
+        div_uv = sr(div_u + div_v)
+        div_term = sr(sr(div_uv * grid.r1_e1e2t) * zdt)
+        ato_i_upd = jnp.maximum(_SI3_PRA_ZERO, sr(sr(ato_i - da) - div_term))
+        ato_i = jnp.where(interior_2d, ato_i_upd, ato_i)
+
+        prather = SI3AllPratherMoments(
+            ice=m_ice,
+            sn=m_sn,
+            a=m_a,
+            age=m_age,
+            sal=m_sal,
+            ap=m_ap,
+            vp=m_vp,
+            vl=m_vl,
+            c0=m_c0,
+            e=m_e,
+            si=m_si,
+        )
+
+        # Lateral boundary conditions `lbc_lnk(..., ldfull = .TRUE.)` (`:450-494`)
+        if not _plant_omit_subcycle_lbc:
+            def _t_lbc(arr: Field) -> Field:
+                return si3_lbc_lnk_orca2(
+                    arr, "T", _SI3_PRA_ONE, nn_hls=nn_hls, ldfull=True
+                )
+
+            def _fam_lbc(fam: SI3PratherMoments) -> SI3PratherMoments:
+                return _apply_prather_family_halos(
+                    fam,
+                    nn_hls=nn_hls,
+                    ldfull=True,
+                    _plant_wrong_nfd_sign=_plant_wrong_nfd_sign,
+                )
+
+            v_i = _t_lbc(v_i)
+            v_s = _t_lbc(v_s)
+            sv_i = _t_lbc(sv_i)
+            a_i = _t_lbc(a_i)
+            oa_i = _t_lbc(oa_i)
+            m_ice_h = _fam_lbc(prather.ice)
+            m_sn_h = _fam_lbc(prather.sn)
+            m_sal_h = _fam_lbc(prather.sal)
+            m_a_h = _fam_lbc(prather.a)
+            m_age_h = _fam_lbc(prather.age)
+
+            if pnd_active:
+                a_ip = _t_lbc(a_ip)
+                v_ip = _t_lbc(v_ip)
+                v_il = _t_lbc(v_il)
+                m_ap_h = _fam_lbc(prather.ap)
+                m_vp_h = _fam_lbc(prather.vp)
+                m_vl_h = _fam_lbc(prather.vl)
+            else:
+                m_ap_h = prather.ap
+                m_vp_h = prather.vp
+                m_vl_h = prather.vl
+
+            e_s = _t_lbc(e_s)
+            e_i = _t_lbc(e_i)
+            m_c0_h = _fam_lbc(prather.c0)
+            m_e_h = _fam_lbc(prather.e)
+            if sal4_active:
+                szv_i = _t_lbc(szv_i)
+                m_si_h = _fam_lbc(prather.si)
+            else:
+                m_si_h = prather.si
+
+            ato_i = _t_lbc(ato_i)
+            wfx_res = _t_lbc(wfx_res)
+            hfx_res = _t_lbc(hfx_res)
+            sfx_res = _t_lbc(sfx_res)
+
+            prather = SI3AllPratherMoments(
+                ice=m_ice_h,
+                sn=m_sn_h,
+                a=m_a_h,
+                age=m_age_h,
+                sal=m_sal_h,
+                ap=m_ap_h,
+                vp=m_vp_h,
+                vl=m_vl_h,
+                c0=m_c0_h,
+                e=m_e_h,
+                si=m_si_h,
+            )
+
+    return (
+        ato_i,
+        v_i,
+        v_s,
+        sv_i,
+        oa_i,
+        a_i,
+        a_ip,
+        v_ip,
+        v_il,
+        e_s,
+        e_i,
+        szv_i,
+        prather,
+        wfx_res,
+        hfx_res,
+        sfx_res,
+        diag_adv_mass,
+        diag_adv_salt,
+        diag_adv_heat,
+        zcfl,
+        jnp.asarray(icycle, dtype=jnp.int32),
+    )
+
+
+def si3_dyn_orca2(
+    state: SI3State,
+    grid: SI3ORCA2AdvectionGrid,
+    *,
+    kt: int = 1,
+    sss_m: Field | float | None = None,
+    sst_m: Field | float | None = None,
+    rn_uice: float | Field | None = None,
+    rn_vice: float | Field | None = None,
+    config: SI3ORCA2StateConfig | None = None,
+    subcycles: int | None = None,
+    _plant_invert_sweep_order: bool = False,
+    _plant_perturb_hbig_cap: bool = False,
+    _plant_omit_subcycle_lbc: bool = False,
+    _plant_omit_donor_readjust: bool = False,
+    _plant_corrupt_receiver_flux: bool = False,
+    _plant_wrong_nfd_sign: bool = False,
+) -> tuple[SI3State, SI3AdvectionDiagnostics]:
+    """Execute NEMO SI3 `ice_dyn` (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn.f90:126-265`).
+
+    Follows NEMO's exact statement order:
+    1. Pre-advection intensive thickness recovery (`icedyn.f90:156-170`)
+    2. Optional `np_dynADV2D` velocity masking (`u_ice = rn_uice * umask`,
+       `v_ice = rn_vice * vmask`, `icedyn.f90:222-223`)
+    3. `ice_dyn_adv_pra` (`icedyn.f90:224`, `icedyn_adv.f90:149-150`,
+       `icedyn_adv_pra.f90:70-510`)
+    4. Transport diagnostics `diag_trp_ei, diag_trp_es, diag_trp_sv, diag_trp_vi, diag_trp_vs`
+       on `A2D(0)` (`icedyn_adv.f90:156-164`)
+    5. `ice_var_zapsmall` (`icedyn.f90:225`, `icevar.f90:615-737`)
+    6. End-of-`ice_dyn` `lbc_lnk(..., ldfull = .TRUE.)` (`icedyn.f90:254-260`).
+    """
+    cfg = config if config is not None else SI3ORCA2StateConfig(ln_icedyn=True)
+    sr = nemo_source_round
+    consts = cfg.ice_constants
+    jpi, jpj, _ = state.v_i.shape
+    dtype = state.v_i.dtype
+    nn_hls = int(cfg.nn_hls)
+    interior_2d = _si3_active_mask_2d(jpi, jpj, nn_hls, 0)
+    rDt_ice = jnp.asarray(cfg.rDt_ice, dtype=dtype)
+    r1_Dt_ice = sr(_SI3_PRA_ONE / rDt_ice)
+    epsi20 = jnp.asarray(_EPSI20, dtype=dtype)
+
+    # Record before-step `*_b` on `A2D(0)` (`store_fields`, `icestp.f90:438-457`)
+    a_i_b = state.a_i
+    v_i_b = state.v_i
+    v_s_b = state.v_s
+    v_ip_b = state.v_ip
+    v_il_b = state.v_il
+    sv_i_b = state.sv_i
+    e_s_b = state.e_s
+    e_i_b = state.e_i
+    szv_i_b = state.szv_i
+
+    # 1. Pre-advection intensive thickness recovery (`icedyn.f90:156-170`)
+    ai_ge_eps20 = state.a_i >= epsi20
+    ai_safe = jnp.where(ai_ge_eps20, state.a_i, _SI3_PRA_ONE)
+    h_i_pre = jnp.where(ai_ge_eps20, sr(state.v_i / ai_safe), _SI3_PRA_ZERO)
+    h_s_pre = jnp.where(ai_ge_eps20, sr(state.v_s / ai_safe), _SI3_PRA_ZERO)
+
+    aip_ge_eps20 = state.a_ip >= epsi20
+    aip_safe = jnp.where(aip_ge_eps20, state.a_ip, _SI3_PRA_ONE)
+    h_ip_pre = jnp.where(aip_ge_eps20, sr(state.v_ip / aip_safe), _SI3_PRA_ZERO)
+    h_il_pre = jnp.where(aip_ge_eps20, sr(state.v_il / aip_safe), _SI3_PRA_ZERO)
+
+    # 2. Velocity selection (`icedyn.f90:222-223`)
+    if rn_uice is not None and rn_vice is not None:
+        u_ice = sr(jnp.asarray(rn_uice, dtype=dtype) * grid.umask)
+        v_ice = sr(jnp.asarray(rn_vice, dtype=dtype) * grid.vmask)
+    else:
+        u_ice = state.u_ice
+        v_ice = state.v_ice
+
+    # 3. `ice_dyn_adv_pra` (`icedyn_adv_pra.f90:70-510`)
+    (
+        ato_i_adv,
+        v_i,
+        v_s,
+        sv_i,
+        oa_i,
+        a_i,
+        a_ip,
+        v_ip,
+        v_il,
+        e_s,
+        e_i,
+        szv_i,
+        prather,
+        wfx_res,
+        hfx_res,
+        sfx_res,
+        diag_adv_mass,
+        diag_adv_salt,
+        diag_adv_heat,
+        zcfl,
+        icycle,
+    ) = si3_dyn_adv_pra_orca2(
+        kt=kt,
+        u_ice=u_ice,
+        v_ice=v_ice,
+        h_i=h_i_pre,
+        h_s=h_s_pre,
+        h_ip=h_ip_pre,
+        ato_i=state.aggregated.ato_i,
+        v_i=state.v_i,
+        v_s=state.v_s,
+        sv_i=state.sv_i,
+        oa_i=state.oa_i,
+        a_i=state.a_i,
+        a_ip=state.a_ip,
+        v_ip=state.v_ip,
+        v_il=state.v_il,
+        e_s=state.e_s,
+        e_i=state.e_i,
+        szv_i=state.szv_i,
+        prather=state.prather,
+        grid=grid,
+        config=cfg,
+        hi_max_top=state.bounds.hi_max[-1],
+        subcycles=subcycles,
+        _plant_invert_sweep_order=_plant_invert_sweep_order,
+        _plant_perturb_hbig_cap=_plant_perturb_hbig_cap,
+        _plant_omit_subcycle_lbc=_plant_omit_subcycle_lbc,
+        _plant_omit_donor_readjust=_plant_omit_donor_readjust,
+        _plant_corrupt_receiver_flux=_plant_corrupt_receiver_flux,
+        _plant_wrong_nfd_sign=_plant_wrong_nfd_sign,
+    )
+
+    # 4. Transport diagnostics `diag_trp_*` on `A2D(0)` (`icedyn_adv.f90:156-164`)
+    dei = sr(e_i - e_i_b)
+    des = sr(e_s - e_s_b)
+    diag_trp_ei = jnp.where(
+        interior_2d,
+        sr(
+            fortran_sum_categories(fortran_sum_categories(dei, axis=-1), axis=-1)
+            * r1_Dt_ice
+        ),
+        _SI3_PRA_ZERO,
+    )
+    diag_trp_es = jnp.where(
+        interior_2d,
+        sr(
+            fortran_sum_categories(fortran_sum_categories(des, axis=-1), axis=-1)
+            * r1_Dt_ice
+        ),
+        _SI3_PRA_ZERO,
+    )
+    if cfg.nn_icesal == 4:
+        dszv = sr(szv_i - szv_i_b)
+        diag_trp_sv = jnp.where(
+            interior_2d,
+            sr(
+                fortran_sum_categories(
+                    fortran_sum_categories(dszv, axis=-1), axis=-1
+                )
+                * r1_Dt_ice
+            ),
+            _SI3_PRA_ZERO,
+        )
+    else:
+        dsv = sr(sv_i - sv_i_b)
+        diag_trp_sv = jnp.where(
+            interior_2d,
+            sr(fortran_sum_categories(dsv, axis=-1) * r1_Dt_ice),
+            _SI3_PRA_ZERO,
+        )
+    dvi = sr(v_i - v_i_b)
+    dvs = sr(v_s - v_s_b)
+    diag_trp_vi = jnp.where(
+        interior_2d,
+        sr(fortran_sum_categories(dvi, axis=-1) * r1_Dt_ice),
+        _SI3_PRA_ZERO,
+    )
+    diag_trp_vs = jnp.where(
+        interior_2d,
+        sr(fortran_sum_categories(dvs, axis=-1) * r1_Dt_ice),
+        _SI3_PRA_ZERO,
+    )
+
+    # 5. `ice_var_zapsmall` (`icedyn.f90:225`, `icevar.f90:615-737`)
+    sss_val = canonical_constants.S_ocean_ref if sss_m is None else sss_m
+    sst_val = _SI3_PRA_ZERO if sst_m is None else sst_m
+    (
+        v_i,
+        v_s,
+        sv_i,
+        oa_i,
+        a_i,
+        a_ip,
+        v_ip,
+        v_il,
+        t_su,
+        h_i_post,
+        h_s_post,
+        h_ip_post,
+        h_il_post,
+        e_s,
+        e_i,
+        szv_i,
+        sz_i_post,
+        t_i_post,
+        t_s_post,
+        at_i_post,
+        vt_i_post,
+        ato_i_dyn,
+        wfx_res,
+        hfx_res,
+        sfx_res,
+    ) = si3_var_zapsmall(
+        v_i=v_i,
+        v_s=v_s,
+        sv_i=sv_i,
+        oa_i=oa_i,
+        a_i=a_i,
+        a_ip=a_ip,
+        v_ip=v_ip,
+        v_il=v_il,
+        t_su=state.t_su,
+        h_i=h_i_pre,
+        h_s=h_s_pre,
+        h_ip=h_ip_pre,
+        h_il=h_il_pre,
+        e_s=e_s,
+        e_i=e_i,
+        szv_i=szv_i,
+        sz_i=state.equivalent.sz_i,
+        t_i=state.equivalent.t_i,
+        t_s=state.equivalent.t_s,
+        at_i=state.aggregated.at_i,
+        vt_i=state.aggregated.vt_i,
+        ato_i=ato_i_adv,
+        wfx_res=wfx_res,
+        hfx_res=hfx_res,
+        sfx_res=sfx_res,
+        rDt_ice=rDt_ice,
+        sss_m=sss_val,
+        sst_m=sst_val,
+        nn_hls=nn_hls,
+        nn_icesal=cfg.nn_icesal,
+        rn_simin=cfg.rn_simin,
+        rn_sinew=cfg.rn_sinew,
+        rt0=consts.T0,
+        rhoi=consts.rho_ice,
+        rhos=consts.rho_snow,
+        rhow=canonical_constants.rho_water,
+    )
+
+    # 6. End-of-`ice_dyn` `lbc_lnk(..., ldfull = .TRUE.)` (`icedyn.f90:254-260`)
+    if not _plant_omit_subcycle_lbc:
+        def _t_pos(arr: Field) -> Field:
+            return si3_lbc_lnk_orca2(
+                arr, "T", _SI3_PRA_ONE, nn_hls=nn_hls, ldfull=True
+            )
+
+        a_i = _t_pos(a_i)
+        v_i = _t_pos(v_i)
+        v_s = _t_pos(v_s)
+        sv_i = _t_pos(sv_i)
+        oa_i = _t_pos(oa_i)
+        t_su = _t_pos(t_su)
+        if cfg.ln_pnd_LEV or cfg.ln_pnd_TOPO:
+            a_ip = _t_pos(a_ip)
+            v_ip = _t_pos(v_ip)
+            v_il = _t_pos(v_il)
+        e_i = _t_pos(e_i)
+        e_s = _t_pos(e_s)
+        szv_i = _t_pos(szv_i)
+
+    # `diag_trends(1)` (`icestp.f90:215, 545-599`)
+    rhoi_f = jnp.asarray(consts.rho_ice, dtype=dtype)
+    rhos_f = jnp.asarray(consts.rho_snow, dtype=dtype)
+    rhow_f = jnp.asarray(canonical_constants.rho_water, dtype=dtype)
+
+    dei_trend = fortran_sum_categories(
+        fortran_sum_categories(sr(e_i - e_i_b), axis=-1), axis=-1
+    )
+    des_trend = fortran_sum_categories(
+        fortran_sum_categories(sr(e_s - e_s_b), axis=-1), axis=-1
+    )
+    diag_heat = jnp.where(
+        interior_2d,
+        sr(sr(-sr(dei_trend * r1_Dt_ice)) - sr(des_trend * r1_Dt_ice)),
+        _SI3_PRA_ZERO,
+    )
+    dvi_trend = fortran_sum_categories(sr(v_i - v_i_b), axis=-1)
+    diag_vice = jnp.where(
+        interior_2d,
+        sr(sr(dvi_trend * r1_Dt_ice) * rhoi_f),
+        _SI3_PRA_ZERO,
+    )
+    dvs_trend = fortran_sum_categories(sr(v_s - v_s_b), axis=-1)
+    diag_vsnw = jnp.where(
+        interior_2d,
+        sr(sr(dvs_trend * r1_Dt_ice) * rhos_f),
+        _SI3_PRA_ZERO,
+    )
+    dpnd_diff = sr(sr(sr(v_ip + v_il) - v_ip_b) - v_il_b)
+    dpnd_trend = fortran_sum_categories(dpnd_diff, axis=-1)
+    diag_vpnd = jnp.where(
+        interior_2d,
+        sr(sr(dpnd_trend * r1_Dt_ice) * rhow_f),
+        _SI3_PRA_ZERO,
+    )
+    if cfg.nn_icesal == 4:
+        dsal_trend = fortran_sum_categories(
+            fortran_sum_categories(sr(szv_i - szv_i_b), axis=-1), axis=-1
+        )
+    else:
+        dsal_trend = fortran_sum_categories(sr(sv_i - sv_i_b), axis=-1)
+    diag_sice = jnp.where(
+        interior_2d,
+        sr(sr(dsal_trend * r1_Dt_ice) * rhoi_f),
+        _SI3_PRA_ZERO,
+    )
+    dai_trend = fortran_sum_categories(sr(a_i - a_i_b), axis=-1)
+    diag_aice = jnp.where(
+        interior_2d,
+        sr(dai_trend * r1_Dt_ice),
+        _SI3_PRA_ZERO,
+    )
+
+    eqv_dyn = state.equivalent._replace(
+        h_i=h_i_post,
+        h_s=h_s_post,
+        h_ip=h_ip_post,
+        h_il=h_il_post,
+        sz_i=sz_i_post,
+        t_i=t_i_post,
+        t_s=t_s_post,
+        a_i=a_i,
+        v_s=v_s,
+    )
+    agg_dyn = state.aggregated._replace(
+        at_i=at_i_post,
+        vt_i=vt_i_post,
+        ato_i=ato_i_dyn,
+    )
+    state_dyn = state._replace(
+        v_i=v_i,
+        v_s=v_s,
+        sv_i=sv_i,
+        a_i=a_i,
+        t_su=t_su,
+        u_ice=u_ice,
+        v_ice=v_ice,
+        oa_i=oa_i,
+        a_ip=a_ip,
+        v_ip=v_ip,
+        v_il=v_il,
+        e_s=e_s,
+        e_i=e_i,
+        szv_i=szv_i,
+        prather=prather,
+        equivalent=eqv_dyn,
+        aggregated=agg_dyn,
+    )
+    diagnostics = SI3AdvectionDiagnostics(
+        diag_adv_mass=diag_adv_mass,
+        diag_adv_salt=diag_adv_salt,
+        diag_adv_heat=diag_adv_heat,
+        wfx_res=wfx_res,
+        hfx_res=hfx_res,
+        sfx_res=sfx_res,
+        diag_trp_vi=diag_trp_vi,
+        diag_trp_vs=diag_trp_vs,
+        diag_trp_ei=diag_trp_ei,
+        diag_trp_es=diag_trp_es,
+        diag_trp_sv=diag_trp_sv,
+        diag_heat=diag_heat,
+        diag_sice=diag_sice,
+        diag_vice=diag_vice,
+        diag_vsnw=diag_vsnw,
+        diag_vpnd=diag_vpnd,
+        diag_aice=diag_aice,
+        ato_i_post_adv=ato_i_adv,
+        ato_i_post_dyn=ato_i_dyn,
+        zcfl=zcfl,
+        icycle=icycle,
+    )
+    return state_dyn, diagnostics
+
+
+def si3_o3_step(
+    state: SI3State,
+    grid: SI3ORCA2AdvectionGrid,
+    *,
+    kt: int = 1,
+    sss_m: Field | float | None = None,
+    sst_m: Field | float | None = None,
+    rn_uice: float | Field | None = None,
+    rn_vice: float | Field | None = None,
+    config: SI3ORCA2StateConfig | None = None,
+    subcycles: int | None = None,
+    apply_halos: bool = False,
+    _plant_invert_sweep_order: bool = False,
+    _plant_perturb_hbig_cap: bool = False,
+    _plant_omit_subcycle_lbc: bool = False,
+    _plant_omit_donor_readjust: bool = False,
+    _plant_corrupt_receiver_flux: bool = False,
+    _plant_wrong_nfd_sign: bool = False,
+    _plant_stop_gradient: bool = False,
+) -> tuple[SI3State, SI3AdvectionDiagnostics]:
+    """Execute one Rung O3 ORCA2 SI3 Prather advection step (`ln_icedyn = True`, `ln_icethd = False`).
+
+    Follows NEMO's exact statement order in `ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icestp.f90:181-272`:
+    1. `store_fields` (`:195, 429-467`) and `diag_set0` (`:208, 470-542`)
+    2. `CALL ice_dyn( kt, Kmm )` (`:211-212`, `icedyn.f90:126-265`,
+       `icedyn_adv.f90:78-179`, `icedyn_adv_pra.f90:70-510`)
+    3. `CALL diag_trends( 1 )` (`:215, 545-599`)
+    4. `CALL ice_var_glo2eqv(2)` (`:226, 254`)
+    5. `CALL ice_var_agg(2)` (`:227, 255`)
+    6. `CALL ice_update_flx(kt)` snow/ice mass update (`:257`, `iceupdate.f90:203-208`).
+    """
+    cfg = config if config is not None else SI3ORCA2StateConfig(ln_icedyn=True)
+    work = jax.lax.stop_gradient(state) if _plant_stop_gradient else state
+    if apply_halos:
+        work = si3_apply_state_halos_orca2(work, config=cfg)
+
+    # `diag_set0` (`icestp.f90:208, 529`): `t_si(A2D(0), 1:jpl) = rt0`
+    jpi, jpj, _ = work.v_i.shape
+    interior_3d = _interior_mask_2d(jpi, jpj, cfg.nn_hls)[:, :, None]
+    t_si_step = jnp.where(
+        interior_3d,
+        jnp.full_like(work.t_si, cfg.ice_constants.T0),
+        _SI3_PRA_ZERO,
+    )
+    work = work._replace(t_si=t_si_step)
+
+    # `CALL ice_dyn( kt, Kmm )` + `CALL diag_trends( 1 )`
+    work_dyn, diagnostics = si3_dyn_orca2(
+        work,
+        grid,
+        kt=kt,
+        sss_m=sss_m,
+        sst_m=sst_m,
+        rn_uice=rn_uice,
+        rn_vice=rn_vice,
+        config=cfg,
+        subcycles=subcycles,
+        _plant_invert_sweep_order=_plant_invert_sweep_order,
+        _plant_perturb_hbig_cap=_plant_perturb_hbig_cap,
+        _plant_omit_subcycle_lbc=_plant_omit_subcycle_lbc,
+        _plant_omit_donor_readjust=_plant_omit_donor_readjust,
+        _plant_corrupt_receiver_flux=_plant_corrupt_receiver_flux,
+        _plant_wrong_nfd_sign=_plant_wrong_nfd_sign,
+    )
+    if _plant_stop_gradient:
+        work_dyn = jax.lax.stop_gradient(work_dyn)
+
+    # `CALL ice_var_glo2eqv(2)` (`icestp.f90:226, 254`)
+    eqv = si3_var_glo2eqv(
+        v_i=work_dyn.v_i,
+        v_s=work_dyn.v_s,
+        sv_i=work_dyn.sv_i,
+        a_i=work_dyn.a_i,
+        oa_i=work_dyn.oa_i,
+        a_ip=work_dyn.a_ip,
+        v_ip=work_dyn.v_ip,
+        v_il=work_dyn.v_il,
+        e_s=work_dyn.e_s,
+        e_i=work_dyn.e_i,
+        szv_i=work_dyn.szv_i,
+        kn=2,
+        hi_max_top=work_dyn.bounds.hi_max[-1],
+        sss_m=sss_m,
+        config=cfg,
+    )
+    # `CALL ice_var_agg(2)` (`icestp.f90:227, 255`)
+    agg = si3_var_agg(
+        v_i=work_dyn.v_i,
+        v_s=eqv.v_s,
+        sv_i=work_dyn.sv_i,
+        a_i=eqv.a_i,
+        oa_i=work_dyn.oa_i,
+        a_ip=work_dyn.a_ip,
+        v_ip=work_dyn.v_ip,
+        v_il=work_dyn.v_il,
+        t_su=work_dyn.t_su,
+        t_si=work_dyn.t_si,
+        e_s=work_dyn.e_s,
+        e_i=work_dyn.e_i,
+        szv_i=work_dyn.szv_i,
+        a_ip_eff=eqv.a_ip_eff,
+        t_i=eqv.t_i,
+        t_s=eqv.t_s,
+        kn=2,
+        config=cfg,
+    )
+    # `CALL ice_update_flx(kt)` snow/ice mass update (`icestp.f90:257`, `iceupdate.f90:203-208`)
+    snwice_mass, snwice_mass_b, snwice_fmass = si3_update_snwice_mass(
+        vt_i=agg.vt_i,
+        vt_s=agg.vt_s,
+        vt_ip=agg.vt_ip,
+        vt_il=agg.vt_il,
+        snwice_mass_prev=work.snwice_mass,
+        tmask=grid.tmask,
+        config=cfg,
+        is_init=False,
+    )
+    out_state = work_dyn._replace(
+        a_i=eqv.a_i,
+        v_s=eqv.v_s,
+        snwice_mass=snwice_mass,
+        snwice_mass_b=snwice_mass_b,
+        snwice_fmass=snwice_fmass,
+        equivalent=eqv,
+        aggregated=agg,
+    )
+    return out_state, diagnostics
+
+
 __all__ = [
     "SI3ORCA2StateConfig",
     "SI3ORCA2Forcing",
+    "SI3ORCA2AdvectionGrid",
+    "SI3AdvectionDiagnostics",
     "SI3CategoryBounds",
     "SI3PratherMoments",
     "SI3AllPratherMoments",
@@ -2236,6 +3505,9 @@ __all__ = [
     "si3_lbc_lnk_orca2",
     "si3_apply_state_halos_orca2",
     "si3_o1_step",
+    "si3_dyn_adv_pra_orca2",
+    "si3_dyn_orca2",
+    "si3_o3_step",
     "si3_rst_to_netcdf_dict",
     "si3_rst_from_netcdf_dict",
     "write_si3_netcdf_restart",

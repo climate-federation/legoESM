@@ -2,7 +2,7 @@
 
 - **Campaign / Lane**: NEMO 5.0.2 SI3 Sea-Ice Ladder (`docs/ice/fidelity/si3_ladder_design.md`)
 - **Round**: `si3_r8` — Model Preparation for Rung O3 (`icedyn_adv_pra.F90` on ORCA2 `(184, 152)` across cyclic east-west seam and T-pivot north fold, without acquisition and without running NEMO)
-- **Parent Commit**: `042c7bd74c29713be111033b8685c30d9209f1f9` (`fidelity/nemo-testcases-si3-ladder`, Rung O1 + Rung D5 landed)
+- **Parent Commit**: `042c7bd74c2944dab8c39318687ab0cef54f9d2b` (`fidelity/nemo-testcases-si3-ladder`, Rung O1 + Rung D5 landed)
 - **Working Clone**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/si3_r8/repo`
 - **Evidence Root**: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round8`
 
@@ -15,7 +15,7 @@
 2. **Reuse O1's halo and north-fold implementation**:
    All lateral boundary conditions (`lbc_lnk` between/after subcycles and at the end of `ice_dyn`) MUST call O1's existing `si3_lbc_lnk_orca2` and `si3_apply_state_halos_orca2` in `packages/ice/legoesm/ice/si3_orca2_state.py` (`src/OCE/LBC/lbclnk.F90:31-425`, `src/OCE/LBC/lbc_nfd_generic.h90:57-350`), never re-implementing cyclic east-west halos or T-pivot north-fold reflections.
 3. **Reuse and preserve Lane-3 Prather kernels**:
-   Reuse the elemental Prather slope limiters, donor flux evaluations, and receiver cell moment merges in `packages/ice/legoesm/ice/transport.py` (`_si3_prather_limit_x`, `_si3_prather_limit_y`, `_si3_prather_merge_from_left`, `_si3_prather_merge_from_right`, `_si3_prather_merge_from_below`, `_si3_prather_merge_from_above`, `_si3_prather_x_substep`, `_si3_prather_y_substep`) while keeping `advect_si3_prather_1d`, `advect_si3_prather_2d`, `step_ice_adv1d_card`, `step_ice_adv2d_card`, `step_sea_ice`, and `si3_o1_step` 0-ULP bit-identical to parent `042c7bd74c29713be111033b8685c30d9209f1f9`.
+   Reuse the elemental Prather slope limiters, donor flux evaluations, and receiver cell moment merges in `packages/ice/legoesm/ice/transport.py` (`_si3_prather_limit_x`, `_si3_prather_limit_y`, `_si3_prather_merge_from_left`, `_si3_prather_merge_from_right`, `_si3_prather_merge_from_below`, `_si3_prather_merge_from_above`, `_si3_prather_x_substep`, `_si3_prather_y_substep`) while keeping `advect_si3_prather_1d`, `advect_si3_prather_2d`, `step_ice_adv1d_card`, `step_ice_adv2d_card`, `step_sea_ice`, and `si3_o1_step` 0-ULP bit-identical to parent `042c7bd74c2944dab8c39318687ab0cef54f9d2b`.
 4. **Parallel round boundary (`si3_r7`)**:
    Do NOT touch O1/O2 acquisition tools (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/`), `iceistate` code, or the initial-state path.
 5. **No NEMO execution and no acquisition**:
@@ -80,7 +80,7 @@ Every statement transcribed in `si3_r8` is pinned to the clean uninstrumented `O
 ### Test (b): Lane-3 `ICE_ADV1D` / `ICE_ADV2D` Invariance and Real Parent-vs-Current (`042c7bd74c29`) Control
 - **Prediction**:
   1. All existing Lane-3 `ICE_ADV1D` and `ICE_ADV2D` gate tests (`tests/ice/fidelity/test_nemo_si3_phase2_gate.py`, `tests/ice/fidelity/test_nemo_si3_phase2_adv2d_gate.py`, `tests/ice/fidelity/test_nemo_si3_oracle_gate.py`) and O1/D5 gates (`tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py`, `tests/ocean/fidelity/test_nemo_si3_d5_c1d_pnd_gate.py`) pass unchanged at `0` ULP.
-  2. Loading `packages/ice/legoesm/ice/*` from parent commit `042c7bd74c29713be111033b8685c30d9209f1f9` via `git show` and comparing against the current workspace across `advect_si3_prather_1d`, `advect_si3_prather_2d`, `step_ice_adv1d_card`, `step_ice_adv2d_card`, `step_sea_ice` (`slab`, `dynamic-v2`, `si3_bl99`), and `si3_o1_step` yields `0` ULP across every output leaf.
+  2. Loading `packages/ice/legoesm/ice/*` from parent commit `042c7bd74c2944dab8c39318687ab0cef54f9d2b` via `git show` and comparing against the current workspace across `advect_si3_prather_1d`, `advect_si3_prather_2d`, `step_ice_adv1d_card`, `step_ice_adv2d_card`, `step_sea_ice` (`slab`, `dynamic-v2`, `si3_bl99`), and `si3_o1_step` yields `0` ULP across every output leaf.
 - **Plants**:
   - `Plant O3-B1`: Perturbing `advect_si3_prather_2d` or `step_ice_adv2d_card` by `1` ULP (`jnp.nextafter(..., jnp.inf)`) fails the parent-vs-current control with `max ULP = 1 != 0`.
   - `Plant O3-B2`: Perturbing `step_sea_ice` (`_si3_step_with_trace`) by `1` ULP fails the production dispatcher control with `max ULP = 1 != 0`.

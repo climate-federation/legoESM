@@ -223,6 +223,43 @@ from legoesm.ice.si3_orca2_state import (  # noqa: E402
     si3_var_snwfra_3d,
     write_si3_netcdf_restart,
 )
+from legoesm.ice.config import build_si3_orca2_o3_config  # noqa: E402
+from legoesm.ice.si3_orca2_state import (  # noqa: E402
+    SI3AdvectionDiagnostics,
+    SI3ORCA2AdvectionGrid,
+    si3_dyn_adv_pra_orca2,
+    si3_dyn_orca2,
+    si3_o3_step,
+)
+from legoesm.ice.transport import (  # noqa: E402
+    si3_adv_x,
+    si3_adv_y,
+    si3_hbig_pra,
+    si3_hsnow_pra,
+    si3_icemax2d_pra,
+    si3_icemax3d_pra,
+    si3_var_zapneg,
+    si3_var_zapsmall,
+)
+
+__all__.extend(
+    (
+        "build_si3_orca2_o3_config",
+        "SI3ORCA2AdvectionGrid",
+        "SI3AdvectionDiagnostics",
+        "si3_adv_x",
+        "si3_adv_y",
+        "si3_icemax2d_pra",
+        "si3_icemax3d_pra",
+        "si3_hbig_pra",
+        "si3_hsnow_pra",
+        "si3_var_zapneg",
+        "si3_var_zapsmall",
+        "si3_dyn_adv_pra_orca2",
+        "si3_dyn_orca2",
+        "si3_o3_step",
+    )
+)
 
 from legoesm.ice.config import build_si3_orca2_o2_config  # noqa: E402
 from legoesm.ice.si3_orca2_state import (  # noqa: E402

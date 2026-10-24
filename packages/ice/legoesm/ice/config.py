@@ -312,7 +312,7 @@ def validate_si3_thermo_config(config: "SeaIceConfig") -> None:
     """Reject unsupported SI3 selector mixtures before any tendency runs."""
 
     if config.thermo_scheme != "si3_bl99":
-        return _validate_si3_orca2_o1_config(config)
+        return _validate_si3_orca2_o1_config(config) or _validate_si3_orca2_o3_config(config)
     wanted = SI3ThermoConfig(lateral_melt=config.si3.lateral_melt, namthd_da=config.si3.namthd_da)
     if config.si3 != wanted:
         raise ValueError(
@@ -599,3 +599,54 @@ class SI3LateralMeltConfig(NamedTuple):
 
     rn_beta: float
     rn_dmin: float
+
+
+def _validate_si3_orca2_o3_config(config: "SeaIceConfig") -> None:
+    """Validate rung-O3 ORCA2 SI3 Prather advection configuration (`thermo_scheme='si3_orca2_o3'`)."""
+    if config.thermo_scheme != "si3_orca2_o3":
+        return
+    orca2_cfg = (
+        config.si3_orca2
+        if config.si3_orca2 is not None
+        else SI3ORCA2StateConfig(ln_icedyn=True, ln_icethd=False, ln_dynadv_pra=True)
+    )
+    if not isinstance(orca2_cfg, SI3ORCA2StateConfig):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o3' requires config.si3_orca2 to be "
+            "SI3ORCA2StateConfig or None"
+        )
+    if (
+        config.ice_constants != NEMO_SI3_CONSTANTS_CONFIG
+        or orca2_cfg.ice_constants != NEMO_SI3_CONSTANTS_CONFIG
+    ):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o3' requires the NEMO 5.0.2 phycst/EOS "
+            "constant set on both SeaIceConfig.ice_constants and "
+            "SI3ORCA2StateConfig.ice_constants"
+        )
+    conflicts = []
+    if not orca2_cfg.ln_icedyn or not orca2_cfg.ln_dynadv_pra or orca2_cfg.ln_icethd:
+        conflicts.append(
+            "ln_icedyn and ln_dynadv_pra must be True and ln_icethd must be False at rung O3 "
+            "(icestp.f90:211,235; icedyn_adv.f90:124-129)"
+        )
+    if config.dynamics != "none" or config.transport != "none":
+        conflicts.append("native dynamics and transport must both be 'none' at rung O3")
+    if conflicts:
+        raise ValueError("invalid SI3 ORCA2 O3 identity: " + "; ".join(conflicts))
+
+
+def build_si3_orca2_o3_config(
+    si3_orca2: SI3ORCA2StateConfig | None = None,
+) -> SeaIceConfig:
+    """Return the rung-O3 ORCA2 SI3 Prather advection `SeaIceConfig`."""
+    cfg = (
+        si3_orca2
+        if si3_orca2 is not None
+        else SI3ORCA2StateConfig(ln_icedyn=True, ln_icethd=False, ln_dynadv_pra=True)
+    )
+    return SeaIceConfig(
+        thermo_scheme="si3_orca2_o3",
+        ice_constants=cfg.ice_constants,
+        si3_orca2=cfg,
+    )
