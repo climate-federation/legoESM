@@ -125,8 +125,10 @@ SHA-256 `88044d158531b30f3257c8dd48601c79cec166caa3bf4dc17f574543b2618e18`.
 - Decision 122/139: seven censuses and aggregate decision pass; exact-loss
   plant fired.
 - Focused TKE bottom-boundary class: 11 passed; old-clamp plant failed.
-- Required receipt citation gate: PENDING FINAL COMMIT.
-- Default landing battery and private-import ratchet: PENDING FINAL COMMIT.
+- Required receipt citation gate: PASS, 8 citations, 0 unmapped, 0 failures,
+  0 map-audit failures; its full pytest gate is 17 passed.
+- Default ORCA2 landing battery: 147 passed in 952.64 s, including all 6
+  private-import ratchet tests.
 
 independent review: operator (Claude)
 
