@@ -1789,12 +1789,12 @@ FILES = {
 CITATION_MAP = {
     # ORCA2 round 332: first non-bit EEN add and residual TKE source order.
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynvor.f90:796-802': [
-        'DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)',
+        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 4),
         'pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zva', 7],
     'ocean_pe_latlon_cgrid.py:3049':
         'dv_dt = dv_dt + diag_vortcor_v',
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:708-719': [
-        'DO jk =  1,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)',
+        ('DO jk =  1,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)', 2),
         'p_avt(ji,jj,jk)   = MAX( p_pdlr(ji,jj,jk) * p_avt(ji,jj,jk), avtb_2d(ji,jj) * avtb(jk) ) * wmask(ji,jj,jk)', 12],
     'tke.py:2262-2287': [
         'kappa_convention = getattr(cfg, "kappa_convention", "gaspar_sqrt2e")',
