@@ -269,9 +269,13 @@ FILES = {
         REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py"),
     "tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py": (
         REPO / "tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py"),
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/namelist_cfg": (
+        REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/namelist_cfg"),
     "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_nemo_restart_fixture.F90": (
         REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_nemo_restart_fixture.F90"),
     "src/OCE/IOM/iom.F90": NEMO / "src/OCE/IOM/iom.F90",
+    "src/OCE/SBC/sbcmod.F90": NEMO / "src/OCE/SBC/sbcmod.F90",
+    "src/OCE/DOM/daymod.F90": NEMO / "src/OCE/DOM/daymod.F90",
     "scripts/validate/ocean_fidelity/testcases/nemo_testcase_g1_orca2grid/run.sh": (
         REPO / "scripts/validate/ocean_fidelity/testcases/nemo_testcase_g1_orca2grid/run.sh"),
     "scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_orca2_tke_boundary_acquisition/run.sh": (
@@ -9119,30 +9123,115 @@ CITATION_MAP = {
         '"heat/freshwater/salt TileResponse contract is implemented"',
         21,
     ],
-    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:195-208": [
-        "render_rst_namelists() {",
-        "sed -E -i 's|^(&namini.*)|\\1\\n   nn_iceini_file   = 2|' \"$dst_ice\"",
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_si3_state_writer.F90:94-97": [
+        "IF( TRIM(cd_stage) == 'entry' ) THEN",
+        "WRITE(cl_fname, '(\"o1_si3_records/o1_si3_state_step\", I4.4, \"_rank\", I4.4, \".bin\")') kt, mpprank",
+        4,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1759-1824": [
+        "# 5. Score rst_1step (Item 5 & Item 6): NetCDF restart read + 1-step trajectory vs rec_2step step 2",
+        'rst_sss_step2 = jnp.asarray(rst_snap_step2["fields"]["sss_m"], dtype=jnp.float64)',
+        66,
+    ],
+    "tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:1231-1252": [
+        "# Write rst_1step binary records and restart",
+        'ev / "rst_1step/o1_si3_records/o1_si3_state_step0002_rank0000.bin",',
+        22,
+    ],
+    "src/OCE/SBC/sbcmod.F90:397-403": [
+        "! most of the following routines update fields only in the interior",
+        "IF( .NOT.ll_sas )   CALL sbc_ssm ( kt, Kbb, Kmm )",
+        7,
+    ],
+    "src/OCE/SBC/sbcmod.F90:474-477": [
+        ("SELECT CASE( nn_ice )", 2),
+        "CASE(  2 )   ;         CALL ice_stp  ( kt, Kbb, Kmm, nsbc )",
+        4,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1729-1742": [
+        "state_entry, cfg = o1_snapshot_to_si3_state(snap_entry)",
+        "state_kt2 = si3_o1_step(state_kt1, tmask=tmask, sss_m=sss_step2, config=cfg)",
         14,
     ],
-    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:373-401": [
-        ('if deck_kind == "rst_1step":', 2),
-        ('raise SystemExit(f"STATUS PLANT-FIRED: rst_1step requires {key}={expected!r}")', 2),
-        29,
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1811-1833": [
+        "rst_snap_entry = stitch_o1_binary_snapshots(",
+        "lego_rst_step2 = si3_o1_step(lego_rst_entry, tmask=tmask, sss_m=rst_sss_step2, config=cfg)",
+        23,
     ],
-    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:447-481": [
-        "def wet_mask_for_field(",
-        "return mask",
-        35,
+    "tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:1112-1122": [
+        "# Make one wet category ice-free so the synthetic kt=2 salinity change is",
+        "state2 = si3_o1_step(state1, tmask=tmask, sss_m=sss_step2, config=cfg)",
+        11,
     ],
-    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1566-1616": [
-        "def admit_evidence_directory(",
-        'f"STATUS PLANT-FIRED: producer commit {recorded_commit} != expected {expect_commit.strip()}"',
-        51,
+    "tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:1301-1325": [
+        "adm = gate.admit_evidence_directory(ev, expect_commit=commit_hex)",
+        "gate.admit_evidence_directory(ev, plant=plant_name, expect_commit=commit_hex)",
+        25,
     ],
-    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1619-1650": [
-        "same_prog_path = manifest_dir / \"same_program.json\"",
-        '"STATUS PLANT-FIRED: binaries.sha256 is not the two same-program nemo.exe files"',
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1261-1357": [
+        "def _compare_si3_states_wet_and_full(",
+        ('f"full_ULP={ulp_f}, wet_norm={norm_w:.3e}"', 3),
+        97,
+    ],
+    "tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:822-879": [
+        "def test_o1_scorer_includes_defined_seam_and_fold_halos_only() -> None:",
+        "equivalent=state.equivalent._replace(a_ip_frac=jnp.asarray(a_ip_frac_changed))",
+        58,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:1055-1061": [
+        "prove_real_same_program() {",
+        "printf 'REFUSE: real reference/instrumented same-program comparison failed before NEMO launch\\n' >&2",
+        7,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:1204-1212": [
+        ('build_target "$TARGET_REF_CFG" 0', 2),
+        ('stage_and_run "$TARGET_REC_CFG" "$EVIDENCE/rst_1step" 1', 2),
+        9,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:199-230": [
+        "check_operator_run_order() {",
+        '"proof must precede every NEMO launch"',
         32,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:905-913": [
+        "# The operator path builds both real executables, proves they are the same",
+        'grep -F "STATUS PLANT-FIRED" "$scratch/run_order_plant.log" >/dev/null',
+        9,
+    ],
+    "src/OCE/DOM/daymod.F90:276-277": [
+        "IF( .NOT. l_offline ) CALL rst_opn( kt )",
+        "IF( lrst_oce         ) CALL day_rst( kt, 'WRITE' )",
+        2,
+    ],
+    "src/OCE/IOM/restart.F90:81-145": [
+        "IF( kt == nit000 ) THEN   ! default definitions",
+        "lrst_oce = .TRUE.",
+        65,
+    ],
+    "src/OCE/SBC/sbcssm.F90:177-191": [
+        "IF( lrst_oce ) THEN",
+        "CALL iom_rstput( kt, nitrst, numrow, 'frq_m'  , frq_m  )",
+        15,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/namelist_cfg:21-24": [
+        "nn_it000    =       1",
+        "nn_write    =      -1",
+        4,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:180-194": [
+        "require_rec_2step_restarts() {",
+        '"$ocean_restart" >&2',
+        15,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:915-926": [
+        "# rec_2step must produce both files consumed by rst_1step.  In particular,",
+        ('require_rec_2step_restarts "$scratch/restart_dependency"', 2),
+        12,
+    ],
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:1173-1181": [
+        'if [[ "$is_rst_run" -eq 1 ]]; then',
+        '"$run_dir/input_restart/ORCA2_SAS_00000001_restart.nc"',
+        9,
     ],
 }
 

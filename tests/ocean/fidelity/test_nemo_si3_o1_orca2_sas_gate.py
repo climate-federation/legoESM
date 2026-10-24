@@ -295,9 +295,7 @@ def test_o1_parent_vs_current_non_si3_and_lane3_callers_bit_identical(monkeypatc
         new_st, resp = si_module.step_sea_ice(
             col_state, frc_in, sst, zero_vel, zero_vel, card.config, 0.1, 3600.0
         )
-        _, _, trace = si_module._si3_step_with_trace(
-            col_state, frc_in, card.config, 3600.0
-        )
+        _, _, trace = si_module._si3_step_with_trace(col_state, frc_in, card.config, 3600.0)
         return new_st, resp, trace
 
     p_l3_st, p_l3_resp, p_l3_trace = _run_si3_production_dispatch(
@@ -347,9 +345,7 @@ def test_o1_parent_vs_current_non_si3_and_lane3_callers_bit_identical(monkeypatc
     h_new = jnp.array([0.32, 0.95, 1.85, 3.00, 4.45], dtype=jnp.float64)
     a_new = jnp.array([0.18, 0.31, 0.26, 0.10, 0.05], dtype=jnp.float64)
     t_new = jnp.full(5, t0 - 6.0, dtype=jnp.float64)
-    p_itd = parent_mods["legoesm.ice.itd"].linear_remap(
-        h_old, a_old, h_new, a_new, 5, T_new=t_new
-    )
+    p_itd = parent_mods["legoesm.ice.itd"].linear_remap(h_old, a_old, h_new, a_new, 5, T_new=t_new)
     c_itd = linear_remap(h_old, a_old, h_new, a_new, 5, T_new=t_new)
     for idx, (pa, ca) in enumerate(zip(p_itd, c_itd)):
         _assert_zero_ulp(pa, ca, f"linear_remap[{idx}]")
@@ -372,15 +368,11 @@ def test_o1_parent_vs_current_non_si3_and_lane3_callers_bit_identical(monkeypatc
 
     def _planted_si3_dispatcher(state, forcing, config, dt):
         new_st, resp, trace = orig_si3_trace(state, forcing, config, dt)
-        perturbed_e_ice = new_st.e_ice.replace(
-            data=jnp.nextafter(new_st.e_ice.data, jnp.inf)
-        )
+        perturbed_e_ice = new_st.e_ice.replace(data=jnp.nextafter(new_st.e_ice.data, jnp.inf))
         perturbed_resp = resp._replace(lhflx=jnp.nextafter(resp.lhflx, jnp.inf))
         return new_st._replace(e_ice=perturbed_e_ice), perturbed_resp, trace
 
-    monkeypatch.setattr(
-        sea_ice_mod, "_si3_step_with_trace", _planted_si3_dispatcher
-    )
+    monkeypatch.setattr(sea_ice_mod, "_si3_step_with_trace", _planted_si3_dispatcher)
     with pytest.raises(AssertionError, match="max ULP = 1 != 0"):
         planted_st, planted_resp, _ = _run_si3_production_dispatch(
             sea_ice_mod, state_mod, bl_mod, c1d_mod
@@ -453,9 +445,7 @@ def test_o1_lane3_column_state_bridge_roundtrip() -> None:
         concentration=jnp.array([[0.50, 0.75], [0.25, 0.0]], dtype=jnp.float64),
         h_ice=jnp.array([[1.50, 2.00], [1.00, 0.0]], dtype=jnp.float64),
         h_snow=jnp.array([[0.125, 0.25], [0.50, 0.0]], dtype=jnp.float64),
-        T_surface=jnp.array(
-            [[t0 - 8.0, t0 - 11.0], [t0 - 5.0, t0]], dtype=jnp.float64
-        ),
+        T_surface=jnp.array([[t0 - 8.0, t0 - 11.0], [t0 - 5.0, t0]], dtype=jnp.float64),
         e_ice=jnp.full((2, 2, 3), 2.85e8, dtype=jnp.float64),
         e_snow=jnp.full((2, 2, 3), 1.10e8, dtype=jnp.float64),
         S_bulk=jnp.array([[4.5, 5.0], [4.0, 0.0]], dtype=jnp.float64),
@@ -613,15 +603,11 @@ def test_o1_jit_grad_jvp_and_stop_gradient_plant() -> None:
     primal_jvp, jvp_val = jax.jvp(_loss_fn, (state0,), (tangent_state,))
     _assert_zero_ulp(loss_eager, primal_jvp, "loss_eager_vs_jvp")
     vjp_val = jnp.sum(grad_st.v_i * tangent_v_i)
-    rel_err = float(
-        jnp.abs(jvp_val - vjp_val) / jnp.maximum(jnp.abs(vjp_val), 1.0e-30)
-    )
+    rel_err = float(jnp.abs(jvp_val - vjp_val) / jnp.maximum(jnp.abs(vjp_val), 1.0e-30))
     assert rel_err < 1.0e-11, f"JVP vs VJP relative error {rel_err:.3e} >= 1e-11"
 
     # Plant P6: stop_gradient must zero the gradient
-    _, grad_planted = jax.value_and_grad(lambda st: _loss_fn(st, plant_stop=True))(
-        state0
-    )
+    _, grad_planted = jax.value_and_grad(lambda st: _loss_fn(st, plant_stop=True))(state0)
     assert float(jnp.linalg.norm(grad_planted.v_i)) == 0.0
 
 
@@ -698,9 +684,7 @@ def test_o1_restart_reader_nemo_parity_t_si_reset_layer_refusal_and_r1_nlay_i() 
 
     # (2a) diag_set0 resets t_si = rt0 on A2D(0) each step even if perturbed before step
     perturbed_t_si = jnp.full_like(state0.t_si, 250.0)
-    state_stepped = si3_o1_step(
-        state0._replace(t_si=perturbed_t_si), tmask=tmask, config=cfg
-    )
+    state_stepped = si3_o1_step(state0._replace(t_si=perturbed_t_si), tmask=tmask, config=cfg)
     h = cfg.nn_hls
     _assert_zero_ulp(
         state_stepped.t_si[h:-h, h:-h, :],
@@ -760,7 +744,10 @@ def test_o1_restart_reader_nemo_parity_t_si_reset_layer_refusal_and_r1_nlay_i() 
     )
     expected_szv = np.full(
         (184, 152, cfg.nlay_i, cfg.jpl),
-        float(nemo_source_round(jnp.asarray(sv_probe)) * nemo_source_round(jnp.asarray(1.0 / float(cfg.nlay_i)))),
+        float(
+            nemo_source_round(jnp.asarray(sv_probe))
+            * nemo_source_round(jnp.asarray(1.0 / float(cfg.nlay_i)))
+        ),
         dtype=np.float64,
     )
     _assert_zero_ulp(reloaded_sal.szv_i, expected_szv, "szv_i_r1_nlay_i_mul")
@@ -841,17 +828,59 @@ def test_o1_scorer_includes_defined_seam_and_fold_halos_only() -> None:
         changed[i, j, 0] = np.nextafter(changed[i, j, 0], np.inf)
         with pytest.raises(ValueError, match="v_i"):
             gate._compare_si3_states_wet_and_full(
-                state, state._replace(v_i=jnp.asarray(changed)),
-                tmask, umask, vmask,
+                state,
+                state._replace(v_i=jnp.asarray(changed)),
+                tmask,
+                umask,
+                vmask,
             )
 
-    # diag_set0 and the equivalent/aggregate DO_2D loops leave their halos
-    # undefined, so those are the only wet halo values deliberately excluded.
+    for i, j in ((0, 20), (20, 151)):
+        h_i_changed = np.asarray(state.equivalent.h_i).copy()
+        h_i_changed[i, j, 0] = np.nextafter(h_i_changed[i, j, 0], np.inf)
+        with pytest.raises(ValueError, match="equivalent field h_i"):
+            gate._compare_si3_states_wet_and_full(
+                state,
+                state._replace(equivalent=state.equivalent._replace(h_i=jnp.asarray(h_i_changed))),
+                tmask,
+                umask,
+                vmask,
+            )
+
+        at_i_changed = np.asarray(state.aggregated.at_i).copy()
+        at_i_changed[i, j] = np.nextafter(at_i_changed[i, j], np.inf)
+        with pytest.raises(ValueError, match="aggregated field at_i"):
+            gate._compare_si3_states_wet_and_full(
+                state,
+                state._replace(
+                    aggregated=state.aggregated._replace(at_i=jnp.asarray(at_i_changed))
+                ),
+                tmask,
+                umask,
+                vmask,
+            )
+
+    # diag_set0 and reduced A2D(0) equivalent/aggregate loops do not compute
+    # their halo ring, so only those specific wet halo values are excluded.
     t_si_changed = np.asarray(state.t_si).copy()
     t_si_changed[0, 20, 0] = 999.0
     gate._compare_si3_states_wet_and_full(
-        state, state._replace(t_si=jnp.asarray(t_si_changed)),
-        tmask, umask, vmask,
+        state,
+        state._replace(t_si=jnp.asarray(t_si_changed)),
+        tmask,
+        umask,
+        vmask,
+    )
+    a_ip_frac_changed = np.asarray(state.equivalent.a_ip_frac).copy()
+    a_ip_frac_changed[0, 20, 0] = 999.0
+    gate._compare_si3_states_wet_and_full(
+        state,
+        state._replace(
+            equivalent=state.equivalent._replace(a_ip_frac=jnp.asarray(a_ip_frac_changed))
+        ),
+        tmask,
+        umask,
+        vmask,
     )
 
 
@@ -870,10 +899,30 @@ def test_o1_same_program_and_objects_equal_plants(tmp_path: Path) -> None:
         if l.startswith("+") and not l.startswith("+++")
     ]
 
-    ref_pra = ["MODULE icedyn_adv_pra", "   PUBLIC ice_dyn_adv_pra", "   PUBLIC adv_pra_init", "END MODULE"]
+    ref_pra = [
+        "MODULE icedyn_adv_pra",
+        "   PUBLIC ice_dyn_adv_pra",
+        "   PUBLIC adv_pra_init",
+        "END MODULE",
+    ]
     new_pra = ref_pra[:3] + pra_add + ref_pra[3:]
-    ref_stp = ["MODULE icestp", "   USE prtctl", "   CALL ice_wri( kt )", "   IF( ierr /= 0 ) STOP", "END MODULE"]
-    new_stp = [ref_stp[0], ref_stp[1], stp_add[0], ref_stp[2], stp_add[1], ref_stp[3], stp_add[2], ref_stp[4]]
+    ref_stp = [
+        "MODULE icestp",
+        "   USE prtctl",
+        "   CALL ice_wri( kt )",
+        "   IF( ierr /= 0 ) STOP",
+        "END MODULE",
+    ]
+    new_stp = [
+        ref_stp[0],
+        ref_stp[1],
+        stp_add[0],
+        ref_stp[2],
+        stp_add[1],
+        ref_stp[3],
+        stp_add[2],
+        ref_stp[4],
+    ]
 
     def _make_pair(base: Path) -> tuple[Path, Path]:
         ref = base / "ORCA2_SAS_ICE_O1_REF/BLD"
@@ -893,7 +942,9 @@ def test_o1_same_program_and_objects_equal_plants(tmp_path: Path) -> None:
             (bld / "obj/icedyn_adv_pra.o").write_bytes(b"\x7fELF pra" + bytes([is_rec]))
             (bld / "obj/icestp.o").write_bytes(b"\x7fELF stp" + bytes([is_rec]))
             if is_rec:
-                (bld / "ppsrc/nemo/o1_si3_state_writer.f90").write_text("MODULE o1_si3_state_writer\n")
+                (bld / "ppsrc/nemo/o1_si3_state_writer.f90").write_text(
+                    "MODULE o1_si3_state_writer\n"
+                )
                 (bld / "obj/o1_si3_state_writer.o").write_bytes(b"\x7fELF writer")
         return ref, new
 
@@ -903,11 +954,29 @@ def test_o1_same_program_and_objects_equal_plants(tmp_path: Path) -> None:
 
     for idx, (plant, mutate) in enumerate(
         (
-            ("other-source", lambda _r, n: (n / "ppsrc/nemo/icevar.f90").write_text("hm_i = 2.0 * vt_i\n")),
+            (
+                "other-source",
+                lambda _r, n: (n / "ppsrc/nemo/icevar.f90").write_text("hm_i = 2.0 * vt_i\n"),
+            ),
             ("other-object", lambda _r, n: (n / "obj/icevar.o").write_bytes(b"\x7fELF icevar_bad")),
-            ("flags", lambda _r, n: (n / "arch_nemo.fcm").write_text("dir::root /cfgs/ORCA2_SAS_ICE_O1_REC/BLD\n%FCFLAGS -O2\n")),
-            ("observer-edit", lambda _r, n: (n / "ppsrc/nemo/icestp.f90").write_text("\n".join(new_stp).replace("ice_wri( kt )", "ice_wri( 0 )") + "\n")),
-            ("observer-extra", lambda _r, n: (n / "ppsrc/nemo/icestp.f90").write_text("\n".join(new_stp + ["   x = 1"]) + "\n")),
+            (
+                "flags",
+                lambda _r, n: (n / "arch_nemo.fcm").write_text(
+                    "dir::root /cfgs/ORCA2_SAS_ICE_O1_REC/BLD\n%FCFLAGS -O2\n"
+                ),
+            ),
+            (
+                "observer-edit",
+                lambda _r, n: (n / "ppsrc/nemo/icestp.f90").write_text(
+                    "\n".join(new_stp).replace("ice_wri( kt )", "ice_wri( 0 )") + "\n"
+                ),
+            ),
+            (
+                "observer-extra",
+                lambda _r, n: (n / "ppsrc/nemo/icestp.f90").write_text(
+                    "\n".join(new_stp + ["   x = 1"]) + "\n"
+                ),
+            ),
             ("extra-unit", lambda _r, n: (n / "ppsrc/nemo/extra.f90").write_text("MODULE extra\n")),
             ("missing-unit", lambda _r, n: (n / "obj/icevar.o").unlink()),
         )
@@ -1038,16 +1107,29 @@ def test_o1_admit_evidence_directory_scores_rst_1step_and_refuses_all_plants(
     cfg = SI3ORCA2StateConfig.for_orca2_sas_ice()
     state0_raw, tmask, umask, vmask = gate.build_synthetic_orca2_o1_state(cfg)
     # In O1 with ln_icedyn=False, adv_pra_init zeroes the Prather moments in memory.
-    z_pra = SI3AllPratherMoments.zeros(
-        184, 152, jpl=cfg.jpl, nlay_i=cfg.nlay_i, nlay_s=cfg.nlay_s
-    )
+    z_pra = SI3AllPratherMoments.zeros(184, 152, jpl=cfg.jpl, nlay_i=cfg.nlay_i, nlay_s=cfg.nlay_s)
     state0 = state0_raw._replace(prather=z_pra)
-    sss = jnp.full((184, 152), 34.2, dtype=jnp.float64)
-    state1 = si3_o1_step(state0, tmask=tmask, sss_m=sss, config=cfg)
-    state2 = si3_o1_step(state1, tmask=tmask, sss_m=sss, config=cfg)
+    # Make one wet category ice-free so the synthetic kt=2 salinity change is
+    # observable in s_i/sz_i; substituting kt=1 salinity must then fail.
+    v_i0 = np.asarray(state0.v_i).copy()
+    v_i0[10, 10, 0] = 0.0
+    state0 = state0._replace(v_i=jnp.asarray(v_i0))
+    sss_step1 = jnp.full((184, 152), 34.2, dtype=jnp.float64)
+    sss_step2_np = np.full((184, 152), 33.1, dtype=np.float64)
+    sss_step2_np[10, 10] = 0.05
+    sss_step2 = jnp.asarray(sss_step2_np)
+    state1 = si3_o1_step(state0, tmask=tmask, sss_m=sss_step1, config=cfg)
+    state2 = si3_o1_step(state1, tmask=tmask, sss_m=sss_step2, config=cfg)
 
     ev = tmp_path / "evidence"
-    for sub in ("manifest", "ref_2step/o1_si3_records", "rec_2step/o1_si3_records", "rst_1step/o1_si3_records", "rst_1step/input_restart", "rst_1step/output_restart"):
+    for sub in (
+        "manifest",
+        "ref_2step/o1_si3_records",
+        "rec_2step/o1_si3_records",
+        "rst_1step/o1_si3_records",
+        "rst_1step/input_restart",
+        "rst_1step/output_restart",
+    ):
         (ev / sub).mkdir(parents=True, exist_ok=True)
 
     o1_log = """AAAAAAAA
@@ -1081,8 +1163,12 @@ AAAAAAAA
         (rdir / "RUN_PRODUCER_COMMIT").write_text(commit_hex + "\n", encoding="utf-8")
 
     # Write NetCDF restarts for step 1 and step 2
-    write_si3_netcdf_restart(ev / "rec_2step/ORCA2_SAS_00000001_restart_ice.nc", state1, kt=1, config=cfg)
-    write_si3_netcdf_restart(ev / "rec_2step/ORCA2_SAS_00000002_restart_ice.nc", state2, kt=2, config=cfg)
+    write_si3_netcdf_restart(
+        ev / "rec_2step/ORCA2_SAS_00000001_restart_ice.nc", state1, kt=1, config=cfg
+    )
+    write_si3_netcdf_restart(
+        ev / "rec_2step/ORCA2_SAS_00000002_restart_ice.nc", state2, kt=2, config=cfg
+    )
     shutil.copy2(
         ev / "rec_2step/ORCA2_SAS_00000001_restart_ice.nc",
         ev / "ref_2step/ORCA2_SAS_00000001_restart_ice.nc",
@@ -1102,11 +1188,11 @@ AAAAAAAA
     )
 
     # Write rec_2step binary records
-    tmask_np, umask_np, vmask_np, sss_np = (
+    tmask_np, umask_np, vmask_np, sss_step1_np = (
         np.asarray(tmask),
         np.asarray(umask),
         np.asarray(vmask),
-        np.asarray(sss),
+        np.asarray(sss_step1),
     )
     _write_o1_binary_snapshot(
         ev / "rec_2step/o1_si3_records/o1_si3_state_entry_rank0000.bin",
@@ -1114,7 +1200,7 @@ AAAAAAAA
         tmask_np,
         umask_np,
         vmask_np,
-        sss_np,
+        sss_step1_np,
         kt=0,
         lrst_ice=0,
         cfg=cfg,
@@ -1125,7 +1211,7 @@ AAAAAAAA
         tmask_np,
         umask_np,
         vmask_np,
-        sss_np,
+        sss_step1_np,
         kt=1,
         lrst_ice=1,
         cfg=cfg,
@@ -1136,7 +1222,7 @@ AAAAAAAA
         tmask_np,
         umask_np,
         vmask_np,
-        sss_np,
+        sss_step2_np,
         kt=2,
         lrst_ice=1,
         cfg=cfg,
@@ -1146,36 +1232,36 @@ AAAAAAAA
     rst_entry = read_si3_netcdf_restart(
         ev / "rec_2step/ORCA2_SAS_00000001_restart_ice.nc",
         tmask=tmask,
-        sss_m=sss,
+        sss_m=sss_step2,
         config=cfg,
         ln_rstart=True,
     )
-    rst_step1 = si3_o1_step(rst_entry, tmask=tmask, sss_m=sss, config=cfg)
+    rst_step2 = si3_o1_step(rst_entry, tmask=tmask, sss_m=sss_step2, config=cfg)
     _write_o1_binary_snapshot(
         ev / "rst_1step/o1_si3_records/o1_si3_state_entry_rank0000.bin",
         rst_entry,
         tmask_np,
         umask_np,
         vmask_np,
-        sss_np,
+        sss_step2_np,
         kt=0,
         lrst_ice=0,
         cfg=cfg,
     )
     _write_o1_binary_snapshot(
-        ev / "rst_1step/o1_si3_records/o1_si3_state_step0001_rank0000.bin",
-        rst_step1,
+        ev / "rst_1step/o1_si3_records/o1_si3_state_step0002_rank0000.bin",
+        rst_step2,
         tmask_np,
         umask_np,
         vmask_np,
-        sss_np,
-        kt=1,
+        sss_step2_np,
+        kt=2,
         lrst_ice=1,
         cfg=cfg,
     )
     write_si3_netcdf_restart(
         ev / "rst_1step/output_restart/ORCA2_SAS_00000002_restart_ice_o1_output.nc",
-        rst_step1,
+        rst_step2,
         kt=2,
         config=cfg,
     )
@@ -1194,7 +1280,8 @@ AAAAAAAA
                 "reference_bld": str(ref_bld),
                 "new_bld": str(rec_bld),
             }
-        ) + "\n",
+        )
+        + "\n",
         encoding="utf-8",
     )
     ref_bin = ref_bld / "bin/nemo.exe"
@@ -1216,7 +1303,7 @@ AAAAAAAA
     assert adm["max_ulp_kt1"] == 0
     assert adm["max_ulp_kt2"] == 0
     assert adm["max_ulp_rst_entry"] == 0
-    assert adm["max_ulp_rst_step1"] == 0
+    assert adm["max_ulp_rst_step2"] == 0
     assert adm["max_ulp_rst_vs_kt2"] == 0
 
     for plant_name in (
@@ -1230,6 +1317,9 @@ AAAAAAAA
         "1ulp-state",
         "rst-missing",
         "rst-1ulp",
+        "rst-step-name",
+        "kt2-sss-step1",
+        "ocean-restart-missing",
     ):
         with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):
             gate.admit_evidence_directory(ev, plant=plant_name, expect_commit=commit_hex)

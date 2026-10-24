@@ -138,16 +138,16 @@ def read_o1_binary_snapshot(path: str | Path) -> dict[str, Any]:
             raise ValueError(
                 f"Truncated O1 binary payload at field {fname} in {p}: need {offset + nbytes}, got {len(raw)}"
             )
-        arr = np.frombuffer(raw, dtype="<f8", count=count, offset=offset).reshape(
-            shape, order="F"
-        ).copy()
+        arr = (
+            np.frombuffer(raw, dtype="<f8", count=count, offset=offset)
+            .reshape(shape, order="F")
+            .copy()
+        )
         fields[fname] = arr
         offset += nbytes
 
     if offset != len(raw):
-        raise ValueError(
-            f"Trailing bytes in {p}: consumed {offset}, file size {len(raw)}"
-        )
+        raise ValueError(f"Trailing bytes in {p}: consumed {offset}, file size {len(raw)}")
 
     return {
         "magic": magic,
@@ -457,9 +457,10 @@ def wet_mask_for_field(
 
     ``iom_get(..., jpdom_auto)`` applies ``lbc_lnk(..., ldfull=.TRUE.)`` to
     restart-read prognostics and Prather moments, so their cyclic-seam and
-    north-fold halo cells are defined and scored.  Diagnostic/equivalent/
-    aggregated arrays are computed only over ``DO_2D(nn_hls,...)`` and retain
-    undefined halos; callers pass ``score_defined_halos=False`` for those.
+    north-fold halo cells are defined and scored.  Callers also score the
+    equivalent and aggregate fields that NEMO computes over
+    ``DO_2D(nn_hls, nn_hls, nn_hls, nn_hls)``; reduced ``A2D(0)`` diagnostics
+    retain undefined halos and are scored only on their computed interior.
     """
     if fname == "u_ice" and umask is not None:
         mask = np.asarray(umask, dtype=np.float64).copy()
@@ -469,9 +470,22 @@ def wet_mask_for_field(
         mask = np.asarray(tmask, dtype=np.float64).copy()
     if score_defined_halos is None:
         score_defined_halos = fname in {
-            "v_i", "v_s", "sv_i", "a_i", "t_su", "u_ice", "v_ice",
-            "oa_i", "a_ip", "v_ip", "v_il", "e_s", "e_i", "szv_i",
-            "snwice_mass", "snwice_mass_b",
+            "v_i",
+            "v_s",
+            "sv_i",
+            "a_i",
+            "t_su",
+            "u_ice",
+            "v_ice",
+            "oa_i",
+            "a_ip",
+            "v_ip",
+            "v_il",
+            "e_s",
+            "e_i",
+            "szv_i",
+            "snwice_mass",
+            "snwice_mass_b",
         }
     if nn_hls and not score_defined_halos:
         mask[:nn_hls, :] = 0.0
@@ -489,9 +503,7 @@ def verify_dry_signed_zero_fixture(
 ) -> dict[str, Any]:
     """Prove that a dry `-0.0` (and dry nonzero perturbation) is ignored by wet-masked scoring while a wet `-0.0` / 1-ULP perturbation at the first wet cell fires."""
     base = np.asarray(arr, dtype=np.float64).copy()
-    mask = wet_mask_for_field(
-        "fixture", mask_2d, nn_hls=nn_hls, score_defined_halos=True
-    )
+    mask = wet_mask_for_field("fixture", mask_2d, nn_hls=nn_hls, score_defined_halos=True)
     wi, wj = first_wet_ij(mask, interior_only=True, nn_hls=nn_hls)
     di, dj = first_dry_ij(mask, interior_only=True, nn_hls=nn_hls)
 
@@ -521,9 +533,7 @@ def verify_dry_signed_zero_fixture(
     wet_zero_b = base.copy()
     wet_zero_a[wi, wj] = +0.0
     wet_zero_b[wi, wj] = -0.0
-    ulp_wet_negzero = max_ulp_diff(
-        wet_zero_a, wet_zero_b, mask=mask, strict_signed_zero=True
-    )
+    ulp_wet_negzero = max_ulp_diff(wet_zero_a, wet_zero_b, mask=mask, strict_signed_zero=True)
     if ulp_wet_negzero == 0:
         raise ValueError("STATUS PLANT-FIRED: wet -0.0 vs +0.0 at first wet cell did not fire")
 
@@ -590,7 +600,7 @@ def same_source_and_flags(
     new_cfg: str = "ORCA2_SAS_ICE_O1_REC",
     ref_cfg: str = "ORCA2_SAS_ICE_O1_REF",
 ) -> dict[str, Any]:
-    """Preflight the real planned source/flag delta before any NEMO build."""
+    """Exercise the planned source/flag comparison on the preflight fixture."""
     try:
         checked = same_program_observers(
             new_bld,
@@ -827,12 +837,8 @@ def verify_layout_fixture(
     # Verify rank uniqueness across all 4 ranks
     for r in range(4):
         for s in range(r + 1, 4):
-            if np.allclose(
-                snaps_entry[r]["fields"]["v_i"], snaps_entry[s]["fields"]["v_i"]
-            ):
-                raise ValueError(
-                    f"STATUS PLANT-FIRED: ranks {r} and {s} have identical v_i data"
-                )
+            if np.allclose(snaps_entry[r]["fields"]["v_i"], snaps_entry[s]["fields"]["v_i"]):
+                raise ValueError(f"STATUS PLANT-FIRED: ranks {r} and {s} have identical v_i data")
 
     # Verify every single field in each rank matches exact formula to 0 ULP
     bounds = si3_hfn_category_bounds(jpl=5, rn_himean=2.0, opt_hips=0, rn_himax=99.0)
@@ -866,9 +872,7 @@ def verify_layout_fixture(
             )
             ulp = max_ulp_diff(snap["fields"][fname], expected_arr)
             if ulp != 0:
-                raise ValueError(
-                    f"STATUS PLANT-FIRED: rank {irank} field {fname} ULP={ulp}"
-                )
+                raise ValueError(f"STATUS PLANT-FIRED: rank {irank} field {fname} ULP={ulp}")
 
     stitched_entry = stitch_o1_binary_snapshots(snaps_entry)
     stitched_step1 = stitch_o1_binary_snapshots(snaps_step1)
@@ -1021,9 +1025,14 @@ def verify_o1_deck_fixture(path: str | Path, plant: str | None = None) -> dict[s
         raise ValueError("STATUS PLANT-FIRED: fixture contains E R R O R")
 
     expected = {
-        "jpl": "5", "nlay_i": "10", "nlay_s": "5",
-        "ln_virtual_itd": "F", "ln_icedyn": "F", "ln_icethd": "F",
-        "ln_cat_hfn": "T", "rn_himean": "2.0000000000000000",
+        "jpl": "5",
+        "nlay_i": "10",
+        "nlay_s": "5",
+        "ln_virtual_itd": "F",
+        "ln_icedyn": "F",
+        "ln_icethd": "F",
+        "ln_cat_hfn": "T",
+        "rn_himean": "2.0000000000000000",
     }
     for name, value in expected.items():
         match = re.search(rf"\b{re.escape(name)}\s*=\s*([^\s!]+)", text)
@@ -1126,21 +1135,13 @@ def build_synthetic_orca2_o1_state(
         sn=_rand_moments(s3, 1e-3),
         a=_rand_moments(s3, 1e-3),
         age=_rand_moments(s3, 1e-1),
-        sal=(
-            _rand_moments(s3, 1e-2)
-            if cfg.nn_icesal != 4
-            else SI3PratherMoments.zeros(s3)
-        ),
+        sal=(_rand_moments(s3, 1e-2) if cfg.nn_icesal != 4 else SI3PratherMoments.zeros(s3)),
         ap=_rand_moments(s3, 1e-4),
         vp=_rand_moments(s3, 1e-5),
         vl=_rand_moments(s3, 1e-6),
         c0=_rand_moments(s4_s, 1e5),
         e=_rand_moments(s4_i, 1e6),
-        si=(
-            _rand_moments(s4_i, 1e-2)
-            if cfg.nn_icesal == 4
-            else SI3PratherMoments.zeros(s4_i)
-        ),
+        si=(_rand_moments(s4_i, 1e-2) if cfg.nn_icesal == 4 else SI3PratherMoments.zeros(s4_i)),
     )
 
     cnd_ice = jnp.zeros(s3, dtype=jnp.float64)
@@ -1251,6 +1252,11 @@ _PROG_FIELDS: tuple[str, ...] = (
     "snwice_mass_b",
 )
 
+_EQUIVALENT_HALO_FIELDS = frozenset(
+    {"h_i", "h_s", "o_i", "h_ip", "h_il", "s_i", "sz_i", "t_i", "t_s", "a_i", "v_s"}
+)
+_AGGREGATED_HALO_FIELDS = frozenset({"vt_i", "vt_s", "at_i", "at_ip", "vt_ip", "vt_il", "ato_i"})
+
 
 def _compare_si3_states_wet_and_full(
     expected: SI3State,
@@ -1296,9 +1302,7 @@ def _compare_si3_states_wet_and_full(
             for mname in SI3PratherMoments._fields:
                 a_arr = getattr(grp1, mname)
                 b_arr = getattr(grp2, mname)
-                wet_t = wet_mask_for_field(
-                    mname, tmask, nn_hls=nn_hls, score_defined_halos=True
-                )
+                wet_t = wet_mask_for_field(mname, tmask, nn_hls=nn_hls, score_defined_halos=True)
                 ulp_w = max_ulp_diff(a_arr, b_arr, mask=wet_t)
                 ulp_f = max_ulp_diff(a_arr, b_arr)
                 norm_w = max_normalized_diff(a_arr, b_arr, mask=wet_t)
@@ -1315,7 +1319,10 @@ def _compare_si3_states_wet_and_full(
         a_arr = getattr(expected.equivalent, eq_name)
         b_arr = getattr(actual.equivalent, eq_name)
         wet_t = wet_mask_for_field(
-            eq_name, tmask, nn_hls=nn_hls, score_defined_halos=False
+            eq_name,
+            tmask,
+            nn_hls=nn_hls,
+            score_defined_halos=eq_name in _EQUIVALENT_HALO_FIELDS,
         )
         ulp_w = max_ulp_diff(a_arr, b_arr, mask=wet_t)
         ulp_f = max_ulp_diff(a_arr, b_arr)
@@ -1333,7 +1340,10 @@ def _compare_si3_states_wet_and_full(
         a_arr = getattr(expected.aggregated, agg_name)
         b_arr = getattr(actual.aggregated, agg_name)
         wet_t = wet_mask_for_field(
-            agg_name, tmask, nn_hls=nn_hls, score_defined_halos=False
+            agg_name,
+            tmask,
+            nn_hls=nn_hls,
+            score_defined_halos=agg_name in _AGGREGATED_HALO_FIELDS,
         )
         ulp_w = max_ulp_diff(a_arr, b_arr, mask=wet_t)
         ulp_f = max_ulp_diff(a_arr, b_arr)
@@ -1406,9 +1416,7 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
 
         # 2. Full Prather moment restart schema (write_prather=True, ln_rstart=True)
         rst_path = Path(tmp) / "ORCA2_SAS_00000001_restart_ice_pra.nc"
-        write_si3_netcdf_restart(
-            rst_path, state1, kt=1, config=cfg, write_prather=True
-        )
+        write_si3_netcdf_restart(rst_path, state1, kt=1, config=cfg, write_prather=True)
         state_reloaded_init = read_si3_netcdf_restart(
             rst_path, tmask=tmask, config=cfg, ln_rstart=True
         )
@@ -1553,9 +1561,7 @@ def _verify_run_completion_and_logs(
     if plant_missing_stop0:
         stdout_text = re.sub(r"STOP\s+0\b", "STOP 1", stdout_text)
     if not re.search(r"STOP\s+0\b", stdout_text):
-        raise ValueError(
-            f"STATUS PLANT-FIRED: missing STOP 0 in {run_label}/run.user.stdout.log"
-        )
+        raise ValueError(f"STATUS PLANT-FIRED: missing STOP 0 in {run_label}/run.user.stdout.log")
     if re.search(r"E\s+R\s+R\s+O\s+R|\bABORT\b", stdout_text):
         raise ValueError(
             f"STATUS PLANT-FIRED: fatal error token in {run_label}/run.user.stdout.log"
@@ -1583,9 +1589,7 @@ def admit_evidence_directory(
         raise ValueError(f"STATUS PLANT-FIRED: missing {commit_file}")
     recorded_commit = commit_file.read_text(encoding="utf-8").strip()
     if not re.fullmatch(r"[0-9a-f]{40}", recorded_commit):
-        raise ValueError(
-            f"STATUS PLANT-FIRED: malformed producer commit {recorded_commit!r}"
-        )
+        raise ValueError(f"STATUS PLANT-FIRED: malformed producer commit {recorded_commit!r}")
     if plant == "stamp":
         recorded_commit = "0" * 40
     commit_object = subprocess.run(
@@ -1600,8 +1604,13 @@ def admit_evidence_directory(
         )
     ancestor = subprocess.run(
         [
-            "git", "-C", str(REPO_ROOT), "merge-base", "--is-ancestor",
-            recorded_commit, "HEAD",
+            "git",
+            "-C",
+            str(REPO_ROOT),
+            "merge-base",
+            "--is-ancestor",
+            recorded_commit,
+            "HEAD",
         ],
         check=False,
         stdout=subprocess.DEVNULL,
@@ -1628,7 +1637,8 @@ def admit_evidence_directory(
         )
 
     binaries_checked = _verify_sha256_manifest(
-        manifest_dir / "binaries.sha256", label="binaries.sha256",
+        manifest_dir / "binaries.sha256",
+        label="binaries.sha256",
         plant_mismatch=plant == "binary-sha",
     )
     binary_targets = {
@@ -1650,7 +1660,8 @@ def admit_evidence_directory(
             "STATUS PLANT-FIRED: binaries.sha256 is not the two same-program nemo.exe files"
         )
     inputs_checked = _verify_sha256_manifest(
-        manifest_dir / "inputs.sha256", label="inputs.sha256",
+        manifest_dir / "inputs.sha256",
+        label="inputs.sha256",
         plant_mismatch=plant == "input-sha",
     )
 
@@ -1675,7 +1686,10 @@ def admit_evidence_directory(
         (rst_dir, "rst_1step"),
     ):
         run_stamp = rdir / "RUN_PRODUCER_COMMIT"
-        if not run_stamp.is_file() or run_stamp.read_text(encoding="utf-8").strip() != recorded_commit:
+        if (
+            not run_stamp.is_file()
+            or run_stamp.read_text(encoding="utf-8").strip() != recorded_commit
+        ):
             raise ValueError(f"STATUS PLANT-FIRED: producer stamp mismatch in {rlabel}")
         _verify_run_completion_and_logs(
             rdir,
@@ -1717,13 +1731,15 @@ def admit_evidence_directory(
     umask = jnp.asarray(snap_entry["fields"]["umask"], dtype=jnp.float64)
     vmask = jnp.asarray(snap_entry["fields"]["vmask"], dtype=jnp.float64)
     sss_entry = jnp.asarray(snap_entry["fields"]["sss_m"], dtype=jnp.float64)
-    sss_step1 = jnp.asarray(snap_step1["fields"]["sss_m"], dtype=jnp.float64)
+    sss_step2 = jnp.asarray(snap_step2["fields"]["sss_m"], dtype=jnp.float64)
+    if plant == "kt2-sss-step1":
+        sss_step2 = jnp.asarray(snap_step1["fields"]["sss_m"], dtype=jnp.float64)
 
     wi, wj = first_wet_ij(tmask, interior_only=True, nn_hls=cfg.nn_hls)
     dry_fixture = verify_dry_signed_zero_fixture(state_entry.v_i, tmask, nn_hls=cfg.nn_hls)
 
     state_kt1 = si3_o1_step(state_entry, tmask=tmask, sss_m=sss_entry, config=cfg)
-    state_kt2 = si3_o1_step(state_kt1, tmask=tmask, sss_m=sss_step1, config=cfg)
+    state_kt2 = si3_o1_step(state_kt1, tmask=tmask, sss_m=sss_step2, config=cfg)
 
     if plant == "1ulp-state":
         v_np = np.asarray(state_kt1.v_i).copy()
@@ -1743,34 +1759,50 @@ def admit_evidence_directory(
     # 5. Score rst_1step (Item 5 & Item 6): NetCDF restart read + 1-step trajectory vs rec_2step step 2
     rst_records = rst_dir / "o1_si3_records"
     rst_entry_files = sorted(rst_records.glob("o1_si3_state_entry_rank*.bin"))
-    rst_step1_files = sorted(rst_records.glob("o1_si3_state_step0001_rank*.bin"))
+    rst_step2_pattern = (
+        "o1_si3_state_step0001_rank*.bin"
+        if plant == "rst-step-name"
+        else "o1_si3_state_step0002_rank*.bin"
+    )
+    rst_step2_files = sorted(rst_records.glob(rst_step2_pattern))
     rst_nc = rst_dir / "output_restart/ORCA2_SAS_00000002_restart_ice_o1_output.nc"
     rst_ocean_nc = rst_dir / "output_restart/ORCA2_SAS_00000002_restart_o1_output.nc"
     rst_input = rst_dir / "input_restart/ORCA2_SAS_00000001_restart_ice.nc"
     rst_ocean_input = rst_dir / "input_restart/ORCA2_SAS_00000001_restart.nc"
     producer_restart = rec_dir / "ORCA2_SAS_00000001_restart_ice.nc"
     producer_ocean_restart = rec_dir / "ORCA2_SAS_00000001_restart.nc"
+    producer_ocean_restart_checked = (
+        rec_dir / "PLANTED_MISSING_SAS_OCEAN_RESTART.nc"
+        if plant == "ocean-restart-missing"
+        else producer_ocean_restart
+    )
     rst_nc_checked = (
-        rst_nc.with_name("PLANTED_MISSING_restart_ice.nc")
-        if plant == "rst-missing"
-        else rst_nc
+        rst_nc.with_name("PLANTED_MISSING_restart_ice.nc") if plant == "rst-missing" else rst_nc
     )
     if (
         not rst_entry_files
-        or not rst_step1_files
+        or not rst_step2_files
         or not rst_nc_checked.is_file()
         or not rst_ocean_nc.is_file()
         or not rst_input.is_file()
         or not rst_ocean_input.is_file()
+        or not producer_restart.is_file()
+        or not producer_ocean_restart_checked.is_file()
     ):
         raise ValueError(
-            "STATUS PLANT-FIRED: missing binary state records or restart NetCDF in rst_1step"
+            "STATUS PLANT-FIRED: rst_1step requires its entry/step0002 records, "
+            "the rec_2step ice and SAS ocean restart inputs, and both step-2 outputs"
         )
-    if rst_input.resolve() == rst_nc.resolve() or rst_input.read_bytes() != producer_restart.read_bytes():
-        raise ValueError("STATUS PLANT-FIRED: restart input/output isolation or copied-input hash failed")
+    if (
+        rst_input.resolve() == rst_nc.resolve()
+        or rst_input.read_bytes() != producer_restart.read_bytes()
+    ):
+        raise ValueError(
+            "STATUS PLANT-FIRED: restart input/output isolation or copied-input hash failed"
+        )
     if (
         rst_ocean_input.resolve() == rst_ocean_nc.resolve()
-        or rst_ocean_input.read_bytes() != producer_ocean_restart.read_bytes()
+        or rst_ocean_input.read_bytes() != producer_ocean_restart_checked.read_bytes()
     ):
         raise ValueError(
             "STATUS PLANT-FIRED: ocean restart input/output isolation or copied-input hash failed"
@@ -1779,12 +1811,17 @@ def admit_evidence_directory(
     rst_snap_entry = stitch_o1_binary_snapshots(
         [read_o1_binary_snapshot(p) for p in rst_entry_files]
     )
-    rst_snap_step1 = stitch_o1_binary_snapshots(
-        [read_o1_binary_snapshot(p) for p in rst_step1_files]
+    rst_snap_step2 = stitch_o1_binary_snapshots(
+        [read_o1_binary_snapshot(p) for p in rst_step2_files]
     )
+    if int(rst_snap_entry["meta"]["kt"]) != 0 or int(rst_snap_step2["meta"]["kt"]) != 2:
+        raise ValueError(
+            "STATUS PLANT-FIRED: rst_1step snapshot metadata must be entry kt=0 and step kt=2"
+        )
     nemo_rst_entry, _ = o1_snapshot_to_si3_state(rst_snap_entry, config=cfg)
-    nemo_rst_step1, _ = o1_snapshot_to_si3_state(rst_snap_step1, config=cfg)
+    nemo_rst_step2, _ = o1_snapshot_to_si3_state(rst_snap_step2, config=cfg)
     rst_sss_entry = jnp.asarray(rst_snap_entry["fields"]["sss_m"], dtype=jnp.float64)
+    rst_sss_step2 = jnp.asarray(rst_snap_step2["fields"]["sss_m"], dtype=jnp.float64)
 
     lego_rst_entry = read_si3_netcdf_restart(
         rec_dir / "ORCA2_SAS_00000001_restart_ice.nc",
@@ -1793,14 +1830,12 @@ def admit_evidence_directory(
         config=cfg,
         ln_rstart=True,
     )
-    lego_rst_step1 = si3_o1_step(
-        lego_rst_entry, tmask=tmask, sss_m=rst_sss_entry, config=cfg
-    )
+    lego_rst_step2 = si3_o1_step(lego_rst_entry, tmask=tmask, sss_m=rst_sss_step2, config=cfg)
 
     if plant == "rst-1ulp":
-        v_rst_np = np.asarray(lego_rst_step1.v_i).copy()
+        v_rst_np = np.asarray(lego_rst_step2.v_i).copy()
         v_rst_np[wi, wj, 0] = np.nextafter(v_rst_np[wi, wj, 0], np.inf)
-        lego_rst_step1 = lego_rst_step1._replace(v_i=jnp.asarray(v_rst_np))
+        lego_rst_step2 = lego_rst_step2._replace(v_i=jnp.asarray(v_rst_np))
 
     cmp_rst_entry = _compare_si3_states_wet_and_full(
         nemo_rst_entry,
@@ -1811,9 +1846,9 @@ def admit_evidence_directory(
         check_fmass=True,
         check_prather=True,
     )
-    cmp_rst_step1 = _compare_si3_states_wet_and_full(
-        nemo_rst_step1,
-        lego_rst_step1,
+    cmp_rst_step2 = _compare_si3_states_wet_and_full(
+        nemo_rst_step2,
+        lego_rst_step2,
         tmask,
         umask,
         vmask,
@@ -1822,7 +1857,7 @@ def admit_evidence_directory(
     )
     cmp_rst_vs_kt2 = _compare_si3_states_wet_and_full(
         nemo_kt2,
-        lego_rst_step1,
+        lego_rst_step2,
         tmask,
         umask,
         vmask,
@@ -1873,11 +1908,11 @@ def admit_evidence_directory(
         "max_ulp_kt1": cmp_kt1["max_ulp_wet"],
         "max_ulp_kt2": cmp_kt2["max_ulp_wet"],
         "max_ulp_rst_entry": cmp_rst_entry["max_ulp_wet"],
-        "max_ulp_rst_step1": cmp_rst_step1["max_ulp_wet"],
+        "max_ulp_rst_step2": cmp_rst_step2["max_ulp_wet"],
         "max_ulp_rst_vs_kt2": cmp_rst_vs_kt2["max_ulp_wet"],
         "max_norm_kt1": cmp_kt1["max_norm_wet"],
         "max_norm_kt2": cmp_kt2["max_norm_wet"],
-        "max_norm_rst_step1": cmp_rst_step1["max_norm_wet"],
+        "max_norm_rst_step2": cmp_rst_step2["max_norm_wet"],
     }
 
 
@@ -1920,11 +1955,7 @@ def main(argv: list[str] | None = None) -> int:
                 plant=args.plant,
             )
         elif args.same_program is not None or args.same_source_flags is not None:
-            if (
-                args.reference_bld is None
-                or args.pra_patch is None
-                or args.stp_patch is None
-            ):
+            if args.reference_bld is None or args.pra_patch is None or args.stp_patch is None:
                 parser.error(
                     "same-source/program checks require --reference-bld, --pra-patch, and --stp-patch"
                 )

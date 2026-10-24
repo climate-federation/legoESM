@@ -177,6 +177,61 @@ check_intrinsic_use() {
   grep -E '^[[:space:]]*USE,[[:space:]]*INTRINSIC[[:space:]]*::[[:space:]]*iso_fortran_env' "$file" >/dev/null
 }
 
+require_rec_2step_restarts() {
+  local producer_dir=$1
+  local ice_restart=$producer_dir/ORCA2_SAS_00000001_restart_ice.nc
+  local ocean_restart=$producer_dir/ORCA2_SAS_00000001_restart.nc
+  if [[ ! -f "$ice_restart" ]]; then
+    printf 'REFUSE: rec_2step did not write required SI3 restart %s; rst_1step cannot start\n' \
+      "$ice_restart" >&2
+    return 1
+  fi
+  if [[ ! -f "$ocean_restart" ]]; then
+    # SAS calls day/rst_opn before sbc; sbc_ssm writes sss_m and the other
+    # surface fields into this ocean restart (daymod.F90:276-277,
+    # restart.F90:81-145, sbcssm.F90:177-191).
+    printf 'REFUSE: rec_2step did not write required SAS ocean restart %s; rst_1step cannot start\n' \
+      "$ocean_restart" >&2
+    return 1
+  fi
+}
+
+check_operator_run_order() {
+  local script=$1
+  "$PY" - "$script" <<'PY'
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+try:
+    operator = text.rsplit("\n# ---- Operator-only --run mode ----", 1)[1]
+except IndexError as exc:
+    raise SystemExit("STATUS PLANT-FIRED: missing operator-only run block") from exc
+
+ordered = (
+    'build_target "$TARGET_REF_CFG" 0',
+    'build_target "$TARGET_REC_CFG" 1',
+    'prove_real_same_program',
+    'stage_and_run "$TARGET_REF_CFG" "$EVIDENCE/ref_2step" 0',
+    'stage_and_run "$TARGET_REC_CFG" "$EVIDENCE/rec_2step" 0',
+    'stage_and_run "$TARGET_REC_CFG" "$EVIDENCE/rst_1step" 1',
+)
+positions = []
+for call in ordered:
+    count = operator.count(call)
+    if count != 1:
+        raise SystemExit(
+            f"STATUS PLANT-FIRED: expected one operator call {call!r}, found {count}"
+        )
+    positions.append(operator.index(call))
+if positions != sorted(positions):
+    raise SystemExit(
+        "STATUS PLANT-FIRED: real reference/instrumented builds and same-program "
+        "proof must precede every NEMO launch"
+    )
+PY
+}
+
 verify_work_cfgs_guard() {
   local before_file=$1
   local after_file=$2
@@ -809,7 +864,9 @@ PY
     grep -F "STATUS PLANT-FIRED" "$scratch/log_${log_plant}.log" >/dev/null
   done
 
-  # Same-program proof preflight on synthetic reference vs instrumented BLD trees + plants
+  # Exercise the source/flag checker on synthetic reference vs instrumented BLD trees + plants.
+  # The actual compiled same-program proof runs on both real builds in --run,
+  # before the first stage_and_run/mpirun call (checked below).
   mkdir -p "$scratch/sp/ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo" "$scratch/sp/ORCA2_SAS_ICE_O1_REF/BLD/obj"
   mkdir -p "$scratch/sp/ORCA2_SAS_ICE_O1_REC/BLD/ppsrc/nemo" "$scratch/sp/ORCA2_SAS_ICE_O1_REC/BLD/obj"
   for bcfg in arch_nemo.fcm cpp.fcm bld.cfg; do
@@ -845,7 +902,30 @@ PY
   fi
   grep -F "STATUS PLANT-FIRED" "$scratch/sp_plant.log" >/dev/null
 
-  # Plant 7f: verify EXIT trap cleans created target cfgs on failed build AND moves completed-but-refused run to refused/
+  # The operator path builds both real executables, proves they are the same
+  # program modulo the observers, and only then reaches the first mpirun.
+  check_operator_run_order "$0"
+  sed '/^prove_real_same_program$/d' "$0" > "$scratch/run_order_plant.sh"
+  if check_operator_run_order "$scratch/run_order_plant.sh" >"$scratch/run_order_plant.log" 2>&1; then
+    printf 'REFUSE: Plant 7f (missing pre-run real same-program proof) did not fail\n' >&2
+    exit 72
+  fi
+  grep -F "STATUS PLANT-FIRED" "$scratch/run_order_plant.log" >/dev/null
+
+  # rec_2step must produce both files consumed by rst_1step.  In particular,
+  # prove the SAS ocean restart dependency has a dedicated refusal.
+  mkdir -p "$scratch/restart_dependency"
+  touch "$scratch/restart_dependency/ORCA2_SAS_00000001_restart_ice.nc"
+  if require_rec_2step_restarts "$scratch/restart_dependency" \
+       >"$scratch/restart_dependency.log" 2>&1; then
+    printf 'REFUSE: Plant 7g (missing SAS ocean restart) did not fail\n' >&2
+    exit 72
+  fi
+  grep -F "required SAS ocean restart" "$scratch/restart_dependency.log" >/dev/null
+  touch "$scratch/restart_dependency/ORCA2_SAS_00000001_restart.nc"
+  require_rec_2step_restarts "$scratch/restart_dependency"
+
+  # Plant 7h: verify EXIT trap cleans created target cfgs on failed build AND moves completed-but-refused run to refused/
   mkdir -p "$scratch/trap_test/cfgs/REF_MOCK" "$scratch/trap_test/cfgs/REC_MOCK" \
            "$scratch/trap_test/incomplete_run" "$scratch/trap_test/completed_run" "$scratch/trap_test/refused"
   touch "$scratch/trap_test/completed_run/RUN_COMPLETE"
@@ -951,7 +1031,9 @@ report = {
         "7e_log_wrong_jpl",
         "7f_log_wrong_flag",
         "7h_same_source_flags_non_observer_mutation",
-        "7i_exit_trap_failed_build_cleanup_and_completed_retained_in_refused",
+        "7i_real_same_program_before_any_nemo_launch",
+        "7j_missing_sas_ocean_restart_dependency",
+        "7k_exit_trap_failed_build_cleanup_and_completed_retained_in_refused",
         "gate_1ulp_state_first_wet_cell",
         "gate_1ulp_moment_first_wet_cell",
         "gate_north_fold_sign",
@@ -970,14 +1052,21 @@ PY
   printf 'PREFLIGHT_OK: checklist items 1-7 and all plants passed\n'
 }
 
+prove_real_same_program() {
+  if ! "$PY" "$GATE_PY" --same-program "$TARGET_REC_ROOT/BLD" \
+       --reference-bld "$TARGET_REF_ROOT/BLD" \
+       --pra-patch "$PRA_PATCH" --stp-patch "$STP_PATCH" \
+       --new-cfg "$TARGET_REC_CFG" --reference-cfg "$TARGET_REF_CFG" \
+       --json "$EVIDENCE/manifest/same_program.json"; then
+    printf 'REFUSE: real reference/instrumented same-program comparison failed before NEMO launch\n' >&2
+    return 1
+  fi
+}
+
 admit_all() {
   local expect_commit=${1:-}
   if [[ -d "$TARGET_REF_ROOT/BLD" && -d "$TARGET_REC_ROOT/BLD" ]]; then
-    "$PY" "$GATE_PY" --same-program "$TARGET_REC_ROOT/BLD" \
-      --reference-bld "$TARGET_REF_ROOT/BLD" \
-      --pra-patch "$PRA_PATCH" --stp-patch "$STP_PATCH" \
-      --new-cfg "$TARGET_REC_CFG" --reference-cfg "$TARGET_REF_CFG" \
-      --json "$EVIDENCE/manifest/same_program.json"
+    prove_real_same_program
   fi
   local commit_args=()
   if [[ -n "$expect_commit" ]]; then
@@ -985,7 +1074,7 @@ admit_all() {
   fi
   "$PY" "$GATE_PY" --admit-evidence "$EVIDENCE" \
     "${commit_args[@]}" --json "$EVIDENCE/o1_admission.json"
-  for adm_plant in stamp same-program binary-sha input-sha missing-complete missing-stop0 ref-rec-diff 1ulp-state rst-missing rst-1ulp; do
+  for adm_plant in stamp same-program binary-sha input-sha missing-complete missing-stop0 ref-rec-diff 1ulp-state rst-missing rst-1ulp rst-step-name kt2-sss-step1 ocean-restart-missing; do
     if "$PY" "$GATE_PY" --admit-evidence "$EVIDENCE" \
          "${commit_args[@]}" \
          --plant "$adm_plant" >/dev/null 2>&1; then
@@ -1082,6 +1171,7 @@ stage_and_run() {
   cp -L "$SHIPPED_NML_REF" "$run_dir/namelist_ref"
   cp -L "$SHIPPED_NML_ICE_REF" "$run_dir/namelist_ice_ref"
   if [[ "$is_rst_run" -eq 1 ]]; then
+    require_rec_2step_restarts "$EVIDENCE/rec_2step"
     render_rst_namelists "$NML_CFG" "$NML_ICE_CFG" "$run_dir/namelist_cfg" "$run_dir/namelist_ice_cfg"
     verify_namelists_and_stems "$run_dir/namelist_cfg" "$run_dir/namelist_ice_cfg" "$EVIDENCE/manifest/bundles.toc" "none" "rst_1step"
     mkdir -p "$run_dir/input_restart" "$run_dir/output_restart"
@@ -1113,6 +1203,7 @@ stage_and_run() {
 
 build_target "$TARGET_REF_CFG" 0
 build_target "$TARGET_REC_CFG" 1
+prove_real_same_program
 sha256sum "$NEMO_ROOT/cfgs/$TARGET_REF_CFG/BLD/bin/nemo.exe" \
           "$NEMO_ROOT/cfgs/$TARGET_REC_CFG/BLD/bin/nemo.exe" > "$EVIDENCE/manifest/binaries.sha256"
 
