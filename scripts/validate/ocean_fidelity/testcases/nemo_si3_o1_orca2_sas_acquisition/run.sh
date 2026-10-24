@@ -199,7 +199,9 @@ render_rst_namelists() {
   local dst_ice=$4
   cp "$src_oce" "$dst_oce"
   cp "$src_ice" "$dst_ice"
-  sed -E -i 's/^( *nn_itend *= *).*/\11/' "$dst_oce"
+  sed -E -i 's/^( *nn_it000 *= *).*/\12/' "$dst_oce"
+  sed -E -i 's/^( *nn_itend *= *).*/\12/' "$dst_oce"
+  sed -E -i 's|^(&namrun.*)|\1\n   ln_rstart        = .true.\n   cn_ocerst_in     = "ORCA2_SAS_00000001_restart"\n   cn_ocerst_indir  = "./input_restart"\n   cn_ocerst_out    = "restart_o1_output"\n   cn_ocerst_outdir = "./output_restart"|' "$dst_oce"
   # cn_icerst_in is declared in &nampar (src/ICE/icestp.F90:341-342);
   # nn_iceini_file is declared in &namini (src/ICE/iceistate.F90:465-470).
   sed -E -i 's|^(&nampar.*)|\1\n   cn_icerst_in     = "ORCA2_SAS_00000001_restart_ice"\n   cn_icerst_indir  = "./input_restart"\n   cn_icerst_out    = "restart_ice_o1_output"\n   cn_icerst_outdir = "./output_restart"|' "$dst_ice"
@@ -252,6 +254,8 @@ elif plant == "bad-fsbc-multiple":
     nml_cfg = re.sub(r"(nn_itend\s*=\s*)\d+", r"\g<1>3", nml_cfg)
 elif plant == "unapproved-deviation":
     nml_ice = re.sub(r"(&nampar)", "&nampar\n   rn_amax_n = 0.5", nml_ice, count=1)
+elif plant == "restart-disabled":
+    nml_cfg = nml_cfg.replace("ln_rstart        = .true.", "ln_rstart        = .false.")
 
 def parse_grouped_assignments(text: str) -> tuple[set[str], dict[str, dict[str, str]], dict[str, str]]:
     group_names: set[str] = set()
@@ -347,6 +351,10 @@ allowed_oce_diff = {"nn_itend", "nn_stock", "nn_write"}
 if deck_kind == "2step":
     allowed_ice_diff = {"ln_icedyn", "ln_icethd"}
 elif deck_kind == "rst_1step":
+    allowed_oce_diff |= {
+        "nn_it000", "ln_rstart", "cn_ocerst_in", "cn_ocerst_indir",
+        "cn_ocerst_out", "cn_ocerst_outdir",
+    }
     allowed_ice_diff = {
         "ln_icedyn", "ln_icethd", "cn_icerst_in", "cn_icerst_indir",
         "cn_icerst_out", "cn_icerst_outdir", "nn_iceini_file",
@@ -363,8 +371,22 @@ if cfg_ice_vars.get("ln_icedyn", "").lower() != ".false." or cfg_ice_vars.get("l
     raise SystemExit("STATUS PLANT-FIRED: O1 requires ln_icedyn=.false. and ln_icethd=.false.")
 
 if deck_kind == "rst_1step":
-    if nn_itend != 1:
-        raise SystemExit(f"STATUS PLANT-FIRED: rst_1step requires nn_itend=1, got {nn_itend}")
+    if int(cfg_oce_vars.get("nn_it000", "0")) != 2 or nn_itend != 2:
+        raise SystemExit(
+            "STATUS PLANT-FIRED: rst_1step must continue the step-1 restart "
+            f"at nn_it000=nn_itend=2, got {cfg_oce_vars.get('nn_it000')}/{nn_itend}"
+        )
+    if cfg_oce_vars.get("ln_rstart", "").lower() != ".true.":
+        raise SystemExit("STATUS PLANT-FIRED: rst_1step requires ln_rstart=.true.")
+    expected_ocean = {
+        "cn_ocerst_in": "ORCA2_SAS_00000001_restart",
+        "cn_ocerst_indir": "./input_restart",
+        "cn_ocerst_out": "restart_o1_output",
+        "cn_ocerst_outdir": "./output_restart",
+    }
+    for key, expected in expected_ocean.items():
+        if cfg_oce_vars.get(key, "").strip("\"'") != expected:
+            raise SystemExit(f"STATUS PLANT-FIRED: rst_1step requires {key}={expected!r}")
     if cfg_ice_vars.get("nn_iceini_file") != "2":
         raise SystemExit("STATUS PLANT-FIRED: rst_1step requires nn_iceini_file=2 in &namini")
     if cfg_ice_vars.get("cn_icerst_in", "").strip("\"'") != "ORCA2_SAS_00000001_restart_ice":
@@ -672,6 +694,12 @@ run_preflight() {
   verify_namelists_and_stems "$NML_CFG" "$NML_ICE_CFG" "$scratch/bundles.toc" "none" "2step"
   render_rst_namelists "$NML_CFG" "$NML_ICE_CFG" "$scratch/rst_namelist_cfg" "$scratch/rst_namelist_ice_cfg"
   verify_namelists_and_stems "$scratch/rst_namelist_cfg" "$scratch/rst_namelist_ice_cfg" "$scratch/bundles.toc" "none" "rst_1step"
+  if verify_namelists_and_stems "$scratch/rst_namelist_cfg" "$scratch/rst_namelist_ice_cfg" \
+       "$scratch/bundles.toc" "restart-disabled" "rst_1step" >"$scratch/nml_restart-disabled.log" 2>&1; then
+    printf 'REFUSE: Plant 3 (restart-disabled) did not fail restart-deck verification\n' >&2
+    exit 72
+  fi
+  grep -F "STATUS PLANT-FIRED" "$scratch/nml_restart-disabled.log" >/dev/null
   for nml_plant in unknown-group wrong-group-var missing-stem bad-fsbc-multiple unapproved-deviation; do
     if verify_namelists_and_stems "$NML_CFG" "$NML_ICE_CFG" "$scratch/bundles.toc" "$nml_plant" "2step" >"$scratch/nml_${nml_plant}.log" 2>&1; then
       printf 'REFUSE: Plant 3 (%s) did not fail namelist verification\n' "$nml_plant" >&2
@@ -717,6 +745,10 @@ tmask = jnp.ones((184, 152), dtype=jnp.float64)
 state = read_si3_netcdf_restart(p, tmask=tmask, config=cfg, ln_rstart=True)
 if state.v_i.shape != (184, 152, 5):
     raise SystemExit(f"STATUS PLANT-FIRED: expanded restart shape {state.v_i.shape}")
+if state.u_ice.shape != (184, 152) or state.v_ice.shape != (184, 152):
+    raise SystemExit(
+        f"STATUS PLANT-FIRED: velocity restart ranks {state.u_ice.shape}/{state.v_ice.shape}"
+    )
 expected = 1.0 + 0.001 + 0.000001 + 0.000000001
 if abs(float(state.v_i[2, 2, 0]) - expected) > 1.0e-14:
     raise SystemExit("STATUS PLANT-FIRED: NEMO payload did not map to true interior")
@@ -800,12 +832,12 @@ PY
     cp "$scratch/sp/ORCA2_SAS_ICE_O1_REC/BLD/obj/icevar.o" "$scratch/sp/ORCA2_SAS_ICE_O1_REC/BLD/obj/${u}.o"
   done
   cp "$scratch/sp/ORCA2_SAS_ICE_O1_REC/BLD/obj/icevar.o" "$scratch/sp/ORCA2_SAS_ICE_O1_REC/BLD/obj/o1_si3_state_writer.o"
-  "$PY" "$GATE_PY" --same-program "$scratch/sp/ORCA2_SAS_ICE_O1_REC/BLD" \
+  "$PY" "$GATE_PY" --same-source-flags "$scratch/sp/ORCA2_SAS_ICE_O1_REC/BLD" \
     --reference-bld "$scratch/sp/ORCA2_SAS_ICE_O1_REF/BLD" \
-    --pra-patch "$PRA_PATCH" --stp-patch "$STP_PATCH" > "$scratch/same_program_check.json"
-  # Plant on same-program: mutate non-observer ppsrc/nemo/icevar.f90
+    --pra-patch "$PRA_PATCH" --stp-patch "$STP_PATCH" > "$scratch/same_source_flags_check.json"
+  # Plant on the pre-build source/flag proof: mutate non-observer ppsrc/nemo/icevar.f90
   printf '\n! planted mutation\n' >> "$scratch/sp/ORCA2_SAS_ICE_O1_REC/BLD/ppsrc/nemo/icevar.f90"
-  if "$PY" "$GATE_PY" --same-program "$scratch/sp/ORCA2_SAS_ICE_O1_REC/BLD" \
+  if "$PY" "$GATE_PY" --same-source-flags "$scratch/sp/ORCA2_SAS_ICE_O1_REC/BLD" \
        --reference-bld "$scratch/sp/ORCA2_SAS_ICE_O1_REF/BLD" \
        --pra-patch "$PRA_PATCH" --stp-patch "$STP_PATCH" >"$scratch/sp_plant.log" 2>&1; then
     printf 'REFUSE: Plant 7e (same-program non-observer mutation) did not fail\n' >&2
@@ -877,7 +909,7 @@ PY
     mkdir -p "$(dirname "$preflight_json_out")"
     "$PY" - "$preflight_json_out" "$ORCA2_BUNDLE_SHA256" "$SAS_BUNDLE_SHA256" \
       "$scratch/layout_fixture.json" "$scratch/log_check.json" \
-      "$scratch/same_program_check.json" "$scratch/gate_self_test.json" <<'PY'
+      "$scratch/same_source_flags_check.json" "$scratch/gate_self_test.json" <<'PY'
 import json
 import pathlib
 import sys
@@ -901,6 +933,7 @@ report = {
         "3c_missing_sn_stem",
         "3d_bad_fsbc_multiple",
         "3e_unapproved_deck_deviation",
+        "3f_restart_disabled",
         "4a_missing_writer_output_dir",
         "4b_rank_collapse",
         "4c_wrong_offset",
@@ -917,7 +950,7 @@ report = {
         "7d_log_missing_derived_line",
         "7e_log_wrong_jpl",
         "7f_log_wrong_flag",
-        "7h_same_program_non_observer_mutation",
+        "7h_same_source_flags_non_observer_mutation",
         "7i_exit_trap_failed_build_cleanup_and_completed_retained_in_refused",
         "gate_1ulp_state_first_wet_cell",
         "gate_1ulp_moment_first_wet_cell",
@@ -927,7 +960,7 @@ report = {
     ],
     "layout_fixture": json.loads(pathlib.Path(lf_p).read_text()),
     "log_verifier": json.loads(pathlib.Path(log_p).read_text()),
-    "same_program_check": json.loads(pathlib.Path(sp_p).read_text()),
+    "same_source_flags_check": json.loads(pathlib.Path(sp_p).read_text()),
     "gate_self_test": json.loads(pathlib.Path(gst_p).read_text()),
 }
 pathlib.Path(out_p).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
@@ -1054,6 +1087,8 @@ stage_and_run() {
     mkdir -p "$run_dir/input_restart" "$run_dir/output_restart"
     cp "$EVIDENCE/rec_2step/ORCA2_SAS_00000001_restart_ice.nc" \
       "$run_dir/input_restart/ORCA2_SAS_00000001_restart_ice.nc"
+    cp "$EVIDENCE/rec_2step/ORCA2_SAS_00000001_restart.nc" \
+      "$run_dir/input_restart/ORCA2_SAS_00000001_restart.nc"
   else
     cp "$NML_CFG" "$run_dir/namelist_cfg"
     cp "$NML_ICE_CFG" "$run_dir/namelist_ice_cfg"
@@ -1069,7 +1104,10 @@ stage_and_run() {
     timeout "$RUN_TIMEOUT_SEC" mpirun -np 1 --oversubscribe ./nemo > run.user.stdout.log 2>&1
     printf 'MPIRUN_RC=0\nRUN_FINISHED_UTC=%s\nRUN DONE\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> run.user.time.log
   )
-  "$PY" "$GATE_PY" --verify-log "$run_dir/ocean.output" --expect-icedyn F --expect-icethd F > "$run_dir/log_check.json"
+  local expect_rstart=F
+  [[ "$is_rst_run" -eq 1 ]] && expect_rstart=T
+  "$PY" "$GATE_PY" --verify-log "$run_dir/ocean.output" --expect-icedyn F \
+    --expect-icethd F --expect-rstart "$expect_rstart" > "$run_dir/log_check.json"
   touch "$run_dir/RUN_COMPLETE"
 }
 

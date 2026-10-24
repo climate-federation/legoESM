@@ -4,16 +4,18 @@ PROGRAM o1_nemo_restart_fixture
    USE, INTRINSIC :: iso_fortran_env, ONLY: real64
    USE netcdf
    IMPLICIT NONE
-   INTEGER, PARAMETER :: nx=180, ny=148, nc=5, n3=36
+   INTEGER, PARAMETER :: nx=180, ny=148, nc=5, n3=34, n2=4
    CHARACTER(LEN=16), PARAMETER :: names3(n3) = [ CHARACTER(LEN=16) :: &
-      'v_i','v_s','a_i','t_su','u_ice','v_ice','oa_i','a_ip','v_ip','v_il', &
+      'v_i','v_s','a_i','t_su','oa_i','a_ip','v_ip','v_il', &
       'sv_i','e_s_l01','e_s_l02','e_s_l03','e_s_l04','e_s_l05', &
       'e_i_l01','e_i_l02','e_i_l03','e_i_l04','e_i_l05','e_i_l06', &
       'e_i_l07','e_i_l08','e_i_l09','e_i_l10','szv_i_l01','szv_i_l02', &
       'szv_i_l03','szv_i_l04','szv_i_l05','szv_i_l06','szv_i_l07', &
       'szv_i_l08','szv_i_l09','szv_i_l10' ]
+   CHARACTER(LEN=16), PARAMETER :: names2(n2) = [ CHARACTER(LEN=16) :: &
+      'u_ice','v_ice','snwice_mass','snwice_mass_b' ]
    INTEGER :: ncid, dx, dy, dc, dt, scalar_dims(1), dims3(4), dims2(3)
-   INTEGER :: ids3(n3), id_mass, id_mass_b, id_fsbc, id_kt
+   INTEGER :: ids3(n3), ids2(n2), id_fsbc, id_kt
    INTEGER :: i, j, k, n, status
    REAL(real64) :: a3(nx,ny,nc,1), a2(nx,ny,1), scalar(1)
 
@@ -28,8 +30,9 @@ PROGRAM o1_nemo_restart_fixture
    DO n=1,n3
       CALL ck(nf90_def_var(ncid, TRIM(names3(n)), NF90_DOUBLE, dims3, ids3(n)))
    END DO
-   CALL ck(nf90_def_var(ncid, 'snwice_mass', NF90_DOUBLE, dims2, id_mass))
-   CALL ck(nf90_def_var(ncid, 'snwice_mass_b', NF90_DOUBLE, dims2, id_mass_b))
+   DO n=1,n2
+      CALL ck(nf90_def_var(ncid, TRIM(names2(n)), NF90_DOUBLE, dims2, ids2(n)))
+   END DO
    CALL ck(nf90_def_var(ncid, 'nn_fsbc', NF90_DOUBLE, scalar_dims, id_fsbc))
    CALL ck(nf90_def_var(ncid, 'kt_ice', NF90_DOUBLE, scalar_dims, id_kt))
    CALL ck(nf90_put_att(ncid, NF90_GLOBAL, 'DOMAIN_size_global', [nx,ny]))
@@ -47,8 +50,9 @@ PROGRAM o1_nemo_restart_fixture
    DO j=1,ny; DO i=1,nx
       a2(i,j,1) = REAL(i,real64)*1.0E-3_real64 + REAL(j,real64)*1.0E-6_real64
    END DO; END DO
-   CALL ck(nf90_put_var(ncid, id_mass, a2))
-   CALL ck(nf90_put_var(ncid, id_mass_b, a2))
+   DO n=1,n2
+      CALL ck(nf90_put_var(ncid, ids2(n), a2 + REAL(n,real64)))
+   END DO
    scalar = 1.0_real64
    CALL ck(nf90_put_var(ncid, id_fsbc, scalar))
    CALL ck(nf90_put_var(ncid, id_kt, scalar))

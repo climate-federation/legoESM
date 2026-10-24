@@ -25,6 +25,7 @@ NEMO 5.0.2 oracle source citations:
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
 
 import jax
@@ -57,7 +58,7 @@ _SALPROF_EXPONENT_NUMERATOR = 0.407
 _SALPROF_EXPONENT_OFFSET = 0.573
 _SALPROF_AMPLITUDE = 1.6
 _SNOW_FRACTION_EXPONENT = -0.2
-_LANE3_REFERENCE_SALINITY = canonical_constants.S_ocean_ref
+_LANE3_REFERENCE_SALINITY = 34.0
 _ORCA2_RN_HIMAX_M = 99.0
 
 __param_spec__ = {
@@ -1727,6 +1728,44 @@ def si3_rst_from_netcdf_dict(
         arr = jnp.asarray(value, dtype=jnp.float64)
         if arr.ndim < 2:
             return arr
+        two_dimensional = {
+            "u_ice",
+            "v_ice",
+            "snwice_mass",
+            "snwice_mass_b",
+        }
+        three_dimensional = {
+            "v_i",
+            "v_s",
+            "sv_i",
+            "a_i",
+            "t_su",
+            "oa_i",
+            "a_ip",
+            "v_ip",
+            "v_il",
+            "cnd_ice",
+            "t1_ice",
+        }
+        is_layer_field = bool(
+            re.fullmatch(r"(?:e_s|e_i|szv_i)_l\d{2}", name)
+        )
+        is_prather_field = bool(
+            re.fullmatch(r"s(?:x|y|xx|yy|xy)[A-Za-z0-9_]*", name)
+        )
+        expected_tail: tuple[int, ...] | None
+        if name in two_dimensional:
+            expected_tail = ()
+        elif name in three_dimensional or is_layer_field or is_prather_field:
+            expected_tail = (cfg.jpl,)
+        else:
+            expected_tail = None
+        if expected_tail is not None and tuple(int(n) for n in arr.shape[2:]) != expected_tail:
+            expected_shape = ("x", "y") + expected_tail
+            raise ValueError(
+                f"ice_rst_read: {name} rank/shape {tuple(arr.shape)} does not match "
+                f"NEMO field shape {expected_shape}"
+            )
         spatial = tuple(int(n) for n in arr.shape[:2])
         if spatial == full_xy:
             return arr
@@ -1793,13 +1832,15 @@ def si3_rst_from_netcdf_dict(
     if "a_ip" in rst_full:
         a_ip = jnp.asarray(rst_full["a_ip"], dtype=jnp.float64)
         v_ip = jnp.asarray(rst_full["v_ip"], dtype=jnp.float64)
-        if "v_il" in rst_full and cfg.ln_pnd_lids:
-            v_il = jnp.asarray(rst_full["v_il"], dtype=jnp.float64)
-        else:
-            v_il = jnp.zeros_like(v_i)
     else:
         a_ip = jnp.zeros_like(v_i)
         v_ip = jnp.zeros_like(v_i)
+
+    # icerst.F90:318-325 tests v_il independently of the melt-pond fields and
+    # namelist switches: if the restart variable exists, NEMO reads it.
+    if "v_il" in rst_full:
+        v_il = jnp.asarray(rst_full["v_il"], dtype=jnp.float64)
+    else:
         v_il = jnp.zeros_like(v_i)
 
     e_s = jnp.stack(
@@ -1997,6 +2038,15 @@ def si3_rst_from_netcdf_dict(
         snwice_mass = jnp.asarray(rst_full["snwice_mass"], dtype=jnp.float64)
         snwice_mass_b = jnp.asarray(rst_full["snwice_mass_b"], dtype=jnp.float64)
         snwice_fmass = jnp.zeros_like(snwice_mass)
+        if apply_halos:
+            # update_rst reads these after the earlier ice_rst_read halo pass;
+            # iom_get itself applies lbc_lnk to each newly read 2-D field.
+            snwice_mass = si3_lbc_lnk_orca2(
+                snwice_mass, "T", 1.0, nn_hls=cfg.nn_hls, ldfull=True
+            )
+            snwice_mass_b = si3_lbc_lnk_orca2(
+                snwice_mass_b, "T", 1.0, nn_hls=cfg.nn_hls, ldfull=True
+            )
     else:
         snwice_mass, snwice_mass_b, snwice_fmass = si3_update_snwice_mass(
             vt_i=agg.vt_i,

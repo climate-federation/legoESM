@@ -2,37 +2,32 @@
 
 ## Outcome
 
-Resume 2 resolves the Codex and Claude HOLDs and leaves the round at `ACQUISITION_NEEDED`. NEMO was not built or run. The CPU-only acquisition preflight is `PREFLIGHT_OK` with 33 negative controls; the focused SI3 suite passes 13/13, the private-import/default-path set passes 17/17, and the SI3 inline-coefficient ratchet passes. Codex has no GPU, so the corrected commit still needs an operator GPU spot-check.
+Resume 3 fixes all ten Claude/Argon HOLD findings and leaves O1 at `ACQUISITION_NEEDED`. NEMO was not built or run. The CPU acquisition preflight is `PREFLIGHT_OK`; operator acquisition and the operator-run independent review remain outstanding.
 
-The original preregistration is restored byte-for-byte to commit `345df680bf`. The source-discovered reason for moving live Prather NetCDF restart certification to O4 is recorded separately in `docs/ice/fidelity/si3_r4_o1_preregister_amendment_1.md`.
+The original preregistration remains byte-identical to commit `345df680bf`; its amendment still moves live Prather NetCDF restart certification to O4. No scientific option, bar, window, or model default changed except the requested restoration of the lane-3 bridge salinity default from 34.7 to 34.0 (`packages/ice/legoesm/ice/si3_orca2_state.py:51-62`).
 
-## Corrected model and restart contract
+## Restart fidelity and scoring
 
-NEMO IOM restart payloads contain no halos. `si3_rst_from_netcdf_dict` now accepts NEMO's halo-free spatial layout or an already allocated mapping, rejects other shapes, embeds the payload into the true interior, and applies ORCA2 boundary conditions (`packages/ice/legoesm/ice/si3_orca2_state.py:1678-1686`). The NetCDF writer and reader expose that same contract (`packages/ice/legoesm/ice/si3_orca2_state.py:2022-2030`, `:2090-2099`). A compiled gfortran/NetCDF fixture writes `(x, y) = (180, 148)` with NEMO IOM dimension order and domain attributes; preflight proves it maps to `(184, 152, 5)` and receives halos (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:697-725`).
+NEMO reads every `iom_get(..., jpdom_auto)` payload into the no-halo interior and immediately applies `lbc_lnk(..., ldfull=.TRUE.)` (`src/OCE/IOM/iom.F90:1347-1431`). The reader now validates each known field's complete rank/category shape, and the compiled fixture writes `u_ice` and `v_ice` as two-dimensional fields, matching NEMO's declarations and reads (`src/ICE/icerst.F90:275-282`; `scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_nemo_restart_fixture.F90:7-34`).
 
-Restart branching now matches NEMO: uncoupled `t1_ice` is undefined and excluded from O1 scoring; fresh lane-3 state uses layer-1 ice temperature; `snwice_mass` is read only for `ln_rstart`; and `v_il` requires both pond data and `ln_pnd_lids`. Scoring uses only defined wet interior T/U/V cells and treats full-grid ULP as diagnostic (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1320-1336`). Dry signed zero and halo differences pass, while a wet one-ULP plant refuses.
+`v_il` is read whenever its own variable exists, independently of `a_ip` and `ln_pnd_lids`, exactly as NEMO's separate probe requires (`src/ICE/icerst.F90:318-324`). `snwice_mass` and `snwice_mass_b` are read later by `update_rst`; their own `iom_get` calls therefore receive a post-read halo fill rather than retaining the earlier zeros (`src/ICE/iceupdate.F90:455-461`; `packages/ice/legoesm/ice/si3_orca2_state.py:2037-2047`). Direct tests cover all 960 mass-halo cells, malformed velocity/category rank, and the independent `v_il` branches.
 
-The production `step_sea_ice` SI3-O1 branch requires explicit configuration and exact `dt == rDt_ice`, then refuses until the NEMO `ice_update_flx` heat/freshwater/salt forcing contract exists (`packages/ice/legoesm/ice/sea_ice.py:590-610`). The direct public `si3_o1_step` remains the O1 state transform; no silent zero flux or ignored timestep remains.
+Scoring includes every wet cyclic-seam and north-fold halo cell NEMO defines. Only dry cells and halos NEMO leaves undefined are excluded: `t_si`, `snwice_fmass`, equivalent variables, and aggregate diagnostics are written by interior-only loops; uncoupled `t1_ice` remains wholly unscored (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:447-481`). One-ULP plants on both the cyclic seam and north fold now refuse.
 
-## Corrected acquisition and admission contract
+## Acquisition and admission
 
-The restart deck uses distinct `input_restart` and `output_restart` directories and a distinct output suffix (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:202-206`). Each staged run records `RUN_PRODUCER_COMMIT`; restart input is copied into its isolated directory (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:1039-1056`). Admission cross-checks the per-run producer stamp, verifies the copied input, and requires the distinct restart output.
+The restart deck is now an actual continuation: `ln_rstart=.true.`, `nn_it000=nn_itend=2`, and both the ocean and ice step-1 restarts from `rec_2step` are copied into the isolated input directory (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:195-208`; `:373-401`). The deck-deviation gate and a `restart-disabled` plant cover those settings. Admission reads legoESM with `ln_rstart=True`, scores the NEMO restart-entry snapshot, advances it at kt=2, and compares it with both the restart run's kt=2 record and the continuous run's kt=2 record.
 
-`inputs.sha256` no longer hashes the gate. `gate.sha256` records gate provenance separately so repaired gates can re-admit retained producer evidence. `--admit-existing` trusts the producer commit recorded at run time instead of comparing evidence to the current checkout. Binary/input SHA and missing-completion/STOP plants now reach their real comparison. Admission and every plant are driven through one path (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:949-958`; `scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1622-1650`).
+`--admit-existing` now requires the recorded producer to be a real commit object and an ancestor of the current checkout, verifies per-run stamps, and binds `binaries.sha256` to exactly the reference and instrumented `nemo.exe` paths recorded by the post-build same-program proof (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1566-1616`; `:1619-1650`). The `ref-rec-diff` and `rst-missing` plants now perturb the operands/paths and reach the real byte and existence comparisons rather than raising from the plant selector.
 
-No O1-deck `ORCA2_SAS_ICE` output existed on disk. The committed text is explicitly a namelist/source-derived fixture, never rewritten run evidence; its verifier accepts only the derivable O1 values (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1072-1100`). Actual acquisition logs still require normal completion and error checks.
+The duplicate same-program implementation is deleted. O1 imports the established round-326 ELF comparator and round-328 multi-observer helper. Preflight performs and plants the planned source/build-flag comparison before any NEMO build; admission retains the post-build preprocessed-source/object comparison. The receipt no longer calls the preflight check a compiled same-program proof.
 
-Generic same-program ELF comparison now has one implementation in `scripts/validate/ocean_fidelity/same_program.py`; the accidental byte-identical ORCA2 tool copy was removed. Preflight performs source/build-flag comparison before any NEMO build, and admission retains the post-build object proof.
+The citation map is a single static literal again: all 87 stale O1 entries and the `.pop()`/`.update()` mutation are removed. `test_no_citation_map_key_is_written_twice` and the default citation gate pass.
 
-## Public interfaces for the parallel O2 rebase
+## Verification and interfaces
 
-* `read_si3_netcdf_restart` / `write_si3_netcdf_restart`: files are halo-free; returned `SI3State` remains allocated with halos.
-* `si3_rst_from_netcdf_dict`: accepts halo-free or allocated mappings and refuses other spatial shapes.
-* `step_sea_ice` with `thermo_scheme="si3_orca2_o1"`: validates explicit config and timestep, then raises `NotImplementedError` until flux coupling is implemented; call `si3_o1_step` for the O1 state operator.
-* Evidence adds per-run `RUN_PRODUCER_COMMIT`, `manifest/gate.sha256`, and separate `rst_1step/input_restart` / `output_restart` directories. The gate CLI adds `--verify-deck-fixture`.
+The regenerated `o1_preflight_receipt.json` has SHA-256 `b84544c5f5fa0c1ee78d6089bd12ac9616cb34018c288092d069d3971bb2bbb6`. The focused O1 suite passes 15/15. The preflight's Fortran/NetCDF fixture confirms `(180,148,5)` categorical arrays, `(180,148)` velocities, allocated `(184,152,5)` / `(184,152)` results, and nonzero defined halos. All 34 configured acquisition plants fire.
 
-## Verification and disposition
+Public interfaces remain source-compatible. Tightened behavior: `si3_rst_from_netcdf_dict` now refuses known restart fields with the wrong full rank/category shape; the gate CLI adds `--same-source-flags` and `--expect-rstart`; restart evidence additionally requires the ocean input/output restart pair and same-program binary targets. `scripts/validate/ocean_fidelity/same_program.py` is removed in favor of the restored ORCA2 modules.
 
-The regenerated `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round4/o1_preflight_receipt.json` has SHA-256 `275025cfeca61118fcbec2e06ffb83fe67ab74fa0c270ae5de05c2962564b6ee`. Its wet maximum is 0 ULP; dry/halo fixture metrics are `ulp_dry_negzero=0`, `ulp_dry_val=0`, `ulp_halo_val=0`, and `ulp_wet_1ulp=1`.
-
-All eleven Resume 2 findings are fixed. Choices: `ASKED` = DECISION 153/159 and the explicit permission to refuse incomplete O1 production fluxes; `UNASKED` = none. Independent review remains operator acquisition and GPU spot-check.
+Choices: `ASKED` = all ten Resume 3 repairs in the user instruction. `UNASKED` = none. Search-before-build: searched the repository and later ORCA2 lane for same-program implementations; restored and imported the existing round-326/328 functions rather than retaining the O1 copy.

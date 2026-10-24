@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import argparse
 import copy
-import difflib
 import hashlib
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 import tempfile
 from typing import Any
@@ -50,10 +50,16 @@ from legoesm.ice.si3_orca2_state import (
     si3_var_glo2eqv,
     write_si3_netcdf_restart,
 )
-from scripts.validate.ocean_fidelity.same_program import (
-    BUILD_CONFIG_FILES,
+from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round326_hmi_gate import (
     objects_equal,
 )
+from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round328_dynzdf_gate import (
+    BUILD_CONFIG_FILES,
+    GateError as SameProgramError,
+    same_program_observers,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
 def read_o1_binary_snapshot(path: str | Path) -> dict[str, Any]:
@@ -445,15 +451,29 @@ def wet_mask_for_field(
     vmask: np.ndarray | jax.Array | None = None,
     *,
     nn_hls: int = 2,
+    score_defined_halos: bool | None = None,
 ) -> np.ndarray:
-    """Return the defined interior wet cells for a T-, U-, or V-point field."""
+    """Return wet cells on which NEMO defines the named field.
+
+    ``iom_get(..., jpdom_auto)`` applies ``lbc_lnk(..., ldfull=.TRUE.)`` to
+    restart-read prognostics and Prather moments, so their cyclic-seam and
+    north-fold halo cells are defined and scored.  Diagnostic/equivalent/
+    aggregated arrays are computed only over ``DO_2D(nn_hls,...)`` and retain
+    undefined halos; callers pass ``score_defined_halos=False`` for those.
+    """
     if fname == "u_ice" and umask is not None:
         mask = np.asarray(umask, dtype=np.float64).copy()
     elif fname == "v_ice" and vmask is not None:
         mask = np.asarray(vmask, dtype=np.float64).copy()
     else:
         mask = np.asarray(tmask, dtype=np.float64).copy()
-    if nn_hls:
+    if score_defined_halos is None:
+        score_defined_halos = fname in {
+            "v_i", "v_s", "sv_i", "a_i", "t_su", "u_ice", "v_ice",
+            "oa_i", "a_ip", "v_ip", "v_il", "e_s", "e_i", "szv_i",
+            "snwice_mass", "snwice_mass_b",
+        }
+    if nn_hls and not score_defined_halos:
         mask[:nn_hls, :] = 0.0
         mask[-nn_hls:, :] = 0.0
         mask[:, :nn_hls] = 0.0
@@ -469,7 +489,9 @@ def verify_dry_signed_zero_fixture(
 ) -> dict[str, Any]:
     """Prove that a dry `-0.0` (and dry nonzero perturbation) is ignored by wet-masked scoring while a wet `-0.0` / 1-ULP perturbation at the first wet cell fires."""
     base = np.asarray(arr, dtype=np.float64).copy()
-    mask = wet_mask_for_field("fixture", mask_2d, nn_hls=nn_hls)
+    mask = wet_mask_for_field(
+        "fixture", mask_2d, nn_hls=nn_hls, score_defined_halos=True
+    )
     wi, wj = first_wet_ij(mask, interior_only=True, nn_hls=nn_hls)
     di, dj = first_dry_ij(mask, interior_only=True, nn_hls=nn_hls)
 
@@ -486,13 +508,13 @@ def verify_dry_signed_zero_fixture(
             f"(ulp_negzero={ulp_dry_negzero}, ulp_val={ulp_dry_val}, norm={norm_dry_val})"
         )
 
-    # Halo values are likewise undefined after a file read and must not score.
+    # The southern closed-boundary halo is dry and therefore does not score.
     halo_perturbed = base.copy()
     halo_idx = (0, 0) + (0,) * (base.ndim - 2)
     halo_perturbed[halo_idx] = -777.0
     ulp_halo_val = max_ulp_diff(base, halo_perturbed, mask=mask)
     if ulp_halo_val != 0:
-        raise ValueError("STATUS PLANT-FIRED: halo perturbation leaked into wet score")
+        raise ValueError("STATUS PLANT-FIRED: dry southern halo leaked into wet score")
 
     # 2. Wet -0.0 vs +0.0 at first wet cell must fire under strict_signed_zero=True.
     wet_zero_a = base.copy()
@@ -530,47 +552,6 @@ WRITER_UNIT = "o1_si3_state_writer"
 OBSERVER_UNITS = ("icedyn_adv_pra", "icestp")
 
 
-def _normalize_build_config(text: str, cfg: str, target_cfg: str) -> str:
-    text = text.replace(cfg, target_cfg)
-    lines = [
-        line
-        for line in text.splitlines()
-        if WRITER_UNIT not in line
-    ]
-    return "\n".join(lines) + "\n"
-
-
-def _verify_patch_insertions_only(
-    ref_text: str,
-    new_text: str,
-    patch_path: Path,
-    unit_label: str,
-) -> list[str]:
-    """Verify `new_text` differs from `ref_text` only by inserting the `+` lines of `patch_path`."""
-    expected_added = [
-        line[1:]
-        for line in patch_path.read_text(encoding="utf-8").splitlines()
-        if line.startswith("+") and not line.startswith("+++")
-    ]
-    ref_lines = ref_text.splitlines()
-    new_lines = new_text.splitlines()
-    added: list[str] = []
-    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(
-        a=ref_lines, b=new_lines, autojunk=False
-    ).get_opcodes():
-        if op in ("replace", "delete"):
-            raise ValueError(
-                f"STATUS PLANT-FIRED: {unit_label} {op}s reference source lines {i1 + 1}:{i2}"
-            )
-        if op == "insert":
-            added.extend(new_lines[j1:j2])
-    if added != expected_added:
-        raise ValueError(
-            f"STATUS PLANT-FIRED: {unit_label} inserts {added!r}, expected {expected_added!r}"
-        )
-    return expected_added
-
-
 def same_program(
     new_bld: Path,
     ref_bld: Path,
@@ -580,106 +561,53 @@ def same_program(
     new_cfg: str = "ORCA2_SAS_ICE_O1_REC",
     ref_cfg: str = "ORCA2_SAS_ICE_O1_REF",
 ) -> dict[str, Any]:
-    """Prove `new_bld` compiles the same NEMO program as `ref_bld` plus only the passive O1 observer."""
-    if not (ref_bld / "ppsrc/nemo").is_dir() or not (ref_bld / "obj").is_dir():
-        raise ValueError(f"STATUS PLANT-FIRED: reference build tree incomplete: {ref_bld}")
-    if not (new_bld / "ppsrc/nemo").is_dir() or not (new_bld / "obj").is_dir():
-        raise ValueError(f"STATUS PLANT-FIRED: instrumented build tree incomplete: {new_bld}")
-
-    for name in BUILD_CONFIG_FILES:
-        if not (ref_bld / name).is_file() or not (new_bld / name).is_file():
-            raise ValueError(f"STATUS PLANT-FIRED: missing build config file {name}")
-        ref_cfg_text = _normalize_build_config(
-            (ref_bld / name).read_text(encoding="utf-8"), ref_cfg, new_cfg
+    """Adapt the shared ORCA2 multi-observer same-program proof for O1."""
+    try:
+        report = same_program_observers(
+            new_bld,
+            ref_bld,
+            dict(zip(OBSERVER_UNITS, (pra_patch, stp_patch), strict=True)),
+            (WRITER_UNIT,),
+            new_cfg=new_cfg,
+            ref_cfg=ref_cfg,
         )
-        new_cfg_text = _normalize_build_config(
-            (new_bld / name).read_text(encoding="utf-8"), new_cfg, new_cfg
-        )
-        if ref_cfg_text != new_cfg_text:
-            raise ValueError(f"STATUS PLANT-FIRED: build config differs: {name}")
-
-    ref_src = {p.name: p for p in (ref_bld / "ppsrc/nemo").glob("*.f90")}
-    new_src = {p.name: p for p in (new_bld / "ppsrc/nemo").glob("*.f90")}
-    ref_obj = {p.name: p for p in (ref_bld / "obj").glob("*.o")}
-    new_obj = {p.name: p for p in (new_bld / "obj").glob("*.o")}
-
-    if not ref_src or not ref_obj:
-        raise ValueError("STATUS PLANT-FIRED: empty ppsrc/nemo or obj in reference build")
-    if set(new_src) - set(ref_src) != {f"{WRITER_UNIT}.f90"}:
-        raise ValueError(
-            f"STATUS PLANT-FIRED: instrumented build adds unexpected preprocessed sources: "
-            f"{sorted(set(new_src) - set(ref_src))}"
-        )
-    if set(ref_src) - set(new_src):
-        raise ValueError(
-            f"STATUS PLANT-FIRED: instrumented build lacks reference preprocessed sources: "
-            f"{sorted(set(ref_src) - set(new_src))}"
-        )
-    if set(new_obj) - set(ref_obj) != {f"{WRITER_UNIT}.o"}:
-        raise ValueError(
-            f"STATUS PLANT-FIRED: instrumented build adds unexpected objects: "
-            f"{sorted(set(new_obj) - set(ref_obj))}"
-        )
-    if set(ref_obj) - set(new_obj):
-        raise ValueError(
-            f"STATUS PLANT-FIRED: instrumented build lacks reference objects: "
-            f"{sorted(set(ref_obj) - set(new_obj))}"
-        )
-
-    observer_src_names = {f"{u}.f90" for u in OBSERVER_UNITS} | {f"{WRITER_UNIT}.f90"}
-    bad_src = [
-        name
-        for name in sorted(set(ref_src) - observer_src_names)
-        if ref_src[name].read_text(encoding="utf-8").replace(ref_cfg, new_cfg)
-        != new_src[name].read_text(encoding="utf-8")
-    ]
-    if bad_src:
-        raise ValueError(
-            f"STATUS PLANT-FIRED: preprocessed sources differ from reference: "
-            + ", ".join(f"ppsrc/nemo/{n}" for n in bad_src[:5])
-        )
-
-    pra_added = _verify_patch_insertions_only(
-        ref_src["icedyn_adv_pra.f90"].read_text(encoding="utf-8").replace(ref_cfg, new_cfg),
-        new_src["icedyn_adv_pra.f90"].read_text(encoding="utf-8"),
-        pra_patch,
-        "icedyn_adv_pra.f90",
-    )
-    stp_added = _verify_patch_insertions_only(
-        ref_src["icestp.f90"].read_text(encoding="utf-8").replace(ref_cfg, new_cfg),
-        new_src["icestp.f90"].read_text(encoding="utf-8"),
-        stp_patch,
-        "icestp.f90",
-    )
-
-    ref_root = f"{ref_bld.parent.resolve()}/".encode()
-    new_root = f"{new_bld.parent.resolve()}/".encode()
-    observer_obj_names = {f"{u}.o" for u in OBSERVER_UNITS} | {f"{WRITER_UNIT}.o"}
-    bad_obj = [
-        name
-        for name in sorted(set(ref_obj) - observer_obj_names)
-        if not objects_equal(
-            ref_obj[name].read_bytes(),
-            new_obj[name].read_bytes(),
-            ref_root,
-            new_root,
-        )
-    ]
-    if bad_obj:
-        raise ValueError(
-            f"STATUS PLANT-FIRED: compiled objects differ from reference: "
-            + ", ".join(f"obj/{n}" for n in bad_obj[:5])
-        )
-
+    except SameProgramError as exc:
+        raise ValueError(f"STATUS PLANT-FIRED: {exc}") from exc
     return {
+        **report,
         "status": "PASS_SAME_PROGRAM",
         "reference_bld": str(ref_bld),
         "new_bld": str(new_bld),
-        "identical_preprocessed_units": len(ref_src) - len(OBSERVER_UNITS),
-        "identical_compiled_objects": len(ref_obj) - len(OBSERVER_UNITS),
-        "icedyn_adv_pra_inserted_lines": pra_added,
-        "icestp_inserted_lines": stp_added,
-        "added_unit": WRITER_UNIT,
+    }
+
+
+def same_source_and_flags(
+    new_bld: Path,
+    ref_bld: Path,
+    pra_patch: Path,
+    stp_patch: Path,
+    *,
+    new_cfg: str = "ORCA2_SAS_ICE_O1_REC",
+    ref_cfg: str = "ORCA2_SAS_ICE_O1_REF",
+) -> dict[str, Any]:
+    """Preflight the real planned source/flag delta before any NEMO build."""
+    try:
+        checked = same_program_observers(
+            new_bld,
+            ref_bld,
+            dict(zip(OBSERVER_UNITS, (pra_patch, stp_patch), strict=True)),
+            (WRITER_UNIT,),
+            new_cfg=new_cfg,
+            ref_cfg=ref_cfg,
+        )
+    except SameProgramError as exc:
+        raise ValueError(f"STATUS PLANT-FIRED: {exc}") from exc
+    return {
+        "status": "PASS_SAME_SOURCE_AND_FLAGS",
+        "identical_preprocessed_units": checked["identical_ppsrc"],
+        "observer_units": checked["observer_units"],
+        "writer_units": [WRITER_UNIT],
+        "build_config_files": list(BUILD_CONFIG_FILES),
     }
 
 
@@ -983,6 +911,7 @@ def verify_ocean_output_log(
     log_path: str | Path,
     expect_icedyn: bool | None = None,
     expect_icethd: bool | None = None,
+    expect_rstart: bool | None = None,
     plant: str | None = None,
 ) -> dict[str, Any]:
     """Whitespace-tolerant NEMO `ocean.output` verifier (`LOG-CHECK NOTE`)."""
@@ -1066,6 +995,12 @@ def verify_ocean_output_log(
         raise ValueError(
             f"STATUS PLANT-FIRED: ln_icethd={parsed['ln_icethd']}, expected {expect_icethd}"
         )
+    if expect_rstart is not None:
+        parsed["ln_rstart"] = _extract_bool("ln_rstart")
+        if parsed["ln_rstart"] != expect_rstart:
+            raise ValueError(
+                f"STATUS PLANT-FIRED: ln_rstart={parsed['ln_rstart']}, expected {expect_rstart}"
+            )
     return {"status": "PASS", "parsed": parsed}
 
 
@@ -1329,7 +1264,7 @@ def _compare_si3_states_wet_and_full(
     score_t1_ice: bool = False,
     nn_hls: int = 2,
 ) -> dict[str, Any]:
-    """Compare only NEMO-defined wet interior cells; report full-grid ULP diagnostically."""
+    """Compare every NEMO-defined wet cell, including seam/fold halos."""
     prog_names = _PROG_FIELDS + (("snwice_fmass",) if check_fmass else ())
     if not score_t1_ice:
         # icerst.F90:329 defines t1_ice only for ln_cpl; O1 has ln_cpl=.false.
@@ -1361,7 +1296,9 @@ def _compare_si3_states_wet_and_full(
             for mname in SI3PratherMoments._fields:
                 a_arr = getattr(grp1, mname)
                 b_arr = getattr(grp2, mname)
-                wet_t = wet_mask_for_field(mname, tmask, nn_hls=nn_hls)
+                wet_t = wet_mask_for_field(
+                    mname, tmask, nn_hls=nn_hls, score_defined_halos=True
+                )
                 ulp_w = max_ulp_diff(a_arr, b_arr, mask=wet_t)
                 ulp_f = max_ulp_diff(a_arr, b_arr)
                 norm_w = max_normalized_diff(a_arr, b_arr, mask=wet_t)
@@ -1377,7 +1314,9 @@ def _compare_si3_states_wet_and_full(
     for eq_name in expected.equivalent._fields:
         a_arr = getattr(expected.equivalent, eq_name)
         b_arr = getattr(actual.equivalent, eq_name)
-        wet_t = wet_mask_for_field(eq_name, tmask, nn_hls=nn_hls)
+        wet_t = wet_mask_for_field(
+            eq_name, tmask, nn_hls=nn_hls, score_defined_halos=False
+        )
         ulp_w = max_ulp_diff(a_arr, b_arr, mask=wet_t)
         ulp_f = max_ulp_diff(a_arr, b_arr)
         norm_w = max_normalized_diff(a_arr, b_arr, mask=wet_t)
@@ -1393,7 +1332,9 @@ def _compare_si3_states_wet_and_full(
     for agg_name in expected.aggregated._fields:
         a_arr = getattr(expected.aggregated, agg_name)
         b_arr = getattr(actual.aggregated, agg_name)
-        wet_t = wet_mask_for_field(agg_name, tmask, nn_hls=nn_hls)
+        wet_t = wet_mask_for_field(
+            agg_name, tmask, nn_hls=nn_hls, score_defined_halos=False
+        )
         ulp_w = max_ulp_diff(a_arr, b_arr, mask=wet_t)
         ulp_f = max_ulp_diff(a_arr, b_arr)
         norm_w = max_normalized_diff(a_arr, b_arr, mask=wet_t)
@@ -1598,7 +1539,10 @@ def _verify_run_completion_and_logs(
     if not ocean_out.is_file():
         raise ValueError(f"STATUS PLANT-FIRED: missing ocean.output in {run_label} ({run_dir})")
     log_report = verify_ocean_output_log(
-        ocean_out, expect_icedyn=False, expect_icethd=False
+        ocean_out,
+        expect_icedyn=False,
+        expect_icethd=False,
+        expect_rstart=run_label == "rst_1step",
     )
     stdout_log = run_dir / "run.user.stdout.log"
     if not stdout_log.is_file():
@@ -1642,12 +1586,35 @@ def admit_evidence_directory(
         raise ValueError(
             f"STATUS PLANT-FIRED: malformed producer commit {recorded_commit!r}"
         )
+    if plant == "stamp":
+        recorded_commit = "0" * 40
+    commit_object = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "cat-file", "-e", f"{recorded_commit}^{{commit}}"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if commit_object.returncode != 0:
+        raise ValueError(
+            f"STATUS PLANT-FIRED: producer commit {recorded_commit} is not a commit object"
+        )
+    ancestor = subprocess.run(
+        [
+            "git", "-C", str(REPO_ROOT), "merge-base", "--is-ancestor",
+            recorded_commit, "HEAD",
+        ],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if ancestor.returncode != 0:
+        raise ValueError(
+            f"STATUS PLANT-FIRED: producer commit {recorded_commit} is not an ancestor of HEAD"
+        )
     if expect_commit is not None and recorded_commit != expect_commit.strip():
         raise ValueError(
             f"STATUS PLANT-FIRED: producer commit {recorded_commit} != expected {expect_commit.strip()}"
         )
-    if plant == "stamp":
-        recorded_commit = "0" * 40
 
     same_prog_path = manifest_dir / "same_program.json"
     if not same_prog_path.is_file():
@@ -1664,6 +1631,24 @@ def admit_evidence_directory(
         manifest_dir / "binaries.sha256", label="binaries.sha256",
         plant_mismatch=plant == "binary-sha",
     )
+    binary_targets = {
+        Path(line.strip().split(None, 1)[1]).resolve()
+        for line in (manifest_dir / "binaries.sha256").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    }
+    try:
+        expected_binary_targets = {
+            (Path(same_prog_data["reference_bld"]) / "bin/nemo.exe").resolve(),
+            (Path(same_prog_data["new_bld"]) / "bin/nemo.exe").resolve(),
+        }
+    except (KeyError, TypeError) as exc:
+        raise ValueError(
+            "STATUS PLANT-FIRED: same_program.json lacks reference/new build paths"
+        ) from exc
+    if binary_targets != expected_binary_targets or binaries_checked != 2:
+        raise ValueError(
+            "STATUS PLANT-FIRED: binaries.sha256 is not the two same-program nemo.exe files"
+        )
     inputs_checked = _verify_sha256_manifest(
         manifest_dir / "inputs.sha256", label="inputs.sha256",
         plant_mismatch=plant == "input-sha",
@@ -1706,7 +1691,11 @@ def admit_evidence_directory(
         rec_rst = rec_dir / rst_name
         if not ref_rst.is_file() or not rec_rst.is_file():
             raise ValueError(f"STATUS PLANT-FIRED: missing restart file {rst_name}")
-        if plant == "ref-rec-diff" or ref_rst.read_bytes() != rec_rst.read_bytes():
+        ref_payload = ref_rst.read_bytes()
+        rec_payload = rec_rst.read_bytes()
+        if plant == "ref-rec-diff" and step == 1:
+            rec_payload += b"PLANTED_REF_REC_DIFFERENCE"
+        if ref_payload != rec_payload:
             raise ValueError(
                 f"STATUS PLANT-FIRED: instrumented restart {rst_name} differs from reference"
             )
@@ -1755,21 +1744,37 @@ def admit_evidence_directory(
     rst_records = rst_dir / "o1_si3_records"
     rst_entry_files = sorted(rst_records.glob("o1_si3_state_entry_rank*.bin"))
     rst_step1_files = sorted(rst_records.glob("o1_si3_state_step0001_rank*.bin"))
-    rst_nc = rst_dir / "output_restart/ORCA2_SAS_00000001_restart_ice_o1_output.nc"
+    rst_nc = rst_dir / "output_restart/ORCA2_SAS_00000002_restart_ice_o1_output.nc"
+    rst_ocean_nc = rst_dir / "output_restart/ORCA2_SAS_00000002_restart_o1_output.nc"
     rst_input = rst_dir / "input_restart/ORCA2_SAS_00000001_restart_ice.nc"
+    rst_ocean_input = rst_dir / "input_restart/ORCA2_SAS_00000001_restart.nc"
     producer_restart = rec_dir / "ORCA2_SAS_00000001_restart_ice.nc"
+    producer_ocean_restart = rec_dir / "ORCA2_SAS_00000001_restart.nc"
+    rst_nc_checked = (
+        rst_nc.with_name("PLANTED_MISSING_restart_ice.nc")
+        if plant == "rst-missing"
+        else rst_nc
+    )
     if (
-        plant == "rst-missing"
-        or not rst_entry_files
+        not rst_entry_files
         or not rst_step1_files
-        or not rst_nc.is_file()
+        or not rst_nc_checked.is_file()
+        or not rst_ocean_nc.is_file()
         or not rst_input.is_file()
+        or not rst_ocean_input.is_file()
     ):
         raise ValueError(
             "STATUS PLANT-FIRED: missing binary state records or restart NetCDF in rst_1step"
         )
     if rst_input.resolve() == rst_nc.resolve() or rst_input.read_bytes() != producer_restart.read_bytes():
         raise ValueError("STATUS PLANT-FIRED: restart input/output isolation or copied-input hash failed")
+    if (
+        rst_ocean_input.resolve() == rst_ocean_nc.resolve()
+        or rst_ocean_input.read_bytes() != producer_ocean_restart.read_bytes()
+    ):
+        raise ValueError(
+            "STATUS PLANT-FIRED: ocean restart input/output isolation or copied-input hash failed"
+        )
 
     rst_snap_entry = stitch_o1_binary_snapshots(
         [read_o1_binary_snapshot(p) for p in rst_entry_files]
@@ -1786,7 +1791,7 @@ def admit_evidence_directory(
         tmask=tmask,
         sss_m=rst_sss_entry,
         config=cfg,
-        ln_rstart=False,
+        ln_rstart=True,
     )
     lego_rst_step1 = si3_o1_step(
         lego_rst_entry, tmask=tmask, sss_m=rst_sss_entry, config=cfg
@@ -1883,7 +1888,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--verify-deck-fixture", type=Path, default=None)
     parser.add_argument("--expect-icedyn", choices=("T", "F"), default=None)
     parser.add_argument("--expect-icethd", choices=("T", "F"), default=None)
+    parser.add_argument("--expect-rstart", choices=("T", "F"), default=None)
     parser.add_argument("--same-program", type=Path, default=None)
+    parser.add_argument("--same-source-flags", type=Path, default=None)
     parser.add_argument("--reference-bld", type=Path, default=None)
     parser.add_argument("--pra-patch", type=Path, default=None)
     parser.add_argument("--stp-patch", type=Path, default=None)
@@ -1904,23 +1911,26 @@ def main(argv: list[str] | None = None) -> int:
         elif args.verify_log is not None:
             exp_dyn = None if args.expect_icedyn is None else (args.expect_icedyn == "T")
             exp_thd = None if args.expect_icethd is None else (args.expect_icethd == "T")
+            exp_rst = None if args.expect_rstart is None else (args.expect_rstart == "T")
             report = verify_ocean_output_log(
                 args.verify_log,
                 expect_icedyn=exp_dyn,
                 expect_icethd=exp_thd,
+                expect_rstart=exp_rst,
                 plant=args.plant,
             )
-        elif args.same_program is not None:
+        elif args.same_program is not None or args.same_source_flags is not None:
             if (
                 args.reference_bld is None
                 or args.pra_patch is None
                 or args.stp_patch is None
             ):
                 parser.error(
-                    "--same-program requires --reference-bld, --pra-patch, and --stp-patch"
+                    "same-source/program checks require --reference-bld, --pra-patch, and --stp-patch"
                 )
-            report = same_program(
-                args.same_program,
+            checker = same_program if args.same_program is not None else same_source_and_flags
+            report = checker(
+                args.same_program if args.same_program is not None else args.same_source_flags,
                 args.reference_bld,
                 args.pra_patch,
                 args.stp_patch,

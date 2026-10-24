@@ -464,6 +464,12 @@ def test_o1_lane3_column_state_bridge_roundtrip() -> None:
     )
     tmask = jnp.array([[1.0, 1.0], [1.0, 0.0]], dtype=jnp.float64)
     full_state = SI3State.from_column_state(col, tmask=tmask, sss_m=34.0)
+    default_state = SI3State.from_column_state(col, tmask=tmask)
+    _assert_zero_ulp(
+        default_state.equivalent.s_i,
+        full_state.equivalent.s_i,
+        "lane3_default_salinity_34",
+    )
     assert full_state.v_i.shape == (2, 2, 1)
     assert full_state.e_i.shape == (2, 2, 3, 1)
     assert full_state.e_s.shape == (2, 2, 3, 1)
@@ -782,20 +788,71 @@ def test_o1_restart_optional_fields_follow_nemo_branching() -> None:
 
     # update_rst('READ') is gated by ln_rstart (iceupdate.F90:453).
     rst["snwice_mass"] = np.full_like(rst["snwice_mass"], 9876.0)
+    rst["snwice_mass_b"] = np.full_like(rst["snwice_mass_b"], 6789.0)
     fresh = si3_rst_from_netcdf_dict(rst, tmask=tmask, config=cfg, ln_rstart=False)
     restarted = si3_rst_from_netcdf_dict(rst, tmask=tmask, config=cfg, ln_rstart=True)
     assert not np.any(np.asarray(fresh.snwice_mass) == 9876.0)
     assert np.all(np.asarray(restarted.snwice_mass)[2:-2, 2:-2] == 9876.0)
 
-    # v_il exists only under a_ip and ln_pnd_lids (icerst.F90:322-328).
+    # v_il is probed and read independently of a_ip and ln_pnd_lids
+    # (icerst.F90:318-325).
     no_lids = cfg._replace(ln_pnd_lids=False)
     without_lids = si3_rst_from_netcdf_dict(rst, tmask=tmask, config=no_lids)
-    _assert_zero_ulp(without_lids.v_il, np.zeros_like(without_lids.v_il), "v_il.no_lids")
+    _assert_zero_ulp(without_lids.v_il, restarted.v_il, "v_il.no_lids")
     no_pond = dict(rst)
     no_pond.pop("a_ip")
     no_pond.pop("v_ip")
     without_pond = si3_rst_from_netcdf_dict(no_pond, tmask=tmask, config=cfg)
-    _assert_zero_ulp(without_pond.v_il, np.zeros_like(without_pond.v_il), "v_il.no_a_ip")
+    _assert_zero_ulp(without_pond.v_il, restarted.v_il, "v_il.no_a_ip")
+
+    # update_rst's iom_get applies lbc_lnk after the mass payload overwrites
+    # memory; all 960 defined cyclic-seam and north-fold halo cells must be full.
+    defined_halo = np.zeros(restarted.snwice_mass.shape, dtype=bool)
+    defined_halo[:2, 2:] = True
+    defined_halo[-2:, 2:] = True
+    defined_halo[:, -2:] = True
+    assert np.count_nonzero(defined_halo) == 960
+    assert np.all(np.asarray(restarted.snwice_mass)[defined_halo] == 9876.0)
+    assert np.all(np.asarray(restarted.snwice_mass_b)[defined_halo] == 6789.0)
+
+
+def test_o1_restart_reader_refuses_rank_and_category_shape_mismatches() -> None:
+    cfg = SI3ORCA2StateConfig.for_orca2_sas_ice()
+    state, tmask, _, _ = gate.build_synthetic_orca2_o1_state(cfg)
+    rst = si3_rst_to_netcdf_dict(state, kt=1, config=cfg)
+
+    bad_u_rank = dict(rst)
+    bad_u_rank["u_ice"] = np.zeros((184, 152, cfg.jpl), dtype=np.float64)
+    with pytest.raises(ValueError, match="u_ice rank/shape"):
+        si3_rst_from_netcdf_dict(bad_u_rank, tmask=tmask, config=cfg)
+
+    bad_vi_categories = dict(rst)
+    bad_vi_categories["v_i"] = np.zeros((184, 152, cfg.jpl + 1), dtype=np.float64)
+    with pytest.raises(ValueError, match="v_i rank/shape"):
+        si3_rst_from_netcdf_dict(bad_vi_categories, tmask=tmask, config=cfg)
+
+
+def test_o1_scorer_includes_defined_seam_and_fold_halos_only() -> None:
+    cfg = SI3ORCA2StateConfig.for_orca2_sas_ice()
+    state, tmask, umask, vmask = gate.build_synthetic_orca2_o1_state(cfg)
+
+    for i, j in ((0, 20), (20, 151)):
+        changed = np.asarray(state.v_i).copy()
+        changed[i, j, 0] = np.nextafter(changed[i, j, 0], np.inf)
+        with pytest.raises(ValueError, match="v_i"):
+            gate._compare_si3_states_wet_and_full(
+                state, state._replace(v_i=jnp.asarray(changed)),
+                tmask, umask, vmask,
+            )
+
+    # diag_set0 and the equivalent/aggregate DO_2D loops leave their halos
+    # undefined, so those are the only wet halo values deliberately excluded.
+    t_si_changed = np.asarray(state.t_si).copy()
+    t_si_changed[0, 20, 0] = 999.0
+    gate._compare_si3_states_wet_and_full(
+        state, state._replace(t_si=jnp.asarray(t_si_changed)),
+        tmask, umask, vmask,
+    )
 
 
 def test_o1_same_program_and_objects_equal_plants(tmp_path: Path) -> None:
@@ -1003,13 +1060,22 @@ nlay_s = 5
 ln_virtual_itd = F
 ln_icedyn = F
 ln_icethd = F
+ln_rstart = F
 ln_cat_hfn = T
 rn_himean = 2.0
 AAAAAAAA
 """
-    commit_hex = "a" * 40
+    commit_hex = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     for rdir in (ev / "ref_2step", ev / "rec_2step", ev / "rst_1step"):
-        (rdir / "ocean.output").write_text(o1_log, encoding="utf-8")
+        run_log = o1_log.replace(
+            "ln_rstart = F", "ln_rstart = T" if rdir.name == "rst_1step" else "ln_rstart = F"
+        )
+        (rdir / "ocean.output").write_text(run_log, encoding="utf-8")
         (rdir / "run.user.stdout.log").write_text("NEMO run ok\nSTOP 0\n", encoding="utf-8")
         (rdir / "RUN_COMPLETE").write_text("ok\n", encoding="utf-8")
         (rdir / "RUN_PRODUCER_COMMIT").write_text(commit_hex + "\n", encoding="utf-8")
@@ -1028,6 +1094,11 @@ AAAAAAAA
     shutil.copy2(
         ev / "rec_2step/ORCA2_SAS_00000001_restart_ice.nc",
         ev / "rst_1step/input_restart/ORCA2_SAS_00000001_restart_ice.nc",
+    )
+    for run_name in ("ref_2step", "rec_2step"):
+        (ev / run_name / "ORCA2_SAS_00000001_restart.nc").write_bytes(b"ocean restart step 1")
+    (ev / "rst_1step/input_restart/ORCA2_SAS_00000001_restart.nc").write_bytes(
+        b"ocean restart step 1"
     )
 
     # Write rec_2step binary records
@@ -1077,7 +1148,7 @@ AAAAAAAA
         tmask=tmask,
         sss_m=sss,
         config=cfg,
-        ln_rstart=False,
+        ln_rstart=True,
     )
     rst_step1 = si3_o1_step(rst_entry, tmask=tmask, sss_m=sss, config=cfg)
     _write_o1_binary_snapshot(
@@ -1103,22 +1174,42 @@ AAAAAAAA
         cfg=cfg,
     )
     write_si3_netcdf_restart(
-        ev / "rst_1step/output_restart/ORCA2_SAS_00000001_restart_ice_o1_output.nc",
+        ev / "rst_1step/output_restart/ORCA2_SAS_00000002_restart_ice_o1_output.nc",
         rst_step1,
-        kt=1,
+        kt=2,
         config=cfg,
+    )
+    (ev / "rst_1step/output_restart/ORCA2_SAS_00000002_restart_o1_output.nc").write_bytes(
+        b"ocean restart step 2"
     )
 
     # Write manifests
     (ev / "manifest/producer_commit.txt").write_text(commit_hex + "\n", encoding="utf-8")
+    ref_bld = ev / "built/ORCA2_SAS_ICE_O1_REF/BLD"
+    rec_bld = ev / "built/ORCA2_SAS_ICE_O1_REC/BLD"
     (ev / "manifest/same_program.json").write_text(
-        json.dumps({"status": "PASS_SAME_PROGRAM"}) + "\n", encoding="utf-8"
+        json.dumps(
+            {
+                "status": "PASS_SAME_PROGRAM",
+                "reference_bld": str(ref_bld),
+                "new_bld": str(rec_bld),
+            }
+        ) + "\n",
+        encoding="utf-8",
     )
-    dummy_bin = ev / "manifest/dummy_nemo.exe"
-    dummy_bin.write_bytes(b"\x7fELF nemo")
-    bin_sha = hashlib.sha256(dummy_bin.read_bytes()).hexdigest()
-    (ev / "manifest/binaries.sha256").write_text(f"{bin_sha}  {dummy_bin}\n", encoding="utf-8")
-    (ev / "manifest/inputs.sha256").write_text(f"{bin_sha}  {dummy_bin}\n", encoding="utf-8")
+    ref_bin = ref_bld / "bin/nemo.exe"
+    rec_bin = rec_bld / "bin/nemo.exe"
+    ref_bin.parent.mkdir(parents=True)
+    rec_bin.parent.mkdir(parents=True)
+    ref_bin.write_bytes(b"\x7fELF reference nemo")
+    rec_bin.write_bytes(b"\x7fELF instrumented nemo")
+    binary_rows = []
+    for binary in (ref_bin, rec_bin):
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        binary_rows.append(f"{digest}  {binary}\n")
+    (ev / "manifest/binaries.sha256").write_text("".join(binary_rows), encoding="utf-8")
+    input_sha = hashlib.sha256(ref_bin.read_bytes()).hexdigest()
+    (ev / "manifest/inputs.sha256").write_text(f"{input_sha}  {ref_bin}\n", encoding="utf-8")
 
     adm = gate.admit_evidence_directory(ev, expect_commit=commit_hex)
     assert adm["status"] == "PASS"
