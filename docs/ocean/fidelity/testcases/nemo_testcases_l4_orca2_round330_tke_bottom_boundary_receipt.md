@@ -6,15 +6,16 @@ Base: `355880d5b796`; preregistration `3c27c2f6f599`; implementation
 `ddd2821b7194`; cross-tree D122 instrument `f1836e669e7d`; bottom-index census
 instrument `e3fbb42b3e57`.
 
-Disposition: **LANDED-pending** (operator review and push gate).
+Disposition: **HELD-pending** (operator GPU acquisition, final gates and
+review).
 
 ## Answer
 
 **CONFIRMED owner.**  NEMO writes the bottom TKE boundary at `mbkt+1`, but a
 full-depth column puts that value at `jpk`, outside the `2:jpkm1` tridiagonal
-solve.  The certified V1 card instead clipped that out-of-range index onto its
-last carried solve row and replaced the row by an identity equation.  Keeping
-the scatter only when the raw index is inside the carried array removes every
+solve.  Rung 10's comparison card instead clipped that out-of-range index onto
+its last carried solve row and replaced the row by an identity equation.
+Keeping the scatter only when the raw index is inside the carried array removes every
 deepest-interface returned-energy mismatch (4,757 -> 0) and every
 deepest-interface viscosity mismatch (4,596 -> 0).
 
@@ -49,13 +50,20 @@ Consequently:
 - **Returned viscosity:** NEMO computes it only through `jpkm1`, from the
   solved `en` (`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:709-711`).
 
-**CONFIRMED, card.**  The ORCA2 recipe converts NEMO's one-based bottom T-cell
+**CONFIRMED, card.**  Rung 10's ORCA2 recipe selects the bottom boundary
+(`nemo_testcase_recipe.py:2042`) and converts NEMO's one-based bottom T-cell
 index to `bottom_level=bottom-1` (`nemo_testcase_recipe.py:1820-1827`).  The
-card carries 29 zero-based solve rows.  Its old scatter clipped every index
+card carries 29 zero-based solve rows.  The old scatter clipped every index
 into `[0,N-1]`; the correction retains the clipped gather index but ANDs the
 row selector with `0 <= raw_idx < N` (`tke.py:1803-1834`).  Thus a shallower
 `bottom_level=28` remains an identity row while full-depth `bottom_level=29`
 does not overwrite solved row 28.
+
+**CONFIRMED, V1 untouched.**  Lane B's V1 deck turns drag off
+(`nemo_testcase_v1_orca2tke/namelist_cfg:193`); its recipe consequently sets
+`bottom_tke_bc=False` and includes that value in the V1 selector
+(`gridladder_vmix/nemo_testcase_recipe.py:5083,5099`).  V1 never executes the
+changed scatter, so its certified values are unchanged by construction.
 
 ## Record census and literal replay
 
@@ -118,6 +126,34 @@ forward-parity non-bit leaves.  Reverse/forward relative errors are
 (`rn_ud` T; reverse `-4.511704487033998e-5`).  Peak RSS is 74.5 GiB.  Evidence
 SHA-256 `88044d158531b30f3257c8dd48601c79cec166caa3bf4dc17f574543b2618e18`.
 
+## DINO shared-branch effect
+
+**CONFIRMED, selected.**  DINO's `nemo_dino_kamm_mlf` recipe selects the
+bottom boundary (`dino.py:1287`).  The committed fp64 probe instantiates that
+recipe's literal TKE solve on both DINO grids with inexact, nonuniform operands
+(`nemo_testcase_l4_orca2_round330_dino_probe.py:88-170`).
+
+- Default 35-level grid: 7,306 columns have `bottom_level == N == 34`.
+  The normalized TKE program changes (SHA-256
+  `d4827052b5761dac7317e429e461d20097b90a695935daf351703d7764b42724`
+  -> `4d4712197d8fc0c0e422f5d6655f4ae1dde2477ce50664f5cc64c48e6ac7ce62`).
+  Three chained solve values move on every step: array SHA-256
+  `1ac5ab30...`, `8865506a...`, `a2d3f282...` -> `07286693...`,
+  `d626e022...`, `bd2c1c16...`; the old pin keeps the maximum at
+  `7.003482e-4`, while the solved maxima are `5.1976535e-5`,
+  `2.5940056e-5`, and `1.6933280e-5`.
+- NEMO-faithful 36-level grid: no wet column has an out-of-solve positive
+  index; 428 dry columns carry `bottom_level=-1`.  The normalized TKE program
+  changes, but all three chained arrays are bit-identical before/after (SHA-256
+  `f0a999a2...`, `6eba3f56...`, `cd64a369...`).  The complete faithful-grid
+  model program also changes (SHA-256 `bb0c501f...` -> `f2be22cb...`).  Its
+  full three-step GPU values and the certified day-30 NEMO comparison are
+  pending the operator acquisition below because this sandbox exposes no GPU.
+
+Evidence is under `orca2_rounds/round330/dino/`.  The synchronous acquisition,
+which refuses a busy GPU and stops its own exact PID below 150 GiB available
+memory, is `orca2_rounds/round330/dino/run.sh`.
+
 ## Gates
 
 - Preregistration frozen before payload inspection; P1--P4 all confirmed.
@@ -129,6 +165,10 @@ SHA-256 `88044d158531b30f3257c8dd48601c79cec166caa3bf4dc17f574543b2618e18`.
   0 map-audit failures; its full pytest gate is 17 passed.
 - Default ORCA2 landing battery: 147 passed in 952.64 s, including all 6
   private-import ratchet tests.
+- Strengthened literal full-depth test: candidate 2 passed; old clamp 2 failed,
+  including expected binary64 word `4535269685926082061` -> pinned
+  `4559595583697369799`.
+- DINO faithful-grid three-step and month gate: **PENDING ACQUISITION**.
 
 independent review: operator (Claude)
 
@@ -146,3 +186,14 @@ the `k=0` family and first unequal index `[1,119,19]`, are not owned by this
 statement.  The top BC and the still-unrecorded `zdf_sh2`, `zdf_drg`, and
 `zdf_mxl` inputs remain candidates for that residual only; this round neither
 confirms nor excludes them.
+
+**Named debt — legacy no-index path.**  When a caller supplies a bottom value
+without per-column bottom indices, the old path still pins the last carried row
+unconditionally (`tke.py:1812-1817`).  No current card takes that path; this
+round records it and does not change it.
+
+**Named debt — faithful-grid terminal coupling (PLAUSIBLE, pre-existing).**
+The faithful-grid solve still carries the `jpkm1` row's upper coefficient into
+the assembled recurrence (`tke.py:1664-1670`), coupling it to the carried
+`jpk` row even though NEMO's terminal assignment never reads `en(jpk)`.  The
+round-330 range fix neither introduces nor repairs that separate topology.
