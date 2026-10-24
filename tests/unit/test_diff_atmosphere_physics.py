@@ -288,9 +288,14 @@ class TestConvectionGrad:
             state = state._replace(tracers={
                 **state.tracers, "q_v": q_v.replace(data=q_v.data * (1.05 / 0.8))})
 
+        ps = None
+        if scheme == "zhang_mcfarlane":  # ZM needs the carried pblh: CAM cold start
+            from tests._zm_cold_start import cold_phys_state
+            ps = cold_phys_state(state.T.data)
+
         def loss(T_data):
             s = state._replace(T=state.T.replace(data=T_data))
-            tend, _ = conv_fn(s, self.grid, self.sigma)
+            tend, _ = conv_fn(s, self.grid, self.sigma, phys_state=ps)
             return jnp.sum(tend.dT_dt.data ** 2)
 
         grad = jax.grad(loss)(state.T.data)

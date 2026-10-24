@@ -38,8 +38,8 @@ from legoesm.atmosphere.physics.convection.config import (
 from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
 from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
-from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
-    zhang_mcfarlane_convection,
+from tests._zm_cold_start import (  # ZM at CAM's cold-start pblh = 0
+    zm_cold_start as zhang_mcfarlane_convection,
 )
 
 

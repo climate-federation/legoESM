@@ -45,7 +45,21 @@ from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import (
     e3sm_cam_gwd,
 )
 
+
 from legoesm import constants as C
+
+
+_e3sm_cam_gwd_kernel = e3sm_cam_gwd
+
+
+def e3sm_cam_gwd(*args, **kw):
+    """The kernel with ``p_ref_half`` (E3SM pref_edge) = the test column's own
+    interfaces: these columns are built at surface pressure p_ref = 1e5 Pa, so
+    their interfaces ARE the reference interfaces a lane would pass."""
+    if "p_ref_half" not in kw:
+        ph = kw["p_half"] if "p_half" in kw else args[4]
+        kw["p_ref_half"] = jnp.asarray(ph)[0]
+    return _e3sm_cam_gwd_kernel(*args, **kw)
 
 
 @pytest.fixture(autouse=True)
@@ -520,7 +534,9 @@ def test_spectral_heating_band_cuts_deep_beres_dttke():
                            cfg_off, netdt_col=netdt)
     out_on = e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, 1800.0,
                           cfg_on, netdt_col=netdt)
-    kbot = int(np.argmin(np.abs(pmid_mean - cfg_on.ediff_kbot_p)))
+    # E3SM kbotbg: last reference interface above ediff_kbot_p (the wrapper
+    # passes the column's own interfaces as pref_edge).
+    kbot = int(np.sum(np.asarray(ph)[0] < cfg_on.ediff_kbot_p)) - 1
     below = np.array(out_off.dT_dt)[:, kbot:]
     assert np.max(np.abs(below)) > 0.0, (
         "fixture must deposit legacy dttke below the 500 hPa band")

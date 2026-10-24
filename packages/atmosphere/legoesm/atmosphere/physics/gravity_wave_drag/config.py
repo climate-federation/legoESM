@@ -37,7 +37,7 @@ __param_spec__ = {
     "E3SMBeresConfig": {
         "scheme_key": "atm.gwd.E3SMBeresConfig",
         "excluded": {
-            "source_wind_p": "selects a level INDEX by argmin(|p - value|), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "source_wind_p": "selects a level INDEX (the last reference interface with p below the value, E3SM gw_init), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
             "z_heat_max": "bounds the integer heating-depth search window (a comparison), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
             "hdepth_min_km": "enters only a hard on/off comparison, so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
             "mfcc_uh_slope": "stand-in-table-only surrogate slope (default 0 = uh-independent); the real source spectrum is the offline mfcc table, not a trained scalar",
@@ -57,8 +57,9 @@ __param_spec__ = {
     "E3SMCAMConfig": {
         "scheme_key": "atm.gwd.E3SMCAMConfig",
         "excluded": {
-            "ediff_kbot_p": "selects a level INDEX by argmin(|p - value|), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "ediff_kbot_p": "selects a level INDEX (the last reference interface with p below the value, E3SM gw_init), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
             "alpha_newtonian": "uniform Newtonian-cooling coefficient (default 0 = off); when used it is replaced by the E3SM height profile, not a single trained scalar",
+            "kwv": "E3SM module PARAMETER (gw_drag.F90:79-83 kwv = 6.28e-5), not a namelist knob; fixed by the oracle",
             # dc is the phase-speed bin width but the frontal source quadrature
             # turns it into a Python integer sub-interval COUNT
             # (e3sm_cam._front_fav: n_sub = int(math.floor(dc/dca + 0.5)) - 1,
@@ -87,8 +88,8 @@ __param_spec__ = {
     "E3SMFrontalConfig": {
         "scheme_key": "atm.gwd.E3SMFrontalConfig",
         "excluded": {
-            "front_p": "selects a level INDEX by argmin(|p - value|), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
-            "launch_p": "selects a level INDEX by argmin(|p - value|), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "front_p": "selects a level INDEX (the last reference interface with p below the value, E3SM gw_init), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "launch_p": "selects a level INDEX (the last reference interface with p below the value, E3SM gw_init), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
             "frontgfc": "enters only a hard on/off comparison, so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
             "front_spectrum_dc_resolution": "sub-bin c-grid quadrature spacing dca for the Gaussian integration; a numerical resolution of the spectrum, not a closure",
         },
@@ -538,11 +539,12 @@ class E3SMFrontalConfig(NamedTuple):
         Gaussian width in phase speed [m/s] (default 30.0, CAM ``c0``).
     launch_p : float
         Pressure [Pa] of the wave LAUNCH interface ``kbot`` (E3SM ``kbotbg``,
-        the interface nearest 500 hPa; default 5.0e4).
+        the last reference interface above 500 hPa, gw_drag.F90:346;
+        default 5.0e4).
     front_p : float
         Pressure [Pa] of the frontogenesis TRIGGER level ``kfront`` (E3SM
-        ``kfront``, the level near 600 hPa where ``frontgf`` is tested;
-        default 6.0e4).  E3SM tests the trigger at ``kfront`` but launches at
+        ``kfront``, the layer whose top reference interface is the last one
+        above 600 hPa, gw_drag.F90:417-420; default 6.0e4).  E3SM tests the trigger at ``kfront`` but launches at
         ``kbot`` — these are NOT the same level.
     front_spectrum_dc_resolution : float
         Sub-bin c-grid spacing [m/s] for the Gaussian phase-speed
@@ -620,7 +622,8 @@ class E3SMBeresConfig(NamedTuple):
         (E3SM ``10``, default 10.0).
     source_wind_p : float
         Pressure [Pa] of the source-wind level ``k700`` (E3SM selects the
-        level nearest 700 hPa; default 7.0e4).  The 700 hPa winds set the
+        layer whose top reference interface is the last one above 700 hPa,
+        gw_drag.F90:453-456; default 7.0e4).  The 700 hPa winds set the
         source direction and the storm speed.
     maxh : int
         Heating-depth table dimension (E3SM ``maxh = 20``); the diagnosed
@@ -676,11 +679,12 @@ class E3SMBeresConfig(NamedTuple):
         interfaces at the half-km points, so an exact tie takes the LOWER
         row).  Identical away from exact ties.
     source_level_rule : str
-        Which midpoint supplies the source wind: ``"nearest_midpoint"``
-        (E3SM: the level whose column-mean pressure is nearest
-        ``source_wind_p``; default) or ``"interface_below_p"`` (CAM6
-        ``gw_drag.F90:871-874``: the lowest midpoint whose TOP interface
-        pressure is below ``source_wind_p``, i.e. the layer straddling it).
+        Which midpoint supplies the source wind: ``"interface_below_p"``
+        (default; E3SM gw_drag.F90:453-456 and CAM6 gw_drag.F90:871-874, the
+        same rule): the lowest midpoint whose TOP reference interface
+        (``pref_edge``) is below ``source_wind_p``, i.e. the layer
+        straddling it.  ``"nearest_midpoint"`` (column-mean pressure nearest
+        ``source_wind_p``) matches neither oracle and raises.
     mfcc_uh_slope : float
         Fractional change of the stand-in spectrum amplitude per (m/s) of the
         heating-region mean wind ``uh`` (default 0.0 -> uh-independent).  The
@@ -709,7 +713,7 @@ class E3SMBeresConfig(NamedTuple):
     mfcc_table_path: str = ""
     spectrum_shift: str = "circular"
     storm_speed_truncate: bool = True
-    source_level_rule: str = "nearest_midpoint"
+    source_level_rule: str = "interface_below_p"
     hd_index_rule: str = "nint"
 
 
@@ -745,7 +749,9 @@ class E3SMCAMConfig(NamedTuple):
     dc : float
         Phase-speed bin width [m/s] (default 2.5, CAM ``dc``).
     kwv : float
-        Effective horizontal wavenumber [1/m] (default 2*pi/1e5).
+        Effective horizontal wavenumber [1/m] (default 6.28e-5, the E3SM
+        ``gw_drag.F90:79-83`` parameter; was 2*pi/1e5, 5.07e-4 relative
+        larger).
     fcrit2 : float
         Critical Froude number squared (default 1.0, CAM ``fcrit2``).
     effgw : float
@@ -785,13 +791,13 @@ class E3SMCAMConfig(NamedTuple):
         over-heats by ``0.5*dt*(du^2+dv^2)/c_pd`` per step.  Orographic
         source only.
     use_newtonian_profile : bool
-        When ``True`` use the E3SM height-dependent Newtonian-cooling
-        profile (``alpha0``/``palph`` from gw_drag.F90, interpolated to the
-        column interface pressures) in the spectral saturation/diffusivity
-        instead of the single uniform ``alpha_newtonian``.  ``False``
-        (default) keeps the uniform value so the clean oracle comparison is
-        unchanged.  E3SM uses the profile for spectral sources and a tiny
-        floor (1e-6 1/s) for orographic-only.
+        ``True`` (DEFAULT, E3SM): the height-dependent Newtonian-cooling
+        profile (``alpha0``/``palph`` from gw_drag.F90, interpolated onto
+        the REFERENCE interfaces ``pref_edge``, gw_drag.F90:313-341) in the
+        saturation/diffusivity of every spectral source and of the
+        orographic member of a spectral suite.  ``False`` is a legacy
+        non-E3SM opt-out (uniform ``alpha_newtonian``).  The orographic-only
+        suite always uses the uniform ``alpha_newtonian`` (E3SM: 1e-6 1/s).
     use_e3sm_spectral_heating : bool
         E3SM-faithful spectral thermal term (``True`` DEFAULT since
         2026-07-17 — the oracle applies it unconditionally; ``False`` =
@@ -832,7 +838,8 @@ class E3SMCAMConfig(NamedTuple):
         ``150``, gw_diffusion.F90).
     ediff_kbot_p : float
         Pressure [Pa] of the eddy-diffusion bottom level ``kbotbg`` (E3SM
-        selects the interface nearest 500 hPa; default 5.0e4).
+        selects the last reference interface above 500 hPa,
+        gw_drag.F90:346; default 5.0e4).
     orographic : E3SMOrographicConfig
         Orographic source sub-config.
     frontal : E3SMFrontalConfig
@@ -843,7 +850,7 @@ class E3SMCAMConfig(NamedTuple):
     source: str = "orographic"
     pgwv: int = 0
     dc: float = 2.5
-    kwv: float = 2.0 * math.pi / 1.0e5
+    kwv: float = 6.28e-5        # E3SM v3.0.1 gw_drag.F90:79-83 ``kwv = 6.28e-5_r8``
     fcrit2: float = 1.0
     effgw: float = 0.125
     alpha_newtonian: float = 0.0
@@ -856,7 +863,7 @@ class E3SMCAMConfig(NamedTuple):
     dttke_use_intrinsic: bool = False
     use_discrete_ke_heating: bool = True
     use_e3sm_spectral_heating: bool = True
-    use_newtonian_profile: bool = False
+    use_newtonian_profile: bool = True
     do_eddy_diffusion: bool = False
     do_energy_conservation: bool = True
     prndl: float = 0.25

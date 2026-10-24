@@ -409,6 +409,9 @@ class PhysicsPipeline:
         # ``_gwd_mcfarlane`` marks a scheme with a ``mcfarlane`` (CAM6
         # gw_oro) part: it takes the reference interfaces and land fraction.
         self._gwd_mcfarlane = False
+        # ``_gwd_e3sm`` marks a scheme with an ``e3sm_cam`` part: it takes the
+        # reference interfaces (E3SM pref_edge); builder-set.
+        self._gwd_e3sm = False
         # ``_gwd_takes_frontgf`` marks the frontal (CM) e3sm_cam source on a
         # grid family with a frontogenesis producer (E3SM FRONTGF analogue,
         # gravity_wave_drag/frontogenesis.py); the pipeline then computes
@@ -2247,15 +2250,22 @@ class PhysicsPipeline:
                 # rides along.
                 _e3sm_kw["netdt_col"] = conv_out.dT_dt
                 _e3sm_kw["mfcc_table"] = self._gwd_mfcc_table
+            from legoesm.atmosphere.physics.gravity_wave_drag.integration import (  # noqa: E501
+                reference_interface_pressures,
+            )
+            if self._gwd_e3sm:
+                # E3SM pref_edge (gw_drag.F90:313-346): every spectral level
+                # index and the Newtonian alpha profile.
+                _e3sm_kw["p_ref_half"] = reference_interface_pressures(
+                    self.sigma_coord, T_col.dtype)
             _mcf_kw = {}
             if self._gwd_mcfarlane:
                 # CAM6 gw_oro: pref_edge = coordinate at p_ref (CAM psr) and
                 # cam_in%landfrac.  Tracer diffusion is not threaded on this
                 # lane (tracers=None).
                 _mcf_kw = {
-                    "p_ref_half": self.sigma_coord.pressure_at_half(
-                        jnp.asarray([constants.p_ref], dtype=T_col.dtype)
-                    ).reshape(-1),
+                    "p_ref_half": reference_interface_pressures(
+                        self.sigma_coord, T_col.dtype),
                     "land_frac_col": (None if self.f_land is None
                                       else ad.flatten_2d(self.f_land)),
                 }
@@ -4883,14 +4893,15 @@ def gwd_config_for(config):
     # Beres (convective) source: offline table path, its own efficiency, and
     # the oracle variant of the source kernel ("e3sm" = the E3SM defaults,
     # "cam6" = CAM6 gw_convect.F90: end-off spectrum shift, real storm speed,
-    # interface-based source level).  hdepth_min_km / cf / al stay --params.
+    # index_of_nearest row lookup; both oracles take the source level from the
+    # reference interfaces).  hdepth_min_km / cf / al stay --params.
     _variant = str(getattr(config, "e3sm_cam_beres_variant", "e3sm"))
     # "cam6" also carries CAM's deep-convection descriptor values
     # (gw_drag.F90:882 min_hdepth = 1000 m; index_of_nearest row lookup); a
     # later --params override of hdepth_min_km still wins (applied after).
     _variant_flags = {
         "e3sm": dict(spectrum_shift="circular", storm_speed_truncate=True,
-                     source_level_rule="nearest_midpoint", hd_index_rule="nint"),
+                     source_level_rule="interface_below_p", hd_index_rule="nint"),
         "cam6": dict(spectrum_shift="end_off", storm_speed_truncate=False,
                      source_level_rule="interface_below_p",
                      hd_index_rule="nearest_grid", hdepth_min_km=1.0),
@@ -5341,6 +5352,7 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
     _e3sm_srcs = e3sm_sources(_resolved_gwd) if _resolved_gwd is not None else ()
     pipeline._gwd_takes_land_frac = "e3sm_cam" in _gwd_scheme.split("+")
     pipeline._gwd_mcfarlane = "mcfarlane" in _gwd_scheme.split("+")
+    pipeline._gwd_e3sm = "e3sm_cam" in _gwd_scheme.split("+")
     # Beres netdt threading: only when the resolved e3sm_cam config actually
     # selects the convective source (the kernel accepts the kwarg for every
     # source but only Beres consumes it — avoid useless plumbing otherwise).

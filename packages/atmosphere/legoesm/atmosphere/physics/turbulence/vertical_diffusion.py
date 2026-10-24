@@ -333,7 +333,12 @@ def cam_compute_vdiff(
     """
     g = constants.g
     R = constants.R_d
-    dt = jnp.asarray(dt, dtype=u.dtype)
+    # The solve runs in the winds' precision: a caller may hand float64
+    # pressures/fluxes next to float32 prognostics (fp32 run under x64, #2110).
+    (v, s, q, T, p_half, kvm_half, kvh_half, cgh_half, cgs_half, taux, tauy,
+     shflx, qflx, dt) = (jnp.asarray(x, dtype=u.dtype) for x in (
+        v, s, q, T, p_half, kvm_half, kvh_half, cgh_half, cgs_half, taux, tauy,
+        shflx, qflx, dt))
 
     # --- Coords1D(pint) (coords_1d.F90) ---
     mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])

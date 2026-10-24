@@ -52,6 +52,7 @@ from legoesm.atmosphere.physics.turbulence.mynn25 import mynn25_turbulence
 from legoesm.atmosphere.physics.turbulence.clubb import clubb_turbulence
 from legoesm.atmosphere.physics.turbulence.clubb_lite import clubb_lite_turbulence
 from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
+    cam_pblintd_height,
     holtslag_boville_turbulence,
 )
 from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
@@ -1198,6 +1199,25 @@ def _make_mpas_turbulence(
                 f"turbulence scheme {scheme_name!r} accepted the liquid "
                 "partition but returned no dq_c_dt, so the liquid removed from "
                 "vapour would vanish. This is a scheme bug, not a config one.")
+        if scheme_name == "clubb" and _surface_flux is not None:
+            # CAM6 PBL height (oracle row 48): clubb_intr.F90:2594-2617 runs
+            # hb_diff::pblintd on state1 AFTER the CLUBB update
+            # (physics_update at :2251; geopotential_t re-derives zm/zi from
+            # the updated T, q), with the coupler's surface stress, sensible
+            # heat and water flux (cam_in%wsx/wsy/shf/cflx) and the hb_diff
+            # constants; ZM reads it next step (convect_deep.F90:266).
+            _T_p = T_col + dt * turb_out.dT_dt
+            _q_p = q_v_col + dt * turb_out.dq_v_dt
+            _zf_p, _zh_p = _compute_heights_from_sigma(
+                _T_p, p_half_col, q_v=_q_p)
+            turb_out = turb_out._replace(h_pbl=cam_pblintd_height(
+                _T_p, _q_p, u_col + dt * turb_out.du_dt,
+                v_col + dt * turb_out.dv_dt, p_full_col, _zf_p, _zh_p,
+                _surface_flux[0], _surface_flux[1], turb_out.shflx,
+                turb_out.evap_sfc,
+                sigma_coord.pressure_at_full(
+                    jnp.asarray(constants.p_ref, dtype=T_col.dtype)),
+                turbulence_config.holtslag_boville))
 
         # Cell → edge tendency projection.  Average the cell tendencies
         # of the two cells flanking each edge, then project onto the

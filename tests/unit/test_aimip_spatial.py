@@ -653,10 +653,14 @@ def test_aimip_zm_lane_runs_on_the_era5_land_fraction_and_refuses_without_it(
         radiation="gray", convection_scheme="zhang_mcfarlane",
         turbulence_scheme="louis", gwd_scheme="mcfarlane",
         microphysics_scheme="sundqvist", cloud_scheme="xu_randall")
-    out = fn(state, g_land, sig)
+    # ZM reads the carried PBL height (oracle row 50): the stateful entry,
+    # which the rollouts use; the memoryless entry has no pblh and refuses.
+    out = fn.with_phys_state(state, g_land, sig, fn.seed_phys_state(state, g_land, sig))
     assert all(bool(jnp.all(jnp.isfinite(x))) for x in jax.tree_util.tree_leaves(out))
     with pytest.raises(ValueError, match="land_frac is required"):
-        fn(state, grid, sig)
+        fn.with_phys_state(state, grid, sig, fn.seed_phys_state(state, grid, sig))
+    with pytest.raises(ValueError, match="no PBL height"):
+        fn(state, g_land, sig)
 
 
 def test_era5_land_fraction_reads_the_callers_store_and_dataset(monkeypatch):

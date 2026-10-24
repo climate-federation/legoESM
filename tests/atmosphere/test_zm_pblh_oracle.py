@@ -343,3 +343,89 @@ def test_fixture_inputs_are_what_the_generator_builds(fx, tmp_path):
     assert (o["ncol"], o["nlev"], o["lengath"], o["limcnv"]) == (2, 3, 1, 6)
     np.testing.assert_array_equal(o["heat"], [[1, 2, 3], [4, 5, 6]])
     np.testing.assert_array_equal(o["ideep"], [2, 0])
+
+
+# ---------------------------------------------------------------------------
+# Oracle rows 49-50: every ZM bridge hands ZM the carried pblh; none without
+# ---------------------------------------------------------------------------
+
+class _Seen(Exception):
+    """Raised by the ZM spy once it has recorded the bridge's arguments."""
+
+
+def _spy_zm(monkeypatch):
+    from legoesm.atmosphere.physics.convection import integration as CI
+    seen = {}
+
+    def spy(*a, **k):
+        seen.update(k)
+        raise _Seen
+    monkeypatch.setattr(CI, "zhang_mcfarlane_convection", spy)
+    return seen
+
+
+_ZM_AQUA = ConvectionConfig(scheme="zhang_mcfarlane",
+                            zhang_mcfarlane=ZhangMcFarlaneConfig(land_fraction="none"))
+
+
+def test_nonhydrostatic_bridge_passes_the_carried_pblh(monkeypatch):
+    from legoesm.core.state import NonHydrostaticState
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import compute_terrain_metric, create_height_coordinate
+
+    seen = _spy_zm(monkeypatch)
+    n, nlev = 2, 6
+    grid = create_cubed_sphere(n)
+    hc = create_height_coordinate(nlev, 30000.0)
+    tm = compute_terrain_metric(jnp.zeros((6, n, n)), hc)
+    d3, z3 = ("face", "x", "y", "level"), jnp.zeros((6, n, n, nlev))
+    state = NonHydrostaticState(
+        u=Field(z3, dims=d3), v=Field(z3, dims=d3),
+        w=Field(jnp.zeros((6, n, n, nlev + 1)), dims=("face", "x", "y", "level_half")),
+        theta_prime=Field(z3, dims=d3), rho_prime=Field(z3, dims=d3),
+        phis=Field(jnp.zeros((6, n, n)), dims=("face", "x", "y")),
+        tracers=Field(jnp.full((6, n, n, nlev, 1), 1e-3),
+                      dims=("face", "x", "y", "level", "tracer")))
+    ncol = 6 * n * n
+    ps = update_physics_state(init_physics_state(ncol, nlev, PhysicsConfig()),
+                              {"pblh": jnp.arange(1.0, ncol + 1.0)})
+    fn = make_convection_physics(_ZM_AQUA, model_type="nonhydrostatic", dt=600.0)
+    with pytest.raises(_Seen):
+        fn(state, grid, hc, tm, phys_state=ps)
+    assert seen.get("pblh") is not None, "the nonhydrostatic bridge dropped pblh"
+    np.testing.assert_array_equal(np.asarray(seen["pblh"]), np.asarray(ps.pblh))
+
+
+def test_spectral_bridge_passes_the_carried_pblh(monkeypatch):
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import isothermal_rest_state_spectral
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    seen = _spy_zm(monkeypatch)
+    grid = create_gaussian_grid(n_max=21)
+    sigma = create_sigma_coordinate(6)
+    state = isothermal_rest_state_spectral(grid, sigma, perturbation_amplitude=0.0)
+    z = jnp.zeros((grid.n_lat, grid.n_lon, sigma.n_levels))
+    state = state._replace(tracers={
+        "q_v": Field(z + 1e-3, dims=("lat", "lon", "level")),
+        "q_c": Field(z, dims=("lat", "lon", "level"))})
+    ncol = grid.n_lat * grid.n_lon
+    ps = update_physics_state(init_physics_state(ncol, sigma.n_levels, PhysicsConfig()),
+                              {"pblh": jnp.arange(1.0, ncol + 1.0)})
+    fn = make_convection_physics(_ZM_AQUA, model_type="spectral_pe", dt=600.0)
+    with pytest.raises(_Seen):
+        fn(state, grid, sigma, phys_state=ps)
+    assert seen.get("pblh") is not None, "the spectral bridge dropped pblh"
+    np.testing.assert_array_equal(np.asarray(seen["pblh"]), np.asarray(ps.pblh))
+
+
+def test_zm_without_pblh_is_refused(fx):
+    """Row 50: no carry-less launch bound; CAM always hands ZM a pblh."""
+    with pytest.raises(ValueError, match="no PBL height"):
+        zhang_mcfarlane_convection(
+            jnp.asarray(fx["T"]), jnp.asarray(fx["q"]), jnp.asarray(fx["p_full"]),
+            jnp.asarray(fx["p_half"]), jnp.asarray(fx["u"]), jnp.asarray(fx["v"]),
+            jnp.zeros_like(jnp.asarray(fx["T"])), float(fx["dt"]), ZhangMcFarlaneConfig(),
+            land_frac=jnp.asarray(fx["land"]), pref_edge=jnp.asarray(fx["pref_edge"]))
+    with pytest.raises(ValueError, match="no PBL height"):
+        _bridge(fx, None)

@@ -260,13 +260,17 @@ class TestSpectralPECMT:
         zeros = jnp.zeros((grid.n_lat, grid.n_lon, sigma_coord.n_levels))
         q_v = Field(data=zeros, name="q_v", dims=("lat", "lon", "level"), units="kg/kg")
         q_c = Field(data=zeros, name="q_c", dims=("lat", "lon", "level"), units="kg/kg")
+        from tests._zm_cold_start import cold_phys_state
+        ps = cold_phys_state(zeros)  # ZM needs the carried pblh: CAM cold start
         tendencies, _ = physics_fn(
-            _state_with_tracers(rest_state, {"q_v": q_v, "q_c": q_c}), grid, sigma_coord)
+            _state_with_tracers(rest_state, {"q_v": q_v, "q_c": q_c}), grid, sigma_coord,
+            phys_state=ps)
         assert set(tendencies.tracers) == {"q_v", "q_c"}
         for k in ("q_v", "q_c"):
             assert bool(jnp.all(jnp.isfinite(tendencies.tracers[k].data)))
         with pytest.raises(ValueError, match="must carry both tracers"):
-            physics_fn(_state_with_tracers(rest_state, {"q_v": q_v}), grid, sigma_coord)
+            physics_fn(_state_with_tracers(rest_state, {"q_v": q_v}), grid, sigma_coord,
+                       phys_state=ps)
 
     def test_tiedtke_with_cape_and_winds_yields_nonzero_cmt(
         self, grid, sigma_coord, rest_state,

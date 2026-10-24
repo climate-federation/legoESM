@@ -79,6 +79,10 @@ def thomas_solve(
         the sea-ice vertical heat solve (``ice/bitz_lipscomb.py``), builds a
         diagonally dominant matrix, whose pivots stay bounded away from zero.
         A new caller must establish the same property before selecting it.
+      * ``"e3sm_vd_lu"`` transcribes E3SM ``vd_lu_decomp``/``vd_lu_solve``
+        (bottom-up elimination with reciprocal pivots, top-down back
+        substitution), keeping the ``_TINY`` pivot clamp.  Caller: the E3SM
+        gravity-wave eddy diffusion (``e3sm_cam.gw_diff_tend``).
 
     Limitations (by design, not bugs):
       * The adjoint is the VJP of the IDEAL solve ``A⁻¹d``.  Where the forward
@@ -168,6 +172,41 @@ def _thomas_solve_impl(
             0, n - 1, unnormalised_backward, solution
         )
         return jax.lax.convert_element_type(solution, out_dtype)
+
+    if operation_order == "e3sm_vd_lu":
+        # E3SM vdiff_lu_solver.F90 (v3.0.1) vd_lu_decomp + vd_lu_solve: the
+        # elimination runs BOTTOM-UP with reciprocal pivots
+        #   dnom(k) = 1/(1 + ca + cc - ca*ze(k+1)),  ze(k) = cc*dnom(k),
+        #   zf(k) = (q(k) + ca*zf(k+1))*dnom(k)
+        # and the back substitution top-down, q(k) = zf(k) + ze(k)*q(k-1),
+        # with ca = -c (super-diagonal), cc = -a (sub-diagonal) and
+        # b = 1 + ca + cc.  The pivot keeps the ``+ _TINY`` clamp of the
+        # default order (the caller e3sm_cam gw_diff_tend had it before):
+        # for an O(1) implicit-diffusion pivot it rounds away exactly, so
+        # the arithmetic is the Fortran's.
+        ca, cc_, b_, d_ = (jnp.moveaxis(v, -1, 0)
+                           for v in jnp.broadcast_arrays(-c, -a, b, d))
+
+        def lu_up(carry, row):
+            ze_next, zf_next = carry
+            ca_k, cc_k, b_k, d_k = row
+            dnom = 1.0 / ((b_k - ca_k * ze_next) + _TINY)
+            ze_k = cc_k * dnom
+            zf_k = (d_k + ca_k * zf_next) * dnom
+            return (ze_k, zf_k), (ze_k, zf_k)
+
+        zero = jnp.zeros_like(d_[0])
+        _, (ze, zf) = jax.lax.scan(lu_up, (zero, zero), (ca, cc_, b_, d_),
+                                   reverse=True)
+
+        def lu_down(x_prev, row):
+            ze_k, zf_k = row
+            x_k = zf_k + ze_k * x_prev
+            return x_k, x_k
+
+        _, x = jax.lax.scan(lu_down, zero, (ze, zf))
+        x = jnp.moveaxis(x, 0, -1)
+        return jax.lax.convert_element_type(x, out_dtype)
 
     if operation_order != "normalised":
         raise ValueError(f"unknown Thomas operation order {operation_order!r}")

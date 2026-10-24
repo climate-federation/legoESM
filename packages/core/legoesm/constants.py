@@ -60,6 +60,9 @@ T_min_atmosphere = 200.0        # Lower-bound floor for atmospheric temperature 
                                 # to avoid division by near-zero T in clear-sky columns.
                                 # Matches Held-Suarez T_MIN and DCMIP lower bounds.
 T_freeze_ocean = 271.35         # Freezing point of seawater [K] (~-1.8 C)
+T_zero_zhao_carr = 273.16       # [K] Zhao-Carr precpd temperature origin: NCAR/ccpp-physics
+                                # v7.0.1 (da75531b) zhaocarr_precpd.f:348 ``tmt0 = t - 273.16``
+                                # (oracle-literal; NOT T_freeze)
 # Saturation specific humidity over sea water, as a fraction of the value over
 # fresh water at the same temperature: the water activity of salt water at the
 # ocean's typical salinity (S ~ 35 psu) lowers the saturation vapour pressure
@@ -217,6 +220,18 @@ ice_supercool_volume_stop_nemo = 20.0  # [m] icesbc.F90:376-381
 ice_landfast_speed_stop_nemo = 5.0e-3  # [m/s] icesbc.F90:421
 ice_full_cover_margin_nemo = 1.0e-3
 ice_growth_thickness_stop_nemo = 3.0  # [m]
+
+# WRF v4.8.0 Thompson microphysics (phys/module_mp_thompson.F, commit
+# 06d4240ae989cc3e50af412bb472df3d9048783c) carries its OWN thermodynamic
+# constants; the faithful port (microphysics/thompson_wrf.py) uses these so
+# it reproduces the running scheme.  Line numbers are in that file.
+R_v_wrf_thompson = 461.5         # [J/(kg*K)] :202 Rv
+R_d_wrf_thompson = 287.04        # [J/(kg*K)] :204 R
+c_p_wrf_thompson = 1004.0        # [J/(kg*K)] :205 Cp (times 1+0.887 q_v in use)
+L_s_wrf_thompson = 2.834e6       # [J/kg] :216 lsub
+L_v0_wrf_thompson = 2.5e6        # [J/kg] :217 lvap0 (lvap = lvap0 + (c_pi - c_pw) T_C)
+epsilon_wrf_thompson = 0.622     # [-] literal in rho (:1234, :1802), RSLF/RSIF, t_dew
+T_flatau_wrf_thompson = 273.16   # [K] Flatau et al. (1992) fit origin in RSLF/RSIF (:5398, :5433)
 
 # Active no-pond ice_alb identity, icealb.F90:124-185 and accepted namalb.
 albedo_snow_dry_orca1 = 0.85

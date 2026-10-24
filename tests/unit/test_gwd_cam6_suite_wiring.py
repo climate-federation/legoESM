@@ -74,7 +74,7 @@ def test_defaults_are_byte_identical_to_before():
     assert g.e3sm_cam.frontal.effgw is None and g.e3sm_cam.beres.effgw is None
     assert g.e3sm_cam.beres.spectrum_shift == "circular"
     assert g.e3sm_cam.beres.storm_speed_truncate is True
-    assert g.e3sm_cam.beres.source_level_rule == "nearest_midpoint"
+    assert g.e3sm_cam.beres.source_level_rule == "interface_below_p"  # E3SM k700 rule
     assert g.e3sm_cam.beres.hd_index_rule == "nint"
     assert g.e3sm_cam.beres.hdepth_min_km == 2.5
     assert not gwd_reads_conv_heating(g)

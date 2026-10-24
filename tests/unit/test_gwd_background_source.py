@@ -18,6 +18,7 @@ import pytest
 from legoesm.atmosphere.physics.gravity_wave_drag.config import (
     E3SMCAMConfig, E3SMFrontalConfig, GravityWaveDragConfig)
 from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import e3sm_cam_gwd
+
 from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
     get_gwd_fn, make_gwd_physics)
 from legoesm.driver.config import ExperimentConfig
@@ -27,6 +28,19 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _HYDRO = os.path.normpath(os.path.join(_HERE, os.pardir, "atmosphere", "hydrostatic", "unit"))
 sys.path.insert(0, os.path.normpath(os.path.join(_HERE, os.pardir, os.pardir, "scripts", "run")))
 from run_amip import build_arg_parser, build_config_from_args  # noqa: E402
+
+
+_e3sm_cam_gwd_kernel = e3sm_cam_gwd
+
+
+def e3sm_cam_gwd(*args, **kw):
+    """The kernel with ``p_ref_half`` (E3SM pref_edge) = the test column's own
+    interfaces: these columns are built at surface pressure p_ref = 1e5 Pa, so
+    their interfaces ARE the reference interfaces a lane would pass."""
+    if "p_ref_half" not in kw:
+        ph = kw["p_half"] if "p_half" in kw else args[4]
+        kw["p_ref_half"] = jnp.asarray(ph)[0]
+    return _e3sm_cam_gwd_kernel(*args, **kw)
 
 
 def _load(name, filename):
@@ -228,7 +242,7 @@ def test_momentum_fixer_uses_the_pre_limiter_stress():
         mod.gw_drag_prof, mod.momentum_energy_conservation = spy_prof, spy_fix
         try:
             mod.e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, DT, cfg,
-                             frontgf_col=zeros)
+                             frontgf_col=zeros, p_ref_half=ph[0])
         finally:
             mod.gw_drag_prof, mod.momentum_energy_conservation = orig_prof, orig_fix
         assert "tau_net" in seen, "the momentum fixer never ran"

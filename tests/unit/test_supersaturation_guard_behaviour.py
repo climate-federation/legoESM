@@ -200,8 +200,9 @@ def test_sundqvist_default_overshoots_and_the_guard_fixes_it():
 
     Its smooth branch removes the whole excess toward q_sat(T_old) in one step
     and ignores the latent heating that raises q_sat, so from RH 1.4 it lands
-    at RH ~0.23 with a ~20 K one-step heating spike and rains out ~28 % of the
-    column water. With the guard the landing point is the enthalpy-consistent
+    at RH ~0.23 with a ~20 K one-step heating spike, and the condensate it dumps
+    is partly rained out (Zhao-Carr then stops releasing: RH < rh_crit gives
+    cloud cover 0). With the guard the landing point is the enthalpy-consistent
     equilibrium and the per-step heating is capped."""
     rh_off, tw_off = _integrate("sundqvist", hard=False, nstep=40)
     rh_on, tw_on = _integrate("sundqvist", hard=True, nstep=40)
@@ -214,7 +215,6 @@ def test_sundqvist_default_overshoots_and_the_guard_fixes_it():
     assert tw_off[-1] < tw_on[-1], (
         f"guarded arm should retain MORE column water ({tw_on[-1]}) than the "
         f"overshooting default ({tw_off[-1]})")
-    assert tw_off[-1] / tw_off[0] < 0.9
 
 
 @pytest.mark.parametrize(
@@ -452,8 +452,12 @@ def test_guard_positivity_claim_is_exactly_what_the_rate_limit_gives():
 # effect the guard could have (enabling it changes these tendencies by O(1)),
 # so it cannot mask a real perturbation.
 _PREGUARD_RTOL = 1.0e-13
-_SUNDQVIST_PREGUARD_DT_DT = (0.07790655134982057, 0.0042109453424112216, -2.6370890683278935e-06, 0.00120314759851969, 0.00021895372484426559)  # re-measured 2026-09-29 (specific q_sat inputs, x64 CPU)
-_SUNDQVIST_PREGUARD_DQ_V_DT = (-3.129469722034535e-05, -1.6915170447021228e-06, 1.0593063421051318e-09, -4.832987618459902e-07, -8.79526869762267e-08)
+# Re-measured 2026-10-20 after the Zhao-Carr precipitation port (x64 CPU); the
+# guard-OFF path must stay byte-identical to these.  Pre-port values (Gaussian-F2,
+# no cloud-cover gate) were dT_dt (0.07790655134982057, 0.0042109453424112216,
+# -2.6370890683278935e-06, 0.00120314759851969, 0.00021895372484426559).
+_SUNDQVIST_PREGUARD_DT_DT = (0.07790655142391562, 0.0042110534620482185, 0.0, 0.0012031476025026462, 0.0002189537248470955)
+_SUNDQVIST_PREGUARD_DQ_V_DT = (-3.129469725010899e-05, -1.6915604758545073e-06, 0.0, -4.83298763445925e-07, -8.795268697736346e-08)
 
 
 def test_sundqvist_default_matches_the_pre_guard_baseline_bit_for_bit():
@@ -492,9 +496,10 @@ def test_sundqvist_default_matches_the_pre_guard_baseline_bit_for_bit():
     # this, a loosened rtol could silently render the whole test decorative.
     on = sundqvist_microphysics(T, q_v, hyd, p, p_half, rho, dz, 300.0,
                                 SundqvistConfig(hard_saturation_adjustment=True))
+    pin = np.array(_SUNDQVIST_PREGUARD_DT_DT)
+    nz = pin != 0.0
     rel = np.max(np.abs(
-        (np.asarray(on.dT_dt).ravel() - np.array(_SUNDQVIST_PREGUARD_DT_DT))
-        / np.array(_SUNDQVIST_PREGUARD_DT_DT)))
+        (np.asarray(on.dT_dt).ravel()[nz] - pin[nz]) / pin[nz]))
     assert rel > 1.0e6 * _PREGUARD_RTOL, (
         f"enabling the guard moved dT_dt by only rel={rel}; the pinned "
         "baseline is too loose to detect a real change."

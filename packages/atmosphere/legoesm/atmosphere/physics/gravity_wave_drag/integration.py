@@ -560,6 +560,8 @@ def _make_hydrostatic_gwd(
                                 _mfcc, u, v, T, p_full)
             if _has_e3sm else {}
         )
+        e3sm_kw.update(e3sm_reference_inputs(scheme_name, sigma_coord,
+                                             T_col.dtype))
 
         _tracers = state.tracers
         mcf_kw = mcfarlane_inputs(scheme_name, sigma_coord, grid, ncol, nlev,
@@ -676,6 +678,23 @@ def _extract_subgrid_topo_stddev(grid, ncol):
     return jnp.asarray(raw).reshape(-1)[:ncol]
 
 
+def reference_interface_pressures(sigma_coord, dtype=None):
+    """CAM/E3SM ``pref_edge``: the vertical coordinate's interface pressures
+    at surface pressure ``constants.p_ref`` (CAM ``psr`` / E3SM ``ps0``),
+    shape ``(nlev+1,)``."""
+    p_ref = jnp.asarray([constants.p_ref], dtype=dtype)
+    return jnp.asarray(sigma_coord.pressure_at_half(p_ref)).reshape(-1)
+
+
+def e3sm_reference_inputs(scheme_name, sigma_coord, dtype=None):
+    """``{"p_ref_half": pref_edge}`` for a scheme with an ``e3sm_cam`` part
+    (E3SM takes its spectral level indices and Newtonian alpha profile from
+    the reference interfaces, gw_drag.F90:313-346); ``{}`` otherwise."""
+    if "e3sm_cam" not in str(scheme_name).split("+"):
+        return {}
+    return {"p_ref_half": reference_interface_pressures(sigma_coord, dtype)}
+
+
 def mcfarlane_inputs(scheme_name, sigma_coord, grid, ncol, nlev,
                      tracers=None, dtype=None):
     """CAM6 ``gw_oro`` inputs for a ``mcfarlane`` (or composite-with-
@@ -686,10 +705,8 @@ def mcfarlane_inputs(scheme_name, sigma_coord, grid, ncol, nlev,
     None).  Empty dict for any other scheme."""
     if "mcfarlane" not in str(scheme_name).split("+"):
         return {}
-    p_ref = jnp.asarray([constants.p_ref], dtype=dtype)
     kw = {
-        "p_ref_half": jnp.asarray(
-            sigma_coord.pressure_at_half(p_ref)).reshape(-1),
+        "p_ref_half": reference_interface_pressures(sigma_coord, dtype),
         "land_frac_col": _extract_land_frac(grid, ncol),
     }
     if tracers is not None:
@@ -839,6 +856,8 @@ def _make_mpas_gwd(
                                 _mfcc, u_col, v_col, T_col, p_full_col)
             if _has_e3sm else {}
         )
+        e3sm_kw.update(e3sm_reference_inputs(scheme_name, sigma_coord,
+                                             T_col.dtype))
 
         # mcfarlane (CAM6 gw_oro): reference interfaces, land fraction and
         # every state tracer (CAM diffuses all constituents) — see
@@ -1154,6 +1173,8 @@ def _make_spectral_pe_gwd(
         # not threaded on this lane (tracers=None).
         mcf_kw = mcfarlane_inputs(scheme_name, sigma_coord, grid, ncol, nlev,
                                   None, T_col.dtype)
+        e3sm_ref_kw = e3sm_reference_inputs(scheme_name, sigma_coord,
+                                            T_col.dtype)
 
         if is_combined:
             # Composite GWD (#834): sum orographic + non-orographic; thread the
@@ -1168,7 +1189,7 @@ def _make_spectral_pe_gwd(
             gwd_out, spec_new = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config, spec_in,
-                h_topo_col=h_topo_col, mcfarlane_kwargs=mcf_kw,
+                h_topo_col=h_topo_col, mcfarlane_kwargs=mcf_kw, **e3sm_ref_kw,
             )
             if combined_spectrum:
                 gwd_spectrum_out = spec_new
@@ -1211,6 +1232,7 @@ def _make_spectral_pe_gwd(
                 # -> None -> no scaling (legacy behaviour).
                 extra["land_frac_col"] = _extract_land_frac(grid, ncol)
             extra.update(mcf_kw)
+            extra.update(e3sm_ref_kw)
             gwd_out = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config,

@@ -336,6 +336,11 @@ __param_spec__ = {
         "scheme_key": "atm.micro.SundqvistConfig",
         "excluded": {
             "sigmoid_sharpness": "numerics: solver/smoothing/tolerance/iteration parameter",
+            # Zhao-Carr namelist coefficients added by the oracle port; whether
+            # (and within which bounds) they are trainable is a pending user decision.
+            "psautco": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
+            "wminco_liquid": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
+            "wminco_ice": "physics: Zhao-Carr namelist coefficient; trainability not yet decided",
         },
         "params": {
             # PRIMARY large-scale-condensation knobs (Sundqvist et al. 1989).
@@ -436,36 +441,41 @@ class KesslerConfig(NamedTuple):
 
 
 class SundqvistConfig(NamedTuple):
-    """Configuration for Sundqvist large-scale condensation."""
-    rh_crit: float = 0.8              # Critical relative humidity
-    sigmoid_sharpness: float = 20.0   # Sharpness for smooth activation
-    auto_rate: float = 1e-3           # Autoconversion rate c_0 [1/s]
-    # Critical cloud water for autoconversion: P_auto = c_0·q_c·
-    # (1 − exp(−(q_c/q_c,crit)²)) (Sundqvist 1989).  Suppresses
-    # autoconversion below q_c,crit (drizzle forms only once cloud water
-    # is large enough).  0 → the linear no-threshold limit.
-    qc_crit: float = 5e-4             # [kg/kg]
-    evap_coeff: float = 5e-4          # Sub-cloud evaporation coefficient
+    """Configuration for Sundqvist large-scale microphysics.
+
+    The precipitation stage is a port of the Zhao-Carr scheme (ccpp-physics
+    v7.0.1 ``zhaocarr_precpd_run``); see ``sundqvist.py`` for the field ->
+    oracle-name mapping.  The oracle hard-codes ``qc_crit`` = 3e-4,
+    ``coalescence_enh_coeff`` = 300 and ``bergeron_enh_coeff`` = 0.5.
+    """
+    rh_crit: float = 0.8              # Critical relative humidity (oracle u00k)
+    # Smooth RH_crit gate of the condensation surrogate and of the precipitation
+    # evaporation; the oracle is its hard-switch limit (sharpness -> inf).
+    sigmoid_sharpness: float = 20.0
+    auto_rate: float = 1e-3           # Liquid release rate c_0 [1/s] (oracle prautco)
+    # Critical cloud water m_r of the SBK89 release
+    # (1 - exp(-(m*F1*F2/(m_r*max(b, 0.01)))^2)) [kg/kg] (oracle 1/cmr).
+    qc_crit: float = 5e-4
+    # Rain-evaporation coefficient (oracle evpco):
+    # E = evap_coeff*sqrt(1/dt)*(rh_crit - RH)*(rho dz dt)*sqrt(P_r).
+    evap_coeff: float = 5e-4
     # --- SBK89 (Sec. 5) precipitation-release enhancements ---
-    # Coalescence F1 = 1 + c1·sqrt(P) with P the precipitation flux falling
-    # in from above [kg m^-2 s^-1]: existing precipitation collects cloud
-    # water and accelerates release (F1 ≈ 6 at 1 mm/h with the default).
-    # 0 → enhancement off (plain Sundqvist base autoconversion).
+    # Coalescence F1 = 1 + c1*sqrt(P/dt), P the precipitation [kg m^-2] per
+    # step falling in from above (oracle c1).
     coalescence_enh_coeff: float = 300.0   # c1 [(kg m^-2 s^-1)^-1/2]
-    # Bergeron-Findeisen F2 = 1 + c2·exp(−((T − T_peak)/T_width)²): a smooth
-    # mixed-phase window peaking near −15 °C, where the ice-liquid saturation
-    # difference e_sw − e_si (the Bergeron growth driver) is largest; decays
-    # to ~1 above freezing by construction.  0 → enhancement off.
-    bergeron_enh_coeff: float = 3.0        # peak amplification [-]
+    # Bergeron-Findeisen F2 = 1 + c2*sqrt(min(max(0, 268 K - T), 20 K)) (oracle c2).
+    bergeron_enh_coeff: float = 3.0        # c2 [K^-1/2]
+    # Parameters of the PRE-PORT Gaussian F2; no counterpart in the oracle.
+    # Setting either to a non-default value raises.
     bergeron_T_peak_K: float = constants.T_freeze - 15.0   # [K]
-    bergeron_T_width_K: float = 7.0        # Gaussian half-width [K]
+    bergeron_T_width_K: float = 7.0        # [K]
     # --- Hard (iterated) saturation-adjustment guard (opt-in) ---
     # The SAME guard the five bulk warm-rain schemes carry, with the SAME
     # defaults, applied to Sundqvist's OWN smooth condensation rate through the
     # shared ``_warm_rain.hard_saturation_blend`` (no second implementation).
-    # Default OFF => byte-identical to the published SBK89 smooth path: a
-    # STATIC Python ``if`` in ``diagnose_sundqvist_process_rates``, so the OFF
-    # path never even traces the hard branch.
+    # Default OFF => the smooth condensation surrogate alone: a STATIC Python
+    # ``if`` in ``sundqvist._sundqvist_step``, so the OFF path never even
+    # traces the hard branch.
     #
     # What it changes when ON (Sundqvist is NOT the same failure mode as the
     # five bulk schemes -- documented honestly): Sundqvist's smooth branch
@@ -497,6 +507,14 @@ class SundqvistConfig(NamedTuple):
     hard_saturation_adjustment: bool = False
     hard_sat_adjust_threshold: float = 1.1      # blend knob here, NOT an on/off trigger [-]
     hard_sat_max_heating_K: float = 5.0         # per-step latent-heating cap [K]
+    # --- Zhao-Carr ice route and conversion thresholds ---
+    # Ice -> snow autoconversion coefficient (oracle psautco) [1/s];
+    # psaut = psautco*dt*exp(0.025*(T - 273.16))*max(0, cwm - wmini).
+    psautco: float = 0.0
+    # Condensate left unconverted, wmin = wminco*p/1e5 [kg/kg] (oracle
+    # wminco(1) liquid, wminco(2) ice).
+    wminco_liquid: float = 0.0
+    wminco_ice: float = 0.0
 
 
 class SeifertBehengConfig(NamedTuple):

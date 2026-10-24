@@ -270,6 +270,16 @@ def test_clubb_step_jit_and_grad():
     assert g.shape == kw["T"].shape and jnp.all(jnp.isfinite(g))
 
 
+# Sundqvist microphysics with the Zhao-Carr oracle's hard-coded constants
+# (m_r 3e-4, c2 0.5; zhaocarr_precpd.f:244,248), the GFS v16/v17 namelist
+# psautco (8e-4) and the oracle's commented operational evpco (2e-5,
+# zhaocarr_precpd.f:215).  The shipped defaults (psautco 0, evap_coeff 5e-4)
+# are pending a user decision; with them this column's cold condensate never
+# reaches the ground and the coupling tests below would have no precip sink.
+_SUNDQVIST_ZC = dict(qc_crit=3.0e-4, bergeron_enh_coeff=0.5, psautco=8.0e-4,
+                     evap_coeff=2.0e-5)
+
+
 def _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3, seed=0):
     """A grid-consistent top-down column for the prognostic SCM driver."""
     kw = _column(ncol=ncol, nlev=nlev, dtheta_dz=dtheta_dz, seed=seed)
@@ -752,11 +762,13 @@ def test_prognostic_clubb_couples_to_microphysics_total_water_budget():
     microphysics' own tests, not this coupling test.
 
     Asserted alongside: (a) real condensation (non-vacuous), and (b) the
-    condensation is enthalpy-consistent (``c_pd·dT + L_v·dq_v = 0``)."""
+    microphysics never creates enthalpy (``c_pd·dT + L_v·dq_v <= 0``: zero but
+    for Zhao-Carr's fusion cooling)."""
     from legoesm.atmosphere.physics._shared import virtual_temperature
     from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
     from legoesm.atmosphere.physics.microphysics.output import make_zero_hydrometeors
-    from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
+    from legoesm.atmosphere.physics.microphysics.sundqvist import (
+        diagnose_sundqvist_process_rates, sundqvist_microphysics)
     from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
     from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
 
@@ -777,7 +789,8 @@ def test_prognostic_clubb_couples_to_microphysics_total_water_budget():
     assert np.all(np.asarray(out.lhflx) == 0.0)          # zero sfc moisture flux
     hyd = make_zero_hydrometeors(ncol, nlev, dtype=T_f.dtype)   # q_r == 0
     mp = sundqvist_microphysics(
-        T_f, q_f, hyd, kw["p_full"], kw["p_half"], rho, dz, dt, SundqvistConfig())
+        T_f, q_f, hyd, kw["p_full"], kw["p_half"], rho, dz, dt,
+        SundqvistConfig(**_SUNDQVIST_ZC))
 
     mass = np.asarray(rho) * np.asarray(dz)              # kg/m^2
     dqc = np.asarray(mp.dq_c_dt)
@@ -788,8 +801,18 @@ def test_prognostic_clubb_couples_to_microphysics_total_water_budget():
     assert float(np.max(np.abs(dqr))) == 0.0             # diagnostic-rain: no q_r tracer growth
     # (a) Non-vacuous: the spun-up column is supersaturated → real condensation.
     assert float(np.max(dqc)) > 1e-7
-    # (b) Condensation is enthalpy-consistent (latent heating balances vapor sink).
-    assert float(np.max(np.abs(constants.c_pd * dTm + constants.L_v * dqv_m))) < 1e-10
+    # (b) Enthalpy: condensation and rain evaporation conserve c_pd*T + L_v*q_v;
+    # the only residual is Zhao-Carr's fusion term (snow sublimation at L_v+L_f,
+    # melting at L_f), which can only cool.
+    # Two-sided: the fusion cooling cannot exceed L_f times the condensate the
+    # step converted to precipitation (only snow can sublimate or melt).
+    resid_h = constants.c_pd * dTm + constants.L_v * dqv_m
+    assert float(np.max(resid_h)) < 1e-10
+    rates = diagnose_sundqvist_process_rates(
+        T_f, q_f, hyd, kw["p_full"], kw["p_half"], rho, dz, dt,
+        SundqvistConfig(**_SUNDQVIST_ZC))
+    fusion_cap = constants.L_f * np.sum(mass * np.asarray(rates.autoconversion), axis=1)
+    assert np.all(-np.sum(mass * resid_h, axis=1) <= fusion_cap * (1.0 + 1e-12))
     # (c) Headline: summed turbulence+microphysics tendencies close the column
     # water budget to the surface precip sink (CLUBB conserves; sundqvist closes).
     clubb_col_dqv = np.sum(mass * np.asarray(out.dq_v_dt), axis=1)
@@ -847,7 +870,8 @@ def test_clubb_microphysics_chain_is_differentiable():
         t1 = T_f + dt * out.dT_dt
         q1 = q_in + dt * out.dq_v_dt
         mp = sundqvist_microphysics(
-            t1, q1, hyd, kw["p_full"], kw["p_half"], rho, dz, dt, SundqvistConfig())
+            t1, q1, hyd, kw["p_full"], kw["p_half"], rho, dz, dt,
+            SundqvistConfig(**_SUNDQVIST_ZC))
         return out, mp
 
     # Forward: the condensation branch is ACTIVE for this column (max on its

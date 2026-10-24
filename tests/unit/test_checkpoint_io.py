@@ -121,3 +121,10 @@ def test_a_suffixless_path_still_resolves(tmp_path):
     eqx.tree_serialise_leaves(tmp_path / "m.eqx", _params(2))
     loaded = load_checkpoint_or_fail(tmp_path / "m", _params(2))
     assert len(loaded.raw_values) == 2
+
+
+def test_checkpoint_path_adds_eqx_only_when_suffixless(tmp_path):
+    from legoesm.ml.checkpoint_io import checkpoint_path
+    assert checkpoint_path(tmp_path / "epoch_0019") == tmp_path / "epoch_0019.eqx"
+    assert checkpoint_path(str(tmp_path / "exp1") + "/") == tmp_path / "exp1.eqx"
+    assert checkpoint_path(tmp_path / "params.eqx") == tmp_path / "params.eqx"

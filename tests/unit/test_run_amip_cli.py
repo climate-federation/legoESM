@@ -1937,7 +1937,7 @@ def test_aimip_classical_overrides_spectral_refused(tmp_path):
     args = parser.parse_args(["--dataset", "analytical",
                               "--discretization", "spectral",
                               "--aimip-classical-checkpoint", ckpt])
-    with pytest.raises(SystemExit, match="spectral"):
+    with pytest.raises(SystemExit, match="AIMIP-classical forces tiedtke"):
         _apply_aimip_classical_overrides(args)
 
 
@@ -5524,3 +5524,85 @@ def test_production_deck_selects_log_form_vapour_filter():
     cfg = build_config_from_args(parser.parse_args([]))
     assert cfg.dycore.mpas_vert4_log_form_tracers == ("q_v",)
     assert cfg.dycore.mpas_vert4_flux_form_tracers == ()
+
+
+_DRY_BASE = ["--grid-type", "latlon", "--dataset", "analytical", "--dry-run"]
+
+
+def test_dry_run_reports_missing_input_and_returns_1(tmp_path, capsys):
+    from scripts.run.run_amip import main
+    gone = str(tmp_path / "no_such_restart.npz")
+    assert main(_DRY_BASE + ["--restart-from", gone]) == 1
+    out = capsys.readouterr().out
+    assert "MISSING" in out and gone in out
+    assert "Setup..." not in out
+
+
+def test_dry_run_all_present_returns_0(tmp_path, capsys):
+    from scripts.run.run_amip import main
+    here = tmp_path / "restart.npz"
+    here.write_bytes(b"")
+    assert main(_DRY_BASE + ["--restart-from", str(here)]) == 0
+    out = capsys.readouterr().out
+    assert "all input files present" in out and "MISSING" not in out
+
+
+def test_dry_run_builtin_topography_is_not_a_file(capsys):
+    from scripts.run.run_amip import main
+    assert main(_DRY_BASE + ["--topography", "gaussian"]) == 0
+    assert "not used  topography" in capsys.readouterr().out
+
+
+def test_dry_run_reports_missing_ml_stats(tmp_path, capsys):
+    from scripts.run.run_amip import main
+    gone = str(tmp_path / "no_such_stats.npz")
+    assert main(_DRY_BASE + ["--physics-parameterization-stats", gone]) == 1
+    out = capsys.readouterr().out
+    assert "MISSING" in out and gone in out
+
+
+def test_dry_run_reports_missing_aimip_checkpoint_before_loading(tmp_path, capsys):
+    from scripts.run.run_amip import main
+    gone = str(tmp_path / "no_such_aimip.eqx")
+    assert main(_DRY_BASE + ["--aimip-classical-checkpoint", gone]) == 1
+    out = capsys.readouterr().out
+    assert "MISSING" in out and gone in out
+
+
+def test_dry_run_finds_suffixless_aimip_checkpoint(tmp_path, capsys):
+    from scripts.run.run_amip import main
+    (tmp_path / "epoch_0019.eqx").write_bytes(b"")
+    assert main(_DRY_BASE + ["--aimip-classical-checkpoint",
+                             str(tmp_path / "epoch_0019")]) == 0
+    assert "MISSING" not in capsys.readouterr().out
+
+
+def test_dry_run_suffixless_aimip_checkpoint_checks_the_eqx_file(tmp_path, capsys):
+    from scripts.run.run_amip import main
+    (tmp_path / "exp1").mkdir()  # the literal path exists; the loader opens exp1.eqx
+    assert main(_DRY_BASE + ["--aimip-classical-checkpoint",
+                             str(tmp_path / "exp1")]) == 1
+    assert "MISSING" in capsys.readouterr().out
+    (tmp_path / "exp1.eqx").mkdir()  # a directory is not a checkpoint file
+    assert main(_DRY_BASE + ["--aimip-classical-checkpoint",
+                             str(tmp_path / "exp1")]) == 1
+
+
+def test_dry_run_keeps_aimip_spectral_refusal(tmp_path):
+    from scripts.run.run_amip import main
+    gone = str(tmp_path / "no_such_aimip.eqx")
+    with pytest.raises(SystemExit, match="AIMIP-classical forces tiedtke"):
+        main(["--grid-type", "gaussian", "--discretization", "spectral",
+              "--dataset", "analytical", "--dry-run",
+              "--aimip-classical-checkpoint", gone])
+
+
+def test_dry_run_exit_code_reaches_the_shell(tmp_path):
+    import subprocess
+    gone = str(tmp_path / "no_such_restart.npz")
+    proc = subprocess.run(
+        [sys.executable, "scripts/run/run_amip.py", *_DRY_BASE,
+         "--restart-from", gone],
+        capture_output=True, text=True, env={**__import__("os").environ,
+                                             "JAX_PLATFORMS": "cpu"})
+    assert proc.returncode == 1, proc.stderr[-2000:]

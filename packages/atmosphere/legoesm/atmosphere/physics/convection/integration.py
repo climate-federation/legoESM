@@ -1326,11 +1326,17 @@ def _make_nonhydrostatic_convection(
                 else:
                     # Zhang-McFarlane (CAM6): land fraction selects the
                     # c0 autoconversion coefficient; the carried cloud
-                    # fraction feeds the rain-evaporation (1 - cldfrc).
+                    # fraction feeds the rain-evaporation (1 - cldfrc); the
+                    # carried PBL height bounds the launch-level search
+                    # (convect_deep.F90:266 -> zm_conv.F90:738-741).
                     _cf = (phys_state.cloud_fraction
                            if phys_state is not None
                            and getattr(phys_state, "cloud_fraction", None) is not None
                            else None)
+                    _pblh = (phys_state.pblh
+                             if phys_state is not None
+                             and getattr(phys_state, "pblh", None) is not None
+                             else None)
                     conv_out, prog_new_profile = conv_fn(
                         T=T_col, q_v=q_v_col,
                         p_full=p_full_col, p_half=p_half_col,
@@ -1339,6 +1345,7 @@ def _make_nonhydrostatic_convection(
                         dt=dt, config=scheme_config,
                         land_frac=land_fraction_for_columns(grid, ncol, scheme_config),
                         cld_frac=None if _cf is None else _cf.reshape(ncol, nlev),
+                        pblh=None if _pblh is None else _pblh.reshape(ncol),
                     )
                 conv_prog_out = prog_new_profile
             elif is_w_grid_consumer:
@@ -1751,11 +1758,17 @@ def _make_spectral_pe_convection(
                 else:
                     # Zhang-McFarlane (CAM6): land fraction selects the
                     # c0 autoconversion coefficient; the carried cloud
-                    # fraction feeds the rain-evaporation (1 - cldfrc).
+                    # fraction feeds the rain-evaporation (1 - cldfrc); the
+                    # carried PBL height bounds the launch-level search
+                    # (convect_deep.F90:266 -> zm_conv.F90:738-741).
                     _cf = (phys_state.cloud_fraction
                            if phys_state is not None
                            and getattr(phys_state, "cloud_fraction", None) is not None
                            else None)
+                    _pblh = (phys_state.pblh
+                             if phys_state is not None
+                             and getattr(phys_state, "pblh", None) is not None
+                             else None)
                     conv_out, prog_new_profile = conv_fn(
                         T=T_col, q_v=q_v_col,
                         p_full=p_full_col, p_half=p_half_col,
@@ -1764,6 +1777,7 @@ def _make_spectral_pe_convection(
                         dt=dt, config=scheme_config,
                         land_frac=land_fraction_for_columns(grid, ncol, scheme_config),
                         cld_frac=None if _cf is None else _cf.reshape(ncol, nlev),
+                        pblh=None if _pblh is None else _pblh.reshape(ncol),
                         pref_edge=sigma_coord.pressure_at_half(
                             jnp.asarray(constants.p_ref, dtype=T_col.dtype)),
                     )

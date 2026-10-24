@@ -586,6 +586,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "mcfarlane / xu_randall) and seeds them with the "
                              "trained best-fit values as INITIAL parameters.")
     parser.add_argument("--restart-from", type=str, default=None)
+    parser.add_argument("--dry-run", action="store_true", default=False,
+                        help="Build the config, report whether every input "
+                             "file exists, and exit (0 = all present, 1 = some "
+                             "missing) without setting up the model.")
     parser.add_argument("--restart-start-day", type=float, default=None,
                         help="Override start_day after loading checkpoint. "
                              "Pass 0.0 at year boundaries to reset the day counter. "
@@ -2577,6 +2581,46 @@ def _resolve_land_model(args, parser=None, argv=None):
         has_land_mask=bool(getattr(args, "land_mask_file", "")))
 
 
+DRY_RUN_CONFIG_INPUTS = (
+    "ic_path", "forcing_path", "sic_path", "ozone_file", "ghg_file",
+    "solar_file", "aerosol_file", "aerosol_ccn_file", "volcanic_aerosol_file",
+    "topography", "land_mask_path", "albedo_land_path",
+    "subgrid_orography_path", "land_ic_path", "clm_surfdata_path",
+    "land_cover_surfdata", "surfdata_path", "e3sm_cam_mfcc_table_path",
+    "physics_parameterization_checkpoint", "physics_parameterization_stats",
+)
+DRY_RUN_ARG_INPUTS = ("restart_from", "params", "aimip_classical_checkpoint")
+# Mirrors the driver's terrain dispatch: these names are built-in shapes, not files.
+_TOPOGRAPHY_BUILTINS = ("flat", "gaussian")
+
+
+def dry_run_check_inputs(config: ExperimentConfig,
+                         args: argparse.Namespace) -> int:
+    """Print found / MISSING / not used for every input file; 0 if none missing."""
+    entries = [(f, getattr(config, f)) for f in DRY_RUN_CONFIG_INPUTS]
+    entries += [(f, getattr(args, f, None)) for f in DRY_RUN_ARG_INPUTS]
+    from legoesm.ml.checkpoint_io import checkpoint_path
+    missing = []
+    print("[run_amip] --dry-run: input files")
+    for name, value in entries:
+        if not value or (name == "topography" and value in _TOPOGRAPHY_BUILTINS):
+            status = "not used"
+        elif (os.path.isfile(checkpoint_path(value))
+              if name == "aimip_classical_checkpoint" else os.path.exists(value)):
+            status = "found"
+        else:
+            status = "MISSING"
+            missing.append((name, value))
+        print(f"  {status:9s} {name:36s} {value or ''}")
+    if missing:
+        print(f"[run_amip] --dry-run: {len(missing)} input file(s) missing:")
+        for name, value in missing:
+            print(f"  {name}: {value}")
+        return 1
+    print("[run_amip] --dry-run: all input files present")
+    return 0
+
+
 def _default_discretization_for_grid(grid_type: str) -> str:
     """The dycore discretization to use when the user gave a grid but no
     ``--discretization``.  The SCVT Voronoi mesh supports only 'mpas'; every
@@ -3540,24 +3584,27 @@ def _apply_aimip_classical_overrides(
     if getattr(args, "cloud_cap_floor_on", False):
         raise SystemExit("--cloud-cap-floor cannot be combined with --aimip-classical-checkpoint: "
                          "the trained cloud config is prebuilt and would not carry the floor")
-    from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
-    from legoesm.training.aimip_params import AIMIPClassicalParams
-    _p = load_checkpoint_or_fail(
-        args.aimip_classical_checkpoint, AIMIPClassicalParams.from_defaults(),
-        what="--aimip-classical-checkpoint")
     args.convection = "tiedtke"
     args.turbulence = "louis"
     args.gravity_wave_drag = "mcfarlane"
     args.clouds = "xu_randall"
     if args.microphysics == "none":
         args.microphysics = "sundqvist"
-    _cc = _p.to_cloud_config()
-    args.cloud_q_c_diagnostic = float(_cc.q_c_diagnostic)
-    args.cloud_rh_crit = float(_cc.rh_crit)
-    args._aimip_params = _p
-    print(f"AIMIP-classical: forced tiedtke/louis/mcfarlane/xu_randall + "
-          f"microphysics={args.microphysics} + "
-          f"loaded trained params from {args.aimip_classical_checkpoint}")
+    # --dry-run only checks that the checkpoint FILE exists
+    # (DRY_RUN_ARG_INPUTS); loading it would fail before that report.
+    if not getattr(args, "dry_run", False):
+        from legoesm.ml.checkpoint_io import load_checkpoint_or_fail
+        from legoesm.training.aimip_params import AIMIPClassicalParams
+        _p = load_checkpoint_or_fail(
+            args.aimip_classical_checkpoint, AIMIPClassicalParams.from_defaults(),
+            what="--aimip-classical-checkpoint")
+        _cc = _p.to_cloud_config()
+        args.cloud_q_c_diagnostic = float(_cc.q_c_diagnostic)
+        args.cloud_rh_crit = float(_cc.rh_crit)
+        args._aimip_params = _p
+        print(f"AIMIP-classical: forced tiedtke/louis/mcfarlane/xu_randall + "
+              f"microphysics={args.microphysics} + "
+              f"loaded trained params from {args.aimip_classical_checkpoint}")
     # AIMIP-classical was trained on lat-lon C-grid PE; the trained per-scheme
     # leaves inject onto the finite-volume PhysicsPipeline (cubed_sphere /
     # latlon).  The MPAS and spectral backends are off-design and differ:
@@ -3873,6 +3920,8 @@ def main(argv: list[str] | None = None):
         pass
 
     config = build_config_from_args(args)
+    if args.dry_run:
+        return dry_run_check_inputs(config, args)
     # Apply the --params calibration layer (issue #691) in two stages:
     #   (1) parameters with a verified flat ExperimentConfig scalar go through
     #       the scalar map PRE-setup (the pipeline builds their scheme configs
@@ -4127,4 +4176,4 @@ def main(argv: list[str] | None = None):
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

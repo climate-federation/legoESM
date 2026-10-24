@@ -78,7 +78,7 @@ def _fake_zm(ncol, nlev, dq_v, dq_c, dq_r):
     z = jnp.zeros((ncol, nlev))
 
     def fake(*, T, q_v, p_full, p_half, u, v, conv_prog_profile, dt, config,
-             land_frac=None, cld_frac=None, pref_edge=None):
+             land_frac=None, cld_frac=None, pblh=None, pref_edge=None):
         return ConvectionOutput(
             dT_dt=z, dq_v_dt=dq_v, dq_c_conv_dt=dq_c, cape=jnp.zeros((ncol,)),
             convective_mask=jnp.ones((ncol,)), dq_r_conv_dt=dq_r), z
@@ -92,7 +92,11 @@ def _run(monkeypatch, name, fake, state, grid, sigma):
     if name == "zhang_mcfarlane":   # the test grid carries no land fraction
         cc = cc._replace(zhang_mcfarlane=cc.zhang_mcfarlane._replace(land_fraction="none"))
     fn = convint.make_convection_physics(cc, "spectral_pe", _DT)
-    tend, _prog = fn(state, grid, sigma)
+    ps = None
+    if name == "zhang_mcfarlane":   # ZM needs the carried pblh: CAM cold start
+        from tests._zm_cold_start import cold_phys_state
+        ps = cold_phys_state(jnp.zeros((grid.n_lat * grid.n_lon, sigma.n_levels)))
+    tend, _prog = fn(state, grid, sigma, phys_state=ps)
     return {k: np.asarray(getattr(v, "data", v)) for k, v in tend.tracers.items()}
 
 

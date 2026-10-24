@@ -330,8 +330,13 @@ class TestSundqvist:
         assert jnp.all(out.precipitation >= 0)
 
     def test_nonzero_tendencies(self):
+        # The cloud in these columns is colder than -6 C and takes the
+        # Zhao-Carr ice route, which only converts with psautco > 0 (default 0,
+        # pending a user decision): 8e-4 is the GFS v16/v17 namelist value
+        # (ccpp-physics docs, FV3_GFS_v16_input.nml).
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
-        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
+        out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0,
+                                     config=SundqvistConfig(psautco=8.0e-4))
         assert float(jnp.max(jnp.abs(out.dT_dt))) > 0
 
     def test_finite_outputs(self):

@@ -81,7 +81,14 @@ def cols():
     return dict(T=T, q=q, pf=pf, ph=ph, z=z, zf=zf, land=land, u=u, v=v, cld=cld)
 
 
+def _cold(c):
+    """CAM's cold-start PBL height (physpkg.F90:419-424): zero, so pblt = pver.
+    ZM refuses a call without pblh (oracle row 50)."""
+    return jnp.zeros(c["T"].shape[0])
+
+
 def _port(c, pblh=None, pref_edge=None, **over):
+    pblh = _cold(c) if pblh is None else pblh
     return Z.zm_convr(c["T"], c["q"], c["pf"], c["ph"], c["z"], c["zf"], c["land"], DT,
                       pblh=pblh, pref_edge=pref_edge, **{**KW, **over})
 
@@ -92,9 +99,9 @@ def _oracle(c, i, pblh=None, pref_edge=None, **over):
               pref_edge=None if pref_edge is None else np.asarray(pref_edge))
     kw.update(over)
     n = lambda a: np.asarray(a[i])
+    pblh = _cold(c) if pblh is None else pblh
     return O.zm_convr(n(c["T"]), n(c["q"]), n(c["pf"]), n(c["ph"]), n(c["z"]), n(c["zf"]),
-                      float(c["land"][i]), 0.5 * DT,
-                      None if pblh is None else float(pblh[i]), 0.0, **kw)
+                      float(c["land"][i]), 0.5 * DT, float(pblh[i]), 0.0, **kw)
 
 
 def _close(a, b, rtol=1e-10, atol=0.0, what=""):
@@ -140,15 +147,14 @@ def test_zm_convr_matches_fortran_transcription(cols, use_pblh, alfa):
 
 def test_buoyan_dilute_indices_and_parcel_match(cols):
     P = _port(cols)
-    K = jnp.arange(1, NLEV + 1)
     # re-run the port's buoyancy stage alone with the oracle's pblt/msg
     for i in range(4):
         Oi = _oracle(cols, i)
         msg = jnp.array([Oi["msg"]], jnp.int32)
         p = cols["pf"][i:i + 1] * 0.01
         pf = cols["ph"][i:i + 1] * 0.01
-        in_pbl = (cols["pf"][i:i + 1] >= CFG.pbl_top_pa) & (K[None, :] >= msg + 1)
-        pblt = jnp.min(jnp.where(in_pbl, K[None, :], NLEV), axis=1).astype(jnp.int32)
+        # _port/_oracle run at pblh = 0: no level matches, pblt = pver
+        pblt = jnp.full((1,), NLEV, jnp.int32)
         bd = Z.buoyan_dilute(cols["q"][i:i + 1], cols["T"][i:i + 1], p, cols["z"][i:i + 1],
                              pf, pblt, jnp.zeros(1), msg, num_cin=CFG.num_cin,
                              dmpdz=CFG.dmpdz, tiedke_add=CFG.tiedke_add, lwmax=LWMAX)
@@ -240,7 +246,8 @@ def test_zm_convr_static_energy_and_water_budgets(cols):
 def test_scheme_water_closure_and_rain_field(cols):
     out, carry = zhang_mcfarlane_convection(
         cols["T"], cols["q"], cols["pf"], cols["ph"], cols["u"], cols["v"],
-        jnp.zeros_like(cols["T"]), DT, CFG, land_frac=cols["land"], cld_frac=cols["cld"])
+        jnp.zeros_like(cols["T"]), DT, CFG, land_frac=cols["land"], cld_frac=cols["cld"],
+        pblh=_cold(cols))
     dpp = cols["ph"][:, 1:] - cols["ph"][:, :-1]
     sink = -(dpp * (out.dq_v_dt + out.dq_c_conv_dt)).sum(1) / constants.g
     rain = (dpp * out.dq_r_conv_dt).sum(1) / constants.g
@@ -262,14 +269,14 @@ def test_scheme_water_closure_and_rain_field(cols):
 def _scheme_scalar(T, q, cfg, c):
     out, _ = zhang_mcfarlane_convection(
         T, q, c["pf"], c["ph"], c["u"], c["v"], jnp.zeros_like(T), DT, cfg,
-        land_frac=c["land"], cld_frac=c["cld"])
+        land_frac=c["land"], cld_frac=c["cld"], pblh=_cold(c))
     return (out.dT_dt ** 2).sum() + (out.dq_v_dt ** 2).sum() * 1e6 + (out.du_dt_conv ** 2).sum()
 
 
 def test_jit_matches_eager(cols):
     f = lambda T, q: zhang_mcfarlane_convection(
         T, q, cols["pf"], cols["ph"], cols["u"], cols["v"], jnp.zeros_like(T), DT, CFG,
-        land_frac=cols["land"], cld_frac=cols["cld"])[0]
+        land_frac=cols["land"], cld_frac=cols["cld"], pblh=_cold(cols))[0]
     o_e = f(cols["T"], cols["q"])
     o_j = jax.jit(f)(cols["T"], cols["q"])
     # 1e-9: XLA fusion re-association in the level scans (float64, ~1e-11 seen)
@@ -342,14 +349,15 @@ def test_non_convecting_column_with_zero_humidity_is_finite(cols):
     the unmasked version returned NaN moisture tendencies."""
     q = cols["q"].at[3, 15].set(0.0)
     P = Z.zm_convr(cols["T"], q, cols["pf"], cols["ph"], cols["z"], cols["zf"], cols["land"],
-                   DT, pblh=None, **KW)
+                   DT, pblh=_cold(cols), **KW)
     assert not bool(P.ideep[3])
     for name in ("dqdt", "heat", "dlf", "rprd", "mb", "prec"):
         a = getattr(P, name)[3]
         assert bool(jnp.isfinite(a).all()), name
         assert float(jnp.abs(a).max()) == 0.0, name
     out, _ = zhang_mcfarlane_convection(cols["T"], q, cols["pf"], cols["ph"], cols["u"],
-                                        cols["v"], jnp.zeros_like(q), DT, CFG_AQUA)
+                                        cols["v"], jnp.zeros_like(q), DT, CFG_AQUA,
+                                        pblh=_cold(cols))
     assert bool(jnp.isfinite(out.dq_v_dt).all()) and bool(jnp.isfinite(out.dT_dt).all())
 
 
@@ -362,7 +370,8 @@ def test_float32_reverse_mode_gradient_is_finite(cols):
     def loss(T, q):
         out, _ = zhang_mcfarlane_convection(T, q, c["pf"], c["ph"], c["u"], c["v"],
                                             jnp.zeros_like(T), DT, CFG,
-                                            land_frac=c["land"], cld_frac=c["cld"])
+                                            land_frac=c["land"], cld_frac=c["cld"],
+                                            pblh=_cold(c).astype(T.dtype))
         assert out.dT_dt.dtype == jnp.float32, "the scheme must run in float32 here"
         return (out.dT_dt ** 2).sum() + (out.du_dt_conv ** 2).sum()
 
@@ -449,7 +458,8 @@ def test_deepcu_inputs_match_transcription_and_feed_the_consumer(cols):
 
     out, _ = zhang_mcfarlane_convection(
         cols["T"], cols["q"], cols["pf"], cols["ph"], cols["u"], cols["v"],
-        jnp.zeros_like(cols["T"]), DT, CFG, land_frac=cols["land"], cld_frac=cols["cld"])
+        jnp.zeros_like(cols["T"]), DT, CFG, land_frac=cols["land"], cld_frac=cols["cld"],
+        pblh=_cold(cols))
     assert out.mass_flux_up.shape == (4, NLEV + 1) and out.icwmr.shape == (4, NLEV)
     assert bool((out.mass_flux_up[:, -1] == 0.0).all())
     assert bool(jnp.isfinite(out.mass_flux_up).all()) and bool(jnp.isfinite(out.icwmr).all())
@@ -494,7 +504,7 @@ def test_real_columns_with_zero_humidity_are_finite_and_pinned(tag):
     assert bool((q == 0.0).any()), "fixture must contain an exact zero"
     u = jnp.zeros_like(T)
     out, carry = zhang_mcfarlane_convection(T, q, pf, ph, u, u, jnp.zeros_like(T), 112.5, CFG_AQUA,
-                                            pref_edge=pref)
+                                            pref_edge=pref, pblh=jnp.zeros(T.shape[0]))
     for name in ("dT_dt", "dq_v_dt", "dq_c_conv_dt", "dq_r_conv_dt", "cape", "du_dt_conv",
                  "mass_flux_up", "icwmr"):
         assert bool(jnp.isfinite(getattr(out, name)).all()), name
@@ -504,13 +514,14 @@ def test_real_columns_with_zero_humidity_are_finite_and_pinned(tag):
     # arm) returns the same dT_dt as a 112.5 s one except where the mumax CFL
     # cap on mb binds (then smaller), never larger (2026-09-22 cadence bisect)
     out_h, _ = zhang_mcfarlane_convection(T, q, pf, ph, u, u, jnp.zeros_like(T), 1800.0, CFG_AQUA,
-                                          pref_edge=pref)
+                                          pref_edge=pref, pblh=jnp.zeros(T.shape[0]))
     assert float(jnp.abs(out_h.dT_dt).max()) <= 1.05 * float(jnp.abs(out.dT_dt).max())
     assert float(jnp.abs(out_h.dq_v_dt).max()) <= 1.05 * float(jnp.abs(out.dq_v_dt).max())
     # the run's second physics call: the carry from the first call plus a
     # carried cloud fraction (the wrapper reads neither into the kernels)
     out2, carry2 = zhang_mcfarlane_convection(
-        T, q, pf, ph, u, u, carry, 112.5, CFG_AQUA, cld_frac=jnp.full(T.shape, 0.5), pref_edge=pref)
+        T, q, pf, ph, u, u, carry, 112.5, CFG_AQUA, cld_frac=jnp.full(T.shape, 0.5), pref_edge=pref,
+        pblh=jnp.zeros(T.shape[0]))
     assert bool(jnp.isfinite(out2.dT_dt).all()) and bool(jnp.isfinite(out2.dq_v_dt).all())
     assert bool(jnp.isfinite(carry2).all())
     dz, _, z = compute_column_geometry(T, pf, ph, q_v=jnp.maximum(q, Z.Q_MIN_VAPOR))

@@ -165,7 +165,7 @@ class TestConvectionAudit:
         assert_grad_ok(loss, 1.0e-4, "tiedtke.epsilon_deep")
 
     def test_zhang_mcfarlane_tau(self):
-        from legoesm.atmosphere.physics.convection.zhang_mcfarlane import zhang_mcfarlane_convection
+        from tests._zm_cold_start import zm_cold_start as zhang_mcfarlane_convection
         from legoesm.atmosphere.physics.convection.config import ZhangMcFarlaneConfig
         T, q_v, p_full, p_half = _column()
         A = _aux()
@@ -343,14 +343,19 @@ class TestMicrophysicsAudit:
         rho = p_full / (constants.R_d * T)
         dz = jnp.full((_NCOL, _NLEV), 500.0)
         z = jnp.zeros((_NCOL, _NLEV))
-        hydro = HydrometeorState(q_c=jnp.full((_NCOL, _NLEV), 3e-3),
+        # q_c 3e-5 (was 3e-3): at 3e-3 the release exponent hits the Zhao-Carr
+        # cap (min(50, .)) and the release no longer depends on the cloud cover.
+        hydro = HydrometeorState(q_c=jnp.full((_NCOL, _NLEV), 3e-5),
             q_r=z, q_i=z, q_s=z, q_g=z, N_c=z, N_r=z, N_i=z)
 
         def loss(x):
             cfg = SundqvistConfig()._replace(rh_crit=x)
             out = sundqvist_microphysics(T, 0.9 * q_v, hydro, p_full, p_half,
                 rho, dz, 60.0, config=cfg)
-            return jnp.sum(out.dT_dt ** 2)
+            # Zhao-Carr: liquid release carries no latent heat and this
+            # column has no sub-rh_crit layer under the cloud, so rh_crit
+            # reaches the output through the cloud cover b -> precipitation.
+            return jnp.sum(out.dT_dt ** 2) + jnp.sum(out.precipitation ** 2)
         assert_grad_ok(loss, 0.8, "sundqvist.RH_crit")
 
 

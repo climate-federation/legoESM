@@ -976,23 +976,14 @@ def test_mpas_partial_physstate_checkpoint_rejected(tmp_path):
 
 
 @pytest.mark.usefixtures("allow_version_drift")
-def test_mpas_pre_pblh_checkpoint_zero_seeds_pblh(tmp_path, caplog):
-    """#2045 (user decision 2026-10-20): a checkpoint written before the
-    carried PBL height existed lacks ``physstate_pblh``.  It must restart
-    with ``pblh`` zero-seeded (CAM's cold start), not trip the INCOMPLETE
-    gate, and ZM (the consumer) must step on that zero seed."""
-    import logging
-
+def test_mpas_pre_pblh_checkpoint_restart_is_refused(tmp_path):
+    """Oracle row 47 (user decision 2026-10-20): a checkpoint written before
+    the carried PBL height existed lacks ``physstate_pblh``.  CAM zero-seeds
+    PBLH only on an initial run (physpkg.F90:419-424, phys_inidat called only
+    if initial_run, :803); a restart without the pbuf field is an error
+    (physics_buffer.F90.in:1591).  So the restart must be REFUSED as
+    INCOMPLETE, naming pblh, with ZM (the consumer) configured."""
     from legoesm.driver.model_driver import ModelDriver
-
-    class _SeedSpy(ModelDriver):
-        # Captures the restored carry the run assigns before its first step.
-        def __setattr__(self, name, value):
-            if (name == "_mpas_phys_state" and value is not None
-                    and getattr(self, "_spy_armed", False)
-                    and not hasattr(self, "_spy_seed")):
-                object.__setattr__(self, "_spy_seed", value)
-            super().__setattr__(name, value)
 
     cfg = _mpas_driver_cfg(convection="zhang_mcfarlane",
                            zm_land_fraction="none")
@@ -1004,27 +995,17 @@ def test_mpas_pre_pblh_checkpoint_zero_seeds_pblh(tmp_path, caplog):
     old = tmp_path / "pre_pblh.npz"
     with np.load(ckpt) as d:
         assert "physstate_pblh" in d.files, "save must persist pblh"
-        assert np.any(d["physstate_pblh"] != 0.0), (
-            "fixture pblh is all zero, so a zero seed proves nothing")
-        tke_saved = d["physstate_tke"]
         kept = {k: d[k] for k in d.files if k != "physstate_pblh"}
     np.savez(old, **kept)
 
-    driver_b = _SeedSpy(cfg, output_dir=tmp_path / "b")
+    driver_b = ModelDriver(cfg, output_dir=tmp_path / "b")
     driver_b.setup()
     driver_b.load_checkpoint(old)
-    driver_b._spy_armed = True
-    with caplog.at_level(logging.INFO):
-        assert driver_b.run() == "COMPLETED"
-    assert "predates PhysicsState field(s) ['pblh']" in caplog.text
-    seed = driver_b._spy_seed
-    np.testing.assert_array_equal(np.asarray(seed.pblh), 0.0)
-    np.testing.assert_array_equal(
-        np.asarray(seed.tke), tke_saved.astype(np.asarray(seed.tke).dtype))
-    final = np.asarray(driver_b._mpas_phys_state.pblh)
-    assert np.all(np.isfinite(final)) and np.any(final != 0.0)
+    with pytest.raises(ValueError, match=r"INCOMPLETE.*missing \['pblh'\]"):
+        driver_b.run()
 
 
+@pytest.mark.usefixtures("allow_version_drift")
 def test_mpas_meta_only_physstate_checkpoint_rejected(tmp_path):
     """Codex adversarial round 3 (#413): a checkpoint left with only the
     physstate_meta_* scheme tag and NO carry fields is a corrupted

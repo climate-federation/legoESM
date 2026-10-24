@@ -9,7 +9,8 @@
 2. ``load_mfcc_table`` orients the netcdf ``mfcc(PS, MW, HD)`` exactly as
    ``gw_init_beres`` reads it into ``mfcc(HD, -maxuh:maxuh, -ngwv:ngwv)``
    with the ``start=[1,1,ngwv_file-ngwv+1]`` phase-speed subset.
-3. ``_source_level_index("interface_below_p")`` = CAM6's ``desc%k`` loop.
+3. ``_source_level_index("interface_below_p")`` on ``pref_edge`` = CAM6's
+   ``desc%k`` loop (and E3SM's ``k700`` loop, gw_drag.F90:453-456).
 4. A ``+``-joined ``E3SMCAMConfig.source`` sums the per-source solves with
    their own efficiencies (CAM ``gw_tend`` accumulation).
 
@@ -266,15 +267,18 @@ def test_half_km_tie_follows_index_of_nearest_not_nint():
         _run_kernel(_beres(**dict(CAM6, hd_index_rule="bogus")), u, v, netdt, zm, mfcc, k)
 
 
-def test_equal_bounds_filter_also_pinned_on_the_e3sm_flags():
-    """Fortran tau0(Umini:Umaxi)=0 zeroes one bin for Umini == Umaxi in E3SM
-    too (same slice); pin it on the E3SM flag set so a revert to ``>`` fails."""
+def test_equal_bounds_filter_differs_between_e3sm_and_cam6():
+    """Umini == Umaxi: E3SM gw_convect.F90:293 guards the slice with
+    ``if (Umaxi > Umini)`` and zeroes NOTHING; CAM6 gw_convect.F90:285 slices
+    unconditionally and zeroes ONE bin.  Pinned on both flag sets."""
     ncol, pver, u, v, netdt, zm, mfcc, k = _synthetic()
-    out = _run_kernel(_beres(), u, v, netdt, zm, mfcc, k)      # E3SM defaults
-    tau = np.asarray(out[0])
-    lvl = int(np.asarray(out[1])[7])
-    t7 = tau[7, :, lvl]
-    assert t7.any() and (t7 == 0.0).sum() == 1
+    e3sm = _run_kernel(_beres(), u, v, netdt, zm, mfcc, k)     # E3SM defaults
+    cam6 = _run_kernel(_beres(spectrum_shift="end_off"), u, v, netdt, zm, mfcc, k)
+    for out, n_zero in ((e3sm, 0), (cam6, 1)):
+        tau = np.asarray(out[0])
+        lvl = int(np.asarray(out[1])[7])
+        t7 = tau[7, :, lvl]
+        assert t7.any() and (t7 == 0.0).sum() == n_zero
 
 
 _REAL_TABLE = ("/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/docs/references/"
@@ -297,7 +301,8 @@ def test_real_cam6_table_loads_with_the_default_beres_dimensions():
     args, kw = _column_state()
     cfg = E3SMCAMConfig(source="convective", pgwv=32,
                         beres=E3SMBeresConfig(hdepth_min_km=1.0))
-    out = e3sm_cam_gwd(*args, 900.0, cfg, mfcc_table=tbl, netdt_col=kw["netdt_col"])
+    out = e3sm_cam_gwd(*args, 900.0, cfg, mfcc_table=tbl, netdt_col=kw["netdt_col"],
+                       p_ref_half=kw["p_ref_half"])
     assert np.all(np.isfinite(np.asarray(out.du_dt)))
 
 
@@ -314,31 +319,24 @@ def test_unknown_shift_and_level_rule_raise():
     with pytest.raises(ValueError, match="spectrum_shift"):
         _run_kernel(_beres(spectrum_shift="bogus"), u, v, netdt, zm, mfcc, k)
     with pytest.raises(ValueError, match="source_level_rule"):
-        _source_level_index(jnp.ones((2, 5)), jnp.ones((2, 6)), 7e4, "bogus")
+        _source_level_index(jnp.ones(6), 5, 7e4, "bogus")
 
 
 def test_source_level_interface_rule_matches_cam6_loop():
-    # pref_edge top-down; CAM: do k=0,pver: if pref_edge(k+1) < 70000 desc%k = k+1
-    pint = np.array([[100.0, 5000.0, 30000.0, 60000.0, 69000.0, 75000.0, 100000.0]])
-    pmid = 0.5 * (pint[:, 1:] + pint[:, :-1])
-    desc_k = 0
-    for kk in range(0, pmid.shape[1] + 1):
-        if pint[0, kk] < 70000.0:           # pref_edge(k+1) 1-based == pint[k] 0-based
-            desc_k = kk + 1
-    got = int(_source_level_index(jnp.asarray(pmid), jnp.asarray(pint), 7e4,
-                                  "interface_below_p"))
-    assert got == desc_k - 1 == 4
-    near = int(_source_level_index(jnp.asarray(pmid), jnp.asarray(pint), 7e4,
-                                   "nearest_midpoint"))
-    assert near == 4  # 72000 is the nearest midpoint here (same level, by chance)
-    # a case where the two rules differ: interfaces 62000/69500/90000 ->
-    # CAM picks the 69500-90000 layer (midpoint 79750); "nearest" picks 65750
-    pint2 = np.array([[100.0, 5000.0, 30000.0, 62000.0, 69500.0, 90000.0, 100000.0]])
-    pmid2 = 0.5 * (pint2[:, 1:] + pint2[:, :-1])
-    assert int(_source_level_index(jnp.asarray(pmid2), jnp.asarray(pint2), 7e4,
-                                   "interface_below_p")) == 4
-    assert int(_source_level_index(jnp.asarray(pmid2), jnp.asarray(pint2), 7e4,
-                                   "nearest_midpoint")) == 3
+    # pref_edge top-down; CAM6 and E3SM: do k=0,pver: if pref_edge(k+1) < 70000
+    # kidx = k+1 (1-based midpoint) -> 0-based midpoint kidx-1.
+    for pref in ([100.0, 5000.0, 30000.0, 60000.0, 69000.0, 75000.0, 100000.0],
+                 [100.0, 5000.0, 30000.0, 62000.0, 69500.0, 90000.0, 100000.0]):
+        desc_k = 0
+        for kk in range(0, len(pref)):
+            if pref[kk] < 70000.0:          # pref_edge(k+1) 1-based == pref[k] 0-based
+                desc_k = kk + 1
+        got = int(_source_level_index(jnp.asarray(pref), len(pref) - 1, 7e4,
+                                      "interface_below_p"))
+        assert got == desc_k - 1 == 4
+    # the column-mean "nearest_midpoint" rule matches neither oracle
+    with pytest.raises(ValueError, match="nearest_midpoint"):
+        _source_level_index(jnp.asarray(pref), len(pref) - 1, 7e4, "nearest_midpoint")
 
 
 def test_load_mfcc_table_orientation_matches_gw_init_beres(tmp_path):
@@ -414,8 +412,9 @@ def _column_state(ncol=6, nlev=30, seed=11):
     frontgf = rng.uniform(0.0, 5e-15, (ncol, nlev))
     h_topo = rng.uniform(50.0, 400.0, ncol)
     args = [jnp.asarray(a) for a in (u, v, T, pmid, pint, z_full, z_half, rho, lat)]
+    # ps == p_ref here, so the column interfaces ARE the reference interfaces
     return args, dict(h_topo_col=jnp.asarray(h_topo), frontgf_col=jnp.asarray(frontgf),
-                      netdt_col=jnp.asarray(netdt))
+                      netdt_col=jnp.asarray(netdt), p_ref_half=jnp.asarray(pint[0]))
 
 
 def test_multi_source_sums_single_sources_with_own_effgw():
@@ -426,27 +425,41 @@ def test_multi_source_sums_single_sources_with_own_effgw():
                         beres=beres)
     dt = 900.0
     out = e3sm_cam_gwd(*args, dt, cfg, **kw)
+    spec = e3sm_cam_gwd(*args, dt, cfg._replace(source="frontal+convective"), **kw)
     parts = [e3sm_cam_gwd(*args, dt, cfg._replace(source=s, effgw=e), **kw)
-             for s, e in (("orographic", 0.125), ("frontal", 1.0), ("convective", 0.4))]
-    # momentum and dissipation are plain sums (the fixers' momentum part does
-    # not depend on the accumulated wind)
+             for s, e in (("frontal", 1.0), ("convective", 0.4))]
+    # spectral momentum and dissipation are plain sums (the fixers' momentum
+    # part does not depend on the accumulated wind)
     for f in ("du_dt", "dv_dt", "eps_gwd"):
         want = sum(np.asarray(getattr(p, f)) for p in parts)
-        np.testing.assert_allclose(np.asarray(getattr(out, f)), want, rtol=1e-12, atol=1e-30)
+        np.testing.assert_allclose(np.asarray(getattr(spec, f)), want, rtol=1e-12, atol=1e-30)
         assert np.any(want != 0.0), f
     for p in parts:
         assert np.any(np.asarray(p.du_dt) != 0.0)
-    # heating is NOT a plain sum: CAM's energy fixer acts on the accumulated
-    # ptend, so the multi-source column total-energy budget must close while
-    # the naive sum of separately-closed sources leaves dt*du_a*du_b open.
+    # heating is NOT a plain sum: the energy fixer acts on the accumulated
+    # ptend, so the spectral column total-energy budget must close while the
+    # naive sum of separately-closed sources leaves dt*du_a*du_b open.
     u, v, T, pmid, pint = (np.asarray(a) for a in args[:5])
     mass = np.diff(pint, axis=1) / constants.g
     def budget(du, dv, dT):
         return np.sum(mass * (constants.c_pd * dT + du * (u + 0.5 * dt * du)
                               + dv * (v + 0.5 * dt * dv)), axis=1)
-    b_multi = budget(*(np.asarray(getattr(out, f)) for f in ("du_dt", "dv_dt", "dT_dt")))
-    scale = np.max(np.abs(mass * constants.c_pd * np.asarray(out.dT_dt)))
-    assert np.max(np.abs(b_multi)) < 1e-10 * scale, (b_multi, scale)
+    b_spec = budget(*(np.asarray(getattr(spec, f)) for f in ("du_dt", "dv_dt", "dT_dt")))
+    scale = np.max(np.abs(mass * constants.c_pd * np.asarray(spec.dT_dt)))
+    assert np.max(np.abs(b_spec)) < 1e-10 * scale, (b_spec, scale)
+    # The orographic member of a spectral suite runs E3SM's suite semantics
+    # (orographic_only = .false., gw_drag.F90:287-288): not the standalone oro.
+    oro_alone = e3sm_cam_gwd(*args, dt, cfg._replace(source="orographic"), **kw)
+    oro_in_suite = np.asarray(out.du_dt) - np.asarray(spec.du_dt)
+    assert np.any(oro_in_suite != 0.0)
+    assert not np.allclose(oro_in_suite, np.asarray(oro_alone.du_dt), rtol=1e-6, atol=0.0)
+    # ... and its heating is E3SM's closure over the ACCUMULATED ptend against
+    # the un-updated wind (gw_drag.F90:903-913).
+    du, dv = np.asarray(out.du_dt), np.asarray(out.dv_dt)
+    want_oro_heat = -(du * (u + 0.5 * dt * du) + dv * (v + 0.5 * dt * dv)) / constants.c_pd
+    np.testing.assert_allclose(np.asarray(out.dT_dt) - np.asarray(spec.dT_dt),
+                               want_oro_heat, rtol=1e-12,
+                               atol=1e-12 * np.abs(np.asarray(out.dT_dt)).max())
     # two OVERLAPPING spectral sources (codex probe): the naive sum of the
     # separately-closed sources leaves the dt*du_a*du_b cross term open
     c2 = cfg._replace(source="frontal+background", effgw=1.0,
