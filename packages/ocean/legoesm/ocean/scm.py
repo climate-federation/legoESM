@@ -377,6 +377,7 @@ class OceanColumnModel:
         K_v_background: float = 1.0e-5,
         A_v_background: float = 1.0e-4,
         t0_seconds: float = 0.0,
+        k_after_surface_flux: bool = False,
     ):
         if time_integrator not in OCEAN_TIME_INTEGRATORS:
             raise ValueError(
@@ -397,6 +398,11 @@ class OceanColumnModel:
                 "Use forward_euler, or set implicit_vertical_mixing=False "
                 "for pure-explicit integration with rk2/rk4/ab2 (subject to "
                 "the explicit-diffusion CFL limit dt < dz^2/(2K))."
+            )
+        if k_after_surface_flux and not implicit_vertical_mixing:
+            raise ValueError(
+                "k_after_surface_flux=True re-diagnoses K for the implicit "
+                "solve and needs implicit_vertical_mixing=True."
             )
         if forcing is not None:
             validate_ocean_forcing(forcing)
@@ -427,6 +433,7 @@ class OceanColumnModel:
         self.K_v_background = float(K_v_background)
         self.A_v_background = float(A_v_background)
         self.t_seconds = float(t0_seconds)
+        self.k_after_surface_flux = bool(k_after_surface_flux)
         self._step_fn = OCEAN_TIME_INTEGRATORS[time_integrator]
         self._ab2_prev_tend: OceanTendencies | None = None
         self._tend_fn = _ocean_tendency_fn(
@@ -570,6 +577,16 @@ class OceanColumnModel:
         # apply_vertical_diffusion=False ⇒ physics returns the explicit
         # remainder + K_v/A_v for the implicit solve.  =True ⇒ physics
         # applies the vertical diffusion explicitly (CFL-limited).
+        # The ePBL MOM6-order flag is a step-order choice the SCM honours
+        # itself (see step); clear it so the closure factory, which rejects
+        # it for drivers that cannot, builds the plain ePBL physics.
+        vmix = physics_config.vertical_mixing
+        k_after_surface_flux = (vmix.scheme == "epbl"
+                                and vmix.epbl.k_after_surface_flux)
+        if k_after_surface_flux:
+            physics_config = physics_config._replace(
+                vertical_mixing=vmix._replace(
+                    epbl=vmix.epbl._replace(k_after_surface_flux=False)))
         physics_fn = make_ocean_physics(
             physics_config,
             apply_vertical_diffusion=not implicit_vertical_mixing,
@@ -580,6 +597,7 @@ class OceanColumnModel:
             implicit_vertical_mixing=implicit_vertical_mixing,
             K_v_background=K_v_background, A_v_background=A_v_background,
             t0_seconds=t0_seconds,
+            k_after_surface_flux=k_after_surface_flux,
         )
 
     def _apply_implicit_vertical_mixing(
@@ -669,7 +687,9 @@ class OceanColumnModel:
            (forward Euler, RK2, RK4, or AB2) applied to the full tendency
            including explicit vertical diffusion.
         2. **Implicit vertical diffusion** (implicit-mixing mode only):
-           backward-Euler tridiagonal solve of ``T, S, u, v``.
+           backward-Euler tridiagonal solve of ``T, S, u, v``.  K comes from the
+           step-entry state, except with ePBL's ``k_after_surface_flux``,
+           where it is re-diagnosed on the post-flux state (MOM6 order).
         3. **Coriolis rotation**: Crank-Nicolson rotation of ``(u, v)``
            (stable for any ``f·dt``; no-op when ``f_c == 0``).
 
@@ -682,8 +702,13 @@ class OceanColumnModel:
         if self.implicit_vertical_mixing:
             tend, _ = self._tend_fn(self.state, None, self.t_seconds)
             state_star = _apply_ocean_tendencies(self.state, tend, self.dt)
+            K_v, A_v = tend.K_v, tend.A_v
+            if self.k_after_surface_flux:
+                # MOM6 ordering: re-diagnose K on the post-flux state.
+                tend_star, _ = self._tend_fn(state_star, None, self.t_seconds)
+                K_v, A_v = tend_star.K_v, tend_star.A_v
             new_state = self._apply_implicit_vertical_mixing(
-                state_star, tend.K_v, tend.A_v, self.dt,
+                state_star, K_v, A_v, self.dt,
             )
         elif self.time_integrator == "ab2":
             # Adams-Bashforth 2 — single tendency evaluation per outer step;

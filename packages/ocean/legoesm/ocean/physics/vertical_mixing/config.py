@@ -15,6 +15,50 @@ from legoesm.ocean.physics.vertical_mixing.double_diffusion import (
 
 
 __param_spec__ = {
+    "EPBLConfig": {
+        "scheme_key": "ocean.vm.epbl",
+        "excluded": {
+            "dt_s": "the model timestep, not a closure parameter",
+            "mld_tol": "solver convergence tolerance, not physics",
+            "ustar_min": "numerical floor that exists to avoid division by zero",
+            "eqd_v0_lower_cap": "Sane et al. (2026) training-range guard, not a trained coefficient",
+            "eqd_v0_upper_cap": "Sane et al. (2026) training-range guard, not a trained coefficient",
+            "eqd_bflux_lower_cap": "Sane et al. (2026) training-range guard, not a trained coefficient",
+            "eqd_bflux_upper_cap": "Sane et al. (2026) training-range guard, not a trained coefficient",
+            "eqd_sigma_max_lower_cap": "Sane et al. (2026) asymptote guard on the shape function",
+            "eqd_sigma_max_upper_cap": "Sane et al. (2026) asymptote guard on the shape function",
+            "eqd_eh_upper_cap": "Sane et al. (2026) asymptote guard on the shape function",
+            "eqd_lh_cap": "Sane et al. (2026) asymptote guard on the shape function",
+            "eqd_f_lower": "Coriolis floor for the v0 scheme; a guard, not a closure knob",
+            "eqd_shape_function_epsilon": "below-boundary-layer floor that keeps the iterative solver well posed",
+            "vonkar": "von Karman constant; a measured universal constant, not tunable",
+            "min_mix_len": "numerical floor on the mixing length (MOM6 default 0 = no floor)",
+        },
+        "params": {
+            "nstar": {"units": "1", "bounds": (0.02, 0.4), "tunable_tier": 1, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Reichl & Hallberg (2018) NSTAR: fraction of released PE available to drive entrainment", "shape": None},
+            "fixed_mstar": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 1, "transform": "sigmoid", "category": "vertical_mixing", "reference": "Reichl & Hallberg (2018) MSTAR: TKE input per unit u_star^3 (CONSTANT scheme)", "shape": None},
+            "tke_decay": {"units": "1", "bounds": (0.001, 12.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "TKE_DECAY: ratio of the Ekman depth to the TKE decay scale", "shape": None},
+            "wstar_ustar_coef": {"units": "1", "bounds": (0.5, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "WSTAR_USTAR_COEF: efficiency of convective relative to mechanical TKE", "shape": None},
+            "ekman_scale_coef": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "EKMAN_SCALE_COEF: rotational inhibition of the mixing length", "shape": None},
+            "mke_to_tke_effic": {"units": "1", "bounds": (0.0, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MKE_TO_TKE_EFFIC: conversion of resolved shear KE into TKE", "shape": None},
+            "mstar_cap": {"units": "1", "bounds": (-1.0, 20.0), "tunable_tier": 0, "transform": "none", "category": "vertical_mixing", "reference": "MSTAR_CAP: upper bound on mstar; negative disables", "shape": None},
+            "mstar_coef": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MSTAR2_COEF1: rotation/stabilization balance (OM4 scheme)", "shape": None},
+            "c_ek": {"units": "1", "bounds": (0.02, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MSTAR2_COEF2: Ekman-limited mixing coefficient (OM4 scheme)", "shape": None},
+            "mstar_convect_coef": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MSTAR_CONV_ADJ: reduction of mstar under convection", "shape": None},
+            "rh18_mstar_cn1": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "RH18_MSTAR_CN1 (Reichl & Hallberg 2018 value 0.275)", "shape": None},
+            "rh18_mstar_cn2": {"units": "1", "bounds": (1.0, 30.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "RH18_MSTAR_CN2 (Reichl & Hallberg 2018 value 8.0)", "shape": None},
+            "rh18_mstar_cn3": {"units": "1", "bounds": (-12.0, -1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "RH18_MSTAR_CN3 (Reichl & Hallberg 2018 value -5.0)", "shape": None},
+            "rh18_mstar_cs1": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "RH18_MSTAR_CS1 (Reichl & Hallberg 2018 value 0.2)", "shape": None},
+            "rh18_mstar_cs2": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "RH18_MSTAR_CS2 (Reichl & Hallberg 2018 value 0.4)", "shape": None},
+            "mixlen_exponent": {"units": "1", "bounds": (0.5, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MIX_LEN_EXPONENT: shape of the mixing-length profile (1 = law of the wall, 2 = KPP-like)", "shape": None},
+            "translay_scale": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "EPBL_TRANSITION_SCALE: mixing length in the transition layer as a fraction of the boundary-layer depth", "shape": None},
+            "vstar_scale_fac": {"units": "1", "bounds": (0.2, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "EPBL_VEL_SCALE_FACTOR: overall scaling of the turbulent velocity", "shape": None},
+            "vstar_surf_fac": {"units": "1", "bounds": (0.5, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "VSTAR_SURF_FAC: surface mechanical contribution to vstar (REICHL_H18 scheme)", "shape": None},
+            "omega_frac": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "ML_OMEGA_FRAC: blend of 2*Omega with the local f in the rotational scale", "shape": None},
+            "K_bg": {"units": "m^2/s", "bounds": (1e-6, 1e-4), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KD: background tracer diffusivity added below the boundary layer", "shape": None},
+            "A_bg": {"units": "m^2/s", "bounds": (1e-5, 1e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "KV: background viscosity added below the boundary layer", "shape": None},
+        },
+    },
     "ConstantVerticalMixingConfig": {
         "scheme_key": "ocean.vm.constant",
         "excluded": {
@@ -980,6 +1024,93 @@ class CATKEConfig(NamedTuple):
     maximum_tke_diffusivity: float = float("inf")     # K_e cap [m^2/s]
 
 
+class EPBLConfig(NamedTuple):
+    """Energetic Planetary Boundary Layer (Reichl & Hallberg 2018) settings.
+
+    Field-for-field the MOM6 ``MOM_energetic_PBL`` runtime parameters, with
+    MOM6's own defaults, so a MOM6 parameter block maps onto this config one
+    name at a time.  The MOM6 name of each field is given in its comment.
+
+    ``dt_s`` has no MOM6 counterpart: MOM6 passes the timestep as an argument,
+    while legoESM's vertical-mixing factory signature carries no timestep, so
+    ePBL — which is an energy-per-timestep closure — reads it from the config.
+    It MUST equal the model timestep; the scheme raises if it is not positive.
+    """
+    # --- timestep (no MOM6 equivalent; see class docstring) ---
+    dt_s: float = 1800.0
+
+    # --- rotation / decay ---
+    omega_frac: float = 0.0        # ML_OMEGA_FRAC
+    tke_decay: float = 2.5         # TKE_DECAY
+    ekman_scale_coef: float = 1.0  # EKMAN_SCALE_COEF
+
+    # --- energy partition ---
+    nstar: float = 0.2                 # NSTAR
+    mke_to_tke_effic: float = 0.0      # MKE_TO_TKE_EFFIC
+    wstar_ustar_coef: float = 1.0      # WSTAR_USTAR_COEF
+
+    # --- mstar (TKE input = mstar * rho0 * ustar^3 * dt) ---
+    mstar_scheme: str = "constant"     # EPBL_MSTAR_SCHEME: constant|om4|reichl_h18
+    fixed_mstar: float = 1.2           # MSTAR
+    mstar_cap: float = -1.0            # MSTAR_CAP (<=0 disables)
+    mstar_coef: float = 0.3            # MSTAR2_COEF1 (om4 scheme)
+    c_ek: float = 0.085                # MSTAR2_COEF2 (om4 scheme)
+    mstar_convect_coef: float = 0.0    # MSTAR_CONV_ADJ
+    rh18_mstar_cn1: float = 0.275      # RH18_MSTAR_CN1
+    rh18_mstar_cn2: float = 8.0        # RH18_MSTAR_CN2
+    rh18_mstar_cn3: float = -5.0       # RH18_MSTAR_CN3
+    rh18_mstar_cs1: float = 0.2        # RH18_MSTAR_CS1
+    rh18_mstar_cs2: float = 0.4        # RH18_MSTAR_CS2
+
+    # --- mixing length / boundary-layer depth iteration ---
+    use_mld_iteration: bool = True     # USE_MLD_ITERATION
+    mld_bisection: bool = False        # EPBL_MLD_BISECTION
+    mld_iter_bug: bool = True          # EPBL_MLD_ITER_BUG
+    max_mld_its: int = 20              # EPBL_MLD_MAX_ITS
+    mld_tol: float = 1.0               # EPBL_MLD_TOLERANCE [m]
+    mixlen_exponent: float = 2.0       # MIX_LEN_EXPONENT
+    translay_scale: float = 0.1        # EPBL_TRANSITION_SCALE
+    min_mix_len: float = 0.0           # EPBL_MIN_MIX_LEN [m]
+    vonkar: float = 0.4                # VON_KARMAN
+
+    # --- turbulent velocity scale ---
+    wt_scheme: str = "cube_root_tke"   # EPBL_VEL_SCALE_SCHEME: cube_root_tke|reichl_h18
+    vstar_scale_fac: float = 1.0       # EPBL_VEL_SCALE_FACTOR
+    vstar_surf_fac: float = 1.2        # VSTAR_SURF_FAC
+
+    # --- solver numerics ---
+    max_kd_its: int = 20               # ePBL_column's hard-coded max_itt
+    ustar_min: float = 1.45842e-18     # EPBL_USTAR_MIN [m/s]
+
+    # --- machine-learning equation-discovery options (Sane et al. 2026) ---
+    eqdisc_shape: bool = False         # EPBL_EQD_DIFFUSIVITY_SHAPE
+    eqdisc_v0: bool = False            # EPBL_EQD_DIFFUSIVITY_VELOCITY
+    eqdisc_v0h: bool = False           # EPBL_EQD_DIFFUSIVITY_VELOCITY_H
+    eqd_v0_lower_cap: float = 1.0e-4   # EPBL_EQD_DIFFUSIVITY_V0_LOWER_CAP [m/s]
+    eqd_v0_upper_cap: float = 0.1      # EPBL_EQD_DIFFUSIVITY_V0_UPPER_CAP [m/s]
+    eqd_bflux_lower_cap: float = -7.0e-7  # ..._BFLUX_LOWER_CAP [m^2/s^3]
+    eqd_bflux_upper_cap: float = 7.0e-7   # ..._BFLUX_UPPER_CAP [m^2/s^3]
+    eqd_sigma_max_lower_cap: float = 0.1  # ..._SIGMA_MAX_LOWER_CAP
+    eqd_sigma_max_upper_cap: float = 0.7  # ..._SIGMA_MAX_UPPER_CAP
+    eqd_eh_upper_cap: float = 2.0         # ..._EH_UPPER_CAP
+    eqd_lh_cap: float = 8.0               # ..._LH_CAP
+    eqd_f_lower: float = 2.5384e-7        # ..._CORIOLIS_LOWER_CAP [1/s]
+    eqd_shape_function_epsilon: float = 0.01  # ..._SHAPE_FUNCTION_EPSILON
+
+    # --- background floors added to the ePBL diffusivity ---
+    K_bg: float = 1.0e-5               # KD   [m^2/s]
+    A_bg: float = 1.0e-4               # KV   [m^2/s]
+
+    # --- operator-split ordering (no MOM6 parameter; see note) ---
+    # False (legoESM default, same as KPP): K is diagnosed from the
+    # step-entry state, before this step's surface flux is applied.
+    # True: K is diagnosed from the state AFTER the surface flux, as MOM6
+    # does (applyBoundaryFluxes precedes energetic_PBL).  Both converge to
+    # the same answer as dt -> 0.  Honoured by the ocean SCM only; every
+    # other driver raises if it is set.
+    k_after_surface_flux: bool = False
+
+
 #: Canonical set of vertical-mixing closures ``compute_vertical_K_profiles``
 #: dispatches. SINGLE SOURCE OF TRUTH -- the k_profiles.py fail-loud raise reads
 #: this instead of a hand-copied literal list, exactly as ``VALID_EOS_SCHEMES``
@@ -987,7 +1118,7 @@ class CATKEConfig(NamedTuple):
 #: never drift). Every member is reachable through the public YAML key
 #: ``ocean.physics.vertical_mixing.scheme`` (pinned by test_config_footguns).
 VALID_VERTICAL_MIXING_SCHEMES = frozenset(
-    {"none", "constant", "richardson", "tke", "catke", "kpp"}
+    {"none", "constant", "richardson", "tke", "catke", "kpp", "epbl"}
 )
 
 
@@ -997,6 +1128,7 @@ class VerticalMixingConfig(NamedTuple):
     constant: ConstantVerticalMixingConfig = ConstantVerticalMixingConfig()
     richardson: RichardsonVerticalMixingConfig = RichardsonVerticalMixingConfig()
     kpp: KPPConfig = KPPConfig()
+    epbl: EPBLConfig = EPBLConfig()
     tke: TKEConfig = TKEConfig()
     catke: CATKEConfig = CATKEConfig()
     # Tidal mixing is ADDITIVE: when ``tidal.enabled=True`` the

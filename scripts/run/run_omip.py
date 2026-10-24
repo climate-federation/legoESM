@@ -123,7 +123,7 @@ GRID_DEFAULTS: dict[str, dict] = {
 
 ALL_RESULTS: list[dict] = []
 
-_VALID_VERTICAL_MIXING_SCHEMES = ("kpp", "tke", "catke", "richardson", "constant", "none")
+_VALID_VERTICAL_MIXING_SCHEMES = ("kpp", "tke", "catke", "richardson", "constant", "none", "epbl")
 _DEFAULT_KPP_CONFIG = KPPConfig()
 from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (  # noqa: E402
     IWMConfig as _IWMConfig,
@@ -224,7 +224,23 @@ def build_vertical_mixing_config_from_args(
         ),
         iwm=build_iwm_config_from_args(args),
         ddm=build_ddm_config_from_args(args),
+        **_epbl_config_from_args(scheme, args),
     )
+
+
+def _epbl_config_from_args(scheme: str, args) -> dict:
+    """ePBL is an energy-per-timestep closure: its ``dt_s`` must be the
+    model timestep.  Require an explicit ``--dt`` rather than inheriting
+    EPBLConfig's placeholder default (a silent mismatch would rescale the
+    TKE budget)."""
+    if scheme != "epbl":
+        return {}
+    if getattr(args, "dt", None) is None:
+        raise ValueError(
+            "--vertical-mixing-scheme epbl needs an explicit --dt: ePBL's "
+            "TKE budget is per timestep and must use the model timestep.")
+    from legoesm.ocean.physics.vertical_mixing.config import EPBLConfig
+    return {"epbl": EPBLConfig(dt_s=float(args.dt))}
 
 
 def build_ddm_config_from_args(args):
@@ -535,6 +551,13 @@ def parse_args(argv: list[str] | None = None):
                    help="Short 30-day run for CI")
     p.add_argument("--output", type=str, default="results/omip")
     p.add_argument("--checkpoint-days", type=float, default=30.0)
+    p.add_argument("--monthly-mld-sst", action="store_true",
+                   help="Write monthly means of SST and mixed-layer depth "
+                        "(de Boyer Montegut, 0.03 kg/m3 wrt 10 m) to "
+                        "<output>/<grid>/<res>/monthly_mld_sst.nc, averaged "
+                        "over the diagnostic samples (every --diag-every "
+                        "steps) of each 365-day-calendar month. Lat-lon "
+                        "JRA55-do runs only.")
     p.add_argument("--no-final-snapshot", action="store_true",
                    help="Skip the end-of-run MLD snapshot (snapshot_final.npz). "
                         "For probe arms at ORCA12 the 14 GB compressed write "
@@ -560,6 +583,14 @@ def parse_args(argv: list[str] | None = None):
                    help="WOA18 temperature NetCDF path")
     p.add_argument("--woa-s", type=str, default=None,
                    help="WOA18 salinity NetCDF path")
+    p.add_argument("--woa-t-var", type=str, default=None,
+                   help="Temperature variable in --woa-t (default 't_an'; "
+                        "WOA13 potential temperature is 'ptemp_an').")
+    p.add_argument("--woa-s-var", type=str, default=None,
+                   help="Salinity variable in --woa-s (default 's_an').")
+    p.add_argument("--woa-month", type=int, default=None,
+                   help="Month 1-12 to read from a 12-record monthly WOA "
+                        "file (default: annual-mean file, no month axis).")
     p.add_argument("--woa-init", action="store_true",
                    help="Initialize T/S from WOA18 instead of rest state. "
                         "Requires --woa-t and --woa-s.")
@@ -4248,6 +4279,83 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
 # Diagnostics
 # ===========================================================================
 
+_NOLEAP_MONTH_END_DAYS = np.cumsum(
+    [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])
+
+
+class MonthlyMldSstWriter:
+    """Accumulate SST and mixed-layer depth at each diagnostic sample and
+    write their monthly means (365-day calendar, day 0 = 1 Jan).
+
+    Each completed month is appended to the NetCDF file and the file is
+    rewritten in full, so a killed run keeps every finished month.  MLD is
+    the shared de Boyer Montegut diagnostic (0.03 kg/m3 wrt 10 m).
+    """
+
+    def __init__(self, path, *, z_coord, lat_deg, lon_deg):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        zh = np.asarray(z_coord.z_half_ref)
+        self.z_centers = np.abs(0.5 * (zh[:-1] + zh[1:]))
+        self.lat, self.lon = np.asarray(lat_deg), np.asarray(lon_deg)
+        self.month = None
+        self.sum_sst = self.sum_mld = None
+        self.n = 0
+        self.done: list[tuple[int, int, np.ndarray, np.ndarray]] = []
+
+    @staticmethod
+    def month_of(day: float) -> tuple[int, int]:
+        """(year index, month 1..12) of the sample interval ending at day."""
+        d = float(day) - 1e-6          # the sample closes the step that ends at day
+        year, doy = divmod(d, 365.0)
+        return int(year), int(np.searchsorted(_NOLEAP_MONTH_END_DAYS, doy,
+                                              side="right")) + 1
+
+    def add(self, state, day: float) -> None:
+        from legoesm.ocean.diagnostics import mixed_layer_depth
+        key = self.month_of(day)
+        if self.month is not None and key != self.month:
+            self._flush()
+        self.month = key
+        wet = np.asarray(state.land_mask.data) > 0.5
+        T = np.asarray(state.T.data)
+        mld = np.asarray(mixed_layer_depth(
+            jnp.asarray(T), jnp.asarray(state.S.data),
+            jnp.asarray(self.z_centers),
+            bottom_depth=jnp.asarray(state.H_bathy.data)))
+        sst = np.where(wet, T[..., 0], np.nan)
+        mld = np.where(wet, mld, np.nan)
+        if self.sum_sst is None:
+            self.sum_sst, self.sum_mld = np.zeros_like(sst), np.zeros_like(mld)
+        self.sum_sst += sst
+        self.sum_mld += mld
+        self.n += 1
+
+    def _flush(self) -> None:
+        import xarray as xr
+        if self.n == 0:
+            return
+        y, m = self.month
+        self.done.append((y, m, self.sum_sst / self.n, self.sum_mld / self.n))
+        self.sum_sst = self.sum_mld = None
+        self.n = 0
+        ds = xr.Dataset(
+            {"sst": (("time", "lat", "lon"), np.stack([d[2] for d in self.done]),
+                     {"units": "degC", "long_name": "monthly mean SST"}),
+             "mld": (("time", "lat", "lon"), np.stack([d[3] for d in self.done]),
+                     {"units": "m", "long_name": "monthly mean mixed-layer "
+                      "depth (0.03 kg/m3 wrt 10 m)"})},
+            coords={"year_index": ("time", [d[0] for d in self.done]),
+                    "month": ("time", [d[1] for d in self.done]),
+                    "lat": self.lat, "lon": self.lon})
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        ds.to_netcdf(tmp)
+        os.replace(tmp, self.path)
+
+    def close(self) -> None:
+        self._flush()
+
+
 def _extract_scalars(state, grid_type, grid, z_coord):
     """Compute scalar diagnostics from ocean state."""
     if grid_type == "spectral":
@@ -4899,7 +5007,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                    nudge_woa_tau=0.0, T_woa_3d=None, S_woa_3d=None,
                    snapshot_fn=None, spmd_step=None, spmd_gather=None,
                    spmd_shard_stack=None, spmd_gather_ice=None,
-                   spmd_shard_ref=None):
+                   spmd_shard_ref=None, diag_state_fn=None):
     """Run time loop with diagnostics.
 
     Two forcing paths, mutually exclusive:
@@ -5342,6 +5450,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             diag["step"].append(step)
             for k, v in scalars.items():
                 diag.setdefault(k, []).append(v)
+            if diag_state_fn is not None:
+                diag_state_fn(_st_diag, day)
 
             elapsed_total = time.time() - t0
             total_days = n_steps * dt / 86400.0
@@ -5419,6 +5529,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 diag["step"].append(step)
                 for k, v in scalars.items():
                     diag.setdefault(k, []).append(v)
+                if diag_state_fn is not None:
+                    diag_state_fn(state, day)
                 elapsed_total = time.time() - t0
                 total_days = n_steps * dt / 86400.0
                 summary = " | ".join(
@@ -6548,7 +6660,10 @@ def run_omip_single(grid_type: str, args) -> dict:
         T_woa, S_woa = init_ocean_from_woa(
             grid, _zc_final, _woa_paths[0], _woa_paths[1],
             cell_center_depths=_cell_depths,
-            void_fill=bool(getattr(args, "woa_void_fill", False)))
+            void_fill=bool(getattr(args, "woa_void_fill", False)),
+            month=getattr(args, "woa_month", None),
+            T_var=getattr(args, "woa_t_var", None),
+            S_var=getattr(args, "woa_s_var", None))
     del _cell_depths   # a full-global (nj, ni, nlev) f64 array per rank at ORCA12
 
     if args.woa_init and T_woa is not None and S_woa is not None:
@@ -7051,6 +7166,16 @@ def run_omip_single(grid_type: str, args) -> dict:
                       f"{spmd_step.land_fill_band_capacity}.")
         elif jax.process_index() == 0:
             print("  SPMD (mpas): single device visible — flag is a no-op.")
+    _monthly = _monthly_fn = None
+    if getattr(args, "monthly_mld_sst", False):
+        if jra55_state is None or grid_type != "latlon":
+            raise ValueError("--monthly-mld-sst is implemented for the "
+                             "lat-lon JRA55-do path only.")
+        _monthly = MonthlyMldSstWriter(
+            Path(args.output) / grid_type / resolution / "monthly_mld_sst.nc",
+            z_coord=z_coord, lat_deg=np.rad2deg(np.asarray(grid.lat)),
+            lon_deg=np.rad2deg(np.asarray(grid.lon)))
+        _monthly_fn = _monthly.add
     # Disarm the process-global SPMD backend on EVERY exit of the loop (a
     # direct run_omip_single() caller has no main()-loop finally).
     try:
@@ -7074,6 +7199,7 @@ def run_omip_single(grid_type: str, args) -> dict:
             S_woa_3d=(S_woa * state.land_mask.data[..., jnp.newaxis]).astype(
                 state.S.data.dtype) if args.nudge_woa_tau > 0 and S_woa is not None else None,
             snapshot_fn=_snapshot_fn,
+            diag_state_fn=_monthly_fn,
             spmd_step=spmd_step,
             spmd_gather=spmd_gather,
             spmd_shard_stack=spmd_shard_stack,
@@ -7086,6 +7212,8 @@ def run_omip_single(grid_type: str, args) -> dict:
             state = spmd_gather(state)
             _gather_final_ice(jra55_state, spmd_gather_ice)
     finally:
+        if _monthly is not None:
+            _monthly.close()
         if run_config.enable_mpas_spmd and spmd_step is not None:
             from legoesm.parallel.voronoi_spmd_ocean import disarm_mpas_ocean_spmd
             disarm_mpas_ocean_spmd()
