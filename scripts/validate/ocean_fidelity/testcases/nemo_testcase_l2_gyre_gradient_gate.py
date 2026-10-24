@@ -207,8 +207,13 @@ def build_observed_primal_preserving_step(
     def observed_step_jvp(primals, tangents):
         # This direct call receives the rule's primal values, so it executes
         # the ordinary production program before any upstream JVP/VJP can
-        # replace its primal with the transform replay.
-        production = production_step(*primals)
+        # replace its primal with the transform replay.  Barriers on both sides
+        # prevent XLA from commoning/fusing this separately executed branch
+        # into the adjacent replay graph; without them CPU reverse lowering
+        # changed 18 state leaves even though the custom rule selected this arm.
+        production_primals = jax.lax.optimization_barrier(primals)
+        production = jax.lax.optimization_barrier(
+            production_step(*production_primals))
         replay, replay_tangent = jax.jvp(
             replay_step, primals, tangents)
         selected = (
