@@ -622,11 +622,19 @@ def _zm_driver_config(grid_type, resolution, dycore_kw):
 ], ids=["column_pipeline", "mpas_combined"])
 def test_driver_zm_land_policy_means_the_same_on_every_lane(tmp_path, grid_type, resolution, dycore_kw):
     """One rule, both driver lanes, on a flat (all-ocean) run: "required"
-    stops at setup, "none" runs to completion."""
+    stops at setup, "none" runs to completion.  The cubed-sphere
+    PhysicsPipeline lane refuses ZM outright (it would discard ZM's momentum
+    transport), so there both land policies stop at that refusal."""
     from legoesm.driver.model_driver import ModelDriver
 
     cfg = _zm_driver_config(grid_type, resolution, dycore_kw)
     assert cfg.zm_land_fraction == "required"
+    if grid_type == "cubed_sphere":
+        for policy in ("required", "none"):
+            with pytest.raises(ValueError, match="convective momentum transport"):
+                ModelDriver(cfg._replace(zm_land_fraction=policy),
+                            output_dir=tmp_path / policy).setup()
+        return
     with pytest.raises(ValueError, match="no land"):
         ModelDriver(cfg, output_dir=tmp_path / "req").setup()
     driver = ModelDriver(cfg._replace(zm_land_fraction="none"), output_dir=tmp_path / "none")

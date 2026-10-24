@@ -507,7 +507,9 @@ def test_make_physics_threads_sfc_override_combined_path():
         fn = make_physics(
             cfg, model_type="spectral_pe", dt=1800.0, sfc_albedo_override=alb,
         )
-        out = fn(state, grid, sigma)
+        # turbulence="none" adds the default bulk surface exchange, which needs
+        # a skin temperature: the isothermal state's own 300 K (no sensible flux).
+        out = fn(state, grid, sigma, forcing={"T_sfc": jnp.full((ncol,), 300.0)})
         out = out[0] if isinstance(out, tuple) else out
         return jnp.sum(jnp.abs(out.T_hat.data) ** 2)
 
