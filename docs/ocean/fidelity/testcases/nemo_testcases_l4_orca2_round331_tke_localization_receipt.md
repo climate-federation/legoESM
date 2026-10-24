@@ -396,3 +396,20 @@ landed call site.  Removing only `u_now=u_now, v_now=v_now` makes it fail with
 `None is entry_u` (exit 1); restoring the call site gives 74/74 TKE-term tests
 passing.  This closes the direct-helper-test review gap without changing model
 behaviour.
+
+## Resume-4 final gate ledger and disposition
+
+- Independent reviews: **LAND** (Claude and Argon).
+- Production-call-site regression: pass; call-site-only revert plant fails
+  with exit 1; restored TKE-term module: 74 passed.
+- Per-receipt citation gate: PASS, 26 citations, 0 unmapped, 0 failures and
+  0 map-audit failures; the new shifted-citation plant fires.
+- Default ORCA2 landing battery: 150 passed in 1122.46 s, including the
+  private-import ratchet.
+- Explicit private-import ratchet: 6 passed in 5.14 s.
+- No NEMO, model-behaviour or configuration change: **ASKED**.
+
+Final disposition: **LANDED-pending push gate and DINO month gate**.  Round
+331's RK3 stored-velocity fix remains unchanged and fully admitted.  The
+leapfrog velocity time level is now explicit named debt; the next numerical
+TKE debt remains the seven wet post-energy `avm/avt` source-order roundings.
