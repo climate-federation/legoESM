@@ -118,3 +118,17 @@ direct test, and retained record reader; extended those paths and added no
 duplicate implementation. Independent review was unavailable: the required
 read-only Codex CLI failed to initialize its app-server client because the
 review sandbox filesystem was read-only.
+
+## Operator amendments after final review (Claude LAND, Argon pending/LAND)
+
+- The admission run's logs and probe outputs lived only in /tmp; the operator copied them into
+  `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round4/admission_evidence/` with `SHA256SUMS`.
+- The jit scoring is NOT what the preregistration specified (it names jit only for gradients); the reviewer
+  re-scored both eager and under jit and both are 0 ULP, so the result does not depend on that choice.
+- The admitted record still sits under `refused/` (where the first, plant-refused admission parked it) and its
+  input links point at the old path; it is the admitted O1 record nonetheless (pinned producer 4fefbe7cba,
+  binary and input digests verified by the reviewer).
+- Reviewer recomputation (CONFIRMED): kt 1, kt 2, restart entry, restart kt 2 and restart-vs-continuous kt 2
+  all 0 ULP over 107 field arrays on 16,433 interior, 281 seam and 135 fold wet T cells; 40 restart variables at
+  kt 1 and kt 2 at 0 ULP. The old kt2-sss plant was vacuous because all 13,145 wet cells with an ice-free category
+  sit above the 0.1333 branch point at both steps; the replacement plant fails on the real record (s_i off by 5 ULP).
