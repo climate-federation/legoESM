@@ -2,26 +2,119 @@
 
 ## Outcome
 
-Resume 4 closes the five remaining acquisition findings and leaves O1 at `ACQUISITION_NEEDED`. NEMO was not built or run. The CPU acquisition preflight is `PREFLIGHT_OK`; operator acquisition and the operator-run independent review remain outstanding. The original preregistration remains byte-identical to commit `345df680bf`, and no scientific option, bar, window, or model default changed.
+O1 is **LANDED**. The kept completed run at
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round4/refused/oracle_o1_orca2_sas_ice_admission_refused_20261024T161410Z_1010784`
+was re-admitted with `--admit-existing`; NEMO was not rebuilt or rerun. Admission
+was pinned to producer commit `4fefbe7cba0afbc76f26bc94a744b5650b26285f`,
+the recorded inputs, and both recorded executable digests. The repaired gate is
+intentionally newer than the producer (`gate_changed_since_run=true`).
 
-## Restart record and forcing clocks
+The operator's real same-program proof is unchanged: `303` object files and
+`291` preprocessed sources are identical; only observer units
+`icedyn_adv_pra`, `icestp`, and writer unit `o1_si3_state_writer` differ. The
+reference executable SHA-256 is
+`dba67f3c81a08dced5c975d26317c637a57b5362237b9121606d1c8f578f7a3e` and
+the observer executable SHA-256 is
+`bfaf323f41d10b5bf959769d7586d3c2021cafa4dc5be0165cd8606ba7aa56f7`.
+Admission checked `2` binaries and `7` pinned inputs.
 
-The writer derives every step filename from the actual `kt`, so the `nn_it000=nn_itend=2` continuation writes `o1_si3_state_step0002_rankNNNN.bin` (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_si3_state_writer.F90:94-97`). Admission now requires exactly that filename and metadata `kt=2`; its fixture contains no restart `step0001` file, and the `rst-step-name` plant proves the old lookup is refused (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1759-1824`; `tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:1231-1252`).
+## Diagnosis — CONFIRMED versus PLAUSIBLE
 
-NEMO updates the mean surface fields before dispatching SI3 in `sbc`: `sbc_ssm` is called at the forcing boundary and `ice_stp` later in the same routine (`src/OCE/SBC/sbcmod.F90:397-403`; `src/OCE/SBC/sbcmod.F90:474-477`). Admission therefore reads `sss_m` from the kt=2 snapshot for both the continuous and restart kt=2 advances, never from kt=1 (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1729-1742`; `scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1811-1833`). The direct fixture gives kt=1 and kt=2 different salinities at an ice-free wet category; `kt2-sss-step1` fails (`tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:1112-1122`; `tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:1301-1325`).
+**CONFIRMED:** the real `kt=1` and `kt=2` `sss_m` arrays are not bit-identical.
+Both have shape `(184, 152)` and contain `27,968` binary64 values. Exactly
+`16,849` elements differ bit-for-bit; `max|kt2-kt1|` is
+`0.20845785140991246`. Their payload SHA-256 values are, respectively,
+`c7dbd409805477751751b9c07438f7f3ce9a5d7f8be8b6c50c0f97046949fee0`
+and `28ec7cae3d892eb21a086e2da36ad5f47f3d696b5411da8ac0f6102baf9f64d7`.
+The committed admission gate measures and records this comparison
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1729-1761`,
+`:1929-1936`).
 
-## Defined halo coverage
+**CONFIRMED:** the old `kt2-sss-step1` substitution was vacuous on this real
+record even though the fields differ. O1 resolves `nn_icesal=4`,
+`rn_simin=0.1`, and `rn_sinew=0.75`. At an icy category NEMO computes `sz_i`
+from `szv_i / (v_i * r1_nlay_i)` and does not consume `sss_m`; at an ice-free
+category it computes `MIN(rn_simin, rn_sinew * sss_m)`
+(`src/ICE/icevar.F90:376-390`; compiled
+`ORCA2_SAS_ICE_O1_REC/BLD/ppsrc/nemo/icevar.f90:376-390`). The branch point is
+therefore `0.13333333333333333`, far below both real forcing snapshots at the
+scored cells, so both produce `0.1`. Substitution changed no scored bit.
 
-NEMO computes the full aggregate arrays with `DO_2D(nn_hls,...)` and the category-equivalent thickness/age fields over the same halo extent (`src/ICE/icevar.F90:105-252`; `src/ICE/icevar.F90:255-428`). The scorer now includes the wet cyclic-seam and north-fold halos for those full equivalent and aggregate fields, while retaining interior-only masks only for reduced `A2D(0)` diagnostics (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1261-1357`). One-ULP plants on `h_i` and `at_i` fire at both halo classes; the corrected test comment identifies only `diag_set0` and reduced `A2D(0)` outputs as undefined there (`tests/ocean/fidelity/test_nemo_si3_o1_orca2_sas_gate.py:822-879`).
+**CONFIRMED:** the replacement `kt2-sss-perturb` plant changes the actual
+`kt=2` field at the first interior wet cell with an ice-free category,
+zero-based `(2, 21)`, to one ULP below that branch point. It fails on the kept
+real record at the first compared statement, equivalent `s_i`, with
+`wet_ULP=5`, `full_ULP=5`, and normalised error `6.939e-17`. This both proves a
+live scored dependency and retains the selection check: if the step regresses
+to the `kt=1` field, changing only `sss_step2` becomes vacuous and the
+acquisition refuses (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1741-1761`).
 
-## Pre-run executable identity and restart dependency
+**PLAUSIBLE:** none. No unmeasured explanation is used in the O1 verdict.
 
-`--run` now builds both real reference and instrumented executables, runs the compiled same-program comparison, and only then permits the first NEMO launch (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:1055-1061`; `scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:1204-1212`). The preflight explicitly checks this operator-call order and plants a missing comparison; its earlier synthetic trees are retained only as a checker fixture (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:199-230`; `scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:905-913`). A real mismatch returns `REFUSE` before any `mpirun`.
+## Preregistered O1 score
 
-The shipped SAS path opens the step restart from `day`, and `sbc_ssm` writes `sss_m` and the other SAS surface fields into the ocean restart (`src/OCE/DOM/daymod.F90:276-277`; `src/OCE/IOM/restart.F90:81-145`; `src/OCE/SBC/sbcssm.F90:177-191`). O1 sets `nn_stock=1`, so `rec_2step` produces `ORCA2_SAS_00000001_restart.nc` (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/namelist_cfg:21-24`). Before staging `rst_1step`, the acquisition now requires both that SAS ocean restart and its ice peer with a dedicated refusal; the preflight's missing-ocean-restart plant fires (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:180-194`; `scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:915-926`; `scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:1173-1181`). Admission independently plants the same missing dependency.
+The score ran on `cpu`, binary64, production `jax.jit`, with `XLA_FLAGS=""`;
+the permanent admission JSON stamps `execution_backend="cpu"`,
+`execution_x64=true`, and `execution_jit=true`. The gate scores every
+prognostic field, Prather moment, equivalent field, and aggregate on wet
+T/U/V cells, including NEMO-defined cyclic seam and north-fold halos; only
+reduced `A2D(0)` diagnostics remain interior-only
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1266-1367`).
 
-## Verification and interfaces
+- Continuous bridge `kt=1`: maximum `0` ULP, maximum normalised error `0.0`.
+- Continuous bridge `kt=2`: maximum `0` ULP, maximum normalised error `0.0`.
+- Restart entry: maximum `0` ULP.
+- Restart advance to `kt=2`: maximum `0` ULP, maximum normalised error `0.0`.
+- Restart `kt=2` versus continuous `kt=2`: maximum `0` ULP.
+- NetCDF restart variables: every registered wet-cell comparison is `0` ULP.
+- First interior wet T cell: zero-based `(2, 21)`; first interior dry T cell:
+  `(2, 2)`. Dry `-0.0`, dry nonzero, and halo fixture perturbations score
+  `0` ULP; wet `-0.0` and wet one-ULP plants score `1` ULP.
 
-The regenerated preflight receipt has SHA-256 `77dddab1ff9c6966142b8b8216425b4bd68037296ca7c1e410e8acee98c802e9`. It records `PREFLIGHT_OK` and 36 preflight plants. The focused O1 suite passes 15/15, including 13 admission plants. The default citation gate and private-import ratchet pass. Public model interfaces are unchanged; only acquisition/admission behavior and scoring coverage tightened.
+There is no first failing production statement: all preregistered bridge,
+restart, seam, and north-fold comparisons are exact. The first failure exists
+only in the deliberate plant and is `s_i`, sourced by NEMO's ice-free
+`sz_i` assignment and layer accumulation
+(`src/ICE/icevar.F90:386-390`; compiled
+`ORCA2_SAS_ICE_O1_REC/BLD/ppsrc/nemo/icevar.f90:386-390`).
 
-Choices: `ASKED` = the five Resume 4 findings. `UNASKED` = none. Search-before-build: searched the existing O1 writer, gate, tests, and imported ORCA2 same-program helpers; extended those existing paths and added no duplicate implementation. Codex review: operator.
+The permanent `o1_admission.json` SHA-256 is
+`c1c2ea1cb78fe9347e2db9096a39107b7b1c093b0676931aeeee0cff675ca963`.
+The successful final `--admit-existing` log SHA-256 is
+`4c3f1dde360726da4a91df65263bd94037776e537f073a927b89bf69de0e4b76`.
+Preflight checklist items `1-7` and all `36` preflight plants pass; all `13`
+admission plants exit nonzero. The focused O1 suite passes `15/15`; the
+post-change real-admission unit passes `1/1` (`14` deselected). The default
+receipt citation gate and private-import ratchet pass.
+
+## GPU spot-check for the operator
+
+Run only after the two `nvidia-smi` queries show an idle device; replace
+`<idle-gpu-index>` without changing any scientific option:
+
+```bash
+nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv
+nvidia-smi --query-compute-apps=pid,used_memory --format=csv
+CUDA_VISIBLE_DEVICES=<idle-gpu-index> JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 XLA_FLAGS='' \
+PYTHONPATH=.:packages/core:packages/ocean:packages/ice:packages/atmosphere:packages/land:packages/coupler:packages/driver \
+/home/dbalwada/legoESM/.venv/bin/python \
+scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py \
+--admit-evidence /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round4/refused/oracle_o1_orca2_sas_ice_admission_refused_20261024T161410Z_1010784 \
+--expect-commit 4fefbe7cba0afbc76f26bc94a744b5650b26285f \
+--json /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round4/o1_gpu_spotcheck.json
+nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv
+nvidia-smi --query-compute-apps=pid,used_memory --format=csv
+```
+
+## Choices and review
+
+**CHOICES:** `ASKED` = diagnose the refused real record, replace the vacuous
+plant, retain exact `kt=2` forcing selection, re-admit without rerunning NEMO,
+and score O1 under the preregistered CPU/JIT/halo contract. `UNASKED` = none.
+No model default, scientific selector, bar, window, mask, or record changed.
+
+Search-before-build: searched the existing O1 admission path, plant loop,
+direct test, and retained record reader; extended those paths and added no
+duplicate implementation. Independent review was unavailable: the required
+read-only Codex CLI failed to initialize its app-server client because the
+review sandbox filesystem was read-only.
