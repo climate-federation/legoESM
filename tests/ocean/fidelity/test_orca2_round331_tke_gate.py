@@ -31,6 +31,7 @@ PATCHES = {
     "zdfphy": ACQ / "zdfphy_round331.patch",
     "zdftke": ACQ / "zdftke_round331.patch",
 }
+ACQ_RUN = DYN_ACQ / "run.sh"
 GFORTRAN = Path("/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran")
 
 
@@ -73,6 +74,24 @@ def test_fixture_rank_payloads_are_distinct(record_dir: Path) -> None:
     rank0 = gate.read_record(record_dir / gate.record_name(0))["fields"]
     rank1 = gate.read_record(record_dir / gate.record_name(1))["fields"]
     assert not np.array_equal(rank0["after_tke_en"], rank1["after_tke_en"])
+
+
+def test_zero_shear_is_valid_but_a_handoff_plant_refuses(record_dir: Path) -> None:
+    record = gate.read_record(record_dir / gate.record_name(0))
+    record["fields"]["sh2_output"].fill(0.0)
+    record["fields"]["tke_sh2_input"].fill(0.0)
+    gate._verify_source_order(record)
+
+    gate._plant(record, "sh2")
+    with pytest.raises(gate.GateError, match="sh2_output differs at TKE entry"):
+        gate._verify_source_order(record)
+
+
+def test_retained_tke_admission_is_immutably_pinned() -> None:
+    text = ACQ_RUN.read_text()
+    assert "orca1ice_tke331_kt1_np2_admission_refused_20261024T103431Z_331969" in text
+    assert "4e20a8af573e5484d0e331200d20284a8b3c8338" in text
+    assert "ad665a96be3b73ebbe83793c09e7996aba69fd191fb6510288be40d82161b0b3" in text
 
 
 PLANT_REASONS = {

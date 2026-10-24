@@ -137,7 +137,6 @@ def _verify_source_order(record: dict) -> None:
                 "surface TKE changed during the interior solve")
     _bits_equal(f["after_solve_en"][:, :, :1], f["after_tke_en"][:, :, :1],
                 "surface TKE changed after the solve")
-    require(bool(np.any(f["sh2_output"] != 0.0)), "shear channel is inactive")
     require(bool(np.any(f["drag_bottom_output"] != 0.0)), "bottom drag channel is inactive")
     require(bool(np.all(f["mxl_nmln_output"] == np.floor(f["mxl_nmln_output"]))),
             "mixed-layer level is not integer-valued")

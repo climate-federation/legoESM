@@ -45,9 +45,15 @@ fi
 TARGET_RUN=$DEFAULT_TARGET_RUN
 if [[ "$MODE" == --admit-existing && -n ${R328_EXISTING_RUN:-} ]]; then
   TARGET_RUN=$(realpath -e -- "$R328_EXISTING_RUN")
-  [[ "$ACQ_TARGET" == zdfphy && "$TARGET_RUN" == \
-    "$EVIDENCE/refused/orca1ice_zdfphy_kt1_np2_admission_refused_20261024T043519Z_4166419" ]] \
-    || { printf 'REFUSE: R328_EXISTING_RUN is not the retained zdf_phy run\n' >&2; exit 64; }
+  if [[ "$ACQ_TARGET" == zdfphy ]]; then
+    expected_retained="$EVIDENCE/refused/orca1ice_zdfphy_kt1_np2_admission_refused_20261024T043519Z_4166419"
+  elif [[ "$ACQ_TARGET" == tke331 ]]; then
+    expected_retained="$EVIDENCE/refused/orca1ice_tke331_kt1_np2_admission_refused_20261024T103431Z_331969"
+  else
+    printf 'REFUSE: retained admission is unsupported for %s\n' "$ACQ_TARGET" >&2; exit 64
+  fi
+  [[ "$TARGET_RUN" == "$expected_retained" ]] \
+    || { printf 'REFUSE: R328_EXISTING_RUN is not the pinned retained run\n' >&2; exit 64; }
 fi
 readonly TARGET_CFG EVIDENCE DEFAULT_TARGET_RUN TARGET_RUN
 readonly TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
@@ -81,6 +87,8 @@ readonly INPUT_MANIFEST_SHA=3dfe251754fa76c8b5053cda90a51ee10589d0fffc01a4e799c4
 readonly OCEAN_OUTPUT_SHA=b1e6c021d79013f3303582034350574fae2f0b1e68c976caf3af4061ac51a80f
 readonly RETAINED_ZDFPHY_PRODUCER=30cb3f2a81866381cbca2a0d8b36d01ac1794d4a
 readonly RETAINED_ZDFPHY_BINARY_SHA=aa16dbf74e4e5bae05df0903038ea71e29f1adf9ab5d9be9752f1d3079dfb684
+readonly RETAINED_TKE331_PRODUCER=4e20a8af573e5484d0e331200d20284a8b3c8338
+readonly RETAINED_TKE331_BINARY_SHA=ad665a96be3b73ebbe83793c09e7996aba69fd191fb6510288be40d82161b0b3
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
@@ -255,11 +263,18 @@ EXPECTED_PRODUCER=$COMMIT
 if [[ "$TARGET_RUN" != "$DEFAULT_TARGET_RUN" ]]; then
   [[ -f "$TARGET_RUN/producer_commit.txt" ]] || refuse 'retained run lacks producer commit'
   EXPECTED_PRODUCER=$(cat "$TARGET_RUN/producer_commit.txt")
-  [[ "$EXPECTED_PRODUCER" == "$RETAINED_ZDFPHY_PRODUCER" ]] \
+  if [[ "$ACQ_TARGET" == zdfphy ]]; then
+    retained_producer=$RETAINED_ZDFPHY_PRODUCER
+    retained_binary_sha=$RETAINED_ZDFPHY_BINARY_SHA
+  else
+    retained_producer=$RETAINED_TKE331_PRODUCER
+    retained_binary_sha=$RETAINED_TKE331_BINARY_SHA
+  fi
+  [[ "$EXPECTED_PRODUCER" == "$retained_producer" ]] \
     || refuse 'retained run has the wrong producer commit'
   git merge-base --is-ancestor "$EXPECTED_PRODUCER" "$COMMIT" \
     || refuse 'retained producer is not an ancestor of the admission repair'
-  pin "$RETAINED_ZDFPHY_BINARY_SHA" "$TARGET_RUN/nemo" 'retained zdf_phy binary'
+  pin "$retained_binary_sha" "$TARGET_RUN/nemo" 'retained acquisition binary'
 fi
 readonly EXPECTED_PRODUCER
 export PYTHONPATH=$REPO:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/atmosphere:$REPO/packages/coupler:$REPO/packages/ice:$REPO/packages/land:$REPO/packages/ml:$REPO/packages/tools:$REPO/src
