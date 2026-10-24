@@ -3176,7 +3176,8 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
                 forc_ice["sw_down"] = (
                     np.asarray(forc_ice["sw_down"], dtype=np.float64)
                     * dm2dc_sw_factor(grid, _dm2dc_win))
-            atm_ice = _build_atm_to_surface_core2(forc_ice, ramp=ramp)
+            atm_ice = _build_atm_to_surface_core2(
+                forc_ice, ramp=ramp, with_precip=args.emp_freshwater)
             # Ocean T is potential temperature [degC]; ice wants SST [K].
             sst_K = jnp.asarray(state.T.data)[..., 0] + _ice_T_freeze
             # Surface current, ROTATED frame -> GEOGRAPHIC east/north (the
@@ -5217,7 +5218,7 @@ def _q_open_top(sf, dz_top_m: float):
     return q_non_sw + sf.sw_down * (1.0 - float(_c.alpha_ocean_broadband)) * frac
 
 
-def _build_atm_to_surface_core2(forc, ramp=1.0):
+def _build_atm_to_surface_core2(forc, ramp=1.0, with_precip=True):
     """Build an :class:`AtmToSurface` from the CORE-II fields ALREADY sampled
     onto the ocean grid by :func:`sample_omip2_forcing`.
 
@@ -5235,7 +5236,11 @@ def _build_atm_to_surface_core2(forc, ramp=1.0):
     ``coupler.surface_exchange.extract_atm_to_surface`` uses.  ``cos_zenith`` /
     ``co2_ppmv`` are inert for the ice model (it has its own SW/albedo path), so
     they are populated as zeros / a default and never read.  ``has_radiation`` /
-    ``has_precipitation`` = 1 (CORE-II provides both)."""
+    ``has_precipitation`` = 1 (CORE-II provides both).
+
+    ``with_precip=False`` (the host loops pass ``args.emp_freshwater``, i.e.
+    ``--no-emp``) zeroes rain and snow, so the ice receives no precipitation
+    when the ocean receives none."""
     from legoesm.core.coupling_fields import AtmToSurface
     from legoesm import constants
 
@@ -5250,6 +5255,9 @@ def _build_atm_to_surface_core2(forc, ramp=1.0):
     snow_np = forc.get("snow")
     precip_snow = (jnp.asarray(np.asarray(snow_np, dtype=np.float64)) * float(ramp)
                    if snow_np is not None else jnp.zeros_like(precip))
+    if not with_precip:
+        precip = jnp.zeros_like(precip)
+        precip_snow = jnp.zeros_like(precip)
     slp_np = forc.get("slp")
     p_sfc = (jnp.asarray(np.asarray(slp_np, dtype=np.float64))
              if slp_np is not None
@@ -10434,7 +10442,8 @@ def main() -> int:
                 forc_ice["sw_down"] = (
                     np.asarray(forc_ice["sw_down"], dtype=np.float64)
                     * dm2dc_sw_factor(grid, _dm2dc_win))
-            atm_ice = _build_atm_to_surface_core2(forc_ice, ramp=ramp)
+            atm_ice = _build_atm_to_surface_core2(
+                forc_ice, ramp=ramp, with_precip=args.emp_freshwater)
             sst_K = jnp.asarray(state.T.data)[..., 0] + _ice_T_freeze
             ocn_u, ocn_v = _surface_currents(state, grid, app_grid_type)
             # Partition time level (codex r4 #1 + r5 #1): the ice model

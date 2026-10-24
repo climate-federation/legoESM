@@ -845,3 +845,26 @@ def test_both_host_loops_ramp_the_ice_forcing_like_the_ocean(loop_name):
     kw = {k.arg: k.value for k in calls[0].keywords}
     assert isinstance(kw.get("ramp"), __import__("ast").Name)
     assert kw["ramp"].id == "ramp"
+
+
+def test_atm_to_surface_builder_no_precip_zeroes_rain_and_snow():
+    forc = _synthetic_sampled_forcing((2, 3))
+    atm = R._build_atm_to_surface_core2(forc, ramp=1.0, with_precip=False)
+    full = R._build_atm_to_surface_core2(forc, ramp=1.0)
+    assert float(jnp.max(jnp.abs(full.precip_total))) > 0.0
+    np.testing.assert_array_equal(np.asarray(atm.precip_total), 0.0)
+    np.testing.assert_array_equal(np.asarray(atm.precip_snow), 0.0)
+    np.testing.assert_array_equal(np.asarray(atm.sw_down), np.asarray(full.sw_down))
+
+
+@pytest.mark.parametrize("loop_name", ["main", "run_fesom_forced_loop"])
+def test_both_host_loops_withhold_ice_precip_under_no_emp(loop_name):
+    """--no-emp gives the ocean no precipitation; the ice must get none either,
+    or its forwarded share arrives with no direct share to offset it."""
+    import ast
+    calls = _atm_ice_build_calls(loop_name)
+    assert len(calls) == 1
+    kw = {k.arg: k.value for k in calls[0].keywords}
+    v = kw.get("with_precip")
+    assert isinstance(v, ast.Attribute) and v.attr == "emp_freshwater"
+    assert isinstance(v.value, ast.Name) and v.value.id == "args"
