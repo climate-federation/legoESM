@@ -291,6 +291,35 @@ def assemble_zdf_term_field(records: dict[int, dict], name: str) -> np.ndarray:
     ).transpose(1, 0, 2)
 
 
+def bottom_index_census(records: dict[int, dict]) -> dict[str, object]:
+    """Map recorded NEMO ``mbkt`` to the card's carried TKE row indices."""
+    nz = {int(records[rank]["header"]["nz"]) for rank in (0, 1)}
+    require(len(nz) == 1, "ZDF ranks disagree on the carried TKE extent")
+    carried_rows = nz.pop()
+    mbkt = assemble_zdf_term_field(records, "tke_mbkt")[..., 0]
+    require(bool(np.all(mbkt == np.floor(mbkt))),
+            "recorded mbkt is not integer-valued")
+    mbkt = mbkt.astype(np.int64)
+    levels, counts = np.unique(mbkt, return_counts=True)
+    histogram = {str(int(level)): int(count)
+                 for level, count in zip(levels, counts, strict=True)}
+    # The payload carries NEMO jk=2:jpkm1, hence nz=jpk-2.  legoESM's
+    # bottom_level is the zero-based bottom T-cell index mbkt-1.
+    full_depth_mbkt = carried_rows + 1
+    return {
+        "carried_solve_row_count": carried_rows,
+        "nemo_jpk": carried_rows + 2,
+        "full_depth_mbkt": full_depth_mbkt,
+        "full_depth_mbkt_plus_1": full_depth_mbkt + 1,
+        "full_depth_card_bottom_level": full_depth_mbkt - 1,
+        "deepest_returned_energy_level": carried_rows - 1,
+        "full_depth_column_count": histogram.get(str(full_depth_mbkt), 0),
+        "one_level_shallower_column_count": histogram.get(
+            str(full_depth_mbkt - 1), 0),
+        "mbkt_histogram": histogram,
+    }
+
+
 def zdf_term_localization(candidates: dict[str, np.ndarray],
                           records: dict[int, dict],
                           active: np.ndarray) -> dict[str, object]:
@@ -575,6 +604,7 @@ def model_avm(root: Path, records: dict[int, dict],
         result["zdf_tke_operands"] = {
             "post_solve_en": score_by_level(model_en, record_en, active),
             "entry_rn2": score_by_level(model_rn2, record_rn2, active),
+            "bottom_index_census": bottom_index_census(zdf_records),
         }
     return result
 
