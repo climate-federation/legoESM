@@ -1771,7 +1771,7 @@ CITATION_MAP = {
         'en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)', 19],
     'nemo_testcase_recipe.py:1820-1827': [
         ('z_coord = create_partial_cell_coordinate(', 2),
-        'is_active=jnp.asarray(tmask),', 8],
+        ('is_active=jnp.asarray(tmask),', 1), 8],
     'tke.py:1803-1834': [
         'if bottom_dirichlet is not None:',
         'rhs = jnp.where(is_bottom, _e_bd[..., jnp.newaxis], rhs)', 32],
