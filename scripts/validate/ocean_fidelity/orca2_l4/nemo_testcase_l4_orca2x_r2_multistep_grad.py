@@ -292,8 +292,55 @@ def measure(n: int, remat: bool, checks: bool, output: Path, smoke: bool = False
     return out
 
 
+def summary(jobs: Path) -> list[dict]:
+    """One row per (mode, N, loss) from the jobs' JSON/.done files; the no-remat
+    dT0 gradient is compared with the remat one where both ran."""
+
+    rows = []
+    for mode in ("remat", "noremat"):
+        for n in range(1, 11):
+            p = jobs / f"{mode}_n{n}.json"
+            if not p.exists():
+                continue
+            d = json.loads(p.read_text())
+            done = (jobs / f"{mode}_n{n}.done")
+            done = done.read_text().split() if done.exists() else ["running"]
+            for name in LOSSES:
+                r = d.get("rows", {}).get(name)
+                row = {"mode": mode, "n": n, "loss": name, "done": " ".join(done[:4]),
+                       "compile_A_s": d.get("program_A", {}).get("compile_s"),
+                       "xla_temp_gib": d.get("program_A", {}).get("xla_temp_gib")}
+                if r:
+                    row.update({k: r[k] for k in (
+                        "nonfinite_cotangent_total", "raw_finite", "dT0_l2", "deta0_l2",
+                        "state_cotangent_l2", "dL_dln_rn_ud", "loss_rel_vs_production",
+                        "run_s", "run_peak_rss_gib", "run_rss_growth_gib")})
+                c = d.get("checks_rows", {}).get(name)
+                if c:
+                    fd = c["raw"]["fd_rel"]
+                    best = min(fd, key=lambda e: fd[e]) if fd else None
+                    row.update({"T_dir0_rel": c["T_dir0"]["rel"], "raw_rev_fwd_rel": c["raw"]["rel"],
+                                "fd_best_eps": best, "fd_best_rel": fd.get(best)})
+                other = jobs / f"remat_n{n}_dT0_{name}.npy"
+                mine = jobs / f"{mode}_n{n}_dT0_{name}.npy"
+                if mode == "noremat" and other.exists() and mine.exists():
+                    a, b = np.load(mine), np.load(other)
+                    row["dT0_vs_remat_max_rel"] = float(
+                        np.max(np.abs(a - b)) / max(np.max(np.abs(b)), 1e-300))
+                rows.append(row)
+    return rows
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv[:1] == ["--summary"]:
+        if len(argv) != 2:
+            raise SystemExit(2)
+        for row in summary(Path(argv[1])):
+            print(json.dumps(row, sort_keys=True))
+        return 0
     parser.add_argument("--n", type=int, required=True, choices=range(1, 11),
                         metavar="N", help="steps (1..10: the record has 10)")
     parser.add_argument("--remat", action="store_true", help="jax.checkpoint every step")
