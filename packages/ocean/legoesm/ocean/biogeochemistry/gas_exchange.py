@@ -142,3 +142,46 @@ def air_sea_co2_flux(
         flux_co2=flux_co2,
         k_w=k_w,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Oxygen (npzd_v2).  Schmidt number: Wanninkhof (2014) Table 1 for O2;        #
+# saturation: Garcia & Gordon (1992) combined fit (eq. 8, without the         #
+# erroneous A3*Ts^2 term).  Check value: T=10 degC, S=35 -> 0.282015 mol/m^3. #
+# --------------------------------------------------------------------------- #
+_V_MOLAR_O2_ML_PER_MOL = 22391.6   # ml of O2 per mol at STP (Garcia & Gordon use 22.3916 L/mol)
+
+
+def schmidt_number_o2(T_degC: jnp.ndarray) -> jnp.ndarray:
+    """Schmidt number of O2 in seawater (Wanninkhof 2014, fit range -2..40 degC)."""
+    T = jnp.clip(T_degC, -2.0, 40.0)
+    return 1920.4 + T * (-135.6 + T * (5.2122 + T * (-0.10939 + T * 0.00093777)))
+
+
+def o2_saturation(T_degC: jnp.ndarray, S_psu: jnp.ndarray) -> jnp.ndarray:
+    """O2 saturation concentration [mol/m^3] at 1 atm (Garcia & Gordon 1992)."""
+    T_K = T_degC + constants.T_freeze
+    Ts = jnp.log(((constants.T_freeze + 25.0) - T_degC) / T_K)
+    ln_c = (2.00907 + Ts * (3.22014 + Ts * (4.05010 + Ts * (4.94457
+            + Ts * (-0.256847 + Ts * 3.88767))))
+            + S_psu * ((-6.24523e-3 + Ts * (-7.37614e-3 + Ts * (-1.03410e-2
+                        + Ts * (-8.17083e-3)))) + S_psu * (-4.88682e-7)))
+    return jnp.exp(ln_c) / _V_MOLAR_O2_ML_PER_MOL * 1.0e3   # ml/L -> mol/m^3
+
+
+def air_sea_o2_flux(
+    O2_surf: jnp.ndarray,
+    T_surf: jnp.ndarray,
+    S_surf: jnp.ndarray,
+    U10: jnp.ndarray,
+    P_atm: jnp.ndarray | float = 1.0,
+) -> jnp.ndarray:
+    """Air-sea O2 flux [mol O2/m^2/s], positive into the ocean.
+
+    F = k_O2 (P_atm * O2_sat(T, S) - O2_surf), k from Wanninkhof (2014) with
+    the O2 Schmidt number; same cm/hr -> m/s conversion as the CO2 path.
+    """
+    Sc = schmidt_number_o2(T_surf)
+    k_cm_hr = 0.251 * U10 ** 2 * (Sc / 660.0) ** (-0.5)
+    k = k_cm_hr / 3600.0 / 100.0
+    return k * (P_atm * o2_saturation(T_surf, S_surf) - O2_surf)

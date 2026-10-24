@@ -6,6 +6,9 @@ Two schemes:
 - ``"npzd"``: Nutrient-Phytoplankton-Zooplankton-Detritus ecosystem model
   coupled to the inorganic carbon cycle. Adds N, P, Z, D tracers with
   light-limited growth, grazing, mortality, and remineralization.
+- ``"npzd_v2"``: 18-tracer extension (diatoms + nanophytoplankton with
+  prognostic Chl, NH4 cycle with nitrification, PO4/Si/Fe, DON/DOP, POC/DOC,
+  O2) on top of the inorganic carbon cycle.
 - ``"none"``: Disabled (default).
 """
 
@@ -112,6 +115,69 @@ class BiogeoConfig(NamedTuple):
     Zoo_init: float = 0.05e-3
     Det_init: float = 0.01e-3
 
+    # ------------------------------------------------------------------ #
+    # npzd_v2 — 18-tracer scheme (2 PFTs with prognostic Chl, NH4 cycle,  #
+    # PO4/Si/Fe, DON/DOP, POC/DOC, O2).  Ported from ggn/bgc_modelling.    #
+    # Every field below is ADDITIVE with a default: the "abiotic" and      #
+    # "npzd" schemes never read them.                                      #
+    # ------------------------------------------------------------------ #
+    R_ON: float = 10.625         # Redfield O2:N [mol O2 / mol N]
+    R_NP: float = 16.0           # Redfield N:P  [mol N / mol P]
+    O2_atm: float = 0.2095       # atmospheric O2 mole fraction
+    O2_init_surf: float = 0.300  # [mol/m^3]
+    O2_init_deep: float = 0.150  # [mol/m^3]
+    # optional nutrient nudging toward a climatology (off by default)
+    nudge_nutrients: bool = False
+    tau_nudge_days: float = 365.0
+    NO3_target: object = None
+    PO4_target: object = None
+    Si_target: object = None
+    # Diatoms (PFT 1)
+    mu_max_d: float = 0.85        # [1/day] (MARBL 0.85)
+    k_N_d: float = 1.0e-4        # NO3+NH4 half-saturation [mol N/m^3]
+    k_NH4_d: float = 5.0e-5
+    k_Fe_d: float = 80.0e-12     # [mol Fe/m^3]
+    k_Si: float = 0.3e-3         # [mol Si/m^3]
+    R_SiN: float = 1.0
+    R_FeN_d: float = 7.5e-6
+    theta_min_d: float = 0.5e-3  # Chl:N [kg Chl / mol N]
+    theta_max_d: float = 5.0e-3
+    # Nanophytoplankton (PFT 2)
+    mu_max_n: float = 0.65
+    k_N_n: float = 1.0e-4
+    k_NH4_n: float = 5.0e-5
+    k_Fe_n: float = 50.0e-12
+    R_FeN_n: float = 5.0e-6
+    theta_min_n: float = 0.5e-3
+    theta_max_n: float = 4.0e-3
+    # Shared phytoplankton
+    alpha_P_v2: float = 0.30     # P-I initial slope for v2 [1/(W/m^2)/day] (MARBL 0.30)
+    m_Pl: float = 0.05           # linear mortality [1/day]
+    m_Pq_v2: float = 0.15        # quadratic aggregation [m^3/(mol N)/day]
+    psi_coeff: float = 1.5e3     # NH4 inhibition of NO3 uptake [m^3/mol N]
+    epse: float = 0.5            # egestion fraction of non-assimilated grazing -> Det (rest -> NH4)
+    # Nitrification
+    k_nitrif: float = 0.20       # [1/day]
+    kI_nitrif: float = 0.005     # light inhibition [(W/m^2)^-1]
+    # Zooplankton v2
+    m_Zl_v2: float = 0.10        # linear mortality [1/day]
+    # Detritus / dissolved organics
+    remin_opal: float = 0.03     # [1/day]
+    remin_DON: float = 0.01      # [1/day]
+    f_POC: float = 0.7           # fraction of phyto mortality -> POC (rest -> DOC)
+    remin_DOC: float = 0.005     # [1/day]
+    # Iron
+    k_Fe_scav: float = 5.0       # scavenging rate above the ligand threshold [1/day]
+    Fe_ligand: float = 150.0e-12 # [mol Fe/m^3]
+    Fe_dust: float = 5.0e-9      # aeolian deposition [mol Fe/m^2/day], applied at the surface
+    R_FeN_avg: float = 6.0e-6
+    # Initial conditions v2
+    NH4_init: float = 1.0e-4
+    Fe_init_surf: float = 50.0e-12
+    Fe_init_deep: float = 200.0e-12
+    Si_init_surf: float = 1.0e-3
+    Si_init_deep: float = 15.0e-3
+
 
 class OceanBiogeoState(NamedTuple):
     """Ocean biogeochemistry tracer state.
@@ -128,6 +194,20 @@ class OceanBiogeoState(NamedTuple):
     Phyto: jax.Array | None = None  # Phytoplankton [mol N/m^3], NPZD only
     Zoo: jax.Array | None = None    # Zooplankton [mol N/m^3], NPZD only
     Det: jax.Array | None = None    # Detritus [mol N/m^3], NPZD only
+    # npzd_v2 additional tracers (None unless scheme == "npzd_v2")
+    NH4: jax.Array | None = None       # Ammonium [mol N/m^3]
+    PO4: jax.Array | None = None       # Phosphate [mol P/m^3]
+    Si: jax.Array | None = None        # Silicate [mol Si/m^3]
+    Fe: jax.Array | None = None        # Dissolved iron [mol Fe/m^3]
+    Pd: jax.Array | None = None        # Diatom biomass N [mol N/m^3]
+    Pn: jax.Array | None = None        # Nanophyto biomass N [mol N/m^3]
+    Chl_d: jax.Array | None = None     # Diatom Chl [kg Chl/m^3]
+    Chl_n: jax.Array | None = None     # Nanophyto Chl [kg Chl/m^3]
+    DON: jax.Array | None = None       # Dissolved organic N [mol N/m^3]
+    DOP: jax.Array | None = None       # Dissolved organic P [mol P/m^3]
+    POC: jax.Array | None = None       # Particulate organic C [mol C/m^3]
+    DOC: jax.Array | None = None       # Dissolved organic C [mol C/m^3]
+    O2: jax.Array | None = None        # Dissolved oxygen [mol O2/m^3]
 
 
 class BiogeoTendencies(NamedTuple):
@@ -143,6 +223,20 @@ class BiogeoTendencies(NamedTuple):
     dPhyto_dt: jax.Array | None = None
     dZoo_dt: jax.Array | None = None
     dDet_dt: jax.Array | None = None
+    # npzd_v2
+    dNH4_dt: jax.Array | None = None
+    dPO4_dt: jax.Array | None = None
+    dSi_dt: jax.Array | None = None
+    dFe_dt: jax.Array | None = None
+    dPd_dt: jax.Array | None = None
+    dPn_dt: jax.Array | None = None
+    dChl_d_dt: jax.Array | None = None
+    dChl_n_dt: jax.Array | None = None
+    dDON_dt: jax.Array | None = None
+    dDOP_dt: jax.Array | None = None
+    dPOC_dt: jax.Array | None = None
+    dDOC_dt: jax.Array | None = None
+    dO2_dt: jax.Array | None = None
 
 
 class AirSeaCO2Diagnostics(NamedTuple):
@@ -202,6 +296,34 @@ def init_biogeo_state(
         return OceanBiogeoState(
             DIC=DIC, ALK=ALK, NO3=NO3,
             Phyto=Phyto, Zoo=Zoo, Det=Det,
+        )
+
+    elif cfg.scheme == "npzd_v2":
+        z_norm = jnp.clip(-z_full_ref / 1000.0, 0.0, 1.0)
+        _bc = lambda prof: jnp.broadcast_to(
+            prof.reshape((1,) * (len(shape_3d) - 1) + (nlev,)), shape_3d)
+        NO3_p = cfg.NO3_init_surf + (cfg.NO3_init_deep - cfg.NO3_init_surf) * z_norm
+        Fe_p = cfg.Fe_init_surf + (cfg.Fe_init_deep - cfg.Fe_init_surf) * z_norm
+        Si_p = cfg.Si_init_surf + (cfg.Si_init_deep - cfg.Si_init_surf) * z_norm
+        O2_p = cfg.O2_init_surf + (cfg.O2_init_deep - cfg.O2_init_surf) * z_norm
+        return OceanBiogeoState(
+            DIC=DIC, ALK=ALK,
+            NO3=_bc(NO3_p),
+            NH4=jnp.full(shape_3d, cfg.NH4_init),
+            PO4=_bc(NO3_p / cfg.R_NP),
+            Si=_bc(Si_p),
+            Fe=_bc(Fe_p),
+            Pd=jnp.full(shape_3d, cfg.Phyto_init * 0.5),
+            Pn=jnp.full(shape_3d, cfg.Phyto_init * 0.5),
+            Chl_d=jnp.full(shape_3d, cfg.Phyto_init * 0.5 * cfg.theta_min_d),
+            Chl_n=jnp.full(shape_3d, cfg.Phyto_init * 0.5 * cfg.theta_min_n),
+            Zoo=jnp.full(shape_3d, cfg.Zoo_init),
+            Det=jnp.full(shape_3d, cfg.Det_init),
+            DON=jnp.full(shape_3d, 1.0e-4),
+            DOP=jnp.full(shape_3d, 1.0e-4 / cfg.R_NP),
+            POC=jnp.full(shape_3d, cfg.Det_init * cfg.R_CN),
+            DOC=jnp.full(shape_3d, 1.0e-3),
+            O2=_bc(O2_p),
         )
 
     raise ValueError(f"Unknown biogeochemistry scheme: {cfg.scheme!r}")

@@ -167,6 +167,12 @@ class TracerTransporter:
 
     # -- diagnostics --------------------------------------------------------
     @partial(jax.jit, static_argnums=(0,))
+    def wet_volume(self, state, area2d):
+        """sum(h * area) over wet cells [m^3] — the denominator of the mean concentration."""
+        h = self.thickness(state)
+        return jnp.sum(jnp.where(self.active_3d, h, 0.0) * jnp.asarray(area2d)[..., None])
+
+    @partial(jax.jit, static_argnums=(0,))
     def inventory(self, tracers, state, area2d):
         """sum(h * c * area) per tracer, wet cells only — conservation check."""
         h = self.thickness(state)

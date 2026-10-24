@@ -198,3 +198,172 @@ def npzd_source_sink(
                - 2.0 * caco3_production + 2.0 * caco3_dissolution)
 
     return dNO3_dt, dPhyto_dt, dZoo_dt, dDet_dt, dDIC_dt, dALK_dt
+
+
+# ======================================================================= #
+#  npzd_v2 — 18-tracer source/sink (2 PFTs, NH4, PO4/Si/Fe, DON/DOP,     #
+#  POC/DOC, O2).  Ported from ggn/bgc_modelling; additive to v1 above.    #
+# ======================================================================= #
+
+def par_profile_v2(
+    PAR_surf: jnp.ndarray,
+    Chl_d: jnp.ndarray,
+    Chl_n: jnp.ndarray,
+    dz_ref: jnp.ndarray,
+    cfg: BiogeoConfig,
+) -> jnp.ndarray:
+    """PAR profile using total (diatom + nanophyto) Chl self-shading."""
+    Chl_tot = jnp.clip(Chl_d, 0.0, None) + jnp.clip(Chl_n, 0.0, None)
+    atten = (cfg.k_w_atten + cfg.k_chl_atten * Chl_tot) * dz_ref
+    cum_interface = jnp.cumsum(atten, axis=-1)
+    _pad = ((0, 0),) * (atten.ndim - 1)
+    cum_top = jnp.pad(cum_interface[..., :-1], (*_pad, (1, 0)))
+    cum_mid = cum_top + 0.5 * atten
+    return PAR_surf[..., jnp.newaxis] * jnp.exp(-cum_mid)
+
+
+def npzd_v2_source_sink(
+    NO3, NH4, PO4, Si, Fe,
+    Pd, Pn, Chl_d, Chl_n,
+    Zoo, Det, DON, DOP,
+    DIC, POC, DOC, ALK, O2,
+    T_degC: jnp.ndarray,
+    PAR: jnp.ndarray,
+    dz_ref: jnp.ndarray,
+    cfg: BiogeoConfig,
+) -> tuple[jnp.ndarray, ...]:
+    """18-tracer source/sink terms for npzd_v2.
+
+    Returns (dNO3, dNH4, dPO4, dSi, dFe, dPd, dPn, dChl_d, dChl_n,
+             dZoo, dDet, dDON, dDOP, dDIC, dPOC, dDOC, dALK, dO2),
+    all [mol/m^3/s] ([kg Chl/m^3/s] for Chl).  Settling of Det is an upwind
+    flux over ``dz_ref`` inside this function (to move into the transport
+    operator later, ShyBFM-style).  The aeolian iron source is NOT here: the
+    host adds ``cfg.Fe_dust / dz_surface`` to the surface level.
+    """
+    day_s = 1.0 / 86400.0
+    eps = 1.0e-30
+
+    NO3_ = jnp.clip(NO3, 0.0, None);  NH4_ = jnp.clip(NH4, 0.0, None)
+    PO4_ = jnp.clip(PO4, 0.0, None);  Si_ = jnp.clip(Si, 0.0, None)
+    Fe_ = jnp.clip(Fe, 0.0, None)
+    Pd_ = jnp.clip(Pd, 0.0, None);  Pn_ = jnp.clip(Pn, 0.0, None)
+    Cd_ = jnp.clip(Chl_d, 0.0, None);  Cn_ = jnp.clip(Chl_n, 0.0, None)
+    Z_ = jnp.clip(Zoo, 0.0, None);  D_ = jnp.clip(Det, 0.0, None)
+    DON_ = jnp.clip(DON, 0.0, None);  DOP_ = jnp.clip(DOP, 0.0, None)
+    POC_ = jnp.clip(POC, 0.0, None);  DOC_ = jnp.clip(DOC, 0.0, None)
+    O2_ = jnp.clip(O2, 0.0, None)
+
+    # ---- temperature ----
+    Tq = 1.066 ** jnp.clip(T_degC, -2.0, 40.0)
+    T_fac_d = (cfg.mu_max_d * day_s) * Tq
+    T_fac_n = (cfg.mu_max_n * day_s) * Tq
+
+    # ---- NH4 inhibition of NO3 uptake ----
+    psi = jnp.exp(-cfg.psi_coeff * NH4_)
+
+    # ---- limitation ----
+    gNO3_d = NO3_ / (cfg.k_N_d + NO3_) * psi
+    gNH4_d = NH4_ / (cfg.k_NH4_d + NH4_)
+    gN_d = gNO3_d + gNH4_d
+    fNH4_d = gNH4_d / (gN_d + eps)
+    gNO3_n = NO3_ / (cfg.k_N_n + NO3_) * psi
+    gNH4_n = NH4_ / (cfg.k_NH4_n + NH4_)
+    gN_n = gNO3_n + gNH4_n
+    fNH4_n = gNH4_n / (gN_n + eps)
+    gI = 1.0 - jnp.exp(-cfg.alpha_P_v2 * PAR / jnp.clip(cfg.mu_max_d, eps, None))
+    gFe_d = Fe_ / (cfg.k_Fe_d + Fe_)
+    gFe_n = Fe_ / (cfg.k_Fe_n + Fe_)
+    gSi = Si_ / (cfg.k_Si + Si_)
+    mu_d = T_fac_d * jnp.minimum(gN_d, 1.0) * gI * gFe_d * gSi
+    mu_n = T_fac_n * jnp.minimum(gN_n, 1.0) * gI * gFe_n
+
+    # ---- grazing (equal preference, Holling II on total prey) ----
+    prey = Pd_ + Pn_
+    G_tot = (cfg.g_max * day_s) * prey / (cfg.k_P + prey)
+    G_d = G_tot * Pd_ / (prey + eps)
+    G_n = G_tot * Pn_ / (prey + eps)
+    # Total grazing in mol N/m^3/s: G_d, G_n are rates [1/s] already weighted
+    # by the prey fractions, and the phyto losses below are G_d*Z, G_n*Z.
+    # (The branch version multiplied by P again -> zooplankton never fed and
+    # N leaked at the grazing rate; found by the column N budget.)
+    G_tot_N = (G_d + G_n) * Z_
+    egestion = (1.0 - cfg.epse) * (1.0 - cfg.gamma_Z) * G_tot_N     # -> Det
+    excretion = cfg.epse * (1.0 - cfg.gamma_Z) * G_tot_N            # -> NH4
+
+    # ---- nitrification ----
+    nitrif = (cfg.k_nitrif * day_s) * NH4_ * jnp.exp(-cfg.kI_nitrif * PAR)
+
+    # ---- phytoplankton ----
+    mpl_s = cfg.m_Pl * day_s
+    mpq_s = cfg.m_Pq_v2 * day_s
+    dPd = mu_d * Pd_ - G_d * Z_ - mpl_s * Pd_ - mpq_s * Pd_ ** 2
+    dPn = mu_n * Pn_ - G_n * Z_ - mpl_s * Pn_ - mpq_s * Pn_ ** 2
+
+    # ---- chlorophyll: target Chl:N follows light, Chl tracks biomass ----
+    theta_tgt_d = cfg.theta_min_d + (cfg.theta_max_d - cfg.theta_min_d) * (1.0 - gI)
+    theta_tgt_n = cfg.theta_min_n + (cfg.theta_max_n - cfg.theta_min_n) * (1.0 - gI)
+    dChl_d = theta_tgt_d * (mu_d - G_d * Z_ / jnp.maximum(Pd_, 1e-15) - mpl_s - mpq_s * Pd_) * Pd_
+    dChl_n = theta_tgt_n * (mu_n - G_n * Z_ / jnp.maximum(Pn_, 1e-15) - mpl_s - mpq_s * Pn_) * Pn_
+
+    # ---- zooplankton ----
+    mzl_s = cfg.m_Zl_v2 * day_s
+    mzq_s = cfg.m_Z * day_s
+    dZoo = cfg.gamma_Z * G_tot_N - mzl_s * Z_ - mzq_s * Z_ ** 2
+
+    # ---- detritus (+ upwind settling over dz_ref) ----
+    remin_s = cfg.remin_rate * day_s
+    dDet_bio = (mpl_s * (Pd_ + Pn_) + mpq_s * (Pd_ ** 2 + Pn_ ** 2)
+                + mzq_s * Z_ ** 2 + egestion - remin_s * D_)
+    w_s = cfg.w_sink * day_s
+    flux_out = w_s * D_
+    _pad = ((0, 0),) * (D_.ndim - 1)
+    flux_in = jnp.pad(flux_out[..., :-1], (*_pad, (1, 0)))
+    sink_tend = (flux_in - flux_out) / jnp.clip(dz_ref, 1.0, None)
+    # bottom flux returned instantly as NH4 (zero-storage benthic return; closes N)
+    bottom_flux = flux_out[..., -1] / jnp.clip(dz_ref[-1], 1.0, None)
+    bottom_return = jnp.pad(bottom_flux[..., jnp.newaxis], (*_pad, (D_.shape[-1] - 1, 0)))
+    dDet = dDet_bio + sink_tend
+
+    # ---- DON / DOP ----
+    remin_DON_s = cfg.remin_DON * day_s
+    dDON = mzl_s * Z_ - remin_DON_s * DON_
+    dDOP = dDON / cfg.R_NP
+
+    # ---- inorganic N ----
+    mu_tot = mu_d * Pd_ + mu_n * Pn_
+    mu_NH4 = mu_d * Pd_ * fNH4_d + mu_n * Pn_ * fNH4_n
+    mu_NO3 = mu_tot - mu_NH4
+    regen = remin_s * D_ + remin_DON_s * DON_ + excretion
+    dNH4 = -mu_NH4 - nitrif + regen + bottom_return
+    dNO3 = -mu_NO3 + nitrif
+    dPO4 = (dNO3 + dNH4) / cfg.R_NP
+
+    # ---- Si ----
+    remin_opal_s = cfg.remin_opal * day_s
+    dSi = -cfg.R_SiN * mu_d * Pd_ + cfg.R_SiN * remin_opal_s * D_
+
+    # ---- Fe (prognostic; dust added by the host at the surface) ----
+    Fe_uptake = cfg.R_FeN_d * mu_d * Pd_ + cfg.R_FeN_n * mu_n * Pn_
+    Fe_regen = cfg.R_FeN_avg * (remin_s * D_ + remin_DON_s * DON_)
+    Fe_scav = (cfg.k_Fe_scav * day_s) * jnp.maximum(Fe_ - cfg.Fe_ligand, 0.0)
+    dFe = -Fe_uptake + Fe_regen - Fe_scav
+
+    # ---- POC / DOC ----
+    remin_DOC_s = cfg.remin_DOC * day_s
+    phyto_mort_tot = mpl_s * (Pd_ + Pn_)
+    dPOC = (cfg.f_POC * phyto_mort_tot + mzq_s * Z_ ** 2 + egestion - remin_s * POC_)
+    dDOC = ((1.0 - cfg.f_POC) * phyto_mort_tot * cfg.R_CN - remin_DOC_s * DOC_)
+
+    # ---- DIC / ALK ----
+    dDIC = -cfg.R_CN * mu_tot + cfg.R_CN * regen - remin_DOC_s * DOC_
+    dALK = mu_NO3 - mu_NH4 - 2.0 * nitrif
+
+    # ---- O2: photosynthesis +R_ON per N fixed, respiration -R_ON per N regenerated,
+    #      nitrification -2 O2 per N; limited to O2 > 0 by the host's positivity ----
+    dO2 = cfg.R_ON * (mu_tot - regen) - 2.0 * nitrif
+
+    return (dNO3, dNH4, dPO4, dSi, dFe,
+            dPd, dPn, dChl_d, dChl_n,
+            dZoo, dDet, dDON, dDOP,
+            dDIC, dPOC, dDOC, dALK, dO2)

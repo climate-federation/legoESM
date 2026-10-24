@@ -45,18 +45,19 @@ from legoesm.ocean.biogeochemistry.transport import TracerTransporter
 _RHO_A = 1.225
 _C_D = 1.3e-3
 
-SCHEMES = ("none", "abiotic", "npzd")
+SCHEMES = ("none", "abiotic", "npzd", "npzd_v2")
 
 
 def add_arguments(p) -> None:
     g = p.add_argument_group("ocean biogeochemistry (operator-split, outside the physics step)")
     g.add_argument("--biogeo", choices=SCHEMES, default="none",
-                   help="BGC scheme: abiotic = DIC+ALK with air-sea CO2; npzd adds NO3/P/Z/D.")
+                   help="BGC scheme: abiotic = DIC+ALK with air-sea CO2; npzd adds NO3/P/Z/D; "
+                        "npzd_v2 = 18 tracers (2 PFTs, NH4, PO4/Si/Fe, DON/DOP, POC/DOC, O2).")
     g.add_argument("--pco2-atm", type=float, default=284.0,
                    help="Atmospheric pCO2 [uatm] (default 284 = pre-industrial).")
     g.add_argument("--bgc-init-dir", type=str, default=None,
                    help="Directory with DIC/ALK/NO3 initial fields regridded onto the model grid "
-                        "(bgc_init.npz with keys DIC, ALK[, NO3], shape (n_lat, n_lon, nlev), "
+                        "(bgc_init.npz with any of DIC, ALK, NO3, PO4, Si, O2, Fe; shape (n_lat, n_lon, nlev), "
                         "mol/m^3). Default: BiogeoConfig uniform initial values.")
     g.add_argument("--bgc-k-bg", type=float, default=1.0e-5,
                    help="Background vertical diffusivity floor for BGC tracers [m^2/s].")
@@ -79,7 +80,8 @@ class BGCRunner:
         self.diag_every_days = float(diag_every_days)
         self.fields = [f for f in bgc._fields if getattr(bgc, f) is not None]
         self.last_diag = None
-        self._inv0 = None
+        self._inv0 = None          # reference inventories (persisted in the sidecar)
+        self._vol0 = None
         self._flux_acc = 0.0   # mol C accumulated since last print
         self._flux_n = 0
 
@@ -96,7 +98,7 @@ class BGCRunner:
             p = Path(args.bgc_init_dir) / "bgc_init.npz"
             d = np.load(p)
             upd = {}
-            for k in ("DIC", "ALK", "NO3"):
+            for k in ("DIC", "ALK", "NO3", "PO4", "Si", "O2", "Fe"):
                 if k in d.files and getattr(bgc, k, None) is not None:
                     a = np.asarray(d[k], dtype=np.float64)
                     if a.shape != shape:
@@ -165,19 +167,23 @@ class BGCRunner:
     # ------------------------------------------------------------- diagnostics
     def print_diag(self, state, step, dt):
         inv = np.asarray(self.tr.inventory(self._stack(), state, self.area2d))
+        vol = float(self.tr.wet_volume(state, self.area2d))
         if self._inv0 is None:
             self._inv0 = inv.copy()
+            self._vol0 = vol
         day = step * dt / 86400.0
         parts = []
         for i, f in enumerate(self.fields):
             rel = (inv[i] - self._inv0[i]) / max(abs(self._inv0[i]), 1e-30)
             parts.append(f"{f}={inv[i]:.6e} ({rel:+.2e})")
+        print(f"[bgc] day={day:.2f} wet volume={vol:.6e} m^3 ({(vol - self._vol0) / self._vol0:+.2e} since ref); "
+              f"inventory = sum(h*c*A), mass-conserving under volume change", flush=True)
         mean_flux_pg_yr = (self._flux_acc / max(self._flux_n, 1)) * 12.011e-15 * 365.0 * 86400.0 \
             if self._flux_n else float("nan")
         surf = {f: float(jnp.nanmean(jnp.where(self.ocean_mask, getattr(self.bgc, f)[..., 0], jnp.nan)))
                 for f in self.fields}
         neg = {f: int(jnp.sum((getattr(self.bgc, f) < 0) & self.tr.active_3d)) for f in self.fields}
-        print(f"[bgc] day={day:.2f} inventories(mol, rel. change since start): " + " ".join(parts),
+        print(f"[bgc] day={day:.2f} inventories(mol, rel. change since ref): " + " ".join(parts),
               flush=True)
         print(f"[bgc]   air-sea CO2 flux (mean since last print) = {mean_flux_pg_yr:+.4f} PgC/yr into ocean | "
               f"surface means {', '.join(f'{k}={v:.4g}' for k, v in surf.items())} | "
@@ -189,7 +195,7 @@ class BGCRunner:
     @staticmethod
     def sidecar(restart_path) -> Path:
         p = Path(restart_path)
-        return p.with_name(p.name + ".bgc.npz")
+        return p.with_name(p.stem + ".bgc.npz")   # restart_leg_X.npz -> restart_leg_X.bgc.npz
 
     def save(self, restart_path, step: int) -> Path:
         out = self.sidecar(restart_path)
@@ -197,6 +203,10 @@ class BGCRunner:
         payload["_step"] = np.asarray(int(step))
         payload["_scheme"] = np.asarray(self.cfg.scheme)
         payload["_pco2_atm"] = np.asarray(float(self.cfg.pCO2_atm))
+        if self._inv0 is not None:
+            payload["_inv0"] = np.asarray(self._inv0)
+            payload["_vol0"] = np.asarray(float(self._vol0))
+            payload["_inv0_fields"] = np.asarray(self.fields)
         tmp = out.with_suffix(out.suffix + f".tmp{os.getpid()}")
         with open(tmp, "wb") as fh:
             np.savez_compressed(fh, **payload)
@@ -206,6 +216,9 @@ class BGCRunner:
 
     def load(self, restart_path, expect_step: int) -> None:
         src = self.sidecar(restart_path)
+        _legacy = Path(restart_path).with_name(Path(restart_path).name + ".bgc.npz")
+        if not src.exists() and _legacy.exists():
+            src = _legacy
         if not src.exists():
             raise FileNotFoundError(
                 f"--biogeo {self.cfg.scheme}: resuming from {restart_path} but its BGC sidecar "
@@ -223,6 +236,8 @@ class BGCRunner:
         if missing:
             raise ValueError(f"{src}: tracers {missing} missing from the sidecar")
         self.bgc = self.bgc._replace(**upd)
+        if "_inv0" in d.files and list(d["_inv0_fields"]) == self.fields:
+            self._inv0 = np.asarray(d["_inv0"]); self._vol0 = float(d["_vol0"])
         print(f"[bgc] restored {len(upd)} tracers from {src} (step {st})", flush=True)
 
 
