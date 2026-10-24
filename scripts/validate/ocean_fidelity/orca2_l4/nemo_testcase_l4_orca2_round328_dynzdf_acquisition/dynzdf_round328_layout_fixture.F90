@@ -4,6 +4,7 @@ PROGRAM dynzdf_round328_layout_fixture
    USE dynzdf_round328_writer
    IMPLICIT NONE
    INTEGER :: rank, jj, phase, component, ji, jk, unit, ios
+   REAL(wp) :: rank_offset
    CHARACTER(LEN=8) :: argument
    CHARACTER(LEN=16) :: magic
    CHARACTER(LEN=64) :: filename
@@ -18,31 +19,33 @@ PROGRAM dynzdf_round328_layout_fixture
    CALL GET_COMMAND_ARGUMENT(1,argument)
    READ(argument,*) rank
    narea=rank+1
+   rank_offset=10000._wp*rank
    DO component=1,3; DO jk=1,jpk; DO jj=1,2; DO ji=1,3
-      puu(ji,jj,jk,component)=1000._wp*component+100._wp*jk+10._wp*jj+ji
+      puu(ji,jj,jk,component)=rank_offset+1000._wp*component+100._wp*jk+10._wp*jj+ji
       pvv(ji,jj,jk,component)=puu(ji,jj,jk,component)+0.5_wp
    END DO; END DO; END DO; END DO
    DO jk=1,jpk; DO jj=1,3; DO ji=1,4
-      avm(ji,jj,jk)=REAL(100*jk+10*jj+ji,wp)
+      avm(ji,jj,jk)=rank_offset+100._wp*(jk-1)+10._wp*jj+ji+2.5_wp
    END DO; END DO; END DO
-   puub=7._wp; pvvb=8._wp; pbot=9._wp; ptop=10._wp
+   puub=rank_offset+7._wp; pvvb=rank_offset+8._wp
+   pbot=rank_offset+9._wp; ptop=rank_offset+10._wp
    r3u_kmm=0.03_wp; r3v_kmm=0.04_wp
    r3u_kaa=0.01_wp; r3v_kaa=0.02_wp
    utau=11._wp; vtau=12._wp
    CALL r328_begin(1,1,2,3,3,puu,pvv,avm,r3u_kmm,r3v_kmm,r3u_kaa,r3v_kaa, &
       & puub,pvvb,pbot,ptop,utau,vtau)
    DO phase=1,4; DO jj=1,2
-      urow=REAL(100*phase+jj,wp); vrow=urow+0.25_wp
+      urow=rank_offset+REAL(100*phase+jj,wp); vrow=urow+0.25_wp
       CALL r328_state_row(phase,jj,urow,vrow)
    END DO; END DO
    DO component=1,2; DO phase=1,5; DO jj=1,2
-      lower=REAL(1000*component+100*phase+10*jj+1,wp)
-      diagonal=REAL(1000*component+100*phase+10*jj+2,wp)
-      upper=REAL(1000*component+100*phase+10*jj+3,wp)
+      lower=rank_offset+REAL(1000*component+100*phase+10*jj+1,wp)
+      diagonal=rank_offset+REAL(1000*component+100*phase+10*jj+2,wp)
+      upper=rank_offset+REAL(1000*component+100*phase+10*jj+3,wp)
       CALL r328_matrix_row(component,phase,jj,lower,diagonal,upper)
    END DO; END DO; END DO
    DO component=1,2; DO jj=1,2
-      urow=REAL(9000+100*component+jj,wp)
+      urow=rank_offset+REAL(9000+100*component+jj,wp)
       CALL r328_solve_row(component,jj,urow)
    END DO; END DO
    ! Raw dyn_zdf output can retain -0.0 at dry cells.  The admitted frame

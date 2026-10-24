@@ -129,6 +129,8 @@ FILES = {
     # ORCA2 round 328 Resume-5: the unmodified round-326 record-build chain.
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/MY_SRC/stprk3.F90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/MY_SRC/stprk3.F90"),
     # ORCA2 round 311: G1b's build (P5) and G8's build (R31FULLENTRY_FIX1).
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90": NEMO / "cfgs/ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90",
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynkeg.f90": NEMO / "cfgs/ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynkeg.f90",
@@ -1745,6 +1747,10 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # ORCA2 round 328 Resume-6: the admitted final-ZDF frame is rank-0-only.
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/MY_SRC/stprk3.F90:411-422': [
+        'INTEGER, INTENT(in) :: kstp, klevel',
+        "& l4_canon_3d(avs,'T'), l4_canon_3d(en,'T')", 12],
     # ORCA2 round 328 Resume-5: exact zdf_phy observer boundaries.
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:336':
         'CALL zdf_tke( kt, Kbb, Kmm, sh2, avm_k, avt_k )',

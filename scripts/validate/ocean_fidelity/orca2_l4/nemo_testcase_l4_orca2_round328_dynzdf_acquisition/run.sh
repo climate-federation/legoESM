@@ -77,7 +77,6 @@ readonly ZP_PATCH=$ZP_DIR/zdfphy_round328.patch
 readonly ZP_DDM_PATCH=$ZP_DIR/zdfddm_round328.patch
 readonly ZP_IWM_PATCH=$ZP_DIR/zdfiwm_round328.patch
 readonly ZP_WRITER=$ZP_DIR/zdfphy_round328_writer.F90
-readonly ZP_FIXTURE_STUBS=$ZP_DIR/zdfphy_round328_fixture_stubs.F90
 readonly ZP_FIXTURE=$ZP_DIR/zdfphy_round328_layout_fixture.F90
 readonly ZP_GATE=$here/../nemo_testcase_l4_orca2_round328_zdf_terms_gate.py
 readonly ZP_TEST=$REPO/tests/ocean/fidelity/test_orca2_round328_zdf_terms_gate.py
@@ -212,7 +211,7 @@ for path in "$PATCH" "$STAGE_PATCH" "$WRITER" "$FIXTURE_STUBS" "$FIXTURE" "$EXCE
 done
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   for path in "$ZP_PATCH" "$ZP_DDM_PATCH" "$ZP_IWM_PATCH" "$ZP_WRITER" \
-    "$ZP_FIXTURE_STUBS" "$ZP_FIXTURE" "$ZP_GATE" "$ZP_TEST" \
+    "$ZP_FIXTURE" "$ZP_GATE" "$ZP_TEST" \
     "$SOURCE_ZDFPHY" "$SOURCE_ZDFDDM" "$SOURCE_ZDFIWM" \
     "$SOURCE_ROOT/BLD/ppsrc/nemo/zdfphy.f90" \
     "$SOURCE_ROOT/BLD/ppsrc/nemo/zdfddm.f90" \
@@ -434,7 +433,7 @@ sha256sum "$PATCH" "$STAGE_PATCH" "$WRITER" "$FIXTURE_STUBS" "$FIXTURE" \
   "$SOURCE_RUN/deck_files.sha256" "$SOURCE_RUN/input_files.sha256" >"$manifest/toolchain.sha256"
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   sha256sum "$ZP_PATCH" "$ZP_DDM_PATCH" "$ZP_IWM_PATCH" "$ZP_WRITER" \
-    "$ZP_FIXTURE_STUBS" "$ZP_FIXTURE" "$ZP_GATE" "$ZP_TEST" \
+    "$ZP_FIXTURE" "$ZP_GATE" "$ZP_TEST" \
     "$SOURCE_ZDFPHY" "$SOURCE_ZDFDDM" "$SOURCE_ZDFIWM" \
     >>"$manifest/toolchain.sha256"
 fi

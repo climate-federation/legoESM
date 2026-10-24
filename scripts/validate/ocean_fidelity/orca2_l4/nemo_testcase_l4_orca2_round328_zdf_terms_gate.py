@@ -14,10 +14,11 @@ import numpy as np
 
 from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round328_dynzdf_gate import (
     GateError,
-    _checksum,
     _changed,
-    _one_ulp,
     _take,
+    _verify_checksums,
+    read_record as read_dynzdf_record,
+    record_name as dynzdf_record_name,
     require,
     same_program_observers,
 )
@@ -28,7 +29,7 @@ HEADER_NAMES = (
     "ntsi", "ntsj", "real_bits", "n_fields",
 )
 EXPECTED_ORDER = (
-    "b1_avm", "b1_avt", "b1_avs", "tke_en", "tke_avm_k", "tke_avt_k",
+    "b1_avm", "b1_avt", "b1_avs_previous", "tke_en", "tke_avm_k", "tke_avt_k",
     "tke_rn2", "tke_r3t_kmm", "tke_ht_0", "tke_mbkt", "tke_wmask",
     "b2_avm", "b2_avt", "b2_avs", "ddm_heat_inc", "ddm_salt_inc",
     "ddm_max_inc", "b3_avm", "b3_avt", "b3_avs", "iwm_zav_wave",
@@ -98,12 +99,6 @@ def read_record(path: Path, plant: str | None = None) -> dict:
             "sha256": hashlib.sha256(raw).hexdigest()}
 
 
-def _verify_checksums(record: dict) -> None:
-    for name, values in record["fields"].items():
-        require(_checksum(values) == record["checksums"][name],
-                f"{name}: payload checksum differs from writer")
-
-
 def _bits_equal(actual: np.ndarray, expected: np.ndarray, message: str) -> None:
     require(not _changed(actual, expected), message)
 
@@ -111,19 +106,18 @@ def _bits_equal(actual: np.ndarray, expected: np.ndarray, message: str) -> None:
 def _verify_source_order(record: dict) -> None:
     f = record["fields"]
     wet = f["tke_wmask"] != 0.0
-    _bits_equal(f["b1_avm"][wet], f["tke_avm_k"][wet],
-                "post-TKE avm differs from copied avm_k")
-    _bits_equal(f["b1_avt"][wet], f["tke_avt_k"][wet],
-                "post-TKE avt differs from copied avt_k")
-    # River-mouth and EVD terms occur between boundary 1 and zdf_ddm in
-    # zdf_phy.  The DDM tracer operands are therefore evidence channels, not
-    # a reconstruction from the earlier boundary.
+    # Check the recorded term chains before the redundant closure-copy checks
+    # so each boundary plant proves that a semantic comparison can fail.
     _bits_equal((f["b1_avm"] + f["ddm_max_inc"])[wet], f["b2_avm"][wet],
                 "post-DDM avm does not reproduce its recorded increment")
     _bits_equal((f["b2_avt"] + f["iwm_zav_wave"])[wet], f["b3_avt"][wet],
                 "post-IWM avt does not reproduce zav_wave")
     _bits_equal((f["b2_avm"] + f["iwm_zav_wave"])[wet], f["b3_avm"][wet],
                 "post-IWM avm does not reproduce zav_wave")
+    _bits_equal(f["b1_avm"][wet], f["tke_avm_k"][wet],
+                "post-TKE avm differs from copied avm_k")
+    _bits_equal(f["b1_avt"][wet], f["tke_avt_k"][wet],
+                "post-TKE avt differs from copied avt_k")
     require(bool(np.any(f["ddm_max_inc"][wet] != 0.0)), "DDM operand channel is inactive")
     require(bool(np.any(f["iwm_zav_wave"][wet] != 0.0)), "IWM operand channel is inactive")
     require(bool(np.all(f["tke_mbkt"] == np.floor(f["tke_mbkt"]))),
@@ -157,7 +151,7 @@ def read_admitted_final(path: Path) -> dict[str, np.ndarray]:
     return fields
 
 
-def _verify_final(record: dict, admitted: dict[str, np.ndarray], plant: bool) -> None:
+def _verify_rank0_final(record: dict, admitted: dict[str, np.ndarray]) -> None:
     f, h = record["fields"], record["header"]
     wet = f["tke_wmask"] != 0.0
     require(bool(np.any(wet)), "record has no wet interfaces")
@@ -165,12 +159,33 @@ def _verify_final(record: dict, admitted: dict[str, np.ndarray], plant: bool) ->
         expected = admitted[name][:, :, 1:1 + h["nz"]]
         require(expected.shape == f[f"b3_{name}"].shape,
                 f"admitted {name} shape {expected.shape} differs from record")
-        if plant and name == "avm":
-            expected = expected.copy()
-            index = np.flatnonzero(wet)[0]
-            expected.flat[index] = np.nextafter(expected.flat[index], np.float64(np.inf))
         _bits_equal(f[f"b3_{name}"][wet], expected[wet],
                     f"post-IWM {name} differs from admitted final wet-cell bits")
+
+
+def _verify_rank1_avm(record: dict, dynzdf: dict) -> None:
+    f, h = record["fields"], record["header"]
+    dh = dynzdf["header"]
+    require((h["ntsi"], h["ntsj"]) == (dh["ntsi"], dh["ntsj"]),
+            "rank-1 zdf_phy and dyn_zdf origins differ")
+    expected = dynzdf["fields"]["avm_input"][
+        :h["nx"], :h["ny"], 1:1 + h["nz"]]
+    require(expected.shape == f["b3_avm"].shape,
+            f"rank-1 dyn_zdf avm shape {expected.shape} differs from record")
+    wet = f["tke_wmask"] != 0.0
+    require(bool(np.any(wet)), "rank-1 record has no wet interfaces")
+    _bits_equal(f["b3_avm"][wet], expected[wet],
+                "rank-1 post-IWM avm differs from admitted dyn_zdf input bits")
+
+
+def _plant_boundary(record: dict, plant: str) -> None:
+    field = {"boundary1": "b1_avm", "boundary2": "b2_avt",
+             "boundary3": "b3_avm"}[plant]
+    values = record["fields"][field]
+    wet_index = np.flatnonzero(record["fields"]["tke_wmask"])
+    require(bool(wet_index.size), "cannot plant a boundary change without wet cells")
+    values.flat[wet_index[0]] = np.nextafter(
+        values.flat[wet_index[0]], np.float64(np.inf))
 
 
 def run_gate(root: Path, expect_commit: str, plant: str | None = None) -> dict:
@@ -181,29 +196,37 @@ def run_gate(root: Path, expect_commit: str, plant: str | None = None) -> dict:
     if plant == "stamp":
         produced = "0" * 40
     require(produced == expect_commit, f"producer commit {produced} != {expect_commit}")
-    admitted_path = root / "oracle_zdf_entry_kt00000001.bin"
-    require(admitted_path.is_file(), f"missing {admitted_path.name}")
-    admitted = read_admitted_final(admitted_path)
+    rank0_path = root / "oracle_zdf_entry_kt00000001.bin"
+    require(rank0_path.is_file(), f"missing {rank0_path.name}")
+    rank0_admitted = read_admitted_final(rank0_path)
     records = {}
     for rank in (0, 1):
         path = root / record_name(rank)
         require(path.is_file(), f"missing {path.name}")
         record = read_record(path, plant=plant if rank == 0 else None)
         require(record["header"]["rank"] == rank, f"{path.name}: wrong rank")
-        if rank == 0 and plant in {"boundary1", "boundary2", "boundary3"}:
-            field = {"boundary1": "b1_avm", "boundary2": "b2_avm",
-                     "boundary3": "b3_avm"}[plant]
-            record["fields"][field] = _one_ulp(record["fields"][field])
         _verify_checksums(record)
-        _verify_source_order(record)
-        _verify_final(record, admitted, plant == "boundary3")
         records[rank] = record
+    if plant in {"boundary1", "boundary2", "boundary3"}:
+        _plant_boundary(records[0], plant)
+    dyn_path = root / dynzdf_record_name(1)
+    require(dyn_path.is_file(), f"missing admitted rank-1 {dyn_path.name}")
+    rank1_dynzdf = read_dynzdf_record(dyn_path)
+    require(rank1_dynzdf["header"]["rank"] == 1,
+            f"{dyn_path.name}: wrong admitted rank")
+    _verify_checksums(rank1_dynzdf)
+    _verify_rank0_final(records[0], rank0_admitted)
+    _verify_rank1_avm(records[1], rank1_dynzdf)
+    for record in records.values():
+        _verify_source_order(record)
     return {
         "format": "nemo-testcase-l4-orca2-round328-zdfphy-v1",
         "status": "PASS_R328_ZDFPHY_ADMISSION",
         "producer_commit": produced,
         "records": {record_name(rank): record["sha256"]
                     for rank, record in records.items()},
+        "rank1_final_reference": dyn_path.name + ":avm_input",
+        "rank1_unscored_final_fields": ["avt", "avs"],
     }
 
 

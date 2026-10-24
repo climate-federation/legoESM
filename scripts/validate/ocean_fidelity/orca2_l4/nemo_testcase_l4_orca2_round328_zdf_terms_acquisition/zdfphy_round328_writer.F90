@@ -3,7 +3,7 @@ MODULE zdfphy_round328_writer
    !! Captured values are never read back into NEMO state.
    USE dom_oce
    USE in_out_manager, ONLY : nit000
-   USE, INTRINSIC :: iso_fortran_env, ONLY : int64
+   USE dynzdf_round328_writer, ONLY : checksum2, checksum3
    USE lib_mpp, ONLY : ctl_stop
    IMPLICIT NONE
    PRIVATE
@@ -19,28 +19,6 @@ MODULE zdfphy_round328_writer
    REAL(wp), ALLOCATABLE, SAVE :: ddm(:,:,:,:), iwm(:,:,:,:)
 
 CONTAINS
-
-   FUNCTION checksum2(value) RESULT(checksum)
-      REAL(wp), INTENT(in) :: value(:,:)
-      INTEGER(int64) :: checksum, word
-      INTEGER :: ji, jj
-      checksum = 0_int64
-      DO jj=1,SIZE(value,2); DO ji=1,SIZE(value,1)
-         word = TRANSFER(value(ji,jj),word)
-         checksum = IEOR(checksum,word)
-      END DO; END DO
-   END FUNCTION checksum2
-
-   FUNCTION checksum3(value) RESULT(checksum)
-      REAL(wp), INTENT(in) :: value(:,:,:)
-      INTEGER(int64) :: checksum, word
-      INTEGER :: ji, jj, jk
-      checksum = 0_int64
-      DO jk=1,SIZE(value,3); DO jj=1,SIZE(value,2); DO ji=1,SIZE(value,1)
-         word = TRANSFER(value(ji,jj,jk),word)
-         checksum = IEOR(checksum,word)
-      END DO; END DO; END DO
-   END FUNCTION checksum3
 
    SUBROUTINE put2(name,value)
       CHARACTER(LEN=*), INTENT(in) :: name
@@ -139,7 +117,7 @@ CONTAINS
       WRITE(nunit) magic,1,nkt,nkbb,nkmm,nkrhs,narea-1,nx,ny,nz,ntsi,ntsj, &
          & STORAGE_SIZE(1._wp),23
       CALL put3('b1_avm',boundary(1,1,:,:,:)); CALL put3('b1_avt',boundary(1,2,:,:,:))
-      CALL put3('b1_avs',boundary(1,3,:,:,:)); CALL put3('tke_en',tke(1,:,:,:))
+      CALL put3('b1_avs_previous',boundary(1,3,:,:,:)); CALL put3('tke_en',tke(1,:,:,:))
       CALL put3('tke_avm_k',tke(2,:,:,:)); CALL put3('tke_avt_k',tke(3,:,:,:))
       CALL put3('tke_rn2',tke(4,:,:,:)); CALL put2('tke_r3t_kmm',r3t_kmm)
       CALL put2('tke_ht_0',ht0); CALL put2('tke_mbkt',mbkt_value)

@@ -8,6 +8,7 @@ MODULE dynzdf_round328_writer
    IMPLICIT NONE
    PRIVATE
    PUBLIC :: r328_begin, r328_state_row, r328_matrix_row, r328_solve_row, r328_finish
+   PUBLIC :: checksum2, checksum3
 
    INTEGER, PARAMETER :: jp_state = 4, jp_matrix = 5
    INTEGER, SAVE :: nunit = -1, nx = 0, ny = 0

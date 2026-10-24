@@ -18,8 +18,10 @@ REPO = Path(__file__).resolve().parents[3]
 DYN_ACQ = REPO / "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition"
 ACQ = REPO / "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_zdf_terms_acquisition"
 WRITER = ACQ / "zdfphy_round328_writer.F90"
-STUBS = ACQ / "zdfphy_round328_fixture_stubs.F90"
+STUBS = DYN_ACQ / "dynzdf_round328_fixture_stubs.F90"
 FIXTURE = ACQ / "zdfphy_round328_layout_fixture.F90"
+DYN_WRITER = DYN_ACQ / "dynzdf_round328_writer.F90"
+DYN_FIXTURE = DYN_ACQ / "dynzdf_round328_layout_fixture.F90"
 PATCHES = {
     "dynzdf": DYN_ACQ / "dynzdf_round328.patch",
     "stprk3_stg": DYN_ACQ / "stprk3_stg_round328.patch",
@@ -35,9 +37,16 @@ def record_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     root = tmp_path_factory.mktemp("r328-zdfphy-layout")
     subprocess.run([
         str(GFORTRAN), "-ffree-line-length-none", "-J", str(root),
-        str(STUBS), str(WRITER), str(FIXTURE), "-o", str(root / "write_fixture"),
+        str(STUBS), str(DYN_WRITER), str(DYN_FIXTURE),
+        "-o", str(root / "write_dyn_fixture"),
+    ], check=True)
+    subprocess.run([
+        str(GFORTRAN), "-ffree-line-length-none", "-I", str(root), "-J", str(root),
+        str(STUBS), str(DYN_WRITER), str(WRITER), str(FIXTURE),
+        "-o", str(root / "write_fixture"),
     ], check=True)
     for rank in (0, 1):
+        subprocess.run([str(root / "write_dyn_fixture"), str(rank)], cwd=root, check=True)
         subprocess.run([str(root / "write_fixture"), str(rank)], cwd=root, check=True)
     (root / "producer_commit.txt").write_text("a" * 40 + "\n")
     return root
@@ -53,6 +62,18 @@ def test_real_writer_layout_and_clean_admission(record_dir: Path) -> None:
     assert fields["b1_avm"].shape == (h["nx"], h["ny"], h["nz"])
     assert fields["tke_ht_0"].shape == (h["nx"], h["ny"], 1)
     assert np.array_equal(fields["b1_avm"], fields["tke_avm_k"])
+    assert result["rank1_final_reference"].endswith(":avm_input")
+    assert result["rank1_unscored_final_fields"] == ["avt", "avs"]
+
+
+def test_fixture_rank_payloads_are_distinct(record_dir: Path) -> None:
+    rank0 = gate.read_record(record_dir / gate.record_name(0))["fields"]
+    rank1 = gate.read_record(record_dir / gate.record_name(1))["fields"]
+    assert not np.array_equal(rank0["b3_avm"], rank1["b3_avm"])
+    dyn1 = dyn_gate.read_record(record_dir / dyn_gate.record_name(1))["fields"]
+    wet = rank1["tke_wmask"] != 0.0
+    assert np.array_equal(
+        rank1["b3_avm"][wet], dyn1["avm_input"][:3, :2, 1:4][wet])
 
 
 PLANT_REASONS = {
@@ -60,9 +81,9 @@ PLANT_REASONS = {
     "field-order": "field order",
     "truncation": "truncated",
     "stamp": "producer commit",
-    "boundary1": "b1_avm: payload checksum",
-    "boundary2": "b2_avm: payload checksum",
-    "boundary3": "b3_avm: payload checksum",
+    "boundary1": "post-DDM avm does not reproduce",
+    "boundary2": "post-IWM avt does not reproduce",
+    "boundary3": "post-IWM avm differs from admitted final",
 }
 
 
@@ -73,10 +94,13 @@ def test_every_required_plant_refuses(record_dir: Path, plant: str) -> None:
 
 
 def test_boundary_plants_are_one_ulp(record_dir: Path) -> None:
-    fields = gate.read_record(record_dir / gate.record_name(0))["fields"]
-    for name in ("b1_avm", "b2_avm", "b3_avm"):
-        planted = gate._one_ulp(fields[name])
-        assert np.count_nonzero(planted.view(np.uint64) != fields[name].view(np.uint64)) == 1
+    for plant, name in (("boundary1", "b1_avm"), ("boundary2", "b2_avt"),
+                        ("boundary3", "b3_avm")):
+        record = gate.read_record(record_dir / gate.record_name(0))
+        before = record["fields"][name].copy()
+        gate._plant_boundary(record, plant)
+        assert np.count_nonzero(
+            record["fields"][name].view(np.uint64) != before.view(np.uint64)) == 1
 
 
 def test_final_check_ignores_only_dry_signed_zero(record_dir: Path) -> None:
@@ -86,9 +110,18 @@ def test_final_check_ignores_only_dry_signed_zero(record_dir: Path) -> None:
     assert np.any(dry)
     assert np.any(np.signbit(record["fields"]["b3_avm"][dry]))
     assert not np.any(np.signbit(admitted["avm"][:, :, 1:4][dry]))
-    gate._verify_final(record, admitted, False)
+    gate._verify_rank0_final(record, admitted)
+    record["fields"]["b3_avm"][0, 0, 0] = np.nextafter(
+        record["fields"]["b3_avm"][0, 0, 0], np.float64(np.inf))
     with pytest.raises(gate.GateError, match="post-IWM avm differs"):
-        gate._verify_final(record, admitted, True)
+        gate._verify_rank0_final(record, admitted)
+
+
+def test_boundary1_avs_is_previous_step_and_unscored(record_dir: Path) -> None:
+    record = gate.read_record(record_dir / gate.record_name(0))
+    assert np.all(record["fields"]["b1_avs_previous"] == -3.0)
+    record["fields"]["b1_avs_previous"].fill(12345.0)
+    gate._verify_source_order(record)
 
 
 def _insertions(path: Path) -> list[str]:

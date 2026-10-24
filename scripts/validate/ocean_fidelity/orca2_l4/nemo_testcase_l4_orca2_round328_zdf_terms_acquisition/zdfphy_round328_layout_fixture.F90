@@ -6,6 +6,7 @@ PROGRAM zdfphy_round328_layout_fixture
    INTEGER :: rank,ji,jj,jk,unit,ios
    CHARACTER(LEN=8) :: argument
    CHARACTER(LEN=16) :: magic
+   REAL(wp) :: rank_offset
    REAL(wp) :: avm(3,2,3),avt(3,2,3),avs(3,2,3),en(3,2,3)
    REAL(wp) :: avm_k(3,2,3),avt_k(3,2,3),rn2(3,2,3),wmask(3,2,3)
    REAL(wp) :: r3t(3,2),ht0(3,2),wave(3,2),emx(3,2),reb(3,2)
@@ -15,8 +16,9 @@ PROGRAM zdfphy_round328_layout_fixture
    CALL GET_COMMAND_ARGUMENT(1,argument)
    READ(argument,*) rank
    narea=rank+1
+   rank_offset=10000._wp*rank
    DO jk=1,3; DO jj=1,2; DO ji=1,3
-      avm_k(ji,jj,jk)=100._wp*jk+10._wp*jj+ji
+      avm_k(ji,jj,jk)=rank_offset+100._wp*jk+10._wp*jj+ji
       avt_k(ji,jj,jk)=avm_k(ji,jj,jk)+0.25_wp
       en(ji,jj,jk)=avm_k(ji,jj,jk)+0.5_wp
       rn2(ji,jj,jk)=avm_k(ji,jj,jk)+0.75_wp
@@ -46,14 +48,16 @@ PROGRAM zdfphy_round328_layout_fixture
    full_avm(3:5,3:4,2:4)=avm
    interior(:,:,2:4)=avt
    full_avm(5,4,4)=0._wp; interior(3,2,4)=0._wp
-   magic='NEMO_L4_ZDF___2'
-   OPEN(NEWUNIT=unit,FILE='oracle_zdf_entry_kt00000001.bin',ACCESS='STREAM', &
-      & FORM='UNFORMATTED',STATUS='REPLACE',ACTION='WRITE',IOSTAT=ios)
-   IF(ios /= 0) ERROR STOP 2
-   WRITE(unit) magic,2,1,1,7,6,jpk,64
-   WRITE(unit) full_avm,interior
-   interior=0._wp; interior(:,:,2:4)=avs
-   interior(3,2,4)=0._wp
-   WRITE(unit) interior,zero3
-   CLOSE(unit)
+   IF(rank == 0) THEN
+      magic='NEMO_L4_ZDF___2'
+      OPEN(NEWUNIT=unit,FILE='oracle_zdf_entry_kt00000001.bin',ACCESS='STREAM', &
+         & FORM='UNFORMATTED',STATUS='REPLACE',ACTION='WRITE',IOSTAT=ios)
+      IF(ios /= 0) ERROR STOP 2
+      WRITE(unit) magic,2,1,1,7,6,jpk,64
+      WRITE(unit) full_avm,interior
+      interior=0._wp; interior(:,:,2:4)=avs
+      interior(3,2,4)=0._wp
+      WRITE(unit) interior,zero3
+      CLOSE(unit)
+   ENDIF
 END PROGRAM zdfphy_round328_layout_fixture
