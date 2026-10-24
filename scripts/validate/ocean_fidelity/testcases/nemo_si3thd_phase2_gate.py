@@ -198,30 +198,59 @@ def _center_global(frame: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     return {k: np.asarray(v[idx]) for k, v in frame.items() if k in GLOBAL_NAMES}
 
 
-def _nemo_salprof(s_i: np.ndarray) -> np.ndarray:
+def _nemo_salprof(
+    s_i: np.ndarray,
+    sss_m: np.ndarray | float = 34.0,
+    *,
+    rn_sal_gd: float = 4.5,
+    rn_sal_fl: float = 3.5,
+    rn_sinew: float = 0.75,
+    rn_simin: float = 0.1,
+    nlay_i: int = 3,
+) -> np.ndarray:
     """Mirror `ice_var_salprof` option-2 profile (`icevar.F90:488-506`)."""
 
     s_i = np.atleast_1d(np.asarray(s_i, dtype=np.float64))
-    z1_ds = np.float64(1.0 / (4.5 - 3.5))
-    zalpha = np.where(
-        s_i >= 4.5,
-        0.0,
-        np.where(s_i <= 3.5, 1.0, (4.5 - s_i) * z1_ds),
+    sss = np.broadcast_to(
+        np.atleast_1d(np.asarray(sss_m, dtype=np.float64)), s_i.shape
     )
-    zalpha = np.where(s_i <= 3.0 * 0.1, 0.0, zalpha)
-    jk = np.array([1.0, 2.0, 3.0], dtype=np.float64)
-    r1_nlay_i = np.float64(1.0 / 3.0)
+    sal_gd = np.float64(rn_sal_gd)
+    sal_fl = np.float64(rn_sal_fl)
+    sinew = np.float64(rn_sinew)
+    simin = np.float64(rn_simin)
+    nlay = np.float64(nlay_i)
+    z1_ds = np.float64(1.0) / (sal_gd - sal_fl)
+    zalpha = np.where(
+        s_i >= sal_gd,
+        0.0,
+        np.where(s_i <= sal_fl, 1.0, (sal_gd - s_i) * z1_ds),
+    )
+    # Constant profile when SSS is too low (`icevar.F90:495`):
+    zalpha = np.where(s_i >= (np.float64(0.5) * sinew * sss), 0.0, zalpha)
+    # Minimum bulk salinity guard (`icevar.F90:496`):
+    zalpha = np.where(
+        s_i <= (nlay * np.minimum(simin, sinew * sss)),
+        0.0,
+        zalpha,
+    )
+    jk = np.arange(1, int(nlay_i) + 1, dtype=np.float64)
+    r1_nlay_i = np.float64(1.0) / nlay
     return (
         zalpha[..., None]
         * s_i[..., None]
-        * 2.0
-        * (jk - 0.5)
+        * np.float64(2.0)
+        * (jk - np.float64(0.5))
         * r1_nlay_i
-        + (1.0 - zalpha[..., None]) * s_i[..., None]
+        + (np.float64(1.0) - zalpha[..., None]) * s_i[..., None]
     )
 
 
-def _entry_arrays(frame, *, _nemo_entry_conversion: bool = True):
+def _entry_arrays(
+    frame,
+    *,
+    sss_m: np.ndarray | float = 34.0,
+    _nemo_entry_conversion: bool = True,
+):
     from legoesm.ice.bitz_lipscomb import SI3ColumnArrays
 
     g = _center_global(frame)
@@ -239,7 +268,7 @@ def _entry_arrays(frame, *, _nemo_entry_conversion: bool = True):
         e_i *= 3.0
         np.divide(g["e_s"], vs, out=e_s, where=vs > 1.0e-20)
         e_s *= 3.0
-        sz_i = _nemo_salprof(s_i)
+        sz_i = _nemo_salprof(s_i, sss_m=sss_m)
     else:
         np.divide(g["e_i"] * 3.0, vi, out=e_i, where=vi > 1.0e-20)
         np.divide(g["e_s"] * 3.0, vs, out=e_s, where=vs > 1.0e-20)

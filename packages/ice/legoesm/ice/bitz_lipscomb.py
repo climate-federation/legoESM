@@ -144,9 +144,15 @@ def ice_enthalpy(T_K, S):
     )
 
 
-def option2_salinity_profile(S_bulk, sss):
+def option2_salinity_profile(
+    S_bulk,
+    sss,
+    *,
+    _nemo_source_round: bool = True,
+):
     """SI3 option-2 diagnostic linear profile (`icevar.F90:537-598`)."""
 
+    sr = nemo_source_round if _nemo_source_round else (lambda x: x)
     S_bulk = jnp.asarray(S_bulk)
     alpha = jnp.where(
         S_bulk >= _OPTION2_UPPER_TRANSITION,
@@ -173,7 +179,7 @@ def option2_salinity_profile(S_bulk, sss):
         alpha,
     )
     z = jnp.asarray(_OPTION2_LAYER_SHAPE, dtype=S_bulk.dtype)
-    return S_bulk[..., None] * (alpha[..., None] * z + (1.0 - alpha[..., None]))
+    return S_bulk[..., None] * (sr(alpha[..., None] * z) + (1.0 - alpha[..., None]))
 
 
 def ice_enthalpy_from_temperature(
@@ -871,9 +877,17 @@ def _si3_zdf_bl99_step(
     )
 
 
-def _piecewise_remap(thickness, enthalpy, new_total, n_layers: int = 3):
+def _piecewise_remap(
+    thickness,
+    enthalpy,
+    new_total,
+    n_layers: int = 3,
+    *,
+    _nemo_source_round: bool = True,
+):
     """Conservative constant-cell remap used by `ice_var_vremap`/`snw_ent`."""
 
+    sr = nemo_source_round if _nemo_source_round else (lambda x: x)
     old_lo = jnp.cumsum(thickness, axis=-1) - thickness
     old_hi = jnp.cumsum(thickness, axis=-1)
     dz_new = new_total / n_layers
@@ -885,13 +899,19 @@ def _piecewise_remap(thickness, enthalpy, new_total, n_layers: int = 3):
         jnp.minimum(new_hi[..., :, None], old_hi[..., None, :])
         - jnp.maximum(new_lo[..., :, None], old_lo[..., None, :]),
     )
-    content = jnp.sum(overlap * enthalpy[..., None, :], axis=-1)
+    content = jnp.sum(sr(overlap * enthalpy[..., None, :]), axis=-1)
     return jnp.where(dz_new[..., None] > _EPS10, content / dz_new[..., None], 0.0)
 
 
-def _nemo_snow_enthalpy_remap(thickness, enthalpy):
+def _nemo_snow_enthalpy_remap(
+    thickness,
+    enthalpy,
+    *,
+    _nemo_source_round: bool = True,
+):
     """NEMO ``snw_ent`` cumulative remap (`icethd_dh.F90:535-613`)."""
 
+    sr = nemo_source_round if _nemo_source_round else (lambda x: x)
     zero = jnp.zeros_like(thickness[..., 0])
     old_h_cumulative = [zero]
     old_e_cumulative = [zero]
@@ -901,7 +921,7 @@ def _nemo_snow_enthalpy_remap(thickness, enthalpy):
         old_h_cumulative.append(total)
         old_e_cumulative.append(
             old_e_cumulative[-1]
-            + enthalpy[..., layer] * thickness[..., layer]
+            + sr(enthalpy[..., layer] * thickness[..., layer])
         )
     old_h_cumulative = jnp.stack(old_h_cumulative, axis=-1)
     old_e_cumulative = jnp.stack(old_e_cumulative, axis=-1)
@@ -921,10 +941,14 @@ def _nemo_snow_enthalpy_remap(thickness, enthalpy):
             denominator = old_h_cumulative[..., old] - old_h_cumulative[..., old - 1]
             safe_denominator = jnp.where(selected, denominator, 1.0)
             interpolated = (
-                old_e_cumulative[..., old - 1]
-                * (old_h_cumulative[..., old] - new_h_cumulative[..., new])
-                + old_e_cumulative[..., old]
-                * (new_h_cumulative[..., new] - old_h_cumulative[..., old - 1])
+                sr(
+                    old_e_cumulative[..., old - 1]
+                    * (old_h_cumulative[..., old] - new_h_cumulative[..., new])
+                )
+                + sr(
+                    old_e_cumulative[..., old]
+                    * (new_h_cumulative[..., new] - old_h_cumulative[..., old - 1])
+                )
             ) / safe_denominator
             new_e_cumulative = new_e_cumulative.at[..., new].set(jnp.where(
                 selected, interpolated, new_e_cumulative[..., new]
@@ -951,9 +975,11 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
              _snow_ice_salinity: bool = True,
              _nemo_snow_sublimation_order: bool = True,
              _nemo_snow_remap: bool = True,
+             _nemo_source_round: bool = True,
              ) -> SI3ColumnArrays:
     """Resolved no-lateral-melt thickness sequence (`icethd_dh.F90:91-533`)."""
 
+    sr = nemo_source_round if _nemo_source_round else (lambda x: x)
     a = state.concentration
     h_i0, h_s0 = state.h_ice, state.h_snow
     # Snowfall partition and snow-first sublimation (:97-202).  Four segments
@@ -1067,7 +1093,7 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
         melted_snow.append(hseg_s[..., k] + delta)
         h_s_work = jnp.maximum(0.0, h_s_work + delta)
         surface_energy = jnp.maximum(
-            surface_energy + delta * eseg_s[..., k], 0.0
+            surface_energy + sr(delta * eseg_s[..., k]), 0.0
         )
     hseg_s = jnp.stack(melted_snow, axis=-1)
 
@@ -1076,9 +1102,10 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     melt_temperature = constants.T0 - constants.liquidus_slope * state.S_layers
     for k in range(3):
         internal_melt = _surface_melt & (zdf.T_ice[..., k] >= melt_temperature[..., k])
-        ice_specific = -zdf.e_ice[..., k] / constants.rho_ice
-        water_specific = constants.c_ocean * (
-            -constants.liquidus_slope * state.S_layers[..., k]
+        ice_specific = sr(-zdf.e_ice[..., k] / constants.rho_ice)
+        water_specific = sr(
+            constants.c_ocean
+            * (-constants.liquidus_slope * state.S_layers[..., k])
         )
         energy_difference = ice_specific - water_specific
         surface_remove = jnp.where(
@@ -1137,9 +1164,10 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             internal_melt = (zf > 0.0) & (
                 zdf.T_ice[..., k] >= melt_temperature[..., k]
             )
-            ice_specific = -zdf.e_ice[..., k] / constants.rho_ice
-            water_specific = constants.c_ocean * (
-                -constants.liquidus_slope * state.S_layers[..., k]
+            ice_specific = sr(-zdf.e_ice[..., k] / constants.rho_ice)
+            water_specific = sr(
+                constants.c_ocean
+                * (-constants.liquidus_slope * state.S_layers[..., k])
             )
             energy_difference = ice_specific - water_specific
             basal_remove = jnp.where(
@@ -1172,9 +1200,10 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
             )
         h_i_pre_flood = jnp.sum(old_h, axis=-1) + dh_growth
     else:
-        bottom_specific = -zdf.e_ice[..., -1] / constants.rho_ice
-        bottom_water = constants.c_ocean * (
-            -constants.liquidus_slope * state.S_layers[..., -1]
+        bottom_specific = sr(-zdf.e_ice[..., -1] / constants.rho_ice)
+        bottom_water = sr(
+            constants.c_ocean
+            * (-constants.liquidus_slope * state.S_layers[..., -1])
         )
         bottom_difference = bottom_specific - bottom_water
         legacy_remove = jnp.where(
@@ -1232,11 +1261,17 @@ def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,
     eseg_i = eseg_i.at[..., 0].set(jnp.where(
         flood > 0.0, flood_content / jnp.maximum(flood, 1.0e-20), 0.0
     ))
-    e_i = _piecewise_remap(hseg_i, eseg_i, h_i)
+    e_i = _piecewise_remap(
+        hseg_i, eseg_i, h_i, _nemo_source_round=_nemo_source_round
+    )
     e_s = (
-        _nemo_snow_enthalpy_remap(hseg_s, eseg_s)
+        _nemo_snow_enthalpy_remap(
+            hseg_s, eseg_s, _nemo_source_round=_nemo_source_round
+        )
         if _nemo_snow_remap
-        else _piecewise_remap(hseg_s, eseg_s, h_s_final)
+        else _piecewise_remap(
+            hseg_s, eseg_s, h_s_final, _nemo_source_round=_nemo_source_round
+        )
     )
 
     snow_ice_salinity = (
@@ -1297,6 +1332,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         _snow_ice_salinity=_snow_ice_salinity,
         _nemo_snow_sublimation_order=_nemo_snow_sublimation_order,
         _nemo_snow_remap=_nemo_snow_remap,
+        _nemo_source_round=_nemo_source_round,
     )
     # `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).
     post_temp1 = post_dh
@@ -1318,7 +1354,9 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         _MINIMUM_ICE_SALINITY,
         _NEW_ICE_SALINITY_FRACTION * forcing.sss,
     )
-    S_layers = option2_salinity_profile(S_bulk, forcing.sss)
+    S_layers = option2_salinity_profile(
+        S_bulk, forcing.sss, _nemo_source_round=_nemo_source_round
+    )
     post_sal = post_temp1._replace(S_bulk=S_bulk, S_layers=S_layers)
     post_temp2 = post_sal
 

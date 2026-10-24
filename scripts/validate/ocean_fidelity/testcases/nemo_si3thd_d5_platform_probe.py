@@ -91,6 +91,14 @@ def _ulp_diff(a: np.ndarray, b: np.ndarray) -> int:
     return int(np.max(np.abs(la - lb)))
 
 
+def _ulp_diff_batch(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    ua = np.asarray(a, dtype=np.float64).view(np.int64)
+    ub = np.asarray(b, dtype=np.float64).view(np.int64)
+    la = np.where(ua < 0, np.int64(-9223372036854775808) - ua, ua)
+    lb = np.where(ub < 0, np.int64(-9223372036854775808) - ub, ub)
+    return np.max(np.abs(la - lb), axis=-1)
+
+
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -297,15 +305,16 @@ def _evaluate_subnormal_window_arm(
             for name in phase2.ZDF_INPUT_NAMES
         )
     )
-    traces = jax.device_get(
-        si3_column_step_arrays(
-            batch_entry,
-            batch_forcing,
+    step_fn = jax.jit(
+        lambda b_ent, b_forc: si3_column_step_arrays(
+            b_ent,
+            b_forc,
             card.dt_seconds,
             card.config.ice_constants,
             _nemo_zdf_layer_reciprocals=zdf_layer_reciprocals,
         )
     )
+    traces = jax.device_get(step_fn(batch_entry, batch_forcing))
     stage_maps = year_gate._stage_maps(traces)
 
     for offset, (kt, frames, _exact_input, entry) in enumerate(subnormal_records):
@@ -443,10 +452,14 @@ def run_step1_reviewer_reproduction(
             )
             normal_step_flags.append(not (5842 <= kt <= 5867))
             entries_r2.append(
-                year_gate._exact_1d_entry(frames, _nemo_entry_conversion=False)
+                year_gate._exact_1d_entry(
+                    frames, sss_m=exact["sss"], _nemo_entry_conversion=False
+                )
             )
             entries_s2.append(
-                year_gate._exact_1d_entry(frames, _nemo_entry_conversion=True)
+                year_gate._exact_1d_entry(
+                    frames, sss_m=exact["sss"], _nemo_entry_conversion=True
+                )
             )
             forcings.append(
                 tuple(
@@ -468,40 +481,34 @@ def run_step1_reviewer_reproduction(
         *entries_s2,
     )
 
+    ts_r2_fn = jax.jit(
+        lambda es: snow_temperature_from_enthalpy(
+            es,
+            c,
+            _nemo_order=True,
+            _nemo_glo2eqv_snow_temp=False,
+            _nemo_source_round=False,
+        )
+    )
+    ts_s2_s3_fn = jax.jit(
+        lambda es: snow_temperature_from_enthalpy(
+            es,
+            c,
+            _nemo_order=True,
+            _nemo_glo2eqv_snow_temp=(not plant_corrupt_snow_temp),
+            _nemo_source_round=True,
+        )
+    )
     ts_r2 = np.asarray(
-        jax.device_get(
-            snow_temperature_from_enthalpy(
-                batch_r2.e_snow,
-                c,
-                _nemo_order=True,
-                _nemo_glo2eqv_snow_temp=False,
-                _nemo_source_round=False,
-            )
-        ),
+        jax.device_get(ts_r2_fn(batch_r2.e_snow)),
         dtype=np.float64,
     )
     ts_s2_only = np.asarray(
-        jax.device_get(
-            snow_temperature_from_enthalpy(
-                batch_s2.e_snow,
-                c,
-                _nemo_order=True,
-                _nemo_glo2eqv_snow_temp=False,
-                _nemo_source_round=False,
-            )
-        ),
+        jax.device_get(ts_r2_fn(batch_s2.e_snow)),
         dtype=np.float64,
     )
     ts_s2_s3 = np.asarray(
-        jax.device_get(
-            snow_temperature_from_enthalpy(
-                batch_s2.e_snow,
-                c,
-                _nemo_order=True,
-                _nemo_glo2eqv_snow_temp=(not plant_corrupt_snow_temp),
-                _nemo_source_round=True,
-            )
-        ),
+        jax.device_get(ts_s2_s3_fn(batch_s2.e_snow)),
         dtype=np.float64,
     )
 
@@ -559,7 +566,24 @@ def run_step1_reviewer_reproduction(
             for f in POST_ZDF_SOLVED_FIELDS
         }
 
-        chunk = 1000
+        zdf_step_fn = jax.jit(
+            lambda b_ent, b_forc: _si3_zdf_bl99_step(
+                b_ent.e_ice,
+                b_ent.e_snow,
+                b_ent.S_layers,
+                b_ent.h_ice,
+                b_ent.h_snow,
+                b_ent.T_surface,
+                b_forc,
+                card.dt_seconds,
+                c,
+                _nemo_zdf_layer_reciprocals=zdf_layer_reciprocals,
+                _nemo_glo2eqv_snow_temp=glo2eqv_snow_temp,
+                _nemo_source_round=source_round,
+            )
+        )
+
+        chunk = max(1, nsteps)
         for start in range(0, nsteps, chunk):
             stop = min(nsteps, start + chunk)
             b_entry = jax.tree.map(
@@ -579,22 +603,7 @@ def run_step1_reviewer_reproduction(
                     for i in range(len(phase2.ZDF_INPUT_NAMES))
                 )
             )
-            zdf_out = jax.device_get(
-                _si3_zdf_bl99_step(
-                    b_entry.e_ice,
-                    b_entry.e_snow,
-                    b_entry.S_layers,
-                    b_entry.h_ice,
-                    b_entry.h_snow,
-                    b_entry.T_surface,
-                    b_forcing,
-                    card.dt_seconds,
-                    c,
-                    _nemo_zdf_layer_reciprocals=zdf_layer_reciprocals,
-                    _nemo_glo2eqv_snow_temp=glo2eqv_snow_temp,
-                    _nemo_source_round=source_round,
-                )
-            )
+            zdf_out = jax.device_get(zdf_step_fn(b_entry, b_forcing))
             cand_fields = {
                 "t_su": np.asarray(zdf_out.T_surface, dtype=np.float64),
                 "e_i": np.asarray(zdf_out.e_ice, dtype=np.float64),
@@ -798,6 +807,7 @@ def run_year_rescore(
     oracle_dir: Path = DEFAULT_ORACLE_DIR,
     *,
     max_steps: int | None = None,
+    use_jit: bool = True,
 ) -> dict:
     """Stage D: full 8,760-step C1D exact-entry operator sweep across Round 2 & Round 3 arms."""
     card = build_c1d_omip_l3_card(oracle_root=oracle_dir)
@@ -814,10 +824,14 @@ def run_year_rescore(
             frames = phase2._read_thd_step(thd, kt)
             exact = phase2._read_zdf_input_step(zin, kt)
             entries_r2.append(
-                year_gate._exact_1d_entry(frames, _nemo_entry_conversion=False)
+                year_gate._exact_1d_entry(
+                    frames, sss_m=exact["sss"], _nemo_entry_conversion=False
+                )
             )
             entries_s2.append(
-                year_gate._exact_1d_entry(frames, _nemo_entry_conversion=True)
+                year_gate._exact_1d_entry(
+                    frames, sss_m=exact["sss"], _nemo_entry_conversion=True
+                )
             )
             forcings.append(
                 tuple(
@@ -900,11 +914,16 @@ def run_year_rescore(
                     **k_dict,
                 )
 
-            return _runner
+            return jax.jit(_runner) if use_jit else _runner
 
         arm_funcs[arm_name] = _make_runner(kw)
 
     arm_accs = {name: _init_arm_accumulator() for name in arm_specs}
+    arm_full_hashers = {name: hashlib.sha256() for name in arm_specs}
+    arm_stage_hashers = {
+        name: {s[1]: hashlib.sha256() for s in phase2.STAGES}
+        for name in arm_specs
+    }
 
     # Retained top-level before (`r2_baseline`) vs after (`step2_plus_step3_plus_step4`)
     # accounting fields for compatibility and direct diff summary:
@@ -939,10 +958,29 @@ def run_year_rescore(
     opened_rows = []
     subnormal_window_touched_rows = []
 
+    # Step 3 vs Step 4 row-by-row bitwise comparison accumulator
+    step3_vs_step4_changed_rows = 0
+    step3_vs_step4_unchanged_rows = 0
+    step3_vs_step4_changed_by_stage = {s[1]: 0 for s in phase2.STAGES}
+    step3_vs_step4_max_ulp = 0
+    step3_vs_step4_first_changed_rows: list[dict] = []
+
+    # Round 2 before (r2_pre_reciprocals) -> after (r2_baseline) accounting
+    r2_touched_by_stage = {
+        s[1]: {
+            "changed_rows": 0,
+            "closed_to_at_bar": 0,
+            "opened_to_debt": 0,
+            "moved_to_zero_ulp_vs_oracle": 0,
+            "moved_from_zero_ulp_vs_oracle": 0,
+        }
+        for s in phase2.STAGES
+    }
+
     # Remaining owner ranking accumulator on final arm (`step2_plus_step3_plus_step4`)
     remaining_owners: dict[str, dict] = {}
 
-    chunk = 1000
+    chunk = max(1, nsteps)
     for start in range(0, nsteps, chunk):
         stop = min(nsteps, start + chunk)
         batch_entry_r2 = jax.tree.map(
@@ -971,69 +1009,176 @@ def run_year_rescore(
         for arm_name, (entries_ref, _) in arm_specs.items():
             b_ent = batch_entry_s2 if entries_ref is entries_s2 else batch_entry_r2
             traces = jax.device_get(arm_funcs[arm_name](b_ent, batch_forcing))
-            arm_maps[arm_name] = year_gate._stage_maps(traces)
-
-        maps_before = arm_maps["r2_baseline"]
-        maps_after = arm_maps["step2_plus_step3_plus_step4"]
-
-        for offset, kt in enumerate(range(start + 1, stop + 1)):
-            frames = oracle_frames[kt - 1]
-            in_subnormal_window = 5842 <= kt <= 5867
-
-            for stage_idx in range(len(phase2.STAGES)):
-                stage_name = phase2.STAGES[stage_idx][1]
-                o_frame = frames[stage_idx]
-                oracle = (
-                    o_frame
-                    if 1 <= stage_idx <= 5
-                    else phase2._center_global(o_frame)
-                )
+            s_maps = year_gate._stage_maps(traces)
+            arm_maps[arm_name] = s_maps
+            for stage_idx, (_, stage_name, _, _) in enumerate(phase2.STAGES):
                 names = (
                     phase2.SELECTED_NAMES
                     if 1 <= stage_idx <= 5
                     else phase2.GLOBAL_NAMES
                 )
                 for fname in names:
-                    wanted = np.asarray(oracle[fname], dtype=np.float64).ravel()
-                    scale = max(1.0, float(np.max(np.abs(wanted))))
+                    raw_bytes = np.ascontiguousarray(
+                        np.asarray(s_maps[stage_idx][fname], dtype=np.float64)
+                    ).tobytes()
+                    arm_full_hashers[arm_name].update(raw_bytes)
+                    arm_stage_hashers[arm_name][stage_name].update(raw_bytes)
 
-                    for arm_name, s_maps in arm_maps.items():
-                        got_arm = np.asarray(
-                            s_maps[stage_idx][fname][offset : offset + 1],
-                            dtype=np.float64,
-                        ).ravel()
-                        abs_arm, norm_arm = year_gate._normalised_error(
-                            wanted, got_arm
-                        )
-                        ulp_arm = _ulp_diff(got_arm, wanted)
+        maps_before = arm_maps["r2_baseline"]
+        maps_step3 = arm_maps["step2_plus_step3"]
+        maps_after = arm_maps["step2_plus_step3_plus_step4"]
+
+        batch_len = stop - start
+        precomputed: dict[tuple[int, str], dict] = {}
+        for stage_idx in range(len(phase2.STAGES)):
+            names = (
+                phase2.SELECTED_NAMES
+                if 1 <= stage_idx <= 5
+                else phase2.GLOBAL_NAMES
+            )
+            stage_oracles = [
+                (
+                    oracle_frames[kt - 1][stage_idx]
+                    if 1 <= stage_idx <= 5
+                    else phase2._center_global(oracle_frames[kt - 1][stage_idx])
+                )
+                for kt in range(start + 1, stop + 1)
+            ]
+            for fname in names:
+                wanted_2d = np.stack(
+                    [
+                        np.asarray(o[fname], dtype=np.float64).ravel()
+                        for o in stage_oracles
+                    ],
+                    axis=0,
+                )
+                scale_vec = np.maximum(
+                    1.0, np.max(np.abs(wanted_2d), axis=-1)
+                )
+                arm_vecs = {}
+                for arm_name, s_maps in arm_maps.items():
+                    got_2d = np.asarray(
+                        s_maps[stage_idx][fname], dtype=np.float64
+                    ).reshape(batch_len, -1)
+                    abs_vec = np.max(np.abs(got_2d - wanted_2d), axis=-1)
+                    norm_vec = abs_vec / scale_vec
+                    ulp_vec = _ulp_diff_batch(got_2d, wanted_2d)
+                    arm_vecs[arm_name] = (got_2d, abs_vec, norm_vec, ulp_vec)
+                got_r2pre_2d, _, norm_r2pre_vec, ulp_r2pre_vec = arm_vecs[
+                    "r2_pre_reciprocals"
+                ]
+                got_bef_2d, _, norm_bef_vec, ulp_bef_vec = arm_vecs["r2_baseline"]
+                got_s3_2d = arm_vecs["step2_plus_step3"][0]
+                got_aft_2d = arm_vecs["step2_plus_step3_plus_step4"][0]
+                ulp_r2_change_vec = _ulp_diff_batch(got_bef_2d, got_r2pre_2d)
+                r2_changed_mask = ulp_r2_change_vec > 0
+                st_r2 = r2_touched_by_stage[phase2.STAGES[stage_idx][1]]
+                st_r2["changed_rows"] += int(np.sum(r2_changed_mask))
+                st_r2["closed_to_at_bar"] += int(
+                    np.sum(
+                        r2_changed_mask
+                        & (norm_r2pre_vec > phase2.BAR)
+                        & (norm_bef_vec <= phase2.BAR)
+                    )
+                )
+                st_r2["opened_to_debt"] += int(
+                    np.sum(
+                        r2_changed_mask
+                        & (norm_r2pre_vec <= phase2.BAR)
+                        & (norm_bef_vec > phase2.BAR)
+                    )
+                )
+                st_r2["moved_to_zero_ulp_vs_oracle"] += int(
+                    np.sum(r2_changed_mask & (ulp_r2pre_vec > 0) & (ulp_bef_vec == 0))
+                )
+                st_r2["moved_from_zero_ulp_vs_oracle"] += int(
+                    np.sum(r2_changed_mask & (ulp_r2pre_vec == 0) & (ulp_bef_vec > 0))
+                )
+                ulp_change_vec = _ulp_diff_batch(got_aft_2d, got_bef_2d)
+                ulp_s3_s4_vec = _ulp_diff_batch(got_aft_2d, got_s3_2d)
+                same_s3_s4_vec = np.all(
+                    got_aft_2d.view(np.uint64) == got_s3_2d.view(np.uint64),
+                    axis=-1,
+                )
+                precomputed[(stage_idx, fname)] = {
+                    "wanted_2d": wanted_2d,
+                    "scale_vec": scale_vec,
+                    "arm_vecs": arm_vecs,
+                    "ulp_change_vec": ulp_change_vec,
+                    "ulp_s3_s4_vec": ulp_s3_s4_vec,
+                    "same_s3_s4_vec": same_s3_s4_vec,
+                }
+
+        for offset, kt in enumerate(range(start + 1, stop + 1)):
+            in_subnormal_window = 5842 <= kt <= 5867
+
+            for stage_idx in range(len(phase2.STAGES)):
+                stage_name = phase2.STAGES[stage_idx][1]
+                names = (
+                    phase2.SELECTED_NAMES
+                    if 1 <= stage_idx <= 5
+                    else phase2.GLOBAL_NAMES
+                )
+                for fname in names:
+                    pc = precomputed[(stage_idx, fname)]
+                    wanted = pc["wanted_2d"][offset]
+                    scale = float(pc["scale_vec"][offset])
+                    arm_vecs = pc["arm_vecs"]
+
+                    for arm_name in arm_maps:
+                        _, abs_v, norm_v, ulp_v = arm_vecs[arm_name]
                         _update_arm_accumulator(
                             arm_accs[arm_name],
                             kt=kt,
                             stage_idx=stage_idx,
                             stage_name=stage_name,
                             fname=fname,
-                            norm_err=norm_arm,
-                            abs_err=abs_arm,
+                            norm_err=float(norm_v[offset]),
+                            abs_err=float(abs_v[offset]),
                             scale=scale,
-                            ulp=ulp_arm,
+                            ulp=int(ulp_v[offset]),
                             in_subnormal_window=in_subnormal_window,
                         )
 
                     total_field_rows += 1
-                    got_bef = np.asarray(
-                        maps_before[stage_idx][fname][offset : offset + 1],
-                        dtype=np.float64,
-                    ).ravel()
-                    got_aft = np.asarray(
-                        maps_after[stage_idx][fname][offset : offset + 1],
-                        dtype=np.float64,
-                    ).ravel()
+                    got_bef, abs_bef_v, norm_bef_v, ulp_bef_v = arm_vecs[
+                        "r2_baseline"
+                    ]
+                    got_s3 = arm_vecs["step2_plus_step3"][0][offset]
+                    got_aft, abs_aft_v, norm_aft_v, ulp_aft_v = arm_vecs[
+                        "step2_plus_step3_plus_step4"
+                    ]
+                    got_bef = got_bef[offset]
+                    got_aft = got_aft[offset]
 
-                    abs_bef, norm_bef = year_gate._normalised_error(wanted, got_bef)
-                    abs_aft, norm_aft = year_gate._normalised_error(wanted, got_aft)
-                    ulp_bef = _ulp_diff(got_bef, wanted)
-                    ulp_aft = _ulp_diff(got_aft, wanted)
-                    ulp_change = _ulp_diff(got_aft, got_bef)
+                    ulp_s3_vs_s4 = int(pc["ulp_s3_s4_vec"][offset])
+                    if ulp_s3_vs_s4 == 0 and bool(pc["same_s3_s4_vec"][offset]):
+                        step3_vs_step4_unchanged_rows += 1
+                    else:
+                        step3_vs_step4_changed_rows += 1
+                        step3_vs_step4_changed_by_stage[stage_name] += 1
+                        step3_vs_step4_max_ulp = max(
+                            step3_vs_step4_max_ulp, ulp_s3_vs_s4
+                        )
+                        if len(step3_vs_step4_first_changed_rows) < 20:
+                            step3_vs_step4_first_changed_rows.append(
+                                {
+                                    "kt": kt,
+                                    "stage": stage_name,
+                                    "field": fname,
+                                    "max_ulp_diff": ulp_s3_vs_s4,
+                                    "step3_bits": _u64_hex(got_s3),
+                                    "step4_bits": _u64_hex(got_aft),
+                                }
+                            )
+
+                    abs_bef = float(abs_bef_v[offset])
+                    norm_bef = float(norm_bef_v[offset])
+                    abs_aft = float(abs_aft_v[offset])
+                    norm_aft = float(norm_aft_v[offset])
+                    ulp_bef = int(ulp_bef_v[offset])
+                    ulp_aft = int(ulp_aft_v[offset])
+                    ulp_change = int(pc["ulp_change_vec"][offset])
 
                     is_over_bef = norm_bef > phase2.BAR
                     is_over_aft = norm_aft > phase2.BAR
@@ -1200,6 +1345,36 @@ def run_year_rescore(
         touched_field_row_count + untouched_field_row_count == total_field_rows,
         "year rescore row accounting mismatch",
     )
+    phase2.require(
+        step3_vs_step4_changed_rows + step3_vs_step4_unchanged_rows
+        == total_field_rows,
+        "step3 vs step4 row accounting mismatch",
+    )
+
+    for arm_name, acc in arm_accs.items():
+        acc["full_year_output_sha256"] = arm_full_hashers[arm_name].hexdigest()
+        acc["stage_output_sha256"] = {
+            s_name: h_obj.hexdigest()
+            for s_name, h_obj in arm_stage_hashers[arm_name].items()
+        }
+
+    step3_sha = arm_accs["step2_plus_step3"]["full_year_output_sha256"]
+    step4_sha = arm_accs["step2_plus_step3_plus_step4"][
+        "full_year_output_sha256"
+    ]
+    step3_vs_step4_bitwise_comparison = {
+        "total_field_rows": total_field_rows,
+        "changed_field_rows": step3_vs_step4_changed_rows,
+        "unchanged_field_rows": step3_vs_step4_unchanged_rows,
+        "changed_by_stage": step3_vs_step4_changed_by_stage,
+        "max_ulp_diff": step3_vs_step4_max_ulp,
+        "step3_full_year_output_sha256": step3_sha,
+        "step4_full_year_output_sha256": step4_sha,
+        "identical_full_year_output_sha256": bool(
+            step3_sha == step4_sha and step3_vs_step4_changed_rows == 0
+        ),
+        "first_changed_rows": step3_vs_step4_first_changed_rows,
+    }
 
     ranked_owners = sorted(
         remaining_owners.values(),
@@ -1208,6 +1383,7 @@ def run_year_rescore(
     )
 
     return {
+        "execution_mode": "jax.jit" if use_jit else "eager",
         "steps_evaluated": nsteps,
         "total_field_rows": total_field_rows,
         "over_bar_before": over_bar_before,
@@ -1234,6 +1410,8 @@ def run_year_rescore(
         "closed_to_at_bar_rows": closed_rows,
         "opened_to_debt_count": len(opened_rows),
         "opened_to_debt_rows": opened_rows,
+        "r2_pre_to_r2_baseline_by_stage": r2_touched_by_stage,
+        "step3_vs_step4_bitwise_comparison": step3_vs_step4_bitwise_comparison,
         "arms": arm_accs,
         "cumulative_progression_order": [
             "r2_pre_reciprocals",
@@ -1294,7 +1472,9 @@ def run_probe(
         for kt in range(1, card.nsteps + 1):
             frames = phase2._read_thd_step(thd, kt)
             exact_input = phase2._read_zdf_input_step(zin, kt)
-            entry = year_gate._exact_1d_entry(frames)
+            entry = year_gate._exact_1d_entry(
+                frames, sss_m=exact_input["sss"]
+            )
             hs_1d = np.asarray(entry.h_snow, dtype=np.float64)
             hs_val = float(hs_1d.ravel()[0])
 

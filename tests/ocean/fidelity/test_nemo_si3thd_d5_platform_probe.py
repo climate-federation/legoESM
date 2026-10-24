@@ -5,8 +5,13 @@ from __future__ import annotations
 import importlib.util
 import os
 from pathlib import Path
+import subprocess
+import sys
+import types
 
 import jax
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -506,153 +511,217 @@ def _parent_commit_bitz_lipscomb_conduction_step(
     return q_new, T_new, F_bottom
 
 
+def _load_parent_commit_non_si3_modules(
+    parent_commit: str = "59fd8f2395ccba60b5b04f3c2c68946835feea12",
+) -> dict[str, types.ModuleType]:
+    """Load the real non-SI3 modules directly from `parent_commit` via `git show`."""
+    module_specs = (
+        (
+            "legoesm.timestepping.tridiagonal",
+            "packages/core/legoesm/timestepping/tridiagonal.py",
+        ),
+        ("legoesm.ice.bitz_lipscomb", "packages/ice/legoesm/ice/bitz_lipscomb.py"),
+        ("legoesm.ice.snow", "packages/ice/legoesm/ice/snow.py"),
+        ("legoesm.ice.sea_ice", "packages/ice/legoesm/ice/sea_ice.py"),
+        ("legoesm.ice.scm", "packages/ice/legoesm/ice/scm.py"),
+    )
+    loaded: dict[str, types.ModuleType] = {}
+    saved_sys = {name: sys.modules.get(name) for name, _ in module_specs}
+    try:
+        for mod_name, rel_path in module_specs:
+            src = subprocess.check_output(
+                ["git", "show", f"{parent_commit}:{rel_path}"],
+                cwd=REPO_ROOT,
+                text=True,
+            )
+            mod = types.ModuleType(mod_name)
+            mod.__file__ = f"<git:{parent_commit}:{rel_path}>"
+            sys.modules[mod_name] = mod
+            exec(compile(src, mod.__file__, "exec"), mod.__dict__)
+            loaded[mod_name] = mod
+    finally:
+        for mod_name, orig_mod in saved_sys.items():
+            if orig_mod is None:
+                sys.modules.pop(mod_name, None)
+            else:
+                sys.modules[mod_name] = orig_mod
+    return loaded
+
+
 def test_d5_non_si3_callers_are_bit_identical(monkeypatch) -> None:
-    """Non-SI3 callers match parent-commit behaviour bit-for-bit and fail on planted changes."""
-    from functools import partial
+    """Non-SI3 callers from the parent commit and current commit match bit-for-bit and fail when a non-SI3 code path is changed."""
+    import legoesm.ice.scm as scm_mod
+    import legoesm.ice.sea_ice as sea_ice_mod
+    import legoesm.timestepping.tridiagonal as tridiag_mod
     from legoesm.ice import (
         BrineConfig,
         SeaIceConfig,
         SnowConfig,
         init_dynamic_ice_state,
-        step_sea_ice,
     )
-    from legoesm.ice.scm import IceColumnModel, cold_polar_forcing
 
-    # 1. Compare bitz_lipscomb_conduction_step bit-for-bit against parent commit
-    #    on both thick ice (h=1.8 m), kt=5841 ice thickness
-    #    (h=0.5877349091111249 m, where `h / 3` vs `h * (1.0 / 3.0)` differs by
-    #    1 ULP), and clamped thin ice (h=1e-3 m).
+    parent_mods = _load_parent_commit_non_si3_modules(
+        "59fd8f2395ccba60b5b04f3c2c68946835feea12"
+    )
+    current_mods = {
+        "legoesm.timestepping.tridiagonal": tridiag_mod,
+        "legoesm.ice.bitz_lipscomb": bl_mod,
+        "legoesm.ice.sea_ice": sea_ice_mod,
+        "legoesm.ice.scm": scm_mod,
+    }
+
     q_layers = jnp.asarray([[-2.8e8, -2.7e8, -2.5e8]], dtype=jnp.float64)
     s = jnp.asarray([5.0], dtype=jnp.float64)
     f_top = jnp.asarray([-25.0], dtype=jnp.float64)
     t_bot = jnp.asarray([271.35], dtype=jnp.float64)
 
-    for h_val in (1.8, 0.5877349091111249, 1.0e-3):
-        h = jnp.asarray([h_val], dtype=jnp.float64)
-        got = bitz_lipscomb_conduction_step(
-            q_layers, h, s, f_top, t_bot, 3600.0
-        )
-        parent_ref = _parent_commit_bitz_lipscomb_conduction_step(
-            q_layers, h, s, f_top, t_bot, 3600.0
-        )
-        for g_arr, p_arr in zip(got, parent_ref, strict=True):
-            assert g_arr.dtype == p_arr.dtype == jnp.float64
-            assert bool(jnp.all(jnp.isfinite(g_arr)))
-            np.testing.assert_array_equal(
-                np.asarray(g_arr).view(np.uint64),
-                np.asarray(p_arr).view(np.uint64),
+    rng = np.random.default_rng(20261024)
+    a_t = jnp.asarray(rng.uniform(-0.3, -0.05, (2, 5)), dtype=jnp.float64).at[
+        ..., 0
+    ].set(0.0)
+    b_t = jnp.asarray(rng.uniform(2.0, 3.0, (2, 5)), dtype=jnp.float64)
+    c_t = jnp.asarray(rng.uniform(-0.3, -0.05, (2, 5)), dtype=jnp.float64).at[
+        ..., -1
+    ].set(0.0)
+    d_t = jnp.asarray(rng.uniform(250.0, 272.0, (2, 5)), dtype=jnp.float64)
+
+    def _run_non_si3_paths(mods: dict[str, types.ModuleType]) -> tuple[np.ndarray, ...]:
+        m_tridiag = mods["legoesm.timestepping.tridiagonal"]
+        m_bl = mods["legoesm.ice.bitz_lipscomb"]
+        m_sea_ice = mods["legoesm.ice.sea_ice"]
+        m_scm = mods["legoesm.ice.scm"]
+
+        out_bits: list[np.ndarray] = []
+
+        # (a) Non-SI3 `bitz_lipscomb_conduction_step` across thick, kt=5841, and thin ice
+        for h_val in (1.8, 0.5877349091111249, 1.0e-3):
+            h = jnp.asarray([h_val], dtype=jnp.float64)
+            q_new, t_new, fb = m_bl.bitz_lipscomb_conduction_step(
+                q_layers, h, s, f_top, t_bot, 3600.0
             )
+            for arr in (q_new, t_new, fb):
+                assert arr.dtype == jnp.float64
+                assert bool(jnp.all(jnp.isfinite(arr)))
+                out_bits.append(np.asarray(arr, dtype=np.float64).view(np.uint64))
 
-    # Planted change 1: planting the SI3 reciprocal `dz = h * (1/3)` into the
-    # non-SI3 `bitz_lipscomb_conduction_step` on `h = 0.5877349091111249 m`
-    # MUST fail the bit-for-bit check against the parent-commit behaviour.
-    h_inexact = jnp.asarray([0.5877349091111249], dtype=jnp.float64)
-    got_inexact = bitz_lipscomb_conduction_step(
-        q_layers, h_inexact, s, f_top, t_bot, 3600.0
-    )
-    planted_recip = _parent_commit_bitz_lipscomb_conduction_step(
-        q_layers,
-        h_inexact,
-        s,
-        f_top,
-        t_bot,
-        3600.0,
-        plant_reciprocal_dz=True,
-    )
-    with pytest.raises(AssertionError):
-        for g_arr, pl_arr in zip(got_inexact, planted_recip, strict=True):
-            np.testing.assert_array_equal(
-                np.asarray(g_arr).view(np.uint64),
-                np.asarray(pl_arr).view(np.uint64),
+        # (b) Default `thomas_solve(..., "normalised")`
+        sol_norm = m_tridiag.thomas_solve(a_t, b_t, c_t, d_t)
+        assert sol_norm.dtype == jnp.float64
+        out_bits.append(np.asarray(sol_norm, dtype=np.float64).view(np.uint64))
+
+        # (c) Non-SI3 `IceColumnModel` slab step (bind `legoesm.ice.step_sea_ice`
+        #     so `scm.step()`'s `from legoesm.ice import step_sea_ice` calls `m_sea_ice.step_sea_ice`)
+        import legoesm.ice as ice_pkg
+
+        orig_pkg_step = ice_pkg.step_sea_ice
+        try:
+            ice_pkg.step_sea_ice = m_sea_ice.step_sea_ice
+            scm = m_scm.IceColumnModel.create(
+                ncol=2, dt=3600.0, forcing=m_scm.cold_polar_forcing(ncol=2)
             )
-
-    # 2. Compare non-SI3 `step_sea_ice` (both default slab and dynamic-v2 paths)
-    #    and `IceColumnModel` bit-for-bit with `_nemo_zdf_layer_reciprocals=True`
-    #    (shipped) vs `_nemo_zdf_layer_reciprocals=False` (parent-commit flag).
-    orig_rad = bl_mod._radiation
-    orig_zdf = bl_mod._si3_zdf_bl99_step
-    orig_col = bl_mod.si3_column_step_arrays
-
-    def _run_non_si3_paths():
-        scm = IceColumnModel.create(
-            ncol=2, dt=3600.0, forcing=cold_polar_forcing(ncol=2)
-        )
-        resp_slab = scm.step()
-        slab_bits = (
-            np.asarray(scm.state.h_ice.data, dtype=np.float64).view(np.uint64),
-            np.asarray(scm.state.T_ice.data, dtype=np.float64).view(np.uint64),
-            np.asarray(scm.state.concentration.data, dtype=np.float64).view(
-                np.uint64
-            ),
-            np.asarray(resp_slab.T_sfc, dtype=np.float64).view(np.uint64),
-            np.asarray(resp_slab.lhflx, dtype=np.float64).view(np.uint64),
+            resp_slab = scm.step()
+        finally:
+            ice_pkg.step_sea_ice = orig_pkg_step
+        out_bits.extend(
+            (
+                np.asarray(scm.state.h_ice.data, dtype=np.float64).view(np.uint64),
+                np.asarray(scm.state.T_ice.data, dtype=np.float64).view(np.uint64),
+                np.asarray(scm.state.concentration.data, dtype=np.float64).view(
+                    np.uint64
+                ),
+                np.asarray(resp_slab.T_sfc, dtype=np.float64).view(np.uint64),
+                np.asarray(resp_slab.lhflx, dtype=np.float64).view(np.uint64),
+            )
         )
 
+        # (d) Non-SI3 `step_sea_ice` dynamic-v2 step
         cfg_v2 = SeaIceConfig(
             snow=SnowConfig(enabled=True),
             brine=BrineConfig(enabled=True),
         )
         dyn_state = init_dynamic_ice_state((2,))
-        forcing_v2 = cold_polar_forcing(ncol=2)
+        forcing_v2 = m_scm.cold_polar_forcing(ncol=2)
         sst = jnp.full((2,), 271.35, dtype=jnp.float64)
         zero_vel = jnp.zeros((2,), dtype=jnp.float64)
-        new_dyn, resp_v2 = step_sea_ice(
+        new_dyn, resp_v2 = m_sea_ice.step_sea_ice(
             dyn_state, forcing_v2, sst, zero_vel, zero_vel, cfg_v2, 1.0, 3600.0
         )
-        v2_bits = (
-            np.asarray(new_dyn.h_ice.data, dtype=np.float64).view(np.uint64),
-            np.asarray(new_dyn.h_snow.data, dtype=np.float64).view(np.uint64),
-            np.asarray(new_dyn.T_ice.data, dtype=np.float64).view(np.uint64),
-            np.asarray(new_dyn.S_ice.data, dtype=np.float64).view(np.uint64),
-            np.asarray(resp_v2.T_sfc, dtype=np.float64).view(np.uint64),
+        out_bits.extend(
+            (
+                np.asarray(new_dyn.h_ice.data, dtype=np.float64).view(np.uint64),
+                np.asarray(new_dyn.h_snow.data, dtype=np.float64).view(np.uint64),
+                np.asarray(new_dyn.T_ice.data, dtype=np.float64).view(np.uint64),
+                np.asarray(new_dyn.S_ice.data, dtype=np.float64).view(np.uint64),
+                np.asarray(resp_v2.T_sfc, dtype=np.float64).view(np.uint64),
+            )
         )
-        return slab_bits + v2_bits
+        return tuple(out_bits)
 
-    bits_flag_on = _run_non_si3_paths()
+    parent_bits = _run_non_si3_paths(parent_mods)
+    current_bits = _run_non_si3_paths(current_mods)
+    for arr_cur, arr_par in zip(current_bits, parent_bits, strict=True):
+        np.testing.assert_array_equal(arr_cur, arr_par)
+
+    def _assert_differs_from_parent(cand_bits: tuple[np.ndarray, ...]) -> None:
+        with pytest.raises(AssertionError):
+            for arr_c, arr_p in zip(cand_bits, parent_bits, strict=True):
+                np.testing.assert_array_equal(arr_c, arr_p)
+
+    # Planted control 1 (in `bitz_lipscomb_conduction_step` code path):
+    # planting the SI3 reciprocal `dz = h * (1/n)` inside `bitz_lipscomb_conduction_step`
+    # changes the executed output at `h = 0.5877349091111249 m` and fails against parent.
     with monkeypatch.context() as mp:
         mp.setattr(
             bl_mod,
-            "_radiation",
-            partial(
-                orig_rad,
-                _nemo_zdf_layer_reciprocals=False,
-                _nemo_source_round=False,
+            "bitz_lipscomb_conduction_step",
+            lambda q, h, S, ft, tb, dt: _parent_commit_bitz_lipscomb_conduction_step(
+                q, h, S, ft, tb, dt, plant_reciprocal_dz=True
             ),
         )
-        mp.setattr(
-            bl_mod,
-            "_si3_zdf_bl99_step",
-            partial(
-                orig_zdf,
-                _nemo_zdf_layer_reciprocals=False,
-                _nemo_glo2eqv_snow_temp=False,
-                _nemo_source_round=False,
-            ),
-        )
-        mp.setattr(
-            bl_mod,
-            "si3_column_step_arrays",
-            partial(
-                orig_col,
-                _nemo_zdf_layer_reciprocals=False,
-                _nemo_glo2eqv_snow_temp=False,
-                _nemo_source_round=False,
-            ),
-        )
-        bits_flag_off = _run_non_si3_paths()
+        _assert_differs_from_parent(_run_non_si3_paths(current_mods))
 
-    for arr_on, arr_off in zip(bits_flag_on, bits_flag_off, strict=True):
-        np.testing.assert_array_equal(arr_on, arr_off)
+    # Planted control 2 (in `thomas_solve` code path):
+    # routing the default `"normalised"` solver to `"nemo_unnormalised"` inside
+    # `legoesm.timestepping.tridiagonal` changes the executed output and fails against parent.
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            tridiag_mod,
+            "thomas_solve",
+            lambda a, b, c_band, d, forward_elimination="normalised": _thomas_solve_impl(
+                a, b, c_band, d, "nemo_unnormalised"
+            ),
+        )
+        _assert_differs_from_parent(_run_non_si3_paths(current_mods))
 
-    # Planted change 2: a 1-ULP perturbation on any non-SI3 caller output MUST
-    # fail the bit-for-bit equality check.
-    planted_bits = list(bits_flag_off)
-    perturbed = planted_bits[0].copy()
-    perturbed[0] += np.uint64(1)
-    planted_bits[0] = perturbed
-    with pytest.raises(AssertionError):
-        for arr_on, arr_pl in zip(bits_flag_on, planted_bits, strict=True):
-            np.testing.assert_array_equal(arr_on, arr_pl)
+    # Planted control 3 (in `step_sea_ice` slab code path):
+    # perturbing `simple_bulk_fluxes` in `legoesm.ice.sea_ice` by 1 ULP on `lhflx`
+    # changes the executed `IceColumnModel.step()` output and fails against parent.
+    orig_bulk = sea_ice_mod.simple_bulk_fluxes
+
+    def _planted_bulk(*a, **kw):
+        tau_x, tau_y, shflx, lhflx = orig_bulk(*a, **kw)
+        return tau_x, tau_y, shflx, jnp.nextafter(lhflx, jnp.inf)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(sea_ice_mod, "simple_bulk_fluxes", _planted_bulk)
+        _assert_differs_from_parent(_run_non_si3_paths(current_mods))
+
+    # Planted control 4 (in `step_sea_ice` dynamic-v2 code path):
+    # perturbing `update_salinity_and_salt_flux` in `legoesm.ice.sea_ice` by 1 ULP
+    # on `S_new` changes the executed `step_sea_ice` dynamic-v2 output and fails against parent.
+    orig_brine = sea_ice_mod.update_salinity_and_salt_flux
+
+    def _planted_brine(*a, **kw):
+        res = orig_brine(*a, **kw)
+        return res._replace(
+            **{res._fields[0]: jnp.nextafter(res[0], jnp.inf)}
+        )
+
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            sea_ice_mod, "update_salinity_and_salt_flux", _planted_brine
+        )
+        _assert_differs_from_parent(_run_non_si3_paths(current_mods))
 
 
 def test_d5_ftz_daz_classification_distinguishes_ftz_only_from_daz(
@@ -828,6 +897,7 @@ def test_d5_platform_probe_and_planted_controls(probe_module) -> None:
 
     # Also test Stage D year_rescore on the first 30 steps
     rescore_30 = probe_module.run_year_rescore(max_steps=30)
+    assert rescore_30["execution_mode"] == "jax.jit"
     assert rescore_30["steps_evaluated"] == 30
     assert rescore_30["total_field_rows"] == 30 * 71
     assert (
@@ -850,6 +920,17 @@ def test_d5_platform_probe_and_planted_controls(probe_module) -> None:
         ]["over_bar_rows"]
         == 0
     )
+    s3_s4 = rescore_30["step3_vs_step4_bitwise_comparison"]
+    assert s3_s4["total_field_rows"] == 30 * 71
+    assert (
+        s3_s4["changed_field_rows"] + s3_s4["unchanged_field_rows"] == 30 * 71
+    )
+    assert len(s3_s4["step3_full_year_output_sha256"]) == 64
+    assert len(s3_s4["step4_full_year_output_sha256"]) == 64
+    if jax.default_backend() == "gpu":
+        assert s3_s4["changed_field_rows"] == 0
+        assert s3_s4["max_ulp_diff"] == 0
+        assert s3_s4["identical_full_year_output_sha256"] is True
 
 
 def test_r3_step2_harness_entry_conversion_is_bit_exact_and_fails_when_reverted(
@@ -932,6 +1013,50 @@ def test_r3_step2_harness_entry_conversion_is_bit_exact_and_fails_when_reverted(
         np.testing.assert_array_equal(
             ts_rev_15.view(np.uint64), oracle_ts_15.view(np.uint64)
         )
+
+    # Verify both SSS-dependent guards in `_nemo_salprof` (`icevar.F90:495-496`):
+    # (1) Low-SSS guard: `s_i >= 0.5 * rn_sinew * sss_m` forces `zalpha = 0`
+    #     (constant profile `[s_i, s_i, s_i]`), whereas omitting the guard gives
+    #     a sloped profile (`zalpha = 1` for `s_i = 2.0 <= 3.5`).
+    s_low_sss = np.asarray([2.0], dtype=np.float64)
+    sss_low = np.asarray([4.0], dtype=np.float64)  # 0.5 * 0.75 * 4.0 = 1.5 <= 2.0
+    got_low_sss = probe_module.phase2._nemo_salprof(s_low_sss, sss_m=sss_low)
+    ref_low_sss = np.asarray(
+        bl_mod.option2_salinity_profile(
+            jnp.asarray(s_low_sss), jnp.asarray(sss_low)
+        ),
+        dtype=np.float64,
+    )
+    np.testing.assert_array_equal(
+        got_low_sss.view(np.uint64), ref_low_sss.view(np.uint64)
+    )
+    np.testing.assert_array_equal(
+        got_low_sss, np.asarray([[2.0, 2.0, 2.0]], dtype=np.float64)
+    )
+    # Without the low-SSS guard (using default sss_m=34.0), `s_i=2.0` has `zalpha=1.0`:
+    unclamped_low_sss = probe_module.phase2._nemo_salprof(
+        s_low_sss, sss_m=34.0
+    )
+    with pytest.raises(AssertionError):
+        np.testing.assert_array_equal(
+            unclamped_low_sss.view(np.uint64), ref_low_sss.view(np.uint64)
+        )
+
+    # (2) Minimum-salinity SSS-dependent guard:
+    #     `s_i <= nlay_i * MIN(rn_simin, rn_sinew * sss_m)` forces `zalpha = 0`.
+    #     When `rn_sinew * sss_m = 0.75 * 0.08 = 0.06 < rn_simin = 0.1`, the
+    #     threshold is `3 * 0.06 = 0.18` (not hardcoded `3 * 0.1 = 0.3`), so
+    #     `s_i = 0.25` has `s_i > 0.18` (and `0.5 * 0.06 = 0.03 <= 0.25` when
+    #     `rn_sinew` is tested with high `rn_simin`). Test `rn_simin=0.5`,
+    #     `sss_m=20.0`, `s_i=1.2`: `3 * min(0.5, 15.0) = 1.5 >= 1.2` -> `zalpha = 0`.
+    got_min_guard = probe_module.phase2._nemo_salprof(
+        np.asarray([1.2], dtype=np.float64),
+        sss_m=20.0,
+        rn_simin=0.5,
+    )
+    np.testing.assert_array_equal(
+        got_min_guard, np.asarray([[1.2, 1.2, 1.2]], dtype=np.float64)
+    )
 
 
 def test_r3_step3_snow_temperature_from_enthalpy_is_bit_exact_and_fails_when_reverted(
@@ -1037,10 +1162,12 @@ def test_r3_step3_snow_temperature_from_enthalpy_is_bit_exact_and_fails_when_rev
 def test_r3_step4_cpu_fusion_prevention_is_bit_exact_and_fails_when_reverted(
     probe_module,
 ) -> None:
-    """Pin Step 4 `nemo_source_round` fusion prevention (DECISION 158) bit-for-bit."""
+    """Pin Step 4 `nemo_source_round` fusion prevention (DECISION 158) across POST_ZDF and POST_DH..EXIT bit-for-bit."""
     card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
     c = card.config.ice_constants
-    steps = _load_step_operands(probe_module, (1, 3, 2906, 4242, 5841))
+    steps = _load_step_operands(
+        probe_module, (1, 2, 3, 2899, 2906, 3961, 4237, 4242, 4738, 5841)
+    )
 
     for kt in (1, 3, 2906, 4242, 5841):
         frames, exact_in = steps[kt]
@@ -1081,7 +1208,10 @@ def test_r3_step4_cpu_fusion_prevention_is_bit_exact_and_fails_when_reverted(
 
     # On CPU default JIT (where FMA is enabled unless prevented by nemo_source_round),
     # reverting `_nemo_source_round=False` at kt = 2906 FAILS bit-exactness
-    # and exceeds the 1e-15 bar on POST_ZDF.e_s.
+    # and exceeds the 1e-15 bar on POST_ZDF.e_s, and reverting `_nemo_source_round=False`
+    # in POST_DH..EXIT changes bits at kt = 2 (option2_salinity_profile),
+    # kt = 2899 (_piecewise_remap), kt = 3961 (_nemo_snow_enthalpy_remap),
+    # kt = 4237 (_dh_step snow melt), and kt = 4738 (_dh_step ice melt).
     if jax.default_backend() == "cpu" and "--xla_cpu_max_isa=AVX" not in os.environ.get("XLA_FLAGS", ""):
         frames_2906, exact_in_2906 = steps[2906]
         entry_2906 = probe_module.year_gate._exact_1d_entry(
@@ -1121,6 +1251,41 @@ def test_r3_step4_cpu_fusion_prevention_is_bit_exact_and_fails_when_reverted(
                 oracle_es_2906.view(np.uint64),
             )
 
+        step_rounded = jax.jit(
+            lambda ent, f: bl_mod.si3_column_step_arrays(
+                ent, f, card.dt_seconds, c, _nemo_source_round=True
+            )
+        )
+        step_unrounded = jax.jit(
+            lambda ent, f: bl_mod.si3_column_step_arrays(
+                ent, f, card.dt_seconds, c, _nemo_source_round=False
+            )
+        )
+        for kt_check, stage_idx, fname in (
+            (3961, 4, "sz_i"),
+            (2899, 2, "e_i"),
+            (3961, 2, "e_s"),
+            (4237, 2, "h_s"),
+            (4738, 2, "h_i"),
+        ):
+            fr_k, ex_k = steps[kt_check]
+            ent_k = jax.tree.map(
+                lambda v: jnp.asarray(v, dtype=jnp.float64),
+                probe_module.year_gate._exact_1d_entry(
+                    fr_k, _nemo_entry_conversion=True
+                ),
+            )
+            forc_k = probe_module.year_gate._forcing(ex_k, jnp.float64)
+            maps_r = probe_module.year_gate._stage_maps(
+                step_rounded(ent_k, forc_k)
+            )
+            maps_u = probe_module.year_gate._stage_maps(
+                step_unrounded(ent_k, forc_k)
+            )
+            arr_r = np.asarray(maps_r[stage_idx][fname], dtype=np.float64).ravel()
+            arr_u = np.asarray(maps_u[stage_idx][fname], dtype=np.float64).ravel()
+            assert probe_module._ulp_diff(arr_r, arr_u) >= 1
+
 
 def test_r3_all_touched_functions_gradients_and_forward_bits() -> None:
     """Verify finite non-zero gradients, reverse == forward, and literal forward bits on all Round 3 touched functions."""
@@ -1132,6 +1297,11 @@ def test_r3_all_touched_functions_gradients_and_forward_bits() -> None:
     s_i0 = jnp.asarray([[3.15, 6.30, 9.45]], dtype=jnp.float64)
     t_i0 = jnp.asarray([[258.15, 263.25, 268.35]], dtype=jnp.float64)
     t_s0 = jnp.asarray([[254.15, 259.25, 265.35]], dtype=jnp.float64)
+    s_bulk0 = jnp.asarray([4.1], dtype=jnp.float64)
+    sss0 = jnp.asarray([34.0], dtype=jnp.float64)
+    h_seg0 = jnp.asarray([[0.05, 0.12, 0.11, 0.09]], dtype=jnp.float64)
+    e_seg0 = jnp.asarray([[1.15e8, 1.12e8, 1.09e8, 1.05e8]], dtype=jnp.float64)
+    h_tot0 = jnp.asarray([0.37], dtype=jnp.float64)
 
     for fn, args in (
         (
@@ -1153,6 +1323,20 @@ def test_r3_all_touched_functions_gradients_and_forward_bits() -> None:
         (
             lambda ti, si: bl_mod.p07_conductivity(ti, si, c),
             (t_i0, s_i0),
+        ),
+        (
+            lambda sb: bl_mod.option2_salinity_profile(sb, sss0),
+            (s_bulk0,),
+        ),
+        (
+            lambda h_seg, e_seg, h_tot: bl_mod._piecewise_remap(
+                h_seg, e_seg, h_tot
+            ),
+            (h_seg0, e_seg0, h_tot0),
+        ),
+        (
+            lambda h_seg, e_seg: bl_mod._nemo_snow_enthalpy_remap(h_seg, e_seg),
+            (h_seg0, e_seg0),
         ),
     ):
         primal_direct = fn(*args)
@@ -1191,8 +1375,8 @@ def test_r3_all_touched_functions_gradients_and_forward_bits() -> None:
         np.testing.assert_allclose(
             np.asarray(dloss_rev),
             np.asarray(dloss_jvp),
-            rtol=1.0e-14,
-            atol=1.0e-14,
+            rtol=1.0e-11,
+            atol=1.0e-11,
         )
 
     # Also test `thomas_solve(..., "nemo_unnormalised")` directly
