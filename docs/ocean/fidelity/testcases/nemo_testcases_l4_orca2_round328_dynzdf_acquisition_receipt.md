@@ -480,7 +480,10 @@ inside-`zdf_tke` statement boundary, so it does not identify a narrower inner
 statement than the confirmed call owner. No model or configuration changed,
 and no NEMO executable was run during this resume.
 
-Validation: pending final gates.
+Validation: the focused acquisition battery passes 41 tests; the per-receipt
+citation gate passes 33 citations with zero failures, unmapped citations, or
+map-audit failures; and the default landing battery passes 147 tests in
+969.52 seconds, including the six-test private-import ratchet.
 
 codex review: operator
 
