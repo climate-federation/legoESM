@@ -4480,7 +4480,7 @@ CITATION_MAP = {
         ('(e3w_1d(jk+1) *(1._wp+r3v(ji,jj,Kmm)))', 1), 2],
     'ORCA2_ORCA1ICE_OMIP_L4_R328ZDF/BLD/ppsrc/nemo/dynzdf.f90:206-210': [
         'zzwi = - zDt_2 * ( avm(ji+1,jj,jk  )     +  avm(ji,jj,jk  )',
-        'zwi(ji,jk) = zzwi', 5],
+        ('zwi(ji,jk) = zzwi', 1), 5],
     'ocean_model_latlon_cgrid.py:14876-14885': [
         'u_new = implicit_vertical_diffusion_ocean_momentum_dispatch(',
         'implicit_w=nemo_aimp_momentum_w_v)', 10],
