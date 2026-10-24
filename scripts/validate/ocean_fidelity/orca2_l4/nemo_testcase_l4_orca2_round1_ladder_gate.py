@@ -15,6 +15,7 @@ stops fail-closed until both MPI slabs exist for the surface and entry records.
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import re

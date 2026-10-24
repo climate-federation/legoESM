@@ -3385,15 +3385,26 @@ def nemo_eos_fzp(S_psu, depth_m=None):
     # At S=0 the full S*P(sqrt(abs(S)/S0)) has derivative P(0), but
     # differentiating the unguarded square root produces 0*inf -> NaN.
     # Guard inside sqrt as well as outside; retain the exact forward value.
-    sal_abs = jnp.abs(jnp.asarray(S_psu))
+    sr = nemo_source_round
+    sal = jnp.asarray(S_psu)
+    sal_abs = jnp.abs(sal)
     nonzero = sal_abs > 0.0
+    z1_s0 = sr(
+        jnp.asarray(1.0, dtype=sal.dtype)
+        / jnp.asarray(35.16504, dtype=sal.dtype)
+    )
+    scaled_sal = sr(sal_abs * z1_s0)
     zs = jnp.where(nonzero, jnp.sqrt(jnp.where(
-        nonzero, sal_abs / _NEMO_FZP_S0, 1.0)), 0.0)
-    poly = ((((_NEMO_FZP_C5 * zs + _NEMO_FZP_C4) * zs + _NEMO_FZP_C3) * zs
-             + _NEMO_FZP_C2) * zs + _NEMO_FZP_C1) * zs + _NEMO_FZP_C0
-    tf = poly * jnp.asarray(S_psu)
+        nonzero, scaled_sal, 1.0)), 0.0)
+    poly = sr(sr(jnp.asarray(_NEMO_FZP_C5, sal.dtype) * zs)
+              + jnp.asarray(_NEMO_FZP_C4, sal.dtype))
+    poly = sr(sr(poly * zs) + jnp.asarray(_NEMO_FZP_C3, sal.dtype))
+    poly = sr(sr(poly * zs) + jnp.asarray(_NEMO_FZP_C2, sal.dtype))
+    poly = sr(sr(poly * zs) + jnp.asarray(_NEMO_FZP_C1, sal.dtype))
+    poly = sr(sr(poly * zs) + jnp.asarray(_NEMO_FZP_C0, sal.dtype))
+    tf = sr(poly * sal)
     if depth_m is not None:
-        tf = tf + _NEMO_FZP_DEP * jnp.asarray(depth_m)
+        tf = sr(tf + sr(jnp.asarray(_NEMO_FZP_DEP, sal.dtype) * jnp.asarray(depth_m)))
     return tf
 
 

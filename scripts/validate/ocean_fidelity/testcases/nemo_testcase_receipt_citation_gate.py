@@ -2310,6 +2310,8 @@ CITATION_MAP = {
     'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_dh.f90:231': 'zh_s    (jk) = MAX( 0._wp , zh_s    (jk) + zdum )',
     'src/ICE/icethd_dh.F90:221': 'zh_s    (jk) = MAX( 0._wp , zh_s    (jk) + zdum )',
     'docs/ice/fidelity/si3_r6_d5_preregister.md:32,36': ['- **CONFIRM**: Enabling `_nemo_dh_ice_content_accumulation=True` (`r6_', '- **CONFIRM**: Enabling `_nemo_dh_snow_update=True` on top of Statemen', 2],
+    'docs/ice/fidelity/si3_r5_d5_preregister.md:1-48': ['# SI3 Ladder Round 5 (`si3_r5`) — Rung D5 Debts Preregistration', '**REFUTE**: Omitting `sss_m` does not raise `GateError`', 48],
+    'docs/ice/fidelity/si3_r6_d5_preregister.md:1-37': ['# SI3 Ladder Round 6 (`si3_r6`) — Rung D5 Remaining Debts Preregistration', '**REFUTE**: Any normal-step (`kt != 5842..5867`)', 37],
     'docs/ice/fidelity/si3_r5_d5_receipt.md:215,251,257': ['| 6 | `POST_DH.e_s` | `2` | `2` | `137` | `129` | `2,563,146,750,041,3', '* Attributing the remaining `34` normal-step over-bar rows (`13` at `P', '* The remaining normal-step snow-enthalpy over-bar rows (`2` steps `kt', 3],
     'icethd_dh.f90:179': 'zh_s(0) = zsnw(ji) * sprecip_1d(ji) * rDt_ice * r1_rhos / at_i_1d(ji) ',
     'icethd_dh.f90:194': 'zdeltah    = MAX( - evap_ice_1d(ji) * r1_rhos * rDt_ice, - h_s_1d(ji) ',
@@ -2534,7 +2536,7 @@ CITATION_MAP = {
         "CASE(  2 )   ;         CALL ice_stp  ( kt, Kbb, Kmm, nsbc )",
         4,
     ],
-    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1729-1761": [
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1755-1787": [
         "state_entry, cfg = o1_snapshot_to_si3_state(snap_entry)",
         "state_kt2 = o1_step_jit(state_kt1, tmask, sss_step2)",
         33,
@@ -2544,12 +2546,12 @@ CITATION_MAP = {
         "lego_rst_step2 = o1_step_jit(lego_rst_entry, tmask, rst_sss_step2)",
         23,
     ],
-    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1929-1936": [
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1955-1962": [
         '"sss_m_kt1_sha256": hashlib.sha256(sss_step1_np.tobytes()).hexdigest(),',
         '"sss_m_kt2_plant_branch_point": cfg.rn_simin / cfg.rn_sinew,',
         8,
     ],
-    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1741-1761": [
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1767-1787": [
         "o1_step_jit = jax.jit(",
         "state_kt2 = o1_step_jit(state_kt1, tmask, sss_step2)",
         21,
@@ -2596,7 +2598,7 @@ CITATION_MAP = {
         "gate.admit_evidence_directory(ev, plant=plant_name, expect_commit=commit_hex)",
         25,
     ],
-    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1261-1357": [
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1287-1383": [
         "def _compare_si3_states_wet_and_full(",
         ('f"full_ULP={ulp_f}, wet_norm={norm_w:.3e}"', 3),
         97,
@@ -2718,6 +2720,8 @@ CITATION_MAP = {
     'src/ICE/iceistate.F90:125-126': ['CALL eos_fzp( sss_m(:,:), t_bo(:,:), kbnd=0 )', 't_bo(:,:) = ( t_bo(:,:) + rt0 ) * smask0(:,:)', 2],
     'src/ICE/iceistate.F90:263-266': ['CALL eos_fzp( sss_m(:,:), ztfrz(:,:), kbnd=nn_hls )', ('END WHERE', 2), 4],
     'src/ICE/iceistate.F90:275-303': ['zt_su_ini(:,:) = rn_tsu_ini_n * zmsk(:,:)', ('zhlid_ini(:,:) = 0._wp', 2), 29],
+    'src/ICE/iceistate.F90:295-304': ['! make sure ponds = 0 if no ponds scheme', ('ENDIF', 4), 10],
+    'src/ICE/iceistate.F90:388-427': ['! ice concentration should not exceed amax', 'ENDWHERE', 40],
     'src/ICE/iceistate.F90:407': ('!', 190),
     'src/ICE/iceistate.F90:412-427': [('#if defined key_agrif', 4), 'ENDWHERE', 16],
     'packages/ice/legoesm/ice/si3_orca2_state.py:2601-2615': ['zsm_i_ini=zsm_i_ini,', ('snwice_mass=snwice_mass,', 4), 15],
@@ -8295,7 +8299,7 @@ CITATION_MAP = {
     # inserted the initial-state helper above the THIRD anchor only, moving it
     # 1411 -> 1493; later card additions moved all three to their current
     # merged locations without changing the anchor text.
-    'nemo_testcase_recipe.py:382,638,3410': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    'nemo_testcase_recipe.py:380,636,3451': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',

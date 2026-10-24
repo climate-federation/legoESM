@@ -1,106 +1,99 @@
-# SI3 round 7 receipt — O2 acquisition needed
+# SI3 round 7 receipt — O2 acquisition needed after review repair
 
-## Outcome and provenance
+## Outcome
 
-Round `si3_r7` implements the O2 scalar initial state and the initial
-levitating-ice SSH adjustment, supplies a fail-closed acquisition/admission
-tool, runs only its read-only preflight, and stops at `ACQUISITION_NEEDED`.
-Neither `makenemo` nor `mpirun` was run.
+Round `si3_r7` remains stopped at acquisition. It implements the O2 scalar
+initial state and levitating-ice SSH adjustment, supplies a fail-closed
+acquisition/admission tool, and runs only the read-only preflight. Neither
+`makenemo` nor `mpirun` was run.
 
-The O2 commits were rebased from the pre-fix O1 head onto the landed SI3 lane
-tip `042c7bd74c2944dab8c39318687ab0cef54f9d2b`. This receipt and the operator
-amendment in `docs/ice/fidelity/si3_r7_o2_preregister.md` supersede stale
-pre-rebase statements without changing the preregistered scope.
+The landed O1 contract is preserved. The O2 implementation is based on lane
+tip `042c7bd74c2944dab8c39318687ab0cef54f9d2b`; ORCA2 round-329 commit
+`02acc8a1b10f2cc8511a6ba4d7fc233b34d73299` was then imported by cherry-pick
+as `11db3ee221` rather than copied.
 
-The implementation was checked against the configuration's own compiled
-source, not only the OMIP example:
+## Review repairs
 
-- `ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/iceistate.f90:174-175`
-  defines the halo-free-interior `t_bo` freezing-point operation.
-- The same file at `:308-337` defines the TEOS-10 SST mask and
-  hemisphere-dependent scalar initialization.
-- The same file at `:441-459` defines mass, DDPDD global reductions, and the
-  levitating-ice SSH branch. Lines `:456-459` subtract the same adjustment from
-  the pre-existing Kmm and Kbb fields independently; there is no inner
-  `ln_rstart` guard in this compiled branch.
+All eight Claude findings were reproduced and repaired:
 
-## Model implementation
+1. The TEOS-10 freezing point now calls the shared `nemo_eos_fzp` and uses
+   NEMO's literal `z1_S0 = 1._wp / 35.16504_wp`
+   (`src/OCE/TRA/eosbn2.F90:1674-1683`). The wrong
+   `0.875 / 30.76941` expression and its hard-coded test oracle are gone.
+2. O2 no longer invents post-fit category totals from scalar thickness times
+   concentration. It takes NEMO's six fitted per-category arrays as exact
+   inputs from the O1 entry record, then transcribes only the category sums,
+   snow/ice/pond/lid mass, and SSH reduction
+   (`src/ICE/iceistate.F90:388-427`). O3 still owns the category fit.
+3. `ORCA2InitialIce` and `orca2_initial_ice_ssh` are the cherry-picked ORCA2
+   implementation: fields and the `ice` argument have no defaults, and the
+   deck pond concentration is the literal `(0.18, 0.18)`.
+4. The ponds-off and lids-off branches are implemented literally
+   (`src/ICE/iceistate.F90:295-304`) and directly tested with nonzero pond/lid
+   inputs.
+5. Continuous step 2 again consumes the recorded step-2 `sss_m`; the landed
+   O1 `kt2-sss-perturb` plant proves that dependency.
+6. The committed log excerpt is now selected from O1's admitted
+   `ORCA2_SAS_ICE` SAS run with `ln_icedyn = F` and `ln_icethd = F`. Preflight
+   validates it directly and never rewrites its flags.
+7. O2 imports O1's halo-free restart alignment helper and NEMO restart-layout
+   fixture, and restores the `restart-disabled`, `rst-step-name`, and
+   `ocean-restart-missing` plants.
+8. The O2 full-array ULP is independently computed rather than copied from the
+   wet ULP. The final preflight JSON records the exact producer commit and is
+   regenerated only after the final commit.
 
-`packages/ice/legoesm/ice/si3_orca2_state.py` requires an explicit
-`SI3O2InitConfig`, explicit `ssmask`, `smask0_i`, both pre-branch SSH levels,
-and explicit halo policy. It refuses the wrong initialization mode, EOS,
-embedded-ice mode, and restart mode. No missing O2 field is inferred.
+## Model and bar
 
-The scalar operator implements:
+`si3_o2_scalar_initial_state` requires explicit masks, both pre-branch SSH
+levels, and all six fitted category arrays. It refuses the wrong initialization
+mode, EOS, embedded-ice mode, restart mode, and category shape. It uses the
+shared DDPDD reducer from `packages/ocean/legoesm/ocean/fidelity/nemo_recipe.py`
+for the two `glob_2Dsum` calls (`src/OCE/LBC/lib_mpp.F90:1244-1267`).
 
-- TEOS-10 `eos_fzp` for `t_bo` on the NEMO-defined interior and `ztfrz` through
-  the NEMO-defined halos (`src/OCE/TRA/eosbn2.F90:1650-1710`);
-- the SST threshold mask and northern/southern namelist scalars
-  (`src/ICE/iceistate.F90:262-304`);
-- pond-area scaling before category fitting; and
-- the SSH branch by calling the existing public `orca2_initial_ice_ssh` recipe
-  from `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py`.
+The preregistered bar is unchanged: all 24 scored O2 fields and both scalar
+reductions must be at 0 ULP. The difference is ownership: fitted categories
+are inputs, while only O2-owned sums, mass, and SSH are scored as O2
+transcriptions. The trajectory and restart fields retain O1's 0-ULP bar. No
+quantitative NEMO result exists yet.
 
-The ORCA2 recipe retains its production-dispatcher NumPy behavior for existing
-callers and adds the explicit TEOS-10, unique-mask, DDPDD, diagnostic-returning
-path used by O2. The parent/current production-dispatcher control covers real
-non-SI3, lane SI3, O1, and ORCA2 recipe callers. Code-path plants prove the O1
-and O2 dispatcher branches are actually reached. O2 remains fail-closed in
-`step_sea_ice`: it exposes initialization through `si3_o2_step` but refuses to
-invent the still-unowned `ice_update_flx` heat/freshwater/salt response.
+O2 remains fail-closed in `step_sea_ice`: it exposes initialization through
+`si3_o2_step` but refuses to invent the still-unowned `ice_update_flx`
+heat/freshwater/salt response.
 
-## Acquisition and admission contract
+## Acquisition contract
 
-The committed tool is
+The operator-only tool is
 `scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/run.sh`.
-Its default is `--preflight-only`; `--run` is operator-only. It uses scratch
-space under the evidence root, requires `free -g` available memory of at least
-150 GB immediately before builds and runs, checks disk, wraps NEMO in
-`timeout`, guards `cfgs/work_cfgs.txt`, and retains failed or admission-refused
-logs through `ERR` and `EXIT` handling.
+Its default is `--preflight-only`; `--run` is operator-only. It checks the two
+input-bundle hashes, available memory and disk, reference-config registration,
+rendered namelists, patched Fortran syntax, the real four-rank writer layout,
+O1's NEMO restart layout, the admitted SAS log excerpt, same-program binaries,
+producer stamps, both restart dependencies, and every negative-control plant.
 
-Before any possible NEMO launch, operator order is statically planted and then
-requires both real executables to pass the shared landed same-program helper.
-The producer manifest records both executable digests. `--admit-existing`
-requires the recorded producer to be a real commit object, an ancestor of
-current HEAD, and equal to the requested pin when supplied. It checks input and
-binary SHA-256 manifests, same-program build paths, per-run producer stamps,
-completion/log markers, and the optional gate-change marker.
+The restart run requires and copies both the SI3 and SAS ocean restart into a
+separate input directory. Outputs use distinct names and directories. Failed
+or admission-refused evidence is retained under the round-7 evidence root.
 
-The restart run refuses unless `rec_2step` produced both the SI3 and SAS ocean
-restart. It copies them into `rst_1step/input_restart`, writes step-2 output to
-`rst_1step/output_restart`, and never aliases an input with an output. The
-restart reader consumes NEMO's halo-free NetCDF payload; rank-local binary
-records retain the NEMO-defined seam/fold halos.
-
-The O2 writer uses `USE, INTRINSIC :: iso_fortran_env`. Its compiled four-rank
-fixture links the real writer, writes different values on every rank, and
-contains a dry negative-zero cell whose sign must survive the writer. Scoring
-uses wet cells only: `t_bo` uses the defined interior; other O2 fields include
-defined wet seam/fold halos. Plants perturb real wet interior, seam/fold,
-rank-local, SSH, provenance, binary, log, and restart-dependency paths and must
-emit `REFUSE`/`STATUS PLANT-FIRED`.
-
-The committed `ocean.output.excerpt` contains source path, complete-source
-SHA-256, and exact source line provenance. Preflight checks those headers and
-the deck deviations rather than trusting hand-written log values.
-
-## Verification and stop condition
-
-The focused O2 tests cover the compiled writer fixture, parent/current
-production dispatchers, exact model formulas, JIT/JVP/VJP behavior,
-same-program plants, halo-free restart layout, and producer-pinned admission.
-The final preflight receipt is written to
+The read-only preflight writes
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round7/o2_preflight_receipt.json`.
-It reports `PREFLIGHT_OK`; its SHA-256 is
-`e506a4144d5841736a298174c3b23acfd1f856eca832ad73adb2f9e876ceda30`.
-Quantitative NEMO fidelity results are deliberately absent until the operator
-runs acquisition and admission on the committed producer.
+The final invocation is run at the final clean HEAD; the JSON's
+`producer_commit` is the binding provenance stamp.
 
-## Choices and review disposition
+## Verification and choices
 
-- `ASKED`: implement O2 on the landed O1 lane, reuse
-  `orca2_initial_ice_ssh`, run preflight only, and stop at
-  `ACQUISITION_NEEDED`.
-- `UNASKED`: none.
-- Independent review: operator.
+Focused O2 tests cover the literal freezing point, pond/lid switches, exact
+category inputs, DDPDD reductions, compiled writer, real log provenance,
+same-program checks, JIT/JVP/VJP, O1 restart layout, step-2 salinity selection,
+and all admission plants. The O1 regression suite and the imported ORCA2
+round-329 tests also pass. Default receipt-citation and private-import gates are
+required before handoff, plus an explicit citation-gate invocation for every
+SI3 receipt.
+
+`ASKED`: repair all eight review findings, preserve the O2 bar with exact
+fitted-category inputs, run preflight only, and stop at acquisition.
+`UNASKED`: none.
+
+Independent review disposition: Claude review was HOLD/HOLD; every listed
+finding above is confirmed and repaired. Argon's distinct re-review remains
+operator-owned.

@@ -37,10 +37,9 @@ from legoesm.ice.constants_config import (
     NEMO_SI3_CONSTANTS_CONFIG,
     IceConstantsConfig,
 )
-from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-    ORCA2InitialIce,
-    orca2_initial_ice_ssh,
-)
+from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+from legoesm.ocean.eos import nemo_eos_fzp
+from legoesm.ocean.fidelity.nemo_recipe import nemo_ddpdd_sum_2d
 
 if TYPE_CHECKING:
     from legoesm.ice.state import SI3ColumnState
@@ -2252,6 +2251,8 @@ __param_spec__["SI3O2InitConfig"] = {
         "rn_hld_ini_s": "oracle identity: NEMO namini SH initial pond lid depth [m]",
         "rn_amax_n": "oracle identity: NEMO nampar NH maximum ice concentration [1]",
         "rn_amax_s": "oracle identity: NEMO nampar SH maximum ice concentration [1]",
+        "ln_pnd": "oracle identity: NEMO namthd_pnd melt-pond switch",
+        "ln_pnd_lids": "oracle identity: NEMO namthd_pnd frozen-lid switch",
     },
     "params": {},
 }
@@ -2292,6 +2293,8 @@ class SI3O2InitConfig(NamedTuple):
     rn_hld_ini_s: float = 0.0
     rn_amax_n: float = 0.997
     rn_amax_s: float = 0.997
+    ln_pnd: bool = True
+    ln_pnd_lids: bool = True
     ln_teos10: bool = True
     ln_ice_embd: bool = False
     ln_rstart: bool = False
@@ -2411,42 +2414,6 @@ def si3_dom_uniq_t_orca2(
     return jnp.where((interior > 0.0) & (z2d_linked == ztst), 1.0, 0.0)
 
 
-@jax.custom_jvp
-def _si3_glob_2dsum_ddpdd_core(field_int: Field, mask_int: Field) -> Field:
-    """NEMO `glob_2Dsum` double-double Knuth two-sum reduction (`src/OCE/LBC/lib_mpp.F90:1244-1267`)."""
-    sr = nemo_source_round
-    terms_ij = sr(field_int * mask_int)
-    # Fortran loop order: DO jj = Njs0, Nje0 ; DO ji = Nis0, Nie0 -> transpose then C-ravel
-    flat = jnp.transpose(terms_ij, (1, 0)).reshape(-1)
-
-    def _ddpdd_step(
-        carry: tuple[Field, Field], x: Field
-    ) -> tuple[tuple[Field, Field], None]:
-        hi, lo = carry
-        zt1 = sr(x + hi)
-        zerr = sr(zt1 - x)
-        zt2 = sr(sr(sr(hi - zerr) + sr(x - sr(zt1 - zerr))) + lo)
-        hi_new = sr(zt1 + zt2)
-        lo_new = sr(zt2 - sr(hi_new - zt1))
-        return (hi_new, lo_new), None
-
-    zero = jnp.asarray(0.0, dtype=field_int.dtype)
-    (hi_final, _lo_final), _ = jax.lax.scan(_ddpdd_step, (zero, zero), flat)
-    return hi_final
-
-
-@_si3_glob_2dsum_ddpdd_core.defjvp
-def _si3_glob_2dsum_ddpdd_jvp(
-    primals: tuple[Field, Field],
-    tangents: tuple[Field, Field],
-) -> tuple[Field, Field]:
-    f_int, m_int = primals
-    df_int, dm_int = tangents
-    y = _si3_glob_2dsum_ddpdd_core(f_int, m_int)
-    dy = jnp.sum(df_int * m_int + f_int * dm_int)
-    return y, dy
-
-
 def si3_glob_2dsum_ddpdd(
     field_2d: Field,
     smask0_i: Field,
@@ -2463,9 +2430,9 @@ def si3_glob_2dsum_ddpdd(
     jpi, jpj = field_2d.shape
     nis0, nie0 = h, jpi - h
     njs0, nje0 = h, jpj - h
-    return _si3_glob_2dsum_ddpdd_core(
-        field_2d[nis0:nie0, njs0:nje0],
-        smask0_i[nis0:nie0, njs0:nje0],
+    return nemo_ddpdd_sum_2d(
+        jnp.transpose(field_2d[nis0:nie0, njs0:nje0]),
+        jnp.transpose(smask0_i[nis0:nie0, njs0:nje0]),
     )
 
 
@@ -2490,24 +2457,7 @@ def si3_eos_fzp(
     use_teos10 = (not ln_teos10) if _plant_wrong_eos else ln_teos10
 
     if use_teos10:
-        # r1_S0 = 0.875_wp / 30.76941_wp = 1._wp / 35.16504_wp (`eosbn2.F90:69`)
-        r1_s0 = sr(
-            sr(jnp.asarray(0.875, dtype=dtype))
-            / sr(jnp.asarray(30.76941, dtype=dtype))
-        )
-        zs = sr(_safe_sqrt(sr(jnp.abs(sss) * r1_s0)))
-        c5 = jnp.asarray(1.46873e-03, dtype=dtype)
-        c4 = jnp.asarray(9.64972e-03, dtype=dtype)
-        c3 = jnp.asarray(2.28348e-02, dtype=dtype)
-        c2 = jnp.asarray(3.12775e-02, dtype=dtype)
-        c1 = jnp.asarray(2.07679e-02, dtype=dtype)
-        c0 = jnp.asarray(5.87701e-02, dtype=dtype)
-        p = sr(sr(c5 * zs) - c4)
-        p = sr(sr(p * zs) + c3)
-        p = sr(sr(p * zs) - c2)
-        p = sr(sr(p * zs) + c1)
-        p = sr(sr(p * zs) - c0)
-        pfzp = sr(p * sss)
+        pfzp = nemo_eos_fzp(sss)
     else:
         # UNESCO / Millero EOS-80 polynomial (`eosbn2.F90:1691-1696`)
         zs = sr(_safe_sqrt(jnp.maximum(sss, jnp.asarray(0.0, dtype=dtype))))
@@ -2536,6 +2486,12 @@ def si3_o2_scalar_initial_state(
     smask0_i: Field,
     ssh_before_kbb: Field,
     ssh_before_kmm: Field,
+    fitted_v_i: Field,
+    fitted_v_s: Field,
+    fitted_a_i: Field,
+    fitted_a_ip: Field,
+    fitted_v_ip: Field,
+    fitted_v_il: Field,
     config: SI3O2InitConfig,
     _plant_wrong_eos: bool = False,
     _plant_tbo_halo_leak: bool = False,
@@ -2673,53 +2629,55 @@ def si3_o2_scalar_initial_state(
     zt_su_ini = sr(jnp.where(is_nh, v_tsu_n, v_tsu_s) * zmsk)
     ztm_s_ini = sr(jnp.where(is_nh, v_tms_n, v_tms_s) * zmsk)
     zapnd_raw = sr(jnp.where(is_nh, v_apd_n, v_apd_s) * zmsk)
-    if _plant_pond_unscaled:
-        zapnd_ini = zapnd_raw
-    else:
-        zapnd_ini = sr(zapnd_raw * zat_i_ini)
+    zapnd_ini = zapnd_raw if _plant_pond_unscaled else sr(zapnd_raw * zat_i_ini)
     zhpnd_ini = sr(jnp.where(is_nh, v_hpd_n, v_hpd_s) * zmsk)
     zhlid_ini = sr(jnp.where(is_nh, v_hld_n, v_hld_s) * zmsk)
+    if not cfg.ln_pnd:
+        zapnd_ini = jnp.zeros_like(zapnd_ini)
+        zhpnd_ini = jnp.zeros_like(zhpnd_ini)
+        zhlid_ini = jnp.zeros_like(zhlid_ini)
+    elif not cfg.ln_pnd_lids:
+        zhlid_ini = jnp.zeros_like(zhlid_ini)
 
-    # 5. Category-conserved volumes at the O2/O3 boundary.  O3 owns the
-    # category fit; O2 uses only the fit's documented total-volume invariants.
-    vt_i_int = sr(zht_i_ini * zat_i_ini)
-    vt_s_int = sr(zht_s_ini * zat_i_ini)
-    at_i = zat_i_ini
-    at_ip = zapnd_ini
-    vt_ip_int = sr(zhpnd_ini * zapnd_ini)
-    vt_il_int = sr(zhlid_ini * zapnd_ini)
-
-    vt_i = vt_i_int
-    vt_s = vt_s_int
-    vt_ip = vt_ip_int
-    vt_il = vt_il_int
-
-    # 6. Reuse the ORCA2 lane's levitating-ice recipe for mass and SSH
-    # (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/iceistate.f90:441-460`).
-    ice_recipe = ORCA2InitialIce(
-        thres_sst=cfg.rn_thres_sst,
-        ice_concentration=(cfg.rn_ati_ini_n, cfg.rn_ati_ini_s),
-        ice_thickness_m=(cfg.rn_hti_ini_n, cfg.rn_hti_ini_s),
-        snow_thickness_m=(cfg.rn_hts_ini_n, cfg.rn_hts_ini_s),
-        pond_concentration=(
-            cfg.rn_apd_ini_n * cfg.rn_ati_ini_n,
-            cfg.rn_apd_ini_s * cfg.rn_ati_ini_s,
-        ),
-        pond_depth_m=(cfg.rn_hpd_ini_n, cfg.rn_hpd_ini_s),
-        lid_depth_m=(cfg.rn_hld_ini_n, cfg.rn_hld_ini_s),
+    # 5. O3 owns the category fit.  O2 takes NEMO's fitted category arrays as
+    # exact inputs, then transcribes only the post-fit SUM and mass statements.
+    v_i_fit = jnp.asarray(fitted_v_i, dtype=dtype)
+    v_s_fit = jnp.asarray(fitted_v_s, dtype=dtype)
+    a_i_fit = jnp.asarray(fitted_a_i, dtype=dtype)
+    a_ip_fit = jnp.asarray(fitted_a_ip, dtype=dtype)
+    v_ip_fit = jnp.asarray(fitted_v_ip, dtype=dtype)
+    v_il_fit = jnp.asarray(fitted_v_il, dtype=dtype)
+    expected_shape = (jpi, jpj, 5)
+    for name, arr in (
+        ("fitted_v_i", v_i_fit), ("fitted_v_s", v_s_fit),
+        ("fitted_a_i", a_i_fit), ("fitted_a_ip", a_ip_fit),
+        ("fitted_v_ip", v_ip_fit), ("fitted_v_il", v_il_fit),
+    ):
+        if arr.shape != expected_shape:
+            raise ValueError(f"O2 requires exact fitted {name} shape {expected_shape}, got {arr.shape}")
+    vt_i = fortran_sum_categories(v_i_fit, axis=-1)
+    vt_s = fortran_sum_categories(v_s_fit, axis=-1)
+    at_i = fortran_sum_categories(a_i_fit, axis=-1)
+    at_ip = fortran_sum_categories(a_ip_fit, axis=-1)
+    vt_ip = fortran_sum_categories(v_ip_fit, axis=-1)
+    vt_il = fortran_sum_categories(v_il_fit, axis=-1)
+    mass_by_category = sr(
+        sr(sr(consts.rho_snow * v_s_fit) + sr(consts.rho_ice * v_i_fit))
+        + sr(canonical_constants.rho_water * sr(v_ip_fit + v_il_fit))
     )
-    ssh_delta, snwice_mass, area, zsshadj = orca2_initial_ice_ssh(
-        temperature=sst,
-        salinity=sss,
-        tmask=tmask_2d,
-        f_t=ff_t_2d,
-        e1e2t=e1e2t_2d,
-        ice=ice_recipe,
-        ln_teos10=True,
-        smask0_i=smask0_i_2d,
-        use_ddpdd=True,
-        return_diagnostics=True,
+    snwice_mass = sr(tmask_2d * fortran_sum_categories(mass_by_category, axis=-1))
+
+    # 6. Levitating-ice SSH adjustment (`iceistate.F90:408-427`).
+    r1_rho0 = sr(
+        jnp.asarray(1.0, dtype=dtype)
+        / jnp.asarray(NEMO_CONSTANTS_CONFIG.rho_0, dtype=dtype)
     )
+    area = si3_glob_2dsum_ddpdd(e1e2t_2d * ssmask_2d, smask0_i_2d, nn_hls=nn_hls)
+    mass_area = sr(sr(snwice_mass * r1_rho0) * e1e2t_2d)
+    zsshadj = sr(
+        si3_glob_2dsum_ddpdd(mass_area, smask0_i_2d, nn_hls=nn_hls) / area
+    )
+    ssh_delta = -zsshadj
     snwice_mass_b = snwice_mass
     ssh_b0 = jnp.asarray(ssh_before_kbb, dtype=dtype)
     ssh_m0 = jnp.asarray(ssh_before_kmm, dtype=dtype)
@@ -2780,6 +2738,12 @@ def si3_o2_step(
         smask0_i=forcing.smask0_i,
         ssh_before_kbb=forcing.ssh_before_kbb,
         ssh_before_kmm=forcing.ssh_before_kmm,
+        fitted_v_i=state.v_i,
+        fitted_v_s=state.v_s,
+        fitted_a_i=state.a_i,
+        fitted_a_ip=state.a_ip,
+        fitted_v_ip=state.v_ip,
+        fitted_v_il=state.v_il,
         config=init_cfg,
         _plant_stop_gradient=_plant_stop_gradient,
     )

@@ -372,7 +372,7 @@ def test_o2_eos_fzp_teos10_and_eos80_zero_ulp_vs_nemo502() -> None:
     sal = np.array([[0.0, 5.0, 18.5, 34.7, 35.16504, 38.2]], dtype=np.float64)
 
     # TEOS-10 reference (`eosbn2.F90:69, 1674-1683`)
-    r1_s0 = np.float64(0.875) / np.float64(30.76941)
+    r1_s0 = np.float64(1.0) / np.float64(35.16504)
     zs = np.sqrt(np.abs(sal) * r1_s0)
     fzp_teos10_ref = (
         (
@@ -410,6 +410,36 @@ def test_o2_eos_fzp_teos10_and_eos80_zero_ulp_vs_nemo502() -> None:
     )
 
 
+def test_o2_ponds_off_and_lids_off_match_iceistate_branches() -> None:
+    """`iceistate.F90:291-300` zeros pond/lid scalar inputs under both switches."""
+    inp = gate.build_synthetic_orca2_o2_inputs()
+    state = inp["state0"]
+    common = dict(
+        sst_m=inp["sst_m"], sss_m=inp["sss_m"], tmask=inp["tmask"],
+        ssmask=inp["ssmask"], smask0_i=inp["smask0_i"], e1e2t=inp["e1e2t"],
+        ff_t=inp["ff_t"], gphit=inp["gphit"],
+        ssh_before_kbb=inp["ssh_before_kbb"], ssh_before_kmm=inp["ssh_before_kmm"],
+        fitted_v_i=state.v_i, fitted_v_s=state.v_s, fitted_a_i=state.a_i,
+        fitted_a_ip=state.a_ip, fitted_v_ip=state.v_ip, fitted_v_il=state.v_il,
+    )
+    ponds_off = si3_o2_scalar_initial_state(
+        **common, config=inp["o2_cfg"]._replace(ln_pnd=False)
+    )
+    lids_off = si3_o2_scalar_initial_state(
+        **common,
+        config=inp["o2_cfg"]._replace(
+            ln_pnd=True, ln_pnd_lids=False,
+            rn_hld_ini_n=0.03, rn_hld_ini_s=0.03,
+        ),
+    )
+    assert np.count_nonzero(np.asarray(ponds_off.zapnd_ini)) == 0
+    assert np.count_nonzero(np.asarray(ponds_off.zhpnd_ini)) == 0
+    assert np.count_nonzero(np.asarray(ponds_off.zhlid_ini)) == 0
+    assert np.count_nonzero(np.asarray(lids_off.zapnd_ini)) > 0
+    assert np.count_nonzero(np.asarray(lids_off.zhpnd_ini)) > 0
+    assert np.count_nonzero(np.asarray(lids_off.zhlid_ini)) == 0
+
+
 def test_o2_dom_uniq_t_and_glob_2dsum_ddpdd_zero_ulp() -> None:
     """`si3_dom_uniq_t_orca2` (`domutl.F90:91-121`) and `si3_glob_2dsum_ddpdd` (`lib_mpp.F90:1244-1267`) match NEMO 5.0.2 to 0 ULP."""
     inp = gate.build_synthetic_orca2_o2_inputs()
@@ -440,6 +470,12 @@ def test_o2_dom_uniq_t_and_glob_2dsum_ddpdd_zero_ulp() -> None:
         gphit=inp["gphit"],
         ssh_before_kbb=inp["ssh_before_kbb"],
         ssh_before_kmm=inp["ssh_before_kmm"],
+        fitted_v_i=inp["state0"].v_i,
+        fitted_v_s=inp["state0"].v_s,
+        fitted_a_i=inp["state0"].a_i,
+        fitted_a_ip=inp["state0"].a_ip,
+        fitted_v_ip=inp["state0"].v_ip,
+        fitted_v_il=inp["state0"].v_il,
         config=inp["o2_cfg"],
     )
     term_mul = nemo_source_round(
@@ -449,8 +485,8 @@ def test_o2_dom_uniq_t_and_glob_2dsum_ddpdd_zero_ulp() -> None:
     _assert_zero_ulp([zssh_mul], [o2_state.zsshadj], "zsshadj_r1_rho0_ddpdd")
 
 
-def test_o2_self_test_orca2_initial_ice_ssh_reuse_and_all_plants_fire() -> None:
-    """`run_self_test` passes at 0 ULP (including 0-ULP agreement with `orca2_initial_ice_ssh`) and all 13 plants fire."""
+def test_o2_self_test_exact_category_inputs_and_all_plants_fire() -> None:
+    """`run_self_test` passes at 0 ULP with exact fitted-category inputs and all plants fire."""
     report = gate.run_self_test(plant=None)
     assert report["status"] == "PASS"
     assert report["max_ulp"] == 0
@@ -533,7 +569,7 @@ def test_o2_ocean_output_log_verifier_and_plants(tmp_path: Path) -> None:
     """Verify whitespace-tolerant `ocean.output` log checking and its plants."""
     excerpt = ACQ_DIR / "ocean.output.excerpt"
     res = gate.verify_ocean_output_log(
-        excerpt, expect_icedyn=True, expect_icethd=True, plant=None
+        excerpt, expect_icedyn=False, expect_icethd=False, plant=None
     )
     assert res["status"] == "PASS"
     assert res["parsed"]["jpl"] == 5
@@ -541,7 +577,7 @@ def test_o2_ocean_output_log_verifier_and_plants(tmp_path: Path) -> None:
     spaced = tmp_path / "ocean.output.spaced"
     spaced.write_text(excerpt.read_text(encoding="ascii").replace("=", "   =    "))
     res_spaced = gate.verify_ocean_output_log(
-        spaced, expect_icedyn=True, expect_icethd=True, plant=None
+        spaced, expect_icedyn=False, expect_icethd=False, plant=None
     )
     assert res_spaced["status"] == "PASS"
 
@@ -603,6 +639,12 @@ def test_o2_jit_grad_jvp_and_stop_gradient_plant() -> None:
             gphit=gphit,
             ssh_before_kbb=ssh_kbb,
             ssh_before_kmm=ssh_in,
+            fitted_v_i=state0.v_i,
+            fitted_v_s=state0.v_s,
+            fitted_a_i=state0.a_i,
+            fitted_a_ip=state0.a_ip,
+            fitted_v_ip=state0.v_ip,
+            fitted_v_il=state0.v_il,
             config=o2_c,
         )
         return (
@@ -940,7 +982,7 @@ def _write_o2_istate_binary_snapshot(
 def test_o2_admit_evidence_directory_scores_istate_2step_and_rst_1step_and_refuses_all_plants(
     tmp_path: Path,
 ) -> None:
-    """Verify `admit_evidence_directory` scores `o2_si3_istate_rank0000.bin`, `rec_2step`, and `rst_1step` to 0 ULP and refuses all 12 plants."""
+    """Score O2 initial/restart records at 0 ULP and refuse every admission plant."""
     inp = gate.build_synthetic_orca2_o2_inputs()
     cfg: SI3ORCA2StateConfig = inp["cfg"]
     o2_cfg: SI3O2InitConfig = inp["o2_cfg"]
@@ -1176,6 +1218,9 @@ def test_o2_admit_evidence_directory_scores_istate_2step_and_rst_1step_and_refus
         "1ulp-state",
         "rst-missing",
         "rst-1ulp",
+        "rst-step-name",
+        "kt2-sss-perturb",
+        "ocean-restart-missing",
     ):
         with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):
             gate.admit_evidence_directory(ev, plant=plant_name, expect_commit=commit_hex)
@@ -1186,7 +1231,7 @@ def test_o2_committed_ocean_output_excerpt_provenance() -> None:
     excerpt = ACQ_DIR / "ocean.output.excerpt"
     lines = excerpt.read_text(encoding="utf-8").splitlines()
     headers = [l for l in lines if l.startswith("#")]
-    body = [l for l in lines if not l.startswith("#")]
+    body = [l.rstrip() for l in lines if not l.startswith("#")]
 
     src_m = next(re.search(r"^#\s*Source path:\s*(.+)$", l) for l in headers if "Source path:" in l)
     sha_m = next(re.search(r"^#\s*Complete source SHA-256:\s*([0-9a-f]{64})\s*$", l) for l in headers if "SHA-256:" in l)
@@ -1204,4 +1249,4 @@ def test_o2_committed_ocean_output_excerpt_provenance() -> None:
             else:
                 nums.append(int(part))
         src_lines = src_path.read_text(encoding="utf-8").splitlines()
-        assert body == [src_lines[n - 1] for n in nums]
+        assert body == [src_lines[n - 1].rstrip() for n in nums]

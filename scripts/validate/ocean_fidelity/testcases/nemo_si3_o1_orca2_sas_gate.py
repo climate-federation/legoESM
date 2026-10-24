@@ -444,6 +444,32 @@ def first_dry_ij(
     return int(dry_idx[0, 0]), int(dry_idx[0, 1])
 
 
+def restart_payload_view(
+    expected: np.ndarray | jax.Array,
+    payload: np.ndarray | jax.Array,
+    mask: np.ndarray | jax.Array | None,
+    *,
+    nn_hls: int,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Align a full ORCA2 field/mask with NEMO's halo-free restart payload."""
+    exp = np.asarray(expected)
+    raw = np.asarray(payload)
+    scored_mask = None if mask is None else np.asarray(mask)
+    if raw.ndim >= 2 and exp.shape[:2] == (
+        raw.shape[0] + 2 * nn_hls,
+        raw.shape[1] + 2 * nn_hls,
+    ):
+        exp = exp[nn_hls:-nn_hls, nn_hls:-nn_hls, ...]
+        if scored_mask is not None:
+            scored_mask = scored_mask[nn_hls:-nn_hls, nn_hls:-nn_hls, ...]
+    elif raw.ndim >= 2 and exp.shape[:2] != raw.shape[:2]:
+        raise ValueError(
+            f"STATUS PLANT-FIRED: restart payload shape {raw.shape} is not "
+            f"full {exp.shape} or halo-free by nn_hls={nn_hls}"
+        )
+    return exp, scored_mask
+
+
 def wet_mask_for_field(
     fname: str,
     tmask: np.ndarray | jax.Array,
@@ -1901,14 +1927,14 @@ def admit_evidence_directory(
                 raw = raw.T
             elif raw.ndim == 3 and dims == ("numcat", "y", "x"):
                 raw = np.transpose(raw, (2, 1, 0))
-            exp_arr = np.asarray(exp_arr)
-            if raw.ndim >= 2 and exp_arr.shape[:2] == np.asarray(tmask).shape:
-                h = cfg.nn_hls
-                exp_arr = exp_arr[h:-h, h:-h, ...]
-                m_full = wet_mask_for_field(vname, tmask, umask, vmask, nn_hls=h)
-                m = m_full[h:-h, h:-h]
-            else:
-                m = None
+            m_full = (
+                wet_mask_for_field(vname, tmask, umask, vmask, nn_hls=cfg.nn_hls)
+                if raw.ndim >= 2
+                else None
+            )
+            exp_arr, m = restart_payload_view(
+                exp_arr, raw, m_full, nn_hls=cfg.nn_hls
+            )
             ulp_nc = max_ulp_diff(exp_arr, raw, mask=m)
             if ulp_nc != 0:
                 raise ValueError(

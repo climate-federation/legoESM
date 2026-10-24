@@ -868,7 +868,7 @@ def nemo_gyre_wind(lat_deg, t_seconds: float = 0.0):
     return sr((-ztaun) * sine), sr(ztaun * sine)
 
 
-def _nemo_ddpdd_sum_2d(values, mask):
+def nemo_ddpdd_sum_2d(values, mask):
     """NEMO reproducible masked sum in Fortran ``ji``-inner order."""
     import jax
     import jax.numpy as jnp
@@ -896,7 +896,7 @@ def nemo_gyre_zero_mean_emp(emp_raw, wet):
 
     values = jnp.asarray(emp_raw, dtype=jnp.float64)
     mask = jnp.asarray(wet, dtype=values.dtype)
-    mean = sr(_nemo_ddpdd_sum_2d(values, mask) / _nemo_ddpdd_sum_2d(mask, mask))
+    mean = sr(nemo_ddpdd_sum_2d(values, mask) / nemo_ddpdd_sum_2d(mask, mask))
     return sr(values - sr(mean * mask))
 
 

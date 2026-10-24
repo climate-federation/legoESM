@@ -46,6 +46,7 @@ readonly IST_PATCH=$here/iceistate_o2_writer.patch
 readonly STP_PATCH=$here/icestp_o2_writer.patch
 readonly STUBS_F90=$here/o2_si3_fixture_stubs.F90
 readonly FIXTURE_F90=$here/o2_si3_layout_fixture.F90
+readonly NEMO_RST_FIXTURE_F90=$here/../nemo_si3_o1_orca2_sas_acquisition/o1_nemo_restart_fixture.F90
 readonly NML_CFG=$here/namelist_cfg
 readonly NML_ICE_CFG=$here/namelist_ice_cfg
 readonly LOG_EXCERPT=$here/ocean.output.excerpt
@@ -301,6 +302,8 @@ elif plant == "bad-fsbc-multiple":
     nml_cfg = re.sub(r"(nn_itend\s*=\s*)\d+", r"\g<1>3", nml_cfg)
 elif plant == "unapproved-deviation":
     nml_ice = re.sub(r"(&nampar)", "&nampar\n   rn_amax_n = 0.5", nml_ice, count=1)
+elif plant == "restart-disabled":
+    nml_cfg = nml_cfg.replace("ln_rstart        = .true.", "ln_rstart        = .false.")
 
 def parse_grouped_assignments(text: str) -> tuple[set[str], dict[str, dict[str, str]], dict[str, str]]:
     group_names: set[str] = set()
@@ -471,7 +474,7 @@ import sys
 excerpt_p, gcm_p, dom_p, stp_p, itd_p, scratch_p, plant = sys.argv[1:]
 lines = pathlib.Path(excerpt_p).read_text(encoding="utf-8").splitlines()
 headers = [l for l in lines if l.startswith("#")]
-body = [l for l in lines if not l.startswith("#")]
+body = [l.rstrip() for l in lines if not l.startswith("#")]
 
 src_match = next((re.search(r"^#\s*Source path:\s*(.+)$", l) for l in headers if "Source path:" in l), None)
 sha_match = next((re.search(r"^#\s*Complete source SHA-256:\s*([0-9a-f]{64})\s*$", l) for l in headers if "SHA-256:" in l), None)
@@ -500,7 +503,7 @@ if src_path.is_file():
         else:
             line_nums.append(int(part))
     src_lines = src_path.read_text(encoding="utf-8").splitlines()
-    extracted = [src_lines[n - 1] for n in line_nums]
+    extracted = [src_lines[n - 1].rstrip() for n in line_nums]
     if body != extracted:
         raise SystemExit("STATUS PLANT-FIRED: ocean.output.excerpt body does not match source lines verbatim")
 
@@ -528,12 +531,6 @@ for txt, token, label in required_source_anchors:
     if token not in txt:
         raise SystemExit(f"STATUS PLANT-FIRED: missing source anchor {token!r} in {label}")
 
-o2_lines = []
-for l in body:
-    l2 = re.sub(r"(ln_icedyn\s*=\s*)T", r"\g<1>F", l)
-    l2 = re.sub(r"(ln_icethd\s*=\s*)T", r"\g<1>F", l2)
-    o2_lines.append(l2)
-(pathlib.Path(scratch_p) / "ocean.output.o2_rendered").write_text("\n".join(o2_lines) + "\n", encoding="utf-8")
 PY
 }
 
@@ -652,7 +649,7 @@ run_preflight() {
   local scratch=$ACTIVE_SCRATCH_DIR
   export TMPDIR=$scratch
 
-  for f in "$WRITER_F90" "$PRA_PATCH" "$IST_PATCH" "$STP_PATCH" "$STUBS_F90" "$FIXTURE_F90" \
+  for f in "$WRITER_F90" "$PRA_PATCH" "$IST_PATCH" "$STP_PATCH" "$STUBS_F90" "$FIXTURE_F90" "$NEMO_RST_FIXTURE_F90" \
            "$NML_CFG" "$NML_ICE_CFG" "$LOG_EXCERPT" "$GATE_PY" \
            "$SHIPPED_PRA" "$SHIPPED_IST" "$SHIPPED_STP" "$SHIPPED_ITD" "$SHIPPED_DOM" "$SHIPPED_SAS_GCM" \
            "$SHIPPED_NML_REF" "$SHIPPED_NML_ICE_REF" \
@@ -681,7 +678,7 @@ run_preflight() {
     printf 'REFUSE: source patches must be strictly additive\n' >&2
     exit 66
   fi
-  for f90 in "$WRITER_F90" "$STUBS_F90" "$FIXTURE_F90"; do
+  for f90 in "$WRITER_F90" "$STUBS_F90" "$FIXTURE_F90" "$NEMO_RST_FIXTURE_F90"; do
     check_intrinsic_use "$f90"
   done
   # Plant 1c: bare USE iso_fortran_env without INTRINSIC
@@ -738,6 +735,12 @@ run_preflight() {
   verify_namelists_and_stems "$NML_CFG" "$NML_ICE_CFG" "$scratch/bundles.toc" "none" "2step"
   render_rst_namelists "$NML_CFG" "$NML_ICE_CFG" "$scratch/rst_namelist_cfg" "$scratch/rst_namelist_ice_cfg"
   verify_namelists_and_stems "$scratch/rst_namelist_cfg" "$scratch/rst_namelist_ice_cfg" "$scratch/bundles.toc" "none" "rst_1step"
+  if verify_namelists_and_stems "$scratch/rst_namelist_cfg" "$scratch/rst_namelist_ice_cfg" \
+       "$scratch/bundles.toc" "restart-disabled" "rst_1step" >"$scratch/nml_restart-disabled.log" 2>&1; then
+    printf 'REFUSE: Plant 3 (restart-disabled) did not fail restart-deck verification\n' >&2
+    exit 72
+  fi
+  grep -F "STATUS PLANT-FIRED" "$scratch/nml_restart-disabled.log" >/dev/null
   for nml_plant in unknown-group wrong-group-var missing-stem bad-fsbc-multiple unapproved-deviation; do
     if verify_namelists_and_stems "$NML_CFG" "$NML_ICE_CFG" "$scratch/bundles.toc" "$nml_plant" "2step" >"$scratch/nml_${nml_plant}.log" 2>&1; then
       printf 'REFUSE: Plant 3 (%s) did not fail namelist verification\n' "$nml_plant" >&2
@@ -760,6 +763,37 @@ run_preflight() {
   ( cd "$scratch/fixture_run" && "$scratch/o2_si3_layout_fixture.exe" )
   "$PY" "$GATE_PY" --verify-layout-fixture "$scratch/fixture_run/o2_si3_records" > "$scratch/layout_fixture.json"
 
+  # Import O1's NEMO-writer restart fixture: IOM writes halo-free 180x148,
+  # and the shared legoESM reader expands it to the ORCA2 184x152 layout.
+  mkdir -p "$scratch/nemo_restart_fixture"
+  "$FC" -O2 -I "$NEMO_INC" "$NEMO_RST_FIXTURE_F90" \
+    -L "$(dirname "$NEMO_INC")/lib" -Wl,-rpath,"$(dirname "$NEMO_INC")/lib" \
+    -lnetcdff -lnetcdf -o "$scratch/o1_nemo_restart_fixture.exe"
+  ( cd "$scratch/nemo_restart_fixture" && "$scratch/o1_nemo_restart_fixture.exe" )
+  "$PY" - "$scratch/nemo_restart_fixture/nemo_writer_layout_restart.nc" <<'PY'
+import pathlib
+import sys
+import jax.numpy as jnp
+import netCDF4
+from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig, read_si3_netcdf_restart
+
+p = pathlib.Path(sys.argv[1])
+with netCDF4.Dataset(p) as ds:
+    if len(ds.dimensions["x"]) != 180 or len(ds.dimensions["y"]) != 148:
+        raise SystemExit("STATUS PLANT-FIRED: fixture is not NEMO halo-free 180x148")
+cfg = SI3ORCA2StateConfig.for_orca2_sas_ice()
+state = read_si3_netcdf_restart(
+    p, tmask=jnp.ones((184, 152), dtype=jnp.float64), config=cfg, ln_rstart=True
+)
+if state.v_i.shape != (184, 152, 5):
+    raise SystemExit(f"STATUS PLANT-FIRED: expanded restart shape {state.v_i.shape}")
+expected = 1.0 + 0.001 + 0.000001 + 0.000000001
+if abs(float(state.v_i[2, 2, 0]) - expected) > 1.0e-14:
+    raise SystemExit("STATUS PLANT-FIRED: NEMO payload did not map to true interior")
+if float(state.v_i[0, 20, 0]) == 0.0:
+    raise SystemExit("STATUS PLANT-FIRED: ORCA2 lbc_lnk halo was not applied")
+PY
+
   # ---- Checklist Item 5: all expected frames written + ASCII-only check + plants ----
   for lf_plant in rank-collapse wrong-offset truncation bad-magic missing-frame field-swap; do
     if "$PY" "$GATE_PY" --verify-layout-fixture "$scratch/fixture_run/o2_si3_records" --plant "$lf_plant" >"$scratch/lf_${lf_plant}.log" 2>&1; then
@@ -769,7 +803,7 @@ run_preflight() {
     grep -F "STATUS PLANT-FIRED" "$scratch/lf_${lf_plant}.log" >/dev/null
   done
 
-  for ascii_target in "$WRITER_F90" "$PRA_PATCH" "$IST_PATCH" "$STP_PATCH" "$STUBS_F90" "$FIXTURE_F90" "$NML_CFG" "$NML_ICE_CFG"; do
+  for ascii_target in "$WRITER_F90" "$PRA_PATCH" "$IST_PATCH" "$STP_PATCH" "$STUBS_F90" "$FIXTURE_F90" "$NEMO_RST_FIXTURE_F90" "$NML_CFG" "$NML_ICE_CFG"; do
     check_ascii_only "$ascii_target"
   done
   printf '! UTF-8 em-dash plant: —\n' > "$scratch/utf8_plant.F90"
@@ -809,17 +843,16 @@ run_preflight() {
   fi
   grep -F "STATUS PLANT-FIRED" "$scratch/exc_plant.log" >/dev/null
 
-  "$PY" "$GATE_PY" --verify-log "$LOG_EXCERPT" --expect-icedyn T --expect-icethd T >/dev/null
-  "$PY" "$GATE_PY" --verify-log "$scratch/ocean.output.o2_rendered" --expect-icedyn F --expect-icethd F > "$scratch/log_check.json"
-  sed -E 's/=/   =    /g' "$scratch/ocean.output.o2_rendered" > "$scratch/ocean.output.spaced"
+  "$PY" "$GATE_PY" --verify-log "$LOG_EXCERPT" --expect-icedyn F --expect-icethd F > "$scratch/log_check.json"
+  sed -E 's/=/   =    /g' "$LOG_EXCERPT" > "$scratch/ocean.output.spaced"
   "$PY" "$GATE_PY" --verify-log "$scratch/ocean.output.spaced" --expect-icedyn F --expect-icethd F >/dev/null
-  if "$PY" "$GATE_PY" --verify-log "$LOG_EXCERPT" --expect-icedyn F --expect-icethd F >"$scratch/log_wrong_dyn.log" 2>&1; then
+  if "$PY" "$GATE_PY" --verify-log "$LOG_EXCERPT" --expect-icedyn T --expect-icethd T >"$scratch/log_wrong_dyn.log" 2>&1; then
     printf 'REFUSE: Plant 7c (wrong ln_icedyn/ln_icethd in log) did not fail\n' >&2
     exit 72
   fi
   grep -F "STATUS PLANT-FIRED" "$scratch/log_wrong_dyn.log" >/dev/null
   for log_plant in error-token missing-aaa wrong-jpl wrong-flag; do
-    if "$PY" "$GATE_PY" --verify-log "$scratch/ocean.output.o2_rendered" --plant "$log_plant" >"$scratch/log_${log_plant}.log" 2>&1; then
+    if "$PY" "$GATE_PY" --verify-log "$LOG_EXCERPT" --plant "$log_plant" >"$scratch/log_${log_plant}.log" 2>&1; then
       printf 'REFUSE: Plant 7d (log plant %s) did not fail\n' "$log_plant" >&2
       exit 72
     fi
@@ -946,16 +979,18 @@ run_preflight() {
     mkdir -p "$(dirname "$preflight_json_out")"
     "$PY" - "$preflight_json_out" "$ORCA2_BUNDLE_SHA256" "$SAS_BUNDLE_SHA256" \
       "$scratch/layout_fixture.json" "$scratch/log_check.json" \
-      "$scratch/same_program_check.json" "$scratch/gate_self_test.json" <<'PY'
+      "$scratch/same_program_check.json" "$scratch/gate_self_test.json" \
+      "$(git -C "$REPO" rev-parse HEAD)" <<'PY'
 import json
 import pathlib
 import sys
 
-out_p, orca2_sha, sas_sha, lf_p, log_p, sp_p, gst_p = sys.argv[1:]
+out_p, orca2_sha, sas_sha, lf_p, log_p, sp_p, gst_p, commit = sys.argv[1:]
 report = {
     "status": "PREFLIGHT_OK",
     "rung": "O2",
     "reference_config": "ORCA2_SAS_ICE",
+    "producer_commit": commit,
     "orca2_bundle_sha256": orca2_sha,
     "sas_bundle_sha256": sas_sha,
     "checklist_items_1_to_7": "PASS",
@@ -970,6 +1005,7 @@ report = {
         "3c_missing_sn_stem",
         "3d_bad_fsbc_multiple",
         "3e_unapproved_deck_deviation",
+        "3f_restart_disabled",
         "4a_missing_writer_output_dir",
         "4b_rank_collapse",
         "4c_wrong_offset",
@@ -978,6 +1014,7 @@ report = {
         "5a_missing_frame",
         "5b_field_swap",
         "5c_utf8_non_ascii",
+        "5d_o1_nemo_restart_layout_fixture",
         "6a_disk_floor_nonexistent_parent",
         "6b_ram_floor_150gb",
         "7a_existing_target_dir",
@@ -1038,7 +1075,7 @@ admit_all() {
   "$PY" "$GATE_PY" --admit-evidence "$EVIDENCE" \
     --expect-commit "$expect_commit" \
     --json "$EVIDENCE/o2_admission.json"
-  for adm_plant in stamp same-program binary-sha input-sha missing-complete missing-stop0 ref-rec-diff 1ulp-istate 1ulp-ssh 1ulp-state rst-missing rst-1ulp; do
+  for adm_plant in stamp same-program binary-sha input-sha missing-complete missing-stop0 ref-rec-diff 1ulp-istate 1ulp-ssh 1ulp-state rst-missing rst-1ulp rst-step-name kt2-sss-perturb ocean-restart-missing; do
     if "$PY" "$GATE_PY" --admit-evidence "$EVIDENCE" \
          --expect-commit "$expect_commit" \
          --plant "$adm_plant" >/dev/null 2>&1; then

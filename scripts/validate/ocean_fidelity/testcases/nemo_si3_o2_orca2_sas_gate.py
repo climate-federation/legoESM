@@ -8,9 +8,8 @@ Covers (`DECISION 153`, `DECISION 159`, `docs/ice/fidelity/si3_r7_o2_preregister
 - Reads and stitches the O2 initial-state snapshot (`O2SI3I01`, `o2_si3_istate_rankXXXX.bin`)
   written by `o2_si3_state_writer.F90` right after NEMO builds the scalar initial state and
   levitating-ice initial SSH (`src/ICE/iceistate.F90:304`, `:427`).
-- Reuses `orca2_initial_ice_ssh` (`ORCA2InitialIce`, `ORCA2_DECK_INITIAL_ICE`) from
-  `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py` and verifies `0`-ULP
-  bit-identity against `si3_o2_scalar_initial_state` and NEMO 5.0.2.
+- Takes NEMO's fitted category arrays as exact inputs at the O2/O3 boundary,
+  then scores O2's post-fit sums, mass, and levitating-ice SSH statements.
 - Verifies all negative-control plants P1-P7.
 """
 
@@ -57,10 +56,6 @@ from legoesm.ice.si3_orca2_state import (
     si3_rst_to_netcdf_dict,
     write_si3_netcdf_restart,
 )
-from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-    ORCA2InitialIce,
-    orca2_initial_ice_ssh,
-)
 from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round328_dynzdf_gate import (
     BUILD_CONFIG_FILES,
     GateError as SameProgramError,
@@ -80,6 +75,7 @@ from scripts.validate.ocean_fidelity.testcases.nemo_si3_o1_orca2_sas_gate import
     max_ulp_diff,
     o1_snapshot_to_si3_state,
     read_o1_binary_snapshot,
+    restart_payload_view,
     stitch_o1_binary_snapshots,
     verify_dry_signed_zero_fixture,
     verify_ocean_output_log,
@@ -776,14 +772,13 @@ def _compare_o2_scalar_state_against_recipe_and_ref(
     ref_area: float,
     ref_zsshadj: float,
     actual: SI3O2ScalarInitialState,
-    recipe_ssh: np.ndarray,
     tmask: np.ndarray | jax.Array,
     *,
     ssh_before_kbb: np.ndarray | jax.Array | None = None,
     ssh_before_kmm: np.ndarray | jax.Array | None = None,
     allow_itd_5cat_1ulp: bool = False,
 ) -> dict[str, Any]:
-    """Verify 0-ULP agreement across `SI3O2ScalarInitialState`, `orca2_initial_ice_ssh`, and `ref_fields`."""
+    """Verify O2-owned fields against the NEMO record."""
     max_ulp_wet = 0
     max_ulp_full = 0
     max_norm_wet = 0.0
@@ -802,7 +797,7 @@ def _compare_o2_scalar_state_against_recipe_and_ref(
             score_mask[:, :2] = False
             score_mask[:, -2:] = False
         ulp_w = max_ulp_diff(exp_arr, act_arr, mask=score_mask)
-        ulp_f = ulp_w
+        ulp_f = max_ulp_diff(exp_arr, act_arr)
         norm_w = max_normalized_diff(exp_arr, act_arr, mask=score_mask)
         if allow_itd_5cat_1ulp and fname in itd_sum_fields:
             if ulp_w > 1 or norm_w > 1e-15:
@@ -828,22 +823,6 @@ def _compare_o2_scalar_state_against_recipe_and_ref(
         raise ValueError(
             f"STATUS PLANT-FIRED: O2 scalar reduction mismatch "
             f"area_ULP={ulp_area}, zsshadj_ULP={ulp_zsshadj}"
-        )
-
-    # Verify 0-ULP agreement between `si3_o2_scalar_initial_state` and reused `orca2_initial_ice_ssh`
-    b0 = np.zeros_like(recipe_ssh) if ssh_before_kbb is None else np.asarray(ssh_before_kbb, dtype=np.float64)
-    m0 = np.zeros_like(recipe_ssh) if ssh_before_kmm is None else np.asarray(ssh_before_kmm, dtype=np.float64)
-    ulp_r_kmm = max_ulp_diff(actual.ssh_kmm, m0 + recipe_ssh)
-    ulp_r_kbb = max_ulp_diff(actual.ssh_kbb, b0 + recipe_ssh)
-    wi, wj = first_wet_ij(tmask, interior_only=True, nn_hls=2)
-    ulp_r_zssh = max_ulp_diff(
-        np.asarray(actual.zsshadj).reshape(1),
-        np.array([-float(recipe_ssh[wi, wj])], dtype=np.float64),
-    )
-    if ulp_r_kmm != 0 or ulp_r_kbb != 0 or ulp_r_zssh != 0:
-        raise ValueError(
-            f"STATUS PLANT-FIRED: orca2_initial_ice_ssh vs si3_o2_scalar_initial_state "
-            f"ULP kmm={ulp_r_kmm}, kbb={ulp_r_kbb}, zsshadj={ulp_r_zssh}"
         )
 
     return {
@@ -879,7 +858,7 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
     wi_u, wj_u = first_wet_ij(umask, interior_only=True, nn_hls=cfg.nn_hls)
     wi_v, wj_v = first_wet_ij(vmask, interior_only=True, nn_hls=cfg.nn_hls)
 
-    # Reference O2 scalar initial state and reused `orca2_initial_ice_ssh`
+    # Reference O2 scalar initial state with exact fitted-category inputs.
     ref_o2 = si3_o2_scalar_initial_state(
         sst_m=sst_m,
         sss_m=sss_m,
@@ -891,18 +870,13 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
         gphit=gphit,
         ssh_before_kbb=ssh_before_kbb,
         ssh_before_kmm=ssh_before_kmm,
+        fitted_v_i=state0.v_i,
+        fitted_v_s=state0.v_s,
+        fitted_a_i=state0.a_i,
+        fitted_a_ip=state0.a_ip,
+        fitted_v_ip=state0.v_ip,
+        fitted_v_il=state0.v_il,
         config=o2_cfg,
-    )
-    smask0_i_full = np.asarray(smask0_i, dtype=np.float64)
-    recipe_ssh = orca2_initial_ice_ssh(
-        temperature=np.asarray(sst_m, dtype=np.float64),
-        salinity=np.asarray(sss_m, dtype=np.float64),
-        tmask=np.asarray(tmask, dtype=np.float64),
-        f_t=np.asarray(ff_t, dtype=np.float64),
-        e1e2t=np.asarray(e1e2t, dtype=np.float64),
-        ln_teos10=o2_cfg.ln_teos10,
-        smask0_i=smask0_i_full,
-        use_ddpdd=True,
     )
 
     cand_o2 = ref_o2
@@ -926,6 +900,12 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
             gphit=gphit,
             ssh_before_kbb=ssh_before_kbb,
             ssh_before_kmm=ssh_before_kmm,
+            fitted_v_i=state0.v_i,
+            fitted_v_s=state0.v_s,
+            fitted_a_i=state0.a_i,
+            fitted_a_ip=state0.a_ip,
+            fitted_v_ip=state0.v_ip,
+            fitted_v_il=state0.v_il,
             config=o2_cfg,
             _plant_wrong_eos=True,
         )
@@ -950,6 +930,12 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
             gphit=gphit,
             ssh_before_kbb=ssh_before_kbb,
             ssh_before_kmm=ssh_before_kmm,
+            fitted_v_i=state0.v_i,
+            fitted_v_s=state0.v_s,
+            fitted_a_i=state0.a_i,
+            fitted_a_ip=state0.a_ip,
+            fitted_v_ip=state0.v_ip,
+            fitted_v_il=state0.v_il,
             config=o2_cfg._replace(
                 rn_hti_ini_n=o2_cfg.rn_hti_ini_s, rn_hti_ini_s=o2_cfg.rn_hti_ini_n
             ),
@@ -974,7 +960,6 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
         ref_area=float(np.asarray(ref_o2.area)),
         ref_zsshadj=float(np.asarray(ref_o2.zsshadj)),
         actual=cand_o2,
-        recipe_ssh=recipe_ssh,
         tmask=tmask,
         ssh_before_kbb=ssh_before_kbb,
         ssh_before_kmm=ssh_before_kmm,
@@ -1104,7 +1089,13 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
         )
         assert o2_out is not None
         return (
-            jnp.sum(o2_out.t_bo + o2_out.ztfrz + o2_out.snwice_mass + o2_out.ssh_kmm)
+            jnp.sum(
+                o2_out.t_bo
+                + o2_out.ztfrz
+                + o2_out.zht_i_ini
+                + o2_out.snwice_mass
+                + o2_out.ssh_kmm
+            )
             + o2_out.zsshadj
             + jnp.sum(s_out.aggregated.vt_i + s_out.snwice_mass)
         )
@@ -1304,7 +1295,9 @@ def admit_evidence_directory(
     snap_step2 = stitch_o1_binary_snapshots([read_o1_binary_snapshot(p) for p in step2_files])
 
     state_entry, cfg = o1_snapshot_to_si3_state(snap_entry)
-    o2_cfg = o2_istate_snapshot_to_config(snap_istate, ln_teos10=True, ln_eos80=False)
+    o2_cfg = o2_istate_snapshot_to_config(
+        snap_istate, ln_teos10=True, ln_eos80=False
+    )._replace(ln_pnd=cfg.ln_pnd, ln_pnd_lids=cfg.ln_pnd_lids)
 
     f_ist = snap_istate["fields"]
     tmask = jnp.asarray(f_ist["tmask"], dtype=jnp.float64)
@@ -1333,18 +1326,13 @@ def admit_evidence_directory(
         gphit=gphit,
         ssh_before_kbb=ssh_before_kbb,
         ssh_before_kmm=ssh_before_kmm,
+        fitted_v_i=state_entry.v_i,
+        fitted_v_s=state_entry.v_s,
+        fitted_a_i=state_entry.a_i,
+        fitted_a_ip=state_entry.a_ip,
+        fitted_v_ip=state_entry.v_ip,
+        fitted_v_il=state_entry.v_il,
         config=o2_cfg,
-    )
-    smask0_i_full = np.asarray(f_ist["smask0_i"], dtype=np.float64)
-    recipe_ssh = orca2_initial_ice_ssh(
-        temperature=np.asarray(sst_istate, dtype=np.float64),
-        salinity=np.asarray(sss_istate, dtype=np.float64),
-        tmask=np.asarray(tmask, dtype=np.float64),
-        f_t=np.asarray(ff_t, dtype=np.float64),
-        e1e2t=np.asarray(e1e2t, dtype=np.float64),
-        ln_teos10=True,
-        smask0_i=smask0_i_full,
-        use_ddpdd=True,
     )
 
     if plant == "1ulp-istate":
@@ -1361,7 +1349,6 @@ def admit_evidence_directory(
         ref_area=float(snap_istate["meta"]["area"]),
         ref_zsshadj=float(snap_istate["meta"]["zsshadj"]),
         actual=actual_o2,
-        recipe_ssh=recipe_ssh,
         tmask=tmask,
         ssh_before_kbb=ssh_before_kbb,
         ssh_before_kmm=ssh_before_kmm,
@@ -1370,7 +1357,8 @@ def admit_evidence_directory(
 
     # 5. Score rec_2step (entry, step 1, step 2) over wet cells
     sss_entry = jnp.asarray(snap_entry["fields"]["sss_m"], dtype=jnp.float64)
-    sss_step1 = jnp.asarray(snap_step1["fields"]["sss_m"], dtype=jnp.float64)
+    sss_step2_np = np.asarray(snap_step2["fields"]["sss_m"], dtype=np.float64)
+    sss_step2 = jnp.asarray(sss_step2_np, dtype=jnp.float64)
     state_kt1, _ = si3_o2_step(
         state_entry,
         SI3ORCA2O2Forcing(
@@ -1389,7 +1377,20 @@ def admit_evidence_directory(
         config=cfg,
         o2_init_config=o2_cfg,
     )
-    state_kt2 = si3_o1_step(state_kt1, tmask=tmask, sss_m=sss_step1, config=cfg)
+    no_ice_wet = (np.asarray(tmask) != 0.0) & np.any(
+        np.asarray(state_kt1.v_i) == 0.0, axis=2
+    )
+    sss_plant_i, sss_plant_j = first_wet_ij(
+        no_ice_wet, interior_only=True, nn_hls=cfg.nn_hls
+    )
+    if plant == "kt2-sss-perturb":
+        sss_step2_plant = sss_step2_np.copy()
+        branch_point = cfg.rn_simin / cfg.rn_sinew
+        sss_step2_plant[sss_plant_i, sss_plant_j] = np.nextafter(
+            branch_point, -np.inf
+        )
+        sss_step2 = jnp.asarray(sss_step2_plant, dtype=jnp.float64)
+    state_kt2 = si3_o1_step(state_kt1, tmask=tmask, sss_m=sss_step2, config=cfg)
 
     if plant == "1ulp-state":
         v_np = np.asarray(state_kt1.v_i).copy()
@@ -1409,13 +1410,23 @@ def admit_evidence_directory(
     # 6. Score rst_1step: NetCDF restart read + 1-step trajectory vs rec_2step step 2
     rst_records = rst_dir / "o2_si3_records"
     rst_entry_files = sorted(rst_records.glob("o2_si3_state_entry_rank*.bin"))
-    rst_step1_files = sorted(rst_records.glob("o2_si3_state_step0002_rank*.bin"))
+    rst_step1_pattern = (
+        "o2_si3_state_step0001_rank*.bin"
+        if plant == "rst-step-name"
+        else "o2_si3_state_step0002_rank*.bin"
+    )
+    rst_step1_files = sorted(rst_records.glob(rst_step1_pattern))
     rst_nc = rst_dir / "output_restart/ORCA2_SAS_00000002_restart_ice_o2_output.nc"
     rst_ocean_nc = rst_dir / "output_restart/ORCA2_SAS_00000002_restart_o2_output.nc"
     rst_input = rst_dir / "input_restart/ORCA2_SAS_00000001_restart_ice.nc"
     rst_ocean_input = rst_dir / "input_restart/ORCA2_SAS_00000001_restart.nc"
     producer_restart = rec_dir / "ORCA2_SAS_00000001_restart_ice.nc"
     producer_ocean_restart = rec_dir / "ORCA2_SAS_00000001_restart.nc"
+    producer_ocean_restart_checked = (
+        rec_dir / "PLANTED_MISSING_SAS_OCEAN_RESTART.nc"
+        if plant == "ocean-restart-missing"
+        else producer_ocean_restart
+    )
     rst_nc_checked = rst_nc.with_name("PLANTED_MISSING_restart_ice.nc") if plant == "rst-missing" else rst_nc
     if (
         not rst_entry_files
@@ -1425,14 +1436,14 @@ def admit_evidence_directory(
         or not rst_input.is_file()
         or not rst_ocean_input.is_file()
         or not producer_restart.is_file()
-        or not producer_ocean_restart.is_file()
+        or not producer_ocean_restart_checked.is_file()
     ):
         raise ValueError(
             "STATUS PLANT-FIRED: rst_1step requires entry/step0002 records, both copied inputs, and both step-2 outputs"
         )
     if rst_input.resolve() == rst_nc.resolve() or rst_input.read_bytes() != producer_restart.read_bytes():
         raise ValueError("STATUS PLANT-FIRED: ice restart input/output isolation failed")
-    if rst_ocean_input.resolve() == rst_ocean_nc.resolve() or rst_ocean_input.read_bytes() != producer_ocean_restart.read_bytes():
+    if rst_ocean_input.resolve() == rst_ocean_nc.resolve() or rst_ocean_input.read_bytes() != producer_ocean_restart_checked.read_bytes():
         raise ValueError("STATUS PLANT-FIRED: ocean restart input/output isolation failed")
 
     rst_snap_entry = stitch_o1_binary_snapshots(
@@ -1514,19 +1525,9 @@ def admit_evidence_directory(
                 if raw.ndim >= 2
                 else None
             )
-            exp_scored = np.asarray(exp_arr)
-            mask_scored = None if m is None else np.asarray(m)
-            # NEMO restart variables are written without the two-cell model
-            # halo.  Compare the halo-free payload to the matching interior;
-            # never pad it with invented values.
-            if (
-                raw.ndim >= 2
-                and exp_scored.shape[0] == raw.shape[0] + 4
-                and exp_scored.shape[1] == raw.shape[1] + 4
-            ):
-                exp_scored = exp_scored[2:-2, 2:-2, ...]
-                if mask_scored is not None:
-                    mask_scored = mask_scored[2:-2, 2:-2, ...]
+            exp_scored, mask_scored = restart_payload_view(
+                exp_arr, raw, m, nn_hls=cfg.nn_hls
+            )
             ulp_nc = max_ulp_diff(exp_scored, raw, mask=mask_scored)
             if ulp_nc != 0:
                 raise ValueError(

@@ -160,3 +160,27 @@ prediction above:
   the corresponding model interior and scores NEMO-defined wet seam/fold halos
   only in rank-local writer records.
 - The round remains acquisition-tool-only: preflight is permitted, NEMO is not.
+
+## Review correction before acquisition (2026-10-24)
+
+The frozen prediction above contained two implementation assumptions that code
+reading disproved; this amendment narrows implementation ownership without
+changing the selected rung or 0-ULP bar:
+
+- NEMO's executed TEOS-10 statement is literally
+  `z1_S0 = 1._wp / 35.16504_wp` (`src/OCE/TRA/eosbn2.F90:1676`). The prose
+  equivalence to `0.875 / 30.76941` is withdrawn; that value does not occur in
+  NEMO and may not be used as the oracle.
+- O2 does not own `ice_var_itd_1cMc`. The six fitted category arrays are exact
+  inputs from the O1 entry record. O2 scores only its post-fit category sums,
+  literal mass statement, and SSH reduction (`src/ICE/iceistate.F90:388-427`).
+  The scalar-product invariant argument above is withdrawn because it is not a
+  statement-by-statement transcription of the fit.
+- ORCA2 commit `02acc8a1b10f2cc8511a6ba4d7fc233b34d73299` is cherry-picked,
+  not copied. Its no-default `ORCA2InitialIce`, explicit `(0.18, 0.18)` deck
+  pond concentration, and original `orca2_initial_ice_ssh` API remain intact.
+- The `ln_pnd = F` and `ln_pnd_lids = F` branches at
+  `src/ICE/iceistate.F90:291-300` are part of O2 and are directly tested.
+- Every O1 acquisition helper and plant remains in force, including the NEMO
+  restart-layout fixture, step-2 salinity perturbation, restart-disable check,
+  restart-step-name check, and missing SAS ocean-restart check.
