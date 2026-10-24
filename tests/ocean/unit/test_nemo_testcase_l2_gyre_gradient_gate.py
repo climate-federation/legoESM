@@ -342,7 +342,7 @@ def test_compiled_step_transform_uses_materialized_production_primal():
     jvp_selected, jvp_replay, _ = compiled_jvp(
         state, jnp.asarray(1, dtype=jnp.int32), production_after, tangent)
     planted_vjp, planted_jvp = G.build_compiled_step_transforms(
-        context, plant_replay_primal=True)
+        context, plant_boundary_primal=True)
     vjp_plant, _, _ = planted_vjp(
         state, jnp.asarray(1, dtype=jnp.int32), production_after, cotangent)
     jvp_plant, _, _ = planted_jvp(
@@ -514,6 +514,7 @@ def _healthy_resource_row():
         "gradient_finite": True,
         "gradient_nonzero": True,
         "schedule_primal_bitwise_production": True,
+        "reverse_primal_bitwise_production": True,
         "loss": 1.0,
         "cold_compile_and_reverse_wall_seconds": 2.0,
         "warm_reverse_wall_seconds": 1.0,
@@ -530,6 +531,7 @@ def _healthy_resource_row():
         ("gradient_finite", False),
         ("gradient_nonzero", False),
         ("schedule_primal_bitwise_production", False),
+        ("reverse_primal_bitwise_production", False),
         ("loss", np.nan),
         ("warm_reverse_wall_seconds", 0.0),
         ("memory_peak_mib", np.nan),
@@ -862,7 +864,8 @@ def test_resource_two_pass_control_uses_fresh_sampler(monkeypatch):
             self.stopped += 1
 
     monkeypatch.setattr(G, "PeakMemorySampler", SingleUseSampler)
-    reverse = jax.jit(jax.value_and_grad(lambda x: x**2))
+    reverse = jax.jit(jax.value_and_grad(
+        lambda x: (x**2, x), has_aux=True))
     cold, warm, _ = G.measure_cold_and_warm_reverse(
         reverse, jnp.asarray(3.0), "cpu")
     assert cold.sampler is instances[0]
@@ -876,7 +879,7 @@ def test_compiled_reverse_warm_call_does_not_retrace():
     def loss(x):
         nonlocal traces
         traces += 1
-        return x**2
+        return x**2, x
 
     reverse = G.build_compiled_reverse(loss)
     reverse(jnp.asarray(2.0))

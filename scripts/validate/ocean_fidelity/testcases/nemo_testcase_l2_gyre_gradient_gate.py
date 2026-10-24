@@ -56,8 +56,10 @@ SCHEDULE_SCOPE = (
     "cold production step followed by a component-agnostic checkpoint "
     "schedule over warm production jitted steps"
 )
-RESOURCE_SCHEMA = "gyre-gradgate-resource-v3-primal-preserving-boundary"
-REVERSE_TRANSFORM = "jax.jit(jax.value_and_grad(scalar_line))"
+RESOURCE_SCHEMA = "gyre-gradgate-resource-v4-transformed-primal-byte-gate"
+REVERSE_TRANSFORM = (
+    "jax.jit(jax.value_and_grad(loss_with_final_state, has_aux=True))"
+)
 WARM_TIMER_SPAN = (
     "blocked execution of pre-jitted value_and_grad only; sampler start and "
     "stop/join excluded"
@@ -95,6 +97,7 @@ class GYREContext(NamedTuple):
 
 class ReversePassMeasurement(NamedTuple):
     value: jax.Array
+    final_state: object
     gradient: jax.Array
     wall_seconds: float
     sampler: object
@@ -454,7 +457,7 @@ def loss_at_state(reference: LossReference, state):
 
 
 def build_compiled_step_transforms(
-        context: GYREContext, *, plant_replay_primal: bool = False):
+        context: GYREContext, *, plant_boundary_primal: bool = False):
     """Build reusable one-production-step VJP and JVP executables.
 
     ``kt`` is a dynamic argument, so a multi-step rollout does not create one
@@ -479,7 +482,10 @@ def build_compiled_step_transforms(
             jnp.zeros_like, cotangent)
         state_cotangent = pullback(
             (cotangent, zero_replay_cotangent))[0]
-        selected = replay if plant_replay_primal else production_after
+        selected = (
+            jax.tree_util.tree_map(_nextafter_plant, production_after)
+            if plant_boundary_primal else production_after
+        )
         return selected, replay, state_cotangent
 
     def step_jvp(state, kt, production_after, tangent):
@@ -489,10 +495,20 @@ def build_compiled_step_transforms(
             (state,),
             (tangent,),
         )
-        selected = replay if plant_replay_primal else production_after
+        selected = (
+            jax.tree_util.tree_map(_nextafter_plant, production_after)
+            if plant_boundary_primal else production_after
+        )
         return selected, replay, selected_tangent
 
     return jax.jit(step_vjp), jax.jit(step_jvp)
+
+
+def _nextafter_plant(value):
+    """Shift floating leaves by one ULP for the boundary-byte-gate plant."""
+    if not jnp.issubdtype(value.dtype, jnp.inexact):
+        return value
+    return jnp.nextafter(value, jnp.full_like(value, jnp.inf))
 
 
 def step_transform_footprint(n_steps: int) -> dict:
@@ -561,7 +577,8 @@ def enforce_step_replay_byte_gate(
 
 def explicit_stepwise_directional_derivatives(
         context: GYREContext, reference: LossReference, base, direction,
-        n_steps: int, *, plant: bool = False):
+        n_steps: int, *, plant: bool = False,
+        plant_boundary_primal: bool = False):
     """Compose one VJP/JVP per production step without a whole-window trace."""
     states = [_apply_initial_perturbation(context, base)]
     for kt in range(1, n_steps + 1):
@@ -571,7 +588,8 @@ def explicit_stepwise_directional_derivatives(
     value, objective_pullback = jax.vjp(
         lambda state: loss_at_state(reference, state), states[-1])
     cotangent = objective_pullback(jnp.ones_like(value))[0]
-    compiled_step_vjp, compiled_step_jvp = build_compiled_step_transforms(context)
+    compiled_step_vjp, compiled_step_jvp = build_compiled_step_transforms(
+        context, plant_boundary_primal=plant_boundary_primal)
     boundary_reports = {}
     replay_reports = {}
     for kt in range(n_steps, 0, -1):
@@ -782,6 +800,7 @@ def directional_derivatives(
 
 
 def measure_agreement(n_steps: int, schedule: str, *, plant=False,
+                      plant_boundary_primal=False,
                       transcendentals: str = "libm"):
     """Build and evaluate one certified-card agreement row."""
     context = build_context(transcendentals=transcendentals)
@@ -834,7 +853,8 @@ def measure_agreement(n_steps: int, schedule: str, *, plant=False,
             try:
                 row = explicit_stepwise_directional_derivatives(
                     context, reference, base, direction, n_steps,
-                    plant=plant)
+                    plant=plant,
+                    plant_boundary_primal=plant_boundary_primal)
             except (TypeError, ValueError, RuntimeError) as error:
                 row = unmeasured_agreement(
                     f"{type(error).__name__}: {error}")
@@ -852,7 +872,10 @@ def measure_agreement(n_steps: int, schedule: str, *, plant=False,
             jax.default_backend(), transcendentals),
         "state_dtype": str(context.initial_state.T.data.dtype),
         "geometry_dtype": str(context.card.recipe.z_coord.dz_ref.dtype),
-        "plant": "broken_vjp" if plant else None,
+        "plant": (
+            "broken_vjp" if plant else
+            "boundary_primal_nextafter" if plant_boundary_primal else None
+        ),
         "production_entry": "LatLonCGridOceanModel._step_jitted",
         "composition": "explicit per-production-step VJP/JVP composition",
         "schedule_scope": "Decision-49 per-step Python composition",
@@ -1070,12 +1093,13 @@ def measure_blocked_reverse(reverse, zero_alpha, backend: str):
     sampler.start()
     started = time.perf_counter()
     try:
-        value, gradient = reverse(zero_alpha)
-        jax.block_until_ready((value, gradient))
+        (value, final_state), gradient = reverse(zero_alpha)
+        jax.block_until_ready((value, final_state, gradient))
         wall_seconds = time.perf_counter() - started
     finally:
         sampler.stop()
-    return ReversePassMeasurement(value, gradient, wall_seconds, sampler)
+    return ReversePassMeasurement(
+        value, final_state, gradient, wall_seconds, sampler)
 
 
 def measure_cold_and_warm_reverse(
@@ -1089,7 +1113,7 @@ def measure_cold_and_warm_reverse(
 
 def build_compiled_reverse(line):
     """Build the compiled reverse executable used by resource measurements."""
-    return jax.jit(jax.value_and_grad(line))
+    return jax.jit(jax.value_and_grad(line, has_aux=True))
 
 
 def extrapolate_steps(
@@ -1184,11 +1208,15 @@ def measure_resources(n_steps: int, schedule: str, *,
         f"{schedule} schedule primal differs from per-step production beyond "
         f"the checkpoint-schedule contract: {primal_comparison}",
     )
-    loss = make_loss(context, reference, n_steps, schedule=schedule)
     base, direction = perturbations(context)
 
+    production_base = production_rollout(context, base, n_steps)
+    jax.block_until_ready(production_base)
+
     def line(alpha):
-        return loss(base + alpha * direction)
+        final_state = scheduled_rollout(
+            context, base + alpha * direction, n_steps, schedule)
+        return loss_at_state(reference, final_state), final_state
 
     reverse = build_compiled_reverse(line)
     zero_alpha = jnp.asarray(0.0, dtype=base.dtype)
@@ -1214,6 +1242,8 @@ def measure_resources(n_steps: int, schedule: str, *,
         reverse, zero_alpha, backend, after_cold=after_cold)
     cold_wall_s = cold.wall_seconds
     value, gradient = warm.value, warm.gradient
+    transformed_primal_comparison = state_bitwise_report(
+        production_base, warm.final_state)
     wall_s = warm.wall_seconds
     sampler = cold.sampler if backend == "gpu" else warm.sampler
     gradient_array = np.asarray(gradient)
@@ -1255,6 +1285,9 @@ def measure_resources(n_steps: int, schedule: str, *,
         "checkpoint_schedule_first_model_step": 2 if n_steps > 1 else None,
         "schedule_primal_bitwise_production": primal_comparison["bitwise"],
         "schedule_primal_comparison": primal_comparison,
+        "reverse_primal_bitwise_production": transformed_primal_comparison[
+            "bitwise_equal"],
+        "reverse_primal_comparison": transformed_primal_comparison,
         "local_ad_boundary": (
             "separate production primal; unchanged production-step JVP/VJP"),
         "cold_compile_and_reverse_wall_seconds": cold_wall_s,
@@ -1358,6 +1391,7 @@ def classify_resource_row(row: dict) -> str:
         row.get("gradient_finite")
         and row.get("gradient_nonzero")
         and row.get("schedule_primal_bitwise_production")
+        and row.get("reverse_primal_bitwise_production")
         and all(math.isfinite(value) for value in numeric)
         and row["cold_compile_and_reverse_wall_seconds"] > 0.0
         and row["warm_reverse_wall_seconds"] > 0.0
@@ -1585,7 +1619,7 @@ def parse_args(argv=None):
         "--schedule", choices=AGREEMENT_COMPOSITIONS)
     parser.add_argument(
         "--plant", choices=(
-            "broken_vjp", "constant_time", "gpu_ordering",
+            "broken_vjp", "boundary_primal", "constant_time", "gpu_ordering",
             "flat_none_memory",
         ))
     parser.add_argument("--input-row", type=Path, action="append", default=[])
@@ -1604,8 +1638,10 @@ def parse_args(argv=None):
         parser.error(f"{args.mode} mode requires --steps")
     if args.mode in ("agreement", "resources") and args.schedule is None:
         parser.error(f"{args.mode} mode requires --schedule")
-    if args.mode == "agreement" and args.plant not in (None, "broken_vjp"):
-        parser.error("agreement accepts only the broken_vjp plant")
+    if args.mode == "agreement" and args.plant not in (
+            None, "broken_vjp", "boundary_primal"):
+        parser.error(
+            "agreement accepts only broken_vjp or boundary_primal plants")
     if args.mode == "resources" and args.plant is not None:
         parser.error("resources mode does not accept --plant")
     if args.mode == "resources" and args.steps not in RESOURCE_STEPS:
@@ -1646,6 +1682,7 @@ def main(argv=None) -> int:
     if args.mode == "agreement":
         row = measure_agreement(
             args.steps, args.schedule, plant=args.plant == "broken_vjp",
+            plant_boundary_primal=args.plant == "boundary_primal",
             transcendentals=args.transcendentals)
     elif args.mode == "resources":
         agreement_reference, agreement_sha256 = load_agreement_reference(

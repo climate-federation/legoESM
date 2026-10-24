@@ -85,6 +85,7 @@ run_row() {
   local steps=$3
   local schedule=$4
   local agreement_row=${5:-}
+  local plant=${6:-}
   local rc=0
   LAST_ROW_CLASSIFIED=0
   LAST_ROW_STATUS=
@@ -92,6 +93,7 @@ run_row() {
   args=("$mode" --steps "$steps" --schedule "$schedule" \
     --transcendentals native --expect-commit "$COMMIT" --output "$output")
   [[ -z "$agreement_row" ]] || args+=(--agreement-row "$agreement_row")
+  [[ -z "$plant" ]] || args+=(--plant "$plant")
   if CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
       XLA_PYTHON_CLIENT_PREALLOCATE=false PYTHONPATH="$MODEL_PATH" \
       env -u XLA_PYTHON_CLIENT_ALLOCATOR \
@@ -112,7 +114,7 @@ import pathlib
 import sys
 
 row = json.loads(pathlib.Path(sys.argv[1]).read_text())
-commit, mode, steps, schedule, agreement_row = sys.argv[2:]
+commit, mode, steps, schedule, agreement_row, plant = sys.argv[2:]
 expected = "GPU, XLA transcendentals — not the certified bit-exact policy"
 assert row["measurement_policy_label"] == expected, row
 assert "transcendentals=\x27native\x27" in row["precision_policy"], row
@@ -128,8 +130,8 @@ status = row.get("status")
 assert status in {
     "CONFIRMED", "REFUTED", "UNMEASURED", "VACUOUS", "RETRACTED"}, row
 if mode == "resources":
-    assert row["resource_schema"] == "gyre-gradgate-resource-v3-primal-preserving-boundary", row
-    assert row["reverse_transform"] == "jax.jit(jax.value_and_grad(scalar_line))", row
+    assert row["resource_schema"] == "gyre-gradgate-resource-v4-transformed-primal-byte-gate", row
+    assert row["reverse_transform"] == "jax.jit(jax.value_and_grad(loss_with_final_state, has_aux=True))", row
     assert row["warm_reverse_timer_span"].startswith("blocked execution"), row
     assert row["xla_python_client_preallocate"].lower() == "false", row
     assert row["xla_python_client_allocator"] is None, row
@@ -137,6 +139,7 @@ if mode == "resources":
     assert row["checkpointed_warm_steps"] == int(steps) - 1, row
     assert row["checkpoint_schedule_first_model_step"] == 2, row
     assert row["schedule_primal_bitwise_production"] is True, row
+    assert isinstance(row["reverse_primal_bitwise_production"], bool), row
     assert row["resource_status"] in {"CONFIRMED", "REFUTED", "VACUOUS", "RETRACTED"}, row
     assert row["gradient_agreement_status"] in {"CONFIRMED", "REFUTED"}, row
     for key in ("reverse", "forward", "finite_difference",
@@ -152,10 +155,15 @@ else:
     assert footprint["jvp_step_invocations"] == int(steps), row
     assert row["step_boundary_primal_source"] == (
         "separately materialized production _step_jitted output"), row
-    assert row["step_vjp_boundary_outputs_bitwise"] is True, row
-    assert row["step_jvp_boundary_outputs_bitwise"] is True, row
+    if plant == "boundary_primal":
+        assert status == "UNMEASURED", row
+        assert row["step_vjp_boundary_outputs_bitwise"] is False, row
+        assert row["step_jvp_boundary_outputs_bitwise"] is False, row
+    else:
+        assert row["step_vjp_boundary_outputs_bitwise"] is True, row
+        assert row["step_jvp_boundary_outputs_bitwise"] is True, row
 print(status)
-' "$output" "$COMMIT" "$mode" "$steps" "$schedule" "$agreement_row"); then
+' "$output" "$COMMIT" "$mode" "$steps" "$schedule" "$agreement_row" "$plant"); then
     printf 'REFUSE gyre-gradgate-gpu: invalid row provenance: %s\n' \
       "$output" >&2
     ((ROW_FAILURES += 1))
@@ -165,7 +173,9 @@ print(status)
   accept_classified_exit "$LAST_ROW_STATUS" "$rc" row
   printf 'GYRE_GRADGATE_GPU_ROW mode=%s steps=%s schedule=%s status=%s output=%s\n' \
     "$mode" "$steps" "$schedule" "$LAST_ROW_STATUS" "$output"
-  if [[ $LAST_ROW_STATUS != CONFIRMED ]]; then
+  if [[ $plant == boundary_primal ]]; then
+    [[ $LAST_ROW_STATUS == UNMEASURED ]] || ((ROW_FAILURES += 1))
+  elif [[ $LAST_ROW_STATUS != CONFIRMED ]]; then
     ((ROW_FAILURES += 1))
   fi
 }
@@ -219,6 +229,8 @@ for steps in "${AGREEMENT_WINDOWS[@]:0:3}"; do
     short_rows_classified=0
   fi
 done
+run_row "$EVIDENCE_DIR/gpu1_agreement_1step_boundary_plant.json" \
+  agreement 1 per_step "" boundary_primal
 if [[ $short_rows_classified -eq 1 ]]; then
   long_steps=${AGREEMENT_WINDOWS[3]}
   run_row "$EVIDENCE_DIR/gpu1_agreement_${long_steps}step.json" \
