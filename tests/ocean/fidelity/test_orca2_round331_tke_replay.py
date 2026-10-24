@@ -24,6 +24,17 @@ def test_score_by_level_is_bit_exact_and_its_plant_moves_one_row():
     assert moved["unequal_by_level"] == [0, 0, 0, 1]
 
 
+def test_boundary_score_does_not_hide_a_dry_solve_operand_plant():
+    expected = np.zeros((1, 1, 2), dtype=np.float64)
+    actual = expected.copy()
+    actual[..., 1] = 1.0
+    wet = np.array([[[True, False]]])
+    scored = replay.score_boundary(actual, expected, wet)
+    assert scored["bit_identical"]
+    assert not scored["all_loop_cells"]["bit_identical"]
+    assert scored["all_loop_cells"]["unequal"] == 1
+
+
 def test_assemble_uses_the_recorded_i_rank_decomposition():
     records = {
         0: {"fields": {"x": np.full((2, 3, 1), 7.0)}},

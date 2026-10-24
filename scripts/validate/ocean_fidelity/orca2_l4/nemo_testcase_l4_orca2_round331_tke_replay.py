@@ -52,6 +52,15 @@ def score_by_level(actual: np.ndarray, expected: np.ndarray,
     return result
 
 
+def score_boundary(actual: np.ndarray, expected: np.ndarray,
+                   wet_support: np.ndarray) -> dict[str, object]:
+    """Score returned wet values and every compiled-loop operand separately."""
+    result = score_by_level(actual, expected, wet_support)
+    result["all_loop_cells"] = score_by_level(
+        actual, expected, np.ones(np.asarray(actual).shape, dtype=bool))
+    return result
+
+
 def _run_live_trace(root: Path):
     import jax
 
@@ -115,7 +124,7 @@ def compare_trace(records: dict[int, dict], card, traced) -> dict[str, object]:
     }
     rows: dict[str, object] = {}
     for name, (actual, expected_name, citation) in full_rows.items():
-        rows[name] = score_by_level(
+        rows[name] = score_boundary(
             np.asarray(actual, dtype=np.float64), assemble(records, expected_name),
             full_wet)
         rows[name]["nemo_citation"] = citation
@@ -146,7 +155,7 @@ def compare_trace(records: dict[int, dict], card, traced) -> dict[str, object]:
             expected = expected[..., 1:]
         elif expected.shape[-1] == full_wet.shape[-1]:
             expected = expected[..., 1:]
-        rows[name] = score_by_level(
+        rows[name] = score_boundary(
             np.asarray(actual, dtype=np.float64), expected, interior_wet)
         rows[name]["nemo_citation"] = citation
 
@@ -157,11 +166,14 @@ def compare_trace(records: dict[int, dict], card, traced) -> dict[str, object]:
         "after_tke_energy", "after_tke_avm", "after_tke_avt",
     )
     first = next((name for name in ordered if not rows[name]["bit_identical"]), None)
+    first_all = next((name for name in ordered
+                      if not rows[name]["all_loop_cells"]["bit_identical"]), None)
     return {
         "backend": __import__("jax").default_backend(),
         "dtype": str(np.asarray(trace.en_post_sweep).dtype),
         "rows": rows,
         "first_non_bit_boundary": first,
+        "first_non_bit_loop_operand_boundary": first_all,
     }
 
 
