@@ -163,6 +163,10 @@ No NEMO executable was run by Codex.
 - Preregistered predictions R331-P1 through P4: all **CONFIRMED**.
 - Focused compiled-layout, admission, control, and same-program battery:
   19 passed; the imported clean preflight battery is 44 passed.
+- Per-receipt citation gate: PASS, 10 citations, 0 unmapped, 0 failures, and
+  0 map-audit failures; the required citation-gate pytest is 17 passed.
+- Default ORCA2 landing battery: 148 passed in 943.01 s, including the
+  six-test private-import ratchet.
 - No configuration value changed: **ASKED**.
 - No model change, seven-pair Decision-122 score, cross-card measurement, or
   gradient claim is made because ownership is still unmeasured: **ASKED**.
