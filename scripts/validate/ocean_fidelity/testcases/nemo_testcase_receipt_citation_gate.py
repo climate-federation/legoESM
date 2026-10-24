@@ -9184,7 +9184,7 @@ for _citation in tuple(CITATION_MAP):
 
 CITATION_MAP.update({
     "packages/ice/legoesm/ice/si3_orca2_state.py:1678-1686": [
-        "def si3_rst_from_netcdf_dict(", ") -> SI3State:", 9,
+        "def si3_rst_from_netcdf_dict(", (") -> SI3State:", 3), 9,
     ],
     "packages/ice/legoesm/ice/si3_orca2_state.py:2022-2030": [
         "def write_si3_netcdf_restart(",
@@ -9208,7 +9208,7 @@ CITATION_MAP.update({
     ],
     "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:697-725": [
         "# Real NEMO IOM convention: a gfortran/NetCDF producer writes Ni_0 x Nj_0",
-        "PY",
+        ("PY", 14),
         29,
     ],
     "scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/run.sh:949-958": [
