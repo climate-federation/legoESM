@@ -491,3 +491,19 @@ COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/orca2_
 ACQUISITION_NEEDED: NONE
 DECISION_NEEDED: NONE
 ROUND_STATUS: LANDED_PENDING_OPERATOR_REVIEW — retained record admitted; k=28 and k=0 first diverge in TKE
+
+## Operator amendments after independent review (Claude LAND, Argon LAND)
+
+- **Owner wording narrowed.** "The first owning source-order statement is the TKE call" overclaims: the earlier unrecorded
+  inputs zdf_sh2 (record build zdfphy.f90:318), zdf_drg (:327-328) and zdf_mxl (:330) are not excluded by this record.
+  CONFIRMED: post-TKE is the first unequal recorded boundary at all 29 levels; TKE entry rn2 is bit-identical at all
+  414,119 interfaces; returned en differs at 5,661 (all 4,757 wet k = 28 interfaces, 279 at k = 0). PLAUSIBLE: the owner
+  is inside zdf_tke or one of those three unrecorded inputs.
+- **Next target (Claude review, PLAUSIBLE).** The bottom TKE value written at the end of the array, en(mbkt+1 = jpk)
+  (zdftke.f90:295), feeding the last solve row: it hits all 4,757 full-depth columns but only 6 of 2,760 columns whose
+  bottom is one level higher, so the bottom-friction formula itself is not the cause. Argon names the same region
+  (top/bottom en boundary conditions, zdftke.f90:272-310).
+- Both reviewers confirmed independently: zFw is never assigned in the active vector-invariant branch before the
+  writer (record stprk3_stg.f90:121,323-351; tra_adv_trp overwrites pFw, traadv.f90:196,311); 159 of 160 inherited
+  files exact and transport_s2 exact over header + zFu + zFv; a zFu flip refuses, a zFw flip passes; re-admission
+  pinned to producer 30cb3f2a8 and its binary digest; no packages/ change.
