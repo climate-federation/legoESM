@@ -15,7 +15,7 @@ This round executes rung **D5** of the SI3 sea-ice fidelity ladder (`docs/ice/fi
   * `d5_platform_probe_cpu.json` (CPU default, `XLA_FLAGS=""`) SHA-256: `8e9de0b3de4648be43eb40275b6520cf40156ddac308940b736d39f00af9dbcf`
   * `d5_platform_probe_cpu_avx_nofma.json` (CPU FMA disabled, `XLA_FLAGS="--xla_cpu_max_isa=AVX"`) SHA-256: `c8be84fa73ea213136967fba05e5f8821bb2d00c1c1ecdc23e26b14c4bf3aaf9`
   * `d5_platform_probe_gpu.json` (GPU 1 pinned via `CUDA_VISIBLE_DEVICES=1`) SHA-256: `3f2c622e5c0751337d306f096d30a4b6b6a44148eb57d9fdd4e5f52574ceb388`
-  * `gpu_nvidia_smi_before.txt` SHA-256: `c72f77ea02607b1183b6245635a2245635a2244381554b83e426f4f356b89329feefb757`
+  * `gpu_nvidia_smi_before.txt` SHA-256: `c72f77ea02607b1183b6245635a2244381554b83e426f4f356b89329feefb757`
   * `gpu_nvidia_smi_after.txt` SHA-256: `af76586d8e9d0257eaa8b4e259080df666f0ad50054fe427e0f784245dd0f472`
 * **Compiled `jax.jit` evidence artifacts under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round3/` (`r2_pre_reciprocals` and `r2_baseline` arms):**
   * `cpu_default_probe.json` SHA-256: `3b500ddf849202a66143bc0cbfa6c4524830a4f00847793415fe7fb4acd36c69`
