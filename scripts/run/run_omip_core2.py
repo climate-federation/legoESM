@@ -7610,6 +7610,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--spinup-drag-days", type=float, default=0.0,
                    help="Duration [days] of the spin-up velocity-damping phase "
                         "(drag removed afterwards -> free run).")
+    from legoesm.ocean.biogeochemistry.omip_hooks import add_arguments as _bgc_add_args
+    _bgc_add_args(p)
     return p
 
 
@@ -9270,6 +9272,8 @@ def main() -> int:
         # baseline because the sampler flag was hashed).
         "evd_occupancy_every_hours", "kprofile_snapshots",
         "restart_branch_from_different_config",
+        # operator-split BGC (omip_hooks): outside the ocean state; its own sidecar
+        "biogeo", "pco2_atm", "bgc_init_dir", "bgc_k_bg", "bgc_diag_every_days", "bgc_every",
     })
     # Path-valued args are normalised before hashing so an equivalent relative
     # path or symlink cannot false-abort a legitimate chained leg.
@@ -10234,6 +10238,13 @@ def main() -> int:
         _evd_box = ((np.asarray(state.land_mask.data) > 0.5)
                     & (np.abs(_evd_lat) <= 2.0)
                     & (_evd_lon >= 220.0) & (_evd_lon < 240.0))
+    # ---- operator-split ocean biogeochemistry (--biogeo) ------------------
+    from legoesm.ocean.biogeochemistry.omip_hooks import BGCRunner as _BGCRunner
+    _bgc = _BGCRunner.from_args(
+        args, state, grid, z_coord, model,
+        np.asarray(grid.areaCell if hasattr(grid, 'areaCell') else grid.area))
+    if _bgc is not None and args.restart_from and start_step > 0:
+        _bgc.load(args.restart_from, start_step)
     for step in range(start_step + 1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _t_sec = jnp.asarray((step - 1) * dt) if _tide_on else None
@@ -10754,7 +10765,10 @@ def main() -> int:
                         freshwater=(_fw_restore if sf.freshwater is None
                                     else sf.freshwater + _fw_restore))
             state = _ensure_sharded_state(state)
+            _h_old_bgc = _bgc.before_step(state) if _bgc is not None else None
             state = _ocean_step(state, sf, fw, _t_sec)
+        if _bgc is not None:
+            _bgc.after_step(_h_old_bgc, _ensure_global_state(state), sf, ice_state, dt, step)
         if _gw_acc is not None:
             # READ-ONLY: `state` is never reassigned here, so the trajectory
             # is bit-identical to a run without the flag.
@@ -11075,6 +11089,8 @@ def main() -> int:
             # when the snapshot block above already did).
             state = _ensure_global_state(state)
             _write_run_restart(step, step * dt / _SEC_PER_DAY, state, ice_state)
+            if _bgc is not None and args.restart_save and _is_io_proc():
+                _bgc.save(args.restart_save, step)
         if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
             yr = step // steps_per_year
             state = _ensure_global_state(state)
@@ -11094,6 +11110,8 @@ def main() -> int:
                    extra=(_kprofiles(model, state, sf, dt, z_coord)
                           if args.kprofile_snapshots else None))
     _write_run_restart(n_steps, n_steps * dt / _SEC_PER_DAY, state, ice_state)
+    if _bgc is not None and args.restart_save and _is_io_proc():
+        _bgc.save(args.restart_save, n_steps)
     _amoc26n_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _acc_drake_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
     _save_bsf_amoc_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc=_io)
