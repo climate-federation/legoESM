@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 
 import jax
@@ -234,13 +235,13 @@ def test_d5_zdf_layer_reciprocals_statement_is_bit_exact_and_fails_when_reverted
         )
 
     # 3. Verify that reverting the fix at kt = 5841 FAILS bit-exactness and the 1e-15 bar
-    for field_name, got_rev, expected_ulp in (
-        ("t_su", np.asarray(reverted_5841.T_surface, dtype=np.float64).ravel(), 271),
-        ("e_s", np.asarray(reverted_5841.e_snow, dtype=np.float64).ravel(), 716),
-        ("e_i", np.asarray(reverted_5841.e_ice, dtype=np.float64).ravel(), 553),
+    for field_name, got_rev, expected_ulps in (
+        ("t_su", np.asarray(reverted_5841.T_surface, dtype=np.float64).ravel(), (269, 271)),
+        ("e_s", np.asarray(reverted_5841.e_snow, dtype=np.float64).ravel(), (710, 716)),
+        ("e_i", np.asarray(reverted_5841.e_ice, dtype=np.float64).ravel(), (553,)),
     ):
         wanted = np.asarray(oracle_5841[field_name], dtype=np.float64).ravel()
-        assert probe_module._ulp_diff(got_rev, wanted) == expected_ulp
+        assert probe_module._ulp_diff(got_rev, wanted) in expected_ulps
         _, rev_norm = probe_module.year_gate._normalised_error(wanted, got_rev)
         assert rev_norm > probe_module.phase2.BAR
         with pytest.raises(AssertionError):
@@ -612,17 +613,31 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch) -> None:
         mp.setattr(
             bl_mod,
             "_radiation",
-            partial(orig_rad, _nemo_zdf_layer_reciprocals=False),
+            partial(
+                orig_rad,
+                _nemo_zdf_layer_reciprocals=False,
+                _nemo_source_round=False,
+            ),
         )
         mp.setattr(
             bl_mod,
             "_si3_zdf_bl99_step",
-            partial(orig_zdf, _nemo_zdf_layer_reciprocals=False),
+            partial(
+                orig_zdf,
+                _nemo_zdf_layer_reciprocals=False,
+                _nemo_glo2eqv_snow_temp=False,
+                _nemo_source_round=False,
+            ),
         )
         mp.setattr(
             bl_mod,
             "si3_column_step_arrays",
-            partial(orig_col, _nemo_zdf_layer_reciprocals=False),
+            partial(
+                orig_col,
+                _nemo_zdf_layer_reciprocals=False,
+                _nemo_glo2eqv_snow_temp=False,
+                _nemo_source_round=False,
+            ),
         )
         bits_flag_off = _run_non_si3_paths()
 
@@ -695,12 +710,25 @@ def test_d5_platform_probe_and_planted_controls(probe_module) -> None:
     """Direct unit test for nemo_si3thd_d5_platform_probe.py and its planted controls."""
     report = probe_module.run_probe(
         include_year_rescore=False,
+        year_max_steps=30,
         allow_dirty=True,
     )
     assert report["format"] == "nemo-si3thd-d5-platform-probe-v2"
     stage_a = report["stage_a_subnormal_probe"]
     stage_b = report["stage_b_predicate_probe"]
     stage_c = report["stage_c_zdf_probe"]
+    step1 = report["step1_reviewer_reproduction"]
+
+    assert (
+        step1["zdf_entry_snow_temperature"]["step2_plus_step3_nonzero_ulp_steps"]
+        == 0
+    )
+    assert (
+        step1["normal_steps_post_zdf_26202_rows"][
+            "nemo_exact_inputs_source_rounded"
+        ]["zero_ulp_rows"]
+        == 30 * 3
+    )
 
     assert stage_a["input_x_bits"] == "0x0000000000000001"
     assert stage_b["subnormal_zdf_entry_step_count"] == 26
@@ -740,7 +768,8 @@ def test_d5_platform_probe_and_planted_controls(probe_module) -> None:
         assert stage_b["daz_flushes_subnormal_input"] is False
         assert stage_b["predicate_all_true"] is True
         assert stage_c["before_statement_fix"]["over_bar_post_zdf_count"] == 57
-        assert stage_c["after_statement_fix"]["over_bar_post_zdf_count"] == 1
+        assert stage_c["after_statement_fix"]["over_bar_post_zdf_count"] == 0
+        assert stage_c["after_statement_fix"]["nonzero_ulp_post_zdf_count"] == 0
         assert (
             stage_c["after_statement_fix"]["detailed_post_zdf_steps"]["kt5860"][
                 "e_s"
@@ -752,6 +781,7 @@ def test_d5_platform_probe_and_planted_controls(probe_module) -> None:
     planted_zero = probe_module.run_probe(
         plant="zero_subnormal_input",
         include_year_rescore=False,
+        include_step1_reproduction=False,
         allow_dirty=True,
     )
     assert planted_zero["stage_a_subnormal_probe"]["input_x_bits"] == "0x0000000000000000"
@@ -761,6 +791,7 @@ def test_d5_platform_probe_and_planted_controls(probe_module) -> None:
     planted_flush = probe_module.run_probe(
         plant="flush_recorded_operand",
         include_year_rescore=False,
+        include_step1_reproduction=False,
         allow_dirty=True,
     )
     assert planted_flush["stage_b_predicate_probe"]["predicate_true_count"] == 0
@@ -771,6 +802,7 @@ def test_d5_platform_probe_and_planted_controls(probe_module) -> None:
     planted_revert = probe_module.run_probe(
         plant="revert_statement_fix",
         include_year_rescore=False,
+        include_step1_reproduction=False,
         allow_dirty=True,
     )
     assert (
@@ -778,6 +810,20 @@ def test_d5_platform_probe_and_planted_controls(probe_module) -> None:
             "detailed_post_zdf_steps"
         ]["kt5841"]["e_s"]["max_ulp"]
         in (710, 716)
+    )
+
+    planted_snow_temp = probe_module.run_probe(
+        plant="revert_snow_temp_statement",
+        include_year_rescore=False,
+        include_step1_reproduction=True,
+        year_max_steps=30,
+        allow_dirty=True,
+    )
+    assert (
+        planted_snow_temp["step1_reviewer_reproduction"][
+            "zdf_entry_snow_temperature"
+        ]["step2_plus_step3_nonzero_ulp_steps"]
+        > 0
     )
 
     # Also test Stage D year_rescore on the first 30 steps
@@ -792,3 +838,404 @@ def test_d5_platform_probe_and_planted_controls(probe_module) -> None:
     assert rescore_30["touched_field_row_count"] > 0
     assert rescore_30["closed_to_at_bar_count"] > 0
     assert rescore_30["over_bar_after"] < rescore_30["over_bar_before"]
+    assert (
+        rescore_30["arms"]["step2_plus_step3_plus_step4"][
+            "normal_post_zdf_3field"
+        ]["zero_ulp_rows"]
+        == 30 * 3
+    )
+    assert (
+        rescore_30["arms"]["step2_plus_step3_plus_step4"][
+            "normal_post_zdf_3field"
+        ]["over_bar_rows"]
+        == 0
+    )
+
+
+def test_r3_step2_harness_entry_conversion_is_bit_exact_and_fails_when_reverted(
+    probe_module,
+) -> None:
+    """Pin Step 2 harness entry conversion (`icevar.F90:368,374,390,412,488-506`) bit-for-bit."""
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    c = card.config.ice_constants
+    steps = _load_step_operands(probe_module, (1, 2, 15))
+
+    # At kt = 2, `(e_s / v_s) * 3.0` vs `(e_s * 3.0) / v_s`, `(e_i / v_i) * 3.0`
+    # vs `(e_i * 3.0) / v_i`, and `_nemo_salprof(s_i)` vs `szv_i * 3.0 / v_i`
+    # differ on inexact recorded C1D operands.
+    frames_2, exact_2 = steps[2]
+    entry_nemo = probe_module.year_gate._exact_1d_entry(
+        frames_2, _nemo_entry_conversion=True
+    )
+    entry_rev = probe_module.year_gate._exact_1d_entry(
+        frames_2, _nemo_entry_conversion=False
+    )
+
+    oracle_szi_2 = np.asarray(frames_2[1]["sz_i"], dtype=np.float64).ravel()
+    assert (
+        probe_module._ulp_diff(
+            np.asarray(entry_nemo.S_layers, dtype=np.float64).ravel(),
+            oracle_szi_2,
+        )
+        == 0
+    )
+    assert (
+        probe_module._ulp_diff(
+            np.asarray(entry_rev.S_layers, dtype=np.float64).ravel(),
+            oracle_szi_2,
+        )
+        == 1
+    )
+    with pytest.raises(AssertionError):
+        np.testing.assert_array_equal(
+            np.asarray(entry_rev.S_layers, dtype=np.float64).view(np.uint64),
+            oracle_szi_2.view(np.uint64),
+        )
+
+    # Verify entry `e_s` at kt = 15 (`(e_s / v_s) * 3.0` vs `(e_s * 3.0) / v_s`)
+    frames_15, exact_15 = steps[15]
+    entry_nemo_15 = probe_module.year_gate._exact_1d_entry(
+        frames_15, _nemo_entry_conversion=True
+    )
+    entry_rev_15 = probe_module.year_gate._exact_1d_entry(
+        frames_15, _nemo_entry_conversion=False
+    )
+    assert (
+        probe_module._ulp_diff(
+            np.asarray(entry_nemo_15.e_snow, dtype=np.float64).ravel(),
+            np.asarray(entry_rev_15.e_snow, dtype=np.float64).ravel(),
+        )
+        == 1
+    )
+    ts_nemo_15 = np.asarray(
+        bl_mod.snow_temperature_from_enthalpy(
+            jnp.asarray(entry_nemo_15.e_snow, dtype=jnp.float64),
+            c,
+            _nemo_glo2eqv_snow_temp=True,
+            _nemo_source_round=True,
+        ),
+        dtype=np.float64,
+    ).ravel()
+    ts_rev_15 = np.asarray(
+        bl_mod.snow_temperature_from_enthalpy(
+            jnp.asarray(entry_rev_15.e_snow, dtype=np.float64),
+            c,
+            _nemo_glo2eqv_snow_temp=True,
+            _nemo_source_round=True,
+        ),
+        dtype=np.float64,
+    ).ravel()
+    oracle_ts_15 = np.asarray(exact_15["t_s"], dtype=np.float64).ravel()
+    assert probe_module._ulp_diff(ts_nemo_15, oracle_ts_15) == 0
+    assert probe_module._ulp_diff(ts_rev_15, oracle_ts_15) == 1
+    with pytest.raises(AssertionError):
+        np.testing.assert_array_equal(
+            ts_rev_15.view(np.uint64), oracle_ts_15.view(np.uint64)
+        )
+
+
+def test_r3_step3_snow_temperature_from_enthalpy_is_bit_exact_and_fails_when_reverted(
+    probe_module,
+) -> None:
+    """Pin Step 3 `snow_temperature_from_enthalpy` (`icevar.F90:412-413`) bit-for-bit."""
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    c = card.config.ice_constants
+    steps = _load_step_operands(probe_module, (2, 15, 1334))
+
+    for kt in (2, 15, 1334):
+        frames, exact_in = steps[kt]
+        entry = probe_module.year_gate._exact_1d_entry(
+            frames, _nemo_entry_conversion=True
+        )
+        e_s_jax = jnp.asarray(entry.e_snow, dtype=jnp.float64)
+        oracle_ts = np.asarray(exact_in["t_s"], dtype=np.float64).ravel()
+
+        got_fixed = np.asarray(
+            jax.jit(
+                lambda e: bl_mod.snow_temperature_from_enthalpy(
+                    e,
+                    c,
+                    _nemo_order=True,
+                    _nemo_glo2eqv_snow_temp=True,
+                    _nemo_source_round=True,
+                )
+            )(e_s_jax),
+            dtype=np.float64,
+        ).ravel()
+        got_reverted = np.asarray(
+            jax.jit(
+                lambda e: bl_mod.snow_temperature_from_enthalpy(
+                    e,
+                    c,
+                    _nemo_order=True,
+                    _nemo_glo2eqv_snow_temp=False,
+                    _nemo_source_round=True,
+                )
+            )(e_s_jax),
+            dtype=np.float64,
+        ).ravel()
+
+        assert probe_module._ulp_diff(got_fixed, oracle_ts) == 0
+        np.testing.assert_array_equal(
+            got_fixed.view(np.uint64), oracle_ts.view(np.uint64)
+        )
+        assert probe_module._ulp_diff(got_reverted, oracle_ts) >= 1
+        with pytest.raises(AssertionError):
+            np.testing.assert_array_equal(
+                got_reverted.view(np.uint64), oracle_ts.view(np.uint64)
+            )
+
+    # At kt = 1334, reverting Step 3 alone pushes POST_ZDF.e_s over the 1e-15 bar!
+    frames_1334, exact_in_1334 = steps[1334]
+    entry_1334 = probe_module.year_gate._exact_1d_entry(
+        frames_1334, _nemo_entry_conversion=True
+    )
+    jax_entry_1334 = jax.tree.map(
+        lambda v: jnp.asarray(v, dtype=jnp.float64), entry_1334
+    )
+    forcing_1334 = probe_module.year_gate._forcing(exact_in_1334, jnp.float64)
+    zdf_fixed_1334 = jax.jit(
+        lambda ent, f: _si3_zdf_bl99_step(
+            ent.e_ice,
+            ent.e_snow,
+            ent.S_layers,
+            ent.h_ice,
+            ent.h_snow,
+            ent.T_surface,
+            f,
+            card.dt_seconds,
+            c,
+            _nemo_glo2eqv_snow_temp=True,
+            _nemo_source_round=True,
+        )
+    )(jax_entry_1334, forcing_1334)
+    zdf_rev_1334 = jax.jit(
+        lambda ent, f: _si3_zdf_bl99_step(
+            ent.e_ice,
+            ent.e_snow,
+            ent.S_layers,
+            ent.h_ice,
+            ent.h_snow,
+            ent.T_surface,
+            f,
+            card.dt_seconds,
+            c,
+            _nemo_glo2eqv_snow_temp=False,
+            _nemo_source_round=True,
+        )
+    )(jax_entry_1334, forcing_1334)
+    oracle_es_1334 = np.asarray(frames_1334[1]["e_s"], dtype=np.float64).ravel()
+    got_es_fixed_1334 = np.asarray(zdf_fixed_1334.e_snow, dtype=np.float64).ravel()
+    got_es_rev_1334 = np.asarray(zdf_rev_1334.e_snow, dtype=np.float64).ravel()
+    assert probe_module._ulp_diff(got_es_fixed_1334, oracle_es_1334) == 0
+    _, norm_rev_1334 = probe_module.year_gate._normalised_error(
+        oracle_es_1334, got_es_rev_1334
+    )
+    assert norm_rev_1334 > probe_module.phase2.BAR
+
+
+def test_r3_step4_cpu_fusion_prevention_is_bit_exact_and_fails_when_reverted(
+    probe_module,
+) -> None:
+    """Pin Step 4 `nemo_source_round` fusion prevention (DECISION 158) bit-for-bit."""
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    c = card.config.ice_constants
+    steps = _load_step_operands(probe_module, (1, 3, 2906, 4242, 5841))
+
+    for kt in (1, 3, 2906, 4242, 5841):
+        frames, exact_in = steps[kt]
+        entry = probe_module.year_gate._exact_1d_entry(
+            frames, _nemo_entry_conversion=True
+        )
+        jax_entry = jax.tree.map(
+            lambda v: jnp.asarray(v, dtype=jnp.float64), entry
+        )
+        forcing = probe_module.year_gate._forcing(exact_in, jnp.float64)
+        zdf_fixed = jax.jit(
+            lambda ent, f: _si3_zdf_bl99_step(
+                ent.e_ice,
+                ent.e_snow,
+                ent.S_layers,
+                ent.h_ice,
+                ent.h_snow,
+                ent.T_surface,
+                f,
+                card.dt_seconds,
+                c,
+                _nemo_glo2eqv_snow_temp=True,
+                _nemo_source_round=True,
+            )
+        )(jax_entry, forcing)
+        oracle_f1 = frames[1]
+        for fname, cand_val in (
+            ("t_su", zdf_fixed.T_surface),
+            ("e_i", zdf_fixed.e_ice),
+            ("e_s", zdf_fixed.e_snow),
+        ):
+            wanted = np.asarray(oracle_f1[fname], dtype=np.float64).ravel()
+            got = np.asarray(cand_val, dtype=np.float64).ravel()
+            assert probe_module._ulp_diff(got, wanted) == 0
+            np.testing.assert_array_equal(
+                got.view(np.uint64), wanted.view(np.uint64)
+            )
+
+    # On CPU default JIT (where FMA is enabled unless prevented by nemo_source_round),
+    # reverting `_nemo_source_round=False` at kt = 2906 FAILS bit-exactness
+    # and exceeds the 1e-15 bar on POST_ZDF.e_s.
+    if jax.default_backend() == "cpu" and "--xla_cpu_max_isa=AVX" not in os.environ.get("XLA_FLAGS", ""):
+        frames_2906, exact_in_2906 = steps[2906]
+        entry_2906 = probe_module.year_gate._exact_1d_entry(
+            frames_2906, _nemo_entry_conversion=True
+        )
+        jax_entry_2906 = jax.tree.map(
+            lambda v: jnp.asarray(v, dtype=jnp.float64), entry_2906
+        )
+        forcing_2906 = probe_module.year_gate._forcing(exact_in_2906, jnp.float64)
+        zdf_unrounded_2906 = jax.jit(
+            lambda ent, f: _si3_zdf_bl99_step(
+                ent.e_ice,
+                ent.e_snow,
+                ent.S_layers,
+                ent.h_ice,
+                ent.h_snow,
+                ent.T_surface,
+                f,
+                card.dt_seconds,
+                c,
+                _nemo_glo2eqv_snow_temp=True,
+                _nemo_source_round=False,
+            )
+        )(jax_entry_2906, forcing_2906)
+        oracle_es_2906 = np.asarray(frames_2906[1]["e_s"], dtype=np.float64).ravel()
+        got_es_unrounded_2906 = np.asarray(
+            zdf_unrounded_2906.e_snow, dtype=np.float64
+        ).ravel()
+        assert probe_module._ulp_diff(got_es_unrounded_2906, oracle_es_2906) >= 4
+        _, norm_unrounded_2906 = probe_module.year_gate._normalised_error(
+            oracle_es_2906, got_es_unrounded_2906
+        )
+        assert norm_unrounded_2906 > probe_module.phase2.BAR
+        with pytest.raises(AssertionError):
+            np.testing.assert_array_equal(
+                got_es_unrounded_2906.view(np.uint64),
+                oracle_es_2906.view(np.uint64),
+            )
+
+
+def test_r3_all_touched_functions_gradients_and_forward_bits() -> None:
+    """Verify finite non-zero gradients, reverse == forward, and literal forward bits on all Round 3 touched functions."""
+    card = build_c1d_omip_l3_card(oracle_root=ORACLE_V2_ROOT)
+    c = card.config.ice_constants
+
+    e_s0 = jnp.asarray([[1.12e8, 1.09e8, 1.05e8]], dtype=jnp.float64)
+    e_i0 = jnp.asarray([[2.95e8, 2.75e8, 2.55e8]], dtype=jnp.float64)
+    s_i0 = jnp.asarray([[3.15, 6.30, 9.45]], dtype=jnp.float64)
+    t_i0 = jnp.asarray([[258.15, 263.25, 268.35]], dtype=jnp.float64)
+    t_s0 = jnp.asarray([[254.15, 259.25, 265.35]], dtype=jnp.float64)
+
+    for fn, args in (
+        (
+            lambda es: bl_mod.snow_temperature_from_enthalpy(es, c),
+            (e_s0,),
+        ),
+        (
+            lambda ei, si: bl_mod.ice_temperature_from_enthalpy(ei, si, c),
+            (e_i0, s_i0),
+        ),
+        (
+            lambda ti, si: bl_mod.ice_enthalpy_from_temperature(ti, si, c),
+            (t_i0, s_i0),
+        ),
+        (
+            lambda ts: bl_mod.snow_enthalpy_from_temperature(ts, c),
+            (t_s0,),
+        ),
+        (
+            lambda ti, si: bl_mod.p07_conductivity(ti, si, c),
+            (t_i0, s_i0),
+        ),
+    ):
+        primal_direct = fn(*args)
+
+        def loss_with_aux(*xs):
+            out = fn(*xs)
+            return jnp.sum(out * jnp.asarray([[0.3, -0.7, 1.1]], dtype=jnp.float64)), out
+
+        argnums = tuple(range(len(args)))
+        (loss_vag, out_vag), grads = jax.value_and_grad(
+            loss_with_aux, argnums=argnums, has_aux=True
+        )(*args)
+        tangents = tuple(jnp.ones_like(a) for a in args)
+        (loss_jvp, out_jvp), (dloss_jvp, _) = jax.jvp(
+            loss_with_aux, args, tangents
+        )
+
+        np.testing.assert_array_equal(
+            np.asarray(primal_direct).view(np.uint64),
+            np.asarray(out_vag).view(np.uint64),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(primal_direct).view(np.uint64),
+            np.asarray(out_jvp).view(np.uint64),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(loss_vag).view(np.uint64),
+            np.asarray(loss_jvp).view(np.uint64),
+        )
+        for g in grads:
+            assert bool(jnp.all(jnp.isfinite(g)))
+            assert float(jnp.linalg.norm(g)) > 0.0
+        dloss_rev = sum(
+            jnp.sum(g * t) for g, t in zip(grads, tangents, strict=True)
+        )
+        np.testing.assert_allclose(
+            np.asarray(dloss_rev),
+            np.asarray(dloss_jvp),
+            rtol=1.0e-14,
+            atol=1.0e-14,
+        )
+
+    # Also test `thomas_solve(..., "nemo_unnormalised")` directly
+    rng = np.random.default_rng(20261023)
+    a_t = jnp.asarray(rng.uniform(-0.2, -0.01, (2, 7)), dtype=jnp.float64).at[..., 0].set(0.0)
+    b_t = jnp.asarray(rng.uniform(2.0, 3.0, (2, 7)), dtype=jnp.float64)
+    c_t = jnp.asarray(rng.uniform(-0.2, -0.01, (2, 7)), dtype=jnp.float64).at[..., -1].set(0.0)
+    d_t = jnp.asarray(rng.uniform(250.0, 272.0, (2, 7)), dtype=jnp.float64)
+
+    primal_ts = bl_mod.thomas_solve(a_t, b_t, c_t, d_t, "nemo_unnormalised")
+
+    def thomas_loss(a, b, c_band, d):
+        sol = bl_mod.thomas_solve(a, b, c_band, d, "nemo_unnormalised")
+        return jnp.sum(sol), sol
+
+    def thomas_impl_loss(a, b, c_band, d):
+        sol = _thomas_solve_impl(a, b, c_band, d, "nemo_unnormalised")
+        return jnp.sum(sol), sol
+
+    (l_vag, s_vag), g_ts = jax.value_and_grad(
+        thomas_loss, argnums=(0, 1, 2, 3), has_aux=True
+    )(a_t, b_t, c_t, d_t)
+    t_in = (
+        jnp.ones_like(a_t).at[..., 0].set(0.0),
+        jnp.ones_like(b_t),
+        jnp.ones_like(c_t).at[..., -1].set(0.0),
+        jnp.ones_like(d_t),
+    )
+    (l_jvp, s_jvp), (dl_jvp, _) = jax.jvp(
+        thomas_impl_loss, (a_t, b_t, c_t, d_t), t_in
+    )
+    np.testing.assert_array_equal(
+        np.asarray(primal_ts).view(np.uint64),
+        np.asarray(s_vag).view(np.uint64),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(primal_ts).view(np.uint64),
+        np.asarray(s_jvp).view(np.uint64),
+    )
+    for g in g_ts:
+        assert bool(jnp.all(jnp.isfinite(g)))
+        assert float(jnp.linalg.norm(g)) > 0.0
+    dl_rev = sum(jnp.sum(g * t) for g, t in zip(g_ts, t_in, strict=True))
+    np.testing.assert_allclose(
+        np.asarray(dl_rev), np.asarray(dl_jvp), rtol=1.0e-13, atol=1.0e-13
+    )

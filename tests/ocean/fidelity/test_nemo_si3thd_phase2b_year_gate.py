@@ -34,7 +34,8 @@ def test_nemo_operation_order_replay_is_exact_and_normalised_order_differs(gate)
     )
     assert result["classification"] == "FLOAT RE-ASSOCIATION"
     assert result["nemo_written_order_max_ulp"] == 0
-    assert result["iteration2_qns"]["executing_legoesm_ulp"] > 2
+    assert result["iteration2_qns"]["normalised_ulp"] > 2
+    assert result["iteration2_qns"]["executing_legoesm_ulp"] == 0
     assert result["kt3_enthalpy"]["executing_legoesm_max_ulp"] == 0
     assert all(row["normalised_solution_max_ulp"] == 1
                for row in result["thomas_rows"])

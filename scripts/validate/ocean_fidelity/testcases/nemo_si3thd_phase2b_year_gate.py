@@ -709,10 +709,12 @@ def _forcing(values, dtype):
     ))
 
 
-def _exact_1d_entry(frames):
+def _exact_1d_entry(frames, *, _nemo_entry_conversion: bool = True):
     """Bridge NEMO's unchanged registered 1-D thickness operands."""
 
-    entry = phase2._entry_arrays(frames[0])
+    entry = phase2._entry_arrays(
+        frames[0], _nemo_entry_conversion=_nemo_entry_conversion
+    )
     return entry._replace(
         h_ice=np.asarray(frames[1]["h_i"], dtype=np.float64),
         h_snow=np.asarray(frames[1]["h_s"], dtype=np.float64),

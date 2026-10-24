@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SI3 ladder rung D5 platform probe and C1D year rescore: binary64 subnormal snow (5e-324 m).
+"""SI3 ladder rung D5 platform probe, reviewer reproduction, and 4-step C1D year rescore.
 
 Evaluates on the active JAX backend (CPU or GPU, under ``JAX_ENABLE_X64=1`` and
 ``PrecisionPolicy.fp64()``):
@@ -15,10 +15,23 @@ Evaluates on the active JAX backend (CPU or GPU, under ``JAX_ENABLE_X64=1`` and
    ``kt = 5842``, ``kt = 5860`` (the Phase 6 ``0.02510099530281747`` row), and
    ``kt = 5867``, plus all 26 subnormal-snow steps before and after the
    selectable ``_nemo_zdf_layer_reciprocals`` statement fix.
-4. Stage D -- Full 8,760-step C1D year exact-entry operator sweep rescore
-   (621,960 stage field rows) before vs after ``_nemo_zdf_layer_reciprocals``,
-   reporting rows over bar before/after, the ``0.02510099530281747`` row, and
-   every row the fix touches.
+4. Step 1 Reviewer Reproduction -- Committed reproduction of the Round 2
+   operator-review numbers:
+   - Recorded ZDF-entry snow temperature reproduced in ``1,811`` of ``7,385``
+     snow steps as shipped in Round 2, ``2,469`` of ``7,385`` after Step 2
+     harness ``e_s / v_s * 3``, and ``7,385`` of ``7,385`` (`0` ULP) after Step 3
+     ``icevar.F90:412-413``.
+   - With NEMO-exact ZDF inputs across all ``8,734`` normal steps (``26,202``
+     ``POST_ZDF`` ``t_su``/``e_i``/``e_s`` rows), all ``26,202`` rows are at
+     ``0`` ULP (``1,625`` over-bar -> ``0``) on GPU and CPU-without-fusion, and
+     also on CPU production JIT once Step 4 ``nemo_source_round`` is active.
+5. Stage D -- Full 8,760-step C1D year exact-entry operator sweep rescore
+   (``621,960`` stage-field rows) across the ordered Round 3 steps:
+   - Round 2 baseline (``_nemo_entry_conversion=False, _nemo_glo2eqv_snow_temp=False, _nemo_source_round=False``)
+   - Step 2 harness entry conversion (``icevar.F90:368,374,390,412,488-506``)
+   - Step 3 model solver-entry snow temperature (``icevar.F90:412-413``)
+   - Step 4 CPU fusion prevention via ``nemo_source_round`` (DECISION 158)
+   plus isolated single-step ablations and the remaining owner ranking.
 """
 
 from __future__ import annotations
@@ -35,7 +48,13 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-from legoesm.ice.bitz_lipscomb import si3_column_step_arrays
+from legoesm.ice.bitz_lipscomb import (
+    SI3SurfaceForcing,
+    _si3_zdf_bl99_step,
+    ice_temperature_from_enthalpy,
+    si3_column_step_arrays,
+    snow_temperature_from_enthalpy,
+)
 from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 
@@ -49,6 +68,7 @@ import nemo_si3thd_phase2b_year_gate as year_gate  # noqa: E402
 DEFAULT_ORACLE_DIR = year_gate.REPLAY_ROOT
 SMALLEST_SUBNORMAL_BITS = np.uint64(1)
 SMALLEST_SUBNORMAL_F64 = SMALLEST_SUBNORMAL_BITS.view(np.float64)
+POST_ZDF_SOLVED_FIELDS = ("t_su", "e_i", "e_s")
 
 
 def _u64_hex(val: float | np.ndarray) -> str | list[str]:
@@ -127,7 +147,7 @@ def run_stage_a_subnormal_probe(*, plant_zero_input: bool = False) -> dict:
 
     x_jax = jnp.asarray(x_np, dtype=jnp.float64)
     one_jax = jnp.asarray(np.float64(1.0), dtype=jnp.float64)
-    zero_jax = jnp.asarray(np.float64(0.0), dtype=np.float64)
+    zero_jax = jnp.asarray(np.float64(0.0), dtype=jnp.float64)
     a_jax = jnp.asarray(a_np, dtype=jnp.float64)
     b_jax = jnp.asarray(b_np, dtype=jnp.float64)
 
@@ -232,8 +252,6 @@ def _evaluate_subnormal_window_arm(
     flush_recorded_operand: bool = False,
 ) -> dict:
     """Evaluate one statement arm across the subnormal-snow window."""
-    from legoesm.ice.bitz_lipscomb import SI3SurfaceForcing
-
     tiny_normal = np.finfo(np.float64).tiny
     over_bar_zdf_rows = []
     nonzero_ulp_zdf_rows = []
@@ -374,25 +392,423 @@ def _evaluate_subnormal_window_arm(
     }
 
 
+def run_step1_reviewer_reproduction(
+    oracle_dir: Path = DEFAULT_ORACLE_DIR,
+    *,
+    max_steps: int | None = None,
+    plant_corrupt_snow_temp: bool = False,
+) -> dict:
+    """Step 1: Committed reproduction of the Round 2 operator-review findings.
+
+    Measures across the C1D year (8,760 steps; 7,385 snow-present steps with
+    ``v_s > 1e-20``; 8,734 normal steps outside ``kt = 5842..5867`` = 26,202
+    ``POST_ZDF`` ``t_su``/``e_i``/``e_s`` rows):
+    1. Recorded ZDF-entry snow temperature (``exact["t_s"]`` in
+       ``oracle_si3_zdf_inputs.bin``) vs:
+       - Round 2 as-shipped: ``(e_s * 3.0) / v_s`` + ``icethd_dh.F90:498-503``
+         (``1,811`` of ``7,385`` snow steps at 0 ULP).
+       - Step 2 harness only: ``(e_s / v_s) * 3.0`` + ``icethd_dh.F90:498-503``
+         (``2,469`` of ``7,385`` snow steps at 0 ULP).
+       - Step 2 + Step 3 model statement: ``(e_s / v_s) * 3.0`` +
+         ``icevar.F90:412-413`` (``7,385`` of ``7,385`` snow steps at 0 ULP).
+    2. Recorded ZDF-entry ice temperature (``exact["t_i"]``) and layer salinity
+       (``frames[1]["sz_i"]``) vs Step 2 harness + ``ice_temperature_from_enthalpy``
+       (``8,760`` of ``8,760`` steps at 0 ULP).
+    3. ``POST_ZDF`` (``t_su``, ``e_i``, ``e_s`` across the ``8,734`` normal
+       steps = ``26,202`` rows) under:
+       - Round 2 as-shipped (``_nemo_entry_conversion=False, _nemo_glo2eqv_snow_temp=False, _nemo_source_round=False``)
+       - NEMO-exact ZDF inputs without source rounding (``_nemo_entry_conversion=True, _nemo_glo2eqv_snow_temp=True, _nemo_source_round=False``)
+       - NEMO-exact ZDF inputs with Step 4 ``nemo_source_round`` (``_nemo_entry_conversion=True, _nemo_glo2eqv_snow_temp=True, _nemo_source_round=True``)
+    """
+    card = build_c1d_omip_l3_card(oracle_root=oracle_dir)
+    c = card.config.ice_constants
+    nsteps = card.nsteps if max_steps is None else min(int(max_steps), card.nsteps)
+    thd_path = oracle_dir / "oracle_si3_thd_frames.bin"
+    zin_path = oracle_dir / "oracle_si3_zdf_inputs.bin"
+
+    entries_r2 = []
+    entries_s2 = []
+    forcings = []
+    oracle_post_zdf = []
+    exact_t_s_list = []
+    snow_active_flags = []
+    normal_step_flags = []
+
+    with thd_path.open("rb") as thd, zin_path.open("rb") as zin:
+        for kt in range(1, nsteps + 1):
+            frames = phase2._read_thd_step(thd, kt)
+            exact = phase2._read_zdf_input_step(zin, kt)
+            g0 = phase2._center_global(frames[0])
+            snow_active_flags.append(float(g0["v_s"]) > 1.0e-20)
+            normal_step_flags.append(not (5842 <= kt <= 5867))
+            entries_r2.append(
+                year_gate._exact_1d_entry(frames, _nemo_entry_conversion=False)
+            )
+            entries_s2.append(
+                year_gate._exact_1d_entry(frames, _nemo_entry_conversion=True)
+            )
+            forcings.append(
+                tuple(
+                    np.asarray(exact[name], dtype=np.float64)
+                    for name in phase2.ZDF_INPUT_NAMES
+                )
+            )
+            oracle_post_zdf.append(frames[1])
+            exact_t_s_list.append(
+                np.asarray(exact["t_s"], dtype=np.float64).reshape(1, 3)
+            )
+
+    batch_r2 = jax.tree.map(
+        lambda *vals: jnp.asarray(np.concatenate(vals, axis=0), dtype=jnp.float64),
+        *entries_r2,
+    )
+    batch_s2 = jax.tree.map(
+        lambda *vals: jnp.asarray(np.concatenate(vals, axis=0), dtype=jnp.float64),
+        *entries_s2,
+    )
+
+    ts_r2 = np.asarray(
+        jax.jit(
+            lambda e: snow_temperature_from_enthalpy(
+                e,
+                c,
+                _nemo_order=True,
+                _nemo_glo2eqv_snow_temp=False,
+                _nemo_source_round=False,
+            )
+        )(batch_r2.e_snow),
+        dtype=np.float64,
+    )
+    ts_s2_only = np.asarray(
+        jax.jit(
+            lambda e: snow_temperature_from_enthalpy(
+                e,
+                c,
+                _nemo_order=True,
+                _nemo_glo2eqv_snow_temp=False,
+                _nemo_source_round=False,
+            )
+        )(batch_s2.e_snow),
+        dtype=np.float64,
+    )
+    ts_s2_s3 = np.asarray(
+        jax.jit(
+            lambda e: snow_temperature_from_enthalpy(
+                e,
+                c,
+                _nemo_order=True,
+                _nemo_glo2eqv_snow_temp=(not plant_corrupt_snow_temp),
+                _nemo_source_round=True,
+            )
+        )(batch_s2.e_snow),
+        dtype=np.float64,
+    )
+
+    snow_step_count = 0
+    ts_r2_exact_steps = 0
+    ts_r2_max_ulp = 0
+    ts_s2_exact_steps = 0
+    ts_s2_max_ulp = 0
+    ts_s2_s3_exact_steps = 0
+    ts_s2_s3_max_ulp = 0
+
+    szi_r2_exact_steps = 0
+    szi_s2_exact_steps = 0
+
+    for idx in range(nsteps):
+        ref_ts = exact_t_s_list[idx].ravel()
+        ref_szi = np.asarray(oracle_post_zdf[idx]["sz_i"], dtype=np.float64).ravel()
+
+        if _ulp_diff(np.asarray(entries_r2[idx].S_layers).ravel(), ref_szi) == 0:
+            szi_r2_exact_steps += 1
+        if _ulp_diff(np.asarray(entries_s2[idx].S_layers).ravel(), ref_szi) == 0:
+            szi_s2_exact_steps += 1
+
+        if snow_active_flags[idx]:
+            snow_step_count += 1
+            u_r2 = _ulp_diff(ts_r2[idx].ravel(), ref_ts)
+            u_s2 = _ulp_diff(ts_s2_only[idx].ravel(), ref_ts)
+            u_s2_s3 = _ulp_diff(ts_s2_s3[idx].ravel(), ref_ts)
+            ts_r2_max_ulp = max(ts_r2_max_ulp, u_r2)
+            ts_s2_max_ulp = max(ts_s2_max_ulp, u_s2)
+            ts_s2_s3_max_ulp = max(ts_s2_s3_max_ulp, u_s2_s3)
+            if u_r2 == 0:
+                ts_r2_exact_steps += 1
+            if u_s2 == 0:
+                ts_s2_exact_steps += 1
+            if u_s2_s3 == 0:
+                ts_s2_s3_exact_steps += 1
+
+    def _eval_post_zdf_arm(
+        entries_list,
+        *,
+        glo2eqv_snow_temp: bool,
+        source_round: bool,
+    ) -> dict:
+        normal_steps = 0
+        total_rows = 0
+        zero_ulp_rows = 0
+        nonzero_ulp_rows = 0
+        over_bar_rows = 0
+        max_ulp = 0
+        max_norm_err = 0.0
+        by_field = {
+            f: {"total": 0, "zero_ulp": 0, "nonzero_ulp": 0, "over_bar": 0, "max_ulp": 0}
+            for f in POST_ZDF_SOLVED_FIELDS
+        }
+
+        @jax.jit
+        def _run_zdf_chunk(b_entry, b_forcing):
+            return _si3_zdf_bl99_step(
+                b_entry.e_ice,
+                b_entry.e_snow,
+                b_entry.S_layers,
+                b_entry.h_ice,
+                b_entry.h_snow,
+                b_entry.T_surface,
+                b_forcing,
+                card.dt_seconds,
+                c,
+                _nemo_zdf_layer_reciprocals=True,
+                _nemo_glo2eqv_snow_temp=glo2eqv_snow_temp,
+                _nemo_source_round=source_round,
+            )
+
+        chunk = 1000
+        for start in range(0, nsteps, chunk):
+            stop = min(nsteps, start + chunk)
+            b_entry = jax.tree.map(
+                lambda *vals: jnp.asarray(
+                    np.concatenate(vals, axis=0), dtype=jnp.float64
+                ),
+                *entries_list[start:stop],
+            )
+            b_forcing = SI3SurfaceForcing(
+                *(
+                    jnp.asarray(
+                        np.concatenate(
+                            [f[i] for f in forcings[start:stop]], axis=0
+                        ),
+                        dtype=jnp.float64,
+                    )
+                    for i in range(len(phase2.ZDF_INPUT_NAMES))
+                )
+            )
+            zdf_out = jax.device_get(_run_zdf_chunk(b_entry, b_forcing))
+            cand_fields = {
+                "t_su": np.asarray(zdf_out.T_surface, dtype=np.float64),
+                "e_i": np.asarray(zdf_out.e_ice, dtype=np.float64),
+                "e_s": np.asarray(zdf_out.e_snow, dtype=np.float64),
+            }
+            for offset, idx in enumerate(range(start, stop)):
+                if not normal_step_flags[idx]:
+                    continue
+                normal_steps += 1
+                oracle_f1 = oracle_post_zdf[idx]
+                for fname in POST_ZDF_SOLVED_FIELDS:
+                    total_rows += 1
+                    by_field[fname]["total"] += 1
+                    wanted = np.asarray(oracle_f1[fname], dtype=np.float64).ravel()
+                    got = cand_fields[fname][offset : offset + 1].ravel()
+                    _, norm_err = year_gate._normalised_error(wanted, got)
+                    u = _ulp_diff(got, wanted)
+                    max_ulp = max(max_ulp, u)
+                    max_norm_err = max(max_norm_err, norm_err)
+                    by_field[fname]["max_ulp"] = max(by_field[fname]["max_ulp"], u)
+                    if u == 0:
+                        zero_ulp_rows += 1
+                        by_field[fname]["zero_ulp"] += 1
+                    else:
+                        nonzero_ulp_rows += 1
+                        by_field[fname]["nonzero_ulp"] += 1
+                    if norm_err > phase2.BAR:
+                        over_bar_rows += 1
+                        by_field[fname]["over_bar"] += 1
+
+        return {
+            "normal_steps_evaluated": normal_steps,
+            "total_post_zdf_rows": total_rows,
+            "zero_ulp_rows": zero_ulp_rows,
+            "nonzero_ulp_rows": nonzero_ulp_rows,
+            "over_bar_rows": over_bar_rows,
+            "max_ulp": max_ulp,
+            "max_norm_err": max_norm_err,
+            "by_field": by_field,
+        }
+
+    post_zdf_r2 = _eval_post_zdf_arm(
+        entries_r2,
+        glo2eqv_snow_temp=False,
+        source_round=False,
+    )
+    post_zdf_exact_inputs_unrounded = _eval_post_zdf_arm(
+        entries_s2,
+        glo2eqv_snow_temp=(not plant_corrupt_snow_temp),
+        source_round=False,
+    )
+    post_zdf_exact_inputs_source_rounded = _eval_post_zdf_arm(
+        entries_s2,
+        glo2eqv_snow_temp=(not plant_corrupt_snow_temp),
+        source_round=True,
+    )
+
+    return {
+        "steps_evaluated": nsteps,
+        "snow_present_step_count": snow_step_count,
+        "zdf_entry_snow_temperature": {
+            "r2_as_shipped_exact_steps": ts_r2_exact_steps,
+            "r2_as_shipped_nonzero_ulp_steps": snow_step_count - ts_r2_exact_steps,
+            "r2_as_shipped_max_ulp": ts_r2_max_ulp,
+            "step2_harness_only_exact_steps": ts_s2_exact_steps,
+            "step2_harness_only_nonzero_ulp_steps": snow_step_count - ts_s2_exact_steps,
+            "step2_harness_only_max_ulp": ts_s2_max_ulp,
+            "step2_plus_step3_exact_steps": ts_s2_s3_exact_steps,
+            "step2_plus_step3_nonzero_ulp_steps": snow_step_count - ts_s2_s3_exact_steps,
+            "step2_plus_step3_max_ulp": ts_s2_s3_max_ulp,
+        },
+        "zdf_entry_salinity_profile": {
+            "szi_r2_exact_steps": szi_r2_exact_steps,
+            "szi_r2_nonzero_ulp_steps": nsteps - szi_r2_exact_steps,
+            "szi_step2_exact_steps": szi_s2_exact_steps,
+            "szi_step2_nonzero_ulp_steps": nsteps - szi_s2_exact_steps,
+        },
+        "normal_steps_post_zdf_26202_rows": {
+            "r2_as_shipped": post_zdf_r2,
+            "nemo_exact_inputs_unrounded": post_zdf_exact_inputs_unrounded,
+            "nemo_exact_inputs_source_rounded": post_zdf_exact_inputs_source_rounded,
+        },
+    }
+
+
+def _init_arm_accumulator() -> dict:
+    return {
+        "total_field_rows": 0,
+        "over_bar_rows": 0,
+        "zero_ulp_rows": 0,
+        "nonzero_ulp_rows": 0,
+        "over_bar_by_stage": {s[1]: 0 for s in phase2.STAGES},
+        "zero_ulp_by_stage": {s[1]: 0 for s in phase2.STAGES},
+        "nonzero_ulp_by_stage": {s[1]: 0 for s in phase2.STAGES},
+        "normal_post_zdf_3field": {
+            "total_rows": 0,
+            "zero_ulp_rows": 0,
+            "nonzero_ulp_rows": 0,
+            "over_bar_rows": 0,
+        },
+        "normal_post_zdf_7field": {
+            "total_rows": 0,
+            "zero_ulp_rows": 0,
+            "nonzero_ulp_rows": 0,
+            "over_bar_rows": 0,
+        },
+        "subnormal_window_kt5842_5867": {
+            "total_rows": 0,
+            "over_bar_rows": 0,
+            "zero_ulp_rows": 0,
+            "nonzero_ulp_rows": 0,
+            "post_zdf_3field_over_bar_rows": 0,
+            "post_zdf_3field_zero_ulp_rows": 0,
+        },
+        "max_normalised_error_row": None,
+    }
+
+
+def _update_arm_accumulator(
+    acc: dict,
+    *,
+    kt: int,
+    stage_idx: int,
+    stage_name: str,
+    fname: str,
+    norm_err: float,
+    abs_err: float,
+    scale: float,
+    ulp: int,
+    in_subnormal_window: bool,
+) -> None:
+    acc["total_field_rows"] += 1
+    is_over = norm_err > phase2.BAR
+    if is_over:
+        acc["over_bar_rows"] += 1
+        acc["over_bar_by_stage"][stage_name] += 1
+    if ulp == 0:
+        acc["zero_ulp_rows"] += 1
+        acc["zero_ulp_by_stage"][stage_name] += 1
+    else:
+        acc["nonzero_ulp_rows"] += 1
+        acc["nonzero_ulp_by_stage"][stage_name] += 1
+
+    if in_subnormal_window:
+        sw = acc["subnormal_window_kt5842_5867"]
+        sw["total_rows"] += 1
+        if is_over:
+            sw["over_bar_rows"] += 1
+        if ulp == 0:
+            sw["zero_ulp_rows"] += 1
+        else:
+            sw["nonzero_ulp_rows"] += 1
+        if stage_idx == 1 and fname in POST_ZDF_SOLVED_FIELDS:
+            if is_over:
+                sw["post_zdf_3field_over_bar_rows"] += 1
+            if ulp == 0:
+                sw["post_zdf_3field_zero_ulp_rows"] += 1
+    elif stage_idx == 1:
+        p7 = acc["normal_post_zdf_7field"]
+        p7["total_rows"] += 1
+        if is_over:
+            p7["over_bar_rows"] += 1
+        if ulp == 0:
+            p7["zero_ulp_rows"] += 1
+        else:
+            p7["nonzero_ulp_rows"] += 1
+        if fname in POST_ZDF_SOLVED_FIELDS:
+            p3 = acc["normal_post_zdf_3field"]
+            p3["total_rows"] += 1
+            if is_over:
+                p3["over_bar_rows"] += 1
+            if ulp == 0:
+                p3["zero_ulp_rows"] += 1
+            else:
+                p3["nonzero_ulp_rows"] += 1
+
+    cur_max = acc["max_normalised_error_row"]
+    if cur_max is None or norm_err > cur_max["norm_err"]:
+        acc["max_normalised_error_row"] = {
+            "kt": kt,
+            "stage": stage_name,
+            "field": fname,
+            "norm_err": norm_err,
+            "max_abs": abs_err,
+            "scale": scale,
+            "max_ulp": ulp,
+        }
+
+
 def run_year_rescore(
     oracle_dir: Path = DEFAULT_ORACLE_DIR,
     *,
     max_steps: int | None = None,
 ) -> dict:
-    """Stage D: full 8,760-step C1D exact-entry operator sweep before vs after D5 fix."""
+    """Stage D: full 8,760-step C1D exact-entry operator sweep across Round 2 & Round 3 arms."""
     card = build_c1d_omip_l3_card(oracle_root=oracle_dir)
     nsteps = card.nsteps if max_steps is None else min(int(max_steps), card.nsteps)
     thd_path = oracle_dir / "oracle_si3_thd_frames.bin"
     zin_path = oracle_dir / "oracle_si3_zdf_inputs.bin"
 
-    entries = []
+    entries_r2 = []
+    entries_s2 = []
     forcings = []
     oracle_frames = []
     with thd_path.open("rb") as thd, zin_path.open("rb") as zin:
         for kt in range(1, nsteps + 1):
             frames = phase2._read_thd_step(thd, kt)
             exact = phase2._read_zdf_input_step(zin, kt)
-            entries.append(year_gate._exact_1d_entry(frames))
+            entries_r2.append(
+                year_gate._exact_1d_entry(frames, _nemo_entry_conversion=False)
+            )
+            entries_s2.append(
+                year_gate._exact_1d_entry(frames, _nemo_entry_conversion=True)
+            )
             forcings.append(
                 tuple(
                     np.asarray(exact[name], dtype=np.float64)
@@ -401,17 +817,88 @@ def run_year_rescore(
             )
             oracle_frames.append(frames)
 
-    def _run_batch(batch_entry, batch_forcing, *, zdf_layer_reciprocals: bool):
-        return jax.device_get(
-            si3_column_step_arrays(
-                batch_entry,
-                batch_forcing,
-                card.dt_seconds,
-                card.config.ice_constants,
-                _nemo_zdf_layer_reciprocals=zdf_layer_reciprocals,
-            )
-        )
+    arm_specs = {
+        "r2_pre_reciprocals": (
+            entries_r2,
+            {
+                "_nemo_zdf_layer_reciprocals": False,
+                "_nemo_glo2eqv_snow_temp": False,
+                "_nemo_source_round": False,
+            },
+        ),
+        "r2_baseline": (
+            entries_r2,
+            {
+                "_nemo_zdf_layer_reciprocals": True,
+                "_nemo_glo2eqv_snow_temp": False,
+                "_nemo_source_round": False,
+            },
+        ),
+        "step2_harness_only": (
+            entries_s2,
+            {
+                "_nemo_zdf_layer_reciprocals": True,
+                "_nemo_glo2eqv_snow_temp": False,
+                "_nemo_source_round": False,
+            },
+        ),
+        "step3_model_only": (
+            entries_r2,
+            {
+                "_nemo_zdf_layer_reciprocals": True,
+                "_nemo_glo2eqv_snow_temp": True,
+                "_nemo_source_round": False,
+            },
+        ),
+        "step4_source_round_only": (
+            entries_r2,
+            {
+                "_nemo_zdf_layer_reciprocals": True,
+                "_nemo_glo2eqv_snow_temp": False,
+                "_nemo_source_round": True,
+            },
+        ),
+        "step2_plus_step3": (
+            entries_s2,
+            {
+                "_nemo_zdf_layer_reciprocals": True,
+                "_nemo_glo2eqv_snow_temp": True,
+                "_nemo_source_round": False,
+            },
+        ),
+        "step2_plus_step3_plus_step4": (
+            entries_s2,
+            {
+                "_nemo_zdf_layer_reciprocals": True,
+                "_nemo_glo2eqv_snow_temp": True,
+                "_nemo_source_round": True,
+            },
+        ),
+    }
 
+    arm_funcs = {}
+    for arm_name, (_, kwargs) in arm_specs.items():
+        kw = dict(kwargs)
+
+        def _make_runner(k_dict):
+            @jax.jit
+            def _runner(b_entry, b_forcing):
+                return si3_column_step_arrays(
+                    b_entry,
+                    b_forcing,
+                    card.dt_seconds,
+                    card.config.ice_constants,
+                    **k_dict,
+                )
+
+            return _runner
+
+        arm_funcs[arm_name] = _make_runner(kw)
+
+    arm_accs = {name: _init_arm_accumulator() for name in arm_specs}
+
+    # Retained top-level before (`r2_baseline`) vs after (`step2_plus_step3_plus_step4`)
+    # accounting fields for compatibility and direct diff summary:
     total_field_rows = 0
     over_bar_before = 0
     over_bar_after = 0
@@ -443,16 +930,23 @@ def run_year_rescore(
     opened_rows = []
     subnormal_window_touched_rows = []
 
-    from legoesm.ice.bitz_lipscomb import SI3SurfaceForcing
+    # Remaining owner ranking accumulator on final arm (`step2_plus_step3_plus_step4`)
+    remaining_owners: dict[str, dict] = {}
 
     chunk = 1000
     for start in range(0, nsteps, chunk):
         stop = min(nsteps, start + chunk)
-        batch_entry = jax.tree.map(
+        batch_entry_r2 = jax.tree.map(
             lambda *vals: jnp.asarray(
                 np.concatenate(vals, axis=0), dtype=jnp.float64
             ),
-            *entries[start:stop],
+            *entries_r2[start:stop],
+        )
+        batch_entry_s2 = jax.tree.map(
+            lambda *vals: jnp.asarray(
+                np.concatenate(vals, axis=0), dtype=jnp.float64
+            ),
+            *entries_s2[start:stop],
         )
         batch_forcing = SI3SurfaceForcing(
             *(
@@ -463,23 +957,23 @@ def run_year_rescore(
                 for i in range(len(phase2.ZDF_INPUT_NAMES))
             )
         )
-        traces_before = _run_batch(
-            batch_entry, batch_forcing, zdf_layer_reciprocals=False
-        )
-        traces_after = _run_batch(
-            batch_entry, batch_forcing, zdf_layer_reciprocals=True
-        )
-        maps_before = year_gate._stage_maps(traces_before)
-        maps_after = year_gate._stage_maps(traces_after)
+
+        arm_maps = {}
+        for arm_name, (entries_ref, _) in arm_specs.items():
+            b_ent = batch_entry_s2 if entries_ref is entries_s2 else batch_entry_r2
+            traces = jax.device_get(arm_funcs[arm_name](b_ent, batch_forcing))
+            arm_maps[arm_name] = year_gate._stage_maps(traces)
+
+        maps_before = arm_maps["r2_baseline"]
+        maps_after = arm_maps["step2_plus_step3_plus_step4"]
 
         for offset, kt in enumerate(range(start + 1, stop + 1)):
             frames = oracle_frames[kt - 1]
             in_subnormal_window = 5842 <= kt <= 5867
 
-            for stage_idx, (o_frame, m_bef, m_aft) in enumerate(
-                zip(frames, maps_before, maps_after, strict=True)
-            ):
+            for stage_idx in range(len(phase2.STAGES)):
                 stage_name = phase2.STAGES[stage_idx][1]
+                o_frame = frames[stage_idx]
                 oracle = (
                     o_frame
                     if 1 <= stage_idx <= 5
@@ -491,18 +985,43 @@ def run_year_rescore(
                     else phase2.GLOBAL_NAMES
                 )
                 for fname in names:
-                    total_field_rows += 1
                     wanted = np.asarray(oracle[fname], dtype=np.float64).ravel()
+                    scale = max(1.0, float(np.max(np.abs(wanted))))
+
+                    for arm_name, s_maps in arm_maps.items():
+                        got_arm = np.asarray(
+                            s_maps[stage_idx][fname][offset : offset + 1],
+                            dtype=np.float64,
+                        ).ravel()
+                        abs_arm, norm_arm = year_gate._normalised_error(
+                            wanted, got_arm
+                        )
+                        ulp_arm = _ulp_diff(got_arm, wanted)
+                        _update_arm_accumulator(
+                            arm_accs[arm_name],
+                            kt=kt,
+                            stage_idx=stage_idx,
+                            stage_name=stage_name,
+                            fname=fname,
+                            norm_err=norm_arm,
+                            abs_err=abs_arm,
+                            scale=scale,
+                            ulp=ulp_arm,
+                            in_subnormal_window=in_subnormal_window,
+                        )
+
+                    total_field_rows += 1
                     got_bef = np.asarray(
-                        m_bef[fname][offset : offset + 1], dtype=np.float64
+                        maps_before[stage_idx][fname][offset : offset + 1],
+                        dtype=np.float64,
                     ).ravel()
                     got_aft = np.asarray(
-                        m_aft[fname][offset : offset + 1], dtype=np.float64
+                        maps_after[stage_idx][fname][offset : offset + 1],
+                        dtype=np.float64,
                     ).ravel()
 
                     abs_bef, norm_bef = year_gate._normalised_error(wanted, got_bef)
                     abs_aft, norm_aft = year_gate._normalised_error(wanted, got_aft)
-                    scale = max(1.0, float(np.max(np.abs(wanted))))
                     ulp_bef = _ulp_diff(got_bef, wanted)
                     ulp_aft = _ulp_diff(got_aft, wanted)
                     ulp_change = _ulp_diff(got_aft, got_bef)
@@ -520,6 +1039,43 @@ def run_year_rescore(
                         over_bar_after_by_stage[stage_name] += 1
                         if in_subnormal_window:
                             subnormal_window_over_bar_after += 1
+
+                    # Populate remaining owner ranking on the final arm (`got_aft`)
+                    if is_over_aft or ulp_aft > 0:
+                        owner_key = (
+                            "D5_PLATFORM_FLOOR_KT5842_5867_SUBNORMAL_SNOW"
+                            if in_subnormal_window
+                            else f"{stage_name}.{fname}"
+                        )
+                        if owner_key not in remaining_owners:
+                            remaining_owners[owner_key] = {
+                                "owner": owner_key,
+                                "over_bar_rows": 0,
+                                "nonzero_ulp_rows": 0,
+                                "max_ulp": 0,
+                                "max_norm_err": 0.0,
+                                "worst_row": None,
+                            }
+                        orec = remaining_owners[owner_key]
+                        if is_over_aft:
+                            orec["over_bar_rows"] += 1
+                        if ulp_aft > 0:
+                            orec["nonzero_ulp_rows"] += 1
+                        orec["max_ulp"] = max(orec["max_ulp"], ulp_aft)
+                        if (
+                            orec["worst_row"] is None
+                            or norm_aft > orec["max_norm_err"]
+                        ):
+                            orec["max_norm_err"] = norm_aft
+                            orec["worst_row"] = {
+                                "kt": kt,
+                                "stage": stage_name,
+                                "field": fname,
+                                "norm_err": norm_aft,
+                                "max_abs": abs_aft,
+                                "scale": scale,
+                                "max_ulp": ulp_aft,
+                            }
 
                     if (
                         max_before_row is None
@@ -636,6 +1192,12 @@ def run_year_rescore(
         "year rescore row accounting mismatch",
     )
 
+    ranked_owners = sorted(
+        remaining_owners.values(),
+        key=lambda r: (r["over_bar_rows"], r["nonzero_ulp_rows"], r["max_norm_err"]),
+        reverse=True,
+    )
+
     return {
         "steps_evaluated": nsteps,
         "total_field_rows": total_field_rows,
@@ -663,6 +1225,21 @@ def run_year_rescore(
         "closed_to_at_bar_rows": closed_rows,
         "opened_to_debt_count": len(opened_rows),
         "opened_to_debt_rows": opened_rows,
+        "arms": arm_accs,
+        "cumulative_progression_order": [
+            "r2_pre_reciprocals",
+            "r2_baseline",
+            "step2_harness_only",
+            "step2_plus_step3",
+            "step2_plus_step3_plus_step4",
+        ],
+        "isolated_single_step_arms_from_r2_baseline": [
+            "r2_baseline",
+            "step2_harness_only",
+            "step3_model_only",
+            "step4_source_round_only",
+        ],
+        "remaining_owner_ranking_after_step4": ranked_owners,
     }
 
 
@@ -671,6 +1248,7 @@ def run_probe(
     *,
     plant: str | None = None,
     include_year_rescore: bool = True,
+    include_step1_reproduction: bool = True,
     year_max_steps: int | None = None,
     allow_dirty: bool = False,
 ) -> dict:
@@ -812,6 +1390,16 @@ def run_probe(
         "detailed_post_zdf_steps": after_arm["detailed_post_zdf_steps"],
     }
 
+    step1_reproduction = (
+        run_step1_reviewer_reproduction(
+            oracle_dir,
+            max_steps=year_max_steps,
+            plant_corrupt_snow_temp=(plant == "revert_snow_temp_statement"),
+        )
+        if include_step1_reproduction
+        else None
+    )
+
     stage_d = (
         run_year_rescore(oracle_dir, max_steps=year_max_steps)
         if include_year_rescore
@@ -836,6 +1424,7 @@ def run_probe(
         "stage_a_subnormal_probe": stage_a,
         "stage_b_predicate_probe": stage_b,
         "stage_c_zdf_probe": stage_c,
+        "step1_reviewer_reproduction": step1_reproduction,
         "stage_d_year_rescore": stage_d,
         "platform_disposition": platform_disposition,
     }
@@ -849,6 +1438,11 @@ def main(argv: list[str] | None = None) -> int:
         "--skip-year-rescore",
         action="store_true",
         help="skip the 8,760-step Stage D year rescore",
+    )
+    parser.add_argument(
+        "--skip-step1-reproduction",
+        action="store_true",
+        help="skip the Step 1 reviewer reproduction sweep",
     )
     parser.add_argument(
         "--expect-disposition",
@@ -871,11 +1465,17 @@ def main(argv: list[str] | None = None) -> int:
         help="if set, exit 1 unless stage_c nonzero_ulp_post_zdf_count == 0",
     )
     parser.add_argument(
+        "--expect-step1-exact-snow-temp",
+        action="store_true",
+        help="if set, exit 1 unless Step 1 step2_plus_step3_nonzero_ulp_steps == 0",
+    )
+    parser.add_argument(
         "--plant",
         choices=(
             "zero_subnormal_input",
             "flush_recorded_operand",
             "revert_statement_fix",
+            "revert_snow_temp_statement",
         ),
         help="planted violation that must cause the expected check to fail",
     )
@@ -885,6 +1485,7 @@ def main(argv: list[str] | None = None) -> int:
         args.oracle_dir,
         plant=args.plant,
         include_year_rescore=not args.skip_year_rescore,
+        include_step1_reproduction=not args.skip_step1_reproduction,
     )
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
@@ -914,6 +1515,14 @@ def main(argv: list[str] | None = None) -> int:
     if (
         args.expect_bit_exact_zdf
         and report["stage_c_zdf_probe"]["nonzero_ulp_post_zdf_count"] != 0
+    ):
+        failed = True
+    if args.expect_step1_exact_snow_temp and (
+        report["step1_reviewer_reproduction"] is None
+        or report["step1_reviewer_reproduction"][
+            "zdf_entry_snow_temperature"
+        ]["step2_plus_step3_nonzero_ulp_steps"]
+        != 0
     ):
         failed = True
 

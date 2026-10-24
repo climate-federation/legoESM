@@ -198,24 +198,57 @@ def _center_global(frame: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     return {k: np.asarray(v[idx]) for k, v in frame.items() if k in GLOBAL_NAMES}
 
 
-def _entry_arrays(frame):
+def _nemo_salprof(s_i: np.ndarray) -> np.ndarray:
+    """Mirror `ice_var_salprof` option-2 profile (`icevar.F90:488-506`)."""
+
+    s_i = np.atleast_1d(np.asarray(s_i, dtype=np.float64))
+    z1_ds = np.float64(1.0 / (4.5 - 3.5))
+    zalpha = np.where(
+        s_i >= 4.5,
+        0.0,
+        np.where(s_i <= 3.5, 1.0, (4.5 - s_i) * z1_ds),
+    )
+    zalpha = np.where(s_i <= 3.0 * 0.1, 0.0, zalpha)
+    jk = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+    r1_nlay_i = np.float64(1.0 / 3.0)
+    return (
+        zalpha[..., None]
+        * s_i[..., None]
+        * 2.0
+        * (jk - 0.5)
+        * r1_nlay_i
+        + (1.0 - zalpha[..., None]) * s_i[..., None]
+    )
+
+
+def _entry_arrays(frame, *, _nemo_entry_conversion: bool = True):
     from legoesm.ice.bitz_lipscomb import SI3ColumnArrays
 
     g = _center_global(frame)
     a, vi, vs = g["a_i"], g["v_i"], g["v_s"]
-    # Mirror ice_thd_1d2d's zero-volume convention exactly
-    # (`icethd.F90:416-434`): zero volumetric enthalpy replaces division by a
-    # physically meaningless <= epsi20 category volume.  This becomes active
-    # when the C1D seasonal cycle loses all snow.
+    # Mirror ice_var_glo2eqv (`icevar.F90:368,374,390,412,488-506`) and
+    # ice_thd_1d2d's zero-volume convention (`icethd.F90:416-434`): zero
+    # volumetric enthalpy replaces division by a physically meaningless
+    # <= epsi20 category volume, and non-zero volume divides before
+    # multiplying by nlay_{i,s} (`e / v * 3`).
     e_i = np.zeros_like(g["e_i"])
     e_s = np.zeros_like(g["e_s"])
-    np.divide(g["e_i"] * 3.0, vi, out=e_i, where=vi > 1.0e-20)
-    np.divide(g["e_s"] * 3.0, vs, out=e_s, where=vs > 1.0e-20)
+    s_i = np.atleast_1d(g["sv_i"] / vi)
+    if _nemo_entry_conversion:
+        np.divide(g["e_i"], vi, out=e_i, where=vi > 1.0e-20)
+        e_i *= 3.0
+        np.divide(g["e_s"], vs, out=e_s, where=vs > 1.0e-20)
+        e_s *= 3.0
+        sz_i = _nemo_salprof(s_i)
+    else:
+        np.divide(g["e_i"] * 3.0, vi, out=e_i, where=vi > 1.0e-20)
+        np.divide(g["e_s"] * 3.0, vs, out=e_s, where=vs > 1.0e-20)
+        sz_i = np.atleast_2d(g["szv_i"] * 3.0 / vi)
     return SI3ColumnArrays(
         np.atleast_1d(a), np.atleast_1d(vi / a), np.atleast_1d(vs / a),
         np.atleast_1d(g["t_su"]), np.atleast_2d(e_i),
-        np.atleast_2d(e_s), np.atleast_1d(g["sv_i"] / vi),
-        np.atleast_2d(g["szv_i"] * 3.0 / vi), np.atleast_1d(g["oa_i"]),
+        np.atleast_2d(e_s), s_i,
+        np.atleast_2d(sz_i), np.atleast_1d(g["oa_i"]),
     )
 
 

@@ -13,6 +13,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ice.constants_config import IceConstantsConfig
 from legoesm.ice.snow import snow_ice_flooding
 from legoesm.timestepping.tridiagonal import thomas_solve
@@ -175,11 +176,18 @@ def option2_salinity_profile(S_bulk, sss):
     return S_bulk[..., None] * (alpha[..., None] * z + (1.0 - alpha[..., None]))
 
 
-def ice_enthalpy_from_temperature(T_K, S, constants: IceConstantsConfig, *,
-                                  _nemo_order: bool = True):
+def ice_enthalpy_from_temperature(
+    T_K,
+    S,
+    constants: IceConstantsConfig,
+    *,
+    _nemo_order: bool = True,
+    _nemo_source_round: bool = True,
+):
     """NEMO positive energy-of-melting `icevar.F90:938-946` [J m-3]."""
 
-    T_m = -constants.liquidus_slope * S
+    sr = nemo_source_round if _nemo_source_round else (lambda x: x)
+    T_m = sr(-constants.liquidus_slope * S)
     if not _nemo_order:
         T_c = jnp.minimum(T_K - constants.T0, -_EPS10)
         T_c = jnp.minimum(T_c, T_m)
@@ -188,29 +196,36 @@ def ice_enthalpy_from_temperature(T_K, S, constants: IceConstantsConfig, *,
             + constants.latent_fusion * jnp.maximum(0.0, 1.0 - T_m / T_c)
             - constants.c_ocean * T_m
         )
-    # Preserve the assignment order in `icevar.F90:938-946`: first clip the
-    # Kelvin temperature, then form Celsius, and finally evaluate the three
-    # parenthesised energy terms.  This is the selected SI3 identity's
-    # operation order, not a user-selectable numerical variant.
-    T_clipped = jnp.minimum(T_K, T_m + constants.T0)
-    T_c = T_clipped - constants.T0
-    sensible = constants.c_ice * (T_m - T_c)
+    # Preserve the assignment and rounding order in `icevar.F90:938-946`
+    # (compiled `icevar.f90:953-961`): first clip the Kelvin temperature, then
+    # form Celsius, and finally evaluate the three parenthesised energy terms
+    # without FMA contraction across the sum/difference.
+    T_clipped = jnp.minimum(T_K, sr(T_m + constants.T0))
+    T_c = sr(T_clipped - constants.T0)
+    sensible = sr(constants.c_ice * sr(T_m - T_c))
     liquid = jnp.maximum(
         0.0,
-        1.0 - T_m / jnp.minimum(T_c, -_EPS10),
+        sr(1.0 - sr(T_m / jnp.minimum(T_c, -_EPS10))),
     )
-    latent = constants.latent_fusion * liquid
-    ocean = constants.c_ocean * T_m
-    return constants.rho_ice * ((sensible + latent) - ocean)
+    latent = sr(constants.latent_fusion * liquid)
+    ocean = sr(constants.c_ocean * T_m)
+    return sr(constants.rho_ice * sr(sr(sensible + latent) - ocean))
 
 
-def ice_temperature_from_enthalpy(e, S, constants: IceConstantsConfig | None = None,
-                                  *, _nemo_order: bool = True):
+def ice_temperature_from_enthalpy(
+    e,
+    S,
+    constants: IceConstantsConfig | None = None,
+    *,
+    _nemo_order: bool = True,
+    _nemo_source_round: bool = True,
+):
     """Invert enthalpy [K] in the selected NEMO or legacy convention.
 
     Supplying ``constants`` selects NEMO's positive energy-of-melting
-    convention (`icethd.F90:221-247`).  Omitting it preserves the public API
-    of the promoted prototype, whose enthalpy is negative for cold ice.
+    convention (`icethd.F90:221-247`, `icevar.F90:390-396`).  Omitting it
+    preserves the public API of the promoted prototype, whose enthalpy is
+    negative for cold ice.
     """
 
     if constants is None:
@@ -226,7 +241,8 @@ def ice_temperature_from_enthalpy(e, S, constants: IceConstantsConfig | None = N
         T_c = (-b - jnp.sqrt(disc)) / (2.0 * canonical_constants.c_pi)
         return T_c + canonical_constants.T_freeze
 
-    T_m = -constants.liquidus_slope * S
+    sr = nemo_source_round if _nemo_source_round else (lambda x: x)
+    T_m = sr(-constants.liquidus_slope * S)
     if not _nemo_order:
         b = (
             (constants.c_ocean - constants.c_ice) * T_m
@@ -238,21 +254,26 @@ def ice_temperature_from_enthalpy(e, S, constants: IceConstantsConfig | None = N
             0.0,
         )
         return constants.T0 - (b + jnp.sqrt(disc)) / (2.0 * constants.c_ice)
-    # Written order of `icethd.F90:233-243`.  NEMO multiplies by its
-    # precomputed reciprocals and applies `* 0.5 * r1_rcpi`; the algebraically
-    # equivalent combined division loses observable ULPs in the oracle gate.
+    # Written order of `icethd.F90:233-243` and `icevar.F90:390-396`
+    # (compiled `icevar.f90:404-410`).  NEMO multiplies by its precomputed
+    # reciprocals, applies `* 0.5 * r1_rcpi`, and adds `rt0` to the rounded
+    # Celsius root without FMA contraction across `zbbb` or `zccc`.
     inverse_rho_ice = 1.0 / constants.rho_ice
     inverse_c_ice = 1.0 / constants.c_ice
     b = (
-        (constants.c_ocean - constants.c_ice) * T_m
-        + e * inverse_rho_ice
+        sr(
+            sr((constants.c_ocean - constants.c_ice) * T_m)
+            + sr(e * inverse_rho_ice)
+        )
         - constants.latent_fusion
     )
     disc = jnp.maximum(
-        b * b - 4.0 * constants.c_ice * constants.latent_fusion * T_m,
+        sr(b * b) - sr((4.0 * constants.c_ice * constants.latent_fusion) * T_m),
         0.0,
     )
-    return constants.T0 - (b + jnp.sqrt(disc)) * 0.5 * inverse_c_ice
+    return sr(
+        constants.T0 - sr(sr(sr(b + jnp.sqrt(disc)) * 0.5) * inverse_c_ice)
+    )
 
 
 def ice_thermal_conductivity(T_K, S):
@@ -310,24 +331,54 @@ def bitz_lipscomb_conduction_step(q_layers, h, S, F_top, T_bottom_K, dt):
     return q_new, T_new, F_bottom
 
 
-def snow_enthalpy_from_temperature(T_K, constants: IceConstantsConfig):
+def snow_enthalpy_from_temperature(
+    T_K,
+    constants: IceConstantsConfig,
+    *,
+    _nemo_source_round: bool = True,
+):
     """Snow energy of melting, `icevar.F90:949-952` [J m-3]."""
 
-    return constants.rho_snow * (
-        constants.c_ice * (constants.T0 - T_K) + constants.latent_fusion
+    sr = nemo_source_round if _nemo_source_round else (lambda x: x)
+    return sr(
+        constants.rho_snow
+        * sr(sr(constants.c_ice * sr(constants.T0 - T_K)) + constants.latent_fusion)
     )
 
 
-def snow_temperature_from_enthalpy(e, constants: IceConstantsConfig, *,
-                                   _nemo_order: bool = True):
+def snow_temperature_from_enthalpy(
+    e,
+    constants: IceConstantsConfig,
+    *,
+    _nemo_order: bool = True,
+    _nemo_glo2eqv_snow_temp: bool = True,
+    _nemo_source_round: bool = True,
+):
     """Invert snow enthalpy with NEMO's global-to-equivalent bounds.
 
-    `icevar.F90:404-416` reconstructs this diagnostic immediately before each
-    `ice_thd` call and bounds it to ``[rt0-100, rt0]``.  The same algebra also
-    appears in `icethd_dh.F90:498-503` after snow remapping.
+    `icevar.F90:412-413` (compiled `icevar.f90:426-427`) reconstructs this
+    diagnostic immediately before each `ice_thd` call as
+    ``rt0 + MAX(-100, MIN(r1_rcpi * (-r1_rhos * e_s + rLfus), 0))``.
+    Setting ``_nemo_glo2eqv_snow_temp=False`` retains the `icethd_dh.F90:498-503`
+    expanded form for before/after ablation.
     """
     inverse_rho_snow = 1.0 / constants.rho_snow
     inverse_c_ice = 1.0 / constants.c_ice
+    if _nemo_order and _nemo_glo2eqv_snow_temp:
+        sr = nemo_source_round if _nemo_source_round else (lambda x: x)
+        return sr(
+            constants.T0
+            + jnp.maximum(
+                -100.0,
+                jnp.minimum(
+                    sr(
+                        inverse_c_ice
+                        * sr(sr(-inverse_rho_snow * e) + constants.latent_fusion)
+                    ),
+                    0.0,
+                ),
+            )
+        )
     if _nemo_order:
         unbounded = constants.T0 + (
             -e * inverse_rho_snow * inverse_c_ice
@@ -340,15 +391,21 @@ def snow_temperature_from_enthalpy(e, constants: IceConstantsConfig, *,
     return jnp.clip(unbounded, constants.T0 - 100.0, constants.T0)
 
 
-def p07_conductivity(T_K, S, constants: IceConstantsConfig):
+def p07_conductivity(
+    T_K,
+    S,
+    constants: IceConstantsConfig,
+    *,
+    _nemo_source_round: bool = True,
+):
     """Pringle et al. selection, `icethd_zdf_bl99.F90:261-275`."""
 
-    T_c = jnp.minimum(T_K - constants.T0, -_EPS10)
+    sr = nemo_source_round if _nemo_source_round else (lambda x: x)
+    T_c = jnp.minimum(sr(T_K - constants.T0), -_EPS10)
     return jnp.maximum(
         _P07_CONDUCTIVITY_MIN,
-        constants.k_ice
-        + _P07_BETA_SALINITY * S / T_c
-        - _P07_BETA_TEMPERATURE * T_c,
+        sr(constants.k_ice + sr(_P07_BETA_SALINITY * S / T_c))
+        - sr(_P07_BETA_TEMPERATURE * T_c),
     )
 
 
@@ -359,10 +416,12 @@ def _radiation(
     T_surface,
     *,
     _nemo_zdf_layer_reciprocals: bool = True,
+    _nemo_source_round: bool = True,
 ):
     """SSL transmission/absorption, `icethd_zdf_bl99.F90:143-230`."""
 
     del T_surface  # nn_qtrice=0 in the resolved deck
+    sr = nemo_source_round if _nemo_source_round else (lambda x: x)
     dtype = h_i.dtype
     js = jnp.arange(1, 4, dtype=dtype)
     ji = jnp.arange(1, 4, dtype=dtype)
@@ -381,17 +440,18 @@ def _radiation(
         h_s + _SNOW_FRACTION_DEPTH
     )  # nn_snwfra=2, icevar.F90:1598-1599
     tr_s = qtr_top[..., None] * jnp.exp(
-        -_SNOW_EXTINCTION * jnp.maximum(0.0, dzs * js - _SNOW_SSL_DEPTH)
+        -_SNOW_EXTINCTION * jnp.maximum(0.0, sr(dzs * js) - _SNOW_SSL_DEPTH)
     )
     tr_s0 = jnp.concatenate([qtr_top[..., None], tr_s], axis=-1)
     ab_s = tr_s0[..., :-1] - tr_s0[..., 1:]
     through_snow = tr_s[..., -1]
-    top_i = snow_fraction * through_snow + (1.0 - snow_fraction) * qtr_top
-    tr_i = (
+    top_i = sr(snow_fraction * through_snow) + sr((1.0 - snow_fraction) * qtr_top)
+    tr_i = sr(
         snow_fraction[..., None] * through_snow[..., None]
-        * jnp.exp(-jnp.maximum(0.0, dzi * ji - _H_MIN))
-        + (1.0 - snow_fraction)[..., None] * qtr_top[..., None]
-        * jnp.exp(-jnp.maximum(0.0, dzi * ji - _ICE_SSL_DEPTH))
+        * jnp.exp(-jnp.maximum(0.0, sr(dzi * ji) - _H_MIN))
+    ) + sr(
+        (1.0 - snow_fraction)[..., None] * qtr_top[..., None]
+        * jnp.exp(-jnp.maximum(0.0, sr(dzi * ji) - _ICE_SSL_DEPTH))
     )
     tr_i0 = jnp.concatenate([top_i[..., None], tr_i], axis=-1)
     ab_i = tr_i0[..., :-1] - tr_i0[..., 1:]
@@ -414,6 +474,8 @@ def _si3_zdf_bl99_step(
     _nemo_snow_temperature_bounds: bool = True,
     _nemo_eos_order: bool = True,
     _nemo_zdf_layer_reciprocals: bool = True,
+    _nemo_glo2eqv_snow_temp: bool = True,
+    _nemo_source_round: bool = True,
 ) -> SI3ZDFResult:
     """Iterative 3+3-layer BL99/P07 solve for the resolved ORCA1 arm.
 
@@ -423,6 +485,7 @@ def _si3_zdf_bl99_step(
     bound exists only to expose a single Picard iterate to the oracle gate.
     """
 
+    sr = nemo_source_round if _nemo_source_round else (lambda x: x)
     e_ice = jnp.asarray(e_ice)
     dtype = e_ice.dtype
     h_ice = jnp.asarray(h_ice, dtype=dtype)
@@ -430,11 +493,19 @@ def _si3_zdf_bl99_step(
     T_surface_input = jnp.asarray(T_surface, dtype=dtype)
     S_layers = jnp.asarray(S_layers, dtype=dtype)
     T_i_old = ice_temperature_from_enthalpy(
-        e_ice, S_layers, constants, _nemo_order=_nemo_eos_order
+        e_ice,
+        S_layers,
+        constants,
+        _nemo_order=_nemo_eos_order,
+        _nemo_source_round=_nemo_source_round,
     )
     e_snow = jnp.asarray(e_snow, dtype=dtype)
     T_s_old = snow_temperature_from_enthalpy(
-        e_snow, constants, _nemo_order=_nemo_eos_order
+        e_snow,
+        constants,
+        _nemo_order=_nemo_eos_order,
+        _nemo_glo2eqv_snow_temp=_nemo_glo2eqv_snow_temp,
+        _nemo_source_round=_nemo_source_round,
     )
     if not _nemo_snow_temperature_bounds:
         # Gate-only one-variable arm reproducing the pre-Phase-4 operand.
@@ -460,6 +531,7 @@ def _si3_zdf_bl99_step(
         qtr_top,
         T_surface,
         _nemo_zdf_layer_reciprocals=_nemo_zdf_layer_reciprocals,
+        _nemo_source_round=_nemo_source_round,
     )
 
     dz_i = jnp.maximum(h_ice, _H_MIN) / 3.0
@@ -495,21 +567,38 @@ def _si3_zdf_bl99_step(
         # P07 conductivity at the four ice interfaces (top, 2 interior, base).
         Ti_iface = 0.5 * (Ti[..., :-1] + Ti[..., 1:])
         S_iface = 0.5 * (S_layers[..., :-1] + S_layers[..., 1:])
-        k0 = p07_conductivity(Ti[..., 0], S_layers[..., 0], constants)
-        km = p07_conductivity(Ti_iface, S_iface, constants)
-        kb = p07_conductivity(T_bottom, S_layers[..., -1], constants)
+        k0 = p07_conductivity(
+            Ti[..., 0],
+            S_layers[..., 0],
+            constants,
+            _nemo_source_round=_nemo_source_round,
+        )
+        km = p07_conductivity(
+            Ti_iface,
+            S_iface,
+            constants,
+            _nemo_source_round=_nemo_source_round,
+        )
+        kb = p07_conductivity(
+            T_bottom,
+            S_layers[..., -1],
+            constants,
+            _nemo_source_round=_nemo_source_round,
+        )
         tcond_i = jnp.concatenate([k0[..., None], km, kb[..., None]], axis=-1)
         if _nemo_zdf_layer_reciprocals:
-            # Written order of `icethd_zdf_bl99.F90:170-186,331-346,365-375`:
-            # layer thicknesses use `* r1_nlay_{i,s}` and conductances/eta
-            # multiply by the precomputed reciprocals `z1_h_{i,s}`.
+            # Written order of `icethd_zdf_bl99.F90:170-186,331-346,365-375`
+            # (compiled `icethd_zdf_bl99.f90:331-346`): layer thicknesses use
+            # `* r1_nlay_{i,s}`, conductances/eta multiply by the precomputed
+            # reciprocals `z1_h_{i,s}`, and `zkappa_comb` adds the rounded
+            # products `zkappa_i * zh_s + rcdsn * zh_i` without FMA.
             k_i = tcond_i * z1_h_i[..., None]
             k_s_bulk = jnp.broadcast_to(
                 (constants.k_snow * z1_h_s)[..., None], k_i.shape
             )
             k_si = (
                 isnow * constants.k_snow * k0
-                / (0.5 * (k0 * zh_s + constants.k_snow * zh_i_pos))
+                / (0.5 * (sr(k0 * zh_s) + sr(constants.k_snow * zh_i_pos)))
             )
         else:
             k_i = tcond_i / dz_i[..., None]
@@ -520,8 +609,12 @@ def _si3_zdf_bl99_step(
         k_s = k_s_bulk.at[..., -1].set(k_si)
         k_i = k_i.at[..., 0].set(jnp.where(snow_present, k_si, k_i[..., 0]))
 
-        ci = constants.c_ice + _BRINE_HEAT_CAPACITY_FACTOR * S_layers / jnp.maximum(
-            (Ti - constants.T0) * (T_i_old - constants.T0), _EPS10
+        # `icethd_zdf_bl99.F90:397` (compiled `icethd_zdf_bl99.f90:370`):
+        # `zc_i = rcpi + zgamma * sz_i / MAX((t_i - rt0) * (zt_i_old - rt0), epsi10)`
+        ci = constants.c_ice + sr(
+            _BRINE_HEAT_CAPACITY_FACTOR
+            * S_layers
+            / jnp.maximum((Ti - constants.T0) * (T_i_old - constants.T0), _EPS10)
         )
         if _nemo_zdf_layer_reciprocals:
             eta_i = (dt * inverse_rho_ice * z1_h_i[..., None]) / ci
@@ -533,7 +626,8 @@ def _si3_zdf_bl99_step(
             eta_i = dt / (constants.rho_ice * dz_i[..., None] * ci)
             eta_s = dt / (constants.rho_snow * dz_s[..., None] * constants.c_ice)
 
-        qns_new = qns + dqns * (Tsu - Tsu_previous)
+        # `icethd_zdf_bl99.F90:408-414` (compiled `icethd_zdf_bl99.f90:381-387`)
+        qns_new = qns + sr(dqns * (Tsu - Tsu_previous))
         fnet = qsr - qtr_top + qns_new
 
         shape = Ti.shape[:-1] + (7,)
@@ -542,55 +636,69 @@ def _si3_zdf_bl99_step(
         c = jnp.zeros(shape, dtype=dtype)
         d = jnp.zeros(shape, dtype=dtype)
 
-        # Surface plus snow rows, NEMO jm=1..4 (:438-448,:419-425).
-        b = b.at[..., 0].set(dqns - 2.0 * k_s[..., 0])
-        c = c.at[..., 0].set(2.0 * k_s[..., 0])
-        d = d.at[..., 0].set(dqns * Tsu - fnet)
+        # Surface plus snow rows, NEMO jm=1..4 (`icethd_zdf_bl99.F90:446-475`,
+        # compiled `icethd_zdf_bl99.f90:419-448`).
+        b = b.at[..., 0].set(dqns - sr(2.0 * k_s[..., 0]))
+        c = c.at[..., 0].set(sr(2.0 * k_s[..., 0]))
+        d = d.at[..., 0].set(sr(dqns * Tsu) - fnet)
         a = a.at[..., 1].set(-eta_s[..., 0] * 2.0 * k_s[..., 0])
-        b = b.at[..., 1].set(1.0 + eta_s[..., 0] * (k_s[..., 1] + 2.0 * k_s[..., 0]))
+        b = b.at[..., 1].set(
+            1.0 + sr(eta_s[..., 0] * (k_s[..., 1] + sr(2.0 * k_s[..., 0])))
+        )
         c = c.at[..., 1].set(-eta_s[..., 0] * k_s[..., 1])
-        d = d.at[..., 1].set(T_s_old[..., 0] + eta_s[..., 0] * ab_s[..., 0])
+        d = d.at[..., 1].set(T_s_old[..., 0] + sr(eta_s[..., 0] * ab_s[..., 0]))
         for k in (1, 2):
             row = k + 1
             a = a.at[..., row].set(-eta_s[..., k] * k_s[..., k])
-            b = b.at[..., row].set(1.0 + eta_s[..., k] * (k_s[..., k] + k_s[..., k + 1]))
+            b = b.at[..., row].set(
+                1.0 + sr(eta_s[..., k] * (k_s[..., k] + k_s[..., k + 1]))
+            )
             c = c.at[..., row].set(-eta_s[..., k] * k_s[..., k + 1])
-            d = d.at[..., row].set(T_s_old[..., k] + eta_s[..., k] * ab_s[..., k])
+            d = d.at[..., row].set(
+                T_s_old[..., k] + sr(eta_s[..., k] * ab_s[..., k])
+            )
 
-        # Ice rows, NEMO jm=5..7 (:399-413).
+        # Ice rows, NEMO jm=5..7 (`icethd_zdf_bl99.F90:426-440`,
+        # compiled `icethd_zdf_bl99.f90:399-413`).
         for k in (0, 1):
             row = k + 4
             a = a.at[..., row].set(-eta_i[..., k] * k_i[..., k])
-            b = b.at[..., row].set(1.0 + eta_i[..., k] * (k_i[..., k] + k_i[..., k + 1]))
+            b = b.at[..., row].set(
+                1.0 + sr(eta_i[..., k] * (k_i[..., k] + k_i[..., k + 1]))
+            )
             c = c.at[..., row].set(-eta_i[..., k] * k_i[..., k + 1])
-            d = d.at[..., row].set(T_i_old[..., k] + eta_i[..., k] * ab_i[..., k])
+            d = d.at[..., row].set(
+                T_i_old[..., k] + sr(eta_i[..., k] * ab_i[..., k])
+            )
         a = a.at[..., 6].set(-eta_i[..., 2] * k_i[..., 2])
-        b = b.at[..., 6].set(1.0 + eta_i[..., 2] * (k_i[..., 2] + 2.0 * k_i[..., 3]))
+        b = b.at[..., 6].set(
+            1.0 + sr(eta_i[..., 2] * (k_i[..., 2] + sr(2.0 * k_i[..., 3])))
+        )
         d = d.at[..., 6].set(
             T_i_old[..., 2]
-            + eta_i[..., 2] * (ab_i[..., 2] + 2.0 * k_i[..., 3] * T_bottom)
+            + sr(eta_i[..., 2] * (ab_i[..., 2] + sr(2.0 * k_i[..., 3] * T_bottom)))
         )
 
         # BL99 changes the solved row range at two physical boundaries
-        # (`icethd_zdf_bl99.F90:433-513`): snow-free columns put the surface
-        # equation in row 4, and a melting surface is fixed at T0 and removed
-        # from the solve.  Keeping a seven-row carrier is convenient for JAX,
-        # but unused rows must be identities so no phantom snow layer couples
-        # into the ice solution.
+        # (`icethd_zdf_bl99.F90:460-540`, compiled `icethd_zdf_bl99.f90:433-513`):
+        # snow-free columns put the surface equation in row 4, and a melting
+        # surface is fixed at T0 and removed from the solve.  Keeping a
+        # seven-row carrier is convenient for JAX, but unused rows must be
+        # identities so no phantom snow layer couples into the ice solution.
         no_snow_a = jnp.zeros_like(a)
         no_snow_b = jnp.ones_like(b)
         no_snow_c = jnp.zeros_like(c)
         no_snow_d = jnp.zeros_like(d)
-        no_snow_b = no_snow_b.at[..., 3].set(dqns - 2.0 * k_i[..., 0])
-        no_snow_c = no_snow_c.at[..., 3].set(2.0 * k_i[..., 0])
-        no_snow_d = no_snow_d.at[..., 3].set(dqns * Tsu - fnet)
+        no_snow_b = no_snow_b.at[..., 3].set(dqns - sr(2.0 * k_i[..., 0]))
+        no_snow_c = no_snow_c.at[..., 3].set(sr(2.0 * k_i[..., 0]))
+        no_snow_d = no_snow_d.at[..., 3].set(sr(dqns * Tsu) - fnet)
         no_snow_a = no_snow_a.at[..., 4].set(-eta_i[..., 0] * 2.0 * k_i[..., 0])
         no_snow_b = no_snow_b.at[..., 4].set(
-            1.0 + eta_i[..., 0] * (k_i[..., 1] + 2.0 * k_i[..., 0])
+            1.0 + sr(eta_i[..., 0] * (k_i[..., 1] + sr(2.0 * k_i[..., 0])))
         )
         no_snow_c = no_snow_c.at[..., 4].set(-eta_i[..., 0] * k_i[..., 1])
         no_snow_d = no_snow_d.at[..., 4].set(
-            T_i_old[..., 0] + eta_i[..., 0] * ab_i[..., 0]
+            T_i_old[..., 0] + sr(eta_i[..., 0] * ab_i[..., 0])
         )
         for row in (5, 6):
             no_snow_a = no_snow_a.at[..., row].set(a[..., row])
@@ -616,8 +724,8 @@ def _si3_zdf_bl99_step(
         a = a.at[..., 1].set(jnp.where(snow_melting, 0.0, a[..., 1]))
         d = d.at[..., 1].set(jnp.where(
             snow_melting,
-            T_s_old[..., 0] + eta_s[..., 0]
-            * (ab_s[..., 0] + 2.0 * k_s[..., 0] * Tsu),
+            T_s_old[..., 0]
+            + sr(eta_s[..., 0] * (ab_s[..., 0] + sr(2.0 * k_s[..., 0] * Tsu))),
             d[..., 1],
         ))
         b = b.at[..., 3].set(jnp.where(no_snow_melting, 1.0, b[..., 3]))
@@ -626,12 +734,17 @@ def _si3_zdf_bl99_step(
         a = a.at[..., 4].set(jnp.where(no_snow_melting, 0.0, a[..., 4]))
         d = d.at[..., 4].set(jnp.where(
             no_snow_melting,
-            T_i_old[..., 0] + eta_i[..., 0]
-            * (ab_i[..., 0] + 2.0 * k_i[..., 0] * Tsu),
+            T_i_old[..., 0]
+            + sr(eta_i[..., 0] * (ab_i[..., 0] + sr(2.0 * k_i[..., 0] * Tsu))),
             d[..., 4],
         ))
 
-        solution = thomas_solve(a, b, c, d, "nemo_unnormalised")
+        thomas_order = (
+            "nemo_unnormalised"
+            if _nemo_source_round
+            else "nemo_unnormalised_unrounded"
+        )
+        solution = thomas_solve(a, b, c, d, thomas_order)
         solved_surface = jnp.where(
             branch_snow_present, solution[..., 0], solution[..., 3]
         )
@@ -645,7 +758,8 @@ def _si3_zdf_bl99_step(
             jnp.clip(solution[..., 1:4], constants.T0 - 100.0, constants.T0),
             Ts,
         )
-        melt = constants.T0 - constants.liquidus_slope * S_layers
+        # `icethd_zdf_bl99.F90:615` (compiled `icethd_zdf_bl99.f90:588`)
+        melt = constants.T0 - sr(constants.liquidus_slope * S_layers)
         Ti_candidate = jnp.maximum(
             jnp.minimum(solution[..., 4:7], melt), constants.T0 - 100.0
         )
@@ -700,9 +814,15 @@ def _si3_zdf_bl99_step(
         iterations,
     ) = jax.lax.fori_loop(0, _maximum_iterations, body, init)
     e_i = ice_enthalpy_from_temperature(
-        Ti, S_layers, constants, _nemo_order=_nemo_eos_order
+        Ti,
+        S_layers,
+        constants,
+        _nemo_order=_nemo_eos_order,
+        _nemo_source_round=_nemo_source_round,
     )
-    e_s = snow_enthalpy_from_temperature(Ts, constants)
+    e_s = snow_enthalpy_from_temperature(
+        Ts, constants, _nemo_source_round=_nemo_source_round
+    )
 
     # Interface conductive diagnostics, `icethd_zdf_bl99.F90:820-824`
     # (`C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:782-784`): NEMO reuses
@@ -714,16 +834,29 @@ def _si3_zdf_bl99_step(
         qcn_bottom = (
             -k_i_frozen[..., -1] * zg1 * (T_bottom - Ti[..., -1])
         )
-        qcn_top = (
+        qcn_top = sr(
             -isnow * k_s_frozen[..., 0] * zg1s * (Ts[..., 0] - Tsu)
-            - (1.0 - isnow) * k_i_frozen[..., 0] * zg1 * (Ti[..., 0] - Tsu)
+        ) - sr(
+            (1.0 - isnow) * k_i_frozen[..., 0] * zg1 * (Ti[..., 0] - Tsu)
         )
     else:
         k_top_i = (
-            p07_conductivity(Ti[..., 0], S_layers[..., 0], constants) / dz_i
+            p07_conductivity(
+                Ti[..., 0],
+                S_layers[..., 0],
+                constants,
+                _nemo_source_round=_nemo_source_round,
+            )
+            / dz_i
         )
         k_base_i = (
-            p07_conductivity(T_bottom, S_layers[..., -1], constants) / dz_i
+            p07_conductivity(
+                T_bottom,
+                S_layers[..., -1],
+                constants,
+                _nemo_source_round=_nemo_source_round,
+            )
+            / dz_i
         )
         k_top = jnp.where(
             snow_present,
@@ -1138,6 +1271,8 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                            _nemo_snow_sublimation_order: bool = True,
                            _nemo_snow_remap: bool = True,
                            _nemo_zdf_layer_reciprocals: bool = True,
+                           _nemo_glo2eqv_snow_temp: bool = True,
+                           _nemo_source_round: bool = True,
                            ) -> SI3StepTrace:
     """Execute the selected `ice_thd` chain and retain every oracle boundary."""
 
@@ -1148,6 +1283,8 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         _nemo_snow_temperature_bounds=_nemo_snow_temperature_bounds,
         _nemo_eos_order=_nemo_eos_order,
         _nemo_zdf_layer_reciprocals=_nemo_zdf_layer_reciprocals,
+        _nemo_glo2eqv_snow_temp=_nemo_glo2eqv_snow_temp,
+        _nemo_source_round=_nemo_source_round,
     )
     post_zdf = state._replace(T_surface=zdf.T_surface, e_ice=zdf.e_ice,
                               e_snow=zdf.e_snow)

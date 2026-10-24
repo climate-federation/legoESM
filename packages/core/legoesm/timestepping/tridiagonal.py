@@ -25,6 +25,8 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.source_rounding import nemo_source_round
+
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 
 
@@ -132,7 +134,7 @@ def _thomas_solve_impl(
     c = jnp.asarray(c, work_dtype)
     d = jnp.asarray(d, work_dtype)
 
-    if operation_order == "nemo_unnormalised":
+    if operation_order in ("nemo_unnormalised", "nemo_unnormalised_unrounded"):
         diagonal = b
         rhs = d
 
@@ -156,11 +158,19 @@ def _thomas_solve_impl(
         solution = solution.at[..., -1].set(
             rhs[..., -1] / diagonal[..., -1]
         )
+        # Prevent XLA from contracting `rhs - c * current` into an FMA in
+        # NEMO's backward sweep (`icethd_zdf_bl99.F90:575,582,587,593-594`,
+        # compiled `icethd_zdf_bl99.f90:548,555,560,566-567`).
+        round_prod = (
+            nemo_source_round
+            if operation_order == "nemo_unnormalised"
+            else (lambda x: x)
+        )
 
         def unnormalised_backward(reverse_k, current):
             k = n - 2 - reverse_k
             return current.at[..., k].set(
-                (rhs[..., k] - c[..., k] * current[..., k + 1])
+                (rhs[..., k] - round_prod(c[..., k] * current[..., k + 1]))
                 / diagonal[..., k]
             )
 
