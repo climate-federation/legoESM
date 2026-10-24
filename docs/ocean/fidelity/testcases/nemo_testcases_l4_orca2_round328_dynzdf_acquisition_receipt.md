@@ -275,4 +275,15 @@ R1--R3 and R5 are **CONFIRMED**. R4 is **CONFIRMED** for non-bit `avm` and its
 first under-ice cell, but its implied ice localization is **REFUTED** by the
 334,041 open-water unequal interfaces.
 
+Resume-4 landing gates: per-receipt citation gate PASS (10 citations, 0
+unmapped, 0 failures, 0 map-audit failures); default landing battery 147
+passed (23 + 96 + 28); private-import ratchet 6 passed. The first ratchet
+invocation exposed only core/ocean on `PYTHONPATH` and correctly refused its
+missing namespace sentinels; the complete `packages/*` namespace run passed.
+
+ORCA2_ROUND328_RECORD_ADMISSION_PASS all_refusals_live
+ORCA2_ROUND328_DYNZDF_OFFLINE_REPLAY_PASS both_ranks_bit_identical_with_record_avm
+ORCA2_ROUND328_FIRST_DEPARTURE_CONFIRMED u_zzwi_global_jik_1_49_1
+ORCA2_ROUND328_STOP_PROPOSAL upstream_tke_avm_no_model_or_configuration_change
+
 codex review: operator
