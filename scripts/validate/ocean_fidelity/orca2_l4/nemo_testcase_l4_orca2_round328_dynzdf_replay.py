@@ -283,6 +283,15 @@ def term_localization(candidate: np.ndarray, record: np.ndarray,
     }
 
 
+def recompose_from_closure(closure, diagnostic_closure,
+                           diagnostic_after_ddm, diagnostic_final):
+    """Apply diagnosed DDM then IWM increments to the step's carried closure."""
+    ddm_increment = diagnostic_after_ddm - diagnostic_closure
+    iwm_increment = diagnostic_final - diagnostic_after_ddm
+    return ((np.asarray(closure, dtype=np.float64) + ddm_increment)
+            + iwm_increment)
+
+
 def _with_vmix_terms(config, *, ddm: bool, iwm: bool):
     vmix = config.physics.vertical_mixing
     vmix = vmix._replace(
@@ -397,7 +406,10 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
         surface_forcing=surface, **step_kwargs))
     require(state_after.tke_avm is not None,
             "ordinary comparison step did not return its closure avm")
+    require(state_after.tke_avt is not None,
+            "ordinary comparison step did not return its closure avt")
     closure_state = np.asarray(state_after.tke_avm.data, dtype=np.float64)
+    closure_heat_state = np.asarray(state_after.tke_avt.data, dtype=np.float64)
 
     ddm_config = _with_vmix_terms(
         card.recipe.model_config, ddm=True, iwm=False)
@@ -407,19 +419,25 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
         card.recipe.grid, card.recipe.z_coord, ddm_config)
     closure_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, closure_config)
-    _, after_ddm = _diagnose_profiles(
+    heat_after_ddm, after_ddm = _diagnose_profiles(
         after_ddm_model, card, freshwater, surface, sponge)
-    _, closure = _diagnose_profiles(
+    heat_closure, closure = _diagnose_profiles(
         closure_model, card, freshwater, surface, sponge)
+    consumed = recompose_from_closure(
+        closure_state, closure, after_ddm, candidate)
+    consumed_after_ddm = recompose_from_closure(
+        closure_state, closure, after_ddm, after_ddm)
+    consumed_heat = recompose_from_closure(
+        closure_heat_state, heat_closure, heat_after_ddm, heat)
     record_avm = assemble_record_avm(records)
     require(candidate.shape == record_avm.shape,
             f"model avm {candidate.shape} != record {record_avm.shape}")
     active = np.array(card.recipe.z_coord.is_active[..., 1:], dtype=bool, copy=True)
     active &= np.asarray(card.recipe.z_coord.is_active[..., :-1], dtype=bool)
     require(active.shape == candidate.shape, "active-interface shape differs")
-    row = score(candidate, record_avm, active)
+    row = score(consumed, record_avm, active)
     ice = np.asarray(surface.ice_concentration) > 0.0
-    unequal = (bits(candidate) != bits(record_avm)) & active
+    unequal = (bits(consumed) != bits(record_avm)) & active
     under_ice = unequal & ice[..., None]
     row["unequal_under_ice"] = int(np.count_nonzero(under_ice))
     row["unequal_open_water"] = int(np.count_nonzero(unequal & ~ice[..., None]))
@@ -430,7 +448,9 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
     row["backend"] = jax.default_backend()
     row["dtype"] = str(candidate.dtype)
     row["term_localization"] = term_localization(
-        candidate, record_avm, after_ddm, closure, active)
+        consumed, record_avm, consumed_after_ddm, closure_state, active)
+    row["fresh_diagnostic_profile_vs_record"] = score(
+        candidate, record_avm, active)
     row["state_tke_avm_vs_closure_without_ddm_or_iwm"] = score(
         closure_state, closure, active)
     row["profile_phase"] = "ordinary step setup, stopped before implicit solve"
@@ -446,7 +466,7 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
             "rank-0 avs record differs from the consumed model profile")
     tracer_rows = {
         "avt_rank0": score(
-            heat[:, :record_avt.shape[1]], record_avt, rank0_active),
+            consumed_heat[:, :record_avt.shape[1]], record_avt, rank0_active),
         "avs_rank0": score(
             salt[:, :record_avs.shape[1]], record_avs, rank0_active),
     }
@@ -457,9 +477,9 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
         tracer_rows["en_rank0"] = score(
             model_en[:, :record_en.shape[1]], record_en, rank0_active)
     candidate_faces = {
-        "u": np.asarray(interp_cell_to_uface(jnp.asarray(candidate)))[:, 1:],
+        "u": np.asarray(interp_cell_to_uface(jnp.asarray(consumed)))[:, 1:],
         "v": np.asarray(interp_to_v_points(
-            jnp.asarray(candidate), card.recipe.grid))[1:],
+            jnp.asarray(consumed), card.recipe.grid))[1:],
     }
     first_statement = {}
     for component in COMPONENTS:
