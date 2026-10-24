@@ -2677,7 +2677,6 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:252-256': [('!', 122), 'zat_i_ini(:,:) = si(jp_ati)%fnow(:,:,1) * tmask(:,:,1)', 5],
     'src/ICE/iceistate.F90:311-316': ['CALL ice_var_itd( zht_i_ini(:,jj)     , zht_s_ini(:,jj)     , zat_i_in', '&                a_ip   (:,jj,:)   ,   h_ip   (:,jj,:)   ,   h_il   (:', 6],
     'src/ICE/iceistate.F90:398-430': ['! 4) Adjust ssh and vertical scale factors to snow-ice mass', ('!', 197), 33],
-    'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4363-4490': ['class ORCA2InitialIce(NamedTuple):', 'return np.where(surface_wet, -ssh_adjustment, 0.0)', 128],
     'cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg:146': 'ln_teos10    = .true.         !  = Use TEOS-10 equation of state',
     'cfgs/ORCA2_SAS_ICE/EXPREF/namelist_ice_cfg:9-50': ['!!              7 - Ice surface boundary conditions    (namsbc)', '&namthd         !   Ice thermodynamics', 42],
     'docs/ice/fidelity/si3_r7_o2_preregister.md:1-143': ['# SI3 Ladder Rung O2 Preregistration — Round 7 (`si3_r7`): Scalar Init', '| **P7** | Preflight checklist items 1–7 and admission provenance gate', 143],
@@ -2690,12 +2689,7 @@ CITATION_MAP = {
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.py:1-1599': ['#!/usr/bin/env python3', 'raise SystemExit(main())', 1599],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:309-460': ['! no ice if (sst - Tfreez) >= thresold', 'ENDWHERE', 152],
     'src/OCE/DOM/domutl.F90:91-121': ['SUBROUTINE dom_uniq( puniq, cdgrd )', 'END SUBROUTINE dom_uniq', 31],
-    'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4363-4375': ['class ORCA2InitialIce(NamedTuple):', 'lid_depth_m: tuple[float, float] = (0.0, 0.0)', 13],
-    'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4378': 'ORCA2_DECK_INITIAL_ICE = ORCA2InitialIce()',
-    'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4381-4392': ['def _ddpdd_sum_2d(arr: np.ndarray) -> np.float64:', 'return hi', 12],
     'src/OCE/LBC/lib_mpp.F90:1244-1267': ['!!               scalar to add to the summ yddb', ('END SUBROUTINE DDPDD', 2), 24],
-    'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4395-4490': ['def orca2_initial_ice_ssh(', 'return np.where(surface_wet, -ssh_adjustment, 0.0)', 96],
-    'tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:297-322': ['# 5. ORCA2 round-329 `orca2_initial_ice_ssh` default (ln_eos80) bit-id', '_assert_zero_ulp(p_recipe, c_recipe, "orca2_initial_ice_ssh")', 26],
     'packages/ice/legoesm/ice/si3_orca2_state.py:2105-2210': ['class SI3O2InitConfig(NamedTuple):', ('apply_halos: bool = False', 3), 106],
     'packages/ice/legoesm/ice/si3_orca2_state.py:2105-2156': ['class SI3O2InitConfig(NamedTuple):', ('return base._replace(**overrides) if overrides else base', 4), 52],
     'src/ICE/iceistate.F90:453-533': ['!!              values called at the first timestep (nit000)', 'END SUBROUTINE ice_istate_init', 81],
@@ -9507,9 +9501,6 @@ def _reanchor(old: str, new: str, *, extent: int | None = None, anchors=None) ->
     CITATION_MAP[new] = value
 
 
-_reanchor('packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1622-1629', 'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1622-1629')
-_reanchor('packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1676-1689', 'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1676-1689')
-_reanchor('packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2091-2107', 'packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2091-2107')
 _reanchor('packages/ice/legoesm/ice/config.py:566-575', 'packages/ice/legoesm/ice/config.py:571-579', anchors=['def build_si3_orca2_o1_config(', ('si3_orca2=cfg,', 1), 9])
 _reanchor('packages/ice/legoesm/ice/config.py:531-563', 'packages/ice/legoesm/ice/config.py:531-568', extent=38)
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:51-62', 'packages/ice/legoesm/ice/si3_orca2_state.py:54-65')
@@ -9517,16 +9508,10 @@ _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2037-2047', 'packages/ice
 _reanchor('packages/ice/legoesm/ice/sea_ice.py:590-610', 'packages/ice/legoesm/ice/sea_ice.py:592-612', anchors=[('if config.si3_orca2 is None:', 1), ('"heat/freshwater/salt TileResponse contract is implemented"', 1), 21])
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1778-1843', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1804-1869')
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1830-1852', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1856-1878')
-CITATION_MAP.pop('packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4363-4490')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2105-2661', 'packages/ice/legoesm/ice/si3_orca2_state.py:2261-2768', extent=508)
 _reanchor('packages/ice/legoesm/ice/sea_ice.py:643-697', 'packages/ice/legoesm/ice/sea_ice.py:621-655', anchors=['def _si3_orca2_o2_step_with_trace(', ('"heat/freshwater/salt TileResponse contract is implemented"', 2), 35])
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/run.sh:1-1073', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/run.sh:1-1221', extent=1221)
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.py:1-1599', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.py:1-1654', extent=1654)
-CITATION_MAP.pop('packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4363-4375')
-CITATION_MAP.pop('packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4378')
-CITATION_MAP.pop('packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4381-4392')
-CITATION_MAP.pop('packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4395-4490')
-CITATION_MAP.pop('tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:297-322')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2105-2210', 'packages/ice/legoesm/ice/si3_orca2_state.py:2261-2367', anchors=['class SI3O2InitConfig(NamedTuple):', ('apply_halos: bool', 5), 107])
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2105-2156', 'packages/ice/legoesm/ice/si3_orca2_state.py:2261-2314', extent=54)
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2159-2193', 'packages/ice/legoesm/ice/si3_orca2_state.py:2317-2351')
@@ -9571,15 +9556,6 @@ _reanchor('tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:792-1085', 't
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.py:1213-1521', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.py:1164-1572', anchors=['def admit_evidence_directory(', '"max_norm_rst_step1": cmp_rst_step1["max_norm_wet"],', 409])
 _reanchor('tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:1088-1111', 'tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:1179-1202', anchors=['def test_o2_committed_ocean_output_excerpt_provenance() -> None:', 'assert body == [src_lines[n - 1].rstrip() for n in nums]', 24])
 _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/ocean.output.excerpt:1-111', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/ocean.output.excerpt:1-71', anchors=['# Selected lines from the admitted NEMO 5.0.2 ORCA2_SAS_ICE O1 run matching this deck; trailing whitespace removed.', ('AAAAAAAA', 2), 71])
-_reanchor('nemo_testcase_recipe.py:2095', 'nemo_testcase_recipe.py:2095')
-_reanchor('nemo_testcase_recipe.py:4050', 'nemo_testcase_recipe.py:4050')
-_reanchor('nemo_testcase_recipe.py:3951', 'nemo_testcase_recipe.py:3951')
-_reanchor('nemo_testcase_recipe.py:3999', 'nemo_testcase_recipe.py:3999')
-_reanchor('nemo_testcase_recipe.py:4263', 'nemo_testcase_recipe.py:4263')
-_reanchor('nemo_testcase_recipe.py:4113', 'nemo_testcase_recipe.py:4113')
-_reanchor('nemo_testcase_recipe.py:1762-1763', 'nemo_testcase_recipe.py:1762-1763')
-_reanchor('nemo_testcase_recipe.py:3424', 'nemo_testcase_recipe.py:3424')
-_reanchor('nemo_testcase_recipe.py:3427', 'nemo_testcase_recipe.py:3427')
 _reanchor('nemo_testcase_recipe.py:380,636,3451', 'nemo_testcase_recipe.py:380,636,3408')
 
 DEFAULT_RECEIPT = (
