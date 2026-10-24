@@ -399,11 +399,9 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
     closure_config = _with_vmix_terms(
         card.recipe.model_config, ddm=False, iwm=False)
     after_ddm_model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, ddm_config,
-        iwm_forcing=card.recipe.iwm_forcing)
+        card.recipe.grid, card.recipe.z_coord, ddm_config)
     closure_model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, closure_config,
-        iwm_forcing=card.recipe.iwm_forcing)
+        card.recipe.grid, card.recipe.z_coord, closure_config)
     _, after_ddm = _diagnose_profiles(
         after_ddm_model, card, surface, sponge)
     _, closure = _diagnose_profiles(closure_model, card, surface, sponge)
