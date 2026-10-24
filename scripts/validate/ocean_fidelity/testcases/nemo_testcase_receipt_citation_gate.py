@@ -1500,6 +1500,9 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
         "/dynzdf.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R328ZDF/BLD/ppsrc/nemo/dynzdf.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R328ZDF/BLD/ppsrc/nemo"
+        "/dynzdf.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynadv.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
         "/dynadv.f90"),
@@ -1812,6 +1815,9 @@ CITATION_MAP = {
         ('uc0=config.bottom_drag.bottom_drag_uc0,', 2), 5],
     'implicit_solver.py:363-382': [
         '_round_the_multiply(quotient * previous))', 'numerator / pivot(current_diagonal))', 20],
+    'implicit_solver.py:438-450': [
+        'avm_sum = jnp.asarray(2.0, dtype=dtype) * avm_face',
+        'avm_product / lower_denominator) * interface_wet', 13],
     'internal_wave_mixing.py:444': 'n_pos = safe_sqrt(n2_pos)',
     'tke.py:1082': 'safe_sqrt((jnp.asarray(2.0, e.dtype) * e) / zrn2),',
     'tke.py:3647': 'dissl_new = safe_sqrt(tke_curr) / l_eps_final',
@@ -4472,6 +4478,9 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/dynzdf.f90:362,364': [
         ('(e3w_1d(jk  ) *(1._wp+r3v(ji,jj,Kmm)))', 1),
         ('(e3w_1d(jk+1) *(1._wp+r3v(ji,jj,Kmm)))', 1), 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R328ZDF/BLD/ppsrc/nemo/dynzdf.f90:206-210': [
+        'zzwi = - zDt_2 * ( avm(ji+1,jj,jk  )     +  avm(ji,jj,jk  )',
+        'zwi(ji,jk) = zzwi', 5],
     'ocean_model_latlon_cgrid.py:14876-14885': [
         'u_new = implicit_vertical_diffusion_ocean_momentum_dispatch(',
         'implicit_w=nemo_aimp_momentum_w_v)', 10],

@@ -4,8 +4,8 @@ Date: 2026-10-23 (Codex round)
 
 Base: `735cab5ba22e`
 
-Disposition: **ACQUISITION_NEEDED; no NEMO run, model, card, or configuration
-change**
+Disposition: **STOP_PROPOSAL; acquired record admitted and replayed; no model,
+card, or configuration change**
 
 independent review: operator (Claude), initial seven findings **FIXED** on
 rereview; one new signed-zero defect **CONFIRMED** and repaired below, together
@@ -213,3 +213,66 @@ source-order matrix boundary, rather than only entry/exit, was an **UNASKED**
 instrument choice and is now operator-approved; it is the minimum record that
 separates input, drag-diagonal, and Thomas-solve ownership without an
 executable legoESM observer.
+
+## Resume-4: record admitted and kt-1 stage-3 replayed
+
+**CONFIRMED.** The acquired record is admitted at producer
+`37fdb2ea181ccd365fd260733139736b0ee5943f`. Both rank records have their
+admitted SHA-256 values (`1f6f5dfbca18f928...` and `e036900af19a49cf...`),
+and all nine refusal plants fire: header, field order, truncation, stamp,
+`avm`, bottom drag, top drag, solve, and endpoint. This supersedes the earlier
+statement that no production result existed. NEMO was not rerun in Resume-4.
+
+**CONFIRMED.** Offline replay with NEMO's recorded operands is bit-identical on
+every wet value on both ranks, in source order: vector explicit update,
+barotropic subtraction, bottom RHS, top RHS, and the base-matrix + bottom/top
+diagonal + wind + ordered solve. ZAD and vertical LDF are inactive in this
+resolved program. The replay covers 226,236/226,637 wet rank-0 U/V values and
+186,794/188,538 rank-1 U/V values at each state/solve boundary, with zero
+unequal bits. Therefore no recorded `dyn_zdf` transcription is an owner.
+
+### First departing statement
+
+**CONFIRMED.** The comparison card's ordinary production step consumes an
+`avm` that differs from NEMO on all 414,119 active T-grid interfaces (first
+zero-based global cell `[j,i,k]=[1,49,0]`; 80,078 under ice and 334,041 in
+open water; maximum absolute difference 0.014359876509295466 m2/s at
+`[29,4,28]`). Thus the first source-ordered `dyn_zdf` output to depart is U's
+interior lower coefficient `zzwi`, which NEMO evaluates and stores at
+`ORCA2_ORCA1ICE_OMIP_L4_R328ZDF/BLD/ppsrc/nemo/dynzdf.f90:206-210`.
+legoESM's corresponding literal matrix product/division is
+`implicit_solver.py:438-450`.
+
+With the card's actual `avm`, that first statement differs on all 397,177
+active U lower coefficients: 217,668 on rank 0 and 179,509 on rank 1. The
+first zero-based global cell is `[1,49,1]` (NEMO one-based `(j,i,k)=(2,50,2)`;
+rank 1 first is global `[1,117,1]`). V follows later in NEMO source order and
+differs on all 399,232 active lower coefficients (218,048 + 181,184), with the
+same first global cell. The cells are therefore neither an ice-only subset nor
+a seam/fold-only subset: they are the full active lower-coefficient support.
+
+Certified-rung coverage is **G2 round 2** for the live face/one-dimensional
+interface divisors and literal `dyn_zdf` matrix statement, with **G3 round 3**
+covering its stored Kmm `r3u/r3v` ratio operand. The current comparison card
+already selects both. Record-fed replay being exact rules out those imported
+statements; the departing operand is the upstream TKE-produced `avm`.
+
+### Decision 122 disposition
+
+**CONFIRMED.** No model change lands. Replacing `avm` with the oracle record
+would be a forbidden bridge, while changing the TKE closure is not a single
+identified cited statement and has no seven-pair Decision-122 card. The
+proposal is to acquire or reuse a passive kt-1 TKE source-order coefficient
+walk and stop at its first non-bit statement; only that single statement may
+then be tested on all seven pairs and both labels. No configuration value
+changed.
+
+Resume-4 evidence:
+`orca2_rounds/round328/replay/dynzdf_replay.json`, SHA-256
+`5e6f06a7655c7a6e5078914afd536949e45d14ca3b6a8ed6cfb622bee8f670ac`.
+The clean stamped replay commit is `23506b9a8bc517edc25f2805bdf9b53519061688`.
+R1--R3 and R5 are **CONFIRMED**. R4 is **CONFIRMED** for non-bit `avm` and its
+first under-ice cell, but its implied ice localization is **REFUTED** by the
+334,041 open-water unequal interfaces.
+
+codex review: operator
