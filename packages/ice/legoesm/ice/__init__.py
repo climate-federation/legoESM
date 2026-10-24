@@ -25,6 +25,7 @@ from legoesm.ice.config import (
     SI3ThermoConfig,
     SeaIceConfig,
     SnowConfig,
+    build_si3_orca2_o1_config,
     validate_si3_bulk_config,
     validate_si3_thermo_config,
 )
@@ -172,7 +173,9 @@ __all__ = [
     "build_c1d_omip_l3_card",
     "C1DOMIPL3Card",
     # Selectable full ORCA2 SI3 state, aggregation, halos, and restart I/O (O1)
+    "build_si3_orca2_o1_config",
     "SI3ORCA2StateConfig",
+    "SI3ORCA2Forcing",
     "SI3CategoryBounds",
     "SI3PratherMoments",
     "SI3AllPratherMoments",
@@ -201,6 +204,7 @@ from legoesm.ice.si3_orca2_state import (  # noqa: E402
     SI3AllPratherMoments,
     SI3CategoryBounds,
     SI3EquivalentVars,
+    SI3ORCA2Forcing,
     SI3ORCA2StateConfig,
     SI3PratherMoments,
     SI3State,

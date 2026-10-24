@@ -455,6 +455,9 @@ class SI3State(NamedTuple):
 
         z2 = jnp.zeros((jpi, jpj), dtype=dtype)
         z3 = jnp.zeros((jpi, jpj, 1), dtype=dtype)
+        interior_3d = _interior_mask_2d(jpi, jpj, cfg.nn_hls)[:, :, None]
+        t_si_init = jnp.where(interior_3d, jnp.full_like(z3, cfg.ice_constants.T0), 0.0)
+        t1_ice_init = jnp.full_like(z3, cfg.ice_constants.T0)
         bounds = si3_hfn_category_bounds(
             jpl=1,
             rn_himean=cfg.rn_himean,
@@ -488,7 +491,7 @@ class SI3State(NamedTuple):
             v_ip=z3,
             v_il=z3,
             t_su=t_su,
-            t_si=z3,
+            t_si=t_si_init,
             e_s=e_s,
             e_i=e_i,
             szv_i=szv_i,
@@ -529,8 +532,8 @@ class SI3State(NamedTuple):
             e_i=e_i,
             szv_i=szv_i,
             cnd_ice=z3,
-            t1_ice=z3,
-            t_si=z3,
+            t1_ice=t1_ice_init,
+            t_si=t_si_init,
             snwice_mass=snwice_mass,
             snwice_mass_b=snwice_mass_b,
             snwice_fmass=snwice_fmass,
@@ -1442,6 +1445,15 @@ def si3_apply_state_halos_orca2(
     )
 
 
+class SI3ORCA2Forcing(NamedTuple):
+    """Boundary forcing for `SI3State` steps through `step_sea_ice` (`thermo_scheme='si3_orca2_o1'`)."""
+
+    tmask: Field
+    sss_m: Field | float | None = None
+    evaporation: Field | None = None
+    apply_halos: bool = False
+
+
 def si3_o1_step(
     state: SI3State,
     tmask: Field,
@@ -1454,7 +1466,7 @@ def si3_o1_step(
     """Execute one O1 SI3 step (`ln_icedyn = False`, `ln_icethd = False`).
 
     Follows NEMO's exact statement order in `src/ICE/icestp.F90:148-224`:
-    1. `store_fields` (`:148`, `:361-394`)
+    1. `store_fields` (`:148`, `:361-394`) and `diag_set0` (`:164`, `:488`)
     2. `CALL ice_var_glo2eqv(2)` (`:218`)
     3. `CALL ice_var_agg(2)` (`:219`)
     4. `CALL ice_update_flx(kt)` snow/ice mass update (`src/ICE/iceupdate.F90:189-194`)
@@ -1463,6 +1475,12 @@ def si3_o1_step(
     work = jax.lax.stop_gradient(state) if _plant_stop_gradient else state
     if apply_halos:
         work = si3_apply_state_halos_orca2(work, config=cfg)
+
+    # diag_set0 (`src/ICE/icestp.F90:164, 488`): t_si(A2D(0), 1:jpl) = rt0
+    jpi, jpj, _ = work.v_i.shape
+    interior_3d = _interior_mask_2d(jpi, jpj, cfg.nn_hls)[:, :, None]
+    t_si_step = jnp.where(interior_3d, jnp.full_like(work.t_si, cfg.ice_constants.T0), 0.0)
+    work = work._replace(t_si=t_si_step)
 
     eqv = si3_var_glo2eqv(
         v_i=work.v_i,
@@ -1543,12 +1561,17 @@ def si3_rst_to_netcdf_dict(
     state: SI3State,
     kt: int = 1,
     config: SI3ORCA2StateConfig | None = None,
+    *,
+    write_prather: bool | None = None,
 ) -> dict[str, np.ndarray]:
-    """Serialize `SI3State` to NEMO's exact `ice_rst_write` + `update_rst` + `adv_pra_rst` dict.
+    """Serialize `SI3State` to NEMO's exact `ice_rst_write` + `update_rst` (+ `adv_pra_rst` when active) dict.
 
     Statement order matches:
     1. `update_rst('WRITE', kt)` (`src/ICE/iceupdate.F90:474-481`)
-    2. `adv_pra_rst('WRITE', kt)` (`src/ICE/icedyn_adv_pra.F90:1383-1503`)
+    2. `adv_pra_rst('WRITE', kt)` (`src/ICE/icedyn_adv_pra.F90:1383-1503`), called
+       inside `ice_dyn_adv_pra` (`src/ICE/icedyn_adv_pra.F90:487`) only when
+       `ln_icedyn` and `ln_dynadv_pra` are active (`src/ICE/icestp.F90:167`,
+       `src/ICE/icedyn_adv.F90:141`).
     3. `ice_rst_write(kt)` (`src/ICE/icerst.F90:137-182`)
 
     Note: NetCDF variables in NEMO's IOM (`iom_nf90`) are stored in `(t, cat, y, x)`
@@ -1558,6 +1581,11 @@ def si3_rst_to_netcdf_dict(
     both native NEMO `(y, x)` and `(x, y)` conventions.
     """
     cfg = config if config is not None else SI3ORCA2StateConfig()
+    do_write_prather = (
+        bool(cfg.ln_icedyn and cfg.ln_dynadv_pra)
+        if write_prather is None
+        else bool(write_prather)
+    )
     iter_val = float(kt + cfg.nn_fsbc - 1)
     out: dict[str, np.ndarray] = {}
 
@@ -1565,28 +1593,29 @@ def si3_rst_to_netcdf_dict(
     out["snwice_mass"] = np.asarray(state.snwice_mass, dtype=np.float64)
     out["snwice_mass_b"] = np.asarray(state.snwice_mass_b, dtype=np.float64)
 
-    # 2. adv_pra_rst ('WRITE', kt)
-    for attr_name, suffix in _PRATHER_3D_FAMILIES:
-        if suffix == "sal" and cfg.nn_icesal == 4:
-            continue
-        if suffix in ("ap", "vp", "vl") and not (cfg.ln_pnd_LEV or cfg.ln_pnd_TOPO):
-            continue
-        fam: SI3PratherMoments = getattr(state.prather, attr_name)
-        for prefix in ("sx", "sy", "sxx", "syy", "sxy"):
-            out[f"{prefix}{suffix}"] = np.asarray(
-                getattr(fam, prefix), dtype=np.float64
-            )
-
-    for attr_name, suffix, nlay_attr in _PRATHER_4D_FAMILIES:
-        if suffix == "si" and cfg.nn_icesal != 4:
-            continue
-        nlay = getattr(cfg, nlay_attr)
-        fam = getattr(state.prather, attr_name)
-        for jk in range(1, nlay + 1):
-            tag = f"_l{jk:02d}"
+    # 2. adv_pra_rst ('WRITE', kt) — written in NEMO only when ice_dyn_adv_pra runs
+    if do_write_prather:
+        for attr_name, suffix in _PRATHER_3D_FAMILIES:
+            if suffix == "sal" and cfg.nn_icesal == 4:
+                continue
+            if suffix in ("ap", "vp", "vl") and not (cfg.ln_pnd_LEV or cfg.ln_pnd_TOPO):
+                continue
+            fam: SI3PratherMoments = getattr(state.prather, attr_name)
             for prefix in ("sx", "sy", "sxx", "syy", "sxy"):
-                arr4 = np.asarray(getattr(fam, prefix), dtype=np.float64)
-                out[f"{prefix}{suffix}{tag}"] = arr4[:, :, jk - 1, :]
+                out[f"{prefix}{suffix}"] = np.asarray(
+                    getattr(fam, prefix), dtype=np.float64
+                )
+
+        for attr_name, suffix, nlay_attr in _PRATHER_4D_FAMILIES:
+            if suffix == "si" and cfg.nn_icesal != 4:
+                continue
+            nlay = getattr(cfg, nlay_attr)
+            fam = getattr(state.prather, attr_name)
+            for jk in range(1, nlay + 1):
+                tag = f"_l{jk:02d}"
+                for prefix in ("sx", "sy", "sxx", "syy", "sxy"):
+                    arr4 = np.asarray(getattr(fam, prefix), dtype=np.float64)
+                    out[f"{prefix}{suffix}{tag}"] = arr4[:, :, jk - 1, :]
 
     # 3. ice_rst_write(kt)
     out["nn_fsbc"] = np.asarray(float(cfg.nn_fsbc), dtype=np.float64)
@@ -1629,25 +1658,63 @@ def si3_rst_from_netcdf_dict(
     sss_m: Field | float | None = None,
     config: SI3ORCA2StateConfig | None = None,
     apply_halos: bool = True,
+    ln_rstart: bool = True,
 ) -> SI3State:
     """Reconstruct `SI3State` in NEMO's exact `ice_init` restart-read sequence.
 
-    Follows NEMO's statement order in `src/ICE/icestp.F90:282-300`:
-    1. `ice_itd_init` (`src/ICE/iceitd.F90:715-780`)
-    2. `ice_rst_read` (`src/ICE/icerst.F90:200-378`)
-    3. `ice_var_glo2eqv(1)` (`src/ICE/icestp.F90:295`)
-    4. `ice_var_agg(1)` (`src/ICE/icestp.F90:296`)
-    5. `adv_pra_rst('READ')` (`src/ICE/icedyn_adv_pra.F90:1203-1381`)
-    6. `update_rst('READ')` (`src/ICE/iceupdate.F90:453-473`)
+    Follows NEMO's statement order in `src/ICE/icestp.F90:281-300`:
+    1. `diag_set0` (`src/ICE/icestp.F90:281, 488`): `t_si(A2D(0), 1:jpl) = rt0`
+    2. `ice_itd_init` (`src/ICE/iceitd.F90:715-780`)
+    3. `ice_rst_read` (`src/ICE/icerst.F90:200-378`): refuses if `v_i` is absent or
+       if the number of snow + ice enthalpy layers in the restart does not equal
+       `nlay_s + nlay_i` (`:241-255, 369`); uses `sv_i * r1_nlay_i` when `szv_i_l01`
+       is absent (`:351`).
+    4. `ice_var_glo2eqv(1)` (`src/ICE/icestp.F90:295`)
+    5. `ice_var_agg(1)` (`src/ICE/icestp.F90:296`)
+    6. `adv_pra_rst('READ')` (`src/ICE/icedyn_adv_pra.F90:546, 1203-1381`): reads
+       Prather moments iff `ln_rstart` and `sxice` + `nlay_s + nlay_i` layer
+       moments are present; zeroes them otherwise.
+    7. `update_rst('READ')` (`src/ICE/iceupdate.F90:453-473`)
     """
     cfg = config if config is not None else SI3ORCA2StateConfig()
     consts = cfg.ice_constants
     sr = nemo_source_round
 
+    if "v_i" not in rst:
+        raise ValueError(
+            "ice_rst_read: v_i is needed to read the restart file (src/ICE/icerst.F90:369)"
+        )
     v_i = jnp.asarray(rst["v_i"], dtype=jnp.float64)
     jpi, jpj, jpl = v_i.shape
     if jpl != cfg.jpl:
-        raise ValueError(f"Restart jpl={jpl} does not match config.jpl={cfg.jpl}")
+        raise ValueError(
+            f"ice_rst_read: number of categories in restart ({jpl}) != config.jpl ({cfg.jpl}) "
+            "(src/ICE/icerst.F90:235-239)"
+        )
+
+    # Layer count check (`src/ICE/icerst.F90:241-255`): NEMO counts e_s_l01..99 and
+    # e_i_l01..99 and calls ctl_stop if id_nlay != (nlay_s + nlay_i).
+    id_nlay_s = sum(1 for jk in range(1, 100) if f"e_s_l{jk:02d}" in rst)
+    id_nlay_i = sum(1 for jk in range(1, 100) if f"e_i_l{jk:02d}" in rst)
+    id_nlay = id_nlay_s + id_nlay_i
+    expected_nlay = cfg.nlay_s + cfg.nlay_i
+    missing_e_s = [
+        f"e_s_l{jk:02d}"
+        for jk in range(1, cfg.nlay_s + 1)
+        if f"e_s_l{jk:02d}" not in rst
+    ]
+    missing_e_i = [
+        f"e_i_l{jk:02d}"
+        for jk in range(1, cfg.nlay_i + 1)
+        if f"e_i_l{jk:02d}" not in rst
+    ]
+    if id_nlay != expected_nlay or missing_e_s or missing_e_i:
+        raise ValueError(
+            f"ice_rst_read: number of layers in restart ({id_nlay}: "
+            f"nlay_s={id_nlay_s}, nlay_i={id_nlay_i}) != nlay_s + nlay_i "
+            f"({expected_nlay}: {cfg.nlay_s} + {cfg.nlay_i}); missing={missing_e_s + missing_e_i} "
+            "(src/ICE/icerst.F90:241-255)"
+        )
 
     v_s = jnp.asarray(rst["v_s"], dtype=jnp.float64)
     sv_i = jnp.asarray(rst["sv_i"], dtype=jnp.float64)
@@ -1673,31 +1740,20 @@ def si3_rst_from_netcdf_dict(
         v_ip = jnp.zeros_like(v_i)
         v_il = jnp.zeros_like(v_i)
 
-    if "e_s_l01" in rst:
-        e_s = jnp.stack(
-            [
-                jnp.asarray(rst[f"e_s_l{jk:02d}"], dtype=jnp.float64)
-                for jk in range(1, cfg.nlay_s + 1)
-            ],
-            axis=2,
-        )
-    else:
-        e_s_val = sr(consts.rho_snow * (consts.latent_fusion - consts.c_ice * -2.0))
-        e_s = jnp.broadcast_to(
-            sr(e_s_val * (v_s[..., None, :] / float(cfg.nlay_s))),
-            (jpi, jpj, cfg.nlay_s, jpl),
-        )
-
-    if "e_i_l01" in rst:
-        e_i = jnp.stack(
-            [
-                jnp.asarray(rst[f"e_i_l{jk:02d}"], dtype=jnp.float64)
-                for jk in range(1, cfg.nlay_i + 1)
-            ],
-            axis=2,
-        )
-    else:
-        e_i = jnp.zeros((jpi, jpj, cfg.nlay_i, jpl), dtype=jnp.float64)
+    e_s = jnp.stack(
+        [
+            jnp.asarray(rst[f"e_s_l{jk:02d}"], dtype=jnp.float64)
+            for jk in range(1, cfg.nlay_s + 1)
+        ],
+        axis=2,
+    )
+    e_i = jnp.stack(
+        [
+            jnp.asarray(rst[f"e_i_l{jk:02d}"], dtype=jnp.float64)
+            for jk in range(1, cfg.nlay_i + 1)
+        ],
+        axis=2,
+    )
 
     if "szv_i_l01" in rst:
         szv_i = jnp.stack(
@@ -1708,8 +1764,11 @@ def si3_rst_from_netcdf_dict(
             axis=2,
         )
     else:
+        # `src/ICE/icerst.F90:351` and `src/ICE/icestp.F90:382`:
+        # szv_i(:,:,jk,:) = sv_i(:,:,:) * r1_nlay_i where r1_nlay_i = 1._wp / REAL(nlay_i, wp)
+        r1_nlay_i = sr(jnp.asarray(1.0 / float(cfg.nlay_i), dtype=jnp.float64))
         szv_i = jnp.broadcast_to(
-            sr(sv_i[..., None, :] / float(cfg.nlay_i)),
+            sr(sv_i[..., None, :] * r1_nlay_i),
             (jpi, jpj, cfg.nlay_i, jpl),
         )
 
@@ -1723,13 +1782,18 @@ def si3_rst_from_netcdf_dict(
         if ("t1_ice" in rst and cfg.ln_cpl)
         else jnp.full_like(v_i, consts.T0)
     )
-    t_si = jnp.zeros_like(v_i)
+    # `diag_set0` (`src/ICE/icestp.F90:281, 488`): t_si(A2D(0), 1:jpl) = rt0
+    interior_3d = _interior_mask_2d(jpi, jpj, cfg.nn_hls)[:, :, None]
+    t_si = jnp.where(interior_3d, jnp.full_like(v_i, consts.T0), 0.0)
 
-    # Prather moments (`adv_pra_rst('READ')`, src/ICE/icedyn_adv_pra.F90:1203-1381)
+    # Prather moments (`adv_pra_rst('READ')`, src/ICE/icedyn_adv_pra.F90:546, 1217-1381)
     pr_zeros = SI3AllPratherMoments.zeros(
         jpi, jpj, jpl=cfg.jpl, nlay_i=cfg.nlay_i, nlay_s=cfg.nlay_s
     )
-    if "sxice" in rst:
+    id0_pra = sum(1 for jk in range(1, 100) if f"sxc0_l{jk:02d}" in rst) + sum(
+        1 for jk in range(1, 100) if f"sxe_l{jk:02d}" in rst
+    )
+    if ln_rstart and ("sxice" in rst) and (id0_pra == expected_nlay):
         fam_dict: dict[str, SI3PratherMoments] = {}
         for attr_name, suffix in _PRATHER_3D_FAMILIES:
             if f"sx{suffix}" in rst:
@@ -1897,6 +1961,7 @@ def write_si3_netcdf_restart(
     *,
     kt: int = 1,
     config: SI3ORCA2StateConfig | None = None,
+    write_prather: bool | None = None,
 ) -> Path:
     """Write a NEMO-compatible `*_restart_ice.nc` file using `netCDF4`."""
     import netCDF4
@@ -1904,7 +1969,9 @@ def write_si3_netcdf_restart(
     cfg = config if config is not None else SI3ORCA2StateConfig()
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    rst_dict = si3_rst_to_netcdf_dict(state, kt=kt, config=cfg)
+    rst_dict = si3_rst_to_netcdf_dict(
+        state, kt=kt, config=cfg, write_prather=write_prather
+    )
     jpi, jpj, jpl = state.v_i.shape
 
     with netCDF4.Dataset(out_path, "w", format="NETCDF4_CLASSIC") as ds:
@@ -1940,6 +2007,7 @@ def read_si3_netcdf_restart(
     sss_m: Field | float | None = None,
     config: SI3ORCA2StateConfig | None = None,
     apply_halos: bool = True,
+    ln_rstart: bool = True,
 ) -> SI3State:
     """Read a NEMO `*_restart_ice.nc` file and reconstruct `SI3State`."""
     import netCDF4
@@ -1973,11 +2041,13 @@ def read_si3_netcdf_restart(
         sss_m=sss_m,
         config=cfg,
         apply_halos=apply_halos,
+        ln_rstart=ln_rstart,
     )
 
 
 __all__ = [
     "SI3ORCA2StateConfig",
+    "SI3ORCA2Forcing",
     "SI3CategoryBounds",
     "SI3PratherMoments",
     "SI3AllPratherMoments",

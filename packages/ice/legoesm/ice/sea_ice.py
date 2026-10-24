@@ -268,20 +268,20 @@ def step_sea_ice(
         # this refusal closes a fail-quiet seam the merge would otherwise have
         # opened.  Routing the liquidus into SI3's bottom boundary is a
         # physics decision for the SI3 lane, not for a merge.
-        if config.thermo_scheme == "si3_bl99":
+        if config.thermo_scheme in ("si3_bl99", "si3_orca2_o1"):
             raise ValueError(
                 "ocean_freezing_temperature_K is not routed into the layered "
-                "SI3 thermodynamics (thermo_scheme='si3_bl99'); pass the "
+                f"SI3 thermodynamics (thermo_scheme={config.thermo_scheme!r}); pass the "
                 "liquidus through the SI3 forcing's bottom boundary instead "
                 "of the ocean-side override")
         liquidus = jnp.asarray(ocean_freezing_temperature_K)
         if liquidus.shape != jnp.shape(ocean_sst):
             raise ValueError("ocean_freezing_temperature_K must have the ocean SST shape")
         config = config._replace(T_freeze_ocean=liquidus)
-    if config.thermo_scheme not in ("zero_layer", "si3_bl99"):
+    if config.thermo_scheme not in ("zero_layer", "si3_bl99", "si3_orca2_o1"):
         raise ValueError(
             f"Unknown sea-ice thermo_scheme {config.thermo_scheme!r}; expected "
-            "'zero_layer' or 'si3_bl99' (icethd.F90:148-183)."
+            "'zero_layer', 'si3_bl99', or 'si3_orca2_o1' (icethd.F90:148-183, icestp.F90:148-224)."
         )
     validate_si3_thermo_config(config)
     if config.thermo_scheme == "si3_bl99":
@@ -361,6 +361,8 @@ def step_sea_ice(
                 f"{type(grid).__name__}.  Use transport='none' for "
                 "thermodynamics-only on this grid."
             )
+    if config.thermo_scheme == "si3_orca2_o1":
+        return _si3_orca2_o1_step_with_trace(state, forcing, config, dt)
     if config.ridging.enabled and grid is None:
         raise ValueError(
             "ridging.enabled=True requires a grid argument: mechanical "
@@ -559,6 +561,78 @@ def _si3_step_with_trace(state: SI3ColumnState,
         ice_concentration_thermo=arrays.concentration,
     )
     return new_state, response, trace
+
+
+from legoesm.ice.si3_orca2_state import (  # noqa: E402
+    SI3ORCA2Forcing,
+    SI3ORCA2StateConfig,
+    SI3State,
+    si3_o1_step,
+)
+
+
+def _si3_orca2_o1_step_with_trace(
+    state: SI3State,
+    forcing: SI3ORCA2Forcing,
+    config: SeaIceConfig,
+    dt: float,
+) -> tuple[SI3State, TileResponse]:
+    """Private fidelity hook executing one O1 ORCA2 SI3 step (`icestp.F90:148-224`)."""
+
+    if not isinstance(state, SI3State):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o1' requires SI3State with full ORCA2 "
+            "5-category 10+5-layer enthalpies/salinities and Prather moments"
+        )
+    if not isinstance(forcing, SI3ORCA2Forcing):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o1' requires SI3ORCA2Forcing carrying "
+            "tmask and optional sss_m at the icestp entry boundary (icestp.F90:148-224)"
+        )
+    orca2_cfg = (
+        config.si3_orca2
+        if config.si3_orca2 is not None
+        else SI3ORCA2StateConfig(
+            rDt_ice=float(dt), ice_constants=config.ice_constants
+        )
+    )
+    new_state = si3_o1_step(
+        state,
+        forcing.tmask,
+        sss_m=forcing.sss_m,
+        config=orca2_cfg,
+        apply_halos=forcing.apply_halos,
+    )
+    agg = new_state.aggregated
+    z = jnp.zeros_like(agg.at_i)
+    one = jnp.ones_like(agg.at_i)
+    evap = forcing.evaporation if forcing.evaporation is not None else z
+    response = TileResponse(
+        T_sfc=agg.tm_su,
+        albedo=one * config.albedo_ice,
+        emissivity=one * config.emissivity_ice,
+        z0=one * config.z0_ice,
+        q_surface=z,
+        shflx=z,
+        lhflx=evap * config.ice_constants.latent_sublimation,
+        tau_x=z,
+        tau_y=z,
+        lw_up=z,
+        u_ocean_sfc=new_state.u_ice,
+        v_ocean_sfc=new_state.v_ice,
+        co2_flux=z,
+        freshwater_flux=-new_state.snwice_fmass,
+        ocean_heat_extraction=z,
+        ocean_stress_x=z,
+        ocean_stress_y=z,
+        surface_mass_flux=evap * agg.at_i,
+        lhflx_exchange=evap * config.ice_constants.latent_sublimation * agg.at_i,
+        salt_flux=z,
+        T_rad=agg.tm_su,
+        ice_concentration_thermo=state.aggregated.at_i,
+    )
+    return new_state, response
+
 
 
 # ==============================================================================

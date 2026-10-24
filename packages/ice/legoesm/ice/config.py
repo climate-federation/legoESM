@@ -312,7 +312,7 @@ def validate_si3_thermo_config(config: "SeaIceConfig") -> None:
     """Reject unsupported SI3 selector mixtures before any tendency runs."""
 
     if config.thermo_scheme != "si3_bl99":
-        return
+        return _validate_si3_orca2_o1_config(config)
     wanted = SI3ThermoConfig()
     if config.si3 != wanted:
         raise ValueError(
@@ -521,7 +521,57 @@ class SeaIceConfig(NamedTuple):
     # NEMO distinguishes the Dalton (Ce) and Stanton (Ch) coefficients even
     # when ORCA1 makes them equal.
     Ce_ice: float = constants.bulk_transfer_ice_default
+    # Optional ORCA2 5-category 10+5-layer SI3 state configuration (`thermo_scheme='si3_orca2_o1'`).
+    si3_orca2: SI3ORCA2StateConfig | None = None
 
 
 from legoesm.ice.si3_orca2_state import SI3ORCA2StateConfig  # noqa: E402,F401
+
+
+def _validate_si3_orca2_o1_config(config: "SeaIceConfig") -> None:
+    """Validate rung-O1 ORCA2 SI3 configuration (`thermo_scheme='si3_orca2_o1'`)."""
+    if config.thermo_scheme != "si3_orca2_o1":
+        return
+    orca2_cfg = (
+        config.si3_orca2
+        if config.si3_orca2 is not None
+        else SI3ORCA2StateConfig()
+    )
+    if not isinstance(orca2_cfg, SI3ORCA2StateConfig):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o1' requires config.si3_orca2 to be "
+            "SI3ORCA2StateConfig or None"
+        )
+    if (
+        config.ice_constants != NEMO_SI3_CONSTANTS_CONFIG
+        or orca2_cfg.ice_constants != NEMO_SI3_CONSTANTS_CONFIG
+    ):
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o1' requires the NEMO 5.0.2 phycst/EOS "
+            "constant set on both SeaIceConfig.ice_constants and "
+            "SI3ORCA2StateConfig.ice_constants"
+        )
+    conflicts = []
+    if orca2_cfg.ln_icedyn or orca2_cfg.ln_icethd:
+        conflicts.append(
+            "ln_icedyn and ln_icethd must both be False at rung O1 "
+            "(icestp.F90:167,199; active dynamics/thermo enter at rungs O4-O16 and O17/C0-C4)"
+        )
+    if config.dynamics != "none" or config.transport != "none":
+        conflicts.append("dynamics and transport must both be 'none' at rung O1")
+    if conflicts:
+        raise ValueError("invalid SI3 ORCA2 O1 identity: " + "; ".join(conflicts))
+
+
+def build_si3_orca2_o1_config(
+    si3_orca2: SI3ORCA2StateConfig | None = None,
+) -> SeaIceConfig:
+    """Return the rung-O1 ORCA2 SI3 state/restart/aggregation `SeaIceConfig`."""
+    cfg = si3_orca2 if si3_orca2 is not None else SI3ORCA2StateConfig()
+    return SeaIceConfig(
+        thermo_scheme="si3_orca2_o1",
+        ice_constants=cfg.ice_constants,
+        si3_orca2=cfg,
+    )
+
 

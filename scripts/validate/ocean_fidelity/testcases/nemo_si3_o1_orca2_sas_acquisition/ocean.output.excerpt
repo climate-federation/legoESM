@@ -1,3 +1,7 @@
+# Verbatim selected lines from the real NEMO 5.0.2 ORCA2 record output:
+# Source path: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round8/acquisition/een_per_rank_a_np2/ocean.output
+# Complete source SHA-256: 0dfc44ffc2bbef05fc63bb3c9a4d2204574fb866231110e74aadb926b761ccc3
+# Source lines: 1-50, 53, 684-685, 691, 699-730, 732, 2676-2695.
 
     CNRS - NERC - Met OFFICE - MERCATOR-ocean - CMCC
                         NEMO team
