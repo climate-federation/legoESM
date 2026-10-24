@@ -1095,9 +1095,13 @@ class _MPASSfcFluxAccum:
         before a slot existed restores the others with a full count while
         the new slot only sees the post-restart remainder; ``is_complete()``
         passes (it counts steps, not per-slot samples) and the short slot
-        would be published as a full interval mean (codex, #1354)."""
+        would be published as a full interval mean (codex, #1354).  Each
+        slot must also have been fed on EVERY counted step: a step where
+        the physics exported none of *slots* leaves equal but short counts,
+        a mean over fewer steps than the window (#1902)."""
         counts = {self._n.get(i, 0) for i in slots}
-        return self.is_complete() and len(counts) == 1 and counts != {0}
+        return (self.is_complete() and self._steps > 0
+                and counts == {self._steps})
 
     def is_complete(self) -> bool:
         """True iff this interval saw EXACTLY the step count a complete
@@ -9668,7 +9672,7 @@ class ModelDriver:
             if (_facc_e is not None and _facc_e.is_complete()
                     and not _use_accum):
                 print("  energy tracker: complete window but energy "
-                      "slots have unequal sample counts -- this sample "
+                      "slots were not fed on every step -- this sample "
                       "falls back to SNAPSHOT fluxes (stamped 0)")
             _qv_e = (self.state.tracers["q_v"].data
                      if (self.state.tracers is not None
