@@ -824,3 +824,24 @@ def test_core2_prognostic_ice_delivers_precip_once_through_freeze_and_meltout(
     assert a_pre[0] == 0.0 and a_post[0] > 0.0
     assert a_pre[1] > 0.0 and a_post[1] == 0.0
     np.testing.assert_allclose((wet - dry)[closed], p, rtol=1e-10)
+
+
+def _atm_ice_build_calls(loop_name):
+    import ast
+    import inspect
+    tree = ast.parse(inspect.getsource(getattr(R, loop_name)))
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == "_build_atm_to_surface_core2"]
+
+
+@pytest.mark.parametrize("loop_name", ["main", "run_fesom_forced_loop"])
+def test_both_host_loops_ramp_the_ice_forcing_like_the_ocean(loop_name):
+    """The ocean's precipitation is ramped (--forcing-ramp-days); the ice must
+    receive the same ramped precipitation or the ice-forwarded share and the
+    direct open-water share no longer sum to the ocean's P."""
+    calls = _atm_ice_build_calls(loop_name)
+    assert len(calls) == 1
+    kw = {k.arg: k.value for k in calls[0].keywords}
+    assert isinstance(kw.get("ramp"), __import__("ast").Name)
+    assert kw["ramp"].id == "ramp"

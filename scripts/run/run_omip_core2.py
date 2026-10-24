@@ -3176,7 +3176,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
                 forc_ice["sw_down"] = (
                     np.asarray(forc_ice["sw_down"], dtype=np.float64)
                     * dm2dc_sw_factor(grid, _dm2dc_win))
-            atm_ice = _build_atm_to_surface_core2(forc_ice)
+            atm_ice = _build_atm_to_surface_core2(forc_ice, ramp=ramp)
             # Ocean T is potential temperature [degC]; ice wants SST [K].
             sst_K = jnp.asarray(state.T.data)[..., 0] + _ice_T_freeze
             # Surface current, ROTATED frame -> GEOGRAPHIC east/north (the
