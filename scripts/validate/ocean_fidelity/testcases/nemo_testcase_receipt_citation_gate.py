@@ -203,11 +203,21 @@ FILES = {
     "src/SAS/sbcssm.F90": NEMO / "src/SAS/sbcssm.F90",
     "src/OCE/SBC/sbcssm.F90": NEMO / "src/OCE/SBC/sbcssm.F90",
     # --- SI3 ladder round 1 survey/design END ---
-    # --- SI3 ladder round 2 (D5) BEGIN ---
+    # --- SI3 ladder round 2 & round 3 (D5) BEGIN ---
     "docs/ice/fidelity/si3_ladder_design.md": (
         REPO / "docs/ice/fidelity/si3_ladder_design.md"),
     "docs/ice/fidelity/si3_r2_d5_preregister.md": (
         REPO / "docs/ice/fidelity/si3_r2_d5_preregister.md"),
+    "docs/ice/fidelity/si3_r2_d5_receipt.md": (
+        REPO / "docs/ice/fidelity/si3_r2_d5_receipt.md"),
+    "docs/ice/fidelity/si3_r3_d5_preregister.md": (
+        REPO / "docs/ice/fidelity/si3_r3_d5_preregister.md"),
+    "docs/ice/fidelity/si3_r3_d5_receipt.md": (
+        REPO / "docs/ice/fidelity/si3_r3_d5_receipt.md"),
+    "packages/core/legoesm/core/source_rounding.py": (
+        REPO / "packages/core/legoesm/core/source_rounding.py"),
+    "packages/core/legoesm/timestepping/tridiagonal.py": (
+        REPO / "packages/core/legoesm/timestepping/tridiagonal.py"),
     "scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90": (
         REPO / "scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90"),
     "C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90": (
@@ -218,6 +228,8 @@ FILES = {
         REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py"),
     "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2_gate.py": (
         REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2_gate.py"),
+    "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2b_year_gate.py": (
+        REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2b_year_gate.py"),
     "src/ICE/icevar.F90": NEMO / "src/ICE/icevar.F90",
     "C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90": (
         NEMO / "cfgs/C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90"),
@@ -228,7 +240,7 @@ FILES = {
         REPO / "tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py"),
     "tests/ocean/fidelity/test_nemo_si3thd_phase2_gate.py": (
         REPO / "tests/ocean/fidelity/test_nemo_si3thd_phase2_gate.py"),
-    # --- SI3 ladder round 2 (D5) END ---
+    # --- SI3 ladder round 2 & round 3 (D5) END ---
     # ORCA2 round 311: G1b's build (P5) and G8's build (R31FULLENTRY_FIX1).
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90": NEMO / "cfgs/ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90",
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynkeg.f90": NEMO / "cfgs/ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynkeg.f90",
@@ -2051,125 +2063,96 @@ CITATION_MAP = {
     'docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_phase2_manifest.md:136-143': [
         '## Phase-2c icebergs-off VARIANT handoff', 'labelled `VARIANT`.', 8],
     # --- SI3 ladder round 1 survey/design END ---
-    # --- SI3 ladder round 2 (D5) BEGIN ---
-    'docs/ice/fidelity/si3_ladder_design.md:220':
-        '| D5 | `cfgs/C1D/EXP_SASICE`, `key_si3 key_RK3 key_vco_1d3d key_linssh',
-    'docs/ice/fidelity/si3_ladder_design.md:344-350': [
-        "**Denormals are platform-specific.** D5's CPU result cannot be inherited by a",
-        'workaround is allowed.', 7],
-    'docs/ice/fidelity/si3_ladder_design.md:354-365': [
-        '| Decision | Numbered options | Pick |',
-        '| 10. Atmospheric forcing boundary | **1)** replay completed surface p', 12],
-    'docs/ice/fidelity/si3_r2_d5_preregister.md:1-74': [
-        '# SI3 Ladder Round 2 (`si3_r2`) — Rung D5 Preregistration',
-        '- **REFUTE P2**: Either (a) GPU flushes `0x0000000000000001` (`h_s > 0', 74],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:103-113': [
-        'def _jit_snow_pred(h_s: jax.Array) -> jax.Array:', (')', 43), 11],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:116-224': [
-        'def run_stage_a_subnormal_probe(*, plant_zero_input: bool = False) -> ',
-        ('}', 4), 109],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:116-841': [
-        'def run_stage_a_subnormal_probe(*, plant_zero_input: bool = False) -> ',
-        ('}', 34), 726],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:144-224': [
-        'expected_bits = "0x0000000000000001"', ('}', 4), 81],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:377-666': [
-        'def run_year_rescore(', ('}', 26), 290],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:760-783': [
-        'stage_b = {',
-        'stage_a["ftz_daz_mode"] = ftz_daz_classification["ftz_daz_mode"]', 24],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2_gate.py:212-218': [
-        'np.divide(g["e_i"] * 3.0, vi, out=e_i, where=vi > 1.0e-20)',
-        'np.atleast_2d(g["szv_i"] * 3.0 / vi), np.atleast_1d(g["oa_i"]),', 7],
-    'src/ICE/icevar.F90:390':
-        'ze_i             =   e_i (ji,jj,jk,jl) / v_i(ji,jj,jl) * zlay_i       ',
-    'src/ICE/icevar.F90:412-413': [
-        't_s(ji,jj,jk,jl) = rt0 + MAX( -100._wp ,  &',
-        '&               MIN( r1_rcpi*( -r1_rhos*( e_s(ji,jj,jk,jl) / v_s(ji,jj', 2],
-    'C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90:404':
-        'ze_i             =   e_i (ji,jj,jk,jl) / v_i(ji,jj,jl) * zlay_i       ',
-    'C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90:426-427': [
-        't_s(ji,jj,jk,jl) = rt0 + MAX( -100._wp ,  &',
-        '&               MIN( r1_rcpi*( -r1_rhos*( e_s(ji,jj,jk,jl) / v_s(ji,jj', 2],
-    'src/ICE/icethd_dh.F90:498-503': [
-        '! recalculate t_s_1d from e_s_1d', ('ELSE', 6), 6],
-    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_dh.f90:508-513': [
-        '! recalculate t_s_1d from e_s_1d', ('ELSE', 6), 6],
-    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:55-301': [
-        'def test_d5_zdf_layer_reciprocals_statement_is_bit_exact_and_fails_whe',
-        'assert rev_norm_5860 > probe_module.phase2.BAR', 247],
-    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:55-794': [
-        'def test_d5_zdf_layer_reciprocals_statement_is_bit_exact_and_fails_whe',
-        'assert rescore_30["over_bar_after"] < rescore_30["over_bar_before"]', 740],
-    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:304-458': [
-        'def test_d5_zdf_gradients_are_finite_and_reverse_equals_forward_with_l',
-        'assert float(jnp.linalg.norm(planted_grad)) > 0.0', 155],
-    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:461-640': [
-        'def _parent_commit_bitz_lipscomb_conduction_step(',
-        'np.testing.assert_array_equal(arr_on, arr_pl)', 180],
-    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:643-691': [
-        'def test_d5_ftz_daz_classification_distinguishes_ftz_only_from_daz(',
-        'assert classified_ftz_daz["ftz_daz_mode"] == "FTZ_DAZ_FLUSH_TO_ZERO"', 49],
-    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:694-794': [
-        'def test_d5_platform_probe_and_planted_controls(probe_module) -> None:',
-        'assert rescore_30["over_bar_after"] < rescore_30["over_bar_before"]', 101],
-    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:170-186': [
-        'IF( h_i_1d(ji) > 0._wp ) THEN', ('ENDIF', 3), 17],
-    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:217-230': [
-        'zradtr_s(ji,jk) = zradtr_s(ji,0) * EXP( - zraext_s(ji) * MAX( 0._wp, z',
-        ('&                                       * EXP( - rn_kappa_i * MAX( 0._', 2), 14],
-    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:326-348': [
-        ('IF ( .NOT. l_T_converged(ji) ) THEN', 1), ('ENDIF', 10), 23],
-    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:332-341': [
-        'zkappa_s(ji,jk) = zghe(ji) * rcnd_s * z1_h_s(ji)',
-        'zkappa_i(ji,jk) = zghe(ji) * ztcond_i(ji,jk) * z1_h_i(ji)', 10],
-    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:366-376': [
-        'zeta_i(ji,jk) = rDt_ice * r1_rhoi * z1_h_i(ji) / zcpi',
-        ('END DO', 22), 11],
-    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:821-823': [
-        ('qcn_ice_bot_1d(ji) = - zkappa_i(ji,nlay_i) * zg1 * ( t_bo_1d(ji ) - t_', 1),
-        '&                 - ( 1._wp - isnow(ji) ) * zkappa_i(ji,0) * zg1  * ( ', 3],
-    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:172-188': [
-        'IF( h_i_1d(ji) > 0._wp ) THEN', ('ENDIF', 3), 17],
-    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:219-232': [
-        'zradtr_s(ji,jk) = zradtr_s(ji,0) * EXP( - zraext_s(ji) * MAX( 0._wp, z',
-        ('&                                       * EXP( - rn_kappa_i * MAX( 0._', 2), 14],
-    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:321-343': [
-        ('IF ( .NOT. l_T_converged(ji) ) THEN', 1), ('ENDIF', 9), 23],
-    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:327-336': [
-        'zkappa_s(ji,jk) = zghe(ji) * rcnd_s * z1_h_s(ji)',
-        'zkappa_i(ji,jk) = zghe(ji) * ztcond_i(ji,jk) * z1_h_i(ji)', 10],
-    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:353-364': [
-        'zcpi = rcpi + zgamma * sz_i_1d(ji,jk) / MAX( ( t_i_1d(ji,jk) - rt0 ) *',
-        ('END DO', 22), 12],
-    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:782-784': [
-        ('qcn_ice_bot_1d(ji) = - zkappa_i(ji,nlay_i) * zg1 * ( t_bo_1d(ji ) - t_', 1),
-        '&                 - ( 1._wp - isnow(ji) ) * zkappa_i(ji,0) * zg1  * ( ', 3],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:280-310': [
-        'def bitz_lipscomb_conduction_step(q_layers, h, S, F_top, T_bottom_K, dt):',
-        'return q_new, T_new, F_bottom', 31],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:331-340': [
-        'if _nemo_order:',
-        'return jnp.clip(unbounded, constants.T0 - 100.0, constants.T0)', 10],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:355-398': [
-        'def _radiation(', 'return ab_s, ab_i, tr_i[..., -1]', 44],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:401-417': [
-        'def _si3_zdf_bl99_step(', ') -> SI3ZDFResult:', 17],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:436-438': [
-        'T_s_old = snow_temperature_from_enthalpy(', (')', 118), 3],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:465-534': [
-        'dz_i = jnp.maximum(h_ice, _H_MIN) / 3.0',
-        'eta_s = dt / (constants.rho_snow * dz_s[..., None] * constants.c_ice)', 70],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:660-735': [
-        'Tsu = jnp.where(active, Tsu_candidate, Tsu)',
-        'qcn_bottom = 2.0 * k_base_i * (Ti[..., -1] - T_bottom)', 76],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1126-1153': [
-        'def si3_column_step_arrays(state: SI3ColumnArrays,',
-        'e_snow=zdf.e_snow)', 28],
-    'tests/ocean/fidelity/test_nemo_si3thd_phase2_gate.py:208-219': [
-        'result = gate_module.run()',
-        'assert result["zdf_iterations"]["oracle"] == 2', 12],
-    # --- SI3 ladder round 2 (D5) END ---
+    # --- SI3 ladder round 2 & round 3 (D5) BEGIN ---
+    'docs/ice/fidelity/si3_ladder_design.md:354-365': ['| Decision | Numbered options | Pick |', '| 10. Atmospheric forcing boundary | **1)** replay completed surface p', 12],
+    'docs/ice/fidelity/si3_ladder_design.md:220': '| D5 | `cfgs/C1D/EXP_SASICE`, `key_si3 key_RK3 key_vco_1d3d key_linssh',
+    'docs/ice/fidelity/si3_ladder_design.md:344-350': ["**Denormals are platform-specific.** D5's CPU result cannot be inherit", 'workaround is allowed.', 7],
+    'docs/ice/fidelity/si3_r2_d5_preregister.md:1-74': ['# SI3 Ladder Round 2 (`si3_r2`) — Rung D5 Preregistration', '- **REFUTE P2**: Either (a) GPU flushes `0x0000000000000001` (`h_s > 0', 74],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:136-1439': ['def run_stage_a_subnormal_probe(*, plant_zero_input: bool = False) -> ', ('}', 65), 1304],
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:56-1241': ['def test_d5_zdf_layer_reciprocals_statement_is_bit_exact_and_fails_whe', (')', 510), 1186],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:136-244': ['def run_stage_a_subnormal_probe(*, plant_zero_input: bool = False) -> ', ('}', 4), 109],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:123-133': ['def _jit_snow_pred(h_s: jax.Array) -> jax.Array:', (')', 51), 11],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:164-244': ['expected_bits = "0x0000000000000001"', ('}', 4), 81],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:1347-1370': ['stage_b = {', 'stage_a["ftz_daz_mode"] = ftz_daz_classification["ftz_daz_mode"]', 24],
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:658-706': ['def test_d5_ftz_daz_classification_distinguishes_ftz_only_from_daz(', 'assert classified_ftz_daz["ftz_daz_mode"] == "FTZ_DAZ_FLUSH_TO_ZERO"', 49],
+    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:170-186': ['IF( h_i_1d(ji) > 0._wp ) THEN', ('ENDIF', 3), 17],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:172-188': ['IF( h_i_1d(ji) > 0._wp ) THEN', ('ENDIF', 3), 17],
+    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:217-230': ['zradtr_s(ji,jk) = zradtr_s(ji,0) * EXP( - zraext_s(ji) * MAX( 0._wp, z', ('&                                       * EXP( - rn_kappa_i * MAX( 0._', 2), 14],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:219-232': ['zradtr_s(ji,jk) = zradtr_s(ji,0) * EXP( - zraext_s(ji) * MAX( 0._wp, z', ('&                                       * EXP( - rn_kappa_i * MAX( 0._', 2), 14],
+    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:326-348': [('IF ( .NOT. l_T_converged(ji) ) THEN', 1), ('ENDIF', 10), 23],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:321-343': [('IF ( .NOT. l_T_converged(ji) ) THEN', 1), ('ENDIF', 9), 23],
+    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:366-376': ['zeta_i(ji,jk) = rDt_ice * r1_rhoi * z1_h_i(ji) / zcpi', ('END DO', 22), 11],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:353-364': ['zcpi = rcpi + zgamma * sz_i_1d(ji,jk) / MAX( ( t_i_1d(ji,jk) - rt0 ) *', ('END DO', 22), 12],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1259-1290': ['def si3_column_step_arrays(state: SI3ColumnArrays,', 'e_snow=zdf.e_snow)', 32],
+    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:821-823': [('qcn_ice_bot_1d(ji) = - zkappa_i(ji,nlay_i) * zg1 * ( t_bo_1d(ji ) - t_', 1), '&                 - ( 1._wp - isnow(ji) ) * zkappa_i(ji,0) * zg1  * ( ', 3],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:782-784': [('qcn_ice_bot_1d(ji) = - zkappa_i(ji,nlay_i) * zg1 * ( t_bo_1d(ji ) - t_', 1), '&                 - ( 1._wp - isnow(ji) ) * zkappa_i(ji,0) * zg1  * ( ', 3],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:412-458': ['def _radiation(', 'return ab_s, ab_i, tr_i[..., -1]', 47],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:461-479': ['def _si3_zdf_bl99_step(', ') -> SI3ZDFResult:', 19],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:537-627': ['dz_i = jnp.maximum(h_ice, _H_MIN) / 3.0', 'eta_s = dt / (constants.rho_snow * dz_s[..., None] * constants.c_ice)', 91],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:774-868': ['Tsu = jnp.where(active, Tsu_candidate, Tsu)', 'qcn_bottom = 2.0 * k_base_i * (Ti[..., -1] - T_bottom)', 95],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:301-331': ['def bitz_lipscomb_conduction_step(q_layers, h, S, F_top, T_bottom_K, d', 'return q_new, T_new, F_bottom', 31],
+    'tests/ocean/fidelity/test_nemo_si3thd_phase2_gate.py:208-219': ['result = gate_module.run()', 'assert result["zdf_iterations"]["oracle"] == 2', 12],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:797-1255': ['def run_year_rescore(', 'def run_probe(', 459],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2_gate.py:244-251': ['np.divide(g["e_i"] * 3.0, vi, out=e_i, where=vi > 1.0e-20)', 'np.atleast_2d(sz_i), np.atleast_1d(g["oa_i"]),', 8],
+    'src/ICE/icevar.F90:390': 'ze_i             =   e_i (ji,jj,jk,jl) / v_i(ji,jj,jl) * zlay_i       ',
+    'src/ICE/icevar.F90:412-413': ['t_s(ji,jj,jk,jl) = rt0 + MAX( -100._wp ,  &', '&               MIN( r1_rcpi*( -r1_rhos*( e_s(ji,jj,jk,jl) / v_s(ji,jj', 2],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90:404': 'ze_i             =   e_i (ji,jj,jk,jl) / v_i(ji,jj,jl) * zlay_i       ',
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90:426-427': ['t_s(ji,jj,jk,jl) = rt0 + MAX( -100._wp ,  &', '&               MIN( r1_rcpi*( -r1_rhos*( e_s(ji,jj,jk,jl) / v_s(ji,jj', 2],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:382-391': ['if _nemo_order:', 'return jnp.clip(unbounded, constants.T0 - 100.0, constants.T0)', 10],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:503-509': ['T_s_old = snow_temperature_from_enthalpy(', (')', 146), 7],
+    'src/ICE/icethd_dh.F90:498-503': ['! recalculate t_s_1d from e_s_1d', ('ELSE', 6), 6],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_dh.f90:508-513': ['! recalculate t_s_1d from e_s_1d', ('ELSE', 6), 6],
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:56-302': ['def test_d5_zdf_layer_reciprocals_statement_is_bit_exact_and_fails_whe', 'assert rev_norm_5860 > probe_module.phase2.BAR', 247],
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:305-459': ['def test_d5_zdf_gradients_are_finite_and_reverse_equals_forward_with_l', 'assert float(jnp.linalg.norm(planted_grad)) > 0.0', 155],
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:462-655': ['def _parent_commit_bitz_lipscomb_conduction_step(', 'np.testing.assert_array_equal(arr_on, arr_pl)', 194],
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:709-852': ['def test_d5_platform_probe_and_planted_controls(probe_module) -> None:', (')', 318), 144],
+    'packages/core/legoesm/core/source_rounding.py:14-27': ['def nemo_source_round(value: jax.Array) -> jax.Array:', (')', 5), 14],
+    'docs/ice/fidelity/si3_r3_d5_preregister.md:1-54': ['# SI3 Ladder Round 3 (`si3_r3`) — Rung D5 Continuation Preregistration', '- **REFUTE**: CPU production JIT (`XLA_FLAGS=""`) still disagrees with', 54],
+    'docs/ice/fidelity/si3_r2_d5_receipt.md:180-189': ['### Operator note on reviewer-measured numbers', '* **Measured impact:** Recorded ZDF-entry snow temperature is reproduc', 10],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:395-690': ['def run_step1_reviewer_reproduction(', ('}', 20), 296],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2_gate.py:201-252': ['def _nemo_salprof(s_i: np.ndarray) -> np.ndarray:', (')', 131), 52],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2b_year_gate.py:712-721': ['def _exact_1d_entry(frames, *, _nemo_entry_conversion: bool = True):', (')', 357), 10],
+    'src/ICE/icevar.F90:354-360': ['s_i(ji,jj,jl) = sv_i(ji,jj,jl) / v_i(ji,jj,jl)', ('CALL ice_var_salprof   ! salinity profile', 2), 7],
+    'src/ICE/icevar.F90:488-506': [('z1_dS = 1._wp / ( zsi1 - zsi0 )', 1), ('!  => mean(sz_i(jk)) = s_i', 1), 19],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90:368-374': ['s_i(ji,jj,jl) = sv_i(ji,jj,jl) / v_i(ji,jj,jl)', ('CALL ice_var_salprof   ! salinity profile', 2), 7],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90:502-520': [('z1_dS = 1._wp / ( zsi1 - zsi0 )', 1), ('!  => mean(sz_i(jk)) = s_i', 1), 19],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:349-391': ['def snow_temperature_from_enthalpy(', 'return jnp.clip(unbounded, constants.T0 - 100.0, constants.T0)', 43],
+    'packages/core/legoesm/timestepping/tridiagonal.py:137-180': ['if operation_order in ("nemo_unnormalised", "nemo_unnormalised_unround', 'return jax.lax.convert_element_type(solution, out_dtype)', 44],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:179-212': ['def ice_enthalpy_from_temperature(', 'return sr(constants.rho_ice * sr(sr(sensible + latent) - ocean))', 34],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:215-276': ['def ice_temperature_from_enthalpy(', (')', 66), 62],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:334-346': ['def snow_enthalpy_from_temperature(', (')', 97), 13],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:394-409': ['def p07_conductivity(', (')', 115), 16],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:461-871': ['def _si3_zdf_bl99_step(', (')', 322), 411],
+    'docs/ice/fidelity/si3_r3_d5_preregister.md:40-42': ['1. **P1 (Step 1 — Reviewer reproduction)**:', '- **REFUTE**: Any of the counts (`1,811`, `7,385`, `26,202`, `1,625 ->', 3],
+    'src/ICE/icevar.F90:362-379': ['ELSEIF( nn_icesal == 4 ) THEN', ('ENDIF', 18), 18],
+    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:571-595': [('t_i_1d(ji,nlay_i) = zindtbis(jm_max) / zdiagbis(jm_max)', 1), ('ENDIF', 22), 25],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:544-567': [('t_i_1d(ji,nlay_i) = zindtbis(jm_max) / zdiagbis(jm_max)', 1), '&          ( isnow(ji) * t_s_1d(ji,1) + ( 1._wp - isnow(ji) ) * t_i_1d', 24],
+    'packages/core/legoesm/timestepping/tridiagonal.py:170-175': ['def unnormalised_backward(reverse_k, current):', (')', 52), 6],
+    'src/ICE/icevar.F90:390-395': ['ze_i             =   e_i (ji,jj,jk,jl) / v_i(ji,jj,jl) * zlay_i       ', 't_i(ji,jj,jk,jl) = MAX( -100._wp , MIN( -( zbbb + zccc ) * 0.5_wp * r1', 6],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90:404-409': ['ze_i             =   e_i (ji,jj,jk,jl) / v_i(ji,jj,jl) * zlay_i       ', 't_i(ji,jj,jk,jl) = MAX( -100._wp , MIN( -( zbbb + zccc ) * 0.5_wp * r1', 6],
+    'src/ICE/icevar.F90:938-953': ['DO jk = 1, nlay_i             ! Sea ice energy of melting', ('END DO', 25), 16],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90:952-967': ['DO jk = 1, nlay_i             ! Sea ice energy of melting', ('END DO', 58), 16],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:813': 'CALL ice_var_enthalpy',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:567-591': ['# P07 conductivity at the four ice interfaces (top, 2 interior, base).', '# (compiled `icethd_zdf_bl99.f90:331-346`): layer thicknesses use', 25],
+    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:276-290': ['ELSEIF( ln_cndi_P07 ) THEN     !-- Pringle et al formula: k = k0 + bet', ('END DO', 13), 15],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:271-285': ['ELSEIF( ln_cndi_P07 ) THEN     !-- Pringle et al formula: k = k0 + bet', ('END DO', 13), 15],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:604-842': ['k_i = tcond_i / dz_i[..., None]', ('else:', 5), 239],
+    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:334-335': ['zkappa_s(ji,nlay_s) = isnow(ji) * zghe(ji) * rcnd_s * ztcond_i(ji,0) &', '&                            / ( 0.5_wp * ( ztcond_i(ji,0) * zh_s(ji) ', 2],
+    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:365-366': ['zcpi = rcpi + zgamma * sz_i_1d(ji,jk) / MAX( ( t_i_1d(ji,jk) - rt0 ) *', 'zeta_i(ji,jk) = rDt_ice * r1_rhoi * z1_h_i(ji) / zcpi', 2],
+    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:399-529': ['qns_ice_1d(ji) = qns_ice_1d(ji) + dqns_ice_1d(ji) * ( t_su_1d(ji) - zt', 'zindterm(jm_min)   = ztiold(ji,1) + zeta_i(ji,1) * (zradab_i(ji,1) + z', 131],
+    'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:620': ('ztmelts       = -rTmlt * sz_i_1d(ji,jk) + rt0', 1),
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:329-330': ['zkappa_s(ji,nlay_s) = isnow(ji) * zghe(ji) * rcnd_s * ztcond_i(ji,0) &', '&                            / ( 0.5_wp * ( ztcond_i(ji,0) * zh_s(ji) ', 2],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:353-354': ['zcpi = rcpi + zgamma * sz_i_1d(ji,jk) / MAX( ( t_i_1d(ji,jk) - rt0 ) *', 'zeta_i(ji,jk) = rDt_ice * r1_rhoi * z1_h_i(ji) / zcpi', 2],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:387-512': ['qns_ice_1d(ji) = qns_ice_1d(ji) + dqns_ice_1d(ji) * ( t_su_1d(ji) - zt', 'zindterm(jm_min)   = ztiold(ji,1) + zeta_i(ji,1) * (zradab_i(ji,1) + z', 126],
+    'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:588': ('ztmelts       = -rTmlt * sz_i_1d(ji,jk) + rt0', 1),
+    'docs/ice/fidelity/si3_r3_d5_preregister.md:44-54': ['2. **P2 (Step 2 — Harness entry conversion)**:', '- **REFUTE**: CPU production JIT (`XLA_FLAGS=""`) still disagrees with', 11],
+    'docs/ice/fidelity/si3_r3_d5_preregister.md:45': '- **CONFIRM**: Updating `_entry_arrays` to `(e_i / v_i) * 3.0`, `(e_s ',
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:855-934': ['def test_r3_step2_harness_entry_conversion_is_bit_exact_and_fails_when', (')', 356), 80],
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:937-1034': ['def test_r3_step3_snow_temperature_from_enthalpy_is_bit_exact_and_fail', 'assert norm_rev_1334 > probe_module.phase2.BAR', 98],
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:1037-1122': ['def test_r3_step4_cpu_fusion_prevention_is_bit_exact_and_fails_when_re', (')', 426), 86],
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:1125-1241': ['def test_r3_all_touched_functions_gradients_and_forward_bits() -> None', (')', 510), 117],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2_gate.py:224-252': ['def _entry_arrays(frame, *, _nemo_entry_conversion: bool = True):', (')', 131), 29],
+    # --- SI3 ladder round 2 & round 3 (D5) END ---
     # ORCA2 round 324 (DECISION 150): rCdU_ice -> rCdU_top.
     'ICE/iceupdate.F90:369': 'tmod_io(ji,jj) = rho0 * drag_io(ji,jj) * SQRT( zmodt )',
     'ICE/iceupdate.F90:391': 'rCdU_ice(ji,jj) = -r1_rho0 * tmod_io(ji,jj) * at_i(ji,jj) * tmask(ji,jj,1)',
@@ -8912,7 +8895,7 @@ _NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm)"
          r"|[A-Za-z0-9_./]*(?:namelist_cfg|namelist_ref|namelist_ice_cfg|namelist_ice_ref|ocean\.output)"
          r"|sette/(?:input_ORCA2_SAS_ICE\.cfg|sette_fetch_inputs\.sh)"
          r"|docs/ocean/fidelity/testcases/(?:nemo_testcases_l3dyn_phase2_receipt|nemo_testcases_l3thd_phase6_receipt|nemo_testcases_l3thd_scalarmath_v2_receipt|nemo_testcases_l4_orca2_phase2_manifest)\.md"
-         r"|docs/ice/fidelity/(?:si3_ladder_design|si3_r2_d5_preregister)\.md")
+         r"|docs/ice/fidelity/(?:si3_ladder_design|si3_r2_d5_preregister|si3_r2_d5_receipt|si3_r3_d5_preregister|si3_r3_d5_receipt)\.md")
 _SPAN = re.compile(r"`([^`\n]+)`")
 _FULL = re.compile(rf"^(?P<f>{_NAME}):(?P<l>\d[\d,\-]*)$")
 _ONLY = re.compile(rf"^(?P<f>{_NAME})$")
