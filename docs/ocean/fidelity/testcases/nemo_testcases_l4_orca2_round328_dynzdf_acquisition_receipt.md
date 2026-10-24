@@ -396,9 +396,95 @@ tests. No NEMO executable was run.
 Choices: none. All changes are the two reviewers' requested admission and
 non-vacuity repairs; no model, card, namelist, or configuration value changed.
 
+## Resume-8: retained-run admission and TKE term ownership
+
+### Refused transport frame diagnosis
+
+**CONFIRMED.** The sole inherited-output difference is not a production
+change. `oracle_transport_kt00000001_s2.bin` is a 48-byte header followed by
+three native-fp64 arrays of shape `(94,152,31)`: `zFu`, then `zFv`, then
+`zFw`. Each array occupies 3,543,424 bytes, so `zFw` begins at one-based file
+byte 7,086,897. The first changed byte, 7,089,561, is 2,664 bytes into that
+record: zero-based linear element 333, or Fortran `(i,j,k)=(52,4,1)`. Its new
+value is `-624.7724791240518`, versus zero in rounds 5 and 326 and in the
+round-328 `dyn_zdf` record.
+
+**CONFIRMED.** The complete new `zFw` payload has 442,928 finite values,
+233,341 nonzero values, no NaN or infinity, minimum
+`-5253981.606405961`, maximum `7254087.19821906`, and smallest nonzero
+magnitude `0.01993049235501692`. These are finite transport-scale numbers,
+not NaNs. **PLAUSIBLE only:** their magnitudes look numerically reasonable;
+they have no semantic meaning in this frame because the array is undefined.
+
+**CONFIRMED.** The writer allocates all three arrays at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:121`, but in
+the active vector-invariant branch it computes `ww`, explicitly says `zFw`
+is instead computed in `tra_adv_trp`, and then writes the still-unassigned
+`zFw` as the third record at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:323-351`.
+The consumer selects vertical-transport construction for this same vector
+branch at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traadv.f90:196` and overwrites
+its `pFw` from a newly computed `ww` before use at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traadv.f90:296-312`.
+Therefore the observed third record is uninitialized allocation content, not
+an operand consumed by production.
+
+**CONFIRMED.** `zFu` and `zFv` are bit-identical. Across the 160 shared
+deterministic oracle/restart outputs, this undefined third record is the only
+difference; the stage-2 and stage-3 production frames, stage-2 tracer and RK
+operands, both-rank ocean and ice restarts, and both-rank `dyn_zdf` records are
+exact. That independently excludes an observer-induced production-state
+change.
+
+### Fail-closed re-admission
+
+**CONFIRMED.** Transport passivity now checks the exact schema and size, then
+compares the defined 48-byte header plus `zFu` plus `zFv` (7,086,896 bytes)
+bit for bit. It deliberately ignores only the writer-proven undefined `zFw`
+payload. A third-record mutation is accepted, while a `zFu` mutation refuses;
+every other inherited deterministic output remains a whole-file exact
+comparison. The retained-run path is pinned to producer commit
+`30cb3f2a81866381cbca2a0d8b36d01ac1794d4a` and its recorded binary digest.
+
+**CONFIRMED.** `--admit-existing` admitted the retained output without a build
+or NEMO execution: 41 preflight tests passed, all 10 refusal plants fired,
+same-program found 421 identical normalized objects and 409 identical
+preprocessed sources, deterministic passivity passed for 160 files, and both
+the inherited `dyn_zdf` and new `zdfphy` admissions passed. The accepted
+record is
+`orca2_rounds/round328/acquisition/orca1ice_zdfphy_kt1_np2`.
+
+### First unequal term boundary
+
+**CONFIRMED.** The clean offline replay is
+`orca2_rounds/round328/replay/zdf_term_localization_resume8.json`, SHA-256
+`61ca3e60837439291357607258a228819d283d0d10c9e10e98796e2d1f730ed1`.
+For both requested zero-based families, `k=28` and `k=0`, the first recorded
+unequal coefficient boundary is post-TKE, before DDM and IWM. Post-TKE has
+5,530 unequal interfaces: 4,596 at `k=28` and 284 at `k=0`. Post-DDM has the
+same counts; post-IWM has 5,524 total, 4,596 at `k=28`, and 282 at `k=0`.
+
+**CONFIRMED.** The first owning source-order statement is therefore the TKE
+call at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90:336` for both
+families; the later coefficient copy, DDM, and IWM statements cannot be their
+first owner. TKE entry `rn2` is bit-identical at all 414,119 scored interfaces,
+while returned `en` is already unequal at 5,661 interfaces (4,757 at `k=28`,
+279 at `k=0`). NEMO then derives `p_avm` from that `en` at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:709-711`.
+
+**PLAUSIBLE, not claimed as measured.** The energy solve or its boundary
+conditions are the next inner-TKE candidates. This acquisition has no
+inside-`zdf_tke` statement boundary, so it does not identify a narrower inner
+statement than the confirmed call owner. No model or configuration changed,
+and no NEMO executable was run during this resume.
+
+Validation: pending final gates.
+
 codex review: operator
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/orca2_r328/repo
-ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/orca2_r328/repo/scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_zdf_terms_acquisition/run.sh --run
+ACQUISITION_NEEDED: NONE
 DECISION_NEEDED: NONE
-ROUND_STATUS: STOPPED_FOR_RECORD — operator-only zdf_phy boundary acquisition ready
+ROUND_STATUS: LANDED_PENDING_OPERATOR_REVIEW — retained record admitted; k=28 and k=0 first diverge in TKE
