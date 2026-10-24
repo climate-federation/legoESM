@@ -12,6 +12,7 @@ import pytest
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round328_dynzdf_gate as gate,
+    nemo_testcase_l4_orca2_round328_dynzdf_replay as replay,
 )
 
 REPO = Path(__file__).resolve().parents[3]
@@ -22,6 +23,21 @@ HARNESS = ACQ / "dynzdf_round328_layout_fixture.F90"
 PATCHES = (ACQ / "dynzdf_round328.patch", ACQ / "stprk3_stg_round328.patch")
 GFORTRAN = Path("/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran")
 RUN_SH = ACQ / "run.sh"
+
+
+def test_term_localization_separates_iwm_and_ddm_boundaries() -> None:
+    closure = np.array([[[1.0, 2.0, 3.0]]])
+    after_ddm = np.array([[[1.0, 2.5, 3.0]]])
+    consumed = np.array([[[1.25, 2.75, 4.0]]])
+    record = np.array([[[1.0, 2.5, 3.5]]])
+    result = replay.term_localization(
+        consumed, record, after_ddm, closure,
+        np.ones_like(consumed, dtype=bool))
+    assert result["unequal_by_level"] == [1, 1, 1]
+    assert result["record_equals_after_ddm_without_iwm"] == 2
+    assert result["record_equals_closure_without_ddm_or_iwm"] == 1
+    assert result["iwm_changes_candidate_at_residual"] == 3
+    assert result["ddm_changes_candidate_at_residual"] == 1
 
 
 @pytest.fixture(scope="module")

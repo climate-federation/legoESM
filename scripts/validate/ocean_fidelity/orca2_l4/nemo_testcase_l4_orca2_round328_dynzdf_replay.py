@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import struct
 import sys
 from pathlib import Path
 
@@ -225,6 +226,110 @@ def assemble_record_avm(records: dict[int, dict]) -> np.ndarray:
     return np.concatenate(slabs, axis=0).transpose(1, 0, 2)
 
 
+def read_record_tracer_profiles(root: Path) -> dict[str, np.ndarray]:
+    """Read the admitted rank-0 final avt/avs record written after zdf_phy."""
+    path = root / "oracle_zdf_entry_kt00000001.bin"
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=7i", handle.read(28))
+        payload = np.fromfile(handle, dtype=np.float64)
+    version, kt, level, nx, ny, nz, real_bits = header
+    require(magic == "NEMO_L4_ZDF___2", f"bad ZDF-entry magic {magic!r}")
+    require((version, kt, level, real_bits) == (2, 1, 1, 64),
+            f"bad ZDF-entry header {header!r}")
+    halo = 2
+    full = nx * ny * nz
+    interior = (nx - 2 * halo) * (ny - 2 * halo) * nz
+    require(payload.size == full + 3 * interior,
+            f"ZDF-entry payload {payload.size} != {full + 3 * interior}")
+    require(np.isfinite(payload).all(), "non-finite ZDF-entry payload")
+    offset = full
+    fields = {}
+    for name in ("avt", "avs", "en"):
+        native_field = payload[offset:offset + interior].reshape(
+            (nx - 2 * halo, ny - 2 * halo, nz), order="F")
+        fields[name] = native_field.transpose(1, 0, 2)
+        offset += interior
+    require(offset == payload.size, "ZDF-entry parser did not reach EOF")
+    return fields
+
+
+def vertical_counts(mask: np.ndarray) -> list[int]:
+    return [int(value) for value in np.count_nonzero(mask, axis=(0, 1))]
+
+
+def term_localization(candidate: np.ndarray, record: np.ndarray,
+                      after_ddm: np.ndarray, closure: np.ndarray,
+                      active: np.ndarray) -> dict[str, object]:
+    """Classify final-avm residuals against the two source-order term boundaries."""
+    unequal = (bits(candidate) != bits(record)) & active
+    no_iwm_equal = (bits(after_ddm) == bits(record)) & unequal
+    closure_equal = (bits(closure) == bits(record)) & unequal
+    iwm_changed = (bits(candidate) != bits(after_ddm)) & active
+    ddm_changed = (bits(after_ddm) != bits(closure)) & active
+    greater = (candidate > record) & unequal
+    return {
+        "unequal_by_level": vertical_counts(unequal),
+        "candidate_greater_than_record": int(np.count_nonzero(greater)),
+        "candidate_greater_by_level": vertical_counts(greater),
+        "record_equals_after_ddm_without_iwm": int(np.count_nonzero(no_iwm_equal)),
+        "record_equals_closure_without_ddm_or_iwm": int(np.count_nonzero(closure_equal)),
+        "iwm_changes_candidate_at_residual": int(np.count_nonzero(iwm_changed & unequal)),
+        "ddm_changes_candidate_at_residual": int(np.count_nonzero(ddm_changed & unequal)),
+        "iwm_unchanged_at_residual": int(np.count_nonzero(~iwm_changed & unequal)),
+        "ddm_unchanged_at_residual": int(np.count_nonzero(~ddm_changed & unequal)),
+    }
+
+
+def _with_vmix_terms(config, *, ddm: bool, iwm: bool):
+    vmix = config.physics.vertical_mixing
+    vmix = vmix._replace(
+        ddm=vmix.ddm._replace(enabled=ddm),
+        iwm=vmix.iwm._replace(enabled=iwm),
+    )
+    return config._replace(
+        physics=config.physics._replace(vertical_mixing=vmix))
+
+
+def _diagnose_profiles(model, card, surface):
+    import jax
+
+    heat, momentum = jax.device_get(model.diagnose_vertical_K(
+        card.recipe.initial_state, card.dt_s, surface_forcing=surface))
+    return (np.asarray(heat, dtype=np.float64),
+            np.asarray(momentum, dtype=np.float64))
+
+
+def _diagnose_salt_profile(model, card, surface):
+    """Read avs before lateral K33 from the model's own literal solve setup."""
+    import jax
+
+    state = card.recipe.initial_state
+    bundle = model._tke_step_entry_n2_bundle(state)
+    state_expl, operands = model._step_impl(
+        state, card.dt_s, surface_forcing=surface,
+        _apply_implicit_vmix=False,
+        _tke_n2_bundle_override=bundle)
+    (K_v_phys, A_v_phys, _k33, surface_tracer_forcing, tke_source,
+     _diss_incr, tracer_source) = operands
+    tke_old = state.tke.data if state.tke is not None else None
+    state_out, trace = jax.device_get(model._apply_implicit_vertical_mixing(
+        state_expl, card.dt_s, surface,
+        K_v_phys=K_v_phys, A_v_phys=A_v_phys, K33_iso=None,
+        dt_mom=card.dt_s / model.config.dt_mom_ratio,
+        surface_tracer_forcing=surface_tracer_forcing,
+        tracer_source=tracer_source, tke_old=tke_old, tke_source=tke_source,
+        n2_tracers=model._n2_before_advection_tracers(state),
+        n2_tracers_before=model._n2_nemo_before_tracers(state),
+        tke_n2_bundle=bundle, eta_now=state.eta.data,
+        eta_step_entry=state.eta.data, u_now=state.u.data,
+        v_now=state.v.data, return_tracer_solve_trace=True))
+    del state_out
+    require(trace.salt_K is not None,
+            "literal tracer solve did not expose its consumed avs")
+    return np.asarray(trace.salt_K, dtype=np.float64)
+
+
 def base_lower_from_avm(avm, dz_after, e3w_now, wet):
     """The production literal solver's first base-matrix coefficient."""
     import jax.numpy as jnp
@@ -259,12 +364,27 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         iwm_forcing=card.recipe.iwm_forcing)
+    heat, candidate = _diagnose_profiles(model, card, surface)
+    salt = _diagnose_salt_profile(model, card, surface)
     state_after = jax.device_get(model.step(
         card.recipe.initial_state, card.dt_s, freshwater=freshwater,
         surface_forcing=surface, **rung10.damping_step_kwargs(card, root, 1)))
     require(state_after.tke_avm is not None,
-            "ordinary comparison step did not return its consumed avm")
-    candidate = np.asarray(state_after.tke_avm.data, dtype=np.float64)
+            "ordinary comparison step did not return its closure avm")
+    closure_state = np.asarray(state_after.tke_avm.data, dtype=np.float64)
+
+    ddm_config = _with_vmix_terms(
+        card.recipe.model_config, ddm=True, iwm=False)
+    closure_config = _with_vmix_terms(
+        card.recipe.model_config, ddm=False, iwm=False)
+    after_ddm_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, ddm_config,
+        iwm_forcing=card.recipe.iwm_forcing)
+    closure_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, closure_config,
+        iwm_forcing=card.recipe.iwm_forcing)
+    _, after_ddm = _diagnose_profiles(after_ddm_model, card, surface)
+    _, closure = _diagnose_profiles(closure_model, card, surface)
     record_avm = assemble_record_avm(records)
     require(candidate.shape == record_avm.shape,
             f"model avm {candidate.shape} != record {record_avm.shape}")
@@ -283,6 +403,25 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
         row["first_under_ice_jik"] = None
     row["backend"] = jax.default_backend()
     row["dtype"] = str(candidate.dtype)
+    row["term_localization"] = term_localization(
+        candidate, record_avm, after_ddm, closure, active)
+    row["state_tke_avm_vs_closure_without_ddm_or_iwm"] = score(
+        closure_state, closure, active)
+
+    tracer_record = read_record_tracer_profiles(root)
+    rank0_active = active[:, :tracer_record["avt"].shape[1], :]
+    record_avt = tracer_record["avt"][..., 1:-1]
+    record_avs = tracer_record["avs"][..., 1:-1]
+    require(record_avt.shape == heat[:, :record_avt.shape[1]].shape,
+            "rank-0 avt record differs from the consumed model profile")
+    require(record_avs.shape == salt[:, :record_avs.shape[1]].shape,
+            "rank-0 avs record differs from the consumed model profile")
+    tracer_rows = {
+        "avt_rank0": score(
+            heat[:, :record_avt.shape[1]], record_avt, rank0_active),
+        "avs_rank0": score(
+            salt[:, :record_avs.shape[1]], record_avs, rank0_active),
+    }
     candidate_faces = {
         "u": np.asarray(interp_cell_to_uface(jnp.asarray(candidate)))[:, 1:],
         "v": np.asarray(interp_to_v_points(
@@ -321,7 +460,11 @@ def model_avm(root: Path, records: dict[int, dict]) -> dict[str, object]:
                 scored["first_unequal_global_jik"] = None
             rank_rows.append(scored)
         first_statement[component] = rank_rows
-    return {"coefficient": row, "first_base_lower_statement": first_statement}
+    return {
+        "coefficient": row,
+        "tracer_coefficients": tracer_rows,
+        "first_base_lower_statement": first_statement,
+    }
 
 
 def measure(root: Path, expect_commit: str, expect_tree: str) -> dict[str, object]:
