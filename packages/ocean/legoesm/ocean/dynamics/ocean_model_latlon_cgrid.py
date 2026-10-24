@@ -12318,7 +12318,8 @@ class LatLonCGridOceanModel:
             )
         return (entry_state.T_before.data, entry_state.S_before.data)
 
-    def _tke_bottom_dirichlet(self, state, z_coord=None, config=None, grid=None):
+    def _tke_bottom_dirichlet(self, state, z_coord=None, config=None, grid=None,
+                              *, u_now=None, v_now=None):
         """NEMO bottom TKE BC value (T15; zdftke.F90:279-288), or None.
 
         Static Python predicate: returns the Dirichlet TKE value when
@@ -12366,7 +12367,15 @@ class LatLonCGridOceanModel:
         h_k = _zc.h_partial
         _bl = jnp.maximum(_zc.bottom_level, 0)
         _bl_idx = _bl[..., jnp.newaxis]
-        u_f, v_f = state.u.data, state.v.data
+        if (u_now is None) != (v_now is None):
+            raise ValueError(
+                "TKE bottom boundary requires both entry-level velocities "
+                "or neither")
+        # zdftke.f90:291-293 reads uu/vv(...,Kbb), not the post-explicit
+        # velocity handed here as ``state``.  The production step already
+        # supplies that stored entry pair as u_now/v_now (Kbb=Kmm at nit000).
+        u_f = state.u.data if u_now is None else u_now
+        v_f = state.v.data if v_now is None else v_now
         if (u_f.shape[1] != h_k.shape[1] + 1
                 or v_f.shape[0] != h_k.shape[0] + 1):
             raise ValueError(
@@ -13871,7 +13880,9 @@ class LatLonCGridOceanModel:
                     lat_deg=_tke_lat_deg,
                     iwm_fields=_iwm,
                     n2_tracers=n2_tracers,
-                    tke_bottom_dirichlet=self._tke_bottom_dirichlet(state, z_coord=z_coord, config=config, grid=_grid),
+                    tke_bottom_dirichlet=self._tke_bottom_dirichlet(
+                        state, z_coord=z_coord, config=config, grid=_grid,
+                        u_now=u_now, v_now=v_now),
                     tke_bottom_level=self._tke_bottom_level(z_coord=z_coord, config=config),
                     n2_tracers_before=n2_tracers_before,
                     tke_n2_bundle=tke_n2_bundle,

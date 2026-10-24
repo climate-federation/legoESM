@@ -1728,6 +1728,27 @@ class TestNemoBottomTkeVelocityConvention:
         with pytest.raises(ValueError, match="RAW face-staggered"):
             model._tke_bottom_dirichlet(collapsed)
 
+    def test_production_entry_velocity_overrides_the_post_explicit_state(self):
+        """zdftke.f90:291-293 reads Kbb, not the updated solver state."""
+        model, state, _ = self._model_and_state()
+        cfg_tke = model.config.physics.vertical_mixing.tke
+        post_explicit = np.asarray(model._tke_bottom_dirichlet(state))
+        assert np.any(post_explicit > cfg_tke.tke_background)
+
+        entry_u = jnp.zeros_like(state.u.data)
+        entry_v = jnp.zeros_like(state.v.data)
+        from_entry = np.asarray(model._tke_bottom_dirichlet(
+            state, u_now=entry_u, v_now=entry_v))
+        wet_columns = np.asarray(state.land_mask.data) > 0.5
+        np.testing.assert_array_equal(
+            from_entry[wet_columns],
+            np.full(np.count_nonzero(wet_columns), cfg_tke.tke_background),
+        )
+        assert not np.array_equal(from_entry, post_explicit)
+
+        with pytest.raises(ValueError, match="both entry-level velocities"):
+            model._tke_bottom_dirichlet(state, u_now=entry_u)
+
 
 def test_nn_mxlice2_anchor_is_nemos_case2_and_refuses_missing_inputs():
     """zdftke.f90:620-623 + :635-637: ((1-fr_i)*zraug*taum + fr_i*hm_i*2)*tmask,
