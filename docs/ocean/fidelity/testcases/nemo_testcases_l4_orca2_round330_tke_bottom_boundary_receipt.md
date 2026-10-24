@@ -6,8 +6,7 @@ Base: `355880d5b796`; preregistration `3c27c2f6f599`; implementation
 `ddd2821b7194`; cross-tree D122 instrument `f1836e669e7d`; bottom-index census
 instrument `e3fbb42b3e57`.
 
-Disposition: **HELD-pending** (operator GPU acquisition, final gates and
-review).
+Disposition: **LANDED-pending** (operator review LAND after the DINO GPU measurement; push gate).
 
 ## Answer
 
@@ -168,7 +167,7 @@ memory, is `orca2_rounds/round330/dino/run.sh`.
 - Strengthened literal full-depth test: candidate 2 passed; old clamp 2 failed,
   including expected binary64 word `4535269685926082061` -> pinned
   `4559595583697369799`.
-- DINO faithful-grid three-step and month gate: **PENDING ACQUISITION**.
+- DINO faithful-grid three-step and month gate: **MEASURED by the operator** — unchanged (see the operator GPU measurement section).
 
 independent review: operator (Claude)
 
