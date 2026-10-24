@@ -1147,13 +1147,25 @@ def test_o2_admit_evidence_directory_scores_istate_2step_and_rst_1step_and_refus
 
     adm = gate.admit_evidence_directory(ev, expect_commit=commit_hex)
     assert adm["status"] == "PASS"
+    assert adm["execution_backend"] == "cpu"
+    assert adm["execution_jit"] is True
+    assert adm["execution_x64"] is True
+    assert adm["o2_arrays_checked"] == 24
+    assert adm["state_arrays_checked_per_comparison"] == 107
+    assert adm["restart_variables_checked"] == 40
     assert adm["max_ulp_o2_istate"] == 0
     assert adm["max_ulp_o2_istate_full"] == 0
     assert adm["max_ulp_kt1"] == 0
+    assert adm["max_ulp_kt1_full"] == 0
     assert adm["max_ulp_kt2"] == 0
+    assert adm["max_ulp_kt2_full"] == 0
     assert adm["max_ulp_rst_entry"] == 0
+    assert adm["max_ulp_rst_entry_full"] == 0
     assert adm["max_ulp_rst_step1"] == 0
+    assert adm["max_ulp_rst_step1_full"] == 0
     assert adm["max_ulp_rst_vs_kt2"] == 0
+    assert adm["max_ulp_rst_vs_kt2_full"] == 0
+    assert adm["max_ulp_restart_variables"] == 0
 
     for plant_name in (
         "stamp",

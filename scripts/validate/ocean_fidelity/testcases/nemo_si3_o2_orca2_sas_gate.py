@@ -1329,24 +1329,45 @@ def admit_evidence_directory(
     wi, wj = first_wet_ij(tmask, interior_only=True, nn_hls=cfg.nn_hls)
     dry_fixture = verify_dry_signed_zero_fixture(f_ist["zht_i_ini"], tmask, nn_hls=cfg.nn_hls)
 
-    actual_o2 = si3_o2_scalar_initial_state(
-        sst_m=sst_istate,
-        sss_m=sss_istate,
-        tmask=tmask,
-        ssmask=ssmask,
-        smask0_i=jnp.asarray(f_ist["smask0_i"], dtype=jnp.float64),
-        e1e2t=e1e2t,
-        ff_t=ff_t,
-        gphit=gphit,
-        ssh_before_kbb=ssh_before_kbb,
-        ssh_before_kmm=ssh_before_kmm,
-        fitted_v_i=state_entry.v_i,
-        fitted_v_s=state_entry.v_s,
-        fitted_a_i=state_entry.a_i,
-        fitted_a_ip=state_entry.a_ip,
-        fitted_v_ip=state_entry.v_ip,
-        fitted_v_il=state_entry.v_il,
-        config=o2_cfg,
+    o2_scalar_jit = jax.jit(
+        lambda sst, sss, tm, ssm, sm0i, area_t, coriolis, lat, ssh_b, ssh_m,
+        v_i, v_s, a_i, a_ip, v_ip, v_il: si3_o2_scalar_initial_state(
+            sst_m=sst,
+            sss_m=sss,
+            tmask=tm,
+            ssmask=ssm,
+            smask0_i=sm0i,
+            e1e2t=area_t,
+            ff_t=coriolis,
+            gphit=lat,
+            ssh_before_kbb=ssh_b,
+            ssh_before_kmm=ssh_m,
+            fitted_v_i=v_i,
+            fitted_v_s=v_s,
+            fitted_a_i=a_i,
+            fitted_a_ip=a_ip,
+            fitted_v_ip=v_ip,
+            fitted_v_il=v_il,
+            config=o2_cfg,
+        )
+    )
+    actual_o2 = o2_scalar_jit(
+        sst_istate,
+        sss_istate,
+        tmask,
+        ssmask,
+        jnp.asarray(f_ist["smask0_i"], dtype=jnp.float64),
+        e1e2t,
+        ff_t,
+        gphit,
+        ssh_before_kbb,
+        ssh_before_kmm,
+        state_entry.v_i,
+        state_entry.v_s,
+        state_entry.a_i,
+        state_entry.a_ip,
+        state_entry.v_ip,
+        state_entry.v_il,
     )
 
     if plant == "1ulp-istate":
@@ -1373,24 +1394,33 @@ def admit_evidence_directory(
     sss_entry = jnp.asarray(snap_entry["fields"]["sss_m"], dtype=jnp.float64)
     sss_step2_np = np.asarray(snap_step2["fields"]["sss_m"], dtype=np.float64)
     sss_step2 = jnp.asarray(sss_step2_np, dtype=jnp.float64)
-    state_kt1, _ = si3_o2_step(
-        state_entry,
-        SI3ORCA2O2Forcing(
-            tmask=tmask,
-            sst_m=sst_istate,
-            sss_m=sss_entry,
-            ff_t=ff_t,
-            gphit=gphit,
-            e1e2t=e1e2t,
-            ssmask=ssmask,
-            smask0_i=jnp.asarray(f_ist["smask0_i"], dtype=jnp.float64),
-            ssh_before_kbb=ssh_before_kbb,
-            ssh_before_kmm=ssh_before_kmm,
-            apply_halos=False,
-        ),
-        config=cfg,
-        o2_init_config=o2_cfg,
+    smask0_i = jnp.asarray(f_ist["smask0_i"], dtype=jnp.float64)
+    o2_step_jit = jax.jit(
+        lambda step_state, step_sss: si3_o2_step(
+            step_state,
+            SI3ORCA2O2Forcing(
+                tmask=tmask,
+                sst_m=sst_istate,
+                sss_m=step_sss,
+                ff_t=ff_t,
+                gphit=gphit,
+                e1e2t=e1e2t,
+                ssmask=ssmask,
+                smask0_i=smask0_i,
+                ssh_before_kbb=ssh_before_kbb,
+                ssh_before_kmm=ssh_before_kmm,
+                apply_halos=False,
+            ),
+            config=cfg,
+            o2_init_config=o2_cfg,
+        )
     )
+    o1_step_jit = jax.jit(
+        lambda step_state, step_sss: si3_o1_step(
+            step_state, tmask=tmask, sss_m=step_sss, config=cfg
+        )
+    )
+    state_kt1, _ = o2_step_jit(state_entry, sss_entry)
     no_ice_wet = (np.asarray(tmask) != 0.0) & np.any(
         np.asarray(state_kt1.v_i) == 0.0, axis=2
     )
@@ -1404,7 +1434,7 @@ def admit_evidence_directory(
             branch_point, -np.inf
         )
         sss_step2 = jnp.asarray(sss_step2_plant, dtype=jnp.float64)
-    state_kt2 = si3_o1_step(state_kt1, tmask=tmask, sss_m=sss_step2, config=cfg)
+    state_kt2 = o1_step_jit(state_kt1, sss_step2)
 
     if plant == "1ulp-state":
         v_np = np.asarray(state_kt1.v_i).copy()
@@ -1480,9 +1510,7 @@ def admit_evidence_directory(
         config=cfg,
         ln_rstart=True,
     )
-    lego_rst_step1 = si3_o1_step(
-        lego_rst_entry, tmask=tmask, sss_m=rst_sss_step2, config=cfg
-    )
+    lego_rst_step1 = o1_step_jit(lego_rst_entry, rst_sss_step2)
 
     if plant == "rst-1ulp":
         v_rst_np = np.asarray(lego_rst_step1.v_i).copy()
@@ -1519,6 +1547,7 @@ def admit_evidence_directory(
 
     # Verify serialized NetCDF restart variables match NEMO's ORCA2_SAS_00000001_restart_ice.nc at 0 ULP
     expected_rst_dict = si3_rst_to_netcdf_dict(state_kt1, kt=1, config=cfg)
+    max_ulp_restart_variables = 0
     with netCDF4.Dataset(rec_dir / "ORCA2_SAS_00000001_restart_ice.nc", "r") as ds:
         for vname, exp_arr in expected_rst_dict.items():
             if vname not in ds.variables:
@@ -1543,10 +1572,28 @@ def admit_evidence_directory(
                 exp_arr, raw, m, nn_hls=cfg.nn_hls
             )
             ulp_nc = max_ulp_diff(exp_scored, raw, mask=mask_scored)
+            max_ulp_restart_variables = max(max_ulp_restart_variables, ulp_nc)
             if ulp_nc != 0:
                 raise ValueError(
                     f"STATUS PLANT-FIRED: NetCDF restart variable {vname} ULP={ulp_nc} != 0"
                 )
+
+    tmask_np = np.asarray(tmask) != 0.0
+    h = cfg.nn_hls
+    interior_t = np.zeros_like(tmask_np)
+    interior_t[h:-h, h:-h] = True
+    i_idx = np.arange(tmask_np.shape[0])[:, None]
+    j_idx = np.arange(tmask_np.shape[1])[None, :]
+    seam_t = ((i_idx < h) | (i_idx >= tmask_np.shape[0] - h)) & (
+        (j_idx >= h) & (j_idx < tmask_np.shape[1] - h)
+    )
+    fold_t = np.broadcast_to(j_idx >= tmask_np.shape[1] - h, tmask_np.shape)
+    state_arrays_checked = (
+        len(_PROG_FIELDS)  # t1_ice excluded, snwice_fmass included: net zero
+        + len(SI3AllPratherMoments._fields) * len(SI3PratherMoments._fields)
+        + len(state_kt1.equivalent._fields)
+        + len(state_kt1.aggregated._fields)
+    )
 
     return {
         "status": "PASS",
@@ -1555,17 +1602,34 @@ def admit_evidence_directory(
         "gate_changed_since_run": gate_changed_since_run,
         "binaries_checked": binaries_checked,
         "inputs_checked": inputs_checked,
+        "execution_backend": jax.default_backend(),
+        "execution_jit": True,
+        "execution_x64": bool(jax.config.jax_enable_x64),
         "first_wet_t_ij": [wi, wj],
         "dry_signed_zero_fixture": dry_fixture,
+        "o2_arrays_checked": len(_O2_SCALAR_STATE_FIELDS),
+        "state_arrays_checked_per_comparison": state_arrays_checked,
+        "restart_variables_checked": len(expected_rst_dict),
+        "wet_t_cell_counts": {
+            "interior": int(np.count_nonzero(tmask_np & interior_t)),
+            "seam": int(np.count_nonzero(tmask_np & seam_t)),
+            "fold": int(np.count_nonzero(tmask_np & fold_t)),
+        },
         "o2_area": o2_cmp["area"],
         "o2_zsshadj": o2_cmp["zsshadj"],
         "max_ulp_o2_istate": o2_cmp["max_ulp_wet"],
         "max_ulp_o2_istate_full": o2_cmp["max_ulp_full"],
         "max_ulp_kt1": cmp_kt1["max_ulp_wet"],
+        "max_ulp_kt1_full": cmp_kt1["max_ulp_full"],
         "max_ulp_kt2": cmp_kt2["max_ulp_wet"],
+        "max_ulp_kt2_full": cmp_kt2["max_ulp_full"],
         "max_ulp_rst_entry": cmp_rst_entry["max_ulp_wet"],
+        "max_ulp_rst_entry_full": cmp_rst_entry["max_ulp_full"],
         "max_ulp_rst_step1": cmp_rst_step1["max_ulp_wet"],
+        "max_ulp_rst_step1_full": cmp_rst_step1["max_ulp_full"],
         "max_ulp_rst_vs_kt2": cmp_rst_vs_kt2["max_ulp_wet"],
+        "max_ulp_rst_vs_kt2_full": cmp_rst_vs_kt2["max_ulp_full"],
+        "max_ulp_restart_variables": max_ulp_restart_variables,
         "max_norm_o2_istate": o2_cmp["max_norm_wet"],
         "max_norm_kt1": cmp_kt1["max_norm_wet"],
         "max_norm_kt2": cmp_kt2["max_norm_wet"],

@@ -1,16 +1,47 @@
-# SI3 round 7 receipt — O2 acquisition needed after review repair
+# SI3 round 7 receipt — O2 ready to land
 
 ## Outcome
 
-Round `si3_r7` remains stopped at acquisition. It implements the O2 scalar
-initial state and levitating-ice SSH adjustment, supplies a fail-closed
-acquisition/admission tool, and runs only the read-only preflight. Neither
-`makenemo` nor `mpirun` was run.
+Round `si3_r7` is ready to land. The operator acquired and admitted the O2
+record at producer commit `6644b2ce1c6449b9ec7134c32d8bfc7e2b0b58f9`.
+The retained record was then replayed on CPU in binary64 through production
+`jax.jit`; no NEMO build or run was repeated during scoring.
 
 The landed O1 contract is preserved. The O2 implementation is based on lane
 tip `042c7bd74c2944dab8c39318687ab0cef54f9d2b`. The unrelated ORCA2
 round-329 cherry-pick `11db3ee221` was rebased out; it is not an ancestor of
 this branch, and O2 does not import or call `orca2_initial_ice_ssh`.
+
+## Results
+
+**CONFIRMED:** O2 is bit-exact against the admitted NEMO record. The compiled
+CPU replay (`execution_backend=cpu`, `execution_x64=true`,
+`execution_jit=true`) scored all `24` O2 arrays plus `area` and `zsshadj`, all
+`107` state/moment/equivalent/aggregate arrays at continuous `kt=1` and
+`kt=2`, restart entry, restart advance to `kt=2`, and restart `kt=2` versus
+continuous `kt=2`, and all `40` registered NetCDF restart variables.
+
+- O2 initial state: wet maximum `0` ULP, full-array maximum `0` ULP, maximum
+  normalised error `0.0`; `area=357005237105466.1` and
+  `zsshadj=0.09976769334054654` are each `0` ULP.
+- Continuous `kt=1` and `kt=2`: wet and full-array maxima are `0` ULP for
+  both steps; maximum normalised errors are `0.0`.
+- Restart entry, restart advance, and restart-versus-continuous `kt=2`: wet
+  and full-array maxima are `0` ULP; all `40` restart variables are `0` ULP.
+- The wet T-cell census is `16,433` interior, `281` cyclic-seam, and `135`
+  north-fold cells. Because every scored wet array is bit-identical, both
+  seam and fold subsets are `0` ULP. The first interior wet T cell is
+  zero-based `(2, 21)`.
+
+There is no first non-bit array or location and therefore no owning NEMO
+statement to propose. **PLAUSIBLE:** none; the verdict uses no unmeasured
+explanation. The permanent score is
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round7/o2_jit_score.json`
+(SHA-256 `3748bf8619742796f9c7d7c66c892f946b71b22343ada95b5adf03f53d9ff2f5`).
+Its `gate_changed_since_run=true` records only the post-acquisition change
+from eager replay to compiled replay plus added result fields; producer
+commit, admitted binaries, inputs, record bytes, masks, scored arrays, and
+bars are unchanged.
 
 ## Review repairs
 
@@ -55,7 +86,7 @@ The preregistered bar is unchanged: all 24 scored O2 fields and both scalar
 reductions must be at 0 ULP. The difference is ownership: fitted categories
 are inputs, while only O2-owned sums, mass, and SSH are scored as O2
 transcriptions. The trajectory and restart fields retain O1's 0-ULP bar. No
-quantitative NEMO result exists yet.
+bar or scoring mask changed for the result above.
 
 O2 remains fail-closed in `step_sea_ice`: it exposes initialization through
 `si3_o2_step` but refuses to invent the still-unowned `ice_update_flx`
@@ -75,10 +106,10 @@ The restart run requires and copies both the SI3 and SAS ocean restart into a
 separate input directory. Outputs use distinct names and directories. Failed
 or admission-refused evidence is retained under the round-7 evidence root.
 
-The read-only preflight writes
+The read-only preflight wrote
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round7/o2_preflight_receipt.json`.
-The final invocation is run at the final clean HEAD; the JSON's
-`producer_commit` is the binding provenance stamp.
+The admitted record's `producer_commit` is the binding provenance stamp; the
+post-acquisition score is separate and does not alter producer evidence.
 
 ## Verification and choices
 
@@ -86,12 +117,12 @@ Focused O2 tests cover the literal freezing point, pond/lid switches, exact
 category inputs, DDPDD reductions, compiled writer, real log provenance,
 same-program checks, JIT/JVP/VJP, O1 restart layout, step-2 salinity selection,
 and all admission plants. The O1 regression suite and the imported ORCA2
-round-329 tests also pass. Default receipt-citation and private-import gates are
-required before handoff, plus an explicit citation-gate invocation for every
-SI3 receipt.
+round-329 tests also pass. Default receipt-citation and private-import gates,
+plus an explicit citation-gate invocation for every SI3 receipt, gate handoff.
 
 `ASKED`: repair all review findings, preserve the O2 bar with exact
-fitted-category inputs, run preflight only, and stop at acquisition.
+fitted-category inputs, admit the operator-run record, and score it under CPU
+production JIT.
 `UNASKED`: none.
 
 `CHOICES — PENDING USER DECISION`: keep the shared NEMO-literal
