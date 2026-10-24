@@ -462,7 +462,12 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
   cp "$R332_WRITER" "$dry/round332_writer.F90"
   patch -s --fuzz=0 -p0 -d "$dry" <"$R332_DYNVOR_PATCH"
   patch -s --fuzz=0 -p0 -d "$dry" <"$R332_TKE_PATCH"
-  { cat "$TKE_PATCH"; cat "$R332_TKE_PATCH"; } >"$scratch/tke_combined.patch"
+  if diff -u --label zdftke.F90 --label zdftke.F90 \
+      "$SOURCE_ZDFTKE" "$dry/zdftke.F90" >"$scratch/tke_combined.patch"; then
+    refuse 'round-332 combined TKE observer patch is empty'
+  else
+    [[ $? -eq 1 ]] || refuse 'could not construct combined TKE observer patch'
+  fi
 fi
 for unit in dynzdf stprk3_stg; do
   check_patched_call_predecessors "$dry/$unit.F90" \
