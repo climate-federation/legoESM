@@ -6,6 +6,7 @@ PROGRAM write_round332_fixture
    CHARACTER(LEN=16) :: arg
    REAL(wp) :: rank_offset,add
    REAL(wp), ALLOCATABLE :: before(:,:,:),added(:,:,:),after(:,:,:),vwet(:,:,:)
+   REAL(wp), ALLOCATABLE :: raw_v(:,:,:)
    REAL(wp), ALLOCATABLE :: ztsw(:,:),ztse(:,:),ztnw(:,:),ztne(:,:),zwx(:,:)
    REAL(wp), ALLOCATABLE :: row_m(:,:),row_d(:,:),row_p(:,:)
 
@@ -17,6 +18,7 @@ PROGRAM write_round332_fixture
    ALLOCATE(added(ntei-ntsi+1,ntej-ntsj+1,jpkm1))
    ALLOCATE(after(ntei-ntsi+1,ntej-ntsj+1,jpkm1))
    ALLOCATE(vwet(ntei-ntsi+1,ntej-ntsj+1,jpkm1))
+   ALLOCATE(raw_v(jpi,jpj,jpk))
    ALLOCATE(ztsw(ntsi-1:ntei+1,ntsj-1:ntej+1))
    ALLOCATE(ztse(ntsi-1:ntei+1,ntsj-1:ntej+1))
    ALLOCATE(ztnw(ntsi-1:ntei+1,ntsj-1:ntej+1))
@@ -50,6 +52,13 @@ PROGRAM write_round332_fixture
    CALL r332_vor_begin(1,1,3,before,vwet)
    CALL r332_vor_add(added)
    CALL r332_vor_done(after)
+
+   ! Full declared extent, including dry/halo cells.  The fixture makes the
+   ! sign channel non-vacuous: initialization is -0 and one cell is +0.
+   raw_v=-0._wp
+   raw_v(1,1,1)=0._wp
+   raw_v(2,1,1)=rank_offset
+   CALL r332_raw_postfold_v(1,1,2,raw_v)
 
    DO jj=ntsj,ntej
       row_m=2._wp+rank_offset+REAL(jj,wp)

@@ -32,7 +32,7 @@ literally evaluates square root, mixing-length multiplication, independent
 floors and mask in
 `ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:708-719`;
 legoesm forms the raw viscosity and then its floors/Prandtl branch in
-`tke.py:2262-2287`.  The admitted round-331 record contains returned energy,
+`tke.py:2267-2292`.  The admitted round-331 record contains returned energy,
 final `avm/avt`, and `wmask`, but not `zmxlm` or `zmxld`.  Consequently the
 round-331 phrase “downstream source-order rounding” is demoted here from a
 factual label to a hypothesis: the evidence does not yet distinguish literal
@@ -207,32 +207,38 @@ all fourteen retained-output manifest checks pass.  The record is therefore
 
 The entire family is rank-0 global row `j=147`, `i=0..89`, `k=0..29` (2,032
 mask-selected words, first `[147,0,0]`, last `[147,89,29]`).  Every word is a
-dry V-fold target (`vmask=0`), NEMO stores positive zero, and the production
-legoesm result stores negative zero.  There is no nonzero-value difference.
+dry V-fold target (`vmask=0`), while the scored stage record contains positive
+zero and the production legoESM result contains negative zero.  This does
+**not** observe NEMO's live dry-cell sign: the stage writer initializes the
+canonical array to `+0.0` and copies only wet words at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynspg_ts.f90:1574-1606`,
+then writes V through that canonicalizer at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3.f90:343-346`.
+All 172,963 dry V words in the dump are therefore positive zero by
+construction.  NEMO's live sign at the 2,032 scored words is **UNOBSERVED**.
 
 At those exact words the admitted NEMO EEN accumulator before the add contains
 1,620 positive zeros, 315 negative nonzero values, and 97 positive nonzero
 values.  The recorded `zva` is negative zero at all 2,032 words.  The
 accumulator after the add is bit-identical to the accumulator before it at
-all 2,032 words; globally, both ranks have zero before/after changed bits.
+all 2,032 words; more strongly, all 399,600 recorded words on both ranks have
+zero before/after changed bits because this kt-1-from-rest add is `+/-0` at
+every word.  The exclusion is therefore **CONFIRMED but vacuous**: the add
+could not have changed any word.
 Thus the literal EEN add at
 `ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynvor.f90:796-802`, and the
 legoesm add at `ocean_pe_latlon_cgrid.py:3049`, are **CONFIRMED excluded** as
 the first owner.
 
-The first observed owning boundary is instead the end-of-stage V fold: NEMO
-calls the fold at
-`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:795-796` and
-executes its V-point signed assignment at
-`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/lbcnfd.f90:684-717`;
-legoesm's corresponding fold assignment is
-`ocean_model_latlon_cgrid.py:18281-18302`.  A production trace shows the
-legoesm raw stage velocity is positive zero at every target and its final
-folded value is negative zero.  This boundary and the EEN exclusion are
-**CONFIRMED**.  The exact first statement remains **PLAUSIBLE**, however:
-the acquisition did not record NEMO's pre-fold source row, so it cannot
-distinguish NEMO's fold multiplication from a source-row zero sign already
-present immediately before that multiplication.  It therefore does not
+The earlier fold-owner claim is **REFUTED/unsupported**.  The executing call
+is the `l_zdfsh2` arm at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:791-793`,
+not lines 795--796.  For equal signed-zero sources, NEMO's `psgn*src` at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/lbcnfd.f90:684-717` and
+legoesm's `-1*src*mask` at `ocean_model_latlon_cgrid.py:18281-18302` produce
+the same sign.  The observed difference must therefore arise either from the
+stage dump's dry-cell zero fill or from an upstream mask multiplication on
+the source row.  The existing record cannot distinguish them and does not
 authorize changing the legoESM fold assignment.
 
 ### Seven residual `avm/avt` cells
@@ -255,27 +261,88 @@ the recorded NEMO `avm` bit for bit at all seven cells; multiplying that
 result by recorded `p_pdlr` equals NEMO `avt` bit for bit at all seven.
 NEMO's viscosity/diffusivity statements are
 `ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:708-719`, and the
-legoesm assembly is `tke.py:2262-2313`.  Therefore the seven `avm/avt`
+legoesm assembly is `tke.py:2267-2329`.  Therefore the seven `avm/avt`
 residuals are **CONFIRMED not** a difference in NEMO's literal operation order;
 they are a remaining mixing-length transcription difference already present
 in `zmxlm` (and, at two cells, `zmxld`).
 
-The first record-proven owning family is NEMO `CASE (3)`, including the `lup`
-and `ldown` scans and their `MIN`/`SQRT` combine, at
-`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:687-700` versus
-legoesm's scans and combine at `tke.py:904-1022`.  This family assignment is
-**CONFIRMED** by the final mixing-length records.  Which single statement in
-that family first owns all seven cells is still **PLAUSIBLE**, because the
-record contains final `zmxlm/zmxld` but not NEMO's pre-combine `lup` and
-`ldown` arms.  The source-order proposal is therefore to record those two
-arms immediately before NEMO's `zemlm/zemlp` combine, then test one recurrence
-or combine statement—never the already exonerated `avm/avt` assembly.
+The offline input replay resolves that family without another NEMO run.  At
+all seven cells the binding arm is `lup`: the NEMO CASE(2) surface anchor at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:621-637` plus the
+successive live `e3t_0*(1+ssh/ht_0)` terms reproduces final recorded `zmxlm`
+bit for bit, and recorded `zmxld` is never below it.  NEMO's owning surface
+statement is lines 623--624; legoESM's first differing statement was
+`_mxl0_surface_anchor` at `tke.py:262-268`, with its materialization at
+`tke.py:4220-4227`.  The pre-fix production-JIT anchor
+missed all seven inputs by `+1,+1,-1,+1,-1,-1,-1` ULP (the repeated column is
+listed twice); eager already matched.  Materializing the NEMO source
+operations makes eager and JIT exact at every required input.  The owner is
+therefore in the `lup` inputs, **not** `ldown` or the `MIN`/`SQRT` combine.
 
-### Resume-5 decision
+The same replay corrects the Prandtl statement.  At
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:717-720`, NEMO
+multiplies by `p_pdlr`; the old legoESM path divided `K_M` by `1/pdlr`.
+Across 414,119 wet cells, literal multiplication has zero NEMO mismatches,
+eager reciprocal division has 148,479 mismatches (64.14581315998542% exact),
+and JIT reciprocal division has zero because XLA rewrites it to a multiply.
+The NEMO step-entry arm now carries `pdlr` and evaluates the literal multiply
+at `tke.py:2306-2329`; every other `_prandtl_number` caller retains the
+reciprocal API.
 
-No single source-cited statement is confirmed to own the full required
-family.  Consequently Decision 122 is not opened, no model statement lands,
-and production-call-site revert, seven-pair/two-label comparison, DINO-path,
-and rung-10 gradient claims are not eligible.  No configuration changed.
-The terminal status is **STOP_PROPOSAL** with an operator-only `lup/ldown`
-pre-combine acquisition proposal; all prior refusals remain live.
+### Resume-7 decision
+
+Two single source-cited statements are confirmed and implemented: the
+CASE(2) surface-anchor evaluation order and the literal `pdlr*K_M` update.
+No selector, constant, recipe, deck, default, or configuration value changes.
+The remaining V-sign question requires the raw post-fold record described
+below, so the terminal status is **ACQUISITION_NEEDED** rather than a fold
+model change.
+
+## Resume 7: interrupted-tree audit and raw-V handoff
+
+Every interrupted edit was diffed against `ce3732a403`.  The useful pieces
+retained are: the round-328 fixture's `jpi=5,jpj=4` extents (needed to compile
+the exact raw array); the round-332 writer, layout fixture and gate after
+reducing them to one raw post-fold V field; the stage patch after reducing it
+to one call; the reviewed source-order `zdftke` row and its existing placement
+check; and the round-328 driver/test extensions needed to compile, plant,
+admit and pin that raw record.  The interrupted pre/post-fold fields, fold
+mask and semantic owner assertion, `lup/ldown` observer, TKE-arm writer and
+fixture fields, duplicate fold calls, fold/arm plants, TKE arithmetic-object
+comparison, and their call censuses were reverted.  They either encoded the
+overturned fold-owner claim or acquired inputs the offline replay has now
+resolved.
+
+The remaining operator-only observer writes exactly one full declared
+`jpi*jpj*jpk` binary64 array immediately after the executing
+`l_zdfsh2` fold.  It applies no mask and no canonicalizer, so dry and halo
+sign bits survive.  Its compiled fixture initializes the full array to
+negative zero, plants one positive-zero cell and one rank-distinguishing
+cell, and is compiled with `-fcheck=bounds`.  Admission checks the header,
+exact extents, field order, checksum and rank, reports only a positive-zero /
+negative-zero / nonzero census, and deliberately does not alter or reinterpret
+the scored comparison.  Header, truncation and checksum plants must refuse.
+The landing check requires exactly one call immediately after the
+`l_zdfsh2` `lbc_lnk`; its misplaced-call plant moves it past `ELSE` and must
+refuse.  The same-program proof still normalizes every observer unit, and the
+stage object/disassembly check proves the observer leaves the floating-point
+instruction census unchanged while a non-observer arithmetic plant changes
+it.  The manifest, binary and producer pins and retained-run
+`--admit-existing` rules remain in force.
+
+Expected evidence directory:
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round332/acquisition/orca1ice_raw_postfold_v_kt1_np2`.
+If it shows live NEMO negative zero too, dry-cell scoring is a policy question
+for the user; this round does not change the score.
+
+The offline replay artifact `/tmp/r332_tke_input_replay.json` reports
+`PASS_R332_TKE_INPUT_REPLAY`: seven of seven lup recurrences and both eager/JIT
+anchors are exact; literal Prandtl multiplication and JIT are exact at all
+414,119 wet cells; eager reciprocal division misses 148,479.  The focused
+production-call-site and acquisition tests pass (30 selected tests), including
+finite reverse derivatives.  Reverting either source materialization or the
+literal multiply makes its production-call-site regression fail.
+
+Decision-122, DINO, N=1 reverse/forward, read-only preflight, citation,
+default landing and private-import ratchet results are recorded below after
+their clean-commit runs.

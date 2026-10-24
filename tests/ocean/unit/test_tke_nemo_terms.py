@@ -1858,6 +1858,84 @@ def test_nn_mxlice2_anchor_is_nemos_case2_and_refuses_missing_inputs():
                              _RHO0, constants.g, jnp.asarray(tm))
 
 
+def test_nn_mxlice2_anchor_materializes_nemo_source_order_under_jit():
+    """The production anchor must retain NEMO's CASE(2) binary64 grouping."""
+    from legoesm.ocean.physics.vertical_mixing.tke import _mxl0_surface_anchor
+
+    # The six unique horizontal inputs owning the seven round-332 avm/avt
+    # residual cells (the seventh cell is the next level in column 5).
+    taum = np.array([float.fromhex(value) for value in (
+        "0x1.d735a44329989p-4", "0x1.2cbcae8c0025ep-2",
+        "0x1.05cd0489f4d37p-3", "0x1.3663af876042bp-3",
+        "0x1.a82ec925ec55bp-1", "0x1.a221f11097f8ap-2")])
+    fr_i = np.array([float.fromhex(value) for value in (
+        "0x1.3e84b6d3548ecp-13", "0x1.8b543878e0b65p-5",
+        "0x1.adb6f8993d940p-6", "0x1.e93f71c084d23p-6",
+        "0x1.22df82c41cb8fp-5", "0x1.1ff2dd1bb1ac8p-6")])
+    hm_i = np.array([float.fromhex(value) for value in (
+        "0x1.999999999999ap-5", "0x1.4186205f8c1a2p-1",
+        "0x1.3b267de9d2378p+1", "0x1.3bbe15fe21883p+1",
+        "0x1.39a53079f7424p+1", "0x1.3e11aa8b86d80p+1")])
+    cfg = TKEConfig(
+        tke_mxl_choice=3, mxl0_min_m=0.001,
+        nemo_mxl0_surface_tmask=True, nemo_mxlice=2)
+    nemo_g = np.float64(9.80665)
+    zraug = (np.float64(0.4) * np.float64(2.0e5) /
+             (np.float64(_RHO0) * nemo_g))
+    # Separate assignments intentionally mirror zdftke.f90:620-623.
+    open_water = (np.float64(1.0) - fr_i) * zraug
+    open_water = open_water * taum
+    ice = fr_i * hm_i
+    ice = ice * np.float64(2.0)
+    expected = np.maximum(np.float64(cfg.mxl0_min_m), open_water + ice)
+
+    def production_anchor(stress, fraction, thickness):
+        return _mxl0_surface_anchor(
+            cfg, stress, _RHO0, nemo_g, jnp.ones_like(stress),
+            fraction, thickness)
+
+    eager = np.asarray(production_anchor(
+        jnp.asarray(taum), jnp.asarray(fr_i), jnp.asarray(hm_i)))
+    compiled = np.asarray(jax.jit(production_anchor)(
+        jnp.asarray(taum), jnp.asarray(fr_i), jnp.asarray(hm_i)))
+    np.testing.assert_array_equal(eager.view(np.uint64), expected.view(np.uint64))
+    np.testing.assert_array_equal(compiled.view(np.uint64), expected.view(np.uint64))
+    gradient = jax.grad(lambda stress: jnp.sum(production_anchor(
+        stress, jnp.asarray(fr_i), jnp.asarray(hm_i))))(jnp.asarray(taum))
+    assert np.all(np.isfinite(np.asarray(gradient)))
+
+
+def test_nemo_step_entry_prandtl_uses_literal_pdlr_multiply_eager_and_jit():
+    """zdftke.f90:717 is ``pdlr*zav``, not ``zav/(1/pdlr)``."""
+    from legoesm.ocean.physics.vertical_mixing.tke import compute_K_from_tke
+
+    # Values drawn from the round-332 owning anchor.  Two distinguish a
+    # literal multiply from eager division by the reciprocal by one ULP.
+    l_k = jnp.asarray([float.fromhex(value) for value in (
+        "0x1.d4429efef7067p-1", "0x1.243aa8be19466p+1",
+        "0x1.1e6f8ca9710d5p+0", "0x1.50fd904d36773p+0",
+        "0x1.a1c091a3acda0p+2", "0x1.a372bac71f152p+1")])
+    cfg = TKEConfig(
+        c_k=1.0, kappa_convention="veros_sqrte",
+        prandtl_mode="nemo_ri", tke_n2_evaluation_stage="step_entry",
+        prandtl_ri_coeff=10.0, kappaM_min=0.0, kappaH_min=0.0,
+        kappaM_max=100.0, enable_kappaH_profile=False)
+    ones = jnp.ones_like(l_k)
+
+    def production_closure(length):
+        return compute_K_from_tke(
+            ones, length, cfg, N2=ones, shear_sq=ones)[1]
+
+    expected = np.float64(0.1) * np.asarray(l_k)
+    eager = np.asarray(production_closure(l_k))
+    compiled = np.asarray(jax.jit(production_closure)(l_k))
+    np.testing.assert_array_equal(eager.view(np.uint64), expected.view(np.uint64))
+    np.testing.assert_array_equal(compiled.view(np.uint64), expected.view(np.uint64))
+    gradient = np.asarray(jax.grad(lambda length: jnp.sum(
+        production_closure(length)))(l_k))
+    assert np.all(np.isfinite(gradient))
+
+
 def test_literal_raw_mixing_length_reverse_gradient_is_finite_at_zero_tke():
     """SQRT(2*en/zrn2) at en = 0 (floored to rmxl_min afterwards) must not turn
     the jitted reverse pass NaN (round 316, rung 10)."""

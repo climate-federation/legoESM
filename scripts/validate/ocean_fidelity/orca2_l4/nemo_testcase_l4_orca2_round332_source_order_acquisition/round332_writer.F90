@@ -7,10 +7,11 @@ MODULE round332_writer
    IMPLICIT NONE
    PRIVATE
    PUBLIC :: r332_vor_begin, r332_vor_add, r332_vor_done
-   PUBLIC :: r332_tke_row
+   PUBLIC :: r332_tke_row, r332_raw_postfold_v
 
    INTEGER, SAVE :: nkt=-1,nkmm=-1,nkrhs=-1,nx=0,ny=0,nz=0,nrows=0
    LOGICAL, SAVE :: active=.FALSE.,have_add=.FALSE.,have_vor=.FALSE.,written=.FALSE.
+   LOGICAL, SAVE :: raw_written=.FALSE.
    REAL(wp), ALLOCATABLE, SAVE :: vor_before(:,:,:),vor_add(:,:,:),vor_after(:,:,:),vor_mask(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: mxlm(:,:,:),mxld(:,:,:),pdlr(:,:,:)
 
@@ -117,5 +118,29 @@ CONTAINS
       CLOSE(unit)
       written=.TRUE.
    END SUBROUTINE maybe_write
+
+   SUBROUTINE r332_raw_postfold_v(kt,kstg,Kaa,pv)
+      INTEGER, INTENT(in) :: kt,kstg,Kaa
+      REAL(wp), DIMENSION(jpi,jpj,jpk), INTENT(in) :: pv
+      INTEGER :: unit,ios
+      CHARACTER(LEN=16) :: magic
+      CHARACTER(LEN=24) :: field
+      CHARACTER(LEN=96) :: filename
+      IF(kt /= nit000 .OR. kstg /= 1 .OR. raw_written) RETURN
+      IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop('round332: raw V requires fp64')
+      WRITE(filename,'("oracle_r332_raw_v_kt",I8.8,"_r",I4.4,".bin")') kt,narea-1
+      OPEN(NEWUNIT=unit,FILE=TRIM(filename),ACCESS='STREAM',FORM='UNFORMATTED', &
+         & STATUS='REPLACE',ACTION='WRITE',IOSTAT=ios)
+      IF(ios /= 0) CALL ctl_stop('round332: cannot open raw V record')
+      magic='NEMO_L4_R332RV'
+      WRITE(unit) magic,1,kt,kstg,Kaa,narea-1,jpi,jpj,jpk,STORAGE_SIZE(1._wp),1
+      field='raw_postfold_v'
+      WRITE(unit) field
+      WRITE(unit) 3,jpi,jpj,jpk,1,1,1
+      WRITE(unit) checksum3(pv)
+      WRITE(unit) pv
+      CLOSE(unit)
+      raw_written=.TRUE.
+   END SUBROUTINE r332_raw_postfold_v
 
 END MODULE round332_writer

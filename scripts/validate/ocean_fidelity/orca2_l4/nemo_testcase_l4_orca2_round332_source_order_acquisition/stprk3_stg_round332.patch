@@ -1,0 +1,16 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -34,3 +34,5 @@
+    USE prtctl         ! print control
++   USE round332_writer, ONLY : r332_raw_postfold_v
++                      ! round-332 WRITE-only raw post-fold V observer
+    USE dynzdf_round328_writer, ONLY : r328_finish
+                       ! round-328 WRITE-only post-correction boundary
+@@ -858,6 +860,7 @@
+             CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:,:       ,Kaa), 'V', -1._wp   &
+                &                       , ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp   &
+                &                       , avm_k(:,:,:)        , 'W',  1._wp, ldfull=.TRUE. ) !  lbc_lnk needed for zdf_sh2, moved here to allow tiling in zdf_phy
++            CALL r332_raw_postfold_v(kstp,kstg,Kaa,vv(:,:,:,Kaa))
+          ELSE
+             CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:,:       ,Kaa), 'V', -1._wp   &
+                &                       , ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp, ldfull=.TRUE. )

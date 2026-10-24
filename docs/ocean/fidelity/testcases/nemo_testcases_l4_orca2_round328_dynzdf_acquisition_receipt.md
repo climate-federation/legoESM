@@ -275,7 +275,7 @@ first candidates are TKE's bottom boundary/mixing-length route—NEMO's bottom
 energy assignment at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:285-293` and
 final coefficient construction at
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:706-711`, corresponding to legoESM's carried closure and final
-K construction at `tke.py:3558-3648`—or IWM's depth distribution. For the
+K construction at `tke.py:3574-3664`—or IWM's depth distribution. For the
 interface-0 family the first IWM candidate is the column-depth normalization
 `ht_0*(1+r3t)` followed by the `gdept_1d` ladder at
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfiwm.f90:234-275`; legoESM transcribes those

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Admit the passive ORCA2 round-332 source-order discriminator."""
+"""Admit the passive ORCA2 round-332 source-order and raw-V records."""
 from __future__ import annotations
 
 import argparse
@@ -17,13 +17,20 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 )
 
 MAGIC = "NEMO_L4_R332SO"
+RAW_MAGIC = "NEMO_L4_R332RV"
 HEADER_NAMES = (
     "version", "kt", "kmm", "krhs", "rank", "nx", "ny", "nz",
     "ntsi", "ntsj", "real_bits", "n_fields",
 )
 FIELDS = ("stage1_v_before", "stage1_v_add", "stage1_v_after", "stage1_v_mask",
           "tke_zmxlm", "tke_zmxld", "tke_pdlr")
-PLANTS = ("header", "field-order", "truncation", "stamp", "vor", "pdlr")
+RAW_HEADER_NAMES = (
+    "version", "kt", "kstg", "kaa", "rank", "jpi", "jpj", "jpk",
+    "real_bits", "n_fields",
+)
+RAW_FIELDS = ("raw_postfold_v",)
+PLANTS = ("header", "field-order", "truncation", "stamp", "vor", "pdlr",
+          "raw-header", "raw-truncation", "raw-checksum")
 OBSERVER_UNITS = ("dynzdf", "stprk3_stg", "dynvor", "zdfphy", "zdftke")
 WRITER_UNITS = ("dynzdf_round328_writer", "tke_round331_writer",
                 "round332_writer")
@@ -34,6 +41,10 @@ require = r331.require
 
 def record_name(rank: int) -> str:
     return f"oracle_r332_source_kt00000001_r{rank:04d}.bin"
+
+
+def raw_record_name(rank: int) -> str:
+    return f"oracle_r332_raw_v_kt00000001_r{rank:04d}.bin"
 
 
 def read_record(path: Path, plant: str | None = None) -> dict:
@@ -71,6 +82,45 @@ def read_record(path: Path, plant: str | None = None) -> dict:
     require(stream.read(1) == b"", "trailing bytes")
     observed = tuple(reversed(order)) if plant == "field-order" else tuple(order)
     require(observed == FIELDS, "field order differs from source order")
+    return {"header": header, "fields": fields, "checksums": checksums,
+            "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def read_raw_record(path: Path, plant: str | None = None) -> dict:
+    raw = path.read_bytes()
+    if plant == "raw-truncation":
+        raw = raw[:-8]
+    stream = io.BytesIO(raw)
+    magic = r331._take(stream, 16, "raw-V magic").decode("ascii").rstrip()
+    values = struct.unpack(
+        f"={len(RAW_HEADER_NAMES)}i",
+        r331._take(stream, 4 * len(RAW_HEADER_NAMES), "raw-V header"))
+    header = dict(zip(RAW_HEADER_NAMES, values, strict=True))
+    if plant == "raw-header":
+        header["kstg"] = 2
+    require(magic == RAW_MAGIC, f"raw-V magic {magic!r} != {RAW_MAGIC!r}")
+    require((header["version"], header["kt"], header["kstg"], header["kaa"],
+             header["real_bits"], header["n_fields"]) ==
+            (1, 1, 1, 2, 64, len(RAW_FIELDS)), "wrong raw-V record header")
+    fields, checksums, order = {}, {}, []
+    shape = (header["jpi"], header["jpj"], header["jpk"])
+    for index in range(header["n_fields"]):
+        name = r331._take(stream, 24, f"raw-V field {index} name").decode("ascii").rstrip()
+        rank, n1, n2, n3, i0, j0, k0 = struct.unpack(
+            "=7i", r331._take(stream, 28, f"{name} metadata"))
+        require((rank, n1, n2, n3, i0, j0, k0) == (3, *shape, 1, 1, 1),
+                f"{name}: raw-V field lacks exact jpi,jpj,jpk extents")
+        checksum, = struct.unpack("=Q", r331._take(stream, 8, f"{name} checksum"))
+        payload = r331._take(stream, n1 * n2 * n3 * 8, f"{name} payload")
+        array = np.frombuffer(payload, dtype="=f8").copy().reshape(shape, order="F")
+        require(bool(np.isfinite(array).all()), f"{name}: non-finite payload")
+        fields[name], checksums[name] = array, checksum
+        order.append(name)
+    require(stream.read(1) == b"", "raw-V record trailing bytes")
+    require(tuple(order) == RAW_FIELDS, "raw-V field order differs from source order")
+    if plant == "raw-checksum":
+        fields[RAW_FIELDS[0]].flat[0] = np.nextafter(
+            fields[RAW_FIELDS[0]].flat[0], np.inf)
     return {"header": header, "fields": fields, "checksums": checksums,
             "sha256": hashlib.sha256(raw).hexdigest()}
 
@@ -136,6 +186,7 @@ def run_gate(root: Path, zdf_reference_dir: Path, expect_commit: str,
     # The extension must preserve and re-admit every round-331 boundary.
     prior = r331.run_gate(root, zdf_reference_dir, expect_commit)
     records = {}
+    raw_records = {}
     wet_masks = {}
     for rank in (0, 1):
         record = read_record(
@@ -143,25 +194,44 @@ def run_gate(root: Path, zdf_reference_dir: Path, expect_commit: str,
         require(record["header"]["rank"] == rank, "rank tag moved")
         r331._verify_checksums(record)
         records[rank] = record
+        raw_record = read_raw_record(
+            root / raw_record_name(rank),
+            plant=(plant if rank == 0 and plant is not None
+                   and plant.startswith("raw-") else None))
+        require(raw_record["header"]["rank"] == rank, "raw-V rank tag moved")
+        r331._verify_checksums(raw_record)
+        raw_records[rank] = raw_record
         prior_record = r331.read_record(root / r331.record_name(rank))
         wet_masks[rank] = prior_record["fields"]["tke_wmask"] != 0.0
     if plant in ("vor", "pdlr"):
         _plant(records[0], plant, wet_masks[0])
     source_order_counts = {}
+    raw_sign_census = {}
     for rank, record in records.items():
         source_order_counts[str(rank)] = _verify_semantics(record, wet_masks[rank])
+        raw_v = raw_records[rank]["fields"][RAW_FIELDS[0]]
+        zeros = raw_v == 0.0
+        raw_sign_census[str(rank)] = {
+            "negative_zero": int(np.count_nonzero(zeros & np.signbit(raw_v))),
+            "positive_zero": int(np.count_nonzero(zeros & ~np.signbit(raw_v))),
+            "nonzero": int(np.count_nonzero(~zeros)),
+        }
         h = record["header"]
         prior_record = r331.read_record(root / r331.record_name(h["rank"]))
         require((h["nx"], h["ny"], h["nz"]) == (
             prior_record["header"]["nx"], prior_record["header"]["ny"],
             prior_record["header"]["nz"] + 1), "round-331/332 extents differ")
     return {
-        "format": "nemo-testcase-l4-orca2-round332-source-order-v1",
+        "format": "nemo-testcase-l4-orca2-round332-source-order-raw-v-v2",
         "status": "PASS_R332_SOURCE_ORDER_ADMISSION",
         "producer_commit": produced,
         "round331_status": prior["status"],
         "source_order_counts": source_order_counts,
+        "raw_sign_census": raw_sign_census,
         "records": {record_name(rank): records[rank]["sha256"] for rank in records},
+        "raw_records": {
+            raw_record_name(rank): raw_records[rank]["sha256"]
+            for rank in raw_records},
     }
 
 

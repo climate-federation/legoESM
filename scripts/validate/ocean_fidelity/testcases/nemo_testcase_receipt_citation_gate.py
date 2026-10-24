@@ -131,6 +131,8 @@ FILES = {
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynspg_ts.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90": (
@@ -1803,7 +1805,7 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:708-719': [
         ('DO jk =  1,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)', 2),
         'p_avt(ji,jj,jk)   = MAX( p_pdlr(ji,jj,jk) * p_avt(ji,jj,jk), avtb_2d(ji,jj) * avtb(jk) ) * wmask(ji,jj,jk)', 12],
-    'tke.py:2262-2287': [
+    'tke.py:2267-2292': [
         'kappa_convention = getattr(cfg, "kappa_convention", "gaspar_sqrt2e")',
         'K_M = jnp.minimum(cfg.kappaM_max, K_M)', 26],
     # ORCA2 round 332 resume 5: admitted source-order walk.
@@ -1822,9 +1824,34 @@ CITATION_MAP = {
     'tke.py:904-1022': [
         'l_w = jnp.concatenate([l_sfc[..., None], l_int], axis=-1)  # (..., nlev)',
         'l_eps = jnp.maximum(jnp.sqrt(lup * ldn), mxl_min)', 119],
-    'tke.py:2262-2313': [
+    'tke.py:2267-2329': [
         'kappa_convention = getattr(cfg, "kappa_convention", "gaspar_sqrt2e")',
-        'K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)', 52],
+        'K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr_or_pdlr)', 63],
+    # ORCA2 round 332 resume 7: corrected dump/fold walk and TKE owners.
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynspg_ts.f90:1574-1606': [
+        'zfield(:,:,:) = 0._wp',
+        'IF( llwet ) zfield(ji,jj,jk) = pfield(ji,jj,jk)', 33],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3.f90:343-346': [
+        'WRITE(iunit) magic, 1, kstp, kstage, klevel, jpi, jpj, jpk, jpts, STORAGE_SIZE(1._wp)',
+        "& l4_canon_2d(ssh(:,:,klevel),'T')", 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:791-793': [
+        ("CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:,:       ,Kaa), 'V', -1._wp", 2),
+        "&                       , avm_k(:,:,:)        , 'W',  1._wp, ldfull=.TRUE. )", 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:621-637': [
+        'CASE( 2 )                      ! scaling with mean sea-ice thickness',
+        'zmxlm(ji,1) = MAX( rn_mxl0, zmxlm(ji,1) )', 17],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:717-720': [
+        'IF( nn_pdl == 1 ) THEN          !* Prandtl number case: update avt',
+        'END DO   ;   END DO', 4],
+    'tke.py:262-268': [
+        'zraug = _NEMO_MXL0_VKARMN * _NEMO_MXL0_LENGTH_SCALE / (rho_0 * g)',
+        'jnp.asarray(_mxl0_anchor_floor(cfg), dtype=taum.dtype), raw)', 7],
+    'tke.py:4220-4227': [
+        'def _nemo_mxlice2_anchor_raw(fr_i, hm_i, taum, zraug, surface_tmask):',
+        '* jnp.asarray(surface_tmask, dtype=taum.dtype))', 8],
+    'tke.py:2306-2329': [
+        '_nemo_literal_pdlr = (',
+        'K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr_or_pdlr)', 24],
     # ORCA2 round 331: remaining TKE input and source-order localisation.
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3.f90:183':
         'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )',
@@ -2006,9 +2033,9 @@ CITATION_MAP = {
         ('u_now=state.u.data, v_now=state.v.data,', 7),
     'nemo_testcase_recipe.py:2144': [('2920,  # DECISION 142 (user, 2026-10-20): one year, deliberate', 1)],
     # round 319 review: the background diffusivity floor against NEMO's avt statement
-    'tke.py:2313': 'K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)',
-    'tke.py:2169': 'pdlr = jnp.maximum(0.1, ri_cri / jnp.maximum(ri_cri, zri))',
-    'tke.py:2170': 'return 1.0 / pdlr',
+    'tke.py:2329': 'K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr_or_pdlr)',
+    'tke.py:2174': 'pdlr = jnp.maximum(0.1, ri_cri / jnp.maximum(ri_cri, zri))',
+    'tke.py:2175': 'return pdlr if return_pdlr else 1.0 / pdlr',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:405':
         'p_pdlr(ji,jj,jk) = MAX(  0.1_wp,  ri_cri / MAX( ri_cri , zri )  )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:708': 'zav   = rn_ediff * zmxlm(ji,jk) * zsqen',
@@ -2035,7 +2062,7 @@ CITATION_MAP = {
         'avm_product / lower_denominator) * interface_wet', 13],
     'internal_wave_mixing.py:444': 'n_pos = safe_sqrt(n2_pos)',
     'tke.py:1082': 'safe_sqrt((jnp.asarray(2.0, e.dtype) * e) / zrn2),',
-    'tke.py:3654': 'dissl_new = safe_sqrt(tke_curr) / l_eps_final',
+    'tke.py:3670': 'dissl_new = safe_sqrt(tke_curr) / l_eps_final',
     'shortwave_penetration.py:561': '/ jnp.where((jk <= nkB) & (ze3t != 0.0), ze3t, c(1.0)))',
     # round 314 namelist audit
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:21': 'nn_itend    =    5840',
@@ -4705,7 +4732,7 @@ CITATION_MAP = {
     'internal_wave_mixing.py:435-486': [
         'hz = r(ht_0 * stretch)',
         'avm = r(avm + zav_wave)', 52],
-    'tke.py:3558-3648': [
+    'tke.py:3574-3664': [
         'for _ in range(max(1, int(n_iterations))):',
         ('prandtl_K_M=(preclosure_K_M if _carried_coeffs else None))', 2), 91],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:285-293': [

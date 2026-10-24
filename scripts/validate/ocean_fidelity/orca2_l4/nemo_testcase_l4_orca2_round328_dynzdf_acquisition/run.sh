@@ -43,9 +43,9 @@ if [[ "$ACQ_TARGET" == tke331 ]]; then
   DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_tke331_kt1_np2
 fi
 if [[ "$ACQ_TARGET" == tke332 ]]; then
-  TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R332SO
+  TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R332RAW
   EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round332/acquisition
-  DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_source_order_kt1_np2
+  DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_raw_postfold_v_kt1_np2
 fi
 TARGET_RUN=$DEFAULT_TARGET_RUN
 if [[ "$MODE" == --admit-existing && -n ${R328_EXISTING_RUN:-} ]]; then
@@ -56,7 +56,7 @@ if [[ "$MODE" == --admit-existing && -n ${R328_EXISTING_RUN:-} ]]; then
     expected_retained="$EVIDENCE/refused/orca1ice_tke331_kt1_np2_admission_refused_20261024T103431Z_331969"
   elif [[ "$ACQ_TARGET" == tke332 ]]; then
     [[ $(dirname "$TARGET_RUN") == "$EVIDENCE/refused" && \
-       $(basename "$TARGET_RUN") == orca1ice_source_order_kt1_np2_* ]] \
+       $(basename "$TARGET_RUN") == orca1ice_raw_postfold_v_kt1_np2_* ]] \
       || { printf 'REFUSE: retained round-332 run is outside its refused directory\n' >&2; exit 64; }
     expected_retained=$TARGET_RUN
   else
@@ -135,6 +135,7 @@ readonly TKE_PREREG=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_rou
 readonly R332_DIR=$here/../nemo_testcase_l4_orca2_round332_source_order_acquisition
 readonly R332_DYNVOR_PATCH=$R332_DIR/dynvor_round332.patch
 readonly R332_TKE_PATCH=$R332_DIR/zdftke_round332.patch
+readonly R332_STAGE_PATCH=$R332_DIR/stprk3_stg_round332.patch
 readonly R332_WRITER=$R332_DIR/round332_writer.F90
 readonly R332_FIXTURE=$R332_DIR/round332_layout_fixture.F90
 readonly R332_VOR_INTERFACE_FIXTURE=$R332_DIR/round332_vor_interface_fixture.F90
@@ -227,6 +228,23 @@ check_r332_tke_landing() {
     END { exit !(count==1 && after_select && viscosity_line==call_line+3) }
   ' "$1"
 }
+check_r332_raw_landing() {
+  awk '
+    /CALL lbc_lnk.*uu\(:,:,:,       Kaa\)/ { in_lbc=1; has_avm=0 }
+    in_lbc && /avm_k\(:,:,:\)/ { has_avm=1 }
+    in_lbc && /ldfull=.TRUE./ {
+      if (has_avm) { target++; lbc_end=NR; state=1 }
+      in_lbc=0
+      next
+    }
+    state==1 {
+      if (/CALL r332_raw_postfold_v\(kstp,kstg,Kaa,vv\(:,:,:,Kaa\)\)/) {
+        raw++; if (NR != lbc_end+1) bad=1; state=2
+      } else bad=1
+    }
+    END { exit !(target==1 && raw==1 && state==2 && !bad) }
+  ' "$1"
+}
 free_ok() {
   local p=$1 need=${2:-8388608}
   while [[ ! -e "$p" ]]; do p=$(dirname "$p"); done
@@ -234,6 +252,22 @@ free_ok() {
 }
 check_absent() { [[ ! -e "$1" ]]; }
 mem_ok() { (( $(free -g | awk '$1 == "Mem:" {print $7}') >= $1 )); }
+compile_record_object() {
+  "$FC" -c -fdefault-real-8 -O3 -funroll-all-loops -fcray-pointer \
+    -ffree-line-length-none -fallow-argument-mismatch -fno-tree-vectorize \
+    -I "$scratch/mod" -J "$scratch/mod" "$1" -o "$2"
+}
+fp_disassembly_signature() {
+  objdump -drwC --no-show-raw-insn "$1" \
+    | sed -nE 's/^[[:space:]]*[0-9a-f]+:[[:space:]]+((f(add|sub|mul|div|sqrt)[a-z0-9]*|add(s|p)[sd]|sub(s|p)[sd]|mul(s|p)[sd]|div(s|p)[sd]|sqrt(s|p)[sd]|min(s|p)[sd]|max(s|p)[sd])).*/\1/p' \
+    | sort | uniq -c >"$2"
+}
+compare_fp_disassembly() {
+  local left=$1 right=$2 label=$3
+  fp_disassembly_signature "$left" "$scratch/${label}.left.fp"
+  fp_disassembly_signature "$right" "$scratch/${label}.right.fp"
+  cmp -s "$scratch/${label}.left.fp" "$scratch/${label}.right.fp"
+}
 fpp() {
   ( cd "$(dirname "$1")" && cpp -Dkey_nosignedzero -P -traditional $FPP_KEYS \
       -I "$SOURCE_ROOT/WORK" -I "$SOURCE_ROOT/BLD/inc" "$(basename "$1")" -o "$2" )
@@ -241,7 +275,7 @@ fpp() {
 same_program() {
   if [[ "$ACQ_TARGET" == tke332 ]]; then
     "$PY" "$R332_GATE" --same-program "$1" --reference-bld "$SOURCE_ROOT/BLD" \
-      --observer-patch "dynzdf=$PATCH" --observer-patch "stprk3_stg=$STAGE_PATCH" \
+      --observer-patch "dynzdf=$PATCH" --observer-patch "stprk3_stg=$scratch/stage_combined.patch" \
       --observer-patch "dynvor=$R332_DYNVOR_PATCH" \
       --observer-patch "zdfphy=$TKE_PHY_PATCH" --observer-patch "zdftke=$scratch/tke_combined.patch" \
       --new-cfg "$TARGET_CFG" --reference-cfg "$SOURCE_CFG" ${2:+--output "$2"}
@@ -373,7 +407,8 @@ if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
   done
 fi
 if [[ "$ACQ_TARGET" == tke332 ]]; then
-  for path in "$R332_DYNVOR_PATCH" "$R332_TKE_PATCH" "$R332_WRITER" "$R332_FIXTURE" \
+  for path in "$R332_DYNVOR_PATCH" "$R332_TKE_PATCH" "$R332_STAGE_PATCH" \
+    "$R332_WRITER" "$R332_FIXTURE" \
     "$R332_VOR_INTERFACE_FIXTURE" \
     "$R332_GATE" "$R332_TEST" "$SOURCE_DYNVOR" \
     "$SOURCE_ROOT/BLD/ppsrc/nemo/dynvor.f90"; do
@@ -417,7 +452,7 @@ if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
   patch_files+=("$TKE_PHY_PATCH" "$TKE_PATCH")
 fi
 if [[ "$ACQ_TARGET" == tke332 ]]; then
-  patch_files+=("$R332_DYNVOR_PATCH" "$R332_TKE_PATCH")
+  patch_files+=("$R332_DYNVOR_PATCH" "$R332_TKE_PATCH" "$R332_STAGE_PATCH")
 fi
 for patch_file in "${patch_files[@]}"; do
   check_no_removed_lines "$patch_file" || refuse "observer patch removes a source line: $patch_file"
@@ -518,14 +553,23 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
   cp "$R332_WRITER" "$dry/round332_writer.F90"
   patch -s --fuzz=0 -p0 -d "$dry" <"$R332_DYNVOR_PATCH"
   patch -s --fuzz=0 -p0 -d "$dry" <"$R332_TKE_PATCH"
+  patch -s --fuzz=0 -p0 -d "$dry" <"$R332_STAGE_PATCH"
   if diff -u --label zdftke.F90 --label zdftke.F90 \
       "$SOURCE_ZDFTKE" "$dry/zdftke.F90" >"$scratch/tke_combined.patch"; then
     refuse 'round-332 combined TKE observer patch is empty'
   else
     [[ $? -eq 1 ]] || refuse 'could not construct combined TKE observer patch'
   fi
+  if diff -u --label stprk3_stg.F90 --label stprk3_stg.F90 \
+      "$SOURCE_STAGE" "$dry/stprk3_stg.F90" >"$scratch/stage_combined.patch"; then
+    refuse 'round-332 combined stage observer patch is empty'
+  else
+    [[ $? -eq 1 ]] || refuse 'could not construct combined stage observer patch'
+  fi
   check_r332_tke_landing "$dry/zdftke.F90" \
     || refuse 'round-332 TKE observer did not land between END SELECT and viscosity loop'
+  check_r332_raw_landing "$dry/stprk3_stg.F90" \
+    || refuse 'round-332 raw V observer is not immediately after the l_zdfsh2 fold'
   awk '
     /CALL r332_tke_row\(Kbb,Kmm,jj,zmxlm/ { skip=1; next }
     skip { skip=0; next }
@@ -537,6 +581,13 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
   ' "$dry/zdftke.F90" >"$plants/zdftke.misplaced.F90"
   plant_must_refuse tke-observer-misplaced \
     check_r332_tke_landing "$plants/zdftke.misplaced.F90"
+  awk '
+    /CALL r332_raw_postfold_v/ { saved=$0; next }
+    /^[[:space:]]*ELSE[[:space:]]*$/ && saved != "" { print; print saved; saved=""; next }
+    { print }
+  ' "$dry/stprk3_stg.F90" >"$plants/stprk3_stg.raw-misplaced.F90"
+  plant_must_refuse raw-observer-misplaced \
+    check_r332_raw_landing "$plants/stprk3_stg.raw-misplaced.F90"
 fi
 for unit in dynzdf stprk3_stg; do
   check_patched_call_predecessors "$dry/$unit.F90" \
@@ -577,6 +628,8 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
     || refuse 'round-332 dynvor observer call census changed'
   [[ $(grep -Fc 'CALL r332_tke_row' "$dry/zdftke.F90") -eq 1 ]] \
     || refuse 'round-332 TKE observer call census changed'
+  [[ $(grep -Fc 'CALL r332_raw_postfold_v' "$dry/stprk3_stg.F90") -eq 1 ]] \
+    || refuse 'round-332 raw V observer call census changed'
 fi
 cp "$SOURCE_ROOT"/BLD/inc/*.mod "$scratch/mod/"
 syntax_units=(dynzdf_round328_writer dynzdf stprk3_stg)
@@ -597,6 +650,27 @@ for unit in "${syntax_units[@]}"; do
   "$FC" -fsyntax-only -ffree-line-length-none -I "$scratch/mod" -J "$scratch/mod" "$scratch/$unit.f90"
   printf 'SYNTAX_PROOF_PASS %s.f90\n' "$unit"
 done
+
+if [[ "$ACQ_TARGET" == tke332 ]]; then
+  command -v objdump >/dev/null || refuse 'no objdump for arithmetic passivity proof'
+  sed -e '/USE round332_writer, ONLY : r332_raw_postfold_v/d' \
+      -e '/round-332 WRITE-only raw post-fold V observer/d' \
+      -e '/CALL r332_raw_postfold_v/d' "$dry/stprk3_stg.F90" >"$scratch/stage_arithmetic_base.F90"
+  fpp "$scratch/stage_arithmetic_base.F90" "$scratch/stage_arithmetic_base.f90"
+  compile_record_object "$scratch/stage_arithmetic_base.f90" "$scratch/stage_arithmetic_base.o"
+  compile_record_object "$scratch/stprk3_stg.f90" "$scratch/stage_arithmetic_observed.o"
+  compare_fp_disassembly "$scratch/stage_arithmetic_base.o" \
+    "$scratch/stage_arithmetic_observed.o" stage \
+    || refuse 'stage observer changed the normalized floating-point instruction census'
+  printf 'R332_NORMALIZED_OBJECT_DISASSEMBLY_PASS stage_fp=%s\n' \
+    "$(awk '{n+=$1} END {print n+0}' "$scratch/stage.left.fp")"
+  sed '0,/r1_2 \*/s//(r1_2 + r1_2) */' "$scratch/stage_arithmetic_base.F90" \
+    >"$plants/stage.arithmetic.F90"
+  fpp "$plants/stage.arithmetic.F90" "$scratch/stage_arithmetic_plant.f90"
+  compile_record_object "$scratch/stage_arithmetic_plant.f90" "$scratch/stage_arithmetic_plant.o"
+  plant_must_refuse arithmetic-disassembly compare_fp_disassembly \
+    "$scratch/stage_arithmetic_base.o" "$scratch/stage_arithmetic_plant.o" stage-plant
+fi
 
 # Same-program preflight: round 326 plus both observer insertions, including
 # stprk3_stg; a non-observer source plant must refuse.
@@ -668,7 +742,7 @@ admit() {
     done
     "$PY" "$GATE" --record-dir "$TARGET_RUN" --expect-commit "$EXPECTED_PRODUCER" \
       --output "$TARGET_RUN/round332_dynzdf_readmission.json"
-    for plant in header field-order truncation stamp vor pdlr; do
+    for plant in header field-order truncation stamp vor pdlr raw-header raw-truncation raw-checksum; do
       if "$PY" "$R332_GATE" --record-dir "$TARGET_RUN" \
         --zdf-reference-dir "$ADMITTED_ZDFPHY_RUN" --expect-commit "$EXPECTED_PRODUCER" \
         --plant "$plant" >"$TARGET_RUN/round332_source_${plant}_plant.log" 2>&1; then
@@ -681,7 +755,7 @@ admit() {
       --zdf-reference-dir "$ADMITTED_ZDFPHY_RUN" --expect-commit "$EXPECTED_PRODUCER" \
       --output "$TARGET_RUN/round332_source_order_admission.json"
     ( cd "$TARGET_RUN" && sha256sum oracle_dynzdf_*.bin oracle_tke331_*.bin \
-        oracle_r332_source_*.bin round332_dynzdf_readmission.json \
+        oracle_r332_source_*.bin oracle_r332_raw_v_*.bin round332_dynzdf_readmission.json \
         round332_source_order_admission.json round332_source_*_plant.log \
         >round332_source_order_outputs.sha256 )
   elif [[ "$ACQ_TARGET" == tke331 ]]; then
@@ -779,7 +853,8 @@ if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
     >>"$manifest/toolchain.sha256"
 fi
 if [[ "$ACQ_TARGET" == tke332 ]]; then
-  sha256sum "$R332_DYNVOR_PATCH" "$R332_TKE_PATCH" "$R332_WRITER" "$R332_FIXTURE" \
+  sha256sum "$R332_DYNVOR_PATCH" "$R332_TKE_PATCH" "$R332_STAGE_PATCH" \
+    "$R332_WRITER" "$R332_FIXTURE" \
     "$R332_VOR_INTERFACE_FIXTURE" "$R332_GATE" "$R332_TEST" "$SOURCE_DYNVOR" \
     >>"$manifest/toolchain.sha256"
 fi
@@ -819,8 +894,11 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
   cp "$R332_WRITER" "$TARGET_ROOT/MY_SRC/round332_writer.F90"
   patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$R332_DYNVOR_PATCH"
   patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$R332_TKE_PATCH"
+  patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$R332_STAGE_PATCH"
   check_r332_tke_landing "$TARGET_ROOT/MY_SRC/zdftke.F90" \
     || refuse 'built round-332 TKE observer did not land at the intended statement'
+  check_r332_raw_landing "$TARGET_ROOT/MY_SRC/stprk3_stg.F90" \
+    || refuse 'built round-332 raw V observer did not land at the intended statement'
 fi
 touch "$TARGET_ROOT/MY_SRC/"*.F90
 ./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
@@ -838,6 +916,8 @@ fi
 if [[ "$ACQ_TARGET" == tke332 ]]; then
   grep 'NEMO_L4_R332SO' "$TARGET_ROOT/BLD/ppsrc/nemo/round332_writer.f90" >/dev/null \
     || refuse 'compiled round-332 source-order writer is absent'
+  grep 'NEMO_L4_R332RV' "$TARGET_ROOT/BLD/ppsrc/nemo/round332_writer.f90" >/dev/null \
+    || refuse 'compiled round-332 raw V writer is absent'
 fi
 diff <(grep -v "^$TARGET_CFG " "$scratch/work_cfgs.before") \
      <(grep -v "^$TARGET_CFG " "$NEMO_ROOT/cfgs/work_cfgs.txt") >/dev/null \

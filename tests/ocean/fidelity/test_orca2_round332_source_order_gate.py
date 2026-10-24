@@ -44,7 +44,7 @@ def record_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     for command in commands:
         *sources, output = command
         subprocess.run([
-            str(GFORTRAN), "-ffree-line-length-none", "-I", str(root),
+            str(GFORTRAN), "-fcheck=bounds", "-ffree-line-length-none", "-I", str(root),
             "-J", str(root), str(STUBS), *(str(path) for path in sources),
             "-o", str(root / output),
         ], check=True)
@@ -61,15 +61,22 @@ def test_real_writer_layout_and_clean_admission(record_dir: Path) -> None:
     result = gate.run_gate(record_dir, record_dir, "a" * 40)
     assert result["status"] == "PASS_R332_SOURCE_ORDER_ADMISSION"
     record = gate.read_record(record_dir / gate.record_name(0))
+    raw = gate.read_raw_record(record_dir / gate.raw_record_name(0))
     assert tuple(record["fields"]) == gate.FIELDS
+    assert tuple(raw["fields"]) == gate.RAW_FIELDS
     assert record["fields"]["tke_pdlr"].shape == (3, 2, 4)
+    assert raw["fields"]["raw_postfold_v"].shape == (5, 4, 5)
     assert set(result["source_order_counts"]) == {"0", "1"}
+    assert set(result["raw_sign_census"]) == {"0", "1"}
 
 
 def test_fixture_rank_payloads_are_distinct(record_dir: Path) -> None:
     rank0 = gate.read_record(record_dir / gate.record_name(0))["fields"]
     rank1 = gate.read_record(record_dir / gate.record_name(1))["fields"]
     assert not np.array_equal(rank0["stage1_v_after"], rank1["stage1_v_after"])
+    raw0 = gate.read_raw_record(record_dir / gate.raw_record_name(0))["fields"]
+    raw1 = gate.read_raw_record(record_dir / gate.raw_record_name(1))["fields"]
+    assert not np.array_equal(raw0["raw_postfold_v"], raw1["raw_postfold_v"])
 
 
 def test_fixture_preserves_dry_negative_zero_sign_bits(record_dir: Path) -> None:
@@ -77,6 +84,10 @@ def test_fixture_preserves_dry_negative_zero_sign_bits(record_dir: Path) -> None
     for name in ("tke_zmxlm", "tke_zmxld"):
         assert np.all(fields[name][0, 0, :] == 0.0)
         assert np.all(np.signbit(fields[name][0, 0, :]))
+    raw = gate.read_raw_record(record_dir / gate.raw_record_name(0))["fields"][
+        "raw_postfold_v"]
+    assert raw[0, 0, 0] == 0.0 and not np.signbit(raw[0, 0, 0])
+    assert raw[2, 0, 0] == 0.0 and np.signbit(raw[2, 0, 0])
 
 
 def test_fixture_preserves_negative_zero_vorticity_add(record_dir: Path) -> None:
@@ -121,6 +132,9 @@ PLANT_REASONS = {
     "stamp": "producer commit",
     "vor": "vorticity source-order addition does not replay bitwise",
     "pdlr": "wet inverse Prandtl ratio is outside",
+    "raw-header": "wrong raw-V record header",
+    "raw-truncation": "truncated",
+    "raw-checksum": "payload checksum differs",
 }
 
 
@@ -138,15 +152,18 @@ def test_semantic_plants_are_one_ulp_and_wet(
     record = gate.read_record(record_dir / gate.record_name(0))
     prior = gate.r331.read_record(record_dir / gate.r331.record_name(0))
     tke_wet = prior["fields"]["tke_wmask"] != 0.0
-    wet = (record["fields"]["stage1_v_mask"] != 0.0
-           if plant == "vor" else tke_wet)
-    before = record["fields"][field].copy()
+    if plant == "vor":
+        wet = record["fields"]["stage1_v_mask"] != 0.0
+    elif plant == "pdlr":
+        wet = tke_wet
+    target = record["fields"][field]
+    before = target.copy()
     gate._plant(record, plant, tke_wet)
-    changed = record["fields"][field].view(np.uint64) != before.view(np.uint64)
+    changed = target.view(np.uint64) != before.view(np.uint64)
     assert np.count_nonzero(changed) == 1
     assert bool(wet[changed][0])
     old_value = before[changed][0]
-    new_value = record["fields"][field][changed][0]
+    new_value = target[changed][0]
     assert new_value == np.nextafter(old_value, np.inf)
 
 
@@ -168,7 +185,8 @@ def test_vorticity_counts_use_vmask_not_tke_column_mask(record_dir: Path) -> Non
     assert counts["wet_changed_bits"] == 0
 
 
-@pytest.mark.parametrize("plant", ["vor", "pdlr"])
+@pytest.mark.parametrize("plant", ["vor", "pdlr", "raw-header",
+                                    "raw-truncation", "raw-checksum"])
 def test_cli_semantic_plants_reach_refuse(record_dir: Path, plant: str) -> None:
     result = subprocess.run([
         sys.executable, "-m",
@@ -184,7 +202,8 @@ def test_cli_semantic_plants_reach_refuse(record_dir: Path, plant: str) -> None:
 def test_patches_are_context_anchored_and_target_owning_statements() -> None:
     dynvor = (ACQ / "dynvor_round332.patch").read_text()
     tke = (ACQ / "zdftke_round332.patch").read_text()
-    for patch in (dynvor, tke):
+    stage = (ACQ / "stprk3_stg_round332.patch").read_text()
+    for patch in (dynvor, tke, stage):
         assert not re.search(r"^@@ -\d+,0 ", patch, re.MULTILINE)
     assert not any(line.startswith("-") and not line.startswith("---")
                        for line in patch.splitlines())
@@ -197,12 +216,19 @@ def test_patches_are_context_anchored_and_target_owning_statements() -> None:
     assert "END SELECT" in tke
     assert "Vertical eddy viscosity and diffusivity" in tke
     assert "p_pdlr(ntsi:ntei,jj,2:jpkm1)" in tke
+    assert "CALL r332_tke_arms" not in tke
+    assert stage.count("CALL r332_raw_postfold_v") == 1
+    assert stage.index("CALL lbc_lnk") < stage.index("CALL r332_raw_postfold_v")
 
 
 def test_tke_landing_check_and_misplacement_plant_are_preflighted() -> None:
     text = ACQ_RUN.read_text()
     assert "check_r332_tke_landing" in text
     assert "tke-observer-misplaced" in text
+    assert "check_r332_raw_landing" in text
+    assert "raw-observer-misplaced" in text
+    assert "R332_NORMALIZED_OBJECT_DISASSEMBLY_PASS" in text
+    assert "arithmetic-disassembly" in text
 
 
 def test_tke332_retained_admission_uses_its_manifest_commit_and_binary_pins() -> None:

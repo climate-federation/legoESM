@@ -262,8 +262,8 @@ def _mxl0_surface_anchor(
         zraug = _NEMO_MXL0_VKARMN * _NEMO_MXL0_LENGTH_SCALE / (rho_0 * g)
         # CASE( 2 ): zmxlm(1) = ((1-fr_i)*zraug*taum + fr_i*hm_i*2)*tmask(1),
         # then MAX(rn_mxl0, zmxlm(1)) (zdftke.f90:620-623, :635-637)
-        raw = (((1.0 - fr_i) * zraug * taum + fr_i * hm_i * 2.0)
-               * jnp.asarray(surface_tmask, dtype=taum.dtype))
+        raw = _nemo_mxlice2_anchor_raw(
+            fr_i, hm_i, taum, zraug, surface_tmask)
         return jnp.maximum(
             jnp.asarray(_mxl0_anchor_floor(cfg), dtype=taum.dtype), raw)
     if not cfg.nemo_mxl0_surface_tmask:
@@ -2038,6 +2038,8 @@ def _prandtl_number(
     kappaM: jnp.ndarray,
     cfg: TKEConfig,
     p_sh2_override: jnp.ndarray | None = None,
+    *,
+    return_pdlr: bool = False,
 ) -> jnp.ndarray:
     r"""Turbulent Prandtl number for the K_H = K_M / Pr relation.
 
@@ -2097,6 +2099,9 @@ def _prandtl_number(
 
     Differentiable; the ``min``/``max`` clamps are sub-gradient-safe and
     the ``6.6`` / ``1`` / ``10`` are Veros's fixed scheme constants.
+    ``return_pdlr=True`` is the NEMO step-entry source form used by
+    :func:`compute_K_from_tke`; the default reciprocal preserves every other
+    caller's established Prandtl-number API.
     """
     if cfg.prandtl_mode == "constant":
         return jnp.full_like(kappaM, cfg.Prandtl_tke0)
@@ -2167,7 +2172,7 @@ def _prandtl_number(
         if cfg.tke_n2_evaluation_stage == "step_entry":
             ri_cri = jnp.asarray(1.0 / cfg.prandtl_ri_coeff, dtype=N2.dtype)
             pdlr = jnp.maximum(0.1, ri_cri / jnp.maximum(ri_cri, zri))  # coeff-ok: NEMO zdfric pdlr floor
-            return 1.0 / pdlr
+            return pdlr if return_pdlr else 1.0 / pdlr
         return jnp.maximum(
             1.0, jnp.minimum(10.0, cfg.prandtl_ri_coeff * zri))
     raise ValueError(
@@ -2298,11 +2303,16 @@ def compute_K_from_tke(
                 f"got {_K_M_pr.shape} vs {K_M.shape}.")
         _p_sh2_pr = (None if p_sh2_override is None
                      else p_sh2_override(_K_M_pr))
-        Pr = _prandtl_number(_N2_pr, shear_sq, _K_M_pr, cfg, _p_sh2_pr)
+        _nemo_literal_pdlr = (
+            cfg.prandtl_mode == "nemo_ri"
+            and cfg.tke_n2_evaluation_stage == "step_entry")
+        Pr_or_pdlr = _prandtl_number(
+            _N2_pr, shear_sq, _K_M_pr, cfg, _p_sh2_pr,
+            return_pdlr=_nemo_literal_pdlr)
         # Tracer floor is INDEPENDENT of the momentum floor (NEMO zdftke:
         # avt = max(avtb, pdlr*zav), avm = max(avmb, zav), both from the raw K).
-        # Divide the ceilinged-but-UN-kappaM_min-floored K_M by Pr, then floor at
-        # kappaH_min — else the momentum floor kappaM_min leaks into the tracer
+        # Apply the Prandtl ratio to the ceilinged-but-UN-kappaM_min-floored
+        # K_M, then floor at kappaH_min — else the momentum floor kappaM_min leaks into the tracer
         # floor (K_H -> kappaM_min/Pr > kappaH_min) in quiescent cells where the
         # raw K < kappaM_min (the abyss). Only those cells change; active/interior
         # cells (raw K >= kappaM_min) are unaffected, so the verified avt match
@@ -2310,7 +2320,13 @@ def compute_K_from_tke(
         # ONLY when the Bryan-Lewis profile below is off (enable_kappaH_profile=
         # False, as the NEMO recipe sets for NEMO's constant avtb); with BL on the
         # BL depth floor becomes the binding deep floor instead.
-        K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)
+        if _nemo_literal_pdlr:
+            # NEMO updates avt with ``p_pdlr * p_avt`` (zdftke.f90:717),
+            # not division by the reciprocal Pr.  XLA happened to rewrite
+            # the old division under JIT, hiding the eager one-ULP mismatch.
+            K_H = jnp.maximum(cfg.kappaH_min, Pr_or_pdlr * K_M)
+        else:
+            K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr_or_pdlr)
         # Bryan-Lewis (1979) arctan depth floor on K_H (Veros
         # enable_kappaH_profile). Previously recorded-but-ignored; now wired
         # on the opt-in Prandtl path. Low impact in shallow domains; raises
@@ -4199,6 +4215,16 @@ def tke_integrate_post_mixing(
     # Veros surface clamp (tke.py:238-244) acts on the (discarded) surface
     # row; the carried interior stays UNFLOORED (energy debt allowed).
     return e_new_w[..., 1:]
+
+
+def _nemo_mxlice2_anchor_raw(fr_i, hm_i, taum, zraug, surface_tmask):
+    """Materialize zdftke CASE(2) source operations under production JIT."""
+    open_water = nemo_source_round(
+        nemo_source_round(nemo_source_round(1.0 - fr_i) * zraug) * taum)
+    ice = nemo_source_round(nemo_source_round(fr_i * hm_i) * 2.0)
+    return nemo_source_round(
+        nemo_source_round(open_water + ice)
+        * jnp.asarray(surface_tmask, dtype=taum.dtype))
 
 
 __all__ = (
