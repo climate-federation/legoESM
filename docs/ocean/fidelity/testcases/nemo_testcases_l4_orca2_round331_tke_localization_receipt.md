@@ -182,3 +182,31 @@ boundary will either identify the live input family (`sh2`/drag), the surface
 and bottom BC boundary, the matrix/RHS, the solve, or the post-solve
 penetration.  Until that record exists, every such owner is **PLAUSIBLE**, not
 confirmed.
+
+## Resume-3 localization preregistration
+
+Frozen at `75687076d7e8`, after admission/localization and before changing the
+model statement.
+
+**CONFIRMED input.**  Every wet shear value is zero at kt 1, but the writer
+proves both the producer and consumer executed.  The live production trace is
+bit-identical through the boundary, all three matrix arrays, and the complete
+RHS on wet cells.  Substituting only NEMO's recorded RHS into the unchanged
+literal solver changes the solve census from 926 unequal wet values to zero;
+substituting all three recorded matrix arrays changes none of the 926.
+
+**Single-statement hypothesis.**  NEMO's bottom TKE boundary reads the stored
+`Kbb` velocity (`zdftke.f90:291-293`).  At this from-rest step `Kbb=Kmm=1` and
+that field is zero.  legoESM already receives the corresponding entry-level
+`u_now/v_now`, but the bottom-boundary call reads the post-explicit state.  The
+candidate will change only that call's velocity operand to the supplied entry
+pair; no configuration value will change.
+
+**Predictions.**  The candidate should make all 430,552 wet post-solve values,
+all 414,119 returned TKE values, and the returned `avm/avt` values bit-exact on
+the admitted record.  It is eligible only if Decision 122 passes for all seven
+required card/label pairs with zero exact-row loss and no first-over-bar move
+away, and every other card that executes the changed line is measured.  V1 is
+predicted unchanged because its deck disables this bottom boundary.  DINO is
+an explicit cross-card measurement obligation; GPU execution remains
+operator-only.
