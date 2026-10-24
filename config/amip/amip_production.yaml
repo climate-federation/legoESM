@@ -353,6 +353,12 @@ mpas_land_lapse_K_per_km: 6.5
 mpas_land_beta: 0.6
 mpas_ice_skin_prognostic: true
 albedo_ice: 0.80
+# Melt-dependent sea-ice albedo on the prognostic skin (#2106, user decision
+# 2026-10-24 after the July 1979 A/B: Arctic clear-sky reflected SW -19.2
+# W/m2).  Named explicitly although "auto" resolves to it here.
+sea_ice_albedo_scheme: maykut_untersteiner
+sea_ice_albedo_melt_width_K: 1.0
+ice_skin_melt_cap_width_K: 0.01
 dynamic_albedo: true
 snow_albedo_feedback: true
 land_snow_tau_days: 150.0

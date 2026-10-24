@@ -637,6 +637,20 @@ CLUBB_PROGNOSTIC_ONLY = frozenset({
     "clubb_c_k10"})
 
 
+def resolve_sea_ice_albedo_scheme(cfg) -> str:
+    """The sea-ice albedo scheme a run actually uses.
+
+    ``"auto"`` resolves to ``"maykut_untersteiner"`` when the run carries the
+    prognostic ice skin (an ice surface temperature exists) and to
+    ``"constant"`` otherwise; an explicit value is returned unchanged.
+    """
+    scheme = getattr(cfg, "sea_ice_albedo_scheme", "auto")
+    if scheme != "auto":
+        return scheme
+    return ("maykut_untersteiner" if getattr(cfg, "ice_skin_prognostic", False)
+            else "constant")
+
+
 class ExperimentConfig(NamedTuple):
     """Top-level experiment configuration.
 
@@ -2022,14 +2036,21 @@ class ExperimentConfig(NamedTuple):
     # CanopyConfig.most_n_iters: fixed-point iterations of the above-canopy
     # Monin-Obukhov solve (same placement and None semantics as the widths).
     land_canopy_most_n_iters: int | None = None
-    # Sea-ice shortwave albedo on the MPAS column lane (#2106).
-    #   "constant"            -> albedo_ice everywhere, every season (default).
+    # Sea-ice shortwave albedo (#2106).
+    #   "auto" (default)      -> resolved per run by resolve_sea_ice_albedo_scheme:
+    #     "maykut_untersteiner" when the lane carries the prognostic ice skin,
+    #     else "constant"; the RESOLVED value replaces "auto" in the driver's
+    #     config (log, experiment_config.json, run manifest).
+    #   "constant"            -> albedo_ice everywhere, every season.
     #   "maykut_untersteiner" -> ice.shortwave.maykut_untersteiner_albedo on the
     #     prognostic ice skin, recomputed every step: albedo_ice when the skin
     #     is <= T_freeze - width, the scheme's melting bare-ice value at
     #     T_freeze, linear between.  Needs ice_skin_prognostic=True.
-    sea_ice_albedo_scheme: str = "constant"
+    sea_ice_albedo_scheme: str = "auto"
     sea_ice_albedo_melt_width_K: float = 1.0   # melt-ramp width below T_freeze [K]
+    # Smooth 0 C cap on the prognostic ice skin (RULE 5): smooth_min(T, T_freeze,
+    # sharpness=1/width).  0 = the hard clip (pre-#2106 behaviour).
+    ice_skin_melt_cap_width_K: float = 0.01
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -3535,17 +3556,16 @@ class ExperimentConfig(NamedTuple):
                     "in its step factories (qv_smooth_coeff) and would "
                     "silently ignore it."
                 )
-            if self.ice_skin_prognostic:
+            # The prognostic ice skin is carried by the column loop, the
+            # compiled / per-step / operator-split (tiled, lat-band SPMD)
+            # lanes (#2106).  The spectral lane and the closed fv3_duo lane
+            # (its own HS/Kessler loop) do not carry it.
+            if self.ice_skin_prognostic and d.discretization in (
+                    "spectral", "fv3_duo"):
                 errors.append(
-                    "ice_skin_prognostic is an MPAS-lane knob; "
-                    f"discretization={d.discretization!r} has its own "
-                    "surface/ice tiles and would silently ignore it."
-                )
-            if self.sea_ice_albedo_scheme != "constant":
-                errors.append(
-                    "sea_ice_albedo_scheme is an MPAS-lane knob; "
-                    f"discretization={d.discretization!r} would silently "
-                    "ignore it."
+                    "ice_skin_prognostic is not wired on the "
+                    f"discretization={d.discretization!r} lane; it would "
+                    "silently keep the constant T_ice anchor."
                 )
         # What the compiled PhysicsPipeline lanes (lat-lon, cube; neither the
         # column loop nor spectral) and the spectral lane would silently drop
@@ -3673,7 +3693,7 @@ class ExperimentConfig(NamedTuple):
                 "ice_skin_prognostic=True (the override would be "
                 "silently inert)."
             )
-        _sia = ("constant", "maykut_untersteiner")
+        _sia = ("auto", "constant", "maykut_untersteiner")
         if self.sea_ice_albedo_scheme not in _sia:
             errors.append(
                 f"sea_ice_albedo_scheme={self.sea_ice_albedo_scheme!r} "
@@ -3683,8 +3703,14 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "sea_ice_albedo_scheme='maykut_untersteiner' reads the "
                 "prognostic ice skin; it requires ice_skin_prognostic=True.")
+        if not (math.isfinite(self.ice_skin_melt_cap_width_K)
+                and self.ice_skin_melt_cap_width_K >= 0.0):
+            errors.append(
+                "ice_skin_melt_cap_width_K must be finite and >= 0 (0 = hard "
+                f"cap); got {self.ice_skin_melt_cap_width_K!r}.")
         if (self.sea_ice_albedo_melt_width_K != 1.0
-                and self.sea_ice_albedo_scheme != "maykut_untersteiner"):
+                and resolve_sea_ice_albedo_scheme(self)
+                != "maykut_untersteiner"):
             errors.append(
                 f"sea_ice_albedo_melt_width_K="
                 f"{self.sea_ice_albedo_melt_width_K!r} requires "
