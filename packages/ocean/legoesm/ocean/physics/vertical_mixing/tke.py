@@ -1358,11 +1358,12 @@ def _solve_tke_backward_euler(
         so this was never a correctness bug, just a BC that didn't fire at
         the physically correct row). ``bottom_level`` supplied (T15-exact):
         the Dirichlet row is scattered to interior interface
-        ``bottom_level`` PER COLUMN (NEMO's ``mbkt+1`` — interface
+        ``bottom_level`` PER COLUMN when ``bottom_level < N`` (NEMO's
+        ``mbkt+1 <= jpkm1`` — interface
         ``bottom_level`` sits between T-cells ``bottom_level`` and
         ``bottom_level+1`` in legoESM's 0-based indexing, exactly ``mbkt``'s
-        seafloor cell), clamped to ``[0, N-1]`` (N = number of carried
-        interfaces) so a dry/degenerate column cannot index out of bounds.
+        seafloor cell). A full-depth ``bottom_level == N`` maps to NEMO's
+        held ``jpk`` row and is therefore not scattered into the solve.
         ``None`` (default) ⇒ BIT-IDENTICAL (the ``[..., -1]`` pin above).
 
     w_active : (..., nlev-1) or None — NEMO's ``wmask`` at the interior
@@ -1803,10 +1804,10 @@ def _solve_tke_backward_euler(
         # NEMO bottom TKE BC (zdftke.F90:279-288): en(mbkt+1) =
         # MAX(0.001875·CdU_bot·|u_bot|, rn_emin)*ssmask, set the SAME way as
         # the surface value (a plain identity row — NEMO solves the
-        # tridiagonal only from jk=2 to jpkm1, so the bottom row jpk is
-        # ALSO held, not coupled). Held AFTER the diffusion assembly so the
-        # pinned row's super/sub-diagonal entries are zeroed too (no
-        # leftover coupling into a row now pinned).
+        # tridiagonal only from jk=2 to jpkm1. Thus an in-range shallower
+        # bottom is an identity row, while a full-depth jpk boundary remains
+        # outside the solve). Applied AFTER diffusion assembly so an in-range
+        # pinned row has no leftover coupling.
         _e_bd = jnp.asarray(bottom_dirichlet, dtype=e_old.dtype)
         if bottom_level is None:
             # BIT-IDENTICAL legacy: unconditional pin at the array's last
@@ -1815,15 +1816,18 @@ def _solve_tke_backward_euler(
             diag = diag.at[..., -1].set(1.0)
             rhs = rhs.at[..., -1].set(_e_bd)
         else:
-            # T15-exact: scatter the pin to the PER-COLUMN seafloor
-            # interface (NEMO's mbkt), clamped into range so a dry column
-            # cannot index out of bounds. take/put_along_axis over the last
-            # (interface) axis — differentiable (pure gather/scatter, no
-            # data-dependent control flow).
+            # T15-exact: scatter the pin to the PER-COLUMN seafloor interface
+            # only when NEMO's mbkt+1 lies inside its solved 2:jpkm1 rows.
+            # Full-depth mbkt+1=jpk is a held row outside this carried array;
+            # clamping it onto N-1 would replace NEMO's last solved row by an
+            # identity equation. take/put_along_axis over the last axis stays
+            # differentiable (pure gather/scatter, no data-dependent control
+            # flow).
             N = e_old.shape[-1]
-            idx = jnp.clip(
-                jnp.asarray(bottom_level), 0, N - 1)[..., jnp.newaxis]
-            is_bottom = jnp.arange(N) == idx    # (..., N) one-hot per column
+            raw_idx = jnp.asarray(bottom_level)
+            idx = jnp.clip(raw_idx, 0, N - 1)[..., jnp.newaxis]
+            in_solve = ((raw_idx >= 0) & (raw_idx < N))[..., jnp.newaxis]
+            is_bottom = (jnp.arange(N) == idx) & in_solve
             a_diff = jnp.where(is_bottom, 0.0, a_diff)
             c_diff = jnp.where(is_bottom, 0.0, c_diff)
             diag = jnp.where(is_bottom, 1.0, diag)
@@ -2910,12 +2914,15 @@ def tke_vertical_mixing(
     bottom_dirichlet : (...,) or None — NEMO bottom TKE BC value (T15;
         :func:`nemo_bottom_tke_dirichlet`), held at the DEEPEST carried
         interface (or, when ``bottom_level`` is also given, at the
-        PER-COLUMN seafloor interface — T15-exact). REQUIRED when
+        PER-COLUMN seafloor interface when that row is inside NEMO's solve —
+        T15-exact). REQUIRED when
         ``cfg.bottom_tke_bc=True`` (raises otherwise — the gate has no
         meaning without a value); ignored (and must be None) when the gate
         is off.
     bottom_level : (...,) int or None — per-column T-point bottom-cell
-        index (:class:`OceanPartialCellCoordinate.bottom_level`). None
+        index (:class:`OceanPartialCellCoordinate.bottom_level`). A full-depth
+        column has ``bottom_level == nlev-1``; its NEMO boundary is the held
+        ``jpk`` row outside the carried ``2:jpkm1`` solve. None
         (default, BIT-IDENTICAL) ⇒ ``bottom_dirichlet`` pins the array's
         last interface unconditionally (exact on a flat-bottom column,
         the historical behaviour). Ignored when ``bottom_dirichlet`` is

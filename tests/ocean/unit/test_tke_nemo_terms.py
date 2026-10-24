@@ -1377,8 +1377,9 @@ class TestNemoBottomTkeDirichlet:
         approximation."""
         u, v, T, S, rho, dz_half, z_int, tx, ty = _orchestrator_inputs()
         N = dz_half.shape[-1]   # 7 interior interfaces (nlev=8)
-        # Per-column bottom_level: shallow (2), mid (4), full-depth (N-1=6).
-        bl = jnp.asarray([2, 4, N - 1])[:, None] * jnp.ones(
+        # Per-column bottom_level: shallow (2), mid (4), full-depth (N=7).
+        # The full-depth boundary is NEMO's held jpk row, outside the solve.
+        bl = jnp.asarray([2, 4, N])[:, None] * jnp.ones(
             u.shape[:-1], dtype=jnp.int32)
         bottom_val = jnp.full(u.shape[:-1], 7e-4)
         out = tke_vertical_mixing(
@@ -1391,8 +1392,13 @@ class TestNemoBottomTkeDirichlet:
         for i in range(bl_np.shape[0]):
             for j in range(bl_np.shape[1]):
                 k = bl_np[i, j]
-                assert en[i, j, k] == pytest.approx(7e-4, abs=1e-12), (
-                    f"column ({i},{j}): pin did not land at bottom_level={k}")
+                if k < N:
+                    assert en[i, j, k] == pytest.approx(7e-4, abs=1e-12), (
+                        f"column ({i},{j}): pin did not land at bottom_level={k}")
+                else:
+                    assert en[i, j, -1] != pytest.approx(7e-4, abs=1e-12), (
+                        f"column ({i},{j}): full-depth jpk boundary was "
+                        "incorrectly clamped onto the last solved row")
         # The last row of the SHALLOW columns must NOT be pinned (it's above
         # the true seafloor and remains a genuine solved/diffusing row) —
         # distinguishes this from the old unconditional-last-row behaviour.
