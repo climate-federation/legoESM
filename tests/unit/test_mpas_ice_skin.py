@@ -351,3 +351,153 @@ def test_restart_refuses_nonfinite_checkpoint_skin(tmp_path):
     assert r.returncode != 0, "restart from a NaN skin should have failed"
     assert "non-finite" in (r.stdout + r.stderr), \
         f"expected a non-finite skin refusal:\n{(r.stdout + r.stderr)[-2000:]}"
+
+
+# ---------------------------------------------------------------------------
+# Melt-dependent sea-ice albedo (#2106): sea_ice_albedo_scheme
+# ---------------------------------------------------------------------------
+
+def test_melt_albedo_ramp_values_with_production_cold_end():
+    """The lane passes albedo_cold_bare=albedo_ice (0.80); at the 2 m slab the
+    thickness factor is 1, so cold skin -> 0.80, 0 C skin -> 0.50, linear in
+    the width-K band below 0 C."""
+    from legoesm.ice.shortwave import maykut_untersteiner_albedo
+    T = jnp.array([constants.T_freeze - 5.0, constants.T_freeze - 1.0,
+                   constants.T_freeze - 0.5, constants.T_freeze])
+    a = maykut_untersteiner_albedo(T, 2.0, albedo_cold_bare=0.80, T_width=1.0)
+    np.testing.assert_allclose(np.asarray(a), [0.80, 0.80, 0.65, 0.50],
+                               atol=1e-12)
+
+
+def test_validate_melt_albedo_accepts_with_skin():
+    _mpas_cfg(ice_skin_prognostic=True,
+              sea_ice_albedo_scheme="maykut_untersteiner",
+              sea_ice_albedo_melt_width_K=2.0).validate_strict()
+
+
+def test_validate_melt_albedo_refuses_unknown_scheme():
+    with pytest.raises(ValueError, match="sea_ice_albedo_scheme"):
+        _mpas_cfg(ice_skin_prognostic=True,
+                  sea_ice_albedo_scheme="ccsm3").validate_strict()
+
+
+def test_validate_melt_albedo_needs_skin():
+    with pytest.raises(ValueError, match="ice_skin_prognostic=True"):
+        _mpas_cfg(sea_ice_albedo_scheme="maykut_untersteiner"
+                  ).validate_strict()
+
+
+def test_validate_melt_albedo_refuses_inert_width():
+    with pytest.raises(ValueError, match="sea_ice_albedo_melt_width_K"):
+        _mpas_cfg(ice_skin_prognostic=True,
+                  sea_ice_albedo_melt_width_K=2.0).validate_strict()
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan")])
+def test_validate_melt_albedo_width_bounds(bad):
+    with pytest.raises(ValueError, match="sea_ice_albedo_melt_width_K"):
+        _mpas_cfg(ice_skin_prognostic=True,
+                  sea_ice_albedo_scheme="maykut_untersteiner",
+                  sea_ice_albedo_melt_width_K=bad).validate_strict()
+
+
+def test_validate_cdgrid_refuses_melt_albedo():
+    with pytest.raises(ValueError, match="MPAS-lane"):
+        _cdgrid_cfg(sea_ice_albedo_scheme="maykut_untersteiner"
+                    ).validate_strict()
+
+
+def test_cli_round_trip_melt_albedo():
+    from scripts.run.run_amip import (
+        _postprocess_args, build_arg_parser, build_config_from_args,
+    )
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.sea_ice_albedo_scheme == "constant"
+    assert cfg_default.sea_ice_albedo_melt_width_K == 1.0
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "voronoi", "--discretization", "mpas",
+        "--mpas-ice-skin-prognostic",
+        "--sea-ice-albedo-scheme", "maykut_untersteiner",
+        "--sea-ice-albedo-melt-width-K", "2.5",
+    ]), parser))
+    assert cfg.sea_ice_albedo_scheme == "maykut_untersteiner"
+    assert cfg.sea_ice_albedo_melt_width_K == 2.5
+
+
+_ICY_RUNNER = r'''
+import sys, runpy
+import jax.numpy as jnp
+import numpy as np
+from legoesm import constants
+import legoesm.forcing.analytical as an
+_orig = an.analytical_sst_sic
+def _icy(lat_deg, day, T_ice=constants.T_freeze_ocean):
+    sst, sic = _orig(lat_deg, day, T_ice=T_ice)
+    polar = np.abs(np.asarray(lat_deg)) >= 60.0
+    return (jnp.where(polar, T_ice, sst).astype(sst.dtype),
+            jnp.where(polar, 1.0, sic).astype(sic.dtype))
+an.analytical_sst_sic = _icy
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+'''
+
+
+def _run_icy(out_dir, extra=()):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    env["JAX_ENABLE_X64"] = "1"
+    cmd = [sys.executable, "-c", _ICY_RUNNER,
+           str(repo / "scripts" / "run" / "run_amip.py"),
+           "--dataset", "analytical",
+           "--grid-type", "voronoi", "--discretization", "mpas",
+           "--resolution", "3", "--nlev", "8",
+           "--days", "1", "--checkpoint-days", "1", "--start-day", "172",
+           "--radiation", "gray", "--mpas-ice-skin-prognostic",
+           "--output", str(out_dir), *extra]
+    r = subprocess.run(cmd, env=env, capture_output=True, text=True,
+                       timeout=600)
+    combined = r.stdout + r.stderr
+    assert r.returncode == 0, f"run failed ({r.returncode}):\n{combined[-2000:]}"
+    return np.load(next(Path(out_dir).glob("checkpoint_day_*.npz")),
+                   allow_pickle=True)
+
+
+def test_end_to_end_melt_albedo_reaches_radiation(tmp_path):
+    """Polar ice (sic=1 poleward of 60 deg), June start: with a 5 K ramp the
+    seed skin (271.35 K) already sits inside the ramp, so the melt scheme
+    darkens the ice from step one.  The state must then differ from the
+    constant-albedo run — fails if the scheme is wired in but inert."""
+    base = _run_icy(tmp_path / "const")
+    melt = _run_icy(tmp_path / "melt", extra=(
+        "--sea-ice-albedo-scheme", "maykut_untersteiner",
+        "--sea-ice-albedo-melt-width-K", "5.0"))
+    assert "ice_T_skin" in base.files and "ice_T_skin" in melt.files
+    sb, sm = np.asarray(base["ice_T_skin"]), np.asarray(melt["ice_T_skin"])
+    assert np.all(np.isfinite(sm))
+    # Darker ice absorbs more sunlight: the skin can only be warmer or equal.
+    assert np.all(sm >= sb - 1e-9)
+    assert np.max(sm - sb) > 1e-3, "melt albedo never reached the surface"
+
+
+def test_committed_deck_selects_melt_albedo():
+    from pathlib import Path
+    from scripts.run.run_amip import (
+        _postprocess_args, build_arg_parser, build_config_from_args,
+    )
+    deck = (Path(__file__).resolve().parents[2] / "config" / "amip"
+            / "amip_production_seaice_melt_albedo.yaml")
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--config", str(deck)]), parser))
+    assert cfg.sea_ice_albedo_scheme == "maykut_untersteiner"
+    assert cfg.sea_ice_albedo_melt_width_K == 1.0
+    assert cfg.ice_skin_prognostic is True
+    assert cfg.albedo_ice == 0.80

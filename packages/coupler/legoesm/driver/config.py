@@ -2022,6 +2022,14 @@ class ExperimentConfig(NamedTuple):
     # CanopyConfig.most_n_iters: fixed-point iterations of the above-canopy
     # Monin-Obukhov solve (same placement and None semantics as the widths).
     land_canopy_most_n_iters: int | None = None
+    # Sea-ice shortwave albedo on the MPAS column lane (#2106).
+    #   "constant"            -> albedo_ice everywhere, every season (default).
+    #   "maykut_untersteiner" -> ice.shortwave.maykut_untersteiner_albedo on the
+    #     prognostic ice skin, recomputed every step: albedo_ice when the skin
+    #     is <= T_freeze - width, the scheme's melting bare-ice value at
+    #     T_freeze, linear between.  Needs ice_skin_prognostic=True.
+    sea_ice_albedo_scheme: str = "constant"
+    sea_ice_albedo_melt_width_K: float = 1.0   # melt-ramp width below T_freeze [K]
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -3533,6 +3541,12 @@ class ExperimentConfig(NamedTuple):
                     f"discretization={d.discretization!r} has its own "
                     "surface/ice tiles and would silently ignore it."
                 )
+            if self.sea_ice_albedo_scheme != "constant":
+                errors.append(
+                    "sea_ice_albedo_scheme is an MPAS-lane knob; "
+                    f"discretization={d.discretization!r} would silently "
+                    "ignore it."
+                )
         # What the compiled PhysicsPipeline lanes (lat-lon, cube; neither the
         # column loop nor spectral) and the spectral lane would silently drop
         # (composable-physics design P1, 2026-10-10). Opt-in features are
@@ -3659,6 +3673,28 @@ class ExperimentConfig(NamedTuple):
                 "ice_skin_prognostic=True (the override would be "
                 "silently inert)."
             )
+        _sia = ("constant", "maykut_untersteiner")
+        if self.sea_ice_albedo_scheme not in _sia:
+            errors.append(
+                f"sea_ice_albedo_scheme={self.sea_ice_albedo_scheme!r} "
+                f"unknown; choose one of {_sia}.")
+        if (self.sea_ice_albedo_scheme == "maykut_untersteiner"
+                and not self.ice_skin_prognostic):
+            errors.append(
+                "sea_ice_albedo_scheme='maykut_untersteiner' reads the "
+                "prognostic ice skin; it requires ice_skin_prognostic=True.")
+        if (self.sea_ice_albedo_melt_width_K != 1.0
+                and self.sea_ice_albedo_scheme != "maykut_untersteiner"):
+            errors.append(
+                f"sea_ice_albedo_melt_width_K="
+                f"{self.sea_ice_albedo_melt_width_K!r} requires "
+                "sea_ice_albedo_scheme='maykut_untersteiner' (the override "
+                "would be silently inert).")
+        if not (math.isfinite(self.sea_ice_albedo_melt_width_K)
+                and self.sea_ice_albedo_melt_width_K > 0.0):
+            errors.append(
+                "sea_ice_albedo_melt_width_K must be finite and > 0; got "
+                f"{self.sea_ice_albedo_melt_width_K!r}.")
         if not (math.isfinite(self.ice_thickness_m)
                 and 0.1 <= self.ice_thickness_m <= 10.0):
             errors.append(
