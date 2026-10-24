@@ -648,12 +648,15 @@ def test_runner_partitions_after_ice_step_via_shared_blend():
     Source-introspection drift guard."""
     import inspect
     src = inspect.getsource(R.main)
+    helper = inspect.getsource(R._blend_prognostic_ice_forcing)
     # The shared partition is called in raw_core2 mode...
-    assert "blend_ice_ocean_forcing(" in src
-    assert 'sw_partition="raw_core2"' in src
+    assert "_blend_prognostic_ice_forcing(" in src
+    assert "blend_ice_ocean_forcing(" in helper
+    assert 'sw_partition="raw_core2"' in helper
     # ...at the PRE-step concentration captured before step_sea_ice.
     assert "_ice_conc_pre = ice_state.concentration.data" in src
-    assert "ice_concentration=_ice_conc_pre" in src
+    assert "sf, fw, ice_resp, ice_state, _ice_conc_pre," in src
+    assert "ice_concentration=ice_conc_thermo" in helper
     # ...and the OLD in-runner routing (full atm stress + added ice stress,
     # beginning-of-step heat attenuation) is GONE.
     assert "_route_ice_response_to_ocean" not in src
@@ -754,3 +757,57 @@ def test_under_ice_heat_attenuation_reduces_qnet():
                                   under_ice=True, tau_ice_sw=0.03)
     # only the small transmitted SW remains; far below open water.
     assert np.all(q_full < 0.2 * q_open)
+
+
+def test_core2_prognostic_ice_delivers_precip_once_through_freeze_and_meltout():
+    """Water closure of the CORE-II prognostic-ice partition: over one real
+    ``step_sea_ice`` call, rain reaching the ocean (direct open-water share +
+    the share the ice tile forwards) equals the incident rain in a cell that
+    freezes from open water, a cell that melts out, and a steady ice cell.
+
+    Isolated by differencing a rainy and a dry step (everything else equal).
+    """
+    from legoesm.ice import SeaIceConfig, init_dynamic_ice_state, step_sea_ice
+    from legoesm.ice.config import BrineConfig
+
+    shape = (3,)
+    cfg = SeaIceConfig(brine=BrineConfig(enabled=True))
+    st = init_dynamic_ice_state(shape, S_ice_init=4.0)
+    st = st._replace(
+        h_ice=st.h_ice.replace(data=jnp.array([0.0, 0.005, 2.0])),
+        concentration=st.concentration.replace(data=jnp.array([0.0, 0.8, 0.9])),
+        T_ice=st.T_ice.replace(data=jnp.array([271.0, 273.0, 260.0])),
+    )
+    sst_K = jnp.array([constants.T_freeze_ocean, constants.T_freeze_ocean + 2.0,
+                       constants.T_freeze_ocean])
+    land = jnp.ones(shape)
+    sf0, fw0, _, _ = _open_forcing(shape)
+
+    def delivered(rain):
+        atm = AtmToSurface(
+            sw_down=jnp.array([0.0, 4000.0, 0.0]), lw_down=jnp.full(shape, 200.0),
+            precip_total=jnp.full(shape, rain), precip_snow=jnp.zeros(shape),
+            T_lowest=jnp.array([245.0, 290.0, 255.0]),
+            q_lowest=jnp.full(shape, 1e-3), u_lowest=jnp.full(shape, 5.0),
+            v_lowest=jnp.zeros(shape), p_lowest=jnp.full(shape, 9.5e4),
+            p_surface=jnp.full(shape, 1e5), rho_lowest=jnp.full(shape, 1.25),
+            cos_zenith=jnp.ones(shape), co2_ppmv=jnp.full(shape, 400.0),
+            has_radiation=jnp.ones(shape), has_precipitation=jnp.ones(shape),
+        )
+        new, resp = step_sea_ice(st, atm, sst_K, jnp.zeros(shape),
+                                 jnp.zeros(shape), cfg, U_min=0.0, dt=3600.0)
+        fw, _ = R._blend_prognostic_ice_forcing(
+            sf0, fw0._replace(precip=jnp.full(shape, rain)), resp, new,
+            resp.ice_concentration_thermo, land, cfg,
+            constants.alpha_ocean_broadband)
+        return (np.asarray(fw.precip + fw.ice_fw), np.asarray(
+            resp.ice_concentration_thermo), np.asarray(new.concentration.data))
+
+    rain = 2.0e-4
+    wet, a_pre, a_post = delivered(rain)
+    dry, _, a_post_dry = delivered(0.0)
+    np.testing.assert_array_equal(a_post, a_post_dry)
+    # The fixture really exercises a freeze and a melt-out.
+    assert a_pre[0] == 0.0 and a_post[0] > 0.0
+    assert a_pre[1] > 0.0 and a_post[1] == 0.0
+    np.testing.assert_allclose(wet - dry, rain, rtol=1e-10)

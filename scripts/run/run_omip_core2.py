@@ -2990,10 +2990,8 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
     if args.prognostic_sea_ice:
         from legoesm.ice import (
             SeaIceConfig, init_dynamic_ice_state, step_sea_ice,
-            uses_new_physics,
         )
         from legoesm.ice.config import BrineConfig
-        from legoesm.coupler.ocean_forcing import blend_ice_ocean_forcing
         # FesomOceanGrid has NO strain-rate / flux-divergence ice operators
         # (grid_supports_ice_dynamics/transport are both False), so the
         # rheology degrades to free_drift and transport stays 'none' —
@@ -3213,18 +3211,10 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             # melt/freeze freshwater and ice stress added exactly once.
             # sf was built UNMASKED (ice_albedo=None -> raw SW), so the SW
             # albedo/partition happens here and only here (raw_core2).
-            fw, sf = blend_ice_ocean_forcing(
-                open_sf=sf, open_fw=fw, ice_resp=ice_resp,
-                ice_concentration=_ice_conc_pre,
-                ocean_mask=state.land_mask.data,
-                sw_partition="raw_core2",
-                alpha_ocean=float(_const.alpha_ocean_broadband),
-                sw_transmittance_ice=0.0,
-                ice_owns_snow_reservoir=uses_new_physics(ice_config),
-            )
-            # Same partition-time-level concentration to the closure (the
-            # TKE eice under-ice attenuation reads it), as the host loop does.
-            sf = sf._replace(ice_concentration=_ice_conc_pre)
+            fw, sf = _blend_prognostic_ice_forcing(
+                sf, fw, ice_resp, ice_state, _ice_conc_pre,
+                state.land_mask.data, ice_config,
+                _const.alpha_ocean_broadband)
         # --- SSS restoring (B4).  Inputs are assembled here, PRE-step, for
         # both channels: the water-flux channel consumes them below (NEMO
         # sbcssr — the flux is computed from the NOW-level SSS and enters the
@@ -4825,6 +4815,35 @@ def _grid_lat2d_deg(grid, grid_type):
 # salt_flux, KPP freshwater) and FreshwaterForcing (evap x f_open, ice_fw)
 # channels.  No new sea-ice physics; no new ocean salt/FW applicator.
 # ===========================================================================
+
+def _blend_prognostic_ice_forcing(sf, fw, ice_resp, ice_state, ice_conc_thermo,
+                                  land_mask, ice_config, alpha_ocean):
+    """Prognostic-ice open-water/ice partition shared by both host loops.
+
+    Heat, SW, stress and evaporation split at the thermodynamics-time cover
+    ``ice_conc_thermo``; the open-water precip share uses the POST-step cover,
+    the frame the ice tile forwards ice-fraction precip in, so the ocean
+    receives exactly ``P`` through freezing and melt-out.
+    """
+    from legoesm.coupler.ocean_forcing import blend_ice_ocean_forcing
+    from legoesm.ice import uses_new_physics
+    conc_post = ice_state.concentration.data
+    if conc_post.ndim > np.asarray(land_mask).ndim:
+        conc_post = jnp.sum(conc_post, axis=-1)  # multi-category total
+    fw, sf = blend_ice_ocean_forcing(
+        open_sf=sf, open_fw=fw, ice_resp=ice_resp,
+        ice_concentration=ice_conc_thermo,
+        precip_ice_concentration=conc_post,
+        ocean_mask=land_mask,
+        sw_partition="raw_core2",
+        alpha_ocean=float(alpha_ocean),
+        sw_transmittance_ice=0.0,
+        ice_owns_snow_reservoir=uses_new_physics(ice_config),
+    )
+    # Same partition-time-level cover to the vertical-mixing closure (TKE eice
+    # under-ice attenuation reads sf.ice_concentration).
+    return fw, sf._replace(ice_concentration=ice_conc_thermo)
+
 
 def _ice_state_spatial_shape(grid, app_grid_type):
     """Spatial shape of a per-cell ice field on the ocean grid.
@@ -10499,24 +10518,15 @@ def main() -> int:
                 # routes tau*SW to the ocean via resp.ocean_heat_extraction),
                 # so adding the old ocean-side A*tau*swd surrogate here would
                 # now DOUBLE-COUNT it (codex L1 — budget closed).
-                from legoesm.coupler.ocean_forcing import blend_ice_ocean_forcing
-                from legoesm.ice import uses_new_physics
-                fw, sf = blend_ice_ocean_forcing(
-                    open_sf=sf, open_fw=fw, ice_resp=ice_resp,
-                    ice_concentration=_ice_conc_pre,
-                    ocean_mask=state.land_mask.data,
-                    sw_partition="raw_core2",
-                    alpha_ocean=float(_ice_const.alpha_ocean_broadband),
-                    sw_transmittance_ice=0.0,
-                    ice_owns_snow_reservoir=uses_new_physics(ice_config),
-                )
-                # Thread the SAME partition-time-level ice concentration to
-                # the vertical-mixing closure: the TKE lc/etau under-ice
-                # attenuation (TKEConfig.eice, NEMO nn_eice) reads
-                # surface_forcing.ice_concentration.  Attach ALWAYS (inert
-                # unless eice != 0 — consumption is config-gated in
-                # k_profiles, so eice=0 stays bit-identical).
-                sf = sf._replace(ice_concentration=_ice_conc_pre)
+                # The helper also threads the SAME partition-time-level ice
+                # concentration to the vertical-mixing closure: the TKE
+                # lc/etau under-ice attenuation (TKEConfig.eice, NEMO nn_eice)
+                # reads surface_forcing.ice_concentration (inert unless
+                # eice != 0).
+                fw, sf = _blend_prognostic_ice_forcing(
+                    sf, fw, ice_resp, ice_state, _ice_conc_pre,
+                    state.land_mask.data, ice_config,
+                    _ice_const.alpha_ocean_broadband)
             elif fw is not None:
                 # KPP freshwater-buoyancy contract (codex): sf.freshwater is
                 # consumed ONLY by the vertical-mixing surface-buoyancy
