@@ -37,6 +37,10 @@ from legoesm.ice.constants_config import (
     NEMO_SI3_CONSTANTS_CONFIG,
     IceConstantsConfig,
 )
+from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+    ORCA2InitialIce,
+    orca2_initial_ice_ssh,
+)
 
 if TYPE_CHECKING:
     from legoesm.ice.state import SI3ColumnState
@@ -2353,12 +2357,11 @@ class SI3ORCA2O2Forcing(NamedTuple):
     ff_t: Field
     gphit: Field
     e1e2t: Field
-    ssmask: Field | None = None
-    smask0_i: Field | None = None
-    ssh_before_kbb: Field | None = None
-    ssh_before_kmm: Field | None = None
-    evaporation: Field | None = None
-    apply_halos: bool = False
+    ssmask: Field
+    smask0_i: Field
+    ssh_before_kbb: Field
+    ssh_before_kmm: Field
+    apply_halos: bool
 
 
 @jax.custom_jvp
@@ -2529,23 +2532,11 @@ def si3_o2_scalar_initial_state(
     gphit: Field,
     e1e2t: Field,
     *,
-    ssmask: Field | None = None,
-    smask0_i: Field | None = None,
-    ssh_before_kbb: Field | None = None,
-    ssh_before_kmm: Field | None = None,
-    config: SI3ORCA2StateConfig | SI3O2InitConfig | None = None,
-    hti_n: Field | float | None = None,
-    hti_s: Field | float | None = None,
-    hts_n: Field | float | None = None,
-    hts_s: Field | float | None = None,
-    ati_n: Field | float | None = None,
-    ati_s: Field | float | None = None,
-    apd_n: Field | float | None = None,
-    apd_s: Field | float | None = None,
-    hpd_n: Field | float | None = None,
-    hpd_s: Field | float | None = None,
-    hld_n: Field | float | None = None,
-    hld_s: Field | float | None = None,
+    ssmask: Field,
+    smask0_i: Field,
+    ssh_before_kbb: Field,
+    ssh_before_kmm: Field,
+    config: SI3O2InitConfig,
     _plant_wrong_eos: bool = False,
     _plant_tbo_halo_leak: bool = False,
     _plant_pond_unscaled: bool = False,
@@ -2573,15 +2564,23 @@ def si3_o2_scalar_initial_state(
        `snwice_mass`, `snwice_mass_b`, `area`, `zsshadj`, `ssh_kbb`, `ssh_kmm`.
     """
     sr = nemo_source_round
-    cfg = config if config is not None else SI3O2InitConfig()
-    nn_hls = int(getattr(cfg, "nn_hls", 2))
-    consts: IceConstantsConfig = getattr(
-        cfg, "ice_constants", NEMO_SI3_CONSTANTS_CONFIG
-    )
-    ln_teos10 = bool(getattr(cfg, "ln_teos10", True))
-    ln_ice_embd = bool(getattr(cfg, "ln_ice_embd", False))
-    ln_rstart = bool(getattr(cfg, "ln_rstart", False))
-    rn_thres_sst = float(getattr(cfg, "rn_thres_sst", 2.0))
+    cfg = config
+    if not isinstance(cfg, SI3O2InitConfig):
+        raise TypeError("O2 scalar initialization requires an explicit SI3O2InitConfig")
+    if not cfg.ln_iceini or cfg.nn_iceini_file != 0:
+        raise ValueError(
+            "O2 requires ORCA2_SAS_ICE namelist initialization "
+            "(ln_iceini=True, nn_iceini_file=0)"
+        )
+    if not cfg.ln_teos10:
+        raise ValueError("O2 ORCA2_SAS_ICE requires ln_teos10=True")
+    if cfg.ln_ice_embd:
+        raise ValueError("O2 owns only ORCA2_SAS_ICE's levitating-ice branch")
+    if cfg.ln_rstart:
+        raise ValueError("O2 ice_istate is not entered on a restart")
+    nn_hls = int(cfg.nn_hls)
+    consts = cfg.ice_constants
+    rn_thres_sst = float(cfg.rn_thres_sst)
 
     sst = jnp.asarray(sst_m, dtype=jnp.float64)
     sss = jnp.asarray(sss_m, dtype=jnp.float64)
@@ -2599,23 +2598,17 @@ def si3_o2_scalar_initial_state(
 
     interior = _interior_mask_2d(jpi, jpj, nn_hls)
     smask0 = sr(tmask_2d * interior)
-    ssmask_2d = (
-        jnp.asarray(ssmask, dtype=dtype) if ssmask is not None else tmask_2d
-    )
-    if smask0_i is not None and not _plant_omit_nfd_uniq:
-        smask0_i_2d = jnp.asarray(smask0_i, dtype=dtype)
-    else:
-        uniq_t = si3_dom_uniq_t_orca2(
-            jpi, jpj, nn_hls=nn_hls, _plant_omit_nfd_uniq=_plant_omit_nfd_uniq
-        )
-        smask0_i_2d = sr(ssmask_2d * uniq_t)
+    ssmask_2d = jnp.asarray(ssmask, dtype=dtype)
+    smask0_i_2d = jnp.asarray(smask0_i, dtype=dtype)
+    if _plant_omit_nfd_uniq:
+        smask0_i_2d = ssmask_2d * _interior_mask_2d(jpi, jpj, nn_hls)
 
     rt0 = sr(jnp.asarray(consts.T0, dtype=dtype))
 
     # 1. t_bo (`src/ICE/iceistate.F90:125-126`): kbnd=0 on interior, masked by smask0
     t_bo_degc = si3_eos_fzp(
         sss,
-        ln_teos10=ln_teos10,
+        ln_teos10=cfg.ln_teos10,
         kbnd=nn_hls if _plant_tbo_halo_leak else 0,
         nn_hls=nn_hls,
         _plant_wrong_eos=_plant_wrong_eos,
@@ -2626,14 +2619,14 @@ def si3_o2_scalar_initial_state(
         t_bo = sr(sr(t_bo_degc + rt0) * smask0)
 
     # 2. rn_amax_2d (`src/ICE/iceistate.F90:203-207`)
-    amax_n = jnp.asarray(getattr(cfg, "rn_amax_n", 0.997), dtype=dtype)
-    amax_s = jnp.asarray(getattr(cfg, "rn_amax_s", 0.997), dtype=dtype)
+    amax_n = jnp.asarray(cfg.rn_amax_n, dtype=dtype)
+    amax_s = jnp.asarray(cfg.rn_amax_s, dtype=dtype)
     rn_amax_2d = jnp.where(gphit_2d >= 0.0, amax_n, amax_s)
 
     # 3. ztfrz and zmsk (`src/ICE/iceistate.F90:263-266`)
     ztfrz = si3_eos_fzp(
         sss,
-        ln_teos10=ln_teos10,
+        ln_teos10=cfg.ln_teos10,
         kbnd=nn_hls,
         nn_hls=nn_hls,
         _plant_wrong_eos=_plant_wrong_eos,
@@ -2643,33 +2636,33 @@ def si3_o2_scalar_initial_state(
     zmsk = jnp.where(sst_minus_tfrz >= thres, 0.0, tmask_2d)
 
     # 4. Hemisphere-dependent scalar state (`src/ICE/iceistate.F90:275-303`)
-    def _val(override: Field | float | None, attr: str, default: float) -> Field:
-        v = override if override is not None else getattr(cfg, attr, default)
+    def _val(attr: str) -> Field:
+        v = getattr(cfg, attr)
         out = jnp.asarray(v, dtype=dtype)
         return jax.lax.stop_gradient(out) if _plant_stop_gradient else out
 
-    v_hti_n = _val(hti_n, "rn_hti_ini_n", 2.0)
-    v_hti_s = _val(hti_s, "rn_hti_ini_s", 1.0)
+    v_hti_n = _val("rn_hti_ini_n")
+    v_hti_s = _val("rn_hti_ini_s")
     if _plant_hemisphere_swap:
         v_hti_n, v_hti_s = v_hti_s, v_hti_n
-    v_hts_n = _val(hts_n, "rn_hts_ini_n", 0.2)
-    v_hts_s = _val(hts_s, "rn_hts_ini_s", 0.2)
-    v_ati_n = _val(ati_n, "rn_ati_ini_n", 0.9)
-    v_ati_s = _val(ati_s, "rn_ati_ini_s", 0.9)
-    v_smi_n = _val(None, "rn_smi_ini_n", 6.3)
-    v_smi_s = _val(None, "rn_smi_ini_s", 6.3)
-    v_tmi_n = _val(None, "rn_tmi_ini_n", 270.0)
-    v_tmi_s = _val(None, "rn_tmi_ini_s", 270.0)
-    v_tsu_n = _val(None, "rn_tsu_ini_n", 270.0)
-    v_tsu_s = _val(None, "rn_tsu_ini_s", 270.0)
-    v_tms_n = _val(None, "rn_tms_ini_n", 270.0)
-    v_tms_s = _val(None, "rn_tms_ini_s", 270.0)
-    v_apd_n = _val(apd_n, "rn_apd_ini_n", 0.2)
-    v_apd_s = _val(apd_s, "rn_apd_ini_s", 0.2)
-    v_hpd_n = _val(hpd_n, "rn_hpd_ini_n", 0.05)
-    v_hpd_s = _val(hpd_s, "rn_hpd_ini_s", 0.05)
-    v_hld_n = _val(hld_n, "rn_hld_ini_n", 0.0)
-    v_hld_s = _val(hld_s, "rn_hld_ini_s", 0.0)
+    v_hts_n = _val("rn_hts_ini_n")
+    v_hts_s = _val("rn_hts_ini_s")
+    v_ati_n = _val("rn_ati_ini_n")
+    v_ati_s = _val("rn_ati_ini_s")
+    v_smi_n = _val("rn_smi_ini_n")
+    v_smi_s = _val("rn_smi_ini_s")
+    v_tmi_n = _val("rn_tmi_ini_n")
+    v_tmi_s = _val("rn_tmi_ini_s")
+    v_tsu_n = _val("rn_tsu_ini_n")
+    v_tsu_s = _val("rn_tsu_ini_s")
+    v_tms_n = _val("rn_tms_ini_n")
+    v_tms_s = _val("rn_tms_ini_s")
+    v_apd_n = _val("rn_apd_ini_n")
+    v_apd_s = _val("rn_apd_ini_s")
+    v_hpd_n = _val("rn_hpd_ini_n")
+    v_hpd_s = _val("rn_hpd_ini_s")
+    v_hld_n = _val("rn_hld_ini_n")
+    v_hld_s = _val("rn_hld_ini_s")
 
     is_nh = ff_t_2d >= 0.0
     zht_i_ini = sr(jnp.where(is_nh, v_hti_n, v_hti_s) * zmsk)
@@ -2687,8 +2680,8 @@ def si3_o2_scalar_initial_state(
     zhpnd_ini = sr(jnp.where(is_nh, v_hpd_n, v_hpd_s) * zmsk)
     zhlid_ini = sr(jnp.where(is_nh, v_hld_n, v_hld_s) * zmsk)
 
-    # 5. Category-conserved volumes (`ice_var_itd` + `ice_var_agg(1)` + `lbc_lnk`,
-    #    `src/ICE/iceistate.F90:311-407`)
+    # 5. Category-conserved volumes at the O2/O3 boundary.  O3 owns the
+    # category fit; O2 uses only the fit's documented total-volume invariants.
     vt_i_int = sr(zht_i_ini * zat_i_ini)
     vt_s_int = sr(zht_s_ini * zat_i_ini)
     at_i = zat_i_ini
@@ -2701,46 +2694,39 @@ def si3_o2_scalar_initial_state(
     vt_ip = vt_ip_int
     vt_il = vt_il_int
 
-    # 6. `snwice_mass` and `snwice_mass_b` (`src/ICE/iceistate.F90:400-401`)
-    rhos_hs = sr(consts.rho_snow * zht_s_ini)
-    rhoi_hi = sr(consts.rho_ice * zht_i_ini)
-    rhow_pnd = sr(canonical_constants.rho_water * sr(vt_ip + vt_il))
-    snwice_mass = sr(tmask_2d * sr(sr(zat_i_ini * sr(rhos_hs + rhoi_hi)) + rhow_pnd))
+    # 6. Reuse the ORCA2 lane's levitating-ice recipe for mass and SSH
+    # (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/iceistate.f90:441-460`).
+    ice_recipe = ORCA2InitialIce(
+        thres_sst=cfg.rn_thres_sst,
+        ice_concentration=(cfg.rn_ati_ini_n, cfg.rn_ati_ini_s),
+        ice_thickness_m=(cfg.rn_hti_ini_n, cfg.rn_hti_ini_s),
+        snow_thickness_m=(cfg.rn_hts_ini_n, cfg.rn_hts_ini_s),
+        pond_concentration=(
+            cfg.rn_apd_ini_n * cfg.rn_ati_ini_n,
+            cfg.rn_apd_ini_s * cfg.rn_ati_ini_s,
+        ),
+        pond_depth_m=(cfg.rn_hpd_ini_n, cfg.rn_hpd_ini_s),
+        lid_depth_m=(cfg.rn_hld_ini_n, cfg.rn_hld_ini_s),
+    )
+    ssh_delta, snwice_mass, area, zsshadj = orca2_initial_ice_ssh(
+        temperature=sst,
+        salinity=sss,
+        tmask=tmask_2d,
+        f_t=ff_t_2d,
+        e1e2t=e1e2t_2d,
+        ice=ice_recipe,
+        ln_teos10=True,
+        smask0_i=smask0_i_2d,
+        use_ddpdd=True,
+        return_diagnostics=True,
+    )
     snwice_mass_b = snwice_mass
-
-    # 7. Levitating-ice SSH adjustment (`src/ICE/iceistate.F90:420-430`,
-    #    `ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:450-460`)
-    ssh_b0 = (
-        jnp.asarray(ssh_before_kbb, dtype=dtype)
-        if ssh_before_kbb is not None
-        else jnp.zeros_like(tmask_2d)
-    )
-    ssh_m0 = (
-        jnp.asarray(ssh_before_kmm, dtype=dtype)
-        if ssh_before_kmm is not None
-        else jnp.zeros_like(tmask_2d)
-    )
-    if (not ln_ice_embd) and (not ln_rstart):
-        r1_rho0 = sr(
-            jnp.asarray(1.0, dtype=dtype) / jnp.asarray(consts.rho_ocean, dtype=dtype)
-        )
-        area = si3_glob_2dsum_ddpdd(
-            sr(e1e2t_2d * ssmask_2d), smask0_i_2d, nn_hls
-        )
-        num_mass = si3_glob_2dsum_ddpdd(
-            sr(sr(snwice_mass * r1_rho0) * e1e2t_2d), smask0_i_2d, nn_hls
-        )
-        zsshadj = sr(num_mass / area)
-        adj_sign = 1.0 if _plant_ssh_sign else -1.0
-        ssh_kmm = jnp.where(
-            ssmask_2d == 1.0, sr(ssh_m0 + adj_sign * zsshadj), ssh_m0
-        )
-        ssh_kbb = jnp.where(ssmask_2d == 1.0, ssh_kmm, ssh_b0)
-    else:
-        area = jnp.asarray(0.0, dtype=dtype)
-        zsshadj = jnp.asarray(0.0, dtype=dtype)
-        ssh_kmm = ssh_m0
-        ssh_kbb = ssh_b0
+    ssh_b0 = jnp.asarray(ssh_before_kbb, dtype=dtype)
+    ssh_m0 = jnp.asarray(ssh_before_kmm, dtype=dtype)
+    if _plant_ssh_sign:
+        ssh_delta = -ssh_delta
+    ssh_kmm = jnp.where(ssmask_2d == 1.0, sr(ssh_m0 + ssh_delta), ssh_m0)
+    ssh_kbb = jnp.where(ssmask_2d == 1.0, sr(ssh_b0 + ssh_delta), ssh_b0)
 
     return SI3O2ScalarInitialState(
         t_bo=t_bo,
@@ -2776,17 +2762,13 @@ def si3_o2_step(
     state: SI3State,
     forcing: SI3ORCA2O2Forcing,
     *,
-    config: SI3ORCA2StateConfig | None = None,
-    o2_init_config: SI3O2InitConfig | None = None,
+    config: SI3ORCA2StateConfig,
+    o2_init_config: SI3O2InitConfig,
     _plant_stop_gradient: bool = False,
 ) -> tuple[SI3State, SI3O2ScalarInitialState]:
     """Compute the Rung-O2 scalar initial state + levitating-ice SSH and execute one O1/O2 step."""
-    cfg = config if config is not None else SI3ORCA2StateConfig()
-    init_cfg = (
-        o2_init_config
-        if o2_init_config is not None
-        else SI3O2InitConfig(nn_hls=cfg.nn_hls, ice_constants=cfg.ice_constants)
-    )
+    cfg = config
+    init_cfg = o2_init_config
     o2_istate = si3_o2_scalar_initial_state(
         sst_m=forcing.sst_m,
         sss_m=forcing.sss_m,
@@ -2822,4 +2804,3 @@ __all__.extend((
     "si3_o2_scalar_initial_state",
     "si3_o2_step",
 ))
-

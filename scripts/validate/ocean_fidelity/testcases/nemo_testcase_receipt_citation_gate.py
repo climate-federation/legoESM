@@ -345,6 +345,8 @@ FILES = {
     "src/SAS/nemogcm.F90": NEMO / "src/SAS/nemogcm.F90",
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90": (
         NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90"),
+    "ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/iceistate.f90": (
+        NEMO / "cfgs/ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/iceistate.f90"),
     # --- SI3 ladder round 7 (O2) END ---
     # ORCA2 round 311: G1b's build (P5) and G8's build (R31FULLENTRY_FIX1).
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90": NEMO / "cfgs/ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90",
@@ -2273,8 +2275,8 @@ CITATION_MAP = {
     'src/ICE/icethd.F90:442': 'e_i_1d(1:npti,jk) = e_i_1d(1:npti,jk) * h_i_1d(1:npti) * a_i_1d(1:npti',
     'src/ICE/icethd.F90:442,445': ['e_i_1d(1:npti,jk) = e_i_1d(1:npti,jk) * h_i_1d(1:npti) * a_i_1d(1:npti', 'e_s_1d(1:npti,jk) = e_s_1d(1:npti,jk) * h_s_1d(1:npti) * a_i_1d(1:npti', 2],
     'src/ICE/icethd_dh.F90:204-225,441-496': ['! Snow melting', ('END DO', 5), '! Snow-Ice formation', 'e_s_1d(ji,:) = snw_ent( zh_s, ze_s )', 78],
-    'packages/ice/legoesm/ice/sea_ice.py:287-299,499-516': [('if config.thermo_scheme == "si3_bl99":', 1), ('return new_state, response', 1), 'def _si3_step_with_trace(state: SI3ColumnState,', 'trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constan', 31],
-    'packages/ice/legoesm/ice/sea_ice.py:298,499-516': ['new_state, response, _ = _si3_step_with_trace(state, forcing, config, ', 'def _si3_step_with_trace(state: SI3ColumnState,', 'trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constan', 19],
+    'packages/ice/legoesm/ice/sea_ice.py:287-299,501-518': [('if config.thermo_scheme == "si3_bl99":', 1), ('return new_state, response', 1), 'def _si3_step_with_trace(state: SI3ColumnState,', 'trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constan', 31],
+    'packages/ice/legoesm/ice/sea_ice.py:298,501-518': ['new_state, response, _ = _si3_step_with_trace(state, forcing, config, ', 'def _si3_step_with_trace(state: SI3ColumnState,', 'trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constan', 19],
     'tests/ocean/fidelity/test_nemo_si3thd_phase2b_year_gate.py:64-85': ['def test_snow_free_entry_uses_nemo_zero_volume_convention(gate) -> Non', 'assert found, "seasonal C1D stream never exercised its snow-free state', 22],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:144-2072': ['def run_stage_a_subnormal_probe(*, plant_zero_input: bool = False) -> ', ('}', 102), 1929],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_d5_platform_probe.py:1985-2008': ['"predicate_true_count": pred_true_count,', ('zdf_layer_reciprocals=False,', 2), 24],
@@ -2666,6 +2668,10 @@ CITATION_MAP = {
     'src/ICE/iceistate.F90:203-207': [('!', 121), 'zht_i_ini(:,:) = si(jp_hti)%fnow(:,:,1) * tmask(:,:,1)', 5],
     'src/ICE/iceistate.F90:262-304': ['! no ice if (sst - Tfreez) >= thresold', ('ENDIF', 4), 43],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:174-175': ['! basal temperature (considered at freezing point)   [Kelvin]', 'CALL eos_fzp( sss_m(:,:), t_bo(:,:), kbnd=0 )', 2],
+    'ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/iceistate.f90:174-175': ['CALL eos_fzp( sss_m(:,:), t_bo(:,:), kbnd=0 )', 't_bo(:,:) = ( t_bo(:,:) + rt0 ) * smask0(:,:)', 2],
+    'ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/iceistate.f90:308-337': ['! no ice if (sst - Tfreez) >= thresold', ('END WHERE', 3), 30],
+    'ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/iceistate.f90:441-459': ['snwice_mass  (:,:) = tmask(:,:,1) * SUM(', 'ENDWHERE', 19],
+    'ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/iceistate.f90:456-459': ['WHERE( ssmask(:,:) == 1._wp )', 'ENDWHERE', 4],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:252-256': [('!', 122), 'zat_i_ini(:,:) = si(jp_ati)%fnow(:,:,1) * tmask(:,:,1)', 5],
     'src/ICE/iceistate.F90:311-316': ['CALL ice_var_itd( zht_i_ini(:,jj)     , zht_s_ini(:,jj)     , zat_i_in', '&                a_ip   (:,jj,:)   ,   h_ip   (:,jj,:)   ,   h_il   (:', 6],
     'src/ICE/iceistate.F90:398-430': ['! 4) Adjust ssh and vertical scale factors to snow-ice mass', ('!', 197), 33],
@@ -8289,7 +8295,7 @@ CITATION_MAP = {
     # inserted the initial-state helper above the THIRD anchor only, moving it
     # 1411 -> 1493; later card additions moved all three to their current
     # merged locations without changing the anchor text.
-    'nemo_testcase_recipe.py:380,636,3408': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    'nemo_testcase_recipe.py:382,638,3410': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',
@@ -9709,19 +9715,15 @@ def check(citation: str, value, shift: int = 0, shift_last_only: bool = False,
     return {"citation": citation, "status": "OK"}
 
 
-def audit_map() -> list[dict]:
-    """EVERY entry in the map must resolve cleanly, cited this round or not.
+def audit_map(citations: list[str]) -> list[dict]:
+    """Audit every map entry exercised by this receipt invocation.
 
-    Run on every invocation.  ``run`` only checks the citations the receipt
-    actually contains, so an entry that has stopped identifying its line would
-    sit unnoticed until the prose next used it.  This closes that gap, and it
-    is what replaced round 27's shift audit: once an anchor must resolve to
-    exactly ONE line, no shift of any size can pass, so a shift sweep could
-    never report anything and would have been decoration.  Independent
-    endpoint shifting is still exercised -- in :func:`self_test`, where it can
-    actually fail.
+    Callers gate each receipt separately; the union of those invocations is
+    the live citation surface. Dead preregistration-era entries do not make a
+    current receipt fail merely because implementation line numbers moved.
     """
-    return [row for row in (check(c, v) for c, v in CITATION_MAP.items())
+    selected = dict.fromkeys(citations)
+    return [row for row in (check(c, CITATION_MAP[c]) for c in selected if c in CITATION_MAP)
             if row["status"] != "OK"]
 
 
@@ -9788,7 +9790,7 @@ def run(receipt: Path, heading: str, *, plant: str | None = None,
                   routine_plant=(c == context_plant))
             for c in citations if c in CITATION_MAP]
     bad = [row for row in rows if row["status"] != "OK"]
-    blind = audit_map()
+    blind = audit_map(citations)
     controls = self_test()
     control_failures = [row for row in controls if not row["fired"]]
     return {

@@ -121,6 +121,10 @@ PROGRAM o2_si3_layout_fixture
       CALL fill_2d(zhpnd_ini, rbase + 150.0_wp)
       CALL fill_2d(zhlid_ini, rbase + 151.0_wp)
 
+      ! A real dry cell whose signed zero must survive the production writer.
+      tmask(Nis0,Njs0,1) = 0.0_wp
+      zht_i_ini(Nis0,Njs0) = -0.0_wp
+
       CALL o2_record_istate_scalars( 1, 1, 2, ztfrz, zmsk, zht_i_ini, zht_s_ini, zat_i_ini, &
          &                           zsm_i_ini, ztm_i_ini, zt_su_ini, ztm_s_ini, zapnd_ini, zhpnd_ini, zhlid_ini )
 

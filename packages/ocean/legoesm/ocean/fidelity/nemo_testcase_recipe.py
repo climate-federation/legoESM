@@ -12,8 +12,10 @@ import math
 from pathlib import Path
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.core.field import Field
 from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
 from legoesm.grids.tripole import create_tripole_grid
@@ -4392,6 +4394,32 @@ def _ddpdd_sum_2d(arr: np.ndarray) -> np.float64:
     return hi
 
 
+@jax.custom_jvp
+def _ddpdd_sum_2d_jax(arr: jax.Array) -> jax.Array:
+    """JAX form of NEMO's serial `DDPDD`, with the same Fortran element order."""
+    sr = nemo_source_round
+    flat = jnp.transpose(arr, (1, 0)).reshape(-1)
+
+    def step(carry, value):
+        hi, lo = carry
+        t1 = sr(value + hi)
+        err = sr(t1 - value)
+        t2 = sr(sr(sr(hi - err) + sr(value - sr(t1 - err))) + lo)
+        hi_next = sr(t1 + t2)
+        lo_next = sr(t2 - sr(hi_next - t1))
+        return (hi_next, lo_next), None
+
+    zero = jnp.asarray(0.0, dtype=arr.dtype)
+    (hi, _), _ = jax.lax.scan(step, (zero, zero), flat)
+    return hi
+
+
+@_ddpdd_sum_2d_jax.defjvp
+def _ddpdd_sum_2d_jax_jvp(primals, tangents):
+    (arr,), (darr,) = primals, tangents
+    return _ddpdd_sum_2d_jax(arr), jnp.sum(darr)
+
+
 def orca2_initial_ice_ssh(
     temperature: np.ndarray,
     salinity: np.ndarray,
@@ -4403,7 +4431,8 @@ def orca2_initial_ice_ssh(
     ln_teos10: bool = False,
     smask0_i: np.ndarray | None = None,
     use_ddpdd: bool = False,
-) -> np.ndarray:
+    return_diagnostics: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Compute NEMO's initial levitating-ice SSH adjustment on ORCA2.
 
     ``iceistate.f90:309-338`` creates one-category ice from the surface T/S
@@ -4418,6 +4447,82 @@ def orca2_initial_ice_ssh(
 
     surface_s = salinity[..., 0] if salinity.ndim == 3 else salinity
     surface_t = temperature[..., 0] if temperature.ndim == 3 else temperature
+    if not isinstance(surface_t, np.ndarray):
+        sr = nemo_source_round
+        surface_s = jnp.asarray(surface_s, dtype=jnp.float64)
+        surface_t = jnp.asarray(surface_t, dtype=jnp.float64)
+        surface_wet = jnp.asarray(
+            tmask[..., 0] if tmask.ndim == 3 else tmask,
+            dtype=jnp.float64,
+        )
+        north = jnp.asarray(f_t) >= 0.0
+
+        if ln_teos10:
+            r1_s0 = sr(jnp.asarray(0.875, dtype=surface_s.dtype)) / sr(
+                jnp.asarray(30.76941, dtype=surface_s.dtype)
+            )
+            zs = sr(jnp.sqrt(sr(jnp.abs(surface_s) * r1_s0)))
+            p = sr(sr(jnp.asarray(1.46873e-03) * zs) - jnp.asarray(9.64972e-03))
+            p = sr(sr(p * zs) + jnp.asarray(2.28348e-02))
+            p = sr(sr(p * zs) - jnp.asarray(3.12775e-02))
+            p = sr(sr(p * zs) + jnp.asarray(2.07679e-02))
+            p = sr(sr(p * zs) - jnp.asarray(5.87701e-02))
+            freezing_t = sr(p * surface_s)
+        else:
+            zs = sr(jnp.sqrt(jnp.maximum(surface_s, 0.0)))
+            freezing_t = sr(
+                sr(
+                    sr(jnp.asarray(-0.0575) + sr(jnp.asarray(1.710523e-3) * zs))
+                    - sr(jnp.asarray(2.154996e-4) * surface_s)
+                )
+                * surface_s
+            )
+
+        initial_ice = (
+            (sr(sr(surface_t - freezing_t) * surface_wet) < ice.thres_sst)
+            & (surface_wet != 0.0)
+        )
+
+        def hemisphere(pair):
+            return jnp.where(north, pair[0], pair[1])
+
+        concentration = hemisphere(ice.ice_concentration)
+        snow_mass = sr(constants.rho_snow * hemisphere(ice.snow_thickness_m))
+        ice_mass = sr(constants.rho_ice * hemisphere(ice.ice_thickness_m))
+        pond_mass = sr(
+            constants.rho_water
+            * sr(
+                hemisphere(ice.pond_concentration)
+                * sr(hemisphere(ice.pond_depth_m) + hemisphere(ice.lid_depth_m))
+            )
+        )
+        snow_ice_pond_mass = jnp.where(
+            initial_ice,
+            sr(sr(concentration * sr(snow_mass + ice_mass)) + pond_mass),
+            0.0,
+        )
+        area = jnp.asarray(e1e2t, dtype=jnp.float64)
+        if smask0_i is None:
+            raise ValueError(
+                "JAX ORCA2 initial-ice SSH requires explicit NEMO smask0_i; "
+                "the north-fold uniqueness mask may not be inferred"
+            )
+        mask_uniq = jnp.asarray(smask0_i, dtype=jnp.float64)
+        if not use_ddpdd:
+            raise ValueError(
+                "JAX ORCA2 initial-ice SSH requires use_ddpdd=True for NEMO identity"
+            )
+        r1_rho0 = sr(jnp.asarray(1.0) / jnp.asarray(NEMO_CONSTANTS_CONFIG.rho_0))
+        area_sum = _ddpdd_sum_2d_jax(sr(area * mask_uniq))
+        mass_sum = _ddpdd_sum_2d_jax(
+            sr(sr(snow_ice_pond_mass * r1_rho0) * area * mask_uniq)
+        )
+        ssh_adjustment = sr(mass_sum / area_sum)
+        ssh = jnp.where(surface_wet != 0.0, -ssh_adjustment, 0.0)
+        if return_diagnostics:
+            return ssh, snow_ice_pond_mass, area_sum, ssh_adjustment
+        return ssh
+
     if ln_teos10:
         zs = np.sqrt(np.abs(surface_s) * (1.0 / 35.16504))
         freezing_t = (
@@ -4484,10 +4589,14 @@ def orca2_initial_ice_ssh(
         )
         ssh_adjustment = np.float64(mass_sum / area_sum)
     else:
+        area_sum = np.sum(area * mask_uniq)
         ssh_adjustment = np.sum(
             snow_ice_pond_mass / NEMO_CONSTANTS_CONFIG.rho_0 * area * weight_uniq
-        ) / np.sum(area * mask_uniq)
-    return np.where(surface_wet, -ssh_adjustment, 0.0)
+        ) / area_sum
+    ssh = np.where(surface_wet, -ssh_adjustment, 0.0)
+    if return_diagnostics:
+        return ssh, snow_ice_pond_mass, area_sum, ssh_adjustment
+    return ssh
 
 
 __all__ = __all__ + (
@@ -4495,4 +4604,3 @@ __all__ = __all__ + (
     "ORCA2_DECK_INITIAL_ICE",
     "orca2_initial_ice_ssh",
 )
-

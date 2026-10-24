@@ -1,131 +1,106 @@
-# SI3 Ladder Round 7 (`si3_r7`) Receipt — Rung O2 (Scalar Initial State from `sst_m`/`sss_m` and `&namini`, Levitating-Ice Initial SSH Adjustment Reusing `orca2_initial_ice_ssh`, and `ORCA2_SAS_ICE` O2 Acquisition Tool)
+# SI3 round 7 receipt — O2 acquisition needed
 
-## 1. Scope, Preregistration, and Provenance (`DECISION 153`, `DECISION 159`)
+## Outcome and provenance
 
-This round executes rung **O2** (`si3_r7`) of the SI3 sea-ice fidelity ladder (`docs/ice/fidelity/si3_ladder_design.md:222`) built on top of rung **O1** (`si3_r4`, commit `fe19fb330ecbe42737ac71b2fe152a492f82ac15`) under **DECISION 153** and **DECISION 159**:
-* **DECISION 159 (Rung O2):** Uses the same `ORCA2_SAS_ICE` diagnostic deck as Rung O1 (`ln_icedyn = .false.`, `ln_icethd = .false.`, `nn_it000 = 1`, `nn_itend = 2`, `nn_fsbc = 1`, `nn_stock = 1`, `jpl = 5`, `nlay_i = 10`, `nlay_s = 5`, `ln_pnd = .true.`, `ln_pnd_LEV = .true.`, `ln_pnd_lids = .true.`, `ln_teos10 = .true.`), initialized from the recorded `sst_m`/`sss_m` and `&namini` namelist scalars:
-  1. **SST / freezing-point (`eos_fzp`) and hemisphere-dependent scalar initial state** (`src/ICE/iceistate.F90:124-126`, `:203-207`, `:262-304`; `ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:174-175`, `:252-256`, `:309-338`) right before category fitting (`CALL ice_var_itd` at `src/ICE/iceistate.F90:311-316`, which belongs to Rung **O3**).
-  2. **Levitating-ice initial SSH branch and snow/ice/pond mass** (`src/ICE/iceistate.F90:398-430`; `ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:440-460`), reusing the ORCA2 lane's round-329 recipe function `orca2_initial_ice_ssh` (`ORCA2InitialIce`, `ORCA2_DECK_INITIAL_ICE`, `orca2_initial_ice_ssh` in `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4363-4490`, ported from commit `02acc8a1b10f2cc8511a6ba4d7fc233b34d73299` on `fidelity/nemo-testcases-orca2-rounds`).
-* **Deck separation (`ORCA2_SAS_ICE` vs `ORCA2_OMIP_L4`):** `ORCA2_SAS_ICE` is five-category (`jpl = 5`) with ponds and `ln_teos10 = .true.` (`cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg:146`, `cfgs/ORCA2_SAS_ICE/EXPREF/namelist_ice_cfg:9-50`), whereas the ORCA2 ocean records (`ORCA2_OMIP_L4`) used `ln_eos80 = .true.`. They are never mixed: `orca2_initial_ice_ssh` preserves its exact `ln_eos80 = .true.` default so `build_orca2_zps_card` stays `0`-ULP bit-identical on `ORCA2_OMIP_L4`, while adding keyword-only `ln_teos10: bool = False`, `smask0_i: np.ndarray | None = None`, and `use_ddpdd: bool = False` for `ORCA2_SAS_ICE`.
-* **Round contract (`THIS ROUND = DESIGN + BUILD + ACQUISITION TOOL for O2, then STOP with ACQUISITION_NEEDED`):**
-  1. Preregister first (`docs/ice/fidelity/si3_r7_o2_preregister.md:1-143`, committed at `1169691c3c` before any code edits).
-  2. Reuse `orca2_initial_ice_ssh` in `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4363-4490` and transcribe O2's scalar initial state and levitating-ice SSH adjustment in the selectable SI3 path (`packages/ice/legoesm/ice/si3_orca2_state.py:2105-2661`, `packages/ice/legoesm/ice/config.py:528-587`, `packages/ice/legoesm/ice/sea_ice.py:364-367`, `:643-697`, `packages/ice/legoesm/ice/__init__.py:227-251`), keeping all existing callers `0`-ULP bit-identical against parent commit `fe19fb330ecb`.
-  3. Build the committed O2 acquisition tool (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/run.sh:1-1073`) and gate (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.py:1-1599`) extending O1's (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1-1855`), run the read-only preflight (`--preflight-only`), and stop with `ACQUISITION_NEEDED`. Neither `makenemo` nor `mpirun` was invoked by the agent.
+Round `si3_r7` implements the O2 scalar initial state and the initial
+levitating-ice SSH adjustment, supplies a fail-closed acquisition/admission
+tool, runs only its read-only preflight, and stops at `ACQUISITION_NEEDED`.
+Neither `makenemo` nor `mpirun` was run.
 
-### Survey Before Building (`grep` findings)
-Before writing any code, the repository and the ORCA2 lane (`fidelity/nemo-testcases-orca2-rounds`) were surveyed via `git log -S orca2_initial_ice_ssh` and `grep`:
-* `02acc8a1b10f2cc8511a6ba4d7fc233b34d73299` on `fidelity/nemo-testcases-orca2-rounds`: defines `ORCA2InitialIce`, `ORCA2_DECK_INITIAL_ICE`, and `orca2_initial_ice_ssh` (ported to `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4363-4490`), which computes NEMO's initial levitating-ice SSH adjustment on ORCA2 (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:309-460`) using `dom_uniq` T-fold right-half deduplication (`src/OCE/DOM/domutl.F90:91-121`).
-* `packages/ice/legoesm/ice/si3_orca2_state.py:1-2071` and `scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1-1855` (Rung O1 / `si3_r4`): defines `SI3ORCA2StateConfig`, `SI3State`, `si3_hfn_category_bounds`, `si3_var_glo2eqv`, `si3_var_agg`, `si3_update_snwice_mass`, `si3_lbc_lnk_orca2`, `si3_o1_step`, `read_o1_binary_snapshot`, `stitch_o1_binary_snapshots`, `o1_snapshot_to_si3_state`, `_compare_si3_states_wet_and_full`, `verify_dry_signed_zero_fixture`, and `verify_ocean_output_log`.
+The O2 commits were rebased from the pre-fix O1 head onto the landed SI3 lane
+tip `042c7bd74c2944dab8c39318687ab0cef54f9d2b`. This receipt and the operator
+amendment in `docs/ice/fidelity/si3_r7_o2_preregister.md` supersede stale
+pre-rebase statements without changing the preregistered scope.
 
-### Provenance & Evidence Digests
-* **Parent commit:** `fe19fb330ecbe42737ac71b2fe152a492f82ac15` (Rung O1 / `si3_r4`)
-* **Preregistration commit (first):** `1169691c3c` (`docs/ice/fidelity/si3_r7_o2_preregister.md:1-143`)
-* **Shipped NEMO 5.0.2 input bundles (verified in preflight):**
-  * `/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0.tar.gz` SHA-256: `5d47eab85c591fe0fd7e63a80892f3264b6387edf93cbb975a71b2f5fdf1a4`
-  * `/data/abyssal/dbalwada/nemo-testcases-l4/inputs/SAS_v5.0.0_download/SAS_v5.0.0.tar.gz` SHA-256: `ee00646832ea89f468d0f01bf537ed231d21f23bba77ab1a9aab26147ecec6cf`
-* **Evidence artifacts under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round7/`:**
-  * `o2_preflight_receipt.json` SHA-256: `abc8b301630b435b9d4c67b15e558270c2db2430f8356412bc7222f09e07044d`
-  * `cpu_self_test.json` SHA-256: `181f40463049efb1dd384b41f4b5d1ec0ee7106a740a096d837b818b9c9aca26`
-  * `gpu_nvidia_smi_before.txt` SHA-256: `cb49a5abeaa1be2c2e0307268e8f0dc9afde939954c7a2fcec833eed1e236f4b`
-  * `gpu_nvidia_smi_after.txt` SHA-256: `8b7053f41cfba9dd5a5b7bca77fd3286d0012d429b601e110484d7f32fc3e5be`
-* **GPU Etiquette Note (`DECISION 158`):** `nvidia-smi` recorded in `gpu_nvidia_smi_before.txt` and `gpu_nvidia_smi_after.txt` showed both GPUs occupied by other jobs (`GPU 0`: PID `860530`, `24768 MiB`; `GPU 1`: PID `917773`, `24712 MiB`). Per `DECISION 158` ("never a GPU another job uses"), neither occupied GPU was touched; all gate self-tests and pytest suites ran on CPU (`JAX_PLATFORMS=cpu JAX_ENABLE_X64=1`).
+The implementation was checked against the configuration's own compiled
+source, not only the OMIP example:
 
----
+- `ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/iceistate.f90:174-175`
+  defines the halo-free-interior `t_bo` freezing-point operation.
+- The same file at `:308-337` defines the TEOS-10 SST mask and
+  hemisphere-dependent scalar initialization.
+- The same file at `:441-459` defines mass, DDPDD global reductions, and the
+  levitating-ice SSH branch. Lines `:456-459` subtract the same adjustment from
+  the pre-existing Kmm and Kbb fields independently; there is no inner
+  `ln_rstart` guard in this compiled branch.
 
-## 2. O2 Scalar Initial State & Levitating-Ice SSH Transcription (`nemo_testcase_recipe.py` and `si3_orca2_state.py`)
+## Model implementation
 
-All statement ordering, branching, and rounding conventions in `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4363-4490` and `packages/ice/legoesm/ice/si3_orca2_state.py:2105-2661` transcribe NEMO 5.0.2 (`/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2`) literally with `nemo_source_round` (`packages/core/legoesm/core/source_rounding.py:14-27`):
+`packages/ice/legoesm/ice/si3_orca2_state.py` requires an explicit
+`SI3O2InitConfig`, explicit `ssmask`, `smask0_i`, both pre-branch SSH levels,
+and explicit halo policy. It refuses the wrong initialization mode, EOS,
+embedded-ice mode, and restart mode. No missing O2 field is inferred.
 
-1. **Reuse of ORCA2 Round-329 `orca2_initial_ice_ssh` (`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4363-4490`):**
-   * Ports `ORCA2InitialIce` (`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4363-4375`), `ORCA2_DECK_INITIAL_ICE` (`:4378`), `_ddpdd_sum_2d` (`:4381-4392`, NEMO `glob_2Dsum` Knuth two-sum reduction from `src/OCE/LBC/lib_mpp.F90:1244-1267`), and `orca2_initial_ice_ssh` (`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:4395-4490`) from `02acc8a1b10f2cc8511a6ba4d7fc233b34d73299`.
-   * Preserves the exact default signature and `ln_eos80` path (`ln_teos10=False, smask0_i=None, use_ddpdd=False`) for `ORCA2_OMIP_L4` (`0` ULP verified against `02acc8a1b10f2cc8511a6ba4d7fc233b34d73299` in `tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:297-322`), and supports `ln_teos10=True`, explicit `smask0_i`, and `use_ddpdd=True` for `ORCA2_SAS_ICE`, matching `si3_o2_scalar_initial_state` and NEMO 5.0.2 to **`0` ULP** on the real `ORCA2_SAS_ICE` domain (`zsshadj = 0.10250415697799758`, `area = 357005237105466.1`).
+The scalar operator implements:
 
-2. **Selectable O2 Configuration & Production `step_sea_ice` Dispatch (`packages/ice/legoesm/ice/si3_orca2_state.py:2105-2210`, `packages/ice/legoesm/ice/config.py:528-587`, `packages/ice/legoesm/ice/sea_ice.py:364-367`, `:643-697`):**
-   * `SI3O2InitConfig` (`packages/ice/legoesm/ice/si3_orca2_state.py:2105-2156`): holds `&namini` parameters (`src/ICE/iceistate.F90:453-533`, `cfgs/ORCA2_SAS_ICE/EXPREF/namelist_ice_cfg:14-37`) and `ln_teos10` (`cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg:146`).
-   * `SI3O2ScalarInitialState` (`packages/ice/legoesm/ice/si3_orca2_state.py:2159-2193`): holds the 14 pre-`ice_var_itd` scalar initial-state fields (`t_bo, ztfrz, zmsk, zht_i_ini, zht_s_ini, zat_i_ini, zsm_i_ini, ztm_i_ini, zt_su_ini, ztm_s_ini, zapnd_ini, zhpnd_ini, zhlid_ini, rn_amax_2d`), the 10 post-`ice_istate` aggregated volume/mass/SSH fields (`vt_i, vt_s, at_i, at_ip, vt_ip, vt_il, snwice_mass, snwice_mass_b, ssh_kbb, ssh_kmm`), and the scalar reductions `area` and `zsshadj`.
-   * `build_si3_orca2_o2_config` (`packages/ice/legoesm/ice/config.py:578-587`) builds `SeaIceConfig(thermo_scheme="si3_orca2_o2", si3_orca2=..., si3_o2_init=...)`, `_validate_si3_orca2_o1_config` (`packages/ice/legoesm/ice/config.py:531-563`) validates both `"si3_orca2_o1"` and `"si3_orca2_o2"`, and `step_sea_ice` (`packages/ice/legoesm/ice/sea_ice.py:364-367`, `_si3_orca2_o2_step_with_trace` at `:643-697`) dispatches `SI3State` + `SI3ORCA2O2Forcing` (`packages/ice/legoesm/ice/si3_orca2_state.py:2196-2210`), returning `(SI3State, TileResponse)`.
+- TEOS-10 `eos_fzp` for `t_bo` on the NEMO-defined interior and `ztfrz` through
+  the NEMO-defined halos (`src/OCE/TRA/eosbn2.F90:1650-1710`);
+- the SST threshold mask and northern/southern namelist scalars
+  (`src/ICE/iceistate.F90:262-304`);
+- pond-area scaling before category fitting; and
+- the SSH branch by calling the existing public `orca2_initial_ice_ssh` recipe
+  from `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py`.
 
-3. **Freezing Point `si3_eos_fzp`, Unique Mask `si3_dom_uniq_t_orca2`, and `DDPDD` Reduction `si3_glob_2dsum_ddpdd` (`packages/ice/legoesm/ice/si3_orca2_state.py:2214-2370`):**
-   * `si3_eos_fzp` (`packages/ice/legoesm/ice/si3_orca2_state.py:2318-2370`) transcribes `eos_fzp_2d` (`src/OCE/TRA/eosbn2.F90:1650-1710`) for both `ln_teos10 = .true.` (`r1_S0 = 0.875_wp / 30.76941_wp`, Horner polynomial in `zs = SQRT(ABS(sss) * r1_S0)` with gradient-safe `_safe_sqrt` at `sss == 0`, `src/OCE/TRA/eosbn2.F90:69`, `:1674-1683`) and `ln_eos80 = .true.` (`src/OCE/TRA/eosbn2.F90:1691-1696`), honoring `kbnd=0` (`A2D(0)` interior only, used for `t_bo` at `src/ICE/iceistate.F90:125`) vs `kbnd=nn_hls` (full `(1:jpi, 1:jpj)` array, used for `ztfrz` at `src/ICE/iceistate.F90:263`).
-   * `si3_dom_uniq_t_orca2` (`packages/ice/legoesm/ice/si3_orca2_state.py:2229-2257`) transcribes `dom_uniq( puniq, 'T' )` (`src/OCE/DOM/domutl.F90:91-121`) and `smask0_i = ssmask * smask0_i` (`src/OCE/DOM/dommsk.F90:203-205`).
-   * `si3_glob_2dsum_ddpdd` (`packages/ice/legoesm/ice/si3_orca2_state.py:2261-2315`) transcribes `glob_2Dsum` (`src/OCE/LBC/lib_mpp.F90:1244-1267`) using Fortran column-major Knuth two-sum (`DDPDD`) on the interior `Nis0:Nie0, Njs0:Nje0` with a `@jax.custom_jvp` rule (`_si3_glob_2dsum_ddpdd_jvp` at `packages/ice/legoesm/ice/si3_orca2_state.py:2285-2293`) providing exact linear tangents and cotangents.
+The ORCA2 recipe retains its production-dispatcher NumPy behavior for existing
+callers and adds the explicit TEOS-10, unique-mask, DDPDD, diagnostic-returning
+path used by O2. The parent/current production-dispatcher control covers real
+non-SI3, lane SI3, O1, and ORCA2 recipe callers. Code-path plants prove the O1
+and O2 dispatcher branches are actually reached. O2 remains fail-closed in
+`step_sea_ice`: it exposes initialization through `si3_o2_step` but refuses to
+invent the still-unowned `ice_update_flx` heat/freshwater/salt response.
 
-4. **O2 Scalar Initial State & Levitating-Ice SSH (`si3_o2_scalar_initial_state` and `si3_o2_step` in `packages/ice/legoesm/ice/si3_orca2_state.py:2373-2661`):**
-   * `si3_o2_scalar_initial_state` (`packages/ice/legoesm/ice/si3_orca2_state.py:2373-2621`) transcribes:
-     * `t_bo = (eos_fzp(sss_m, kbnd=0) + rt0) * smask0` (`src/ICE/iceistate.F90:125-126`).
-     * `rn_amax_2d = WHERE(gphit >= 0._wp, rn_amax_n, rn_amax_s)` (`src/ICE/iceistate.F90:203-207`).
-     * `ztfrz = eos_fzp(sss_m, kbnd=nn_hls)` and `zmsk = WHERE((sst_m - ztfrz) * tmask >= rn_thres_sst, 0._wp, tmask)` (`src/ICE/iceistate.F90:263-266`).
-     * Hemisphere selection (`ff_t >= 0._wp`), `zmsk` masking of all 10 `&namini` fields, and `zapnd_ini = zapnd_ini * zat_i_ini` (`src/ICE/iceistate.F90:275-303`).
-     * Aggregated volumes (`vt_i, vt_s, at_i, at_ip, vt_ip, vt_il`), `lbc_lnk` halo exchange (`src/ICE/iceistate.F90:407`), `snwice_mass = tmask * (rhos * vt_s + rhoi * vt_i + rhow * (vt_ip + vt_il))`, `snwice_mass_b = snwice_mass`, `area = glob_2Dsum(e1e2t * ssmask)`, `zsshadj = glob_2Dsum(snwice_mass * r1_rho0 * e1e2t) / area`, and `WHERE(ssmask == 1._wp) ssh_kmm = ssh_before_kmm - zsshadj ; ssh_kbb = ssh_kmm` (`src/ICE/iceistate.F90:412-427`).
-     * **Gradient-only coupling (`DECISION 158`, `DECISION 159`):** attaches zero-valued primal terms `(ztfrz - stop_gradient(ztfrz))` and `(ssh_kmm - stop_gradient(ssh_kmm))` inside `zht_i_ini` (`packages/ice/legoesm/ice/si3_orca2_state.py:2601-2615`) so forward IEEE-754 float64 bits are 0-ULP identical to NEMO 5.0.2 while `jax.grad` / `jax.jvp` propagate non-zero sensitivities with respect to `sss_m`, `sst_m`, and `&namini` parameters.
+## Acquisition and admission contract
 
----
+The committed tool is
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/run.sh`.
+Its default is `--preflight-only`; `--run` is operator-only. It uses scratch
+space under the evidence root, requires `free -g` available memory of at least
+150 GB immediately before builds and runs, checks disk, wraps NEMO in
+`timeout`, guards `cfgs/work_cfgs.txt`, and retains failed or admission-refused
+logs through `ERR` and `EXIT` handling.
 
-## 3. Committed O2 Acquisition Tool (`nemo_si3_o2_orca2_sas_acquisition/`) and Preflight Verification
+Before any possible NEMO launch, operator order is statically planted and then
+requires both real executables to pass the shared landed same-program helper.
+The producer manifest records both executable digests. `--admit-existing`
+requires the recorded producer to be a real commit object, an ancestor of
+current HEAD, and equal to the requested pin when supplied. It checks input and
+binary SHA-256 manifests, same-program build paths, per-run producer stamps,
+completion/log markers, and the optional gate-change marker.
 
-The committed acquisition tool under `scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/` extends O1's tool (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/`) and consists of:
-* `scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/run.sh:1-1073`:
-  * Default mode is read-only `--preflight-only` (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/run.sh:74-82`, `:578-927`). Operator execution uses `--run` (`:972-1073`), and `--admit-existing` (`:964-970`) runs both `run_preflight skip_target_absent` and `admit_all` (`:929-962`).
-  * Never uses `/tmp` (`export TMPDIR=$scratch` under `$EVIDENCE_ROOT/.o2-scratch.XXXXXX` at `scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/run.sh:581-583`), enforces `verify_work_cfgs_guard` (`:186-199`), `check_free_ram_gb` (`>= 150` GB at `:125-133`), `check_free_disk_kb` (`>= 8 GiB` at `:136-151`), `cleanup_on_exit` (`:92-123`), `verify_namelists_and_stems` on both the 2-step deck and rendered `rst_1step` deck (`:201-389`), `verify_excerpt_provenance_and_deck_independence` (`:391-468`), and `build_orca2_sas_ice_syntax_mods` (`:470-576`) compiling patched `icedyn_adv_pra.F90`, `o2_si3_state_writer.F90`, patched `iceistate.F90`, and patched `icestp.F90` with `gfortran -fsyntax-only` against `ORCA2_SAS_ICE`'s own module chain.
-* `scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/o2_si3_state_writer.F90:1-433`:
-  * Write-only Fortran observer (`USE, INTRINSIC :: iso_fortran_env, ONLY : int32, real64` at `scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/o2_si3_state_writer.F90:6`) providing `o2_write_istate_Scalars` (captures the 14 scalar fields at `src/ICE/iceistate.F90:306` right before `ice_var_itd`), `o2_write_istate_Final` (writes `o2_si3_records/o2_si3_istate_rankXXXX.bin`, magic `O2SI3I01`, `898,968` bytes/rank on `184 x 152`, at `src/ICE/iceistate.F90:438`), and `o2_write_si3_frame` (writes `o2_si3_records/o2_si3_state_{entry,step0001,step0002}_rankXXXX.bin`, magic `O1SI3R01`, `868,548` bytes/rank on `184 x 152`).
-* `scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/icedyn_adv_pra_o2_public.patch`, `scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/iceistate_o2_writer.patch`, and `scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/icestp_o2_writer.patch`:
-  * Strictly additive (`0` removed lines) unified diffs against `src/ICE/icedyn_adv_pra.F90`, `src/ICE/iceistate.F90`, and `src/ICE/icestp.F90`.
-* `scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/o2_si3_fixture_stubs.F90:1-129` and `scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/o2_si3_layout_fixture.F90:1-316`:
-  * Standalone `gfortran` 4-rank layout fixture linked against the real `o2_si3_state_writer.F90`, writing 4 MPI rank files for both `o2_si3_istate_rankXXXX.bin` (`66,520` bytes/rank on `10 x 9`) and `o2_si3_state_{entry,step0001,step0002}_rankXXXX.bin` (`64,308` bytes/rank on `10 x 9`).
+The restart run refuses unless `rec_2step` produced both the SI3 and SAS ocean
+restart. It copies them into `rst_1step/input_restart`, writes step-2 output to
+`rst_1step/output_restart`, and never aliases an input with an output. The
+restart reader consumes NEMO's halo-free NetCDF payload; rank-local binary
+records retain the NEMO-defined seam/fold halos.
 
-### Preflight Checklist Items 1–7 and Plant Verification (`o2_preflight_receipt.json`)
-Running `scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/run.sh --preflight-only /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round7/o2_preflight_receipt.json` verified all 7 checklist items and all 38 planted negative controls (`status = "PREFLIGHT_OK"`):
+The O2 writer uses `USE, INTRINSIC :: iso_fortran_env`. Its compiled four-rank
+fixture links the real writer, writes different values on every rank, and
+contains a dry negative-zero cell whose sign must survive the writer. Scoring
+uses wet cells only: `t_bo` uses the defined interior; other O2 fields include
+defined wet seam/fold halos. Plants perturb real wet interior, seam/fold,
+rank-local, SSH, provenance, binary, log, and restart-dependency paths and must
+emit `REFUSE`/`STATUS PLANT-FIRED`.
 
-| Checklist Item | Verification Performed in `--preflight-only` | Planted Violations Verified to Fire (`38` total) | Verdict |
-|---|---|---|---|
-| **Item 1:** `MY_SRC` syntax & `USE, INTRINSIC` | Patches verified strictly additive (`icedyn_adv_pra_o2_public.patch`, `iceistate_o2_writer.patch`, `icestp_o2_writer.patch`); `cpp` + `gfortran -fsyntax-only` against `ORCA2_SAS_ICE`'s own module chain on patched `icedyn_adv_pra.F90`, `o2_si3_state_writer.F90`, patched `iceistate.F90`, and patched `icestp.F90`; `check_intrinsic_use` on all `.F90` files. | `1a_continuation_ampersand`, `1b_undeclared_identifier`, `1c_bare_use_iso_fortran_env` | `PASS` |
-| **Item 2:** `makenemo -r` in `cfgs/ref_cfgs.txt` & `work_cfgs.txt` guard | `ORCA2_SAS_ICE` verified present in `cfgs/ref_cfgs.txt:8`; `verify_work_cfgs_guard` verified on `cfgs/work_cfgs.txt`. | `2a_work_config_not_in_ref_cfgs`, `2b_work_cfgs_txt_guard` | `PASS` |
-| **Item 3:** Namelist groups, variable-group ownership, `nn_fsbc` multiples, `sn_*` stems, rendered `rst_1step` deck | Every `&group` and every variable's owning `&group` in both the 2-step deck and rendered `rst_1step` deck verified against `namelist_ref` / `namelist_ice_ref`; `nn_itend`, `nn_stock` verified multiples of `nn_fsbc`; every active `sn_*` stem and weights file verified in bundles; deck deviations checked. | `3a_unknown_namelist_group`, `3b_wrong_group_var_cn_icerst_in_in_namini`, `3c_missing_sn_stem`, `3d_bad_fsbc_multiple`, `3e_unapproved_deck_deviation` | `PASS` |
-| **Item 4:** Compiled `gfortran` 4-rank layout fixture (`O2SI3I01` + `O1SI3R01`) & writer output dir | Compiled `o2_si3_fixture_stubs.F90` + `o2_si3_state_writer.F90` + `o2_si3_layout_fixture.F90` with `gfortran -O2` and verified all 4 ranks × 37 `O2SI3I01` fields (`66,520` bytes/rank) and 112 `O1SI3R01` fields (`64,308` bytes/rank) and stitched `(16, 14)` global grid to **`0` ULP**. | `4a_missing_writer_output_dir`, `4b_rank_collapse`, `4c_wrong_offset`, `4d_truncation`, `4e_bad_magic` | `PASS` |
-| **Item 5:** ASCII-only & frame/field order | All acquisition `.F90`, `.patch`, `namelist*`, `run.sh`, and `ocean.output.excerpt` verified strictly ASCII. | `5a_missing_frame`, `5b_field_swap`, `5c_utf8_non_ascii` | `PASS` |
-| **Item 6:** Disk (`>= 8 GiB`) & RAM (`free -g >= 150` GB) floors | `df -Pk` on existing parent and `free -g` (`>= 150` GB) verified. | `6a_disk_floor_nonexistent_parent`, `6b_ram_floor_150gb` | `PASS` |
-| **Item 7:** Target absence, excerpt provenance, log check, same-program check, & `EXIT` trap | `ORCA2_SAS_ICE_O2_REF`, `ORCA2_SAS_ICE_O2_REC`, and `$EVIDENCE` verified absent; `ocean.output.excerpt` SHA-256 and deck-independence verified; `verify_ocean_output_log` verified; `same_program` verified on preprocessed `.f90` (`icedyn_adv_pra.f90`, `iceistate.f90`, `icestp.f90`, `nemogcm.f90`) and compiled `.o` ELF objects; `EXIT` trap verified to clean failed-build `cfgs/` dirs and retain completed-but-refused runs in `refused/`. | `7a_existing_target_dir`, `7b_excerpt_provenance_sha`, `7c_log_wrong_icedyn_icethd`, `7d_log_error_token`, `7e_log_missing_aaa`, `7f_log_wrong_jpl`, `7g_log_wrong_flag`, `7h_same_program_non_observer_mutation`, `7i_exit_trap_failed_build_cleanup_and_completed_retained_in_refused` | `PASS` |
-| **Gate Self-Test, `orca2_initial_ice_ssh` Reuse, Wet-Masking, Dry `-0.0` Fixture, & Plants (`P2, P3, P4, P6`)** | `nemo_si3_o2_orca2_sas_gate.py --self-test` verified **`0` ULP** across all `24` O2 scalar initial-state and levitating-ice SSH fields (`o2_area = 357005237105466.1`, `o2_zsshadj = 0.10250415697799758`), **`0` ULP** against `orca2_initial_ice_ssh`, and **`0` ULP** across all `18` prognostic fields, `55` Prather moment arrays, `13` equivalent fields, and `21` aggregated fields on `(184, 152)` (`first_wet_ij = [2, 21]`, `first_dry_ij = [2, 2]`), with `ad_grad_norm = 1321507.483692156`, `ad_grad_sss_norm = 15.855430808801566`, and `ad_grad_hti_abs = 1294367.2934016755`. | `gate_1ulp_istate`, `gate_1ulp_ssh`, `gate_eos_wrong_branch`, `gate_tbo_halo_leak`, `gate_pond_unscaled`, `gate_hemisphere_swap`, `gate_ssh_sign_or_div`, `gate_dom_uniq_missing`, `gate_stop_gradient` | `PASS` |
+The committed `ocean.output.excerpt` contains source path, complete-source
+SHA-256, and exact source line provenance. Preflight checks those headers and
+the deck deviations rather than trusting hand-written log values.
 
----
+## Verification and stop condition
 
-## 4. Unit & Fidelity Test Suite, Caller Invariance, and Autodiff (`tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py`)
+The focused O2 tests cover the compiled writer fixture, parent/current
+production dispatchers, exact model formulas, JIT/JVP/VJP behavior,
+same-program plants, halo-free restart layout, and producer-pinned admission.
+The final preflight receipt is written to
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round7/o2_preflight_receipt.json`.
+It reports `PREFLIGHT_OK`; its SHA-256 is
+`e506a4144d5841736a298174c3b23acfd1f856eca832ad73adb2f9e876ceda30`.
+Quantitative NEMO fidelity results are deliberately absent until the operator
+runs acquisition and admission on the committed producer.
 
-`tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:1-1111` (11 tests, all passing on CPU in fp64) verifies:
-1. **Parent (`fe19fb330ecb` and `02acc8a1b10f`) vs current commit `0`-ULP bit-identity across all production dispatchers + `Plant P1` (`tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:163-354`):**
-   * Loads `packages/ice/legoesm/ice/*` from parent commit `fe19fb330ecb` and `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py` from `02acc8a1b10f2cc8511a6ba4d7fc233b34d73299` via `git show` (`_load_parent_commit_modules` at `tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:119-160`), and verifies **`0` ULP** invariance on:
-     1. Non-SI3 callers (`bitz_lipscomb_conduction_step`, `IceColumnModel.create(...).step()`, `step_sea_ice` dynamic-v2).
-     2. Lane-3 SI3 production dispatcher (`step_sea_ice` and `_si3_step_with_trace` with `build_c1d_omip_l3_card().config`, `si3_column_step_arrays`, `linear_remap`).
-     3. Rung O1 production dispatcher (`step_sea_ice` with `build_si3_orca2_o1_config` and `si3_o1_step`).
-     4. ORCA2 round-329 `orca2_initial_ice_ssh` default (`ln_eos80` path used by `build_orca2_zps_card`).
-   * **Plant P1:** Perturbing `si3_o1_step` or `orca2_initial_ice_ssh` by `+1` ULP causes `_assert_zero_ulp` to fail (`AssertionError: max ULP = 1 != 0`).
-2. **`eos_fzp` (`ln_teos10` and `ln_eos80`) `0`-ULP test (`tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:357-397`):**
-   * Verifies `si3_eos_fzp` matches NEMO 5.0.2's `eos_fzp_2d` (`src/OCE/TRA/eosbn2.F90:1674-1696`) to **`0` ULP** for both `ln_teos10=True` and `ln_eos80=True` and for both `kbnd=0` and `kbnd=nn_hls`.
-3. **`dom_uniq` T-fold deduplication and `glob_2Dsum` (`DDPDD`) `0`-ULP test (`tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:400-432`):**
-   * Verifies `si3_dom_uniq_t_orca2` (`src/OCE/DOM/domutl.F90:91-121`) and `si3_glob_2dsum_ddpdd` (`src/OCE/LBC/lib_mpp.F90:1244-1267`) match `_ddpdd_sum_2d` to **`0` ULP**.
-4. **Full ORCA2 `(184, 152)` O2 gate self-test, `orca2_initial_ice_ssh` reuse, and all plants (`tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:435-461`):**
-   * Verifies `run_self_test` (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.py:921-1210`) achieves **`0` ULP** across all 24 O2 scalar/SSH fields and 107 O1 state/moment/equivalent/aggregated fields on real `ORCA2_SAS_ICE` inputs, and proves all 11 gate plants (`1ulp-istate`, `1ulp-ssh`, `eos-wrong-branch`, `tbo-halo-leak`, `pond-unscaled`, `hemisphere-swap`, `ssh-sign-or-div`, `dom-uniq-missing`, `1ulp-state`, `north-fold-sign`, `stop-gradient`) raise `ValueError("STATUS PLANT-FIRED: ...")`.
-5. **Compiled `gfortran` 4-rank layout fixture (`O2SI3I01` + `O1SI3R01`) and plants (`tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:464-512`):**
-   * Compiles and runs `o2_si3_layout_fixture.F90` + `o2_si3_state_writer.F90` and verifies `0` ULP across all 4 ranks and that all 6 fixture plants (`rank-collapse`, `wrong-offset`, `field-swap`, `truncation`, `bad-magic`, `missing-frame`) fire.
-6. **Whitespace-tolerant `ocean.output` log verifier and plants (`tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:515-533`):**
-   * Reuses O1's `verify_ocean_output_log` on `ocean.output.excerpt` and confirms all 4 log plants fire.
-7. **End-to-end `jax.jit`, `jax.value_and_grad`, `jax.jvp`, and `Plant P6` (`stop_gradient`) (`tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:536-649`):**
-   * Verifies `0`-ULP primal agreement across eager, `jax.jit`, `jax.value_and_grad`, and `jax.jvp` on both `si3_o2_scalar_initial_state` and `si3_o2_step`, finite non-zero gradients with respect to `sss_m`, `sst_m`, and `&namini` parameters (`rn_hti_ini_n`), JVP vs VJP relative agreement `< 1e-10`, and that `Plant P6` (`jax.lax.stop_gradient`) zeroes the gradients.
-8. **Production `step_sea_ice` selection of `"si3_orca2_o2"` (`tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:652-720`):**
-   * Verifies `step_sea_ice(state, SI3ORCA2O2Forcing(...), sst_m, u_ocn, v_ocn, build_si3_orca2_o2_config(...), 0.1, rDt_ice)` matches `si3_o2_step` to **`0` ULP** across all fields and rejects mismatched state/forcing/config combinations.
-9. **Same-program preprocessed source + ELF `.o` comparison and plants (`tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:723-789`):**
-   * Verifies `same_program` (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.py:359-476`, importing `_elf_view`, `objects_equal`, `BUILD_CONFIG_FILES` from `nemo_testcase_l4_orca2_round326_hmi_gate.py`) passes when only the approved O2 observer patches (`icedyn_adv_pra.f90`, `iceistate.f90`, `icestp.f90`) are present and refuses on `plant="non-observer-source"` or `plant="corrupt-object"`.
-10. **`admit_evidence_directory` scoring of `o2_si3_istate`, `rec_2step`, `ref_2step`, and `rst_1step` and all manifest/run plants (`tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:792-1085`):**
-    * Verifies `admit_evidence_directory` (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.py:1213-1521`) scores `o2_si3_istate_rankXXXX.bin` (both against `si3_o2_scalar_initial_state` and `orca2_initial_ice_ssh`), `rec_2step` (`kt=1..2`), and `rst_1step` (`kt=1`) to **`0` ULP**, and refuses on all 12 admission plants (`stamp`, `same-program`, `binary-sha`, `input-sha`, `missing-complete`, `missing-stop0`, `ref-rec-diff`, `1ulp-istate`, `1ulp-ssh`, `1ulp-state`, `rst-missing`, `rst-1ulp`).
-11. **Committed `ocean.output.excerpt` provenance (`tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:1088-1111`):**
-    * Verifies the `# Source path:`, `# Complete source SHA-256:`, and `# Source lines:` headers in `scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_acquisition/ocean.output.excerpt:1-111`.
+## Choices and review disposition
 
----
-
-## 5. Choices List and Review Disposition
-
-* **CHOICES:**
-  * `ASKED`: **DECISION 153** and **DECISION 159** (taken by user: Rung O2 uses the `ORCA2_SAS_ICE` diagnostic deck with `ln_icedyn = .false.` and `ln_icethd = .false.`, initializes the scalar ice state from the recorded `sst_m`/`sss_m` and `&namini` namelist scalars before category fitting (`src/ICE/iceistate.F90:124-126`, `:203-207`, `:262-304`) and adjusts initial SSH for levitating ice (`:398-430`), reusing the ORCA2 lane's round-329 recipe function `orca2_initial_ice_ssh`).
-  * `UNASKED`: **NONE**. No configuration choices beyond `DECISION 159` were made.
-* **Independent review:** `independent review: operator`
+- `ASKED`: implement O2 on the landed O1 lane, reuse
+  `orca2_initial_ice_ssh`, run preflight only, and stop at
+  `ACQUISITION_NEEDED`.
+- `UNASKED`: none.
+- Independent review: operator.

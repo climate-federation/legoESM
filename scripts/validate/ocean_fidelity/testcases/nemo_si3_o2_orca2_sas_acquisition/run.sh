@@ -121,6 +121,7 @@ cleanup_on_exit() {
   exit "$rc"
 }
 trap cleanup_on_exit EXIT
+trap 'printf "REFUSE: acquisition command failed at line %s; EXIT trap will retain logs\n" "$LINENO" >&2' ERR
 
 check_free_ram_gb() {
   local floor_gb=$1
@@ -183,6 +184,47 @@ check_intrinsic_use() {
   grep -E '^[[:space:]]*USE,[[:space:]]*INTRINSIC[[:space:]]*::[[:space:]]*iso_fortran_env' "$file" >/dev/null
 }
 
+require_rec_2step_restarts() {
+  local producer_dir=$1
+  local ice_restart=$producer_dir/ORCA2_SAS_00000001_restart_ice.nc
+  local ocean_restart=$producer_dir/ORCA2_SAS_00000001_restart.nc
+  [[ -f "$ice_restart" ]] || {
+    printf 'REFUSE: rec_2step did not write required SI3 restart %s\n' "$ice_restart" >&2
+    return 1
+  }
+  [[ -f "$ocean_restart" ]] || {
+    printf 'REFUSE: rec_2step did not write required SAS ocean restart %s\n' "$ocean_restart" >&2
+    return 1
+  }
+}
+
+check_operator_run_order() {
+  local script=$1
+  "$PY" - "$script" <<'PY'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+try:
+    operator = text.rsplit("\n# ---- Operator-only --run mode ----", 1)[1]
+except IndexError as exc:
+    raise SystemExit("STATUS PLANT-FIRED: missing operator-only run block") from exc
+ordered = (
+    'build_target "$TARGET_REF_CFG" 0',
+    'build_target "$TARGET_REC_CFG" 1',
+    'prove_real_same_program',
+    'stage_and_run "$TARGET_REF_CFG" "$EVIDENCE/ref_2step" 0',
+    'stage_and_run "$TARGET_REC_CFG" "$EVIDENCE/rec_2step" 0',
+    'stage_and_run "$TARGET_REC_CFG" "$EVIDENCE/rst_1step" 1',
+)
+positions = []
+for call in ordered:
+    if operator.count(call) != 1:
+        raise SystemExit(f"STATUS PLANT-FIRED: expected one operator call {call!r}")
+    positions.append(operator.index(call))
+if positions != sorted(positions):
+    raise SystemExit("STATUS PLANT-FIRED: same-program proof must precede every NEMO launch")
+PY
+}
+
 verify_work_cfgs_guard() {
   local before_file=$1
   local after_file=$2
@@ -205,10 +247,12 @@ render_rst_namelists() {
   local dst_ice=$4
   cp "$src_oce" "$dst_oce"
   cp "$src_ice" "$dst_ice"
-  sed -E -i 's/^( *nn_itend *= *).*/\11/' "$dst_oce"
+  sed -E -i 's/^( *nn_it000 *= *).*/\12/' "$dst_oce"
+  sed -E -i 's/^( *nn_itend *= *).*/\12/' "$dst_oce"
+  sed -E -i 's|^(&namrun.*)|\1\n   ln_rstart        = .true.\n   cn_ocerst_in     = "ORCA2_SAS_00000001_restart"\n   cn_ocerst_indir  = "./input_restart"\n   cn_ocerst_out    = "restart_o2_output"\n   cn_ocerst_outdir = "./output_restart"|' "$dst_oce"
   # cn_icerst_in is declared in &nampar (src/ICE/icestp.F90:341-342);
   # nn_iceini_file is declared in &namini (src/ICE/iceistate.F90:465-470).
-  sed -E -i 's|^(&nampar.*)|\1\n   cn_icerst_in     = "ORCA2_SAS_00000001_restart_ice"|' "$dst_ice"
+  sed -E -i 's|^(&nampar.*)|\1\n   cn_icerst_in     = "ORCA2_SAS_00000001_restart_ice"\n   cn_icerst_indir  = "./input_restart"\n   cn_icerst_out    = "restart_ice_o2_output"\n   cn_icerst_outdir = "./output_restart"|' "$dst_ice"
   sed -E -i 's|^(&namini.*)|\1\n   nn_iceini_file   = 2|' "$dst_ice"
 }
 
@@ -350,7 +394,14 @@ allowed_oce_diff = {"nn_itend", "nn_stock", "nn_write"}
 if deck_kind == "2step":
     allowed_ice_diff = {"ln_icedyn", "ln_icethd"}
 elif deck_kind == "rst_1step":
-    allowed_ice_diff = {"ln_icedyn", "ln_icethd", "cn_icerst_in", "nn_iceini_file"}
+    allowed_oce_diff |= {
+        "nn_it000", "ln_rstart", "cn_ocerst_in", "cn_ocerst_indir",
+        "cn_ocerst_out", "cn_ocerst_outdir",
+    }
+    allowed_ice_diff = {
+        "ln_icedyn", "ln_icethd", "cn_icerst_in", "cn_icerst_indir",
+        "cn_icerst_out", "cn_icerst_outdir", "nn_iceini_file",
+    }
 else:
     raise SystemExit(f"STATUS PLANT-FIRED: unknown deck_kind={deck_kind!r}")
 
@@ -363,12 +414,31 @@ if cfg_ice_vars.get("ln_icedyn", "").lower() != ".false." or cfg_ice_vars.get("l
     raise SystemExit("STATUS PLANT-FIRED: O2 requires ln_icedyn=.false. and ln_icethd=.false.")
 
 if deck_kind == "rst_1step":
-    if nn_itend != 1:
-        raise SystemExit(f"STATUS PLANT-FIRED: rst_1step requires nn_itend=1, got {nn_itend}")
+    if int(cfg_oce_vars.get("nn_it000", "0")) != 2 or nn_itend != 2:
+        raise SystemExit("STATUS PLANT-FIRED: rst_1step must continue at nn_it000=nn_itend=2")
+    if cfg_oce_vars.get("ln_rstart", "").lower() != ".true.":
+        raise SystemExit("STATUS PLANT-FIRED: rst_1step requires ln_rstart=.true.")
+    expected_ocean = {
+        "cn_ocerst_in": "ORCA2_SAS_00000001_restart",
+        "cn_ocerst_indir": "./input_restart",
+        "cn_ocerst_out": "restart_o2_output",
+        "cn_ocerst_outdir": "./output_restart",
+    }
+    for key, expected in expected_ocean.items():
+        if cfg_oce_vars.get(key, "").strip("\"'") != expected:
+            raise SystemExit(f"STATUS PLANT-FIRED: rst_1step requires {key}={expected!r}")
     if cfg_ice_vars.get("nn_iceini_file") != "2":
         raise SystemExit("STATUS PLANT-FIRED: rst_1step requires nn_iceini_file=2 in &namini")
     if cfg_ice_vars.get("cn_icerst_in", "").strip("\"'") != "ORCA2_SAS_00000001_restart_ice":
         raise SystemExit("STATUS PLANT-FIRED: rst_1step requires cn_icerst_in='ORCA2_SAS_00000001_restart_ice' in &nampar")
+    expected_paths = {
+        "cn_icerst_indir": "./input_restart",
+        "cn_icerst_out": "restart_ice_o2_output",
+        "cn_icerst_outdir": "./output_restart",
+    }
+    for key, expected in expected_paths.items():
+        if cfg_ice_vars.get(key, "").strip("\"'") != expected:
+            raise SystemExit(f"STATUS PLANT-FIRED: rst_1step requires {key}={expected!r}")
 
 domcfg_stem = cfg_oce_vars["cn_domcfg"].strip("\"'")
 if f"{domcfg_stem}.nc" not in archive_basenames:
@@ -794,6 +864,24 @@ run_preflight() {
   fi
   grep -F "STATUS PLANT-FIRED" "$scratch/sp_plant.log" >/dev/null
 
+  check_operator_run_order "$0"
+  sed '/^prove_real_same_program$/d' "$0" > "$scratch/run_order_plant.sh"
+  if check_operator_run_order "$scratch/run_order_plant.sh" >"$scratch/run_order_plant.log" 2>&1; then
+    printf 'REFUSE: Plant 7f (missing pre-run real same-program proof) did not fail\n' >&2
+    exit 72
+  fi
+  grep -F "STATUS PLANT-FIRED" "$scratch/run_order_plant.log" >/dev/null
+
+  mkdir -p "$scratch/restart_dependency"
+  touch "$scratch/restart_dependency/ORCA2_SAS_00000001_restart_ice.nc"
+  if require_rec_2step_restarts "$scratch/restart_dependency" >"$scratch/restart_dependency.log" 2>&1; then
+    printf 'REFUSE: Plant 7g (missing SAS ocean restart) did not fail\n' >&2
+    exit 72
+  fi
+  grep -F "required SAS ocean restart" "$scratch/restart_dependency.log" >/dev/null
+  touch "$scratch/restart_dependency/ORCA2_SAS_00000001_restart.nc"
+  require_rec_2step_restarts "$scratch/restart_dependency"
+
   # Plant 7f: verify EXIT trap cleans created target cfgs on failed build AND moves completed-but-refused run to refused/
   mkdir -p "$scratch/trap_test/cfgs/REF_MOCK" "$scratch/trap_test/cfgs/REC_MOCK" \
            "$scratch/trap_test/incomplete_run" "$scratch/trap_test/completed_run" "$scratch/trap_test/refused"
@@ -838,7 +926,8 @@ run_preflight() {
     printf 'REFUSE: Plant 7f completed subshell did not exit non-zero\n' >&2
     exit 72
   fi
-  if ! find "$scratch/trap_test/refused" -name RUN_COMPLETE | grep -q RUN_COMPLETE; then
+  find "$scratch/trap_test/refused" -name RUN_COMPLETE > "$scratch/retained_markers.txt"
+  if ! grep -q RUN_COMPLETE "$scratch/retained_markers.txt"; then
     printf 'REFUSE: Plant 7f EXIT trap did not retain completed run in refused/\n' >&2
     exit 72
   fi
@@ -926,6 +1015,17 @@ PY
   printf 'PREFLIGHT_OK: checklist items 1-7 and all plants passed\n'
 }
 
+prove_real_same_program() {
+  if ! "$PY" "$GATE_PY" --same-program "$TARGET_REC_ROOT/BLD" \
+       --reference-bld "$TARGET_REF_ROOT/BLD" \
+       --pra-patch "$PRA_PATCH" --ist-patch "$IST_PATCH" --stp-patch "$STP_PATCH" \
+       --new-cfg "$TARGET_REC_CFG" --reference-cfg "$TARGET_REF_CFG" \
+       --json "$EVIDENCE/manifest/same_program.json"; then
+    printf 'REFUSE: real reference/instrumented same-program comparison failed before NEMO launch\n' >&2
+    return 1
+  fi
+}
+
 admit_all() {
   local expect_commit=$1
   if [[ -d "$TARGET_REF_ROOT/BLD" && -d "$TARGET_REC_ROOT/BLD" ]]; then
@@ -980,7 +1080,8 @@ ACTIVE_RUN_DIR="$EVIDENCE"
 cp "$NEMO_ROOT/cfgs/work_cfgs.txt" "$EVIDENCE/manifest/work_cfgs.before"
 printf '%s\n' "$COMMIT" > "$EVIDENCE/manifest/producer_commit.txt"
 sha256sum "$ORCA2_BUNDLE" "$SAS_BUNDLE" "$WRITER_F90" "$PRA_PATCH" "$IST_PATCH" "$STP_PATCH" \
-  "$NML_CFG" "$NML_ICE_CFG" "$GATE_PY" > "$EVIDENCE/manifest/inputs.sha256"
+  "$NML_CFG" "$NML_ICE_CFG" > "$EVIDENCE/manifest/inputs.sha256"
+sha256sum "$GATE_PY" > "$EVIDENCE/manifest/gate.sha256"
 
 tar -ztf "$ORCA2_BUNDLE" > "$EVIDENCE/manifest/bundles.toc"
 tar -ztf "$SAS_BUNDLE" >> "$EVIDENCE/manifest/bundles.toc"
@@ -1033,12 +1134,18 @@ stage_and_run() {
   check_free_ram_gb "$MIN_FREE_RAM_GB"
   check_free_disk_kb "$run_dir" "$MIN_FREE_DISK_KB"
   mkdir -p "$run_dir/o2_si3_records"
+  printf '%s\n' "$COMMIT" > "$run_dir/RUN_PRODUCER_COMMIT"
   cp -L "$SHIPPED_NML_REF" "$run_dir/namelist_ref"
   cp -L "$SHIPPED_NML_ICE_REF" "$run_dir/namelist_ice_ref"
   if [[ "$is_rst_run" -eq 1 ]]; then
+    require_rec_2step_restarts "$EVIDENCE/rec_2step"
     render_rst_namelists "$NML_CFG" "$NML_ICE_CFG" "$run_dir/namelist_cfg" "$run_dir/namelist_ice_cfg"
     verify_namelists_and_stems "$run_dir/namelist_cfg" "$run_dir/namelist_ice_cfg" "$EVIDENCE/manifest/bundles.toc" "none" "rst_1step"
-    cp "$EVIDENCE/rec_2step/ORCA2_SAS_00000001_restart_ice.nc" "$run_dir/ORCA2_SAS_00000001_restart_ice.nc"
+    mkdir -p "$run_dir/input_restart" "$run_dir/output_restart"
+    cp "$EVIDENCE/rec_2step/ORCA2_SAS_00000001_restart_ice.nc" \
+      "$run_dir/input_restart/ORCA2_SAS_00000001_restart_ice.nc"
+    cp "$EVIDENCE/rec_2step/ORCA2_SAS_00000001_restart.nc" \
+      "$run_dir/input_restart/ORCA2_SAS_00000001_restart.nc"
   else
     cp "$NML_CFG" "$run_dir/namelist_cfg"
     cp "$NML_ICE_CFG" "$run_dir/namelist_ice_cfg"
@@ -1054,12 +1161,16 @@ stage_and_run() {
     timeout "$RUN_TIMEOUT_SEC" mpirun -np 1 --oversubscribe ./nemo > run.user.stdout.log 2>&1
     printf 'MPIRUN_RC=0\nRUN_FINISHED_UTC=%s\nRUN DONE\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> run.user.time.log
   )
-  "$PY" "$GATE_PY" --verify-log "$run_dir/ocean.output" --expect-icedyn F --expect-icethd F > "$run_dir/log_check.json"
+  local expect_rstart=F
+  [[ "$is_rst_run" -eq 1 ]] && expect_rstart=T
+  "$PY" "$GATE_PY" --verify-log "$run_dir/ocean.output" --expect-icedyn F \
+    --expect-icethd F --expect-rstart "$expect_rstart" > "$run_dir/log_check.json"
   touch "$run_dir/RUN_COMPLETE"
 }
 
 build_target "$TARGET_REF_CFG" 0
 build_target "$TARGET_REC_CFG" 1
+prove_real_same_program
 sha256sum "$NEMO_ROOT/cfgs/$TARGET_REF_CFG/BLD/bin/nemo.exe" \
           "$NEMO_ROOT/cfgs/$TARGET_REC_CFG/BLD/bin/nemo.exe" > "$EVIDENCE/manifest/binaries.sha256"
 

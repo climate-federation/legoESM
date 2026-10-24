@@ -45,6 +45,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import legoesm.ice.sea_ice as sea_ice_module
 
 from legoesm import constants as canonical_constants
 from legoesm.core.field import Field
@@ -91,7 +92,7 @@ from tests.ocean.fidelity.test_nemo_si3_o1_orca2_sas_gate import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TESTCASES_DIR = REPO_ROOT / "scripts/validate/ocean_fidelity/testcases"
 ACQ_DIR = TESTCASES_DIR / "nemo_si3_o2_orca2_sas_acquisition"
-PARENT_COMMIT = "fe19fb330ecb"
+PARENT_COMMIT = "042c7bd74c2944dab8c39318687ab0cef54f9d2b"
 ORCA2_RECIPE_COMMIT = "02acc8a1b10f2cc8511a6ba4d7fc233b34d73299"
 
 SPEC = importlib.util.spec_from_file_location(
@@ -161,7 +162,7 @@ def _load_parent_commit_modules(
 
 
 def test_o2_parent_vs_current_all_callers_bit_identical(monkeypatch) -> None:
-    """Real non-SI3, lane-3, O1, and ORCA2 `orca2_initial_ice_ssh` callers match parent commit `fe19fb330ecb` / `02acc8a1b1` to 0 ULP and fail under Plant P1."""
+    """Real non-SI3, lane-3, O1, and ORCA2 recipe callers match the landed parent and fail under Plant P1."""
     import legoesm.ice as ice_pkg
     import legoesm.ice.bitz_lipscomb as bl_mod
     import legoesm.ice.c1d_omip_l3 as c1d_mod
@@ -279,7 +280,7 @@ def test_o2_parent_vs_current_all_callers_bit_identical(monkeypatch) -> None:
     p_o1_st = parent_mods["legoesm.ice.si3_orca2_state"].si3_o1_step(
         state0_o1, tmask=tmask, sss_m=34.2, config=cfg_o1
     )
-    c_o1_st, c_o1_resp = step_sea_ice(
+    o1_dispatch_args = (
         state0_o1,
         SI3ORCA2Forcing(tmask=tmask, sss_m=34.2),
         z2,
@@ -289,10 +290,22 @@ def test_o2_parent_vs_current_all_callers_bit_identical(monkeypatch) -> None:
         0.1,
         cfg_o1.rDt_ice,
     )
-    gate._compare_si3_states_wet_and_full(
-        p_o1_st, c_o1_st, tmask, umask, vmask, check_fmass=True
+    with pytest.raises(NotImplementedError, match="ice_update_flx"):
+        step_sea_ice(*o1_dispatch_args)
+
+    original_o1_dispatch = sea_ice_mod._si3_orca2_o1_step_with_trace
+
+    def _planted_o1_dispatch(*args, **kwargs):
+        raise RuntimeError("P1 O1 DISPATCH PATH")
+
+    monkeypatch.setattr(
+        sea_ice_mod, "_si3_orca2_o1_step_with_trace", _planted_o1_dispatch
     )
-    _assert_zero_ulp(p_o1_st.aggregated.tm_su, c_o1_resp.T_sfc, "o1_resp.T_sfc")
+    with pytest.raises(RuntimeError, match="P1 O1 DISPATCH PATH"):
+        step_sea_ice(*o1_dispatch_args)
+    monkeypatch.setattr(
+        sea_ice_mod, "_si3_orca2_o1_step_with_trace", original_o1_dispatch
+    )
 
     # 5. ORCA2 round-329 `orca2_initial_ice_ssh` default (ln_eos80) bit-identity
     inp_o2 = gate.build_synthetic_orca2_o2_inputs()
@@ -421,9 +434,13 @@ def test_o2_dom_uniq_t_and_glob_2dsum_ddpdd_zero_ulp() -> None:
         sss_m=inp["sss_m"],
         tmask=inp["tmask"],
         ssmask=ssmask,
+        smask0_i=smask0_i,
         e1e2t=inp["e1e2t"],
         ff_t=inp["ff_t"],
         gphit=inp["gphit"],
+        ssh_before_kbb=inp["ssh_before_kbb"],
+        ssh_before_kmm=inp["ssh_before_kmm"],
+        config=inp["o2_cfg"],
     )
     term_mul = nemo_source_round(
         nemo_source_round(o2_state.snwice_mass * r1_rho0) * inp["e1e2t"]
@@ -541,6 +558,7 @@ def test_o2_jit_grad_jvp_and_stop_gradient_plant() -> None:
     state0: SI3State = inp["state0"]
     tmask = inp["tmask"]
     ssmask = inp["ssmask"]
+    smask0_i = inp["smask0_i"]
     e1e2t = inp["e1e2t"]
     ff_t = inp["ff_t"]
     gphit = inp["gphit"]
@@ -579,6 +597,7 @@ def test_o2_jit_grad_jvp_and_stop_gradient_plant() -> None:
             sss_m=sss_in,
             tmask=tmask,
             ssmask=ssmask,
+            smask0_i=smask0_i,
             e1e2t=e1e2t,
             ff_t=ff_t,
             gphit=gphit,
@@ -649,7 +668,9 @@ def test_o2_jit_grad_jvp_and_stop_gradient_plant() -> None:
         assert float(jnp.linalg.norm(g)) == 0.0
 
 
-def test_o2_production_step_sea_ice_selects_o2_and_validates_config() -> None:
+def test_o2_production_step_sea_ice_selects_o2_and_validates_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`step_sea_ice` selects `thermo_scheme='si3_orca2_o2'` (`build_si3_orca2_o2_config`) and rejects invalid state/forcing/config combinations."""
     inp = gate.build_synthetic_orca2_o2_inputs()
     cfg: SI3ORCA2StateConfig = inp["cfg"]
@@ -659,6 +680,7 @@ def test_o2_production_step_sea_ice_selects_o2_and_validates_config() -> None:
     umask = inp["umask"]
     vmask = inp["vmask"]
     ssmask = inp["ssmask"]
+    smask0_i = inp["smask0_i"]
     e1e2t = inp["e1e2t"]
     ff_t = inp["ff_t"]
     gphit = inp["gphit"]
@@ -677,8 +699,10 @@ def test_o2_production_step_sea_ice_selects_o2_and_validates_config() -> None:
         gphit=gphit,
         e1e2t=e1e2t,
         ssmask=ssmask,
+        smask0_i=smask0_i,
         ssh_before_kbb=ssh_kbb,
         ssh_before_kmm=ssh_kmm,
+        apply_halos=False,
     )
     state1_direct, o2_direct = si3_o2_step(
         state0,
@@ -687,22 +711,43 @@ def test_o2_production_step_sea_ice_selects_o2_and_validates_config() -> None:
         o2_init_config=o2_cfg,
     )
     assert o2_direct is not None
-    state1_dispatch, resp = step_sea_ice(
-        state0,
-        o2_forcing,
-        z2,
-        z2,
-        z2,
-        sea_cfg,
-        0.1,
-        cfg.rDt_ice,
+    with pytest.raises(NotImplementedError, match="ice_update_flx"):
+        step_sea_ice(
+            state0,
+            o2_forcing,
+            z2,
+            z2,
+            z2,
+            sea_cfg,
+            0.1,
+            cfg.rDt_ice,
+        )
+
+    _assert_zero_ulp(
+        o2_direct.ssh_kmm - ssh_kmm,
+        o2_direct.ssh_kbb - ssh_kbb,
+        "o2_direct_independent_ssh_increment",
     )
-    gate._compare_si3_states_wet_and_full(
-        state1_direct, state1_dispatch, tmask, umask, vmask, check_fmass=True
-    )
-    _assert_zero_ulp(resp.T_sfc, state1_direct.aggregated.tm_su, "resp.T_sfc")
-    _assert_zero_ulp(resp.freshwater_flux, -state1_direct.snwice_fmass, "resp.freshwater_flux")
-    _assert_zero_ulp(o2_direct.ssh_kmm, o2_direct.ssh_kbb, "o2_direct.ssh_kmm_vs_kbb")
+
+    class O2PathPlant(RuntimeError):
+        pass
+
+    def _o2_path_plant(*_args, **_kwargs):
+        raise O2PathPlant("O2 production dispatcher path reached")
+
+    monkeypatch.setattr(sea_ice_module, "_si3_orca2_o2_step_with_trace", _o2_path_plant)
+    with pytest.raises(O2PathPlant, match="dispatcher path reached"):
+        sea_ice_module.step_sea_ice(
+            state0,
+            o2_forcing,
+            z2,
+            z2,
+            z2,
+            sea_cfg,
+            0.1,
+            cfg.rDt_ice,
+        )
+    monkeypatch.undo()
 
     with pytest.raises(ValueError, match="requires SI3State"):
         step_sea_ice(
@@ -926,8 +971,10 @@ def test_o2_admit_evidence_directory_scores_istate_2step_and_rst_1step_and_refus
             gphit=gphit,
             e1e2t=e1e2t,
             ssmask=ssmask,
+            smask0_i=inp["smask0_i"],
             ssh_before_kbb=ssh_before_kbb,
             ssh_before_kmm=ssh_before_kmm,
+            apply_halos=False,
         ),
         config=cfg,
         o2_init_config=o2_cfg,
@@ -936,8 +983,19 @@ def test_o2_admit_evidence_directory_scores_istate_2step_and_rst_1step_and_refus
     state2 = si3_o1_step(state1, tmask=tmask, sss_m=sss_m, config=cfg)
 
     ev = tmp_path / "evidence"
-    for sub in ("manifest", "ref_2step/o2_si3_records", "rec_2step/o2_si3_records", "rst_1step/o2_si3_records"):
+    for sub in (
+        "manifest",
+        "ref_2step/o2_si3_records",
+        "rec_2step/o2_si3_records",
+        "rst_1step/o2_si3_records",
+        "rst_1step/input_restart",
+        "rst_1step/output_restart",
+    ):
         (ev / sub).mkdir(parents=True, exist_ok=True)
+
+    commit_hex = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True
+    ).strip()
 
     exc_body = [
         l
@@ -949,12 +1007,17 @@ def test_o2_admit_evidence_directory_scores_istate_2step_and_rst_1step_and_refus
         for l in exc_body
     ) + "\n"
     for rdir in (ev / "ref_2step", ev / "rec_2step", ev / "rst_1step"):
-        (rdir / "ocean.output").write_text(o2_log, encoding="utf-8")
+        ln_rstart = "T" if rdir.name == "rst_1step" else "F"
+        (rdir / "ocean.output").write_text(
+            o2_log + f" ln_rstart = {ln_rstart}\n", encoding="utf-8"
+        )
         (rdir / "run.user.stdout.log").write_text("NEMO run ok\nSTOP 0\n", encoding="utf-8")
         (rdir / "RUN_COMPLETE").write_text("ok\n", encoding="utf-8")
+        (rdir / "RUN_PRODUCER_COMMIT").write_text(commit_hex + "\n", encoding="utf-8")
 
     write_si3_netcdf_restart(ev / "rec_2step/ORCA2_SAS_00000001_restart_ice.nc", state1, kt=1, config=cfg)
     write_si3_netcdf_restart(ev / "rec_2step/ORCA2_SAS_00000002_restart_ice.nc", state2, kt=2, config=cfg)
+    (ev / "rec_2step/ORCA2_SAS_00000001_restart.nc").write_bytes(b"SAS ocean restart")
     shutil.copy2(
         ev / "rec_2step/ORCA2_SAS_00000001_restart_ice.nc",
         ev / "ref_2step/ORCA2_SAS_00000001_restart_ice.nc",
@@ -1017,7 +1080,7 @@ def test_o2_admit_evidence_directory_scores_istate_2step_and_rst_1step_and_refus
         tmask=tmask,
         sss_m=sss_m,
         config=cfg,
-        ln_rstart=False,
+        ln_rstart=True,
     )
     rst_step1 = si3_o1_step(rst_entry, tmask=tmask, sss_m=sss_m, config=cfg)
     _write_o1_binary_snapshot(
@@ -1032,29 +1095,62 @@ def test_o2_admit_evidence_directory_scores_istate_2step_and_rst_1step_and_refus
         cfg=cfg,
     )
     _write_o1_binary_snapshot(
-        ev / "rst_1step/o2_si3_records/o2_si3_state_step0001_rank0000.bin",
+        ev / "rst_1step/o2_si3_records/o2_si3_state_step0002_rank0000.bin",
         rst_step1,
         tmask_np,
         umask_np,
         vmask_np,
         sss_np,
-        kt=1,
+        kt=2,
         lrst_ice=1,
         cfg=cfg,
     )
+    shutil.copy2(
+        ev / "rec_2step/ORCA2_SAS_00000001_restart_ice.nc",
+        ev / "rst_1step/input_restart/ORCA2_SAS_00000001_restart_ice.nc",
+    )
+    shutil.copy2(
+        ev / "rec_2step/ORCA2_SAS_00000001_restart.nc",
+        ev / "rst_1step/input_restart/ORCA2_SAS_00000001_restart.nc",
+    )
     write_si3_netcdf_restart(
-        ev / "rst_1step/ORCA2_SAS_00000001_restart_ice.nc", rst_step1, kt=1, config=cfg
+        ev / "rst_1step/output_restart/ORCA2_SAS_00000002_restart_ice_o2_output.nc",
+        rst_step1,
+        kt=2,
+        config=cfg,
+    )
+    (ev / "rst_1step/output_restart/ORCA2_SAS_00000002_restart_o2_output.nc").write_bytes(
+        b"SAS ocean output restart"
     )
 
-    commit_hex = "b" * 40
     (ev / "manifest/producer_commit.txt").write_text(commit_hex + "\n", encoding="utf-8")
+    ref_bld = ev / "builds/ORCA2_SAS_ICE_O2_REF/BLD"
+    rec_bld = ev / "builds/ORCA2_SAS_ICE_O2_REC/BLD"
+    (ref_bld / "bin").mkdir(parents=True)
+    (rec_bld / "bin").mkdir(parents=True)
+    (ref_bld / "bin/nemo.exe").write_bytes(b"\x7fELF reference nemo")
+    (rec_bld / "bin/nemo.exe").write_bytes(b"\x7fELF recorder nemo")
     (ev / "manifest/same_program.json").write_text(
-        json.dumps({"status": "PASS_SAME_PROGRAM"}) + "\n", encoding="utf-8"
+        json.dumps(
+            {
+                "status": "PASS_SAME_PROGRAM",
+                "reference_bld": str(ref_bld),
+                "new_bld": str(rec_bld),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
     )
     dummy_bin = ev / "manifest/dummy_nemo.exe"
     dummy_bin.write_bytes(b"\x7fELF nemo")
     bin_sha = hashlib.sha256(dummy_bin.read_bytes()).hexdigest()
-    (ev / "manifest/binaries.sha256").write_text(f"{bin_sha}  {dummy_bin}\n", encoding="utf-8")
+    (ev / "manifest/binaries.sha256").write_text(
+        "".join(
+            f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p}\n"
+            for p in (ref_bld / "bin/nemo.exe", rec_bld / "bin/nemo.exe")
+        ),
+        encoding="utf-8",
+    )
     (ev / "manifest/inputs.sha256").write_text(f"{bin_sha}  {dummy_bin}\n", encoding="utf-8")
 
     adm = gate.admit_evidence_directory(ev, expect_commit=commit_hex)

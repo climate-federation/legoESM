@@ -141,3 +141,22 @@ The O2 acquisition tool records two binary snapshot families under `o2_si3_recor
 | **P5** | Compiled `gfortran` 4-rank layout fixture (`O2SI3I01` + `O1SI3R01`) | `rank-collapse`, `wrong-offset`, `field-swap`, `truncation`, `bad-magic`, `missing-frame` | Fails layout verifier with `STATUS PLANT-FIRED` |
 | **P6** | End-to-end `jax.jit` / `jax.value_and_grad` / `jax.jvp` differentiability | Wrap differentiable O2 inputs (`sss_m`, `sst_m`, `&namini` thickness/concentration/pond parameters) in `jax.lax.stop_gradient` | Fails AD gate with `STATUS PLANT-FIRED` (`grad_norm == 0.0`) |
 | **P7** | Preflight checklist items 1–7 and admission provenance gates | Continuation `&`, undeclared identifier, bare `USE iso_fortran_env`, `ref_cfgs.txt`/`work_cfgs.txt`, namelist group/var/stem/fsbc/deviation, missing output dir, UTF-8, disk/RAM floors, target dir, excerpt SHA, log tokens, `same_program`, `EXIT` trap, and admission plants (`stamp`, `same-program`, `binary-sha`, `input-sha`, `missing-complete`, `missing-stop0`, `ref-rec-diff`, `1ulp-istate`, `1ulp-ssh`, `1ulp-state`, `rst-missing`, `rst-1ulp`) | Fails preflight / admission with `STATUS PLANT-FIRED` |
+
+## Operator amendment after the landed O1 review series
+
+This preregistration was originally committed on the pre-fix O1 head. The O2
+implementation was subsequently rebased onto lane commit
+`042c7bd74c2944dab8c39318687ab0cef54f9d2b`; the landed O1 helpers are imported
+instead of copied. The following source verification supersedes any conflicting
+prediction above:
+
+- The configuration's own compiled source is
+  `ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/iceistate.f90:308-338,439-460`.
+- Its levitating-ice branch has no inner `ln_rstart` condition. It subtracts
+  `zsshadj` independently from the existing `ssh(:,:,Kmm)` and
+  `ssh(:,:,Kbb)` values (`:456-459`); it does not assign Kbb from
+  the already-updated Kmm field.
+- Restart NetCDF payloads are halo-free. O2 scores their wet interior against
+  the corresponding model interior and scores NEMO-defined wet seam/fold halos
+  only in rank-local writer records.
+- The round remains acquisition-tool-only: preflight is permitted, NEMO is not.

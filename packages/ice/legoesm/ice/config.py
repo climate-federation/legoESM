@@ -532,6 +532,11 @@ def _validate_si3_orca2_o1_config(config: "SeaIceConfig") -> None:
     """Validate rung-O1 ORCA2 SI3 configuration (`thermo_scheme='si3_orca2_o1'`)."""
     if config.thermo_scheme not in {"si3_orca2_o1", "si3_orca2_o2"}:
         return
+    if config.thermo_scheme == "si3_orca2_o2" and config.si3_orca2 is None:
+        raise ValueError(
+            "thermo_scheme='si3_orca2_o2' requires an explicit "
+            "SI3ORCA2StateConfig; O2 does not infer deck values"
+        )
     orca2_cfg = (
         config.si3_orca2
         if config.si3_orca2 is not None
@@ -576,14 +581,15 @@ def build_si3_orca2_o1_config(
 
 
 def build_si3_orca2_o2_config(
-    si3_orca2: SI3ORCA2StateConfig | None = None,
+    si3_orca2: SI3ORCA2StateConfig,
 ) -> SeaIceConfig:
     """Return the rung-O2 ORCA2 SI3 scalar initial state + SSH `SeaIceConfig`."""
-    cfg = si3_orca2 if si3_orca2 is not None else SI3ORCA2StateConfig()
+    if not isinstance(si3_orca2, SI3ORCA2StateConfig):
+        raise TypeError("O2 requires an explicit SI3ORCA2StateConfig")
+    cfg = si3_orca2
     return SeaIceConfig(
         thermo_scheme="si3_orca2_o2",
         ice_constants=cfg.ice_constants,
         si3_orca2=cfg,
     )
-
 
