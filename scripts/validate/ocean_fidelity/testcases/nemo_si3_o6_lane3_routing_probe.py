@@ -6,6 +6,10 @@ completed-step-8 active window) once per arm, swapping one kernel at a time by
 harness patch (the kernel adapters of ``nemo_si3_o6_lane3_kernel_probe``), and
 diffs every scored row of each gate against the ``lane3`` arm: status moves in
 both directions and any change of a row's numbers.
+
+Only the card's step is routed.  The active window's oracle-frame ridging
+projection reads lane 3's per-cell iteration counts and clamp flags, which the
+O6 kernel does not return, so that diagnostic keeps lane 3's arm.
 """
 
 from __future__ import annotations
@@ -121,7 +125,7 @@ def run(root: Path, restart_root: Path, gates=GATES, *, plant: bool = False) -> 
                     scale = 1.0 + 1.0e-10 if arm == "o6_rdgrft_planted" else 1.0
                     rdg = kernel.o6_ridging_adapter(CARD_CONSTANTS, sst_m, murdg_scale=scale)
                     rdg = counted(rdg, count, "o6_rdgrft")
-                    recipe.apply_si3_jpl1_ridging = trajectory.apply_si3_jpl1_ridging = rdg
+                    recipe.apply_si3_jpl1_ridging = rdg  # the card's step only
                 if arm == "o6_rdgrft_cor":
                     recipe._ice_cor = counted(kernel.o6_cor_adapter(sst_m), count, "o6_cor")
                 reports[arm][g] = run_gate(g, root, restart_root)
