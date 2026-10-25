@@ -1,7 +1,7 @@
 """Precision-policy transcendental functions.
 
 ``native`` delegates to JAX/XLA.  ``libm`` calls the scalar ``exp``, ``log``,
-``log10``, ``tanh``, ``sin``, and ``cos`` entry points from ``libm.so.6`` through
+``log10``, ``pow``, ``tanh``, ``sin``, and ``cos`` entry points from ``libm.so.6`` through
 :func:`jax.pure_callback`.
 That is the soname linked by the NEMO certification executables on the
 campaign host (glibc 2.34).  The callback deliberately invokes the scalar C
@@ -105,6 +105,58 @@ def _libm_cos_jvp(primals, tangents):
     return result, -_libm_sin(value) * value_dot
 
 
+def _scalar_libm_pow(base: np.ndarray, exponent: np.ndarray) -> np.ndarray:
+    base, exponent = np.broadcast_arrays(np.asarray(base), np.asarray(exponent))
+    function = _LIBM.pow
+    function.argtypes = (ctypes.c_double, ctypes.c_double)
+    function.restype = ctypes.c_double
+    result = np.empty(base.shape, dtype=np.result_type(base, exponent))
+    base_flat, exponent_flat, result_flat = (
+        base.reshape(-1), exponent.reshape(-1), result.reshape(-1)
+    )
+    for index in range(result_flat.size):
+        result_flat[index] = function(
+            float(base_flat[index]), float(exponent_flat[index])
+        )
+    return result
+
+
+@jax.custom_jvp
+def _libm_pow(base: jax.Array, exponent: jax.Array) -> jax.Array:
+    if jax.default_backend() != "cpu":
+        raise RuntimeError(
+            f"PrecisionPolicy.transcendentals='libm' is CPU-only; got "
+            f"{jax.default_backend()!r}"
+        )
+    shape = jnp.broadcast_shapes(base.shape, exponent.shape)
+    result = jax.ShapeDtypeStruct(shape, jnp.result_type(base, exponent))
+    return jax.pure_callback(
+        _scalar_libm_pow, result, base, exponent, vmap_method="broadcast_all",
+    )
+
+
+@_libm_pow.defjvp
+def _libm_pow_jvp(primals, tangents):
+    # Finite zero subgradient at base 0 (the d/dbase cusp for exponent < 1 and
+    # the 0*log(0) of d/dexponent); the primal is the scalar libm value.
+    (base, exponent), (base_dot, exponent_dot) = primals, tangents
+    result = _libm_pow(base, exponent)
+    positive = base > 0.0
+    safe_base = jnp.where(positive, base, jnp.ones_like(base))
+    d_base = jnp.where(positive, exponent * _libm_pow(safe_base, exponent - 1.0), 0.0)
+    d_exponent = jnp.where(positive, result * _libm_log(safe_base), 0.0)
+    return result, d_base * base_dot + d_exponent * exponent_dot
+
+
+def pow(base, exponent) -> jax.Array:  # noqa: A001 - mirrors the C name
+    """Evaluate ``base ** exponent`` under the active precision policy."""
+    base_array, exponent_array = jnp.asarray(base), jnp.asarray(exponent)
+    if get_policy().transcendentals == "native":
+        return jnp.power(base_array, exponent_array)
+    dtype = jnp.result_type(base_array, exponent_array)
+    return _libm_pow(base_array.astype(dtype), exponent_array.astype(dtype))
+
+
 def exp(value) -> jax.Array:
     """Evaluate exponential under the active precision policy."""
     array = jnp.asarray(value)
@@ -176,4 +228,4 @@ def cos(value) -> jax.Array:
     return _libm_cos(array)
 
 
-__all__ = ("cos", "exp", "log", "log10", "sin", "tanh")
+__all__ = ("cos", "exp", "log", "log10", "pow", "sin", "tanh")
