@@ -150,17 +150,19 @@ def _aevp_inputs(seed: int = 7):
         u_ice_u=field("U", 0.1, -1.0, umask), v_ice_v=field("V", 0.1, -1.0, vmask),
         stress1_t=field("T", 1.0e3), stress2_t=field("T", 1.0e3), stress12_f=field("F", 1.0e3),
     )
-    ssh = dict(
+    entry = dict(
         ssh_m=field("T", 0.3), snwice_mass=field("T", 300.0), snwice_mass_b=field("T", 300.0),
+        # previous-step velocities, deliberately different from the entry state
+        u_ice_b=field("U", 0.1, -1.0, umask), v_ice_b=field("V", 0.1, -1.0, vmask),
     )
-    return state, forcing, _metrics(rng), strength.strength, ssh
+    return state, forcing, _metrics(rng), strength.strength, entry
 
 
 def _run_aevp(*, n=TEST_SUBCYCLES, full=False, differentiable=False, **plants):
-    state, forcing, metrics, strength, ssh = _aevp_inputs()
+    state, forcing, metrics, strength, entry = _aevp_inputs()
     return si3_orca2_aevp_solver(
         state, forcing, metrics, _aevp_config(n), strength_t=strength, ln_ice_embd=False,
-        fold=_fold(full), differentiable=differentiable, **ssh, **plants,
+        fold=_fold(full), differentiable=differentiable, **entry, **plants,
     )
 
 
@@ -297,11 +299,11 @@ def test_aevp_exchange_program_site_by_site(monkeypatch):
         calls.append((cd_nat, float(psgn), bool(ldfull)))
         return real(field, cd_nat, psgn, nn_hls=nn_hls, ldfull=ldfull, **kw)
 
-    state, forcing, metrics, strength, ssh = _aevp_inputs()
+    state, forcing, metrics, strength, entry = _aevp_inputs()
     monkeypatch.setattr(o1, "si3_lbc_lnk_orca2", recording)
     si3_orca2_aevp_solver(
         state, forcing, metrics, _aevp_config(TEST_SUBCYCLES), strength_t=strength,
-        ln_ice_embd=False, fold=_fold(False), differentiable=False, **ssh,
+        ln_ice_embd=False, fold=_fold(False), differentiable=False, **entry,
     )
     expected = (
         [("F", 1.0, True)]  # :238 fimask, kt == nit000
@@ -316,13 +318,13 @@ def test_partial_vs_full_pivot_line_fold():
     """Fold-symmetric inputs give mirror-identical pivot rows (NEMO's "NP repro"
     parentheses), so the full/partial fold only binds when the pivot row is not
     symmetric; break it in one right-half strength cell and the two programs differ."""
-    state, forcing, metrics, strength, ssh = _aevp_inputs()
+    state, forcing, metrics, strength, entry = _aevp_inputs()
     config = _aevp_config(TEST_SUBCYCLES)
 
     def solve(strength_t, full):
         return si3_orca2_aevp_solver(
             state, forcing, metrics, config, strength_t=strength_t, ln_ice_embd=False,
-            fold=_fold(full), differentiable=False, **ssh,
+            fold=_fold(full), differentiable=False, **entry,
         )
 
     assert _sha(*solve(strength, True)) == _sha(*solve(strength, False))
@@ -332,19 +334,25 @@ def test_partial_vs_full_pivot_line_fold():
 
 
 def test_aevp_jit_equals_eager_and_fd_gradient():
-    state, forcing, metrics, strength, ssh = _aevp_inputs()
+    """Eager = jax.disable_jit (one primitive at a time, nothing fused); nonzero
+    Coriolis, so an unbarriered Coriolis statement fused into FMAs under jit fails."""
+    state, forcing, metrics, strength, entry = _aevp_inputs()
     config = _aevp_config(TEST_SUBCYCLES)
+    assert bool(jnp.all(forcing.coriolis_t[:, NN_HLS:] != 0.0))
 
-    def solve(strength_t, *, differentiable):
+    def solve(strength_t, *, differentiable, coriolis_t=forcing.coriolis_t):
         return si3_orca2_aevp_solver(
-            state, forcing, metrics, config, strength_t=strength_t, ln_ice_embd=False,
-            fold=_fold(False), differentiable=differentiable, **ssh,
+            state, forcing._replace(coriolis_t=coriolis_t), metrics, config, strength_t=strength_t,
+            ln_ice_embd=False, fold=_fold(False), differentiable=differentiable, **entry,
         )
 
-    eager = solve(strength, differentiable=False)
+    with jax.disable_jit():
+        eager = solve(strength, differentiable=False)
     jitted = jax.jit(lambda s: solve(s, differentiable=False))(strength)
     for e, j in zip(eager, jitted):
         np.testing.assert_array_equal(np.asarray(e), np.asarray(j))
+    no_coriolis = solve(strength, differentiable=False, coriolis_t=jnp.zeros_like(forcing.coriolis_t))
+    assert _sha(*no_coriolis) != _sha(*jitted)  # Coriolis binds in this fixture
 
     def loss(scale):
         out = solve(strength * scale, differentiable=True)
@@ -358,9 +366,9 @@ def test_aevp_jit_equals_eager_and_fd_gradient():
 
 
 def test_physical_inputs_have_no_defaults():
-    state, forcing, metrics, strength, ssh = _aevp_inputs()
+    state, forcing, metrics, strength, entry = _aevp_inputs()
     config = _aevp_config(TEST_SUBCYCLES)
-    common = dict(strength_t=strength, ln_ice_embd=False, fold=_fold(False), differentiable=False, **ssh)
+    common = dict(strength_t=strength, ln_ice_embd=False, fold=_fold(False), differentiable=False, **entry)
     with pytest.raises(TypeError):
         si3_orca2_aevp_solver(state, forcing, metrics, config, **{k: v for k, v in common.items() if k != "ssh_m"})
     with pytest.raises(ValueError, match="no default"):
@@ -368,7 +376,7 @@ def test_physical_inputs_have_no_defaults():
     with pytest.raises(ValueError, match="no default"):
         si3_orca2_aevp_solver(state, forcing, metrics, config, **{**common, "strength_t": None})
     with pytest.raises(ValueError, match="ice_var_sshdyn"):
-        si3_orca2_aevp_solver(state, forcing._replace(ssh_t=ssh["ssh_m"]), metrics, config, **common)
+        si3_orca2_aevp_solver(state, forcing._replace(ssh_t=entry["ssh_m"]), metrics, config, **common)
     with pytest.raises(ValueError, match="levitating"):
         si3_orca2_aevp_solver(state, forcing, metrics, config, **{**common, "ln_ice_embd": True})
     with pytest.raises(ValueError, match="Frankenstein"):
@@ -380,7 +388,29 @@ def test_physical_inputs_have_no_defaults():
         si3_orca2_ice_strength(a_i=a_i, v_i=None, tmask=tmask, config=STRENGTH_CFG, fold=_fold(True))
     with pytest.raises(ValueError, match=r"\(jpi, jpj, 5\)"):
         si3_orca2_ice_strength(a_i=a_i[..., :1], v_i=v_i[..., :1], tmask=tmask, config=STRENGTH_CFG, fold=_fold(True))
-    assert si3_var_sshdyn(ln_ice_embd=False, **ssh) is not None
+    for name in ("u_ice_b", "v_ice_b"):
+        with pytest.raises(TypeError):
+            si3_orca2_aevp_solver(state, forcing, metrics, config, **{k: v for k, v in common.items() if k != name})
+        with pytest.raises(ValueError, match="no default"):
+            si3_orca2_aevp_solver(state, forcing, metrics, config, **{**common, name: None})
+    masses = {k: entry[k] for k in ("ssh_m", "snwice_mass", "snwice_mass_b")}
+    assert si3_var_sshdyn(ln_ice_embd=False, **masses) is not None
+
+
+def test_aevp_reads_recorded_previous_velocity_not_entry_state():
+    """u_ice_b/v_ice_b (icedyn_rhg_evp.f90:574,625) are inputs of their own:
+    substituting the entry u_ice/v_ice for them changes both velocities."""
+    state, forcing, metrics, strength, entry = _aevp_inputs()
+    assert not np.array_equal(np.asarray(entry["u_ice_b"]), np.asarray(state.u_ice_u))
+    assert not np.array_equal(np.asarray(entry["v_ice_b"]), np.asarray(state.v_ice_v))
+    common = dict(strength_t=strength, ln_ice_embd=False, fold=_fold(False), differentiable=False)
+    config = _aevp_config(TEST_SUBCYCLES)
+    recorded = si3_orca2_aevp_solver(state, forcing, metrics, config, **common, **entry)
+    substituted = si3_orca2_aevp_solver(
+        state, forcing, metrics, config, **common, **{**entry, "u_ice_b": state.u_ice_u, "v_ice_b": state.v_ice_v}
+    )
+    for leaf in ("u_ice_u", "v_ice_v"):
+        assert not np.array_equal(np.asarray(getattr(recorded, leaf)), np.asarray(getattr(substituted, leaf))), leaf
 
 
 # --- lane-3 cards: parent vs current through the production dispatchers --------
@@ -485,4 +515,4 @@ def test_lane3_rheo_card_parent_vs_current_bit_identical():
 
 
 STRENGTH_PIN = "097712318bf93aaa1444855ebddff76db8ff21b3c59cd9672dddff9830391223"
-AEVP_PIN = "132f198fc59c3a289c01560c713d4f51a1336b8dee34d86f021ad79cdc5f1ae4"
+AEVP_PIN = "cf17eb690a4e2345eb1a3b4d6a650c9ccd951f5684744c5de776ef8d78f1c147"

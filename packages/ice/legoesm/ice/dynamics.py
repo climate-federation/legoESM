@@ -1241,6 +1241,10 @@ def si3_cgrid_aevp_solver(
         metrics,
         config,
         strength_t=strength_t,
+        # Lane 3 keeps its certified contract: store_fields (icestp.f90:463)
+        # sets u_ice_b = u_ice before ice_dyn, which its cards enter directly.
+        u_ice_b=state.u_ice_u,
+        v_ice_b=state.v_ice_v,
         halo=_si3_lane3_halo,
         differentiable=differentiable,
         stress_divergence_outer_weight=stress_divergence_outer_weight,
@@ -1255,12 +1259,18 @@ def _si3_cgrid_aevp_core(
     config: SI3CGridAEVPConfig,
     *,
     strength_t: jnp.ndarray,
+    u_ice_b: jnp.ndarray,
+    v_ice_b: jnp.ndarray,
     halo,
     differentiable: bool,
     stress_divergence_outer_weight: float,
     swap_parity: bool,
 ) -> SI3CGridAEVPState:
-    """Shared aEVP body; ``halo(label, field, nature, sign, ldfull)`` is the lbc_lnk program."""
+    """Shared aEVP body; ``halo(label, field, nature, sign, ldfull)`` is the lbc_lnk program.
+
+    ``u_ice_b``/``v_ice_b`` are NEMO's previous-step velocities
+    (``icedyn_rhg_evp.f90:574,625``), distinct inputs from the entry ``state``.
+    """
 
     at_i = forcing.concentration_t
     zmsk = (at_i >= _SI3_ICE_PRESENCE).astype(state.u_ice_u.dtype)
@@ -1616,22 +1626,34 @@ def _si3_cgrid_aevp_core(
                     )
                 ),
             )
-            coriolis_u = nemo_source_round(
-                _SI3_QUARTER
-                * nemo_source_round(_SI3_ONE / metrics.e1u)
-                * (
-                    mass_coriolis_t
-                    * (
-                        metrics.e1v * current_v
-                        + jnp.roll(metrics.e1v, 1, axis=1) * jnp.roll(current_v, 1, axis=1)
-                    )
-                    + jnp.roll(mass_coriolis_t, -1, axis=0)
-                    * (
-                        jnp.roll(metrics.e1v, -1, axis=0) * jnp.roll(current_v, -1, axis=0)
-                        + jnp.roll(jnp.roll(metrics.e1v, -1, axis=0), 1, axis=1)
-                        * jnp.roll(jnp.roll(current_v, -1, axis=0), 1, axis=1)
-                    )
-                )
+            # icedyn_rhg_evp.f90:611-613,666-668; every operation rounded (no FMA).
+            coriolis_u = _si3_mul(
+                _si3_mul(_SI3_QUARTER, _si3_div(_SI3_ONE, metrics.e1u)),
+                _si3_add(
+                    _si3_mul(
+                        mass_coriolis_t,
+                        _si3_add(
+                            _si3_mul(metrics.e1v, current_v),
+                            _si3_mul(
+                                jnp.roll(metrics.e1v, 1, axis=1),
+                                jnp.roll(current_v, 1, axis=1),
+                            ),
+                        ),
+                    ),
+                    _si3_mul(
+                        jnp.roll(mass_coriolis_t, -1, axis=0),
+                        _si3_add(
+                            _si3_mul(
+                                jnp.roll(metrics.e1v, -1, axis=0),
+                                jnp.roll(current_v, -1, axis=0),
+                            ),
+                            _si3_mul(
+                                jnp.roll(jnp.roll(metrics.e1v, -1, axis=0), 1, axis=1),
+                                jnp.roll(jnp.roll(current_v, -1, axis=0), 1, axis=1),
+                            ),
+                        ),
+                    ),
+                ),
             )
             ocean_stress = _si3_mul(drag_magnitude, _si3_sub(forcing.ocean_u_u, current_u))
             rhs = _si3_add(force_u, tau_air_u)
@@ -1639,7 +1661,7 @@ def _si3_cgrid_aevp_core(
             rhs = _si3_add(rhs, slope_u)
             rhs = _si3_add(rhs, ocean_stress)
             beta_u = jnp.maximum(beta_t, jnp.roll(beta_t, -1, axis=0))
-            numerator = _si3_add(_si3_mul(beta_u, current_u), state.u_ice_u)
+            numerator = _si3_add(_si3_mul(beta_u, current_u), u_ice_b)
             numerator = _si3_mul(mass_over_dt_u, numerator)
             numerator = _si3_add(numerator, rhs)
             numerator = _si3_add(numerator, _si3_mul(drag_magnitude, current_u))
@@ -1673,7 +1695,7 @@ def _si3_cgrid_aevp_core(
                     ),
                 )
                 static_numerator = _si3_add(
-                    state.u_ice_u,
+                    u_ice_b,
                     _si3_mul(current_u, static_decay),
                 )
                 static_value = _si3_div(
@@ -1719,22 +1741,35 @@ def _si3_cgrid_aevp_core(
                     )
                 ),
             )
-            coriolis_v = nemo_source_round(
-                -_SI3_QUARTER
-                * nemo_source_round(_SI3_ONE / metrics.e2v)
-                * (
-                    mass_coriolis_t
-                    * (
-                        metrics.e2u * current_u
-                        + jnp.roll(metrics.e2u, 1, axis=0) * jnp.roll(current_u, 1, axis=0)
-                    )
-                    + jnp.roll(mass_coriolis_t, -1, axis=1)
-                    * (
-                        jnp.roll(metrics.e2u, -1, axis=1) * jnp.roll(current_u, -1, axis=1)
-                        + jnp.roll(jnp.roll(metrics.e2u, 1, axis=0), -1, axis=1)
-                        * jnp.roll(jnp.roll(current_u, 1, axis=0), -1, axis=1)
-                    )
-                )
+            # icedyn_rhg_evp.f90:560-562,718-720; Fortran's leading minus negates
+            # the whole product (exact).  Every operation rounded (no FMA).
+            coriolis_v = -_si3_mul(
+                _si3_mul(_SI3_QUARTER, _si3_div(_SI3_ONE, metrics.e2v)),
+                _si3_add(
+                    _si3_mul(
+                        mass_coriolis_t,
+                        _si3_add(
+                            _si3_mul(metrics.e2u, current_u),
+                            _si3_mul(
+                                jnp.roll(metrics.e2u, 1, axis=0),
+                                jnp.roll(current_u, 1, axis=0),
+                            ),
+                        ),
+                    ),
+                    _si3_mul(
+                        jnp.roll(mass_coriolis_t, -1, axis=1),
+                        _si3_add(
+                            _si3_mul(
+                                jnp.roll(metrics.e2u, -1, axis=1),
+                                jnp.roll(current_u, -1, axis=1),
+                            ),
+                            _si3_mul(
+                                jnp.roll(jnp.roll(metrics.e2u, 1, axis=0), -1, axis=1),
+                                jnp.roll(jnp.roll(current_u, 1, axis=0), -1, axis=1),
+                            ),
+                        ),
+                    ),
+                ),
             )
             ocean_stress = _si3_mul(drag_magnitude, _si3_sub(forcing.ocean_v_v, current_v))
             rhs = _si3_add(force_v, tau_air_v)
@@ -1742,7 +1777,7 @@ def _si3_cgrid_aevp_core(
             rhs = _si3_add(rhs, slope_v)
             rhs = _si3_add(rhs, ocean_stress)
             beta_v = jnp.maximum(beta_t, jnp.roll(beta_t, -1, axis=1))
-            numerator = _si3_add(_si3_mul(beta_v, current_v), state.v_ice_v)
+            numerator = _si3_add(_si3_mul(beta_v, current_v), v_ice_b)
             numerator = _si3_mul(mass_over_dt_v, numerator)
             numerator = _si3_add(numerator, rhs)
             numerator = _si3_add(numerator, _si3_mul(drag_magnitude, current_v))
@@ -1776,7 +1811,7 @@ def _si3_cgrid_aevp_core(
                     ),
                 )
                 static_numerator = _si3_add(
-                    state.v_ice_v,
+                    v_ice_b,
                     _si3_mul(current_v, static_decay),
                 )
                 static_value = _si3_div(
@@ -2056,6 +2091,8 @@ def si3_orca2_aevp_solver(
     config: SI3CGridAEVPConfig,
     *,
     strength_t: jnp.ndarray,
+    u_ice_b: jnp.ndarray,
+    v_ice_b: jnp.ndarray,
     ssh_m: jnp.ndarray,
     snwice_mass: jnp.ndarray,
     snwice_mass_b: jnp.ndarray,
@@ -2072,6 +2109,8 @@ def si3_orca2_aevp_solver(
     field ``strength_t`` (``ice_strength`` called at ``:268``) as exact input,
     and ``zsshdyn = ice_var_sshdyn(ssh_m, snwice_mass, snwice_mass_b)``
     (``:281``).  ``forcing.ssh_t`` must be ``None``: the levitating arm owns it.
+    ``u_ice_b``/``v_ice_b`` are NEMO's recorded previous-step velocities
+    (``:574,625``), never substituted by the entry ``state``.
     ``forcing.concentration_t`` is NEMO's ``at_i`` after ``ice_strength``.
     """
 
@@ -2089,8 +2128,10 @@ def si3_orca2_aevp_solver(
     )
     forcing = forcing._replace(ssh_t=sshdyn)
     strength_t = _require("strength_t", strength_t)
+    u_ice_b = _require("u_ice_b", u_ice_b)
+    v_ice_b = _require("v_ice_b", v_ice_b)
     shape = state.u_ice_u.shape
-    leaves = (*state, *forcing, *metrics, strength_t)
+    leaves = (*state, *forcing, *metrics, strength_t, u_ice_b, v_ice_b)
     if len(shape) != 2 or any(value is None or value.shape != shape for value in leaves):
         raise ValueError("SI3 ORCA2 aEVP requires every NEMO array, same-shape 2-D")
     return _si3_cgrid_aevp_core(
@@ -2099,6 +2140,8 @@ def si3_orca2_aevp_solver(
         metrics,
         config,
         strength_t=strength_t,
+        u_ice_b=u_ice_b,
+        v_ice_b=v_ice_b,
         halo=_si3_orca2_halo(fold, _plant_fold_sign),
         differentiable=differentiable,
         stress_divergence_outer_weight=_SI3_HALF,
