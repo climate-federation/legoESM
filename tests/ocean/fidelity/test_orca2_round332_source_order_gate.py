@@ -241,13 +241,14 @@ def test_tke_landing_check_and_misplacement_plant_are_preflighted() -> None:
     assert "arithmetic-disassembly" in text
 
 
-def test_tke332_retained_admission_uses_its_manifest_commit_and_binary_pins() -> None:
+def test_tke332_existing_admission_uses_its_manifest_commit_and_binary_pins() -> None:
     text = ACQ_RUN.read_text()
     assert "R332_RETAINED_PRODUCER" not in text
     assert "R332_RETAINED_BINARY_SHA" not in text
+    assert 'if [[ "$MODE" == --admit-existing ]]; then' in text
     assert 'git cat-file -e "$EXPECTED_PRODUCER^{commit}"' in text
     assert 'retained_binary_sha=$(awk' in text
-    assert "retained acquisition binary" in text
+    assert "existing acquisition binary" in text
 
 
 def test_launcher_imports_reviewed_acquisition_driver() -> None:
