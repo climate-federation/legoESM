@@ -20,6 +20,28 @@ freshwater-budget adjustment at `sbcmod.f90:517-521`.  It fills halos and
 rotates T-point stress to U/V points at `sbcmod.f90:552-570`.  The numbered
 rungs below are delivery increments, not permission to reorder those calls.
 
+## S0 — time-varying input and two-step surface means
+
+S0 has two source-ordered boundaries.  **S0-F** owns `fld_read` record
+selection and temporal interpolation for every downstream time-varying field,
+including ice cover, runoff, and chlorophyll.  The existing O1 result certifies
+only the spatial CORE-to-ORCA2 map and rotation for the selected first record
+with `ln_tint=.false.`.  It does **not** certify `fld_update` before/after
+record selection, record-centre construction, `rec_shft`, or the temporal
+blend.  S0-F therefore records the before/after arrays, their record times,
+the exact model time, interpolation weights, and `fnow`, and scores all of
+them at every forcing update.  This is required for `sn_ice`, `sn_rnf`, and
+`sn_chl`, whose resolved namelist entries enable time interpolation.
+
+**S0-M** owns the call to `sbc_ssm` on every ocean step.  With the comparison
+deck's `nn_fsbc=2`, this is a stateful two-step mean, not an instantaneous
+read: it initializes or restarts the accumulators, resets them on the source
+schedule, accumulates `sst_m,sss_m,ssu_m,ssv_m,ssh_m,e3t_m,frq_m` every step,
+and divides only at the forcing boundary.  Exact input is both time levels of
+the surface ocean state plus the prior mean/restart state; exact output is the
+complete post-call mean state.  Score kt 1--10 on both ranks so the alternating
+reset/accumulate/divide behavior is exercised before S1 consumes the means.
+
 ## S1 — `sbc_blk` ocean side
 
 Extend, do not copy, `packages/ocean/legoesm/ocean/bulk_flux_omip.py`, its
@@ -48,9 +70,10 @@ than inferred after this offline score.
 
 ## S2 — remaining executed surface terms
 
-Build on the existing `sss_restoring.py`, runoff/river-source code, stress
-rotation in the comparison card, and the already certified `fld_read`; grep
-those production paths before adding any helper.  Exact input is S1's public
+Build on the existing `sss_restoring.py`, runoff/river-source code, and stress
+rotation in the comparison card; grep those production paths before adding
+any helper.  S0-F supplies the certified **temporally interpolated** runoff
+and chlorophyll fields.  Exact input is S1's public
 output plus the pre-call ocean means/state and the deck's independently read
 runoff, runoff salinity/temperature/depth, and SSS-restoring fields.
 
@@ -78,22 +101,45 @@ source states that stress, `taum`, `wndm`, `emp`, and `sfx` remain unchanged.
 Score changed and unchanged channels independently at `0 / n` on both ranks
 and all recorded steps, with signed zero included.
 
-The reference namelist requests monthly interpolated `ice_cover_clim.nc`
-(`namelist_ref:412-419`), but that file is absent from the ORCA2 inputs.  Its
-provenance is deliberately unresolved; see DECISION_NEEDED below.
+The temperature clamp mutates `ts(:,:,:,Kmm)` over `A2D(nn_hls)`, including
+the halo, before the owned-interior flux loop; the S3 record and scorer must
+therefore carry and compare that halo mutation, not only owned T cells.
+
+The reference namelist requests a **yearly mean** `ice_cover_clim.nc` record:
+`sn_ice%freqh=-12`, `ln_tint=.true.`, and `clftyp='yearly'`.  In `fld_read`,
+`-12` selects one yearly record, not twelve monthly records.  The file is
+absent from the ORCA2 inputs, and its provenance is deliberately unresolved;
+see DECISION_NEEDED below.  S0-F owns whatever yearly-record interpolation
+the admitted file and calendar actually execute.
 
 ## S4 — composed standalone comparison card
 
 Add a new NEMO configuration and build named
-`ORCA2_STANDALONE_IIF_OMIP_L4`: clone the current round-5 ORCA2 deck, remove
-the ORCA1/SI3 component and its config-local SI3 overrides, select `nn_ice=1`,
-and point `namsbc_iif` at the user-selected pinned climatology.  Keep the CORE
-normal-year forcing/weights and every other ORCA2 ocean option fixed.  The
+`ORCA2_STANDALONE_IIF_OMIP_L4`: clone the current round-5 ORCA2 deck, select
+`nn_ice=1`, and point `namsbc_iif` at the user-selected pinned climatology.
+Whether `key_si3` remains compiled is an explicit build decision below; it is
+not silently removed.  Keep the CORE normal-year forcing/weights and every
+other ORCA2 ocean option fixed.  The
 matching legoESM card reads those same files, enters S1 from its own
-`fld_read`, executes S1 -> S3 -> S2 in NEMO source order, and never reads a
-NEMO exchange record.
+S0-F/S0-M output, executes S1 -> S3 -> S2 in NEMO source order, and never
+reads a NEMO exchange record.
 
-The exact-input NEMO record contains entry state, every S1/S3/S2 boundary,
+Source inspection confirms that `sbcmod` permits `nn_ice=1` in a
+`key_si3` build: only case 2 calls `ice_stp`.  It does not prove the new deck
+boot-safe.  With `key_si3`, bulk initialization still allocates and validates
+SI3 air-ice fields; `sbcice_if` binds `a_i` from the SI3 module, while
+`sbcmod` calls neither `ice_init` nor the no-SI3 allocator for `nn_ice=1`.
+The candidate must therefore pass an initialization/ten-step smoke gate with
+coupling disabled before any scientific comparison.
+
+Dropping `key_si3` is not an equivalent simplification.  It selects different
+compiled ocean branches in `zdftke`/`zdfgls` surface mixing-length scaling and
+removes the SI3 implicit top-drag contribution in `zdfdrg`; it also changes
+bulk/ABL/coupler allocation and blending branches.  Most SI3-only routines
+would be runtime-dead at `nn_ice=1`, but these shared ocean paths are not
+certified equivalent merely because `ice_stp` is skipped.
+
+The exact-input NEMO record contains entry state, every S0/S1/S3/S2 boundary,
 and the existing ten-step ladder checkpoints for steps 1--10 on ranks 0--1.
 The composed bar first requires every surface boundary above to be `0 / n`,
 then applies the existing per-row rung-10 bar without relaxing any constant.
@@ -108,7 +154,9 @@ twin before the candidate.
 
 | Choice | Status | Disposition |
 |---|---|---|
-| standalone surface flux + `nn_ice=1` target | ASKED | four-rung design above |
+| standalone surface flux + `nn_ice=1` target | ASKED | five-rung S0--S4 design above |
+| `fld_read` temporal interpolation | ASKED | S0-F; prior O1 certifies spatial mapping only |
+| two-step `sbc_ssm` means for `nn_fsbc=2` | ASKED | S0-M, every step and restart state |
 | literal record-build NCAR arithmetic | ASKED | S1, including barriers/libm/ties |
 | reuse existing bulk, restoring, runoff, rotation, and fld-read code | ASKED | extend after grep; no parallel copy |
 | one exact-input NEMO record per rung | ASKED | separate immutable record labels |
@@ -118,6 +166,7 @@ twin before the candidate.
 | change the shipped comparison or training card | UNASKED | no configuration change |
 | relax any bar or hide signed-zero differences | UNASKED | prohibited |
 | select or manufacture an ice-cover climatology | UNASKED | DECISION_NEEDED |
+| change `key_si3` build identity | UNASKED | DECISION_NEEDED; no silent choice |
 | remove existing record-replay comparison modes | UNASKED | retain as diagnostics |
 
 ## DECISION_NEEDED — ice-cover provenance
@@ -137,3 +186,23 @@ twin before the candidate.
 No option is selected by this document.  The pick is option 1 for a controlled
 NEMO-vs-legoESM fidelity reference; option 2 should be a later observational
 sensitivity experiment.
+
+## DECISION_NEEDED — NEMO reference build identity
+
+1. **Keep `key_si3` compiled and set `nn_ice=1` (pick).**  This preserves the
+   comparison card's compiled ocean mixing/drag/bulk branches and changes only
+   the runtime ice selector.  Cost: the executable still links SI3, retains
+   SI3 initialization/namelist obligations, and needs the explicit boot/ten-
+   step smoke gate above because `nn_ice=1` skips `ice_init`.
+2. **Remove `key_si3` and recertify a new ocean reference.**  This produces a
+   smaller, conceptually cleaner ice-if executable, but changes TKE/GLS surface
+   mixing, top drag, allocation, ABL, bulk, and coupler code at compile time.
+   Cost: a new zero-step state comparison plus the full ten-step ocean ladder;
+   it cannot inherit the current comparison card's certification.
+3. **Carry two NEMO references.**  Use option 1 as the fidelity control and a
+   no-SI3 build as a sensitivity.  This resolves attribution best but doubles
+   build, acquisition, twin-reproducibility, and long-run cost.
+
+No option is selected.  The pick is option 1 because it preserves the ocean
+code paths the existing card actually certified; option 2 is admissible only
+as a separately named and fully recertified reference.

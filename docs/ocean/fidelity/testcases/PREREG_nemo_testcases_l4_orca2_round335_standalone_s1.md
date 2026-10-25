@@ -7,10 +7,13 @@ build its tool, configure NEMO, or execute NEMO.
 ## Record identity
 
 The future deck/build is `ORCA2_STANDALONE_IIF_OMIP_L4`, derived from the
-round-5 record deck with SI3 absent and `nn_ice=1`.  The selected ice-cover
-file is an unresolved input and must be filled only after the design's
-DECISION_NEEDED is answered.  S1 itself precedes the ice call, so its numeric
-record is independent of ice-cover values; the configuration identity is not.
+round-5 record deck with `nn_ice=1`.  Whether `key_si3` remains compiled is a
+separate unresolved build-identity decision; the design's pick is to retain
+it so the ocean mixing/drag branches match the comparison card, subject to a
+boot/ten-step smoke gate.  The selected ice-cover file is also unresolved and
+must be filled only after both design decisions are answered.  S1 itself
+precedes the ice call, so its numeric record is independent of ice-cover
+values; the configuration identity is not.
 
 Run two ranks (`jpni=2,jpnj=1`) for steps kt 1--10 from the same from-rest
 state used by the standalone reference.  Produce independent A/B twins.  The
@@ -20,8 +23,8 @@ namelist digest, executable digest, and input-file digests.
 
 ## Frozen boundaries and arrays
 
-1. **S1-E / entry**, immediately after the final atmospheric `fld_read`, wind
-   rotation, and surface-mean calculation and immediately before
+1. **S1-E / entry**, immediately after the S0-F temporal-input and S0-M
+   two-step-surface-mean boundaries, wind rotation, and immediately before
    `blk_oce_1`: `wndi,wndj,tair,humi,qsr_down,qlw_down,precip_raw,snow_raw,
    slp,sst_m,ssu_m,ssv_m,smask` plus the resolved S1 deck scalars.
 2. **S1-1 / post `blk_oce_1`** at its return:
