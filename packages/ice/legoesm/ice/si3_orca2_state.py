@@ -1380,6 +1380,23 @@ def si3_lbc_lnk_orca2(
                 src_i_1based.append(ii2 - 1)
             src_idx = jnp.asarray(src_i_1based, dtype=jnp.int32)
             out = out.at[:, ij1 - 1].set(sign * out[src_idx, ij2 - 1])
+    elif cd_nat == "F":
+        # lbcnfd.f90:722-747 (ORCA2_SAS_ICE_O2_REF ppsrc); the extra line
+        # jj = ihls+1 is the mpp_nfd "full" line (lbcnfd.f90:1741-1766).
+        for jj in range(1, ihls + 2 if ldfull else ihls + 1):
+            ij1 = ipj - jj + 1
+            ij2 = ipj - 2 * ihls + jj - 2
+            src_i_1based = []
+            for ji in range(1, ipi + 1):
+                if ji <= ihls:
+                    ii2 = 2 * ihls + 1 - ji
+                elif ji <= ipi - ihls:
+                    ii2 = ipi + 1 - ji
+                else:
+                    ii2 = 2 * (ipi - ihls) + 1 - ji
+                src_i_1based.append(ii2 - 1)
+            src_idx = jnp.asarray(src_i_1based, dtype=jnp.int32)
+            out = out.at[:, ij1 - 1].set(sign * out[src_idx, ij2 - 1])
     else:
         raise ValueError(f"Unsupported grid nature cd_nat={cd_nat!r}")
 
