@@ -2497,7 +2497,7 @@ class SI3O3ITDFit(NamedTuple):
 
 
 class SI3O3IstateFields(NamedTuple):
-    """Rung-O3 post-fit `ice_istate` fields (`iceistate.f90:340-414`)."""
+    """Rung-O3 post-fit `ice_istate` fields (`iceistate.f90:356-434`)."""
 
     fit: SI3O3ITDFit
     a_i: Field
@@ -2565,7 +2565,7 @@ def si3_var_itd_1cmc(
     r1_rhos = sr(1.0 / rhos)
     rhoi_m_rho0 = sr(rhoi - rho0_v)
 
-    # :1214-1216
+    # :1220-1223
     z1_hti = _safe_div(jnp.ones_like(phti), phti, phti != 0.0)
     has_ice = phti > 0.0
     za = sr(pati * z1_hti)
@@ -2582,7 +2582,7 @@ def si3_var_itd_1cmc(
 
     a_cats = []
     h_cats = []
-    # :1220-1243  categories 1:jpl-1
+    # :1227-1250  categories 1:jpl-1
     for jl in range(1, jpl):
         lin0, ex0 = _conc_term(hm[jl - 1])
         lin1, ex1 = _conc_term(hm[jl])
@@ -2591,7 +2591,7 @@ def si3_var_itd_1cmc(
         keep = pa > _EPSI06
         a_cats.append(jnp.where(has_ice & keep, pa, 0.0))
         h_cats.append(jnp.where(has_ice, _safe_div(zv, pa, keep), 0.0))
-    # :1246-1262  last category, hi_max(jpl-1) to infinity
+    # :1253-1271  last category, hi_max(jpl-1) to infinity
     lin0, ex0 = _conc_term(hm[jpl - 1])
     pa = sr(sr(za * lin0) * ex0)
     zv = sr(sr(za * _vol_poly(hm[jpl - 1])) * ex0)
@@ -2599,7 +2599,7 @@ def si3_var_itd_1cmc(
     a_cats.append(jnp.where(has_ice & keep, pa, 0.0))
     h_cats.append(jnp.where(has_ice, _safe_div(zv, pa, keep), 0.0))
 
-    # :1265-1276  snow, and snow-to-ice transfer of the excess load
+    # :1274-1286  snow, and snow-to-ice transfer of the excess load
     hs_cats = []
     for jl in range(1, jpl + 1):
         pa_l = a_cats[jl - 1]
@@ -2619,11 +2619,11 @@ def si3_var_itd_1cmc(
     h_i = jnp.stack(h_cats, axis=-1)
     h_s = jnp.stack(hs_cats, axis=-1)
 
-    # :1281-1286  temperature and salinity, every category
+    # :1291-1296  temperature and salinity, every category
     def _bc(x: Field) -> Field:
         return jnp.broadcast_to(jnp.asarray(x, dtype=dtype)[..., None], a_i.shape)
 
-    # :1288-1323  ponds
+    # :1299-1325  ponds
     zfra = _safe_div(patip, pati, pati != 0.0)[..., None]
     a_ip = sr(zfra * a_i)
     vi_ati = sr(phti * pati)
@@ -2663,7 +2663,7 @@ def si3_o3_istate_fill_fields(
 ) -> SI3O3IstateFields:
     """Rung O3: fit and fill `ice_istate`'s jpl categories and layers.
 
-    Transcribes `ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/iceistate.f90:343-412`:
+    Transcribes `ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/iceistate.f90:356-434`:
     `ice_var_itd` (the `_1cMc` arm, selected because the 2-D inputs are
     passed row by row as rank-1 arrays and the outputs are rank-2), the
     layer copies, `zswitch`, the salinity clamp and `ice_var_salprof`, the
@@ -2685,7 +2685,7 @@ def si3_o3_istate_fill_fields(
         jpl=cfg.jpl, rn_himean=cfg.rn_himean, opt_hips=cfg.opt_hips, rn_himax=cfg.rn_himax
     )
 
-    # :343-351  CALL ice_var_itd( ... )  -> ice_var_itd_1cMc
+    # :356-363  CALL ice_var_itd( ... )  -> ice_var_itd_1cMc
     fit = si3_var_itd_1cmc(
         phti=zht_i_ini, phts=zht_s_ini, pati=zat_i_ini,
         ptmi=ztm_i_ini, ptms=ztm_s_ini, ptmsu=zt_su_ini, psmi=zsm_i_ini,
@@ -2694,18 +2694,18 @@ def si3_o3_istate_fill_fields(
         rho0=NEMO_CONSTANTS_CONFIG.rho_0,
         _plant_skip_snow_transfer=_plant_skip_snow_transfer,
     )
-    # :352-361  copy layer 1 temperatures into every layer
+    # :364-373  copy layer 1 temperatures into every layer
     t_s = jnp.broadcast_to(fit.t_s1[:, :, None, :], (jpi, jpj, nlay_s, cfg.jpl))
     t_i = jnp.broadcast_to(fit.t_i1[:, :, None, :], (jpi, jpj, nlay_i, cfg.jpl))
-    # :364-366
+    # :376-378
     zswitch = jnp.where(fortran_sum_categories(fit.a_i, axis=-1) > 0.0, tm, 0.0)
-    # :369-374  salinity clamp then ice_var_salprof
+    # :381-386  salinity clamp then ice_var_salprof
     sss = jnp.asarray(sss_m, dtype=dtype)
     s_i = jnp.minimum(
         jnp.maximum(cfg.rn_simin, fit.s_i), sr(cfg.rn_sinew * sss)[..., None]
     )
     s_i, sz_i = si3_var_salprof(s_i, sss_m=sss, config=cfg)
-    # :376-382
+    # :388-394
     v_i = sr(fit.h_i * fit.a_i)
     v_s = sr(fit.h_s * fit.a_i)
     sv_i = sr(s_i * v_i)
@@ -2719,12 +2719,12 @@ def si3_o3_istate_fill_fields(
     r1_nlay_s = sr(1.0 / jnp.asarray(float(nlay_s), dtype=dtype))
     r1_nlay_i = sr(1.0 / jnp.asarray(float(nlay_i), dtype=dtype))
     zsw = zswitch[:, :, None, None]
-    # :384-389
+    # :396-401
     e_s = sr(
         sr(sr(sr(zsw * v_s[:, :, None, :]) * r1_nlay_s) * rhos)
         * sr(sr(rcpi * sr(rt0 - t_s)) + rLfus)
     )
-    # :391-402
+    # :403-414
     v_i4 = v_i[:, :, None, :]
     szv_i = sr(sr(sz_i * v_i4) * r1_nlay_i)
     ztmelts = sr(-sr(rTmlt * sz_i) + rt0)
@@ -2736,14 +2736,14 @@ def si3_o3_istate_fill_fields(
             - sr(rcp * sr(ztmelts - rt0))
         )
     )
-    # :404-408  ponds (a_ip_eff on A2D(0) only)
+    # :416-421  ponds (a_ip_eff on A2D(0) only)
     interior = _interior_mask_2d(jpi, jpj, cfg.nn_hls, dtype=dtype)[..., None]
     a_ip_eff = _safe_div(fit.a_ip, fit.a_i, fit.a_i > _EPSI10) * interior
     v_ip = sr(fit.h_ip * fit.a_ip)
     v_il = sr(fit.h_il * fit.a_ip)
-    # :411-414  coupled-run temperature, A2D(0)
+    # :424-427  coupled-run temperature, A2D(0)
     t1_ice = fit.t_i1 * interior
-    # :417-421  concentration cap
+    # :430-434  concentration cap
     at_i = fortran_sum_categories(fit.a_i, axis=-1)
     amax = jnp.asarray(rn_amax_2d, dtype=dtype)
     over = (at_i > amax)[..., None]
@@ -2798,7 +2798,7 @@ def si3_o2_scalar_initial_state(
        `zht_i_ini`, `zht_s_ini`, `zat_i_ini`, `zsm_i_ini`, `ztm_i_ini`,
        `zt_su_ini`, `ztm_s_ini`, `zapnd_ini`, `zhpnd_ini`, `zhlid_ini`, with
        `zapnd_ini(:,:) = zapnd_ini(:,:) * zat_i_ini(:,:)` (`:303`).
-    5. Rung-O3 category fit and fill (`iceistate.f90:343-421`) through
+    5. Rung-O3 category fit and fill (`iceistate.f90:356-434`) through
        `si3_o3_istate_fill_fields`.  `_control_exact_fitted` (test-only)
        substitutes NEMO's six recorded `(v_i, v_s, a_i, a_ip, v_ip, v_il)`.
     6. Levitating-ice initial SSH branch (`:398-430`, `iceistate.f90:440-460`):
@@ -2924,7 +2924,7 @@ def si3_o2_scalar_initial_state(
     elif not cfg.ln_pnd_lids:
         zhlid_ini = jnp.zeros_like(zhlid_ini)
 
-    # 5. Rung-O3 fit and fill (`iceistate.f90:343-421`).
+    # 5. Rung-O3 fit and fill (`iceistate.f90:356-434`).
     if not isinstance(state_config, SI3ORCA2StateConfig):
         raise TypeError("O2 requires an explicit SI3ORCA2StateConfig for the O3 fit")
     o3 = si3_o3_istate_fill_fields(

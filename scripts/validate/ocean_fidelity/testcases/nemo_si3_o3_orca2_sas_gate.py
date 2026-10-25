@@ -3,7 +3,7 @@
 
 Replays the ADMITTED O2 record (`si3_rounds/round7/oracle_o2_orca2_sas_ice`), no
 new acquisition.  O2's own scalar state (already 0 ULP) feeds the O3 fit
-`si3_o3_istate_fill_fields` (`iceistate.f90:343-421`, `icevar.f90:1182-1327`),
+`si3_o3_istate_fill_fields` (`iceistate.f90:356-434`, `icevar.f90:1182-1327`),
 then `ice_var_glo2eqv(1)`/`ice_var_agg(1)` (`icestp.f90:336-337`), and every
 fitted per-category array, layer field, equivalent and aggregate is compared
 with NEMO's `entry` snapshot written at the end of `ice_init`.  Production

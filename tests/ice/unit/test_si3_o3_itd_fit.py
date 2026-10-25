@@ -108,7 +108,7 @@ def test_snow_transfer_branch_live_and_mass_conserving():
     assert not np.array_equal(np.asarray(good.h_i)[col], np.asarray(bad.h_i)[col])
     m_good = C.rho_snow * np.asarray(good.h_s)[col] + C.rho_ice * np.asarray(good.h_i)[col]
     m_bad = C.rho_snow * np.asarray(bad.h_s)[col] + C.rho_ice * np.asarray(bad.h_i)[col]
-    # `MIN( hi_max(jl), ph_i + zdh )` (icevar.f90:1273) clips without returning the snow: mass is
+    # `MIN( hi_max(jl), ph_i + zdh )` (icevar.f90:1282) clips without returning the snow: mass is
     # conserved only where the clip does not bind.
     clipped = np.asarray(good.h_i)[col] == HI_MAX[1:]
     assert clipped.any() and (~clipped).any()
