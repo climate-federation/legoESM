@@ -189,3 +189,7 @@ arms are identical on both trees. Evidence:
 
 Review: `codex review: operator`.
 Evidence: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round15/`.
+
+## Operator amendment (2026-10-25)
+
+Reviews: Argon LAND; codex HOLD (production wiring) then LAND after resume 1. DECISION 173 (user: "Your pick"): O8 is admitted from the ONE shared 100-step ORCA2_SAS_ICE master record for O8-O16 (si3_ladder_design.md:205-209); no separate O8 run. The O8 acquisition therefore waits for the master-record tool.
