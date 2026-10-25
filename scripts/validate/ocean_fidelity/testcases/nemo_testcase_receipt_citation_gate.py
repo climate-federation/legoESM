@@ -1966,6 +1966,14 @@ FILES = {
     'packages/core/legoesm/core/bulk_flux.py': REPO / "packages/core/legoesm/core/bulk_flux.py",
     'packages/core/legoesm/core/nemo_namelist.py': REPO / "packages/core/legoesm/core/nemo_namelist.py",
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_bulk_flux_gate.py': REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_bulk_flux_gate.py",
+    # --- SI3 ladder round 15 (O8) ---
+    'ORCA2_SAS_ICE_O7_REF/BLD/arch_nemo.fcm': NEMO / "cfgs/ORCA2_SAS_ICE_O7_REF/BLD/arch_nemo.fcm",
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90': NEMO / "cfgs/ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90",
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90': NEMO / "cfgs/ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90",
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/ice.f90': NEMO / "cfgs/ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/ice.f90",
+    'tests/ice/unit/data/orca2_sas_ice_expref/namelist_ice_ref': REPO / "tests/ice/unit/data/orca2_sas_ice_expref/namelist_ice_ref",
+    'docs/ice/fidelity/si3_r15_o8_receipt.md': REPO / "docs/ice/fidelity/si3_r15_o8_receipt.md",
+    'docs/ice/fidelity/si3_r15_o8_preregister.md': REPO / "docs/ice/fidelity/si3_r15_o8_preregister.md",
 }
 
 # citation -> the anchors that IDENTIFY its first and last line, plus the
@@ -9675,6 +9683,21 @@ CITATION_MAP = {
     'packages/ice/legoesm/ice/si3_surface.py:505-506': ['zqfr_neg = _fmin(zqfr, 0.0)', 'zqfr_pos = _fmax(zqfr, 0.0)', 2],
     'packages/ice/legoesm/ice/si3_surface.py:510': 'qsb = sr(zswitch * jnp.where(cap <= qsb, cap, qsb))',
     'tests/ice/unit/test_si3_surface.py:615': 'def test_production_surface_step_keeps_qsb_dry_negative_zero():',
+    # --- SI3 round 15 (O8) frazil collection bookkeeping ---
+    'ORCA2_SAS_ICE_O7_REF/BLD/arch_nemo.fcm:27': '%FCFLAGS             -fdefault-real-8 -O3 -funroll-all-loops -fcray-pointer -ffree-line-length-none -fallow-argument-mismatch -fno-tree-vectorize',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:113': '_NEW_ICE_THICKNESS = 0.05',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1754': 'vnew / _NEW_ICE_THICKNESS,',
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:174': 'CALL ice_thd_frazil             !--- frazil ice: collection thickness (ht_i_new) & fraction of frazil (fraz_frac)',
+    'tests/ice/unit/data/orca2_sas_ice_expref/namelist_ice_ref:190-191': ['rn_hinew         =   0.1', 'ln_frazil        = .false.', 2],
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:419': 'fraz_frac(:,:) = 0._wp',
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:422': 'WHERE( qlead(:,:) < 0._wp ) ! cooling',
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:423': 'ht_i_new(:,:) = rn_hinew',
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:425': 'ht_i_new(:,:) = 0._wp',
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:428': 'IF( ln_frazil ) THEN',
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/ice.f90:445': 'ALLOCATE( ht_i_new (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) , fraz_frac (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) , STAT=ierr(ii) )',
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:474': 'ht_i_new(ji,jj) = MAX( 0.01_wp, MIN( ht_i_new(ji,jj), hi_max(jpl) ) )',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1794': 'def si3_ice_thd_frazil(qlead, *, rn_hinew, ln_frazil) -> SI3Frazil:',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1782': 'def _ieee_lt_zero(value):',
 }
 
 
