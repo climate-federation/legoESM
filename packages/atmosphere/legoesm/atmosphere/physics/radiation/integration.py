@@ -2206,6 +2206,8 @@ def _mc3d_plane_heating(
             config=cloud_config, q_cloud=q_cloud_col, q_ice=q_ice_col,
             n_ice=n_ice_col, n_cloud=n_cloud_col,
         ).to_rrtmg_kwargs()
+        # One bulk ice density for the PSD radius and the optics size (CAM6).
+        cloud_kwargs["cloud_rho_ice"] = cloud_config.rho_cloud_ice
 
     # --- shortwave optical field ---
     # NOTE: the plane mc3d path is AEROSOL-FREE (no aerosol_optical_depth is
@@ -2220,8 +2222,6 @@ def _mc3d_plane_heating(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, q_v=q_v_safe, cos_zenith=cos_sza_col,
             sw_optical_field_only=True, **cloud_kwargs,
-            **({"cloud_rho_ice": cloud_config.rho_cloud_ice}
-               if cloud_kwargs else {}),
         )
         ngpt = tau.shape[0]
         tau_td = tau.reshape(ngpt, ny, nx, nlev)
