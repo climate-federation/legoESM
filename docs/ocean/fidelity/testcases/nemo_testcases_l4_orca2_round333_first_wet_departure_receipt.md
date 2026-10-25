@@ -110,6 +110,12 @@ Expected evidence directory:
   single-statement owner, so Decision 122 is not opened and no production
   edit, cross-card claim, DINO/month claim, or gradient claim is made.
 
+The per-receipt citation gate passes 8 citations with zero failures, zero
+unmapped citations, and zero map-audit failures; all nine self-test controls
+fire. The exact default ORCA2 landing battery passes 152 tests in 1,000.71
+seconds, including the required receipt-citation test. The explicit
+private-import ratchet passes 6 tests in 4.99 seconds.
+
 No configuration value changed: **ASKED**. The next admissible action is the
 operator-only acquisition above, followed by admission and offline replay.
 
