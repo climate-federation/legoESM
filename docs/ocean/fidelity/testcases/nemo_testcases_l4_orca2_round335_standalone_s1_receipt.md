@@ -12,26 +12,26 @@ ocean, S2 remaining surface composition, S3 observed-cover ice-if, and S4 a
 composed card against a purpose-built NEMO reference without SI3.  The S2/S3
 delivery order is not confused with execution order: NEMO calls bulk, ice,
 runoff, restoring/budget, halo assembly, then T-to-U/V stress rotation in
-`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90:428-570`.
+`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90:428-569`.
 
 S1 now uses the existing shared bulk-flux module rather than another copy.
 The literal path covers humidity/temperature preprocessing and the two ocean
 calls in
 `ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:640-678`,
-the executing `blk_oce_1` statements at `:791-949` and `:976`, and all of
-`blk_oce_2` at `:1019-1046`.  The exact deck selects the NCAR call at
+the executing `blk_oce_1` statements at `:791-948` and `:976`, and the
+computed part of `blk_oce_2` at `:1019-1045`.  The exact deck selects the NCAR call at
 `:835-838`; no dead algorithm arm is claimed.
 
 The NCAR coefficient transcription follows the initialization, five-iteration
 loop, neutral-wind exp/log round-trip, coefficients, and literal arithmetic
 stability blend in
-`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:124-238`,
+`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:125-238`,
 with its coefficient and stability helpers at `:241-381`.  The shared physical
 helpers transcribe the active pressure/Exner/density statements in
 `ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbc_phy.f90:250-409`,
 latent heat and moist heat capacity at `:443-506`, Obukhov inverse at
 `:548-581`, Goff saturation and humidity at `:645-766`, bulk assembly at
-`:898-940`, net longwave at `:1020-1042`, roughness reconstruction at
+`:898-940`, net longwave at `:1019-1042`, roughness reconstruction at
 `:1062-1080`, and neutral wind at `:1198-1213`.
 
 Assignments pass through the existing no-FMA materialization helper.  The

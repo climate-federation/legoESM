@@ -8908,25 +8908,24 @@ CITATION_MAP = {
         'routine': 'drg_init',
     },
     # ORCA2 round 335: standalone-S1 literal surface-bulk transcription.
-    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90:428-570': [
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90:428-569': [
         'IF( .NOT.ll_sas )   CALL sbc_ssm',
-        ('END DO   ;   END DO', 9), 143],
+        'vtauV  (ji,jj) = 0.5_wp * ( vtau(ji,jj) + vtau(ji,jj+1) )', 142],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:640-678': [
         'q_air_zt(:,:) = sf(jp_humi )%fnow(:,:,1)',
         '&                zsen, zlat, zevp, zqlwn )', 39],
-    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:791-949': [
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:791-948': [
         'ptsk(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) = pst',
-        ('ENDIF', 74), 159],
+        "CALL lbc_lnk( 'sbcblk', utau, 'T', -1.0_wp", 158],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:976':
         'ptsk(:,:) = ( ptsk(:,:) - rt0 ) * smask0(:,:)',
-    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:1019-1046': [
-        'DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)',
-        ('END DO   ;   END DO', 21), 28],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:1019-1045': [
+        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 7),
+        'qns(ji,jj) = qns(ji,jj) * smask0(ji,jj)', 27],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:835-838': [
-        'CASE( np_NCAR      )', '&                nb_iter=nn_iter_algo )', 4],
-    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:124-238': [
-        '!!----------------------------------------------------------------------------------',
-        'END SUBROUTINE turb_ncar', 115],
+        ('CASE( np_NCAR      )', 2), '&                nb_iter=nn_iter_algo )', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:125-238': [
+        'nbit = nb_iter0', 'END SUBROUTINE turb_ncar', 114],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:241-381': [
         'FUNCTION cd_n10_ncar( pw10 )', 'END FUNCTION psi_h_ncar', 141],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbc_phy.f90:250-409': [
@@ -8943,9 +8942,9 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbc_phy.f90:898-940': [
         'ELEMENTAL SUBROUTINE BULK_FORMULA_SCLR',
         'END SUBROUTINE BULK_FORMULA_SCLR', 43],
-    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbc_phy.f90:1020-1042': [
-        ('!!---------------------------------------------------------------------------------', 25),
-        'END FUNCTION qlw_net_sclr', 23],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbc_phy.f90:1019-1042': [
+        'ELEMENTAL FUNCTION qlw_net_sclr( pdwlw, pts,  l_ice )',
+        'END FUNCTION qlw_net_sclr', 24],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbc_phy.f90:1062-1080': [
         'FUNCTION z0_from_Cd( pzu, pCd,  ppsi )',
         'END FUNCTION z0_from_Cd', 19],
