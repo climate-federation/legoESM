@@ -1981,6 +1981,8 @@ FILES = {
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icestp.f90': NEMO / "cfgs/ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icestp.f90",
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/phycst.f90': NEMO / "cfgs/ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/phycst.f90",
     'packages/ice/legoesm/ice/si3_thd_da.py': REPO / "packages/ice/legoesm/ice/si3_thd_da.py",
+    'docs/ice/fidelity/si3_r17_o11_receipt.md': REPO / "docs/ice/fidelity/si3_r17_o11_receipt.md",
+    'docs/ice/fidelity/si3_r17_o11_preregister.md': REPO / "docs/ice/fidelity/si3_r17_o11_preregister.md",
 }
 
 # citation -> the anchors that IDENTIFY its first and last line, plus the
