@@ -158,7 +158,7 @@ addressed below.
    `src/ICE/icevar.F90:122-130`. The O2 operator correspondingly requires
    `fitted_v_i`, `fitted_v_s`, `fitted_a_i`, `fitted_a_ip`, `fitted_v_ip`, and
    `fitted_v_il`, checks their `(jpi, jpj, 5)` shape, and sums them in
-   `packages/ice/legoesm/ice/si3_orca2_state.py:2794-2975` (since O3, round
+   `packages/ice/legoesm/ice/si3_orca2_state.py:4542-4723` (since O3, round
    `si3_r9`, the arrays come from the O3 fit and NEMO's recorded arrays are
    the test-only `_control_exact_fitted` control). Thus O3 owns the
    nonlinear fit, while O2's 0-ULP bar still covers `vt_i`, `vt_s`, `at_i`,

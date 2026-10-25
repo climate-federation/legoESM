@@ -63,7 +63,7 @@ aEVP, `ice_dyn_rhg_evp`:
 - Model: `packages/ice/legoesm/ice/dynamics.py:1273` (`def _si3_cgrid_aevp_core(`, the one body), `packages/ice/legoesm/ice/dynamics.py:1221` (`def si3_cgrid_aevp_solver(`, lane 3: periodic halo `packages/ice/legoesm/ice/dynamics.py:843`), `packages/ice/legoesm/ice/dynamics.py:2127` (`def si3_orca2_aevp_solver(`, ORCA2), `packages/ice/legoesm/ice/dynamics.py:2106` (`def si3_var_sshdyn(`).
 
 Fold, F nature:
-- `ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbcnfd.f90:722` (`CASE ( 'F' )`, T-pivot), rows `ij2 = ipj - 2*ihls + jj - 2`; model `packages/ice/legoesm/ice/si3_orca2_state.py:1383`.
+- `ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbcnfd.f90:722` (`CASE ( 'F' )`, T-pivot), rows `ij2 = ipj - 2*ihls + jj - 2`; model `packages/ice/legoesm/ice/si3_orca2_state.py:1389`.
 - When a call without `ldfull` folds the duplicated pivot line: always for one rank (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbclnk.f90:2112`, `IF( jpni == 1 )  THEN   ;   CALL lbc_nfd(`), else only at the first step (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbcnfd.f90:1617`). This is the explicit, default-free `nfd_full_when_absent` of `packages/ice/legoesm/ice/dynamics.py:1970` (`class SI3ORCA2FoldProgram(NamedTuple):`).
 
 ## Exact-input structure
