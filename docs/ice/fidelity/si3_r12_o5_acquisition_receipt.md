@@ -104,8 +104,9 @@ read-only, while `--run` has RAM, disk, timeout, ERR and EXIT gates.
   (the final O5 gate subset was rerun separately: 13 passed).
 - Private-import ratchet: 6 passed against a complete archived checkout (the
   operator work clone omits two tracked ML sentinel files).
-- Citation gate: all nine SI3 receipts PASS with zero failures, unmapped
-  citations, or stale full-map entries.
+- Citation gate: all nine SI3 receipts and the default gate PASS with zero
+  failures, unmapped citations, or stale full-map entries; gate tests: 17
+  passed.
 - NEMO acquisition result: ACQUISITION_NEEDED.
 - independent review: operator (Claude)
 
