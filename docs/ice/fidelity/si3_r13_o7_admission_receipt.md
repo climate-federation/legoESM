@@ -110,11 +110,15 @@ The five O7 commits were rebased from lane base `e795e17482` onto the current
 lane tip `d3f2cff704` (O5). Four commits applied cleanly. The retained-record
 admission commit had the rebase's only conflict, in
 `scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py`:
-the lane side added O5's two `icedyn_adv_pra.f90:267`/`:317` entries, while
-the O7 side added the three retained-admission entries for `icesbc.f90:447`,
-`si3_surface.py:510`, and `test_si3_surface.py:615`. Resolution kept both
-sides verbatim, O5 followed by O7. No receipt file conflicted, and no conflict
-side was discarded.
+the lane side added O5's
+`ORCA2_SAS_ICE_O5_REC/BLD/ppsrc/nemo/icedyn_adv_pra.f90:267` and
+`ORCA2_SAS_ICE_O5_REC/BLD/ppsrc/nemo/icedyn_adv_pra.f90:317` entries, while
+the O7 side added the three retained-admission entries for
+`ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icesbc.f90:447`,
+`packages/ice/legoesm/ice/si3_surface.py:510`, and
+`tests/ice/unit/test_si3_surface.py:615`. Resolution kept both sides verbatim,
+O5 followed by O7. No receipt file conflicted, and no conflict side was
+discarded.
 
 ## Invariance and gates
 
