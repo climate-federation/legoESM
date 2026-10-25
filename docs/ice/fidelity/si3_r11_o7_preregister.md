@@ -79,3 +79,14 @@ not transcribed. The `iom_put`/`prt_ctl` diagnostics are not transcribed.
 O7 acquisition deck: (1) unmodified production `ORCA2_SAS_ICE`, 1 rank,
 `kt = 1..2` (pick: it runs every production arm the model now carries);
 (2) O2 diagnostic overlay `ln_icedyn = ln_icethd = F`, same window.
+
+## Addendum (after the unit tests; predictions P1-P6 unchanged)
+
+- Retracted: section 3's "the `h_s <= 0` transmission predicate is evaluated
+  on the IEEE bit pattern". Under XLA CPU `jit` the subnormal operand is
+  flushed even through a bitcast, so that case is under the D5 platform floor
+  (pinned by a strict xfail), not claimed.
+- Section 4's "native `exp` instead of glibc" plant did not fire on the
+  synthetic unit fixture (native and glibc agreed there); it stays a required
+  plant on the real record, where it must be shown to fire or be reported
+  vacuous.
