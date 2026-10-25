@@ -299,7 +299,15 @@ def read_o7_record(path: str | Path, plant: str | None = None) -> dict[str, Any]
     }
 
 
-def _write_synthetic_record(path: Path, kind: int, *, kt: int = 1, kmm: int = 2) -> None:
+def _write_synthetic_record(
+    path: Path,
+    kind: int,
+    *,
+    kt: int = 1,
+    kmm: int = 2,
+    fields: dict[str, np.ndarray] | None = None,
+    scalars: tuple[float, ...] | None = None,
+) -> None:
     jpi, jpj, jpl, h = 12, 10, 5, 2
     ntsi, ntei, ntsj, ntej = h + 1, jpi - h, h + 1, jpj - h
     ni, nj = ntei - ntsi + 1, ntej - ntsj + 1
@@ -332,13 +340,19 @@ def _write_synthetic_record(path: Path, kind: int, *, kt: int = 1, kmm: int = 2)
         out.write(MAGIC)
         out.write(np.array([VERSION], dtype="<i4").tobytes())
         out.write(meta.tobytes())
-        out.write(
-            np.array(
-                [10800.0, 1 / 10800.0, 1026.0, 3991.86795711963, 1.4e-3, 1.4e-3, 1.4e-3],
-                dtype="<f8",
-            ).tobytes()
+        scalar_values = scalars or (
+            10800.0,
+            1 / 10800.0,
+            1026.0,
+            3991.86795711963,
+            1.4e-3,
+            1.4e-3,
+            1.4e-3,
         )
-        for index, (_name, code) in enumerate(KINDS[kind], start=1):
+        if len(scalar_values) != N_SCALARS:
+            raise ValueError("synthetic O7 fixture has the wrong scalar count")
+        out.write(np.array(scalar_values, dtype="<f8").tobytes())
+        for index, (name, code) in enumerate(KINDS[kind], start=1):
             shape = _shape(
                 code,
                 dict(
@@ -370,8 +384,164 @@ def _write_synthetic_record(path: Path, kind: int, *, kt: int = 1, kmm: int = 2)
                     )
                 ),
             )
-            values = np.arange(np.prod(shape), dtype=np.float64).reshape(shape, order="F") + index
+            values = (
+                np.asarray(fields[name], dtype=np.float64)
+                if fields is not None
+                else np.arange(np.prod(shape), dtype=np.float64).reshape(shape, order="F") + index
+            )
+            if values.shape != shape:
+                raise ValueError(f"synthetic O7 {name} shape {values.shape}, expected {shape}")
             out.write(np.asfortranarray(values).tobytes(order="F"))
+
+
+def _write_scoring_fixture(root: Path, config: SI3SurfaceConfig, kmm: int) -> None:
+    """Write one internally exact, record-shaped step for control-path tests."""
+    ni, nj, jpl, h = 8, 6, 5, 2
+    grid = np.arange(ni * nj, dtype=np.float64).reshape((ni, nj), order="F")
+    full_grid = np.arange((ni + 2 * h) * (nj + 2 * h), dtype=np.float64).reshape(
+        (ni + 2 * h, nj + 2 * h), order="F"
+    )
+    mask = np.ones((ni, nj), dtype=np.float64)
+    mask[0, 0] = 0.0
+    category = np.arange(jpl, dtype=np.float64)[None, None, :]
+    fields1 = {
+        "wndi": 3.0 + grid / 1000.0,
+        "wndj": 4.0 - grid / 2000.0,
+        "theta_air_zt": np.full((ni, nj), 270.0),
+        "q_air_zt": np.full((ni, nj), 0.002),
+        "slp": np.full((ni, nj), 101000.0),
+        "tm_su": np.full((ni, nj), 268.0),
+        "rhoa": np.full((ni, nj), 1.2),
+        "smask0": mask,
+    }
+    fields4 = {
+        "t_su": np.broadcast_to(270.0 + category / 10.0, (ni, nj, jpl)).copy(),
+        "h_i": np.broadcast_to(0.4 + category / 20.0, (ni, nj, jpl)).copy(),
+        "h_s": np.full((ni, nj, jpl), 0.05),
+        "a_ip_eff": np.full((ni, nj, jpl), 0.1),
+        "h_ip": np.full((ni, nj, jpl), 0.02),
+        "h_il": np.full((ni, nj, jpl), 0.005),
+        "cloud_fra": np.full((ni, nj), 0.5),
+        "smask0": mask,
+    }
+    full = {
+        "u_ice": 0.05 + full_grid / 100000.0,
+        "v_ice": -0.03 + full_grid / 120000.0,
+        "ssu_m": 0.01 + full_grid / 200000.0,
+        "ssv_m": -0.01 + full_grid / 220000.0,
+        "utau": np.full((ni + 2 * h, nj + 2 * h), -0.0),
+        "vtau": np.full((ni + 2 * h, nj + 2 * h), -0.0),
+    }
+    surface_inputs = {
+        **{name: fields1[name] for name in fields1 if name != "smask0"},
+        **{name: fields4[name] for name in fields4 if name != "smask0"},
+        "smask0": mask,
+        "qlw": np.full((ni, nj), 250.0),
+        "precip": np.full((ni, nj), 0.0),
+        "snow": np.full((ni, nj), 0.0),
+        "qsr": np.full((ni, nj), 100.0),
+        "sst_m": np.full((ni, nj), -1.5),
+        "emp": np.full((ni, nj), 0.0),
+        "at_i_b": np.full((ni, nj), 0.6),
+        # All negative-zero category terms distinguish SUM's +0 seed.
+        "a_i_b": np.full((ni, nj, jpl), -0.0),
+        "qns_oce": np.full((ni, nj), -30.0),
+        "qsr_oce": np.full((ni, nj), 100.0),
+        **full,
+        "at_i": np.full((ni, nj), 0.6),
+        "vt_i": np.full((ni, nj), 1.0),
+        "frq_m": np.full((ni, nj), 0.2),
+        "e3t_m": np.full((ni, nj), 10.0),
+        "t_bo": np.full((ni, nj), 271.6),
+        "rn_amax_2d": np.full((ni, nj), 0.95),
+    }
+    fold = SI3ORCA2FoldProgram(nn_hls=h, nfd_full_when_absent=True)
+    result = jax.jit(lambda **kw: si3_surface_step(config=config, fold=fold, **kw))(
+        **{name: jnp.asarray(value) for name, value in surface_inputs.items()}
+    )
+    fields6 = {
+        "t_su": fields4["t_su"],
+        "h_s": fields4["h_s"],
+        "h_i": fields4["h_i"],
+        "alb_ice": np.asarray(result.alb_ice),
+        "a_i_b": surface_inputs["a_i_b"],
+        "theta_air_zt": fields1["theta_air_zt"],
+        "q_air_zt": fields1["q_air_zt"],
+        "slp": fields1["slp"],
+        "qlw": surface_inputs["qlw"],
+        "precip": surface_inputs["precip"],
+        "snow": surface_inputs["snow"],
+        "qsr": surface_inputs["qsr"],
+        "rhoa": fields1["rhoa"],
+        "wndm_ice": np.asarray(result.blk_ice_1.wndm_ice),
+        "Ch_ice": np.asarray(result.blk_ice_1.Ch_ice),
+        "Ce_ice": np.asarray(result.blk_ice_1.Ce_ice),
+        "theta_zu_i": np.asarray(result.blk_ice_1.theta_zu_i),
+        "q_zu_i": np.asarray(result.blk_ice_1.q_zu_i),
+        "sst_m": surface_inputs["sst_m"],
+        "emp": surface_inputs["emp"],
+        "at_i_b": surface_inputs["at_i_b"],
+        "qns_oce": surface_inputs["qns_oce"],
+        "qsr_oce": surface_inputs["qsr_oce"],
+        "cloud_fra": fields4["cloud_fra"],
+        "smask0": mask,
+    }
+    fields8 = {
+        **full,
+        "smask0": mask,
+        "at_i": surface_inputs["at_i"],
+        "at_i_b": surface_inputs["at_i_b"],
+        "vt_i": surface_inputs["vt_i"],
+        "qsr_oce": surface_inputs["qsr_oce"],
+        "qns_oce": surface_inputs["qns_oce"],
+        "qemp_oce": np.asarray(result.blk_ice_2.qemp_oce),
+        "frq_m": surface_inputs["frq_m"],
+        "e3t_m": surface_inputs["e3t_m"],
+        "sst_m": surface_inputs["sst_m"],
+        "t_bo": surface_inputs["t_bo"],
+        "rn_amax_2d": surface_inputs["rn_amax_2d"],
+    }
+    records = {
+        1: fields1,
+        2: {name: np.asarray(getattr(result.blk_ice_1, name)) for name, _ in KINDS[2]},
+        3: {"utau_ice": np.asarray(result.utau_ice), "vtau_ice": np.asarray(result.vtau_ice)},
+        4: fields4,
+        5: {"alb_ice": np.asarray(result.alb_ice)},
+        6: fields6,
+        7: {
+            name: (
+                np.broadcast_to(np.asarray(getattr(result.blk_ice_2, name)), (ni, nj, jpl)).copy()
+                if name == "z_dqsb"
+                else np.asarray(getattr(result.blk_ice_2, name))
+            )
+            for name, _ in KINDS[7]
+        },
+        8: fields8,
+        9: {
+            "qsb_ice_bot": np.asarray(result.flx_other.qsb_ice_bot),
+            "fhld": np.asarray(result.flx_other.fhld),
+            "qlead": np.asarray(result.flx_other.qlead),
+            "frq_m": surface_inputs["frq_m"],
+        },
+    }
+    scalar_values = (
+        config.rDt_ice,
+        1.0 / config.rDt_ice,
+        constants.rho_ocean_nemo,
+        NEMO_SI3_CONSTANTS_CONFIG.c_ocean,
+        config.rn_Cd_ia,
+        config.rn_Ce_ia,
+        config.rn_Ch_ia,
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    for kind, values in records.items():
+        _write_synthetic_record(
+            root / record_name(kind, 1),
+            kind,
+            kmm=kmm,
+            fields=values,
+            scalars=scalar_values,
+        )
 
 
 def _verify_relative_manifest(
@@ -583,11 +753,16 @@ def _score_step(
         scores[f"blk1.{name}"] = _compare(f"blk1.{name}", getattr(b1, name), f[2][name], mask)
     tau = jax.jit(lambda u, v: si3_ice_sbc_tau_lbc(u, v, fold))(b1.utau_ice, b1.vtau_ice)
     if plant == "fold-sign":
-        tau = (-tau[0], tau[1])
+        planted = np.asarray(tau[0]).copy()
+        fold_row = -fold.nn_hls - 1
+        planted[:, fold_row] = -planted[:, fold_row]
+        tau = (planted, tau[1])
     full_shape = f[3]["utau_ice"].shape
     if full_shape != (mask.shape[0] + 4, mask.shape[1] + 4):
         raise _refuse(f"interior/full extent mismatch: {mask.shape} -> {full_shape}")
-    full_mask = np.pad(mask, ((2, 2), (2, 2)))
+    # Every exchanged halo cell is filled by lbc_lnk and is part of the exact
+    # stress claim, including the cyclic seam and north-fold rows.
+    full_mask = np.ones(full_shape, dtype=np.float64)
     scores["tau.utau_ice"] = _compare("tau.utau_ice", tau[0], f[3]["utau_ice"], full_mask)
     scores["tau.vtau_ice"] = _compare("tau.vtau_ice", tau[1], f[3]["vtau_ice"], full_mask)
 
@@ -605,6 +780,10 @@ def _score_step(
     b2 = jax.jit(lambda **kw: si3_blk_ice_2(config=score_config, **kw))(**b2_kwargs)
     for name in b2._fields:
         actual = getattr(b2, name)
+        if name == "z_dqsb":
+            # NEMO assigns this category-independent scalar inside the jl loop;
+            # the record therefore repeats the singleton over its declared T3D extent.
+            actual = np.broadcast_to(np.asarray(actual), f[7][name].shape)
         if plant == "sum-seed" and name == "emp_ice":
             terms = np.asarray(f[6]["a_i_b"]) * np.asarray(b2.evap_ice)
             wrong = terms[..., 0].copy()
@@ -704,8 +883,11 @@ def _score_step(
     )
     scores["composed.albedo"] = _compare("composed.albedo", composed.alb_ice, f[5]["alb_ice"], mask)
     for name in composed.blk_ice_2._fields:
+        actual = getattr(composed.blk_ice_2, name)
+        if name == "z_dqsb":
+            actual = np.broadcast_to(np.asarray(actual), f[7][name].shape)
         scores[f"composed.blk2.{name}"] = _compare(
-            f"composed.blk2.{name}", getattr(composed.blk_ice_2, name), f[7][name], mask
+            f"composed.blk2.{name}", actual, f[7][name], mask
         )
     for name in composed.flx_other._fields:
         scores[f"composed.flx_other.{name}"] = _compare(
@@ -925,12 +1107,15 @@ def run_control_self_test(plant: str, *, nemo_root: Path = DEFAULT_NEMO_ROOT) ->
         nemo_root / "cfgs/ORCA2_SAS_ICE/EXPREF/namelist_ice_cfg",
     )
     mask = np.ones((4, 4), dtype=np.float64)
-    if plant in {"swapped-field", "composed-feed"}:
-        left = np.arange(16, dtype=np.float64).reshape(4, 4)
-        right = left.T.copy() if plant == "swapped-field" else left + 1.0
-        _compare(plant, left, right, mask)
-    if plant == "sum-seed":
-        _compare(plant, np.full((4, 4), -0.0), np.zeros((4, 4)), mask)
+    if plant in {"swapped-field", "composed-feed", "sum-seed"}:
+        kmm = derive_sas_time_level(nemo_root)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_scoring_fixture(root, config, kmm)
+            baseline = _load_step(root, 1, kmm)
+            _score_step(baseline, config)
+            planted = _load_step(root, 1, kmm, plant=plant)
+            _score_step(planted, config, plant=plant)
     if plant == "cd-1ulp":
         values = dict(
             wndi=jnp.full((4, 4), 3.0), wndj=jnp.full((4, 4), 4.0),
@@ -947,7 +1132,9 @@ def run_control_self_test(plant: str, *, nemo_root: Path = DEFAULT_NEMO_ROOT) ->
         u = jnp.arange(24, dtype=jnp.float64).reshape(4, 6) + 1.0
         v = u + 0.5
         good = si3_ice_sbc_tau_lbc(u, v, SI3ORCA2FoldProgram(2, True))[0]
-        _compare(plant, -good, np.asarray(good), np.ones(np.asarray(good).shape))
+        bad = np.asarray(good).copy()
+        bad[:, -3] = -bad[:, -3]
+        _compare(plant, bad, np.asarray(good), np.ones(np.asarray(good).shape))
     if plant in {"pond-branch", "nn-snwfra"}:
         shape = (4, 4, 5)
         kwargs = dict(

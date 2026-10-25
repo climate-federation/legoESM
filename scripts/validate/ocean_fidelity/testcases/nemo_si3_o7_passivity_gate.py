@@ -14,9 +14,11 @@ FUNCTIONS = {
     "blk_ice_1": ("sbcblk.o", "__sbcblk_MOD_blk_ice_1"),
     "blk_ice_2": ("sbcblk.o", "__sbcblk_MOD_blk_ice_2"),
     "ice_alb": ("icealb.o", "__icealb_MOD_ice_alb"),
+    "ice_sbc_tau": ("icesbc.o", "__icesbc_MOD_ice_sbc_tau"),
     # ice_flx_other is PRIVATE and is inlined at -O3.  Census the emitted
     # enclosing routine which owns the observer calls and the inlined body.
     "ice_sbc_flx": ("icesbc.o", "__icesbc_MOD_ice_sbc_flx"),
+    "ice_stp": ("icestp.o", "__icestp_MOD_ice_stp"),
 }
 FP = re.compile(
     r"^(?:v)?(?:add|sub|mul|div|sqrt|max|min|fmadd|fmsub|fnmadd|fnmsub|cvt).*(?:ss|sd|ps|pd)$"

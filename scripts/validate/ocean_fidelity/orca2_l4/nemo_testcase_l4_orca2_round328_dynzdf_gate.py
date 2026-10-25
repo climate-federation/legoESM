@@ -267,7 +267,7 @@ def _observer_only(ref: list[str], new: list[str], inserted: list[str], unit: st
 
 def _strip_preprocessed_observers(
         lines: list[str], begin: str, end: str, unit: str,
-        expected_nonblank: list[str] | None = None) -> tuple[list[str], int]:
+        expected_nonblank: list[str] | None = None) -> tuple[list[str], int, list[str]]:
     """Remove explicitly marked observer blocks from a real preprocessed unit."""
     stripped: list[str] = []
     inside = False
@@ -293,7 +293,7 @@ def _strip_preprocessed_observers(
     if expected_nonblank is not None:
         require(observed_nonblank == expected_nonblank,
                 f"{unit}.f90 marked observer contents differ from its committed patch")
-    return stripped, blocks
+    return stripped, blocks, observed_nonblank
 
 
 def _marked_patch_contents(lines: list[str], begin: str, end: str, unit: str) -> list[str]:
@@ -338,21 +338,21 @@ def same_program_observers(
         require(preprocessed_patch_units is not None
                 and set(preprocessed_patch_units) == set(observer_patches),
                 "marker mode requires one independently preprocessed patched unit per observer")
+        # The raw patch check proves that every insertion is enclosed by an
+        # observer marker.  CPP may legitimately alter/remove inserted lines,
+        # so exact content is taken from the independently preprocessed copy.
+        for unit in observer_patches:
+            _marked_patch_contents(
+                inserted[unit], *preprocessed_markers[unit], f"{unit}.f90"
+            )
         marked_contents = {}
         for unit, path in preprocessed_patch_units.items():
             expected_lines = path.read_text().splitlines()
-            _stripped, _ = _strip_preprocessed_observers(
-                expected_lines, *preprocessed_markers[unit], unit)
-            contents = []
-            inside = False
-            for line in expected_lines:
-                if line.strip() == preprocessed_markers[unit][0]:
-                    inside = True
-                elif line.strip() == preprocessed_markers[unit][1]:
-                    inside = False
-                elif inside and line.strip():
-                    contents.append(line.strip())
-            marked_contents[unit] = contents
+            _stripped, _, marked_contents[unit] = _strip_preprocessed_observers(
+                expected_lines,
+                *preprocessed_markers[unit],
+                unit,
+            )
     else:
         marked_contents = {}
     ref_root, new_root = f"{ref_bld.parent}/".encode(), f"{new_bld.parent}/".encode()
@@ -380,7 +380,7 @@ def same_program_observers(
                 ref_lines = (ref_bld / sub / rel).read_text().splitlines()
                 new_lines = (new_bld / sub / rel).read_text().splitlines()
                 if preprocessed_markers:
-                    stripped, _ = _strip_preprocessed_observers(
+                    stripped, _, _ = _strip_preprocessed_observers(
                         new_lines, *preprocessed_markers[unit], unit,
                         expected_nonblank=marked_contents[unit])
                     require(stripped == ref_lines,

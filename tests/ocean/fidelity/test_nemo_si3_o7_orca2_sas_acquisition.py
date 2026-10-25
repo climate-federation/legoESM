@@ -147,9 +147,28 @@ def test_o7_script_default_is_read_only_and_operator_run_is_explicit() -> None:
 
 def test_o7_passivity_targets_only_symbols_emitted_by_the_real_o3_build() -> None:
     text = (TOOLS / "nemo_si3_o7_passivity_gate.py").read_text()
+    assert '"ice_sbc_tau": ("icesbc.o", "__icesbc_MOD_ice_sbc_tau")' in text
     assert "__icesbc_MOD_ice_sbc_flx" in text
+    assert '"ice_stp": ("icestp.o", "__icestp_MOD_ice_stp")' in text
     assert "__icesbc_MOD_ice_flx_other" not in text
     assert "FIXTURE_FUNCTIONS" not in text
+
+
+def test_o7_bounds_fixture_executes_all_four_patched_observer_units() -> None:
+    text = (ACQ / "run.sh").read_text()
+    invocation = text[text.index('"$PATH_STUBS" "$WRITER"'):]
+    for unit in ("sbcblk", "icealb", "icesbc"):
+        assert f'"$ppsrc/{unit}.f90"' in invocation
+    assert "icestp_path.f90" in invocation
+    assert "$FIXTURE" not in text and "$ICEALB_DRIVER" not in text
+    assert "PASS_PATCHED_FOUR_UNIT_BOUNDS_PATH_RANK_DATA_SIGNED_ZERO" in text
+
+
+def test_o7_writer_pins_the_second_albedo_call_after_flux() -> None:
+    text = (ACQ / "o7_si3_writer.F90").read_text()
+    assert "require_order(9,'post-flux albedo entry')" in text
+    assert "require_order(10,'post-flux albedo exit')" in text
+    assert "current_order /= 11" in text
 
 
 def test_o7_time_level_plant_changes_header_bytes_and_s4_names_are_distinct() -> None:
@@ -178,4 +197,5 @@ def test_o7_read_only_preflight_exercises_real_ppsrc_and_all_controls(tmp_path: 
     assert result == {"status": "PREFLIGHT_OK", "nemo_run": False, "plants": 36}
     assert "PASS_SAME_PROGRAM_REAL_PPSRC_MARKERS" in proc.stdout
     assert "PASS_12_LANDINGS_AND_12_MISPLACEMENT_PLANTS" in proc.stdout
+    assert "PASS_PATCHED_FOUR_UNIT_BOUNDS_PATH_RANK_DATA_SIGNED_ZERO" in proc.stdout
     assert "PREFLIGHT_OK: no NEMO build or integration was run" in proc.stdout

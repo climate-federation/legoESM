@@ -31,10 +31,9 @@ export PYTHONPATH="$REPO:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages
 readonly GATE=$here/../nemo_si3_o7_orca2_sas_gate.py
 readonly PASSIVITY=$here/../nemo_si3_o7_passivity_gate.py
 readonly WRITER=$here/o7_si3_writer.F90
-readonly STUBS=$here/o7_si3_fixture_stubs.F90
-readonly FIXTURE=$here/o7_si3_layout_fixture.F90
-readonly ICEALB_STUBS=$here/o7_icealb_stubs.F90
-readonly ICEALB_DRIVER=$here/o7_icealb_driver.F90
+readonly PATH_STUBS=$here/o7_si3_path_stubs.F90
+readonly PATH_ICEUPDATE=$here/o7_si3_path_iceupdate.F90
+readonly PATH_DRIVER=$here/o7_si3_path_driver.F90
 readonly REAL_EXCERPT=$here/ocean.output.excerpt
 readonly REF_ROOT=$NEMO_ROOT/cfgs/$REF_CFG
 readonly REC_ROOT=$NEMO_ROOT/cfgs/$REC_CFG
@@ -324,16 +323,37 @@ syntax_compile_real_ppsrc() {
 }
 
 bounds_fixture() {
-  local scratch=$1 icealb_ppsrc=$2
-  mkdir -p "$scratch/layout/o7_si3_records" "$scratch/actual/o7_si3_records"
-  (cd "$scratch/layout" && "$FC" -O2 -fcheck=bounds -fbacktrace -Wall -Wextra -J. -I. \
-    "$STUBS" "$WRITER" "$FIXTURE" -o o7_fixture && ./o7_fixture)
-  [[ $(find "$scratch/layout/o7_si3_records" -type f | wc -l) -eq 18 ]] || refuse 'bounds fixture did not emit 18 frames'
-  "$PY" "$GATE" --read-record "$scratch/layout/o7_si3_records/o7_kind07_step0002_rank0000.bin" >/dev/null
-  (cd "$scratch/actual" && "$FC" -O2 -fcheck=bounds -fbacktrace -ffree-line-length-none -J. -I. \
-    "$ICEALB_STUBS" "$WRITER" "$icealb_ppsrc" "$ICEALB_DRIVER" -o o7_actual_icealb && ./o7_actual_icealb)
-  [[ $(find "$scratch/actual/o7_si3_records" -type f | wc -l) -eq 5 ]] || refuse 'patched icealb fixture did not emit ordered S1-S4 records'
-  "$PY" "$GATE" --read-record "$scratch/actual/o7_si3_records/o7_s4_alb_exit_step0001_rank0000.bin" >/dev/null
+  local scratch=$1 ppsrc=$2
+  mkdir -p "$scratch/actual/o7_si3_records"
+  # Retain the patched production ice_stp body verbatim while omitting its
+  # unrelated initialization/diagnostic tail from this minimal link fixture.
+  sed '/PUBLIC.*ice_init/d' "$ppsrc/icestp.f90" | awk \
+    '{print} /END SUBROUTINE ice_stp/{print "END MODULE icestp"; exit}' \
+    > "$scratch/actual/icestp_path.f90"
+  (cd "$scratch/actual" && "$FC" -fdefault-real-8 -O2 -fcheck=bounds -fbacktrace \
+    -ffree-line-length-none -fallow-argument-mismatch -J. -I. \
+    "$PATH_STUBS" "$WRITER" "$ppsrc/sbcblk.f90" "$ppsrc/icealb.f90" \
+    "$ppsrc/icesbc.f90" "$PATH_ICEUPDATE" icestp_path.f90 "$PATH_DRIVER" \
+    -o o7_actual_si3_path && ./o7_actual_si3_path)
+  [[ $(find "$scratch/actual/o7_si3_records" -type f | wc -l) -eq 18 ]] || \
+    refuse 'patched sbcblk/icealb/icesbc/icestp bounds path did not emit 18 frames'
+  "$PY" "$GATE" --read-record "$scratch/actual/o7_si3_records/o7_kind07_step0001_rank0000.bin" >/dev/null
+  "$PY" - "$scratch/actual/o7_si3_records" <<'PY'
+import hashlib, pathlib, struct, sys
+import numpy as np
+from scripts.validate.ocean_fidelity.testcases.nemo_si3_o7_orca2_sas_gate import read_o7_record
+root=pathlib.Path(sys.argv[1])
+r0=root/'o7_s4_alb_entry_step0001_rank0000.bin'
+r1=root/'o7_s4_alb_entry_step0002_rank0001.bin'
+rec=read_o7_record(r0)
+if not any(np.any((v == 0.0) & np.signbit(v)) for v in rec['fields'].values()):
+    raise SystemExit('STATUS PLANT-FIRED: real observer path lost all negative zero payloads')
+if struct.unpack_from('<i',r1.read_bytes(),24)[0] != 1:
+    raise SystemExit('STATUS PLANT-FIRED: second fixture rank was not recorded')
+if hashlib.sha256(r0.read_bytes()).digest() == hashlib.sha256(r1.read_bytes()).digest():
+    raise SystemExit('STATUS PLANT-FIRED: per-rank observer records are identical')
+print('PASS_PATCHED_FOUR_UNIT_BOUNDS_PATH_RANK_DATA_SIGNED_ZERO')
+PY
 }
 
 reader_plants() {
@@ -364,7 +384,7 @@ passivity_real_objects() {
   # shellcheck disable=SC2086
   "$FC" $flags -J "$scratch/rec_mod" -I "$BASE_BLD/inc" -c "$WRITER" -o "$scratch/rec/o7_si3_writer.o"
   local unit
-  for unit in sbcblk icealb icesbc; do
+  for unit in sbcblk icealb icesbc icestp; do
     # shellcheck disable=SC2086
     "$FC" $flags -J "$scratch/ref_mod" -I "$scratch/ref_mod" -I "$BASE_BLD/inc" -c \
       "$scratch/../ref_bld/ppsrc/nemo/$unit.f90" -o "$scratch/ref/$unit.o"
@@ -479,7 +499,7 @@ run_preflight() {
   printf 'PREFLIGHT 4/11 exact call-point landings and misplacement plants\n'; check_landings "$scratch/rec_bld/ppsrc/nemo"
   printf 'PREFLIGHT 5/11 actual patched interfaces under production flags\n'; mkdir -p "$scratch/mod"; syntax_compile_real_ppsrc "$scratch"
   printf 'PREFLIGHT 6/11 bounds-checked writer and patched-NEMO execution fixtures\n'
-  bounds_fixture "$scratch/bounds" "$scratch/rec_bld/ppsrc/nemo/icealb.f90"
+  bounds_fixture "$scratch/bounds" "$scratch/rec_bld/ppsrc/nemo"
   printf 'PREFLIGHT 7/11 reader/extents/source-derived-time-level/wet-cell controls\n'; reader_plants
   printf 'PREFLIGHT 8/11 preregistered red-score controls including P6 composition\n'; preregistered_control_plants
   printf 'PREFLIGHT 9/11 real-object per-function passivity census and injected-op plant\n'; passivity_real_objects "$scratch/passivity"

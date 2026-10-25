@@ -43,7 +43,7 @@ CONTAINS
    END SUBROUTINE require_order
 
    SUBROUTINE o7_finish_step
-      IF( current_order /= 9 .OR. current_alb_calls /= 2 ) THEN
+      IF( current_order /= 11 .OR. current_alb_calls /= 2 ) THEN
          WRITE(*,*) 'O7 observer completion failure', current_order, current_alb_calls
          ERROR STOP 'O7 observer call count/order'
       ENDIF
@@ -146,8 +146,14 @@ CONTAINS
       REAL(wp), DIMENSION(:,:), INTENT(in) :: cloud, smask0
       INTEGER :: u
       current_alb_calls = current_alb_calls + 1
-      IF( current_alb_calls /= 1 ) RETURN
-      CALL require_order(3,'S4 pre-thermodynamics albedo entry')
+      IF( current_alb_calls == 1 ) THEN
+         CALL require_order(3,'S4 pre-thermodynamics albedo entry')
+      ELSEIF( current_alb_calls == 2 ) THEN
+         CALL require_order(9,'post-flux albedo entry')
+         RETURN
+      ELSE
+         ERROR STOP 'O7 unexpected albedo entry call'
+      ENDIF
       CALL open_record(4, 8, u)
       CALL put_i3(u,t_su); CALL put_i3(u,h_i); CALL put_i3(u,h_s); CALL put_i3(u,a_ip_eff)
       CALL put_i3(u,h_ip); CALL put_i3(u,h_il); CALL put_i2(u,cloud); CALL put_i2(u,smask0)
@@ -157,8 +163,14 @@ CONTAINS
    SUBROUTINE o7_alb_exit( alb )
       REAL(wp), DIMENSION(:,:,:), INTENT(in) :: alb
       INTEGER :: u
-      IF( current_alb_calls /= 1 ) RETURN
-      CALL require_order(4,'S4 pre-thermodynamics albedo exit')
+      IF( current_alb_calls == 1 ) THEN
+         CALL require_order(4,'S4 pre-thermodynamics albedo exit')
+      ELSEIF( current_alb_calls == 2 ) THEN
+         CALL require_order(10,'post-flux albedo exit')
+         RETURN
+      ELSE
+         ERROR STOP 'O7 unexpected albedo exit call'
+      ENDIF
       CALL open_record(5, 1, u); CALL put_i3(u,alb); CLOSE(u)
    END SUBROUTINE o7_alb_exit
 

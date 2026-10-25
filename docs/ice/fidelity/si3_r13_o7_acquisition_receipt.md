@@ -25,9 +25,9 @@ Four observer patches bracket the preregistered running call points in
 preprocessed with the record build's real keys and include files, and compile
 against the real NEMO module interfaces under the production flags.
 The global `ice_alb` observer records only the named pre-thermodynamics S4
-call; the later `src/ICE/iceupdate.F90:208` call is counted but cannot overwrite S4.
-A finish observer requires the complete nine-stage order and exactly two
-albedo calls per step.
+call; the later `src/ICE/iceupdate.F90:208` call is independently pinned after
+`ice_flx_other` and cannot overwrite S4. A finish observer requires the complete
+eleven-position call order and exactly two albedo entry/exit pairs per step.
 
 The observed statements include the wind magnitude
 (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/sbcblk.f90:1082`), category shortwave
@@ -63,12 +63,13 @@ The per-function passivity census reads `%FCFLAGS` from the record build and
 requires the production `-O3`, real-size, unrolled, non-vectorized flags. It
 compiles real observer-free and instrumented NEMO `ppsrc` and compares
 nonzero floating-point mnemonic counts for `blk_ice_1`, `blk_ice_2`,
-`ice_alb`, and emitted enclosing function `ice_sbc_flx`. Private
+`ice_alb`, `ice_sbc_tau`, `ice_sbc_flx`, and `ice_stp`. Private
 `ice_flx_other` is inlined and is never required as a symbol. A real-source
-injected operation must change the census. One `-fcheck=bounds` executable invokes every
-writer interface for both steps and reads all resulting layouts; a second
-compiles and runs the real patched, preprocessed NEMO `ice_alb` routine against
-conforming stubs. Its `smask0` has NEMO's A2D(0) extent.
+injected operation must change the census. One `-fcheck=bounds` executable
+compiles and runs the real patched, preprocessed NEMO `sbcblk`, `icealb`,
+`icesbc`, and `icestp` observer path against minimal conforming stubs for two
+pseudo-ranks. It verifies distinct per-rank records, signed zero, all 18 frame
+layouts, and both ordered `ice_alb` calls.
 
 ## Admission and controls
 
@@ -94,6 +95,11 @@ is independently required to reproduce its 45 returned leaves. The native
 transcendental policy must make the retained-record control fail; a vacuous
 native control refuses admission.
 
+The swapped-field, composition-feed, and SUM-seed controls write record-shaped
+fixtures, load them through `_load_step`, and fail through `_score_step`; they
+therefore exercise the same scoring path as admission. The fold-sign control
+changes only the north-fold row rather than negating an entire stress array.
+
 Controls also cover magic/version, truncation, declared versus filled
 extents, relative checksums, missing frames, source-derived SAS time level
 (the plant changes the binary header), first-wet-cell one-ULP changes, swapped
@@ -108,7 +114,7 @@ real production-deck log check occurs at admission.
 
 - Read-only preflight: PASS, eleven sections and 36 planted violations; no NEMO
   build or integration.
-- Focused O7 acquisition tests: 16 passed.
+- Focused O7 acquisition tests: 18 passed.
 - NEMO acquisition result: ACQUISITION_NEEDED.
 - independent review: operator (Claude)
 
