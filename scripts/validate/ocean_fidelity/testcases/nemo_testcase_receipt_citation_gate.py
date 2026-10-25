@@ -9755,6 +9755,19 @@ CITATION_MAP = {
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_da.f90:205': 'wfx_lam_1d(ji) =  wfx_lam_1d(ji) + zda * r1_Dt_ice * ( rhoi * h_i_1d(j',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_da.f90:208': 'a_i_1d(ji) = a_i_1d(ji) - zda',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_da.f90:211-213': ['IF( a_i_1d(ji) == 0._wp ) THEN', 'h_s_1d(ji) = 0._wp', 3],
+    # --- SI3 round 17 resume 1 (O11 production wiring) ---
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:181': 'IF ( a_i(ji,jj,jl) > epsi10 ) THEN',
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:205': ('CALL ice_thd_temp', 2),
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:227': 'IF( ln_icedO )          CALL ice_thd_do',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:41': 'sst_m: jax.Array | None = None',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1677': 'si3=None) -> SI3StepTrace:',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1735': 'post_da = _si3_column_thd_da(state, post_temp2, forcing, si3, dt, constants)',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1848': 'def _si3_column_thd_da(entry, post_temp2, forcing, si3, dt, constants):',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1880': 'gathered = entry.concentration > _EPS10',
+    'packages/ice/legoesm/ice/sea_ice.py:517': 'trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constants, si3=config.si3)',
+    'packages/ice/legoesm/ice/config.py:309': 'namthd_da: SI3LateralMeltConfig | None = None',
+    'packages/ice/legoesm/ice/config.py:316': 'wanted = SI3ThermoConfig(lateral_melt=config.si3.lateral_melt, namthd_da=config.si3.namthd_da)',
+    'packages/ice/legoesm/ice/config.py:597-601': ['class SI3LateralMeltConfig(NamedTuple):', 'rn_dmin: float', 5],
 }
 
 
