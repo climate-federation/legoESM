@@ -155,6 +155,8 @@ FILES = {
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/istate.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynvor.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynvor.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynhpg.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynhpg.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/lbcnfd.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/lbcnfd.f90"),
     "nemo_testcase_l4_orca2_round331_tke_gate.py": (
@@ -1815,6 +1817,12 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/lbcnfd.f90:684-717': [
         ("CASE ( 'V' )                               ! V-point", 5),
         ('ptab(jf)%pt4d(ii1,ij1,jk,jl) = psgn(jf) * ptab(jf)%pt4d(ii2,ij2,jk,jl)', 57), 34],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynhpg.f90:402,427': [
+        'pvv(ji,jj,1,Krhs) = zhpj(ji,jj) + zvap',
+        'pvv(ji,jj,jk,Krhs) = zhpj(ji,jj) + zvap', 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:467-470': [
+        'IF( ln_dynadv_vec .OR. lk_linssh ) THEN',
+        'vv(ji,jj,jk,Kaa) = ( vv(ji,jj,jk,Kbb) + rDt * vv(ji,jj,jk,Krhs) ) * vmask(ji,jj,jk)', 4],
     'ocean_model_latlon_cgrid.py:18281-18302': [
         'def _rk3_fold_exchange_top_v(v, grid, v_mask_3d):',
         'fold.vector_sign_v * v[-2][perm] * v_mask_3d[-2][perm].astype(v.dtype))', 22],

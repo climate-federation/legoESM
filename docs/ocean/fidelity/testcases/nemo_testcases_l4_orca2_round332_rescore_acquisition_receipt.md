@@ -415,3 +415,110 @@ ratchet passes all 6 tests in 5.01 seconds.  Codex review: operator.  The
 independent Claude review's four disagreements are incorporated in the
 corrected walk above; no overturned fold-owner or live-dry-sign claim
 remains.
+
+## Resume 9: admitted live post-fold V, source owner, and landing
+
+The operator's retained raw record ends in
+`ORCA2_ROUND328_TKE332_ACQUISITION_PASS` and admission returns
+`PASS_R332_SOURCE_ORDER_ADMISSION`.  Codex did not rebuild or run NEMO.  The
+rank-0/rank-1 raw-record SHA-256 values are
+`36f808c1...cd4a` and `3343e813...0f4b`; their complete local sign censuses
+are respectively +0/-0/nonzero = 191,507/15,530/235,891 and
+228,513/16,534/197,881.  The record has producer `e73db2a2f94d`, the corrected
+stage-1 after level Kaa=3, and all header, field-order, truncation, checksum,
+producer, time-level and arithmetic plants remain refusing.
+
+### Confirmed live sign census
+
+The 2,032 registered words are the rank-0 global V row `j=147`, `i=0..89`,
+`k=0..29` selected by the dry source faces that feed NEMO's north-fold image.
+The result is mixed, so neither proposed answer applies to the whole family:
+1,975 words are case (a), while 57 are case (b).  The production result below
+is after the single-statement fix.
+
+| population | words | NEMO live +0 / -0 / nonzero | legoESM +0 / -0 / nonzero | joint N+/L+ ; N+/L- ; N-/L+ ; N-/L- | bit exact |
+|---|---:|---:|---:|---:|---:|
+| registered family | 2,032 | 57 / 1,975 / 0 | 48 / 1,984 / 0 | 48 ; 9 ; 0 ; 1,975 | 2,023 |
+| every other dry/halo cell | 381,993 | 361,468 / 20,525 / 0 | 367,721 / 14,272 / 0 | 361,468 ; 0 ; 6,253 ; 14,272 | 375,740 |
+| all dry/halo cells | 384,025 | 361,525 / 22,500 / 0 | 367,769 / 16,256 / 0 | 361,516 ; 9 ; 6,253 ; 16,247 | 377,763 |
+| wet control | 415,175 | 0 / 0 / 415,175 | 0 / 0 / 415,175 | value-sign zero classes inapplicable | 415,175 |
+
+Before this fix, legoESM stored -0 at all 2,032 registered words: 1,975 were
+already bit-identical case (a), and the 57 NEMO +0 words were case (b).  The
+57 case-(b) targets are `i=58,k=20..29`; `i=59,k=19..29`;
+`i=60,k=16..29`; `i=61,k=17..29`; and `i=64,k=0..8`.  NEMO's corresponding
+fold sources, at row 146 and permuted columns 122, 121, 120, 119 and 116, are
+all -0.  Thus NEMO's fold multiply at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/lbcnfd.f90:684-717` and
+legoESM's fold at `ocean_model_latlon_cgrid.py:18281-18302` agree: -1 times
+the source -0 makes the target +0.
+
+The pre-fold source-order record closes the owner.  At those 57 mapped source
+cells, NEMO records a finite negative full stage-1 V RHS before the stage
+mask, a -0 add channel, the same finite-negative RHS after the add, and a +0
+V mask.  NEMO's active HPG assignments write the unmasked surface and
+interior V accelerations at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynhpg.f90:402,427`; its
+vector stage first multiplies the completed update by V mask at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:467-470`.
+legoESM instead multiplied the completed V RHS by the literal V mask earlier
+in its generic tendency boundary.  That upstream multiply was therefore the
+first owning statement.
+
+The fix changes only the `rk3_vector_raw_vmask` arm at
+`ocean_pe_latlon_cgrid.py:6236-6255`: it no longer writes a prematurely masked
+`dv_dt`, leaving NEMO's later stage-update product to determine the dry sign.
+The production-call-site AST test fails on the exact one-line revert, and the
+real stage-update-plus-fold test checks both signed-zero directions and a
+finite reverse derivative.  It recovers 48 of the 57 case-(b) target bits and
+12,399 dry/halo bits overall, with all 415,175 wet words unchanged and exact.
+The remaining nine targets are `i=64,k=0..8`: their NEMO dry HPG values depend
+on live dry tracer/density operands that the canonical entry record replaces
+with zero.  No unrecorded operand or index predicate was manufactured.
+
+This live-faithful result makes the canonical stage score's policy visible.
+The writer's +0 dry fill now compares against 7,534 legoESM -0 words at the kt
+1 stage-1 V row, up from 2,032 before the fix, even though live-NEMO dry/halo
+bit agreement improves.  No dump zero-fill was added on the legoESM side.
+
+### Decision 122 and complete re-score
+
+The clean production-JIT re-score covers all 1,560 rows and passes the
+aggregate completeness gate.  It contains 233 bit-exact, 161 at-bar non-bit,
+and 1,166 over-bar rows.  OMT-0 is 16/23/161; rung 0 is 11/10/179; OMT-1 is
+48/33/79; OMT-2 is 48/33/119; OMT-3 is 36/25/139; OMT-4 is 12/15/173; and
+each rung-10 label is 31/11/158 (bit/at-bar/over-bar).
+
+Across the seven Decision-122 card/label pairs no exact row is lost.  Rung 0
+and OMT-1 through OMT-4 are max/RMS-identical to the published control, and
+their first over-bar row is equal.  Both rung-10 labels gain 13 exact rows,
+have the registered RMS census 176 toward / 4 away / 0 equal, and move their
+first over-bar row later from kt 2 stage 2 `u` to kt 2 stage 3 `T`; the old
+first over-bar row moves toward.  This is `PASS_R278_D122_DECISION` under
+Decisions 122 and 139.  Both labels remain row-for-row identical.  Their first
+non-bit row is kt 1 stage 1 `v`, 7,534 unequal signed zeros with max/RMS zero.
+The other first non-bit rows are unchanged: OMT-0 through OMT-4 kt 1 entry
+`T`, and rung 0 kt 1 stage 1 `T`, each 151,917 unequal signed zeros and
+max/RMS zero.
+
+The aggregate and full table are under
+`orca2_rounds/round332/resume9_rescore/`; their SHA-256 values are
+`faca29a380119171e5a8a70fbcbd1a29b967d250a4c0a4db378f7ae9b532132a`
+and `3b1f5c81fdd8c8551fce0bf4dc740b3cf1cc8da4125fcd05749e4384aa79914c`.
+
+### Cross-caller, gradient, and landing gates
+
+The faithful-DINO three-step production probe is bit-identical to the
+pre-change baseline on all 66 state-leaf/step hashes and its bottom census;
+the current artifact SHA-256 is
+`5f977ac145525b73d311bdaacd5c7620b4199567f62afac15d3d1c8d19b503fa`.
+DINO retains the default-false raw-V arm.  The affected ORCA2-grid production
+caller passes all three isolated variants; the GYRE arm, atomic-mask caller,
+production/revert regression and finite local gradient pass 35 tests.  A
+combined 106-test JAX process aborted during compilation after many green
+cases because of accumulated compiler resources; the exact affected test was
+rerun alone and passed 3/3 in 334.16 seconds.
+
+The clean rung-10 N=1 comparison-card gradient, final citation/default/ratchet
+results, and final commit are recorded below after their synchronous gates
+complete.
