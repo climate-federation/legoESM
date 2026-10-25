@@ -139,6 +139,8 @@ FILES = {
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traadv.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traadv.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90"),
     # Frozen round-331 resume prereg used the short basename; bind that one
@@ -1814,6 +1816,9 @@ CITATION_MAP = {
         'CALL tra_qsr( kstp, Kmm, ts, Krhs )',
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:734':
         'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )',
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90:287-291': [
+        ('pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +', 1),
+        ('* r1_e1e2t(ji,jj) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 1), 5],
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:738-740': [
         'IF( ln_trabbc  )   CALL tra_bbc( kstp,      Kmm, ts, Krhs )',
         'IF( ln_tradmp  )   CALL tra_dmp( kstp, Kbb, Kmm, ts, Krhs )', 3],
@@ -1822,6 +1827,12 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:2927-2928': [
         'fd2_a, fd2_b, rhs2_a, rhs2_b, fct_activity, fct_inputs = _flux_pair(',
         'a2, b2, dt, 2, h_k_new)', 2],
+    'ocean_model_latlon_cgrid.py:208-210': [
+        't_value = sr(t_value + term)',
+        's_value = sr(s_value + term)', 3],
+    'ocean_model_latlon_cgrid.py:11013-11019': [
+        '_stage3_l8_krhs_terms = (',
+        '((_dmp_t,), (_dmp_s,)),', 7],
     # ORCA2 round 332: first non-bit EEN add and residual TKE source order.
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90:139-147': [
         '!*  hydrostatic pressure gradient (HPG))  *!   always called FIRST',

@@ -3,7 +3,7 @@
 Date: 2026-10-25
 
 Base: `072e4aa1b1c8`; preregistration: `fb7aa3cffc`; measurement gate:
-`c238f7232c`. Disposition: **ACQUISITION_NEEDED**. This round changes no
+`c238f7232c`. Disposition: **HELD at Resume 3; acquisition admitted**. This round changes no
 model statement or configuration value, and Codex did not run NEMO.
 Signed-zero-only dry-cell rows were excluded exactly as instructed; no scoring
 rule was changed.
@@ -186,3 +186,84 @@ operator rereview remains required before acquisition.
 Disposition remains **ACQUISITION_NEEDED** at the same operator command and
 expected evidence directory above. This resume makes both recovery paths
 usable; it does not admit or synthesize the missing tracer record.
+
+## Resume 3: admitted tracer record and source-order replay
+
+The operator returned the requested two-rank record with
+`ORCA2_ROUND333_TRACER_ACQUISITION_PASS`.  Codex did not run NEMO.  The
+committed `--admit-existing` path admitted that retained record and preserved
+all refusals: the inherited round-332 admission, producer-commit ancestry,
+binary digest, both record digests, field order/extents, checksums, time
+levels, wet-zero control and rank-0 Kmm/stage-2 identity all pass.  All seven
+header, truncation, checksum, stamp, zero, Kmm and time-level plants fire.
+`round333_tracer_admission.json` has SHA-256
+`37f7d773758d8590741a0cca3725e008f6b50a35fbe78eafdc0fab74c6b04ba6` and
+status `PASS_R333_TRACER_ACQUISITION`.
+
+The production-JIT replay observes the ordinary shared stage-3 Krhs walk and
+implicit solve with ordered callbacks, then compares the result with a
+separately compiled unobserved production step.  Both labels report zero
+changed prognostic leaves and bit-identical observed/unobserved states.  The
+walk is exact for both tracers after zeroing, advection, surface forcing and
+solar forcing.  Its first wet value mismatch is immediately after lateral
+mixing:
+
+| boundary | T everywhere wet | T registered 18 | S everywhere wet | S registered 13 |
+|---|---:|---:|---:|---:|
+| after QSR | 0, max 0 | 0, max 0 | 0, max 0 | 0, max 0 |
+| after LDF | 14, max `1.0587911840678754e-22` | 0, max 0 | 4, max `4.235164736271502e-22` | 1, max `4.235164736271502e-22` |
+| after damping | 14, same maximum | 0, max 0 | 4, same maximum | 1, same maximum |
+| pre-fold finish | 29, max `7.678080393702658e-12` | 18, same maximum | 22, max `9.652723065300961e-11` | 13, same maximum |
+| post-boundary finish | 18, same maximum | 18, same maximum | 13, same maximum | 13, same maximum |
+
+Counts are value-unequal wet binary64 words.  “Everywhere wet” contains
+430,552 pre-fold cells and 233,341 rank-0 post-boundary cells.  Both the
+given-NEMO-entry and independent label produce these same rows.  Their replay
+artifacts have SHA-256
+`6cd401600086842e7b2a546828de6d6c51b55f4fffc4a5782fd3b98f41937a24` and
+`e0171f525f77ddb0a7790c37fefeb79201b28ed67814a5c9df5210cfe7254285`,
+respectively.
+
+### First owner: CONFIRMED at the recorded statement boundary
+
+The first owning NEMO statement in executed source order is the record-build
+`CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )` at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:734`:
+the admitted before boundary is exact everywhere wet and the admitted after
+boundary contains every first mismatch.  The corresponding shared legoESM
+route places `_ldf_t/_ldf_s` in the third L8 group at
+`ocean_model_latlon_cgrid.py:11013-11019` and writes that group into the live
+accumulators at `:208-210`.  This call-boundary ownership is **CONFIRMED** for
+both labels and both tracers; advection, SBC and QSR are exonerated.
+
+The record does not contain the internal `zfu`, `zfv`, `zfw`, reciprocal and
+divisor operands needed to name one expression inside `traldf_iso_lap`.
+Moreover, the most direct single-statement proposal is refuted.  NEMO's
+regular in-place update is at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90:287-291`.
+Replaying its add/sub increment seam against the live post-QSR accumulator
+leaves exactly the same 14 T and 4 S mismatches and the same maxima as the
+current direct add.  Thus neither the final in-place assignment nor the
+recorder subtraction owns the residual magnitude.
+
+### Disposition and unchanged first row
+
+There is no confirmed single legoESM implementation statement to fix.  The
+conditional landing gate therefore does not open: Decision 122, DINO, the
+gridladder caller cards and the N=1 forward/reverse gradient probe are not run
+or claimed.  No production implementation or configuration value changes.
+The held proposal, if a later round is authorized, is an operator-only
+acquisition of the internal `traldf_iso_lap` operands at the 18 T / 13 S
+registered cells plus every one of the 14 T / 4 S first-boundary cells; until
+then, changing the shared operator would be an uncited guess.
+
+Because nothing lands, the first wet-value row is unchanged for each label:
+
+| label | first wet-value row | wet unequal | max abs | wet RMS |
+|---|---|---:|---:|---:|
+| given NEMO entry | kt 2 stage 3 T | 18 | `7.678080393702658e-12 K` | `1.561494903752516e-14 K` |
+| independent | kt 2 stage 3 T | 18 | `7.678080393702658e-12 K` | `1.561494903752516e-14 K` |
+
+Salinity remains the following row at the same boundary with 13 unequal wet
+words and maximum `9.652723065300961e-11`.  Resume 3 ends **HELD**, with no
+acquisition or configuration decision needed for this disposition.
