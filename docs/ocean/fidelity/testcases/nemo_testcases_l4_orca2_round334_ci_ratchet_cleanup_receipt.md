@@ -91,8 +91,8 @@ Evidence: `orca2_rounds/round334/` (`d122/`, `dino/`, `unit/`, `ratchet_*.log`).
   the parent: two from SPEC_MODULES registry drift, and three because ORCA1
   geothermal input files are missing from the archive. These are pre-existing
   and out of scope.
-- Per-receipt citation gate: see the machine output in the commit. Three NEMO
-  entries were added to `CITATION_MAP`.
+- Per-receipt citation gate: PASS, 3 citations, 0 failures, 0 unmapped (three NEMO
+  entries added to `CITATION_MAP`); default citation-gate test 17 passed.
 
 ## CHOICES
 
