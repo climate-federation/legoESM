@@ -1,8 +1,20 @@
 --- icedyn.F90
 +++ icedyn.F90
-@@ -32,0 +33 @@
+@@ -18,6 +18,7 @@
+    USE ice            ! sea-ice: variables
+    USE icedyn_rhg     ! sea-ice: rheology
+    USE icedyn_adv     ! sea-ice: advection
 +   USE o5_si3_writer, ONLY : o5_rdgrft_entry, o5_rdgrft_exit
-@@ -133,0 +135 @@
+    USE icedyn_rdgrft  ! sea-ice: ridging/rafting
+    USE icecor         ! sea-ice: corrections
+    USE icevar  , ONLY : ice_var_zapsmall
+@@ -131,7 +132,9 @@
+          !
+          CALL ice_dyn_rhg   ( kt, Kmm )                                     ! -- rheology
+          CALL ice_dyn_adv   ( kt )                                          ! -- advection of ice
 +         CALL o5_rdgrft_entry( a_i(1:jpi,1:jpj,1:jpl), v_i(1:jpi,1:jpj,1:jpl) )
-@@ -134,0 +137 @@
+          CALL ice_dyn_rdgrft( kt )                                          ! -- ridging/rafting
 +         CALL o5_rdgrft_exit( a_i(1:jpi,1:jpj,1:jpl), v_i(1:jpi,1:jpj,1:jpl) )
+          CALL ice_cor       ( kt , 1 )                                      ! -- Corrections
+          !
+       CASE ( np_dynRHGADV  )       !==  no ridge/raft & no corrections ==!

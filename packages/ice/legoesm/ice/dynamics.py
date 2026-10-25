@@ -209,6 +209,24 @@ class SI3CGridAEVPState(NamedTuple):
     stress12_f: jnp.ndarray
 
 
+class SI3ORCA2AEVPTrace(NamedTuple):
+    """Preregistered O5 diagnostics at NEMO's exact aEVP call points.
+
+    The leading axis of every frame field is the one-based ``jter`` sequence.
+    This is an observation result from the shared solver, not a second solver.
+    """
+
+    final: SI3CGridAEVPState
+    fimask: jnp.ndarray
+    zdelta: jnp.ndarray
+    zp_delt: jnp.ndarray
+    stress1: jnp.ndarray
+    stress2: jnp.ndarray
+    stress12: jnp.ndarray
+    u_ice: jnp.ndarray
+    v_ice: jnp.ndarray
+
+
 class SI3CGridAEVPForcing(NamedTuple):
     """Outer-step fields consumed by the resolved rung-3.3 momentum solve."""
 
@@ -1265,7 +1283,8 @@ def _si3_cgrid_aevp_core(
     differentiable: bool,
     stress_divergence_outer_weight: float,
     swap_parity: bool,
-) -> SI3CGridAEVPState:
+    capture_trace: bool = False,
+) -> SI3CGridAEVPState | SI3ORCA2AEVPTrace:
     """Shared aEVP body; ``halo(label, field, nature, sign, ldfull)`` is the lbc_lnk program.
 
     ``u_ice_b``/``v_ice_b`` are NEMO's previous-step velocities
@@ -1477,7 +1496,7 @@ def _si3_cgrid_aevp_core(
     halo_one = slice(1, -1)
     interior = slice(2, -2)
 
-    def subcycle(iteration, carry):
+    def subcycle_with_frame(iteration, carry):
         u_ice, v_ice, stress1, stress2, stress12 = carry
         shear = _si3_f_shear(u_ice, v_ice, metrics, fimask, jnp.zeros_like(stress12))
         divergence, tension, shear_square = _si3_t_deformation(u_ice, v_ice, shear, metrics)
@@ -1868,10 +1887,27 @@ def _si3_cgrid_aevp_core(
         # icedyn_rhg_evp.f90:647,754 (ldfull=.true.).
         u_ice = halo("u_ice", u_ice, "U", -_SI3_ONE, True)
         v_ice = halo("v_ice", v_ice, "V", -_SI3_ONE, True)
-        return u_ice, v_ice, stress1, stress2, stress12
+        updated = (u_ice, v_ice, stress1, stress2, stress12)
+        frame = (delta_t, p_over_delta_t, stress1, stress2, stress12, u_ice, v_ice)
+        return updated, frame
+
+    def subcycle(iteration, carry):
+        updated, _ = subcycle_with_frame(iteration, carry)
+        return updated
 
     initial = tuple(state)
-    if differentiable:
+    frames = None
+    if capture_trace:
+
+        def trace_scan_body(carry, iteration):
+            return subcycle_with_frame(iteration, carry)
+
+        final, frames = jax.lax.scan(
+            trace_scan_body,
+            initial,
+            xs=jnp.arange(config.n_subcycles),
+        )
+    elif differentiable:
 
         def scan_body(carry, iteration):
             updated = subcycle(iteration, carry)
@@ -1886,13 +1922,17 @@ def _si3_cgrid_aevp_core(
         final = jax.lax.fori_loop(0, config.n_subcycles, subcycle, initial)
     u_final, v_final, stress1_final, stress2_final, stress12_final = final
     # icedyn_rhg_evp.f90:845, no ldfull argument.
-    return SI3CGridAEVPState(
+    final_state = SI3CGridAEVPState(
         u_ice_u=u_final,
         v_ice_v=v_final,
         stress1_t=halo("zs1", stress1_final, "T", _SI3_ONE, None),
         stress2_t=halo("zs2", stress2_final, "T", _SI3_ONE, None),
         stress12_f=halo("zs12", stress12_final, "F", _SI3_ONE, None),
     )
+    if not capture_trace:
+        return final_state
+    assert frames is not None
+    return SI3ORCA2AEVPTrace(final_state, fimask, *frames)
 
 
 def si3_h79_strength_raw(
@@ -2114,6 +2154,89 @@ def si3_orca2_aevp_solver(
     ``forcing.concentration_t`` is NEMO's ``at_i`` after ``ice_strength``.
     """
 
+    result = _si3_orca2_aevp_run(
+        state,
+        forcing,
+        metrics,
+        config,
+        strength_t=strength_t,
+        u_ice_b=u_ice_b,
+        v_ice_b=v_ice_b,
+        ssh_m=ssh_m,
+        snwice_mass=snwice_mass,
+        snwice_mass_b=snwice_mass_b,
+        ln_ice_embd=ln_ice_embd,
+        fold=fold,
+        differentiable=differentiable,
+        plant_fold_sign=_plant_fold_sign,
+        plant_swap_parity=_plant_swap_parity,
+        capture_trace=False,
+    )
+    assert isinstance(result, SI3CGridAEVPState)
+    return result
+
+
+def si3_orca2_aevp_trace(
+    state: SI3CGridAEVPState,
+    forcing: SI3CGridAEVPForcing,
+    metrics: SI3CGridMetrics,
+    config: SI3CGridAEVPConfig,
+    *,
+    strength_t: jnp.ndarray,
+    u_ice_b: jnp.ndarray,
+    v_ice_b: jnp.ndarray,
+    ssh_m: jnp.ndarray,
+    snwice_mass: jnp.ndarray,
+    snwice_mass_b: jnp.ndarray,
+    ln_ice_embd: bool,
+    fold: SI3ORCA2FoldProgram,
+    differentiable: bool,
+    _plant_fold_sign: frozenset = frozenset(),
+    _plant_swap_parity: bool = False,
+) -> SI3ORCA2AEVPTrace:
+    """Return O5's B2/B3 frames from the shared ORCA2 aEVP execution."""
+
+    result = _si3_orca2_aevp_run(
+        state,
+        forcing,
+        metrics,
+        config,
+        strength_t=strength_t,
+        u_ice_b=u_ice_b,
+        v_ice_b=v_ice_b,
+        ssh_m=ssh_m,
+        snwice_mass=snwice_mass,
+        snwice_mass_b=snwice_mass_b,
+        ln_ice_embd=ln_ice_embd,
+        fold=fold,
+        differentiable=differentiable,
+        plant_fold_sign=_plant_fold_sign,
+        plant_swap_parity=_plant_swap_parity,
+        capture_trace=True,
+    )
+    assert isinstance(result, SI3ORCA2AEVPTrace)
+    return result
+
+
+def _si3_orca2_aevp_run(
+    state: SI3CGridAEVPState,
+    forcing: SI3CGridAEVPForcing,
+    metrics: SI3CGridMetrics,
+    config: SI3CGridAEVPConfig,
+    *,
+    strength_t: jnp.ndarray,
+    u_ice_b: jnp.ndarray,
+    v_ice_b: jnp.ndarray,
+    ssh_m: jnp.ndarray,
+    snwice_mass: jnp.ndarray,
+    snwice_mass_b: jnp.ndarray,
+    ln_ice_embd: bool,
+    fold: SI3ORCA2FoldProgram,
+    differentiable: bool,
+    plant_fold_sign: frozenset,
+    plant_swap_parity: bool,
+    capture_trace: bool,
+) -> SI3CGridAEVPState | SI3ORCA2AEVPTrace:
     _validate_si3_cgrid_aevp_static(config, _SI3_ORCA2_CATEGORY_COUNT)
     if config.landfast:
         raise ValueError("SI3 ORCA2 O5 deck has ln_landfast_L16 = .false.")
@@ -2142,10 +2265,11 @@ def si3_orca2_aevp_solver(
         strength_t=strength_t,
         u_ice_b=u_ice_b,
         v_ice_b=v_ice_b,
-        halo=_si3_orca2_halo(fold, _plant_fold_sign),
+        halo=_si3_orca2_halo(fold, plant_fold_sign),
         differentiable=differentiable,
         stress_divergence_outer_weight=_SI3_HALF,
-        swap_parity=_plant_swap_parity,
+        swap_parity=plant_swap_parity,
+        capture_trace=capture_trace,
     )
 
 

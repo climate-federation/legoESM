@@ -27,15 +27,47 @@ def _env() -> dict[str, str]:
 def test_binary_reader_self_test_preserves_signed_zero_and_declared_extents():
     report = gate.run_self_test()
     assert report["status"] == "PASS_SELF_TEST"
-    assert report["header_bytes"] == 100
+    assert report["header_bytes"] == 112
     assert report["signed_zero"]["ulp_wet_negzero"] != 0
     assert report["signed_zero"]["ulp_wet_1ulp"] == 1
 
 
-@pytest.mark.parametrize("plant", ["header", "truncation", "checksum", "time-level", "wet-1ulp"])
+@pytest.mark.parametrize(
+    "plant", ["header", "truncation", "checksum", "time-level", "wet-1ulp", "swapped-field"]
+)
 def test_binary_and_admission_plants_refuse(plant):
     with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):
         gate.run_self_test(plant)
+
+
+def test_reader_uses_declared_interior_and_initialized_slice_extents(tmp_path):
+    path = tmp_path / "o5_kind11_step0001_iter000_rank0000.bin"
+    gate._write_synthetic_record(path, 11)
+    fields = gate.read_o5_record(path)["fields"]
+    assert fields["stress1"].shape == (8, 7)
+    assert fields["divu"].shape == (4, 3)
+    assert fields["shear"].shape == (4, 3)
+    assert fields["delta"].shape == (4, 3)
+    masks_path = tmp_path / "o5_kind05_step0001_iter000_rank0000.bin"
+    gate._write_synthetic_record(masks_path, 5)
+    masks = gate.read_o5_record(masks_path)["fields"]
+    assert masks["fast_umask"].shape == (7, 6)
+    assert masks["fast_vmask"].shape == (7, 6)
+
+
+def test_reader_refuses_nonfinite_payloads(tmp_path):
+    path = tmp_path / "o5_kind11_step0001_iter000_rank0000.bin"
+    gate._write_synthetic_record(path, 11)
+    raw = bytearray(path.read_bytes())
+    raw[gate.HEADER_BYTES : gate.HEADER_BYTES + 8] = b"\x00\x00\x00\x00\x00\x00\xf8\x7f"
+    path.write_bytes(raw)
+    with pytest.raises(ValueError, match="non-finite payload"):
+        gate.read_o5_record(path)
+
+
+def test_sas_time_level_is_derived_from_nemo_sources():
+    nemo = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
+    assert gate.derive_sas_time_level(nemo / "src/SAS/nemogcm.F90", nemo / "src/SAS/step.F90") == 2
 
 
 def test_default_operator_script_is_read_only_preflight(tmp_path):
@@ -63,7 +95,7 @@ def test_default_operator_script_is_read_only_preflight(tmp_path):
         capture_output=True,
     ).stdout
     assert "PREFLIGHT_OK: no NEMO build or integration was run" in result.stdout
-    assert "PASS_LANDINGS_AND_12_MISPLACEMENT_PLANTS" in result.stdout
+    assert "PASS_PATCHED_PPSRC_FIXTURE_COVERAGE_AND_12_MISPLACEMENT_PLANTS" in result.stdout
     assert before == after
 
 

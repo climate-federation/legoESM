@@ -1563,6 +1563,8 @@ def _verify_run_completion_and_logs(
     *,
     plant_missing_complete: bool = False,
     plant_missing_stop0: bool = False,
+    expect_icedyn: bool = False,
+    expect_icethd: bool = False,
 ) -> dict[str, Any]:
     """Verify `RUN_COMPLETE`, `ocean.output`, and `run.user.stdout.log` in `run_dir`."""
     if not run_dir.is_dir():
@@ -1574,8 +1576,8 @@ def _verify_run_completion_and_logs(
         raise ValueError(f"STATUS PLANT-FIRED: missing ocean.output in {run_label} ({run_dir})")
     log_report = verify_ocean_output_log(
         ocean_out,
-        expect_icedyn=False,
-        expect_icethd=False,
+        expect_icedyn=expect_icedyn,
+        expect_icethd=expect_icethd,
         expect_rstart=run_label == "rst_1step",
     )
     stdout_log = run_dir / "run.user.stdout.log"

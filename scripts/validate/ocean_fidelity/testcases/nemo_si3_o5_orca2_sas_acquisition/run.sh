@@ -39,6 +39,8 @@ readonly ICE_NML=$here/namelist_ice_cfg
 readonly REAL_EXCERPT=$here/ocean.output.excerpt
 readonly REF_ROOT=$NEMO_ROOT/cfgs/$REF_CFG
 readonly REC_ROOT=$NEMO_ROOT/cfgs/$REC_CFG
+readonly O2_REF_BLD=$NEMO_ROOT/cfgs/ORCA2_SAS_ICE_O2_REF/BLD
+readonly O2_REC_BLD=$NEMO_ROOT/cfgs/ORCA2_SAS_ICE_O2_REC/BLD
 
 mode=${1:---preflight-only}
 arg=${2:-}
@@ -54,10 +56,12 @@ cleanup() {
   [[ -z "$ACTIVE_SCRATCH" || ! -d "$ACTIVE_SCRATCH" ]] || rm -rf -- "$ACTIVE_SCRATCH"
   if [[ "$rc" -ne 0 ]]; then
     mkdir -p "$REFUSED_DIR"
-    if [[ -n "$ACTIVE_RUN" && -d "$ACTIVE_RUN" ]]; then
+    if [[ -n "$ACTIVE_RUN" && -d "$ACTIVE_RUN" && "$RUN_COMPLETE" -eq 0 ]]; then
       local dst="$REFUSED_DIR/$(basename "$ACTIVE_RUN")_$(date -u +%Y%m%dT%H%M%SZ)_rc${rc}_$$"
       mv "$ACTIVE_RUN" "$dst"
       printf 'REFUSE_RETained: %s\n' "$dst" >&2
+    elif [[ -n "$ACTIVE_RUN" && -d "$ACTIVE_RUN" ]]; then
+      printf 'REFUSE_RETAINED_IN_PLACE: completed run was not relocated: %s\n' "$ACTIVE_RUN" >&2
     fi
     [[ "$CREATED_REF" -eq 0 || "$RUN_COMPLETE" -eq 1 || ! -d "$REF_ROOT" ]] || rm -rf -- "$REF_ROOT"
     [[ "$CREATED_REC" -eq 0 || "$RUN_COMPLETE" -eq 1 || ! -d "$REC_ROOT" ]] || rm -rf -- "$REC_ROOT"
@@ -108,25 +112,46 @@ PY
 
 check_patches_and_landings() {
   local scratch=$1
-  cp "$NEMO_ROOT/src/ICE/icedyn_rhg_evp.F90" "$scratch/icedyn_rhg_evp.F90"
-  cp "$NEMO_ROOT/src/ICE/icedyn_rdgrft.F90" "$scratch/icedyn_rdgrft.F90"
-  cp "$NEMO_ROOT/src/ICE/icedyn.F90" "$scratch/icedyn.F90"
-  patch -s --fuzz=0 "$scratch/icedyn_rhg_evp.F90" < "$RHG_PATCH"
-  patch -s --fuzz=0 "$scratch/icedyn_rdgrft.F90" < "$RDG_PATCH"
-  patch -s --fuzz=0 "$scratch/icedyn.F90" < "$DYN_PATCH"
-  "$PY" - "$scratch" <<'PY'
+  local raw=$scratch/raw pp=$scratch/pp mods=$scratch/mods fpp_keys
+  mkdir -p "$raw" "$pp" "$mods"
+  cp "$NEMO_ROOT/src/ICE/icedyn_rhg_evp.F90" "$raw/icedyn_rhg_evp.F90"
+  cp "$NEMO_ROOT/src/ICE/icedyn_rdgrft.F90" "$raw/icedyn_rdgrft.F90"
+  cp "$NEMO_ROOT/src/ICE/icedyn.F90" "$raw/icedyn.F90"
+  patch -s --fuzz=0 "$raw/icedyn_rhg_evp.F90" < "$RHG_PATCH"
+  patch -s --fuzz=0 "$raw/icedyn_rdgrft.F90" < "$RDG_PATCH"
+  patch -s --fuzz=0 "$raw/icedyn.F90" < "$DYN_PATCH"
+  fpp_keys=$(awk '/bld::tool::fppkeys/ {for(i=2;i<=NF;i++) printf " -D%s",$i}' "$O2_REF_BLD/cpp.fcm")
+  for unit in icedyn_rhg_evp icedyn_rdgrft icedyn; do
+    cpp $fpp_keys -P -traditional -I "$NEMO_ROOT/cfgs/ORCA2_SAS_ICE_O2_REF/WORK" \
+      "$raw/$unit.F90" -o "$pp/$unit.f90"
+  done
+  "$FC" -c -O3 -fdefault-real-8 -ffree-line-length-none -I "$O2_REF_BLD/inc" \
+    -J "$mods" "$WRITER" -o "$scratch/o5_si3_writer.o"
+  for unit in icedyn_rdgrft icedyn_rhg_evp icedyn; do
+    "$FC" -fsyntax-only -fdefault-real-8 -fcray-pointer -ffree-line-length-none \
+      -fallow-argument-mismatch -I "$mods" -I "$O2_REF_BLD/inc" \
+      -I /home/dbalwada/miniconda3/envs/nemo-build/include -J "$mods" "$pp/$unit.f90"
+  done
+  sed 's/ncom_stp, nit000/ncom_stp, o5_undeclared_identifier/' "$pp/icedyn_rhg_evp.f90" > "$scratch/undefined_plant.f90"
+  if "$FC" -fsyntax-only -fdefault-real-8 -fcray-pointer -ffree-line-length-none \
+       -fallow-argument-mismatch -I "$mods" -I "$O2_REF_BLD/inc" -J "$mods" \
+       -I /home/dbalwada/miniconda3/envs/nemo-build/include \
+       "$scratch/undefined_plant.f90" >/dev/null 2>&1; then
+    refuse 'patched-ppsrc syntax plant did not fail'
+  fi
+  "$PY" - "$pp" "$FIXTURE" <<'PY'
 import pathlib, re, sys
 root=pathlib.Path(sys.argv[1])
-text="\n".join(p.read_text() for p in (root/'icedyn_rhg_evp.F90',root/'icedyn_rdgrft.F90',root/'icedyn.F90'))
+text="\n".join(p.read_text() for p in (root/'icedyn_rhg_evp.f90',root/'icedyn_rdgrft.f90',root/'icedyn.f90'))
 checks={
 "o5_context":r"CALL o5_context\([\s\S]{0,220}?\)\n\s*IF\( kt == nit000",
 "o5_fimask":r"CALL lbc_lnk\( 'icedyn_rhg_evp', fimask[^\n]+\)\n\s*CALL o5_fimask",
-"o5_strength_entry":r"CALL o5_strength_entry\([\s\S]{0,220}?\)\n\s*CALL ice_strength",
+"o5_strength_entry":r"CALL o5_strength_entry\([\s\S]{0,500}?\)\n[\s\S]{0,100}?CALL ice_strength",
 "o5_strength_smooth":r"CALL ice_strength\n\s*CALL o5_strength_smooth",
 "o5_aevp_entry_state":r"zsshdyn\(:,:\) = ice_var_sshdyn[^\n]+\n\s*CALL o5_aevp_entry_state",
 "o5_frame_delta":r"CALL lbc_lnk\( 'icedyn_rhg_evp', zdelta[^\n]+\n[\s\S]{0,180}?CALL o5_frame_delta",
-"o5_frame_stress":r"CALL o5_frame_stress[\s\S]{0,100}?\n\s*! --- Ice internal stresses",
-"o5_frame_velocity":r"ENDIF\n[\s\S]{0,180}?CALL o5_frame_velocity[\s\S]{0,80}?#if defined key_agrif",
+"o5_frame_stress":r"CALL o5_frame_stress[\s\S]{0,600}?\n\s*! --- Ice internal stresses",
+"o5_frame_velocity":r"CALL lbc_lnk\( 'icedyn_rhg_evp', u_ice[^\n]+\n[\s\S]{0,100}?ENDIF\n\s*IF\([^\n]+\n[^\n]+CALL o5_frame_velocity",
 "o5_aevp_exit":r"pstress12_i\(:,:\) = zs12\(:,:\)\n\s*CALL o5_aevp_exit",
 "o5_strength_raw":r"CALL o5_strength_raw[^\n]+\n\s*CASE \( np_strcst \)",
 "o5_rdgrft_entry":r"CALL o5_rdgrft_entry[^\n]+\n\s*CALL ice_dyn_rdgrft",
@@ -136,28 +161,71 @@ def verify(value):
     missing=[name for name,pat in checks.items() if re.search(pat,value,re.M) is None]
     if missing: raise ValueError(','.join(missing))
 verify(text)
+patched_calls=set(re.findall(r"\bCALL\s+(o5_[a-z0-9_]+)",text,re.I))
+markers={"o5_"+name.lower() for name in re.findall(r"O5_PATCHED_([A-Z0-9_]+)",pathlib.Path(sys.argv[2]).read_text())}
+if patched_calls != markers:
+    raise SystemExit(f"STATUS PLANT-FIRED: patched/fixture observer coverage differs: {sorted(patched_calls ^ markers)}")
 for name in checks:
     planted=text.replace(f"CALL {name}", f"CALL misplaced_{name}", 1)+f"\nCALL {name}\n"
     try: verify(planted)
     except ValueError: continue
     raise SystemExit(f"STATUS PLANT-FIRED: misplacement plant inert for {name}")
-print("PASS_LANDINGS_AND_12_MISPLACEMENT_PLANTS")
+print("PASS_PATCHED_PPSRC_FIXTURE_COVERAGE_AND_12_MISPLACEMENT_PLANTS")
 PY
 }
 
 compile_fixture() {
-  local scratch=$1
+  local scratch=$1 pp=$2
   mkdir -p "$scratch/o5_si3_records"
-  (cd "$scratch" && "$FC" -O2 -fcheck=bounds -fbacktrace -Wall -Wextra -J. -I. \
-    "$STUBS" "$WRITER" "$FIXTURE" -o o5_fixture && ./o5_fixture)
-  [[ $(find "$scratch/o5_si3_records" -type f | wc -l) -eq 82 ]] || refuse "fixture record count is not 82"
-  "$PY" "$GATE" --read-record "$scratch/o5_si3_records/o5_kind01_step0001_iter000_rank0000.bin" >/dev/null
+  "$PY" - "$pp" "$FIXTURE" "$scratch/o5_patched_fixture.F90" <<'PY'
+import pathlib,re,sys
+pp,template,out=map(pathlib.Path,sys.argv[1:])
+calls={}
+for source in (pp/'icedyn_rhg_evp.f90',pp/'icedyn_rdgrft.f90',pp/'icedyn.f90'):
+    lines=source.read_text().splitlines()
+    index=0
+    while index < len(lines):
+        match=re.search(r'\bCALL\s+(o5_[a-z0-9_]+)\s*\(',lines[index],re.I)
+        if not match:
+            index+=1; continue
+        name=match.group(1).lower()
+        start=index-1 if lines[index].lstrip().startswith('&') and index > 0 else index
+        block=lines[start:index+1]
+        depth=sum(line.count('(')-line.count(')') for line in block)
+        while depth > 0:
+            index+=1
+            if index >= len(lines): raise SystemExit(f'STATUS PLANT-FIRED: unterminated {name} call')
+            block.append(lines[index]); depth+=lines[index].count('(')-lines[index].count(')')
+        if name in calls: raise SystemExit(f'STATUS PLANT-FIRED: duplicate patched call {name}')
+        calls[name]='\n'.join(block)
+        index+=1
+text=template.read_text()
+markers=re.findall(r'^! O5_PATCHED_([A-Z0-9_]+)$',text,re.M)
+expected={f'o5_{marker.lower()}' for marker in markers}
+if set(calls) != expected:
+    raise SystemExit(f'STATUS PLANT-FIRED: patched source/template calls differ: {sorted(set(calls)^expected)}')
+for marker in markers:
+    text=text.replace(f'! O5_PATCHED_{marker}',calls[f'o5_{marker.lower()}'])
+if re.search(r'^! O5_PATCHED_',text,re.M): raise SystemExit('STATUS PLANT-FIRED: unexpanded patched-source marker')
+out.write_text(text)
+print('PASS_GENERATED_FIXTURE_USES_PATCHED_PPSRC_CALLS')
+PY
+  (cd "$scratch" && "$FC" -O2 -fcheck=bounds -fbacktrace -finit-real=snan -Wall -Wextra -J. -I. \
+    "$STUBS" "$WRITER" "$scratch/o5_patched_fixture.F90" -o o5_fixture && ./o5_fixture)
+  [[ $(find "$scratch/o5_si3_records" -type f | wc -l) -eq 164 ]] || refuse "fixture record count is not 164"
+  "$PY" "$GATE" --verify-layout-fixture "$scratch/o5_si3_records"
+  local plant
+  for plant in rank-collapse signed-zero extent; do
+    if "$PY" "$GATE" --verify-layout-fixture "$scratch/o5_si3_records" --plant "$plant" >/dev/null 2>&1; then
+      refuse "layout fixture plant $plant did not refuse"
+    fi
+  done
 }
 
 reader_plants() {
   "$PY" "$GATE" --self-test >/dev/null
   local plant
-  for plant in header truncation checksum time-level wet-1ulp; do
+  for plant in header truncation checksum time-level wet-1ulp swapped-field; do
     if "$PY" "$GATE" --self-test --plant "$plant" >/dev/null 2>&1; then
       refuse "reader plant $plant did not refuse"
     fi
@@ -168,6 +236,7 @@ verify_real_excerpt() {
   "$PY" - "$REAL_EXCERPT" <<'PY'
 import pathlib, sys
 from scripts.validate.ocean_fidelity.testcases.nemo_si3_o1_orca2_sas_gate import verify_ocean_output_log
+from scripts.validate.ocean_fidelity.testcases.nemo_si3_o5_orca2_sas_gate import verify_o5_log
 p=pathlib.Path(sys.argv[1]); lines=p.read_text().splitlines()
 src=next(x.split(':',1)[1].strip() for x in lines if x.startswith('# Source path:'))
 sha=next(x.split(':',1)[1].strip() for x in lines if x.startswith('# Complete source SHA-256:'))
@@ -185,27 +254,61 @@ source_lines=source.read_text(errors='replace').splitlines()
 if body != [source_lines[n-1].rstrip() for n in numbers]:
     raise SystemExit('STATUS PLANT-FIRED: committed excerpt body differs from cited real output lines')
 verify_ocean_output_log(p, expect_icedyn=False, expect_icethd=False)
-print('PASS_REAL_OCEAN_OUTPUT_EXCERPT')
+# This provenance-bearing historical excerpt predates O5 and has dynamics off.
+# Exercise O5's overlay parser with an explicitly synthetic dynamics-on variant;
+# admission always checks the complete, real record-run ocean.output itself.
+synthetic='\n'.join(body).replace('ln_icedyn =  F', 'ln_icedyn =  T')
+synthetic += '''
+ ln_ice_embd = F
+ ln_dynALL = T
+ ln_dynRHGADV = F
+ ln_ridging = F
+ ln_rafting = F
+ ln_str_H79 = T
+ ln_str_smooth = T
+ ln_aEVP = T
+ nn_nevp = 100
+'''
+import tempfile
+with tempfile.TemporaryDirectory() as td:
+    candidate=pathlib.Path(td)/'synthetic.ocean.output'
+    candidate.write_text(synthetic)
+    verify_o5_log(candidate)
+    try: verify_o5_log(candidate, plant='selector')
+    except ValueError: pass
+    else: raise SystemExit('STATUS PLANT-FIRED: synthetic O5 selector plant did not fail')
+print('PASS_REAL_EXCERPT_PROVENANCE_AND_SYNTHETIC_O5_LOG; real O5 log is checked at admission')
 PY
 }
 
 run_preflight() {
   local scratch; scratch=$(mktemp -d); ACTIVE_SCRATCH=$scratch
-  printf 'PREFLIGHT 1/8 deck and one-rank three-step overlay\n'; verify_deck
-  printf 'PREFLIGHT 2/8 source patches, call-point landings, misplacement plants\n'; check_patches_and_landings "$scratch"
-  printf 'PREFLIGHT 3/8 bounds-checked observer fixture\n'; compile_fixture "$scratch/fixture"
-  printf 'PREFLIGHT 4/8 header/truncation/checksum/time-level/wet-ULP plants\n'; reader_plants
-  printf 'PREFLIGHT 5/8 committed real ocean.output excerpt\n'; verify_real_excerpt
-  printf 'PREFLIGHT 6/8 SAS time level derived from Nnn source\n'
+  printf 'PREFLIGHT 1/9 deck and one-rank three-step overlay\n'; verify_deck
+  printf 'PREFLIGHT 2/9 source patches, preprocessed call-point landings, misplacement plants\n'; check_patches_and_landings "$scratch"
+  printf 'PREFLIGHT 3/9 bounds-checked patched-ppsrc fixture, two ranks, real extents and signed zero\n'; compile_fixture "$scratch/fixture" "$scratch/pp"
+  printf 'PREFLIGHT 4/9 reader and admission payload plants\n'; reader_plants
+  printf 'PREFLIGHT 5/9 real excerpt provenance and synthetic dynamics-on O5 overlay\n'; verify_real_excerpt
+  printf 'PREFLIGHT 6/9 SAS time level derived from Nnn source\n'
   grep -q 'Nbb = 1; Nnn = 2; Naa = 3; Nrhs = Naa' "$NEMO_ROOT/src/SAS/nemogcm.F90"
   grep -q 'CALL sbc    ( kstp, Nbb, Nnn )' "$NEMO_ROOT/src/SAS/step.F90"
-  printf 'PREFLIGHT 7/8 memory/disk/timeout/trap gates present\n'; ram_gate 1; disk_gate "$EVIDENCE" 1024
+  printf 'PREFLIGHT 7/9 real-flag FP census and injected-operation plant\n'
+  fp_census "$O2_REF_BLD" "$O2_REC_BLD" "$scratch/fp_census.json"
+  "$FC" -x f95 -c -O3 -fdefault-real-8 -o "$scratch/fp_plant.o" - <<'F90'
+SUBROUTINE o5_injected_fp_operation(x, y)
+  REAL, VOLATILE, INTENT(INOUT) :: x, y
+  y = x * 1.0000000000000002 + y
+END SUBROUTINE o5_injected_fp_operation
+F90
+  if fp_census "$O2_REF_BLD" "$O2_REC_BLD" "$scratch/fp_census_plant.json" "$scratch/fp_plant.o"; then
+    refuse 'injected floating-point operation census plant did not fail'
+  fi
+  printf 'PREFLIGHT 8/9 memory/disk/timeout/trap gates present\n'; ram_gate 1; disk_gate "$EVIDENCE" 1024
   grep -q 'timeout "$RUN_TIMEOUT_SEC" mpirun -np 1' "$0"
-  printf 'PREFLIGHT 8/8 default is read-only; operator block not entered\n'
+  printf 'PREFLIGHT 9/9 default is read-only; operator block not entered\n'
   if [[ -n "${PREFLIGHT_JSON:-}" ]]; then
     "$PY" - "$PREFLIGHT_JSON" <<'PY'
 import json,pathlib,sys
-pathlib.Path(sys.argv[1]).write_text(json.dumps({"status":"PREFLIGHT_OK","nemo_run":False,"plants":17},indent=2)+"\n")
+pathlib.Path(sys.argv[1]).write_text(json.dumps({"status":"PREFLIGHT_OK","nemo_run":False,"plants":31},indent=2)+"\n")
 PY
   fi
   printf 'PREFLIGHT_OK: no NEMO build or integration was run\n'
@@ -214,27 +317,49 @@ PY
 }
 
 fp_census() {
-  local ref_bld=$1 rec_bld=$2 out=$3
-  "$PY" - "$ref_bld" "$rec_bld" "$out" <<'PY'
-import json,pathlib,re,subprocess,sys
-ref,rec,out=map(pathlib.Path,sys.argv[1:])
-cfg=(rec/'arch_nemo.fcm').read_text(errors='ignore')
-if re.search(r'(^|\s)-O0(\s|$)',cfg): raise SystemExit('STATUS PLANT-FIRED: record build uses -O0')
+  local ref_bld=$1 rec_bld=$2 out=$3 plant_obj=${4:-}
+  "$PY" - "$ref_bld" "$rec_bld" "$out" "$plant_obj" <<'PY'
+import json,pathlib,re,shlex,subprocess,sys
+ref,rec,out=map(pathlib.Path,sys.argv[1:4]); plant=pathlib.Path(sys.argv[4]) if sys.argv[4] else None
+def fortran_flags(bld):
+    values={}
+    for line in (bld/'arch_nemo.fcm').read_text(errors='ignore').splitlines():
+        match=re.match(r'^%(FCFLAGS|FFLAGS)\s+(.*)$',line)
+        if match: values[match.group(1)]=match.group(2).strip()
+    text=values.get('FFLAGS',values.get('FCFLAGS','')).replace('%FCFLAGS',values.get('FCFLAGS',''))
+    flags=shlex.split(text)
+    if '-O0' in flags or not any(re.fullmatch(r'-O[1-9gs]',flag) for flag in flags):
+        raise SystemExit(f'STATUS PLANT-FIRED: observed Fortran flags are not optimized: {flags}')
+    return flags
+flags={'reference':fortran_flags(ref),'record':fortran_flags(rec)}
+if flags['reference'] != flags['record']:
+    raise SystemExit('STATUS PLANT-FIRED: reference/record Fortran flags differ')
 units=('icedyn_rhg_evp','icedyn_rdgrft','icedyn')
-pat=re.compile(r'^(?:v)?(?:add|sub|mul|div|sqrt|max|min|fmadd|fmsub|fnmadd|fnmsub|cvt).*(?:ss|sd|ps|pd)$|^f(?:add|sub|mul|div|sqrt)')
-def one(p):
-    raw=subprocess.run(['objdump','-d',str(p)],check=True,text=True,capture_output=True).stdout
-    ans={}
+header=re.compile(r'^\s*[0-9a-f]+\s+<([^>]+)>:$')
+instruction=re.compile(r'^\s*[0-9a-f]+:\s+(?:(?:[0-9a-f]{2})\s+)+\s*([a-z][a-z0-9.]*)\b')
+fp=re.compile(r'^(?:v)?(?:add|sub|mul|div|sqrt|max|min|fmadd|fmsub|fnmadd|fnmsub|cvt|cmp|comi|ucomi|and|andn|xor).*?(?:ss|sd|ps|pd)(?:x|y|z)?$|^f(?:add|sub|mul|div|sqrt)')
+def one(path):
+    raw=subprocess.run(['objdump','-d',str(path)],check=True,text=True,capture_output=True).stdout
+    function='<outside>'; counts={}
     for line in raw.splitlines():
-        cols=line.split()
-        for token in cols[2:5]:
-            m=token.lower()
-            if pat.match(m): ans[m]=ans.get(m,0)+1; break
-    return ans
-report={u:{'reference':one(ref/'obj'/f'{u}.o'),'record':one(rec/'obj'/f'{u}.o')} for u in units}
-bad=[u for u,v in report.items() if v['reference']!=v['record']]
-if bad: raise SystemExit(f'STATUS PLANT-FIRED: FP instruction census changed: {bad}')
-out.write_text(json.dumps({'status':'PASS_FP_CENSUS_REAL_FLAGS','units':report},indent=2)+"\n")
+        found=header.match(line)
+        if found: function=found.group(1); continue
+        found=instruction.match(line)
+        if found and fp.match(found.group(1).lower()): counts[function]=counts.get(function,0)+1
+    return counts
+report={}
+for unit in units:
+    reference=one(ref/'obj'/f'{unit}.o'); record=one(rec/'obj'/f'{unit}.o')
+    if plant is not None and unit == 'icedyn':
+        for name,count in one(plant).items(): record[f'PLANT::{name}']=count
+    report[unit]={'reference':reference,'record':record,'reference_total':sum(reference.values()),'record_total':sum(record.values())}
+bad=[unit for unit,value in report.items() if value['reference'] != value['record']]
+zero=[unit for unit,value in report.items() if value['reference_total'] == 0 or value['record_total'] == 0]
+payload={'status':'PASS_FP_CENSUS_REAL_FLAGS','fortran_flags':flags,'units':report}
+out.write_text(json.dumps(payload,indent=2,sort_keys=True)+"\n")
+if zero: raise SystemExit(f'STATUS PLANT-FIRED: zero FP census: {zero}')
+if bad: raise SystemExit(f'STATUS PLANT-FIRED: per-function FP instruction census changed: {bad}')
+print('PASS_FP_CENSUS_REAL_FLAGS '+ ' '.join(f"{u}={report[u]['reference_total']}" for u in units))
 PY
 }
 
@@ -249,7 +374,10 @@ admit() {
   local commit=$1
   "$PY" "$GATE" --admit-evidence "$EVIDENCE" --expect-commit "$commit" --json "$EVIDENCE/o5_admission.json"
   local plant
-  for plant in stamp binary-checksum checksum time-level selector; do
+  for plant in stamp binary-checksum checksum time-level selector missing-complete missing-stop0 ref-rec-diff \
+    wet-1ulp swapped-field fold-sign-fimask fold-sign-zdelta fold-sign-zp_delt fold-sign-u_ice \
+    fold-sign-v_ice fold-sign-zs1 fold-sign-zs2 fold-sign-zs12 fold-sign-strength \
+    exchange-before-smooth unmasked-smooth parity-swap; do
     if "$PY" "$GATE" --admit-evidence "$EVIDENCE" --expect-commit "$commit" --plant "$plant" >/dev/null 2>&1; then
       refuse "retained-evidence plant $plant did not refuse"
     fi
@@ -260,7 +388,7 @@ if [[ "$mode" == --preflight-only ]]; then run_preflight; exit 0; fi
 if [[ "$mode" == --admit-existing ]]; then
   run_preflight
   [[ -f "$EVIDENCE/manifest/producer_commit.txt" ]] || refuse "missing producer commit"
-  commit=$(tr -d '[:space:]' < "$EVIDENCE/manifest/producer_commit.txt")
+  commit=$(git -C "$REPO" rev-parse HEAD)
   admit "$commit"; printf 'ACQUISITION_ADMITTED: %s\n' "$EVIDENCE"; exit 0
 fi
 
@@ -316,7 +444,7 @@ same_program
 mkdir -p "$EVIDENCE/manifest/binaries"
 cp "$REF_ROOT/BLD/bin/nemo.exe" "$EVIDENCE/manifest/binaries/nemo.ref"
 cp "$REC_ROOT/BLD/bin/nemo.exe" "$EVIDENCE/manifest/binaries/nemo.rec"
-sha256sum "$EVIDENCE/manifest/binaries/nemo.ref" "$EVIDENCE/manifest/binaries/nemo.rec" > "$EVIDENCE/manifest/binaries.sha256"
+(cd "$EVIDENCE/manifest" && sha256sum binaries/nemo.ref binaries/nemo.rec > binaries.sha256)
 stage_run "$REF_CFG" "$EVIDENCE/reference_3step"
 stage_run "$REC_CFG" "$EVIDENCE/record_3step"
 (cd "$EVIDENCE/record_3step" && find o5_si3_records -type f -print0 | sort -z | xargs -0 sha256sum > records.sha256)

@@ -26,6 +26,7 @@ from legoesm.ice.dynamics import (
     SI3CGridMetrics,
     SI3ORCA2FoldProgram,
     SI3ORCA2StrengthConfig,
+    si3_orca2_aevp_trace,
     si3_orca2_aevp_solver,
     si3_orca2_ice_strength,
     si3_var_sshdyn,
@@ -286,6 +287,24 @@ def test_aevp_wrong_fold_sign_plant_fires(label):
 def test_aevp_parity_plant_fires():
     base = _run_aevp()
     assert _sha(*_run_aevp(_plant_swap_parity=True)) != _sha(*base)
+
+
+def test_aevp_trace_is_the_shared_solver_and_exposes_every_inner_frame():
+    state, forcing, metrics, strength, entry = _aevp_inputs()
+    config = _aevp_config(TEST_SUBCYCLES)
+    common = dict(
+        strength_t=strength,
+        ln_ice_embd=False,
+        fold=_fold(False),
+        differentiable=False,
+        **entry,
+    )
+    trace = si3_orca2_aevp_trace(state, forcing, metrics, config, **common)
+    solved = si3_orca2_aevp_solver(state, forcing, metrics, config, **common)
+    for actual, expected in zip(trace.final, solved):
+        np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    for frames in trace[2:]:
+        assert frames.shape == (TEST_SUBCYCLES, JPI, JPJ)
 
 
 def test_aevp_exchange_program_site_by_site(monkeypatch):

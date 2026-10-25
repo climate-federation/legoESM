@@ -1,6 +1,14 @@
 --- icedyn_rdgrft.F90
 +++ icedyn_rdgrft.F90
-@@ -31,0 +32 @@
+@@ -24,2 +24,3 @@
+    USE icevar  , ONLY : ice_var_roundoff
 +   USE o5_si3_writer, ONLY : o5_strength_raw
-@@ -1057,0 +1059 @@
+    USE icectl         ! sea-ice: control prints
+@@ -1055,6 +1056,7 @@
+             ENDIF
+          END_2D
+          !
 +         CALL o5_strength_raw( at_i(1:jpi,1:jpj), strength(1:jpi,1:jpj) )
+       CASE ( np_strcst )           !== Constant strength ==!
+          !
+          DO_2D( nn_hls, nn_hls, nn_hls, nn_hls )

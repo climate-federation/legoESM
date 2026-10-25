@@ -14,10 +14,11 @@ MODULE o5_si3_writer
    PUBLIC :: o5_rdgrft_entry, o5_rdgrft_exit
 
    CHARACTER(len=8), PARAMETER :: record_magic = 'O5SI3R01'
-   INTEGER(int32), PARAMETER :: record_version = 1_int32
+   INTEGER(int32), PARAMETER :: record_version = 2_int32
    INTEGER(int32), SAVE :: c_kt = -1, c_kmm = -1, c_rank = -1
    INTEGER(int32), SAVE :: c_jpi = -1, c_jpj = -1, c_jpl = -1, c_nn_hls = -1
    INTEGER(int32), SAVE :: c_ncom_stp = -1, c_nit000 = -1, c_jpni = -1, c_jpnj = -1
+   INTEGER(int32), SAVE :: c_nis0 = -1, c_nie0 = -1, c_njs0 = -1, c_nje0 = -1
    INTEGER(int32), SAVE :: c_ln_nnogather = -1, c_nn_npfchk = -1
    REAL(real64), SAVE :: c_rdt_ice = -1.0_real64
 
@@ -27,7 +28,7 @@ CONTAINS
       INTEGER, INTENT(out) :: iu
       INTEGER, INTENT(in) :: kind, jter, nfields
       INTEGER :: ios
-      INTEGER(int32), DIMENSION(18) :: meta
+      INTEGER(int32), DIMENSION(21) :: meta
       REAL(real64), DIMENSION(2) :: rmeta
       CHARACTER(len=256) :: name
 
@@ -39,7 +40,7 @@ CONTAINS
       IF (ios /= 0) ERROR STOP 'O5 record open failed'
       meta = [INT(kind,int32), c_kt, INT(jter,int32), c_kmm, c_rank, c_jpi, c_jpj, c_jpl, &
               c_nn_hls, c_ncom_stp, c_nit000, c_jpni, c_jpnj, c_ln_nnogather, c_nn_npfchk, &
-              INT(nfields,int32), 1_int32, 0_int32]
+              INT(nfields,int32), 1_int32, c_nis0, c_nie0, c_njs0, c_nje0]
       rmeta = [c_rdt_ice, 0.0_real64]
       WRITE(iu) record_magic
       WRITE(iu) record_version
@@ -47,19 +48,24 @@ CONTAINS
       WRITE(iu) rmeta
    END SUBROUTINE open_record
 
-   SUBROUTINE o5_context(kt, kmm, rank, jpi, jpj, jpl, nn_hls, ncom_stp, nit000, jpni, jpnj, &
-                         ln_nnogather, nn_npfchk, rdt_ice)
+   SUBROUTINE o5_context(kt, kmm, rank, jpi, jpj, jpl, nn_hls, nis0, nie0, njs0, nje0, &
+                         ncom_stp, nit000, jpni, jpnj, ln_nnogather, nn_npfchk, rdt_ice)
       INTEGER, INTENT(in) :: kt, kmm, rank, nn_hls, ncom_stp, nit000, jpni, jpnj
       INTEGER, INTENT(in) :: jpi, jpj, jpl
+      INTEGER, INTENT(in) :: nis0, nie0, njs0, nje0
       LOGICAL, INTENT(in) :: ln_nnogather
       INTEGER, INTENT(in) :: nn_npfchk
       REAL(wp), INTENT(in) :: rdt_ice
       c_kt = INT(kt,int32); c_kmm = INT(kmm,int32); c_rank = INT(rank,int32)
       c_jpi = INT(jpi,int32); c_jpj = INT(jpj,int32); c_jpl = INT(jpl,int32)
+      c_nis0 = INT(nis0,int32); c_nie0 = INT(nie0,int32)
+      c_njs0 = INT(njs0,int32); c_nje0 = INT(nje0,int32)
       c_nn_hls = INT(nn_hls,int32); c_ncom_stp = INT(ncom_stp,int32)
       c_nit000 = INT(nit000,int32); c_jpni = INT(jpni,int32); c_jpnj = INT(jpnj,int32)
       c_ln_nnogather = MERGE(1_int32,0_int32,ln_nnogather); c_nn_npfchk = INT(nn_npfchk,int32)
       c_rdt_ice = REAL(rdt_ice,real64)
+      IF (c_nis0 < 1 .OR. c_nie0 > c_jpi .OR. c_njs0 < 1 .OR. c_nje0 > c_jpj) &
+         ERROR STOP 'O5 interior extent/context mismatch'
    END SUBROUTINE o5_context
 
    SUBROUTINE o5_strength_entry(a_i, v_i, at_i, tmask)
