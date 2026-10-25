@@ -212,6 +212,25 @@ def _nemo_stage3_l8_krhs_walk(adv_t, adv_s, *term_groups):
     return t_value, s_value, tuple(boundaries)
 
 
+def _nemo_safe_stored_ldf_divisor(stored_thickness, active_3d):
+    """Keep NEMO's stored wet divisor without a dry ``0 / 0`` transpose.
+
+    NEMO's ``tra_ldf`` loops only over active tracer cells.  legoESM evaluates
+    the rectangular array and masks the tendency afterward; the materialized
+    partial-cell thickness is zero below the sea floor and in land columns.
+    Supplying that zero to the division makes its reverse rule evaluate
+    ``zero_cotangent / 0`` even though the cell is physically inactive.  One
+    is an inert divisor on those cells and leaves every executed NEMO word
+    untouched.
+    """
+
+    stored_thickness = jnp.asarray(stored_thickness)
+    active_3d = jnp.asarray(active_3d)
+    return jnp.where(
+        active_3d != 0.0, stored_thickness,
+        jnp.ones_like(stored_thickness))
+
+
 def mass_flux_fields(u_field, v_field, w_field, mfu_data, mfv_data, mfw_data):
     """Wrap the tracer-advecting mass fluxes as the three ``mass_flux_*`` Fields.
 
@@ -10621,7 +10640,23 @@ class LatLonCGridOceanModel:
                 return_bolus_transport=_want_bolus,
                 return_redi_diagnostics=((_return_tracer_process_trace or _return_ldf_diagnostic_trace) and self._nemo_ws_test_hooks.tracer_ldf_diagnostics is not None), return_redi_slope_diagnostics=((_return_tracer_process_trace or _return_ldf_diagnostic_trace) and (self._nemo_ws_test_hooks.tracer_ldf_diagnostics == "slope" or isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict))), native_slope_nmln_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("nmln") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
                 redi_face_thickness_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("face_thickness") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else (self._nemo_ws_test_hooks.tracer_ldf_diagnostics if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, tuple) else None)),
-                redi_divisor_thickness_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("divisor_thickness") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
+                # traldf_iso.f90:301-305/:318-322 reads the already-stored
+                # stage-2 e3t(Kmm).  Preserve those wet-cell words, but use an
+                # inert unit divisor where NEMO's wet-cell loop does not
+                # execute; a rectangular 0/0 followed by masking has a NaN
+                # transpose even when its primal is later discarded.
+                redi_divisor_thickness_override=(
+                    self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get(
+                        "divisor_thickness")
+                    if (isinstance(
+                            self._nemo_ws_test_hooks.tracer_ldf_diagnostics,
+                            dict)
+                        and self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get(
+                            "divisor_thickness") is not None)
+                    else (_nemo_safe_stored_ldf_divisor(
+                        _h_s3_kmm, _active_live)
+                        if gm_cfg.redi_flux_geometry_stage == "rk3_kmm"
+                        else None)),
                 redi_closed_bottom_wmask_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("closed_bottom_wmask") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
                 redi_horizontal_flux_evaluation_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("horizontal_flux_evaluation") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
                 redi_area_reciprocal_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("area_reciprocal") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
