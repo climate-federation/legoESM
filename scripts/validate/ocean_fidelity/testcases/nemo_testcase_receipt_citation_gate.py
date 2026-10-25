@@ -1816,22 +1816,22 @@ CITATION_MAP = {
     'tramle.F90:51': "r5_21 = 5.e0 / 21.e0",
     # ORCA2 round 333 Resume 7: admitted internal traldf record ownership.
     'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/stprk3_stg.f90:210-229': [
-        ('r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )', 2),
+        ('!                          ! set ssh and (uu_b,vv_b) at N+1/2  (Kaa)', 2),
         ('r3f(:,:)     = r2_3 * r3fb(:,:) + r1_3 * r3fa(:,:)', 2), 20],
     'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/traldf_iso.f90:301-305': [
         ('pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +', 1),
         ('* r1_e1e2t(ji,jj) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 1), 5],
     'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/traldf_iso.f90:318-322': [
-        ('pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +', 1),
-        ('* r1_e1e2t(ji,jj) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 1), 5],
+        ('pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +', 2),
+        ('* r1_e1e2t(ji,jj) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 2), 5],
     'gm_redi_latlon_cgrid.py:3264-3269': [
         ('e3t_divisor = e3t if divisor_thickness is None else jnp.asarray(', 1),
-        ('"divisor_thickness must have the full tracer shape "', 1), 6],
+        ('f"{q.shape}, got {e3t_divisor.shape}")', 1), 6],
     'ocean_model_latlon_cgrid.py:8764-8778': [
-        ('_h_s3_kmm = _h_live_one_half', 1),
-        ('_h_s3_kmm = nemo_source_round(', 1), 15],
+        ("# Stage 3's Kmm: NEMO's stored e3t_0*(1+r3t(Kmm)), r3t(Kmm) being", 1),
+        ('_h_ref_ws * _stretch_s3_kmm[..., None])', 1), 15],
     'ocean_model_latlon_cgrid.py:10611-10624': [
-        ('redi_divisor_eta=(', 1),
+        ('# Stage-3 tra_ldf receives the stage-2 output as Kmm', 1),
         ('redi_divisor_thickness_override=', 1), 14],
     # ORCA2 round 333: first wet-value stage-3 tracer source-order walk.
     'src/OCE/TRA/traldf_iso.F90:145': [('#           define   INN                0', 1)],
