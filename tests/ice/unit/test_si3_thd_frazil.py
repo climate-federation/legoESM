@@ -54,7 +54,9 @@ def _mismatches(res, q, rn_hinew):
 
 
 def _jit(q, rn_hinew, ln_frazil=False):
-    return jax.jit(lambda x: bl.si3_ice_thd_frazil(x, rn_hinew=rn_hinew, ln_frazil=ln_frazil))(jnp.asarray(q))
+    # CPU: the float-compare plant relies on XLA CPU flushing -5e-324 under jit.
+    fn = jax.jit(lambda x: bl.si3_ice_thd_frazil(x, rn_hinew=rn_hinew, ln_frazil=ln_frazil))
+    return fn(jax.device_put(jnp.asarray(q), jax.devices("cpu")[0]))
 
 
 def test_production_deck_resolves_hinew_and_collection_off():

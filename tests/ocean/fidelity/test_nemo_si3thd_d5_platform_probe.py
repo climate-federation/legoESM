@@ -2775,3 +2775,62 @@ def test_r6_literal_denominators_never_zero_under_record_and_frq_m_scales_qtr_ic
             got4242_hi_0.view(np.uint64), oracle4242_hi.view(np.uint64)
         )
 
+
+
+# O8: the production C1D step takes ht_i_new and the cooling predicate from ice_thd_frazil.
+_O8_QLEAD = (-300.0, -1.0e-3, -5e-324, -0.0, 0.0, 5e-324, 300.0)
+
+
+def _o8_production_exit(probe_module):
+    from legoesm.core.nemo_namelist import parse_namelist
+
+    cfg = parse_namelist(
+        REPO_ROOT / "scripts/validate/ocean_fidelity/testcases/configs/c1d_omip_l3_namelist_ice_cfg", "ice")
+    assert cfg[("ice", "namthd_do", "rn_hinew")][0] == bl_mod._NEW_ICE_THICKNESS
+    assert cfg[("ice", "namthd_do", "ln_frazil")][0] is False
+    yg = probe_module.year_gate
+    card = build_c1d_omip_l3_card()
+    frames, exact = yg._read_exact_steps(yg.REPLAY_ROOT, (1,))[1]
+    n = len(_O8_QLEAD)
+    entry = jax.tree.map(lambda v: jnp.repeat(jnp.asarray(v, jnp.float64), n, axis=0),
+                         yg._exact_1d_entry(frames, sss_m=exact.get("sss")))
+    forcing = yg._forcing(exact, jnp.float64)
+    forcing = forcing._replace(**{
+        name: (jnp.asarray(_O8_QLEAD, jnp.float64) if name == "qlead"
+               else jnp.broadcast_to(getattr(forcing, name), (n,)))
+        for name in ("qns_ice", "qsr_ice", "dqns_ice", "qtr_ice_top", "t_bottom", "sss", "evaporation",
+                     "snow_precipitation", "qprec_ice", "qcn_ice_bottom", "qsb_ice_bottom", "fhld", "qlead")})
+    step = jax.jit(lambda s, f: bl_mod.si3_column_step_arrays(s, f, card.dt_seconds, card.config.ice_constants))
+    out = step(*jax.device_put((entry, forcing), jax.devices("cpu")[0])).post_do
+    return np.stack([np.asarray(out.concentration), np.asarray(out.h_ice)]).view(np.uint64)
+
+
+def test_o8_production_c1d_step_calls_shared_frazil(probe_module, monkeypatch):
+    calls = []
+    real = bl_mod.si3_ice_thd_frazil
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(bl_mod, "si3_ice_thd_frazil", spy)
+    _o8_production_exit(probe_module)
+    assert calls == [{"rn_hinew": bl_mod._NEW_ICE_THICKNESS, "ln_frazil": False}]
+
+
+@pytest.mark.parametrize("plant", ["orca2_hinew", "always_cooling", "never_cooling"])
+def test_o8_production_c1d_plants_fire(probe_module, monkeypatch, plant):
+    base = _o8_production_exit(probe_module)
+    real = bl_mod.si3_ice_thd_frazil
+    if plant == "orca2_hinew":                                         # ORCA2 deck's 0.1 wired in by mistake
+        monkeypatch.setattr(bl_mod, "si3_ice_thd_frazil", lambda q, **kw: real(
+            q, rn_hinew=0.1, ln_frazil=kw["ln_frazil"]))
+        hit = {0, 1}                                                   # the two normal cooling columns
+    elif plant == "always_cooling":
+        monkeypatch.setattr(bl_mod, "_ieee_lt_zero", lambda x: x == x)
+        hit = {6}                                                      # qlead = +300 grows ice
+    else:
+        monkeypatch.setattr(bl_mod, "_ieee_lt_zero", lambda x: x != x)
+        hit = {0, 1}
+    planted = _o8_production_exit(probe_module)
+    assert set(np.nonzero(np.any(planted != base, axis=0))[0]) == hit

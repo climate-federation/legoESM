@@ -110,7 +110,7 @@ _FLUSHING_TIMESCALE = 864000.0
 _OPTION2_LOWER_TRANSITION = 3.5
 _OPTION2_UPPER_TRANSITION = 4.5
 _OPTION2_LAYER_SHAPE = (1.0 / 3.0, 1.0, 5.0 / 3.0)
-_NEW_ICE_THICKNESS = 0.05
+_NEW_ICE_THICKNESS = 0.05  # C1D card rn_hinew (c1d_omip_l3_namelist_ice_cfg:113)
 _MAXIMUM_ICE_CONCENTRATION = 0.99999
 
 
@@ -1745,21 +1745,26 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     )
     zEi = -e_new / constants.rho_ice
     zEw = constants.c_ocean * Tbo_c
+    # `ice_thd_frazil` supplies ht_i_new (O7_REF ppsrc `icethd.f90:174`); the same
+    # `qlead < 0` gathers ice_thd_do's cells (`icethd_do.f90:182`).
+    frazil = si3_ice_thd_frazil(forcing.qlead, rn_hinew=_NEW_ICE_THICKNESS, ln_frazil=False)
+    cooling = _ieee_lt_zero(forcing.qlead)
     vnew = jnp.where(
-        forcing.qlead < 0.0,
+        cooling,
         -(-forcing.qlead / (zEi - zEw)) / constants.rho_ice,
         0.0,
     )
+    # Non-cooling cells: ht_i_new = +0 and vnew = +0; the 1 only keeps 0/0 out.
     anew = jnp.minimum(
-        vnew / _NEW_ICE_THICKNESS,
+        vnew / jnp.where(cooling, frazil.ht_i_new, 1.0),
         jnp.maximum(
             0.0,
             _MAXIMUM_ICE_CONCENTRATION - post_temp2.concentration,
         ),
     )
-    residual = jnp.maximum(vnew - anew * _NEW_ICE_THICKNESS, 0.0)
+    residual = jnp.maximum(vnew - anew * frazil.ht_i_new, 0.0)
     v_old = post_temp2.h_ice * post_temp2.concentration
-    v_total = v_old + anew * _NEW_ICE_THICKNESS + residual
+    v_total = v_old + anew * frazil.ht_i_new + residual
     a_total = post_temp2.concentration + anew
     h_total = jnp.where(a_total > _EPS10, v_total / a_total, 0.0)
     post_do = post_temp2._replace(concentration=a_total, h_ice=h_total)
