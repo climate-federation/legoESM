@@ -72,3 +72,15 @@ input only; PLAUSIBLE for NEMO until a multi-rank record exists.
 
 Step window: `nn_itend = 2` (pick; kt 2 exercises the carried stress and a
 non-first-step fold) or `nn_itend = 3`.
+
+Reviewer notes for this decision (added after review; the pick is unchanged and still with the user):
+- Argon: `nn_itend = 3` additionally feeds strength and the aEVP a state advected
+  by both alternating Prather sweep orders. The order switches by step at
+  `ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_adv_pra.f90:267` (odd step: `adv_x`
+  then `adv_y`) and `:317` (even step: `adv_y` then `adv_x`); the note cited
+  `:324`, a line inside the even-step branch.
+- codex: 2 steps buy one stress-carry transition; 3 steps add a second recurrence check.
+
+Exact-input addendum (after review): B1's `u_ice_b`, `v_ice_b` enter the model as
+their own required inputs (`icedyn_rhg_evp.f90:574,625`), never substituted by
+the entry `u_ice`, `v_ice`.
