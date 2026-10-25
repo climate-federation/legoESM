@@ -356,6 +356,7 @@ FILES = {
     "docs/ice/fidelity/si3_r9_o3_receipt.md": REPO / "docs/ice/fidelity/si3_r9_o3_receipt.md",
     "docs/ice/fidelity/si3_r10_o5_receipt.md": REPO / "docs/ice/fidelity/si3_r10_o5_receipt.md",
     "docs/ice/fidelity/si3_r11_o7_receipt.md": REPO / "docs/ice/fidelity/si3_r11_o7_receipt.md",
+    "docs/ice/fidelity/si3_r12_o5_acquisition_receipt.md": REPO / "docs/ice/fidelity/si3_r12_o5_acquisition_receipt.md",
     "docs/ice/fidelity/si3_r13_o7_acquisition_receipt.md": REPO / "docs/ice/fidelity/si3_r13_o7_acquisition_receipt.md",
     "docs/ice/fidelity/si3_r13_o7_admission_receipt.md": REPO / "docs/ice/fidelity/si3_r13_o7_admission_receipt.md",
     "ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icesbc.f90": NEMO / "cfgs/ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icesbc.f90",
