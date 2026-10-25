@@ -363,3 +363,19 @@ Disposition is **STOPPED_FOR_RECORD**. The next admissible action is the
 operator-only acquisition and manifest-pinned admission, followed by offline
 replay of both tracer passes. No implementation landing, D122 claim, DINO
 month run or gradient claim is made. Codex review: operator.
+
+### Resume-4 gates
+
+The acquisition implementation is commit `a604a72e5`. Its clean
+`--preflight-only` invocation produced every result reported above and stopped
+at the read-only ready marker. The full-receipt citation gate on commit
+`c69d58031` passes 18 citations with zero failures, zero unmapped citations
+and zero map-audit failures; all nine self-test controls fire. Its JSON
+SHA-256 is
+`5e3a4e9b91835175368ca24bfafbbd521d4f35c3064e87063c9d4f53dcf65179`.
+
+The exact ORCA2 landing battery passes all 152 tests in 990.20 seconds,
+including the complete six-test private-import ratchet and the ORCA2 parallel
+receipt gate. Its log SHA-256 is
+`a7a8c8bc9cccbdd89129c9d96ef88a948f941c99bae3c7b38780d0818bfe8312`.
+No DINO month gate is required because no model or package source changed.
