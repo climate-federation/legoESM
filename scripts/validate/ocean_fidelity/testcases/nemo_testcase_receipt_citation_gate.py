@@ -1562,6 +1562,18 @@ FILES = {
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/trasbc.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
         "/trasbc.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/sbcmod.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/sbcblk.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/sbcblk_algo_ncar.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbc_phy.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/sbc_phy.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
         "/stprk3_stg.f90"),
@@ -8895,6 +8907,51 @@ CITATION_MAP = {
         'anchors': ('pCd0(:,:) = rn_Cd0 * zmsk_boost(:,:)', 1),
         'routine': 'drg_init',
     },
+    # ORCA2 round 335: standalone-S1 literal surface-bulk transcription.
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90:428-570': [
+        'IF( .NOT.ll_sas )   CALL sbc_ssm',
+        ('END DO   ;   END DO', 9), 143],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:640-678': [
+        'q_air_zt(:,:) = sf(jp_humi )%fnow(:,:,1)',
+        '&                zsen, zlat, zevp, zqlwn )', 39],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:791-949': [
+        'ptsk(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) = pst',
+        ('ENDIF', 74), 159],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:976':
+        'ptsk(:,:) = ( ptsk(:,:) - rt0 ) * smask0(:,:)',
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:1019-1046': [
+        'DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)',
+        ('END DO   ;   END DO', 21), 28],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:835-838': [
+        'CASE( np_NCAR      )', '&                nb_iter=nn_iter_algo )', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:124-238': [
+        '!!----------------------------------------------------------------------------------',
+        'END SUBROUTINE turb_ncar', 115],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:241-381': [
+        'FUNCTION cd_n10_ncar( pw10 )', 'END FUNCTION psi_h_ncar', 141],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbc_phy.f90:250-409': [
+        'impure ELEMENTAL FUNCTION pres_temp_sclr',
+        'END FUNCTION rho_air_sclr', 160],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbc_phy.f90:443-506': [
+        'FUNCTION L_vap_vctr( psst )', 'END FUNCTION cp_air_sclr', 64],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbc_phy.f90:548-581': [
+        'FUNCTION One_on_L( ptha, pqa, pus, pts, pqs )',
+        'END FUNCTION One_on_L', 34],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbc_phy.f90:645-766': [
+        'ELEMENTAL FUNCTION e_sat_sclr( ptak )',
+        'END FUNCTION q_sat_sclr', 122],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbc_phy.f90:898-940': [
+        'ELEMENTAL SUBROUTINE BULK_FORMULA_SCLR',
+        'END SUBROUTINE BULK_FORMULA_SCLR', 43],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbc_phy.f90:1020-1042': [
+        ('!!---------------------------------------------------------------------------------', 25),
+        'END FUNCTION qlw_net_sclr', 23],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbc_phy.f90:1062-1080': [
+        'FUNCTION z0_from_Cd( pzu, pCd,  ppsi )',
+        'END FUNCTION z0_from_Cd', 19],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbc_phy.f90:1198-1213': [
+        'FUNCTION UN10_from_CD( pzu, pUb, pCd, ppsi )',
+        'END FUNCTION UN10_from_CD', 16],
 }
 
 
