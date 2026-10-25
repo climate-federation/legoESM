@@ -13,7 +13,7 @@
 +      INTEGER :: ios
 +      CHARACTER(LEN=16) :: magic
 +      CHARACTER(LEN=96) :: filename
-+      IF(.NOT.lwp .OR. kt /= nit000+1 .OR. kstg /= 3) RETURN
++      IF(kt /= nit000+1 .OR. kstg /= 3) RETURN
 +      IF(r333_active .OR. r333_written) CALL ctl_stop('round333: duplicate tracer open')
 +      IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop('round333: tracer record requires fp64')
 +      IF(ANY(SHAPE(pT) /= (/jpi,jpj,jpk/)) .OR. ANY(SHAPE(pS) /= (/jpi,jpj,jpk/))) &
