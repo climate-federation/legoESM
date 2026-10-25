@@ -1,8 +1,7 @@
 --- stprk3_stg.F90
 +++ stprk3_stg.F90
-@@ -34,0 +35,3 @@
-+   USE round332_writer, ONLY : r332_raw_postfold_v, r333_tracer_open, &
-+      & r333_tracer_rhs, r333_tracer_finish
+@@ -34,0 +35,2 @@
++   USE round332_writer, ONLY : r332_raw_postfold_v, r333_tracer_open, r333_tracer_rhs, r333_tracer_finish
 +                      ! round-332/333 WRITE-only source-order observers
 @@ -663,0 +667,4 @@
 +      IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) THEN
