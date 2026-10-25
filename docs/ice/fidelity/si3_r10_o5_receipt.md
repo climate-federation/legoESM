@@ -101,15 +101,16 @@ Evidence directory: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/
 
 ## Gates
 
-- Citation gate, all eight SI3 receipts including this one: status PASS, 0 unmapped, 0 map entries failing audit (`citation_gate_all_si3.log`, `f212130e230e563f`); a planted citation shift turns this receipt red. O2/O3 receipt citations into `si3_orca2_state.py` moved +17 lines and were re-anchored.
-- Default citation gate: `17 passed in 10.73s` (`default_gate.log`, `aa9dd98312bfef62`).
-- Private-import, inline-coefficient (`dynamics.py`) and hardcoded-constant ratchets on the touched files: `25 passed` (`ratchets.log`, `ed786ef0557ac0d4`). The 30 reds of the wider batch (`existing_b.log`) are pre-existing sites outside this diff.
-- Review: codex review: operator. One in-round Claude review: no confirmed defects; its three test-gap notes were closed (whole-interior reference, site-by-site exchange check, test rename).
+After the review fixes (evidence in `resume/`):
+- Citation gate, all eight SI3 receipts, full map: every receipt PASS, 0 unmapped, 0 map entries failing audit (`resume/citation_gate_all_si3.log`).
+- Default citation gate: `17 passed in 6.64s` (`resume/default_gate.log`).
+- Private-import ratchet: `6 passed in 5.25s` (`resume/private_import.log`). Inline-coefficient, hardcoded-constant and dispatch ratchets: no red in a touched file; 8 reds elsewhere (seven listed before this round, plus the land dispatch guard, in a file this round does not touch) (`resume/ratchets_wide.log`).
+- Review: codex HOLD and Argon HOLD on the first submission; these fixes are not yet re-reviewed.
 - GPU spot check: not run (no certification this round).
 
 ## CONFIRMED vs PLAUSIBLE
 
-- CONFIRMED: lane 3 bit-identical (both cards); strength equals an independent transcription; F fold equals NEMO's formulas; all plants fire; jit == eager; FD agrees.
+- CONFIRMED: lane 3 bit-identical (both cards); strength equals an independent transcription; F fold equals NEMO's formulas; all plants fire; eager (`jax.disable_jit`) == jit with nonzero Coriolis; FD agrees.
 - PLAUSIBLE: O5 bit-exactness against NEMO (no record yet; preregistered P1-P7); `at_i` at aEVP entry equals NEMO's recomputed `at_i` (P2); the multi-rank partial fold (one-rank decks never run it).
 
 ## CHOICES
@@ -119,5 +120,6 @@ Evidence directory: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/
 - Acquisition on one MPI rank, following O1/O2. UNASKED; offered for revert (preregistration section 1).
 - Inner frames `jter in {1, 2, 3, 50, 99, 100}` (design: "selected 100-subcycle frames"). UNASKED; offered for revert.
 - Step window `nn_itend = 2`. ASKED (DECISION_NEEDED).
+- Lane 3 passes its entry velocity as `u_ice_b` (unchanged behaviour, NEMO's `store_fields`). UNASKED; offered for review.
 - Test-local subcycle count 4 and synthetic 16 x 12 grid. Tests only.
 - No configuration default or production config changed.
