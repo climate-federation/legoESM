@@ -173,10 +173,10 @@ stress `(rhoa*Cd)*wndm` (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/sbcblk.f90:1137`),
 
 - O7 acquisition deck and window: production deck, 1 rank, `kt` 1..2. ASKED (DECISION 165; preregistration addendum 3).
 - Lane-3 C1D card now moves 16,494 values onto NEMO's record instead of
-  staying byte-identical. UNASKED (consequence of one implementation);
-  offered as the decision below.
+  staying byte-identical. ASKED (DECISION 167, 2026-10-25,
+  user: "Yes"): accepted as the consequence of one implementation.
 - Production `nemo_si3_constant` dispatch bits change under `jit` (now
-  equal to its eager arithmetic). UNASKED; same decision.
+  equal to its eager arithmetic). ASKED (DECISION 167): accepted.
 - Lane-3 gate reads its constants from the C1D run's resolved namelists
   instead of library constants (values identical). UNASKED; offered for revert.
 - Namelist reader moved from the ORCA2 round-314 audit into core. UNASKED,
