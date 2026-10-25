@@ -1803,6 +1803,25 @@ CITATION_MAP = {
     'trabbc.F90:179': "* 1.e-3 ! conversion in W/m2",
     'phycst.F90:26': "rad      = 3.141592653589793_wp / 180._wp",
     'tramle.F90:51': "r5_21 = 5.e0 / 21.e0",
+    # ORCA2 round 333: first wet-value stage-3 tracer source-order walk.
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:604':
+        'ts(:,:,:,jn,Krhs) = 0._wp',
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:637':
+        'CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs, zFu, zFv, zFw, kstg )',
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:645':
+        'CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs,                kstg )',
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:717':
+        'CALL tra_qsr( kstp, Kmm, ts, Krhs )',
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:734':
+        'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )',
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:738-740': [
+        'IF( ln_trabbc  )   CALL tra_bbc( kstp,      Kmm, ts, Krhs )',
+        'IF( ln_tradmp  )   CALL tra_dmp( kstp, Kbb, Kmm, ts, Krhs )', 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:749':
+        'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )',
+    'ocean_model_latlon_cgrid.py:2927-2928': [
+        'fd2_a, fd2_b, rhs2_a, rhs2_b, fct_activity, fct_inputs = _flux_pair(',
+        'a2, b2, dt, 2, h_k_new)', 2],
     # ORCA2 round 332: first non-bit EEN add and residual TKE source order.
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90:139-147': [
         '!*  hydrostatic pressure gradient (HPG))  *!   always called FIRST',
