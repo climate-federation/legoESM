@@ -443,6 +443,11 @@ is after the single-statement fix.
 | all dry/halo cells | 384,025 | 361,525 / 22,500 / 0 | 367,769 / 16,256 / 0 | 361,516 ; 9 ; 6,253 ; 16,247 | 377,763 |
 | wet control | 415,175 | 0 / 0 / 415,175 | 0 / 0 / 415,175 | value-sign zero classes inapplicable | 415,175 |
 
+The clean committed census artifact is
+`orca2_rounds/round332/resume9_live/live_v_census.json`, SHA-256
+`c68f6523d7b530eb8ca574cc0c6f8cb3771b24a7154ea4d23a8806178c577d2f`;
+its terminal status is `PASS_R332_LIVE_V_CENSUS`.
+
 Before this fix, legoESM stored -0 at all 2,032 registered words: 1,975 were
 already bit-identical case (a), and the 57 NEMO +0 words were case (b).  The
 57 case-(b) targets are `i=58,k=20..29`; `i=59,k=19..29`;
@@ -466,7 +471,7 @@ in its generic tendency boundary.  That upstream multiply was therefore the
 first owning statement.
 
 The fix changes only the `rk3_vector_raw_vmask` arm at
-`ocean_pe_latlon_cgrid.py:6236-6255`: it no longer writes a prematurely masked
+`ocean_pe_latlon_cgrid.py:6236-6256`: it no longer writes a prematurely masked
 `dv_dt`, leaving NEMO's later stage-update product to determine the dry sign.
 The production-call-site AST test fails on the exact one-line revert, and the
 real stage-update-plus-fold test checks both signed-zero directions and a

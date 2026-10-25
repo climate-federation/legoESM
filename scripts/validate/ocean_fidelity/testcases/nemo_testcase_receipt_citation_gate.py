@@ -3659,10 +3659,10 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:203-215': [
         '!*  vertical averaging  *!',
         ('END SELECT', 2), 13],
-    'ocean_pe_latlon_cgrid.py:6236-6255': [
+    'ocean_pe_latlon_cgrid.py:6236-6256': [
         ('du_dt = du_dt * u_mask_3d', 1),
         'dv_dt = jnp.where(_restore_hpg, hpg_tendency_v, dv_dt * v_mask_3d)',
-        20],
+        21],
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/dynhpg.f90:386-427': [
         ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)              ! Surface value', 2),
         'pvv(ji,jj,jk,Krhs) = zhpj(ji,jj) + zvap', 42],
