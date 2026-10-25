@@ -76,7 +76,7 @@ def _psim_oracle(rc_f, H, width, dbm, cap):
 # ===================== constant canaries (non-circular) =====================
 
 def test_module_constants_match_nemo():
-    assert mle._R5_21 == pytest.approx(_O_R5_21, rel=1e-15)
+    assert mle.R5_21 == pytest.approx(_O_R5_21, rel=1e-15)
     assert mle._RC_F_LENGTH_SCALE_M == _O_RC_F_LENGTH_M
     assert mle.MLEConfig().ce == 0.06            # ORCA1 rn_ce
     assert mle.MLEConfig().lat_ref_deg == 20.0   # ORCA1 rn_lat
@@ -118,7 +118,7 @@ def test_vertical_structure_full_curve_matches_nemo():
 
 def test_vertical_structure_5_21_coefficient_canary():
     # The 5/21 factor is the NEMO value; 1/3 (a plausible transcription) shifts
-    # mu measurably at mid-column (proves the pin canaries _R5_21).
+    # mu measurably at mid-column (proves the pin canaries R5_21).
     frac = np.array([0.25, 0.5, 0.75])
     got = np.asarray(mle_vertical_structure(jnp.asarray(frac)))
     zeta = 1.0 - 2.0 * frac
