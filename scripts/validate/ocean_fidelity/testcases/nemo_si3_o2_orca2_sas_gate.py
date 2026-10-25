@@ -8,8 +8,9 @@ Covers (`DECISION 153`, `DECISION 159`, `docs/ice/fidelity/si3_r7_o2_preregister
 - Reads and stitches the O2 initial-state snapshot (`O2SI3I01`, `o2_si3_istate_rankXXXX.bin`)
   written by `o2_si3_state_writer.F90` right after NEMO builds the scalar initial state and
   levitating-ice initial SSH (`src/ICE/iceistate.F90:304`, `:427`).
-- Takes NEMO's fitted category arrays as exact inputs at the O2/O3 boundary,
-  then scores O2's post-fit sums, mass, and levitating-ice SSH statements.
+- Computes the category fit through rung O3 (`si3_o3_istate_fill_fields`),
+  then scores O2's post-fit sums, mass, and levitating-ice SSH statements
+  under the glibc-`exp` certification arm (`transcendentals="libm"`).
 - Verifies all negative-control plants P1-P7.
 """
 
@@ -705,10 +706,11 @@ def build_synthetic_orca2_o2_inputs(
     o2_config: SI3O2InitConfig | None = None,
 ) -> dict[str, Any]:
     """Build deterministic full ORCA2 `(184, 152)` O2 inputs (preferring real bundle geometry/SAS when present)."""
-    set_policy(PrecisionPolicy.fp64())
     cfg = config or SI3ORCA2StateConfig.for_orca2_sas_ice()
     o2_cfg = o2_config or SI3O2InitConfig.for_orca2_sas_ice()
     state0, tmask_syn, umask_syn, vmask_syn = build_synthetic_orca2_o1_state(cfg)
+    # O1's builder selects the native arm; the O3 fit's EXP needs glibc's.
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
 
     bundle = _load_orca2_sas_ice_bundle_inputs()
     if bundle is not None:
@@ -836,7 +838,7 @@ def _compare_o2_scalar_state_against_recipe_and_ref(
 
 def run_self_test(plant: str | None = None) -> dict[str, Any]:
     """Run the full O2 gate self-test and negative-control plants P2-P6."""
-    set_policy(PrecisionPolicy.fp64())
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     inp = build_synthetic_orca2_o2_inputs()
     cfg: SI3ORCA2StateConfig = inp["cfg"]
     o2_cfg: SI3O2InitConfig = inp["o2_cfg"]
@@ -858,7 +860,7 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
     wi_u, wj_u = first_wet_ij(umask, interior_only=True, nn_hls=cfg.nn_hls)
     wi_v, wj_v = first_wet_ij(vmask, interior_only=True, nn_hls=cfg.nn_hls)
 
-    # Reference O2 scalar initial state with exact fitted-category inputs.
+    # Reference O2 scalar initial state (category fit computed by rung O3).
     ref_o2 = si3_o2_scalar_initial_state(
         sst_m=sst_m,
         sss_m=sss_m,
@@ -870,13 +872,8 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
         gphit=gphit,
         ssh_before_kbb=ssh_before_kbb,
         ssh_before_kmm=ssh_before_kmm,
-        fitted_v_i=state0.v_i,
-        fitted_v_s=state0.v_s,
-        fitted_a_i=state0.a_i,
-        fitted_a_ip=state0.a_ip,
-        fitted_v_ip=state0.v_ip,
-        fitted_v_il=state0.v_il,
         config=o2_cfg,
+        state_config=cfg,
     )
 
     cand_o2 = ref_o2
@@ -900,13 +897,8 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
             gphit=gphit,
             ssh_before_kbb=ssh_before_kbb,
             ssh_before_kmm=ssh_before_kmm,
-            fitted_v_i=state0.v_i,
-            fitted_v_s=state0.v_s,
-            fitted_a_i=state0.a_i,
-            fitted_a_ip=state0.a_ip,
-            fitted_v_ip=state0.v_ip,
-            fitted_v_il=state0.v_il,
             config=o2_cfg,
+            state_config=cfg,
             _plant_wrong_eos=True,
         )
     elif plant == "tbo-halo-leak":
@@ -914,20 +906,14 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
             sst_m=sst_m, sss_m=sss_m, tmask=tmask, ssmask=ssmask,
             smask0_i=smask0_i, e1e2t=e1e2t, ff_t=ff_t, gphit=gphit,
             ssh_before_kbb=ssh_before_kbb, ssh_before_kmm=ssh_before_kmm,
-            fitted_v_i=state0.v_i, fitted_v_s=state0.v_s,
-            fitted_a_i=state0.a_i, fitted_a_ip=state0.a_ip,
-            fitted_v_ip=state0.v_ip, fitted_v_il=state0.v_il,
-            config=o2_cfg, _plant_tbo_halo_leak=True,
+            config=o2_cfg, state_config=cfg, _plant_tbo_halo_leak=True,
         )
     elif plant == "pond-unscaled":
         cand_o2 = si3_o2_scalar_initial_state(
             sst_m=sst_m, sss_m=sss_m, tmask=tmask, ssmask=ssmask,
             smask0_i=smask0_i, e1e2t=e1e2t, ff_t=ff_t, gphit=gphit,
             ssh_before_kbb=ssh_before_kbb, ssh_before_kmm=ssh_before_kmm,
-            fitted_v_i=state0.v_i, fitted_v_s=state0.v_s,
-            fitted_a_i=state0.a_i, fitted_a_ip=state0.a_ip,
-            fitted_v_ip=state0.v_ip, fitted_v_il=state0.v_il,
-            config=o2_cfg, _plant_pond_unscaled=True,
+            config=o2_cfg, state_config=cfg, _plant_pond_unscaled=True,
         )
     elif plant == "hemisphere-swap":
         cand_o2 = si3_o2_scalar_initial_state(
@@ -941,13 +927,8 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
             gphit=gphit,
             ssh_before_kbb=ssh_before_kbb,
             ssh_before_kmm=ssh_before_kmm,
-            fitted_v_i=state0.v_i,
-            fitted_v_s=state0.v_s,
-            fitted_a_i=state0.a_i,
-            fitted_a_ip=state0.a_ip,
-            fitted_v_ip=state0.v_ip,
-            fitted_v_il=state0.v_il,
             config=o2_cfg,
+            state_config=cfg,
             _plant_hemisphere_swap=True,
         )
     elif plant == "ssh-sign-or-div":
@@ -955,20 +936,14 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
             sst_m=sst_m, sss_m=sss_m, tmask=tmask, ssmask=ssmask,
             smask0_i=smask0_i, e1e2t=e1e2t, ff_t=ff_t, gphit=gphit,
             ssh_before_kbb=ssh_before_kbb, ssh_before_kmm=ssh_before_kmm,
-            fitted_v_i=state0.v_i, fitted_v_s=state0.v_s,
-            fitted_a_i=state0.a_i, fitted_a_ip=state0.a_ip,
-            fitted_v_ip=state0.v_ip, fitted_v_il=state0.v_il,
-            config=o2_cfg, _plant_ssh_sign=True,
+            config=o2_cfg, state_config=cfg, _plant_ssh_sign=True,
         )
     elif plant == "dom-uniq-fold":
         cand_o2 = si3_o2_scalar_initial_state(
             sst_m=sst_m, sss_m=sss_m, tmask=tmask, ssmask=ssmask,
             smask0_i=smask0_i, e1e2t=e1e2t, ff_t=ff_t, gphit=gphit,
             ssh_before_kbb=ssh_before_kbb, ssh_before_kmm=ssh_before_kmm,
-            fitted_v_i=state0.v_i, fitted_v_s=state0.v_s,
-            fitted_a_i=state0.a_i, fitted_a_ip=state0.a_ip,
-            fitted_v_ip=state0.v_ip, fitted_v_il=state0.v_il,
-            config=o2_cfg, _plant_omit_nfd_uniq=True,
+            config=o2_cfg, state_config=cfg, _plant_omit_nfd_uniq=True,
         )
 
     ref_fields = {fname: getattr(ref_o2, fname) for fname in _O2_SCALAR_STATE_FIELDS}
@@ -1168,7 +1143,7 @@ def admit_evidence_directory(
     expect_commit: str | None = None,
 ) -> dict[str, Any]:
     """Admit a completed NEMO 5.0.2 `ORCA2_SAS_ICE` O2 acquisition directory."""
-    set_policy(PrecisionPolicy.fp64())
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     ev = Path(evidence_dir)
     manifest_dir = ev / "manifest"
     ref_dir = ev / "ref_2step"
@@ -1330,8 +1305,7 @@ def admit_evidence_directory(
     dry_fixture = verify_dry_signed_zero_fixture(f_ist["zht_i_ini"], tmask, nn_hls=cfg.nn_hls)
 
     o2_scalar_jit = jax.jit(
-        lambda sst, sss, tm, ssm, sm0i, area_t, coriolis, lat, ssh_b, ssh_m,
-        v_i, v_s, a_i, a_ip, v_ip, v_il: si3_o2_scalar_initial_state(
+        lambda sst, sss, tm, ssm, sm0i, area_t, coriolis, lat, ssh_b, ssh_m: si3_o2_scalar_initial_state(
             sst_m=sst,
             sss_m=sss,
             tmask=tm,
@@ -1342,13 +1316,8 @@ def admit_evidence_directory(
             gphit=lat,
             ssh_before_kbb=ssh_b,
             ssh_before_kmm=ssh_m,
-            fitted_v_i=v_i,
-            fitted_v_s=v_s,
-            fitted_a_i=a_i,
-            fitted_a_ip=a_ip,
-            fitted_v_ip=v_ip,
-            fitted_v_il=v_il,
             config=o2_cfg,
+            state_config=cfg,
         )
     )
     actual_o2 = o2_scalar_jit(
@@ -1362,12 +1331,6 @@ def admit_evidence_directory(
         gphit,
         ssh_before_kbb,
         ssh_before_kmm,
-        state_entry.v_i,
-        state_entry.v_s,
-        state_entry.a_i,
-        state_entry.a_ip,
-        state_entry.v_ip,
-        state_entry.v_il,
     )
 
     if plant == "1ulp-istate":

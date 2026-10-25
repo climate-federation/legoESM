@@ -32,6 +32,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from legoesm import constants as canonical_constants
+from legoesm.core import transcendentals
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ice.constants_config import (
     NEMO_SI3_CONSTANTS_CONFIG,
@@ -2349,6 +2350,7 @@ class SI3O2ScalarInitialState(NamedTuple):
     zsshadj: Field
     ssh_kbb: Field
     ssh_kmm: Field
+    o3: "SI3O3IstateFields"
 
 
 class SI3ORCA2O2Forcing(NamedTuple):
@@ -2474,6 +2476,290 @@ def si3_eos_fzp(
     return pfzp
 
 
+# Fixed NEMO 5.0.2 SI3 small numbers (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/par_ice.f90:134-135`).
+_EPSI06 = 1.0e-06
+_EPSI10 = 1.0e-10
+
+
+class SI3O3ITDFit(NamedTuple):
+    """Per-category output of NEMO's `ice_var_itd_1cMc` (`icevar.f90:1182-1327`)."""
+
+    h_i: Field
+    h_s: Field
+    a_i: Field
+    t_i1: Field
+    t_s1: Field
+    t_su: Field
+    s_i: Field
+    a_ip: Field
+    h_ip: Field
+    h_il: Field
+
+
+class SI3O3IstateFields(NamedTuple):
+    """Rung-O3 post-fit `ice_istate` fields (`iceistate.f90:340-414`)."""
+
+    fit: SI3O3ITDFit
+    a_i: Field
+    v_i: Field
+    v_s: Field
+    sv_i: Field
+    t_su: Field
+    s_i: Field
+    sz_i: Field
+    t_i: Field
+    t_s: Field
+    e_i: Field
+    e_s: Field
+    szv_i: Field
+    a_ip: Field
+    v_ip: Field
+    v_il: Field
+    a_ip_eff: Field
+    t1_ice: Field
+    zswitch: Field
+    at_i: Field
+
+
+def _safe_div(num: Field, den: Field, ok: Field) -> Field:
+    """`num / den` where `ok`, else `0.0`; gradient-only guard on the untaken branch."""
+    return jnp.where(ok, nemo_source_round(num / jnp.where(ok, den, 1.0)), 0.0)
+
+
+def si3_var_itd_1cmc(
+    *,
+    phti: Field,
+    phts: Field,
+    pati: Field,
+    ptmi: Field,
+    ptms: Field,
+    ptmsu: Field,
+    psmi: Field,
+    patip: Field,
+    phtip: Field,
+    phtil: Field,
+    hi_max: Field,
+    ice_constants: IceConstantsConfig,
+    rho0: float,
+    _plant_skip_snow_transfer: bool = False,
+) -> SI3O3ITDFit:
+    """Transcribe NEMO's 1-category -> jpl gamma-function fit `ice_var_itd_1cMc`.
+
+    Source: `ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icevar.f90:1182-1327`
+    (Abraham et al. 2015).  Elementwise over any leading shape; `hi_max` is
+    the O1 HFN bound vector `hi_max(0:jpl)`.  Forward arithmetic is
+    NEMO-literal in source order; the `WHERE`/`IF` switches are not
+    differentiable across their thresholds, and divisions carry
+    gradient-only safe denominators.
+    """
+    sr = nemo_source_round
+    exp = transcendentals.exp
+    phti = jnp.asarray(phti, dtype=jnp.float64)
+    dtype = phti.dtype
+    hm = jnp.asarray(hi_max, dtype=dtype)
+    jpl = int(hm.shape[0]) - 1
+    rhos = jnp.asarray(ice_constants.rho_snow, dtype=dtype)
+    rhoi = jnp.asarray(ice_constants.rho_ice, dtype=dtype)
+    rho0_v = jnp.asarray(rho0, dtype=dtype)
+    r1_rho0 = sr(1.0 / rho0_v)
+    r1_rhos = sr(1.0 / rhos)
+    rhoi_m_rho0 = sr(rhoi - rho0_v)
+
+    # :1214-1216
+    z1_hti = _safe_div(jnp.ones_like(phti), phti, phti != 0.0)
+    has_ice = phti > 0.0
+    za = sr(pati * z1_hti)
+
+    def _conc_term(h: Field) -> tuple[Field, Field]:
+        # ( phti + 2.*h ) and EXP( -2.*h*z1_hti )
+        lin = sr(phti + sr(2.0 * h))
+        ex = exp(-sr(sr(2.0 * h) * z1_hti))
+        return lin, ex
+
+    def _vol_poly(h: Field) -> Field:
+        # phti*phti + 2.*phti*h + 2.*h*h
+        return sr(sr(sr(phti * phti) + sr(sr(2.0 * phti) * h)) + sr(sr(2.0 * h) * h))
+
+    a_cats = []
+    h_cats = []
+    # :1220-1243  categories 1:jpl-1
+    for jl in range(1, jpl):
+        lin0, ex0 = _conc_term(hm[jl - 1])
+        lin1, ex1 = _conc_term(hm[jl])
+        pa = sr(za * sr(sr(lin0 * ex0) - sr(lin1 * ex1)))
+        zv = sr(za * sr(sr(_vol_poly(hm[jl - 1]) * ex0) - sr(_vol_poly(hm[jl]) * ex1)))
+        keep = pa > _EPSI06
+        a_cats.append(jnp.where(has_ice & keep, pa, 0.0))
+        h_cats.append(jnp.where(has_ice, _safe_div(zv, pa, keep), 0.0))
+    # :1246-1262  last category, hi_max(jpl-1) to infinity
+    lin0, ex0 = _conc_term(hm[jpl - 1])
+    pa = sr(sr(za * lin0) * ex0)
+    zv = sr(sr(za * _vol_poly(hm[jpl - 1])) * ex0)
+    keep = pa > _EPSI06
+    a_cats.append(jnp.where(has_ice & keep, pa, 0.0))
+    h_cats.append(jnp.where(has_ice, _safe_div(zv, pa, keep), 0.0))
+
+    # :1265-1276  snow, and snow-to-ice transfer of the excess load
+    hs_cats = []
+    for jl in range(1, jpl + 1):
+        pa_l = a_cats[jl - 1]
+        hi_l = h_cats[jl - 1]
+        hs_l = sr(sr(hi_l * phts) * z1_hti)
+        if _plant_skip_snow_transfer:
+            hi_new, hs_new = hi_l, hs_l
+        else:
+            zdh = jnp.maximum(0.0, sr(sr(sr(rhos * hs_l) + sr(rhoi_m_rho0 * hi_l)) * r1_rho0))
+            hi_new = jnp.minimum(hm[jl], sr(hi_l + zdh))
+            hs_new = jnp.maximum(0.0, sr(hs_l - sr(sr(zdh * rhoi) * r1_rhos)))
+        snow = pa_l > 0.0
+        h_cats[jl - 1] = jnp.where(snow, hi_new, hi_l)
+        hs_cats.append(jnp.where(snow, hs_new, 0.0))
+
+    a_i = jnp.stack(a_cats, axis=-1)
+    h_i = jnp.stack(h_cats, axis=-1)
+    h_s = jnp.stack(hs_cats, axis=-1)
+
+    # :1281-1286  temperature and salinity, every category
+    def _bc(x: Field) -> Field:
+        return jnp.broadcast_to(jnp.asarray(x, dtype=dtype)[..., None], a_i.shape)
+
+    # :1288-1323  ponds
+    zfra = _safe_div(patip, pati, pati != 0.0)[..., None]
+    a_ip = sr(zfra * a_i)
+    vi_ati = sr(phti * pati)
+    vi_ok = vi_ati != 0.0
+    vi_cat = sr(h_i * a_i)
+    ip_ok = a_ip != 0.0
+    zfra_p = _safe_div(sr(phtip * patip), vi_ati, vi_ok)[..., None]
+    h_ip = _safe_div(sr(zfra_p * vi_cat), a_ip, ip_ok)
+    zfra_l = _safe_div(sr(phtil * patip), vi_ati, vi_ok)[..., None]
+    h_il = _safe_div(sr(zfra_l * vi_cat), a_ip, ip_ok)
+
+    return SI3O3ITDFit(
+        h_i=h_i, h_s=h_s, a_i=a_i,
+        t_i1=_bc(ptmi), t_s1=_bc(ptms), t_su=_bc(ptmsu), s_i=_bc(psmi),
+        a_ip=a_ip, h_ip=h_ip, h_il=h_il,
+    )
+
+
+def si3_o3_istate_fill_fields(
+    *,
+    zht_i_ini: Field,
+    zht_s_ini: Field,
+    zat_i_ini: Field,
+    ztm_i_ini: Field,
+    ztm_s_ini: Field,
+    zt_su_ini: Field,
+    zsm_i_ini: Field,
+    zapnd_ini: Field,
+    zhpnd_ini: Field,
+    zhlid_ini: Field,
+    tmask: Field,
+    sss_m: Field,
+    rn_amax_2d: Field,
+    config: SI3ORCA2StateConfig,
+    _plant_skip_snow_transfer: bool = False,
+    _plant_skip_amax: bool = False,
+) -> SI3O3IstateFields:
+    """Rung O3: fit and fill `ice_istate`'s jpl categories and layers.
+
+    Transcribes `ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/iceistate.f90:343-412`:
+    `ice_var_itd` (the `_1cMc` arm, selected because the 2-D inputs are
+    passed row by row as rank-1 arrays and the outputs are rank-2), the
+    layer copies, `zswitch`, the salinity clamp and `ice_var_salprof`, the
+    extensive volumes/energies/salt, the pond volumes, `t1_ice`, and the
+    `rn_amax_2d` concentration cap.  No default exists for any input.
+    """
+    cfg = config
+    if not isinstance(cfg, SI3ORCA2StateConfig):
+        raise TypeError("O3 requires an explicit SI3ORCA2StateConfig")
+    if cfg.nn_icesal not in (2, 4):
+        raise ValueError("O3 transcribes only the ORCA2_SAS_ICE nn_icesal=4 salinity arm")
+    sr = nemo_source_round
+    consts = cfg.ice_constants
+    tm = jnp.asarray(tmask[..., 0] if jnp.ndim(tmask) == 3 else tmask, dtype=jnp.float64)
+    dtype = tm.dtype
+    jpi, jpj = tm.shape
+    nlay_i, nlay_s = int(cfg.nlay_i), int(cfg.nlay_s)
+    bounds = si3_hfn_category_bounds(
+        jpl=cfg.jpl, rn_himean=cfg.rn_himean, opt_hips=cfg.opt_hips, rn_himax=cfg.rn_himax
+    )
+
+    # :343-351  CALL ice_var_itd( ... )  -> ice_var_itd_1cMc
+    fit = si3_var_itd_1cmc(
+        phti=zht_i_ini, phts=zht_s_ini, pati=zat_i_ini,
+        ptmi=ztm_i_ini, ptms=ztm_s_ini, ptmsu=zt_su_ini, psmi=zsm_i_ini,
+        patip=zapnd_ini, phtip=zhpnd_ini, phtil=zhlid_ini,
+        hi_max=bounds.hi_max, ice_constants=consts,
+        rho0=NEMO_CONSTANTS_CONFIG.rho_0,
+        _plant_skip_snow_transfer=_plant_skip_snow_transfer,
+    )
+    # :352-361  copy layer 1 temperatures into every layer
+    t_s = jnp.broadcast_to(fit.t_s1[:, :, None, :], (jpi, jpj, nlay_s, cfg.jpl))
+    t_i = jnp.broadcast_to(fit.t_i1[:, :, None, :], (jpi, jpj, nlay_i, cfg.jpl))
+    # :364-366
+    zswitch = jnp.where(fortran_sum_categories(fit.a_i, axis=-1) > 0.0, tm, 0.0)
+    # :369-374  salinity clamp then ice_var_salprof
+    sss = jnp.asarray(sss_m, dtype=dtype)
+    s_i = jnp.minimum(
+        jnp.maximum(cfg.rn_simin, fit.s_i), sr(cfg.rn_sinew * sss)[..., None]
+    )
+    s_i, sz_i = si3_var_salprof(s_i, sss_m=sss, config=cfg)
+    # :376-382
+    v_i = sr(fit.h_i * fit.a_i)
+    v_s = sr(fit.h_s * fit.a_i)
+    sv_i = sr(s_i * v_i)
+    rt0 = jnp.asarray(consts.T0, dtype=dtype)
+    rhos = jnp.asarray(consts.rho_snow, dtype=dtype)
+    rhoi = jnp.asarray(consts.rho_ice, dtype=dtype)
+    rcpi = jnp.asarray(consts.c_ice, dtype=dtype)
+    rcp = jnp.asarray(consts.c_ocean, dtype=dtype)
+    rLfus = jnp.asarray(consts.latent_fusion, dtype=dtype)
+    rTmlt = jnp.asarray(consts.liquidus_slope, dtype=dtype)
+    r1_nlay_s = sr(1.0 / jnp.asarray(float(nlay_s), dtype=dtype))
+    r1_nlay_i = sr(1.0 / jnp.asarray(float(nlay_i), dtype=dtype))
+    zsw = zswitch[:, :, None, None]
+    # :384-389
+    e_s = sr(
+        sr(sr(sr(zsw * v_s[:, :, None, :]) * r1_nlay_s) * rhos)
+        * sr(sr(rcpi * sr(rt0 - t_s)) + rLfus)
+    )
+    # :391-402
+    v_i4 = v_i[:, :, None, :]
+    szv_i = sr(sr(sz_i * v_i4) * r1_nlay_i)
+    ztmelts = sr(-sr(rTmlt * sz_i) + rt0)
+    zfrac = sr(sr(ztmelts - rt0) / jnp.minimum(sr(t_i - rt0), -_EPSI10))
+    e_i = sr(
+        sr(sr(sr(zsw * v_i4) * r1_nlay_i) * rhoi)
+        * sr(
+            sr(sr(rcpi * sr(ztmelts - t_i)) + sr(rLfus * jnp.maximum(0.0, sr(1.0 - zfrac))))
+            - sr(rcp * sr(ztmelts - rt0))
+        )
+    )
+    # :404-408  ponds (a_ip_eff on A2D(0) only)
+    interior = _interior_mask_2d(jpi, jpj, cfg.nn_hls, dtype=dtype)[..., None]
+    a_ip_eff = _safe_div(fit.a_ip, fit.a_i, fit.a_i > _EPSI10) * interior
+    v_ip = sr(fit.h_ip * fit.a_ip)
+    v_il = sr(fit.h_il * fit.a_ip)
+    # :411-414  coupled-run temperature, A2D(0)
+    t1_ice = fit.t_i1 * interior
+    # :417-421  concentration cap
+    at_i = fortran_sum_categories(fit.a_i, axis=-1)
+    amax = jnp.asarray(rn_amax_2d, dtype=dtype)
+    over = (at_i > amax)[..., None]
+    if _plant_skip_amax:
+        a_i = fit.a_i
+    else:
+        a_i = jnp.where(over, _safe_div(sr(fit.a_i * amax[..., None]), at_i[..., None], over), fit.a_i)
+    at_i = fortran_sum_categories(a_i, axis=-1)
+    return SI3O3IstateFields(
+        fit=fit, a_i=a_i, v_i=v_i, v_s=v_s, sv_i=sv_i, t_su=fit.t_su, s_i=s_i,
+        sz_i=sz_i, t_i=t_i, t_s=t_s, e_i=e_i, e_s=e_s, szv_i=szv_i,
+        a_ip=fit.a_ip, v_ip=v_ip, v_il=v_il, a_ip_eff=a_ip_eff, t1_ice=t1_ice,
+        zswitch=zswitch, at_i=at_i,
+    )
+
+
 def si3_o2_scalar_initial_state(
     sst_m: Field,
     sss_m: Field,
@@ -2486,13 +2772,9 @@ def si3_o2_scalar_initial_state(
     smask0_i: Field,
     ssh_before_kbb: Field,
     ssh_before_kmm: Field,
-    fitted_v_i: Field,
-    fitted_v_s: Field,
-    fitted_a_i: Field,
-    fitted_a_ip: Field,
-    fitted_v_ip: Field,
-    fitted_v_il: Field,
     config: SI3O2InitConfig,
+    state_config: SI3ORCA2StateConfig,
+    _control_exact_fitted: tuple[Field, Field, Field, Field, Field, Field] | None = None,
     _plant_wrong_eos: bool = False,
     _plant_tbo_halo_leak: bool = False,
     _plant_pond_unscaled: bool = False,
@@ -2516,7 +2798,10 @@ def si3_o2_scalar_initial_state(
        `zht_i_ini`, `zht_s_ini`, `zat_i_ini`, `zsm_i_ini`, `ztm_i_ini`,
        `zt_su_ini`, `ztm_s_ini`, `zapnd_ini`, `zhpnd_ini`, `zhlid_ini`, with
        `zapnd_ini(:,:) = zapnd_ini(:,:) * zat_i_ini(:,:)` (`:303`).
-    5. Levitating-ice initial SSH branch (`:398-430`, `iceistate.f90:440-460`):
+    5. Rung-O3 category fit and fill (`iceistate.f90:343-421`) through
+       `si3_o3_istate_fill_fields`.  `_control_exact_fitted` (test-only)
+       substitutes NEMO's six recorded `(v_i, v_s, a_i, a_ip, v_ip, v_il)`.
+    6. Levitating-ice initial SSH branch (`:398-430`, `iceistate.f90:440-460`):
        `snwice_mass`, `snwice_mass_b`, `area`, `zsshadj`, `ssh_kbb`, `ssh_kmm`.
     """
     sr = nemo_source_round
@@ -2639,29 +2924,27 @@ def si3_o2_scalar_initial_state(
     elif not cfg.ln_pnd_lids:
         zhlid_ini = jnp.zeros_like(zhlid_ini)
 
-    # 5. O3 owns the category fit.  O2 takes NEMO's fitted category arrays as
-    # exact inputs, then transcribes only the post-fit SUM and mass statements.
-    v_i_fit = jnp.asarray(fitted_v_i, dtype=dtype)
-    v_s_fit = jnp.asarray(fitted_v_s, dtype=dtype)
-    a_i_fit = jnp.asarray(fitted_a_i, dtype=dtype)
-    a_ip_fit = jnp.asarray(fitted_a_ip, dtype=dtype)
-    v_ip_fit = jnp.asarray(fitted_v_ip, dtype=dtype)
-    v_il_fit = jnp.asarray(fitted_v_il, dtype=dtype)
+    # 5. Rung-O3 fit and fill (`iceistate.f90:343-421`).
+    if not isinstance(state_config, SI3ORCA2StateConfig):
+        raise TypeError("O2 requires an explicit SI3ORCA2StateConfig for the O3 fit")
+    o3 = si3_o3_istate_fill_fields(
+        zht_i_ini=zht_i_ini, zht_s_ini=zht_s_ini, zat_i_ini=zat_i_ini,
+        ztm_i_ini=ztm_i_ini, ztm_s_ini=ztm_s_ini, zt_su_ini=zt_su_ini,
+        zsm_i_ini=zsm_i_ini, zapnd_ini=zapnd_ini, zhpnd_ini=zhpnd_ini,
+        zhlid_ini=zhlid_ini, tmask=tmask_2d, sss_m=sss, rn_amax_2d=rn_amax_2d,
+        config=state_config,
+    )
+    if _control_exact_fitted is None:
+        fitted = (o3.v_i, o3.v_s, o3.a_i, o3.a_ip, o3.v_ip, o3.v_il)
+    else:
+        fitted = tuple(jnp.asarray(x, dtype=dtype) for x in _control_exact_fitted)
     if _plant_stop_gradient:
-        v_i_fit = jax.lax.stop_gradient(v_i_fit)
-        v_s_fit = jax.lax.stop_gradient(v_s_fit)
-        a_i_fit = jax.lax.stop_gradient(a_i_fit)
-        a_ip_fit = jax.lax.stop_gradient(a_ip_fit)
-        v_ip_fit = jax.lax.stop_gradient(v_ip_fit)
-        v_il_fit = jax.lax.stop_gradient(v_il_fit)
-    expected_shape = (jpi, jpj, 5)
-    for name, arr in (
-        ("fitted_v_i", v_i_fit), ("fitted_v_s", v_s_fit),
-        ("fitted_a_i", a_i_fit), ("fitted_a_ip", a_ip_fit),
-        ("fitted_v_ip", v_ip_fit), ("fitted_v_il", v_il_fit),
-    ):
+        fitted = tuple(jax.lax.stop_gradient(x) for x in fitted)
+    v_i_fit, v_s_fit, a_i_fit, a_ip_fit, v_ip_fit, v_il_fit = fitted
+    expected_shape = (jpi, jpj, state_config.jpl)
+    for name, arr in zip(("v_i", "v_s", "a_i", "a_ip", "v_ip", "v_il"), fitted):
         if arr.shape != expected_shape:
-            raise ValueError(f"O2 requires exact fitted {name} shape {expected_shape}, got {arr.shape}")
+            raise ValueError(f"O2 requires fitted {name} shape {expected_shape}, got {arr.shape}")
     vt_i = fortran_sum_categories(v_i_fit, axis=-1)
     vt_s = fortran_sum_categories(v_s_fit, axis=-1)
     at_i = fortran_sum_categories(a_i_fit, axis=-1)
@@ -2723,6 +3006,7 @@ def si3_o2_scalar_initial_state(
         zsshadj=zsshadj,
         ssh_kbb=ssh_kbb,
         ssh_kmm=ssh_kmm,
+        o3=o3,
     )
 
 
@@ -2748,13 +3032,8 @@ def si3_o2_step(
         smask0_i=forcing.smask0_i,
         ssh_before_kbb=forcing.ssh_before_kbb,
         ssh_before_kmm=forcing.ssh_before_kmm,
-        fitted_v_i=state.v_i,
-        fitted_v_s=state.v_s,
-        fitted_a_i=state.a_i,
-        fitted_a_ip=state.a_ip,
-        fitted_v_ip=state.v_ip,
-        fitted_v_il=state.v_il,
         config=init_cfg,
+        state_config=cfg,
         _plant_stop_gradient=_plant_stop_gradient,
     )
     new_state = si3_o1_step(
@@ -2777,4 +3056,8 @@ __all__.extend((
     "si3_eos_fzp",
     "si3_o2_scalar_initial_state",
     "si3_o2_step",
+    "SI3O3ITDFit",
+    "SI3O3IstateFields",
+    "si3_var_itd_1cmc",
+    "si3_o3_istate_fill_fields",
 ))

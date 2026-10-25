@@ -99,7 +99,7 @@ SPEC.loader.exec_module(gate)
 
 @pytest.fixture(autouse=True)
 def _force_fp64():
-    set_policy(PrecisionPolicy.fp64())
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
 
 
 def _assert_zero_ulp(a, b, label: str = "") -> None:
@@ -352,14 +352,12 @@ def test_o2_eos_fzp_teos10_and_eos80_zero_ulp_vs_nemo502() -> None:
 def test_o2_ponds_off_and_lids_off_match_iceistate_branches() -> None:
     """`iceistate.F90:291-300` zeros pond/lid scalar inputs under both switches."""
     inp = gate.build_synthetic_orca2_o2_inputs()
-    state = inp["state0"]
     common = dict(
         sst_m=inp["sst_m"], sss_m=inp["sss_m"], tmask=inp["tmask"],
         ssmask=inp["ssmask"], smask0_i=inp["smask0_i"], e1e2t=inp["e1e2t"],
         ff_t=inp["ff_t"], gphit=inp["gphit"],
         ssh_before_kbb=inp["ssh_before_kbb"], ssh_before_kmm=inp["ssh_before_kmm"],
-        fitted_v_i=state.v_i, fitted_v_s=state.v_s, fitted_a_i=state.a_i,
-        fitted_a_ip=state.a_ip, fitted_v_ip=state.v_ip, fitted_v_il=state.v_il,
+        state_config=inp["cfg"],
     )
     ponds_off = si3_o2_scalar_initial_state(
         **common, config=inp["o2_cfg"]._replace(ln_pnd=False)
@@ -409,12 +407,7 @@ def test_o2_dom_uniq_t_and_glob_2dsum_ddpdd_zero_ulp() -> None:
         gphit=inp["gphit"],
         ssh_before_kbb=inp["ssh_before_kbb"],
         ssh_before_kmm=inp["ssh_before_kmm"],
-        fitted_v_i=inp["state0"].v_i,
-        fitted_v_s=inp["state0"].v_s,
-        fitted_a_i=inp["state0"].a_i,
-        fitted_a_ip=inp["state0"].a_ip,
-        fitted_v_ip=inp["state0"].v_ip,
-        fitted_v_il=inp["state0"].v_il,
+        state_config=inp["cfg"],
         config=inp["o2_cfg"],
     )
     term_mul = nemo_source_round(
@@ -588,12 +581,7 @@ def test_o2_jit_grad_jvp_and_stop_gradient_plant() -> None:
             gphit=gphit,
             ssh_before_kbb=ssh_kbb,
             ssh_before_kmm=ssh_in,
-            fitted_v_i=state0.v_i,
-            fitted_v_s=state0.v_s,
-            fitted_a_i=state0.a_i,
-            fitted_a_ip=state0.a_ip,
-            fitted_v_ip=state0.v_ip,
-            fitted_v_il=state0.v_il,
+            state_config=cfg,
             config=o2_c,
             _plant_stop_gradient=plant_stop,
         )
