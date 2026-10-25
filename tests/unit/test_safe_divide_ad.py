@@ -656,7 +656,7 @@ class TestMixingLength:
         # Near surface (κz ≪ l_∞): l → κz.
         z_small = jnp.array([2.0, 5.0])
         l_small = mixing_length(z_small, l_inf)
-        assert jnp.allclose(l_small, constants.kappa_vk * z_small, rtol=0.1)
+        assert jnp.allclose(l_small, constants.kappa_von_karman * z_small, rtol=0.1)
         # Far aloft (κz ≫ l_∞): l → l_∞.
         l_high = mixing_length(jnp.array([1.0e5]), l_inf)
         assert float(l_high[0]) > 0.9 * l_inf
@@ -666,7 +666,7 @@ class TestMixingLength:
         from legoesm.atmosphere.physics._shared import mixing_length
         l_inf = 80.0
         z = jnp.array([10.0, 50.0, 200.0, 1000.0])
-        k = constants.kappa_vk
+        k = constants.kappa_von_karman
         expected = k * z / (1.0 + k * z / l_inf)
         assert jnp.allclose(mixing_length(z, l_inf), expected, rtol=1e-12)
         # Strictly increasing with height.

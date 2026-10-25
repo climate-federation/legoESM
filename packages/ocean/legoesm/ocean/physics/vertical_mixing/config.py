@@ -826,6 +826,16 @@ class TKEConfig(NamedTuple):
     eice: int = 0              # 0 off | 1 tanh(10fi) | 2 fi | 3 min(4fi,1)
 
 
+# --- LMD94 nonlocal-transport constants (Large, McWilliams & Doney 1994, eq. 20 + App. B) ---
+_LMD94_C_STAR = 10.0     # C*, nonlocal flux constant (eq. 20)
+_LMD94_C_S = 98.96       # c_s, scalar convective constant (App. B)
+_LMD94_EPSILON = 0.1     # epsilon, surface-layer fraction (App. A/B)
+# C_s = C* kappa (c_s kappa epsilon)^(1/3) (LMD94 eq. 20; POP/CVMix ``Cg``). At kappa = 0.4
+# this is 6.3275155 -- the published 6.33 and CVMix's 6.32739901 are roundings of it.
+_LMD94_GAMMA_NONLOCAL = (_LMD94_C_STAR * constants.kappa_von_karman
+                         * (_LMD94_C_S * constants.kappa_von_karman * _LMD94_EPSILON) ** (1.0 / 3.0))
+
+
 class KPPConfig(NamedTuple):
     """LMD94-style K-Profile Parameterization.
 
@@ -841,18 +851,18 @@ class KPPConfig(NamedTuple):
     """
     Ri_crit: float = 0.3    # Critical bulk Richardson number (Large, McWilliams & Doney 1994; matches NCAR POP2 / MOM6 default)
     Cv: float = 1.6          # Unresolved shear coefficient
-    kappa_vk: float = constants.kappa_vk
+    kappa_vk: float = constants.kappa_von_karman
     K_max: float = 1.0       # Maximum diffusivity [m^2/s]
     K_bg: float = 1e-5       # Background diffusivity [m^2/s]
     A_bg: float = 1e-4       # Background viscosity [m^2/s]
-    gamma_T: float = 6.33    # Non-local transport coefficient for T
-    gamma_S: float = 6.33    # Non-local transport coefficient for S
+    gamma_T: float = _LMD94_GAMMA_NONLOCAL  # Non-local transport coefficient for T
+    gamma_S: float = _LMD94_GAMMA_NONLOCAL  # Non-local transport coefficient for S
     K_conv: float = 1.0      # Convective mixing diffusivity [m^2/s]
     Ri_conv: float = 0.0     # Ri threshold for convective instability
     K_0_shear: float = 5e-3  # LMD94 interior shear instability peak K [m^2/s]
     Ri_0: float = 0.7        # LMD94 critical Ri for interior shear mixing
-    c_s: float = 98.96       # LMD94 scalar stability constant (App. B; V_t^2 + scalar convective scale)
-    epsilon_lmd: float = 0.1  # LMD94 surface-layer fraction (App. A/B)
+    c_s: float = _LMD94_C_S  # LMD94 scalar stability constant (App. B; V_t^2 + scalar convective scale)
+    epsilon_lmd: float = _LMD94_EPSILON  # LMD94 surface-layer fraction (App. A/B)
     # LMD94 Eq. 23 unresolved-shear variance V_t^2 carries a (-beta_T)^1/2
     # prefactor (beta_T = -0.2 fixed, App. B); applied EXPLICITLY in kpp.py so
     # Cv keeps its standard standalone value 1.6 (it does NOT absorb sqrt(0.2)).

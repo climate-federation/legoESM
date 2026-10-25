@@ -124,7 +124,13 @@ sigma_water = 0.0728            # Surface tension of the water-air interface [N/
 # ==============================================================================
 # Turbulence
 # ==============================================================================
-kappa_von_karman = 0.4          # Von Kármán constant for the log-law (Pope 2000)
+# Von Kármán constant for the log-law.
+# REVISIT: literature best estimates 0.38-0.41 (Andreas et al. 2006 0.387±0.003;
+# Högström 1996 0.40±0.01; Bailey et al. 2014 0.40±0.02; Lee & Moser 2015 ~0.384;
+# 2024 reviews argue non-universal). Kept 0.4 (user 2026-10-25) because reference
+# ports (CESM, CAM, COARE, KPP, NEMO, CLM5) use 0.4; a change needs fixtures
+# regenerated or per-port config.
+kappa_von_karman = 0.4
 nu_ocean_molecular = 1.4e-6     # Molecular kinematic viscosity of seawater
                                 # [m^2/s] (~10 degC; NEMO phycst/zdfiwm ``rnu``)
 kappa_T_ocean_molecular = 1.4e-7  # Molecular thermal diffusivity of seawater
@@ -340,7 +346,6 @@ RAD_TO_DEG = 180.0 / jnp.pi
 # ==============================================================================
 # Turbulence
 # ==============================================================================
-kappa_vk = 0.4                  # von Kármán constant
 nu_air = 1.5e-5                 # Kinematic viscosity of air at 15°C [m^2/s]
 prandtl_air = 0.71              # Molecular Prandtl number of air ν/α [-] (DNS
                                 # heat diffusion κ = ν / Pr). Schmidt number of

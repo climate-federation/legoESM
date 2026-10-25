@@ -61,7 +61,7 @@ import jax.numpy as jnp
 from legoesm import constants
 
 # Physical constants
-KAPPA = constants.kappa_vk  # von Kármán constant (0.4)
+KAPPA = constants.kappa_von_karman
 G = constants.g
 NU_AIR = constants.nu_air  # kinematic viscosity of air [m²/s]
 

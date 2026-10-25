@@ -1296,7 +1296,7 @@ class TestOceanBottomDragParams:
 
     def _loss(self, scheme, name, p, **fixed):
         kwargs = dict(cd0=1.0e-3, cd_max=0.1, z0=3.0e-3, ke0=2.5e-3,
-                      von_karman=constants.kappa_vk)
+                      von_karman=constants.kappa_von_karman)
         kwargs.update(fixed)
         kwargs[name] = p
         r = self.drag_r(self.u_bot, self.v_bot, self.h_bot,

@@ -545,7 +545,7 @@ def test_land_stress_before_any_valid_solve_is_neutral_land_drag_not_ocean():
     neutral log-law drag of the column's static land roughness, opposing the
     wind; never the bulk (ocean) stress."""
     rho, z, d, z0, U2 = 1.25, 50.0, 10.0, 1.0, 25.0
-    expect = rho * (_const.kappa_vk / np.log((z - d) / z0)) ** 2 * U2
+    expect = rho * (_const.kappa_von_karman / np.log((z - d) / z0)) ** 2 * U2
     for kw in (dict(land_valid=jnp.zeros(1, bool)),
                dict(tau_land_mag=jnp.array([jnp.nan])),
                dict(tau_land_mag=jnp.array([jnp.inf]))):
@@ -555,7 +555,7 @@ def test_land_stress_before_any_valid_solve_is_neutral_land_drag_not_ocean():
     # displacement at/above the lowest level: log argument clamped (Cd <= 0.04)
     o = _call(**_lsf(1, land_valid=jnp.zeros(1, bool), d=jnp.array([60.0])))
     np.testing.assert_allclose(np.hypot(float(o[0][0]), float(o[1][0])),
-                               rho * (_const.kappa_vk / 2.0) ** 2 * U2,
+                               rho * (_const.kappa_von_karman / 2.0) ** 2 * U2,
                                rtol=1e-9)
 
 
