@@ -524,6 +524,22 @@ combined 106-test JAX process aborted during compilation after many green
 cases because of accumulated compiler resources; the exact affected test was
 rerun alone and passed 3/3 in 334.16 seconds.
 
-The clean rung-10 N=1 comparison-card gradient, final citation/default/ratchet
-results, and final commit are recorded below after their synchronous gates
-complete.
+The clean production-commit rung-10 N=1 comparison-card gradient completes in
+2,871.7 seconds with peak RSS 75.0 GiB.  Production and traced-forward states
+have zero non-bit leaves.  Both reverse cotangents are finite, with zero
+non-finite leaves and zero nonzero dry-cell gradients.  T-direction
+reverse/forward relative differences are `1.819369557262068e-14` for the T
+loss and `1.3868976507379975e-15` for the SSH loss.  The trainable `rn_ud` T
+derivative agrees to `1.501929835492298e-15`; its SSH derivative is exactly
+zero in both modes.  Rebuilt/traced construction has zero non-bit leaves.  The
+artifact SHA-256 is
+`e25d9fa08f44b97fc3816a03f1e7896045f51875b84c16590b491f6a518eac8a`.
+
+The per-receipt citation gate passes 5 citations with zero failures, zero
+unmapped citations and zero map-audit failures; all nine self-test controls
+fire.  The exact default ORCA2 landing battery passes 152 tests in 1,273.40
+seconds, and the explicit private-import ratchet passes 6 tests in 4.99
+seconds.  The production change is commit `7b03e8b97`; all later commits add
+only the census, receipt and citation evidence.  No configuration value or
+NEMO source changed.  Codex review: operator; independent Claude review:
+operator.
