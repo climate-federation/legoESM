@@ -15,6 +15,9 @@
    which turns the control red.
 4. My first full-versus-partial fold plant was vacuous for a real reason (next
    section) and was rewritten to break the pivot-row symmetry.
+5. My first citation-gate pass read only the gate's failure list, which omits
+   unmapped citations; the gate's own status was FAIL. Every citation is now
+   mapped and the status is read.
 
 ## Outcome
 
@@ -85,8 +88,8 @@ Evidence directory: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/
 
 ## Gates
 
-- Citation gate, every SI3 receipt including this one: 0 failures (O2/O3 receipt citations into `si3_orca2_state.py` moved +17 lines; re-anchored).
-- Default citation gate: `17 passed in 10.84s` (`default_gate.log`, `f7ad5578b98ded21`).
+- Citation gate, all eight SI3 receipts including this one: status PASS, 0 unmapped, 0 map entries failing audit (`citation_gate_all_si3.log`, `f212130e230e563f`); a planted citation shift turns this receipt red. O2/O3 receipt citations into `si3_orca2_state.py` moved +17 lines and were re-anchored.
+- Default citation gate: `17 passed in 10.73s` (`default_gate.log`, `aa9dd98312bfef62`).
 - Private-import, inline-coefficient (`dynamics.py`) and hardcoded-constant ratchets on the touched files: `25 passed` (`ratchets.log`, `ed786ef0557ac0d4`). The 30 reds of the wider batch (`existing_b.log`) are pre-existing sites outside this diff.
 - Review: codex review: operator. One in-round Claude review: no confirmed defects; its three test-gap notes were closed (whole-interior reference, site-by-site exchange check, test rename).
 - GPU spot check: not run (no certification this round).
