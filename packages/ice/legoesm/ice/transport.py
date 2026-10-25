@@ -861,20 +861,31 @@ def _si3_prather_x_substep(
     u_transport: jnp.ndarray,
     cell_area: jnp.ndarray,
     wet: jnp.ndarray,
-    dt: float,
+    dt: float | jnp.ndarray,
     *,
     initial_area: jnp.ndarray,
     first_sweep: bool,
     halo_width: int,
-    subcycle_index: int,
-    subcycles: int,
+    subcycle_index: int = 1,
+    subcycles: int = 1,
+    ihls: int | None = None,
+    pcrh: float | jnp.ndarray | None = None,
+    strict_loop_domains: bool = False,
+    _plant_omit_donor_readjust: bool = False,
+    _plant_symmetric_neg_zfx: bool = False,
+    _plant_corrupt_receiver_flux: bool = False,
 ) -> tuple[jnp.ndarray, SI3PratherMoments, jnp.ndarray]:
-    """One closed-box x sweep of SI3 ``adv_x`` (Fortran lines 499-719)."""
+    """One x sweep of SI3 ``adv_x`` (``icedyn_adv_pra.f90:513-733``)."""
 
     n_x = contents.shape[0]
-    ihls = 0 if subcycles == 1 else max(0, halo_width - subcycle_index)
-    ji0 = 1 + ihls
-    jj0 = (1 if first_sweep else 0) + ihls
+    ihls_val = (
+        (0 if subcycles == 1 else max(0, halo_width - subcycle_index))
+        if ihls is None
+        else ihls
+    )
+    first_flag = (1 if first_sweep else 0) if pcrh is None else int(round(float(pcrh)))
+    ji0 = 1 + ihls_val
+    jj0 = first_flag + ihls_val
     index = jnp.arange(n_x)
     index_y = jnp.arange(contents.shape[1])
     limit_mask = (index >= halo_width - ji0) & (index < n_x - halo_width + ji0)
@@ -888,13 +899,21 @@ def _si3_prather_x_substep(
     receiver_mask_xy = receiver_mask[:, None] & cross_mask[None, :]
     face_mask_xy = face_mask[:, None] & cross_mask[None, :]
     sr = nemo_source_round
-    pcrh = _SI3_PRA_ONE if first_sweep else _SI3_PRA_ZERO
-    one_minus_pcrh = sr(_SI3_PRA_ONE - pcrh)
-    sweep_area = sr(
+    if pcrh is None:
+        pcrh_val = _SI3_PRA_ONE if first_sweep else _SI3_PRA_ZERO
+    else:
+        pcrh_val = jnp.asarray(pcrh, dtype=contents.dtype)
+    one_minus_pcrh = sr(_SI3_PRA_ONE - pcrh_val)
+    zpsm_init = sr(
         jnp.maximum(
-            sr(sr(pcrh * cell_area) + sr(one_minus_pcrh * initial_area)),
+            sr(sr(pcrh_val * cell_area) + sr(one_minus_pcrh * initial_area)),
             _SI3_PRA_AREA_FLOOR,
         )
+    )
+    sweep_area = (
+        sr(jnp.where(limit_mask_xy, zpsm_init, initial_area))
+        if strict_loop_domains
+        else zpsm_init
     )
 
     limited_content, limited_moments = _si3_prather_limit_x(contents, moments, wet)
@@ -908,17 +927,23 @@ def _si3_prather_x_substep(
     )
     sx, sy, sxx, syy, sxy = moments
 
-    positive = (u_transport >= 0.0) & face_mask_xy
+    positive = (u_transport >= 0.0) & (limit_mask_xy if strict_loop_domains else face_mask_xy)
     negative = (u_transport < 0.0) & face_mask_xy
+    dt_val = jnp.asarray(dt, dtype=contents.dtype) if strict_loop_domains else dt
 
     # NEMO first computes and removes every right-going slab
     # (icedyn_adv_pra.F90:570-616).  The negative-face flux loop then reads
     # those already-updated donor boxes at i+1 (:618-637).  Preserving that
     # ordering matters when one cell exports through both faces.
+    sweep_area_denom = (
+        jnp.where(positive, sweep_area, _SI3_PRA_ONE)
+        if strict_loop_domains
+        else sweep_area
+    )
     positive_alpha = sr(
         jnp.where(
             positive,
-            sr(sr(u_transport * dt) / sweep_area),
+            sr(sr(u_transport * dt_val) / sweep_area_denom),
             _SI3_PRA_ZERO,
         )
     )
@@ -997,9 +1022,9 @@ def _si3_prather_x_substep(
 
     positive_one2 = sr(positive_one * positive_one)
     positive_one3 = sr(positive_one2 * positive_one)
-    area_after_right = sr(sweep_area - positive_flux_area)
-    content_after_right = sr(content - positive_flux_content)
-    sx_after_right = sr(
+    area_after_right_expr = sr(sweep_area - positive_flux_area)
+    content_after_right_expr = sr(content - positive_flux_content)
+    sx_after_right_expr = sr(
         positive_one2[..., None]
         * sr(
             sx
@@ -1009,10 +1034,36 @@ def _si3_prather_x_substep(
             )
         )
     )
-    sxx_after_right = sr(positive_one3[..., None] * sxx)
-    sy_after_right = sr(sy - positive_flux_y)
-    syy_after_right = sr(syy - positive_flux_yy)
-    sxy_after_right = sr(positive_one2[..., None] * sxy)
+    sxx_after_right_expr = sr(positive_one3[..., None] * sxx)
+    sy_after_right_expr = sr(sy - positive_flux_y)
+    syy_after_right_expr = sr(syy - positive_flux_yy)
+    sxy_after_right_expr = sr(positive_one2[..., None] * sxy)
+    if strict_loop_domains:
+        area_after_right = jnp.where(positive, area_after_right_expr, sweep_area)
+        if _plant_omit_donor_readjust:
+            content_after_right = content
+            sx_after_right = sx
+            sxx_after_right = sxx
+            sy_after_right = sy
+            syy_after_right = syy
+            sxy_after_right = sxy
+        else:
+            content_after_right = jnp.where(
+                positive[..., None], content_after_right_expr, content
+            )
+            sx_after_right = jnp.where(positive[..., None], sx_after_right_expr, sx)
+            sxx_after_right = jnp.where(positive[..., None], sxx_after_right_expr, sxx)
+            sy_after_right = jnp.where(positive[..., None], sy_after_right_expr, sy)
+            syy_after_right = jnp.where(positive[..., None], syy_after_right_expr, syy)
+            sxy_after_right = jnp.where(positive[..., None], sxy_after_right_expr, sxy)
+    else:
+        area_after_right = area_after_right_expr
+        content_after_right = content_after_right_expr
+        sx_after_right = sx_after_right_expr
+        sxx_after_right = sxx_after_right_expr
+        sy_after_right = sy_after_right_expr
+        syy_after_right = syy_after_right_expr
+        sxy_after_right = sxy_after_right_expr
 
     # Negative fluxes use the post-positive residual of donor i+1 exactly as
     # NEMO does at icedyn_adv_pra.F90:618-664, rather than independently
@@ -1025,10 +1076,15 @@ def _si3_prather_x_substep(
     negative_donor_syy = jnp.roll(syy_after_right, -1, axis=0)
     negative_donor_sxy = jnp.roll(sxy_after_right, -1, axis=0)
     negative_velocity = sr(-u_transport)
+    negative_donor_area_denom = (
+        jnp.where(negative, negative_donor_area, _SI3_PRA_ONE)
+        if strict_loop_domains
+        else negative_donor_area
+    )
     negative_alpha = sr(
         jnp.where(
             negative,
-            sr(sr(negative_velocity * dt) / negative_donor_area),
+            sr(sr(negative_velocity * dt_val) / negative_donor_area_denom),
             _SI3_PRA_ZERO,
         )
     )
@@ -1059,7 +1115,25 @@ def _si3_prather_x_substep(
     negative_flux_content = sr(
         jnp.where(negative[..., None], negative_flux_content, _SI3_PRA_ZERO)
     )
-    negative_flux_x = jnp.zeros_like(negative_flux_content)
+    if _plant_symmetric_neg_zfx:
+        negative_flux_x = sr(
+            jnp.where(
+                negative[..., None],
+                sr(
+                    negative_alpha2[..., None]
+                    * sr(
+                        negative_donor_sx
+                        - sr(
+                            sr(_SI3_PRA_FLUX_MOMENT_FACTOR * negative_one)[..., None]
+                            * negative_donor_sxx
+                        )
+                    )
+                ),
+                _SI3_PRA_ZERO,
+            )
+        )
+    else:
+        negative_flux_x = jnp.zeros_like(negative_flux_content)
     negative_flux_xx = sr(
         jnp.where(
             negative[..., None],
@@ -1095,12 +1169,21 @@ def _si3_prather_x_substep(
         )
     )
 
-    out_left = jnp.roll(negative, 1, axis=0)
+    out_left = (
+        (receiver_mask_xy & jnp.roll(negative, 1, axis=0))
+        if strict_loop_domains
+        else jnp.roll(negative, 1, axis=0)
+    )
     left_velocity = jnp.roll(u_transport, 1, axis=0)
+    area_after_right_denom = (
+        jnp.where(out_left, area_after_right, _SI3_PRA_ONE)
+        if strict_loop_domains
+        else area_after_right
+    )
     left_alpha = sr(
         jnp.where(
             out_left,
-            sr(sr(sr(-left_velocity) * dt) / area_after_right),
+            sr(sr(sr(-left_velocity) * dt_val) / area_after_right_denom),
             _SI3_PRA_ZERO,
         )
     )
@@ -1121,9 +1204,9 @@ def _si3_prather_x_substep(
             _SI3_PRA_ZERO,
         )
     )
-    area = sr(area_after_right - left_flux_area)
-    content = sr(content_after_right - left_flux_content)
-    sx = sr(
+    area_expr = sr(area_after_right - left_flux_area)
+    content_expr = sr(content_after_right - left_flux_content)
+    sx_expr = sr(
         left_one2[..., None]
         * sr(
             sx_after_right
@@ -1133,7 +1216,7 @@ def _si3_prather_x_substep(
             )
         )
     )
-    sxx = sr(left_one3[..., None] * sxx_after_right)
+    sxx_expr = sr(left_one3[..., None] * sxx_after_right)
     left_flux_y = sr(
         jnp.where(
             out_left[..., None],
@@ -1148,13 +1231,39 @@ def _si3_prather_x_substep(
             _SI3_PRA_ZERO,
         )
     )
-    sy = sr(sy_after_right - left_flux_y)
-    syy = sr(syy_after_right - left_flux_yy)
-    sxy = sr(left_one2[..., None] * sxy_after_right)
+    sy_expr = sr(sy_after_right - left_flux_y)
+    syy_expr = sr(syy_after_right - left_flux_yy)
+    sxy_expr = sr(left_one2[..., None] * sxy_after_right)
+    if strict_loop_domains:
+        area = jnp.where(out_left, area_expr, area_after_right)
+        if _plant_omit_donor_readjust:
+            content = content_after_right
+            sx = sx_after_right
+            sxx = sxx_after_right
+            sy = sy_after_right
+            syy = syy_after_right
+            sxy = sxy_after_right
+        else:
+            content = jnp.where(out_left[..., None], content_expr, content_after_right)
+            sx = jnp.where(out_left[..., None], sx_expr, sx_after_right)
+            sxx = jnp.where(out_left[..., None], sxx_expr, sxx_after_right)
+            sy = jnp.where(out_left[..., None], sy_expr, sy_after_right)
+            syy = jnp.where(out_left[..., None], syy_expr, syy_after_right)
+            sxy = jnp.where(out_left[..., None], sxy_expr, sxy_after_right)
+    else:
+        area = area_expr
+        content = content_expr
+        sx = sx_expr
+        sxx = sxx_expr
+        sy = sy_expr
+        syy = syy_expr
+        sxy = sxy_expr
     moments = sx, sy, sxx, syy, sxy
 
     flux_area = sr(positive_flux_area + negative_flux_area)
     flux_content = sr(positive_flux_content + negative_flux_content)
+    if _plant_corrupt_receiver_flux:
+        flux_content = sr(flux_content * _SI3_PRA_PLANT_CORRUPT_FACTOR)
     flux_moments = (
         sr(positive_flux_x + negative_flux_x),
         sr(positive_flux_y + negative_flux_y),
@@ -1189,8 +1298,13 @@ def _si3_prather_x_substep(
             for value in flux_moments
         ),
     )
+    area_for_left = (
+        jnp.where(incoming_left, area, _SI3_PRA_ONE)
+        if strict_loop_domains
+        else area
+    )
     merged_area, merged_content, merged_moments = _si3_prather_merge_from_left(
-        area, content, moments, left_area, left_content, left_moments
+        area_for_left, content, moments, left_area, left_content, left_moments
     )
     area = sr(jnp.where(incoming_left, merged_area, area))
     content = sr(jnp.where(incoming_left[..., None], merged_content, content))
@@ -1214,8 +1328,13 @@ def _si3_prather_x_substep(
             for value in flux_moments
         ),
     )
+    area_for_right = (
+        jnp.where(incoming_right, area, _SI3_PRA_ONE)
+        if strict_loop_domains
+        else area
+    )
     merged_area, merged_content, merged_moments = _si3_prather_merge_from_right(
-        area, content, moments, right_area, right_content, right_moments
+        area_for_right, content, moments, right_area, right_content, right_moments
     )
     area = sr(jnp.where(incoming_right, merged_area, area))
     content = sr(jnp.where(incoming_right[..., None], merged_content, content))
@@ -1235,19 +1354,29 @@ def _si3_prather_y_substep(
     v_transport: jnp.ndarray,
     cell_area: jnp.ndarray,
     wet: jnp.ndarray,
-    dt: float,
+    dt: float | jnp.ndarray,
     *,
     initial_area: jnp.ndarray,
     first_sweep: bool,
     halo_width: int,
-    subcycle_index: int,
-    subcycles: int,
+    subcycle_index: int = 1,
+    subcycles: int = 1,
+    ihls: int | None = None,
+    pcrh: float | jnp.ndarray | None = None,
+    strict_loop_domains: bool = False,
+    _plant_omit_donor_readjust: bool = False,
+    _plant_corrupt_receiver_flux: bool = False,
 ) -> tuple[jnp.ndarray, SI3PratherMoments, jnp.ndarray]:
-    """One y sweep of SI3 ``adv_y`` (``icedyn_adv_pra.F90:722-943``)."""
+    """One y sweep of SI3 ``adv_y`` (``icedyn_adv_pra.f90:736-957``)."""
 
-    ihls = 0 if subcycles == 1 else max(0, halo_width - subcycle_index)
-    ji0 = (1 if first_sweep else 0) + ihls
-    jj0 = 1 + ihls
+    ihls_val = (
+        (0 if subcycles == 1 else max(0, halo_width - subcycle_index))
+        if ihls is None
+        else ihls
+    )
+    first_flag = (1 if first_sweep else 0) if pcrh is None else int(round(float(pcrh)))
+    ji0 = first_flag + ihls_val
+    jj0 = 1 + ihls_val
     index_x = jnp.arange(contents.shape[0])
     index_y = jnp.arange(contents.shape[1])
     cross_mask = (index_x >= halo_width - ji0) & (index_x < contents.shape[0] - halo_width + ji0)
@@ -1263,13 +1392,21 @@ def _si3_prather_y_substep(
     receiver_mask_xy = cross_mask[:, None] & receiver_mask[None, :]
     face_mask_xy = cross_mask[:, None] & face_mask[None, :]
     sr = nemo_source_round
-    pcrh = _SI3_PRA_ONE if first_sweep else _SI3_PRA_ZERO
-    one_minus_pcrh = sr(_SI3_PRA_ONE - pcrh)
-    sweep_area = sr(
+    if pcrh is None:
+        pcrh_val = _SI3_PRA_ONE if first_sweep else _SI3_PRA_ZERO
+    else:
+        pcrh_val = jnp.asarray(pcrh, dtype=contents.dtype)
+    one_minus_pcrh = sr(_SI3_PRA_ONE - pcrh_val)
+    zpsm_init = sr(
         jnp.maximum(
-            sr(sr(pcrh * cell_area) + sr(one_minus_pcrh * initial_area)),
+            sr(sr(pcrh_val * cell_area) + sr(one_minus_pcrh * initial_area)),
             _SI3_PRA_AREA_FLOOR,
         )
+    )
+    sweep_area = (
+        sr(jnp.where(limit_mask_xy, zpsm_init, initial_area))
+        if strict_loop_domains
+        else zpsm_init
     )
 
     limited_content, limited_moments = _si3_prather_limit_y(contents, moments, wet)
@@ -1282,13 +1419,19 @@ def _si3_prather_y_substep(
         ),
     )
     sx, sy, sxx, syy, sxy = moments
-    positive = (v_transport >= 0.0) & face_mask_xy
+    positive = (v_transport >= 0.0) & (limit_mask_xy if strict_loop_domains else face_mask_xy)
     negative = (v_transport < 0.0) & face_mask_xy
+    dt_val = jnp.asarray(dt, dtype=contents.dtype) if strict_loop_domains else dt
 
+    sweep_area_denom = (
+        jnp.where(positive, sweep_area, _SI3_PRA_ONE)
+        if strict_loop_domains
+        else sweep_area
+    )
     positive_alpha = sr(
         jnp.where(
             positive,
-            sr(sr(v_transport * dt) / sweep_area),
+            sr(sr(v_transport * dt_val) / sweep_area_denom),
             _SI3_PRA_ZERO,
         )
     )
@@ -1365,9 +1508,9 @@ def _si3_prather_y_substep(
 
     positive_one2 = sr(positive_one * positive_one)
     positive_one3 = sr(positive_one2 * positive_one)
-    area_after_up = sr(sweep_area - positive_flux_area)
-    content_after_up = sr(content - positive_flux_content)
-    sy_after_up = sr(
+    area_after_up_expr = sr(sweep_area - positive_flux_area)
+    content_after_up_expr = sr(content - positive_flux_content)
+    sy_after_up_expr = sr(
         positive_one2[..., None]
         * sr(
             sy
@@ -1377,10 +1520,36 @@ def _si3_prather_y_substep(
             )
         )
     )
-    syy_after_up = sr(positive_one3[..., None] * syy)
-    sx_after_up = sr(sx - positive_flux_x)
-    sxx_after_up = sr(sxx - positive_flux_xx)
-    sxy_after_up = sr(positive_one2[..., None] * sxy)
+    syy_after_up_expr = sr(positive_one3[..., None] * syy)
+    sx_after_up_expr = sr(sx - positive_flux_x)
+    sxx_after_up_expr = sr(sxx - positive_flux_xx)
+    sxy_after_up_expr = sr(positive_one2[..., None] * sxy)
+    if strict_loop_domains:
+        area_after_up = jnp.where(positive, area_after_up_expr, sweep_area)
+        if _plant_omit_donor_readjust:
+            content_after_up = content
+            sy_after_up = sy
+            syy_after_up = syy
+            sx_after_up = sx
+            sxx_after_up = sxx
+            sxy_after_up = sxy
+        else:
+            content_after_up = jnp.where(
+                positive[..., None], content_after_up_expr, content
+            )
+            sy_after_up = jnp.where(positive[..., None], sy_after_up_expr, sy)
+            syy_after_up = jnp.where(positive[..., None], syy_after_up_expr, syy)
+            sx_after_up = jnp.where(positive[..., None], sx_after_up_expr, sx)
+            sxx_after_up = jnp.where(positive[..., None], sxx_after_up_expr, sxx)
+            sxy_after_up = jnp.where(positive[..., None], sxy_after_up_expr, sxy)
+    else:
+        area_after_up = area_after_up_expr
+        content_after_up = content_after_up_expr
+        sy_after_up = sy_after_up_expr
+        syy_after_up = syy_after_up_expr
+        sx_after_up = sx_after_up_expr
+        sxx_after_up = sxx_after_up_expr
+        sxy_after_up = sxy_after_up_expr
 
     negative_donor_area = jnp.roll(area_after_up, -1, axis=1)
     negative_donor_content = jnp.roll(content_after_up, -1, axis=1)
@@ -1390,10 +1559,15 @@ def _si3_prather_y_substep(
     negative_donor_syy = jnp.roll(syy_after_up, -1, axis=1)
     negative_donor_sxy = jnp.roll(sxy_after_up, -1, axis=1)
     negative_velocity = sr(-v_transport)
+    negative_donor_area_denom = (
+        jnp.where(negative, negative_donor_area, _SI3_PRA_ONE)
+        if strict_loop_domains
+        else negative_donor_area
+    )
     negative_alpha = sr(
         jnp.where(
             negative,
-            sr(sr(negative_velocity * dt) / negative_donor_area),
+            sr(sr(negative_velocity * dt_val) / negative_donor_area_denom),
             _SI3_PRA_ZERO,
         )
     )
@@ -1475,12 +1649,21 @@ def _si3_prather_y_substep(
         )
     )
 
-    out_down = jnp.roll(negative, 1, axis=1)
+    out_down = (
+        (receiver_mask_xy & jnp.roll(negative, 1, axis=1))
+        if strict_loop_domains
+        else jnp.roll(negative, 1, axis=1)
+    )
     down_velocity = jnp.roll(v_transport, 1, axis=1)
+    area_after_up_denom = (
+        jnp.where(out_down, area_after_up, _SI3_PRA_ONE)
+        if strict_loop_domains
+        else area_after_up
+    )
     down_alpha = sr(
         jnp.where(
             out_down,
-            sr(sr(sr(-down_velocity) * dt) / area_after_up),
+            sr(sr(sr(-down_velocity) * dt_val) / area_after_up_denom),
             _SI3_PRA_ZERO,
         )
     )
@@ -1501,9 +1684,9 @@ def _si3_prather_y_substep(
             _SI3_PRA_ZERO,
         )
     )
-    area = sr(area_after_up - down_flux_area)
-    content = sr(content_after_up - down_flux_content)
-    sy = sr(
+    area_expr = sr(area_after_up - down_flux_area)
+    content_expr = sr(content_after_up - down_flux_content)
+    sy_expr = sr(
         down_one2[..., None]
         * sr(
             sy_after_up
@@ -1513,7 +1696,7 @@ def _si3_prather_y_substep(
             )
         )
     )
-    syy = sr(down_one3[..., None] * syy_after_up)
+    syy_expr = sr(down_one3[..., None] * syy_after_up)
     down_flux_x = sr(
         jnp.where(
             out_down[..., None],
@@ -1528,13 +1711,39 @@ def _si3_prather_y_substep(
             _SI3_PRA_ZERO,
         )
     )
-    sx = sr(sx_after_up - down_flux_x)
-    sxx = sr(sxx_after_up - down_flux_xx)
-    sxy = sr(down_one2[..., None] * sxy_after_up)
+    sx_expr = sr(sx_after_up - down_flux_x)
+    sxx_expr = sr(sxx_after_up - down_flux_xx)
+    sxy_expr = sr(down_one2[..., None] * sxy_after_up)
+    if strict_loop_domains:
+        area = jnp.where(out_down, area_expr, area_after_up)
+        if _plant_omit_donor_readjust:
+            content = content_after_up
+            sy = sy_after_up
+            syy = syy_after_up
+            sx = sx_after_up
+            sxx = sxx_after_up
+            sxy = sxy_after_up
+        else:
+            content = jnp.where(out_down[..., None], content_expr, content_after_up)
+            sy = jnp.where(out_down[..., None], sy_expr, sy_after_up)
+            syy = jnp.where(out_down[..., None], syy_expr, syy_after_up)
+            sx = jnp.where(out_down[..., None], sx_expr, sx_after_up)
+            sxx = jnp.where(out_down[..., None], sxx_expr, sxx_after_up)
+            sxy = jnp.where(out_down[..., None], sxy_expr, sxy_after_up)
+    else:
+        area = area_expr
+        content = content_expr
+        sy = sy_expr
+        syy = syy_expr
+        sx = sx_expr
+        sxx = sxx_expr
+        sxy = sxy_expr
     moments = sx, sy, sxx, syy, sxy
 
     flux_area = sr(positive_flux_area + negative_flux_area)
     flux_content = sr(positive_flux_content + negative_flux_content)
+    if _plant_corrupt_receiver_flux:
+        flux_content = sr(flux_content * _SI3_PRA_PLANT_CORRUPT_FACTOR)
     flux_moments = (
         sr(positive_flux_x + negative_flux_x),
         sr(positive_flux_y + negative_flux_y),
@@ -1568,8 +1777,13 @@ def _si3_prather_y_substep(
             for value in flux_moments
         ),
     )
+    area_for_below = (
+        jnp.where(incoming_below, area, _SI3_PRA_ONE)
+        if strict_loop_domains
+        else area
+    )
     merged_area, merged_content, merged_moments = _si3_prather_merge_from_below(
-        area, content, moments, below_area, below_content, below_moments
+        area_for_below, content, moments, below_area, below_content, below_moments
     )
     area = sr(jnp.where(incoming_below, merged_area, area))
     content = sr(jnp.where(incoming_below[..., None], merged_content, content))
@@ -1592,8 +1806,13 @@ def _si3_prather_y_substep(
             for value in flux_moments
         ),
     )
+    area_for_above = (
+        jnp.where(incoming_above, area, _SI3_PRA_ONE)
+        if strict_loop_domains
+        else area
+    )
     merged_area, merged_content, merged_moments = _si3_prather_merge_from_above(
-        area, content, moments, above_area, above_content, above_moments
+        area_for_above, content, moments, above_area, above_content, above_moments
     )
     area = sr(jnp.where(incoming_above, merged_area, area))
     content = sr(jnp.where(incoming_above[..., None], merged_content, content))
@@ -1945,7 +2164,7 @@ def advect_si3_prather_2d(
 
 
 # ==============================================================================
-# Rung O3: Full-state ORCA2 SI3 Prather advection elemental kernels
+# Rung O4: Full-state ORCA2 SI3 Prather advection elemental kernels
 # (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn_adv_pra.f90:513-1156,1519-1588`,
 # `ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icevar.f90:615-853`).
 # ==============================================================================
@@ -2022,459 +2241,35 @@ def si3_adv_x(
     *,
     e1e2t: jnp.ndarray,
     tmask: jnp.ndarray,
-    nn_hls: int = 2,
+    nn_hls: int,
     _plant_omit_donor_readjust: bool = False,
     _plant_symmetric_neg_zfx: bool = False,
     _plant_corrupt_receiver_flux: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray, SI3PratherMoments]:
     """Execute NEMO SI3 `adv_x` (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn_adv_pra.f90:513-733`).
 
-    Preserves the three sequential loop domains of `adv_x`:
-    1. Loop 1 (`:550-630`, `DO_2D( ji0, ji0, jj0, jj0 )` where `ji0 = 1 + ihls`,
-       `jj0 = NINT(pcrh) + ihls`): initializes `zpsm`, limits moments via
-       `_si3_prather_limit_x`, and extracts/readjusts positive-U (`put >= 0`)
-       donor fluxes.
-    2. Loop 2 (`:632-651`, `ji in [ntsi-ji0, ntei+ji0-1]`, `jj in [ntsj-jj0, ntej+jj0]`):
-       extracts negative-U (`put < 0`) fluxes from post-Loop-1 donor `ji+1`
-       (including NEMO's source-literal `zfx = 0._wp` when `put < 0`, `:615,642-648`).
-    3. Loop 3 (`:653-731`, `DO_2D( ji0-1, ji0-1, jj0, jj0 )`): readjusts negative-U
-       donors where `put(ji-1,jj) < 0` and merges incoming positive-U (`ji-1 -> ji`)
-       and negative-U (`ji+1 -> ji`) fluxes via `_si3_prather_merge_from_left` and
-       `_si3_prather_merge_from_right`.
+    Thin wrapper around the generalized `_si3_prather_x_substep` kernel with
+    `strict_loop_domains=True` (`DO_2D( ji0, ji0, jj0, jj0 )` for Loop 1,
+    `ji in [ntsi-ji0, ntei+ji0-1]` for Loop 2, `DO_2D( ji0-1, ji0-1, jj0, jj0 )`
+    for Loop 3).
     """
     ps0_3d, moments_3d, orig_shape = _si3_pack_tracer_axis(ps0, moments)
-    n_x, n_y = ps0_3d.shape[:2]
-    ji0 = 1 + int(ihls)
-    jj0 = int(round(float(pcrh))) + int(ihls)
-    index_x = jnp.arange(n_x)
-    index_y = jnp.arange(n_y)
-    limit_mask = (index_x >= nn_hls - ji0) & (index_x < n_x - nn_hls + ji0)
-    cross_mask = (index_y >= nn_hls - jj0) & (index_y < n_y - nn_hls + jj0)
-    receiver_width = ji0 - 1
-    receiver_mask = (index_x >= nn_hls - receiver_width) & (
-        index_x < n_x - nn_hls + receiver_width
-    )
-    face_mask = (index_x >= nn_hls - ji0) & (
-        index_x < n_x - nn_hls + receiver_width
-    )
-    limit_mask_xy = limit_mask[:, None] & cross_mask[None, :]
-    receiver_mask_xy = receiver_mask[:, None] & cross_mask[None, :]
-    face_mask_xy = face_mask[:, None] & cross_mask[None, :]
-
-    sr = nemo_source_round
-    dtype = ps0_3d.dtype
-    pdt_f = jnp.asarray(pdt, dtype=dtype)
-    pcrh_f = jnp.asarray(pcrh, dtype=dtype)
-    one_minus_pcrh = sr(_SI3_PRA_ONE - pcrh_f)
-    zpsm_init = sr(
-        jnp.maximum(
-            sr(sr(pcrh_f * e1e2t) + sr(one_minus_pcrh * psm)),
-            _SI3_PRA_AREA_FLOOR,
-        )
-    )
-    sweep_area = sr(jnp.where(limit_mask_xy, zpsm_init, psm))
-
-    limited_content, limited_moments = _si3_prather_limit_x(ps0_3d, moments_3d, tmask)
-    content = sr(jnp.where(limit_mask_xy[..., None], limited_content, ps0_3d))
-    moments_3d = cast(
-        SI3PratherMoments,
-        tuple(
-            sr(jnp.where(limit_mask_xy[..., None], new, old))
-            for new, old in zip(limited_moments, moments_3d, strict=True)
-        ),
-    )
-    sx, sy, sxx, syy, sxy = moments_3d
-
-    positive = (put >= _SI3_PRA_ZERO) & limit_mask_xy
-    negative = (put < _SI3_PRA_ZERO) & face_mask_xy
-
-    sweep_area_safe = jnp.where(positive, sweep_area, _SI3_PRA_ONE)
-    positive_alpha = sr(
-        jnp.where(
-            positive,
-            sr(sr(put * pdt_f) / sweep_area_safe),
-            _SI3_PRA_ZERO,
-        )
-    )
-    positive_one = sr(_SI3_PRA_ONE - positive_alpha)
-    positive_alpha2 = sr(positive_alpha * positive_alpha)
-    positive_alpha3 = sr(positive_alpha2 * positive_alpha)
-    positive_flux_area = sr(
-        jnp.where(positive, sr(positive_alpha * sweep_area), _SI3_PRA_ZERO)
-    )
-    positive_delta = sr(positive_one - positive_alpha)
-    positive_flux_content = sr(
-        positive_alpha[..., None]
-        * sr(
-            content
-            + sr(
-                positive_one[..., None]
-                * sr(sx + sr(positive_delta[..., None] * sxx))
-            )
-        )
-    )
-    positive_flux_content = sr(
-        jnp.where(positive[..., None], positive_flux_content, _SI3_PRA_ZERO)
-    )
-    positive_flux_x = sr(
-        jnp.where(
-            positive[..., None],
-            sr(
-                positive_alpha2[..., None]
-                * sr(
-                    sx
-                    + sr(
-                        sr(_SI3_PRA_FLUX_MOMENT_FACTOR * positive_one)[..., None]
-                        * sxx
-                    )
-                )
-            ),
-            _SI3_PRA_ZERO,
-        )
-    )
-    positive_flux_xx = sr(
-        jnp.where(
-            positive[..., None],
-            sr(positive_alpha3[..., None] * sxx),
-            _SI3_PRA_ZERO,
-        )
-    )
-    positive_flux_y = sr(
-        jnp.where(
-            positive[..., None],
-            sr(
-                positive_alpha[..., None]
-                * sr(sy + sr(positive_one[..., None] * sxy))
-            ),
-            _SI3_PRA_ZERO,
-        )
-    )
-    positive_flux_yy = sr(
-        jnp.where(
-            positive[..., None],
-            sr(positive_alpha[..., None] * syy),
-            _SI3_PRA_ZERO,
-        )
-    )
-    positive_flux_xy = sr(
-        jnp.where(
-            positive[..., None],
-            sr(positive_alpha2[..., None] * sxy),
-            _SI3_PRA_ZERO,
-        )
-    )
-
-    positive_one2 = sr(positive_one * positive_one)
-    positive_one3 = sr(positive_one2 * positive_one)
-    area_after_right = jnp.where(
-        positive, sr(sweep_area - positive_flux_area), sweep_area
-    )
-    if _plant_omit_donor_readjust:
-        content_after_right = content
-        sx_after_right = sx
-        sxx_after_right = sxx
-        sy_after_right = sy
-        syy_after_right = syy
-        sxy_after_right = sxy
-    else:
-        content_after_right = jnp.where(
-            positive[..., None], sr(content - positive_flux_content), content
-        )
-        sx_after_right = jnp.where(
-            positive[..., None],
-            sr(
-                positive_one2[..., None]
-                * sr(
-                    sx
-                    - sr(
-                        sr(_SI3_PRA_FLUX_MOMENT_FACTOR * positive_alpha)[..., None]
-                        * sxx
-                    )
-                )
-            ),
-            sx,
-        )
-        sxx_after_right = jnp.where(
-            positive[..., None], sr(positive_one3[..., None] * sxx), sxx
-        )
-        sy_after_right = jnp.where(
-            positive[..., None], sr(sy - positive_flux_y), sy
-        )
-        syy_after_right = jnp.where(
-            positive[..., None], sr(syy - positive_flux_yy), syy
-        )
-        sxy_after_right = jnp.where(
-            positive[..., None], sr(positive_one2[..., None] * sxy), sxy
-        )
-
-    negative_donor_area = jnp.roll(area_after_right, -1, axis=0)
-    negative_donor_content = jnp.roll(content_after_right, -1, axis=0)
-    negative_donor_sx = jnp.roll(sx_after_right, -1, axis=0)
-    negative_donor_sy = jnp.roll(sy_after_right, -1, axis=0)
-    negative_donor_sxx = jnp.roll(sxx_after_right, -1, axis=0)
-    negative_donor_syy = jnp.roll(syy_after_right, -1, axis=0)
-    negative_donor_sxy = jnp.roll(sxy_after_right, -1, axis=0)
-    negative_velocity = sr(-put)
-    negative_donor_area_safe = jnp.where(
-        negative, negative_donor_area, _SI3_PRA_ONE
-    )
-    negative_alpha = sr(
-        jnp.where(
-            negative,
-            sr(sr(negative_velocity * pdt_f) / negative_donor_area_safe),
-            _SI3_PRA_ZERO,
-        )
-    )
-    negative_one = sr(_SI3_PRA_ONE - negative_alpha)
-    negative_alpha2 = sr(negative_alpha * negative_alpha)
-    negative_alpha3 = sr(negative_alpha2 * negative_alpha)
-    negative_flux_area = sr(
-        jnp.where(
-            negative,
-            sr(negative_alpha * negative_donor_area),
-            _SI3_PRA_ZERO,
-        )
-    )
-    negative_delta = sr(negative_one - negative_alpha)
-    negative_flux_content = sr(
-        negative_alpha[..., None]
-        * sr(
-            negative_donor_content
-            - sr(
-                negative_one[..., None]
-                * sr(
-                    negative_donor_sx
-                    - sr(negative_delta[..., None] * negative_donor_sxx)
-                )
-            )
-        )
-    )
-    negative_flux_content = sr(
-        jnp.where(negative[..., None], negative_flux_content, _SI3_PRA_ZERO)
-    )
-    if _plant_symmetric_neg_zfx:
-        negative_flux_x = sr(
-            jnp.where(
-                negative[..., None],
-                sr(
-                    negative_alpha2[..., None]
-                    * sr(
-                        negative_donor_sx
-                        - sr(
-                            sr(_SI3_PRA_FLUX_MOMENT_FACTOR * negative_one)[..., None]
-                            * negative_donor_sxx
-                        )
-                    )
-                ),
-                _SI3_PRA_ZERO,
-            )
-        )
-    else:
-        negative_flux_x = jnp.zeros_like(negative_flux_content)
-    negative_flux_xx = sr(
-        jnp.where(
-            negative[..., None],
-            sr(negative_alpha3[..., None] * negative_donor_sxx),
-            _SI3_PRA_ZERO,
-        )
-    )
-    negative_flux_y = sr(
-        jnp.where(
-            negative[..., None],
-            sr(
-                negative_alpha[..., None]
-                * sr(
-                    negative_donor_sy
-                    - sr(negative_one[..., None] * negative_donor_sxy)
-                )
-            ),
-            _SI3_PRA_ZERO,
-        )
-    )
-    negative_flux_yy = sr(
-        jnp.where(
-            negative[..., None],
-            sr(negative_alpha[..., None] * negative_donor_syy),
-            _SI3_PRA_ZERO,
-        )
-    )
-    negative_flux_xy = sr(
-        jnp.where(
-            negative[..., None],
-            sr(negative_alpha2[..., None] * negative_donor_sxy),
-            _SI3_PRA_ZERO,
-        )
-    )
-
-    out_left = receiver_mask_xy & jnp.roll(negative, 1, axis=0)
-    left_velocity = jnp.roll(put, 1, axis=0)
-    area_after_right_safe = jnp.where(
-        out_left, area_after_right, _SI3_PRA_ONE
-    )
-    left_alpha = sr(
-        jnp.where(
-            out_left,
-            sr(sr(sr(-left_velocity) * pdt_f) / area_after_right_safe),
-            _SI3_PRA_ZERO,
-        )
-    )
-    left_one = sr(_SI3_PRA_ONE - left_alpha)
-    left_one2 = sr(left_one * left_one)
-    left_one3 = sr(left_one2 * left_one)
-    left_flux_area = sr(
-        jnp.where(
-            out_left,
-            jnp.roll(negative_flux_area, 1, axis=0),
-            _SI3_PRA_ZERO,
-        )
-    )
-    left_flux_content = sr(
-        jnp.where(
-            out_left[..., None],
-            jnp.roll(negative_flux_content, 1, axis=0),
-            _SI3_PRA_ZERO,
-        )
-    )
-    area = jnp.where(
-        out_left, sr(area_after_right - left_flux_area), area_after_right
-    )
-    if _plant_omit_donor_readjust:
-        content = content_after_right
-        sx = sx_after_right
-        sxx = sxx_after_right
-        sy = sy_after_right
-        syy = syy_after_right
-        sxy = sxy_after_right
-    else:
-        content = jnp.where(
-            out_left[..., None],
-            sr(content_after_right - left_flux_content),
-            content_after_right,
-        )
-        sx = jnp.where(
-            out_left[..., None],
-            sr(
-                left_one2[..., None]
-                * sr(
-                    sx_after_right
-                    + sr(
-                        sr(_SI3_PRA_FLUX_MOMENT_FACTOR * left_alpha)[..., None]
-                        * sxx_after_right
-                    )
-                )
-            ),
-            sx_after_right,
-        )
-        sxx = jnp.where(
-            out_left[..., None],
-            sr(left_one3[..., None] * sxx_after_right),
-            sxx_after_right,
-        )
-        left_flux_y = sr(
-            jnp.where(
-                out_left[..., None],
-                jnp.roll(negative_flux_y, 1, axis=0),
-                _SI3_PRA_ZERO,
-            )
-        )
-        left_flux_yy = sr(
-            jnp.where(
-                out_left[..., None],
-                jnp.roll(negative_flux_yy, 1, axis=0),
-                _SI3_PRA_ZERO,
-            )
-        )
-        sy = jnp.where(
-            out_left[..., None],
-            sr(sy_after_right - left_flux_y),
-            sy_after_right,
-        )
-        syy = jnp.where(
-            out_left[..., None],
-            sr(syy_after_right - left_flux_yy),
-            syy_after_right,
-        )
-        sxy = jnp.where(
-            out_left[..., None],
-            sr(left_one2[..., None] * sxy_after_right),
-            sxy_after_right,
-        )
-    moments_3d = sx, sy, sxx, syy, sxy
-
-    flux_area = sr(positive_flux_area + negative_flux_area)
-    flux_content = sr(positive_flux_content + negative_flux_content)
-    if _plant_corrupt_receiver_flux:
-        flux_content = sr(flux_content * _SI3_PRA_PLANT_CORRUPT_FACTOR)
-    flux_moments = (
-        sr(positive_flux_x + negative_flux_x),
-        sr(positive_flux_y + negative_flux_y),
-        sr(positive_flux_xx + negative_flux_xx),
-        sr(positive_flux_yy + negative_flux_yy),
-        sr(positive_flux_xy + negative_flux_xy),
-    )
-
-    incoming_left = receiver_mask_xy & jnp.roll(positive, 1, axis=0)
-    left_area = sr(
-        jnp.where(incoming_left, jnp.roll(flux_area, 1, axis=0), _SI3_PRA_ZERO)
-    )
-    left_content = sr(
-        jnp.where(
-            incoming_left[..., None],
-            jnp.roll(flux_content, 1, axis=0),
-            _SI3_PRA_ZERO,
-        )
-    )
-    left_moments = cast(
-        SI3PratherMoments,
-        tuple(
-            sr(
-                jnp.where(
-                    incoming_left[..., None],
-                    jnp.roll(value, 1, axis=0),
-                    _SI3_PRA_ZERO,
-                )
-            )
-            for value in flux_moments
-        ),
-    )
-    area_for_left = jnp.where(incoming_left, area, _SI3_PRA_ONE)
-    merged_area, merged_content, merged_moments = _si3_prather_merge_from_left(
-        area_for_left, content, moments_3d, left_area, left_content, left_moments
-    )
-    area = sr(jnp.where(incoming_left, merged_area, area))
-    content = sr(jnp.where(incoming_left[..., None], merged_content, content))
-    moments_3d = cast(
-        SI3PratherMoments,
-        tuple(
-            sr(jnp.where(incoming_left[..., None], new, old))
-            for new, old in zip(merged_moments, moments_3d, strict=True)
-        ),
-    )
-
-    incoming_right = receiver_mask_xy & negative
-    right_area = sr(jnp.where(incoming_right, flux_area, _SI3_PRA_ZERO))
-    right_content = sr(
-        jnp.where(incoming_right[..., None], flux_content, _SI3_PRA_ZERO)
-    )
-    right_moments = cast(
-        SI3PratherMoments,
-        tuple(
-            sr(jnp.where(incoming_right[..., None], value, _SI3_PRA_ZERO))
-            for value in flux_moments
-        ),
-    )
-    area_for_right = jnp.where(incoming_right, area, _SI3_PRA_ONE)
-    merged_area, merged_content, merged_moments = _si3_prather_merge_from_right(
-        area_for_right, content, moments_3d, right_area, right_content, right_moments
-    )
-    area = sr(jnp.where(incoming_right, merged_area, area))
-    content = sr(jnp.where(incoming_right[..., None], merged_content, content))
-    moments_3d = cast(
-        SI3PratherMoments,
-        tuple(
-            sr(jnp.where(incoming_right[..., None], new, old))
-            for new, old in zip(merged_moments, moments_3d, strict=True)
-        ),
+    content, moments_3d, area = _si3_prather_x_substep(
+        ps0_3d,
+        moments_3d,
+        put,
+        e1e2t,
+        tmask,
+        pdt,
+        initial_area=psm,
+        first_sweep=bool(round(float(pcrh))),
+        halo_width=nn_hls,
+        ihls=ihls,
+        pcrh=pcrh,
+        strict_loop_domains=True,
+        _plant_omit_donor_readjust=_plant_omit_donor_readjust,
+        _plant_symmetric_neg_zfx=_plant_symmetric_neg_zfx,
+        _plant_corrupt_receiver_flux=_plant_corrupt_receiver_flux,
     )
     content_out, moments_out = _si3_unpack_tracer_axis(content, moments_3d, orig_shape)
     return area, content_out, moments_out
@@ -2491,448 +2286,33 @@ def si3_adv_y(
     *,
     e1e2t: jnp.ndarray,
     tmask: jnp.ndarray,
-    nn_hls: int = 2,
+    nn_hls: int,
     _plant_omit_donor_readjust: bool = False,
     _plant_corrupt_receiver_flux: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray, SI3PratherMoments]:
     """Execute NEMO SI3 `adv_y` (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn_adv_pra.f90:736-957`).
 
-    Preserves the three sequential loop domains of `adv_y`:
-    1. Loop 1 (`:773-853`, `DO_2D( ji0, ji0, jj0, jj0 )` where `ji0 = NINT(pcrh) + ihls`,
-       `jj0 = 1 + ihls`): initializes `zpsm`, limits moments via `_si3_prather_limit_y`,
-       and extracts/readjusts positive-V (`pvt >= 0`) donor fluxes.
-    2. Loop 2 (`:855-875`, `ji in [ntsi-ji0, ntei+ji0]`, `jj in [ntsj-jj0, ntej+jj0-1]`):
-       extracts negative-V (`pvt < 0`) fluxes from post-Loop-1 donor `jj+1`.
-    3. Loop 3 (`:877-955`, `DO_2D( ji0, ji0, jj0-1, jj0-1 )`): readjusts negative-V
-       donors where `pvt(ji,jj-1) < 0` and merges incoming positive-V (`jj-1 -> jj`)
-       and negative-V (`jj+1 -> jj`) fluxes via `_si3_prather_merge_from_below` and
-       `_si3_prather_merge_from_above`.
+    Thin wrapper around the generalized `_si3_prather_y_substep` kernel with
+    `strict_loop_domains=True` (`DO_2D( ji0, ji0, jj0, jj0 )` for Loop 1,
+    `jj in [ntsj-jj0, ntej+jj0-1]` for Loop 2, `DO_2D( ji0, ji0, jj0-1, jj0-1 )`
+    for Loop 3).
     """
     ps0_3d, moments_3d, orig_shape = _si3_pack_tracer_axis(ps0, moments)
-    n_x, n_y = ps0_3d.shape[:2]
-    ji0 = int(round(float(pcrh))) + int(ihls)
-    jj0 = 1 + int(ihls)
-    index_x = jnp.arange(n_x)
-    index_y = jnp.arange(n_y)
-    cross_mask = (index_x >= nn_hls - ji0) & (index_x < n_x - nn_hls + ji0)
-    limit_mask = (index_y >= nn_hls - jj0) & (index_y < n_y - nn_hls + jj0)
-    receiver_width = jj0 - 1
-    receiver_mask = (index_y >= nn_hls - receiver_width) & (
-        index_y < n_y - nn_hls + receiver_width
-    )
-    face_mask = (index_y >= nn_hls - jj0) & (
-        index_y < n_y - nn_hls + receiver_width
-    )
-    limit_mask_xy = cross_mask[:, None] & limit_mask[None, :]
-    receiver_mask_xy = cross_mask[:, None] & receiver_mask[None, :]
-    face_mask_xy = cross_mask[:, None] & face_mask[None, :]
-
-    sr = nemo_source_round
-    dtype = ps0_3d.dtype
-    pdt_f = jnp.asarray(pdt, dtype=dtype)
-    pcrh_f = jnp.asarray(pcrh, dtype=dtype)
-    one_minus_pcrh = sr(_SI3_PRA_ONE - pcrh_f)
-    zpsm_init = sr(
-        jnp.maximum(
-            sr(sr(pcrh_f * e1e2t) + sr(one_minus_pcrh * psm)),
-            _SI3_PRA_AREA_FLOOR,
-        )
-    )
-    sweep_area = sr(jnp.where(limit_mask_xy, zpsm_init, psm))
-
-    limited_content, limited_moments = _si3_prather_limit_y(ps0_3d, moments_3d, tmask)
-    content = sr(jnp.where(limit_mask_xy[..., None], limited_content, ps0_3d))
-    moments_3d = cast(
-        SI3PratherMoments,
-        tuple(
-            sr(jnp.where(limit_mask_xy[..., None], new, old))
-            for new, old in zip(limited_moments, moments_3d, strict=True)
-        ),
-    )
-    sx, sy, sxx, syy, sxy = moments_3d
-    positive = (pvt >= _SI3_PRA_ZERO) & limit_mask_xy
-    negative = (pvt < _SI3_PRA_ZERO) & face_mask_xy
-
-    sweep_area_safe = jnp.where(positive, sweep_area, _SI3_PRA_ONE)
-    positive_alpha = sr(
-        jnp.where(
-            positive,
-            sr(sr(pvt * pdt_f) / sweep_area_safe),
-            _SI3_PRA_ZERO,
-        )
-    )
-    positive_one = sr(_SI3_PRA_ONE - positive_alpha)
-    positive_alpha2 = sr(positive_alpha * positive_alpha)
-    positive_alpha3 = sr(positive_alpha2 * positive_alpha)
-    positive_flux_area = sr(
-        jnp.where(positive, sr(positive_alpha * sweep_area), _SI3_PRA_ZERO)
-    )
-    positive_delta = sr(positive_one - positive_alpha)
-    positive_flux_content = sr(
-        positive_alpha[..., None]
-        * sr(
-            content
-            + sr(
-                positive_one[..., None]
-                * sr(sy + sr(positive_delta[..., None] * syy))
-            )
-        )
-    )
-    positive_flux_content = sr(
-        jnp.where(positive[..., None], positive_flux_content, _SI3_PRA_ZERO)
-    )
-    positive_flux_y = sr(
-        jnp.where(
-            positive[..., None],
-            sr(
-                positive_alpha2[..., None]
-                * sr(
-                    sy
-                    + sr(
-                        sr(_SI3_PRA_FLUX_MOMENT_FACTOR * positive_one)[..., None]
-                        * syy
-                    )
-                )
-            ),
-            _SI3_PRA_ZERO,
-        )
-    )
-    positive_flux_yy = sr(
-        jnp.where(
-            positive[..., None],
-            sr(positive_alpha3[..., None] * syy),
-            _SI3_PRA_ZERO,
-        )
-    )
-    positive_flux_x = sr(
-        jnp.where(
-            positive[..., None],
-            sr(
-                positive_alpha[..., None]
-                * sr(sx + sr(positive_one[..., None] * sxy))
-            ),
-            _SI3_PRA_ZERO,
-        )
-    )
-    positive_flux_xx = sr(
-        jnp.where(
-            positive[..., None],
-            sr(positive_alpha[..., None] * sxx),
-            _SI3_PRA_ZERO,
-        )
-    )
-    positive_flux_xy = sr(
-        jnp.where(
-            positive[..., None],
-            sr(positive_alpha2[..., None] * sxy),
-            _SI3_PRA_ZERO,
-        )
-    )
-
-    positive_one2 = sr(positive_one * positive_one)
-    positive_one3 = sr(positive_one2 * positive_one)
-    area_after_up = jnp.where(
-        positive, sr(sweep_area - positive_flux_area), sweep_area
-    )
-    if _plant_omit_donor_readjust:
-        content_after_up = content
-        sy_after_up = sy
-        syy_after_up = syy
-        sx_after_up = sx
-        sxx_after_up = sxx
-        sxy_after_up = sxy
-    else:
-        content_after_up = jnp.where(
-            positive[..., None], sr(content - positive_flux_content), content
-        )
-        sy_after_up = jnp.where(
-            positive[..., None],
-            sr(
-                positive_one2[..., None]
-                * sr(
-                    sy
-                    - sr(
-                        sr(_SI3_PRA_FLUX_MOMENT_FACTOR * positive_alpha)[..., None]
-                        * syy
-                    )
-                )
-            ),
-            sy,
-        )
-        syy_after_up = jnp.where(
-            positive[..., None], sr(positive_one3[..., None] * syy), syy
-        )
-        sx_after_up = jnp.where(
-            positive[..., None], sr(sx - positive_flux_x), sx
-        )
-        sxx_after_up = jnp.where(
-            positive[..., None], sr(sxx - positive_flux_xx), sxx
-        )
-        sxy_after_up = jnp.where(
-            positive[..., None], sr(positive_one2[..., None] * sxy), sxy
-        )
-
-    negative_donor_area = jnp.roll(area_after_up, -1, axis=1)
-    negative_donor_content = jnp.roll(content_after_up, -1, axis=1)
-    negative_donor_sx = jnp.roll(sx_after_up, -1, axis=1)
-    negative_donor_sy = jnp.roll(sy_after_up, -1, axis=1)
-    negative_donor_sxx = jnp.roll(sxx_after_up, -1, axis=1)
-    negative_donor_syy = jnp.roll(syy_after_up, -1, axis=1)
-    negative_donor_sxy = jnp.roll(sxy_after_up, -1, axis=1)
-    negative_velocity = sr(-pvt)
-    negative_donor_area_safe = jnp.where(
-        negative, negative_donor_area, _SI3_PRA_ONE
-    )
-    negative_alpha = sr(
-        jnp.where(
-            negative,
-            sr(sr(negative_velocity * pdt_f) / negative_donor_area_safe),
-            _SI3_PRA_ZERO,
-        )
-    )
-    negative_one = sr(_SI3_PRA_ONE - negative_alpha)
-    negative_alpha2 = sr(negative_alpha * negative_alpha)
-    negative_alpha3 = sr(negative_alpha2 * negative_alpha)
-    negative_flux_area = sr(
-        jnp.where(
-            negative,
-            sr(negative_alpha * negative_donor_area),
-            _SI3_PRA_ZERO,
-        )
-    )
-    negative_delta = sr(negative_one - negative_alpha)
-    negative_flux_content = sr(
-        negative_alpha[..., None]
-        * sr(
-            negative_donor_content
-            - sr(
-                negative_one[..., None]
-                * sr(
-                    negative_donor_sy
-                    - sr(negative_delta[..., None] * negative_donor_syy)
-                )
-            )
-        )
-    )
-    negative_flux_content = sr(
-        jnp.where(negative[..., None], negative_flux_content, _SI3_PRA_ZERO)
-    )
-    negative_flux_y = sr(
-        jnp.where(
-            negative[..., None],
-            sr(
-                negative_alpha2[..., None]
-                * sr(
-                    negative_donor_sy
-                    - sr(
-                        sr(_SI3_PRA_FLUX_MOMENT_FACTOR * negative_one)[..., None]
-                        * negative_donor_syy
-                    )
-                )
-            ),
-            _SI3_PRA_ZERO,
-        )
-    )
-    negative_flux_yy = sr(
-        jnp.where(
-            negative[..., None],
-            sr(negative_alpha3[..., None] * negative_donor_syy),
-            _SI3_PRA_ZERO,
-        )
-    )
-    negative_flux_x = sr(
-        jnp.where(
-            negative[..., None],
-            sr(
-                negative_alpha[..., None]
-                * sr(
-                    negative_donor_sx
-                    - sr(negative_one[..., None] * negative_donor_sxy)
-                )
-            ),
-            _SI3_PRA_ZERO,
-        )
-    )
-    negative_flux_xx = sr(
-        jnp.where(
-            negative[..., None],
-            sr(negative_alpha[..., None] * negative_donor_sxx),
-            _SI3_PRA_ZERO,
-        )
-    )
-    negative_flux_xy = sr(
-        jnp.where(
-            negative[..., None],
-            sr(negative_alpha2[..., None] * negative_donor_sxy),
-            _SI3_PRA_ZERO,
-        )
-    )
-
-    out_down = receiver_mask_xy & jnp.roll(negative, 1, axis=1)
-    down_velocity = jnp.roll(pvt, 1, axis=1)
-    area_after_up_safe = jnp.where(out_down, area_after_up, _SI3_PRA_ONE)
-    down_alpha = sr(
-        jnp.where(
-            out_down,
-            sr(sr(sr(-down_velocity) * pdt_f) / area_after_up_safe),
-            _SI3_PRA_ZERO,
-        )
-    )
-    down_one = sr(_SI3_PRA_ONE - down_alpha)
-    down_one2 = sr(down_one * down_one)
-    down_one3 = sr(down_one2 * down_one)
-    down_flux_area = sr(
-        jnp.where(
-            out_down,
-            jnp.roll(negative_flux_area, 1, axis=1),
-            _SI3_PRA_ZERO,
-        )
-    )
-    down_flux_content = sr(
-        jnp.where(
-            out_down[..., None],
-            jnp.roll(negative_flux_content, 1, axis=1),
-            _SI3_PRA_ZERO,
-        )
-    )
-    area = jnp.where(
-        out_down, sr(area_after_up - down_flux_area), area_after_up
-    )
-    if _plant_omit_donor_readjust:
-        content = content_after_up
-        sy = sy_after_up
-        syy = syy_after_up
-        sx = sx_after_up
-        sxx = sxx_after_up
-        sxy = sxy_after_up
-    else:
-        content = jnp.where(
-            out_down[..., None],
-            sr(content_after_up - down_flux_content),
-            content_after_up,
-        )
-        sy = jnp.where(
-            out_down[..., None],
-            sr(
-                down_one2[..., None]
-                * sr(
-                    sy_after_up
-                    + sr(
-                        sr(_SI3_PRA_FLUX_MOMENT_FACTOR * down_alpha)[..., None]
-                        * syy_after_up
-                    )
-                )
-            ),
-            sy_after_up,
-        )
-        syy = jnp.where(
-            out_down[..., None],
-            sr(down_one3[..., None] * syy_after_up),
-            syy_after_up,
-        )
-        down_flux_x = sr(
-            jnp.where(
-                out_down[..., None],
-                jnp.roll(negative_flux_x, 1, axis=1),
-                _SI3_PRA_ZERO,
-            )
-        )
-        down_flux_xx = sr(
-            jnp.where(
-                out_down[..., None],
-                jnp.roll(negative_flux_xx, 1, axis=1),
-                _SI3_PRA_ZERO,
-            )
-        )
-        sx = jnp.where(
-            out_down[..., None],
-            sr(sx_after_up - down_flux_x),
-            sx_after_up,
-        )
-        sxx = jnp.where(
-            out_down[..., None],
-            sr(sxx_after_up - down_flux_xx),
-            sxx_after_up,
-        )
-        sxy = jnp.where(
-            out_down[..., None],
-            sr(down_one2[..., None] * sxy_after_up),
-            sxy_after_up,
-        )
-    moments_3d = sx, sy, sxx, syy, sxy
-
-    flux_area = sr(positive_flux_area + negative_flux_area)
-    flux_content = sr(positive_flux_content + negative_flux_content)
-    if _plant_corrupt_receiver_flux:
-        flux_content = sr(flux_content * _SI3_PRA_PLANT_CORRUPT_FACTOR)
-    flux_moments = (
-        sr(positive_flux_x + negative_flux_x),
-        sr(positive_flux_y + negative_flux_y),
-        sr(positive_flux_xx + negative_flux_xx),
-        sr(positive_flux_yy + negative_flux_yy),
-        sr(positive_flux_xy + negative_flux_xy),
-    )
-    incoming_below = receiver_mask_xy & jnp.roll(positive, 1, axis=1)
-    below_area = sr(
-        jnp.where(incoming_below, jnp.roll(flux_area, 1, axis=1), _SI3_PRA_ZERO)
-    )
-    below_content = sr(
-        jnp.where(
-            incoming_below[..., None],
-            jnp.roll(flux_content, 1, axis=1),
-            _SI3_PRA_ZERO,
-        )
-    )
-    below_moments = cast(
-        SI3PratherMoments,
-        tuple(
-            sr(
-                jnp.where(
-                    incoming_below[..., None],
-                    jnp.roll(value, 1, axis=1),
-                    _SI3_PRA_ZERO,
-                )
-            )
-            for value in flux_moments
-        ),
-    )
-    area_for_below = jnp.where(incoming_below, area, _SI3_PRA_ONE)
-    merged_area, merged_content, merged_moments = _si3_prather_merge_from_below(
-        area_for_below, content, moments_3d, below_area, below_content, below_moments
-    )
-    area = sr(jnp.where(incoming_below, merged_area, area))
-    content = sr(jnp.where(incoming_below[..., None], merged_content, content))
-    moments_3d = cast(
-        SI3PratherMoments,
-        tuple(
-            sr(jnp.where(incoming_below[..., None], new, old))
-            for new, old in zip(merged_moments, moments_3d, strict=True)
-        ),
-    )
-    incoming_above = receiver_mask_xy & negative
-    above_area = sr(jnp.where(incoming_above, flux_area, _SI3_PRA_ZERO))
-    above_content = sr(
-        jnp.where(incoming_above[..., None], flux_content, _SI3_PRA_ZERO)
-    )
-    above_moments = cast(
-        SI3PratherMoments,
-        tuple(
-            sr(jnp.where(incoming_above[..., None], value, _SI3_PRA_ZERO))
-            for value in flux_moments
-        ),
-    )
-    area_for_above = jnp.where(incoming_above, area, _SI3_PRA_ONE)
-    merged_area, merged_content, merged_moments = _si3_prather_merge_from_above(
-        area_for_above, content, moments_3d, above_area, above_content, above_moments
-    )
-    area = sr(jnp.where(incoming_above, merged_area, area))
-    content = sr(jnp.where(incoming_above[..., None], merged_content, content))
-    moments_3d = cast(
-        SI3PratherMoments,
-        tuple(
-            sr(jnp.where(incoming_above[..., None], new, old))
-            for new, old in zip(merged_moments, moments_3d, strict=True)
-        ),
+    content, moments_3d, area = _si3_prather_y_substep(
+        ps0_3d,
+        moments_3d,
+        pvt,
+        e1e2t,
+        tmask,
+        pdt,
+        initial_area=psm,
+        first_sweep=bool(round(float(pcrh))),
+        halo_width=nn_hls,
+        ihls=ihls,
+        pcrh=pcrh,
+        strict_loop_domains=True,
+        _plant_omit_donor_readjust=_plant_omit_donor_readjust,
+        _plant_corrupt_receiver_flux=_plant_corrupt_receiver_flux,
     )
     content_out, moments_out = _si3_unpack_tracer_axis(content, moments_3d, orig_shape)
     return area, content_out, moments_out
@@ -2942,18 +2322,15 @@ def si3_icemax2d_pra(
     ihls: int,
     pice: jnp.ndarray,
     *,
-    nn_hls: int = 2,
+    nn_hls: int,
+    mask_inactive: bool,
 ) -> jnp.ndarray:
     """Compute 9-point neighborhood maximum (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn_adv_pra.f90:1519-1550`).
 
     Evaluates `zmax1` (`jj - 1`), `zmax2` (`jj`), `zmax3` (`jj + 1`) across
     `(ji - 1, ji, ji + 1)` with floor `epsi20` on `A2D(ihls)`.
-    Supports `(jpi, jpj)` or `(jpi, jpj, jpl)`.
+    Supports `(jpi, jpj)` or trailing category/layer axes.
     """
-    jpi, jpj = pice.shape[:2]
-    active = _si3_active_mask_2d(jpi, jpj, nn_hls, ihls)
-    if pice.ndim == 3:
-        active = active[..., None]
     epsi20 = jnp.asarray(_SI3_PRA_AREA_FLOOR, dtype=pice.dtype)
     p_xm1 = jnp.roll(pice, 1, axis=0)
     p_xp1 = jnp.roll(pice, -1, axis=0)
@@ -2968,6 +2345,12 @@ def si3_icemax2d_pra(
         jnp.maximum(epsi20, zmax1),
         jnp.maximum(zmax2, zmax3),
     )
+    if not mask_inactive:
+        return pmax
+    jpi, jpj = pice.shape[:2]
+    active = _si3_active_mask_2d(jpi, jpj, nn_hls, ihls)
+    for _ in range(pice.ndim - 2):
+        active = active[..., None]
     return jnp.where(active, pmax, _SI3_PRA_ZERO)
 
 
@@ -2975,43 +2358,21 @@ def si3_icemax3d_pra(
     ihls: int,
     pice: jnp.ndarray,
     *,
-    nn_hls: int = 2,
+    nn_hls: int,
+    mask_inactive: bool,
 ) -> jnp.ndarray:
-    """Compute 3-D 9-point neighborhood maximum (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn_adv_pra.f90:1552-1588`).
-
-    Supports `(jpi, jpj, jlay)` or `(jpi, jpj, jlay, jpl)`.
-    """
-    jpi, jpj = pice.shape[:2]
-    active = _si3_active_mask_2d(jpi, jpj, nn_hls, ihls)
-    extra_dims = pice.ndim - 2
-    for _ in range(extra_dims):
-        active = active[..., None]
-    epsi20 = jnp.asarray(_SI3_PRA_AREA_FLOOR, dtype=pice.dtype)
-    p_xm1 = jnp.roll(pice, 1, axis=0)
-    p_xp1 = jnp.roll(pice, -1, axis=0)
-    row_max = jnp.maximum(
-        jnp.maximum(epsi20, pice),
-        jnp.maximum(p_xm1, p_xp1),
-    )
-    zmax1 = jnp.roll(row_max, 1, axis=1)
-    zmax2 = row_max
-    zmax3 = jnp.roll(row_max, -1, axis=1)
-    pmax = jnp.maximum(
-        jnp.maximum(epsi20, zmax1),
-        jnp.maximum(zmax2, zmax3),
-    )
-    return jnp.where(active, pmax, _SI3_PRA_ZERO)
+    """Compute 3-D 9-point neighborhood maximum (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn_adv_pra.f90:1552-1588`)."""
+    return si3_icemax2d_pra(ihls, pice, nn_hls=nn_hls, mask_inactive=mask_inactive)
 
 
 def _seq_sum_axis(arr: jnp.ndarray, axis: int) -> jnp.ndarray:
     """Sequential summation matching Fortran `SUM(..., dim=...)` rounding."""
-    sr = nemo_source_round
     n = arr.shape[axis]
     if n == 0:
         return jnp.sum(arr, axis=axis)
     acc = jnp.take(arr, 0, axis=axis)
     for idx in range(1, n):
-        acc = sr(acc + jnp.take(arr, idx, axis=axis))
+        acc = acc + jnp.take(arr, idx, axis=axis)
     return acc
 
 
@@ -3038,14 +2399,18 @@ def si3_hbig_pra(
     hfx_res: jnp.ndarray,
     sfx_res: jnp.ndarray,
     *,
-    nn_hls: int = 2,
-    nn_icesal: int = 4,
-    ln_pnd_LEV: bool = True,
-    ln_pnd_TOPO: bool = False,
-    hi_max_top: float | jnp.ndarray = _SI3_PRA_HBIG_MAX_THICKNESS_M,
-    rhoi: float = constants.rho_ice,
-    rhos: float = constants.rho_snow,
+    nn_hls: int,
+    nn_icesal: int,
+    ln_pnd_LEV: bool,
+    ln_pnd_TOPO: bool,
+    hi_max_top: float | jnp.ndarray | None,
+    rhoi: float,
+    rhos: float,
+    apply_hi_cap: bool,
+    multiply_before_divide: bool,
+    extensive_area: float | jnp.ndarray | None,
     _plant_perturb_hbig_cap: bool = False,
+    _return_cat_residuals: bool = False,
 ) -> tuple[
     jnp.ndarray,
     jnp.ndarray,
@@ -3091,166 +2456,241 @@ def si3_hbig_pra(
     dtype = pv_i.dtype
     active_2d = _si3_active_mask_2d(jpi, jpj, nn_hls, ihls)
     interior_2d = _si3_active_mask_2d(jpi, jpj, nn_hls, 0)
-    z1_dt = sr(_SI3_PRA_ONE / jnp.asarray(pdt, dtype=dtype))
+    z1_dt = _SI3_PRA_ONE / jnp.asarray(pdt, dtype=dtype)
     conc_thresh = (
         _SI3_PRA_HBIG_PLANT_CONCENTRATION_THRESHOLD
         if _plant_perturb_hbig_cap
         else _SI3_PRA_HBIG_CONCENTRATION_THRESHOLD
     )
-    hi_max_val = jnp.asarray(hi_max_top, dtype=dtype)
+    if apply_hi_cap == (hi_max_top is None):
+        raise ValueError("si3_hbig_pra needs hi_max_top exactly when apply_hi_cap is True")
     rhoi_f = jnp.asarray(rhoi, dtype=dtype)
     rhos_f = jnp.asarray(rhos, dtype=dtype)
     epsi20 = jnp.asarray(_SI3_PRA_AREA_FLOOR, dtype=dtype)
+    use_ext = extensive_area is not None
+    ext_area_f = jnp.asarray(extensive_area if use_ext else _SI3_PRA_ONE, dtype=dtype)
+    if use_ext and ext_area_f.ndim == 2:
+        ext_3d = ext_area_f[:, :, None]
+        ext_4d = ext_area_f[:, :, None, None]
+    else:
+        ext_3d = ext_area_f
+        ext_4d = ext_area_f
+
+    def _to_int3(arr: jnp.ndarray) -> jnp.ndarray:
+        return arr / ext_3d if use_ext else arr
+
+    def _to_ext3(arr: jnp.ndarray) -> jnp.ndarray:
+        return arr * ext_3d if use_ext else arr
+
+    def _to_int4(arr: jnp.ndarray) -> jnp.ndarray:
+        return arr / ext_4d if use_ext else arr
+
+    def _to_ext4(arr: jnp.ndarray) -> jnp.ndarray:
+        return arr * ext_4d if use_ext else arr
+
+    active_3d = active_2d[:, :, None]
+
+    v_i_cat = _to_int3(pv_i)
+    v_s_cat = _to_int3(pv_s)
+    a_i_cat = _to_int3(pa_i)
+    a_ip_cat = _to_int3(pa_ip)
+    v_ip_cat = _to_int3(pv_ip)
+
+    has_ice = active_3d & (v_i_cat > _SI3_PRA_ZERO) & (a_i_cat > _SI3_PRA_ZERO)
+
+    # -- check h_ip (`icedyn_adv_pra.f90:1004-1009`) --
+    pnd_cond = has_ice & (
+        bool(ln_pnd_LEV) | (bool(ln_pnd_TOPO) & (v_ip_cat > _SI3_PRA_ZERO))
+    )
+    denom_ap = jnp.maximum(epsi20, a_ip_cat)
+    zhip = v_ip_cat / denom_ap
+    cond_hip = pnd_cond & (zhip > phip_max) & (a_ip_cat < conc_thresh)
+    phip_safe = jnp.where(cond_hip, phip_max, _SI3_PRA_ONE)
+    corr_aip = jnp.where(cond_hip, v_ip_cat / phip_safe, _SI3_PRA_ZERO)
+    pa_ip = jnp.where(cond_hip, _to_ext3(corr_aip), pa_ip)
+
+    # -- check h_i (`icedyn_adv_pra.f90:1013-1016`) --
+    if apply_hi_cap:
+        a_i_safe = jnp.where(has_ice, a_i_cat, _SI3_PRA_ONE)
+        zhi = jnp.where(has_ice, v_i_cat / a_i_safe, _SI3_PRA_ZERO)
+        cond_hi = has_ice & (zhi > phi_max) & (a_i_cat < conc_thresh)
+        phi_cap = jnp.minimum(phi_max, jnp.asarray(hi_max_top, dtype=dtype))
+        phi_cap_safe = jnp.where(cond_hi, phi_cap, _SI3_PRA_ONE)
+        corr_ai = jnp.where(cond_hi, v_i_cat / phi_cap_safe, _SI3_PRA_ZERO)
+        pa_i = jnp.where(cond_hi, _to_ext3(corr_ai), pa_i)
+    a_i_cat = _to_int3(pa_i)
+
+    # -- check h_s (`icedyn_adv_pra.f90:1020-1029`) --
+    has_a_i = active_3d & (a_i_cat > _SI3_PRA_ZERO)
+    a_i_safe2 = jnp.where(has_a_i, a_i_cat, _SI3_PRA_ONE)
+    zhs = jnp.where(has_a_i, v_s_cat / a_i_safe2, _SI3_PRA_ZERO)
+    cond_hs = (
+        (has_a_i if not apply_hi_cap else has_ice)
+        & (v_s_cat > _SI3_PRA_ZERO)
+        & (zhs > phs_max)
+        & (a_i_cat < conc_thresh)
+    )
+    zfra_hs = jnp.where(
+        cond_hs,
+        phs_max / jnp.maximum(zhs, epsi20),
+        _SI3_PRA_ONE,
+    )
+    v_s_target = sr(a_i_cat * phs_max)
+    wfx_hs = sr(((v_s_cat - v_s_target) * rhos_f) * z1_dt)
+    e_s_int = _to_int4(pe_s)
+    sum_es = _seq_sum_axis(e_s_int, axis=2)
+    hfx_hs = sr((sum_es * (_SI3_PRA_ONE - zfra_hs)) * z1_dt)
+    zwfx_all = jnp.where(cond_hs, wfx_hs, _SI3_PRA_ZERO)
+    zhfx_all = jnp.where(cond_hs, -hfx_hs, _SI3_PRA_ZERO)
+    zsfx_all = jnp.zeros((jpi, jpj, jpl), dtype=dtype)
+    pv_s = jnp.where(cond_hs, _to_ext3(v_s_target), pv_s)
+    v_s_cat = _to_int3(pv_s)
+    pe_s = jnp.where(
+        cond_hs[:, :, None, :],
+        _to_ext4(e_s_int * zfra_hs[:, :, None, :]),
+        pe_s,
+    )
+
+    # -- check s_i (`icedyn_adv_pra.f90:1035-1060`) --
+    has_ice_post = active_3d & (v_i_cat > _SI3_PRA_ZERO) & (a_i_cat > _SI3_PRA_ZERO)
+    v_i_safe = jnp.where(has_ice_post, v_i_cat, _SI3_PRA_ONE)
+    if nn_icesal == 4:
+        szv_int = _to_int4(pszv_i)
+        zsi = jnp.where(
+            has_ice_post[:, :, None, :],
+            szv_int / v_i_safe[:, :, None, :],
+            _SI3_PRA_ZERO,
+        )
+        cond_si = (
+            has_ice_post[:, :, None, :]
+            & (zsi > pszi_max)
+            & (a_i_cat < conc_thresh)[:, :, None, :]
+        )
+        zsi_safe = jnp.where(cond_si, zsi, _SI3_PRA_ONE)
+        zfra_si = pszi_max / zsi_safe
+        sfx_inc = jnp.where(
+            cond_si,
+            sr(((szv_int * (_SI3_PRA_ONE - zfra_si)) * rhoi_f) * z1_dt),
+            _SI3_PRA_ZERO,
+        )
+        for jk in range(nlay_i):
+            zsfx_all = zsfx_all + sfx_inc[:, :, jk, :]
+        if multiply_before_divide:
+            corr_szv = jnp.where(
+                cond_si,
+                (szv_int * pszi_max) / zsi_safe,
+                _SI3_PRA_ZERO,
+            )
+        else:
+            corr_szv = szv_int * zfra_si
+        pszv_i = jnp.where(cond_si, _to_ext4(corr_szv), pszv_i)
+    else:
+        sv_i_cat = _to_int3(psv_i)
+        zsi = jnp.where(has_ice_post, sv_i_cat / v_i_safe, _SI3_PRA_ZERO)
+        cond_si = (
+            has_ice_post
+            & (zsi > psi_max)
+            & (a_i_cat < conc_thresh)
+        )
+        zsi_safe = jnp.where(cond_si, zsi, _SI3_PRA_ONE)
+        zfra_si = psi_max / zsi_safe
+        sfx_inc = sr(((sv_i_cat * (_SI3_PRA_ONE - zfra_si)) * rhoi_f) * z1_dt)
+        zsfx_all = jnp.where(cond_si, zsfx_all + sfx_inc, zsfx_all)
+        corr_sv = (
+            jnp.where(
+                cond_si,
+                (sv_i_cat * psi_max) / zsi_safe,
+                _SI3_PRA_ZERO,
+            )
+            if multiply_before_divide
+            else sv_i_cat * zfra_si
+        )
+        psv_i = jnp.where(cond_si, _to_ext3(corr_sv), psv_i)
+
+    # -- check e_i/v_i (`icedyn_adv_pra.f90:1062-1072`) --
+    ei_int = _to_int4(pe_i)
+    zei = jnp.where(
+        has_ice_post[:, :, None, :],
+        ei_int / v_i_safe[:, :, None, :],
+        _SI3_PRA_ZERO,
+    )
+    cond_ei = (
+        has_ice_post[:, :, None, :]
+        & (zei > pei_max)
+        & (a_i_cat < conc_thresh)[:, :, None, :]
+    )
+    zei_safe = jnp.where(cond_ei, zei, _SI3_PRA_ONE)
+    zfra_ei = pei_max / zei_safe
+    hfx_ei_inc = jnp.where(
+        cond_ei,
+        sr((ei_int * (_SI3_PRA_ONE - zfra_ei)) * z1_dt),
+        _SI3_PRA_ZERO,
+    )
+    for jk in range(nlay_i):
+        zhfx_all = zhfx_all - hfx_ei_inc[:, :, jk, :]
+    if multiply_before_divide:
+        corr_ei = jnp.where(
+            cond_ei,
+            (ei_int * pei_max) / zei_safe,
+            _SI3_PRA_ZERO,
+        )
+    else:
+        corr_ei = ei_int * zfra_ei
+    pe_i = jnp.where(cond_ei, _to_ext4(corr_ei), pe_i)
+
+    # -- check e_s/v_s (`icedyn_adv_pra.f90:1074-1084`) --
+    has_snw_post = active_3d & (v_s_cat > _SI3_PRA_ZERO) & (a_i_cat > _SI3_PRA_ZERO)
+    v_s_safe = jnp.where(has_snw_post, v_s_cat, _SI3_PRA_ONE)
+    es_int2 = _to_int4(pe_s)
+    zes = jnp.where(
+        has_snw_post[:, :, None, :],
+        es_int2 / v_s_safe[:, :, None, :],
+        _SI3_PRA_ZERO,
+    )
+    cond_es = (
+        has_snw_post[:, :, None, :]
+        & (zes > pes_max)
+        & (a_i_cat < conc_thresh)[:, :, None, :]
+    )
+    zes_safe = jnp.where(cond_es, zes, _SI3_PRA_ONE)
+    zfra_es = pes_max / zes_safe
+    hfx_es_inc = jnp.where(
+        cond_es,
+        sr((es_int2 * (_SI3_PRA_ONE - zfra_es)) * z1_dt),
+        _SI3_PRA_ZERO,
+    )
+    for jk in range(nlay_s):
+        zhfx_all = zhfx_all - hfx_es_inc[:, :, jk, :]
+    if multiply_before_divide:
+        corr_es = jnp.where(
+            cond_es,
+            (es_int2 * pes_max) / zes_safe,
+            _SI3_PRA_ZERO,
+        )
+    else:
+        corr_es = es_int2 * zfra_es
+    pe_s = jnp.where(cond_es, _to_ext4(corr_es), pe_s)
+
+    if _return_cat_residuals:
+        return (
+            pv_i,
+            pv_s,
+            pa_i,
+            pa_ip,
+            pv_ip,
+            psv_i,
+            pe_s,
+            pe_i,
+            pszv_i,
+            zwfx_all,
+            zhfx_all,
+            zsfx_all,
+        )
 
     for jl in range(jpl):
-        zwfx_res = jnp.zeros((jpi, jpj), dtype=dtype)
-        zhfx_res = jnp.zeros((jpi, jpj), dtype=dtype)
-        zsfx_res = jnp.zeros((jpi, jpj), dtype=dtype)
-
-        v_i_cat = pv_i[:, :, jl]
-        v_s_cat = pv_s[:, :, jl]
-        a_i_cat = pa_i[:, :, jl]
-        a_ip_cat = pa_ip[:, :, jl]
-        v_ip_cat = pv_ip[:, :, jl]
-        sv_i_cat = psv_i[:, :, jl]
-        e_s_cat = pe_s[:, :, :, jl]
-        e_i_cat = pe_i[:, :, :, jl]
-        szv_i_cat = pszv_i[:, :, :, jl]
-
-        has_ice = active_2d & (v_i_cat > _SI3_PRA_ZERO) & (a_i_cat > _SI3_PRA_ZERO)
-
-        # -- check h_ip (`icedyn_adv_pra.f90:1004-1009`) --
-        pnd_cond = has_ice & (
-            bool(ln_pnd_LEV) | (bool(ln_pnd_TOPO) & (v_ip_cat > _SI3_PRA_ZERO))
-        )
-        denom_ap = jnp.maximum(epsi20, a_ip_cat)
-        zhip = sr(v_ip_cat / denom_ap)
-        cond_hip = (
-            pnd_cond
-            & (zhip > phip_max[:, :, jl])
-            & (a_ip_cat < conc_thresh)
-        )
-        phip_safe = jnp.where(cond_hip, phip_max[:, :, jl], _SI3_PRA_ONE)
-        a_ip_cat = jnp.where(cond_hip, sr(v_ip_cat / phip_safe), a_ip_cat)
-
-        # -- check h_i (`icedyn_adv_pra.f90:1013-1016`) --
-        a_i_safe = jnp.where(has_ice, a_i_cat, _SI3_PRA_ONE)
-        zhi = jnp.where(has_ice, sr(v_i_cat / a_i_safe), _SI3_PRA_ZERO)
-        cond_hi = (
-            has_ice
-            & (zhi > phi_max[:, :, jl])
-            & (a_i_cat < conc_thresh)
-        )
-        phi_cap = jnp.minimum(phi_max[:, :, jl], hi_max_val)
-        phi_cap_safe = jnp.where(cond_hi, phi_cap, _SI3_PRA_ONE)
-        a_i_cat = jnp.where(cond_hi, sr(v_i_cat / phi_cap_safe), a_i_cat)
-
-        # -- check h_s (`icedyn_adv_pra.f90:1020-1029`) --
-        a_i_safe2 = jnp.where(has_ice, a_i_cat, _SI3_PRA_ONE)
-        zhs = jnp.where(has_ice, sr(v_s_cat / a_i_safe2), _SI3_PRA_ZERO)
-        cond_hs = (
-            has_ice
-            & (v_s_cat > _SI3_PRA_ZERO)
-            & (zhs > phs_max[:, :, jl])
-            & (a_i_cat < conc_thresh)
-        )
-        zfra_hs = sr(phs_max[:, :, jl] / jnp.maximum(zhs, epsi20))
-        v_s_target = sr(a_i_cat * phs_max[:, :, jl])
-        wfx_hs = sr(sr(sr(v_s_cat - v_s_target) * rhos_f) * z1_dt)
-        sum_es = _seq_sum_axis(e_s_cat, axis=2)
-        hfx_hs = sr(sr(sum_es * sr(_SI3_PRA_ONE - zfra_hs)) * z1_dt)
-        zwfx_res = jnp.where(cond_hs, sr(zwfx_res + wfx_hs), zwfx_res)
-        zhfx_res = jnp.where(cond_hs, sr(zhfx_res - hfx_hs), zhfx_res)
-        e_s_cat = jnp.where(
-            cond_hs[..., None],
-            sr(e_s_cat * zfra_hs[..., None]),
-            e_s_cat,
-        )
-        v_s_cat = jnp.where(cond_hs, v_s_target, v_s_cat)
-
-        # -- check s_i (`icedyn_adv_pra.f90:1035-1060`) --
-        has_ice_post = active_2d & (v_i_cat > _SI3_PRA_ZERO) & (a_i_cat > _SI3_PRA_ZERO)
-        v_i_safe = jnp.where(has_ice_post, v_i_cat, _SI3_PRA_ONE)
-        if nn_icesal == 4:
-            szv_layers = []
-            for jk in range(nlay_i):
-                szv_jk = szv_i_cat[:, :, jk]
-                zsi = jnp.where(has_ice_post, sr(szv_jk / v_i_safe), _SI3_PRA_ZERO)
-                cond_si = (
-                    has_ice_post
-                    & (zsi > pszi_max[:, :, jk, jl])
-                    & (a_i_cat < conc_thresh)
-                )
-                zsi_safe = jnp.where(cond_si, zsi, _SI3_PRA_ONE)
-                zfra_si = sr(pszi_max[:, :, jk, jl] / zsi_safe)
-                sfx_inc = sr(
-                    sr(sr(szv_jk * sr(_SI3_PRA_ONE - zfra_si)) * rhoi_f) * z1_dt
-                )
-                zsfx_res = jnp.where(cond_si, sr(zsfx_res + sfx_inc), zsfx_res)
-                szv_layers.append(jnp.where(cond_si, sr(szv_jk * zfra_si), szv_jk))
-            szv_i_cat = jnp.stack(szv_layers, axis=2)
-        else:
-            zsi = jnp.where(has_ice_post, sr(sv_i_cat / v_i_safe), _SI3_PRA_ZERO)
-            cond_si = (
-                has_ice_post
-                & (zsi > psi_max[:, :, jl])
-                & (a_i_cat < conc_thresh)
-            )
-            zsi_safe = jnp.where(cond_si, zsi, _SI3_PRA_ONE)
-            zfra_si = sr(psi_max[:, :, jl] / zsi_safe)
-            sfx_inc = sr(
-                sr(sr(sv_i_cat * sr(_SI3_PRA_ONE - zfra_si)) * rhoi_f) * z1_dt
-            )
-            zsfx_res = jnp.where(cond_si, sr(zsfx_res + sfx_inc), zsfx_res)
-            sv_i_cat = jnp.where(cond_si, sr(sv_i_cat * zfra_si), sv_i_cat)
-
-        # -- check e_i/v_i (`icedyn_adv_pra.f90:1062-1072`) --
-        ei_layers = []
-        for jk in range(nlay_i):
-            ei_jk = e_i_cat[:, :, jk]
-            zei = jnp.where(has_ice_post, sr(ei_jk / v_i_safe), _SI3_PRA_ZERO)
-            cond_ei = (
-                has_ice_post
-                & (zei > pei_max[:, :, jk, jl])
-                & (a_i_cat < conc_thresh)
-            )
-            zei_safe = jnp.where(cond_ei, zei, _SI3_PRA_ONE)
-            zfra_ei = sr(pei_max[:, :, jk, jl] / zei_safe)
-            hfx_inc = sr(sr(ei_jk * sr(_SI3_PRA_ONE - zfra_ei)) * z1_dt)
-            zhfx_res = jnp.where(cond_ei, sr(zhfx_res - hfx_inc), zhfx_res)
-            ei_layers.append(jnp.where(cond_ei, sr(ei_jk * zfra_ei), ei_jk))
-        e_i_cat = jnp.stack(ei_layers, axis=2)
-
-        # -- check e_s/v_s (`icedyn_adv_pra.f90:1074-1084`) --
-        has_snw_post = active_2d & (v_s_cat > _SI3_PRA_ZERO) & (a_i_cat > _SI3_PRA_ZERO)
-        v_s_safe = jnp.where(has_snw_post, v_s_cat, _SI3_PRA_ONE)
-        es_layers = []
-        for jk in range(nlay_s):
-            es_jk = e_s_cat[:, :, jk]
-            zes = jnp.where(has_snw_post, sr(es_jk / v_s_safe), _SI3_PRA_ZERO)
-            cond_es = (
-                has_snw_post
-                & (zes > pes_max[:, :, jk, jl])
-                & (a_i_cat < conc_thresh)
-            )
-            zes_safe = jnp.where(cond_es, zes, _SI3_PRA_ONE)
-            zfra_es = sr(pes_max[:, :, jk, jl] / zes_safe)
-            hfx_inc = sr(sr(es_jk * sr(_SI3_PRA_ONE - zfra_es)) * z1_dt)
-            zhfx_res = jnp.where(cond_es, sr(zhfx_res - hfx_inc), zhfx_res)
-            es_layers.append(jnp.where(cond_es, sr(es_jk * zfra_es), es_jk))
-        e_s_cat = jnp.stack(es_layers, axis=2)
-
-        pv_s = pv_s.at[:, :, jl].set(v_s_cat)
-        pa_i = pa_i.at[:, :, jl].set(a_i_cat)
-        pa_ip = pa_ip.at[:, :, jl].set(a_ip_cat)
-        psv_i = psv_i.at[:, :, jl].set(sv_i_cat)
-        pe_s = pe_s.at[:, :, :, jl].set(e_s_cat)
-        pe_i = pe_i.at[:, :, :, jl].set(e_i_cat)
-        pszv_i = pszv_i.at[:, :, :, jl].set(szv_i_cat)
-
-        wfx_res = jnp.where(interior_2d, sr(wfx_res + zwfx_res), wfx_res)
-        hfx_res = jnp.where(interior_2d, sr(hfx_res + zhfx_res), hfx_res)
-        sfx_res = jnp.where(interior_2d, sr(sfx_res + zsfx_res), sfx_res)
+        wfx_res = jnp.where(interior_2d, wfx_res + zwfx_all[:, :, jl], wfx_res)
+        hfx_res = jnp.where(interior_2d, hfx_res + zhfx_all[:, :, jl], hfx_res)
+        sfx_res = jnp.where(interior_2d, sfx_res + zsfx_all[:, :, jl], sfx_res)
 
     if single_cat:
         return (
@@ -3294,10 +2734,13 @@ def si3_hsnow_pra(
     wfx_res: jnp.ndarray,
     hfx_res: jnp.ndarray,
     *,
-    nn_hls: int = 2,
-    rho0: float = constants.rho_ocean_nemo,
-    rhoi: float = constants.rho_ice,
-    rhos: float = constants.rho_snow,
+    nn_hls: int,
+    rho0: float,
+    rhoi: float,
+    rhos: float,
+    use_reciprocal_rhos: bool,
+    extensive_area: float | jnp.ndarray | None,
+    _return_cat_residuals: bool = False,
 ) -> tuple[
     jnp.ndarray,
     jnp.ndarray,
@@ -3321,56 +2764,98 @@ def si3_hsnow_pra(
     dtype = pv_i.dtype
     active_2d = _si3_active_mask_2d(jpi, jpj, nn_hls, ihls)
     interior_2d = _si3_active_mask_2d(jpi, jpj, nn_hls, 0)
-    z1_dt = sr(_SI3_PRA_ONE / jnp.asarray(pdt, dtype=dtype))
+    z1_dt = _SI3_PRA_ONE / jnp.asarray(pdt, dtype=dtype)
     rho0_f = jnp.asarray(rho0, dtype=dtype)
     rhoi_f = jnp.asarray(rhoi, dtype=dtype)
     rhos_f = jnp.asarray(rhos, dtype=dtype)
-    r1_rhos = sr(_SI3_PRA_ONE / rhos_f)
-    drho = sr(rho0_f - rhoi_f)
+    r1_rhos = _SI3_PRA_ONE / rhos_f
+    drho = rho0_f - rhoi_f
     epsi20 = jnp.asarray(_SI3_PRA_AREA_FLOOR, dtype=dtype)
+    use_ext = extensive_area is not None
+    ext_area_f = jnp.asarray(extensive_area if use_ext else _SI3_PRA_ONE, dtype=dtype)
+    if use_ext and ext_area_f.ndim == 2:
+        ext_3d = ext_area_f[:, :, None]
+        ext_4d = ext_area_f[:, :, None, None]
+    else:
+        ext_3d = ext_area_f
+        ext_4d = ext_area_f
+
+    def _to_int3(arr: jnp.ndarray) -> jnp.ndarray:
+        return arr / ext_3d if use_ext else arr
+
+    def _to_ext3(arr: jnp.ndarray) -> jnp.ndarray:
+        return arr * ext_3d if use_ext else arr
+
+    def _to_int4(arr: jnp.ndarray) -> jnp.ndarray:
+        return arr / ext_4d if use_ext else arr
+
+    def _to_ext4(arr: jnp.ndarray) -> jnp.ndarray:
+        return arr * ext_4d if use_ext else arr
+
+    active_3d = active_2d[:, :, None]
+    v_i_cat = _to_int3(pv_i)
+    v_s_cat = _to_int3(pv_s)
+    a_i_cat = _to_int3(pa_i)
+
+    has_ice = active_3d & (v_i_cat > _SI3_PRA_ZERO)
+    buoy_cap = (
+        sr(sr(v_i_cat * drho) * r1_rhos)
+        if use_reciprocal_rhos
+        else (v_i_cat * drho) / rhos_f
+    )
+    zvs_excess = jnp.where(
+        has_ice,
+        jnp.maximum(_SI3_PRA_ZERO, v_s_cat - buoy_cap),
+        _SI3_PRA_ZERO,
+    )
+    cond_excess = has_ice & (zvs_excess > _SI3_PRA_ZERO)
+    v_s_rem = v_s_cat - zvs_excess
+    if use_reciprocal_rhos:
+        zfra = v_s_rem / jnp.maximum(v_s_cat, epsi20)
+    else:
+        v_s_pos = v_s_cat > _SI3_PRA_ZERO
+        v_s_safe = jnp.where(v_s_pos, v_s_cat, _SI3_PRA_ONE)
+        zfra = jnp.where(v_s_pos, v_s_rem / v_s_safe, _SI3_PRA_ONE)
+    wfx_inc = sr((zvs_excess * rhos_f) * z1_dt)
+    e_s_int = _to_int4(pe_s)
+    sum_es = _seq_sum_axis(e_s_int, axis=2)
+    hfx_inc = sr((sum_es * (_SI3_PRA_ONE - zfra)) * z1_dt)
+    zwfx_all = jnp.where(cond_excess, wfx_inc, _SI3_PRA_ZERO)
+    zhfx_all = jnp.where(cond_excess, -hfx_inc, _SI3_PRA_ZERO)
+    pv_s = jnp.where(cond_excess, _to_ext3(v_s_rem), pv_s)
+    pe_s = jnp.where(
+        cond_excess[:, :, None, :],
+        _to_ext4(e_s_int * zfra[:, :, None, :]),
+        pe_s,
+    )
+    a_ip_cat = _to_int3(pa_ip)
+    if use_ext:
+        pa_ip = jnp.where(
+            active_3d & (a_ip_cat > a_i_cat),
+            pa_i,
+            pa_ip,
+        )
+    else:
+        pa_ip = jnp.where(
+            active_3d,
+            jnp.minimum(a_ip_cat, a_i_cat),
+            pa_ip,
+        )
+
+    if _return_cat_residuals:
+        return (
+            pv_i,
+            pv_s,
+            pa_i,
+            pa_ip,
+            pe_s,
+            zwfx_all,
+            zhfx_all,
+        )
 
     for jl in range(jpl):
-        zwfx_res = jnp.zeros((jpi, jpj), dtype=dtype)
-        zhfx_res = jnp.zeros((jpi, jpj), dtype=dtype)
-        v_i_cat = pv_i[:, :, jl]
-        v_s_cat = pv_s[:, :, jl]
-        a_i_cat = pa_i[:, :, jl]
-        a_ip_cat = pa_ip[:, :, jl]
-        e_s_cat = pe_s[:, :, :, jl]
-
-        has_ice = active_2d & (v_i_cat > _SI3_PRA_ZERO)
-        buoy_cap = sr(sr(v_i_cat * drho) * r1_rhos)
-        zvs_excess = jnp.where(
-            has_ice,
-            jnp.maximum(_SI3_PRA_ZERO, sr(v_s_cat - buoy_cap)),
-            _SI3_PRA_ZERO,
-        )
-        cond_excess = has_ice & (zvs_excess > _SI3_PRA_ZERO)
-        v_s_rem = sr(v_s_cat - zvs_excess)
-        zfra = sr(v_s_rem / jnp.maximum(v_s_cat, epsi20))
-        wfx_inc = sr(sr(zvs_excess * rhos_f) * z1_dt)
-        sum_es = _seq_sum_axis(e_s_cat, axis=2)
-        hfx_inc = sr(sr(sum_es * sr(_SI3_PRA_ONE - zfra)) * z1_dt)
-        zwfx_res = jnp.where(cond_excess, sr(zwfx_res + wfx_inc), zwfx_res)
-        zhfx_res = jnp.where(cond_excess, sr(zhfx_res - hfx_inc), zhfx_res)
-        e_s_cat = jnp.where(
-            cond_excess[..., None],
-            sr(e_s_cat * zfra[..., None]),
-            e_s_cat,
-        )
-        v_s_cat = jnp.where(cond_excess, v_s_rem, v_s_cat)
-        a_ip_cat = jnp.where(
-            active_2d,
-            jnp.minimum(a_ip_cat, a_i_cat),
-            a_ip_cat,
-        )
-
-        pv_s = pv_s.at[:, :, jl].set(v_s_cat)
-        pa_ip = pa_ip.at[:, :, jl].set(a_ip_cat)
-        pe_s = pe_s.at[:, :, :, jl].set(e_s_cat)
-
-        wfx_res = jnp.where(interior_2d, sr(wfx_res + zwfx_res), wfx_res)
-        hfx_res = jnp.where(interior_2d, sr(hfx_res + zhfx_res), hfx_res)
+        wfx_res = jnp.where(interior_2d, wfx_res + zwfx_all[:, :, jl], wfx_res)
+        hfx_res = jnp.where(interior_2d, hfx_res + zhfx_all[:, :, jl], hfx_res)
 
     if single_cat:
         return (
@@ -3382,7 +2867,15 @@ def si3_hsnow_pra(
             wfx_res,
             hfx_res,
         )
-    return pv_i, pv_s, pa_i, pa_ip, pe_s, wfx_res, hfx_res
+    return (
+        pv_i,
+        pv_s,
+        pa_i,
+        pa_ip,
+        pe_s,
+        wfx_res,
+        hfx_res,
+    )
 
 
 def si3_var_zapneg(
@@ -3403,11 +2896,11 @@ def si3_var_zapneg(
     hfx_res: jnp.ndarray,
     sfx_res: jnp.ndarray,
     *,
-    nn_hls: int = 2,
-    nn_icesal: int = 4,
-    rhoi: float = constants.rho_ice,
-    rhos: float = constants.rho_snow,
-    rhow: float = constants.rho_water,
+    nn_hls: int,
+    nn_icesal: int,
+    rhoi: float,
+    rhos: float,
+    rhow: float,
 ) -> tuple[
     jnp.ndarray,
     jnp.ndarray,
@@ -3426,13 +2919,27 @@ def si3_var_zapneg(
 ]:
     """Execute NEMO SI3 `ice_var_zapneg` (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icevar.f90:740-853`)."""
     sr = nemo_source_round
+    single_cat = pv_i.ndim == 2
+    if single_cat:
+        pv_i = pv_i[..., None]
+        pv_s = pv_s[..., None]
+        psv_i = psv_i[..., None]
+        poa_i = poa_i[..., None]
+        pa_i = pa_i[..., None]
+        pa_ip = pa_ip[..., None]
+        pv_ip = pv_ip[..., None]
+        pv_il = pv_il[..., None]
+        pe_s = pe_s[..., None]
+        pe_i = pe_i[..., None]
+        pszv_i = pszv_i[..., None]
+
     jpi, jpj, jpl = pv_i.shape
     nlay_i = pe_i.shape[2]
     nlay_s = pe_s.shape[2]
     dtype = pv_i.dtype
     active_2d = _si3_active_mask_2d(jpi, jpj, nn_hls, ihls)
     interior_2d = _si3_active_mask_2d(jpi, jpj, nn_hls, 0)
-    z1_dt = sr(_SI3_PRA_ONE / jnp.asarray(pdt, dtype=dtype))
+    z1_dt = _SI3_PRA_ONE / jnp.asarray(pdt, dtype=dtype)
     rhoi_f = jnp.asarray(rhoi, dtype=dtype)
     rhos_f = jnp.asarray(rhos, dtype=dtype)
     rhow_f = jnp.asarray(rhow, dtype=dtype)
@@ -3446,123 +2953,106 @@ def si3_var_zapneg(
 
     # 1. Salt zapping (`icevar.f90:779-797`)
     if nn_icesal == 4:
+        zap_salt = active_2d[:, :, None, None] & (
+            (pszv_i < _SI3_PRA_ZERO)
+            | (pa_i[:, :, None, :] <= _SI3_PRA_ZERO)
+            | (pv_i[:, :, None, :] <= _SI3_PRA_ZERO)
+        )
+        sfx_inc_all = jnp.where(
+            zap_salt, sr((pszv_i * rhoi_f) * z1_dt), _SI3_PRA_ZERO
+        )
         for jl in range(jpl):
-            a_i_cat = pa_i[:, :, jl]
-            v_i_cat = pv_i[:, :, jl]
             for jk in range(nlay_i):
-                szv_jk = pszv_i[:, :, jk, jl]
-                zap_salt = active_2d & (
-                    (szv_jk < _SI3_PRA_ZERO)
-                    | (a_i_cat <= _SI3_PRA_ZERO)
-                    | (v_i_cat <= _SI3_PRA_ZERO)
-                )
-                sfx_inc = sr(sr(szv_jk * rhoi_f) * z1_dt)
-                zsfx_res = jnp.where(zap_salt, sr(zsfx_res + sfx_inc), zsfx_res)
-                pszv_i = pszv_i.at[:, :, jk, jl].set(
-                    jnp.where(zap_salt, _SI3_PRA_ZERO, szv_jk)
-                )
+                zsfx_res = zsfx_res + sfx_inc_all[:, :, jk, jl]
+        pszv_i = jnp.where(zap_salt, _SI3_PRA_ZERO, pszv_i)
     else:
+        zap_salt = active_2d[:, :, None] & (
+            (psv_i < _SI3_PRA_ZERO)
+            | (pa_i <= _SI3_PRA_ZERO)
+            | (pv_i <= _SI3_PRA_ZERO)
+        )
+        sfx_inc_all = jnp.where(
+            zap_salt, sr((psv_i * rhoi_f) * z1_dt), _SI3_PRA_ZERO
+        )
         for jl in range(jpl):
-            a_i_cat = pa_i[:, :, jl]
-            v_i_cat = pv_i[:, :, jl]
-            sv_cat = psv_i[:, :, jl]
-            zap_salt = active_2d & (
-                (sv_cat < _SI3_PRA_ZERO)
-                | (a_i_cat <= _SI3_PRA_ZERO)
-                | (v_i_cat <= _SI3_PRA_ZERO)
-            )
-            sfx_inc = sr(sr(sv_cat * rhoi_f) * z1_dt)
-            zsfx_res = jnp.where(zap_salt, sr(zsfx_res + sfx_inc), zsfx_res)
-            psv_i = psv_i.at[:, :, jl].set(
-                jnp.where(zap_salt, _SI3_PRA_ZERO, sv_cat)
-            )
+            zsfx_res = zsfx_res + sfx_inc_all[:, :, jl]
+        psv_i = jnp.where(zap_salt, _SI3_PRA_ZERO, psv_i)
 
     # 2. Energy zapping (`icevar.f90:802-816`: per category `jl`, `pe_i` then `pe_s`)
+    zap_ei = active_2d[:, :, None, None] & (
+        (pe_i < _SI3_PRA_ZERO)
+        | (pa_i[:, :, None, :] <= _SI3_PRA_ZERO)
+        | (pv_i[:, :, None, :] <= _SI3_PRA_ZERO)
+    )
+    hfx_ei_all = jnp.where(zap_ei, sr(pe_i * z1_dt), _SI3_PRA_ZERO)
+    zap_es = active_2d[:, :, None, None] & (
+        (pe_s < _SI3_PRA_ZERO)
+        | (pa_i[:, :, None, :] <= _SI3_PRA_ZERO)
+        | (pv_s[:, :, None, :] <= _SI3_PRA_ZERO)
+    )
+    hfx_es_all = jnp.where(zap_es, sr(pe_s * z1_dt), _SI3_PRA_ZERO)
     for jl in range(jpl):
-        a_i_cat = pa_i[:, :, jl]
-        v_i_cat = pv_i[:, :, jl]
-        v_s_cat = pv_s[:, :, jl]
         for jk in range(nlay_i):
-            ei_jk = pe_i[:, :, jk, jl]
-            zap_ei = active_2d & (
-                (ei_jk < _SI3_PRA_ZERO)
-                | (a_i_cat <= _SI3_PRA_ZERO)
-                | (v_i_cat <= _SI3_PRA_ZERO)
-            )
-            hfx_inc = sr(ei_jk * z1_dt)
-            zhfx_res = jnp.where(zap_ei, sr(zhfx_res - hfx_inc), zhfx_res)
-            pe_i = pe_i.at[:, :, jk, jl].set(
-                jnp.where(zap_ei, _SI3_PRA_ZERO, ei_jk)
-            )
+            zhfx_res = zhfx_res - hfx_ei_all[:, :, jk, jl]
         for jk in range(nlay_s):
-            es_jk = pe_s[:, :, jk, jl]
-            zap_es = active_2d & (
-                (es_jk < _SI3_PRA_ZERO)
-                | (a_i_cat <= _SI3_PRA_ZERO)
-                | (v_s_cat <= _SI3_PRA_ZERO)
-            )
-            hfx_inc = sr(es_jk * z1_dt)
-            zhfx_res = jnp.where(zap_es, sr(zhfx_res - hfx_inc), zhfx_res)
-            pe_s = pe_s.at[:, :, jk, jl].set(
-                jnp.where(zap_es, _SI3_PRA_ZERO, es_jk)
-            )
+            zhfx_res = zhfx_res - hfx_es_all[:, :, jk, jl]
+    pe_i = jnp.where(zap_ei, _SI3_PRA_ZERO, pe_i)
+    pe_s = jnp.where(zap_es, _SI3_PRA_ZERO, pe_s)
 
     # 3. Volume zapping (`icevar.f90:821-840`: `pv_il` tested before `pv_ip` is zeroed)
+    zap_vi = active_2d[:, :, None] & (
+        (pv_i < _SI3_PRA_ZERO) | (pa_i <= _SI3_PRA_ZERO)
+    )
+    zap_vs = active_2d[:, :, None] & (
+        (pv_s < _SI3_PRA_ZERO) | (pa_i <= _SI3_PRA_ZERO)
+    )
+    zap_vil = active_2d[:, :, None] & (
+        (pv_ip < _SI3_PRA_ZERO)
+        | (pv_il < _SI3_PRA_ZERO)
+        | (pa_ip <= _SI3_PRA_ZERO)
+    )
+    zap_vip = active_2d[:, :, None] & (
+        (pv_ip < _SI3_PRA_ZERO) | (pa_ip <= _SI3_PRA_ZERO)
+    )
+    wfx_vi_all = jnp.where(zap_vi, sr((pv_i * rhoi_f) * z1_dt), _SI3_PRA_ZERO)
+    wfx_vs_all = jnp.where(zap_vs, sr((pv_s * rhos_f) * z1_dt), _SI3_PRA_ZERO)
+    wfx_vil_all = jnp.where(zap_vil, sr((pv_il * rhow_f) * z1_dt), _SI3_PRA_ZERO)
+    wfx_vip_all = jnp.where(zap_vip, sr((pv_ip * rhow_f) * z1_dt), _SI3_PRA_ZERO)
     for jl in range(jpl):
-        a_i_cat = pa_i[:, :, jl]
-        v_i_cat = pv_i[:, :, jl]
-        v_s_cat = pv_s[:, :, jl]
-        a_ip_cat = pa_ip[:, :, jl]
-        v_ip_cat = pv_ip[:, :, jl]
-        v_il_cat = pv_il[:, :, jl]
+        zwfx_res = zwfx_res + wfx_vi_all[:, :, jl]
+        zwfx_res = zwfx_res + wfx_vs_all[:, :, jl]
+        zwfx_res = zwfx_res + wfx_vil_all[:, :, jl]
+        zwfx_res = zwfx_res + wfx_vip_all[:, :, jl]
+    pv_i = jnp.where(zap_vi, _SI3_PRA_ZERO, pv_i)
+    pv_s = jnp.where(zap_vs, _SI3_PRA_ZERO, pv_s)
+    pv_il = jnp.where(zap_vil, _SI3_PRA_ZERO, pv_il)
+    pv_ip = jnp.where(zap_vip, _SI3_PRA_ZERO, pv_ip)
 
-        zap_vi = active_2d & (
-            (v_i_cat < _SI3_PRA_ZERO) | (a_i_cat <= _SI3_PRA_ZERO)
-        )
-        zwfx_res = jnp.where(
-            zap_vi, sr(zwfx_res + sr(sr(v_i_cat * rhoi_f) * z1_dt)), zwfx_res
-        )
-        v_i_cat = jnp.where(zap_vi, _SI3_PRA_ZERO, v_i_cat)
-
-        zap_vs = active_2d & (
-            (v_s_cat < _SI3_PRA_ZERO) | (a_i_cat <= _SI3_PRA_ZERO)
-        )
-        zwfx_res = jnp.where(
-            zap_vs, sr(zwfx_res + sr(sr(v_s_cat * rhos_f) * z1_dt)), zwfx_res
-        )
-        v_s_cat = jnp.where(zap_vs, _SI3_PRA_ZERO, v_s_cat)
-
-        zap_vil = active_2d & (
-            (v_ip_cat < _SI3_PRA_ZERO)
-            | (v_il_cat < _SI3_PRA_ZERO)
-            | (a_ip_cat <= _SI3_PRA_ZERO)
-        )
-        zwfx_res = jnp.where(
-            zap_vil, sr(zwfx_res + sr(sr(v_il_cat * rhow_f) * z1_dt)), zwfx_res
-        )
-        v_il_cat = jnp.where(zap_vil, _SI3_PRA_ZERO, v_il_cat)
-
-        zap_vip = active_2d & (
-            (v_ip_cat < _SI3_PRA_ZERO) | (a_ip_cat <= _SI3_PRA_ZERO)
-        )
-        zwfx_res = jnp.where(
-            zap_vip, sr(zwfx_res + sr(sr(v_ip_cat * rhow_f) * z1_dt)), zwfx_res
-        )
-        v_ip_cat = jnp.where(zap_vip, _SI3_PRA_ZERO, v_ip_cat)
-
-        pv_i = pv_i.at[:, :, jl].set(v_i_cat)
-        pv_s = pv_s.at[:, :, jl].set(v_s_cat)
-        pv_il = pv_il.at[:, :, jl].set(v_il_cat)
-        pv_ip = pv_ip.at[:, :, jl].set(v_ip_cat)
-
-    wfx_res = jnp.where(interior_2d, sr(wfx_res + zwfx_res), wfx_res)
-    hfx_res = jnp.where(interior_2d, sr(hfx_res + zhfx_res), hfx_res)
-    sfx_res = jnp.where(interior_2d, sr(sfx_res + zsfx_res), sfx_res)
+    wfx_res = jnp.where(interior_2d, wfx_res + zwfx_res, wfx_res)
+    hfx_res = jnp.where(interior_2d, hfx_res + zhfx_res, hfx_res)
+    sfx_res = jnp.where(interior_2d, sfx_res + zsfx_res, sfx_res)
 
     poa_i = jnp.where(poa_i < _SI3_PRA_ZERO, _SI3_PRA_ZERO, poa_i)
     pa_i = jnp.where(pa_i < _SI3_PRA_ZERO, _SI3_PRA_ZERO, pa_i)
     pa_ip = jnp.where(pa_ip < _SI3_PRA_ZERO, _SI3_PRA_ZERO, pa_ip)
 
+    if single_cat:
+        return (
+            pv_i[..., 0],
+            pv_s[..., 0],
+            psv_i[..., 0],
+            poa_i[..., 0],
+            pa_i[..., 0],
+            pa_ip[..., 0],
+            pv_ip[..., 0],
+            pv_il[..., 0],
+            pe_s[..., 0],
+            pe_i[..., 0],
+            pszv_i[..., 0],
+            wfx_res,
+            hfx_res,
+            sfx_res,
+        )
     return (
         pv_i,
         pv_s,
@@ -3581,8 +3071,27 @@ def si3_var_zapneg(
     )
 
 
-_SI3_ZAPSMALL_RN_SIMIN_DEFAULT = 0.1
-_SI3_ZAPSMALL_RN_SINEW_DEFAULT = 0.75
+def si3_zapsmall_mask(
+    v_i: jnp.ndarray,
+    a_i: jnp.ndarray,
+    *,
+    nn_hls: int,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Compute SI3's `zsmall < epsi10` mask and recovered `h_i` (`icevar.f90:625-631`)."""
+    sr = nemo_source_round
+    epsi10 = jnp.asarray(_SI3_PRA_ICE_PRESENCE, dtype=v_i.dtype)
+    a_gt_eps = a_i > epsi10
+    a_safe = jnp.where(a_gt_eps, a_i, _SI3_PRA_ONE)
+    h_i_int = jnp.where(a_gt_eps, sr(v_i / a_safe), _SI3_PRA_ZERO)
+    zsmall = jnp.minimum(jnp.minimum(a_i, v_i), h_i_int)
+    zap_mask = zsmall < epsi10
+    if nn_hls > 0:
+        jpi, jpj = v_i.shape[:2]
+        interior = _si3_active_mask_2d(jpi, jpj, nn_hls, 0)
+        for _ in range(v_i.ndim - 2):
+            interior = interior[..., None]
+        zap_mask = interior & zap_mask
+    return zap_mask, h_i_int
 
 
 def si3_var_zapsmall(
@@ -3613,16 +3122,16 @@ def si3_var_zapsmall(
     sfx_res: jnp.ndarray,
     *,
     rDt_ice: float | jnp.ndarray,
-    sss_m: jnp.ndarray | float = _SI3_PRA_ZERO,
-    sst_m: jnp.ndarray | float = _SI3_PRA_ZERO,
-    nn_hls: int = 2,
-    nn_icesal: int = 4,
-    rn_simin: float = _SI3_ZAPSMALL_RN_SIMIN_DEFAULT,
-    rn_sinew: float = _SI3_ZAPSMALL_RN_SINEW_DEFAULT,
-    rt0: float = constants.T_freeze,
-    rhoi: float = constants.rho_ice,
-    rhos: float = constants.rho_snow,
-    rhow: float = constants.rho_water,
+    sss_m: jnp.ndarray | float,
+    sst_m: jnp.ndarray | float,
+    nn_hls: int,
+    nn_icesal: int,
+    rn_simin: float,
+    rn_sinew: float,
+    rt0: float,
+    rhoi: float,
+    rhos: float,
+    rhow: float,
 ) -> tuple[
     jnp.ndarray,
     jnp.ndarray,
@@ -3651,6 +3160,10 @@ def si3_var_zapsmall(
     jnp.ndarray,
 ]:
     """Execute NEMO SI3 `ice_var_zapsmall` (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icevar.f90:615-737`)."""
+    if sss_m is None:
+        raise ValueError("si3_var_zapsmall requires explicit sss_m (None is not permitted)")
+    if sst_m is None:
+        raise ValueError("si3_var_zapsmall requires explicit sst_m (None is not permitted)")
     sr = nemo_source_round
     jpi, jpj, jpl = v_i.shape
     nlay_i = e_i.shape[2]
@@ -3659,7 +3172,6 @@ def si3_var_zapsmall(
     interior_2d = _si3_active_mask_2d(jpi, jpj, nn_hls, 0)
     interior_3d = interior_2d[..., None]
     r1_Dt_ice = sr(_SI3_PRA_ONE / jnp.asarray(rDt_ice, dtype=dtype))
-    epsi10 = jnp.asarray(_SI3_PRA_ICE_PRESENCE, dtype=dtype)
     rhoi_f = jnp.asarray(rhoi, dtype=dtype)
     rhos_f = jnp.asarray(rhos, dtype=dtype)
     rhow_f = jnp.asarray(rhow, dtype=dtype)
@@ -3672,90 +3184,70 @@ def si3_var_zapsmall(
     )
 
     # `WHERE( a_i(A2D(0),:) > epsi10 ) h_i = v_i / a_i ELSEWHERE h_i = 0._wp` (`icevar.f90:625-627`)
-    a_gt_eps = a_i > epsi10
-    a_safe = jnp.where(a_gt_eps, a_i, _SI3_PRA_ONE)
-    h_i_int = jnp.where(a_gt_eps, sr(v_i / a_safe), _SI3_PRA_ZERO)
+    zap_mask, h_i_int = si3_zapsmall_mask(v_i, a_i, nn_hls=nn_hls)
     h_i = jnp.where(interior_3d, h_i_int, h_i)
 
-    zsmall = jnp.minimum(jnp.minimum(a_i, v_i), h_i)
-    zap_mask = interior_3d & (zsmall < epsi10)
+    zap_mask_4d = zap_mask[:, :, None, :]
 
     # 1. Zap salt (`icevar.f90:632-659`)
     if nn_icesal == 4:
+        sfx_inc_all = jnp.where(
+            zap_mask_4d, sr((szv_i * rhoi_f) * r1_Dt_ice), _SI3_PRA_ZERO
+        )
         for jl in range(jpl):
-            zap_cat = zap_mask[:, :, jl]
             for jk in range(nlay_i):
-                szv_jk = szv_i[:, :, jk, jl]
-                sfx_inc = sr(sr(szv_jk * rhoi_f) * r1_Dt_ice)
-                sfx_res = jnp.where(zap_cat, sr(sfx_res + sfx_inc), sfx_res)
-                szv_i = szv_i.at[:, :, jk, jl].set(
-                    jnp.where(zap_cat, _SI3_PRA_ZERO, szv_jk)
-                )
-                sz_i = sz_i.at[:, :, jk, jl].set(
-                    jnp.where(zap_cat, s_new_ice, sz_i[:, :, jk, jl])
-                )
+                sfx_res = sfx_res + sfx_inc_all[:, :, jk, jl]
+        szv_i = jnp.where(zap_mask_4d, _SI3_PRA_ZERO, szv_i)
+        sz_i = jnp.where(zap_mask_4d, s_new_ice[:, :, None, None], sz_i)
     else:
+        sfx_inc_all = jnp.where(
+            zap_mask, sr((sv_i * rhoi_f) * r1_Dt_ice), _SI3_PRA_ZERO
+        )
         for jl in range(jpl):
-            zap_cat = zap_mask[:, :, jl]
-            sv_cat = sv_i[:, :, jl]
-            sfx_inc = sr(sr(sv_cat * rhoi_f) * r1_Dt_ice)
-            sfx_res = jnp.where(zap_cat, sr(sfx_res + sfx_inc), sfx_res)
-            sv_i = sv_i.at[:, :, jl].set(
-                jnp.where(zap_cat, _SI3_PRA_ZERO, sv_cat)
-            )
+            sfx_res = sfx_res + sfx_inc_all[:, :, jl]
+        sv_i = jnp.where(zap_mask, _SI3_PRA_ZERO, sv_i)
 
     # 2. Zap ice energy (`icevar.f90:664-676`)
+    hfx_ei_all = jnp.where(zap_mask_4d, sr(e_i * r1_Dt_ice), _SI3_PRA_ZERO)
     for jl in range(jpl):
-        zap_cat = zap_mask[:, :, jl]
         for jk in range(nlay_i):
-            ei_jk = e_i[:, :, jk, jl]
-            hfx_inc = sr(ei_jk * r1_Dt_ice)
-            hfx_res = jnp.where(zap_cat, sr(hfx_res - hfx_inc), hfx_res)
-            e_i = e_i.at[:, :, jk, jl].set(
-                jnp.where(zap_cat, _SI3_PRA_ZERO, ei_jk)
-            )
-            t_i = t_i.at[:, :, jk, jl].set(
-                jnp.where(zap_cat, rt0_f, t_i[:, :, jk, jl])
-            )
+            hfx_res = hfx_res - hfx_ei_all[:, :, jk, jl]
+    e_i = jnp.where(zap_mask_4d, _SI3_PRA_ZERO, e_i)
+    t_i = jnp.where(zap_mask_4d, rt0_f, t_i)
 
     # 3. Zap snow energy (`icevar.f90:678-690`)
+    hfx_es_all = jnp.where(zap_mask_4d, sr(e_s * r1_Dt_ice), _SI3_PRA_ZERO)
     for jl in range(jpl):
-        zap_cat = zap_mask[:, :, jl]
         for jk in range(nlay_s):
-            es_jk = e_s[:, :, jk, jl]
-            hfx_inc = sr(es_jk * r1_Dt_ice)
-            hfx_res = jnp.where(zap_cat, sr(hfx_res - hfx_inc), hfx_res)
-            e_s = e_s.at[:, :, jk, jl].set(
-                jnp.where(zap_cat, _SI3_PRA_ZERO, es_jk)
-            )
-            t_s = t_s.at[:, :, jk, jl].set(
-                jnp.where(zap_cat, rt0_f, t_s[:, :, jk, jl])
-            )
+            hfx_res = hfx_res - hfx_es_all[:, :, jk, jl]
+    e_s = jnp.where(zap_mask_4d, _SI3_PRA_ZERO, e_s)
+    t_s = jnp.where(zap_mask_4d, rt0_f, t_s)
 
     # 4. Zap ice/snow/pond volumes (`icevar.f90:695-722`)
     t_su_zap = sr(sst_2d + rt0_f)
+    wfx_1_all = sr((v_i * rhoi_f) * r1_Dt_ice)
+    wfx_2_all = sr((v_s * rhos_f) * r1_Dt_ice)
+    wfx_3_all = sr(((v_ip + v_il) * rhow_f) * r1_Dt_ice)
     for jl in range(jpl):
         zap_cat = zap_mask[:, :, jl]
-        wfx_1 = sr(sr(v_i[:, :, jl] * rhoi_f) * r1_Dt_ice)
-        wfx_2 = sr(sr(v_s[:, :, jl] * rhos_f) * r1_Dt_ice)
-        wfx_3 = sr(
-            sr(sr(v_ip[:, :, jl] + v_il[:, :, jl]) * rhow_f) * r1_Dt_ice
+        wfx_upd = (
+            ((wfx_res + wfx_1_all[:, :, jl]) + wfx_2_all[:, :, jl])
+            + wfx_3_all[:, :, jl]
         )
-        wfx_upd = sr(sr(sr(wfx_res + wfx_1) + wfx_2) + wfx_3)
         wfx_res = jnp.where(zap_cat, wfx_upd, wfx_res)
 
-        a_i = a_i.at[:, :, jl].set(jnp.where(zap_cat, _SI3_PRA_ZERO, a_i[:, :, jl]))
-        v_i = v_i.at[:, :, jl].set(jnp.where(zap_cat, _SI3_PRA_ZERO, v_i[:, :, jl]))
-        v_s = v_s.at[:, :, jl].set(jnp.where(zap_cat, _SI3_PRA_ZERO, v_s[:, :, jl]))
-        t_su = t_su.at[:, :, jl].set(jnp.where(zap_cat, t_su_zap, t_su[:, :, jl]))
-        oa_i = oa_i.at[:, :, jl].set(jnp.where(zap_cat, _SI3_PRA_ZERO, oa_i[:, :, jl]))
-        h_i = h_i.at[:, :, jl].set(jnp.where(zap_cat, _SI3_PRA_ZERO, h_i[:, :, jl]))
-        h_s = h_s.at[:, :, jl].set(jnp.where(zap_cat, _SI3_PRA_ZERO, h_s[:, :, jl]))
-        a_ip = a_ip.at[:, :, jl].set(jnp.where(zap_cat, _SI3_PRA_ZERO, a_ip[:, :, jl]))
-        v_ip = v_ip.at[:, :, jl].set(jnp.where(zap_cat, _SI3_PRA_ZERO, v_ip[:, :, jl]))
-        v_il = v_il.at[:, :, jl].set(jnp.where(zap_cat, _SI3_PRA_ZERO, v_il[:, :, jl]))
-        h_ip = h_ip.at[:, :, jl].set(jnp.where(zap_cat, _SI3_PRA_ZERO, h_ip[:, :, jl]))
-        h_il = h_il.at[:, :, jl].set(jnp.where(zap_cat, _SI3_PRA_ZERO, h_il[:, :, jl]))
+    a_i = jnp.where(zap_mask, _SI3_PRA_ZERO, a_i)
+    v_i = jnp.where(zap_mask, _SI3_PRA_ZERO, v_i)
+    v_s = jnp.where(zap_mask, _SI3_PRA_ZERO, v_s)
+    t_su = jnp.where(zap_mask, t_su_zap[:, :, None], t_su)
+    oa_i = jnp.where(zap_mask, _SI3_PRA_ZERO, oa_i)
+    h_i = jnp.where(zap_mask, _SI3_PRA_ZERO, h_i)
+    h_s = jnp.where(zap_mask, _SI3_PRA_ZERO, h_s)
+    a_ip = jnp.where(zap_mask, _SI3_PRA_ZERO, a_ip)
+    v_ip = jnp.where(zap_mask, _SI3_PRA_ZERO, v_ip)
+    v_il = jnp.where(zap_mask, _SI3_PRA_ZERO, v_il)
+    h_ip = jnp.where(zap_mask, _SI3_PRA_ZERO, h_ip)
+    h_il = jnp.where(zap_mask, _SI3_PRA_ZERO, h_il)
 
     # `at_i(A2D(0)) = SUM(a_i, dim=3)` ; `vt_i(A2D(0)) = SUM(v_i, dim=3)` (`icevar.f90:725-726`)
     at_i_int = _seq_sum_axis(a_i, axis=2)

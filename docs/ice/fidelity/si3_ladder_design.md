@@ -163,7 +163,7 @@ cards.  The aEVP arm hard-codes a two-cell halo and exactly one category
 halos with `mode="wrap"`
 (`packages/ice/legoesm/ice/dynamics.py:809-822`).  The SI3 Prather arm likewise
 implements an ICE_ADV2D bi-periodic halo
-(`packages/ice/legoesm/ice/transport.py:1610-1615`).  Thus neither arm can
+(`packages/ice/legoesm/ice/transport.py:1829-1834`).  Thus neither arm can
 represent ORCA2's cyclic east-west seam plus north fold today.  O4/O5 must
 replace those arm-local periodic assumptions with the existing fold-aware
 geometry operations and extend the carried state to five categories; changing

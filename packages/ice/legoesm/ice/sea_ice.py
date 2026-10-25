@@ -267,9 +267,7 @@ def step_sea_ice(
         # this refusal closes a fail-quiet seam the merge would otherwise have
         # opened.  Routing the liquidus into SI3's bottom boundary is a
         # physics decision for the SI3 lane, not for a merge.
-        if config.thermo_scheme in (
-            "si3_bl99", "si3_orca2_o1", "si3_orca2_o2", "si3_orca2_o3"
-        ):
+        if config.thermo_scheme in ("si3_bl99", "si3_orca2_o1", "si3_orca2_o2"):
             raise ValueError(
                 "ocean_freezing_temperature_K is not routed into the layered "
                 f"SI3 thermodynamics (thermo_scheme={config.thermo_scheme!r}); pass the "
@@ -280,12 +278,12 @@ def step_sea_ice(
             raise ValueError("ocean_freezing_temperature_K must have the ocean SST shape")
         config = config._replace(T_freeze_ocean=liquidus)
     if config.thermo_scheme not in (
-        "zero_layer", "si3_bl99", "si3_orca2_o1", "si3_orca2_o2", "si3_orca2_o3"
+        "zero_layer", "si3_bl99", "si3_orca2_o1", "si3_orca2_o2"
     ):
         raise ValueError(
             f"Unknown sea-ice thermo_scheme {config.thermo_scheme!r}; expected "
-            "'zero_layer', 'si3_bl99', 'si3_orca2_o1', 'si3_orca2_o2', or "
-            "'si3_orca2_o3' (icethd.F90:148-183, icestp.F90:148-224)."
+            "'zero_layer', 'si3_bl99', 'si3_orca2_o1', or 'si3_orca2_o2' "
+            "(icethd.F90:148-183, icestp.F90:148-224)."
         )
     validate_si3_thermo_config(config)
     if config.thermo_scheme == "si3_bl99":
@@ -369,14 +367,14 @@ def step_sea_ice(
         return _si3_orca2_o1_step_with_trace(state, forcing, config, dt)
     if config.thermo_scheme == "si3_orca2_o2":
         return _si3_orca2_o2_step_with_trace(state, forcing, config, dt)
-    if config.thermo_scheme == "si3_orca2_o3":
-        return _si3_orca2_o3_step_with_trace(state, forcing, config, dt)
     if config.ridging.enabled and grid is None:
         raise ValueError(
             "ridging.enabled=True requires a grid argument: mechanical "
             "ridging needs the convergence (strain-rate) operator.  Pass a "
-            "supported grid, or set ridging.enabled=False.")
-    if config.ridging.enabled and config.ridging.closing_scheme == "convergence" and config.n_categories < 2:
+            "supported grid, or set ridging.enabled=False."
+        )
+    if (config.ridging.enabled and config.ridging.closing_scheme == "convergence"
+            and config.n_categories < 2):
         raise ValueError("Convergence ridging requires n_categories >= 2.")
 
     # F10 guard: lat-lon EVP/mEVP strain-rate + stress-divergence use the
@@ -3298,43 +3296,3 @@ def _step_dynamic_v2(
         pond_depth=state.pond_depth.replace(data=pond_depth),
     )
     return new_state, response
-
-
-def _si3_orca2_o3_step_with_trace(
-    state: SI3State,
-    forcing: SI3ORCA2Forcing,
-    config: SeaIceConfig,
-    dt: float,
-) -> tuple[SI3State, TileResponse]:
-    """Private fidelity hook executing one O3 ORCA2 SI3 step (`icestp.f90:181-272`)."""
-
-    if not isinstance(state, SI3State):
-        raise ValueError(
-            "thermo_scheme='si3_orca2_o3' requires SI3State with full ORCA2 "
-            "5-category 10+5-layer enthalpies/salinities and Prather moments"
-        )
-    if not isinstance(forcing, SI3ORCA2Forcing):
-        raise ValueError(
-            "thermo_scheme='si3_orca2_o3' requires SI3ORCA2Forcing carrying "
-            "tmask and optional sss_m at the icestp entry boundary (icestp.f90:181-272)"
-        )
-    orca2_cfg = config.si3_orca2
-    if orca2_cfg is None:
-        raise ValueError(
-            "thermo_scheme='si3_orca2_o3' requires an explicit si3_orca2 config; "
-            "the ice time step may not be inferred from the dispatcher dt"
-        )
-    if float(dt) != float(orca2_cfg.rDt_ice):
-        raise ValueError(
-            "thermo_scheme='si3_orca2_o3' requires dt == si3_orca2.rDt_ice "
-            f"({float(dt)!r} != {float(orca2_cfg.rDt_ice)!r})"
-        )
-
-    # O3 exposes the ORCA2 Prather advection operator (`si3_o3_step` / `si3_dyn_orca2` /
-    # `si3_dyn_adv_pra_orca2`). Full `step_sea_ice` coupling remains refused until Rung O17
-    # implements `ice_update_flx` atmospheric/ocean heat, freshwater, and salt TileResponse.
-    raise NotImplementedError(
-        "SI3 ORCA2 O3 Prather advection stepping is available through si3_o3_step, "
-        "si3_dyn_orca2, and si3_dyn_adv_pra_orca2, but step_sea_ice is refused until "
-        "the NEMO ice_update_flx TileResponse coupling contract (rung O17) is implemented"
-    )

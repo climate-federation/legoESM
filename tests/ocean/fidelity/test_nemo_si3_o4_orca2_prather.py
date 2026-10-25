@@ -1,98 +1,78 @@
-"""Fidelity, conservation, and invariance tests for SI3 ladder rung O3 (`si3_r8`, `DECISION 159`).
+"""Fidelity, conservation, and invariance tests for SI3 ladder rung O4 (`si3_r8`, `DECISION 159`).
 
-Covers all preregistered requirements (`docs/ice/fidelity/si3_r8_o3_preregister.md`):
+Covers all preregistered requirements (`docs/ice/fidelity/si3_r8_o4_preregister.md`,
+`docs/ice/fidelity/si3_ladder_design.md:224`):
 (a) Bit-for-bit (`0`-ULP) statement pins of NEMO 5.0.2 `icedyn_adv_pra.f90`,
-    `icedyn.f90`, `icedyn_adv.f90`, and `icevar.f90` with inexact `float64`
-    operands against independent scalar/loop reference implementations, plus
-    failing statement-reversal and reordering plants (`Plants O3-A1..A4`).
+    `icedyn.f90`, `icedyn_adv.f90`, `icevar.f90`, and `lib_mpp.f90` (including
+    delayed CFL `mpp_max(..., cdelay='cflice')` when `ln_mppdelay = .TRUE.`)
+    with inexact `float64` operands against independent scalar/loop reference
+    implementations, independent NEMO-literal `lbc_lnk` seam and T-pivot north-fold
+    moment checks across all 11 families, missing-input refusal gates, and
+    failing statement-reversal/reordering/sign plants (`Plants O4-A1..A4`).
 (b) Lane-3 `ICE_ADV1D` / `ICE_ADV2D` invariance and real parent-vs-current
     (`042c7bd74c2944dab8c39318687ab0cef54f9d2b`) `0`-ULP bit-identity across
     `advect_si3_prather_1d`, `advect_si3_prather_2d`, `step_ice_adv1d_card`,
     `step_ice_adv2d_card`, `step_sea_ice` (`slab`, `dynamic-v2`, `si3_bl99`),
-    and `si3_o1_step`, plus failing `1`-ULP code-path plants (`Plants O3-B1, O3-B2`).
+    and `si3_o1_step`, plus failing `1`-ULP code-path plants (`Plants O4-B1, O4-B2`).
 (c) Conservation of every extensive family (`v_i, v_s, a_i, oa_i, e_s, e_i,
     szv_i, sv_i, a_ip, v_ip, v_il`) to `float64` round-off (`<= 1e-14`) on a
     closed ORCA2 `(184, 152)` test field across `x -> y` and `y -> x` sweeps
-    and `icycle in {1, 2, 3}` with active cyclic east-west seam transport,
-    plus residual budget closure (`wfx_res, hfx_res, sfx_res`, `diag_adv_*`)
-    when `Hbig_pra` / `Hsnow_pra` / `ice_var_zapneg` clip, and failing flux
-    plant (`Plant O3-C1`).
+    and `icycle in {1, 2, 3}` with active cyclic east-west seam transport and
+    ice at and next to the north fold (`jj = 148, 149`), plus residual budget
+    closure (`wfx_res, hfx_res, sfx_res`, `diag_adv_*`) when `Hbig_pra` /
+    `Hsnow_pra` / `ice_var_zapneg` clip, and failing flux plant (`Plant O4-C1`).
 (d) End-to-end differentiability (`jax.jit`, `jax.value_and_grad`, `jax.jvp`)
-    through one ORCA2 Prather advection step (`si3_o3_step`), with `0`-ULP
-    primal invariance under `jax.jit`, finite non-zero gradients with respect
-    to extensives, velocities (`u_ice, v_ice`), and Prather moments (`sx, sy,
-    sxx, syy, sxy`), `reverse == forward` (`<= 1e-11`), and failing
-    `stop_gradient` plant (`Plant O3-D1`).
+    through one ORCA2 Prather advection step (`si3_o4_step`), with `icycle`
+    selected inside `jax.jit` from the carried delayed `cflice` state, with `0`-ULP primal invariance under `jax.jit`, finite non-zero
+    gradients with respect to extensives, velocities (`u_ice, v_ice`), and
+    Prather moments (`sx, sy, sxx, syy, sxy`), `reverse == forward` (`<= 1e-11`),
+    central finite-difference ratio `~ 1` at `float64`, and failing
+    `stop_gradient` plant (`Plant O4-D1`).
 """
 
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
-import types
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from legoesm import constants as canonical_constants
-from legoesm.core.field import Field
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ice import (
-    NEMO_SI3_CONSTANTS_CONFIG,
-    BrineConfig,
-    SeaIceConfig,
     SI3AdvectionDiagnostics,
     SI3AllPratherMoments,
-    SI3ColumnState,
     SI3ORCA2AdvectionGrid,
-    SI3ORCA2Forcing,
     SI3ORCA2StateConfig,
     SI3PratherMoments,
     SI3State,
-    SI3ThermoConfig,
-    SnowConfig,
-    build_c1d_omip_l3_card,
-    build_si3_orca2_o1_config,
-    build_si3_orca2_o3_config,
-    fortran_sum_categories,
-    init_dynamic_ice_state,
+    build_si3_orca2_o4_config,
     si3_adv_x,
     si3_adv_y,
     si3_apply_state_halos_orca2,
     si3_dyn_adv_pra_orca2,
     si3_dyn_orca2,
     si3_hbig_pra,
-    si3_hfn_category_bounds,
     si3_hsnow_pra,
     si3_icemax2d_pra,
     si3_icemax3d_pra,
     si3_lbc_lnk_orca2,
-    si3_o1_step,
-    si3_o3_step,
+    si3_o4_step,
+    si3_rst_from_netcdf_dict,
+    si3_rst_to_netcdf_dict,
+    si3_var_glo2eqv,
     si3_var_zapneg,
     si3_var_zapsmall,
-    step_sea_ice,
 )
 from legoesm.ice.transport import (
-    advect_si3_prather_1d,
-    advect_si3_prather_2d,
     si3_active_mask_2d,
 )
-from legoesm.ice.bitz_lipscomb import (
-    SI3SurfaceForcing,
-    bitz_lipscomb_conduction_step,
-)
-from legoesm.ice.fidelity.nemo_adv2d_testcase_recipe import (
-    build_ice_adv2d_card,
-    step_ice_adv2d_card,
-)
-from legoesm.ice.fidelity.nemo_testcase_recipe import (
-    build_ice_adv1d_card,
-    step_ice_adv1d_card,
-)
+
+from legoesm import constants as canonical_constants
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TESTCASES_DIR = REPO_ROOT / "scripts/validate/ocean_fidelity/testcases"
@@ -124,10 +104,30 @@ def _assert_zero_ulp(a, b, label: str = "") -> None:
     assert ulp == 0, f"{label} max ULP = {ulp} != 0"
 
 
+# Delayed `zcfl` values selecting `icycle = 1, 2, 3` (`icedyn_adv_pra.f90:138-141`).
+_CFL_FOR_ICYCLE = {1: 0.25, 2: 1.0, 3: 2.0}
+
+
+def _dyn_inputs(jpi: int = 184, jpj: int = 152) -> dict:
+    """Replayed state velocities plus `diag_set0` zero accumulators (`icestp.f90:478-523`)."""
+    zero = jnp.zeros((jpi, jpj), dtype=jnp.float64)
+    return dict(
+        rn_uice=None,
+        rn_vice=None,
+        wfx_res=zero,
+        hfx_res=zero,
+        sfx_res=zero,
+        diag_adv_mass=zero,
+        diag_adv_salt=zero,
+        diag_adv_heat=zero,
+    )
+
+
 # ==============================================================================
 # Independent scalar/loop Fortran-literal reference kernels for Test (a)
-# (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn_adv_pra.f90:513-1156,1519-1588`,
-# `ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icevar.f90:615-853`).
+# (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn_adv_pra.f90:450-1156,1519-1588`,
+# `ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icevar.f90:615-853`,
+# `ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/lbcnfd.f90:96-150`).
 # ==============================================================================
 
 
@@ -533,6 +533,87 @@ def _ref_adv_y_scalar_loop(
     return psm_w, ps0_w, (psx_w, psy_w, psxx_w, psyy_w, psxy_w)
 
 
+def _ref_nemo_lbc_lnk_orca2_t_point(
+    field: np.ndarray,
+    psgn: float,
+    *,
+    nn_hls: int = 2,
+) -> np.ndarray:
+    """Independent scalar-loop NEMO 5.0.2 replica of `lbc_lnk` on ORCA2 T-point arrays.
+
+    Transcribes east-west cyclic periodicity (`jperio == 4`), `lbc_nfd` case `'T'`
+    with `ldfull = .TRUE.` (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/lbcnfd.f90:96-150`,
+    `ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn_adv_pra.f90:450-494`), and south
+    closed boundary (`lbc_lnk_pt2pt_generic.h90:245-260`).
+    """
+    arr = np.array(field, dtype=np.float64, copy=True)
+    orig_shape = arr.shape
+    ipi, ipj = orig_shape[:2]
+    ihls = int(nn_hls)
+    ni0glo = ipi - 2 * ihls
+    n_planes = int(np.prod(orig_shape[2:])) if arr.ndim > 2 else 1
+    arr_3d = arr.reshape((ipi, ipj, n_planes))
+    zsgn = np.float64(psgn)
+
+    for jn in range(n_planes):
+        plane = arr_3d[:, :, jn]
+        # 1. East-west cyclic seam (`1..ihls <- ipi-2*ihls+1..ipi-ihls`,
+        #    `ipi-ihls+1..ipi <- ihls+1..2*ihls` in 1-based Fortran indexing)
+        for ji_0 in range(ihls):
+            plane[ji_0, :] = plane[ipi - 2 * ihls + ji_0, :]
+            plane[ipi - ihls + ji_0, :] = plane[ihls + ji_0, :]
+
+        # 2. T-pivot north fold (`lbcnfd.f90:96-150`, 1-based Fortran indices)
+        #    Last `ihls` lines (`from ipj to ipj-ihls+1`) : full (`lbcnfd.f90:99-129`)
+        for jj in range(1, ihls + 1):
+            ij1 = ipj - jj + 1
+            ij2 = ipj - 2 * ihls + jj - 1
+            # `DO ji = 1, ihls` (`lbcnfd.f90:104-108`)
+            for ji in range(1, ihls + 1):
+                ii1 = ji
+                ii2 = 2 * ihls + 2 - ji
+                plane[ii1 - 1, ij1 - 1] = zsgn * plane[ii2 - 1, ij2 - 1]
+            # `DO ji = 1, 1` (`lbcnfd.f90:109-113`)
+            for ji in range(1, 2):
+                ii1 = ihls + ji
+                ii2 = ii1
+                plane[ii1 - 1, ij1 - 1] = zsgn * plane[ii2 - 1, ij2 - 1]
+            # `DO ji = 1, Ni0glo - 1` (`lbcnfd.f90:114-118`)
+            for ji in range(1, ni0glo):
+                ii1 = 2 + ihls + ji - 1
+                ii2 = ipi - ihls - ji + 1
+                plane[ii1 - 1, ij1 - 1] = zsgn * plane[ii2 - 1, ij2 - 1]
+            # `DO ji = 1, COUNT( (/ihls > 0/) )` (`lbcnfd.f90:119-123`)
+            if ihls > 0:
+                ii1 = ipi - ihls + 1
+                ii2 = ihls + 1
+                plane[ii1 - 1, ij1 - 1] = zsgn * plane[ii2 - 1, ij2 - 1]
+            # `DO ji = 1, ihls-1` (`lbcnfd.f90:124-128`)
+            for ji in range(1, ihls):
+                ii1 = ipi - ihls + 1 + ji
+                ii2 = ipi - ihls + 1 - ji
+                plane[ii1 - 1, ij1 - 1] = zsgn * plane[ii2 - 1, ij2 - 1]
+
+        # Line number `ipj-ihls` : right half (`lbcnfd.f90:131-148`, `ldfull = .TRUE.`)
+        ij1 = ipj - ihls
+        ij2 = ij1
+        # `DO ji = 1, Ni0glo/2-1` (`lbcnfd.f90:136-140`)
+        for ji in range(1, ni0glo // 2):
+            ii1 = ipi // 2 + ji + 1
+            ii2 = ipi // 2 - ji + 1
+            plane[ii1 - 1, ij1 - 1] = zsgn * plane[ii2 - 1, ij2 - 1]
+        # `DO ji = 1, ihls` (`lbcnfd.f90:141-146`)
+        for ji in range(1, ihls + 1):
+            ii1 = ji
+            ii2 = 2 * ihls + 2 - ji
+            plane[ii1 - 1, ij1 - 1] = zsgn * plane[ii2 - 1, ij2 - 1]
+
+        # 3. South closed boundary (`rows 1..ihls` in 1-based set to `0.0`)
+        plane[:, :ihls] = 0.0
+
+    return arr_3d.reshape(orig_shape)
+
+
 def _build_orca2_advection_grid(
     tmask: jnp.ndarray,
     umask: jnp.ndarray,
@@ -541,7 +622,6 @@ def _build_orca2_advection_grid(
     """Build a realistic curved ORCA2 `(184, 152)` advection metric grid."""
     jpi, jpj = tmask.shape
     ii, jj = np.meshgrid(np.arange(jpi), np.arange(jpj), indexing="ij")
-    # Smoothly varying metric scales around ~200 km (`ORCA2`) with inexact fp64 values
     e1t_np = 185000.0 + 27000.0 * np.cos(2.0 * np.pi * (ii - 2) / 180.0) + 113.7 * (jj / 152.0)
     e2t_np = 165000.0 + 31000.0 * np.sin(np.pi * (jj - 2) / 148.0) + 89.3 * (ii / 184.0)
     e1u_np = 0.5 * (e1t_np + np.roll(e1t_np, -1, axis=0))
@@ -550,8 +630,6 @@ def _build_orca2_advection_grid(
     e2v_np = 0.5 * (e2t_np + np.roll(e2t_np, -1, axis=1))
     e1e2t_np = e1t_np * e2t_np
 
-    # Enforce ORCA2 cyclic + north-fold consistency on T/U/V metrics while keeping
-    # positive metric lengths on the closed southern boundary (`jj = 0, 1`).
     def _lbc_pos(arr_np: np.ndarray, ctype: str) -> jnp.ndarray:
         raw_j = jnp.asarray(arr_np, dtype=jnp.float64)
         linked = si3_lbc_lnk_orca2(raw_j, ctype, 1.0, nn_hls=2, ldfull=True)
@@ -576,12 +654,12 @@ def _build_orca2_advection_grid(
 
 # ==============================================================================
 # Test (a): Bit-for-bit (`0`-ULP) statement pins with inexact `float64` operands
-# and failing reversal/reordering plants (`Plants O3-A1..A4`).
+# and failing reversal/reordering/sign plants (`Plants O4-A1..A4`).
 # ==============================================================================
 
 
-def test_o3_a1_adv_x_and_adv_y_statement_pins_and_plants() -> None:
-    """`si3_adv_x` and `si3_adv_y` match scalar-loop Fortran reference to 0 ULP on inexact operands and fail under Plant O3-A1."""
+def test_o4_a1_adv_x_and_adv_y_statement_pins_and_plants() -> None:
+    """`si3_adv_x` and `si3_adv_y` match scalar-loop Fortran reference to 0 ULP on inexact operands and fail under Plant O4-A1."""
     rng = np.random.default_rng(2026102401)
     jpi, jpj, jpl = 12, 11, 3
     nn_hls = 2
@@ -589,13 +667,12 @@ def test_o3_a1_adv_x_and_adv_y_statement_pins_and_plants() -> None:
 
     e1e2t_np = 3.7123456789e9 + rng.uniform(-2.5e8, 2.5e8, size=(jpi, jpj))
     tmask_np = np.ones((jpi, jpj), dtype=np.float64)
-    tmask_np[4, 5] = 0.0  # dry island cell inside active domain
+    tmask_np[4, 5] = 0.0
     put_np = rng.uniform(-4.2e5, 4.5e5, size=(jpi, jpj))
     pvt_np = rng.uniform(-3.8e5, 4.1e5, size=(jpi, jpj))
     psm_np = e1e2t_np * rng.uniform(0.88, 1.12, size=(jpi, jpj))
 
     ps0_np = rng.uniform(-0.2, 2.8, size=(jpi, jpj, jpl)) * e1e2t_np[:, :, None]
-    # Include both active limiter cells (large slopes/curvatures) and smooth cells
     moments_np = (
         rng.uniform(-2.2, 2.2, size=(jpi, jpj, jpl)) * np.abs(ps0_np),
         rng.uniform(-2.2, 2.2, size=(jpi, jpj, jpl)) * np.abs(ps0_np),
@@ -672,7 +749,6 @@ def test_o3_a1_adv_x_and_adv_y_statement_pins_and_plants() -> None:
                     f"adv_y(ihls={ihls},pcrh={pcrh}).{mname}",
                 )
 
-    # Also verify 4D `(jpi, jpj, nlay, jpl)` packing/unpacking in `si3_adv_x` and `si3_adv_y`
     ps0_4d = ps0_np.reshape((jpi, jpj, 1, jpl))
     mom_4d = tuple(m.reshape((jpi, jpj, 1, jpl)) for m in moments_np)
     _, got_ps0_4d, got_mom_4d = si3_adv_x(
@@ -690,7 +766,7 @@ def test_o3_a1_adv_x_and_adv_y_statement_pins_and_plants() -> None:
     assert got_ps0_4d.shape == (jpi, jpj, 1, jpl)
     assert all(m.shape == (jpi, jpj, 1, jpl) for m in got_mom_4d)
 
-    # Plant O3-A1a: omitting donor readjustment in `si3_adv_x` / `si3_adv_y` MUST fail 0-ULP
+    # Plant O4-A1a: omitting donor readjustment MUST fail 0-ULP
     _, bad_ps0_x, _ = si3_adv_x(
         0,
         pdt,
@@ -707,8 +783,7 @@ def test_o3_a1_adv_x_and_adv_y_statement_pins_and_plants() -> None:
     with pytest.raises(AssertionError, match="max ULP"):
         _assert_zero_ulp(ref_ps0_x, bad_ps0_x, "plant_omit_donor_readjust_x")
 
-    # Plant O3-A1b: restoring `zfx` in `adv_x`'s negative-velocity branch (`_plant_symmetric_neg_zfx=True`)
-    # instead of NEMO's source-literal `zfx = 0._wp` (`icedyn_adv_pra.f90:615,642-648`) MUST fail 0-ULP
+    # Plant O4-A1b: restoring `zfx` in `adv_x`'s negative-velocity branch MUST fail 0-ULP
     _, _, bad_mom_x_neg = si3_adv_x(
         0,
         pdt,
@@ -725,7 +800,7 @@ def test_o3_a1_adv_x_and_adv_y_statement_pins_and_plants() -> None:
     with pytest.raises(AssertionError, match="max ULP"):
         _assert_zero_ulp(ref_mom_x[0], bad_mom_x_neg[0], "plant_symmetric_neg_zfx")
 
-    # Plant O3-A1c: reordering `zalf1q * (psx - 3 * zalf * psxx)` association MUST fail 0-ULP
+    # Plant O4-A1c: reordering `zalf1q * (psx - 3 * zalf * psxx)` association MUST fail 0-ULP
     _, _, reordered_mom_x = _ref_adv_x_scalar_loop(
         0,
         pdt,
@@ -743,8 +818,8 @@ def test_o3_a1_adv_x_and_adv_y_statement_pins_and_plants() -> None:
         _assert_zero_ulp(got_mom_x[0], reordered_mom_x[0], "plant_reorder_donor_alf")
 
 
-def test_o3_a2_odd_even_sweep_order_and_cfl_subcycling_pins_and_plant() -> None:
-    """`si3_dyn_adv_pra_orca2` enforces NEMO's `MOD((kt-1)//nn_fsbc, 2) == MOD(jt-1, 2)` sweep parity and `icycle in {1, 2, 3}` CFL thresholds, and fails under Plant O3-A2."""
+def test_o4_a2_odd_even_sweep_order_and_cfl_subcycling_pins_and_plant() -> None:
+    """`si3_dyn_adv_pra_orca2` enforces NEMO's `MOD((kt-1)//nn_fsbc, 2) == MOD(jt-1, 2)` sweep parity, `icycle in {1, 2, 3}` CFL thresholds, and `ln_mppdelay` one-call delayed `cflice` semantics (`icedyn_adv_pra.f90:131-141`, `lib_mpp.f90:789-846`), and fails under Plants O4-A2a and O4-A2b."""
     cfg = SI3ORCA2StateConfig(
         jpl=2,
         nlay_i=2,
@@ -755,6 +830,7 @@ def test_o3_a2_odd_even_sweep_order_and_cfl_subcycling_pins_and_plant() -> None:
         ln_pnd_lids=True,
         ln_icedyn=True,
         ln_icethd=False,
+        ln_mppdelay=True,
         nn_fsbc=1,
         rDt_ice=10800.0,
         nn_hls=2,
@@ -770,10 +846,16 @@ def test_o3_a2_odd_even_sweep_order_and_cfl_subcycling_pins_and_plant() -> None:
         3.9e10 + rng.uniform(-2.0e9, 2.0e9, size=(jpi, jpj)), dtype=jnp.float64
     )
     grid = SI3ORCA2AdvectionGrid.from_metrics(
-        e1u=e1u, e2v=e2v, e2u=e2u, e1v=e1v, e1e2t=e1e2t, tmask=tmask
+        e1u=e1u,
+        e2v=e2v,
+        e2u=e2u,
+        e1v=e1v,
+        e1e2t=e1e2t,
+        tmask=tmask,
+        umask=tmask,
+        vmask=tmask,
     )
 
-    # Base fields
     a_i = jnp.asarray(rng.uniform(0.05, 0.25, size=(jpi, jpj, cfg.jpl)))
     v_i = a_i * jnp.asarray(rng.uniform(0.4, 1.5, size=(jpi, jpj, cfg.jpl)))
     v_s = a_i * jnp.asarray(rng.uniform(0.02, 0.12, size=(jpi, jpj, cfg.jpl)))
@@ -792,15 +874,33 @@ def test_o3_a2_odd_even_sweep_order_and_cfl_subcycling_pins_and_plant() -> None:
     prather = SI3AllPratherMoments.zeros(
         jpi, jpj, jpl=cfg.jpl, nlay_i=cfg.nlay_i, nlay_s=cfg.nlay_s
     )
-    # Non-zero cross-moments so x->y vs y->x is strongly non-commutative
     sxy_ice = jnp.asarray(rng.uniform(-1.0e7, 1.0e7, size=(jpi, jpj, cfg.jpl)))
     prather = prather._replace(ice=prather.ice._replace(sxy=sxy_ice))
 
-    # 1. Verify CFL threshold -> icycle mapping (`icedyn_adv_pra.f90:133-138`):
-    #    e1u = 200000 m, rDt_ice = 10800 s => u = 5.0 m/s gives zcfl = 0.27 -> icycle = 1
-    #    u = 15.0 m/s gives zcfl = 0.81 -> icycle = 2
-    #    u = 32.0 m/s gives zcfl = 1.728 -> icycle = 3
-    for u_speed, expected_icycle in ((5.0, 1), (15.0, 2), (32.0, 3)):
+    z2 = jnp.zeros((jpi, jpj), dtype=jnp.float64)
+    acc = dict(
+        hi_max_top=99.0,
+        wfx_res=z2,
+        hfx_res=z2,
+        sfx_res=z2,
+        diag_adv_mass=z2,
+        diag_adv_salt=z2,
+        diag_adv_heat=z2,
+    )
+
+    # 1a. First call from rest (`cflice_delayed=None`, `lib_mpp.f90:801-828`):
+    #     e1u = 200000 m, rDt_ice = 10800 s =>
+    #     u = 5.0 m/s -> zcfl_curr = 0.27 -> icycle = 1, cflice_delayed_out = 0.27
+    #     u = 15.0 m/s -> zcfl_curr = 0.81 -> icycle = 2, cflice_delayed_out = 0.81
+    #     u = 32.0 m/s -> zcfl_curr = 1.728 -> icycle = 3, cflice_delayed_out = 1.728
+    cfl_5 = (np.float64(5.0) * np.float64(10800.0)) * (np.float64(1.0) / np.float64(200000.0))
+    cfl_15 = (np.float64(15.0) * np.float64(10800.0)) * (np.float64(1.0) / np.float64(200000.0))
+    cfl_32 = (np.float64(32.0) * np.float64(10800.0)) * (np.float64(1.0) / np.float64(200000.0))
+    for u_speed, expected_icycle, expected_cfl in (
+        (5.0, 1, cfl_5),
+        (15.0, 2, cfl_15),
+        (32.0, 3, cfl_32),
+    ):
         u_test = jnp.full((jpi, jpj), u_speed, dtype=jnp.float64)
         v_test = jnp.full((jpi, jpj), 0.4 * u_speed, dtype=jnp.float64)
         res = si3_dyn_adv_pra_orca2(
@@ -825,8 +925,113 @@ def test_o3_a2_odd_even_sweep_order_and_cfl_subcycling_pins_and_plant() -> None:
             prather=prather,
             grid=grid,
             config=cfg,
+        **acc,
+            cflice_delayed=None,
         )
         assert int(res[-1]) == expected_icycle
+        _assert_zero_ulp(res[-3], expected_cfl, f"first_call_zcfl_{u_speed}")
+        _assert_zero_ulp(res[-2], expected_cfl, f"first_call_delayed_out_{u_speed}")
+
+    # 1b. Subsequent calls with `ln_mppdelay = True` (`lib_mpp.f90:830-842`):
+    #     Call 2 receives `cflice_delayed = cfl_5` (from Call 1 with u=5.0) while current
+    #     velocity is `u = 32.0` (`zcfl_curr = cfl_32`): NEMO uses the delayed `cfl_5`
+    #     so `icycle = 1` (NOT 3), and stores `cflice_delayed_out = cfl_32` for Call 3!
+    u_fast = jnp.full((jpi, jpj), 32.0, dtype=jnp.float64)
+    v_fast = jnp.full((jpi, jpj), 0.4 * 32.0, dtype=jnp.float64)
+    res_call2 = si3_dyn_adv_pra_orca2(
+        kt=2,
+        u_ice=u_fast,
+        v_ice=v_fast,
+        h_i=h_i,
+        h_s=h_s,
+        h_ip=h_ip,
+        ato_i=ato_i,
+        v_i=v_i,
+        v_s=v_s,
+        sv_i=sv_i,
+        oa_i=oa_i,
+        a_i=a_i,
+        a_ip=a_ip,
+        v_ip=v_ip,
+        v_il=v_il,
+        e_s=e_s,
+        e_i=e_i,
+        szv_i=szv_i,
+        prather=prather,
+        grid=grid,
+        config=cfg,
+        **acc,
+        cflice_delayed=jnp.asarray(cfl_5, dtype=jnp.float64),
+    )
+    assert int(res_call2[-1]) == 1  # delayed zcfl = 0.27 -> icycle = 1
+    _assert_zero_ulp(res_call2[-3], cfl_5, "call2_used_delayed_zcfl")
+    _assert_zero_ulp(res_call2[-2], cfl_32, "call2_stored_current_zcfl")
+
+    # Call 3 receives `cflice_delayed = res_call2[-2] = cfl_32` while current velocity
+    # drops back to `u = 5.0` (`zcfl_curr = cfl_5`): NEMO uses the delayed `cfl_32`
+    # so `icycle = 3` (NOT 1), and stores `cflice_delayed_out = cfl_5`!
+    u_slow = jnp.full((jpi, jpj), 5.0, dtype=jnp.float64)
+    v_slow = jnp.full((jpi, jpj), 0.4 * 5.0, dtype=jnp.float64)
+    res_call3 = si3_dyn_adv_pra_orca2(
+        kt=3,
+        u_ice=u_slow,
+        v_ice=v_slow,
+        h_i=h_i,
+        h_s=h_s,
+        h_ip=h_ip,
+        ato_i=ato_i,
+        v_i=v_i,
+        v_s=v_s,
+        sv_i=sv_i,
+        oa_i=oa_i,
+        a_i=a_i,
+        a_ip=a_ip,
+        v_ip=v_ip,
+        v_il=v_il,
+        e_s=e_s,
+        e_i=e_i,
+        szv_i=szv_i,
+        prather=prather,
+        grid=grid,
+        config=cfg,
+        **acc,
+        cflice_delayed=res_call2[-2],
+    )
+    assert int(res_call3[-1]) == 3  # delayed zcfl = 1.728 -> icycle = 3
+    _assert_zero_ulp(res_call3[-3], cfl_32, "call3_used_delayed_zcfl")
+    _assert_zero_ulp(res_call3[-2], cfl_5, "call3_stored_current_zcfl")
+
+    # Plant O4-A2b: ignoring `ln_mppdelay` (`_plant_ignore_mppdelay=True`) on Call 2
+    # uses current-step `zcfl = 1.728` (`icycle = 3` instead of `1`) and MUST fail 0-ULP!
+    res_call2_planted = si3_dyn_adv_pra_orca2(
+        kt=2,
+        u_ice=u_fast,
+        v_ice=v_fast,
+        h_i=h_i,
+        h_s=h_s,
+        h_ip=h_ip,
+        ato_i=ato_i,
+        v_i=v_i,
+        v_s=v_s,
+        sv_i=sv_i,
+        oa_i=oa_i,
+        a_i=a_i,
+        a_ip=a_ip,
+        v_ip=v_ip,
+        v_il=v_il,
+        e_s=e_s,
+        e_i=e_i,
+        szv_i=szv_i,
+        prather=prather,
+        grid=grid,
+        config=cfg,
+        **acc,
+        cflice_delayed=jnp.asarray(0.27, dtype=jnp.float64),
+        _plant_ignore_mppdelay=True,
+    )
+    assert int(res_call2_planted[-1]) == 3
+    with pytest.raises(AssertionError, match="max ULP"):
+        _assert_zero_ulp(res_call2[1], res_call2_planted[1], "plant_o4_a2b_ignore_mppdelay")
 
     # 2. Verify odd/even parity: kt=1 (x->y on jt=1) vs kt=2 (y->x on jt=1)
     u_curv = jnp.asarray(rng.uniform(-4.0, 4.0, size=(jpi, jpj)))
@@ -853,6 +1058,8 @@ def test_o3_a2_odd_even_sweep_order_and_cfl_subcycling_pins_and_plant() -> None:
         prather=prather,
         grid=grid,
         config=cfg,
+        **acc,
+        cflice_delayed=None,
     )
     out_kt2 = si3_dyn_adv_pra_orca2(
         kt=2,
@@ -876,8 +1083,10 @@ def test_o3_a2_odd_even_sweep_order_and_cfl_subcycling_pins_and_plant() -> None:
         prather=prather,
         grid=grid,
         config=cfg,
+        **acc,
+        cflice_delayed=None,
     )
-    # Plant O3-A2: inverting sweep order at kt=1 must equal kt=2 (for icycle=1) and fail 0-ULP vs kt=1!
+    # Plant O4-A2a: inverting sweep order at kt=1 must equal kt=2 (for icycle=1) and fail 0-ULP vs kt=1!
     out_kt1_planted = si3_dyn_adv_pra_orca2(
         kt=1,
         u_ice=u_curv,
@@ -900,19 +1109,21 @@ def test_o3_a2_odd_even_sweep_order_and_cfl_subcycling_pins_and_plant() -> None:
         prather=prather,
         grid=grid,
         config=cfg,
+        **acc,
+        cflice_delayed=None,
         _plant_invert_sweep_order=True,
     )
     _assert_zero_ulp(out_kt2[1], out_kt1_planted[1], "kt2_matches_inverted_kt1_v_i")
     with pytest.raises(AssertionError, match="max ULP"):
-        _assert_zero_ulp(out_kt1[1], out_kt1_planted[1], "plant_o3_a2_v_i")
+        _assert_zero_ulp(out_kt1[1], out_kt1_planted[1], "plant_o4_a2a_v_i")
     with pytest.raises(AssertionError, match="max ULP"):
         _assert_zero_ulp(
-            out_kt1[12].ice.sxy, out_kt1_planted[12].ice.sxy, "plant_o3_a2_sxy"
+            out_kt1[12].ice.sxy, out_kt1_planted[12].ice.sxy, "plant_o4_a2a_sxy"
         )
 
 
-def test_o3_a3_icemax_hbig_hsnow_zapneg_zapsmall_pato_diag_pins_and_plants() -> None:
-    """`si3_icemax2d_pra`, `si3_icemax3d_pra`, `si3_hbig_pra`, `si3_hsnow_pra`, `si3_var_zapneg`, `si3_var_zapsmall`, and `pato_i` match scalar Fortran references to 0 ULP and fail under Plants O3-A3."""
+def test_o4_a3_icemax_hbig_hsnow_zapneg_zapsmall_pato_diag_pins_and_plants() -> None:
+    """`si3_icemax2d_pra`, `si3_icemax3d_pra`, `si3_hbig_pra`, `si3_hsnow_pra`, `si3_var_zapneg`, `si3_var_zapsmall`, and `pato_i` match scalar Fortran references to 0 ULP, refuse missing inputs, and fail under Plants O4-A3."""
     rng = np.random.default_rng(2026102403)
     jpi, jpj, jpl = 9, 8, 2
     nlay_i, nlay_s = 3, 2
@@ -922,7 +1133,7 @@ def test_o3_a3_icemax_hbig_hsnow_zapneg_zapsmall_pato_diag_pins_and_plants() -> 
 
     # 1. Pin `si3_icemax2d_pra` and `si3_icemax3d_pra` (`icedyn_adv_pra.f90:1519-1588`)
     pice2d = rng.uniform(0.0, 3.5, size=(jpi, jpj, jpl))
-    pice2d[4, 4, 0] = 5.0e-12  # below epsi10 = 1e-10
+    pice2d[4, 4, 0] = 5.0e-12
     pice3d = rng.uniform(0.0, 4.0e8, size=(jpi, jpj, nlay_i, jpl))
 
     ref_max2d = np.zeros_like(pice2d)
@@ -933,7 +1144,7 @@ def test_o3_a3_icemax_hbig_hsnow_zapneg_zapsmall_pato_diag_pins_and_plants() -> 
                     1.0e-20,
                     float(np.max(pice2d[ji - 1 : ji + 2, jj - 1 : jj + 2, jl])),
                 )
-    got_max2d = si3_icemax2d_pra(ihls, jnp.asarray(pice2d), nn_hls=nn_hls)
+    got_max2d = si3_icemax2d_pra(ihls, jnp.asarray(pice2d), nn_hls=nn_hls, mask_inactive=True)
     _assert_zero_ulp(ref_max2d, got_max2d, "si3_icemax2d_pra")
 
     ref_max3d = np.zeros_like(pice3d)
@@ -949,11 +1160,10 @@ def test_o3_a3_icemax_hbig_hsnow_zapneg_zapsmall_pato_diag_pins_and_plants() -> 
                             )
                         ),
                     )
-    got_max3d = si3_icemax3d_pra(ihls, jnp.asarray(pice3d), nn_hls=nn_hls)
+    got_max3d = si3_icemax3d_pra(ihls, jnp.asarray(pice3d), nn_hls=nn_hls, mask_inactive=True)
     _assert_zero_ulp(ref_max3d, got_max3d, "si3_icemax3d_pra")
 
     # 2. Pin `si3_hbig_pra` (`icedyn_adv_pra.f90:960-1093`) with inexact operands
-    # Choose operands where `(field * cap) / zsi` differs by >= 1 ULP from `zfra = cap / zsi; field * zfra`
     zhi_max = jnp.full((jpi, jpj, jpl), 1.7319587628865979, dtype=jnp.float64)
     zhs_max = jnp.full((jpi, jpj, jpl), 0.31958762886597936, dtype=jnp.float64)
     zhip_max = jnp.full((jpi, jpj, jpl), 0.17525773195876287, dtype=jnp.float64)
@@ -962,14 +1172,12 @@ def test_o3_a3_icemax_hbig_hsnow_zapneg_zapsmall_pato_diag_pins_and_plants() -> 
     zei_max = jnp.full((jpi, jpj, nlay_i, jpl), 2.3711340206185567e8, dtype=jnp.float64)
     zszi_max = jnp.full((jpi, jpj, nlay_i, jpl), 5.154639175257732, dtype=jnp.float64)
 
-    # `Hbig_pra` only caps where `pa_i < 0.15` (`icedyn_adv_pra.f90:1006,1014,1021,1040,1066,1078`).
-    # Keep `a_i` in `[0.02, 0.08]` so `a_i_after = v_i / zhi_max` is also `< 0.15`.
     a_i = jnp.asarray(rng.uniform(0.02, 0.08, size=(jpi, jpj, jpl)))
-    v_i = a_i * (zhi_max * 1.15)  # exceeds zhi_max so Hbig_pra fires, a_i_after < 0.10
-    v_s = a_i * (zhs_max * 1.41)  # exceeds zhs_max even after a_i increases by 1.15x
+    v_i = a_i * (zhi_max * 1.15)
+    v_s = a_i * (zhs_max * 1.41)
     a_ip = a_i * 0.45
-    v_ip = a_ip * (zhip_max * 1.29)  # exceeds zhip_max
-    sv_i = v_i * (zsi_max * 1.33)  # exceeds zsi_max
+    v_ip = a_ip * (zhip_max * 1.29)
+    sv_i = v_i * (zsi_max * 1.33)
     oa_i = a_i * 14.0
     v_il = a_ip * 0.02
     e_s = v_s[:, :, None, :] * (zes_max * 1.27)
@@ -1003,17 +1211,24 @@ def test_o3_a3_icemax_hbig_hsnow_zapneg_zapsmall_pato_diag_pins_and_plants() -> 
         sfx0,
         nn_hls=nn_hls,
         nn_icesal=4,
+        ln_pnd_LEV=True,
+        ln_pnd_TOPO=False,
+        hi_max_top=99.0,
+        rhoi=canonical_constants.rho_ice,
+        rhos=canonical_constants.rho_snow,
+        apply_hi_cap=True,
+        multiply_before_divide=False,
+        extensive_area=None,
     )
-    # Check that capped pond concentration `pa_ip = pv_ip / phip_max` matches to 0 ULP on active cells
     active = np.asarray(si3_active_mask_2d(jpi, jpj, nn_hls, ihls))
-    v_i_after, v_s_after, a_i_after, a_ip_after, v_ip_after, _, e_s_after, e_i_after, szv_i_after, _, _, sfx_hbig = hbig_out
+    v_i_after, _, a_i_after, a_ip_after, _, _, _, _, szv_i_after, _, _, _ = hbig_out
     _assert_zero_ulp(
         np.asarray(a_ip_after)[active],
         np.asarray(v_ip / zhip_max)[active],
         "hbig_a_ip_capped",
     )
 
-    # Plant O3-A3a: `_plant_perturb_hbig_cap=True` MUST fail 0-ULP
+    # Plant O4-A3a: `_plant_perturb_hbig_cap=True` MUST fail 0-ULP
     hbig_planted = si3_hbig_pra(
         ihls,
         pdt,
@@ -1038,12 +1253,20 @@ def test_o3_a3_icemax_hbig_hsnow_zapneg_zapsmall_pato_diag_pins_and_plants() -> 
         sfx0,
         nn_hls=nn_hls,
         nn_icesal=4,
+        ln_pnd_LEV=True,
+        ln_pnd_TOPO=False,
+        hi_max_top=99.0,
+        rhoi=canonical_constants.rho_ice,
+        rhos=canonical_constants.rho_snow,
+        apply_hi_cap=True,
+        multiply_before_divide=False,
+        extensive_area=None,
         _plant_perturb_hbig_cap=True,
     )
     with pytest.raises(AssertionError, match="max ULP"):
         _assert_zero_ulp(a_i_after, hbig_planted[2], "plant_perturb_hbig_cap")
 
-    # Plant O3-A3b: reordering `zfra = zszi_max / zsi ; pszv_i = pszv_i * zfra` to
+    # Plant O4-A3b: reordering `zfra = zszi_max / zsi ; pszv_i = pszv_i * zfra` to
     # `(pszv_i * zszi_max) / zsi` produces >= 1 ULP difference on inexact operands
     zsi_layer = np.asarray(szv_i) / np.asarray(v_i_after)[:, :, None, :]
     zfra_exact = np.asarray(zszi_max) / zsi_layer
@@ -1061,7 +1284,6 @@ def test_o3_a3_icemax_hbig_hsnow_zapneg_zapsmall_pato_diag_pins_and_plants() -> 
     rho0 = canonical_constants.rho_ocean_nemo
     rhoi = canonical_constants.rho_ice
     rhos = canonical_constants.rho_snow
-    # Set snow volume above Archimedes limit `v_i * (rho0 - rhoi) / rhos`
     v_s_heavy = v_i * ((rho0 - rhoi) / rhos * 1.45)
     a_ip_big = a_i * 1.25
     hsnow_out = si3_hsnow_pra(
@@ -1078,8 +1300,10 @@ def test_o3_a3_icemax_hbig_hsnow_zapneg_zapsmall_pato_diag_pins_and_plants() -> 
         rho0=rho0,
         rhoi=rhoi,
         rhos=rhos,
+        use_reciprocal_rhos=True,
+        extensive_area=None,
     )
-    _, v_s_hsnow, _, a_ip_hsnow, e_s_hsnow, wfx_hsnow, hfx_hsnow = hsnow_out
+    _, v_s_hsnow, _, a_ip_hsnow, _, _, _ = hsnow_out
     buoy_cap = np.asarray(v_i) * (rho0 - rhoi) * (1.0 / rhos)
     zvs_excess = np.maximum(0.0, np.asarray(v_s_heavy) - buoy_cap)
     ref_vs_rem = np.where(active[..., None], np.asarray(v_s_heavy) - zvs_excess, np.asarray(v_s_heavy))
@@ -1089,20 +1313,16 @@ def test_o3_a3_icemax_hbig_hsnow_zapneg_zapsmall_pato_diag_pins_and_plants() -> 
         a_ip_hsnow,
         "hsnow_a_ip",
     )
-    # Plant O3-A3c: omitting Archimedes snow shedding fails 0-ULP
     with pytest.raises(AssertionError, match="max ULP"):
         _assert_zero_ulp(v_s_hsnow, v_s_heavy, "plant_omit_archimedes")
 
-    # 4. Pin `si3_var_zapneg` (`icevar.f90:740-853`):
-    # Specifically test the ordering at `:833-839` where `pv_il` is zapped if
-    # `pv_ip < 0 .OR. pv_il < 0 .OR. pa_ip <= 0` BEFORE `pv_ip < 0` is zeroed!
+    # 4. Pin `si3_var_zapneg` (`icevar.f90:740-853`)
     v_i_z = jnp.array(v_i)
     v_s_z = jnp.array(v_s)
     sv_i_z = jnp.array(sv_i)
     oa_i_z = jnp.array(oa_i).at[3, 3, 0].set(-0.05)
     a_i_z = jnp.array(a_i)
     a_ip_z = jnp.array(a_ip)
-    # At (4, 4, 0): pv_ip < 0, pv_il > 0, pa_ip > 0 -> pv_il MUST be zapped into wfx_res!
     v_ip_z = jnp.array(v_ip).at[4, 4, 0].set(-0.015)
     v_il_z = jnp.array(v_il).at[4, 4, 0].set(0.025)
     e_s_z = jnp.array(e_s).at[5, 4, 0, 0].set(-1.5e6)
@@ -1128,8 +1348,11 @@ def test_o3_a3_icemax_hbig_hsnow_zapneg_zapsmall_pato_diag_pins_and_plants() -> 
         sfx0,
         nn_hls=nn_hls,
         nn_icesal=4,
+        rhoi=canonical_constants.rho_ice,
+        rhos=canonical_constants.rho_snow,
+        rhow=canonical_constants.rho_water,
     )
-    assert float(zapneg_out[7][4, 4, 0]) == 0.0  # pv_il(4,4,0) zapped because pv_ip(4,4,0) < 0
+    assert float(zapneg_out[7][4, 4, 0]) == 0.0
     z1_dt_np = np.float64(1.0) / np.float64(pdt)
     rhow_np = np.float64(canonical_constants.rho_water)
     expected_wfx_44 = (np.float64(0.025) * rhow_np) * z1_dt_np + (
@@ -1137,13 +1360,12 @@ def test_o3_a3_icemax_hbig_hsnow_zapneg_zapsmall_pato_diag_pins_and_plants() -> 
     ) * z1_dt_np
     _assert_zero_ulp(zapneg_out[11][4, 4], expected_wfx_44, "zapneg_wfx_res_44")
 
-    # Plant O3-A3d: if `pv_ip < 0` were zeroed BEFORE testing `pv_il`, `pv_il(4,4,0)` would remain 0.025
     wrong_wfx_44 = (np.float64(-0.015) * rhow_np) * z1_dt_np
     with pytest.raises(AssertionError, match="max ULP"):
         _assert_zero_ulp(zapneg_out[11][4, 4], wrong_wfx_44, "plant_late_vil_check")
 
     # 5. Pin `si3_var_zapsmall` (`icevar.f90:615-737`)
-    a_i_small = jnp.array(a_i).at[3, 3, 0].set(0.5e-10)  # < epsi10 = 1e-10
+    a_i_small = jnp.array(a_i).at[3, 3, 0].set(0.5e-10)
     t_su_in = jnp.full((jpi, jpj, jpl), canonical_constants.T_freeze - 5.0, dtype=jnp.float64)
     h_i_in = v_i / a_i
     h_s_in = v_s / a_i
@@ -1187,29 +1409,127 @@ def test_o3_a3_icemax_hbig_hsnow_zapneg_zapsmall_pato_diag_pins_and_plants() -> 
         sst_m=-1.8,
         nn_hls=nn_hls,
         nn_icesal=4,
+        rn_simin=0.1,
+        rn_sinew=0.75,
+        rt0=canonical_constants.T_freeze,
+        rhoi=canonical_constants.rho_ice,
+        rhos=canonical_constants.rho_snow,
+        rhow=canonical_constants.rho_water,
     )
-    assert float(zapsmall_out[0][3, 3, 0]) == 0.0  # v_i(3,3,0) zapped
-    assert float(zapsmall_out[4][3, 3, 0]) == 0.0  # a_i(3,3,0) zapped
+    assert float(zapsmall_out[0][3, 3, 0]) == 0.0
+    assert float(zapsmall_out[4][3, 3, 0]) == 0.0
     _assert_zero_ulp(
         zapsmall_out[8][3, 3, 0],
         canonical_constants.T_freeze - 1.8,
         "zapsmall_t_su_reset",
     )
 
+    zapsmall_namelist = dict(
+        rn_simin=0.1,
+        rn_sinew=0.75,
+        rt0=canonical_constants.T_freeze,
+        rhoi=canonical_constants.rho_ice,
+        rhos=canonical_constants.rho_snow,
+        rhow=canonical_constants.rho_water,
+    )
+    # 6. Verify explicit missing-input refusal gates (no hidden defaults for sss_m, sst_m, umask, vmask, si3_orca2)
+    with pytest.raises(ValueError, match="sss_m"):
+        si3_var_zapsmall(
+            v_i, v_s, sv_i, oa_i, a_i_small, a_ip, v_ip, v_il,
+            t_su_in, h_i_in, h_s_in, h_ip_in, h_il_in, e_s, e_i, szv_i, sz_i_in,
+            t_i_in, t_s_in, at_i_in, vt_i_in, ato_i_in, wfx0, hfx0, sfx0,
+            rDt_ice=pdt, sss_m=None, sst_m=-1.8, nn_hls=nn_hls, nn_icesal=4, **zapsmall_namelist,
+        )
+    with pytest.raises(ValueError, match="sst_m"):
+        si3_var_zapsmall(
+            v_i, v_s, sv_i, oa_i, a_i_small, a_ip, v_ip, v_il,
+            t_su_in, h_i_in, h_s_in, h_ip_in, h_il_in, e_s, e_i, szv_i, sz_i_in,
+            t_i_in, t_s_in, at_i_in, vt_i_in, ato_i_in, wfx0, hfx0, sfx0,
+            rDt_ice=pdt, sss_m=34.7, sst_m=None, nn_hls=nn_hls, nn_icesal=4, **zapsmall_namelist,
+        )
+    with pytest.raises(TypeError):
+        SI3ORCA2AdvectionGrid.from_metrics(
+            e1u=wfx0 + 1.0, e2v=wfx0 + 1.0, e2u=wfx0 + 1.0, e1v=wfx0 + 1.0,
+            e1e2t=wfx0 + 1.0, tmask=wfx0 + 1.0,
+        )
+    with pytest.raises(ValueError, match="umask"):
+        SI3ORCA2AdvectionGrid.from_metrics(
+            e1u=wfx0 + 1.0, e2v=wfx0 + 1.0, e2u=wfx0 + 1.0, e1v=wfx0 + 1.0,
+            e1e2t=wfx0 + 1.0, tmask=wfx0 + 1.0, umask=None, vmask=wfx0 + 1.0,
+        )
+    with pytest.raises(ValueError, match="vmask"):
+        SI3ORCA2AdvectionGrid.from_metrics(
+            e1u=wfx0 + 1.0, e2v=wfx0 + 1.0, e2u=wfx0 + 1.0, e1v=wfx0 + 1.0,
+            e1e2t=wfx0 + 1.0, tmask=wfx0 + 1.0, umask=wfx0 + 1.0, vmask=None,
+        )
+    with pytest.raises(TypeError):
+        build_si3_orca2_o4_config()
+    with pytest.raises(ValueError, match="SI3ORCA2StateConfig"):
+        build_si3_orca2_o4_config(None)  # type: ignore[arg-type]
 
-def test_o3_a4_orca2_seam_and_north_fold_subcycle_lbc_lnk_pins_and_plants() -> None:
-    """`si3_dyn_adv_pra_orca2` exchanges all 11 extensive families and 55 Prather moment arrays across the ORCA2 cyclic seam and T-pivot north fold at every subcycle (`icycle >= 2`), and fails under Plant O3-A4."""
-    cfg = build_si3_orca2_o3_config().si3_orca2
+
+def test_o4_a4_orca2_seam_and_north_fold_subcycle_lbc_lnk_pins_and_plants() -> None:
+    """`si3_dyn_adv_pra_orca2` exchanges all 11 extensive families and 55 Prather moment arrays across the ORCA2 cyclic seam and T-pivot north fold at every subcycle (`icycle >= 2`), matching an independent NEMO-literal `lbc_lnk` replica at every fold and seam cell, and failing when any of `sx, sy, sxx, syy, sxy` has a wrong north-fold sign (`Plants O4-A4a..f`)."""
+    o4_state_cfg = SI3ORCA2StateConfig.for_orca2_sas_ice(ln_icedyn=True)
+    cfg = build_si3_orca2_o4_config(o4_state_cfg).si3_orca2
     assert cfg is not None
     state0, tmask, umask, vmask = o1_gate.build_synthetic_orca2_o1_state(cfg)
-    grid = _build_orca2_advection_grid(tmask, umask, vmask)
 
-    # Prescribe strong velocities near the cyclic seam (ji=2..5, 179..182) and north fold (jj=146..150)
-    # so `zcfl > 0.5` (`icycle = 2`) and subcycle 1 (`ihls = 1`) feeds subcycle 2 (`ihls = 0`).
-    u_np = np.zeros((184, 152), dtype=np.float64)
-    v_np = np.zeros((184, 152), dtype=np.float64)
-    u_np[:, :] = 14.5  # zcfl ~ 14.5 * 10800 / 185000 ~ 0.85 -> icycle = 2
-    v_np[:, :] = 6.2
+    # Ensure wet cells and non-zero ice + non-zero Prather moments across the
+    # north fold (`jj = 146..151`) and cyclic east-west seam (`ji = 0..5, 178..183`)
+    # so every moment of every family is non-vacuously tested at both the fold and seam.
+    tmask_full = si3_lbc_lnk_orca2(
+        tmask.at[:, 140:150].set(1.0), "T", 1.0, nn_hls=2, ldfull=True
+    )
+    umask_full = si3_lbc_lnk_orca2(
+        umask.at[:, 140:150].set(1.0), "U", 1.0, nn_hls=2, ldfull=True
+    )
+    vmask_full = si3_lbc_lnk_orca2(
+        vmask.at[:, 140:150].set(1.0), "V", 1.0, nn_hls=2, ldfull=True
+    )
+    grid = _build_orca2_advection_grid(tmask_full, umask_full, vmask_full)
+
+    rng = np.random.default_rng(2026102405)
+    e1e2t_np = np.asarray(grid.e1e2t)
+
+    def _seed_moments(shape: tuple[int, ...], base_scale: float) -> SI3PratherMoments:
+        area_b = e1e2t_np.reshape((184, 152) + (1,) * (len(shape) - 2))
+        return SI3PratherMoments(
+            sx=jnp.asarray(rng.uniform(-0.12, 0.14, size=shape) * base_scale * area_b),
+            sy=jnp.asarray(rng.uniform(-0.11, 0.13, size=shape) * base_scale * area_b),
+            sxx=jnp.asarray(rng.uniform(-0.04, 0.05, size=shape) * base_scale * area_b),
+            syy=jnp.asarray(rng.uniform(-0.04, 0.05, size=shape) * base_scale * area_b),
+            sxy=jnp.asarray(rng.uniform(-0.03, 0.04, size=shape) * base_scale * area_b),
+        )
+
+    a_i_seed = jnp.asarray(rng.uniform(0.08, 0.14, size=state0.a_i.shape))
+    v_i_seed = a_i_seed * jnp.asarray(rng.uniform(0.5, 1.8, size=state0.v_i.shape))
+    v_s_seed = a_i_seed * jnp.asarray(rng.uniform(0.03, 0.12, size=state0.v_s.shape))
+    sv_i_seed = v_i_seed * 4.2
+    oa_i_seed = a_i_seed * 18.0
+    a_ip_seed = a_i_seed * 0.35
+    v_ip_seed = a_ip_seed * 0.07
+    v_il_seed = a_ip_seed * 0.02
+    e_s_seed = jnp.asarray(rng.uniform(1.0e7, 4.0e7, size=state0.e_s.shape))
+    e_i_seed = jnp.asarray(rng.uniform(1.0e8, 3.5e8, size=state0.e_i.shape))
+    szv_i_seed = jnp.asarray(rng.uniform(0.4, 2.2, size=state0.szv_i.shape))
+
+    prather_seed = SI3AllPratherMoments(
+        ice=_seed_moments(state0.v_i.shape, 0.4),
+        sn=_seed_moments(state0.v_s.shape, 0.03),
+        a=_seed_moments(state0.a_i.shape, 0.08),
+        age=_seed_moments(state0.oa_i.shape, 1.0),
+        sal=_seed_moments(state0.sv_i.shape, 1.2),
+        ap=_seed_moments(state0.a_ip.shape, 0.02),
+        vp=_seed_moments(state0.v_ip.shape, 0.002),
+        vl=_seed_moments(state0.v_il.shape, 0.0005),
+        c0=_seed_moments(state0.e_s.shape, 1.0e6),
+        e=_seed_moments(state0.e_i.shape, 1.0e7),
+        si=_seed_moments(state0.szv_i.shape, 0.1),
+    )
+
+    u_np = np.full((184, 152), 14.5, dtype=np.float64)
+    v_np = np.full((184, 152), 6.2, dtype=np.float64)
     u_ice = si3_lbc_lnk_orca2(
         jnp.asarray(u_np) * grid.umask, "U", -1.0, nn_hls=2, ldfull=True
     )
@@ -1217,14 +1537,56 @@ def test_o3_a4_orca2_seam_and_north_fold_subcycle_lbc_lnk_pins_and_plants() -> N
         jnp.asarray(v_np) * grid.vmask, "V", -1.0, nn_hls=2, ldfull=True
     )
     state_in = si3_apply_state_halos_orca2(
-        state0._replace(u_ice=u_ice, v_ice=v_ice), config=cfg
+        state0._replace(
+            a_i=a_i_seed,
+            v_i=v_i_seed,
+            v_s=v_s_seed,
+            sv_i=sv_i_seed,
+            oa_i=oa_i_seed,
+            a_ip=a_ip_seed,
+            v_ip=v_ip_seed,
+            v_il=v_il_seed,
+            e_s=e_s_seed,
+            e_i=e_i_seed,
+            szv_i=szv_i_seed,
+            u_ice=u_ice,
+            v_ice=v_ice,
+            prather=prather_seed,
+        ),
+        config=cfg,
     )
+    sss_m = jnp.full((184, 152), 34.2, dtype=jnp.float64)
+    sst_m = jnp.full((184, 152), -1.8, dtype=jnp.float64)
 
-    state_out, diag = si3_dyn_orca2(state_in, grid, kt=1, config=cfg)
+    # Refuse missing sss_m or sst_m in `si3_dyn_orca2` and `si3_o4_step`
+    with pytest.raises(ValueError, match="sss_m"):
+        si3_dyn_orca2(state_in, grid, kt=1, sss_m=None, sst_m=sst_m, config=cfg, **_dyn_inputs())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="sst_m"):
+        si3_dyn_orca2(state_in, grid, kt=1, sss_m=sss_m, sst_m=None, config=cfg, **_dyn_inputs())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="sss_m"):
+        si3_o4_step(state_in, grid, kt=1, sss_m=None, sst_m=sst_m, config=cfg, rn_uice=None, rn_vice=None, apply_halos=False)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="sst_m"):
+        si3_o4_step(state_in, grid, kt=1, sss_m=sss_m, sst_m=None, config=cfg, rn_uice=None, rn_vice=None, apply_halos=False)  # type: ignore[arg-type]
+
+    state_out, diag = si3_dyn_orca2(
+        state_in, grid, kt=1, sss_m=sss_m, sst_m=sst_m, config=cfg, **_dyn_inputs()
+    )
     assert int(diag.icycle) == 2
 
-    # Every extensive and all 55 Prather moments in `state_out` must be 0-ULP halo-idempotent
-    state_rehalo = si3_apply_state_halos_orca2(state_out, config=cfg)
+    # Compare every extensive and all 55 Prather moment arrays at every north-fold
+    # cell (`jj = 149, 150, 151`) and every east-west cyclic seam cell
+    # (`ji = 0, 1, 182, 183`) against the independent NEMO-literal replica
+    # `_ref_nemo_lbc_lnk_orca2_t_point` (`icedyn_adv_pra.f90:450-494`, `lbcnfd.f90:96-150`).
+    moment_signs = {
+        "sx": -1.0,
+        "sy": -1.0,
+        "sxx": 1.0,
+        "syy": 1.0,
+        "sxy": 1.0,
+    }
+    fold_rows = slice(149, 152)
+    seam_cols = [0, 1, 182, 183]
+
     for fname in (
         "v_i",
         "v_s",
@@ -1239,25 +1601,44 @@ def test_o3_a4_orca2_seam_and_north_fold_subcycle_lbc_lnk_pins_and_plants() -> N
         "e_i",
         "szv_i",
     ):
-        _assert_zero_ulp(
-            getattr(state_out, fname),
-            getattr(state_rehalo, fname),
-            f"post_dyn_halo_idempotent.{fname}",
-        )
+        arr_out = np.asarray(getattr(state_out, fname), dtype=np.float64)
+        ref_linked = _ref_nemo_lbc_lnk_orca2_t_point(arr_out, psgn=1.0, nn_hls=2)
+        _assert_zero_ulp(arr_out[:, fold_rows], ref_linked[:, fold_rows], f"fold.{fname}")
+        _assert_zero_ulp(arr_out[seam_cols, :], ref_linked[seam_cols, :], f"seam.{fname}")
+
     for fam_name in state_out.prather._fields:
         fam_out = getattr(state_out.prather, fam_name)
-        fam_reh = getattr(state_rehalo.prather, fam_name)
-        for mname in ("sx", "sy", "sxx", "syy", "sxy"):
+        for mname, psgn in moment_signs.items():
+            m_arr = np.asarray(getattr(fam_out, mname), dtype=np.float64)
+            ref_m = _ref_nemo_lbc_lnk_orca2_t_point(m_arr, psgn=psgn, nn_hls=2)
+            assert float(np.max(np.abs(m_arr[:, fold_rows]))) > 0.0, (
+                f"vacuous zero fold moments for {fam_name}.{mname}"
+            )
+            assert float(np.max(np.abs(m_arr[seam_cols, :]))) > 0.0, (
+                f"vacuous zero seam moments for {fam_name}.{mname}"
+            )
             _assert_zero_ulp(
-                getattr(fam_out, mname),
-                getattr(fam_reh, mname),
-                f"post_dyn_halo_idempotent.prather.{fam_name}.{mname}",
+                m_arr[:, fold_rows],
+                ref_m[:, fold_rows],
+                f"independent_nfd_replica.prather.{fam_name}.{mname}",
+            )
+            _assert_zero_ulp(
+                m_arr[seam_cols, :],
+                ref_m[seam_cols, :],
+                f"independent_seam_replica.prather.{fam_name}.{mname}",
             )
 
-    # Plant O3-A4a: omitting inter-subcycle `lbc_lnk` (`_plant_omit_subcycle_lbc=True`)
+    # Plant O4-A4a: omitting inter-subcycle `lbc_lnk` (`_plant_omit_subcycle_lbc=True`)
     # corrupts seam and north-fold interior cells on subcycle 2 (`icycle = 2`) and fails 0-ULP!
     state_no_lbc, _ = si3_dyn_orca2(
-        state_in, grid, kt=1, config=cfg, _plant_omit_subcycle_lbc=True
+        state_in,
+        grid,
+        kt=1,
+        sss_m=sss_m,
+        sst_m=sst_m,
+        config=cfg,
+        **_dyn_inputs(),
+        _plant_omit_subcycle_lbc=True,
     )
     with pytest.raises(AssertionError, match="max ULP"):
         _assert_zero_ulp(
@@ -1266,337 +1647,149 @@ def test_o3_a4_orca2_seam_and_north_fold_subcycle_lbc_lnk_pins_and_plants() -> N
             "plant_omit_subcycle_lbc_interior_v_i",
         )
 
-    # Plant O3-A4b: wrong north-fold sign (`+1` instead of `-1` on `sx, sy`, `_plant_wrong_nfd_sign=True`)
-    # corrupts moments across the T-pivot north fold and fails 0-ULP!
-    state_bad_nfd, _ = si3_dyn_orca2(
-        state_in, grid, kt=1, config=cfg, _plant_wrong_nfd_sign=True
-    )
-    with pytest.raises(AssertionError, match="max ULP"):
-        _assert_zero_ulp(
-            state_out.prather.ice.sx,
-            state_bad_nfd.prather.ice.sx,
-            "plant_wrong_nfd_sign_ice_sx",
+    # Plants O4-A4b..f: planting a wrong north-fold sign on EACH of `sx, sy, sxx, syy, sxy`
+    # individually (`_plant_wrong_nfd_sign=mname`) MUST fail the independent NEMO-literal
+    # north-fold replica check on that moment (`icedyn_adv_pra.f90:450-490`)!
+    for mname, psgn in moment_signs.items():
+        state_bad_m, _ = si3_dyn_orca2(
+            state_in,
+            grid,
+            kt=1,
+            sss_m=sss_m,
+            sst_m=sst_m,
+            config=cfg,
+            **_dyn_inputs(),
+            _plant_wrong_nfd_sign=mname,
         )
+        bad_arr = np.asarray(getattr(state_bad_m.prather.ice, mname), dtype=np.float64)
+        ref_arr = _ref_nemo_lbc_lnk_orca2_t_point(bad_arr, psgn=psgn, nn_hls=2)
+        with pytest.raises(AssertionError, match="max ULP"):
+            _assert_zero_ulp(
+                bad_arr[:, fold_rows],
+                ref_arr[:, fold_rows],
+                f"plant_wrong_nfd_sign_{mname}",
+            )
 
 
 # ==============================================================================
 # Test (b): Lane-3 `ICE_ADV1D` / `ICE_ADV2D` invariance and real parent-vs-current
-# (`042c7bd74c29713be111033b8685c30d9209f1f9`) 0-ULP bit-identity control
-# (`Plants O3-B1, O3-B2`).
+# (`042c7bd74c2944dab8c39318687ab0cef54f9d2b`) 0-ULP bit-identity control
+# (`Plants O4-B1, O4-B2`).
 # ==============================================================================
 
 
-def _load_parent_commit_ice_modules(
-    parent_commit: str = PARENT_COMMIT,
-) -> dict[str, types.ModuleType]:
-    """Load `packages/ice/legoesm/ice/*` directly from `parent_commit` via `git show`."""
-    module_specs = (
-        ("legoesm.ice.constants_config", "packages/ice/legoesm/ice/constants_config.py"),
-        ("legoesm.ice.si3_orca2_state", "packages/ice/legoesm/ice/si3_orca2_state.py"),
-        ("legoesm.ice.config", "packages/ice/legoesm/ice/config.py"),
-        ("legoesm.ice.state", "packages/ice/legoesm/ice/state.py"),
-        ("legoesm.ice.transport", "packages/ice/legoesm/ice/transport.py"),
-        ("legoesm.ice.bitz_lipscomb", "packages/ice/legoesm/ice/bitz_lipscomb.py"),
-        ("legoesm.ice.snow", "packages/ice/legoesm/ice/snow.py"),
-        ("legoesm.ice.itd", "packages/ice/legoesm/ice/itd.py"),
-        ("legoesm.ice.sea_ice", "packages/ice/legoesm/ice/sea_ice.py"),
-        ("legoesm.ice.c1d_omip_l3", "packages/ice/legoesm/ice/c1d_omip_l3.py"),
-        ("legoesm.ice.scm", "packages/ice/legoesm/ice/scm.py"),
+_LANE3_DUMP = TESTCASES_DIR / "nemo_si3_lane3_prather_dump.py"
+_PACKAGE_ROOTS = (
+    "packages/core",
+    "packages/ocean",
+    "packages/atmosphere",
+    "packages/coupler",
+    "packages/ice",
+    "packages/land",
+    "packages/ml",
+    "packages/tools",
+    "src",
+)
+
+
+def _run_lane3_dump(tree: Path, out: Path, *extra: str) -> dict[str, np.ndarray]:
+    """Run the lane-3 dump in a fresh interpreter whose `legoesm` comes only from `tree`."""
+    env = dict(
+        os.environ,
+        PYTHONPATH=os.pathsep.join(str(tree / root) for root in _PACKAGE_ROOTS),
+        JAX_ENABLE_X64="1",
+        JAX_PLATFORMS="cpu",
     )
-    loaded: dict[str, types.ModuleType] = {}
-    saved_sys = {name: sys.modules.get(name) for name, _ in module_specs}
-    try:
-        for mod_name, rel_path in module_specs:
-            src = subprocess.check_output(
-                ["git", "show", f"{parent_commit}:{rel_path}"],
-                cwd=REPO_ROOT,
-                text=True,
-            )
-            mod = types.ModuleType(mod_name)
-            mod.__file__ = f"<git:{parent_commit}:{rel_path}>"
-            sys.modules[mod_name] = mod
-            exec(compile(src, mod.__file__, "exec"), mod.__dict__)
-            loaded[mod_name] = mod
-    finally:
-        for mod_name, orig_mod in saved_sys.items():
-            if orig_mod is None:
-                sys.modules.pop(mod_name, None)
-            else:
-                sys.modules[mod_name] = orig_mod
-    return loaded
-
-
-def test_o3_b_parent_vs_current_lane3_and_production_dispatcher_zero_ulp(
-    monkeypatch,
-) -> None:
-    """Real Lane-3 (`advect_si3_prather_1d`, `advect_si3_prather_2d`, `step_ice_adv1d_card`, `step_ice_adv2d_card`), `si3_o1_step`, and `step_sea_ice` callers match parent `042c7bd74c29` to 0 ULP and fail under Plants O3-B1 and O3-B2."""
-    import legoesm.ice.bitz_lipscomb as bl_mod
-    import legoesm.ice.c1d_omip_l3 as c1d_mod
-    import legoesm.ice.config as cfg_mod
-    import legoesm.ice.scm as scm_mod
-    import legoesm.ice.sea_ice as sea_ice_mod
-    import legoesm.ice.si3_orca2_state as o1_mod
-    import legoesm.ice.state as state_mod
-    import legoesm.ice.transport as tr_mod
-
-    parent_mods = _load_parent_commit_ice_modules(PARENT_COMMIT)
-    p_tr = parent_mods["legoesm.ice.transport"]
-
-    # 1. Direct `advect_si3_prather_1d` and `advect_si3_prather_2d` parent-vs-current 0-ULP
-    rng = np.random.default_rng(2026102404)
-    shape = (10, 9, 4)
-    contents = jnp.asarray(rng.uniform(0.1, 2.5, size=shape) * 1.0e8)
-    moments = tuple(
-        jnp.asarray(rng.uniform(-0.2, 0.2, size=shape) * 1.0e8) for _ in range(5)
+    subprocess.run(
+        [sys.executable, str(_LANE3_DUMP), str(out), *extra],
+        env=env,
+        cwd=out.parent,
+        check=True,
     )
-    u_ice = jnp.asarray(rng.uniform(-0.35, 0.45, size=shape[:2]))
-    v_ice = jnp.asarray(rng.uniform(-0.30, 0.40, size=shape[:2]))
-    area = jnp.asarray(3.5e7 + rng.uniform(-2.0e6, 2.0e6, size=shape[:2]))
-    wet = jnp.ones(shape[:2], dtype=bool)
+    with np.load(out) as dump:
+        return {key: dump[key] for key in dump.files}
 
-    p_1d = p_tr.advect_si3_prather_1d(
-        contents,
-        moments,
-        u_ice,
-        jnp.zeros_like(v_ice),
-        area,
-        wet,
-        1200.0,
-        dx=6000.0,
-        dy=6000.0,
-        ice_volume_index=0,
-        concentration_index=1,
-    )
-    c_1d = advect_si3_prather_1d(
-        contents,
-        moments,
-        u_ice,
-        jnp.zeros_like(v_ice),
-        area,
-        wet,
-        1200.0,
-        dx=6000.0,
-        dy=6000.0,
-        ice_volume_index=0,
-        concentration_index=1,
-    )
-    _assert_zero_ulp(p_1d[0], c_1d[0], "advect_si3_prather_1d.contents")
-    for idx in range(5):
-        _assert_zero_ulp(p_1d[1][idx], c_1d[1][idx], f"advect_si3_prather_1d.moments[{idx}]")
 
-    for step_idx in (1, 2):
-        p_2d = p_tr.advect_si3_prather_2d(
-            contents,
-            moments,
-            u_ice,
-            v_ice,
-            area,
-            wet,
-            1200.0,
-            dx=6000.0,
-            dy=6000.0,
-            ice_step_index=step_idx,
-            ice_volume_index=0,
-            concentration_index=1,
-        )
-        c_2d = advect_si3_prather_2d(
-            contents,
-            moments,
-            u_ice,
-            v_ice,
-            area,
-            wet,
-            1200.0,
-            dx=6000.0,
-            dy=6000.0,
-            ice_step_index=step_idx,
-            ice_volume_index=0,
-            concentration_index=1,
-        )
-        _assert_zero_ulp(p_2d[0], c_2d[0], f"advect_si3_prather_2d(step={step_idx}).contents")
-        for idx in range(5):
-            _assert_zero_ulp(
-                p_2d[1][idx],
-                c_2d[1][idx],
-                f"advect_si3_prather_2d(step={step_idx}).moments[{idx}]",
-            )
+def test_o4_b_lane3_parent_vs_current_zero_ulp(tmp_path: Path) -> None:
+    """Lane-3 cards, the shared correction ledger and `step_sea_ice` match parent `042c7bd74c29` at 0 ULP; a real arithmetic-order plant fails."""
+    parent_tree = tmp_path / "parent"
+    parent_tree.mkdir()
+    archive = subprocess.run(
+        ["git", "archive", PARENT_COMMIT, *_PACKAGE_ROOTS],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+    ).stdout
+    subprocess.run(["tar", "-x", "-C", str(parent_tree)], input=archive, check=True)
 
-    # 2. Lane-3 `step_ice_adv1d_card` and `step_ice_adv2d_card` parent-vs-current 0-ULP
-    card_1d = build_ice_adv1d_card(np.full((59, 59), -1.8, dtype=np.float64))
-    c_card1d_st = step_ice_adv1d_card(card_1d, card_1d.initial_state)
-    orig_tr_1d = tr_mod.advect_si3_prather_1d
-    try:
-        tr_mod.advect_si3_prather_1d = p_tr.advect_si3_prather_1d
-        p_card1d_st = step_ice_adv1d_card(card_1d, card_1d.initial_state)
-    finally:
-        tr_mod.advect_si3_prather_1d = orig_tr_1d
-    _assert_zero_ulp(p_card1d_st.contents, c_card1d_st.contents, "step_ice_adv1d_card.contents")
-    for idx in range(5):
-        _assert_zero_ulp(
-            p_card1d_st.moments[idx],
-            c_card1d_st.moments[idx],
-            f"step_ice_adv1d_card.moments[{idx}]",
-        )
+    parent = _run_lane3_dump(parent_tree, tmp_path / "parent.npz")
+    current = _run_lane3_dump(REPO_ROOT, tmp_path / "current.npz")
+    assert str(parent.pop("_module_file")).startswith(str(parent_tree))
+    assert str(current.pop("_module_file")).startswith(str(REPO_ROOT / "packages"))
+    assert parent.keys() == current.keys()
+    for key, value in parent.items():
+        if value.dtype == np.float64:
+            _assert_zero_ulp(value, current[key], f"lane3.{key}")
+        else:
+            np.testing.assert_array_equal(value, current[key], err_msg=key)
 
-    card_2d = build_ice_adv2d_card(np.full((99, 99), -1.8, dtype=np.float64))
-    c_card2d_st = step_ice_adv2d_card(card_2d, card_2d.initial_state, completed_steps=0)
-    orig_tr_2d = tr_mod.advect_si3_prather_2d
-    try:
-        tr_mod.advect_si3_prather_2d = p_tr.advect_si3_prather_2d
-        p_card2d_st = step_ice_adv2d_card(card_2d, card_2d.initial_state, completed_steps=0)
-    finally:
-        tr_mod.advect_si3_prather_2d = orig_tr_2d
-    _assert_zero_ulp(p_card2d_st.contents, c_card2d_st.contents, "step_ice_adv2d_card.contents")
-    for idx in range(5):
-        _assert_zero_ulp(
-            p_card2d_st.moments[idx],
-            c_card2d_st.moments[idx],
-            f"step_ice_adv2d_card.moments[{idx}]",
-        )
+    # Non-vacuity: Hsnow/Hbig/zapneg change most tracers in both calling conventions.
+    for tag in ("int", "ext"):
+        assert int(np.count_nonzero(current[f"corr_{tag}.changed_per_tracer"])) >= 10
 
-    # 3. Production dispatcher `step_sea_ice` (dynamic-v2, `si3_bl99`, and `si3_orca2_o1`)
-    t0 = canonical_constants.T_freeze
-    cfg_v2 = SeaIceConfig(snow=SnowConfig(enabled=True), brine=BrineConfig(enabled=True))
-    dyn_state = init_dynamic_ice_state((2,))
-    forcing_v2 = scm_mod.cold_polar_forcing(ncol=2)
-    sst_2 = jnp.full((2,), t0 - 1.8, dtype=jnp.float64)
-    zero_2 = jnp.zeros((2,), dtype=jnp.float64)
-    p_si_st, p_si_resp = parent_mods["legoesm.ice.sea_ice"].step_sea_ice(
-        dyn_state, forcing_v2, sst_2, zero_2, zero_2, cfg_v2, 1.0, 3600.0
-    )
-    c_si_st, c_si_resp = step_sea_ice(
-        dyn_state, forcing_v2, sst_2, zero_2, zero_2, cfg_v2, 1.0, 3600.0
-    )
-    for fname in ("h_ice", "h_snow", "T_ice", "S_ice", "concentration"):
-        _assert_zero_ulp(
-            getattr(p_si_st, fname).data,
-            getattr(c_si_st, fname).data,
-            f"step_sea_ice(v2).{fname}",
-        )
-    _assert_zero_ulp(p_si_resp.T_sfc, c_si_resp.T_sfc, "step_sea_ice(v2).T_sfc")
-
-    # O1 `si3_o1_step` and `step_sea_ice(si3_orca2_o1)` parent-vs-current 0-ULP
-    o1_cfg = SI3ORCA2StateConfig.for_orca2_sas_ice()
-    state0, tmask, umask, vmask = o1_gate.build_synthetic_orca2_o1_state(o1_cfg)
-    sss_step = jnp.full((184, 152), 34.2, dtype=jnp.float64)
-    p_o1_st = parent_mods["legoesm.ice.si3_orca2_state"].si3_o1_step(
-        state0, tmask=tmask, sss_m=sss_step, config=o1_cfg
-    )
-    c_o1_st = si3_o1_step(state0, tmask=tmask, sss_m=sss_step, config=o1_cfg)
-    for fname in ("v_i", "v_s", "sv_i", "a_i", "oa_i", "snwice_mass", "snwice_fmass"):
-        _assert_zero_ulp(
-            getattr(p_o1_st, fname),
-            getattr(c_o1_st, fname),
-            f"si3_o1_step.{fname}",
-        )
-
-    # Also verify `step_sea_ice` refusal contract on `si3_orca2_o1` (parent vs current) and `si3_orca2_o3`
-    frc_o1 = SI3ORCA2Forcing(tmask=tmask, sss_m=sss_step)
-    o1_sea_cfg = build_si3_orca2_o1_config()
-    p_o1_mod = parent_mods["legoesm.ice.si3_orca2_state"]
-    p_state0 = p_o1_mod.SI3State(*state0)
-    p_frc_o1 = p_o1_mod.SI3ORCA2Forcing(tmask=tmask, sss_m=sss_step)
-    p_o1_sea_cfg = parent_mods["legoesm.ice.config"].build_si3_orca2_o1_config()
-    with pytest.raises(NotImplementedError, match="ice_update_flx"):
-        parent_mods["legoesm.ice.sea_ice"].step_sea_ice(
-            p_state0,
-            p_frc_o1,
-            jnp.full((184, 152), t0 - 1.8, dtype=jnp.float64),
-            state0.u_ice,
-            state0.v_ice,
-            p_o1_sea_cfg,
-            1.0,
-            10800.0,
-        )
-    with pytest.raises(NotImplementedError, match="ice_update_flx"):
-        step_sea_ice(
-            state0,
-            frc_o1,
-            jnp.full((184, 152), t0 - 1.8, dtype=jnp.float64),
-            state0.u_ice,
-            state0.v_ice,
-            o1_sea_cfg,
-            1.0,
-            10800.0,
-        )
-    o3_sea_cfg = build_si3_orca2_o3_config()
-    with pytest.raises(NotImplementedError, match="ice_update_flx"):
-        step_sea_ice(
-            state0,
-            frc_o1,
-            jnp.full((184, 152), t0 - 1.8, dtype=jnp.float64),
-            state0.u_ice,
-            state0.v_ice,
-            o3_sea_cfg,
-            1.0,
-            10800.0,
-        )
-
-    # Plant O3-B1: 1-ULP perturbation on `advect_si3_prather_2d` MUST fail parent-vs-current control
-    orig_adv2d = tr_mod.advect_si3_prather_2d
-
-    def _planted_adv2d(*args, **kwargs):
-        c_out, m_out, area_out = orig_adv2d(*args, **kwargs)
-        return jnp.nextafter(c_out, jnp.inf), m_out, area_out
-
-    monkeypatch.setattr(tr_mod, "advect_si3_prather_2d", _planted_adv2d)
-    with pytest.raises(AssertionError, match="max ULP = 1 != 0"):
-        planted_2d = tr_mod.advect_si3_prather_2d(
-            contents,
-            moments,
-            u_ice,
-            v_ice,
-            area,
-            wet,
-            1200.0,
-            dx=6000.0,
-            dy=6000.0,
-            ice_step_index=2,
-            ice_volume_index=0,
-            concentration_index=1,
-        )
-        _assert_zero_ulp(p_2d[0], planted_2d[0], "plant_o3_b1_adv2d")
-
-    # Plant O3-B2: 1-ULP perturbation on `step_sea_ice` MUST fail dispatcher control
-    orig_step_si = sea_ice_mod.step_sea_ice
-
-    def _planted_step_sea_ice(*args, **kwargs):
-        st_out, resp_out = orig_step_si(*args, **kwargs)
-        return st_out, resp_out._replace(T_sfc=jnp.nextafter(resp_out.T_sfc, jnp.inf))
-
-    monkeypatch.setattr(sea_ice_mod, "step_sea_ice", _planted_step_sea_ice)
-    with pytest.raises(AssertionError, match="max ULP = 1 != 0"):
-        _, planted_resp = sea_ice_mod.step_sea_ice(
-            dyn_state, forcing_v2, sst_2, zero_2, zero_2, cfg_v2, 1.0, 3600.0
-        )
-        _assert_zero_ulp(p_si_resp.T_sfc, planted_resp.T_sfc, "plant_o3_b2_step_sea_ice")
+    # Plant O4-B1: flipping Hbig's divide/multiply order in the lane-3 ledger must fail.
+    planted = _run_lane3_dump(REPO_ROOT, tmp_path / "planted.npz", "--plant-multiply-order")
+    planted.pop("_module_file")
+    differing = {key for key, value in parent.items() if not np.array_equal(value, planted[key])}
+    assert {"corr_int", "corr_ext"} <= differing
 
 
 # ==============================================================================
 # Test (c): Conservation of every extensive to round-off on a closed ORCA2
-# `(184, 152)` test field (`Plant O3-C1`).
+# `(184, 152)` test field including ice at and next to the north fold (`Plant O4-C1`).
 # ==============================================================================
 
 
 def _build_closed_orca2_conservation_state(
     cfg: SI3ORCA2StateConfig,
 ) -> tuple[SI3State, SI3ORCA2AdvectionGrid]:
-    """Build a closed ORCA2 `(184, 152)` state with active cyclic-seam flow and non-clipping thicknesses."""
+    """Build a closed ORCA2 `(184, 152)` state with active cyclic-seam flow and ice at and next to the north fold (`jj = 148, 149`)."""
     state0, tmask, umask, vmask = o1_gate.build_synthetic_orca2_o1_state(cfg)
-    grid = _build_orca2_advection_grid(tmask, umask, vmask)
     jpi, jpj = 184, 152
 
-    # Construct a smooth ice field in the wet latitude band `jj in [12, 132]`
-    # that crosses the cyclic east-west seam (`ji = 2 <-> 182`) with zero support
-    # near the north fold (`jj >= 136`) and southern land (`jj <= 8`), and with
-    # uniform category intensive ratios and well-above-threshold concentrations
-    # (`a_i > 1e-3 >> epsi10`) on the active flow support so `Hbig_pra`,
-    # `Hsnow_pra`, `ice_var_zapneg`, and `ice_var_zapsmall` do not clip.
+    # Make northern band (`jj = 130..149`) wet and fold-symmetric so ice is
+    # present and actively advected AT (`jj = 149`) and NEXT TO (`jj = 148`)
+    # the ORCA2 T-pivot north fold (`Nje0 = 150` in 1-based indexing).
+    tmask_wet_fold = si3_lbc_lnk_orca2(
+        tmask.at[:, 130:150].set(1.0), "T", 1.0, nn_hls=2, ldfull=True
+    )
+    umask_wet_fold = si3_lbc_lnk_orca2(
+        umask.at[:, 130:150].set(1.0), "U", 1.0, nn_hls=2, ldfull=True
+    )
+    vmask_wet_fold = si3_lbc_lnk_orca2(
+        vmask.at[:, 130:150].set(1.0), "V", 1.0, nn_hls=2, ldfull=True
+    )
+    grid = _build_orca2_advection_grid(tmask_wet_fold, umask_wet_fold, vmask_wet_fold)
+
+    # Construct a smooth ice field in `jj in [12, 149]` (including `jj = 148` next to
+    # the fold and `jj = 149` at the fold) that is symmetric under the T-pivot
+    # reflection `ji <-> 184 - ji` (`cos(2*pi*(ii - 2)/180)`) and crosses the
+    # cyclic east-west seam (`ji = 2 <-> 181`), with `a_cat >= 0.165 > 0.15` on
+    # all active wet cells so `Hbig_pra`, `Hsnow_pra`, `ice_var_zapneg`, and
+    # `ice_var_zapsmall` do not clip.
     ii, jj = np.meshgrid(np.arange(jpi), np.arange(jpj), indexing="ij")
-    lat_ice = np.where((jj >= 12) & (jj <= 132), 1.0 + 0.15 * np.exp(-0.5 * ((jj - 70.0) / 22.0) ** 2), 0.0)
+    lat_ice = np.where(
+        (jj >= 12) & (jj <= 149),
+        1.0 + 0.12 * np.exp(-0.5 * ((jj - 90.0) / 35.0) ** 2),
+        0.0,
+    )
     lon_angle = 2.0 * np.pi * (ii - 2.0) / 180.0
-    base_2d = lat_ice * (1.0 + 0.06 * np.cos(lon_angle + 0.4) + 0.04 * np.sin(2.0 * lon_angle))
-    base_2d = base_2d * np.asarray(tmask)
+    base_2d = lat_ice * (1.0 + 0.06 * np.cos(lon_angle) + 0.03 * np.cos(2.0 * lon_angle))
+    base_2d = np.asarray(
+        si3_lbc_lnk_orca2(
+            jnp.asarray(base_2d) * tmask_wet_fold, "T", 1.0, nn_hls=2, ldfull=True
+        )
+    )
 
     hi_mean = np.asarray(state0.bounds.hi_mean)
     a_i_np = np.zeros((jpi, jpj, cfg.jpl), dtype=np.float64)
@@ -1612,8 +1805,6 @@ def _build_closed_orca2_conservation_state(
     szv_i_np = np.zeros((jpi, jpj, cfg.nlay_i, cfg.jpl), dtype=np.float64)
 
     for jl in range(cfg.jpl):
-        # Keep `a_cat >= 0.165 > 0.15` and `a_ip >= 0.155 > 0.15` on all active wet cells
-        # so `Hbig_pra`'s `< 0.15` concentration gate never triggers on 1-ULP round-trip noise.
         cat_w = 0.185 * (1.0 + 0.03 * jl)
         a_cat = cat_w * base_2d
         h_cat = 0.65 * hi_mean[jl]
@@ -1638,27 +1829,48 @@ def _build_closed_orca2_conservation_state(
                 v_i_np[:, :, jl] * (3.0 + 0.15 * jk) / cfg.nlay_i
             )
 
-    # Smooth velocities across the cyclic east-west seam (`ji = 2 <-> 182`) strictly inside
-    # the ice-covered latitude band (`jj in [20, 124]`) and zero on dry-cell faces.
-    tmask_np = np.asarray(tmask)
-    wet_u = np.asarray(umask) * tmask_np * np.roll(tmask_np, -1, axis=0)
-    wet_v = np.asarray(vmask) * tmask_np * np.roll(tmask_np, -1, axis=1)
-    vel_band = ((jj >= 20) & (jj <= 124)).astype(np.float64)
-    u_np = (0.35 + 0.12 * np.cos(lon_angle)) * vel_band * wet_u
-    v_np = (0.22 * np.sin(lon_angle)) * vel_band * wet_v
+    # Velocities across the cyclic east-west seam (`ji = 2 <-> 181`) and next to / at
+    # the north fold (`jj = 147, 148, 149`):
+    # - On `jj = 20..148` (including `jj = 148`, next to the fold), `u_ice` crosses
+    #   the cyclic seam (`ji = 2 <-> 181`) and `v_ice` on `jj = 20..147` transports
+    #   directly into/out of `jj = 148` (next to the fold).
+    # - On `jj = 149` (the T-pivot fold row), `u_ice` is T-pivot anti-symmetric
+    #   (`u_ice[183 - ji, 149] == -u_ice[ji, 149]`, via `sin((ii - 1.5)*2*pi/180)`)
+    #   so zonal advection is active right on the fold row `jj = 149` while preserving
+    #   the T-pivot fold symmetry `field[184 - ji, 149] == field[ji, 149]`.
+    tmask_np = np.asarray(tmask_wet_fold)
+    wet_u = np.asarray(umask_wet_fold) * tmask_np * np.roll(tmask_np, -1, axis=0)
+    wet_v = np.asarray(vmask_wet_fold) * tmask_np * np.roll(tmask_np, -1, axis=1)
+    u_band_subfold = ((jj >= 20) & (jj <= 148)).astype(np.float64)
+    u_band_fold = (jj == 149).astype(np.float64)
+    v_band = ((jj >= 20) & (jj <= 147)).astype(np.float64)
+    u_fold_sym = 0.28 * np.sin(2.0 * np.pi * (ii - 1.5) / 180.0)
+    u_np = ((0.35 + 0.12 * np.cos(lon_angle)) * u_band_subfold + u_fold_sym * u_band_fold) * wet_u
+    v_np = (0.22 * np.cos(lon_angle)) * v_band * wet_v
+    u_ice_j = si3_lbc_lnk_orca2(jnp.asarray(u_np), "U", -1.0, nn_hls=2, ldfull=True)
+    v_ice_j = si3_lbc_lnk_orca2(jnp.asarray(v_np), "V", -1.0, nn_hls=2, ldfull=True)
 
-    # Non-zero Prather moments within physical slope limits
     e1e2t_3d = np.asarray(grid.e1e2t)[:, :, None]
     e1e2t_4d = np.asarray(grid.e1e2t)[:, :, None, None]
+    sin_3d = np.sin(lon_angle)[:, :, None]
+    sin_4d = np.sin(lon_angle)[:, :, None, None]
 
     def _make_moments(ext_arr: np.ndarray) -> SI3PratherMoments:
         scale = ext_arr * (e1e2t_3d if ext_arr.ndim == 3 else e1e2t_4d)
+        s_ang = sin_3d if ext_arr.ndim == 3 else sin_4d
+        # Zero initial moments on `jj >= 148` so the negative-velocity `zfx = 0`
+        # asymmetry in `adv_x` (`icedyn_adv_pra.f90:615,642-648`) does not break
+        # `sx` mirror symmetry on the T-pivot row `jj = 149`, while keeping
+        # non-zero `sx, sy, sxx, syy, sxy` across `jj < 148`.
+        m_mask = ((jj < 148).astype(np.float64))[:, :, None]
+        if ext_arr.ndim == 4:
+            m_mask = m_mask[:, :, None, :]
         return SI3PratherMoments(
-            sx=jnp.asarray(0.08 * scale),
-            sy=jnp.asarray(-0.06 * scale),
-            sxx=jnp.asarray(0.02 * scale),
-            syy=jnp.asarray(0.015 * scale),
-            sxy=jnp.asarray(0.01 * scale),
+            sx=jnp.asarray(0.08 * s_ang * scale * m_mask),
+            sy=jnp.asarray(-0.06 * s_ang * scale * m_mask),
+            sxx=jnp.asarray(0.02 * scale * m_mask),
+            syy=jnp.asarray(0.015 * scale * m_mask),
+            sxy=jnp.asarray(0.01 * scale * m_mask),
         )
 
     prather = SI3AllPratherMoments(
@@ -1687,8 +1899,8 @@ def _build_closed_orca2_conservation_state(
         e_s=jnp.asarray(e_s_np),
         e_i=jnp.asarray(e_i_np),
         szv_i=jnp.asarray(szv_i_np),
-        u_ice=jnp.asarray(u_np),
-        v_ice=jnp.asarray(v_np),
+        u_ice=u_ice_j,
+        v_ice=v_ice_j,
         prather=prather,
     )
     state = si3_apply_state_halos_orca2(state, config=cfg)
@@ -1704,14 +1916,22 @@ def _domain_integral(field: jnp.ndarray, e1e2t: jnp.ndarray) -> float:
     return float(np.sum(f_int * area_int, dtype=np.float64))
 
 
-def test_o3_c_orca2_extensive_conservation_and_residual_budget_closure() -> None:
-    """Every extensive family (`v_i, v_s, a_i, oa_i, e_s, e_i, szv_i, sv_i, a_ip, v_ip, v_il`) is conserved to `<= 1e-14` relative error on ORCA2 across `x -> y` and `y -> x` sweeps and `icycle in {1, 2, 3}`, residual budgets close when clipping is active, and Plant O3-C1 fails."""
+def test_o4_c_orca2_extensive_conservation_and_residual_budget_closure() -> None:
+    """Every extensive family (`v_i, v_s, a_i, oa_i, e_s, e_i, szv_i, sv_i, a_ip, v_ip, v_il`) is conserved to `<= 1e-14` relative error on ORCA2 across `x -> y` and `y -> x` sweeps and `icycle in {1, 2, 3}` with active cyclic-seam flow and ice at and next to the north fold (`jj = 148, 149`), residual budgets close when clipping is active, and Plant O4-C1 fails."""
     cfg_sal4 = SI3ORCA2StateConfig.for_orca2_sas_ice(ln_icedyn=True, nn_icesal=4)
     state_in, grid = _build_closed_orca2_conservation_state(cfg_sal4)
+    sss_m = jnp.full((184, 152), 34.2, dtype=jnp.float64)
+    sst_m = jnp.full((184, 152), -1.8, dtype=jnp.float64)
 
-    # Confirm cyclic east-west seam transport is genuinely active (`u_ice` and `v_i` non-zero at `ji=2, 181`)
+    # Confirm both cyclic east-west seam transport (`ji = 2, 181`) AND ice + velocity
+    # AT (`jj = 149`) and NEXT TO (`jj = 148`) the north fold are genuinely active!
     assert float(jnp.max(jnp.abs(state_in.u_ice[2, 2:150]))) > 0.1
     assert float(jnp.max(jnp.abs(state_in.v_i[2, 2:150]))) > 0.01
+    assert float(jnp.max(jnp.abs(state_in.v_i[2:182, 148, :]))) > 0.05  # next to fold
+    assert float(jnp.max(jnp.abs(state_in.v_i[2:182, 149, :]))) > 0.05  # at fold
+    assert float(jnp.max(jnp.abs(state_in.u_ice[2:182, 148]))) > 0.1  # u next to fold
+    assert float(jnp.max(jnp.abs(state_in.u_ice[2:182, 149]))) > 0.1  # u at fold
+    assert float(jnp.max(jnp.abs(state_in.v_ice[2:182, 147]))) > 0.1  # v into row 148
 
     ext_names_sal4 = (
         "v_i",
@@ -1734,9 +1954,17 @@ def test_o3_c_orca2_extensive_conservation_and_residual_budget_closure() -> None
     for kt in (1, 2):
         for subcycles in (1, 2, 3):
             state_adv, diag = si3_dyn_orca2(
-                state_in, grid, kt=kt, config=cfg_sal4, subcycles=subcycles
+                state_in._replace(
+                    cflice_delayed=jnp.asarray(_CFL_FOR_ICYCLE[subcycles], dtype=jnp.float64)
+                ),
+                grid,
+                kt=kt,
+                sss_m=sss_m,
+                sst_m=sst_m,
+                config=cfg_sal4,
+                **_dyn_inputs(),
             )
-            # Confirm no clipping occurred on the smooth closed field
+            assert int(diag.icycle) == subcycles
             assert float(jnp.max(jnp.abs(diag.wfx_res))) == 0.0
             assert float(jnp.max(jnp.abs(diag.hfx_res))) == 0.0
             assert float(jnp.max(jnp.abs(diag.sfx_res))) == 0.0
@@ -1751,16 +1979,20 @@ def test_o3_c_orca2_extensive_conservation_and_residual_budget_closure() -> None
     # Also test `nn_icesal = 2` so the 11th extensive family `sv_i` is actively transported and conserved
     cfg_sal2 = cfg_sal4._replace(nn_icesal=2)
     sv_init = _domain_integral(state_in.sv_i, grid.e1e2t)
-    state_sal2, _ = si3_dyn_orca2(state_in, grid, kt=1, config=cfg_sal2, subcycles=2)
+    state_sal2, _ = si3_dyn_orca2(
+        state_in._replace(cflice_delayed=jnp.asarray(_CFL_FOR_ICYCLE[2], dtype=jnp.float64)),
+        grid,
+        kt=1,
+        sss_m=sss_m,
+        sst_m=sst_m,
+        config=cfg_sal2,
+        **_dyn_inputs(),
+    )
     sv_after = _domain_integral(state_sal2.sv_i, grid.e1e2t)
     assert abs(sv_after - sv_init) / sv_init <= 1.0e-14
 
     # Residual budget closure when `Hbig_pra` / `Hsnow_pra` / `ice_var_zapneg` actively clip:
-    # `diag_vice + diag_vsnw + diag_vpnd - diag_adv_mass == -wfx_res`
-    # `diag_heat - diag_adv_heat == -hfx_res`
-    # `diag_sice - diag_adv_salt == -sfx_res`
     state_clip_raw, _, _, _ = o1_gate.build_synthetic_orca2_o1_state(cfg_sal4)
-    # Exaggerate snow and moment slopes on interior wet cells to trigger Hsnow_pra and zapneg
     v_s_clip = state_clip_raw.v_s * 3.5
     sx_clip = state_clip_raw.prather.ice.sx * 8.0
     state_clip = si3_apply_state_halos_orca2(
@@ -1772,7 +2004,15 @@ def test_o3_c_orca2_extensive_conservation_and_residual_budget_closure() -> None
         ),
         config=cfg_sal4,
     )
-    _, diag_clip = si3_dyn_orca2(state_clip, grid, kt=1, config=cfg_sal4, subcycles=1)
+    _, diag_clip = si3_dyn_orca2(
+        state_clip._replace(cflice_delayed=jnp.asarray(_CFL_FOR_ICYCLE[1], dtype=jnp.float64)),
+        grid,
+        kt=1,
+        sss_m=sss_m,
+        sst_m=sst_m,
+        config=cfg_sal4,
+        **_dyn_inputs(),
+    )
     assert float(jnp.max(jnp.abs(diag_clip.wfx_res))) > 0.0
     mass_rate_post = (
         diag_clip.diag_vice + diag_clip.diag_vsnw + diag_clip.diag_vpnd
@@ -1802,13 +2042,15 @@ def test_o3_c_orca2_extensive_conservation_and_residual_budget_closure() -> None
     )
     assert float(jnp.max(jnp.abs(heat_budget_residual[2:182, 2:150]))) / heat_scale <= 1.0e-13
 
-    # Plant O3-C1: corrupting receiver flux (`_plant_corrupt_receiver_flux=True`) MUST break conservation
+    # Plant O4-C1: corrupting receiver flux (`_plant_corrupt_receiver_flux=True`) MUST break conservation
     state_corrupt, _ = si3_dyn_orca2(
-        state_in,
+        state_in._replace(cflice_delayed=jnp.asarray(_CFL_FOR_ICYCLE[1], dtype=jnp.float64)),
         grid,
         kt=1,
+        sss_m=sss_m,
+        sst_m=sst_m,
         config=cfg_sal4,
-        subcycles=1,
+        **_dyn_inputs(),
         _plant_corrupt_receiver_flux=True,
     )
     vi_corrupt = _domain_integral(state_corrupt.v_i, grid.e1e2t)
@@ -1820,24 +2062,74 @@ def test_o3_c_orca2_extensive_conservation_and_residual_budget_closure() -> None
 
 # ==============================================================================
 # Test (d): End-to-end differentiability (`jax.jit`, `jax.value_and_grad`,
-# `jax.jvp`) through one ORCA2 Prather advection step (`Plant O3-D1`).
+# `jax.jvp`, and central finite differences) through one ORCA2 Prather advection
+# step with `icycle` taken from carried delayed-CFL state (`Plant O4-D1`).
 # ==============================================================================
 
 
-def test_o3_d_jit_primal_zero_ulp_and_forward_equals_reverse_ad() -> None:
-    """`si3_o3_step` is 0-ULP invariant under `jax.jit`, produces finite non-zero gradients with respect to extensives, velocities (`u_ice, v_ice`), and Prather moments (`sx, sy, sxx, syy, sxy`), satisfies `reverse == forward` (`<= 1e-11`), and fails under Plant O3-D1."""
+def test_o4_d_jit_primal_zero_ulp_and_forward_equals_reverse_ad() -> None:
+    """`si3_o4_step` jits and differentiates with `icycle` from carried delayed-CFL state, is 0-ULP invariant under `jax.jit`, produces finite non-zero gradients with respect to extensives, velocities (`u_ice, v_ice`), and Prather moments (`sx, sy, sxx, syy, sxy`), satisfies `reverse == forward` (`<= 1e-11`) and central finite-difference ratio `~ 1` at `float64`, and fails under Plant O4-D1."""
     cfg = SI3ORCA2StateConfig.for_orca2_sas_ice(ln_icedyn=True)
     state_in, grid = _build_closed_orca2_conservation_state(cfg)
     sss_m = jnp.full((184, 152), 34.2, dtype=jnp.float64)
     sst_m = jnp.full((184, 152), -1.8, dtype=jnp.float64)
 
-    def _step_fn(st: SI3State) -> tuple[SI3State, SI3AdvectionDiagnostics]:
-        return si3_o3_step(
-            st, grid, kt=1, sss_m=sss_m, sst_m=sst_m, config=cfg, subcycles=1
+    # `icycle in {1, 2, 3}` is selected from traced carried state (`cflice_delayed`).
+    def _step_fn(
+        st: SI3State,
+        g: SI3ORCA2AdvectionGrid,
+        sss: jnp.ndarray,
+        sst: jnp.ndarray,
+    ) -> tuple[SI3State, SI3AdvectionDiagnostics]:
+        return si3_o4_step(
+            st, g, kt=1, sss_m=sss, sst_m=sst, config=cfg,
+            rn_uice=None, rn_vice=None, apply_halos=False,
         )
 
-    eager_state, eager_diag = _step_fn(state_in)
-    jit_state, jit_diag = jax.jit(_step_fn)(state_in)
+    eager_state, eager_diag = _step_fn(state_in, grid, sss_m, sst_m)
+    jit_state, jit_diag = jax.jit(_step_fn)(state_in, grid, sss_m, sst_m)
+
+    # Verify `t_si` halo contract (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/ice.f90:465`, `icestp.f90:526-540`):
+    # `t_si` is allocated on `A2D(0)` (`Nis0:Nie0, Njs0:Nje0`) in NEMO with no halo cells,
+    # so padded `(184, 152, jpl)` storage is zero outside `2:182, 2:150`.
+    assert float(jnp.max(jnp.abs(eager_state.t_si[:2, :, :]))) == 0.0
+    assert float(jnp.max(jnp.abs(eager_state.t_si[182:, :, :]))) == 0.0
+    assert float(jnp.max(jnp.abs(eager_state.t_si[:, :2, :]))) == 0.0
+    assert float(jnp.max(jnp.abs(eager_state.t_si[:, 150:, :]))) == 0.0
+    assert float(jnp.min(eager_state.t_si[2:182, 2:150, :])) > 200.0
+
+    # `ice_stp` repeats `ice_var_glo2eqv(2)` (`icestp.f90:226,254`); with no thermodynamics
+    # in between, a second call on the step output must change nothing.
+    eqv_again = si3_var_glo2eqv(
+        v_i=eager_state.v_i,
+        v_s=eager_state.v_s,
+        sv_i=eager_state.sv_i,
+        a_i=eager_state.a_i,
+        oa_i=eager_state.oa_i,
+        a_ip=eager_state.a_ip,
+        v_ip=eager_state.v_ip,
+        v_il=eager_state.v_il,
+        e_s=eager_state.e_s,
+        e_i=eager_state.e_i,
+        szv_i=eager_state.szv_i,
+        kn=2,
+        hi_max_top=eager_state.bounds.hi_max[-1],
+        sss_m=sss_m,
+        config=cfg,
+    )
+    for e_leaf, again_leaf in zip(
+        jax.tree_util.tree_leaves(eager_state.equivalent),
+        jax.tree_util.tree_leaves(eqv_again),
+    ):
+        _assert_zero_ulp(e_leaf, again_leaf, "glo2eqv_idempotent")
+
+    # Verify `cflice_delayed` is carried on `SI3State` and serialized as `DELAY__r8_cflice`
+    assert eager_state.cflice_delayed is not None
+    _assert_zero_ulp(eager_state.cflice_delayed, eager_diag.cflice_delayed, "cflice_delayed_state_diag")
+    rst_dict = si3_rst_to_netcdf_dict(eager_state, config=cfg)
+    assert "DELAY__r8_cflice" in rst_dict
+    reloaded_state = si3_rst_from_netcdf_dict(rst_dict, grid.tmask, config=cfg)
+    _assert_zero_ulp(reloaded_state.cflice_delayed, eager_state.cflice_delayed, "cflice_delayed_rst_roundtrip")
 
     # 1. 0-ULP primal invariance between eager and `jax.jit`
     for e_leaf, j_leaf in zip(
@@ -1853,7 +2145,19 @@ def test_o3_d_jit_primal_zero_ulp_and_forward_equals_reverse_ad() -> None:
         if jnp.issubdtype(e_leaf.dtype, jnp.floating):
             _assert_zero_ulp(e_leaf, j_leaf, "jit_primal_diag")
 
-    # 2. Reverse-mode (`jax.value_and_grad`) and forward-mode (`jax.jvp`) AD through `si3_o3_step`
+    # 1b. A traced delayed `cflice` selects each `icycle` inside one compiled step.
+    step_jit = jax.jit(_step_fn)
+    for want in (1, 2, 3):
+        st_d = state_in._replace(
+            cflice_delayed=jnp.asarray(_CFL_FOR_ICYCLE[want], dtype=jnp.float64)
+        )
+        e_st, e_dg = _step_fn(st_d, grid, sss_m, sst_m)
+        j_st, j_dg = step_jit(st_d, grid, sss_m, sst_m)
+        assert int(e_dg.icycle) == want and int(j_dg.icycle) == want
+        _assert_zero_ulp(e_st.v_i, j_st.v_i, f"jit_delayed_icycle{want}.v_i")
+        _assert_zero_ulp(e_st.prather.ice.sx, j_st.prather.ice.sx, f"jit_delayed_icycle{want}.sx")
+
+    # 2. Reverse-mode (`jax.value_and_grad`) and forward-mode (`jax.jvp`) AD through `si3_o4_step`
     weights_2d = jnp.asarray(
         1.0 + 0.25 * np.sin(np.arange(184)[:, None] * 0.1 + np.arange(152)[None, :] * 0.13),
         dtype=jnp.float64,
@@ -1910,14 +2214,16 @@ def test_o3_d_jit_primal_zero_ulp_and_forward_equals_reverse_ad() -> None:
             v_ice=v_ice,
             prather=state_in.prather._replace(ice=m_ice),
         )
-        out_st, out_diag = si3_o3_step(
+        out_st, _ = si3_o4_step(
             st,
             grid,
             kt=1,
             sss_m=sss_m,
             sst_m=sst_m,
             config=cfg,
-            subcycles=1,
+            rn_uice=None,
+            rn_vice=None,
+            apply_halos=False,
             _plant_stop_gradient=plant_stop_grad,
         )
         return (
@@ -1936,7 +2242,7 @@ def test_o3_d_jit_primal_zero_ulp_and_forward_equals_reverse_ad() -> None:
             + 1.0e-10 * jnp.sum(w_int[:, :, None] * out_st.prather.ice.sxx)
             + 1.0e-10 * jnp.sum(w_int[:, :, None] * out_st.prather.ice.syy)
             + 1.0e-10 * jnp.sum(w_int[:, :, None] * out_st.prather.ice.sxy)
-            + 1.0e-3 * jnp.sum(w_int * out_diag.snwice_fmass if hasattr(out_diag, "snwice_fmass") else w_int * out_st.snwice_fmass)
+            + 1.0e-3 * jnp.sum(w_int * out_st.snwice_fmass)
         )
 
     primals = (
@@ -1996,7 +2302,33 @@ def test_o3_d_jit_primal_zero_ulp_and_forward_equals_reverse_ad() -> None:
     rel_ad_diff = abs(jvp_f - vjp_val) / max(abs(jvp_f), abs(vjp_val), 1.0e-30)
     assert rel_ad_diff <= 1.0e-11, f"JVP vs VJP mismatch: {rel_ad_diff:.3e}"
 
-    # Plant O3-D1: `_plant_stop_gradient=True` zeros all gradients and MUST fail the AD check
+    # 3. Central finite-difference check at `float64` (`ratio ~ 1`):
+    #    Perturb `u_ice` and `v_i` along smooth interior directions with step `eps = 1e-6`
+    #    and verify `fd_deriv / ad_deriv` matches `1.0` to `<= 1e-7`.
+    eps_fd = 1.0e-6
+    dir_u = interior * jnp.asarray(np.cos(np.arange(184)[:, None] * 0.07), dtype=jnp.float64)
+    ad_u_deriv = float(jnp.sum(grads[10] * dir_u))
+    assert abs(ad_u_deriv) > 1.0e-3
+    primals_u_plus = primals[:10] + (primals[10] + eps_fd * dir_u,) + primals[11:]
+    primals_u_minus = primals[:10] + (primals[10] - eps_fd * dir_u,) + primals[11:]
+    fd_u_deriv = float(_loss(primals_u_plus) - _loss(primals_u_minus)) / (2.0 * eps_fd)
+    fd_u_ratio = fd_u_deriv / ad_u_deriv
+    assert abs(fd_u_ratio - 1.0) <= 1.0e-7, (
+        f"u_ice central FD ratio = {fd_u_ratio:.12f} (ad={ad_u_deriv}, fd={fd_u_deriv})"
+    )
+
+    dir_vi = interior[:, :, None] * jnp.ones_like(primals[0])
+    ad_vi_deriv = float(jnp.sum(grads[0] * dir_vi))
+    assert abs(ad_vi_deriv) > 1.0
+    primals_vi_plus = (primals[0] + eps_fd * dir_vi,) + primals[1:]
+    primals_vi_minus = (primals[0] - eps_fd * dir_vi,) + primals[1:]
+    fd_vi_deriv = float(_loss(primals_vi_plus) - _loss(primals_vi_minus)) / (2.0 * eps_fd)
+    fd_vi_ratio = fd_vi_deriv / ad_vi_deriv
+    assert abs(fd_vi_ratio - 1.0) <= 1.0e-7, (
+        f"v_i central FD ratio = {fd_vi_ratio:.12f} (ad={ad_vi_deriv}, fd={fd_vi_deriv})"
+    )
+
+    # Plant O4-D1: `_plant_stop_gradient=True` zeros all gradients and MUST fail the AD check
     _, planted_grads = jax.value_and_grad(
         lambda p: _loss(p, plant_stop_grad=True)
     )(primals)
