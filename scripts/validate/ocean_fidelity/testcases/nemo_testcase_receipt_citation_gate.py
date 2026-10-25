@@ -344,6 +344,7 @@ FILES = {
     "ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbcnfd.f90": NEMO / "cfgs/ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbcnfd.f90",
     "ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbclnk.f90": NEMO / "cfgs/ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbclnk.f90",
     "ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icestp.f90": NEMO / "cfgs/ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icestp.f90",
+    "ORCA2_SAS_ICE_O5_REC/BLD/ppsrc/nemo/icedyn_adv_pra.f90": NEMO / "cfgs/ORCA2_SAS_ICE_O5_REC/BLD/ppsrc/nemo/icedyn_adv_pra.f90",
     "tests/ice/unit/test_si3_o5_strength_aevp.py": REPO / "tests/ice/unit/test_si3_o5_strength_aevp.py",
     # --- SI3 ladder round 9 (O3) ---
     "ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icevar.f90": NEMO / "cfgs/ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icevar.f90",
@@ -9658,6 +9659,9 @@ CITATION_MAP = {
     'tests/ice/unit/test_si3_surface.py:483': 'def test_zsipt_consumer_plant_is_caught(monkeypatch):',
     'tests/ice/unit/test_si3_surface.py:324': 'def lbc_t_oracle(interior, psgn):',
     'tests/ice/unit/test_si3_surface.py:514': 'def test_production_path_plants_fire(plant, monkeypatch):',
+    # --- SI3 round 12 (O5) admitted-record result ---
+    'ORCA2_SAS_ICE_O5_REC/BLD/ppsrc/nemo/icedyn_adv_pra.f90:267': 'odd ice time step:  adv_x then adv_y',
+    'ORCA2_SAS_ICE_O5_REC/BLD/ppsrc/nemo/icedyn_adv_pra.f90:317': 'even ice time step:  adv_y then adv_x',
 }
 
 

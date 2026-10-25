@@ -2,10 +2,9 @@
 
 ## Outcome
 
-The O5 NEMO acquisition tool is complete and its read-only preflight passes.
-No NEMO build or integration was run. The operator must run
-`scripts/validate/ocean_fidelity/testcases/nemo_si3_o5_orca2_sas_acquisition/run.sh --run`;
-until that happens, O5 remains UNMEASURED against NEMO.
+The operator acquisition is admitted and O5 is READY TO LAND. The retained
+record scores 0 ULP throughout the preregistered three-step CPU production-JIT
+comparison. No model change follows from the measurement.
 
 Resume 4 diagnoses and repairs the retained reference-run initialization
 failure. The offending assignment was `ln_ice_embd` on line 28 of the original
@@ -152,6 +151,40 @@ dynamics-off acquisition. Preflight therefore checks its provenance, while
 admission checks the complete real O5 `ocean.output`. The default path remains
 read-only, while `--run` has RAM, disk, timeout, ERR and EXIT gates.
 
+## O5 record results
+
+CONFIRMED: admission returned `PASS_O5_ADMISSION` for producer
+`5eb81c94a9d6b711919b3b053b86a4ba19c0d82d`. It verified both retained
+binaries, all 82 record checksums and payload checksums, independent `STOP 0`
+completion of both runs, and byte identity of the step-3 ocean and ice
+restarts. The 22 retained-evidence refusal plants all refused. The admitted
+JSON is
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round12/oracle_o5_orca2_sas_ice/o5_admission.json`,
+SHA-256 `8f9d911f67a0e651966ee3096d245a796a81d3c8266ed03705047cd191e131bf`.
+
+The scorer used binary64, `transcendentals="libm"`, CPU production JIT, and
+the one-rank full T-pivot fold at every step. Strength was replayed from
+NEMO's recorded five-category area and volume, through both raw H79 strength
+and smoothing. aEVP consumed NEMO's separately recorded post-strength field.
+The 199 compared field instances produced 796 wet/full/seam/fold ULP maxima;
+every maximum was zero and every wet normalised error was `0.0`.
+
+| kt | Prather state entering O5 | strength raw/smoothed | `fimask` | aEVP frames 1/2/3/50/99/100 + exit | wet/full ULP | seam/fold wet-cell ULP |
+|---:|---|---:|---:|---:|---:|---:|
+| 1 | x then y | 0 / 0 | 0 | all 0 | 0 / 0 | 0 / 0 |
+| 2 | y then x | 0 / 0 | not rewritten after kt 1 | all 0 | 0 / 0 | 0 / 0 |
+| 3 | x then y | 0 / 0 | not rewritten after kt 1 | all 0 | 0 / 0 | 0 / 0 |
+
+The alternating orders are the running record build's odd-step branch
+(`ORCA2_SAS_ICE_O5_REC/BLD/ppsrc/nemo/icedyn_adv_pra.f90:267`) and even-step
+branch (`ORCA2_SAS_ICE_O5_REC/BLD/ppsrc/nemo/icedyn_adv_pra.f90:317`). Thus
+both sweep orders feed an exact O5 score; there is no first non-bit owning
+statement to localise and no proposal or model change. O5 is READY TO LAND.
+
+PLAUSIBLE only, unchanged from the preregistration: the multi-rank partial
+pivot-line fold remains synthetic-unit-tested rather than NEMO-recorded. It is
+outside this decided one-rank O5 claim.
+
 ## Verification
 
 - Resume-4 read-only preflight: PASS, including exact-group validation against
@@ -172,7 +205,7 @@ read-only, while `--run` has RAM, disk, timeout, ERR and EXIT gates.
 - Citation gate: all nine SI3 receipts and the default gate PASS with zero
   failures, unmapped citations, or stale full-map entries; gate tests: 17
   passed.
-- NEMO acquisition result: ACQUISITION_NEEDED.
+- NEMO acquisition result: ADMITTED; O5 READY TO LAND.
 - Previous re-reviews: Argon RUN; Claude HOLD on retained-run admission was addressed by
   using the manifest producer commit and verifying its object and ancestry.
   Resume-3 Codex-authored diff review is operator-owned under the lane rule.
@@ -182,7 +215,7 @@ read-only, while `--run` has RAM, disk, timeout, ERR and EXIT gates.
 ASKED: three steps, one rank, the six preregistered inner frames, exact-input
 strength plus aEVP admission, and operator-only acquisition.
 
-UNASKED: the model now exposes a trace view of the same aEVP execution so the
-preregistered inner frames can be scored when evidence arrives; the existing
-final-state solver API and every configuration default are unchanged. No
-NEMO agreement is claimed before operator evidence exists.
+UNASKED: the model exposes a trace view of the same aEVP execution so the
+preregistered inner frames can be scored; the existing final-state solver API
+and every configuration default are unchanged. This results-only continuation
+made no new choice and no model change.
