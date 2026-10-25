@@ -139,6 +139,8 @@ FILES = {
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traadv.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traadv.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90": (
@@ -1819,6 +1821,27 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90:287-291': [
         ('pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +', 1),
         ('* r1_e1e2t(ji,jj) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 1), 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf.f90:105-122': [
+        ('SELECT CASE ( nldf_tra )   !* compute lateral mixing trend and add it to the general trend', 2),
+        ('END SELECT', 2), 18],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90:154-160': [
+        ('CALL traldf_iso_a33( Kmm, ah_wslp2, akz )', 1),
+        ('DO jk = 1, jpkm1', 1), 7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90:183-204': [
+        ('zdit(ji,jj,ik  ) = ( pt(ji+1,jj,jk  ,jn,Kbb) - pt(ji,jj,jk  ,jn,Kbb) ) * umask(ji,jj,jk  )', 1),
+        ('zdkt(ji,jj,ikp1) = ( pt(ji,jj,jk,jn,Kbb) - pt(ji,jj,jk+1,jn,Kbb) ) * wmask(ji,jj,jk+1)', 2), 22],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90:230-246': [
+        ('zA11 = e2_e1u(ji,jj) * (e3u_3d(ji,jj,jk) *(1._wp+r3u(ji,jj,Kmm)*umask(ji,jj,jk)))', 1),
+        ('&                                             + ( zdkt(ji,jj+1,ikp1) + zdkt(ji,jj,ik  ) )  )   )', 1), 17],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90:259-291': [
+        ('IF( jk ==1 )   zfw(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0)) = 0._wp', 1),
+        ('* r1_e1e2t(ji,jj) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 1), 33],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90:297-304': [
+        ('ELSEIF( jk == jpkm1 ) THEN', 2),
+        ('* r1_e1e2t(ji,jj) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 2), 8],
+    'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90:335-341': [
+        ("IF( ll_ptr )  CALL dia_ptr_hst( jn, 'ldf', -zfv(:,:) )", 1),
+        'END SUBROUTINE traldf_iso_lap', 7],
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:738-740': [
         'IF( ln_trabbc  )   CALL tra_bbc( kstp,      Kmm, ts, Krhs )',
         'IF( ln_tradmp  )   CALL tra_dmp( kstp, Kbb, Kmm, ts, Krhs )', 3],

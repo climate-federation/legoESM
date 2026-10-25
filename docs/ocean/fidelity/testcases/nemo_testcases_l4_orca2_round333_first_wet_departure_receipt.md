@@ -285,3 +285,81 @@ bypassing the sentinel.  The retained default and corrected-ratchet log
 SHA-256 values are
 `b3e492f001c7ca3a8466b32b5b84f93e433efcfee068a473925627c921a18b5f` and
 `68084d0b99bade46badc42b33290319bf0689e5405ca0f7d6443c3ff5c155a88`.
+
+## Resume 4: internal `traldf_iso_lap` acquisition handoff
+
+The operator authorized the held proposal and fixed its scope: the first wet
+departure is **CONFIRMED** at the `tra_ldf` call boundary for both labels and
+both tracers, while advection, SBC and QSR are exonerated and the in-place
+update hypothesis is refuted. This resume changes no model statement or
+configuration value. Codex did not run NEMO.
+
+The executing record build selects the standard isoneutral Laplacian at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf.f90:105-122`.
+Inside that routine, NEMO computes `a33`, enters `jn=1,itra`, and then enters
+the vertical-level loop at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90:154-160`.
+There is no `kpass` loop in `traldf_iso_lap`; the two executed passes are the
+T and S iterations of this tracer loop, whose end is pinned at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90:335-341`.
+
+The passive observer follows the executing statement order. It copies the
+masked tracer gradients formed at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90:183-204`,
+the horizontal tensor coefficients, reciprocal results and complete `zfu` and
+`zfv` fluxes formed at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90:230-246`,
+and the vertical mask quotients, averaged coefficients, `A31/A32`, lower and
+upper `zfw`, A33 operands, RHS reciprocal/divisor operands, and ordinary-level
+increment inputs formed and consumed at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90:259-291`.
+The deepest-level zero-upper-flux case and its divisor operands are covered at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90:297-304`.
+NEMO forms each horizontal total and the vertical total in one statement, so
+there are no separately assigned flux-component temporaries to observe; all
+of their source operands are recorded instead.
+
+Each rank-local stream contains 53 fields at explicit full declared extents,
+not merely the 18 T / 13 S registered cells or the 14 T / 4 S first-boundary
+cells. It includes both T and S passes, the input time level, RHS before and
+after, the bitwise checked per-pass increment, gradients, tensor coefficients,
+fluxes, source slopes/coefficient arrays, masks and metric operands, and
+coverage arrays. Stream metadata pins rank, origin, extents, field order and
+binary64 precision; every payload has an XOR checksum and raw IEEE signed
+zeros are retained.
+
+The new operator-only wrapper extends the reviewed round-333 tool rather than
+replacing it. It retains every inherited landing check, deliberate
+misplacement plant, deterministic-output passivity check, all-observer-stripped
+baseline, raw per-rank records, bounds fixture, checksum/truncation/derived
+time-level plants, wet-cell plants, manifest-pinned in-place and retained
+`--admit-existing` paths, and refused-output retention trap. Added controls
+cover internal begin, gradient, horizontal, vertical, deepest-level and finish
+placement; field order, tracer count, extents, signed zero, wet coverage and
+exact increment; and a two-rank `-fcheck=bounds` fixture.
+
+The clean read-only preflight passes 77 inherited tests plus 6 outer-tracer
+and 4 internal-LDF tests, the selector and every outer/internal placement
+plant, both two-rank bounds/sign fixtures, 140-file inherited deterministic
+passivity, and all ten Fortran syntax proofs. The stage object retains its
+1,367-instruction census. For `traldf_iso.o`, the exact preprocessed unit with
+all `R333_LDF_OBSERVER` lines stripped and the observed unit have identical
+normalized FP instruction censuses of 404; a changed-arithmetic object plant
+refuses. Same-program admission reports 408 identical ppsrc units and 420
+identical normalized objects, with exactly six observer and four writer units.
+The preflight ends with `ORCA2_ROUND333_TRALDF_PREFLIGHT_READY`; it neither
+builds nor executes NEMO.
+
+Operator command:
+
+```text
+/data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/orca2_r333/repo/scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round333_tracer_acquisition/run.sh --run
+```
+
+Expected evidence directory:
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round333/acquisition/orca1ice_traldf_iso_internal_kt2_np2`.
+
+Disposition is **STOPPED_FOR_RECORD**. The next admissible action is the
+operator-only acquisition and manifest-pinned admission, followed by offline
+replay of both tracer passes. No implementation landing, D122 claim, DINO
+month run or gradient claim is made. Codex review: operator.
