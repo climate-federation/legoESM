@@ -1702,7 +1702,6 @@ def _nemo_sqrt_nonnegative_forward_exact_jvp(primals, tangents):
     return result, result_dot
 
 
-@jax.custom_jvp
 def _stored_primal_with_rebuilt_tangent(stored, rebuilt):
     """Use NEMO's stored operand while retaining the finite rebuilt tangent.
 
@@ -1714,18 +1713,14 @@ def _stored_primal_with_rebuilt_tangent(stored, rebuilt):
     certified finite derivative path.  Pair its tangent with the stored primal
     without changing a single forward bit.
     """
-    del rebuilt
-    # A zero cotangent is not enough here: propagating that numeric zero back
-    # through the stage-materialisation graph can still evaluate ``0 * NaN``.
-    # Cut the stored graph explicitly; the custom JVP below supplies the sole
-    # derivative from the finite rebuilt operand.
-    return jax.lax.stop_gradient(stored)
-
-
-@_stored_primal_with_rebuilt_tangent.defjvp
-def _stored_primal_with_rebuilt_tangent_jvp(primals, tangents):
-    (stored, rebuilt), (_, rebuilt_dot) = primals, tangents
-    return _stored_primal_with_rebuilt_tangent(stored, rebuilt), rebuilt_dot
+    # A numeric zero cotangent is not enough: propagating it through the
+    # stage-materialisation graph can still evaluate ``0 * NaN``.  Express
+    # the straight-through identity from ordinary JAX primitives so both
+    # reverse and forward mode use the rebuilt derivative without a custom
+    # transpose rule.  ``rebuilt - stop_gradient(rebuilt)`` is +0 in the
+    # primal, and the physical thickness ``stored`` is strictly positive.
+    return (jax.lax.stop_gradient(stored)
+            + (rebuilt - jax.lax.stop_gradient(rebuilt)))
 
 
 def compute_treguier_kappa_gm_nemo_native(
