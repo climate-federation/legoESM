@@ -141,7 +141,14 @@ Re-measured on `6729d95bd`:
 - Bit-identity: the touched-routine probe (`unit/fn_hash.py`) output is
   byte-identical to the parent and candidate runs (`unit/resume.json`). No
   executed code changed, so the D122 ladders and DINO checks above stand.
-- Default gate: see Gates below. Per-receipt citation gate: see Gates below.
+- Default gate (land.sh set) on the committed tree: green. Fast files plus
+  the MLE unit tests: 154 passed under `-n 12`; the only 2 failures were the
+  citation-gate stamp refusing the then-dirty tree, and that file then gave
+  17 passed on the clean tree. Slow files, split to fit the 10-minute limit:
+  parallel receipt gate 2 passed, prognostic barotropic state 8 passed, stage
+  face-mask rank 2 passed (`-n 2`, 564 s). Logs `default_gate_resume_*.log`.
+- Per-receipt citation gate (`receipt_citations_resume.log`): PASS,
+  3 citations, 0 failures, 0 unmapped.
 
 ## OPEN
 
