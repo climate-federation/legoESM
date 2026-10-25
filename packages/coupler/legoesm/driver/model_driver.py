@@ -8288,7 +8288,8 @@ class ModelDriver:
             raise ValueError(
                 "checkpoint_format='zarr' cannot persist the prognostic ice "
                 "skin (ice_T_skin, carried in carry_aux) — a restart would "
-                "re-seed it at 271.35 K (#2106). Use checkpoint_format='npz' "
+                f"re-seed it at {constants.T_freeze_ocean} K (#2106). Use "
+                "checkpoint_format='npz' "
                 "with ice_skin_prognostic.")
         # Same zarr carry_aux limitation for the evolved double-moment tracers:
         # they ride carry_aux (dmtr_*), which zarr does not round-trip, so a
