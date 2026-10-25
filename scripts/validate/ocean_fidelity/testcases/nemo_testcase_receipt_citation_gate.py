@@ -1835,14 +1835,14 @@ CITATION_MAP = {
         'WRITE(iunit) magic, 1, kstp, kstage, klevel, jpi, jpj, jpk, jpts, STORAGE_SIZE(1._wp)',
         "& l4_canon_2d(ssh(:,:,klevel),'T')", 4],
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:791-793': [
-        ("CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:,:       ,Kaa), 'V', -1._wp", 2),
-        "&                       , avm_k(:,:,:)        , 'W',  1._wp, ldfull=.TRUE. )", 3],
+        ("CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:,:       ,Kaa), 'V', -1._wp", 1),
+        ("&                       , avm_k(:,:,:)        , 'W',  1._wp, ldfull=.TRUE. )", 2), 3],
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:621-637': [
         'CASE( 2 )                      ! scaling with mean sea-ice thickness',
         'zmxlm(ji,1) = MAX( rn_mxl0, zmxlm(ji,1) )', 17],
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdftke.f90:717-720': [
         'IF( nn_pdl == 1 ) THEN          !* Prandtl number case: update avt',
-        'END DO   ;   END DO', 4],
+        ('END DO   ;   END DO', 23), 4],
     'tke.py:262-268': [
         'zraug = _NEMO_MXL0_VKARMN * _NEMO_MXL0_LENGTH_SCALE / (rho_0 * g)',
         'jnp.asarray(_mxl0_anchor_floor(cfg), dtype=taum.dtype), raw)', 7],
