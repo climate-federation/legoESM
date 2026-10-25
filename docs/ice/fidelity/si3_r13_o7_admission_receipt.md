@@ -122,21 +122,47 @@ discarded.
 
 ## Invariance and gates
 
-- Lane-3 C1D bulk gate: byte-identical to round 11's JSON (SHA-256
-  `c5f96fb239913515ad3cb3ecf8b0e8917e0cd30edeb7d2dece4d0de4ba06ee03`),
-  227,760 comparisons, 227,742 bit-identical, the same 18 native-exp rows;
-  `qsb_ice_bot` is 8,760/8,760 bit-identical.
-- D5 C1D year under CPU production JIT: the complete `stage_d_year_rescore`
-  object is identical to the round-11 baseline; the landed
-  `r6_step1_plus_step2_snow_update` full-year SHA-256 remains
-  `b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2`.
-- O1/O2/O3/O5 regression suites: 57 passed, 1 intentionally deselected.
+The retained admission reproduced the admitted JSON exactly after the rebase:
+
+```text
+PREFLIGHT_OK: no NEMO build or integration was run
+PASS_O7_ADMISSION status=PASS_O7_ADMISSION native=FIRED_KT_2 full_max_ulp=0 wet_max_ulp=0
+PASS_O7_ADMISSION_SHA256 67e799dab877deeb38aeafb15949c4de1b630720e6d5fea986c402210e5a34ac
+ACQUISITION_ADMITTED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round13/refused/oracle_o7_orca2_sas_ice_20261025T172428Z_rc2_3061284
+```
+
+The post-rebase rung suites passed in the foreground:
+
+```text
+38 passed, 1 deselected in 118.04s
+37 passed in 463.58s
+```
+
+The lane-3 and D5 rescoring lines were:
+
+```text
+PASS_LANE3_BULK verdict=AT-BAR comparisons=227760 bit_identical=227742 non_bit=18 over_bar=0
+PASS_LANE3_BULK_SHA256 c5f96fb239913515ad3cb3ecf8b0e8917e0cd30edeb7d2dece4d0de4ba06ee03
+PASS_D5_STAGE_D_YEAR_RESCORE_IDENTICAL
+PASS_D5_C1D_JIT_YEAR_HASH b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2
+PASS_D5_PLATFORM_DISPOSITION D5_PLATFORM_FLOOR
+PASS_D5_EXECUTION cpu x64=true xla_flags=''
+```
+
+The first default citation-test run found that its receipt-discovery registry
+omitted the newly landed O5 acquisition receipt: 29 passed and the discovery
+test failed. Adding that existing receipt to `FILES` made the gate complete;
+the final full-map and ratchet lines are:
+
+```text
+PASS_CITATION all_si3_receipts receipts=12 citations=432 failures=0 unmapped=0 map_failures=0
+30 passed in 5.94s
+6 passed in 5.08s
+```
+
 - The two requested external reviewer CLIs could not run in this restricted
   sandbox: Claude failed DNS lookup and Argon was denied its localhost socket.
   This is an environment limitation, not positive review evidence.
-- Per-receipt citation gate: all 11 SI3 receipts passed, covering 417
-  citations with zero unmapped citations and zero full-map audit failures.
-  The default gate passed 29/29 and the private-import ratchet passed 6/6.
 - O7 surface tests passed 23/23, with one environment skip and the registered
   D5 platform-floor xfail; O7 acquisition tests passed 19/19, including the
   read-only 36-plant preflight under isolated temporary target names.
