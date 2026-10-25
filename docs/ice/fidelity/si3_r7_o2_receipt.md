@@ -128,9 +128,11 @@ fitted-category inputs, admit the operator-run record, and score it under CPU
 production JIT.
 `UNASKED`: none.
 
-`CHOICES — PENDING USER DECISION`: keep the shared NEMO-literal
-`nemo_eos_fzp` change for now. Do not yet decide whether the pre-existing
-ice-shelf and OMIP-driver callers should retain their parent rounding.
+`CHOICES — ASKED (DECISION 161, 2026-10-24, user: "Your pick")`: the one
+shared `nemo_eos_fzp` uses NEMO's literal statement for every caller. The
+pre-existing ice-shelf and OMIP-driver callers do NOT keep a separate parent
+rounding; measured above, their returned outputs are unchanged (0/4,001 and
+0/808 + 0/101 values) and only intermediate freezing points move by 1-2 ULP.
 
 Independent review disposition: Claude review was HOLD/HOLD; every listed
 finding above is confirmed and repaired. Argon's three distinct findings are
