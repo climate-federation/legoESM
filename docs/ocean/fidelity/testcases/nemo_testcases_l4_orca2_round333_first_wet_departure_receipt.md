@@ -512,3 +512,18 @@ the operator runs:
 Expected evidence remains
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round333/acquisition/orca1ice_traldf_iso_internal_kt2_np2`.
 Codex review: operator.
+
+### Resume-6 gates
+
+The clean full-receipt citation gate passes 19 citations with zero failures,
+zero unmapped citations and zero map-audit failures; all nine self-test
+controls fire. The exact ORCA2 landing battery passes all 152 tests in
+1,118.94 seconds, including the inherited ORCA2 parallel receipt gate. The
+private-import ratchet also passes separately at 6 of 6 tests in 5.02
+seconds.
+
+No DINO month gate is required because Resume 6 changes only acquisition
+tools, fixtures, tests and this receipt. No model or package source changed.
+The final state is **STOPPED_FOR_RECORD**: the next action is operator-only
+acquisition with the command above, followed by manifest-pinned admission and
+offline replay before any scientific conclusion or implementation landing.
