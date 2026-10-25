@@ -907,3 +907,416 @@ def apply_si3_jpl1_ridging(
         open_water_correction=open_water_correction,
     )
     return result, losses
+
+
+# ==============================================================================
+# SI3 ORCA2 (rung O6): five-category ridging/rafting, NEMO-literal
+# Cited build: ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icedyn_rdgrft.f90 (byte-identical
+# to the O1/O2/O5_REF/O7_REF builds).  Arrays use NEMO's index order:
+# (jpi, jpj, jpl) and (jpi, jpj, nlay, jpl).  Every operation is rounded in source
+# order (DECISION 158); exp/tanh go through the precision policy (DECISION 162).
+# ==============================================================================
+
+_RDG_EPSI10 = 1.0e-10  # ice.F90 epsi10
+_RDG_EPSI20 = 1.0e-20  # ice.F90 epsi20
+_RDG_HRDG_HI_MIN = 1.1  # icedyn_rdgrft.f90:87
+_RDG_HI_HRFT = 0.5  # icedyn_rdgrft.f90:88
+_RDG_ITERMAX = 20  # icedyn_rdgrft.f90:228 (DO WHILE iter < 20: at most 19 passes)
+_RDG_POROSITY_FULL_M = 10.0  # icedyn_rdgrft.f90:749
+_RDG_POROSITY_ZERO_M = 20.0  # icedyn_rdgrft.f90:750
+_RDG_POROSITY_SLOPE = 0.1  # icedyn_rdgrft.f90:751
+
+
+class SI3RdgrftConfig(NamedTuple):
+    """Resolved ``namdyn_rdgrft`` + the selectors ``ice_dyn_rdgrft`` reads; no defaults.
+
+    Build it from the run's resolved namelists, then pass it through
+    :func:`si3_rdgrft_config_after_init` with the run's ``ln_icethd``.
+    """
+
+    rn_csrdg: float
+    ln_partf_exp: bool
+    rn_astar: float
+    ln_distf_lin: bool
+    ln_distf_exp: bool
+    rn_murdg: float
+    ln_ridging: bool
+    rn_hstar: float
+    rn_porordg: float
+    rn_fsnwrdg: float
+    rn_fpndrdg: float
+    ln_rafting: bool
+    rn_hraft: float
+    rn_craft: float
+    rn_fsnwrft: float
+    rn_fpndrft: float
+    ln_rhg_evp_or_vp: bool
+    ln_pnd: bool  # ln_pnd_LEV .OR. ln_pnd_TOPO
+    ln_pnd_lids: bool
+    nn_icesal: int
+    rdt_ice: float
+    rhoi: float
+    rhos: float
+    rhow: float
+    rcp: float
+
+
+class SI3RdgrftState(NamedTuple):
+    """NEMO's arrays at ``ice_dyn_rdgrft`` entry that it modifies (also outputs)."""
+
+    a_i: jnp.ndarray
+    v_i: jnp.ndarray
+    v_s: jnp.ndarray
+    oa_i: jnp.ndarray
+    a_ip: jnp.ndarray
+    v_ip: jnp.ndarray
+    v_il: jnp.ndarray
+    e_s: jnp.ndarray
+    e_i: jnp.ndarray
+    szv_i: jnp.ndarray
+    at_i: jnp.ndarray
+    ato_i: jnp.ndarray
+    wfx_dyn: jnp.ndarray
+    sfx_dyn: jnp.ndarray
+    hfx_dyn: jnp.ndarray
+    wfx_snw_dyn: jnp.ndarray
+    wfx_pnd: jnp.ndarray
+
+
+class SI3RdgrftResult(NamedTuple):
+    state: SI3RdgrftState
+    selected: jnp.ndarray  # cells kept by the :311-323 selection
+    n_passes: jnp.ndarray  # ridging passes executed (<= 19)
+
+
+def si3_rdgrft_config_after_init(config: SI3RdgrftConfig, *, ln_icethd: bool) -> SI3RdgrftConfig:
+    """``ice_dyn_rdgrft_init``'s override, ``icedyn_rdgrft.f90:1273-1276``."""
+    if ln_icethd:
+        return config
+    return config._replace(rn_porordg=0.0, rn_fsnwrdg=1.0, rn_fsnwrft=1.0,
+                           rn_fpndrdg=1.0, rn_fpndrft=1.0)
+
+
+def _validate_rdgrft_config(cfg: SI3RdgrftConfig) -> None:
+    if not isinstance(cfg, SI3RdgrftConfig):
+        raise TypeError("SI3 ridging requires an explicit SI3RdgrftConfig")
+    if not cfg.ln_partf_exp:
+        raise ValueError("SI3 O6 transcribes ln_partf_exp only (ln_partf_lin is not executed)")
+    if cfg.ln_distf_lin == cfg.ln_distf_exp:
+        raise ValueError("choose one and only one redistribution function (icedyn_rdgrft.f90:1262-1265)")
+    if not cfg.ln_rhg_evp_or_vp:
+        raise ValueError("SI3 O6 transcribes the EVP/VP closing rate only (EAP rdg_conv absent)")
+    if cfg.nn_icesal != 4:
+        raise ValueError("SI3 O6 transcribes nn_icesal == 4 only")
+    if not (math.isfinite(cfg.rdt_ice) and cfg.rdt_ice > 0.0):
+        raise ValueError("SI3 ridging requires finite positive rdt_ice")
+
+
+def _rdgrft_prep(a, v, ato, closing_net, opning, cfg: SI3RdgrftConfig):
+    """``rdgrft_prep``, ``icedyn_rdgrft.f90:444-665`` (per cell; cells are the 2-D grid)."""
+    from legoesm.core import transcendentals as tr
+    from legoesm.ice.itd import si3_safe_div
+    from legoesm.ice.si3_surface import fortran_max_tie_first as fmax
+    from legoesm.ice.si3_surface import fortran_min_tie_first as fmin
+    from legoesm.ice.si3_surface import fortran_sum0
+
+    sr = nemo_source_round
+    jpl = a.shape[-1]
+    rdt = cfg.rdt_ice
+    r1 = 1.0 / rdt
+    z1_astar = 1.0 / cfg.rn_astar  # :445
+    ok = a > _RDG_EPSI10
+    zhi = jnp.where(ok, sr(si3_safe_div(v, a, ok)), 0.0)  # :451-453
+    zasum = sr(ato + fortran_sum0(a))  # :468
+    oks = zasum > _RDG_EPSI10
+    z1_asum = jnp.where(oks, sr(si3_safe_div(1.0, zasum, oks)), 0.0)  # :470-472
+    zg = [jnp.zeros_like(ato), sr(ato * z1_asum)]  # :478-479
+    for jl in range(1, jpl + 1):  # :480-482
+        zg.append(sr(sr(ato + fortran_sum0(a[..., :jl])) * z1_asum))
+    zfac = sr(1.0 / sr(1.0 - tr.exp(jnp.asarray(-z1_astar, jnp.float64))))  # :501
+    ge = [sr(sr(tr.exp(-sr(g * z1_astar))) * zfac) for g in zg]  # :502-506
+    apartf = jnp.stack([sr(ge[k] - ge[k + 1]) for k in range(jpl + 1)], axis=-1)  # :507-511
+    ap = apartf[..., 1:]
+    if cfg.ln_rafting and cfg.ln_ridging:  # :516-522
+        tanh_term = sr(1.0 + tr.tanh(sr(cfg.rn_craft * sr(zhi - cfg.rn_hraft))))
+        aridge = sr(sr(tanh_term * 0.5) * ap)
+        araft = sr(ap - aridge)
+    elif cfg.ln_ridging:  # :523-529
+        aridge, araft = ap, jnp.zeros_like(ap)
+    elif cfg.ln_rafting:  # :530-536
+        aridge, araft = jnp.zeros_like(ap), ap
+    else:  # :537-543
+        aridge, araft = jnp.zeros_like(ap), jnp.zeros_like(ap)
+
+    pos = ap > 0.0  # :603
+    sq = jnp.sqrt(sr(cfg.rn_hstar * zhi))
+    zhmean = fmax(sq, sr(zhi * _RDG_HRDG_HI_MIN))  # :604, MAXSD tie order PLAUSIBLE
+    hrmin = fmin(sr(2.0 * zhi), sr(0.5 * sr(zhmean + zhi)))  # :605
+    hraft = sr(zhi * (1.0 / _RDG_HI_HRFT))  # :598,606
+    if cfg.ln_distf_lin:  # :608-610
+        hrmax = sr(sr(2.0 * zhmean) - hrmin)
+        hrexp = jnp.zeros_like(zhi)
+        phi = sr(zhi / jnp.maximum(zhmean, _RDG_EPSI20))
+    else:  # :611-613
+        hrmax = jnp.zeros_like(zhi)
+        hrexp = sr(cfg.rn_murdg * jnp.sqrt(zhi))
+        phi = sr(zhi / jnp.maximum(_RDG_EPSI20, sr(hrmin + hrexp)))
+    hrmin = jnp.where(pos, hrmin, 0.0)  # :619-625
+    hrmax = jnp.where(pos, hrmax, 0.0)
+    hrexp = jnp.where(pos, hrexp, 0.0)
+    hraft = jnp.where(pos, hraft, 0.0)
+    phi = jnp.where(pos, phi, 1.0)
+    zaksum = apartf[..., 0]  # :599
+    for jl in range(jpl):  # :617-618, (zaksum + ridge term) + raft term
+        term = sr(sr(zaksum + sr(aridge[..., jl] * sr(1.0 - phi[..., jl])))
+                  + sr(araft[..., jl] * (1.0 - _RDG_HI_HRFT)))
+        zaksum = jnp.where(pos[..., jl], term, zaksum)
+
+    okk = zaksum > _RDG_EPSI10  # :635-637
+    cg = jnp.where(okk, sr(si3_safe_div(closing_net, zaksum, okk)), 0.0)
+    for jl in range(jpl):  # :643-650, sequential in jl
+        p = ap[..., jl]
+        excess = (sr(sr(p * cg) * rdt) > a[..., jl]) & (p != 0.0)
+        cg = jnp.where(excess, sr(sr(si3_safe_div(a[..., jl], p, p != 0.0)) * r1), cg)
+    p0cg = sr(apartf[..., 0] * cg)  # :656-663
+    zf = sr(ato + sr(sr(opning - p0cg) * rdt))
+    opning = jnp.where(zf < 0.0, sr(p0cg - sr(ato * r1)),
+                       jnp.where(zf > zasum, sr(p0cg + sr(sr(zasum - ato) * r1)), opning))
+    return apartf, aridge, araft, phi, hraft, hrmin, hrmax, hrexp, cg, opning
+
+
+def _rdgrft_shift(s: dict, cells, prep, sst, sss, hi_max, cfg: SI3RdgrftConfig) -> dict:
+    """``rdgrft_shift``, ``icedyn_rdgrft.f90:708-944`` on the selected ``cells``."""
+    from legoesm.core import transcendentals as tr
+    from legoesm.ice.itd import si3_safe_div, si3_var_roundoff
+    from legoesm.ice.si3_surface import fortran_max_tie_first as fmax
+    from legoesm.ice.si3_surface import fortran_sum0
+
+    sr = nemo_source_round
+    apartf, aridge, araft, phi, hraft, hrmin, hrmax, hrexp, cg, opning = prep
+    s = dict(s)
+    jpl = s["a_i"].shape[-1]
+    rdt = cfg.rdt_ice
+    r1 = 1.0 / rdt
+    r1_nlay = 1.0 / s["e_i"].shape[-2]
+    zvti = fortran_sum0(s["v_i"])  # :708
+    new_ato = fmax(0.0, sr(s["ato_i"] + sr(sr(opning - sr(apartf[..., 0] * cg)) * rdt)))  # :713
+    s["ato_i"] = jnp.where(cells, new_ato, s["ato_i"])
+
+    def col(name, jl):
+        return s[name][..., jl]
+
+    def put(name, jl, value, mask):
+        x = s[name]
+        m = mask[..., None] if x.ndim == 4 else mask
+        s[name] = x.at[..., jl].set(jnp.where(m, value, x[..., jl]))
+
+    for jl1 in range(jpl):  # :722
+        ll = cells & (apartf[..., jl1 + 1] > 0.0) & (cg > 0.0)  # :727-729
+        a1 = col("a_i", jl1)
+        oka = a1 > _RDG_EPSI10
+        z1_ai = jnp.where(oka, sr(si3_safe_div(1.0, a1, oka)), 0.0)  # :733-735
+        airdg1 = sr(sr(aridge[..., jl1] * cg) * rdt)  # :738
+        airft1 = sr(sr(araft[..., jl1] * cg) * rdt)  # :739
+        airdg2 = sr(airdg1 * phi[..., jl1])  # :741
+        airft2 = sr(airft1 * _RDG_HI_HRFT)  # :742
+        afrdg = sr(airdg1 * z1_ai)  # :745
+        afrft = sr(airft1 * z1_ai)  # :746
+        v1, vs1, oa1 = col("v_i", jl1), col("v_s", jl1), col("oa_i", jl1)
+        vsw_full = sr(sr(v1 * afrdg) * cfg.rn_porordg)  # :749
+        ramp = fmax(0.0, sr(2.0 - sr(_RDG_POROSITY_SLOPE * zvti)))
+        vsw = jnp.where(zvti <= _RDG_POROSITY_FULL_M, vsw_full,
+                        jnp.where(zvti >= _RDG_POROSITY_ZERO_M, 0.0, sr(vsw_full * ramp)))  # :749-752
+        ersw = -sr(sr(sr(cfg.rhoi * vsw) * cfg.rcp) * sst)  # :753
+        virdg = sr(sr(v1 * afrdg) + vsw)  # :756
+        vsrdg = sr(vs1 * afrdg)  # :757
+        oirdg = sr(sr(oa1 * afrdg) * phi[..., jl1])  # :758
+        virft = sr(v1 * afrft)  # :760
+        vsrft = sr(vs1 * afrft)  # :761
+        oirft = sr(sr(oa1 * afrft) * _RDG_HI_HRFT)  # :762
+        aip1, vip1, vil1 = col("a_ip", jl1), col("v_ip", jl1), col("v_il", jl1)
+        aprdg = sr(sr(aip1 * afrdg) * phi[..., jl1])  # :765
+        vprdg = sr(vip1 * afrdg)  # :766
+        aprft = sr(sr(aip1 * afrft) * _RDG_HI_HRFT)  # :767
+        vprft = sr(vip1 * afrft)  # :768
+        vlrdg = sr(vil1 * afrdg)  # :770
+        vlrft = sr(vil1 * afrft)  # :771
+        es1, ei1, sz1 = col("e_s", jl1), col("e_i", jl1), col("szv_i", jl1)
+        esrdg = sr(es1 * afrdg[..., None])  # :775
+        esrft = sr(es1 * afrft[..., None])  # :776
+        eirdg = sr(sr(ei1 * afrdg[..., None]) + sr(ersw * r1_nlay)[..., None])  # :777
+        eirft = sr(ei1 * afrft[..., None])  # :778
+        sirdg = sr(sr(sz1 * afrdg[..., None]) + sr(sr(vsw * sss) * r1_nlay)[..., None])  # :781
+        sirft = sr(sz1 * afrft[..., None])  # :782
+
+        def acc(name, value):
+            s[name] = jnp.where(ll, value, s[name])
+
+        acc("wfx_dyn", sr(s["wfx_dyn"] - sr(sr(vsw * cfg.rhoi) * r1)))  # :789
+        acc("sfx_dyn", sr(s["sfx_dyn"] - sr(sr(sr(vsw * sss) * cfg.rhoi) * r1)))  # :790
+        acc("hfx_dyn", sr(s["hfx_dyn"] + sr(ersw * r1)))  # :791
+        snw_r, snw_f = 1.0 - cfg.rn_fsnwrdg, 1.0 - cfg.rn_fsnwrft
+        acc("wfx_snw_dyn", sr(s["wfx_snw_dyn"] + sr(sr(sr(sr(cfg.rhos * vsrdg) * snw_r)
+                                                       + sr(sr(cfg.rhos * vsrft) * snw_f)) * r1)))  # :795-796
+        for jk in range(esrdg.shape[-1]):  # :797-800
+            acc("hfx_dyn", sr(s["hfx_dyn"] + sr(sr(-sr(esrdg[..., jk] * snw_r)
+                                                   - sr(esrft[..., jk] * snw_f)) * r1)))
+        pnd_r, pnd_f = 1.0 - cfg.rn_fpndrdg, 1.0 - cfg.rn_fpndrft
+        if cfg.ln_pnd:  # :802-809
+            acc("wfx_pnd", sr(s["wfx_pnd"] + sr(sr(sr(sr(cfg.rhow * vprdg) * pnd_r)
+                                                 + sr(sr(cfg.rhow * vprft) * pnd_f)) * r1)))
+            if cfg.ln_pnd_lids:
+                acc("wfx_pnd", sr(s["wfx_pnd"] + sr(sr(sr(sr(cfg.rhow * vlrdg) * pnd_r)
+                                                     + sr(sr(cfg.rhow * vlrft) * pnd_f)) * r1)))
+
+        keep = sr(sr(1.0 - afrdg) - afrft)  # :821
+        put("a_i", jl1, sr(sr(a1 - airdg1) - airft1), ll)  # :820
+        put("v_i", jl1, sr(v1 * keep), ll)  # :821
+        put("v_s", jl1, sr(vs1 * keep), ll)  # :822
+        put("oa_i", jl1, sr(oa1 * keep), ll)  # :823
+        if cfg.ln_pnd:  # :824-828
+            put("a_ip", jl1, sr(aip1 * keep), ll)
+            put("v_ip", jl1, sr(vip1 * keep), ll)
+            if cfg.ln_pnd_lids:
+                put("v_il", jl1, sr(vil1 * keep), ll)
+        put("e_s", jl1, sr(es1 * keep[..., None]), ll)  # :830
+        put("e_i", jl1, sr(ei1 * keep[..., None]), ll)  # :831
+        put("szv_i", jl1, sr(sz1 * keep[..., None]), ll)  # :833
+
+        itest_rdg = jnp.zeros_like(ll)  # :844-845
+        itest_rft = jnp.zeros_like(ll)
+        hmin1, hmax1, hexp1, hrft1 = hrmin[..., jl1], hrmax[..., jl1], hrexp[..., jl1], hraft[..., jl1]
+        for jl2 in range(jpl):  # :846, Fortran jl2 = jl2 + 1
+            lo, hi = hi_max[jl2], hi_max[jl2 + 1]
+            if cfg.ln_distf_lin:  # :853-865
+                ov = (hmin1 <= hi) & (hmax1 > lo)
+                hL = jnp.maximum(hmin1, lo)
+                hR = jnp.minimum(hmax1, hi)
+                farea = jnp.where(ov, sr(si3_safe_div(sr(hR - hL), sr(hmax1 - hmin1), ov)), 0.0)
+                fvol = jnp.where(ov, sr(si3_safe_div(sr(sr(hR * hR) - sr(hL * hL)),
+                                                      sr(sr(hmax1 * hmax1) - sr(hmin1 * hmin1)), ov)), 0.0)
+                itest_rdg = itest_rdg | ov
+            else:  # :867-893
+                den = jnp.maximum(_RDG_EPSI20, hexp1)
+                den2 = jnp.maximum(_RDG_EPSI20, sr(hmin1 + hexp1))
+                hL = jnp.maximum(hmin1, lo)
+                expL = sr(tr.exp(sr(-sr(hL - hmin1) / den)))
+                if jl2 < jpl - 1:
+                    ov = hmin1 <= hi
+                    expR = sr(tr.exp(sr(-sr(hi - hmin1) / den)))
+                    farea = jnp.where(ov, sr(expL - expR), 0.0)
+                    fvol = jnp.where(ov, sr(sr(sr(sr(hL + hexp1) * expL) - sr(sr(hi + hexp1) * expR)) / den2), 0.0)
+                else:
+                    farea = expL
+                    fvol = sr(sr(sr(hL + hexp1) * expL) / den2)
+                itest_rdg = jnp.ones_like(ll)
+            hit = (hrft1 <= hi) & (hrft1 > lo)  # :898-904
+            zsw = jnp.where(hit, 1.0, 0.0)
+            itest_rft = itest_rft | hit
+            if jl2 == jpl - 1:  # :910-911
+                farea = jnp.where(itest_rdg, farea, 1.0)
+                fvol = jnp.where(itest_rdg, fvol, 1.0)
+                zsw = jnp.where(itest_rft, zsw, 1.0)
+
+            def add(name, x_rdg, f, x_rft):
+                cur = col(name, jl2)
+                fb = f[..., None] if cur.ndim == 3 else f
+                zb = zsw[..., None] if cur.ndim == 3 else zsw
+                put(name, jl2, sr(cur + sr(sr(x_rdg * fb) + sr(x_rft * zb))), ll)
+
+            add("a_i", airdg2, farea, airft2)  # :915
+            add("oa_i", oirdg, farea, oirft)  # :916
+            add("v_i", virdg, fvol, virft)  # :917
+            add("v_s", sr(vsrdg * cfg.rn_fsnwrdg), fvol, sr(vsrft * cfg.rn_fsnwrft))  # :918
+            if cfg.ln_pnd:  # :919-925
+                add("v_ip", sr(vprdg * cfg.rn_fpndrdg), fvol, sr(vprft * cfg.rn_fpndrft))
+                add("a_ip", sr(aprdg * cfg.rn_fpndrdg), farea, sr(aprft * cfg.rn_fpndrft))
+                if cfg.ln_pnd_lids:
+                    add("v_il", sr(vlrdg * cfg.rn_fpndrdg), fvol, sr(vlrft * cfg.rn_fpndrft))
+            add("e_s", sr(esrdg * cfg.rn_fsnwrdg), fvol, sr(esrft * cfg.rn_fsnwrft))  # :926
+            add("e_i", eirdg, fvol, eirft)  # :927
+            add("szv_i", sirdg, fvol, sirft)  # :929
+
+    return si3_var_roundoff(s, cells, ln_pnd=cfg.ln_pnd, ln_pnd_lids=cfg.ln_pnd_lids,
+                            nn_icesal=cfg.nn_icesal)  # :944
+
+
+def si3_ice_dyn_rdgrft(
+    state: SI3RdgrftState,
+    *,
+    divu_i,
+    delta_i,
+    sst_m,
+    sss_m,
+    hi_max,
+    nn_hls: int,
+    config: SI3RdgrftConfig,
+) -> SI3RdgrftResult:
+    """``ice_dyn_rdgrft``, ``icedyn_rdgrft.f90:268-392``, NEMO-literal.
+
+    Inputs are NEMO's arrays at the call (``icedyn.f90:193``): the category
+    state, ``divu_i``/``delta_i`` from the rheology, ``sst_m``/``sss_m`` and the
+    category bounds ``hi_max(0:jpl)``.  Every one is required.  The packed
+    cell list is NEMO's: interior ``A2D(0)`` cells with ``at_i > epsi10``, then
+    those with ``SUM(apartf(1:jpl)) > 0`` and ``closing_gross > 0``
+    (``:311-323``).  ``iterate_ridging`` is one flag over that list (one MPI
+    rank's subdomain), so converged cells keep being re-visited, as in NEMO.
+    The ridging diagnostics (``ll_diag_rdg``) feed only ``iom_put`` and are
+    not transcribed.
+    """
+    from legoesm.ice.itd import si3_interior_mask
+    from legoesm.ice.si3_surface import fortran_max_tie_first as fmax
+    from legoesm.ice.si3_surface import fortran_min_tie_first as fmin
+    from legoesm.ice.si3_surface import fortran_sum0
+
+    _validate_rdgrft_config(config)
+    for name, value in (("divu_i", divu_i), ("delta_i", delta_i), ("sst_m", sst_m),
+                        ("sss_m", sss_m), ("hi_max", hi_max)):
+        if value is None:
+            raise ValueError(f"SI3 ridging requires the NEMO array {name!r}; no default")
+    if any(v is None for v in state):
+        raise ValueError("SI3 ridging requires every SI3RdgrftState array; no default")
+    sr = nemo_source_round
+    s = {k: jnp.asarray(v, dtype=jnp.float64) for k, v in state._asdict().items()}
+    zdivu = jnp.asarray(divu_i, jnp.float64)
+    zdelt = jnp.asarray(delta_i, jnp.float64)
+    sst = jnp.asarray(sst_m, jnp.float64)
+    sss = jnp.asarray(sss_m, jnp.float64)
+    hi_max = jnp.asarray(hi_max, jnp.float64)
+    if hi_max.shape != (s["a_i"].shape[-1] + 1,):
+        raise ValueError("hi_max must be hi_max(0:jpl)")
+    interior = si3_interior_mask(s["at_i"].shape, nn_hls)
+    r1 = 1.0 / config.rdt_ice
+
+    s["at_i"] = jnp.where(interior, fortran_sum0(s["a_i"]), s["at_i"])  # :268
+    c0 = interior & (s["at_i"] > _RDG_EPSI10)  # :271-276
+    closing_net = sr(sr(sr(config.rn_csrdg * 0.5) * sr(zdelt - jnp.abs(zdivu)))
+                     - fmin(0.0, zdivu))  # :295, MINSD keeps the 0 on a tie
+    closing_net = jnp.where(zdivu < 0.0, fmax(closing_net, -zdivu), closing_net)  # :298
+    opning = sr(closing_net + zdivu)  # :301
+    prep = _rdgrft_prep(s["a_i"], s["v_i"], s["ato_i"], closing_net, opning, config)  # :307-309
+    opning = jnp.where(c0, prep[-1], opning)
+    selected = c0 & (fortran_sum0(prep[0][..., 1:]) > 0.0) & (prep[-2] > 0.0)  # :311-323
+
+    def one_pass(_, carry):
+        st, cn, op, dv, active, n = carry
+        pr = _rdgrft_prep(st["a_i"], st["v_i"], st["ato_i"], cn, op, config)  # :346-348
+        op_p = jnp.where(selected, pr[-1], op)
+        new = _rdgrft_shift(st, selected, pr[:-1] + (op_p,), sst, sss, hi_max, config)  # :351-352
+        zfac = sr(1.0 - sr(new["ato_i"] + fortran_sum0(new["a_i"])))  # :371
+        conv = jnp.abs(zfac) < _RDG_EPSI10
+        dv_new = jnp.where(selected & ~conv, sr(zfac * r1), dv)  # :378
+        cn_new = jnp.where(selected, jnp.where(conv, 0.0, fmax(0.0, -dv_new)), cn)  # :373,379
+        op_new = jnp.where(selected, jnp.where(conv, 0.0, fmax(0.0, dv_new)), op_p)  # :374,380
+        ato_conv = fmax(0.0, sr(1.0 - fortran_sum0(new["a_i"])))  # :375
+        new["ato_i"] = jnp.where(selected & conv, ato_conv, new["ato_i"])
+        keep = {k: jnp.where(active, new[k], st[k]) for k in st}
+        nxt = active & jnp.any(selected & ~conv)  # :358,377 iterate_ridging
+        return (keep, jnp.where(active, cn_new, cn), jnp.where(active, op_new, op),
+                jnp.where(active, dv_new, dv), nxt, n + active.astype(jnp.int32))
+
+    active0 = jnp.any(selected)  # :334 IF( npti > 0 )
+    carry = (s, closing_net, opning, zdivu, active0, jnp.asarray(0, jnp.int32))
+    s, _, _, _, _, n_passes = jax.lax.fori_loop(0, _RDG_ITERMAX - 1, one_pass, carry)  # :341
+    return SI3RdgrftResult(SI3RdgrftState(**{k: s[k] for k in SI3RdgrftState._fields}),
+                           selected, n_passes)

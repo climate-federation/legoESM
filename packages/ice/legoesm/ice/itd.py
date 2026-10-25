@@ -1090,3 +1090,279 @@ def _si3_o13_fused_melt_min(
 ) -> jax.Array:
     """Execute fused lines 280/282 in the record object's ``MINSD`` order."""
     return _nemo_minsd(_nemo_minsd(hi_max, h_r), neg_dh0)
+
+# ==============================================================================
+# SI3 ORCA2 (rung O6): roundoff, rebinning, zapsmall and ice_cor(kt, 1)
+# Cited build: ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo (icevar.f90, iceitd.f90,
+# icecor.f90 byte-identical to the O1/O2/O5_REF/O7_REF builds).
+# Arrays use NEMO's own index order: (jpi, jpj, jpl) and (jpi, jpj, nlay, jpl).
+# ==============================================================================
+
+from typing import NamedTuple  # noqa: E402
+
+_SI3_EPSI10 = 1.0e-10  # ice.F90 epsi10
+_SI3_EPSI20 = 1.0e-20  # ice.F90 epsi20
+_SI3_HALF = 0.5
+
+
+class SI3IceCorConfig(NamedTuple):
+    """Resolved selectors and constants ``ice_cor(kt, 1)`` reads; no defaults."""
+
+    rn_himin: float
+    rn_simin: float
+    rn_sinew: float
+    nn_icesal: int
+    ln_pnd: bool  # ln_pnd_LEV .OR. ln_pnd_TOPO
+    ln_pnd_lids: bool
+    rdt_ice: float
+    rhoi: float
+    rhos: float
+    rhow: float
+    rt0: float
+
+
+class SI3IceCorState(NamedTuple):
+    """NEMO's ice arrays at ``ice_cor`` entry (also its outputs)."""
+
+    a_i: jnp.ndarray
+    v_i: jnp.ndarray
+    v_s: jnp.ndarray
+    oa_i: jnp.ndarray
+    a_ip: jnp.ndarray
+    v_ip: jnp.ndarray
+    v_il: jnp.ndarray
+    e_s: jnp.ndarray
+    e_i: jnp.ndarray
+    szv_i: jnp.ndarray
+    sz_i: jnp.ndarray
+    t_su: jnp.ndarray
+    t_i: jnp.ndarray
+    t_s: jnp.ndarray
+    h_i: jnp.ndarray
+    h_s: jnp.ndarray
+    h_ip: jnp.ndarray
+    h_il: jnp.ndarray
+    at_i: jnp.ndarray
+    vt_i: jnp.ndarray
+    ato_i: jnp.ndarray
+    sfx_res: jnp.ndarray
+    hfx_res: jnp.ndarray
+    wfx_res: jnp.ndarray
+
+
+def si3_interior_mask(shape2d, nn_hls: int) -> jnp.ndarray:
+    mask = jnp.zeros(shape2d, dtype=bool)
+    return mask.at[nn_hls:-nn_hls, nn_hls:-nn_hls].set(True)
+
+
+def si3_safe_div(num, den, ok):
+    """``num / den`` where ``ok``; the masked denominator is a gradient-only guard."""
+    return num / jnp.where(ok, den, 1.0)
+
+
+def si3_var_roundoff(fields: dict, cells: jnp.ndarray, *, ln_pnd: bool, ln_pnd_lids: bool,
+                     nn_icesal: int) -> dict:
+    """``ice_var_roundoff``, ``icevar.f90:875-892``, on the packed ``cells`` only.
+
+    ``WHERE( x < 0 ) x = 0``: a ``-0`` is not ``< 0`` and survives.  ``v_il`` is
+    clipped only in ``(-epsi10, 0)`` (``:885``).  ``nn_icesal == 4`` clips
+    ``szv_i`` and leaves ``sv_i`` (``:888-892``).
+    """
+    if nn_icesal != 4:
+        raise ValueError("SI3 O6 transcribes nn_icesal == 4 only")
+    out = dict(fields)
+    c2 = cells[..., None]
+    c3 = cells[..., None, None]
+
+    def clip(name, cmask):
+        x = out[name]
+        out[name] = jnp.where(cmask & (x < 0.0), 0.0, x)
+
+    for name in ("a_i", "v_i", "v_s", "oa_i"):
+        clip(name, c2)
+    clip("e_i", c3)
+    clip("e_s", c3)
+    if ln_pnd:
+        clip("a_ip", c2)
+        clip("v_ip", c2)
+        if ln_pnd_lids:
+            x = out["v_il"]
+            out["v_il"] = jnp.where(c2 & (x < 0.0) & (x > -_SI3_EPSI10), 0.0, x)
+    clip("szv_i", c3)
+    return out
+
+
+def _si3_itd_shiftice(s: dict, cells, jl, donor_upper: bool, dai, dvi, amax, cfg):
+    """``itd_shiftice`` for one active boundary ``jl`` (``iceitd.f90:432-597``).
+
+    ``ice_itd_reb`` resets every other boundary's donor to 0 between calls
+    (``:656-658``, ``:685-687``), so exactly one transfer row is live.
+    """
+    from legoesm.core.source_rounding import nemo_source_round as sr
+    from legoesm.ice.si3_surface import fortran_sum0
+
+    jl1, jl2 = (jl + 1, jl) if donor_upper else (jl, jl + 1)
+    c = cells
+    s = dict(s)
+    zaTsfn = sr(s["a_i"] * s["t_su"])  # :469-473
+    v1 = s["v_i"][..., jl1]
+    a1 = s["a_i"][..., jl1]
+    okv = v1 >= _SI3_EPSI10
+    oka = a1 >= _SI3_EPSI10
+    zworkv = jnp.where(okv, si3_safe_div(dvi, v1, okv), 0.0)  # :489-491
+    zworka = jnp.where(oka, si3_safe_div(dai, a1, oka), 0.0)  # :492-494
+
+    def move(name, amount, layered=False):
+        x = s[name]
+        cm = c[..., None] if layered else c
+        x = x.at[..., jl1].set(jnp.where(cm, sr(x[..., jl1] - amount), x[..., jl1]))
+        x = x.at[..., jl2].set(jnp.where(cm, sr(x[..., jl2] + amount), x[..., jl2]))
+        s[name] = x
+
+    move("a_i", dai)  # :496-497
+    move("v_i", dvi)  # :499-500
+    move("v_s", sr(s["v_s"][..., jl1] * zworkv))  # :502-504
+    move("oa_i", sr(s["oa_i"][..., jl1] * zworka))  # :506-508
+    s["_zaTsfn"] = zaTsfn
+    move("_zaTsfn", sr(zaTsfn[..., jl1] * zworka))  # :510-512
+    if cfg.ln_pnd:
+        move("a_ip", sr(s["a_ip"][..., jl1] * zworka))  # :515-517
+        move("v_ip", sr(s["v_ip"][..., jl1] * zworkv))  # :519-521
+        if cfg.ln_pnd_lids:
+            move("v_il", sr(s["v_il"][..., jl1] * zworkv))  # :524-526
+    move("e_s", sr(s["e_s"][..., jl1] * zworkv[..., None]), layered=True)  # :530-534
+    move("e_i", sr(s["e_i"][..., jl1] * zworkv[..., None]), layered=True)  # :535-539
+    move("szv_i", sr(s["szv_i"][..., jl1] * zworkv[..., None]), layered=True)  # :541-546
+    zaTsfn = s.pop("_zaTsfn")
+
+    s = si3_var_roundoff(s, c, ln_pnd=cfg.ln_pnd, ln_pnd_lids=cfg.ln_pnd_lids,
+                         nn_icesal=cfg.nn_icesal)  # :563
+    ztmp = fortran_sum0(s["a_i"])  # :566
+    over = c & (ztmp > amax)
+    clamp = sr(sr(s["a_i"] * amax[..., None]) / jnp.where(over, ztmp, 1.0)[..., None])
+    s["a_i"] = jnp.where(over[..., None], clamp, s["a_i"])  # :567-570
+    ok = c[..., None] & (s["a_i"] >= _SI3_EPSI20)  # :575-581
+    s["h_i"] = jnp.where(c[..., None], jnp.where(ok, sr(si3_safe_div(s["v_i"], s["a_i"], ok)), 0.0), s["h_i"])
+    s["t_su"] = jnp.where(c[..., None], jnp.where(ok, sr(si3_safe_div(zaTsfn, s["a_i"], ok)), cfg.rt0), s["t_su"])
+    return s
+
+
+def si3_ice_itd_reb(s: dict, *, interior, hi_max, hi_mean, amax, cfg: SI3IceCorConfig) -> dict:
+    """``ice_itd_reb``, ``iceitd.f90:623-690``: rebin too-thick then too-thin categories."""
+    from legoesm.core.source_rounding import nemo_source_round as sr
+
+    jpl = s["a_i"].shape[-1]
+    for jl in range(jpl - 1):  # :628 DO jl = 1, jpl-1 (0-based jl)
+        a, v = s["a_i"][..., jl], s["v_i"][..., jl]
+        cells = interior & (a > 0.0) & (v > sr(a * hi_max[jl + 1]))  # :632
+        dai = sr(_SI3_HALF * a)  # :650
+        dvi = sr(v - sr(sr((1.0 - _SI3_HALF) * a) * hi_mean[jl]))  # :651
+        s = _si3_itd_shiftice(s, cells, jl, False, dai, dvi, amax, cfg)  # :654
+    for jl in range(jpl - 2, -1, -1):  # :664 DO jl = jpl-1, 1, -1
+        a, v = s["a_i"][..., jl + 1], s["v_i"][..., jl + 1]
+        cells = interior & (a > 0.0) & (v <= sr(a * hi_max[jl + 1]))  # :668
+        s = _si3_itd_shiftice(s, cells, jl, True, a, v, amax, cfg)  # :678-683
+    return s
+
+
+def si3_var_zapsmall(s: dict, *, interior, sss_m, sst_m, cfg: SI3IceCorConfig) -> dict:
+    """``ice_var_zapsmall``, ``icevar.f90:625-735`` (``nn_icesal == 4`` arm)."""
+    from legoesm.core.source_rounding import nemo_source_round as sr
+    from legoesm.ice.si3_surface import fortran_sum0
+
+    s = dict(s)
+    r1 = 1.0 / cfg.rdt_ice
+    i2 = interior[..., None]
+    ok = s["a_i"] > _SI3_EPSI10
+    s["h_i"] = jnp.where(i2, jnp.where(ok, sr(si3_safe_div(s["v_i"], s["a_i"], ok)), 0.0), s["h_i"])  # :625-627
+    small = i2 & (jnp.minimum(jnp.minimum(s["a_i"], s["v_i"]), s["h_i"]) < _SI3_EPSI10)  # :636
+    jpl = s["a_i"].shape[-1]
+    sfx, hfx, wfx = s["sfx_res"], s["hfx_res"], s["wfx_res"]
+    sz_new = jnp.minimum(cfg.rn_simin, sr(cfg.rn_sinew * sss_m))  # :642
+    for jl in range(jpl):  # :633-645
+        for jk in range(s["szv_i"].shape[-2]):
+            m = small[..., jl]
+            sfx = jnp.where(m, sr(sfx + sr(sr(s["szv_i"][..., jk, jl] * cfg.rhoi) * r1)), sfx)
+    s["szv_i"] = jnp.where(small[..., None, :], 0.0, s["szv_i"])
+    s["sz_i"] = jnp.where(small[..., None, :], sz_new[..., None, None], s["sz_i"])
+    for name, t_name in (("e_i", "t_i"), ("e_s", "t_s")):  # :664-690, e_i before e_s
+        for jl in range(jpl):
+            for jk in range(s[name].shape[-2]):
+                hfx = jnp.where(small[..., jl], sr(hfx - sr(s[name][..., jk, jl] * r1)), hfx)
+        s[name] = jnp.where(small[..., None, :], 0.0, s[name])
+        s[t_name] = jnp.where(small[..., None, :], cfg.rt0, s[t_name])
+    for jl in range(jpl):  # :695-722
+        m = small[..., jl]
+        wfx = jnp.where(m, sr(wfx + sr(sr(s["v_i"][..., jl] * cfg.rhoi) * r1)), wfx)
+        wfx = jnp.where(m, sr(wfx + sr(sr(s["v_s"][..., jl] * cfg.rhos) * r1)), wfx)
+        wfx = jnp.where(m, sr(wfx + sr(sr(sr(s["v_ip"][..., jl] + s["v_il"][..., jl]) * cfg.rhow) * r1)), wfx)
+    for name in ("a_i", "v_i", "v_s", "oa_i", "h_i", "h_s", "a_ip", "v_ip", "v_il", "h_ip", "h_il"):
+        s[name] = jnp.where(small, 0.0, s[name])
+    s["t_su"] = jnp.where(small, sr(sst_m + cfg.rt0)[..., None], s["t_su"])  # :709
+    s["sfx_res"], s["hfx_res"], s["wfx_res"] = sfx, hfx, wfx
+    s["at_i"] = jnp.where(interior, fortran_sum0(s["a_i"]), s["at_i"])  # :725
+    s["vt_i"] = jnp.where(interior, fortran_sum0(s["v_i"]), s["vt_i"])  # :726
+    s["ato_i"] = jnp.where(interior & (s["at_i"] == 0.0), 1.0, s["ato_i"])  # :735
+    return s
+
+
+def si3_ice_cor_dyn(state: SI3IceCorState, *, rn_amax_2d, sss_m, sst_m, hi_max, hi_mean,
+                    nn_hls: int, config: SI3IceCorConfig) -> SI3IceCorState:
+    """``ice_cor(kt, kn=1)``, ``icecor.f90:81-130``, the post-dynamics correction.
+
+    Interior ``A2D(0)`` only, as NEMO; halos are returned unchanged.  Inputs are
+    NEMO's arrays at the call (``icedyn.f90:194``); every one is required.
+    """
+    from legoesm.core.source_rounding import nemo_source_round as sr
+    from legoesm.ice.si3_surface import fortran_sum0
+
+    if not isinstance(config, SI3IceCorConfig):
+        raise TypeError("ice_cor requires an explicit SI3IceCorConfig")
+    if config.nn_icesal != 4:
+        raise ValueError("SI3 O6 transcribes nn_icesal == 4 only")
+    for name, value in (("rn_amax_2d", rn_amax_2d), ("sss_m", sss_m), ("sst_m", sst_m),
+                        ("hi_max", hi_max), ("hi_mean", hi_mean)):
+        if value is None:
+            raise ValueError(f"ice_cor requires the NEMO array {name!r}; no default")
+    if any(v is None for v in state):
+        raise ValueError("ice_cor requires every SI3IceCorState array; no default")
+    s = {k: jnp.asarray(v, dtype=jnp.float64) for k, v in state._asdict().items()}
+    amax = jnp.asarray(rn_amax_2d, jnp.float64)
+    sss_m = jnp.asarray(sss_m, jnp.float64)
+    sst_m = jnp.asarray(sst_m, jnp.float64)
+    hi_max = jnp.asarray(hi_max, jnp.float64)
+    hi_mean = jnp.asarray(hi_mean, jnp.float64)
+    interior = si3_interior_mask(s["at_i"].shape, nn_hls)
+    i2 = interior[..., None]
+
+    ok = s["a_i"] >= _SI3_EPSI20  # :81-83
+    s["h_i"] = jnp.where(i2, jnp.where(ok, sr(si3_safe_div(s["v_i"], s["a_i"], ok)), 0.0), s["h_i"])
+    thin = i2 & (s["h_i"] < config.rn_himin)
+    # Materialized divisor: XLA otherwise rewrites x / constant as x * (1 / constant).
+    himin = sr(jnp.asarray(config.rn_himin, jnp.float64))
+    if config.ln_pnd:  # :84-86
+        s["a_ip"] = jnp.where(thin, sr(sr(s["a_ip"] * s["h_i"]) / himin), s["a_ip"])
+    s["a_i"] = jnp.where(thin, sr(sr(s["a_i"] * s["h_i"]) / himin), s["a_i"])  # :87
+    at_i = fortran_sum0(s["a_i"])  # :92
+    s["at_i"] = jnp.where(interior, at_i, s["at_i"])
+    over = interior & (s["at_i"] > amax)  # :93-95
+    clamp = sr(sr(s["a_i"] * amax[..., None]) / jnp.where(over, s["at_i"], 1.0)[..., None])
+    s["a_i"] = jnp.where(over[..., None], clamp, s["a_i"])
+    if s["a_i"].shape[-1] > 1:  # :99
+        s = si3_ice_itd_reb(s, interior=interior, hi_max=hi_max, hi_mean=hi_mean, amax=amax, cfg=config)
+    r1 = 1.0 / config.rdt_ice
+    r1_nlay = 1.0 / s["szv_i"].shape[-2]
+    sfx = s["sfx_res"]
+    for jl in range(s["a_i"].shape[-1]):  # :114-122
+        v = s["v_i"][..., jl]
+        lo = sr(sr(config.rn_simin * v) * r1_nlay)
+        hi = sr(sr(sr(config.rn_sinew * sss_m) * v) * r1_nlay)
+        for jk in range(s["szv_i"].shape[-2]):
+            zsal = s["szv_i"][..., jk, jl]
+            new = jnp.minimum(jnp.maximum(zsal, lo), hi)  # :117-118, zero ties PLAUSIBLE
+            new = jnp.where(interior, new, zsal)
+            sfx = jnp.where(interior, sr(sfx - sr(sr(sr(new - zsal) * config.rhoi) * r1)), sfx)
+            s["szv_i"] = s["szv_i"].at[..., jk, jl].set(new)
+    s["sfx_res"] = sfx
+    s = si3_var_zapsmall(s, interior=interior, sss_m=sss_m, sst_m=sst_m, cfg=config)  # :128
+    return SI3IceCorState(**{k: s[k] for k in SI3IceCorState._fields})
