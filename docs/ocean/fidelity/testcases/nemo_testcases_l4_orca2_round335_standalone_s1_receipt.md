@@ -105,11 +105,12 @@ the selected runtime ice model is `nn_ice=1`.
 - OMIP/coupler/legacy/AMIP/land/SI3 shared-caller tests: 142/142 PASS.
 - Parent/current real-CORE control: 0/226,440 unequal.
 - Changed-path default gates: 36/36 focused, 142/142 shared callers, and 16/16
-  in-tree SI3 PASS.  The full ratchet sweep has 14,585 PASS, 2,359 SKIP, and
-  23 base-tree failures outside this diff (package-root discovery and existing
-  AMIP/land/ocean/config findings); no failure names a changed file.  The
-  round citation gate and its plant controls are run from the final clean
-  documentation commit.
+  in-tree SI3 PASS.  The authoritative `land.sh` ORCA2 default gate passes
+  152/152 in 1,049.81 s.  The per-receipt citation gate passes all 13 citations
+  with zero failures/unmapped entries, and its mandatory suite passes 17/17.
+  The full ratchet sweep has 14,585 PASS, 2,359 SKIP, and 23 base-tree failures
+  outside this diff (package-root discovery and existing AMIP/land/ocean/config
+  findings); no failure names a changed file.
 
 Independent review: Claude HOLD + Argon HOLD findings addressed by this
 resume; operator confirmation remains external to this receipt.
