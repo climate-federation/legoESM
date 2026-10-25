@@ -3708,7 +3708,9 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "ice_skin_melt_cap_width_K must be finite and >= 0 (0 = hard "
                 f"cap); got {self.ice_skin_melt_cap_width_K!r}.")
-        if (self.sea_ice_albedo_melt_width_K != 1.0
+        if (self.sea_ice_albedo_melt_width_K
+                != ExperimentConfig._field_defaults[
+                    "sea_ice_albedo_melt_width_K"]
                 and resolve_sea_ice_albedo_scheme(self)
                 != "maykut_untersteiner"):
             errors.append(
