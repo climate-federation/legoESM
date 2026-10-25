@@ -185,3 +185,18 @@ def test_o3_scores_zero_ulp_on_admitted_o2_record_and_plants_fire():
     for plant in ("1ulp-v_i", "native-exp"):
         with pytest.raises(ValueError, match="PLANT-FIRED"):
             score_o3(_O2_RECORD, plant=plant)
+
+
+O3_PARENT_COMMIT = "62a28e1324b203e5a6930b734680a4af8196630a"
+
+
+def test_o3_parent_vs_current_other_callers_bit_identical(monkeypatch):
+    """Non-SI3, SCM, lane-3 `si3_bl99` and O1 callers match this round's parent (O2 harness, its P1 plant)."""
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[2] / "ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py"
+    spec = importlib.util.spec_from_file_location("o2_tests_for_o3_parent", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod, "PARENT_COMMIT", O3_PARENT_COMMIT)
+    mod.test_o2_parent_vs_current_all_callers_bit_identical(monkeypatch)
