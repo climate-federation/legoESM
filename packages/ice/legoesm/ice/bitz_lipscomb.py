@@ -110,7 +110,7 @@ _FLUSHING_TIMESCALE = 864000.0
 _OPTION2_LOWER_TRANSITION = 3.5
 _OPTION2_UPPER_TRANSITION = 4.5
 _OPTION2_LAYER_SHAPE = (1.0 / 3.0, 1.0, 5.0 / 3.0)
-_NEW_ICE_THICKNESS = 0.05  # C1D card rn_hinew (c1d_omip_l3_namelist_ice_cfg:113)
+_NEW_ICE_THICKNESS = 0.05  # C1D card rn_hinew, c1d_omip_l3_namelist_ice_cfg:113
 _MAXIMUM_ICE_CONCENTRATION = 0.99999
 
 

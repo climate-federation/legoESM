@@ -2386,7 +2386,7 @@ CITATION_MAP = {
     'packages/ice/legoesm/ice/bitz_lipscomb.py:894-914': ['def _piecewise_remap(', 'return jnp.where(dz_new[..., None] > _EPS10, content / dz_new[..., Non', 21],
     'packages/ice/legoesm/ice/bitz_lipscomb.py:917-976': ['def _nemo_snow_enthalpy_remap(', ('], axis=-1)', 9), 60],
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1040-1652': ['def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,', 'S_bulk, state.S_layers, state.age_volume)', 613],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1655-1768': ['def si3_column_step_arrays(state: SI3ColumnArrays,', 'post_temp2, post_do, exit_state)', 114],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1655-1773': ['def si3_column_step_arrays(state: SI3ColumnArrays,', 'post_temp2, post_do, exit_state)', 119],
     'packages/ice/legoesm/ice/bitz_lipscomb.py:587-611': ['# P07 conductivity at the four ice interfaces (top, 2 interior, base).', '# (compiled `icethd_zdf_bl99.f90:331-346`): layer thicknesses use', 25],
     'packages/ice/legoesm/ice/bitz_lipscomb.py:624-862': ['k_i = tcond_i / dz_i[..., None]', ('else:', 5), 239],
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1727-1732': ['S_layers = option2_salinity_profile(', (')', 689), 6],
@@ -9687,7 +9687,7 @@ CITATION_MAP = {
     'tests/ice/unit/test_si3_surface.py:615': 'def test_production_surface_step_keeps_qsb_dry_negative_zero():',
     # --- SI3 round 15 (O8) frazil collection bookkeeping ---
     'ORCA2_SAS_ICE_O7_REF/BLD/arch_nemo.fcm:27': '%FCFLAGS             -fdefault-real-8 -O3 -funroll-all-loops -fcray-pointer -ffree-line-length-none -fallow-argument-mismatch -fno-tree-vectorize',
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:113': '_NEW_ICE_THICKNESS = 0.05  # C1D card rn_hinew (c1d_omip_l3_namelist_ice_cfg:113)',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:113': '_NEW_ICE_THICKNESS = 0.05  # C1D card rn_hinew, c1d_omip_l3_namelist_ice_cfg:113',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:174': 'CALL ice_thd_frazil             !--- frazil ice: collection thickness (ht_i_new) & fraction of frazil (fraz_frac)',
     'tests/ice/unit/data/orca2_sas_ice_expref/namelist_ice_ref:190-191': ['rn_hinew         =   0.1', 'ln_frazil        = .false.', 2],
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:419': 'fraz_frac(:,:) = 0._wp',
