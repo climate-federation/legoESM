@@ -211,6 +211,7 @@ def measure(
     ordinary = jax.tree.map(lambda value: value.block_until_ready(), ordinary)
 
     captured_boundaries: list[tuple[np.ndarray, ...]] = []
+    captured_ldf_terms: list[tuple[np.ndarray, np.ndarray]] = []
     captured_finish: list[tuple[np.ndarray, np.ndarray]] = []
     original_walk = model_module._nemo_stage3_l8_krhs_walk
     original_solve = LatLonCGridOceanModel._apply_implicit_vertical_mixing
@@ -221,11 +222,20 @@ def measure(
     def store_finish(temperature, salinity) -> None:
         captured_finish.append((np.array(temperature, copy=True), np.array(salinity, copy=True)))
 
+    def store_ldf_terms(temperature, salinity) -> None:
+        captured_ldf_terms.append(
+            (np.array(temperature, copy=True), np.array(salinity, copy=True)))
+
     def observed_walk(adv_t, adv_s, *term_groups):
         result = original_walk(adv_t, adv_s, *term_groups)
         jax.debug.callback(
             store_boundaries,
             *(value for pair in result[2] for value in pair),
+            ordered=True,
+        )
+        jax.debug.callback(
+            store_ldf_terms,
+            term_groups[2][0][0], term_groups[2][1][0],
             ordered=True,
         )
         return result
@@ -260,6 +270,7 @@ def measure(
     passive, changed_leaves = _tree_bit_identical(ordinary, observed)
     require(passive, f"observer moved {changed_leaves} prognostic leaves")
     require(len(captured_boundaries) == 1, "expected one boundary callback")
+    require(len(captured_ldf_terms) == 1, "expected one LDF-term callback")
     require(len(captured_finish) == 1, "expected one finish callback")
 
     candidate: dict[str, dict[str, np.ndarray]] = {
@@ -299,6 +310,28 @@ def measure(
         "T": oracle_stage3["T"],
         "S": oracle_stage3["S"],
     }
+
+    ldf_final_update_arms = {}
+    for tracer_index, tracer in enumerate(("T", "S")):
+        before = candidate["after_qsr"][tracer][..., :30]
+        term = captured_ldf_terms[0][tracer_index][..., :30]
+        direct = np.asarray(before + term, dtype=np.float64)
+        increment = np.asarray(direct - before, dtype=np.float64)
+        add_sub_add = np.asarray(before + increment, dtype=np.float64)
+        ldf_final_update_arms[tracer] = {
+            "direct_add": _score(direct, oracle["after_ldf"][tracer], wet),
+            "nemo_add_sub_add": _score(
+                add_sub_add, oracle["after_ldf"][tracer], wet),
+            "term_vs_recorded_increment": _score(
+                term,
+                np.asarray(
+                    oracle["after_ldf"][tracer]
+                    - oracle["after_qsr"][tracer],
+                    dtype=np.float64,
+                ),
+                wet,
+            ),
+        }
 
     targets = {}
     for tracer in ("T", "S"):
@@ -351,6 +384,7 @@ def measure(
             name: int(np.count_nonzero(mask)) for name, mask in targets.items()
         },
         "first_wet_value_boundary": first,
+        "ldf_final_update_arms": ldf_final_update_arms,
         "rows": rows,
     }
 
