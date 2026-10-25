@@ -392,8 +392,13 @@ derivative agrees reverse/forward to `1.501929835492298e-15`; its SSH
 derivative is exactly zero in both modes.  Forward production parity has zero
 non-bit leaves.
 
-The clean read-only acquisition preflight passes 74 tests, all continuation,
-placement, extent, bounds, checksum and arithmetic plants, eight Fortran
+Resume 8 corrects the raw-V admission's RK3 after level.  The expected level
+is now derived from NEMO's initialized levels and its inter-stage swaps: the
+observed stage 1 uses Kaa 3.  The compiled fixture writes that value, and a
+dedicated wrong-time-level plant refuses.
+
+The clean read-only acquisition preflight passes 77 tests, all continuation,
+placement, time-level, extent, bounds, checksum and arithmetic plants, eight Fortran
 syntax proofs, a normalized stage-object floating-point instruction census
 of 1,367, and the same-program proof (409 identical preprocessed units and
 421 identical normalized objects).  It runs no NEMO executable and stops at:
