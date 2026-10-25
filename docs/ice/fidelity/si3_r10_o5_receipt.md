@@ -94,8 +94,8 @@ Evidence directory: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/
 
 ## Review fixes (resume)
 
-- `u_ice_b`/`v_ice_b` (codex): required inputs, `icedyn_rhg_evp.f90:574,625`. Plant (substitution restored in the solver): the new test fails (`resume/item1_PLANT_substitution.log`); reverted, passes.
-- Coriolis no-FMA (Argon): every operation of `icedyn_rhg_evp.f90:560-562,611-613,666-668,718-720` rounded in source order. Without it the real eager-vs-jit test fails, 5 of 192 `u_ice` cells (`resume/item3_before_barriers.log`); with it, passes.
+- `u_ice_b`/`v_ice_b` (codex): required inputs, read at `ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:574` and `:625`. Plant (substitution restored in the solver): the new test fails (`resume/item1_PLANT_substitution.log`); reverted, passes.
+- Coriolis no-FMA (Argon): every operation of `ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:560-562`, `:611-613`, `:666-668` and `:718-720` rounded in source order. Without it the real eager-vs-jit test fails, 5 of 192 `u_ice` cells (`resume/item3_before_barriers.log`); with it, passes.
 - Eager-vs-jit (Argon): eager now means `jax.disable_jit`.
 - Lane 3 keeps passing its entry velocity as `u_ice_b`: `store_fields` sets `u_ice_b = u_ice` before `ice_dyn` (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icestp.f90:463`). Unchanged behaviour, offered for review.
 
