@@ -8916,7 +8916,7 @@ CITATION_MAP = {
         '&                zsen, zlat, zevp, zqlwn )', 39],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:791-948': [
         'ptsk(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) = pst',
-        "CALL lbc_lnk( 'sbcblk', utau, 'T', -1._wp", 158],
+        ("CALL lbc_lnk( 'sbcblk', utau, 'T', -1._wp", 1), 158],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:976':
         'ptsk(:,:) = ( ptsk(:,:) - rt0 ) * smask0(:,:)',
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:1019-1045': [
