@@ -36,10 +36,16 @@ now pin that behavior.  Calm-wind magnitude and masked zero-temperature inputs
 use safe inactive operands; both eager and JIT reverse-mode gradients are
 finite without changing any primal value.
 
-The duplicate NCAR drag/stability implementations were removed in favor of
-selectable exact arms in the shared core kernels.  The two host/scan copies of
-`blk_oce_2` are one backend-selectable implementation.  `NemoBlkOceResult`
-now carries `Cd`, `Ch`, `Ce`, and `rhoa` as the design requires.
+The duplicate NCAR drag/stability implementations were removed where the
+operation is measured bit-identical and made selectable in shared core
+kernels.  The adjacent legacy/NEMO copies of `_one_on_obukhov`, `_ch_n10`,
+and `_ce_n10` deliberately remain separate: the exact arm has per-statement
+barriers plus Fortran `SIGN`/`MIN`/`MAX` semantics, while the legacy arm must
+reproduce the parent expression graph.  They are physically equivalent but
+not word-identical, so unifying either direction breaks one of the two exact
+bars.  `_virt_temp` remains shared because its arms are word-identical.  The
+two host/scan copies of `blk_oce_2` are one backend-selectable implementation,
+and `NemoBlkOceResult` carries `Cd`, `Ch`, `Ce`, and `rhoa`.
 
 ## Exact offline score
 
@@ -67,14 +73,25 @@ elsewhere.  An independent replay on the immutable O1 frame reproduced the
 `11.997116616015276 W m-2` wet-cell maximum; away from the humidity-floor
 tail, the median relative change was `1.31e-5`.
 
-That change is fully removed from non-NEMO callers.  A real checkout of base
-`072e4aa1b1c8` and the final tree consumed identical CORE O1 arrays.  NCAR,
-legacy `ly09_2coeff`, potential temperature, pressure, moist density,
-saturation humidity, shared drag, and both stability functions were
-bit-identical: **0 / 226,440 unequal binary64 words across 17 outputs**.  This
-control covers the two OMIP driver/coupler paths and the shared defaults used
-by AMIP, land, and SI3 surface code.  The shared-caller suite passes 142/142.
-The earlier failure in
+The first control was incomplete: its 17-output, 226,440-word score omitted
+`q_net`.  Re-review found that the shared legacy `blk_oce_2` arm had flattened
+the parent's precipitation/evaporation sub-sum.  Each affected `q_net` array
+then differed on 4,142 / 13,320 ORCA2-tile words and 26,269 / 72,192
+global-CORE words, with maximum absolute difference about
+`4.6e-13 W m-2`, in both host and scan consumers.
+
+The legacy arm now restores the parent's exact grouping: build
+`q_precip_evap` first, then evaluate `sensible + latent + qlwn +
+q_precip_evap`.  The expanded parent/current control scores every returned
+output of every non-NEMO caller: all eager/JIT `air_sea_fluxes` arms; public
+helpers; AMIP, land, coupler, SI3 and other core consumers; host absolute and
+feedback surface forcing; both host freshwater paths; and scan surface
+forcing.  Its 214-array census is **0 / 10,231,076 unequal binary64 words**.
+The surface inventory explicitly includes `tau_x,tau_y,q_net,sw_down` on all
+six ORCA2/global host/scan paths; freshwater includes
+`precip,evap,runoff,ice_fw,restoring`.  A one-ULP plant in
+`A/app_jax/q_net` exits nonzero.  The shared-caller suite passes 142/142.  The
+earlier failure in
 `test_aerobulk_oracle.py::test_aerobulk_convention_L_matches_explicit_injection`
 is fixed; the focused source/oracle suite passes 36/36.
 
@@ -91,10 +108,25 @@ The source execution order remains anchored by
 The ice input is corrected from monthly to a yearly mean: `sn_ice%freqh=-12`
 means one yearly record.  S3 now records the `sbcice_if` mutation of
 `ts(:,:,:,Kmm)` on the full `A2D(nn_hls)` halo as well as its owned-interior
-flux outputs.  The design also no longer assumes that dropping `key_si3`
-leaves the ocean unchanged.  Compile-time SI3 branches alter TKE/GLS surface
-mixing, implicit top drag, bulk/ABL allocation, and coupling paths even when
-the selected runtime ice model is `nn_ice=1`.
+flux outputs.
+
+Decision 172's premise is now explicitly **REFUTED**.  In a key-SI3 build,
+`nn_ice=1` enters neither the no-ice allocator nor `ice_init`
+(`sbcmod.F90:331-340`).  NEMO forcibly resolves implicit ice drag false
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfdrg.f90:380`), TKE's case 2 reads `hm_i`
+(`zdftke.F90:622`), and initialization rejects `nn_mxlice>1` for ice-if
+(`zdftke.F90:794-795`).  Active icebergs are also unsafe with the key: their
+copy/interpolation reads uninitialized SI3 snow/ice mass, concentration,
+thickness, and velocity (`icbutl.F90:89-93`, `:174-181`).
+
+The design records the complete viable configuration families and costs.
+Their shared safety envelope keeps coupling off because `sbcice_if` otherwise
+writes `a_i` (`sbcice_if.F90:105`), keeps embedded ice off because the ocean
+step reads `snwice_mass*` (`stp2d.F90:213-220`), excludes the `sshice`
+diagnostic (`diaar5.F90:197-200`), and accepts that freshwater budgeting
+automatically switches to ocean-only volume (`sbcfwb.F90:119`).  It also
+enumerates the off assimilation, observation, section, boundary, bulk/ABL,
+coupler, restart and ice-writer consumers found by the full `src/OCE` grep.
 
 ## Gates and review
 
@@ -103,7 +135,8 @@ the selected runtime ice model is `nn_ice=1`.
 - Focused literal/aerobulk tests: 36/36 PASS, including signed-zero and finite
   calm-wind/masked-fill gradients.
 - OMIP/coupler/legacy/AMIP/land/SI3 shared-caller tests: 142/142 PASS.
-- Parent/current real-CORE control: 0/226,440 unequal.
+- Complete parent/current non-NEMO control: 0/10,231,076 unequal across all
+  214 arrays; one-ULP `q_net` plant PASS_NONZERO.
 - Changed-path default gates: 36/36 focused, 142/142 shared callers, and 16/16
   in-tree SI3 PASS.  The authoritative `land.sh` ORCA2 default gate passes
   152/152 in 1,049.81 s.  The per-receipt citation gate passes all 13 citations
@@ -125,9 +158,14 @@ resume; operator confirmation remains external to this receipt.
 - DECISION_NEEDED: ice-cover provenance remains the three-option choice in the
   design.  The pick is a pinned native-grid yearly mean derived from the NEMO
   ORCA2_ICE reference; no option is selected.
-- DECISION_NEEDED: reference build identity remains open.  The pick is
-  `key_si3` compiled with `nn_ice=1`, preserving the comparison card's ocean
-  branches at the cost of SI3 linkage/initialization and a mandatory boot plus
-  ten-step smoke gate.  Removing `key_si3` requires a separately named build,
-  zero-step comparison, and full ten-step recertification; carrying both builds
-  doubles acquisition and long-run cost.  No option is selected.
+- DECISION_NEEDED: Decision 172 is refuted; reference configuration remains
+  open.  The design lists five viable families.  The pick is **K0**:
+  `key_si3`, `nn_ice=1`, `ln_drgice_imp=F`, `ln_mxl0=T`, `nn_mxlice=0`, and
+  `ln_icebergs=F`, with the full off-consumer safety envelope.  Its three
+  changed branches are independently certified by the round-324 pre-D150
+  control, round-326 pre-D154/round-325 control, and accepted Phase-2d
+  icebergs-off VARIANT, but their ice-if composition still requires a new boot
+  and full ten-step acquisition.  K1 (`nn_mxlice=1`), K2 (`ln_mxl0=F`), N0
+  (no SI3, icebergs off), and N1 (no SI3, icebergs on with the zero-ice
+  fallback) all need new branch or compiled-path certification.  No option is
+  selected or applied.

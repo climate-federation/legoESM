@@ -1726,6 +1726,11 @@ FILES = {
     "nemo_state_bridge.py": (
         REPO / "packages/ocean/legoesm/ocean/fidelity/nemo_state_bridge.py"),
     "zdftke.F90": _OCE / "ZDF/zdftke.F90",
+    "sbcmod.F90": _OCE / "SBC/sbcmod.F90",
+    "icbutl.F90": _OCE / "ICB/icbutl.F90",
+    "sbcice_if.F90": _OCE / "SBC/sbcice_if.F90",
+    "sbcfwb.F90": _OCE / "SBC/sbcfwb.F90",
+    "diaar5.F90": _OCE / "DIA/diaar5.F90",
     "domhgr.F90": _OCE / "DOM/domhgr.F90",
     "geo2ocean.F90": _OCE / "SBC/geo2ocean.F90",
     "cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_cfg": (
@@ -8895,10 +8900,6 @@ CITATION_MAP = {
         'anchors': 'pCdU(ji,jj) = - pCd0(ji,jj) * rn_Uc0   ! linear friction',
         'routine': 'zdf_drg_lin',
     },
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfdrg.f90:380': {
-        'anchors': 'IF ( ln_drgice_imp .AND.   nn_ice /= 2  )   ln_drgice_imp = .FALSE.',
-        'routine': 'zdf_drg_init',
-    },
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfdrg.f90:525': {
         'anchors': 'IF(ll_bot)   zmsk_boost(:,:) = zmsk_boost(:,:) * ssmask(:,:)',
         'routine': 'drg_init',
@@ -8951,6 +8952,33 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbc_phy.f90:1198-1213': [
         'FUNCTION UN10_from_CD( pzu, pUb, pCd, ppsi )',
         'END FUNCTION UN10_from_CD', 16],
+    # Round 335 resume 2: nn_ice=1 safety audit in pristine NEMO source.
+    'sbcmod.F90:331-340': [
+        ('IF( nn_ice == 0 ) THEN', 2),
+        'CALL ice_init( Kbb, Kmm, Kaa )', 10],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfdrg.f90:380': {
+        'anchors': 'IF ( ln_drgice_imp .AND.   nn_ice /= 2  )   ln_drgice_imp = .FALSE.',
+        'routine': 'zdf_drg_init',
+    },
+    'zdftke.F90:622': 'fr_i(ji,jj)   * hm_i(ji,jj) * 2._wp',
+    'zdftke.F90:794-795': [
+        'ELSEIF ( nn_mxlice > 1 .AND. nn_ice == 1 ) THEN',
+        "CALL ctl_stop( 'zdf_tke_init: with no ice model, nn_mxlice must be 0 or 1')",
+        2],
+    'icbutl.F90:89-93': [
+        'zssh_lead_m(:,:) = ice_var_sshdyn(ssh_m, snwice_mass, snwice_mass_b)',
+        'hi_icb(:,:) = vt_i(:,:) / at_i(:,:)', 5],
+    'icbutl.F90:174-181': [
+        'IF ( PRESENT(pui) ) pui = icb_utl_bilin_h( u_ice',
+        'IF ( PRESENT(phi) ) phi = 0._wp', 8],
+    'sbcice_if.F90:105': 'IF( ln_cpl )   a_i(:,:,1) = fr_i(:,:)',
+    'sbcfwb.F90:119': 'IF ( nn_ice/=2 ) nn_fwb_voltype = 2',
+    'stp2d.F90:213-220': [
+        'IF( ln_ice_embd ) THEN',
+        'zpice(ji,jj) = ( zintp * snwice_mass(ji,jj)', 8],
+    'diaar5.F90:197-200': [
+        "IF( iom_use( 'sshice' ) .AND. nn_ice /= 0 ) THEN",
+        'z2d(ji,jj) = ztf * snwice_mass(ji,jj)', 4],
 }
 
 

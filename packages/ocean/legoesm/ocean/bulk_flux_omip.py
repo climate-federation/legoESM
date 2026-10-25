@@ -311,7 +311,14 @@ def _virt_temp(T_K, q):
 
 
 def _one_on_obukhov(theta_K, q, u_star, theta_star, q_star):
-    """Parent/public inverse Obukhov implementation."""
+    """Parent/public inverse Obukhov implementation.
+
+    Keep this separate from ``_one_on_obukhov_nemo``.  The two expressions
+    are physically equivalent, but the literal NEMO arm deliberately inserts
+    source-statement barriers and implements Fortran ``SIGN``/``MIN``.  They
+    are not bit-identical, while this arm is the compatibility boundary for
+    every pre-existing caller.
+    """
     zqa = 1.0 + _RCTV0 * q
     inv_L = (
         constants.g_nemo * constants.kappa_von_karman
@@ -348,7 +355,12 @@ def _one_on_obukhov_nemo(theta_K, q, u_star, theta_star, q_star):
 
 
 def _ch_n10(sqrt_cdn, stable_01):
-    """Parent/public neutral sensible-heat coefficient."""
+    """Parent/public neutral sensible-heat coefficient.
+
+    The adjacent NEMO form retains statement barriers and Fortran maximum
+    semantics; sharing it would change legacy words.  Only ``_virt_temp`` is
+    common because its two arms are measured bit-identical.
+    """
     return jnp.maximum(
         1.0e-3 * sqrt_cdn * (18.0 * stable_01 + 32.7 * (1.0 - stable_01)),
         _CX_MIN,
@@ -742,13 +754,20 @@ def blk_oce_2(
         xp.asarray(qlw_down) - float(constants.sigma_sb) * tsk_K ** 4
     )
     liquid = xp.maximum(precip_arr - snow_arr, 0.0)
-    qns = (
-        qlwn + xp.asarray(sensible) + xp.asarray(latent)
-        - snow_arr * float(precip_factor) * float(constants.L_fus_nemo)
+    # This is an externally observed compatibility boundary.  Preserve the
+    # parent host/scan statement grouping exactly: the precipitation/evap
+    # terms are reduced first, followed by sh + lh + lw + precip.  Flattening
+    # the sum changes q_net by a few ulps even though it is algebraically
+    # equivalent.
+    q_precip_evap = (
+        -snow_arr * float(precip_factor) * float(constants.L_fus_nemo)
         - xp.asarray(evap) * float(constants.c_p_seawater) * tsk_c_arr
         + liquid * float(precip_factor) * float(constants.c_p_seawater) * theta_air_c
         + snow_arr * float(precip_factor) * float(constants.c_p_ice_nemo)
         * xp.minimum(theta_air_c, 0.0)
+    )
+    qns = (
+        xp.asarray(sensible) + xp.asarray(latent) + qlwn + q_precip_evap
     )
     emp = (xp.asarray(evap) - precip_arr * float(precip_factor)) * wet
     return BlkOce2Result(qlwn, qns * wet, emp)

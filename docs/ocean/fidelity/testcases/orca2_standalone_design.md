@@ -124,20 +124,35 @@ matching legoESM card reads those same files, enters S1 from its own
 S0-F/S0-M output, executes S1 -> S3 -> S2 in NEMO source order, and never
 reads a NEMO exchange record.
 
-Source inspection confirms that `sbcmod` permits `nn_ice=1` in a
-`key_si3` build: only case 2 calls `ice_stp`.  It does not prove the new deck
-boot-safe.  With `key_si3`, bulk initialization still allocates and validates
-SI3 air-ice fields; `sbcice_if` binds `a_i` from the SI3 module, while
-`sbcmod` calls neither `ice_init` nor the no-SI3 allocator for `nn_ice=1`.
-The candidate must therefore pass an initialization/ten-step smoke gate with
-coupling disabled before any scientific comparison.
+**Decision 172's premise is refuted.**  Keeping `key_si3` with `nn_ice=1`
+does not preserve the certified ocean path.  `sbcmod` calls neither
+`sbc_ice_alloc` nor `ice_init`; `zdfdrg` forcibly resolves
+`ln_drgice_imp=F`; and TKE/GLS reject `nn_mxlice>1` before the first step.
+The current `ln_icebergs=T` is independently unsafe: the key-SI3 iceberg path
+reads `snwice_mass`, `at_i`, `vt_i`, `u_ice`, and `v_ice`, none of which was
+allocated or initialized.  This is a boot/undefined-read defect, not merely a
+different scientific choice.
 
-Dropping `key_si3` is not an equivalent simplification.  It selects different
-compiled ocean branches in `zdftke`/`zdfgls` surface mixing-length scaling and
-removes the SI3 implicit top-drag contribution in `zdfdrg`; it also changes
-bulk/ABL/coupler allocation and blending branches.  Most SI3-only routines
-would be runtime-dead at `nn_ice=1`, but these shared ocean paths are not
-certified equivalent merely because `ice_stp` is skipped.
+An exhaustive import-and-dereference grep over `src/OCE` gives this safety
+envelope for an ice-if deck.  It is part of every viable option below.
+
+| SI3-allocated field/read cone | Required resolved state at `nn_ice=1` |
+|---|---|
+| `rCdU_ice` in `zdfdrg` | `ln_drgice_imp=F` (NEMO also coerces it false) |
+| `hm_i,h_i` in TKE/GLS | with `ln_mxl0=T`, use `nn_mxlice=0` or `1`; alternatively disable `ln_mxl0` and recertify the global surface anchor |
+| `snwice_mass*` in `stp2d`/`dynspg` | retain `ln_ice_embd=F` |
+| `snwice_mass*` in freshwater budget | `nn_fwb=2` may remain, but NEMO resolves `nn_fwb_voltype=2` when `nn_ice/=2` |
+| `snwice_mass*`, `at_i`, `vt_i`, `u_ice`, `v_ice` in icebergs | with `key_si3`, require `ln_icebergs=F`; without the key, the compiled fallback supplies zero ice velocity/thickness |
+| `a_i` in `sbcice_if` | retain standalone `ln_cpl=F`; the assignment is coupling-only |
+| SI3 fields in diagnostics/assimilation/BDY | retain `ln_diadct=F`, `ln_diaobs=F`, `ln_asmdin=F`, `ln_asmiau=F`, `ln_bdy=F`, and do not request `sshice` |
+| bulk, ABL, coupler, restart, and ice-writer SI3 fields | already runtime-dead under resolved `nn_ice=1`, `ln_abl=F`, `ln_cpl=F`; restart/ice-writer calls are guarded by `nn_ice==2` |
+
+Dropping `key_si3` is still not an equivalent simplification.  It changes
+compiled TKE/GLS, top-drag, iceberg, bulk/ABL, coupler, allocation, restart,
+and diagnostics branches.  Conversely, retaining the key requires disabling
+all live consumers listed above.  Each option therefore has an explicit
+certification cost in the decision table below; no configuration is changed
+by this design round.
 
 The exact-input NEMO record contains entry state, every S0/S1/S3/S2 boundary,
 and the existing ten-step ladder checkpoints for steps 1--10 on ranks 0--1.
@@ -187,22 +202,23 @@ No option is selected by this document.  The pick is option 1 for a controlled
 NEMO-vs-legoESM fidelity reference; option 2 should be a later observational
 sensitivity experiment.
 
-## DECISION_NEEDED — NEMO reference build identity
+## DECISION_NEEDED — viable NEMO reference configurations
 
-1. **Keep `key_si3` compiled and set `nn_ice=1` (pick).**  This preserves the
-   comparison card's compiled ocean mixing/drag/bulk branches and changes only
-   the runtime ice selector.  Cost: the executable still links SI3, retains
-   SI3 initialization/namelist obligations, and needs the explicit boot/ten-
-   step smoke gate above because `nn_ice=1` skips `ice_init`.
-2. **Remove `key_si3` and recertify a new ocean reference.**  This produces a
-   smaller, conceptually cleaner ice-if executable, but changes TKE/GLS surface
-   mixing, top drag, allocation, ABL, bulk, and coupler code at compile time.
-   Cost: a new zero-step state comparison plus the full ten-step ocean ladder;
-   it cannot inherit the current comparison card's certification.
-3. **Carry two NEMO references.**  Use option 1 as the fidelity control and a
-   no-SI3 build as a sensitivity.  This resolves attribution best but doubles
-   build, acquisition, twin-reproducibility, and long-run cost.
+All rows set `nn_ice=1`, explicitly resolve `ln_drgice_imp=F`, and retain the
+diagnostic/coupling safety envelope above.  These are the complete viable
+families while retaining the deck's TKE scheme; `nn_mxlice=2/3` with
+`ln_mxl0=T` and key-SI3 plus active icebergs are not viable.
 
-No option is selected.  The pick is option 1 because it preserves the ocean
-code paths the existing card actually certified; option 2 is admissible only
-as a separately named and fully recertified reference.
+| ID | Configuration | Earlier certification | Incremental cost |
+|---|---|---|---|
+| K0 **(pick)** | keep `key_si3`; `ln_mxl0=T`; `nn_mxlice=0`; `ln_icebergs=F` | each changed branch is already certified separately: drag-off is the round-324 pre-D150/shipped control (0/1,360 rows); mxlice-0 is the round-326 pre-D154/round-325 control (0/1,360); icebergs-off is the accepted Phase-2d VARIANT with the Phase-2c 10-step and 30-day controls | no rebuild; new composition still needs boot, reproducibility twin, and full ten-step S0--S4 acquisition; then reserve 90 minutes for each yearly arm |
+| K1 | K0 but `nn_mxlice=1` with a pinned `rn_mxlice` | **not certified** in this campaign; prior rungs certify 0 and record-fed 2 only | K0 cost plus a new TKE surface-mixing branch record, plants, gradients, and D122 comparison |
+| K2 | keep `key_si3` and `nn_mxlice=2` inert by setting `ln_mxl0=F`; `ln_icebergs=F` | **not certified**; every ORCA2 rung used `ln_mxl0=T` | K0 cost plus recertification of the global stress-derived surface mixing-length anchor; highest-confound key-SI3 option |
+| N0 | remove `key_si3`; set `nn_mxlice=0`; `ln_icebergs=F` | **not certified**; no earlier rung certifies the no-SI3 compiled ocean | one new build, zero-step state census, full ten-step ladder/acquisition and twin, then the yearly arm |
+| N1 | N0 but retain `ln_icebergs=T`, selecting the compiled zero-ice-velocity/thickness fallback | **not certified**; existing iceberg runs use SI3 fields | N0 cost plus iceberg entry/restart/trajectory census and at least the existing 30-day iceberg control before the yearly arm |
+
+K0 minimizes new physics and reuses three independently certified branch
+states, but their `nn_ice=1` composition remains unexecuted and is not
+grandfathered.  No option is selected by this document; the operator must
+decide.  The engineering pick is K0.  Carrying both K0 and N0 as references
+is also admissible, at roughly double build/acquisition/twin/yearly cost.

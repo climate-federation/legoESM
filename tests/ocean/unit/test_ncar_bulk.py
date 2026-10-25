@@ -29,6 +29,7 @@ import jax.numpy as jnp  # noqa: E402
 from legoesm import constants  # noqa: E402
 from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
     air_sea_fluxes,
+    blk_oce_2,
     exner_potential_temperature,
     latent_heat_vaporization_sst as latent_heat_vaporization,
     moist_air_cp,
@@ -58,6 +59,68 @@ _MDRY = 28.9647e-3                    # NEMO rmm_dryair
 _MWAT = 18.0153e-3                    # NEMO rmm_water
 _GAMMA_DRY = _RGAS / (_MDRY * 1005.0)  # NEMO rgamma_dry
 _RT0 = 273.15                         # const-ok: NEMO rt0 in the test mirror
+
+
+@pytest.mark.parametrize("backend", ["host", "scan"])
+def test_legacy_blk_oce_2_preserves_parent_reduction_order(backend):
+    """Host and scan backends keep the pre-refactor q_net word order.
+
+    The deliberately flattened plant is algebraically identical but differs
+    by ulps, so this is a live bitwise compatibility check rather than an
+    allclose physics test.
+    """
+    rng = np.random.default_rng(335)
+    shape = (37, 43)
+    theta = rng.uniform(245.0, 310.0, shape)
+    tsk_c = rng.uniform(-2.0, 32.0, shape)
+    lw = rng.uniform(180.0, 480.0, shape)
+    precip = rng.uniform(0.0, 2.0e-4, shape)
+    snow = precip * rng.uniform(0.0, 1.0, shape)
+    evap = rng.uniform(-2.0e-4, 2.0e-4, shape)
+    sensible = rng.uniform(-400.0, 400.0, shape)
+    latent = rng.uniform(-800.0, 800.0, shape)
+
+    xp = np if backend == "host" else jnp
+    theta = xp.asarray(theta)
+    tsk_c = xp.asarray(tsk_c)
+    lw = xp.asarray(lw)
+    precip = xp.asarray(precip)
+    snow = xp.asarray(snow)
+    evap = xp.asarray(evap)
+    sensible = xp.asarray(sensible)
+    latent = xp.asarray(latent)
+    theta_c = theta - constants.T_freeze
+    tsk_K = tsk_c + constants.T_freeze
+    qlwn = constants.emissivity_seawater_lw * (
+        lw - constants.sigma_sb * tsk_K ** 4
+    )
+    liquid = xp.maximum(precip - snow, 0.0)
+    q_precip_evap = (
+        -snow * constants.L_fus_nemo
+        - evap * constants.c_p_seawater * tsk_c
+        + liquid * constants.c_p_seawater * theta_c
+        + snow * constants.c_p_ice_nemo * xp.minimum(theta_c, 0.0)
+    )
+    parent_qns = sensible + latent + qlwn + q_precip_evap
+
+    got = blk_oce_2(
+        theta, tsk_c, lw, precip, snow, evap, sensible, latent,
+        array_namespace=xp,
+    )
+    np.testing.assert_array_equal(np.asarray(got.qns), parent_qns)
+
+    flattened_plant = (
+        qlwn + sensible + latent
+        - snow * constants.L_fus_nemo
+        - evap * constants.c_p_seawater * tsk_c
+        + liquid * constants.c_p_seawater * theta_c
+        + snow * constants.c_p_ice_nemo * xp.minimum(theta_c, 0.0)
+    )
+    flattened_plant = np.asarray(flattened_plant)
+    parent_qns = np.asarray(parent_qns)
+    assert np.count_nonzero(
+        flattened_plant.view(np.uint64) != parent_qns.view(np.uint64)
+    ) > 0
 
 
 def _np_e_sat_goff(T):
