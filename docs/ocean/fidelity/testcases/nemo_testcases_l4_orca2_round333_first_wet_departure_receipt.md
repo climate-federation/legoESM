@@ -133,11 +133,13 @@ Expected evidence directory:
 
 The per-receipt citation gate passes 8 citations with zero failures, zero
 unmapped citations, and zero map-audit failures; all nine self-test controls
-fire. The exact default ORCA2 landing battery passes 152 tests in 1,000.71
+fire. The exact default ORCA2 landing battery passes 152 tests in 1,133.45
 seconds, including the required receipt-citation test. The explicit
-private-import ratchet passes 6 tests in 4.99 seconds.
+private-import ratchet passes 6 tests in 5.54 seconds.
 
 No configuration value changed: **ASKED**. The next admissible action is the
 operator-only acquisition above, followed by admission and offline replay.
 
-independent review: operator (Claude)
+Independent reviews: **HOLD** (Claude and Argon) on the superseded acquisition
+tool. Every enumerated finding is repaired above; operator rereview is still
+required before acquisition.
