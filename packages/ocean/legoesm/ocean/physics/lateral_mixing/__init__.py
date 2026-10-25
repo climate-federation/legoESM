@@ -24,6 +24,7 @@ from legoesm.ocean.physics.lateral_mixing.backscatter import (
     cfl_cap_eddy_energy,
     diagnostic_backscatter_cgrid,
 )
+from legoesm.ocean.physics.lateral_mixing.mle import R5_21
 
 __all__ = [
     "LateralMixingConfig",
@@ -42,4 +43,5 @@ __all__ = [
     "diagnostic_eddy_energy",
     "cfl_cap_eddy_energy",
     "diagnostic_backscatter_cgrid",
+    "R5_21",
 ]
