@@ -9652,10 +9652,12 @@ CITATION_MAP = {
     'packages/ice/legoesm/ice/si3_surface.py:384': 'def si3_blk_ice_2(',
     'packages/ice/legoesm/ice/si3_surface.py:467': 'def si3_ice_flx_other(',
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_bulk_flux_gate.py:411': 'cfg = SI3SurfaceConfig.from_resolved_namelists(',
-    'tests/ice/unit/test_si3_surface.py:351': 'def test_production_config_is_read_from_the_shipped_deck():',
-    'tests/ice/unit/test_si3_surface.py:398': 'def test_jit_equals_independent_glibc_transcription_on_every_output(deck):',
-    'tests/ice/unit/test_si3_surface.py:436': 'def test_blk_ice_1_zsipt_is_transcribed_and_has_no_consumer_on_this_arm():',
-    'tests/ice/unit/test_si3_surface.py:441': 'def test_zsipt_consumer_plant_is_caught(monkeypatch):',
+    'tests/ice/unit/test_si3_surface.py:395': 'def test_production_config_is_read_from_the_shipped_deck():',
+    'tests/ice/unit/test_si3_surface.py:442': 'def test_jit_equals_independent_glibc_transcription_on_every_output(deck):',
+    'tests/ice/unit/test_si3_surface.py:478': 'def test_blk_ice_1_zsipt_is_transcribed_and_has_no_consumer_on_this_arm():',
+    'tests/ice/unit/test_si3_surface.py:483': 'def test_zsipt_consumer_plant_is_caught(monkeypatch):',
+    'tests/ice/unit/test_si3_surface.py:324': 'def lbc_t_oracle(interior, psgn):',
+    'tests/ice/unit/test_si3_surface.py:514': 'def test_production_path_plants_fire(plant, monkeypatch):',
 }
 
 

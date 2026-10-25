@@ -69,7 +69,7 @@ not transcribed. The `iom_put`/`prt_ctl` diagnostics are not transcribed.
 
 ## 6. CHOICES (ASKED/UNASKED)
 
-- Deck, rank count and step window: section 1. ASKED (DECISION_NEEDED).
+- Deck, rank count and step window: section 1. ASKED; answered by DECISION 165 (Addendum 3).
 - Reference build `ORCA2_SAS_ICE_O2_REF` (byte-identical alternatives). UNASKED, mechanical.
 - `theta_air_zt`, `q_air_zt`, `rhoa`, `precip`, `emp`, `qsr`, `qsr_oce`, `qns_oce`, `cloud_fra`, `rn_amax_2d`, `t_bo` enter as recorded arrays (they are produced by `sbc_blk`/`blk_oce_1/2`/`ice_stp`, outside the four O7 routines). UNASKED; follows the round's exact-input instruction.
 - Both `ice_flx_other` dynamics arms transcribed so either deck answer is covered. UNASKED; offered for revert.
@@ -112,3 +112,9 @@ O7 acquisition deck: (1) unmodified production `ORCA2_SAS_ICE`, 1 rank,
   `cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg`, `namelist_ice_cfg`), merged as
   NEMO reads them. If the production deck is chosen, the run's own
   `output.namelist.dyn/.ice` must equal it field for field before scoring.
+
+## Addendum 3 (user decision; predictions P1-P6 unchanged)
+
+- **DECISION 165 (2026-10-25), ASKED:** the O7 acquisition uses the
+  unmodified production `ORCA2_SAS_ICE` deck, one MPI rank, `kt = 1..2`
+  (section 7 option 1). The O2 diagnostic overlay is not acquired.

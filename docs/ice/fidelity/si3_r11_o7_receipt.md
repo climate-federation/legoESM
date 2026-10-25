@@ -41,8 +41,8 @@ local in `blk_ice_1` is a non-constant arm:
 (`blk_ice_2`'s `zsipt` is its own scalar local, `:1225`.) Transcribed
 (`packages/core/legoesm/core/bulk_flux.py:1646`). The test moves
 `tm_su` alone and requires `zsipt` to change and every other output to stay
-bit-identical (`tests/ice/unit/test_si3_surface.py:436`); a planted consumer
-(`theta_zu_i = zsipt`) is caught (`tests/ice/unit/test_si3_surface.py:441`).
+bit-identical (`tests/ice/unit/test_si3_surface.py:478`); a planted consumer
+(`theta_zu_i = zsipt`) is caught (`tests/ice/unit/test_si3_surface.py:483`).
 Not transcribed, stated: `zmsk00`, read only by `iom_put` diagnostics.
 
 ## Codex item 2 — production configuration from the production deck
@@ -55,7 +55,7 @@ compared to the NEMO tree when it is mounted, of `cfgs/SHARED/namelist_ref`,
 `cfgs/ORCA2_SAS_ICE/EXPREF/namelist_ice_cfg` (`ORCA2_SAS_ICE` has no `BLD`;
 "as built" does not exist). Result: `rn_Cd_ia = rn_Ce_ia = rn_Ch_ia = 1.4e-3`,
 `ln_icedyn = T`, ponds on. It differs from the O2 run's resolved config in
-exactly one field, `ln_icedyn` (`tests/ice/unit/test_si3_surface.py:351`).
+exactly one field, `ln_icedyn` (`tests/ice/unit/test_si3_surface.py:395`).
 The reader is the round-314 audit's, moved to one home
 (`packages/core/legoesm/core/nemo_namelist.py:80`); that audit's tests still pass.
 
@@ -92,13 +92,22 @@ Codex's "C1D bits byte-identical" cannot hold with one NEMO-literal body: lane
 
 ## Codex item 4 — oracle on every output
 
-The independent per-cell glibc transcription now covers all 45 model leaves
-(`blk_ice_1` 9 incl. `zsipt`, albedo, `blk_ice_2` 19 outputs and 11 statement
-intermediates — `zcptrain`, `zcptsnw`, `zcptn`, `zsq`, `zsipt`, `z_qlw`,
-`z_dqlw`, `z_qsb`, `z_dqsb`, `zevap`, `zsnw` — and the 3 lead/bottom outputs).
-The key sets are asserted equal, so an unscored output fails the test. It runs
-on three decks: production, the O2 overlay, and C1D (no ponds)
-(`tests/ice/unit/test_si3_surface.py:398`).
+Correction (codex re-review): the earlier "45 leaves" was false. The key-set
+check covered 43 per-cell leaves; the two full-halo stresses were checked only
+eager against `jit`. Now all 45 are scored against the oracle:
+
+- 43 per-cell leaves: `blk_ice_1` 9 incl. `zsipt`, albedo, `blk_ice_2` 19
+  outputs and 11 statement intermediates, the 3 lead/bottom outputs. Key sets
+  asserted equal.
+- `utau_ice`, `vtau_ice` on the full halo: the oracle's interior stresses pass
+  through an independent per-cell transcription of NEMO's exchange
+  (`tests/ice/unit/test_si3_surface.py:324`), sign -1 as
+  `ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icesbc.f90:167`. It starts its halo as
+  NaN, so a halo cell the model leaves unwritten also fails. A wrong fold sign
+  is caught on these two leaves only.
+
+Three decks: production, the O2 overlay, and C1D (no ponds)
+(`tests/ice/unit/test_si3_surface.py:442`).
 
 ## Codex item 5 — deck
 
@@ -126,16 +135,22 @@ stress `(rhoa*Cd)*wndm` (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/sbcblk.f90:1137`),
 ## Tests and gates
 
 - `tests/ice/unit/test_si3_surface.py`, namelist reader, lane-3 bulk-gate test,
-  round-314 audit test: `40 passed, 2 xfailed in 82.09s`. The xfails: the
-  native-`exp` plant is vacuous on the synthetic fixture (agrees with glibc;
-  still required on the record), and the subnormal-snow-under-`jit` platform
-  floor (eagerly the shared code gives NEMO's answer).
+  round-314 audit test: `42 passed, 1 xfailed in 81.63s`. The xfail is the
+  subnormal-snow-under-`jit` platform floor.
+- The native-transcendental plant now fails as required
+  (`tests/ice/unit/test_si3_surface.py:514`). Earlier it was vacuous: native
+  `exp` differed from glibc on 43 of the fixture's 240 snow cells, but every
+  difference rounded away before the albedo. One added cell (0.0066 m dry
+  snow on 1 m ice, no pond, cloud 0.5; found by search) carries it to the
+  albedo. The retained-record C1D gate gets no native plant: it still runs
+  the native arm (its 18 native-`exp` rows), so that plant would change
+  nothing until the pending lane-3 decision moves it to glibc.
 - Plants that fire on the full oracle: `Cd_ia` +1 ULP, `rtt0` +1 ULP,
   `LOG(10)` +1 ULP, `SUM` from the first category, `nn_snwfra` swapped,
-  planted `zsipt` consumer.
+  native transcendentals, wrong fold sign, planted `zsipt` consumer.
 - Eager == `jit` on all 45 leaves; gradients finite, central difference on one
   `t_su` cell within 1e-5.
-- `tests/ice/unit`: `391 passed, 1 skipped, 2 xfailed`. SI3 fidelity-gate
+- `tests/ice/unit`: `393 passed, 1 skipped, 1 deselected, 1 xfailed`. SI3 fidelity-gate
   tests: `93 passed`. Sea-ice/core/coupler/land unit set: `25 failed, 619
   passed`; parent `25 failed, 618 passed`, same 25 failures (pre-existing).
 - `test_nemo_si3_scalarmath_v2_gate.py::test_full_v2_gate_and_plants` fails
@@ -156,7 +171,7 @@ stress `(rhoa*Cd)*wndm` (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/sbcblk.f90:1137`),
 
 ## CHOICES
 
-- O7 acquisition deck and window. ASKED (pending with the user).
+- O7 acquisition deck and window: production deck, 1 rank, `kt` 1..2. ASKED (DECISION 165; preregistration addendum 3).
 - Lane-3 C1D card now moves 16,494 values onto NEMO's record instead of
   staying byte-identical. UNASKED (consequence of one implementation);
   offered as the decision below.

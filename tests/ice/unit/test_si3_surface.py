@@ -120,6 +120,10 @@ def _inputs(seed=0):
     x["v_ice"][H + 4, H + 0] = x["v_ice"][H + 4, H - 1] = 0.0
     x["sst_m"][5, 2] = -0.5                                   # warm leads (fhld branch)
     x["qns_oce"][5, 2] = 200.0
+    # Thin dry snow: XLA's native exp(-h_s/0.02) differs from glibc here by an ULP that survives into alb
+    # (searched; ponds, cloud and thick snow elsewhere round that ULP away), so the native plant binds.
+    x["h_s"][6, 4, 0], x["t_su"][6, 4, 0], x["h_i"][6, 4, 0], x["a_ip_eff"][6, 4, 0] = 0.0066, 250.0, 1.0, 0.0
+    x["cloud_fra"][6, 4] = 0.5
     for cell in ((5, 3), (4, 0), (4, 1)):                     # cooling leads at freezing SST
         x["sst_m"][cell] = x["t_bo"][cell] - TF
         x["qns_oce"][cell], x["qsr_oce"][cell] = -300.0, 0.0
@@ -317,6 +321,40 @@ def s_cell(c, x, i, j):
     return o
 
 
+def lbc_t_oracle(interior, psgn):
+    """lbc_lnk on a T-point field, jpni = 1, ORCA2 (cyclic E-W, T-pivot fold, closed south), 1-based.
+
+    Order and extents as lbc_lnk_pt2pt_generic.h90: E-W halos over the Nj_0 inner rows (step 4), self
+    north fold lbc_nfd_generic.h90:22-75 (step 6), south halo = zland over all ipi (step 7). Halos start
+    as NaN: every halo cell must be written.
+    """
+    ni0, nj0, hl = len(interior), len(interior[0]), H
+    ipi, ipj = ni0 + 2 * hl, nj0 + 2 * hl
+    t = {(i, j): math.nan for i in range(1, ipi + 1) for j in range(1, ipj + 1)}
+    for i in range(ni0):
+        for j in range(nj0):
+            t[(i + hl + 1, j + hl + 1)] = interior[i][j]
+    for jj in range(hl + 1, hl + nj0 + 1):
+        for ji in range(1, hl + 1):
+            t[(ji, jj)] = t[(ipi - 2 * hl + ji, jj)]                 # west <- im1i
+            t[(ipi - hl + ji, jj)] = t[(hl + ji, jj)]                # east <- ip1i
+    for jj in range(1, hl + 1):
+        ij1, ij2 = ipj - jj + 1, ipj - 2 * hl + jj - 1
+        pairs = [(ji, 2 * hl + 2 - ji) for ji in range(1, hl + 1)] + [(hl + 1, hl + 1)]
+        pairs += [(2 + hl + ji - 1, ipi - hl - ji + 1) for ji in range(1, ni0)]
+        pairs += [(ipi - hl + 1, hl + 1)] + [(ipi - hl + 1 + ji, ipi - hl + 1 - ji) for ji in range(1, hl)]
+        for ii1, ii2 in pairs:
+            t[(ii1, ij1)] = psgn * t[(ii2, ij2)]
+    ij1 = ipj - hl
+    for ii1, ii2 in [(ipi // 2 + ji + 1, ipi // 2 - ji + 1) for ji in range(1, ni0 // 2)] + \
+            [(ji, 2 * hl + 2 - ji) for ji in range(1, hl + 1)]:
+        t[(ii1, ij1)] = psgn * t[(ii2, ij1)]
+    for jj in range(1, hl + 1):
+        for ji in range(1, ipi + 1):
+            t[(ji, jj)] = 0.0
+    return np.array([[t[(i, j)] for j in range(1, ipj + 1)] for i in range(1, ipi + 1)])
+
+
 def _bits(a):
     return np.asarray(a, dtype=np.float64).view(np.uint64)
 
@@ -327,19 +365,25 @@ def _model_view(res):
         for name, value in tup._asdict().items():
             value = np.asarray(value)
             view[f"{prefix}.{name}"] = value[..., 0] if value.shape == (NI, NJ, 1) else value
+    view["utau_ice"], view["vtau_ice"] = res.utau_ice, res.vtau_ice  # full halo, after icesbc.f90:167
     return view
 
 
 def _oracle_mismatches(res, x, c):
     view = {k: np.asarray(v) for k, v in _model_view(res).items()}
     bad = []
+    cells = [[s_cell(c, x, i, j) for j in range(NJ)] for i in range(NI)]
     for i in range(NI):
         for j in range(NJ):
-            cell = s_cell(c, x, i, j)
-            assert set(cell) == set(view), set(cell) ^ set(view)
+            cell = cells[i][j]
+            assert set(cell) | {"utau_ice", "vtau_ice"} == set(view), set(cell) ^ set(view)
             for k, v in cell.items():
                 if not np.array_equal(_bits(view[k][i, j]), _bits(np.asarray(v, dtype=np.float64))):
                     bad.append((k, i, j))
+    for k in ("utau_ice", "vtau_ice"):   # icesbc.f90:167: lbc_lnk(..., 'T', -1.0_wp, ...)
+        want = lbc_t_oracle([[cells[i][j][f"b1.{k}"] for j in range(NJ)] for i in range(NI)], -1.0)
+        assert view[k].shape == want.shape and np.all(np.isfinite(want))
+        bad += [(k, int(i), int(j)) for i, j in np.argwhere(_bits(view[k]) != _bits(want))]
     return bad
 
 
@@ -400,8 +444,6 @@ def test_jit_equals_independent_glibc_transcription_on_every_output(deck):
     x = _inputs()
     res = _jit_step(x, c)
     assert _oracle_mismatches(res, x, c) == []
-    full = np.asarray(res.utau_ice)  # exchanged; the T-fold also rewrites half of the last interior row
-    np.testing.assert_array_equal(_bits(full[H:-H, H:-H - 1]), _bits(res.blk_ice_1.utau_ice[:, :-1]))
 
 
 def test_branches_bind_on_the_production_deck():
@@ -429,7 +471,7 @@ def _zsipt_has_no_consumer(c, x):
     moved = dict(x, tm_su=x["tm_su"] + 7.0)
     other = _jit_step(moved, c)
     assert not np.array_equal(_bits(base.blk_ice_1.zsipt), _bits(other.blk_ice_1.zsipt))
-    leaves = lambda r: [v for k, v in _model_view(r).items() if k != "b1.zsipt"] + [r.utau_ice, r.vtau_ice]  # noqa: E731
+    leaves = lambda r: [v for k, v in _model_view(r).items() if k != "b1.zsipt"]  # noqa: E731
     return all(np.array_equal(_bits(a), _bits(b)) for a, b in zip(leaves(base), leaves(other)))
 
 
@@ -468,7 +510,7 @@ def test_inexact_value_pins():
         assert v == ref[key] and v != round(v, 6), key
 
 
-@pytest.mark.parametrize("plant", ["cd_ulp", "rtt0_ulp", "sum_first_category", "ln10_ulp", "snwfra", "native_exp"])
+@pytest.mark.parametrize("plant", ["cd_ulp", "rtt0_ulp", "sum_first_category", "ln10_ulp", "snwfra", "native_exp", "fold_sign"])
 def test_production_path_plants_fire(plant, monkeypatch):
     c, x = _prod_config(), _inputs()
     if plant == "cd_ulp":
@@ -483,10 +525,14 @@ def test_production_path_plants_fire(plant, monkeypatch):
         c = c._replace(nn_snwfra=1)
     elif plant == "native_exp":
         set_policy(PrecisionPolicy.fp64(transcendentals="native"))
+    elif plant == "fold_sign":
+        monkeypatch.setattr(o7, "si3_lbc_lnk_orca2", lambda *a, **k: si3_lbc_lnk_orca2(*a, **k, _plant_wrong_nfd_sign=True))
     mismatches = _oracle_mismatches(_jit_step(x, c), x, _prod_config())
-    if plant == "native_exp" and not mismatches:
-        pytest.xfail("native exp/log/pow agree with glibc on this synthetic fixture (vacuous here; required on the record)")
     assert mismatches != []
+    if plant == "native_exp":
+        assert ("alb", 6, 4) in mismatches
+    if plant == "fold_sign":
+        assert {k for k, _, _ in mismatches} == {"utau_ice", "vtau_ice"}
 
 
 def test_eager_disable_jit_equals_jit():
