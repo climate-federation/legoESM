@@ -94,6 +94,16 @@ instruction census. `--admit-existing` is pinned to the retained run's producer
 commit and binary SHA; all `admit-r333-*.log` files remain inside retained
 evidence and final admission runs inside the refused-output retention trap.
 
+At committed tool revision `251029d2c`, the clean `--preflight-only` run
+passed 77 inherited tests and 6 round-333 tests, all seven placement plants,
+the three enabled-selector plants, both-rank bounds/sign fixtures, checksum and
+truncation plants, deterministic passivity across 140 inherited files, and
+eight real-Fortran syntax proofs. The observer-free versus instrumented object
+comparison reported an unchanged census of 1,367 floating-point instructions;
+the same-program proof reported 409 identical preprocessed units and 421
+identical normalized objects. It printed
+`ORCA2_ROUND333_TRACER_PREFLIGHT_READY` and did not build or execute NEMO.
+
 Operator command:
 
 ```text
