@@ -742,7 +742,7 @@ admit() {
     done
     "$PY" "$GATE" --record-dir "$TARGET_RUN" --expect-commit "$EXPECTED_PRODUCER" \
       --output "$TARGET_RUN/round332_dynzdf_readmission.json"
-    for plant in header field-order truncation stamp vor pdlr raw-header raw-truncation raw-checksum; do
+    for plant in header field-order truncation stamp vor pdlr raw-header raw-time-level raw-truncation raw-checksum; do
       if "$PY" "$R332_GATE" --record-dir "$TARGET_RUN" \
         --zdf-reference-dir "$ADMITTED_ZDFPHY_RUN" --expect-commit "$EXPECTED_PRODUCER" \
         --plant "$plant" >"$TARGET_RUN/round332_source_${plant}_plant.log" 2>&1; then

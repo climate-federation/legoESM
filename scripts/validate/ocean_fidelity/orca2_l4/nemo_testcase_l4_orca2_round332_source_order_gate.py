@@ -30,7 +30,7 @@ RAW_HEADER_NAMES = (
 )
 RAW_FIELDS = ("raw_postfold_v",)
 PLANTS = ("header", "field-order", "truncation", "stamp", "vor", "pdlr",
-          "raw-header", "raw-truncation", "raw-checksum")
+          "raw-header", "raw-time-level", "raw-truncation", "raw-checksum")
 OBSERVER_UNITS = ("dynzdf", "stprk3_stg", "dynvor", "zdfphy", "zdftke")
 WRITER_UNITS = ("dynzdf_round328_writer", "tke_round331_writer",
                 "round332_writer")
@@ -45,6 +45,22 @@ def record_name(rank: int) -> str:
 
 def raw_record_name(rank: int) -> str:
     return f"oracle_r332_raw_v_kt00000001_r{rank:04d}.bin"
+
+
+def rk3_after_level_for_stage(stage: int) -> int:
+    """Derive Kaa from NEMO's initialized levels and inter-stage swaps.
+
+    ``nemogcm.f90:368`` initializes ``Nnn=2, Naa=3``.  The stage calls and
+    swaps at ``stprk3.f90:216-230`` pass the current Naa, then exchange Nnn
+    and Naa after stages 1 and 2.
+    """
+    require(stage in (1, 2, 3), f"invalid RK3 stage {stage}")
+    nnn, naa = 2, 3
+    for current_stage in (1, 2, 3):
+        if current_stage == stage:
+            return naa
+        nnn, naa = naa, nnn
+    raise AssertionError("unreachable")
 
 
 def read_record(path: Path, plant: str | None = None) -> dict:
@@ -98,10 +114,16 @@ def read_raw_record(path: Path, plant: str | None = None) -> dict:
     header = dict(zip(RAW_HEADER_NAMES, values, strict=True))
     if plant == "raw-header":
         header["kstg"] = 2
+    elif plant == "raw-time-level":
+        header["kaa"] = 2 if header["kaa"] != 2 else 3
     require(magic == RAW_MAGIC, f"raw-V magic {magic!r} != {RAW_MAGIC!r}")
-    require((header["version"], header["kt"], header["kstg"], header["kaa"],
+    require((header["version"], header["kt"], header["kstg"],
              header["real_bits"], header["n_fields"]) ==
-            (1, 1, 1, 2, 64, len(RAW_FIELDS)), "wrong raw-V record header")
+            (1, 1, 1, 64, len(RAW_FIELDS)), "wrong raw-V record header")
+    expected_kaa = rk3_after_level_for_stage(header["kstg"])
+    require(header["kaa"] == expected_kaa,
+            f"wrong raw-V after level {header['kaa']} for stage "
+            f"{header['kstg']}; expected {expected_kaa}")
     fields, checksums, order = {}, {}, []
     shape = (header["jpi"], header["jpj"], header["jpk"])
     for index in range(header["n_fields"]):

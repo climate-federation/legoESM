@@ -336,7 +336,10 @@ Expected evidence directory:
 If it shows live NEMO negative zero too, dry-cell scoring is a policy question
 for the user; this round does not change the score.
 
-The offline replay artifact `/tmp/r332_tke_input_replay.json` reports
+The offline replay artifact
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round332/resume7_evidence/r332_tke_input_replay.json`
+(SHA-256 `48bf6e3b74789a10071fb79b0c45491f64a405f468dc85e1d0679f9f3c526766`)
+reports
 `PASS_R332_TKE_INPUT_REPLAY`: seven of seven lup recurrences and both eager/JIT
 anchors are exact; literal Prandtl multiplication and JIT are exact at all
 414,119 wet cells; eager reciprocal division misses 148,479.  The focused
@@ -359,7 +362,9 @@ The clean-commit Decision-122 remeasurement at `b0f9eb329` covered all seven
 required card/label pairs plus OMT-0.  OMT-0, rung 0 and OMT-1 through OMT-4
 are byte-for-byte identical to the published pre-fix row objects.  Each
 rung-10 label gains 13 bit-exact rows and loses none; 91 normalized-maximum
-rows improve, 180 rows reduce their unequal-word count and none increases it.
+rows improve, while the same 12 rows on each identical label have slightly
+larger normalized maxima, all with relative increases below `1e-15`.  A total
+of 180 rows reduce their unequal-word count and none increases it.
 The recomputed first over-bar row moves later from kt 2 stage 2 `u` to kt 2
 stage 3 `T`.  The registered RMS census is 176 toward, 4 away, 0 equal on
 each label, while the first registered non-bit row remains kt 1 stage 1 `v`

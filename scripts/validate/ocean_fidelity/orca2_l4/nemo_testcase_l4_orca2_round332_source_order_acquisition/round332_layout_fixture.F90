@@ -58,7 +58,7 @@ PROGRAM write_round332_fixture
    raw_v=-0._wp
    raw_v(1,1,1)=0._wp
    raw_v(2,1,1)=rank_offset
-   CALL r332_raw_postfold_v(1,1,2,raw_v)
+   CALL r332_raw_postfold_v(1,1,3,raw_v)
 
    DO jj=ntsj,ntej
       row_m=2._wp+rank_offset+REAL(jj,wp)

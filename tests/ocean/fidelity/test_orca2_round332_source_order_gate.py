@@ -66,6 +66,8 @@ def test_real_writer_layout_and_clean_admission(record_dir: Path) -> None:
     assert tuple(raw["fields"]) == gate.RAW_FIELDS
     assert record["fields"]["tke_pdlr"].shape == (3, 2, 4)
     assert raw["fields"]["raw_postfold_v"].shape == (5, 4, 5)
+    assert raw["header"]["kaa"] == gate.rk3_after_level_for_stage(
+        raw["header"]["kstg"])
     assert set(result["source_order_counts"]) == {"0", "1"}
     assert set(result["raw_sign_census"]) == {"0", "1"}
 
@@ -133,6 +135,7 @@ PLANT_REASONS = {
     "vor": "vorticity source-order addition does not replay bitwise",
     "pdlr": "wet inverse Prandtl ratio is outside",
     "raw-header": "wrong raw-V record header",
+    "raw-time-level": "wrong raw-V after level",
     "raw-truncation": "truncated",
     "raw-checksum": "payload checksum differs",
 }
@@ -185,7 +188,7 @@ def test_vorticity_counts_use_vmask_not_tke_column_mask(record_dir: Path) -> Non
     assert counts["wet_changed_bits"] == 0
 
 
-@pytest.mark.parametrize("plant", ["vor", "pdlr", "raw-header",
+@pytest.mark.parametrize("plant", ["vor", "pdlr", "raw-header", "raw-time-level",
                                     "raw-truncation", "raw-checksum"])
 def test_cli_semantic_plants_reach_refuse(record_dir: Path, plant: str) -> None:
     result = subprocess.run([
@@ -219,6 +222,13 @@ def test_patches_are_context_anchored_and_target_owning_statements() -> None:
     assert "CALL r332_tke_arms" not in tke
     assert stage.count("CALL r332_raw_postfold_v") == 1
     assert stage.index("CALL lbc_lnk") < stage.index("CALL r332_raw_postfold_v")
+
+
+def test_rk3_after_levels_follow_nemo_initialization_and_swaps() -> None:
+    assert tuple(gate.rk3_after_level_for_stage(stage) for stage in (1, 2, 3)) == (
+        3, 2, 3)
+    with pytest.raises(gate.GateError, match="invalid RK3 stage"):
+        gate.rk3_after_level_for_stage(0)
 
 
 def test_tke_landing_check_and_misplacement_plant_are_preflighted() -> None:
