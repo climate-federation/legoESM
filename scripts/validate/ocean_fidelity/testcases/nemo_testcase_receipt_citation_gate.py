@@ -9856,6 +9856,17 @@ CITATION_MAP = {
     'tests/ice/unit/test_si3_o9_zdf_dh_temp.py:802': 'def test_no_defaults_and_refused_arms():',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:463': 'zEw            = rcp * sst_1d(ji)',
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1612': 'sst=forcing.t_bottom - constants.T0,',
+    # Landed O1 anchors consumed by the cross-rung re-anchor chain below.
+    "packages/ice/legoesm/ice/si3_orca2_state.py:51-62": [
+        "# Fixed NEMO 5.0.2 SI3 coefficients.",
+        "_ORCA2_RN_HIMAX_M = 99.0",
+        12,
+    ],
+    "packages/ice/legoesm/ice/si3_orca2_state.py:2037-2047": [
+        'if ln_rstart and "snwice_mass" in rst_full and "snwice_mass_b" in rst_full:',
+        "snwice_mass_b = si3_lbc_lnk_orca2(",
+        11,
+    ],
     # --- SI3 ladder round 8 (O4 model prep) BEGIN ---
     'docs/ice/fidelity/si3_r5_d5_preregister.md:1-48': ['# SI3 Ladder Round 5 (`si3_r5`) — Rung D5 Debts Preregistration', '- **REFUTE**: Omitting `sss_m` does not raise `GateError`, CPU production JIT and `--xla_cpu_max_isa=AVX` differ in full-year SHA-256, any non-SI3 caller changes by `>= 1` ULP, or `jax.grad` / `jax.jvp` fails.', 48],
     'docs/ice/fidelity/si3_r6_d5_preregister.md:1-37': ['# SI3 Ladder Round 6 (`si3_r6`) — Rung D5 Remaining Debts Preregistration', '- **REFUTE**: Any normal-step (`kt != 5842..5867`) over-bar row remains (`> 0`) on CPU or any over-bar row (`> 0`) remains on GPU, CPU production JIT and `--xla_cpu_max_isa=AVX` differ in full-year SHA-256, any non-SI3 caller changes by `>= 1` ULP vs `071dfa844369`, or `jax.grad` / `jax.jvp` fails.', 37],
