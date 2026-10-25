@@ -87,3 +87,16 @@ def test_stored_divisor_keeps_its_bits_and_the_finite_rebuilt_tangent() -> None:
         lambda live: jnp.sum(_stored_primal_with_rebuilt_tangent(stored, live))
     )(rebuilt)
     np.testing.assert_array_equal(np.asarray(gradient), np.ones(2))
+
+    # A merely numeric zero cotangent still lets reverse mode evaluate the
+    # inactive 0/0 branch as ``0 * NaN``.  The stored primal graph must be cut.
+    def poisoned_stored_graph(value):
+        stored_value = jnp.where(
+            value == 0.0, jnp.ones_like(value), value / value)
+        return jnp.sum(_stored_primal_with_rebuilt_tangent(
+            stored_value, 2.0 * value))
+
+    np.testing.assert_array_equal(
+        np.asarray(jax.grad(poisoned_stored_graph)(jnp.zeros(2))),
+        np.full(2, 2.0),
+    )

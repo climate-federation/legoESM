@@ -1715,7 +1715,11 @@ def _stored_primal_with_rebuilt_tangent(stored, rebuilt):
     without changing a single forward bit.
     """
     del rebuilt
-    return stored
+    # A zero cotangent is not enough here: propagating that numeric zero back
+    # through the stage-materialisation graph can still evaluate ``0 * NaN``.
+    # Cut the stored graph explicitly; the custom JVP below supplies the sole
+    # derivative from the finite rebuilt operand.
+    return jax.lax.stop_gradient(stored)
 
 
 @_stored_primal_with_rebuilt_tangent.defjvp
