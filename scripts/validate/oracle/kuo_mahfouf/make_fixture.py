@@ -225,7 +225,9 @@ def main():
     assert np.sum(mixed) > 0 and np.any(out["g60_ora_bkuo"] < 0.0)
     gf = subprocess.run(["gfortran", "--version"], capture_output=True, text=True).stdout.split("\n")[0]
     meta = dict(ORACLE, oracle_file_sha256=_sha256(Path(a.oracle) / ORACLE["file"]), gfortran=gf,
-                flags="-O0 -cpp -fdefault-real-8 -fdefault-double-8 -DCONST_LEGO",
+                flags=[ln for ln in r.stdout.split("\n") if ln.startswith("FLAGS: ")][0][7:],
+                data_in_sha256={f: _sha256(Path(a.oracle) / "data_in" / f)
+                                for f in ("profiles.dat", "input_model_mean_values.dat")},
                 constants="legoESM (driver CONST_LEGO block)",
                 saturation="legoESM Tetens + q_sat with softplus floor/cap and exact dq_sat/dT (thermo_lego.f90)",
                 klev_max=1, klev_max_20_identical_on_ecmwf_profiles=True, dt=DT, entrainment=5.0e-5,

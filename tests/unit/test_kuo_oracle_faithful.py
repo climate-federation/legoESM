@@ -12,8 +12,10 @@ running the oracle.  This file keeps the behavioural checks:
   4. Finite outputs and gradients, jit/vmap parity, partition dispatch,
      the ``w_grid`` gate, and the ``convective_mask`` activation scale.
 
-The sounding below uses the oracle's Huang (2018) saturation curve and
-constants only to BUILD a humidity profile; the scheme itself uses legoESM's.
+The sounding below uses the water branch of the oracle's Huang (2018)
+saturation curve (at every temperature; the oracle switches to ice below
+freezing) and oracle constants only to BUILD a humidity profile; the scheme
+itself uses legoESM's.
 """
 from __future__ import annotations
 
