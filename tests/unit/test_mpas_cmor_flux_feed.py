@@ -1102,6 +1102,19 @@ class TestWindowIdentity:
         acc.add(tuple(self._field(1.0) for _ in range(8)))   # overlong
         assert not acc.window_ready(acc.ENERGY_SLOTS)
 
+    def test_step_without_energy_exports_is_not_ready(self):
+        """One step where the physics exported no energy slot: every slot
+        has 7 samples over an 8-step window -- equal counts, but a mean over
+        a short window, so ``window_ready`` must refuse (#1902)."""
+        from legoesm.driver.model_driver import _MPASSfcFluxAccum
+        acc = _MPASSfcFluxAccum(expected_steps=8, window_start_day=0.0,
+                                dt_s=10800.0)
+        acc.add(None)
+        for _ in range(7):
+            acc.add(tuple(self._field(1.0) for _ in range(8)))
+        assert acc.is_complete()
+        assert not acc.window_ready(acc.ENERGY_SLOTS)
+
     def test_legacy_checkpoint_leaves_new_slots_short_and_not_ready(self):
         """A checkpoint written before slots 0/1 existed restores slot 2 with
         the pre-restart count; slots 0/1 then see only the remainder.  The

@@ -2255,6 +2255,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Climatological ice slab thickness [m] for the "
                              "prognostic ice skin (default 2.0; bounds "
                              "[0.1, 10]). Requires --mpas-ice-skin-prognostic.")
+    parser.add_argument("--sea-ice-albedo-scheme",
+                        choices=("constant", "maykut_untersteiner"),
+                        default=None, action=_StoreOneSpelling,
+                        dest="sea_ice_albedo_scheme",
+                        help="MPAS lane only: sea-ice shortwave albedo. "
+                             "'constant' (default) = --albedo-ice everywhere; "
+                             "'maykut_untersteiner' = melt ramp on the "
+                             "prognostic ice skin, recomputed every step "
+                             "(albedo-ice when cold, 0.50 at 0 C). Requires "
+                             "--mpas-ice-skin-prognostic.")
+    parser.add_argument("--sea-ice-albedo-melt-width-K", type=float,
+                        default=None, action=_StoreOneSpelling,
+                        dest="sea_ice_albedo_melt_width_K",
+                        help="Width [K] of the maykut_untersteiner melt ramp "
+                             "below 0 C (default 1.0). Requires "
+                             "--sea-ice-albedo-scheme maykut_untersteiner.")
     # --cloud-conv-cloud-max closes the AMIP CLI gap for the existing
     # ExperimentConfig.cloud_conv_cloud_max field (--q-c-diagnostic / --rh-crit /
     # --subgrid-autoconv already ship from run_coupled-mirrored #647 + #613).
@@ -3026,6 +3042,14 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             args.ice_thickness_m
             if args.ice_thickness_m is not None
             else _EXPERIMENT_DEFAULTS.ice_thickness_m),
+        sea_ice_albedo_scheme=(
+            args.sea_ice_albedo_scheme
+            if args.sea_ice_albedo_scheme is not None
+            else _EXPERIMENT_DEFAULTS.sea_ice_albedo_scheme),
+        sea_ice_albedo_melt_width_K=(
+            args.sea_ice_albedo_melt_width_K
+            if args.sea_ice_albedo_melt_width_K is not None
+            else _EXPERIMENT_DEFAULTS.sea_ice_albedo_melt_width_K),
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         cloud_conv_cloud_condensate=args.conv_cloud_condensate,

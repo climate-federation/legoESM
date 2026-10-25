@@ -557,15 +557,12 @@ def test_frontgfc_default_is_e3sm_operational_namelist_value():
     The earlier 1.0e-10 default sat ~5 orders of magnitude above anything
     the resolved flow produces (10-day r16 AMIP: max frontgf 5.4e-15), so
     the frontal source could NEVER fire — a dead-on-arrival trigger the
-    2026-07-20 frontal A/B exposed.  The __param_spec__ tuning window must
-    bracket BOTH namelist values so --params can reach them."""
+    2026-07-20 frontal A/B exposed.  frontgfc is excluded from training
+    (a hard on/off comparison, zero gradient), so it has no tuning bounds."""
     from legoesm.atmosphere.physics.gravity_wave_drag import config as gwd_config
 
     cfg = E3SMFrontalConfig()
     assert cfg.frontgfc == 1.25e-15
-    spec = gwd_config.__param_spec__["E3SMFrontalConfig"]["params"]["frontgfc"]
-    lo, hi = spec["bounds"]
-    assert lo < 7.5e-16 < hi, "bounds must cover the 4x5 coarse-grid value"
-    assert lo < 1.25e-15 < hi, "bounds must cover the operational default"
-    assert lo < 2.0e-14 < hi, (
-        "bounds must cover the ne120np4 high-res value (2e-14, E3SM master)")
+    spec = gwd_config.__param_spec__["E3SMFrontalConfig"]
+    assert "frontgfc" in spec["excluded"]
+    assert "frontgfc" not in spec["params"]

@@ -61,6 +61,7 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "microphysics",
         # Morrison warm-rain law (kk2000 | seifert_beheng | seifert_beheng_sb2001).
         "morrison_warm_rain_scheme",
+        "sea_ice_albedo_scheme",
         "convection",
         "turbulence",
         "surface_bulk_scheme",

@@ -41,6 +41,9 @@ ROOT = Path(__file__).resolve().parents[4]
 FIXTURE = ROOT / "tests/atmosphere/microphysics/oracle_fixtures/thompson_wrf.npz"
 GENERATOR = ROOT / "scripts/validate/oracle/thompson/make_fixture.py"
 TOL = 1.0e-10
+# Fixture-input rebuild: last-digit libm differences across machines (measured
+# worst 2.6e-14 relative, q_v); a real generator change is far larger.
+REBUILD_RTOL = 1e-13
 SETS = [("cols", 300), ("cols", 60), ("snow", 300), ("ice", 300)]
 FIN = ("T", "p", "dz", "w", "qv", "qc", "qi", "qr", "qs", "qg", "ni", "nr")
 FOUT = ("T", "qv", "qc", "qi", "qr", "qs", "qg", "ni", "nr")
@@ -93,7 +96,7 @@ def _errors(out, fx, key):
 
 
 def test_fixture_provenance_and_inputs_reproduce():
-    """The committed generator rebuilds the fixture's inputs bit-for-bit."""
+    """The committed generator rebuilds the fixture's inputs to REBUILD_RTOL."""
     fx = _fx()
     meta = json.loads(str(fx["meta"]))
     assert meta["tag"] == "v4.8.0"
@@ -108,8 +111,8 @@ def test_fixture_provenance_and_inputs_reproduce():
     for tag, cols in (("cols", gen.build_columns()), ("snow", snow), ("ice", ice)):
         assert [n for n, _ in cols] == meta["sets"][tag]["columns"]
         for v in FIN:
-            np.testing.assert_array_equal(np.stack([c[v] for _, c in cols]),
-                                          fx[f"{tag}_in_{v}"])
+            np.testing.assert_allclose(np.stack([c[v] for _, c in cols]),
+                                       fx[f"{tag}_in_{v}"], rtol=REBUILD_RTOL, atol=0.0)
 
 
 def test_lookup_tables_match_oracle():

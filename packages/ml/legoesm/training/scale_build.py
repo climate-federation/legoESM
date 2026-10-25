@@ -334,10 +334,13 @@ def _wb_local_stores(cfg, yml, era5_cfg, sst_cfg, times, snaps_per_day,
         stamps.astype("int64").tolist()]).encode()).hexdigest()[:16]
     logger.info("ERA5 local cache at %s: %d snapshots from %d store(s)",
                 root, len(stamps), len(groups))
+    import jax
+    # Column-sharded runs pass nproc=1 (one logical trainer) from several
+    # processes; the cache still needs one builder among all of them.
     paths = _wb_build_or_wait(
         lambda: {p: _ensure_era5_store_cache(era5_cfg, p, pv, sv, stamps, root)
                  for p, (pv, sv) in groups.items()},
-        root / f".build_{tag}", rank, nproc)
+        root / f".build_{tag}", rank, max(nproc, jax.process_count()))
     if rank == 0:
         for p, c in paths.items():
             logger.info("ERA5 cache %s -> %s (%.1f GB)", p, c, _store_size_gb(c))

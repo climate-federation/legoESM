@@ -241,6 +241,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/coupler/legoesm/driver/kernel_registry.py", "resolve_kernel"),
         ("packages/coupler/legoesm/driver/physics_pipeline.py", "_resolve_physics_parameterization"),
         ("packages/coupler/legoesm/driver/physics_pipeline.py", "build_physics_pipeline"),
+        # MPAS column lane sea_ice_albedo_scheme ("constant" | "maykut_untersteiner").
+        ("packages/coupler/legoesm/driver/model_driver.py", "_run_column"),
         ("packages/ice/legoesm/ice/sea_ice.py", "_bulk_flux_dispatch"),
         ("packages/ice/legoesm/ice/sea_ice.py", "step_sea_ice"),
         ("packages/ice/legoesm/ice/sea_ice.py", "_closing_rate_from_velocity"),

@@ -128,6 +128,27 @@ def test_local_stores_remap_every_index_by_timestamp(tmp_path, monkeypatch):
             assert ds_l.time.values[at(i)] == times[i]
 
 
+def test_column_sharded_processes_share_one_builder(tmp_path, monkeypatch):
+    """nproc=1 from each of several JAX processes must still gate the build."""
+    import jax
+    _write_store(tmp_path / "src.zarr")
+    times = xr.open_zarr(str(tmp_path / "src.zarr")).time.values.astype("datetime64[ns]")
+    monkeypatch.setattr(sb, "_training_sample_indices", lambda *a: iter([(2015, 3, 4)]))
+    monkeypatch.setattr(jax, "process_count", lambda: 4)
+    seen = {}
+
+    def gate(build, base, rank, nproc):
+        seen.update(rank=rank, nproc=nproc)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(sb, "_wb_build_or_wait", gate)
+    era5 = _cfg(tmp_path / "src.zarr")
+    with pytest.raises(RuntimeError, match="stop"):
+        sb._wb_local_stores(SimpleNamespace(), {"cache_dir": str(tmp_path / "cache")},
+                            era5, era5, times, 4, 1, rank=2, nproc=1)
+    assert seen == {"rank": 2, "nproc": 4}
+
+
 def test_no_cache_dir_means_no_local_stores(tmp_path):
     era5 = _cfg(tmp_path / "unused.zarr")
     assert sb._wb_local_stores(SimpleNamespace(), {}, era5, era5,
