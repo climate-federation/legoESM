@@ -147,11 +147,33 @@ and the 11 ratchet reds are pre-existing and identical on both trees; the
 `bitz_lipscomb.py` inline-coefficient red lists only the old
 `jk_minus_half` site.
 
+## Controls, resume 1 (parent `f55fa84f70` vs current `29d94bd78d`)
+
+Parent run from a clean detached worktree; both trees fp64, CPU, `jit`.
+
+| caller | parent | current |
+|---|---|---|
+| D5 C1D year, 18 arm hashes, `XLA_FLAGS=""` | shipped arm `b7a7329b...`, platform floor | all 18 identical to parent |
+| D5 C1D year, 18 arm hashes, `--xla_cpu_max_isa=AVX` | shipped arm `b7a7329b...` (CPU == AVX) | all 18 identical to parent |
+| `tests/ice/unit` | 408 passed, 1 skipped, 1 xfailed | 408 passed, 1 skipped, 1 xfailed |
+| SI3 fidelity tests (11 files) | 1 failed, 139 passed | same 1 failed, 143 passed (+4 O8 production-path) |
+| CI ratchets (5 files) | 11 failed, 12041 passed | same 11 failed, 12041 passed |
+
+The fidelity failure (scalarmath v2 full gate) and the 11 ratchet reds are
+pre-existing and identical on both trees; the round's earlier O7-preflight
+failure did not recur on either tree. The current-tree suites started at
+`29d94bd78d`; the two later commits change only a comment and docs. Lane 3's
+C1D card is the D5 year above; its other callers are in the unit and
+fidelity suites. The ten CPU-vs-AVX differences among the legacy diagnostic
+arms are identical on both trees. Evidence:
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round15/resume1/`.
+
 ## CONFIRMED vs PLAUSIBLE
 
 - CONFIRMED: bit-identity to the independent transcription, every class of
-  input above, `jit` and eager; object-code semantics of the `WHERE`; D5
-  hash and every listed caller unchanged.
+  input above, `jit` and eager; object-code semantics of the `WHERE`; the
+  production C1D step calls the routine (spy, three plants, all four fail
+  on the parent); D5 hashes and every listed caller unchanged.
 - PLAUSIBLE: bit-exactness against an ORCA2 NEMO record (none read; P1-P3).
 
 ## CHOICES
@@ -160,7 +182,9 @@ and the 11 ratchet reds are pre-existing and identical on both trees; the
 - Bit-pattern `< 0` predicate instead of a float compare, so a negative subnormal matches NEMO under `jit`. UNASKED; offered for revert.
 - Collection arm refused rather than transcribed (it does not execute). UNASKED; offered for revert.
 - Function placed in the existing SI3 thermodynamics module. UNASKED, mechanical.
-- C1D's `_NEW_ICE_THICKNESS = 0.05` not rewired to the new function (its consumer is `ice_thd_do`, rung O14). UNASKED; finding only, nothing changed.
+- Resume 1: C1D's open-water growth now calls the routine with `rn_hinew = _NEW_ICE_THICKNESS` (0.05, the C1D card's value) and uses the shared bit-pattern predicate; the value is unchanged, and the card value is not yet read from the namelist. ASKED (codex HOLD, operator instruction).
+- Resume 1: non-cooling cells divide by 1 instead of `ht_i_new = +0` (forward bits unchanged, keeps NaN out of gradients). UNASKED; offered for revert.
+- Resume 1: frazil unit tests place inputs on the CPU device rather than `jit(backend="cpu")`, which JAX 0.10.0 marks deprecated. ASKED (Argon), mechanism UNASKED.
 - No configuration default, production config or deck changed.
 
 Review: `codex review: operator`.
