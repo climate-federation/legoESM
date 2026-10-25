@@ -1702,27 +1702,6 @@ def _nemo_sqrt_nonnegative_forward_exact_jvp(primals, tangents):
     return result, result_dot
 
 
-def _stored_primal_with_rebuilt_tangent(stored, rebuilt):
-    """Use NEMO's stored operand while retaining the finite rebuilt tangent.
-
-    WS-RK3 source ordering can make a stored binary64 operand differ from its
-    algebraically equivalent live-QCO rebuild by a last-place bit.  The stored
-    value owns the forward statement, but its stage-materialisation graph is
-    not an admissible AD route: it crosses the barotropic carried-state graph
-    and produces all-NaN cotangents.  The literal rebuild was the previously
-    certified finite derivative path.  Pair its tangent with the stored primal
-    without changing a single forward bit.
-    """
-    # A numeric zero cotangent is not enough: propagating it through the
-    # stage-materialisation graph can still evaluate ``0 * NaN``.  Express
-    # the straight-through identity from ordinary JAX primitives so both
-    # reverse and forward mode use the rebuilt derivative without a custom
-    # transpose rule.  ``rebuilt - stop_gradient(rebuilt)`` is +0 in the
-    # primal, and the physical thickness ``stored`` is strictly positive.
-    return (jax.lax.stop_gradient(stored)
-            + (rebuilt - jax.lax.stop_gradient(rebuilt)))
-
-
 def compute_treguier_kappa_gm_nemo_native(
     rho: jnp.ndarray,
     T: jnp.ndarray,
@@ -5017,10 +4996,7 @@ def gm_redi_tracer_tendency_latlon(
                 "or 'rk3_kmm'")
         _flux_e3u = None
         _flux_e3v = None
-        _stored_divisor_e3t = redi_divisor_thickness_override
-        # Non-live-QCO modes keep the existing direct override semantics.
-        # The live-QCO arm below additionally has the literal rebuilt tangent.
-        _divisor_e3t = _stored_divisor_e3t
+        _divisor_e3t = redi_divisor_thickness_override
         if _flux_face_mode == "nemo_qco_live":
             if eta is None:
                 raise ValueError(
@@ -5064,27 +5040,23 @@ def gm_redi_tracer_tendency_latlon(
                 grid=grid if cfg.nemo_slope_north_fold else None,
                 r3_native=redi_flux_r3_native,
                 preserve_north_fold=cfg.redi_flux_stored_face_ratios)
-            # traldf_iso.f90:306-310/:327-331 divides the flux divergence by
-            # e3t(Kmm).  Retain the literal live-QCO rebuild even when the
-            # caller supplies NEMO's already-stored operand: the stored value
-            # owns the primal, while this established path owns its finite AD
-            # tangent.  NEMO's r3t divisor is ht_0, the source-ordered sum of
-            # e3t_0*tmask (domain.f90:193-212), not analytic bathymetry.
-            _ht0 = jnp.zeros_like(_flux_eta, dtype=T.dtype)
-            for _jk in range(T.shape[-1]):
-                _ht0 = nemo_source_round(
-                    _ht0 + nemo_source_round(
-                        _e3t0[..., _jk] * _active_3d[..., _jk]))
-            _divisor_eta = (
-                _flux_eta if redi_divisor_eta is None
-                else redi_divisor_eta)
-            _rebuilt_divisor_e3t = nemo_qco_live_t_thickness(
-                _divisor_eta, _ht0, z_coord, T.dtype, e3t_0=_e3t0)
-            _divisor_e3t = (
-                _rebuilt_divisor_e3t
-                if _stored_divisor_e3t is None
-                else _stored_primal_with_rebuilt_tangent(
-                    _stored_divisor_e3t, _rebuilt_divisor_e3t))
+            if _divisor_e3t is None:
+                # traldf_iso.f90:306-310/:327-331 divides the flux
+                # divergence by e3t(Kmm).  Use the same literal QCO T-point
+                # statement as the rest of the WS-RK3 identity path instead
+                # of the reference/Jacobian thickness.  NEMO's r3t divisor
+                # is ht_0, the source-ordered sum of e3t_0*tmask
+                # (domain.f90:193-212), not the card's analytic bathymetry.
+                _ht0 = jnp.zeros_like(_flux_eta, dtype=T.dtype)
+                for _jk in range(T.shape[-1]):
+                    _ht0 = nemo_source_round(
+                        _ht0 + nemo_source_round(
+                            _e3t0[..., _jk] * _active_3d[..., _jk]))
+                _divisor_eta = (
+                    _flux_eta if redi_divisor_eta is None
+                    else redi_divisor_eta)
+                _divisor_e3t = nemo_qco_live_t_thickness(
+                    _divisor_eta, _ht0, z_coord, T.dtype, e3t_0=_e3t0)
         _closed_bottom_wmask = (
             True if redi_closed_bottom_wmask_override is None
             else redi_closed_bottom_wmask_override)
