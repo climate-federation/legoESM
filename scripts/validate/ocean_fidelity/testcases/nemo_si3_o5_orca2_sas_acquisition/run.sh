@@ -84,29 +84,119 @@ disk_gate() {
 }
 
 verify_deck() {
-  "$PY" - "$NML" "$ICE_NML" "$NEMO_ROOT/cfgs/$SOURCE_CFG/EXPREF/namelist_cfg" \
+  local ocean_cfg=${1:-$NML} ice_cfg=${2:-$ICE_NML}
+  "$PY" - "$ocean_cfg" "$ice_cfg" "$NEMO_ROOT/cfgs/$SOURCE_CFG/EXPREF/namelist_cfg" \
     "$NEMO_ROOT/cfgs/$SOURCE_CFG/EXPREF/namelist_ice_cfg" "$NEMO_ROOT/cfgs/SHARED/namelist_ref" \
     "$NEMO_ROOT/cfgs/SHARED/namelist_ice_ref" <<'PY'
 import pathlib, re, sys
-oce, ice, base_oce, base_ice, ref_oce, ref_ice = [pathlib.Path(p).read_text() for p in sys.argv[1:]]
-def vals(text):
-    return {m.group(1).lower(): m.group(2).strip().lower()
-            for m in re.finditer(r"^\s*([a-z][a-z0-9_]*)\s*=\s*([^!,\n]+)", text, re.I|re.M)}
-o, i, bo, bi = map(vals, (oce, ice, base_oce, base_ice))
-eo, ei = vals(ref_oce+"\n"+base_oce+"\n"+oce), vals(ref_ice+"\n"+base_ice+"\n"+ice)
-want_o = {"nn_it000":"1", "nn_itend":"3", "nn_stock":"3", "nn_fsbc":"1", "ln_ice_embd":".false."}
-want_i = {"ln_icedyn":".true.", "ln_icethd":".false.", "ln_dynall":".true.",
-          "ln_dynrhgadv":".false.", "ln_ridging":".false.", "ln_rafting":".false.",
-          "ln_str_h79":".true.", "ln_str_smooth":".true.", "ln_aevp":".true.", "nn_nevp":"100"}
-for key, value in {**want_o, **want_i}.items():
-    got = eo.get(key, ei.get(key))
-    if got != value: raise SystemExit(f"STATUS PLANT-FIRED: {key}={got}, expected {value}")
-allowed_o = {"nn_itend", "nn_stock", "nn_write", "ln_ice_embd"}
-allowed_i = {"ln_icedyn", "ln_icethd", "ln_dynall", "ln_dynrhgadv", "ln_ridging", "ln_rafting"}
-if {k for k in o|bo if o.get(k)!=bo.get(k)} != allowed_o:
-    raise SystemExit("STATUS PLANT-FIRED: ocean deck has unregistered deviations")
-if {k for k in i|bi if i.get(k)!=bi.get(k)} != allowed_i:
-    raise SystemExit("STATUS PLANT-FIRED: ice deck has unregistered deviations")
+paths = list(map(pathlib.Path, sys.argv[1:]))
+
+def groups(path):
+    parsed, group = {}, None
+    for line_number, raw in enumerate(path.read_text().splitlines(), 1):
+        code = raw.split("!", 1)[0].strip()
+        if not code:
+            continue
+        start = re.match(r"&([a-z][a-z0-9_]*)\b", code, re.I)
+        if start:
+            group = start.group(1).lower()
+            if group in parsed:
+                raise SystemExit(f"STATUS PLANT-FIRED: duplicate &{group} in {path}:{line_number}")
+            parsed[group] = {}
+            continue
+        if group is not None and code.startswith("/"):
+            group = None
+            continue
+        if group is None:
+            continue
+        assignment = re.match(
+            r"([a-z][a-z0-9_]*(?:%[a-z][a-z0-9_]*)*)(?:\s*\([^=]*\))?\s*=\s*(.*)",
+            code,
+            re.I,
+        )
+        if assignment:
+            parsed[group][assignment.group(1).lower()] = (
+                assignment.group(2).strip().rstrip(",").lower(), line_number
+            )
+        elif "=" in code:
+            raise SystemExit(f"STATUS PLANT-FIRED: unparsed assignment in {path}:{line_number}: {code}")
+    if group is not None:
+        raise SystemExit(f"STATUS PLANT-FIRED: unterminated &{group} in {path}")
+    return parsed
+
+o, i, bo, bi, ro, ri = map(groups, paths)
+
+def validate_membership(deck, reference, path):
+    for group, variables in deck.items():
+        if group not in reference:
+            raise SystemExit(f"STATUS PLANT-FIRED: unknown namelist group &{group} in {path}")
+        for variable, (_, line_number) in variables.items():
+            if variable not in reference[group]:
+                raise SystemExit(
+                    f"STATUS PLANT-FIRED: unknown namelist variable {variable} in &{group} "
+                    f"at {path}:{line_number}"
+                )
+
+validate_membership(o, ro, paths[0])
+validate_membership(i, ri, paths[1])
+
+def merged(*layers):
+    result = {}
+    for layer in layers:
+        for group, variables in layer.items():
+            result.setdefault(group, {}).update(variables)
+    return result
+
+eo, ei = merged(ro, bo, o), merged(ri, bi, i)
+want_o = {
+    ("namrun", "nn_it000"): "1", ("namrun", "nn_itend"): "3",
+    ("namrun", "nn_stock"): "3", ("namsbc", "nn_fsbc"): "1",
+    ("namsbc", "ln_ice_embd"): ".false.",
+}
+want_i = {
+    ("nampar", "ln_icedyn"): ".true.", ("nampar", "ln_icethd"): ".false.",
+    ("namdyn", "ln_dynall"): ".true.", ("namdyn", "ln_dynrhgadv"): ".false.",
+    ("namdyn_rdgrft", "ln_ridging"): ".false.",
+    ("namdyn_rdgrft", "ln_rafting"): ".false.",
+    ("namdyn_rdgrft", "ln_str_h79"): ".true.",
+    ("namdyn_rdgrft", "ln_str_smooth"): ".true.",
+    ("namdyn_rhg", "ln_aevp"): ".true.", ("namdyn_rhg", "nn_nevp"): "100",
+}
+for resolved, wanted in ((eo, want_o), (ei, want_i)):
+    for (group, variable), value in wanted.items():
+        got = resolved.get(group, {}).get(variable, (None, None))[0]
+        if got != value:
+            raise SystemExit(
+                f"STATUS PLANT-FIRED: &{group} {variable}={got}, expected {value}"
+            )
+
+def deviations(deck, base):
+    changed = set()
+    for group in deck.keys() | base.keys():
+        deck_vars, base_vars = deck.get(group, {}), base.get(group, {})
+        for variable in deck_vars.keys() | base_vars.keys():
+            if deck_vars.get(variable, (None,))[0] != base_vars.get(variable, (None,))[0]:
+                changed.add((group, variable))
+    return changed
+
+allowed_o = {
+    ("namrun", "nn_itend"), ("namrun", "nn_stock"), ("namrun", "nn_write"),
+    ("namsbc", "ln_ice_embd"),
+}
+allowed_i = {
+    ("nampar", "ln_icedyn"), ("nampar", "ln_icethd"),
+    ("namdyn", "ln_dynall"), ("namdyn", "ln_dynrhgadv"),
+    ("namdyn_rdgrft", "ln_ridging"), ("namdyn_rdgrft", "ln_rafting"),
+}
+for label, got, wanted in (
+    ("ocean", deviations(o, bo), allowed_o), ("ice", deviations(i, bi), allowed_i)
+):
+    if got != wanted:
+        raise SystemExit(
+            f"STATUS PLANT-FIRED: {label} deck has unregistered deviations: "
+            f"got={sorted(got)}, expected={sorted(wanted)}"
+        )
+print("PASS_NAMELIST_REF_GROUP_MEMBERSHIP_AND_RESOLVED_OVERLAY")
 PY
 }
 
@@ -307,6 +397,14 @@ source_lines=source.read_text(errors='replace').splitlines()
 if body != [source_lines[n-1].rstrip() for n in numbers]:
     raise SystemExit('STATUS PLANT-FIRED: committed excerpt body differs from cited real output lines')
 verify_ocean_output_log(p, expect_icedyn=False, expect_icethd=False)
+try:
+    verify_ocean_output_log(p, plant='error-token')
+except ValueError as exc:
+    message=str(exc)
+    if 'ocean.output contains E R R O R' not in message or 'planted fatal error in ocean.output' not in message:
+        raise SystemExit('STATUS PLANT-FIRED: ocean.output error refusal did not quote NEMO error lines')
+else:
+    raise SystemExit('STATUS PLANT-FIRED: ocean.output E R R O R plant did not refuse')
 # This provenance-bearing historical excerpt predates O5 and has dynamics off.
 # Exercise O5's overlay parser with an explicitly synthetic dynamics-on variant;
 # admission always checks the complete, real record-run ocean.output itself.
@@ -337,6 +435,15 @@ PY
 run_preflight() {
   local scratch; scratch=$(mktemp -d); ACTIVE_SCRATCH=$scratch
   printf 'PREFLIGHT 1/10 deck and one-rank three-step overlay\n'; verify_deck
+  awk '{print} /nn_itend[[:space:]]*=/ {print "   nn_itned    =       3   ! misspelled-variable plant"}' \
+    "$NML" > "$scratch/namelist_misspelled_cfg"
+  local namelist_plant_output
+  if namelist_plant_output=$(verify_deck "$scratch/namelist_misspelled_cfg" "$ICE_NML" 2>&1); then
+    refuse 'misspelled namelist variable plant did not refuse'
+  fi
+  grep -F 'unknown namelist variable nn_itned in &namrun' <<< "$namelist_plant_output" >/dev/null || \
+    refuse "misspelled namelist variable plant refused for the wrong reason: $namelist_plant_output"
+  printf 'PASS_MISSPELLED_NAMELIST_VARIABLE_PLANT\n'
   printf 'PREFLIGHT 2/10 source patches, preprocessed call-point landings, misplacement plants\n'; check_patches_and_landings "$scratch"
   printf 'PREFLIGHT 3/10 same-program on patched/unpatched real sources preprocessed with record-build CPP flags\n'
   preflight_real_same_program "$scratch"
@@ -487,9 +594,16 @@ stage_run() {
   cp -L "$NEMO_ROOT/cfgs/SHARED/namelist_ice_ref" "$dir/namelist_ice_ref"
   for f in "$EVIDENCE/input"/*.nc; do ln -s "$f" "$dir/$(basename "$f")"; done
   cp "$root/BLD/bin/nemo.exe" "$dir/nemo"
+  local run_rc=0
   (cd "$dir" && printf 'RUN_STARTED\n' > run.user.time.log && \
-    timeout "$RUN_TIMEOUT_SEC" mpirun -np 1 --oversubscribe ./nemo > run.user.stdout.log 2>&1 && \
-    printf 'MPIRUN_RC=0\nRUN DONE\n' >> run.user.time.log)
+    timeout "$RUN_TIMEOUT_SEC" mpirun -np 1 --oversubscribe ./nemo > run.user.stdout.log 2>&1) || run_rc=$?
+  if [[ -f "$dir/ocean.output" ]] && \
+     grep -E 'E[[:space:]]+R[[:space:]]+R[[:space:]]+O[[:space:]]+R' "$dir/ocean.output" >/dev/null; then
+    "$PY" "$GATE" --verify-log "$dir/ocean.output" >&2 || true
+    [[ "$run_rc" -ne 0 ]] || run_rc=1
+  fi
+  [[ "$run_rc" -eq 0 ]] || return "$run_rc"
+  printf 'MPIRUN_RC=0\nRUN DONE\n' >> "$dir/run.user.time.log"
   touch "$dir/RUN_COMPLETE"
 }
 

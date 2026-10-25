@@ -25,7 +25,6 @@
 /
 !-----------------------------------------------------------------------
 &namdom        !   time and space domain
-   ln_ice_embd = .false.   !  O5 levitating-ice arm
 !-----------------------------------------------------------------------
 !MLF   rn_Dt       = 5400.     !  time step for the dynamics and tracer
    rn_Dt       = 10800.     !  time step for the dynamics and tracer
@@ -64,6 +63,7 @@
    nn_fsbc     = 1         !  frequency of SBC module call
    ln_blk      = .true.    !  Bulk formulation                          (T => fill namsbc_blk )
    nn_ice      = 2         !  =0 no ice boundary condition
+   ln_ice_embd = .false.   !  O5 levitating-ice arm
       !                    !  =1 use observed ice-cover                 (  => fill namsbc_iif )
       !                    !  =2 or 3 for SI3 and CICE, respectively
 /

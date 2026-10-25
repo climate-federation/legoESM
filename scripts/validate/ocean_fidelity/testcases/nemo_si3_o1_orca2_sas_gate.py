@@ -955,8 +955,21 @@ def verify_ocean_output_log(
     elif plant == "wrong-flag":
         text = re.sub(r"(ln_cat_hfn\s*=\s*)[TF]", r"\g<1>F", text)
 
-    if re.search(r"E\s+R\s+R\s+O\s+R", text):
-        raise ValueError("STATUS PLANT-FIRED: ocean.output contains E R R O R")
+    error_lines = text.splitlines()
+    error_index = next(
+        (i for i, line in enumerate(error_lines) if re.search(r"E\s+R\s+R\s+O\s+R", line)),
+        None,
+    )
+    if error_index is not None:
+        quoted = "\n".join(
+            f"ocean.output:{i + 1}: {error_lines[i].rstrip()}"
+            for i in range(error_index, min(error_index + 7, len(error_lines)))
+            if error_lines[i].strip()
+        )
+        raise ValueError(
+            "STATUS PLANT-FIRED: ocean.output contains E R R O R; NEMO error lines:\n"
+            + quoted
+        )
 
     aaa_count = len(re.findall(r"^\s*AAAAAAAA\s*$", text, flags=re.M))
     if aaa_count < 2:

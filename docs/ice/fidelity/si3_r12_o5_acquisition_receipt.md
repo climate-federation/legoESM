@@ -7,6 +7,41 @@ No NEMO build or integration was run. The operator must run
 `scripts/validate/ocean_fidelity/testcases/nemo_si3_o5_orca2_sas_acquisition/run.sh --run`;
 until that happens, O5 remains UNMEASURED against NEMO.
 
+Resume 4 diagnoses and repairs the retained reference-run initialization
+failure. The offending assignment was `ln_ice_embd` on line 28 of the original
+committed O5 `namelist_cfg`: it was under `&namdom`, and `stage_run` copied that
+file unchanged into the run directory. NEMO 5.0.2 declares `ln_ice_embd` only
+in `&namsbc`; the fixed deck writes it there. `nn_itend=3` was and remains in
+`&namrun`, matching NEMO 5.0.2's group ownership and the admitted O1/O2 decks.
+The retained NEMO diagnostic was:
+
+```text
+  ===>>> : E R R O R
+          ===========
+ misspelled variable in namelist namdom (cfg) iostat =  5010
+```
+
+The complete nonempty-group comparison is below. Empty groups in both staged
+files are also required to exist in their corresponding reference file.
+
+| staged group | NEMO 5.0.2 reference ownership | admitted O1/O2 | failed O5 | fixed O5 |
+|---|---|---|---|---|
+| ocean `namrun` | all six staged variables belong | `nn_itend=2`, `nn_stock=1` | `nn_itend=3`, `nn_stock=3` | unchanged; `nn_itend` stays here |
+| ocean `namdom` | `rn_Dt` belongs; `ln_ice_embd` does not | `rn_Dt` only | `rn_Dt` plus misplaced `ln_ice_embd` | `rn_Dt` only |
+| ocean `namsbc` | `nn_fsbc`, `ln_blk`, `nn_ice`, and `ln_ice_embd` belong | first three; reference supplies `ln_ice_embd=F` | first three | explicitly adds `ln_ice_embd=F` |
+| ocean `namcfg`, `namsbc_blk`, `namsbc_sas`, `namlbc`, `nameos` | every staged variable belongs to its named group | same assignments | same assignments | unchanged |
+| ice `nampar` | `ln_icedyn`, `ln_icethd` belong | both false | dynamics true, thermodynamics false | unchanged |
+| ice `namdyn` | `ln_dynALL`, `ln_dynRHGADV` belong | no overrides | true, false | unchanged |
+| ice `namdyn_rdgrft` | `ln_ridging`, `ln_rafting` belong | no overrides | both false | unchanged |
+
+Preflight now parses both staged decks and NEMO's own `namelist_ref` files by
+group. Every written variable must exist in that exact group; resolved-value
+and registered-deviation checks are also group-qualified. An added `nn_itned`
+in `&namrun` must refuse specifically as an unknown variable. If a NEMO launch
+produces `E R R O R`, the launch path invokes the same log verifier before
+retention, and the verifier quotes the NEMO banner and following diagnostic
+lines rather than emitting only a generic token error.
+
 Resume 3 diagnoses the operator refusal as a gate defect, not a patch or build
 defect. Both O5 builds compiled. The rheology patch contains 46 added raw
 lines, seven of which are blank; NEMO's FCM preprocessing removes those seven
@@ -119,13 +154,19 @@ read-only, while `--run` has RAM, disk, timeout, ERR and EXIT gates.
 
 ## Verification
 
-- Read-only preflight: PASS, ten checklist sections, real-preprocessed
+- Resume-4 read-only preflight: PASS, including exact-group validation against
+  both NEMO reference namelists, the `nn_itned` refusal plant, quoted-error
+  plant, ten checklist sections, real-preprocessed
   same-program comparison and insertion plant, 12 landing controls and 12
   misplacement plants, the nonzero real-object census, and its injected-op
   plant; no NEMO build/run.
-- Resume-3 O1/O2/O5 acquisition-gate regressions: 42 passed in 565.94 s;
-  the O5 direct module contributes 15 passed, including older-producer
-  admission, real-preprocessed same-program proof, and refusal retention.
+- Resume-4 O1/O2/O5 acquisition and O5 model regressions: 64 passed, one
+  deselected in 665.05 s, including older-producer admission,
+  real-preprocessed same-program proof, refusal retention, exact-group
+  preflight, and quoted error diagnostics.
+- The verifier was also run directly on the retained failed
+  `reference_3step/ocean.output`: expected refusal rc 2, with lines 193, 195,
+  and 197 quoted verbatim.
 - Private-import ratchet: 6 passed against a complete archived checkout (the
   operator work clone omits two tracked ML sentinel files).
 - Citation gate: all nine SI3 receipts and the default gate PASS with zero

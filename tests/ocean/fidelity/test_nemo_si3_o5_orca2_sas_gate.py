@@ -99,7 +99,24 @@ def test_default_operator_script_is_read_only_preflight(tmp_path):
     assert "PREFLIGHT_OK: no NEMO build or integration was run" in result.stdout
     assert "PASS_PATCHED_PPSRC_FIXTURE_COVERAGE_AND_12_MISPLACEMENT_PLANTS" in result.stdout
     assert "PASS_REAL_PREPROCESSED_SAME_PROGRAM_AND_INSERTION_PLANT" in result.stdout
+    assert "PASS_NAMELIST_REF_GROUP_MEMBERSHIP_AND_RESOLVED_OVERLAY" in result.stdout
+    assert "PASS_MISSPELLED_NAMELIST_VARIABLE_PLANT" in result.stdout
     assert before == after
+
+
+def test_ocean_error_refusal_quotes_nemo_error_lines(tmp_path):
+    ocean_output = tmp_path / "ocean.output"
+    ocean_output.write_text(
+        "  ===>>> : E R R O R\n\n"
+        "          ===========\n\n"
+        " misspelled variable in namelist namdom (cfg) iostat =  5010\n"
+    )
+    with pytest.raises(ValueError) as caught:
+        gate.verify_o5_log(ocean_output)
+    message = str(caught.value)
+    assert "ocean.output contains E R R O R" in message
+    assert "ocean.output:1:   ===>>> : E R R O R" in message
+    assert "ocean.output:5:  misspelled variable in namelist namdom (cfg) iostat =  5010" in message
 
 
 def test_operator_only_block_has_one_rank_timeout_and_real_flag_census():
