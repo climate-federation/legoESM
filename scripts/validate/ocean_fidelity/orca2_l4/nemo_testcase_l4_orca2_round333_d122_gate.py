@@ -43,6 +43,13 @@ def _legacy(original, counter: list[int]):
     return wrapped
 
 
+def _counted(original, counter: list[int]):
+    def wrapped(*args, **kwargs):
+        counter[0] += 1
+        return original(*args, **kwargs)
+    return wrapped
+
+
 def measure(rung: str, label: str, arm: str, deck_root: Path,
             twin_a: Path, expect_commit: str) -> dict:
     require((rung, label) in PAIRS, "pair is outside Decision 122")
@@ -51,15 +58,15 @@ def measure(rung: str, label: str, arm: str, deck_root: Path,
 
     calls = [0]
     original = model_module.gm_redi_tracer_tendency_latlon
-    if arm == "control":
-        model_module.gm_redi_tracer_tendency_latlon = _legacy(original, calls)
+    model_module.gm_redi_tracer_tendency_latlon = (
+        _legacy(original, calls) if arm == "control"
+        else _counted(original, calls))
     try:
         result = r332.measure(rung, label, deck_root, twin_a, expect_commit)
     finally:
         model_module.gm_redi_tracer_tendency_latlon = original
-    if arm == "control":
-        require((calls[0] > 0) == (rung == "rung10"),
-                f"legacy divisor execution count moved: {calls[0]}")
+    require((calls[0] > 0) == (rung == "rung10"),
+            f"divisor call execution count moved: {calls[0]}")
     result.update({
         "format": "nemo-testcase-l4-orca2-round333-d122-arm-v1",
         "status": "PASS_R333_D122_ARM",
@@ -79,8 +86,12 @@ def classify(control_path: Path, candidate_path: Path) -> dict:
     candidate = json.loads(candidate_path.read_text())
     require(control.get("status") == candidate.get("status") == "PASS_R333_D122_ARM",
             "arm is not admitted")
-    require(control["arm"] == "control" and candidate["arm"] == "candidate",
-            "arm order moved")
+    same_nonexecuting = (
+        control["arm"] == candidate["arm"] == "candidate"
+        and control["rung"] != "rung10"
+        and control["legacy_divisor_calls"] == candidate["legacy_divisor_calls"] == 0)
+    require((control["arm"] == "control" and candidate["arm"] == "candidate")
+            or same_nonexecuting, "arm order moved")
     require((control["rung"], control["label"])
             == (candidate["rung"], candidate["label"]), "pair moved")
     require(control["worktree"]["commit"] == candidate["worktree"]["commit"],
