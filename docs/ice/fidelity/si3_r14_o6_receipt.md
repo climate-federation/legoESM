@@ -83,19 +83,23 @@ Every physical input is required; `None` raises; configs have no defaults.
 - Plants in the production path (ridge minimum multiplier, porosity slope, raft area ratio, reversed `SUM`, rebinning share) each turn the comparison red.
 - Eager (`jax.disable_jit`) equals jit, both pieces; central finite difference on one `v_i` cell agrees with the jit gradient; the full `delta_i` gradient is finite.
 - No defaults; halos untouched; value pins.
-- Result: RESULT_UNIT (evidence `o6_unit.log`).
+- Result: `18 passed in 1502.99s (0:25:02)` (evidence `o6_unit.log`). Existing consumers of the three touched modules (ridging, ITD, O3 fit, O7 surface suites): `92 passed, 1 xfailed in 119.13s` (`touched_consumers.log`).
 
 ## Parent-vs-current controls (parent `e8ee89ece8cb`)
 
 - The parent text of all three touched files is an exact prefix of the current file (zero removed lines): no existing statement changed.
 - Lane 3's one-category ridging arm and the generic `apply_ridging`, parent module vs current: every output word equal (`parent_controls.log`).
-- Lane 3's ICE_RHEO card, one full step with the parent's ridging, ITD and surface modules: RESULT_RHEO (`parent_control_rheo.log`).
+- Lane 3's ICE_RHEO card, one full step with the parent's ridging, ITD and surface modules, every state leaf equal: `1 passed, 17 deselected in 658.10s` (`parent_control_rheo.log`; run before the last edits, which touched only the new functions and the test file).
 
 Evidence directory: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round14/`.
 
 ## Gates
 
-RESULT_GATES
+- Citation gate, all 13 SI3 receipts, full map: every receipt PASS, 0 unmapped, 0 failing, 0 map entries failing audit (`citation_gate_all_si3.log`); a shifted-line plant on this receipt fires (exit 1).
+- Default citation gate: `31 passed in 6.90s` (`default_gate.log`).
+- Private-import ratchet: `6 passed in 4.94s`. Inline-coefficient, hardcoded-constant, dispatch, parameter-spec and saturation ratchets: 11 reds, none in a touched file, the identical 11 at the parent (`ratchets_current.log`, `ratchets_parent.log`).
+- Review: single review (codex): no transcription defect on the executed path; three confirmed test/API hygiene findings (oracle read global `rhow`/`hi_max`, a `1000.0` literal, aliases missing from `__all__`) fixed, plus its suggested `hi_max` and lid input plants added. GLM: no route available in this session, so not run (honour-system rule unmet, stated).
+- GPU spot check: not run (no certification this round).
 
 ## CONFIRMED vs PLAUSIBLE
 
