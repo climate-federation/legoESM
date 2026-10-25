@@ -231,10 +231,11 @@ already certify under the glibc arm. The choice stays with the user.
 ## CHOICES
 
 - ASKED: transcribe the fit, measure on the admitted record, wire O2 on 0 ULP.
-- UNASKED: certify under the glibc `exp` arm (`transcendentals="libm"`), the
-  campaign's existing NEMO-certification arm. Offered for revert.
-- UNASKED: the O2 gate and tests now select that arm, because O2 now runs the
-  fit. Offered for revert.
+- ASKED (DECISION 162, 2026-10-25, user: "Your pick."): certify under the
+  glibc `exp` arm (`transcendentals="libm"`), the campaign's existing
+  NEMO-certification arm used by the ORCA2 ocean ladder gates.
+- ASKED (DECISION 162): the O2 gate and tests select that arm, because O2's
+  initial state now runs the fit.
 - UNASKED: the fit lives next to O1/O2 rather than in `itd.py`. Offered for
   revert.
 - ASKED (resume item 1): the fit-dependence probe and the O3-FIT-ENTRY
