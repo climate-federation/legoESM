@@ -40,10 +40,6 @@ from legoesm.core.bulk_flux import (
     sqrt_zero_subgradient,
 )
 from legoesm.core.nemo_namelist import overlay, parse_namelist
-from legoesm.core.source_rounding import fortran_max as _fmax
-from legoesm.core.source_rounding import fortran_min as _fmin
-from legoesm.core.source_rounding import fortran_sum0 as _sum0
-from legoesm.core.source_rounding import ieee_is_zero as _ieee_is_zero
 from legoesm.core.source_rounding import nemo_source_round as sr
 from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
 from legoesm.ice.dynamics import SI3ORCA2FoldProgram
@@ -242,6 +238,31 @@ def _req(name: str, value) -> jax.Array:
     if value is None:
         raise ValueError(f"SI3 surface requires the NEMO array {name!r}; no default")
     return jnp.asarray(value, dtype=jnp.float64)
+
+
+def _fmin(a, b):
+    """Fortran ``MIN(a, b)`` as compiled: ``b`` only when strictly smaller."""
+    return jnp.where(b < a, b, a)
+
+
+def _fmax(a, b):
+    """Fortran ``MAX(a, b)`` as compiled: ``b`` only when strictly larger."""
+    return jnp.where(b > a, b, a)
+
+
+def _sum0(terms):
+    """Fortran ``SUM(x(:))`` over the category axis: ``+0`` then each term in order."""
+    # Materialized seed: XLA otherwise folds 0 + x to x, which keeps a -0 term's sign.
+    acc = sr(jnp.zeros(terms.shape[:-1], dtype=terms.dtype))
+    for jl in range(terms.shape[-1]):
+        acc = sr(acc + terms[..., jl])
+    return acc
+
+
+def _ieee_is_zero(value):
+    """``value == 0._wp`` on the bit pattern (a positive subnormal stays nonzero)."""
+    bits = jax.lax.bitcast_convert_type(value, jnp.uint64)
+    return (bits << jnp.uint64(1)) == jnp.uint64(0)
 
 
 def _ieee_le_zero(value):
@@ -564,8 +585,16 @@ def si3_surface_step(
     return SI3SurfaceOutputs(b1, utau_ice, vtau_ice, alb, b2, other)
 
 
+# Public names of the compiled-Fortran helpers above, shared with the other SI3
+# statement modules (the definitions stay where the O7/O8 receipts cite them).
+fortran_min = _fmin
+fortran_max = _fmax
+fortran_sum0 = _sum0
+ieee_is_zero = _ieee_is_zero
+
 __all__ = (
     "SI3BlkIce2", "SI3FlxOther", "SI3SurfaceConfig", "SI3SurfaceOutputs",
+    "fortran_max", "fortran_min", "fortran_sum0", "ieee_is_zero",
     "orca2_flx_other_neighbours", "si3_blk_ice_1", "si3_blk_ice_2", "si3_ice_alb",
     "si3_ice_flx_other", "si3_ice_sbc_tau_lbc", "si3_surface_step",
 )
