@@ -9,24 +9,32 @@ codex review: operator.
 Ten ratchet files, fresh detached worktrees, `JAX_ENABLE_X64=1`, CPU.
 Lane tip `072e4aa1b1c8`: 8 failed, 12275 passed. Main `b090be7b18d9`: 4 failed, 11412 passed.
 
-| failing test ID | lane tip | main | class |
-|---|---|---|---|
-| hardcoded constants `[tests/unit/test_jra55_do.py]` | F | F | on main |
-| inline coeffs `[packages/land/legoesm/land/restart.py]` | F | F | on main |
-| param specs `[.../physics/shortwave_penetration.py]` | F | F | on main (lane lists 3 of main's 4 bad names) |
-| no private cross imports | pass | F | main only |
-| dispatch `test_no_dispatch_guard_removed` (slab land `step_land`) | F | pass | inherited at the fork point, fixed on main since |
-| inline coeffs `[.../physics/geothermal.py]` | F | pass | **lane** (round 320 import) |
-| inline coeffs `[.../lateral_mixing/mle.py]` | F | pass | **lane** (round 323 import) |
-| inline coeffs `[.../lateral_mixing/mle_latlon_cgrid.py]` | F | pass | **lane** (round 323 import) |
-| param specs `[.../lateral_mixing/mle.py]` | F | pass | **lane** (round 323 import) |
+Measured sets (logs `ratchet_tip.log`, `ratchet_main.log`). Main and the fixed
+lane each fail four tests, but not the same four: three are shared, the lane
+alone fails the slab-land dispatch test, and main alone fails private imports.
 
-The dispatch failure: main commit `642481601` (2026-10-03) moved slab land's
-unknown-scheme raises from `step_land` into `step_land_with_diagnostics`. That
-was a deliberate move, not a removal. Main's `f9cde047d6` (2026-10-05) then
-updated the baseline. The lane forked at `cffa2ab79` (2026-10-05), which
-contains the first commit but not the second. The lane never touched either
-file. The fix arrives with the next main merge, so it is not fixed here.
+| failing test ID | lane tip | main | measured set | origin |
+|---|---|---|---|---|
+| hardcoded constants `[tests/unit/test_jra55_do.py]` | F | F | both | main code |
+| inline coeffs `[packages/land/legoesm/land/restart.py]` | F | F | both | main code |
+| param specs `[.../physics/shortwave_penetration.py]` | F | F | both | main code (lane lists 3 of main's 4 bad names) |
+| no private cross imports | pass | F | **main only** | main code after the fork |
+| dispatch `test_no_dispatch_guard_removed` (slab land `step_land`) | F | pass | **lane only** | main commit before the fork; main's baseline follow-up after it (below) |
+| inline coeffs `[.../physics/geothermal.py]` | F | pass | lane only | lane (round 320 import), fixed |
+| inline coeffs `[.../lateral_mixing/mle.py]` | F | pass | lane only | lane (round 323 import), fixed |
+| inline coeffs `[.../lateral_mixing/mle_latlon_cgrid.py]` | F | pass | lane only | lane (round 323 import), fixed |
+| param specs `[.../lateral_mixing/mle.py]` | F | pass | lane only | lane (round 323 import), fixed |
+
+The dispatch failure is measured lane-only, but no lane commit caused it.
+`git log -S'Unknown bulk_scheme'` and `git log cffa2ab79..HEAD` on
+`slab_land.py` find no lane commit touching the file. The only lane commit
+touching the dispatch test (round 309, `c7b3a91a95`) adds one unrelated ocean
+entry. Main commit `642481601` (2026-10-03, an ancestor of the fork point
+`cffa2ab79`) deliberately moved step_land's body, including its unknown-scheme
+raises, into `step_land_with_diagnostics`. Main commit `f9cde047d`
+(2026-10-05, not in the lane) then moved the baseline entry to follow the code;
+its message says "the guards are unchanged". The lane carries the code move
+without the baseline follow-up.
 
 ## Fixes (lane items only)
 
@@ -47,8 +55,9 @@ used. No configuration value or default changed.
 
 ## Ratchet suite, after
 
-Fix tree: 4 failed, 12279 passed. The four failures are exactly the
-main/fork-point rows above. Every lane-introduced item is green.
+Fix tree: 4 failed, 12279 passed. Three are the shared rows; the fourth is
+the lane-only dispatch row. Main's private-import failure does not occur on
+the lane. Every item a lane commit introduced is green.
 
 ## Bit-identity (parent `072e4aa1b1c8` vs candidate `11943cc1a076`)
 
@@ -108,11 +117,37 @@ Evidence: `orca2_rounds/round334/` (`d122/`, `dino/`, `unit/`, `ratchet_*.log`).
   the operator.
 - Running the three slow default-gate files with `-n 12` — UNASKED (to fit the
   10-minute foreground limit; it does not change the results).
+- Re-exporting `R5_21` from the package — ASKED (resume task, item 2).
+- Not restoring a guard in `step_land` — ASKED (resume task: stop if the move
+  was deliberate and citable).
 - Starting the ladders with nohup, recording their pids, and waiting on them in
   the foreground — UNASKED (each rung-10 arm takes about 14 minutes, longer than
   the foreground limit).
 
+## Resume (review HOLD fixes)
+
+1. Restoring a raising guard in `step_land` itself: STOPPED and reported.
+   The move was main's and deliberate, with a citable reason (`642481601`,
+   followed up by `f9cde047d`). No lane commit moved it, so there is no lane
+   commit to undo. Decision put to the operator.
+2. `R5_21` re-exported from `lateral_mixing/__init__.py`, as the promotion
+   rule requires (commit `6729d95bd`). Pure addition: the package attribute is
+   the same float object (`0x1.e79e79e79e79ep-3`).
+3. Classification table above corrected to the measured lane-vs-main sets.
+
+Re-measured on `6729d95bd`:
+- Ratchet suite (`ratchet_resume.log`): 4 failed, 12279 passed. Three are the
+  shared main rows; the fourth is the lane-only dispatch row, open on item 1.
+- Bit-identity: the touched-routine probe (`unit/fn_hash.py`) output is
+  byte-identical to the parent and candidate runs (`unit/resume.json`). No
+  executed code changed, so the D122 ladders and DINO checks above stand.
+- Default gate: see Gates below. Per-receipt citation gate: see Gates below.
+
 ## OPEN
+
+- Slab-land dispatch baseline (lane only): pick between cherry-picking main's
+  `f9cde047d`, adding a redundant guard in `step_land`, or waiting for the next
+  main merge.
 
 - Main-side failures (jra55 literal, land restart coefficients, shortwave spec,
   private imports) belong to main, not this lane.
