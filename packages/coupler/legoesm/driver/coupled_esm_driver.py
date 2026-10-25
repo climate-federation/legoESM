@@ -1672,7 +1672,9 @@ class CoupledESMDriver:
             # latent heat (each tile's own L(T, phase)) for the heat consumers,
             # the tiles' WATER flux for the moisture source: the atmosphere's
             # heat lower BC adds latent_enthalpy_correction = lhflx - L_v*E to
-            # the sensible heat, so the column takes up exactly shflx + lhflx.
+            # the sensible heat, so the column takes up exactly shflx + lhflx --
+            # except cam6 CLUBB, whose heat BC is CAM's shf alone (oracle row 9):
+            # it takes up shflx + L_v*E and (L(T) - L_v)*E is unbooked.
             return hb
 
         self._atm.get_sfc_flux_override = _coupled_get_sfc_flux_override

@@ -8,49 +8,49 @@ one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
 being absorbed here section by section (see the table of contents below); the
 CAM-default model-flag values are recorded as comments at the end of the file.
 
-Table of contents (sections, in order; flag reference table at line 7175)
+Table of contents (sections, in order; flag reference table at line 7211)
 -----------------------------------------------------------------------------
-  1. [line  352] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
-  2. [line  473] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
+  1. [line  351] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
+  2. [line  472] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
       model flags fixed at CAM defaults — reference table at file end)
-  3. [line  775] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
+  3. [line  774] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
       ``make_clubb_grid[_from_levels]`` / ``flip_vertical``)
-  4. [line  1106] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
+  4. [line  1105] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
       the canonical ``legoesm.thermo`` curves)
-  5. [line  1160] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
+  5. [line  1159] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
       ``calc_brunt_vaisala_freq_sqd``)
-  6. [line  1334] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
+  6. [line  1333] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
       ``set_Lscale_max``)
-  7. [line  1782] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
-  8. [line  1910] Mass-conserving hole filling (``fill_holes_vertical`` /
+  7. [line  1781] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
+  8. [line  1909] Mass-conserving hole filling (``fill_holes_vertical`` /
       ``fill_holes_wp2_from_horz_tke``)
-  9. [line  2091] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
+  9. [line  2090] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
       ``compute_skewness_diagnostics``)
-  10. [line  2279] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
-  11. [line  2360] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
+  10. [line  2278] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
+  11. [line  2359] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
       cloud-fraction closure)
-  12. [line  2682] ADG1 PDF moment integrals + buoyancy-flux assembly
+  12. [line  2681] ADG1 PDF moment integrals + buoyancy-flux assembly
       (``calc_pdf_higher_order_moments`` / ``calc_pdf_xprcp_fluxes`` /
       ``calc_xpthvp_terms``) + the two-level-set reconciliation
       (``calc_trapezoid_zt`` / ``calc_trapezoid_zm`` / ``clip_rcm`` /
       ``compute_cloud_cover``). Every routine in this section is
       grid-agnostic: CAM evaluates the closure once per level set, so all
       regridding is the caller's.
-  13. [line  3043] Moment-advance building blocks + the xp2_xpyp / windm advances
+  13. [line  3042] Moment-advance building blocks + the xp2_xpyp / windm advances
       (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
       ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
-  14. [line  3937] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
+  14. [line  3936] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
       ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
-  15. [line  4002] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
+  15. [line  4001] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
       ``clip_skewness``)
-  16. [line  4675] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
+  16. [line  4674] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
       ``calc_turb_adv_range``)
-  17. [line  4955] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
+  17. [line  4954] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
       coupling + ``solve_xm_wpxp_with_single_lhs``)
-  18. [line  5329] Core orchestration (``compute_clubb_diagnostics`` /
+  18. [line  5328] Core orchestration (``compute_clubb_diagnostics`` /
       ``compute_pdf_closure`` / ``calc_sfc_varnce`` / ``advance_clubb_core`` +
       the ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  19. [line  6090] Scheme entries (``clubb_turbulence`` diagnostic default /
+  19. [line  6094] Scheme entries (``clubb_turbulence`` diagnostic default /
       ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
       ``integrate_clubb_column`` SCM driver)
 
@@ -139,7 +139,6 @@ from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
-    latent_enthalpy_correction,
     surface_moisture_flux,
     compute_surface_fluxes,
     surface_fluxes_at_lowest_level,
@@ -6289,8 +6288,9 @@ def clubb_turbulence(
             T_sfc, q_sfc, rho[:, -1], config.surface, z_full[:, -1] - z_half[:, -1])
     sflx_u, sflx_v = tau_x, tau_y
     sflx_q = surface_moisture_flux(config.surface, lhflx, T_sfc)   # [kg/m^2/s]
-    # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
-    sflx_T = (shflx + latent_enthalpy_correction(lhflx, sflx_q)) / constants.c_pd
+    # Heat BC = the sensible flux alone, as CAM (clubb_intr.F90:1781); no
+    # latent-enthalpy correction (user decision 2026-10-25, oracle row 9).
+    sflx_T = shflx / constants.c_pd
 
     # ---- Implicit vertical diffusion of the mean state ----
     u_new = implicit_vertical_diffusion(u, Km_half, rho, dz_layer, dz_half, dt, sflx_u)
@@ -6627,11 +6627,10 @@ def clubb_step(
             u[:, -1], v[:, -1], T[:, -1], q_v[:, -1],
             T_sfc, q_sfc, rho_sfc, config.surface, z_full[:, -1] - z_half[:, -1])
         wprtp_b = surface_moisture_flux(config.surface, lhflx_b, T_sfc) / rho_sfc   # w'rt'  [kg/kg m/s]
-        # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
         # CAM host convention (clubb_intr.F90:1781): wpthlp_sfc =
-        # shf/(cpair*rho_ds_zm(1)), no division by exner.
-        wpthlp_b = ((shflx_b + latent_enthalpy_correction(lhflx_b, wprtp_b * rho_sfc))
-                    / (rho_sfc * constants.c_pd))              # w'thl' [K m/s]
+        # shf/(cpair*rho_ds_zm(1)), no division by exner and no latent-enthalpy
+        # correction (user decision 2026-10-25, oracle row 9).
+        wpthlp_b = shflx_b / (rho_sfc * constants.c_pd)        # w'thl' [K m/s]
         # Surface stress convention is tau = -rho*Cd*|V|*u (compute_surface_fluxes),
         # so the kinematic momentum flux is u'w'_sfc = tau_x/rho (NEGATIVE for u>0 —
         # momentum transported downward / drag), NOT -tau_x/rho.
@@ -6775,9 +6774,9 @@ def clubb_step(
     # exact for the host update u += dt*du, T += dt*dT of this call.
     dT_dt = dT_dt + ke_dissipation_heating(u, v, du_dt, dv_dt, dt)
     # Energy [W/m2, + up = into the air] the lower BCs actually supply to the
-    # host's c_pd*T + L_v*q_v: the heat BC (latent-enthalpy correction
-    # included) plus the water BC at the reference L_v.  Equals shflx + lhflx
-    # for the bulk and injected paths; read by the column energy fixer.
+    # host's c_pd*T + L_v*q_v: the heat BC plus the water BC at the reference
+    # L_v.  Equals shflx + L_v*E for the bulk and injected paths (CAM: shf +
+    # cflx*L, clubb_intr.F90:2135); read by the column energy fixer.
     sfc_energy_in = rho_sfc * (constants.c_pd * wpthlp_sfc
                                + constants.L_v * wprtp_sfc)  # latent-ok: CAM6 clubb_intr energy-fix reference constant
     diags = dict(diags, ustar=ustar, shflx=shflx, lhflx=lhflx,
@@ -6842,8 +6841,10 @@ def clubb_turbulence_prognostic(
     to ``compute_surface_fluxes`` / Louis) is the coupled-run path: each
     :func:`clubb_step` (sub-)step converts it to the kinematic ``sfc_*`` lower BC
     at the host near-surface density (held through the sub-cycle, as CAM holds
-    rho_ds), so the prescribed DYNAMIC W/m^2 / Pa flux is applied exactly (the
-    coupler energy-budget contract),
+    rho_ds), so the prescribed DYNAMIC W/m^2 / Pa flux is applied exactly
+    (heat BC = shflx and water = E, as CAM: the column takes up
+    shflx + L_v*E, not shflx + lhflx -- the (L(T_sfc) - L_v)*E gap is not
+    booked anywhere, oracle row 9),
     and the reported ``shflx``/``lhflx``/``ustar`` are the injected values
     directly (Louis-equivalent).  So ``clubb`` runs in tiled (mosaic-surface)
     production exactly like Louis.  Mutually exclusive with the explicit ``sfc_*``
@@ -6902,8 +6903,8 @@ def clubb_turbulence_prognostic(
     # density (``_sfc_bcs`` below).  The density is held at the host value through
     # the whole sub-cycle (CAM clubb_intr sets rho_ds = dp/(g dz) once, before its
     # ``do t=1,nadv`` loop), so the applied DYNAMIC W/m^2 / Pa flux is exact on
-    # every sub-step -- the coupler energy-budget contract (the atmosphere must
-    # receive exactly the flux the surface/ocean tile exchanged).  Mutually
+    # every sub-step: heat BC shflx, water E (as CAM; the column takes up
+    # shflx + L_v*E, so the tile's (L(T_sfc) - L_v)*E is unbooked).  Mutually
     # exclusive with the explicit SCM sfc_* prescriptions (a static None-ness
     # check, not traced).
     if surface_flux is not None and any(
@@ -6928,12 +6929,12 @@ def clubb_turbulence_prognostic(
         rho_s = rho_local[:, -1]
         _E_sf = surface_moisture_flux(config.surface, lhflx_sf, T_sfc)
         return (
-            # Heat BC carries the latent enthalpy correction (water at L(T) vs
-            # L_v).  CAM host convention (clubb_intr.F90:1781): wpthlp_sfc =
-            # shf/(cpair*rho_ds_zm(1)), no division by exner; the (1-exner)
-            # share of the heat goes to the column energy fixer, as in CAM.
-            (shflx_sf + latent_enthalpy_correction(lhflx_sf, _E_sf))
-            / (rho_s * constants.c_pd),                       # w'thl' [K m/s]
+            # CAM host convention (clubb_intr.F90:1781): wpthlp_sfc =
+            # shf/(cpair*rho_ds_zm(1)), no division by exner and no
+            # latent-enthalpy correction (user decision 2026-10-25, oracle row
+            # 9); the (1-exner) share of the heat goes to the column energy
+            # fixer, as in CAM.
+            shflx_sf / (rho_s * constants.c_pd),               # w'thl' [K m/s]
             _E_sf / rho_s,                                     # w'rt'  [kg/kg m/s]
             tau_x_sf / rho_s,                                  # u'w'   [m^2/s^2]
             tau_y_sf / rho_s,                                  # v'w'   [m^2/s^2]
@@ -7025,7 +7026,7 @@ def clubb_turbulence_prognostic(
     # in stable layers creates energy (+0.21..0.24 W/m2 global mean, p99 2.9
     # W/m2 on the production deck after the KE heating).  Residual of the column
     # total energy sum(dp/g (c_pd T + KE + L_v q_v)) [W/m2, + = created] against
-    # the energy the lower BCs supplied (``sfc_energy_in`` = shflx + lhflx on
+    # the energy the lower BCs supplied (``sfc_energy_in`` = shflx + L_v*E on
     # the bulk and injected paths, positive up = into the air; sub-cycle mean,
     # exact since the density is held), with the EXACT finite KE change of the
     # host update u += dt*du; it is removed as a uniform heating per unit mass

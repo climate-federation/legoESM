@@ -122,7 +122,8 @@ def test_heat_bc_and_energy_fixer_target_share_the_cam_convention(fix, path,
     """The paths CAM has no counterpart for (CLUBB's own bulk formula, an
     LES-style prescribed kinematic flux) use the same host convention
     shf = c_pd rho w'thl' (clubb_intr.F90:1781): the energy handed to the
-    column fixer equals the reported shflx + lhflx."""
+    column fixer equals shflx + L_v*E (CAM :2135; no latent-enthalpy
+    correction, oracle row 9)."""
     g = lambda k: jnp.asarray(fix[f"in/{k}"])  # noqa: E731
     T, qv = g("T"), g("qv")
     ncol, nlev = T.shape
@@ -142,7 +143,13 @@ def test_heat_bc_and_energy_fixer_target_share_the_cam_convention(fix, path,
         g("u"), g("v"), T, qv, C.init_clubb_moments(ncol, nlev, cfg),
         g("p_full"), g("p_half"), g("z_full"), g("z_half"), T[:, -1] + 3.0,
         qv[:, -1] * 1.2, g("rho_cam"), 600.0, cfg, q_c=g("qc"), **sfc)
-    tot = np.asarray(d["shflx"] + d["lhflx"])
+    from legoesm import constants
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        surface_moisture_flux,
+    )
+    evap = (surface_moisture_flux(cfg.surface, d["lhflx"], T[:, -1] + 3.0)
+            if path == "bulk" else d["lhflx"] / constants.L_v)   # latent-ok: prescribed lhflx is wprtp*rho*L_v
+    tot = np.asarray(d["shflx"] + constants.L_v * evap)   # latent-ok: host moist-enthalpy reference L_v
     assert np.max(np.abs(tot)) > 1.0
     np.testing.assert_allclose(np.asarray(d["sfc_energy_in"]), tot,
                                rtol=_TOL, atol=0.0)

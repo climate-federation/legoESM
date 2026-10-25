@@ -2212,17 +2212,16 @@ def test_clubb_prognostic_injected_flux_equals_kinematic_prescription():
     so passing surface_flux is bit-identical to passing the equivalent
     sfc_wpthlp/sfc_wprtp/sfc_upwp/sfc_vpwp directly.
 
-    That map is the one-latent-heat surface interface (user decision
-    2026-09-28, 4a): the water leaves at the latent heat the surface law
-    charged (``surface_moisture_flux`` = lhflx / L(T_sfc)), and the heat BC
-    carries the enthalpy the water itself brings
-    (``latent_enthalpy_correction``).  The expectation used to invert with the
-    constant L_v and no correction -- the convention that decision replaced."""
+    The water leaves at the latent heat the surface law charged
+    (``surface_moisture_flux`` = lhflx / L(T_sfc)); the heat BC is CAM's
+    ``wpthlp_sfc = shf/(cpair*rho)`` (clubb_intr.F90:1781), without the
+    latent-enthalpy correction (user decision 2026-10-25, oracle row 9,
+    reversing the 2026-09-28 keep)."""
     from legoesm.atmosphere.physics.turbulence.clubb import (
         init_clubb_moments, pack_clubb_moments,
     )
     from legoesm.atmosphere.physics.turbulence.surface_layer import (
-        latent_enthalpy_correction, surface_moisture_flux,
+        surface_moisture_flux,
     )
     kw = _hydrostatic_heights(_column(ncol=3, nlev=18))
     kw.pop("tke")
@@ -2235,8 +2234,7 @@ def test_clubb_prognostic_injected_flux_equals_kinematic_prescription():
     # The exact inverse map clubb_turbulence_prognostic applies internally
     # (CAM host convention, clubb_intr.F90:1781: no exner).
     evap = surface_moisture_flux(cfg.surface, lhflx, kw["T_sfc"])
-    sfc_wpthlp = ((shflx + latent_enthalpy_correction(lhflx, evap))
-                  / (rho_sfc * constants.c_pd))
+    sfc_wpthlp = shflx / (rho_sfc * constants.c_pd)
     sfc_wprtp = evap / rho_sfc
     sfc_upwp = tau_x / rho_sfc
     sfc_vpwp = tau_y / rho_sfc
@@ -2264,13 +2262,14 @@ def test_clubb_prognostic_injected_dynamic_flux_conserved():
 
     Across the host update ``x += dt*dx_dt`` the column total energy
     ``sum(dp/g (c_pd T + KE + L_v q_v))`` changes by exactly the injected
-    ``(shflx + lhflx)*dt``, and the column water by exactly the evaporation the
+    ``(shflx + L_v*E)*dt``, and the column water by exactly the evaporation the
     surface law charged for ``lhflx``, at n_sub=1 and n_sub=5.
 
     History (review 2026-10-11, clubbres): this test used to pin the theta-l
-    budget to ``shflx`` alone, which stopped holding when the heat BC took the
-    latent-enthalpy correction (user decision 2026-09-28) and the KE heating
-    (F14); with the CAM6 column energy fixer the contract is the total energy.
+    budget to ``shflx`` alone, which stopped holding with the KE heating (F14);
+    with the CAM6 column energy fixer the contract is the total energy,
+    ``shflx + L_v*E`` (the latent-enthalpy correction was dropped, user
+    decision 2026-10-25).
     Its sub-cycled half asserted that converting the flux per sub-step at an
     evolving density differs from converting once; the sub-cycle now holds the
     host density (CAM computes rho_ds once before its nadv loop), so the two
@@ -2313,8 +2312,10 @@ def test_clubb_prognostic_injected_dynamic_flux_conserved():
         de = (energy(T_f + dt * out.dT_dt, u_f + dt * out.du_dt,
                      v_f + dt * out.dv_dt, q_f + dt * out.dq_v_dt)
               - energy(T_f, u_f, v_f, q_f)) / dt
-        assert np.all(np.abs(de - (shflx_inj + lhflx_inj))
-                      / (shflx_inj + lhflx_inj) < 1e-9), (dt, de)
+        # CAM contract (clubb_intr.F90:2135): heat BC = shf, water at the
+        # host's reference latent heat; no latent-enthalpy correction.
+        e_in = shflx_inj + constants.L_v * evap   # latent-ok: host moist-enthalpy reference L_v
+        assert np.all(np.abs(de - e_in) / e_in < 1e-9), (dt, de)
         dw = np.sum(mass_clubb * np.asarray(out.dq_v_dt), axis=1)
         np.testing.assert_allclose(dw, evap, rtol=1e-9, atol=0.0)
         # The reported diagnostics are the injected dynamic values (Louis-equivalent).
@@ -2689,3 +2690,43 @@ def test_prescribed_cross_wind_stress_is_applied_as_a_vector():
     scale = np.abs(want_x) + np.abs(want_y)
     assert np.all(np.abs(col_du - want_x) / scale < 5e-2), (col_du, want_x)
     assert np.all(np.abs(col_dv - want_y) / scale < 5e-2), (col_dv, want_y)
+
+
+def test_clubb_heat_bc_is_cams_sensible_flux_only(monkeypatch):
+    """Every CLUBB heat lower BC is CAM's ``wpthlp_sfc = shf/(cpair*rho)``
+    (clubb_intr.F90:1781): no latent-enthalpy correction (user decision
+    2026-10-25, oracle row 9).  Bulk path (clubb_step): the energy the BCs
+    supply is ``shflx + L_v*E``.  Phase-1 path (clubb_turbulence): the theta
+    diffusion receives ``shflx/c_pd``.  The default bulk law charges L(T_sfc),
+    so restoring the correction (``lhflx - L_v*E`` != 0 here) fails both."""
+    import legoesm.atmosphere.physics.turbulence.clubb as clubb_mod
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        surface_moisture_flux,
+    )
+    kw = _column()
+    kw["z_full"] = 0.5 * (kw["z_half"][:, :-1] + kw["z_half"][:, 1:])
+    kw["q_sfc"] = kw["q_v"][:, -1] + 3e-3   # nonzero evaporation (fixture has q_sfc == q_air)
+    cfg = kw["config"]
+    ncol, nlev = kw["T"].shape
+    tke = kw.pop("tke")
+    _, _, _, _, _, diags = clubb_step(moments=_init_moments(ncol, nlev), **kw)
+    evap = surface_moisture_flux(cfg.surface, diags["lhflx"], kw["T_sfc"])
+    gap = np.asarray(diags["lhflx"] - constants.L_v * evap)   # latent-ok: host reference L_v
+    assert np.all(np.abs(gap) > 1e-3 * np.abs(np.asarray(diags["lhflx"])))
+    want = np.asarray(diags["shflx"] + constants.L_v * evap)   # latent-ok: host reference L_v
+    got = np.asarray(diags["sfc_energy_in"])
+    assert np.all(np.abs(got - want) <= 1e-10 * np.abs(want)), (got, want)
+
+    seen = []
+    real = clubb_mod.implicit_vertical_diffusion_theta
+
+    def spy(*args, **kwargs):
+        seen.append(args[-1])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(clubb_mod, "implicit_vertical_diffusion_theta", spy)
+    sf = _injected_surface_flux(ncol, kw["T"].dtype)
+    clubb_turbulence(**dict(kw, tke=tke), surface_flux=sf)
+    assert len(seen) == 1
+    want_T = np.asarray(sf[2]) / constants.c_pd
+    np.testing.assert_allclose(np.asarray(seen[0]), want_T, rtol=1e-10, atol=0.0)

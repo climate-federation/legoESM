@@ -13,7 +13,9 @@ helpers (so CLUBB's ``rho*dz`` equals the host ``dp/g``, as on the lane):
 
 * energy: the change of the INDEPENDENT diagnostic
   ``process_ledger.column_total_energy`` across the host update
-  ``x += dt*dx_dt`` equals ``(shflx + lhflx)*dt`` to round-off (CAM6
+  ``x += dt*dx_dt`` equals ``(shflx + L_v*E)*dt`` to round-off (CAM6
+  clubb_intr.F90:2135: heat BC = shf, water at the host reference latent
+  heat; the latent-enthalpy correction was dropped, oracle row 9,
   ``clubb_do_energyfix``); a control with the fixer patched to zero shows the
   residual the fixer removes is real;
 * water: ``sum(dp/g (dq_v + dq_c))*dt == evap*dt`` to round-off with
@@ -40,6 +42,9 @@ from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     clubb_turbulence_prognostic,
     init_clubb_moments,
     pack_clubb_moments,
+)
+from legoesm.atmosphere.physics.turbulence.surface_layer import (  # noqa: E402
+    surface_moisture_flux,
 )
 from legoesm.diagnostics.process_ledger import column_total_energy  # noqa: E402
 
@@ -85,7 +90,7 @@ def _run(kw, dt=DT, cfg=None, carry=None, with_carry=False):
 
 
 def _energy_residual(kw, out, dt=DT):
-    """[W/m2, + = created] of the host update against shflx + lhflx."""
+    """[W/m2, + = created] of the host update against shflx + L_v*E."""
     p_s = kw["p_half"][:, -1]
     dp = kw["p_half"][:, 1:] - kw["p_half"][:, :-1]
     dsig = dp / p_s[:, None]
@@ -96,7 +101,9 @@ def _energy_residual(kw, out, dt=DT):
     e0 = energy(kw["T"], kw["u"], kw["v"], kw["q_v"])
     e1 = energy(kw["T"] + dt * out.dT_dt, kw["u"] + dt * out.du_dt,
                 kw["v"] + dt * out.dv_dt, kw["q_v"] + dt * out.dq_v_dt)
-    return (e1 - e0) / dt - np.asarray(out.shflx + out.lhflx)
+    evap = surface_moisture_flux(CLUBBConfig().surface, out.lhflx, kw["T_sfc"])
+    supply = out.shflx + constants.L_v * evap   # latent-ok: host moist-enthalpy reference L_v
+    return (e1 - e0) / dt - np.asarray(supply)
 
 
 def test_fixer_helper_is_exact():
