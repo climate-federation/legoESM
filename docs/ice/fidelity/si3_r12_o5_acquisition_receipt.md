@@ -234,8 +234,8 @@ PASS_D5_EXECUTION cpu x64=True xla_flags=''
 - Resume-5 per-receipt citation gate: all ten SI3 receipts PASS, 417 cited
   locations checked, with `failures=0`, `unmapped=0`, and
   `map_failures=0` on every receipt's full-map audit.
-- Resume-5 default citation-gate tests: `17 passed in 6.12s`.
-- Resume-5 private-import ratchet: `6 passed in 5.17s`.
+- Resume-5 final default citation-gate tests: `17 passed in 6.45s`.
+- Resume-5 final private-import ratchet: `6 passed in 5.50s`.
 - Resume-4 read-only preflight: PASS, including exact-group validation against
   both NEMO reference namelists, the `nn_itned` refusal plant, quoted-error
   plant, ten checklist sections, real-preprocessed
@@ -260,8 +260,15 @@ PASS_D5_EXECUTION cpu x64=True xla_flags=''
 
 ## Choices
 
+ASKED: rebase O5 onto current O7 tip, retain both sides of every conflict,
+rerun the named gates in the foreground, and commit the result.
+
 ASKED: three steps, one rank, the six preregistered inner frames, exact-input
 strength plus aEVP admission, and operator-only acquisition.
+
+UNASKED: retained admission recognizes an exact stable-patch equivalent of a
+manifest producer after rebase; every content/binary/record check and every
+configuration choice remains unchanged.
 
 UNASKED: the model exposes a trace view of the same aEVP execution so the
 preregistered inner frames can be scored; the existing final-state solver API
