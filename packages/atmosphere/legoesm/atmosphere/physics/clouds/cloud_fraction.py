@@ -168,6 +168,14 @@ def initial_ice_number_from_mass(q_i, rho_cloud_ice: float = _RHO_CLOUD_ICE_DEFA
     lami = _R_EFF_ICE_PSD_COEFF / _R_EFF_ICE_DEFAULT_M
     return jnp.maximum(jnp.asarray(q_i), 0.0) * lami ** 3 / (
         jnp.pi * rho_cloud_ice)
+# Cloud schemes whose droplet radius has an oracle for an IN-CLOUD droplet
+# number (``n_cloud_in_cloud``): cam6_clubb = CAM6 MG2 REL; resolved = the
+# cloud-resolving M2005 convention (cell fully cloudy, WRF
+# module_mp_morr_two_moment.F EFFC on the cell q_c and N_c).  sundqvist /
+# xu_randall have no reference with this M2005 PSD (#2072 ask 2; ICON-AES pairs
+# q/cover with in-cloud CDNC but through its own ECHAM radius law), so an
+# in-cloud number there is refused until that choice is made.
+_IN_CLOUD_NUMBER_SCHEMES = ("cam6_clubb", "resolved")
 # --- two_region sub-grid cloud-optics inhomogeneity ---
 _INHOM_CF_FLOOR = 1.0e-3         # min cloud fraction for the in-cloud water path
 _INHOM_R_EFF_FLOOR_M = 1.0e-6    # min effective radius in the tau estimate [m]
@@ -1051,8 +1059,10 @@ def compute_cloud_properties(
         in-cloud water ``min(q_c / max(ast, mincld), 5e-3)`` (ast =
         max(alst, aist), mincld = 1e-4, micro_mg_utils.F90:123), the MG2
         droplet PSD ``size_dist_param_liq``, and 10 um where that water is
-        below qsmall = 1e-18.  Other schemes keep the M2005 PSD with the
-        grid-mean pairing (#1521).
+        below qsmall = 1e-18.  Under ``resolved`` the cell is fully cloudy,
+        so the M2005 PSD on the cell q_c is the in-cloud pairing (WRF M2005).
+        Any other scheme raises: no oracle pairs an in-cloud number with its
+        cloud fraction.
 
     Returns
     -------
@@ -1086,6 +1096,15 @@ def compute_cloud_properties(
     #     blend collapses to ``1.0*q_sat_liq + 0.0*q_sat_ice`` = q_sat_liq
     #     BIT-identically (the ice curve is bounded, never inf/NaN, so the
     #     0.0*x term is exactly 0.0) => warm cloud is unchanged.
+    if (n_cloud_in_cloud and n_cloud is not None
+            and config.scheme not in _IN_CLOUD_NUMBER_SCHEMES):
+        raise ValueError(
+            f"cloud scheme {config.scheme!r} with an in-cloud (aerosol/CCN) "
+            "droplet number: no reference pairs that number with this "
+            "scheme's cloud fraction and the M2005 droplet PSD, so the "
+            "radiation would run an unreferenced pairing. Use one of "
+            f"{_IN_CLOUD_NUMBER_SCHEMES} or drop the aerosol CCN coupling "
+            "(--aerosol-ccn).")
     q_sat = cover_saturation_specific_humidity(T, p_full, config)
     RH = q_v / jnp.maximum(q_sat, 1.0e-10)
 

@@ -315,6 +315,16 @@ class PhysicsPipeline:
         # the daytime-effective daily-mean cosine — matching the zenith
         # convention the radiation solver itself uses.
         self.dynamic_albedo = dynamic_albedo
+        # ``dynamic_albedo`` with the rrtmgp solver: CESM2.1 open-ocean albedo
+        # split (cime5.6.47 seq_flux_mct.F90 L881-894), as on the MPAS lane --
+        # DIFFUSE 0.06, DIRECT = the zenith curve at the radiation call's own
+        # cosine.  Set by ``build_physics_pipeline``; False keeps the single
+        # zenith albedo above on both beams (gray, direct constructions).
+        self.cesm_ocean_albedo = False
+        # True when ``radiation_fn`` is the rrtmgp solver (set by
+        # ``build_physics_pipeline``): the only consumer of the cloud droplet
+        # radius, as the MPAS physics_fn gates its CCN radiation path.
+        self.rrtmgp_radiation = False
         # Realistic Earth orbit (Berger 1978) for AMIP-II/CMIP insolation;
         # None ⇒ circular orbit.  Set by ``build_physics_pipeline`` from
         # ``ExperimentConfig.orbital_insolation``; used by the radiation
@@ -2616,7 +2626,20 @@ class PhysicsPipeline:
         nlev = self.sigma_full.shape[0]
 
         T_sfc = blend_surface_temperature(sst, sic, self.T_ice)
-        if self.dynamic_albedo:
+        open_ocean_frac = None
+        if self.dynamic_albedo and self.cesm_ocean_albedo:
+            # CESM2.1 split (rrtmgp): this blend is the DIFFUSE albedo, open
+            # ocean at 0.06; the rrtmgp radiation_fn swaps the open-ocean part
+            # of the DIRECT beam for the zenith curve at its own cosine
+            # (integration.cesm_direct_surface_albedo).  Same recipe as the
+            # MPAS lane (model_driver ``_cesm_ocean_alb``).
+            from legoesm.atmosphere.physics.radiation.integration import (
+                OCEAN_ALBEDO_DIFFUSE_CESM,
+            )
+            albedo = blend_surface_property(sic, _albedo_ice,
+                                            OCEAN_ALBEDO_DIFFUSE_CESM)
+            open_ocean_frac = 1.0 - sic
+        elif self.dynamic_albedo:
             # Zenith-dependent ocean albedo (Briegleb 1992).  Use the
             # SAME zenith convention as the radiation solver: the
             # instantaneous cos(SZA) under a diurnal cycle, else the
@@ -2703,6 +2726,8 @@ class PhysicsPipeline:
             T_sfc = self._blend_land(T_sfc, T_land_grid)
             albedo = self._blend_land(albedo, alb_land)
             emissivity = self._blend_land(emissivity, emis_land)
+            if open_ocean_frac is not None:
+                open_ocean_frac = (1.0 - self.f_land) * open_ocean_frac
 
         # --- Coupler-provided dynamic surface overrides ---
         # In a coupled run the ocean/sea-ice/land tile models compute dynamic
@@ -2714,6 +2739,14 @@ class PhysicsPipeline:
         # ice-albedo feedback / zenith ocean albedo / snow brightening and the
         # ice/land prognostic skin temperature.  ``None`` (AMIP / standalone /
         # uncoupled) leaves the static blend untouched ⇒ byte-identical.
+        if open_ocean_frac is not None and (sfc_albedo_override is not None
+                                            or sfc_sw_up is not None):
+            raise ValueError(
+                "dynamic_albedo with rrtmgp forms the direct-beam albedo from "
+                "the pipeline's own blend (open ocean 0.06 diffuse); a coupler "
+                "albedo override or a prescribed surface SW replaces that blend "
+                "and the direct beam would be built on the wrong field. Drop "
+                "dynamic_albedo or the override.")
         if sfc_albedo_override is not None:
             albedo = sfc_albedo_override
         if sfc_T_override is not None:
@@ -2780,6 +2813,8 @@ class PhysicsPipeline:
         lon_col = ad.flatten_2d(lon)
         albedo_col = ad.flatten_2d(albedo)
         emis_col = ad.flatten_2d(emissivity)
+        open_ocean_frac_col = (None if open_ocean_frac is None
+                               else ad.flatten_2d(open_ocean_frac))
 
         # Compute cloud properties for cloud-radiation coupling
         cloud_kwargs = {}
@@ -2866,6 +2901,7 @@ class PhysicsPipeline:
                 n_cloud_col = jnp.maximum(
                     ad.flatten_3d(N_c) * _rho_nc, 0.0)
             n_ice_col = None if N_i is None else ad.flatten_3d(N_i)
+            _nc_in_cloud = False
             # Aerosol-CCN droplet number for the radiation PSD: under
             # specified-Nc with aerosol coupling, feed the SAME
             # Andreae (2009) AOD->CCN diagnostic into the cloud-optics
@@ -2887,6 +2923,11 @@ class PhysicsPipeline:
                 n_cloud_col = jnp.broadcast_to(
                     ccn_from_aod(_aod_col)[:, None], T_col.shape,
                 )
+                # specified IN-CLOUD number (MG2 nccons), flagged as on the
+                # MPAS lane where rrtmgp consumes the radius (gray discards
+                # it); compute_cloud_properties refuses schemes with no
+                # in-cloud pairing reference.
+                _nc_in_cloud = self.rrtmgp_radiation
             # ``compute_cloud_properties`` is parameterised on mixing
             # ratio (RH from q_v vs q_sat_mixing_ratio); leave the
             # mixing-ratio q_v here and only feed the converted
@@ -2915,6 +2956,7 @@ class PhysicsPipeline:
                 n_cloud=n_cloud_col, n_ice=n_ice_col,
                 conv_precip=conv_precip_col,
                 cloud_fraction_override=_cf_ovr,
+                n_cloud_in_cloud=_nc_in_cloud,
             )
             # ``to_rrtmg_kwargs`` builds the kwargs without
             # ``cloud_fraction`` (commit 4c9591bb, lost in AIMIP-#312
@@ -2950,6 +2992,7 @@ class PhysicsPipeline:
             lon_col = _shard(lon_col)
             albedo_col = _shard(albedo_col)
             emis_col = _shard(emis_col)
+            open_ocean_frac_col = _shard(open_ocean_frac_col)
             o3_vmr_precomputed = _shard(o3_vmr_precomputed)
             aerosol_od_precomputed = _shard(aerosol_od_precomputed)
             aerosol_lw_od_precomputed = _shard(aerosol_lw_od_precomputed)
@@ -2968,13 +3011,21 @@ class PhysicsPipeline:
             ghg_vmr_override=ghg_vmr_override,
             aerosol_lw_od_col=aerosol_lw_od_precomputed,
             o3_top_vmr_col=o3_top_vmr,
+            # only the rrtmgp radiation_fn takes it (cesm_ocean_albedo)
+            **({} if open_ocean_frac_col is None
+               else {"open_ocean_frac_col": open_ocean_frac_col}),
             **cloud_kwargs,
         )
 
         # Unflatten back to native grid shape via adapter
         dT_dt_rad = ad.unflatten_3d(rad_out.heating_rate)
         sw_down_sfc = ad.unflatten_2d(rad_out.sw_flux_down[:, -1])
-        sw_net_sfc = sw_down_sfc * (1.0 - albedo)
+        if open_ocean_frac_col is None:
+            sw_net_sfc = sw_down_sfc * (1.0 - albedo)
+        else:
+            # Two surface albedos: the solver's own surface net, as on the
+            # MPAS lane (radiation/integration.py physics_fn).
+            sw_net_sfc = sw_down_sfc - ad.unflatten_2d(rad_out.sw_flux_up[:, -1])
         lw_net_sfc = ad.unflatten_2d(
             rad_out.lw_flux_down[:, -1] - rad_out.lw_flux_up[:, -1]
         )
@@ -3563,7 +3614,7 @@ def _build_rrtmgp_radiation_fn(config):
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
-                     cloud_fraction=None):
+                     cloud_fraction=None, open_ocean_frac_col=None):
         del tau_equator, tau_pole  # RRTMGP does not use gray optical depth
         _sw_scale = None
         # Eccentricity scales the incident SW *flux* by (a/r)^2; the orbital
@@ -3641,6 +3692,15 @@ def _build_rrtmgp_radiation_fn(config):
         )
         if o3_top_vmr_col is not None:  # overhead-layer ozone
             _rad_kwargs["o3_top_vmr"] = o3_top_vmr_col
+        if open_ocean_frac_col is not None:
+            # CESM2.1 ocean albedo split (dynamic_albedo): ``albedo_col`` is
+            # the diffuse blend; the direct beam takes the open-ocean zenith
+            # curve at THIS call's cosine (the one the solver uses).
+            from legoesm.atmosphere.physics.radiation.integration import (
+                cesm_direct_surface_albedo,
+            )
+            _rad_kwargs["sfc_albedo_direct"] = cesm_direct_surface_albedo(
+                albedo_col, open_ocean_frac_col, cos_zenith)
         # Column-chunk the rrtmgp solve when configured: the per-block body
         # compiles ONCE at column_chunk_size, capping the super-linear rrtmgp
         # XLA compile time at higher horizontal resolution.  Columns are
@@ -5176,6 +5236,9 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
         co2_ppmv=config.co2_ppmv,
         surface_bulk_scheme=config.surface_bulk_scheme,
     )
+    pipeline.rrtmgp_radiation = rad_scheme in ("rrtmgp", "rrtmg")
+    pipeline.cesm_ocean_albedo = (bool(config.dynamic_albedo)
+                                  and pipeline.rrtmgp_radiation)
     from legoesm.atmosphere.physics.radiation.solar import earth_orbit
     pipeline.orbit = (earth_orbit()
                       if getattr(config, 'orbital_insolation', False) else None)
