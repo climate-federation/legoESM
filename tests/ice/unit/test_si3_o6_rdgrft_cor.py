@@ -4,8 +4,9 @@ The reference is an independent scalar transcription written here in plain
 Python, in NEMO's statement order over NEMO's packed cell list
 (``ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icedyn_rdgrft.f90``, ``iceitd.f90``,
 ``icevar.f90``, ``icecor.f90``).  ``math.exp``/``math.tanh`` are glibc's,
-the arm the record build links (DECISION 162).  MIN/MAX keep the operand the
-compiled MINSD/MAXSD keeps on a tie where the object code was read.
+the arm the record build links (DECISION 162).  Every MIN/MAX keeps the operand
+the record's compiled MINSD/MAXSD keeps on a tie or a NaN, per the audited table
+``nemo_si3_o6_minmax_sites.json``.
 """
 
 from __future__ import annotations
@@ -159,7 +160,7 @@ def _prep_cell(a, v, ato, cn, op, cfg):
             hrmin[j] = _mink(2.0 * zhi[j], 0.5 * (zhm + zhi[j]))
             hraft[j] = zhi[j] * 2.0
             hrmax[j] = 2.0 * zhm - hrmin[j]
-            phi[j] = zhi[j] / max(zhm, 1e-20)
+            phi[j] = zhi[j] / _maxk(1e-20, zhm)
             zak = zak + ar[j] * (1.0 - phi[j]) + af[j] * (1.0 - 0.5)
     cg = cn / zak if zak > 1e-10 else 0.0
     for j in range(jpl):
@@ -193,7 +194,7 @@ def _shift_cell(c, p, sst, sss, cfg, hi_max):
         elif zvti >= 20.0:
             vsw = 0.0
         else:
-            vsw = v1 * afr * cfg.rn_porordg * _maxk(0.0, 2.0 - 0.1 * zvti)
+            vsw = v1 * afr * cfg.rn_porordg * _maxk(2.0 - 0.1 * zvti, 0.0)
         ersw = -(cfg.rhoi * vsw * cfg.rcp * sst)
         virdg, vsrdg = v1 * afr + vsw, c["v_s"][j1] * afr
         oirdg = c["oa_i"][j1] * afr * p["phi"][j1]
@@ -228,7 +229,7 @@ def _shift_cell(c, p, sst, sss, cfg, hi_max):
             lo, hi = hi_max[j2], hi_max[j2 + 1]
             hmin, hmax = p["hrmin"][j1], p["hrmax"][j1]
             if hmin <= hi and hmax > lo:
-                hL, hR = max(hmin, lo), min(hmax, hi)
+                hL, hR = _maxk(hmin, lo), _mink(hi, hmax)
                 fa = (hR - hL) / (hmax - hmin)
                 fv = (hR * hR - hL * hL) / (hmax * hmax - hmin * hmin)
                 it_rdg = 1
@@ -298,7 +299,7 @@ def oracle_rdgrft(s, divu, delta, sst, sss, cfg, hi_max=HI_MAX):
         dv, dl = float(divu[ji, jj]), float(delta[ji, jj])
         cn = cfg.rn_csrdg * 0.5 * (dl - abs(dv)) - _mink(0.0, dv)
         if dv < 0.0:
-            cn = max(cn, -dv)
+            cn = _maxk(-dv, cn)
         c = _cell(o, ji, jj, _CAT, _LAY, ("ato_i",) + _FLX)
         p = _prep_cell(c["a_i"], c["v_i"], c["ato_i"], cn, cn + dv, cfg)
         if _sum0(p["ap"][1:]) > 0.0 and p["cg"] > 0.0:
@@ -386,17 +387,16 @@ def oracle_ice_cor(s, amax, sst, sss, cfg, hi_max=HI_MAX, hi_mean=HI_MEAN):
             for jl in range(JPL):
                 for k in range(NLAY_I):
                     z = c["szv_i"][k][jl]
-                    c["szv_i"][k][jl] = min(max(z, cfg.rn_simin * c["v_i"][jl] * r1n),
-                                            cfg.rn_sinew * float(sss[ji, jj]) * c["v_i"][jl] * r1n)
+                    c["szv_i"][k][jl] = _mink(_maxk(z, cfg.rn_simin * c["v_i"][jl] * r1n), cfg.rn_sinew * float(sss[ji, jj]) * c["v_i"][jl] * r1n)
                     c["sfx_res"] = c["sfx_res"] - (c["szv_i"][k][jl] - z) * cfg.rhoi * r1
             c["h_i"] = [c["v_i"][j] / c["a_i"][j] if c["a_i"][j] > 1e-10 else 0.0 for j in range(JPL)]
-            small = [min(c["a_i"][j], c["v_i"][j], c["h_i"][j]) < 1e-10 for j in range(JPL)]
+            small = [_mink(c["h_i"][j], _mink(c["v_i"][j], c["a_i"][j])) < 1e-10 for j in range(JPL)]
             for jl in range(JPL):
                 for k in range(NLAY_I):
                     if small[jl]:
                         c["sfx_res"] = c["sfx_res"] + c["szv_i"][k][jl] * cfg.rhoi * r1
                         c["szv_i"][k][jl] = 0.0
-                        c["sz_i"][k][jl] = min(cfg.rn_simin, cfg.rn_sinew * float(sss[ji, jj]))
+                        c["sz_i"][k][jl] = _mink(cfg.rn_simin, cfg.rn_sinew * float(sss[ji, jj]))
             for n, tn in (("e_i", "t_i"), ("e_s", "t_s")):
                 for jl in range(JPL):
                     for k in range(len(c[n])):
@@ -487,49 +487,77 @@ def test_ice_cor_equals_independent_scalar_transcription():
     assert np.asarray(got.sfx_res != jnp.asarray(c["sfx_res"])).any()
 
 
-def _budget(st, flx_w, flx_s, flx_h, rhoi, rhos, rhow):
-    """NEMO's ice_cons_hsm terms per cell (icectl.f90:110-121), e1e2t = 1."""
-    m = (np.asarray(st.v_i) * rhoi + np.asarray(st.v_s) * rhos + (np.asarray(st.v_ip) + np.asarray(st.v_il)) * rhow).sum(-1)
-    salt = np.asarray(st.szv_i).sum(-2).sum(-1) * rhoi
-    heat = np.asarray(st.e_i).sum((-2, -1)) + np.asarray(st.e_s).sum((-2, -1))
-    return m, salt, heat, flx_w, flx_s, flx_h
+_E1E2T = np.random.default_rng(7).uniform(0.5e10, 2.0e10, (JPI, JPJ))  # non-uniform cell areas
+_RN_ICECHK_GLO = 1.0e-4  # namelist_ice_ref rn_icechk_glo
 
 
-def test_rdgrft_conserves_mass_salt_heat_as_nemo_checks():
+def _cons_sums(st):
+    """NEMO's ice_cons_hsm zchk3 for a state; fluxes the rung does not touch are zero."""
+    from legoesm.ice import si3_orca2_state as o
+    g = st._asdict()
+    names = o.SI3_CONS_HSM_MASS_FLUXES + o.SI3_CONS_HSM_SALT_FLUXES + o.SI3_CONS_HSM_HEAT_ADDED + o.SI3_CONS_HSM_HEAT_REMOVED
+    fluxes = {n: g.get(n, jnp.zeros((JPI, JPJ))) for n in names}
+    return o.si3_ice_cons_hsm_sums(g, fluxes, e1e2t=_E1E2T, smask0_i=np.ones((JPI, JPJ)), nn_hls=NN_HLS,
+                                   rhoi=K.rho_ice, rhos=K.rho_snow, rhow=RHOW)
+
+
+def _cons_check(s0, s1, routine):
+    from legoesm.ice import si3_orca2_state as o
+    return o.si3_ice_cons_hsm_check(_cons_sums(s0), _cons_sums(s1), r1_dt_ice=1.0 / RDT,
+                                    rn_icechk_glo=_RN_ICECHK_GLO, rn_amax_n=0.997, rn_amax_s=0.997,
+                                    cd_routine=routine)
+
+
+def _flagged(check):
+    return sorted(k for k, v in check["violations"].items() if v)
+
+
+def _cons_plants(s0, s1, routine, wfx, sfx, hfx):
+    """Each plant must make NEMO's own check print exactly the expected warning."""
+    bump = np.asarray(s1.v_i).copy()
+    bump[NN_HLS + 1, NN_HLS + 1, 0] += 1.0e-4  # > rchk_m * rn_icechk_glo * area
+    neg = np.asarray(s1.v_s).copy()
+    neg[NN_HLS, NN_HLS, 1] = -1.0e-12
+    return {
+        "mass": _flagged(_cons_check(s0, s1._replace(**{wfx: getattr(s0, wfx)}), routine)),
+        "salt": _flagged(_cons_check(s0, s1._replace(**{sfx: getattr(s0, sfx)}), routine)),
+        "heat": _flagged(_cons_check(s0, s1._replace(**{hfx: getattr(s0, hfx)}), routine)),
+        "v_i+1e-4": _flagged(_cons_check(s0, s1._replace(v_i=jnp.asarray(bump)), routine)),
+        "v_s<0": _flagged(_cons_check(s0, s1._replace(v_s=jnp.asarray(neg)), routine)),
+    }
+
+
+def test_rdgrft_passes_nemo_ice_cons_hsm_and_its_plants_fire():
     s, divu, delta, sst, sss = _inputs()
     s0 = SI3RdgrftState(**{k: jnp.asarray(s[k]) for k in SI3RdgrftState._fields})
-    s1 = _run_rdgrft(s, divu, delta, sst, sss).state
-
-    def terms(st):
-        fw = np.asarray(st.wfx_dyn) + np.asarray(st.wfx_snw_dyn) + np.asarray(st.wfx_pnd)
-        return _budget(st, fw, np.asarray(st.sfx_dyn), -np.asarray(st.hfx_dyn), K.rho_ice, K.rho_snow, RHOW)
-
-    t0, t1 = terms(s0), terms(s1)
-    for name, k in (("mass", 0), ("salt", 1), ("heat", 2)):  # icectl.f90:176-178
-        diag = (t1[k] - t0[k]) / RDT + (t1[k + 3] - t0[k + 3])
-        scale = np.abs(t0[k]).max() / RDT
-        assert np.abs(diag).max() <= 1e-12 * scale, name
-        assert np.abs(t1[k] - t0[k]).max() > 1e-6 * np.abs(t0[k]).max() or name != "mass"
-    for leaf in ("a_i", "v_i", "v_s", "v_ip", "e_i", "e_s", "szv_i"):  # icectl.f90:150-157 minima
-        assert np.asarray(getattr(s1, leaf)).min() >= 0.0
+    r = _run_rdgrft(s, divu, delta, sst, sss)
+    s1 = r.state
+    clean = _cons_check(s0, s1, "icedyn_rdgrft")
+    assert _flagged(clean) == []
+    for k in ("mass", "salt", "heat"):  # the routine really moves each channel
+        assert abs(float(_cons_sums(s1)[k] - _cons_sums(s0)[k])) > 0.0
+    plants = _cons_plants(s0, s1, "icedyn_rdgrft", "wfx_dyn", "sfx_dyn", "hfx_dyn")
+    assert "v_s_negative" in plants.pop("v_s<0")
+    assert plants == {"mass": ["mass"], "salt": ["salt"], "heat": ["heat"], "v_i+1e-4": ["mass"]}
+    over = np.asarray(s1.a_i).copy()
+    over[NN_HLS, NN_HLS, :] = 0.3  # at_i = 1.5 > amax: NEMO skips this check for icedyn_rdgrft
+    assert "a_i_above_amax" not in _flagged(_cons_check(s0, s1._replace(a_i=jnp.asarray(over)), "icedyn_rdgrft"))
     a_sum = np.asarray(s1.a_i).sum(-1) + np.asarray(s1.ato_i)
-    sel = np.asarray(_run_rdgrft(s, divu, delta, sst, sss).selected)
+    sel = np.asarray(r.selected)
     assert np.abs(a_sum[sel] - 1.0).max() < 1e-9  # converged: a_i + ato_i = 1
 
 
-def test_ice_cor_conserves_mass_salt_heat_as_nemo_checks():
+def test_ice_cor_passes_nemo_ice_cons_hsm_and_its_plants_fire():
     c, amax, sst, sss = _cor_inputs()
     s0 = SI3IceCorState(**{k: jnp.asarray(c[k]) for k in SI3IceCorState._fields})
     s1 = _run_cor(c, amax, sst, sss)
-
-    def terms(st):
-        return _budget(st, np.asarray(st.wfx_res), np.asarray(st.sfx_res), -np.asarray(st.hfx_res),
-                       K.rho_ice, K.rho_snow, RHOW)
-
-    t0, t1 = terms(s0), terms(s1)
-    for k in range(3):
-        diag = (t1[k] - t0[k]) / RDT + (t1[k + 3] - t0[k + 3])
-        assert np.abs(diag).max() <= 1e-12 * np.abs(t0[k]).max() / RDT
+    assert _flagged(_cons_check(s0, s1, "icecor")) == []
+    plants = _cons_plants(s0, s1, "icecor", "wfx_res", "sfx_res", "hfx_res")
+    assert "v_s_negative" in plants.pop("v_s<0")
+    assert plants == {"mass": ["mass"], "salt": ["salt"], "heat": ["heat"], "v_i+1e-4": ["mass"]}
+    over = np.asarray(s1.a_i).copy()
+    over[NN_HLS, NN_HLS, :] = 0.3
+    assert "a_i_above_amax" in _flagged(_cons_check(s0, s1._replace(a_i=jnp.asarray(over)), "icecor"))
 
 
 PLANTS = {
@@ -671,6 +699,170 @@ def test_halos_untouched():
             for sl in (np.s_[:NN_HLS], np.s_[-NN_HLS:]):
                 np.testing.assert_array_equal(g[sl], w[sl])
                 np.testing.assert_array_equal(g[:, sl], w[:, sl])
+
+
+# ------------------------------------------- MIN/MAX tie order and source barriers
+_REPO = __import__("pathlib").Path(__file__).resolve().parents[3]
+_SITES = __import__("json").loads(
+    (_REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o6_minmax_sites.json").read_text())["sites"]
+_O6_PRE_FIX = "2e58765fa3ec"  # the O6 commit before the tie audit
+_MODEL_FUNCS = {
+    "packages/ice/legoesm/ice/ridging.py": ("_rdgrft_prep", "_rdgrft_shift", "si3_ice_dyn_rdgrft"),
+    "packages/ice/legoesm/ice/itd.py": ("si3_var_roundoff", "_si3_itd_shiftice", "si3_ice_itd_reb",
+                                        "si3_var_zapsmall", "si3_ice_cor_dyn"),
+}
+_ORACLE_FUNCS = ("_prep_cell", "_shift_cell", "_roundoff_cell", "oracle_rdgrft", "_shiftice_cell", "oracle_ice_cor")
+
+
+def _functions(src: str, names):
+    import ast
+    tree = ast.parse(src)
+    return [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+
+
+def _minmax_calls(src: str, names, helpers):
+    """(audited helper calls, every other min/max call) inside the named functions."""
+    import ast
+    found, other = [], []
+    for fn in _functions(src, names):
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+            if name in helpers:
+                found.append(ast.get_source_segment(src, node))
+            elif name in ("min", "max", "minimum", "maximum", "fmin", "fmax", "amin", "amax"):
+                other.append(ast.get_source_segment(src, node))
+    return sorted(found), other
+
+
+def _model_minmax(rev=None):
+    import subprocess
+    found, other = [], []
+    for rel, names in _MODEL_FUNCS.items():
+        src = (subprocess.check_output(["git", "show", f"{rev}:{rel}"], cwd=_REPO, text=True)
+               if rev else (_REPO / rel).read_text())
+        f, o = _minmax_calls(src, names, ("fmin", "fmax"))
+        found += f
+        other += o
+    return sorted(found), other
+
+
+def test_every_minmax_keeps_the_record_object_code_survivor():
+    """Model and oracle MIN/MAX calls are exactly the audited table's, survivor first.
+
+    The table is checked against the record build's object code by
+    ``nemo_si3_minmax_tie_audit.py`` (``test_si3_minmax_tie_audit.py``).
+    """
+    want_model = sorted(c for site in _SITES.values() for c in site["model"])
+    want_oracle = sorted(c for site in _SITES.values() for c in site["oracle"])
+    found, other = _model_minmax()
+    assert other == [] and found == want_model
+    found, other = _minmax_calls((_REPO / "tests/ice/unit/test_si3_o6_rdgrft_cor.py").read_text(),
+                                 _ORACLE_FUNCS, ("_mink", "_maxk"))
+    assert other == [] and found == want_oracle
+    # non-vacuity: the pre-audit model used NaN-propagating jnp.minimum/maximum and wrong orders
+    pre, pre_other = _model_minmax(_O6_PRE_FIX)
+    assert pre_other and pre != want_model
+
+
+@pytest.mark.parametrize("jit", [False, True])
+def test_tie_first_helpers_return_what_minsd_maxsd_return(jit):
+    """minsd/maxsd SRC,DST return SRC on a +0/-0 tie and on any NaN; SRC is the first argument."""
+    nan = float("nan")
+    a = jnp.array([0.0, -0.0, nan, 1.0, nan, 2.0, 1.0])
+    b = jnp.array([-0.0, 0.0, 1.0, nan, -nan, 1.0, 2.0])
+    fmin, fmax = si3_surface.fortran_min_tie_first, si3_surface.fortran_max_tie_first
+    run = jax.jit(lambda x, y: (fmin(x, y), fmax(x, y))) if jit else (lambda x, y: (fmin(x, y), fmax(x, y)))
+    lo, hi = run(a, b)
+    keep_a = _bits(a)[:5]
+    np.testing.assert_array_equal(_bits(lo)[:5], keep_a)
+    np.testing.assert_array_equal(_bits(hi)[:5], keep_a)
+    np.testing.assert_array_equal(np.asarray(lo)[5:], [1.0, 1.0])
+    np.testing.assert_array_equal(np.asarray(hi)[5:], [2.0, 2.0])
+    assert (_maxk(nan, 1.0) != _maxk(nan, 1.0)) and _maxk(1.0, nan) == 1.0  # oracle helpers agree
+    assert math.copysign(1.0, _mink(0.0, -0.0)) == 1.0 and math.copysign(1.0, _maxk(-0.0, 0.0)) == -1.0
+
+
+def test_closing_rate_nan_takes_the_record_survivor():
+    """:298 keeps -zdivu on NaN (both EVP copies), so a NaN delta_i cannot poison the cell."""
+    s, divu, delta, sst, sss = _inputs()
+    delta = delta.copy()
+    delta[5, 3] = float("nan")  # divu < 0 there
+    want, _, sel = oracle_rdgrft(s, divu, delta, sst, sss, RDG_CFG)
+    got = _run_rdgrft(s, divu, delta, sst, sss).state
+    assert (5, 3) in sel and np.isfinite(np.asarray(got.a_i)[5, 3]).all()
+    _assert_bits(got, want, ("a_i", "v_i", "v_s", "e_i", "szv_i", "ato_i", "hfx_dyn"), "nan298")
+
+
+def test_856_copy_dependence_is_unobservable():
+    """:856 keeps phrmin in one compiled copy and hi_max(jl2-1) in the other.
+
+    The bits can differ only on phrmin = -0 against hi_max(0) = +0.  Feeding the
+    shift both signs of zero for phrmin (with the :855 branch forced open) gives
+    the same output bits, so the copy that runs cannot be told apart.
+    """
+    s, divu, delta, sst, sss = _inputs()
+    st = {k: jnp.asarray(v, jnp.float64) for k, v in s.items()}
+    zdivu, zdelt = jnp.asarray(divu), jnp.asarray(delta)
+    cn = 0.5 * 0.5 * (zdelt - jnp.abs(zdivu)) - jnp.minimum(zdivu, 0.0)
+    prep = rdg_mod._rdgrft_prep(st["a_i"], st["v_i"], st["ato_i"], cn, cn + zdivu, RDG_CFG)
+    apartf, aridge, araft, phi, hraft, hrmin, hrmax, hrexp, cg, opning = prep
+    cells = jnp.asarray(np.ones((JPI, JPJ), bool)).at[:NN_HLS].set(False).at[:, :NN_HLS].set(False)
+    outs = []
+    for zero in (0.0, -0.0):
+        hmin = hrmin.at[..., 0].set(zero)
+        hmax = hrmax.at[..., 0].set(0.3)  # > hi_max(0): branch taken, hL = MAX(+-0, +0)
+        p = (apartf, aridge, araft, phi, hraft, hmin, hmax, hrexp, cg, opning)
+        outs.append(rdg_mod._rdgrft_shift(st, cells, p, jnp.asarray(sst), jnp.asarray(sss), jnp.asarray(HI_MAX), RDG_CFG))
+    assert math.copysign(1.0, float(si3_surface.fortran_max_tie_first(jnp.asarray(-0.0), 0.0))) == -1.0
+    for k in outs[0]:
+        np.testing.assert_array_equal(_bits(outs[0][k]), _bits(outs[1][k]), err_msg=k)
+
+
+_SR_SCALARS = {"cfg", "config", "rdt", "r1", "r1_nlay", "jl", "jl1", "jl2", "jk", "k", "jpl", "nn_hls",
+               "snw_r", "snw_f", "pnd_r", "pnd_f", "z1_astar"}
+
+
+def _unbarriered(src: str, names):
+    """Array arithmetic (BinOp or si3_safe_div) not the direct argument of sr()."""
+    import ast
+    bad = []
+
+    def scalar(node):  # Python scalars, shapes, tuples and the int pass counter are not fp64 statements
+        if any(isinstance(n, ast.Tuple) or (isinstance(n, ast.Attribute) and n.attr in ("shape", "astype"))
+               for n in ast.walk(node)):
+            return True
+        for n in ast.walk(node):
+            if isinstance(n, ast.Name) and not (n.id in _SR_SCALARS or n.id.isupper() or n.id.startswith("_")):
+                return False
+        return True
+
+    for fn in _functions(src, names):
+        parents = {c: p for p in ast.walk(fn) for c in ast.iter_child_nodes(p)}
+        for node in ast.walk(fn):
+            div = isinstance(node, ast.Call) and getattr(node.func, "id", "") == "si3_safe_div"
+            arith = isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div))
+            if not (div or arith) or (arith and scalar(node)):
+                continue
+            up = parents.get(node)
+            if isinstance(up, (ast.Subscript, ast.Slice)) or (isinstance(up, ast.Call) and getattr(up.func, "id", "") in ("range", "len")):
+                continue
+            wrapped = isinstance(up, ast.Call) and getattr(up.func, "id", "") == "sr"
+            inner_div = arith and isinstance(up, ast.Call) and getattr(up.func, "id", "") == "si3_safe_div"
+            if not (wrapped or inner_div):
+                bad.append(f"{fn.name}:{node.lineno}: {ast.get_source_segment(src, node)}")
+    return bad
+
+
+def test_every_array_operation_is_source_rounded():
+    """Each rung statement is materialized before its consumer (DECISION 158 barriers)."""
+    import subprocess
+    for rel, names in _MODEL_FUNCS.items():
+        assert _unbarriered((_REPO / rel).read_text(), names) == [], rel
+    pre = subprocess.check_output(["git", "show", f"{_O6_PRE_FIX}:packages/ice/legoesm/ice/itd.py"], cwd=_REPO, text=True)
+    assert any("zworkv" in b or "si3_safe_div(dvi" in b for b in _unbarriered(pre, _MODEL_FUNCS["packages/ice/legoesm/ice/itd.py"]))
 
 
 RDG_PIN = "00e22bad91eb8c38750766bc6ba07f96642ea6f4cd214e06ea75c9d569e57415"

@@ -4826,3 +4826,129 @@ __all__.extend((
     "si3_var_itd_1cmc",
     "si3_o3_istate_fill_fields",
 ))
+
+
+# ==============================================================================
+# icectl.f90 ice_cons_hsm: NEMO's own global mass/salt/heat conservation check.
+# Cited build ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icectl.f90:81-209.  Arrays use
+# NEMO's index order (jpi, jpj, jpl) and (jpi, jpj, nlay, jpl).
+# ==============================================================================
+
+_RCHK_M = 2.5e-7  # icectl.f90:59 kg/m2/s
+_RCHK_S = 2.5e-6  # icectl.f90:60 g/m2/s
+_RCHK_T = 7.5e-2  # icectl.f90:61 W/m2
+_CONS_EPSI10 = 1.0e-10  # ice.F90 epsi10
+SI3_CONS_HSM_MASS_FLUXES = (  # icectl.f90:118-121, summed left to right
+    "wfx_bog", "wfx_bom", "wfx_sum", "wfx_sni", "wfx_opw", "wfx_res", "wfx_dyn", "wfx_lam",
+    "wfx_pnd", "wfx_snw_sni", "wfx_snw_sum", "wfx_snw_dyn", "wfx_snw_sub", "wfx_ice_sub", "wfx_spr",
+)
+SI3_CONS_HSM_SALT_FLUXES = (  # icectl.f90:122-123
+    "sfx_bri", "sfx_bog", "sfx_bom", "sfx_sum", "sfx_sni", "sfx_opw", "sfx_res", "sfx_dyn",
+    "sfx_sub", "sfx_lam",
+)
+SI3_CONS_HSM_HEAT_ADDED = ("hfx_sum", "hfx_bom", "hfx_bog", "hfx_dif", "hfx_opw", "hfx_snw")
+SI3_CONS_HSM_HEAT_REMOVED = ("hfx_thd", "hfx_dyn", "hfx_res", "hfx_sub", "hfx_spr")  # :124-125
+
+
+def _sum_rows(rows) -> Field:
+    acc = rows[0]
+    for row in rows[1:]:
+        acc = nemo_source_round(acc + row)
+    return acc
+
+
+def si3_ice_cons_hsm_sums(
+    state: Mapping[str, Field],
+    fluxes: Mapping[str, Field],
+    *,
+    e1e2t: Field,
+    smask0_i: Field,
+    nn_hls: int,
+    rhoi: float,
+    rhos: float,
+    rhow: float,
+) -> dict[str, Field]:
+    """``zchk3`` of ``ice_cons_hsm`` (``icectl.f90:105-157``), ``nn_icesal == 4`` arm.
+
+    Every flux the routine sums is required (``fluxes`` must name all 36);
+    ``zchk3(7:8)`` (the advection-scheme rows, read only for ``icedyn_adv``) are
+    not formed.
+    """
+    from legoesm.ice.si3_surface import fortran_sum0
+
+    sr = nemo_source_round
+    names = (SI3_CONS_HSM_MASS_FLUXES + SI3_CONS_HSM_SALT_FLUXES + SI3_CONS_HSM_HEAT_ADDED
+             + SI3_CONS_HSM_HEAT_REMOVED)
+    missing = [n for n in names if fluxes.get(n) is None]
+    if missing:
+        raise ValueError(f"ice_cons_hsm requires every flux it sums; missing {missing}")
+    e1e2t = jnp.asarray(e1e2t, jnp.float64)
+    g = {k: jnp.asarray(v, jnp.float64) for k, v in state.items()}
+    f = {k: jnp.asarray(fluxes[k], jnp.float64) for k in names}
+    mass_terms = sr(sr(sr(g["v_i"] * rhoi) + sr(g["v_s"] * rhos))
+                    + sr(sr(g["v_ip"] + g["v_il"]) * rhow))  # :112-113
+    zsv_i = fortran_sum0(jnp.swapaxes(g["szv_i"], -1, -2))  # :105 SUM(szv_i, dim=3)
+    heat = sr(fortran_sum0(fortran_sum0(g["e_i"])) + fortran_sum0(fortran_sum0(g["e_s"])))  # :115
+    cells = {
+        "mass": sr(fortran_sum0(mass_terms) * e1e2t),
+        "salt": sr(sr(fortran_sum0(zsv_i) * rhoi) * e1e2t),  # :114
+        "heat": sr(heat * e1e2t),
+        "flux_mass": sr(_sum_rows([f[n] for n in SI3_CONS_HSM_MASS_FLUXES]) * e1e2t),
+        "flux_salt": sr(_sum_rows([f[n] for n in SI3_CONS_HSM_SALT_FLUXES]) * e1e2t),
+        "flux_heat": sr(_sum_rows([f[n] for n in SI3_CONS_HSM_HEAT_ADDED]
+                                  + [-f[n] for n in SI3_CONS_HSM_HEAT_REMOVED]) * e1e2t),
+        "area": sr(fortran_sum0(sr(g["a_i"] + _CONS_EPSI10)) * e1e2t),  # :134
+    }
+    out = {k: si3_glob_2dsum_ddpdd(v, smask0_i, nn_hls=nn_hls) for k, v in cells.items()}  # :141 glob_2Dsum (DDPDD)
+    h = int(nn_hls)
+    inner = (slice(h, -h), slice(h, -h))
+    out["max_concentration"] = jnp.max(fortran_sum0(g["a_i"])[inner])  # :137, :142
+    for key, field in (("v_i", g["v_i"]), ("v_s", g["v_s"]), ("v_ip", g["v_ip"]), ("v_il", g["v_il"]),
+                       ("a_i", g["a_i"]), ("s_i", zsv_i)):  # :146-157
+        out[f"min_{key}"] = jnp.min(field[inner])
+    out["min_e_i"] = jnp.min(g["e_i"][inner])
+    out["min_e_s"] = jnp.min(g["e_s"][inner])
+    return out
+
+
+def si3_ice_cons_hsm_check(
+    before: Mapping[str, Field],
+    after: Mapping[str, Field],
+    *,
+    r1_dt_ice: float,
+    rn_icechk_glo: float,
+    rn_amax_n: float,
+    rn_amax_s: float,
+    cd_routine: str,
+) -> dict[str, Any]:
+    """``ice_cons_hsm(icount=1)``'s diagnostics and every warning it would print.
+
+    ``before``/``after`` are :func:`si3_ice_cons_hsm_sums` at ``icount = 0``/``1``
+    (``icectl.f90:176-198``).  NEMO only prints the warnings (``lwp``); here they
+    are returned as booleans.
+    """
+    sr = nemo_source_round
+    diag = {
+        k: sr(sr(sr(after[k] - before[k]) * r1_dt_ice) + sr(after[f"flux_{k}"] - before[f"flux_{k}"]))
+        for k in ("mass", "salt", "heat")
+    }
+    area = after["area"]
+    rchk = {"mass": _RCHK_M, "salt": _RCHK_S, "heat": _RCHK_T}
+    violations = {k: bool(jnp.abs(diag[k]) > rchk[k] * rn_icechk_glo * area) for k in diag}
+    for key in ("v_i", "v_s", "v_ip", "v_il", "a_i", "s_i", "e_i", "e_s"):
+        violations[f"{key}_negative"] = bool(after[f"min_{key}"] < 0.0)
+    violations["a_i_above_amax"] = bool(
+        after["max_concentration"] > max(rn_amax_n, rn_amax_s) + _CONS_EPSI10
+        and cd_routine not in ("icedyn_adv", "icedyn_rdgrft")
+    )
+    return {"diag": diag, "violations": violations}
+
+
+__all__.extend((
+    "SI3_CONS_HSM_MASS_FLUXES",
+    "SI3_CONS_HSM_SALT_FLUXES",
+    "SI3_CONS_HSM_HEAT_ADDED",
+    "SI3_CONS_HSM_HEAT_REMOVED",
+    "si3_ice_cons_hsm_sums",
+    "si3_ice_cons_hsm_check",
+))

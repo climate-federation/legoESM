@@ -1209,8 +1209,8 @@ def _si3_itd_shiftice(s: dict, cells, jl, donor_upper: bool, dai, dvi, amax, cfg
     a1 = s["a_i"][..., jl1]
     okv = v1 >= _SI3_EPSI10
     oka = a1 >= _SI3_EPSI10
-    zworkv = jnp.where(okv, si3_safe_div(dvi, v1, okv), 0.0)  # :489-491
-    zworka = jnp.where(oka, si3_safe_div(dai, a1, oka), 0.0)  # :492-494
+    zworkv = jnp.where(okv, sr(si3_safe_div(dvi, v1, okv)), 0.0)  # :489-491
+    zworka = jnp.where(oka, sr(si3_safe_div(dai, a1, oka)), 0.0)  # :492-494
 
     def move(name, amount, layered=False):
         x = s[name]
@@ -1268,6 +1268,8 @@ def si3_ice_itd_reb(s: dict, *, interior, hi_max, hi_mean, amax, cfg: SI3IceCorC
 def si3_var_zapsmall(s: dict, *, interior, sss_m, sst_m, cfg: SI3IceCorConfig) -> dict:
     """``ice_var_zapsmall``, ``icevar.f90:625-735`` (``nn_icesal == 4`` arm)."""
     from legoesm.core.source_rounding import nemo_source_round as sr
+    from legoesm.ice.si3_surface import fortran_max_tie_first as fmax
+    from legoesm.ice.si3_surface import fortran_min_tie_first as fmin
     from legoesm.ice.si3_surface import fortran_sum0
 
     s = dict(s)
@@ -1275,10 +1277,10 @@ def si3_var_zapsmall(s: dict, *, interior, sss_m, sst_m, cfg: SI3IceCorConfig) -
     i2 = interior[..., None]
     ok = s["a_i"] > _SI3_EPSI10
     s["h_i"] = jnp.where(i2, jnp.where(ok, sr(si3_safe_div(s["v_i"], s["a_i"], ok)), 0.0), s["h_i"])  # :625-627
-    small = i2 & (jnp.minimum(jnp.minimum(s["a_i"], s["v_i"]), s["h_i"]) < _SI3_EPSI10)  # :636
+    small = i2 & (fmin(s["h_i"], fmin(s["v_i"], s["a_i"])) < _SI3_EPSI10)  # :636 compiled MIN(h, MIN(v, a))
     jpl = s["a_i"].shape[-1]
     sfx, hfx, wfx = s["sfx_res"], s["hfx_res"], s["wfx_res"]
-    sz_new = jnp.minimum(cfg.rn_simin, sr(cfg.rn_sinew * sss_m))  # :642
+    sz_new = fmin(cfg.rn_simin, sr(cfg.rn_sinew * sss_m))  # :642
     for jl in range(jpl):  # :633-645
         for jk in range(s["szv_i"].shape[-2]):
             m = small[..., jl]
@@ -1314,6 +1316,8 @@ def si3_ice_cor_dyn(state: SI3IceCorState, *, rn_amax_2d, sss_m, sst_m, hi_max, 
     NEMO's arrays at the call (``icedyn.f90:194``); every one is required.
     """
     from legoesm.core.source_rounding import nemo_source_round as sr
+    from legoesm.ice.si3_surface import fortran_max_tie_first as fmax
+    from legoesm.ice.si3_surface import fortran_min_tie_first as fmin
     from legoesm.ice.si3_surface import fortran_sum0
 
     if not isinstance(config, SI3IceCorConfig):
@@ -1359,7 +1363,7 @@ def si3_ice_cor_dyn(state: SI3IceCorState, *, rn_amax_2d, sss_m, sst_m, hi_max, 
         hi = sr(sr(sr(config.rn_sinew * sss_m) * v) * r1_nlay)
         for jk in range(s["szv_i"].shape[-2]):
             zsal = s["szv_i"][..., jk, jl]
-            new = jnp.minimum(jnp.maximum(zsal, lo), hi)  # :117-118, zero ties PLAUSIBLE
+            new = fmin(fmax(zsal, lo), hi)  # :117-118, the kn /= 0 copy
             new = jnp.where(interior, new, zsal)
             sfx = jnp.where(interior, sr(sfx - sr(sr(sr(new - zsal) * config.rhoi) * r1)), sfx)
             s["szv_i"] = s["szv_i"].at[..., jk, jl].set(new)

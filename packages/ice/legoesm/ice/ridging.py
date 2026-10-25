@@ -1050,17 +1050,17 @@ def _rdgrft_prep(a, v, ato, closing_net, opning, cfg: SI3RdgrftConfig):
 
     pos = ap > 0.0  # :603
     sq = jnp.sqrt(sr(cfg.rn_hstar * zhi))
-    zhmean = fmax(sq, sr(zhi * _RDG_HRDG_HI_MIN))  # :604, MAXSD tie order PLAUSIBLE
+    zhmean = fmax(sq, sr(zhi * _RDG_HRDG_HI_MIN))  # :604
     hrmin = fmin(sr(2.0 * zhi), sr(0.5 * sr(zhmean + zhi)))  # :605
     hraft = sr(zhi * (1.0 / _RDG_HI_HRFT))  # :598,606
     if cfg.ln_distf_lin:  # :608-610
         hrmax = sr(sr(2.0 * zhmean) - hrmin)
         hrexp = jnp.zeros_like(zhi)
-        phi = sr(zhi / jnp.maximum(zhmean, _RDG_EPSI20))
+        phi = sr(zhi / fmax(_RDG_EPSI20, zhmean))  # :610
     else:  # :611-613
         hrmax = jnp.zeros_like(zhi)
         hrexp = sr(cfg.rn_murdg * jnp.sqrt(zhi))
-        phi = sr(zhi / jnp.maximum(_RDG_EPSI20, sr(hrmin + hrexp)))
+        phi = sr(zhi / fmax(_RDG_EPSI20, sr(hrmin + hrexp)))  # :613
     hrmin = jnp.where(pos, hrmin, 0.0)  # :619-625
     hrmax = jnp.where(pos, hrmax, 0.0)
     hrexp = jnp.where(pos, hrexp, 0.0)
@@ -1090,6 +1090,7 @@ def _rdgrft_shift(s: dict, cells, prep, sst, sss, hi_max, cfg: SI3RdgrftConfig) 
     from legoesm.core import transcendentals as tr
     from legoesm.ice.itd import si3_safe_div, si3_var_roundoff
     from legoesm.ice.si3_surface import fortran_max_tie_first as fmax
+    from legoesm.ice.si3_surface import fortran_min_tie_first as fmin
     from legoesm.ice.si3_surface import fortran_sum0
 
     sr = nemo_source_round
@@ -1124,7 +1125,7 @@ def _rdgrft_shift(s: dict, cells, prep, sst, sss, hi_max, cfg: SI3RdgrftConfig) 
         afrft = sr(airft1 * z1_ai)  # :746
         v1, vs1, oa1 = col("v_i", jl1), col("v_s", jl1), col("oa_i", jl1)
         vsw_full = sr(sr(v1 * afrdg) * cfg.rn_porordg)  # :749
-        ramp = fmax(0.0, sr(2.0 - sr(_RDG_POROSITY_SLOPE * zvti)))
+        ramp = fmax(sr(2.0 - sr(_RDG_POROSITY_SLOPE * zvti)), 0.0)  # :751, the record keeps x (MAX folded)
         vsw = jnp.where(zvti <= _RDG_POROSITY_FULL_M, vsw_full,
                         jnp.where(zvti >= _RDG_POROSITY_ZERO_M, 0.0, sr(vsw_full * ramp)))  # :749-752
         ersw = -sr(sr(sr(cfg.rhoi * vsw) * cfg.rcp) * sst)  # :753
@@ -1190,16 +1191,16 @@ def _rdgrft_shift(s: dict, cells, prep, sst, sss, hi_max, cfg: SI3RdgrftConfig) 
             lo, hi = hi_max[jl2], hi_max[jl2 + 1]
             if cfg.ln_distf_lin:  # :853-865
                 ov = (hmin1 <= hi) & (hmax1 > lo)
-                hL = jnp.maximum(hmin1, lo)
-                hR = jnp.minimum(hmax1, hi)
+                hL = fmax(hmin1, lo)  # :856 (copy-dependent; no observable tie)
+                hR = fmin(hi, hmax1)  # :857
                 farea = jnp.where(ov, sr(si3_safe_div(sr(hR - hL), sr(hmax1 - hmin1), ov)), 0.0)
                 fvol = jnp.where(ov, sr(si3_safe_div(sr(sr(hR * hR) - sr(hL * hL)),
                                                       sr(sr(hmax1 * hmax1) - sr(hmin1 * hmin1)), ov)), 0.0)
                 itest_rdg = itest_rdg | ov
             else:  # :867-893
-                den = jnp.maximum(_RDG_EPSI20, hexp1)
-                den2 = jnp.maximum(_RDG_EPSI20, sr(hmin1 + hexp1))
-                hL = jnp.maximum(hmin1, lo)
+                den = fmax(hexp1, _RDG_EPSI20)  # :874-875, :887
+                den2 = fmax(_RDG_EPSI20, sr(hmin1 + hexp1))  # :878, :889
+                hL = fmax(hmin1, lo)  # :872, :886
                 expL = sr(tr.exp(sr(-sr(hL - hmin1) / den)))
                 if jl2 < jpl - 1:
                     ov = hmin1 <= hi
@@ -1292,7 +1293,7 @@ def si3_ice_dyn_rdgrft(
     c0 = interior & (s["at_i"] > _RDG_EPSI10)  # :271-276
     closing_net = sr(sr(sr(config.rn_csrdg * 0.5) * sr(zdelt - jnp.abs(zdivu)))
                      - fmin(0.0, zdivu))  # :295, MINSD keeps the 0 on a tie
-    closing_net = jnp.where(zdivu < 0.0, fmax(closing_net, -zdivu), closing_net)  # :298
+    closing_net = jnp.where(zdivu < 0.0, fmax(-zdivu, closing_net), closing_net)  # :298
     opning = sr(closing_net + zdivu)  # :301
     prep = _rdgrft_prep(s["a_i"], s["v_i"], s["ato_i"], closing_net, opning, config)  # :307-309
     opning = jnp.where(c0, prep[-1], opning)
