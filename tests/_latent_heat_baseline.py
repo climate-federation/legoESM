@@ -44,7 +44,6 @@ LATENT_BUDGET: dict[str, int] = {
     'packages/atmosphere/legoesm/atmosphere/_future/pdf_condensation.py': 1,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/box_model.py': 2,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/column.py': 2,
-    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/condensation.py': 2,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/coupling.py': 1,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/lagrangian.py': 1,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/seifert_beheng.py': 1,
