@@ -229,6 +229,16 @@ class BGCRunner:
         print(f"[bgc] saved {len(self.fields)} tracers at step {step} -> {out}", flush=True)
         return out
 
+    def sidecar_scheme(self, restart_path):
+        """Scheme name stored in the BGC sidecar beside restart_path, or None if there is none."""
+        from pathlib import Path as _P
+        p = _P(restart_path)
+        for src in (self.sidecar(p), p.with_name(p.name + ".bgc.npz")):
+            if src.exists():
+                d = np.load(src, allow_pickle=False)
+                return str(d["_scheme"]) if "_scheme" in d.files else None
+        return None
+
     def load(self, restart_path, expect_step: int) -> None:
         src = self.sidecar(restart_path)
         _legacy = Path(restart_path).with_name(Path(restart_path).name + ".bgc.npz")

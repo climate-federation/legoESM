@@ -10257,7 +10257,12 @@ def main() -> int:
         args, state, grid, z_coord, model,
         np.asarray(grid.areaCell if hasattr(grid, 'areaCell') else grid.area))
     if _bgc is not None and args.restart_from and start_step > 0:
-        _bgc.load(args.restart_from, start_step)
+        _par_scheme = _bgc.sidecar_scheme(args.restart_from)
+        if getattr(args, "restart_branch_from_different_config", False) and _par_scheme != _bgc.scheme:
+            print(f"[bgc] BRANCH: parent sidecar scheme {_par_scheme!r} != {_bgc.scheme!r}; "
+                  f"BGC starts fresh from --bgc-init-dir at ocean step {start_step}", flush=True)
+        else:
+            _bgc.load(args.restart_from, start_step)
     for step in range(start_step + 1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _t_sec = jnp.asarray((step - 1) * dt) if _tide_on else None
