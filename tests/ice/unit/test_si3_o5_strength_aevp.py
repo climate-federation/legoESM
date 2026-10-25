@@ -204,14 +204,21 @@ def test_strength_matches_independent_numpy_transcription():
     raw = np.vectorize(lambda a, v: (2.0e4 * v) * math.exp(-20.0 * (1.0 - a)) if a > 1.0e-10 else 0.0)(at, vt)
     np.testing.assert_array_equal(np.asarray(out.at_i), at)
     np.testing.assert_array_equal(np.asarray(out.strength_raw), raw)
-    i, j = 9, 6
-    num = 4.0 * raw[i, j] + (
-        (raw[i - 1, j] * tmask[i - 1, j] + raw[i + 1, j] * tmask[i + 1, j])
-        + (raw[i, j - 1] * tmask[i, j - 1] + raw[i, j + 1] * tmask[i, j + 1])
-    )
-    den = 4.0 + tmask[i - 1, j] + tmask[i + 1, j] + tmask[i, j - 1] + tmask[i, j + 1]
-    assert float(out.strength[i, j]) == num / den
+    smoothed = raw.copy()  # every interior cell, coast included (icedyn_rdgrft.f90:1100-1113)
+    for i in range(NN_HLS, JPI - NN_HLS):
+        for j in range(NN_HLS, JPJ - NN_HLS):
+            if at[i, j] > 1.0e-10:
+                num = 4.0 * raw[i, j] + (
+                    (raw[i - 1, j] * tmask[i - 1, j] + raw[i + 1, j] * tmask[i + 1, j])
+                    + (raw[i, j - 1] * tmask[i, j - 1] + raw[i, j + 1] * tmask[i, j + 1])
+                )
+                den = 4.0 + tmask[i - 1, j] + tmask[i + 1, j] + tmask[i, j - 1] + tmask[i, j + 1]
+                smoothed[i, j] = num / den
+            else:
+                smoothed[i, j] = 0.0
+    np.testing.assert_array_equal(np.asarray(out.strength), np.asarray(_lbc(smoothed, "T")))
     assert float(out.strength[2, 3]) == 0.0  # at_i <= epsi10
+    assert np.any(tmask[NN_HLS:-NN_HLS, NN_HLS:-NN_HLS] == 0.0)
 
 
 def test_strength_inexact_value_pins_and_plants():
@@ -274,9 +281,34 @@ def test_aevp_wrong_fold_sign_plant_fires(label):
     assert any(not np.array_equal(np.asarray(b), np.asarray(p)) for b, p in zip(base, planted)), label
 
 
-def test_aevp_halo_program_and_parity_plants_fire():
+def test_aevp_parity_plant_fires():
     base = _run_aevp()
     assert _sha(*_run_aevp(_plant_swap_parity=True)) != _sha(*base)
+
+
+def test_aevp_exchange_program_site_by_site(monkeypatch):
+    """Nature, fold sign and ldfull at every lbc_lnk site of icedyn_rhg_evp.f90."""
+    import legoesm.ice.si3_orca2_state as o1
+
+    calls = []
+    real = o1.si3_lbc_lnk_orca2
+
+    def recording(field, cd_nat, psgn, nn_hls, ldfull, **kw):
+        calls.append((cd_nat, float(psgn), bool(ldfull)))
+        return real(field, cd_nat, psgn, nn_hls=nn_hls, ldfull=ldfull, **kw)
+
+    state, forcing, metrics, strength, ssh = _aevp_inputs()
+    monkeypatch.setattr(o1, "si3_lbc_lnk_orca2", recording)
+    si3_orca2_aevp_solver(
+        state, forcing, metrics, _aevp_config(TEST_SUBCYCLES), strength_t=strength,
+        ln_ice_embd=False, fold=_fold(False), differentiable=False, **ssh,
+    )
+    expected = (
+        [("F", 1.0, True)]  # :238 fimask, kt == nit000
+        + [("T", 1.0, False), ("T", 1.0, False), ("U", -1.0, True), ("V", -1.0, True)]  # :440, :647/:754 (traced once)
+        + [("T", 1.0, False), ("T", 1.0, False), ("F", 1.0, False)]  # :845
+    )
+    assert calls == expected
 
 
 
