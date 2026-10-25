@@ -171,6 +171,13 @@ attributed to the cold pass while only the warm pass was checked; commit
 `73abf2a6b` makes both pass checks binding.  GPU outcomes remain
 acquisition-dependent.
 
+The mechanism reviewer retains HOLD on a limitation of the frozen protocol:
+one registered random direction cannot exclude a gradient error exactly
+orthogonal to that direction, even when cold/warm final primals are exact.
+The discriminating measurement would add independent directions or a tractable
+full-Jacobian projection.  Round 10 does not silently widen the preregistered
+one-direction gate; this limitation remains explicit for training admission.
+
 ## OPEN and choice audit
 
 OPEN:
@@ -179,6 +186,9 @@ OPEN:
 2. Operator GPU 1 acquisition of nine checkpoint-schedule memory/time rows.
 3. Admission of multi-day gradients to online closure training only after the
    unchanged byte and agreement gates pass.
+4. The registered random-direction check does not certify every gradient
+   component; any wider directional matrix requires a separately preregistered
+   measurement round.
 
 DECISION_NEEDED: NONE.  The user explicitly approved a primal-preserving local
 AD boundary.  No unasked scientific or configuration choice was made.
