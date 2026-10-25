@@ -25,3 +25,11 @@ def test_score_separates_signed_zero_from_a_value_difference() -> None:
 def test_self_test_plant_fires() -> None:
     with pytest.raises(gate.GateError, match="plant stayed green"):
         gate.self_test(plant=True)
+
+
+def test_checkpoint_mask_distinguishes_entry_and_stage_geometry() -> None:
+    full = np.ones((148, 180, 30), dtype=bool)
+    assert gate.checkpoint_mask(full, "entry").shape == (148, 180, 30)
+    assert gate.checkpoint_mask(full, "stage3").shape == (148, 90, 30)
+    with pytest.raises(gate.GateError, match="unknown checkpoint"):
+        gate.checkpoint_mask(full, "after")

@@ -74,12 +74,22 @@ def _native_masks(card) -> dict[str, np.ndarray]:
     if vmask.ndim == 2:
         vmask = np.broadcast_to(vmask[..., None], state.v.data.shape)
     return {
-        "T": tmask[:, :90, :30],
-        "S": tmask[:, :90, :30],
-        "u": umask[:, 1:91, :30],
-        "v": vmask[1:, :90, :30],
-        "ssh": tmask[:, :90, 0],
+        "T": tmask[..., :30],
+        "S": tmask[..., :30],
+        "u": umask[:, 1:, :30],
+        "v": vmask[1:, :, :30],
+        "ssh": tmask[..., 0],
     }
+
+
+def checkpoint_mask(mask: np.ndarray, checkpoint: str) -> np.ndarray:
+    """Match full-domain entry rows or rank-0 stage rows without ambiguity."""
+
+    require(
+        checkpoint == "entry" or checkpoint.startswith("stage"),
+        f"unknown checkpoint {checkpoint}",
+    )
+    return mask if checkpoint == "entry" else mask[:, :90]
 
 
 def _full_native_mask(card, field: str) -> np.ndarray:
@@ -139,7 +149,7 @@ def _locate(
 ) -> dict[str, object]:
     detail = int(row.pop("_round333_detail"))
     actual, expected, valued = _DETAILS.pop(detail)
-    wet = masks[str(row["field"])]
+    wet = checkpoint_mask(masks[str(row["field"])], str(row["checkpoint"]))
     require(
         wet.shape == actual.shape == expected.shape,
         f"native support {wet.shape} != row {actual.shape}",
@@ -160,7 +170,7 @@ def _locate(
         "i": index[1],
         "j": index[0],
         "k": index[2] if len(index) == 3 else 0,
-        "rank": 0,
+        "rank": index[1] // 90,
     }
     return {
         **{key: value for key, value in row.items() if not key.startswith("_round333")},
@@ -201,11 +211,13 @@ def measure(
     _, shipped = rung10.card_fields(deck_root)
     card = r329.selected_card(shipped, arm="recordice", rung="rung10")
     masks = _native_masks(card)
-    ice_record = hmi.read_record(hmi_root / hmi.record_name(2, 0))
-    ice_fraction = hmi.owned(ice_record["fields"]["fr_i"])
+    ice_records = [hmi.read_record(hmi_root / hmi.record_name(2, rank)) for rank in range(2)]
+    ice_fraction = np.concatenate(
+        [hmi.owned(record["fields"]["fr_i"]) for record in ice_records], axis=1
+    )
     require(
         ice_fraction.shape == masks["ssh"].shape,
-        "SI3 ice fraction does not cover the rank-0 T columns",
+        "SI3 ice fraction does not cover the full T domain",
     )
 
     original_score, rung10.score = rung10.score, located_score
@@ -234,7 +246,13 @@ def measure(
     for source in rows:
         detail = int(source["_round333_detail"])
         _, _, valued = _DETAILS[detail]
-        if first_wet is None and bool(np.any(valued & masks[str(source["field"])])):
+        wet = checkpoint_mask(masks[str(source["field"])], str(source["checkpoint"]))
+        require(
+            valued.shape == wet.shape,
+            f"{source['checkpoint']} {source['field']} shape mismatch: "
+            f"{valued.shape} != {wet.shape}",
+        )
+        if first_wet is None and bool(np.any(valued & wet)):
             first_wet = dict(source)
         if first_over is None and source["classification"] == "OVER_BAR":
             first_over = dict(source)
