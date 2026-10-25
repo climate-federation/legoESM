@@ -8,12 +8,25 @@
 2. That first probe's "jit" captured every input as a closure constant, so
    XLA constant-folded it; its numbers are RETRACTED. The committed gate passes
    every input as a jit argument, and the result below is from that gate.
+3. The first version of this receipt said "O2 now computes its five-category
+   arrays through the O3 fit, and its real admission is still 0 ULP
+   everywhere". Measured since (section "Which O2-admission comparisons read
+   the fit"): only O2's initial-state comparison reads the fit; its four step
+   comparisons, the restart comparisons and the restart-file check start from
+   NEMO's recorded state and do not. The sentence over-claimed and is replaced.
+4. The first dependence probe of the resumed round nudged one category by one
+   ULP in a halo column; the five-category sum and the halo-excluding global
+   sum absorbed it, so it showed no dependence anywhere. Retracted; the
+   committed probe below perturbs one interior column by a relative 2**-10.
 
 ## Outcome
 
 O3 is bit-exact against the ADMITTED O2 record; no acquisition was needed.
-O2 now computes its five-category arrays through the O3 fit, and its real
-admission is still 0 ULP everywhere.
+O2's initial-state comparison (its category sums, snow-ice mass and SSH
+adjustment) now takes its candidate from our fit and stays 0 ULP. O2's step and
+restart comparisons start from NEMO's recorded entry state, as the ladder's
+exact-input rule intends. Stepping kt 1 and kt 2 from the entry state O3 builds
+is also 0 ULP, scored separately under its own label.
 
 ## Which NEMO branch the deck executes, and why
 
@@ -54,9 +67,12 @@ no statement is fused, and `EXP` is the scalar glibc call.
   (`:398-399`, `:409-412`), layer salt (`:406`), pond volumes (`:420-421`),
   `t1_ice` (`:426`) and the concentration cap (`:432`). The HFN bounds,
   salinity profile and category sums are O1's existing helpers, reused.
-- O2 wiring (`packages/ice/legoesm/ice/si3_orca2_state.py:2927-2934`): O2
-  calls the fit; NEMO's six recorded arrays survive only as the test-only
-  `_control_exact_fitted` argument.
+- O2 wiring (`packages/ice/legoesm/ice/si3_orca2_state.py:2927-2934`): O2's
+  initial state calls the fit; NEMO's six recorded arrays survive only as the
+  test-only `_control_exact_fitted` argument. O2's step does not consume the
+  fit: it advances the state it is given
+  (`packages/ice/legoesm/ice/si3_orca2_state.py:3039-3046`, first line
+  `new_state = si3_o1_step(`).
 
 Searched before building: `grep -rn -i "ice_var_itd|abraham|1cMc|gamma function|distribute"`
 over `packages/`, `src/` and the O1/O2 tools. Found only
@@ -67,7 +83,7 @@ a different method with a different interface, so it was not extended.
 ## Results (CPU, binary64, production jit with inputs as arguments)
 
 **CONFIRMED:** the committed gate
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o3_orca2_sas_gate.py:120-188`)
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o3_orca2_sas_gate.py:153-221`)
 feeds O2's own scalar state into the fit, then into NEMO's
 `ice_var_glo2eqv(1)` and `ice_var_agg(1)` (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icestp.f90:336-337`),
 and compares with NEMO's `entry` snapshot written at the end of `ice_init`.
@@ -109,6 +125,65 @@ gives at most 14 ULP and 1.59e-15 normalised on the layer energies, above the
 1e-15 bar. **PLAUSIBLE:** the GPU excess comes from the GPU `exp`; not
 localised.
 
+## Which O2-admission comparisons read the fit (measured)
+
+**CONFIRMED.** The committed probe
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o3_orca2_sas_gate.py:225-277`)
+runs the unmodified O2 admission twice with every comparator replaced by a
+recorder, the second time with the fit's six O2-feeding outputs multiplied by
+1 + 2**-10 in the first interior ice column
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o3_orca2_sas_gate.py:74-91`).
+A comparison reads the fit iff a bit of its candidate moves. Output
+`si3_rounds/round9/r9b/o2_fit_dependence.json`; pinned by
+`tests/ice/unit/test_si3_o3_itd_fit.py:191-202`.
+
+| O2-admission comparison | candidate starts from | reads the fit | moved |
+|---|---|---|---|
+| initial state, 26 values | our scalar state and fit | yes | 10: the six category sums but lid volume, both masses, the SSH adjustment, both SSH levels |
+| kt 1 state, 111 arrays | NEMO's recorded entry | no | 0 |
+| kt 2 state, 111 arrays | our kt 1 | no | 0 |
+| restart entry, 111 arrays | NEMO's restart file | no | 0 |
+| restart step, 111 arrays | NEMO's restart file | no | 0 |
+| restart step vs kt 2, 111 arrays | NEMO's restart file | no | 0 |
+| restart-file variables, 40 | our kt 1 | no | 0 |
+
+Lid volume cannot move: NEMO's entry lid volume is identically zero on this
+deck. The kt 1 candidate is computed from the recorded entry
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.py:1386`,
+`state_kt1, _ = o2_step_jit(state_entry, sss_entry)`). That is the ladder's
+exact-input rule, not a gap
+(`docs/ice/fidelity/si3_ladder_design.md:195-197`, first line
+`The O rungs separate **operator admission** from **composition**. O1-O16 replay`:
+"replay the exact NEMO input at each named source boundary ... only O17
+advances the complete live deck"; O3's row,
+`docs/ice/fidelity/si3_ladder_design.md:223`: "O2 scalar state as exact input"). Those numbers carry the
+GIVEN-NEMO-ENTRY label and are not mixed with the next section's.
+
+## Steps from our own fitted entry (label O3-FIT-ENTRY)
+
+**CONFIRMED.** What O3 owns is the initial category state the first step
+consumes. The committed score
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o3_orca2_sas_gate.py:280-344`)
+builds the entry state from the fit (every prognostic category field,
+equivalents, aggregates, `t1_ice`, both masses), keeps NEMO's entry only for
+fields ice_istate's fit does not produce (`u_ice`, `v_ice`, `cnd_ice`, `t_si`,
+`snwice_fmass`, Prather moments, category bounds), steps kt 1 and kt 2 under
+CPU jit with every array an argument, and scores against NEMO's step records.
+
+- kt 1 and kt 2: wet and full maximum 0 ULP; entry masses 0 ULP. Output
+  `si3_rounds/round9/r9b/o3_entry_steps.json`.
+- Fit output perturbed as above: refuses at kt 1 (`v_i`). So the step reads
+  the fit.
+- NEMO re-sets the snow-ice mass after `ice_istate`, from the aggregates, in
+  `ice_update_init`
+  (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/iceupdate.f90:482-483`, first line
+  `snwice_mass  (:,:) = tmask(:,:,1) * ( rhos * vt_s(:,:) + rhoi * vt_i(:,:) + rhow * (vt_ip(:,:) + vt_il(:,:)) )`).
+  It differs from the `ice_istate` value by 1 ULP in 3,704 cells; using the
+  `ice_istate` value made kt 1 refuse by 1 ULP. The O3-built entry reuses the
+  package's existing transcription of that statement
+  (`packages/ice/legoesm/ice/si3_orca2_state.py:1219-1245`). No model code changed.
+- Pinned by `tests/ice/unit/test_si3_o3_itd_fit.py:205-212`.
+
 ## Controls for every other caller
 
 - O2 real admission rescored with the fit inside: PASS, every comparison
@@ -125,8 +200,33 @@ localised.
   `WHERE`/`IF`/`MIN`/`MAX` switches are not differentiable at their
   thresholds; forward arithmetic is NEMO-literal and divisions carry
   gradient-only safe denominators.
-- Ratchets: the same 11 pre-existing failures on parent and current; the
-  private-import ratchet passes 6/6.
+- Ratchets: the CLAUDE.md CI ratchet suite (`tests/test_no_hardcoded_constants.py`,
+  `tests/test_dispatch_hardening.py`, `tests/test_validate_strict_coverage.py`,
+  `tests/test_physics_contracts.py`, `tests/unit/test_params_reachability_audit.py`,
+  `tests/unit/test_param_bounds_agree.py`, `tests/test_no_private_cross_imports.py`,
+  `tests/test_no_inline_physics_coeffs.py`, `tests/test_param_specs.py`) gives
+  11 failed on a clean checkout of the lane tip `62a28e1324` and on this
+  branch, and the 38 failure-detail lines are identical, so none is caused by
+  this branch (`si3_rounds/round9/r9b/ratchets_{lane_tip,current}.txt`). The 11:
+  `test_no_hardcoded_physical_constants[tests/unit/test_jra55_do.py]`;
+  `test_no_dispatch_guard_removed`;
+  `test_no_inline_physics_coefficients[...]` for `ice/bitz_lipscomb.py`,
+  `ice/si3_orca2_state.py`, `land/restart.py`, `ocean/physics/geothermal.py`,
+  `ocean/physics/lateral_mixing/mle.py`,
+  `ocean/physics/lateral_mixing/mle_latlon_cgrid.py`;
+  `test_config_module_has_valid_param_spec[...]` for `ice/si3_orca2_state.py`,
+  `ocean/physics/lateral_mixing/mle.py`,
+  `ocean/physics/shortwave_penetration.py`. The private-import ratchet passes.
+
+## Precision arm
+
+No earlier SI3 O rung selected an arm (O1 and O2 used `PrecisionPolicy.fp64()`
+at the lane tip), whereas the ORCA2 ocean ladder gates
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_eos_gate.py:108`,
+`policy = PrecisionPolicy.fp64(transcendentals="libm")`) and lane 3's ADV2D/RHG
+oracle recipe
+(`packages/ice/legoesm/ice/fidelity/nemo_adv2d_rhg_testcase_recipe.py:152`)
+already certify under the glibc arm. The choice stays with the user.
 
 ## CHOICES
 
@@ -137,7 +237,11 @@ localised.
   fit. Offered for revert.
 - UNASKED: the fit lives next to O1/O2 rather than in `itd.py`. Offered for
   revert.
+- ASKED (resume item 1): the fit-dependence probe and the O3-FIT-ENTRY
+  step score, including which entry fields stay NEMO's.
+- UNASKED: perturbation size 2**-10 in the first interior ice column. Offered
+  for revert.
 - UNASKED: one O2-receipt sentence was updated for the moved code, and the
   citation map was re-anchored. Offered for revert.
 
-Review: codex review: operator. Independent review: none run in this round.
+Review: codex review: operator (first pass HOLD on the O2-wiring claim, measured above); Argon LAND. Independent review of this resume: operator.

@@ -14,25 +14,34 @@ binary64, glibc `exp` (`transcendentals="libm"`), and eager parity.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 from pathlib import Path
 import subprocess
 import sys
 from typing import Any
+from unittest import mock
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from legoesm.core.precision import PrecisionPolicy, set_policy
+import legoesm.ice.si3_orca2_state as si3_state_module
 from legoesm.ice.si3_orca2_state import (
+    SI3ORCA2O2Forcing,
+    si3_o1_step,
     si3_o2_scalar_initial_state,
+    si3_o2_step,
+    si3_update_snwice_mass,
     si3_o3_istate_fill_fields,
     si3_var_agg,
     si3_var_glo2eqv,
 )
+from scripts.validate.ocean_fidelity.testcases import nemo_si3_o2_orca2_sas_gate as o2_gate
 from scripts.validate.ocean_fidelity.testcases.nemo_si3_o1_orca2_sas_gate import (
+    _compare_si3_states_wet_and_full,
     max_normalized_diff,
     max_ulp_diff,
     o1_snapshot_to_si3_state,
@@ -56,6 +65,30 @@ _INPUT_NAMES = (
 _PROG = ("a_i", "v_i", "v_s", "sv_i", "t_su", "oa_i", "a_ip", "v_ip", "v_il", "e_s", "e_i", "szv_i")
 _AGG_O2 = ("vt_i", "vt_s", "at_i", "at_ip", "vt_ip", "vt_il", "snwice_mass", "snwice_mass_b")
 PLANTS = ("1ulp-v_i", "skip-snow-transfer", "skip-amax", "native-exp")
+# The fit outputs O2's own sums and mass read (`si3_o2_scalar_initial_state`, step 5).
+_FIT_FEEDS_O2 = ("v_i", "v_s", "a_i", "a_ip", "v_ip", "v_il")
+# Entry fields ice_istate's fit does not produce; the O3-entry step keeps NEMO's.
+RECORDED_ENTRY_FIELDS = ("u_ice", "v_ice", "cnd_ice", "t_si", "snwice_fmass", "prather", "bounds")
+
+
+def _fit_perturbed(fill_fn):
+    """Wrap the fit so its O2-feeding outputs grow by 2**-10 (relative) in the first interior ice column.
+
+    Not one ULP: a one-ULP change of one category can round away in the
+    five-category sum, and a small change of one column can round away in the
+    global SSH mean; either would make the dependence test vacuous.
+    """
+    def perturbed(*args, **kwargs):
+        o3 = fill_fn(*args, **kwargs)
+        h = int(kwargs["config"].nn_hls)
+        col = jnp.any(o3.v_i > 0.0, axis=-1)
+        col = col & jnp.zeros(col.shape, dtype=bool).at[h:-h, h:-h].set(True)
+        hit = jnp.zeros(col.size, dtype=bool).at[jnp.argmax(col.reshape(-1))].set(True).reshape(col.shape)
+        return o3._replace(**{
+            k: jnp.where(hit[..., None], getattr(o3, k) * (1.0 + 2.0**-10), getattr(o3, k))
+            for k in _FIT_FEEDS_O2
+        })
+    return perturbed
 
 
 def _o3_entry(inputs: tuple[jax.Array, ...], o2_cfg, cfg, plant: str | None):
@@ -189,14 +222,144 @@ def score_o3(evidence_dir: str | Path = O2_RECORD, plant: str | None = None) -> 
     }
 
 
+def o2_admission_fit_dependence(evidence_dir: str | Path = O2_RECORD) -> dict[str, Any]:
+    """Run the O2 admission twice, the second time with the fit's output perturbed.
+
+    Every comparison's candidate is captured (the comparators are replaced by
+    recorders, so neither run can refuse) and reported as fit-dependent iff a
+    bit of it moved.
+    """
+    def run(bump: bool) -> list[tuple[str, dict[str, np.ndarray]]]:
+        cap: list[tuple[str, dict[str, np.ndarray]]] = []
+        names = iter(("kt1", "kt2", "rst_entry", "rst_step1", "rst_vs_kt2"))
+
+        def rec_o2(ref_fields, ref_area, ref_zsshadj, actual, tmask, **_kw):
+            scored = tuple(getattr(o2_gate, "_O2_SCALAR_STATE_FIELDS")) + ("area", "zsshadj")
+            cap.append(("o2_istate", {k: np.asarray(getattr(actual, k)) for k in scored}))
+            return {"max_ulp_wet": 0, "max_ulp_full": 0, "max_norm_wet": 0.0, "area": 0.0, "zsshadj": 0.0}
+
+        def rec_state(expected, actual, *_a, **_kw):
+            leaves = jax.tree_util.tree_flatten_with_path(actual)[0]
+            cap.append((next(names), {jax.tree_util.keystr(p): np.asarray(v) for p, v in leaves}))
+            return {"max_ulp_wet": 0, "max_ulp_full": 0, "max_norm_wet": 0.0}
+
+        def rec_restart(candidate, _raw, mask=None):
+            cap.append(("restart_variables", {str(len(cap)): np.asarray(candidate)}))
+            return 0
+
+        patches = [
+            mock.patch.object(o2_gate, "_compare_o2_scalar_state_against_recipe_and_ref", rec_o2),
+            mock.patch.object(o2_gate, "_compare_si3_states_wet_and_full", rec_state),
+            mock.patch.object(o2_gate, "max_ulp_diff", rec_restart),
+        ]
+        if bump:
+            patches.append(mock.patch.object(
+                si3_state_module, "si3_o3_istate_fill_fields",
+                _fit_perturbed(si3_state_module.si3_o3_istate_fill_fields),
+            ))
+        with contextlib.ExitStack() as stack:
+            for p in patches:
+                stack.enter_context(p)
+            o2_gate.admit_evidence_directory(evidence_dir)
+        return cap
+
+    base, bumped = run(False), run(True)
+    if [n for n, _ in base] != [n for n, _ in bumped]:
+        raise ValueError("STATUS PLANT-FIRED: the two admission runs made different comparisons")
+    out: dict[str, Any] = {}
+    for (name, a), (_, b) in zip(base, bumped):
+        moved = sorted(k for k in a if a[k].tobytes() != b[k].tobytes())
+        row = out.setdefault(name, {"candidates": 0, "moved": []})
+        row["candidates"] += len(a)
+        row["moved"] += moved if name != "restart_variables" else (["any"] if moved else [])
+    for row in out.values():
+        row["depends_on_fit"] = bool(row["moved"])
+    return out
+
+
+def score_o3_entry_steps(evidence_dir: str | Path = O2_RECORD, *, bump_fit: bool = False) -> dict[str, Any]:
+    """Step kt 1 and kt 2 from the entry state O3 builds, scored against NEMO's steps.
+
+    The fit-built fields replace the recorded entry; RECORDED_ENTRY_FIELDS stay NEMO's.
+    """
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    ev = Path(evidence_dir)
+    rec = ev / "rec_2step" / "o2_si3_records"
+    snaps = {
+        tag: stitch_o1_binary_snapshots([read_o1_binary_snapshot(p) for p in sorted(rec.glob(f"o2_si3_state_{tag}_rank*.bin"))])
+        for tag in ("entry", "step0001", "step0002")
+    }
+    ist = stitch_o2_istate_snapshots([read_o2_istate_snapshot(p) for p in sorted(rec.glob("o2_si3_istate_rank*.bin"))])
+    entry, cfg = o1_snapshot_to_si3_state(snaps["entry"])
+    o2_cfg = o2_istate_snapshot_to_config(ist)._replace(ln_pnd=cfg.ln_pnd, ln_pnd_lids=cfg.ln_pnd_lids)
+    f = ist["fields"]
+    inputs = tuple(jnp.asarray(f[n], dtype=jnp.float64) for n in _INPUT_NAMES)
+    sss = tuple(jnp.asarray(snaps[t]["fields"]["sss_m"], dtype=jnp.float64) for t in ("entry", "step0002"))
+
+    # Every array, recorded entry included, is a jit argument (no constant folding).
+    def two_steps(rec_entry, sss_entry, sss_step2, *a):
+        kw = dict(zip(_INPUT_NAMES, a))
+        prog, eqv, agg, _o2agg, t1_ice = _o3_entry(a, o2_cfg, cfg, None)
+        # ice_init re-sets the mass after ice_istate from the aggregates
+        # (`iceupdate.f90:482-483`, start-from-rest arm of update_rst('READ')).
+        mass, mass_b, _ = si3_update_snwice_mass(
+            vt_i=agg.vt_i, vt_s=agg.vt_s, vt_ip=agg.vt_ip, vt_il=agg.vt_il,
+            snwice_mass_prev=jnp.zeros_like(agg.vt_i), tmask=kw["tmask"], config=cfg, is_init=True,
+        )
+        o3_entry = rec_entry._replace(
+            **prog, equivalent=eqv, aggregated=agg, t1_ice=t1_ice, snwice_mass=mass, snwice_mass_b=mass_b,
+        )
+        forcing = SI3ORCA2O2Forcing(
+            tmask=kw["tmask"], sst_m=kw["sst_m"], sss_m=sss_entry, ff_t=kw["ff_t"], gphit=kw["gphit"],
+            e1e2t=kw["e1e2t"], ssmask=kw["ssmask"], smask0_i=kw["smask0_i"],
+            ssh_before_kbb=kw["ssh_before_kbb"], ssh_before_kmm=kw["ssh_before_kmm"], apply_halos=False,
+        )
+        kt1, _ = si3_o2_step(o3_entry, forcing, config=cfg, o2_init_config=o2_cfg)
+        return mass, mass_b, kt1, si3_o1_step(kt1, tmask=kw["tmask"], sss_m=sss_step2, config=cfg)
+
+    with contextlib.ExitStack() as stack:
+        if bump_fit:
+            stack.enter_context(mock.patch.object(
+                si3_state_module, "si3_o3_istate_fill_fields",
+                _fit_perturbed(si3_state_module.si3_o3_istate_fill_fields),
+            ))
+        mass, mass_b, kt1, kt2 = jax.jit(two_steps)(entry, *sss, *inputs)
+    kw = dict(zip(_INPUT_NAMES, inputs))
+    tm = kw["tmask"]
+    um = jnp.asarray(f["umask"], dtype=jnp.float64)
+    vm = jnp.asarray(f["vmask"], dtype=jnp.float64)
+    out = {"label": "O3-FIT-ENTRY", "recorded_entry_fields": list(RECORDED_ENTRY_FIELDS), "entry_mass_ulp": 0}
+    for tag, mine in (("kt1", kt1), ("kt2", kt2)):
+        nemo, _ = o1_snapshot_to_si3_state(snaps[f"step000{tag[-1]}"], config=cfg)
+        c = _compare_si3_states_wet_and_full(nemo, mine, tm, um, vm, check_fmass=True, check_prather=True)
+        if c["max_ulp_wet"] or c["max_ulp_full"]:
+            raise ValueError(f"STATUS PLANT-FIRED: O3-entry {tag} wet_ULP={c['max_ulp_wet']} full_ULP={c['max_ulp_full']}")
+        out[f"max_ulp_{tag}"] = [c["max_ulp_wet"], c["max_ulp_full"]]
+    regions = _region_masks(np.asarray(f["tmask"]), cfg.nn_hls)
+    for k, mine in (("snwice_mass", mass), ("snwice_mass_b", mass_b)):
+        r = _score(getattr(entry, k), mine, regions)
+        if r["full_ulp"] or r["wet_ulp"]:
+            raise ValueError(f"STATUS PLANT-FIRED: O3-entry {k} {r}")
+    out["status"] = "PASS"
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="SI3 Rung O3 offline score against the admitted O2 record.")
     p.add_argument("--evidence", type=Path, default=O2_RECORD)
     p.add_argument("--plant", choices=PLANTS, default=None)
     p.add_argument("--json", type=Path, default=None)
+    p.add_argument("--fit-dependence", action="store_true", help="which O2-admission comparisons read the fit")
+    p.add_argument("--entry-steps", action="store_true", help="step kt 1-2 from the O3-built entry state")
+    p.add_argument("--bump-fit", action="store_true", help="with --entry-steps: perturb the fit output (must refuse)")
     a = p.parse_args(argv)
     try:
-        report = score_o3(a.evidence, plant=a.plant)
+        if a.fit_dependence:
+            report = {"status": "MEASURED", "comparisons": o2_admission_fit_dependence(a.evidence)}
+        elif a.entry_steps:
+            report = score_o3_entry_steps(a.evidence, bump_fit=a.bump_fit)
+        else:
+            report = score_o3(a.evidence, plant=a.plant)
     except Exception as exc:
         print(f"REFUSE: GATE_FAIL: {exc}", file=sys.stderr)
         return 1

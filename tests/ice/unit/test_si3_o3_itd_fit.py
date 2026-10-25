@@ -187,6 +187,31 @@ def test_o3_scores_zero_ulp_on_admitted_o2_record_and_plants_fire():
             score_o3(_O2_RECORD, plant=plant)
 
 
+
+@pytest.mark.skipif(not (_O2_RECORD / "o2_admission.json").is_file(), reason="admitted O2 record absent")
+def test_o2_admission_reads_the_fit_only_in_its_initial_state_comparison():
+    """Perturbing the fit's output moves the O2 initial-state candidates and no step/restart candidate."""
+    from scripts.validate.ocean_fidelity.testcases.nemo_si3_o3_orca2_sas_gate import o2_admission_fit_dependence
+
+    dep = o2_admission_fit_dependence(_O2_RECORD)
+    assert set(dep) == {"o2_istate", "kt1", "kt2", "rst_entry", "rst_step1", "rst_vs_kt2", "restart_variables"}
+    # vt_il cannot move: the deck's lid volume is identically zero.
+    assert sorted(dep["o2_istate"]["moved"]) == sorted((
+        "vt_i", "vt_s", "at_i", "at_ip", "vt_ip", "snwice_mass", "snwice_mass_b", "zsshadj", "ssh_kbb", "ssh_kmm",
+    ))
+    assert [k for k, r in dep.items() if r["depends_on_fit"]] == ["o2_istate"]
+
+
+@pytest.mark.skipif(not (_O2_RECORD / "o2_admission.json").is_file(), reason="admitted O2 record absent")
+def test_o3_built_entry_steps_zero_ulp_and_perturbed_fit_refuses():
+    from scripts.validate.ocean_fidelity.testcases.nemo_si3_o3_orca2_sas_gate import score_o3_entry_steps
+
+    rep = score_o3_entry_steps(_O2_RECORD)
+    assert rep["status"] == "PASS" and rep["max_ulp_kt1"] == [0, 0] and rep["max_ulp_kt2"] == [0, 0]
+    with pytest.raises(ValueError, match="PLANT-FIRED: prognostic field"):
+        score_o3_entry_steps(_O2_RECORD, bump_fit=True)
+
+
 O3_PARENT_COMMIT = "62a28e1324b203e5a6930b734680a4af8196630a"
 
 
