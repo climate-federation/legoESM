@@ -127,12 +127,13 @@ Result: `14 passed, 1 xfailed in 74.33s` (`si3_rounds/round11/o7_unit.log`).
 ## Controls for every other caller (parent `f76638f1a7`)
 
 - D5 C1D year under CPU `jit`: all 237,111 non-provenance values identical parent vs current; shipped-arm hash `b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2` (`d5_parent_cpu.json`, `d5_current_cpu.json`).
-- Lane-3 bulk-flux gate, O3 fit and landfast suites (transcendentals consumers): `27 passed` on current; parent result in `shared_callers_parent_vs_current.txt`.
+- Lane-3 bulk-flux gate, O3 fit and landfast suites (transcendentals consumers): `27 passed` on both trees (`shared_callers_parent_vs_current.txt`).
 - ORCA2 ocean card: not touched. Lane-3 cards: no touched file on their path except the additive `pow`.
 
 ## Gates
 
-- Citation gate, all SI3 receipts, full map: see `citation_gate_all_si3.log`.
+- Citation gate, all nine SI3 receipts, full map: every receipt PASS, 0 unmapped, 0 map entries failing audit; this receipt 48 citations (`citation_gate_all_si3.log`).
+- Default citation gate: `17 passed in 5.90s` (`default_gate.log`). Private-import ratchet: `6 passed in 4.99s` (`private_import.log`).
 - Ratchets: the same 11 pre-existing reds as round 9 recorded, none in a touched file; the new module and test pass the inline-coefficient, hard-coded-constant and private-import ratchets (`ratchets_current.txt`).
 - Review: `codex review: operator`.
 - GPU spot check: not run (no certification this round).
@@ -160,3 +161,5 @@ Result: `14 passed, 1 xfailed in 74.33s` (`si3_rounds/round11/o7_unit.log`).
 - New glibc `pow` in the shared transcendentals module (DECISION 162 names `pow`). UNASKED, additive.
 - Fixture: the admitted O2 run's resolved namelists committed under `tests/ice/unit/data/`. UNASKED; offered for revert.
 - No configuration default, production config or other caller changed.
+
+Evidence directory: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round11/`.
