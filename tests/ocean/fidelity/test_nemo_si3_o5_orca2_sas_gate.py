@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -106,6 +108,75 @@ def test_operator_only_block_has_one_rank_timeout_and_real_flag_census():
     assert "-O0" in text and "PASS_FP_CENSUS_REAL_FLAGS" in text
     assert operator.index('build_target "$REF_CFG" 0') < operator.index("same_program")
     assert operator.index("same_program") < operator.index('stage_run "$REF_CFG"')
+
+
+def test_admit_existing_accepts_retained_run_from_older_ancestor_commit(
+    tmp_path, monkeypatch
+):
+    script = (ACQ / "run.sh").read_text()
+    retained = script.split('if [[ "$mode" == --admit-existing ]]', 1)[1].split(
+        "# ---- Operator-only --run mode ----", 1
+    )[0]
+    assert "existing_commit=$(tr -d '[:space:]'" in retained
+    assert 'admit "$existing_commit"' in retained
+    assert 'git -C "$REPO" rev-parse HEAD' not in retained
+
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, check=True, text=True, capture_output=True
+    ).stdout.strip()
+    producer = subprocess.run(
+        ["git", "rev-parse", "HEAD^"], cwd=ROOT, check=True, text=True, capture_output=True
+    ).stdout.strip()
+    assert producer != head
+    subprocess.run(
+        ["git", "merge-base", "--is-ancestor", producer, head], cwd=ROOT, check=True
+    )
+
+    evidence = tmp_path / "retained"
+    manifest = evidence / "manifest"
+    ref = evidence / "reference_3step"
+    record = evidence / "record_3step"
+    for directory in (manifest / "binaries", ref, record):
+        directory.mkdir(parents=True, exist_ok=True)
+    (manifest / "producer_commit.txt").write_text(producer + "\n")
+    (manifest / "same_program.json").write_text(json.dumps({"status": "PASS_SAME_PROGRAM"}))
+    (manifest / "fp_census.json").write_text(
+        json.dumps({"status": "PASS_FP_CENSUS_REAL_FLAGS"})
+    )
+    binary_rows = []
+    for name, payload, run_path in (
+        ("nemo.ref", b"synthetic retained reference binary", ref / "nemo"),
+        ("nemo.rec", b"synthetic retained record binary", record / "nemo"),
+    ):
+        retained_binary = manifest / "binaries" / name
+        retained_binary.write_bytes(payload)
+        run_path.write_bytes(payload)
+        binary_rows.append(
+            f"{hashlib.sha256(payload).hexdigest()}  binaries/{name}\n"
+        )
+    (manifest / "binaries.sha256").write_text("".join(binary_rows))
+    raw_record = record / "synthetic-record.bin"
+    raw_record.write_bytes(b"synthetic retained record")
+    (record / "records.sha256").write_text(
+        f"{hashlib.sha256(raw_record.read_bytes()).hexdigest()}  {raw_record.name}\n"
+    )
+    for name in (
+        "ORCA2_SAS_00000003_restart.nc",
+        "ORCA2_SAS_00000003_restart_ice.nc",
+    ):
+        (ref / name).write_bytes(b"synthetic matching restart")
+        (record / name).write_bytes(b"synthetic matching restart")
+
+    monkeypatch.setattr(gate, "_verify_run_completion_and_logs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(gate, "verify_o5_log", lambda *args, **kwargs: {"status": "PASS"})
+    monkeypatch.setattr(gate, "derive_sas_time_level", lambda *args, **kwargs: 2)
+    monkeypatch.setattr(gate, "_load_step", lambda *args, **kwargs: {})
+    monkeypatch.setattr(gate, "_score_step", lambda *args, **kwargs: {"status": "PASS"})
+
+    admitted = gate.admit_evidence_directory(evidence, expect_commit=producer)
+    assert admitted["status"] == "PASS_O5_ADMISSION"
+    assert admitted["producer_commit"] == producer
+    assert admitted["binaries_checked"] == 2
 
 
 def test_writer_uses_stream_records_and_direct_array_writes():

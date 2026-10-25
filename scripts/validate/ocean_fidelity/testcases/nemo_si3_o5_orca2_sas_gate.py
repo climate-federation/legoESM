@@ -796,17 +796,22 @@ def admit_evidence_directory(
     producer = commit_path.read_text().strip()
     if plant == "stamp":
         producer = "0" * 40
-    if (
-        re.fullmatch(r"[0-9a-f]{40}", producer) is None
-        or producer != expect_commit
-        or subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "cat-file", "-e", f"{producer}^{{commit}}"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        ).returncode
-    ):
-        raise _refuse("producer commit mismatch or missing commit object")
+    if re.fullmatch(r"[0-9a-f]{40}", producer) is None or producer != expect_commit.strip():
+        raise _refuse("producer commit does not match retained-run manifest")
+    if subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "cat-file", "-e", f"{producer}^{{commit}}"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode:
+        raise _refuse("producer commit is not a commit object")
+    if subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "merge-base", "--is-ancestor", producer, "HEAD"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode:
+        raise _refuse("producer commit is not an ancestor of HEAD")
     binary_manifest = manifest / "binaries.sha256"
     binaries = _sha256_manifest(binary_manifest, plant=plant == "binary-checksum")
     binary_targets = {

@@ -388,8 +388,8 @@ if [[ "$mode" == --preflight-only ]]; then run_preflight; exit 0; fi
 if [[ "$mode" == --admit-existing ]]; then
   run_preflight
   [[ -f "$EVIDENCE/manifest/producer_commit.txt" ]] || refuse "missing producer commit"
-  commit=$(git -C "$REPO" rev-parse HEAD)
-  admit "$commit"; printf 'ACQUISITION_ADMITTED: %s\n' "$EVIDENCE"; exit 0
+  existing_commit=$(tr -d '[:space:]' < "$EVIDENCE/manifest/producer_commit.txt")
+  admit "$existing_commit"; printf 'ACQUISITION_ADMITTED: %s\n' "$EVIDENCE"; exit 0
 fi
 
 # ---- Operator-only --run mode ----
