@@ -79,7 +79,9 @@ and compares with NEMO's `entry` snapshot written at the end of `ice_init`.
 - 16,849 wet cells: 16,433 interior, 281 cyclic seam, 135 north fold; 0 ULP
   in each subset.
 - jit equals eager to 0 ULP.
-- Score file `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round9/o3_score.json`.
+- Score file `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round9/o3_score.json`
+  (SHA-256 `6db4dfbd5910fa8688a5cf69c65d6d15498807effff23854a9ccbd7167323b2c`,
+  scored at commit `6ccf54900116`).
 
 **CONFIRMED, plants:** a one-ULP change in `v_i` fails (exit 1); XLA's native
 `exp` fails (2 ULP, first at zero-based `(31, 149, 3)`, a fold cell).
@@ -110,7 +112,8 @@ localised.
 ## Controls for every other caller
 
 - O2 real admission rescored with the fit inside: PASS, every comparison
-  0 ULP (`o2_rescore_with_o3_fit.json`). O2 suite 12/12, O1 suite 15/15,
+  0 ULP; the output file is byte-identical to round 7's admitted O2 score
+  (both SHA-256 `3748bf8619742796f9c7d7c66c892f946b71b22343ada95b5adf03f53d9ff2f5`). O2 suite 12/12, O1 suite 15/15,
   O3 suite 8/8.
 - Parent `62a28e1324b2` versus current: D5 C1D year under CPU jit, all 4,613
   non-provenance values identical (shipped-arm hash
