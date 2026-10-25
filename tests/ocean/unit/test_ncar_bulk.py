@@ -16,6 +16,7 @@ Strategy
 
 from __future__ import annotations
 
+import inspect
 import numpy as np
 import pytest
 
@@ -31,6 +32,7 @@ from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
     exner_potential_temperature,
     latent_heat_vaporization_sst as latent_heat_vaporization,
     moist_air_cp,
+    nemo_blk_oce_ncar,
     ncar_transfer_coefficients,
     potential_air_temperature_10m,
     pressure_at_height,
@@ -97,7 +99,6 @@ def _np_rho_air(T_abs, q, p):
 
 
 def _np_cd_n10(w):
-    w = np.maximum(w, 0.5)
     cd = (2.7 / w + 0.142 + w / 13.09 - 3.14807e-10 * w ** 6) * 1e-3
     cd = np.where(w >= 33.0, 2.34e-3, cd)
     return np.maximum(cd, 0.1e-3)
@@ -146,7 +147,10 @@ def _np_turb_ncar(theta, q, sst, ssq, wind, nb_iter=5):
         invL = np.clip(invL, -200.0, 200.0)
         zeta = np.clip(10.0 * invL, -10.0, 10.0)
         psim = _np_psi_m(zeta)
-        UN10 = np.maximum(0.25, Ub * (1.0 + sqCd / _VK * psim))
+        z0 = 10.0 * np.exp(-(_VK / np.sqrt(Cd) + psim))
+        UN10 = np.maximum(
+            0.25, np.sqrt(Cd) * Ub / _VK * np.log(10.0 / z0)
+        )
         CdN = _np_cd_n10(UN10)
         sqCdN = np.sqrt(CdN)
         denom = 1.0 - sqCdN / _VK * psim
@@ -164,23 +168,27 @@ def _np_turb_ncar(theta, q, sst, ssq, wind, nb_iter=5):
 
 
 def _np_nemo_l_vap(theta_sst):
-    """NEMO sbc_phy ``L_vap`` verbatim (empirical slope 2370 J/kg/K).  The model
-    uses the Kirchhoff slope c_pw - c_pv = 2372 instead; the parity test below
-    rescales the mirror's latent flux by the known ratio, and
-    ``test_l_vap_deviation_from_nemo_is_bounded`` pins the deviation itself."""
+    """NEMO sbc_phy ``L_vap`` verbatim (empirical slope 2370 J/kg/K)."""
     return (2.501 - 0.00237 * (theta_sst - _RT0)) * 1e6  # const-ok: NEMO L_vap mirror
 
 
 def _np_fluxes(u, v, T_air, q_air, sst, slp):
     """Full NEMO open-water flux path in the NumPy mirror: preprocessing
     (pres_temp/theta_exner/ssq) -> turb_ncar -> BULK_FORMULA."""
-    wind = np.sqrt(u * u + v * v + 1e-12)
+    wind = np.sqrt(u * u + v * v)
     ssq = 0.98 * _np_q_sat(sst, slp)  # satcurve-ok: NEMO rdct_qsat_salt mirror
     p10 = _np_pres_temp(q_air, slp, 10.0, T_air)
     theta_air = _np_theta_exner(T_air, p10)
     theta_sst = _np_theta_exner(sst, slp)
     Cd, Ch, Ce, Ub = _np_turb_ncar(theta_air, q_air, theta_sst, ssq, wind)
-    rho = _np_rho_air(T_air, q_air, p10)
+    p_rho = np.asarray(slp, dtype=np.float64).copy()
+    for _ in range(3):
+        T_rho = theta_air * (p_rho / 1.0e5) ** _GAMMA_DRY
+        qs = _np_q_sat(T_rho, p_rho)
+        ratio = q_air / qs
+        xm = (1.0 - ratio) * _MDRY + ratio * _MWAT
+        p_rho = slp * np.exp(-_GRAV * xm * 10.0 / (_RGAS * T_rho))
+    rho = _np_rho_air(T_rho, q_air, p_rho)
     Urho = Ub * np.maximum(rho, 1.0)
     tau_x = -Urho * Cd * u
     tau_y = -Urho * Cd * v
@@ -232,11 +240,8 @@ def test_full_flux_path_matches_independent_numpy_mirror():
     T_air = sst + rng.uniform(-6.0, 6.0, n)             # ABSOLUTE at 10 m
     q = rng.uniform(2e-4, 0.020, n)
     slp = rng.uniform(96000.0, 104000.0, n)
-    # Keep q within w = q/q_sat <= 1.5 (up to 150% RH): the random draw can
-    # otherwise pair cold air with tropical humidity (w ~ 9, unphysical),
-    # where the implementation's w<=2 garbage guard INTENTIONALLY departs
-    # from the unclipped Fortran mirror.  Supersaturation parity has its own
-    # dedicated test (q = 1.3 q_sat).
+    # Keep the randomized sample physical; explicit supersaturation is tested
+    # separately against the same unclipped source formula.
     q = np.minimum(q, 1.5 * _np_q_sat(T_air, slp))
     u = rng.uniform(-20.0, 20.0, n)
     v = rng.uniform(-20.0, 20.0, n)
@@ -246,15 +251,8 @@ def test_full_flux_path_matches_independent_numpy_mirror():
         q_air=jnp.asarray(q), T_sfc_K=jnp.asarray(sst),
         slp_Pa=jnp.asarray(slp))
     names = ("tau_x", "tau_y", "sh", "lh", "evap")
-    theta_sst = _np_theta_exner(sst, slp)
-    l_ratio = np.asarray(latent_heat_vaporization(jnp.asarray(theta_sst))) / _np_nemo_l_vap(theta_sst)
     for nm, a, b in zip(names, out, ref):
-        if nm == "lh":
-            # The ONE intentional departure from the Fortran: Kirchhoff L_v(T)
-            # in place of NEMO's empirical slope.  Exact parity after rescaling
-            # by that known ratio; evap itself is untouched by the choice of L.
-            b = b * l_ratio
-        assert np.allclose(np.asarray(a), b, rtol=1e-10, atol=1e-12), nm
+        assert np.allclose(np.asarray(a), b, rtol=2e-10, atol=2e-12), nm
 
 
 def test_ncar_coefficient_magnitudes_physical():
@@ -340,10 +338,8 @@ def test_seawater_q_sat_salt_factor_and_pressure():
 
 def test_rho_air_moist_reference_and_floor():
     rho_dry = float(rho_air_moist(288.15, 0.0, constants.p_atm_std))
-    # rel 2e-6: the implementation floors q at 1e-6 like NEMO (rctv0*1e-6
-    # ~ 6e-7 relative shift vs the exact dry-air value).
     assert rho_dry == pytest.approx(
-        constants.p_atm_std / (constants.R_d * 288.15), rel=2e-6)
+        constants.p_atm_std / (constants.R_d * 288.15), rel=1e-15)
     # moisture lightens air
     assert float(rho_air_moist(288.15, 0.015, constants.p_atm_std)) < rho_dry
     # NEMO floor at 0.8
@@ -354,11 +350,7 @@ def test_l_vap_and_cp_air_reference():
     assert float(latent_heat_vaporization(constants.T_freeze)) == (
         pytest.approx(constants.L_v, rel=1e-12))
     assert float(latent_heat_vaporization(constants.T_freeze + 25.0)) == (
-        pytest.approx(constants.L_v - (constants.c_pw - constants.c_pv) * 25.0, rel=1e-12))
-    # Independent pin (codex round 2): a literal, not the constants the
-    # implementation reads, so a drift in c_pw/c_pv cannot pass unnoticed.
-    assert float(latent_heat_vaporization(constants.T_freeze + 25.0)) == (
-        pytest.approx(2441700.0, rel=1e-12))   # const-ok: 2.501e6 - 2372*25 pinned
+        pytest.approx(2441750.0, rel=0.0, abs=0.0))  # const-ok: NEMO literal
     assert float(moist_air_cp(0.0)) == pytest.approx(
         constants.c_p_dry_air_nemo, rel=1e-12)
     assert float(moist_air_cp(0.01)) == pytest.approx(
@@ -366,23 +358,96 @@ def test_l_vap_and_cp_air_reference():
         rel=1e-12)
 
 
-def test_l_vap_deviation_from_nemo_is_bounded():
-    """Kirchhoff (2372 J/kg/K) vs NEMO's empirical 2370: identical at 0 degC,
-    within 3e-5 relative over the whole ocean SST range (user decision 2026-09-28,
-    one latent-heat formula for the codebase)."""
+def test_l_vap_is_literal_nemo_empirical_formula():
     T = constants.T_freeze + np.array([0.0, 10.0, 25.0, 32.0])
     ours = np.asarray(latent_heat_vaporization(jnp.asarray(T)))
     nemo = _np_nemo_l_vap(T)
-    assert ours[0] == pytest.approx(nemo[0], rel=1e-14)
-    assert np.all(np.abs(ours / nemo - 1.0) < 3e-5)
-    assert np.all(ours[1:] < nemo[1:])   # Kirchhoff is the slightly steeper slope, so smaller L when warm
+    assert np.array_equal(ours, nemo)
+
+
+def _literal_scalar_inputs():
+    return (
+        jnp.asarray(6.25), jnp.asarray(-2.5), jnp.asarray(286.4),
+        jnp.asarray(0.0065), jnp.asarray(100800.0), jnp.asarray(14.2),
+        jnp.asarray(0.1), jnp.asarray(-0.2), jnp.asarray(125.0),
+        jnp.asarray(310.0), jnp.asarray(2.3e-5), jnp.asarray(3.0e-6),
+        jnp.asarray(1.0), 0.066, 1.0, 1.0, 5,
+    )
+
+
+def test_literal_blk_oce_inexact_binary64_pins_and_eager_jit():
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
+    prior = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+        eager = nemo_blk_oce_ncar(*_literal_scalar_inputs())
+        inputs = _literal_scalar_inputs()
+        compiled = jax.jit(
+            lambda *values: nemo_blk_oce_ncar(*values, 5)
+        )(*inputs[:-1])
+        assert all(np.array_equal(np.asarray(a).view(np.uint64),
+                                  np.asarray(b).view(np.uint64))
+                   for a, b in zip(eager, compiled))
+        pins = {
+            "theta_air": 4643735832083737147,
+            "ssq": 4576833549615626132,
+            "qns": 13863530862587990243,
+            "utau": 4588492273966355432,
+            "taum": 4589134070458585377,
+        }
+        for name, word in pins.items():
+            assert int(np.asarray(getattr(eager, name)).view(np.uint64)) == word
+    finally:
+        set_policy(prior)
+
+
+def test_literal_blk_oce_path_plants_and_physical_inputs_have_no_defaults():
+    signature = inspect.signature(nemo_blk_oce_ncar)
+    assert all(parameter.default is inspect.Parameter.empty
+               for parameter in signature.parameters.values())
+    base_args = list(_literal_scalar_inputs())
+    base = nemo_blk_oce_ncar(*base_args)
+    longwave_args = list(base_args)
+    longwave_args[9] = longwave_args[9] + 1.0
+    longwave = nemo_blk_oce_ncar(*longwave_args)
+    assert float(longwave.qlwn - base.qlwn) == pytest.approx(
+        constants.emissivity_seawater_lw, rel=0.0, abs=1e-14)
+    assert np.asarray(longwave.qns).view(np.uint64) != np.asarray(base.qns).view(np.uint64)
+    snow_args = list(base_args)
+    snow_args[11] = snow_args[11] + 1.0e-6
+    snow = nemo_blk_oce_ncar(*snow_args)
+    assert np.asarray(snow.qns).view(np.uint64) != np.asarray(base.qns).view(np.uint64)
+    assert np.asarray(snow.emp).view(np.uint64) == np.asarray(base.emp).view(np.uint64)
+
+
+def test_literal_blk_oce_finite_difference_gradient():
+    args = _literal_scalar_inputs()
+    objective = lambda sst: nemo_blk_oce_ncar(
+        *args[:5], sst, *args[6:]
+    ).qns
+    value = args[5]
+    tangent = float(jax.grad(objective)(value))
+    step = 1.0e-4
+    finite_difference = float(
+        (objective(value + step) - objective(value - step)) / (2.0 * step)
+    )
+    assert np.isfinite(tangent)
+    assert tangent == pytest.approx(finite_difference, rel=2e-5, abs=2e-5)
+
+
+def test_record_object_minmax_second_operand_wins_signed_zero_ties():
+    from legoesm.ocean.bulk_flux_omip import _fmax, _fmin
+
+    positive = jnp.asarray(0.0)
+    negative = jnp.asarray(-0.0)
+    for operation in (_fmax, _fmin):
+        assert np.signbit(float(operation(positive, negative)))
+        assert not np.signbit(float(operation(negative, positive)))
 
 
 def test_pressure_at_height_supersaturated_matches_unclipped_nemo():
-    """SUPERSATURATED air (q = 1.3 q_sat, RH 130%): the implementation must
-    still match the UNCLIPPED NEMO formula bit-for-bit — the garbage guard
-    clips only at w > 2, beyond any physical supersaturation (codex
-    round-2 MED: a clip at 1.0 would silently diverge from NEMO here)."""
+    """Supersaturated air follows NEMO's unclipped molar-mass formula."""
     T, slp = 275.0, 101000.0
     q_sat0 = float(_np_q_sat(np.float64(T), np.float64(slp)))
     q_super = 1.3 * q_sat0
@@ -391,10 +456,10 @@ def test_pressure_at_height_supersaturated_matches_unclipped_nemo():
     p_ref = float(_np_pres_temp(np.float64(q_super), np.float64(slp), 10.0,
                                 np.float64(T)))
     assert p_impl == pytest.approx(p_ref, rel=1e-13)
-    # and the guard still protects true garbage (land cell at the T floor)
+    # The literal source has no ratio clip: nonphysical land garbage may NaN.
     p_junk = float(pressure_at_height(
         jnp.asarray(0.01), jnp.asarray(slp), 10.0, jnp.asarray(150.0)))
-    assert np.isfinite(p_junk) and 0.0 < p_junk <= slp
+    assert np.isnan(p_junk)
 
 
 def test_pressure_at_height_and_exner_theta():

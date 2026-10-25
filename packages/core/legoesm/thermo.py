@@ -151,7 +151,9 @@ def dd_saturation_vapor_pressure_aerk(T: jax.Array) -> jax.Array:
     return ddw * (ew - ei) + 2.0 * dw * (dew - dei) + w * ddew + (1.0 - w) * ddei
 
 
-def saturation_vapor_pressure_goff(T: jax.Array) -> jax.Array:
+def saturation_vapor_pressure_goff(
+    T: jax.Array, *, nemo_source_exact: bool = False
+) -> jax.Array:
     """Saturation vapour pressure over liquid water, WMO Goff (1957) [Pa].
 
     Exact port of NEMO/aerobulk ``sbc_phy.F90::e_sat_sclr`` (the curve NEMO's
@@ -171,6 +173,23 @@ def saturation_vapor_pressure_goff(T: jax.Array) -> jax.Array:
     jax.Array
         Saturation vapor pressure [Pa].
     """
+    if nemo_source_exact:
+        from legoesm.core.source_rounding import nemo_source_round as R
+        from legoesm.core import transcendentals as tx
+
+        T_K = R(jnp.maximum(T, 180.0))
+        rt = R(constants.T_freeze / T_K)
+        term1 = R(10.79574 * R(1.0 - rt))
+        term2 = R(5.028 * tx.log10(R(T_K / constants.T_freeze)))
+        inner3 = R(-8.2969 * R(R(T_K / constants.T_freeze) - 1.0))
+        scale3 = R(1.50475 * tx.pow(10.0, -4.0))
+        term3 = R(scale3 * R(1.0 - tx.pow(10.0, inner3)))
+        inner4 = R(4.76955 * R(1.0 - rt))
+        scale4 = R(0.42873 * tx.pow(10.0, -3.0))
+        term4 = R(scale4 * R(tx.pow(10.0, inner4) - 1.0))
+        exponent = R(R(R(R(term1 - term2) + term3) + term4) + 0.78614)
+        return R(100.0 * tx.pow(10.0, exponent))
+
     T_K = jnp.maximum(T, 180.0)
     rt = constants.T_freeze / T_K
     log10_T = jnp.log10(T_K / constants.T_freeze)

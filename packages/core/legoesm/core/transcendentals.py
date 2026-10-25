@@ -1,7 +1,7 @@
 """Precision-policy transcendental functions.
 
 ``native`` delegates to JAX/XLA.  ``libm`` calls the scalar ``exp``, ``log``,
-``log10``, ``tanh``, ``sin``, and ``cos`` entry points from ``libm.so.6`` through
+``log10``, ``pow``, ``atan``, ``tanh``, ``sin``, and ``cos`` entry points from ``libm.so.6`` through
 :func:`jax.pure_callback`.
 That is the soname linked by the NEMO certification executables on the
 campaign host (glibc 2.34).  The callback deliberately invokes the scalar C
@@ -53,6 +53,34 @@ def _callback(name: str, value: jax.Array) -> jax.Array:
     result = jax.ShapeDtypeStruct(value.shape, value.dtype)
     return jax.pure_callback(
         partial(_scalar_libm, name), result, value,
+        vmap_method="broadcast_all",
+    )
+
+
+def _scalar_libm_binary(
+    name: str, left: np.ndarray, right: np.ndarray
+) -> np.ndarray:
+    left_source, right_source = np.broadcast_arrays(left, right)
+    if left_source.dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
+        raise TypeError(f"libm {name} requires float32/float64")
+    function = getattr(_LIBM, name)
+    function.argtypes = (ctypes.c_double, ctypes.c_double)
+    function.restype = ctypes.c_double
+    result = np.empty_like(left_source)
+    for index in range(result.size):
+        result.flat[index] = function(
+            float(left_source.flat[index]), float(right_source.flat[index])
+        )
+    return result
+
+
+def _callback_binary(name: str, left: jax.Array, right: jax.Array) -> jax.Array:
+    if jax.default_backend() != "cpu":
+        raise RuntimeError("scalar libm policy is CPU-only")
+    shape = jnp.broadcast_shapes(left.shape, right.shape)
+    result = jax.ShapeDtypeStruct(shape, jnp.result_type(left, right))
+    return jax.pure_callback(
+        partial(_scalar_libm_binary, name), result, left, right,
         vmap_method="broadcast_all",
     )
 
@@ -136,6 +164,31 @@ def _libm_log10_jvp(primals, tangents):
     return result, value_dot / (value * jnp.log(jnp.asarray(10.0, value.dtype)))
 
 
+@jax.custom_jvp
+def _libm_atan(value: jax.Array) -> jax.Array:
+    return _callback("atan", value)
+
+
+@_libm_atan.defjvp
+def _libm_atan_jvp(primals, tangents):
+    (value,), (value_dot,) = primals, tangents
+    return _libm_atan(value), value_dot / (1.0 + value * value)
+
+
+@jax.custom_jvp
+def _libm_pow(left: jax.Array, right: jax.Array) -> jax.Array:
+    return _callback_binary("pow", left, right)
+
+
+@_libm_pow.defjvp
+def _libm_pow_jvp(primals, tangents):
+    left, right = primals
+    left_dot, right_dot = tangents
+    result = _libm_pow(left, right)
+    tangent = result * (right_dot * _libm_log(left) + right * left_dot / left)
+    return result, tangent
+
+
 def log(value) -> jax.Array:
     """Evaluate natural logarithm under the active precision policy."""
     array = jnp.asarray(value)
@@ -150,6 +203,24 @@ def log10(value) -> jax.Array:
     if get_policy().transcendentals == "native":
         return jnp.log10(array)
     return _libm_log10(array)
+
+
+def atan(value) -> jax.Array:
+    """Evaluate arctangent under the active precision policy."""
+    array = jnp.asarray(value)
+    if get_policy().transcendentals == "native":
+        return jnp.arctan(array)
+    return _libm_atan(array)
+
+
+def pow(left, right) -> jax.Array:
+    """Evaluate binary power under the active precision policy."""
+    left_array, right_array = jnp.broadcast_arrays(
+        jnp.asarray(left), jnp.asarray(right)
+    )
+    if get_policy().transcendentals == "native":
+        return jnp.power(left_array, right_array)
+    return _libm_pow(left_array, right_array)
 
 
 def tanh(value) -> jax.Array:
@@ -176,4 +247,4 @@ def cos(value) -> jax.Array:
     return _libm_cos(array)
 
 
-__all__ = ("cos", "exp", "log", "log10", "sin", "tanh")
+__all__ = ("atan", "cos", "exp", "log", "log10", "pow", "sin", "tanh")

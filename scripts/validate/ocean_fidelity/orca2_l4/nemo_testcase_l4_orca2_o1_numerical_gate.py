@@ -26,9 +26,7 @@ from legoesm.core.precision import (  # noqa: E402
 )
 from legoesm import constants  # noqa: E402
 from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
-    air_sea_fluxes,
-    potential_air_temperature_10m,
-    seawater_q_sat,
+    nemo_blk_oce_ncar,
 )
 from legoesm.ocean.forcing.nemo_fld_read import (  # noqa: E402
     decode_source_indices,
@@ -48,6 +46,13 @@ OUTPUT_FIELDS = (
     "ssq", "cd_du", "sensible", "latent", "evap", "qlwn", "qsr",
     "qns", "emp", "utau", "vtau", "taum", "wndm",
 )
+DEFINED_BULK_FIELDS = tuple(
+    name for name in OUTPUT_FIELDS if name not in ("cd_du", "qlwn")
+)
+REGISTERED_PARENT_UNEQUAL = {
+    "theta_air": 117, "ssq": 3964, "utau": 8794, "vtau": 8794,
+    "sensible": 8794, "latent": 8794, "evap": 8794,
+}
 FIELD_SPECS = (
     ("wndi", "u_10.15JUNE2009_fill.nc", "U_10_MOD", True),
     ("wndj", "v_10.15JUNE2009_fill.nc", "V_10_MOD", True),
@@ -189,29 +194,17 @@ def validate(root: Path) -> dict:
 
     with Dataset(root / "mesh_mask_0000.nc") as dataset:
         wet = np.asarray(dataset["tmask"][0, 0].data, dtype=bool)
-    u, v = oracle_input["wndi"], oracle_input["wndj"]
-    tair, qair, slp = (oracle_input[name] for name in ("tair", "humi", "slp"))
-    sst = oracle_output["sst"]
-    bulk = jax.jit(
-        lambda ui, vj, ta, qa, ts, ps: air_sea_fluxes(
-            ui, vj, ta, qa, ts + constants.T_freeze, slp_Pa=ps, algo="ncar"
-        )
-    )(u, v, tair, qair, sst, slp)
-    tau_x, tau_y, sensible, latent, evap = map(np.asarray, bulk)
-    theta_air = np.asarray(jax.jit(
-        lambda ta, qa, ps: potential_air_temperature_10m(ta, qa, ps)[0]
-    )(tair, qair, slp))
-    ssq = np.asarray(jax.jit(
-        lambda ts, ps: seawater_q_sat(ts + constants.T_freeze, ps)
-    )(sst, slp))
+    result = jax.jit(lambda *args: nemo_blk_oce_ncar(
+        *args, constants.albedo_ocean_nemo, 1.0, 1.0, 5
+    ))(
+        oracle_input["wndi"], oracle_input["wndj"], oracle_input["tair"],
+        oracle_input["humi"], oracle_input["slp"], oracle_output["sst"],
+        oracle_output["ssu"], oracle_output["ssv"], oracle_input["qsr_down"],
+        oracle_input["qlw_down"], oracle_input["precip_raw"],
+        oracle_input["snow_raw"], wet.astype(np.float64),
+    )
     bulk_candidates = {
-        "theta_air": theta_air,
-        "ssq": ssq,
-        "utau": -tau_x,
-        "vtau": -tau_y,
-        "sensible": sensible,
-        "latent": latent,
-        "evap": evap,
+        name: np.asarray(getattr(result, name)) for name in DEFINED_BULK_FIELDS
     }
     bulk_scores = {
         field: cell_score(values, oracle_output[field], wet)
@@ -245,7 +238,9 @@ def validate(root: Path) -> dict:
         "O1_M_fld_read": {"status": mapping_status, "owner": "ORCA2_OWNER",
                            "fields": mapping_scores},
         "O1_B_ncar": {"status": bulk_status, "owner": "LANE3B_OWNER",
-                       "operand_mode": "ORACLE_SUPPLIED_O1_M", "fields": bulk_scores},
+                       "operand_mode": "ORACLE_SUPPLIED_O1_M",
+                       "registered_parent_unequal": REGISTERED_PARENT_UNEQUAL,
+                       "fields": bulk_scores},
         "first_over_bar": first,
         "plants": {
             "mapping_cell_score": binding_plants(oracle_input, all_cells),
