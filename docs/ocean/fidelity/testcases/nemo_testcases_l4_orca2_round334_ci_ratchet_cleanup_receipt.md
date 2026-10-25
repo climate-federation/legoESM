@@ -172,7 +172,8 @@ Re-measured on `6729d95bd`:
   results above stand.
 - Default gate (land.sh set) on `6b3683e06`: fast files 140 passed; parallel
   receipt gate plus prognostic barotropic state 10 passed (`-n 2`); stage
-  face-mask rank: SLOW2_RESULT.
+  face-mask rank 2 passed (`-n 2`, 621 s). Per-receipt citation gate on
+  `8b3c7eaaf` (`receipt_citations_r2.log`): PASS, 3 citations, 0 failures, 0 unmapped.
 - CHOICES: dropping the multilayer baseline entry from the conflict — ASKED
   (DECISION 169 names `f9cde047d` only). Running the slow files with `-n 2` —
   UNASKED, same as resume 1.
