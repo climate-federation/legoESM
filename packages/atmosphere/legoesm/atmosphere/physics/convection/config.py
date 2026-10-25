@@ -1605,23 +1605,14 @@ class BechtoldConfig(NamedTuple):
     # 10 days, r16); RCE-inert (no trigger data).  Flip needs a skill-gated
     # longer run.  False is byte-identical legacy.
     use_ifs_shallow_closure: bool = False
-    # Faithful IFS chain (2026-09-17, user decision): selects the ported
-    # cubasen trigger + cuascn ascent + cumastrn closure + cudtdqn tendencies
-    # AS A WHOLE, in place of the legacy Bechtold reduction.  Static python
-    # bool, so only one branch is ever traced.
-    #
-    # INCOMPLETE -- DO NOT SCORE A RUN WITH THIS ON.  Closed so far: CUFLXN and
-    # the absolute-flux reconstruction (which removes a +-11000 K/day dipole at
-    # the two lowest levels) and the humidity convention across the trigger /
-    # ascent seam (q_v, q_u and l_u are all PQEN / PQU / PLU specific humidity,
-    # cubasen.F90:72 and :677-678) and the KTYPE reclassification against the
-    # actual ascent top (cumastrn.F90:635-641) and the return of the detrained
-    # condensate and the convective precipitation to the host water budget.
-    # Still open: the early return
-    # bypasses the legacy downdraught and sub-cloud evaporation rather than
-    # keeping them, and the ported ascent does not return an updated LDCUM
-    # (CUASCN has it INOUT and clears it for mid-level columns, cuascn.F90:389
-    # and :627), which is harmless only while this port has no KTYPE=3 branch.
+    # Faithful IFS convection (2026-09-17, user decision): runs CUMASTRN as
+    # OpenIFS 8f6f722 does (trigger, ascent, downdraught, closures,
+    # precipitation/melting/evaporation, implicit T/q/u/v tendencies), matched
+    # to the compiled oracle at 1e-10 (tests/atmosphere/
+    # test_bechtold_ifs_oracle.py).  Static python bool, so only one branch is
+    # ever traced.  On this path only dx_m is read; any other non-default
+    # BechtoldConfig field raises.  Default False keeps the legacy smooth
+    # reduction below, which is NOT the oracle.
     use_ifs_ascent: bool = False
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production

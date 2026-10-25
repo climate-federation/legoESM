@@ -2148,17 +2148,16 @@ def bechtold_convection(
     conv_stoch_state_new : jax.Array, shape (ncol,)
         Updated AR1 noise state.
     """
-    # Faithful IFS chain, selected as a whole (user decision 2026-09-17):
-    # trigger -> first-guess cloud-base mass flux -> ascent launched at that
-    # flux -> cumastrn rescale -> cudtdqn tendencies.  Static python bool, so
-    # the legacy path below is not traced when this is on (and vice versa).
+    # Faithful IFS chain (user decision 2026-09-17): CUMASTRN as OpenIFS
+    # 8f6f722 runs it, oracle-matched (tests/atmosphere/
+    # test_bechtold_ifs_oracle.py).  Static python bool, so the legacy path
+    # below is not traced when this is on (and vice versa).
     if config.use_ifs_ascent:
         from legoesm.atmosphere.physics.convection._ifs_faithful import (
             ifs_faithful_convection,
         )
         out, M_u_new = ifs_faithful_convection(
-            T, q_v, p_full, p_half, u, v, conv_prog_profile,
-            conv_stoch_state, prng_key, dt, config,
+            T, q_v, p_full, p_half, u, v, dt, config,
             shf_w_m2=shf_w_m2, lhf_w_m2=lhf_w_m2, land_frac=land_frac,
             dT_dt_adv=dT_dt_dyn, dq_dt_adv=dq_dt_dyn,
             # PTENT/PTENQ: cumastrn's TOTAL model tendency, which in IFS holds
@@ -2173,6 +2172,7 @@ def bechtold_convection(
                          (dT_dt_rad if dT_dt_dyn is None
                           else dT_dt_dyn + dT_dt_rad)),
             dq_dt_other=dq_dt_dyn,
+            omega=omega,
             out_ctor=ConvectionOutput,
         )
         return out, M_u_new, conv_stoch_state
