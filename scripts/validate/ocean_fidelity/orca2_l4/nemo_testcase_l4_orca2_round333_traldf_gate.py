@@ -46,7 +46,7 @@ FIELDS = FOUR_D_FIELDS + THREE_D_FIELDS + TWO_D_FIELDS + ONE_D_FIELDS
 PLANTS = (
     "header", "field-order", "truncation", "checksum", "stamp", "time-level",
     "tracer-pass", "extent", "signed-zero", "wet", "increment", "nonfinite",
-    "rhs-replay", "a33-replay",
+    "scheme-replay", "rhs-replay", "a33-replay",
 )
 OBSERVER_UNITS = ("dynzdf", "stprk3_stg", "dynvor", "zdfphy", "zdftke", "traldf_iso")
 WRITER_UNITS = (
@@ -139,23 +139,135 @@ def _verify_checksums(record: dict) -> None:
 
 def _bits_equal_on(actual: np.ndarray, expected: np.ndarray,
                    mask: np.ndarray, label: str) -> None:
+    if expected.shape != actual.shape:
+        expected = np.broadcast_to(expected, actual.shape)
     require(bool(np.array_equal(actual[mask].view(np.uint64),
                                 expected[mask].view(np.uint64))),
             f"{label}: recorded statement does not replay bitwise")
 
 
 def _replay_self_consistency(fields: dict[str, np.ndarray]) -> None:
-    """Replay the two scored NEMO statement families from raw operands."""
+    """Replay every recorded NEMO statement from its raw operands."""
+    hseen = fields["horizontal_seen"] == 1.0
     vseen = fields["vertical_seen"] == 1.0
+
+    pt = fields["pt_kbb"]
+    dit = (np.roll(pt, -1, axis=0) - pt) * fields["umask"][..., None]
+    djt = (np.roll(pt, -1, axis=1) - pt) * fields["vmask"][..., None]
+    _bits_equal_on(fields["dit"], dit, hseen, "zdit")
+    _bits_equal_on(fields["djt"], djt, hseen, "zdjt")
+    dkt = np.zeros_like(pt)
+    dkt[:, :, 1:-1, :] = ((pt[:, :, :-2, :] - pt[:, :, 1:-1, :])
+                           * fields["wmask"][:, :, 1:-1, None])
+    dkt_seen = hseen.copy()
+    dkt_seen[1:, ...] |= hseen[:-1, ...]
+    dkt_seen[:, 1:, ...] |= dkt_seen[:, :-1, ...]
+    dkt_seen[:, :, 1:, :] |= dkt_seen[:, :, :-1, :]
+    _bits_equal_on(fields["dkt"], dkt, dkt_seen, "zdkt")
+
+    e3u = fields["e3u_3d"][..., None]
+    e3v = fields["e3v_3d"][..., None]
+    r3u = fields["r3u_kmm"][..., None, None]
+    r3v = fields["r3v_kmm"][..., None, None]
+    a11 = fields["e2_e1u"][..., None, None] * (
+        e3u * (np.float64(1.0) + r3u * fields["umask"][..., None]))
+    a22 = fields["e1_e2v"][..., None, None] * (
+        e3v * (np.float64(1.0) + r3v * fields["vmask"][..., None]))
+    _bits_equal_on(fields["A11"], a11, hseen, "A11")
+    _bits_equal_on(fields["A22"], a22, hseen, "A22")
+    hmsku = np.float64(1.0) / np.maximum(
+        (np.roll(fields["wmask"], -1, axis=0) + np.roll(fields["wmask"], -1, axis=2))
+        + (np.roll(np.roll(fields["wmask"], -1, axis=0), -1, axis=2)
+           + fields["wmask"]), np.float64(1.0))
+    hmskv = np.float64(1.0) / np.maximum(
+        (np.roll(fields["wmask"], -1, axis=1) + np.roll(fields["wmask"], -1, axis=2))
+        + (np.roll(np.roll(fields["wmask"], -1, axis=1), -1, axis=2)
+           + fields["wmask"]), np.float64(1.0))
+    hmsku = hmsku[..., None]
+    hmskv = hmskv[..., None]
+    a13 = (-fields["e2u"][..., None, None] * fields["uslp"][..., None]) * hmsku
+    a23 = (-fields["e1v"][..., None, None] * fields["vslp"][..., None]) * hmskv
+    _bits_equal_on(fields["hmsku"], hmsku, hseen, "horizontal u-mask quotient")
+    _bits_equal_on(fields["hmskv"], hmskv, hseen, "horizontal v-mask quotient")
+    _bits_equal_on(fields["A13"], a13, hseen, "A13")
+    _bits_equal_on(fields["A23"], a23, hseen, "A23")
+    dkt_ip1 = np.roll(dkt, -1, axis=0)
+    dkt_jp1 = np.roll(dkt, -1, axis=1)
+    dkt_kp1 = np.roll(dkt, -1, axis=2)
+    zfu = fields["ahtu"][..., None] * (
+        a11 * dit + a13 * ((dkt_ip1 + dkt_kp1)
+                           + (np.roll(dkt_ip1, -1, axis=2) + dkt)))
+    zfv = fields["ahtv"][..., None] * (
+        a22 * djt + a23 * ((dkt_jp1 + dkt_kp1)
+                           + (np.roll(dkt_jp1, -1, axis=2) + dkt)))
+    _bits_equal_on(fields["zfu"], zfu, hseen, "zfu")
+    _bits_equal_on(fields["zfv"], zfv, hseen, "zfv")
+
+    ordinary = vseen.copy()
+    ordinary[:, :, fields["pt_kbb"].shape[2] - 2:, :] = False
+    vmsku = fields["wmask"] / np.maximum(
+        (fields["umask"] + np.roll(np.roll(fields["umask"], 1, axis=0), -1, axis=2))
+        + (np.roll(fields["umask"], 1, axis=0) + np.roll(fields["umask"], -1, axis=2)),
+        np.float64(1.0))
+    vmskv = fields["wmask"] / np.maximum(
+        (fields["vmask"] + np.roll(np.roll(fields["vmask"], 1, axis=1), -1, axis=2))
+        + (np.roll(fields["vmask"], 1, axis=1) + np.roll(fields["vmask"], -1, axis=2)),
+        np.float64(1.0))
+    zahu = ((fields["ahtu"] + np.roll(np.roll(fields["ahtu"], 1, axis=0), -1, axis=2))
+            + (np.roll(fields["ahtu"], 1, axis=0)
+               + np.roll(fields["ahtu"], -1, axis=2))) * vmsku
+    zahv = ((fields["ahtv"] + np.roll(np.roll(fields["ahtv"], 1, axis=1), -1, axis=2))
+            + (np.roll(fields["ahtv"], 1, axis=1)
+               + np.roll(fields["ahtv"], -1, axis=2))) * vmskv
+    a31 = (((-zahu * fields["e2t"][..., None]) * vmsku)
+           * np.roll(fields["wslpi"], -1, axis=2))[..., None]
+    a32 = (((-zahv * fields["e1t"][..., None]) * vmskv)
+           * np.roll(fields["wslpj"], -1, axis=2))[..., None]
+    _bits_equal_on(fields["vmsku"], vmsku[..., None], ordinary,
+                   "vertical u-mask quotient")
+    _bits_equal_on(fields["vmskv"], vmskv[..., None], ordinary,
+                   "vertical v-mask quotient")
+    _bits_equal_on(fields["zahu_w"], zahu[..., None], ordinary,
+                   "vertical averaged u coefficient")
+    _bits_equal_on(fields["zahv_w"], zahv[..., None], ordinary,
+                   "vertical averaged v coefficient")
+    _bits_equal_on(fields["A31"], a31, ordinary, "A31")
+    _bits_equal_on(fields["A32"], a32, ordinary, "A32")
+    dit_im1 = np.roll(dit, 1, axis=0)
+    djt_jm1 = np.roll(djt, 1, axis=1)
+    dit_kp1 = np.roll(dit, -1, axis=2)
+    djt_kp1 = np.roll(djt, -1, axis=2)
+    e3w_kp1 = np.roll(fields["e3w_1d"], -1)[None, None, :, None]
+    r3t = fields["r3t_kmm"][..., None, None]
+    vertical_a33 = ((fields["e1e2t"][..., None, None]
+                     / (e3w_kp1 * (np.float64(1.0) + r3t)))
+                    * np.roll(fields["wmask"], -1, axis=2)[..., None])
+    vertical_a33 = ((vertical_a33
+                     * (np.roll(fields["ah_wslp2"], -1, axis=2)[..., None]
+                        - np.roll(fields["akz"], -1, axis=2)[..., None]))
+                    * (pt - np.roll(pt, -1, axis=2)))
+    zfw_upper = (a31 * ((dit + np.roll(dit_im1, -1, axis=2))
+                        + (dit_im1 + dit_kp1))
+                 + a32 * ((djt + np.roll(djt_jm1, -1, axis=2))
+                          + (djt_jm1 + djt_kp1))) + vertical_a33
+    _bits_equal_on(fields["zfw_upper"], zfw_upper, ordinary, "zfw upper")
+    deepest = vseen & ~ordinary
+    _bits_equal_on(fields["zfw_upper"], np.zeros_like(zfw_upper), deepest,
+                   "deepest zfw upper")
+    zfw_lower = np.zeros_like(zfw_upper)
+    zfw_lower[:, :, 1:, :] = fields["zfw_upper"][:, :, :-1, :]
+    _bits_equal_on(fields["zfw_lower"], zfw_lower, vseen, "zfw lower")
+
     divergence = ((fields["zfu"] - np.roll(fields["zfu"], 1, axis=0))
                   + (fields["zfv"] - np.roll(fields["zfv"], 1, axis=1)))
     divergence = divergence + (fields["zfw_lower"] - fields["zfw_upper"])
     _bits_equal_on(fields["divergence"], divergence, vseen, "divergence")
     e3t = fields["e3t_3d"][..., None]
-    divisor = fields["r1_e1e2t"][..., None, None] / e3t
+    stretched_e3t = e3t * (np.float64(1.0) + r3t * fields["tmask"][..., None])
+    divisor = fields["r1_e1e2t"][..., None, None] / stretched_e3t
     divisor = np.broadcast_to(divisor, fields["divisor"].shape)
     _bits_equal_on(fields["divisor"], divisor, vseen, "RHS divisor")
-    increment = (divergence * fields["r1_e1e2t"][..., None, None]) / e3t
+    increment = (divergence * fields["r1_e1e2t"][..., None, None]) / stretched_e3t
     rhs_post = fields["rhs_preadd"] + increment
     _bits_equal_on(fields["rhs_postadd"], rhs_post, vseen, "RHS addition")
     _bits_equal_on(fields["rhs_after"], fields["rhs_postadd"], vseen,
@@ -264,6 +376,9 @@ def run_gate(root: Path, *, expect_commit: str, plant: str | None = None) -> dic
         if rank == 0 and plant == "rhs-replay":
             fields["divergence"][2, 2, 1, 0] = np.nextafter(
                 fields["divergence"][2, 2, 1, 0], np.inf)
+        if rank == 0 and plant == "scheme-replay":
+            fields["zfu"][2, 2, 1, 0] = np.nextafter(
+                fields["zfu"][2, 2, 1, 0], np.inf)
         if rank == 0 and plant == "a33-replay":
             fields["a33_zcoef0"][2, 2, 1] = np.nextafter(
                 fields["a33_zcoef0"][2, 2, 1], np.inf)

@@ -220,8 +220,10 @@ CONTAINS
       rhs_increment=rhs_after-r333_rhs_before
       DO n=1,jpts; DO k=1,jpk; DO j=1,jpj; DO i=1,jpi
          IF(r333_horizontal_seen(i,j,k,n)==1._wp) THEN
-            r333_A11(i,j,k,n)=e2_e1u(i,j)*e3u(i,j,k)
-            r333_A22(i,j,k,n)=e1_e2v(i,j)*e3v(i,j,k)
+            r333_A11(i,j,k,n)=e2_e1u(i,j)*(e3u(i,j,k)* &
+               & (1._wp+r3u(i,j)*umask(i,j,k)))
+            r333_A22(i,j,k,n)=e1_e2v(i,j)*(e3v(i,j,k)* &
+               & (1._wp+r3v(i,j)*vmask(i,j,k)))
             zu=1._wp/MAX((wmask(i+1,j,k)+wmask(i,j,k+1)) + &
                & (wmask(i+1,j,k+1)+wmask(i,j,k)),1._wp)
             zv=1._wp/MAX((wmask(i,j+1,k)+wmask(i,j,k+1)) + &
@@ -234,7 +236,8 @@ CONTAINS
             r333_divergence(i,j,k,n)=((r333_fu(i,j,k,n)-r333_fu(i-1,j,k,n)) + &
                & (r333_fv(i,j,k,n)-r333_fv(i,j-1,k,n))) + &
                & (r333_fw_lower(i,j,k,n)-r333_fw_upper(i,j,k,n))
-            r333_divisor(i,j,k,n)=r1_e1e2t(i,j)/e3t(i,j,k)
+            r333_divisor(i,j,k,n)=r1_e1e2t(i,j)/ &
+               & (e3t(i,j,k)*(1._wp+r3t(i,j)*tmask(i,j,k)))
             IF(k<jpk-1) THEN
                zu=wmask(i,j,k)/MAX((umask(i,j,k)+umask(i-1,j,k+1)) + &
                   & (umask(i-1,j,k)+umask(i,j,k+1)),1._wp)

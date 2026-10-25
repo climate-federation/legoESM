@@ -210,17 +210,20 @@ check_r333_ldf_landing() {
       if(plant=="a33-lap") lap=lap_statement-1
       exit !(begin_count==1 && finish_count==1 && first_count==1 && raw_count==1 && lap_count==1 &&
              begin<a33 && a33<itra && tracer_end<finish && finish<routine_end &&
-             pah<first && raw_statement<raw && lap_statement<lap)
+             pah<first && first<raw_statement && raw_statement<raw &&
+             raw<lap_statement && lap_statement<lap)
     }
   ' "$source" && awk -v plant="$plant" '
     BEGIN {active=1}
     /^[[:space:]]*SUBROUTINE traldf_iso_lap/ {active=1; rotation=0; vertical_title=0; store=0}
-    active && /CALL r333_ldf_grad/ {grad_count++; grad=NR; grad_lower=($0 ~ /ntsi-\(inn\+1\)/)}
+    active && /zdkt\(ji,jj,ikp1\)[[:space:]]*=/ {zdkt=NR}
+    active && /R333_LDF_OBSERVER/ && /inn/ {lowercase_inn++}
+    active && /CALL r333_ldf_grad/ {grad_count++; grad=NR; grad_lower=($0 ~ /ntsi-\(INN\+1\)/)}
     active && /rotation matrix[[:space:]]+A =/ {if(!rotation) rotation=NR}
     active && /zfv\(ji,jj\) = ahtv/ {zfv=NR}
     active && /CALL r333_ldf_horizontal/ {h_count++; horiz=NR}
     active && /VERTICAL iso-neutral fluxes/ {vertical_title=NR}
-    active && /CALL r333_ldf_vertical_before/ {before_count++; before[before_count]=NR; if($0 ~ /ntsi-\(inn\)/) lower_count++}
+    active && /CALL r333_ldf_vertical_before/ {before_count++; before[before_count]=NR; if($0 ~ /ntsi-\(INN\)/) lower_count++}
     active && /pt\(ji,jj,jk,jn,Krhs\) = pt\(ji,jj,jk,jn,Krhs\) \+/ {update_count++; update[update_count]=NR}
     active && /CALL r333_ldf_vertical_after/ {after_count++; after=NR}
     active && /CALL r333_ldf_bottom_after/ {bottom_count++; bottom=NR}
@@ -230,13 +233,15 @@ check_r333_ldf_landing() {
       if(plant=="gradient") grad=rotation+1
       if(plant=="horizontal") horiz=vertical_title+1
       if(plant=="gradient-lower") grad_lower=0
+      if(plant=="lowercase-inn") lowercase_inn=1
       if(plant=="vertical-lower") lower_count=0
       if(plant=="vertical") before[1]=update[1]+1
       if(plant=="bottom") bottom=update[2]-1
       exit !(grad_count==1 && h_count==1 && before_count==2 && after_count==1 && bottom_count==1 &&
-             update_count==2 && grad_lower && lower_count==2 && grad<rotation && zfv<horiz &&
+             update_count==2 && grad_lower && lower_count==2 && lowercase_inn==0 &&
+             zdkt<grad && grad<rotation && zfv<horiz &&
              horiz<vertical_title && before[1]<update[1] && update[1]<store && store<after &&
-             before[2]<update[2] && update[2]<bottom)
+             after<before[2] && before[2]<update[2] && update[2]<bottom)
     }
   ' "$scheme"
 }
@@ -250,7 +255,7 @@ patch -s --fuzz=0 -p0 -d "$ldf_check" <"$LDF_PATCH"
 patch -s --fuzz=0 -p0 -d "$ldf_check" <"$LDF_SCHEME_PATCH"
 check_r333_ldf_landing "$ldf_check/traldf_iso.F90" "$ldf_check/traldf_iso_scheme.h90" \
   || refuse 'internal LDF observers do not bracket the cited executing statements'
-for landing in begin a33-first a33-raw a33-lap gradient gradient-lower horizontal \
+for landing in begin a33-first a33-raw a33-lap gradient gradient-lower lowercase-inn horizontal \
     vertical-lower vertical bottom finish; do
   plant_must_refuse "r333-ldf-${landing}-misplaced" check_r333_ldf_landing \
     "$ldf_check/traldf_iso.F90" "$ldf_check/traldf_iso_scheme.h90" "$landing"
@@ -261,6 +266,8 @@ printf 'R333_TRALDF_LANDING_PASS ppsrc=154,183-204,230-246,266-285,287-304\n'
 # The fixture feeds rank-distinct data and negative-zero dry/halo cells.
 fixture_dir=$driver_dir/fixture
 mkdir "$fixture_dir" "$fixture_dir/mod"
+export PYTHONPATH=$REPO:$REPO/packages/core:$REPO/packages/ocean
+export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 "$FC" -c -O0 -fcheck=bounds -ffree-line-length-none -J "$fixture_dir/mod" \
   "$FIXTURE_STUBS" -o "$fixture_dir/stubs.o"
 "$FC" -c -O0 -fcheck=bounds -ffree-line-length-none -I "$fixture_dir/mod" \
@@ -334,7 +341,6 @@ root = Path(sys.argv[1])
 for rank in (0, 1):
     record = gate.read_record(root / gate.record_name(rank), expected_shape=(5, 4, 3))
     gate._verify_checksums(record)
-    gate._replay_self_consistency(record["fields"])
     assert record["header"]["rank"] == rank
     assert record["fields"]["rhs_increment"].shape == (5, 4, 3, 2)
     assert np.signbit(record["fields"]["dit"][1, 1, 0, 0])
@@ -358,26 +364,51 @@ else:
 print("R333_TRALDF_WRITER_BOUNDS_AND_SIGN_PASS ranks=2 fields=71")
 PY
 
-# Execute an observer-bearing copy of the patched loop bodies and compare it
-# bitwise with an independently written unpatched copy on small rank arrays.
-"$FC" -O3 -funroll-all-loops -fno-tree-vectorize -fcheck=bounds \
-  -ffree-line-length-none -I "$ldf_fixture_dir/mod" "$LDF_LOOP_FIXTURE" \
+# Compile the actual patched traldf_iso_scheme.h90 and compare it bitwise with
+# the actual pristine include on two rank-distinct data sets with negative zero.
+cp "$LDF_SCHEME_SOURCE" "$ldf_fixture_dir/traldf_iso_scheme_unpatched.h90"
+cp "$ldf_check/traldf_iso_scheme.h90" "$ldf_fixture_dir/traldf_iso_scheme_patched.h90"
+"$FC" -cpp -O3 -funroll-all-loops -fno-tree-vectorize -fcheck=bounds \
+  -ffree-line-length-none -I "$ldf_fixture_dir" -I "$ldf_fixture_dir/mod" "$LDF_LOOP_FIXTURE" \
   "$ldf_fixture_dir/stubs.o" "$ldf_fixture_dir/writer.o" \
   -o "$ldf_fixture_dir/round333_traldf_loop_fixture"
-( cd "$ldf_fixture_dir" && ./round333_traldf_loop_fixture ) \
-  >>"$ldf_fixture_dir/fixture.log" 2>&1
-grep -F 'R333_TRALDF_PATCHED_LOOP_FIXTURE_PASS independent-reference' \
-  "$ldf_fixture_dir/fixture.log" >/dev/null \
-  || refuse 'patched traldf loop fixture differs from independent reference'
-sed '0,/upper=0\.5_wp/s//upper=0.25_wp/' "$LDF_LOOP_FIXTURE" \
-  >"$ldf_fixture_dir/round333_traldf_loop_plant.F90"
-"$FC" -O3 -funroll-all-loops -fno-tree-vectorize -fcheck=bounds \
-  -ffree-line-length-none -I "$ldf_fixture_dir/mod" \
-  "$ldf_fixture_dir/round333_traldf_loop_plant.F90" \
+for rank in 0 1; do
+  ( cd "$ldf_fixture_dir" && ./round333_traldf_loop_fixture "$rank" ) \
+    >>"$ldf_fixture_dir/fixture.log" 2>&1
+  grep -F "R333_TRALDF_PATCHED_LOOP_FIXTURE_PASS $rank" \
+    "$ldf_fixture_dir/fixture.log" >/dev/null \
+    || refuse "actual patched traldf scheme differs from pristine source on rank $rank"
+done
+"$PY" - "$ldf_fixture_dir" <<'PY'
+import sys
+from pathlib import Path
+import numpy as np
+from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round333_traldf_gate as gate
+
+root = Path(sys.argv[1])
+for rank in (0, 1):
+    record = gate.read_record(root / gate.record_name(rank), expected_shape=(5, 4, 3))
+    gate._verify_checksums(record)
+    fields = record["fields"]
+    gate._replay_self_consistency(fields)
+    assert np.count_nonzero(fields["r3t_kmm"]) > 0
+    assert np.count_nonzero(fields["r3u_kmm"]) > 0
+    assert np.count_nonzero(fields["r3v_kmm"]) > 0
+    assert any(np.any((values == 0.0) & np.signbit(values)) for values in fields.values())
+print("R333_TRALDF_ACTUAL_SCHEME_REPLAY_PASS ranks=2 expressions=all")
+PY
+plant_include=$ldf_fixture_dir/plant-include
+mkdir "$plant_include"
+sed '0,/zA11 = /s//zA11 = 1._wp + /' \
+  "$ldf_fixture_dir/traldf_iso_scheme_patched.h90" \
+  >"$plant_include/traldf_iso_scheme_patched.h90"
+"$FC" -cpp -O3 -funroll-all-loops -fno-tree-vectorize -fcheck=bounds \
+  -ffree-line-length-none -I "$plant_include" -I "$ldf_fixture_dir" -I "$ldf_fixture_dir/mod" \
+  "$LDF_LOOP_FIXTURE" \
   "$ldf_fixture_dir/stubs.o" "$ldf_fixture_dir/writer.o" \
   -o "$ldf_fixture_dir/round333_traldf_loop_plant"
 plant_must_refuse r333-traldf-loop-arithmetic \
-  "$ldf_fixture_dir/round333_traldf_loop_plant"
+  "$ldf_fixture_dir/round333_traldf_loop_plant" 0
 
 # Import every reviewed helper, plant, syntax proof, same-program check and
 # admission step from the round-328/332 driver. The arithmetic-baseline edit
@@ -524,8 +555,6 @@ grep -F 'R328_SYNTHETIC_ADMISSION_IDENTITY_PASS route=retained' \
   || refuse 'synthetic retained admission did not pass'
 printf 'R333_SYNTHETIC_RETAINED_ADMISSION_PASS routes=in-place,retained\n'
 
-export PYTHONPATH=$REPO:$REPO/packages/core:$REPO/packages/ocean
-export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 "$PY" -m pytest -q -p no:xdist "$TEST"
 "$PY" -m pytest -q -p no:xdist "$LDF_TEST"
 
@@ -568,7 +597,7 @@ done
 "$PY" "$GATE" --record-dir "$TARGET_RUN" --expect-commit "$producer" \
   --output "$TARGET_RUN/round333_tracer_admission.json"
 for plant in header field-order truncation checksum stamp time-level \
-    tracer-pass extent signed-zero wet increment nonfinite rhs-replay a33-replay; do
+    tracer-pass extent signed-zero wet increment nonfinite scheme-replay rhs-replay a33-replay; do
   log=$TARGET_RUN/admit-r333-traldf-$plant.log
   if "$PY" "$LDF_GATE" --record-dir "$TARGET_RUN" --expect-commit "$producer" \
       --plant "$plant" >"$log" 2>&1; then

@@ -5,20 +5,21 @@
              ENDIF
  	    !
 +#if defined iso_lap
-+            CALL r333_ldf_grad(jn,jk,ntsi-(inn+1),ntei+(inn),ntsj-(inn+1),ntej+(inn), & ! R333_LDF_OBSERVER
-+               & zdit(ntsi-(inn+1):ntei+(inn),ntsj-(inn+1):ntej+(inn),ik),zdjt(ntsi-(inn+1):ntei+(inn),ntsj-(inn+1):ntej+(inn),ik), & ! R333_LDF_OBSERVER
-+               & ntsi-(inn+1),ntei+(inn+1),ntsj-(inn+1),ntej+(inn+1),zdkt(T2D(INN+1),ik),zdkt(T2D(INN+1),ikp1)) ! R333_LDF_OBSERVER
++            CALL r333_ldf_grad(jn,jk,ntsi-(INN+1),ntei+(INN),ntsj-(INN+1),ntej+(INN), & ! R333_LDF_OBSERVER
++               & zdit(ntsi-(INN+1):ntei+(INN),ntsj-(INN+1):ntej+(INN),ik),zdjt(ntsi-(INN+1):ntei+(INN),ntsj-(INN+1):ntej+(INN),ik), & ! R333_LDF_OBSERVER
++               & ntsi-(INN+1),ntei+(INN+1),ntsj-(INN+1),ntej+(INN+1),zdkt(T2D(INN+1),ik),zdkt(T2D(INN+1),ikp1)) ! R333_LDF_OBSERVER
 +#endif
              !!----------------------------------------------------------------------
              !                             (  A11   0   A13  )      
              !  rotation matrix        A = (   0   A22  A23  )
-@@ -90,6 +95,10 @@
+@@ -90,6 +95,11 @@
                    &       * (   zA22 * zdjt(ji,jj,ik) + zA23 * (  ( zdkt(ji,jj+1,ik  ) + zdkt(ji,jj,ikp1) )      &
                    &                                             + ( zdkt(ji,jj+1,ikp1) + zdkt(ji,jj,ik  ) )  )   )
              END_2D
 +#if defined iso_lap
-+            CALL r333_ldf_horizontal(jn,jk,ntsi-(inn+1),ntei+(inn),ntsj-(inn+1),ntej+(inn), & ! R333_LDF_OBSERVER
-+               & zfu(T2D(INN+1)),zfv(T2D(INN+1))) ! R333_LDF_OBSERVER
++            CALL r333_ldf_horizontal(jn,jk,ntsi-(INN+1),ntei+(INN),ntsj-(INN+1),ntej+(INN), & ! R333_LDF_OBSERVER
++               & zfu(ntsi-(INN+1):ntei+(INN),ntsj-(INN+1):ntej+(INN)), & ! R333_LDF_OBSERVER
++               & zfv(ntsi-(INN+1):ntei+(INN),ntsj-(INN+1):ntej+(INN))) ! R333_LDF_OBSERVER
 +#endif
  !!gm
  !!gm OPTIM???    also verify the usage of akz ah_wslp2 in trazdf !!!
@@ -27,29 +28,29 @@
              IF( 1 <= jk .AND. jk <= jpk-2 ) THEN      ! ocean level except the deepest one (jpkm1)
                 !
 +#if defined iso_lap
-+               CALL r333_ldf_vertical_before(jn,jk,ntsi-(inn),ntei+(inn),ntsj-(inn),ntej+(inn), & ! R333_LDF_OBSERVER
-+                  & zfw(T2D(INN)),pt(ntsi-(inn):ntei+(inn),ntsj-(inn):ntej+(inn),jk,jn,Krhs)) ! R333_LDF_OBSERVER
++               CALL r333_ldf_vertical_before(jn,jk,ntsi-(INN),ntei+(INN),ntsj-(INN),ntej+(INN), & ! R333_LDF_OBSERVER
++                  & zfw(T2D(INN)),pt(ntsi-(INN):ntei+(INN),ntsj-(INN):ntej+(INN),jk,jn,Krhs)) ! R333_LDF_OBSERVER
 +#endif
                 DO_2D( INN, INN, INN, INN )
                    !                             !==  Vertical fluxes at jpk+1  ==!   used elements: ( A31  A32  and explicit part of A33 )
                    !
 @@ -157,1 +170,9 @@
 +#if defined iso_lap
-+               CALL r333_ldf_vertical_after(jn,jk,ntsi-(inn),ntei+(inn),ntsj-(inn),ntej+(inn), & ! R333_LDF_OBSERVER
-+                  & zfw(T2D(INN)),pt(ntsi-(inn):ntei+(inn),ntsj-(inn):ntej+(inn),jk,jn,Krhs)) ! R333_LDF_OBSERVER
++               CALL r333_ldf_vertical_after(jn,jk,ntsi-(INN),ntei+(INN),ntsj-(INN),ntej+(INN), & ! R333_LDF_OBSERVER
++                  & zfw(T2D(INN)),pt(ntsi-(INN):ntei+(INN),ntsj-(INN):ntej+(INN),jk,jn,Krhs)) ! R333_LDF_OBSERVER
 +#endif
              ELSEIF( jk == jpkm1 ) THEN                ! level jpkm1   (zfw_kp1 at jpk always zero)
 +#if defined iso_lap
-+               CALL r333_ldf_vertical_before(jn,jk,ntsi-(inn),ntei+(inn),ntsj-(inn),ntej+(inn), & ! R333_LDF_OBSERVER
-+                  & zfw(T2D(INN)),pt(ntsi-(inn):ntei+(inn),ntsj-(inn):ntej+(inn),jk,jn,Krhs)) ! R333_LDF_OBSERVER
++               CALL r333_ldf_vertical_before(jn,jk,ntsi-(INN),ntei+(INN),ntsj-(INN),ntej+(INN), & ! R333_LDF_OBSERVER
++                  & zfw(T2D(INN)),pt(ntsi-(INN):ntei+(INN),ntsj-(INN):ntej+(INN),jk,jn,Krhs)) ! R333_LDF_OBSERVER
 +#endif
 @@ -169,6 +190,10 @@
                       &                 * r1_e1e2t(ji,jj) / e3t(ji,jj,jk,Kmm)
                 END_2D
                 !
 +#if defined iso_lap
-+               CALL r333_ldf_bottom_after(jn,jk,ntsi-(inn),ntei+(inn),ntsj-(inn),ntej+(inn), & ! R333_LDF_OBSERVER
-+                  & pt(ntsi-(inn):ntei+(inn),ntsj-(inn):ntej+(inn),jk,jn,Krhs)) ! R333_LDF_OBSERVER
++               CALL r333_ldf_bottom_after(jn,jk,ntsi-(INN),ntei+(INN),ntsj-(INN),ntej+(INN), & ! R333_LDF_OBSERVER
++                  & pt(ntsi-(INN):ntei+(INN),ntsj-(INN):ntej+(INN),jk,jn,Krhs)) ! R333_LDF_OBSERVER
 +#endif
  	    ENDIF
              !

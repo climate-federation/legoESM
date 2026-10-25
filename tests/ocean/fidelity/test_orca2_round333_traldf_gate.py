@@ -16,7 +16,7 @@ def test_schema_covers_both_tracers_fluxes_operands_and_increment() -> None:
     assert {"divergence", "divisor", "rhs_preadd", "rhs_postadd"} <= set(gate.FIELDS)
     assert {"e1u", "e2v", "rDt", "r1_Dt", "a33_zcoef0"} <= set(gate.FIELDS)
     assert {"wet", "signed-zero", "checksum", "truncation", "time-level",
-            "nonfinite", "rhs-replay", "a33-replay"} <= set(gate.PLANTS)
+            "nonfinite", "scheme-replay", "rhs-replay", "a33-replay"} <= set(gate.PLANTS)
 
 
 def test_patches_are_additions_only_and_mark_every_observer() -> None:
@@ -29,7 +29,12 @@ def test_patches_are_additions_only_and_mark_every_observer() -> None:
         assert "IF(r333_ldf_active)" not in text
     scheme = (ACQ / "traldf_iso_scheme_round333.patch").read_text()
     assert "CALL r333_ldf_grad" in scheme
-    assert "ntsi-(inn+1):ntei+(inn)" in scheme
+    observer_lines = [line for line in scheme.splitlines() if "R333_LDF_OBSERVER" in line]
+    assert observer_lines
+    assert not any("inn" in line for line in observer_lines)
+    assert "ntsi-(INN+1):ntei+(INN)" in scheme
+    assert "zfu(ntsi-(INN+1):ntei+(INN),ntsj-(INN+1):ntej+(INN))" in scheme
+    assert "zfv(ntsi-(INN+1):ntei+(INN),ntsj-(INN+1):ntej+(INN))" in scheme
     assert "CALL r333_ldf_vertical_before" in scheme
     assert "CALL r333_ldf_vertical_after" in scheme
 
@@ -56,6 +61,9 @@ def test_driver_retains_parent_and_required_controls() -> None:
     assert "-fno-tree-vectorize" in text
     assert "traldf_independent_base.f90" in text
     assert "R333_TRALDF_PATCHED_LOOP_FIXTURE_PASS" in text
+    assert "traldf_iso_scheme_unpatched.h90" in text
+    assert "traldf_iso_scheme_patched.h90" in text
+    assert text.index("export PYTHONPATH=") < text.index('"$PY" - "$fixture_dir"')
 
 
 def test_gate_derives_levels_checks_finite_and_replays_statements() -> None:
@@ -64,4 +72,7 @@ def test_gate_derives_levels_checks_finite_and_replays_statements() -> None:
     assert "rk3_levels_for_step_stage" in text
     assert "np.isfinite" in text
     assert "_replay_self_consistency" in text
+    assert 'fields["r3u_kmm"]' in text
+    assert 'fields["r3v_kmm"]' in text
+    assert "stretched_e3t" in text
     assert "== (3, 2, 1)" not in text
