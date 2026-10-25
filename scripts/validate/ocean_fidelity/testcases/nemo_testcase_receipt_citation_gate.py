@@ -9543,6 +9543,37 @@ CITATION_MAP = {
     'tests/ice/unit/test_si3_o3_itd_fit.py:205-212': [('@pytest.mark.skipif(not (_O2_RECORD / "o2_admission.json").is_file(), reason="admitted O2 record absent")', 3), 'score_o3_entry_steps(_O2_RECORD, bump_fit=True)', 8],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_eos_gate.py:108': 'policy = PrecisionPolicy.fp64(transcendentals="libm")',
     'packages/ice/legoesm/ice/fidelity/nemo_adv2d_rhg_testcase_recipe.py:152': 'oracle_policy = PrecisionPolicy.fp64(transcendentals="libm")',
+    # --- SI3 ladder round 10 (O5) receipt citations ---
+    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rdgrft.f90:973': 'at_i(:,:) = SUM( a_i, dim=3 )',
+    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rdgrft.f90:1081': 'strength(ji,jj) = rn_pstar * SUM( v_i(ji,jj,:) ) * EXP( -rn_crhg * ( 1._wp - at_i(ji,jj) ) )',
+    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rdgrft.f90:1102-1105': ['zworka(ji,jj) = ( 4._wp * strength(ji,jj)              &', '&            ) / ( 4._wp + tmask(ji-1,jj,1) + tmask(ji+1,jj,1) + tmask(ji,jj-1,1) + tmask(ji,jj+1,1) )', 4],
+    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rdgrft.f90:1114': ("CALL lbc_lnk( 'icedyn_rdgrft', strength, 'T', 1.0_wp )", 2),
+    'packages/ice/legoesm/ice/dynamics.py:1863': 'def si3_h79_strength_raw(',
+    'packages/ice/legoesm/ice/dynamics.py:1954': 'def si3_orca2_ice_strength(',
+    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:268': 'CALL ice_strength',
+    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:281': 'zsshdyn(:,:) = ice_var_sshdyn( ssh_m, snwice_mass, snwice_mass_b)',
+    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icevar.f90:1090': ('ice_var_sshdyn(:,:) = pssh(:,:)', 2),
+    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:238': "CALL lbc_lnk( 'icedyn_rhg_evp', fimask, 'F', 1._wp )",
+    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:440': "CALL lbc_lnk( 'icedyn_rhg_evp', zdelta, 'T', 1.0_wp, zp_delt, 'T', 1.0_wp )",
+    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:647': ("CALL lbc_lnk( 'icedyn_rhg_evp', u_ice, 'U', -1.0_wp, v_ice, 'V', -1.0_wp, ldfull=.true. )", 1),
+    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:754': ("CALL lbc_lnk( 'icedyn_rhg_evp', u_ice, 'U', -1.0_wp, v_ice, 'V', -1.0_wp, ldfull=.true. )", 2),
+    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:845': "CALL lbc_lnk( 'icedyn_rhg_evp', zs1   , 'T', 1._wp, zs2   , 'T', 1._wp, zs12  , 'F', 1._wp )",
+    'packages/ice/legoesm/ice/dynamics.py:1251': 'def _si3_cgrid_aevp_core(',
+    'packages/ice/legoesm/ice/dynamics.py:1203': 'def si3_cgrid_aevp_solver(',
+    'packages/ice/legoesm/ice/dynamics.py:825': 'def _si3_lane3_halo(label, value, nature, sign, ldfull):',
+    'packages/ice/legoesm/ice/dynamics.py:2052': 'def si3_orca2_aevp_solver(',
+    'packages/ice/legoesm/ice/dynamics.py:2031': 'def si3_var_sshdyn(',
+    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbcnfd.f90:722': ("CASE ( 'F' )                               ! F-point", 5),
+    'packages/ice/legoesm/ice/si3_orca2_state.py:1383': 'elif cd_nat == "F":',
+    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbclnk.f90:2112': ('IF( jpni == 1 )  THEN   ;   CALL lbc_nfd(         ptab, cd_nat, psgn                  , kfld         )   ! self NFold', 3),
+    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbcnfd.f90:1617': ('llfullappl = ( llfullprsc .OR. ncom_stp <= nit000 ) .AND. .NOT. ( llfullarg .AND. .NOT. llfullprsc )', 2),
+    'packages/ice/legoesm/ice/dynamics.py:1895': 'class SI3ORCA2FoldProgram(NamedTuple):',
+    'tests/ice/unit/test_si3_o5_strength_aevp.py:170': 'def test_f_fold_matches_lbcnfd_index_formulas():',
+    'tests/ice/unit/test_si3_o5_strength_aevp.py:196': 'def test_strength_matches_independent_numpy_transcription():',
+    'tests/ice/unit/test_si3_o5_strength_aevp.py:224': 'def test_strength_inexact_value_pins_and_plants():',
+    'tests/ice/unit/test_si3_o5_strength_aevp.py:278': 'def test_aevp_wrong_fold_sign_plant_fires(label):',
+    'tests/ice/unit/test_si3_o5_strength_aevp.py:289': 'def test_aevp_exchange_program_site_by_site(monkeypatch):',
+    'tests/ice/unit/test_si3_o5_strength_aevp.py:315': 'def test_partial_vs_full_pivot_line_fold():',
 }
 
 
@@ -9671,39 +9702,6 @@ _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2556', 'packages/ice/lego
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2645-2759', 'packages/ice/legoesm/ice/si3_orca2_state.py:2662-2776')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2927-2934', 'packages/ice/legoesm/ice/si3_orca2_state.py:2944-2951')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:3039-3046', 'packages/ice/legoesm/ice/si3_orca2_state.py:3056-3063', anchors=['new_state = si3_o1_step(', (')', 1131), 8])
-# --- SI3 ladder round 10 (O5) receipt citations ---
-CITATION_MAP.update({
-    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rdgrft.f90:973': 'at_i(:,:) = SUM( a_i, dim=3 )',
-    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rdgrft.f90:1081': 'strength(ji,jj) = rn_pstar * SUM( v_i(ji,jj,:) ) * EXP( -rn_crhg * ( 1._wp - at_i(ji,jj) ) )',
-    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rdgrft.f90:1102-1105': ['zworka(ji,jj) = ( 4._wp * strength(ji,jj)              &', '&            ) / ( 4._wp + tmask(ji-1,jj,1) + tmask(ji+1,jj,1) + tmask(ji,jj-1,1) + tmask(ji,jj+1,1) )', 4],
-    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rdgrft.f90:1114': ("CALL lbc_lnk( 'icedyn_rdgrft', strength, 'T', 1.0_wp )", 2),
-    'packages/ice/legoesm/ice/dynamics.py:1863': 'def si3_h79_strength_raw(',
-    'packages/ice/legoesm/ice/dynamics.py:1954': 'def si3_orca2_ice_strength(',
-    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:268': 'CALL ice_strength',
-    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:281': 'zsshdyn(:,:) = ice_var_sshdyn( ssh_m, snwice_mass, snwice_mass_b)',
-    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icevar.f90:1090': ('ice_var_sshdyn(:,:) = pssh(:,:)', 2),
-    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:238': "CALL lbc_lnk( 'icedyn_rhg_evp', fimask, 'F', 1._wp )",
-    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:440': "CALL lbc_lnk( 'icedyn_rhg_evp', zdelta, 'T', 1.0_wp, zp_delt, 'T', 1.0_wp )",
-    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:647': ("CALL lbc_lnk( 'icedyn_rhg_evp', u_ice, 'U', -1.0_wp, v_ice, 'V', -1.0_wp, ldfull=.true. )", 1),
-    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:754': ("CALL lbc_lnk( 'icedyn_rhg_evp', u_ice, 'U', -1.0_wp, v_ice, 'V', -1.0_wp, ldfull=.true. )", 2),
-    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icedyn_rhg_evp.f90:845': "CALL lbc_lnk( 'icedyn_rhg_evp', zs1   , 'T', 1._wp, zs2   , 'T', 1._wp, zs12  , 'F', 1._wp )",
-    'packages/ice/legoesm/ice/dynamics.py:1251': 'def _si3_cgrid_aevp_core(',
-    'packages/ice/legoesm/ice/dynamics.py:1203': 'def si3_cgrid_aevp_solver(',
-    'packages/ice/legoesm/ice/dynamics.py:825': 'def _si3_lane3_halo(label, value, nature, sign, ldfull):',
-    'packages/ice/legoesm/ice/dynamics.py:2052': 'def si3_orca2_aevp_solver(',
-    'packages/ice/legoesm/ice/dynamics.py:2031': 'def si3_var_sshdyn(',
-    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbcnfd.f90:722': ("CASE ( 'F' )                               ! F-point", 5),
-    'packages/ice/legoesm/ice/si3_orca2_state.py:1383': 'elif cd_nat == "F":',
-    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbclnk.f90:2112': ('IF( jpni == 1 )  THEN   ;   CALL lbc_nfd(         ptab, cd_nat, psgn                  , kfld         )   ! self NFold', 3),
-    'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/lbcnfd.f90:1617': ('llfullappl = ( llfullprsc .OR. ncom_stp <= nit000 ) .AND. .NOT. ( llfullarg .AND. .NOT. llfullprsc )', 2),
-    'packages/ice/legoesm/ice/dynamics.py:1895': 'class SI3ORCA2FoldProgram(NamedTuple):',
-    'tests/ice/unit/test_si3_o5_strength_aevp.py:170': 'def test_f_fold_matches_lbcnfd_index_formulas():',
-    'tests/ice/unit/test_si3_o5_strength_aevp.py:196': 'def test_strength_matches_independent_numpy_transcription():',
-    'tests/ice/unit/test_si3_o5_strength_aevp.py:224': 'def test_strength_inexact_value_pins_and_plants():',
-    'tests/ice/unit/test_si3_o5_strength_aevp.py:278': 'def test_aevp_wrong_fold_sign_plant_fires(label):',
-    'tests/ice/unit/test_si3_o5_strength_aevp.py:289': 'def test_aevp_exchange_program_site_by_site(monkeypatch):',
-    'tests/ice/unit/test_si3_o5_strength_aevp.py:315': 'def test_partial_vs_full_pivot_line_fold():',
-})
 
 DEFAULT_RECEIPT = (
     REPO / "docs/ocean/fidelity/testcases"
