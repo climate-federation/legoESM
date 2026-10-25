@@ -1768,6 +1768,50 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                         post_temp2, post_do, exit_state)
 
 
+class SI3Frazil(NamedTuple):
+    """``ice_thd_frazil`` outputs: new-ice collection thickness and frazil fraction."""
+
+    ht_i_new: jax.Array
+    fraz_frac: jax.Array
+
+
+_SIGN_BIT_SHIFT = 63
+_NAN_SHIFTED_FLOOR = 0xFFE0000000000000  # (exponent all ones) << 1: above it is NaN
+
+
+def _ieee_lt_zero(value):
+    """``value < 0._wp`` as gfortran compiles it (``comisd``/``ja``), on the bit pattern.
+
+    True for every negative non-NaN, including a negative subnormal that XLA CPU
+    ``jit`` would flush to ``-0`` before a float compare; ``-0`` and NaN are false.
+    """
+    bits = jax.lax.bitcast_convert_type(value, jnp.uint64)
+    shifted = bits << jnp.uint64(1)
+    return ((bits >> jnp.uint64(_SIGN_BIT_SHIFT)) == jnp.uint64(1)) & (
+        shifted != jnp.uint64(0)) & (shifted <= jnp.uint64(_NAN_SHIFTED_FLOOR))
+
+
+def si3_ice_thd_frazil(qlead, *, rn_hinew, ln_frazil) -> SI3Frazil:
+    """``ice_thd_frazil`` with collection off (``icethd_do.f90:393-483``, ``ORCA2_SAS_ICE_O7_REF``).
+
+    Executes ``fraz_frac(:,:) = 0._wp`` (``:419``) and
+    ``WHERE( qlead(:,:) < 0._wp ) ht_i_new = rn_hinew ELSEWHERE ht_i_new = 0._wp`` (``:422-426``).
+    Shape-agnostic: the routine has no category axis on this arm (``hi_max(jpl)`` is
+    read only by the collection arm, ``:428-482``), so C1D and jpl=5 ORCA2 share it.
+    The collection arm (``ln_frazil = .true.``) is refused, not transcribed.
+    """
+    if qlead is None or rn_hinew is None:
+        raise ValueError("ice_thd_frazil needs qlead and rn_hinew; no defaults")
+    if not isinstance(ln_frazil, bool):
+        raise ValueError(f"ln_frazil must be the namelist logical, got {ln_frazil!r}")
+    if ln_frazil:
+        raise ValueError("ice_thd_frazil collection arm (ln_frazil=T) is not transcribed")
+    qlead = jnp.asarray(qlead)
+    zero = jnp.zeros_like(qlead)
+    ht_i_new = jnp.where(_ieee_lt_zero(qlead), jnp.asarray(rn_hinew, qlead.dtype), zero)
+    return SI3Frazil(ht_i_new=ht_i_new, fraz_frac=zero)
+
+
 __all__ = (
     "freezing_temperature",
     "ice_enthalpy",
@@ -1785,4 +1829,6 @@ __all__ = (
     "snow_temperature_from_enthalpy",
     "p07_conductivity",
     "si3_column_step_arrays",
+    "SI3Frazil",
+    "si3_ice_thd_frazil",
 )
