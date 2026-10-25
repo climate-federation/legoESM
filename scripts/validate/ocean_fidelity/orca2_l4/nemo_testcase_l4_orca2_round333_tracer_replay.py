@@ -345,6 +345,29 @@ def measure(
         full[:, :90] = target
         targets[tracer] = full
 
+    ldf_target_walk = {}
+    for tracer_index, tracer in enumerate(("T", "S")):
+        target = targets[tracer]
+        before = candidate["after_qsr"][tracer][..., :30]
+        term = captured_ldf_terms[0][tracer_index][..., :30]
+        reconstructed = np.asarray(before + term, dtype=np.float64)
+        live = candidate["after_ldf"][tracer][..., :30]
+        post_terms = candidate["after_damping"][tracer][..., :30]
+        solved = candidate["finish"][tracer][..., :30]
+        ldf_target_walk[tracer] = {
+            "krhs_before_ldf": _target_score(
+                before, oracle["after_qsr"][tracer], target),
+            "ldf_term_add": _target_score(
+                reconstructed, oracle["after_ldf"][tracer], target),
+            "live_accumulator_after_ldf": _target_score(
+                live, oracle["after_ldf"][tracer], target),
+            "live_vs_reconstructed": _target_score(live, reconstructed, target),
+            "post_bbc_bbl_dmp": _target_score(
+                post_terms, oracle["after_damping"][tracer], target),
+            "implicit_vertical_solve_return": _target_score(
+                solved, oracle["finish"][tracer], target),
+        }
+
     rows: dict[str, dict[str, object]] = {}
     first = None
     for boundary in BOUNDARIES:
@@ -383,6 +406,7 @@ def measure(
         "registered_target_counts": {
             name: int(np.count_nonzero(mask)) for name, mask in targets.items()
         },
+        "ldf_target_walk": ldf_target_walk,
         "first_wet_value_boundary": first,
         "ldf_final_update_arms": ldf_final_update_arms,
         "rows": rows,

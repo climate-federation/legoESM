@@ -33,6 +33,7 @@ def require(condition: bool, message: str) -> None:
 
 
 DIAGNOSTICS = (
+    "actual_tendency",
     "dit", "djt", "dkt", "A11", "A22", "hmsku", "hmskv", "A13", "A23",
     "zfu", "zfv", "vmsku", "vmskv", "ahu_w", "ahv_w", "A31", "A32",
     "zfw_top", "zfw_kp1", "tendency", "r1_e1e2t", "e3t", "tmask",
@@ -144,8 +145,10 @@ def measure(label: str, arm: str, deck_root: Path, record_root: Path,
             probe.update(return_bolus=False, return_diagnostics=True,
                          return_operand_diagnostics=True)
             _tendency, diagnostics = original_low(*args, **probe)
-            jax.debug.callback(store, *(diagnostics[name] for name in DIAGNOSTICS),
-                               ordered=True)
+            jax.debug.callback(
+                store, result,
+                *(diagnostics[name] for name in DIAGNOSTICS[1:]),
+                ordered=True)
             return result
 
         gm.nemo_iso_lap_tracer_tendency_latlon_cgrid = observed_low
@@ -223,6 +226,7 @@ def measure(label: str, arm: str, deck_root: Path, record_root: Path,
             ("r1_e1e2t", np.broadcast_to(diag["r1_e1e2t"][..., None], raw.shape),
              np.broadcast_to(r1, raw.shape)),
             ("e3t_divisor", diag["e3t"][..., :30], stretched),
+            ("actual_scaled_tendency", diag["actual_tendency"][..., :30], raw),
             ("scaled_tendency", diag["tendency"][..., :30], raw),
             ("rhs_add", rhs_post,
              _global(records, "rhs_postadd", tracer_index)[..., :30]),
