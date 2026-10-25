@@ -47,7 +47,7 @@ import numpy as np
 from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.thermo import saturation_vapor_pressure
-from legoesm.ocean.bulk_flux_omip import air_sea_fluxes
+from legoesm.ocean.bulk_flux_omip import air_sea_fluxes, blk_oce_2
 from legoesm.ocean.eos import VALID_FREEZE_SCHEMES, freezing_point
 
 # --- per-step host-transfer ledger (scaling-M2 honest-cost accounting) ------
@@ -1414,7 +1414,6 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
     namsbc_blk specifies. Tripole only; the sampler raises otherwise.
     """
     from legoesm.ocean.state import OceanSurfaceForcing
-    sigma_sb = float(constants.sigma_sb)
     T_freeze = float(constants.T_freeze)
 
     forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
@@ -1459,31 +1458,24 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
     # (NEMO blk_oce_2 receives theta_air_zt for the rain/snow terms and the
     # ABSOLUTE skin/bulk SST for LW + evap heat content; rcp/rcpi/rLfus are
     # the NEMO-parity values.)
-    lw_net = constants.emissivity_seawater_lw * (
-        np.asarray(forc["lw_down"], dtype=np.float64) - sigma_sb * T_sfc_K ** 4
-    )
     precip_np = np.asarray(forc["precip"], dtype=np.float64)
     snow_np = (np.asarray(forc["snow"], dtype=np.float64)
                if forc.get("snow") is not None else np.zeros_like(precip_np))
-    # CORE-II precip = RAIN+SNOW; guard tiny negative rain from regridding.
-    rain_np = np.maximum(precip_np - snow_np, 0.0)
     from legoesm.ocean.bulk_flux_omip import potential_air_temperature_10m
     theta_air_j, _ = potential_air_temperature_10m(
         jnp.asarray(forc["T_air"]), jnp.asarray(forc["q_air"]),
         None if slp is None else jnp.asarray(slp))
-    theta_air_C = np.asarray(theta_air_j, dtype=np.float64) - T_freeze
-    T_sfc_C = T_sfc_K - T_freeze
-    q_precip_evap = (
-        - snow_np * float(constants.L_fus_nemo)
-        - np.asarray(evap, dtype=np.float64) * float(constants.c_p_seawater) * T_sfc_C
-        + rain_np * float(constants.c_p_seawater) * theta_air_C
-        + snow_np * float(constants.c_p_ice_nemo) * np.minimum(theta_air_C, 0.0)
+    surface = blk_oce_2(
+        np.asarray(theta_air_j, dtype=np.float64), T_sfc_K - T_freeze,
+        np.asarray(forc["lw_down"], dtype=np.float64), precip_np, snow_np,
+        np.asarray(evap, dtype=np.float64), np.asarray(sh), np.asarray(lh),
+        array_namespace=np,
     )
     # Under a prescribed-ice boundary (under_ice) ``_ice_surface_heat``
     # suppresses this on the ice-covered fraction (snow falling on ice does
     # NOT cool the ocean) and cuts the under-ice SW; otherwise it is the
     # albedo-only surrogate.
-    q_non_sw = np.asarray(sh) + np.asarray(lh) + lw_net + q_precip_evap
+    q_non_sw = surface.qns
     sw_net, q_net = _ice_surface_heat(
         forc["sw_down"], q_non_sw, ice_albedo,
         under_ice=under_ice, tau_ice_sw=tau_ice_sw)
@@ -1613,7 +1605,6 @@ def compute_omip2_surface_forcing_jax(
     until the freshwater channel is wired into the scan body.
     """
     from legoesm.ocean.state import OceanSurfaceForcing
-    sigma_sb = float(constants.sigma_sb)
     T_freeze = float(constants.T_freeze)
 
     def _sample(name):
@@ -1644,19 +1635,12 @@ def compute_omip2_surface_forcing_jax(
     # Kirchhoff eps_w, snow fusion, rain/snow heat content at theta_air,
     # evap heat content at the absolute SST.
     from legoesm.ocean.bulk_flux_omip import potential_air_temperature_10m
-    lw_net = constants.emissivity_seawater_lw * (
-        lw_down - sigma_sb * T_sfc_K ** 4)
-    rain = jnp.maximum(precip - snow, 0.0)
     theta_air, _ = potential_air_temperature_10m(T_air, q_air, slp)
-    theta_air_C = theta_air - T_freeze
-    T_sfc_C = T_sfc_K - T_freeze
-    q_precip_evap = (
-        - snow * constants.L_fus_nemo
-        - evap * constants.c_p_seawater * T_sfc_C
-        + rain * constants.c_p_seawater * theta_air_C
-        + snow * constants.c_p_ice_nemo * jnp.minimum(theta_air_C, 0.0)
+    surface = blk_oce_2(
+        theta_air, T_sfc_K - T_freeze, lw_down, precip, snow,
+        evap, sh, lh, array_namespace=jnp,
     )
-    q_net = sh + lh + lw_net + q_precip_evap + sw_down
+    q_net = surface.qns + sw_down
     return OceanSurfaceForcing(
         tau_x=tau_x, tau_y=tau_y, q_net=q_net, sw_down=sw_down,
     )

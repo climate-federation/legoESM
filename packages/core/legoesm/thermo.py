@@ -174,14 +174,20 @@ def saturation_vapor_pressure_goff(
         Saturation vapor pressure [Pa].
     """
     if nemo_source_exact:
-        from legoesm.core.source_rounding import nemo_source_round as R
+        from legoesm.core.source_rounding import (
+            nemo_source_barrier as B,
+            nemo_source_round as R,
+        )
         from legoesm.core import transcendentals as tx
 
         T_K = R(jnp.maximum(T, 180.0))
         rt = R(constants.T_freeze / T_K)
         term1 = R(10.79574 * R(1.0 - rt))
-        term2 = R(5.028 * tx.log10(R(T_K / constants.T_freeze)))
-        inner3 = R(-8.2969 * R(R(T_K / constants.T_freeze) - 1.0))
+        temperature_ratio = R(T_K / B(constants.T_freeze))
+        log_temperature_ratio = tx.log10(temperature_ratio)
+        term2 = R(5.028 * B(log_temperature_ratio))
+        ratio_minus_one = R(temperature_ratio - 1.0)
+        inner3 = R(-8.2969 * ratio_minus_one)
         scale3 = R(1.50475 * tx.pow(10.0, -4.0))
         term3 = R(scale3 * R(1.0 - tx.pow(10.0, inner3)))
         inner4 = R(4.76955 * R(1.0 - rt))

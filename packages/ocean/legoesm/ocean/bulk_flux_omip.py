@@ -78,7 +78,11 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core import transcendentals as tx
-from legoesm.core.source_rounding import nemo_source_round as R
+from legoesm.core.source_rounding import (
+    nemo_fortran_sign as _sign,
+    nemo_source_barrier as B,
+    nemo_source_round as R,
+)
 from legoesm.thermo import saturation_vapor_pressure_goff
 
 
@@ -118,16 +122,15 @@ def _fmin(first, second):
     return jnp.where(first < second, first, second)
 
 
-def _sign(magnitude, sign_source):
-    return jnp.copysign(jnp.abs(magnitude), sign_source)
-
-
 def _q_sat_nemo(T_K, p_Pa):
-    e_s = saturation_vapor_pressure_goff(T_K, nemo_source_exact=True)
-    return R(_REPS0 * e_s / (p_Pa - (1.0 - _REPS0) * e_s))
+    e_s = B(saturation_vapor_pressure_goff(B(T_K), nemo_source_exact=True))
+    numerator = R(_REPS0 * e_s)
+    pressure_correction = R(R(1.0 - _REPS0) * e_s)
+    denominator = R(B(p_Pa) - pressure_correction)
+    return R(numerator / B(denominator))
 
 
-def exner_potential_temperature(T_K, p_Pa):
+def exner_potential_temperature(T_K, p_Pa, *, nemo_source_exact: bool = False):
     """Potential temperature via the Exner function (NEMO ``theta_exner``).
 
     ``theta = T (rpref / p)^gamma_dry`` with ``rpref = 1e5 Pa`` and the
@@ -138,10 +141,15 @@ def exner_potential_temperature(T_K, p_Pa):
     """
     T = jnp.asarray(T_K, dtype=jnp.float64)
     p = jnp.asarray(p_Pa, dtype=jnp.float64)
-    return R(T * tx.pow(_P_EXNER_REF / p, _GAMMA_DRY))
+    if nemo_source_exact:
+        pressure_ratio = R(_P_EXNER_REF / p)
+        return R(T * tx.pow(pressure_ratio, _GAMMA_DRY))
+    return T * (_P_EXNER_REF / p) ** _GAMMA_DRY
 
 
-def pressure_at_height(q_air, slp_Pa, z_m, T_abs_K):
+def pressure_at_height(
+    q_air, slp_Pa, z_m, T_abs_K, *, nemo_source_exact: bool = False
+):
     """Air pressure at height ``z_m`` (NEMO ``pres_temp``, absolute-T branch).
 
     3 fixed-point iterations of the barometric law with the MOIST molar mass
@@ -154,37 +162,64 @@ def pressure_at_height(q_air, slp_Pa, z_m, T_abs_K):
     """
     q = jnp.asarray(q_air, dtype=jnp.float64)
     slp = jnp.asarray(slp_Pa, dtype=jnp.float64)
-    T = jnp.asarray(T_abs_K, dtype=jnp.float64)
+    if not nemo_source_exact:
+        T = jnp.maximum(jnp.asarray(T_abs_K, dtype=jnp.float64), 180.0)
+        p = slp
+        for _ in range(_N_ITER_PRES):
+            e_s = saturation_vapor_pressure_goff(T)
+            q_sat = _REPS0 * e_s / (p - (1.0 - _REPS0) * e_s)
+            ratio = jnp.clip(q / q_sat, 0.0, 2.0)
+            xm = ((1.0 - ratio) * constants.M_dry_air
+                  + ratio * constants.M_water)
+            p = slp * jnp.exp(
+                -constants.g_nemo * xm * z_m / (constants.R_gas_molar * T))
+        return p
+
+    q = B(q)
+    slp = B(slp)
+    T = B(jnp.asarray(T_abs_K, dtype=jnp.float64))
     p = slp
     for _ in range(_N_ITER_PRES):
-        q_sat = _q_sat_nemo(T, p)
+        q_sat = B(_q_sat_nemo(B(T), B(p)))
         ratio = R(q / q_sat)
-        xm = R((1.0 - ratio) * constants.M_dry_air
-               + ratio * constants.M_water)
-        p = R(slp * tx.exp(
-            -constants.g_nemo * xm * z_m / (constants.R_gas_molar * T)))
+        dry_fraction = R(1.0 - ratio)
+        dry_mass = R(dry_fraction * constants.M_dry_air)
+        water_mass = R(ratio * constants.M_water)
+        xm = R(dry_mass + water_mass)
+        numerator = R(R(R(-constants.g_nemo * xm) * z_m))
+        denominator = B(R(constants.R_gas_molar * T))
+        exponent = R(numerator / denominator)
+        p = R(slp * B(tx.exp(exponent)))
     return p
 
 
 def _pressure_from_potential(q_air, slp_Pa, z_m, theta_K):
     """Literal potential-temperature arm of NEMO ``pres_temp``."""
-    q = jnp.asarray(q_air, dtype=jnp.float64)
-    slp = jnp.asarray(slp_Pa, dtype=jnp.float64)
-    theta = jnp.asarray(theta_K, dtype=jnp.float64)
+    q = B(jnp.asarray(q_air, dtype=jnp.float64))
+    slp = B(jnp.asarray(slp_Pa, dtype=jnp.float64))
+    theta = B(jnp.asarray(theta_K, dtype=jnp.float64))
     p = slp
     T = jnp.zeros_like(theta)
     for _ in range(_N_ITER_PRES):
-        T = R(theta * tx.pow(p / _P_EXNER_REF, _GAMMA_DRY))
-        q_sat = _q_sat_nemo(T, p)
+        pressure_ratio = R(p / B(_P_EXNER_REF))
+        power = B(tx.pow(pressure_ratio, _GAMMA_DRY))
+        T = R(theta * power)
+        q_sat = B(_q_sat_nemo(B(T), B(p)))
         ratio = R(q / q_sat)
-        xm = R((1.0 - ratio) * constants.M_dry_air
-               + ratio * constants.M_water)
-        p = R(slp * tx.exp(
-            -constants.g_nemo * xm * z_m / (constants.R_gas_molar * T)))
+        dry_fraction = R(1.0 - ratio)
+        dry_mass = R(dry_fraction * constants.M_dry_air)
+        water_mass = R(ratio * constants.M_water)
+        xm = R(dry_mass + water_mass)
+        numerator = R(R(R(-constants.g_nemo * xm) * z_m))
+        denominator = B(R(constants.R_gas_molar * T))
+        exponent = R(numerator / denominator)
+        p = R(slp * B(tx.exp(exponent)))
     return p, T
 
 
-def potential_air_temperature_10m(T_air_K, q_air, slp_Pa=None):
+def potential_air_temperature_10m(
+    T_air_K, q_air, slp_Pa=None, *, nemo_source_exact: bool = False
+):
     """NEMO blk_oce_1 air-temperature preprocessing at zt = 10 m.
 
     Returns ``(theta_air, p10)``: the potential air temperature
@@ -192,11 +227,15 @@ def potential_air_temperature_10m(T_air_K, q_air, slp_Pa=None):
     :func:`pressure_at_height`.  ``slp_Pa=None`` -> standard atmosphere.
     """
     p_slp = constants.p_atm_std if slp_Pa is None else slp_Pa
-    p10 = pressure_at_height(q_air, p_slp, _ZU_M, T_air_K)
-    return exner_potential_temperature(T_air_K, p10), p10
+    p10 = pressure_at_height(
+        q_air, p_slp, _ZU_M, T_air_K, nemo_source_exact=nemo_source_exact
+    )
+    return exner_potential_temperature(
+        T_air_K, p10, nemo_source_exact=nemo_source_exact
+    ), p10
 
 
-def seawater_q_sat(T_sfc_K, slp_Pa=None):
+def seawater_q_sat(T_sfc_K, slp_Pa=None, *, nemo_source_exact: bool = False):
     """Salt-reduced saturation specific humidity at the sea surface [kg/kg].
 
     NEMO: ``ssq = rdct_qsat_salt * q_sat(SST, slp)`` with the Goff (1957)
@@ -207,12 +246,17 @@ def seawater_q_sat(T_sfc_K, slp_Pa=None):
     ``slp_Pa=None`` falls back to the standard atmosphere.
     """
     p = constants.p_atm_std if slp_Pa is None else slp_Pa
+    T = jnp.asarray(T_sfc_K, dtype=jnp.float64)
     p = jnp.asarray(p, dtype=jnp.float64)
-    q = _q_sat_nemo(jnp.asarray(T_sfc_K, dtype=jnp.float64), p)
-    return R(_QSAT_SALT_FACTOR * q)
+    if nemo_source_exact:
+        q = B(_q_sat_nemo(B(T), B(p)))
+        return R(_QSAT_SALT_FACTOR * q)
+    e_s = saturation_vapor_pressure_goff(T)
+    q = _REPS0 * e_s / (p - (1.0 - _REPS0) * e_s)
+    return _QSAT_SALT_FACTOR * q
 
 
-def rho_air_moist(T_air_K, q_air, slp_Pa=None):
+def rho_air_moist(T_air_K, q_air, slp_Pa=None, *, nemo_source_exact: bool = False):
     """Moist-air density from the ideal-gas law [kg/m^3] (NEMO ``rho_air``).
 
     ``rho = slp / (R_d T (1 + 0.608 q))``, floored at 0.8 like NEMO.
@@ -220,28 +264,45 @@ def rho_air_moist(T_air_K, q_air, slp_Pa=None):
     forcing sets without an slp channel).
     """
     p = constants.p_atm_std if slp_Pa is None else slp_Pa
-    T = jnp.asarray(T_air_K, dtype=jnp.float64)
-    q = jnp.asarray(q_air, dtype=jnp.float64)
-    rho = R(jnp.asarray(p, dtype=jnp.float64) / (
+    if nemo_source_exact:
+        T = jnp.asarray(T_air_K, dtype=jnp.float64)
+        q = jnp.asarray(q_air, dtype=jnp.float64)
+        humidity_factor = R(1.0 + R(_RCTV0 * q))
+        denominator = R(R(constants.R_d * T) * humidity_factor)
+        rho = R(jnp.asarray(p, dtype=jnp.float64) / denominator)
+        return R(_fmax(rho, _RHO_AIR_FLOOR))
+    T = jnp.maximum(jnp.asarray(T_air_K, dtype=jnp.float64), 180.0)
+    q = jnp.maximum(jnp.asarray(q_air, dtype=jnp.float64), 1.0e-6)
+    rho = jnp.asarray(p, dtype=jnp.float64) / (
         constants.R_d * T * (1.0 + _RCTV0 * q)
-    ))
-    return R(_fmax(rho, _RHO_AIR_FLOOR))
+    )
+    return jnp.maximum(rho, _RHO_AIR_FLOOR)
 
 
-def latent_heat_vaporization_sst(T_sfc_K):
-    """Literal NEMO ``L_vap`` empirical formula [J/kg], in binary64."""
+def latent_heat_vaporization_sst(
+    T_sfc_K, *, nemo_source_exact: bool = False
+):
+    """SST-dependent latent heat, with a selectable NEMO-literal arm."""
     T = jnp.asarray(T_sfc_K, dtype=jnp.float64)
-    return R((2.501 - 0.00237 * (T - constants.T_freeze)) * 1.0e6)
+    if nemo_source_exact:
+        delta = R(T - constants.T_freeze)
+        slope = R(0.00237 * delta)
+        return R(R(2.501 - slope) * 1.0e6)
+    from legoesm.thermo import latent_heat_vaporization as _l
+    return _l(T)
 
 
-def moist_air_cp(q_air):
+def moist_air_cp(q_air, *, nemo_source_exact: bool = False):
     """Moist-air specific heat [J/(kg K)] (NEMO ``cp_air``).
 
     NEMO-parity float64 pin around the shared
     :func:`legoesm.thermo.moist_air_cp` (#762).
     """
     q = jnp.asarray(q_air, dtype=jnp.float64)
-    return R(constants.c_p_dry_air_nemo + 1860.0 * q)
+    if nemo_source_exact:
+        return R(constants.c_p_dry_air_nemo + R(1860.0 * q))
+    from legoesm.thermo import moist_air_cp as _cp_moist
+    return _cp_moist(q)
 
 
 def _virt_temp(T_K, q):
@@ -250,24 +311,51 @@ def _virt_temp(T_K, q):
 
 
 def _one_on_obukhov(theta_K, q, u_star, theta_star, q_star):
+    """Parent/public inverse Obukhov implementation."""
+    zqa = 1.0 + _RCTV0 * q
+    inv_L = (
+        constants.g_nemo * constants.kappa_von_karman
+        * (theta_star * zqa + _RCTV0 * theta_K * q_star)
+        / jnp.maximum(u_star * u_star * theta_K * zqa, 1.0e-9)
+    )
+    return jnp.clip(inv_L, -_ONE_ON_L_ABS_MAX, _ONE_ON_L_ABS_MAX)
+
+
+def _one_on_obukhov_nemo(theta_K, q, u_star, theta_star, q_star):
     """Inverse Obukhov length 1/L [1/m] (NEMO ``One_on_L``), |1/L| <= 200.
 
     Virtual-temperature flux form (option (a) in NEMO):
     ``<w'thv'> ~ theta*(1 + 0.608 q) + 0.608 theta q*``.
     """
-    zqa = R(1.0 + _RCTV0 * q)
-    numerator = R(
-        constants.g_nemo * constants.kappa_von_karman
-        * (theta_star * zqa + _RCTV0 * theta_K * q_star)
-    )
-    denominator = R(_fmax(
-        u_star * u_star * theta_K * zqa, 1.0e-9
-    ))
-    inv_L = R(numerator / denominator)
+    theta_K = B(theta_K)
+    q = B(q)
+    u_star = B(u_star)
+    theta_star = B(theta_star)
+    q_star = B(q_star)
+    zqa = R(1.0 + R(_RCTV0 * q))
+    theta_flux = R(theta_star * B(zqa))
+    humidity_scale = R(_RCTV0 * theta_K)
+    humidity_flux = R(humidity_scale * q_star)
+    virtual_flux = R(theta_flux + humidity_flux)
+    gravity_kappa = R(constants.g_nemo * constants.kappa_von_karman)
+    numerator = R(gravity_kappa * virtual_flux)
+    ustar_squared = R(u_star * u_star)
+    denominator = R(ustar_squared * theta_K)
+    denominator = R(denominator * zqa)
+    denominator = R(_fmax(denominator, 1.0e-9))
+    inv_L = R(numerator / B(denominator))
     return R(_sign(_fmin(jnp.abs(inv_L), _ONE_ON_L_ABS_MAX), inv_L))
 
 
 def _ch_n10(sqrt_cdn, stable_01):
+    """Parent/public neutral sensible-heat coefficient."""
+    return jnp.maximum(
+        1.0e-3 * sqrt_cdn * (18.0 * stable_01 + 32.7 * (1.0 - stable_01)),
+        _CX_MIN,
+    )
+
+
+def _ch_n10_nemo(sqrt_cdn, stable_01):
     """Neutral 10-m sensible-heat coefficient (LY08 Eq. 9/12)."""
     value = R(
         1.0e-3 * sqrt_cdn * (18.0 * stable_01 + 32.7 * (1.0 - stable_01)),
@@ -276,56 +364,27 @@ def _ch_n10(sqrt_cdn, stable_01):
 
 
 def _ce_n10(sqrt_cdn):
+    """Parent/public neutral latent-heat coefficient."""
+    return jnp.maximum(1.0e-3 * 34.6 * sqrt_cdn, _CX_MIN)
+
+
+def _ce_n10_nemo(sqrt_cdn):
     """Neutral 10-m latent-heat coefficient (LY08 Eq. 6b)."""
-    value = R(1.0e-3 * (34.6 * sqrt_cdn))
+    scaled_root = R(34.6 * sqrt_cdn)
+    value = R(1.0e-3 * scaled_root)
     return R(_fmax(value, _CX_MIN))
-
-
-def _cd_n10_ncar(wind):
-    """Literal ``cd_n10_ncar`` including arithmetic branch blending."""
-    w = jnp.asarray(wind, dtype=jnp.float64)
-    w6 = R(w * w * w)
-    w6 = R(w6 * w6)
-    gt33 = R(0.5 + _sign(0.5, w - 33.0))
-    low = R(2.7 / w + 0.142 + w / 13.09 - 3.14807e-10 * w6)
-    value = R(1.0e-3 * ((1.0 - gt33) * low + gt33 * 2.34))
-    return R(_fmax(value, _CX_MIN))
-
-
-def _psi_m_ncar(zeta):
-    """Literal ``psi_m_ncar``; both source arms execute before blending."""
-    z = jnp.asarray(zeta, dtype=jnp.float64)
-    x2 = R(jnp.sqrt(jnp.abs(1.0 - 16.0 * z)))
-    x2 = R(_fmax(x2, 1.0))
-    x = R(jnp.sqrt(x2))
-    unstable = R(
-        2.0 * tx.log((1.0 + x) * 0.5)
-        + tx.log((1.0 + x2) * 0.5)
-        - 2.0 * tx.atan(x) + jnp.pi * 0.5
-    )
-    stable_value = R(-5.0 * z)
-    stable = R(0.5 + _sign(0.5, z))
-    return R(stable * stable_value + (1.0 - stable) * unstable)
-
-
-def _psi_h_ncar(zeta):
-    """Literal ``psi_h_ncar``; both source arms execute before blending."""
-    z = jnp.asarray(zeta, dtype=jnp.float64)
-    x2 = R(jnp.sqrt(jnp.abs(1.0 - 16.0 * z)))
-    x2 = R(_fmax(x2, 1.0))
-    unstable = R(2.0 * tx.log(0.5 * (1.0 + x2)))
-    stable_value = R(-5.0 * z)
-    stable = R(0.5 + _sign(0.5, z))
-    return R(stable * stable_value + (1.0 - stable) * unstable)
 
 
 def _un10_from_cd(zu, bulk_wind, cd, psi):
     """Literal ``z0_from_Cd`` then ``UN10_from_CD`` exp/log chain."""
-    z0 = R(zu * tx.exp(-(constants.kappa_von_karman / jnp.sqrt(cd) + psi)))
-    return R(
-        jnp.sqrt(cd) * bulk_wind / constants.kappa_von_karman
-        * tx.log(10.0 / z0)
-    )
+    sqrt_cd = R(jnp.sqrt(cd))
+    k_over_root = R(B(constants.kappa_von_karman) / B(sqrt_cd))
+    exponent = R(-R(k_over_root + psi))
+    z0 = R(zu * tx.exp(exponent))
+    friction_wind = R(sqrt_cd * bulk_wind)
+    velocity_scale = R(friction_wind / B(constants.kappa_von_karman))
+    height_ratio = R(10.0 / z0)
+    return R(velocity_scale * tx.log(height_ratio))
 
 
 def _ncar_transfer_coefficients_exact(theta_air_K, q_air, theta_sst_K, q_sfc,
@@ -341,6 +400,12 @@ def _ncar_transfer_coefficients_exact(theta_air_K, q_air, theta_sst_K, q_sfc,
 
     Returns ``(Cd, Ch, Ce, Ub)`` with ``Ub = max(wind_speed, 0.5)``.
     """
+    from legoesm.core.bulk_flux import (
+        large_yeager_neutral_cd,
+        psi_h,
+        psi_m,
+    )
+
     k = constants.kappa_von_karman
     theta = jnp.asarray(theta_air_K, dtype=jnp.float64)
     q = jnp.asarray(q_air, dtype=jnp.float64)
@@ -354,11 +419,13 @@ def _ncar_transfer_coefficients_exact(theta_air_K, q_air, theta_sst_K, q_sfc,
     dTv = R(_virt_temp(theta, q) - _virt_temp(sst, ssq))
     stable = R(0.5 + _sign(0.5, dTv))
 
-    CdN = _cd_n10_ncar(Ub)
+    CdN = large_yeager_neutral_cd(
+        Ub, nemo_parity=True, nemo_source_exact=True
+    )
     sqrt_CdN = R(jnp.sqrt(CdN))
     Cd = R(CdN)
-    Ch = _ch_n10(sqrt_CdN, stable)
-    Ce = _ce_n10(sqrt_CdN)
+    Ch = _ch_n10_nemo(sqrt_CdN, stable)
+    Ce = _ce_n10_nemo(sqrt_CdN)
     sqrt_Cd = R(sqrt_CdN)
 
     theta_zu = R(_fmax(theta, 180.0))
@@ -371,41 +438,96 @@ def _ncar_transfer_coefficients_exact(theta_air_K, q_air, theta_sst_K, q_sfc,
         theta_star = R(Ch / sqrt_Cd * d_theta)
         q_star = R(Ce / sqrt_Cd * d_q)
 
-        inv_L = _one_on_obukhov(
+        inv_L = _one_on_obukhov_nemo(
             theta_zu, q_zu, u_star, theta_star, q_star
         )
         zeta = R(_ZU_M * inv_L)
         zeta = R(_sign(_fmin(jnp.abs(zeta), _ZETA_ABS_MAX), zeta))
-        psim = _psi_m_ncar(zeta)
+        psim = psi_m(zeta, nemo_source_exact=True)
 
         UN10 = R(_fmax(
             _UN10_FLOOR_M_S, _un10_from_cd(_ZU_M, Ub, Cd, psim)
         ))
 
-        CdN = _cd_n10_ncar(UN10)
+        CdN = large_yeager_neutral_cd(
+            UN10, nemo_parity=True, nemo_source_exact=True
+        )
         sqrt_CdN = R(jnp.sqrt(CdN))
 
-        denom = R(1.0 + sqrt_CdN / k * (tx.log(_ZU_M / 10.0) - psim))
-        Cd = R(_fmax(CdN / (denom * denom), _CX_MIN))
+        log_height = tx.log(R(_ZU_M / 10.0))
+        psi_difference = R(log_height - psim)
+        neutral_over_k = R(sqrt_CdN / B(k))
+        stability_term = R(neutral_over_k * psi_difference)
+        denom = R(1.0 + stability_term)
+        denom_squared = R(denom * denom)
+        Cd = R(_fmax(CdN / B(denom_squared), _CX_MIN))
         sqrt_Cd = R(jnp.sqrt(Cd))
 
-        zh = R((tx.log(_ZU_M / 10.0) - _psi_h_ncar(zeta)) / k / sqrt_CdN)
-        ratio = R(sqrt_Cd / sqrt_CdN)
+        height_log = log_height
+        heat_psi = psi_h(zeta, nemo_source_exact=True)
+        heat_difference = R(height_log - heat_psi)
+        heat_over_k = R(heat_difference / B(k))
+        zh = R(heat_over_k / B(sqrt_CdN))
+        ratio = R(sqrt_Cd / B(sqrt_CdN))
         stable = R(0.5 + _sign(0.5, zeta))
-        ChN = _ch_n10(sqrt_CdN, stable)
-        CeN = _ce_n10(sqrt_CdN)
-        Ch = R(_fmax(ChN * ratio / (1.0 + ChN * zh), _CX_MIN))
-        Ce = R(_fmax(CeN * ratio / (1.0 + CeN * zh), _CX_MIN))
+        ChN = _ch_n10_nemo(sqrt_CdN, stable)
+        CeN = _ce_n10_nemo(sqrt_CdN)
+        ch_numerator = R(ChN * ratio)
+        ch_denominator = R(1.0 + R(ChN * zh))
+        ce_numerator = R(CeN * ratio)
+        ce_denominator = R(1.0 + R(CeN * zh))
+        Ch = R(_fmax(ch_numerator / B(ch_denominator), _CX_MIN))
+        Ce = R(_fmax(ce_numerator / B(ce_denominator), _CX_MIN))
 
     return Cd, Ch, Ce, Ub, theta_zu, q_zu
 
 
 def ncar_transfer_coefficients(theta_air_K, q_air, theta_sst_K, q_sfc,
                                wind_speed, *, nb_iter: int = _NB_ITER_NCAR):
-    """Public coefficient interface; see the literal implementation above."""
-    return _ncar_transfer_coefficients_exact(
-        theta_air_K, q_air, theta_sst_K, q_sfc, wind_speed, nb_iter=nb_iter
-    )[:4]
+    """Legacy/public coefficient interface, bit-identical to the parent."""
+    from legoesm.core.bulk_flux import large_yeager_neutral_cd, psi_m, psi_h
+
+    k = constants.kappa_von_karman
+    theta = jnp.asarray(theta_air_K, dtype=jnp.float64)
+    q = jnp.asarray(q_air, dtype=jnp.float64)
+    sst = jnp.asarray(theta_sst_K, dtype=jnp.float64)
+    ssq = jnp.asarray(q_sfc, dtype=jnp.float64)
+    Ub = jnp.maximum(jnp.asarray(wind_speed, dtype=jnp.float64), _U10_FLOOR_M_S)
+    dTv = _virt_temp(theta, q) - _virt_temp(sst, ssq)
+    stable = jnp.where(dTv > 0.0, 1.0, 0.0)
+    CdN = large_yeager_neutral_cd(Ub, nemo_parity=True)
+    sqrt_CdN = jnp.sqrt(CdN)
+    Cd = CdN
+    Ch = _ch_n10(sqrt_CdN, stable)
+    Ce = _ce_n10(sqrt_CdN)
+    sqrt_Cd = sqrt_CdN
+    d_theta = theta - sst
+    d_q = q - ssq
+    for _ in range(int(nb_iter)):
+        u_star = sqrt_Cd * Ub
+        theta_star = Ch / sqrt_Cd * d_theta
+        q_star = Ce / sqrt_Cd * d_q
+        inv_L = _one_on_obukhov(
+            theta, q, u_star, theta_star, q_star
+        )
+        zeta = jnp.clip(_ZU_M * inv_L, -_ZETA_ABS_MAX, _ZETA_ABS_MAX)
+        psim = psi_m(zeta)
+        UN10 = jnp.maximum(
+            _UN10_FLOOR_M_S, Ub * (1.0 + sqrt_Cd / k * psim)
+        )
+        CdN = large_yeager_neutral_cd(UN10, nemo_parity=True)
+        sqrt_CdN = jnp.sqrt(CdN)
+        denom = 1.0 - sqrt_CdN / k * psim
+        Cd = jnp.maximum(CdN / (denom * denom), _CX_MIN)
+        sqrt_Cd = jnp.sqrt(Cd)
+        zh = -psi_h(zeta) / k / sqrt_CdN
+        ratio = sqrt_Cd / sqrt_CdN
+        stable = jnp.where(zeta > 0.0, 1.0, 0.0)
+        ChN = _ch_n10(sqrt_CdN, stable)
+        CeN = _ce_n10(sqrt_CdN)
+        Ch = jnp.maximum(ChN * ratio / (1.0 + ChN * zh), _CX_MIN)
+        Ce = jnp.maximum(CeN * ratio / (1.0 + CeN * zh), _CX_MIN)
+    return Cd, Ch, Ce, Ub
 
 
 def large_yeager_cd(u10_speed):
@@ -460,31 +582,57 @@ def _nemo_ncar_turbulent(
     """The executing round-5 ``blk_oce_1`` NCAR path, statement ordered."""
     u = jnp.asarray(u_wind, dtype=jnp.float64)
     v = jnp.asarray(v_wind, dtype=jnp.float64)
-    T_air = jnp.asarray(T_air_K, dtype=jnp.float64)
-    q = jnp.asarray(q_air, dtype=jnp.float64)
-    sst = jnp.asarray(T_sfc_K, dtype=jnp.float64)
-    slp = jnp.asarray(slp_Pa, dtype=jnp.float64)
     wet = jnp.asarray(mask, dtype=jnp.float64)
+    active = wet != 0.0
+    # Masked forcing files use zero fills.  Give every differentiated source
+    # expression a finite inactive operand; wet-cell primal values are unchanged.
+    T_air = jnp.where(
+        active, jnp.asarray(T_air_K, dtype=jnp.float64), 180.0
+    )
+    q = jnp.where(active, jnp.asarray(q_air, dtype=jnp.float64), 1.0e-6)
+    sst = jnp.where(
+        active, jnp.asarray(T_sfc_K, dtype=jnp.float64), constants.T_freeze
+    )
+    slp = jnp.where(
+        active, jnp.asarray(slp_Pa, dtype=jnp.float64), constants.p_atm_std
+    )
 
     tsk = R(sst)
-    theta_sst = exner_potential_temperature(tsk, slp)
-    wndm = R(jnp.sqrt(u * u + v * v))
-    ssq = (seawater_q_sat(tsk, slp) if q_sfc_override is None
+    theta_sst = exner_potential_temperature(
+        tsk, slp, nemo_source_exact=True
+    )
+    u2 = R(u * u)
+    v2 = R(v * v)
+    wind_squared = R(u2 + v2)
+    safe_wind_squared = jnp.where(wind_squared > 0.0, wind_squared, 1.0)
+    wndm_nonzero = R(jnp.sqrt(safe_wind_squared))
+    wndm = jnp.where(wind_squared > 0.0, wndm_nonzero, 0.0)
+    ssq = (seawater_q_sat(tsk, slp, nemo_source_exact=True)
+           if q_sfc_override is None
            else jnp.asarray(q_sfc_override, dtype=jnp.float64))
-    theta_air, _ = potential_air_temperature_10m(T_air, q, slp)
+    theta_air, _ = potential_air_temperature_10m(
+        T_air, q, slp, nemo_source_exact=True
+    )
     cd, ch, ce, Ub, theta_zu, q_zu = _ncar_transfer_coefficients_exact(
         theta_air, q, theta_sst, ssq, wndm, nb_iter=nb_iter
     )
     pressure, tabs = _pressure_from_potential(
         q_zu, slp, _ZU_M, theta_zu
     )
-    rhoa = (rho_air_moist(tabs, q_zu, pressure) if rho_override is None
+    rhoa = (rho_air_moist(
+        tabs, q_zu, pressure, nemo_source_exact=True
+    ) if rho_override is None
             else jnp.asarray(rho_override, dtype=jnp.float64))
     Urho = R(Ub * _fmax(rhoa, _RHO_FLUX_FLOOR))
     taum = R(Urho * cd * wndm)
     zevap = R(Urho * ce * (q_zu - ssq))
-    sensible = R(Urho * ch * (theta_zu - theta_sst) * moist_air_cp(q_zu))
-    latent_heat = (latent_heat_vaporization_sst(theta_sst)
+    sensible = R(
+        R(R(Urho * ch) * R(theta_zu - theta_sst))
+        * moist_air_cp(q_zu, nemo_source_exact=True)
+    )
+    latent_heat = (latent_heat_vaporization_sst(
+        theta_sst, nemo_source_exact=True
+    )
                    if latent_heat_override is None
                    else jnp.asarray(latent_heat_override, dtype=jnp.float64))
     latent = R(latent_heat * zevap)
@@ -494,7 +642,9 @@ def _nemo_ncar_turbulent(
     latent = R(latent * wet)
     taum = R(taum * wet)
     evap = R(evap * wet)
-    ratio = jnp.where(wndm > 0.0, R(taum / wndm), 0.0)
+    safe_wndm = jnp.where(wndm > 0.0, wndm, 1.0)
+    ratio_nonzero = R(taum / safe_wndm)
+    ratio = jnp.where(wndm > 0.0, ratio_nonzero, 0.0)
     utau = R(ratio * u)
     vtau = R(ratio * v)
     tsk_c = R((tsk - constants.T_freeze) * wet)
@@ -513,6 +663,10 @@ class NemoBlkOceResult(NamedTuple):
     ssv: object
     tsk: object
     ssq: object
+    Cd: object
+    Ch: object
+    Ce: object
+    rhoa: object
     sensible: object
     latent: object
     evap: object
@@ -524,6 +678,80 @@ class NemoBlkOceResult(NamedTuple):
     vtau: object
     taum: object
     wndm: object
+
+
+class BlkOce2Result(NamedTuple):
+    qlwn: object
+    qns: object
+    emp: object
+
+
+def blk_oce_2(
+    theta_air, tsk_c, qlw_down, precip, snow, evap, sensible, latent,
+    *, mask=1.0, precip_factor=1.0, nemo_source_exact: bool = False,
+    array_namespace=jnp,
+):
+    """Assemble NEMO ``blk_oce_2`` once for literal and legacy callers.
+
+    ``nemo_source_exact=True`` retains the record build's statement boundaries.
+    The default branch retains the established OMIP host/scan arithmetic; the
+    caller supplies NumPy or JAX as ``array_namespace`` to preserve its backend.
+    """
+    if nemo_source_exact:
+        wet = jnp.asarray(mask, dtype=jnp.float64)
+        rain = jnp.asarray(precip, dtype=jnp.float64)
+        solid = jnp.asarray(snow, dtype=jnp.float64)
+        tsk_c_arr = jnp.asarray(tsk_c, dtype=jnp.float64)
+        cp_rain = R(
+            R(jnp.asarray(theta_air, dtype=jnp.float64) - constants.T_freeze)
+            * R(constants.c_p_seawater * wet)
+        )
+        cp_snow = R(
+            R(_fmin(theta_air, constants.T_freeze) - constants.T_freeze)
+            * R(constants.c_p_ice_nemo * wet)
+        )
+        cp_sst = R(tsk_c_arr * R(constants.c_p_seawater * wet))
+        tsk_K = R(tsk_c_arr + constants.T_freeze)
+        t2 = R(tsk_K * tsk_K)
+        outgoing_lw = R(R(constants.sigma_sb_nemo * t2) * t2)
+        net_lw = R(jnp.asarray(qlw_down, dtype=jnp.float64) - outgoing_lw)
+        qlwn = R(constants.emissivity_seawater_lw * net_lw)
+        emp = R(
+            R(jnp.asarray(evap, dtype=jnp.float64) - R(rain * precip_factor))
+            * wet
+        )
+        qns = R(
+            R(R(R(qlwn + sensible) + latent)
+              - R(R(solid * precip_factor) * constants.L_fus_nemo))
+            - R(evap * cp_sst)
+        )
+        qns = R(
+            R(qns + R(R(R(rain - solid) * precip_factor) * cp_rain))
+            + R(R(solid * precip_factor) * cp_snow)
+        )
+        return BlkOce2Result(qlwn, R(qns * wet), emp)
+
+    xp = array_namespace
+    theta_air_c = xp.asarray(theta_air) - float(constants.T_freeze)
+    tsk_c_arr = xp.asarray(tsk_c)
+    precip_arr = xp.asarray(precip)
+    snow_arr = xp.asarray(snow)
+    wet = xp.asarray(mask)
+    tsk_K = tsk_c_arr + float(constants.T_freeze)
+    qlwn = float(constants.emissivity_seawater_lw) * (
+        xp.asarray(qlw_down) - float(constants.sigma_sb) * tsk_K ** 4
+    )
+    liquid = xp.maximum(precip_arr - snow_arr, 0.0)
+    qns = (
+        qlwn + xp.asarray(sensible) + xp.asarray(latent)
+        - snow_arr * float(precip_factor) * float(constants.L_fus_nemo)
+        - xp.asarray(evap) * float(constants.c_p_seawater) * tsk_c_arr
+        + liquid * float(precip_factor) * float(constants.c_p_seawater) * theta_air_c
+        + snow_arr * float(precip_factor) * float(constants.c_p_ice_nemo)
+        * xp.minimum(theta_air_c, 0.0)
+    )
+    emp = (xp.asarray(evap) - precip_arr * float(precip_factor)) * wet
+    return BlkOce2Result(qlwn, qns * wet, emp)
 
 
 def nemo_blk_oce_ncar(
@@ -544,39 +772,21 @@ def nemo_blk_oce_ncar(
         R(sst_c_arr + constants.T_freeze), slp_Pa, wet, evap_factor,
         nb_iter=int(nb_iter),
     )
-    T_air = jnp.asarray(T_air_K, dtype=jnp.float64)
     rain = jnp.asarray(precip, dtype=jnp.float64)
     solid = jnp.asarray(snow, dtype=jnp.float64)
-    tsk_c_arr = state.tsk_c
-    cp_rain = R(
-        (state.theta_air - constants.T_freeze)
-        * constants.c_p_seawater * wet
+    surface = blk_oce_2(
+        state.theta_air, state.tsk_c, qlw_down, rain, solid,
+        state.evap, state.sensible, state.latent,
+        mask=wet, precip_factor=precip_factor, nemo_source_exact=True,
     )
-    cp_snow = R(
-        (_fmin(state.theta_air, constants.T_freeze) - constants.T_freeze)
-        * constants.c_p_ice_nemo * wet
-    )
-    cp_sst = R(tsk_c_arr * constants.c_p_seawater * wet)
-    tsk_K = R(tsk_c_arr + constants.T_freeze)
-    t2 = R(tsk_K * tsk_K)
-    outgoing_lw = R(R(constants.sigma_sb_nemo * t2) * t2)
-    net_lw = R(jnp.asarray(qlw_down, dtype=jnp.float64) - outgoing_lw)
-    qlwn = R(constants.emissivity_seawater_lw * net_lw)
-    emp = R((state.evap - rain * precip_factor) * wet)
-    qns = R(
-        qlwn + state.sensible + state.latent
-        - solid * precip_factor * constants.L_fus_nemo
-        - state.evap * cp_sst
-        + (rain - solid) * precip_factor * cp_rain
-        + solid * precip_factor * cp_snow
-    )
-    qns = R(qns * wet)
     qsr = R((1.0 - albedo) * jnp.asarray(qsr_down, dtype=jnp.float64) * wet)
     return NemoBlkOceResult(
         state.theta_air, jnp.asarray(q_air, dtype=jnp.float64), rain,
         sst_c_arr, jnp.asarray(ssu, dtype=jnp.float64),
         jnp.asarray(ssv, dtype=jnp.float64), state.tsk_c, state.ssq,
-        state.sensible, state.latent, state.evap, qsr, qlwn, qns, emp,
+        state.cd, state.ch, state.ce, state.rhoa,
+        state.sensible, state.latent, state.evap, qsr,
+        surface.qlwn, surface.qns, surface.emp,
         state.utau, state.vtau, state.taum, state.wndm,
     )
 
@@ -656,11 +866,7 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
     else:
         u_rel = u_arr
         v_rel = v_arr
-    if algo == "ncar":
-        wind_speed = R(jnp.sqrt(u_rel * u_rel + v_rel * v_rel))
-    else:
-        # Frozen legacy convention; the S1 transcription does not alter it.
-        wind_speed = jnp.sqrt(u_rel ** 2 + v_rel ** 2 + 1e-12)
+    wind_speed = jnp.sqrt(u_rel ** 2 + v_rel ** 2 + 1e-12)
 
     if algo == "ly09_2coeff":
         if q_sfc is None:
@@ -682,18 +888,30 @@ def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
 
     slp_for_sst = constants.p_atm_std if slp_Pa is None else jnp.asarray(
         slp_Pa, dtype=jnp.float64)
-    state = _nemo_ncar_turbulent(
-        u_rel, v_rel, T_air, q_a, sst, slp_for_sst,
-        jnp.ones_like(sst), 1.0, nb_iter=int(nb_iter),
-        q_sfc_override=q_sfc, rho_override=rho_air,
-        latent_heat_override=L_latent,
+    ssq = seawater_q_sat(sst, slp_Pa) if q_sfc is None else jnp.asarray(
+        q_sfc, dtype=jnp.float64)
+    theta_air, p10 = potential_air_temperature_10m(T_air, q_a, slp_Pa)
+    theta_sst = exner_potential_temperature(sst, slp_for_sst)
+    Cd, Ch, Ce, Ub = ncar_transfer_coefficients(
+        theta_air, q_a, theta_sst, ssq, wind_speed, nb_iter=nb_iter,
     )
-    return (-state.utau, -state.vtau, state.sensible, state.latent,
-            state.evap)
+    rho = rho_air_moist(T_air, q_a, p10) if rho_air is None else jnp.asarray(
+        rho_air, dtype=jnp.float64)
+    Urho = Ub * jnp.maximum(rho, _RHO_FLUX_FLOOR)
+    tau_x = -Urho * Cd * u_rel
+    tau_y = -Urho * Cd * v_rel
+    L_vap = latent_heat_vaporization_sst(theta_sst)
+    z_evap = Urho * Ce * (q_a - ssq)
+    shflx = Urho * Ch * (theta_air - theta_sst) * moist_air_cp(q_a)
+    lhflx = L_vap * z_evap
+    evap = -z_evap
+    return tau_x, tau_y, shflx, lhflx, evap
 
 
 __all__ = [
     "air_sea_fluxes",
+    "blk_oce_2",
+    "BlkOce2Result",
     "exner_potential_temperature",
     "large_yeager_cd",
     "large_yeager_ch",
