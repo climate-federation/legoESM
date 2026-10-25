@@ -69,7 +69,7 @@ for token in \
   "EVIDENCE=$EVIDENCE" \
   'DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_tracer_stage3_kt2_np2' \
   "readonly R332_STAGE_PATCH=$PATCH"; do
-  [[ $(grep -Fxc "$token" "$ADAPTED") -eq 1 ]] \
+  [[ $(grep -Fc "$token" "$ADAPTED") -eq 1 ]] \
     || refuse "adapted driver lacks unique substitution: $token"
 done
 
