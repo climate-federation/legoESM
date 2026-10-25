@@ -2,7 +2,8 @@
 
 Date: 2026-10-25.  Base `072e4aa1b1c8`; initial preregistration/design commit
 `9194a71e6`; initial model commit `12c0e9ac6`; exact-resume implementation
-commit `34c520d79`.  Final disposition: **LANDED; the offline S1 boundary is
+commit `34c520d79`; re-review repair `44ca47e21`.  Final disposition:
+**LANDED; the offline S1 boundary and non-NEMO compatibility boundary are
 certified at the exact bar**.  No configuration changed and no NEMO executable
 ran.
 
@@ -137,13 +138,16 @@ coupler, restart and ice-writer consumers found by the full `src/OCE` grep.
 - OMIP/coupler/legacy/AMIP/land/SI3 shared-caller tests: 142/142 PASS.
 - Complete parent/current non-NEMO control: 0/10,231,076 unequal across all
   214 arrays; one-ULP `q_net` plant PASS_NONZERO.
-- Changed-path default gates: 36/36 focused, 142/142 shared callers, and 16/16
-  in-tree SI3 PASS.  The authoritative `land.sh` ORCA2 default gate passes
-  152/152 in 1,049.81 s.  The per-receipt citation gate passes all 13 citations
-  with zero failures/unmapped entries, and its mandatory suite passes 17/17.
-  The correctly rooted full ratchet sweep has 15,254 PASS, 2,557 SKIP, and ten
-  base-tree failures outside this diff (existing AMIP/land/ocean/config audit
-  findings); no failure names a changed file.
+- Resume-2 focused bulk/applicator/scan/aerobulk tests: 72/72 PASS in 95.31 s.
+  The authoritative `land.sh` ORCA2 default inventory passes 152/152 in
+  1,292.61 s, foreground.  The per-receipt citation gate passes all 23
+  citations with zero failures or unmapped entries; its shifted new-source
+  plant exits 1.
+- The dedicated CI ratchet inventory completed foreground: 12,277 PASS, 4
+  SKIP, 8 FAIL in 134.45 s.  All eight are inherited audit findings in files
+  outside this commit (slab-land dispatch; JRA55 test literal; land restart;
+  geothermal/MLE coefficients; MLE/shortwave specs); no failure names a
+  changed file.
 
 Independent review: Claude HOLD + Argon HOLD findings addressed by this
 resume; operator confirmation remains external to this receipt.
@@ -151,8 +155,9 @@ resume; operator confirmation remains external to this receipt.
 ## Choices and open work
 
 - ASKED and complete: exact JIT S1, parent-compatible shared defaults, custom
-  record `SIGN`, finite gradients, removal of duplicate drag/stability and
-  `blk_oce_2`, result coefficients/density, design corrections, and gates.
+  record `SIGN`, finite gradients, unification of only bit-identical helpers
+  and `blk_oce_2`, documented non-unifiable helper pairs, result
+  coefficients/density, design corrections, and gates.
 - UNASKED and unchanged: configure/build/run NEMO, select an ice-cover file,
   alter the shipped comparison/training card, or relax any exact bar.
 - DECISION_NEEDED: ice-cover provenance remains the three-option choice in the
