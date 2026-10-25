@@ -143,3 +143,46 @@ operator-only acquisition above, followed by admission and offline replay.
 Independent reviews: **HOLD** (Claude and Argon) on the superseded acquisition
 tool. Every enumerated finding is repaired above; operator rereview is still
 required before acquisition.
+
+## Resume 2: retained-run admission review repair
+
+Claude and Argon confirmed every earlier acquisition repair and narrowed their
+remaining HOLD to the two retained-run entry paths. Both are repaired without
+changing an observer, a model statement, a configuration value, or a score.
+
+The round-333 wrapper now adapts both the canonical target and the refused-run
+basename predicate from the inherited round-332 raw-V name to
+`orca1ice_tracer_stage3_kt2_np2`. Thus an operator can set
+`R328_EXISTING_RUN` to a retained round-333 refusal and the inherited driver
+will validate it, admit it, and move it back to the canonical round-333 target
+without another NEMO run.
+
+Every `--admit-existing` invocation, including the in-place canonical path,
+now reads its expected producer from the run's single-entry
+`producer_commit.txt` and its binary digest from `nemo.sha256`. Admission
+requires the producer to be a local commit object and an ancestor of the
+admission commit, and hashes the run's `nemo` against that manifest. The
+in-place path no longer substitutes current `HEAD` for the producer or depends
+on a currently staged target-build executable.
+
+The read-only preflight constructs a disposable, manifest-pinned round-333
+run and passes it through both paths: first in-place at the canonical name,
+then through `R328_EXISTING_RUN` under `refused/` with the round-333 refusal
+basename. Its terminal control is
+`R333_SYNTHETIC_RETAINED_ADMISSION_PASS routes=in-place,retained`. The complete
+preflight remains green: 77 inherited tests and 6 round-333 tests, all seven
+placement plants, both-rank bounds/sign fixtures, 140-file deterministic
+passivity, eight Fortran syntax proofs, 1,367 floating-point instructions on
+both object arms, and 409/421 identical same-program units. It ends at
+`ORCA2_ROUND333_TRACER_PREFLIGHT_READY`; no NEMO executable ran.
+
+The exact ORCA2 landing battery passes 152 tests in 1,139.58 seconds. The
+per-receipt citation gate still passes 8 citations with zero failures, zero
+unmapped citations, and zero map-audit failures; its self-test plants fire.
+No DINO month run is required because no model or package file changed.
+Codex review: operator. The two reviewer HOLD items are dispositioned here;
+operator rereview remains required before acquisition.
+
+Disposition remains **ACQUISITION_NEEDED** at the same operator command and
+expected evidence directory above. This resume makes both recovery paths
+usable; it does not admit or synthesize the missing tracer record.
