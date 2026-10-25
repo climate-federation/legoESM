@@ -200,8 +200,7 @@ outside this decided one-rank O5 claim.
 - The verifier was also run directly on the retained failed
   `reference_3step/ocean.output`: expected refusal rc 2, with lines 193, 195,
   and 197 quoted verbatim.
-- Private-import ratchet: 6 passed against a complete archived checkout (the
-  operator work clone omits two tracked ML sentinel files).
+- Private-import ratchet: 6 passed in this complete checkout.
 - Citation gate: all nine SI3 receipts and the default gate PASS with zero
   failures, unmapped citations, or stale full-map entries; gate tests: 17
   passed.
