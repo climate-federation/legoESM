@@ -205,6 +205,46 @@ def test_admit_existing_accepts_retained_run_from_older_ancestor_commit(
     assert admitted["binaries_checked"] == 2
 
 
+def test_rebased_producer_requires_a_patch_equivalent_head_commit(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args], cwd=repo, check=True, text=True, capture_output=True
+        )
+
+    git("init", "-q")
+    git("config", "user.name", "O5 test")
+    git("config", "user.email", "o5-test@example.invalid")
+    tracked = repo / "tracked.txt"
+    tracked.write_text("base\n")
+    git("add", "tracked.txt")
+    git("commit", "-q", "-m", "base")
+    base = git("rev-parse", "HEAD").stdout.strip()
+
+    tracked.write_text("base\nproducer\n")
+    git("commit", "-q", "-am", "producer")
+    producer = git("rev-parse", "HEAD").stdout.strip()
+    git("commit", "-q", "--amend", "-m", "rebased producer")
+    rebased_branch = git("branch", "--show-current").stdout.strip()
+
+    # The amended commit is patch-equivalent even though the original object is
+    # no longer an ancestor.  The helper must accept that exact rebase case.
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", producer, "HEAD"], cwd=repo
+    )
+    assert ancestor.returncode != 0
+    assert gate._producer_is_ancestor_or_rebased_equivalent(producer, repo)
+
+    git("checkout", "-q", "-b", "unrelated", base)
+    tracked.write_text("base\nunrelated\n")
+    git("commit", "-q", "-am", "unrelated")
+    unrelated = git("rev-parse", "HEAD").stdout.strip()
+    git("checkout", "-q", rebased_branch)
+    assert not gate._producer_is_ancestor_or_rebased_equivalent(unrelated, repo)
+
+
 def test_writer_uses_stream_records_and_direct_array_writes():
     text = (ACQ / "o5_si3_writer.F90").read_text()
     assert "ACCESS='STREAM'" in text

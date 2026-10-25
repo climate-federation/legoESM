@@ -175,6 +175,29 @@ def _refuse(message: str) -> ValueError:
     return ValueError(f"STATUS PLANT-FIRED: {message}")
 
 
+def _producer_is_ancestor_or_rebased_equivalent(
+    producer: str, repo_root: str | Path = REPO_ROOT
+) -> bool:
+    """Accept a retained producer only if HEAD contains it or the same stable patch."""
+    repo = str(repo_root)
+    if subprocess.run(
+        ["git", "-C", repo, "merge-base", "--is-ancestor", producer, "HEAD"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0:
+        return True
+    equivalent = subprocess.run(
+        ["git", "-C", repo, "cherry", "HEAD", producer, f"{producer}^"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return equivalent.returncode == 0 and equivalent.stdout.splitlines() == [
+        f"- {producer}"
+    ]
+
+
 def read_o5_record(path: str | Path, plant: str | None = None) -> dict[str, Any]:
     """Read one declared-extent O5 raw record, retaining all float64 bit patterns."""
     p = Path(path)
@@ -805,13 +828,8 @@ def admit_evidence_directory(
         check=False,
     ).returncode:
         raise _refuse("producer commit is not a commit object")
-    if subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "merge-base", "--is-ancestor", producer, "HEAD"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    ).returncode:
-        raise _refuse("producer commit is not an ancestor of HEAD")
+    if not _producer_is_ancestor_or_rebased_equivalent(producer):
+        raise _refuse("producer commit is neither an ancestor nor a rebased equivalent of HEAD")
     binary_manifest = manifest / "binaries.sha256"
     binaries = _sha256_manifest(binary_manifest, plant=plant == "binary-checksum")
     binary_targets = {
