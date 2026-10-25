@@ -126,6 +126,7 @@ _OVERFLOW_R56UP3_COMPILED = (
 _OVERFLOW_R62ZDF_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo")
 FILES = {
+    "src/OCE/TRA/traldf_iso.F90": NEMO / "src/OCE/TRA/traldf_iso.F90",
     # ORCA2 round 328 Resume-5: the unmodified round-326 record-build chain.
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90"),
@@ -1808,6 +1809,7 @@ CITATION_MAP = {
     'phycst.F90:26': "rad      = 3.141592653589793_wp / 180._wp",
     'tramle.F90:51': "r5_21 = 5.e0 / 21.e0",
     # ORCA2 round 333: first wet-value stage-3 tracer source-order walk.
+    'src/OCE/TRA/traldf_iso.F90:145': [('#           define   INN                0', 1)],
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:604':
         'ts(:,:,:,jn,Krhs) = 0._wp',
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:637':

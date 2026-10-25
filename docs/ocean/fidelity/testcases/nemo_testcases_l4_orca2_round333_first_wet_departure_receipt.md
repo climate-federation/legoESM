@@ -454,3 +454,61 @@ tools, fixtures, tests and this receipt. No model or package source changed.
 The final state is **STOPPED_FOR_RECORD**: the next action is operator-only
 acquisition with the command above, followed by manifest-pinned admission and
 offline replay before any scientific conclusion or implementation landing.
+
+## Resume 6: macro, shape, stretched-metric, and actual-source repair
+
+Claude and Argon held Resume 5 on five remaining defects. All are repaired in
+committed tool revisions `a1152eb3d` through `c15b2590f`; no NEMO model
+statement, package source, configuration value, score, or threshold changed,
+and Codex did not run NEMO.
+
+The scheme patch now uses the cpp macro `INN` exactly as NEMO defines it at
+`src/OCE/TRA/traldf_iso.F90:145`; no observer can resolve to the uninitialised
+local integer `inn`. The placement gate rejects lowercase observer bounds on
+the raw include and accepts only their legitimate numeric expansion in
+independently preprocessed source. The horizontal observer passes the exact
+asymmetric range NEMO fills, with conforming `zfu` and `zfv` sections rather
+than their one-cell-larger declared arrays. That range and the executed
+gradient and flux statements are pinned at
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90:183-204` and
+`:230-246`.
+
+The writer now records A11/A22 with the executed `r3u/r3v` stretching and the
+ordinary and deepest RHS divisors with the executed `r3t*tmask` stretching.
+The record retains `r3t`, `r3u`, and `r3v` at derived stage-3 `Kmm`. Admission
+replays bitwise from raw operands every recorded gradient, tensor coefficient,
+mask quotient, `zfu`, `zfv`, `zfw`, divergence, divisor, RHS addition, and A33
+statement. The cited ordinary vertical path is
+`ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traldf_iso.f90:259-291`; the
+deepest path is `:297-304`. A dedicated scheme-replay mutation refuses.
+
+The loop control no longer contains a hand-written observed kernel. It compiles
+the actual patched `traldf_iso_scheme.h90` beside an actual pristine copy under
+`-O3 -funroll-all-loops -fno-tree-vectorize -fcheck=bounds`, runs both ranks
+with rank-distinct nonzero `r3*` data and raw negative-zero cells, compares the
+states bitwise, and applies the complete admission replay to both output
+records. Its arithmetic mutation refuses. Placement additionally enforces
+`zdkt < gradient observer`, `A33 first observer < raw statement < limited
+statement`, and `ordinary after observer < deepest before observer`; the
+driver exports `PYTHONPATH` before either embedded Python use.
+
+The clean read-only preflight passes 77 inherited tests, 6 outer-tracer tests,
+and 5 internal-LDF tests; every selector, placement, lowercase-macro, shape,
+bounds, signed-zero, checksum, truncation, arithmetic, full-replay,
+re-admission, and retention control fires. It passes 10 Fortran syntax proofs,
+140-file deterministic passivity, both manifest-pinned admission routes, the
+1,367-instruction inherited stage census, and the unchanged **1,966/1,966**
+production LDF census. Same-program identity remains 408 preprocessed units
+and 420 normalized objects. It ends at
+`ORCA2_ROUND333_TRALDF_PREFLIGHT_READY` and neither builds nor executes NEMO.
+
+Disposition remains **STOPPED_FOR_RECORD**. Operator rereview is required, then
+the operator runs:
+
+```text
+/data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/orca2_r333/repo/scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round333_tracer_acquisition/run.sh --run
+```
+
+Expected evidence remains
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round333/acquisition/orca1ice_traldf_iso_internal_kt2_np2`.
+Codex review: operator.
