@@ -222,12 +222,12 @@ check_r333_ldf_landing() {
     /^[[:space:]]*SUBROUTINE traldf_iso_lap/ {active=1; rotation=0; vertical_title=0; store=0}
     active && /zdkt\(ji,jj,ikp1\)[[:space:]]*=/ {zdkt=NR}
     active && /R333_LDF_OBSERVER/ && /inn/ {lowercase_inn++}
-    active && /CALL r333_ldf_grad/ {grad_count++; grad=NR; grad_lower=($0 ~ /ntsi-\(INN\+1\)/)}
+    active && /CALL r333_ldf_grad/ {grad_count++; grad=NR; grad_lower=($0 ~ /ntsi-\((INN|0)\+1\)/)}
     active && /rotation matrix[[:space:]]+A =/ {if(!rotation) rotation=NR}
     active && /zfv\(ji,jj\) = ahtv/ {zfv=NR}
     active && /CALL r333_ldf_horizontal/ {h_count++; horiz=NR}
     active && /VERTICAL iso-neutral fluxes/ {vertical_title=NR}
-    active && /CALL r333_ldf_vertical_before/ {before_count++; before[before_count]=NR; if($0 ~ /ntsi-\(INN\)/) lower_count++}
+    active && /CALL r333_ldf_vertical_before/ {before_count++; before[before_count]=NR; if($0 ~ /ntsi-\((INN|0)\)/) lower_count++}
     active && /pt\(ji,jj,jk,jn,Krhs\) = pt\(ji,jj,jk,jn,Krhs\) \+/ {update_count++; update[update_count]=NR}
     active && /CALL r333_ldf_vertical_after/ {after_count++; after=NR}
     active && /CALL r333_ldf_bottom_after/ {bottom_count++; bottom=NR}
