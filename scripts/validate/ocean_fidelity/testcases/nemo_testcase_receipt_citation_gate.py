@@ -9651,7 +9651,7 @@ _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2529-2638', 'packages/ice
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2556', 'packages/ice/legoesm/ice/si3_orca2_state.py:2573')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2645-2759', 'packages/ice/legoesm/ice/si3_orca2_state.py:2662-2776')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2927-2934', 'packages/ice/legoesm/ice/si3_orca2_state.py:2944-2951')
-_reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:3039-3046', 'packages/ice/legoesm/ice/si3_orca2_state.py:3056-3063')
+_reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:3039-3046', 'packages/ice/legoesm/ice/si3_orca2_state.py:3056-3063', anchors=['new_state = si3_o1_step(', (')', 1131), 8])
 
 DEFAULT_RECEIPT = (
     REPO / "docs/ocean/fidelity/testcases"
