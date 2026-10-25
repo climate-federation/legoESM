@@ -8824,6 +8824,19 @@ class ModelDriver:
                     phis=Field(data=_phis, name="phis",
                                dims=("nCells",), units="m2/s2"),
                 )
+            # A checkpoint written before the run's N_s tracer (CAM6 MG2
+            # two-moment snow), or with no tracers at all, is REFUSED (oracle
+            # row 22, user pick 'hard error'; replaces the zero-number seed of
+            # 2026-10-20).  Column lanes check their own slot list above.
+            if (self._column_model() is None
+                    and "N_s" in self.tracer_registry.names
+                    and ("tracer_names" not in d
+                         or "N_s" not in [str(n) for n in d["tracer_names"]])):
+                raise ValueError(
+                    f"MPAS checkpoint {path.name} has no snow number N_s, "
+                    f"which this run carries (CAM6 MG2 two-moment snow, "
+                    f"morrison_warm_rain_incloud); restart from a "
+                    f"checkpoint written with N_s or start cold.")
             # Restore moisture tracers (moist MPAS runs); absent ⇒ dry restart.
             # (column lane: the tracers are the bundle's own q slots, already
             # in the view built above)
@@ -8840,26 +8853,6 @@ class ModelDriver:
                                else "kg/kg"))
                     for _k in _names
                 })
-                # Schema-growth migration (grow-only allowlist, as for the
-                # PhysicsState fields): tracers ADDED after a checkpoint
-                # format was in production.  N_s (CAM6 MG2 two-moment snow,
-                # user decision 2026-10-20): zero, so MG2's snow size limit
-                # treats the carried snow as the largest allowed flakes until
-                # new snow adds number.  Without the seed the restart silently
-                # ran single-moment snow.
-                _NEW_OPTIONAL_TRACERS = frozenset({"N_s"})
-                _seed = [n for n in self.tracer_registry.names
-                         if n not in _names and n in _NEW_OPTIONAL_TRACERS]
-                if _seed:
-                    logger.info(
-                        "  MPAS restart checkpoint predates tracer(s) %s — "
-                        "seeding them with zeros.", _seed)
-                    _ref = self.state.tracers[_names[0]].data
-                    self.state = self.state._replace(tracers={
-                        **self.state.tracers,
-                        **{_k: Field(data=jnp.zeros_like(_ref), name=_k,
-                                     dims=("nCells", "nlev"), units="1/kg")
-                           for _k in _seed}})
             # Multilayer (Richards) land columns (MPAS port): stage the
             # ``land_ml_<field>`` arrays into carry_aux and reuse the shared
             # fail-loud restore (#730 exact-field-set contract).  Under MPI the
