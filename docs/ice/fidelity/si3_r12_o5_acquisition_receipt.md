@@ -7,6 +7,17 @@ No NEMO build or integration was run. The operator must run
 `scripts/validate/ocean_fidelity/testcases/nemo_si3_o5_orca2_sas_acquisition/run.sh --run`;
 until that happens, O5 remains UNMEASURED against NEMO.
 
+Resume 3 diagnoses the operator refusal as a gate defect, not a patch or build
+defect. Both O5 builds compiled. The rheology patch contains 46 added raw
+lines, seven of which are blank; NEMO's FCM preprocessing removes those seven
+blank lines, leaving the same 39 nonblank observer lines in the record ppsrc.
+The old same-program check compared all 46 raw additions against those 39
+compiled additions and therefore refused a correct build. Its refusal cleanup
+then removed both O5 build trees, so they were no longer present for the
+requested postmortem despite the retained evidence directory. The repaired
+comparison requires every nonblank compiled insertion exactly and ignores only
+raw blank lines that CPP does not emit. Refusals now retain both built trees.
+
 The frozen overlay is one MPI rank, `nn_it000=1`, `nn_itend=3`,
 `ln_dynALL=T`, `ln_dynRHGADV=F`, `ln_ridging=F`, `ln_rafting=F`,
 `ln_icethd=F`, H79 strength with smoothing, and aEVP with 100 inner
@@ -50,6 +61,9 @@ then checked in every record rather than hard-coded by the reader.
 
 The admission gate imports O1's wet-mask, ULP, signed-zero, and real-log
 helpers and round 328's config-root-normalized same-program comparator.
+The comparator's committed-patch check is defined on compiled source: raw
+blank additions removed by NEMO's CPP are excluded, while every nonblank
+insertion remains exact and all replacements or deletions still refuse.
 `--admit-existing` reads the expected producer commit from the retained run's
 own manifest rather than current `HEAD`; the gate verifies that object with
 `git cat-file` and requires it to be an ancestor of `HEAD`. It reads the two
@@ -68,7 +82,12 @@ required to be 0 ULP on wet masks and full recorded arrays; seam and fold
 maxima are reported. The shared production solver supplies the trace, so
 inner-frame scoring and final-state scoring cannot diverge into two solvers.
 
-Preflight plants cover each of the twelve observer landing sites, header,
+Preflight now applies all three observer patches to unmodified NEMO source,
+preprocesses patched and unpatched copies with the admitted O2 record build's
+real keys and FCM `-P -traditional` flags, and sends those real ppsrc files
+through the same same-program comparator used after an O5 build. A changed
+`fimask` observer expression in that preprocessed source must refuse. Other
+plants cover each of the twelve observer landing sites, header,
 truncation, checksum, SAS time level, swapped fields, signed zero, extents,
 rank collapse, and the first wet-cell one-ULP change. The bounds-checked
 Fortran fixture is a hand-written driver into which preflight splices the
@@ -100,20 +119,22 @@ read-only, while `--run` has RAM, disk, timeout, ERR and EXIT gates.
 
 ## Verification
 
-- Read-only preflight: PASS, nine checklist sections, 12 landing controls and
-  12 misplacement plants, the nonzero real-object census, and its injected-op
+- Read-only preflight: PASS, ten checklist sections, real-preprocessed
+  same-program comparison and insertion plant, 12 landing controls and 12
+  misplacement plants, the nonzero real-object census, and its injected-op
   plant; no NEMO build/run.
-- O1/O2/O5 acquisition plus O5 model regressions: 62 passed, 1 deselected
-  (the O5 acquisition-gate subset, including older-producer admission: 14
-  passed).
+- Resume-3 O1/O2/O5 acquisition-gate regressions: 42 passed in 565.94 s;
+  the O5 direct module contributes 15 passed, including older-producer
+  admission, real-preprocessed same-program proof, and refusal retention.
 - Private-import ratchet: 6 passed against a complete archived checkout (the
   operator work clone omits two tracked ML sentinel files).
 - Citation gate: all nine SI3 receipts and the default gate PASS with zero
   failures, unmapped citations, or stale full-map entries; gate tests: 17
   passed.
 - NEMO acquisition result: ACQUISITION_NEEDED.
-- Re-reviews: Argon RUN; Claude HOLD on retained-run admission was addressed by
+- Previous re-reviews: Argon RUN; Claude HOLD on retained-run admission was addressed by
   using the manifest producer commit and verifying its object and ancestry.
+  Resume-3 Codex-authored diff review is operator-owned under the lane rule.
 
 ## Choices
 

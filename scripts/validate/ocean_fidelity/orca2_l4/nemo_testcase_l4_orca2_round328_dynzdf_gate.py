@@ -257,7 +257,12 @@ def _observer_only(ref: list[str], new: list[str], inserted: list[str], unit: st
         require(tag in ("equal", "insert"),
                 f"{unit}.f90 {tag}s record-build lines {i1 + 1}-{i2}")
         added += new[j1:j2] if tag == "insert" else []
-    require(added == inserted, f"{unit}.f90 insertions differ from its committed patch")
+    # FCM runs CPP with ``-P -traditional`` before writing BLD/ppsrc.  CPP
+    # removes blank lines added by a unified patch, so raw patch blanks are not
+    # part of the compiled source and cannot be required in its insertion list.
+    compiled_insertions = [line for line in inserted if line.strip()]
+    require(added == compiled_insertions,
+            f"{unit}.f90 insertions differ from its committed patch")
 
 
 def same_program_observers(

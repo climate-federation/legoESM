@@ -98,6 +98,7 @@ def test_default_operator_script_is_read_only_preflight(tmp_path):
     ).stdout
     assert "PREFLIGHT_OK: no NEMO build or integration was run" in result.stdout
     assert "PASS_PATCHED_PPSRC_FIXTURE_COVERAGE_AND_12_MISPLACEMENT_PLANTS" in result.stdout
+    assert "PASS_REAL_PREPROCESSED_SAME_PROGRAM_AND_INSERTION_PLANT" in result.stdout
     assert before == after
 
 
@@ -108,6 +109,14 @@ def test_operator_only_block_has_one_rank_timeout_and_real_flag_census():
     assert "-O0" in text and "PASS_FP_CENSUS_REAL_FLAGS" in text
     assert operator.index('build_target "$REF_CFG" 0') < operator.index("same_program")
     assert operator.index("same_program") < operator.index('stage_run "$REF_CFG"')
+
+
+def test_refusal_retains_real_built_trees_for_diagnosis():
+    text = (ACQ / "run.sh").read_text()
+    cleanup = text.split("cleanup() {", 1)[1].split("trap cleanup EXIT", 1)[0]
+    assert 'REFUSE_RETAINED_BUILD: %s' in cleanup
+    assert 'rm -rf -- "$REF_ROOT"' not in cleanup
+    assert 'rm -rf -- "$REC_ROOT"' not in cleanup
 
 
 def test_admit_existing_accepts_retained_run_from_older_ancestor_commit(

@@ -63,8 +63,8 @@ cleanup() {
     elif [[ -n "$ACTIVE_RUN" && -d "$ACTIVE_RUN" ]]; then
       printf 'REFUSE_RETAINED_IN_PLACE: completed run was not relocated: %s\n' "$ACTIVE_RUN" >&2
     fi
-    [[ "$CREATED_REF" -eq 0 || "$RUN_COMPLETE" -eq 1 || ! -d "$REF_ROOT" ]] || rm -rf -- "$REF_ROOT"
-    [[ "$CREATED_REC" -eq 0 || "$RUN_COMPLETE" -eq 1 || ! -d "$REC_ROOT" ]] || rm -rf -- "$REC_ROOT"
+    [[ "$CREATED_REF" -eq 0 || ! -d "$REF_ROOT" ]] || printf 'REFUSE_RETAINED_BUILD: %s\n' "$REF_ROOT" >&2
+    [[ "$CREATED_REC" -eq 0 || ! -d "$REC_ROOT" ]] || printf 'REFUSE_RETAINED_BUILD: %s\n' "$REC_ROOT" >&2
   fi
   exit "$rc"
 }
@@ -157,6 +157,7 @@ checks={
 "o5_rdgrft_entry":r"CALL o5_rdgrft_entry[^\n]+\n\s*CALL ice_dyn_rdgrft",
 "o5_rdgrft_exit":r"CALL ice_dyn_rdgrft[^\n]+\n\s*CALL o5_rdgrft_exit",
 }
+
 def verify(value):
     missing=[name for name,pat in checks.items() if re.search(pat,value,re.M) is None]
     if missing: raise ValueError(','.join(missing))
@@ -172,6 +173,58 @@ for name in checks:
     raise SystemExit(f"STATUS PLANT-FIRED: misplacement plant inert for {name}")
 print("PASS_PATCHED_PPSRC_FIXTURE_COVERAGE_AND_12_MISPLACEMENT_PLANTS")
 PY
+}
+
+preflight_real_same_program() {
+  local scratch=$1
+  local root=$scratch/real_same_program
+  local ref=$root/ORCA2_SAS_ICE_O2_REF/BLD
+  local rec=$root/ORCA2_SAS_ICE_O2_REC/BLD
+  local raw=$root/raw fpp_keys unit name
+  mkdir -p "$ref/ppsrc/nemo" "$ref/obj" "$rec/ppsrc/nemo" "$rec/obj" "$raw"
+  for name in arch_nemo.fcm cpp.fcm bld.cfg; do
+    cp "$O2_REF_BLD/$name" "$ref/$name"
+    cp "$O2_REC_BLD/$name" "$rec/$name"
+  done
+  fpp_keys=$(awk '/bld::tool::fppkeys/ {for(i=2;i<=NF;i++) printf " -D%s",$i}' "$O2_REC_BLD/cpp.fcm")
+  for unit in icedyn_rhg_evp icedyn_rdgrft icedyn; do
+    cp "$NEMO_ROOT/src/ICE/$unit.F90" "$raw/$unit.ref.F90"
+    cp "$raw/$unit.ref.F90" "$raw/$unit.rec.F90"
+  done
+  patch -s --fuzz=0 "$raw/icedyn_rhg_evp.rec.F90" < "$RHG_PATCH"
+  patch -s --fuzz=0 "$raw/icedyn_rdgrft.rec.F90" < "$RDG_PATCH"
+  patch -s --fuzz=0 "$raw/icedyn.rec.F90" < "$DYN_PATCH"
+  for unit in icedyn_rhg_evp icedyn_rdgrft icedyn; do
+    cpp $fpp_keys -P -traditional -I "$O2_REC_BLD/../WORK" \
+      "$raw/$unit.ref.F90" -o "$ref/ppsrc/nemo/$unit.f90"
+    cpp $fpp_keys -P -traditional -I "$O2_REC_BLD/../WORK" \
+      "$raw/$unit.rec.F90" -o "$rec/ppsrc/nemo/$unit.f90"
+    cp "$O2_REF_BLD/obj/$unit.o" "$ref/obj/$unit.o"
+    cp "$O2_REC_BLD/obj/$unit.o" "$rec/obj/$unit.o"
+  done
+  cp "$O2_REF_BLD/ppsrc/nemo/icevar.f90" "$ref/ppsrc/nemo/icevar.f90"
+  cp "$O2_REC_BLD/ppsrc/nemo/icevar.f90" "$rec/ppsrc/nemo/icevar.f90"
+  cp "$O2_REF_BLD/obj/icevar.o" "$ref/obj/icevar.o"
+  cp "$O2_REF_BLD/obj/icevar.o" "$rec/obj/icevar.o"
+  cpp $fpp_keys -P -traditional -I "$O2_REC_BLD/../WORK" \
+    "$WRITER" -o "$rec/ppsrc/nemo/o5_si3_writer.f90"
+  cp "$O2_REC_BLD/obj/o2_si3_state_writer.o" "$rec/obj/o5_si3_writer.o"
+  "$PY" "$GATE" --same-program "$rec" --reference-bld "$ref" \
+    --rhg-patch "$RHG_PATCH" --rdgrft-patch "$RDG_PATCH" --dyn-patch "$DYN_PATCH" \
+    --writer "$WRITER" --new-cfg ORCA2_SAS_ICE_O2_REC \
+    --reference-cfg ORCA2_SAS_ICE_O2_REF --json "$root/same_program.json"
+
+  sed 's/CALL o5_fimask( fimask )/CALL o5_fimask( -fimask )/' \
+    "$raw/icedyn_rhg_evp.rec.F90" > "$raw/icedyn_rhg_evp.plant.F90"
+  cpp $fpp_keys -P -traditional -I "$O2_REC_BLD/../WORK" \
+    "$raw/icedyn_rhg_evp.plant.F90" -o "$rec/ppsrc/nemo/icedyn_rhg_evp.f90"
+  if "$PY" "$GATE" --same-program "$rec" --reference-bld "$ref" \
+       --rhg-patch "$RHG_PATCH" --rdgrft-patch "$RDG_PATCH" --dyn-patch "$DYN_PATCH" \
+       --writer "$WRITER" --new-cfg ORCA2_SAS_ICE_O2_REC \
+       --reference-cfg ORCA2_SAS_ICE_O2_REF >/dev/null 2>&1; then
+    refuse 'real-preprocessed same-program insertion plant did not fail'
+  fi
+  printf 'PASS_REAL_PREPROCESSED_SAME_PROGRAM_AND_INSERTION_PLANT\n'
 }
 
 compile_fixture() {
@@ -283,15 +336,17 @@ PY
 
 run_preflight() {
   local scratch; scratch=$(mktemp -d); ACTIVE_SCRATCH=$scratch
-  printf 'PREFLIGHT 1/9 deck and one-rank three-step overlay\n'; verify_deck
-  printf 'PREFLIGHT 2/9 source patches, preprocessed call-point landings, misplacement plants\n'; check_patches_and_landings "$scratch"
-  printf 'PREFLIGHT 3/9 bounds-checked patched-ppsrc fixture, two ranks, real extents and signed zero\n'; compile_fixture "$scratch/fixture" "$scratch/pp"
-  printf 'PREFLIGHT 4/9 reader and admission payload plants\n'; reader_plants
-  printf 'PREFLIGHT 5/9 real excerpt provenance and synthetic dynamics-on O5 overlay\n'; verify_real_excerpt
-  printf 'PREFLIGHT 6/9 SAS time level derived from Nnn source\n'
+  printf 'PREFLIGHT 1/10 deck and one-rank three-step overlay\n'; verify_deck
+  printf 'PREFLIGHT 2/10 source patches, preprocessed call-point landings, misplacement plants\n'; check_patches_and_landings "$scratch"
+  printf 'PREFLIGHT 3/10 same-program on patched/unpatched real sources preprocessed with record-build CPP flags\n'
+  preflight_real_same_program "$scratch"
+  printf 'PREFLIGHT 4/10 bounds-checked patched-ppsrc fixture, two ranks, real extents and signed zero\n'; compile_fixture "$scratch/fixture" "$scratch/pp"
+  printf 'PREFLIGHT 5/10 reader and admission payload plants\n'; reader_plants
+  printf 'PREFLIGHT 6/10 real excerpt provenance and synthetic dynamics-on O5 overlay\n'; verify_real_excerpt
+  printf 'PREFLIGHT 7/10 SAS time level derived from Nnn source\n'
   grep -q 'Nbb = 1; Nnn = 2; Naa = 3; Nrhs = Naa' "$NEMO_ROOT/src/SAS/nemogcm.F90"
   grep -q 'CALL sbc    ( kstp, Nbb, Nnn )' "$NEMO_ROOT/src/SAS/step.F90"
-  printf 'PREFLIGHT 7/9 real-flag FP census and injected-operation plant\n'
+  printf 'PREFLIGHT 8/10 real-flag FP census and injected-operation plant\n'
   fp_census "$O2_REF_BLD" "$O2_REC_BLD" "$scratch/fp_census.json"
   "$FC" -x f95 -c -O3 -fdefault-real-8 -o "$scratch/fp_plant.o" - <<'F90'
 SUBROUTINE o5_injected_fp_operation(x, y)
@@ -302,13 +357,13 @@ F90
   if fp_census "$O2_REF_BLD" "$O2_REC_BLD" "$scratch/fp_census_plant.json" "$scratch/fp_plant.o"; then
     refuse 'injected floating-point operation census plant did not fail'
   fi
-  printf 'PREFLIGHT 8/9 memory/disk/timeout/trap gates present\n'; ram_gate 1; disk_gate "$EVIDENCE" 1024
+  printf 'PREFLIGHT 9/10 memory/disk/timeout/trap gates present\n'; ram_gate 1; disk_gate "$EVIDENCE" 1024
   grep -q 'timeout "$RUN_TIMEOUT_SEC" mpirun -np 1' "$0"
-  printf 'PREFLIGHT 9/9 default is read-only; operator block not entered\n'
+  printf 'PREFLIGHT 10/10 default is read-only; operator block not entered\n'
   if [[ -n "${PREFLIGHT_JSON:-}" ]]; then
     "$PY" - "$PREFLIGHT_JSON" <<'PY'
 import json,pathlib,sys
-pathlib.Path(sys.argv[1]).write_text(json.dumps({"status":"PREFLIGHT_OK","nemo_run":False,"plants":31},indent=2)+"\n")
+pathlib.Path(sys.argv[1]).write_text(json.dumps({"status":"PREFLIGHT_OK","nemo_run":False,"plants":32},indent=2)+"\n")
 PY
   fi
   printf 'PREFLIGHT_OK: no NEMO build or integration was run\n'
