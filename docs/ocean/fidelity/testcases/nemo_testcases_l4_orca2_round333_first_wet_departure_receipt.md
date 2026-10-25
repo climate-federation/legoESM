@@ -379,3 +379,63 @@ including the complete six-test private-import ratchet and the ORCA2 parallel
 receipt gate. Its log SHA-256 is
 `a7a8c8bc9cccbdd89129c9d96ef88a948f941c99bae3c7b38780d0818bfe8312`.
 No DINO month gate is required because no model or package source changed.
+
+## Resume 5: passive production-flag internal acquisition repair
+
+Claude and Argon held the Resume-4 acquisition tool. All seven enumerated
+findings are repaired in committed tool revision `9d6bf22c5`; no NEMO model
+statement, package source, configuration value, score, or preregistered
+threshold changed, and Codex did not run NEMO.
+
+Every internal capture now occurs through an observer subroutine call after a
+NEMO loop nest, never through an observer branch or copy inside the loop body.
+The gradient recorder copies only NEMO's initialized `INN+1,INN,INN+1,INN`
+horizontal range; the broader range remains confined to the initialized
+vertical gradient. The independent observer-free and observed units are
+compiled with the record build's unchanged production flags
+`-O3 -funroll-all-loops -fno-tree-vectorize`. Their normalized floating-point
+instruction censuses are **1,966 and 1,966**. The arithmetic mutation refuses.
+
+The begin observer now precedes the executing `traldf_iso_a33` call. The
+71-field record adds `e1u`, `e2v`, `rDt`, `r1_Dt`, the A33 mask quotients,
+averaged coefficients, slope-square coefficient, raw coefficient, `ze3w_2`,
+`zcoef0`, and final limited coefficient. For the ordinary Laplacian update it
+adds the pre-add RHS, lower and upper vertical flux, pre-add divergence,
+divisor, and post-add RHS. Time levels are derived by
+`rk3_levels_for_step_stage`; every payload must be finite. Admission replays
+the recorded A33 and RHS statements from these operands and requires bitwise
+identity before the record can be scored.
+
+Placement now brackets both ordinary updates and the deepest update, checks
+the exact gradient and vertical lower bounds, inspects the independently
+preprocessed `ppsrc/nemo/traldf_iso.f90`, and carries the same check into the
+future `$TARGET_ROOT`. Plants cover begin/finish, all three A33 boundaries,
+gradient/horizontal/ordinary/deepest placement, both lower bounds, and both
+bitwise replay families.
+
+The bounds fixture executes the complete 71-field writer for two rank-distinct
+records, including raw negative zero and non-vacuous A33/RHS replays. A second
+production-flag fixture executes the observer-bearing loop bodies on small
+rank arrays and compares them bitwise with an independently written unpatched
+copy; its arithmetic mutation fails. The same-program ledger is produced by
+independently patching and preprocessing pristine NEMO source, not by diffing
+the observed scratch file against itself.
+
+The clean read-only preflight passes 77 inherited tests, 6 outer-tracer tests,
+and 5 internal-LDF tests; all selector, placement, bounds, checksum,
+truncation, arithmetic, replay, re-admission, and retention controls fire. It
+passes 10 Fortran syntax proofs, inherited deterministic passivity over 140
+files, both manifest-pinned admission routes, the 1,367-instruction inherited
+stage census, the 1,966-instruction production LDF census, and same-program
+identity for 408 preprocessed units and 420 normalized objects. It ends at
+`ORCA2_ROUND333_TRALDF_PREFLIGHT_READY` and does not build or execute NEMO.
+
+Disposition remains **STOPPED_FOR_RECORD**. Reviewer re-admission is still
+required before the operator runs:
+
+```text
+/data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/orca2_r333/repo/scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round333_tracer_acquisition/run.sh --run
+```
+
+Expected evidence remains
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round333/acquisition/orca1ice_traldf_iso_internal_kt2_np2`.
