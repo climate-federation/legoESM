@@ -543,3 +543,20 @@ seconds.  The production change is commit `7b03e8b97`; all later commits add
 only the census, receipt and citation evidence.  No configuration value or
 NEMO source changed.  Codex review: operator; independent Claude review:
 operator.
+
+## Operator amendment (2026-10-25, after Claude and Argon reviews: both LAND)
+
+Both reviews independently read the live raw post-fold V record on both ranks:
+the 2,032 kt-1 stage-1 fold-row words are 57 +0.0 and 1,975 -0.0 in live NEMO;
+all 384,025 dry/halo V cells are 361,525 +0.0, 22,500 -0.0, 0 nonzero; wet cells
+equal the stage dump bitwise. The model change drops one premature V-mask
+multiply (NEMO writes the HPG trend unmasked and masks only at the stage
+update). Against LIVE NEMO, dry-cell unequal words fall from 18,661 to 6,262
+with zero wet differences (Claude's own kt-1 runs). The rise of the first
+non-bit row from 2,032 to 7,534 unequal words is measured against the stage
+dump, which writes +0.0 into every dry cell; live NEMO itself scores 10,700
+unequal words against its own rank-0 dump. Omitted above: rung 0 and OMT-1 to
+OMT-4 also change 31-39 rows each, in signed-zero counts only (for example
+rung 0 kt 1 stage 3 v: 493 -> 12,975); no exact row is lost on any pair and
+max/RMS are unchanged on every row. How dry cells should be scored is a user
+decision (pending).
