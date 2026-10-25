@@ -983,13 +983,13 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None
     # inside the dispatcher must make the Statement Family 1 check (`kt = 5241, 3996`) fail.
     orig_si3_arrays = sea_ice_mod.si3_column_step_arrays
 
-    def _planted_si3_arrays_no_r6_step1(arrays, forcing, dt, ice_constants):
+    def _planted_si3_arrays_no_r6_step1(arrays, forcing, dt, ice_constants, **kw):
         return orig_si3_arrays(
             arrays,
             forcing,
             dt,
             ice_constants,
-            _nemo_dh_ice_content_accumulation=False,
+            _nemo_dh_ice_content_accumulation=False, **kw,
         )
 
     with monkeypatch.context() as mp:
@@ -1004,13 +1004,13 @@ def test_d5_non_si3_callers_are_bit_identical(monkeypatch, probe_module) -> None
     # Planted control 5c (in `_si3_step_with_trace` -> `si3_column_step_arrays`
     # call at `sea_ice.py:514`): reverting `_nemo_dh_snow_update=False` inside
     # the dispatcher must make the Statement Family 2 check (`kt = 5460`) fail.
-    def _planted_si3_arrays_no_r6_step2(arrays, forcing, dt, ice_constants):
+    def _planted_si3_arrays_no_r6_step2(arrays, forcing, dt, ice_constants, **kw):
         return orig_si3_arrays(
             arrays,
             forcing,
             dt,
             ice_constants,
-            _nemo_dh_snow_update=False,
+            _nemo_dh_snow_update=False, **kw,
         )
 
     with monkeypatch.context() as mp:

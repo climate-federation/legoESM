@@ -58,10 +58,11 @@ def _div(a, b):
         return float(np.float64(a) / np.float64(b))
 
 
-def _oracle_cell(c, beta, dmin, nn_icesal):
+def _oracle_cell(c, beta, dmin, nn_icesal, rdt=RDT):
     """icethd_da.f90:174-215 for one cell, statement by statement."""
+    nlay_i, nlay_s = len(c["e_i"]), len(c["e_s"])
     zastar = _div(1.0, 1.0 - _LIBM.pow(_div(dmin, 300.0), _div(1.0, beta)))
-    zs = list(c["sz_i"]) if nn_icesal == 4 else [c["s_i"]] * NLAY_I
+    zs = list(c["sz_i"]) if nn_icesal == 4 else [c["s_i"]] * nlay_i
     a, at = c["a_i"], c["at_i"]
     out = dict(
         a_i=a,
@@ -77,11 +78,11 @@ def _oracle_cell(c, beta, dmin, nn_icesal):
     zperi = _div(at * math.pi, 0.66 * zdfloe)
     y = c["sst"] - (c["t_bo"] - RT0)
     zwlat = 3.0e-6 * _LIBM.pow(y if y > 0.0 else 0.0, 1.36)
-    x = zwlat * zperi * RDT
+    x = zwlat * zperi * rdt
     zda_tot = x if x < at else at
     q = _div(zda_tot * a, at)
     zda = q if q < a else a
-    r1dt, r1i, r1s = 1.0 / RDT, 1.0 / NLAY_I, 1.0 / NLAY_S
+    r1dt, r1i, r1s = 1.0 / rdt, 1.0 / nlay_i, 1.0 / nlay_s
 
     def fsum(xs):
         s = 0.0
@@ -340,3 +341,332 @@ def test_zdmax_division_kept_a_division(monkeypatch):
     )
     bad = _mismatch(_jit_call(arr, jnp.float64(beta), jnp.float64(dmin), 4), cells, beta, dmin, 4)
     assert bad, "bare 300 constant did not change any bit"
+
+
+# --- positive-subnormal a_i: the a_i > 0 test at si3_thd_da.py:143 -------------------
+SUBNORMAL = [  # at_i = 1; -0 accumulators so a taken branch (+0 increments) changes bits
+    ("a_subnormal_warm", dict(at_i=1.0, a_i=5e-324, sst=40.0, t_bo=RT0 - 1.8)),
+    ("a_subnormal_cold", dict(at_i=1.0, a_i=5e-324, sst=-1.9, t_bo=RT0 - 1.8)),
+]
+
+
+def _subnormal_cells():
+    cells = _cells(n=len(EDGE) + len(SUBNORMAL), seed=11)[len(EDGE) :]
+    for c, (_, over) in zip(cells, SUBNORMAL, strict=True):
+        c.update(over, sfx_lam=-0.0, hfx_thd=-0.0, wfx_lam=-0.0)
+    return cells
+
+
+def _assert_subnormal_pinned(res, cells, beta, dmin):
+    want = [_oracle_cell(c, beta, dmin, 4) for c in cells]
+    assert all(w["sfx_lam"].hex() == "0x0.0p+0" for w in want)  # oracle takes the branch
+    for f in ("sfx_lam", "hfx_thd", "wfx_lam"):
+        assert np.array_equal(_bits(getattr(res, f)), _bits([w[f] for w in want])), f
+    # D5_PLATFORM_FLOOR: XLA CPU flushes the subnormal operand inside the branch, so a_i
+    # empties (and h_i, h_s are zeroed) where binary64 keeps 5e-324; pinned so it is seen.
+    assert all(w["a_i"] == 5e-324 for w in want)
+    for f in ("a_i", "h_i", "h_s"):
+        assert not _bits(getattr(res, f)).any(), f
+
+
+def test_positive_subnormal_a_i_takes_the_branch():
+    beta, dmin = _deck()
+    cells = _subnormal_cells()
+    _assert_subnormal_pinned(_jit_call(_arrays(cells), beta, dmin, 4), cells, beta, dmin)
+
+
+def test_positive_subnormal_float_compare_plant_fires(monkeypatch):
+    beta, dmin = _deck()
+    cells = _subnormal_cells()
+    monkeypatch.setattr(bl, "_ieee_gt_zero", lambda v: v > 0.0)  # line 143 as `a_i > 0`
+    with pytest.raises(AssertionError):
+        _assert_subnormal_pinned(_jit_call(_arrays(cells), beta, dmin, 4), cells, beta, dmin)
+
+
+# --- MIN/MAX ties: which operand survives -------------------------------------------
+def test_fortran_min_max_ties_keep_the_first_operand():
+    """minsd/maxsd as compiled: on a +0/-0 tie the FIRST model operand survives."""
+    f = jax.jit(lambda a, b: (bl.fortran_min(a, b), bl.fortran_max(a, b)))
+    for a, b in ((0.0, -0.0), (-0.0, 0.0)):
+        mn, mx = f(jnp.float64(a), jnp.float64(b))
+        assert _bits(mn) == _bits(a) and _bits(mx) == _bits(a), (a, b)
+
+
+def test_fortran_min_max_tie_plant_fires():
+    f = jax.jit(lambda a, b: (jnp.minimum(a, b), jnp.maximum(a, b)))
+    kept = [
+        _bits(r) == _bits(a)
+        for a, b in ((0.0, -0.0), (-0.0, 0.0))
+        for r in f(jnp.float64(a), jnp.float64(b))
+    ]
+    assert not all(kept)
+
+
+def _record_operands(monkeypatch, swap=()):
+    """Eager call recording each MIN/MAX site's operands and result, in call order."""
+    calls = []
+    real = {"fortran_min": bl.fortran_min, "fortran_max": bl.fortran_max}
+
+    def recorder(name):
+        def rec(a, b):
+            if name in swap:  # the production line written with its operands reversed
+                a, b = b, a
+            out = real[name](a, b)
+            calls.append((name, _bits(a).copy(), _bits(b).copy(), _bits(out).copy()))
+            return out
+
+        return rec
+
+    for name in real:
+        monkeypatch.setattr(bl, name, recorder(name))
+    beta, dmin = _deck()
+    arr = _arrays(_cells())
+    with jax.disable_jit():
+        res = _call(arr, beta, dmin, 4)
+    return calls, arr, res
+
+
+def _assert_operand_order(calls, arr):
+    k = [name for name, _ in EDGE].index("dT_negzero")
+    assert [c[0] for c in calls] == ["fortran_max", "fortran_min", "fortran_min"]
+    (_, a0, b0, out0), (_, a1, _, _), (_, a2, _, _) = calls
+    assert not a0.any() and b0[k] == _bits(-0.0) and out0[k] == 0  # :187 MAX(+0, -0) = +0
+    assert np.array_equal(a1, _bits(arr["at_i"]))  # :189 minsd keeps at_i on a tie
+    assert np.array_equal(a2, _bits(arr["a_i"]))  # :195 minsd keeps a_i on a tie
+
+
+def test_min_max_operand_order_at_each_site(monkeypatch):
+    calls, arr, _ = _record_operands(monkeypatch)
+    _assert_operand_order(calls, arr)
+
+
+@pytest.mark.parametrize("site", ["fortran_max", "fortran_min"])
+def test_min_max_operand_order_plants_fire(monkeypatch, site):
+    _, _, base = _record_operands(monkeypatch)
+    monkeypatch.undo()
+    calls, arr, res = _record_operands(monkeypatch, swap=(site,))
+    with pytest.raises(AssertionError):
+        _assert_operand_order(calls, arr)
+    if site == "fortran_max":  # pow(+-0, 1.36) = +0: the :187 tie cannot reach a stored bit
+        k = [name for name, _ in EDGE].index("dT_negzero")
+        for f in bl.SI3ThdDa._fields:
+            assert _bits(getattr(res, f))[k] == _bits(getattr(base, f))[k], f
+
+
+# --- glibc pow arm: a firing control -------------------------------------------------
+def _static_call(arr, beta, dmin):
+    """rn_beta/rn_dmin as compile-time constants, as the production config passes them."""
+    cpu = jax.devices("cpu")[0]
+    arr = {k: jax.device_put(jnp.asarray(v), cpu) for k, v in arr.items()}
+    return jax.jit(lambda a: _call(a, beta, dmin, 4))(arr)
+
+
+def test_glibc_pow_arm_fires_at_a_constant_exponent():
+    """XLA rewrites pow at a constant exponent of 3 and then differs from glibc."""
+    cells = _cells(seed=13)
+    arr = _arrays(cells)
+    assert _mismatch(_static_call(arr, 3.0, 8.0), cells, 3.0, 8.0, 4) == {}
+    set_policy(PrecisionPolicy.fp64(transcendentals="native"))
+    bad = _mismatch(_static_call(arr, 3.0, 8.0), cells, 3.0, 8.0, 4)
+    assert bad, "native pow matched glibc: the libm arm is not observable"
+    # On the deck (rn_beta = 1, exponents 1 and 1.36) the arms agree: not observable there.
+    beta, dmin = _deck()
+    assert _mismatch(_static_call(arr, beta, dmin), cells, beta, dmin, 4) == {}
+
+
+# --- production dispatch: step_sea_ice -> si3_column_step_arrays -> ice_thd_da ----------
+C1D_ICE_CFG = (
+    Path(__file__).parents[2].parent
+    / "scripts/validate/ocean_fidelity/testcases/configs/c1d_omip_l3_namelist_ice_cfg"
+)
+# (entry a_i, h_s, sst_m [degC]): warm, cold, NaN sst, total melt, not gathered (a_i <= epsi10),
+# then random cells so rounding-only plants reach a stored bit (the column drops the fluxes)
+_RNG = np.random.default_rng(17)
+PROD_CELLS = [
+    (0.80, 0.20, 2.5),
+    (0.60, 0.10, -1.9),
+    (0.70, 0.30, math.nan),
+    (0.02, 0.25, 40.0),
+    (1.0e-12, 0.10, 3.0),
+] + list(zip(_RNG.uniform(0.05, 0.99, 250), _RNG.uniform(0.0, 0.4, 250),
+             _RNG.uniform(-1.9, 6.0, 250), strict=True))
+
+
+def _production_case():
+    from legoesm.core.field import Field
+    from legoesm.ice.bitz_lipscomb import (
+        SI3SurfaceForcing,
+        ice_enthalpy_from_temperature,
+        option2_salinity_profile,
+        snow_enthalpy_from_temperature,
+    )
+    from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_card
+    from legoesm.ice.state import SI3ColumnState
+
+    card = build_c1d_omip_l3_card()
+    n = len(PROD_CELLS)
+    a, hs, sst = (np.array(col, dtype=np.float64) for col in zip(*PROD_CELLS, strict=True))
+    hi = np.random.default_rng(18).uniform(0.3, 3.0, n)
+    sss = np.full(n, 34.0)
+    s_bulk = np.full(n, 5.0)
+    s_lay = option2_salinity_profile(jnp.asarray(s_bulk), jnp.asarray(sss))
+    ice_c = card.config.ice_constants
+    t_ice = jnp.broadcast_to(jnp.linspace(265.0, 271.0, 3), (n, 3))
+    e_i = ice_enthalpy_from_temperature(t_ice, s_lay, ice_c)
+    e_s = snow_enthalpy_from_temperature(jnp.full((n, 3), 266.0), ice_c)
+
+    def fld(v, layered=False):
+        dims = ("column", "layer") if layered else ("column",)
+        return Field(jnp.asarray(v, jnp.float64), name="x", dims=dims, units="1")
+
+    state = SI3ColumnState(
+        fld(a), fld(hi), fld(hs), fld(np.full(n, 268.0)), fld(e_i, True), fld(e_s, True),
+        fld(s_bulk), fld(s_lay, True), fld(np.zeros(n)),
+    )
+    z = jnp.zeros(n)
+    forcing = SI3SurfaceForcing(  # qlead > 0: no open-water growth, so ice_thd_do adds +0
+        qns_ice=jnp.full(n, -20.0), qsr_ice=jnp.full(n, 30.0), dqns_ice=jnp.full(n, -5.0),
+        qtr_ice_top=z, t_bottom=jnp.full(n, 271.25), sss=jnp.asarray(sss), evaporation=z,
+        snow_precipitation=z, qprec_ice=z, qcn_ice_bottom=z, qsb_ice_bottom=jnp.full(n, 2.0),
+        fhld=z, qlead=jnp.full(n, 5.0), sst_m=jnp.asarray(sst),
+    )
+    return card, state, forcing
+
+
+def _lateral_melt_config(card, beta, dmin):
+    from legoesm.ice.config import SI3LateralMeltConfig
+
+    si3 = card.config.si3._replace(
+        lateral_melt=True, namthd_da=SI3LateralMeltConfig(rn_beta=beta, rn_dmin=dmin))
+    return card.config._replace(si3=si3)
+
+
+def _dispatch(config, state, forcing, dt, traced=False):
+    """Jitted step_sea_ice; ``traced`` passes &namthd_da as jit arguments (training override)."""
+    from legoesm.ice.config import SI3LateralMeltConfig
+    from legoesm.ice.sea_ice import step_sea_ice
+
+    cpu = jax.devices("cpu")[0]
+    z = jnp.zeros(state.concentration.data.shape)
+    state, forcing = jax.device_put((state, forcing), cpu)
+    if not traced:
+        out, _ = jax.jit(lambda s, f: step_sea_ice(s, f, z, z, z, config, 1.0, dt))(state, forcing)
+        return out
+
+    def step(s, f, beta, dmin):
+        si3 = config.si3._replace(namthd_da=SI3LateralMeltConfig(rn_beta=beta, rn_dmin=dmin))
+        return step_sea_ice(s, f, z, z, z, config._replace(si3=si3), 1.0, dt)[0]
+
+    nam = config.si3.namthd_da
+    return jax.jit(step)(state, forcing, jnp.float64(nam.rn_beta), jnp.float64(nam.rn_dmin))
+
+
+def _production_expected(card, state, forcing, beta, dmin):
+    """Oracle ice_thd_da on the column's post-ice_thd_temp state, then non-cooling ice_thd_do."""
+    from legoesm.ice.bitz_lipscomb import SI3ColumnArrays, si3_column_step_arrays
+
+    arrays = SI3ColumnArrays(*(f.data for f in state))
+    pre = jax.jit(lambda s, f: si3_column_step_arrays(s, f, card.dt_seconds, ICE))(
+        *jax.device_put((arrays, forcing), jax.devices("cpu")[0])).post_temp2
+    pre = jax.tree.map(np.asarray, pre)
+    entry_a = np.asarray(state.concentration.data)
+    want = {"concentration": [], "h_ice": [], "h_snow": []}
+    for k in range(len(entry_a)):
+        a, h, hs = float(pre.concentration[k]), float(pre.h_ice[k]), float(pre.h_snow[k])
+        if entry_a[k] > 1e-10:  # icethd.f90:181 gather
+            o = _oracle_cell(
+                dict(at_i=float(entry_a[k]), a_i=a, h_i=h, h_s=hs, e_i=list(pre.e_ice[k]),
+                     e_s=list(pre.e_snow[k]), s_i=float(pre.S_bulk[k]), sz_i=list(pre.S_layers[k]),
+                     sst=float(forcing.sst_m[k]), t_bo=float(forcing.t_bottom[k]),
+                     sfx_lam=0.0, hfx_thd=0.0, wfx_lam=0.0),
+                beta, dmin, card.config.si3.salinity_scheme, rdt=card.dt_seconds)
+            a, h, hs = o["a_i"], o["h_i"], o["h_s"]
+        a_tot = a + 0.0
+        v_tot = h * a + 0.0 + 0.0
+        want["concentration"].append(a_tot)
+        want["h_ice"].append(_div(v_tot, a_tot) if a_tot > 1e-10 else 0.0)
+        want["h_snow"].append(hs)
+    return want
+
+
+def _production_mismatch(out, want):
+    return {
+        f: np.flatnonzero(_bits(getattr(out, f).data) != _bits(want[f])).tolist()
+        for f in want
+        if (_bits(getattr(out, f).data) != _bits(want[f])).any()
+    }
+
+
+def test_d5_card_keeps_lateral_melt_off():
+    deck = parse_namelist(C1D_ICE_CFG, "ice")
+    assert deck[("ice", "namthd", "ln_iceda")][0] is False
+    card, state, forcing = _production_case()
+    assert card.config.si3.lateral_melt is False and card.config.si3.namthd_da is None
+    on = _dispatch(_lateral_melt_config(card, *_deck()), state, forcing, card.dt_seconds)
+    off = _dispatch(card.config, state, forcing, card.dt_seconds)
+    assert not np.array_equal(_bits(on.concentration.data), _bits(off.concentration.data))
+
+
+@pytest.mark.parametrize(
+    "beta, dmin, traced", [(1.0, 8.0, False), (3.0, 8.0, False), (1.0, 6.2, True)])
+def test_production_dispatch_bitwise(beta, dmin, traced):
+    card, state, forcing = _production_case()
+    cfg = _lateral_melt_config(card, beta, dmin)
+    out = _dispatch(cfg, state, forcing, card.dt_seconds, traced=traced)
+    want = _production_expected(card, state, forcing, beta, dmin)
+    assert _production_mismatch(out, want) == {}
+    a = np.asarray(out.concentration.data)
+    if (beta, dmin) == _deck():
+        assert a[3] == 0 and out.h_snow.data[3] == 0  # total melt
+    assert _bits(a[4]) == _bits(state.concentration.data[4])  # not gathered
+    assert np.isnan(forcing.sst_m[2]) and a[2] == want["concentration"][2]  # MAX(0, NaN) = +0
+
+
+def test_production_dispatch_calls_ice_thd_da_with_the_config(monkeypatch):
+    import legoesm.ice.si3_thd_da as da_mod
+
+    calls, real = [], da_mod.si3_ice_thd_da
+
+    def spy(**kw):
+        calls.append({k: kw[k] for k in ("rn_beta", "rn_dmin", "rDt_ice", "nn_icesal")})
+        return real(**kw)
+
+    monkeypatch.setattr(da_mod, "si3_ice_thd_da", spy)
+    card, state, forcing = _production_case()
+    beta, dmin = _deck()
+    _dispatch(_lateral_melt_config(card, beta, dmin), state, forcing, card.dt_seconds)
+    assert calls == [dict(rn_beta=beta, rn_dmin=dmin, rDt_ice=card.dt_seconds, nn_icesal=2)]
+    _dispatch(card.config, state, forcing, card.dt_seconds)
+    assert len(calls) == 1  # ln_icedA = .false. never calls it
+
+
+# (module attribute, replacement, beta, dmin, traced).  Not here, with the reason: source
+# rounding and the SUM order move only sfx/hfx/wfx, which this column does not return
+# (leaf plants above fire on them); a NaN MIN operand needs at_i <= epsi10, never gathered.
+# The 1/300 rewrite happens only on a traced rn_dmin (constants fold exactly).
+PRODUCTION_PLANTS = {
+    "call_removed": ("_si3_column_thd_da", lambda entry, post, *a: post, 1.0, 8.0, False),
+    "max_nan_propagating": ("fortran_max", lambda a, b: jnp.maximum(a, b), 1.0, 8.0, False),
+    "a_eq_zero_never": (
+        "ieee_is_zero", lambda x: jnp.zeros(jnp.shape(x), bool), 1.0, 8.0, False),
+    "zdmax_reciprocal": (
+        "_da_zastar", lambda d, b: 1.0 / (1.0 - bl.transcendentals.pow(d / 300.0, 1.0 / b)),
+        1.0, 6.2, True),
+    "native_pow": (None, None, 3.0, 8.0, False),
+}
+
+
+@pytest.mark.parametrize("plant", sorted(PRODUCTION_PLANTS))
+def test_production_dispatch_plants_fire(plant, monkeypatch):
+    from legoesm.ice import bitz_lipscomb
+
+    name, fake, beta, dmin, traced = PRODUCTION_PLANTS[plant]
+    card, state, forcing = _production_case()
+    want = _production_expected(card, state, forcing, beta, dmin)
+    if plant == "native_pow":
+        set_policy(PrecisionPolicy.fp64(transcendentals="native"))
+    else:
+        monkeypatch.setattr(bitz_lipscomb if plant == "call_removed" else bl, name, fake)
+    cfg = _lateral_melt_config(card, beta, dmin)
+    out = _dispatch(cfg, state, forcing, card.dt_seconds, traced=traced)
+    assert _production_mismatch(out, want), f"plant {plant} did not change any bit"
