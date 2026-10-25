@@ -111,10 +111,10 @@ def cor_config(card) -> SI3IceCorConfig:
     )
 
 
-def o6_ridging_adapter(card, sst_m, *, hstar_scale: float = 1.0):
+def o6_ridging_adapter(card, sst_m, *, murdg_scale: float = 1.0):
     """Drop-in for ``apply_si3_jpl1_ridging`` that runs the O6 kernel at jpl=1."""
     cfg = rdgrft_config(card)
-    cfg = cfg._replace(rn_hstar=cfg.rn_hstar * hstar_scale)
+    cfg = cfg._replace(rn_murdg=cfg.rn_murdg * murdg_scale)
     hi_max = jnp.asarray([0.0, RN_HIMAX])
     sss = jnp.full_like(sst_m, SSS_M)
 
@@ -235,11 +235,11 @@ def o6_cor_adapter(sst_m):
     return run
 
 
-def run_arm(seed, card, state, target, arm: str, sst_m, *, hstar_scale: float = 1.0):
+def run_arm(seed, card, state, target, arm: str, sst_m, *, murdg_scale: float = 1.0):
     saved_rdg, saved_cor = recipe.apply_si3_jpl1_ridging, recipe._ice_cor
     try:
         if arm in ("o6_rdgrft", "o6_rdgrft_cor"):
-            recipe.apply_si3_jpl1_ridging = o6_ridging_adapter(card, sst_m, hstar_scale=hstar_scale)
+            recipe.apply_si3_jpl1_ridging = o6_ridging_adapter(card, sst_m, murdg_scale=murdg_scale)
         if arm == "o6_rdgrft_cor":
             recipe._ice_cor = o6_cor_adapter(sst_m)
         out = seed._exact_dynamics_arm(card, state, target)
@@ -282,10 +282,11 @@ def run_probe(root: Path, restart_root: Path, *, plant: bool = False) -> tuple[d
         moments=seed.trajectory._restart_moments(entry_restart, card)
     )
     sst_m = recipe._periodic_halo(sst_c.T)
-    hstar_scale = 1.0 + 1.0e-10 if plant else 1.0  # plant: O6 rn_hstar moved by 1e-10
+    # plant: O6 rn_murdg moved by 1e-10 (rn_hstar does not bind: hrmin = 2*zhi below ~2.8 m)
+    murdg_scale = 1.0 + 1.0e-10 if plant else 1.0
     arms = {}
     for arm in ARMS:
-        rows, _ = run_arm(seed, card, state, target, arm, sst_m, hstar_scale=hstar_scale)
+        rows, _ = run_arm(seed, card, state, target, arm, sst_m, murdg_scale=murdg_scale)
         arms[arm] = {"summary": summarize(rows), "rows": rows}
     exact = {
         a: v["summary"]["bit_exact_rows"] == v["summary"]["informative_rows"]
@@ -300,7 +301,8 @@ def run_probe(root: Path, restart_root: Path, *, plant: bool = False) -> tuple[d
         "arms": arms,
         "all_informative_rows_bit_exact": exact,
     }
-    code = 0 if (exact["lane3"] and not plant) or (plant and not exact["o6_rdgrft"]) else 1
+    planted_moved = exact["lane3"] and not exact["o6_rdgrft"] and not exact["o6_rdgrft_cor"]
+    code = 0 if (planted_moved if plant else exact["lane3"]) else 1
     return report, code
 
 
