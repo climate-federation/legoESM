@@ -61,3 +61,31 @@ instruction.
   grid-ladder lanes), and finite rung-10 `N=1` gradients with reverse equal to
   forward.  Otherwise this round stops with the measured proposal or
   `ACQUISITION_NEEDED`.
+
+## Resume 8 preregistration — post-LDF boundary and stored-divisor reverse pass
+
+Frozen 2026-10-25 at `aa31c5c6bac1` before extending or running either replay.
+No configuration value changes and no NEMO execution is authorized.
+
+- **R333-R8-P1 — the 18 temperature words.**  The admitted inner-LDF replay
+  says NEMO's pre-add accumulator, scaled tendency, and post-add accumulator
+  are exact at all 18 registered words.  The outer replay is therefore
+  predicted to remain exact through its live LDF term materialisation and
+  ordered add.  A value mismatch in the actual term, masking, ordered add, or
+  a fold/halo operation before the recorded post-LDF boundary refutes this.
+  If none differs, the first confirmed owner moves to the next admitted outer
+  call boundary; no inner statement is inferred across a missing record.
+- **R333-R8-P2 — NaN localization.**  The stored thickness is predicted to
+  contain zero dry/sub-bottom cells that reach a division transpose, where a
+  zero cotangent still evaluates a `0/0`-derived divisor derivative.  The
+  first non-finite reverse primitive and every affected cell class will be
+  measured at the smallest production-faithful N=1 replay.  A first NaN on a
+  strictly positive wet divisor, or before the stored-divisor graph, refutes
+  this mechanism.
+- **R333-R8-P3 — candidate.**  A branch-safe divisor form may use the stored
+  value on positive/live cells and a finite inactive surrogate on zero/dry
+  cells, while retaining the previously finite rebuilt tangent.  It qualifies
+  only if its forward bits equal the direct stored-divisor candidate, its
+  reverse gradients equal forward mode, and Decision 122, both rung-10 labels,
+  the faithful DINO probe, and the N=1 gate all pass.  Otherwise Resume 8 is a
+  measured held proposal with no package-source landing.
