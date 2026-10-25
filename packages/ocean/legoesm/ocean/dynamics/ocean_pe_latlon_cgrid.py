@@ -6246,10 +6246,11 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 "nemo_literal_hpg_vmask must match the V tendency shape; "
                 f"got {_literal_vmask.shape} versus {dv_dt.shape}")
         if bool(config.rk3_vector_raw_vmask):
-            # The vector program carries every Krhs term on NEMO's raw
-            # northern V-pivot support, not HPG alone.  The stage update uses
-            # the same mask in the caller.
-            dv_dt = dv_dt * _literal_vmask
+            # hpg_sco stores its source-native acceleration without a V mask
+            # (dynhpg.f90:400,425).  The vector stage applies vmask later in
+            # stprk3_stg.f90:470; masking the completed Krhs here erases the
+            # sign that this later product must retain on dry fold sources.
+            pass
         else:
             _restore_hpg = (_literal_vmask != 0.0) & (v_mask_3d == 0.0)
             dv_dt = jnp.where(_restore_hpg, hpg_tendency_v, dv_dt * v_mask_3d)
