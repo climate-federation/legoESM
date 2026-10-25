@@ -48,7 +48,7 @@ no statement is fused, and `EXP` is the scalar glibc call.
 
 ## What was transcribed (one shared ice package, `si3_orca2_state.py`)
 
-- `si3_var_itd_1cmc` (`packages/ice/legoesm/ice/si3_orca2_state.py:2529-2638`):
+- `si3_var_itd_1cmc` (`packages/ice/legoesm/ice/si3_orca2_state.py:2546-2655`):
   the reciprocal `ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icevar.f90:1221` (`WHERE( phti(:) /= 0._wp )   ;   z1_hti(:) = 1._wp / phti(:)`),
   the gamma-integral areas and volumes of categories 1 to 4 (`:1232`, first
   line `pa_i(ji,jl) = pati(ji) * z1_hti(ji) * (  ( phti(ji) + 2.*hi_max(jl-1) ) * EXP( -2.*hi_max(jl-1)*z1_hti(ji) ) &`)
@@ -57,9 +57,9 @@ no statement is fused, and `EXP` is the scalar glibc call.
   the per-category temperatures and salinity (`:1294`, `pt_su(:,jl) = ptmsu(:)`)
   and the pond fractions (`:1301` and `:1321`). The small numbers are NEMO's
   (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/par_ice.f90:134-135`). `EXP` is the
-  precision-policy transcendental (`packages/ice/legoesm/ice/si3_orca2_state.py:2556`);
+  precision-policy transcendental (`packages/ice/legoesm/ice/si3_orca2_state.py:2573`);
   every other operation is source-rounded so XLA cannot fuse it.
-- `si3_o3_istate_fill_fields` (`packages/ice/legoesm/ice/si3_orca2_state.py:2645-2759`):
+- `si3_o3_istate_fill_fields` (`packages/ice/legoesm/ice/si3_orca2_state.py:2662-2776`):
   the fit call, the layer-temperature copies, the ice indicator
   (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/iceistate.f90:376`), the salinity clamp
   (`:383`, `s_i(ji,jj,jl) = MIN( MAX( rn_simin , s_i(ji,jj,jl) ) , rn_sinew * sss_m(ji,jj) )`)
@@ -67,11 +67,11 @@ no statement is fused, and `EXP` is the scalar glibc call.
   (`:398-399`, `:409-412`), layer salt (`:406`), pond volumes (`:420-421`),
   `t1_ice` (`:426`) and the concentration cap (`:432`). The HFN bounds,
   salinity profile and category sums are O1's existing helpers, reused.
-- O2 wiring (`packages/ice/legoesm/ice/si3_orca2_state.py:2927-2934`): O2's
+- O2 wiring (`packages/ice/legoesm/ice/si3_orca2_state.py:2944-2951`): O2's
   initial state calls the fit; NEMO's six recorded arrays survive only as the
   test-only `_control_exact_fitted` argument. O2's step does not consume the
   fit: it advances the state it is given
-  (`packages/ice/legoesm/ice/si3_orca2_state.py:3039-3046`, first line
+  (`packages/ice/legoesm/ice/si3_orca2_state.py:3056-3063`, first line
   `new_state = si3_o1_step(`).
 
 Searched before building: `grep -rn -i "ice_var_itd|abraham|1cMc|gamma function|distribute"`

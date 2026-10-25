@@ -9645,6 +9645,13 @@ _reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o2_orca2_sas_gate.
 _reanchor('tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:1191-1214', 'tests/ocean/fidelity/test_nemo_si3_o2_orca2_sas_gate.py:1179-1202')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2489-2675', 'packages/ice/legoesm/ice/si3_orca2_state.py:2777-2958', anchors=['_control_exact_fitted: tuple[Field, Field, Field, Field, Field, Field] | None = None,', 'snwice_mass = sr(tmask_2d * fortran_sum_categories(mass_by_category, axis=-1))', 182])
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2706-2720', 'packages/ice/legoesm/ice/si3_orca2_state.py:2989-3003', anchors=[('zsm_i_ini=zsm_i_ini,', 2), ('snwice_mass=snwice_mass,', 4), 15])
+# --- SI3 ladder round 10 (O5): F-point fold (+17 lines) inserted in si3_lbc_lnk_orca2 ---
+_reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2777-2958', 'packages/ice/legoesm/ice/si3_orca2_state.py:2794-2975')
+_reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2529-2638', 'packages/ice/legoesm/ice/si3_orca2_state.py:2546-2655')
+_reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2556', 'packages/ice/legoesm/ice/si3_orca2_state.py:2573')
+_reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2645-2759', 'packages/ice/legoesm/ice/si3_orca2_state.py:2662-2776')
+_reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2927-2934', 'packages/ice/legoesm/ice/si3_orca2_state.py:2944-2951')
+_reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:3039-3046', 'packages/ice/legoesm/ice/si3_orca2_state.py:3056-3063')
 
 DEFAULT_RECEIPT = (
     REPO / "docs/ocean/fidelity/testcases"
