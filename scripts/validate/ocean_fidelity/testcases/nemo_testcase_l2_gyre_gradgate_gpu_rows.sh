@@ -140,6 +140,8 @@ if mode == "resources":
     assert row["checkpoint_schedule_first_model_step"] == 2, row
     assert row["schedule_primal_bitwise_production"] is True, row
     assert isinstance(row["reverse_primal_bitwise_production"], bool), row
+    assert isinstance(row["cold_reverse_primal_comparison"]["bitwise_equal"], bool), row
+    assert isinstance(row["warm_reverse_primal_comparison"]["bitwise_equal"], bool), row
     assert row["resource_status"] in {"CONFIRMED", "REFUTED", "VACUOUS", "RETRACTED"}, row
     assert row["gradient_agreement_status"] in {"CONFIRMED", "REFUTED"}, row
     for key in ("reverse", "forward", "finite_difference",

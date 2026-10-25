@@ -864,13 +864,20 @@ def test_resource_two_pass_control_uses_fresh_sampler(monkeypatch):
             self.stopped += 1
 
     monkeypatch.setattr(G, "PeakMemorySampler", SingleUseSampler)
-    reverse = jax.jit(jax.value_and_grad(
-        lambda x: (x**2, x), has_aux=True))
+    calls = 0
+
+    def reverse(x):
+        nonlocal calls
+        calls += 1
+        return (x**2, x + calls), 2.0 * x
+
     cold, warm, _ = G.measure_cold_and_warm_reverse(
         reverse, jnp.asarray(3.0), "cpu")
     assert cold.sampler is instances[0]
     assert warm.sampler is instances[1]
     assert all(item.started == item.stopped == 1 for item in instances)
+    assert float(cold.final_state) == 4.0
+    assert float(warm.final_state) == 5.0
 
 
 def test_compiled_reverse_warm_call_does_not_retrace():

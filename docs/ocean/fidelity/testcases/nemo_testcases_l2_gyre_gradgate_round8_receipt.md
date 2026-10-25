@@ -202,7 +202,7 @@ and no 60-step or 360-step projection is admissible:
 
 The resource producer and fail-closed classifier remain at
 `nemo_testcase_l2_gyre_gradient_gate.py:1192` and
-`nemo_testcase_l2_gyre_gradient_gate.py:1367`. Projections will be written only
+`nemo_testcase_l2_gyre_gradient_gate.py:1373`. Projections will be written only
 from the operator's valid measured six-step rows; this receipt fabricates none.
 
 ## Tests and gates

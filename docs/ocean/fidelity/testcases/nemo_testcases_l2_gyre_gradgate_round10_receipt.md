@@ -123,8 +123,8 @@ checks and exits nonzero unless every required outcome is present.
 
 Each resource reverse now returns the final state produced *inside*
 `jax.value_and_grad(..., has_aux=True)`.  Its executable classifier compares
-that transformed primal byte-for-byte with the separately materialized
-production rollout and refuses the row when they differ.  This closes the
+both cold and warm transformed primals byte-for-byte with the separately
+materialized production rollout and refuses the row when either differs.  This closes the
 reviewed gap where an ordinary pre-transform rollout could be exact while the
 timed reverse internally used changed GPU primal bits.  The operator script
 also runs the live boundary-primal plant before resource acquisition.

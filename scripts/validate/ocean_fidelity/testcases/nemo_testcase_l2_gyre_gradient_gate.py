@@ -1242,8 +1242,14 @@ def measure_resources(n_steps: int, schedule: str, *,
         reverse, zero_alpha, backend, after_cold=after_cold)
     cold_wall_s = cold.wall_seconds
     value, gradient = warm.value, warm.gradient
-    transformed_primal_comparison = state_bitwise_report(
+    cold_transformed_primal_comparison = state_bitwise_report(
+        production_base, cold.final_state)
+    warm_transformed_primal_comparison = state_bitwise_report(
         production_base, warm.final_state)
+    transformed_primals_bitwise = bool(
+        cold_transformed_primal_comparison["bitwise_equal"]
+        and warm_transformed_primal_comparison["bitwise_equal"]
+    )
     wall_s = warm.wall_seconds
     sampler = cold.sampler if backend == "gpu" else warm.sampler
     gradient_array = np.asarray(gradient)
@@ -1285,9 +1291,9 @@ def measure_resources(n_steps: int, schedule: str, *,
         "checkpoint_schedule_first_model_step": 2 if n_steps > 1 else None,
         "schedule_primal_bitwise_production": primal_comparison["bitwise"],
         "schedule_primal_comparison": primal_comparison,
-        "reverse_primal_bitwise_production": transformed_primal_comparison[
-            "bitwise_equal"],
-        "reverse_primal_comparison": transformed_primal_comparison,
+        "reverse_primal_bitwise_production": transformed_primals_bitwise,
+        "cold_reverse_primal_comparison": cold_transformed_primal_comparison,
+        "warm_reverse_primal_comparison": warm_transformed_primal_comparison,
         "local_ad_boundary": (
             "separate production primal; unchanged production-step JVP/VJP"),
         "cold_compile_and_reverse_wall_seconds": cold_wall_s,

@@ -65,7 +65,7 @@ must classify REFUTED. Resource rows build
 and time/sample the second blocked execution at
 `nemo_testcase_l2_gyre_gradient_gate.py:1192`. Rows with historical timing
 stamps are executable RETRACTED outcomes, and missing/flat/non-finite sampler
-data are VACUOUS at `nemo_testcase_l2_gyre_gradient_gate.py:1367`. The
+data are VACUOUS at `nemo_testcase_l2_gyre_gradient_gate.py:1373`. The
 constant-time scaling plant and GPU schedule-order plant are direct tests.
 
 ## Production trajectory identity

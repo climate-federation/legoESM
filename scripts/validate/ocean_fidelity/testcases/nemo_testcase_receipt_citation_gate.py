@@ -1403,7 +1403,7 @@ CITATION_MAP = {
         'def enforce_step_replay_byte_gate('),
     'nemo_testcase_l2_gyre_gradient_gate.py:1192': (
         'def measure_resources(n_steps: int, schedule: str, *,'),
-    'nemo_testcase_l2_gyre_gradient_gate.py:1367': (
+    'nemo_testcase_l2_gyre_gradient_gate.py:1373': (
         'def classify_resource_row(row: dict) -> str:'),
     'cfgs/GYRE_OMIP_L2_P3_SM/WORK/traadv.F90:295-298': [
         '! FCT at last stage only with RK3', ('ENDIF', 9), 4],
