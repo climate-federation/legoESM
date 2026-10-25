@@ -28,6 +28,12 @@ normalized maximum is `2.5511626431537103e-13`, over the registered
 `1e-15` bar, and the oracle normalization scale is
 `30.0963970850997 K`.
 
+Salinity departs at that same kt-2 stage-3 boundary on both independently
+constructed labels: 13 wet words are unequal, with maximum absolute difference
+`9.65e-11`. It follows T in the registered row order and therefore does not
+change the first-wet-row identity above. Every earlier T and S row contains
+signed-zero differences only, never a wet value difference.
+
 The clean CPU/fp64/production-JIT artifacts were produced at
 `c238f7232cc6cf24a7243cd6bc554c599cc6e0fa`:
 
@@ -69,24 +75,29 @@ for a Decision-122 change.
 
 The committed operator-only extension imports the reviewed round-328 driver
 and extends the reviewed round-332 writer rather than replacing their
-controls. At kt 2 stage 3 it records `Krhs` after zeroing, advection, surface
-forcing, solar forcing, and lateral mixing; it then records pre-fold `Kbb`,
-`Kmm`, `Kaa`, and `r3t` immediately after the implicit solve. The existing
-stage frame supplies the post-boundary-condition endpoint. Admission rechecks
-the inherited record and compares `Kmm` to the admitted stage-2 state.
+controls. At kt 2 stage 3 it records raw, signed-zero-preserving `Krhs` on both
+ranks after zeroing, advection, surface forcing, solar forcing, lateral mixing,
+and the enabled bottom-heat-flux/BBL/damping group. It then records pre-fold
+`Kbb`, `Kmm`, `Kaa`, and `r3t` after the implicit solve and after the inherited
+kt-1 dump block. Every field has declared `jpi,jpj,jpk` (or `jpi,jpj`) extents
+and a checksum. The existing stage frame supplies the post-boundary-condition
+endpoint; admission rechecks the inherited record and compares rank-0 `Kmm`
+to the admitted stage-2 state.
 
-The clean `--preflight-only` run passed all 77 inherited tests, every inherited
-plant, deterministic passivity across 140 files, eight real-Fortran syntax
-proofs, the normalized 1,367-instruction arithmetic census and its plant, the
-same-program proof (409 identical preprocessed units and 421 identical
-normalized objects), four round-333 parser tests, and both round-333 parser
-plants. It printed
-`ORCA2_ROUND333_TRACER_PREFLIGHT_READY`; it did not execute NEMO.
+The corrected driver adds exact landing checks at the six cited source-order
+locations plus the post-damping boundary, with one misplacement plant per
+observer. It compiles and runs the extended writer for two ranks under
+`-fcheck=bounds`, including raw `-0.0` cells, and has checksum, truncation,
+time-level, wet-zero, and wet-Kmm plants. The arithmetic comparison strips all
+r332/r333 observer calls from its baseline and reports its floating-point
+instruction census. `--admit-existing` is pinned to the retained run's producer
+commit and binary SHA; all `admit-r333-*.log` files remain inside retained
+evidence and final admission runs inside the refused-output retention trap.
 
 Operator command:
 
 ```text
-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/orca2_r333-3229828517/scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round333_tracer_acquisition/run.sh --run
+/data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/orca2_r333/repo/scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round333_tracer_acquisition/run.sh --run
 ```
 
 Expected evidence directory:

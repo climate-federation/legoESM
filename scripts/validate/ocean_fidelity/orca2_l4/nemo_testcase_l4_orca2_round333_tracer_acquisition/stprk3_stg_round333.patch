@@ -1,37 +1,85 @@
 --- stprk3_stg.F90
 +++ stprk3_stg.F90
-@@ -34,0 +35,2 @@
+@@ -34,6 +34,8 @@
+    USE prtctl         ! print control
+    USE dynzdf_round328_writer, ONLY : r328_finish
+                       ! round-328 WRITE-only post-correction boundary
 +   USE round332_writer, ONLY : r332_raw_postfold_v, r333_tracer_open, r333_tracer_rhs, r333_tracer_finish
-+                      ! round-332/333 WRITE-only source-order observers
-@@ -663,0 +667,4 @@
-+      IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) THEN
-+         CALL r333_tracer_open(kstp,kstg,Kbb,Kmm,Krhs,Kaa, &
-+            & l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T'))
-+      ENDIF
-@@ -688,0 +696,3 @@
-+         IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) &
-+            & CALL r333_tracer_rhs(l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
-+            & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T'))
-@@ -696,0 +707,3 @@
-+         IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) &
-+            & CALL r333_tracer_rhs(l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
-+            & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T'))
-@@ -796,0 +810,3 @@
-+            IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) &
-+               & CALL r333_tracer_rhs(l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
-+               & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T'))
-@@ -800,0 +817,3 @@
-+            IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) &
-+               & CALL r333_tracer_rhs(l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
-+               & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T'))
-@@ -812,0 +832,8 @@
-+            IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) THEN
-+               CALL r333_tracer_finish( &
-+                  & l4_canon_3d(ts(:,:,:,jp_tem,Kbb),'T'), l4_canon_3d(ts(:,:,:,jp_sal,Kbb),'T'), &
-+                  & l4_canon_3d(ts(:,:,:,jp_tem,Kmm),'T'), l4_canon_3d(ts(:,:,:,jp_sal,Kmm),'T'), &
-+                  & l4_canon_3d(ts(:,:,:,jp_tem,Kaa),'T'), l4_canon_3d(ts(:,:,:,jp_sal,Kaa),'T'), &
-+                  & l4_canon_2d(r3t(:,:,Kbb),'T'), l4_canon_2d(r3t(:,:,Kmm),'T'), &
-+                  & l4_canon_2d(r3t(:,:,Kaa),'T'))
-+            ENDIF
-@@ -860,0 +888 @@
++                      ! round-332 WRITE-only raw post-fold V observer
+
+    IMPLICIT NONE
+    PRIVATE
+@@ -651,6 +653,10 @@
+       DO jn = 1, jpts
+          ts(:,:,:,jn,Krhs) = 0._wp                                                ! set tracer trends to zero (:,:,:) needed otherwise it does not work (?)
+       END DO
++      IF( .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) THEN ! R333_OBSERVER
++         CALL r333_tracer_open(kstp,kstg,Kbb,Kmm,Krhs,Kaa, & ! R333_OBSERVER
++            & ts(:,:,:,jp_tem,Krhs),ts(:,:,:,jp_sal,Krhs)) ! R333_OBSERVER
++      ENDIF ! R333_OBSERVER
+       IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) THEN
+          l1_filename = 'oracle_rktracer_stage3_kt00000001.bin'
+          OPEN( NEWUNIT=l2_tracer_unit, FILE=TRIM(l1_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
+@@ -683,6 +689,8 @@
+          IF( ln_tile )   CALL dom_tile( ntsi, ntsj, ntei, ntej, ktile = jtile )
+          !
+          CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs, zFu, zFv, zFw, kstg )   ! horizontal & vertical advection
++         IF( .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) & ! R333_OBSERVER
++            & CALL r333_tracer_rhs(ts(:,:,:,jp_tem,Krhs),ts(:,:,:,jp_sal,Krhs)) ! R333_OBSERVER
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+             & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
+             & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+@@ -691,6 +699,8 @@
+             & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+          !
+          CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs,                kstg )   ! surface boundary condition
++         IF( .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) & ! R333_OBSERVER
++            & CALL r333_tracer_rhs(ts(:,:,:,jp_tem,Krhs),ts(:,:,:,jp_sal,Krhs)) ! R333_OBSERVER
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+             & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
+             & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+@@ -791,16 +801,22 @@
+                   DEALLOCATE( l2_qsr_before )
+                ENDIF
+             ENDIF
++            IF( .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) & ! R333_OBSERVER
++               & CALL r333_tracer_rhs(ts(:,:,:,jp_tem,Krhs),ts(:,:,:,jp_sal,Krhs)) ! R333_OBSERVER
+             IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+                & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
+                & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+                                CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )  ! lateral mixing
++            IF( .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) & ! R333_OBSERVER
++               & CALL r333_tracer_rhs(ts(:,:,:,jp_tem,Krhs),ts(:,:,:,jp_sal,Krhs)) ! R333_OBSERVER
+             IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+                & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
+                & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+             IF( ln_trabbc  )   CALL tra_bbc( kstp,      Kmm, ts, Krhs )  ! bottom heat flux
+             IF( ln_trabbl  )   CALL tra_bbl( kstp, Kbb, Kmm, ts, Krhs )  ! advective (and/or diffusive) bottom boundary layer scheme
+             IF( ln_tradmp  )   CALL tra_dmp( kstp, Kbb, Kmm, ts, Krhs )  ! internal damping trends
++            IF( .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) & ! R333_OBSERVER
++               & CALL r333_tracer_rhs(ts(:,:,:,jp_tem,Krhs),ts(:,:,:,jp_sal,Krhs)) ! R333_OBSERVER
+
+             IF( ln_zdfmfc  )   CALL tra_mfc( kstp, Kbb,      ts, Krhs )  ! Mass Flux Convection
+             IF( ln_zdfosm  ) THEN
+@@ -822,6 +838,13 @@
+                CLOSE(l2_tracer_unit)
+                WRITE(numout,*) 'L2_RK_TRACER_STAGE3_DUMP ', kstp, Kbb, Kmm, Krhs, Kaa, TRIM(l1_filename)
+             ENDIF
++            IF( .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) THEN ! R333_OBSERVER
++               CALL r333_tracer_finish( & ! R333_OBSERVER
++                  & ts(:,:,:,jp_tem,Kbb),ts(:,:,:,jp_sal,Kbb), & ! R333_OBSERVER
++                  & ts(:,:,:,jp_tem,Kmm),ts(:,:,:,jp_sal,Kmm), & ! R333_OBSERVER
++                  & ts(:,:,:,jp_tem,Kaa),ts(:,:,:,jp_sal,Kaa), & ! R333_OBSERVER
++                  & r3t(:,:,Kbb),r3t(:,:,Kmm),r3t(:,:,Kaa)) ! R333_OBSERVER
++            ENDIF ! R333_OBSERVER
+             IF( ln_zdfnpc  )   CALL tra_npc( kstp,      Kmm, Krhs, ts    , Kaa  )  ! update after fields by non-penetrative convection
+             !
+          END DO
+@@ -858,6 +881,7 @@
+             CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:,:       ,Kaa), 'V', -1._wp   &
+                &                       , ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp   &
+                &                       , avm_k(:,:,:)        , 'W',  1._wp, ldfull=.TRUE. ) !  lbc_lnk needed for zdf_sh2, moved here to allow tiling in zdf_phy
 +            CALL r332_raw_postfold_v(kstp,kstg,Kaa,vv(:,:,:,Kaa))
+          ELSE
+             CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:,:       ,Kaa), 'V', -1._wp   &
+                &                       , ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp, ldfull=.TRUE. )
