@@ -16,6 +16,7 @@ the hard limit of the existing smoothing field (``icond_sharpness = 1e12``).
 Error metric: the tier-1 CLUBB oracle test's field-normalised
 ``max|ours - oracle| / max|oracle|`` over all columns of a group.
 """
+
 from __future__ import annotations
 
 import json
@@ -25,10 +26,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
-from legoesm import constants
 from legoesm.atmosphere.physics.convection.config import KuoConfig
 from legoesm.atmosphere.physics.convection.kuo import kuo_convection
+
+from legoesm import constants
 
 jax.config.update("jax_enable_x64", True)
 
@@ -47,8 +48,9 @@ def fx():
 
 
 def _run(fx, g, cfg, dtype=jnp.float64, fn=kuo_convection):
-    T, q, pf, ph, w, pq = (jnp.asarray(fx[f"{g}_{k}"], dtype)
-                           for k in ("T", "q", "p_full", "p_half", "w", "ptenq"))
+    T, q, pf, ph, w, pq = (
+        jnp.asarray(fx[f"{g}_{k}"], dtype) for k in ("T", "q", "p_full", "p_half", "w", "ptenq")
+    )
     return fn(T, q, pf, ph, float(fx["meta"]["dt"]), cfg, pq, w)
 
 
@@ -108,8 +110,10 @@ def test_default_smoothing_gap_reported(fx, partition):
         e = (_err(out.dT_dt, fx[f"{g}_ora_{kT}"]), _err(out.dq_v_dt, fx[f"{g}_ora_{kq}"]))
         fires = np.max(np.abs(np.asarray(out.dT_dt)), axis=1) > 0.0
         ora = fx[f"{g}_ora_n_icond2"] > 0
-        print(f"Kuo {partition} {g} default sharpness: dT {e[0]:.3e} dq {e[1]:.3e}; "
-              f"columns firing ours {int(fires.sum())} / oracle {int(ora.sum())} of {len(ora)}")
+        print(
+            f"Kuo {partition} {g} default sharpness: dT {e[0]:.3e} dq {e[1]:.3e}; "
+            f"columns firing ours {int(fires.sum())} / oracle {int(ora.sum())} of {len(ora)}"
+        )
         assert np.all(np.isfinite(e))
 
 
@@ -118,16 +122,20 @@ def test_column_water_residual_matches_oracle(fx):
     zint - 1); zero unless there is divergence inside the cloud.  Ours equals
     the oracle's (its signed rain is sum(dT/alpha dp/g))."""
     from legoesm.thermo import latent_heat_vaporization
+
     for g in GROUPS:
         out = _run(fx, g, KuoConfig(icond_sharpness=HARD))
         T, q = fx[f"{g}_T"], fx[f"{g}_q"]
         dpg = np.diff(fx[f"{g}_p_half"], axis=1) / constants.g
         alpha = np.asarray(latent_heat_vaporization(jnp.asarray(T))) / (
-            constants.c_pd * (1.0 - q) + q * constants.c_pv)
+            constants.c_pd * (1.0 - q) + q * constants.c_pv
+        )
         ours = np.sum((np.asarray(out.dq_v_dt) + np.asarray(out.dT_dt) / alpha) * dpg, axis=1)
         ora = np.sum(fx[f"{g}_ora_dq_k65"] * dpg, axis=1) + fx[f"{g}_ora_rain"]
         scale = np.max(fx[f"{g}_ora_cvgu"])
-        print(f"{g}: max |oracle column water residual| / max cvgu = {np.max(np.abs(ora)) / scale:.3e}")
+        print(
+            f"{g}: max |oracle column water residual| / max cvgu = {np.max(np.abs(ora)) / scale:.3e}"
+        )
         assert np.max(np.abs(ours - ora)) <= TOL * scale
 
 
@@ -140,8 +148,10 @@ def test_gradients_finite_fp64_and_fp32(fx):
     open question in the PR.)"""
     for g in GROUPS:
         for dtype, argnums in ((jnp.float64, (0, 1, 2)), (jnp.float32, (0, 1))):
-            T, q, pf, ph, w, pq = (jnp.asarray(fx[f"{g}_{k}"], dtype)
-                                   for k in ("T", "q", "p_full", "p_half", "w", "ptenq"))
+            T, q, pf, ph, w, pq = (
+                jnp.asarray(fx[f"{g}_{k}"], dtype)
+                for k in ("T", "q", "p_full", "p_half", "w", "ptenq")
+            )
 
             def loss(T, q, pq):
                 o = kuo_convection(T, q, pf, ph, 900.0, KuoConfig(), pq, w)
