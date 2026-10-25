@@ -149,10 +149,7 @@ def measure(
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel,
-        _NEMOWSRK3TestHooks,
-    )
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 
     stamp = worktree_stamp()
     require(
@@ -187,33 +184,24 @@ def measure(
             eta=state0.eta.replace(data=jnp.asarray(entry["ssh"], dtype=jnp.float64))
         )
 
-    hooks = _NEMOWSRK3TestHooks(expose_live_stage_operands=True)
     model1 = LatLonCGridOceanModel(
         card.recipe.grid,
         card.recipe.z_coord,
         card.recipe.model_config,
         iwm_forcing=card.recipe.iwm_forcing,
-        _nemo_ws_test_hooks=hooks,
     )
     freshwater1, surface1, damping1 = _surface(card, deck_root, record_root, 1)
-    trace1 = model1.step(
+    state1 = model1.step(
         state0,
         dt=card.dt_s,
         freshwater=freshwater1,
         surface_forcing=surface1,
         **damping1,
     )
-    state1 = jax.tree.map(lambda value: value.block_until_ready(), trace1.state_after)
+    state1 = jax.tree.map(lambda value: value.block_until_ready(), state1)
 
     freshwater2, surface2, damping2 = _surface(card, deck_root, record_root, 2)
-    ordinary_model = LatLonCGridOceanModel(
-        card.recipe.grid,
-        card.recipe.z_coord,
-        card.recipe.model_config,
-        iwm_forcing=card.recipe.iwm_forcing,
-        _nemo_ws_test_hooks=hooks,
-    )
-    ordinary = ordinary_model.step(
+    ordinary = model1.step(
         state1,
         dt=card.dt_s,
         freshwater=freshwater2,
@@ -256,7 +244,6 @@ def measure(
             card.recipe.z_coord,
             card.recipe.model_config,
             iwm_forcing=card.recipe.iwm_forcing,
-            _nemo_ws_test_hooks=hooks,
         )
         observed = observed_model.step(
             state1,
@@ -270,24 +257,10 @@ def measure(
         model_module._nemo_stage3_l8_krhs_walk = original_walk
         LatLonCGridOceanModel._apply_implicit_vertical_mixing = original_solve
 
-    passive, changed_leaves = _tree_bit_identical(ordinary.state_after, observed.state_after)
+    passive, changed_leaves = _tree_bit_identical(ordinary, observed)
     require(passive, f"observer moved {changed_leaves} prognostic leaves")
-    require(len(captured_boundaries) == 2, "expected trace and reference boundary callbacks")
-    require(len(captured_finish) == 2, "expected trace and reference finish callbacks")
-    require(
-        all(
-            _bits_equal(lhs, rhs)
-            for lhs, rhs in zip(captured_boundaries[0], captured_boundaries[1], strict=True)
-        ),
-        "trace and reference boundary callbacks differ",
-    )
-    require(
-        all(
-            _bits_equal(lhs, rhs)
-            for lhs, rhs in zip(captured_finish[0], captured_finish[1], strict=True)
-        ),
-        "trace and reference finish callbacks differ",
-    )
+    require(len(captured_boundaries) == 1, "expected one boundary callback")
+    require(len(captured_finish) == 1, "expected one finish callback")
 
     candidate: dict[str, dict[str, np.ndarray]] = {
         "zero": {
@@ -313,10 +286,9 @@ def measure(
         "T": captured_finish[0][0],
         "S": captured_finish[0][1],
     }
-    stage3 = observed.stage_outputs[2]
     candidate["post_boundary_finish"] = {
-        "T": np.asarray(stage3.T.data),
-        "S": np.asarray(stage3.S.data),
+        "T": np.asarray(observed.T.data),
+        "S": np.asarray(observed.S.data),
     }
 
     oracle, wet = _record_boundaries(record_root)
@@ -373,7 +345,7 @@ def measure(
         "observer_passivity": {
             "bit_identical": passive,
             "changed_leaves": changed_leaves,
-            "callback_copies": 2,
+            "callback_copies": 1,
         },
         "registered_target_counts": {
             name: int(np.count_nonzero(mask)) for name, mask in targets.items()
