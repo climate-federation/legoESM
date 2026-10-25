@@ -232,15 +232,23 @@ def classify(insn: dict, opt: dict[str, list[str]], cun: dict[str, list[str]]) -
         return [
             (lhs, (a, b), k)
             for lhs, a, b in stmts
-            if dst_ok(lhs, a, b)
             for k, op in enumerate((a, b))
-            if is_src(op) and (a, b)[1 - k] != op
+            if is_src(op) and (a, b)[1 - k] != op and dst_ok(lhs, (a, b)[1 - k])
         ]
 
-    # The asm destination names the result when it can; only then fall back to an input.
-    hits, match = hits_where(lambda lhs, a, b: dst == lhs), "result"
+    # The asm destination names the result when it can.  Otherwise it must name the
+    # statement's other operand, so both instruction operands are that statement's
+    # operands, and that pair must occur in no other MIN/MAX of the function.
+    hits, match = hits_where(lambda lhs, other: dst == lhs), "result"
     if not hits:
-        hits, match = hits_where(lambda lhs, a, b: dst in (a, b)), "input"
+        hits, match = hits_where(lambda lhs, other: dst == other), "input"
+        pairs = [
+            frozenset(x.strip() for x in m.group(5, 6))
+            for raw in opt[func]
+            if (m := GIMPLE_MINMAX.match(raw))
+        ]
+        if len(hits) == 1 and pairs.count(frozenset(hits[0][1])) != 1:
+            hits = []
     if len(hits) != 1:
         return {**insn, "status": "UNMATCHED", "candidates": stmts}
     lhs, ops, k = hits[0]

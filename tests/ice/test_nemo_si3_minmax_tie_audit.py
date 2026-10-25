@@ -123,3 +123,34 @@ def test_refuses_an_object_that_is_not_the_records(tmp_path, monkeypatch):
     monkeypatch.setattr(audit, "fcflags", lambda build: [f if f != "-O3" else "-O2" for f in flags])
     with pytest.raises(audit.AuditError, match="differ from the record"):
         audit.compile_unit(BUILD, GFORTRAN, "icecor", tmp_path)
+
+
+def _one(asm_line, gimple_lines):
+    asm = f"__m_MOD_f:\n# /x/m.f90:7:  y = MAX(a, b)\n{asm_line}\n"
+    opt = (
+        ";; Function f (__m_MOD_f, funcdef_no=0, decl_uid=1, cgraph_uid=1, symbol_order=0)\n"
+        + "".join(f"  [/x/m.f90:7:3] {g};\n" for g in gimple_lines)
+    )
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        (Path(d) / "m.s").write_text(asm)
+        (Path(d) / "o").write_text(opt)
+        row = audit.asm_minmax(Path(d) / "m.s", {7})[0]
+        return audit.classify(row, audit.gimple_functions(Path(d) / "o"), {})
+
+
+def test_input_match_needs_both_operands_and_a_unique_pair():
+    ok = _one("\tmaxsd\t%xmm1, %xmm2\t# a_1, b_2", ["r_3 = MAX_EXPR <a_1, b_2>"])
+    assert (ok["status"], ok["matched_by"], ok["keeps"]) == ("MATCHED", "input", "a")
+    # destination names the survivor itself, not the other operand: refuse
+    assert (
+        _one("\tmaxsd\t%xmm1, %xmm2\t# a_1, a_1", ["r_3 = MAX_EXPR <a_1, b_2>"])["status"]
+        == "UNMATCHED"
+    )
+    # the same operand pair in two statements: ambiguous, refuse
+    dup = ["r_3 = MAX_EXPR <a_1, b_2>", "r_4 = MAX_EXPR <b_2, a_1>"]
+    assert _one("\tmaxsd\t%xmm1, %xmm2\t# a_1, b_2", dup)["status"] == "UNMATCHED"
+    # a result-named destination still wins over an input reading
+    res = _one("\tmaxsd\t%xmm1, %xmm2\t# a_1, r_3", ["r_3 = MAX_EXPR <a_1, b_2>"])
+    assert (res["status"], res["matched_by"]) == ("MATCHED", "result")
