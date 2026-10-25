@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import struct
 import subprocess
 from pathlib import Path
@@ -102,6 +103,19 @@ def test_o7_reader_retains_signed_zero_and_declared_fortran_extents(tmp_path: Pa
     assert np.signbit(record["fields"]["wndi"][0, 0])
 
 
+def test_o7_native_control_checks_every_recorded_step(monkeypatch) -> None:
+    calls = []
+
+    def score(step, _config):
+        calls.append(step)
+        if step == "kt2":
+            raise ValueError("native arm differs")
+
+    monkeypatch.setattr(gate, "_score_step", score)
+    assert gate._native_transcendental_control({1: "kt1", 2: "kt2"}, object()) == 2
+    assert calls == ["kt1", "kt2"]
+
+
 def test_o7_patches_mark_every_insertion_for_real_ppsrc_stripping() -> None:
     for unit in gate.OBSERVER_UNITS:
         lines = (ACQ / f"{unit}_o7.patch").read_text().splitlines()
@@ -185,9 +199,17 @@ def test_o7_read_only_preflight_exercises_real_ppsrc_and_all_controls(tmp_path: 
     if not base.is_dir() or not compiler.is_file():
         pytest.skip("NEMO oracle build/compiler not mounted")
     report = tmp_path / "preflight.json"
+    env = os.environ.copy()
+    env.update(
+        REF_CFG="ORCA2_SAS_ICE_O7_PREFLIGHT_TEST_REF",
+        REC_CFG="ORCA2_SAS_ICE_O7_PREFLIGHT_TEST_REC",
+        EVIDENCE=str(tmp_path / "evidence"),
+        REFUSED_DIR=str(tmp_path / "refused"),
+    )
     proc = subprocess.run(
         [str(ACQ / "run.sh"), "--preflight-only", str(report)],
         cwd=REPO,
+        env=env,
         text=True,
         capture_output=True,
         check=True,

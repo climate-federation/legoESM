@@ -911,6 +911,24 @@ def _completion(run: Path, label: str, plant: str | None = None) -> dict[str, An
     return verify_o7_log(run / "ocean.output", log_plant)
 
 
+def _native_transcendental_control(
+    loaded: dict[int, dict[int, dict[str, Any]]], config: SI3SurfaceConfig
+) -> int:
+    """Require the wrong transcendental arm to fail on at least one recorded step."""
+    set_policy(PrecisionPolicy.fp64(transcendentals="native"))
+    jax.clear_caches()
+    try:
+        for kt in STEPS:
+            try:
+                _score_step(loaded[kt], config)
+            except ValueError:
+                return kt
+        raise _refuse("native-transcendental control was vacuous on the retained record")
+    finally:
+        set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+        jax.clear_caches()
+
+
 def admit_evidence_directory(
     evidence_dir: str | Path,
     *,
@@ -1023,16 +1041,7 @@ def admit_evidence_directory(
     for kt in STEPS:
         loaded[kt] = _load_step(record_dir, kt, expected_kmm, plant=plant)
         scores[str(kt)] = _score_step(loaded[kt], config, plant=plant)
-    set_policy(PrecisionPolicy.fp64(transcendentals="native"))
-    native_fired = False
-    try:
-        _score_step(loaded[STEPS[0]], config)
-    except ValueError:
-        native_fired = True
-    finally:
-        set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-    if not native_fired:
-        raise _refuse("native-transcendental control was vacuous on the retained record")
+    native_fired_step = _native_transcendental_control(loaded, config)
     return {
         "status": "PASS_O7_ADMISSION",
         "producer_commit": producer,
@@ -1043,7 +1052,7 @@ def admit_evidence_directory(
         "reference_log": ref_log,
         "record_log": rec_log,
         "steps": scores,
-        "native_transcendental_plant": "FIRED",
+        "native_transcendental_plant": f"FIRED_KT_{native_fired_step}",
         "platform": {
             "backend": "cpu",
             "dtype": "float64",

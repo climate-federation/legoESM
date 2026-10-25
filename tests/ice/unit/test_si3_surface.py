@@ -302,7 +302,7 @@ def s_cell(c, x, i, j):
     qsb = sw * RHO0 * RCP * 0.0057 * fu * (sstk - g("t_bo"))
     den = at if not (1e-10 > at) else 1e-10
     cap = -qneg * r1 / den
-    qsb = sw * (qsb if not (cap < qsb) else cap)
+    qsb = sw * (cap if cap <= qsb else qsb)  # gfortran MINSD returns RHS on ties
     if (g("t_bo") - sstk) > 0.0 and vt >= 20.0:
         qfr = qpos = qsb = 0.0
     if (qld - qfr) < 0.0:
@@ -610,3 +610,14 @@ def test_subnormal_snow_blocks_transmission_under_jit():
     c, x = _prod_config(), _inputs()
     x["h_s"][1, 1, 0] = 5e-324
     assert float(_jit_step(x, c).blk_ice_2.qtr_ice_top[1, 1, 0]) == 0.0
+
+
+def test_production_surface_step_keeps_qsb_dry_negative_zero():
+    """icesbc.f90:447 returns the cap operand on a signed-zero MIN tie."""
+    c, x = _prod_config(), _inputs()
+    x["smask0"][0, 0] = 0.0
+    x["at_i"][0, 0] = x["at_i_b"][0, 0] = x["vt_i"][0, 0] = 0.0
+    x["a_i_b"][0, 0, :] = 0.0
+    x["sst_m"][0, 0], x["t_bo"][0, 0] = 0.0, TF
+    got = np.asarray(_jit_step(x, c).flx_other.qsb_ice_bot)
+    assert got.view(np.uint64)[0, 0] == np.uint64(0x8000000000000000)

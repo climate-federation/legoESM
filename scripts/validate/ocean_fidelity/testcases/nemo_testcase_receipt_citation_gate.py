@@ -357,6 +357,8 @@ FILES = {
     "docs/ice/fidelity/si3_r10_o5_receipt.md": REPO / "docs/ice/fidelity/si3_r10_o5_receipt.md",
     "docs/ice/fidelity/si3_r11_o7_receipt.md": REPO / "docs/ice/fidelity/si3_r11_o7_receipt.md",
     "docs/ice/fidelity/si3_r13_o7_acquisition_receipt.md": REPO / "docs/ice/fidelity/si3_r13_o7_acquisition_receipt.md",
+    "docs/ice/fidelity/si3_r13_o7_admission_receipt.md": REPO / "docs/ice/fidelity/si3_r13_o7_admission_receipt.md",
+    "ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icesbc.f90": NEMO / "cfgs/ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icesbc.f90",
     "ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/iceupdate.f90": NEMO / "cfgs/ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/iceupdate.f90",
     "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_eos_gate.py": REPO / "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_eos_gate.py",
     "packages/ice/legoesm/ice/fidelity/nemo_adv2d_rhg_testcase_recipe.py": REPO / "packages/ice/legoesm/ice/fidelity/nemo_adv2d_rhg_testcase_recipe.py",
@@ -9666,6 +9668,10 @@ CITATION_MAP = {
     # --- SI3 round 12 (O5) admitted-record result ---
     'ORCA2_SAS_ICE_O5_REC/BLD/ppsrc/nemo/icedyn_adv_pra.f90:267': 'odd ice time step:  adv_x then adv_y',
     'ORCA2_SAS_ICE_O5_REC/BLD/ppsrc/nemo/icedyn_adv_pra.f90:317': 'even ice time step:  adv_y then adv_x',
+    # --- SI3 round 13 (O7) retained-record admission ---
+    'ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icesbc.f90:447': 'qsb_ice_bot(ji,jj) = zswitch * MIN( qsb_ice_bot(ji,jj), - zqfr_neg * r1_Dt_ice / MAX( at_i(ji,jj), epsi10 ) )',
+    'packages/ice/legoesm/ice/si3_surface.py:510': 'qsb = sr(zswitch * jnp.where(cap <= qsb, cap, qsb))',
+    'tests/ice/unit/test_si3_surface.py:615': 'def test_production_surface_step_keeps_qsb_dry_negative_zero():',
 }
 
 

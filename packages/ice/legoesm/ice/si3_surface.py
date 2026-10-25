@@ -507,7 +507,7 @@ def si3_ice_flx_other(
     zfric_u = _fmax(sqrt_zero_subgradient(zfric), _ZFRIC_UMIN)                      # :429
     qsb = sr(sr(sr(sr(sr(zswitch * _RHO0) * _RCP) * _ZCH) * zfric_u) * sr(sst_k - t_bo2))  # :430
     cap = -sr(sr(zqfr_neg * r1_dt) / _fmax(at, _EPSI10))
-    qsb = sr(zswitch * _fmin(qsb, cap))                                             # :436
+    qsb = sr(zswitch * jnp.where(cap <= qsb, cap, qsb))  # MINSD keeps RHS on tie  # :436
     supercool = (sr(t_bo2 - sst_k) > 0.0) & (vt >= _SUPERCOOL_VOLUME_M)             # :440
     zqfr = jnp.where(supercool, 0.0, zqfr)
     zqfr_pos = jnp.where(supercool, 0.0, zqfr_pos)
