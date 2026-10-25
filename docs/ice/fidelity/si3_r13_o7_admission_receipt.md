@@ -41,6 +41,26 @@ The production `si3_surface_step` test at
 `0x0000000000000000` and passes after it with `0x8000000000000000`. The
 independent scalar transcription was corrected to the observed compiler rule.
 
+## Registered debt
+
+**DEBT — O7-ZQFR-SIGNED-ZERO (Claude, PLAUSIBLE, latent):** at
+`ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icesbc.f90:435-436`, NEMO's
+`MIN(zqfr,0)` and `MAX(zqfr,0)` return the zero second operand on a tie, while
+`packages/ice/legoesm/ice/si3_surface.py:505-506` calls `_fmin`/`_fmax`, which
+return `zqfr` on a tie. They therefore differ only when `zqfr` is `-0`: a dry
+cell (`smask0=0`) whose `t_bo` is below SST. Neither the retained O7 record nor
+C1D produces that condition, so no record exercises a code change now.
+
+Argon's object-code evidence is the saved `-g` rebuild
+`operator_review_claude/landcheck/g/icesbc_g.o` under the round-13 evidence
+root, SHA-256
+`0b148f3aaf0d89941581ae314c842b78a46e2a4d54ac9ae03c70d012762f6cbd`.
+Its `ice_sbc_flx` disassembly has `MINSD zqfr,0` at object offsets
+`0x488e` and `0x56ae`, and `MAXSD zqfr,0` at `0x5211` and `0x5951`; the second
+operand is the emitted zero and is returned on equality. Follow-up
+**O7-ZQFR-SIGNED-ZERO** will acquire a record containing that dry/cold cell,
+then change and test the shared helpers only if the record proves the debt.
+
 ## Full O7 score
 
 For every name below, the score tuple is identical at `kt=1` and `kt=2`:
@@ -84,6 +104,18 @@ changes `alb_ice` by 2 ULP and composed shortwave leaves by up to 4 ULP. The
 control now clears JAX caches and checks both preregistered steps; admission
 records `FIRED_KT_2`. No score definition or bar changed.
 
+## Current-tip rebase
+
+The five O7 commits were rebased from lane base `e795e17482` onto the current
+lane tip `d3f2cff704` (O5). Four commits applied cleanly. The retained-record
+admission commit had the rebase's only conflict, in
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py`:
+the lane side added O5's two `icedyn_adv_pra.f90:267`/`:317` entries, while
+the O7 side added the three retained-admission entries for `icesbc.f90:447`,
+`si3_surface.py:510`, and `test_si3_surface.py:615`. Resolution kept both
+sides verbatim, O5 followed by O7. No receipt file conflicted, and no conflict
+side was discarded.
+
 ## Invariance and gates
 
 - Lane-3 C1D bulk gate: byte-identical to round 11's JSON (SHA-256
@@ -112,7 +144,8 @@ records `FIRED_KT_2`. No score definition or bar changed.
   intermediates are 0 ULP at both steps on wet/full/seam/fold scoring; all
   admission plants fire; the refusal was a compiler-observable signed-zero
   tie at one cited statement and the production-call-site test is non-vacuous.
-- **PLAUSIBLE:** none in the O7 score.
+- **PLAUSIBLE:** latent debt `O7-ZQFR-SIGNED-ZERO` above; it is outside both
+  available records and does not weaken the 0-ULP O7 score.
 
 ## Choices
 
