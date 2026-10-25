@@ -1,0 +1,8 @@
+--- icedyn.F90
++++ icedyn.F90
+@@ -32,0 +33 @@
++   USE o5_si3_writer, ONLY : o5_rdgrft_entry, o5_rdgrft_exit
+@@ -133,0 +135 @@
++         CALL o5_rdgrft_entry( a_i(1:jpi,1:jpj,1:jpl), v_i(1:jpi,1:jpj,1:jpl) )
+@@ -134,0 +137 @@
++         CALL o5_rdgrft_exit( a_i(1:jpi,1:jpj,1:jpl), v_i(1:jpi,1:jpj,1:jpl) )

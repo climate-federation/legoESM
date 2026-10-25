@@ -1,0 +1,46 @@
+--- icedyn_rhg_evp.F90
++++ icedyn_rhg_evp.F90
+@@ -42,0 +43,3 @@
++   USE o5_si3_writer, ONLY : o5_context, o5_strength_entry, o5_strength_smooth, o5_aevp_entry_state, &
++      & o5_aevp_entry_masks, o5_aevp_entry_metrics, o5_fimask, o5_frame_delta, o5_frame_stress, &
++      & o5_frame_velocity, o5_aevp_exit
+@@ -186,0 +190,2 @@
++      CALL o5_context( kt, Kmm, mpprank, jpi, jpj, jpl, nn_hls, ncom_stp, nit000, jpni, jpnj, &
++         & ln_nnogather, nn_npfchk, rDt_ice )
+@@ -225,0 +231 @@
++         CALL o5_fimask( fimask )
+@@ -254,0 +261,2 @@
++      CALL o5_strength_entry( a_i(1:jpi,1:jpj,1:jpl), v_i(1:jpi,1:jpj,1:jpl), &
++         & at_i(1:jpi,1:jpj), tmask(1:jpi,1:jpj,1) )
+@@ -255,0 +264 @@
++      CALL o5_strength_smooth( strength(1:jpi,1:jpj) )
+@@ -268,0 +278,17 @@
++      CALL o5_aevp_entry_state( u_ice(1:jpi,1:jpj), v_ice(1:jpi,1:jpj), &
++         & u_ice_b(1:jpi,1:jpj), v_ice_b(1:jpi,1:jpj), zs1, zs2, zs12, &
++         & strength(1:jpi,1:jpj), at_i(1:jpi,1:jpj), vt_i(1:jpi,1:jpj), &
++         & vt_s(1:jpi,1:jpj), vt_ip(1:jpi,1:jpj), vt_il(1:jpi,1:jpj), &
++         & utau_ice(1:jpi,1:jpj), vtau_ice(1:jpi,1:jpj), drag_io(1:jpi,1:jpj), &
++         & u_oce(1:jpi,1:jpj), v_oce(1:jpi,1:jpj), ssh_m(1:jpi,1:jpj), &
++         & snwice_mass(1:jpi,1:jpj), snwice_mass_b(1:jpi,1:jpj), zsshdyn, ff_t(1:jpi,1:jpj) )
++      CALL o5_aevp_entry_masks( tmask(1:jpi,1:jpj,1), umask(1:jpi,1:jpj,1), &
++         & vmask(1:jpi,1:jpj,1), fast_umask(1:jpi,1:jpj), fast_vmask(1:jpi,1:jpj), &
++         & fast_tmask(1:jpi,1:jpj), icb_umask(1:jpi,1:jpj), icb_vmask(1:jpi,1:jpj), &
++         & icb_tmask(1:jpi,1:jpj) )
++      CALL o5_aevp_entry_metrics( e1t(1:jpi,1:jpj), e2t(1:jpi,1:jpj), &
++         & e1u(1:jpi,1:jpj), e2u(1:jpi,1:jpj), e1v(1:jpi,1:jpj), e2v(1:jpi,1:jpj), &
++         & e1f(1:jpi,1:jpj), e2f(1:jpi,1:jpj), e1e2t(1:jpi,1:jpj), &
++         & e1e2u(1:jpi,1:jpj), e1e2v(1:jpi,1:jpj), e1e2f(1:jpi,1:jpj), &
++         & r1_e1u(1:jpi,1:jpj), r1_e2v(1:jpi,1:jpj), r1_e1e2t(1:jpi,1:jpj), &
++         & r1_e1e2u(1:jpi,1:jpj), r1_e1e2v(1:jpi,1:jpj), r1_e1e2f(1:jpi,1:jpj) )
+@@ -427,0 +454,2 @@
++         IF( jter == 1 .OR. jter == 2 .OR. jter == 3 .OR. jter == 50 .OR. &
++            & jter == 99 .OR. jter == 100 )   CALL o5_frame_delta( jter, zdelta, zp_delt )
+@@ -491,0 +520,2 @@
++         IF( jter == 1 .OR. jter == 2 .OR. jter == 3 .OR. jter == 50 .OR. &
++            & jter == 99 .OR. jter == 100 )   CALL o5_frame_stress( jter, zs1, zs2, zs12 )
+@@ -743,0 +774,2 @@
++         IF( jter == 1 .OR. jter == 2 .OR. jter == 3 .OR. jter == 50 .OR. &
++            & jter == 99 .OR. jter == 100 )   CALL o5_frame_velocity( jter, u_ice(1:jpi,1:jpj), v_ice(1:jpi,1:jpj) )
+@@ -843,0 +876,2 @@
++      CALL o5_aevp_exit( pstress1_i, pstress2_i, pstress12_i, u_ice(1:jpi,1:jpj), &
++         & v_ice(1:jpi,1:jpj), pdivu_i, pshear_i, pdelta_i )

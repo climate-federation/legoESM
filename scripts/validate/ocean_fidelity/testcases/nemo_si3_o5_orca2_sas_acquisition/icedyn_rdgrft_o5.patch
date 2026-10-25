@@ -1,0 +1,6 @@
+--- icedyn_rdgrft.F90
++++ icedyn_rdgrft.F90
+@@ -31,0 +32 @@
++   USE o5_si3_writer, ONLY : o5_strength_raw
+@@ -1057,0 +1059 @@
++         CALL o5_strength_raw( at_i(1:jpi,1:jpj), strength(1:jpi,1:jpj) )
