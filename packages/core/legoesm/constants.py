@@ -247,6 +247,21 @@ sigma_water_erf = 0.076148325    # [N/m] MaterialProperties.H surfaceTension(), 
 b_solute_water_erf = 4.3e-6      # [m^3/mol] MaterialProperties.H coeffVPSolute(), water
 T_flatau_erf = 273.16            # [K] Flatau et al. (1992) fit origin in erf_esatw (Utils/ERF_MicrophysicsUtils.H)
 
+# WRF v4.8.0 fast spectral-bin microphysics (phys/module_mp_fast_sbm.F, commit
+# 06d4240ae989cc3e50af412bb472df3d9048783c) carries its OWN thermodynamic
+# literals; the faithful FSBM building blocks (microphysics/fast_sbm/) use these
+# so they reproduce the running scheme.  CGS values converted to SI exactly.
+epsilon_fast_sbm = 0.622            # [-] :4596 EW1N=QQ*PP/(0.622+0.378*QQ), :2871 OPER2
+one_minus_epsilon_fast_sbm = 0.378  # [-] same statements (literal, not 1-0.622)
+aa1_fast_sbm = 2.53e11              # [Pa] :1724 POLYSVP AA1_MY = 2.53E12 dyn/cm^2
+bb1_fast_sbm = 5.42e3               # [K] :1724 POLYSVP BB1_MY (also B5L=BB1_MY/T^2 in ONECOND1)
+lv_over_cp_fast_sbm = 2500.0        # [K] :6830 ONECOND1 DATA AL1 /2500./ (T update, RW)
+lf_over_cp_fast_sbm = 333.0         # [K] :6627 FREEZ / :6741 J_W_MELT ARG_1=333.*SUM_ICE/RO
+R_v_fast_sbm = 461.5                # [J/(kg*K)] :1768 JERRATE_KS RV_MY=461.5D4 erg/(g*K)
+L_v_fast_sbm = 2.5e6                # [J/kg] :1816 JERRATE_KS AL1_MY(1)=2.5D10 erg/g
+k_air_fast_sbm = 2.4e-2             # [W/(m*K)] :1768 JERRATE_KS CF_MY=2.4D3 erg/(cm*s*K)
+p_zero_fast_sbm = 101300.0          # [Pa] :1782 JERRATE_KS PZERO=1.013D6 dyn/cm^2
+
 # Active no-pond ice_alb identity, icealb.F90:124-185 and accepted namalb.
 albedo_snow_dry_orca1 = 0.85
 albedo_snow_melt_orca1 = 0.75

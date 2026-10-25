@@ -14,18 +14,22 @@ Port of WRF ``module_mp_fast_sbm.F``:
 
 State variable: ``g(ln r) = 3 m² f(m)`` — mass density per unit ln(radius)
 [kg m⁻³] (oracle: ``G1 = FF1R·3·x²·1e3``, mg cm⁻³). The pair kernel table is
-``ck = K(m_i, m_j) · dt · dlnr`` with ``dlnr = COL`` (oracle ``Kernals_KS``:
+``ck = K(m_i, m_j) · dt · dlnr`` with exact ``dlnr = ln2/3`` (oracle ``Kernals_KS``:
 ``cwll = YWLL·dt·dlnr``, optionally × a coalescence-efficiency matrix).
 The algorithm is unit-consistent in SI exactly as in CGS.
 
-Faithfulness notes (documented deviations):
-* The oracle's ``ix0/ix1`` integration-bound narrowing is a CPU shortcut —
-  here every pair runs and empty pairs are masked (identical math).
+Faithfulness notes:
+* The oracle's integration bounds (``ix0/ix1``; riming ``jx0/jx1``,
+  ``iy0/iy1``) are frozen at entry and change the result (a bin that fills
+  during the sweep stays outside the bounds), so they are ported: computed
+  from the entry spectrum, early return when the lower bound is ``nkr-1``,
+  and the row bin ``g(i)`` is tested only at row entry while ``g(j)`` is
+  tested per pair (``coll_xxx_lwf`` l. 670-694, ``coll_xyx_lwf`` l. 846-885).
 * ``kp_flux_max = 44`` (1-based) is unreachable for NKR ≤ 43, so the
   halve-flux branch is omitted.
 * Oracle hard-stops (``wrf_error_fatal`` on ``fl`` bounds) guard the LWF
   path only; the mass-only port has no equivalent state to corrupt.
-* Sub-``gmin`` floors can create/destroy mass at the 1e-16 kg m⁻³ scale per
+* Sub-``gmin`` floors can create/destroy mass at the 1e-13 kg m⁻³ scale per
   pair (oracle behaviour, ``g_lim``); the box test bounds it.
 
 Differentiable: pair updates are ``jnp.where`` selections of smooth
@@ -42,7 +46,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm.atmosphere.physics.microphysics.fast_sbm.grid import COL
+from legoesm.atmosphere.physics.microphysics.fast_sbm.grid import COL, DLNR
 
 __physics_contract__ = {
     "summary": (
@@ -78,9 +82,10 @@ __physics_contract__ = {
     ),
 }
 
-# Oracle ``g_lim = 1.0D-19*1.0D3`` [mg cm⁻³] = 1e-19 g cm⁻³ = 1e-16 kg m⁻³:
-# bins at or below this mass density are treated as empty.
-GMIN_DEFAULT = 1.0e-16
+# Oracle ``coll_xxx_lwf``/``coll_xyx_lwf``: ``gmin = G_LIM*1.0d3`` with module
+# parameter ``G_LIM = 1.0D-16`` (l. 458) on ``g`` in mg cm⁻³ → 1e-13 mg cm⁻³
+# = 1e-13 kg m⁻³: bins at or below this mass density are treated as empty.
+GMIN_DEFAULT = 1.0e-13
 
 
 class CollisionTables(NamedTuple):
@@ -192,13 +197,14 @@ def precompute_riming_tables(masses) -> CollisionTables:
 
 
 def collision_ck_matrix(kernel: jax.Array, dt: float | jax.Array) -> jax.Array:
-    """Pair coefficient table ``ck = K·dt·dlnr`` (oracle ``Kernals_KS``).
+    """Pair coefficient table ``ck = K·dt·dlnr`` (oracle ``Kernals_KS``,
+    ``dlnr = dlog(2.0d0)/3.0d0`` exact — not the moment COL literal).
 
     ``kernel``: gravitational/analytic collection kernel ``K(m_i, m_j)``
     [m³ s⁻¹], shape ``(n, n)``; multiply by a coalescence-efficiency matrix
     before calling if one applies (oracle ``ECOALMASSM``).
     """
-    return kernel * dt * COL
+    return kernel * dt * DLNR
 
 
 def g_from_f(f: jax.Array, masses: jax.Array) -> jax.Array:
@@ -219,6 +225,20 @@ def mass_density_from_g(g: jax.Array) -> jax.Array:
 def number_density_from_g(g: jax.Array, masses: jax.Array) -> jax.Array:
     """Number density [m⁻³] = ``COL · Σ_k g_k/m_k``."""
     return COL * jnp.sum(g / masses, axis=-1)
+
+
+def _lower_bound(nonempty: jax.Array, n_src: int) -> jax.Array:
+    """Oracle ``do i=1,nkr-1; ix0=i; if(g(i)>gmin) exit`` (0-based): first
+    non-empty source bin, ``n_src-1`` when none."""
+    return jnp.where(jnp.any(nonempty), jnp.argmax(nonempty), n_src - 1)
+
+
+def _upper_bound(nonempty: jax.Array, n_src: int, floor: jax.Array) -> jax.Array:
+    """Oracle ``do i=nkr-1,floor,-1; ix1=i; if(g(i)>gmin) exit`` (0-based):
+    last non-empty source bin at or above ``floor``, ``floor`` when none."""
+    idx = jnp.arange(n_src)
+    cand = nonempty & (idx >= floor)
+    return jnp.where(jnp.any(cand), n_src - 1 - jnp.argmax(cand[::-1]), floor)
 
 
 def bott_coalescence(
@@ -245,21 +265,30 @@ def bott_coalescence(
         tables: static pair tables for this grid.
         prdkrn: scalar kernel enhancement (oracle ``MODKRN_KS`` output;
             1.0 = no temperature modification).
-        gmin: empty-bin threshold [kg m⁻³] (oracle ``g_lim``; safety floor,
-            not a tunable).
+        gmin: empty-bin threshold [kg m⁻³] (oracle ``G_LIM*1e3``; safety
+            floor, not a tunable).
 
     Returns:
         Updated spectrum ``(n_bins,)``.
     """
     x = masses
+    n_src = g.shape[-1] - 1
+    nonempty = g[:n_src] > gmin
+    ix0 = _lower_bound(nonempty, n_src)
+    early = ix0 == n_src - 1            # oracle: if(ix0.eq.nkr-1) return
+    ix1 = _upper_bound(nonempty, n_src, jnp.asarray(0))
 
-    def body(g, pair):
+    def body(carry, pair):
+        g, row, row_ok = carry
         i, j, k, c_ij = pair
         kp = k + 1
         gi = g[i]
         gj = g[j]
-        # Oracle loop-entry skips: empty source bins do nothing.
-        active = (gi > gmin) & (gj > gmin)
+        # Row bin tested once at row entry (first pair of row i, before any
+        # pair of the row touches g(i)); column bin tested per pair.
+        row_ok = jnp.where(i != row, gi > gmin, row_ok)
+        in_bounds = (~early) & (i >= ix0) & (i <= ix1) & (j <= ix1)
+        active = in_bounds & row_ok & (gj > gmin)
 
         x01 = ck[i, j] * gi * gj * prdkrn
         x02 = jnp.minimum(x01, gi * x[j])
@@ -326,11 +355,12 @@ def bott_coalescence(
         g = g.at[j].set(v_j)
         g = g.at[k].set(v_k)
         g = g.at[kp].set(v_kp)
-        return g, None
+        return (g, i, row_ok), None
 
     pairs = (tables.i_idx, tables.j_idx, tables.k_idx,
              tables.c_pair.astype(g.dtype))
-    g_out, _ = jax.lax.scan(body, g, pairs)
+    init = (g, jnp.asarray(-1, tables.i_idx.dtype), jnp.asarray(False))
+    (g_out, _, _), _ = jax.lax.scan(body, init, pairs)
     return g_out
 
 
@@ -356,14 +386,28 @@ def bott_riming(
     Gauss-Seidel scan over the full ``(i,j)`` grid in oracle order.
     """
     x = masses
+    n_src = g_ice.shape[-1] - 1
+    ne_x = g_ice[:n_src] > gmin
+    ne_y = g_liq[:n_src] > gmin
+    jx0 = _lower_bound(ne_x, n_src)
+    jx1 = _upper_bound(ne_x, n_src, jx0)
+    iy0 = _lower_bound(ne_y, n_src)
+    iy1 = _upper_bound(ne_y, n_src, iy0)
+    # oracle: if(jx0.eq.nkr-1) return; if(iy0.eq.nkr-1) return
+    early = (jx0 == n_src - 1) | (iy0 == n_src - 1)
 
     def body(carry, pair):
-        g_ice, g_liq = carry
+        g_ice, g_liq, row, row_ok = carry
         i, j, k, c_ij = pair          # i: liquid bin, j: ice bin
         kp = k + 1
         gy_i = g_liq[i]
         gx_j = g_ice[j]
-        active = (gy_i > gmin) & (gx_j > gmin)
+        # gy(i) tested at row entry; gx(j) per pair; j runs
+        # max(i+1, jx0)..jx1 (j > i is built into the tables).
+        row_ok = jnp.where(i != row, gy_i > gmin, row_ok)
+        in_bounds = ((~early) & (i >= iy0) & (i <= iy1)
+                     & (j >= jx0) & (j <= jx1))
+        active = in_bounds & row_ok & (gx_j > gmin)
 
         x01 = ck[j, i] * gy_i * gx_j * prdkrn
         x02 = jnp.minimum(x01, gy_i * x[j])
@@ -409,9 +453,10 @@ def bott_riming(
         g_ice = g_ice.at[j].set(v_ice_j_pre)
         g_ice = g_ice.at[k].set(v_ice_k)
         g_ice = g_ice.at[kp].set(v_ice_kp)
-        return (g_ice, g_liq), None
+        return (g_ice, g_liq, i, row_ok), None
 
     pairs = (tables.i_idx, tables.j_idx, tables.k_idx,
              tables.c_pair.astype(g_ice.dtype))
-    (g_ice_out, g_liq_out), _ = jax.lax.scan(body, (g_ice, g_liq), pairs)
+    init = (g_ice, g_liq, jnp.asarray(-1, tables.i_idx.dtype), jnp.asarray(False))
+    (g_ice_out, g_liq_out, _, _), _ = jax.lax.scan(body, init, pairs)
     return g_ice_out, g_liq_out
