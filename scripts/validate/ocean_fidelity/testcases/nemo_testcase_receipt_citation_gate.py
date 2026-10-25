@@ -9857,6 +9857,8 @@ CITATION_MAP = {
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:463': 'zEw            = rcp * sst_1d(ji)',
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1612': 'sst=forcing.t_bottom - constants.T0,',
     # --- SI3 ladder round 8 (O4 model prep) BEGIN ---
+    'docs/ice/fidelity/si3_r5_d5_preregister.md:1-48': ['# SI3 Ladder Round 5 (`si3_r5`) — Rung D5 Debts Preregistration', '- **REFUTE**: Omitting `sss_m` does not raise `GateError`, CPU production JIT and `--xla_cpu_max_isa=AVX` differ in full-year SHA-256, any non-SI3 caller changes by `>= 1` ULP, or `jax.grad` / `jax.jvp` fails.', 48],
+    'docs/ice/fidelity/si3_r6_d5_preregister.md:1-37': ['# SI3 Ladder Round 6 (`si3_r6`) — Rung D5 Remaining Debts Preregistration', '- **REFUTE**: Any normal-step (`kt != 5842..5867`) over-bar row remains (`> 0`) on CPU or any over-bar row (`> 0`) remains on GPU, CPU production JIT and `--xla_cpu_max_isa=AVX` differ in full-year SHA-256, any non-SI3 caller changes by `>= 1` ULP vs `071dfa844369`, or `jax.grad` / `jax.jvp` fails.', 37],
     'docs/ice/fidelity/si3_ladder_design.md:224': '| O4 | ORCA2_SAS_ICE with Prather only; dynamics/thermo otherwise off. | Add **five-category Prather across the cyclic seam and north fold**, replacing the periodic arm-local halo. D1 and D2 gate composition, but exact-input seam/fold admission can proceed. | Both sweep orders, fold/seam exchanges and every moment; 10–20 GiB. |',
     'docs/ice/fidelity/si3_ladder_design.md:223': '| O3 | Same diagnostic deck, O2 scalar state as exact input. | Add the **initial HFN thickness-distribution fit** (`ice_var_itd`) separately from state construction (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceistate.f90:354-364`). | Category fit inputs/outputs, layer initialization and conservation; about 1–2 GiB. |',
     'ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn_adv_pra.f90:136': "CALL mpp_max( 'icedyn_adv_pra', zcfl, cdelay = 'cflice' )",
@@ -9873,6 +9875,7 @@ CITATION_MAP = {
     'packages/ice/legoesm/ice/si3_orca2_state.py:1663-1665': ['if do_write_prather and cfg.ln_mppdelay and state.cflice_delayed is not None:', 'out["DELAY__r8_cflice"] = np.asarray(state.cflice_delayed, dtype=np.float64)', 3],
     'packages/ice/legoesm/ice/si3_orca2_state.py:3034-3116': ['def _si3_pra_subcycle_cond_dispatch(', (')', 1088), 83],
     'tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:821-1122': ['def test_o4_a2_odd_even_sweep_order_and_cfl_subcycling_pins_and_plant() -> None:', (')', 400), 302],
+    'tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:2150-2241': ['def test_o4_d_jit_primal_zero_ulp_and_delayed_cfl_selection() -> None:', '_assert_zero_ulp(e_st.prather.ice.sx, j_st.prather.ice.sx, f"jit_delayed_icycle{want}.sx")', 92],
     'packages/ice/legoesm/ice/config.py:609-623': ['def build_si3_orca2_o4_config(', 'return cfg', 15],
     'packages/ice/legoesm/ice/si3_orca2_state.py:3119-3350': ['def si3_dyn_adv_pra_orca2(', (')', 1155), 232],
     'packages/ice/legoesm/ice/si3_orca2_state.py:3353-3783': ['def si3_dyn_orca2(', 'return state_dyn, diagnostics', 431],
@@ -9896,7 +9899,8 @@ CITATION_MAP = {
     'ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/lbclnk.f90:2105': ('!     6. north fold treatment     !', 2),
     'ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/lbclnk.f90:2118': ('!           7. Fill south and north halos          !', 2),
     'ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn_adv_pra.f90:451-452': [("CALL lbc_lnk( 'icedyn_adv_pra', pv_i  , 'T', 1._wp, sxice , 'T', -1._wp, syice , 'T', -1._wp  & ! ice volume", 1), ("&                          , sxxice, 'T', 1._wp, syyice, 'T',  1._wp, sxyice, 'T',  1._wp  &", 1), 2],
-    'tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:2070-2341': ['def test_o4_d_jit_primal_zero_ulp_and_forward_equals_reverse_ad() -> None:', (')', 951), 272],
+    'tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:2244-2438': ['def _o4_ad_checks() -> None:', 'print(f"O4_AD_CHECKS_PASS fd_u_ratio={fd_u_ratio!r} fd_vi_ratio={fd_vi_ratio!r} rel_ad_diff={rel_ad_diff!r}")', 195],
+    'tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:2441-2466': ['def test_o4_d_ad_reverse_forward_and_central_fd() -> None:', 'print(result.stdout.strip().splitlines()[-1])', 26],
     'ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/ice.f90:465': 'ALLOCATE( t_si(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),jpl) , tm_si(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) , qcn_ice_bot(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),jpl) , qcn_ice_top(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),jpl) , STAT = ierr(ii) )',
     'ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icestp.f90:529': 't_si       (ji,jj,jl) = rt0     ! temp at the ice-snow interface',
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_acquisition/o1_si3_state_writer.F90:35-40': ['SUBROUTINE o1_pad_a2d_3d( psrc, pdst )', 'END SUBROUTINE o1_pad_a2d_3d', 6],
@@ -9904,8 +9908,6 @@ CITATION_MAP = {
     'ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icestp.f90:254-255': [('CALL ice_var_glo2eqv(2)', 2), 'CALL ice_var_agg(2)', 2],
     'ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icestp.f90:245': 'CALL ice_sbc_flx( kt, ksbc )',
     'ORCA2_SAS_ICE_O1_REF/EXP00/namelist_ref:1515': 'ln_mppdelay  =  .true.  !  activate delayed global communications to go faster',
-    'docs/ice/fidelity/si3_r5_d5_preregister.md:1-48': ['# SI3 Ladder Round 5 (`si3_r5`) — Rung D5 Debts Preregistration', '- **REFUTE**: Omitting `sss_m` does not raise `GateError`, CPU production JIT and `--xla_cpu_max_isa=AVX` differ in full-year SHA-256, any non-SI3 caller changes by `>= 1` ULP, or `jax.grad` / `jax.jvp` fails.', 48],
-    'docs/ice/fidelity/si3_r6_d5_preregister.md:1-37': ['# SI3 Ladder Round 6 (`si3_r6`) — Rung D5 Remaining Debts Preregistration', '- **REFUTE**: Any normal-step (`kt != 5842..5867`) over-bar row remains (`> 0`) on CPU or any over-bar row (`> 0`) remains on GPU, CPU production JIT and `--xla_cpu_max_isa=AVX` differ in full-year SHA-256, any non-SI3 caller changes by `>= 1` ULP vs `071dfa844369`, or `jax.grad` / `jax.jvp` fails.', 37],
     # --- SI3 ladder round 8 (O4 model prep) END ---
 }
 

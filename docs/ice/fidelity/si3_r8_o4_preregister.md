@@ -105,3 +105,4 @@ Every statement transcribed in `si3_r8` is pinned to the clean uninstrumented `O
 3. Test (d) also runs one compiled step with a traced `cflice_delayed` selecting each of `icycle = 1, 2, 3`.
 4. Test (c) selects `icycle` through `cflice_delayed`, not an override.
 5. Plant O4-C1 as built multiplies the summed face flux by `1.000001` (not a dropped donor term); Plant O4-D1 stops the gradient on the whole input state (not on `v_i` or `sx` only). Both still fail their gates.
+6. Test (d) is split. The primal, jit, delayed-CFL and restart checks run in-process at production settings on a small cyclic + T-fold grid with the full roster. The AD checks (reverse = forward, central FD at the preregistered `1e-6`, stop-gradient plant) run in a fresh interpreter with XLA's CPU backend optimisation off on 1 category and 1+1 layers, because the full-roster reverse program did not finish compiling (> 2 h, 58 GB).
