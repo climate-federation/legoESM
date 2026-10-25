@@ -15,6 +15,10 @@ plant_must_refuse() {
   if "$@"; then refuse "preflight plant stayed green: $label"; fi
   printf 'PREFLIGHT_PLANT_FIRED %s\n' "$label"
 }
+run_in_dir() {
+  local directory=$1; shift
+  ( cd "$directory" && "$@" )
+}
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 readonly here
 readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
@@ -408,7 +412,7 @@ sed '0,/zA11 = /s//zA11 = 1._wp + /' \
   "$ldf_fixture_dir/stubs.o" "$ldf_fixture_dir/writer.o" \
   -o "$ldf_fixture_dir/round333_traldf_loop_plant"
 plant_must_refuse r333-traldf-loop-arithmetic \
-  "$ldf_fixture_dir/round333_traldf_loop_plant" 0
+  run_in_dir "$ldf_fixture_dir" ./round333_traldf_loop_plant 0
 
 # Import every reviewed helper, plant, syntax proof, same-program check and
 # admission step from the round-328/332 driver. The arithmetic-baseline edit
