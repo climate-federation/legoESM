@@ -1816,7 +1816,7 @@ CITATION_MAP = {
     'tramle.F90:51': "r5_21 = 5.e0 / 21.e0",
     # ORCA2 round 333 Resume 7: admitted internal traldf record ownership.
     'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/stprk3_stg.f90:210-229': [
-        ('!                          ! set ssh and (uu_b,vv_b) at N+1/2  (Kaa)', 2),
+        ('!                          ! set ssh and (uu_b,vv_b) at N+1/2  (Kaa)', 1),
         ('r3f(:,:)     = r2_3 * r3fb(:,:) + r1_3 * r3fa(:,:)', 2), 20],
     'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/traldf_iso.f90:301-305': [
         ('pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +', 1),
