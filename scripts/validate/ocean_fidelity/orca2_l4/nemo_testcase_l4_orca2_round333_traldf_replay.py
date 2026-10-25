@@ -141,12 +141,16 @@ def measure(label: str, arm: str, deck_root: Path, record_root: Path,
 
         def observed_low(*args, **kwargs):
             result = original_low(*args, **kwargs)
+            # The production R333 call requests the through-FCT bolus transport,
+            # so its ordinary return is ``(tendency, bolus_transport)``.  Record
+            # only the live tendency while returning that tuple untouched.
+            actual_tendency = result[0] if isinstance(result, tuple) else result
             probe = dict(kwargs)
             probe.update(return_bolus=False, return_diagnostics=True,
                          return_operand_diagnostics=True)
             _tendency, diagnostics = original_low(*args, **probe)
             jax.debug.callback(
-                store, result,
+                store, actual_tendency,
                 *(diagnostics[name] for name in DIAGNOSTICS[1:]),
                 ordered=True)
             return result
