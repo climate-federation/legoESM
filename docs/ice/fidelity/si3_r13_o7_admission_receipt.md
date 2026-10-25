@@ -98,8 +98,12 @@ records `FIRED_KT_2`. No score definition or bar changed.
 - The two requested external reviewer CLIs could not run in this restricted
   sandbox: Claude failed DNS lookup and Argon was denied its localhost socket.
   This is an environment limitation, not positive review evidence.
-- Per-receipt citation gate (all SI3 receipts, full map), default gate, and
-  private-import ratchet: run from the clean landed commit below.
+- Per-receipt citation gate: all 11 SI3 receipts passed, covering 417
+  citations with zero unmapped citations and zero full-map audit failures.
+  The default gate passed 29/29 and the private-import ratchet passed 6/6.
+- O7 surface tests passed 23/23, with one environment skip and the registered
+  D5 platform-floor xfail; O7 acquisition tests passed 19/19, including the
+  read-only 36-plant preflight under isolated temporary target names.
 
 ## CONFIRMED vs PLAUSIBLE
 
