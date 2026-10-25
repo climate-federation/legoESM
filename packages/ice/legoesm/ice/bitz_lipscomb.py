@@ -38,7 +38,7 @@ class SI3SurfaceForcing(NamedTuple):
     fhld: jax.Array
     qlead: jax.Array
     frq_m: jax.Array | float = 1.0
-
+    sst_m: jax.Array | None = None  # sst_1d [degC], read only by ice_thd_da
 
 class SI3ZDFResult(NamedTuple):
     T_surface: jax.Array
@@ -1674,7 +1674,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
                            _nemo_zdf_layer_reciprocals: bool = True,
                            _nemo_glo2eqv_snow_temp: bool = True,
                            _nemo_source_round: bool = True,
-                           ) -> SI3StepTrace:
+                           si3=None) -> SI3StepTrace:
     """Execute the selected `ice_thd` chain and retain every oracle boundary."""
 
     zdf = _si3_zdf_bl99_step(
@@ -1732,7 +1732,7 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
     )
     post_sal = post_temp1._replace(S_bulk=S_bulk, S_layers=S_layers)
     post_temp2 = post_sal
-
+    post_da = _si3_column_thd_da(state, post_temp2, forcing, si3, dt, constants)
     # Open-water growth (`icethd_do.F90:171-307`), active only for qlead<0.
     Tm = -constants.liquidus_slope * (
         _NEW_ICE_SALINITY_FRACTION * forcing.sss
@@ -1759,15 +1759,15 @@ def si3_column_step_arrays(state: SI3ColumnArrays,
         vnew / jnp.where(cooling, frazil.ht_i_new, 1.0),
         jnp.maximum(
             0.0,
-            _MAXIMUM_ICE_CONCENTRATION - post_temp2.concentration,
+            _MAXIMUM_ICE_CONCENTRATION - post_da.concentration,
         ),
     )
     residual = jnp.maximum(vnew - anew * frazil.ht_i_new, 0.0)
-    v_old = post_temp2.h_ice * post_temp2.concentration
+    v_old = post_da.h_ice * post_da.concentration
     v_total = v_old + anew * frazil.ht_i_new + residual
-    a_total = post_temp2.concentration + anew
+    a_total = post_da.concentration + anew
     h_total = jnp.where(a_total > _EPS10, v_total / a_total, 0.0)
-    post_do = post_temp2._replace(concentration=a_total, h_ice=h_total)
+    post_do = post_da._replace(concentration=a_total, h_ice=h_total)
     exit_state = post_do._replace(age_volume=post_do.age_volume + a_total * dt)
     return SI3StepTrace(state, post_zdf, post_dh, post_temp1, post_sal,
                         post_temp2, post_do, exit_state)
@@ -1843,3 +1843,43 @@ __all__ = (
     "si3_ice_thd_frazil",
     "ieee_lt_zero",
 )
+
+
+def _si3_column_thd_da(entry, post_temp2, forcing, si3, dt, constants):
+    """``IF( ln_icedA ) CALL ice_thd_da`` on the C1D column (O7_REF ppsrc ``icethd.f90:210``).
+
+    ``si3`` is ``SeaIceConfig.si3``; ``None`` or ``lateral_melt=False`` is
+    ``ln_icedA = .false.`` and returns ``post_temp2`` itself.  NEMO's inputs at
+    the call: ``at_i_1d`` is the gather-time total (one category: the entry
+    ``a_i``), the rest is the state after the second ``ice_thd_temp``; only cells
+    gathered at entry (``a_i > epsi10``, ``icethd.f90:181``) change.  The column
+    carries no ice-ocean flux accumulators, so ``sfx_lam``/``hfx_thd``/``wfx_lam``
+    start at +0 and are not returned (as for every other stage of this column).
+    """
+    if si3 is None or not si3.lateral_melt:
+        if si3 is not None and si3.namthd_da is not None:
+            raise ValueError("si3.namthd_da is set but lateral_melt is False (ln_icedA)")
+        return post_temp2
+    if si3.namthd_da is None:
+        raise ValueError("lateral_melt=True (ln_icedA) needs si3.namthd_da; no defaults")
+    if forcing.sst_m is None:
+        raise ValueError("lateral_melt=True (ln_icedA) needs SI3SurfaceForcing.sst_m")
+    from legoesm.ice.si3_thd_da import si3_ice_thd_da  # deferred: it imports this module
+
+    zero = jnp.zeros_like(post_temp2.concentration)
+    da = si3_ice_thd_da(
+        at_i=entry.concentration, a_i=post_temp2.concentration,
+        h_i=post_temp2.h_ice, h_s=post_temp2.h_snow,
+        e_i=post_temp2.e_ice, e_s=post_temp2.e_snow,
+        s_i=post_temp2.S_bulk, sz_i=post_temp2.S_layers,
+        sst=forcing.sst_m, t_bo=forcing.t_bottom,
+        sfx_lam=zero, hfx_thd=zero, wfx_lam=zero,
+        rn_beta=si3.namthd_da.rn_beta, rn_dmin=si3.namthd_da.rn_dmin,
+        rDt_ice=dt, nn_icesal=si3.salinity_scheme, constants=constants,
+    )
+    gathered = entry.concentration > _EPS10
+    return post_temp2._replace(
+        concentration=jnp.where(gathered, da.a_i, post_temp2.concentration),
+        h_ice=jnp.where(gathered, da.h_i, post_temp2.h_ice),
+        h_snow=jnp.where(gathered, da.h_s, post_temp2.h_snow),
+    )

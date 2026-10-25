@@ -306,14 +306,14 @@ class SI3ThermoConfig(NamedTuple):
     flushing: bool = True
     ponds: bool = False
     lateral_melt: bool = False
-
+    namthd_da: SI3LateralMeltConfig | None = None  # lateral_melt=True needs it
 
 def validate_si3_thermo_config(config: "SeaIceConfig") -> None:
     """Reject unsupported SI3 selector mixtures before any tendency runs."""
 
     if config.thermo_scheme != "si3_bl99":
         return _validate_si3_orca2_o1_config(config)
-    wanted = SI3ThermoConfig()
+    wanted = SI3ThermoConfig(lateral_melt=config.si3.lateral_melt, namthd_da=config.si3.namthd_da)
     if config.si3 != wanted:
         raise ValueError(
             "thermo_scheme='si3_bl99' supports only the ORCA1-resolved "
@@ -593,3 +593,9 @@ def build_si3_orca2_o2_config(
         si3_orca2=cfg,
     )
 
+
+class SI3LateralMeltConfig(NamedTuple):
+    """``&namthd_da`` values read by ``ice_thd_da`` (``namelist_ice_ref:179,183``); no defaults."""
+
+    rn_beta: float
+    rn_dmin: float

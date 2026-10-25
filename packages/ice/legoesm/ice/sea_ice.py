@@ -514,7 +514,7 @@ def _si3_step_with_trace(state: SI3ColumnState,
         state.S_layers.data,
         state.age_volume.data,
     )
-    trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constants)
+    trace = si3_column_step_arrays(arrays, forcing, dt, config.ice_constants, si3=config.si3)
     out = trace.exit
     new_state = SI3ColumnState(
         concentration=state.concentration.replace(data=out.concentration),
