@@ -231,6 +231,11 @@ PASS_D5_PLATFORM_DISPOSITION D5_PLATFORM_FLOOR
 PASS_D5_EXECUTION cpu x64=True xla_flags=''
 ```
 
+- Resume-5 per-receipt citation gate: all ten SI3 receipts PASS, 417 cited
+  locations checked, with `failures=0`, `unmapped=0`, and
+  `map_failures=0` on every receipt's full-map audit.
+- Resume-5 default citation-gate tests: `17 passed in 6.12s`.
+- Resume-5 private-import ratchet: `6 passed in 5.17s`.
 - Resume-4 read-only preflight: PASS, including exact-group validation against
   both NEMO reference namelists, the `nn_itned` refusal plant, quoted-error
   plant, ten checklist sections, real-preprocessed
