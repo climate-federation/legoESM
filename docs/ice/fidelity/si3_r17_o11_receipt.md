@@ -143,6 +143,12 @@ The fidelity failure common to both is the scalarmath v2 full gate; the parent's
 private-import ratchet is green. Evidence:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round17/` (`head_caf7fd/` for current).
 
+## Gates
+
+This receipt's citation gate: `PASS`, 41 citations, 0 unmapped; a planted citation makes it
+`FAIL`. All 14 SI3 receipts pass. Default citation-gate test: `32 passed`. Private-import
+ratchet: `6 passed`.
+
 ## Findings outside this rung (not acted on)
 
 - The surface module's `<= 0` bit helper is fused by XLA into a flushing float compare under
