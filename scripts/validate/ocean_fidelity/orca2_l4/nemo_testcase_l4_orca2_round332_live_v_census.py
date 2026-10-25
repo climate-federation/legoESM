@@ -103,10 +103,9 @@ def measure(deck_root: Path, record_root: Path, expect_commit: str) -> dict:
         np.asarray(state.v_mask.data)[1:, :, None] != 0.0, lego.shape)
     wet = mask
     dry = ~mask
-    perm = np.asarray(card.recipe.grid.fold.perm_v)
     dump = rung10.read_state_frame(
         record_root / "oracle_stage_kt00000001_s1.bin", kt=1, stage=1)["v"]
-    registered_2d = ((~mask[146, perm[:90], :])
+    registered_2d = ((~mask[147, :90, :])
                      & (dump[147, :90, :] == 0.0)
                      & ~np.signbit(dump[147, :90, :]))
     registered = np.zeros_like(dry)
