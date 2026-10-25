@@ -5,8 +5,9 @@ Date: 2026-10-24
 Base: `f2dcf0a8cfff`; preregistration: `77ab00003`; rescore gate:
 `a80e3d0ab`.  Post-review acquisition repair: `c9569b8cf`.
 Initial disposition: **ACQUISITION_NEEDED**.  The resume-5 disposition below
-supersedes it after admitting the operator's record.  No model or
-configuration value changed, and Codex did not run NEMO.
+supersedes it after admitting the operator's record, and the resume-7 decision
+and measurements are the terminal account.  Resume 7 changes two cited model
+statements but no configuration value.  Codex did not run NEMO.
 
 ## Answer
 
@@ -90,7 +91,7 @@ missing mixing lengths.  R332-P4 therefore also remains **PLAUSIBLE** and
 triggers acquisition; “downstream source-order rounding” is not yet literally
 demonstrated as NEMO's operation order.
 
-## Operator acquisition
+## Historical operator acquisition (completed in resume 5)
 
 The thin round-332 launcher imports the reviewed round-328 acquisition driver
 and its round-331 TKE extension.  It adds only write-only observers to the
@@ -155,7 +156,7 @@ Operator command:
 Expected evidence directory:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round332/acquisition/orca1ice_source_order_kt1_np2`.
 
-## Gates and disposition
+## Historical gates and disposition (superseded by resume 7)
 
 - R332-P1 and P2: **CONFIRMED**.
 - R332-P3 mandatory VOR flip: **REFUTED**.  The no-flip path is admissible.
@@ -343,6 +344,61 @@ production-call-site and acquisition tests pass (30 selected tests), including
 finite reverse derivatives.  Reverting either source materialization or the
 literal multiply makes its production-call-site regression fail.
 
-Decision-122, DINO, N=1 reverse/forward, read-only preflight, citation,
-default landing and private-import ratchet results are recorded below after
-their clean-commit runs.
+### Resume-7 measurements and gates
+
+The production-call-site regressions and the full offline replay pass.  The
+replay covers the six distinct anchor inputs represented by the seven cells
+(one horizontal column appears at two levels), and both eager and production
+JIT now reproduce all seven recorded NEMO `lup` values.  The literal
+`pdlr*K_M` form is exact at all 414,119 wet cells; the pre-fix eager reciprocal
+form missed 148,479, while the pre-fix JIT happened to be exact by compiler
+rewrite.  Reverse derivatives through both fixed statements are finite, and
+reverting either statement makes its production-call-site test fail.
+
+The clean-commit Decision-122 remeasurement at `b0f9eb329` covered all seven
+required card/label pairs plus OMT-0.  OMT-0, rung 0 and OMT-1 through OMT-4
+are byte-for-byte identical to the published pre-fix row objects.  Each
+rung-10 label gains 13 bit-exact rows and loses none; 91 normalized-maximum
+rows improve, 180 rows reduce their unequal-word count and none increases it.
+The recomputed first over-bar row moves later from kt 2 stage 2 `u` to kt 2
+stage 3 `T`.  The registered RMS census is 176 toward, 4 away, 0 equal on
+each label, while the first registered non-bit row remains kt 1 stage 1 `v`
+and is equal.  The campaign classifier returns
+`PASS_R278_D122_DECISION`: zero exact-row losses and an equal first registered
+row on all seven pairs.  The four later RMS-away rows are the registered
+census, not a Decision-122 veto.
+
+The established three-step faithful-DINO production probe was run on both
+the exact pre-fix commit `ce3732a403` and `b0f9eb329`, CPU/fp64/production
+JIT.  All 66 state-leaf/step hashes are bit-identical.  The default-grid
+full-model probe correctly refuses because that grid lacks the raw NEMO
+`gdept_0/gdepw_0/e3t_0` operands required by its step-entry configuration;
+the direct/default and all other closure callers are covered by the 311-test
+caller suite, which passes.  That suite includes the anchor API, reciprocal
+API, both iterative and final `compute_K_from_tke` production call sites,
+prognostic TKE, Veros conventions, NEMO defaults and DINO configuration.
+
+The clean-commit rung-10 `N=1` comparison-card gradient probe completes in
+2,447.8 seconds with peak RSS 72.6 GiB.  Every reverse cotangent is finite,
+with no non-finite leaves and no dry-cell gradient.  `T_dir0` reverse/forward
+relative differences are `1.819369557262068e-14` for the T loss and
+`1.3868976507379975e-15` for the SSH loss.  The trainable `rn_ud` scalar's T
+derivative agrees reverse/forward to `1.501929835492298e-15`; its SSH
+derivative is exactly zero in both modes.  Forward production parity has zero
+non-bit leaves.
+
+The clean read-only acquisition preflight passes 74 tests, all continuation,
+placement, extent, bounds, checksum and arithmetic plants, eight Fortran
+syntax proofs, a normalized stage-object floating-point instruction census
+of 1,367, and the same-program proof (409 identical preprocessed units and
+421 identical normalized objects).  It runs no NEMO executable and stops at:
+
+```text
+ORCA2_ROUND328_TKE332_PREFLIGHT_READY /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round332/acquisition/orca1ice_raw_postfold_v_kt1_np2
+```
+
+The per-receipt citation, default landing and explicit private-import ratchet
+results are recorded after their final-commit runs below.  Codex review:
+operator.  The independent Claude review's four disagreements are incorporated
+in the corrected walk above; no overturned fold-owner or live-dry-sign claim
+remains.
