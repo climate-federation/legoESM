@@ -216,7 +216,7 @@ def call_scheme(
         return out
     if name == "kain_fritsch":
         out, _ = kain_fritsch_convection(
-            **common, w_grid=jnp.zeros_like(T),
+            **common, w_grid=jnp.zeros_like(T), u=u, v=v,
             conv_prog_profile=prog,
             config=_with_solve(KainFritschConfig(), subsidence_solve),
         )

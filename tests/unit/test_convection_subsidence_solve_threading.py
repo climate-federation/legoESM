@@ -65,12 +65,8 @@ from legoesm.atmosphere.physics.convection.bechtold import bechtold_convection
 from legoesm.atmosphere.physics.convection.config import (
     BechtoldConfig,
     ConvectiveEDMFConfig,
-    KainFritschConfig,
     MassFluxConfig,
     TiedtkeConfig,
-)
-from legoesm.atmosphere.physics.convection.kain_fritsch import (
-    kain_fritsch_convection,
 )
 from legoesm.atmosphere.physics.convection.mass_flux import (
     apply_mass_flux_kernel_implicit_flux,
@@ -119,17 +115,6 @@ def _run_tiedtke(ss, T_offset=0.0):
     return out
 
 
-def _run_kain_fritsch(ss, T_offset=0.0):
-    T, q_v, p_full, p_half, _u, _v = _column()
-    cpp = jnp.zeros_like(T)
-    cfg = (KainFritschConfig() if ss is None
-           else KainFritschConfig(subsidence_solve=ss))
-    w_grid = jnp.zeros_like(T)
-    out, _ = kain_fritsch_convection(
-        T + T_offset, q_v, p_full, p_half, w_grid, cpp, dt=DT_S, config=cfg)
-    return out
-
-
 def _run_mass_flux(ss, T_offset=0.0):
     T, q_v, p_full, p_half, _u, _v = _column()
     cfg = MassFluxConfig() if ss is None else MassFluxConfig(subsidence_solve=ss)
@@ -174,9 +159,9 @@ SCHEMES = {
     # zhang_mcfarlane: the CAM6 port runs its own cloud model (cldprp /
     # q1q2_pjr), not the shared subsidence kernel -- no subsidence_solve field.
     "mass_flux": (_run_mass_flux, MassFluxConfig, "advective"),
-    # Kain-Fritsch already shipped the conservative solve (hardcoded at its
-    # call site, PR #988); the field promotes it with the SAME default.
-    "kain_fritsch": (_run_kain_fritsch, KainFritschConfig, "implicit_flux"),
+    # kain_fritsch: the WRF KF-Eta port runs the oracle's own upstream
+    # subsidence (NSTEP substeps), not the shared kernel; subsidence_solve is a
+    # surrogate-only field that raises if set (tests/unit/test_kain_fritsch.py).
     # EDMF and Bechtold already SHIPPED the conservative solve.  They are in
     # this matrix because codex r2 found EDMF silently missing the paired
     # condensation heating, and Bechtold applying it UNCONDITIONALLY (i.e.

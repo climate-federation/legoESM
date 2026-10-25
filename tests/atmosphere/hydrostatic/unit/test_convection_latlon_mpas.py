@@ -118,6 +118,10 @@ def scheme_config(request):
     # The test grids carry no land fraction: ZM gets the explicit aquaplanet choice.
     kwargs = {scheme_field: (scheme_cls(land_fraction="none")
                              if name == "zhang_mcfarlane" else scheme_cls())}
+    # The WRF KF-Eta port needs real winds; on MPAS they come only from the
+    # edge-normal reconstruction (mpas_cmt=True), else the bridge raises.
+    if name == "kain_fritsch":
+        kwargs["mpas_cmt"] = True
     return name, ConvectionConfig(scheme=name, **kwargs)
 
 
@@ -252,6 +256,16 @@ class TestConvectionMPAS:
         )
         assert bool(jnp.all(jnp.isfinite(tend.du_dt.data)))
         assert bool(jnp.all(jnp.isfinite(tend.dp_s_dt.data)))
+
+    def test_kf_mpas_without_reconstructed_winds_raises(
+        self, mpas_mesh, mpas_state, sigma_coord,
+    ):
+        """KF on MPAS with mpas_cmt off would run on zero winds: refused."""
+        physics_fn = make_convection_physics(
+            ConvectionConfig(scheme="kain_fritsch"), model_type="mpas", dt=300.0,
+        )
+        with pytest.raises(ValueError, match="mpas_cmt"):
+            physics_fn(mpas_state, mpas_mesh, sigma_coord)
 
     def test_tiedtke_mpas_passes_none_not_zeros_for_missing_mc(
         self, mpas_mesh, mpas_state, sigma_coord,
