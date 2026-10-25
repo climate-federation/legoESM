@@ -354,6 +354,9 @@ FILES = {
     "scripts/validate/ocean_fidelity/testcases/nemo_si3_o3_orca2_sas_gate.py": REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o3_orca2_sas_gate.py",
     "tests/ice/unit/test_si3_o3_itd_fit.py": REPO / "tests/ice/unit/test_si3_o3_itd_fit.py",
     "docs/ice/fidelity/si3_r9_o3_receipt.md": REPO / "docs/ice/fidelity/si3_r9_o3_receipt.md",
+    "docs/ice/fidelity/si3_r10_o5_receipt.md": REPO / "docs/ice/fidelity/si3_r10_o5_receipt.md",
+    "docs/ice/fidelity/si3_r11_o7_receipt.md": REPO / "docs/ice/fidelity/si3_r11_o7_receipt.md",
+    "docs/ice/fidelity/si3_r13_o7_acquisition_receipt.md": REPO / "docs/ice/fidelity/si3_r13_o7_acquisition_receipt.md",
     "ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/iceupdate.f90": NEMO / "cfgs/ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/iceupdate.f90",
     "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_eos_gate.py": REPO / "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_eos_gate.py",
     "packages/ice/legoesm/ice/fidelity/nemo_adv2d_rhg_testcase_recipe.py": REPO / "packages/ice/legoesm/ice/fidelity/nemo_adv2d_rhg_testcase_recipe.py",
@@ -9629,6 +9632,7 @@ CITATION_MAP = {
     'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icesbc.f90:450': 'IF( ( zqld - zqfr ) < 0._wp ) THEN',
     'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icesbc.f90:472': 'IF( zvel(ji,jj) <= 5.e-03_wp .AND. at_i(ji,jj) >= (rn_amax_2d(ji,jj)-0.001_wp) .AND. vt_i(ji,jj) >= 3._wp )   qlead(ji,jj) = 0._wp',
     'ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icestp.f90:418': 'rDt_ice   = REAL(nn_fsbc) * rn_Dt          !--- sea-ice timestep and its inverse',
+    'src/ICE/iceupdate.F90:208': 'CALL ice_alb( ln_pnd_alb, t_su(:,:,:), h_i(:,:,:), h_s(:,:,:), a_ip_eff(:,:,:), &',
     # --- SI3 round 11 (O7) codex HOLD fixes ---
     'packages/core/legoesm/thermo.py:385': 'zle = sr(zle + sr(constants.goff_ice_C_nemo * sr(1.0 - sr(zta / sr(jnp.asarray(rtt0))))))',
     'packages/ice/legoesm/ice/si3_surface.py:256': 'acc = sr(jnp.zeros(terms.shape[:-1], dtype=terms.dtype))',
@@ -9852,7 +9856,7 @@ _NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm)"
          r"|sette/(?:input_ORCA2_SAS_ICE\.cfg|sette_fetch_inputs\.sh)"
          r"|scripts/validate/ocean_fidelity/testcases/[A-Za-z0-9_./]+/run\.sh"
          r"|docs/ocean/fidelity/testcases/(?:nemo_testcases_l3dyn_phase2_receipt|nemo_testcases_l3thd_phase6_receipt|nemo_testcases_l3thd_scalarmath_v2_receipt|nemo_testcases_l4_orca2_phase2_manifest)\.md"
-         r"|docs/ice/fidelity/(?:si3_ladder_design|si3_r2_d5_preregister|si3_r2_d5_receipt|si3_r3_d5_preregister|si3_r3_d5_receipt|si3_r4_o1_preregister|si3_r4_o1_receipt|si3_r5_d5_preregister|si3_r5_d5_receipt|si3_r6_d5_preregister|si3_r6_d5_receipt|si3_r7_o2_preregister|si3_r7_o2_receipt|si3_r9_o3_receipt)\.md")
+         r"|docs/ice/fidelity/(?:si3_ladder_design|si3_r\d+_[A-Za-z0-9_]+_(?:preregister|receipt))\.md")
 _SPAN = re.compile(r"`([^`\n]+)`")
 _FULL = re.compile(rf"^(?P<f>{_NAME}):(?P<l>\d[\d,\-]*)$")
 _ONLY = re.compile(rf"^(?P<f>{_NAME})$")

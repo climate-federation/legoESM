@@ -35,7 +35,6 @@ readonly STUBS=$here/o7_si3_fixture_stubs.F90
 readonly FIXTURE=$here/o7_si3_layout_fixture.F90
 readonly ICEALB_STUBS=$here/o7_icealb_stubs.F90
 readonly ICEALB_DRIVER=$here/o7_icealb_driver.F90
-readonly PASSIVITY_FIXTURE=$here/o7_passivity_fixture.F90
 readonly REAL_EXCERPT=$here/ocean.output.excerpt
 readonly REF_ROOT=$NEMO_ROOT/cfgs/$REF_CFG
 readonly REC_ROOT=$NEMO_ROOT/cfgs/$REC_CFG
@@ -48,7 +47,8 @@ arg=${2:-}
 case "$mode" in
   --preflight-only) PREFLIGHT_JSON=$arg ;;
   --run|--admit-existing) [[ -z "$arg" ]] || EVIDENCE=$arg ;;
-  *) printf 'REFUSE: usage: %s [--preflight-only|--run|--admit-existing] [path]\n' "$0" >&2; exit 64 ;;
+  --move-aside-builds) [[ -z "$arg" ]] || { printf 'REFUSE: --move-aside-builds takes no path\n' >&2; exit 64; } ;;
+  *) printf 'REFUSE: usage: %s [--preflight-only|--run|--admit-existing|--move-aside-builds] [path]\n' "$0" >&2; exit 64 ;;
 esac
 
 ACTIVE_RUN=""; ACTIVE_SCRATCH=""; CREATED_REF=0; CREATED_REC=0; RUN_COMPLETE=0
@@ -62,8 +62,9 @@ cleanup() {
       mv "$ACTIVE_RUN" "$dst"
       printf 'REFUSE_RETAINED: %s\n' "$dst" >&2
     fi
-    [[ "$CREATED_REF" -eq 0 || "$RUN_COMPLETE" -eq 1 || ! -d "$REF_ROOT" ]] || rm -rf -- "$REF_ROOT"
-    [[ "$CREATED_REC" -eq 0 || "$RUN_COMPLETE" -eq 1 || ! -d "$REC_ROOT" ]] || rm -rf -- "$REC_ROOT"
+    # Checklist 13: refused builds are evidence too.  Never delete them.
+    [[ "$CREATED_REF" -eq 0 || ! -d "$REF_ROOT" ]] || printf 'REFUSE_BUILD_RETAINED: %s\n' "$REF_ROOT" >&2
+    [[ "$CREATED_REC" -eq 0 || ! -d "$REC_ROOT" ]] || printf 'REFUSE_BUILD_RETAINED: %s\n' "$REC_ROOT" >&2
   fi
   exit "$rc"
 }
@@ -109,7 +110,7 @@ s,n=re.subn(r"(^\s*nn_itend\s*=\s*)[^!,\n]+",r"\g<1>2 ",s,count=1,flags=re.I|re.
 if n!=1: raise SystemExit("STATUS PLANT-FIRED: cannot set run-control nn_itend")
 match=re.search(r"(^\s*&namrun\b[\s\S]*?)(^\s*/\s*$)",s,re.I|re.M)
 if not match: raise SystemExit("STATUS PLANT-FIRED: cannot find &namrun")
-insert="   nn_stock    =       2\n   nn_write    =       0\n"
+insert="   nn_stock    =       2\n   nn_write    =      -1\n"
 s=s[:match.start(2)]+insert+s[match.start(2):]
 p.write_text(s)
 PY
@@ -117,6 +118,58 @@ PY
 
 targets_absent() {
   [[ ! -e "$1" && ! -e "$2" && ! -e "$3" ]]
+}
+
+move_builds_aside() {
+  local ref=$1 rec=$2 destination=$3 moved=0
+  mkdir -p "$destination"
+  if [[ -d "$ref" ]]; then mv "$ref" "$destination/$(basename "$ref")"; moved=$((moved+1)); fi
+  if [[ -d "$rec" ]]; then mv "$rec" "$destination/$(basename "$rec")"; moved=$((moved+1)); fi
+  [[ "$moved" -gt 0 ]] || refuse 'no retained O7 build exists to move aside'
+  printf 'BUILDS_MOVED_ASIDE: %s\n' "$destination"
+}
+
+verify_staged_namelists() {
+  local dir=$1 plant=${2:-none}
+  "$PY" - "$dir/namelist_cfg" "$dir/namelist_ice_cfg" "$dir/namelist_ref" "$dir/namelist_ice_ref" "$plant" <<'PY'
+import re,sys
+from pathlib import Path
+cfg_oce,cfg_ice,ref_oce,ref_ice=map(lambda x:Path(x).read_text(),sys.argv[1:5])
+plant=sys.argv[5]
+if plant == "misspelled":
+    cfg_oce=re.sub(r"(&namrun\b)",r"\1\n   nn_writ = -1",cfg_oce,count=1,flags=re.I)
+elif plant == "misplaced":
+    cfg_oce=re.sub(r"(&namdom\b)",r"\1\n   nn_write = -1",cfg_oce,count=1,flags=re.I)
+
+def groups(text):
+    result={}; current=None
+    for raw in text.splitlines():
+        code=raw.split("!",1)[0].strip()
+        if not code: continue
+        match=re.match(r"&([A-Za-z0-9_]+)",code)
+        if match:
+            current=match.group(1).lower(); result.setdefault(current,set()); continue
+        if code.startswith("/"): current=None; continue
+        if current and "=" in code:
+            name=re.sub(r"\(.*\)$","",code.split("=",1)[0].strip()).lower()
+            result[current].add(name)
+    return result
+
+for label,cfg,ref in (("ocean",cfg_oce,ref_oce),("ice",cfg_ice,ref_ice)):
+    got,want=groups(cfg),groups(ref)
+    unknown=sorted(set(got)-set(want))
+    if unknown: raise SystemExit(f"STATUS PLANT-FIRED: {label} unknown groups {unknown}")
+    owners={name:{group for group,names in want.items() if name in names}
+            for names in want.values() for name in names}
+    for group,names in got.items():
+        for name in names:
+            if name not in want[group]:
+                raise SystemExit(
+                    f"STATUS PLANT-FIRED: {label} variable {name} is staged in &{group}; "
+                    f"declared owners={sorted(owners.get(name,set()))}"
+                )
+print("PASS_STAGED_NAMELIST_GROUP_MEMBERSHIP")
+PY
 }
 
 verify_production_deck() {
@@ -148,7 +201,7 @@ rendered=SI3SurfaceConfig.from_input_namelists(d/'namelist_ref',d/'namelist_cfg'
 production=SI3SurfaceConfig.from_input_namelists(*map(Path,(sys.argv[4],sys.argv[2],sys.argv[5],sys.argv[3])))
 if rendered != production: raise SystemExit('STATUS PLANT-FIRED: rendered physical deck changed')
 text=(d/'namelist_cfg').read_text()
-for name,want in (("nn_it000",1),("nn_itend",2),("nn_stock",2),("nn_write",0),("nn_fsbc",1)):
+for name,want in (("nn_it000",1),("nn_itend",2),("nn_stock",2),("nn_write",-1),("nn_fsbc",1)):
     sources=[text,(d/'namelist_ref').read_text()]
     matches=[re.findall(rf"^\s*{name}\s*=\s*(-?\d+)",source,re.I|re.M) for source in sources]
     got=int(next(values[-1] for values in matches if values))
@@ -159,9 +212,14 @@ PY
 }
 
 preprocess() {
-  local source=$1 output=$2 keys=() key
+  local source=$1 output=$2 keys=() key cpp_text fpp_text
+  local -a cpp_cmd fpp_flags
   while read -r key; do keys+=("-D$key"); done < <(awk '/bld::tool::fppkeys/ {for(i=2;i<=NF;i++) print $i}' "$BASE_BLD/cpp.fcm")
-  "$FC" -E -cpp -P -traditional "${keys[@]}" -I "$BASE_BLD/inc" "$source" > "$output"
+  cpp_text=$(awk '/^%CPP[[:space:]]/ {$1=""; sub(/^ +/,""); print}' "$BASE_BLD/arch_nemo.fcm")
+  fpp_text=$(awk '/^%FPPFLAGS[[:space:]]/ {$1=""; sub(/^ +/,""); print}' "$BASE_BLD/arch_nemo.fcm")
+  read -r -a cpp_cmd <<< "$cpp_text"; read -r -a fpp_flags <<< "$fpp_text"
+  [[ ${#cpp_cmd[@]} -gt 0 && ${#fpp_flags[@]} -gt 0 ]] || refuse 'cannot resolve record-build CPP invocation'
+  "${cpp_cmd[@]}" "${fpp_flags[@]}" "${keys[@]}" -I "$BASE_BLD/../WORK" "$source" > "$output"
 }
 
 prepare_real_ppsrc() {
@@ -186,8 +244,18 @@ prepare_real_ppsrc() {
 }
 
 same_program_preflight() {
-  local scratch=$1 args=() unit
-  for unit in "${UNITS[@]}"; do args+=(--patch "$unit=$here/${unit}_o7.patch"); done
+  local scratch=$1 args=() unit src
+  mkdir -p "$scratch/expected_raw" "$scratch/expected_ppsrc"
+  for unit in "${UNITS[@]}"; do
+    # Build the expected observer text independently from the installed patch,
+    # using the exact CPP command recorded by the production build.  Do not
+    # copy it from the record ppsrc: that would make the content check circular.
+    src=$(source_path "$unit")
+    cp "$src" "$scratch/expected_raw/$unit.F90"
+    patch -s --fuzz=0 "$scratch/expected_raw/$unit.F90" < "$here/${unit}_o7.patch"
+    preprocess "$scratch/expected_raw/$unit.F90" "$scratch/expected_ppsrc/$unit.f90"
+    args+=(--patch "$unit=$here/${unit}_o7.patch" --expected-ppsrc "$unit=$scratch/expected_ppsrc/$unit.f90")
+  done
   "$PY" "$GATE" --same-program "$scratch/rec_bld" --reference-bld "$scratch/ref_bld" \
     --writer "$WRITER" "${args[@]}" --new-cfg "$REC_CFG" --reference-cfg "$REF_CFG"
   cp -a "$scratch/rec_bld" "$scratch/rec_bld_plant"
@@ -195,6 +263,13 @@ same_program_preflight() {
   if "$PY" "$GATE" --same-program "$scratch/rec_bld_plant" --reference-bld "$scratch/ref_bld" \
       --writer "$WRITER" "${args[@]}" --new-cfg "$REC_CFG" --reference-cfg "$REF_CFG" >/dev/null 2>&1; then
     refuse 'real-ppsrc outside-marker same-program plant did not fire'
+  fi
+  cp -a "$scratch/rec_bld" "$scratch/rec_bld_marker_plant"
+  sed -i '0,/CALL o7_set_coeffs/s/CALL o7_set_coeffs/CALL o7_set_coeffs_changed/' \
+    "$scratch/rec_bld_marker_plant/ppsrc/nemo/sbcblk.f90"
+  if "$PY" "$GATE" --same-program "$scratch/rec_bld_marker_plant" --reference-bld "$scratch/ref_bld" \
+      --writer "$WRITER" "${args[@]}" --new-cfg "$REC_CFG" --reference-cfg "$REF_CFG" >/dev/null 2>&1; then
+    refuse 'real-ppsrc marked-content/patch comparison plant did not fire'
   fi
 }
 
@@ -206,6 +281,7 @@ root=pathlib.Path(sys.argv[1])
 texts={u:(root/f"{u}.f90").read_text() for u in ("icestp","sbcblk","icealb","icesbc")}
 checks={
 "o7_set_context":("icestp",r"CALL o7_set_context\([\s\S]{0,240}?\)\n\s*! O7_OBSERVER_END\n\s*CALL ice_sbc_tau"),
+"o7_finish_step":("icestp",r"CALL ice_update_flx\([^\n]+\)\s*!.*\n\s*! O7_OBSERVER_BEGIN\n\s*CALL o7_finish_step"),
 "o7_set_coeffs":("sbcblk",r"CALL o7_set_coeffs\([^\n]+\)\n\s*CALL o7_blk1_entry"),
 "o7_blk1_entry":("sbcblk",r"CALL o7_blk1_entry\([^\n]+\)\n\s*! O7_OBSERVER_END\n\s*!\n\s*! treshold for outputs"),
 "o7_blk1_exit":("sbcblk",r"CALL o7_blk1_exit\([^\n]+\)\n\s*! O7_OBSERVER_END\n\s*END SUBROUTINE blk_ice_1"),
@@ -230,7 +306,7 @@ for name,(unit,_pat) in checks.items():
 for token in ("o7_zsq(ji,jj,jl) = zsq","o7_zsipt(ji,jj,jl) = zsipt",
               "o7_zdqlw(ji,jj,jl) = z_dqlw","o7_zdqsb(ji,jj,jl) = z_dqsb"):
     if texts["sbcblk"].count(token)!=1: raise SystemExit(f"STATUS PLANT-FIRED: intermediate copy {token}")
-print("PASS_11_LANDINGS_AND_11_MISPLACEMENT_PLANTS")
+print("PASS_12_LANDINGS_AND_12_MISPLACEMENT_PLANTS")
 PY
 }
 
@@ -256,42 +332,65 @@ bounds_fixture() {
   "$PY" "$GATE" --read-record "$scratch/layout/o7_si3_records/o7_kind07_step0002_rank0000.bin" >/dev/null
   (cd "$scratch/actual" && "$FC" -O2 -fcheck=bounds -fbacktrace -ffree-line-length-none -J. -I. \
     "$ICEALB_STUBS" "$WRITER" "$icealb_ppsrc" "$ICEALB_DRIVER" -o o7_actual_icealb && ./o7_actual_icealb)
-  [[ $(find "$scratch/actual/o7_si3_records" -type f | wc -l) -eq 2 ]] || refuse 'patched icealb fixture did not emit entry/exit'
-  "$PY" "$GATE" --read-record "$scratch/actual/o7_si3_records/o7_kind05_step0001_rank0000.bin" >/dev/null
+  [[ $(find "$scratch/actual/o7_si3_records" -type f | wc -l) -eq 5 ]] || refuse 'patched icealb fixture did not emit ordered S1-S4 records'
+  "$PY" "$GATE" --read-record "$scratch/actual/o7_si3_records/o7_s4_alb_exit_step0001_rank0000.bin" >/dev/null
 }
 
 reader_plants() {
-  "$PY" "$GATE" --self-test >/dev/null
+  "$PY" "$GATE" --self-test --nemo-root "$NEMO_ROOT" >/dev/null
   local plant
   for plant in header truncation extent checksum time-level missing-frame wet-1ulp absolute-path; do
-    if "$PY" "$GATE" --self-test --plant "$plant" >/dev/null 2>&1; then
+    if "$PY" "$GATE" --self-test --plant "$plant" --nemo-root "$NEMO_ROOT" >/dev/null 2>&1; then
       refuse "reader plant $plant did not refuse"
     fi
   done
 }
 
-passivity_fixture() {
+preregistered_control_plants() {
+  local plant
+  for plant in swapped-field cd-1ulp fold-sign pond-branch nn-snwfra sum-seed composed-feed; do
+    if "$PY" "$GATE" --control-self-test --plant "$plant" --nemo-root "$NEMO_ROOT" >/dev/null 2>&1; then
+      refuse "preregistered control plant $plant did not turn the scorer red"
+    fi
+  done
+}
+
+passivity_real_objects() {
   local scratch=$1 flags
-  mkdir -p "$scratch/ref" "$scratch/obs" "$scratch/bad"
+  mkdir -p "$scratch/ref" "$scratch/rec" "$scratch/bad" "$scratch/ref_mod" "$scratch/rec_mod" "$scratch/bad_mod"
   flags=$(awk '/^%FCFLAGS/ {$1=""; sub(/^ /,""); print}' "$BASE_BLD/arch_nemo.fcm")
+  # The writer supplies the observer interface; every censused object below is
+  # the actual NEMO ppsrc compiled with the record build's production flags.
   # shellcheck disable=SC2086
-  "$FC" $flags -cpp -J "$scratch/ref" -c "$PASSIVITY_FIXTURE" -o "$scratch/ref/fixture.o"
+  "$FC" $flags -J "$scratch/rec_mod" -I "$BASE_BLD/inc" -c "$WRITER" -o "$scratch/rec/o7_si3_writer.o"
+  local unit
+  for unit in sbcblk icealb icesbc; do
+    # shellcheck disable=SC2086
+    "$FC" $flags -J "$scratch/ref_mod" -I "$scratch/ref_mod" -I "$BASE_BLD/inc" -c \
+      "$scratch/../ref_bld/ppsrc/nemo/$unit.f90" -o "$scratch/ref/$unit.o"
+    # shellcheck disable=SC2086
+    "$FC" $flags -J "$scratch/rec_mod" -I "$scratch/rec_mod" -I "$BASE_BLD/inc" -c \
+      "$scratch/../rec_bld/ppsrc/nemo/$unit.f90" -o "$scratch/rec/$unit.o"
+  done
+  "$PY" "$PASSIVITY" --reference "$scratch/ref" --record "$scratch/rec" \
+    --arch "$BASE_BLD/arch_nemo.fcm" >/dev/null
+  cp "$scratch/rec"/*.o "$scratch/bad/"
+  cp "$scratch/../rec_bld/ppsrc/nemo/sbcblk.f90" "$scratch/bad_sbcblk.f90"
+  sed -i '/wndm_ice(ji,jj) = SQRT/a\         wndm_ice(ji,jj) = wndm_ice(ji,jj) + rn_Cd_ia ! O7 injected FP census plant' \
+    "$scratch/bad_sbcblk.f90"
   # shellcheck disable=SC2086
-  "$FC" $flags -cpp -DO7_OBSERVED -J "$scratch/obs" -c "$PASSIVITY_FIXTURE" -o "$scratch/obs/fixture.o"
-  # shellcheck disable=SC2086
-  "$FC" $flags -cpp -DO7_OBSERVED -DO7_INJECT_FP -J "$scratch/bad" -c "$PASSIVITY_FIXTURE" -o "$scratch/bad/fixture.o"
-  "$PY" "$PASSIVITY" --reference "$scratch/ref" --record "$scratch/obs" \
-    --arch "$BASE_BLD/arch_nemo.fcm" --fixture >/dev/null
+  "$FC" $flags -J "$scratch/bad_mod" -I "$scratch/rec_mod" -I "$BASE_BLD/inc" -c \
+    "$scratch/bad_sbcblk.f90" -o "$scratch/bad/sbcblk.o"
   if "$PY" "$PASSIVITY" --reference "$scratch/ref" --record "$scratch/bad" \
-      --arch "$BASE_BLD/arch_nemo.fcm" --fixture >/dev/null 2>&1; then
+      --arch "$BASE_BLD/arch_nemo.fcm" >/dev/null 2>&1; then
     refuse 'injected-FP passivity plant did not fire'
   fi
 }
 
 verify_real_excerpt() {
   "$PY" - "$REAL_EXCERPT" <<'PY'
-import hashlib,pathlib,sys
-from scripts.validate.ocean_fidelity.testcases.nemo_si3_o1_orca2_sas_gate import verify_ocean_output_log
+import hashlib,pathlib,sys,tempfile
+from scripts.validate.ocean_fidelity.testcases.nemo_si3_o7_orca2_sas_gate import verify_o7_log
 p=pathlib.Path(sys.argv[1]); lines=p.read_text().splitlines()
 src=pathlib.Path(next(x.split(':',1)[1].strip() for x in lines if x.startswith('# Source path:')))
 sha=next(x.split(':',1)[1].strip() for x in lines if x.startswith('# Complete source SHA-256:'))
@@ -303,8 +402,30 @@ for span in spans.split(','):
 body=[x.rstrip() for x in lines if not x.startswith('#')]
 source=src.read_text(errors='replace').splitlines()
 if body != [source[n-1].rstrip() for n in nums]: raise SystemExit('STATUS PLANT-FIRED: real log excerpt differs')
-verify_ocean_output_log(p,expect_icedyn=False,expect_icethd=False)
-print('PASS_REAL_PRODUCTION_OCEAN_OUTPUT_FORMAT')
+# The available real excerpt is O1's diagnostic deck (dynamics/thermo off).
+# Exercise the O7 parser with an explicit synthetic production-selector echo;
+# admission applies the same parser to each real dynamics-on O7 ocean.output.
+text='\n'.join(body).replace('ln_icedyn =  F','ln_icedyn =  T').replace('ln_icethd =  F','ln_icethd =  T')
+text += '''
+ ln_pnd = T
+ ln_pnd_alb = T
+ ln_blk = T
+ ln_mixcpl = F
+ ln_Cx_ice_cst = T
+ nn_it000 = 1
+ nn_itend = 2
+ nn_fsbc = 1
+ jpni = 1
+ jpnj = 1
+'''
+with tempfile.TemporaryDirectory() as td:
+    synthetic=pathlib.Path(td)/'ocean.output'; synthetic.write_text(text)
+    verify_o7_log(synthetic)
+    try: verify_o7_log(synthetic,plant='error-token')
+    except ValueError as exc:
+        if 'E R R O R : planted fatal NEMO line' not in str(exc): raise
+    else: raise SystemExit('STATUS PLANT-FIRED: ocean.output E R R O R plant inert')
+print('PASS_SYNTHETIC_DYNAMICS_ON_LOG; REAL_CHECK_AT_ADMISSION')
 PY
 }
 
@@ -319,11 +440,28 @@ retention_plant() {
     refuse 'failure evidence was not retained exactly once'
 }
 
+rerun_move_aside_plant() {
+  local scratch=$1 root ref rec
+  root=$scratch/rerun; ref=$root/ORCA2_SAS_ICE_O7_REF; rec=$root/ORCA2_SAS_ICE_O7_REC
+  mkdir -p "$ref" "$rec"; printf ref > "$ref/retained"; printf rec > "$rec/retained"
+  move_builds_aside "$ref" "$rec" "$root/refused/builds_test" >/dev/null
+  [[ ! -e "$ref" && ! -e "$rec" ]] || refuse 'move-aside rerun plant left target builds in place'
+  [[ -f "$root/refused/builds_test/ORCA2_SAS_ICE_O7_REF/retained" && \
+     -f "$root/refused/builds_test/ORCA2_SAS_ICE_O7_REC/retained" ]] || \
+    refuse 'move-aside rerun plant did not retain both builds'
+}
+
 run_preflight() {
   local scratch; scratch=$(mktemp -d); ACTIVE_SCRATCH=$scratch
-  printf 'PREFLIGHT 1/10 unmodified production and rendered two-step O7 deck\n'
+  printf 'PREFLIGHT 1/11 unmodified production and validated two-step O7 deck\n'
   awk -v cfg="$SOURCE_CFG" '$1==cfg {found=1} END {exit !found}' "$NEMO_ROOT/cfgs/ref_cfgs.txt"
   verify_production_deck; render_deck "$scratch/deck"; verify_rendered_deck "$scratch/deck"
+  verify_staged_namelists "$scratch/deck"
+  for nml_plant in misspelled misplaced; do
+    if verify_staged_namelists "$scratch/deck" "$nml_plant" >/dev/null 2>&1; then
+      refuse "staged-namelist $nml_plant variable plant did not fire"
+    fi
+  done
   cp -a "$scratch/deck" "$scratch/deck_plant"
   sed -i '0,/ln_blk[[:space:]]*=[[:space:]]*\.true\./s//ln_blk = .false./' "$scratch/deck_plant/namelist_cfg"
   if verify_rendered_deck "$scratch/deck_plant" >/dev/null 2>&1; then
@@ -336,24 +474,23 @@ run_preflight() {
   if targets_absent "$scratch/no-ref" "$scratch/no-rec" "$scratch/existing"; then
     refuse 'target-existence plant did not fire'
   fi
-  printf 'PREFLIGHT 2/10 raw patches and real preprocessed sources\n'; prepare_real_ppsrc "$scratch"
-  printf 'PREFLIGHT 3/10 like-with-like ppsrc same-program proof and plant\n'; same_program_preflight "$scratch"
-  printf 'PREFLIGHT 4/10 exact call-point landings and misplacement plants\n'; check_landings "$scratch/rec_bld/ppsrc/nemo"
-  printf 'PREFLIGHT 5/10 actual patched interfaces under production flags\n'; mkdir -p "$scratch/mod"; syntax_compile_real_ppsrc "$scratch"
-  printf 'PREFLIGHT 6/10 bounds-checked writer and patched-NEMO execution fixtures\n'
+  printf 'PREFLIGHT 2/11 raw patches and record-build CPP output\n'; prepare_real_ppsrc "$scratch"
+  printf 'PREFLIGHT 3/11 like-with-like ppsrc same-program proof and plants\n'; same_program_preflight "$scratch"
+  printf 'PREFLIGHT 4/11 exact call-point landings and misplacement plants\n'; check_landings "$scratch/rec_bld/ppsrc/nemo"
+  printf 'PREFLIGHT 5/11 actual patched interfaces under production flags\n'; mkdir -p "$scratch/mod"; syntax_compile_real_ppsrc "$scratch"
+  printf 'PREFLIGHT 6/11 bounds-checked writer and patched-NEMO execution fixtures\n'
   bounds_fixture "$scratch/bounds" "$scratch/rec_bld/ppsrc/nemo/icealb.f90"
-  printf 'PREFLIGHT 7/10 reader/extents/time-level/wet-cell controls\n'; reader_plants
-  printf 'PREFLIGHT 8/10 per-function passivity census and injected-op plant\n'; passivity_fixture "$scratch/passivity"
-  printf 'PREFLIGHT 9/10 real production ocean.output excerpt and SAS time level\n'; verify_real_excerpt
-  grep -q 'Nbb = 1; Nnn = 2; Naa = 3; Nrhs = Naa' "$NEMO_ROOT/src/SAS/nemogcm.F90"
-  grep -q 'CALL sbc    ( kstp, Nbb, Nnn )' "$NEMO_ROOT/src/SAS/step.F90"
-  printf 'PREFLIGHT 10/10 retention, resource, timeout, and read-only-default controls\n'
-  retention_plant "$scratch"; ram_gate 1; disk_gate "$EVIDENCE" 1024
+  printf 'PREFLIGHT 7/11 reader/extents/source-derived-time-level/wet-cell controls\n'; reader_plants
+  printf 'PREFLIGHT 8/11 preregistered red-score controls including P6 composition\n'; preregistered_control_plants
+  printf 'PREFLIGHT 9/11 real-object per-function passivity census and injected-op plant\n'; passivity_real_objects "$scratch/passivity"
+  printf 'PREFLIGHT 10/11 synthetic dynamics-on ocean.output parser; real check at admission\n'; verify_real_excerpt
+  printf 'PREFLIGHT 11/11 retention, move-aside rerun, resource, timeout, and read-only controls\n'
+  retention_plant "$scratch"; rerun_move_aside_plant "$scratch"; ram_gate 1; disk_gate "$EVIDENCE" 1024
   grep -q 'timeout "$RUN_TIMEOUT_SEC" mpirun -np 1' "$0"
   if [[ -n "${PREFLIGHT_JSON:-}" ]]; then
     "$PY" - "$PREFLIGHT_JSON" <<'PY'
 import json,pathlib,sys
-pathlib.Path(sys.argv[1]).write_text(json.dumps({"status":"PREFLIGHT_OK","nemo_run":False,"plants":24},indent=2)+"\n")
+pathlib.Path(sys.argv[1]).write_text(json.dumps({"status":"PREFLIGHT_OK","nemo_run":False,"plants":36},indent=2)+"\n")
 PY
   fi
   printf 'PREFLIGHT_OK: no NEMO build or integration was run\n'
@@ -361,25 +498,43 @@ PY
 }
 
 same_program_real_builds() {
-  local args=() unit
-  for unit in "${UNITS[@]}"; do args+=(--patch "$unit=$here/${unit}_o7.patch"); done
+  local args=() unit src scratch
+  scratch=$(mktemp -d)
+  for unit in "${UNITS[@]}"; do
+    src=$scratch/$unit.F90; cp "$(source_path "$unit")" "$src"
+    patch -s --fuzz=0 "$src" < "$here/${unit}_o7.patch"
+    preprocess "$src" "$scratch/$unit.f90"
+    args+=(--patch "$unit=$here/${unit}_o7.patch" --expected-ppsrc "$unit=$scratch/$unit.f90")
+  done
   "$PY" "$GATE" --same-program "$REC_ROOT/BLD" --reference-bld "$REF_ROOT/BLD" \
     --writer "$WRITER" "${args[@]}" --new-cfg "$REC_CFG" --reference-cfg "$REF_CFG" \
     --json "$EVIDENCE/manifest/same_program.json"
+  rm -rf -- "$scratch"
   "$PY" "$PASSIVITY" --reference "$REF_ROOT/BLD/obj" --record "$REC_ROOT/BLD/obj" \
     --arch "$REC_ROOT/BLD/arch_nemo.fcm" --json "$EVIDENCE/manifest/fp_census.json"
 }
 
 admit() {
   local commit=$1 plant
-  "$PY" "$GATE" --admit-evidence "$EVIDENCE" --expect-commit "$commit" --json "$EVIDENCE/o7_admission.json"
-  for plant in stamp binary-checksum checksum input-checksum time-level selector restart missing-frame wet-1ulp; do
-    if "$PY" "$GATE" --admit-evidence "$EVIDENCE" --expect-commit "$commit" --plant "$plant" >/dev/null 2>&1; then
+  "$PY" "$GATE" --admit-evidence "$EVIDENCE" --expect-commit "$commit" --nemo-root "$NEMO_ROOT" --json "$EVIDENCE/o7_admission.json"
+  for plant in stamp binary-checksum checksum input-checksum time-level selector error-log restart missing-frame wet-1ulp \
+    swapped-field cd-1ulp fold-sign pond-branch nn-snwfra sum-seed composed-feed; do
+    if "$PY" "$GATE" --admit-evidence "$EVIDENCE" --expect-commit "$commit" --nemo-root "$NEMO_ROOT" --plant "$plant" >/dev/null 2>&1; then
       refuse "retained-evidence plant $plant did not refuse"
     fi
   done
 }
 
+if [[ "$mode" == --move-aside-builds ]]; then
+  # Refused builds are never deleted.  Operator rerun procedure:
+  #   run.sh --move-aside-builds
+  #   run.sh --run
+  # The exact retained configs move below refused/builds_*; makenemo recreates
+  # the same names and refreshes their work_cfgs.txt entries.
+  move_builds_aside "$REF_ROOT" "$REC_ROOT" \
+    "$REFUSED_DIR/builds_$(date -u +%Y%m%dT%H%M%SZ)_$$"
+  exit 0
+fi
 if [[ "$mode" == --preflight-only ]]; then run_preflight; exit 0; fi
 if [[ "$mode" == --admit-existing ]]; then
   run_preflight

@@ -21,7 +21,8 @@ END MODULE par_ice
 MODULE dom_oce
    USE par_oce
    IMPLICIT NONE
-   REAL(wp), DIMENSION(jpi,jpj) :: smask0=1._wp
+   ! NEMO 5.0.2 dom_oce.F90 declares smask0 on A2D(0), without halos.
+   REAL(wp), DIMENSION(Nis0:Nie0,Njs0:Nje0) :: smask0=1._wp
 END MODULE dom_oce
 
 MODULE icevar

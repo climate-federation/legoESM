@@ -14,10 +14,9 @@ FUNCTIONS = {
     "blk_ice_1": ("sbcblk.o", "__sbcblk_MOD_blk_ice_1"),
     "blk_ice_2": ("sbcblk.o", "__sbcblk_MOD_blk_ice_2"),
     "ice_alb": ("icealb.o", "__icealb_MOD_ice_alb"),
-    "ice_flx_other": ("icesbc.o", "__icesbc_MOD_ice_flx_other"),
-}
-FIXTURE_FUNCTIONS = {
-    name: ("fixture.o", f"__o7_passivity_fixture_MOD_{name}_probe") for name in FUNCTIONS
+    # ice_flx_other is PRIVATE and is inlined at -O3.  Census the emitted
+    # enclosing routine which owns the observer calls and the inlined body.
+    "ice_sbc_flx": ("icesbc.o", "__icesbc_MOD_ice_sbc_flx"),
 }
 FP = re.compile(
     r"^(?:v)?(?:add|sub|mul|div|sqrt|max|min|fmadd|fmsub|fnmadd|fnmsub|cvt).*(?:ss|sd|ps|pd)$"
@@ -62,12 +61,11 @@ def _flags(path: Path) -> str:
     return flags
 
 
-def census(reference: Path, record: Path, arch: Path, *, fixture: bool = False) -> dict:
-    mapping = FIXTURE_FUNCTIONS if fixture else FUNCTIONS
+def census(reference: Path, record: Path, arch: Path) -> dict:
     flags = _flags(arch)
     cache: dict[Path, dict[str, list[str]]] = {}
     report = {}
-    for label, (filename, symbol) in mapping.items():
+    for label, (filename, symbol) in FUNCTIONS.items():
         left, right = reference / filename, record / filename
         for path in (left, right):
             if not path.is_file():
@@ -92,11 +90,10 @@ def main() -> int:
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--record", type=Path, required=True)
     parser.add_argument("--arch", type=Path, required=True)
-    parser.add_argument("--fixture", action="store_true")
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
     try:
-        result = census(args.reference, args.record, args.arch, fixture=args.fixture)
+        result = census(args.reference, args.record, args.arch)
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         print(exc)
         return 2

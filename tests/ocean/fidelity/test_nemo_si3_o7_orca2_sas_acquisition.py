@@ -141,6 +141,23 @@ def test_o7_script_default_is_read_only_and_operator_run_is_explicit() -> None:
     assert 'timeout "$RUN_TIMEOUT_SEC" mpirun -np 1' in text
     assert "--admit-existing" in text and "producer_commit.txt" in text
     assert "manifest/records.sha256" in text and "manifest/inputs.sha256" in text
+    assert "nn_write    =      -1" in text
+    assert "--move-aside-builds" in text and "REFUSE_BUILD_RETAINED" in text
+
+
+def test_o7_passivity_targets_only_symbols_emitted_by_the_real_o3_build() -> None:
+    text = (TOOLS / "nemo_si3_o7_passivity_gate.py").read_text()
+    assert "__icesbc_MOD_ice_sbc_flx" in text
+    assert "__icesbc_MOD_ice_flx_other" not in text
+    assert "FIXTURE_FUNCTIONS" not in text
+
+
+def test_o7_time_level_plant_changes_header_bytes_and_s4_names_are_distinct() -> None:
+    text = (TOOLS / "nemo_si3_o7_orca2_sas_gate.py").read_text()
+    assert 'struct.pack_into("<i", raw, 20, current + 1)' in text
+    assert "levels.add(3)" not in text
+    assert gate.record_name(4, 2) == "o7_s4_alb_entry_step0002_rank0000.bin"
+    assert gate.record_name(5, 2) == "o7_s4_alb_exit_step0002_rank0000.bin"
 
 
 def test_o7_read_only_preflight_exercises_real_ppsrc_and_all_controls(tmp_path: Path) -> None:
@@ -158,7 +175,7 @@ def test_o7_read_only_preflight_exercises_real_ppsrc_and_all_controls(tmp_path: 
         timeout=120,
     )
     result = json.loads(report.read_text())
-    assert result == {"status": "PREFLIGHT_OK", "nemo_run": False, "plants": 24}
+    assert result == {"status": "PREFLIGHT_OK", "nemo_run": False, "plants": 36}
     assert "PASS_SAME_PROGRAM_REAL_PPSRC_MARKERS" in proc.stdout
-    assert "PASS_11_LANDINGS_AND_11_MISPLACEMENT_PLANTS" in proc.stdout
+    assert "PASS_12_LANDINGS_AND_12_MISPLACEMENT_PLANTS" in proc.stdout
     assert "PREFLIGHT_OK: no NEMO build or integration was run" in proc.stdout

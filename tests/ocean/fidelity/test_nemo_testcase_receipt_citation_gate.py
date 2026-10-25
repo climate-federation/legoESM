@@ -28,6 +28,10 @@ assert SPEC and SPEC.loader
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
+SI3_RECEIPTS = tuple(sorted(
+    (Path(__file__).parents[3] / "docs/ice/fidelity").glob("si3_r*_receipt.md")
+))
+
 
 def test_bare_line_spans_bind_to_the_last_named_file():
     text = ("`stprk3_stg.F90:324` then, in `stp2d.F90` order, `:128` and "
@@ -200,3 +204,25 @@ def test_no_citation_map_key_is_written_twice():
         key for key, count in collections.Counter(written).items() if count > 1)
     assert repeated == [], f"shadowed citation-map keys: {repeated}"
     assert len(written) == len(gate.CITATION_MAP)
+
+
+@pytest.mark.parametrize("receipt", SI3_RECEIPTS, ids=lambda path: path.stem)
+def test_every_si3_receipt_has_a_full_live_citation_map(receipt: Path) -> None:
+    """Default CI audits every SI3 receipt from its first line, not a selected subset."""
+    citations = gate.extract(receipt.read_text())
+    assert citations, f"{receipt.name} rendered no citations"
+    assert [citation for citation in citations if citation not in gate.CITATION_MAP] == []
+    failures = [
+        gate.check(citation, gate.CITATION_MAP[citation])
+        for citation in citations
+        if gate.check(citation, gate.CITATION_MAP[citation])["status"] != "OK"
+    ]
+    assert failures == []
+
+
+def test_default_si3_receipt_discovery_is_complete() -> None:
+    registered = {
+        Path(name).name for name in gate.FILES
+        if name.startswith("docs/ice/fidelity/si3_r") and name.endswith("_receipt.md")
+    }
+    assert registered == {path.name for path in SI3_RECEIPTS}

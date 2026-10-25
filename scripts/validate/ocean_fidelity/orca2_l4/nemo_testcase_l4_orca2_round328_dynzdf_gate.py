@@ -266,11 +266,13 @@ def _observer_only(ref: list[str], new: list[str], inserted: list[str], unit: st
 
 
 def _strip_preprocessed_observers(
-        lines: list[str], begin: str, end: str, unit: str) -> tuple[list[str], int]:
+        lines: list[str], begin: str, end: str, unit: str,
+        expected_nonblank: list[str] | None = None) -> tuple[list[str], int]:
     """Remove explicitly marked observer blocks from a real preprocessed unit."""
     stripped: list[str] = []
     inside = False
     blocks = 0
+    observed_nonblank: list[str] = []
     for line_number, line in enumerate(lines, start=1):
         marker = line.strip()
         if marker == begin:
@@ -284,15 +286,42 @@ def _strip_preprocessed_observers(
             continue
         if not inside:
             stripped.append(line)
+        elif line.strip():
+            observed_nonblank.append(line.strip())
     require(not inside, f"{unit}.f90 unterminated observer block")
     require(blocks > 0, f"{unit}.f90 has no marked observer block")
+    if expected_nonblank is not None:
+        require(observed_nonblank == expected_nonblank,
+                f"{unit}.f90 marked observer contents differ from its committed patch")
     return stripped, blocks
+
+
+def _marked_patch_contents(lines: list[str], begin: str, end: str, unit: str) -> list[str]:
+    """Return nonblank patch insertions inside markers; reject any outside them."""
+    contents: list[str] = []
+    inside = False
+    blocks = 0
+    for line in lines:
+        marker = line.strip()
+        if marker == begin:
+            require(not inside, f"{unit} patch nests observer markers")
+            inside = True
+            blocks += 1
+        elif marker == end:
+            require(inside, f"{unit} patch has unmatched observer end")
+            inside = False
+        elif line.strip():
+            require(inside, f"{unit} patch inserts a line outside observer markers")
+            contents.append(line.strip())
+    require(not inside and blocks > 0, f"{unit} patch has incomplete observer markers")
+    return contents
 
 
 def same_program_observers(
         new_bld: Path, ref_bld: Path, observer_patches: dict[str, Path],
         writer_units: tuple[str, ...], *, new_cfg: str, ref_cfg: str,
-        preprocessed_markers: dict[str, tuple[str, str]] | None = None) -> dict:
+        preprocessed_markers: dict[str, tuple[str, str]] | None = None,
+        preprocessed_patch_units: dict[str, Path] | None = None) -> dict:
     """Prove a build differs only by named observer insertions and writers."""
     for name in BUILD_CONFIG_FILES:
         want = (ref_bld / name).read_text().replace(ref_cfg, new_cfg)
@@ -305,6 +334,27 @@ def same_program_observers(
                if line.startswith("+") and not line.startswith("+++")]
         for unit, patch in observer_patches.items()
     }
+    if preprocessed_markers:
+        require(preprocessed_patch_units is not None
+                and set(preprocessed_patch_units) == set(observer_patches),
+                "marker mode requires one independently preprocessed patched unit per observer")
+        marked_contents = {}
+        for unit, path in preprocessed_patch_units.items():
+            expected_lines = path.read_text().splitlines()
+            _stripped, _ = _strip_preprocessed_observers(
+                expected_lines, *preprocessed_markers[unit], unit)
+            contents = []
+            inside = False
+            for line in expected_lines:
+                if line.strip() == preprocessed_markers[unit][0]:
+                    inside = True
+                elif line.strip() == preprocessed_markers[unit][1]:
+                    inside = False
+                elif inside and line.strip():
+                    contents.append(line.strip())
+            marked_contents[unit] = contents
+    else:
+        marked_contents = {}
     ref_root, new_root = f"{ref_bld.parent}/".encode(), f"{new_bld.parent}/".encode()
     counts: dict[str, int] = {}
     for sub, writers in (
@@ -331,7 +381,8 @@ def same_program_observers(
                 new_lines = (new_bld / sub / rel).read_text().splitlines()
                 if preprocessed_markers:
                     stripped, _ = _strip_preprocessed_observers(
-                        new_lines, *preprocessed_markers[unit], unit)
+                        new_lines, *preprocessed_markers[unit], unit,
+                        expected_nonblank=marked_contents[unit])
                     require(stripped == ref_lines,
                             f"{unit}.f90 differs after stripping real ppsrc observer blocks")
                 else:

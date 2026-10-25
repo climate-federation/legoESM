@@ -12,7 +12,10 @@ The tool uses DECISION 165 exactly: the shipped, unmodified production
 end/stock/write values are shortened for the two-step acquisition. The gate
 reconstructs every O7 scalar from the run's resolved namelists and requires
 the resulting configuration to equal the four shipped production namelists.
-No campaign bar or production model default changed.
+`nn_write=-1` disables SAS output safely; zero is forbidden because non-XIOS
+`diawri` divides by it. Every staged assignment is checked against its exact
+reference-namelist group, with misspelling and misplacement plants. No
+campaign bar or production model default changed.
 
 ## Source-derived observation contract
 
@@ -21,6 +24,10 @@ Four observer patches bracket the preregistered running call points in
 `ice_flx_other`. The patches apply with zero fuzz to NEMO 5.0.2, are
 preprocessed with the record build's real keys and include files, and compile
 against the real NEMO module interfaces under the production flags.
+The global `ice_alb` observer records only the named pre-thermodynamics S4
+call; the later `src/ICE/iceupdate.F90:208` call is counted but cannot overwrite S4.
+A finish observer requires the complete nine-stage order and exactly two
+albedo calls per step.
 
 The observed statements include the wind magnitude
 (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/sbcblk.f90:1082`), category shortwave
@@ -31,12 +38,13 @@ the stress T exchange
 bottom friction (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icesbc.f90:396`), the
 bottom-flux cap (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icesbc.f90:436`), and
 the lead heat flux (`ORCA2_SAS_ICE_O2_REF/BLD/ppsrc/nemo/icesbc.f90:463`).
-The preflight moves each of the eleven calls in turn and requires every
+The preflight moves each of the twelve calls in turn and requires every
 misplacement plant to fail.
 
 The writer emits nine kinds at each of two steps: `blk_ice_1` entry/exit,
 post-exchange stress, albedo entry/exit, `blk_ice_2` entry/exit, and
-`ice_flx_other` entry/exit. Its 148-byte header declares global and filled
+`ice_flx_other` entry/exit. S4 has distinct `o7_s4_alb_entry...` and
+`o7_s4_alb_exit...` filenames. Its 148-byte header declares global and filled
 extents, category count, halo, decomposition, step, `Kmm`, `nit000`, and the
 seven run scalars. Interior records use NEMO's `ntsi:ntei,ntsj:ntej` filled
 ranges; only preregistered full-halo fields use `1:jpi,1:jpj`. Direct stream
@@ -45,22 +53,22 @@ missing or extra file.
 
 ## Passivity and same-program proof
 
-The shared same-program helper now has a marker mode for real preprocessed
-sources. It strips explicit observer blocks from the actual record `ppsrc`
-and requires byte identity with reference `ppsrc`; it does not compare raw
-patch hunks with preprocessed sources. A change outside a marker is planted
-and must fail. The operator path repeats this proof over the two real builds
-before either executable is launched.
+The shared same-program helper strips observer blocks from actual record
+`ppsrc`, requires byte identity with reference `ppsrc`, and separately
+compares every nonblank marked line with a fresh preprocessing of the
+committed patch. Outside-marker and inside-marker plants both fail. Preflight
+and admission use the build's `%CPP`/`%FPPFLAGS`, not `gfortran -E`.
 
 The per-function passivity census reads `%FCFLAGS` from the record build and
 requires the production `-O3`, real-size, unrolled, non-vectorized flags. It
-compares floating-point instruction counts by mnemonic, with a nonzero total,
-for `blk_ice_1`, `blk_ice_2`, `ice_alb`, and `ice_flx_other`. The preflight
-compiles the census fixture with those flags and proves an injected floating
-operation changes the result. One `-fcheck=bounds` executable invokes every
+compiles real observer-free and instrumented NEMO `ppsrc` and compares
+nonzero floating-point mnemonic counts for `blk_ice_1`, `blk_ice_2`,
+`ice_alb`, and emitted enclosing function `ice_sbc_flx`. Private
+`ice_flx_other` is inlined and is never required as a symbol. A real-source
+injected operation must change the census. One `-fcheck=bounds` executable invokes every
 writer interface for both steps and reads all resulting layouts; a second
 compiles and runs the real patched, preprocessed NEMO `ice_alb` routine against
-conforming stubs, including an interior array whose lower bound is not one.
+conforming stubs. Its `smask0` has NEMO's A2D(0) extent.
 
 ## Admission and controls
 
@@ -71,7 +79,10 @@ evidence-root-relative. `--admit-existing` re-runs preflight and admission in
 place against that manifest; failure does not discard the retained evidence.
 Reference and record restarts must be present and byte-identical, and both
 runs must have a clean `STOP 0` plus the expected production selectors in
-their real `ocean.output`.
+their real `ocean.output`; any `E R R O R` line is quoted in the refusal.
+Refused builds are never deleted. The documented rerun is
+`run.sh --move-aside-builds` followed by `run.sh --run`; the preflight proves
+both builds remain below `refused/builds_*` and the target names become free.
 
 Admission sets fp64, CPU production JIT, and the glibc/libm transcendental
 policy before scoring. For both steps it requires zero ULP, including signed
@@ -84,18 +95,20 @@ transcendental policy must make the retained-record control fail; a vacuous
 native control refuses admission.
 
 Controls also cover magic/version, truncation, declared versus filled
-extents, relative checksums, missing frames, SAS time level, first-wet-cell
-one-ULP changes, strict wet signed zero, selector drift, producer stamp,
-binary/input/record digests, and restart divergence. The default path has RAM,
-disk, timeout, error-trap, and failure-retention gates. A committed excerpt
-from a real NEMO ORCA2_SAS_ICE `ocean.output` is checked byte-for-byte against
-its source and exercises the whitespace-tolerant production log parser.
+extents, relative checksums, missing frames, source-derived SAS time level
+(the plant changes the binary header), first-wet-cell one-ULP changes, swapped
+fields, `Cd_ia +1 ULP`, wrong fold sign, wrong pond branch, changed
+`nn_snwfra`, wrong SUM seed, a composition-only P6 perturbation, strict wet
+signed zero, selector drift, producer stamp, binary/input/record digests, and
+restart divergence. Because the retained real excerpt is an O1 dynamics-off
+run, preflight exercises `verify_o7_log` on a synthetic dynamics-on echo; the
+real production-deck log check occurs at admission.
 
 ## Verification
 
-- Read-only preflight: PASS, ten sections and 24 planted violations; no NEMO
+- Read-only preflight: PASS, eleven sections and 36 planted violations; no NEMO
   build or integration.
-- Focused O7 acquisition tests: 14 passed.
+- Focused O7 acquisition tests: 16 passed.
 - NEMO acquisition result: ACQUISITION_NEEDED.
 - independent review: operator (Claude)
 

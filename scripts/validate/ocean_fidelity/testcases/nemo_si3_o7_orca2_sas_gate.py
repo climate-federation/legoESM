@@ -8,6 +8,7 @@ import hashlib
 import json
 import platform
 import re
+import struct
 import subprocess
 import tempfile
 from pathlib import Path
@@ -52,6 +53,7 @@ N_META = 20
 N_SCALARS = 7
 HEADER_BYTES = 8 + 4 + 4 * N_META + 8 * N_SCALARS
 STEPS = (1, 2)
+DEFAULT_NEMO_ROOT = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
 OBSERVER_UNITS = ("icestp", "sbcblk", "icealb", "icesbc")
 WRITER_UNIT = "o7_si3_writer"
 MARKERS = {unit: ("! O7_OBSERVER_BEGIN", "! O7_OBSERVER_END") for unit in OBSERVER_UNITS}
@@ -168,6 +170,29 @@ KINDS: dict[int, tuple[tuple[str, str], ...]] = {
 }
 
 
+def record_name(kind: int, kt: int, rank: int = 0) -> str:
+    """Name S4 explicitly so the later thermodynamic albedo call cannot overwrite it silently."""
+    if kind == 4:
+        return f"o7_s4_alb_entry_step{kt:04d}_rank{rank:04d}.bin"
+    if kind == 5:
+        return f"o7_s4_alb_exit_step{kt:04d}_rank{rank:04d}.bin"
+    return f"o7_kind{kind:02d}_step{kt:04d}_rank{rank:04d}.bin"
+
+
+def derive_sas_time_level(nemo_root: Path) -> int:
+    """Resolve the time level passed to sbc from NEMO's SAS source, never a literal."""
+    nemogcm = (nemo_root / "src/SAS/nemogcm.F90").read_text()
+    step = (nemo_root / "src/SAS/step.F90").read_text()
+    assignments = {
+        name.lower(): int(value)
+        for name, value in re.findall(r"\b(Nbb|Nnn|Naa|Nrhs)\s*=\s*(\d+)", nemogcm, re.I)
+    }
+    call = re.search(r"CALL\s+sbc\s*\(\s*kstp\s*,\s*([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)", step, re.I)
+    if not call or call.group(2).lower() not in assignments:
+        raise _refuse("cannot derive SAS sbc current time level from source")
+    return assignments[call.group(2).lower()]
+
+
 def _refuse(message: str) -> ValueError:
     return ValueError(f"STATUS PLANT-FIRED: {message}")
 
@@ -180,9 +205,12 @@ def _shape(code: str, meta: dict[str, int]) -> tuple[int, ...]:
 def read_o7_record(path: str | Path, plant: str | None = None) -> dict[str, Any]:
     """Read one writer record using only its declared extents and schema."""
     p = Path(path)
-    raw = p.read_bytes()
+    raw = bytearray(p.read_bytes())
     if plant == "truncation":
         raw = raw[:-1]
+    if plant == "time-level" and len(raw) >= 24:
+        current = struct.unpack_from("<i", raw, 20)[0]
+        struct.pack_into("<i", raw, 20, current + 1)
     if len(raw) < HEADER_BYTES or raw[:8] != MAGIC:
         raise _refuse(f"bad/truncated magic in {p}")
     version = int(np.frombuffer(raw, dtype="<i4", count=1, offset=8)[0])
@@ -240,8 +268,7 @@ def read_o7_record(path: str | Path, plant: str | None = None) -> dict[str, Any]
         meta["jpj"] - meta["nn_hls"],
     ):
         raise _refuse("filled range is not the one-rank NEMO interior")
-    match = re.search(r"o7_kind(\d+)_step(\d+)_rank(\d+)\.bin$", p.name)
-    if not match or tuple(map(int, match.groups())) != (kind, meta["kt"], meta["rank"]):
+    if p.name != record_name(kind, meta["kt"], meta["rank"]):
         raise _refuse(f"filename/header mismatch in {p.name}")
     scalars = np.frombuffer(raw, dtype="<f8", count=N_SCALARS, offset=12 + 4 * N_META)
     if not np.isfinite(scalars).all():
@@ -388,8 +415,13 @@ def _verify_relative_manifest(
 
 def verify_o7_log(path: str | Path, plant: str | None = None) -> dict[str, Any]:
     """Use O1's whitespace-tolerant real-log parser, then pin production O7."""
-    base = verify_ocean_output_log(path, expect_icedyn=True, expect_icethd=True)
     text = Path(path).read_text(errors="replace")
+    if plant == "error-token":
+        text += "\n E R R O R : planted fatal NEMO line\n"
+    error_lines = [line.strip() for line in text.splitlines() if re.search(r"E\s+R\s+R\s+O\s+R", line)]
+    if error_lines:
+        raise _refuse("ocean.output contains NEMO error lines: " + " | ".join(error_lines[:8]))
+    base = verify_ocean_output_log(path, expect_icedyn=True, expect_icethd=True)
     expected = {
         "ln_icedyn": True,
         "ln_icethd": True,
@@ -424,6 +456,7 @@ def same_program(
     ref_bld: Path,
     patches: dict[str, Path],
     writer: Path,
+    expected_ppsrc: dict[str, Path],
     *,
     new_cfg: str,
     ref_cfg: str,
@@ -438,6 +471,7 @@ def same_program(
             new_cfg=new_cfg,
             ref_cfg=ref_cfg,
             preprocessed_markers=MARKERS,
+            preprocessed_patch_units=expected_ppsrc,
         )
     except SameProgramError as exc:
         raise _refuse(str(exc)) from exc
@@ -475,20 +509,20 @@ def _compare(label: str, actual: Any, expected: np.ndarray, mask2: np.ndarray) -
     }
 
 
-def _load_step(records: Path, kt: int, plant: str | None = None) -> dict[int, dict[str, Any]]:
+def _load_step(
+    records: Path, kt: int, expected_kmm: int, plant: str | None = None
+) -> dict[int, dict[str, Any]]:
     result = {}
     for kind in KINDS:
-        path = records / f"o7_kind{kind:02d}_step{kt:04d}_rank0000.bin"
+        path = records / record_name(kind, kt)
         if plant == "missing-frame" and kind == max(KINDS):
             path = path.with_name("missing.bin")
         if not path.is_file():
             raise _refuse(f"missing frame {path.name}")
-        result[kind] = read_o7_record(path)
+        result[kind] = read_o7_record(path, "time-level" if plant == "time-level" and kind == 1 else None)
     levels = {item["meta"]["kmm"] for item in result.values()}
-    if plant == "time-level":
-        levels.add(3)
-    if levels != {2}:
-        raise _refuse(f"SAS Kmm must be Nnn=2, got {levels}")
+    if levels != {expected_kmm}:
+        raise _refuse(f"SAS Kmm must be source-derived Nnn={expected_kmm}, got {levels}")
     if {item["meta"]["kt"] for item in result.values()} != {kt}:
         raise _refuse(f"mixed kt in requested step {kt}")
     if {item["meta"]["nit000"] for item in result.values()} != {1}:
@@ -501,10 +535,16 @@ def _load_step(records: Path, kt: int, plant: str | None = None) -> dict[int, di
         wi, wj = first_wet_ij(mask, interior_only=False, nn_hls=0)
         field = result[2]["fields"]["wndm_ice"]
         field[wi, wj] = np.nextafter(field[wi, wj], np.inf)
+    if plant == "swapped-field":
+        result[1]["fields"]["wndi"], result[1]["fields"]["wndj"] = (
+            result[1]["fields"]["wndj"], result[1]["fields"]["wndi"]
+        )
     return result
 
 
-def _score_step(step: dict[int, dict[str, Any]], config: SI3SurfaceConfig) -> dict[str, Any]:
+def _score_step(
+    step: dict[int, dict[str, Any]], config: SI3SurfaceConfig, plant: str | None = None
+) -> dict[str, Any]:
     f = {kind: item["fields"] for kind, item in step.items()}
     mask = f[1]["smask0"]
     fold = SI3ORCA2FoldProgram(nn_hls=2, nfd_full_when_absent=True)
@@ -522,7 +562,15 @@ def _score_step(step: dict[int, dict[str, Any]], config: SI3SurfaceConfig) -> di
     if scalars != expected_scalars:
         raise _refuse(f"record scalars disagree with resolved deck/constants: {scalars}")
 
-    b1 = jax.jit(lambda **kw: si3_blk_ice_1(config=config, **kw))(
+    score_config = config
+    if plant == "cd-1ulp":
+        score_config = score_config._replace(rn_Cd_ia=np.nextafter(config.rn_Cd_ia, np.inf))
+    elif plant == "pond-branch":
+        score_config = score_config._replace(ld_pnd_alb=not config.ld_pnd_alb)
+    elif plant == "nn-snwfra":
+        score_config = score_config._replace(nn_snwfra=1 if config.nn_snwfra != 1 else 2)
+
+    b1 = jax.jit(lambda **kw: si3_blk_ice_1(config=score_config, **kw))(
         wndi=jnp.asarray(f[1]["wndi"]),
         wndj=jnp.asarray(f[1]["wndj"]),
         theta_air_zt=jnp.asarray(f[1]["theta_air_zt"]),
@@ -534,6 +582,8 @@ def _score_step(step: dict[int, dict[str, Any]], config: SI3SurfaceConfig) -> di
     for name in b1._fields:
         scores[f"blk1.{name}"] = _compare(f"blk1.{name}", getattr(b1, name), f[2][name], mask)
     tau = jax.jit(lambda u, v: si3_ice_sbc_tau_lbc(u, v, fold))(b1.utau_ice, b1.vtau_ice)
+    if plant == "fold-sign":
+        tau = (-tau[0], tau[1])
     full_shape = f[3]["utau_ice"].shape
     if full_shape != (mask.shape[0] + 4, mask.shape[1] + 4):
         raise _refuse(f"interior/full extent mismatch: {mask.shape} -> {full_shape}")
@@ -541,7 +591,7 @@ def _score_step(step: dict[int, dict[str, Any]], config: SI3SurfaceConfig) -> di
     scores["tau.utau_ice"] = _compare("tau.utau_ice", tau[0], f[3]["utau_ice"], full_mask)
     scores["tau.vtau_ice"] = _compare("tau.vtau_ice", tau[1], f[3]["vtau_ice"], full_mask)
 
-    alb = jax.jit(lambda **kw: si3_ice_alb(config=config, **kw))(
+    alb = jax.jit(lambda **kw: si3_ice_alb(config=score_config, **kw))(
         **{
             name: jnp.asarray(f[4][name])
             for name in ("t_su", "h_i", "h_s", "a_ip_eff", "h_ip", "h_il", "cloud_fra", "smask0")
@@ -552,9 +602,16 @@ def _score_step(step: dict[int, dict[str, Any]], config: SI3SurfaceConfig) -> di
     b2_kwargs = {name: jnp.asarray(f[6][name]) for name in f[6] if name not in {"snow", "qlw"}}
     b2_kwargs["snow"] = jnp.asarray(f[6]["snow"])
     b2_kwargs["qlw"] = jnp.asarray(f[6]["qlw"])
-    b2 = jax.jit(lambda **kw: si3_blk_ice_2(config=config, **kw))(**b2_kwargs)
+    b2 = jax.jit(lambda **kw: si3_blk_ice_2(config=score_config, **kw))(**b2_kwargs)
     for name in b2._fields:
-        scores[f"blk2.{name}"] = _compare(f"blk2.{name}", getattr(b2, name), f[7][name], mask)
+        actual = getattr(b2, name)
+        if plant == "sum-seed" and name == "emp_ice":
+            terms = np.asarray(f[6]["a_i_b"]) * np.asarray(b2.evap_ice)
+            wrong = terms[..., 0].copy()
+            for jl in range(1, terms.shape[-1]):
+                wrong = wrong + terms[..., jl]
+            actual = wrong - np.asarray(b2.sprecip) * np.asarray(b2.zsnw)
+        scores[f"blk2.{name}"] = _compare(f"blk2.{name}", actual, f[7][name], mask)
 
     neigh = orca2_flx_other_neighbours(
         u_ice=f[8]["u_ice"], v_ice=f[8]["v_ice"], ssu_m=f[8]["ssu_m"], ssv_m=f[8]["ssv_m"], nn_hls=2
@@ -581,7 +638,7 @@ def _score_step(step: dict[int, dict[str, Any]], config: SI3SurfaceConfig) -> di
             )
         }
     )
-    other = jax.jit(lambda **kw: si3_ice_flx_other(config=config, **kw))(**other_args)
+    other = jax.jit(lambda **kw: si3_ice_flx_other(config=score_config, **kw))(**other_args)
     for name in other._fields:
         scores[f"flx_other.{name}"] = _compare(
             f"flx_other.{name}", getattr(other, name), f[9][name], mask
@@ -627,7 +684,12 @@ def _score_step(step: dict[int, dict[str, Any]], config: SI3SurfaceConfig) -> di
         "t_bo": f[8]["t_bo"],
         "rn_amax_2d": f[8]["rn_amax_2d"],
     }
-    composed = jax.jit(lambda **kw: si3_surface_step(config=config, fold=fold, **kw))(
+    if plant == "composed-feed":
+        planted = np.asarray(composed_args["wndi"]).copy()
+        wi, wj = first_wet_ij(mask, interior_only=False, nn_hls=0)
+        planted[wi, wj] = planted[wi, wj] + 1.0
+        composed_args["wndi"] = planted
+    composed = jax.jit(lambda **kw: si3_surface_step(config=score_config, fold=fold, **kw))(
         **{name: jnp.asarray(value) for name, value in composed_args.items()}
     )
     for name in composed.blk_ice_1._fields:
@@ -657,13 +719,14 @@ def _score_step(step: dict[int, dict[str, Any]], config: SI3SurfaceConfig) -> di
     }
 
 
-def _completion(run: Path, label: str) -> dict[str, Any]:
+def _completion(run: Path, label: str, plant: str | None = None) -> dict[str, Any]:
     if not (run / "RUN_COMPLETE").is_file():
         raise _refuse(f"missing RUN_COMPLETE in {label}")
     stdout = (run / "run.user.stdout.log").read_text(errors="replace")
     if not re.search(r"STOP\s+0\b", stdout) or re.search(r"\bABORT\b|E\s+R\s+R\s+O\s+R", stdout):
         raise _refuse(f"{label} did not finish with clean STOP 0")
-    return verify_o7_log(run / "ocean.output")
+    log_plant = "selector" if plant == "selector" else "error-token" if plant == "error-log" else None
+    return verify_o7_log(run / "ocean.output", log_plant)
 
 
 def admit_evidence_directory(
@@ -671,6 +734,7 @@ def admit_evidence_directory(
     *,
     expect_commit: str,
     plant: str | None = None,
+    nemo_root: Path = DEFAULT_NEMO_ROOT,
 ) -> dict[str, Any]:
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     libc_name, libc_version = platform.libc_ver()
@@ -679,6 +743,7 @@ def admit_evidence_directory(
     if libc_name.lower() != "glibc":
         raise _refuse(f"O7 libm arm requires glibc, got {libc_name!r}")
     ev = Path(evidence_dir).resolve()
+    expected_kmm = derive_sas_time_level(nemo_root)
     manifest = ev / "manifest"
     if not (ev / "RUN_COMPLETE").is_file():
         raise _refuse("retained evidence lacks top-level RUN_COMPLETE")
@@ -697,7 +762,7 @@ def admit_evidence_directory(
         raise _refuse("producer commit mismatch or missing commit object")
     binary_paths = {"manifest/binaries/nemo.ref", "manifest/binaries/nemo.rec"}
     record_paths = {
-        f"record_2step/o7_si3_records/o7_kind{kind:02d}_step{kt:04d}_rank0000.bin"
+        f"record_2step/o7_si3_records/{record_name(kind, kt)}"
         for kt in STEPS
         for kind in KINDS
     }
@@ -724,7 +789,8 @@ def admit_evidence_directory(
         if report.get("status") != want:
             raise _refuse(f"retained {name} did not pass: {report.get('status')!r}")
     ref, rec = ev / "reference_2step", ev / "record_2step"
-    ref_log, rec_log = _completion(ref, "reference_2step"), _completion(rec, "record_2step")
+    ref_log = _completion(ref, "reference_2step")
+    rec_log = _completion(rec, "record_2step", plant)
     ref_restarts = sorted(p for p in ref.glob("*restart*.nc") if p.is_file())
     if not ref_restarts:
         raise _refuse("reference run has no restart")
@@ -763,7 +829,7 @@ def admit_evidence_directory(
         raise _refuse("resolved ice-atmosphere coefficients are not all 1.4e-3")
     record_dir = rec / "o7_si3_records"
     expected_records = {
-        f"o7_kind{kind:02d}_step{kt:04d}_rank0000.bin" for kt in STEPS for kind in KINDS
+        record_name(kind, kt) for kt in STEPS for kind in KINDS
     }
     actual_records = {path.name for path in record_dir.iterdir() if path.is_file()}
     if actual_records != expected_records:
@@ -773,8 +839,8 @@ def admit_evidence_directory(
         )
     scores, loaded = {}, {}
     for kt in STEPS:
-        loaded[kt] = _load_step(record_dir, kt, plant=plant)
-        scores[str(kt)] = _score_step(loaded[kt], config)
+        loaded[kt] = _load_step(record_dir, kt, expected_kmm, plant=plant)
+        scores[str(kt)] = _score_step(loaded[kt], config, plant=plant)
     set_policy(PrecisionPolicy.fp64(transcendentals="native"))
     native_fired = False
     try:
@@ -806,18 +872,18 @@ def admit_evidence_directory(
     }
 
 
-def run_self_test(plant: str | None = None) -> dict[str, Any]:
+def run_self_test(plant: str | None = None, *, nemo_root: Path = DEFAULT_NEMO_ROOT) -> dict[str, Any]:
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         for kind in KINDS:
-            _write_synthetic_record(root / f"o7_kind{kind:02d}_step0001_rank0000.bin", kind)
-        path = root / "o7_kind01_step0001_rank0000.bin"
+            _write_synthetic_record(root / record_name(kind, 1), kind, kmm=derive_sas_time_level(nemo_root))
+        path = root / record_name(1, 1)
         rec = read_o7_record(
             path, plant=plant if plant in {"header", "truncation", "extent"} else None
         )
         if plant in {"time-level", "missing-frame"}:
-            _load_step(root, 1, plant=plant)
-        rel = Path("o7_kind01_step0001_rank0000.bin")
+            _load_step(root, 1, derive_sas_time_level(nemo_root), plant=plant)
+        rel = Path(record_name(1, 1))
         manifest = root / "records.sha256"
         manifest.write_text(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {rel}\n")
         _verify_relative_manifest(manifest, root, plant=plant == "checksum")
@@ -842,11 +908,71 @@ def run_self_test(plant: str | None = None) -> dict[str, Any]:
         }
 
 
+CONTROL_PLANTS = (
+    "swapped-field", "cd-1ulp", "fold-sign", "pond-branch",
+    "nn-snwfra", "sum-seed", "composed-feed",
+)
+
+
+def run_control_self_test(plant: str, *, nemo_root: Path = DEFAULT_NEMO_ROOT) -> None:
+    """Make each preregistered wrong-program control reach the exact scorer and refuse."""
+    if plant not in CONTROL_PLANTS:
+        raise _refuse(f"unknown O7 control plant {plant}")
+    config = SI3SurfaceConfig.from_input_namelists(
+        nemo_root / "cfgs/SHARED/namelist_ref",
+        nemo_root / "cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg",
+        nemo_root / "cfgs/SHARED/namelist_ice_ref",
+        nemo_root / "cfgs/ORCA2_SAS_ICE/EXPREF/namelist_ice_cfg",
+    )
+    mask = np.ones((4, 4), dtype=np.float64)
+    if plant in {"swapped-field", "composed-feed"}:
+        left = np.arange(16, dtype=np.float64).reshape(4, 4)
+        right = left.T.copy() if plant == "swapped-field" else left + 1.0
+        _compare(plant, left, right, mask)
+    if plant == "sum-seed":
+        _compare(plant, np.full((4, 4), -0.0), np.zeros((4, 4)), mask)
+    if plant == "cd-1ulp":
+        values = dict(
+            wndi=jnp.full((4, 4), 3.0), wndj=jnp.full((4, 4), 4.0),
+            theta_air_zt=jnp.full((4, 4), 270.0), q_air_zt=jnp.full((4, 4), 0.002),
+            slp=jnp.full((4, 4), 101000.0), tm_su=jnp.full((4, 4), 268.0),
+            rhoa=jnp.full((4, 4), 1.2),
+        )
+        good = si3_blk_ice_1(config=config, **values)
+        bad = si3_blk_ice_1(
+            config=config._replace(rn_Cd_ia=np.nextafter(config.rn_Cd_ia, np.inf)), **values
+        )
+        _compare(plant, bad.utau_ice, np.asarray(good.utau_ice), mask)
+    if plant == "fold-sign":
+        u = jnp.arange(24, dtype=jnp.float64).reshape(4, 6) + 1.0
+        v = u + 0.5
+        good = si3_ice_sbc_tau_lbc(u, v, SI3ORCA2FoldProgram(2, True))[0]
+        _compare(plant, -good, np.asarray(good), np.ones(np.asarray(good).shape))
+    if plant in {"pond-branch", "nn-snwfra"}:
+        shape = (4, 4, 5)
+        kwargs = dict(
+            t_su=jnp.full(shape, 274.0), h_i=jnp.full(shape, 0.5),
+            h_s=jnp.full(shape, 0.04), a_ip_eff=jnp.full(shape, 0.3),
+            h_ip=jnp.full(shape, 0.03), h_il=jnp.zeros(shape),
+            cloud_fra=jnp.full((4, 4), 0.4), smask0=jnp.ones((4, 4)),
+        )
+        good = si3_ice_alb(config=config, **kwargs)
+        changed = (
+            config._replace(ld_pnd_alb=not config.ld_pnd_alb)
+            if plant == "pond-branch"
+            else config._replace(nn_snwfra=1 if config.nn_snwfra != 1 else 2)
+        )
+        bad = si3_ice_alb(config=changed, **kwargs)
+        _compare(plant, bad, np.asarray(good), mask)
+    raise _refuse(f"{plant} control plant was inert")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--read-record")
     mode.add_argument("--self-test", action="store_true")
+    mode.add_argument("--control-self-test", action="store_true")
     mode.add_argument("--verify-log")
     mode.add_argument("--same-program")
     mode.add_argument("--admit-evidence")
@@ -855,9 +981,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reference-bld")
     parser.add_argument("--writer")
     parser.add_argument("--patch", action="append", default=[])
+    parser.add_argument("--expected-ppsrc", action="append", default=[])
     parser.add_argument("--new-cfg", default="ORCA2_SAS_ICE_O7_REC")
     parser.add_argument("--reference-cfg", default="ORCA2_SAS_ICE_O7_REF")
     parser.add_argument("--json")
+    parser.add_argument("--nemo-root", type=Path, default=DEFAULT_NEMO_ROOT)
     args = parser.parse_args(argv)
     try:
         if args.read_record:
@@ -867,12 +995,19 @@ def main(argv: list[str] | None = None) -> int:
                 "fields": {k: list(v.shape) for k, v in rec["fields"].items()},
             }
         elif args.self_test:
-            result = run_self_test(args.plant)
+            result = run_self_test(args.plant, nemo_root=args.nemo_root)
+        elif args.control_self_test:
+            if not args.plant:
+                raise _refuse("--control-self-test requires --plant")
+            run_control_self_test(args.plant, nemo_root=args.nemo_root)
+            result = {"status": "CONTROL_PLANT_DID_NOT_FIRE"}
         elif args.verify_log:
             result = verify_o7_log(args.verify_log, args.plant)
         elif args.same_program:
-            if not args.reference_bld or not args.writer or len(args.patch) != len(OBSERVER_UNITS):
-                raise _refuse("same-program requires reference, writer, and four unit=patch pairs")
+            if (not args.reference_bld or not args.writer
+                    or len(args.patch) != len(OBSERVER_UNITS)
+                    or len(args.expected_ppsrc) != len(OBSERVER_UNITS)):
+                raise _refuse("same-program requires reference, writer, and four patch/expected-ppsrc pairs")
             patches = {}
             for item in args.patch:
                 unit, sep, path = item.partition("=")
@@ -881,11 +1016,20 @@ def main(argv: list[str] | None = None) -> int:
                 patches[unit] = Path(path)
             if set(patches) != set(OBSERVER_UNITS):
                 raise _refuse("same-program patch unit set incomplete")
+            expected_ppsrc = {}
+            for item in args.expected_ppsrc:
+                unit, sep, path = item.partition("=")
+                if not sep or unit not in OBSERVER_UNITS:
+                    raise _refuse(f"bad --expected-ppsrc {item}")
+                expected_ppsrc[unit] = Path(path)
+            if set(expected_ppsrc) != set(OBSERVER_UNITS):
+                raise _refuse("same-program expected-ppsrc unit set incomplete")
             result = same_program(
                 Path(args.same_program),
                 Path(args.reference_bld),
                 patches,
                 Path(args.writer),
+                expected_ppsrc,
                 new_cfg=args.new_cfg,
                 ref_cfg=args.reference_cfg,
             )
@@ -893,7 +1037,8 @@ def main(argv: list[str] | None = None) -> int:
             if not args.expect_commit:
                 raise _refuse("--expect-commit required")
             result = admit_evidence_directory(
-                args.admit_evidence, expect_commit=args.expect_commit, plant=args.plant
+                args.admit_evidence, expect_commit=args.expect_commit, plant=args.plant,
+                nemo_root=args.nemo_root,
             )
     except (ValueError, OSError, KeyError) as exc:
         print(exc)

@@ -39,5 +39,8 @@ PROGRAM o7_si3_layout_fixture
       CALL o7_blk2_exit(xi,yi,zi,pi,qi,ri,xi,ai,yi,zi,pi,qi,ri,xi,yi,zi,bi,ci,di,ei,fi,gi,hi,ai,bi,ci,di,ei,fi,gi)
       CALL o7_flx_entry(a,b,c,d,e,f,gi,hi,ai,bi,ci,di,ei,fi,gi,hi,ai,bi)
       CALL o7_flx_exit(ai,bi,ci,di)
+      CALL o7_alb_entry(x,y,z,p,q,r,ai,a)
+      CALL o7_alb_exit(xi)
+      CALL o7_finish_step
    END DO
 END PROGRAM o7_si3_layout_fixture
