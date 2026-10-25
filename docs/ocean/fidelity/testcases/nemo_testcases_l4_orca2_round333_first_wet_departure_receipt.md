@@ -562,6 +562,16 @@ Disposition: **HELD — PROPOSAL ONLY**. The confirmed internal divisor mismatch
 is recorded, but no implementation is eligible to land until a forward-exact
 form also has finite rung-10 N=1 cotangents with reverse equal to forward.
 
+### Resume-7 final gates
+
+The full-receipt citation gate passes 25 citations with zero failures, zero
+unmapped citations, and zero map-audit failures; all nine self-test controls
+fire. The exact default ORCA2 landing battery passes all 152 tests in 1,030.79
+seconds, including the inherited parallel-receipt gate. The private-import
+ratchet also passes separately at 6 of 6 tests in 5.36 seconds. The DINO month
+gate is not applicable to the final held tree because no package/model source
+change remains; no month-gate claim is made for the withdrawn proposal.
+
 ## Resume 6: macro, shape, stretched-metric, and actual-source repair
 
 Claude and Argon held Resume 5 on five remaining defects. All are repaired in
