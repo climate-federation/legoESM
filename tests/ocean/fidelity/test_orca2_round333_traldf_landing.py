@@ -5,6 +5,14 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+    _stored_primal_with_rebuilt_tangent,
+)
+
 
 REPO = Path(__file__).resolve().parents[3]
 MODEL = REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py"
@@ -60,3 +68,22 @@ def test_production_call_site_check_fails_for_the_exact_revert() -> None:
     expression = _gm_divisor_expression(reverted)
     assert expression is not None
     assert "_h_s3_kmm" not in expression
+
+
+def test_stored_divisor_keeps_its_bits_and_the_finite_rebuilt_tangent() -> None:
+    stored = jnp.asarray([1.0, jnp.nextafter(1.0, 2.0)], dtype=jnp.float64)
+    rebuilt = jnp.asarray([3.0, 4.0], dtype=jnp.float64)
+    stored_dot = jnp.asarray([np.nan, np.nan], dtype=jnp.float64)
+    rebuilt_dot = jnp.asarray([5.0, -7.0], dtype=jnp.float64)
+    primal, tangent = jax.jvp(
+        _stored_primal_with_rebuilt_tangent,
+        (stored, rebuilt),
+        (stored_dot, rebuilt_dot),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(primal).view(np.uint64), np.asarray(stored).view(np.uint64))
+    np.testing.assert_array_equal(np.asarray(tangent), np.asarray(rebuilt_dot))
+    gradient = jax.grad(
+        lambda live: jnp.sum(_stored_primal_with_rebuilt_tangent(stored, live))
+    )(rebuilt)
+    np.testing.assert_array_equal(np.asarray(gradient), np.ones(2))
