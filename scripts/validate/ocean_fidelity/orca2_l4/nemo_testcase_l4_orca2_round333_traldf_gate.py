@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""Admit the passive full-array kt=2 stage-3 traldf_iso_lap records."""
+from __future__ import annotations
+
+import argparse
+import difflib
+import hashlib
+import io
+import json
+import struct
+from pathlib import Path
+
+import numpy as np
+
+from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round328_dynzdf_gate as dyn_gate,
+    nemo_testcase_l4_orca2_round332_source_order_gate as r332,
+    nemo_testcase_l4_orca2_round333_tracer_gate as r333,
+)
+
+MAGIC = "NEMO_L4_R333LI"
+HEADER_NAMES = (
+    "version", "kt", "stage", "Kbb", "Kmm", "Krhs", "rank", "nx", "ny",
+    "nz", "ntracer", "real_bits", "n_fields",
+)
+FOUR_D_FIELDS = (
+    "pt_kbb", "rhs_before", "rhs_after", "rhs_increment", "dit", "djt", "dkt",
+    "A11", "A22", "A13", "A23", "hmsku", "hmskv", "zfu", "zfv", "vmsku",
+    "vmskv", "zahu_w", "zahv_w", "A31", "A32", "zfw_lower", "zfw_upper",
+    "horizontal_seen", "vertical_seen", "rhs_seen",
+)
+THREE_D_FIELDS = (
+    "e3t_3d", "e3u_3d", "e3v_3d", "tmask", "umask", "vmask", "wmask",
+    "ahtu", "ahtv", "uslp", "vslp", "wslpi", "wslpj", "ah_wslp2", "akz",
+)
+TWO_D_FIELDS = (
+    "r3t_kmm", "r3u_kmm", "r3v_kmm", "e2_e1u", "e1_e2v", "e2u", "e1v",
+    "e1t", "e2t", "e1e2t", "r1_e1e2t",
+)
+ONE_D_FIELDS = ("e3w_1d",)
+FIELDS = FOUR_D_FIELDS + THREE_D_FIELDS + TWO_D_FIELDS + ONE_D_FIELDS
+PLANTS = (
+    "header", "field-order", "truncation", "checksum", "stamp", "time-level",
+    "tracer-pass", "extent", "signed-zero", "wet", "increment",
+)
+OBSERVER_UNITS = ("dynzdf", "stprk3_stg", "dynvor", "zdfphy", "zdftke", "traldf_iso")
+WRITER_UNITS = (
+    "dynzdf_round328_writer", "tke_round331_writer", "round332_writer",
+    "round333_traldf_writer",
+)
+
+GateError = r332.GateError
+require = r332.require
+
+
+def record_name(rank: int) -> str:
+    return f"oracle_r333_traldf_kt00000002_r{rank:04d}.bin"
+
+
+def _shape_for(name: str, header: dict[str, int]) -> tuple[int, ...]:
+    base = (header["nx"], header["ny"], header["nz"])
+    if name in FOUR_D_FIELDS:
+        return (*base, header["ntracer"])
+    if name in THREE_D_FIELDS:
+        return base
+    if name in TWO_D_FIELDS:
+        return base[:2]
+    if name in ONE_D_FIELDS:
+        return (base[2],)
+    raise GateError(f"unknown traldf field {name}")
+
+
+def read_record(path: Path, *, plant: str | None = None,
+                expected_shape: tuple[int, int, int] = (94, 152, 31)) -> dict:
+    raw = path.read_bytes()
+    if plant == "truncation":
+        raw = raw[:-8]
+    stream = io.BytesIO(raw)
+    magic = r333._take(stream, 16, "magic").decode("ascii").rstrip()
+    values = struct.unpack(f"={len(HEADER_NAMES)}i", r333._take(
+        stream, 4 * len(HEADER_NAMES), "header"))
+    header = dict(zip(HEADER_NAMES, values, strict=True))
+    if plant == "header":
+        header["stage"] = 2
+    elif plant == "time-level":
+        header["Kmm"] = 1
+    elif plant == "tracer-pass":
+        header["ntracer"] = 1
+    require(magic == MAGIC, f"bad magic {magic!r}")
+    require((header["version"], header["kt"], header["stage"], header["real_bits"])
+            == (1, 2, 3, 64), "wrong version/step/stage/precision")
+    require((header["Kbb"], header["Kmm"], header["Krhs"]) == (3, 2, 1),
+            "wrong kt=2 stage-3 time levels")
+    require(header["rank"] in (0, 1), "wrong rank")
+    require((header["nx"], header["ny"], header["nz"]) == expected_shape,
+            "record lacks exact jpi,jpj,jpk extents")
+    require(header["ntracer"] == 2, "record does not contain both T and S passes")
+    require(header["n_fields"] == len(FIELDS), "wrong field count")
+    fields: dict[str, np.ndarray] = {}
+    checksums: dict[str, int] = {}
+    order: list[str] = []
+    for index in range(header["n_fields"]):
+        name = r333._take(stream, 24, f"field {index} name").decode("ascii").rstrip()
+        metadata = list(struct.unpack("=9i", r333._take(stream, 36, f"{name} metadata")))
+        if plant == "extent" and index == 0:
+            metadata[1] -= 1
+        array_rank, *dims, i0, j0, k0, n0 = metadata
+        shape = _shape_for(name, header)
+        padded = (*shape, *(1 for _ in range(4 - len(shape))))
+        require((array_rank, *dims, i0, j0, k0, n0)
+                == (len(shape), *padded, 1, 1, 1, 1),
+                f"{name}: wrong rank, extent, or origin")
+        checksum, = struct.unpack("=Q", r333._take(stream, 8, f"{name} checksum"))
+        payload = r333._take(stream, int(np.prod(shape)) * 8, f"{name} payload")
+        array = np.frombuffer(payload, dtype="=f8").copy().reshape(shape, order="F")
+        require(name not in fields, f"duplicate field {name}")
+        fields[name], checksums[name] = array, checksum
+        order.append(name)
+    require(stream.read(1) == b"", "trailing bytes")
+    if plant == "field-order":
+        order[0], order[1] = order[1], order[0]
+    require(tuple(order) == FIELDS, "field order differs from executing order")
+    return {"header": header, "fields": fields, "checksums": checksums,
+            "sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def _verify_checksums(record: dict) -> None:
+    for name, values in record["fields"].items():
+        observed = int(np.bitwise_xor.reduce(values.view(np.uint64).reshape(-1), initial=0))
+        require(observed == record["checksums"][name], f"{name}: checksum mismatch")
+
+
+def same_program(new_bld: Path, ref_bld: Path, patches: dict[str, Path], *,
+                 new_cfg: str, ref_cfg: str) -> dict:
+    require(tuple(patches) == OBSERVER_UNITS, "wrong observer unit order")
+    ref = (ref_bld / "ppsrc/nemo/traldf_iso.f90").read_text().splitlines()
+    new = (new_bld / "ppsrc/nemo/traldf_iso.f90").read_text().splitlines()
+    expected = [line[1:] for line in patches["traldf_iso"].read_text().splitlines()
+                if line.startswith("+") and not line.startswith("+++")]
+    observed = []
+    for tag, _i1, _i2, j1, j2 in difflib.SequenceMatcher(
+            None, ref, new, autojunk=False).get_opcodes():
+        if tag == "insert":
+            observed.extend(new[j1:j2])
+    mismatch = next((index for index, pair in enumerate(zip(expected, observed))
+                     if pair[0] != pair[1]), min(len(expected), len(observed)))
+    require(expected == observed,
+            f"traldf patch ledger mismatch expected={len(expected)} observed={len(observed)} "
+            f"first={mismatch}")
+    return dyn_gate.same_program_observers(
+        new_bld, ref_bld, patches, WRITER_UNITS, new_cfg=new_cfg, ref_cfg=ref_cfg)
+
+
+def run_gate(root: Path, *, expect_commit: str, plant: str | None = None) -> dict:
+    require(plant is None or plant in PLANTS, f"unknown plant {plant}")
+    produced = (root / "producer_commit.txt").read_text(encoding="ascii").strip()
+    if plant == "stamp":
+        produced = "0" * 40
+    require(produced == expect_commit, "producer commit moved")
+    inherited = r333.run_gate(root, expect_commit=expect_commit)
+    require(inherited["status"] == "PASS_R333_TRACER_ACQUISITION",
+            "inherited round-333 admission moved")
+    records = {}
+    signed_zeros = {}
+    wet_counts = {}
+    for rank in (0, 1):
+        parser_plant = plant if rank == 0 and plant in (
+            "header", "field-order", "truncation", "time-level", "tracer-pass", "extent"
+        ) else None
+        record = read_record(root / record_name(rank), plant=parser_plant)
+        require(record["header"]["rank"] == rank, "rank tag moved")
+        if rank == 0 and plant == "checksum":
+            record["fields"]["zfu"][2, 2, 1, 0] = np.nextafter(
+                record["fields"]["zfu"][2, 2, 1, 0], np.inf)
+        _verify_checksums(record)
+        fields = record["fields"]
+        wet = r333._full_wet_mask(root, rank)
+        if rank == 0 and plant == "wet":
+            index = tuple(np.argwhere(wet)[0])
+            fields["rhs_seen"][(*index, 0)] = 0.0
+        for tracer in range(2):
+            require(bool(np.all(fields["rhs_seen"][..., tracer][wet] == 1.0)),
+                    f"rank {rank} tracer {tracer}: wet RHS coverage incomplete")
+            require(bool(np.any(fields["rhs_increment"][..., tracer][wet] != 0.0)),
+                    f"rank {rank} tracer {tracer}: passive increment")
+        if rank == 0 and plant == "increment":
+            index = (*tuple(np.argwhere(wet)[0]), 0)
+            fields["rhs_increment"][index] = np.nextafter(fields["rhs_increment"][index], np.inf)
+        expected_increment = fields["rhs_after"] - fields["rhs_before"]
+        require(np.array_equal(fields["rhs_increment"].view(np.uint64),
+                               expected_increment.view(np.uint64)),
+                f"rank {rank}: per-pass increment differs from recorded endpoints")
+        if rank == 0 and plant == "signed-zero":
+            for values in fields.values():
+                values[values == 0.0] = 0.0
+        sign_count = sum(int(np.count_nonzero((values == 0.0) & np.signbit(values)))
+                         for values in fields.values())
+        require(sign_count > 0, f"rank {rank}: signed zeros were normalized")
+        records[rank] = record
+        signed_zeros[str(rank)] = sign_count
+        wet_counts[str(rank)] = int(np.count_nonzero(wet))
+    return {
+        "format": "nemo-testcase-l4-orca2-round333-traldf-internal-v1",
+        "status": "PASS_R333_TRALDF_INTERNAL_ACQUISITION",
+        "producer_commit": produced,
+        "inherited_status": inherited["status"],
+        "tracer_passes": ["T", "S"],
+        "kpass_loop": False,
+        "recorded_fields": list(FIELDS),
+        "records": {record_name(rank): records[rank]["sha256"] for rank in records},
+        "signed_zero_census": signed_zeros,
+        "wet_cell_census": wet_counts,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--record-dir", type=Path)
+    parser.add_argument("--expect-commit")
+    parser.add_argument("--plant", choices=PLANTS)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--same-program", type=Path)
+    parser.add_argument("--reference-bld", type=Path)
+    parser.add_argument("--observer-patch", action="append", default=[])
+    parser.add_argument("--new-cfg")
+    parser.add_argument("--reference-cfg")
+    args = parser.parse_args()
+    try:
+        if args.same_program:
+            entries = [item.split("=", 1) for item in args.observer_patch]
+            result = same_program(args.same_program, args.reference_bld,
+                                  {unit: Path(path) for unit, path in entries},
+                                  new_cfg=args.new_cfg, ref_cfg=args.reference_cfg)
+        else:
+            require(args.record_dir is not None and args.expect_commit is not None,
+                    "admission arguments incomplete")
+            result = run_gate(args.record_dir, expect_commit=args.expect_commit,
+                              plant=args.plant)
+            require(args.plant is None, f"{args.plant} plant stayed green")
+    except (GateError, OSError, UnicodeError, ValueError, struct.error) as error:
+        print(f"STATUS {'PLANT-FIRED' if args.plant else 'REFUSE'}: {error}")
+        return 2
+    rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
+    if args.output:
+        args.output.write_text(rendered, encoding="utf-8")
+    else:
+        print(rendered, end="")
+    print(f"STATUS {result['status']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
