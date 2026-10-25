@@ -143,7 +143,7 @@ Round 9 refused diagnostic and no projection is promoted in their place.
 
 ## Tests and gates
 
-- Direct instrument controls after review: **53 passed in 7.92 s**.  They include the
+- Direct instrument controls after final review fixes: **53 passed in 8.92 s**.  They include the
   hostile one-ULP materialized-primal control, replay-primal plant, doubled-VJP
   plant, directory creation ordering, runner continuation, allocator refusal,
   and memory/time classifiers.
@@ -155,7 +155,7 @@ Round 9 refused diagnostic and no projection is promoted in their place.
 - Combined direct controls and `tests/ocean/unit/test_nemo_recipe.py`:
   **77 passed in 356.65 s**.
 - Exact three-file push battery (citation tests, recipe tests, full gradient
-  matrix in one pytest process): **52 passed, 1 skipped in 1955.76 s**.  The
+  matrix in one pytest process): **52 passed, 1 skipped in 1891.30 s**.  The
   parent process remained alive after the isolated certified one-step child;
   the sole skip is the registered six-step CPU LLVM section-memory limit.
 - Receipt citation gate: PASS with four citations and no unmapped or failing
@@ -166,7 +166,10 @@ Independent adversarial review initially returned HOLD: resource rows did not
 byte-check the primal returned inside the reverse transform, and the boundary
 plant was helper-only.  Commit `c6943d66a` adds the transformed-primal byte
 gate and live one-step plant described above.  Both findings are resolved in
-executable controls; GPU outcomes remain acquisition-dependent.
+executable controls.  A second mechanism review then found that GPU memory is
+attributed to the cold pass while only the warm pass was checked; commit
+`73abf2a6b` makes both pass checks binding.  GPU outcomes remain
+acquisition-dependent.
 
 ## OPEN and choice audit
 
