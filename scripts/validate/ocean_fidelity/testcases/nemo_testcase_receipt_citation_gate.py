@@ -9669,9 +9669,9 @@ CITATION_MAP = {
     'ORCA2_SAS_ICE_O5_REC/BLD/ppsrc/nemo/icedyn_adv_pra.f90:267': 'odd ice time step:  adv_x then adv_y',
     'ORCA2_SAS_ICE_O5_REC/BLD/ppsrc/nemo/icedyn_adv_pra.f90:317': 'even ice time step:  adv_y then adv_x',
     # --- SI3 round 13 (O7) retained-record admission ---
-    'ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icesbc.f90:435-436': 'zqfr_neg = MIN( zqfr , 0._wp )',
+    'ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icesbc.f90:435-436': ['zqfr_neg = MIN( zqfr , 0._wp )', 'zqfr_pos = MAX( zqfr , 0._wp )', 2],
     'ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icesbc.f90:447': 'qsb_ice_bot(ji,jj) = zswitch * MIN( qsb_ice_bot(ji,jj), - zqfr_neg * r1_Dt_ice / MAX( at_i(ji,jj), epsi10 ) )',
-    'packages/ice/legoesm/ice/si3_surface.py:505-506': 'zqfr_neg = _fmin(zqfr, 0.0)',
+    'packages/ice/legoesm/ice/si3_surface.py:505-506': ['zqfr_neg = _fmin(zqfr, 0.0)', 'zqfr_pos = _fmax(zqfr, 0.0)', 2],
     'packages/ice/legoesm/ice/si3_surface.py:510': 'qsb = sr(zswitch * jnp.where(cap <= qsb, cap, qsb))',
     'tests/ice/unit/test_si3_surface.py:615': 'def test_production_surface_step_keeps_qsb_dry_negative_zero():',
 }
