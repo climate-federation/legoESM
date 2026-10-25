@@ -27,8 +27,8 @@ Both have shape `(184, 152)` and contain `27,968` binary64 values. Exactly
 `c7dbd409805477751751b9c07438f7f3ce9a5d7f8be8b6c50c0f97046949fee0`
 and `28ec7cae3d892eb21a086e2da36ad5f47f3d696b5411da8ac0f6102baf9f64d7`.
 The committed admission gate measures and records this comparison
-(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1755-1787`,
-`:1955-1962`).
+(`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1757-1789`,
+`:1957-1964`).
 
 **CONFIRMED:** the old `kt2-sss-step1` substitution was vacuous on this real
 record even though the fields differ. O1 resolves `nn_icesal=4`,
@@ -47,7 +47,7 @@ real record at the first compared statement, equivalent `s_i`, with
 `wet_ULP=5`, `full_ULP=5`, and normalised error `6.939e-17`. This both proves a
 live scored dependency and retains the selection check: if the step regresses
 to the `kt=1` field, changing only `sss_step2` becomes vacuous and the
-acquisition refuses (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1767-1787`).
+acquisition refuses (`scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1769-1789`).
 
 **PLAUSIBLE:** none. No unmeasured explanation is used in the O1 verdict.
 
