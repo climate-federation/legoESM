@@ -136,6 +136,10 @@ FILES = {
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/dynspg_ts.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/traldf_iso.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/traldf_iso.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traadv.f90": (
@@ -1294,6 +1298,8 @@ FILES = {
         REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py",
     "ocean_model_latlon_cgrid.py":
         REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py",
+    "gm_redi_latlon_cgrid.py":
+        REPO / "packages/ocean/legoesm/ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py",
     "advection.py": REPO / "packages/ocean/legoesm/ocean/advection.py",
     "implicit_solver.py":
         REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/implicit_solver.py",
@@ -1808,6 +1814,25 @@ CITATION_MAP = {
     'trabbc.F90:179': "* 1.e-3 ! conversion in W/m2",
     'phycst.F90:26': "rad      = 3.141592653589793_wp / 180._wp",
     'tramle.F90:51': "r5_21 = 5.e0 / 21.e0",
+    # ORCA2 round 333 Resume 7: admitted internal traldf record ownership.
+    'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/stprk3_stg.f90:210-229': [
+        ('r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )', 2),
+        ('r3f(:,:)     = r2_3 * r3fb(:,:) + r1_3 * r3fa(:,:)', 2), 20],
+    'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/traldf_iso.f90:301-305': [
+        ('pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +', 1),
+        ('* r1_e1e2t(ji,jj) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 1), 5],
+    'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/traldf_iso.f90:318-322': [
+        ('pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +', 1),
+        ('* r1_e1e2t(ji,jj) / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 1), 5],
+    'gm_redi_latlon_cgrid.py:3264-3269': [
+        ('e3t_divisor = e3t if divisor_thickness is None else jnp.asarray(', 1),
+        ('"divisor_thickness must have the full tracer shape "', 1), 6],
+    'ocean_model_latlon_cgrid.py:8764-8778': [
+        ('_h_s3_kmm = _h_live_one_half', 1),
+        ('_h_s3_kmm = nemo_source_round(', 1), 15],
+    'ocean_model_latlon_cgrid.py:10611-10624': [
+        ('redi_divisor_eta=(', 1),
+        ('redi_divisor_thickness_override=', 1), 14],
     # ORCA2 round 333: first wet-value stage-3 tracer source-order walk.
     'src/OCE/TRA/traldf_iso.F90:145': [('#           define   INN                0', 1)],
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3_stg.f90:604':

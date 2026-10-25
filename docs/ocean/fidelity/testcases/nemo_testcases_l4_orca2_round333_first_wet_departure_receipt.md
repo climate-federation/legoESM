@@ -455,6 +455,113 @@ The final state is **STOPPED_FOR_RECORD**: the next action is operator-only
 acquisition with the command above, followed by manifest-pinned admission and
 offline replay before any scientific conclusion or implementation landing.
 
+## Resume 7: admitted internal operands, confirmed divisor, held proposal
+
+The operator-produced internal-LDF record was admitted in place with
+`--admit-existing`; Codex did not build or execute NEMO. Admission returned
+`PASS_R333_TRALDF_INTERNAL_ACQUISITION` for both T and S passes, 71 fields,
+both ranks, finite payloads, complete wet coverage, signed-zero preservation,
+checksums, truncation, time levels, field order, full source-statement replay,
+and retained-run manifests. Every refusal remained live, including arithmetic
+scheme/RHS replay, non-finite, wet-coverage, signed-zero, checksum, truncation,
+and producer/binary-stamp plants. The self-consistency replay accepted both
+the dry and coastal paths without repair. The admitted JSON has SHA-256
+`c57f475f0d9dba30725f44220b3405d3ca34c98ea7879fade509e373d214f220`.
+
+### Source-order operand replay
+
+The offline production-JIT replay walks NEMO order independently for each
+label and tracer: `dit`, `djt`, `dkt`, `A11`, `A22`, `hmsku`, `hmskv`, `A13`,
+`A23`, `zfu`, `zfv`, `vmsku`, `vmskv`, `zahu_w`, `zahv_w`, `A31`, `A32`,
+lower and upper `zfw`, `r1_e1e2t`, the T-cell divisor, scaled tendency, and RHS
+addition. Earlier bit differences are signed-zero-only; every earlier value is
+exact at all 18 registered T words, all 13 registered S words, and everywhere
+the recorded statement executes wet. Observer passivity is bit-identical for
+two calls with zero changed state leaves.
+
+The **first value-unequal internal operand is CONFIRMED** as `e3t_divisor` for
+both labels and both tracers. Everywhere executed wet it differs at 29 words,
+maximum `5.684341886080802e-14`, RMS `7.537596267255227e-17`. At the registered
+first-departure words it is exact at 18/18 T words and differs at 1/13 S words
+by `1.7763568394002505e-15`; the later scaled-tendency and RHS rows inherit that
+S difference. Thus this is the first internal operand owner, but it does not
+explain the 18 T endpoint words, and the campaign's first-wet T row cannot move
+under this proposal.
+
+The owning ordinary and deepest NEMO statements divide the accumulated flux
+divergence by the already stored
+`e3t_3d*(1+r3t(Kmm)*tmask)` at
+`ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/traldf_iso.f90:301-305`
+and
+`ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/traldf_iso.f90:318-322`.
+The producing record build materializes the half-stage `r3t` in
+`ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/stprk3_stg.f90:210-229`.
+legoESM already materializes the corresponding `_h_s3_kmm` at
+`ocean_model_latlon_cgrid.py:8764-8778`, but the shared operator chooses its
+divisor at `gm_redi_latlon_cgrid.py:3264-3269` and the production call supplies
+only rebuilt half-stage sea level, not the stored thickness, at
+`ocean_model_latlon_cgrid.py:10611-10624`.
+
+The two replay artifacts return `PASS_R333_TRALDF_REPLAY` and name
+`e3t_divisor` as first value owner. Their SHA-256 values are
+`919e7a163543e4ed4239242525a65a148af90ee7d1a62e93343e2d09fe6324de`
+(`given_nemo_entry`) and
+`28f688050b3e7ca4677ce02046c99203b9e71c31d04c362d27cc54f6eaa6f175`
+(`independent`).
+
+### Proposal, measurements, and gradient falsifier
+
+The tested single-statement proposal passed the already materialized
+`_h_s3_kmm` to the one shared divisor override at the production call site.
+Its exact call-site revert failed the provisional test. At candidate commit
+`086a971a5357369cb54f0fc8a83440fb9e2f694e`, Decision 122 passed all seven
+pairs: zero exact rows lost, every registered row equal, and both rung-10
+labels equal on all 200 rows. The decision artifact SHA-256 is
+`67edc2f9bc9e0d149c2662951eb5a35f13cbcec4e705894b0a223b5cff5c7017`.
+The candidate's preliminary grid-ladder battery passed 111 tests, and its
+three-step faithful DINO probe reproduced all 66 baseline leaf-step hashes;
+the DINO artifact SHA-256 is
+`5f977ac145525b73d311bdaacd5c7620b4199567f62afac15d3d1c8d19b503fa`.
+These are candidate diagnostics, not landing claims.
+
+The mandatory rung-10 N=1 gradient gate falsified the proposal. The direct
+stored-divisor candidate at `1881e0df69b344b70916b00ae07ec28f39b5c855`
+produced 799,200 non-finite T cotangents for both T and SSH objectives and NaN
+reverse `rn_Ud` gradients, while forward `dL/dln(rn_Ud)` was finite at
+`-4.511704487056347e-05`; artifact SHA-256
+`63a138bf22b184e39955a7643a6d00eec06e4395ceaaf5bcbadb3c7184792393`.
+A rebuilt-tangent custom JVP and an explicit stored-graph cut retained the
+same all-NaN reverse result, with artifact SHA-256 values
+`4444c35e5b5371dd991443630c1a87f07411fbc9dc79a984885c27b41dab523d`
+and `13904193eaaf2953260f5e50fac54a82263bf2b1934422646032d49ff5a270e9`.
+Finally, the ordinary-primitives straight-through form passed its isolated
+forward/reverse/poisoned-graph test but failed the production scalar gate after
+1,277.95 seconds: both `dL/draw` and `dL/dln(rn_Ud)` were NaN. The same-tree
+legacy call-site control returned finite `dL/dln(rn_Ud)=-4.511811e-05`, so the
+gate itself is discriminating. The required finite gradients and
+reverse-equals-forward condition are therefore not met.
+
+The candidate re-score leaves the first wet-value row unchanged for both
+labels: kt 2, stage 3, T; 18 unequal wet words, maximum
+`7.678080393702658e-12 K`, full RMS `1.2687664596813964e-14 K`, wet RMS
+`1.561494903752516e-14 K`, first unequal `[147,31,2]`, unique maximum
+`(i,j,k,rank)=(32,147,5,0)` on the north fold under ice. The candidate artifacts
+are `given_nemo_entry` SHA-256
+`1448e717915ab1eb7c2bf732041c83937582f500cdfb1098596d50b30e6df05a`
+and `independent` SHA-256
+`1cbea4258d1beeed550c37da00a62a89ba46d9ba7ad2d9df64a81cd00695160e`.
+
+Per the round condition, work stopped at the failed gradient gate. No DINO
+month claim is made, and the provisional production implementation and its
+landing test were withdrawn. The final tree changes no package source and no
+configuration value; relative to incoming `3895dbeb307c`, it retains only the
+offline statement replay, the Decision-122 census tool, citation mappings,
+and this receipt. Codex review: operator.
+
+Disposition: **HELD — PROPOSAL ONLY**. The confirmed internal divisor mismatch
+is recorded, but no implementation is eligible to land until a forward-exact
+form also has finite rung-10 N=1 cotangents with reverse equal to forward.
+
 ## Resume 6: macro, shape, stretched-metric, and actual-source repair
 
 Claude and Argon held Resume 5 on five remaining defects. All are repaired in
