@@ -4,7 +4,8 @@
 #
 # usage: build.sh <CAM checkout @ cam_cesm2_1_rel_60> <WRF module_mp_morr_two_moment.F (v4.6.1)> <build dir>
 # micro_mg_utils.F90 is compiled UNMODIFIED; the MG2 statements are copied verbatim
-# (line ranges below) from micro_mg2_0.F90; the WRF M2005 PSD lines get only the
+# (line ranges below) from micro_mg2_0.F90 and micro_mg_cam.F90 (the grid REL that
+# CAM6 radiation reads); the WRF M2005 PSD lines get only the
 # renames needed to share one Fortran scope with MG2 (Fortran is case-insensitive:
 # PGAM/LAMC/EFFC/DUM/QSMALL clash with MG2 locals) and legoESM's moist density for
 # DUM (the constants-only variant certified in the tier-1 cloud-optics audit).
@@ -19,7 +20,13 @@ sed -n '877,879p'   "$M/micro_mg2_0.F90" > "$B/mg2_cld.inc"
 sed -n '2739,2768p' "$M/micro_mg2_0.F90" > "$B/mg2_dum.inc"
 sed -n '2772,2808p' "$M/micro_mg2_0.F90" > "$B/mg2_ice.inc"
 sed -n '2811,2865p' "$M/micro_mg2_0.F90" > "$B/mg2_liq.inc"
+sed -n '2296p'      "$M/micro_mg_cam.F90" > "$B/mgcam_icw.inc"
+sed -n '2534,2554p' "$M/micro_mg_cam.F90" > "$B/mgcam_rel.inc"
 grep -q 'lcldm = max(liqcldf,mincld)' "$B/mg2_cld.inc"
+grep -q 'icwmrst(i,k)   = min( state_loc%q(i,k,ixcldliq) / max(mincld,liqcldf(i,k)),0.005_r8 )' "$B/mgcam_icw.inc"
+head -1 "$B/mgcam_rel.inc" | grep -q 'mu_grid = 0._r8'
+grep -q 'where (icwmrst_grid(:ngrdcol,top_lev:) >= qsmall)' "$B/mgcam_rel.inc"
+tail -1 "$B/mgcam_rel.inc" | grep -q 'end where'
 grep -q 'dumc(i,k) = max(qc(i,k)+qctend(i,k)\*deltat,0._r8)/lcldm(i,k)' "$B/mg2_dum.inc"
 grep -q 'dumnc(i,k)=ncnst/rho(i,k)' "$B/mg2_dum.inc"
 grep -q 'effi(i,k) = 1.5_r8/lami(i,k)\*1.e6_r8' "$B/mg2_ice.inc"

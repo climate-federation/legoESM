@@ -1069,6 +1069,9 @@ def _call_radiation_backend(
         solar_spectral_fraction=solar_spectral_fraction,
         **cloud_kwargs,
     )
+    if cloud_config is not None:
+        # One bulk ice density for the PSD radius and the optics size (CAM6).
+        _rad_kwargs["cloud_rho_ice"] = cloud_config.rho_cloud_ice
     if clear_sky_toa:
         _rad_kwargs["clear_sky"] = True
     if o3_top_vmr is not None and o3_vmr_override is not None:
@@ -2217,6 +2220,8 @@ def _mc3d_plane_heating(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, q_v=q_v_safe, cos_zenith=cos_sza_col,
             sw_optical_field_only=True, **cloud_kwargs,
+            **({"cloud_rho_ice": cloud_config.rho_cloud_ice}
+               if cloud_kwargs else {}),
         )
         ngpt = tau.shape[0]
         tau_td = tau.reshape(ngpt, ny, nx, nlev)

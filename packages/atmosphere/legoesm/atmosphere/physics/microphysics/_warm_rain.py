@@ -812,6 +812,9 @@ _MG2_PGAM_MIN = 2.0
 _MG2_DROP_DIAM_MAX = 50.0e-6   # [m] -> lambda lower bound (pgam+1)/50 um
 _MG2_DROP_DIAM_MIN = 2.0e-6    # [m] -> lambda upper bound (pgam+1)/2 um
 _MG2_MIN_MEAN_MASS_LIQ = 1.0e-20   # [kg]
+# Droplet effective radius where the in-cloud water is below qsmall: CAM6
+# REL fill 10 um (micro_mg_cam.F90:2536; micro_mg2_0.F90:2859 effc = 10).
+MG2_REL_NO_LIQUID_M = 10.0e-6      # [m]
 # --- CAM6 MG2 rain processes (micro_mg_utils.F90) ---
 _MG2_BEHENG_SELFCOLL = 8.0     # self_collection_rain nragg = -8 nric qric rho (:1359, Beheng 1994)
 _MG2_EVAP_CLOUD_QMIN = 1.0e-6  # evaporate_sublimate_precip: dum=0 if qcic+qiic < 1e-6 (:1468)
@@ -876,14 +879,17 @@ def mg2_var_coef(relvar, a, dtype):
                    - jax.scipy.special.gammaln(r)) / r ** a
 
 
-def mg2_size_bounded_nc(q_c_ic, N_c_ic, rho):
-    """MG2 ``size_dist_param_liq`` droplet-number reset (micro_mg_utils.F90:
-    376-422 -> size_dist_param_basic :481-516), per-VOLUME here.
+def mg2_droplet_psd(q_c_ic, N_c_ic, rho):
+    """MG2 ``size_dist_param_liq`` (micro_mg_utils.F90:376-422 ->
+    size_dist_param_basic :481-516), per-VOLUME number here.
 
     Where ``qcic > qsmall``: ``pgam = max(1/(1-0.7 exp(-0.008e-6 N))^2 - 1, 2)``
-    (``N = ncic*rho`` [#/m^3]), ``ncic <= qcic/1e-20``, and ``ncic`` is reset
-    so ``lambda = (pi/6 rho_w (pgam+1)(pgam+2)(pgam+3) ncic/qcic)^(1/3)`` stays
-    in ``(pgam+1)/[50 um, 2 um]``.  Elsewhere ``N_c_ic`` is returned unchanged.
+    (``N = ncic*rho`` [#/m^3]), ``ncic <= qcic/1e-20``,
+    ``lambda = (pi/6 rho_w (pgam+1)(pgam+2)(pgam+3) ncic/qcic)^(1/3)`` set to
+    the bound (and ``ncic`` reset to match) when it leaves
+    ``(pgam+1)/[50 um, 2 um]``.  Returns ``(active, pgam, lambda, ncic)``
+    with ``ncic`` per kg; ``pgam``/``lambda``/``ncic`` are finite but
+    meaningless where ``active`` is False (placeholder ``qcic = 1``).
     """
     active = q_c_ic > MG2_QSMALL
     q_safe = jnp.where(active, q_c_ic, 1.0)
@@ -898,7 +904,29 @@ def mg2_size_bounded_nc(q_c_ic, N_c_ic, rho):
     nc_kg = jnp.where(lam < lam_lo, lam_lo ** 3 * q_safe / shape,
                       jnp.where(lam > lam_hi, lam_hi ** 3 * q_safe / shape,
                                 nc_kg))
+    return active, pgam, jnp.clip(lam, lam_lo, lam_hi), nc_kg
+
+
+def mg2_size_bounded_nc(q_c_ic, N_c_ic, rho):
+    """MG2 ``size_dist_param_liq`` droplet-number reset
+    (:func:`mg2_droplet_psd`), per-VOLUME.  Elsewhere (``qcic <= qsmall``)
+    ``N_c_ic`` is returned unchanged.
+    """
+    active, _, _, nc_kg = mg2_droplet_psd(q_c_ic, N_c_ic, rho)
     return jnp.where(active, nc_kg * rho, N_c_ic)
+
+
+def mg2_droplet_effective_radius(q_c_ic, N_c_ic, rho):
+    """CAM6 radiation droplet effective radius REL [m] (micro_mg_cam.F90:
+    2534-2554): ``(pgam+3)/lambda/2`` from :func:`mg2_droplet_psd` where the
+    in-cloud water ``qcic >= qsmall``, else 10 um.
+
+    ``q_c_ic`` is CAM6's ``icwmrst = min(q/max(mincld, ast), 5e-3)``
+    (micro_mg_cam.F90:2296), ``N_c_ic`` the in-cloud number [#/m^3].
+    """
+    _, pgam, lam, _ = mg2_droplet_psd(q_c_ic, N_c_ic, rho)
+    return jnp.where(q_c_ic >= MG2_QSMALL, (pgam + 3.0) / lam / 2.0,
+                     MG2_REL_NO_LIQUID_M)
 
 
 def mg2_inprecip_rain(q_r, N_r, rho, precip_frac, lamr_min, lamr_max):

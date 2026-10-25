@@ -45,7 +45,7 @@ _M_TO_MICRONS_FACTOR = 1e6
 # PSD assumes) converted to the effective DIAMETER of solid ice
 # (rhows = 917 kg/m^3 = ``constants.rho_ice``), which is what the RRTMGP ice
 # table is indexed by (rte-rrtmgp v1.9 relabels that axis as diameter).
-_RHO_ICE_BULK_CAM_MG2 = 500.0  # [kg/m^3] CAM micro_mg_utils.F90 ``rhoi``
+RHO_ICE_BULK_CAM_MG2 = 500.0  # [kg/m^3] CAM micro_mg_utils.F90 ``rhoi``
 
 
 def _particle_size_interpolant(
@@ -123,7 +123,7 @@ def compute_optical_properties(
       ),
       jnp.clip(
           _M_TO_MICRONS_FACTOR * radius_eff_ice
-          * _RHO_ICE_BULK_CAM_MG2 / constants.rho_ice * 2.0,
+          * RHO_ICE_BULK_CAM_MG2 / constants.rho_ice * 2.0,
           lookup.diameter_ice_lower,
           lookup.diameter_ice_upper,
       ),
