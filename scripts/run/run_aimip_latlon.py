@@ -244,7 +244,8 @@ def _parse_windows(spec: str):
 
 def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
                       era5_zarr=None, microphysics="none", turbulence="none",
-                      multi_step_hours=(), grid_kind="latlon"):
+                      multi_step_hours=(), grid_kind="latlon",
+                      ice_skin_prognostic=False):
     """Build (initial_carries, target_carries, forcings) on the model grid.
 
     Mirrors ``neural_gcm_spectral.load_training_data`` window->time-index
@@ -299,6 +300,7 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
             era5, grid_or_mesh, sigma_,
             target_phis=era5_terrain_product(era5, grid_or_mesh),
             microphysics=microphysics_, turbulence=turbulence_,
+            ice_skin_prognostic=ice_skin_prognostic,
         )
 
     era5_cfg = TrainingERA5Config(dt_hours=6, load_radiation_fluxes=True)
@@ -862,6 +864,7 @@ def main(argv=None):
         rollout_hours=_ROLLOUT_HOURS, forcing_ctx=forcing_ctx,
         era5_zarr=args.era5_zarr,
         microphysics=args.microphysics, turbulence=args.turbulence,
+        ice_skin_prognostic=config.ice_skin_prognostic,
         multi_step_hours=tuple(args.multi_step_hours),
     )
     logger.info("Loading eval data ...")
@@ -871,6 +874,7 @@ def main(argv=None):
         rollout_hours=_EVAL_HOURS, forcing_ctx=forcing_ctx,
         era5_zarr=args.era5_zarr,
         microphysics=args.microphysics, turbulence=args.turbulence,
+        ice_skin_prognostic=config.ice_skin_prognostic,
     )
 
     scorecard = {}

@@ -1681,8 +1681,12 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
         s_ic, s_tg, sst_src = _sample_inputs(
             era5_cfg, sst_cfg, i_ic, i_tg, ds, cloud_ds, flux_ds, at)
         tp = era5_terrain_product(s_ic, grid)
-        ic = era5_to_latlon_carry(s_ic, grid, sigma, target_phis=tp, microphysics=_micro)
-        target = era5_to_latlon_carry(s_tg, grid, sigma, target_phis=tp, microphysics=_micro)
+        _skin = bool(config.ice_skin_prognostic)
+        ic = era5_to_latlon_carry(s_ic, grid, sigma, target_phis=tp,
+                                  microphysics=_micro, ice_skin_prognostic=_skin)
+        target = era5_to_latlon_carry(s_tg, grid, sigma, target_phis=tp,
+                                      microphysics=_micro,
+                                      ice_skin_prognostic=_skin)
         sst = regrid_2d_to_gaussian(sst_src.sst, sst_src.lat, sst_src.lon, grid)
         # Prescribed surface planes the slice carries (spectral names),
         # regridded exactly like sst, then renamed to the driver-path
