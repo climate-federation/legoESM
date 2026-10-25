@@ -99,8 +99,11 @@ def measure(deck_root: Path, record_root: Path, expect_commit: str) -> dict:
     nemo = assemble_raw(record_root)
     require(nemo.shape == lego.shape == (148, 180, 30), "global V shape moved")
 
-    mask = np.broadcast_to(
-        np.asarray(state.v_mask.data)[1:, :, None] != 0.0, lego.shape)
+    raw_faces = card.recipe.z_coord.nemo_een_barotropic
+    require(raw_faces is not None and raw_faces.vmask is not None,
+            "ORCA2 card lacks NEMO's raw V mask")
+    mask = np.asarray(raw_faces.vmask)[..., :30] != 0.0
+    require(mask.shape == lego.shape, "raw NEMO V-mask shape moved")
     wet = mask
     dry = ~mask
     dump = rung10.read_state_frame(
