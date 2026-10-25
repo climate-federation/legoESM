@@ -12,7 +12,7 @@ ocean, S2 remaining surface composition, S3 observed-cover ice-if, and S4 a
 composed card against a purpose-built NEMO reference without SI3.  The S2/S3
 delivery order is not confused with execution order: NEMO calls bulk, ice,
 runoff, restoring/budget, halo assembly, then T-to-U/V stress rotation in
-`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90:428-569`.
+`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90:428-568`.
 
 S1 now uses the existing shared bulk-flux module rather than another copy.
 The literal path covers humidity/temperature preprocessing and the two ocean

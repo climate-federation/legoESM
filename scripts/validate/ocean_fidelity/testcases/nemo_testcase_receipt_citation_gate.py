@@ -8908,15 +8908,15 @@ CITATION_MAP = {
         'routine': 'drg_init',
     },
     # ORCA2 round 335: standalone-S1 literal surface-bulk transcription.
-    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90:428-569': [
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90:428-568': [
         'IF( .NOT.ll_sas )   CALL sbc_ssm',
-        'vtauV  (ji,jj) = 0.5_wp * ( vtau(ji,jj) + vtau(ji,jj+1) )', 142],
+        'vtauV  (ji,jj) = 0.5_wp * ( vtau(ji,jj) + vtau(ji,jj+1) )', 141],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:640-678': [
         'q_air_zt(:,:) = sf(jp_humi )%fnow(:,:,1)',
         '&                zsen, zlat, zevp, zqlwn )', 39],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:791-948': [
         'ptsk(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) = pst',
-        "CALL lbc_lnk( 'sbcblk', utau, 'T', -1.0_wp", 158],
+        "CALL lbc_lnk( 'sbcblk', utau, 'T', -1._wp", 158],
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:976':
         'ptsk(:,:) = ( ptsk(:,:) - rt0 ) * smask0(:,:)',
     'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcblk.f90:1019-1045': [
