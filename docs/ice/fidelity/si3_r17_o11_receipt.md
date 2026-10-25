@@ -237,7 +237,7 @@ Controls (parent `f87536a06d`, model-identical to `caf7fd5cca`):
 |---|---|---|
 | `tests/ice/unit` | 422 passed, 1 skipped, 1 xfailed | 440 passed, 1 skipped, 1 xfailed (+18) |
 | O11 tests | 14 passed | 32 passed |
-| SI3 fidelity tests (11 files) | 1 failed, 143 passed | RESULT_FID |
+| SI3 fidelity tests (11 files) | 1 failed, 143 passed | 2 failed, 142 passed (O7 preflight passes alone: 1 passed in 92.77s) |
 | CI ratchets (10 files) | 13 failed | same 13 failed |
 
 The two fidelity reds are the parent's: scalarmath v2 "A MY_SRC is not verbatim", and
@@ -245,4 +245,7 @@ the O7 preflight subprocess timeout at 120 s (also on the parent last round). On
 dispatcher plant had a fixed signature; it now forwards the new keyword (lines unmoved).
 Evidence: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round17/resume1/`.
 
-Gates (Resume 1): RESULT_GATES
+Gates (Resume 1): this receipt's citation gate `PASS`, 53 citations, 0 unmapped, full-map
+audit 0 failing; a planted citation makes it `FAIL`. All 14 SI3 receipts pass. Default
+citation-gate test: `32 passed in 8.16s`. Private-import ratchet: `6 passed in 6.77s`.
+Review: `codex review: operator`; GLM: not run (NO GATE).
