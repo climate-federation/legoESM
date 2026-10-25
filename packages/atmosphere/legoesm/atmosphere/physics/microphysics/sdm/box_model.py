@@ -1,5 +1,9 @@
 """Adiabatic-parcel driver for the Super-Droplet Method.
 
+NOT YET FAITHFUL as a whole (legoESM driver; no ERF counterpart for the
+parcel, and the vapour/heat coupling is ``coupling.py``'s): only the particle
+physics it calls is oracle-tested.
+
 A 0-D *persistent-particle* test bed — the natural home for SDM, which is
 Lagrangian and needs particle state carried across time (the stateless
 column-physics interface cannot). A closed air parcel rises at a constant

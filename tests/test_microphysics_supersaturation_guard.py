@@ -311,7 +311,7 @@ def test_exempt_reasons_name_symbols_that_actually_run() -> None:
     root = ra.repo_root() / "packages/atmosphere/legoesm/atmosphere/physics/microphysics"
     claims = {
         "sdm": [("sdm/condensation.py", "integrate_radius"),
-                ("sdm/condensation.py", "saturation_vapor_pressure"),
+                ("sdm/condensation.py", "saturation_vapor_pressure_erf"),
                 ("sdm/column.py", "relative_humidity")],
         "seifert_beheng": [("seifert_beheng.py", "saturation_adjustment_gsam")],
         "fast_sbm": [

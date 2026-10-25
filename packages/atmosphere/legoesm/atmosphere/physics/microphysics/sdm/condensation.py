@@ -23,12 +23,18 @@ with
 * ``F_d = (ρ_l R_v T)/(d_cf·D·e_s)``          (vapor-diffusion term),
 * ``d_cf = (1+Kn)/(1+2Kn(1+Kn))``, ``Kn = λ_v/R``, ``λ_v = 2D/√(8 T R_v/π)``,
 * ``a = 2σ/(R_v ρ_l)``                         (Kelvin curvature coeff),
-* ``b = (3/4π)(M_w/ρ_l)``                      (Raoult solute coeff),
+* ``b = 4.3e-6 m³/mol``                        (Raoult solute coeff, water),
 * ``N_s = m_s · i / M_s``                       (effective solute moles).
 
-All physical constants come from :mod:`legoesm.constants`; the saturation
-vapor pressure ``e_s(T)`` comes from :mod:`legoesm.thermo` (audit-mandated:
-no re-implemented saturation curve). This module is JIT- and grad-compatible.
+Every coefficient is the one ERF 26.09 ``MassChange_LV`` builds for water
+(``ERF_MaterialProperties.H`` ``coeffCurv``/``coeffVPSolute``/
+``coeffMolecularDiffusion`` and ``ERF_Constants.H``): ``L = 2.5e6``,
+``R_v = 461.505``, ``σ = 0.076148325``, ``b = 4.3e-6``, ``D = 2.21e-5``,
+``K = 2.40e-2``, ``ρ_l = 1000`` (``legoesm.constants`` ``*_erf`` entries).
+The saturation vapour pressure is ERF's own ``erf_esatw`` (Flatau 1992
+polynomial with its Magnus fallback) — the oracle's curve, which the
+growth ODE needs to reproduce the running scheme.  The fixed-substep
+integrators are JIT- and grad-compatible.
 
 References
 ----------
@@ -45,7 +51,6 @@ import jax.numpy as jnp
 from jax import lax
 
 from legoesm import constants
-from legoesm.thermo import saturation_vapor_pressure
 from legoesm.atmosphere.physics.microphysics.sdm.config import SDMConfig
 from legoesm.atmosphere.physics.microphysics.sdm.particles import SuperDropletState
 
@@ -55,8 +60,9 @@ __physics_contract__ = {
         "condensation/evaporation with Kelvin curvature and Raoult solute "
         "(Köhler) terms and a Knudsen diffusivity correction. The "
         "differentiable=True claim covers the default fixed-substep "
-        "rk4/euler integrators; the opt-in rk4_adaptive mode (lax.while_loop) "
-        "is jit-compatible but NOT reverse-mode differentiable."
+        "rk4/euler integrators; the opt-in ERF adaptive modes (rk4_adaptive, "
+        "rk3bs, be, cn, dirk2; lax.while_loop) are jit-compatible but NOT "
+        "reverse-mode differentiable."
     ),
     "inputs": {
         "radius": "m",
@@ -88,13 +94,51 @@ __physics_contract__ = {
 _R_FLOOR = 1.0e-9
 _R_SQ_FLOOR = _R_FLOOR * _R_FLOOR
 
-# Water molar mass in kg/mol (constants.M_H2O is g/mol; g->kg is a unit factor).
-_M_H2O_KG = constants.M_H2O * 1.0e-3
-
+# (4/3) π — sphere volume prefactor (pure geometry; ERF four_thirds_pi).
+_FOUR_THIRDS_PI = 4.0 / 3.0 * jnp.pi
 
 # Kinetic-theory mean-speed (8kT/pi) + 3/2 curvature coefficient.
 _KINETIC_8 = 8.0
 _CURVATURE_32 = 1.5
+
+# --- Bogacki-Shampine 3(2) tableau of ERF TI::rk3bs (stage 3 weight, final
+# combination (1/9)(2 f1 + 3 f2 + 4 f3)) ---
+_RK3BS_A32 = 0.75
+_RK3BS_B_SCALE = 1.0 / 9.0
+_RK3BS_B = (2.0, 3.0, 4.0)
+
+# --- ERF erf_esatw (Utils/ERF_MicrophysicsUtils.H, ERF 26.09) ---
+# Flatau et al. (1992) liquid polynomial in dT = T - 273.16 [hPa], used on
+# -70 < dT < 70 while positive; otherwise ERF's Magnus fallback erf_esatw_cc
+# 10*svp1*exp(svp2 (T - svpt0)/(T - svp3)) [hPa].  ERF converts hPa -> Pa (x100,
+# MaterialProperties.cpp l.29).
+_ERF_ESATW_POLY = (6.11239921, 0.443987641, 0.142986287e-1, 0.264847430e-3,
+                   0.302950461e-5, 0.206739458e-7, 0.640689451e-10,
+                   -0.952447341e-13, -0.976195544e-15)
+_ERF_ESATW_DT_RANGE = 70.0       # [K] |dT| bound of the polynomial branch
+_ERF_SVP1 = 0.6112               # [kPa] erf_esatw_cc svp1
+_ERF_SVP2 = 17.67                # [-]   erf_esatw_cc svp2
+_ERF_SVP3 = 29.65                # [K]   erf_esatw_cc svp3
+_ERF_SVP_KPA_TO_HPA = 10.0       # erf_esatw_cc leading factor
+_HPA_TO_PA = 100.0
+
+
+def saturation_vapor_pressure_erf(T: jax.Array) -> jax.Array:
+    """ERF ``erf_esatw(T)*100`` [Pa]: the saturation pressure ERF's SDM uses.
+
+    Flatau (1992) Horner polynomial where ``-70 < T-273.16 < 70`` and the
+    polynomial is positive, else ERF's Magnus fallback (hard branch, as the
+    oracle; piecewise-differentiable).
+    """
+    dtt = T - constants.T_flatau_erf
+    c = _ERF_ESATW_POLY
+    poly = c[0] + dtt * (c[1] + dtt * (c[2] + dtt * (c[3] + dtt * (c[4] + dtt * (
+        c[5] + dtt * (c[6] + dtt * (c[7] + c[8] * dtt)))))))
+    use_poly = (dtt > -_ERF_ESATW_DT_RANGE) & (dtt < _ERF_ESATW_DT_RANGE) & (poly > 0.0)
+    # Magnus fallback, ERF's own curve (satcurve-ok: oracle erf_esatw_cc)
+    cc = _ERF_SVP_KPA_TO_HPA * _ERF_SVP1 * jnp.exp(  # satcurve-ok: ERF erf_esatw_cc
+        _ERF_SVP2 * (T - constants.T_freeze) / (T - _ERF_SVP3))
+    return jnp.where(use_poly, poly, cc) * _HPA_TO_PA
 
 def drsq_dt(
     r_sq: jax.Array,
@@ -128,33 +172,37 @@ def drsq_dt(
     include_curvature, include_solute : bool
         Toggle the Kelvin and Raoult terms.
     """
-    D = constants.D_vapor
-    K = constants.k_air
-    Rv = constants.R_v
-    rho_l = constants.rho_water
-    L = constants.L_v
+    D = constants.D_vapor      # = ERF diffelq 2.21e-5
+    K = constants.k_air        # = ERF therco 2.40e-2
+    Rv = constants.R_v_erf
+    rho_l = constants.rho_water  # = ERF rhor 1000
+    L = constants.L_v_erf
 
     r_sq = jnp.maximum(r_sq, _R_SQ_FLOOR)
     R = jnp.sqrt(r_sq)
 
+    # ERF dRsqdt::rhs_func, same operation order (round-off identical).
     # Fukuta-Walter transitional correction to the diffusivity (Knudsen).
     lambda_v = 2.0 * D / jnp.sqrt(_KINETIC_8 * T * Rv / jnp.pi)
     Kn = lambda_v / R
     d_cf = (1.0 + Kn) / (1.0 + 2.0 * Kn * (1.0 + Kn))
 
-    F_k = (L / (Rv * T) - 1.0) * (L * rho_l) / (K * T)
+    F_k = (L / (Rv * T) - 1.0) * ((L * rho_l) / (K * T))
     F_d = (rho_l * Rv * T) / (d_cf * D * e_s)
     denom = F_k + F_d
 
+    R_inv = 1.0 / R
     out = 2.0 * (S - 1.0) / denom
 
     if include_curvature:
-        a = 2.0 * constants.sigma_water / (Rv * rho_l)   # Kelvin coeff [m·K]
-        out = out - 2.0 * (a / T) / denom / R
+        a = 2.0 * constants.sigma_water_erf / (Rv * rho_l)   # Kelvin coeff [m·K]
+        beta = -2.0 * (a / T) / denom
+        out = out + beta * R_inv
 
     if include_solute:
-        b = (3.0 / (4.0 * jnp.pi)) * (_M_H2O_KG / rho_l)  # Raoult coeff [m³/mol]
-        out = out + 2.0 * b * N_s / denom / (r_sq * R)    # / R³
+        b = constants.b_solute_water_erf                  # Raoult coeff [m³/mol]
+        gamma = 2.0 * b * N_s / denom
+        out = out + gamma * (R_inv * R_inv * R_inv)       # / R³
 
     return out
 
@@ -200,11 +248,11 @@ def drsq_dt_jac(
     ``jax.grad(drsq_dt)`` (and is exactly 0 for a pure Maxwell droplet).
     Adequate for step-size control; do not use it as an exact derivative.
     """
-    D = constants.D_vapor
-    K = constants.k_air
-    Rv = constants.R_v
-    rho_l = constants.rho_water
-    L = constants.L_v
+    D = constants.D_vapor      # = ERF diffelq 2.21e-5
+    K = constants.k_air        # = ERF therco 2.40e-2
+    Rv = constants.R_v_erf
+    rho_l = constants.rho_water  # = ERF rhor 1000
+    L = constants.L_v_erf
 
     r_sq = jnp.maximum(r_sq, _R_SQ_FLOOR)
     R = jnp.sqrt(r_sq)
@@ -212,7 +260,7 @@ def drsq_dt_jac(
     lambda_v = 2.0 * D / jnp.sqrt(_KINETIC_8 * T * Rv / jnp.pi)
     Kn = lambda_v / R
     d_cf = (1.0 + Kn) / (1.0 + 2.0 * Kn * (1.0 + Kn))
-    F_k = (L / (Rv * T) - 1.0) * (L * rho_l) / (K * T)
+    F_k = (L / (Rv * T) - 1.0) * ((L * rho_l) / (K * T))
     F_d = (rho_l * Rv * T) / (d_cf * D * e_s)
     denom = F_k + F_d
 
@@ -222,11 +270,11 @@ def drsq_dt_jac(
 
     out = jnp.zeros_like(r_sq)
     if include_curvature:
-        a = 2.0 * constants.sigma_water / (Rv * rho_l)
+        a = 2.0 * constants.sigma_water_erf / (Rv * rho_l)
         beta = -2.0 * (a / T) / denom
         out = out - 0.5 * beta * R_inv3
     if include_solute:
-        b = (3.0 / (4.0 * jnp.pi)) * (_M_H2O_KG / rho_l)
+        b = constants.b_solute_water_erf
         gamma = 2.0 * b * N_s / denom
         out = out - _CURVATURE_32 * gamma * R_inv5
     return out
@@ -247,9 +295,10 @@ def _integrate_adaptive(
       interval, exactly ERF's ``cfl/0 → ∞`` then limit-to-``t_final``);
     * a rejected attempt (``ok`` False: bad stage, non-convergence,
       non-finite/non-positive result) halves ``dt`` and retries;
-    * the ERF too-small exit (``dt < 1e-12·cfl/|τ|`` AND ``dt < 1e-12·t_final``)
-      marks the droplet *unconverged*: its radius is left UNCHANGED (ERF skips
-      the particle update for unconverged droplets);
+    * the ERF too-small exit (``dt < 1e-12·cfl/|τ|`` AND ``dt < 1e-12·t_final``,
+      tested before every attempt) and a non-finite ``dt`` mark the droplet
+      *unconverged*: its radius is left UNCHANGED (ERF skips the particle
+      update for unconverged droplets);
     * steady-state exit when ``snorm = |u_new-u|/u < stol``;
     * the step cap counts ACCEPTED steps only (ERF ``n_step``); halvings are
       bounded by the too-small exit (geometric halving terminates in ~40
@@ -265,48 +314,56 @@ def _integrate_adaptive(
     eps_exit = jnp.asarray(1.0e-12, dtype)
 
     def _dt_from_tau(u, t):
+        # ERF computeTau / computeTimestep / limitTimestep: dt = cfl/|tau|
+        # (tau = 0 -> +inf -> the remaining interval), limited to t_final.
         tau = jnp.abs(drsq_dt_jac(u, T, e_s, N_s, include_curvature, include_solute))
-        dt_stiff = jnp.where(tau > 0.0, cfl / tau, t_final - t)
-        return jnp.minimum(dt_stiff, t_final - t), tau
+        dt_stiff = jnp.where(tau > 0.0, cfl / tau, jnp.inf)
+        dt_stiff = jnp.where(jnp.isnan(tau), jnp.nan, dt_stiff)
+        return jnp.where(t + dt_stiff > t_final, t_final - t, dt_stiff), tau
+
+    def _too_small(dt, tau):
+        # ERF isTimestepTooSmall(dt, tau)
+        dt_ref = jnp.where(tau > 0.0, cfl / tau, jnp.inf)
+        return (dt < eps_exit * dt_ref) & (dt < eps_exit * t_final)
 
     def cond(st):
-        u, t, dt, n, failed, steady = st
+        u, t, dt, tau, n, failed, steady = st
         # n counts ACCEPTED steps only (ERF's n_step) — halvings are bounded
         # by the too-small exit, exactly as the oracle's unbounded inner loop.
         return (~failed) & (~steady) & (t < t_final) & (n < max_steps)
 
     def body(st):
-        u, t, dt, n, failed, steady = st
+        u, t, dt, tau, n, failed, steady = st
+        # ERF: a non-finite dt fails the droplet; the too-small test runs
+        # BEFORE every attempt (first try and after each halving).
+        stop = ~jnp.isfinite(dt) | _too_small(dt, tau)
         u_new, ok = attempt(u, dt)
-        ok = ok & jnp.isfinite(u_new) & (u_new > 0.0)
+        ok = ok & jnp.isfinite(u_new) & (u_new > 0.0) & ~stop
 
         # Accepted: advance, check steady, recompute dt from fresh stiffness.
         snorm = jnp.abs(u_new - u) / jnp.maximum(u, _R_SQ_FLOOR)
         steady_acc = snorm < stol
         t_acc = t + dt
-        dt_acc, _ = _dt_from_tau(u_new, t_acc)
-
-        # Rejected: halve; ERF too-small exit -> unconverged failure.
-        dt_half = 0.5 * dt
-        _, tau_here = _dt_from_tau(u, t)
-        dt_ref = jnp.where(tau_here > 0.0, cfl / tau_here, t_final)
-        too_small = (dt_half < eps_exit * dt_ref) & (dt_half < eps_exit * t_final)
+        dt_acc, tau_acc = _dt_from_tau(u_new, t_acc)
 
         u = jnp.where(ok, u_new, u)
         t = jnp.where(ok, t_acc, t)
-        dt = jnp.where(ok, jnp.maximum(dt_acc, 0.0), dt_half)
+        dt = jnp.where(ok, dt_acc, 0.5 * dt)
+        tau = jnp.where(ok, tau_acc, tau)
         steady = jnp.where(ok, steady_acc, steady)
-        failed = jnp.where(ok, failed, too_small)
+        failed = failed | stop
         n = jnp.where(ok, n + 1, n)   # accepted steps only, like ERF n_step
-        return (u, t, dt, n, failed, steady)
+        return (u, t, dt, tau, n, failed, steady)
 
-    dt0, _ = _dt_from_tau(r_sq0, jnp.zeros((), dtype))
-    init = (r_sq0, jnp.zeros((), dtype), dt0,
+    t0 = jnp.zeros((), dtype)
+    dt0, tau0 = _dt_from_tau(r_sq0, t0)
+    init = (r_sq0, t0, dt0, tau0,
             jnp.zeros((), jnp.int32),
             jnp.zeros((), jnp.bool_), jnp.zeros((), jnp.bool_))
-    u, t, dt, n, failed, steady = lax.while_loop(cond, body, init)
-    # Unconverged droplets keep their initial radius (ERF skips their update).
-    return jnp.where(failed, r_sq0, u)
+    u, t, dt, tau, n, failed, steady = lax.while_loop(cond, body, init)
+    # Unconverged droplets keep their initial radius (ERF skips their update);
+    # the caller applies that with the returned flag.
+    return u, failed
 
 
 def _newton_solve(u_init, rhs, mu, S, T, e_s, N_s,
@@ -393,8 +450,21 @@ def _make_attempt(
             k3 = rhs(u3)
             u4 = u + dt * k3
             k4 = rhs(u4)
-            u_new = u + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+            u_new = u + dt * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
             return u_new, (u2 > 0.0) & (u3 > 0.0) & (u4 > 0.0)
+    elif method == "rk3bs":
+        # ERF TI::rk3bs with m_adapt_dt = false (MassChange.cpp l.191): the
+        # Bogacki-Shampine 3rd-order stages; the update is u4 (f4 feeds only
+        # the embedded error estimate, unused without error-based dt).
+        def attempt(u, dt):
+            f1 = rhs(u)
+            u2 = u + 0.5 * dt * f1
+            f2 = rhs(u2)
+            u3 = u + _RK3BS_A32 * dt * f2
+            f3 = rhs(u3)
+            b1, b2, b3 = _RK3BS_B
+            u4 = u + _RK3BS_B_SCALE * dt * (b1 * f1 + b2 * f2 + b3 * f3)
+            return u4, (u2 > 0.0) & (u3 > 0.0) & (u4 > 0.0)
     elif method == "be":
         def attempt(u, dt):
             mu = 1.0 / jnp.maximum(dt, tiny)
@@ -455,15 +525,17 @@ def integrate_radius(
     -----
     ``"rk4"``/``"euler"`` use ``cfg.n_substeps_condensation`` fixed equal
     sub-steps (reverse-mode differentiable; the ODE stiffens as ``R -> 0``, so
-    increase the sub-step count for strong evaporation). The adaptive family —
-    ``"rk4_adaptive"`` (explicit), ``"be"`` (backward Euler + Newton), ``"cn"``
-    (Crank-Nicolson + Newton), ``"dirk2"`` (2-stage DIRK + Newton) — shares the
+    increase the sub-step count for strong evaporation); they have no ERF
+    counterpart. The adaptive family — ``"rk4_adaptive"`` and ``"rk3bs"``
+    (explicit), ``"be"`` (backward Euler + Newton), ``"cn"`` (Crank-Nicolson +
+    Newton), ``"dirk2"`` (2-stage DIRK + Newton) — is ERF ``TI`` and shares the
     ERF stiffness-based outer loop (``dt = cfl/|τ|`` from :func:`drsq_dt_jac`,
     step-halving on rejection, too-small unconverged exit leaving the radius
     unchanged, steady-state early exit) — per-droplet ``lax.while_loop``, NOT
-    reverse-mode differentiable.
+    reverse-mode differentiable — followed by ERF's particle update (water
+    mass change clipped at zero, radius re-derived from the masses).
     """
-    _ADAPTIVE = ("rk4_adaptive", "be", "cn", "dirk2")
+    _ADAPTIVE = ("rk4_adaptive", "rk3bs", "be", "cn", "dirk2")
     if cfg.condensation_integrator == "rk4":
         step_fn = _rk4_step
     elif cfg.condensation_integrator == "euler":
@@ -473,7 +545,7 @@ def integrate_radius(
     else:
         raise ValueError(
             f"Unknown SDM condensation_integrator: {cfg.condensation_integrator!r} "
-            "(expected 'rk4', 'euler', 'rk4_adaptive', 'be', 'cn', or 'dirk2')"
+            "(expected 'rk4', 'euler', 'rk4_adaptive', 'rk3bs', 'be', 'cn', or 'dirk2')"
         )
 
     n_sub = int(cfg.n_substeps_condensation)
@@ -487,7 +559,7 @@ def integrate_radius(
     dtype = state.radius.dtype
     S = jnp.asarray(S, dtype=dtype)
     T = jnp.asarray(T, dtype=dtype)
-    e_s = saturation_vapor_pressure(T)
+    e_s = saturation_vapor_pressure_erf(T)
     if cfg.include_solute:
         N_s = state.solute_mass * cfg.solute_ionization / cfg.solute_molar_mass
     else:
@@ -522,7 +594,23 @@ def integrate_radius(
                 include_curvature, include_solute, cfl, stol, max_steps,
                 attempt)
 
-        r_sq = jax.vmap(_one)(state.radius**2, S_b, T_b, e_s_b, N_s)
+        r_sq, failed = jax.vmap(_one)(state.radius**2, S_b, T_b, e_s_b, N_s)
+
+        # ERF MassChange_LV particle update (MassChange.cpp l.218-230): the
+        # water mass changes by (4/3)πρ_l (r_new³ − r_init³), is clipped at
+        # zero, and the radius is re-derived from the masses with the soluble
+        # solute counted at water density (SD_effective_radius).  Unconverged
+        # droplets are left untouched.
+        r_init = state.radius
+        r_new = jnp.sqrt(r_sq)
+        m_s = state.solute_mass
+        c_w = _FOUR_THIRDS_PI * constants.rho_water
+        m_w = c_w * (r_init * r_init * r_init) - m_s
+        d_mass = c_w * (r_new * r_new * r_new - r_init * r_init * r_init)
+        m_w = jnp.maximum(m_w + d_mass, 0.0)
+        radius_new = jnp.cbrt((m_w + m_s) / c_w)
+        radius_new = jnp.where(failed | (state.active <= 0), r_init, radius_new)
+        return state._replace(radius=radius_new)
     else:
         h = jnp.asarray(dt, dtype=dtype) / n_sub
 

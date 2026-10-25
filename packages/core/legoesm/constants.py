@@ -233,6 +233,20 @@ L_v0_wrf_thompson = 2.5e6        # [J/kg] :217 lvap0 (lvap = lvap0 + (c_pi - c_p
 epsilon_wrf_thompson = 0.622     # [-] literal in rho (:1234, :1802), RSLF/RSIF, t_dew
 T_flatau_wrf_thompson = 273.16   # [K] Flatau et al. (1992) fit origin in RSLF/RSIF (:5398, :5433)
 
+# ERF super-droplet physics (erf-model/ERF tag 26.09,
+# 6d09aeb120eb4eac388106004bfaaa7f795a2e26) carries its OWN constants; the
+# faithful SDM port (microphysics/sdm/) uses these so it reproduces the running
+# scheme.  Source/ERF_Constants.H unless noted.
+L_v_erf = 2.5e6                  # [J/kg] l.59 L_v (water m_lat_vap, MaterialProperties.cpp:175)
+R_v_erf = 461.505                # [J/(kg*K)] l.48 R_v (water m_Rv)
+g_erf = 9.81                     # [m/s^2] l.64 CONST_GRAV (TerminalVelocity.H CloudRainShima)
+k_B_erf = 1.38065e-23            # [J/K] l.105 boltz (Brownian kernel)
+N_A_erf_kmol = 6.02214e26        # [1/kmol] l.106 avogadro (per KILOmole)
+M_air_erf = 28.966               # [kg/kmol] l.107 mwdair
+sigma_water_erf = 0.076148325    # [N/m] MaterialProperties.H surfaceTension(), water
+b_solute_water_erf = 4.3e-6      # [m^3/mol] MaterialProperties.H coeffVPSolute(), water
+T_flatau_erf = 273.16            # [K] Flatau et al. (1992) fit origin in erf_esatw (Utils/ERF_MicrophysicsUtils.H)
+
 # Active no-pond ice_alb identity, icealb.F90:124-185 and accepted namalb.
 albedo_snow_dry_orca1 = 0.85
 albedo_snow_melt_orca1 = 0.75
