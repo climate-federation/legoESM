@@ -1,0 +1,92 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -32,6 +32,8 @@
+ # endif
+    !
+    USE prtctl         ! print control
++   USE round332_writer, ONLY : r332_raw_postfold_v
++                      ! round-332 WRITE-only raw post-fold V observer
+    USE dynzdf_round328_writer, ONLY : r328_finish
+                       ! round-328 WRITE-only post-correction boundary
+ 
+@@ -661,6 +663,16 @@
+          WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
+             & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+       ENDIF
++      IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) THEN
++         l1_filename = 'oracle_rktracer_stage3_kt00000002.bin'
++         OPEN( NEWUNIT=l2_tracer_unit, FILE=TRIM(l1_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=l2_tracer_ios )
++         IF( l2_tracer_ios /= 0 )   CALL ctl_stop( 'stp_RK3_stg: cannot open R333 stage-3 tracer dump' )
++         l1_magic = 'NEMO_L2_RKTR3_1'
++         WRITE(l2_tracer_unit) l1_magic, 1, kstp, kstg, Kbb, Kmm, Krhs, Kaa, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++         WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
++            & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
++      ENDIF
+       ! Phase-3 L2 WRITE-only tracer-stage operand stream.  GYRE is run
+       ! without tiling; fail closed by emitting no file if that assumption
+       ! changes rather than recording a partly updated tiled accumulator.
+@@ -686,6 +698,9 @@
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+             & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
+             & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
++         IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) &
++            & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
++            & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg <= 2 ) &
+             & WRITE(l1_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
+             & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+@@ -694,6 +709,9 @@
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+             & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
+             & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
++         IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) &
++            & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
++            & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg <= 2 ) &
+             & WRITE(l1_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
+             & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+@@ -794,10 +812,16 @@
+             IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+                & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
+                & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
++            IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) &
++               & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
++               & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+                                CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )  ! lateral mixing
+             IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+                & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
+                & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
++            IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) &
++               & WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
++               & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
+             IF( ln_trabbc  )   CALL tra_bbc( kstp,      Kmm, ts, Krhs )  ! bottom heat flux
+             IF( ln_trabbl  )   CALL tra_bbl( kstp, Kbb, Kmm, ts, Krhs )  ! advective (and/or diffusive) bottom boundary layer scheme
+             IF( ln_tradmp  )   CALL tra_dmp( kstp, Kbb, Kmm, ts, Krhs )  ! internal damping trends
+@@ -822,6 +846,18 @@
+                CLOSE(l2_tracer_unit)
+                WRITE(numout,*) 'L2_RK_TRACER_STAGE3_DUMP ', kstp, Kbb, Kmm, Krhs, Kaa, TRIM(l1_filename)
+             ENDIF
++            IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 + 1 .AND. kstg == 3 ) THEN
++               WRITE(l2_tracer_unit) l4_canon_3d(ts(:,:,:,jp_tem,Kbb),'T'), &
++                  &                   l4_canon_3d(ts(:,:,:,jp_sal,Kbb),'T'), &
++                  &                   l4_canon_3d(ts(:,:,:,jp_tem,Kmm),'T'), &
++                  &                   l4_canon_3d(ts(:,:,:,jp_sal,Kmm),'T'), &
++                  &                   l4_canon_3d(ts(:,:,:,jp_tem,Kaa),'T'), &
++                  &                   l4_canon_3d(ts(:,:,:,jp_sal,Kaa),'T'), &
++                  &                   l4_canon_2d(r3t(:,:,Kbb),'T'), &
++                  &                   l4_canon_2d(r3t(:,:,Kmm),'T'), l4_canon_2d(r3t(:,:,Kaa),'T')
++               CLOSE(l2_tracer_unit)
++               WRITE(numout,*) 'R333_RK_TRACER_STAGE3_DUMP ', kstp, Kbb, Kmm, Krhs, Kaa, TRIM(l1_filename)
++            ENDIF
+             IF( ln_zdfnpc  )   CALL tra_npc( kstp,      Kmm, Krhs, ts    , Kaa  )  ! update after fields by non-penetrative convection
+             !
+          END DO
+@@ -858,6 +894,7 @@
+             CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:,:       ,Kaa), 'V', -1._wp   &
+                &                       , ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp   &
+                &                       , avm_k(:,:,:)        , 'W',  1._wp, ldfull=.TRUE. ) !  lbc_lnk needed for zdf_sh2, moved here to allow tiling in zdf_phy
++            CALL r332_raw_postfold_v(kstp,kstg,Kaa,vv(:,:,:,Kaa))
+          ELSE
+             CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:,:       ,Kaa), 'V', -1._wp   &
+                &                       , ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp, ldfull=.TRUE. )
