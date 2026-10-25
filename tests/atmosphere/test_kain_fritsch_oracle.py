@@ -159,6 +159,29 @@ def test_sweep_columns_match_wrf(fix):
     assert (fix["sweep_fired"] == 1).sum() >= 90 and (fix["sweep_ishall"] == 1).sum() >= 10
 
 
+def test_lookup_beyond_table_is_clamped_edge_continuous():
+    """Where WRF reads its KF_LUTAB tables out of bounds (undefined behaviour;
+    the oracle segfaults on some such columns) the port clamps the table
+    coordinate: finite, constant beyond the edge and continuous at it."""
+    from legoesm.atmosphere.physics.convection import _kf_eta as K
+    kc = _lego_constants()
+    lut = tuple(jnp.asarray(x) for x in K.kf_lookup_tables(kc.svp1, kc.svp2, kc.svp3, kc.svpt0))
+    plutop, rdpr, rdthk = (float(x) for x in lut[4:7])
+    p_edge = plutop + (K._KFNP - 1) / rdpr            # top of the pressure axis
+    for p in (p_edge, p_edge + 5.0e3):
+        th_edge = float(lut[2][-1]) + (K._KFNT - 1) / rdthk
+        a = np.asarray(K._tab_interp(lut, p, th_edge))
+        b = np.asarray(K._tab_interp(lut, p, th_edge + 50.0))
+        np.testing.assert_allclose(a, b, rtol=1e-12)
+        assert np.all(np.isfinite(b))
+    a = np.asarray(K._tab_interp(lut, p_edge - 1.0e-6, 330.0))
+    b = np.asarray(K._tab_interp(lut, p_edge + 5.0e3, 330.0))
+    np.testing.assert_allclose(a, b, rtol=1e-8)
+    top = K._ALU_ASTRT + (K._ALU_N - 1) * K._ALU_AINC
+    np.testing.assert_allclose(K._tlog_lookup(lut[3], top), K._tlog_lookup(lut[3], 10.0 * top),
+                               rtol=1e-12)
+
+
 def test_fixture_exercises_the_scheme(fix):
     """The arms cover deep, shallow (USL re-pass with FBFRC = 1), elevated
     source layers, downdraughts, glaciation, rain feedback and no convection."""

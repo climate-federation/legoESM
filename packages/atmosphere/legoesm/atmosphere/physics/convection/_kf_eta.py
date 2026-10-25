@@ -299,6 +299,9 @@ def kf_lookup_tables(svp1: float, svp2: float, svp3: float, svpt0: float):
 
 def _tlog_lookup(alu, a1):
     """TLOG = ln(a1) from the ALU table (l.919-926, l.3067-3074)."""
+    # Outside the coordinates where the oracle reads inside ALU (-1 < tp < N-1)
+    # WRF reads out of bounds; clamp the coordinate there (edge-continuous).
+    a1 = jnp.clip(a1, _ALU_ASTRT - _ALU_AINC, _ALU_ASTRT + (_ALU_N - 1) * _ALU_AINC)
     tp = (a1 - _ALU_ASTRT) / _ALU_AINC
     i0 = jnp.clip(_ftrunc_i(tp), 0, _ALU_N - 2)
     value = i0.astype(a1.dtype) * _ALU_AINC + _ALU_ASTRT
@@ -332,13 +335,17 @@ def _envirtht(alu, ab, p1, t1, q1):
 def _tab_interp(lut, p, thes):
     """Bilinear TTAB/QSTAB lookup shared by TPMIX2 and TPMIX2DD."""
     ttab, qstab, the0k, _alu, plutop, rdpr, rdthk = lut
-    tp = (p - plutop) * rdpr
-    qq = tp - jnp.trunc(tp)
+    # The oracle reads inside its tables for -1 < coordinate < N-1 (Fortran INT
+    # truncates toward zero, so (-1, 0) extrapolates from the first interval);
+    # beyond that WRF reads out of bounds.  There the coordinate is clamped
+    # (edge-continuous); inside, the arithmetic is the oracle's.
+    tp = jnp.clip((p - plutop) * rdpr, -1.0, _KFNP - 1.0)
     ip = jnp.clip(_ftrunc_i(tp), 0, _KFNP - 2)
+    qq = tp - ip.astype(tp.dtype)
     bth = (the0k[ip + 1] - the0k[ip]) * qq + the0k[ip]
-    tth = (thes - bth) * rdthk
-    pp = tth - jnp.trunc(tth)
+    tth = jnp.clip((thes - bth) * rdthk, -1.0, _KFNT - 1.0)
     it = jnp.clip(_ftrunc_i(tth), 0, _KFNT - 2)
+    pp = tth - it.astype(tth.dtype)
     t00, t10 = ttab[it, ip], ttab[it + 1, ip]
     t01, t11 = ttab[it, ip + 1], ttab[it + 1, ip + 1]
     q00, q10 = qstab[it, ip], qstab[it + 1, ip]
@@ -664,7 +671,7 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
             frz = tu <= _TTFRZ_K
             part = tu > _TBFRZ_K
             ttemp0 = jnp.where(part & (u["TTEMP"] > _TTFRZ_K), _TTFRZ_K, u["TTEMP"])
-            frc1 = jnp.where(part, (ttemp0 - tu) / _sd(ttemp0 - _TBFRZ_K, part), 1.0)
+            frc1 = jnp.where(part, (ttemp0 - tu) / _sd(ttemp0 - _TBFRZ_K, part & frz), 1.0)
             frc1 = jnp.where(frz, frc1, 0.0)
             iflag = jnp.where(frz & ~part, 1, u["IFLAG"])
             ttemp = jnp.where(frz, tu, u["TTEMP"])

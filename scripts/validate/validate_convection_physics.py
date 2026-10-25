@@ -140,7 +140,9 @@ def kernel_arm_status(name: str, subsidence_solve: str) -> str:
     if subsidence_solve == "as_shipped":
         return "as_shipped"
     cfg = _CONFIG_FACTORY[name]()
-    if not hasattr(cfg, "subsidence_solve"):
+    # kain_fritsch keeps subsidence_solve only as a surrogate-only field (the WRF
+    # KF-Eta port runs its own upstream subsidence and raises on a non-default).
+    if not hasattr(cfg, "subsidence_solve") or name == "kain_fritsch":
         return f"not_applicable:{name}"
     return f"forced:{name}={subsidence_solve}"
 
@@ -217,8 +219,7 @@ def call_scheme(
     if name == "kain_fritsch":
         out, _ = kain_fritsch_convection(
             **common, w_grid=jnp.zeros_like(T), u=u, v=v,
-            conv_prog_profile=prog,
-            config=_with_solve(KainFritschConfig(), subsidence_solve),
+            conv_prog_profile=prog, config=KainFritschConfig(),
         )
         return out
     if name == "emanuel":
