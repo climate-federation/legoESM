@@ -108,8 +108,8 @@ the selected runtime ice model is `nn_ice=1`.
   in-tree SI3 PASS.  The authoritative `land.sh` ORCA2 default gate passes
   152/152 in 1,049.81 s.  The per-receipt citation gate passes all 13 citations
   with zero failures/unmapped entries, and its mandatory suite passes 17/17.
-  The full ratchet sweep has 14,585 PASS, 2,359 SKIP, and 23 base-tree failures
-  outside this diff (package-root discovery and existing AMIP/land/ocean/config
+  The correctly rooted full ratchet sweep has 15,254 PASS, 2,557 SKIP, and ten
+  base-tree failures outside this diff (existing AMIP/land/ocean/config audit
   findings); no failure names a changed file.
 
 Independent review: Claude HOLD + Argon HOLD findings addressed by this
