@@ -265,13 +265,41 @@ def _observer_only(ref: list[str], new: list[str], inserted: list[str], unit: st
             f"{unit}.f90 insertions differ from its committed patch")
 
 
+def _strip_preprocessed_observers(
+        lines: list[str], begin: str, end: str, unit: str) -> tuple[list[str], int]:
+    """Remove explicitly marked observer blocks from a real preprocessed unit."""
+    stripped: list[str] = []
+    inside = False
+    blocks = 0
+    for line_number, line in enumerate(lines, start=1):
+        marker = line.strip()
+        if marker == begin:
+            require(not inside, f"{unit}.f90 nested observer block at line {line_number}")
+            inside = True
+            blocks += 1
+            continue
+        if marker == end:
+            require(inside, f"{unit}.f90 unmatched observer end at line {line_number}")
+            inside = False
+            continue
+        if not inside:
+            stripped.append(line)
+    require(not inside, f"{unit}.f90 unterminated observer block")
+    require(blocks > 0, f"{unit}.f90 has no marked observer block")
+    return stripped, blocks
+
+
 def same_program_observers(
         new_bld: Path, ref_bld: Path, observer_patches: dict[str, Path],
-        writer_units: tuple[str, ...], *, new_cfg: str, ref_cfg: str) -> dict:
+        writer_units: tuple[str, ...], *, new_cfg: str, ref_cfg: str,
+        preprocessed_markers: dict[str, tuple[str, str]] | None = None) -> dict:
     """Prove a build differs only by named observer insertions and writers."""
     for name in BUILD_CONFIG_FILES:
         want = (ref_bld / name).read_text().replace(ref_cfg, new_cfg)
         require((new_bld / name).read_text() == want, f"build config differs: {name}")
+    marker_units = set(preprocessed_markers or ())
+    require(not marker_units or marker_units == set(observer_patches),
+            "preprocessed marker units must equal observer patch units")
     inserted = {
         unit: [line[1:] for line in patch.read_text().splitlines()
                if line.startswith("+") and not line.startswith("+++")]
@@ -299,9 +327,15 @@ def same_program_observers(
         if sub == "ppsrc":
             for unit in observer_patches:
                 rel = f"nemo/{unit}.f90"
-                _observer_only((ref_bld / sub / rel).read_text().splitlines(),
-                               (new_bld / sub / rel).read_text().splitlines(),
-                               inserted[unit], unit)
+                ref_lines = (ref_bld / sub / rel).read_text().splitlines()
+                new_lines = (new_bld / sub / rel).read_text().splitlines()
+                if preprocessed_markers:
+                    stripped, _ = _strip_preprocessed_observers(
+                        new_lines, *preprocessed_markers[unit], unit)
+                    require(stripped == ref_lines,
+                            f"{unit}.f90 differs after stripping real ppsrc observer blocks")
+                else:
+                    _observer_only(ref_lines, new_lines, inserted[unit], unit)
         counts[sub] = len(ref_files) - len(observers)
     return {"status": "PASS_SAME_PROGRAM_R326_PLUS_OBSERVERS",
             "identical_ppsrc": counts["ppsrc"], "identical_obj": counts["obj"],

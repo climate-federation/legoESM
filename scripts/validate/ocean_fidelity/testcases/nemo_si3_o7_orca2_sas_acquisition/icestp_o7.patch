@@ -1,0 +1,11 @@
+--- icestp.F90
++++ icestp.F90
+@@ -78,0 +79,3 @@
++! O7_OBSERVER_BEGIN
++   USE o7_si3_writer, ONLY : o7_set_context
++! O7_OBSERVER_END
+@@ -158,0 +162,4 @@
++! O7_OBSERVER_BEGIN
++                                        CALL o7_set_context( kt, Kmm, nit000, narea-1, jpni, jpnj, &
++                                           &                 rDt_ice, r1_Dt_ice, rho0, rcp )
++! O7_OBSERVER_END
