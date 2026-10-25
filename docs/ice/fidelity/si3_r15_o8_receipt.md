@@ -34,7 +34,7 @@ Searched `packages/`, `src/`, `scripts/validate/`, `tests/ice/` for
 `frazil`, `hinew`, `ht_i_new`, `fraz_frac`, `qlead`, `thd_do`. Found: no
 transcription of `ice_thd_frazil` anywhere; before resume 1 the C1D column
 step inlined `qlead < 0.0` and the module constant `_NEW_ICE_THICKNESS = 0.05`
-(`packages/ice/legoesm/ice/bitz_lipscomb.py:113`, the C1D card's `rn_hinew`)
+(`packages/ice/legoesm/ice/bitz_lipscomb.py:115`, the C1D card's `rn_hinew`)
 in its open-water growth. The ocean
 `physics/frazil.py` is the ocean-side supercooling fix, a different
 statement. The bit-pattern zero test in `packages/ice/legoesm/ice/si3_surface.py:262`
@@ -62,8 +62,8 @@ The routine has no category axis on this arm; `hi_max(jpl)` is read only in
 the collection arm (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:474`),
 so jpl=5 needs no generalisation.
 
-Model: `packages/ice/legoesm/ice/bitz_lipscomb.py:1799` (`si3_ice_thd_frazil`),
-predicate `packages/ice/legoesm/ice/bitz_lipscomb.py:1787`.
+Model: `packages/ice/legoesm/ice/bitz_lipscomb.py:2393` (`si3_ice_thd_frazil`),
+predicate `packages/ice/legoesm/ice/bitz_lipscomb.py:2381`.
 
 ## Production wiring (resume 1)
 
@@ -72,12 +72,12 @@ ice_thd_do gathers its cells with the same predicate
 `IF ( qlead(ji,jj)  <  0._wp ) THEN`) and reads `ht_i_new` as its new-ice
 thickness (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:200`,
 `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:283`). The C1D step now
-calls the routine (`packages/ice/legoesm/ice/bitz_lipscomb.py:1750`) with
+calls the routine (`packages/ice/legoesm/ice/bitz_lipscomb.py:2344`) with
 the C1D card's values
 (`scripts/validate/ocean_fidelity/testcases/configs/c1d_omip_l3_namelist_ice_cfg:113-114`:
 `rn_hinew = 0.05`, `ln_frazil = .false.`), takes the cooling mask from the
-shared predicate (`packages/ice/legoesm/ice/bitz_lipscomb.py:1751`) and
-divides by `ht_i_new` (`packages/ice/legoesm/ice/bitz_lipscomb.py:1759`).
+shared predicate (`packages/ice/legoesm/ice/bitz_lipscomb.py:2345`) and
+divides by `ht_i_new` (`packages/ice/legoesm/ice/bitz_lipscomb.py:2353`).
 Non-cooling cells divide `+0` by 1 rather than by `ht_i_new = +0`, which
 keeps 0/0 out of the forward and the gradient; their values stay `+0`.
 ORCA2's ice_thd_do itself is rung O14; nothing of it is transcribed here.
