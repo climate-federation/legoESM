@@ -10621,7 +10621,22 @@ class LatLonCGridOceanModel:
                 return_bolus_transport=_want_bolus,
                 return_redi_diagnostics=((_return_tracer_process_trace or _return_ldf_diagnostic_trace) and self._nemo_ws_test_hooks.tracer_ldf_diagnostics is not None), return_redi_slope_diagnostics=((_return_tracer_process_trace or _return_ldf_diagnostic_trace) and (self._nemo_ws_test_hooks.tracer_ldf_diagnostics == "slope" or isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict))), native_slope_nmln_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("nmln") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
                 redi_face_thickness_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("face_thickness") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else (self._nemo_ws_test_hooks.tracer_ldf_diagnostics if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, tuple) else None)),
-                redi_divisor_thickness_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("divisor_thickness") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
+                # traldf_iso.f90:301-305/:318-322 reads the already-stored
+                # stage-2 ``e3t_3d*(1+r3t(Kmm)*tmask)``.  The WS-RK3 path has
+                # materialized that exact source-ordered thickness above as
+                # ``_h_s3_kmm``; do not rebuild its 29 last-place words from
+                # the algebraically equivalent half-stage sea level.  Keep the
+                # private diagnostic operand authoritative when one is supplied.
+                redi_divisor_thickness_override=(
+                    self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get(
+                        "divisor_thickness")
+                    if (isinstance(
+                            self._nemo_ws_test_hooks.tracer_ldf_diagnostics,
+                            dict)
+                        and self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get(
+                            "divisor_thickness") is not None)
+                    else (_h_s3_kmm if gm_cfg.redi_flux_geometry_stage
+                          == "rk3_kmm" else None)),
                 redi_closed_bottom_wmask_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("closed_bottom_wmask") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
                 redi_horizontal_flux_evaluation_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("horizontal_flux_evaluation") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
                 redi_area_reciprocal_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("area_reciprocal") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
