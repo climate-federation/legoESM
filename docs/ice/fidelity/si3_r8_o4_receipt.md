@@ -129,3 +129,54 @@ conflicts; files not listed here merged automatically.
 renames, and the O4 test rename merged without textual conflicts. Their landed
 and round-8 symbols remain subject to the post-rebase rung suites and
 parent-vs-current controls below. No O4 acquisition tool was run.
+
+## 7. Resume-5 post-rebase verification
+
+All commands in this section ran in the foreground against the clean tree at
+`e2bdf1a5cf834ed18d818c167057a42f8939054b`, with the repository source roots
+first on `PYTHONPATH`, CPU JAX, and float64 enabled. The exact decisive lines
+were:
+
+| Check | Decisive pass line |
+|---|---|
+| O1 | `15 passed in 173.94s (0:02:53)` |
+| O2 | `12 passed in 248.10s (0:04:08)` |
+| O3 | `10 passed in 103.84s (0:01:43)` |
+| O4 full file | `8 passed in 7724.90s (2:08:44)` |
+| O5 default-marker suite | `20 passed, 1 deselected in 88.79s (0:01:28)` |
+| O7 surface, bulk-flux, and round-314 audit | `41 passed, 1 xfailed in 70.08s (0:01:10)` |
+| Lane-3 Prather parent-vs-current control | `1 passed in 64.85s (0:01:04)` |
+| Lane-3 RHG parent-vs-current control | `1 passed in 17.13s` |
+| Lane-3 RHEO parent-vs-current control, explicitly opted in with `-m slow` | `1 passed in 481.76s (0:08:01)` |
+| Citation-gate test suite | `17 passed in 6.24s` |
+| Default landing gate | `145 passed in 1023.15s (0:17:03)` |
+| Private-import ratchet alone | `6 passed in 4.78s` |
+
+The O5 default marker expression intentionally deselected the slow RHEO
+control; the next standalone row ran that exact node with its required
+`-m slow` opt-in. The O7 xfail is the suite's declared expected case.
+
+The D5 C1D production-JIT year probe evaluated all 8,760 steps twice. Its
+decisive lines were:
+
+* `D5_YEAR_PASS: arm=default execution_mode=jax.jit steps=8760 hash=b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2`
+* `D5_YEAR_PASS: arm=--xla_cpu_max_isa=AVX execution_mode=jax.jit steps=8760 hash=b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2`
+* `D5_CPU_AVX_EQUAL_PASS: b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2 == b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2 == b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2`
+
+The per-receipt citation gate audited each receipt plus the complete
+2,904-entry map. The exact pass lines were:
+
+* `CITATION_RECEIPT_PASS: docs/ice/fidelity/si3_r2_d5_receipt.md status=PASS citations=49 full_map_failures=0`
+* `CITATION_RECEIPT_PASS: docs/ice/fidelity/si3_r3_d5_receipt.md status=PASS citations=96 full_map_failures=0`
+* `CITATION_RECEIPT_PASS: docs/ice/fidelity/si3_r4_o1_receipt.md status=PASS citations=8 full_map_failures=0`
+* `CITATION_RECEIPT_PASS: docs/ice/fidelity/si3_r5_d5_receipt.md status=PASS citations=53 full_map_failures=0`
+* `CITATION_RECEIPT_PASS: docs/ice/fidelity/si3_r6_d5_receipt.md status=PASS citations=69 full_map_failures=0`
+* `CITATION_RECEIPT_PASS: docs/ice/fidelity/si3_r7_o2_receipt.md status=PASS citations=9 full_map_failures=0`
+* `CITATION_RECEIPT_PASS: docs/ice/fidelity/si3_r8_o4_receipt.md status=PASS citations=48 full_map_failures=0`
+* `CITATION_RECEIPT_PASS: docs/ice/fidelity/si3_r9_o3_receipt.md status=PASS citations=44 full_map_failures=0`
+* `CITATION_RECEIPT_PASS: docs/ice/fidelity/si3_r10_o5_receipt.md status=PASS citations=38 full_map_failures=0`
+* `CITATION_RECEIPT_PASS: docs/ice/fidelity/si3_r11_o7_receipt.md status=PASS citations=38 full_map_failures=0`
+
+The composed map itself reported `MAP_ENTRIES 2904`, `AUDIT_FAILURES 0`, and
+`DUPLICATE_LITERALS []`. No O4 acquisition command was started during resume
+5; the acquisition overlay remains pending with the user.
