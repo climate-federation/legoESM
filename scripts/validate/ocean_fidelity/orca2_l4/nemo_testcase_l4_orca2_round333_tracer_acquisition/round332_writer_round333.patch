@@ -1,0 +1,62 @@
+--- round332_writer.F90
++++ round332_writer.F90
+@@ -10,0 +11 @@
++   PUBLIC :: r333_tracer_open, r333_tracer_rhs, r333_tracer_finish
+@@ -16,0 +18,2 @@
++   INTEGER, SAVE :: r333_unit=-1,r333_rows=0
++   LOGICAL, SAVE :: r333_active=.FALSE.,r333_written=.FALSE.
+@@ -144,0 +148,54 @@
++
++   SUBROUTINE r333_tracer_open(kt,kstg,Kbb,Kmm,Krhs,Kaa,pT,pS)
++      INTEGER, INTENT(in) :: kt,kstg,Kbb,Kmm,Krhs,Kaa
++      REAL(wp), INTENT(in) :: pT(:,:,:),pS(:,:,:)
++      INTEGER :: ios
++      CHARACTER(LEN=16) :: magic
++      CHARACTER(LEN=96) :: filename
++      IF(.NOT.lwp .OR. kt /= nit000+1 .OR. kstg /= 3) RETURN
++      IF(r333_active .OR. r333_written) CALL ctl_stop('round333: duplicate tracer open')
++      IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop('round333: tracer record requires fp64')
++      IF(ANY(SHAPE(pT) /= (/jpi,jpj,jpk/)) .OR. ANY(SHAPE(pS) /= (/jpi,jpj,jpk/))) &
++         & CALL ctl_stop('round333: tracer open shape')
++      filename='oracle_rktracer_stage3_kt00000002.bin'
++      OPEN(NEWUNIT=r333_unit,FILE=TRIM(filename),ACCESS='STREAM',FORM='UNFORMATTED', &
++         & STATUS='REPLACE',ACTION='WRITE',IOSTAT=ios)
++      IF(ios /= 0) CALL ctl_stop('round333: cannot open tracer record')
++      magic='NEMO_L2_RKTR3_1'
++      WRITE(r333_unit) magic,1,kt,kstg,Kbb,Kmm,Krhs,Kaa,jpi,jpj,jpk,STORAGE_SIZE(1._wp)
++      WRITE(r333_unit) pT,pS
++      r333_rows=0
++      r333_active=.TRUE.
++   END SUBROUTINE r333_tracer_open
++
++   SUBROUTINE r333_tracer_rhs(pT,pS)
++      REAL(wp), INTENT(in) :: pT(:,:,:),pS(:,:,:)
++      IF(.NOT.r333_active) RETURN
++      IF(ANY(SHAPE(pT) /= (/jpi,jpj,jpk/)) .OR. ANY(SHAPE(pS) /= (/jpi,jpj,jpk/))) &
++         & CALL ctl_stop('round333: tracer RHS shape')
++      IF(r333_rows >= 4) CALL ctl_stop('round333: excess tracer RHS boundary')
++      WRITE(r333_unit) pT,pS
++      r333_rows=r333_rows+1
++   END SUBROUTINE r333_tracer_rhs
++
++   SUBROUTINE r333_tracer_finish(pbbT,pbbS,pmmT,pmmS,paaT,paaS,rbb,rmm,raa)
++      REAL(wp), INTENT(in) :: pbbT(:,:,:),pbbS(:,:,:),pmmT(:,:,:),pmmS(:,:,:)
++      REAL(wp), INTENT(in) :: paaT(:,:,:),paaS(:,:,:),rbb(:,:),rmm(:,:),raa(:,:)
++      IF(.NOT.r333_active) RETURN
++      IF(r333_rows /= 4) CALL ctl_stop('round333: incomplete tracer RHS boundary set')
++      IF(ANY(SHAPE(pbbT) /= (/jpi,jpj,jpk/)) .OR. &
++         & ANY(SHAPE(pbbS) /= (/jpi,jpj,jpk/)) .OR. &
++         & ANY(SHAPE(pmmT) /= (/jpi,jpj,jpk/)) .OR. &
++         & ANY(SHAPE(pmmS) /= (/jpi,jpj,jpk/)) .OR. &
++         & ANY(SHAPE(paaT) /= (/jpi,jpj,jpk/)) .OR. &
++         & ANY(SHAPE(paaS) /= (/jpi,jpj,jpk/))) &
++         & CALL ctl_stop('round333: tracer finish 3-D shape')
++      IF(ANY(SHAPE(rbb) /= (/jpi,jpj/)) .OR. &
++         & ANY(SHAPE(rmm) /= (/jpi,jpj/)) .OR. &
++         & ANY(SHAPE(raa) /= (/jpi,jpj/))) &
++         & CALL ctl_stop('round333: tracer finish 2-D shape')
++      WRITE(r333_unit) pbbT,pbbS,pmmT,pmmS,paaT,paaS,rbb,rmm,raa
++      CLOSE(r333_unit)
++      r333_active=.FALSE.
++      r333_written=.TRUE.
++   END SUBROUTINE r333_tracer_finish

@@ -16,20 +16,22 @@ readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
 readonly PARENT_DIR=$here/../nemo_testcase_l4_orca2_round328_dynzdf_acquisition
 readonly PARENT=$PARENT_DIR/run.sh
 readonly PATCH=$here/stprk3_stg_round333.patch
+readonly WRITER_PATCH=$here/round332_writer_round333.patch
+readonly BASE_WRITER=$here/../nemo_testcase_l4_orca2_round332_source_order_acquisition/round332_writer.F90
 readonly GATE=$here/../nemo_testcase_l4_orca2_round333_tracer_gate.py
 readonly TEST=$REPO/tests/ocean/fidelity/test_orca2_round333_tracer_gate.py
 readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round333/acquisition
 readonly TARGET_RUN=$EVIDENCE/orca1ice_tracer_stage3_kt2_np2
 readonly PY=/home/dbalwada/legoESM/.venv/bin/python
 
-for path in "$PARENT" "$PATCH" "$GATE" "$TEST"; do
+for path in "$PARENT" "$PATCH" "$WRITER_PATCH" "$BASE_WRITER" "$GATE" "$TEST"; do
   [[ -f "$path" ]] || refuse "missing acquisition input $path"
 done
 [[ -z $(git -C "$REPO" status --porcelain --untracked-files=all) ]] \
   || refuse 'acquisition requires a clean committed tree'
 
 # Import every reviewed helper, plant, syntax proof, same-program check and
-# admission step from the round-328/332 driver. Five pinned substitutions give
+# admission step from the round-328/332 driver. Six pinned substitutions give
 # that driver a fresh config/run and this additions-only stage observer. The
 # generated driver is evidence-local, never /tmp, and its diff is audited.
 mkdir -p "$EVIDENCE"
@@ -43,12 +45,18 @@ cleanup() {
 trap cleanup EXIT
 readonly driver_dir
 readonly ADAPTED=$driver_dir/run.sh
+readonly COMBINED_WRITER=$driver_dir/round332_writer.F90
+cp "$BASE_WRITER" "$COMBINED_WRITER"
+patch -s --fuzz=0 -p0 -d "$driver_dir" <"$WRITER_PATCH"
+[[ $(awk '/^--- / {next} /^-/ {n++} END {print n+0}' "$WRITER_PATCH") -eq 0 ]] \
+  || refuse 'round-333 writer observer patch removes a source line'
 sed \
   -e "s|^here=\$(CDPATH= cd -- \"\$(dirname -- \"\$0\")\" && pwd -P)$|here=$PARENT_DIR|" \
   -e 's|TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R332RAW|TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R333TR|' \
   -e 's|EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round332/acquisition|EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round333/acquisition|' \
   -e 's|DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_raw_postfold_v_kt1_np2|DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_tracer_stage3_kt2_np2|' \
   -e "s|readonly R332_STAGE_PATCH=\$R332_DIR/stprk3_stg_round332.patch|readonly R332_STAGE_PATCH=$PATCH|" \
+  -e "s|readonly R332_WRITER=\$R332_DIR/round332_writer.F90|readonly R332_WRITER=$COMBINED_WRITER|" \
   "$PARENT" >"$ADAPTED"
 chmod 700 "$ADAPTED"
 
@@ -62,13 +70,14 @@ changed=$(awk '
   /^[-+]/ { count++ }
   END { print count+0 }
 ' "$driver_dir/import.diff")
-[[ "$changed" -eq 10 ]] || refuse "imported driver changed $changed lines, expected 10"
+[[ "$changed" -eq 12 ]] || refuse "imported driver changed $changed lines, expected 12"
 for token in \
   "here=$PARENT_DIR" \
   'TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R333TR' \
   "EVIDENCE=$EVIDENCE" \
   'DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_tracer_stage3_kt2_np2' \
-  "readonly R332_STAGE_PATCH=$PATCH"; do
+  "readonly R332_STAGE_PATCH=$PATCH" \
+  "readonly R332_WRITER=$COMBINED_WRITER"; do
   [[ $(grep -Fc "$token" "$ADAPTED") -eq 1 ]] \
     || refuse "adapted driver lacks unique substitution: $token"
 done

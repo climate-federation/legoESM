@@ -8,10 +8,11 @@ is read-only:
 scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round333_tracer_acquisition/run.sh --preflight-only
 ```
 
-The wrapper imports the complete parent driver, audits exactly five pinned
+The wrapper imports the complete parent driver, audits exactly six pinned
 substitutions (fresh configuration, evidence path, run name, source directory,
-and observer patch), and therefore retains every inherited plant, syntax proof,
-passivity check, same-program proof, memory/disk guard, and admission gate.
+stage observer patch, and extended writer), and therefore retains every
+inherited plant, syntax proof, passivity check, same-program proof, memory/disk
+guard, and admission gate.
 
 Only the operator may request the NEMO run:
 
