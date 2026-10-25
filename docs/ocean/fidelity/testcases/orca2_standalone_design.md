@@ -180,27 +180,17 @@ twin before the candidate.
 | configure/build/run NEMO | UNASKED | design only; operator work after decision |
 | change the shipped comparison or training card | UNASKED | no configuration change |
 | relax any bar or hide signed-zero differences | UNASKED | prohibited |
-| select or manufacture an ice-cover climatology | UNASKED | DECISION_NEEDED |
+| select or manufacture an ice-cover climatology | ASKED | DECISION 171: pinned native-grid yearly mean from a fixed full-SI3 ORCA2 run |
 | change `key_si3` build identity | UNASKED | DECISION_NEEDED; no silent choice |
 | remove existing record-replay comparison modes | UNASKED | retain as diagnostics |
 
-## DECISION_NEEDED — ice-cover provenance
+## DECISION 171 — ice-cover provenance (TAKEN)
 
-1. **Monthly `fr_i` climatology from the pinned NEMO ORCA2_ICE reference
-   (pick).**  Average the same calendar months on the native ORCA2 grid, pin
-   run/years/digest, and name it honestly as reference-derived cover.  This is
-   the lowest-confound fidelity experiment, but it is not independent
-   observational evidence.
-2. **Pinned external observed climatology.**  The user supplies or approves a
-   named product/version; preregister its mask, calendar, units, regridding,
-   missing-data rule, and digest.  This best matches the scientific phrase
-   “observed cover” but introduces a new data/regridding owner.
-3. **User-supplied existing `ice_cover_clim.nc`.**  Admit its provenance,
-   schema, calendar, values, and digest before use; reject an opaque file.
-
-No option is selected by this document.  The pick is option 1 for a controlled
-NEMO-vs-legoESM fidelity reference; option 2 should be a later observational
-sensitivity experiment.
+Use one pinned native-grid **yearly mean** of `fr_i` from a fixed full-SI3
+NEMO ORCA2 run.  Record the producer commit, run and averaging years, calendar,
+mask, schema, and file digest.  No monthly record set or external regridding is
+part of this reference.  An independently observed product may be added later
+only as a separately named sensitivity experiment.
 
 ## DECISION_NEEDED — viable NEMO reference configurations
 

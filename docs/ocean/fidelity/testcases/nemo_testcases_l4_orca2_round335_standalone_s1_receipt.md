@@ -160,9 +160,9 @@ resume; operator confirmation remains external to this receipt.
   coefficients/density, design corrections, and gates.
 - UNASKED and unchanged: configure/build/run NEMO, select an ice-cover file,
   alter the shipped comparison/training card, or relax any exact bar.
-- DECISION_NEEDED: ice-cover provenance remains the three-option choice in the
-  design.  The pick is a pinned native-grid yearly mean derived from the NEMO
-  ORCA2_ICE reference; no option is selected.
+- DECISION 171 is taken: the ice-cover input is one pinned native-grid yearly
+  mean derived from a fixed full-SI3 NEMO ORCA2 run, with producer/run/years
+  and digest recorded; it is not a monthly record set.
 - DECISION_NEEDED: Decision 172 is refuted; reference configuration remains
   open.  The design lists five viable families.  The pick is **K0**:
   `key_si3`, `nn_ice=1`, `ln_drgice_imp=F`, `ln_mxl0=T`, `nn_mxlice=0`, and
