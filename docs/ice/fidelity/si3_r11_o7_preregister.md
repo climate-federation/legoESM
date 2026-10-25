@@ -90,3 +90,25 @@ O7 acquisition deck: (1) unmodified production `ORCA2_SAS_ICE`, 1 rank,
   synthetic unit fixture (native and glibc agreed there); it stays a required
   plant on the real record, where it must be shown to fire or be reported
   vacuous.
+
+## Addendum 2 (after the codex HOLD; predictions P1-P6 unchanged)
+
+- **Deck: only the deck the user chooses will be acquired.** Section 1's
+  "Pick" is a recommendation awaiting the user, not a decision. Both
+  `ice_flx_other` arms exist in the model; that does not choose the deck.
+  The O7 acquisition tool is not written until the user answers section 7.
+- The functions named in section 3 are renamed, same statements:
+  `si3_o7_blk_ice_1` -> `si3_blk_ice_1`, `si3_o7_ice_sbc_tau_lbc` ->
+  `si3_ice_sbc_tau_lbc`, `si3_o7_ice_alb` -> `si3_ice_alb`,
+  `si3_o7_blk_ice_2` -> `si3_blk_ice_2`, `si3_o7_ice_flx_other` ->
+  `si3_ice_flx_other`, `si3_o7_surface_step` -> `si3_surface_step`
+  (module `legoesm.ice.si3_surface`). C1D and O7 now call the same code.
+- Retracted: section 5's "`zsipt` ... is not transcribed". It is now
+  transcribed. It is a local of `blk_ice_1`, so the record cannot score it;
+  the model test pins it against the oracle and shows nothing on this arm
+  reads it.
+- The production configuration comes from the deck's shipped namelist
+  files (`cfgs/SHARED/namelist_ref`, `namelist_ice_ref`,
+  `cfgs/ORCA2_SAS_ICE/EXPREF/namelist_cfg`, `namelist_ice_cfg`), merged as
+  NEMO reads them. If the production deck is chosen, the run's own
+  `output.namelist.dyn/.ice` must equal it field for field before scoring.

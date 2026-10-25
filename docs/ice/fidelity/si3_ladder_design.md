@@ -155,7 +155,7 @@ with the ORCA fold convention (`packages/ocean/legoesm/ocean/fidelity/nemo_testc
 `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:1748-1761`); the card explicitly names the unmeasured five-category layered
 Prather state (`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py:2134-2150`).
 The resulting type is `LatLonCGridGeometry`.  The generic production path has
-a type guard for strain dynamics (`packages/ice/legoesm/ice/sea_ice.py:89-121`,
+a type guard for strain dynamics (`packages/ice/legoesm/ice/sea_ice.py:88-120`,
 `packages/ice/legoesm/ice/sea_ice.py:329-362`), but that guard is **not the
 binding blocker for the fidelity arms**, which are called directly by their
 cards.  The aEVP arm hard-codes a two-cell halo and exactly one category
