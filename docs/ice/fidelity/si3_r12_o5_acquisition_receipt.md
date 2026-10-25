@@ -187,6 +187,50 @@ outside this decided one-rank O5 claim.
 
 ## Verification
 
+- Resume-5 rebase: fetched the current SI3 lane and rebased all eleven O5
+  commits from shared base `f76638f1a7` onto O7 tip `e795e17482`.  The
+  resulting range-diff preserves every O5 commit; the two commits below differ
+  only by their conflict resolutions.
+- Conflict 1, while replaying original commit `009225c494` (rebased as
+  `d3970dc1f3`):
+  `scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py`
+  conflicted at the reanchor block because O7 had extended the same map.  The
+  resolution retained the complete O7 map/reanchors and appended the complete
+  O5 trace/log reanchor block before `DEFAULT_RECEIPT`; neither side was
+  discarded.
+- Conflict 2, while replaying original commit `73575e2cca` (rebased as
+  `14cd10ed96`): the same citation-map file conflicted where O7's receipt and
+  HOLD-fix entries met O5's two retained-record Prather citations.  The
+  resolution retained all O7 entries and appended both O5
+  `icedyn_adv_pra.f90` entries inside `CITATION_MAP`; the O5 `FILES` entry
+  auto-merged.  No other file conflicted.
+- The first post-rebase retained admission correctly exposed a provenance
+  problem: all ten preflight sections passed, then the literal-ancestor check
+  refused producer `5eb81c94a9`, whose rebased stable-patch equivalent is
+  `68e9fcb17a`.  The admission gate now accepts either the manifest producer as
+  an ancestor or that exact stable patch in `HEAD`; it still requires the
+  original producer object, manifest stamp, both binary digests, all record
+  and payload checksums, restart byte equality and the complete score.  A
+  synthetic amended-commit test accepts the rebased equivalent and refuses an
+  unrelated side-branch patch.  The initially logged `tee` pipeline masked
+  the refusal status; it was rerun with outer `pipefail` before any PASS claim.
+- Resume-5 retained admission: `PREFLIGHT_OK: no NEMO build or integration was
+  run`, `PASS_O5_ADMISSION`, and `ACQUISITION_ADMITTED`.  All step/frame
+  wet/full/seam/fold maxima remain 0 ULP.  The rewritten JSON reproduces the
+  original SHA-256 exactly:
+  `8f9d911f67a0e651966ee3096d245a796a81d3c8266ed03705047cd191e131bf`.
+- Resume-5 O5 tests: `38 passed, 1 deselected in 122.61s`.
+- Resume-5 O1/O2/O3 tests: `37 passed in 490.92s`.
+- Resume-5 O7 tests: `42 passed, 1 xfailed in 72.09s`; the xfail remains the
+  registered subnormal-snow CPU-JIT platform floor.
+- Resume-5 D5 full C1D year, CPU production JIT, fp64 and default ISA:
+
+```text
+PASS_D5_C1D_JIT_YEAR_HASH b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2
+PASS_D5_PLATFORM_DISPOSITION D5_PLATFORM_FLOOR
+PASS_D5_EXECUTION cpu x64=True xla_flags=''
+```
+
 - Resume-4 read-only preflight: PASS, including exact-group validation against
   both NEMO reference namelists, the `nn_itned` refusal plant, quoted-error
   plant, ten checklist sections, real-preprocessed
