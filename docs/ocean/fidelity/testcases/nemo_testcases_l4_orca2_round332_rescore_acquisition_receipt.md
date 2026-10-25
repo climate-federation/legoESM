@@ -397,8 +397,11 @@ of 1,367, and the same-program proof (409 identical preprocessed units and
 ORCA2_ROUND328_TKE332_PREFLIGHT_READY /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round332/acquisition/orca1ice_raw_postfold_v_kt1_np2
 ```
 
-The per-receipt citation, default landing and explicit private-import ratchet
-results are recorded after their final-commit runs below.  Codex review:
-operator.  The independent Claude review's four disagreements are incorporated
-in the corrected walk above; no overturned fold-owner or live-dry-sign claim
+On clean commit `a30a9e67b`, the per-receipt citation gate passes 16
+citations with zero failures, zero unmapped citations and zero map-audit
+failures; every self-test plant fires.  The default ORCA2 landing battery
+passes all 150 tests in 1,042.78 seconds, and the explicit private-import
+ratchet passes all 6 tests in 5.01 seconds.  Codex review: operator.  The
+independent Claude review's four disagreements are incorporated in the
+corrected walk above; no overturned fold-owner or live-dry-sign claim
 remains.
