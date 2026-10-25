@@ -224,6 +224,7 @@ sed \
   -e 's|TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R332RAW|TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R333TR|' \
   -e 's|EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round332/acquisition|EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round333/acquisition|' \
   -e 's|DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_raw_postfold_v_kt1_np2|DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_tracer_stage3_kt2_np2|' \
+  -e 's|orca1ice_raw_postfold_v_kt1_np2_\*|orca1ice_tracer_stage3_kt2_np2_*|' \
   -e "s|readonly R332_STAGE_PATCH=\$R332_DIR/stprk3_stg_round332.patch|readonly R332_STAGE_PATCH=$PATCH|" \
   -e "s|readonly R332_WRITER=\$R332_DIR/round332_writer.F90|readonly R332_WRITER=$COMBINED_WRITER|" \
   "$PARENT" >"$ADAPTED"
@@ -242,18 +243,46 @@ changed=$(awk '
   /^[-+]/ { count++ }
   END { print count+0 }
 ' "$driver_dir/import.diff")
-[[ "$changed" -eq 14 ]] || refuse "imported driver changed $changed lines, expected 14"
+[[ "$changed" -eq 16 ]] || refuse "imported driver changed $changed lines, expected 16"
 for token in \
   "here=$PARENT_DIR" \
   'TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R333TR' \
   "EVIDENCE=$EVIDENCE" \
   'DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_tracer_stage3_kt2_np2' \
+  '$(basename "$TARGET_RUN") == orca1ice_tracer_stage3_kt2_np2_*' \
   "readonly R332_STAGE_PATCH=$PATCH" \
   "readonly R332_WRITER=$COMBINED_WRITER" \
   "R333_OBSERVER"; do
   [[ $(grep -Fc "$token" "$ADAPTED") -eq 1 ]] \
     || refuse "adapted driver lacks unique substitution: $token"
 done
+
+# Exercise the inherited manifest/ancestry admission identity on a synthetic
+# round-333 run through both supported routes. This invokes the same adapted
+# driver used below, but exits before deterministic-output admission.
+synthetic_root=$driver_dir/synthetic-admission
+synthetic_default=$synthetic_root/orca1ice_tracer_stage3_kt2_np2
+mkdir -p "$synthetic_default"
+cp "$PARENT" "$synthetic_default/nemo"
+chmod 700 "$synthetic_default/nemo"
+git -C "$REPO" rev-parse HEAD >"$synthetic_default/producer_commit.txt"
+( cd "$synthetic_default" && sha256sum nemo >nemo.sha256 )
+R328_ADMISSION_IDENTITY_ONLY=1 R328_ADMISSION_TEST_ROOT=$synthetic_root \
+  R328_ACQ_TARGET=tke332 "$ADAPTED" --admit-existing \
+  >"$driver_dir/synthetic-in-place.log"
+grep -F 'R328_SYNTHETIC_ADMISSION_IDENTITY_PASS route=in-place' \
+  "$driver_dir/synthetic-in-place.log" >/dev/null \
+  || refuse 'synthetic in-place admission did not pass'
+mkdir -p "$synthetic_root/refused"
+synthetic_retained=$synthetic_root/refused/orca1ice_tracer_stage3_kt2_np2_admission_refused_synthetic
+mv -- "$synthetic_default" "$synthetic_retained"
+R328_ADMISSION_IDENTITY_ONLY=1 R328_ADMISSION_TEST_ROOT=$synthetic_root \
+  R328_EXISTING_RUN=$synthetic_retained R328_ACQ_TARGET=tke332 \
+  "$ADAPTED" --admit-existing >"$driver_dir/synthetic-retained.log"
+grep -F 'R328_SYNTHETIC_ADMISSION_IDENTITY_PASS route=retained' \
+  "$driver_dir/synthetic-retained.log" >/dev/null \
+  || refuse 'synthetic retained admission did not pass'
+printf 'R333_SYNTHETIC_RETAINED_ADMISSION_PASS routes=in-place,retained\n'
 
 export PYTHONPATH=$REPO:$REPO/packages/core:$REPO/packages/ocean
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1

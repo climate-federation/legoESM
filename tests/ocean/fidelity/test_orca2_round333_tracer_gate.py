@@ -78,3 +78,7 @@ def test_driver_has_placement_plants_fixture_and_pinned_admission() -> None:
     assert "r333-${selector}-off" in text
     for selector in ("ln_trabbc", "ln_trabbl", "ln_tradmp"):
         assert selector in text
+    assert "orca1ice_raw_postfold_v_kt1_np2_\\*" in text
+    assert "orca1ice_tracer_stage3_kt2_np2_*" in text
+    assert "R333_SYNTHETIC_RETAINED_ADMISSION_PASS routes=in-place,retained" in text
+    assert "R328_ADMISSION_IDENTITY_ONLY=1" in text

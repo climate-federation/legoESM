@@ -47,6 +47,18 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
   EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round332/acquisition
   DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_raw_postfold_v_kt1_np2
 fi
+readonly ADMISSION_IDENTITY_ONLY=${R328_ADMISSION_IDENTITY_ONLY:-0}
+case "$ADMISSION_IDENTITY_ONLY" in
+  0|1) ;;
+  *) printf 'REFUSE: R328_ADMISSION_IDENTITY_ONLY must be 0 or 1\n' >&2; exit 64 ;;
+esac
+if [[ "$ADMISSION_IDENTITY_ONLY" == 1 ]]; then
+  [[ "$MODE" == --admit-existing && -n ${R328_ADMISSION_TEST_ROOT:-} ]] \
+    || { printf 'REFUSE: identity-only admission requires --admit-existing and R328_ADMISSION_TEST_ROOT\n' >&2; exit 64; }
+  admission_default_name=$(basename "$DEFAULT_TARGET_RUN")
+  EVIDENCE=$(realpath -e -- "$R328_ADMISSION_TEST_ROOT")
+  DEFAULT_TARGET_RUN=$EVIDENCE/$admission_default_name
+fi
 TARGET_RUN=$DEFAULT_TARGET_RUN
 if [[ "$MODE" == --admit-existing && -n ${R328_EXISTING_RUN:-} ]]; then
   TARGET_RUN=$(realpath -e -- "$R328_EXISTING_RUN")
@@ -332,18 +344,18 @@ cd "$REPO"
   || refuse 'acquisition requires a clean committed tree'
 readonly COMMIT=$(git rev-parse HEAD)
 EXPECTED_PRODUCER=$COMMIT
-if [[ "$TARGET_RUN" != "$DEFAULT_TARGET_RUN" ]]; then
+if [[ "$MODE" == --admit-existing ]]; then
   [[ -f "$TARGET_RUN/producer_commit.txt" &&
      $(wc -l <"$TARGET_RUN/producer_commit.txt") -eq 1 ]] \
-    || refuse 'retained run lacks its single-entry producer manifest'
+    || refuse 'existing run lacks its single-entry producer manifest'
   EXPECTED_PRODUCER=$(awk 'NF == 1 && $1 ~ /^[0-9a-f]{40}$/ {print $1}' \
     "$TARGET_RUN/producer_commit.txt")
   [[ $EXPECTED_PRODUCER =~ ^[0-9a-f]{40}$ ]] \
-    || refuse 'retained producer manifest is malformed'
-  if [[ "$ACQ_TARGET" == zdfphy ]]; then
+    || refuse 'existing producer manifest is malformed'
+  if [[ "$TARGET_RUN" != "$DEFAULT_TARGET_RUN" && "$ACQ_TARGET" == zdfphy ]]; then
     retained_producer=$RETAINED_ZDFPHY_PRODUCER
     retained_binary_sha=$RETAINED_ZDFPHY_BINARY_SHA
-  elif [[ "$ACQ_TARGET" == tke331 ]]; then
+  elif [[ "$TARGET_RUN" != "$DEFAULT_TARGET_RUN" && "$ACQ_TARGET" == tke331 ]]; then
     retained_producer=$RETAINED_TKE331_PRODUCER
     retained_binary_sha=$RETAINED_TKE331_BINARY_SHA
   else
@@ -356,20 +368,26 @@ if [[ "$TARGET_RUN" != "$DEFAULT_TARGET_RUN" ]]; then
       || refuse 'retained binary digest manifest is malformed'
   fi
   [[ "$EXPECTED_PRODUCER" == "$retained_producer" ]] \
-    || refuse 'retained run has the wrong producer commit'
+    || refuse 'existing run has the wrong producer commit'
   git cat-file -e "$EXPECTED_PRODUCER^{commit}" 2>/dev/null \
-    || refuse 'retained producer is not a local commit object'
+    || refuse 'existing producer is not a local commit object'
   git merge-base --is-ancestor "$EXPECTED_PRODUCER" "$COMMIT" \
-    || refuse 'retained producer is not an ancestor of the admission repair'
-  pin "$retained_binary_sha" "$TARGET_RUN/nemo" 'retained acquisition binary'
+    || refuse 'existing producer is not an ancestor of the admission repair'
+  pin "$retained_binary_sha" "$TARGET_RUN/nemo" 'existing acquisition binary'
   if [[ "$ACQ_TARGET" == tke332 ]]; then
     [[ -f "$TARGET_RUN/nemo.sha256" ]] \
-      || refuse 'retained run lacks its binary digest manifest'
+      || refuse 'existing run lacks its binary digest manifest'
     ( cd "$TARGET_RUN" && sha256sum -c nemo.sha256 >/dev/null ) \
-      || refuse 'retained binary digest manifest changed'
+      || refuse 'existing binary digest manifest changed'
   fi
 fi
 readonly EXPECTED_PRODUCER
+if [[ "$ADMISSION_IDENTITY_ONLY" == 1 ]]; then
+  route=in-place
+  [[ "$TARGET_RUN" == "$DEFAULT_TARGET_RUN" ]] || route=retained
+  printf 'R328_SYNTHETIC_ADMISSION_IDENTITY_PASS route=%s run=%s\n' "$route" "$TARGET_RUN"
+  exit 0
+fi
 export PYTHONPATH=$REPO:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/atmosphere:$REPO/packages/coupler:$REPO/packages/ice:$REPO/packages/land:$REPO/packages/ml:$REPO/packages/tools:$REPO/src
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
@@ -821,8 +839,7 @@ admit() {
 
 if [[ "$MODE" == --admit-existing ]]; then
   if [[ "$TARGET_RUN" == "$DEFAULT_TARGET_RUN" ]]; then
-    [[ -x "$BINARY" && -x "$TARGET_RUN/nemo" ]] || refuse 'existing target lacks its binary'
-    cmp -s "$BINARY" "$TARGET_RUN/nemo" || refuse 'staged binary differs'
+    [[ -x "$TARGET_RUN/nemo" ]] || refuse 'existing target lacks its binary'
   else
     [[ -x "$TARGET_RUN/nemo" ]] || refuse 'retained run lacks its binary'
     [[ ! -e "$DEFAULT_TARGET_RUN" ]] || refuse 'canonical admission target already exists'
