@@ -78,3 +78,54 @@ Evidence directory `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/r
 * `UNASKED` (offered for revert): the dump script lives in `scripts/validate/ocean_fidelity/testcases/` and is run by the O4 test, not by a separate test file.
 * `UNASKED` (offered for revert): the AD check's grid (24 x 20), roster (1 category, 1+1 layers) and XLA backend optimisation level (off, subprocess only); the in-process primal check's grid (24 x 20, full roster).
 * Review: codex (independent, read-only, on the uncommitted diff before `10689480ac`): no defect in the seven areas; HOLD on the then-unmigrated citation gate and stale receipt, both fixed. The later test-d rework (`5571978732`) is UNREVIEWED. GLM: NOT RUN (no GLM tool in this session), so the dual-review rule is not met.
+
+## 6. Resume-5 rebase onto the current SI3 lane
+
+Resume 5 rebased the seven round-8 commits from `042c7bd74c` onto the current
+lane tip `e795e17482` (O2 `62a28e1324`, O3 `1bb17df9dd`, O5
+`f76638f1a7`, and O7 `e795e17482`). The rebase produced the following textual
+conflicts; files not listed here merged automatically.
+
+1. Applying original O4 implementation `7b85ef1ca2`,
+   `packages/ice/legoesm/ice/config.py`: the lane side supplied the landed O2
+   builder; round 8 supplied the then-named O3 Prather validator and builder.
+   Resolution: retained the complete O2 builder and added the complete Prather
+   validator/builder after it. The later review-fix commit renamed only the
+   round-8 path to O4.
+2. Applying `7b85ef1ca2`, `packages/ice/legoesm/ice/sea_ice.py`: the lane side
+   admitted and dispatched O2; round 8 admitted and dispatched the then-named
+   O3 path and its temporary refusal stub. Resolution: retained both selector
+   lists and both dispatch branches at this commit, without changing the
+   landed ridging code. The later review-fix commit removed the round-8 stub as
+   intended while leaving O2 intact.
+3. Applying receipt/map commit `bfffae32af`,
+   `scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py`:
+   the lane side contained all landed O2/O3/O5/O7 file and citation entries;
+   round 8 supplied its preregistration, receipt, test, NEMO-source entries and
+   receipt-name parser alternatives. Resolution: took the union of both
+   `FILES` and `CITATION_MAP` blocks and the union of receipt-name alternatives;
+   no landed map entry was removed.
+4. Applying review-fix/rename commit `10689480ac`,
+   `packages/ice/legoesm/ice/config.py`: the rebased side contained O2 plus the
+   temporary round-8 O3 builder; the commit renamed and hardened that builder
+   as O4 with an explicit required `SI3ORCA2StateConfig`. Resolution: retained
+   O2 unchanged and applied the O3-to-O4 replacement and explicit-config
+   validation only to round 8.
+5. Applying `10689480ac`, `packages/ice/legoesm/ice/sea_ice.py`: the rebased
+   side contained landed O2 plus the temporary round-8 O3 selector, dispatch,
+   and `NotImplementedError` stub; the commit removed the round-8 selector and
+   stub because O4 is exposed only through its dedicated entry point.
+   Resolution: retained O2 in the liquidus refusal, allowed-selector list and
+   dispatcher, and removed only the obsolete round-8 O3/O4 dispatcher/stub.
+6. Applying `10689480ac`, the citation map: the rebased side contained every
+   landed rung block plus round 8's old O3 names; the commit supplied O4 file
+   names, citations and parser alternatives. Resolution: retained every landed
+   O2/O3/O5/O7 entry, replaced only round 8's old O3 block with its O4 block,
+   and kept all landed plus O4 receipt-name alternatives. The duplicate-key
+   gate remains authoritative for the merged literals.
+
+`packages/ice/legoesm/ice/si3_orca2_state.py`,
+`packages/ice/legoesm/ice/__init__.py`, both round-8 receipt/preregistration
+renames, and the O4 test rename merged without textual conflicts. Their landed
+and round-8 symbols remain subject to the post-rebase rung suites and
+parent-vs-current controls below. No O4 acquisition tool was run.
