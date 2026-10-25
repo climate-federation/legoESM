@@ -88,6 +88,15 @@ dispatch, and supersaturated/unphysical source behavior.  Shared saturation
 plus caller tests pass 67/67.  The O1 gate's mutation plant fires on every one
 of the 18 defined outputs.
 
+The round-specific citation gate passes all 16 citations with zero failures,
+unmapped citations, or audit failures; its mandatory test suite passes 17/17.
+The remaining default/ratchet set has 169 passes and one base-tree failure:
+the old iceberg-drift fixture supplies `rn_gambbl=0` before reaching the
+expected iceberg guard, while the Decision-152 card at this round's parent
+already requires `rn_gambbl=10`.  This diff changes neither file.  The two
+large stage-face tests were split into their own process as required and pass
+2/2 in 694.54 seconds; the final prognostic/parallel-receipt gates pass 4/4.
+
 independent review: operator (Claude)
 
 ## Choices and open work
