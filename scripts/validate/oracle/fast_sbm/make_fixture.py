@@ -135,10 +135,12 @@ def main():
         out[f"coll_{n}_g"] = g
         out[f"coll_{n}_out"] = coll(g)
         # The oracle's OWN round-off sensitivity: max relative change of its
-        # output when every input bin is perturbed by +-1 ulp (5 draws).
+        # output when every nonzero input bin moves by exactly one ulp, random
+        # sign (5 draws).
         spread = 0.0
         for _ in range(5):
-            gp = g * (1.0 + np.finfo(float).eps * rng.choice([-1.0, 1.0], NKR))
+            gp = np.where(g != 0.0, np.nextafter(
+                g, np.where(rng.random(NKR) < 0.5, -np.inf, np.inf)), g)
             o, b = coll(gp), out[f"coll_{n}_out"]
             d = np.maximum(np.abs(o), np.abs(b))
             spread = max(spread, float(np.max(np.where(d > 0, np.abs(o - b) / np.where(d > 0, d, 1.0), 0.0))))

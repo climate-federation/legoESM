@@ -64,6 +64,21 @@ def _rel(a, b):
     return np.where(d > 0, np.abs(a - b) / np.where(d > 0, d, 1.0), 0.0)
 
 
+def _resolvable(T_out, T_in):
+    """True when the oracle's returned T resolves its increment to better
+    than TOL (spacing(T) < TOL*|dT|)."""
+    return bool(np.spacing(float(T_out)) < TOL * abs(float(T_out) - float(T_in)))
+
+
+def test_heating_increment_checks_are_exercised():
+    f = _fx()
+    frz = [k[:-2] for k in f if k.startswith("frz_") and k.endswith("_T")]
+    mlt = [k[:-2] for k in f if k.startswith("melt_") and k.endswith("_T")]
+    assert any(_resolvable(f[k + "_T"], f[k + "_in"][0]) for k in frz)
+    assert any(_resolvable(f[k + "_T"], f["_".join(k.split("_")[:3]) + "_in"][1])
+               for k in mlt)
+
+
 def test_fixture_provenance():
     f = _fx()
     meta = json.loads(str(f["meta"]))
@@ -97,11 +112,12 @@ def test_bott_coalescence_matches_coll_xxx_lwf(name):
         assert not np.allclose(f[f"coll_{name}_out"], f[f"coll_{name}_g"])
     err = float(_rel(out, f[f"coll_{name}_out"]).max())
     spread = float(f[f"coll_{name}_ulp_spread"])
-    if err > TOL and spread > TOL:
+    if TOL < err <= spread:
         # NOT certified: the oracle's own output moves by more than the
         # tolerance under a 1-ulp input perturbation (the Gauss-Seidel Bott
         # sweep amplifies round-off; the port's logic is bit-identical to a
-        # NumPy transcription, the residual is XLA vs glibc exp/log).
+        # NumPy transcription, the residual is XLA vs glibc exp/log). An
+        # error beyond the oracle's own spread still fails hard.
         pytest.xfail(f"oracle 1-ulp spread {spread:.2e} > tol; port error {err:.2e}")
     assert err <= TOL
 
@@ -146,9 +162,11 @@ def test_freeze_matches_freez(name, T):
     assert _rel(r.f_liquid, f[k + "_liq"]).max() <= TOL
     assert _rel(r.f_crystals, f[k + "_cryst"]).max() <= TOL
     assert _rel(r.f_hail, f[k + "_hail"]).max() <= TOL
-    # The oracle returns only the updated T (17 digits), so the fusion warming
-    # is checked through T; the frozen mass behind it is checked bin by bin.
+    # The oracle returns only the updated T, so its increment is known to
+    # spacing(T); it is compared directly wherever that resolves 1e-10 of it.
     assert _rel(Tin + r.dT, f[k + "_T"]) <= TOL
+    if _resolvable(f[k + "_T"], Tin):
+        assert _rel(r.dT, f[k + "_T"] - Tin) <= TOL
 
 
 @pytest.mark.parametrize("dt", [60, 150])
@@ -165,6 +183,8 @@ def test_melt_matches_j_w_melt(cat, T, dt):
     assert _rel(r.f_ice, f[k + "_ice"]).max() <= TOL
     assert _rel(r.f_liquid, f[k + "_liq"]).max() <= TOL
     assert _rel(Tin + r.dT, f[k + "_T"]) <= TOL
+    if _resolvable(f[k + "_T"], Tin):
+        assert _rel(r.dT, f[k + "_T"] - Tin) <= TOL
     if dt == 150:
         assert (f[k + "_ice"] < 0).any()          # oracle is unclamped at dt*rate > 1
 
