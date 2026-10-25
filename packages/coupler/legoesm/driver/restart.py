@@ -1241,6 +1241,15 @@ def build_run_manifest(
         so the run can be rebuilt.
     command_line
         The invoking command; defaults to ``" ".join(sys.argv)``.
+    runner_tag, patches
+        The entry script's tag (the key into ``RUNNER_REPLAY_SPECS``) and the
+        patch chain applied, recorded under ``[reproducibility]``.  When
+        ``LEGOESM_RUNNER_PATCHES`` (comma-separated list) is set, its entries
+        are appended to the caller's patches (caller first, duplicates and
+        blank entries dropped).  ``LEGOESM_RUNNER_TAG`` is recorded separately
+        as ``[reproducibility].orchestrator_tag``; ``runner_tag`` is never
+        overridden, because replay and the one-run-per-directory check key
+        on it.
     state_digest
         Filled after N steps by the reproduce/checkpoint path; ``None`` at start.
     config_kind
@@ -1250,6 +1259,17 @@ def build_run_manifest(
     from legoesm._version import __version__
 
     kind = config_kind or detect_config_kind(config)
+
+    # Downstream orchestrators (e.g. legoESM-ocean-runners' run.sh) identify
+    # themselves via env vars.  Their tag goes in its own field: runner_tag
+    # keys the replay specs and the one-run-per-directory check, so it must
+    # stay the entry script's tag.
+    orchestrator_tag = os.environ.get("LEGOESM_RUNNER_TAG", "")
+    # Orchestrator patches are appended to the run's own (run first, deduped);
+    # blank entries on either side are ignored, so a blank env var is a no-op.
+    env_patches = os.environ.get("LEGOESM_RUNNER_PATCHES", "").split(",")
+    patches = list(dict.fromkeys(
+        p.strip() for p in [*(patches or []), *env_patches] if p.strip()))
 
     # Provenance of the IMPORTED package — the code that runs — not the CWD.
     # If the CWD is a legoesm checkout at a different HEAD (launcher cd-ed into
@@ -1280,6 +1300,7 @@ def build_run_manifest(
         "legoESM": legoesm_section,
         "reproducibility": {
             "runner_tag": runner_tag,
+            "orchestrator_tag": orchestrator_tag,
             "python_version": platform.python_version(),
             "jax_version": _get_jax_version(),
             "jax_x64_enabled": _get_jax_x64(),

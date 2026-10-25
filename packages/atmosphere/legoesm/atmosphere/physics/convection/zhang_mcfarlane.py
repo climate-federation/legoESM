@@ -33,10 +33,9 @@ the falling-precipitation flux (``prdprec - evpprec``), negative where rain
 from above evaporates.  It column-integrates to the surface rain and is not
 a per-layer condensate source; hosts must sum it (the bridges do, or refuse).
 
-Host inputs beyond the convection contract: ``pblh`` (PBL height; the
-hydrostatic/MPAS bridge passes the turbulence scheme's lagged
-``PhysicsState.pblh``, CAM's pbuf ``pblh``; ``None`` -> ``pbl_top_pa``
-launch bound), the total cloud
+Host inputs beyond the convection contract: ``pblh`` (PBL height; every
+bridge passes the turbulence scheme's lagged ``PhysicsState.pblh``, CAM's
+pbuf ``pblh``; ``None`` raises), the total cloud
 fraction for the evaporation (``cld_frac``; ``None`` -> 0, i.e. CAM's
 ``(1 - cldfrc)`` factor at its maximum), and ``land_frac``, which is required
 unless ``config.land_fraction == "none"`` (an explicit aquaplanet: ocean

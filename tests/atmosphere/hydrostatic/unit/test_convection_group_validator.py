@@ -52,8 +52,8 @@ from legoesm.atmosphere.physics.convection.dca import (
     dca_convection,
 )
 from legoesm.atmosphere.physics.convection.kuo import kuo_convection
-from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
-    zhang_mcfarlane_convection,
+from tests._zm_cold_start import (  # ZM at CAM's cold-start pblh = 0
+    zm_cold_start as zhang_mcfarlane_convection,
 )
 from legoesm.atmosphere.physics.convection.emanuel import emanuel_convection
 from legoesm.atmosphere.physics.convection.kain_fritsch import (

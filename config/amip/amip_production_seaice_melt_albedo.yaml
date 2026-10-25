@@ -1,0 +1,10 @@
+# Production deck + melt-dependent sea-ice albedo (#2106), one variable.
+#
+# The MPAS lane's sea-ice albedo becomes the Maykut-Untersteiner melt ramp on
+# the prognostic ice skin, recomputed every step: albedo_ice (0.80) when the
+# skin is at or below -1 C, 0.50 at 0 C, linear between.  Everything else is
+# amip_production.yaml.  Production keeps the constant 0.80 until the July
+# 1979 A/B against CERES has been reviewed.
+include: amip_production.yaml
+sea_ice_albedo_scheme: maykut_untersteiner
+sea_ice_albedo_melt_width_K: 1.0

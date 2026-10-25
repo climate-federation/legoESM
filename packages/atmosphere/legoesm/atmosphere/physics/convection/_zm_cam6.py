@@ -38,10 +38,9 @@ Departures from the oracle (all documented, measured where numeric):
 * Divisions the Fortran performs only on gathered deep columns are guarded
   (``_safe_div``) so non-deep columns stay finite under reverse-mode AD;
   the guarded branch is never selected on a deep column.
-* The Fortran ``pblt`` needs ``pblh``; the hydrostatic/MPAS bridge passes
-  the turbulence scheme's lagged ``PhysicsState.pblh`` as CAM does.  A caller
-  without that carry (``pblh=None``) gets the launch-level search bounded by
-  ``pbl_top_pa`` instead (see ``zm_convr``).
+* The Fortran ``pblt`` needs ``pblh``; every ZM bridge passes the
+  turbulence scheme's lagged ``PhysicsState.pblh`` as CAM does.  A caller
+  without it (``pblh=None``) is refused (see ``zm_convr``).
 * ``limcnv``: CAM fixes the 40 hPa cap from the REFERENCE interface
   pressures once at init; hosts without a reference vertical coordinate
   (``pref_edge=None``) get it from each column's own interfaces instead.
@@ -911,10 +910,8 @@ def zm_convr(t, qh, p_full, p_half, z, zf, landfrac, dt, *, pblh, tpert,
              alfa, limcnv_p_pa, pbl_top_pa, pref_edge=None):
     """Port of ``zm_convr`` (``delt = 0.5*dt`` as in ``zm_conv_tend``).
 
-    ``pblh`` is the PBL height [m] (``None`` -> the launch-level search is
-    bounded by ``pbl_top_pa`` [Pa] instead of the Fortran ``pblt``, a
-    documented departure for callers without the ``PhysicsState.pblh``
-    carry).
+    ``pblh`` is the PBL height [m] (``None`` raises: CAM always has one).
+    ``pbl_top_pa`` is no longer read.
 
     ``pref_edge`` are the REFERENCE interface pressures [Pa] (``nlev+1``, top
     first): CAM caps deep convection at the interface where they cross
@@ -949,13 +946,16 @@ def zm_convr(t, qh, p_full, p_half, z, zf, landfrac, dt, *, pblh, tpert,
     dz = zf[:, :-1] - zf[:, 1:]
 
     if pblh is None:
-        in_pbl = (p_full >= pbl_top_pa) & (K >= msg1)
-        pblt = jnp.where(in_pbl.any(axis=1),
-                         jnp.min(jnp.where(in_pbl, K, nlev), axis=1), nlev)
-    else:
-        match = (jnp.abs(z - pblh[:, None]) < 0.5 * dz) & (K <= nlev - 1) & (K >= msg1)
-        pblt = jnp.where(match.any(axis=1),
-                         jnp.min(jnp.where(match, K, nlev), axis=1), nlev)
+        # CAM always hands ZM the pbuf PBL height (convect_deep.F90:266);
+        # there is no oracle launch bound without it (oracle row 50).
+        raise ValueError(
+            "zm_convr: no PBL height (pblh). CAM's zm_conv bounds the "
+            "launch-level search with the carried pbuf pblh "
+            "(zm_conv.F90:738-741); pass PhysicsState.pblh (the turbulence "
+            "scheme publishes it).")
+    match = (jnp.abs(z - pblh[:, None]) < 0.5 * dz) & (K <= nlev - 1) & (K >= msg1)
+    pblt = jnp.where(match.any(axis=1),
+                     jnp.min(jnp.where(match, K, nlev), axis=1), nlev)
     pblt = pblt.astype(jnp.int32)
 
     q = qh

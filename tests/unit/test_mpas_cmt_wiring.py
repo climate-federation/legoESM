@@ -33,6 +33,7 @@ from legoesm.core.state import MPASHydrostaticState  # noqa: E402
 from legoesm.grids.vertical import create_sigma_coordinate  # noqa: E402
 from legoesm.grids.voronoi import cell_vector_to_edge_normal, create_voronoi_mesh  # noqa: E402
 from legoesm.thermo import saturation_mixing_ratio  # noqa: E402
+from tests._zm_cold_start import cold_phys_state  # noqa: E402
 
 NLEV = 20
 
@@ -211,7 +212,8 @@ def test_other_cmt_schemes_keep_zero_edge_winds_on_mpas_with_switches_off():
     state, sigma = _state(mesh)
     for scheme in ("tiedtke", "zhang_mcfarlane"):
         fn = make_convection_physics(ConvectionConfig(scheme=scheme, zhang_mcfarlane=_ZM_AQUA), model_type="mpas", dt=600.0)
-        tend, _ = fn(state, mesh, sigma)
+        tend, _ = fn(state, mesh, sigma, phys_state=(
+            cold_phys_state(state.T.data) if scheme == "zhang_mcfarlane" else None))
         du = np.asarray(tend.du_dt.data)
         assert du.shape == (mesh.nEdges, NLEV)
         assert np.all(du == 0.0), scheme
@@ -225,7 +227,7 @@ def test_zm_cmt_reaches_mpas_edge_winds():
     fn = make_convection_physics(
         ConvectionConfig(scheme="zhang_mcfarlane", mpas_cmt=True, zhang_mcfarlane=_ZM_AQUA),
         model_type="mpas", dt=600.0)
-    tend, out = fn(state, mesh, sigma)
+    tend, out = fn(state, mesh, sigma, phys_state=cold_phys_state(state.T.data))
     du = np.asarray(tend.du_dt.data)
     assert du.shape == (mesh.nEdges, NLEV) and np.all(np.isfinite(du))
     assert np.asarray(out["conv_precip"]).max() > 1e-7, "fixture must convect or the test is vacuous"

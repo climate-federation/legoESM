@@ -299,8 +299,8 @@ def _call_convection(scheme, col, *, T=None, q_v=None, u=None, v=None,
         from legoesm.atmosphere.physics.convection.config import (
             ZhangMcFarlaneConfig,
         )
-        from legoesm.atmosphere.physics.convection.zhang_mcfarlane import (
-            zhang_mcfarlane_convection,
+        from tests._zm_cold_start import (  # ZM at CAM's cold-start pblh = 0
+            zm_cold_start as zhang_mcfarlane_convection,
         )
         out, _prof = zhang_mcfarlane_convection(
             T, q_v, p_full, p_half, u, v, carry, _DT,
@@ -1164,10 +1164,15 @@ class TestCloudFractionGrad:
         cfg = CloudConfig(scheme="sundqvist", convective_cloud=True)
         ones = jnp.ones((col.ncol, col.nlev))
         conv_precip0 = jnp.full((col.ncol,), 1.0e-4)   # ~8.6 mm/day
+        # Half the fixture's vapour (RH ~30-48 %): the stratiform cover drops
+        # below the convective one (~0.09) in the deck, so the max picks
+        # cf_conv there.  At full RH the stratiform cover wins every deck
+        # cell and the gradient is exactly zero by construction.
+        q_v = 0.5 * col.q_v
 
         def loss(conv_precip):
             props = compute_cloud_properties(
-                col.T, col.p_full, col.q_v, col.dp, cfg,
+                col.T, col.p_full, q_v, col.dp, cfg,
                 q_cloud=1.0e-4 * ones, q_ice=1.0e-5 * ones,
                 conv_precip=conv_precip,
             )

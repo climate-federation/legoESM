@@ -1095,9 +1095,13 @@ class _MPASSfcFluxAccum:
         before a slot existed restores the others with a full count while
         the new slot only sees the post-restart remainder; ``is_complete()``
         passes (it counts steps, not per-slot samples) and the short slot
-        would be published as a full interval mean (codex, #1354)."""
+        would be published as a full interval mean (codex, #1354).  Each
+        slot must also have been fed on EVERY counted step: a step where
+        the physics exported none of *slots* leaves equal but short counts,
+        a mean over fewer steps than the window (#1902)."""
         counts = {self._n.get(i, 0) for i in slots}
-        return self.is_complete() and len(counts) == 1 and counts != {0}
+        return (self.is_complete() and self._steps > 0
+                and counts == {self._steps})
 
     def is_complete(self) -> bool:
         """True iff this interval saw EXACTLY the step count a complete
@@ -9668,7 +9672,7 @@ class ModelDriver:
             if (_facc_e is not None and _facc_e.is_complete()
                     and not _use_accum):
                 print("  energy tracker: complete window but energy "
-                      "slots have unequal sample counts -- this sample "
+                      "slots were not fed on every step -- this sample "
                       "falls back to SNAPSHOT fluxes (stamped 0)")
             _qv_e = (self.state.tracers["q_v"].data
                      if (self.state.tracers is not None
@@ -13510,6 +13514,32 @@ class ModelDriver:
             _alb_lat = jnp.asarray(_alb_lat_np).reshape(-1)
         _albedo_ocean = float(cfg.albedo_ocean)
         _albedo_ice = float(cfg.albedo_ice)
+        _sia_scheme = getattr(cfg, "sea_ice_albedo_scheme", "constant")
+        if _sia_scheme not in ("constant", "maykut_untersteiner"):
+            raise ValueError(
+                f"sea_ice_albedo_scheme={_sia_scheme!r} unknown; choose "
+                "'constant' or 'maykut_untersteiner'.")
+        _ice_alb_melt = _sia_scheme == "maykut_untersteiner"
+        if _ice_alb_melt and not bool(getattr(cfg, "ice_skin_prognostic",
+                                               False)):
+            raise ValueError(
+                "sea_ice_albedo_scheme='maykut_untersteiner' needs "
+                "ice_skin_prognostic=True (it reads the ice skin).")
+
+        def _ice_albedo_now():
+            # Sea-ice albedo seen by radiation: the scalar albedo_ice, or the
+            # Maykut-Untersteiner melt ramp on the CURRENT prognostic skin
+            # (albedo_ice as the cold end; refreshed every step with the skin,
+            # matching the T_sfc re-anchor cadence).
+            if not _ice_alb_melt:
+                return _albedo_ice
+            from legoesm.ice.shortwave import maykut_untersteiner_albedo
+            return maykut_untersteiner_albedo(
+                self._ice_T_skin, float(cfg.ice_thickness_m),
+                albedo_cold_bare=_albedo_ice,
+                T_width=float(cfg.sea_ice_albedo_melt_width_K))
+
+        _alb_ocean_cur = None    # open-ocean albedo of the current forcing day
         _albedo_land_static = None
         # RANK-LOCAL land test, computed here rather than reusing ``_has_land``
         # (which only exists inside the land_beta / lapse guard above and
@@ -14422,11 +14452,12 @@ class ModelDriver:
                 # the correct pre-feature state (deepcu exactly 0).
                 "conv_mass_flux_up",
                 "conv_icwmr",
-                # pblh (2026-10-20, user decision on #2045): the carried PBL
-                # height ZM reads one step lagged; zero-seed = CAM's cold
-                # start (physpkg.F90:419-424), refreshed by the first
-                # turbulence call.
-                "pblh",
+                # NOT pblh (user decision 2026-10-20, oracle row 47): CAM
+                # zero-seeds PBLH only on an initial run (physpkg.F90:419-424
+                # via phys_inidat, called only if initial_run, :803); a
+                # restart without the pbuf field is an error
+                # (physics_buffer.F90.in:1591).  A pre-#2045 checkpoint is
+                # therefore INCOMPLETE below.
                 # relvar (2026-10-19): CAM6 MG2 relative cloud-water variance;
                 # seeds at its fresh init (CAM pbuf value 2) and is rewritten
                 # by CLUBB before the microphysics reads it in every sub-step.
@@ -15035,11 +15066,13 @@ class ModelDriver:
                                 _alb_ocean_day = _mpas_zenith_ocean_albedo(
                                     _alb_lat, _force_day_canonical,
                                     getattr(self, "orbit", None))
+                            _alb_ocean_cur = _alb_ocean_day
+                            _alb_ice_day = _ice_albedo_now()
                             _sea_albedo_day = blend_surface_property(
-                                _sic_day, _albedo_ice, _alb_ocean_day)
+                                _sic_day, _alb_ice_day, _alb_ocean_day)
                             _forcing_daily["sfc_albedo"] = (
                                 blended_surface_albedo(
-                                    _sic_day, _alb_f_land, _albedo_ice,
+                                    _sic_day, _alb_f_land, _alb_ice_day,
                                     _alb_ocean_day, _albedo_land_static))
                             if _cesm_ocean_alb:
                                 _forcing_daily["open_ocean_frac"] = (
@@ -15295,6 +15328,18 @@ class ModelDriver:
                 # the advance for missing fluxes) so T_sfc stays consistent
                 # with self._ice_T_skin.
                 _write_sfc_anchors(_forcing_daily, _ice_sst_cur, _ice_sic_cur)
+                # Melt-dependent sea-ice albedo: refresh from the advanced
+                # skin at the same per-step cadence as T_sfc.  The land
+                # re-blend reads _sea_albedo_day, so both carry the new ice
+                # albedo.
+                if (_ice_alb_melt and _sfc_albedo_on
+                        and _alb_ocean_cur is not None):
+                    _alb_ice_day = _ice_albedo_now()
+                    _sea_albedo_day = blend_surface_property(
+                        _ice_sic_cur, _alb_ice_day, _alb_ocean_cur)
+                    _forcing_daily["sfc_albedo"] = blended_surface_albedo(
+                        _ice_sic_cur, _alb_f_land, _alb_ice_day,
+                        _alb_ocean_cur, _albedo_land_static)
             # Interactive multilayer land step (MPAS port): advance the soil/
             # snow columns with the surface fluxes this step just exported
             # (sw/lw down refresh on radiation steps; precip every step) and

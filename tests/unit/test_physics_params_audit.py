@@ -165,7 +165,7 @@ class TestConvectionAudit:
         assert_grad_ok(loss, 1.0e-4, "tiedtke.epsilon_deep")
 
     def test_zhang_mcfarlane_tau(self):
-        from legoesm.atmosphere.physics.convection.zhang_mcfarlane import zhang_mcfarlane_convection
+        from tests._zm_cold_start import zm_cold_start as zhang_mcfarlane_convection
         from legoesm.atmosphere.physics.convection.config import ZhangMcFarlaneConfig
         T, q_v, p_full, p_half = _column()
         A = _aux()

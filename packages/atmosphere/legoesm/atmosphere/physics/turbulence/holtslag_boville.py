@@ -250,13 +250,10 @@ def holtslag_boville_turbulence(
         NOT-faithful actual-pressure search region (module docstring).
     """
     g = constants.g
-    vk = constants.kappa_vk
     cpair = constants.c_pd
 
     # ----- thv = virtem(th, q) (oracle compute_hb_diff) -----
-    exner = exner_function(p_full)
-    theta = T / jnp.clip(exner, 1.0e-6, None)
-    theta_v = virtual_temperature(theta, q_v)
+    theta, theta_v = _theta_thetav(T, q_v, p_full)
     thv_bot = theta_v[:, -1]
     th_bot = theta[:, -1]
 
@@ -278,22 +275,9 @@ def holtslag_boville_turbulence(
     sflx_q = surface_moisture_flux(config.surface, lhflx, T_sfc)   # qflx [kg/m2/s]
 
     # ----- calc_ustar / calc_obklen (pbl_utils) -----
-    # rrho = rair*t/pmid (dry, bottom level); ustar recomputed from the stress.
-    rrho = constants.R_d * T[:, -1] / jnp.clip(p_full[:, -1], 1.0, None)
-    # ustar = max(sqrt(sqrt(taux^2+tauy^2)*rrho), ustar_min), written so the
-    # max picks ustar_min BEFORE the square roots are differentiated (exact
-    # forward value and exact gradient; no NaN at zero stress).
-    tau2 = tau_x ** 2 + tau_y ** 2
-    stressed = tau2 > 0.0
-    ustar_tau = jnp.sqrt(jnp.sqrt(jnp.where(stressed, tau2, 1.0)) * rrho)
-    ustar = jnp.where(stressed & (ustar_tau > config.ustar_min),
-                      ustar_tau, config.ustar_min)
-    khfs = shflx * rrho / cpair                    # [m K/s]
-    kqfs = sflx_q * rrho                           # [m/s]
-    kbfs = surface_buoyancy_flux(khfs, kqfs, th_bot)  # khfs + zvir*ths*kqfs
-    # Obukhov length: L = -thvs*u*^3 / (g*vk*(kbfs + sign(1e-10,kbfs))).
-    kbfs_signed = kbfs + jnp.sign(kbfs) * 1.0e-10 + (kbfs == 0) * 1.0e-10
-    obklen = -thv_bot * ustar ** 3 / (g * vk * kbfs_signed)
+    ustar, khfs, kqfs, kbfs, obklen = _calc_ustar_obklen(
+        T[:, -1], p_full[:, -1], tau_x, tau_y, shflx, sflx_q, th_bot, thv_bot,
+        config.ustar_min)
 
     # ----- pblintd + austausch_atm + austausch_pbl -----
     hb = hb_diffusivities(
@@ -335,6 +319,81 @@ def holtslag_boville_turbulence(
     )
 
 
+def _theta_thetav(T, q_v, p_full):
+    """``th = t*exner`` and ``thv = virtem(th, q)`` (oracle input of pblintd).
+
+    ``exner`` is the repo's ``exner_function`` (``p0``-referenced, as for the
+    HB lane)."""
+    exner = exner_function(p_full)
+    theta = T / jnp.clip(exner, 1.0e-6, None)
+    return theta, virtual_temperature(theta, q_v)
+
+
+def _calc_ustar_obklen(T_bot, p_bot, tau_x, tau_y, shflx, qflx, th_bot,
+                       thv_bot, ustar_min):
+    """Oracle ``pbl_utils`` ``calc_ustar`` + ``calc_obklen``.
+
+    Returns ``(ustar, khfs, kqfs, kbfs, obklen)`` from the bottom-level
+    temperature/pressure (dry ``rrho = rair*t/pmid``), the surface stress
+    [Pa], sensible heat flux [W/m2] and water flux [kg/m2/s].
+    """
+    g = constants.g
+    vk = constants.kappa_vk
+    rrho = constants.R_d * T_bot / jnp.clip(p_bot, 1.0, None)
+    # ustar = max(sqrt(sqrt(taux^2+tauy^2)*rrho), ustar_min), written so the
+    # max picks ustar_min BEFORE the square roots are differentiated (exact
+    # forward value and exact gradient; no NaN at zero stress).
+    tau2 = tau_x ** 2 + tau_y ** 2
+    stressed = tau2 > 0.0
+    ustar_tau = jnp.sqrt(jnp.sqrt(jnp.where(stressed, tau2, 1.0)) * rrho)
+    ustar = jnp.where(stressed & (ustar_tau > ustar_min), ustar_tau, ustar_min)
+    khfs = shflx * rrho / constants.c_pd             # [m K/s]
+    kqfs = qflx * rrho                               # [m/s]
+    kbfs = surface_buoyancy_flux(khfs, kqfs, th_bot)  # khfs + zvir*ths*kqfs
+    # Obukhov length: L = -thvs*u*^3 / (g*vk*(kbfs + sign(1e-10,kbfs))).
+    kbfs_signed = kbfs + jnp.sign(kbfs) * 1.0e-10 + (kbfs == 0) * 1.0e-10
+    obklen = -thv_bot * ustar ** 3 / (g * vk * kbfs_signed)
+    return ustar, khfs, kqfs, kbfs, obklen
+
+
+def _unstable_indicator(kbfs, config):
+    """Oracle ``unstbl = kbfs > 0``; biased so kbfs = 0 is stable."""
+    return jax.nn.sigmoid(
+        config.unstable_blend_sharpness * (kbfs - config.unstable_kbfs_threshold)
+    )
+
+
+def cam_pblintd_height(
+    T, q_v, u, v, p_full, z_full, z_half, tau_x, tau_y, shflx, qflx,
+    pref_mid, config: HoltslagBovilleConfig,
+):
+    """PBL height CAM6 diagnoses after CLUBB (``clubb_intr.F90:2594-2617``).
+
+    ``th = t*exner``, ``thv = th*(1+zvir*q)``, ``calc_ustar`` from the
+    surface stress, ``calc_obklen`` from the sensible heat flux and the water
+    flux, then ``hb_diff::pblintd`` -- the same oracle routine the
+    Holtslag-Boville lane ports (:func:`_pbl_height`, scan limited to the
+    ``npbl`` levels with ``pref_mid >= pblmaxp``; cloud argument >= 0, so the
+    ``zi(pver)+50 m`` floor is unconditional).  ``clubb_intr`` also sets
+    ``kbfs = 0`` where it is ``-0``; no value downstream depends on the sign
+    of a zero.  Inputs top-first ``(ncol, nlev)`` (``z_half`` ``nlev+1``,
+    surface last), the per-column surface stress ``tau_x, tau_y`` [Pa],
+    ``shflx`` [W/m2] and ``qflx`` [kg/m2/s] (CAM ``cam_in%wsx, wsy, shf,
+    cflx(:,1)``), ``pref_mid`` (nlev,) [Pa].  Returns ``pblh`` [m], (ncol,).
+    """
+    theta, theta_v = _theta_thetav(T, q_v, p_full)
+    ustar, _, _, kbfs, obklen = _calc_ustar_obklen(
+        T[:, -1], p_full[:, -1], tau_x, tau_y, shflx, qflx, theta[:, -1],
+        theta_v[:, -1], config.ustar_min)
+    h_pbl, *_ = _pbl_height(
+        u, v, theta_v, z_full, z_half, p_full, ustar, obklen, kbfs,
+        _unstable_indicator(kbfs, config), theta_v[:, -1], constants.g,
+        config.betam * config.sffrac, config.betah * config.sffrac,
+        config.fak, config.Ri_crit, config, _npbl(pref_mid, config.pblmaxp),
+    )
+    return h_pbl
+
+
 def _npbl(pref_mid, pblmaxp):
     """Oracle ``init_hb_diff``: ``npbl = max(count(pref_mid >= pblmaxp), 1)``."""
     return jnp.maximum(jnp.sum(jnp.asarray(pref_mid) >= pblmaxp), 1)
@@ -367,9 +426,7 @@ def hb_diffusivities(
     thv_bot = theta_v[:, -1]
 
     # Unstable indicator (oracle unstbl = kbfs > 0); biased so kbfs = 0 is stable.
-    unstbl = jax.nn.sigmoid(
-        config.unstable_blend_sharpness * (kbfs - config.unstable_kbfs_threshold)
-    )
+    unstbl = _unstable_indicator(kbfs, config)
 
     # Oracle level ranges.  pref_mid given: hard masks from npbl (interface j
     # is oracle interface j+2; the K loop is k = pver..pver-npbl+2 and the

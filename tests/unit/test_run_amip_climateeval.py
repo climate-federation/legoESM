@@ -259,3 +259,68 @@ def test_main_routes_the_suite_through_restrict_suite_def(monkeypatch, tmp_path)
     assert [b["name"] for b in seen["def"]] == ["map"]
     assert "run_amip_climateeval.extract_months_keep_time" in \
         seen["def"][0]["variables"][0]["additional_preprocessors"]
+
+
+def test_build_arg_parser_share_defaults_off():
+    args = build_arg_parser().parse_args([
+        "--cmor-dir", "/tmp/cmor", "--data-root-dir", "/tmp/d", "--output-dir", "/tmp/o"])
+    assert args.share is False
+    assert args.share_container is None
+    assert args.share_name is None
+
+
+def _run_main_with_fakes(monkeypatch, tmp_path, extra_args):
+    import sys
+    import types
+    from scripts.validate import run_amip_climateeval as bridge
+
+    shared = {}
+
+    class _FakeSuite:
+        def __init__(self, yml, **kw):
+            pass
+
+        def get_database(self, *a, **kw):
+            return None
+
+    fake_suites = types.ModuleType("climateeval.suites"); fake_suites.Suite = _FakeSuite
+    fake_data = types.ModuleType("climateeval.data")
+    fake_data.DataSourceInformation = lambda **kw: None
+    fake_report = types.ModuleType("climateeval.report")
+    fake_report.serve = lambda *a, **kw: None
+    fake_cli = types.ModuleType("climateeval._cli")
+
+    def _fake_share(html_path, args, default_name):
+        shared.update(html=html_path, default_name=default_name, name=args.share_name)
+
+    fake_cli._share_report = _fake_share
+    fake_iris = types.ModuleType("iris"); fake_iris.load = lambda paths: []
+    suite_dir = tmp_path / "suites"; suite_dir.mkdir()
+    (suite_dir / "toy.yml").write_text(
+        "- name: map\n  diagnostic: y\n  variables: [{id: tas, var_name: tas}]\n")
+    for name, mod in (("climateeval", types.ModuleType("climateeval")),
+                      ("climateeval.suites", fake_suites), ("climateeval.data", fake_data),
+                      ("climateeval.report", fake_report), ("climateeval._cli", fake_cli),
+                      ("iris", fake_iris)):
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.setattr(bridge, "cmor_nc_paths", lambda d: [tmp_path / "x.nc"])
+    import importlib.resources as resources
+    monkeypatch.setattr(resources, "files", lambda pkg: suite_dir)
+    cmor = tmp_path / "my_run" / "cmor"; cmor.mkdir(parents=True)
+    rc = bridge.main(["--cmor-dir", str(cmor), "--data-root-dir", str(tmp_path),
+                      "--output-dir", str(tmp_path / "out"), "--suite", "toy", *extra_args])
+    return rc, shared
+
+
+def test_main_share_publishes_with_run_folder_as_default_name(monkeypatch, tmp_path):
+    rc, shared = _run_main_with_fakes(monkeypatch, tmp_path, ["--share"])
+    assert rc == 0
+    import re
+    assert re.fullmatch(r"my_run_\d{8}T\d{4}Z", shared["default_name"]), shared["default_name"]
+    assert shared["html"] == tmp_path / "out" / "climateeval_report.html"
+
+
+def test_main_without_share_does_not_publish(monkeypatch, tmp_path):
+    rc, shared = _run_main_with_fakes(monkeypatch, tmp_path, [])
+    assert rc == 0
+    assert shared == {}
