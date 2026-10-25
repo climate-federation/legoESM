@@ -458,6 +458,11 @@ def _make_hydrostatic_convection(
             _u_data = state.u.data
             if _u_data.shape[0] == ncol or _u_data.shape[:-1] == shape_2d:
                 u_col = _u_data.reshape(ncol, nlev)
+                if state.v is None and not is_cmt_capable:
+                    # Kain-Fritsch: no zero-wind fallback (TIMEC, shear).
+                    raise ValueError(
+                        "convection: kain_fritsch needs both wind components; "
+                        "state.v is None")
                 v_col = (
                     state.v.data.reshape(ncol, nlev)
                     if state.v is not None

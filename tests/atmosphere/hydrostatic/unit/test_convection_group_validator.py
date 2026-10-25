@@ -220,13 +220,13 @@ def _run_emanuel(T, q, pf, ph, **kw):
     return out
 
 
-def _run_kf(T, q, pf, ph, u, v, w=None, **kw):
+def _run_kf(T, q, pf, ph, u, v, w=None, dt=DT, **kw):
     ncol, nlev = T.shape
     if w is None:
         w = jnp.zeros((ncol, nlev))
     cpp = jnp.zeros((ncol, nlev))
     out, _ = kain_fritsch_convection(
-        T, q, pf, ph, w, cpp, DT, KainFritschConfig(**kw), u=u, v=v,
+        T, q, pf, ph, w, cpp, dt, KainFritschConfig(**kw), u=u, v=v,
     )
     return out
 
@@ -472,7 +472,7 @@ def test_tier3_kf_vapor_stays_nonnegative(dt, q_scale):
     q = q * q_scale
     ncol, nlev = T.shape
     dp = _dp(ph)
-    out = _run_kf(T, q, pf, ph, u, v, w=jnp.full((ncol, nlev), 0.05))
+    out = _run_kf(T, q, pf, ph, u, v, w=jnp.full((ncol, nlev), 0.05), dt=dt)
     q_new = q + out.dq_v_dt * dt
     assert jnp.all(jnp.isfinite(out.dq_v_dt)) and jnp.all(jnp.isfinite(out.dT_dt))
     assert jnp.all(jnp.where(q >= 1.0e-6, q_new, 0.0) >= -1.0e-12), float(jnp.min(q_new))

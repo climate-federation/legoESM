@@ -664,7 +664,7 @@ def _column(u0, v0, t0, qv0, p0, dzq, w0, rhoe, *, dt, dx, kc, lut, prm, trigger
             frz = tu <= _TTFRZ_K
             part = tu > _TBFRZ_K
             ttemp0 = jnp.where(part & (u["TTEMP"] > _TTFRZ_K), _TTFRZ_K, u["TTEMP"])
-            frc1 = jnp.where(part, (ttemp0 - tu) / (ttemp0 - _TBFRZ_K), 1.0)
+            frc1 = jnp.where(part, (ttemp0 - tu) / _sd(ttemp0 - _TBFRZ_K, part), 1.0)
             frc1 = jnp.where(frz, frc1, 0.0)
             iflag = jnp.where(frz & ~part, 1, u["IFLAG"])
             ttemp = jnp.where(frz, tu, u["TTEMP"])
