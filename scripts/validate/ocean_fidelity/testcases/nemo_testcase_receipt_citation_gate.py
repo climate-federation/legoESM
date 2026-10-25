@@ -9794,6 +9794,30 @@ _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2645-2759', 'packages/ice
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2927-2934', 'packages/ice/legoesm/ice/si3_orca2_state.py:2944-2951')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:3039-3046', 'packages/ice/legoesm/ice/si3_orca2_state.py:3056-3063', anchors=['new_state = si3_o1_step(', (')', 1131), 8])
 
+# SI3 round 12 adds the O5 trace API and exposes dynamics-on log expectations.
+# Re-anchor every affected historical receipt citation before the full-map audit.
+_reanchor('packages/ice/legoesm/ice/dynamics.py:239-264', 'packages/ice/legoesm/ice/dynamics.py:257-282')
+_reanchor('packages/ice/legoesm/ice/dynamics.py:809-822', 'packages/ice/legoesm/ice/dynamics.py:827-840')
+_reanchor('packages/ice/legoesm/ice/dynamics.py:1203', 'packages/ice/legoesm/ice/dynamics.py:1221')
+_reanchor('packages/ice/legoesm/ice/dynamics.py:1255', 'packages/ice/legoesm/ice/dynamics.py:1273')
+_reanchor('packages/ice/legoesm/ice/dynamics.py:825', 'packages/ice/legoesm/ice/dynamics.py:843')
+_reanchor('packages/ice/legoesm/ice/dynamics.py:1898', 'packages/ice/legoesm/ice/dynamics.py:1938')
+_reanchor('packages/ice/legoesm/ice/dynamics.py:1930', 'packages/ice/legoesm/ice/dynamics.py:1970')
+_reanchor('packages/ice/legoesm/ice/dynamics.py:1989', 'packages/ice/legoesm/ice/dynamics.py:2029')
+_reanchor('packages/ice/legoesm/ice/dynamics.py:2066', 'packages/ice/legoesm/ice/dynamics.py:2106')
+_reanchor('packages/ice/legoesm/ice/dynamics.py:2087', 'packages/ice/legoesm/ice/dynamics.py:2127')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1755-1787', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1757-1789')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1767-1787', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1769-1789')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1955-1962', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1957-1964')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1804-1869', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1806-1871')
+_reanchor('scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1856-1878', 'scripts/validate/ocean_fidelity/testcases/nemo_si3_o1_orca2_sas_gate.py:1858-1880')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:172', 'tests/ice/unit/test_si3_o5_strength_aevp.py:173')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:198', 'tests/ice/unit/test_si3_o5_strength_aevp.py:199')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:226', 'tests/ice/unit/test_si3_o5_strength_aevp.py:227')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:280', 'tests/ice/unit/test_si3_o5_strength_aevp.py:281')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:291', 'tests/ice/unit/test_si3_o5_strength_aevp.py:310')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:317', 'tests/ice/unit/test_si3_o5_strength_aevp.py:336')
+_reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:400', 'tests/ice/unit/test_si3_o5_strength_aevp.py:419')
 
 DEFAULT_RECEIPT = (
     REPO / "docs/ocean/fidelity/testcases"
