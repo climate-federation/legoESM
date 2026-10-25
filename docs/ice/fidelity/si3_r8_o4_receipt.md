@@ -50,13 +50,23 @@ FINDING: the reverse-mode program of the full step does not compile in practice 
 
 ## 3. Verification (CPU, float64, `JAX_ENABLE_X64=1`)
 
-Pending: filled from the committed-tree runs in the follow-up receipt commit.
+Model code is identical at `10689480ac` and `5571978732` (the second commit changes only tests and documents), so each run is quoted with the commit it ran on.
+
+| Run | Commit | Decisive line |
+|---|---|---|
+| O4 test file (8 tests) | `5571978732` | `8 passed in 8160.67s (2:16:00)`; AD line `O4_AD_CHECKS_PASS fd_u_ratio=1.000000346896843 fd_vi_ratio=0.9999999995498314 rel_ad_diff=8.10341647527711e-16` |
+| Lane-3 ice fidelity suite (`tests/ice/fidelity/`, includes the ICE_ADV1D, ICE_ADV2D, ICE_RHEO record-bound gates) | `10689480ac` | `111 passed in 1220.22s (0:20:20)` |
+| Default gate (the landing set, includes the citation-gate test and private-import ratchet) | `10689480ac` | `145 passed in 1338.78s (0:22:18)` |
+| Private-import ratchet alone | `10689480ac` | `6 passed in 5.67s` |
+| Per-receipt citation gate, all six SI3 receipts, full-map audit | `10689480ac` | each `PASS`, unmapped 0, failures 0, map entries failing audit 0, self-test 9/9 |
+
+The lane-3 suite run on the uncommitted tree had failed 19 tests only because the provenance stamp refuses a dirty tree; on the committed tree all pass. Compile-cost numbers in 2.6: the 14.6 GB / 257 s reverse compile is in `prof_d.log`; the > 40 GB and > 2 h / 58 GB figures were read by a memory watchdog that stopped the runs and are not archived.
 
 ## 4. Record contract for the O4 acquisition round, and evidence
 
 The acquisition round must record, for two consecutive ice steps (`kt = 1`, x then y; `kt = 2`, y then x) of `ORCA2_SAS_ICE` with dynamics reduced to Prather advection and thermodynamics off: the horizontal metrics and the three surface masks; `u_ice`, `v_ice`, `sss_m`, `sst_m` at advection entry; BOTH the current and the delayed `zcfl` and the resulting `icycle` at every step, plus `DELAY__r8_cflice` in every restart; the full state and all 55 moment arrays before advection, after advection, after `ice_var_zapsmall` plus the end-of-dynamics halo exchange, and at the end of the step; the six advection diagnostics and five transport diagnostics. Which dynamics overlay produces "Prather only" is a deck choice not yet made (section 5).
 
-Pending: digest manifest recomputed after the committed-tree runs.
+Evidence directory `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round8/resume4_claude` holds the logs above (`final2_o4.log`, `final_lane3.log`, `final_default.log`, `final_ratchet.log`, `d_ad.log`, `prof_d.log`), the six gate JSONs and the codex prompt and log. The round-8 manifest `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round8/SHA256SUMS` was rebuilt over every file in the round-8 directory; its own SHA-256 is `2071c56f2fbaf6b034bbf0fecb6fae4f7219bd182f9effe74cc1ddf6dcd7d55a`. The earlier receipt's `66a656...` value was wrong; the manifest it described hashed to `89238530c24655ec25a6c2613905dc0e05f213dd3f3135c07bd498543cb00c8d`, as codex found.
 
 ## 5. CHOICES and review
 
@@ -67,4 +77,4 @@ Pending: digest manifest recomputed after the committed-tree runs.
 * `UNASKED` (offered for revert): the lane-3 control's parent is `042c7bd74c2944dab8c39318687ab0cef54f9d2b` (the commit the preregistration names), and its dump covers several card steps rather than a full trajectory.
 * `UNASKED` (offered for revert): the dump script lives in `scripts/validate/ocean_fidelity/testcases/` and is run by the O4 test, not by a separate test file.
 * `UNASKED` (offered for revert): the AD check's grid (24 x 20), roster (1 category, 1+1 layers) and XLA backend optimisation level (off, subprocess only); the in-process primal check's grid (24 x 20, full roster).
-* Review: codex (independent, read-only, on the uncommitted diff): no defect in the seven areas; HOLD on the then-unmigrated citation gate and stale receipt, both fixed here. GLM: NOT RUN (no GLM tool in this session) — UNREVIEWED by GLM.
+* Review: codex (independent, read-only, on the uncommitted diff before `10689480ac`): no defect in the seven areas; HOLD on the then-unmigrated citation gate and stale receipt, both fixed. The later test-d rework (`5571978732`) is UNREVIEWED. GLM: NOT RUN (no GLM tool in this session), so the dual-review rule is not met.
