@@ -150,11 +150,34 @@ Re-measured on `6729d95bd`:
 - Per-receipt citation gate (`receipt_citations_resume.log`): PASS,
   3 citations, 0 failures, 0 unmapped.
 
-## OPEN
+## Resume 2 (DECISION 169: main's dispatch-baseline follow-up)
 
-- Slab-land dispatch baseline (lane only): pick between cherry-picking main's
-  `f9cde047d`, adding a redundant guard in `step_land`, or waiting for the next
-  main merge.
+- Cherry-picked main's `f9cde047d` as `6b3683e06` (`-x`). Main = `origin`'s
+  `origin/main` `b090be7b18d9`. Diff stat: 1 file, `tests/test_dispatch_hardening.py`,
+  4 insertions, 1 deletion. Test baseline only; no model code changed.
+- Conflict resolution: the pick's hunk context carried a second main baseline
+  entry, the multilayer-land snowpack dispatcher, added on main by a different
+  commit (`7b15e013e1`) that is not in the lane. Dropped it, so the pick carries
+  only `f9cde047d`'s own change. Checked: the added and removed lines are
+  identical to `f9cde047d`'s.
+- Ratchet suite, same ten files (`ratchet_r2_head.log`, `ratchet_r2_main.log`):
+  before (`6729d95bd`) the lane had 4 failed; after (`6b3683e06`) it has 3 failed, 12280 passed;
+  main `b090be7b18d9` has 4 failed, 11412 passed. Lane-only failures: none (`comm`).
+  The three lane failures all fail on main too: hardcoded constants
+  `[tests/unit/test_jra55_do.py]`, inline coeffs
+  `[packages/land/legoesm/land/restart.py]`, param specs
+  `[.../physics/shortwave_penetration.py]`. Main also fails private imports.
+- Bit-identity controls: unchanged. The change is test-only (diff stat
+  above), so no executed model code moved. The D122, DINO and routine
+  results above stand.
+- Default gate (land.sh set) on `6b3683e06`: fast files 140 passed; parallel
+  receipt gate plus prognostic barotropic state 10 passed (`-n 2`); stage
+  face-mask rank: SLOW2_RESULT.
+- CHOICES: dropping the multilayer baseline entry from the conflict — ASKED
+  (DECISION 169 names `f9cde047d` only). Running the slow files with `-n 2` —
+  UNASKED, same as resume 1.
+
+## OPEN
 
 - Main-side failures (jra55 literal, land restart coefficients, shortwave spec,
   private imports) belong to main, not this lane.
