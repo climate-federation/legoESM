@@ -81,10 +81,12 @@ Evidence directory `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/r
 
 ## 6. Resume-5 rebase onto the current SI3 lane
 
-Resume 5 rebased the seven round-8 commits from `042c7bd74c` onto the current
-lane tip `e795e17482` (O2 `62a28e1324`, O3 `1bb17df9dd`, O5
-`f76638f1a7`, and O7 `e795e17482`). The rebase produced the following textual
-conflicts; files not listed here merged automatically.
+Resume 5 first rebased the seven round-8 commits from `042c7bd74c` onto lane
+tip `e795e17482` (O2 `62a28e1324`, O3 `1bb17df9dd`, O5 `f76638f1a7`, and O7
+`e795e17482`). During the long foreground verification the lane advanced, so
+the complete round was rebased again onto the then-current tip `d3f2cff704`,
+which adds the O5 acquisition result. The two rebases produced the following
+textual conflicts; files not listed here merged automatically.
 
 1. Applying original O4 implementation `7b85ef1ca2`,
    `packages/ice/legoesm/ice/config.py`: the lane side supplied the landed O2
@@ -123,6 +125,30 @@ conflicts; files not listed here merged automatically.
    O2/O3/O5/O7 entry, replaced only round 8's old O3 block with its O4 block,
    and kept all landed plus O4 receipt-name alternatives. The duplicate-key
    gate remains authoritative for the merged literals.
+7. In the second rebase, applying the original round-8 receipt/map commit, the
+   citation map's lane side supplied the round-12 O5 admitted-record entries
+   while round 8 supplied its old O3-named map block. Resolution: retained the
+   two O5 admitted-record entries and the full round-8 block; no landed entry
+   was replaced.
+8. Applying the O4 review-fix/rename during the second rebase, the citation
+   map's lane side contained the round-12 O5 entries followed by round 8's old
+   O3 block, while the replayed commit replaced that old block with O4.
+   Resolution: retained the O5 entries, discarded only the superseded
+   round-8 O3 block, and retained the complete O4 replacement block.
+9. Applying the landed-anchor repair during the second rebase, the citation
+   map's lane side supplied the two O5 admitted-record entries while the
+   replayed commit supplied the two landed O1 anchors used by the re-anchor
+   chain. Resolution: retained both sets in the literal map.
+10. Applying the composed-anchor repair during the second rebase, the citation
+    map's lane side supplied the round-12 O5 dynamics, O1-tool, and O5-test
+    re-anchor chain while the replayed commit supplied the O4/O2/O3 composed
+    chain. Resolution: retained both complete chains; their touched files are
+    disjoint, and the mandatory full-map audit validates their final targets.
+11. Applying the receipt re-anchor commit during the second rebase,
+    `docs/ice/fidelity/si3_r10_o5_receipt.md` conflicted between the newly
+    landed O5 dynamics shift and O4's state-file shift. Resolution: used the
+    O4-composed state anchor at line 1389 and the landed O5 fold-program anchor
+    at line 1970, preserving both sides' current locations.
 
 `packages/ice/legoesm/ice/si3_orca2_state.py`,
 `packages/ice/legoesm/ice/__init__.py`, both round-8 receipt/preregistration
@@ -132,25 +158,26 @@ parent-vs-current controls below. No O4 acquisition tool was run.
 
 ## 7. Resume-5 post-rebase verification
 
-All commands in this section ran in the foreground against the clean tree at
-`e2bdf1a5cf834ed18d818c167057a42f8939054b`, with the repository source roots
+All definitive commands in this section ran in the foreground against the
+clean tree at `38a64e9dadaa938f231d53f61f49a71a8992d45d`, with the repository source roots
 first on `PYTHONPATH`, CPU JAX, and float64 enabled. The exact decisive lines
 were:
 
 | Check | Decisive pass line |
 |---|---|
-| O1 | `15 passed in 173.94s (0:02:53)` |
-| O2 | `12 passed in 248.10s (0:04:08)` |
-| O3 | `10 passed in 103.84s (0:01:43)` |
-| O4 full file | `8 passed in 7724.90s (2:08:44)` |
-| O5 default-marker suite | `20 passed, 1 deselected in 88.79s (0:01:28)` |
-| O7 surface, bulk-flux, and round-314 audit | `41 passed, 1 xfailed in 70.08s (0:01:10)` |
-| Lane-3 Prather parent-vs-current control | `1 passed in 64.85s (0:01:04)` |
-| Lane-3 RHG parent-vs-current control | `1 passed in 17.13s` |
-| Lane-3 RHEO parent-vs-current control, explicitly opted in with `-m slow` | `1 passed in 481.76s (0:08:01)` |
-| Citation-gate test suite | `17 passed in 6.24s` |
-| Default landing gate | `145 passed in 1023.15s (0:17:03)` |
-| Private-import ratchet alone | `6 passed in 4.78s` |
+| O1 | `15 passed in 178.41s (0:02:58)` |
+| O2 | `12 passed in 244.31s (0:04:04)` |
+| O3 | `10 passed in 97.86s (0:01:37)` |
+| O4 full file | `8 passed in 8935.89s (2:28:55)` |
+| O5 default-marker suite | `21 passed, 1 deselected in 90.60s (0:01:30)` |
+| Landed O5 acquisition gate | `17 passed in 26.32s` |
+| O7 surface, bulk-flux, and round-314 audit | `41 passed, 1 xfailed in 72.34s (0:01:12)` |
+| Lane-3 Prather parent-vs-current control | `1 passed in 73.72s (0:01:13)` |
+| Lane-3 RHG parent-vs-current control | `1 passed in 17.67s` |
+| Lane-3 RHEO parent-vs-current control, explicitly opted in with `-m slow` | `1 passed in 459.66s (0:07:39)` |
+| Citation-gate test suite | `17 passed in 6.17s` |
+| Default landing gate | `145 passed in 1003.29s (0:16:43)` |
+| Private-import ratchet alone | `6 passed in 5.98s` |
 
 The O5 default marker expression intentionally deselected the slow RHEO
 control; the next standalone row ran that exact node with its required
@@ -164,7 +191,7 @@ decisive lines were:
 * `D5_CPU_AVX_EQUAL_PASS: b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2 == b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2 == b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2`
 
 The per-receipt citation gate audited each receipt plus the complete
-2,904-entry map. The exact pass lines were:
+2,906-entry map. The exact pass lines were:
 
 * `CITATION_RECEIPT_PASS: docs/ice/fidelity/si3_r2_d5_receipt.md status=PASS citations=49 full_map_failures=0`
 * `CITATION_RECEIPT_PASS: docs/ice/fidelity/si3_r3_d5_receipt.md status=PASS citations=96 full_map_failures=0`
@@ -176,7 +203,8 @@ The per-receipt citation gate audited each receipt plus the complete
 * `CITATION_RECEIPT_PASS: docs/ice/fidelity/si3_r9_o3_receipt.md status=PASS citations=44 full_map_failures=0`
 * `CITATION_RECEIPT_PASS: docs/ice/fidelity/si3_r10_o5_receipt.md status=PASS citations=38 full_map_failures=0`
 * `CITATION_RECEIPT_PASS: docs/ice/fidelity/si3_r11_o7_receipt.md status=PASS citations=38 full_map_failures=0`
+* `CITATION_RECEIPT_PASS: docs/ice/fidelity/si3_r12_o5_acquisition_receipt.md status=PASS citations=11 full_map_failures=0`
 
-The composed map itself reported `MAP_ENTRIES 2904`, `AUDIT_FAILURES 0`, and
+The composed map itself reported `MAP_ENTRIES 2906`, `AUDIT_FAILURES 0`, and
 `DUPLICATE_LITERALS []`. No O4 acquisition command was started during resume
 5; the acquisition overlay remains pending with the user.
