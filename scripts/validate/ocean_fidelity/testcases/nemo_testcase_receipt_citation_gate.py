@@ -1778,6 +1778,10 @@ FILES = {
         NEMO / "tests/VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/domhgr.f90"),
     "VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/vortex_r23_ldf_terms.f90": (
         NEMO / "tests/VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/vortex_r23_ldf_terms.f90"),
+    # Round 334 (ratchet cleanup): the NEMO statements the named constants cite.
+    "trabbc.F90": _OCE / "TRA/trabbc.F90",
+    "phycst.F90": _OCE / "DOM/phycst.F90",
+    "tramle.F90": _OCE / "TRA/tramle.F90",
 }
 
 # citation -> the anchors that IDENTIFY its first and last line, plus the
@@ -1795,6 +1799,10 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # ORCA2 round 334: provenance of the constants the ratchet cleanup named.
+    'trabbc.F90:179': "* 1.e-3 ! conversion in W/m2",
+    'phycst.F90:26': "rad      = 3.141592653589793_wp / 180._wp",
+    'tramle.F90:51': "r5_21 = 5.e0 / 21.e0",
     # ORCA2 round 332: first non-bit EEN add and residual TKE source order.
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90:139-147': [
         '!*  hydrostatic pressure gradient (HPG))  *!   always called FIRST',
