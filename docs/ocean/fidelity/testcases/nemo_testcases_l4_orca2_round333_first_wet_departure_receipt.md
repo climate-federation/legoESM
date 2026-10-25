@@ -267,3 +267,21 @@ Because nothing lands, the first wet-value row is unchanged for each label:
 Salinity remains the following row at the same boundary with 13 unequal wet
 words and maximum `9.652723065300961e-11`.  Resume 3 ends **HELD**, with no
 acquisition or configuration decision needed for this disposition.
+
+### Resume-3 gates
+
+On clean commit `0d3ee15b1`, the full-receipt citation gate passes 11
+citations with zero failures, zero unmapped citations and zero map-audit
+failures; all self-test controls fire.  Its JSON SHA-256 is
+`11959e7787c5abfbd2d663e7c677104298545e3e1fc6aac83be357175cc0d406`.
+
+The default battery's first invocation passed 154 of 155 tests in 1,073.34
+seconds.  Its sole refusal was the private-import anti-vacuity sentinel because
+that command exposed only four of the repository's eight namespace package
+roots; it reported no private import.  The corrected all-package invocation
+passes the complete six-test private-import ratchet in 4.90 seconds.  Thus all
+155 default test nodes pass across the split invocation, without weakening or
+bypassing the sentinel.  The retained default and corrected-ratchet log
+SHA-256 values are
+`b3e492f001c7ca3a8466b32b5b84f93e433efcfee068a473925627c921a18b5f` and
+`68084d0b99bade46badc42b33290319bf0689e5405ca0f7d6443c3ff5c155a88`.
