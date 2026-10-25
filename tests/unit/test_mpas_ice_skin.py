@@ -534,9 +534,12 @@ def test_end_to_end_melt_albedo_reaches_radiation(tmp_path):
     seed skin (271.35 K) already sits inside the ramp, so the melt scheme
     darkens the ice from step one.  The state must then differ from the
     constant-albedo run — fails if the scheme is wired in but inert."""
+    # Both arms at the hard melt cap: with the smooth cap a sub-cap skin can
+    # end ~1e-6 K cooler under darker ice through the atmospheric response.
+    hard = ("--ice-skin-melt-cap-width-K", "0.0")
     base = _last_ckpt(_run_icy(tmp_path / "const", extra=(
-        "--sea-ice-albedo-scheme", "constant")))
-    melt = _last_ckpt(_run_icy(tmp_path / "melt", extra=_MELT))
+        "--sea-ice-albedo-scheme", "constant") + hard))
+    melt = _last_ckpt(_run_icy(tmp_path / "melt", extra=_MELT + hard))
     sb, sm = np.asarray(base["ice_T_skin"]), np.asarray(melt["ice_T_skin"])
     assert np.all(np.isfinite(sm))
     # Darker ice absorbs more sunlight: the skin can only be warmer or equal.
