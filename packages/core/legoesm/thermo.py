@@ -28,6 +28,8 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core import transcendentals
+from legoesm.core.source_rounding import nemo_source_round as sr
 
 
 def saturation_vapor_pressure(T: jax.Array) -> jax.Array:
@@ -357,37 +359,65 @@ def saturation_mixing_ratio_ice(
     return 1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat_i)) / 20.0
 
 
+# Compile-time intrinsic folds of NEMO PARAMETERs (gfortran/MPFR, correctly rounded; glibc agrees).
+_NEMO_LN10 = float.fromhex("0x1.26bb1bbb55516p+1")        # LOG(10._wp), sbc_phy.f90:724,726
+_NEMO_GOFF_ICE_D = float.fromhex("0x1.9258f81f79246p-1")  # rDg_i = LOG10(6.1071_wp), sbc_phy.f90:90
+
+
+def _nemo_reps0() -> float:
+    return constants.R_d / constants.R_v_nemo                                  # sbc_phy.f90:46
+
+
+def nemo_theta_exner(pta, ppa):
+    """``theta_exner_sclr``: ``pta * ( rpref / ppa ) ** rgamma_dry`` (``sbc_phy.f90:350``)."""
+    rgamma_dry = constants.R_gas_molar / (constants.M_dry_air * constants.c_p_dry_air_nemo)  # sbc_phy.f90:54
+    return sr(pta * sr(transcendentals.pow(sr(constants.p_ref / ppa), rgamma_dry)))
+
+
+def nemo_si3_e_sat_ice(ptak):
+    """``e_sat_ice_sclr`` (``sbc_phy.f90:689-694``), NEMO source order."""
+    rtt0 = constants.T_triple_nemo
+    zta = jnp.where(constants.T_goff_floor_nemo > ptak, constants.T_goff_floor_nemo, ptak)  # MAX(ptak, 180)
+    ztmp = sr(rtt0 / zta)
+    zle = sr(constants.goff_ice_A_nemo * sr(ztmp - 1.0))
+    zle = sr(zle + sr(constants.goff_ice_B_nemo * sr(transcendentals.log10(ztmp))))
+    # Materialized divisor: XLA otherwise rewrites x / constant as x * (1 / constant).
+    zle = sr(zle + sr(constants.goff_ice_C_nemo * sr(1.0 - sr(zta / sr(jnp.asarray(rtt0))))))
+    zle = sr(zle + _NEMO_GOFF_ICE_D)
+    return sr(100.0 * sr(transcendentals.pow(10.0, zle)))
+
+
+def nemo_si3_q_sat_ice(pta, ppa):
+    """``q_sat_sclr(..., l_ice=.TRUE.)`` (``sbc_phy.f90:760,764``)."""
+    reps0 = _nemo_reps0()
+    ze_s = nemo_si3_e_sat_ice(pta)
+    return sr(sr(reps0 * ze_s) / sr(ppa - sr((1.0 - reps0) * ze_s)))
+
+
+def nemo_si3_dq_sat_dt_ice(pta, ppa):
+    """``dq_sat_dt_ice_sclr`` with ``de_sat_dt_ice_sclr`` (``sbc_phy.f90:722-726,798-803``)."""
+    reps0, rtt0 = _nemo_reps0(), constants.T_triple_nemo
+    ze_s = nemo_si3_e_sat_ice(pta)
+    zta = jnp.where(constants.T_goff_floor_nemo > pta, constants.T_goff_floor_nemo, pta)
+    zde = sr(-(constants.goff_ice_A_nemo * rtt0) / sr(zta * zta))
+    zde = sr(zde - sr(constants.goff_ice_B_nemo / sr(zta * _NEMO_LN10)))
+    zde = sr(zde - constants.goff_ice_C_nemo / rtt0)
+    zde_s_dt = sr(sr(_NEMO_LN10 * zde) * nemo_si3_e_sat_ice(zta))
+    ztmp = sr(sr((reps0 - 1.0) * ze_s) + ppa)
+    return sr(sr(sr(reps0 * ppa) * zde_s_dt) / sr(ztmp * ztmp))
+
+
 def nemo_si3_saturation_over_ice(
     T: jax.Array,
     p: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
-    """NEMO 5.0.2 Goff-ice specific humidity and analytic ``dq/dT``.
+    """NEMO 5.0.2 Goff-ice ``(q_sat, dq_sat/dT)``, the one SI3 implementation.
 
-    This is the literal operation order of ``sbc_phy.F90:665-711,727-790``.
-    It intentionally does not use the smooth generic mixing-ratio conversion:
-    that would be a different formula at an oracle boundary.  Returns
-    ``(q_sat, dq_sat_dT)`` and remains JIT/reverse-mode compatible.
+    Literal operation order of ``sbc_phy.f90:689-694,722-726,760-764,798-803``
+    with source-order barriers; ``log10``/``pow`` follow the precision policy.
+    JIT/reverse-mode compatible.
     """
-    zta = jnp.maximum(jnp.asarray(T), constants.T_goff_floor_nemo)
-    ztmp = constants.T_triple_nemo / zta
-    zle = (
-        constants.goff_ice_A_nemo * (ztmp - 1.0)
-        + constants.goff_ice_B_nemo * jnp.log10(ztmp)
-        + constants.goff_ice_C_nemo * (1.0 - zta / constants.T_triple_nemo)
-        + jnp.log10(constants.goff_ice_D_pressure_hpa_nemo)
-    )
-    e_sat = 100.0 * 10.0 ** zle
-    eps = constants.R_d / constants.R_v_nemo
-    denom = (eps - 1.0) * e_sat + p
-    q_sat = eps * e_sat / denom
-    zde = (
-        -(constants.goff_ice_A_nemo * constants.T_triple_nemo) / (zta * zta)
-        - constants.goff_ice_B_nemo / (zta * jnp.log(10.0))
-        - constants.goff_ice_C_nemo / constants.T_triple_nemo
-    )
-    de_sat_dT = jnp.log(10.0) * zde * e_sat
-    dq_sat_dT = eps * p * de_sat_dT / (denom * denom)
-    return q_sat, dq_sat_dT
+    return nemo_si3_q_sat_ice(T, p), nemo_si3_dq_sat_dt_ice(T, p)
 
 
 def homogeneous_freezing_rh_factor(

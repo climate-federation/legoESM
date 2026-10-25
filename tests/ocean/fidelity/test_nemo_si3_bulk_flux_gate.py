@@ -73,14 +73,22 @@ def test_selector_is_single_orca1_identity() -> None:
         validate_si3_bulk_config(card.config._replace(Cd_ice=card.config.Cd_ice * 2.0))
 
 
-def test_positive_subnormal_snow_uses_nemo_nonzero_branch() -> None:
+def test_positive_subnormal_snow_uses_nemo_nonzero_branch(monkeypatch) -> None:
     from legoesm import constants
-    from legoesm.ice.sea_ice import _nemo_si3_ice_albedo
+    from legoesm.ice import si3_surface
 
-    tiny = jnp.asarray(np.nextafter(np.float64(0.0), np.float64(1.0)))
-    args = (jnp.asarray(constants.T_freeze), jnp.asarray(0.586), tiny, jnp.asarray(0.81))
-    faithful = _nemo_si3_ice_albedo(*args)
-    ablated = _nemo_si3_ice_albedo(*args, _preserve_subnormal_snow=False)
+    data = Path(__file__).parents[2] / "ice/unit/data"
+    cfg = si3_surface.SI3SurfaceConfig.from_resolved_namelists(
+        data / "c1d_omip_l3_v2_output.namelist.dyn", data / "c1d_omip_l3_v2_output.namelist.ice")
+    assert not cfg.ld_pnd_alb
+    tiny = jnp.asarray([[np.nextafter(np.float64(0.0), np.float64(1.0))]])
+    one = jnp.ones((1, 1))
+    kwargs = dict(t_su=one * constants.T_freeze, h_i=one * 0.586, h_s=tiny, a_ip_eff=one * 0.0,
+                  h_ip=one * 0.0, h_il=one * 0.0, cloud_fra=jnp.asarray([0.81]),
+                  smask0=jnp.asarray([1.0]), config=cfg)
+    faithful = si3_surface.si3_ice_alb(**kwargs)
+    monkeypatch.setattr(si3_surface, "_ieee_is_zero", lambda v: v == 0.0)
+    ablated = si3_surface.si3_ice_alb(**kwargs)
     assert np.asarray(faithful) != np.asarray(ablated)
 
 
@@ -123,9 +131,8 @@ def test_full_year_gate_and_all_plants() -> None:
     assert result["oracle_version"] == "V2_SCALAR_MATH"
     assert result["bit_comparisons"] == result["comparisons"]
     assert result["non_bit_identical_rows"] > 0
-    assert set(result["bit_owner_groups"]) == {
-        "jax_exp_ice_alb", "binary64_operation_order",
-    }
+    # Shared NEMO-literal statements (si3_surface): only the native-exp rows remain non-bit.
+    assert set(result["bit_owner_groups"]) == {"jax_exp_ice_alb"}
     assert result["bit_owner_groups"]["jax_exp_ice_alb"]["status"] == (
         "AWAITING_LIBM_POLICY"
     )
