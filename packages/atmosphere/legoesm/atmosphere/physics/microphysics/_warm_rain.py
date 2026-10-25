@@ -1037,6 +1037,25 @@ def mg2_size_dist_liq(q_c_ic, N_c_ic, rho):
             jnp.where(active, jnp.clip(lam, lam_lo, lam_hi), 0.0))
 
 
+@jax.custom_jvp
+def _div_tangent_safe(x, y):
+    """``x / y``, forward bitwise identical to the division.  The tangent
+    ``(dx - (x/y) dy)/y`` replaces JAX's ``-x dy/y**2``, whose ``y**2``
+    underflows to 0 in fp32 for ``y`` ~ 1e-19 (in-precip rain near qsmall at
+    rho ~ 0.1, oracle row 17) and turns a finite derivative into inf/NaN.
+    First order only: here 2x/y**3 ~ 1e48 exceeds the fp32 range, so fp32
+    second derivatives of the rain chain near qsmall stay non-finite (fp64
+    is finite)."""
+    return x / y
+
+
+@_div_tangent_safe.defjvp
+def _div_tangent_safe_jvp(primals, tangents):
+    (x, y), (dx, dy) = primals, tangents
+    r = x / y
+    return r, (dx - r * dy) / y
+
+
 def mg2_inprecip_rain(q_r, N_r, rho, precip_frac, lamr_min, lamr_max):
     """CAM6 MG2 in-precip rain state ``(q_ric, N_ric, lamr, n0r)``.
 
@@ -1047,7 +1066,10 @@ def mg2_inprecip_rain(q_r, N_r, rho, precip_frac, lamr_min, lamr_max):
     leaves ``[lamr_min, lamr_max]``, it is set to the bound and ``nric`` is
     re-adjusted to match; ``n0r = nric*lamr``; ``lamr = 0`` elsewhere.
     ``N_r``/``N_ric``/``n0r`` are per-VOLUME (this module's rain convention:
-    MG2's per-kg value times rho).
+    MG2's per-kg value times rho).  At ``qric == qsmall`` exactly MG2 (and
+    this port) leave ``lamr = n0r = 0``; consumers gate on ``lamr > 0``
+    (oracle row 18).  The slope's division carries an fp32-safe tangent
+    (:func:`_div_tangent_safe`, oracle row 17); the forward is unchanged.
     """
     q_ric = jnp.minimum(q_r / precip_frac, MG2_QRIC_MAX)
     small = q_ric < MG2_QSMALL
@@ -1056,7 +1078,7 @@ def mg2_inprecip_rain(q_r, N_r, rho, precip_frac, lamr_min, lamr_max):
     active = q_ric > MG2_QSMALL
     cr = jnp.pi * constants.rho_water
     den = jnp.where(active, rho * q_ric, 1.0)
-    lam_raw = safe_pow(cr * N_ric / den, 1.0 / 3.0)
+    lam_raw = safe_pow(_div_tangent_safe(cr * N_ric, den), 1.0 / 3.0)
     lam = jnp.clip(lam_raw, lamr_min, lamr_max)
     N_adj = jnp.where((lam_raw < lamr_min) | (lam_raw > lamr_max),
                       lam ** 3 * den / cr, N_ric)
@@ -1097,7 +1119,10 @@ def rain_evaporation_mg2(q_v, q_sat, T, p, rho, q_ric, lamr, n0r, lcldm,
     ice (``qcic``/``qiic``); ``q_sat`` is MG2's ``qvl``.
     """
     dum = jnp.where(q_cic + q_iic < _MG2_EVAP_CLOUD_QMIN, 0.0, lcldm)
-    active = (precip_frac > dum) & (q_ric >= MG2_QSMALL)
+    # lamr > 0 drops only qric == qsmall exactly, where MG2 itself leaves
+    # lamr = n0r = 0 and evaluates 0 * inf (NaN, oracle row 18); every other
+    # cell is unchanged.
+    active = (precip_frac > dum) & (q_ric >= MG2_QSMALL) & (lamr > 0.0)
     am_evp_st = precip_frac - dum
     one_m_dum = jnp.where(active, 1.0 - dum, 1.0)
     qclr = (q_v - dum * q_sat) / one_m_dum
@@ -1930,7 +1955,8 @@ def rain_freezing_bigg_mg2(q_ric, N_ric, lamr, T, rho, precip_frac, config):
 
     where ``T < 269.15 K`` and ``qric >= qsmall``.  No internal clamp: the
     MG2 rain mass/number limiters bound it (micro_mg2_0.F90:1660-1709)."""
-    active = (T < _BIGG_T_MAX_K) & (q_ric >= MG2_QSMALL)
+    # lamr > 0: see rain_evaporation_mg2 (oracle row 18, qric == qsmall).
+    active = (T < _BIGG_T_MAX_K) & (q_ric >= MG2_QSMALL) & (lamr > 0.0)
     lam3 = jnp.where(active, lamr, 1.0) ** 3
     nnuccr = (jnp.pi * (N_ric / rho) * config.bigg_bimm
               * (jnp.exp(config.bigg_aimm * (constants.T_freeze - T)) - 1.0)
