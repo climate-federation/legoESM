@@ -1974,6 +1974,8 @@ FILES = {
     'tests/ice/unit/data/orca2_sas_ice_expref/namelist_ice_ref': REPO / "tests/ice/unit/data/orca2_sas_ice_expref/namelist_ice_ref",
     'docs/ice/fidelity/si3_r15_o8_receipt.md': REPO / "docs/ice/fidelity/si3_r15_o8_receipt.md",
     'docs/ice/fidelity/si3_r15_o8_preregister.md': REPO / "docs/ice/fidelity/si3_r15_o8_preregister.md",
+    'scripts/validate/ocean_fidelity/testcases/configs/c1d_omip_l3_namelist_ice_cfg': REPO / "scripts/validate/ocean_fidelity/testcases/configs/c1d_omip_l3_namelist_ice_cfg",
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py': REPO / "tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py",
 }
 
 # citation -> the anchors that IDENTIFY its first and last line, plus the
@@ -9685,8 +9687,7 @@ CITATION_MAP = {
     'tests/ice/unit/test_si3_surface.py:615': 'def test_production_surface_step_keeps_qsb_dry_negative_zero():',
     # --- SI3 round 15 (O8) frazil collection bookkeeping ---
     'ORCA2_SAS_ICE_O7_REF/BLD/arch_nemo.fcm:27': '%FCFLAGS             -fdefault-real-8 -O3 -funroll-all-loops -fcray-pointer -ffree-line-length-none -fallow-argument-mismatch -fno-tree-vectorize',
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:113': '_NEW_ICE_THICKNESS = 0.05',
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1754': 'vnew / _NEW_ICE_THICKNESS,',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:113': '_NEW_ICE_THICKNESS = 0.05  # C1D card rn_hinew (c1d_omip_l3_namelist_ice_cfg:113)',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:174': 'CALL ice_thd_frazil             !--- frazil ice: collection thickness (ht_i_new) & fraction of frazil (fraz_frac)',
     'tests/ice/unit/data/orca2_sas_ice_expref/namelist_ice_ref:190-191': ['rn_hinew         =   0.1', 'ln_frazil        = .false.', 2],
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:419': 'fraz_frac(:,:) = 0._wp',
@@ -9696,8 +9697,18 @@ CITATION_MAP = {
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:428': 'IF( ln_frazil ) THEN',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/ice.f90:445': 'ALLOCATE( ht_i_new (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) , fraz_frac (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) , STAT=ierr(ii) )',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:474': 'ht_i_new(ji,jj) = MAX( 0.01_wp, MIN( ht_i_new(ji,jj), hi_max(jpl) ) )',
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1794': 'def si3_ice_thd_frazil(qlead, *, rn_hinew, ln_frazil) -> SI3Frazil:',
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1782': 'def _ieee_lt_zero(value):',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1799': 'def si3_ice_thd_frazil(qlead, *, rn_hinew, ln_frazil) -> SI3Frazil:',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1787': 'def _ieee_lt_zero(value):',
+    # --- SI3 round 15 resume 1 (O8 production wiring) ---
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:182': 'IF ( qlead(ji,jj)  <  0._wp ) THEN',
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:200': 'CALL tab_2d_1d( npti, nptidx(1:npti), zh_newice    (1:npti), ht_i_new   )',
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:283': 'za_newice = zv_newice / zh_newice(ii)',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1750': 'frazil = si3_ice_thd_frazil(forcing.qlead, rn_hinew=_NEW_ICE_THICKNESS, ln_frazil=False)',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1751': 'cooling = _ieee_lt_zero(forcing.qlead)',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1759': 'vnew / jnp.where(cooling, frazil.ht_i_new, 1.0),',
+    'scripts/validate/ocean_fidelity/testcases/configs/c1d_omip_l3_namelist_ice_cfg:113-114': ['rn_hinew         = 0.05', 'ln_frazil         = .false.', 2],
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:2808': 'def test_o8_production_c1d_step_calls_shared_frazil(probe_module, monkeypatch):',
+    'tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:2822': 'def test_o8_production_c1d_plants_fire(probe_module, monkeypatch, plant):',
 }
 
 

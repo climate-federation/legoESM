@@ -2,16 +2,23 @@
 
 ## Own errors, first
 
-None found this round.
+The first landing (`5a8d17ed3d`) overstated integration: the new function
+was called only by its tests, while the production C1D step kept its own
+inline cooling predicate and new-ice thickness (codex HOLD). Resume 1
+(`29d94bd78d`) wires the production step to it.
 
 ## Outcome
 
 `ice_thd_frazil` as it executes on the production deck (collection off) is
-now one NEMO-literal function in the shared ice package. It is bit-identical
-to an independent per-cell transcription under `jit` and eager, including
-`-0`, NaN and negative-subnormal lead heat. No NEMO array was read for O8;
-the acquisition is preregistered (`docs/ice/fidelity/si3_r15_o8_preregister.md`)
-and not built. The D5 C1D year hash is unchanged.
+one NEMO-literal function in the shared ice package, and since resume 1 the
+production C1D step calls it: the open-water growth takes `ht_i_new` from it
+and gathers cooling cells with the same `qlead < 0` predicate; the inline
+copy is gone. The function is bit-identical to an independent per-cell
+transcription under `jit` and eager, including `-0`, NaN and
+negative-subnormal lead heat. The D5 C1D year is byte-identical to the
+parent on all 18 arms, CPU and AVX. No NEMO array was read for O8; the
+acquisition is preregistered (`docs/ice/fidelity/si3_r15_o8_preregister.md`)
+and not built.
 
 ## Build cited
 
@@ -25,10 +32,10 @@ byte-identical across `ORCA2_SAS_ICE_{O1,O2,O5,O7}_{REF,REC}`.
 
 Searched `packages/`, `src/`, `scripts/validate/`, `tests/ice/` for
 `frazil`, `hinew`, `ht_i_new`, `fraz_frac`, `qlead`, `thd_do`. Found: no
-transcription of `ice_thd_frazil` anywhere; the C1D column step only uses a
-module constant `_NEW_ICE_THICKNESS = 0.05`
-(`packages/ice/legoesm/ice/bitz_lipscomb.py:113`) inside its open-water
-growth (`packages/ice/legoesm/ice/bitz_lipscomb.py:1754`). The ocean
+transcription of `ice_thd_frazil` anywhere; before resume 1 the C1D column
+step inlined `qlead < 0.0` and the module constant `_NEW_ICE_THICKNESS = 0.05`
+(`packages/ice/legoesm/ice/bitz_lipscomb.py:113`, the C1D card's `rn_hinew`)
+in its open-water growth. The ocean
 `physics/frazil.py` is the ocean-side supercooling fix, a different
 statement. The bit-pattern zero test in `packages/ice/legoesm/ice/si3_surface.py:262`
 is the `== 0` sibling; it is private to that module, so the `< 0`
@@ -55,8 +62,41 @@ The routine has no category axis on this arm; `hi_max(jpl)` is read only in
 the collection arm (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:474`),
 so jpl=5 needs no generalisation.
 
-Model: `packages/ice/legoesm/ice/bitz_lipscomb.py:1794` (`si3_ice_thd_frazil`),
-predicate `packages/ice/legoesm/ice/bitz_lipscomb.py:1782`.
+Model: `packages/ice/legoesm/ice/bitz_lipscomb.py:1799` (`si3_ice_thd_frazil`),
+predicate `packages/ice/legoesm/ice/bitz_lipscomb.py:1787`.
+
+## Production wiring (resume 1)
+
+ice_thd_do gathers its cells with the same predicate
+(`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:182`:
+`IF ( qlead(ji,jj)  <  0._wp ) THEN`) and reads `ht_i_new` as its new-ice
+thickness (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:200`,
+`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:283`). The C1D step now
+calls the routine (`packages/ice/legoesm/ice/bitz_lipscomb.py:1750`) with
+the C1D card's values
+(`scripts/validate/ocean_fidelity/testcases/configs/c1d_omip_l3_namelist_ice_cfg:113-114`:
+`rn_hinew = 0.05`, `ln_frazil = .false.`), takes the cooling mask from the
+shared predicate (`packages/ice/legoesm/ice/bitz_lipscomb.py:1751`) and
+divides by `ht_i_new` (`packages/ice/legoesm/ice/bitz_lipscomb.py:1759`).
+Non-cooling cells divide `+0` by 1 rather than by `ht_i_new = +0`, which
+keeps 0/0 out of the forward and the gradient; their values stay `+0`.
+ORCA2's ice_thd_do itself is rung O14; nothing of it is transcribed here.
+
+Production-path tests (`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:2808`,
+`tests/ocean/fidelity/test_nemo_si3thd_d5_platform_probe.py:2822`), on a real
+C1D entry (kt = 1) widened to seven columns with
+`qlead = -300, -1e-3, -5e-324, -0, +0, +5e-324, +300`, CPU `jit`:
+a spy shows the step calls the routine once with the card's values; three
+plants each change exactly the predicted columns — ORCA2's `rn_hinew = 0.1`
+wired in (columns 0, 1), always-cooling predicate (column 6), never-cooling
+predicate (columns 0, 1). With the parent model file restored, all four
+fail (`4 failed`). A negative-subnormal plant is not observable in this
+step's outputs (its growth is `±0`), so it stays a unit-level plant.
+
+The frazil unit tests place their inputs on the CPU device
+(`jax.device_put(..., jax.devices("cpu")[0])`) because the float-compare
+plant relies on XLA CPU flushing; `jax.jit(backend="cpu")` exists in JAX
+0.10.0 but warns that it is deprecated, so it was not used.
 
 ## Object code (the MIN/MAX/SIGN lesson)
 
