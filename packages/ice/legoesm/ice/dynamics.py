@@ -1966,7 +1966,7 @@ def si3_orca2_ice_strength(
 
     Inputs are NEMO's exact arrays at ``ice_strength`` entry: ``a_i`` and
     ``v_i`` shaped ``(jpi, jpj, jpl=5)`` and ``tmask(:,:,1)``.  Returns NEMO's
-    recomputed ``at_i`` (``:962``), the H79 strength on the full
+    recomputed ``at_i`` (``:973``), the H79 strength on the full
     ``nn_hls`` extent (``:1079-1085``) and the smoothed, halo-exchanged
     strength (``:1099-1114``).  ``_plant_*`` are test-only code-path plants.
     """
@@ -1987,7 +1987,7 @@ def si3_orca2_ice_strength(
         raise ValueError("SI3 ORCA2 strength requires tmask(:,:,1) on the a_i grid")
     halo = _si3_orca2_halo(fold, _plant_fold_sign)
 
-    at_i = fortran_sum_categories(a_i, axis=-1)  # :962 at_i = SUM( a_i, dim=3 )
+    at_i = fortran_sum_categories(a_i, axis=-1)  # :973 at_i(:,:) = SUM( a_i, dim=3 )
     strength_raw = si3_h79_strength_raw(
         fortran_sum_categories(v_i, axis=-1), at_i, config.rn_pstar, config.rn_crhg
     )
