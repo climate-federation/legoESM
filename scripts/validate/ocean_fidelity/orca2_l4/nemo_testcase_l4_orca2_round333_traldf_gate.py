@@ -27,21 +27,26 @@ FOUR_D_FIELDS = (
     "pt_kbb", "rhs_before", "rhs_after", "rhs_increment", "dit", "djt", "dkt",
     "A11", "A22", "A13", "A23", "hmsku", "hmskv", "zfu", "zfv", "vmsku",
     "vmskv", "zahu_w", "zahv_w", "A31", "A32", "zfw_lower", "zfw_upper",
-    "horizontal_seen", "vertical_seen", "rhs_seen",
+    "horizontal_seen", "vertical_seen", "rhs_seen", "divergence", "divisor",
+    "rhs_preadd", "rhs_postadd",
 )
 THREE_D_FIELDS = (
     "e3t_3d", "e3u_3d", "e3v_3d", "tmask", "umask", "vmask", "wmask",
     "ahtu", "ahtv", "uslp", "vslp", "wslpi", "wslpj", "ah_wslp2", "akz",
+    "a33_msku", "a33_mskv", "a33_ahu_w", "a33_ahv_w", "a33_pah",
+    "a33_pakz_raw", "a33_ze3w2", "a33_zcoef0", "a33_pakz_final",
+    "a33_seen", "rDt", "r1_Dt",
 )
 TWO_D_FIELDS = (
     "r3t_kmm", "r3u_kmm", "r3v_kmm", "e2_e1u", "e1_e2v", "e2u", "e1v",
-    "e1t", "e2t", "e1e2t", "r1_e1e2t",
+    "e1u", "e2v", "e1t", "e2t", "e1e2t", "r1_e1e2t",
 )
 ONE_D_FIELDS = ("e3w_1d",)
 FIELDS = FOUR_D_FIELDS + THREE_D_FIELDS + TWO_D_FIELDS + ONE_D_FIELDS
 PLANTS = (
     "header", "field-order", "truncation", "checksum", "stamp", "time-level",
-    "tracer-pass", "extent", "signed-zero", "wet", "increment",
+    "tracer-pass", "extent", "signed-zero", "wet", "increment", "nonfinite",
+    "rhs-replay", "a33-replay",
 )
 OBSERVER_UNITS = ("dynzdf", "stprk3_stg", "dynvor", "zdfphy", "zdftke", "traldf_iso")
 WRITER_UNITS = (
@@ -89,8 +94,10 @@ def read_record(path: Path, *, plant: str | None = None,
     require(magic == MAGIC, f"bad magic {magic!r}")
     require((header["version"], header["kt"], header["stage"], header["real_bits"])
             == (1, 2, 3, 64), "wrong version/step/stage/precision")
-    require((header["Kbb"], header["Kmm"], header["Krhs"]) == (3, 2, 1),
-            "wrong kt=2 stage-3 time levels")
+    kbb, kmm, _kaa, krhs = r333.rk3_levels_for_step_stage(
+        header["kt"], header["stage"])
+    require((header["Kbb"], header["Kmm"], header["Krhs"])
+            == (kbb, kmm, krhs), "time levels disagree with RK3 routing")
     require(header["rank"] in (0, 1), "wrong rank")
     require((header["nx"], header["ny"], header["nz"]) == expected_shape,
             "record lacks exact jpi,jpj,jpk extents")
@@ -128,6 +135,82 @@ def _verify_checksums(record: dict) -> None:
     for name, values in record["fields"].items():
         observed = int(np.bitwise_xor.reduce(values.view(np.uint64).reshape(-1), initial=0))
         require(observed == record["checksums"][name], f"{name}: checksum mismatch")
+
+
+def _bits_equal_on(actual: np.ndarray, expected: np.ndarray,
+                   mask: np.ndarray, label: str) -> None:
+    require(bool(np.array_equal(actual[mask].view(np.uint64),
+                                expected[mask].view(np.uint64))),
+            f"{label}: recorded statement does not replay bitwise")
+
+
+def _replay_self_consistency(fields: dict[str, np.ndarray]) -> None:
+    """Replay the two scored NEMO statement families from raw operands."""
+    vseen = fields["vertical_seen"] == 1.0
+    divergence = ((fields["zfu"] - np.roll(fields["zfu"], 1, axis=0))
+                  + (fields["zfv"] - np.roll(fields["zfv"], 1, axis=1)))
+    divergence = divergence + (fields["zfw_lower"] - fields["zfw_upper"])
+    _bits_equal_on(fields["divergence"], divergence, vseen, "divergence")
+    e3t = fields["e3t_3d"][..., None]
+    divisor = fields["r1_e1e2t"][..., None, None] / e3t
+    divisor = np.broadcast_to(divisor, fields["divisor"].shape)
+    _bits_equal_on(fields["divisor"], divisor, vseen, "RHS divisor")
+    increment = (divergence * fields["r1_e1e2t"][..., None, None]) / e3t
+    rhs_post = fields["rhs_preadd"] + increment
+    _bits_equal_on(fields["rhs_postadd"], rhs_post, vseen, "RHS addition")
+    _bits_equal_on(fields["rhs_after"], fields["rhs_postadd"], vseen,
+                   "final RHS versus recorded update")
+
+    seen = fields["a33_seen"] == 1.0
+    umask_i0 = np.roll(fields["umask"], 1, axis=2)
+    umask_i1 = np.roll(fields["umask"], 1, axis=0)
+    a33_msku = fields["wmask"] / np.maximum(
+        (umask_i0 + umask_i1) + (np.roll(umask_i1, 1, axis=2) + fields["umask"]),
+        np.float64(1.0))
+    vmask_k0 = np.roll(fields["vmask"], 1, axis=2)
+    vmask_j1 = np.roll(fields["vmask"], 1, axis=1)
+    a33_mskv = fields["wmask"] / np.maximum(
+        (vmask_k0 + vmask_j1) + (np.roll(vmask_j1, 1, axis=2) + fields["vmask"]),
+        np.float64(1.0))
+    _bits_equal_on(fields["a33_msku"], a33_msku, seen, "A33 u-mask quotient")
+    _bits_equal_on(fields["a33_mskv"], a33_mskv, seen, "A33 v-mask quotient")
+    ahtu_k0 = np.roll(fields["ahtu"], 1, axis=2)
+    ahtu_i1 = np.roll(fields["ahtu"], 1, axis=0)
+    a33_ahu = ((ahtu_k0 + ahtu_i1) +
+               (np.roll(ahtu_i1, 1, axis=2) + fields["ahtu"])) * a33_msku
+    ahtv_k0 = np.roll(fields["ahtv"], 1, axis=2)
+    ahtv_j1 = np.roll(fields["ahtv"], 1, axis=1)
+    a33_ahv = ((ahtv_k0 + ahtv_j1) +
+               (np.roll(ahtv_j1, 1, axis=2) + fields["ahtv"])) * a33_mskv
+    _bits_equal_on(fields["a33_ahu_w"], a33_ahu, seen, "A33 averaged u coefficient")
+    _bits_equal_on(fields["a33_ahv_w"], a33_ahv, seen, "A33 averaged v coefficient")
+    pah = ((a33_ahu * fields["wslpi"]) * fields["wslpi"]
+           + (a33_ahv * fields["wslpj"]) * fields["wslpj"])
+    _bits_equal_on(fields["a33_pah"], pah, seen, "A33 slope-square coefficient")
+    u0 = ((fields["ahtu"] + np.roll(fields["ahtu"], 1, axis=2))
+          / (fields["e1u"][..., None] * fields["e1u"][..., None]))
+    u1_ahtu = np.roll(fields["ahtu"], 1, axis=0)
+    u1_e1u = np.roll(fields["e1u"], 1, axis=0)[..., None]
+    u1 = (u1_ahtu + np.roll(u1_ahtu, 1, axis=2)) / (u1_e1u * u1_e1u)
+    v0 = ((fields["ahtv"] + np.roll(fields["ahtv"], 1, axis=2))
+          / (fields["e2v"][..., None] * fields["e2v"][..., None]))
+    v1_ahtv = np.roll(fields["ahtv"], 1, axis=1)
+    v1_e2v = np.roll(fields["e2v"], 1, axis=1)[..., None]
+    v1 = (v1_ahtv + np.roll(v1_ahtv, 1, axis=2)) / (v1_e2v * v1_e2v)
+    pakz_raw = ((u0 + u1) + (v0 + v1)) * np.float64(0.25)
+    _bits_equal_on(fields["a33_pakz_raw"], pakz_raw, seen, "A33 raw coefficient")
+    e3w = fields["e3w_1d"][None, None, :]
+    stretch = e3w * (np.float64(1.0) + fields["r3t_kmm"][..., None])
+    ze3w2 = stretch * stretch
+    _bits_equal_on(fields["a33_ze3w2"], ze3w2, seen, "A33 ze3w_2")
+    zcoef0 = fields["rDt"] * (pakz_raw + fields["a33_pah"] / ze3w2)
+    _bits_equal_on(fields["a33_zcoef0"], zcoef0, seen, "A33 zcoef0")
+    pakz_final = (np.maximum(zcoef0 - np.float64(0.5), np.float64(0.0))
+                  * ze3w2) * fields["r1_Dt"]
+    _bits_equal_on(fields["a33_pakz_final"], pakz_final, seen,
+                   "A33 limited coefficient")
+    _bits_equal_on(fields["akz"], fields["a33_pakz_final"], seen,
+                   "A33 output coefficient")
 
 
 def same_program(new_bld: Path, ref_bld: Path, patches: dict[str, Path], *,
@@ -174,6 +257,17 @@ def run_gate(root: Path, *, expect_commit: str, plant: str | None = None) -> dic
                 record["fields"]["zfu"][2, 2, 1, 0], np.inf)
         _verify_checksums(record)
         fields = record["fields"]
+        if rank == 0 and plant == "nonfinite":
+            fields["dit"][2, 2, 1, 0] = np.nan
+        require(all(bool(np.isfinite(values).all()) for values in fields.values()),
+                f"rank {rank}: non-finite record payload")
+        if rank == 0 and plant == "rhs-replay":
+            fields["divergence"][2, 2, 1, 0] = np.nextafter(
+                fields["divergence"][2, 2, 1, 0], np.inf)
+        if rank == 0 and plant == "a33-replay":
+            fields["a33_zcoef0"][2, 2, 1] = np.nextafter(
+                fields["a33_zcoef0"][2, 2, 1], np.inf)
+        _replay_self_consistency(fields)
         wet = r333._full_wet_mask(root, rank)
         if rank == 0 and plant == "wet":
             index = tuple(np.argwhere(wet)[0])

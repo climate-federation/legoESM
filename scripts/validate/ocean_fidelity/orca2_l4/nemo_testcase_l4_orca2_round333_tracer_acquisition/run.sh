@@ -37,6 +37,7 @@ readonly LDF_SCHEME_PATCH=$here/traldf_iso_scheme_round333.patch
 readonly LDF_WRITER=$here/round333_traldf_writer.F90
 readonly LDF_FIXTURE_STUBS=$here/round333_traldf_fixture_stubs.F90
 readonly LDF_FIXTURE=$here/round333_traldf_writer_fixture.F90
+readonly LDF_LOOP_FIXTURE=$here/round333_traldf_loop_fixture.F90
 readonly LDF_GATE=$here/../nemo_testcase_l4_orca2_round333_traldf_gate.py
 readonly LDF_TEST=$REPO/tests/ocean/fidelity/test_orca2_round333_traldf_gate.py
 readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round333/acquisition
@@ -47,7 +48,7 @@ readonly FC=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
 for path in "$PARENT" "$PARENT_STAGE_PATCH" "$SOURCE_OUTPUT" "$SOURCE_STAGE" "$PATCH" \
   "$WRITER_PATCH" "$BASE_WRITER" "$FIXTURE_STUBS" "$FIXTURE" "$GATE" "$TEST" \
   "$LDF_SOURCE" "$LDF_SCHEME_SOURCE" "$LDF_PATCH" "$LDF_SCHEME_PATCH" "$LDF_WRITER" \
-  "$LDF_FIXTURE_STUBS" "$LDF_FIXTURE" "$LDF_GATE" "$LDF_TEST"; do
+  "$LDF_FIXTURE_STUBS" "$LDF_FIXTURE" "$LDF_LOOP_FIXTURE" "$LDF_GATE" "$LDF_TEST"; do
   [[ -f "$path" ]] || refuse "missing acquisition input $path"
 done
 [[ -z $(git -C "$REPO" status --porcelain --untracked-files=all) ]] \
@@ -195,31 +196,51 @@ check_r333_ldf_landing() {
     in_lap && /END DO.*end tracer loop/ {tracer_end=NR}
     in_lap && /CALL r333_ldf_finish/ {finish_count++; finish=NR}
     in_lap && /END SUBROUTINE traldf_iso_lap/ {routine_end=NR; in_lap=0}
+    /pah_wslp2\(ji,jj,jk\) = zahu_w/ {pah=NR}
+    /CALL r333_ldf_a33_first/ {first_count++; first=NR}
+    /pakz\(ji,jj,jk\) = \(/ {raw_statement=NR}
+    /CALL r333_ldf_a33_raw/ {raw_count++; raw=NR}
+    /pakz\(ji,jj,jk\) = MAX/ {lap_statement=NR}
+    /CALL r333_ldf_a33_lap/ {lap_count++; lap=NR}
     END {
-      if(plant=="begin") begin=itra+1
+      if(plant=="begin") begin=a33+1
       if(plant=="finish") finish=tracer_end-1
-      exit !(begin_count==1 && finish_count==1 && a33<begin && begin<itra &&
-             tracer_end<finish && finish<routine_end)
+      if(plant=="a33-first") first=pah-1
+      if(plant=="a33-raw") raw=raw_statement-1
+      if(plant=="a33-lap") lap=lap_statement-1
+      exit !(begin_count==1 && finish_count==1 && first_count==1 && raw_count==1 && lap_count==1 &&
+             begin<a33 && a33<itra && tracer_end<finish && finish<routine_end &&
+             pah<first && raw_statement<raw && lap_statement<lap)
     }
   ' "$source" && awk -v plant="$plant" '
-    /r333_dit\(ji,jj,jk,jn\)/ {grad_count++; grad=NR}
-    /rotation matrix/ {if(!rotation) rotation=NR}
-    /zfv\(ji,jj\) = ahtv/ {zfv=NR}
-    /r333_A11\(ji,jj,jk,jn\)/ {h_count++; horiz=NR}
-    /VERTICAL iso-neutral fluxes/ {vertical_title=NR}
-    /r333_vmsku\(ji,jj,jk,jn\)/ {v_count++; vertical=NR}
-    /zfw\(ji,jj\) = zfw_kp1/ {store=NR}
-    /r333_fw_lower\(ji,jj,jk,jn\)=zfw\(ji,jj\);/ {bottom_count++; bottom=NR}
+    BEGIN {active=1}
+    /^[[:space:]]*SUBROUTINE traldf_iso_lap/ {active=1; rotation=0; vertical_title=0; store=0}
+    active && /CALL r333_ldf_grad/ {grad_count++; grad=NR; grad_lower=($0 ~ /ntsi-\(inn\+1\)/)}
+    active && /rotation matrix[[:space:]]+A =/ {if(!rotation) rotation=NR}
+    active && /zfv\(ji,jj\) = ahtv/ {zfv=NR}
+    active && /CALL r333_ldf_horizontal/ {h_count++; horiz=NR}
+    active && /VERTICAL iso-neutral fluxes/ {vertical_title=NR}
+    active && /CALL r333_ldf_vertical_before/ {before_count++; before[before_count]=NR; if($0 ~ /ntsi-\(inn\)/) lower_count++}
+    active && /pt\(ji,jj,jk,jn,Krhs\) = pt\(ji,jj,jk,jn,Krhs\) \+/ {update_count++; update[update_count]=NR}
+    active && /CALL r333_ldf_vertical_after/ {after_count++; after=NR}
+    active && /CALL r333_ldf_bottom_after/ {bottom_count++; bottom=NR}
+    active && /zfw\(ji,jj\) = zfw_kp1/ {store=NR}
+    /END SUBROUTINE traldf_iso_lap/ {active=0}
     END {
       if(plant=="gradient") grad=rotation+1
       if(plant=="horizontal") horiz=vertical_title+1
-      if(plant=="vertical") vertical=store+1
-      if(plant=="bottom") bottom=0
-      exit !(grad_count==1 && h_count==1 && v_count==1 && bottom_count==1 &&
-             grad<rotation && zfv<horiz && horiz<vertical_title && vertical<store && bottom>store)
+      if(plant=="gradient-lower") grad_lower=0
+      if(plant=="vertical-lower") lower_count=0
+      if(plant=="vertical") before[1]=update[1]+1
+      if(plant=="bottom") bottom=update[2]-1
+      exit !(grad_count==1 && h_count==1 && before_count==2 && after_count==1 && bottom_count==1 &&
+             update_count==2 && grad_lower && lower_count==2 && grad<rotation && zfv<horiz &&
+             horiz<vertical_title && before[1]<update[1] && update[1]<store && store<after &&
+             before[2]<update[2] && update[2]<bottom)
     }
   ' "$scheme"
 }
+export -f check_r333_ldf_landing
 
 ldf_check=$driver_dir/ldf-check
 mkdir "$ldf_check"
@@ -229,7 +250,8 @@ patch -s --fuzz=0 -p0 -d "$ldf_check" <"$LDF_PATCH"
 patch -s --fuzz=0 -p0 -d "$ldf_check" <"$LDF_SCHEME_PATCH"
 check_r333_ldf_landing "$ldf_check/traldf_iso.F90" "$ldf_check/traldf_iso_scheme.h90" \
   || refuse 'internal LDF observers do not bracket the cited executing statements'
-for landing in begin gradient horizontal vertical bottom finish; do
+for landing in begin a33-first a33-raw a33-lap gradient gradient-lower horizontal \
+    vertical-lower vertical bottom finish; do
   plant_must_refuse "r333-ldf-${landing}-misplaced" check_r333_ldf_landing \
     "$ldf_check/traldf_iso.F90" "$ldf_check/traldf_iso_scheme.h90" "$landing"
 done
@@ -312,10 +334,13 @@ root = Path(sys.argv[1])
 for rank in (0, 1):
     record = gate.read_record(root / gate.record_name(rank), expected_shape=(5, 4, 3))
     gate._verify_checksums(record)
+    gate._replay_self_consistency(record["fields"])
     assert record["header"]["rank"] == rank
     assert record["fields"]["rhs_increment"].shape == (5, 4, 3, 2)
     assert np.signbit(record["fields"]["dit"][1, 1, 0, 0])
     assert np.signbit(record["fields"]["zfw_lower"][1, 1, 0, 1])
+    assert np.count_nonzero(record["fields"]["vertical_seen"]) == 2
+    assert np.count_nonzero(record["fields"]["a33_seen"]) > 0
 try:
     gate.read_record(root / gate.record_name(0), plant="truncation", expected_shape=(5, 4, 3))
 except gate.GateError:
@@ -330,8 +355,29 @@ except gate.GateError:
     print("PREFLIGHT_PLANT_FIRED r333-traldf-checksum")
 else:
     raise AssertionError("traldf checksum plant stayed green")
-print("R333_TRALDF_WRITER_BOUNDS_AND_SIGN_PASS ranks=2 fields=53")
+print("R333_TRALDF_WRITER_BOUNDS_AND_SIGN_PASS ranks=2 fields=71")
 PY
+
+# Execute an observer-bearing copy of the patched loop bodies and compare it
+# bitwise with an independently written unpatched copy on small rank arrays.
+"$FC" -O3 -funroll-all-loops -fno-tree-vectorize -fcheck=bounds \
+  -ffree-line-length-none -I "$ldf_fixture_dir/mod" "$LDF_LOOP_FIXTURE" \
+  "$ldf_fixture_dir/stubs.o" "$ldf_fixture_dir/writer.o" \
+  -o "$ldf_fixture_dir/round333_traldf_loop_fixture"
+( cd "$ldf_fixture_dir" && ./round333_traldf_loop_fixture ) \
+  >>"$ldf_fixture_dir/fixture.log" 2>&1
+grep -F 'R333_TRALDF_PATCHED_LOOP_FIXTURE_PASS independent-reference' \
+  "$ldf_fixture_dir/fixture.log" >/dev/null \
+  || refuse 'patched traldf loop fixture differs from independent reference'
+sed '0,/upper=0\.5_wp/s//upper=0.25_wp/' "$LDF_LOOP_FIXTURE" \
+  >"$ldf_fixture_dir/round333_traldf_loop_plant.F90"
+"$FC" -O3 -funroll-all-loops -fno-tree-vectorize -fcheck=bounds \
+  -ffree-line-length-none -I "$ldf_fixture_dir/mod" \
+  "$ldf_fixture_dir/round333_traldf_loop_plant.F90" \
+  "$ldf_fixture_dir/stubs.o" "$ldf_fixture_dir/writer.o" \
+  -o "$ldf_fixture_dir/round333_traldf_loop_plant"
+plant_must_refuse r333-traldf-loop-arithmetic \
+  "$ldf_fixture_dir/round333_traldf_loop_plant"
 
 # Import every reviewed helper, plant, syntax proof, same-program check and
 # admission step from the round-328/332 driver. The arithmetic-baseline edit
@@ -371,26 +417,33 @@ sed -i "/for unit in dynzdf stprk3_stg; do/i\\
 
 sed -i "/# Same-program preflight:/i\\
 compile_traldf_census_object() {\\
-  \"\$FC\" -c -fdefault-real-8 -O0 -fcray-pointer -ffree-line-length-none \\\
+  \"\$FC\" -c -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -fcray-pointer -ffree-line-length-none \\\
     -fallow-argument-mismatch -I \"\$scratch/mod\" -J \"\$scratch/mod\" \"\$1\" -o \"\$2\"\\
 }\\
 if [[ \"\$ACQ_TARGET\" == tke332 ]]; then\\
+  mkdir \"\$scratch/traldf-independent\"\\
+  cp $LDF_SOURCE \"\$scratch/traldf-independent/traldf_iso.F90\"\\
+  cp $LDF_SCHEME_SOURCE \"\$scratch/traldf-independent/traldf_iso_scheme.h90\"\\
+  patch -s --fuzz=0 -p0 -d \"\$scratch/traldf-independent\" <$LDF_PATCH\\
+  patch -s --fuzz=0 -p0 -d \"\$scratch/traldf-independent\" <$LDF_SCHEME_PATCH\\
+  fpp $LDF_SOURCE \"\$scratch/traldf_independent_base.f90\"\\
+  fpp \"\$scratch/traldf-independent/traldf_iso.F90\" \"\$scratch/traldf_independent_observed.f90\"\\
   if diff -u --label traldf_iso.f90 --label traldf_iso.f90 \\\
-      \"\$SOURCE_ROOT/BLD/ppsrc/nemo/traldf_iso.f90\" \"\$scratch/traldf_iso.f90\" >\"\$scratch/traldf_combined.patch\"; then\\
+      \"\$scratch/traldf_independent_base.f90\" \"\$scratch/traldf_independent_observed.f90\" >\"\$scratch/traldf_combined.patch\"; then\\
     refuse 'round-333 combined traldf observer patch is empty'\\
   else\\
     [[ \$? -eq 1 ]] || refuse 'could not construct combined traldf observer patch'\\
   fi\\
+  cmp -s \"\$scratch/traldf_independent_observed.f90\" \"\$scratch/traldf_iso.f90\" || refuse 'independent patched traldf unit differs from syntax unit'\\
   command -v objdump >/dev/null || refuse 'no objdump for traldf passivity proof'\\
-  sed '/R333_LDF_OBSERVER/d' \"\$scratch/traldf_iso.f90\" >\"\$scratch/traldf_base.f90\"\\
-  compile_traldf_census_object \"\$scratch/traldf_base.f90\" \"\$scratch/traldf_iso.without-observers.o\"\\
+  compile_traldf_census_object \"\$scratch/traldf_independent_base.f90\" \"\$scratch/traldf_iso.without-observers.o\"\\
   compile_traldf_census_object \"\$scratch/traldf_iso.f90\" \"\$scratch/traldf_iso.with-observers.o\"\\
   compare_fp_disassembly \"\$scratch/traldf_iso.without-observers.o\" \"\$scratch/traldf_iso.with-observers.o\" traldf \\\
     || refuse 'traldf observer changed the normalized floating-point instruction census'\\
   printf 'R333_TRALDF_NORMALIZED_OBJECT_DISASSEMBLY_PASS fp=%s\\n' \\\
     \"\$(awk '{n+=\$1} END {print n+0}' \"\$scratch/traldf.left.fp\")\"\\
   sed '0,/zA11 = /s//zA11 = 1._wp + /' \\\
-    \"\$scratch/traldf_base.f90\" >\"\$plants/traldf.arithmetic.f90\"\\
+    \"\$scratch/traldf_independent_base.f90\" >\"\$plants/traldf.arithmetic.f90\"\\
   compile_traldf_census_object \"\$plants/traldf.arithmetic.f90\" \"\$scratch/traldf_plant.o\"\\
   plant_must_refuse traldf-arithmetic-disassembly compare_fp_disassembly \\\
     \"\$scratch/traldf_iso.without-observers.o\" \"\$scratch/traldf_plant.o\" traldf-plant\\
@@ -400,10 +453,11 @@ sed -i "/same_program \"\$dry_bld\"/i\\
 rm -f \"\$dry_bld/ppsrc/nemo/traldf_iso.f90\"\\
 cp \"\$scratch/traldf_iso.f90\" \"\$dry_bld/ppsrc/nemo/traldf_iso.f90\"\\
 cp \"\$scratch/round333_traldf_writer.f90\" \"\$dry_bld/ppsrc/nemo/round333_traldf_writer.f90\"\\
+check_r333_ldf_landing \"\$dry_bld/ppsrc/nemo/traldf_iso.f90\" \"\$dry_bld/ppsrc/nemo/traldf_iso.f90\" || refuse 'round-333 placement moved in dry ppsrc/nemo/traldf_iso.f90'\\
 : >\"\$dry_bld/obj/round333_traldf_writer.o\"" "$ADAPTED"
 
 sed -i "/# makenemo rewrites shared work_cfgs.txt/i\\
-sha256sum $LDF_PATCH $LDF_SCHEME_PATCH $LDF_WRITER $LDF_GATE $LDF_TEST \\\
+sha256sum $LDF_PATCH $LDF_SCHEME_PATCH $LDF_WRITER $LDF_LOOP_FIXTURE $LDF_GATE $LDF_TEST \\\
   >>\"\$manifest/toolchain.sha256\"" "$ADAPTED"
 
 sed -i "/touch \"\$TARGET_ROOT\/MY_SRC\/\"\*.F90/i\\
@@ -415,7 +469,8 @@ patch -s --fuzz=0 -p0 -d \"\$TARGET_ROOT/MY_SRC\" <$LDF_SCHEME_PATCH" "$ADAPTED"
 
 sed -i "/diff <(grep -v/i\\
 grep 'NEMO_L4_R333LI' \"\$TARGET_ROOT/BLD/ppsrc/nemo/round333_traldf_writer.f90\" >/dev/null \\\
-  || refuse 'compiled round-333 traldf writer is absent'" "$ADAPTED"
+  || refuse 'compiled round-333 traldf writer is absent'\\
+check_r333_ldf_landing \"\$TARGET_ROOT/BLD/ppsrc/nemo/traldf_iso.f90\" \"\$TARGET_ROOT/BLD/ppsrc/nemo/traldf_iso.f90\" || refuse 'round-333 placement moved under TARGET_ROOT'" "$ADAPTED"
 chmod 700 "$ADAPTED"
 
 if diff -u "$PARENT" "$ADAPTED" >"$driver_dir/import.diff"; then
@@ -513,7 +568,7 @@ done
 "$PY" "$GATE" --record-dir "$TARGET_RUN" --expect-commit "$producer" \
   --output "$TARGET_RUN/round333_tracer_admission.json"
 for plant in header field-order truncation checksum stamp time-level \
-    tracer-pass extent signed-zero wet increment; do
+    tracer-pass extent signed-zero wet increment nonfinite rhs-replay a33-replay; do
   log=$TARGET_RUN/admit-r333-traldf-$plant.log
   if "$PY" "$LDF_GATE" --record-dir "$TARGET_RUN" --expect-commit "$producer" \
       --plant "$plant" >"$log" 2>&1; then

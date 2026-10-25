@@ -1,32 +1,54 @@
 --- traldf_iso.F90
 +++ traldf_iso.F90
-@@ -45,5 +45,11 @@
+@@ -33,6 +33,11 @@
+    USE phycst         ! physical constants
     USE lbclnk         ! ocean lateral boundary conditions (or mpp link)
     USE lib_fortran    ! to use sign with key_nosignedzero
-+   USE round333_traldf_writer, ONLY : r333_ldf_active, r333_ldf_begin, r333_ldf_finish, & ! R333_LDF_OBSERVER
-+      & r333_dit, r333_djt, r333_dkt, r333_A11, r333_A22, r333_A13, r333_A23, & ! R333_LDF_OBSERVER
-+      & r333_hmsku, r333_hmskv, r333_fu, r333_fv, r333_vmsku, r333_vmskv, & ! R333_LDF_OBSERVER
-+      & r333_ahu_w, r333_ahv_w, r333_A31, r333_A32, r333_fw_lower, & ! R333_LDF_OBSERVER
-+      & r333_fw_upper, r333_rhs_before, r333_horizontal_seen, & ! R333_LDF_OBSERVER
-+      & r333_vertical_seen, r333_rhs_seen ! R333_LDF_OBSERVER
++   USE round333_traldf_writer, ONLY : r333_ldf_begin, r333_ldf_finish, & ! R333_LDF_OBSERVER
++      & r333_ldf_grad, r333_ldf_horizontal, r333_ldf_vertical_before, & ! R333_LDF_OBSERVER
++      & r333_ldf_vertical_after, r333_ldf_bottom_after, & ! R333_LDF_OBSERVER
++      & r333_ldf_a33_first, r333_ldf_a33_raw, r333_ldf_a33_lap, & ! R333_LDF_OBSERVER
++      & r333_rhs_before ! R333_LDF_OBSERVER
  
     IMPLICIT NONE
     PRIVATE
-@@ -133,5 +139,6 @@
+@@ -132,6 +137,7 @@
+ !!            caution: the gm velocity have also to be calculated as they use the slopes....
+ !!gm idea
        !
-       CALL traldf_iso_a33( Kmm, ah_wslp2, akz )   ! calculate  a33 element   (ah_wslp2 and akz)
 +      CALL r333_ldf_begin(kt,Kbb,Kmm,Krhs,pt) ! R333_LDF_OBSERVER
+       CALL traldf_iso_a33( Kmm, ah_wslp2, akz )   ! calculate  a33 element   (ah_wslp2 and akz)
        !
        itra = SIZE( pt, dim = 4 )                   ! number of tracers
-       !
-@@ -159,6 +166,10 @@
+@@ -160,6 +166,10 @@
           !
        END DO                          !==  end tracer loop  ==!
        !
-+      IF(r333_ldf_active) CALL r333_ldf_finish(kt,Kbb,Kmm,Krhs,pt,e3t_3d,e3u_3d,e3v_3d, & ! R333_LDF_OBSERVER
++      CALL r333_ldf_finish(kt,Kbb,Kmm,Krhs,pt,e3t_3d,e3u_3d,e3v_3d, & ! R333_LDF_OBSERVER
 +         & tmask,umask,vmask,wmask,ahtu,ahtv,uslp,vslp,wslpi,wslpj,ah_wslp2,akz, & ! R333_LDF_OBSERVER
-+         & r3t(:,:,Kmm),r3u(:,:,Kmm),r3v(:,:,Kmm),e2_e1u,e1_e2v,e2u,e1v,e1t,e2t, & ! R333_LDF_OBSERVER
-+         & e1e2t,r1_e1e2t,e3w_1d) ! R333_LDF_OBSERVER
++         & r3t(:,:,Kmm),r3u(:,:,Kmm),r3v(:,:,Kmm),e2_e1u,e1_e2v,e2u,e1v,e1u,e2v, & ! R333_LDF_OBSERVER
++         & e1t,e2t,e1e2t,r1_e1e2t,e3w_1d) ! R333_LDF_OBSERVER
     END SUBROUTINE traldf_iso_lap
  
  
+@@ -300,1 +310,3 @@
++      CALL r333_ldf_a33_first(Kmm,ntsi-(inn),ntei+(inn),ntsj-(inn),ntej+(inn), & ! R333_LDF_OBSERVER
++         & pah_wslp2,wmask,umask,vmask,ahtu,ahtv,wslpi,wslpj) ! R333_LDF_OBSERVER
+ !!gm size allocate for ah_wslp2 and akz should be A2D(0) in lap case and A2D(1) in bilap case
+@@ -319,6 +331,7 @@
+                &               + (  ( ahtv(ji,jj  ,jk) + ahtv(ji,jj  ,jk-1) ) / ( e2v(ji,jj  ) * e2v(ji,jj  ) )      &
+                &                  + ( ahtv(ji,jj-1,jk) + ahtv(ji,jj-1,jk-1) ) / ( e2v(ji,jj-1) * e2v(ji,jj-1) )  )   ) * 0.25_wp
+          END_3D
++         CALL r333_ldf_a33_raw(ntsi-(inn),ntei+(inn),ntsj-(inn),ntej+(inn),pakz) ! R333_LDF_OBSERVER
+          !
+          IF( ln_traldf_blp ) THEN            ! bilaplacian operator
+             DO_3D( inn , inn , inn , inn , 2, jpkm1 )
+@@ -331,6 +344,8 @@
+                zcoef0 = rDt * (  pakz(ji,jj,jk) + pah_wslp2(ji,jj,jk) / ze3w_2  )
+                pakz(ji,jj,jk) = MAX( zcoef0 - 0.5_wp , 0._wp ) * ze3w_2 * r1_Dt
+             END_3D
++            CALL r333_ldf_a33_lap(Kmm,ntsi-(inn),ntei+(inn),ntsj-(inn),ntej+(inn), & ! R333_LDF_OBSERVER
++               & pakz,e3w_1d,r3t(:,:,Kmm),rDt,r1_Dt) ! R333_LDF_OBSERVER
+         ENDIF
+         !
+       ELSE                                    ! A33 flux set to zero with akz=ah_wslp2 ==>> computed in full implicit

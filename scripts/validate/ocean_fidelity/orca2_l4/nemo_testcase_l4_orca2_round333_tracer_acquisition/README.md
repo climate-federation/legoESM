@@ -12,10 +12,11 @@ The wrapper imports the complete parent driver and audits its pinned
 substitutions (fresh configuration, evidence path, run name, source directory,
 stage observer patch, and extended writers). It retains every inherited plant,
 syntax proof, same-program proof, memory/disk guard, and admission gate. Its
-arithmetic baselines strip all r332/r333 observers before their normalized
-floating-point instruction censuses. A separate `traldf_iso.o` census must be
-identical with and without the internal observer; a changed-arithmetic plant
-proves that comparison is live.
+arithmetic baselines are independently preprocessed from the unpatched NEMO
+source. The separate `traldf_iso.o` census uses the record build's production
+`-O3 -funroll-all-loops -fno-tree-vectorize` flags and must be identical with
+and without the internal observer; a changed-arithmetic plant proves that
+comparison is live. NEMO's build flags are never changed to make this pass.
 
 Only the operator may request the NEMO run:
 
@@ -36,20 +37,29 @@ value changes.
 The additional per-rank streams are
 `oracle_r333_traldf_kt00000002_r0000.bin` and `_r0001.bin`. At the stage-3
 `tra_ldf` boundary, the arm is active only for `kt=2`; `traldf_iso_lap` then
-records both tracer passes (T and S) in NEMO execution order. The 53 fields
+records both tracer passes (T and S) in NEMO execution order. The 71 fields
 include the full declared extents of the input time level, before/after RHS and
 exact per-pass increment, horizontal/vertical gradients, tensor coefficients,
 individual flux components and totals, reciprocal/divisor operands, source
-geometry and masks, and coverage flags. The routine has no `kpass` loop in the
+geometry and masks, pre-add divergence and divisor, and coverage flags. They
+also include the executed `traldf_iso_a33` inputs (`e1u`, `e2v`, `rDt`, and
+`r1_Dt`), its pre-limit coefficient and limiter intermediates. The routine has
+no `kpass` loop in the
 record build; its `jn=1,itra` loop is the two-pass T/S iteration. Records retain
 IEEE signed zeros and carry explicit rank, origin, extent, field-order, and XOR
 checksum metadata.
 
-The internal writer is compiled and run on a two-rank synthetic fixture under
-`-fcheck=bounds`. Preflight includes source-placement plants for the outer
+All capture calls are outside the NEMO loop nests; exact initialized gradient
+ranges are copied by array section. The internal writer is compiled and run on
+a two-rank synthetic fixture under `-fcheck=bounds`. A second production-flag
+fixture executes the observer-bearing loop bodies and compares them bitwise
+with an independent unpatched implementation. Preflight includes
+source-placement plants for both source and preprocessed `ppsrc/nemo`, the outer
 boundary and each internal region, plus header, field-order, truncation,
-checksum, time-level, tracer-pass, extent, signed-zero, wet-coverage, and exact
-increment plants. No preflight path builds or executes NEMO.
+checksum, derived time-level, tracer-pass, extent, finite-payload, signed-zero,
+wet-coverage, exact-increment, RHS replay, and A33 replay plants. The replay
+gate reconstructs NEMO's recorded RHS and A33 statements bitwise before a
+record can be admitted. No preflight path builds or executes NEMO.
 
 Retained output can be re-admitted without rebuilding or running NEMO by
 setting `R328_EXISTING_RUN` to its path under this round's `refused/` directory

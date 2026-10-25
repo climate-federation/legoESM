@@ -1,68 +1,55 @@
 --- traldf_iso_scheme.h90
 +++ traldf_iso_scheme.h90
-@@ -56,6 +56,16 @@
+@@ -56,6 +56,11 @@
                 END_2D
              ENDIF
  	    !
 +#if defined iso_lap
-+            IF(r333_ldf_active) THEN ! R333_LDF_OBSERVER
-+               DO_2D(INN+1,INN+1,INN+1,INN+1) ! R333_LDF_OBSERVER
-+                  r333_dit(ji,jj,jk,jn)=zdit(ji,jj,ik) ! R333_LDF_OBSERVER
-+                  r333_djt(ji,jj,jk,jn)=zdjt(ji,jj,ik) ! R333_LDF_OBSERVER
-+                  r333_dkt(ji,jj,jk,jn)=zdkt(ji,jj,ik) ! R333_LDF_OBSERVER
-+                  IF(jk==jpkm1) r333_dkt(ji,jj,jpk,jn)=zdkt(ji,jj,ikp1) ! R333_LDF_OBSERVER
-+               END_2D ! R333_LDF_OBSERVER
-+            ENDIF ! R333_LDF_OBSERVER
++            CALL r333_ldf_grad(jn,jk,ntsi-(inn+1),ntei+(inn),ntsj-(inn+1),ntej+(inn), & ! R333_LDF_OBSERVER
++               & zdit(ntsi-(inn+1):ntei+(inn),ntsj-(inn+1):ntej+(inn),ik),zdjt(ntsi-(inn+1):ntei+(inn),ntsj-(inn+1):ntej+(inn),ik), & ! R333_LDF_OBSERVER
++               & ntsi-(inn+1),ntei+(inn+1),ntsj-(inn+1),ntej+(inn+1),zdkt(T2D(INN+1),ik),zdkt(T2D(INN+1),ikp1)) ! R333_LDF_OBSERVER
 +#endif
              !!----------------------------------------------------------------------
              !                             (  A11   0   A13  )      
              !  rotation matrix        A = (   0   A22  A23  )
-@@ -88,6 +98,15 @@
-                zfv(ji,jj) = ahtv(ji,jj,jk)                                                                       &   ! v-masked
+@@ -90,6 +95,10 @@
                    &       * (   zA22 * zdjt(ji,jj,ik) + zA23 * (  ( zdkt(ji,jj+1,ik  ) + zdkt(ji,jj,ikp1) )      &
                    &                                             + ( zdkt(ji,jj+1,ikp1) + zdkt(ji,jj,ik  ) )  )   )
-+#if defined iso_lap
-+               IF(r333_ldf_active) THEN ! R333_LDF_OBSERVER
-+                  r333_A11(ji,jj,jk,jn)=zA11; r333_A22(ji,jj,jk,jn)=zA22 ! R333_LDF_OBSERVER
-+                  r333_A13(ji,jj,jk,jn)=zA13; r333_A23(ji,jj,jk,jn)=zA23 ! R333_LDF_OBSERVER
-+                  r333_hmsku(ji,jj,jk,jn)=zmsku; r333_hmskv(ji,jj,jk,jn)=zmskv ! R333_LDF_OBSERVER
-+                  r333_fu(ji,jj,jk,jn)=zfu(ji,jj); r333_fv(ji,jj,jk,jn)=zfv(ji,jj) ! R333_LDF_OBSERVER
-+                  r333_horizontal_seen(ji,jj,jk,jn)=1._wp ! R333_LDF_OBSERVER
-+               ENDIF ! R333_LDF_OBSERVER
-+#endif
              END_2D
++#if defined iso_lap
++            CALL r333_ldf_horizontal(jn,jk,ntsi-(inn+1),ntei+(inn),ntsj-(inn+1),ntej+(inn), & ! R333_LDF_OBSERVER
++               & zfu(T2D(INN+1)),zfv(T2D(INN+1))) ! R333_LDF_OBSERVER
++#endif
  !!gm
  !!gm OPTIM???    also verify the usage of akz ah_wslp2 in trazdf !!!
-@@ -148,6 +167,17 @@
-                      &                   + ( zfw(ji,jj) - zfw_kp1      )  )   & 
-                      &                 * r1_e1e2t(ji,jj) / e3t(ji,jj,jk,Kmm)
-                   !
+ !!gm
+@@ -105,5 +114,9 @@
+             IF( 1 <= jk .AND. jk <= jpk-2 ) THEN      ! ocean level except the deepest one (jpkm1)
+                !
 +#if defined iso_lap
-+                  IF(r333_ldf_active) THEN ! R333_LDF_OBSERVER
-+                     r333_vmsku(ji,jj,jk,jn)=zmsku; r333_vmskv(ji,jj,jk,jn)=zmskv ! R333_LDF_OBSERVER
-+                     r333_ahu_w(ji,jj,jk,jn)=zahu_w; r333_ahv_w(ji,jj,jk,jn)=zahv_w ! R333_LDF_OBSERVER
-+                     r333_A31(ji,jj,jk,jn)=zA31; r333_A32(ji,jj,jk,jn)=zA32 ! R333_LDF_OBSERVER
-+                     r333_fw_lower(ji,jj,jk,jn)=zfw(ji,jj) ! R333_LDF_OBSERVER
-+                     r333_fw_upper(ji,jj,jk,jn)=zfw_kp1 ! R333_LDF_OBSERVER
-+                     r333_vertical_seen(ji,jj,jk,jn)=1._wp ! R333_LDF_OBSERVER
-+                     r333_rhs_seen(ji,jj,jk,jn)=1._wp ! R333_LDF_OBSERVER
-+                  ENDIF ! R333_LDF_OBSERVER
++               CALL r333_ldf_vertical_before(jn,jk,ntsi-(inn),ntei+(inn),ntsj-(inn),ntej+(inn), & ! R333_LDF_OBSERVER
++                  & zfw(T2D(INN)),pt(ntsi-(inn):ntei+(inn),ntsj-(inn):ntej+(inn),jk,jn,Krhs)) ! R333_LDF_OBSERVER
 +#endif
-                   zfw(ji,jj) = zfw_kp1          !==  Store zfw for next level calculation  ==!
+                DO_2D( INN, INN, INN, INN )
+                   !                             !==  Vertical fluxes at jpk+1  ==!   used elements: ( A31  A32  and explicit part of A33 )
                    !
-                END_2D
-@@ -168,6 +196,15 @@
+@@ -157,1 +170,9 @@
++#if defined iso_lap
++               CALL r333_ldf_vertical_after(jn,jk,ntsi-(inn),ntei+(inn),ntsj-(inn),ntej+(inn), & ! R333_LDF_OBSERVER
++                  & zfw(T2D(INN)),pt(ntsi-(inn):ntei+(inn),ntsj-(inn):ntej+(inn),jk,jn,Krhs)) ! R333_LDF_OBSERVER
++#endif
+             ELSEIF( jk == jpkm1 ) THEN                ! level jpkm1   (zfw_kp1 at jpk always zero)
++#if defined iso_lap
++               CALL r333_ldf_vertical_before(jn,jk,ntsi-(inn),ntei+(inn),ntsj-(inn),ntej+(inn), & ! R333_LDF_OBSERVER
++                  & zfw(T2D(INN)),pt(ntsi-(inn):ntei+(inn),ntsj-(inn):ntej+(inn),jk,jn,Krhs)) ! R333_LDF_OBSERVER
++#endif
+@@ -169,6 +190,10 @@
                       &                 * r1_e1e2t(ji,jj) / e3t(ji,jj,jk,Kmm)
                 END_2D
                 !
 +#if defined iso_lap
-+               IF(r333_ldf_active) THEN ! R333_LDF_OBSERVER
-+                  DO_2D(INN,INN,INN,INN) ! R333_LDF_OBSERVER
-+                     r333_fw_lower(ji,jj,jk,jn)=zfw(ji,jj); r333_fw_upper(ji,jj,jk,jn)=0._wp ! R333_LDF_OBSERVER
-+                     r333_vertical_seen(ji,jj,jk,jn)=1._wp ! R333_LDF_OBSERVER
-+                     r333_rhs_seen(ji,jj,jk,jn)=1._wp ! R333_LDF_OBSERVER
-+                  END_2D ! R333_LDF_OBSERVER
-+               ENDIF ! R333_LDF_OBSERVER
++               CALL r333_ldf_bottom_after(jn,jk,ntsi-(inn),ntei+(inn),ntsj-(inn),ntej+(inn), & ! R333_LDF_OBSERVER
++                  & pt(ntsi-(inn):ntei+(inn),ntsj-(inn):ntej+(inn),jk,jn,Krhs)) ! R333_LDF_OBSERVER
 +#endif
  	    ENDIF
              !
