@@ -228,13 +228,19 @@ def classify(insn: dict, opt: dict[str, list[str]], cun: dict[str, list[str]]) -
             return re.sub(r"\s", "", odefs.get(op, "")) == re.sub(r"\s", "", src_name)
         return op == src_name or _base(op) == src_name
 
-    hits = [
-        (lhs, (a, b), k)
-        for lhs, a, b in stmts
-        if dst in (lhs, a, b)
-        for k, op in enumerate((a, b))
-        if is_src(op) and (a, b)[1 - k] != op
-    ]
+    def hits_where(dst_ok):
+        return [
+            (lhs, (a, b), k)
+            for lhs, a, b in stmts
+            if dst_ok(lhs, a, b)
+            for k, op in enumerate((a, b))
+            if is_src(op) and (a, b)[1 - k] != op
+        ]
+
+    # The asm destination names the result when it can; only then fall back to an input.
+    hits, match = hits_where(lambda lhs, a, b: dst == lhs), "result"
+    if not hits:
+        hits, match = hits_where(lambda lhs, a, b: dst in (a, b)), "input"
     if len(hits) != 1:
         return {**insn, "status": "UNMATCHED", "candidates": stmts}
     lhs, ops, k = hits[0]
@@ -251,6 +257,7 @@ def classify(insn: dict, opt: dict[str, list[str]], cun: dict[str, list[str]]) -
     return {
         **insn,
         "status": "MATCHED",
+        "matched_by": match,
         "gimple": f"{lhs} = {kind}_EXPR <{ops[0]}, {ops[1]}>",
         "kind": kind,
         "keeps": express(ops[k], defs),

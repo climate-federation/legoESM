@@ -4900,14 +4900,18 @@ def si3_ice_cons_hsm_sums(
         "area": sr(fortran_sum0(sr(g["a_i"] + _CONS_EPSI10)) * e1e2t),  # :134
     }
     out = {k: si3_glob_2dsum_ddpdd(v, smask0_i, nn_hls=nn_hls) for k, v in cells.items()}  # :141 glob_2Dsum (DDPDD)
+    # glob_2Dmax/min: masked by smask0_i == 1 from -/+HUGE (lib_fortran.f90:430-463, :967-1000)
     h = int(nn_hls)
     inner = (slice(h, -h), slice(h, -h))
-    out["max_concentration"] = jnp.max(fortran_sum0(g["a_i"])[inner])  # :137, :142
-    for key, field in (("v_i", g["v_i"]), ("v_s", g["v_s"]), ("v_ip", g["v_ip"]), ("v_il", g["v_il"]),
-                       ("a_i", g["a_i"]), ("s_i", zsv_i)):  # :146-157
-        out[f"min_{key}"] = jnp.min(field[inner])
-    out["min_e_i"] = jnp.min(g["e_i"][inner])
-    out["min_e_s"] = jnp.min(g["e_s"][inner])
+    keep = jnp.asarray(smask0_i)[inner] == 1
+    huge = jnp.finfo(jnp.float64).max
+    out["max_concentration"] = jnp.max(jnp.where(keep, fortran_sum0(g["a_i"])[inner], -huge))  # :137, :142
+    cell_min = {k: jnp.min(g[k], axis=-1) for k in ("v_i", "v_s", "v_ip", "v_il", "a_i")}  # :146-151
+    cell_min["s_i"] = jnp.min(zsv_i, axis=-1)
+    cell_min["e_i"] = jnp.min(g["e_i"], axis=(-2, -1))
+    cell_min["e_s"] = jnp.min(g["e_s"], axis=(-2, -1))
+    for key, field in cell_min.items():  # :157
+        out[f"min_{key}"] = jnp.min(jnp.where(keep, field[inner], huge))
     return out
 
 

@@ -238,7 +238,7 @@ def o6_cor_adapter(sst_m):
 def run_arm(seed, card, state, target, arm: str, sst_m, *, murdg_scale: float = 1.0):
     saved_rdg, saved_cor = recipe.apply_si3_jpl1_ridging, recipe._ice_cor
     try:
-        if arm in ("o6_rdgrft", "o6_rdgrft_cor"):
+        if arm in ("o6_rdgrft", "o6_rdgrft_cor", "o6_rdgrft_planted"):
             recipe.apply_si3_jpl1_ridging = o6_ridging_adapter(card, sst_m, murdg_scale=murdg_scale)
         if arm == "o6_rdgrft_cor":
             recipe._ice_cor = o6_cor_adapter(sst_m)
@@ -282,11 +282,12 @@ def run_probe(root: Path, restart_root: Path, *, plant: bool = False) -> tuple[d
         moments=seed.trajectory._restart_moments(entry_restart, card)
     )
     sst_m = recipe._periodic_halo(sst_c.T)
-    # plant: O6 rn_murdg moved by 1e-10 (rn_hstar does not bind: hrmin = 2*zhi below ~2.8 m)
-    murdg_scale = 1.0 + 1.0e-10 if plant else 1.0
     arms = {}
-    for arm in ARMS:
-        rows, _ = run_arm(seed, card, state, target, arm, sst_m, murdg_scale=murdg_scale)
+    # The plant arm (rn_murdg moved by 1e-10) runs beside the clean arms in the same
+    # invocation; rn_hstar does not bind here (hrmin = 2*zhi below about 2.8 m).
+    for arm in ARMS + (("o6_rdgrft_planted",) if plant else ()):
+        scale = 1.0 + 1.0e-10 if arm == "o6_rdgrft_planted" else 1.0
+        rows, _ = run_arm(seed, card, state, target, arm, sst_m, murdg_scale=scale)
         arms[arm] = {"summary": summarize(rows), "rows": rows}
     exact = {
         a: v["summary"]["bit_exact_rows"] == v["summary"]["informative_rows"]
@@ -301,8 +302,9 @@ def run_probe(root: Path, restart_root: Path, *, plant: bool = False) -> tuple[d
         "arms": arms,
         "all_informative_rows_bit_exact": exact,
     }
-    planted_moved = exact["lane3"] and not exact["o6_rdgrft"] and not exact["o6_rdgrft_cor"]
-    code = 0 if (planted_moved if plant else exact["lane3"]) else 1
+    clean = all(exact[a] for a in ARMS)
+    passed = (clean and not exact["o6_rdgrft_planted"]) if plant else exact["lane3"]
+    code = 0 if passed else 1
     return report, code
 
 

@@ -491,14 +491,32 @@ _E1E2T = np.random.default_rng(7).uniform(0.5e10, 2.0e10, (JPI, JPJ))  # non-uni
 _RN_ICECHK_GLO = 1.0e-4  # namelist_ice_ref rn_icechk_glo
 
 
-def _cons_sums(st):
+def _cons_sums(st, smask0_i=None):
     """NEMO's ice_cons_hsm zchk3 for a state; fluxes the rung does not touch are zero."""
     from legoesm.ice import si3_orca2_state as o
     g = st._asdict()
     names = o.SI3_CONS_HSM_MASS_FLUXES + o.SI3_CONS_HSM_SALT_FLUXES + o.SI3_CONS_HSM_HEAT_ADDED + o.SI3_CONS_HSM_HEAT_REMOVED
     fluxes = {n: g.get(n, jnp.zeros((JPI, JPJ))) for n in names}
-    return o.si3_ice_cons_hsm_sums(g, fluxes, e1e2t=_E1E2T, smask0_i=np.ones((JPI, JPJ)), nn_hls=NN_HLS,
+    mask = np.ones((JPI, JPJ)) if smask0_i is None else smask0_i
+    return o.si3_ice_cons_hsm_sums(g, fluxes, e1e2t=_E1E2T, smask0_i=mask, nn_hls=NN_HLS,
                                    rhoi=K.rho_ice, rhos=K.rho_snow, rhow=RHOW)
+
+
+def test_cons_hsm_extrema_and_sums_honour_smask0_i():
+    """glob_2Dsum/min/max skip smask0_i /= 1 cells (lib_fortran.f90:430-463, :967-1000, :1545-1580)."""
+    c, amax, sst, sss = _cor_inputs()
+    st = SI3IceCorState(**{k: jnp.asarray(c[k]) for k in SI3IceCorState._fields})
+    bad = np.asarray(st.v_i).copy()
+    bad[NN_HLS + 1, NN_HLS + 2, :] = -2.0
+    a = np.asarray(st.a_i).copy()
+    a[NN_HLS + 1, NN_HLS + 2, :] = 0.5  # at_i = 2.5 > amax
+    planted = st._replace(v_i=jnp.asarray(bad), a_i=jnp.asarray(a))
+    mask = np.ones((JPI, JPJ))
+    mask[NN_HLS + 1, NN_HLS + 2] = 0.0
+    seen, hidden = _cons_sums(planted), _cons_sums(planted, mask)
+    assert float(seen["min_v_i"]) == -2.0 and float(seen["max_concentration"]) == 2.5
+    assert float(hidden["min_v_i"]) >= 0.0 and float(hidden["max_concentration"]) < 2.5
+    assert float(hidden["mass"]) != float(seen["mass"])
 
 
 def _cons_check(s0, s1, routine):
@@ -799,28 +817,40 @@ def test_closing_rate_nan_takes_the_record_survivor():
 def test_856_copy_dependence_is_unobservable():
     """:856 keeps phrmin in one compiled copy and hi_max(jl2-1) in the other.
 
-    The bits can differ only on phrmin = -0 against hi_max(0) = +0.  Feeding the
-    shift both signs of zero for phrmin (with the :855 branch forced open) gives
-    the same output bits, so the copy that runs cannot be told apart.
+    The bits can differ only on phrmin = -0 against hi_max(0) = +0.  The shift is
+    run as written (keeps phrmin) and with that one call's operands swapped (the
+    other copy), with phrmin = -0 and the :855 branch forced open: every output
+    bit agrees, so which copy runs cannot be observed.
     """
+    import inspect
+    import textwrap
+
+    line = "hL = fmax(hmin1, lo)  # :856"
+    src = textwrap.dedent(inspect.getsource(rdg_mod._rdgrft_shift))
+    assert src.count(line) == 1
+    namespace = dict(rdg_mod.__dict__)
+    exec(compile(src.replace(line, "hL = fmax(lo, hmin1)  # :856"), "<856-other-copy>", "exec"), namespace)
+    other_copy = namespace["_rdgrft_shift"]
+
     s, divu, delta, sst, sss = _inputs()
     st = {k: jnp.asarray(v, jnp.float64) for k, v in s.items()}
     zdivu, zdelt = jnp.asarray(divu), jnp.asarray(delta)
     cn = 0.5 * 0.5 * (zdelt - jnp.abs(zdivu)) - jnp.minimum(zdivu, 0.0)
-    prep = rdg_mod._rdgrft_prep(st["a_i"], st["v_i"], st["ato_i"], cn, cn + zdivu, RDG_CFG)
-    apartf, aridge, araft, phi, hraft, hrmin, hrmax, hrexp, cg, opning = prep
+    prep = list(rdg_mod._rdgrft_prep(st["a_i"], st["v_i"], st["ato_i"], cn, cn + zdivu, RDG_CFG))
+    prep[5] = prep[5].at[..., 0].set(-0.0)  # phrmin = -0
+    prep[6] = prep[6].at[..., 0].set(0.3)  # phrmax > hi_max(0): branch taken, hL = MAX(-0, +0)
     cells = jnp.asarray(np.ones((JPI, JPJ), bool)).at[:NN_HLS].set(False).at[:, :NN_HLS].set(False)
-    outs = []
-    for zero in (0.0, -0.0):
-        hmin = hrmin.at[..., 0].set(zero)
-        hmax = hrmax.at[..., 0].set(0.3)  # > hi_max(0): branch taken, hL = MAX(+-0, +0)
-        p = (apartf, aridge, araft, phi, hraft, hmin, hmax, hrexp, cg, opning)
-        outs.append(rdg_mod._rdgrft_shift(st, cells, p, jnp.asarray(sst), jnp.asarray(sss), jnp.asarray(HI_MAX), RDG_CFG))
-    assert math.copysign(1.0, float(si3_surface.fortran_max_tie_first(jnp.asarray(-0.0), 0.0))) == -1.0
-    for k in outs[0]:
-        np.testing.assert_array_equal(_bits(outs[0][k]), _bits(outs[1][k]), err_msg=k)
+    args = (st, cells, tuple(prep), jnp.asarray(sst), jnp.asarray(sss), jnp.asarray(HI_MAX), RDG_CFG)
+    fmax = si3_surface.fortran_max_tie_first
+    assert math.copysign(1.0, float(fmax(jnp.asarray(-0.0), 0.0))) == -1.0  # the two copies' hL differ
+    assert math.copysign(1.0, float(fmax(jnp.asarray(0.0), -0.0))) == 1.0
+    written, swapped = rdg_mod._rdgrft_shift(*args), other_copy(*args)
+    assert np.asarray(written["a_i"] != st["a_i"]).any()  # the branch really redistributed
+    for k in written:
+        np.testing.assert_array_equal(_bits(written[k]), _bits(swapped[k]), err_msg=k)
 
 
+_ARITH_UFUNCS = {"add", "subtract", "multiply", "divide", "true_divide", "power", "square", "fma"}
 _SR_SCALARS = {"cfg", "config", "rdt", "r1", "r1_nlay", "jl", "jl1", "jl2", "jk", "k", "jpl", "nn_hls",
                "snw_r", "snw_f", "pnd_r", "pnd_f", "z1_astar"}
 
@@ -842,18 +872,28 @@ def _unbarriered(src: str, names):
     for fn in _functions(src, names):
         parents = {c: p for p in ast.walk(fn) for c in ast.iter_child_nodes(p)}
         for node in ast.walk(fn):
+            if isinstance(node, ast.AugAssign) and not scalar(node):  # x += y is never wrapped
+                bad.append(f"{fn.name}:{node.lineno}: {ast.get_source_segment(src, node)}")
+                continue
             div = isinstance(node, ast.Call) and getattr(node.func, "id", "") == "si3_safe_div"
-            arith = isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div))
-            if not (div or arith) or (arith and scalar(node)):
+            ufunc = isinstance(node, ast.Call) and getattr(node.func, "attr", "") in _ARITH_UFUNCS
+            arith = isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow))
+            if not (div or arith or ufunc) or ((arith or ufunc) and scalar(node)):
                 continue
             up = parents.get(node)
             if isinstance(up, (ast.Subscript, ast.Slice)) or (isinstance(up, ast.Call) and getattr(up.func, "id", "") in ("range", "len")):
                 continue
             wrapped = isinstance(up, ast.Call) and getattr(up.func, "id", "") == "sr"
-            inner_div = arith and isinstance(up, ast.Call) and getattr(up.func, "id", "") == "si3_safe_div"
+            inner_div = (arith or ufunc) and isinstance(up, ast.Call) and getattr(up.func, "id", "") == "si3_safe_div"
             if not (wrapped or inner_div):
                 bad.append(f"{fn.name}:{node.lineno}: {ast.get_source_segment(src, node)}")
     return bad
+
+
+def test_barrier_sweep_sees_every_arithmetic_form():
+    probe = "def f(x, y):\n    z = sr(x * y)\n    z += y\n    w = jnp.multiply(x, y)\n    v = x ** 2\n    return sr(z + w) + v\n"
+    bad = _unbarriered(probe, ("f",))
+    assert [b.split(": ", 1)[1] for b in bad] == ["z += y", "jnp.multiply(x, y)", "x ** 2", "sr(z + w) + v"]
 
 
 def test_every_array_operation_is_source_rounded():
