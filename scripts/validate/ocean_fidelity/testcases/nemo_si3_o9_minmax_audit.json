@@ -1,0 +1,1131 @@
+{
+ "build": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE_O7_REF/BLD",
+ "flags": [
+  "-fdefault-real-8",
+  "-O3",
+  "-funroll-all-loops",
+  "-fcray-pointer",
+  "-ffree-line-length-none",
+  "-fallow-argument-mismatch",
+  "-fno-tree-vectorize"
+ ],
+ "objects": {
+  "icethd": {
+   "instructions_without_token": [],
+   "ppsrc_sha256": "b74357d35d91bb2f2d256ed25581a4e3802050915de80dd44c376f2e70495a16",
+   "record_object_sha256": "8d7dab03212342827433a378e887c830932e1c711a430c3738d4abf2dd1fc8e4",
+   "routines": {
+    "ice_thd_temp": [
+     267,
+     293
+    ]
+   },
+   "sign_tokens": [],
+   "sites": {
+    "285": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      },
+      {
+       "count": 1,
+       "dst": "-",
+       "op": "sqrtsd",
+       "src": "-"
+      }
+     ],
+     "statement": "zccc          = SQRT( MAX( zbbb * zbbb - 4._wp * rcpi * rLfus * ztmelts, 0._wp ) )",
+     "tokens": [
+      "MAX",
+      "SQRT"
+     ]
+    }
+   },
+   "token_statements_without_instruction": {}
+  },
+  "icethd_dh": {
+   "instructions_without_token": [
+    "228",
+    "295"
+   ],
+   "ppsrc_sha256": "87ebe0b13b6462ea11c0b9d1bce002532bc81ebc92f288ecde6c8ed6462097e4",
+   "record_object_sha256": "cbf470998cd42ac64247ae02ea60ae18907aebb4e836545f377d52840615c34b",
+   "routines": {
+    "ice_thd_dh": [
+     44,
+     543
+    ],
+    "snw_ent": [
+     545,
+     623
+    ]
+   },
+   "sign_tokens": [],
+   "sites": {
+    "128": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zq_top = MAX( 0._wp, qml_ice_1d(ji) * rDt_ice )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "130": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zq_bot = MAX( 0._wp, zf_tt * rDt_ice )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "170": {
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "h_s_1d  (ji) = MAX( 0._wp, h_s_1d  (ji) - zh_s(jk) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "180": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "ze_s(0) = MAX( 0._wp, - qprec_ice_1d(ji) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "194": {
+     "instructions": [
+      {
+       "count": 2,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "zdeltah    = MAX( - evap_ice_1d(ji) * r1_rhos * rDt_ice, - h_s_1d(ji) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "200": {
+     "instructions": [
+      {
+       "count": 3,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "zdum = MAX( -zh_s(jk), zdeltah )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "206": {
+     "instructions": [
+      {
+       "count": 3,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "h_s_1d(ji) = MAX( 0._wp , h_s_1d(ji) + zdum )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "207": {
+     "instructions": [
+      {
+       "count": 3,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zh_s  (jk) = MAX( 0._wp , zh_s  (jk) + zdum )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "211": {
+     "instructions": [
+      {
+       "count": 3,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zdeltah = MIN( zdeltah - zdum, 0._wp )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "221": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "CONST:0x1.79ca10c924223p-67",
+       "op": "maxsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "zdum = - zq_top / MAX( ze_s(jk), epsi20 )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "228": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "dh_s_sum(ji) =              dh_s_sum(ji) + zdum",
+     "tokens": []
+    },
+    "229": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zq_top       = MAX( 0._wp , zq_top       + zdum * ze_s(jk) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "230": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "h_s_1d  (ji) = MAX( 0._wp , h_s_1d  (ji) + zdum )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "231": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zh_s    (jk) = MAX( 0._wp , zh_s    (jk) + zdum )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "251": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zdum           = MIN( 0._wp , - zh_i(jk) )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "272": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zdum           = MIN( 0._wp , MAX( zdum , - zh_i(jk) ) )",
+     "tokens": [
+      "MAX",
+      "MIN"
+     ]
+    },
+    "274": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zq_top         = MAX( 0._wp , zq_top - zdum * rhoi * zdE )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "289": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zh_i  (jk) = MAX( 0._wp, zh_i  (jk) + zdum )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "290": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "h_i_1d(ji) = MAX( 0._wp, h_i_1d(ji) + zdum )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "295": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "zh_i_old(jk) = zh_i_old(jk) + zdum",
+     "tokens": []
+    },
+    "310": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zh_i  (jk)   = MAX( 0._wp, zh_i  (jk) + zdum )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "311": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "h_i_1d(ji)   = MAX( 0._wp, h_i_1d(ji) + zdum )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "348": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "CONST:-0x1.b7cdfd9d7bdbbp-34"
+      }
+     ],
+     "statement": "zEi            = rcpi * ( zt_i_new - (ztmelts+rt0) ) - rLfus * MAX( 0._wp, 1.0 - ztmelts / ( MIN( zt_i_new - rt0, -epsi10 ) ) ) + rcp * ztmelts",
+     "tokens": [
+      "MAX",
+      "MIN"
+     ]
+    },
+    "355": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "dh_i_bog(ji)   = rDt_ice * MAX( 0._wp , zf_tt / ( zdE * rhoi ) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "388": {
+     "instructions": [
+      {
+       "count": 4,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zdum           = MIN( 0._wp , - zh_i(jk) )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "409": {
+     "instructions": [
+      {
+       "count": 4,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 4,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zdum           = MIN( 0._wp , MAX( zdum, - zh_i(jk) ) )",
+     "tokens": [
+      "MAX",
+      "MIN"
+     ]
+    },
+    "411": {
+     "instructions": [
+      {
+       "count": 4,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zq_bot         = MAX( 0._wp , zq_bot - zdum * rhoi * zdE )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "426": {
+     "instructions": [
+      {
+       "count": 4,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zh_i  (jk) = MAX( 0._wp, zh_i  (jk) + zdum )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "427": {
+     "instructions": [
+      {
+       "count": 4,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "h_i_1d(ji) = MAX( 0._wp, h_i_1d(ji) + zdum )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "456": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "dh_snowice(ji) = MAX( 0._wp , ( rhos * h_s_1d(ji) + (rhoi-rho0) * h_i_1d(ji) ) * z1_rho )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "490": {
+     "instructions": [
+      {
+       "count": 4,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "zdum        = MIN( zdeltah, zh_s(jk) )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "491": {
+     "instructions": [
+      {
+       "count": 4,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zh_s(jk)    = MAX( 0._wp, zh_s(jk) - zdum )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "494": {
+     "instructions": [
+      {
+       "count": 4,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zdeltah     = MAX( 0._wp, zdeltah - zdum )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "525": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "CONST:0x1.b7cdfd9d7bdbbp-34"
+      }
+     ],
+     "statement": "zds    =       ( zs_sni   - s_i_1d(ji) ) * dh_snowice(ji) / MAX( epsi10, h_i_1d(ji) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "619": {
+     "instructions": [
+      {
+       "count": 2,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "CONST:0x1.79ca10c924223p-67"
+      },
+      {
+       "count": 16,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "snw_ent(jk1) = MAX( 0._wp, zeh_cum1(jk1) - zeh_cum1(jk1-1) ) / MAX( zhnew, epsi20 )",
+     "tokens": [
+      "MAX",
+      "MAX"
+     ]
+    }
+   },
+   "token_statements_without_instruction": {
+    "222": {
+     "statement": "zdum = MAX( zdum , - zh_s(jk) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "300": {
+     "statement": "zdum               = MAX( - zh_i(jk) , - zevap_rema * r1_rhoi )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "526": {
+     "statement": "zds    = zds + ( zs_i_new - s_i_1d(ji) ) * dh_i_bog  (ji) / MAX( epsi10, h_i_1d(ji) )",
+     "tokens": [
+      "MAX"
+     ]
+    }
+   }
+  },
+  "icethd_zdf": {
+   "instructions_without_token": [],
+   "ppsrc_sha256": "b96d344ddbd9b89b201b61398c136693187e149e5fc54727481b4b31bdaf590a",
+   "record_object_sha256": "0b9666497859720966556984a8d8d9eb313734fb0612f006aae679b8121c9346",
+   "routines": {
+    "ice_thd_zdf": [
+     102,
+     126
+    ]
+   },
+   "sign_tokens": [],
+   "sites": {},
+   "token_statements_without_instruction": {}
+  },
+  "icethd_zdf_bl99": {
+   "instructions_without_token": [],
+   "ppsrc_sha256": "67ace0d7db76f40f1f64930551870da8751a1d553b8b69d59d83aa25ca64411a",
+   "record_object_sha256": "242addb5df963ffbd125bf02ef97fc913acb0be3dcb611c387a98bffdaf4f7e2",
+   "routines": {
+    "ice_thd_zdf_BL99": [
+     44,
+     881
+    ]
+   },
+   "sign_tokens": [],
+   "sites": {
+    "173": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "CONST:0x1.0624dd2f1a9fcp-10"
+      }
+     ],
+     "statement": "zh_i  (ji) = MAX( zh_min , h_i_1d(ji) ) * r1_nlay_i",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "181": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "CONST:0x1.0624dd2f1a9fcp-10"
+      }
+     ],
+     "statement": "zh_s  (ji) = MAX( zh_min , h_s_1d(ji) ) * r1_nlay_s",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "202": {
+     "instructions": [
+      {
+       "count": 15,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "t_su_1d    (1:npti) = MIN( t_su_1d(1:npti), rt0 - ztsu_err )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "219": {
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zradtr_s(ji,jk) = zradtr_s(ji,0) * EXP( - zraext_s(ji) * MAX( 0._wp, zh_s(ji) * REAL(jk) - zhs_ssl ) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "229": {
+     "instructions": [
+      {
+       "count": 6,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "zradtr_i(ji,jk) =           za_s_fra(ji)   * zradtr_s(ji,nlay_s) * EXP( - rn_kappa_i * MAX( 0._wp, zh_i(ji) * REAL(jk) - zh_min  ) ) + ( 1._wp - za_s_fra(ji) ) * qtr_ice_top_1d(ji) * EXP( - rn_kappa_i * MAX( 0._wp, zh_i(ji) * REAL(jk) - zhi_ssl ) )",
+     "tokens": [
+      "MAX",
+      "MAX"
+     ]
+    },
+    "261": {
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "CONST:-0x1.b7cdfd9d7bdbbp-34"
+      }
+     ],
+     "statement": "ztcond_i_cp(ji,0)      = rcnd_i + zbeta * sz_i_1d(ji,1)      / MIN( -epsi10, t_i_1d(ji,1) - rt0 )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "262": {
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "CONST:-0x1.b7cdfd9d7bdbbp-34"
+      }
+     ],
+     "statement": "ztcond_i_cp(ji,nlay_i) = rcnd_i + zbeta * sz_i_1d(ji,nlay_i) / MIN( -epsi10, t_bo_1d(ji)  - rt0 )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "266": {
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "CONST:-0x1.b7cdfd9d7bdbbp-34"
+      }
+     ],
+     "statement": "ztcond_i_cp(ji,jk) = rcnd_i + zbeta * 0.5_wp * ( sz_i_1d(ji,jk) + sz_i_1d(ji,jk+1) ) / MIN( -epsi10, 0.5_wp * (  t_i_1d(ji,jk) +  t_i_1d(ji,jk+1) ) - rt0 )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "274": {
+     "instructions": [
+      {
+       "count": 3,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "CONST:-0x1.b7cdfd9d7bdbbp-34"
+      }
+     ],
+     "statement": "ztcond_i_cp(ji,0)      = rcnd_i + 0.09_wp  *  sz_i_1d(ji,1)      / MIN( -epsi10, t_i_1d(ji,1) - rt0 ) - 0.011_wp * ( t_i_1d(ji,1) - rt0 )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "276": {
+     "instructions": [
+      {
+       "count": 3,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "CONST:-0x1.b7cdfd9d7bdbbp-34"
+      }
+     ],
+     "statement": "ztcond_i_cp(ji,nlay_i) = rcnd_i + 0.09_wp  *  sz_i_1d(ji,nlay_i) / MIN( -epsi10, t_bo_1d(ji)  - rt0 ) - 0.011_wp * ( t_bo_1d(ji) - rt0 )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "281": {
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "CONST:-0x1.b7cdfd9d7bdbbp-34"
+      }
+     ],
+     "statement": "ztcond_i_cp(ji,jk) = rcnd_i + 0.09_wp  *   0.5_wp * ( sz_i_1d(ji,jk) + sz_i_1d(ji,jk+1) ) / MIN( -epsi10, 0.5_wp * (  t_i_1d(ji,jk) +  t_i_1d(ji,jk+1) ) - rt0 ) - 0.011_wp * ( 0.5_wp * (  t_i_1d(ji,jk) +  t_i_1d(ji,jk+1) ) - rt0 )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "292": {
+     "instructions": [
+      {
+       "count": 15,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "CONST:0x1.999999999999ap-4"
+      }
+     ],
+     "statement": "IF ( .NOT. l_T_converged(ji) ) ztcond_i(ji,:) = MAX( zkimin, ztcond_i_cp(ji,:) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "309": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "CONST:0x1.0000000000000p+1"
+      }
+     ],
+     "statement": "IF( zhe >=  zepsilon * 0.5_wp * EXP(1._wp) ) zghe(ji) = MIN( 2._wp, 0.5_wp * ( 1._wp + LOG( 2._wp * zhe / zepsilon ) ) )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "353": {
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "CONST:0x1.b7cdfd9d7bdbbp-34"
+      }
+     ],
+     "statement": "zcpi = rcpi + zgamma * sz_i_1d(ji,jk) / MAX( ( t_i_1d(ji,jk) - rt0 ) * ( ztiold(ji,jk) - rt0 ), epsi10 )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "577": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "t_su_1d(ji) = MAX( MIN( t_su_1d(ji) , rt0 ) , rt0 - 100._wp )",
+     "tokens": [
+      "MAX",
+      "MIN"
+     ]
+    },
+    "582": {
+     "instructions": [
+      {
+       "count": 15,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 15,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "t_s_1d(ji,jk) = MAX( MIN( t_s_1d(ji,jk), rt0 ), rt0 - 100._wp )",
+     "tokens": [
+      "MAX",
+      "MIN"
+     ]
+    },
+    "583": {
+     "instructions": [
+      {
+       "count": 15,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "zdti_max      = MAX ( zdti_max , ABS( t_s_1d(ji,jk) - ztsb(jk) ) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "589": {
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "t_i_1d(ji,jk) =  MAX( MIN( t_i_1d(ji,jk), ztmelts ), rt0 - 100._wp )",
+     "tokens": [
+      "MAX",
+      "MIN"
+     ]
+    },
+    "590": {
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "zdti_max      =  MAX( zdti_max, ABS( t_i_1d(ji,jk) - ztib(jk) ) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "747": {
+     "instructions": [
+      {
+       "count": 15,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 15,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "t_s_1d(ji,jk) = MAX( MIN( t_s_1d(ji,jk), rt0 ), rt0 - 100._wp )",
+     "tokens": [
+      "MAX",
+      "MIN"
+     ]
+    },
+    "748": {
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "MIXED(VAR|ZERO)",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 1,
+       "dst": "ZERO",
+       "op": "maxsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "zdti_max      = MAX ( zdti_max , ABS( t_s_1d(ji,jk) - ztsb(jk) ) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "754": {
+     "instructions": [
+      {
+       "count": 8,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 8,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "t_i_1d(ji,jk) =  MAX( MIN( t_i_1d(ji,jk), ztmelts ), rt0 - 100._wp )",
+     "tokens": [
+      "MAX",
+      "MIN"
+     ]
+    },
+    "755": {
+     "instructions": [
+      {
+       "count": 1,
+       "dst": "MIXED(VAR|ZERO)",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "zdti_max      =  MAX ( zdti_max, ABS( t_i_1d(ji,jk) - ztib(jk) ) )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "800": {
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "CONST:0x1.b7cdfd9d7bdbbp-34"
+      }
+     ],
+     "statement": "t_su_1d(ji) = ( qcn_ice_top_1d(ji) +          isnow(ji)   * zkappa_s(ji,0) * zg1s * t_s_1d(ji,1) + ( 1._wp - isnow(ji) ) * zkappa_i(ji,0) * zg1  * t_i_1d(ji,1) ) / MAX( epsi10, isnow(ji) * zkappa_s(ji,0) * zg1s + ( 1._wp - isnow(ji) ) * zkappa_i(ji,0) * zg1 )",
+     "tokens": [
+      "MAX"
+     ]
+    },
+    "803": {
+     "instructions": [
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "VAR"
+      },
+      {
+       "count": 7,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "t_su_1d(ji) = MAX( MIN( t_su_1d(ji), rt0 ), rt0 - 100._wp )",
+     "tokens": [
+      "MAX",
+      "MIN"
+     ]
+    }
+   },
+   "token_statements_without_instruction": {
+    "578": {
+     "statement": "zdti_max    = MAX( zdti_max, ABS( t_su_1d(ji) - ztsub(ji) ) )",
+     "tokens": [
+      "MAX"
+     ]
+    }
+   }
+  },
+  "icevar": {
+   "instructions_without_token": [],
+   "ppsrc_sha256": "069d3750b10bd98d88884162b8b0038b9b179ff9a8e714e411dda785e883db27",
+   "record_object_sha256": "622e41afadb32a2d865309b997655006186d62554a293fd298859b0947b7d613",
+   "routines": {
+    "ice_var_enthalpy": [
+     940,
+     969
+    ],
+    "ice_var_snwblow_1d": [
+     1639,
+     1643
+    ],
+    "ice_var_vremap": [
+     971,
+     1048
+    ]
+   },
+   "sign_tokens": [],
+   "sites": {
+    "1045": {
+     "instructions": [
+      {
+       "count": 2,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "CONST:0x1.79ca10c924223p-67"
+      },
+      {
+       "count": 18,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      }
+     ],
+     "statement": "pts_i(jk1) = MAX( 0._wp, zts_cum1(jk1) - zts_cum1(jk1-1) ) / MAX( zhnew, epsi20 )",
+     "tokens": [
+      "MAX",
+      "MAX"
+     ]
+    },
+    "955": {
+     "instructions": [
+      {
+       "count": 3,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "VAR"
+      }
+     ],
+     "statement": "t_i_1d(ji,jk) = MIN( t_i_1d(ji,jk), ztmelts + rt0 )",
+     "tokens": [
+      "MIN"
+     ]
+    },
+    "957": {
+     "instructions": [
+      {
+       "count": 3,
+       "dst": "VAR",
+       "op": "maxsd",
+       "src": "ZERO"
+      },
+      {
+       "count": 3,
+       "dst": "VAR",
+       "op": "minsd",
+       "src": "CONST:-0x1.b7cdfd9d7bdbbp-34"
+      }
+     ],
+     "statement": "e_i_1d(ji,jk) = rhoi * ( rcpi  * ( ztmelts - ( t_i_1d(ji,jk) - rt0 ) ) + rLfus * MAX( 0._wp, 1._wp - ztmelts / MIN( t_i_1d(ji,jk) - rt0, -epsi10 ) ) - rcp   *   ztmelts )",
+     "tokens": [
+      "MAX",
+      "MIN"
+     ]
+    }
+   },
+   "token_statements_without_instruction": {}
+  }
+ }
+}

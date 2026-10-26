@@ -908,6 +908,8 @@ class SI3ZDFOutputs(NamedTuple):
     cnd_ice: jax.Array
     t1_ice: jax.Array
     t_si: jax.Array
+    # Picard passes this cell executed; NEMO's per-cell `tice_cvgstp_1d` (:596).
+    n_picard: jax.Array
 
 
 def _required(name, value):
@@ -1001,7 +1003,7 @@ def si3_ice_thd_zdf_bl99(
     )  # :871-878
     return SI3ZDFOutputs(core.t_su, ti_new, core.t_s, e_i_new, e_s_new,
                          core.qns_ice, qcn_top, qcn_bot, tr_bot, hfx_err_dif,
-                         hfx_dif, cnd_ice, t1_ice, t_si)
+                         hfx_dif, cnd_ice, t1_ice, t_si, core.iterations)
 
 
 

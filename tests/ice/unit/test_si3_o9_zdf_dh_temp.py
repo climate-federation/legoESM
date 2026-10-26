@@ -274,7 +274,8 @@ def oracle_zdf(c, nml):
                        / (rcnd_s * h_i * r1n + tcond[1] * h_s * r1m))
     else:
         out["t_si"] = t_su
-    out.update(t_su=t_su, t_i=t_i[1:], t_s=t_s[1:], e_i=e_i[1:], e_s=e_s[1:], qns_ice=qns, qtr_ice_bot=tri[n])
+    out.update(t_su=t_su, t_i=t_i[1:], t_s=t_s[1:], e_i=e_i[1:], e_s=e_s[1:], qns_ice=qns, qtr_ice_bot=tri[n],
+               n_picard=iconv)
     return out
 
 
@@ -666,7 +667,7 @@ def test_five_categories_bit_identical_to_independent_transcription():
             branch["ice_gone"] += d["h_i"] == 0.0
             branch["deposition"] += c["evap_ice"] < 0
             branch["warm_snow"] += max(z["t_s"]) > RT0
-            branch["picard>1"] += 1
+            branch["picard>1"] += z["n_picard"] > 1
     assert not [k for k, v in branch.items() if v == 0], branch
 
 

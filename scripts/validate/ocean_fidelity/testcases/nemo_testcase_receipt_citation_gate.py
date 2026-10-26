@@ -2270,14 +2270,14 @@ CITATION_MAP = {
     'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2b_year_gate.py:717-732': ['def _exact_1d_entry(', (')', 361), 16],
     'src/ICE/icevar.F90:354-360': ['s_i(ji,jj,jl) = sv_i(ji,jj,jl) / v_i(ji,jj,jl)', ('CALL ice_var_salprof   ! salinity profile', 2), 7],
     'C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90:368-374': ['s_i(ji,jj,jl) = sv_i(ji,jj,jl) / v_i(ji,jj,jl)', ('CALL ice_var_salprof   ! salinity profile', 2), 7],
-    'packages/core/legoesm/timestepping/tridiagonal.py:137-180': ['if operation_order in ("nemo_unnormalised", "nemo_unnormalised_unround', 'return jax.lax.convert_element_type(solution, out_dtype)', 44],
+    'packages/core/legoesm/timestepping/tridiagonal.py:137-179': ['if operation_order in ("nemo_unnormalised", "nemo_unnormalised_unround', 'return jax.lax.convert_element_type(solution, out_dtype)', 43],
     'docs/ice/fidelity/si3_r3_d5_preregister.md:40-42': ['1. **P1 (Step 1 — Reviewer reproduction)**:', '- **REFUTE**: Any of the counts (`1,811`, `7,385`, `26,202`, `1,625 ->', 3],
     'src/ICE/icevar.F90:362-379': ['ELSEIF( nn_icesal == 4 ) THEN', ('ENDIF', 18), 18],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2_gate.py:201-249': ['def _nemo_salprof(', (')', 128), 49],
     'scripts/validate/ocean_fidelity/testcases/nemo_si3thd_phase2_gate.py:252-286': ['def _entry_arrays(', (')', 148), 35],
     'scripts/validate/ocean_fidelity/testcases/nemo502_si3thd_MY_SRC/icethd_zdf_bl99.F90:571-595': [('t_i_1d(ji,nlay_i) = zindtbis(jm_max) / zdiagbis(jm_max)', 1), ('ENDIF', 22), 25],
     'C1D_OMIP_L3/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:544-567': [('t_i_1d(ji,nlay_i) = zindtbis(jm_max) / zdiagbis(jm_max)', 1), '&          ( isnow(ji) * t_s_1d(ji,1) + ( 1._wp - isnow(ji) ) * t_i_1d', 24],
-    'packages/core/legoesm/timestepping/tridiagonal.py:170-175': ['def unnormalised_backward(reverse_k, current):', (')', 52), 6],
+    'packages/core/legoesm/timestepping/tridiagonal.py:169-174': ['def unnormalised_backward(reverse_k, current):', (')', 53), 6],
     'src/ICE/icevar.F90:390-395': ['ze_i             =   e_i (ji,jj,jk,jl) / v_i(ji,jj,jl) * zlay_i       ', 't_i(ji,jj,jk,jl) = MAX( -100._wp , MIN( -( zbbb + zccc ) * 0.5_wp * r1', 6],
     'C1D_OMIP_L3/BLD/ppsrc/nemo/icevar.f90:404-409': ['ze_i             =   e_i (ji,jj,jk,jl) / v_i(ji,jj,jl) * zlay_i       ', 't_i(ji,jj,jk,jl) = MAX( -100._wp , MIN( -( zbbb + zccc ) * 0.5_wp * r1', 6],
     'src/ICE/icevar.F90:938-953': ['DO jk = 1, nlay_i             ! Sea ice energy of melting', ('END DO', 25), 16],
@@ -9780,13 +9780,13 @@ CITATION_MAP = {
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:201': ('CALL ice_thd_temp                     ! --- Temperature update --- !', 1),
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:203': 'CALL ice_thd_sal                      ! --- Ice salinity --- !',
     'packages/ice/legoesm/ice/bitz_lipscomb.py:532': 'def _si3_zdf_bl99_core(',
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:919': 'def si3_ice_thd_zdf_bl99(',
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1247': 'def _si3_ice_thd_dh_core(',
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1520': 'def si3_ice_thd_dh(*, fluxes: SI3DHFluxes, rDt_ice, rn_snwblow, rn_sinew,',
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1212': 'def _cumulative_remap(h_old, content_old, nlay, sr):',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:921': 'def si3_ice_thd_zdf_bl99(',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1249': 'def _si3_ice_thd_dh_core(',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1522': 'def si3_ice_thd_dh(*, fluxes: SI3DHFluxes, rDt_ice, rn_snwblow, rn_sinew,',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1214': 'def _cumulative_remap(h_old, content_old, nlay, sr):',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:522': 'IF( nn_icesal == 4 )   CALL ice_var_vremap( zh_i_old, zs_i_old, sz_i_1d(ji,:) )',
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1504': 'def si3_ice_thd_temp(*, h_i, e_i, sz_i, constants: IceConstantsConfig):',
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1554': 'def si3_ice_thd_category_stages(*, entry: dict, fluxes: SI3DHFluxes, namelist: dict,',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1506': 'def si3_ice_thd_temp(*, h_i, e_i, sz_i, constants: IceConstantsConfig):',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1556': 'def si3_ice_thd_category_stages(*, entry: dict, fluxes: SI3DHFluxes, namelist: dict,',
     'packages/ice/legoesm/ice/bitz_lipscomb.py:439': 'def _maxsd(dst, src):',
     'packages/ice/legoesm/ice/bitz_lipscomb.py:444': 'def _minsd(dst, src):',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:128': 'zq_top = MAX( 0._wp, qml_ice_1d(ji) * rDt_ice )',
@@ -9796,27 +9796,28 @@ CITATION_MAP = {
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:221': 'zdum = - zq_top / MAX( ze_s(jk), epsi20 )   ! thickness change',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:194': 'zdeltah    = MAX( - evap_ice_1d(ji) * r1_rhos * rDt_ice, - h_s_1d(ji) )   ! amount of snw that sublimates (<0) or deposition (>0)',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:300': 'zdum               = MAX( - zh_i(jk) , - zevap_rema * r1_rhoi )',
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1330': 'zdeltah = -_minsd(sr(sr(evap_ice * r1_rhos) * dt), h_s)',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1332': 'zdeltah = -_minsd(sr(sr(evap_ice * r1_rhos) * dt), h_s)',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:490': 'zdum        = MIN( zdeltah, zh_s(jk) )         ! amount of snw that floods, > 0',
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1469': 'zdum = _minsd(zh_s[jk], zdeltah)  # :490 emitted `minsd zdeltah, zh_s`',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1471': 'zdum = _minsd(zh_s[jk], zdeltah)  # :490 emitted `minsd zdeltah, zh_s`',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icevar.f90:955': 't_i_1d(ji,jk) = MIN( t_i_1d(ji,jk), ztmelts + rt0 ) ! Force t_i_1d to be lower than melting point => likely conservation issue',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:285': 'zccc          = SQRT( MAX( zbbb * zbbb - 4._wp * rcpi * rLfus * ztmelts, 0._wp ) )',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:191': 'isnow_comb(ji) = h_s_1d(ji) / zh_min',
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:537-538': [('zdiagbis(jm) = ztrid   (jm,2) - ztrid(jm,1) * ztrid   (jm-1,3) / zdiagbis(jm-1)', 1), ('zindtbis(jm) = zindterm(jm  ) - ztrid(jm,1) * zindtbis(jm-1  ) / zdiagbis(jm-1)', 1), 2],
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:857': 'cnd_ice_1d(ji) = 2._wp * ztcond_i(ji,0) / zhi_ssl ! cnd_ice is capped by: cond_i/zhi_ssl',
     'packages/ice/legoesm/ice/bitz_lipscomb.py:449': 'def _div_const(x, c):',
     'packages/ice/legoesm/ice/bitz_lipscomb.py:590': 'isnow_comb = jnp.where(h_s < _H_MIN, _div_const(h_s, _H_MIN), 1.0)  # :190-194',
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:991': '_div_const(2.0 * core.tcond_i[..., 0], _ICE_SSL_DEPTH),',
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1289': "zero = sr(jnp.zeros_like(h_i))  # materialized: NEMO's 0._wp + (-0) is +0, XLA's folded 0 + x is not",
-    'tests/ice/unit/test_si3_o9_zdf_dh_temp.py:651': 'def test_five_categories_bit_identical_to_independent_transcription():',
-    'tests/ice/unit/test_si3_o9_zdf_dh_temp.py:673': 'def test_eager_equals_jit_every_bit():',
-    'tests/ice/unit/test_si3_o9_zdf_dh_temp.py:681': 'def test_inexact_value_pins():',
-    'tests/ice/unit/test_si3_o9_zdf_dh_temp.py:696': 'def test_production_path_plants_fire(plant, monkeypatch):',
-    'tests/ice/unit/test_si3_o9_zdf_dh_temp.py:726': 'def test_signed_zero_and_nan_sites_follow_object_code():',
-    'tests/ice/unit/test_si3_o9_zdf_dh_temp.py:741': 'def test_c1d_card_routes_its_dh_through_the_shared_core(monkeypatch):',
-    'tests/ice/unit/test_si3_o9_zdf_dh_temp.py:758': 'def test_gradients_finite_and_central_difference():',
-    'tests/ice/unit/test_si3_o9_zdf_dh_temp.py:777': 'def test_no_defaults_and_refused_arms():',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:993': '_div_const(2.0 * core.tcond_i[..., 0], _ICE_SSL_DEPTH),',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1291': "zero = sr(jnp.zeros_like(h_i))  # materialized: NEMO's 0._wp + (-0) is +0, XLA's folded 0 + x is not",
+    'tests/ice/unit/test_si3_o9_zdf_dh_temp.py:652': 'def test_five_categories_bit_identical_to_independent_transcription():',
+    'tests/ice/unit/test_si3_o9_zdf_dh_temp.py:674': 'def test_eager_equals_jit_every_bit():',
+    'tests/ice/unit/test_si3_o9_zdf_dh_temp.py:682': 'def test_inexact_value_pins():',
+    'tests/ice/unit/test_si3_o9_zdf_dh_temp.py:697': 'def test_production_path_plants_fire(plant, monkeypatch):',
+    'tests/ice/unit/test_si3_o9_zdf_dh_temp.py:727': 'def test_signed_zero_and_nan_sites_follow_object_code():',
+    'tests/ice/unit/test_si3_o9_zdf_dh_temp.py:742': 'def test_c1d_card_routes_its_dh_through_the_shared_core(monkeypatch):',
+    'tests/ice/unit/test_si3_o9_zdf_dh_temp.py:759': 'def test_gradients_finite_and_central_difference():',
+    'tests/ice/unit/test_si3_o9_zdf_dh_temp.py:778': 'def test_no_defaults_and_refused_arms():',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:463': 'zEw            = rcp * sst_1d(ji)',
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1608': 'sst=forcing.t_bottom - constants.T0,',
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1610': 'sst=forcing.t_bottom - constants.T0,',
 }
 
 
@@ -9962,54 +9963,54 @@ _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:235-296', 'packages/ice/leg
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:354-366', 'packages/ice/legoesm/ice/bitz_lipscomb.py:356-368', anchors=['def snow_enthalpy_from_temperature(', (')', 107), 13])
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:414-429', 'packages/ice/legoesm/ice/bitz_lipscomb.py:416-429', anchors=['def p07_conductivity(', (')', 122), 14])
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:481-891', 'packages/ice/legoesm/ice/bitz_lipscomb.py:778-876', anchors=['def _si3_zdf_bl99_step(', (')', 330), 99])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:917-976', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1031-1090', anchors=['def _nemo_snow_enthalpy_remap(', ('], axis=-1)', 11), 60])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1040-1652', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1624-2246', anchors=['def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,', 'S_bulk, state.S_layers, state.age_volume)', 623])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:917-976', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1033-1092', anchors=['def _nemo_snow_enthalpy_remap(', ('], axis=-1)', 11), 60])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1040-1652', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1626-2248', anchors=['def _dh_step(state: SI3ColumnArrays, zdf: SI3ZDFResult,', 'S_bulk, state.S_layers, state.age_volume)', 623])
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:624-862', 'packages/ice/legoesm/ice/bitz_lipscomb.py:621-856', anchors=['k_i = tcond_i / dz_i[..., None]', ('else:', 5), 236])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1727-1732', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2321-2326', anchors=['S_layers = option2_salinity_profile(', (')', 990), 6])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1620-1636', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2214-2230', anchors=[('e_i = (', 1), (')', 972), 17])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1630-1636', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2224-2230', anchors=['e_s = (', (')', 972), 7])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1201-1203', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1795-1797', anchors=['surface_energy = jnp.maximum(', (')', 773), 3])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:979-1037', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1093-1151', anchors=['def _nemo_ice_enthalpy_remap(', ('], axis=-1)', 12), 59])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1620-1629', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2214-2223', anchors=[('e_i = (', 1), (')', 969), 10])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1210-1402,1578-1629', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1804-1996,2172-2223', anchors=[('if _nemo_dh_ice_content_accumulation:', 1), 'old_h = jnp.stack(zh_i_old_layers, axis=-1)', ('if _nemo_dh_ice_content_accumulation:', 2), (')', 969), 245])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1068-1085,1120-1136,1195-1199', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1662-1679,1714-1730,1789-1793', anchors=[('if _nemo_dh_snow_update:', 1), (')', 718), ('if _nemo_dh_snow_update:', 2), 'remaining_mass = evaporation * dt + snow_delta * constants.rho_snow', 'melted_snow.append(', (')', 770), 40])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:40,979-1037,1210-1402,1578-1629,1655-1707', 'packages/ice/legoesm/ice/bitz_lipscomb.py:41,1093-1151,1804-1996,2172-2223,2249-2301', anchors=['frq_m: jax.Array | float = 1.0', 'def _nemo_ice_enthalpy_remap(', ('], axis=-1)', 12), ('if _nemo_dh_ice_content_accumulation:', 1), 'old_h = jnp.stack(zh_i_old_layers, axis=-1)', ('if _nemo_dh_ice_content_accumulation:', 2), (')', 969), 'def si3_column_step_arrays(state: SI3ColumnArrays,', '# `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-24', 358])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:40,1281-1285', 'packages/ice/legoesm/ice/bitz_lipscomb.py:41,1875-1879', anchors=['frq_m: jax.Array | float = 1.0', 'frq_m = getattr(forcing, "frq_m", 1.0)', (')', 817), 6])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1608-1617', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2202-2211', anchors=['ze_i_old = jnp.stack(', (')', 966), 10])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1621-1626', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2215-2220', anchors=[('_nemo_ice_enthalpy_remap(', 2), (')', 967), 6])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1068-1085,1120-1136,1195-1199,1672,1704', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1662-1679,1714-1730,1789-1793,2266,2298', anchors=[('if _nemo_dh_snow_update:', 1), (')', 718), ('if _nemo_dh_snow_update:', 2), 'remaining_mass = evaporation * dt + snow_delta * constants.rho_snow', 'melted_snow.append(', (')', 770), ('_nemo_dh_snow_update: bool = True,', 2), '_nemo_dh_snow_update=_nemo_dh_snow_update,', 42])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1073-1077', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1667-1671', anchors=['h_precip_raw = (', (')', 715), 5])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1078-1080', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1672-1674', anchors=['h_precip = jnp.where(', (')', 716), 3])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1124-1130', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1718-1724', anchors=[('snow_delta = jnp.maximum(', 1), (')', 739), 7])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1195-1199', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1789-1793', anchors=['melted_snow.append(', (')', 770), 5])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1076,1235,1338', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1670,1829,1932', anchors=[('/ a', 3), 'zfmdt = sr(-surface_energy / energy_difference)', 'zfmdt = sr(-basal_energy / energy_difference)', 3])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:40,1281-1285,1465', 'packages/ice/legoesm/ice/bitz_lipscomb.py:41,1875-1879,2059', anchors=['frq_m: jax.Array | float = 1.0', 'frq_m = getattr(forcing, "frq_m", 1.0)', (')', 817), '+ zdf.qtr_ice_bottom * getattr(forcing, "frq_m", 1.0)', 7])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1052-1053,1671-1672', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1636-1637,2265-2266', anchors=[('_nemo_dh_ice_content_accumulation: bool = True,', 1), ('_nemo_dh_snow_update: bool = True,', 1), ('_nemo_dh_ice_content_accumulation: bool = True,', 2), ('_nemo_dh_snow_update: bool = True,', 2), 4])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1655-1691', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2249-2285', anchors=['def si3_column_step_arrays(state: SI3ColumnArrays,', 'e_snow=zdf.e_snow)', 37])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1727-1732', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2323-2328', anchors=['S_layers = option2_salinity_profile(', (')', 991), 6])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1620-1636', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2216-2232', anchors=['e_i = (', (')', 973), 17])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1630-1636', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2226-2232', anchors=['e_s = (', (')', 973), 7])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1201-1203', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1797-1799', anchors=['surface_energy = jnp.maximum(', (')', 774), 3])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:979-1037', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1095-1153', anchors=['def _nemo_ice_enthalpy_remap(', ('], axis=-1)', 12), 59])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1620-1629', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2216-2225', anchors=['e_i = (', (')', 970), 10])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1210-1402,1578-1629', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1806-1998,2174-2225', anchors=[('if _nemo_dh_ice_content_accumulation:', 1), 'old_h = jnp.stack(zh_i_old_layers, axis=-1)', ('if _nemo_dh_ice_content_accumulation:', 2), (')', 970), 245])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1068-1085,1120-1136,1195-1199', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1664-1681,1716-1732,1791-1795', anchors=[('if _nemo_dh_snow_update:', 1), (')', 719), ('if _nemo_dh_snow_update:', 2), 'remaining_mass = evaporation * dt + snow_delta * constants.rho_snow', 'melted_snow.append(', (')', 771), 40])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:40,979-1037,1210-1402,1578-1629,1655-1707', 'packages/ice/legoesm/ice/bitz_lipscomb.py:41,1095-1153,1806-1998,2174-2225,2251-2303', anchors=['frq_m: jax.Array | float = 1.0', 'def _nemo_ice_enthalpy_remap(', ('], axis=-1)', 12), ('if _nemo_dh_ice_content_accumulation:', 1), 'old_h = jnp.stack(zh_i_old_layers, axis=-1)', ('if _nemo_dh_ice_content_accumulation:', 2), (')', 970), 'def si3_column_step_arrays(state: SI3ColumnArrays,', '# `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-24', 358])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:40,1281-1285', 'packages/ice/legoesm/ice/bitz_lipscomb.py:41,1877-1881', anchors=['frq_m: jax.Array | float = 1.0', 'frq_m = getattr(forcing, "frq_m", 1.0)', (')', 818), 6])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1608-1617', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2204-2213', anchors=['ze_i_old = jnp.stack(', (')', 967), 10])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1621-1626', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2217-2222', anchors=[('_nemo_ice_enthalpy_remap(', 2), (')', 968), 6])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1068-1085,1120-1136,1195-1199,1672,1704', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1664-1681,1716-1732,1791-1795,2268,2300', anchors=[('if _nemo_dh_snow_update:', 1), (')', 719), ('if _nemo_dh_snow_update:', 2), 'remaining_mass = evaporation * dt + snow_delta * constants.rho_snow', 'melted_snow.append(', (')', 771), ('_nemo_dh_snow_update: bool = True,', 2), '_nemo_dh_snow_update=_nemo_dh_snow_update,', 42])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1073-1077', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1669-1673', anchors=['h_precip_raw = (', (')', 716), 5])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1078-1080', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1674-1676', anchors=['h_precip = jnp.where(', (')', 717), 3])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1124-1130', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1720-1726', anchors=[('snow_delta = jnp.maximum(', 1), (')', 740), 7])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1195-1199', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1791-1795', anchors=['melted_snow.append(', (')', 771), 5])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1076,1235,1338', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1672,1831,1934', anchors=[('/ a', 3), 'zfmdt = sr(-surface_energy / energy_difference)', 'zfmdt = sr(-basal_energy / energy_difference)', 3])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:40,1281-1285,1465', 'packages/ice/legoesm/ice/bitz_lipscomb.py:41,1877-1881,2061', anchors=['frq_m: jax.Array | float = 1.0', 'frq_m = getattr(forcing, "frq_m", 1.0)', (')', 818), '+ zdf.qtr_ice_bottom * getattr(forcing, "frq_m", 1.0)', 7])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1052-1053,1671-1672', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1638-1639,2267-2268', anchors=[('_nemo_dh_ice_content_accumulation: bool = True,', 1), ('_nemo_dh_snow_update: bool = True,', 1), ('_nemo_dh_ice_content_accumulation: bool = True,', 2), ('_nemo_dh_snow_update: bool = True,', 2), 4])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1655-1691', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2251-2287', anchors=['def si3_column_step_arrays(state: SI3ColumnArrays,', 'e_snow=zdf.e_snow)', 37])
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:481-499', 'packages/ice/legoesm/ice/bitz_lipscomb.py:778-796', anchors=['def _si3_zdf_bl99_step(', ') -> SI3ZDFResult:', 19])
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:321-351', 'packages/ice/legoesm/ice/bitz_lipscomb.py:323-353', anchors=['def bitz_lipscomb_conduction_step(q_layers, h, S, F_top, T_bottom_K, d', 'return q_new, T_new, F_bottom', 31])
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:402-411', 'packages/ice/legoesm/ice/bitz_lipscomb.py:404-413', anchors=['if _nemo_order:', 'return jnp.clip(unbounded, constants.T0 - 100.0, constants.T0)', 10])
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:369-411', 'packages/ice/legoesm/ice/bitz_lipscomb.py:371-413', anchors=['def snow_temperature_from_enthalpy(', 'return jnp.clip(unbounded, constants.T0 - 100.0, constants.T0)', 43])
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:148-196', 'packages/ice/legoesm/ice/bitz_lipscomb.py:150-198', anchors=['def option2_salinity_profile(', 'return S_bulk[..., None] * (sr(alpha[..., None] * z) + (1.0 - alpha[..', 49])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:894-914', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1008-1028', anchors=['def _piecewise_remap(', 'return jnp.where(dz_new[..., None] > _EPS10, content / dz_new[..., Non', 21])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1655-1773', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2249-2367', anchors=['def si3_column_step_arrays(state: SI3ColumnArrays,', 'post_temp2, post_do, exit_state)', 119])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1225-1234', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1819-1828', anchors=[('internal_melt = _surface_melt & (', 1), ('energy_difference = sr(ice_specific - water_specific)', 1), 10])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1331-1337', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1925-1931', anchors=[('ice_specific = (', 2), ('energy_difference = sr(ice_specific - water_specific)', 2), 7])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1374-1383', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1968-1977', anchors=[('bottom_specific = (', 1), ('bottom_difference = bottom_specific - bottom_water', 1), 10])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1206,1225-1234,1331-1337,1374-1383', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1800,1819-1828,1925-1931,1968-1977', anchors=['inverse_ice_density = 1.0 / constants.rho_ice', ('internal_melt = _surface_melt & (', 1), ('energy_difference = sr(ice_specific - water_specific)', 1), ('ice_specific = (', 2), ('energy_difference = sr(ice_specific - water_specific)', 2), ('bottom_specific = (', 1), ('bottom_difference = bottom_specific - bottom_water', 1), 28])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1206', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1800', anchors='inverse_ice_density = 1.0 / constants.rho_ice')
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:989', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1103', anchors='pts_old = content if content is not None else sr(thickness * enthalpy)')
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1655-1707', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2249-2301', anchors=['def si3_column_step_arrays(state: SI3ColumnArrays,', '# `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-24', 53])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1672,1704', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2266,2298', anchors=[('_nemo_dh_snow_update: bool = True,', 2), '_nemo_dh_snow_update=_nemo_dh_snow_update,', 2])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:979-989', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1093-1103', anchors=['def _nemo_ice_enthalpy_remap(', 'pts_old = content if content is not None else sr(thickness * enthalpy)', 11])
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1235', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1829', anchors='zfmdt = sr(-surface_energy / energy_difference)')
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1338', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1932', anchors='zfmdt = sr(-basal_energy / energy_difference)')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:894-914', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1010-1030', anchors=['def _piecewise_remap(', 'return jnp.where(dz_new[..., None] > _EPS10, content / dz_new[..., Non', 21])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1655-1773', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2251-2369', anchors=['def si3_column_step_arrays(state: SI3ColumnArrays,', 'post_temp2, post_do, exit_state)', 119])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1225-1234', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1821-1830', anchors=[('internal_melt = _surface_melt & (', 1), ('energy_difference = sr(ice_specific - water_specific)', 1), 10])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1331-1337', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1927-1933', anchors=[('ice_specific = (', 2), ('energy_difference = sr(ice_specific - water_specific)', 2), 7])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1374-1383', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1970-1979', anchors=[('bottom_specific = (', 1), ('bottom_difference = bottom_specific - bottom_water', 1), 10])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1206,1225-1234,1331-1337,1374-1383', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1802,1821-1830,1927-1933,1970-1979', anchors=['inverse_ice_density = 1.0 / constants.rho_ice', ('internal_melt = _surface_melt & (', 1), ('energy_difference = sr(ice_specific - water_specific)', 1), ('ice_specific = (', 2), ('energy_difference = sr(ice_specific - water_specific)', 2), ('bottom_specific = (', 1), ('bottom_difference = bottom_specific - bottom_water', 1), 28])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1206', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1802', anchors='inverse_ice_density = 1.0 / constants.rho_ice')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:989', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1105', anchors='pts_old = content if content is not None else sr(thickness * enthalpy)')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1655-1707', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2251-2303', anchors=['def si3_column_step_arrays(state: SI3ColumnArrays,', '# `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-24', 53])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1672,1704', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2268,2300', anchors=[('_nemo_dh_snow_update: bool = True,', 2), '_nemo_dh_snow_update=_nemo_dh_snow_update,', 2])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:979-989', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1095-1105', anchors=['def _nemo_ice_enthalpy_remap(', 'pts_old = content if content is not None else sr(thickness * enthalpy)', 11])
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1235', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1831', anchors='zfmdt = sr(-surface_energy / energy_difference)')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1338', 'packages/ice/legoesm/ice/bitz_lipscomb.py:1934', anchors='zfmdt = sr(-basal_energy / energy_difference)')
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:113', 'packages/ice/legoesm/ice/bitz_lipscomb.py:115', anchors='_NEW_ICE_THICKNESS = 0.05  # C1D card rn_hinew, c1d_omip_l3_namelist_ice_cfg:113')
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1799', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2393', anchors='def si3_ice_thd_frazil(qlead, *, rn_hinew, ln_frazil) -> SI3Frazil:')
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1787', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2381', anchors='def _ieee_lt_zero(value):')
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1750', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2344', anchors='frazil = si3_ice_thd_frazil(forcing.qlead, rn_hinew=_NEW_ICE_THICKNESS, ln_frazil=False)')
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1751', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2345', anchors='cooling = _ieee_lt_zero(forcing.qlead)')
-_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1759', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2353', anchors='vnew / jnp.where(cooling, frazil.ht_i_new, 1.0),')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1799', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2395', anchors='def si3_ice_thd_frazil(qlead, *, rn_hinew, ln_frazil) -> SI3Frazil:')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1787', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2383', anchors='def _ieee_lt_zero(value):')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1750', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2346', anchors='frazil = si3_ice_thd_frazil(forcing.qlead, rn_hinew=_NEW_ICE_THICKNESS, ln_frazil=False)')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1751', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2347', anchors='cooling = _ieee_lt_zero(forcing.qlead)')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1759', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2355', anchors='vnew / jnp.where(cooling, frazil.ht_i_new, 1.0),')
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:557-647', 'packages/ice/legoesm/ice/bitz_lipscomb.py:579-646', anchors=['dz_i = jnp.maximum(h_i, _H_MIN) / nlay_i', 'eta_s = dt / (constants.rho_snow * dz_s[..., None] * constants.c_ice)', 68])
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:587-611', 'packages/ice/legoesm/ice/bitz_lipscomb.py:600-611', anchors=['# P07 conductivity at the nlay_i+1 interfaces (:273-285), floor :293.', '# :326-341, zghe = 1 (ln_virtual_itd = F).', 12])
 
