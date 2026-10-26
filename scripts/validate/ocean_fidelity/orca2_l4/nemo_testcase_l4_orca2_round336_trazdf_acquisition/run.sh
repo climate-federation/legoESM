@@ -36,6 +36,7 @@ readonly NAMELIST_REF=$SOURCE_CFG/EXP00/namelist_ref
 readonly TRAZDF_SOURCE=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/TRA/trazdf.F90
 readonly PATCH=$here/trazdf_round336.patch
 readonly ZDFPHY_PATCH=$here/zdfphy_round336.patch
+readonly ZDFPHY_PPSRC_PATCH=$here/zdfphy_ppsrc_round336.patch
 readonly WRITER=$here/round336_trazdf_writer.F90
 readonly FIXTURE_STUBS=$here/round336_fixture_stubs.F90
 readonly FIXTURE=$here/round336_writer_fixture.F90
@@ -52,7 +53,7 @@ readonly NEMO_BIN=/home/dbalwada/miniconda3/envs/nemo-build/bin
 
 for path in "$PARENT" "$SOURCE_PPSRC" "$SOURCE_ZDFPHY_PPSRC" "$BASE_ZDFPHY_PPSRC" "$SOURCE_OBJECT" \
   "$SOURCE_OUTPUT" "$SOURCE_NAMELIST" "$NAMELIST_REF" "$TRAZDF_SOURCE" \
-  "$PATCH" "$ZDFPHY_PATCH" "$WRITER" "$FIXTURE_STUBS" "$FIXTURE" \
+  "$PATCH" "$ZDFPHY_PATCH" "$ZDFPHY_PPSRC_PATCH" "$WRITER" "$FIXTURE_STUBS" "$FIXTURE" \
   "$PARENT_EXTENSION" "$NAMELIST_GATE" "$GATE" "$TEST"; do
   [[ -f "$path" ]] || refuse "missing acquisition input $path"
 done
@@ -224,7 +225,7 @@ compile_nemo_object() {
     -J "$driver_dir/nemo-mod" "$1" -o "$2"
 }
 
-for observer_patch in "$PATCH" "$ZDFPHY_PATCH"; do
+for observer_patch in "$PATCH" "$ZDFPHY_PATCH" "$ZDFPHY_PPSRC_PATCH"; do
   check_no_removed_lines "$observer_patch" \
     || refuse "round-336 observer patch removes a source line: $observer_patch"
   check_real_context "$observer_patch" \
@@ -266,7 +267,7 @@ done
   || refuse 'tra_zdf observer call census moved'
 
 cp "$SOURCE_ZDFPHY_PPSRC" "$source_check/zdfphy.F90"
-patch --batch -s --fuzz=0 -p0 -d "$source_check" <"$ZDFPHY_PATCH"
+patch --batch -s --fuzz=0 -p0 -d "$source_check" <"$ZDFPHY_PPSRC_PATCH"
 check_r336_zdfphy_landing "$source_check/zdfphy.F90" \
   || refuse 'zdf_phy observers do not bracket the five executing contributions'
 for landing in tke runoff evd ddm iwm; do
@@ -493,6 +494,7 @@ fi
 sed \
   -e "s|@PATCH@|$PATCH|g" \
   -e "s|@ZDFPHY_PATCH@|$ZDFPHY_PATCH|g" \
+  -e "s|@ZDFPHY_PPSRC_PATCH@|$ZDFPHY_PPSRC_PATCH|g" \
   -e "s|@WRITER@|$WRITER|g" \
   -e "s|@GATE@|$GATE|g" \
   -e "s|@TEST@|$TEST|g" \

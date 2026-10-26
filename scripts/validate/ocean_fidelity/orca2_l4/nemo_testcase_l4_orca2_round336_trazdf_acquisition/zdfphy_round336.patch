@@ -1,6 +1,6 @@
 --- zdfphy.F90
 +++ zdfphy.F90
-@@ -49,6 +49,8 @@
+@@ -41,6 +41,8 @@
     USE tke_round331_writer, ONLY : r331_begin, r331_sh2, r331_drag, r331_mxl, &
        & r331_finish
                       ! round-331 WRITE-only TKE localisation recorder
@@ -9,17 +9,17 @@
  
  
     IMPLICIT NONE
-@@ -369,14 +371,20 @@
+@@ -333,14 +335,20 @@
              avt(ji,jj,jk) = avt_k(ji,jj,jk)
              avm(ji,jj,jk) = avm_k(ji,jj,jk)
-          END DO   ;   END DO   ;   END DO
+          END_3D
 +         CALL r336_zdfphy_capture(kt,1,avt_k(ntsi:ntei,ntsj:ntej,2:jpkm1), & ! R336_ZDFPHY_OBSERVER
 +            & avt(ntsi:ntei,ntsj:ntej,2:jpkm1),avs(ntsi:ntei,ntsj:ntej,2:jpkm1)) ! R336_ZDFPHY_OBSERVER
           !
           IF( ln_rnf_mouth ) THEN                   !* increase diffusivity at rivers mouths
-             DO jk =  2,  nkrnf  ; DO jj = ntsj-(  0), ntej+(   0) ; DO ji = ntsi-( 0), ntei+(   0)
+             DO_3D( 0, 0, 0, 0, 2, nkrnf )
                 avt(ji,jj,jk) = avt(ji,jj,jk) + 2._wp * rn_avt_rnf * rnfmsk(ji,jj) * wmask(ji,jj,jk)
-             END DO   ;   END DO   ;   END DO
+             END_3D
           ENDIF
 +         CALL r336_zdfphy_capture(kt,2,avt_k(ntsi:ntei,ntsj:ntej,2:jpkm1), & ! R336_ZDFPHY_OBSERVER
 +            & avt(ntsi:ntei,ntsj:ntej,2:jpkm1),avs(ntsi:ntei,ntsj:ntej,2:jpkm1)) ! R336_ZDFPHY_OBSERVER
@@ -30,9 +30,9 @@
           !
           !                                         !* double diffusive mixing
           IF( ln_zdfddm ) THEN                            ! update avt and compute avs
-@@ -386,10 +396,14 @@
+@@ -350,10 +358,14 @@
                 avs(ji,jj,jk) = avt(ji,jj,jk)
-             END DO   ;   END DO   ;   END DO
+             END_3D
           ENDIF
 +         CALL r336_zdfphy_capture(kt,4,avt_k(ntsi:ntei,ntsj:ntej,2:jpkm1), & ! R336_ZDFPHY_OBSERVER
 +            & avt(ntsi:ntei,ntsj:ntej,2:jpkm1),avs(ntsi:ntei,ntsj:ntej,2:jpkm1)) ! R336_ZDFPHY_OBSERVER

@@ -36,7 +36,7 @@ check_r336_landing \"\$dry_bld/ppsrc/nemo/trazdf.f90\" || refuse 'round-336 plac
 : >\"\$dry_bld/obj/round336_trazdf_writer.o\"" "$ADAPTED"
 
 sed -i "/# makenemo rewrites shared work_cfgs.txt/i\\
-sha256sum @PATCH@ @ZDFPHY_PATCH@ @WRITER@ @NAMELIST_GATE@ @GATE@ @TEST@ >>\"\$manifest/toolchain.sha256\"" \
+sha256sum @PATCH@ @ZDFPHY_PATCH@ @ZDFPHY_PPSRC_PATCH@ @WRITER@ @NAMELIST_GATE@ @GATE@ @TEST@ >>\"\$manifest/toolchain.sha256\"" \
   "$ADAPTED"
 
 sed -i "/touch \"\$TARGET_ROOT\/MY_SRC\/\"\*\.F90/i\\
