@@ -16,6 +16,11 @@ r336_stub_finish_target() {
   [[ -x $stub ]] || refuse 'stub NEMO is absent or not executable'
   mkdir -p "$target/BLD/bin"
   cp -a "$template/." "$target/BLD/"
+  # The inherited preflight deliberately leaves its same-program icevar plant
+  # in dry_bld after proving that it refuses. Restore that one planted file
+  # before using the otherwise-clean dry build as the makenemo stand-in.
+  cp -- "$SOURCE_ROOT/BLD/ppsrc/nemo/icevar.f90" \
+    "$target/BLD/ppsrc/nemo/icevar.f90"
   cp -- "$stub" "$target/BLD/bin/nemo.exe"
   chmod 700 "$target/BLD/bin/nemo.exe"
 }
