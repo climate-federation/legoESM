@@ -17,7 +17,12 @@ rebuilt from the surfdata exactly as the driver builds them::
     psi_k      <- psi(theta_k)                for EVERY cell (the elastic branch
                                               now starts at air entry)
 
-Temperature, snow and the runoff stores are untouched.  ``--verify`` then runs
+Temperature and snow are untouched.  The two runoff fields, the old solver's
+fluxes for the final spin-up hour, are set to zero: nothing reads them before
+the first step overwrites them (the land step recomputes them; the coupled
+driver takes river runoff from the step's tile response with a lag buffer that
+starts at zero), and the stored values (up to 2.8e4 mm/d in the pressurised
+columns) describe a state this file no longer holds.  ``--verify`` then runs
 one hour of the fixed solver from the capped state under zero forcing and
 checks that nothing runs off and no layer exceeds its cap.
 
@@ -115,10 +120,16 @@ def main(argv=None) -> int:
         "max_psi_before_m": float(np.nanmax(psi_old)),
         "max_psi_after_m": float(np.nanmax(psi_new)),
         "psi_recomputed_for_all_cells": True,
+        "runoff_reset": True,
+        "max_stored_runoff_surface_before_mm_d": float(
+            np.nanmax(np.asarray(state.runoff_surface)) * 86400.0),
     }
     print("cap_land_restart:", json.dumps(summary, indent=1))
 
-    new_state = state._replace(theta_soil=jnp.asarray(theta_new), psi_soil=jnp.asarray(psi_new))
+    new_state = state._replace(
+        theta_soil=jnp.asarray(theta_new), psi_soil=jnp.asarray(psi_new),
+        runoff_surface=jnp.zeros_like(state.runoff_surface),
+        runoff_subsurface=jnp.zeros_like(state.runoff_subsurface))
     metadata = dict(meta.get("metadata") or {})
     metadata["capped_by"] = {"script": "scripts/data/cap_land_restart.py", **summary}
     out = save_land_restart(args.out, new_state, land_mode="multilayer",
