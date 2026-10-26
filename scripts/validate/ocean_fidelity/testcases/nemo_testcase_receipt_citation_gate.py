@@ -10157,11 +10157,6 @@ _reanchor('packages/ice/legoesm/ice/config.py:609-623', 'packages/ice/legoesm/ic
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:3119-3350', 'packages/ice/legoesm/ice/si3_orca2_state.py:3140-3317', extent=178)
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:3353-3783', 'packages/ice/legoesm/ice/si3_orca2_state.py:3374-3804')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:3786-3939', 'packages/ice/legoesm/ice/si3_orca2_state.py:3807-3960')
-_reanchor('packages/ice/legoesm/ice/sea_ice.py:328-361', 'packages/ice/legoesm/ice/sea_ice.py:331-364')
-_reanchor('packages/ice/legoesm/ice/sea_ice.py:363-364', 'packages/ice/legoesm/ice/sea_ice.py:366-367')
-_reanchor('packages/ice/legoesm/ice/sea_ice.py:363-366', 'packages/ice/legoesm/ice/sea_ice.py:366-369')
-_reanchor('packages/ice/legoesm/ice/sea_ice.py:591-611', 'packages/ice/legoesm/ice/sea_ice.py:594-614')
-_reanchor('packages/ice/legoesm/ice/sea_ice.py:620-654', 'packages/ice/legoesm/ice/sea_ice.py:623-657')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:43', 'packages/ice/legoesm/ice/si3_orca2_state.py:44')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2279-3064', 'packages/ice/legoesm/ice/si3_orca2_state.py:4027-4812')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2279-2386', 'packages/ice/legoesm/ice/si3_orca2_state.py:4027-4134', anchors=['class SI3O2InitConfig(NamedTuple):', ('apply_halos: bool', 6), 108])
@@ -10181,6 +10176,22 @@ _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2573', 'packages/ice/lego
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2662-2776', 'packages/ice/legoesm/ice/si3_orca2_state.py:4410-4524')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2944-2951', 'packages/ice/legoesm/ice/si3_orca2_state.py:4692-4699')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:3056-3063', 'packages/ice/legoesm/ice/si3_orca2_state.py:4804-4811', anchors=['new_state = si3_o1_step(', (')', 1619), 8])
+# O4 resume 6: the limiter tie fix, the shared-sum imports and the new tests move these O4 keys,
+# and O11's lateral-melt config moves the O4 builder.
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:821-1122', 'tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:834-1135', anchors=['def test_o4_a2_odd_even_sweep_order_and_cfl_subcycling_pins_and_plant() -> None:', (')', 406), 302])
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:2150-2241', 'tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:2214-2312', anchors=['def test_o4_d_jit_primal_zero_ulp_and_delayed_cfl_selection() -> None:', '_assert_same_bits(e_leaf, j_leaf, f"jit_delayed_icycle{want}")', 99])
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:1125-1468', 'tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:1138-1481', anchors=['def test_o4_a3_icemax_hbig_hsnow_zapneg_zapsmall_pato_diag_pins_and_plants() -> None:', 'build_si3_orca2_o4_config(None)  # type: ignore[arg-type]', 344])
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:1471-1671', 'tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:1535-1735', anchors=['def test_o4_a4_orca2_seam_and_north_fold_subcycle_lbc_lnk_pins_and_plants() -> None:', (')', 651), 201])
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:1713-1744', 'tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:1777-1808', anchors=['def test_o4_b_lane3_parent_vs_current_zero_ulp(tmp_path: Path) -> None:', 'assert {"corr_int", "corr_ext"} <= differing', 32])
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:536-614', 'tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:549-627', anchors=['def _ref_nemo_lbc_lnk_orca2_t_point(', 'return arr_3d.reshape(orig_shape)', 79])
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:2244-2438', 'tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:2315-2509', anchors=['def _o4_ad_checks() -> None:', 'print(f"O4_AD_CHECKS_PASS fd_u_ratio={fd_u_ratio!r} fd_vi_ratio={fd_vi_ratio!r} rel_ad_diff={rel_ad_diff!r}")', 195])
+_reanchor('tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:2441-2466', 'tests/ocean/fidelity/test_nemo_si3_o4_orca2_prather.py:2512-2537', anchors=['def test_o4_d_ad_reverse_forward_and_central_fd() -> None:', 'print(result.stdout.strip().splitlines()[-1])', 26])
+_reanchor('packages/ice/legoesm/ice/transport.py:858-1348', 'packages/ice/legoesm/ice/transport.py:860-1350', anchors=['def _si3_prather_x_substep(', ('return content, moments, area', 1), 491])
+_reanchor('packages/ice/legoesm/ice/transport.py:1351-1826', 'packages/ice/legoesm/ice/transport.py:1353-1828', anchors=['def _si3_prather_y_substep(', ('return content, moments, area', 2), 476])
+_reanchor('packages/ice/legoesm/ice/transport.py:2233-2275', 'packages/ice/legoesm/ice/transport.py:2235-2277', anchors=['def si3_adv_x(', ('return area, content_out, moments_out', 1), 43])
+_reanchor('packages/ice/legoesm/ice/transport.py:2278-2318', 'packages/ice/legoesm/ice/transport.py:2280-2320', anchors=['def si3_adv_y(', ('return area, content_out, moments_out', 2), 41])
+_reanchor('packages/ice/legoesm/ice/transport.py:1829-1834', 'packages/ice/legoesm/ice/transport.py:1831-1836', anchors=['def _si3_periodic_halo_xy', 'mode="wrap"', 6])
+_reanchor('packages/ice/legoesm/ice/config.py:628-642', 'packages/ice/legoesm/ice/config.py:635-649', anchors=['def build_si3_orca2_o4_config(', 'return cfg', 15])
 
 
 DEFAULT_RECEIPT = (

@@ -3280,7 +3280,7 @@ def si3_dyn_adv_pra_orca2(
     # `IF( zcfl > 1.5 ) THEN ; icycle = 3 ELSEIF( zcfl > .5 ) THEN ; icycle = 2 ELSE ; icycle = 1 ENDIF`
     # (`icedyn_adv_pra.f90:138-141`). Evaluate `zdt = rDt_ice / REAL(icycle)` on the
     # traced `icycle_arr`, always compute all three subcycles `jt in {1, 2, 3}` and keep
-    # subcycle `jt` only where `icycle >= jt` (`jnp.where`, no `lax.cond`), so the step
+    # subcycle `jt` only where `icycle >= jt` with `jnp.where`, no `lax.cond`, so the step
     # jits and differentiates end-to-end without host `float(zcfl)` conversion.
     # `icycle` is runtime state in NEMO (from the delayed zcfl), bounded to {1, 2, 3}
     # by `icedyn_adv_pra.f90:138-141`; all three cycles are traced and selected.
