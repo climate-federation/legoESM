@@ -356,3 +356,14 @@ SHA-256 `3a01f0800dc2360c75f49a2c567c6dd756c2e91a92ee1de07bfc86df3d2af832`.
 The disposition remains **ACQUISITION_NEEDED** at the operator command above.
 No NEMO executable was run, no model or configuration changed, and no unasked
 choice was made. Codex review: operator.
+
+The final per-receipt citation gate reports PASS for 17 citations with zero
+failures, zero unmapped citations, zero map-audit failures, and all nine
+self-tests fired. The exact default ORCA2 landing battery passes 152 tests in
+1,098.95 seconds; its log SHA-256 is
+`3be6e54c9f8fd431d27e02f3b32bc14c10bc86b539bf8794c6d09f539c456fcf`.
+The private-import ratchet separately passes 6 tests in 6.11 seconds; its log
+SHA-256 is
+`1742d0160ea02bfb39c1243f53c27353a25868b9a893b6e9c285559b7f172ce9`.
+The reports are `round336/resume6_citation_gate.json`,
+`round336/resume6_default_gate.log`, and `round336/resume6_ratchet.log`.
