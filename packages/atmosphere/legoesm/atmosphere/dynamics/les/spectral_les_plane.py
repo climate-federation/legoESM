@@ -542,8 +542,11 @@ def _vreman_nu_t(u, v, w, g: SpectralLESGrid):
 def eddy_viscosity(u, v, w, g: SpectralLESGrid):
     """Wall-damped constant-coefficient Smagorinsky ``ν_t=(C_s l)²|S|`` at centres.
 
-    ``l = min(C_s Δ, κ z)`` (Mason 1989) with ``Δ=(Δx Δy Δz)^⅓``. This is the
-    oracle's static-SGS option; the Bou-Zeid scale-dependent dynamic coefficient
+    ``l = min(C_s Δ, κ z)`` (Mason 1989) with ``Δ=(Δx Δy Δz)^⅓``. This is a
+    legoESM option, NOT the jax-alfa oracle's static SGS: jax-alfa's static
+    stress (``SGSStresses_SM.py``, ``-2 L² C_s² |S| S_ij`` with a constant
+    ``C_s²`` from ``DerivedVars.py``) has no ``κ z`` cap, which here is on by
+    default (``wall_damping=True``). The Bou-Zeid scale-dependent dynamic coefficient
     (``smagorinsky_dynamic``) replaces the constant ``C_s`` + κz cap with the
     per-(x,y,z) ``C_s²`` from :func:`lasd_core.lasd_cs2` (β IS the near-wall
     scale correction, so no Mason cap)."""
