@@ -31,6 +31,12 @@ THREE_D_FIELDS = (
     "avs_after_runoff", "avt_after_evd", "avs_after_evd", "avt_after_ddm",
     "avs_after_ddm", "avt_after_iwm", "avs_after_iwm",
 )
+INTERIOR_THREE_D_FIELDS = (
+    "avt", "avs", "avt_k_zdf", "avt_after_tke", "avs_after_tke",
+    "avt_after_runoff", "avs_after_runoff", "avt_after_evd", "avs_after_evd",
+    "avt_after_ddm", "avs_after_ddm", "avt_after_iwm", "avs_after_iwm",
+)
+ZDFPHY_PHASE_FIELDS = INTERIOR_THREE_D_FIELDS[2:]
 TWO_D_FIELDS = ("r3t_Kbb", "r3t_Kmm", "r3t_Kaa")
 ONE_D_FIELDS = ("e3w_1d",)
 FOUR_D_FIELDS = (
@@ -51,6 +57,7 @@ PLANTS = (
     "header", "field-order", "truncation", "checksum", "stamp", "selector",
     "extent", "nonfinite", "signed-zero", "wet", "replay", "association",
     "actual", "time-level", "filled-range", "zdfphy",
+    *(f"zdfphy-{name.replace('_', '-')}" for name in ZDFPHY_PHASE_FIELDS),
 )
 OBSERVER_UNITS = ldf_gate.OBSERVER_UNITS + ("trazdf",)
 WRITER_UNITS = ldf_gate.WRITER_UNITS + ("round336_trazdf_writer",)
@@ -65,6 +72,9 @@ def record_name(rank: int) -> str:
 
 def _shape(name: str, header: dict[str, int]) -> tuple[int, ...]:
     base = (header["nx"], header["ny"], header["nz"])
+    if name in INTERIOR_THREE_D_FIELDS:
+        return (header["ntei"] - header["ntsi"] + 1,
+                header["ntej"] - header["ntsj"] + 1, header["nz"])
     if name in THREE_D_FIELDS:
         return base
     if name in FOUR_D_FIELDS:
@@ -149,15 +159,25 @@ def _bit_equal(actual: np.ndarray, expected: np.ndarray,
 
 def verify_record(record: dict, *, plant: str | None = None) -> dict[str, int]:
     fields, header = record["fields"], record["header"]
-    r331._verify_checksums(record)
-    if plant == "nonfinite":
-        fields["forward"][2, 2, 1, 0] = np.nan
-    require(all(bool(np.isfinite(value).all()) for value in fields.values()),
-            "non-finite payload")
     seen = fields["solve_seen"] == 1.0
     wet = np.broadcast_to(fields["tmask"][..., None] != 0.0, seen.shape)
     owned = np.zeros_like(seen)
-    owned[2:-2, 2:-2, :header["nz"] - 1, :] = True
+    owned[header["ntsi"] - 1:header["ntei"],
+          header["ntsj"] - 1:header["ntej"], :header["nz"] - 1, :] = True
+    wet_index = tuple(np.argwhere(wet & owned)[0])
+    interior_wet_index = (wet_index[0] - (header["ntsi"] - 1),
+                          wet_index[1] - (header["ntsj"] - 1), wet_index[2])
+    if plant is not None and plant.startswith("zdfphy-"):
+        planted_name = plant.removeprefix("zdfphy-").replace("-", "_")
+        require(planted_name in ZDFPHY_PHASE_FIELDS,
+                f"unknown zdf_phy phase plant {planted_name}")
+        fields[planted_name][interior_wet_index] = np.nextafter(
+            fields[planted_name][interior_wet_index], np.inf)
+    r331._verify_checksums(record)
+    if plant == "nonfinite":
+        fields["forward"][wet_index] = np.nan
+    require(all(bool(np.isfinite(value).all()) for value in fields.values()),
+            "non-finite payload")
     require(bool(np.all(seen[wet & owned])), "wet solve coverage is incomplete")
     if plant == "wet":
         index = tuple(np.argwhere(wet & owned)[0])
@@ -178,14 +198,14 @@ def verify_record(record: dict, *, plant: str | None = None) -> dict[str, int]:
     metric3[i0:i1, j0:j1, :header["nz"] - 1] = True
     e3w_support = np.zeros_like(metric3)
     e3w_support[i0:i1, j0:j1, :] = True
-    process_support = np.array(metric3, copy=True)
-    process_support[:, :, 0] = False
+    process_support = np.zeros(fields["avt"].shape, dtype=bool)
+    process_support[:, :, 1:header["nz"] - 1] = True
 
     if plant == "filled-range":
         fields["e3t_Kaa"][0, 0, 0] = 1.0
     if plant == "zdfphy":
-        fields["avt_after_iwm"][i0, j0, 1] = np.nextafter(
-            fields["avt_after_iwm"][i0, j0, 1], np.inf)
+        fields["avt_after_iwm"][interior_wet_index] = np.nextafter(
+            fields["avt_after_iwm"][interior_wet_index], np.inf)
 
     def filled(name: str, expected: np.ndarray, support: np.ndarray) -> None:
         _bit_equal(fields[name], expected, support, f"{name} filled-range replay moved")
@@ -212,14 +232,18 @@ def verify_record(record: dict, *, plant: str | None = None) -> dict[str, int]:
                 f"{name} overwrote zdf_phy-unfilled cells")
     _bit_equal(fields["avt_after_tke"], fields["avt_k_zdf"], process_support,
                "TKE avt_k copy boundary moved")
+    _bit_equal(fields["avs_after_runoff"], fields["avs_after_tke"], process_support,
+               "runoff boundary changed avs")
+    _bit_equal(fields["avs_after_evd"], fields["avs_after_runoff"], process_support,
+               "EVD boundary changed avs")
     _bit_equal(fields["avt_after_iwm"], fields["avt"], process_support,
                "IWM avt boundary differs from final tra_zdf input")
     _bit_equal(fields["avs_after_iwm"], fields["avs"], process_support,
                "IWM avs boundary differs from final tra_zdf input")
 
     if plant == "replay":
-        fields["diagonal"][2, 2, 1, 0] = np.nextafter(
-            fields["diagonal"][2, 2, 1, 0], np.inf)
+        fields["diagonal"][wet_index] = np.nextafter(
+            fields["diagonal"][wet_index], np.inf)
     if plant == "actual":
         index = tuple(np.argwhere(wet & owned)[0])
         fields["actual_Kaa"][index] = np.nextafter(fields["actual_Kaa"][index], np.inf)
@@ -228,9 +252,9 @@ def verify_record(record: dict, *, plant: str | None = None) -> dict[str, int]:
     effective = np.full_like(fields["effective_K"], -0.0)
     effective[i0:i1, j0:j1, 0, :] = 0.0
     effective[i0:i1, j0:j1, 1:, 0] = (
-        fields["avt"][i0:i1, j0:j1, 1:] + fields["akz"][i0:i1, j0:j1, 1:])
+        fields["avt"][:, :, 1:] + fields["akz"][i0:i1, j0:j1, 1:])
     effective[i0:i1, j0:j1, 1:, 1] = (
-        fields["avs"][i0:i1, j0:j1, 1:] + fields["akz"][i0:i1, j0:j1, 1:])
+        fields["avs"][:, :, 1:] + fields["akz"][i0:i1, j0:j1, 1:])
     effective_support = np.zeros_like(seen)
     effective_support[i0:i1, j0:j1, :, :] = True
     _bit_equal(fields["effective_K"], effective, effective_support,
@@ -355,12 +379,22 @@ def run_gate(root: Path, *, expect_commit: str, plant: str | None = None) -> dic
         record = read_record(root / record_name(rank), plant=parser_plant)
         require(record["header"]["rank"] == rank, "rank tag moved")
         if rank == 0 and plant == "checksum":
-            record["fields"]["avt"][2, 2, 1] = np.nextafter(
-                record["fields"]["avt"][2, 2, 1], np.inf)
+            header = record["header"]
+            full_wet = record["fields"]["tmask"] != 0.0
+            full_wet[:header["ntsi"] - 1, :, :] = False
+            full_wet[header["ntei"]:, :, :] = False
+            full_wet[:, :header["ntsj"] - 1, :] = False
+            full_wet[:, header["ntej"]:, :] = False
+            global_index = tuple(np.argwhere(full_wet)[0])
+            index = (global_index[0] - (header["ntsi"] - 1),
+                     global_index[1] - (header["ntsj"] - 1), global_index[2])
+            record["fields"]["avt"][index] = np.nextafter(
+                record["fields"]["avt"][index], np.inf)
         reports[str(rank)] = verify_record(
-            record, plant=plant if rank == 0 and plant in (
-                "nonfinite", "signed-zero", "wet", "replay", "association",
-                "actual", "filled-range", "zdfphy") else None)
+            record, plant=plant if rank == 0 and (
+                plant in ("nonfinite", "signed-zero", "wet", "replay", "association",
+                          "actual", "filled-range", "zdfphy") or
+                (plant is not None and plant.startswith("zdfphy-"))) else None)
         records[rank] = record
 
         tracer = tracer_gate.read_stage3(root / tracer_gate.record_name(rank))["fields"]

@@ -542,7 +542,7 @@ cp "$PARENT" "$synthetic_default/nemo"
 chmod 700 "$synthetic_default/nemo"
 git -C "$REPO" rev-parse HEAD >"$synthetic_default/producer_commit.txt"
 ( cd "$synthetic_default" && sha256sum nemo >nemo.sha256 )
-R328_ADMISSION_IDENTITY_ONLY=1 R328_ADMISSION_TEST_ROOT=$synthetic_root \
+env -u R328_EXISTING_RUN R328_ADMISSION_IDENTITY_ONLY=1 R328_ADMISSION_TEST_ROOT=$synthetic_root \
   R328_ACQ_TARGET=tke332 "$ADAPTED" --admit-existing \
   >"$driver_dir/synthetic-in-place.log"
 grep -F 'R328_SYNTHETIC_ADMISSION_IDENTITY_PASS route=in-place' \
@@ -563,6 +563,7 @@ printf 'R333_SYNTHETIC_RETAINED_ADMISSION_PASS routes=in-place,retained\n'
 "$PY" -m pytest -q -p no:xdist "$LDF_TEST"
 
 export R328_ACQ_TARGET=tke332
+if [[ "$MODE" != --preflight-only ]]; then retention_armed=1; fi
 "$ADAPTED" "$MODE"
 
 if [[ "$MODE" == --preflight-only ]]; then
@@ -573,7 +574,6 @@ fi
 # The inherited driver has now completed its admission (including retained-run
 # movement). Any r333 refusal below is covered by this trap and retains the
 # complete run, including every admit-r333-*.log, under refused/.
-retention_armed=1
 [[ -f "$TARGET_RUN/producer_commit.txt" && \
    $(wc -l <"$TARGET_RUN/producer_commit.txt") -eq 1 ]] \
   || refuse 'run manifest lacks its single producer commit'

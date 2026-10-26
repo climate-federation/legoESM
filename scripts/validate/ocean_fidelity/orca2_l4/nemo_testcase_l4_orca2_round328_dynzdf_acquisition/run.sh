@@ -175,7 +175,10 @@ cleanup() {
         printf 'R328_FAILED_OUTPUTS_LEFT_IN_PLACE kind=%s path=%s\n' "$failure_kind" "$TARGET_RUN" >&2
       fi
     fi
-    [[ $created_target -eq 0 || ! -e "$TARGET_ROOT" ]] || rm -rf -- "$TARGET_ROOT"
+    if [[ $created_target -ne 0 && -e "$TARGET_ROOT" ]]; then
+      printf 'R328_FAILED_BUILD_KEPT path=%s rerun=move-this-directory-aside-first\n' \
+        "$TARGET_ROOT" >&2
+    fi
     [[ $created_run -eq 0 && $created_target -eq 0 ]] || \
       printf 'R328_FAILED_INVOCATION_HANDLED target=%s run=%s completed=%s\n' \
         "$created_target" "$created_run" "$run_completed" >&2
@@ -189,6 +192,16 @@ plant_must_refuse() {
   local label=$1; shift
   if "$@"; then refuse "preflight plant stayed green: $label"; fi
   printf 'PREFLIGHT_PLANT_FIRED %s\n' "$label"
+}
+refuse_nemo_errors() {
+  local output=$1 lines
+  [[ -f "$output" ]] || return 0
+  lines=$(grep -nF 'E R R O R' "$output" || true)
+  [[ -z "$lines" ]] || {
+    printf 'NEMO_ERROR_LINES_BEGIN %s\n%s\nNEMO_ERROR_LINES_END\n' \
+      "$output" "$lines" >&2
+    return 1
+  }
 }
 pin() {
   local digest=$1 path=$2 label=$3
@@ -499,6 +512,9 @@ sed -E 's/(nn_mxlice[[:space:]]*=[[:space:]]*)2/\1 0/' "$EXCERPT" >"$plants/ocea
 plant_must_refuse echo-mxlice check_echo "$plants/ocean.output.mxlice"
 sed -E 's/(jpl[[:space:]]*=[[:space:]]*)1/\1 5/' "$EXCERPT" >"$plants/ocean.output.jpl"
 plant_must_refuse echo-jpl check_echo "$plants/ocean.output.jpl"
+printf 'before\nE R R O R staged namelist rejected\nafter\n' >"$plants/ocean.output.error"
+plant_must_refuse ocean-output-error-lines \
+  refuse_nemo_errors "$plants/ocean.output.error"
 # Checklist (4)+(5): compiled exact writer layout, every expected frame, A4,
 # and one-ULP A5 plants. The imported round-326 test proves ELF root-only normalisation.
 tests=("$TEST")
@@ -964,6 +980,8 @@ cp "$manifest"/* "$TARGET_RUN/"
   timeout --kill-after=60 "$RUN_TIMEOUT_S" mpirun -np 2 --oversubscribe ./nemo >run.user.stdout.log 2>&1
   rc=$?
   set -e
+  refuse_nemo_errors "$TARGET_RUN/ocean.output" \
+    || refuse 'NEMO ocean.output contains the quoted E R R O R lines above'
   [[ $rc -eq 0 ]] || refuse "mpirun exited $rc"
   printf 'wall_seconds %s\nRUN_FINISHED_UTC=%s\nRUN_DONE\n' "$((SECONDS-started))" \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>run.user.time.log

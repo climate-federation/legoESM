@@ -27,8 +27,14 @@ else\\
 fi" "$ADAPTED"
 
 sed -i "/same_program \"\$dry_bld\"/i\\
+fpp @TRAZDF_SOURCE@ \"\$scratch/trazdf_r336_cpp.f90\"\\
+awk 'NF' \"\$scratch/trazdf_r336_cpp.f90\" >\"\$scratch/trazdf_r336_cpp.nonblank\"\\
+awk 'NF' @SOURCE_PPSRC@ >\"\$scratch/trazdf_r336_record.nonblank\"\\
+cmp -s \"\$scratch/trazdf_r336_cpp.nonblank\" \"\$scratch/trazdf_r336_record.nonblank\" || refuse 'build-cpp trazdf differs from record ppsrc'\\
+sed '0,/SUBROUTINE tra_zdf(/s//SUBROUTINE tra_zdf_planted(/' \"\$scratch/trazdf_r336_cpp.nonblank\" >\"\$scratch/trazdf_r336_cpp.plant.nonblank\"\\
+plant_must_refuse r336-build-cpp-same-program cmp -s \"\$scratch/trazdf_r336_cpp.plant.nonblank\" \"\$scratch/trazdf_r336_record.nonblank\"\\
 rm -f \"\$dry_bld/ppsrc/nemo/trazdf.f90\" \"\$dry_bld/ppsrc/nemo/trazdf.F90\"\\
-cp @SOURCE_PPSRC@ \"\$dry_bld/ppsrc/nemo/trazdf.F90\"\\
+cp \"\$scratch/trazdf_r336_cpp.f90\" \"\$dry_bld/ppsrc/nemo/trazdf.F90\"\\
 patch --batch -s --fuzz=0 -p0 -d \"\$dry_bld/ppsrc/nemo\" <@PATCH@\\
 mv -- \"\$dry_bld/ppsrc/nemo/trazdf.F90\" \"\$dry_bld/ppsrc/nemo/trazdf.f90\"\\
 cp @WRITER@ \"\$dry_bld/ppsrc/nemo/round336_trazdf_writer.f90\"\\

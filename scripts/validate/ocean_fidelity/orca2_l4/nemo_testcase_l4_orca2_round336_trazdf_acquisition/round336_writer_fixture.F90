@@ -17,7 +17,10 @@ PROGRAM round336_writer_fixture
 
    CALL GET_COMMAND_ARGUMENT(1,arg); READ(arg,*) rank; narea=rank+1
    ALLOCATE(e3t_3d(jpi,jpj,jpk),e3w_1d(jpk),r3t(jpi,jpj,jpt),tmask(jpi,jpj,jpk))
-   ALLOCATE(avt(jpi,jpj,jpk),avs(jpi,jpj,jpk),akz(jpi,jpj,jpk),ah_wslp2(jpi,jpj,jpk))
+   ! Match zdf_oce.F90's A2D(0) declaration for avt/avs exactly.  Bounds
+   ! checking must exercise the real interior-only contract.
+   ALLOCATE(avt(ntsi:ntei,ntsj:ntej,jpk),avs(ntsi:ntei,ntsj:ntej,jpk))
+   ALLOCATE(akz(jpi,jpj,jpk),ah_wslp2(jpi,jpj,jpk))
    ALLOCATE(wi(jpi,jpj,jpk),edmfm(jpi,jpj,jpk),edmftra(jpi,jpj,jpk,jpts))
    ALLOCATE(pt_observed(jpi,jpj,jpk,jpts,jpt),pt_reference(jpi,jpj,jpk,jpts,jpt))
    DO k=1,jpk
@@ -25,16 +28,18 @@ PROGRAM round336_writer_fixture
       DO j=1,jpj; DO i=1,jpi
          e3t_3d(i,j,k)=8._wp+REAL(k,wp)+0.01_wp*REAL(i+j+rank,wp)
          tmask(i,j,k)=1._wp
-         avt(i,j,k)=1.e-5_wp*REAL(1+i+j+k+rank,wp)
-         avs(i,j,k)=1.5e-5_wp*REAL(1+i+j+k+rank,wp)
          akz(i,j,k)=2.e-6_wp*REAL(1+k,wp)
          ah_wslp2(i,j,k)=0._wp
          wi(i,j,k)=0._wp; edmfm(i,j,k)=0._wp
       END DO; END DO
    END DO
+   DO k=1,jpk; DO j=ntsj,ntej; DO i=ntsi,ntei
+      avt(i,j,k)=1.e-5_wp*REAL(1+i+j+k+rank,wp)
+      avs(i,j,k)=1.5e-5_wp*REAL(1+i+j+k+rank,wp)
+   END DO; END DO; END DO
    edmftra=0._wp
    tmask(4,3,4:5)=0._wp
-   avt(1,1,1)=-0._wp; avs(1,1,1)=-0._wp; akz(1,1,1)=-0._wp
+   avt(ntsi,ntsj,1)=-0._wp; avs(ntsi,ntsj,1)=-0._wp; akz(1,1,1)=-0._wp
    DO n=1,jpt; DO j=1,jpj; DO i=1,jpi
       r3t(i,j,n)=1.e-5_wp*REAL(i-j+n+rank,wp)
    END DO; END DO; END DO

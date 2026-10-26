@@ -14,8 +14,13 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 
 def _record():
     nx, ny, nz, nt = 7, 6, 5, 2
-    three = {name: np.full((nx, ny, nz), -0.0, dtype=np.float64)
-             for name in gate.THREE_D_FIELDS}
+    interior_shape = (nx - 4, ny - 4, nz)
+    three = {
+        name: np.full(
+            interior_shape if name in gate.INTERIOR_THREE_D_FIELDS else (nx, ny, nz),
+            -0.0, dtype=np.float64)
+        for name in gate.THREE_D_FIELDS
+    }
     two = {name: np.zeros((nx, ny), dtype=np.float64)
            for name in gate.TWO_D_FIELDS}
     one = {"e3w_1d": np.ones(nz, dtype=np.float64)}
@@ -37,8 +42,8 @@ def _record():
     fields["e3t_Kbb"][metric] = 10800.0
     fields["e3t_Kmm"][metric] = np.float64(10800.0) * np.float64(0.99999)
     fields["e3t_Kaa"][metric] = 10800.0
-    process = np.zeros((nx, ny, nz), dtype=bool)
-    process[2:-2, 2:-2, 1:nz - 1] = True
+    process = np.zeros(interior_shape, dtype=bool)
+    process[:, :, 1:nz - 1] = True
     for name in ("avt_k_zdf", "avt_after_tke", "avs_after_tke",
                  "avt_after_runoff", "avs_after_runoff", "avt_after_evd",
                  "avs_after_evd", "avt_after_ddm", "avs_after_ddm",
@@ -75,7 +80,8 @@ def test_clean_record_replays_and_covers_wet_cells():
 
 @pytest.mark.parametrize("plant", (
     "nonfinite", "signed-zero", "wet", "replay", "association", "actual",
-    "filled-range", "zdfphy",
+    "filled-range", "zdfphy", *(
+        f"zdfphy-{name.replace('_', '-')}" for name in gate.ZDFPHY_PHASE_FIELDS),
 ))
 def test_value_plants_fire(plant):
     record = copy.deepcopy(_record())
@@ -88,3 +94,10 @@ def test_structural_plants_are_registered():
                 "selector", "extent", "time-level")) < set(gate.PLANTS)
     assert gate.OBSERVER_UNITS[-2:] == ("traldf_iso", "trazdf")
     assert gate.WRITER_UNITS[-1] == "round336_trazdf_writer"
+
+
+def test_a2d_fields_use_declared_interior_extents():
+    record = _record()
+    for name in gate.INTERIOR_THREE_D_FIELDS:
+        assert record["fields"][name].shape == (3, 2, 5)
+    assert record["fields"]["akz"].shape == (7, 6, 5)

@@ -41,18 +41,20 @@ CONTAINS
          & CALL ctl_stop('round336: zdfphy contribution extent moved')
       IF(phase==1) THEN
          IF(ALLOCATED(saved_avt_k)) CALL ctl_stop('round336: duplicate zdfphy capture')
-         ALLOCATE(saved_avt_k(jpi,jpj,jpk),saved_avt_phases(jpi,jpj,jpk,5), &
-            & saved_avs_phases(jpi,jpj,jpk,5))
+         ! zdf_oce allocates these fields with A2D(0), not (jpi,jpj).
+         ALLOCATE(saved_avt_k(ntsi:ntei,ntsj:ntej,jpk), &
+            & saved_avt_phases(ntsi:ntei,ntsj:ntej,jpk,5), &
+            & saved_avs_phases(ntsi:ntei,ntsj:ntej,jpk,5))
          saved_avt_k=-0._wp; saved_avt_phases=-0._wp; saved_avs_phases=-0._wp
          saved_zdfphy_phase_mask=0
-         saved_avt_k(ntsi:ntei,ntsj:ntej,2:jpkm1)=pavt_k
+         saved_avt_k(:,:,2:jpkm1)=pavt_k
       ELSE IF(.NOT.ALLOCATED(saved_avt_k)) THEN
          CALL ctl_stop('round336: missing first zdfphy capture')
       ENDIF
       IF(BTEST(saved_zdfphy_phase_mask,phase-1)) &
          & CALL ctl_stop('round336: duplicate zdfphy phase')
-      saved_avt_phases(ntsi:ntei,ntsj:ntej,2:jpkm1,phase)=pavt
-      saved_avs_phases(ntsi:ntei,ntsj:ntej,2:jpkm1,phase)=pavs
+      saved_avt_phases(:,:,2:jpkm1,phase)=pavt
+      saved_avs_phases(:,:,2:jpkm1,phase)=pavs
       saved_zdfphy_phase_mask=IBSET(saved_zdfphy_phase_mask,phase-1)
    END SUBROUTINE r336_zdfphy_capture
 
