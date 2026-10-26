@@ -166,7 +166,7 @@ _NEMO_TKE_CDRAG = 1.5e-3       # zcdrag [-] surface drag coeff      (zdftke.F90:
 # ½·0.016² / (ρ_air·C_d): surface stress → ½W_lc² (Axell 2002 Eq. 44, via
 # |τ| = ρ_air·C_d·U₁₀² and the Stokes drift u_s = 0.016·U₁₀) (zdftke.F90:243)
 _NEMO_TKE_LC_CSD = 0.5 * 0.016 * 0.016 / (_NEMO_TKE_RHO_AIR * _NEMO_TKE_CDRAG)
-_NEMO_MXL0_VKARMN = 0.4        # vkarmn (phycst) — the ln_mxl0 anchor prefactor
+_NEMO_MXL0_VKARMN = constants.kappa_von_karman  # vkarmn (phycst) — the ln_mxl0 anchor prefactor
 _NEMO_MXL0_LENGTH_SCALE = 2.0e5  # zraug numerator; shipped zdftke.F90:575
 _NEMO_MOLECULAR_VISCOSITY = 1.0e-6
 

@@ -272,3 +272,78 @@ def test_mg2_rain_number_evaporates_with_the_mass_fraction(monkeypatch):
     fn = float(out.dN_r_dt[0, 1] / Nr[0, 1])
     assert fm < 0.0 and abs(fm) * 600.0 < 0.5      # partial evaporation
     assert abs(fn - fm) <= TOL * abs(fm), (fm, fn)
+
+
+def _rain_floor_chain(qr, nr, rho, pf, T, p):
+    """In-precip rain -> MG2 evaporation, Beheng self-collection and Bigg
+    freezing (the consumers of lamr/n0r), summed per process."""
+    from legoesm.atmosphere.physics.microphysics import _warm_rain as W
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from legoesm.atmosphere.physics.microphysics.morrison import resolve_morrison_flavor
+    from legoesm.thermo import saturation_specific_humidity_goff_gratch
+    cfg = resolve_morrison_flavor(MorrisonConfig(morrison_flavor="mg"))
+    q_ric, N_ric, lamr, n0r = W.mg2_inprecip_rain(qr, nr, rho, pf, cfg.lamr_min,
+                                                  cfg.lamr_max)
+    qs = saturation_specific_humidity_goff_gratch(T, p)
+    z = jnp.zeros_like(qr)
+    ev = W.rain_evaporation_mg2(0.7 * qs, qs, T, p, rho, q_ric, lamr, n0r,
+                                z + 0.2, pf, z, z, cfg)
+    sc = W.self_collection_rain_mg2(q_ric, N_ric, rho, pf)
+    fq, fn = W.rain_freezing_bigg_mg2(q_ric, N_ric, lamr, T - 20.0, rho, pf, cfg)
+    return ev, sc, fq, fn
+
+
+def _floor_point(qric, lam, rho, dtype):
+    from legoesm import constants as C
+    pf = 0.5
+    nr = lam ** 3 * rho * qric / (math.pi * C.rho_water) * pf
+    return [jnp.asarray(x, dtype) for x in (qric * pf, nr, rho, pf, 285.0, 8.5e4)]
+
+
+@pytest.mark.parametrize("lam", [2500.0, 1.0e5])
+def test_inprecip_rain_fp32_gradient_finite_just_above_qsmall(lam):
+    """Oracle row 17: in fp32 at rho = 0.1 and qric just above qsmall, the
+    slope's (rho qric)**2 underflowed in the division tangent and every
+    in-precip rain process had a NaN gradient.  Now finite."""
+    args = _floor_point(1.0e-18 * (1.0 + 1.0e-6), lam, 0.1, jnp.float32)
+    for j in range(4):
+        g = jax.grad(lambda a, b: _rain_floor_chain(a, b, *args[2:])[j],
+                     argnums=(0, 1))(args[0], args[1])
+        for gi in g:
+            assert bool(jnp.isfinite(gi)), (j, g)
+
+
+@pytest.mark.parametrize("dtype", [jnp.float64, jnp.float32])
+def test_inprecip_rain_exactly_at_qsmall_is_finite(dtype):
+    """Oracle row 18: at qric == qsmall exactly MG2 leaves lamr = n0r = 0 and
+    evaporation/Bigg evaluated 0 * inf (NaN forward and backward, also in
+    the oracle).  Now those processes are 0 there, with finite gradients."""
+    args = _floor_point(1.0e-18, 2500.0, 1.0, dtype)
+    out = _rain_floor_chain(*args)
+    assert all(bool(jnp.isfinite(o)) for o in out), out
+    assert float(out[0]) == 0.0 and float(out[2]) == 0.0 and float(out[3]) == 0.0
+    for j in range(4):
+        g = jax.grad(lambda a, b: _rain_floor_chain(a, b, *args[2:])[j],
+                     argnums=(0, 1))(args[0], args[1])
+        for gi in g:
+            assert bool(jnp.isfinite(gi)), (j, g)
+
+
+def test_div_tangent_safe_forward_bitwise_and_exact_derivative():
+    """The row-17 division is bitwise ``x / y`` forward; its derivative is the
+    exact one (order-2 check in fp64) and finite where ``y**2`` underflows."""
+    from jax.test_util import check_grads
+
+    from legoesm.atmosphere.physics.microphysics._warm_rain import _div_tangent_safe
+    x = jnp.asarray([3.0, -1.5e-7, 2.0e10])
+    y = jnp.asarray([7.0, 3.0e-19, -0.25])
+    np.testing.assert_array_equal(np.asarray(_div_tangent_safe(x, y)),
+                                  np.asarray(x / y))
+    check_grads(_div_tangent_safe, (x[0], y[0]), order=2, modes=("fwd", "rev"))
+    y32 = jnp.asarray(1.0e-19, jnp.float32)
+    gy = jax.grad(_div_tangent_safe, argnums=1)(jnp.asarray(1.0, jnp.float32), y32)
+    assert bool(jnp.isfinite(gy)) and float(gy) < 0.0
+    # exact second derivative (fp64): d2/dy2 (1/y) = 2/y**3
+    g2 = jax.grad(jax.grad(_div_tangent_safe, argnums=1), argnums=1)(
+        jnp.asarray(1.0), jnp.asarray(1.0e-3))
+    np.testing.assert_allclose(float(g2), 2.0 / 1.0e-9, rtol=1e-12)

@@ -777,7 +777,7 @@ def test_inclusion_predicate_excludes_constants_and_nonfloat() -> None:
         "from legoesm import constants\n"
         "class C(NamedTuple):\n"
         "    tau: float = 7200.0\n"
-        "    kappa: float = constants.kappa_vk\n"
+        "    kappa: float = constants.kappa_von_karman\n"
         "    n: int = 2\n"
         "    name: str = 'x'\n"
         "    flag: bool = False\n"

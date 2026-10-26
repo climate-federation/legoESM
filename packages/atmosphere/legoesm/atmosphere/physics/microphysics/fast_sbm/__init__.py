@@ -3,6 +3,19 @@
 Eulerian bin microphysics on a mass-doubling grid (33 liquid bins,
 43 aerosol bins), built incrementally against the WRF/HUCM oracle.
 See ``docs/science/specs/bin_microphysics.md`` for the port plan and status.
+
+Oracle-faithfulness status (WRF v4.8.0 06d4240a, campaign 2026-10):
+FAITHFUL (reproduce the running oracle to <= 1e-10 rel in fp64,
+``tests/atmosphere/microphysics/unit/test_fast_sbm_wrf_oracle.py``):
+``precompute_collision_tables`` (courant_bott_KS), ``bott_coalescence``
+(coll_xxx_lwf; one sweep NOT certified where the oracle's own 1-ulp spread
+exceeds the tolerance), ``bott_riming`` (coll_xyx_lwf, mass only),
+``warm_condensation_step`` (one ONECOND1 call), ``freeze_step_routed``
+(FREEZ), ``melt_step`` (J_W_MELT, every category ladder) and
+``sedimentation.falfluxhucm_z`` (FALFLUXHUCM_Z).
+NOT YET FAITHFUL: the column adapter (``column.py``), ``sediment_bins``,
+nucleation, ice condensation (ONECOND2/3), breakup, SIP, ECOALMASSM and the
+WRF ``run/`` data tables.
 """
 
 from legoesm.atmosphere.physics.microphysics.fast_sbm.config import (

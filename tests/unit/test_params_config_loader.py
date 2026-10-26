@@ -225,6 +225,8 @@ def test_atm_scalar_map_is_pipeline_threaded():
             got = getattr(cc, m.field)
         elif m.config_class == "CLUBBParams":
             got = getattr(pipe.turbulence_config.params, m.field)
+        elif m.config_class == "PrescribedIceSurfaceConfig":
+            got = getattr(pipe, m.field)
         else:
             got = getattr(getattr(pipe, resolved_attr[m.config_class]), m.field)
         assert got == sentinel, (
@@ -296,6 +298,10 @@ def test_atm_scalar_map_has_no_under_claim():
         ("CLUBBParams", "clubb_", {"turbulence": "clubb",
                                    "clubb_prognostic": True},
          lambda pipe, field: getattr(pipe.turbulence_config.params, field)),
+        # Prescribed-ice surface: the flat scalar and the spec field share one
+        # name, read back from the pipeline attribute of that name.
+        ("PrescribedIceSurfaceConfig", "", {},
+         lambda pipe, field: getattr(pipe, field, None)),
     ]
     # Companion drift-guard: the family list scanned below must exactly match
     # the config classes present in the verified allowlist map.  The selector /

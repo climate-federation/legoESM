@@ -149,6 +149,49 @@ def test_column_sharded_processes_share_one_builder(tmp_path, monkeypatch):
     assert seen == {"rank": 2, "nproc": 4}
 
 
+_STATE_3D = ("temperature", "u_component_of_wind", "v_component_of_wind",
+             "specific_humidity")
+_STATE_2D = ("surface_pressure", "skin_temperature")
+
+
+def _gate_inputs(tmp_path, monkeypatch, perturb=None):
+    _write_store(tmp_path / "src.zarr", var_3d=_STATE_3D, var_2d=_STATE_2D)
+    times = xr.open_zarr(str(tmp_path / "src.zarr")).time.values.astype("datetime64[ns]")
+    monkeypatch.setattr(sb, "_training_sample_indices", lambda *a: iter([(2015, 3, 4)]))
+    era5 = TrainingERA5Config(zarr_store=str(tmp_path / "src.zarr"), levels=(500, 850))
+    ds_l, cloud_l, flux_l, at = sb._wb_local_stores(
+        SimpleNamespace(), {"cache_dir": str(tmp_path / "cache")}, era5, era5,
+        times, 4, 1, rank=0, nproc=1)
+    if perturb:
+        ds_l = ds_l.load()
+        a = ds_l[perturb].values.copy()
+        a.flat[-1] = np.nextafter(a.flat[-1], np.inf)
+        ds_l[perturb] = (ds_l[perturb].dims, a)
+    remote = xr.open_zarr(str(tmp_path / "src.zarr"))
+    return (sb._sample_inputs(era5, era5, 3, 4, remote, None, None, int),
+            sb._sample_inputs(era5, era5, 3, 4, ds_l, cloud_l, flux_l, at))
+
+
+def test_gate_inputs_from_cache_match_remote(tmp_path, monkeypatch):
+    sb._assert_same_sample(*_gate_inputs(tmp_path, monkeypatch))
+
+
+@pytest.mark.parametrize("var", ["temperature", "skin_temperature"])
+def test_gate_inputs_catch_one_ulp_in_the_cache(tmp_path, monkeypatch, var):
+    with pytest.raises(RuntimeError, match="ERA5 cache gate"):
+        sb._assert_same_sample(*_gate_inputs(tmp_path, monkeypatch, perturb=var))
+
+
+def test_loaders_build_from_the_gated_inputs():
+    """Both sample builders read their ERA5 through _sample_inputs, so the gate
+    compares exactly what training consumes."""
+    import inspect
+    for fn in (sb._load_era5_samples_spectral, sb.load_era5_samples):
+        src = inspect.getsource(fn)
+        assert src.count("_sample_inputs(") == 3   # build + both gate sides
+        assert "load_era5_slice(" not in src
+
+
 def test_no_cache_dir_means_no_local_stores(tmp_path):
     era5 = _cfg(tmp_path / "unused.zarr")
     assert sb._wb_local_stores(SimpleNamespace(), {}, era5, era5,

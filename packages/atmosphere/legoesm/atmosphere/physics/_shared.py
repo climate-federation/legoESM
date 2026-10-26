@@ -609,7 +609,7 @@ def mixing_length(z, l_mix_max, z_floor=1.0):
     array
         Mixing length [m], same shape as ``z``.
     """
-    kappa = constants.kappa_vk
+    kappa = constants.kappa_von_karman
     z_abs = jnp.clip(jnp.abs(z), z_floor, None)
     return kappa * z_abs / (1.0 + kappa * z_abs / l_mix_max)
 

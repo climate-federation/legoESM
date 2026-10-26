@@ -47,6 +47,7 @@ SPEC_MODULES: tuple[str, ...] = (
     "legoesm.land.soil_thermal",
     "legoesm.ocean.physics.shortwave_penetration",
     "legoesm.ice.config",
+    "legoesm.ice.shortwave",
     "legoesm.coupler.config",
     "legoesm.coupler.coupled_latlon_band",
     "legoesm.coupler.lake.config",

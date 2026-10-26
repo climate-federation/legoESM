@@ -375,7 +375,7 @@ def neutral_land_stress(z0m, d, z_low, u, v, rho):
     displacement ``d`` for a wind ``(u, v)`` at height ``z_low`` above the local
     surface: rho (kappa |V| / ln((z_low - d)/z0m))^2, the log bounded below by 2."""
     arg = jnp.maximum((z_low - d) / z0m, _NEUTRAL_LOG_ARG_MIN)
-    cd = (constants.kappa_vk / jnp.log(arg)) ** 2
+    cd = (constants.kappa_von_karman / jnp.log(arg)) ** 2
     return rho * cd * (u * u + v * v)
 
 

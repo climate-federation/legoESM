@@ -59,6 +59,34 @@ _T_MELT_WIDTH_K = 1.0            # melt-transition width below T_melt [K]
 _KAPPA_ICE_M_INV = 1.4          # sea-ice SW extinction coefficient [1/m]
 
 
+# Prescribed-ice (AMIP) surface knobs: the melt-albedo ramp read by
+# sea_ice_albedo and the smooth melt cap of the prognostic ice skin.  The
+# ExperimentConfig scalars of the same names take their default and range here.
+__param_spec__ = {
+    "PrescribedIceSurfaceConfig": {
+        "scheme_key": "atm.prescribed_ice",
+        "excluded": {
+            "ice_skin_melt_cap_width_K": "smoothing width",
+        },
+        "params": {
+            "sea_ice_melt_ramp_width_K": {
+                "units": "K", "bounds": (0.1, 5.0), "tunable_tier": 2,
+                "transform": "sigmoid", "category": "radiative",
+                "reference": "melt-onset albedo ramp below 0 C "
+                             "(Maykut & Untersteiner 1971)",
+                "shape": None,
+                "legacy_name": "sea_ice_albedo_melt_width_K",
+            },
+        },
+    },
+}
+
+
+class PrescribedIceSurfaceConfig(NamedTuple):
+    sea_ice_melt_ramp_width_K: float = 1.0   # melt-ramp width below T_freeze [K]
+    ice_skin_melt_cap_width_K: float = 0.01    # smooth melt-cap width, 0 = hard [K]
+
+
 # ==============================================================================
 # Result container
 # ==============================================================================
@@ -143,6 +171,33 @@ def maykut_untersteiner_albedo(
 # ==============================================================================
 # Delta-Eddington two-band albedo (Briegleb & Light 2007 surrogate)
 # ==============================================================================
+
+
+def sea_ice_albedo(
+    scheme: str,
+    albedo_ice: float,
+    T_skin=None,
+    h_ice_m: float | None = None,
+    melt_width_K: float = _T_MELT_WIDTH_K,
+):
+    """Sea-ice albedo a lane's radiation sees, by resolved scheme.
+
+    ``"constant"`` -> the scalar ``albedo_ice``; ``"maykut_untersteiner"`` ->
+    :func:`maykut_untersteiner_albedo` on the prognostic skin with
+    ``albedo_ice`` as the cold end.  Unknown schemes raise.
+    """
+    if scheme == "constant":
+        return albedo_ice
+    if scheme == "maykut_untersteiner":
+        if T_skin is None or h_ice_m is None:
+            raise ValueError(
+                "sea_ice_albedo('maykut_untersteiner') needs the prognostic "
+                "ice skin temperature and slab thickness.")
+        return maykut_untersteiner_albedo(
+            T_skin, h_ice_m, albedo_cold_bare=albedo_ice, T_width=melt_width_K)
+    raise ValueError(
+        f"sea_ice_albedo scheme={scheme!r} unknown; choose 'constant' or "
+        "'maykut_untersteiner' (resolve 'auto' first).")
 
 def _band_albedo_snow(
     melt_fraction: jnp.ndarray,
