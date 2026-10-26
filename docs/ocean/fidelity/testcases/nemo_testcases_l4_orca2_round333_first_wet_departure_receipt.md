@@ -801,3 +801,39 @@ the internal-traldf record `efaaa8396c5b2c6eb7d78269299078caf46b75aa35837e22ab94
 `round333_traldf_admission.json`
 `c57f475f0d9dba30725f44220b3405d3ca34c98ea7879fade509e373d214f220`.
 All three report PASS.
+
+### Resume-9 gates on the rebased tree
+
+Evidence under `orca2_rounds/round333/resume9/`. CPU, fp64, no NEMO run.
+
+- Replays, both labels: traldf replay `PASS_R333_TRALDF_REPLAY` (given NEMO
+  entry 505 s, independent 432 s) and tracer replay `PASS_R333_TRACER_REPLAY`
+  (563 s, 496 s). Traldf output equals Resume 8's in every field but the
+  commit stamp. Resume 8's tracer replay ran before the divisor landing, so the
+  tracer replay was also re-run on the pre-rebase approved tip `d8d4104a4`:
+  both labels equal the rebased output in every field but the commit stamp.
+- Decision 122: all 14 arms `PASS_R333_D122_ARM`, all seven censuses
+  `PASS_R333_D122_CENSUS`, decision `PASS_R333_D122_DECISION`. With the commit
+  stamp and evidence paths removed, all 22 artifacts equal the approved
+  Resume-8 census: no exact row lost, every registered direction equal, first
+  over-bar rows unchanged on all seven pairs and both rung-10 labels.
+  The four rung-10 arms (1,042-1,114 s each) exceed the 10-minute foreground
+  tool limit and finished after the harness moved them to the background,
+  partly overlapping; memory stayed above 800 GB available.
+- Faithful DINO probe: 66 of 66 leaf-step hashes equal Resume 8's; artifact
+  SHA-256 unchanged at
+  `5f977ac145525b73d311bdaacd5c7620b4199567f62afac15d3d1c8d19b503fa`.
+- Per-receipt citation gate, each from its title line: rounds 331 (26
+  citations), 332 (19), 333 (35) and 334 (3) all PASS with zero unmapped, zero
+  failures, zero map-audit failures, 9 of 9 controls. The gyre round-8 receipt
+  (not ORCA2; touched by this round) fails with 151 unmapped of 426, identical
+  on the lane tip before this rebase: not introduced here.
+- Default gate (the landing set): 140 passed (fast files), 10 passed
+  (parallel receipt gate + prognostic barotropic state, `-n 2`), 2 passed
+  (stage face-mask rank, `-n 2`, 612 s): 152 passed. Private-import ratchet
+  separately: 6 passed.
+- Full ratchet suite (round 334's ten files): 3 failed, 12,302 passed. All
+  three failures also fail on main `b090be7b18d9` (round 334's measured set);
+  lane-only failures: none.
+
+Disposition: **REBASED, gates unchanged**. Codex review: operator.
