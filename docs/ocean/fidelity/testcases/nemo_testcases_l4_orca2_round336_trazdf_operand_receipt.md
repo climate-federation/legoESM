@@ -148,7 +148,7 @@ coefficient sufficiency; every listed item is addressed above. Codex review:
 operator.
 
 The mandatory receipt-citation test passes 17 tests. The round-336 receipt
-gate finds 15 citations with zero failures, zero unmapped citations and zero
+gate finds 13 citations with zero failures, zero unmapped citations and zero
 map-audit failures; all nine self-test controls fire. Its report is stored as
 `round336/resume2_citation_gate.json`.
 
