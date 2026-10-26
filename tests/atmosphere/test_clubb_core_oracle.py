@@ -24,6 +24,12 @@ Metric: per field, max |ours - oracle| / max |oracle| over the column and the
 step (field-normalised, the tier-1 audit metric); bound 1e-10 in fp64 (user
 decision 2026-10-19).  The core has no AD smoothing fields, so this is also
 the production configuration.
+
+``oracle_fixtures/clubb_core_cam_implemented.npz`` (``run.sh implemented``):
+the same generator with every recorded step run as CAM runs it,
+``l_implemented = .true.`` (clubb_intr.F90:113 cam_cesm2_1_rel_60): BOMEX,
+DYCOMS-II RF01 and M-PACE B carry subsidence ``wm``, ARM none, and
+``bomex_bigup2`` (scaled up2/vp2 and winds) hits the up2/vp2 <= 1000 cap.
 """
 from __future__ import annotations
 
@@ -42,6 +48,8 @@ from legoesm import constants  # noqa: E402
 from legoesm.atmosphere.physics.turbulence import clubb as C  # noqa: E402, N812
 
 _FIX = Path(__file__).parent / "oracle_fixtures" / "clubb_core_cam.npz"
+_FIX_IMPL = (Path(__file__).parent / "oracle_fixtures"
+             / "clubb_core_cam_implemented.npz")
 _GEN_DIR = (Path(__file__).resolve().parents[2]
             / "scripts" / "validate" / "oracle" / "clubb_core")
 _TOL = 1.0e-10
@@ -60,6 +68,11 @@ def _module(name):
 @pytest.fixture(scope="module")
 def fix():
     return dict(np.load(_FIX))
+
+
+@pytest.fixture(scope="module")
+def fix_impl():
+    return dict(np.load(_FIX_IMPL))
 
 
 def _cases(fx):
@@ -90,9 +103,12 @@ def _state(fx, case, n):
     return st, jnp.asarray(fx[f"{case}/s{n}/rcm"])
 
 
-def _step(st, rcm, forcing, env, gr, cfg, extra=()):
+def _step(st, rcm, forcing, env, gr, cfg, extra=(), l_implemented=False,
+          host_dx=None):
     """One step of ours from the oracle state: Lscale/N^2 as the Fortran forms
-    them inside advance_clubb_core, the core, then the post-advance closure."""
+    them inside advance_clubb_core, the core, then the post-advance closure.
+    ``l_implemented``/``host_dx`` as the fixture's Fortran call (host_dx =
+    host_dy there)."""
     p = cfg.params
     ep1 = (1.0 - constants.epsilon) / constants.epsilon
     ep2 = 1.0 / constants.epsilon
@@ -106,12 +122,13 @@ def _step(st, rcm, forcing, env, gr, cfg, extra=()):
         p.bv_efold, cfg.T0, gr)[0]
     em = jnp.maximum(0.5 * (st.wp2 + st.up2 + st.vp2), cfg.tke_min)
     Lscale, _, _ = C.compute_mixing_length(
-        thvm, st.thlm, st.rtm, em, C.set_Lscale_max(False, None, None, ng),
+        thvm, st.thlm, st.rtm, em,
+        C.set_Lscale_max(l_implemented, host_dx, host_dx, ng),
         env["p_in_Pa_zt"], env["exner_zt"], thv, jnp.full((ng,), p.mu),
-        C.derive_lmin(p.lmin_coef), False, gr)
+        C.derive_lmin(p.lmin_coef), l_implemented, gr)
     new, diag = C.advance_clubb_core(
         st, forcing, Lscale=Lscale, brunt_vaisala_freq_sqd=brunt, dt=300.0,
-        gr=gr, config=cfg, **env)
+        gr=gr, config=cfg, l_implemented=l_implemented, **env)
     dpost = C.compute_clubb_diagnostics(
         new.wp2, new.wp3, new.up2, new.vp2, new.thlp2, new.rtp2, new.wpthlp,
         new.wprtp, Lscale, brunt, gr, cfg)
@@ -127,13 +144,18 @@ def _step(st, rcm, forcing, env, gr, cfg, extra=()):
     return out
 
 
-def max_rel_errors(fx, case, cfg=_CFG):
-    """Field -> worst field-normalised error over the case's N steps."""
+def max_rel_errors(fx, case, cfg=_CFG, l_implemented=None):
+    """Field -> worst field-normalised error over the case's N steps.
+    ``l_implemented`` defaults to the fixture's (``meta/l_implemented``)."""
     gr, forcing, env = _inputs(fx, case)
+    fx_impl = bool(fx.get("meta/l_implemented", False))
+    impl = fx_impl if l_implemented is None else l_implemented
+    host_dx = jnp.asarray(fx[f"{case}/host_dx"]) if fx_impl else None
     worst = {}
     for n in range(int(fx["meta/n_steps"])):
         st, rcm = _state(fx, case, n)
-        out = _step(st, rcm, forcing, env, gr, cfg)
+        out = _step(st, rcm, forcing, env, gr, cfg, l_implemented=impl,
+                    host_dx=host_dx)
         for k, v in out.items():
             ref = fx[f"{case}/s{n + 1}/{k}"]
             v = np.asarray(v)
@@ -213,3 +235,59 @@ def test_gradient_is_finite_on_the_fixture_columns(fix):
         for g in grads:
             assert np.all(np.isfinite(np.asarray(g))), case
         assert any(float(jnp.max(jnp.abs(g))) > 0.0 for g in grads)
+
+
+# ---- l_implemented = .true. (CAM) fixture: wm from the host, up2/vp2 cap ----
+
+_IMPL_CASES = ("bomex", "dycoms2_rf01", "mpace_b", "arm", "bomex_bigup2")
+
+
+def test_implemented_fixture_records_the_cam_call(fix_impl):
+    assert bool(fix_impl["meta/l_implemented"]) is True
+    assert tuple(_cases(fix_impl)) == _IMPL_CASES
+    for k in ("meta/cam_params", "meta/cam_flags"):
+        assert str(fix_impl[k]) == str(np.load(_FIX)[k])
+
+
+@pytest.mark.parametrize("case", _IMPL_CASES)
+def test_core_matches_fortran_implemented(fix_impl, case):
+    worst = max_rel_errors(fix_impl, case)
+    bad = {k: v for k, v in worst.items() if not v <= _TOL}
+    assert not bad, f"{case}: fields above {_TOL}: {bad}"
+
+
+@pytest.mark.parametrize("case", ["bomex", "dycoms2_rf01", "mpace_b", "arm"])
+def test_implemented_fixture_exercises_l_implemented(fix_impl, case):
+    """Non-vacuity: the standalone path (mean advection of the means and, on
+    every column, the Coriolis term kept) misses the CAM-call oracle."""
+    worst = max_rel_errors(fix_impl, case, l_implemented=False)
+    assert max(worst.values()) > 1.0e3 * _TOL, (case, worst)
+
+
+def test_bigup2_column_hits_the_up2_vp2_cap(fix_impl):
+    """The oracle's up2/vp2 <= 1000 m2/s2 cap binds on every recorded step."""
+    for n in range(1, int(fix_impl["meta/n_steps"]) + 1):
+        for k in ("up2", "vp2"):
+            ref = fix_impl[f"bomex_bigup2/s{n}/{k}"]
+            assert np.max(ref) == C._UP2_VP2_MAX and np.sum(ref == C._UP2_VP2_MAX) > 0
+
+
+def test_gradient_is_finite_on_the_implemented_columns(fix_impl):
+    """jax.grad through the l_implemented step, incl. the capped column."""
+    for case in ("mpace_b", "bomex_bigup2"):
+        gr, forcing, env = _inputs(fix_impl, case)
+        st, rcm = _state(fix_impl, case, 1)
+        host_dx = jnp.asarray(fix_impl[f"{case}/host_dx"])
+
+        def loss(thlm, rtm, up2, wm_zt):
+            out = _step(st._replace(thlm=thlm, rtm=rtm, up2=up2), rcm, forcing,
+                        dict(env, wm_zt=wm_zt), gr, _CFG, l_implemented=True,
+                        host_dx=host_dx)
+            return (jnp.sum(out["thlm"]) + 1e3 * jnp.sum(out["rtm"])
+                    + jnp.sum(out["up2"]) + jnp.sum(out["wpthlp"]))
+
+        grads = jax.grad(loss, argnums=(0, 1, 2, 3))(
+            st.thlm, st.rtm, st.up2, env["wm_zt"])
+        for g in grads:
+            assert np.all(np.isfinite(np.asarray(g))), case
+        assert all(float(jnp.max(jnp.abs(g))) > 0.0 for g in grads), case
