@@ -53,8 +53,32 @@ patch --batch -s --fuzz=0 -p0 -d \"\$TARGET_ROOT/MY_SRC\" <@ZDFPHY_PATCH@" \
   "$ADAPTED"
 
 sed -i "/diff <(grep -v/i\\
-grep 'NEMO_L4_R336TZ' \"\$TARGET_ROOT/BLD/ppsrc/nemo/round336_trazdf_writer.f90\" >/dev/null \\
-  || refuse 'compiled round-336 tra_zdf writer is absent'\\
+grep 'NEMO_L4_R336TZ' \"\$TARGET_ROOT/BLD/ppsrc/nemo/round336_trazdf_writer.f90\" >/dev/null || refuse 'compiled round-336 tra_zdf writer is absent'\\
 check_r336_landing \"\$TARGET_ROOT/BLD/ppsrc/nemo/trazdf.f90\" || refuse 'round-336 tra_zdf placement moved under TARGET_ROOT'\\
 check_r336_zdfphy_landing \"\$TARGET_ROOT/BLD/ppsrc/nemo/zdfphy.f90\" || refuse 'round-336 zdf_phy placement moved under TARGET_ROOT'" \
   "$ADAPTED"
+
+# Test-only redirection and fast path. Production invocations never set the
+# variable, so the generated driver's normal paths are byte-for-byte below it.
+sed -i '/^TARGET_RUN=\$DEFAULT_TARGET_RUN$/i\
+if [[ -n ${R336_STUB_FLOW_ROOT:-} ]]; then\
+  [[ -d $R336_STUB_FLOW_ROOT && $R336_STUB_FLOW_ROOT == /* ]] || { printf '\''REFUSE: invalid stub flow root\\n'\'' >&2; exit 64; }\
+  EVIDENCE=$R336_STUB_FLOW_ROOT/evidence\
+  DEFAULT_TARGET_RUN=$EVIDENCE/$(basename "$DEFAULT_TARGET_RUN")\
+fi' "$ADAPTED"
+sed -i '/^pin() {/i\
+if [[ -n ${R336_STUB_FLOW_ROOT:-} ]]; then\
+  source @FLOW_LIB@\
+  r336_stub_driver_flow\
+fi\
+' "$ADAPTED"
+
+bash -n "$ADAPTED" || refuse 'generated round-336 inner driver has invalid shell syntax'
+cp -- "$ADAPTED" "$driver_dir/run.syntax-plant.sh"
+printf '\nif then\n' >>"$driver_dir/run.syntax-plant.sh"
+plant_must_refuse r336-inner-driver-syntax bash -n "$driver_dir/run.syntax-plant.sh"
+printf 'R336_GENERATED_DRIVER_SYNTAX_PASS role=inner path=%s\n' "$ADAPTED"
+if [[ -n ${R336_GENERATED_INNER_COPY:-} ]]; then
+  cp -- "$ADAPTED" "$R336_GENERATED_INNER_COPY"
+  chmod 700 "$R336_GENERATED_INNER_COPY"
+fi
