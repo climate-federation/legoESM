@@ -16,7 +16,7 @@ cp @WRITER@ \"\$dry/round336_trazdf_writer.F90\"\\
 patch --batch -s --fuzz=0 -p0 -d \"\$dry\" <@ZDFPHY_PATCH@\\
 check_r336_zdfphy_landing \"\$dry/zdfphy.F90\" || refuse 'round-336 zdf_phy placement moved in syntax source'" \
   "$ADAPTED"
-sed -i 's|syntax_units=(dynzdf_round328_writer tke_round331_writer round332_writer \\|syntax_units=(dynzdf_round328_writer tke_round331_writer round332_writer round336_trazdf_writer \\|' \
+sed -i 's|syntax_units=(dynzdf_round328_writer tke_round331_writer round332_writer round333_traldf_writer \\|syntax_units=(dynzdf_round328_writer tke_round331_writer round332_writer round333_traldf_writer round336_trazdf_writer \\|' \
   "$ADAPTED"
 
 sed -i "/# Same-program preflight:/i\\
