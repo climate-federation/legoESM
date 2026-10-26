@@ -58,8 +58,7 @@ check_r336_landing \"\$TARGET_ROOT/BLD/ppsrc/nemo/trazdf.f90\" || refuse 'round-
 check_r336_zdfphy_landing \"\$TARGET_ROOT/BLD/ppsrc/nemo/zdfphy.f90\" || refuse 'round-336 zdf_phy placement moved under TARGET_ROOT'" \
   "$ADAPTED"
 
-# Test-only redirection and fast path. Production invocations never set the
-# variable, so the generated driver's normal paths are byte-for-byte below it.
+# Test-only redirection. Production invocations never set the variable.
 sed -i '/^TARGET_RUN=\$DEFAULT_TARGET_RUN$/i\
 if [[ -n ${R336_STUB_FLOW_ROOT:-} ]]; then\
   [[ -d $R336_STUB_FLOW_ROOT && $R336_STUB_FLOW_ROOT == /* ]] || { printf '\''REFUSE: invalid stub flow root\\n'\'' >&2; exit 64; }\
@@ -69,11 +68,32 @@ fi' "$ADAPTED"
 sed -i '/^pin() {/i\
 if [[ -n ${R336_STUB_FLOW_ROOT:-} ]]; then\
   source @FLOW_LIB@\
-  r336_stub_driver_flow\
 fi\
 ' "$ADAPTED"
 
+# The flow exercise runs this generated driver itself.  It redirects only the
+# writable build/run roots and substitutes makenemo/mpirun/NEMO at their real
+# call sites; the inherited mode, cleanup, retention, and admission branches
+# remain the branches under test.
+sed -i '/^readonly TARGET_ROOT=\$NEMO_ROOT\/cfgs\/\$TARGET_CFG$/c\
+TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG\
+if [[ -n ${R336_STUB_FLOW_ROOT:-} ]]; then TARGET_ROOT=$R336_STUB_FLOW_ROOT/build/$TARGET_CFG; fi\
+readonly TARGET_ROOT' "$ADAPTED"
+sed -i '/^export PATH=.*nemo-build\/bin/a\
+if [[ -n ${R336_STUB_FLOW_ROOT:-} ]]; then PATH=$R336_STUB_BIN:$PATH; export PATH; fi' \
+  "$ADAPTED"
+sed -i '/^admit() {$/a\
+  if [[ -n ${R336_STUB_FLOW_ROOT:-} ]]; then r336_stub_admit "$TARGET_RUN"; return 0; fi' \
+  "$ADAPTED"
+sed -i 's|^\./makenemo -r "$REFERENCE_CFG" -n "$TARGET_CFG" -m conda-scalarmath del_key '\''key_xios'\''$|if [[ -n ${R336_STUB_FLOW_ROOT:-} ]]; then r336_stub_prepare_target "$TARGET_ROOT"; else ./makenemo -r "$REFERENCE_CFG" -n "$TARGET_CFG" -m conda-scalarmath del_key '\''key_xios'\''; fi|' \
+  "$ADAPTED"
+sed -i 's|^\./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key '\''key_xios'\''$|if [[ -n ${R336_STUB_FLOW_ROOT:-} ]]; then r336_stub_finish_target "$TARGET_ROOT" "$dry_bld"; else ./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key '\''key_xios'\''; fi|' \
+  "$ADAPTED"
+
+source @FLOW_LIB@
 bash -n "$ADAPTED" || refuse 'generated round-336 inner driver has invalid shell syntax'
+r336_check_driver_body "$ADAPTED" inner \
+  || refuse 'generated round-336 inner driver body is incomplete'
 cp -- "$ADAPTED" "$driver_dir/run.syntax-plant.sh"
 printf '\nif then\n' >>"$driver_dir/run.syntax-plant.sh"
 plant_must_refuse r336-inner-driver-syntax bash -n "$driver_dir/run.syntax-plant.sh"

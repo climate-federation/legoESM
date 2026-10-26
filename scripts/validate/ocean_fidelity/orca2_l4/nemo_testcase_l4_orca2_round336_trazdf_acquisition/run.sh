@@ -61,6 +61,7 @@ for path in "$PARENT" "$SOURCE_PPSRC" "$SOURCE_ZDFPHY_PPSRC" "$BASE_ZDFPHY_PPSRC
   [[ -f "$path" ]] || refuse "missing acquisition input $path"
 done
 [[ -d "$SOURCE_MODULES" ]] || refuse "missing record-build module directory $SOURCE_MODULES"
+source "$DRIVER_FLOW"
 [[ -z $(git -C "$REPO" status --porcelain --untracked-files=all) ]] \
   || refuse 'acquisition requires a clean committed tree'
 
@@ -258,24 +259,28 @@ check_zdf_oce_interior_allocations() {
 }
 
 exercise_generated_driver() {
-  local driver=$1 role=$2 base stub canonical retained
+  local driver=$1 role=$2 base stub stub_bin canonical retained truncated
   base=$driver_dir/flow-$role
   stub=$base/stub-nemo
-  mkdir -p "$base" "$base/success" "$base/refusal" "$base/retention"
+  stub_bin=$base/bin
+  mkdir -p "$base" "$stub_bin" "$base/success" "$base/refusal" "$base/retention"
   cat >"$stub" <<'STUB'
 #!/usr/bin/env bash
 set -eu
 case "${R336_STUB_NEMO_SCENARIO:-success}" in
   success)
-    printf 'stub NEMO completed\n' >ocean.output
+    cp -- "$R336_STUB_SOURCE_OUTPUT" ocean.output
+    printf 'success\n' >.r336-stub-scenario
     printf 'STOP 0\n'
     ;;
   refusal)
     printf 'before\nE R R O R stub namelist refusal\nafter\n' >ocean.output
+    printf 'refusal\n' >.r336-stub-scenario
     printf 'STOP 0\n'
     ;;
   retention)
-    printf 'stub NEMO crashed cleanly\n' >ocean.output
+    cp -- "$R336_STUB_SOURCE_OUTPUT" ocean.output
+    printf 'retention\n' >.r336-stub-scenario
     printf 'stub crash\n'
     exit 17
     ;;
@@ -283,14 +288,48 @@ case "${R336_STUB_NEMO_SCENARIO:-success}" in
 esac
 STUB
   chmod 700 "$stub"
+  cat >"$stub_bin/mpirun" <<'STUB'
+#!/usr/bin/env bash
+set -eu
+while [[ $# -gt 0 ]]; do
+  if [[ $1 == ./nemo ]]; then exec "$@"; fi
+  shift
+done
+printf 'stub mpirun did not receive ./nemo\n' >&2
+exit 64
+STUB
+  chmod 700 "$stub_bin/mpirun"
 
-  R336_STUB_FLOW_ROOT=$base/success R336_STUB_NEMO=$stub \
+  r336_check_driver_body "$driver" "$role" \
+    || refuse "generated $role driver body is incomplete"
+  truncated=$base/run.body-truncated.sh
+  if [[ $role == parent ]]; then
+    awk '/^# The inherited driver has now completed its admission/ {exit} {print}' \
+      "$driver" >"$truncated"
+  else
+    awk '/^admit\(\) \{/ {exit} {print}' "$driver" >"$truncated"
+  fi
+  bash -n "$truncated" || refuse "generated $role body plant is not valid shell"
+  plant_must_refuse "r336-$role-driver-body-truncation" \
+    r336_check_driver_body "$truncated" "$role"
+
+  R336_STUB_FLOW_ROOT=$base/success R336_STUB_NEMO=$stub R336_STUB_BIN=$stub_bin \
+    R336_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
     R336_STUB_NEMO_SCENARIO=success R336_STUB_DRIVER_ROLE=$role \
     R328_ACQ_TARGET=tke332 "$driver" --run >"$base/success.log" 2>&1
-  grep -F "R336_STUB_DRIVER_SUCCESS_PASS role=$role" "$base/success.log" >/dev/null \
-    || refuse "generated $role driver missed stub success"
+  grep -F 'R336_STUB_NEMO_ADMISSION_PASS scenario=success' "$base/success.log" >/dev/null \
+    || refuse "generated $role driver missed real-flow stub success"
+  R336_STUB_FLOW_ROOT=$base/success R336_STUB_NEMO=$stub R336_STUB_BIN=$stub_bin \
+    R336_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
+    R336_STUB_NEMO_SCENARIO=success R336_STUB_DRIVER_ROLE=$role \
+    R328_ACQ_TARGET=tke332 "$driver" --admit-existing \
+    >"$base/admit-in-place.log" 2>&1
+  grep -F 'R336_STUB_NEMO_ADMISSION_PASS scenario=success' \
+    "$base/admit-in-place.log" >/dev/null \
+    || refuse "generated $role driver missed in-place admission"
 
-  if R336_STUB_FLOW_ROOT=$base/refusal R336_STUB_NEMO=$stub \
+  if R336_STUB_FLOW_ROOT=$base/refusal R336_STUB_NEMO=$stub R336_STUB_BIN=$stub_bin \
+      R336_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
       R336_STUB_NEMO_SCENARIO=refusal R336_STUB_DRIVER_ROLE=$role \
       R328_ACQ_TARGET=tke332 "$driver" --run >"$base/refusal.log" 2>&1; then
     refuse "generated $role driver accepted stub NEMO E R R O R"
@@ -301,7 +340,8 @@ STUB
     -name 'orca1ice_trazdf_internal_kt2_np2_*' -print -quit | grep . >/dev/null \
     || refuse "generated $role driver did not retain refused outputs"
 
-  if R336_STUB_FLOW_ROOT=$base/retention R336_STUB_NEMO=$stub \
+  if R336_STUB_FLOW_ROOT=$base/retention R336_STUB_NEMO=$stub R336_STUB_BIN=$stub_bin \
+      R336_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
       R336_STUB_NEMO_SCENARIO=retention R336_STUB_DRIVER_ROLE=$role \
       R328_ACQ_TARGET=tke332 "$driver" --run >"$base/retention.log" 2>&1; then
     refuse "generated $role driver accepted crashing stub NEMO"
@@ -309,16 +349,17 @@ STUB
   retained=$(find "$base/retention/evidence/refused" -mindepth 1 -maxdepth 1 \
     -type d -name 'orca1ice_trazdf_internal_kt2_np2_*' -print -quit)
   [[ -n $retained ]] || refuse "generated $role driver did not retain a crashed run"
-  R336_STUB_FLOW_ROOT=$base/retention R336_STUB_NEMO=$stub \
+  R336_STUB_FLOW_ROOT=$base/retention R336_STUB_NEMO=$stub R336_STUB_BIN=$stub_bin \
+    R336_STUB_SOURCE_OUTPUT=$SOURCE_OUTPUT \
     R336_STUB_NEMO_SCENARIO=success R336_STUB_DRIVER_ROLE=$role \
     R328_ACQ_TARGET=tke332 R328_EXISTING_RUN=$retained \
     "$driver" --admit-existing >"$base/admit-existing.log" 2>&1
-  grep -F "R336_STUB_DRIVER_ADMIT_PASS role=$role" "$base/admit-existing.log" >/dev/null \
+  grep -F 'R336_STUB_NEMO_ADMISSION_PASS scenario=retention' "$base/admit-existing.log" >/dev/null \
     || refuse "generated $role driver missed retained admission"
   canonical=$base/retention/evidence/orca1ice_trazdf_internal_kt2_np2
   [[ -d $canonical && ! -e $retained ]] \
     || refuse "generated $role driver did not move retained output into place"
-  printf 'R336_GENERATED_DRIVER_FLOW_PASS role=%s cases=refusal,retention,admit-existing,success\n' \
+  printf 'R336_GENERATED_DRIVER_FLOW_PASS role=%s cases=success,refusal,retention,admit-existing-retained,admit-existing-in-place\n' \
     "$role"
 }
 
@@ -602,8 +643,9 @@ sed \
   -e 's|orca1ice_traldf_iso_internal_kt2_np2|orca1ice_trazdf_internal_kt2_np2|g' \
   "$PARENT" >"$ADAPTED_PARENT"
 
-# Redirect only the generated parent's stub-flow tests into their temporary
-# root, then enter the shared fast path after its real cleanup trap is armed.
+# Redirect only the generated parent's flow tests into their temporary root.
+# The test library is sourced here, but the driver is not intercepted: its
+# inherited inner driver performs the real run/admission/cleanup branches.
 sed -i \
   -e 's|^readonly EVIDENCE=|EVIDENCE=|' \
   -e '/^EVIDENCE=.*round336\/acquisition$/a\
@@ -615,10 +657,16 @@ readonly EVIDENCE' \
   -e '/^readonly ADAPTED=\$driver_dir\/run.sh$/i\
 if [[ -n ${R336_STUB_FLOW_ROOT:-} ]]; then\
   source '"$DRIVER_FLOW"'\
-  r336_stub_driver_flow\
 fi\
 ' \
   "$ADAPTED_PARENT"
+sed -i '/^"\$ADAPTED" "\$MODE"$/a\
+if [[ -n ${R336_STUB_FLOW_ROOT:-} ]]; then\
+  r336_stub_admit "$TARGET_RUN"\
+  retention_armed=0\
+  printf '\''R336_STUB_PARENT_FLOW_PASS path=%s\\n'\'' "$TARGET_RUN"\
+  exit 0\
+fi' "$ADAPTED_PARENT"
 
 # Superseded direct-edit prototype retained inert so its exact failure mode is
 # auditable; the extension fragment below targets the generated inner driver.
@@ -671,6 +719,8 @@ mv -- "$driver_dir/run-parent.extended.sh" "$ADAPTED_PARENT"
 chmod 700 "$ADAPTED_PARENT"
 bash -n "$DRIVER_FLOW" || refuse 'round-336 generated-driver flow include has invalid shell syntax'
 bash -n "$ADAPTED_PARENT" || refuse 'generated round-336 parent driver has invalid shell syntax'
+r336_check_driver_body "$ADAPTED_PARENT" parent \
+  || refuse 'generated round-336 parent driver body is incomplete'
 cp -- "$ADAPTED_PARENT" "$driver_dir/run-parent.syntax-plant.sh"
 printf '\nif then\n' >>"$driver_dir/run-parent.syntax-plant.sh"
 plant_must_refuse r336-parent-driver-syntax bash -n "$driver_dir/run-parent.syntax-plant.sh"
