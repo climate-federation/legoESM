@@ -815,3 +815,19 @@ def test_fv3_duo_column_lane_auto_turns_the_skin_on_and_steps(tmp_path):
     assert res["skin_finite"] is True
     assert res["skin_moved"] > 0.0, "the skin never stepped off its seed"
 
+
+
+def test_coupled_marker_keeps_the_auto_skin_off():
+    """The marker the coupled drivers set before setup() is what auto reads:
+    with it, ModelDriver resolves the skin OFF (and the albedo constant);
+    without it, the same config resolves ON."""
+    from legoesm.driver.model_driver import ModelDriver
+    for coupled, want in ((True, False), (False, True)):
+        d = ModelDriver(_cdgrid_cfg())
+        if coupled:
+            d._requires_surface_flux_export = True
+        d._resolve_ice_skin()
+        assert d.config.ice_skin_prognostic is want
+        assert d._input_config.ice_skin_prognostic is want
+        assert d.config.sea_ice_albedo_scheme == (
+            "maykut_untersteiner" if want else "constant")
