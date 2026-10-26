@@ -158,6 +158,8 @@ FILES = {
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/zdfphy.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/trazdf.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/trazdf.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/zdftke.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/zdftke.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traadv.f90": (
@@ -193,6 +195,14 @@ FILES = {
         REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
         "nemo_testcase_l4_orca2_round331_tke_acquisition/"
         "tke_round331_writer.F90"),
+    "zdftke_round326_writer.F90": (
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round326_hmi_acquisition/"
+        "zdftke_round326_writer.F90"),
+    "round332_writer.F90": (
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round332_source_order_acquisition/"
+        "round332_writer.F90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/MY_SRC/stprk3.F90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/MY_SRC/stprk3.F90"),
     # ORCA2 round 311: G1b's build (P5) and G8's build (R31FULLENTRY_FIX1).
@@ -2102,15 +2112,27 @@ CITATION_MAP = {
     # ORCA2 round 331: remaining TKE input and source-order localisation.
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stprk3.f90:183':
         'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )',
-    'nemo_testcase_l4_orca2_round331_tke_gate.py:124-146': [
+    'nemo_testcase_l4_orca2_round331_tke_gate.py:128-150': [
         'def _verify_source_order(record: dict) -> None:',
         'require(bool(np.any(f["matrix_diag"] != 0.0)), "matrix channel is inactive")', 23],
-    'tke_round331_writer.F90:51-78': [
+    'tke_round331_writer.F90:51-75': [
         'SUBROUTINE r331_begin(kt,Kbb,Kmm,Krhs,pinterior)',
-        'END SUBROUTINE r331_sh2', 28],
-    'tke_round331_writer.F90:153-161': [
+        'END SUBROUTINE r331_begin', 25],
+    'tke_round331_writer.F90:157-165': [
         'SUBROUTINE r331_finish(pen,pavm,pavt,pwmask)',
         "IF(ninput/=ny .OR. nbc/=ny .OR. nmatrix/=ny .OR. nsolve/=ny) &", 9],
+    'zdftke_round326_writer.F90:34-69': [
+        'IF( kt < nit000 .OR. kt > nit000 + jp_r326_last - 1 )   RETURN',
+        "R326_2D('tmask_1         ',zwrk)", 36],
+    'round332_writer.F90:82-125': [
+        'SUBROUTINE r332_tke_begin(kt,Kbb,Kmm)',
+        'END SUBROUTINE r332_tke_row', 44],
+    'round332_writer.F90:127-145': [
+        'SUBROUTINE write_tke2(kt,Kbb,Kmm)',
+        'END SUBROUTINE write_tke2', 19],
+    'ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/zdftke.f90:197-200': [
+        'CALL tke_tke( Kbb, Kmm, p_sh2, p_avm, p_avt, z_pdlr )   ! now tke (en)',
+        'CALL tke_avn( Kbb, Kmm,        p_avm, p_avt, z_pdlr )   ! now avt, avm, dissl', 4],
     'ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/istate.f90:105-140': [
         'IF( ln_rstart ) THEN',
         'vv    (:,:,:,Kmm) = vv   (:,:,:,Kbb)', 36],

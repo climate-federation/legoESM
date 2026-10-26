@@ -222,14 +222,14 @@ separately required at least one `sh2_output != 0.0`.  The latter was the
 producer and consumer executed; it inferred execution from numerical
 nonzeroness.  The repaired gate keeps the bitwise producer-to-consumer check
 and explicitly admits a zero field at a from-rest first step
-(`nemo_testcase_l4_orca2_round331_tke_gate.py:124-146`).
+(`nemo_testcase_l4_orca2_round331_tke_gate.py:128-150`).
 
 The observer did not silently preserve its zero initialization.  Its begin
 routine zeros storage and clears `lsh2`, while the `r331_sh2` call copies the
 computed array and sets `lsh2=.TRUE.`
-(`tke_round331_writer.F90:51-78`).  Finish refuses unless that flag is true and
+(`tke_round331_writer.F90:51-75`).  Finish refuses unless that flag is true and
 unless every TKE input, boundary, matrix and solve row was captured
-(`tke_round331_writer.F90:153-161`).  Thus the retained record proves both the
+(`tke_round331_writer.F90:157-165`).  Thus the retained record proves both the
 producer call and the downstream TKE capture ran.
 
 **CONFIRMED — what the retained record holds.**  Rank 0 has 224,547 wet shear

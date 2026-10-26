@@ -463,3 +463,94 @@ SHA-256 is
 `357552e211123f746071b1da46e34b619513dc21077812ffe469614a71dd6b28`.
 The reports are `round336/resume7_citation_gate.json`,
 `round336/resume7_default_gate.log`, and `round336/resume7_ratchet.log`.
+
+## Resume 8: wet-target repair and kt-2 TKE record census
+
+The replay target is now the intersection of the registered adjacent W faces
+and NEMO's actual W mask. This removes seven dry bottom faces from the target
+census; it does not remove any of the 17 genuine wet `avt_k` differences. The
+`first` control is no longer vacuous: its planted record clears the metric of
+the first source-ordered row while retaining the old first-row marker, and the
+classifier refuses that inconsistent record. Reverting either repair makes its
+focused production-call-site test fail.
+
+Both labels reran the production trace and returned
+`PASS_R336_TRAZDF_STATEMENT_REPLAY`. Their corrected, identical kt-2 table is:
+
+| executed output | all-wet unequal/support | all-wet maximum | target unequal/support | target maximum |
+|---|---:|---:|---:|---:|
+| TKE `avt_k` copy | 17/414119 | `6.361019669726387e-13` | 9/18 | `6.361019669726387e-13` |
+| runoff `avt` add | 17/414119 | `6.361019669726387e-13` | 9/18 | `6.361019669726387e-13` |
+| EVD `avt` replace | 17/414119 | `6.361019669726387e-13` | 9/18 | `6.361019669726387e-13` |
+| DDM `avt` update | 17/414119 | `6.361019670744853e-13` | 9/18 | `6.361019670744853e-13` |
+| DDM `avs` write | 17/414119 | `6.361019669725353e-13` | 9/18 | `6.361019669725353e-13` |
+| IWM `avt` add | 17/414119 | `6.361019670744853e-13` | 9/18 | `6.361019670744853e-13` |
+| IWM `avs` add | 17/414119 | `6.361019669719149e-13` | 9/18 | `6.361019669719149e-13` |
+| effective temperature K | 17/414119 | `6.361019670744853e-13` | 9/18 | `6.361019670744853e-13` |
+| lower matrix row | 17/430552 | `6.874397878199601e-10` | 9/18 | `6.874397878199601e-10` |
+| upper matrix row | 17/430552 | `6.874397878199601e-10` | 8/18 | `6.874397878199601e-10` |
+| diagonal matrix row | 25/430552 | `6.874447677773787e-10` | 14/18 | `6.874447677773787e-10` |
+| eliminated diagonal | 25/430552 | `6.874447677773787e-10` | 14/18 | `6.874447677773787e-10` |
+| content RHS | 0/430552 | `0.0` | 0/18 | `0.0` |
+| forward recurrence | 13/430552 | `1.0226131053059362e-09` | 8/18 | `1.0226131053059362e-09` |
+| back substitution | 29/430552 | `7.678080393702658e-12` | 18/18 | `7.678080393702658e-12` |
+| Kaa update | 29/430552 | `7.678080393702658e-12` | 18/18 | `7.678080393702658e-12` |
+
+The artifacts are `round336/resume8/given.json` (SHA-256
+`b442f8fd7e198396b01a481585141f357f17cc97e58be846b3911f26b059f74e`)
+and `round336/resume8/independent.json` (SHA-256
+`5d022117c4e7d8999ab1426cf1df1b09f8669b9864abfb662b7114ea59507490`).
+Their raw traced companions are SHA-256
+`87061db067300a33d36365c685daae9047139ee4c526d9e3a52340e67391a3cc`
+and `cc147b4b77229ff9a823b502b7dd0a3cb8ec944b54009f0c32c446c17f0d6808`.
+
+The cheapest-next-step census found that the admitted round-326 kt-2 files
+contain only `hm_i`, `fr_i`, `taum`, and the surface T mask, exactly the four
+fields written by `zdftke_round326_writer.F90:34-69`. Round 331 has TKE
+internal records only for kt 1; round 332 likewise has only its kt-1
+`zmxlm`/`zmxld`/`pdlr` record. There is no admitted
+`oracle_tke331_kt00000002_*` or `oracle_r332_source_kt00000002_*` file. Those
+records therefore cannot replay the executing `tke_tke` followed by `tke_avn`
+calls at
+`ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/zdftke.f90:197-200`.
+No internal TKE statement can be labeled **CONFIRMED** from existing evidence,
+so Decision 122 does not permit a literal production fix or M1--M6 landing.
+
+The acquisition-only extension activates the already reviewed round-331
+statement writer at both kt 1 and kt 2, with exact kt-2 levels
+`(Kbb,Kmm,Krhs)=(3,3,1)`, at `tke_round331_writer.F90:51-75`. It also records
+the full kt-2 mixing-length and Prandtl fields through the existing round-332
+in-loop hook at `round332_writer.F90:82-125`; the separate three-field output
+is defined at `round332_writer.F90:127-145`. Its production flags, decomposition,
+array bounds, record headers and manifests remain pinned, and it changes no
+NEMO arithmetic.
+
+The read-only preflight passes 88 focused tests, its inherited 78-test battery,
+all refusal plants, 140-file deterministic passivity, eight Fortran syntax
+proofs, a 1,367-instruction stage census, the nonzero 783-instruction
+`tke_avn` census, and the 421-object/409-ppsrc same-program proof. The log is
+`round336/resume8_tke_preflight.log`, SHA-256
+`c37cf567690e99692b433c5272586c510ebd5ec0dcaec1f6fbf41e730b248b8b`.
+It ends at `ORCA2_ROUND336_TKE_KT2_PREFLIGHT_READY`; no NEMO run or build was
+started. No configuration or shared model statement changed. Codex review:
+operator.
+
+The required operator handoff is:
+
+```text
+ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh
+```
+
+The final per-receipt citation gate reports PASS for 5 citations with zero
+failures, zero unmapped citations, zero map-audit failures, and all nine
+self-tests fired; its report SHA-256 is
+`d246220382f843dce91fe9fd6bc090b962d67e57b36a4d6d86f32d9ad45c1552`.
+The exact default ORCA2 landing battery, extended by the two replay repairs
+and eleven acquisition controls, passes 172 tests in 1,026.90 seconds; its log
+SHA-256 is
+`696c4359925ef2dec4ce77b02547fd20e8bc5d141d13b7de58a5ad85d3817c2d`.
+The private-import ratchet separately passes 6 tests in 4.99 seconds; its log
+SHA-256 is
+`a199421a3a3c3466f4b0cf403655ab82284f7e63e97b56a4c121389f811fd16d`.
+The reports are `round336/resume8_citation_gate.json`,
+`round336/resume8_default_gate.log`, and `round336/resume8_ratchet.log`.
