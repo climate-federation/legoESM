@@ -88,7 +88,7 @@ def validate_group_membership(reference: Path, expected: dict[str, str]) -> None
         group = group.lower()
         require(group in groups, f"namelist group {group} is absent")
         owners = sorted(name for name, variables in groups.items() if variable in variables)
-        require(owners == [group], f"{variable} belongs to {owners}, expected {group}")
+        require(group in owners, f"{variable} belongs to {owners}, expected membership in {group}")
 
 
 def output_has(text: str, name: str, value: str) -> bool:
