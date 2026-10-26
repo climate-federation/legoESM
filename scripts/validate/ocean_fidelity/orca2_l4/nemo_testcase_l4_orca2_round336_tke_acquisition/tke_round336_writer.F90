@@ -4,15 +4,15 @@ MODULE tke_round336_writer
    USE, INTRINSIC :: iso_fortran_env, ONLY : int64
    USE dom_oce
    USE in_out_manager, ONLY : nit000
-   USE dynzdf_round328_writer, ONLY : checksum2, checksum3
    USE lib_mpp, ONLY : ctl_stop
    IMPLICIT NONE
    PRIVATE
    PUBLIC :: r336_tke_begin, r336_tke_after_tke, r336_tke_finish
    PUBLIC :: r336_after_bc, r336_after_langmuir, r336_after_rhs
    PUBLIC :: r336_matrix_diag, r336_matrix_upper, r336_matrix_lower
-   PUBLIC :: r336_after_solve, r336_pre_sweep_mxl, r336_final_mxl
-   PUBLIC :: r336_final_mxld, r336_pre_pdlr_zav, r336_pre_pdlr_avt
+   PUBLIC :: r336_solve_diag, r336_solve_rhs, r336_solve_bottom, r336_solve_back
+   PUBLIC :: r336_after_solve, r336_pre_sweep_mxl, r336_after_lup, r336_after_ldown
+   PUBLIC :: r336_final_mxl, r336_final_mxld, r336_pre_pdlr_avt
 
    INTEGER, SAVE :: nkt=-1,nkbb=-1,nkmm=-1
    LOGICAL, SAVE :: lactive=.FALSE.
@@ -22,18 +22,20 @@ MODULE tke_round336_writer
    REAL(wp), ALLOCATABLE, SAVE :: r336_matrix_diag(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: r336_matrix_upper(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: r336_matrix_lower(:,:,:)
+   REAL(wp), ALLOCATABLE, SAVE :: r336_solve_diag(:,:,:),r336_solve_rhs(:,:,:)
+   REAL(wp), ALLOCATABLE, SAVE :: r336_solve_bottom(:,:,:),r336_solve_back(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: r336_after_solve(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: r336_pre_sweep_mxl(:,:,:)
+   REAL(wp), ALLOCATABLE, SAVE :: r336_after_lup(:,:,:),r336_after_ldown(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: r336_final_mxl(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: r336_final_mxld(:,:,:)
-   REAL(wp), ALLOCATABLE, SAVE :: r336_pre_pdlr_zav(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: r336_pre_pdlr_avt(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: r336_entry_gdepw_kmm(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: r336_entry_e3t_kmm(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: r336_entry_e3w_kmm(:,:,:)
 
    REAL(wp), ALLOCATABLE, SAVE :: entry_en(:,:,:),entry_avt(:,:,:)
-   REAL(wp), ALLOCATABLE, SAVE :: entry_avm(:,:,:),entry_sh2(:,:,:)
+   REAL(wp), ALLOCATABLE, SAVE :: entry_avm_k(:,:,:),entry_sh2(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: entry_dissl(:,:,:),entry_rn2(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: entry_rn2b(:,:,:),entry_wmask(:,:,:)
    REAL(wp), ALLOCATABLE, SAVE :: entry_drag_bottom(:,:),entry_drag_top(:,:)
@@ -49,6 +51,26 @@ MODULE tke_round336_writer
 #  include "do_loop_substitute.h90"
 
 CONTAINS
+
+   FUNCTION checksum2(value) RESULT(checksum)
+      REAL(wp), INTENT(in) :: value(:,:)
+      INTEGER(int64) :: checksum,word
+      INTEGER :: ji,jj
+      checksum=0_int64
+      DO jj=1,SIZE(value,2); DO ji=1,SIZE(value,1)
+         word=TRANSFER(value(ji,jj),word); checksum=IEOR(checksum,word)
+      END DO; END DO
+   END FUNCTION checksum2
+
+   FUNCTION checksum3(value) RESULT(checksum)
+      REAL(wp), INTENT(in) :: value(:,:,:)
+      INTEGER(int64) :: checksum,word
+      INTEGER :: ji,jj,jk
+      checksum=0_int64
+      DO jk=1,SIZE(value,3); DO jj=1,SIZE(value,2); DO ji=1,SIZE(value,1)
+         word=TRANSFER(value(ji,jj,jk),word); checksum=IEOR(checksum,word)
+      END DO; END DO; END DO
+   END FUNCTION checksum3
 
    SUBROUTINE fill_negative_zero(value)
       REAL(wp), INTENT(out) :: value(:,:,:)
@@ -83,13 +105,16 @@ CONTAINS
       ALLOCATE(r336_after_bc(A2D(0),jpk),r336_after_langmuir(A2D(0),jpk), &
          & r336_after_rhs(A2D(0),jpk),r336_matrix_diag(A2D(0),jpk), &
          & r336_matrix_upper(A2D(0),jpk),r336_matrix_lower(A2D(0),jpk), &
+         & r336_solve_diag(A2D(0),jpk),r336_solve_rhs(A2D(0),jpk), &
+         & r336_solve_bottom(A2D(0),jpk),r336_solve_back(A2D(0),jpk), &
          & r336_after_solve(A2D(0),jpk),r336_pre_sweep_mxl(A2D(0),jpk), &
+         & r336_after_lup(A2D(0),jpk),r336_after_ldown(A2D(0),jpk), &
          & r336_final_mxl(A2D(0),jpk),r336_final_mxld(A2D(0),jpk), &
-         & r336_pre_pdlr_zav(A2D(0),jpk),r336_pre_pdlr_avt(A2D(0),jpk), &
+         & r336_pre_pdlr_avt(A2D(0),jpk), &
          & r336_entry_gdepw_kmm(A2D(0),jpk),r336_entry_e3t_kmm(A2D(0),jpk), &
          & r336_entry_e3w_kmm(A2D(0),jpk))
       ALLOCATE(entry_en(A2D(0),jpk),entry_avt(A2D(0),jpk), &
-         & entry_avm(jpi,jpj,jpk),entry_sh2(A2D(0),jpk), &
+         & entry_avm_k(jpi,jpj,jpk),entry_sh2(A2D(0),jpk), &
          & entry_dissl(A2D(0),jpk),entry_rn2(jpi,jpj,jpk), &
          & entry_rn2b(jpi,jpj,jpk),entry_wmask(jpi,jpj,jpk), &
          & entry_tmask(jpi,jpj,jpk),entry_umask(jpi,jpj,jpk),entry_vmask(jpi,jpj,jpk), &
@@ -101,7 +126,7 @@ CONTAINS
          & entry_uu_kbb(jpi,jpj,jpk),entry_vv_kbb(jpi,jpj,jpk), &
          & entry_avtb_2d(A2D(0)),entry_avtb(jpk),entry_avmb(jpk), &
          & after_tke_en(A2D(0),jpk),after_tke_pdlr(A2D(0),jpk))
-      entry_en=pen; entry_avt=pavt; entry_avm=pavm; entry_sh2=psh2
+      entry_en=pen; entry_avt=pavt; entry_avm_k=pavm; entry_sh2=psh2
       entry_dissl=pdissl; entry_rn2=prn2; entry_rn2b=prn2b
       entry_wmask=pwmask; entry_drag_bottom=pbottom; entry_drag_top=ptop
       entry_nmln=REAL(pnmln,wp); entry_hmlp=phmlp
@@ -117,11 +142,16 @@ CONTAINS
       CALL fill_negative_zero(r336_matrix_diag)
       CALL fill_negative_zero(r336_matrix_upper)
       CALL fill_negative_zero(r336_matrix_lower)
+      CALL fill_negative_zero(r336_solve_diag)
+      CALL fill_negative_zero(r336_solve_rhs)
+      CALL fill_negative_zero(r336_solve_bottom)
+      CALL fill_negative_zero(r336_solve_back)
       CALL fill_negative_zero(r336_after_solve)
       CALL fill_negative_zero(r336_pre_sweep_mxl)
+      CALL fill_negative_zero(r336_after_lup)
+      CALL fill_negative_zero(r336_after_ldown)
       CALL fill_negative_zero(r336_final_mxl)
       CALL fill_negative_zero(r336_final_mxld)
-      CALL fill_negative_zero(r336_pre_pdlr_zav)
       CALL fill_negative_zero(r336_pre_pdlr_avt)
       CALL fill_negative_zero(r336_entry_gdepw_kmm)
       CALL fill_negative_zero(r336_entry_e3t_kmm)
@@ -200,10 +230,10 @@ CONTAINS
          IF(ios /= 0) CALL ctl_stop('round336 TKE: cannot open record')
          magic='NEMO_L4_R336TKE'
          WRITE(unit) magic,2,nkt,nkbb,nkmm,narea-1,jpi,jpj,jpk,ntsi,ntei,ntsj,ntej, &
-            & STORAGE_SIZE(1._wp),46
+            & STORAGE_SIZE(1._wp),51
          CALL put3(unit,'entry_en',entry_en,ntsi,ntsj,1)
          CALL put3(unit,'entry_avt',entry_avt,ntsi,ntsj,1)
-         CALL put3(unit,'entry_avm',entry_avm,1,1,1)
+         CALL put3(unit,'entry_avm_k',entry_avm_k,1,1,1)
          CALL put3(unit,'entry_sh2',entry_sh2,ntsi,ntsj,1)
          CALL put3(unit,'entry_dissl',entry_dissl,ntsi,ntsj,1)
          CALL put3(unit,'entry_rn2',entry_rn2,1,1,1)
@@ -236,13 +266,18 @@ CONTAINS
          CALL put3(unit,'matrix_diag',r336_matrix_diag,ntsi,ntsj,1)
          CALL put3(unit,'matrix_upper',r336_matrix_upper,ntsi,ntsj,1)
          CALL put3(unit,'matrix_lower',r336_matrix_lower,ntsi,ntsj,1)
+         CALL put3(unit,'solve_diag',r336_solve_diag,ntsi,ntsj,1)
+         CALL put3(unit,'solve_rhs',r336_solve_rhs,ntsi,ntsj,1)
+         CALL put3(unit,'solve_bottom',r336_solve_bottom,ntsi,ntsj,1)
+         CALL put3(unit,'solve_back',r336_solve_back,ntsi,ntsj,1)
          CALL put3(unit,'after_solve_en',r336_after_solve,ntsi,ntsj,1)
          CALL put3(unit,'after_tke_en',after_tke_en,ntsi,ntsj,1)
          CALL put3(unit,'tke_pdlr',after_tke_pdlr,ntsi,ntsj,1)
          CALL put3(unit,'pre_sweep_mxl',r336_pre_sweep_mxl,ntsi,ntsj,1)
+         CALL put3(unit,'after_lup_mxld',r336_after_lup,ntsi,ntsj,1)
+         CALL put3(unit,'after_ldown_mxl',r336_after_ldown,ntsi,ntsj,1)
          CALL put3(unit,'final_mxl',r336_final_mxl,ntsi,ntsj,1)
          CALL put3(unit,'final_mxld',r336_final_mxld,ntsi,ntsj,1)
-         CALL put3(unit,'pre_pdlr_zav',r336_pre_pdlr_zav,ntsi,ntsj,1)
          CALL put3(unit,'pre_pdlr_avt',r336_pre_pdlr_avt,ntsi,ntsj,1)
          CALL put3(unit,'final_avm',pavm,1,1,1)
          CALL put3(unit,'final_avt',pavt,ntsi,ntsj,1)
@@ -250,9 +285,11 @@ CONTAINS
          CLOSE(unit)
       ENDIF
       DEALLOCATE(r336_after_bc,r336_after_langmuir,r336_after_rhs, &
-         & r336_matrix_diag,r336_matrix_upper,r336_matrix_lower,r336_after_solve, &
-         & r336_pre_sweep_mxl,r336_final_mxl,r336_final_mxld,r336_pre_pdlr_zav, &
-         & r336_pre_pdlr_avt,entry_en,entry_avt,entry_avm,entry_sh2,entry_dissl, &
+         & r336_matrix_diag,r336_matrix_upper,r336_matrix_lower, &
+         & r336_solve_diag,r336_solve_rhs,r336_solve_bottom,r336_solve_back, &
+         & r336_after_solve,r336_pre_sweep_mxl,r336_after_lup,r336_after_ldown, &
+         & r336_final_mxl,r336_final_mxld,r336_pre_pdlr_avt, &
+         & entry_en,entry_avt,entry_avm_k,entry_sh2,entry_dissl, &
          & r336_entry_gdepw_kmm,r336_entry_e3t_kmm,r336_entry_e3w_kmm, &
          & entry_rn2,entry_rn2b,entry_wmask,entry_tmask,entry_umask,entry_vmask, &
          & entry_drag_bottom,entry_drag_top,entry_ssmask,entry_mbkt,entry_mikt, &

@@ -25,20 +25,21 @@ HEADER_NAMES = (
     "ntsi", "ntei", "ntsj", "ntej", "real_bits", "n_fields",
 )
 FIELDS = (
-    "entry_en", "entry_avt", "entry_avm", "entry_sh2", "entry_dissl",
+    "entry_en", "entry_avt", "entry_avm_k", "entry_sh2", "entry_dissl",
     "entry_rn2", "entry_rn2b", "entry_drag_bottom", "entry_drag_top",
     "entry_nmln", "entry_hmlp", "entry_fr_i", "entry_hm_i", "entry_taum",
     "entry_htau", "entry_uu_kbb", "entry_vv_kbb", "entry_tmask",
     "entry_umask", "entry_vmask", "entry_ssmask", "entry_mbkt", "entry_mikt",
     "entry_gdepw_kmm", "entry_e3t_kmm", "entry_e3w_kmm", "entry_avtb_2d",
     "entry_avtb", "entry_avmb",
-    "after_bc_en", "post_langmuir_en", "matrix_rhs_en", "matrix_diag",
-    "matrix_upper", "matrix_lower", "after_solve_en", "after_tke_en",
-    "tke_pdlr", "pre_sweep_mxl", "final_mxl", "final_mxld",
-    "pre_pdlr_zav", "pre_pdlr_avt", "final_avm", "final_avt", "tke_wmask",
+    "after_bc_en", "post_langmuir_en", "matrix_rhs_en", "matrix_diag", "matrix_upper",
+    "matrix_lower", "solve_diag", "solve_rhs", "solve_bottom", "solve_back",
+    "after_solve_en", "after_tke_en", "tke_pdlr", "pre_sweep_mxl",
+    "after_lup_mxld", "after_ldown_mxl", "final_mxl", "final_mxld",
+    "pre_pdlr_avt", "final_avm", "final_avt", "tke_wmask",
 )
 FULL_3D = {
-    "entry_avm", "entry_rn2", "entry_rn2b", "entry_uu_kbb", "entry_vv_kbb",
+    "entry_avm_k", "entry_rn2", "entry_rn2b", "entry_uu_kbb", "entry_vv_kbb",
     "entry_tmask", "entry_umask", "entry_vmask", "final_avm", "tke_wmask",
 }
 FULL_2D = {
@@ -50,17 +51,19 @@ INTERIOR_2D = {
 }
 ONE_D = {"entry_avtb", "entry_avmb"}
 NEGATIVE_ZERO_EDGE = {
-    "matrix_diag", "matrix_upper", "matrix_lower", "after_solve_en",
-    "tke_pdlr", "pre_pdlr_zav", "pre_pdlr_avt",
+    "matrix_diag", "matrix_upper",
+    "matrix_lower", "solve_diag", "solve_rhs", "solve_bottom", "solve_back",
+    "after_solve_en", "tke_pdlr", "pre_pdlr_avt",
 }
 REAL_LAYOUT = (94, 152, 31, 3, 92, 3, 150)
 PLANTS = (
     "header", "field-order", "truncation", "checksum", "stamp", "extent",
-    "entry", "rn2", "langmuir", "pre-sweep", "zav", "pdlr", "final",
+    "entry", "rn2", "langmuir", "solve-steps",
+    "pre-sweep", "sweep-steps", "north-halo-avm-k", "pdlr", "final",
     "signed-zero", "source-values", "time-level",
 )
-OBSERVER_UNITS = ("dynzdf", "stprk3_stg", "zdftke")
-WRITER_UNITS = ("dynzdf_round328_writer", "tke_round336_writer")
+OBSERVER_UNITS = ("zdftke",)
+WRITER_UNITS = ("tke_round336_writer",)
 
 # External array reads in the active ORCA2 tke_tke/tke_avn blocks.  Scalars
 # and selectors are pinned by the run's namelist/ocean.output identity; local
@@ -69,7 +72,7 @@ WRITER_UNITS = ("dynzdf_round328_writer", "tke_round336_writer")
 # it is deliberately classified and recorded.
 READ_SET_FIELDS = {
     "en": ("entry_en", "after_tke_en"),
-    "p_avt": ("entry_avt",), "p_avm": ("entry_avm",),
+    "p_avt": ("entry_avt",), "p_avm": ("entry_avm_k",),
     "p_sh2": ("entry_sh2",), "dissl": ("entry_dissl",),
     "rn2": ("entry_rn2",), "rn2b": ("entry_rn2b",),
     "rCdU_bot": ("entry_drag_bottom",), "rCdU_top": ("entry_drag_top",),
@@ -278,7 +281,8 @@ def _wet_index(wet: np.ndarray) -> tuple[int, ...]:
 def verify_record(record: dict, phase: dict | None = None,
                   ice: dict | None = None, plant: str | None = None) -> dict[str, int]:
     require(plant is None or plant in {
-        "entry", "rn2", "langmuir", "pre-sweep", "zav", "pdlr", "final",
+        "entry", "rn2", "langmuir", "solve-steps",
+        "pre-sweep", "sweep-steps", "north-halo-avm-k", "pdlr", "final",
         "signed-zero", "source-values"}, f"unsupported semantic plant {plant}")
     fields = record["fields"]
     header = record["header"]
@@ -289,7 +293,8 @@ def verify_record(record: dict, phase: dict | None = None,
     index = _wet_index(wet)
     field_for_plant = {
         "entry": "entry_en", "rn2": "entry_rn2", "langmuir": "post_langmuir_en",
-        "pre-sweep": "pre_sweep_mxl", "zav": "pre_pdlr_zav",
+        "solve-steps": "solve_diag",
+        "pre-sweep": "pre_sweep_mxl", "sweep-steps": "after_lup_mxld",
         "pdlr": "tke_pdlr", "final": "final_avt",
     }
     if plant in field_for_plant:
@@ -300,6 +305,8 @@ def verify_record(record: dict, phase: dict | None = None,
             target[global_index] = np.nan
         else:
             target[index] = np.nan
+    if plant == "north-halo-avm-k":
+        fields["entry_avm_k"][i0, header["ntej"], index[2]] = np.nan
     if plant == "source-values":
         fields["entry_drag_bottom"].flat[0] = np.nextafter(
             fields["entry_drag_bottom"].flat[0], np.float64(np.inf))
@@ -323,8 +330,8 @@ def verify_record(record: dict, phase: dict | None = None,
                 "bottom drag differs from -rn_Cd0*rn_Uc0*ssmask")
     interior = wet[..., 1:-1]
     require(bool(np.any(interior)), "record has no wet process-range interface")
-    for name in ("pre_sweep_mxl", "final_mxl", "final_mxld", "pre_pdlr_zav",
-                 "pre_pdlr_avt", "final_avt"):
+    for name in ("pre_sweep_mxl", "after_lup_mxld", "after_ldown_mxl",
+                 "final_mxl", "final_mxld", "pre_pdlr_avt", "final_avt"):
         require(bool(np.all(fields[name][..., 1:-1][interior] >= 0.0)),
                 f"{name}: negative wet process-range value")
     require(bool(np.all(fields["final_mxld"][..., 1:-1][interior] >=
@@ -395,7 +402,8 @@ def run_gate(root: Path, phase_root: Path, ice_root: Path, expect_commit: str,
                 phase_path, phase_admission["records"][phase_path.name])
             ice = hmi.read_record(ice_path)
         semantic_plant = plant if rank == 0 and plant in {
-            "entry", "rn2", "langmuir", "pre-sweep", "zav", "pdlr", "final",
+            "entry", "rn2", "langmuir", "solve-steps",
+            "pre-sweep", "sweep-steps", "north-halo-avm-k", "pdlr", "final",
             "signed-zero", "source-values"} else None
         counts[str(rank)] = verify_record(record, phase, ice, semantic_plant)
         hashes[str(rank)] = {"tke": record["sha256"]}

@@ -108,6 +108,11 @@ if [[ -n ${R336_TKE_STUB_FLOW_ROOT:-} ]]; then
 fi
 readonly TARGET_ROOT
 readonly SOURCE_DYNZDF=$NEMO_ROOT/src/OCE/DYN/dynzdf.F90
+readonly SOURCE_DYNVOR_PRISTINE=$NEMO_ROOT/src/OCE/DYN/dynvor.F90
+readonly SOURCE_STAGE_PRISTINE=$NEMO_ROOT/src/OCE/stprk3_stg.F90
+readonly SOURCE_STPRK3_PRISTINE=$NEMO_ROOT/src/OCE/stprk3.F90
+readonly SOURCE_ZDFTKE_PRISTINE=$NEMO_ROOT/src/OCE/ZDF/zdftke.F90
+readonly SOURCE_TRALDF_PRISTINE=$NEMO_ROOT/src/OCE/TRA/traldf_iso.F90
 readonly SOURCE_DYNVOR=$SOURCE_ROOT/MY_SRC/dynvor.F90
 readonly SOURCE_STAGE=$SOURCE_ROOT/MY_SRC/stprk3_stg.F90
 readonly SOURCE_ZDFPHY=$NEMO_ROOT/src/OCE/ZDF/zdfphy.F90
@@ -189,6 +194,15 @@ readonly R336_TKE_FIXTURE=$R336_TKE_DIR/tke_round336_fixture.F90
 readonly R336_TKE_GATE=$here/../nemo_testcase_l4_orca2_round336_tke_gate.py
 readonly R336_TKE_TEST=$REPO/tests/ocean/fidelity/test_orca2_round336_tke_gate.py
 readonly R336_PHASE_REFERENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/acquisition/orca1ice_trazdf_internal_kt2_np2
+readonly HIST_R5_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/acquisition/orca1ice_surface_entry_every_step_a_np2
+readonly HIST_R326_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round326/acquisition/orca1ice_tke_hmi_10step_np2
+readonly HIST_R328_DYN_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round328/acquisition/orca1ice_dynzdf_kt1_np2
+readonly HIST_R328_ZDF_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round328/acquisition/orca1ice_zdfphy_kt1_np2
+readonly HIST_R331_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round331/acquisition/orca1ice_tke331_kt1_np2
+readonly HIST_R332_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round332/acquisition/orca1ice_source_order_kt1_np2
+readonly HIST_R332_RAW_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round332/acquisition/orca1ice_raw_postfold_v_kt1_np2
+readonly HIST_R333_TR_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round333/acquisition/orca1ice_tracer_stage3_kt2_np2
+readonly HIST_R333_LDF_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round333/acquisition/orca1ice_traldf_iso_internal_kt2_np2
 readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
 
 scratch=
@@ -260,7 +274,7 @@ r336_tke_stub_assert() {
     || refuse 'stub did not execute the real round-336 admission'
   plant_count=$(find "$TARGET_RUN" -maxdepth 1 -type f \
     -name 'round336_tke_*_plant.log' -printf x | wc -c)
-  [[ $plant_count -eq 16 ]] || refuse "stub real admission ran $plant_count/16 plants"
+  [[ $plant_count -eq 18 ]] || refuse "stub real admission ran $plant_count/18 plants"
   printf 'R336_TKE_STUB_ADMISSION_PASS scenario=%s path=%s\n' "$scenario" "$TARGET_RUN"
 }
 plant_must_refuse() {
@@ -366,15 +380,20 @@ check_r336_tke_landing() {
     /r336_matrix_diag/ {diag=NR}
     /r336_matrix_upper/ {upper=NR}
     /r336_matrix_lower/ {lower=NR}
+    /r336_solve_diag/ {solve_diag=NR}
+    /r336_solve_rhs/ {solve_rhs=NR}
+    /r336_solve_bottom/ {solve_bottom=NR}
+    /r336_solve_back/ {solve_back=NR}
     /r336_after_solve/ {after_solve=NR}
     /^[[:space:]]*END SUBROUTINE tke_tke/ {end_tke=NR; routine=""}
     /^[[:space:]]*SUBROUTINE tke_avn\(/ {avn=NR; routine="avn"}
     /r336_pre_sweep_mxl/ {pre_sweep=NR}
     /SELECT CASE[[:space:]]*\([[:space:]]*nn_mxl/ && routine=="avn" {mxl_select=NR}
+    /r336_after_lup/ {after_lup=NR}
+    /r336_after_ldown/ {after_ldown=NR}
     /r336_final_mxl\(/ {final_mxl=NR}
     /r336_final_mxld\(/ {final_mxld=NR}
     /zav[[:space:]]*=[[:space:]]*rn_ediff/ && routine=="avn" {zav=NR}
-    /r336_pre_pdlr_zav/ {pre_zav=NR}
     /r336_pre_pdlr_avt/ {pre_avt=NR}
     /IF\([[:space:]]*nn_pdl[[:space:]]*==[[:space:]]*1[[:space:]]*\)/ && routine=="avn" {pdlr=NR}
     /^[[:space:]]*END SUBROUTINE tke_avn/ {end_avn=NR; routine=""}
@@ -383,10 +402,12 @@ check_r336_tke_landing() {
           after_tke<call_avn && call_avn<finish && finish<inner)
       ok=ok && inner<after_bc && after_bc<langmuir && langmuir<after_langmuir
       ok=ok && after_langmuir<after_rhs && after_rhs<diag && diag<upper &&
-          upper<lower && lower<after_solve && after_solve<end_tke
-      ok=ok && avn<pre_sweep && pre_sweep<mxl_select && mxl_select<final_mxl &&
-          final_mxl<final_mxld && final_mxld<zav && zav<pre_zav &&
-          pre_zav<pre_avt && pre_avt<pdlr && pdlr<end_avn
+          upper<lower && lower<solve_diag && solve_diag<solve_rhs &&
+          solve_rhs<solve_bottom && solve_bottom<solve_back &&
+          solve_back<after_solve && after_solve<end_tke
+      ok=ok && avn<pre_sweep && pre_sweep<mxl_select && mxl_select<after_lup &&
+          after_lup<after_ldown && after_ldown<final_mxl && final_mxl<final_mxld &&
+          final_mxld<zav && zav<pre_avt && pre_avt<pdlr && pdlr<end_avn
       exit !ok
     }
   ' "$1"
@@ -411,7 +432,7 @@ compare_fp_disassembly() {
 }
 fp_named_signature() {
   local object=$1 output=$2 wanted=$3
-  objdump -drwC --no-show-raw-insn "$object" | awk -v wanted="$wanted" '
+  objdump -drwC --no-show-raw-insn --disassemble="$wanted" "$object" | awk -v wanted="$wanted" '
     /^[[:xdigit:]]+[[:space:]]+<[^>]+>:/ {
       fn=$2; gsub(/[<>:]/,"",fn); next
     }
@@ -422,6 +443,25 @@ fp_named_signature() {
   ' | sort | uniq -c >"$output"
   awk -v fn="$wanted" '$2==fn {n+=$1} END {exit !(n>0)}' "$output"
 }
+historical_fp_row() {
+  local tool=$1 baseline=$2 producer=$3 function=$4 expected=$5 expected_base=$6 expected_observed=$7
+  local base_count observed_count verdict
+  fp_named_signature "$baseline" "$scratch/historical-${tool}-${function}.base.fp" "$function" \
+    || refuse "historical $tool production function has a zero FP census: $function"
+  fp_named_signature "$producer" "$scratch/historical-${tool}-${function}.observed.fp" "$function" \
+    || refuse "historical $tool producer function has a zero FP census: $function"
+  base_count=$(awk '{n+=$1} END {print n+0}' "$scratch/historical-${tool}-${function}.base.fp")
+  observed_count=$(awk '{n+=$1} END {print n+0}' "$scratch/historical-${tool}-${function}.observed.fp")
+  [[ $base_count -eq $expected_base && $observed_count -eq $expected_observed ]] \
+    || refuse "historical $tool $function count $base_count/$observed_count != $expected_base/$expected_observed"
+  verdict=different
+  cmp -s "$scratch/historical-${tool}-${function}.base.fp" \
+    "$scratch/historical-${tool}-${function}.observed.fp" && verdict=equal
+  [[ $verdict == "$expected" ]] \
+    || refuse "historical $tool $function census unexpectedly $verdict"
+  printf 'R336_HISTORICAL_OBSERVER_FP tool=%s function=%s production=%s producer=%s verdict=%s\n' \
+    "$tool" "$function" "$base_count" "$observed_count" "$verdict"
+}
 fpp() {
   ( cd "$(dirname "$1")" && cpp -Dkey_nosignedzero -P -traditional $FPP_KEYS \
       -I "$SOURCE_ROOT/WORK" -I "$SOURCE_ROOT/BLD/inc" "$(basename "$1")" -o "$2" )
@@ -429,7 +469,6 @@ fpp() {
 same_program() {
   if [[ "$ACQ_TARGET" == tke336 ]]; then
     "$PY" "$R336_TKE_GATE" --same-program "$1" --reference-bld "$SOURCE_ROOT/BLD" \
-      --observer-patch "dynzdf=$PATCH" --observer-patch "stprk3_stg=$STAGE_PATCH" \
       --observer-patch "zdftke=$R336_TKE_PATCH" \
       --new-cfg "$TARGET_CFG" --reference-cfg "$SOURCE_CFG" ${2:+--output "$2"}
   elif [[ "$ACQ_TARGET" == tke332 ]]; then
@@ -584,7 +623,13 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
   for path in "$R336_TKE_PATCH" "$R336_TKE_WRITER" "$R336_TKE_FIXTURE_STUBS" \
     "$R336_TKE_FIXTURE" "$R336_TKE_GATE" "$R336_TKE_TEST" "$SOURCE_ZDFTKE" \
     "$SOURCE_ROOT/BLD/ppsrc/nemo/zdftke.f90" \
-    "$R336_PHASE_REFERENCE/producer_commit.txt"; do
+    "$R336_PHASE_REFERENCE/producer_commit.txt" "$SOURCE_STPRK3_PRISTINE" \
+    "$SOURCE_STAGE_PRISTINE" "$SOURCE_DYNVOR_PRISTINE" "$SOURCE_ZDFTKE_PRISTINE" \
+    "$SOURCE_TRALDF_PRISTINE" "$SOURCE_ZDFPHY" "$SOURCE_ZDFDDM" "$SOURCE_ZDFIWM" \
+    "$HIST_R5_RUN/nemo" "$HIST_R326_RUN/nemo" \
+    "$HIST_R328_DYN_RUN/nemo" "$HIST_R328_ZDF_RUN/nemo" "$HIST_R331_RUN/nemo" \
+    "$HIST_R332_RUN/nemo" "$HIST_R332_RAW_RUN/nemo" "$HIST_R333_TR_RUN/nemo" \
+    "$HIST_R333_LDF_RUN/nemo"; do
     [[ -f "$path" ]] || refuse "missing round-336 TKE input $path"
   done
 fi
@@ -607,6 +652,15 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
 fi
 if [[ "$ACQ_TARGET" == tke336 ]]; then
   pin "$SOURCE_ZDFTKE_SHA" "$SOURCE_ZDFTKE" 'source zdftke'
+  pin 0d4360984a193ff9bce2cfbaa13a45dbd26fcd18b215e0159c95254075830630 "$HIST_R5_RUN/nemo" 'round-5 producer binary'
+  pin 20376f40a78cb1a5491838ff112bfbe738178e4da8da1e43d5bd5c3884c72934 "$HIST_R326_RUN/nemo" 'round-326 producer binary'
+  pin eead2832bfe824810d40fb32014d86c9b6b7ece52eba86673c48d5a0a5878bb5 "$HIST_R328_DYN_RUN/nemo" 'round-328 dyn producer binary'
+  pin aa16dbf74e4e5bae05df0903038ea71e29f1adf9ab5d9be9752f1d3079dfb684 "$HIST_R328_ZDF_RUN/nemo" 'round-328 zdf producer binary'
+  pin ad665a96be3b73ebbe83793c09e7996aba69fd191fb6510288be40d82161b0b3 "$HIST_R331_RUN/nemo" 'round-331 producer binary'
+  pin 9b27cdd323e847cd31d892a30af9731d4839a27b01147a42a7100105df6f3503 "$HIST_R332_RUN/nemo" 'round-332 source producer binary'
+  pin 5791908de5c6181d0f12235b073e98992f70f92849d38bca6a8328dd2167e192 "$HIST_R332_RAW_RUN/nemo" 'round-332 raw producer binary'
+  pin c2afb5b26a0b6c9bff941cf35b68c62d9c21d2ac8c44755498a580bc389757e5 "$HIST_R333_TR_RUN/nemo" 'round-333 tracer producer binary'
+  pin 4eb9f3701c647cdee8c8ae2c992c7eceec58e6844de92aa285581aabbe0fd539 "$HIST_R333_LDF_RUN/nemo" 'round-333 LDF producer binary'
 fi
 pin "$SOURCE_BINARY_SHA" "$SOURCE_ROOT/BLD/bin/nemo.exe" 'source build binary'
 pin "$SOURCE_BINARY_SHA" "$SOURCE_RUN/nemo" 'source run binary'
@@ -620,7 +674,8 @@ scratch=$(mktemp -d "$(dirname "$EVIDENCE")/.r328-scratch.XXXXXX")
 plants=$scratch/plants; mkdir "$plants" "$scratch/mod"
 
 # Checklist (1): additions-only and no insertion following a continued line.
-patch_files=("$PATCH" "$STAGE_PATCH")
+patch_files=()
+[[ "$ACQ_TARGET" == tke336 ]] || patch_files+=("$PATCH" "$STAGE_PATCH")
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   patch_files+=("$ZP_PATCH" "$ZP_DDM_PATCH" "$ZP_IWM_PATCH")
 fi
@@ -708,11 +763,13 @@ compare_deterministic "$BASELINE_RUN" "$SOURCE_RUN" \
 
 # Syntax proof uses the record program's stprk3_stg, not pristine NEMO.
 dry=$scratch/dry; mkdir "$dry"
-cp "$SOURCE_DYNZDF" "$dry/dynzdf.F90"
-cp "$SOURCE_STAGE" "$dry/stprk3_stg.F90"
-cp "$WRITER" "$dry/dynzdf_round328_writer.F90"
-patch -s --fuzz=0 -p0 -d "$dry" <"$PATCH"
-patch -s --fuzz=0 -p0 -d "$dry" <"$STAGE_PATCH"
+if [[ "$ACQ_TARGET" != tke336 ]]; then
+  cp "$SOURCE_DYNZDF" "$dry/dynzdf.F90"
+  cp "$SOURCE_STAGE" "$dry/stprk3_stg.F90"
+  cp "$WRITER" "$dry/dynzdf_round328_writer.F90"
+  patch -s --fuzz=0 -p0 -d "$dry" <"$PATCH"
+  patch -s --fuzz=0 -p0 -d "$dry" <"$STAGE_PATCH"
+fi
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   cp "$SOURCE_ZDFPHY" "$dry/zdfphy.F90"
   cp "$SOURCE_ZDFDDM" "$dry/zdfddm.F90"
@@ -775,10 +832,12 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
   cp "$R336_TKE_WRITER" "$dry/tke_round336_writer.F90"
   patch -s --fuzz=0 -p0 -d "$dry" <"$R336_TKE_PATCH"
 fi
-for unit in dynzdf stprk3_stg; do
-  check_patched_call_predecessors "$dry/$unit.F90" \
-    || refuse "observer call inserted after a continuation: $unit.F90"
-done
+if [[ "$ACQ_TARGET" != tke336 ]]; then
+  for unit in dynzdf stprk3_stg; do
+    check_patched_call_predecessors "$dry/$unit.F90" \
+      || refuse "observer call inserted after a continuation: $unit.F90"
+  done
+fi
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   for unit in zdfphy zdfddm zdfiwm; do
     check_patched_call_predecessors "$dry/$unit.F90" \
@@ -796,8 +855,10 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
     || refuse 'observer call inserted after a continuation: zdftke.F90'
   [[ $(grep -Fc 'CALL r336_tke_' "$dry/zdftke.F90") -eq 3 ]] \
     || refuse 'round-336 outside-loop TKE call census changed'
-  [[ $(grep -Fc 'R336_TKE_COPYOUT' "$dry/zdftke.F90") -eq 12 ]] \
+  [[ $(grep -Fc 'R336_TKE_COPYOUT' "$dry/zdftke.F90") -eq 17 ]] \
     || refuse 'round-336 TKE copy-out census changed'
+  ! grep -F 'r336_pre_pdlr_zav' "$dry/zdftke.F90" >/dev/null \
+    || refuse 'round-336 still copies zav inside the coefficient loop'
   "$PY" "$R336_TKE_GATE" --read-set-source "$dry/zdftke.F90" \
     --writer-source "$dry/tke_round336_writer.F90"
   sed 's/entry_htau/entry_htau_missing/g' "$dry/tke_round336_writer.F90" \
@@ -806,8 +867,10 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
     "$PY" "$R336_TKE_GATE" --read-set-source "$dry/zdftke.F90" \
       --writer-source "$plants/tke_round336_writer.read-set-missing.F90"
 fi
-[[ $(grep -Fc 'CALL r328_' "$dry/dynzdf.F90") -eq 17 ]] || refuse 'dynzdf writer call census changed'
-[[ $(grep -Fc 'CALL r328_finish' "$dry/stprk3_stg.F90") -eq 1 ]] || refuse 'stage writer call census changed'
+if [[ "$ACQ_TARGET" != tke336 ]]; then
+  [[ $(grep -Fc 'CALL r328_' "$dry/dynzdf.F90") -eq 17 ]] || refuse 'dynzdf writer call census changed'
+  [[ $(grep -Fc 'CALL r328_finish' "$dry/stprk3_stg.F90") -eq 1 ]] || refuse 'stage writer call census changed'
+fi
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   [[ $(grep -Fc 'CALL r328_zp_' "$dry/zdfphy.F90") -eq 3 ]] \
     || refuse 'zdfphy writer call census changed'
@@ -849,8 +912,7 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
     dynzdf stprk3_stg dynvor zdfphy zdftke)
 fi
 if [[ "$ACQ_TARGET" == tke336 ]]; then
-  syntax_units=(dynzdf_round328_writer tke_round336_writer dynzdf \
-    stprk3_stg zdftke)
+  syntax_units=(tke_round336_writer zdftke)
 fi
 for unit in "${syntax_units[@]}"; do
   fpp "$dry/$unit.F90" "$scratch/$unit.f90"
@@ -862,9 +924,11 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
   check_r336_tke_landing "$scratch/zdftke.f90" \
     || refuse 'round-336 TKE observer placement moved in real preprocessed source'
   r336_observers=(r336_tke_begin r336_tke_after_tke r336_tke_finish \
-    r336_after_bc r336_after_langmuir r336_after_rhs r336_matrix_diag \
-    r336_matrix_upper r336_matrix_lower r336_after_solve r336_pre_sweep_mxl \
-    r336_final_mxl r336_final_mxld r336_pre_pdlr_zav r336_pre_pdlr_avt)
+    r336_after_bc r336_after_langmuir r336_after_rhs \
+    r336_matrix_diag r336_matrix_upper r336_matrix_lower r336_solve_diag \
+    r336_solve_rhs r336_solve_bottom r336_solve_back r336_after_solve \
+    r336_pre_sweep_mxl r336_after_lup r336_after_ldown r336_final_mxl \
+    r336_final_mxld r336_pre_pdlr_avt)
   for observer in "${r336_observers[@]}"; do
     awk -v token="$observer" '
       index($0,token) && $0 !~ /USE tke_round336_writer/ &&
@@ -968,6 +1032,12 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
   patch -s --fuzz=0 -p0 "$scratch/historical-r331.F90" <"$TKE_PATCH"
   cp "$scratch/historical-r331.F90" "$scratch/historical-r332.F90"
   patch -s --fuzz=0 -p0 "$scratch/historical-r332.F90" <"$R332_TKE_PATCH"
+  # This module is compiled only to provide the checksum interface required by
+  # the historical round-331 writer; its dyn_zdf observer patch is not applied
+  # to, compiled into, or linked into the round-336 acquisition target.
+  fpp "$WRITER" "$scratch/historical_dynzdf_round328_writer.f90"
+  compile_record_object "$scratch/historical_dynzdf_round328_writer.f90" \
+    "$scratch/historical_dynzdf_round328_writer.o"
   fpp "$TKE_WRITER" "$scratch/tke_round331_writer.f90"
   compile_record_object "$scratch/tke_round331_writer.f90" "$scratch/tke_round331_writer.o"
   fpp "$R332_WRITER" "$scratch/round332_writer.f90"
@@ -1000,6 +1070,83 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
     refuse 'round-332 historical zdf_tke unexpectedly retained FP arithmetic'
   fi
   printf 'R336_HISTORICAL_TKE_RESULT admitted_rounds=331,332 arithmetic_differs_from_production=yes\n'
+
+  # Audit every admitted ORCA2 recorder in the requested round set against an
+  # observer-free source object at the record flags.  The right-hand side is
+  # the pinned binary that actually produced the admitted files, so inherited
+  # observers are included in the program verdict rather than reconstructed.
+  for source_spec in \
+    "stprk3:$SOURCE_STPRK3_PRISTINE" \
+    "stprk3_stg:$SOURCE_STAGE_PRISTINE" \
+    "dynzdf:$SOURCE_DYNZDF" \
+    "zdfphy:$SOURCE_ZDFPHY" \
+    "zdfddm:$SOURCE_ZDFDDM" \
+    "zdfiwm:$SOURCE_ZDFIWM" \
+    "zdftke:$SOURCE_ZDFTKE_PRISTINE" \
+    "dynvor:$SOURCE_DYNVOR_PRISTINE" \
+    "traldf_iso:$SOURCE_TRALDF_PRISTINE"; do
+    unit=${source_spec%%:*}; source=${source_spec#*:}
+    fpp "$source" "$scratch/production-${unit}.f90"
+    compile_record_object "$scratch/production-${unit}.f90" "$scratch/production-${unit}.o"
+  done
+  historical_fp_row r5 "$scratch/production-stprk3.o" "$HIST_R5_RUN/nemo" \
+    __stprk3_MOD_stp_rk3 equal 30 30
+  historical_fp_row r326 "$scratch/production-zdftke.o" "$HIST_R326_RUN/nemo" \
+    __zdftke_MOD_zdf_tke equal 1007 1007
+  historical_fp_row r326 "$scratch/production-zdftke.o" "$HIST_R326_RUN/nemo" \
+    __zdftke_MOD_tke_avn equal 783 783
+  historical_fp_row r328-dyn "$scratch/production-dynzdf.o" "$HIST_R328_DYN_RUN/nemo" \
+    __dynzdf_MOD_dyn_zdf different 2446 2365
+  historical_fp_row r328-dyn "$scratch/production-stprk3_stg.o" "$HIST_R328_DYN_RUN/nemo" \
+    __stprk3_stg_MOD_stp_rk3_stg different 1175 1367
+  historical_fp_row r328-zdf "$scratch/production-zdfphy.o" "$HIST_R328_ZDF_RUN/nemo" \
+    __zdfphy_MOD_zdf_phy equal 121 121
+  historical_fp_row r328-zdf "$scratch/production-zdfddm.o" "$HIST_R328_ZDF_RUN/nemo" \
+    __zdfddm_MOD_zdf_ddm equal 58 58
+  historical_fp_row r328-zdf "$scratch/production-zdfiwm.o" "$HIST_R328_ZDF_RUN/nemo" \
+    __zdfiwm_MOD_zdf_iwm equal 423 423
+  historical_fp_row r331 "$scratch/production-zdfphy.o" "$HIST_R331_RUN/nemo" \
+    __zdfphy_MOD_zdf_phy equal 121 121
+  historical_fp_row r331 "$scratch/production-zdftke.o" "$HIST_R331_RUN/nemo" \
+    __zdftke_MOD_zdf_tke different 1007 783
+  historical_fp_row r332 "$scratch/production-zdfphy.o" "$HIST_R332_RUN/nemo" \
+    __zdfphy_MOD_zdf_phy equal 121 121
+  historical_fp_row r332 "$scratch/production-dynvor.o" "$HIST_R332_RUN/nemo" \
+    __dynvor_MOD_vor_een equal 555 555
+  historical_fp_row r332 "$scratch/production-stprk3_stg.o" "$HIST_R332_RAW_RUN/nemo" \
+    __stprk3_stg_MOD_stp_rk3_stg different 1175 1367
+  historical_fp_row r332 "$scratch/production-zdftke.o" "$HIST_R332_RUN/nemo" \
+    __zdftke_MOD_tke_avn equal 783 783
+  historical_fp_row r333-tracer "$scratch/production-stprk3_stg.o" "$HIST_R333_TR_RUN/nemo" \
+    __stprk3_stg_MOD_stp_rk3_stg different 1175 1367
+  historical_fp_row r333-ldf "$scratch/production-stprk3_stg.o" "$HIST_R333_LDF_RUN/nemo" \
+    __stprk3_stg_MOD_stp_rk3_stg different 1175 1367
+  historical_fp_row r333-ldf "$scratch/production-traldf_iso.o" "$HIST_R333_LDF_RUN/nemo" \
+    __traldf_iso_MOD_traldf_iso_lap equal 526 526
+  historical_fp_row r333-ldf "$scratch/production-traldf_iso.o" "$HIST_R333_LDF_RUN/nemo" \
+    __traldf_iso_MOD_traldf_iso_a33 equal 538 538
+  nm "$HIST_R331_RUN/nemo" | grep '__zdftke_MOD_tke_tke' >/dev/null \
+    || refuse 'round-331 producer lost its split tke_tke function'
+  nm "$HIST_R332_RUN/nemo" | grep '__zdftke_MOD_tke_tke' >/dev/null \
+    || refuse 'round-332 producer lost its split tke_tke function'
+  nm "$HIST_R332_RUN/nemo" | grep '__dynvor_MOD_dyn_vor' >/dev/null \
+    || refuse 'round-332 producer lost its dyn_vor wrapper'
+  if nm "$scratch/production-zdftke.o" | grep '__zdftke_MOD_tke_tke' >/dev/null; then
+    refuse 'observer-free production unexpectedly split tke_tke'
+  fi
+  printf 'R336_HISTORICAL_OBSERVER_TOPOLOGY tool=r331 function=tke_tke production=inlined producer=1054 verdict=different\n'
+  if nm "$HIST_R331_RUN/nemo" | grep '__zdftke_MOD_tke_avn' >/dev/null; then
+    refuse 'round-331 producer unexpectedly retained a separate tke_avn function'
+  fi
+  printf 'R336_HISTORICAL_OBSERVER_TOPOLOGY tool=r331 function=tke_avn production=783 producer=inlined verdict=different\n'
+  if fp_named_signature "$HIST_R332_RUN/nemo" \
+      "$scratch/historical-r332-dyn_vor.fp" __dynvor_MOD_dyn_vor; then
+    refuse 'round-332 dyn_vor wrapper unexpectedly gained FP arithmetic'
+  fi
+  printf 'R336_HISTORICAL_OBSERVER_TOPOLOGY tool=r332 function=dyn_vor production=zero-fp producer=zero-fp verdict=equal\n'
+  printf 'R336_HISTORICAL_OBSERVER_TOPOLOGY tool=r332 function=zdf_tke production=1007 producer=zero-fp verdict=different\n'
+  printf 'R336_HISTORICAL_OBSERVER_TOPOLOGY tool=r332 function=tke_tke production=inlined producer=1054 verdict=different\n'
+  printf 'R336_HISTORICAL_OBSERVER_RESULT equal=r5,r326,r328-zdf,r333-ldf-arithmetic different=r328-dyn,r331,r332,r333-stage\n'
 
   # Checklist items 2, 3, 5 and 14: compile and execute the actual patched
   # NEMO routines with full-grid p_avm/rn2/rn2b/wmask, interior-only A2D(0)
@@ -1076,7 +1223,7 @@ for plant in ("header", "field-order", "truncation", "checksum", "extent", "time
         print(f"PREFLIGHT_PLANT_FIRED r336-tke-{plant}")
     else:
         raise AssertionError(f"{plant} parser plant stayed green")
-for plant in ("entry", "rn2", "langmuir", "pre-sweep", "zav", "pdlr", "final", "signed-zero", "source-values"):
+for plant in ("entry", "rn2", "langmuir", "solve-steps", "pre-sweep", "sweep-steps", "north-halo-avm-k", "pdlr", "final", "signed-zero", "source-values"):
     record = gate.read_record(root / gate.record_name(0), expected_layout=layout)
     try:
         gate.verify_record(copy.deepcopy(record), plant=plant)
@@ -1084,7 +1231,7 @@ for plant in ("entry", "rn2", "langmuir", "pre-sweep", "zav", "pdlr", "final", "
         print(f"PREFLIGHT_PLANT_FIRED r336-tke-{plant}")
     else:
         raise AssertionError(f"{plant} semantic plant stayed green")
-print("R336_PATCHED_TKE_BOUNDS_AND_SOURCE_EXECUTION_PASS ranks=2 fields=46")
+print("R336_PATCHED_TKE_BOUNDS_AND_SOURCE_EXECUTION_PASS ranks=2 fields=51")
 PY
 fi
 
@@ -1096,7 +1243,8 @@ cp -as "$SOURCE_ROOT/BLD/obj" "$dry_bld/obj"
 for name in arch_nemo.fcm cpp.fcm bld.cfg; do
   sed "s|$SOURCE_CFG|$TARGET_CFG|g" "$SOURCE_ROOT/BLD/$name" >"$dry_bld/$name"
 done
-observer_units=(dynzdf stprk3_stg)
+observer_units=()
+[[ "$ACQ_TARGET" == tke336 ]] || observer_units=(dynzdf stprk3_stg)
 [[ "$ACQ_TARGET" != zdfphy ]] || observer_units+=(zdfphy zdfddm zdfiwm)
 [[ "$ACQ_TARGET" != tke331 ]] || observer_units+=(zdfphy zdftke)
 [[ "$ACQ_TARGET" != tke332 ]] || observer_units+=(zdfphy zdftke)
@@ -1105,10 +1253,13 @@ observer_units=(dynzdf stprk3_stg)
 for unit in "${observer_units[@]}"; do
   rm -f "$dry_bld/ppsrc/nemo/$unit.f90"
 done
-cp "$scratch/dynzdf.f90" "$dry_bld/ppsrc/nemo/dynzdf.f90"
-cp "$scratch/stprk3_stg.f90" "$dry_bld/ppsrc/nemo/stprk3_stg.f90"
-cp "$scratch/dynzdf_round328_writer.f90" "$dry_bld/ppsrc/nemo/dynzdf_round328_writer.f90"
-: >"$dry_bld/obj/dynzdf_round328_writer.o"
+if [[ "$ACQ_TARGET" != tke336 ]]; then
+  cp "$scratch/dynzdf.f90" "$dry_bld/ppsrc/nemo/dynzdf.f90"
+  cp "$scratch/stprk3_stg.f90" "$dry_bld/ppsrc/nemo/stprk3_stg.f90"
+  cp "$scratch/dynzdf_round328_writer.f90" \
+    "$dry_bld/ppsrc/nemo/dynzdf_round328_writer.f90"
+  : >"$dry_bld/obj/dynzdf_round328_writer.o"
+fi
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   for unit in zdfphy zdfddm zdfiwm; do
     cp "$scratch/$unit.f90" "$dry_bld/ppsrc/nemo/$unit.f90"
@@ -1154,7 +1305,8 @@ admit() {
     || refuse 'write-only observer changed an inherited deterministic output'
   if [[ "$ACQ_TARGET" == tke336 ]]; then
     for plant in header field-order truncation checksum stamp extent entry rn2 \
-      langmuir pre-sweep zav pdlr final signed-zero source-values time-level; do
+      langmuir solve-steps pre-sweep sweep-steps north-halo-avm-k \
+      pdlr final signed-zero source-values time-level; do
       if "$PY" "$R336_TKE_GATE" --record-dir "$TARGET_RUN" \
         --phase-reference-dir "$R336_PHASE_REFERENCE" --ice-reference-dir "$SOURCE_RUN" \
         --expect-commit "$EXPECTED_PRODUCER" \
@@ -1320,10 +1472,12 @@ while IFS= read -r -d '' source; do cp -a "$source" "$TARGET_ROOT/EXP00/$(basena
 while IFS= read -r -d '' source; do cp -a "$source" "$TARGET_ROOT/MY_SRC/$(basename "$source")"; done \
   < <(find "$SOURCE_ROOT/MY_SRC" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
 cp "$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm" "$TARGET_ROOT/cpp_$TARGET_CFG.fcm"
-cp "$SOURCE_DYNZDF" "$TARGET_ROOT/MY_SRC/dynzdf.F90"
-cp "$WRITER" "$TARGET_ROOT/MY_SRC/dynzdf_round328_writer.F90"
-patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$PATCH"
-patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$STAGE_PATCH"
+if [[ "$ACQ_TARGET" != tke336 ]]; then
+  cp "$SOURCE_DYNZDF" "$TARGET_ROOT/MY_SRC/dynzdf.F90"
+  cp "$WRITER" "$TARGET_ROOT/MY_SRC/dynzdf_round328_writer.F90"
+  patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$PATCH"
+  patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$STAGE_PATCH"
+fi
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   cp "$SOURCE_ZDFPHY" "$TARGET_ROOT/MY_SRC/zdfphy.F90"
   cp "$SOURCE_ZDFDDM" "$TARGET_ROOT/MY_SRC/zdfddm.F90"
@@ -1363,8 +1517,10 @@ else
   ./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 fi
 [[ -x "$BINARY" ]] || refuse 'build produced no executable'
-grep 'NEMO_L4_R328ZDF' "$TARGET_ROOT/BLD/ppsrc/nemo/dynzdf_round328_writer.f90" >/dev/null \
-  || refuse 'compiled writer is absent'
+if [[ "$ACQ_TARGET" != tke336 ]]; then
+  grep 'NEMO_L4_R328ZDF' "$TARGET_ROOT/BLD/ppsrc/nemo/dynzdf_round328_writer.f90" >/dev/null \
+    || refuse 'compiled writer is absent'
+fi
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
   grep 'NEMO_L4_R328ZP' "$TARGET_ROOT/BLD/ppsrc/nemo/zdfphy_round328_writer.f90" >/dev/null \
     || refuse 'compiled zdf_phy writer is absent'

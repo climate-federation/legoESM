@@ -70,7 +70,8 @@ def record(tmp_path: Path) -> dict:
 def test_real_declared_extents_and_semantics(record: dict) -> None:
     header = record["header"]
     assert record["fields"]["entry_en"].shape == (3, 2, 5)
-    assert record["fields"]["entry_avm"].shape == (7, 6, 5)
+    assert record["fields"]["entry_avm_k"].shape == (7, 6, 5)
+    assert record["fields"]["entry_avm_k"][:, header["ntej"], :].shape == (7, 5)
     assert record["fields"]["entry_fr_i"].shape == (7, 6)
     assert record["fields"]["entry_nmln"].shape == (7, 6)
     assert record["fields"]["entry_htau"].shape == (3, 2)
@@ -79,7 +80,8 @@ def test_real_declared_extents_and_semantics(record: dict) -> None:
 
 
 @pytest.mark.parametrize("plant", [
-    "entry", "rn2", "langmuir", "pre-sweep", "zav", "pdlr", "final",
+    "entry", "rn2", "langmuir", "solve-steps",
+    "pre-sweep", "sweep-steps", "north-halo-avm-k", "pdlr", "final",
     "signed-zero", "source-values",
 ])
 def test_semantic_plants_hit_recorded_wet_boundaries(record: dict, plant: str) -> None:
@@ -100,13 +102,18 @@ def test_layout_plants_refuse(tmp_path: Path, plant: str) -> None:
 def test_patch_keeps_calls_outside_tke_loops_and_captures_missing_boundaries() -> None:
     patch = (TOOL / "zdftke_round336.patch").read_text()
     assert patch.count("CALL r336_tke_") == 3
-    assert patch.count("R336_TKE_COPYOUT") == 12
-    for name in ("r336_after_langmuir", "r336_pre_sweep_mxl", "r336_pre_pdlr_zav"):
+    assert patch.count("R336_TKE_COPYOUT") == 17
+    assert "r336_pre_pdlr_zav" not in patch
+    for name in ("r336_after_langmuir", "r336_solve_diag",
+                 "r336_solve_rhs", "r336_solve_bottom", "r336_solve_back",
+                 "r336_pre_sweep_mxl", "r336_after_lup", "r336_after_ldown"):
         assert name in patch
     writer = (TOOL / "tke_round336_writer.F90").read_text()
-    for name in ("entry_en", "entry_avt", "entry_rn2", "entry_rn2b",
+    assert "dynzdf_round328_writer" not in writer
+    for name in ("entry_en", "entry_avt", "entry_avm_k", "entry_rn2", "entry_rn2b",
                  "entry_htau", "entry_uu_kbb", "entry_vv_kbb",
-                 "entry_gdepw_kmm"):
+                 "entry_gdepw_kmm", "post_langmuir_en", "solve_diag",
+                 "after_lup_mxld"):
         assert f"'{name}'" in writer
 
 
@@ -129,3 +136,13 @@ def test_wrapper_pins_distinct_build_record_and_exit_retention() -> None:
     assert "ORCA2_ORCA1ICE_OMIP_L4_R336TKE" in wrapper
     assert "orca1ice_tke_internal_kt2_np2" in wrapper
     assert "trap cleanup EXIT" in wrapper
+
+
+def test_tke_target_excludes_round328_dynzdf_observer() -> None:
+    parent = (TOOL.parent / "nemo_testcase_l4_orca2_round328_dynzdf_acquisition" /
+              "run.sh").read_text()
+    assert '[[ "$ACQ_TARGET" == tke336 ]] || patch_files+=("$PATCH" "$STAGE_PATCH")' in parent
+    assert 'if [[ "$ACQ_TARGET" != tke336 ]]; then\n  cp "$SOURCE_DYNZDF"' in parent
+    start = parent.index('if [[ "$ACQ_TARGET" == tke336 ]]; then\n    "$PY" "$R336_TKE_GATE"')
+    stop = parent.index('elif [[ "$ACQ_TARGET" == tke332 ]]', start)
+    assert 'dynzdf=$PATCH' not in parent[start:stop]
