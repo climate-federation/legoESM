@@ -815,14 +815,3 @@ def test_fv3_duo_column_lane_auto_turns_the_skin_on_and_steps(tmp_path):
     assert res["skin_finite"] is True
     assert res["skin_moved"] > 0.0, "the skin never stepped off its seed"
 
-
-def test_old_melt_width_spelling_stays_an_alias():
-    """Renamed sea_ice_albedo_melt_width_K -> sea_ice_melt_ramp_width_K: the
-    old YAML key and CLI flag still load (repo rename convention)."""
-    from legoesm.driver.config import migrate_renamed_keys
-    from scripts.run.run_amip import build_arg_parser
-    assert migrate_renamed_keys({"sea_ice_albedo_melt_width_K": 2.0}) == {
-        "sea_ice_melt_ramp_width_K": 2.0}
-    args = build_arg_parser().parse_args(
-        ["--sea-ice-albedo-melt-width-K", "2.5"])
-    assert args.sea_ice_melt_ramp_width_K == 2.5

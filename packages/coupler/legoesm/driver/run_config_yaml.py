@@ -36,7 +36,6 @@ RENAMED_CONFIG_KEYS = {
     "mpas_land_params_refresh": "land_params_refresh",
     "mpas_ice_skin_prognostic": "ice_skin_prognostic",
     "mpas_ice_thickness_m": "ice_thickness_m",
-    "sea_ice_albedo_melt_width_K": "sea_ice_melt_ramp_width_K",
 }
 
 

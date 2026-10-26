@@ -2274,8 +2274,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Width [K] of the smooth 0 C cap on the "
                              "prognostic ice skin (default 0.01; 0 = hard "
                              "cap).")
-    parser.add_argument("--sea-ice-melt-ramp-width-K",
-                        "--sea-ice-albedo-melt-width-K", type=float,
+    parser.add_argument("--sea-ice-melt-ramp-width-K", type=float,
                         default=None, action=_StoreOneSpelling,
                         dest="sea_ice_melt_ramp_width_K",
                         help="Width [K] of the maykut_untersteiner melt ramp "
