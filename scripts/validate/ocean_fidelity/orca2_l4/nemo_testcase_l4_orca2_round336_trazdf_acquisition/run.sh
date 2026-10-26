@@ -98,7 +98,9 @@ echo_has() {
 echo_number_is() {
   awk -v key="$2" -v expected="$3" '
     {
-      for(i=1; i<NF-1; i++) if($i==key && $(i+1)=="=") { found++; value=$(i+2) }
+      line=$0; gsub(/=/," = ",line); count=split(line,field,/[^[:graph:]]+/)
+      for(i=1; i<count-1; i++)
+        if(field[i]==key && field[i+1]=="=") { found++; value=field[i+2] }
     }
     END { exit !(found==1 && value+0==expected+0) }
   ' "$1"
