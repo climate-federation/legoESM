@@ -1,8 +1,10 @@
 --- zdfphy.F90
 +++ zdfphy.F90
-@@ -51,0 +52,2 @@
+@@ -48,2 +48,4 @@
+    USE timing         ! Timing
 +   USE round336_trazdf_writer, ONLY : r336_zdfphy_capture ! R336_ZDFPHY_OBSERVER
 +
+    USE tke_round331_writer, ONLY : r331_begin, r331_sh2, r331_drag, r331_mxl, &
 @@ -369,14 +371,20 @@
              avt(ji,jj,jk) = avt_k(ji,jj,jk)
              avm(ji,jj,jk) = avm_k(ji,jj,jk)
