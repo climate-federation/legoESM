@@ -2274,9 +2274,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Width [K] of the smooth 0 C cap on the "
                              "prognostic ice skin (default 0.01; 0 = hard "
                              "cap).")
-    parser.add_argument("--sea-ice-albedo-melt-width-K", type=float,
+    parser.add_argument("--sea-ice-melt-ramp-width-K", type=float,
                         default=None, action=_StoreOneSpelling,
-                        dest="sea_ice_albedo_melt_width_K",
+                        dest="sea_ice_melt_ramp_width_K",
                         help="Width [K] of the maykut_untersteiner melt ramp "
                              "below 0 C (default 1.0). Requires "
                              "--sea-ice-albedo-scheme maykut_untersteiner.")
@@ -3055,10 +3055,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             args.sea_ice_albedo_scheme
             if args.sea_ice_albedo_scheme is not None
             else _EXPERIMENT_DEFAULTS.sea_ice_albedo_scheme),
-        sea_ice_albedo_melt_width_K=(
-            args.sea_ice_albedo_melt_width_K
-            if args.sea_ice_albedo_melt_width_K is not None
-            else _EXPERIMENT_DEFAULTS.sea_ice_albedo_melt_width_K),
+        sea_ice_melt_ramp_width_K=(
+            args.sea_ice_melt_ramp_width_K
+            if args.sea_ice_melt_ramp_width_K is not None
+            else _EXPERIMENT_DEFAULTS.sea_ice_melt_ramp_width_K),
         ice_skin_melt_cap_width_K=(
             args.ice_skin_melt_cap_width_K
             if args.ice_skin_melt_cap_width_K is not None

@@ -69,12 +69,13 @@ __param_spec__ = {
             "ice_skin_melt_cap_width_K": "smoothing width",
         },
         "params": {
-            "sea_ice_albedo_melt_width_K": {
+            "sea_ice_melt_ramp_width_K": {
                 "units": "K", "bounds": (0.1, 5.0), "tunable_tier": 2,
                 "transform": "sigmoid", "category": "radiative",
                 "reference": "melt-onset albedo ramp below 0 C "
                              "(Maykut & Untersteiner 1971)",
                 "shape": None,
+                "legacy_name": "sea_ice_albedo_melt_width_K",
             },
         },
     },
@@ -82,7 +83,7 @@ __param_spec__ = {
 
 
 class PrescribedIceSurfaceConfig(NamedTuple):
-    sea_ice_albedo_melt_width_K: float = 1.0   # melt-ramp width below T_freeze [K]
+    sea_ice_melt_ramp_width_K: float = 1.0   # melt-ramp width below T_freeze [K]
     ice_skin_melt_cap_width_K: float = 0.01    # smooth melt-cap width, 0 = hard [K]
 
 

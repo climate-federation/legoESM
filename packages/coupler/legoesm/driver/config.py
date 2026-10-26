@@ -34,7 +34,7 @@ _SNOW_EMISSIVITY_BOUNDS = (
 # melt-width range owned by the ice shortwave parameter spec.
 _ICE_SFC_DEFAULTS = _ice_sw.PrescribedIceSurfaceConfig._field_defaults
 _ICE_MELT_WIDTH_BOUNDS = (_ice_sw.__param_spec__["PrescribedIceSurfaceConfig"]
-                          ["params"]["sea_ice_albedo_melt_width_K"]["bounds"])
+                          ["params"]["sea_ice_melt_ramp_width_K"]["bounds"])
 
 # Canonical AIMIP variant set.  Single source of truth — imported by
 # ``scripts/run/run_aimip.py`` and the ``validate_strict`` rule below.
@@ -2088,8 +2088,8 @@ class ExperimentConfig(NamedTuple):
     #     is <= T_freeze - width, the scheme's melting bare-ice value at
     #     T_freeze, linear between.  Needs ice_skin_prognostic=True.
     sea_ice_albedo_scheme: str = "auto"
-    sea_ice_albedo_melt_width_K: float = _ICE_SFC_DEFAULTS[
-        "sea_ice_albedo_melt_width_K"]   # melt-ramp width below T_freeze [K]
+    sea_ice_melt_ramp_width_K: float = _ICE_SFC_DEFAULTS[
+        "sea_ice_melt_ramp_width_K"]   # melt-ramp width below T_freeze [K]
     # Smooth 0 C cap on the prognostic ice skin (RULE 5): smooth_min(T, T_freeze,
     # sharpness=1/width).  0 = the hard clip (pre-#2106 behaviour).
     ice_skin_melt_cap_width_K: float = _ICE_SFC_DEFAULTS[
@@ -3751,24 +3751,24 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "ice_skin_melt_cap_width_K must be finite and >= 0 (0 = hard "
                 f"cap); got {self.ice_skin_melt_cap_width_K!r}.")
-        if (self.sea_ice_albedo_melt_width_K
+        if (self.sea_ice_melt_ramp_width_K
                 != ExperimentConfig._field_defaults[
-                    "sea_ice_albedo_melt_width_K"]
+                    "sea_ice_melt_ramp_width_K"]
                 and self.ice_skin_prognostic is not None
                 and resolve_sea_ice_albedo_scheme(self)
                 != "maykut_untersteiner"):
             errors.append(
-                f"sea_ice_albedo_melt_width_K="
-                f"{self.sea_ice_albedo_melt_width_K!r} requires "
+                f"sea_ice_melt_ramp_width_K="
+                f"{self.sea_ice_melt_ramp_width_K!r} requires "
                 "sea_ice_albedo_scheme='maykut_untersteiner' (the override "
                 "would be silently inert).")
         _lo, _hi = _ICE_MELT_WIDTH_BOUNDS
-        if not (math.isfinite(self.sea_ice_albedo_melt_width_K)
-                and _lo <= self.sea_ice_albedo_melt_width_K <= _hi):
+        if not (math.isfinite(self.sea_ice_melt_ramp_width_K)
+                and _lo <= self.sea_ice_melt_ramp_width_K <= _hi):
             errors.append(
-                f"sea_ice_albedo_melt_width_K must be in [{_lo}, {_hi}] K "
+                f"sea_ice_melt_ramp_width_K must be in [{_lo}, {_hi}] K "
                 f"(its parameter spec); got "
-                f"{self.sea_ice_albedo_melt_width_K!r}.")
+                f"{self.sea_ice_melt_ramp_width_K!r}.")
         if not (math.isfinite(self.ice_thickness_m)
                 and 0.1 <= self.ice_thickness_m <= 10.0):
             errors.append(

@@ -162,8 +162,6 @@ def build_latlon_config(args):
         # Match the training-segment sub-cycling (also resolves the None that
         # skipping _postprocess_args would leave).
         "--rad-update-steps", str(args.rad_update_steps),
-        ("--ice-skin-prognostic" if args.ice_skin_prognostic
-         else "--no-ice-skin-prognostic"),
         # Lat-lon C-grid needs pole-CFL relief; the Fourier polar filter
         # lets the dycore take a much larger stable dt than the ~30 s the
         # raw pole cells force.  The effective (CFL-clamped) dt is read
@@ -173,6 +171,9 @@ def build_latlon_config(args):
         "--dataset", "analytical",   # IC/forcing replaced by ERA5 below
         "--ic", "standard",
     ]
+    if args.ice_skin_prognostic is not None:
+        argv.append("--ice-skin-prognostic" if args.ice_skin_prognostic
+                    else "--no-ice-skin-prognostic")
     parsed = ra.build_arg_parser().parse_args(argv)
     # Land surface model.  This lane builds its ExperimentConfig from a FIXED
     # argv that passes no land flags and no --topography, so until now it
@@ -198,7 +199,8 @@ def build_latlon_config(args):
             has_land_mask=bool(getattr(parsed, "land_mask_file", ""))),
         parsed.slab_land_active, parsed.use_multilayer_land,
         getattr(parsed, "land_mask_file", "") or "<none>")
-    return ra.build_config_from_args(parsed)
+    from legoesm.training.scale_build import resolve_training_ice_skin
+    return resolve_training_ice_skin(ra.build_config_from_args(parsed))
 
 
 # ---------------------------------------------------------------------------
@@ -657,8 +659,9 @@ def build_parser():
     # CFL dt~155s) — never every step.  Moot for the NN-replacement variants.
     p.add_argument("--rad-update-steps", type=int, default=6)
     p.add_argument("--ice-skin-prognostic",
-                   action=argparse.BooleanOptionalAction, default=True,
-                   help="Prognostic sea-ice skin (#2106); the ERA5 carries "
+                   action=argparse.BooleanOptionalAction, default=None,
+                   help="Prognostic sea-ice skin (#2106); unset = auto (on "
+                        "wherever the lane carries it). The ERA5 carries "
                         "seed it at the seawater freezing point.")
     # Radiation-as-forcing: stop_gradient rrtmgp in the rollout so its adjoint
     # never enters the backward graph.  rrtmgp's reverse-mode is the dominant

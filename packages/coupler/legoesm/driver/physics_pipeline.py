@@ -3211,7 +3211,7 @@ class PhysicsPipeline:
                 albedo_ice = sea_ice_albedo(
                     pipeline.sea_ice_albedo_scheme, albedo_ice,
                     T_skin=ice_T_skin, h_ice_m=pipeline.ice_thickness_m,
-                    melt_width_K=pipeline.sea_ice_albedo_melt_width_K)
+                    melt_width_K=pipeline.sea_ice_melt_ramp_width_K)
 
             def _skin_tail(skin, held, physics_out, sic, dt):
                 # Same per-step update as the MPAS column lane: this step's
@@ -5439,8 +5439,8 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
     from legoesm.driver.config import resolve_sea_ice_albedo_scheme
     pipeline.sea_ice_albedo_scheme = resolve_sea_ice_albedo_scheme(config)
     pipeline.ice_thickness_m = float(config.ice_thickness_m)
-    pipeline.sea_ice_albedo_melt_width_K = float(
-        config.sea_ice_albedo_melt_width_K)
+    pipeline.sea_ice_melt_ramp_width_K = float(
+        config.sea_ice_melt_ramp_width_K)
     pipeline.ice_skin_melt_cap_width_K = float(config.ice_skin_melt_cap_width_K)
     pipeline.ice_skin_prognostic = bool(config.ice_skin_prognostic)
     return pipeline

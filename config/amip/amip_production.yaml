@@ -357,7 +357,7 @@ albedo_ice: 0.80
 # 2026-10-24 after the July 1979 A/B: Arctic clear-sky reflected SW -19.2
 # W/m2).  Named explicitly although "auto" resolves to it here.
 sea_ice_albedo_scheme: maykut_untersteiner
-sea_ice_albedo_melt_width_K: 1.0
+sea_ice_melt_ramp_width_K: 1.0
 ice_skin_melt_cap_width_K: 0.01
 dynamic_albedo: true
 snow_albedo_feedback: true

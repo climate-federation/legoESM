@@ -383,7 +383,7 @@ def test_melt_albedo_ramp_values_with_production_cold_end():
 def test_validate_melt_albedo_accepts_with_skin():
     _mpas_cfg(ice_skin_prognostic=True,
               sea_ice_albedo_scheme="maykut_untersteiner",
-              sea_ice_albedo_melt_width_K=2.0).validate_strict()
+              sea_ice_melt_ramp_width_K=2.0).validate_strict()
 
 
 def test_validate_melt_albedo_refuses_unknown_scheme():
@@ -401,12 +401,12 @@ def test_validate_melt_albedo_needs_skin():
 
 def test_validate_melt_albedo_refuses_inert_width():
     # auto albedo with the skin off resolves to constant: the width is inert.
-    with pytest.raises(ValueError, match="sea_ice_albedo_melt_width_K"):
+    with pytest.raises(ValueError, match="sea_ice_melt_ramp_width_K"):
         _mpas_cfg(ice_skin_prognostic=False,
-                  sea_ice_albedo_melt_width_K=2.0).validate_strict()
-    with pytest.raises(ValueError, match="sea_ice_albedo_melt_width_K"):
+                  sea_ice_melt_ramp_width_K=2.0).validate_strict()
+    with pytest.raises(ValueError, match="sea_ice_melt_ramp_width_K"):
         _mpas_cfg(ice_skin_prognostic=True, sea_ice_albedo_scheme="constant",
-                  sea_ice_albedo_melt_width_K=2.0).validate_strict()
+                  sea_ice_melt_ramp_width_K=2.0).validate_strict()
 
 
 def test_auto_resolves_per_ice_temperature():
@@ -432,10 +432,10 @@ def test_validate_cap_width_bounds(bad):
 
 @pytest.mark.parametrize("bad", [0.0, -1.0, float("nan")])
 def test_validate_melt_albedo_width_bounds(bad):
-    with pytest.raises(ValueError, match="sea_ice_albedo_melt_width_K"):
+    with pytest.raises(ValueError, match="sea_ice_melt_ramp_width_K"):
         _mpas_cfg(ice_skin_prognostic=True,
                   sea_ice_albedo_scheme="maykut_untersteiner",
-                  sea_ice_albedo_melt_width_K=bad).validate_strict()
+                  sea_ice_melt_ramp_width_K=bad).validate_strict()
 
 
 def test_validate_cdgrid_refuses_melt_albedo():
@@ -454,18 +454,18 @@ def test_cli_round_trip_melt_albedo():
         parser.parse_args(["--dataset", "analytical"]), parser))
     assert cfg_default.sea_ice_albedo_scheme == "auto"
     assert cfg_default.ice_skin_melt_cap_width_K == 0.01
-    assert cfg_default.sea_ice_albedo_melt_width_K == 1.0
+    assert cfg_default.sea_ice_melt_ramp_width_K == 1.0
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical",
         "--grid-type", "voronoi", "--discretization", "mpas",
         "--mpas-ice-skin-prognostic",
         "--sea-ice-albedo-scheme", "maykut_untersteiner",
-        "--sea-ice-albedo-melt-width-K", "2.5",
+        "--sea-ice-melt-ramp-width-K", "2.5",
         "--ice-skin-melt-cap-width-K", "0.0",
     ]), parser))
     assert cfg.ice_skin_melt_cap_width_K == 0.0
     assert cfg.sea_ice_albedo_scheme == "maykut_untersteiner"
-    assert cfg.sea_ice_albedo_melt_width_K == 2.5
+    assert cfg.sea_ice_melt_ramp_width_K == 2.5
 
 
 _ICY_RUNNER = r'''
@@ -532,7 +532,7 @@ def _last_ckpt(d):
 
 
 _MELT = ("--sea-ice-albedo-scheme", "maykut_untersteiner",
-         "--sea-ice-albedo-melt-width-K", "5.0")
+         "--sea-ice-melt-ramp-width-K", "5.0")
 
 
 def test_end_to_end_melt_albedo_reaches_radiation(tmp_path):
@@ -579,7 +579,7 @@ def test_committed_deck_selects_melt_albedo():
     parser.set_defaults(**load_yaml_config(deck, parser))  # run_amip.main's load
     args = parser.parse_args([])
     assert args.sea_ice_albedo_scheme == "maykut_untersteiner"
-    assert args.sea_ice_albedo_melt_width_K == 1.0
+    assert args.sea_ice_melt_ramp_width_K == 1.0
     assert args.ice_skin_prognostic is True
     assert args.albedo_ice == 0.80
 
@@ -592,7 +592,7 @@ def test_production_deck_selects_melt_albedo_explicitly():
             / "amip_production.yaml")
     keys = load_yaml_config(deck, build_arg_parser())
     assert keys["sea_ice_albedo_scheme"] == "maykut_untersteiner"
-    assert keys["sea_ice_albedo_melt_width_K"] == 1.0
+    assert keys["sea_ice_melt_ramp_width_K"] == 1.0
     assert keys["ice_skin_melt_cap_width_K"] == 0.01
 
 

@@ -474,13 +474,28 @@ def build_latlon_config(cfg, yml):
         # driver's _prepare_run_context reads it bare): radiation every step (1)
         # unless the YAML overrides.
         "--rad-update-steps", str(int(yml.get("rad_update_steps", 1))),
-        # Prognostic sea-ice skin (#2106), on unless the deck turns it off;
-        # the ERA5 sample carries seed it.
-        ("--ice-skin-prognostic" if yml.get("ice_skin_prognostic", True)
-         else "--no-ice-skin-prognostic"),
     ]
+    # Prognostic sea-ice skin (#2106): auto unless the deck sets true/false.
+    _skin = yml.get("ice_skin_prognostic", "auto")
+    if _skin is True:
+        argv.append("--ice-skin-prognostic")
+    elif _skin is False:
+        argv.append("--no-ice-skin-prognostic")
+    elif _skin != "auto":
+        raise ValueError(
+            f"ice_skin_prognostic must be true, false or auto; got {_skin!r}")
     parsed = ra.build_arg_parser().parse_args(argv)
-    return ra.build_config_from_args(parsed)
+    return resolve_training_ice_skin(ra.build_config_from_args(parsed))
+
+
+def resolve_training_ice_skin(config):
+    """Resolve the ice-skin "auto" once for a trainer, as ModelDriver.setup
+    would for a single-process run, so the ERA5 carries, the physics pipeline
+    and the driver context all see the same explicit value."""
+    from legoesm.driver.config import resolve_ice_skin_prognostic
+    on, why = resolve_ice_skin_prognostic(config)
+    logger.info("  Ice skin %s (%s)", "ON" if on else "OFF", why)
+    return config._replace(ice_skin_prognostic=on)
 
 
 # --- campaign-YAML key validation (2026-08-24) ------------------------------

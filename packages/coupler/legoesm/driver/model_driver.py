@@ -13583,7 +13583,7 @@ class ModelDriver:
                 _sia_scheme, _albedo_ice,
                 T_skin=getattr(self, "_ice_T_skin", None),
                 h_ice_m=float(cfg.ice_thickness_m),
-                melt_width_K=float(cfg.sea_ice_albedo_melt_width_K))
+                melt_width_K=float(cfg.sea_ice_melt_ramp_width_K))
 
         _alb_ocean_cur = None    # open-ocean albedo of the current forcing day
         _albedo_land_static = None

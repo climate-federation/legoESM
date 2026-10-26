@@ -1228,7 +1228,7 @@ def _skin_albedo(pipeline, albedo_ice, skin):
     return sea_ice_albedo(
         pipeline.sea_ice_albedo_scheme, albedo_ice, T_skin=skin,
         h_ice_m=pipeline.ice_thickness_m,
-        melt_width_K=pipeline.sea_ice_albedo_melt_width_K)
+        melt_width_K=pipeline.sea_ice_melt_ramp_width_K)
 
 
 class _SplitStepLocals(NamedTuple):

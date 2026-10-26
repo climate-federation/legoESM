@@ -216,8 +216,8 @@ def load_params_config(path) -> dict:
 # (issue #691, codex audit).
 _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     # prescribed-ice melt albedo -> build_physics_pipeline / MPAS column lane
-    "atm.prescribed_ice.sea_ice_albedo_melt_width_K":
-        "sea_ice_albedo_melt_width_K",
+    "atm.prescribed_ice.sea_ice_melt_ramp_width_K":
+        "sea_ice_melt_ramp_width_K",
     # clouds -> build_cloud_config (physics_pipeline)
     "atm.clouds.CloudConfig.rh_crit": "cloud_rh_crit",
     "atm.clouds.CloudConfig.q_c_diagnostic": "cloud_q_c_diagnostic",
