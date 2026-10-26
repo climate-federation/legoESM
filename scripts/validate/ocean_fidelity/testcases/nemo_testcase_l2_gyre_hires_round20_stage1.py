@@ -44,6 +44,7 @@ SCALAR_ROOT = Path(
 RHS_RECORD = "oracle_rhs_kt00000001.bin"
 BT_RECORD = "oracle_bt_frames_kt00004321.bin"
 RHS_FAMILY_RECORD = "oracle_r20_stage1_rhs_kt00004321.bin"
+AHM_RECORD = "oracle_ahm_kt00004321.bin"
 STEP = 4321
 ACTIVE_LEVELS = 30
 TWIN_CLEAR_FACTOR = 4.0
@@ -221,6 +222,32 @@ def first_clearing_source_boundary(
     return None
 
 
+def coefficient_factor_owner(arms: dict[str, dict[str, object]]) -> str:
+    """Classify only an exact, upstream-preserving coefficient substitution.
+
+    When both one-field arms and the pair all collapse, no coefficient factor
+    is unique.  With word-identical live/oracle arrays that is the materialized
+    coefficient/operator composition boundary, not an ``ahmt``/``ahmf`` owner.
+    """
+    single_exact = [
+        name for name in ("ahmt", "ahmf")
+        if arms[name]["untouched_hpg_bit_exact"]
+        and arms[name]["after_ldf_bit_exact"]
+    ]
+    pair_exact = (
+        arms["ahmt_ahmf"]["untouched_hpg_bit_exact"]
+        and arms["ahmt_ahmf"]["after_ldf_bit_exact"])
+    if len(single_exact) == 2 and pair_exact:
+        return "COEFFICIENT_OPERATOR_COMPOSITION"
+    if len(single_exact) == 1:
+        return f"COEFFICIENT_{single_exact[0].upper()}"
+    if single_exact:
+        return "COEFFICIENT_NON_UNIQUE"
+    if pair_exact:
+        return "COUPLED_COEFFICIENT_FIELDS"
+    return "COEFFICIENT_EXONERATED_OPERATOR_WALK_REQUIRED"
+
+
 def _face_fields(values: tuple) -> dict[str, np.ndarray]:
     return {
         "u": np.asarray(values[0], dtype=np.float64)[:, 1:, :],
@@ -254,6 +281,69 @@ def _plant_one_ulp(field: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return planted
 
 
+def _plant_cancellation_sensitive_coefficient_one_ulp(
+    pair: tuple[np.ndarray, np.ndarray],
+    scalar_family: dict[str, np.ndarray],
+) -> tuple[tuple[np.ndarray, np.ndarray], dict[str, object]]:
+    """Move one active F coefficient at the most shift-sensitive RHS word.
+
+    A coefficient ULP can disappear when the LDF term is accumulated onto a
+    much larger HPG term.  Select the native output word with the largest
+    ``eps * abs(LDF) / spacing(accumulated RHS)`` ratio, then plant the F-point
+    coefficient entering that word's second-pass curl.  This keeps the control
+    one-word/one-ULP while choosing it from the acquired, executed support.
+    """
+    arrays = tuple(np.asarray(value, dtype=np.float64) for value in pair)
+    best = None
+    for face in FACE_ORDER:
+        before = _active_levels(scalar_family[f"after_hpg_{face}"])
+        after = _active_levels(scalar_family[f"after_ldf_{face}"])
+        term = after - before
+        spacing = np.abs(np.spacing(after))
+        score = np.divide(
+            np.finfo(np.float64).eps * np.abs(term), spacing,
+            out=np.zeros_like(term), where=spacing > 0.0,
+        )
+        flat_index = int(np.argmax(score))
+        candidate = (float(score.ravel()[flat_index]), face,
+                     tuple(np.unravel_index(flat_index, score.shape)))
+        if best is None or candidate[0] > best[0]:
+            best = candidate
+    require(best is not None and best[0] > 0.0,
+            "no cancellation-sensitive post-LDF word was found")
+    sensitivity, output_face, index = best
+    # dynldf_lev's second pass forms both U and V curl differences from ahmf at
+    # the same native (j, i, k) index as the output word.
+    field_index = 1
+    planted_field = np.array(arrays[field_index], copy=True)
+    require(all(index[axis] < planted_field.shape[axis] for axis in range(3)),
+            "selected native output has no matching F coefficient")
+    before = planted_field[index]
+    require(np.isfinite(before) and before != 0.0,
+            "selected F coefficient is not finite and active")
+    direction = np.inf if before >= 0.0 else -np.inf
+    planted_field[index] = np.nextafter(before, direction)
+    planted = list(arrays)
+    planted[field_index] = planted_field
+    movement = wordwise_result(
+        np.concatenate([value.ravel() for value in planted]),
+        np.concatenate([value.ravel() for value in arrays]),
+    )
+    require(
+        movement["unequal_words"] == 1 and movement["max_ulp"] == 1,
+        "coefficient plant did not move exactly one word by one ULP",
+    )
+    return (planted[0], planted[1]), {
+        "field": ("ahmt", "ahmf")[field_index],
+        "index_j_i_k": [int(value) for value in index],
+        "before": float(before),
+        "after": float(planted_field[index]),
+        "selected_output_face": output_face,
+        "selection_eps_ldf_over_rhs_spacing": sensitivity,
+        "coefficient_movement": movement,
+    }
+
+
 def _state_bytes_equal(left, right) -> tuple[bool, int]:
     import jax
 
@@ -278,6 +368,8 @@ def run(
     *,
     rhs_family_vector_root: Path | None = None,
     rhs_family_scalar_root: Path | None = None,
+    ahm_vector_root: Path | None = None,
+    ahm_scalar_root: Path | None = None,
     plant: str = "none",
 ) -> dict[str, object]:
     import jax
@@ -334,6 +426,41 @@ def run(
     ordinary = jax.device_get(ordinary)
     passive, passive_bytes = _state_bytes_equal(trace.state_after, ordinary)
     require(passive, f"live-stage trace moved {passive_bytes} state bytes")
+
+    # NEMO's stage-1 accumulator order is HPG -> LDF -> VOR -> KEG -> ZAD
+    # (compiled stp2d.f90:159-190).  legoESM's ordinary tendency evaluator
+    # forms the same isolated terms in a different order.  Use the existing
+    # private Round-119 association arm for the cumulative comparison; retain
+    # the ordinary trace above as the independent passivity control.
+    def source_order_step(coefficient_override=None):
+        return LatLonCGridOceanModel(
+            card.recipe.grid,
+            card.recipe.z_coord,
+            card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_live_stage_operands=True,
+                nemo_stage_rhs_accumulation_order_arm=(
+                    "stage1-source-order", None),
+                smagorinsky_coefficient_override=coefficient_override,
+            ),
+        ).step(state, dt=card.dt_s, freshwater=freshwater,
+               surface_forcing=surface)
+
+    require((ahm_vector_root is None) == (ahm_scalar_root is None),
+            "both scalar and vector AHM providers are required")
+    require(ahm_vector_root is None or rhs_family_vector_root is not None,
+            "AHM factor walk requires the cumulative RHS providers")
+    source_order_trace = None
+    source_order_state_identity = None
+    if rhs_family_vector_root is not None:
+        source_order_trace = source_order_step()
+        source_order_trace = jax.device_get(source_order_trace)
+        arm_exact, arm_bytes = _state_bytes_equal(
+            source_order_trace.state_after, ordinary)
+        source_order_state_identity = {
+            "bit_exact": arm_exact,
+            "mismatched_bytes": arm_bytes,
+        }
 
     masks = expected_masks(card)
     planted_control = None
@@ -400,13 +527,17 @@ def run(
     source_boundaries = None
     first_source_boundary = None
     source_order_calibration = None
+    coefficient_factor_walk = None
     if rhs_family_vector_root is not None:
+        require(source_order_trace is not None,
+                "source-order trace was not materialized")
         scalar_family = read_stage1_rhs_family(
             rhs_family_scalar_root / "instrumented" / RHS_FAMILY_RECORD)
         vector_family = read_stage1_rhs_family(
             rhs_family_vector_root / "instrumented" / RHS_FAMILY_RECORD)
-        live_operands = trace.operator_operands[0]
+        live_operands = source_order_trace.operator_operands[0]
         live_final = _trace_source_boundary(live_operands, "after_adv")
+        source_order_rhs = _face_fields(source_order_trace.stage1_full_rhs)
         source_order_calibration = {}
         for face in FACE_ORDER:
             active = masks[face]
@@ -417,8 +548,10 @@ def run(
                 "vector_final_equals_inherited_completed_rhs": wordwise_result(
                     _active_levels(vector_family[f"after_adv_{face}"])[active],
                     _active_levels(vector_rhs[face])[active]),
-                "legoesm_final_equals_completed_rhs": wordwise_result(
-                    live_final[face][active], live_rhs[face][active]),
+                "legoesm_source_order_final_equals_source_order_rhs": (
+                    wordwise_result(
+                        live_final[face][active],
+                        source_order_rhs[face][active])),
             }
         require(all(
             row[check]["bit_exact"]
@@ -450,6 +583,151 @@ def run(
             })
         first_source_boundary = first_clearing_source_boundary(
             source_boundaries)
+
+        if ahm_vector_root is not None:
+            import jax.numpy as jnp
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                compute_vertex_mask,
+                nemo_smagorinsky_bilaplacian_coefficients_cgrid,
+            )
+            from nemo_testcase_l2_gyre_hires_ladder_gate import read_ahm
+
+            providers["ahm_vector"] = manifest_contract(
+                ahm_vector_root, "vector-math-conda")
+            providers["ahm_scalar"] = manifest_contract(
+                ahm_scalar_root, "scalar-math-conda")
+            scalar_ahm = read_ahm(
+                ahm_scalar_root / "instrumented" / AHM_RECORD,
+                expected_kt=STEP,
+            )
+            vector_ahm = read_ahm(
+                ahm_vector_root / "instrumented" / AHM_RECORD,
+                expected_kt=STEP,
+            )
+            cell3 = (
+                np.asarray(card.recipe.z_coord.is_active, dtype=np.float64)
+                * np.asarray(state.land_mask.data)[..., None]
+            )
+            coefficient_vertex_mask = jax.vmap(
+                lambda level: compute_vertex_mask(
+                    level, grid=card.recipe.grid),
+                in_axes=-1, out_axes=-1,
+            )(jnp.asarray(cell3))
+            live_ahmt, live_ahmf = (
+                nemo_smagorinsky_bilaplacian_coefficients_cgrid(
+                    state.u.data, state.v.data, card.recipe.grid,
+                    card.recipe.model_config.lateral_viscosity.C_smag,
+                    card.dt_s, mask=state.land_mask.data,
+                    cell_mask=jnp.asarray(cell3),
+                    u_mask=state.u_mask.data, v_mask=state.v_mask.data,
+                    vertex_mask=coefficient_vertex_mask,
+                )
+            )
+            live_ahmt, live_ahmf = jax.device_get((live_ahmt, live_ahmf))
+            scalar_pair = (
+                np.asarray(scalar_ahm["ahmt"]),
+                np.asarray(scalar_ahm["ahmf"]),
+            )
+            vector_pair = (
+                np.asarray(vector_ahm["ahmt"]),
+                np.asarray(vector_ahm["ahmf"]),
+            )
+            live_pair = (np.asarray(live_ahmt), np.asarray(live_ahmf))
+            coefficient_rows = {
+                name: envelope_score(
+                    live_pair[index], scalar_pair[index], vector_pair[index],
+                    np.ones_like(scalar_pair[index], dtype=bool),
+                )
+                for index, name in enumerate(("ahmt", "ahmf"))
+            }
+            arms = {}
+            pair_operands = None
+            for name, override in (
+                ("ahmt", (scalar_pair[0], live_pair[1])),
+                ("ahmf", (live_pair[0], scalar_pair[1])),
+                ("ahmt_ahmf", scalar_pair),
+            ):
+                factor_trace = jax.device_get(source_order_step(
+                    tuple(jnp.asarray(value) for value in override)))
+                factor_operands = factor_trace.operator_operands[0]
+                if name == "ahmt_ahmf":
+                    pair_operands = factor_operands
+                rows = {}
+                for boundary in ("after_hpg", "after_ldf"):
+                    live_boundary = _trace_source_boundary(
+                        factor_operands, boundary)
+                    rows[boundary] = {
+                        face: envelope_score(
+                            live_boundary[face],
+                            _active_levels(
+                                scalar_family[f"{boundary}_{face}"]),
+                            _active_levels(
+                                vector_family[f"{boundary}_{face}"]),
+                            masks[face],
+                        )
+                        for face in FACE_ORDER
+                    }
+                arms[name] = {
+                    "rows": rows,
+                    "untouched_hpg_bit_exact": all(
+                        rows["after_hpg"][face]["legoesm_minus_scalar"]
+                        ["bit_exact"] for face in FACE_ORDER),
+                    "after_ldf_bit_exact": all(
+                        rows["after_ldf"][face]["legoesm_minus_scalar"]
+                        ["bit_exact"] for face in FACE_ORDER),
+                }
+            require(pair_operands is not None,
+                    "paired coefficient substitution was not evaluated")
+            planted_pair, coefficient_plant = (
+                _plant_cancellation_sensitive_coefficient_one_ulp(
+                    scalar_pair, scalar_family))
+            # A single coefficient ULP can legitimately round away through
+            # two bilaplacian passes and the cumulative HPG addition.  Keep
+            # that exact one-ULP input control, and separately amplify only
+            # the same acquired active word to prove the override seam reaches
+            # the executed post-LDF boundary.
+            seam_pair = [np.array(value, copy=True) for value in scalar_pair]
+            seam_field = 0 if coefficient_plant["field"] == "ahmt" else 1
+            seam_index = tuple(coefficient_plant["index_j_i_k"])
+            seam_before = seam_pair[seam_field][seam_index]
+            seam_pair[seam_field][seam_index] = seam_before * (1.0 + 2.0**-26)
+            seam_movement = wordwise_result(
+                np.concatenate([value.ravel() for value in seam_pair]),
+                np.concatenate([value.ravel() for value in scalar_pair]),
+            )
+            require(seam_movement["unequal_words"] == 1,
+                    "coefficient seam plant moved more than one word")
+            planted_trace = jax.device_get(source_order_step(
+                tuple(jnp.asarray(value) for value in seam_pair)))
+            planted_operands = planted_trace.operator_operands[0]
+            coefficient_plant["one_ulp_post_ldf_observable"] = False
+            coefficient_plant["seam_movement"] = seam_movement
+            coefficient_plant["seam_rows_vs_unplanted_pair"] = {}
+            for boundary in ("after_hpg", "after_ldf"):
+                unplanted = _trace_source_boundary(pair_operands, boundary)
+                planted = _trace_source_boundary(planted_operands, boundary)
+                coefficient_plant["seam_rows_vs_unplanted_pair"][boundary] = {
+                    face: wordwise_result(
+                        planted[face][masks[face]],
+                        unplanted[face][masks[face]],
+                    )
+                    for face in FACE_ORDER
+                }
+            require(all(
+                coefficient_plant["seam_rows_vs_unplanted_pair"]["after_hpg"]
+                [face]["bit_exact"] for face in FACE_ORDER
+            ), "coefficient plant moved the upstream HPG boundary")
+            require(any(
+                not coefficient_plant["seam_rows_vs_unplanted_pair"]["after_ldf"]
+                [face]["bit_exact"] for face in FACE_ORDER
+            ), "active one-word coefficient seam plant did not reach post-LDF")
+            coefficient_factor_walk = {
+                "input_time_level": "Nbb before velocity",
+                "coefficient_rows": coefficient_rows,
+                "arms": arms,
+                "one_ulp_control": coefficient_plant,
+                "owner": coefficient_factor_owner(arms),
+            }
 
     first_stage = first_clearing_stage(stages)
     rhs_clears = any(
@@ -493,6 +771,7 @@ def run(
             "bit_exact": passive,
             "mismatched_bytes": passive_bytes,
         },
+        "source_order_arm_vs_ordinary_state": source_order_state_identity,
         "plant": plant,
         "plant_control": planted_control,
         "stages": stages,
@@ -500,6 +779,7 @@ def run(
         "source_ordered_stage1_rhs": source_boundaries,
         "source_order_calibration": source_order_calibration,
         "first_source_boundary_beyond_twin": first_source_boundary,
+        "coefficient_factor_walk": coefficient_factor_walk,
         "external_mode_handoff": bt_rows,
         "first_stage_beyond_twin": first_stage,
         "next_boundary": next_boundary,
@@ -512,6 +792,8 @@ def main() -> int:
     parser.add_argument("--scalar-root", type=Path, default=SCALAR_ROOT)
     parser.add_argument("--rhs-family-vector-root", type=Path)
     parser.add_argument("--rhs-family-scalar-root", type=Path)
+    parser.add_argument("--ahm-vector-root", type=Path)
+    parser.add_argument("--ahm-scalar-root", type=Path)
     parser.add_argument("--plant", default="none", choices=(
         "none", "stage1-u", "stage1-v", "stage2-u", "stage2-v",
         "rhs-u", "rhs-v", "bt-u", "bt-v",
@@ -526,6 +808,8 @@ def main() -> int:
         args.scalar_root,
         rhs_family_vector_root=args.rhs_family_vector_root,
         rhs_family_scalar_root=args.rhs_family_scalar_root,
+        ahm_vector_root=args.ahm_vector_root,
+        ahm_scalar_root=args.ahm_scalar_root,
         plant=args.plant,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)

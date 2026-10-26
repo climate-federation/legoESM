@@ -637,17 +637,64 @@ _CERTIFIED_CARD_DIGESTS_GRADGATE = {        # gradient-gate tip d678430f3
     "LOCK_EXCHANGE-zco": "70746f41480350ec",
     "OVERFLOW-zps": "2c562be8a7d2e793",
 }
-# re-pinned 2026-10-16 (#2009, #1910 config fields); re-pinned 2026-10-17 for
-# the ORCA2 lane's new config fields (23 appended to the lat-lon config, 32 in
-# all nested configs) and each deck's explicit
-# rn_bt_alpha, and again for the card-selected flux-form external-mode
-# switch (True on LOCK_EXCHANGE and OVERFLOW) -- the non-config part of
-# every digest is unchanged.
+# re-pinned 2026-10-16 (#2009, #1910 config fields).  Round 24 formally
+# admits the 2026-10-17 ORCA2 fold-in after an exact 33-row resolved-config
+# diff and byte identity of all 24 state leaves at each of ten GYRE steps.
+# The 32 appended selectors below are false on GYRE; explicit rn_bt_alpha is
+# the already-executed 0.07 default.  LOCK_EXCHANGE/OVERFLOW intentionally
+# select the new external-mode flux form, but GYRE does not.
 _CERTIFIED_CARD_DIGESTS = {
     "GYRE-zco": "dca02dffba3eb14f",
     "LOCK_EXCHANGE-zco": "10516c2a4d166c73",
     "OVERFLOW-zps": "9be98498ac9f50de",
 }
+
+_ROUND24_GYRE_INERT_ORCA2_FIELDS = {
+    "barotropic.barotropic_fold_top_v_face_ssh": False,
+    "barotropic.barotropic_flux_update_nemo_literal": False,
+    "barotropic.barotropic_substep_dt_nemo_literal": False,
+    "barotropic.barotropic_entry_depth_nemo_literal": False,
+    "barotropic.barotropic_een_ratio_fold_exchange": False,
+    "barotropic.barotropic_een_fe3mask_pivot_row": False,
+    "barotropic.barotropic_een_ratio_written_order": False,
+    "barotropic.barotropic_literal_fold_unit_vector_form": False,
+    "barotropic.nemo_barotropic_filter_alpha": 0.07,
+    "barotropic.nemo_literal_external_mode_flux_form": False,
+    "een_fold_image_v_row": False,
+    "rk3_stage1_ssh_nemo_literal": False,
+    "rk3_stage1_rhs_nemo_literal": False,
+    "rk3_stage_velocity_written_order": False,
+    "een_vorticity_written_order": False,
+    "zdf_barotropic_removal_nemo_literal": False,
+    "zdf_momentum_nemo_face_thickness": False,
+    "rk3_fold_exchange_top_v_row": False,
+    "rk3_stage_r3f_nemo_literal": False,
+    "rk3_stage_r3t_nemo_literal": False,
+    "nemo_eos_gdept_rounded_product": False,
+    "rk3_stage_r3uv_nemo_literal": False,
+    "zdf_tracer_nemo_rounded_thickness": False,
+    "barotropic_rhs_ascending_level_sum": False,
+    "zdf_momentum_stage_r3u_nemo_literal": False,
+    "een_nemo_relative_vorticity": False,
+    "een_nemo_top_f_u_halo": False,
+    "barotropic_wind_nemo_stored_depth": False,
+    "surface_stress_nemo_fold_vector_sign": False,
+    "zdf_surface_stress_nemo_face_thickness": False,
+    "rk3_stage_tracer_written_order": False,
+    "rk3_stage3_heat_nemo_written": False,
+    "rk3_stage3_tracer_nemo_stored_thickness": False,
+}
+
+
+def test_round24_admitted_gyre_digest_carries_only_audited_orca2_defaults():
+    """The exact pre/post config diff is executable, not receipt prose only."""
+    cfg = build_nemo_testcase_card("GYRE-zco").recipe.model_config
+    assert len(_ROUND24_GYRE_INERT_ORCA2_FIELDS) == 33
+    for path, expected in _ROUND24_GYRE_INERT_ORCA2_FIELDS.items():
+        value = cfg
+        for part in path.split("."):
+            value = getattr(value, part)
+        assert value == expected, path
 
 
 @pytest.mark.parametrize("case", sorted(_CERTIFIED_CARD_DIGESTS))

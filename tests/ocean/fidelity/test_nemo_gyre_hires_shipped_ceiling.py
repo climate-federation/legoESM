@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 
@@ -94,6 +95,23 @@ CEILINGS: dict[str, float] = {
     'GYRE-zco.kt10.before.v': 1.807891145816365e-10,
 }
 
+# Round 24's user-authorized ORCA2-merge audit.  These are whole-pytree
+# hashes after each production step, independently reproduced from both the
+# pre-merge tree (7e78361fb1) and the admitted merged card (a62e10e8a6).
+# Every path, dtype, shape and C-order byte of all 24 state leaves participates.
+ROUND24_SHIPPED_STATE_SHA256 = {
+    1: "20b095a840e680dc5e15acaf5689c5e1b96a47979ec2f40f2c969c428aedbdb5",
+    2: "f851ac2710b3ca63984846f1a77dfc4014651797dd9b4f418f35c9fb848af629",
+    3: "61cc76db690e7d689f1a2f23cfa06bc8dc14fb056cbfda4b1df74775264dcd46",
+    4: "cce107fe25f9db1e0b5459b48bbe37e301909d4f285162d61fe0dcface10ff50",
+    5: "63394d664c5c2707cdda6098e32400dede4931ad052f30a36fe824769cc817b3",
+    6: "aaaec1eb4d3db1d08d6b217f28d2a4cdd8b293bcdc4b57138c9c17c22a8947b7",
+    7: "abe237fabfef3a7b53104d1e9189fea6788a7c67ced7948a70dbe904d571dccc",
+    8: "fb191c26100e593f2ec59fb4220f9ddb6066075b658bd23019f1fa9b9610f961",
+    9: "a03091102b6f5b0767b1289b5f778eaf00ac9bc50835f6fd860e9e4c00e7d624",
+    10: "b17e7e20bbe55b6a38f79205f2cae514552d674892423c3ee4d7636533f70799",
+}
+
 
 def _load_gate():
     spec = importlib.util.spec_from_file_location(
@@ -144,6 +162,17 @@ def test_ceiling_comparator_covers_all_rows_and_fires_on_one_worsening():
     assert rows_over_ceiling(report, CEILINGS)[0].startswith(worst)
 
 
+def test_whole_state_digest_control_fires_on_one_word():
+    gate = _load_gate()
+    exact = {"a": np.array([0.0, 1.0]), "b": np.array([2], dtype=np.int64)}
+    planted = {key: np.array(value, copy=True) for key, value in exact.items()}
+    planted["a"][1] = np.nextafter(planted["a"][1], np.inf)
+    exact_hash, exact_leaves = gate.state_pytree_sha256(exact)
+    planted_hash, planted_leaves = gate.state_pytree_sha256(planted)
+    assert exact_leaves == planted_leaves == 2
+    assert exact_hash != planted_hash
+
+
 def test_shipped_card_stays_within_round9_nemo_distance(monkeypatch):
     gate = _load_gate()
     if not Path(gate.ROOT).is_dir():
@@ -152,3 +181,12 @@ def test_shipped_card_stays_within_round9_nemo_distance(monkeypatch):
         gate, "worktree_stamp", lambda *args, **kwargs: {"ceiling": True})
     report = gate.run(gate.ROOT, max_step=10, trajectory_only=True)
     assert rows_over_ceiling(report, CEILINGS) == []
+    observed = {
+        int(row["kt"]): row["state_sha256_after_step"]
+        for row in report["barotropic_state_steps"]
+    }
+    assert observed == ROUND24_SHIPPED_STATE_SHA256
+    assert all(
+        row["state_leaf_count"] == 24
+        for row in report["barotropic_state_steps"]
+    )

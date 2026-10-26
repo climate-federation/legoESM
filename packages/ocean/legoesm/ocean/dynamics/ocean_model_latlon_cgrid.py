@@ -6263,7 +6263,7 @@ class LatLonCGridOceanModel:
                                zad_continuity_dt=dt,
                                up3_upwind_selector=_up3_selector_override,
                                momentum_flux_face_thickness=_ws_face_thickness_kbb,
-                               ldf_thickness_operands=_ws_ldf_thickness_kbb,
+                               ldf_thickness_operands=_ws_ldf_thickness_kbb, nemo_smagorinsky_coefficient_override=(self._nemo_ws_test_hooks.smagorinsky_coefficient_override),
                                nemo_operator_association=self._nemo_ws_test_hooks.nemo_stage_rhs_accumulation_order_arm,
                                nemo_stage_zad_operands=(
                                    (self._nemo_ws_test_hooks.stage1_zad_w_override, None, None)
