@@ -41,7 +41,7 @@ __param_spec__ = {
             "wstar_ustar_coef": {"units": "1", "bounds": (0.5, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "WSTAR_USTAR_COEF: efficiency of convective relative to mechanical TKE", "shape": None},
             "ekman_scale_coef": {"units": "1", "bounds": (0.3, 3.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "EKMAN_SCALE_COEF: rotational inhibition of the mixing length", "shape": None},
             "mke_to_tke_effic": {"units": "1", "bounds": (0.0, 0.2), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MKE_TO_TKE_EFFIC: conversion of resolved shear KE into TKE", "shape": None},
-            "mstar_cap": {"units": "1", "bounds": (-1.0, 20.0), "tunable_tier": 0, "transform": "none", "category": "vertical_mixing", "reference": "MSTAR_CAP: upper bound on mstar; negative disables", "shape": None},
+            "mstar_cap": {"units": "1", "bounds": (-1.0, 20.0), "tunable_tier": 0, "transform": "none", "category": "vertical_mixing", "reference": "MSTAR_CAP: upper bound on mstar (OM4 scheme only, as in MOM6); negative disables", "shape": None},
             "mstar_coef": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MSTAR2_COEF1: rotation/stabilization balance (OM4 scheme)", "shape": None},
             "c_ek": {"units": "1", "bounds": (0.02, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MSTAR2_COEF2: Ekman-limited mixing coefficient (OM4 scheme)", "shape": None},
             "mstar_convect_coef": {"units": "1", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "vertical_mixing", "reference": "MSTAR_CONV_ADJ: reduction of mstar under convection", "shape": None},
@@ -1064,7 +1064,7 @@ class EPBLConfig(NamedTuple):
     # --- mstar (TKE input = mstar * rho0 * ustar^3 * dt) ---
     mstar_scheme: str = "constant"     # EPBL_MSTAR_SCHEME: constant|om4|reichl_h18
     fixed_mstar: float = 1.2           # MSTAR
-    mstar_cap: float = -1.0            # MSTAR_CAP (<=0 disables)
+    mstar_cap: float = -1.0            # MSTAR_CAP, om4 only (<=0 disables)
     mstar_coef: float = 0.3            # MSTAR2_COEF1 (om4 scheme)
     c_ek: float = 0.085                # MSTAR2_COEF2 (om4 scheme)
     mstar_convect_coef: float = 0.0    # MSTAR_CONV_ADJ

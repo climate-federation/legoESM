@@ -354,8 +354,6 @@ def _find_mstar(cfg: EPBLConfig, b_flux, u_star, bld, absf):
             _safe_div(jnp.maximum(0.0, b_flux) ** 2 * bld,
                       u_star**5 * absf_safe), cfg.rh18_mstar_cs2)
         mstar = mstar_n + mstar_s
-        if cfg.mstar_cap > 0.0:
-            mstar = jnp.minimum(cfg.mstar_cap, mstar)
 
     # Reduce mstar to account for convective turbulence eroding the stable
     # density gradient that mechanical mixing would otherwise work against.
@@ -429,8 +427,8 @@ def _eqdisc_v0(cfg: EPBLConfig, absf, b_flux, u_star):
         (c[7] * ((u_star * root_b_f) + (c[9] * f_u2))) * u_star, den_heat)
 
     # Cooling branch.
-    f_prime = _safe_div(f_capped * u_star, jnp.maximum(-bflux_c, _TINY))
-    root_b_by_omega = _safe_sqrt(_safe_div(jnp.abs(bflux_c), f_capped))
+    f_prime = f_capped / constants.Omega
+    root_b_by_omega = _safe_sqrt(-bflux_c / constants.Omega)
     den_cool = ((-bflux_c + c[11] * f_u2 * jnp.exp(-f_prime * c[12]))
                 + c[13] * f_u2)
     v0_cool = (_safe_div(c[10] * (-bflux_c * root_b_by_omega), den_cool)
@@ -650,7 +648,8 @@ def _epbl_column(h, u, v, t0, s0, dsv_dt, dsv_ds, tke_forcing,
             (h_above, h_below, t_above, t_below, s_above, s_below,
              u_below, v_below, tkef_k, dt_h, hbs_raw, mls_k, pres_k,
              dt_to_dpe_k, ds_to_dpe_k,
-             dt_to_dcolht_k, ds_to_dcolht_k) = xs
+             dt_to_dcolht_k, ds_to_dcolht_k,
+             dt_to_dcolht_km1, ds_to_dcolht_km1) = xs
 
             # 1. Mechanical TKE decays across the layer above.
             exp_kh = jnp.where(idecay > 0.0, jnp.exp(-h_above * idecay), 1.0)
@@ -689,9 +688,9 @@ def _epbl_column(h, u, v, t0, s0, dsv_dt, dsv_ds, tke_forcing,
             dse_term = dse_t2 + hp_a_prev * (s_above - s_below)
 
             convectively_stable = (
-                0.0 <= ((dt_to_dcolht_k + dt_to_dcolht_a_prev)
+                0.0 <= ((dt_to_dcolht_k + dt_to_dcolht_km1)
                         * (t_above - t_below)
-                        + (ds_to_dcolht_k + ds_to_dcolht_a_prev)
+                        + (ds_to_dcolht_k + ds_to_dcolht_km1)
                         * (s_above - s_below)))
             exhausted = ((mech_tke + conv_perel) <= 0.0) & convectively_stable
 
@@ -936,7 +935,8 @@ def _epbl_column(h, u, v, t0, s0, dsv_dt, dsv_ds, tke_forcing,
               u[1:], v[1:], tke_forcing[1:], dt_h_int, hb_hs[1:nz],
               mixlen_shape[1:nz], pres_z[1:nz],
               dt_to_dpe[1:], ds_to_dpe[1:],
-              dt_to_dcolht[1:], ds_to_dcolht[1:])
+              dt_to_dcolht[1:], ds_to_dcolht[1:],
+              dt_to_dcolht[:-1], ds_to_dcolht[:-1])
         carry, (kd_int, vstar_int, mixlen_int) = lax.scan(body, init, xs)
         mld_found = carry[7]
 
@@ -955,7 +955,7 @@ def _epbl_column(h, u, v, t0, s0, dsv_dt, dsv_ds, tke_forcing,
     mld_guess_0 = jnp.where(mld_guess_in > 0.0, mld_guess_in,
                             0.5 * column_depth)
 
-    def mld_body(_, st):
+    def mld_body(i, st):
         (guess, min_mld, max_mld, dmld_min, dmld_max, done,
          kd_keep, mld_keep, mixvel_keep, mixlen_keep) = st
 
@@ -988,7 +988,11 @@ def _epbl_column(h, u, v, t0, s0, dsv_dt, dsv_ds, tke_forcing,
         if cfg.mld_bisection:
             next_guess = 0.5 * (min_mld_n + max_mld_n)
         else:
-            bracketed = (dmld_min_n > 0.0) & (dmld_max_n < 0.0)
+            # MOM6 takes the false-position step only from its third
+            # iteration on, and skips it every fourth (OBL_it = i + 1).
+            obl_it = i + 1
+            bracketed = ((dmld_min_n > 0.0) & (dmld_max_n < 0.0)
+                         & (obl_it > 2) & ((obl_it - 1) % 4 > 0))
             false_pos = _safe_div(
                 dmld_min_n * max_mld_n - dmld_max_n * min_mld_n,
                 dmld_min_n - dmld_max_n)
@@ -1116,8 +1120,10 @@ def epbl_vertical_mixing(
 
     # Friction velocity and the mechanical TKE input before mstar.
     tau_mag = _safe_sqrt(tau_x_b**2 + tau_y_b**2)
-    u_star = jnp.maximum(_safe_sqrt(tau_mag / rho_0), cfg.ustar_min)
-    mech_tke_in = cfg.dt_s * rho_0 * u_star**3
+    # MOM6 prices mech_TKE from the raw u_star and floors u_star after.
+    u_star_raw = _safe_sqrt(tau_mag / rho_0)
+    mech_tke_in = cfg.dt_s * rho_0 * u_star_raw**3
+    u_star = jnp.maximum(u_star_raw, cfg.ustar_min)
 
     # Blend the local f with the planetary rotation rate (MOM6 ML_OMEGA_FRAC).
     if cfg.omega_frac >= 1.0:
@@ -1178,8 +1184,10 @@ def epbl_diagnostics(
         return jnp.broadcast_to(jnp.asarray(x, dtype), horiz)
 
     tau_mag = _safe_sqrt(_b(tau_x) ** 2 + _b(tau_y) ** 2)
-    u_star = jnp.maximum(_safe_sqrt(tau_mag / rho_0), cfg.ustar_min)
-    mech_tke_in = cfg.dt_s * rho_0 * u_star**3
+    # MOM6 prices mech_TKE from the raw u_star and floors u_star after.
+    u_star_raw = _safe_sqrt(tau_mag / rho_0)
+    mech_tke_in = cfg.dt_s * rho_0 * u_star_raw**3
+    u_star = jnp.maximum(u_star_raw, cfg.ustar_min)
     absf_b = _b(absf)
     if cfg.omega_frac >= 1.0:
         absf_eff = jnp.full_like(absf_b, 2.0 * constants.Omega)
