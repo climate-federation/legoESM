@@ -163,15 +163,19 @@ def _prep_cell(a, v, ato, cn, op, cfg):
             phi[j] = zhi[j] / _maxk(1e-20, zhm)
             zak = zak + ar[j] * (1.0 - phi[j]) + af[j] * (1.0 - 0.5)
     cg = cn / zak if zak > 1e-10 else 0.0
+    excess = False
     for j in range(jpl):
         if ap[j + 1] * cg * cfg.rdt_ice > a[j] and ap[j + 1] != 0.0:
             cg = a[j] / ap[j + 1] * r1
+            excess = True
     zf = ato + (op - ap[0] * cg) * cfg.rdt_ice
+    opfix = zf < 0.0 or zf > zasum
     if zf < 0.0:
         op = ap[0] * cg - ato * r1
     elif zf > zasum:
         op = ap[0] * cg + (zasum - ato) * r1
-    return dict(ap=ap, ar=ar, af=af, phi=phi, hraft=hraft, hrmin=hrmin, hrmax=hrmax, cg=cg, op=op)
+    return dict(ap=ap, ar=ar, af=af, phi=phi, hraft=hraft, hrmin=hrmin, hrmax=hrmax, cg=cg, op=op,
+                excess=excess, opfix=opfix)
 
 
 def _shift_cell(c, p, sst, sss, cfg, hi_max):
@@ -294,7 +298,7 @@ def oracle_rdgrft(s, divu, delta, sst, sss, cfg, hi_max=HI_MAX):
             o["at_i"][ji, jj] = _sum0(o["a_i"][ji, jj])
             if o["at_i"][ji, jj] > 1e-10:
                 cells.append((ji, jj))
-    st = {}
+    st, ev = {}, {}
     for ji, jj in cells:
         dv, dl = float(divu[ji, jj]), float(delta[ji, jj])
         cn = cfg.rn_csrdg * 0.5 * (dl - abs(dv)) - _mink(0.0, dv)
@@ -302,6 +306,7 @@ def oracle_rdgrft(s, divu, delta, sst, sss, cfg, hi_max=HI_MAX):
             cn = _maxk(-dv, cn)
         c = _cell(o, ji, jj, _CAT, _LAY, ("ato_i",) + _FLX)
         p = _prep_cell(c["a_i"], c["v_i"], c["ato_i"], cn, cn + dv, cfg)
+        ev[(ji, jj)] = dict(shifts=0, excess=p["excess"], opfix=p["opfix"])
         if _sum0(p["ap"][1:]) > 0.0 and p["cg"] > 0.0:
             st[(ji, jj)] = dict(c=c, cn=cn, op=p["op"], dv=dv)
     it, iterate = 1, 1 if st else 0
@@ -309,6 +314,9 @@ def oracle_rdgrft(s, divu, delta, sst, sss, cfg, hi_max=HI_MAX):
         for key, d in st.items():
             p = _prep_cell(d["c"]["a_i"], d["c"]["v_i"], d["c"]["ato_i"], d["cn"], d["op"], cfg)
             d["op"] = p["op"]
+            e = ev[key]
+            e["shifts"] += int(p["cg"] > 0.0 and any(x > 0.0 for x in p["ap"][1:]))  # :727-729
+            e["excess"], e["opfix"] = e["excess"] or p["excess"], e["opfix"] or p["opfix"]
             _shift_cell(d["c"], p, float(sst[key]), float(sss[key]), cfg, hi_max)
         iterate = 0
         for d in st.values():
@@ -323,6 +331,7 @@ def oracle_rdgrft(s, divu, delta, sst, sss, cfg, hi_max=HI_MAX):
         it += 1
     for (ji, jj), d in st.items():
         _put(o, ji, jj, d["c"], _CAT, _LAY, ("ato_i",) + _FLX)
+    oracle_rdgrft.events = ev
     return o, it - 1, set(st)
 
 
@@ -466,6 +475,24 @@ def test_rdgrft_equals_independent_scalar_transcription():
     assert 10.0 < zvti < 20.0 and (6, 4) in sel
     # the fixture reaches the branches the oracle exercises
     assert np.asarray(got.state.wfx_dyn != jnp.asarray(s["wfx_dyn"])).any()  # porosity fluxes
+
+
+def test_rdgrft_branch_diagnostics_equal_the_transcription_and_count_real_events():
+    """Per-cell shift counts and the :647 / :659-661 branch flags, every cell, both icethd arms."""
+    for seed, cfg in ((0, RDG_CFG), (3, si3_rdgrft_config_after_init(RDG_CFG, ln_icethd=False))):
+        s, divu, delta, sst, sss = _inputs(seed)
+        oracle_rdgrft(s, divu, delta, sst, sss, cfg)
+        ev = oracle_rdgrft.events
+        got = _run_rdgrft(s, divu, delta, sst, sss, cfg)
+        for name, key in (("n_shifts", "shifts"), ("excess_clamp", "excess"), ("opening_fix", "opfix")):
+            want = np.zeros((JPI, JPJ), np.asarray(getattr(got, name)).dtype)
+            for cell, e in ev.items():
+                want[cell] = e[key]
+            np.testing.assert_array_equal(np.asarray(getattr(got, name)), want, err_msg=f"{seed}:{name}")
+        # real events, not an unconditional counter (M5)
+        assert max(e["shifts"] for e in ev.values()) >= 2
+        assert sum(e["excess"] for e in ev.values()) >= 1
+        assert sum(e["opfix"] for e in ev.values()) >= 1
 
 
 def test_rdgrft_thermo_off_override_and_equality():
@@ -909,51 +936,9 @@ RDG_PIN = "00e22bad91eb8c38750766bc6ba07f96642ea6f4cd214e06ea75c9d569e57415"
 COR_PIN = "929051ba6c3889e31c92fa0e014810d45c99b5b5594ca566185d73ebde4cd0af"
 
 
-def test_lane3_jpl1_arm_is_not_the_nemo_literal_kernel():
-    """Measured reason lane 3's jpl=1 arm is not routed through the O6 kernel.
-
-    Same jpl=1 inputs, lane 3's resolved selectors (exponential redistribution,
-    zero porosity, unit retention): the two disagree in bits on interior cells,
-    so delegating would move lane-3 card values.  Read off the code (PLAUSIBLE
-    as the cause): lane 3 takes G(jpl) = 1 exactly where NEMO computes
-    ``(ato + SUM(a)) * z1_asum`` (``icedyn_rdgrft.f90:481``), and it stops
-    updating a cell once ``shift`` is false although NEMO still opens water
-    there on the next pass (``:713``).
-    """
-    from legoesm.ice.ridging import SI3JPL1RidgingState, apply_si3_jpl1_ridging
-
-    s, divu, delta, sst, sss = _inputs(5)
-    one = {k: (v[..., :1] if np.ndim(v) in (3, 4) else v) for k, v in s.items()}
-    one["e_s"], one["e_i"], one["szv_i"] = s["e_s"][..., :1], s["e_i"][..., :1], s["szv_i"][..., :1]
-    one["a_i"] = s["a_i"].sum(-1, keepdims=True).clip(0, 0.99)
-    one["v_i"] = s["v_i"].sum(-1, keepdims=True)
-    one["ato_i"] = 1.0 - one["a_i"][..., 0]
-    cfg = RDG_CFG._replace(ln_distf_lin=False, ln_distf_exp=True, rn_porordg=0.0, rn_fsnwrdg=1.0,
-                           rn_fsnwrft=1.0, rn_fpndrdg=1.0, rn_fpndrft=1.0)
-    st = SI3RdgrftState(**{k: jnp.asarray(one[k]) for k in SI3RdgrftState._fields})
-    ours = si3_ice_dyn_rdgrft(st, divu_i=divu, delta_i=delta, sst_m=sst, sss_m=sss,
-                              hi_max=np.array([0.0, 99.0]), nn_hls=NN_HLS, config=cfg).state
-    lane3, _ = apply_si3_jpl1_ridging(
-        SI3JPL1RidgingState(
-            ice_area=jnp.asarray(one["a_i"][..., 0]), open_water_area=jnp.asarray(one["ato_i"]),
-            ice_volume=jnp.asarray(one["v_i"][..., 0]), snow_volume=jnp.asarray(one["v_s"][..., 0]),
-            age_content=jnp.asarray(one["oa_i"][..., 0]), pond_area=jnp.asarray(one["a_ip"][..., 0]),
-            pond_volume=jnp.asarray(one["v_ip"][..., 0]), pond_lid_volume=jnp.asarray(one["v_il"][..., 0]),
-            snow_enthalpy=jnp.asarray(one["e_s"][..., 0]), ice_enthalpy=jnp.asarray(one["e_i"][..., 0]),
-            ice_salt_content=jnp.asarray(one["szv_i"][..., 0])),
-        jnp.asarray(divu), jnp.asarray(delta), RDT)
-    inner = np.s_[NN_HLS:-NN_HLS, NN_HLS:-NN_HLS]
-    a_ours = np.asarray(ours.a_i)[..., 0][inner]
-    a_l3 = np.asarray(lane3.ice_area)[inner]
-    o_ours = np.asarray(ours.ato_i)[inner]
-    o_l3 = np.asarray(lane3.open_water_area)[inner]
-    n_diff = int((_bits(a_ours) != _bits(a_l3)).sum() + (_bits(o_ours) != _bits(o_l3)).sum())
-    assert n_diff > 0
-    np.testing.assert_allclose(a_ours, a_l3, rtol=1e-9)
-
-
 # ------------------------------------------------- parent-vs-current controls
 O6_PARENT_COMMIT = "e8ee89ece8cb"
+MERGE_PARENT_COMMIT = "6c53813384"  # last commit with lane 3's own jpl=1 ridging and ice_cor (DECISION 177)
 _RHEO_ROOT = __import__("pathlib").Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")
 _TOUCHED = (
     ("legoesm.ice.itd", "packages/ice/legoesm/ice/itd.py"),
@@ -962,21 +947,21 @@ _TOUCHED = (
 )
 
 
-def _load_parent(extra=()):
+def _load_parent(extra=(), rev=O6_PARENT_COMMIT, touched=_TOUCHED):
     import subprocess
     import sys
     import types
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[3]
-    names = _TOUCHED + tuple(extra)
+    names = tuple(touched) + tuple(extra)
     saved = {n: sys.modules.get(n) for n, _ in names}
     loaded = {}
     try:
         for name, rel in names:
-            src = subprocess.check_output(["git", "show", f"{O6_PARENT_COMMIT}:{rel}"], cwd=root, text=True)
+            src = subprocess.check_output(["git", "show", f"{rev}:{rel}"], cwd=root, text=True)
             mod = types.ModuleType(name)
-            mod.__file__ = f"<git:{O6_PARENT_COMMIT}:{rel}>"
+            mod.__file__ = f"<git:{rev}:{rel}>"
             sys.modules[name] = mod
             exec(compile(src, mod.__file__, "exec"), mod.__dict__)
             loaded[name] = mod
@@ -989,24 +974,12 @@ def _load_parent(extra=()):
     return loaded
 
 
-def test_parent_vs_current_shared_ridging_and_itd_callers():
-    """Lane 3's jpl=1 arm and the generic ridging/ITD entry points are bit-identical to the parent."""
+def test_parent_vs_current_shared_ridging_callers():
+    """The generic ridging entry point is bit-identical to the pre-O6 parent."""
     from legoesm.ice import ridging as cur
 
     par = _load_parent()["legoesm.ice.ridging"]
     rng = np.random.default_rng(7)
-    sh = (6, 5)
-    fields = dict(ice_area=rng.uniform(0.1, 0.95, sh), open_water_area=rng.uniform(0.0, 0.2, sh),
-                  ice_volume=rng.uniform(0.1, 3.0, sh), snow_volume=rng.uniform(0, 0.3, sh),
-                  age_content=rng.uniform(0, 1e6, sh), pond_area=rng.uniform(0, 0.1, sh),
-                  pond_volume=rng.uniform(0, 0.02, sh), pond_lid_volume=rng.uniform(0, 0.002, sh),
-                  snow_enthalpy=rng.uniform(1e6, 1e8, sh + (5,)), ice_enthalpy=rng.uniform(1e7, 3e8, sh + (10,)),
-                  ice_salt_content=rng.uniform(0.01, 0.5, sh + (10,)))
-    divu, delta = rng.normal(-3e-6, 3e-6, sh), rng.uniform(0, 6e-6, sh)
-    out_c = cur.apply_si3_jpl1_ridging(cur.SI3JPL1RidgingState(**fields), divu, delta, RDT)
-    out_p = par.apply_si3_jpl1_ridging(par.SI3JPL1RidgingState(**fields), divu, delta, RDT)
-    for x, y in zip(jax.tree_util.tree_leaves(out_c), jax.tree_util.tree_leaves(out_p)):
-        np.testing.assert_array_equal(_bits(x), _bits(y))
     a = rng.uniform(0.05, 0.3, (4, 3, 5))
     h = np.sort(rng.uniform(0.1, 4.0, (4, 3, 5)), -1)
     args = (a, h, a * h * 0.2, np.full((4, 3, 5), 6.0), np.full((4, 3), 2e-6), 5, RDT)
@@ -1018,8 +991,13 @@ def test_parent_vs_current_shared_ridging_and_itd_callers():
 
 @pytest.mark.slow
 @pytest.mark.skipif(not _RHEO_ROOT.exists(), reason="lane-3 ICE_RHEO record absent")
-def test_lane3_rheo_card_parent_vs_current_bit_identical():
-    """One ICE_RHEO step (rhg -> adv -> rdgrft -> cor) with the parent's ridging/ITD/surface modules."""
+def test_lane3_rheo_card_merge_parent_vs_current_bit_identical():
+    """One ICE_RHEO step (rhg -> adv -> rdgrft -> cor): lane 3's own kernels vs the O6 kernels.
+
+    The parent is the last commit before DECISION 177 deleted lane 3's jpl=1
+    ridging and ice_cor; its card, ridging, ITD and surface modules are loaded
+    from git.  A rn_murdg plant on the current card must break the equality.
+    """
     import importlib.util
 
     import netCDF4
@@ -1029,10 +1007,10 @@ def test_lane3_rheo_card_parent_vs_current_bit_identical():
 
     root = __import__("pathlib").Path(__file__).resolve().parents[3]
     par = _load_parent((("legoesm.ice.fidelity.nemo_rheo_testcase_recipe",
-                         "packages/ice/legoesm/ice/fidelity/nemo_rheo_testcase_recipe.py"),))
+                         "packages/ice/legoesm/ice/fidelity/nemo_rheo_testcase_recipe.py"),),
+                       rev=MERGE_PARENT_COMMIT)
     rheo_par = par["legoesm.ice.fidelity.nemo_rheo_testcase_recipe"]
-    assert rheo_par.apply_si3_jpl1_ridging.__module__ != rheo_cur.apply_si3_jpl1_ridging.__module__ or (
-        rheo_par.apply_si3_jpl1_ridging is not rheo_cur.apply_si3_jpl1_ridging)
+    assert hasattr(rheo_par, "apply_si3_jpl1_ridging") and not hasattr(rheo_cur, "apply_si3_jpl1_ridging")
     spec = importlib.util.spec_from_file_location(
         "o6_gate", root / "scripts/validate/ocean_fidelity/testcases/nemo_si3_oracle_gate.py")
     gate = importlib.util.module_from_spec(spec)
@@ -1042,9 +1020,13 @@ def test_lane3_rheo_card_parent_vs_current_bit_identical():
     with netCDF4.Dataset(_RHEO_ROOT / "mesh_mask.nc") as ds:
         mesh = {n: np.asarray(ds[n][:]) for n in names}
     with netCDF4.Dataset(_RHEO_ROOT / "output.init_ice.nc") as ds:
-        sst_k = np.asarray(ds["sst"][0]) + C.T_freeze
-    rc, rp = rheo_cur.build_ice_rheo_card(frame, mesh, sst_k), rheo_par.build_ice_rheo_card(frame, mesh, sst_k)
+        sst_c = np.asarray(ds["sst"][0])
+    rc = rheo_cur.build_ice_rheo_card(frame, mesh, sst_c)
+    rp = rheo_par.build_ice_rheo_card(frame, mesh, sst_c + C.T_freeze)
     sc = rheo_cur.step_ice_rheo_card(rc, rc.initial_state, completed_steps=0)
     sp = rheo_par.step_ice_rheo_card(rp, rp.initial_state, completed_steps=0)
     for x, y in zip(jax.tree_util.tree_leaves(sc), jax.tree_util.tree_leaves(sp)):
-        np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+        np.testing.assert_array_equal(_bits(x), _bits(y))
+    planted = rc._replace(ridging_config=rc.ridging_config._replace(rn_murdg=rc.ridging_config.rn_murdg * (1 + 1e-10)))
+    sx = rheo_cur.step_ice_rheo_card(planted, planted.initial_state, completed_steps=0)
+    assert not np.array_equal(_bits(sx.contents), _bits(sc.contents))

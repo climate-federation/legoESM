@@ -17,12 +17,11 @@ from legoesm.ice.dynamics import si3_cgrid_deformation
 from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
     _step_ice_rheo_card_impl,
     build_ice_rheo_card,
+    ice_rheo_frame_contents,
+    ridge_ice_rheo,
     step_ice_rheo_card,
 )
-from legoesm.ice.ridging import SI3JPL1RidgingState, apply_si3_jpl1_ridging
 from legoesm.ice.transport import SI3_PRATHER_MOMENT_NAMES, SI3PratherMoments
-
-from legoesm import constants
 
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")
 HERE = Path(__file__).resolve().parent
@@ -109,8 +108,8 @@ def run_ridging_regime_scan(
     with netCDF4.Dataset(root / "mesh_mask.nc") as dataset:
         mesh = {name: np.asarray(dataset[name][:]) for name in gate.MESH_FIELDS}
     with netCDF4.Dataset(root / "output.init_ice.nc") as dataset:
-        ocean_temperature_k = np.asarray(dataset["sst"][0]) + constants.T_freeze
-    card = build_ice_rheo_card(current, mesh, ocean_temperature_k)
+        sst_m = np.asarray(dataset["sst"][0])
+    card = build_ice_rheo_card(current, mesh, sst_m)
     rows: list[dict[str, object]] = []
     selected_step: int | None = None
     first_excessive_removal_step: int | None = None
@@ -275,47 +274,34 @@ def _active_ridging_projection(card, frame: dict[str, np.ndarray], next_frame):
     divergence, deformation = si3_cgrid_deformation(
         dynamics, forcing, card.metrics, card.dynamics_config
     )
-    state = SI3JPL1RidgingState(
-        ice_area=jnp.asarray(frame["a_i"][..., 0]),
-        open_water_area=1.0 - jnp.asarray(frame["a_i"][..., 0]),
-        ice_volume=jnp.asarray(frame["v_i"][..., 0]),
-        snow_volume=jnp.asarray(frame["v_s"][..., 0]),
-        age_content=jnp.asarray(frame["oa_i"][..., 0]),
-        pond_area=jnp.asarray(frame["a_ip"][..., 0]),
-        pond_volume=jnp.asarray(frame["v_ip"][..., 0]),
-        pond_lid_volume=jnp.asarray(frame["v_il"][..., 0]),
-        snow_enthalpy=jnp.asarray(frame["e_s"][..., :, 0]),
-        ice_enthalpy=jnp.asarray(frame["e_i"][..., :, 0]),
-        ice_salt_content=jnp.asarray(frame["szv_i"][..., :, 0]),
-    )
-    result, losses = apply_si3_jpl1_ridging(
-        state, divergence, deformation, card.dt_s, config=card.ridging_config
-    )
+    area = jnp.asarray(frame["a_i"][..., 0])
+    open_water = 1.0 - area
+    out = ridge_ice_rheo(card, ice_rheo_frame_contents(frame), open_water, divergence, deformation)
     halo = gate._HALO_WIDTH
     interior = (slice(halo, -halo), slice(halo, -halo))
-    iterations = np.asarray(losses.iterations)[interior]
+    iterations = np.asarray(out.n_shifts)[interior]
     unique, counts = np.unique(iterations, return_counts=True)
     return {
         "scope": "isolated arm on oracle entry state before Prather advection",
         "max_abs_ice_area_change": float(
-            np.max(np.abs(np.asarray(result.ice_area - state.ice_area)[interior]))
+            np.max(np.abs(np.asarray(out.state.a_i[..., 0] - area)[interior]))
         ),
         "max_abs_open_water_change": float(
-            np.max(np.abs(np.asarray(result.open_water_area - state.open_water_area)[interior]))
+            np.max(np.abs(np.asarray(out.state.ato_i - open_water)[interior]))
         ),
-        "minimum_open_water_before": float(np.min(np.asarray(state.open_water_area)[interior])),
-        "minimum_open_water_after": float(np.min(np.asarray(result.open_water_area)[interior])),
-        "minimum_pond_lid_before": float(np.min(np.asarray(state.pond_lid_volume)[interior])),
-        "minimum_pond_lid_after": float(np.min(np.asarray(result.pond_lid_volume)[interior])),
+        "minimum_open_water_before": float(np.min(np.asarray(open_water)[interior])),
+        "minimum_open_water_after": float(np.min(np.asarray(out.state.ato_i)[interior])),
+        "minimum_pond_lid_before": float(np.min(np.asarray(frame["v_il"][..., 0])[interior])),
+        "minimum_pond_lid_after": float(np.min(np.asarray(out.state.v_il[..., 0])[interior])),
         "iteration_population": {
             str(int(value)): int(count) for value, count in zip(unique, counts, strict=True)
         },
         "max_iterations": int(np.max(iterations)),
         "excessive_removal_cell_count": int(
-            np.count_nonzero(np.asarray(losses.excessive_removal_clamp)[interior])
+            np.count_nonzero(np.asarray(out.excess_clamp)[interior])
         ),
         "open_water_correction_cell_count": int(
-            np.count_nonzero(np.asarray(losses.open_water_correction)[interior])
+            np.count_nonzero(np.asarray(out.opening_fix)[interior])
         ),
     }
 
@@ -438,8 +424,8 @@ def run_full_walk(
     with netCDF4.Dataset(root / "mesh_mask.nc") as dataset:
         mesh = {name: np.asarray(dataset[name][:]) for name in gate.MESH_FIELDS}
     with netCDF4.Dataset(root / "output.init_ice.nc") as dataset:
-        ocean_temperature_k = np.asarray(dataset["sst"][0]) + constants.T_freeze
-    card = build_ice_rheo_card(entry, mesh, ocean_temperature_k)
+        sst_m = np.asarray(dataset["sst"][0])
+    card = build_ice_rheo_card(entry, mesh, sst_m)
     entry_restart = restart_root / (
         f"ICE_RHEO_OMIP_L3_{_ACTIVE_ENTRY_RESTART_STEP:08d}_restart_ice.nc"
     )
@@ -584,8 +570,8 @@ def run_active_window(
     with netCDF4.Dataset(root / "mesh_mask.nc") as dataset:
         mesh = {name: np.asarray(dataset[name][:]) for name in gate.MESH_FIELDS}
     with netCDF4.Dataset(root / "output.init_ice.nc") as dataset:
-        ocean_temperature_k = np.asarray(dataset["sst"][0]) + constants.T_freeze
-    card = build_ice_rheo_card(entry, mesh, ocean_temperature_k)
+        sst_m = np.asarray(dataset["sst"][0])
+    card = build_ice_rheo_card(entry, mesh, sst_m)
     entry_restart = restart_root / (
         f"ICE_RHEO_OMIP_L3_{_ACTIVE_ENTRY_RESTART_STEP:08d}_restart_ice.nc"
     )
@@ -742,8 +728,8 @@ def run_sweep(root: Path, *, last_frame: int = LAST_ENTRY_FRAME) -> dict[str, ob
     with netCDF4.Dataset(root / "mesh_mask.nc") as dataset:
         mesh = {name: np.asarray(dataset[name][:]) for name in gate.MESH_FIELDS}
     with netCDF4.Dataset(root / "output.init_ice.nc") as dataset:
-        ocean_temperature_k = np.asarray(dataset["sst"][0]) + constants.T_freeze
-    card = build_ice_rheo_card(frame1, mesh, ocean_temperature_k)
+        sst_m = np.asarray(dataset["sst"][0])
+    card = build_ice_rheo_card(frame1, mesh, sst_m)
     state = card.initial_state
     boundaries: list[dict[str, object]] = []
     first_divergence: dict[str, object] | None = None

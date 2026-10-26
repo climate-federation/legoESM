@@ -3,22 +3,21 @@
 - Date: 2026-10-25. Lane `si3`, round 14, rung O6 (`docs/ice/fidelity/si3_ladder_design.md:226`).
 - Parent commit: `e8ee89ece8cb`. Model functions preregistered: `si3_ice_dyn_rdgrft` (ridging module) and `si3_ice_cor_dyn` (ITD module).
 - Status: committed BEFORE any O6 measurement. No NEMO array has been read for O6. The acquisition tool is NOT built this round.
+- Amended 2026-10-25, still before any O6 measurement: the deck is the unmodified production deck (DECISION 174, section 1).
 - Reference build cited: `ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/` (the production-deck record build of DECISION 165). Its `icedyn_rdgrft.f90`, `icecor.f90`, `iceitd.f90`, `icevar.f90` and `icedyn.f90` are byte-identical to `_O1_REF`, `_O1_REC`, `_O2_REF`, `_O2_REC`, `_O5_REF` and `_O7_REF`. `_O5_REC` differs (its observers), so it is not cited.
 
-## 1. Deck — PENDING USER DECISION
+## 1. Deck — DECISION 174: the unmodified production deck
 
-The design row says "ORCA2_SAS_ICE `dynALL`, thermodynamics off, production
-ridging and rafting restored". With `ln_icethd = F`, NEMO's ridging init
-overwrites the deck's porosity and snow/pond survival fractions
-(`icedyn_rdgrft.f90:1273-1276`: porosity 0, all survival fractions 1), so the
-seawater-trapping, snow-loss and pond-loss statements and their ocean fluxes
-would run with zero operands.
+The unmodified production `ORCA2_SAS_ICE` deck, thermodynamics on (the design
+row as amended by DECISION 174). With `ln_icethd = T`, `ice_dyn_rdgrft_init`
+keeps the deck's porosity `.3`, snow survival `.5` and pond survival `1`
+(its override at `icedyn_rdgrft.f90:1273-1276` runs only when
+`ln_icethd = F`), so the seawater-trapping, snow-loss and pond-loss
+statements and their ocean fluxes run with live operands. The `ln_icethd = F`
+overlay is not acquired.
 
-1. Unmodified production `ORCA2_SAS_ICE` deck (DECISION 165 precedent): porosity `.3`, snow survival `.5`, pond survival `1`; every O6 statement runs with live operands. **Pick.**
-2. The design row's overlay: `ln_icethd = F` on the production deck (O5's overlay with `ln_ridging = ln_rafting = T`).
-
-Everything else is the production deck, read from the resolved
-`output.namelist.ice`/`ocean.output`, never the deck text. One MPI rank.
+Every value is read from the resolved `output.namelist.ice`/`ocean.output`,
+never the deck text. One MPI rank.
 
 ## 2. Steps and ranks
 
@@ -78,7 +77,7 @@ in the model must turn P1/P4 red.
 
 | choice | status |
 |---|---|
-| deck (section 1) | PENDING (DECISION_NEEDED, pick 1) |
+| deck (section 1) | ASKED: DECISION 174, unmodified production deck |
 | `nn_itend = 2`, one rank | UNASKED, following DECISION 165; offered for revert |
 | R2 passes {1, 2, last} | UNASKED; offered for revert |
 | cited build `ORCA2_SAS_ICE_O7_REC` | UNASKED, mechanical (byte-identical alternatives) |

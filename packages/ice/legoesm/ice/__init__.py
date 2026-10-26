@@ -61,11 +61,7 @@ from legoesm.ice.rheology import (
     vp_stress,
 )
 from legoesm.ice.ridging import (
-    SI3JPL1RidgingConfig,
-    SI3JPL1RidgingLosses,
-    SI3JPL1RidgingState,
     apply_ridging,
-    apply_si3_jpl1_ridging,
     participation_weights,
 )
 from legoesm.ice.sea_ice import (
@@ -160,11 +156,7 @@ __all__ = [
     "SaltBudgetResult",
     # Ridging
     "apply_ridging",
-    "apply_si3_jpl1_ridging",
     "participation_weights",
-    "SI3JPL1RidgingConfig",
-    "SI3JPL1RidgingLosses",
-    "SI3JPL1RidgingState",
     # Shortwave
     "compute_ice_sw",
     "delta_eddington_albedo",

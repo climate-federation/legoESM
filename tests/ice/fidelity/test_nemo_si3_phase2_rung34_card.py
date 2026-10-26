@@ -19,8 +19,6 @@ from legoesm.ice.fidelity.nemo_rheo_testcase_recipe import (
     validate_ice_rheo_card,
 )
 
-from legoesm import constants
-
 _ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l3/ice_rheo/final")
 _ORACLE_GATE = Path(__file__).parents[3] / (
     "scripts/validate/ocean_fidelity/testcases/nemo_si3_oracle_gate.py"
@@ -67,8 +65,8 @@ def oracle_card():
     with netCDF4.Dataset(_ROOT / "mesh_mask.nc") as dataset:
         mesh = {name: np.asarray(dataset[name][:]) for name in names}
     with netCDF4.Dataset(_ROOT / "output.init_ice.nc") as dataset:
-        ocean_temperature_k = np.asarray(dataset["sst"][0]) + constants.T_freeze
-    return build_ice_rheo_card(frame, mesh, ocean_temperature_k), frame, mesh
+        sst_m = np.asarray(dataset["sst"][0])
+    return build_ice_rheo_card(frame, mesh, sst_m), frame, mesh
 
 
 def _mesh_xy(value: np.ndarray) -> np.ndarray:

@@ -480,6 +480,7 @@ def _parent_lane3():
             ("legoesm.ice.dynamics", "packages/ice/legoesm/ice/dynamics.py"),
             ("legoesm.ice.fidelity.nemo_adv2d_rhg_testcase_recipe",
              "packages/ice/legoesm/ice/fidelity/nemo_adv2d_rhg_testcase_recipe.py"),
+            ("legoesm.ice.ridging", "packages/ice/legoesm/ice/ridging.py"),
             ("legoesm.ice.fidelity.nemo_rheo_testcase_recipe",
              "packages/ice/legoesm/ice/fidelity/nemo_rheo_testcase_recipe.py"),
         )
@@ -525,9 +526,11 @@ def test_lane3_rheo_card_parent_vs_current_bit_identical():
     with netCDF4.Dataset(_RHEO_ROOT / "mesh_mask.nc") as ds:
         mesh = {name: np.asarray(ds[name][:]) for name in names}
     with netCDF4.Dataset(_RHEO_ROOT / "output.init_ice.nc") as ds:
-        sst_k = np.asarray(ds["sst"][0]) + constants.T_freeze
+        sst_c = np.asarray(ds["sst"][0])
     rheo_par = parent["legoesm.ice.fidelity.nemo_rheo_testcase_recipe"]
-    rc, rp = rheo_cur.build_ice_rheo_card(frame, mesh, sst_k), rheo_par.build_ice_rheo_card(frame, mesh, sst_k)
+    # DECISION 177: the current card ridges through the O6 kernels and takes SST in degC.
+    rc = rheo_cur.build_ice_rheo_card(frame, mesh, sst_c)
+    rp = rheo_par.build_ice_rheo_card(frame, mesh, sst_c + constants.T_freeze)
     sc = rheo_cur.step_ice_rheo_card(rc, rc.initial_state, completed_steps=0)
     sp = rheo_par.step_ice_rheo_card(rp, rp.initial_state, completed_steps=0)
     _assert_trees_identical(sc, sp, "ICE_RHEO step 1")

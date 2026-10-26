@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -11328,6 +11329,41 @@ _repin('tests/ocean/fidelity/test_nemo_si3_o8_o12_master_scorer.py:1-932', [
     '"""Direct unit and master-record tests for the SI3 O8--O12 0-ULP scoring driver."""',
     'assert calls == ["_cumulative_remap", "_cumulative_remap"]', 932])
 
+# DECISION 177 deleted lane 3's own jpl=1 ridging arm and its tests (merged into
+# the O6 kernels).  Citations of that code resolve at the last commit that had it.
+_D177_PARENT = "6c53813384"
+
+
+def _pin_at(key: str, commit: str) -> None:
+    value = CITATION_MAP[key]
+    CITATION_MAP[key] = ({**value, "at": commit} if isinstance(value, dict)
+                         else {"anchors": value, "at": commit})
+
+
+# The earlier O6 receipt sections describe the tree before the merge; their
+# citations of code the merge moved are pinned to that commit as well.
+for _key in (
+    'packages/ice/legoesm/ice/ridging.py:84-100',
+    'tests/ice/fidelity/test_si3_jpl1_ridging.py:221-250',
+    'tests/ice/unit/test_si3_o6_rdgrft_cor.py:912',
+    'packages/ice/legoesm/ice/__init__.py:199-225',
+    'packages/ice/legoesm/ice/__init__.py:227-251',
+    'packages/ice/legoesm/ice/ridging.py:1245',
+    'packages/ice/legoesm/ice/ridging.py:1015',
+    'packages/ice/legoesm/ice/ridging.py:1088',
+    'tests/ice/unit/test_si3_o6_rdgrft_cor.py:457',
+    'tests/ice/unit/test_si3_o6_rdgrft_cor.py:480',
+    'tests/ice/unit/test_si3_o6_rdgrft_cor.py:770',
+    'tests/ice/unit/test_si3_o6_rdgrft_cor.py:789',
+    'tests/ice/unit/test_si3_o6_rdgrft_cor.py:806',
+    'tests/ice/unit/test_si3_o6_rdgrft_cor.py:817',
+    'tests/ice/unit/test_si3_o6_rdgrft_cor.py:899',
+    'tests/ice/unit/test_si3_o6_rdgrft_cor.py:505',
+    'tests/ice/unit/test_si3_o6_rdgrft_cor.py:548',
+    'tests/ice/unit/test_si3_o6_rdgrft_cor.py:568',
+):
+    _pin_at(_key, _D177_PARENT)
+
 DEFAULT_RECEIPT = (
     REPO / "docs/ocean/fidelity/testcases"
     / "nemo_testcases_l2_gyre_phase3_round8_receipt.md")
@@ -11714,7 +11750,10 @@ def check(citation: str, value, shift: int = 0, shift_last_only: bool = False,
     """
     path_key, spec = citation.rsplit(":", 1)
     path = FILES.get(path_key)
-    if path is None or not path.is_file():
+    # {"at": <commit>} pins a citation of code a later decision deleted to the
+    # last commit that had it; the receipt's claim is about that tree.
+    at = value.get("at") if isinstance(value, dict) else None
+    if path is None or not (at or path.is_file()):
         return {"citation": citation, "status": "UNRESOLVED",
                 "detail": f"no readable file for {path_key!r}"}
     routine = None
@@ -11728,7 +11767,15 @@ def check(citation: str, value, shift: int = 0, shift_last_only: bool = False,
     except ValueError as error:
         return {"citation": citation, "status": "BAD-CITATION",
                 "detail": str(error)}
-    body = path.read_text(errors="replace").splitlines()
+    if at:
+        shown = subprocess.run(["git", "show", f"{at}:{path.relative_to(REPO)}"], cwd=REPO,
+                               capture_output=True, text=True, errors="replace")
+        if shown.returncode != 0:
+            return {"citation": citation, "status": "UNRESOLVED",
+                    "detail": f"{path_key!r} not in commit {at}"}
+        body = shown.stdout.splitlines()
+    else:
+        body = path.read_text(errors="replace").splitlines()
 
     if extent is None and len(numbers) > 1:
         return {"citation": citation, "status": "EXTENT-NOT-PINNED",
@@ -11832,6 +11879,12 @@ def self_test() -> list[dict]:
                 CITATION_MAP["BLD/ppsrc/nemo/dynadv_up3.f90:211,317,355"][-2],
                 3])),
     ]
+    # a commit-pinned citation of deleted code is still line-exact at that commit
+    pinned = CITATION_MAP["tests/ice/fidelity/test_si3_jpl1_ridging.py:221-250"]
+    planted.append(("commit-pinned endpoint shifted",
+                    check("tests/ice/fidelity/test_si3_jpl1_ridging.py:221-250", pinned, shift=2)))
+    planted.append(("commit pin removed from deleted code",
+                    check("tests/ice/fidelity/test_si3_jpl1_ridging.py:221-250", pinned["anchors"])))
     # and the unplanted entry must still PASS, or the controls prove nothing
     baseline = check("stprk3_stg.F90:309-334", good)
     comma_baseline = check(
