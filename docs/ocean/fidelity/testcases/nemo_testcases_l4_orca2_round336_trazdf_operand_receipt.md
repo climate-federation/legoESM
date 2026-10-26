@@ -115,8 +115,8 @@ that census. The extended same-program proof reports 407 identical ppsrc and
 units. Both in-place and retained `--admit-existing` routes were rechecked
 against each run's manifest: the producer must be a local ancestor and the
 binary must match the manifest SHA-256; producer and binary plants fired on
-both routes. The refreshed preflight log digest is recorded after the final
-preflight below.
+both routes. The refreshed preflight passes and its log SHA-256 is
+`61d8076d4b07db37c3751fbf3d958746f751621d997c2917a47e67a7bab3b0a5`.
 
 Operator command:
 
