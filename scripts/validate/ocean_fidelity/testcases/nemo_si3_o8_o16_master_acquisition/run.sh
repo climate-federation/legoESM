@@ -8,6 +8,7 @@ export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 
 readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
+readonly NEMO_SOURCE_ROOT=${NEMO_SOURCE_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly SOURCE_CFG=ORCA2_SAS_ICE
 readonly BASE_BLD=${BASE_BLD:-$NEMO_ROOT/cfgs/ORCA2_SAS_ICE_O7_REF/BLD}
 readonly REF_CFG=${REF_CFG:-ORCA2_SAS_ICE_O8O16_REF}
@@ -36,7 +37,7 @@ readonly PROD=$NEMO_ROOT/cfgs/$SOURCE_CFG/EXPREF
 readonly SHARED=$NEMO_ROOT/cfgs/SHARED
 readonly REF_ROOT=$NEMO_ROOT/cfgs/$REF_CFG
 readonly REC_ROOT=$NEMO_ROOT/cfgs/$REC_CFG
-readonly UNITS=(icestp icethd icethd_do icethd_da icethd_sal icethd_pnd icethd_zdf_bl99)
+readonly UNITS=(icestp icethd icethd_do icethd_da icethd_sal icethd_pnd icethd_zdf_bl99 icealb)
 readonly MASTER_BYTES=$($PY "$GATE" --size | $PY -c 'import json,sys; print(json.load(sys.stdin)["master_bytes_worst_case"])')
 export O8O16_GATE=$GATE O8O16_PY=$PY
 
@@ -131,8 +132,17 @@ patch_real_sources() {
   local out=$1 unit
   mkdir -p "$out"
   for unit in "${UNITS[@]}"; do
-    cp "$BASE_BLD/ppsrc/nemo/$unit.f90" "$out/$unit.F90"
+    cp "$NEMO_SOURCE_ROOT/src/ICE/$unit.F90" "$out/$unit.F90"
     patch --batch --fuzz=0 "$out/$unit.F90" "$here/${unit}_o8_o16.patch" >/dev/null
+  done
+}
+
+preprocess_sources() {
+  local source=$1 out=$2 unit
+  mkdir -p "$out"
+  for unit in "${UNITS[@]}"; do
+    cpp -Dkey_nosignedzero -P -traditional -Dkey_si3 -Dkey_linssh -Dkey_vco_1d3d -Dkey_RK3 \
+      -I"$BASE_BLD/../WORK" "$source/$unit.F90" > "$out/$unit.f90"
   done
 }
 
@@ -143,18 +153,20 @@ import sys
 from pathlib import Path
 d=Path(sys.argv[1]); plant=sys.argv[2]
 checks={
-'icethd_do.F90':[('CALL o8o16_frazil(1','fraz_frac(:,:) = 0._wp'),('fraz_frac(:,:) = 0._wp','CALL o8o16_frazil(2')],
-'icethd.F90':[('CALL o8o16_category(3','CALL ice_thd_zdf'),('CALL ice_thd_zdf','CALL o8o16_category(4'),("CALL ice_cons2D  (1, 'icethd'",'CALL o8o16_global(10)'),('CALL o8o16_global(10)','CALL ice_thd_pnd'),('CALL ice_thd_pnd','CALL o8o16_global(11)'),('CALL ice_itd_rem','CALL o8o16_global(12)'),('CALL ice_thd_do','CALL o8o16_global(13)'),('CALL ice_cor( kt , 2 )','CALL o8o16_global(14)')],
-'icethd_zdf_bl99.F90':[('END DO  ! End of the do while iterative procedure','CALL o8o16_picard')],
-'icethd_sal.F90':[('IF( nn_icesal /= 4 )','CALL o8o16_salinity_config')],
-'icethd_pnd.F90':[('IF( ioptio /= 1 )','CALL o8o16_pond_config')],
-'icestp.F90':[('CALL ice_thd','CALL o8o16_update(18)'),('CALL o8o16_update(18)','CALL ice_var_glo2eqv'),('CALL ice_var_agg','CALL o8o16_update(15)'),('CALL o8o16_update(15)','CALL ice_update_flx'),('CALL ice_update_flx','CALL o8o16_update(16)')],
+'icethd_do.f90':[('CALL o8o16_frazil(1','fraz_frac(:,:) = 0._wp'),('fraz_frac(:,:) = 0._wp','CALL o8o16_frazil(2')],
+'icethd.f90':[('CALL o8o16_category(3','CALL ice_thd_zdf'),('CALL ice_thd_zdf','CALL o8o16_category(4'),("CALL ice_cons2D  (1, 'icethd'",'CALL o8o16_global(10)'),('CALL o8o16_global(10)','CALL ice_thd_pnd'),('CALL ice_thd_pnd','CALL o8o16_global(11)'),('CALL ice_itd_rem','CALL o8o16_global(12)'),('CALL ice_thd_do','CALL o8o16_global(13)'),('CALL ice_cor( kt , 2 )','CALL o8o16_global(14)')],
+'icethd_zdf_bl99.f90':[('END DO  ! End of the do while iterative procedure','CALL o8o16_picard')],
+'icethd_da.f90':[('READ(numnam_ice_cfg','CALL o8o16_da_config')],
+'icethd_sal.f90':[('IF( nn_icesal /= 4 )','CALL o8o16_salinity_config')],
+'icethd_pnd.f90':[('IF( ioptio /= 1 )','CALL o8o16_pond_config')],
+'icestp.f90':[('CALL ice_thd','CALL o8o16_update(18)'),('CALL o8o16_update(18)','CALL ice_var_glo2eqv'),('CALL ice_var_agg','CALL o8o16_update(15)'),('CALL o8o16_update(15)','CALL ice_update_flx'),('CALL ice_update_flx','CALL o8o16_update(16)'),('CALL o8o16_tau(19','CALL ice_update_tau'),('CALL ice_update_tau','CALL o8o16_tau(20')],
+'icealb.f90':[('READ(numnam_ice_cfg','CALL o8o16_albedo_config')],
 }
 for file,pairs in checks.items():
     text=(d/file).read_text()
     for i,(a,b) in enumerate(pairs):
         ai=text.find(a); bi=text.find(b,ai+1)
-        if plant == 'misplace' and file=='icethd_do.F90' and i==0: ai=bi+1
+        if plant == 'misplace' and file=='icethd_do.f90' and i==0: ai=bi+1
         if ai<0 or bi<0 or ai>=bi: raise SystemExit(f'STATUS PLANT-FIRED: placement {file}: {a} !< {b}')
 print('PASS_REAL_PPSRC_PLACEMENT')
 PY
@@ -174,15 +186,15 @@ compile_real_bounds_fixture() {
   mpif90 -c -cpp "${flags[@]}" -fcheck=bounds -I"$BASE_BLD/inc" -J"$scratch/bounds_mod" \
     "$WRITER" -o "$scratch/bounds_obj/o8_o16_master_writer.o"
   for unit in "${UNITS[@]}"; do
-    mpif90 -c -cpp "${flags[@]}" -fcheck=bounds -I"$scratch/bounds_mod" -I"$BASE_BLD/inc" \
-      -J"$scratch/bounds_mod" "$scratch/patched/$unit.F90" -o "$scratch/bounds_obj/$unit.o"
+    mpif90 -c "${flags[@]}" -fcheck=bounds -I"$scratch/bounds_mod" -I"$BASE_BLD/inc" \
+      -J"$scratch/bounds_mod" "$scratch/patched_ppsrc/$unit.f90" -o "$scratch/bounds_obj/$unit.o"
   done
   mpif90 -c -cpp "${flags[@]}" -fcheck=bounds -I"$scratch/bounds_mod" -I"$BASE_BLD/inc" \
     -J"$scratch/bounds_mod" "$here/real_bounds_driver.F90" -o "$scratch/bounds_obj/real_bounds_driver.o"
   local base_objects=()
   for obj in "$BASE_BLD"/obj/*.o; do
     case $(basename "$obj") in
-      nemo.o|icestp.o|icethd.o|icethd_do.o|icethd_da.o|icethd_sal.o|icethd_pnd.o|icethd_zdf_bl99.o) ;;
+      nemo.o|icestp.o|icethd.o|icethd_do.o|icethd_da.o|icethd_sal.o|icethd_pnd.o|icethd_zdf_bl99.o|icealb.o) ;;
       *) base_objects+=("$obj") ;;
     esac
   done
@@ -193,7 +205,8 @@ compile_real_bounds_fixture() {
     "$scratch/bounds_obj/icestp.o" "$scratch/bounds_obj/icethd.o" \
     "$scratch/bounds_obj/icethd_do.o" "$scratch/bounds_obj/icethd_da.o" \
     "$scratch/bounds_obj/icethd_sal.o" "$scratch/bounds_obj/icethd_pnd.o" \
-    "$scratch/bounds_obj/icethd_zdf_bl99.o" "${base_objects[@]}" $link_flags
+    "$scratch/bounds_obj/icethd_zdf_bl99.o" "$scratch/bounds_obj/icealb.o" \
+    "${base_objects[@]}" $link_flags
   (cd "$run" && "$scratch/real_bounds_fixture")
   "$PY" - "$run/o8_o16_master_records" <<'PY'
 import importlib.util,sys
@@ -202,10 +215,18 @@ import numpy as np
 root=Path(sys.argv[1]); gate=Path(__import__('os').environ['O8O16_GATE'])
 spec=importlib.util.spec_from_file_location('bounds_gate',gate); mod=importlib.util.module_from_spec(spec)
 sys.modules[spec.name]=mod; spec.loader.exec_module(mod)
-r1=mod.read_master_record(root/mod.record_name(1,1)); r2=mod.read_master_record(root/mod.record_name(2,1))
+r1=mod.read_master_record(root/mod.record_name(1,1,rank=7)); r2=mod.read_master_record(root/mod.record_name(2,1,rank=7))
 assert np.signbit(r1['fields']['qlead'][0,0])
 assert np.unique(r1['fields']['qlead']).size > 2
 assert np.all(r2['fields']['ht_i_new']==0) and np.all(r2['fields']['fraz_frac']==0)
+records=[mod.read_master_record(p) for p in sorted(root.glob('*.bin'))]
+assert {r['meta']['kind'] for r in records} == set(mod.KINDS)
+assert len(records) == len(mod.KINDS)
+assert all(r['meta']['rank'] == 7 for r in records)
+k8=next(r for r in records if r['meta']['kind']==8)
+assert k8['scalars']['rn_beta']==0.9 and k8['scalars']['rn_dmin']==8.0
+k15=next(r for r in records if r['meta']['kind']==15)
+assert k15['scalars']['rn_alb_sdry']==0.85 and k15['scalars']['rn_alb_hpiv']==1.0
 print('PASS_REAL_PATCHED_WRITER_LAYOUT')
 PY
 }
@@ -224,15 +245,16 @@ from pathlib import Path
 p=Path(sys.argv[1]); text=p.read_text().replace(sys.argv[2],sys.argv[3]); p.unlink(); p.write_text(text)
 PY
   done
-  patch_real_sources "$expected"
+  patch_real_sources "$scratch/same_raw"
+  preprocess_sources "$scratch/same_raw" "$expected"
   mkdir -p "$scratch/same_mod"
   cp "$WRITER" "$new/ppsrc/nemo/o8_o16_master_writer.f90"
   mpif90 -c -cpp "${flags[@]}" -I"$BASE_BLD/inc" -J"$scratch/same_mod" \
     "$WRITER" -o "$new/obj/o8_o16_master_writer.o"
   for unit in "${UNITS[@]}"; do
     rm -f -- "$new/ppsrc/nemo/$unit.f90" "$new/obj/$unit.o"
-    cp "$expected/$unit.F90" "$new/ppsrc/nemo/$unit.f90"
-    mpif90 -c -cpp "${flags[@]}" -I"$scratch/same_mod" -I"$BASE_BLD/inc" \
+    cp "$expected/$unit.f90" "$new/ppsrc/nemo/$unit.f90"
+    mpif90 -c "${flags[@]}" -I"$scratch/same_mod" -I"$BASE_BLD/inc" \
       -J"$scratch/same_mod" "$new/ppsrc/nemo/$unit.f90" -o "$new/obj/$unit.o"
   done
   "$PY" "$GATE" --same-program "$new" --reference-bld "$BASE_BLD" --patch-dir "$here" \
@@ -245,6 +267,7 @@ PY
 }
 
 stub_driver_fixture() {
+  # O8O16_DRIVER_TRUNCATION_POINT: cutting run.sh here leaves this function unclosed.
   local scratch=$1 root=$scratch/stub_nemo_root bundles=$scratch/stub_bundles
   local evidence=$scratch/stub_evidence refused=$scratch/stub_refused fail_evidence=$scratch/stub_failure
   mkdir -p "$root/cfgs/$SOURCE_CFG/EXPREF" "$root/cfgs/SHARED" "$bundles/orca" "$bundles/sas"
@@ -257,13 +280,14 @@ stub_driver_fixture() {
   tar -czf "$bundles/sas.tar.gz" -C "$bundles/sas" .
   local orca_sha sas_sha; orca_sha=$(sha256sum "$bundles/orca.tar.gz"); orca_sha=${orca_sha%% *}
   sas_sha=$(sha256sum "$bundles/sas.tar.gz"); sas_sha=${sas_sha%% *}
-  local envs=(env O8O16_STUB_MODE=1 O8O16_SKIP_DRIVER_TEST=1 NEMO_ROOT="$root" BASE_BLD="$BASE_BLD" \
+  local envs=(env O8O16_DRIVER_FIXTURE_ACTIVE=1 NEMO_EXE_OVERRIDE="$STUB_NEMO" NEMO_ROOT="$root" \
+    NEMO_SOURCE_ROOT="$NEMO_SOURCE_ROOT" BASE_BLD="$BASE_BLD" \
     REF_CFG=STUB_O8O16_REF REC_CFG=STUB_O8O16_REC REFUSED_DIR="$refused" MIN_FREE_RAM_GB=1 \
     MIN_FREE_DISK_KB=1 ORCA2_BUNDLE="$bundles/orca.tar.gz" ORCA2_BUNDLE_SHA256="$orca_sha" \
     SAS_BUNDLE="$bundles/sas.tar.gz" SAS_BUNDLE_SHA256="$sas_sha")
   bash -n "$0"; bash -n "$STUB_NEMO"
-  cp "$STUB_NEMO" "$scratch/syntax_plant.sh"; printf '\nif [[ 1 == 1 ]]\n' >> "$scratch/syntax_plant.sh"
-  expect_refusal bash -n "$scratch/syntax_plant.sh"
+  awk '{print} /O8O16_DRIVER_TRUNCATION_POINT/ {exit}' "$0" > "$scratch/run_truncated.sh"
+  expect_refusal bash -n "$scratch/run_truncated.sh"
   "${envs[@]}" EVIDENCE="$evidence" "$0" --run
   "${envs[@]}" EVIDENCE="$evidence" "$0" --admit-existing
   expect_refusal "${envs[@]}" EVIDENCE="$evidence" "$0" --run
@@ -281,12 +305,6 @@ stub_driver_fixture() {
 run_preflight() {
   local scratch rung plant
   scratch=$(mktemp -d); ACTIVE_SCRATCH=$scratch
-  if [[ ${O8O16_SKIP_DRIVER_TEST:-0} == 1 ]]; then
-    bash -n "$0"; bash -n "$STUB_NEMO"
-    "$PY" "$GATE" --self-test > "$scratch/self.json"
-    printf 'PREFLIGHT_OK: stub-recursion control path\n'
-    rm -rf -- "$scratch"; ACTIVE_SCRATCH=""; return
-  fi
   printf 'PREFLIGHT 1/10 schema, sizes, signed zero, checksum and truncation plants\n'
   "$PY" "$GATE" --schema > "$scratch/schema.json"
   "$PY" "$GATE" --size > "$scratch/size.json"
@@ -303,9 +321,11 @@ run_preflight() {
   render_deck "$scratch/deck"; verify_namelists "$scratch/deck"
   expect_refusal verify_namelists "$scratch/deck" misspelled
   expect_refusal verify_namelists "$scratch/deck" misplaced
-  printf 'PREFLIGHT 4/10 real ppsrc patch placement and misplacement plant\n'
-  patch_real_sources "$scratch/patched"; placement_gate "$scratch/patched"
-  expect_refusal placement_gate "$scratch/patched" misplace
+  printf 'PREFLIGHT 4/10 original-source patch, real cpp ppsrc placement and misplacement plant\n'
+  patch_real_sources "$scratch/patched"
+  preprocess_sources "$scratch/patched" "$scratch/patched_ppsrc"
+  placement_gate "$scratch/patched_ppsrc"
+  expect_refusal placement_gate "$scratch/patched_ppsrc" misplace
   printf 'PREFLIGHT 5/10 production-flag writer/patched-source compile and FP census plant\n'
   "$PY" "$PASSIVITY" > "$scratch/passivity.json"
   printf 'PREFLIGHT 6/10 real writer and all patched units under production flags plus -fcheck=bounds\n'
@@ -321,9 +341,9 @@ run_preflight() {
   grep -q 'remaining_timeout' "$0"
   grep -q 'REFUSE_RETAINED' "$0"
   printf 'PREFLIGHT 10/10 generated driver: syntax/refusal/admission/retention/move-aside with 100-step stub NEMO\n'
-  stub_driver_fixture "$scratch"
-  if [[ -n "${PREFLIGHT_JSON:-}" ]]; then printf '{"status":"PREFLIGHT_OK","nemo_run":false,"plants":39}\n' > "$PREFLIGHT_JSON"; fi
-  printf 'PREFLIGHT_OK: no real NEMO integration was run; worst-case master %s bytes (122.37 GiB)\n' "$MASTER_BYTES"
+  if [[ ${O8O16_DRIVER_FIXTURE_ACTIVE:-0} == 0 ]]; then stub_driver_fixture "$scratch"; fi
+  if [[ -n "${PREFLIGHT_JSON:-}" ]]; then printf '{"status":"PREFLIGHT_OK","nemo_run":false,"plants":40}\n' > "$PREFLIGHT_JSON"; fi
+  printf 'PREFLIGHT_OK: no real NEMO integration was run; worst-case master %s bytes (124.23 GiB)\n' "$MASTER_BYTES"
   rm -rf -- "$scratch"; ACTIVE_SCRATCH=""
 }
 
@@ -346,7 +366,7 @@ if [[ "$mode" == --preflight-only ]]; then run_preflight; exit 0; fi
 if [[ "$mode" == --admit-existing ]]; then run_preflight; admit; printf 'ACQUISITION_ADMITTED: %s\n' "$EVIDENCE"; exit 0; fi
 
 # Operator-only --run begins here.
-[[ ${O8O16_STUB_MODE:-0} == 1 || -z $(git -C "$REPO" status --porcelain --untracked-files=all) ]] \
+[[ -z $(git -C "$REPO" status --porcelain --untracked-files=all) ]] \
   || refuse '--run requires a clean committed tree'
 readonly COMMIT=$(git -C "$REPO" rev-parse HEAD)
 RUN_STARTED_EPOCH=$(date +%s)
@@ -366,37 +386,52 @@ cp -L "$SHARED/namelist_ref" "$EVIDENCE/manifest/production_deck/namelist_ref"
 cp -L "$SHARED/namelist_ice_ref" "$EVIDENCE/manifest/production_deck/namelist_ice_ref"
 
 build_target() {
-  local cfg=$1 instrument=$2 root=$NEMO_ROOT/cfgs/$1 unit
+  local cfg=$1 instrument=$2 root=$NEMO_ROOT/cfgs/$1 unit name flags_text link_flags
   [[ "$cfg" == "$REF_CFG" ]] && CREATED_REF=1 || CREATED_REC=1
-  if [[ ${O8O16_STUB_MODE:-0} == 1 ]]; then
-    mkdir -p "$root/BLD/bin"
-    cp "$STUB_NEMO" "$root/BLD/bin/nemo.exe"; chmod +x "$root/BLD/bin/nemo.exe"
-    return
-  fi
-  (cd "$NEMO_ROOT" && ./makenemo -r "$SOURCE_CFG" -n "$cfg" -m conda-scalarmath del_key 'key_xios')
+  mkdir -p "$root"
+  cp -a "$BASE_BLD" "$root/BLD"
+  for name in arch_nemo.fcm cpp.fcm bld.cfg; do
+    "$PY" - "$root/BLD/$name" "$(basename "$(dirname "$BASE_BLD")")" "$cfg" <<'PY'
+import sys
+from pathlib import Path
+p=Path(sys.argv[1]); p.write_text(p.read_text().replace(sys.argv[2],sys.argv[3]))
+PY
+  done
   if [[ "$instrument" -eq 1 ]]; then
+    mkdir -p "$root/MY_SRC" "$root/BLD/ppsrc/nemo" "$root/BLD/obj" "$root/BLD/inc"
     for unit in "${UNITS[@]}"; do
-      cp "$BASE_BLD/ppsrc/nemo/$unit.f90" "$root/MY_SRC/$unit.F90"
+      cp "$NEMO_SOURCE_ROOT/src/ICE/$unit.F90" "$root/MY_SRC/$unit.F90"
       patch --batch --fuzz=0 "$root/MY_SRC/$unit.F90" "$here/${unit}_o8_o16.patch" >/dev/null
     done
     cp "$WRITER" "$root/MY_SRC/o8_o16_master_writer.F90"
-    (cd "$NEMO_ROOT" && ./makenemo -n "$cfg" -m conda-scalarmath del_key 'key_xios')
+    preprocess_sources "$root/MY_SRC" "$root/BLD/ppsrc/nemo"
+    cp "$WRITER" "$root/BLD/ppsrc/nemo/o8_o16_master_writer.f90"
+    flags_text=$(production_flags); read -r -a flags <<< "$flags_text"
+    mpif90 -c -cpp "${flags[@]}" -I"$root/BLD/inc" -J"$root/BLD/inc" \
+      "$WRITER" -o "$root/BLD/obj/o8_o16_master_writer.o"
+    for unit in "${UNITS[@]}"; do
+      mpif90 -c "${flags[@]}" -I"$root/BLD/inc" -I"$BASE_BLD/inc" -J"$root/BLD/inc" \
+        "$root/BLD/ppsrc/nemo/$unit.f90" -o "$root/BLD/obj/$unit.o"
+    done
+    link_flags=$(awk -F'= ' '/^export LDFLAGS = / {print $2; exit}' "$BASE_BLD/Makefile")
+    # shellcheck disable=SC2086
+    mpif90 -o "$root/BLD/bin/nemo.exe" "$root/BLD"/obj/*.o $link_flags
   fi
   [[ -x "$root/BLD/bin/nemo.exe" ]] || refuse "$cfg lacks nemo.exe"
+  if [[ -n "${NEMO_EXE_OVERRIDE:-}" ]]; then
+    cp "$NEMO_EXE_OVERRIDE" "$root/BLD/bin/nemo.exe"
+    chmod +x "$root/BLD/bin/nemo.exe"
+  fi
 }
 
 build_target "$REF_CFG" 0; build_target "$REC_CFG" 1
 mkdir -p "$EVIDENCE/manifest/expected_ppsrc"
-if [[ ${O8O16_STUB_MODE:-0} == 1 ]]; then
-  printf '{"status":"STUB_ONLY_REAL_SAME_PROGRAM_PROVED_IN_OUTER_PREFLIGHT"}\n' \
-    > "$EVIDENCE/manifest/same_program.json"
-else
-  patch_real_sources "$EVIDENCE/manifest/expected_ppsrc"
-  "$PY" "$GATE" --same-program "$REC_ROOT/BLD" --reference-bld "$REF_ROOT/BLD" \
-    --patch-dir "$here" --expected-ppsrc-dir "$EVIDENCE/manifest/expected_ppsrc" \
-    --new-cfg "$REC_CFG" --reference-cfg "$REF_CFG" \
-    > "$EVIDENCE/manifest/same_program.json"
-fi
+patch_real_sources "$EVIDENCE/manifest/expected_raw"
+preprocess_sources "$EVIDENCE/manifest/expected_raw" "$EVIDENCE/manifest/expected_ppsrc"
+"$PY" "$GATE" --same-program "$REC_ROOT/BLD" --reference-bld "$REF_ROOT/BLD" \
+  --patch-dir "$here" --expected-ppsrc-dir "$EVIDENCE/manifest/expected_ppsrc" \
+  --new-cfg "$REC_CFG" --reference-cfg "$REF_CFG" \
+  > "$EVIDENCE/manifest/same_program.json"
 cp "$REF_ROOT/BLD/bin/nemo.exe" "$EVIDENCE/manifest/binaries/nemo.ref"
 cp "$REC_ROOT/BLD/bin/nemo.exe" "$EVIDENCE/manifest/binaries/nemo.rec"
 
@@ -438,11 +473,7 @@ stage_run() {
   for f in "$EVIDENCE/input"/*.nc; do ln -s "$f" "$dir/$(basename "$f")"; done
   cp "$root/BLD/bin/nemo.exe" "$dir/nemo"
   local remaining; remaining=$(remaining_timeout)
-  if [[ ${O8O16_STUB_MODE:-0} == 1 ]]; then
-    (cd "$dir" && printf 'RUN_STARTED\n' > run.user.time.log && timeout "$remaining" ./nemo > run.user.stdout.log 2>&1 && printf 'STUB_RC=0\nRUN DONE\n' >> run.user.time.log)
-  else
-    (cd "$dir" && printf 'RUN_STARTED\n' > run.user.time.log && timeout "$remaining" mpirun -np 1 --oversubscribe ./nemo > run.user.stdout.log 2>&1 && printf 'MPIRUN_RC=0\nRUN DONE\n' >> run.user.time.log)
-  fi
+  (cd "$dir" && printf 'RUN_STARTED\n' > run.user.time.log && timeout "$remaining" mpirun -np 1 --oversubscribe ./nemo > run.user.stdout.log 2>&1 && printf 'MPIRUN_RC=0\nRUN DONE\n' >> run.user.time.log)
   ! grep -Eiq 'E[[:space:]]+R[[:space:]]+R[[:space:]]+O[[:space:]]+R|ABORT' "$dir/ocean.output" "$dir/run.user.stdout.log" || refuse "fatal token in $dir"
   touch "$dir/RUN_COMPLETE"
 }

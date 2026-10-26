@@ -25,6 +25,7 @@ UNITS = {
     "icethd_sal": ("__icethd_sal_MOD_ice_thd_sal", "sz_i_1d(1,1) = sz_i_1d(1,1) + 1._wp"),
     "icethd_pnd": ("__icethd_pnd_MOD_ice_thd_pnd", "a_ip(1,1,1) = a_ip(1,1,1) + 1._wp"),
     "icethd_zdf_bl99": ("__icethd_zdf_bl99_MOD_ice_thd_zdf_bl99", "t_i_1d(1,1) = t_i_1d(1,1) + 1._wp"),
+    "icealb": ("__icealb_MOD_ice_alb", "palb_ice(1,1,1) = palb_ice(1,1,1) + 1._wp"),
 }
 
 
@@ -62,6 +63,22 @@ def _plant_pond(text: str, statement: str) -> str:
     return text.replace(marker, "      " + statement + "\n" + marker, 1)
 
 
+def _plant_icealb(text: str, statement: str) -> str:
+    marker = "      IF( ln_timing )   CALL timing_start('icealb')"
+    if marker not in text:
+        raise ValueError("albedo routine executable marker absent")
+    return text.replace(marker, "      " + statement + "\n" + marker, 1)
+
+
+def _preprocess(source: Path, destination: Path, build: Path, env: dict[str, str]) -> None:
+    with destination.open("w") as stream:
+        subprocess.run(
+            ["cpp", "-Dkey_nosignedzero", "-P", "-traditional", "-Dkey_si3",
+             "-Dkey_linssh", "-Dkey_vco_1d3d", "-Dkey_RK3", f"-I{build.parent / 'WORK'}",
+             str(source)], check=True, env=env, stdout=stream, text=True,
+        )
+
+
 def census(build: Path = BUILD, toolchain: Path = TOOLCHAIN) -> dict:
     flags = _flags(build)
     report = {"flags": flags, "units": {}}
@@ -74,29 +91,33 @@ def census(build: Path = BUILD, toolchain: Path = TOOLCHAIN) -> dict:
             check=True, env=env, capture_output=True, text=True,
         )
         for unit, (routine, plant_statement) in UNITS.items():
-            original = build / "ppsrc/nemo" / f"{unit}.f90"
+            original_raw = NEMO / "src/ICE" / f"{unit}.F90"
+            patched_raw = tmp / f"{unit}_instrumented.F90"
+            _patched(original_raw, HERE / f"{unit}_o8_o16.patch", patched_raw)
+            original = tmp / f"{unit}_baseline.f90"
             patched = tmp / f"{unit}_instrumented.f90"
-            _patched(original, HERE / f"{unit}_o8_o16.patch", patched)
+            _preprocess(original_raw, original, build, env)
+            _preprocess(patched_raw, patched, build, env)
             planted = tmp / f"{unit}_plant.f90"
             if unit == "icethd_sal":
                 plant_text = _plant_salinity(patched.read_text(), plant_statement)
             elif unit == "icethd_pnd":
                 plant_text = _plant_pond(patched.read_text(), plant_statement)
+            elif unit == "icealb":
+                plant_text = _plant_icealb(patched.read_text(), plant_statement)
             else:
                 plant_text = _plant(patched.read_text(), plant_statement)
             planted.write_text(plant_text)
-            baseline = tmp / f"{unit}_baseline.f90"
-            baseline.write_bytes(original.read_bytes())
             # Local compilation adds the writer .mod directory for USE resolution.
             def compile_local(src: Path) -> Path:
                 obj = src.with_suffix(".o")
                 subprocess.run(
-                    ["mpif90", "-c", "-cpp", *flags, f"-I{tmp}", f"-I{build / 'inc'}",
+                    ["mpif90", "-c", *flags, f"-I{tmp}", f"-I{build / 'inc'}",
                      f"-J{tmp}", str(src), "-o", str(obj)], check=True, env=env,
                     capture_output=True, text=True,
                 )
                 return obj
-            plain = compile_local(baseline)
+            plain = compile_local(original)
             observed = compile_local(patched)
             plant = compile_local(planted)
             a, b, c = fp_counts(plain), fp_counts(observed), fp_counts(plant)
@@ -116,7 +137,7 @@ def census(build: Path = BUILD, toolchain: Path = TOOLCHAIN) -> dict:
                 "instrumented_fp_total": sum(b.get(routine, {}).values()),
                 "differing_mnemonics": diffs,
                 "plant_fired": plant_fired,
-                "source_sha256": hashlib.sha256(original.read_bytes()).hexdigest(),
+                "source_sha256": hashlib.sha256(original_raw.read_bytes()).hexdigest(),
                 "passive": total > 0 and not diffs and plant_fired,
             }
     report["pass"] = all(row["passive"] for row in report["units"].values())

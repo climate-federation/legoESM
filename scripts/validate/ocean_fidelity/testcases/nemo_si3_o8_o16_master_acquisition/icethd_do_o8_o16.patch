@@ -1,14 +1,14 @@
 --- icethd_do.F90
 +++ icethd_do.F90
-@@ -34,0 +35,3 @@
+@@ -31,0 +32,3 @@
 +! O8O16_OBSERVER_BEGIN
 +   USE o8_o16_master_writer, ONLY : o8o16_frazil
 +! O8O16_OBSERVER_END
-@@ -414,0 +418,3 @@
+@@ -366,0 +370,3 @@
 +! O8O16_OBSERVER_BEGIN
 +      CALL o8o16_frazil(1,rn_hinew)
 +! O8O16_OBSERVER_END
-@@ -482,0 +489,3 @@
+@@ -435,0 +442,3 @@
 +! O8O16_OBSERVER_BEGIN
 +      CALL o8o16_frazil(2,rn_hinew)
 +! O8O16_OBSERVER_END

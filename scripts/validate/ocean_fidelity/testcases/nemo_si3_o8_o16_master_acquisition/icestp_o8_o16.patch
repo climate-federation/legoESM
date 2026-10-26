@@ -2,22 +2,30 @@
 +++ icestp.F90
 @@ -78,0 +79,3 @@
 +! O8O16_OBSERVER_BEGIN
-+   USE o8_o16_master_writer, ONLY : o8o16_set_context, o8o16_update
++   USE o8_o16_master_writer, ONLY : o8o16_set_context, o8o16_update, o8o16_tau
 +! O8O16_OBSERVER_END
-@@ -177,0 +181,4 @@
+@@ -128,0 +132,4 @@
 +! O8O16_OBSERVER_BEGIN
 +                                        CALL o8o16_set_context( kt, Kmm, nit000, narea-1, jpni, jpnj, &
 +                                           &                    rDt_ice, r1_Dt_ice )
 +! O8O16_OBSERVER_END
-@@ -253,0 +262,3 @@
+@@ -206,0 +214,3 @@
 +! O8O16_OBSERVER_BEGIN
 +                                        CALL o8o16_update(18)
 +! O8O16_OBSERVER_END
-@@ -256,0 +268,3 @@
+@@ -211,0 +222,3 @@
 +! O8O16_OBSERVER_BEGIN
 +                                        CALL o8o16_update(15)
 +! O8O16_OBSERVER_END
-@@ -257,0 +272,3 @@
+@@ -213,0 +227,3 @@
 +! O8O16_OBSERVER_BEGIN
 +                                        CALL o8o16_update(16)
++! O8O16_OBSERVER_END
+@@ -232,0 +249,3 @@
++! O8O16_OBSERVER_BEGIN
++      CALL o8o16_tau(19,uu(:,:,1,Kbb),vv(:,:,1,Kbb))
++! O8O16_OBSERVER_END
+@@ -233,0 +253,3 @@
++! O8O16_OBSERVER_BEGIN
++      CALL o8o16_tau(20,uu(:,:,1,Kbb),vv(:,:,1,Kbb))
 +! O8O16_OBSERVER_END

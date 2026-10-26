@@ -1,50 +1,50 @@
 --- icethd.F90
 +++ icethd.F90
-@@ -41,0 +42,3 @@
+@@ -38,0 +39,3 @@
 +! O8O16_OBSERVER_BEGIN
 +   USE o8_o16_master_writer, ONLY : o8o16_category, o8o16_global
 +! O8O16_OBSERVER_END
-@@ -195,0 +199,3 @@
+@@ -140,0 +144,3 @@
 +! O8O16_OBSERVER_BEGIN
 +                              CALL o8o16_category(3,jl)
 +! O8O16_OBSERVER_END
-@@ -197,0 +204,3 @@
+@@ -148,0 +155,3 @@
 +! O8O16_OBSERVER_BEGIN
 +                              CALL o8o16_category(4,jl)
 +! O8O16_OBSERVER_END
-@@ -199,0 +209,3 @@
+@@ -150,0 +160,3 @@
 +! O8O16_OBSERVER_BEGIN
 +                              CALL o8o16_category(5,jl)
 +! O8O16_OBSERVER_END
-@@ -201,0 +214,3 @@
+@@ -152,0 +165,3 @@
 +! O8O16_OBSERVER_BEGIN
 +                              CALL o8o16_category(6,jl)
 +! O8O16_OBSERVER_END
-@@ -203,0 +219,3 @@
+@@ -154,0 +170,3 @@
 +! O8O16_OBSERVER_BEGIN
 +                              CALL o8o16_category(7,jl)
 +! O8O16_OBSERVER_END
-@@ -205,0 +224,3 @@
+@@ -156,0 +175,3 @@
 +! O8O16_OBSERVER_BEGIN
 +                              CALL o8o16_category(8,jl)
 +! O8O16_OBSERVER_END
-@@ -220,0 +242,3 @@
+@@ -174,0 +196,3 @@
 +! O8O16_OBSERVER_BEGIN
 +      CALL o8o16_global(10)
 +! O8O16_OBSERVER_END
-@@ -223,0 +248,3 @@
+@@ -177,0 +202,3 @@
 +! O8O16_OBSERVER_BEGIN
 +      CALL o8o16_global(11)
 +! O8O16_OBSERVER_END
-@@ -225,0 +253,3 @@
+@@ -179,0 +207,3 @@
 +! O8O16_OBSERVER_BEGIN
 +      CALL o8o16_global(12)
 +! O8O16_OBSERVER_END
-@@ -227,0 +258,3 @@
+@@ -181,0 +212,3 @@
 +! O8O16_OBSERVER_BEGIN
 +      CALL o8o16_global(13)
 +! O8O16_OBSERVER_END
-@@ -229,0 +263,3 @@
+@@ -183,0 +217,3 @@
 +! O8O16_OBSERVER_BEGIN
 +      CALL o8o16_global(14)
 +! O8O16_OBSERVER_END

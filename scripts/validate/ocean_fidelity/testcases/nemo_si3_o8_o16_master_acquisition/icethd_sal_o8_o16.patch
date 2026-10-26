@@ -1,10 +1,10 @@
 --- icethd_sal.F90
 +++ icethd_sal.F90
-@@ -30,0 +31,3 @@
+@@ -25,0 +26,3 @@
 +! O8O16_OBSERVER_BEGIN
 +   USE o8_o16_master_writer, ONLY : o8o16_salinity_config
 +! O8O16_OBSERVER_END
-@@ -746,0 +750,6 @@
+@@ -690,0 +694,6 @@
 +! O8O16_OBSERVER_BEGIN
 +      CALL o8o16_salinity_config(ln_drainage,ln_flushing,nn_drainage,nn_flushing,rn_sal_himin, &
 +         &                       rn_flushrate,rn_vbrc,nn_sal_scheme,rn_alpha_RJW,rn_Rc_RJW, &

@@ -1,10 +1,14 @@
 --- icethd_da.F90
 +++ icethd_da.F90
-@@ -29,0 +30,3 @@
+@@ -22,0 +23,3 @@
 +! O8O16_OBSERVER_BEGIN
-+   USE o8_o16_master_writer, ONLY : o8o16_category
++   USE o8_o16_master_writer, ONLY : o8o16_category, o8o16_da_config
 +! O8O16_OBSERVER_END
-@@ -216,0 +220,3 @@
+@@ -161,0 +165,3 @@
 +! O8O16_OBSERVER_BEGIN
 +      CALL o8o16_category(9,0,rn_beta,rn_dmin)
++! O8O16_OBSERVER_END
+@@ -185,0 +192,3 @@
++! O8O16_OBSERVER_BEGIN
++      CALL o8o16_da_config(rn_beta,rn_dmin)
 +! O8O16_OBSERVER_END

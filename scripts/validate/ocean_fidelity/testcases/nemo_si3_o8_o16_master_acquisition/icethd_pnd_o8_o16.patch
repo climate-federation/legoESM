@@ -1,10 +1,10 @@
 --- icethd_pnd.F90
 +++ icethd_pnd.F90
-@@ -31,0 +32,3 @@
+@@ -30,0 +31,3 @@
 +! O8O16_OBSERVER_BEGIN
 +   USE o8_o16_master_writer, ONLY : o8o16_pond_config
 +! O8O16_OBSERVER_END
-@@ -1486,0 +1490,5 @@
+@@ -1430,0 +1434,5 @@
 +! O8O16_OBSERVER_BEGIN
 +      CALL o8o16_pond_config(nice_pnd,rn_apnd_min,rn_apnd_max,rn_pnd_flush,ln_pnd_lids,ln_pnd_rain, &
 +         &                    ln_pnd,ln_pnd_LEV,ln_pnd_CST,ln_pnd_TOPO,rn_apnd,rn_hpnd,ln_pnd_alb, &

@@ -4,19 +4,20 @@ MODULE o8_o16_master_writer
    USE par_ice, ONLY: jpl, nlay_i, nlay_s, rn_kappa_i, rn_kappa_s, rn_snwblow, rn_sinew, &
       &              nn_icesal, r1_nlay_i, r1_nlay_s, rn_simin, rn_himin
    USE phycst, ONLY: rcnd_s
-   USE dom_oce, ONLY: tmask
+   USE dom_oce, ONLY: tmask, smask0, umask, vmask
    USE ice
    USE ice1D
    USE sbc_oce, ONLY: qsr, qns, emp, sfx, fr_i, fwfice, qns_tot, qsr_tot, frq_m, &
-      &               sss_m, cloud_fra, sprecip, tprecip
-   USE sbc_ice, ONLY: qsr_oce, qns_oce, qemp_oce, emp_oce, emp_ice, qsr_ice, qns_ice, qevap_ice, &
+      &               sss_m, cloud_fra, sprecip, tprecip, utau, vtau, taum
+   USE sbc_ice, ONLY: qsr_oce, qns_oce, qemp_oce, qemp_ice, emp_oce, emp_ice, qsr_ice, qns_ice, qevap_ice, &
       &               qcn_ice, qml_ice, qtr_ice_top, tn_ice, alb_ice, &
       &               snwice_mass, snwice_mass_b, snwice_fmass
    IMPLICIT NONE
    PRIVATE
    PUBLIC :: o8o16_set_context, o8o16_frazil, o8o16_category, o8o16_picard
-   PUBLIC :: o8o16_global, o8o16_update
+   PUBLIC :: o8o16_global, o8o16_update, o8o16_tau
    PUBLIC :: o8o16_salinity_config, o8o16_pond_config
+   PUBLIC :: o8o16_da_config, o8o16_albedo_config
 
    INTEGER :: current_kt=-1, current_kmm=-1, current_nit000=-1, current_rank=-1, current_jl=-1
    INTEGER :: current_jpni=-1, current_jpnj=-1
@@ -29,6 +30,9 @@ MODULE o8_o16_master_writer
    REAL(wp) :: current_icesal=0._wp, current_sal_gd=0._wp, current_time_gd=0._wp
    REAL(wp) :: current_sal_fl=0._wp, current_time_fl=0._wp
    REAL(wp) :: current_alpha_gn=0._wp, current_rc_gn=0._wp, current_alpha_cw=0._wp
+   REAL(wp) :: current_alb_sdry=0._wp, current_alb_smlt=0._wp, current_alb_idry=0._wp
+   REAL(wp) :: current_alb_imlt=0._wp, current_alb_dpnd=0._wp, current_alb_lpnd=0._wp
+   REAL(wp) :: current_alb_hpiv=0._wp
    REAL(wp) :: current_apnd=0._wp, current_hpnd=0._wp
    REAL(wp) :: current_pnd_hl_min=0._wp, current_pnd_hl_max=0._wp
    INTEGER :: current_ndrainage=-1, current_nflushing=-1, current_sal_scheme=-1, current_nice_pnd=-1
@@ -47,6 +51,18 @@ CONTAINS
       current_jpni=jpni ; current_jpnj=jpnj ; current_rdt=rdt ; current_r1dt=r1dt
       current_picard=-1._wp
    END SUBROUTINE o8o16_set_context
+
+   SUBROUTINE o8o16_da_config(beta,dmin)
+      REAL(wp),INTENT(in)::beta,dmin
+      current_beta=beta ; current_dmin=dmin
+   END SUBROUTINE o8o16_da_config
+
+   SUBROUTINE o8o16_albedo_config(alb_sdry,alb_smlt,alb_idry,alb_imlt,alb_dpnd,alb_lpnd,alb_hpiv)
+      REAL(wp),INTENT(in)::alb_sdry,alb_smlt,alb_idry,alb_imlt,alb_dpnd,alb_lpnd,alb_hpiv
+      current_alb_sdry=alb_sdry ; current_alb_smlt=alb_smlt ; current_alb_idry=alb_idry
+      current_alb_imlt=alb_imlt ; current_alb_dpnd=alb_dpnd ; current_alb_lpnd=alb_lpnd
+      current_alb_hpiv=alb_hpiv
+   END SUBROUTINE o8o16_albedo_config
 
    SUBROUTINE o8o16_salinity_config(ldrain,lflush,ndrain,nflush,sal_himin,flushrate,vbrc,sal_scheme,alpha_rjw,rc_rjw, &
       &                             icesal,sal_gd,time_gd,sal_fl,time_fl,liquidus,alpha_gn,rc_gn,alpha_cw,lsal_chk)
@@ -82,7 +98,7 @@ CONTAINS
       CHARACTER(LEN=8), PARAMETER :: magic='O816M001'
       CHARACTER(LEN=192) :: path,label,suffix
       INTEGER(int32), DIMENSION(20) :: meta
-      REAL(real64), DIMENSION(51) :: scalars
+      REAL(real64), DIMENSION(58) :: scalars
       SELECT CASE(kind)
       CASE(1); label='frazil_entry'
       CASE(2); label='frazil_exit'
@@ -102,6 +118,8 @@ CONTAINS
       CASE(16); label='update_flx_exit_ocean_boundary'
       CASE(17); label='picard_final'
       CASE(18); label='pre_aggregation'
+      CASE(19); label='tau_entry'
+      CASE(20); label='tau_exit'
       CASE DEFAULT; ERROR STOP 'O8-O16 unknown record kind'
       END SELECT
       IF(jl > 0) THEN
@@ -127,7 +145,9 @@ CONTAINS
          MERGE(1._wp,0._wp,current_sal_chk),MERGE(1._wp,0._wp,current_pnd), &
          MERGE(1._wp,0._wp,current_pnd_lev),MERGE(1._wp,0._wp,current_pnd_cst), &
          MERGE(1._wp,0._wp,current_pnd_topo),current_apnd,current_hpnd, &
-         MERGE(1._wp,0._wp,current_pnd_alb),current_pnd_hl_min,current_pnd_hl_max]
+         MERGE(1._wp,0._wp,current_pnd_alb),current_pnd_hl_min,current_pnd_hl_max, &
+         current_alb_sdry,current_alb_smlt,current_alb_idry,current_alb_imlt, &
+         current_alb_dpnd,current_alb_lpnd,current_alb_hpiv]
       WRITE(u) magic ; WRITE(u) INT(1,int32) ; WRITE(u) meta ; WRITE(u) scalars
    END SUBROUTINE open_record
 
@@ -216,20 +236,6 @@ CONTAINS
       WRITE(u) a(1:npti,0:nlay_s)
    END SUBROUTINE put_gs0
 
-   SUBROUTINE put_tri1(u,a)
-      INTEGER,INTENT(in)::u
-      REAL(wp),DIMENSION(:),INTENT(in)::a
-      IF(SIZE(a)/=nlay_i+nlay_s+1) ERROR STOP 'O8-O16 TRI1 extent mismatch'
-      WRITE(u) a
-   END SUBROUTINE put_tri1
-
-   SUBROUTINE put_tri3(u,a)
-      INTEGER,INTENT(in)::u
-      REAL(wp),DIMENSION(:,:),INTENT(in)::a
-      IF(SIZE(a,1)/=nlay_i+nlay_s+1 .OR. SIZE(a,2)/=3) ERROR STOP 'O8-O16 TRI3 extent mismatch'
-      WRITE(u) a
-   END SUBROUTINE put_tri3
-
    SUBROUTINE put_c0(u,a)
       INTEGER,INTENT(in)::u
       REAL(wp),DIMENSION(0:),INTENT(in)::a
@@ -268,7 +274,8 @@ CONTAINS
 
    SUBROUTINE put_cat_base(u)
       INTEGER,INTENT(in)::u
-      CALL put_g1(u,a_i_1d); CALL put_g1(u,at_i_1d); CALL put_g1(u,h_i_1d); CALL put_g1(u,h_s_1d)
+      CALL put_g1(u,a_i_1d); CALL put_g1(u,a_ib_1d); CALL put_g1(u,h_ib_1d)
+      CALL put_g1(u,at_i_1d); CALL put_g1(u,h_i_1d); CALL put_g1(u,h_s_1d)
       CALL put_g1(u,t_su_1d); CALL put_g1(u,s_i_1d); CALL put_g1(u,t_bo_1d); CALL put_g1(u,sss_1d)
       CALL put_g1(u,sst_1d); CALL put_g1(u,qns_ice_1d); CALL put_g1(u,qsr_ice_1d)
       CALL put_g1(u,dqns_ice_1d); CALL put_g1(u,qtr_ice_top_1d); CALL put_g1(u,qsb_ice_bot_1d)
@@ -313,7 +320,7 @@ CONTAINS
       IF(PRESENT(rn_dmin)) current_dmin=rn_dmin
       SELECT CASE(kind)
       CASE(3,5,6,7,8,9)
-         CALL open_record(kind,record_jl,npti,65,u); CALL put_idx(u); CALL put_cat_base(u); CALL put_dh(u); CALL put_dh_fluxes(u)
+         CALL open_record(kind,record_jl,npti,67,u); CALL put_idx(u); CALL put_cat_base(u); CALL put_dh(u); CALL put_dh_fluxes(u)
       CASE(4)
          CALL open_record(kind,record_jl,npti,15,u); CALL put_idx(u)
          CALL put_g1(u,t_su_1d); CALL put_g1(u,qns_ice_1d); CALL put_g1(u,qcn_ice_top_1d)
@@ -327,23 +334,21 @@ CONTAINS
       CLOSE(u)
    END SUBROUTINE o8o16_category
 
-   SUBROUTINE o8o16_picard(iconv,lconv,ztrid,zindterm,zdiagbis,zindtbis,zkappa_i,zkappa_s,zradab_i,zradab_s,zradtr_i,zradtr_s)
+   SUBROUTINE o8o16_picard(iconv,lconv,zkappa_i,zkappa_s,zradab_i,zradab_s,zradtr_i,zradtr_s)
       INTEGER,INTENT(in)::iconv
       LOGICAL,DIMENSION(:),INTENT(in)::lconv
-      REAL(wp),DIMENSION(:,:),INTENT(in)::ztrid,zkappa_i,zkappa_s,zradab_i,zradab_s,zradtr_i,zradtr_s
-      REAL(wp),DIMENSION(:),INTENT(in)::zindterm,zdiagbis,zindtbis
+      REAL(wp),DIMENSION(:,0:),INTENT(in)::zkappa_i,zkappa_s,zradab_i,zradab_s,zradtr_i,zradtr_s
       INTEGER::u
       INTEGER(int32),ALLOCATABLE::conv(:)
       IF(current_kt/=1 .AND. current_kt/=2 .AND. current_kt/=100) RETURN
       current_picard=REAL(iconv,wp)
       ALLOCATE(conv(npti)); conv=MERGE(1_int32,0_int32,lconv(1:npti))
       IF(current_jl < 1 .OR. current_jl > jpl) ERROR STOP 'O9 Picard category unavailable'
-      CALL open_record(17,current_jl,npti,16,u); CALL put_idx(u); WRITE(u) conv
+      CALL open_record(17,current_jl,npti,12,u); CALL put_idx(u); WRITE(u) conv
       CALL put_g1(u,t_su_1d); CALL put_g1(u,qns_ice_1d)
       CALL put_gi(u,t_i_1d); CALL put_gs(u,t_s_1d)
-      CALL put_gi0(u,zkappa_i); CALL put_gi0(u,zradab_i); CALL put_gi0(u,zradtr_i)
-      CALL put_gs0(u,zkappa_s); CALL put_gs0(u,zradab_s); CALL put_gs0(u,zradtr_s)
-      CALL put_tri3(u,ztrid); CALL put_tri1(u,zindterm); CALL put_tri1(u,zdiagbis); CALL put_tri1(u,zindtbis)
+      CALL put_gi0(u,zkappa_i); CALL put_gi(u,zradab_i(:,1:nlay_i)); CALL put_gi0(u,zradtr_i)
+      CALL put_gs0(u,zkappa_s); CALL put_gs(u,zradab_s(:,1:nlay_s)); CALL put_gs0(u,zradtr_s)
       CLOSE(u); DEALLOCATE(conv)
    END SUBROUTINE o8o16_picard
 
@@ -364,7 +369,7 @@ CONTAINS
       CALL put_i2(u,tm_s); CALL put_i2(u,sm_i); CALL put_i2(u,tm_su); CALL put_i2(u,hm_i)
       CALL put_i2(u,hm_s); CALL put_i2(u,om_i); CALL put_i2(u,at_ip); CALL put_i2(u,at_ip_eff)
       CALL put_i2(u,hm_ip); CALL put_i2(u,vt_ip); CALL put_i2(u,hm_il); CALL put_i2(u,vt_il)
-      CALL put_i2(u,vm_ibr)
+      CALL put_i2(u,vm_ibr); CALL put_i2(u,tm_si)
    END SUBROUTINE put_totals
 
    SUBROUTINE put_pond(u)
@@ -377,6 +382,7 @@ CONTAINS
       CALL put_i3(u,h_i_b); CALL put_i3(u,a_i_b)
       CALL put_i2(u,t_bo); CALL put_i2(u,ht_i_new); CALL put_i2(u,fraz_frac)
       CALL put_i2(u,sss_m); CALL put_i2(u,rn_amax_2d)
+      CALL put_f2(u,tmask(:,:,1)); CALL put_i2(u,smask0)
       CALL put_c0(u,hi_max); CALL put_c1(u,hi_mean)
    END SUBROUTINE put_global_aux
 
@@ -409,7 +415,7 @@ CONTAINS
       INTEGER,INTENT(in)::kind
       INTEGER::u
       IF(kind<10 .OR. kind>14) ERROR STOP 'O12-O15 global kind'
-      CALL open_record(kind,0,0,104,u); CALL put_state(u); CALL put_totals(u); CALL put_pond(u); CALL put_flux(u)
+      CALL open_record(kind,0,0,107,u); CALL put_state(u); CALL put_totals(u); CALL put_pond(u); CALL put_flux(u)
       CALL put_global_aux(u); CALL put_pond_forcing(u)
       CLOSE(u)
    END SUBROUTINE o8o16_global
@@ -420,20 +426,21 @@ CONTAINS
       IF(kind==18) THEN
          CALL open_record(kind,0,0,23,u); CALL put_state(u)
       ELSEIF(kind==15) THEN
-         CALL open_record(kind,0,0,111,u); CALL put_state(u); CALL put_totals(u); CALL put_flux(u)
-         CALL put_i2(u,qsr_oce); CALL put_i2(u,qns_oce); CALL put_i2(u,qemp_oce)
+         CALL open_record(kind,0,0,114,u); CALL put_state(u); CALL put_totals(u); CALL put_flux(u)
+         CALL put_i2(u,qsr_oce); CALL put_i2(u,qns_oce); CALL put_i2(u,qemp_oce); CALL put_i2(u,qemp_ice)
          CALL put_i2(u,emp_oce); CALL put_i2(u,emp_ice); CALL put_i2(u,qns_tot)
          CALL put_i2(u,qsr_tot); CALL put_i2(u,frq_m); CALL put_i3(u,a_i_b)
          CALL put_i3(u,qsr_ice); CALL put_i3(u,qns_ice); CALL put_i3(u,qtr_ice_bot)
          CALL put_i3(u,qevap_ice); CALL put_i3(u,qcn_ice); CALL put_i3(u,qml_ice)
          CALL put_i3(u,qtr_ice_top); CALL put_i2(u,at_i_b); CALL put_i2(u,wfx_snw_dyn)
-         CALL put_i2(u,cloud_fra); CALL put_f2(u,tmask(:,:,1))
+         CALL put_i2(u,cloud_fra); CALL put_f2(u,tmask(:,:,1)); CALL put_i2(u,smask0)
          CALL put_f2(u,snwice_mass); CALL put_f2(u,snwice_mass_b)
       ELSEIF(kind==16) THEN
          CALL open_record(kind,0,0,16,u)
          CALL put_i2(u,qsr); CALL put_i2(u,qns); CALL put_i2(u,emp); CALL put_i2(u,sfx)
-         CALL put_i2(u,fr_i); CALL put_i2(u,fwfice); CALL put_i2(u,qt_atm_oi); CALL put_i2(u,qt_oce_ai)
+         CALL put_i2(u,fwfice); CALL put_i2(u,qt_atm_oi); CALL put_i2(u,qt_oce_ai)
          CALL put_i2(u,wfx_ice); CALL put_i2(u,wfx_snw); CALL put_i2(u,wfx_pnd)
+         CALL put_f2(u,fr_i)
          CALL put_i3(u,tn_ice); CALL put_i3(u,alb_ice)
          CALL put_f2(u,snwice_mass); CALL put_f2(u,snwice_mass_b); CALL put_f2(u,snwice_fmass)
       ELSE
@@ -441,5 +448,25 @@ CONTAINS
       ENDIF
       CLOSE(u)
    END SUBROUTINE o8o16_update
+
+   SUBROUTINE o8o16_tau(kind,pu_oce,pv_oce)
+      INTEGER,INTENT(in)::kind
+      REAL(wp),DIMENSION(:,:),INTENT(in)::pu_oce,pv_oce
+      INTEGER::u
+      IF(kind==19) THEN
+         CALL open_record(kind,0,0,13,u)
+         CALL put_f2(u,pu_oce); CALL put_f2(u,pv_oce)
+         CALL put_f2(u,umask(:,:,1)); CALL put_f2(u,vmask(:,:,1))
+         CALL put_f2(u,u_ice); CALL put_f2(u,v_ice); CALL put_f2(u,u_oce); CALL put_f2(u,v_oce)
+         CALL put_f2(u,drag_io); CALL put_f2(u,at_i)
+         CALL put_f2(u,utau); CALL put_f2(u,vtau); CALL put_i2(u,taum)
+      ELSEIF(kind==20) THEN
+         CALL open_record(kind,0,0,3,u)
+         CALL put_f2(u,utau); CALL put_f2(u,vtau); CALL put_i2(u,taum)
+      ELSE
+         ERROR STOP 'O16 tau kind'
+      ENDIF
+      CLOSE(u)
+   END SUBROUTINE o8o16_tau
 
 END MODULE o8_o16_master_writer

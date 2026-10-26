@@ -9759,6 +9759,7 @@ CITATION_MAP = {
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/iceitd.f90:632-668': ['v_i(ji,jj,jl) > (a_i(ji,jj,jl) * hi_max(jl))', 'v_i(ji,jj,jl+1) <= (a_i(ji,jj,jl+1) * hi_max(jl))', 37],
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icestp.f90:254-257': [('CALL ice_var_glo2eqv(2)', 2), 'CALL ice_update_flx( kt )', 4],
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/iceupdate.f90:119-223': ['qt_atm_oi(ji,jj) = ( 1._wp - at_i_b(ji,jj) )', 'h_ip(:,:,:), h_il(:,:,:), cloud_fra(:,:)', 105],
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/iceupdate.f90:332-423': [('SUBROUTINE ice_update_tau', 1), ('END SUBROUTINE ice_update_tau', 1), 92],
     'tests/ice/unit/data/orca2_sas_ice_expref/namelist_ice_ref:190-191': ['rn_hinew         =   0.1', 'ln_frazil        = .false.', 2],
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:419': 'fraz_frac(:,:) = 0._wp',
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:422': 'WHERE( qlead(:,:) < 0._wp ) ! cooling',

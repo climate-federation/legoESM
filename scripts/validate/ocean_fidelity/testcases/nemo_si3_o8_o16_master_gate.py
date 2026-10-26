@@ -49,6 +49,8 @@ SCALAR_NAMES = (
     "nn_liquidus", "rn_alpha_GN", "rn_Rc_GN", "rn_alpha_CW", "ln_sal_chk",
     "ln_pnd", "ln_pnd_LEV", "ln_pnd_CST", "ln_pnd_TOPO", "rn_apnd",
     "rn_hpnd", "ln_pnd_alb", "rn_pnd_hl_min", "rn_pnd_hl_max",
+    "rn_alb_sdry", "rn_alb_smlt", "rn_alb_idry", "rn_alb_imlt",
+    "rn_alb_dpnd", "rn_alb_lpnd", "rn_alb_hpiv",
 )
 N_SCALARS = len(SCALAR_NAMES)
 HEADER_BYTES = 8 + 4 + 4 * N_META + 8 * N_SCALARS
@@ -68,7 +70,7 @@ def _fields(names: str, extent: str, dtype: str = "f8") -> tuple[Field, ...]:
 
 
 CAT_BASE = _fields(
-    "a_i at_i h_i h_s t_su s_i t_bo sss sst qns_ice qsr_ice dqns_ice "
+    "a_i a_i_b h_i_b at_i h_i h_s t_su s_i t_bo sss sst qns_ice qsr_ice dqns_ice "
     "qtr_ice_top qsb_ice_bot fhld frq_m sprecip qprec_ice evap_ice "
     "hfx_err_dif hfx_dif qml_ice sfx_bri sfx_lam wfx_lam",
     "G1",
@@ -97,13 +99,15 @@ STATE_IS4 = _fields("t_s e_s", "IS4")
 STATE = STATE_I3 + STATE_II4 + STATE_IS4
 TOTALS = _fields(
     "at_i ato_i vt_i vt_s st_i et_i et_s tm_i tm_s sm_i tm_su hm_i hm_s "
-    "om_i at_ip at_ip_eff hm_ip vt_ip hm_il vt_il vm_ibr",
+    "om_i at_ip at_ip_eff hm_ip vt_ip hm_il vt_il vm_ibr tm_si",
     "I2",
 )
 POND = _fields("dh_i_sum_2d dh_s_sum_2d", "I3")
 GLOBAL_AUX = (
     _fields("h_i_b a_i_b", "I3")
     + _fields("t_bo ht_i_new fraz_frac sss_m rn_amax_2d", "I2")
+    + _fields("tmask_k1", "F2")
+    + _fields("smask0", "I2")
     + _fields("hi_max", "C0")
     + _fields("hi_mean", "C1")
 )
@@ -155,19 +159,21 @@ KINDS: dict[int, Kind] = {
     15: Kind(
         "update_flx_entry",
         STATE + TOTALS + FLUX
-        + _fields("qsr_oce qns_oce qemp_oce emp_oce emp_ice qns_tot qsr_tot frq_m", "I2")
+        + _fields("qsr_oce qns_oce qemp_oce qemp_ice emp_oce emp_ice qns_tot qsr_tot frq_m", "I2")
         + _fields("a_i_b qsr_ice qns_ice qtr_ice_bot qevap_ice", "I3")
         + _fields("qcn_ice qml_ice qtr_ice_top", "I3")
         + _fields("at_i_b wfx_snw_dyn cloud_fra", "I2")
         + _fields("tmask_k1", "F2")
+        + _fields("smask0", "I2")
         + _fields("snwice_mass snwice_mass_b", "F2"),
     ),
     16: Kind(
         "update_flx_exit_ocean_boundary",
         _fields(
-            "qsr qns emp sfx fr_i fwfice qt_atm_oi qt_oce_ai wfx_ice wfx_snw wfx_pnd",
+            "qsr qns emp sfx fwfice qt_atm_oi qt_oce_ai wfx_ice wfx_snw wfx_pnd",
             "I2",
         )
+        + _fields("fr_i", "F2")
         + _fields("tn_ice alb_ice", "I3")
         + _fields("snwice_mass snwice_mass_b snwice_fmass", "F2"),
     ),
@@ -191,12 +197,21 @@ KINDS: dict[int, Kind] = {
 KINDS[17] = Kind(
     "picard_final",
     KINDS[17].fields
-    + _fields("zkappa_i zradab_i zradtr_i", "GI0")
-    + _fields("zkappa_s zradab_s zradtr_s", "GS0")
-    + _fields("ztrid", "TRI3")
-    + _fields("zindterm zdiagbis zindtbis", "TRI1"),
+        + _fields("zkappa_i", "GI0")
+        + _fields("zradab_i", "GI")
+        + _fields("zradtr_i", "GI0")
+        + _fields("zkappa_s", "GS0")
+        + _fields("zradab_s", "GS")
+        + _fields("zradtr_s", "GS0"),
         True,
 )
+
+KINDS[19] = Kind(
+    "tau_entry",
+    _fields("uu_kbb vv_kbb umask_k1 vmask_k1 u_ice v_ice u_oce v_oce drag_io at_i utau vtau", "F2")
+    + _fields("taum", "I2"),
+)
+KINDS[20] = Kind("tau_exit", _fields("utau vtau", "F2") + _fields("taum", "I2"))
 
 PROJECTIONS: dict[str, tuple[int, ...]] = {
     "O8": (1, 2),
@@ -207,7 +222,7 @@ PROJECTIONS: dict[str, tuple[int, ...]] = {
     "O13": (11, 12),
     "O14": (12, 13),
     "O15": (13, 14),
-    "O16": (18, 15, 16),
+    "O16": (18, 15, 16, 19, 20),
 }
 
 
@@ -229,8 +244,6 @@ def _shape(field: Field, meta: dict[str, int]) -> tuple[int, ...]:
         "GS": (meta["npti"], meta["nlay_s"]),
         "GI0": (meta["npti"], meta["nlay_i"] + 1),
         "GS0": (meta["npti"], meta["nlay_s"] + 1),
-        "TRI1": (meta["nlay_i"] + meta["nlay_s"] + 1,),
-        "TRI3": (meta["nlay_i"] + meta["nlay_s"] + 1, 3),
         "C0": (meta["jpl"] + 1,),
         "C1": (meta["jpl"],),
     }
@@ -608,21 +621,21 @@ def verify_same_program(
 ) -> dict[str, Any]:
     units = (
         "icestp", "icethd", "icethd_do", "icethd_da", "icethd_sal",
-        "icethd_pnd", "icethd_zdf_bl99",
+        "icethd_pnd", "icethd_zdf_bl99", "icealb",
     )
     markers = {unit: ("! O8O16_OBSERVER_BEGIN", "! O8O16_OBSERVER_END") for unit in units}
-    expected = {unit: expected_ppsrc_dir / f"{unit}.F90" for unit in units}
+    expected = {unit: expected_ppsrc_dir / f"{unit}.f90" for unit in units}
     if plant == "same-program":
         with tempfile.TemporaryDirectory() as raw:
             planted = Path(raw)
             for unit, source in expected.items():
                 target = planted / source.name
                 target.write_bytes(source.read_bytes())
-            target = planted / "icethd.F90"
+            target = planted / "icethd.f90"
             text = target.read_text()
             text = text.replace("CALL o8o16_category(3,jl)", "CALL o8o16_category(4,jl)", 1)
             target.write_text(text)
-            expected = {unit: planted / f"{unit}.F90" for unit in units}
+            expected = {unit: planted / f"{unit}.f90" for unit in units}
             return same_program_observers(
                 new_bld, ref_bld,
                 {unit: patch_dir / f"{unit}_o8_o16.patch" for unit in units},
