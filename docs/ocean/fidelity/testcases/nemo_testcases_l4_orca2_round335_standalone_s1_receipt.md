@@ -202,3 +202,30 @@ required no code change.
   `nn_mxlice=0` are not NEMO-certified; the operator-run S4 smoke comes first,
   followed by their first exact NEMO comparison inside S4.  No model or
   shipped-card configuration changed in this resume.
+
+## Resume 4 rebase onto the lane tip
+
+Round 335 was based on `072e4aa1b1c8`.  Resume 4 rebased its 16 commits onto
+lane tip `ba9f39512595` (rounds 334 `d95e9a1237` and 333 `ba9f39512595`).
+The pre-rebase tip is kept as branch
+`backup/orca2_r335_pre_rebase_80ba55353` (`80ba5535365a`).
+
+Conflicts: **none**.  The only file both sides changed is the receipt
+citation gate.  The two sides' hunks are disjoint: the lane re-anchored
+existing `CITATION_MAP` entries and added round-333 `FILES` entries; round 335
+added its `FILES` and `CITATION_MAP` entries and moved the
+`zdfdrg.f90:380` entry.  Both sides are kept.  Neither `bulk_flux_omip.py`
+nor `omip2_applicator.py` was touched by rounds 333 or 334.  No `CITATION_MAP`
+key is duplicated after the merge; the three duplicated `FILES` keys
+(`dynspg_ts.f90`, `domqco.F90`, `iceistate.f90`) are identical on the base,
+the lane tip, the backup and the rebased tree, so the merge introduced none.
+
+Mechanical delta check, changed lines only (`git diff -U0` with `index` and
+`@@` lines stripped):
+
+- backup -> rebased tip equals `072e4aa1b1c8` -> lane tip: identical,
+  5,943 lines; changed file sets equal (39 files).
+- lane tip -> rebased tip equals `072e4aa1b1c8` -> backup: identical,
+  1,914 lines.
+
+This section is the only addition beyond the lane's own changes.
