@@ -676,6 +676,10 @@ if [[ -n ${R336_STUB_FLOW_ROOT:-} ]]; then\
   printf '\''R336_STUB_PARENT_FLOW_PASS path=%s\\n'\'' "$TARGET_RUN"\
   exit 0\
 fi' "$ADAPTED_PARENT"
+# The imported-driver audit must continue to check the production assignment,
+# not the temporary value selected later by the flow-only runtime conditional.
+sed -i 's|  "EVIDENCE=\$EVIDENCE" \\|  "EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/acquisition" \\|' \
+  "$ADAPTED_PARENT"
 
 # Superseded direct-edit prototype retained inert so its exact failure mode is
 # auditable; the extension fragment below targets the generated inner driver.
