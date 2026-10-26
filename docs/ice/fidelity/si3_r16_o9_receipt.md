@@ -327,3 +327,10 @@ premises stated in the proofs: UNASKED, offered for revert. Review of these fixe
 
 Choices in the rebase: block order in the conflict (lane first) and re-anchoring by `_reanchor` rows rather than
 editing O11's map entries: UNASKED, mechanical; offered for revert.
+
+Gates on the rebased tree (resume 4; evidence `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round16/resume4/`):
+O9 tests with the audit and census `32 passed in 1177.24s`; tie survivors `96 passed in 69.57s`; D5 year,
+18 arms, CPU and AVX: `arms 18 18 differ 0`, shipped `b7a7329b...` on both; `tests/ice/unit` (O1-O8, O9, O11)
+`551 passed, 1 skipped, 1 xfailed`; lane-3 ice fidelity `111 passed`; SI3 fidelity files `1 failed, 143 passed`
+(the pre-existing scalarmath v2 "MY_SRC is not verbatim"); every SI3 receipt's gate `PASS`, full map 0 failing;
+default citation-gate test `33 passed`; private-import ratchet `6 passed`. Review of the rebase: UNREVIEWED.
