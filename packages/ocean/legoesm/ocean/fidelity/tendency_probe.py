@@ -357,6 +357,7 @@ def probe_latlon_cgrid(
         # the production implicit solve makes).
         _K_v, _A_v = compute_vertical_K_profiles(
             state, z_coord, surface_forcing, config.physics, dt_tke=_dt_tke,
+            lat_deg=jnp.degrees(grid.lat_T),
         )
         _dz_cell = z_coord.dz_ref * J[:, :, jnp.newaxis]
         _dz_half = build_dz_half(_dz_cell)

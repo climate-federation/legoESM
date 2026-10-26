@@ -251,6 +251,25 @@ def test_epbl_probe_checks_dt_s_against_tracer_dt(
                            dt_tracer=600.0)
 
 
+def test_epbl_probe_passes_latitude_to_the_closure(state, grid, z_coord):
+    """Unpatched K-profile call: ePBL refuses a missing latitude, so the
+    probe must thread the grid latitude exactly as production does."""
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        EPBLConfig, VerticalMixingConfig,
+    )
+
+    vm = VerticalMixingConfig(scheme="epbl", epbl=EPBLConfig(dt_s=600.0))
+    cfg = LatLonCGridOceanConfig.from_flat(
+        A_h=1.0e4, A_v=1.0e-3, bottom_drag_r=0.0,
+        implicit_vertical_mixing=False,
+        physics=OceanPhysicsConfig(vertical_mixing=vm),
+    )
+    result = probe_latlon_cgrid(state, grid, z_coord, cfg, dt=600.0)
+    assert result.dT_zdf is not None
+    assert bool(jnp.isfinite(result.dT_zdf).all())
+
+
 # ---------------------------------------------------------------------------
 # 1. End-to-end probe runs and returns finite arrays
 # ---------------------------------------------------------------------------
