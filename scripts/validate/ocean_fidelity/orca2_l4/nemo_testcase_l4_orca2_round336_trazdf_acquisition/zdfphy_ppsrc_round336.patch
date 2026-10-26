@@ -1,14 +1,11 @@
 --- zdfphy.F90
 +++ zdfphy.F90
-@@ -49,6 +49,8 @@
+@@ -49,3 +49,5 @@
     USE tke_round331_writer, ONLY : r331_begin, r331_sh2, r331_drag, r331_mxl, &
        & r331_finish
                       ! round-331 WRITE-only TKE localisation recorder
 +   USE round336_trazdf_writer, ONLY : r336_zdfphy_capture ! R336_ZDFPHY_OBSERVER
 +
- 
- 
-    IMPLICIT NONE
 @@ -369,14 +371,20 @@
              avt(ji,jj,jk) = avt_k(ji,jj,jk)
              avm(ji,jj,jk) = avm_k(ji,jj,jk)
