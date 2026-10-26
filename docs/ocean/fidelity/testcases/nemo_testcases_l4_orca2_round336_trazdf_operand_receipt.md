@@ -541,6 +541,19 @@ The required operator handoff is:
 ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh
 ```
 
+The final per-receipt citation gate reports PASS for 8 citations with zero
+failures, zero unmapped citations, zero map-audit failures, and all nine
+self-tests fired; its report SHA-256 is
+`f164f0630d018b7dcc6cae5a27fe403c310fb5f27c246e8b724631670e231ff7`.
+The exact default ORCA2 landing battery passes 152 tests in 1,101.26 seconds;
+its log SHA-256 is
+`465bc3ef6b2e0c08751f9fef778fa03ff9a7c552b2e8904af62ff64a395af206`.
+The private-import ratchet separately passes 6 tests in 5.20 seconds; its log
+SHA-256 is
+`f0d5ceafde69f4e360158e199bcba4d954a930ce4d84356b74b9041464fd256c`.
+The reports are `round336/resume9_citation_gate.json`,
+`round336/resume9_default_gate.log`, and `round336/resume9_ratchet.log`.
+
 The final per-receipt citation gate reports PASS for 5 citations with zero
 failures, zero unmapped citations, zero map-audit failures, and all nine
 self-tests fired; its report SHA-256 is
