@@ -101,9 +101,9 @@ physics result or fidelity claim is made here.
 
 - Acquisition unit checks: 25 passed; the complete clean-tree preflight passed
   separately through all ten phases with 45 plants and the full driver retention fixture.
-- Required default receipt-citation gate: 35 passed. This receipt's 16 live
+- Required default receipt-citation gate: 35 passed. This receipt's 15 live
   source citations pass; every built-in citation plant fires.
-- Seven CI ratchet files: 11,954 passed, 4 skipped, 14 failed. All 14
+- Eight CI ratchet files: 6,419 passed, 2 skipped, 8 failed. All 8
   failures name pre-existing, untouched files; none is in this acquisition,
   citation-map, test or receipt change.
 
