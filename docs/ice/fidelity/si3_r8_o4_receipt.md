@@ -355,3 +355,86 @@ to their summary lines.
 
 The O4 lane-3 control (inside the eight) compares bits against `d2402fd179`.
 The citation gate results for every SI3 receipt are below this table's commit.
+
+## 9. Resume 7 (Claude): DECISION 180, shared category sum from +0
+
+Evidence: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round8/resume7_claude/`.
+
+1. **Rebase (CONFIRMED).** All 18 round-8 commits rebased from `53cd3c732d` onto
+   the lane tip `cf45f424e3` (O9). Three conflicts, all in the citation map,
+   each resolved keeping both sides: the O3 receipt entries (lane O9 block,
+   then round 8's block); the O3 -> O4 rename (lane O9 lines kept, round 8's
+   superseded O3 block replaced by its O4 block); the landed O1 anchors (lane
+   O9 lines, then the anchors). Check: for all 22 files changed on either
+   side, the rebased tip minus `53cd3c732d` equals, line for line, the lane's
+   `d2402fd179..cf45f424e3` change (0 mismatches). Parent of the fix:
+   `f638172d7b`.
+2. **Fix (CONFIRMED).** The shared category sum now starts from a
+   barriered `+0` and adds every category left to right, as gfortran's `SUM`
+   does. A new production-jit test (all categories `-0` along either axis,
+   nested sums, Fortran order) fails 3 of 3 on the parent, fails 3 of 3 with
+   an unbarriered `+0` seed (XLA folds it away, as codex measured), and passes
+   with the barrier; its eager arm runs under `jax.disable_jit()`.
+   For finite inputs the old and new sums differ only where every term is
+   `-0`: both become identical at the first term that is not `-0`.
+3. **Every caller, parent vs current (CONFIRMED).** A committed probe ran
+   each driver in a parent worktree and in the current tree, captured every
+   floating output of every production `jax.jit` call, and compared bits; a
+   second run counted, per call line, the cells whose summed categories are
+   all `-0`. A known-answer driver showed exactly one changed cell (`-0` to
+   `+0`). Coverage: all 61 production calls of the sum in the ice package
+   were executed; all-`-0` cells: 0 at every call.
+
+   | Driver | jit calls | leaves compared | leaves changed |
+   |---|---|---|---|
+   | O1 admission | 3 | 333 | 0 |
+   | O2 admission | 4 | 443 | 0 |
+   | O3 score / entry steps | 1 / 1 | 55 / 224 | 0 / 0 |
+   | O5 admission | 36 | 78 | 0 |
+   | O7 admission | 21 | 282 | 0 |
+   | O1 / O2 / O3 / O5 tests | 20 / 29 / 18 / 2 | 1893 / 2673 / 1540 / 8 | 0 |
+   | O4 tests (eight non-gradient) | 48 + 43 | 4608 + 4276 | 0 |
+
+   The lane-3 correction dump (no jit; Hbig/Hsnow ledger, both ADV2D orders,
+   ADV1D, production sea-ice step) is bitwise identical on all 94 arrays; the
+   95th entry is the dump's own source path, which names each tree. The
+   lane-3 RHEO control passed in both trees. D5 year, default and
+   `--xla_cpu_max_isa=AVX`: all 166 hashes equal the parent's in each arm;
+   shipped arm `b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2`
+   on both.
+   So no output of any caller changes on any record or test input, because
+   none of them contains a cell whose categories are all `-0`. A future
+   input that does will now give `+0`, as NEMO does.
+4. **Admissions (CONFIRMED).** Re-run in both trees; every admission JSON is
+   byte-identical between parent and current: O1 `c1c2ea1c`, O2 `3748bf86`,
+   O3 score `7f468722`, O3 entry steps `beaba85b`, O5 `8f9d911f`, O7
+   `67e799da`. No digest changed, so none needs explaining. (Both O3 runs
+   stamp the scorer head `f638172d7b`: the fix was not yet committed.)
+5. **Review.** Codex (read-only): HOLD three times, all on the probe — it
+   could pass without the callers running; the call scan missed aliases,
+   attribute calls and subpackages and accepted zero calls; and it counted a
+   zero-count record as coverage. Each fixed with a plant in the probe's test;
+   the rescan found the same 61 calls. Fourth pass: LAND. Codex confirmed the
+   fix gives `+0` under jit and eager and changes only all-`-0` sums. GLM: NOT
+   RUN (no GLM tool in this session), so the dual-review rule is not met.
+6. **Not acted on.** Two other `+0`-seeded category sums with the same
+   arithmetic already exist (the O7 surface module and the O9 thermodynamics
+   module); merging them into the shared one is a refactor for the user to
+   order.
+
+Verification, CPU, float64, production `jit`:
+
+| Check | Decisive pass line |
+|---|---|
+| Category-sum test + probe test | `7 passed in 12.31s` |
+| Default landing gate (7 files) | `162 passed in 1462.36s (0:24:22)` |
+| Lane-3 ice fidelity suite | `104 passed` + the 7 that refused a dirty tree mid-run, re-run clean: `7 passed in 75.58s` |
+| Private-import ratchet | `6 passed in 5.55s` |
+| Caller coverage | `CATSUM_COVERAGE production_calls=61 uncovered=0 all_negzero_cells=0` |
+| O1 / O2 / O3 / O5 tests (each tree) | `15 passed` / `12 passed` / `10 passed` / `21 passed, 1 deselected` |
+| O4 tests, eight non-gradient (each tree) | `5 passed` + `3 passed, 6 deselected` |
+| O5 / O7 admission (each tree) | `PASS_O5_ADMISSION` / `PASS_O7_ADMISSION` |
+| D5 year, default and AVX (each tree) | `D5_PLATFORM_FLOOR`, 166 of 166 hashes equal |
+
+The O4 gradient test was not re-run: the sum change is a `+0` add, and no
+input it uses has an all-`-0` sum (census above).
