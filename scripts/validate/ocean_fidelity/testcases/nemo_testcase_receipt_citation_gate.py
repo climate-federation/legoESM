@@ -10013,6 +10013,13 @@ _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1751', 'packages/ice/legoes
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1759', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2357', anchors='vnew / jnp.where(cooling, frazil.ht_i_new, 1.0),')
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:557-647', 'packages/ice/legoesm/ice/bitz_lipscomb.py:579-648', anchors=['dz_i = jnp.maximum(h_i, _H_MIN) / nlay_i', 'eta_s = dt / (constants.rho_snow * dz_s[..., None] * constants.c_ice)', 70])
 _reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:587-611', 'packages/ice/legoesm/ice/bitz_lipscomb.py:600-611', anchors=['# P07 conductivity at the nlay_i+1 interfaces (:273-285), floor :293.', '# :326-341, zghe = 1 (ln_virtual_itd = F).', 12])
+# SI3 round 16 resume 4: O11's citations into bitz_lipscomb.py after rebasing O9 onto O11.
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:41', 'packages/ice/legoesm/ice/bitz_lipscomb.py:42')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1677', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2275')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1735', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2333')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1822', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2420')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1848', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2446')
+_reanchor('packages/ice/legoesm/ice/bitz_lipscomb.py:1880', 'packages/ice/legoesm/ice/bitz_lipscomb.py:2478')
 
 # SI3 round 12 adds the O5 trace API and exposes dynamics-on log expectations.
 # Re-anchor every affected historical receipt citation before the full-map audit.

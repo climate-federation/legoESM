@@ -304,3 +304,26 @@ Evidence: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round16/`.
 
 Choices in these fixes: the melt-out family's values, the 621-cell stride for the flip check, and the entry
 premises stated in the proofs: UNASKED, offered for revert. Review of these fixes: UNREVIEWED.
+
+## Rebase onto the lane tip (resume 4)
+
+- Rebased the nine O9 commits from base `abd7262c11` onto the lane tip `d2402fd179` (O11 landed). Pre-rebase tip
+  kept as branch `backup/si3_r16_pre_rebase_7b0acc0c5b`.
+- One textual conflict, in the citation gate's `CITATION_MAP` (commit "O9 receipt"): O11's round-17 block and
+  O9's round-16 block were both appended after the same O8 entry. Resolution: both kept, O11's block first, then
+  O9's; no entry dropped or edited; no new duplicate key (the dict's 6 duplicate keys are the same on the lane tip,
+  the pre-rebase tip and the result).
+- `packages/ice/legoesm/ice/bitz_lipscomb.py`, the gate's `FILES` block and the D5 probe test merged without
+  conflict. O11's model edits there keep their line numbers; O9's insertions above them moved seven O11 receipt
+  citations (`:41`, `:1677`, `:1735`, `:1787`, `:1822`, `:1848`, `:1880`). Resolution: the O11 receipt cites the
+  same statements at their new lines and six `_reanchor` rows follow them (`:1787` already had O9's re-anchor to
+  `:2385`). Every SI3 receipt's per-receipt gate then passes, full map included.
+- Mechanical check: for every file, the ordered added/removed lines of backup -> rebased HEAD equal those of
+  `abd7262c11` -> `d2402fd179` (10 files, `DELTA_EQUALS_LANE`); the commits after the rebase add only this
+  section, the preregistration status line and the citation follow-up above.
+- DECISION 178 (user, 2026-10-26): the 1.0e-15 relative batch-1 gradient change on the shared column step from
+  the O9 barriers is accepted: ASKED. Per-cell Picard counts (`ln_zdf_chkcvg = T`): still pending with the user
+  (preregistration section 6).
+
+Choices in the rebase: block order in the conflict (lane first) and re-anchoring by `_reanchor` rows rather than
+editing O11's map entries: UNASKED, mechanical; offered for revert.

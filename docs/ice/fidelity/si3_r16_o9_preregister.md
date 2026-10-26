@@ -115,6 +115,7 @@ operands). Per-site survivor tests: `tests/ice/unit/test_si3_o9_tie_survivors.py
 - P steps: pick `kt = 1, 2, 100`, every gathered cell, all five categories.
 - Per-cell Picard counts: (1) not scored, P as above (pick); (2) record overlay `ln_zdf_chkcvg = T` so NEMO fills
   `tice_cvgstp_1d`, a deck deviation that adds a branch inside NEMO's `ji` loop and needs its own census.
+  Status 2026-10-26: still PENDING with the user; nothing scores per-cell counts until answered.
 - Steps scored for F0-F4: pick all 100 steps of the master record.
 
 ## 7. CHOICES (ASKED/UNASKED)
