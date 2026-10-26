@@ -196,3 +196,17 @@ file: 185 passed.
 2. S0-F: certify `fld_read` for `sn_ice`, including the one-ULP blend.
 3. S4: build K0, boot/10-step smoke, wire S1 -> S3 -> S2 into the
    standalone card with a production-call plant, then acquire and score S3.
+
+## Verification (final tree, foreground, CPU binary64)
+
+- Per-receipt citation gate on this receipt: PASS, 13 citations, 0
+  failures, 0 unmapped, 0 map-audit failures, 9 / 9 self-tests fired.  The
+  two-line shift plant on the `stprk3.f90:155` key exits 1
+  (SYMBOL-NOT-AT-LINE).
+- Default `land.sh` ORCA2 inventory, split to fit the foreground cap:
+  99 + 41 + 11 = **151 / 152 PASS**.  The remaining test, the staircase
+  stage-velocity test in the face-mask-rank file (574 s alone in round 335),
+  was killed by the 595 s cap before it finished, with the machine's load
+  average near 25.  It is **UNVERIFIED here**; the operator's push gate runs
+  it.  It does not import either changed module's new code: both changes are
+  pure additions.
