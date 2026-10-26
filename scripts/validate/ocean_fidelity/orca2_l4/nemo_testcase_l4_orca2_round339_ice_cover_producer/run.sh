@@ -74,7 +74,7 @@ check_placement() {
     /CASE\(  2 \).*CALL ice_stp/ {ice=NR}
     /CALL r339_write\(kt,fr_i,nn_fsbc\)/ {c++; cl=NR}
     /IF\( ln_icebergs/ {iceberg=NR}
-    /SUBROUTINE r339_fixture_write/ {f++; fl=NR}
+    /^[[:space:]]*SUBROUTINE r339_fixture_write/ {f++; fl=NR}
     /END MODULE sbcmod/ {e=NR}
     END {exit !(u==1 && c==1 && f==1 && ul<s && s<ice && ice<cl && cl<iceberg && iceberg<fl && fl<e)}
   ' "$1"
