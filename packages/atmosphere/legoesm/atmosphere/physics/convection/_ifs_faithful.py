@@ -144,6 +144,27 @@ def _reclassify_ktype(ktype, ldcum, p_half, k_cbot, k_ctop, depth_split_pa):
     return ktype
 
 
+def ifs_ascent_config(config) -> IFSAscentConfig:
+    """The run's ascent parameters: the BechtoldConfig fields that ARE the
+    IFS ascent constants, the IFS source defaults for the rest.
+
+    ENTRORG = epsilon_deep and DETRPEN = delta_deep (same 1/m, same IFS
+    defaults); ENTSHALP = epsilon_shallow / epsilon_deep, the shallow
+    multiplier on the deep organised entrainment (cuascn.F90:500-507), so the
+    shallow rate equals epsilon_shallow where that entrainment is the bare
+    ENTRORG (it carries the RH factor and the cap elsewhere); RPRCON /
+    ZDNOPRC by name.  epsilon_deep must be > 0 (validate_strict's range).
+    The closure and test-ascent configs still use IFS source defaults.
+    """
+    return IFSAscentConfig()._replace(
+        entrorg=config.epsilon_deep,
+        detrpen=config.delta_deep,
+        entshalp=config.epsilon_shallow / config.epsilon_deep,
+        rprcon=config.rprcon,
+        dnoprc=config.dnoprc,
+    )
+
+
 def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
                             conv_stoch_state, prng_key, dt, config,
                             shf_w_m2, lhf_w_m2, land_frac,
@@ -229,7 +250,7 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
         T, q_v, qs, p_full, p_half, geo_full, geo_half,
         T_h, q_h, plitot,
         ldcum, ktype, k_dpl, k_cbot, klab0,
-        T_u0, q_u0, l_u0, w_base, M_b, dt, cfg=IFSAscentConfig())
+        T_u0, q_u0, l_u0, w_base, M_b, dt, cfg=ifs_ascent_config(config))
     # ascent yields the flux profiles at first-guess M_b (attribute `M`);
     # the closure then only RESCALES them (no second ascent).
 
