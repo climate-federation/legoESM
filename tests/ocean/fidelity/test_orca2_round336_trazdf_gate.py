@@ -81,13 +81,20 @@ def test_clean_record_replays_and_covers_wet_cells():
 
 @pytest.mark.parametrize("plant", (
     "nonfinite", "signed-zero", "wet", "replay", "association", "actual",
-    "filled-range", "zdfphy", *(
-        f"zdfphy-{name.replace('_', '-')}" for name in gate.ZDFPHY_PHASE_FIELDS),
+    "filled-range",
 ))
 def test_value_plants_fire(plant):
     record = copy.deepcopy(_record())
     with pytest.raises(gate.GateError):
         gate.verify_record(record, plant=plant)
+
+
+@pytest.mark.parametrize("plant, message", gate.ZDFPHY_PLANT_MESSAGES.items())
+def test_zdfphy_plants_fire_their_own_phase_check_after_checksum(plant, message):
+    record = copy.deepcopy(_record())
+    with pytest.raises(gate.GateError) as error:
+        gate.verify_record(record, plant=plant)
+    assert str(error.value) == message
 
 
 def test_structural_plants_are_registered():

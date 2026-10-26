@@ -95,6 +95,14 @@ check_real_context() {
 echo_has() {
   grep -E "(^|[[:space:]])$2[[:space:]]*=[[:space:]]*$3([[:space:]]|$)" "$1" >/dev/null
 }
+echo_number_is() {
+  awk -v key="$2" -v expected="$3" '
+    {
+      for(i=1; i<NF-1; i++) if($i==key && $(i+1)=="=") { found++; value=$(i+2) }
+    }
+    END { exit !(found==1 && value+0==expected+0) }
+  ' "$1"
+}
 check_selectors() {
   echo_has "$1" ln_zad_Aimp F \
     && echo_has "$1" ln_zdfmfc F \
@@ -104,7 +112,11 @@ check_selectors() {
     && echo_has "$1" ln_zdfddm T \
     && echo_has "$1" ln_zdfswm F \
     && echo_has "$1" ln_zdfiwm T \
-    && echo_has "$1" ln_traldf_msc T
+    && echo_has "$1" ln_traldf_msc T \
+    && echo_number_is "$1" rn_avt_rnf 0.001 \
+    && echo_number_is "$1" rn_evd 100.0 \
+    && echo_number_is "$1" rn_avts 0.0001 \
+    && echo_number_is "$1" rn_hsbfr 1.6
 }
 check_r336_landing() {
   local source=$1 plant=${2:-none}
@@ -258,6 +270,12 @@ for selector in ln_zad_Aimp ln_zdfmfc ln_rnf_mouth ln_zdftke ln_zdfevd \
   sed -E "s/(${selector}[[:space:]]*=[[:space:]]*)[TF]/\\1$replacement/" \
     "$SOURCE_OUTPUT" >"$driver_dir/${selector}.moved"
   plant_must_refuse "r336-${selector}-moved" check_selectors "$driver_dir/${selector}.moved"
+done
+for parameter in rn_avt_rnf rn_evd rn_avts rn_hsbfr; do
+  sed -E "s/(${parameter}[[:space:]]*=[[:space:]]*)[-+0-9.Ee]+/\1 99/" \
+    "$SOURCE_OUTPUT" >"$driver_dir/${parameter}.moved"
+  plant_must_refuse "r336-${parameter}-moved" \
+    check_selectors "$driver_dir/${parameter}.moved"
 done
 
 "$PY" "$NAMELIST_GATE" --staged "$SOURCE_NAMELIST" --reference "$NAMELIST_REF"
@@ -430,8 +448,7 @@ except gate.GateError:
 else:
     raise AssertionError("checksum plant stayed green")
 for plant in ("nonfinite", "signed-zero", "wet", "replay", "association", "actual",
-              "filled-range", "zdfphy", *(
-                  f"zdfphy-{name.replace('_', '-')}" for name in gate.ZDFPHY_PHASE_FIELDS)):
+              "filled-range"):
     record = gate.read_record(root / gate.record_name(0), expected_shape=(7, 6, 5))
     try:
         gate.verify_record(record, plant=plant)
@@ -439,6 +456,17 @@ for plant in ("nonfinite", "signed-zero", "wet", "replay", "association", "actua
         print(f"PREFLIGHT_PLANT_FIRED r336-{plant}")
     else:
         raise AssertionError(f"{plant} value plant stayed green")
+for plant, expected in gate.ZDFPHY_PLANT_MESSAGES.items():
+    record = gate.read_record(root / gate.record_name(0), expected_shape=(7, 6, 5))
+    try:
+        gate.verify_record(record, plant=plant)
+    except gate.GateError as error:
+        if str(error) != expected:
+            raise AssertionError(
+                f"{plant} hit {str(error)!r}, expected phase refusal {expected!r}")
+        print(f"PREFLIGHT_PLANT_FIRED r336-{plant}: {error}")
+    else:
+        raise AssertionError(f"{plant} phase plant stayed green")
 print("R336_PATCHED_TRAZDF_BOUNDS_REPLAY_ASSOCIATION_AND_SIGN_PASS ranks=2 fields=36")
 PY
 
@@ -597,14 +625,21 @@ for plant in header field-order truncation checksum stamp selector extent time-l
     zdfphy-avt-k-zdf zdfphy-avt-after-tke zdfphy-avs-after-tke \
     zdfphy-avt-after-runoff zdfphy-avs-after-runoff zdfphy-avt-after-evd \
     zdfphy-avs-after-evd zdfphy-avt-after-ddm zdfphy-avs-after-ddm \
-    zdfphy-avt-after-iwm zdfphy-avs-after-iwm; do
+    zdfphy-avt-after-iwm zdfphy-avs-after-iwm zdfphy-final-avs \
+    zdfphy-nonfinite zdfphy-negative; do
   log=$TARGET_RUN/admit-r336-trazdf-$plant.log
   if "$PY" "$GATE" --record-dir "$TARGET_RUN" --expect-commit "$producer" \
       --plant "$plant" >"$log" 2>&1; then
     refuse "round-336 tra_zdf admission plant stayed green: $plant"
   fi
-  grep -F 'STATUS PLANT-FIRED' "$log" >/dev/null \
-    || refuse "round-336 tra_zdf admission plant missed refusal: $plant"
+  if [[ $plant == zdfphy* ]]; then
+    expected=$("$PY" -c "from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round336_trazdf_gate as g; print(g.ZDFPHY_PLANT_MESSAGES['$plant'])")
+    grep -Fx "STATUS PLANT-FIRED: $expected" "$log" >/dev/null \
+      || refuse "round-336 zdf_phy plant hit the wrong refusal: $plant"
+  else
+    grep -F 'STATUS PLANT-FIRED' "$log" >/dev/null \
+      || refuse "round-336 tra_zdf admission plant missed refusal: $plant"
+  fi
   printf 'ACQUISITION_PLANT_FIRED r336-trazdf-%s\n' "$plant"
 done
 "$PY" "$GATE" --record-dir "$TARGET_RUN" --expect-commit "$producer" \

@@ -20,6 +20,7 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 )
 
 MAGIC = "NEMO_L4_R336TZ"
+EVD_COEFFICIENT = np.float64(100.0)
 HEADER_NAMES = (
     "version", "kt", "Kbb", "Kmm", "Krhs", "Kaa", "rank", "nx", "ny",
     "nz", "ntracer", "real_bits", "n_fields", "ln_zdfddm", "ln_traldf_msc",
@@ -37,6 +38,28 @@ INTERIOR_THREE_D_FIELDS = (
     "avt_after_ddm", "avs_after_ddm", "avt_after_iwm", "avs_after_iwm",
 )
 ZDFPHY_PHASE_FIELDS = INTERIOR_THREE_D_FIELDS[2:]
+ZDFPHY_FIELD_PLANTS = tuple(
+    f"zdfphy-{name.replace('_', '-')}" for name in ZDFPHY_PHASE_FIELDS)
+ZDFPHY_EXTRA_PLANTS = (
+    "zdfphy-final-avs", "zdfphy-nonfinite", "zdfphy-negative",
+)
+ZDFPHY_PLANT_MESSAGES = {
+    "zdfphy-avt-k-zdf": "TKE avt_k copy boundary moved",
+    "zdfphy-avt-after-tke": "TKE avt_k copy boundary moved",
+    "zdfphy-avs-after-tke": "runoff boundary changed avs",
+    "zdfphy-avt-after-runoff": "runoff boundary decreased avt",
+    "zdfphy-avs-after-runoff": "runoff boundary changed avs",
+    "zdfphy-avt-after-evd": "EVD boundary wrote neither prior avt nor rn_evd*wmask",
+    "zdfphy-avs-after-evd": "EVD boundary changed avs",
+    "zdfphy-avt-after-ddm": "DDM boundary decreased avt",
+    "zdfphy-avs-after-ddm": "DDM boundary set avs below incoming avt",
+    "zdfphy-avt-after-iwm": "IWM boundary decreased avt",
+    "zdfphy-avs-after-iwm": "IWM boundary decreased avs",
+    "zdfphy": "IWM avt boundary differs from final tra_zdf input",
+    "zdfphy-final-avs": "IWM avs boundary differs from final tra_zdf input",
+    "zdfphy-nonfinite": "zdf_phy phase process values are non-finite",
+    "zdfphy-negative": "zdf_phy phase process values are negative",
+}
 TWO_D_FIELDS = ("r3t_Kbb", "r3t_Kmm", "r3t_Kaa")
 ONE_D_FIELDS = ("e3w_1d",)
 FOUR_D_FIELDS = (
@@ -57,7 +80,7 @@ PLANTS = (
     "header", "field-order", "truncation", "checksum", "stamp", "selector",
     "extent", "nonfinite", "signed-zero", "wet", "replay", "association",
     "actual", "time-level", "filled-range", "zdfphy",
-    *(f"zdfphy-{name.replace('_', '-')}" for name in ZDFPHY_PHASE_FIELDS),
+    *ZDFPHY_FIELD_PLANTS, *ZDFPHY_EXTRA_PLANTS,
 )
 OBSERVER_UNITS = ldf_gate.OBSERVER_UNITS + ("trazdf",)
 WRITER_UNITS = ldf_gate.WRITER_UNITS + ("round336_trazdf_writer",)
@@ -157,6 +180,57 @@ def _bit_equal(actual: np.ndarray, expected: np.ndarray,
         np.ascontiguousarray(expected[support]).view(np.uint64))), message)
 
 
+def _set_phase_chain(fields: dict[str, np.ndarray], index: tuple[int, int, int],
+                     value: np.float64) -> None:
+    """Set one complete phase chain while preserving every transition invariant."""
+    for name in ZDFPHY_PHASE_FIELDS:
+        fields[name][index] = value
+    fields["avt"][index] = value
+    fields["avs"][index] = value
+
+
+def _apply_zdfphy_plant(fields: dict[str, np.ndarray], plant: str,
+                        index: tuple[int, int, int]) -> None:
+    """Mutate phase content after its stream checksum has already passed."""
+    if plant == "zdfphy-nonfinite":
+        _set_phase_chain(fields, index, np.float64(np.nan))
+    elif plant == "zdfphy-negative":
+        _set_phase_chain(fields, index, np.float64(-1.0))
+    elif plant in ("zdfphy", "zdfphy-final-avs"):
+        name = "avt_after_iwm" if plant == "zdfphy" else "avs_after_iwm"
+        fields[name][index] = np.nextafter(fields[name][index], np.inf)
+    elif plant in ZDFPHY_FIELD_PLANTS:
+        name = plant.removeprefix("zdfphy-").replace("-", "_")
+        if name in ("avt_k_zdf", "avt_after_tke", "avs_after_tke",
+                    "avs_after_runoff", "avs_after_evd"):
+            fields[name][index] = np.nextafter(fields[name][index], np.inf)
+        elif name == "avt_after_runoff":
+            fields["avt_k_zdf"][index] = 1.0
+            fields["avt_after_tke"][index] = 1.0
+            fields[name][index] = 0.0
+        elif name == "avt_after_evd":
+            prior = fields["avt_after_runoff"][index]
+            fields[name][index] = 17.0 if prior != 17.0 else 18.0
+        elif name in ("avt_after_ddm", "avs_after_ddm"):
+            fields["avt_k_zdf"][index] = 1.0
+            fields["avt_after_tke"][index] = 1.0
+            fields["avt_after_runoff"][index] = 1.0
+            fields["avt_after_evd"][index] = 1.0
+            fields["avt_after_ddm"][index] = 1.0
+            fields[name][index] = 0.0
+        elif name in ("avt_after_iwm", "avs_after_iwm"):
+            fields["avt_k_zdf"][index] = 1.0
+            fields["avt_after_tke"][index] = 1.0
+            fields["avt_after_runoff"][index] = 1.0
+            fields["avt_after_evd"][index] = 1.0
+            fields["avt_after_ddm"][index] = 1.0
+            fields["avs_after_ddm"][index] = 1.0
+            fields["avt_after_iwm"][index] = 1.0
+            fields[name][index] = 0.0
+        else:  # pragma: no cover - registration and the tuple above are exhaustive
+            raise GateError(f"unknown zdf_phy field plant {name}")
+
+
 def verify_record(record: dict, *, plant: str | None = None) -> dict[str, int]:
     fields, header = record["fields"], record["header"]
     seen = fields["solve_seen"] == 1.0
@@ -165,14 +239,6 @@ def verify_record(record: dict, *, plant: str | None = None) -> dict[str, int]:
     owned[header["ntsi"] - 1:header["ntei"],
           header["ntsj"] - 1:header["ntej"], :header["nz"] - 1, :] = True
     wet_index = tuple(np.argwhere(wet & owned)[0])
-    interior_wet_index = (wet_index[0] - (header["ntsi"] - 1),
-                          wet_index[1] - (header["ntsj"] - 1), wet_index[2])
-    if plant is not None and plant.startswith("zdfphy-"):
-        planted_name = plant.removeprefix("zdfphy-").replace("-", "_")
-        require(planted_name in ZDFPHY_PHASE_FIELDS,
-                f"unknown zdf_phy phase plant {planted_name}")
-        fields[planted_name][interior_wet_index] = np.nextafter(
-            fields[planted_name][interior_wet_index], np.inf)
     r331._verify_checksums(record)
     if plant == "nonfinite":
         fields["forward"][wet_index] = np.nan
@@ -200,12 +266,14 @@ def verify_record(record: dict, *, plant: str | None = None) -> dict[str, int]:
     e3w_support[i0:i1, j0:j1, :] = True
     process_support = np.zeros(fields["avt"].shape, dtype=bool)
     process_support[:, :, 1:header["nz"] - 1] = True
+    process_wet = (fields["tmask"][i0:i1, j0:j1, :] != 0.0) & process_support
+    require(bool(np.any(process_wet)), "record has no wet zdf_phy process cell")
+    interior_wet_index = tuple(np.argwhere(process_wet)[0])
 
     if plant == "filled-range":
         fields["e3t_Kaa"][0, 0, 0] = 1.0
-    if plant == "zdfphy":
-        fields["avt_after_iwm"][interior_wet_index] = np.nextafter(
-            fields["avt_after_iwm"][interior_wet_index], np.inf)
+    if plant in ZDFPHY_PLANT_MESSAGES:
+        _apply_zdfphy_plant(fields, plant, interior_wet_index)
 
     def filled(name: str, expected: np.ndarray, support: np.ndarray) -> None:
         _bit_equal(fields[name], expected, support, f"{name} filled-range replay moved")
@@ -230,16 +298,44 @@ def verify_record(record: dict, *, plant: str | None = None) -> dict[str, int]:
         require(bool(np.all((fields[name][outside] == 0.0)
                             & np.signbit(fields[name][outside]))),
                 f"{name} overwrote zdf_phy-unfilled cells")
+    require(all(bool(np.isfinite(fields[name][process_support]).all())
+                for name in ZDFPHY_PHASE_FIELDS),
+            "zdf_phy phase process values are non-finite")
     _bit_equal(fields["avt_after_tke"], fields["avt_k_zdf"], process_support,
                "TKE avt_k copy boundary moved")
+    require(bool(np.all(fields["avt_after_runoff"][process_support]
+                        >= fields["avt_after_tke"][process_support])),
+            "runoff boundary decreased avt")
     _bit_equal(fields["avs_after_runoff"], fields["avs_after_tke"], process_support,
                "runoff boundary changed avs")
+    evd_before = fields["avt_after_runoff"]
+    evd_after = fields["avt_after_evd"]
+    evd_changed = evd_after.view(np.uint64) != evd_before.view(np.uint64)
+    evd_valid = ((~evd_changed) | (evd_after == 0.0)
+                 | (evd_after == EVD_COEFFICIENT))
+    require(bool(np.all(evd_valid[process_support])),
+            "EVD boundary wrote neither prior avt nor rn_evd*wmask")
     _bit_equal(fields["avs_after_evd"], fields["avs_after_runoff"], process_support,
                "EVD boundary changed avs")
+    require(bool(np.all(fields["avt_after_ddm"][process_support]
+                        >= fields["avt_after_evd"][process_support])),
+            "DDM boundary decreased avt")
+    require(bool(np.all(fields["avs_after_ddm"][process_support]
+                        >= fields["avt_after_evd"][process_support])),
+            "DDM boundary set avs below incoming avt")
+    require(bool(np.all(fields["avt_after_iwm"][process_support]
+                        >= fields["avt_after_ddm"][process_support])),
+            "IWM boundary decreased avt")
+    require(bool(np.all(fields["avs_after_iwm"][process_support]
+                        >= fields["avs_after_ddm"][process_support])),
+            "IWM boundary decreased avs")
     _bit_equal(fields["avt_after_iwm"], fields["avt"], process_support,
                "IWM avt boundary differs from final tra_zdf input")
     _bit_equal(fields["avs_after_iwm"], fields["avs"], process_support,
                "IWM avs boundary differs from final tra_zdf input")
+    require(all(bool(np.all(fields[name][process_support] >= 0.0))
+                for name in ZDFPHY_PHASE_FIELDS),
+            "zdf_phy phase process values are negative")
 
     if plant == "replay":
         fields["diagonal"][wet_index] = np.nextafter(
