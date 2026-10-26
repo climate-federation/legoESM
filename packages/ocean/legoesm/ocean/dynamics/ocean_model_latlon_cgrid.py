@@ -215,13 +215,13 @@ def _nemo_stage3_l8_krhs_walk(adv_t, adv_s, *term_groups):
 def _nemo_safe_stored_ldf_divisor(stored_thickness, active_3d):
     """Keep NEMO's stored wet divisor without a dry ``0 / 0`` transpose.
 
-    NEMO's ``tra_ldf`` loops only over active tracer cells.  legoESM evaluates
-    the rectangular array and masks the tendency afterward; the materialized
-    partial-cell thickness is zero below the sea floor and in land columns.
-    Supplying that zero to the division makes its reverse rule evaluate
-    ``zero_cotangent / 0`` even though the cell is physically inactive.  One
-    is an inert divisor on those cells and leaves every executed NEMO word
-    untouched.
+    NEMO's ``tra_ldf`` also updates dry cells, where its stored thickness is
+    nonzero, and masks them later.  legoESM's materialized partial-cell
+    thickness is zero below the sea floor and in land columns, so dividing by
+    it there makes the reverse rule evaluate ``zero_cotangent / 0`` even
+    though the cell is masked.  One is an inert divisor on those cells: every
+    wet word equals NEMO's and every dry cell stays masked (round 333 receipt,
+    operator amendment).
     """
 
     stored_thickness = jnp.asarray(stored_thickness)

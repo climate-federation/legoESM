@@ -751,3 +751,18 @@ seconds, and the revert-sensitive production-call-site suite passes all 3
 tests in 1.43 seconds. The operator-owned DINO month/push gate is not claimed
 here; the requested faithful DINO probe is the passing 66-hash measurement
 reported above.
+
+## Operator amendment (2026-10-25, after Claude and Argon reviews: both LAND)
+
+Both reviews independently confirmed the reverse-safe stored-divisor landing:
+the LDF and damping accumulators are exact against NEMO at every wet cell for
+T and S (the legacy divisor missed 14 T and 4 S words), no dry-cell bit
+changes, the post-solve state is unchanged, reverse cotangents are finite with
+rn_Ud reverse -4.5118108e-05 against a central difference -4.5118107e-05
+(relative 2e-8), Decision 122 rows and DINO 66/66 are unchanged, and only the
+rung-10 rk3_kmm call site changed. Claim A is confirmed at the walk level
+(the 18 registered T words first differ after tra_zdf); its internal primitive
+stays PLAUSIBLE. CORRECTION: the sentence above that NEMO "executes only wet
+tracer cells in its divisions" is wrong — NEMO's LDF update also runs at
+166,259 dry rank-0 cells, where its stored e3t is nonzero, and the result is
+masked; the helper's docstring was corrected to say so (no line shift).
