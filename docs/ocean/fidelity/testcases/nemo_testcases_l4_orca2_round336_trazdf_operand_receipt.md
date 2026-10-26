@@ -554,3 +554,87 @@ SHA-256 is
 `a199421a3a3c3466f4b0cf403655ab82284f7e63e97b56a4c121389f811fd16d`.
 The reports are `round336/resume8_citation_gate.json`,
 `round336/resume8_default_gate.log`, and `round336/resume8_ratchet.log`.
+
+## Resume 9: historical observer audit and production-arithmetic kt-2 TKE handoff
+
+The admitted round-331 and round-332 TKE records did **not** come from the
+production arithmetic program.  Their calls are inside NEMO's `jj` loop:
+round 331 inserts four row observers across `tke_tke` at
+`zdftke_round331.patch:8-24`, and round 332 retains those calls and adds its
+mixing-length row call at `zdftke_round332.patch:12-23`.
+
+At the real record flags (`-fdefault-real-8 -O3 -funroll-all-loops
+-fcray-pointer -ffree-line-length-none -fallow-argument-mismatch
+-fno-tree-vectorize`), the per-function FP census is:
+
+| source program | `zdf_tke` FP | `tke_tke` FP | `tke_avn` FP |
+|---|---:|---:|---:|
+| production | 1,007 | fully inlined into `zdf_tke` | 783 |
+| admitted round 331 | 783 | 1,054 | inlined into `zdf_tke` |
+| admitted round 332 | 0 | 1,054 | 783 |
+| new round-336 copy-out observer | 1,007 | fully inlined into `zdf_tke` | 783 |
+
+The normalized opcode multisets of both FP-bearing functions in the new build
+equal production exactly; the arithmetic plant changes the `zdf_tke` census.
+The historical build independently pins every nonzero count above and refuses
+if round 332 unexpectedly regains FP arithmetic in `zdf_tke`
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:918-989`).
+Thus the 1,007-to-1,054 `tke_tke` change is plain evidence that the admitted
+round-331/332 TKE arithmetic differs from production, not merely a symbol-name
+or record-layout difference.
+
+Earlier-receipt impact is listed here without rewriting those receipts:
+
+- Round 331's record-dependent attribution of the first TKE mismatch to the
+  RHS family, its exact recorded recurrence/returned-energy claims, the seven
+  residual `avm/avt` cells, and the stored-`Kbb` bottom-boundary ownership all
+  rest on the non-production round-331 TKE record. Its independent D122 card,
+  DINO, and gradient measurements still describe the landed model candidate,
+  but they do not repair the NEMO statement-localization premise.
+- Round 332's seven-cell `zmxlm`/`zmxld`/`p_pdlr` walk, `lup` surface-anchor
+  ownership, exclusion of literal viscosity order, and literal Prandtl
+  conclusion rest on the combined round-331/332 TKE record. The separate
+  raw-V/fold acquisition and its later V landing do not.
+- Round 333 cites rounds 331/332 only as contextual refinement of earlier
+  vertical/TKE boundaries. Its kt-2 tracer records, divisor ownership, and
+  landed tracer statement do not consume their TKE arithmetic.
+- Round 334 mentions equality to a round-332 rescore artifact; it makes no TKE
+  statement-localization inference from the admitted 331/332 programs.
+- Round 336 resumes 7--8 do not use a kt-1 TKE record to score their admitted
+  kt-2 `zdf_phy`/`tra_zdf` walk. However, resume 8's claim that activating the
+  inherited TKE observers “changes no NEMO arithmetic,” and therefore its
+  proposed kt-2 acquisition tool, is refuted and superseded here.
+
+The replacement tool has three procedure calls, all in outer `zdf_tke`, and
+only direct assignments at the twelve statement boundaries inside
+`tke_tke`/`tke_avn`
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/zdftke_round336.patch:11-37`).
+The writer allocates full-halo `p_avm/rn2/rn2b/wmask` and interior-only
+`A2D(0)` energy/diffusivity/source arrays with exact kt-1/kt-2 level checks
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/tke_round336_writer.F90:49-76`).
+Its 31 ordered fields now include entry `en/p_avt`, `rn2/rn2b`, post-Langmuir
+`en`, pre-sweep `zmxlm`, and pre-Prandtl `zav`, as well as the previous
+boundary, matrix, solve, final-mixing, and final-coefficient values
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/tke_round336_writer.F90:142-174`).
+
+The read-only preflight passes 17 focused tests and the inherited 43-test
+battery; syntax-compiles all five relevant Fortran units; fires all 15 real
+preprocessed-source misplacement plants; runs the actual patched NEMO routines
+at ranks 0 and 1 with bounds checking, real full-halo versus `A2D(0)` extents,
+rank-distinct data, and signed zeros; parses 31 fields and fires all parser and
+semantic plants; and passes same-program identity for 423 objects and 411
+preprocessed sources. The wrapper has its own `EXIT` retention trap
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:34-52`)
+and its stub NEMO exercises success, quoted refusal, crash retention, in-place
+admission, and retained admission through the actual driver branches
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:104-154`).
+
+The preflight log is `round336/resume9_tke_preflight.log`, SHA-256
+`d4eeb86f56d810e166fd399f997fb5a8ced37990fb49e231ea067b64bbb35b3d`.
+It ends at `ORCA2_ROUND336_TKE_KT2_PREFLIGHT_READY`; no NEMO production run or
+build was started. Codex review: operator. The round therefore stops for the
+new production-arithmetic kt-2 TKE record.
+
+```text
+ACQUISITION_NEEDED: scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh
+```

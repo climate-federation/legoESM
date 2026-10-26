@@ -203,6 +203,34 @@ FILES = {
         REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
         "nemo_testcase_l4_orca2_round332_source_order_acquisition/"
         "round332_writer.F90"),
+    "zdftke_round331.patch": (
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round331_tke_acquisition/"
+        "zdftke_round331.patch"),
+    "zdftke_round332.patch": (
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round332_source_order_acquisition/"
+        "zdftke_round332.patch"),
+    "scripts/validate/ocean_fidelity/orca2_l4/"
+    "nemo_testcase_l4_orca2_round336_tke_acquisition/"
+    "zdftke_round336.patch": (
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round336_tke_acquisition/"
+        "zdftke_round336.patch"),
+    "scripts/validate/ocean_fidelity/orca2_l4/"
+    "nemo_testcase_l4_orca2_round336_tke_acquisition/"
+    "tke_round336_writer.F90": (
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round336_tke_acquisition/"
+        "tke_round336_writer.F90"),
+    "scripts/validate/ocean_fidelity/orca2_l4/"
+    "nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh": (
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh"),
+    "scripts/validate/ocean_fidelity/orca2_l4/"
+    "nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh": (
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4/"
+        "nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh"),
     "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/MY_SRC/stprk3.F90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/MY_SRC/stprk3.F90"),
     # ORCA2 round 311: G1b's build (P5) and G8's build (R31FULLENTRY_FIX1).
@@ -1890,6 +1918,30 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    'zdftke_round331.patch:8-24': [
+        '@@ -254,0 +259,6 @@',
+        '+         CALL r331_after_solve(jj,en(ntsi:ntei,jj,1:jpkm1))', 17],
+    'zdftke_round332.patch:12-23': [
+        '@@ -185,3 +187,5 @@',
+        '+            & zmxld(ntsi:ntei,1:jpkm1),p_pdlr(ntsi:ntei,jj,2:jpkm1))', 12],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/zdftke_round336.patch:11-37': [
+        '@@ -182,0 +190,2 @@',
+        '+         r336_pre_pdlr_avt(:,jj,1:jpkm1)=p_avt(ntsi:ntei,jj,1:jpkm1) ! R336_TKE_COPYOUT', 27],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/tke_round336_writer.F90:49-76': [
+        'SUBROUTINE r336_tke_begin(kt,Kbb,Kmm,pen,pavt,pavm,psh2,pdissl,prn2,prn2b, &',
+        '& after_tke_en(A2D(0),jpk),after_tke_pdlr(A2D(0),jpk))', 28],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/tke_round336_writer.F90:142-174': [
+        'WRITE(unit) magic,2,nkt,nkbb,nkmm,narea-1,jpi,jpj,jpk,ntsi,ntei,ntsj,ntej, &',
+        "CALL put3(unit,'tke_wmask',entry_wmask,1,1,1)", 33],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:918-989': [
+        "command -v objdump >/dev/null || refuse 'no objdump for TKE arithmetic passivity proof'",
+        "printf 'R336_HISTORICAL_TKE_RESULT admitted_rounds=331,332 arithmetic_differs_from_production=yes\\n'", 72],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:34-52': [
+        'scratch=$(mktemp -d /tmp/orca2-r336-tke-driver.XXXXXX)',
+        'trap cleanup EXIT', 19],
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:104-154': [
+        'if ! R336_TKE_STUB_FLOW_ROOT=$base/success R336_TKE_STUB_NEMO=$stub \\',
+        "printf 'R336_TKE_STUB_FLOW_PASS cases=success,in-place,refusal,retention,retained-admission\\n'", 51],
     'zdf_oce.F90:70-72': [
         'ALLOCATE( avm (jpi,jpj,jpk), avm_k(jpi,jpj,jpk), avs(A2D(0),jpk)',
         '&      avmb(jpk)        , avtb(jpk)         , avtb_2d(A2D(0))', 3],
