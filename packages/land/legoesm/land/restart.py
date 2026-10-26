@@ -546,7 +546,7 @@ def file_md5(path) -> str:
     """md5 of a file's bytes (chunked)."""
     h = hashlib.md5()
     with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 24), b""):
+        for chunk in iter(lambda: fh.read(1 << 24), b""):  # coeff-ok: I/O chunk byte count, not physics
             h.update(chunk)
     return h.hexdigest()
 
@@ -564,7 +564,9 @@ def soil_hydraulics_stamp(retention_curve: str, parameter_source: str,
                                 HYDRAULICS_SOURCE_SURFDATA_COSBY):
         raise ValueError(f"unknown soil-hydraulics source {parameter_source!r}")
     from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
-    psi_from_theta(0.3, SoilHydraulicsConfig(retention_curve=str(retention_curve)))
+    psi_from_theta(
+        0.3,  # coeff-ok: domain-interior validation probe, not a coefficient
+        SoilHydraulicsConfig(retention_curve=str(retention_curve)))
     return {
         "version": SOIL_HYDRAULICS_STAMP_VERSION,
         "retention_curve": str(retention_curve),

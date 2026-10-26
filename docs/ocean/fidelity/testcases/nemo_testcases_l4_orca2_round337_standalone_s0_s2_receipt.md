@@ -232,21 +232,25 @@ control above after the rebase and obtained the same 0 / 328 result.
   stress-neighbour plant, S3-order plant, S0 plant, and S2 plant all turn the
   relevant composed test red;
 - NCAR bulk plus the directly affected freshwater and SSS-restoring suites
-  pass; the combined regression/ratchet battery reports 6,375 pass and 2 skip,
-  with only the two inherited ratchet failures below;
+  pass;
 - offline measured-group gate: 0 / 34,631 after, with all four one-ULP plants
   nonzero;
 - focused non-NEMO parent/current control: 0 / 328, with its plant nonzero;
 - the unchanged S1/O1 numerical gate remains exact for all 158,292 bulk and
   119,880 mapping words, and all per-field plants fire;
-- hardcoded-constant and inline-coefficient ratchets: 2
-  inherited FAIL.  The identical parent failures are the JRA55 test's
-  `273.15` literal and two land-restart findings; neither names a changed file.
+- hardcoded-constant and inline-coefficient ratchets: **6,186 pass, 2 skip**.
+  Decision 166's two inherited reds were cleared without production
+  arithmetic changes: the JRA55 test now names the canonical freezing-point
+  constant, while the land restart I/O chunk size and validation probe carry
+  explicit non-physics provenance.  The land restart suite is 22/22 PASS.
 
-The authoritative default ORCA2 inventory passed 152/152 in 1,334.08 s.  The
+The authoritative default ORCA2 inventory passed 152/152 in 1,324.33 s.  The
 default citation test and this receipt's 14-citation gate both pass with zero
 unmapped entries, zero failures, every map entry shift-sensitive, and every
-self-test firing.  A shifted round-337 source citation exits nonzero.
+self-test firing.  A shifted round-337 source citation exits nonzero.  The
+rebase initially exposed one duplicated S3/S0 `fldread` citation-map key; the
+duplicate was removed, its dedicated ratchet turned green, and the full
+152-test default battery was then rerun at the corrected tip.
 
 ## Acquisition preregistration and choices
 
