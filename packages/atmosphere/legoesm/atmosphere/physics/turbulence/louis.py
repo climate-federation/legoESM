@@ -5,15 +5,31 @@ functions applied to the eddy diffusivity. The mixing length follows
 an asymptotic formula, and the Richardson number controls the
 stability functions.
 
-The stability functions f_m, f_h are the shared
-``physics._shared.louis_stability_functions`` — see its docstring's
-"Faithfulness to Louis (1979) / LTG82" section (and
-``tests/atmosphere/hydrostatic/unit/test_louis_faithful.py``) for the
-term-by-term match to the published Eqs. (19)-(20) and the documented
-departures: the default ``c_louis=16.6`` is Holtslag & De Bruin (1988), not
-Louis (1979)'s 5.0 (``b``=``d``=5 ARE the Louis values), and a continuous
-sigmoid blend replaces Louis's hard Ri<0/Ri>=0 branch switch (AD-safe; the
-``√|Ri|`` floor leaves a small slope kink at exactly Ri=0, not strictly C¹ there).
+Oracle-faithful part (pinned against the RUNNING codes in
+``tests/atmosphere/hydrostatic/unit/test_louis_oracle.py``; fixture generator
+``scripts/validate/oracle/louis/``): given the gradient Richardson number, the
+interface diffusivities ``K = l²·|dV/dz|·f(Ri)``.
+  * Stable interfaces: OpenIFS vdfexcu.F90 (openifs @
+    8f6f722f732b92fed2c39af763d8fcd1ab15f573), including its velocity-difference
+    floor ``|dV|² >= REPDU2 = 0.1²`` (parphy.F90) and the heat function
+    ``1/(1 + 2·b_h·Ri·sqrt(1+d·Ri))``.
+  * Unstable interfaces: ECHAM/ICON "Louis 79" block (ICON icon-2026.04-public
+    8597da45ef4b86323f3fb844caedc4ae5e1ffc01, mo_turb_vdiff_diag.f90:518-530),
+    including its cube-root interior geometry factor.
+  * Stability functions: ``physics._shared.louis_stability_functions``.
+The oracles run fixed coefficients (IFS b=5, d=1, b_h=b; ICON b=c=5, b_h=1.5b);
+``LouisConfig`` keeps its own defaults (c_louis=16.6, d_louis=5), so the
+production configuration is the oracle algebra at different coefficients.
+The sigmoid ``blend_ri_sharpness`` reduces to the oracles' hard branch switch
+at its hard limit.
+
+NOT-YET-FAITHFUL / bespoke (no running oracle compared):
+  * the gradient Richardson number itself (dry theta_v form; IFS uses dry static
+    energy, ICON a moist/cloudy buoyancy);
+  * one mixing length ``kappa z/(1 + kappa z/l_mix_max)`` for both stabilities
+    (IFS uses a different asymptotic length when unstable);
+  * the optional cloud-top entrainment diffusivity (legoESM-specific, off by
+    default) and the PBL-height diagnostic.
 
 References
 ----------
@@ -101,6 +117,11 @@ __physics_contract__ = {
     ),
 }
 
+
+# --- Shear floor (OpenIFS parphy.F90:25, REPDU2 = 0.1**2), used by
+# vdfexcu.F90:361-363 ZDU2 = MAX(REPDU2, du**2 + dv**2) for the shear in K and by
+# vdfhghtn.F90:286-292 for the Richardson number ---
+_REPDU2_M2_S2 = 0.1 ** 2  # minimum squared velocity difference across an interface [m^2/s^2]
 
 # --- Cloud-top entrainment (marine-Sc BL-top ventilation) constants ---
 # Louis is a LOCAL K scheme with no non-local entrainment flux: at a
@@ -244,10 +265,13 @@ def louis_turbulence(
     dz_half = jnp.abs(z_full[:, :-1] - z_full[:, 1:])  # (ncol, nlev-1)
     dz_half = jnp.clip(dz_half, 1.0, None)
 
-    # Wind shear at half-levels
-    du_dz = (u[:, :-1] - u[:, 1:]) / dz_half
-    dv_dz = (v[:, :-1] - v[:, 1:]) / dz_half
-    S2 = du_dz ** 2 + dv_dz ** 2 + 1e-10  # shear squared, with floor
+    # Wind shear at half-levels with the OpenIFS velocity-difference floor
+    # (vdfexcu.F90:361-363: ZDU2 = MAX(REPDU2, du^2+dv^2), ZDUDZ = sqrt(ZDU2)/dz).
+    dU2 = jnp.maximum(
+        (u[:, :-1] - u[:, 1:]) ** 2 + (v[:, :-1] - v[:, 1:]) ** 2,
+        _REPDU2_M2_S2,
+    )
+    S2 = dU2 / dz_half ** 2
     S = jnp.sqrt(S2)
 
     # Virtual potential temperature for buoyancy:
@@ -264,22 +288,17 @@ def louis_turbulence(
     N2 = buoyancy_coefficient(jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz  # Brunt-Väisälä
     Ri = N2 / S2  # (ncol, nlev-1)
 
-    # Louis stability functions (Louis 1979; separate heat function per
-    # Louis, Tiedtke & Geleyn 1982) via the SHARED helper
-    # ``physics._shared.louis_stability_functions`` (also used by YSU's
-    # free-atmosphere branch — one home, no verbatim copy).
-    # Momentum uses b_m = b_louis; heat uses b_h = b_heat_ratio·b_louis
-    # (LTG82: 3b heat vs 2b momentum ⇒ ratio 1.5).  The branch denominators
-    # are SHARED between momentum and heat inside the helper so only the
-    # numerator coefficient differs: K_m is then exactly independent of
-    # b_heat_ratio, and b_heat_ratio = 1 recovers the Louis (1979)
-    # f_h = f_m form.  The heat function is *more* enhanced when unstable
-    # (Pr_t = K_m/K_h < 1) and *more* suppressed when stable (Pr_t > 1).
+    # Louis stability functions via the SHARED helper
+    # ``physics._shared.louis_stability_functions``: stable branch = OpenIFS
+    # vdfexcu.F90:393-395, unstable branch = ICON mo_turb_vdiff_diag.f90:518-530
+    # with the cube-root interior geometry from the full-level heights.
+    # Momentum uses b_m = b_louis; heat uses b_h = b_heat_ratio·b_louis.
     f_m, f_h = louis_stability_functions(
         Ri, l_mix, dz_half,
         config.b_louis, config.c_louis, config.d_louis,
         config.blend_ri_sharpness,
         b_heat=config.b_heat_ratio * config.b_louis,
+        z_full_pair=(z_full[:, :-1], z_full[:, 1:]),
     )
 
     # Eddy diffusivities at half-levels

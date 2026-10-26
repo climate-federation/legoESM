@@ -213,6 +213,12 @@ ice_landfast_speed_stop_nemo = 5.0e-3  # [m/s] icesbc.F90:421
 ice_full_cover_margin_nemo = 1.0e-3
 ice_growth_thickness_stop_nemo = 3.0  # [m]
 
+# WRF v4.8.0 MYNN-EDMF (phys/MYNN-EDMF/module_bl_mynnedmf.F90, submodule
+# 8f8e8b59021249949c04d1686edc5a02ca325627): qsat_blend writes the vapour/dry-air
+# molecular-weight ratio as a literal, not as R_d/R_v; the faithful port
+# (turbulence/mynnedmf_wrf.py) uses it there.
+epsilon_wrf_mynn = 0.622         # [-] qsat_blend literal
+
 # Active no-pond ice_alb identity, icealb.F90:124-185 and accepted namalb.
 albedo_snow_dry_orca1 = 0.85
 albedo_snow_melt_orca1 = 0.75

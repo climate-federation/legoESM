@@ -607,61 +607,60 @@ def mixing_length(z, l_mix_max, z_floor=1.0):
 
 
 def louis_stability_functions(
-    Ri, l_mix, dz, b, c, d, blend_sharpness, b_heat=None,
+    Ri, l_mix, dz, b, c, d, blend_sharpness, b_heat=None, z_full_pair=None,
 ):
-    """Louis (1979/1982) Richardson-number stability functions, smoothly blended.
+    """Louis Richardson-number stability functions, smoothly blended.
 
-    Canonical home for the Louis surface-layer / free-atmosphere stability
-    functions shared by the standalone Louis PBL scheme (``louis.py``) and the
-    free-atmosphere local-Ri branch of YSU (``ysu.py``) — previously verbatim
-    copies (CLAUDE.md "no duplicate numerics"; colocated with the shared
-    Blackadar :func:`mixing_length` the same closures use).
+    Canonical home for the Louis stability functions shared by the standalone
+    Louis PBL scheme (``louis.py``) and the free-atmosphere local-Ri branch of
+    YSU (``ysu.py``) (CLAUDE.md "no duplicate numerics"; colocated with the
+    shared Blackadar :func:`mixing_length` the same closures use).
 
-    Branch forms (Louis 1979; Louis, Tiedtke & Geleyn 1982 coefficient split):
+    Branch forms (momentum ``f_m`` with ``b``; heat ``f_h`` with ``b_heat``):
 
-    * Unstable (Ri<0): ``f = 1 - 2·b·Ri / (1 + 3·b·c·l²·sqrt(|Ri|) / dz²)``
-    * Stable   (Ri≥0): ``f = 1 / (1 + 2·b·Ri / sqrt(1 + d·Ri))``
+    * Stable   (Ri>0): ``f_m = 1/(1 + 2·b·Ri/sqrt(1+d·Ri))``,
+      ``f_h = 1/(1 + 2·b_heat·Ri·sqrt(1+d·Ri))``.
+    * Unstable (Ri<0): ``f = 1 - 2·b·Ri·u`` (heat: ``b_heat``) with
+      ``u = 1/(1 + 3·b·c·l²·sqrt(|Ri|·G))``, where, when the full-level
+      heights ``z_full_pair = (z_k, z_k+1)`` bracketing the interface are
+      passed,
+      ``G = (((z_k/z_k+1)^(1/3) - 1)/(z_k - z_k+1))³ / z_k+1``.
 
-    blended with ``sigmoid(blend_sharpness · Ri)`` so the function is CONTINUOUS
-    and AD-safe through neutral (see the differentiability caveat under
-    DEPARTURES — the ``√|Ri|`` floor leaves a small slope kink at exactly Ri=0).
-    The heat function shares BOTH branch
-    denominators with momentum and differs only in the numerator coefficient
-    ``b_heat`` (LTG82: 3b heat vs 2b momentum ⇒ ``b_heat = 1.5·b``);
-    ``b_heat=None`` (default) sets ``b_heat = b`` so ``f_h == f_m`` (the Louis
-    1979 single-function form, used by YSU which consumes only ``f_m``).
+    blended with ``sigmoid(blend_sharpness · Ri)``; at the hard-switch limit
+    (``blend_sharpness`` -> inf) this is the oracles' ``IF (Ri > 0)`` /
+    ``IF (Ri < 0)`` branch selection (at Ri = 0 both branches equal 1).
 
-    Faithfulness to Louis (1979) / LTG82 (oracle = the published closed forms;
-    pinned in ``tests/atmosphere/hydrostatic/unit/test_louis_faithful.py``)
-    ----------------------------------------------------------------------------
-    FAITHFUL (the UNBLENDED per-branch algebra matches the published equations
-    away from the numerical guards; the RETURNED f additionally applies the
-    sigmoid blend and the 1e-10 floors documented under DEPARTURES):
-      * Stable branch ``f = 1/(1 + 2·b·Ri/√(1+d·Ri))`` is Louis (1979) Eq. (20)
-        (both momentum and heat, with their respective ``b``/``b_heat``).
-      * Unstable branch ``f = 1 - 2·b·Ri/(1 + C·√|Ri|)`` is Louis (1979) Eq. (19)
-        with the ECMWF/GCM *interior* geometry factor ``C = 3·b·c·l²/dz²``
-        (mixing-length form) in place of the surface-layer ``C = 3·b·c·a²·√(z/z0)``.
-      * Momentum/heat split ``b_heat = 1.5·b`` with SHARED branch denominators
-        is the LTG82 "3b heat vs 2b momentum" coefficient split; ``b_heat=b``
-        recovers the Louis (1979) single ``f_h=f_m`` form (K_m is independent of
-        ``b_heat``). For ``b_heat > b`` (the LTG82 default) Pr_t = K_m/K_h < 1
-        unstable and > 1 stable; the inequality reverses for ``b_heat < b``.
-    DEPARTURES (documented; NOT the Louis 1979 originals):
-      * ``c`` default 16.6 is Holtslag & De Bruin (1988), not Louis (1979)'s 5.0;
-        ``b``=5 and ``d``=5 ARE the Louis (1979) values. (See ``LouisConfig``.)
-      * Sigmoid ``blend_sharpness·Ri`` replaces Louis's HARD ``Ri<0`` vs ``Ri≥0``
-        switch by a CONTINUOUS blend of both branches. At large ``blend_sharpness``
-        (default 100) it approximates the hard-switch VALUE to O(exp(-sharpness·|Ri|))
-        for fixed ``Ri≠0``; near neutral both branches → 1 so the value difference
-        → 0, THOUGH the transition gradient differs from the hard switch. AD-safe
-        (autodiff returns a finite, implementation-defined tie-rule derivative at
-        the ``Ri=0`` kink, where the true two-sided derivative does NOT exist: the
-        one-sided slopes of ``f_m`` differ — ``-b`` from above vs
-        ``-b/(1 + 3bc·l²·1e-5/(dz²+1e-10))`` from below, from the ``√|Ri|`` floor;
-        ``f_h`` uses ``b_heat`` in place of ``b``) — the blend is a continuous
-        surrogate, NOT a strictly C¹ function at the single neutral point.
-      * ``1e-10`` floors on ``√|Ri|`` and ``dz²`` are numerical guards.
+    Oracle provenance (the running codes this reproduces; pinned in
+    ``tests/atmosphere/hydrostatic/unit/test_louis_oracle.py``):
+      * Stable branch, momentum AND heat: OpenIFS
+        (github.com/ecmwf-ifs/openifs @ 8f6f722f732b92fed2c39af763d8fcd1ab15f573)
+        ``arpifs/phys_ec/vdfexcu.F90`` lines 393-395::
+
+            ZSCF    = SQRT(1.0_JPRB+ZCD*ZRI(JL))
+            ZIFLTGM = 1.0_JPRB / (1.0_JPRB + 2.0_JPRB *ZCB * ZRI(JL)/ZSCF)
+            ZIFLTGH = 1.0_JPRB / (1.0_JPRB + 2.0_JPRB *ZCB * ZRI(JL)*ZSCF)
+
+        i.e. the heat function MULTIPLIES by the square root (IFS runs
+        ``b = ZCB = 5``, ``d = ZCD = 1``, ``b_heat = b``).
+      * Unstable branch (with the heights passed): ICON icon-2026.04-public
+        (8597da45ef4b86323f3fb844caedc4ae5e1ffc01)
+        ``src/atm_phy_schemes/mo_turb_vdiff_diag.f90`` lines 518-530 (the
+        ECHAM/ICON "Louis 79" block): ``kh *= 1 - 3·cb·Ri·zucf``,
+        ``km *= 1 - 2·cb·Ri·zucf``, ``zucf`` as ``u`` above with
+        ``cons5 = 3·cb·cc`` (ICON runs ``cb = cc = 5``, i.e. ``b = c = 5``,
+        ``b_heat = 1.5·b``).
+      * The only addition to the oracle algebra is the pre-existing ``1e-10``
+        inside ``sqrt(|Ri| + 1e-10)`` (keeps the reverse-mode derivative finite
+        at Ri = 0, where the oracle never evaluates this branch); it moves
+        ``f`` by a relative ~1e-11 on the oracle fixture.
+
+    NOT-YET-FAITHFUL legacy path (``z_full_pair`` omitted;
+    used ONLY by YSU's free-atmosphere local-K branch, whose own oracle is a
+    separate scheme): the unstable geometry factor is ``1/(dz² + 1e-10)`` in
+    place of ``sqrt(G)``.  This form is not the running ECHAM/ICON code (its
+    unstable enhancement f_m was median 3.8x, up to 20x weaker on the tier-2
+    audit columns).  YSU reads
+    only ``f_m``, so the stable heat form does not reach it.
 
     Parameters
     ----------
@@ -670,15 +669,19 @@ def louis_stability_functions(
     l_mix : array
         Mixing length at the same interfaces [m].
     dz : array
-        Interface spacing [m] (same shape as ``Ri``).
+        Interface spacing [m] (same shape as ``Ri``); used only by the legacy
+        unstable geometry.
     b, c, d : float
-        Louis (1982) coefficients: ``b`` enters both branches, ``c`` is the
-        unstable-branch denominator coefficient, ``d`` the stable-branch
-        sqrt coefficient.
+        Louis coefficients: ``b`` enters both branches, ``c`` the unstable
+        denominator, ``d`` the stable square root.
     blend_sharpness : float
         Sigmoid sharpness of the stable/unstable blend [1/Ri].
     b_heat : float or None
-        Heat-function numerator coefficient (default ``b`` ⇒ ``f_h = f_m``).
+        Heat-function coefficient (default ``b``).
+    z_full_pair : (array, array) or None
+        ``(z_k, z_k+1)``: full-level heights above the surface [m] of the
+        layers above and below each interface, both > 0 (oracle geometry);
+        ``None`` selects the legacy geometry.
 
     Returns
     -------
@@ -690,18 +693,26 @@ def louis_stability_functions(
 
     # Unstable branch — denominator shared between momentum and heat.
     Ri_neg = jnp.minimum(Ri, 0.0)
-    denom_unstable = (
-        1.0 + 3.0 * b * c * l_mix ** 2
-        * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz ** 2 + 1e-10)
-    )
+    sqrt_abs_ri = jnp.sqrt(jnp.abs(Ri_neg) + 1e-10)
+    if z_full_pair is None:
+        geom = 1.0 / (dz ** 2 + 1e-10)  # legacy (YSU) geometry, see docstring
+    else:
+        # ICON mo_turb_vdiff_diag.f90:523-525 (pghf(jk) = z_k, pghf(jk+1) = z_k+1)
+        z_full_upper, z_full_lower = z_full_pair
+        geom = jnp.sqrt(
+            (((z_full_upper / z_full_lower) ** (1.0 / 3.0) - 1.0)
+             / (z_full_upper - z_full_lower)) ** 3
+            / z_full_lower
+        )
+    denom_unstable = 1.0 + 3.0 * b * c * l_mix ** 2 * sqrt_abs_ri * geom
     f_unstable_m = 1.0 - 2.0 * b * Ri_neg / denom_unstable
     f_unstable_h = 1.0 - 2.0 * b_heat * Ri_neg / denom_unstable
 
-    # Stable branch — sqrt denominator shared between momentum and heat.
+    # Stable branch — OpenIFS vdfexcu.F90:393-395 (heat MULTIPLIES by ZSCF).
     Ri_pos = jnp.maximum(Ri, 0.0)
     sqrt_stable = jnp.sqrt(1.0 + d * Ri_pos)
     f_stable_m = 1.0 / (1.0 + 2.0 * b * Ri_pos / sqrt_stable)
-    f_stable_h = 1.0 / (1.0 + 2.0 * b_heat * Ri_pos / sqrt_stable)
+    f_stable_h = 1.0 / (1.0 + 2.0 * b_heat * Ri_pos * sqrt_stable)
 
     # Smooth blending: sigmoid transitions from unstable to stable.
     blend = jax.nn.sigmoid(blend_sharpness * Ri)
