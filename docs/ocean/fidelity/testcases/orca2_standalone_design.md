@@ -1,6 +1,6 @@
 # Standalone ORCA2 surface-forcing design
 
-Date: 2026-10-25.  Decision basis: Decision 168.  This document designs the
+Date: 2026-10-25.  Decision basis: Decisions 168, 171, and 175.  This document designs the
 route from the comparison card's recorded surface exchange to an ORCA2 ocean
 which reads CORE normal-year atmosphere, computes its own fluxes, and uses
 NEMO's `nn_ice = 1` ice-interface model.  It changes no configuration.
@@ -108,18 +108,19 @@ therefore carry and compare that halo mutation, not only owned T cells.
 The reference namelist requests a **yearly mean** `ice_cover_clim.nc` record:
 `sn_ice%freqh=-12`, `ln_tint=.true.`, and `clftyp='yearly'`.  In `fld_read`,
 `-12` selects one yearly record, not twelve monthly records.  The file is
-absent from the ORCA2 inputs, and its provenance is deliberately unresolved;
-see DECISION_NEEDED below.  S0-F owns whatever yearly-record interpolation
-the admitted file and calendar actually execute.
+absent from the ORCA2 inputs.  Decision 171 supplies it as a pinned native-grid
+yearly mean from a fixed full-SI3 ORCA2 run.  S0-F owns whatever yearly-record
+interpolation the admitted file and calendar actually execute.
 
 ## S4 — composed standalone comparison card
 
 Add a new NEMO configuration and build named
-`ORCA2_STANDALONE_IIF_OMIP_L4`: clone the current round-5 ORCA2 deck, select
-`nn_ice=1`, and point `namsbc_iif` at the user-selected pinned climatology.
-Whether `key_si3` remains compiled is an explicit build decision below; it is
-not silently removed.  Keep the CORE normal-year forcing/weights and every
-other ORCA2 ocean option fixed.  The
+`ORCA2_STANDALONE_IIF_OMIP_L4`: clone the current round-5 ORCA2 deck, keep
+`key_si3`, select `nn_ice=1`, resolve `ln_drgice_imp=F`, retain
+`ln_mxl0=T`, select `nn_mxlice=0`, resolve `ln_icebergs=F`, and point
+`namsbc_iif` at the Decision-171 pinned climatology.  This is K0, selected by
+Decision 175.  Keep the CORE normal-year forcing/weights and every other
+ORCA2 ocean option fixed.  The
 matching legoESM card reads those same files, enters S1 from its own
 S0-F/S0-M output, executes S1 -> S3 -> S2 in NEMO source order, and never
 reads a NEMO exchange record.
@@ -134,7 +135,7 @@ allocated or initialized.  This is a boot/undefined-read defect, not merely a
 different scientific choice.
 
 An exhaustive import-and-dereference grep over `src/OCE` gives this safety
-envelope for an ice-if deck.  It is part of every viable option below.
+envelope for the selected ice-if deck.
 
 | SI3-allocated field/read cone | Required resolved state at `nn_ice=1` |
 |---|---|
@@ -150,9 +151,47 @@ envelope for an ice-if deck.  It is part of every viable option below.
 Dropping `key_si3` is still not an equivalent simplification.  It changes
 compiled TKE/GLS, top-drag, iceberg, bulk/ABL, coupler, allocation, restart,
 and diagnostics branches.  Conversely, retaining the key requires disabling
-all live consumers listed above.  Each option therefore has an explicit
-certification cost in the decision table below; no configuration is changed
-by this design round.
+all live consumers listed above.  Decision 175 therefore selects the
+key-SI3 K0 safety envelope above; no shipped configuration or model code is
+changed by this design round.
+
+K0's drag-off and mixing-under-ice-off branches are **not NEMO-certified**.
+The `0 / 1,360` figures in rounds 324 and 326 compare legoESM's flag-off arm
+with earlier legoESM rows.  They never compare against a NEMO run with
+`ln_drgice_imp=F` or `nn_mxlice=0`; every existing ORCA2 NEMO record ran with
+drag on and `nn_mxlice=2`.  The accepted Phase-2d icebergs-off evidence also
+does not certify the new K0 composition.  K0 and its changed branches receive
+their first NEMO comparison inside S4; none is grandfathered from those
+controls.
+
+The first S4 action is an **operator-run boot plus ten-step smoke run**.  Its
+checklist is fail-closed:
+
+1. The resolved namelist and compiled-key echo must show exactly K0, including
+   `key_si3` present and `key_xios` absent, with the Decision-171 input and its
+   digest.
+2. Both ranks must boot, reach and complete step 10, exit zero, and contain no
+   NEMO error or stop banner; retain `ocean.output`, resolved namelists,
+   executable digest, and restart/output inventory.
+3. The acquisition builds delete `key_xios`, so the ice-axis calls in
+   `iom.F90:241-245` are compiled out by the outer `key_xios` guard at
+   `iom.F90:116-123` and the enabled ice output group at
+   `ORCA2_OMIP_L4/EXP00/file_def_nemo-ice.xml:13-14` is not consumed.  If a
+   future smoke unexpectedly retains `key_xios`, refuse it before stepping:
+   at `nn_ice=1`, `sbcmod.F90:331-340` calls neither allocation branch nor
+   `ice_init`, while `ice_init` is what calls `par_init`
+   (`icestp.F90:241-263`) to read `jpl` and `nlay_i`
+   (`icestp.F90:341-346`).  The reported zero-length axes must then be resolved
+   or the enabled ice output disabled and separately approved; a successful
+   no-XIOS smoke is not evidence for an XIOS-enabled build.
+
+After the smoke passes, S4 acquires a reproducibility twin and the exact entry,
+S0/S1/S3/S2 boundaries plus the existing ten-step ladder checkpoints from the
+same K0 NEMO executable.  It scores every registered word and each binding
+plant at the exact bar.  The drag-off and `nn_mxlice=0` branches are certified
+only if that K0 NEMO comparison passes; a boot alone is not certification.
+Only after the exact S4 comparison passes may the 2,920-step statistical arms
+run.
 
 The exact-input NEMO record contains entry state, every S0/S1/S3/S2 boundary,
 and the existing ten-step ladder checkpoints for steps 1--10 on ranks 0--1.
@@ -177,11 +216,12 @@ twin before the candidate.
 | one exact-input NEMO record per rung | ASKED | separate immutable record labels |
 | S1 model preparation and offline phase-2h score | ASKED | this round |
 | preregister, but do not build, S1 acquisition | ASKED | companion preregistration |
-| configure/build/run NEMO | UNASKED | design only; operator work after decision |
+| K0 reference configuration | ASKED | Decision 175; first applied by the operator in S4, not by this design edit |
+| configure/build/run NEMO | ASKED | future S4 operator work; boot plus 10-step smoke is first |
 | change the shipped comparison or training card | UNASKED | no configuration change |
 | relax any bar or hide signed-zero differences | UNASKED | prohibited |
 | select or manufacture an ice-cover climatology | ASKED | DECISION 171: pinned native-grid yearly mean from a fixed full-SI3 ORCA2 run |
-| change `key_si3` build identity | UNASKED | DECISION_NEEDED; no silent choice |
+| retain `key_si3` build identity | ASKED | Decision 175 |
 | remove existing record-replay comparison modes | UNASKED | retain as diagnostics |
 
 ## DECISION 171 — ice-cover provenance (TAKEN)
@@ -192,23 +232,11 @@ mask, schema, and file digest.  No monthly record set or external regridding is
 part of this reference.  An independently observed product may be added later
 only as a separately named sensitivity experiment.
 
-## DECISION_NEEDED — viable NEMO reference configurations
+## DECISION 175 — NEMO reference configuration (TAKEN)
 
-All rows set `nn_ice=1`, explicitly resolve `ln_drgice_imp=F`, and retain the
-diagnostic/coupling safety envelope above.  These are the complete viable
-families while retaining the deck's TKE scheme; `nn_mxlice=2/3` with
-`ln_mxl0=T` and key-SI3 plus active icebergs are not viable.
-
-| ID | Configuration | Earlier certification | Incremental cost |
-|---|---|---|---|
-| K0 **(pick)** | keep `key_si3`; `ln_mxl0=T`; `nn_mxlice=0`; `ln_icebergs=F` | each changed branch is already certified separately: drag-off is the round-324 pre-D150/shipped control (0/1,360 rows); mxlice-0 is the round-326 pre-D154/round-325 control (0/1,360); icebergs-off is the accepted Phase-2d VARIANT with the Phase-2c 10-step and 30-day controls | no rebuild; new composition still needs boot, reproducibility twin, and full ten-step S0--S4 acquisition; then reserve 90 minutes for each yearly arm |
-| K1 | K0 but `nn_mxlice=1` with a pinned `rn_mxlice` | **not certified** in this campaign; prior rungs certify 0 and record-fed 2 only | K0 cost plus a new TKE surface-mixing branch record, plants, gradients, and D122 comparison |
-| K2 | keep `key_si3` and `nn_mxlice=2` inert by setting `ln_mxl0=F`; `ln_icebergs=F` | **not certified**; every ORCA2 rung used `ln_mxl0=T` | K0 cost plus recertification of the global stress-derived surface mixing-length anchor; highest-confound key-SI3 option |
-| N0 | remove `key_si3`; set `nn_mxlice=0`; `ln_icebergs=F` | **not certified**; no earlier rung certifies the no-SI3 compiled ocean | one new build, zero-step state census, full ten-step ladder/acquisition and twin, then the yearly arm |
-| N1 | N0 but retain `ln_icebergs=T`, selecting the compiled zero-ice-velocity/thickness fallback | **not certified**; existing iceberg runs use SI3 fields | N0 cost plus iceberg entry/restart/trajectory census and at least the existing 30-day iceberg control before the yearly arm |
-
-K0 minimizes new physics and reuses three independently certified branch
-states, but their `nn_ice=1` composition remains unexecuted and is not
-grandfathered.  No option is selected by this document; the operator must
-decide.  The engineering pick is K0.  Carrying both K0 and N0 as references
-is also admissible, at roughly double build/acquisition/twin/yearly cost.
+K0 is selected: `key_si3`, `nn_ice=1`, `ln_drgice_imp=F`, `ln_mxl0=T`,
+`nn_mxlice=0`, and `ln_icebergs=F`, with the complete off-consumer safety
+envelope above.  This supersedes the refuted Decision 172.  It selects the
+reference but does not claim prior certification: the operator-run S4 smoke is
+first, and the ensuing exact S4 acquisition is the first NEMO comparison and
+certification opportunity for K0's drag-off and `nn_mxlice=0` branches.

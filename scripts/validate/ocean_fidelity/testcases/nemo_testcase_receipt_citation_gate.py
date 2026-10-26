@@ -1727,6 +1727,10 @@ FILES = {
         REPO / "packages/ocean/legoesm/ocean/fidelity/nemo_state_bridge.py"),
     "zdftke.F90": _OCE / "ZDF/zdftke.F90",
     "sbcmod.F90": _OCE / "SBC/sbcmod.F90",
+    "iom.F90": _OCE / "IOM/iom.F90",
+    "icestp.F90": NEMO / "src/ICE/icestp.F90",
+    "ORCA2_OMIP_L4/EXP00/file_def_nemo-ice.xml": (
+        NEMO / "cfgs/ORCA2_OMIP_L4/EXP00/file_def_nemo-ice.xml"),
     "icbutl.F90": _OCE / "ICB/icbutl.F90",
     "sbcice_if.F90": _OCE / "SBC/sbcice_if.F90",
     "sbcfwb.F90": _OCE / "SBC/sbcfwb.F90",
@@ -8979,6 +8983,23 @@ CITATION_MAP = {
     'diaar5.F90:197-200': [
         "IF( iom_use( 'sshice' ) .AND. nn_ice /= 0 ) THEN",
         'z2d(ji,jj) = ztf * snwice_mass(ji,jj)', 4],
+    # Round 335 resume 3: the no-XIOS acquisition disposition and the
+    # XIOS-enabled nn_ice=1 boot gap retained in the smoke checklist.
+    'iom.F90:116-123': [
+        ('#if defined key_xios', 4),
+        'LOGICAL           :: llrst_context', 8],
+    'iom.F90:241-245': [
+        '# if defined key_si3',
+        "CALL iom_duplicate_grid( 'grid_T_nlayice'", 5],
+    'icestp.F90:241-263': [
+        'SUBROUTINE ice_init( Kbb, Kmm, Kaa )',
+        'CALL par_init', 23],
+    'icestp.F90:341-346': [
+        'NAMELIST/nampar/ jpl, nlay_i, nlay_s',
+        'READ_NML_CFG(numnam_ice,nampar)', 6],
+    'ORCA2_OMIP_L4/EXP00/file_def_nemo-ice.xml:13-14': [
+        '<file_group id="ice_5d"',
+        '<file id="file101"', 2],
 }
 
 
@@ -8999,7 +9020,7 @@ AUDITED_ROUNDS = "25 and later (heading to end of file)"
 UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
                     "CITATION_MAP and this gate does not read them")
 
-_NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm)"
+_NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm|xml)"
          r"|[A-Za-z0-9_./]*(?:namelist_cfg|namelist_ref|ocean\.output)")
 _SPAN = re.compile(r"`([^`\n]+)`")
 _FULL = re.compile(rf"^(?P<f>{_NAME}):(?P<l>\d[\d,\-]*)$")

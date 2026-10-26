@@ -129,6 +129,31 @@ automatically switches to ocean-only volume (`sbcfwb.F90:119`).  It also
 enumerates the off assimilation, observation, section, boundary, bulk/ABL,
 coupler, restart and ice-writer consumers found by the full `src/OCE` grep.
 
+Decision 175 is **ASKED and taken**: the standalone reference is K0,
+`key_si3`, `nn_ice=1`, `ln_drgice_imp=F`, `ln_mxl0=T`, `nn_mxlice=0`, and
+`ln_icebergs=F`.  The earlier "already certified" claim is false.  Round
+324's and 326's `0 / 1,360` results compare legoESM flag-off arms with earlier
+legoESM rows, not with NEMO running drag-off or `nn_mxlice=0`; every existing
+ORCA2 NEMO record ran drag on with `nn_mxlice=2`.  Those K0 branches are **not
+yet NEMO-certified**.  Their first NEMO comparison and possible certification
+is the exact S4 acquisition after the smoke run; the smoke itself certifies
+nothing beyond boot and ten-step execution.
+
+The first S4 action is the operator-run boot plus ten-step smoke.  It must pin
+the resolved K0 namelist, Decision-171 input and binary, verify both ranks
+finish step 10 with zero exit and no NEMO error/stop banner, and retain the
+logs, resolved namelists, digests, and output inventory.  It must also verify
+`key_si3` present and `key_xios` absent.  The XIOS ice-axis setup is inside the
+outer `key_xios` block (`iom.F90:116-123`, `:241-245`), so it is compiled out
+of the acquisition builds, which delete that key.  This does not clear an
+XIOS-enabled build: at `nn_ice=1`, `sbcmod.F90:331-340` does not call
+`ice_init`; that routine calls `par_init` (`icestp.F90:241-263`), whose
+namelist reads set `jpl` and `nlay_i` (`icestp.F90:341-346`), while the ice
+file remains enabled
+(`ORCA2_OMIP_L4/EXP00/file_def_nemo-ice.xml:13-14`).  A future smoke with
+`key_xios` must refuse until its reported zero-length axes are resolved or the
+ice output is disabled by a separately approved configuration.
+
 ## Gates and review
 
 - O1 production JIT numerical gate: PASS, mapping and all 18 bulk fields at
@@ -149,8 +174,14 @@ coupler, restart and ice-writer consumers found by the full `src/OCE` grep.
   geothermal/MLE coefficients; MLE/shortwave specs); no failure names a
   changed file.
 
-Independent review: Claude HOLD + Argon HOLD findings addressed by this
-resume; operator confirmation remains external to this receipt.
+Resume-2 re-review: Claude **HOLD**, Argon **LAND**.  Both confirmed the OMIP
+`q_net` restoration (0 / 10,231,076 across all 214 non-NEMO output arrays),
+S1 JIT exactness (0 / 158,292), the unsafe key-SI3 iceberg reads at
+`nn_ice=1`, the NEMO safety-envelope coercions, and the deliberate helper
+duplication.  Claude's decisive HOLD was the false K0 certification claim;
+the operator independently verified that rounds 324/326 compared legoESM
+arms only.  This resume corrects that claim and records the plausible XIOS
+boot gap; Argon's LAND verdict required no code change.
 
 ## Choices and open work
 
@@ -163,14 +194,10 @@ resume; operator confirmation remains external to this receipt.
 - DECISION 171 is taken: the ice-cover input is one pinned native-grid yearly
   mean derived from a fixed full-SI3 NEMO ORCA2 run, with producer/run/years
   and digest recorded; it is not a monthly record set.
-- DECISION_NEEDED: Decision 172 is refuted; reference configuration remains
-  open.  The design lists five viable families.  The pick is **K0**:
+- DECISION 175 is ASKED and taken, superseding refuted Decision 172.  The
+  standalone reference is **K0**:
   `key_si3`, `nn_ice=1`, `ln_drgice_imp=F`, `ln_mxl0=T`, `nn_mxlice=0`, and
-  `ln_icebergs=F`, with the full off-consumer safety envelope.  Its three
-  changed branches are independently certified by the round-324 pre-D150
-  control, round-326 pre-D154/round-325 control, and accepted Phase-2d
-  icebergs-off VARIANT, but their ice-if composition still requires a new boot
-  and full ten-step acquisition.  K1 (`nn_mxlice=1`), K2 (`ln_mxl0=F`), N0
-  (no SI3, icebergs off), and N1 (no SI3, icebergs on with the zero-ice
-  fallback) all need new branch or compiled-path certification.  No option is
-  selected or applied.
+  `ln_icebergs=F`, with the full off-consumer safety envelope.  Drag-off and
+  `nn_mxlice=0` are not NEMO-certified; the operator-run S4 smoke comes first,
+  followed by their first exact NEMO comparison inside S4.  No model or
+  shipped-card configuration changed in this resume.
