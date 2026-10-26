@@ -42,6 +42,15 @@ from .sss_restoring import (
     build_region_masks,
     compute_sss_restoring_flux,
     interp_woa_sss_to_grid,
+    nemo_orca2_sss_restoring,
+)
+from .nemo_surface import (
+    NemoS2Result,
+    NemoSurfaceMeans,
+    nemo_orca2_s2,
+    nemo_sbc_ssm_step,
+    nemo_s2_to_ocean_interfaces,
+    nemo_t_stress_to_uv,
 )
 
 __all__ = [
@@ -65,4 +74,11 @@ __all__ = [
     "build_region_masks",
     "compute_sss_restoring_flux",
     "interp_woa_sss_to_grid",
+    "nemo_orca2_sss_restoring",
+    "NemoS2Result",
+    "NemoSurfaceMeans",
+    "nemo_orca2_s2",
+    "nemo_sbc_ssm_step",
+    "nemo_s2_to_ocean_interfaces",
+    "nemo_t_stress_to_uv",
 ]

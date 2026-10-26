@@ -44,6 +44,10 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.source_rounding import (
+    nemo_fortran_sign as _fortran_sign,
+    nemo_source_round as _sr,
+)
 
 
 SECONDS_PER_DAY = 86400.0
@@ -429,6 +433,51 @@ def compute_sss_restoring_flux(
         "inv_tau_eff": inv_tau_eff,
         "region_active": region_active,
     }
+
+
+def nemo_orca2_sss_restoring(
+    sss_mean,
+    sss_target,
+    sst_mean,
+    runoff_mouth_mask,
+    surface_mask,
+    *,
+    restoring_mm_per_day,
+    bound_mm_per_day,
+    seconds_per_day,
+    salinity_floor,
+    heat_capacity,
+):
+    """Literal ORCA2 ``sbc_ssr`` ``nn_sssr=2`` deck arm.
+
+    This extends the shared restoring module without changing its generic
+    OMIP defaults.  ``nn_sssr_ice=1`` makes the initial ice coefficient one;
+    active runoff-mouth damping then multiplies it by ``1-2*rnfmsk``.  The
+    returned ``erp`` uses NEMO's positive-upward convention and ``qns_delta``
+    is the heat term added to the post-ice non-solar flux.
+
+    All resolved namelist/constants are required inputs.  This path therefore
+    cannot silently substitute ORCA1 or generic restoring settings.
+    """
+    sss = _sr(jnp.asarray(sss_mean, dtype=jnp.float64))
+    target = _sr(jnp.asarray(sss_target, dtype=jnp.float64))
+    sst = _sr(jnp.asarray(sst_mean, dtype=jnp.float64))
+    rnfmsk = _sr(jnp.asarray(runoff_mouth_mask, dtype=jnp.float64))
+    smask = _sr(jnp.asarray(surface_mask, dtype=jnp.float64))
+    zsrp = _sr(_sr(restoring_mm_per_day) / _sr(seconds_per_day))
+    zerp_bound = _sr(_sr(bound_mm_per_day) / _sr(seconds_per_day))
+    two_rnf = _sr(_sr(2.0) * rnfmsk)
+    coefice = _sr(_sr(1.0) - two_rnf)
+    salinity_delta = _sr(sss - target)
+    numerator = _sr(_sr(zsrp * coefice) * salinity_delta)
+    denominator = _sr(jnp.maximum(sss, _sr(salinity_floor)))
+    quotient = _sr(numerator / denominator)
+    unbounded = _sr(quotient * smask)
+    magnitude = _sr(jnp.minimum(zerp_bound, _sr(jnp.abs(unbounded))))
+    erp = _sr(_fortran_sign(_sr(1.0), unbounded) * magnitude)
+    heat_content = _sr(_sr(heat_capacity) * sst)
+    qns_delta = _sr(_sr(-erp) * heat_content)
+    return erp, qns_delta
 
 
 def interp_woa_sss_to_grid(

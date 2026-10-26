@@ -23,6 +23,8 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from legoesm.core.source_rounding import nemo_source_round as _sr
+
 
 class FreshwaterForcing(NamedTuple):
     """Freshwater fluxes applied to the ocean surface.
@@ -53,6 +55,39 @@ class FreshwaterForcing(NamedTuple):
     runoff: jnp.ndarray
     ice_fw: jnp.ndarray
     restoring: jnp.ndarray = None  # type: ignore[assignment]
+
+
+class NemoRunoffSurface(NamedTuple):
+    """Deck surface-only ``sbc_rnf`` mass and tracer-content channels."""
+
+    mass_flux: jnp.ndarray
+    temperature_content: jnp.ndarray
+    salinity_content: jnp.ndarray
+
+
+def nemo_orca2_surface_runoff(
+    runoff_now, sst_mean, surface_mask, *, runoff_factor, reference_density
+):
+    """Literal ORCA2 runoff update for disabled T/S/depth input files.
+
+    The result feeds the existing :class:`FreshwaterForcing` mass path and
+    ``OceanSurfaceForcing.runoff_tracer_content``.  With both deck depth
+    options false, the existing core's ``runoff_spread_m=None`` arm deposits
+    mass and tracer content in the live top cell; no second distribution
+    formula is introduced here.
+    """
+    runoff = _sr(jnp.asarray(runoff_now, dtype=jnp.float64))
+    sst = _sr(jnp.asarray(sst_mean, dtype=jnp.float64))
+    smask = _sr(jnp.asarray(surface_mask, dtype=jnp.float64))
+    mass = _sr(_sr(_sr(runoff_factor) * runoff) * smask)
+    runoff_temperature = _sr(jnp.maximum(sst, _sr(0.0)))
+    temperature_mass = _sr(runoff_temperature * mass)
+    inverse_density = _sr(_sr(1.0) / _sr(reference_density))
+    temperature_content = _sr(temperature_mass * inverse_density)
+    zero_salinity = _sr(jnp.zeros_like(mass))
+    salinity_mass = _sr(zero_salinity * mass)
+    salinity_content = _sr(salinity_mass * inverse_density)
+    return NemoRunoffSurface(mass, temperature_content, salinity_content)
 
 
 def zero_freshwater(nCells: int) -> FreshwaterForcing:

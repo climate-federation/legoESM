@@ -208,10 +208,120 @@ def nemo_fld_time_interp(fdta_before, fdta_after, isecsbc, nrec_sec_before,
     return _sr(_sr(_sr(ztintb) * _sr(fb)) + _sr(_sr(ztinta) * _sr(fa)))
 
 
+def _nemo_nint(value):
+    """Fortran ``NINT`` (ties away from zero), returned as int64."""
+    value = _sr(jnp.asarray(value, dtype=jnp.float64))
+    rounded = jnp.where(
+        value >= 0.0, jnp.floor(value + 0.5), jnp.ceil(value - 0.5)
+    )
+    return rounded.astype(jnp.int64)
+
+
+def nemo_fld_model_time(
+    *, nsec_year, nsec_1jan000, forcing_stride, timestep_seconds, time_offset
+):
+    """NEMO ``fld_read`` model time at the middle of a forcing interval.
+
+    This is ``fldread.f90:195-206``'s no-``kit`` arm.  Every operand is
+    explicit because calendar state and the component offset are physical
+    inputs, not safe defaults.
+    """
+    stride = _sr(jnp.asarray(forcing_stride, dtype=jnp.float64))
+    half_span = _sr(_sr(0.5) * _sr(stride - _sr(1.0)))
+    offset_span = _sr(half_span + _sr(time_offset))
+    seconds = _sr(offset_span * _sr(timestep_seconds))
+    rounded = _nemo_nint(seconds)
+    return (
+        jnp.asarray(nsec_year, dtype=jnp.int64)
+        + jnp.asarray(nsec_1jan000, dtype=jnp.int64)
+        + rounded
+    )
+
+
+def _trunc_divide_by_two(value):
+    value = jnp.asarray(value, dtype=jnp.int64)
+    return jnp.where(value >= 0, value // 2, -((-value) // 2))
+
+
+def nemo_fld_record_centres(record_edges, rec_shft):
+    """Construct interpolated-record centres from integer edge times.
+
+    Literal ``fldread.f90:932-936`` arithmetic, including truncating integer
+    division, Fortran ``MOD`` for negative edges, and ``NINT(rec_shft*width)``.
+    ``record_edges`` includes both ends and therefore returns one fewer centre.
+    """
+    edge = jnp.asarray(record_edges, dtype=jnp.int64)
+    if edge.ndim != 1 or edge.shape[0] < 2:
+        raise ValueError("record_edges must be a one-dimensional edge array")
+    left = edge[:-1]
+    right = edge[1:]
+    shift = _nemo_nint(
+        _sr(_sr(rec_shft) * _sr((right[0] - left[0]).astype(jnp.float64)))
+    )
+    left_half = _trunc_divide_by_two(left)
+    right_half = _trunc_divide_by_two(right)
+    left_mod = left - _trunc_divide_by_two(left) * 2
+    right_mod = right - _trunc_divide_by_two(right) * 2
+    odd_carry = jnp.maximum(left_mod, right_mod)
+    return left_half + right_half + odd_carry + shift
+
+
+def nemo_fld_select_bracket(model_seconds, record_centres):
+    """Select the closest before and strictly-later after record indices.
+
+    The caller supplies previous/current/next-file centres after NEMO's file
+    policy has assembled them.  It must include a record on each side; file
+    cycling/extrapolation remains explicit loader policy, not a numeric default.
+    """
+    centres = np.asarray(record_centres, dtype=np.int64)
+    if centres.ndim != 1 or centres.shape[0] < 2:
+        raise ValueError("record_centres must contain at least two records")
+    if np.any(np.diff(centres) <= 0):
+        raise ValueError("record_centres must be strictly increasing")
+    after = int(np.searchsorted(centres, int(model_seconds), side="right"))
+    if after == 0 or after == centres.size:
+        raise ValueError("record_centres do not bracket model_seconds")
+    before = after - 1
+    return before, after
+
+
+def nemo_fld_time_interpolate(
+    before_record, after_record, *, model_seconds, before_seconds, after_seconds
+):
+    """Literal S0-F temporal blend of already spatially mapped records.
+
+    Returns ``(fnow, after_weight, before_weight)`` in NEMO assignment order.
+    Source-rounding barriers materialize every intermediate for the CPU-fp64
+    oracle arm.
+    """
+    before = jnp.asarray(before_record, dtype=jnp.float64)
+    after = jnp.asarray(after_record, dtype=jnp.float64)
+    if before.shape != after.shape:
+        raise ValueError("before_record and after_record must share a shape")
+    elapsed_i = jnp.asarray(model_seconds, dtype=jnp.int64) - jnp.asarray(
+        before_seconds, dtype=jnp.int64
+    )
+    width_i = jnp.asarray(after_seconds, dtype=jnp.int64) - jnp.asarray(
+        before_seconds, dtype=jnp.int64
+    )
+    elapsed = _sr(elapsed_i.astype(jnp.float64))
+    width = _sr(width_i.astype(jnp.float64))
+    after_weight = _sr(elapsed / width)
+    before_weight = _sr(_sr(1.0) - after_weight)
+    before_term = _sr(before_weight * _sr(before))
+    after_term = _sr(after_weight * _sr(after))
+    fnow = _sr(before_term + after_term)
+    return fnow, after_weight, before_weight
+
+
 __all__ = (
     "decode_source_indices",
     "nemo_fld_time_interp",
     "nemo_fld_interp",
+    "nemo_fld_model_time",
+    "nemo_fld_record_centres",
+    "nemo_fld_select_bracket",
+    "nemo_fld_time_interpolate",
     "nemo_t_rotation_from_domain",
     "rotate_en_to_ij",
 )
