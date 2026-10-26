@@ -267,3 +267,17 @@ def test_restart_psi_below_the_floor_is_bounded_without_moving_water():
     # The dry layers exchange nothing; the moist layers redistribute by their own tiny K.
     assert np.allclose(theta1, np.asarray(theta0[0]), atol=1e-4)
     assert abs(budget_mm) < _MM_TOL and runoff_mm == 0.0
+
+
+def test_budget_residual_reports_infeasible_sink_and_closes_otherwise():
+    """A sink a layer can supply above the floor closes the budget; one it
+    cannot is reported as created water, never silently absorbed."""
+    floor = _floor(_CH)
+    theta0 = jnp.full((1, 10), floor + 0.02)
+    psi0 = psi_from_theta(theta0, _CH)
+    for rate_mm_h, feasible in ((0.02, True), (1.0, False)):
+        sink = jnp.zeros_like(theta0).at[:, 0].set(rate_mm_h / 1000.0 / 3600.0 / float(_DZ[0]))
+        out = solve_richards(psi0, theta0, _GRID, _CH, RichardsConfig(),
+                             jnp.zeros(1), sink, _DT, surface_water=jnp.zeros(1))
+        res_mm = float(out.budget_residual[0]) * 1000.0
+        assert abs(res_mm) < _MM_TOL if feasible else res_mm > 0.5

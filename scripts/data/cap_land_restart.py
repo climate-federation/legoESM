@@ -48,7 +48,7 @@ import numpy as np
 from legoesm.land.boundary_data import init_land_surface_data
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.restart import load_land_restart, save_land_restart
-from legoesm.land.richards import _PSI_FLOOR_MIN, _SE_DRY_FLOOR, RichardsConfig, solve_richards
+from legoesm.land.richards import RichardsConfig, dry_floor, solve_richards
 from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.land.soil_hydraulics import psi_from_theta, theta_from_psi
 from legoesm.land.surface_scheme import TwoLeafCanopyConfig
@@ -95,11 +95,7 @@ def main(argv=None) -> int:
     # The solver's own bounds (richards.py): hydrostatic cap with no pond, dry floor.
     theta_cap = np.asarray(theta_from_psi(jnp.asarray(soil_grid.z_node)[None, :], hyd))
     theta_cap = np.broadcast_to(theta_cap, theta.shape)
-    psi_floor = np.maximum(np.asarray(psi_from_theta(
-        jnp.asarray(hyd.theta_r + _SE_DRY_FLOOR * (hyd.theta_sat - hyd.theta_r)), hyd)),
-        _PSI_FLOOR_MIN)
-    theta_floor = np.broadcast_to(
-        np.asarray(theta_from_psi(jnp.asarray(psi_floor), hyd)), theta.shape)
+    theta_floor = np.broadcast_to(np.asarray(dry_floor(hyd)[1]), theta.shape)
     theta_new = np.clip(theta, theta_floor, theta_cap)
     psi_new = np.asarray(psi_from_theta(jnp.asarray(theta_new), hyd))
 
