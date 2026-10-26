@@ -1884,7 +1884,7 @@ CITATION_MAP = {
         '!==  ocean Kz  ==!   (avt, avs, avm)',
         'IF( ln_zdfiwm )   CALL zdf_iwm( kt, Kmm, avm, avt, avs )', 28],
     'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfevd.f90:107-110': [
-        'DO jk =  1,  jpkm1',
+        ('DO jk =  1,  jpkm1', 1),
         ('END DO   ;   END DO   ;   END DO', 2), 4],
     'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfddm.f90:163-172': [
         'zavfs = rn_avts / ( 1. + zrr*zrr*zrr ) * zmsks * zmskf',
