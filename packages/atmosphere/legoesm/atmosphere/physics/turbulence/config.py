@@ -437,11 +437,14 @@ class LouisConfig(NamedTuple):
         one, ``b_h / b_m`` (Louis, Tiedtke & Geleyn 1982 use 3b for heat
         vs 2b for momentum ⇒ 1.5).  Gives a stratification-dependent
         turbulent Prandtl number Pr_t = K_m/K_h (>1 stable, <1 unstable);
-        ``1.0`` recovers the Louis (1979) ``f_h = f_m`` simplification.
+        ``1.0`` gives ``f_h = f_m`` on the unstable branch only (the stable
+        heat function multiplies by √(1+d·Ri) where momentum divides).
         Momentum K_m is independent of this ratio (default 1.5).  Must be
         positive: like ``b_louis``/``d_louis`` it appears in the stable
-        denominator ``1 + 2·b_h·Ri/√(1+d·Ri)``, which a negative value
-        could drive through zero (singular K_h).
+        heat denominator ``1 + 2·b_h·Ri·√(1+d·Ri)`` (OpenIFS vdfexcu.F90:395),
+        which a negative value could drive through zero (singular K_h).
+        The running oracles use 1.0 (OpenIFS, stable) and 1.5 (ECHAM/ICON,
+        unstable).
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
