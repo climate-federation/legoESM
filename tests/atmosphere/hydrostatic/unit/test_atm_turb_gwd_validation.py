@@ -149,8 +149,11 @@ def _run_turb(fn, cfg, d):
 
 def _gwd_kw(gwd, d):
     """CAM6 gw_oro (``mcfarlane``) needs the reference interface pressures
-    (CAM pref_edge); these test columns use their own first column."""
-    return {"p_ref_half": d["p_half"][0]} if gwd is mcfarlane_gwd else {}
+    (CAM pref_edge) and the land fraction; these test columns use their own
+    first column, all land (lf = 1 is CAM's unscaled drag)."""
+    return ({"p_ref_half": d["p_half"][0],
+             "land_frac_col": jnp.ones(d["u"].shape[0])}
+            if gwd is mcfarlane_gwd else {})
 
 
 # ===========================================================================
@@ -382,13 +385,13 @@ def test_gwd_no_nan_in_reversed_flow():
         out = mcfarlane_gwd(
             d["u"], d["v"], d["T"], d["p_full"], d["p_half"],
             d["z_full"], d["z_half"], d["rho"], d["lat"], DT,
-            McFarlaneConfig(G_0=g0), p_ref_half=d["p_half"][0],
+            McFarlaneConfig(G_0=g0), **_gwd_kw(mcfarlane_gwd, d),
         )
         return jnp.sum(out.du_dt ** 2)
     out = mcfarlane_gwd(
         d["u"], d["v"], d["T"], d["p_full"], d["p_half"],
         d["z_full"], d["z_half"], d["rho"], d["lat"], DT, McFarlaneConfig(),
-        p_ref_half=d["p_half"][0],
+        **_gwd_kw(mcfarlane_gwd, d),
     )
     assert not bool(jnp.any(jnp.isnan(out.du_dt)))
     g = jax.grad(loss)(0.5)

@@ -434,8 +434,6 @@ class TestTurbulenceAudit:
 def _gwd_call(fn, cfg, extra=(), **kw):
     A = _aux()
     T, q_v, p_full, p_half = _column()
-    if kw.pop("p_ref_from_column", False):
-        kw["p_ref_half"] = p_half.reshape(-1, p_half.shape[-1])[0]
     out = fn(A["u"], A["v"], T, p_full, p_half, A["z_full"], A["z_half"],
              A["rho"], A["lat"], 60.0, cfg, *extra, **kw)
     # GWDOutput is itself a NamedTuple (==tuple); only unwrap the
@@ -460,9 +458,24 @@ class TestGWDRadiationCloudsAudit:
     def test_mcfarlane_G_0(self):
         from legoesm.atmosphere.physics.gravity_wave_drag.mcfarlane import mcfarlane_gwd
         from legoesm.atmosphere.physics.gravity_wave_drag.config import McFarlaneConfig
-        assert_grad_ok(lambda x: _gwd_call(mcfarlane_gwd,
-            McFarlaneConfig()._replace(G_0=x), p_ref_from_column=True),
-            0.5, "mcfarlane.G_0")
+        from pathlib import Path
+        # The shared audit column has a 0 Pa model top, which CAM6 gw_oro
+        # refuses (log(pint)); audit on the CAM6 oracle fixture columns.
+        npz = np.load(Path(__file__).resolve().parents[1] / "atmosphere"
+                      / "oracle_fixtures" / "gw_oro_cam6.npz")
+        f = {k: jnp.asarray(npz[k]) for k in (
+            "u", "v", "T", "p_full", "p_half", "z_full", "z_half", "rho",
+            "lat", "dt", "sgh", "p_ref_half", "lf")}
+
+        def loss(x):
+            out = mcfarlane_gwd(
+                f["u"], f["v"], f["T"], f["p_full"], f["p_half"], f["z_full"],
+                f["z_half"], f["rho"], f["lat"], float(f["dt"]),
+                McFarlaneConfig()._replace(G_0=x), h_topo_col=f["sgh"],
+                p_ref_half=f["p_ref_half"], land_frac_col=f["lf"])
+            return jnp.sum(out.du_dt ** 2)
+
+        assert_grad_ok(loss, 0.5, "mcfarlane.G_0")
 
     def test_hines_total_rms_wind(self):
         from legoesm.atmosphere.physics.gravity_wave_drag.hines import hines_gwd

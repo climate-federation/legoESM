@@ -375,8 +375,9 @@ class McFarlaneConfig(NamedTuple):
         two are combined as a smooth XNOR multiplying ``tausat``; the hard
         limit (sharpness -> inf, floor -> 0) is CAM's test exactly.
     crit_level_floor : float
-        Offset [m/s] of the two smoothed sign tests (default 0.5); CAM's
-        phase speed ``c = 0`` is the hard limit ``crit_level_floor -> 0``.
+        Offset [m/s] of the two smoothed sign tests (default 0.0 = CAM's
+        orographic phase speed ``c = 0``, gw_common.F90:485 in
+        cam_cesm2_1_rel_60).
     tndmax_per_day : float
         Absolute ceiling on ``|du/dt|`` [m/s/day] (default 400.0, CAM6
         ``tndmax = 400/86400`` in cam_cesm2_1_rel_60 gw_common.F90, applied
@@ -399,7 +400,7 @@ class McFarlaneConfig(NamedTuple):
     use_e3sm_hdsp: bool | str = "auto"
     use_depth_averaged_source: bool = True
     crit_level_sharpness: float = 10.0
-    crit_level_floor: float = 0.5
+    crit_level_floor: float = 0.0
     tndmax_per_day: float = 400.0
     umcfac: float = 0.5
 

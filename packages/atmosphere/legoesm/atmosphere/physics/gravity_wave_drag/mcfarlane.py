@@ -42,18 +42,22 @@ Algorithm (k = 0 model top; interface k sits above midpoint k)
 Smoothing (differentiability).  The existing sharpness/width fields each
 reduce to the CAM hard switch at their limit: ``min_wind_sharpness`` (the
 ``U > 2 m/s`` launch gate, applied as ``sigmoid*U``), ``softmin_sharpness``
-(``min(taudmp, tausat)``), ``crit_level_sharpness`` / ``crit_level_floor``
-(the sign-agreement test of ``ubi`` across the layer; CAM's ``c = 0`` is
-``crit_level_floor -> 0``).  The ``hdsp > 10 m`` gate, ``n2min``, ``taumin``,
+(``min(taudmp, tausat)``), ``crit_level_sharpness`` (the sign-agreement
+test of ``ubi`` across the layer).  ``crit_level_floor`` defaults to CAM's
+``c = 0``.  The ``hdsp > 10 m`` gate, ``n2min``, ``taumin``,
 ``ubmc2mn`` and the limiters are hard, as in CAM (piecewise smooth; finite
 gradients).  The production smoothing values are NOT the hard limit; the
 oracle test reports that gap.
 
 Departures kept from the shared signature, not from the oracle:
 ``use_e3sm_hdsp`` / ``use_depth_averaged_source`` keep their
-legacy opt-outs (the production-resolved values are the CAM path).  Without a
-``land_frac_col`` the scheme runs CAM's ``gw_lndscl_sgh = .false.`` path
-(``effgw = effgw_oro``, unscaled ``sgh``).  ``gw_oro_south_fac = 1`` (CAM6
+legacy opt-outs (the production-resolved values are the CAM path).  A
+missing ``land_frac_col`` raises (CAM6 default ``gw_lndscl_sgh = .true.``
+always scales by ``cam_in%landfrac``; the unscaled path is not offered).  A
+non-positive model-top pressure raises (``log(pint)`` would be non-finite);
+the check runs on every concrete ``p_ref_half`` / ``p_half`` (callers build
+``p_ref_half`` at compile time, so it also runs under ``jit`` unless the
+vertical coordinate itself is traced).  ``gw_oro_south_fac = 1`` (CAM6
 default) is not modelled.
 
 References
@@ -102,7 +106,7 @@ __physics_contract__ = {
         "rho": "kg/m^3", "lat": "rad", "dt": "s",
         "h_topo_col": "m (optional per-column subgrid orographic stddev sgh)",
         "p_ref_half": "Pa (reference interface pressures, CAM pref_edge)",
-        "land_frac_col": "1 (optional per-column land fraction)",
+        "land_frac_col": "1 (per-column land fraction, required)",
         "tracers": "kg/kg or 1/kg (optional dict of per-mass mixing ratios)",
     },
     "outputs": {
@@ -245,9 +249,9 @@ def mcfarlane_gwd(
         REQUIRED reference interface pressures [Pa] (CAM ``pref_edge``: the
         vertical coordinate at surface pressure 1e5 Pa) on which the
         Newtonian-cooling profile is interpolated.
-    land_frac_col : (ncol,) or None
-        Land fraction (CAM ``cam_in%landfrac``).  None = CAM's
-        ``gw_lndscl_sgh = .false.`` path.
+    land_frac_col : (ncol,)
+        REQUIRED land fraction (CAM ``cam_in%landfrac``; CAM6
+        ``gw_lndscl_sgh = .true.``).  None raises.
     tracers : dict[str, (ncol, nlev)] or None
         Per-mass mixing ratios diffused by the gravity-wave eddy diffusion;
         their tendencies are returned in ``GWDOutput.dq_dt`` (same keys).
@@ -278,6 +282,30 @@ def mcfarlane_gwd(
             "interpolated on them.  The GWD factories pass "
             "sigma_coord.pressure_at_half(constants.p_ref)."
         )
+    if land_frac_col is None:
+        raise ValueError(
+            "mcfarlane_gwd needs land_frac_col (CAM cam_in%landfrac): CAM6 "
+            "(gw_lndscl_sgh = .true.) scales the orographic drag by the land "
+            "fraction.  Attach grid.land_frac (or the pipeline's f_land)."
+        )
+    # CAM gw_drag_prof damps with log(pint) (gw_common.F90:508); a zero model
+    # top makes it -inf and every reverse-mode gradient non-finite.  Python
+    # can only test a concrete value; a traced top is not checked here.
+    with jax.ensure_compile_time_eval():
+        _tops = (("p_ref_half", jnp.asarray(p_ref_half)[..., 0]),
+                 ("p_half", jnp.asarray(p_half)[..., 0]))
+    for _name, _top in _tops:
+        try:
+            _top = np.asarray(_top)
+        except jax.errors.TracerArrayConversionError:
+            continue
+        if not np.all(_top > 0.0):
+            raise ValueError(
+                f"mcfarlane_gwd: model-top {_name} = {_top.min()!r} Pa; the "
+                "CAM6 damping takes log(pint), which is non-finite at a zero "
+                "(or negative) model top.  Use a vertical coordinate with a "
+                "positive top pressure."
+            )
     config = config._replace(
         use_e3sm_hdsp=(_hdsp is True)
         or (_hdsp == "auto" and h_topo_col is not None),
@@ -299,13 +327,10 @@ def mcfarlane_gwd(
         sgh = jnp.full((ncol,), config.h_topo, dtype=u.dtype)
     else:
         sgh = jnp.clip(jnp.asarray(h_topo_col), 0.0, None).astype(u.dtype)
-    if land_frac_col is None:
-        effgw = jnp.full((ncol,), _EFFGW_ORO, dtype=u.dtype)
-    else:
-        lf = jnp.asarray(land_frac_col).astype(u.dtype)
-        on_land = lf >= _LANDFRAC_MIN
-        effgw = jnp.where(on_land, _EFFGW_ORO * lf, 0.0)
-        sgh = jnp.where(on_land, sgh / jnp.sqrt(jnp.where(on_land, lf, 1.0)), 0.0)
+    lf = jnp.asarray(land_frac_col).astype(u.dtype)
+    on_land = lf >= _LANDFRAC_MIN
+    effgw = jnp.where(on_land, _EFFGW_ORO * lf, 0.0)
+    sgh = jnp.where(on_land, sgh / jnp.sqrt(jnp.where(on_land, lf, 1.0)), 0.0)
     # ``is True``: flag already resolved above.
     hdsp = sgh * (2.0 if config.use_e3sm_hdsp is True else 1.0)
 

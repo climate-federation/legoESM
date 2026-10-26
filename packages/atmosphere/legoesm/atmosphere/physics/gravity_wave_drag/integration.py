@@ -686,10 +686,13 @@ def mcfarlane_inputs(scheme_name, sigma_coord, grid, ncol, nlev,
     None).  Empty dict for any other scheme."""
     if "mcfarlane" not in str(scheme_name).split("+"):
         return {}
-    p_ref = jnp.asarray([constants.p_ref], dtype=dtype)
+    # Evaluated at trace time when the coordinate is concrete, so the
+    # kernel's model-top check also runs under jit.
+    with jax.ensure_compile_time_eval():
+        p_ref_half = jnp.asarray(sigma_coord.pressure_at_half(
+            jnp.asarray([constants.p_ref], dtype=dtype))).reshape(-1)
     kw = {
-        "p_ref_half": jnp.asarray(
-            sigma_coord.pressure_at_half(p_ref)).reshape(-1),
+        "p_ref_half": p_ref_half,
         "land_frac_col": _extract_land_frac(grid, ncol),
     }
     if tracers is not None:
@@ -1150,10 +1153,11 @@ def _make_spectral_pe_gwd(
 
         # Latitude from Gaussian grid
         lat = jnp.broadcast_to(grid.lat[:, None], (n_lat, n_lon)).reshape(ncol)
-        # mcfarlane: reference interfaces + land fraction; tracer diffusion is
-        # not threaded on this lane (tracers=None).
+        # mcfarlane: reference interfaces, land fraction and every state
+        # tracer (CAM diffuses all constituents) — see mcfarlane_inputs.
+        _tracers = getattr(state, "tracers", None)
         mcf_kw = mcfarlane_inputs(scheme_name, sigma_coord, grid, ncol, nlev,
-                                  None, T_col.dtype)
+                                  _tracers, T_col.dtype)
 
         if is_combined:
             # Composite GWD (#834): sum orographic + non-orographic; thread the
@@ -1253,6 +1257,7 @@ def _make_spectral_pe_gwd(
             T_hat=state.T_hat.replace(data=dT_hat),
             lnps_hat=state.lnps_hat.replace(data=zero_2d),
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
+            tracers=_gwd_tracer_tendencies(gwd_out, _tracers),
         )
         return tendencies, gwd_spectrum_out
 
