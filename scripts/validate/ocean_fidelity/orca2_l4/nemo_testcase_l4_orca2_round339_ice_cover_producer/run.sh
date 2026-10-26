@@ -146,7 +146,7 @@ check_tool_a_my_src() {
   local root=$1 inventory
   inventory=$(find "$root" -maxdepth 1 \( -type f -o -type l \) -printf '%f\n' | sort)
   [[ "$inventory" == $'round339_ice_cover_writer.F90\nsbcmod.F90' ]] || return 1
-  ! grep -EHn 'rCdU_ice|hm_i|divu_i|shear_i|delta_i|a_i|v_i|v_s|sv_i|oa_i' \
+  ! grep -EHn '(^|[^A-Za-z0-9_])(rCdU_ice|hm_i|divu_i|shear_i|delta_i|a_i|v_i|v_s|sv_i|oa_i)([^A-Za-z0-9_]|$)' \
     "$root/round339_ice_cover_writer.F90" "$root/sbcmod.F90" >/dev/null
 }
 snapshot_build_sources() {

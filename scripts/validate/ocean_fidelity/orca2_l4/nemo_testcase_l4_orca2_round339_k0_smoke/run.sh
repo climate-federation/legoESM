@@ -93,7 +93,7 @@ check_k0_my_src() {
   local root=$1 source count=0
   while IFS= read -r -d '' source; do
     count=$((count+1))
-    grep -EHn 'rCdU_ice|hm_i|divu_i|shear_i|delta_i|a_i|v_i|v_s|sv_i|oa_i|fr_i' "$source" \
+    grep -EHn '(^|[^A-Za-z0-9_])(rCdU_ice|hm_i|divu_i|shear_i|delta_i|a_i|v_i|v_s|sv_i|oa_i|fr_i)([^A-Za-z0-9_]|$)' "$source" >/dev/null \
       && return 1
   done < <(find "$root" -maxdepth 1 \( -type f -o -type l \) -print0)
   [[ $count -eq 0 ]]

@@ -22,7 +22,8 @@ binary64 `ice_cover(time_counter,y,x)` record, including native land and halo
 content needed by the reader. The requested NEMO record is declared at
 `cfgs/SHARED/namelist_ref:418`.
 
-Tool B rebuilds the round-5 program observer-free with `key_si3` and stages
+Tool B rebuilds the round-5 deck with `key_si3`, NEMO's unmodified source and
+an empty `MY_SRC`, and stages
 only the Decision-175 K0 selectors: `nn_ice=1`, `ln_drgice_imp=F`,
 `ln_mxl0=T`, `nn_mxlice=0`, `ln_icebergs=F`, with `sn_ice` naming Tool A's
 digest-pinned file. It runs ten steps only after Tool A admission. Its result
@@ -49,6 +50,16 @@ move a retained build to a unique retained name and start again; it is never
 deleted. Tool A's estimate is about 55 minutes of production stepping plus a
 short ten-step passivity run and build time; the operator should reserve 90
 minutes plus build. Tool B reserves a 15-minute smoke timeout plus build.
+
+## Post-review repair
+
+The operator's Claude review returned RUN; Argon returned HOLD on acquisition
+source isolation, the iceberg banner, plant specificity, and manifest timing.
+The resumed implementation now builds Tool A from a separate observer-free
+same-key baseline and keeps only `sbcmod.F90` plus its `fr_i` writer in the
+observed `MY_SRC`. Tool B's `MY_SRC` is empty, so no SI3 field can be touched by
+a configuration-local observer. Both manifests are written before the first
+NEMO launch and digest the complete generated ppsrc and `MY_SRC` snapshot.
 
 ## Acquisition checklist disposition
 
@@ -82,7 +93,9 @@ minutes plus build. Tool B reserves a 15-minute smoke timeout plus build.
    one-ULP controls refuse. Value-changing controls select a positive
    ice-covered wet cell when available; every real value must be finite and in
    `[0,1]`.
-9. **Admission and retention:** the short passivity run requires `STOP 0`, no
+9. **Admission and retention:** the producer manifest is written before the
+   first NEMO launch, so every refusal already has its producer commit, binary,
+   staged inputs and complete build-source snapshot. The short passivity run requires `STOP 0`, no
    `E R R O R`, and byte-identical restarts against the admitted observer-free
    record. Both tools retain relative-path SHA-256 manifests, executables,
    inputs, resolved namelists, logs, restarts, outputs and admission reports.
@@ -91,29 +104,37 @@ minutes plus build. Tool B reserves a 15-minute smoke timeout plus build.
 10. **Score scope:** Tool A checks all 2,920 rank-record pairs and every native
     output cell. Tool B checks every numeric variable in each ocean restart.
     Neither claims or computes an S4 physics score.
-11. **Like-with-like proof:** the reused round-328 helper compares real
+11. **Like-with-like proof:** the reused round-328 helper compares Tool A's real
     preprocessed source and objects after stripping only the declared observer
-    and writer additions. A changed unrelated `iceupdate` ppsrc plant refuses.
-    Tool B uses the observer-free variant of the same helper.
+    and writer additions against its separately built observer-free baseline.
+    A changed unrelated `iceupdate` ppsrc plant refuses. Tool B uses the
+    observer-free variant against that same clean baseline.
 12. **Namelists and errors:** the K0 preflight validates every staged name in
     its exact `namelist_ref` group. Moved-group and misspelled-name plants
     refuse. Resolved `ocean.output` selectors are parsed with whitespace
-    tolerance, and either log containing `E R R O R` refuses.
+    tolerance; `ln_icebergs=.false.` is checked through NEMO's real
+    `==>>>   No icebergs used` banner, and either log containing `E R R O R`
+    refuses. A committed excerpt from the admitted round-5 `ocean.output`
+    exercises that banner.
 13. **Rerun after refusal:** both READMEs and traps retain builds and failed
     runs, name the move-aside retry procedure, and provide manifest-pinned
-    `--admit-existing` paths. No cleanup path deletes acquired evidence.
+    `--admit-existing` paths. Each preflight moves a synthetic manifested run
+    under `refused/` and admits it through the launcher's actual
+    `--admit-existing` route. No cleanup path deletes acquired evidence.
 
 ## Preflight result
 
 Tool A preflight: **PASS**. Placement-call, placement-import,
 placement-wrapper, arithmetic-census, whole-build same-program, restart-byte,
-memory and disk plants all fired. The real patched-source bounds fixture ran
-on two rank-distinct inputs. Focused Python tests passed 5 of 5. Final status:
+memory and disk plants all fired. The retained-run admission route passed. The
+real patched-source bounds fixture ran on two rank-distinct inputs. Focused
+Python tests passed 9 of 9. Final status:
 `ORCA2_ROUND339_ICE_COVER_PREFLIGHT_READY`.
 
 Tool B preflight: **PASS**. Three wrong-group plants, the misspelled-name
-plant, staged-filename plant and memory plant all fired. Focused Python tests
-passed 5 of 5. Final status: `ORCA2_ROUND339_K0_PREFLIGHT_READY`.
+plant, staged-filename plant, empty-`MY_SRC` plant and memory plant all fired.
+The retained-run admission route passed. Focused Python tests passed 9 of 9.
+Final status: `ORCA2_ROUND339_K0_PREFLIGHT_READY`.
 
 No NEMO executable was built or run by the author. The next action is strictly
 Tool A `--run`, followed only after its admission by Tool B `--run`.
@@ -125,7 +146,8 @@ Tool A `--run`, followed only after its admission by Tool B `--run`.
   smoke, no NEMO run by Codex, reuse of the round-5/333/336 helpers, and an
   operator-only acquisition stop.
 - UNASKED: none.
-- independent review: operator (Claude)
+- independent review: operator Claude RUN; Argon HOLD findings repaired and
+  re-preflighted
 
 ## Verification
 
@@ -138,7 +160,7 @@ Tool A `--run`, followed only after its admission by Tool B `--run`.
   1,469.76 seconds.
 - Required standalone citation-gate pytest on the clean pre-final tree:
   **17 / 17 PASS**.
-- Focused round-339 tests: **5 / 5 PASS**.
+- Focused round-339 tests: **9 / 9 PASS**.
 - Dedicated three-invocation ratchet: **12,314 PASS, 4 SKIP, 3 inherited
   FAIL**. The failures are the unchanged JRA55 test literal, land restart
   coefficient and shortwave-penetration parameter spec; none names a file in
