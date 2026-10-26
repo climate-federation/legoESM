@@ -2,10 +2,10 @@
   "format": "nemo-si3-o6-minmax-sites-v1",
   "build": "ORCA2_SAS_ICE_O7_REC",
   "rule": "x86 minsd/maxsd SRC,DST return SRC on a +0/-0 tie or a NaN operand; 'keeps' is SRC per copy. Model and oracle helpers keep their FIRST argument on a tie or NaN (fortran_min/max_tie_first, _mink/_maxk).",
-  "complete": {"icedyn_rdgrft": ["ice_dyn_rdgrft", "rdgrft_prep", "rdgrft_shift"], "icecor": ["ice_cor"],
+  "complete": {"icedyn_rdgrft": ["ice_dyn_rdgrft", "rdgrft_prep", "rdgrft_shift", "ice_dyn_1d2d"], "icecor": ["ice_cor"],
                "iceitd": ["ice_itd_reb", "itd_shiftice"], "icevar": ["ice_var_zapsmall", "ice_var_roundoff"]},
-  "non_executing": {"icecor:108": "nn_icesal == 2 salt bounds (the rung runs nn_icesal = 4)",
-                    "icevar:650": "nn_icesal /= 4 zapsmall salt arm"},
+  "non_executing": {"icecor:108": {"if": "IF ( nn_icesal == 2 ) THEN", "arm": "IF ( nn_icesal == 2 ) THEN"},
+                    "icevar:650": {"if": "IF( nn_icesal == 4 ) THEN", "arm": "ELSE"}},
   "sites": {
     "icedyn_rdgrft:295": {"fortran": "MIN( zdivu(ii), 0._wp )", "fortran_keeps": "0._wp (second)", "copies": 2,
       "rules": [{"kind": "MIN", "keeps": "0.0"}],

@@ -187,3 +187,72 @@ def test_every_source_min_max_sign_of_the_rung_is_in_the_table():
             ):
                 found.add(f"{unit}:{n}")
     assert found and found <= known, sorted(found - known)
+
+
+def _routines(unit):
+    """Routine name -> (first, last) source line of a ppsrc unit."""
+    import re
+
+    out, name = {}, None
+    for n, text in enumerate(
+        (BUILD / "ppsrc" / "nemo" / f"{unit}.f90").read_text().splitlines(), 1
+    ):
+        if m := re.match(r"\s*SUBROUTINE\s+(\w+)", text, re.I):
+            name, start = m.group(1).lower(), n
+        elif re.match(r"\s*END\s+SUBROUTINE", text, re.I) and name:
+            out[name] = (start, n)
+            name = None
+    return out
+
+
+@pytest.mark.skipif(not HAVE_BUILD, reason="record build not on this host")
+def test_completeness_scope_is_nemos_call_graph():
+    """The audited routines are exactly those of these units reachable from the rung's two calls."""
+    import re
+
+    table = json.loads(TABLE.read_text())
+    units = list(table["complete"])
+    where = {r: (u, span) for u in units for r, span in _routines(u).items()}
+    seen, todo = set(), ["ice_dyn_rdgrft", "ice_cor"]  # icedyn.f90:193-194
+    while todo:
+        r = todo.pop()
+        if (
+            r in seen or r not in where
+        ):  # other modules: icetab copies, icectl diagnostics, iom, timing
+            continue
+        seen.add(r)
+        u, (a, b) = where[r]
+        body = (BUILD / "ppsrc" / "nemo" / f"{u}.f90").read_text().splitlines()[a - 1 : b]
+        todo += [
+            c.lower()
+            for t in body
+            if not t.lstrip().startswith("!")
+            for c in re.findall(r"CALL\s+(\w+)", t, re.I)
+        ]
+    assert seen == {r for rs in table["complete"].values() for r in rs}
+
+
+@pytest.mark.skipif(not HAVE_BUILD, reason="record build not on this host")
+def test_idle_lines_sit_in_nn_icesal_arms_the_deck_does_not_take():
+    import re
+
+    table = json.loads(TABLE.read_text())
+    exp = BUILD.parent / "EXP00"
+    assert "nn_icesal" not in (exp / "namelist_ice_cfg").read_text()
+    assert re.search(r"^\s*nn_icesal\s*=\s*4\b", (exp / "namelist_ice_ref").read_text(), re.M)
+    for key, spec in table["non_executing"].items():
+        unit, line = key.split(":")
+        body = (BUILD / "ppsrc" / "nemo" / f"{unit}.f90").read_text().splitlines()
+        stack = []  # [if_text, current_arm_text]
+        for text in body[: int(line) - 1]:
+            t = text.strip()
+            if re.match(r"IF\s*\(.*\)\s*THEN$", t, re.I):
+                stack.append([t, t])
+            elif re.match(r"ELSE(\s*IF\s*\(.*\)\s*THEN)?$", t, re.I) and stack:
+                stack[-1][1] = t
+            elif re.match(r"END\s*IF\b", t, re.I) and stack:
+                stack.pop()
+        assert stack and stack[-1] == [spec["if"], spec["arm"]], (
+            key,
+            stack[-1:] if stack else None,
+        )

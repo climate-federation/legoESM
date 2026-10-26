@@ -130,15 +130,21 @@ dumps. All 27 MIN/MAX lines of `ice_dyn_rdgrft`, `rdgrft_prep`, `rdgrft_shift`,
 result name, 6 by both operands), all equal to the committed table
 `nemo_si3_o6_minmax_sites.json`. Completeness is checked both ways: every
 min/max instruction inside those compiled functions is on a table line or a
-declared idle arm (`nn_icesal /= 4`: icecor line 108, icevar line 650), and every
-MIN/MAX/SIGN source line of those routines is in the table. It agrees with my hand reads
+declared idle arm, and every MIN/MAX/SIGN source line of those routines is in
+the table. The routine set is pinned to NEMO's call graph (every routine of
+these four units reachable from the two calls at `ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icedyn.f90:193-194`;
+this adds `ice_dyn_1d2d`, which has none; calls into other modules are array
+copies, diagnostics behind `ln_icediachk`/`ln_icectl`, I/O and timing). Each
+idle line is checked to sit in an `nn_icesal` arm the deck does not take
+(icecor line 108 in `nn_icesal == 2`, icevar line 650 in the `ELSE` of
+`nn_icesal == 4`; the deck resolves `nn_icesal = 4`). It agrees with my hand reads
 of icedyn_rdgrft lines 295, 298, 375-380, 604-605, 713, 856-857 and 872-889,
 icecor line 118 and icevar line 636.
 
 - Model changed to the record's survivor at `ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icedyn_rdgrft.f90:298` (keeps `-zdivu` in both EVP copies), `:610`/`:613`/`:878`/`:889` (keep `epsi20`), `:874`/`:887` (keep `phrexp`), `:857` (keeps `hi_max(jl2)`), `:751` (the record has no MAX instruction; it keeps `2 - 0.1*zvti`), `ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icecor.f90:117-118` (MAX keeps `szv_i`; in the `kn /= 0` copy MIN keeps the MAX result), and `ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icevar.f90:636` (compiled `MIN(h_i, MIN(v_i, a_i))`). The NaN-propagating `jnp.minimum/maximum` are gone from the rung.
 - Copy-dependent: `ORCA2_SAS_ICE_O7_REC/BLD/ppsrc/nemo/icedyn_rdgrft.f90:856` keeps `phrmin` in one copy and `hi_max(jl2-1)` in the other. Running the shift as written and with that call's operands swapped, `phrmin = -0`, branch forced open: every output bit equal.
 - The scalar oracle uses the same survivors through its own helpers.
-- Tests: `tests/ice/unit/test_si3_o6_rdgrft_cor.py:770` (model and oracle calls equal the table; the pre-audit source fails it), `:789` (helpers return what `minsd/maxsd` return, eager and jit), `:806` (a NaN `delta_i` at line 298; the pre-fix model fails it, 5 words), `:817` (the line-856 counterfactual); `tests/ice/test_nemo_si3_minmax_tie_audit.py` (record object equals the table; three table plants, a dropped-line plant and a wrong-object plant fire; the matcher refuses ambiguous rows; source-level completeness): `6 passed in 14.39s`.
+- Tests: `tests/ice/unit/test_si3_o6_rdgrft_cor.py:770` (model and oracle calls equal the table; the pre-audit source fails it), `:789` (helpers return what `minsd/maxsd` return, eager and jit), `:806` (a NaN `delta_i` at line 298; the pre-fix model fails it, 5 words), `:817` (the line-856 counterfactual); `tests/ice/test_nemo_si3_minmax_tie_audit.py` (record object equals the table; three table plants, a dropped-line plant and a wrong-object plant fire; the matcher refuses ambiguous rows; source-level completeness; call-graph scope; idle arms): `8 passed in 13.50s` (`audit_tests.log`).
 
 ### 2. Lane 3's duplicate kernels, measured on lane 3's record
 
@@ -229,14 +235,14 @@ negative `v_s`; `at_i` above `amax` flagged for `icecor`, not for
 
 - O6 suite without the two slow tests: `35 passed in 194.05s` (`o6_fast_try2.log`); the slow set (FD gradient, both parent-vs-current controls including lane 3's ICE_RHEO card step): `3 passed in 1577.84s` (`o6_slow.log`).
 - Consumers of the touched modules (lane-3 jpl=1 ridging, ridging, ITD, O3, O5, surface suites): `121 passed, 1 xfailed in 387.84s`; O2 gate (`si3_orca2_state` consumer): `12 passed in 186.93s`.
-- Probe tests: kernel probe `3 passed`, routing probe `4 passed`.
+- Probe tests (kernel and routing probes): `7 passed in 5.22s` (`probe_tests.log`).
 
 ### Gates (this resume)
 
 - Citation gate, all 13 SI3 receipts, full map: every receipt PASS, 0 unmapped, 0 failing, 0 map entries failing audit; this receipt 65 citations; a shifted-line plant fires (exit 1) (`citation_gate_all_si3.log`).
 - Default citation gate: `31 passed in 6.90s` (`default_gate.log`). Private-import ratchet: `6 passed in 5.43s` (`private_imports.log`).
-- Inline-coefficient, hardcoded-constant, dispatch, parameter-spec and saturation ratchets: `11 failed, 12053 passed, 4 skipped`, the identical 11 at the parent; the one in a touched file (`si3_orca2_state.py`, inline coefficients) lists the same four pre-existing sites, none in the appended code (`ratchets_current.log`, `inline_si3_orca2_current.txt`).
-- Reviews (codex, read-only CLI): pass 1 HOLD, five harness/tool defects confirmed and one plausible, all fixed; pass 2 confirmed five fixed and the matcher not, now fixed and tested; pass 3 (claims check) HOLD on wording and completeness, fixed (`review_codex_r2.log`..`r5`). GLM: no route in this session, not run (honour-system rule unmet, stated).
+- Inline-coefficient, hardcoded-constant, dispatch, parameter-spec and saturation ratchets: `11 failed, 12053 passed, 4 skipped`, the identical 11 at the parent; the one in a touched file (`si3_orca2_state.py`, inline coefficients) lists the same five pre-existing sites, none in the appended code (`ratchets_current.log`, `inline_si3_orca2_current.txt`).
+- Reviews (codex, read-only CLI): pass 1 HOLD, five harness/tool defects confirmed and one plausible, all fixed; pass 2 confirmed five fixed and the matcher not, now fixed and tested; pass 3 (claims check) HOLD on wording and completeness, fixed; pass 4 HOLD on self-declared completeness scope, unvalidated idle arms, one count and two unlogged runs, fixed (`review_codex_r2.log`..`r5`). GLM: no route in this session, not run (honour-system rule unmet, stated).
 - GPU spot check: not run (no certification this round).
 
 ## CONFIRMED vs PLAUSIBLE

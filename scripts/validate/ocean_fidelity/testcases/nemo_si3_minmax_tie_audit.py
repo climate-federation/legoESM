@@ -125,7 +125,7 @@ def asm_minmax(asm: Path, lines: set[int]) -> list[dict]:
 
 
 def minmax_lines(asm: Path, prefixes) -> dict[int, int]:
-    """Source line -> min/max instruction count inside functions named by ``prefixes``."""
+    """Source line -> min/max count inside the named functions (and their gcc clones)."""
     out: dict[int, int] = {}
     line, func = None, ""
     for raw in asm.read_text().splitlines():
@@ -133,7 +133,7 @@ def minmax_lines(asm: Path, prefixes) -> dict[int, int]:
             line = int(m.group(2))
         elif raw.startswith("__") and raw.rstrip().endswith(":"):
             func = raw.rstrip()[:-1].split("_MOD_")[-1]
-        elif ASM_MINMAX.match(raw) and any(func.startswith(p) for p in prefixes):
+        elif ASM_MINMAX.match(raw) and any(func == p or func.startswith(p + ".") for p in prefixes):
             out[line] = out.get(line, 0) + 1
     return out
 
