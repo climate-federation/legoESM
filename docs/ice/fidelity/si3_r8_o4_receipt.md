@@ -235,3 +235,123 @@ The per-receipt citation gate audited each receipt plus the complete
 The composed map itself reported `MAP_ENTRIES 2934`, `AUDIT_FAILURES 0`, and
 `DUPLICATE_LITERALS []`. No O4 acquisition command was started during resume
 5. The acquisition overlay has since been decided (DECISION 170).
+
+## 8. Resume 6 (Claude): review HOLD items
+
+Two reviews (Claude, Argon) HELD the rebased O4. Each item below is fixed or
+answered; labels as in section 1.
+
+1. **Statement barriers (CONFIRMED).** XLA regroups `(x*c1)*c2` into
+   `x*(c1*c2)` even when only one factor is a constant, so an outer
+   `nemo_source_round` alone did not hold NEMO's left-to-right order. Every
+   intermediate of the Hbig_pra, Hsnow_pra, `ice_var_zapneg` and
+   `ice_var_zapsmall` flux statements is now barriered as NEMO evaluates it,
+   e.g. `zwfx_res + ( pv_s - pa_i * phs_max ) * rhos * z1_dt` is
+   `sr(sr(sr(v_s - target) * rhos) * z1_dt)`. An AST sweep of the O4 kernels
+   and the O4 functions of the state module found no other arithmetic with an
+   unbarriered arithmetic operand; the remaining hits are the lane-3-only
+   `multiply_before_divide` and non-reciprocal Hsnow branches, which O4 does
+   not execute. Every O4 divisor is a runtime array or a traced value, so the
+   division-by-constant rewrite (also measured: 33,373 of 100,000 quotients)
+   cannot occur on the O4 path.
+   Measured on the test's 24 x 20 cyclic + T-fold state, kt 1 and 2, each
+   `icycle`: production `jax.jit` against the whole call under
+   `jax.disable_jit()` differed in 774 cells (wfx_res 87-117 and sfx_res 20-36
+   per arm, 1-2 ULP) on the parent and in 0 cells after the fix.
+2. **Truly eager test (CONFIRMED).** `test_o4_d` now runs its eager arms under
+   `jax.disable_jit()` and compares raw bits (signed zeros included) on every
+   floating leaf for all three `icycle` values. On the parent model it fails
+   (`jit_primal_diag: 87 cells differ bitwise`); on the fixed model it passes.
+   The subcycle comment no longer claims `lax.cond`: all three subcycles are
+   computed and subcycle `jt` is kept where `icycle >= jt`.
+3. **Signed-zero ties (CONFIRMED).** The object code evaluates
+   `MAX( ABS( zs1new ) - zslpmax, zpsxx )` as `maxsd` with `psxx` as the
+   source operand (`adv_x.constprop.1.isra.0+0x872`; the same in the second
+   loop copy and in `adv_x.constprop.0`), likewise `zpsyy` in `adv_y`
+   (`+0x8a6`), so a tie keeps `zpsxx`/`zpsyy`; `Hsnow_pra`'s
+   `MIN( pa_ip, pa_i )` is `minsd` with `pa_i` as source (`+0x784`), so a tie
+   keeps `pa_i`. `jnp.maximum`/`jnp.minimum` return `+0`/`-0` on any tie. Both
+   now use the instruction's selection. The other executing sites cannot
+   change bits on a tie: `MAX( 0, zps0 )`, `MAX( 0, ... )` in Hsnow and the
+   `pato_i` update keep the literal `+0` (`maxsd zero, reg`), which
+   `jnp.maximum` also returns; the slope caps, `epsi20` floors, the 9-point
+   maxima and `MIN( phi_max, hi_max )` compare only non-zero values.
+   `test_o4_a5` pins the three sites through the public `si3_adv_x`,
+   `si3_adv_y` and `si3_hsnow_pra`; reverting any one site alone fails it. The
+   scalar replica now uses MAXSD selection too (Python `max` kept the first
+   operand). Lane 3 shares the limiter: its dump is bitwise identical to the
+   parent on all 94 arrays, so no certified lane-3 change goes to the user.
+4. **One category sum (CONFIRMED).** `_seq_sum_axis` is deleted; Hbig, Hsnow
+   and zapsmall call `fortran_sum_categories` (function-scope import: the state
+   module imports the kernels). FINDING, not acted on: gfortran's `SUM` starts
+   from `+0` (`pxor` at `ice_dyn_adv_pra+0x1037a`, then `addsd`), while the shared
+   helper starts from the first element, so an all-`-0` sum gives `-0` instead
+   of `+0`. The helper is shared by certified rungs; changing it is the user's
+   decision.
+5. **Parent and stale receipt lines (CONFIRMED).** The lane-3 control pins the
+   real parent `d2402fd179` and compares bits. The rebases had reintroduced a
+   reformat of the O2 refusal in `sea_ice.py`; the file is byte-identical to
+   the parent again, and the five re-anchors and two receipt edits that existed
+   only for it are removed. DECISION 170 is recorded in the header and 4.
+6. **CFL lag coverage (CONFIRMED by reading the deck; the future record is
+   PLAUSIBLE until acquired).** Under DECISION 170 the velocities are the fixed
+   `rn_uice = rn_vice = 0.5` m/s, so `zcfl` is the same on every call and the
+   delayed value equals the current one: the O4 record cannot exercise the
+   one-call lag. The first scored record whose velocities change between
+   Prather calls is O6's production-deck acquisition (DECISION 174: rheology
+   live, thermodynamics on); its record contract must carry the current and
+   delayed `zcfl` and `icycle` at every step, as section 4 lists for O4. O17
+   composes it over 100 steps. Until then the lag is pinned only by the
+   synthetic tests of 2.1.
+7. **Rebase onto the current lane tip.** Rebased all round-8 commits from
+   `abd7262c11` onto `d2402fd179` (O11). Conflicts, each resolved keeping both
+   sides:
+   - Original O4 implementation, `config.py`: the O1/O3 validator call (round
+     8) and O11's identity line (lane) are both kept; at end of file O11's
+     `SI3LateralMeltConfig` and round 8's validator/builder are both kept.
+   - Original receipt/map commit, citation map: O11's entries, then round 8's
+     block.
+   - O3 -> O4 rename commit, `config.py` (same two hunks) and the citation map:
+     lane content kept, only round 8's superseded O3 lines replaced by O4.
+   - Landed-anchor repair, citation map: O11's entries and the landed O1
+     anchors both kept.
+   Check: for every file, rebased tip minus pre-rebase tip equals exactly the
+   lane's `abd7262c11..d2402fd179` change (identical changed lines in nine
+   files; in `config.py` the same lines with the two blank lines placed before
+   the following function).
+
+Review: codex (independent, read-only, on 41626cbc7c..75089274a5) returned HOLD on one claim only: that the unbarriered residual add chains could be regrouped by XLA. Measured: production jit and op-by-op agree on 200,000 cells for a 6-term add chain, the where/subtract chain as written in the kernels, and `(a+b)+c`, and codex's own case `[1e16, -1e16, 1]` gives `1` both ways; the finding is refuted and no guard was added. Codex confirmed both tie pins under jit and eager. GLM: NOT RUN (no GLM tool in this session), so
+the dual-review rule is not met.
+
+Verification, CPU, float64, production `jit`, all on clean `75089274a5`
+(evidence `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round8/resume6_claude/verify/`).
+The O4 file was first run whole; the session's 2 h task limit stopped it during
+the gradient test, after the other eight had passed, so both parts were re-run
+to their summary lines.
+
+| Check | Decisive pass line |
+|---|---|
+| O1 tests | `15 passed in 196.15s (0:03:16)` |
+| O1 admitted-record rescore | `status PASS`, every `max_ulp` 0 |
+| O2 tests | `12 passed in 286.83s (0:04:46)` |
+| O2 admitted-record rescore | `status PASS`, every `max_ulp` 0 |
+| O3 tests | `10 passed in 125.69s (0:02:05)` |
+| O3 score / entry steps | `PASS`, `jit_vs_eager_max_ulp 0` / `PASS` |
+| O4, eight non-gradient tests | `8 passed, 1 deselected in 552.53s (0:09:12)` |
+| O4 gradient test | `1 passed in 9971.77s (2:46:11)`; `O4_AD_CHECKS_PASS fd_u_ratio=1.000000346896843 fd_vi_ratio=0.9999999995498314 rel_ad_diff=8.10341647527711e-16` |
+| O5 unit (default markers) | `21 passed, 1 deselected in 103.11s (0:01:43)` |
+| O5 acquisition gate tests | `17 passed in 28.11s` |
+| O5 admitted-record rescore | `PASS_O5_ADMISSION` |
+| Lane-3 RHEO control (`-m slow`) | `1 passed in 407.55s (0:06:47)` |
+| O7 surface, bulk-flux, round-314 audit, acquisition tests | `61 passed, 1 xfailed in 171.12s (0:02:51)` |
+| O7 admitted-record rescore | `PASS_O7_ADMISSION` |
+| Lane-3 bulk-flux gate | `AT-BAR` |
+| O8 frazil unit / C1D production controls | `13 passed in 2.38s` / `4 passed in 30.19s` |
+| O11 lateral melt | `32 passed in 120.15s (0:02:00)` |
+| Lane-3 ice fidelity suite | `111 passed in 1136.48s (0:18:56)` |
+| Default landing gate (7 files) | `161 passed in 1297.74s (0:21:37)` |
+| Private-import ratchet | `6 passed in 5.21s` |
+| D5 year, default and `--xla_cpu_max_isa=AVX` | `D5_PLATFORM_FLOOR`; shipped arm `b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2` in both; all 21 arm hashes equal the reviewed pre-rebase rescore in each arm |
+
+The O4 lane-3 control (inside the eight) compares bits against `d2402fd179`.
+The citation gate results for every SI3 receipt are below this table's commit.
