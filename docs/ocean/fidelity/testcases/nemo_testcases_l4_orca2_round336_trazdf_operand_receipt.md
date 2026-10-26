@@ -115,3 +115,8 @@ Expected evidence directory:
 
 No configuration value changed: **ASKED**. Independent review: operator
 (Claude).
+
+The mandatory receipt-citation test passes 17 tests. The round-336 receipt
+gate finds 13 citations with zero failures, zero unmapped citations and zero
+map-audit failures; all nine self-test controls fire. Its JSON SHA-256 is
+`9d778eb9257c55c09674e423acab16072e356b8f143df76d23b7615d998b7b8f`.
