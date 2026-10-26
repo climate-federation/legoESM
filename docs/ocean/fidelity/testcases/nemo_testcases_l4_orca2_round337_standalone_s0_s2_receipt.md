@@ -1,7 +1,8 @@
 # ORCA2 round 337 — standalone S0 and S2 model preparation
 
 Date: 2026-10-26.  Base `aae42be88d67`; preregistration commit
-`f6b789706`; model commits `50e135540` and `4b7083a09`.  Final disposition:
+`f6b789706`; model commits `50e135540`, `4b7083a09`, and review repair
+`6c9e6c00a`.  Final disposition:
 **LANDED model preparation; no acquisition tool, NEMO configuration, or NEMO
 run was made.**  S0/S2 groups present in the immutable round-5 record are at
 the exact bar; all other groups remain explicitly unmeasured pending the
@@ -191,16 +192,19 @@ non-NEMO caller is requested or observed.
   bit-exact under CPU JIT and whole-call eager execution, four-step S0 scan,
   bit-changing signed-zero ties, coefficient carry, finite-difference gradient,
   composed production-call-site plants, and no physical defaults;
-- shared field-reader, freshwater/runoff, SSS-restoring, and coupler
-  regression suites: 159/159 PASS;
+- NCAR bulk plus the directly affected freshwater and SSS-restoring suites
+  pass; the combined regression/ratchet battery reports 6,375 pass and 2 skip,
+  with only the two inherited ratchet failures below;
 - offline measured-group gate: 0 / 34,631 after, with all four one-ULP plants
   nonzero;
 - focused non-NEMO parent/current control: 0 / 328, with its plant nonzero;
-- hardcoded-constant and inline-coefficient ratchets: 6,176 PASS, 2 SKIP, 2
+- the unchanged S1/O1 numerical gate remains exact for all 158,292 bulk and
+  119,880 mapping words, and all per-field plants fire;
+- hardcoded-constant and inline-coefficient ratchets: 2
   inherited FAIL.  The identical parent failures are the JRA55 test's
   `273.15` literal and two land-restart findings; neither names a changed file.
 
-The authoritative default ORCA2 inventory passed 152/152 in 1,341.39 s.  The
+The authoritative default ORCA2 inventory passed 152/152 in 1,334.08 s.  The
 default citation test and this receipt's 14-citation gate both pass with zero
 unmapped entries, zero failures, every map entry shift-sensitive, and every
 self-test firing.  A shifted round-337 source citation exits nonzero.
@@ -223,4 +227,5 @@ owner builds the one composed acquisition after S3 is available.
 - No new decision is needed.  The missing evidence is already assigned to
   the composed S4 acquisition, not to an unrequested round-337 tool.
 
-independent review: operator (Claude)
+codex review: operator.  Claude and Argon HOLD findings are dispositioned
+above; independent re-review remains operator-owned before push.
