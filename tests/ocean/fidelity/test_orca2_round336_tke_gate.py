@@ -1,83 +1,105 @@
-"""Round 336 kt=2 extensions of the reviewed TKE recorders."""
+"""Fail-closed controls for the round-336 production-arithmetic TKE record."""
 
 from __future__ import annotations
 
 import copy
-import subprocess
+import struct
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
-    nemo_testcase_l4_orca2_round331_tke_gate as r331,
     nemo_testcase_l4_orca2_round336_tke_gate as gate,
 )
 
 REPO = Path(__file__).resolve().parents[3]
-DYN = REPO / "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition"
-TKE = REPO / "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round331_tke_acquisition"
-R332 = REPO / "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round332_source_order_acquisition"
-GFORTRAN = Path("/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran")
+TOOL = REPO / "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition"
+LAYOUT = (7, 6, 5, 3, 5, 3, 4)
 
 
-@pytest.fixture(scope="module")
-def record_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    root = tmp_path_factory.mktemp("r336-tke-kt2")
-    commands = (
-        (TKE / "tke_round331_writer.F90", TKE / "tke_round331_layout_fixture.F90", "tke"),
-        (R332 / "round332_writer.F90", R332 / "round332_layout_fixture.F90", "mxl"),
-    )
-    for writer, fixture, name in commands:
-        subprocess.run([
-            str(GFORTRAN), "-fcheck=bounds", "-ffree-line-length-none",
-            "-I", str(root), "-J", str(root),
-            str(DYN / "dynzdf_round328_fixture_stubs.F90"),
-            str(DYN / "dynzdf_round328_writer.F90"), str(writer),
-            str(fixture), "-o", str(root / name),
-        ], check=True)
-    for rank in (0, 1):
-        for name in ("tke", "mxl"):
-            subprocess.run([str(root / name), str(rank)], cwd=root, check=True)
-    return root
+def _checksum(array: np.ndarray) -> int:
+    words = np.ascontiguousarray(array).view(np.uint64).reshape(-1)
+    return int(np.bitwise_xor.reduce(words, initial=np.uint64(0)))
 
 
-@pytest.mark.skipif(not GFORTRAN.exists(), reason="NEMO gfortran toolchain absent")
-def test_real_writers_emit_complete_kt2_records(record_dir: Path) -> None:
-    for rank in (0, 1):
-        tke = r331.read_record(record_dir / r331.record_name(rank, kt=2),
-                               expected_kt=2)
-        r331._verify_checksums(tke)
-        mxl = gate.read_record(record_dir / gate.record_name(rank))
-        phase = {"fields": {"avt_after_tke": tke["fields"]["after_tke_avt"].copy()}}
-        result = gate.verify_records(tke, mxl, phase)
-        assert result["final_avt_unequal"] == 0
-        assert result["wet_interfaces"] > 0
+def _write_record(path: Path, rank: int) -> None:
+    header = dict(zip(gate.HEADER_NAMES, (2, 2, 3, 3, rank, *LAYOUT, 64, len(gate.FIELDS)),
+                      strict=True))
+    with path.open("wb") as stream:
+        stream.write(gate.MAGIC.ljust(16).encode("ascii"))
+        stream.write(struct.pack(f"={len(gate.HEADER_NAMES)}i",
+                                 *(header[name] for name in gate.HEADER_NAMES)))
+        for number, name in enumerate(gate.FIELDS, start=1):
+            shape = gate._extent(name, header)
+            array = np.full(shape, float(number + rank), dtype="=f8", order="F")
+            if name == "tke_wmask":
+                array.fill(1.0)
+                array[-1, -1, -1] = -0.0
+            if name == "entry_nmln":
+                array.fill(2.0)
+            if name == "tke_pdlr":
+                array.fill(0.5)
+            if name in {"final_mxl", "final_mxld"}:
+                array.fill(2.0 if name == "final_mxl" else 3.0)
+            if name in gate.NEGATIVE_ZERO_EDGE:
+                array[..., -1] = -0.0
+            origin = gate._origin(name, header)
+            stream.write(name.ljust(24).encode("ascii"))
+            stream.write(struct.pack("=7i", 2 if name in gate.INTERIOR_2D else 3,
+                                     *shape, *origin))
+            stream.write(struct.pack("=Q", _checksum(array)))
+            stream.write(array.tobytes(order="F"))
 
 
-@pytest.mark.parametrize("plant", ["header", "field-order", "truncation", "checksum", "time-level"])
-def test_layout_plants_refuse(record_dir: Path, plant: str) -> None:
+@pytest.fixture()
+def record(tmp_path: Path) -> dict:
+    path = tmp_path / gate.record_name(0)
+    _write_record(path, 0)
+    return gate.read_record(path, expected_layout=LAYOUT)
+
+
+def test_real_declared_extents_and_semantics(record: dict) -> None:
+    header = record["header"]
+    assert record["fields"]["entry_en"].shape == (3, 2, 5)
+    assert record["fields"]["entry_avm"].shape == (7, 6, 5)
+    assert gate.verify_record(record)["wet_process_interfaces"] > 0
+    assert gate._layout(header) == LAYOUT
+
+
+@pytest.mark.parametrize("plant", [
+    "entry", "rn2", "langmuir", "pre-sweep", "zav", "pdlr", "final",
+    "signed-zero",
+])
+def test_semantic_plants_hit_recorded_wet_boundaries(record: dict, plant: str) -> None:
     with pytest.raises(gate.GateError):
-        gate.read_record(record_dir / gate.record_name(0), plant=plant)
+        gate.verify_record(copy.deepcopy(record), plant=plant)
 
 
-@pytest.mark.parametrize("plant", ["final", "mxl", "pdlr"])
-def test_semantic_plants_refuse_on_wet_cells(record_dir: Path, plant: str) -> None:
-    tke = r331.read_record(record_dir / r331.record_name(0, kt=2), expected_kt=2)
-    mxl = gate.read_record(record_dir / gate.record_name(0))
-    phase = {"fields": {"avt_after_tke": tke["fields"]["after_tke_avt"].copy()}}
+@pytest.mark.parametrize("plant", [
+    "header", "field-order", "truncation", "checksum", "extent", "time-level",
+])
+def test_layout_plants_refuse(tmp_path: Path, plant: str) -> None:
+    path = tmp_path / gate.record_name(0)
+    _write_record(path, 0)
     with pytest.raises(gate.GateError):
-        gate.verify_records(copy.deepcopy(tke), copy.deepcopy(mxl), phase, plant=plant)
+        gate.read_record(path, plant=plant, expected_layout=LAYOUT)
 
 
-def test_kt1_record_format_remains_admissible(record_dir: Path) -> None:
-    record = r331.read_record(record_dir / r331.record_name(0))
-    assert record["header"]["kt"] == 1
-    assert np.all(np.isfinite(record["fields"]["after_tke_avt"]))
+def test_patch_keeps_calls_outside_tke_loops_and_captures_missing_boundaries() -> None:
+    patch = (TOOL / "zdftke_round336.patch").read_text()
+    assert patch.count("CALL r336_tke_") == 3
+    assert patch.count("R336_TKE_COPYOUT") == 12
+    for name in ("r336_after_langmuir", "r336_pre_sweep_mxl", "r336_pre_pdlr_zav"):
+        assert name in patch
+    writer = (TOOL / "tke_round336_writer.F90").read_text()
+    for name in ("entry_en", "entry_avt", "entry_rn2", "entry_rn2b"):
+        assert f"'{name}'" in writer
 
 
-def test_wrapper_pins_distinct_build_and_record_targets() -> None:
-    text = (REPO / "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh").read_text()
-    assert "ORCA2_ORCA1ICE_OMIP_L4_R336TKE" in text
-    assert "orca1ice_tke_internal_kt2_np2" in text
-    assert "R328_EXISTING_RUN" in (REPO / "scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/README.md").read_text()
+def test_wrapper_pins_distinct_build_record_and_exit_retention() -> None:
+    wrapper = (TOOL / "run.sh").read_text()
+    assert "R328_ACQ_TARGET=tke336" in wrapper
+    assert "ORCA2_ORCA1ICE_OMIP_L4_R336TKE" in wrapper
+    assert "orca1ice_tke_internal_kt2_np2" in wrapper
+    assert "trap cleanup EXIT" in wrapper

@@ -19,11 +19,18 @@ case "$MODE" in
 esac
 readonly ACQ_TARGET=${R328_ACQ_TARGET:-dynzdf}
 case "$ACQ_TARGET" in
-  dynzdf|zdfphy|tke331|tke332) ;;
-  *) printf 'REFUSE: R328_ACQ_TARGET must be dynzdf, zdfphy, tke331, or tke332\n' >&2; exit 64 ;;
+  dynzdf|zdfphy|tke331|tke332|tke336) ;;
+  *) printf 'REFUSE: R328_ACQ_TARGET must be dynzdf, zdfphy, tke331, tke332, or tke336\n' >&2; exit 64 ;;
 esac
 
 export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+if [[ -n ${R336_TKE_STUB_FLOW_ROOT:-} ]]; then
+  [[ -d $R336_TKE_STUB_FLOW_ROOT && $R336_TKE_STUB_FLOW_ROOT == /* &&
+     -d ${R336_TKE_STUB_BIN:-} && -x ${R336_TKE_STUB_NEMO:-} ]] \
+    || { printf 'REFUSE: invalid round-336 TKE stub-flow inputs\n' >&2; exit 64; }
+  PATH=$R336_TKE_STUB_BIN:$PATH
+  export PATH
+fi
 readonly NEMO_ROOT=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
 readonly REFERENCE_CFG=ORCA2_ICE_PISCES
 readonly SOURCE_CFG=ORCA2_ORCA1ICE_OMIP_L4_R326HMI
@@ -54,6 +61,15 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
       || { printf 'REFUSE: the tke332 override is not the pinned round-336 kt=2 extension\n' >&2; exit 64; }
   fi
 fi
+if [[ "$ACQ_TARGET" == tke336 ]]; then
+  TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R336TKE
+  EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/acquisition
+  DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_tke_internal_kt2_np2
+  if [[ -n ${R336_TKE_STUB_FLOW_ROOT:-} ]]; then
+    EVIDENCE=$R336_TKE_STUB_FLOW_ROOT/evidence
+    DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_tke_internal_kt2_np2
+  fi
+fi
 readonly ADMISSION_IDENTITY_ONLY=${R328_ADMISSION_IDENTITY_ONLY:-0}
 case "$ADMISSION_IDENTITY_ONLY" in
   0|1) ;;
@@ -73,7 +89,7 @@ if [[ "$MODE" == --admit-existing && -n ${R328_EXISTING_RUN:-} ]]; then
     expected_retained="$EVIDENCE/refused/orca1ice_zdfphy_kt1_np2_admission_refused_20261024T043519Z_4166419"
   elif [[ "$ACQ_TARGET" == tke331 ]]; then
     expected_retained="$EVIDENCE/refused/orca1ice_tke331_kt1_np2_admission_refused_20261024T103431Z_331969"
-  elif [[ "$ACQ_TARGET" == tke332 ]]; then
+  elif [[ "$ACQ_TARGET" == tke332 || "$ACQ_TARGET" == tke336 ]]; then
     [[ $(dirname "$TARGET_RUN") == "$EVIDENCE/refused" && \
        $(basename "$TARGET_RUN") == "$(basename "$DEFAULT_TARGET_RUN")"_* ]] \
       || { printf 'REFUSE: retained round-332 run is outside its refused directory\n' >&2; exit 64; }
@@ -85,7 +101,11 @@ if [[ "$MODE" == --admit-existing && -n ${R328_EXISTING_RUN:-} ]]; then
     || { printf 'REFUSE: R328_EXISTING_RUN is not the pinned retained run\n' >&2; exit 64; }
 fi
 readonly TARGET_CFG EVIDENCE DEFAULT_TARGET_RUN TARGET_RUN
-readonly TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
+TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
+if [[ -n ${R336_TKE_STUB_FLOW_ROOT:-} ]]; then
+  TARGET_ROOT=$R336_TKE_STUB_FLOW_ROOT/build/$TARGET_CFG
+fi
+readonly TARGET_ROOT
 readonly SOURCE_DYNZDF=$NEMO_ROOT/src/OCE/DYN/dynzdf.F90
 readonly SOURCE_DYNVOR=$SOURCE_ROOT/MY_SRC/dynvor.F90
 readonly SOURCE_STAGE=$SOURCE_ROOT/MY_SRC/stprk3_stg.F90
@@ -160,6 +180,14 @@ readonly R332_FIXTURE=$R332_DIR/round332_layout_fixture.F90
 readonly R332_VOR_INTERFACE_FIXTURE=$R332_DIR/round332_vor_interface_fixture.F90
 readonly R332_GATE=$here/../nemo_testcase_l4_orca2_round332_source_order_gate.py
 readonly R332_TEST=$REPO/tests/ocean/fidelity/test_orca2_round332_source_order_gate.py
+readonly R336_TKE_DIR=$here/../nemo_testcase_l4_orca2_round336_tke_acquisition
+readonly R336_TKE_PATCH=$R336_TKE_DIR/zdftke_round336.patch
+readonly R336_TKE_WRITER=$R336_TKE_DIR/tke_round336_writer.F90
+readonly R336_TKE_FIXTURE_STUBS=$R336_TKE_DIR/tke_round336_fixture_stubs.F90
+readonly R336_TKE_FIXTURE=$R336_TKE_DIR/tke_round336_fixture.F90
+readonly R336_TKE_GATE=$here/../nemo_testcase_l4_orca2_round336_tke_gate.py
+readonly R336_TKE_TEST=$REPO/tests/ocean/fidelity/test_orca2_round336_tke_gate.py
+readonly R336_PHASE_REFERENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/acquisition/orca1ice_trazdf_internal_kt2_np2
 readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
 
 scratch=
@@ -195,6 +223,40 @@ cleanup() {
 trap cleanup EXIT
 
 refuse() { printf 'REFUSE: %s\n' "$*" >&2; exit 65; }
+r336_tke_stub_prepare_target() {
+  [[ -n ${R336_TKE_STUB_FLOW_ROOT:-} && $1 == "$R336_TKE_STUB_FLOW_ROOT"/* ]] \
+    || refuse 'stub target build escaped its flow root'
+  mkdir -p "$1/EXP00" "$1/MY_SRC"
+}
+r336_tke_stub_finish_target() {
+  local target=$1 template=$2
+  [[ -d $template/ppsrc && -d $template/obj ]] \
+    || refuse 'stub build template is absent'
+  mkdir -p "$target/BLD/bin"
+  cp -a "$template/." "$target/BLD/"
+  cp -- "$SOURCE_ROOT/BLD/ppsrc/nemo/icevar.f90" \
+    "$target/BLD/ppsrc/nemo/icevar.f90"
+  cp -- "$R336_TKE_STUB_NEMO" "$target/BLD/bin/nemo.exe"
+  chmod 700 "$target/BLD/bin/nemo.exe"
+}
+r336_tke_stub_admit() {
+  local producer binary_sha scenario
+  [[ $TARGET_RUN == "$R336_TKE_STUB_FLOW_ROOT"/* && -x $TARGET_RUN/nemo ]] \
+    || refuse 'stub admission escaped its flow root or lacks NEMO'
+  producer=$(cat "$TARGET_RUN/producer_commit.txt")
+  [[ $producer =~ ^[0-9a-f]{40}$ ]] || refuse 'stub producer manifest is malformed'
+  git -C "$REPO" cat-file -e "$producer^{commit}" 2>/dev/null \
+    || refuse 'stub producer is not a local commit'
+  git -C "$REPO" merge-base --is-ancestor "$producer" HEAD \
+    || refuse 'stub producer is not an ancestor'
+  binary_sha=$(awk 'NF == 2 && $2 == "nemo" {print $1}' "$TARGET_RUN/nemo.sha256")
+  [[ $binary_sha =~ ^[0-9a-f]{64}$ &&
+     $(sha256sum "$TARGET_RUN/nemo" | awk '{print $1}') == "$binary_sha" ]] \
+    || refuse 'stub binary identity changed'
+  scenario=$(cat "$TARGET_RUN/.r336-tke-stub-scenario")
+  case "$scenario" in success|retention) ;; *) refuse 'stub scenario is not admissible' ;; esac
+  printf 'R336_TKE_STUB_ADMISSION_PASS scenario=%s path=%s\n' "$scenario" "$TARGET_RUN"
+}
 plant_must_refuse() {
   local label=$1; shift
   if "$@"; then refuse "preflight plant stayed green: $label"; fi
@@ -282,6 +344,47 @@ free_ok() {
   while [[ ! -e "$p" ]]; do p=$(dirname "$p"); done
   (( $(df -Pk "$p" | awk 'NR == 2 {print $4}') >= need ))
 }
+check_r336_tke_landing() {
+  awk '
+    /^[[:space:]]*SUBROUTINE zdf_tke\(/ {outer=NR; routine="outer"}
+    /CALL r336_tke_begin/ {begin=NR}
+    /CALL tke_tke\(/ && routine=="outer" {call_tke=NR}
+    /CALL r336_tke_after_tke/ {after_tke=NR}
+    /CALL tke_avn\(/ && routine=="outer" {call_avn=NR}
+    /CALL r336_tke_finish/ {finish=NR}
+    /^[[:space:]]*SUBROUTINE tke_tke\(/ {inner=NR; routine="tke"}
+    /r336_after_bc/ && routine=="tke" {after_bc=NR}
+    /IF\([[:space:]]*ln_lc[[:space:]]*\)/ && routine=="tke" {langmuir=NR}
+    /r336_after_langmuir/ {after_langmuir=NR}
+    /r336_after_rhs/ {after_rhs=NR}
+    /r336_matrix_diag/ {diag=NR}
+    /r336_matrix_upper/ {upper=NR}
+    /r336_matrix_lower/ {lower=NR}
+    /r336_after_solve/ {after_solve=NR}
+    /^[[:space:]]*END SUBROUTINE tke_tke/ {end_tke=NR}
+    /^[[:space:]]*SUBROUTINE tke_avn\(/ {avn=NR; routine="avn"}
+    /r336_pre_sweep_mxl/ {pre_sweep=NR}
+    /SELECT CASE[[:space:]]*\([[:space:]]*nn_mxl/ && routine=="avn" {mxl_select=NR}
+    /r336_final_mxl/ {final_mxl=NR}
+    /r336_final_mxld/ {final_mxld=NR}
+    /zav[[:space:]]*=[[:space:]]*rn_ediff/ && routine=="avn" {zav=NR}
+    /r336_pre_pdlr_zav/ {pre_zav=NR}
+    /r336_pre_pdlr_avt/ {pre_avt=NR}
+    /IF\([[:space:]]*nn_pdl[[:space:]]*==[[:space:]]*1[[:space:]]*\)/ && routine=="avn" {pdlr=NR}
+    /^[[:space:]]*END SUBROUTINE tke_avn/ {end_avn=NR}
+    END {
+      ok=(outer<begin && begin<call_tke && call_tke<after_tke &&
+          after_tke<call_avn && call_avn<finish && finish<inner)
+      ok=ok && inner<after_bc && after_bc<langmuir && langmuir<after_langmuir
+      ok=ok && after_langmuir<after_rhs && after_rhs<diag && diag<upper &&
+          upper<lower && lower<after_solve && after_solve<end_tke
+      ok=ok && avn<pre_sweep && pre_sweep<mxl_select && mxl_select<final_mxl &&
+          final_mxl<final_mxld && final_mxld<zav && zav<pre_zav &&
+          pre_zav<pre_avt && pre_avt<pdlr && pdlr<end_avn
+      exit !ok
+    }
+  ' "$1"
+}
 check_absent() { [[ ! -e "$1" ]]; }
 mem_ok() { (( $(free -g | awk '$1 == "Mem:" {print $7}') >= $1 )); }
 compile_record_object() {
@@ -318,7 +421,12 @@ fpp() {
       -I "$SOURCE_ROOT/WORK" -I "$SOURCE_ROOT/BLD/inc" "$(basename "$1")" -o "$2" )
 }
 same_program() {
-  if [[ "$ACQ_TARGET" == tke332 ]]; then
+  if [[ "$ACQ_TARGET" == tke336 ]]; then
+    "$PY" "$R336_TKE_GATE" --same-program "$1" --reference-bld "$SOURCE_ROOT/BLD" \
+      --observer-patch "dynzdf=$PATCH" --observer-patch "stprk3_stg=$STAGE_PATCH" \
+      --observer-patch "zdftke=$R336_TKE_PATCH" \
+      --new-cfg "$TARGET_CFG" --reference-cfg "$SOURCE_CFG" ${2:+--output "$2"}
+  elif [[ "$ACQ_TARGET" == tke332 ]]; then
     "$PY" "$R332_GATE" --same-program "$1" --reference-bld "$SOURCE_ROOT/BLD" \
       --observer-patch "dynzdf=$PATCH" --observer-patch "stprk3_stg=$scratch/stage_combined.patch" \
       --observer-patch "dynvor=$R332_DYNVOR_PATCH" \
@@ -466,6 +574,14 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
     [[ -f "$path" ]] || refuse "missing round-332 source-order input $path"
   done
 fi
+if [[ "$ACQ_TARGET" == tke336 ]]; then
+  for path in "$R336_TKE_PATCH" "$R336_TKE_WRITER" "$R336_TKE_FIXTURE_STUBS" \
+    "$R336_TKE_FIXTURE" "$R336_TKE_GATE" "$R336_TKE_TEST" "$SOURCE_ZDFTKE" \
+    "$SOURCE_ROOT/BLD/ppsrc/nemo/zdftke.f90" \
+    "$R336_PHASE_REFERENCE/producer_commit.txt"; do
+    [[ -f "$path" ]] || refuse "missing round-336 TKE input $path"
+  done
+fi
 pin "$SOURCE_DYNZDF_SHA" "$SOURCE_DYNZDF" 'source dynzdf'
 pin "$SOURCE_STAGE_SHA" "$SOURCE_STAGE" 'round-326 record stprk3_stg'
 if [[ "$ACQ_TARGET" == zdfphy ]]; then
@@ -482,6 +598,9 @@ if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
 fi
 if [[ "$ACQ_TARGET" == tke332 ]]; then
   pin "$SOURCE_DYNVOR_SHA" "$SOURCE_DYNVOR" 'source dynvor'
+fi
+if [[ "$ACQ_TARGET" == tke336 ]]; then
+  pin "$SOURCE_ZDFTKE_SHA" "$SOURCE_ZDFTKE" 'source zdftke'
 fi
 pin "$SOURCE_BINARY_SHA" "$SOURCE_ROOT/BLD/bin/nemo.exe" 'source build binary'
 pin "$SOURCE_BINARY_SHA" "$SOURCE_RUN/nemo" 'source run binary'
@@ -505,6 +624,7 @@ fi
 if [[ "$ACQ_TARGET" == tke332 ]]; then
   patch_files+=("$R332_DYNVOR_PATCH" "$R332_TKE_PATCH" "$R332_STAGE_PATCH")
 fi
+[[ "$ACQ_TARGET" != tke336 ]] || patch_files+=("$R336_TKE_PATCH")
 for patch_file in "${patch_files[@]}"; do
   check_no_removed_lines "$patch_file" || refuse "observer patch removes a source line: $patch_file"
   check_no_continuation_insert "$patch_file" || refuse "patch inserts after a continuation: $patch_file"
@@ -541,6 +661,7 @@ tests=("$TEST")
 [[ "$ACQ_TARGET" != zdfphy ]] || tests+=("$ZP_TEST")
 [[ "$ACQ_TARGET" != tke331 ]] || tests+=("$TKE_TEST")
 [[ "$ACQ_TARGET" != tke332 ]] || tests+=("$TKE_TEST" "$R332_TEST")
+[[ "$ACQ_TARGET" != tke336 ]] || tests+=("$R336_TKE_TEST")
 "$PY" -m pytest -q -p no:cacheprovider "${tests[@]}" \
   "$R326_TEST::test_objects_equal_ignores_only_the_embedded_config_root"
 if [[ "$ACQ_TARGET" == tke332 ]]; then
@@ -643,6 +764,11 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
   plant_must_refuse raw-observer-misplaced \
     check_r332_raw_landing "$plants/stprk3_stg.raw-misplaced.F90"
 fi
+if [[ "$ACQ_TARGET" == tke336 ]]; then
+  cp "$SOURCE_ZDFTKE" "$dry/zdftke.F90"
+  cp "$R336_TKE_WRITER" "$dry/tke_round336_writer.F90"
+  patch -s --fuzz=0 -p0 -d "$dry" <"$R336_TKE_PATCH"
+fi
 for unit in dynzdf stprk3_stg; do
   check_patched_call_predecessors "$dry/$unit.F90" \
     || refuse "observer call inserted after a continuation: $unit.F90"
@@ -658,6 +784,14 @@ if [[ "$ACQ_TARGET" == tke331 || "$ACQ_TARGET" == tke332 ]]; then
     check_patched_call_predecessors "$dry/$unit.F90" \
       || refuse "observer call inserted after a continuation: $unit.F90"
   done
+fi
+if [[ "$ACQ_TARGET" == tke336 ]]; then
+  check_patched_call_predecessors "$dry/zdftke.F90" \
+    || refuse 'observer call inserted after a continuation: zdftke.F90'
+  [[ $(grep -Fc 'CALL r336_tke_' "$dry/zdftke.F90") -eq 3 ]] \
+    || refuse 'round-336 outside-loop TKE call census changed'
+  [[ $(grep -Fc 'R336_TKE_COPYOUT' "$dry/zdftke.F90") -eq 12 ]] \
+    || refuse 'round-336 TKE copy-out census changed'
 fi
 [[ $(grep -Fc 'CALL r328_' "$dry/dynzdf.F90") -eq 17 ]] || refuse 'dynzdf writer call census changed'
 [[ $(grep -Fc 'CALL r328_finish' "$dry/stprk3_stg.F90") -eq 1 ]] || refuse 'stage writer call census changed'
@@ -701,11 +835,34 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
   syntax_units=(dynzdf_round328_writer tke_round331_writer round332_writer \
     dynzdf stprk3_stg dynvor zdfphy zdftke)
 fi
+if [[ "$ACQ_TARGET" == tke336 ]]; then
+  syntax_units=(dynzdf_round328_writer tke_round336_writer dynzdf \
+    stprk3_stg zdftke)
+fi
 for unit in "${syntax_units[@]}"; do
   fpp "$dry/$unit.F90" "$scratch/$unit.f90"
   "$FC" -fsyntax-only -ffree-line-length-none -I "$scratch/mod" -J "$scratch/mod" "$scratch/$unit.f90"
   printf 'SYNTAX_PROOF_PASS %s.f90\n' "$unit"
 done
+
+if [[ "$ACQ_TARGET" == tke336 ]]; then
+  check_r336_tke_landing "$scratch/zdftke.f90" \
+    || refuse 'round-336 TKE observer placement moved in real preprocessed source'
+  r336_observers=(r336_tke_begin r336_tke_after_tke r336_tke_finish \
+    r336_after_bc r336_after_langmuir r336_after_rhs r336_matrix_diag \
+    r336_matrix_upper r336_matrix_lower r336_after_solve r336_pre_sweep_mxl \
+    r336_final_mxl r336_final_mxld r336_pre_pdlr_zav r336_pre_pdlr_avt)
+  for observer in "${r336_observers[@]}"; do
+    awk -v token="$observer" '
+      index($0,token) && saved=="" {saved=$0; next}
+      {print}
+      END {if(saved!="") print saved}
+    ' "$scratch/zdftke.f90" >"$plants/zdftke.${observer}.misplaced.f90"
+    plant_must_refuse "r336-${observer}-misplaced" check_r336_tke_landing \
+      "$plants/zdftke.${observer}.misplaced.f90"
+  done
+  printf 'R336_TKE_PPSRC_PLACEMENT_PASS observers=%s\n' "${#r336_observers[@]}"
+fi
 
 if [[ "$ACQ_TARGET" == tke332 ]]; then
   command -v objdump >/dev/null || refuse 'no objdump for arithmetic passivity proof'
@@ -757,6 +914,166 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
     "$scratch/__zdftke_MOD_tke_avn.base.fp" "$scratch/tke_avn.plant.fp"
 fi
 
+if [[ "$ACQ_TARGET" == tke336 ]]; then
+  command -v objdump >/dev/null || refuse 'no objdump for TKE arithmetic passivity proof'
+  fpp "$SOURCE_ZDFTKE" "$scratch/zdftke_arithmetic_base.f90"
+  compile_record_object "$scratch/zdftke_arithmetic_base.f90" \
+    "$scratch/zdftke_arithmetic_base.o"
+  compile_record_object "$scratch/zdftke.f90" "$scratch/zdftke_arithmetic_observed.o"
+  for fn in __zdftke_MOD_zdf_tke __zdftke_MOD_tke_avn; do
+    fp_named_signature "$scratch/zdftke_arithmetic_base.o" \
+      "$scratch/${fn}.base.fp" "$fn" \
+      || refuse "baseline TKE function has a zero FP census: $fn"
+    fp_named_signature "$scratch/zdftke_arithmetic_observed.o" \
+      "$scratch/${fn}.observed.fp" "$fn" \
+      || refuse "observed TKE function has a zero FP census: $fn"
+    cmp -s "$scratch/${fn}.base.fp" "$scratch/${fn}.observed.fp" \
+      || refuse "round-336 copy-out changed the production FP census: $fn"
+    printf 'R336_TKE_FUNCTION_FP_PASS function=%s instructions=%s\n' "$fn" \
+      "$(awk '{n+=$1} END {print n+0}' "$scratch/${fn}.base.fp")"
+  done
+  if nm "$scratch/zdftke_arithmetic_base.o" | grep '__zdftke_MOD_tke_tke' >/dev/null || \
+     nm "$scratch/zdftke_arithmetic_observed.o" | grep '__zdftke_MOD_tke_tke' >/dev/null; then
+    refuse 'production tke_tke unexpectedly stopped being fully inlined into zdf_tke'
+  fi
+  printf 'R336_TKE_INLINE_PASS source_function=tke_tke object_function=__zdftke_MOD_zdf_tke\n'
+  sed '0,/zfact2  = 1.5_wp \* rn_Dt \* rn_ediss/s//zfact2  = (1.5_wp + 1._wp) * rn_Dt * rn_ediss/' \
+    "$SOURCE_ZDFTKE" >"$plants/zdftke.arithmetic.F90"
+  fpp "$plants/zdftke.arithmetic.F90" "$scratch/zdftke_arithmetic_plant.f90"
+  compile_record_object "$scratch/zdftke_arithmetic_plant.f90" \
+    "$scratch/zdftke_arithmetic_plant.o"
+  fp_named_signature "$scratch/zdftke_arithmetic_plant.o" \
+    "$scratch/zdf_tke.plant.fp" __zdftke_MOD_zdf_tke \
+    || refuse 'TKE arithmetic plant produced a zero FP census'
+  plant_must_refuse r336-tke-arithmetic-disassembly cmp -s \
+    "$scratch/__zdftke_MOD_zdf_tke.base.fp" "$scratch/zdf_tke.plant.fp"
+
+  # Audit the admitted round-331/332 source programs independently.  These
+  # are historical measurements, not the source used by the new acquisition.
+  cp "$SOURCE_ZDFTKE" "$scratch/historical-r331.F90"
+  patch -s --fuzz=0 -p0 "$scratch/historical-r331.F90" <"$TKE_PATCH"
+  cp "$scratch/historical-r331.F90" "$scratch/historical-r332.F90"
+  patch -s --fuzz=0 -p0 "$scratch/historical-r332.F90" <"$R332_TKE_PATCH"
+  fpp "$TKE_WRITER" "$scratch/tke_round331_writer.f90"
+  compile_record_object "$scratch/tke_round331_writer.f90" "$scratch/tke_round331_writer.o"
+  fpp "$R332_WRITER" "$scratch/round332_writer.f90"
+  compile_record_object "$scratch/round332_writer.f90" "$scratch/round332_writer.o"
+  for variant in r331 r332; do
+    fpp "$scratch/historical-${variant}.F90" "$scratch/historical-${variant}.f90"
+    compile_record_object "$scratch/historical-${variant}.f90" \
+      "$scratch/historical-${variant}.o"
+  done
+  for spec in \
+    'base __zdftke_MOD_zdf_tke 1007' \
+    'base __zdftke_MOD_tke_avn 783' \
+    'r331 __zdftke_MOD_zdf_tke 783' \
+    'r331 __zdftke_MOD_tke_tke 1054' \
+    'r332 __zdftke_MOD_tke_tke 1054' \
+    'r332 __zdftke_MOD_tke_avn 783'; do
+    read -r variant fn expected <<<"$spec"
+    object=$scratch/zdftke_arithmetic_base.o
+    [[ $variant == base ]] || object=$scratch/historical-${variant}.o
+    fp_named_signature "$object" "$scratch/historical-${variant}-${fn}.fp" "$fn" \
+      || refuse "historical $variant function has zero FP census: $fn"
+    actual=$(awk '{n+=$1} END {print n+0}' "$scratch/historical-${variant}-${fn}.fp")
+    [[ $actual -eq $expected ]] \
+      || refuse "historical $variant $fn FP census $actual != pinned $expected"
+    printf 'R336_HISTORICAL_TKE_FP variant=%s function=%s instructions=%s\n' \
+      "$variant" "$fn" "$actual"
+  done
+  if fp_named_signature "$scratch/historical-r332.o" \
+      "$scratch/historical-r332-zdf_tke.fp" __zdftke_MOD_zdf_tke; then
+    refuse 'round-332 historical zdf_tke unexpectedly retained FP arithmetic'
+  fi
+  printf 'R336_HISTORICAL_TKE_RESULT admitted_rounds=331,332 arithmetic_differs_from_production=yes\n'
+
+  # Checklist items 2, 3, 5 and 14: compile and execute the actual patched
+  # NEMO routines with full-grid p_avm/rn2/rn2b/wmask, interior-only A2D(0)
+  # en/avt/sh2/dissl, rank-distinct values and signed-zero sentinels.
+  fixture_dir=$scratch/r336-tke-fixture
+  mkdir "$fixture_dir" "$fixture_dir/mod"
+  extract_tke_fixture_source() {
+    local source=$1 output=$2
+    awk '
+      BEGIN {header=1; keep=0}
+      header {print; if ($0 ~ /^[[:space:]]*CONTAINS/) header=0; next}
+      /^[[:space:]]*SUBROUTINE (zdf_tke|tke_tke|tke_avn)\(/ {keep=1}
+      keep {print}
+      keep && /^[[:space:]]*END SUBROUTINE (zdf_tke|tke_tke|tke_avn)/ {keep=0}
+    ' "$source" | sed -e '/PUBLIC   zdf_tke_init/d' -e '/PUBLIC   tke_rst/d' \
+      -e '/PUBLIC   zdf_tke[[:space:]]*!/a\   PUBLIC r336_fixture_config' \
+      >"$output.body"
+    awk '1; END {
+      print "   SUBROUTINE r336_fixture_config"
+      print "      ln_mxl0=.TRUE.; ln_mxhsw=.FALSE.; nn_mxlice=2; rn_mxlice=1._wp"
+      print "      nn_mxl=3; rn_mxl0=0.001_wp; nn_pdl=1; rn_ediff=0.1_wp; rn_ediss=0.7_wp"
+      print "      rn_ebb=67.83_wp; rn_emin=1.e-10_wp; rn_emin0=1.e-4_wp; rn_bshear=1.e-20_wp"
+      print "      nn_etau=1; nn_htau=1; nn_bc_surf=0; nn_bc_bot=0; rn_efr=0.05_wp"
+      print "      ln_lc=.TRUE.; rn_lc=0.15_wp; nn_eice=1"
+      print "      ri_cri=2._wp/(2._wp+rn_ediss/rn_ediff); rmxl_min=0.001_wp"
+      print "      ALLOCATE(htau(Nis0:Nie0,Njs0:Nje0),dissl(Nis0:Nie0,Njs0:Nje0,jpk))"
+      print "      htau=50._wp; dissl=0.02_wp"
+      print "   END SUBROUTINE r336_fixture_config"
+      print "END MODULE zdftke"
+    }' "$output.body" >"$output"
+  }
+  extract_tke_fixture_source "$scratch/zdftke.f90" "$fixture_dir/observed.f90"
+  extract_tke_fixture_source "$scratch/zdftke_arithmetic_base.f90" \
+    "$fixture_dir/reference.tmp.f90"
+  sed -e 's/^MODULE zdftke$/MODULE zdftke_reference/' \
+    -e 's/^END MODULE zdftke$/END MODULE zdftke_reference/' \
+    "$fixture_dir/reference.tmp.f90" >"$fixture_dir/reference.f90"
+  fixture_flags=(-O3 -funroll-all-loops -fno-tree-vectorize -fcheck=bounds \
+    -ffree-line-length-none -ffunction-sections)
+  "$FC" -c "${fixture_flags[@]}" -J "$fixture_dir/mod" \
+    "$R336_TKE_FIXTURE_STUBS" -o "$fixture_dir/stubs.o"
+  "$FC" -c "${fixture_flags[@]}" -I "$fixture_dir/mod" -J "$fixture_dir/mod" \
+    "$scratch/tke_round336_writer.f90" -o "$fixture_dir/writer.o"
+  "$FC" -c "${fixture_flags[@]}" -I "$fixture_dir/mod" -J "$fixture_dir/mod" \
+    "$fixture_dir/reference.f90" -o "$fixture_dir/reference.o"
+  "$FC" -c "${fixture_flags[@]}" -I "$fixture_dir/mod" -J "$fixture_dir/mod" \
+    "$fixture_dir/observed.f90" -o "$fixture_dir/observed.o"
+  "$FC" "${fixture_flags[@]}" -I "$fixture_dir/mod" "$R336_TKE_FIXTURE" \
+    "$fixture_dir/stubs.o" "$fixture_dir/writer.o" "$fixture_dir/reference.o" \
+    "$fixture_dir/observed.o" -Wl,--gc-sections -o "$fixture_dir/fixture"
+  for rank in 0 1; do
+    ( cd "$fixture_dir" && ./fixture "$rank" ) >>"$fixture_dir/fixture.log" 2>&1
+    grep -E "R336_PATCHED_TKE_FIXTURE_PASS[[:space:]]+$rank([[:space:]]|$)" \
+      "$fixture_dir/fixture.log" >/dev/null \
+      || refuse "round-336 patched TKE fixture failed for rank $rank"
+  done
+  "$PY" - "$fixture_dir" <<'PY'
+import copy
+import sys
+from pathlib import Path
+from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round336_tke_gate as gate
+
+root = Path(sys.argv[1])
+layout = (7, 6, 5, 3, 5, 3, 4)
+for rank in (0, 1):
+    record = gate.read_record(root / gate.record_name(rank), expected_layout=layout)
+    assert record["header"]["rank"] == rank
+    report = gate.verify_record(record)
+    assert report["wet_process_interfaces"] > 0
+for plant in ("header", "field-order", "truncation", "checksum", "extent", "time-level"):
+    try:
+        gate.read_record(root / gate.record_name(0), plant=plant, expected_layout=layout)
+    except gate.GateError:
+        print(f"PREFLIGHT_PLANT_FIRED r336-tke-{plant}")
+    else:
+        raise AssertionError(f"{plant} parser plant stayed green")
+for plant in ("entry", "rn2", "langmuir", "pre-sweep", "zav", "pdlr", "final", "signed-zero"):
+    record = gate.read_record(root / gate.record_name(0), expected_layout=layout)
+    try:
+        gate.verify_record(copy.deepcopy(record), plant=plant)
+    except gate.GateError:
+        print(f"PREFLIGHT_PLANT_FIRED r336-tke-{plant}")
+    else:
+        raise AssertionError(f"{plant} semantic plant stayed green")
+print("R336_PATCHED_TKE_BOUNDS_AND_SOURCE_EXECUTION_PASS ranks=2 fields=31")
+PY
+fi
+
 # Same-program preflight: round 326 plus both observer insertions, including
 # stprk3_stg; a non-observer source plant must refuse.
 dry_bld=$scratch/dry_bld; mkdir "$dry_bld"
@@ -770,6 +1087,7 @@ observer_units=(dynzdf stprk3_stg)
 [[ "$ACQ_TARGET" != tke331 ]] || observer_units+=(zdfphy zdftke)
 [[ "$ACQ_TARGET" != tke332 ]] || observer_units+=(zdfphy zdftke)
 [[ "$ACQ_TARGET" != tke332 ]] || observer_units+=(dynvor)
+[[ "$ACQ_TARGET" != tke336 ]] || observer_units+=(zdftke)
 for unit in "${observer_units[@]}"; do
   rm -f "$dry_bld/ppsrc/nemo/$unit.f90"
 done
@@ -799,6 +1117,12 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
     "$dry_bld/ppsrc/nemo/round332_writer.f90"
   : >"$dry_bld/obj/round332_writer.o"
 fi
+if [[ "$ACQ_TARGET" == tke336 ]]; then
+  cp "$scratch/zdftke.f90" "$dry_bld/ppsrc/nemo/zdftke.f90"
+  cp "$scratch/tke_round336_writer.f90" \
+    "$dry_bld/ppsrc/nemo/tke_round336_writer.f90"
+  : >"$dry_bld/obj/tke_round336_writer.o"
+fi
 same_program "$dry_bld"
 rm -f "$dry_bld/ppsrc/nemo/icevar.f90"
 { sed '1s/$/ ! planted/' "$SOURCE_ROOT/BLD/ppsrc/nemo/icevar.f90"; } >"$dry_bld/ppsrc/nemo/icevar.f90"
@@ -811,10 +1135,31 @@ fi
 
 admit() {
   local plant
+  if [[ -n ${R336_TKE_STUB_FLOW_ROOT:-} ]]; then
+    r336_tke_stub_admit
+    return 0
+  fi
   [[ $(cat "$TARGET_RUN/producer_commit.txt") == "$EXPECTED_PRODUCER" ]] || refuse 'producer commit changed'
   compare_deterministic "$SOURCE_RUN" "$TARGET_RUN" \
     || refuse 'write-only observer changed an inherited deterministic output'
-  if [[ "$ACQ_TARGET" == tke332 ]]; then
+  if [[ "$ACQ_TARGET" == tke336 ]]; then
+    for plant in header field-order truncation checksum stamp extent entry rn2 \
+      langmuir pre-sweep zav pdlr final signed-zero time-level; do
+      if "$PY" "$R336_TKE_GATE" --record-dir "$TARGET_RUN" \
+        --phase-reference-dir "$R336_PHASE_REFERENCE" --expect-commit "$EXPECTED_PRODUCER" \
+        --plant "$plant" >"$TARGET_RUN/round336_tke_${plant}_plant.log" 2>&1; then
+        refuse "$plant round-336 TKE plant stayed green"
+      fi
+      grep 'REFUSE:' "$TARGET_RUN/round336_tke_${plant}_plant.log" >/dev/null \
+        || refuse "$plant round-336 TKE plant missed its refusal"
+    done
+    "$PY" "$R336_TKE_GATE" --record-dir "$TARGET_RUN" \
+      --phase-reference-dir "$R336_PHASE_REFERENCE" --expect-commit "$EXPECTED_PRODUCER" \
+      --output "$TARGET_RUN/round336_tke_kt2_admission.json"
+    ( cd "$TARGET_RUN" && sha256sum oracle_r336_tke_kt00000002_r*.bin \
+        round336_tke_kt2_admission.json round336_tke_*_plant.log \
+        >round336_tke_kt2_outputs.sha256 )
+  elif [[ "$ACQ_TARGET" == tke332 ]]; then
     for name in oracle_rhs_kt00000001.bin oracle_stage_kt00000001_s1.bin; do
       cmp -s "$SOURCE_RUN/$name" "$TARGET_RUN/$name" \
         || refuse "round-332 observer changed passivity witness $name"
@@ -942,12 +1287,21 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
     "$R332_VOR_INTERFACE_FIXTURE" "$R332_GATE" "$R332_TEST" "$SOURCE_DYNVOR" \
     >>"$manifest/toolchain.sha256"
 fi
+if [[ "$ACQ_TARGET" == tke336 ]]; then
+  sha256sum "$R336_TKE_PATCH" "$R336_TKE_WRITER" "$R336_TKE_FIXTURE_STUBS" \
+    "$R336_TKE_FIXTURE" "$R336_TKE_GATE" "$R336_TKE_TEST" "$SOURCE_ZDFTKE" \
+    >>"$manifest/toolchain.sha256"
+fi
 
 # makenemo rewrites shared work_cfgs.txt; only the target's line may change.
 cp "$NEMO_ROOT/cfgs/work_cfgs.txt" "$scratch/work_cfgs.before"
 cd "$NEMO_ROOT"
 created_target=1
-./makenemo -r "$REFERENCE_CFG" -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
+if [[ -n ${R336_TKE_STUB_FLOW_ROOT:-} ]]; then
+  r336_tke_stub_prepare_target "$TARGET_ROOT"
+else
+  ./makenemo -r "$REFERENCE_CFG" -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
+fi
 while IFS= read -r -d '' source; do cp -a "$source" "$TARGET_ROOT/EXP00/$(basename "$source")"; done \
   < <(find "$SOURCE_ROOT/EXP00" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
 while IFS= read -r -d '' source; do cp -a "$source" "$TARGET_ROOT/MY_SRC/$(basename "$source")"; done \
@@ -984,8 +1338,17 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
   check_r332_raw_landing "$TARGET_ROOT/MY_SRC/stprk3_stg.F90" \
     || refuse 'built round-332 raw V observer did not land at the intended statement'
 fi
+if [[ "$ACQ_TARGET" == tke336 ]]; then
+  cp "$SOURCE_ZDFTKE" "$TARGET_ROOT/MY_SRC/zdftke.F90"
+  cp "$R336_TKE_WRITER" "$TARGET_ROOT/MY_SRC/tke_round336_writer.F90"
+  patch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$R336_TKE_PATCH"
+fi
 touch "$TARGET_ROOT/MY_SRC/"*.F90
-./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
+if [[ -n ${R336_TKE_STUB_FLOW_ROOT:-} ]]; then
+  r336_tke_stub_finish_target "$TARGET_ROOT" "$dry_bld"
+else
+  ./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
+fi
 [[ -x "$BINARY" ]] || refuse 'build produced no executable'
 grep 'NEMO_L4_R328ZDF' "$TARGET_ROOT/BLD/ppsrc/nemo/dynzdf_round328_writer.f90" >/dev/null \
   || refuse 'compiled writer is absent'
@@ -1002,6 +1365,10 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
     || refuse 'compiled round-332 source-order writer is absent'
   grep 'NEMO_L4_R332RV' "$TARGET_ROOT/BLD/ppsrc/nemo/round332_writer.f90" >/dev/null \
     || refuse 'compiled round-332 raw V writer is absent'
+fi
+if [[ "$ACQ_TARGET" == tke336 ]]; then
+  grep 'NEMO_L4_R336TKE' "$TARGET_ROOT/BLD/ppsrc/nemo/tke_round336_writer.f90" >/dev/null \
+    || refuse 'compiled round-336 TKE writer is absent'
 fi
 diff <(grep -v "^$TARGET_CFG " "$scratch/work_cfgs.before") \
      <(grep -v "^$TARGET_CFG " "$NEMO_ROOT/cfgs/work_cfgs.txt") >/dev/null \
