@@ -315,9 +315,9 @@ premises stated in the proofs: UNASKED, offered for revert. Review of these fixe
   the pre-rebase tip and the result).
 - `packages/ice/legoesm/ice/bitz_lipscomb.py`, the gate's `FILES` block and the D5 probe test merged without
   conflict. O11's model edits there keep their line numbers; O9's insertions above them moved seven O11 receipt
-  citations (`:41`, `:1677`, `:1735`, `:1787`, `:1822`, `:1848`, `:1880`). Resolution: the O11 receipt cites the
-  same statements at their new lines and six `_reanchor` rows follow them (`:1787` already had O9's re-anchor to
-  `:2385`). Every SI3 receipt's per-receipt gate then passes, full map included.
+  citations into that file. Resolution: the O11 receipt cites the same statements at their new lines and six
+  `_reanchor` rows follow them (the seventh, `_ieee_lt_zero`, already had O9's re-anchor). Every SI3 receipt's
+  per-receipt gate then passes, full map included.
 - Mechanical check: for every file, the ordered added/removed lines of backup -> rebased HEAD equal those of
   `abd7262c11` -> `d2402fd179` (10 files, `DELTA_EQUALS_LANE`); the commits after the rebase add only this
   section, the preregistration status line and the citation follow-up above.
