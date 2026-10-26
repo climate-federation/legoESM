@@ -120,3 +120,11 @@ The mandatory receipt-citation test passes 17 tests. The round-336 receipt
 gate finds 13 citations with zero failures, zero unmapped citations and zero
 map-audit failures; all nine self-test controls fire. Its JSON SHA-256 is
 `9d778eb9257c55c09674e423acab16072e356b8f143df76d23b7615d998b7b8f`.
+
+The default ORCA2 landing battery passes 146 tests in 1,462.44 seconds; log
+SHA-256 is
+`8ddc3ec81940098fa911966fcd181d4b003a3a1522bcfaee1a107e8bc5c42f9b`.
+The all-package private-import ratchet separately passes 6 tests in 6.42
+seconds; log SHA-256 is
+`50cb70694b877bb2a88d4cf1a09018216f131123bea992f586ce03de4cdd9546`.
+No DINO month gate is required because no model or package file changed.
