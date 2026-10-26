@@ -45,7 +45,7 @@ Main groups:
 
 | Group | Fields (MOM6 name) |
 |---|---|
-| timestep | `dt_s` (no MOM6 equivalent — must equal the model timestep) |
+| timestep | `dt_s` (no MOM6 equivalent — the timestep the energy budget is priced over; the OMIP driver and the SCM set/check it against their dt, the lat-lon C-grid model ignores it and passes its step dt; see below) |
 | rotation / decay | `omega_frac` (ML_OMEGA_FRAC), `tke_decay` (TKE_DECAY), `ekman_scale_coef` |
 | energy partition | `nstar` (NSTAR), `mke_to_tke_effic`, `wstar_ustar_coef` (WSTAR_USTAR_COEF) |
 | mstar | `mstar_scheme` = `constant` / `om4` / `reichl_h18` (EPBL_MSTAR_SCHEME), `fixed_mstar` (MSTAR), `mstar_cap`, `mstar_coef`, `c_ek`, `mstar_convect_coef` (MSTAR_CONV_ADJ), `rh18_mstar_cn1..3`, `rh18_mstar_cs1..2` |
@@ -58,9 +58,10 @@ Main groups:
 Requirements and guards (`validate_epbl_config`, all raise on violation):
 - **implicit only** — the host must run `implicit_vertical_mixing=True`; ePBL
   returns `K_v`/`A_v` for the backward-Euler solve and has no explicit form;
-- `dt_s > 0` (`validate_epbl_config`). It must also equal the model timestep
-  (ePBL is an energy-per-timestep closure), which the drivers enforce, not
-  `validate_epbl_config`: the OMIP driver sets it from `--dt`, refuses to run
+- `dt_s > 0` (`validate_epbl_config`; checked on every path, including the
+  lat-lon C-grid model, which does not otherwise read `dt_s`). Where `dt_s`
+  is read it must equal the model timestep (ePBL is an energy-per-timestep
+  closure), which the drivers enforce, not `validate_epbl_config`: the OMIP driver sets it from `--dt`, refuses to run
   ePBL without an explicit `--dt`, and raises if it differs from the run
   timestep; the ocean single-column model sets it to its own `dt` when
   `dt_s` is left at the default and raises when a non-default `dt_s`
