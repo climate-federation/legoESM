@@ -105,12 +105,79 @@ The temperature clamp mutates `ts(:,:,:,Kmm)` over `A2D(nn_hls)`, including
 the halo, before the owned-interior flux loop; the S3 record and scorer must
 therefore carry and compare that halo mutation, not only owned T cells.
 
+Round 338 transcribed the update block (`nemo_sbc_ice_if` beside the S1
+literal arm in `bulk_flux_omip.py`; EOS-80 freezing point
+`nemo_eos_fzp_eos80` in `eos.py`, because the deck sets `ln_eos80`).  Source
+facts the S3 record must respect, read from the record build:
+
+- RK3 calls `sbc(kstp, Nbb, Nbb)` (`stprk3.f90:155`), so `Kbb = Kmm`: the
+  flux loop reads the **clamped** temperature, `MIN(0., ts - zt_fzp)` is
+  always the literal `0.`, and the under-ice damping term never acts.
+- `emp` and `sfx` are not modified (the header comment says they are);
+  `zsice` is computed and never read.
+- `fr_i` leaves the call holding the masked freezing point on the halo and
+  0/1 on the interior.
+- Object code: no fused multiply-add; MAXSD keeps `zt_fzp` on ties, so land
+  cells with `sss_m = +0` and `ts = +0` leave with `ts = -0`; the MINSD in
+  `MIN(0., x)` keeps the literal (unobservable here, since `x >= 0`);
+  `SIGN` is lib_fortran's `b >= 0` form; EOS-80 `SQRT` is inline `sqrtsd`, so
+  no libm arm is involved.
+
 The reference namelist requests a **yearly mean** `ice_cover_clim.nc` record:
 `sn_ice%freqh=-12`, `ln_tint=.true.`, and `clftyp='yearly'`.  In `fld_read`,
 `-12` selects one yearly record, not twelve monthly records.  The file is
 absent from the ORCA2 inputs.  Decision 171 supplies it as a pinned native-grid
 yearly mean from a fixed full-SI3 ORCA2 run.  S0-F owns whatever yearly-record
 interpolation the admitted file and calendar actually execute.
+
+What `fld_read` does with it (record-build `fldread.f90`): `freqh = -12`
+reads exactly one record (`:885`), whose time bounds come from the model
+calendar (`:903-909`), not from the file's time values; with
+`ln_clim=.true.` the same file serves every year.  With `ln_tint=.true.` it
+still interpolates, `fnow = ztintb*fdta(bb) + ztinta*fdta(aa)` (`:244-246`),
+between two copies of the same field.  That sum is not bitwise the file
+value: on a synthetic uniform field about 14--19% of cells move one ULP at
+generic weights (PLAUSIBLE for the real file; a field of exactly 0 or 1 is
+unchanged).  So the S3 record must carry `fnow`, not the file.
+
+### Operator task — ice-cover file production (Decision 171, not run)
+
+No existing record can supply it: every admitted ORCA2 record runs ten
+steps, and the only longer full-SI3 ORCA2 run is the ORCA2X 30-day pilot.
+A new operator run is required.
+
+1. **Producer.**  The admitted round-5 record build
+   `ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY` (keys `key_si3 key_qco key_vco_1d3d
+   key_RK3`, flags `-fdefault-real-8 -O3 -funroll-all-loops ...
+   -fno-tree-vectorize`), round-5 deck unchanged (`nn_ice=2`, the record's
+   one-category SI3 of Decision 157), two ranks, from the record's initial
+   state, plus one passive observer.  Run length and averaging year are a
+   **user decision**; the proposal is one 365-day year (`nn_itend = 2920`,
+   `nn_leapy = 0`, `nn_date0 = 010101`), matching Decision 142's card length.
+   Alternatives: two years (EXP00's 5,840 steps) averaging year 2, or the
+   five-category EXP00 ice deck.
+2. **Averaging.**  `fr_i = at_i` is set only on SBC steps
+   (`iceupdate.f90:212`), so the observer reads `fr_i` once per SBC step,
+   immediately after `CALL ice_stp` (`sbcmod.f90:501`), outside every loop:
+   1,460 samples at `nn_fsbc = 2`, each held for two equal ocean steps, so the
+   unweighted mean equals the time mean.  Accumulate per owned cell in
+   binary64 in kt order (`zsum = zsum + fr_i`), divide once by the sample
+   count at `nitend`, write once.  NEMO itself imposes no averaging on a
+   `-12` record.
+3. **Schema.**  NetCDF `ice_cover_clim.nc`, dimensions
+   `time_counter = 1` (unlimited), `y = 148`, `x = 180` (interior-only global
+   grid, as the deck's `chlorophyll.nc`); variable
+   `ice_cover(time_counter, y, x)` as NF90_DOUBLE, no `_FillValue`, scale or
+   offset; no land/sea mask file (`sn_ice` names none), so land holds the
+   producer's value.  Each global cell is written by exactly one rank's owned
+   interior; overlaps or gaps refuse.
+4. **Provenance.**  NEMO source, patch, build and executable digests;
+   namelist and input digests; run manifest; averaging kt list and count;
+   calendar; summation order; file SHA-256.  Relative paths, retention and
+   refusal handling follow the acquisition-tool checklist (items 1--13).
+5. **Cost.**  Round 5 ran 10 steps in 11.22 s, so 2,920 steps is about 55
+   minutes stepping alone.  Reserve 90 minutes plus build; the observer adds
+   one in-memory 2-D accumulation per SBC step and one write.
 
 ## S4 — composed standalone comparison card
 
@@ -222,6 +289,7 @@ twin before the candidate.
 | relax any bar or hide signed-zero differences | UNASKED | prohibited |
 | select or manufacture an ice-cover climatology | ASKED | DECISION 171: pinned native-grid yearly mean from a fixed full-SI3 ORCA2 run |
 | retain `key_si3` build identity | ASKED | Decision 175 |
+| ice-cover producer run length, averaging year and deck | PENDING | proposal: round-5 deck, one year, mean of 1,460 SBC samples |
 | remove existing record-replay comparison modes | UNASKED | retain as diagnostics |
 
 ## DECISION 171 — ice-cover provenance (TAKEN)

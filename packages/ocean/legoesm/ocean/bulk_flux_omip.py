@@ -83,6 +83,7 @@ from legoesm.core.source_rounding import (
     nemo_source_barrier as B,
     nemo_source_round as R,
 )
+from legoesm.ocean.eos import nemo_eos_fzp_eos80
 from legoesm.thermo import saturation_vapor_pressure_goff
 
 
@@ -110,6 +111,10 @@ _P_EXNER_REF: float = 1.0e5    # NEMO sbc_phy rpref [Pa]
 _N_ITER_PRES: int = 3          # NEMO pres_temp barometric iterations
 
 _VALID_OMIP_BULK_ALGOS = ("ncar", "ly09_2coeff")
+
+# --- NEMO sbc_ice_if constants (sbcice_if.f90:154, :192) ---
+_IIF_ZTRP_W_M2_K: float = -40.0   # restoring term for temperature [W/m2/K]
+_IIF_ZQI_OFFSET_W_M2: float = -3.0  # zqi = -3 + SIGN(1, ff_f): -2 N, -4 S
 
 
 def _fmax(first, second):
@@ -810,6 +815,59 @@ def nemo_blk_oce_ncar(
     )
 
 
+class NemoSbcIceIfResult(NamedTuple):
+    """Post-``sbc_ice_if`` state.  ``ts_surface``/``fr_i`` are full
+    ``A2D(nn_hls)`` arrays; ``qsr``/``qns`` are interior ``A2D(0)`` arrays."""
+    ts_surface: jnp.ndarray
+    fr_i: jnp.ndarray
+    qsr: jnp.ndarray
+    qns: jnp.ndarray
+
+
+def nemo_sbc_ice_if(ice_cover, sss_m, sst_m, ts_surface, ff_f,
+                    tmask_surface, smask0, qsr, qns, *, nn_hls):
+    """Literal record-build ``sbc_ice_if`` update block (nn_ice = 1).
+
+    Transcribes sbcice_if.f90:154-196, the body of ``IF( MOD(kt-1, nn_fsbc)
+    == 0 )``; on every other step the routine changes nothing, so the caller
+    applies that gate.  ``ice_cover`` is ``sf_ice(1)%fnow`` after
+    ``fld_read`` (owned by S0-F).  ``ts_surface`` is ``ts(:,:,1,jp_tem,Nbb)``:
+    the RK3 record build calls ``sbc(kstp, Nbb, Nbb)``, so Kbb = Kmm and the
+    flux loop reads the clamped temperature.  The source leaves ``emp``,
+    ``sfx`` and the stresses untouched and never reads ``zsice``.
+
+    Ties follow the object code: MAXSD keeps ``zt_fzp`` (second operand);
+    MINSD in ``MIN(0., x)`` keeps the literal ``0.`` (first operand).
+    """
+    h = int(nn_hls)
+    f64 = jnp.float64
+    sss_m = jnp.asarray(sss_m, dtype=f64)
+    ny, nx = sss_m.shape
+    inner = (slice(h, ny - h), slice(h, nx - h))
+    # sbcice_if.f90:158-159: eos_fzp on A2D(nn_hls), then masked.
+    fzp = R(nemo_eos_fzp_eos80(sss_m) * jnp.asarray(tmask_surface, dtype=f64))
+    # :164-167: clamp on the full A2D(nn_hls) halo.
+    ts_new = _fmax(jnp.asarray(ts_surface, dtype=f64), fzp)
+    zt = fzp[inner]
+    zfr = jnp.asarray(ice_cover, dtype=f64)
+    ts_b = ts_new[inner]
+    mask0 = jnp.asarray(smask0, dtype=f64)
+    # :173-175
+    fr_in = jnp.where(jnp.asarray(sst_m, dtype=f64)[inner] <= zt, 1.0, 0.0)
+    open_frac = R(1.0 - zfr)
+    # :177
+    qsr_new = R(open_frac * jnp.asarray(qsr, dtype=f64))
+    # :182-185
+    zqri = R(_IIF_ZTRP_W_M2_K * R(ts_b - R(zt - 1.0)))
+    zqrj = R(_IIF_ZTRP_W_M2_K * _fmin(R(ts_b - zt), 0.0))
+    zqrp = R(R(zfr * R(R(R(1.0 - fr_in) * zqri) + R(fr_in * zqrj))) * mask0)
+    # :192-195
+    zqi = R(_IIF_ZQI_OFFSET_W_M2 + _sign(1.0, jnp.asarray(ff_f, dtype=f64)[inner]))
+    qns_new = R(R(R(R(open_frac * jnp.asarray(qns, dtype=f64))
+                    + R(R(zfr * fr_in) * zqi)) * mask0) + zqrp)
+    return NemoSbcIceIfResult(ts_new, fzp.at[inner].set(fr_in), qsr_new, qns_new)
+
+
 def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
                    rho_air=None, *, slp_Pa=None, algo: str = "ncar",
                    nb_iter: int = _NB_ITER_NCAR, L_latent=None,
@@ -938,6 +996,8 @@ __all__ = [
     "moist_air_cp",
     "nemo_blk_oce_ncar",
     "NemoBlkOceResult",
+    "nemo_sbc_ice_if",
+    "NemoSbcIceIfResult",
     "ncar_transfer_coefficients",
     "potential_air_temperature_10m",
     "pressure_at_height",

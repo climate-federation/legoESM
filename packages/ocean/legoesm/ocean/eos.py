@@ -3532,6 +3532,25 @@ def freezing_point(S, p=0.0, *, scheme="constant"):
     return constants.T_freeze + depression_c
 
 
+def nemo_eos_fzp_eos80(S_psu):
+    """Surface freezing point [°C] — literal NEMO ``eos_fzp`` EOS-80 branch.
+
+    ``((-0.0575 + 1.710523e-3*SQRT(S)) - 2.154996e-4*S) * S``, one rounding per
+    source operation (eosbn2.f90:1867-1868).  ``x + (-c)*S`` is the IEEE
+    identity of ``x - c*S``.  Negative salinity gives NaN, as SQRT does in
+    NEMO.  At ``S <= 0`` the square root's gradient is cut (forward bits kept):
+    its true derivative there is infinite and land cells carry ``S = 0``.
+    """
+    S = jnp.asarray(S_psu, dtype=jnp.float64)
+    positive = S > 0.0
+    root = jnp.where(positive, jnp.sqrt(jnp.where(positive, S, 1.0)),
+                     lax.stop_gradient(jnp.sqrt(S)))
+    rd = nemo_source_round
+    poly = rd(rd(_TFRZ_S_LINEAR + rd(_TFRZ_S_ONEHALF * rd(root)))
+              + rd(_TFRZ_S_SQUARE * S))
+    return rd(poly * S)
+
+
 def slab_freeze_point_K(T_freeze_const, scheme: str = "constant"):
     """Effective seawater freezing point [K] for slab-ocean freeze clamps.
 
