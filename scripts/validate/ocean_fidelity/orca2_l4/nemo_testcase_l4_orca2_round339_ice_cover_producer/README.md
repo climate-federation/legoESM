@@ -8,11 +8,13 @@ scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round339_ice_cov
 ```
 
 `--run` rebuilds the admitted round-5 full-SI3 program with one passive
-post-`ice_stp` observer, stages the identical two-rank initial deck with a
-2,920-step endpoint, records all 1,460 forcing-step `fr_i` arrays, and creates
-`ice_cover_clim.nc` offline. It reserves 90 minutes plus build time. The raw
-records, output file, build/program proof, resolved namelist, logs and digests
-are retained.
+post-`ice_stp` observer. It first runs the unmodified ten-step round-5 deck and
+requires all four terminal restart files to equal the admitted observer-free
+record byte for byte. It then stages the identical two-rank initial deck with
+a 2,920-step endpoint, records all 1,460 forcing-step `fr_i` arrays, and
+creates `ice_cover_clim.nc` offline. It reserves 90 minutes plus build time.
+The passivity twin, raw records, output file, build/program proof, resolved
+namelist, logs and digests are retained.
 
 A refused run is moved under this round's `refused/` evidence directory and
 both the observer-free and observed builds remain in `cfgs/`. Move those two

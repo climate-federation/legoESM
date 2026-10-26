@@ -85,6 +85,17 @@ check_year_namelist() {
     && grep -E '^[[:space:]]*nn_fsbc[[:space:]]*=[[:space:]]*2([[:space:]!]|$)' "$1" >/dev/null \
     && grep -E '^[[:space:]]*nn_ice[[:space:]]*=[[:space:]]*2([[:space:]!]|$)' "$1" >/dev/null
 }
+compare_restart_set() {
+  local reference=$1 candidate=$2 source name count=0
+  while IFS= read -r -d '' source; do
+    name=$(basename "$source")
+    [[ -f "$candidate/$name" ]] || return 1
+    cmp -s "$source" "$candidate/$name" || return 1
+    count=$((count+1))
+  done < <(find "$reference" -maxdepth 1 -type f \
+    -name 'ORCA2_00000010_restart*.nc' -print0 | sort -z)
+  [[ $count -eq 4 ]]
+}
 fpp() {
   local source=$1 output=$2 root=${3:-$SOURCE_ROOT}
   ( cd "$(dirname "$source")" && cpp -Dkey_nosignedzero -P -traditional $FPP_KEYS \
@@ -171,6 +182,20 @@ rm "$scratch/dry_bld/ppsrc/nemo/iceupdate.f90"
 cp "$SOURCE_ROOT/BLD/ppsrc/nemo/iceupdate.f90" "$scratch/dry_bld/ppsrc/nemo/iceupdate.f90"
 printf '! plant\n' >>"$scratch/dry_bld/ppsrc/nemo/iceupdate.f90"
 plant_must_refuse same-program same_program "$scratch/dry_bld"
+
+# Checklist 9: the short observed run must preserve every byte of the admitted
+# observer-free round-5 terminal restarts.  This plant proves the comparator.
+mkdir "$scratch/restart-reference" "$scratch/restart-candidate"
+for name in ORCA2_00000010_restart_0000.nc ORCA2_00000010_restart_0001.nc \
+  ORCA2_00000010_restart_ice_0000.nc ORCA2_00000010_restart_ice_0001.nc; do
+  printf 'reference-%s\n' "$name" >"$scratch/restart-reference/$name"
+  cp "$scratch/restart-reference/$name" "$scratch/restart-candidate/$name"
+done
+compare_restart_set "$scratch/restart-reference" "$scratch/restart-candidate" \
+  || refuse 'restart comparator rejected an identical control'
+printf 'plant\n' >>"$scratch/restart-candidate/ORCA2_00000010_restart_0000.nc"
+plant_must_refuse restart-byte compare_restart_set \
+  "$scratch/restart-reference" "$scratch/restart-candidate"
 
 # Bounds/signed-zero/rank-distinct fixture.  Linker garbage collection lets the
 # fixture execute the wrapper from the actual patched/preprocessed sbcmod unit
@@ -302,6 +327,28 @@ diff <(grep -v "^$TARGET_CFG " "$scratch/work_cfgs.before") \
   || refuse 'work_cfgs.txt changed beyond the target line'
 
 mkdir "$TARGET_RUN"; run_created=1
+mkdir "$TARGET_RUN/passivity_10step"
+while read -r _digest name; do cp -a "$SOURCE_RUN/$name" "$TARGET_RUN/passivity_10step/$name"; done <"$SOURCE_RUN/deck_files.sha256"
+while read -r _digest name; do cp -a "$SOURCE_RUN/$name" "$TARGET_RUN/passivity_10step/$name"; done <"$SOURCE_RUN/input_files.sha256"
+cp "$BINARY" "$TARGET_RUN/passivity_10step/nemo"
+(
+  cd "$TARGET_RUN/passivity_10step"
+  mem_ok "$MEM_MIN_GB" || refuse "under $MEM_MIN_GB GB memory before passivity mpirun"
+  free -g >run.user.memory.log
+  printf 'RUN_STARTED_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >run.user.time.log
+  started=$SECONDS
+  timeout --kill-after=60 900 mpirun -np 2 --oversubscribe ./nemo >run.user.stdout.log 2>&1
+  printf 'wall_seconds %s\nRUN_FINISHED_UTC=%s\nRUN_DONE\n' "$((SECONDS-started))" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>run.user.time.log
+)
+grep 'STOP 0' "$TARGET_RUN/passivity_10step/run.user.stdout.log" >/dev/null \
+  || refuse 'passivity run did not report STOP 0'
+! grep -F 'E R R O R' "$TARGET_RUN/passivity_10step/ocean.output" \
+    "$TARGET_RUN/passivity_10step/run.user.stdout.log" >/dev/null \
+  || refuse 'passivity run reported E R R O R'
+compare_restart_set "$SOURCE_RUN" "$TARGET_RUN/passivity_10step" \
+  || refuse 'observer changed a round-5 ten-step restart byte'
+
 while read -r _digest name; do cp -a "$SOURCE_RUN/$name" "$TARGET_RUN/$name"; done <"$SOURCE_RUN/deck_files.sha256"
 while read -r _digest name; do cp -a "$SOURCE_RUN/$name" "$TARGET_RUN/$name"; done <"$SOURCE_RUN/input_files.sha256"
 cp "$BINARY" "$TARGET_RUN/nemo"
@@ -338,7 +385,7 @@ grep 'STOP 0' "$TARGET_RUN/run.user.stdout.log" >/dev/null || refuse 'NEMO did n
 import sys
 from pathlib import Path
 from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round339_common as c
-root=Path(sys.argv[1]); files=[p for p in root.iterdir() if p.is_file() and p.name!='producer_manifest.json']
+root=Path(sys.argv[1]); files=[p for p in root.rglob('*') if p.is_file() and p.name!='producer_manifest.json']
 c.write_manifest(root/'producer_manifest.json',producer_commit=sys.argv[2],binary=root/'nemo',files=files,root=root)
 PY
 admit_existing "$TARGET_RUN"
