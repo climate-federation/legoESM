@@ -780,7 +780,9 @@ def build_parser():
                              "Arctic/strong-stable forms; "
                              "'beljaars_holtslag1991' avoids the stable flux "
                              "collapse of -5*zeta. Unstable branch stays "
-                             "Businger-Dyer (Fairall blend on coare3).")
+                             "Businger-Dyer (Fairall blend on coare3; heat "
+                             "scaled by Pr0 = 0.98 for gryanik2020 on "
+                             "most/large_yeager, as in SurfaceFluxes.jl).")
     # `choices=` cannot express the '+'-joined composites validate_strict
     # accepts (#834), so this list silently made them unreachable here while
     # run_amip allowed them. The shared validator restores composites AND keeps

@@ -121,9 +121,14 @@ def test_dyer1974_is_byte_identical_default():
     np.testing.assert_array_equal(
         np.asarray(psi_h(zetas)), np.asarray(psi_h(zetas, "dyer1974"))
     )
-    # Default == the ORIGINAL implementation, bit-for-bit, on BOTH branches.
-    np.testing.assert_array_equal(np.asarray(psi_m(zetas)), np.asarray(_old_psi_m(zetas)))
-    np.testing.assert_array_equal(np.asarray(psi_h(zetas)), np.asarray(_old_psi_h(zetas)))
+    # Default == the ORIGINAL implementation, bit-for-bit, on BOTH branches,
+    # except at zeta = 0: the original returned -5e-10 (stable branch on a
+    # 1e-10 floor); SurfaceFluxes.jl and this port return exactly 0.
+    nz = np.asarray(zetas) != 0.0
+    np.testing.assert_array_equal(np.asarray(psi_m(zetas))[nz], np.asarray(_old_psi_m(zetas))[nz])
+    np.testing.assert_array_equal(np.asarray(psi_h(zetas))[nz], np.asarray(_old_psi_h(zetas))[nz])
+    np.testing.assert_array_equal(np.asarray(psi_m(zetas))[~nz], 0.0)
+    np.testing.assert_array_equal(np.asarray(psi_h(zetas))[~nz], 0.0)
 
 
 def test_dyer1974_stable_branch_is_minus_5_zeta():

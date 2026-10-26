@@ -343,9 +343,9 @@ def large_yeager_neutral_cd(wind, *, nemo_parity: bool = False):
 # surface fluxes (the physically-required stable-regime suppression).
 #
 # The private ``_<scheme>_psi_{m,h}`` helpers below evaluate ONLY the stable
-# branch and are always called with a strictly-positive ``zeta_pos`` (floored at
-# 1e-10 by :func:`psi_m` / :func:`psi_h`), so no fractional power / log / cbrt
-# ever sees a non-positive argument. Together with the ``jnp.where`` split this
+# branch and are always called with ``zeta_pos >= 0`` (``max(zeta, 0)`` in
+# :func:`psi_m` / :func:`psi_h`), where every fractional power / log / cbrt
+# argument is >= 1. Together with the ``jnp.where`` split this
 # keeps the masked (inactive) branch finite in BOTH value and gradient -- the
 # classic AD-safe double-branch construction.
 
@@ -486,15 +486,19 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
     gamma = 16) are UNAFFECTED. Both default to the module constants so every
     existing caller is byte-identical.
 
-    Safe double-branch construction: the unstable expression is evaluated on
-    ``zeta_neg <= -1e-10`` and the stable expression on ``zeta_pos >= 1e-10`` so
-    the masked branch never produces a NaN value or gradient under ``jnp.where``.
+    Branch construction as CliMA SurfaceFluxes.jl: the unstable expression is
+    evaluated on ``min(zeta, 0)`` and the stable one on ``max(zeta, 0)`` (both
+    finite, with finite gradients, at 0); the stable form is selected for
+    ``zeta > 0`` (SurfaceFluxes v0.12 Beljaars / v1.5.1 Gryanik), so psi(0) is
+    the unstable form's exact 0.
     """
     validate_stability_scheme(stability_scheme)
     zeta_c = jnp.clip(zeta, -10.0, 10.0)
     # Safe inputs: each branch only sees valid arguments
-    zeta_neg = jnp.minimum(zeta_c, -1e-10)
-    zeta_pos = jnp.maximum(zeta_c, 1e-10)
+    # where (not min/max): at zeta = 0 the selected (unstable) branch gets the
+    # full derivative instead of half of it at a min/max tie.
+    zeta_neg = jnp.where(zeta_c > 0.0, 0.0, zeta_c)
+    zeta_pos = jnp.where(zeta_c > 0.0, zeta_c, 0.0)
 
     # The trainable ``unstable_gamma`` reparameterises the Businger-Dyer UNSTABLE
     # branch ONLY for ``dyer1974`` (the scheme whose stable branch it is paired
@@ -515,7 +519,7 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
     # selected expression is traced), not ``jnp.where`` (which would trace all).
     stable = _stable_psi_m(zeta_pos, stability_scheme, stable_beta)
 
-    return jnp.where(zeta_c < 0.0, unstable, stable)
+    return jnp.where(zeta_c > 0.0, stable, unstable)
 
 
 def psi_h(zeta, stability_scheme="dyer1974", *,
@@ -534,21 +538,29 @@ def psi_h(zeta, stability_scheme="dyer1974", *,
     ``stability_scheme="dyer1974"`` (both branches); the beljaars/grachev/gryanik
     schemes keep their own published stable fits AND the historical gamma = 16
     unstable branch. Both default to the module constants (byte-identical).
+    For ``"gryanik2020"`` the unstable branch is multiplied by Pr0 = 0.98, as in
+    SurfaceFluxes.jl v1.5.1 (oracle: tests/core/test_surfacefluxes_psi_oracle.py).
     """
     validate_stability_scheme(stability_scheme)
     zeta_c = jnp.clip(zeta, -10.0, 10.0)
-    zeta_neg = jnp.minimum(zeta_c, -1e-10)
-    zeta_pos = jnp.maximum(zeta_c, 1e-10)
+    # where (not min/max): at zeta = 0 the selected (unstable) branch gets the
+    # full derivative instead of half of it at a min/max tie.
+    zeta_neg = jnp.where(zeta_c > 0.0, 0.0, zeta_c)
+    zeta_pos = jnp.where(zeta_c > 0.0, zeta_c, 0.0)
 
     # See psi_m: the trainable unstable gamma applies ONLY to dyer1974; the
     # non-linear stable schemes keep the historical gamma = 16 unstable branch.
     _gamma = unstable_gamma if stability_scheme == "dyer1974" else _DYER_UNSTABLE_GAMMA
     y = jnp.sqrt(1.0 - _gamma * zeta_neg)
     unstable = 2.0 * jnp.log((1.0 + y) / 2.0)
+    if stability_scheme == "gryanik2020":
+        # SurfaceFluxes.jl v1.5.1 GryanikParams psi_h: the Businger fallback is
+        # scaled by Pr_0, consistent with the stable branch's phi_h(0) = Pr_0.
+        unstable = _GRYANIK_PR0 * unstable
 
     stable = _stable_psi_h(zeta_pos, stability_scheme, stable_beta)
 
-    return jnp.where(zeta_c < 0.0, unstable, stable)
+    return jnp.where(zeta_c > 0.0, stable, unstable)
 
 
 def _f32(x):
