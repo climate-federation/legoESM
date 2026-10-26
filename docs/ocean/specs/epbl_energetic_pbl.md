@@ -38,7 +38,9 @@ It can never mix more than the forcing supplies.
 
 ## Configuration
 `EPBLConfig` is field-for-field the MOM6 `MOM_energetic_PBL` parameter block,
-**with MOM6's own defaults**; the MOM6 name of each field is in its comment.
+**with MOM6's own defaults except `vonkar`**: legoESM uses 0.4 (the repo's
+core von Karman value) where MOM6 uses 0.41. The MOM6 name of each field is
+in its comment.
 Main groups:
 
 | Group | Fields (MOM6 name) |

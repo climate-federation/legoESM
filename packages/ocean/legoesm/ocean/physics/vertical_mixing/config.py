@@ -1028,8 +1028,10 @@ class EPBLConfig(NamedTuple):
     """Energetic Planetary Boundary Layer (Reichl & Hallberg 2018) settings.
 
     Field-for-field the MOM6 ``MOM_energetic_PBL`` runtime parameters, with
-    MOM6's own defaults, so a MOM6 parameter block maps onto this config one
-    name at a time.  The MOM6 name of each field is given in its comment.
+    MOM6's own defaults except ``vonkar``: legoESM uses 0.4 (the repo's core
+    von Karman value) where MOM6 uses 0.41.  A MOM6 parameter block maps onto
+    this config one name at a time.  The MOM6 name of each field is given in
+    its comment.
 
     ``dt_s`` has no MOM6 counterpart: MOM6 passes the timestep as an argument,
     while legoESM's vertical-mixing factory signature carries no timestep, so
@@ -1071,7 +1073,7 @@ class EPBLConfig(NamedTuple):
     mixlen_exponent: float = 2.0       # MIX_LEN_EXPONENT
     translay_scale: float = 0.1        # EPBL_TRANSITION_SCALE
     min_mix_len: float = 0.0           # EPBL_MIN_MIX_LEN [m]
-    vonkar: float = 0.4                # VON_KARMAN
+    vonkar: float = 0.4                # VON_KARMAN (legoESM 0.4; MOM6 0.41)
 
     # --- turbulent velocity scale ---
     wt_scheme: str = "cube_root_tke"   # EPBL_VEL_SCALE_SCHEME: cube_root_tke|reichl_h18

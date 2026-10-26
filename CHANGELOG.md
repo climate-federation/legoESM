@@ -10,7 +10,8 @@ All notable changes to legoESM. Format roughly follows
 - **ePBL vertical mixing (`VerticalMixingConfig(scheme="epbl")`).** A JAX
   port of MOM6's `MOM_energetic_PBL` (created by B. G. Reichl and R. Hallberg;
   machine-learned diffusivity options by A. Sane), swappable with KPP and
-  CATKE, differentiable, MOM6 parameter names and defaults in `EPBLConfig`.
+  CATKE, differentiable, MOM6 parameter names and defaults in `EPBLConfig`
+  (except von Karman: legoESM uses 0.4 where MOM6 uses 0.41).
   New option `EPBLConfig.k_after_surface_flux` (default `False`, legoESM/KPP
   order): when `True` the ocean single-column model applies the surface flux
   first and then evaluates ePBL on the updated column, as MOM6 does, so the
