@@ -87,12 +87,12 @@ physics result or fidelity claim is made here.
 
 ## Gates
 
-- Acquisition unit checks: 21 passed; the complete clean-tree preflight passed
+- Acquisition unit checks: 22 passed; the complete clean-tree preflight passed
   separately through all ten phases and the full driver retention fixture.
-- Required default receipt-citation gate and this receipt's 16 live source
-  citations: PASS; the shifted-line control exits nonzero with a FAIL verdict.
-- Seven CI ratchet files: 12,197 passed, 4 skipped, 8 failed. All eight
+- Required default receipt-citation gate: 35 passed. This receipt's 16 live
+  source citations pass; every built-in citation plant fires.
+- Seven CI ratchet files: 11,954 passed, 4 skipped, 14 failed. All 14
   failures name pre-existing, untouched files; none is in this acquisition,
   citation-map, test or receipt change.
 
-independent review: operator (Claude)
+independent review: requested from operator (Claude-4.6 and Argon)
