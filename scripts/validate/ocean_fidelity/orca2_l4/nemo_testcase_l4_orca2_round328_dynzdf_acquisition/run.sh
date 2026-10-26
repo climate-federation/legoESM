@@ -938,7 +938,7 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
     refuse 'production tke_tke unexpectedly stopped being fully inlined into zdf_tke'
   fi
   printf 'R336_TKE_INLINE_PASS source_function=tke_tke object_function=__zdftke_MOD_zdf_tke\n'
-  sed '0,/zfact2  = 1.5_wp \* rn_Dt \* rn_ediss/s//zfact2  = (1.5_wp + 1._wp) * rn_Dt * rn_ediss/' \
+  sed '0,/zfact2  = 1.5_wp \* rn_Dt \* rn_ediss/s//zfact2  = (1.5_wp + rn_ediff) * rn_Dt * rn_ediss/' \
     "$SOURCE_ZDFTKE" >"$plants/zdftke.arithmetic.F90"
   fpp "$plants/zdftke.arithmetic.F90" "$scratch/zdftke_arithmetic_plant.f90"
   compile_record_object "$scratch/zdftke_arithmetic_plant.f90" \
