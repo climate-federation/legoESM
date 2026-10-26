@@ -217,6 +217,8 @@ def test_patches_are_context_anchored_and_target_owning_statements() -> None:
     assert "CALL r332_vor_add" in dynvor
     assert "pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zva" not in dynvor
     assert "END SELECT" in tke
+    assert "CALL r332_tke_begin(kt,Kbb,Kmm)" in tke
+    assert "CALL r332_tke_row(Kbb,Kmm" in tke
     assert "Vertical eddy viscosity and diffusivity" in tke
     assert "p_pdlr(ntsi:ntei,jj,2:jpkm1)" in tke
     assert "CALL r332_tke_arms" not in tke

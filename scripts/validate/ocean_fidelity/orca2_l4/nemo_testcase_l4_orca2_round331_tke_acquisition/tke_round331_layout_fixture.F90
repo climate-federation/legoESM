@@ -2,7 +2,7 @@ PROGRAM tke_round331_layout_fixture
    USE dom_oce
    USE tke_round331_writer
    IMPLICIT NONE
-   INTEGER :: rank,ji,jj,jk
+   INTEGER :: rank,ji,jj,jk,kt
    CHARACTER(LEN=8) :: argument
    REAL(wp) :: rank_offset
    REAL(wp) :: interior(3,2,3),sh2(3,2,3),bottom(3,2),top(3,2)
@@ -22,26 +22,32 @@ PROGRAM tke_round331_layout_fixture
    bottom=rank_offset+9._wp; top=rank_offset+10._wp
    nmln=3; hmlp=20._wp+rank
    avm=interior; dissl=interior+0.75_wp
-   CALL r331_begin(1,1,1,3,interior)
-   CALL r331_sh2(sh2)
-   CALL r331_drag(1,bottom); CALL r331_drag(2,top)
-   CALL r331_mxl(nmln,hmlp)
-   DO jj=1,2
-      sh2row=sh2(:,jj,:)
-      CALL r331_tke_inputs(jj,sh2row,bottom(:,jj),top(:,jj),nmln(:,jj), &
-         & hmlp(:,jj),avm(:,jj,:),dissl(:,jj,:))
-      fullrow(:,1)=rank_offset+1._wp
-      fullrow(:,2:4)=interior(:,jj,:)+0.1_wp
-      CALL r331_after_bc(jj,fullrow)
-      diag=2._wp; upper=-0.25_wp; lower=-0.5_wp
-      CALL r331_after_matrix(jj,fullrow,diag,upper,lower)
-      fullrow(:,2:4)=interior(:,jj,:)+0.25_wp
-      CALL r331_after_solve(jj,fullrow)
+   DO kt=1,2
+      IF(kt == 1) THEN
+         CALL r331_begin(kt,1,1,3,interior)
+      ELSE
+         CALL r331_begin(kt,3,3,1,interior)
+      ENDIF
+      CALL r331_sh2(sh2)
+      CALL r331_drag(1,bottom); CALL r331_drag(2,top)
+      CALL r331_mxl(nmln,hmlp)
+      DO jj=1,2
+         sh2row=sh2(:,jj,:)
+         CALL r331_tke_inputs(jj,sh2row,bottom(:,jj),top(:,jj),nmln(:,jj), &
+            & hmlp(:,jj),avm(:,jj,:),dissl(:,jj,:))
+         fullrow(:,1)=rank_offset+1._wp
+         fullrow(:,2:4)=interior(:,jj,:)+0.1_wp
+         CALL r331_after_bc(jj,fullrow)
+         diag=2._wp; upper=-0.25_wp; lower=-0.5_wp
+         CALL r331_after_matrix(jj,fullrow,diag,upper,lower)
+         fullrow(:,2:4)=interior(:,jj,:)+0.25_wp
+         CALL r331_after_solve(jj,fullrow)
+      END DO
+      wmask=1._wp
+      wmask(1,1,:)=-0._wp
+      en(:,:,1)=rank_offset+1._wp
+      en(:,:,2:4)=interior+0.5_wp
+      avt=interior+0.25_wp
+      CALL r331_finish(en,avm,avt,wmask)
    END DO
-   wmask=1._wp
-   wmask(1,1,:)=-0._wp
-   en(:,:,1)=rank_offset+1._wp
-   en(:,:,2:4)=interior+0.5_wp
-   avt=interior+0.25_wp
-   CALL r331_finish(en,avm,avt,wmask)
 END PROGRAM tke_round331_layout_fixture

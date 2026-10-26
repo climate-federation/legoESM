@@ -58,8 +58,8 @@ OBSERVER_UNITS = ("dynzdf", "stprk3_stg", "zdfphy", "zdftke")
 WRITER_UNITS = ("dynzdf_round328_writer", "tke_round331_writer")
 
 
-def record_name(rank: int) -> str:
-    return f"oracle_tke331_kt00000001_r{rank:04d}.bin"
+def record_name(rank: int, kt: int = 1) -> str:
+    return f"oracle_tke331_kt{kt:08d}_r{rank:04d}.bin"
 
 
 def _extent(name: str, header: dict[str, int]) -> tuple[int, int, int]:
@@ -72,7 +72,8 @@ def _origin(name: str, header: dict[str, int]) -> tuple[int, int, int]:
     return header["ntsi"], header["ntsj"], k0
 
 
-def read_record(path: Path, plant: str | None = None) -> dict:
+def read_record(path: Path, plant: str | None = None,
+                expected_kt: int = 1) -> dict:
     raw = path.read_bytes()
     if plant == "truncation":
         raw = raw[:-8]
@@ -82,10 +83,13 @@ def read_record(path: Path, plant: str | None = None) -> dict:
         f"={len(HEADER_NAMES)}i", _take(stream, 4 * len(HEADER_NAMES), "header"))
     header = dict(zip(HEADER_NAMES, values, strict=True))
     if plant == "header":
-        header["kmm"] = 2
+        header["kmm"] = -1
     require(magic == MAGIC, f"magic {magic!r} != {MAGIC!r}")
+    expected_levels = {1: (1, 1, 3), 2: (3, 3, 1)}
+    require(expected_kt in expected_levels, f"unsupported TKE step {expected_kt}")
     require((header["version"], header["kt"], header["kbb"],
-             header["kmm"], header["krhs"]) == (1, 1, 1, 1, 3),
+             header["kmm"], header["krhs"]) ==
+            (1, expected_kt, *expected_levels[expected_kt]),
             "wrong version/kt/RK indices")
     require(header["real_bits"] == 64, "record is not fp64")
     require(header["n_fields"] == len(EXPECTED_ORDER), "wrong field count")

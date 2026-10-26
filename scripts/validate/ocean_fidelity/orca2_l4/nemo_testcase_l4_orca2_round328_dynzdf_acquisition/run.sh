@@ -43,9 +43,16 @@ if [[ "$ACQ_TARGET" == tke331 ]]; then
   DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_tke331_kt1_np2
 fi
 if [[ "$ACQ_TARGET" == tke332 ]]; then
-  TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R332RAW
-  EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round332/acquisition
-  DEFAULT_TARGET_RUN=$EVIDENCE/orca1ice_raw_postfold_v_kt1_np2
+  TARGET_CFG=${R328_TARGET_CFG_OVERRIDE:-ORCA2_ORCA1ICE_OMIP_L4_R332RAW}
+  EVIDENCE=${R328_EVIDENCE_OVERRIDE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round332/acquisition}
+  target_run_name=${R328_TARGET_RUN_NAME_OVERRIDE:-orca1ice_raw_postfold_v_kt1_np2}
+  DEFAULT_TARGET_RUN=$EVIDENCE/$target_run_name
+  if [[ -n ${R328_TARGET_CFG_OVERRIDE:-}${R328_EVIDENCE_OVERRIDE:-}${R328_TARGET_RUN_NAME_OVERRIDE:-} ]]; then
+    [[ ${R328_TARGET_CFG_OVERRIDE:-} == ORCA2_ORCA1ICE_OMIP_L4_R336TKE &&
+       ${R328_EVIDENCE_OVERRIDE:-} == /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/acquisition &&
+       ${R328_TARGET_RUN_NAME_OVERRIDE:-} == orca1ice_tke_internal_kt2_np2 ]] \
+      || { printf 'REFUSE: the tke332 override is not the pinned round-336 kt=2 extension\n' >&2; exit 64; }
+  fi
 fi
 readonly ADMISSION_IDENTITY_ONLY=${R328_ADMISSION_IDENTITY_ONLY:-0}
 case "$ADMISSION_IDENTITY_ONLY" in
@@ -68,7 +75,7 @@ if [[ "$MODE" == --admit-existing && -n ${R328_EXISTING_RUN:-} ]]; then
     expected_retained="$EVIDENCE/refused/orca1ice_tke331_kt1_np2_admission_refused_20261024T103431Z_331969"
   elif [[ "$ACQ_TARGET" == tke332 ]]; then
     [[ $(dirname "$TARGET_RUN") == "$EVIDENCE/refused" && \
-       $(basename "$TARGET_RUN") == orca1ice_raw_postfold_v_kt1_np2_* ]] \
+       $(basename "$TARGET_RUN") == "$(basename "$DEFAULT_TARGET_RUN")"_* ]] \
       || { printf 'REFUSE: retained round-332 run is outside its refused directory\n' >&2; exit 64; }
     expected_retained=$TARGET_RUN
   else
@@ -292,6 +299,19 @@ compare_fp_disassembly() {
   fp_disassembly_signature "$left" "$scratch/${label}.left.fp"
   fp_disassembly_signature "$right" "$scratch/${label}.right.fp"
   cmp -s "$scratch/${label}.left.fp" "$scratch/${label}.right.fp"
+}
+fp_named_signature() {
+  local object=$1 output=$2 wanted=$3
+  objdump -drwC --no-show-raw-insn "$object" | awk -v wanted="$wanted" '
+    /^[[:xdigit:]]+[[:space:]]+<[^>]+>:/ {
+      fn=$2; gsub(/[<>:]/,"",fn); next
+    }
+    /^[[:space:]]*[[:xdigit:]]+:/ {
+      op=$2
+      if (fn==wanted && op ~ /^(f(add|sub|mul|div|sqrt)|add(s|p)[sd]|sub(s|p)[sd]|mul(s|p)[sd]|div(s|p)[sd]|sqrt(s|p)[sd]|min(s|p)[sd]|max(s|p)[sd])/) print fn,op
+    }
+  ' | sort | uniq -c >"$output"
+  awk -v fn="$wanted" '$2==fn {n+=$1} END {exit !(n>0)}' "$output"
 }
 fpp() {
   ( cd "$(dirname "$1")" && cpp -Dkey_nosignedzero -P -traditional $FPP_KEYS \
@@ -662,6 +682,8 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
     || refuse 'round-332 dynvor observer call census changed'
   [[ $(grep -Fc 'CALL r332_tke_row' "$dry/zdftke.F90") -eq 1 ]] \
     || refuse 'round-332 TKE observer call census changed'
+  [[ $(grep -Fc 'CALL r332_tke_begin' "$dry/zdftke.F90") -eq 1 ]] \
+    || refuse 'round-336 TKE context observer call census changed'
   [[ $(grep -Fc 'CALL r332_raw_postfold_v' "$dry/stprk3_stg.F90") -eq 1 ]] \
     || refuse 'round-332 raw V observer call census changed'
 fi
@@ -704,6 +726,35 @@ if [[ "$ACQ_TARGET" == tke332 ]]; then
   compile_record_object "$scratch/stage_arithmetic_plant.f90" "$scratch/stage_arithmetic_plant.o"
   plant_must_refuse arithmetic-disassembly compare_fp_disassembly \
     "$scratch/stage_arithmetic_base.o" "$scratch/stage_arithmetic_plant.o" stage-plant
+
+  # Checklist item 1: the kt=2 extension activates the already reviewed
+  # in-loop record calls, so prove the executing TKE functions retain their
+  # nonzero production-flag floating-point instruction multisets.
+  fpp "$SOURCE_ZDFTKE" "$scratch/zdftke_arithmetic_base.f90"
+  compile_record_object "$scratch/zdftke_arithmetic_base.f90" \
+    "$scratch/zdftke_arithmetic_base.o"
+  compile_record_object "$scratch/zdftke.f90" "$scratch/zdftke_arithmetic_observed.o"
+  for fn in __zdftke_MOD_tke_avn; do
+    fp_named_signature "$scratch/zdftke_arithmetic_base.o" \
+      "$scratch/${fn}.base.fp" "$fn" \
+      || refuse "baseline TKE function has a zero FP census: $fn"
+    fp_named_signature "$scratch/zdftke_arithmetic_observed.o" \
+      "$scratch/${fn}.observed.fp" "$fn" \
+      || refuse "observed TKE function has a zero FP census: $fn"
+    cmp -s "$scratch/${fn}.base.fp" "$scratch/${fn}.observed.fp" \
+      || refuse "TKE observer changed the production FP census: $fn"
+    printf 'R332_TKE_FUNCTION_FP_PASS function=%s instructions=%s\n' "$fn" \
+      "$(awk '{n+=$1} END {print n+0}' "$scratch/${fn}.base.fp")"
+  done
+  sed '0,/zraug = vkarmn \* 2.e5_wp/s//zraug = (vkarmn + vkarmn) * 2.e5_wp/' \
+    "$SOURCE_ZDFTKE" >"$plants/zdftke.arithmetic.F90"
+  fpp "$plants/zdftke.arithmetic.F90" "$scratch/zdftke_arithmetic_plant.f90"
+  compile_record_object "$scratch/zdftke_arithmetic_plant.f90" \
+    "$scratch/zdftke_arithmetic_plant.o"
+  fp_named_signature "$scratch/zdftke_arithmetic_plant.o" \
+    "$scratch/tke_avn.plant.fp" __zdftke_MOD_tke_avn
+  plant_must_refuse tke-arithmetic-disassembly cmp -s \
+    "$scratch/__zdftke_MOD_tke_avn.base.fp" "$scratch/tke_avn.plant.fp"
 fi
 
 # Same-program preflight: round 326 plus both observer insertions, including

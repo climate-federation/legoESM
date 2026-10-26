@@ -70,6 +70,14 @@ PROGRAM write_round332_fixture
          row_d(1,:)=-0._wp
          row_p(1,:)=-0._wp
       ENDIF
+      IF(jj==ntsj) CALL r332_tke_begin(1,1,1)
       CALL r332_tke_row(1,1,jj,row_m,row_d,row_p)
+   END DO
+   DO jj=ntsj,ntej
+      row_m=REAL(2000+rank*100+jj,wp)
+      row_d=REAL(3000+rank*100+jj,wp)
+      row_p=0.5_wp
+      IF(jj==ntsj) CALL r332_tke_begin(2,3,3)
+      CALL r332_tke_row(3,3,jj,row_m,row_d,row_p)
    END DO
 END PROGRAM write_round332_fixture

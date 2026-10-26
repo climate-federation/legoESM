@@ -1,5 +1,5 @@
 MODULE tke_round331_writer
-   !! WRITE-only kt=1 TKE source-order recorder for ORCA2 round 331.
+   !! WRITE-only kt=1/2 TKE source-order recorder for ORCA2 rounds 331/336.
    !! Captured values are never read back into NEMO state.
    USE dom_oce
    USE in_out_manager, ONLY : nit000
@@ -51,8 +51,12 @@ CONTAINS
    SUBROUTINE r331_begin(kt,Kbb,Kmm,Krhs,pinterior)
       INTEGER, INTENT(in) :: kt,Kbb,Kmm,Krhs
       REAL(wp), INTENT(in) :: pinterior(:,:,:)
-      lactive=kt == nit000 .AND. Kbb == 1 .AND. Kmm == 1 .AND. Krhs == 3
+      lactive=kt == nit000 .OR. kt == nit000+1
       IF(.NOT.lactive) RETURN
+      IF(kt == nit000 .AND. (Kbb /= 1 .OR. Kmm /= 1 .OR. Krhs /= 3)) &
+         & CALL ctl_stop('round331 TKE: kt1 levels moved')
+      IF(kt == nit000+1 .AND. (Kbb /= 3 .OR. Kmm /= 3 .OR. Krhs /= 1)) &
+         & CALL ctl_stop('round336 TKE: kt2 levels moved')
       IF(ALLOCATED(sh2_output)) CALL ctl_stop('round331 TKE: nested record')
       IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop('round331 TKE: requires fp64')
       nx=SIZE(pinterior,1); ny=SIZE(pinterior,2); nz=SIZE(pinterior,3)
