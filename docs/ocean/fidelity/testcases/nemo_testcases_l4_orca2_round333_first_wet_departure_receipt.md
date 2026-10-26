@@ -766,3 +766,38 @@ stays PLAUSIBLE. CORRECTION: the sentence above that NEMO "executes only wet
 tracer cells in its divisions" is wrong — NEMO's LDF update also runs at
 166,259 dry rank-0 cells, where its stored e3t is nonzero, and the result is
 masked; the helper's docstring was corrected to say so (no line shift).
+
+## Resume 9: rebase onto the lane tip after round 334
+
+The approved round (51 commits, previously based on `072e4aa1b1c8`, tip
+`d8d4104a4`) was rebased onto the lane tip `d95e9a1237` (round 334, CI ratchet
+cleanup). No model change beyond the approved one; no configuration value
+changed. The pre-rebase tip is kept as local branch
+`backup/r333-pre-rebase-d8d4104a4`.
+
+### Conflicts and resolutions
+
+Only `scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py`
+conflicted, twice, both in the same hunk at the head of `CITATION_MAP`:
+
+| round-333 commit | hunk | round-334 side | round-333 side | resolution |
+|---|---|---|---|---|
+| `397bbafaf` record round333 first wet departure | 1 | 3 entries (`trabbc.F90:179`, `phycst.F90:26`, `tramle.F90:51`) | first-wet source-order walk entries | keep both: round 334's block, then round 333's |
+| `437bd07a0` record held round 333 divisor proposal | 1 | same 3 entries | Resume-7 internal traldf ownership entries | keep both: round 334's block, then round 333's |
+
+The resolver refused any conflict whose lane side was not exactly round 334's
+three-entry block. Post-rebase checks: the lane tip is an ancestor of the new
+tip; the round's diff outside the citation gate is byte-identical to the
+pre-rebase diff; and in the citation gate, both round 333's and round 334's
+changed lines are present unchanged.
+
+### Admission replay
+
+Re-running both admission gates on the retained records, pinned to their
+producer commits, reproduces every admitted JSON digest:
+`round333_tracer_admission.json` for the stage-3 tracer record
+`37f7d773758d8590741a0cca3725e008f6b50a35fbe78eafdc0fab74c6b04ba6`, and for
+the internal-traldf record `efaaa8396c5b2c6eb7d78269299078caf46b75aa35837e22ab946d4f01526ed6`;
+`round333_traldf_admission.json`
+`c57f475f0d9dba30725f44220b3405d3ca34c98ea7879fade509e373d214f220`.
+All three report PASS.
