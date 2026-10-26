@@ -367,3 +367,86 @@ SHA-256 is
 `1742d0160ea02bfb39c1243f53c27353a25868b9a893b6e9c285559b7f172ce9`.
 The reports are `round336/resume6_citation_gate.json`,
 `round336/resume6_default_gate.log`, and `round336/resume6_ratchet.log`.
+
+## Resume 7: admitted `tra_zdf` statement walk
+
+The manifest-pinned retained-record route admitted producer
+`5e9bf388bd0ab4f08b16af86517e4adbe55f6204` with copied executable SHA-256
+`24420ae44505ece369af01fcb8303d9e5881ae4ab70e5bd128153ffee3188328`.
+Its final line was exactly:
+
+```text
+ORCA2_ROUND336_TRAZDF_ACQUISITION_PASS /data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/acquisition/orca1ice_trazdf_internal_kt2_np2
+```
+
+The admitted build's actual `zdf_phy` copies the TKE coefficient and then
+executes runoff, EVD, DDM, and IWM in that order at
+`ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/zdfphy.f90:369-404`.
+Its non-Aimp `tra_zdf` builds effective K and the lower, upper, and diagonal
+rows at
+`ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/trazdf.f90:185-240`, then
+executes eliminated-diagonal, forward, and back-substitution statements at
+`ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/trazdf.f90:273-278`,
+`ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/trazdf.f90:288-296`, and
+`ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/trazdf.f90:298-304`.
+
+The production replay observes legoESM's closure handoff at
+`k_profiles.py:329-348`; the shared tracer call, matrix construction, and
+three recurrences are the actual production functions at
+`implicit_solver.py:478-539`, `implicit_solver.py:542-641`, and
+`implicit_solver.py:329-392`. The extra callbacks are passive: each trace-graph
+observation equals the corresponding ordinary-reference observation bit for
+bit, and both returned production states change zero leaves relative to their
+ordinary calls.
+
+Both labels produced the following identical kt-2 walk. “Target faces” are
+the W faces adjacent to round 333's 18 registered T words; because that
+adjacency includes dry faces, the wet-face column is the ownership census.
+
+| executed output | wet unequal words | wet maximum | target unequal words | target maximum |
+|---|---:|---:|---:|---:|
+| TKE `avt_k` copy | 17 | `6.361019669726387e-13` | 16 | `1.0e-10` |
+| runoff `avt` add | 17 | `6.361019669726387e-13` | 16 | `1.0e-10` |
+| EVD `avt` replace | 17 | `6.361019669726387e-13` | 16 | `1.0e-10` |
+| DDM `avt` update | 17 | `6.361019670744853e-13` | 16 | `1.0e-10` |
+| DDM `avs` write | 17 | `6.361019669725353e-13` | 16 | `1.0e-10` |
+| IWM `avt` add | 17 | `6.361019670744853e-13` | 16 | `1.0e-10` |
+| IWM `avs` add | 17 | `6.361019669719149e-13` | 16 | `1.0e-10` |
+| effective temperature K | 17 | `6.361019670744853e-13` | 9 | `6.361019670744853e-13` |
+| lower matrix row | 17 | `6.874397878199601e-10` | 9 | `6.874397878199601e-10` |
+| upper matrix row | 17 | `6.874397878199601e-10` | 8 | `6.874397878199601e-10` |
+| diagonal matrix row | 25 | `6.874447677773787e-10` | 14 | `6.874447677773787e-10` |
+| eliminated diagonal | 25 | `6.874447677773787e-10` | 14 | `6.874447677773787e-10` |
+| content RHS | 0 | `0.0` | 0 | `0.0` |
+| forward recurrence | 13 | `1.0226131053059362e-09` | 8 | `1.0226131053059362e-09` |
+| back substitution | 29 | `7.678080393702658e-12` | 18 | `7.678080393702658e-12` |
+| Kaa update | 29 | `7.678080393702658e-12` | 18 | `7.678080393702658e-12` |
+
+Thus the first measured wet mismatch is **CONFIRMED** at the first boundary,
+the TKE `avt_k` copy: 17 wet W words, maximum
+`6.361019669726387e-13 m2 s-1`. It precedes every runoff/EVD/DDM/IWM and
+`tra_zdf` arithmetic statement. The walk nevertheless recovers round 333's
+registered terminal signature exactly: 18 T words after back substitution and
+the Kaa update, maximum `7.678080393702658e-12 K`, whose unique maximum is
+`(i,j,k,rank)=(32,147,5,0)` on the north fold under ice.
+
+Ownership by a particular statement *inside* the shared TKE closure is only
+**PLAUSIBLE**: this record starts at the TKE-to-`zdf_phy` handoff and therefore
+cannot distinguish the upstream TKE statements. No single cited shared
+statement owns the departure, so Decision 122 forbids a literal fix and the
+conditional M1--M6, seven-pair, other-caller, and gradient landing work does
+not open. No model statement or configuration value changed.
+
+Proposal: extend the same manifest-pinned kt-2 record with passive boundaries
+through the shared TKE closure, then replay its source order up to the 17-word
+`avt_k` handoff. Only a single first internal statement whose literal repair is
+bit-identical or strictly better on all seven Decision-122 pairs and both
+labels may proceed to the production-call-site landing path.
+
+The two `PASS_R336_TRAZDF_STATEMENT_REPLAY` artifacts are
+`round336/resume7/given.json` (SHA-256
+`0e40d493f2fd3e48ba1e0d6fe07dcb2000a395c138cb1cf644bbb3ca284bc578`)
+and `round336/resume7/independent.json` (SHA-256
+`d6329d6f6a13a45ca929833af2ae5512d4e577c8ebe9117bc92dbbd7cab9a17c`).
+The statement replay's seven fail-closed classifier tests pass. Codex review:
+operator.

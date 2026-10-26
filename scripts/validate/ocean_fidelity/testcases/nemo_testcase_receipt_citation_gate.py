@@ -152,6 +152,12 @@ FILES = {
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfddm.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfiwm.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfiwm.f90"),
+    # Round 336's admitted record was built from this instrumented target;
+    # bind its statement walk to that producer rather than the parent build.
+    "ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/zdfphy.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/zdfphy.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/trazdf.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/trazdf.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traadv.f90": (
@@ -1907,6 +1913,22 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/trazdf.f90:293-299': [
         '!* 3d recurrence:    Xk = (Zk - Sk Xk+1 ) / Tk',
         ('END DO   ;   END DO', 14), 7],
+    'ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/zdfphy.f90:369-404': [
+        '!* start from turbulent closure values',
+        (('& avt(ntsi:ntei,ntsj:ntej,2:jpkm1),'
+          'avs(ntsi:ntei,ntsj:ntej,2:jpkm1)) ! R336_ZDFPHY_OBSERVER'), 5), 36],
+    'ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/trazdf.f90:185-240': [
+        "IF( cdtype == 'TRA' .AND. jn == jp_tem ) THEN",
+        ('ENDIF', 11), 56],
+    'ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/trazdf.f90:273-278': [
+        '!* 1st recurrence:   Tk = Dk - Ik Sk-1 / Tk-1',
+        ('END DO   ;   END DO', 11), 6],
+    'ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/trazdf.f90:288-296': [
+        '!* 2nd recurrence:    Zk = Yk - Ik / Tk-1  Zk-1',
+        ('END DO   ;   END DO', 13), 9],
+    'ORCA2_ORCA1ICE_OMIP_L4_R336TZDF/BLD/ppsrc/nemo/trazdf.f90:298-304': [
+        '!* 3d recurrence:    Xk = (Zk - Sk Xk+1 ) / Tk',
+        ('END DO   ;   END DO', 14), 7],
     'implicit_solver.py:329-392': [
         'def pivot(d):', ('return solution', 2), 64],
     'implicit_solver.py:478-539': [
@@ -1915,6 +1937,9 @@ CITATION_MAP = {
     'implicit_solver.py:542-641': [
         'def nemo_tracer_tridiagonal(',
         'return lower, diagonal, upper', 100],
+    'k_profiles.py:329-348': [
+        'K_vmix, A_vmix, tke_new = _vmix_K_profiles(',
+        'A_v_total = A_v_total + A_vmix', 20],
     # ORCA2 round 334: provenance of the constants the ratchet cleanup named.
     'trabbc.F90:179': "* 1.e-3 ! conversion in W/m2",
     'phycst.F90:26': "rad      = 3.141592653589793_wp / 180._wp",
