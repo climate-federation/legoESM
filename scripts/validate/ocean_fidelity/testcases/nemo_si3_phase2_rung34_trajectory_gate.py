@@ -110,6 +110,8 @@ def run_ridging_regime_scan(
     with netCDF4.Dataset(root / "output.init_ice.nc") as dataset:
         sst_m = np.asarray(dataset["sst"][0])
     card = build_ice_rheo_card(current, mesh, sst_m)
+    # compiled once: eager calls compile a fresh loop body each and exhaust the JIT's memory
+    ridge = jax.jit(lambda *args: ridge_ice_rheo(card, *args))
     rows: list[dict[str, object]] = []
     selected_step: int | None = None
     first_excessive_removal_step: int | None = None
@@ -139,7 +141,7 @@ def run_ridging_regime_scan(
             card.dt_s,
         )
         if scan_excessive_removal:
-            projection = _active_ridging_projection(card, current, following)
+            projection = _active_ridging_projection(card, current, following, ridge=ridge)
             row["excessive_removal_cell_count"] = projection["excessive_removal_cell_count"]
             row["open_water_correction_cell_count"] = projection["open_water_correction_cell_count"]
             if (
@@ -264,7 +266,7 @@ def _restart_moments(path: Path, card) -> SI3PratherMoments:
     return tuple(leaves)  # type: ignore[return-value]
 
 
-def _active_ridging_projection(card, frame: dict[str, np.ndarray], next_frame):
+def _active_ridging_projection(card, frame: dict[str, np.ndarray], next_frame, *, ridge=None):
     """Isolate redistribution on the selected oracle entry state."""
 
     dynamics = card.initial_state.dynamics._replace(
@@ -276,7 +278,9 @@ def _active_ridging_projection(card, frame: dict[str, np.ndarray], next_frame):
     )
     area = jnp.asarray(frame["a_i"][..., 0])
     open_water = 1.0 - area
-    out = ridge_ice_rheo(card, ice_rheo_frame_contents(frame), open_water, divergence, deformation)
+    if ridge is None:
+        ridge = jax.jit(lambda *args: ridge_ice_rheo(card, *args))
+    out = ridge(ice_rheo_frame_contents(frame), open_water, divergence, deformation)
     halo = gate._HALO_WIDTH
     interior = (slice(halo, -halo), slice(halo, -halo))
     iterations = np.asarray(out.n_shifts)[interior]
