@@ -91,7 +91,7 @@ def test_inversion_is_the_face_above_the_highest_moist_cell():
     z_half, dz, rho, q_cond, q_tot = _cloud_column()
     cfg = SimpleLWConfig()
     z_i = float(simple_lw_inversion_height(q_tot, z_half, cfg)[..., 0])
-    k_top = int(np.max(np.flatnonzero(np.asarray(q_tot) >= cfg.qt_inversion_kg_kg)))
+    k_top = int(np.max(np.flatnonzero(np.asarray(q_tot) > cfg.qt_inversion_kg_kg)))
     assert z_i == pytest.approx(float(z_half[k_top + 1]))
 
 
@@ -122,8 +122,12 @@ def test_gsam_local_density_differs_from_the_specification_form():
     z_half, dz, rho, q_cond, q_tot = _cloud_column()
     spec = simple_lw_net_upward_flux(
         q_cond, q_tot, rho, dz, z_half, SimpleLWConfig(density_at_inversion=True))
+    # gSAM's form takes the FACE density (gSAM rhow); any positive profile
+    # serves to show the two options differ.
+    rho_half = 1.2 * jnp.exp(-z_half / 8000.0)
     gsam = simple_lw_net_upward_flux(
-        q_cond, q_tot, rho, dz, z_half, SimpleLWConfig(density_at_inversion=False))
+        q_cond, q_tot, rho, dz, z_half, SimpleLWConfig(density_at_inversion=False),
+        rho_half=rho_half)
     assert not np.allclose(np.asarray(spec), np.asarray(gsam), rtol=1e-6)
 
 

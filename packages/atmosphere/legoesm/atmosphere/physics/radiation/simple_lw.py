@@ -33,8 +33,13 @@ the prescribed subsidence warming.
 Only CLOUD condensate enters the optical depth. Rain does not (gSAM line 54
 sums ``qcl + qci``, never ``qpl``), and RF01 is non-drizzling in any case.
 
-FAITHFULNESS -- three places this repo differs from ``rad_simple.f90``, all
-deliberate, none silent:
+FAITHFULNESS. With ``cp_j_kg_k=DYCOMS_SPEC_CP_J_KG_K``,
+``density_at_inversion=False`` and gSAM's face density passed as
+``rho_half``, this module reproduces gSAM 1.8.8 ``rad_simple.f90`` to
+round-off (oracle test: ``tests/atmosphere/test_simple_lw_oracle.py``). The
+DEFAULT configuration is the RF01 specification form instead, which differs
+from gSAM in two places, both deliberate and documented below; a third note
+concerns cloud ice:
 
 1. ``cp``. gSAM hardcodes ``cp_spec`` "from DycomsII LES intercomparison
    specs" (line 24), which sits about 1 % above this repo's
@@ -48,10 +53,19 @@ deliberate, none silent:
    this way ensures a rough balance between the subsidence heating and
    radiative cooling above the inversion"). The specification, and this
    module's default, use the density AT THE INVERSION.
-   ``density_at_inversion=False`` selects gSAM's form.
+   ``density_at_inversion=False`` selects gSAM's form, and then the caller
+   MUST pass the face density ``rho_half`` (gSAM ``rhow``, one value per
+   half level): gSAM builds it from the reference pressure in
+   ``setdata.f90``, which this kernel does not receive, so the kernel refuses
+   to run that branch without it rather than substitute a layer density.
 3. Cloud ice. gSAM's optical depth is ``qcl + qci``; the caller here passes
    whatever it calls cloud condensate. Both stratocumulus decks are warm, so
    the two agree for every case currently driven by this module.
+
+Edge guards follow gSAM exactly, in every configuration: a layer contributes
+optical depth only where its condensate is strictly positive (line 54,
+``if(qcl+qci .gt. 0.)``), and the inversion is the face above the highest
+layer with ``q_t`` STRICTLY above the isoline (line 57, ``.gt. 0.008``).
 
 VALIDITY: this is a boundary-layer fit, not a column radiation solver. The
 clear-sky term grows as ``(z - z_i)^(4/3)``, so on a deep column it reaches
@@ -96,6 +110,7 @@ __physics_contract__ = {
         "q_cond": "kg/kg (cloud condensate; rain excluded)",
         "q_total": "kg/kg (vapour + cloud condensate, for the inversion)",
         "rho": "kg/m^3", "dz": "m", "z_half": "m (heights, surface = 0)",
+        "rho_half": "kg/m^3 (face density, gSAM rhow; density_at_inversion=False only)",
     },
     "outputs": {
         "net_upward_flux": "W/m^2 (positive UP, at half levels)",
@@ -202,32 +217,34 @@ class SimpleLWConfig(NamedTuple):
     cp_j_kg_k: float = constants.c_pd
     # True  = density at the inversion (the RF01 SPECIFICATION, and the value
     #         the existing DYCOMS LES reference was generated with).
-    # False = local layer density (what gSAM actually does; see the module
-    #         docstring, Faithfulness point 2).
+    # False = local FACE density gSAM ``rhow`` (what gSAM actually does; see
+    #         the module docstring, Faithfulness point 2). The caller must
+    #         then pass ``rho_half``.
     density_at_inversion: bool = True
 
 
 def simple_lw_inversion_height(q_total, z_half, config: SimpleLWConfig):
-    """Height of the face above the highest cell with ``q_t >= threshold``.
+    """Height of the face above the highest cell with ``q_t > threshold``.
 
-    gSAM (line 57) tracks ``itop = max(itop, k+1)`` over cells exceeding the
-    isoline and uses ``zi(itop)`` -- the face ABOVE the highest such cell. A
-    column that never exceeds the threshold keeps ``itop = 1``, i.e. z = 0, and
-    the clear-sky term then applies its weak divergence from the surface.
+    gSAM (line 57) tracks ``itop = max(itop, k+1)`` over cells STRICTLY
+    exceeding the isoline (``.gt. 0.008``) and uses ``zi(itop)`` -- the face
+    ABOVE the highest such cell. A column that never exceeds the threshold
+    keeps ``itop = 1``, i.e. z = 0, and the clear-sky term then applies its
+    weak divergence from the surface.
 
     Arrays are ordered BOTTOM-UP along the last axis; ``z_half`` has one more
     entry than ``q_total``. Returns a trailing singleton axis so the result
     broadcasts against half-level arrays.
     """
     idx = jnp.arange(q_total.shape[-1])
-    below = q_total >= config.qt_inversion_kg_kg
+    below = q_total > config.qt_inversion_kg_kg
     k_top = jnp.max(jnp.where(below, idx, -1), axis=-1)
     return jnp.take(z_half, k_top + 1, axis=-1)[..., None]
 
 
 def simple_lw_net_upward_flux(q_cond, q_total, rho, dz, z_half,
                               config: SimpleLWConfig = SimpleLWConfig(),
-                              *, z_full=None):
+                              *, z_full=None, rho_half=None):
     """Net UPWARD longwave flux at half levels [W/m^2], positive up.
 
     Parameters
@@ -252,12 +269,16 @@ def simple_lw_net_upward_flux(q_cond, q_total, rho, dz, z_half,
         uniform grid ``(k + 0.5) dz`` and ``0.5 (z_k + z_{k+1})`` are equal
         mathematically but can differ in the last bit, and that bit reaches
         the clear-sky term through the interpolation.
+    rho_half : array (nlev+1,), optional
+        Face density [kg/m^3] (gSAM ``rhow``), bottom-up. Required when
+        ``config.density_at_inversion`` is False and ignored otherwise.
 
     All profile axes are ordered BOTTOM-UP (index 0 nearest the surface),
     which is the orientation the cumulative optical depths are defined in.
     """
-    # Optical-depth increment per layer, cloud condensate only (gSAM line 54).
-    dq = config.kappa_m2_kg * rho * q_cond * dz
+    # Optical-depth increment per layer, cloud condensate only, and only
+    # where it is strictly positive (gSAM line 54: if(qcl+qci .gt. 0.)).
+    dq = config.kappa_m2_kg * rho * jnp.where(q_cond > 0.0, q_cond, 0.0) * dz
     # Cumulative optical depth at the TOP face of each layer, padded with the
     # surface face, where nothing lies below.
     pad = [(0, 0)] * (dq.ndim - 1) + [(1, 0)]
@@ -273,9 +294,14 @@ def simple_lw_net_upward_flux(q_cond, q_total, rho, dz, z_half,
                    else z_full)
         rho_ref = jnp.interp(z_i[..., 0], centres, rho)[..., None]
     else:
-        # gSAM's local density, held at the layer below each face; the top
-        # face reuses the topmost layer (gSAM's flux(nz) uses rhow(nz)).
-        rho_ref = jnp.pad(rho, (0, 1), mode="edge")
+        # gSAM's local FACE density rhow(k) at every face above the
+        # inversion, including the top face (flux(nz) uses rhow(nz)).
+        if rho_half is None:
+            raise ValueError(
+                "simple_lw: density_at_inversion=False is gSAM's form and needs "
+                "the face density rho_half (gSAM rhow, nlev+1 values); it is not "
+                "derivable from the layer density inside this kernel.")
+        rho_ref = rho_half
     # `dz_i ** (1/3)` has an INFINITE derivative at dz_i = 0, and dz_i is
     # EXACTLY zero at every face below the inversion -- by construction, since
     # that clip is how the clear-sky term switches itself off there. Forward
@@ -302,7 +328,7 @@ def simple_lw_net_upward_flux(q_cond, q_total, rho, dz, z_half,
 
 def simple_lw_temperature_tendency(q_cond, q_total, rho, dz, z_half,
                                    config: SimpleLWConfig = SimpleLWConfig(),
-                                   *, z_full=None):
+                                   *, z_full=None, rho_half=None):
     """Radiative TEMPERATURE tendency [K/s] at full levels, bottom-up.
 
     ``dT/dt = -(1/(rho cp)) dF/dz`` with ``F`` the net UPWARD flux and ``z``
@@ -315,6 +341,6 @@ def simple_lw_temperature_tendency(q_cond, q_total, rho, dz, z_half,
     which prognoses T.
     """
     flux = simple_lw_net_upward_flux(q_cond, q_total, rho, dz, z_half, config,
-                                     z_full=z_full)
+                                     z_full=z_full, rho_half=rho_half)
     d_flux = flux[..., 1:] - flux[..., :-1]
     return -d_flux / (rho * config.cp_j_kg_k * dz)
