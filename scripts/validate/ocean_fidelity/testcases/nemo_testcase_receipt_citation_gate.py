@@ -9272,7 +9272,7 @@ AUDITED_ROUNDS = "25 and later (heading to end of file)"
 UNAUDITED_ROUNDS = ("1-24 -- hand-checked only; their citations are not in "
                     "CITATION_MAP and this gate does not read them")
 
-_NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm|xml)"
+_NAME = (r"[A-Za-z0-9_./]+\.(?:F90|f90|h90|py|fcm|xml|sh|patch)"
          r"|[A-Za-z0-9_./]*(?:namelist_cfg|namelist_ref|ocean\.output)")
 _SPAN = re.compile(r"`([^`\n]+)`")
 _FULL = re.compile(rf"^(?P<f>{_NAME}):(?P<l>\d[\d,\-]*)$")
