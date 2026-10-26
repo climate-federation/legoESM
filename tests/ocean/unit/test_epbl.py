@@ -576,3 +576,35 @@ def test_k_after_surface_flux_rejected_outside_scm():
             VerticalMixingConfig(
                 scheme="epbl", epbl=EPBLConfig(k_after_surface_flux=True)),
             apply_diffusion=False)
+
+
+def test_om4_mstar_at_zero_coriolis_takes_the_obukhov_cap():
+    """MOM6's log(u*/(f*BLD)) is +inf at f = 0, so min() returns 1.25."""
+    cfg = EPBLConfig(mstar_scheme="om4", mstar_convect_coef=0.0)
+    m = _find_mstar(cfg, jnp.asarray(0.0), jnp.asarray(0.01),
+                    jnp.asarray(30.0), jnp.asarray(0.0))
+    assert float(m) == 1.25
+
+
+def test_missing_mld_guess_becomes_mid_column_without_iteration():
+    """MOM6 replaces a non-positive guess with half the column depth before
+    any pass (MOM_energetic_PBL.F90:1231), iterating or not."""
+    cfg = _ref_cfg(use_mld_iteration=False)
+    h, T, S, dSV_dT, dSV_dS = _column()
+    absf = abs(2 * OMEGA * math.sin(math.radians(40.0)))
+    tke = jnp.zeros_like(T).at[0].set(surface_tke_forcing(
+        jnp.asarray(-200.0), None, h[0], dSV_dT[0], dSV_dS[0],
+        g=G, rho_0=RHO0, c_sw=C_SW, dt=cfg.dt_s))
+
+    def run(guess):
+        return epbl_diagnostics(
+            T[None, :] * 0.0, T[None, :] * 0.0, T[None, :], S[None, :],
+            dSV_dT[None, :], dSV_dS[None, :], h, cfg,
+            tau_x=jnp.asarray([0.2]), tau_y=jnp.asarray([0.0]),
+            B_flux=jnp.asarray([_b_flux(-200.0, float(T[0]), float(S[0]))]),
+            tke_forcing=tke[None, :], absf=jnp.asarray([absf]),
+            mld_guess=guess, g=G, rho_0=RHO0)
+
+    kd_none = run(None)[0]
+    kd_mid = run(jnp.asarray([0.5 * float(jnp.sum(h))]))[0]
+    np.testing.assert_array_equal(np.asarray(kd_none), np.asarray(kd_mid))

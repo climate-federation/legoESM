@@ -338,9 +338,15 @@ def _find_mstar(cfg: EPBLConfig, b_flux, u_star, bld, absf):
             _safe_div(jnp.maximum(0.0, b_flux), u_star**2 * absf_safe))
         # Rotation (Ekman length) limited mixing; zero unless u_star exceeds
         # the rotational scale, exactly as MOM6's guarded log.
-        ratio = _safe_div(u_star, absf * bld)
-        mstar_n = jnp.where(u_star > absf * bld,
-                            cfg.c_ek * jnp.log(jnp.maximum(ratio, 1.0)), 0.0)
+        # At absf * bld == 0 MOM6's log is +inf, so min() below returns the cap.
+        ekman = absf * bld
+        ratio = _safe_div(u_star, ekman)
+        mstar_n = jnp.where(
+            u_star > ekman,
+            jnp.where(ekman > 0.0,
+                      cfg.c_ek * jnp.log(jnp.maximum(ratio, 1.0)),
+                      _OM4_MSTAR_N_CAP),
+            0.0)
         # 1.25 is about 0.5/von Karman, which gives the Obukhov limit.
         mstar = jnp.maximum(mstar_s, jnp.minimum(_OM4_MSTAR_N_CAP, mstar_n))
         if cfg.mstar_cap > 0.0:
@@ -948,12 +954,13 @@ def _epbl_column(h, u, v, t0, s0, dsv_dt, dsv_ds, tke_forcing,
         return kd_full, mld_found, vstar_full, mixlen_full
 
     # --- boundary-layer depth iteration ---------------------------------
-    if not cfg.use_mld_iteration:
-        kd, mld, mixvel, mixlen = one_pass(mld_guess_in)
-        return kd, mld, mixvel, mixlen
-
+    # MOM6 replaces a missing guess with mid-column before any pass,
+    # iterating or not (MOM_energetic_PBL.F90:1231).
     mld_guess_0 = jnp.where(mld_guess_in > 0.0, mld_guess_in,
                             0.5 * column_depth)
+    if not cfg.use_mld_iteration:
+        kd, mld, mixvel, mixlen = one_pass(mld_guess_0)
+        return kd, mld, mixvel, mixlen
 
     def mld_body(i, st):
         (guess, min_mld, max_mld, dmld_min, dmld_max, done,
