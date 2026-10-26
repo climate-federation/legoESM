@@ -208,5 +208,5 @@ file: 185 passed.
   stage-velocity test in the face-mask-rank file (574 s alone in round 335),
   was killed by the 595 s cap before it finished, with the machine's load
   average near 25.  It is **UNVERIFIED here**; the operator's push gate runs
-  it.  It does not import either changed module's new code: both changes are
-  pure additions.
+  it.  Both package changes are pure additions (0 removed lines), so no
+  existing function body it could call changed.
