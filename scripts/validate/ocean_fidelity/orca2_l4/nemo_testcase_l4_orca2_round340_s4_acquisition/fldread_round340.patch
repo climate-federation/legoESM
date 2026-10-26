@@ -15,7 +15,7 @@
           !
        ENDIF
        !
-@@ -1655,5 +1657,36 @@
+@@ -1655,5 +1657,38 @@
        ! 
     END FUNCTION ksec_week
  
@@ -36,15 +36,17 @@
 +         WRITE(name,'("oracle_r340_fld_k",I8.8,"_c",I3.3,"_f",I3.3,"_r",I4.4,".bin")') kt,r340_call,jf,mpprank
 +         OPEN(NEWUNIT=iu,FILE=TRIM(name),ACCESS='STREAM',FORM='UNFORMATTED',STATUS='NEW',ACTION='WRITE')
 +         WRITE(iu) magic
-+         WRITE(iu) 1,kt,r340_call,jf,mpprank,isecsbc,sd(jf)%nbb,sd(jf)%naa,64
++         WRITE(iu) 3,kt,r340_call,jf,mpprank,isecsbc,sd(jf)%nbb,sd(jf)%naa,64
 +         WRITE(iu) sd(jf)%clvar,sd(jf)%nrec,sd(jf)%rec_shft
-+         WRITE(iu) LBOUND(sd(jf)%fnow),UBOUND(sd(jf)%fnow),SIZE(sd(jf)%fnow)
-+         WRITE(iu) sd(jf)%fnow
++         WRITE(iu) LBOUND(sd(jf)%fnow),UBOUND(sd(jf)%fnow),Nis0,Nie0,Njs0,Nje0, &
++            & (Nie0-Nis0+1)*(Nje0-Njs0+1)*SIZE(sd(jf)%fnow,3)
++         WRITE(iu) sd(jf)%fnow(Nis0:Nie0,Njs0:Nje0,:)
 +         IF (ASSOCIATED(sd(jf)%fdta)) THEN
-+            WRITE(iu) 1,LBOUND(sd(jf)%fdta),UBOUND(sd(jf)%fdta),SIZE(sd(jf)%fdta)
-+            WRITE(iu) sd(jf)%fdta
++            WRITE(iu) 1,LBOUND(sd(jf)%fdta),UBOUND(sd(jf)%fdta),Nis0,Nie0,Njs0,Nje0, &
++               & (Nie0-Nis0+1)*(Nje0-Njs0+1)*SIZE(sd(jf)%fdta,3)*SIZE(sd(jf)%fdta,4)
++            WRITE(iu) sd(jf)%fdta(Nis0:Nie0,Njs0:Nje0,:,:)
 +         ELSE
-+            WRITE(iu) 0,0,0,0,0,0,0,0,0,0
++            WRITE(iu) 0,0,0,0,0,0,0,0,0,0,0,0,0,0
 +         ENDIF
 +         CLOSE(iu)
 +      END DO

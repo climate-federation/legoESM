@@ -508,7 +508,9 @@ def test_production_binding_and_existing_top_cell_runoff_path(monkeypatch):
         nemo_blk_oce_ncar(
             *shadowed, nn_ice=1, ice_if=ice_if, s0=s0, s2=s2)
     run = lambda: nemo_blk_oce_ncar(
-        *bulk_args, nn_ice=1, ice_if=ice_if, s0=s0, s2=s2)
+        *bulk_args, nn_ice=1, ice_if=ice_if, s0=s0, s2=s2,
+        chl=jnp.ones_like(s2.surface_mask),
+        geothermal_heat_flux_mwm2=jnp.ones_like(s2.surface_mask))
     with jax.disable_jit():
         baseline = run()
     compiled = jax.jit(run)()
@@ -619,7 +621,7 @@ def test_production_binding_and_existing_top_cell_runoff_path(monkeypatch):
     )[0, 0]
 
     forcing, freshwater = baseline.surface_forcing, baseline.freshwater_forcing
-    np.testing.assert_array_equal(_bits(forcing.q_solar), _bits(baseline.s2.qsr))
+    assert forcing.q_solar is None
     np.testing.assert_array_equal(_bits(forcing.sw_down), _bits(baseline.s2.qsr))
     h = jnp.ones(baseline.s2.emp.shape + (3,), dtype=jnp.float64)
     temperature = jnp.broadcast_to(baseline.s2.qns[..., None] * 0.0 + 2.0, h.shape)

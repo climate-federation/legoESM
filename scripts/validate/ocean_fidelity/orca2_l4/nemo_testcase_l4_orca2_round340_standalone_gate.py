@@ -12,6 +12,10 @@ from typing import Mapping
 import netCDF4
 import numpy as np
 
+from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+    build_orca2_damping_for_step,
+)
+
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round1_ladder_gate as rung10,
 )
@@ -58,6 +62,20 @@ OUTER_REDUCED_FIELDS = (
     "qsr", "qns", "sfx", "taum", "wndm", "rnf_tsc_T", "rnf_tsc_S",
     "erp", "qrp", "coefice",
 )
+OUTER_FIELDS_BY_KID = {
+    0: (),
+    1: OUTER_FULL_FIELDS[:7],
+    2: OUTER_FULL_FIELDS[:7],
+    3: OUTER_FULL_FIELDS[:7] + ("utau", "vtau", "emp") + OUTER_REDUCED_FIELDS[:5],
+    4: OUTER_FULL_FIELDS[:7] + ("utau", "vtau", "emp") + OUTER_REDUCED_FIELDS[:5],
+    5: OUTER_FULL_FIELDS[:7] + ("utau", "vtau", "emp") + OUTER_REDUCED_FIELDS[:5] + ("fr_i",),
+    6: OUTER_FULL_FIELDS[:7] + ("utau", "vtau", "emp") + OUTER_REDUCED_FIELDS[:5] + ("fr_i",),
+    7: OUTER_FULL_FIELDS[:7] + ("utau", "vtau", "emp") + OUTER_REDUCED_FIELDS[:5] + ("fr_i", "rnf") + OUTER_REDUCED_FIELDS[5:7],
+    8: OUTER_FULL_FIELDS[:7] + ("utau", "vtau", "emp") + OUTER_REDUCED_FIELDS[:5] + ("fr_i", "rnf") + OUTER_REDUCED_FIELDS[5:],
+    9: OUTER_FULL_FIELDS[:7] + ("utau", "vtau", "emp") + OUTER_REDUCED_FIELDS[:5] + ("fr_i", "rnf") + OUTER_REDUCED_FIELDS[5:],
+    10: OUTER_FULL_FIELDS[:7] + ("utau", "vtau", "emp") + OUTER_REDUCED_FIELDS[:5] + ("fr_i", "rnf") + OUTER_REDUCED_FIELDS[5:],
+    11: OUTER_FULL_FIELDS[:7] + ("utau", "vtau", "emp") + OUTER_REDUCED_FIELDS[:5] + ("fr_i", "rnf") + OUTER_REDUCED_FIELDS[5:] + ("utauU", "vtauV"),
+}
 S1_TURB_FIELDS = (
     "theta_air", "q_air", "sst", "ssu", "ssv", "tsk", "ssq", "Cd", "Ch",
     "Ce", "rhoa", "sensible", "latent", "evap", "qsr", "utau", "vtau",
@@ -69,6 +87,12 @@ IIF_FULL_FIELDS = (
     "utau", "vtau",
 )
 IIF_REDUCED_FIELDS = ("ice_cover", "qsr", "qns", "sfx", "taum", "wndm", "smask0")
+IIF_FIELDS_BY_KID = {
+    0: tuple(name for name in IIF_FULL_FIELDS if name != "fr_i") + IIF_REDUCED_FIELDS,
+    1: IIF_FULL_FIELDS + IIF_REDUCED_FIELDS,
+    2: IIF_FULL_FIELDS + IIF_REDUCED_FIELDS,
+    3: IIF_FULL_FIELDS + IIF_REDUCED_FIELDS,
+}
 
 
 class GateError(RuntimeError):
@@ -122,24 +146,15 @@ def read_exact_record(path: Path) -> dict[str, object]:
     magic, offset = data[:16].decode("ascii"), 16
     fields: dict[str, np.ndarray] = {}
     result: dict[str, object]
-    if magic == "NEMO_R340_S4_2  ":
+    if magic == "NEMO_R340_S4_3  ":
         header, offset = _integers(data, offset, 7)
-        version, kt, kid, rank, jpi, jpj, bits = header
-        bounds, offset = _integers(data, offset, 4)
-        ilo, ihi, jlo, jhi = bounds
-        ni, nj = ihi - ilo + 1, jhi - jlo + 1
-        require((version, bits) == (2, 64), "surface schema moved")
+        version, kt, kid, rank, ni, nj, bits = header
+        require((version, bits) == (3, 64), "surface schema moved")
         require(1 <= kt <= 10 and kid in OUTER_BOUNDARIES and rank in (0, 1),
                 "surface time/boundary/rank moved")
-        nfull, nred = jpi * jpj, ni * nj
-        for name in OUTER_FULL_FIELDS:
-            value, offset = _take_f64(data, offset, nfull)
-            fields[name] = _full_owned(value, jpi, jpj, bounds)
-        for name in OUTER_REDUCED_FIELDS:
-            value, offset = _take_f64(data, offset, nred)
+        for name in OUTER_FIELDS_BY_KID[kid]:
+            value, offset = _take_f64(data, offset, ni * nj)
             fields[name] = _reduced(value, ni, nj)
-        scalars, offset = _take_f64(data, offset, 2)
-        fields["a_fwb"], fields["a_fwb_b"] = scalars[:1], scalars[1:]
         result = {"kind": "surface", "kt": kt, "kid": kid, "rank": rank}
     elif magic in ("NEMO_R340_S1T_1 ", "NEMO_R340_S1F_1 "):
         header, offset = _integers(data, offset, 7)
@@ -176,21 +191,14 @@ def read_exact_record(path: Path) -> dict[str, object]:
             value.reshape((jpi, jpj), order="F")[h:-h, h:-h].T)
         result = {"kind": "state", "kt": kt, "kid": stage, "rank": rank,
                   "level": level}
-    elif magic == "NEMO_R340_IIF_1 ":
+    elif magic == "NEMO_R340_IIF_2 ":
         header, offset = _integers(data, offset, 9)
         version, kt, kid, kbb, kmm, rank, jpi, jpj, bits = header
-        declared, offset = _integers(data, offset, 5)
-        ilo, jlo, ihi, jhi, size = declared
-        bounds = (ilo, ihi, jlo, jhi)
-        ni, nj = ihi - ilo + 1, jhi - jlo + 1
-        require(size == ni * nj and (version, bits) == (1, 64),
-                "ice-if declared extent/schema moved")
+        ni, nj = jpi, jpj
+        require((version, bits) == (2, 64), "ice-if declared extent/schema moved")
         require(1 <= kt <= 10 and kid in IIF_BOUNDARIES and rank in (0, 1),
                 "ice-if time/boundary/rank moved")
-        for name in IIF_FULL_FIELDS:
-            value, offset = _take_f64(data, offset, jpi * jpj)
-            fields[name] = _full_owned(value, jpi, jpj, bounds)
-        for name in IIF_REDUCED_FIELDS:
+        for name in IIF_FIELDS_BY_KID[kid]:
             value, offset = _take_f64(data, offset, ni * nj)
             fields[name] = _reduced(value, ni, nj)
         result = {"kind": "iif", "kt": kt, "kid": kid, "rank": rank,
@@ -198,7 +206,7 @@ def read_exact_record(path: Path) -> dict[str, object]:
     elif magic == "NEMO_R340_FLDRD1":
         header, offset = _integers(data, offset, 9)
         version, kt, call, field, rank, isecsbc, nbb, naa, bits = header
-        require((version, bits) == (1, 64), "fld_read schema moved")
+        require(version in (1, 2, 3) and bits == 64, "fld_read schema moved")
         require(1 <= kt <= 10 and call > 0 and field > 0 and rank in (0, 1),
                 "fld_read time/call/field/rank moved")
         require(offset + 34 <= len(data), "truncated fld_read variable name")
@@ -206,21 +214,46 @@ def read_exact_record(path: Path) -> dict[str, object]:
         offset += 34
         nrec, offset = _integers(data, offset, 4)
         shift, offset = _take_f64(data, offset, 1)
-        now_decl, offset = _integers(data, offset, 7)
-        now_lo, now_hi, now_size = now_decl[:3], now_decl[3:6], now_decl[6]
+        now_decl, offset = _integers(data, offset, 11 if version >= 2 else 7)
+        now_lo, now_hi = now_decl[:3], now_decl[3:6]
+        if version >= 2:
+            owned = now_decl[6:10]
+            now_size = now_decl[10]
+        else:
+            owned = (now_lo[0], now_hi[0], now_lo[1], now_hi[1])
+            now_size = now_decl[6]
         now, offset = _take_f64(data, offset, now_size)
-        now_shape = tuple(hi - lo + 1 for lo, hi in zip(now_lo, now_hi, strict=True))
-        fields["fnow"] = np.ascontiguousarray(
-            now.reshape(now_shape, order="F").transpose(1, 0, 2))
-        data_decl, offset = _integers(data, offset, 10)
+        now_shape = ((owned[1] - owned[0] + 1,
+                      owned[3] - owned[2] + 1,
+                      now_hi[2] - now_lo[2] + 1)
+                     if version == 3 else
+                     tuple(hi - lo + 1 for lo, hi in zip(now_lo, now_hi, strict=True)))
+        now = now.reshape(now_shape, order="F")
+        if version < 3:
+            ilo, ihi, jlo, jhi = owned
+            now = now[ilo - now_lo[0]:ihi - now_lo[0] + 1,
+                      jlo - now_lo[1]:jhi - now_lo[1] + 1, :]
+        fields["fnow"] = np.ascontiguousarray(now.transpose(1, 0, 2))
+        data_decl, offset = _integers(data, offset, 14 if version >= 2 else 10)
         associated, data_lo, data_hi, data_size = (
-            data_decl[0], data_decl[1:5], data_decl[5:9], data_decl[9])
+            data_decl[0], data_decl[1:5], data_decl[5:9],
+            data_decl[13] if version >= 2 else data_decl[9])
         require(associated in (0, 1), "fld_read association flag moved")
         if associated:
             raw, offset = _take_f64(data, offset, data_size)
-            shape = tuple(hi - lo + 1 for lo, hi in zip(data_lo, data_hi, strict=True))
+            shape = ((data_decl[10] - data_decl[9] + 1,
+                      data_decl[12] - data_decl[11] + 1,
+                      data_hi[2] - data_lo[2] + 1,
+                      data_hi[3] - data_lo[3] + 1)
+                     if version == 3 else
+                     tuple(hi - lo + 1 for lo, hi in zip(data_lo, data_hi, strict=True)))
+            raw = raw.reshape(shape, order="F")
+            if version == 2:
+                ilo, ihi, jlo, jhi = data_decl[9:13]
+                raw = raw[ilo - data_lo[0]:ihi - data_lo[0] + 1,
+                          jlo - data_lo[1]:jhi - data_lo[1] + 1, :, :]
             fields["fdta"] = np.ascontiguousarray(
-                raw.reshape(shape, order="F").transpose(1, 0, 2, 3))
+                raw.transpose(1, 0, 2, 3))
         else:
             require(data_size == 0, "absent fld_read array has a nonzero size")
         fields.update(
@@ -367,6 +400,147 @@ def load_core_normal_year(root: Path, manifest: Path) -> dict[str, np.ndarray]:
     return mapped
 
 
+def _monthly_slots(path: Path, variable: str) -> tuple[np.ndarray, np.ndarray]:
+    """Return the December/January slots used by K0's first ten steps."""
+
+    require(path.is_file(), f"missing K0 field file: {path}")
+    with netCDF4.Dataset(path) as dataset:
+        require(variable in dataset.variables,
+                f"K0 variable {variable!r} is absent from {path.name}")
+        source = dataset.variables[variable]
+        source.set_auto_maskandscale(False)
+        value = np.asarray(source[:], dtype=np.float64)
+    require(value.shape[0] == 12 and value.shape[-2:] == (148, 180),
+            f"K0 monthly field shape moved: {path.name} {value.shape}")
+    if value.ndim == 4:
+        value = value[:, 0]
+    require(value.shape == (12, 148, 180),
+            f"K0 surface field shape moved: {path.name} {value.shape}")
+    require(bool(np.isfinite(value).all()), f"K0 field is non-finite: {path}")
+    return value[11], value[0]
+
+
+def build_real_composed_inputs(
+    card, deck_root: Path, core_manifest: Path, ice_cover_path: Path,
+) -> tuple[dict[str, object], ...]:
+    """Build ten K0 controls from the exact files named by its namelists.
+
+    This is the standalone smoke/input boundary, not an oracle-record bridge:
+    CORE is mapped through the deck weights, while ice cover, runoff, restoring
+    SSS, chlorophyll, geothermal heat flow, masks, and metrics come directly
+    from the same K0 deck products NEMO opens.
+    """
+
+    import jax.numpy as jnp
+    from legoesm.ocean import bulk_flux_omip as bulk
+    from legoesm.ocean.forcing.nemo_surface import NemoSurfaceMeans
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round1_ladder_gate as ladder,
+    )
+
+    root = Path(deck_root)
+    mapped = load_core_normal_year(root, Path(core_manifest))
+    cover = read_decision171_cover(Path(ice_cover_path))
+    runoff_before, runoff_after = _monthly_slots(
+        root / "runoff_core_monthly.nc", "sorunoff")
+    sss_before, sss_after = _monthly_slots(root / "sss_data.nc", "sss")
+    geothermal = ladder.read_geothermal_heatflow(root, (148, 180))
+    with netCDF4.Dataset(root / "ORCA_R2_zps_domcfg.nc") as dataset:
+        ff_f = np.asarray(dataset.variables["ff_f"][:], dtype=np.float64)
+    with netCDF4.Dataset(root / "runoff_core_monthly.nc") as dataset:
+        mouth = np.asarray(dataset.variables["socoefr0"][:], dtype=np.float64)
+
+    state = card.ocean.recipe.initial_state
+    mask = np.asarray(state.land_mask.data, dtype=np.float64)
+    ny, nx = mask.shape
+    require((ny, nx) == (148, 180), "real K0 card grid moved")
+    center = np.arange(ny * nx, dtype=np.int64).reshape(ny, nx)
+    center_index = center.copy()
+    center_sign = np.ones((ny, nx), dtype=np.float64)
+    fold = card.ocean.recipe.grid.fold
+    center_index[-1] = center[-1, np.asarray(fold.perm_T)]
+    center_sign[-1] = float(fold.vector_sign_u)
+    east_index = np.roll(center_index, -1, axis=1)
+    east_sign = np.roll(center_sign, -1, axis=1)
+    north_index = np.concatenate((center_index[1:], center_index[-1:]), axis=0)
+    north_sign = np.concatenate((center_sign[1:], center_sign[-1:]), axis=0)
+    stress_lbc = bulk.NemoTStressLbcPlan(
+        *(jnp.asarray(value) for value in (
+            center_index, east_index, north_index,
+            center_sign, east_sign, north_sign)))
+    flat_mask = mask.reshape(-1)
+    tmask_east = flat_mask[east_index]
+    tmask_north = flat_mask[north_index]
+    umask = np.asarray(state.u_mask.data, dtype=np.float64)[:, 1:]
+    vmask = np.asarray(state.v_mask.data, dtype=np.float64)[1:, :]
+    zero = jnp.zeros((ny, nx), dtype=jnp.float64)
+    one = jnp.ones((ny, nx), dtype=jnp.float64)
+    means = NemoSurfaceMeans(*(zero for _ in range(7)))
+    s0 = bulk.NemoS0Inputs(
+        prior=means, kt=1, nit000=1, forcing_stride=2,
+        restart_means_present=False, use_conservative_temperature=False,
+        remove_inverse_barometer=False, u_before=zero, v_before=zero,
+        temperature_now=zero, salinity_now=zero, ssh_now=zero,
+        ssh_inverse_barometer=zero, e3t_reference=one, r3t_now=zero,
+        surface_mask=jnp.asarray(mask), shortwave_fraction_top=zero,
+    )
+    s2 = bulk.NemoS2Inputs(
+        stress_lbc=stress_lbc, post_ice_sfx=zero,
+        runoff_now=zero, prior_runoff_mass=zero,
+        prior_runoff_temperature_content=zero,
+        prior_runoff_salinity_content=zero,
+        prior_restoring_volume_flux=zero, prior_restoring_heat_flux=zero,
+        prior_restoring_coefficient=one, sss_target=zero,
+        runoff_mouth_mask=jnp.asarray(mouth), surface_mask=jnp.asarray(mask),
+        tmask_east=jnp.asarray(tmask_east), tmask_north=jnp.asarray(tmask_north),
+        umask=jnp.asarray(umask), vmask=jnp.asarray(vmask),
+        # K0 ocean.output reports rn_fwb0=0.0 for nn_fwb=2 at cold start.
+        freshwater_budget_correction=jnp.asarray(0.0, dtype=jnp.float64),
+        runoff_factor=jnp.asarray(1.0, dtype=jnp.float64),
+        reference_density=jnp.asarray(
+            card.ocean.recipe.model_config.physics.constants.rho_0,
+            dtype=jnp.float64),
+        restoring_mm_per_day=jnp.asarray(-166.67, dtype=jnp.float64),
+        restoring_bound_mm_per_day=jnp.asarray(4.0, dtype=jnp.float64),
+        seconds_per_day=jnp.asarray(86400.0, dtype=jnp.float64),
+        salinity_floor=jnp.asarray(1.0e-20, dtype=jnp.float64),
+        heat_capacity=jnp.asarray(
+            card.ocean.recipe.model_config.physics.constants.c_sw,
+            dtype=jnp.float64),
+    )
+    atmosphere = bulk.NemoStandaloneAtmosphereFields(
+        *(jnp.asarray(mapped[name], dtype=jnp.float64) for name in (
+            "wndi", "wndj", "tair", "humi", "slp", "qsr_down",
+            "qlw_down", "precip_raw", "snow_raw")))
+    geothermal = jnp.asarray(geothermal, dtype=jnp.float64)
+    controls = []
+    for kt in range(1, 11):
+        midpoint = (2 * kt - 1) * int(card.ocean.dt_s) // 2
+        pair_runoff = bulk.NemoStandaloneFieldPair(
+            jnp.asarray(runoff_before), jnp.asarray(runoff_after), midpoint,
+            -1339200, 1339200)
+        pair_sss = bulk.NemoStandaloneFieldPair(
+            jnp.asarray(sss_before), jnp.asarray(sss_after), midpoint,
+            -1339200, 1339200)
+        s0f = bulk.NemoStandaloneS0FInputs(
+            atmosphere, atmosphere, midpoint, midpoint - 1, midpoint + 1,
+            pair_runoff, pair_sss)
+        ice_if = bulk.NemoSbcIceIfInputs(
+            jnp.asarray(cover), jnp.asarray(cover), midpoint,
+            -15768000, 15768000, zero, zero, zero, jnp.asarray(ff_f),
+            jnp.asarray(mask), jnp.asarray(mask))
+        controls.append({
+            "s0f": s0f, "ice_if": ice_if, "s0": s0, "s2": s2,
+            "chl": jnp.asarray(ladder.chlorophyll_at_step(
+                root, kt, mask > 0.5, dt_s=card.ocean.dt_s)),
+            "geothermal_heat_flux_mwm2": geothermal,
+            "sponge": build_orca2_damping_for_step(
+                root, np.asarray(card.ocean.recipe.z_coord.is_active) > 0.5,
+                kt=kt, dt_s=card.ocean.dt_s),
+        })
+    return tuple(controls)
+
+
 def verify_round339_prerequisites(ice_root: Path, smoke_root: Path) -> dict:
     ice_manifest = round339.verify_manifest(ice_root / "producer_manifest.json")
     smoke_manifest = round339.verify_manifest(smoke_root / "producer_manifest.json")
@@ -486,9 +660,25 @@ def run_composed_card(card, initial_state, step_inputs, *, model=None):
     state = initial_state
     ladder: dict[str, dict[str, np.ndarray]] = {}
     surfaces = []
+    carry_s0 = carry_s2 = prior_surface = None
     for kt, controls in enumerate(inputs, start=1):
+        controls = dict(controls)
         require("model" not in controls and "nemo_kt" not in controls,
                 "step inputs may not replace the production driver/model")
+        if carry_s0 is not None:
+            controls["s0"] = controls["s0"]._replace(prior=carry_s0.prior)
+            controls["s2"] = controls["s2"]._replace(
+                prior_runoff_mass=carry_s2.prior_runoff_mass,
+                prior_runoff_temperature_content=(
+                    carry_s2.prior_runoff_temperature_content),
+                prior_runoff_salinity_content=(
+                    carry_s2.prior_runoff_salinity_content),
+                prior_restoring_volume_flux=(
+                    carry_s2.prior_restoring_volume_flux),
+                prior_restoring_heat_flux=carry_s2.prior_restoring_heat_flux,
+                prior_restoring_coefficient=carry_s2.prior_restoring_coefficient,
+            )
+        controls["prior_surface"] = prior_surface
         ladder[f"kt{kt:02d}/entry"] = rung10._candidate_fields(state)
         result = bulk.nemo_orca2_k0_ocean_step(
             card, state, model=model, nemo_kt=kt, **controls)
@@ -501,6 +691,8 @@ def run_composed_card(card, initial_state, step_inputs, *, model=None):
             ladder[f"kt{kt:02d}/stage{stage}"] = \
                 rung10._stage_candidate_fields(values)
         surfaces.append(result.surface)
+        carry_s0, carry_s2 = result.next_s0, result.next_s2
+        prior_surface = result.surface
         state = trace.state_after
     require(sum(len(fields) for fields in ladder.values()) == 200,
             "composed card did not produce the registered 200 ladder rows")
@@ -521,7 +713,17 @@ def score_surface_boundaries(
 ) -> dict[str, object]:
     require(tuple(actual) == tuple(expected), "surface boundary inventory/order moved")
     rows: dict[str, dict[str, object]] = {}
-    for boundary in SURFACE_ORDER:
+    for boundary in expected:
+        parts = boundary.split("/")
+        require(len(parts) >= 2 and parts[0].startswith("kt"),
+                f"malformed surface boundary key: {boundary}")
+        label = parts[1]
+        require(
+            label == "S0_F"
+            or label in SURFACE_ORDER
+            or (label.endswith("_IIF") and label[:-4] in SURFACE_ORDER),
+            f"unregistered surface boundary: {boundary}",
+        )
         require(tuple(actual[boundary]) == tuple(expected[boundary]),
                 f"{boundary} field inventory moved")
         for name in actual[boundary]:

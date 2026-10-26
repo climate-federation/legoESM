@@ -24,7 +24,7 @@
  
           DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)
              zt_fzp  = fr_i(ji,jj)                        ! freezing point temperature
-@@ -196,8 +199,26 @@
+@@ -196,8 +199,29 @@
           END DO   ;   END DO
           !
        ENDIF
@@ -34,17 +34,20 @@
  
 +   SUBROUTINE r340_iif_frame(kt,kid,Kbb,Kmm)
 +      INTEGER,INTENT(in)::kt,kid,Kbb,Kmm
-+      INTEGER::iu
++      INTEGER::iu,i0,i1,j0,j1
 +      CHARACTER(LEN=128)::name
 +      CHARACTER(LEN=16)::magic
-+      magic='NEMO_R340_IIF_1'
++      magic='NEMO_R340_IIF_2'
 +      WRITE(name,'("oracle_r340_iif_k",I8.8,"_b",I1,"_r",I4.4,".bin")') kt,kid,mpprank
 +      OPEN(NEWUNIT=iu,FILE=TRIM(name),ACCESS='STREAM',FORM='UNFORMATTED',STATUS='NEW',ACTION='WRITE')
 +      WRITE(iu) magic
-+      WRITE(iu) 1,kt,kid,Kbb,Kmm,mpprank,jpi,jpj,64
-+      WRITE(iu) LBOUND(qsr),UBOUND(qsr),SIZE(qsr)
-+      WRITE(iu) sss_m,sst_m,ts(:,:,1,jp_tem,Kbb),ts(:,:,1,jp_tem,Kmm),fr_i,ff_f,tmask(:,:,1)
-+      WRITE(iu) emp,utau,vtau
++      i0=LBOUND(qsr,1); i1=UBOUND(qsr,1); j0=LBOUND(qsr,2); j1=UBOUND(qsr,2)
++      WRITE(iu) 2,kt,kid,Kbb,Kmm,mpprank,i1-i0+1,j1-j0+1,64
++      WRITE(iu) sss_m(i0:i1,j0:j1),sst_m(i0:i1,j0:j1), &
++         & ts(i0:i1,j0:j1,1,jp_tem,Kbb),ts(i0:i1,j0:j1,1,jp_tem,Kmm)
++      IF(kid > 0) WRITE(iu) fr_i(i0:i1,j0:j1)
++      WRITE(iu) ff_f(i0:i1,j0:j1),tmask(i0:i1,j0:j1,1), &
++         & emp(i0:i1,j0:j1),utau(i0:i1,j0:j1),vtau(i0:i1,j0:j1)
 +      WRITE(iu) sf_ice(1)%fnow,qsr,qns,sfx,taum,wndm,smask0
 +      CLOSE(iu)
 +   END SUBROUTINE r340_iif_frame

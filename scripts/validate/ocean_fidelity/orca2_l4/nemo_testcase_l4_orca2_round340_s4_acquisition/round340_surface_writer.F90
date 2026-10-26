@@ -1,30 +1,34 @@
 MODULE round340_surface_writer
-   USE par_oce, ONLY: wp, jpi, jpj
+   USE par_oce, ONLY: wp
    USE lib_mpp, ONLY: mpprank
    USE sbc_oce, ONLY: sst_m, sss_m, ssu_m, ssv_m, ssh_m, e3t_m, frq_m, &
       & utau, vtau, utauU, vtauV, taum, wndm, qsr, qns, emp, sfx, rnf, fr_i
    USE sbcrnf, ONLY: rnf_tsc
    USE sbcssr, ONLY: erp, qrp, coefice
-   USE sbcfwb, ONLY: a_fwb, a_fwb_b
    IMPLICIT NONE
    PRIVATE
    PUBLIC :: r340_surface_frame, r340_s1_turb_frame, r340_s1_flux_frame
 CONTAINS
    SUBROUTINE r340_surface_frame(kt, kid)
       INTEGER, INTENT(in) :: kt, kid
-      INTEGER :: iu
+      INTEGER :: iu, i0, i1, j0, j1
       CHARACTER(LEN=128) :: name
       CHARACTER(LEN=16) :: magic
-      magic = 'NEMO_R340_S4_2'
+      magic = 'NEMO_R340_S4_3'
       WRITE(name,'("oracle_r340_surface_k",I8.8,"_b",I2.2,"_r",I4.4,".bin")') kt,kid,mpprank
       OPEN(NEWUNIT=iu,FILE=TRIM(name),ACCESS='STREAM',FORM='UNFORMATTED',STATUS='NEW',ACTION='WRITE')
       WRITE(iu) magic
-      WRITE(iu) 2,kt,kid,mpprank,jpi,jpj,64
-      WRITE(iu) LBOUND(qsr,1),UBOUND(qsr,1),LBOUND(qsr,2),UBOUND(qsr,2)
-      WRITE(iu) sst_m,sss_m,ssu_m,ssv_m,ssh_m,e3t_m,frq_m
-      WRITE(iu) utau,vtau,utauU,vtauV,emp,rnf,fr_i
-      WRITE(iu) qsr,qns,sfx,taum,wndm,rnf_tsc,erp,qrp,coefice
-      WRITE(iu) a_fwb,a_fwb_b
+      i0=LBOUND(qsr,1); i1=UBOUND(qsr,1); j0=LBOUND(qsr,2); j1=UBOUND(qsr,2)
+      WRITE(iu) 3,kt,kid,mpprank,i1-i0+1,j1-j0+1,64
+      IF(kid >= 1) WRITE(iu) sst_m(i0:i1,j0:j1),sss_m(i0:i1,j0:j1), &
+         & ssu_m(i0:i1,j0:j1),ssv_m(i0:i1,j0:j1),ssh_m(i0:i1,j0:j1), &
+         & e3t_m(i0:i1,j0:j1),frq_m(i0:i1,j0:j1)
+      IF(kid >= 3) WRITE(iu) utau(i0:i1,j0:j1),vtau(i0:i1,j0:j1), &
+         & emp(i0:i1,j0:j1),qsr,qns,sfx,taum,wndm
+      IF(kid >= 5) WRITE(iu) fr_i(i0:i1,j0:j1)
+      IF(kid >= 7) WRITE(iu) rnf(i0:i1,j0:j1),rnf_tsc(:,:,1),rnf_tsc(:,:,2)
+      IF(kid >= 8) WRITE(iu) erp,qrp,coefice
+      IF(kid >= 11) WRITE(iu) utauU(i0:i1,j0:j1),vtauV(i0:i1,j0:j1)
       CLOSE(iu)
    END SUBROUTINE r340_surface_frame
 

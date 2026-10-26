@@ -2,6 +2,8 @@
 +++ sbcmod.F90
 @@ -12,0 +13 @@
 +   USE round340_surface_writer, ONLY: r340_surface_frame
+@@ -82,0 +84 @@
++   PUBLIC   r340_surface_probe
 @@ -427,0 +429 @@
 +      CALL r340_surface_frame(kt,0)
 @@ -428,0 +431 @@
@@ -26,3 +28,10 @@
 +      CALL r340_surface_frame(kt,10)
 @@ -570,0 +583 @@
 +      CALL r340_surface_frame(kt,11)
+@@ -671,0 +685,6 @@
++   SUBROUTINE r340_surface_probe(kt,kid)
++      INTEGER,INTENT(in)::kt,kid
++      CALL r340_surface_frame(kt,kid)
++   END SUBROUTINE r340_surface_probe
++
++

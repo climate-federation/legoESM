@@ -5,12 +5,13 @@ PROGRAM round340_surface_fixture_program
    USE sbc_oce
    USE sbcrnf, ONLY: rnf_tsc
    USE sbcssr, ONLY: erp, qrp, coefice
-   USE sbcfwb, ONLY: a_fwb, a_fwb_b
-   USE round340_surface_writer, ONLY: r340_surface_frame
+   USE sbcmod, ONLY: r340_surface_probe
+   USE round340_surface_writer, ONLY: r340_s1_turb_frame, r340_s1_flux_frame
    USE round340_state_writer, ONLY: r340_state_frame
    IMPLICIT NONE
    INTEGER :: rank
    REAL(wp), ALLOCATABLE :: pts(:,:,:,:), pu(:,:,:), pv(:,:,:), pssh(:,:)
+   REAL(wp) :: z(2,1)
    CHARACTER(LEN=8) :: argument
    CALL GET_COMMAND_ARGUMENT(1,argument)
    READ(argument,*) rank
@@ -30,10 +31,12 @@ PROGRAM round340_surface_fixture_program
    utau=-0._wp ; vtau=-0._wp ; utauU=-0._wp ; vtauV=-0._wp ; rnf=-0._wp ; fr_i=-0._wp
    qsr=-0._wp ; qns=-0._wp ; emp=-0._wp ; sfx=-0._wp
    taum=-0._wp ; wndm=-0._wp ; rnf_tsc=-0._wp ; erp=-0._wp ; qrp=-0._wp ; coefice=-0._wp
-   a_fwb=-0._wp ; a_fwb_b=-0._wp
    pts=-0._wp ; pu=-0._wp ; pv=-0._wp ; pssh=-0._wp
+   z=-0._wp
    qsr(2,2)=REAL(rank+1,wp)
-   CALL r340_surface_frame(1,rank)
+   CALL r340_surface_probe(1,rank)
+   CALL r340_s1_turb_frame(1,z,z,z,z,z,z,z,z,z,z,z,z,z,z,z,z,z,z,z)
+   CALL r340_s1_flux_frame(1,z,z,z,z,z,z)
    CALL r340_state_frame(1,rank,1,pts,pu,pv,pssh)
    IF(.NOT.ieee_is_negative(sst_m(1,1))) ERROR STOP 'lost negative zero'
    WRITE(*,'(A,1X,I0)') 'R340_SURFACE_FIXTURE_PASS',rank

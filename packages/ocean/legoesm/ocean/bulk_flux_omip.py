@@ -75,6 +75,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm import constants
 from legoesm.core import transcendentals as tx
@@ -853,6 +854,8 @@ class NemoStandaloneK0StepResult(NamedTuple):
 
     surface: NemoStandaloneSurfaceResult
     ocean: object
+    next_s0: NemoS0Inputs
+    next_s2: NemoS2Inputs
 
 
 def validate_nemo_standalone_k0(config: NemoStandaloneK0Config) -> None:
@@ -935,6 +938,7 @@ def nemo_orca2_k0_surface_card(
     u_wind, v_wind, T_air_K, q_air, slp_Pa,
     qsr_down, qlw_down, precip, snow, mask, albedo, precip_factor,
     evap_factor, nb_iter, *, k0_config, ice_if, s0, s2,
+    prior_surface=None, chl=None, geothermal_heat_flux_mwm2=None,
 ):
     """Run the production S0 -> S1 -> S3 -> S2 path for standalone K0.
 
@@ -952,11 +956,15 @@ def nemo_orca2_k0_surface_card(
         qsr_down, qlw_down, precip, snow, mask, albedo, precip_factor,
         evap_factor, nb_iter,
         nn_ice=k0_config.nn_ice, ice_if=ice_if, s0=s0, s2=s2,
+        prior_surface=prior_surface, chl=chl,
+        geothermal_heat_flux_mwm2=geothermal_heat_flux_mwm2,
     )
 
 
 def nemo_orca2_k0_ocean_step(
-    card, state, *, s0f, ice_if, s0, s2, model=None, sponge=None, nemo_kt=None,
+    card, state, *, s0f, ice_if, s0, s2, chl,
+    geothermal_heat_flux_mwm2, prior_surface=None, model=None, sponge=None,
+    nemo_kt=None,
 ):
     """Run S0-F -> S0-M -> S1 -> S3 -> S2, then the rung-10 ocean step.
 
@@ -971,16 +979,42 @@ def nemo_orca2_k0_ocean_step(
     # sbc(kstp,Nbb,Nbb) reads the live rung-10 state.  The caller owns only
     # the explicit controls/carry; it cannot shadow S0-M or S3 with stale
     # state arrays.
+    if (isinstance(nemo_kt, bool) or not isinstance(nemo_kt, (int, np.integer))
+            or nemo_kt < 1):
+        raise ValueError("standalone ORCA2 requires nemo_kt=<positive step>")
+    if int(s0.forcing_stride) != 2:
+        raise ValueError("standalone ORCA2 K0 requires nn_fsbc=2")
     temperature = jnp.asarray(state.T.data, dtype=jnp.float64)
     salinity = jnp.asarray(state.S.data, dtype=jnp.float64)
-    u_before = jnp.asarray(state.u.data, dtype=jnp.float64)[:, 1:, 0]
-    v_before = jnp.asarray(state.v.data, dtype=jnp.float64)[1:, :, 0]
+    u_level = state.u if state.u_before is None else state.u_before
+    v_level = state.v if state.v_before is None else state.v_before
+    u_before = jnp.asarray(u_level.data, dtype=jnp.float64)[:, 1:, 0]
+    v_before = jnp.asarray(v_level.data, dtype=jnp.float64)[1:, :, 0]
+    from legoesm.ocean.eos import nemo_r3t_stretch
+
+    stretch = nemo_r3t_stretch(
+        card.ocean.recipe.z_coord, state.eta.data, state.H_bathy.data,
+        evaluation="nemo_reciprocal",
+    )
+    e3t_reference = jnp.asarray(
+        card.ocean.recipe.z_coord.nemo_e3t_0[..., 0], dtype=jnp.float64)
+    from legoesm.ocean.physics.shortwave_penetration import (
+        top_layer_absorbed_fraction,
+    )
+    shortwave_fraction_top = top_layer_absorbed_fraction(
+        e3t_reference * stretch, chl_surface=chl,
+    )
     s0 = s0._replace(
+        kt=int(nemo_kt),
         u_before=u_before,
         v_before=v_before,
         temperature_now=temperature[..., 0],
         salinity_now=salinity[..., 0],
         ssh_now=jnp.asarray(state.eta.data, dtype=jnp.float64),
+        e3t_reference=e3t_reference,
+        r3t_now=stretch - jnp.asarray(1.0, dtype=jnp.float64),
+        surface_mask=jnp.asarray(state.land_mask.data, dtype=jnp.float64),
+        shortwave_fraction_top=shortwave_fraction_top,
     )
     ice_if = ice_if._replace(ts_surface=temperature[..., 0])
     fields, runoff_now, sss_target = nemo_orca2_k0_s0f(s0f)
@@ -990,7 +1024,16 @@ def nemo_orca2_k0_ocean_step(
         s2.surface_mask, card.albedo, card.precip_factor,
         card.evap_factor, card.nb_iter,
         k0_config=card.k0, ice_if=ice_if, s0=s0, s2=s2,
+        prior_surface=prior_surface, chl=chl,
+        geothermal_heat_flux_mwm2=geothermal_heat_flux_mwm2,
     )
+    # sbc_ice_if writes ts(:,:,1,jp_tem,Kmm) before the ocean step on forcing
+    # updates.  K0 calls sbc with Kbb=Kmm, so this is the live T slot.
+    if (int(nemo_kt) - 1) % int(s0.forcing_stride) == 0:
+        clamped = _crop_to_surface_interior(
+            surface.ice_if.ts_surface, temperature.shape[:2])
+        temperature = temperature.at[..., 0].set(clamped)
+        state = state._replace(T=state.T.replace(data=temperature))
     if model is None:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -1007,10 +1050,19 @@ def nemo_orca2_k0_ocean_step(
     }
     if sponge is not None:
         kwargs["sponge"] = sponge
-    if nemo_kt is not None:
-        kwargs["nemo_kt"] = nemo_kt
+    kwargs["nemo_kt"] = int(nemo_kt)
     stepped = model.step(state, card.ocean.dt_s, **kwargs)
-    return NemoStandaloneK0StepResult(surface=surface, ocean=stepped)
+    next_s0 = s0._replace(prior=surface.means)
+    next_s2 = s2._replace(
+        prior_runoff_mass=surface.s2.runoff.mass_flux,
+        prior_runoff_temperature_content=surface.s2.runoff.temperature_content,
+        prior_runoff_salinity_content=surface.s2.runoff.salinity_content,
+        prior_restoring_volume_flux=surface.s2.erp,
+        prior_restoring_heat_flux=surface.s2.qrp,
+        prior_restoring_coefficient=surface.s2.restoring_coefficient,
+    )
+    return NemoStandaloneK0StepResult(
+        surface=surface, ocean=stepped, next_s0=next_s0, next_s2=next_s2)
 
 
 def _crop_to_surface_interior(value, interior_shape):
@@ -1115,6 +1167,7 @@ def nemo_blk_oce_ncar(
     u_wind, v_wind, T_air_K, q_air, slp_Pa, sst_c, ssu, ssv,
     qsr_down, qlw_down, precip, snow, mask, albedo, precip_factor,
     evap_factor, nb_iter, *, nn_ice, ice_if, s0, s2,
+    prior_surface=None, chl=None, geothermal_heat_flux_mwm2=None,
 ):
     """Literal S0 -> NCAR S1 -> optional S3 -> optional S2 surface path.
 
@@ -1170,6 +1223,12 @@ def nemo_blk_oce_ncar(
         sst_c = _crop_to_surface_interior(means.sst, interior_shape)
         ssu = _crop_to_surface_interior(means.ssu, interior_shape)
         ssv = _crop_to_surface_interior(means.ssv, interior_shape)
+        update = (int(s0.kt) - 1) % int(s0.forcing_stride) == 0
+        if not update:
+            if prior_surface is None:
+                raise ValueError(
+                    "nn_fsbc=2 preservation step requires prior_surface carry")
+            return prior_surface._replace(means=means)
     wet = jnp.asarray(mask, dtype=jnp.float64)
     sst_c_arr = jnp.asarray(sst_c, dtype=jnp.float64)
     state = _nemo_ncar_turbulent(
@@ -1266,7 +1325,13 @@ def nemo_blk_oce_ncar(
         salinity_floor=s2.salinity_floor,
         heat_capacity=s2.heat_capacity,
     )
-    forcing, freshwater = nemo_s2_to_ocean_interfaces(tail)
+    # The dynamics ice mask consumes the same ``sf_ice(1)%fnow`` field used
+    # by K0's ice-if heat-flux update, never ``fr_i`` (which is a freezing
+    # temperature / binary freeze flag at different points in that routine).
+    ice_concentration = jnp.asarray(iif.ice_cover, dtype=jnp.float64)
+    forcing, freshwater = nemo_s2_to_ocean_interfaces(
+        tail, chl=chl, ice_concentration=ice_concentration,
+        geothermal_heat_flux_mwm2=geothermal_heat_flux_mwm2)
     return NemoStandaloneSurfaceResult(
         means, bulk, tail, forcing, freshwater, bulk_before_ice, iif)
 

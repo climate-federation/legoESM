@@ -377,7 +377,9 @@ def nemo_orca2_s2(
     )
 
 
-def nemo_s2_to_ocean_interfaces(result):
+def nemo_s2_to_ocean_interfaces(
+    result, *, chl, ice_concentration, geothermal_heat_flux_mwm2,
+):
     """Bind an S2 result to the existing ocean forcing/runoff interfaces.
 
     K0 ``nn_ice=1`` contributes no separate freshwater or salt-mass channel;
@@ -386,13 +388,22 @@ def nemo_s2_to_ocean_interfaces(result):
     """
     q_net = _sr(result.qns + result.qsr)
     zero = _sr(jnp.zeros_like(result.emp))
+    if chl is None:
+        raise ValueError("standalone ORCA2 requires deck chlorophyll")
+    if ice_concentration is None:
+        raise ValueError("standalone ORCA2 requires composed ice concentration")
+    if geothermal_heat_flux_mwm2 is None:
+        raise ValueError("standalone ORCA2 requires deck geothermal heat flux")
     forcing = OceanSurfaceForcing(
         sw_down=result.penetrative_qsr,
         q_net=q_net,
         tau_x=result.utau,
         tau_y=result.vtau,
         freshwater=_sr(-result.emp),
-        q_solar=result.penetrative_qsr,
+        # The ORCA2 rung-10 card selects the native NEMO qsr arm, whose
+        # input contract is ``sw_down`` plus deck chlorophyll.  ``q_solar``
+        # belongs exclusively to the unrelated flux-feedback scheme.
+        q_solar=None,
         taum=result.taum,
         tau_i_native=result.utau_u,
         tau_j_native=result.vtau_v,
@@ -401,7 +412,12 @@ def nemo_s2_to_ocean_interfaces(result):
             result.runoff.salinity_content,
         ),
         q_nonsolar=result.qns,
+        salt_flux=_sr(jnp.asarray(1.0e-3, dtype=jnp.float64) * result.sfx),
         salt_flux_sfx=result.sfx,
+        chl=_sr(jnp.asarray(chl, dtype=jnp.float64)),
+        ice_concentration=_sr(jnp.asarray(ice_concentration, dtype=jnp.float64)),
+        geothermal_heat_flux_mwm2=_sr(
+            jnp.asarray(geothermal_heat_flux_mwm2, dtype=jnp.float64)),
     )
     freshwater = FreshwaterForcing(
         precip=zero,

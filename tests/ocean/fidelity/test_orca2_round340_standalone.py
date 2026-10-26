@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 import struct
 from collections import OrderedDict, namedtuple
 from pathlib import Path
@@ -10,6 +11,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm.core.field import Field
+from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ocean import bulk_flux_omip as bulk
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round340_standalone_gate as gate,
@@ -19,6 +22,7 @@ from tests.ocean.fidelity.test_nemo_testcase_l4_orca2_round337_surface import (
 )
 
 jax.config.update("jax_enable_x64", True)
+set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
 
 
 def _k0():
@@ -27,9 +31,11 @@ def _k0():
 
 def _run_with_wind(u_wind):
     args, s0, ice_if, s2 = _production_surface_case()
+    one = jnp.ones_like(s2.surface_mask)
     return bulk.nemo_orca2_k0_surface_card(
         u_wind, *args[1:5], *args[8:],
         k0_config=_k0(), ice_if=ice_if, s0=s0, s2=s2,
+        chl=one, geothermal_heat_flux_mwm2=one,
     )
 
 
@@ -55,10 +61,22 @@ def test_k0_is_explicit_and_calls_production_composition(monkeypatch):
 
     monkeypatch.setattr(bulk, "nemo_blk_oce_ncar", planted)
     result = bulk.nemo_orca2_k0_surface_card(
-        *args[:5], *args[8:], k0_config=_k0(), ice_if=ice_if, s0=s0, s2=s2)
+        *args[:5], *args[8:], k0_config=_k0(), ice_if=ice_if, s0=s0, s2=s2,
+        chl=jnp.ones_like(s2.surface_mask),
+        geothermal_heat_flux_mwm2=jnp.ones_like(s2.surface_mask))
     assert called["count"] == 1
     assert result.bulk.fr_i is not None
     assert result.s2 is not None
+    np.testing.assert_array_equal(
+        np.asarray(result.surface_forcing.ice_concentration),
+        np.asarray(result.ice_if.ice_cover),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(result.surface_forcing.chl), np.ones(s2.surface_mask.shape))
+    np.testing.assert_array_equal(
+        np.asarray(result.surface_forcing.geothermal_heat_flux_mwm2),
+        np.ones(s2.surface_mask.shape),
+    )
 
 
 def test_composed_card_gradient_n1_reverse_equals_forward():
@@ -80,7 +98,7 @@ def test_composed_card_gradient_n1_reverse_equals_forward():
 
 def _boundaries(value=0.0):
     return OrderedDict(
-        (name, OrderedDict((field, np.asarray([value], dtype=np.float64))
+        (f"kt01/{name}", OrderedDict((field, np.asarray([value], dtype=np.float64))
                            for field in ("a", "b")))
         for name in gate.SURFACE_ORDER
     )
@@ -104,7 +122,7 @@ def test_surface_first_then_unchanged_rung10_bar_and_plants():
     result = gate.score_composed_card(actual, Path("unused"), rung_actual)
     assert result["status"] == "PASS_S4_EXACT"
 
-    for boundary in gate.SURFACE_ORDER:
+    for boundary in expected:
         planted = _boundaries()
         planted[boundary]["a"][0] = np.nextafter(0.0, np.inf)
         with pytest.raises(gate.GateError, match="surface exact bar failed"):
@@ -128,21 +146,20 @@ def test_no_nemo_exchange_record_api():
 
 
 def test_native_record_parser_checksum_adjacent_controls(tmp_path):
-    path = tmp_path / "oracle_r340_surface_k00000001_b00_r0000.bin"
+    path = tmp_path / "oracle_r340_surface_k00000001_b01_r0000.bin"
     header = (
-        b"NEMO_R340_S4_2  "
-        + struct.pack("=7i", 2, 1, 0, 0, 2, 2, 64)
-        + struct.pack("=4i", 1, 2, 1, 2)
+        b"NEMO_R340_S4_3  "
+        + struct.pack("=7i", 3, 1, 1, 0, 2, 2, 64)
     )
-    path.write_bytes(header + np.zeros(98, dtype="=f8").tobytes())
+    path.write_bytes(header + np.zeros(28, dtype="=f8").tobytes())
     assert gate.inspect_exact_record(path) == {
-        "kind": "surface", "kt": 1, "kid": 0, "rank": 0,
+        "kind": "surface", "kt": 1, "kid": 1, "rank": 0,
     }
 
     path.write_bytes(path.read_bytes()[:-1])
     with pytest.raises(gate.GateError, match="truncated binary64 payload"):
         gate.inspect_exact_record(path)
-    path.write_bytes(header + np.full(98, np.nan, dtype="=f8").tobytes())
+    path.write_bytes(header + np.full(28, np.nan, dtype="=f8").tobytes())
     with pytest.raises(gate.GateError, match="non-finite"):
         gate.inspect_exact_record(path)
 
@@ -160,6 +177,26 @@ def test_native_state_time_level_plant(tmp_path):
         gate.inspect_exact_record(path)
 
 
+def test_s0f_v3_payload_contains_owned_cells_only(tmp_path):
+    path = tmp_path / "oracle_r340_fld_k00000001_c001_f001_r0000.bin"
+    header = (
+        b"NEMO_R340_FLDRD1"
+        + struct.pack("=9i", 3, 1, 1, 1, 0, 0, 1, 2, 64)
+        + b"tair".ljust(34)
+        + struct.pack("=4i", 1, 2, 3, 4)
+        + struct.pack("=d", 0.0)
+        + struct.pack("=11i", 1, 1, 1, 4, 5, 1, 2, 3, 2, 4, 6)
+        + np.arange(6, dtype="=f8").tobytes()
+        + struct.pack("=14i", 1, 1, 1, 1, 1, 4, 5, 1, 2,
+                      2, 3, 2, 4, 12)
+        + np.arange(12, dtype="=f8").tobytes()
+    )
+    path.write_bytes(header)
+    fields = gate.read_exact_record(path)["fields"]
+    assert fields["fnow"].shape == (3, 2, 1)
+    assert fields["fdta"].shape == (3, 2, 1, 2)
+
+
 def test_composed_card_steps_a_three_dimensional_ocean_state():
     """Production binding plant: the result is a 3-D ocean step, not q_net."""
 
@@ -170,14 +207,18 @@ def test_composed_card_steps_a_three_dimensional_ocean_state():
     shape = (2, 3)
     one = jnp.ones(shape, dtype=jnp.float64)
     zero = jnp.zeros(shape, dtype=jnp.float64)
-    Field = namedtuple("Field", "data")
-    State = namedtuple("State", "T S u v eta")
+    State = namedtuple(
+        "State", "T S u v eta H_bathy land_mask u_before v_before")
+    tiny_e3t = jnp.ones(shape + (2,), dtype=jnp.float64)
+    recipe = card.ocean.recipe
+    card = card._replace(ocean=card.ocean._replace(recipe=recipe._replace(
+        z_coord=recipe.z_coord._replace(nemo_e3t_0=tiny_e3t))))
     state = State(
         Field(jnp.ones(shape + (2,), dtype=jnp.float64)),
         Field(34.0 * jnp.ones(shape + (2,), dtype=jnp.float64)),
         Field(jnp.zeros((2, 4, 2), dtype=jnp.float64)),
         Field(jnp.zeros((3, 3, 2), dtype=jnp.float64)),
-        Field(zero),
+        Field(zero), Field(one), Field(one), None, None,
     )
     _, old_s0, old_iif, s2 = _production_surface_case()
     means = bulk.NemoSurfaceMeans(*(zero for _ in range(7)))
@@ -209,6 +250,7 @@ def test_composed_card_steps_a_three_dimensional_ocean_state():
         forcing = s0f._replace(before=moved, after=moved)
         result = bulk.nemo_orca2_k0_ocean_step(
             card, state, s0f=forcing, ice_if=iif, s0=s0, s2=s2,
+            chl=one, geothermal_heat_flux_mwm2=one,
             model=ThreeDimensionalOcean(), nemo_kt=1,
         )
         assert result.ocean.T.data.ndim == 3
@@ -237,6 +279,7 @@ def test_composed_card_steps_a_three_dimensional_ocean_state():
     model = TenStepOcean()
     controls = {
         "s0f": s0f, "ice_if": iif, "s0": s0, "s2": s2,
+        "chl": one, "geothermal_heat_flux_mwm2": one,
     }
     replay = gate.run_composed_card(
         card, state, (controls.copy() for _ in range(10)), model=model)
@@ -244,3 +287,28 @@ def test_composed_card_steps_a_three_dimensional_ocean_state():
     assert len(replay["rung10"]) == 40
     assert sum(len(row) for row in replay["rung10"].values()) == 200
     assert replay["state_after"].T.data.ndim == 3
+
+
+@pytest.mark.skipif(
+    os.environ.get("ORCA2_R340_REAL_SMOKE") != "1",
+    reason="operator-only real rung-10 CPU smoke",
+)
+def test_real_rung10_composed_card_ten_steps_cpu():
+    """M4 plant: real card + real model + deck sources, never the 2x3 stub."""
+
+    deck = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    source = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round5/acquisition/orca1ice_surface_entry_every_step_a_np2")
+    k0 = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round339/k0_smoke/orca2_k0_10step_np2")
+    card = bulk.build_nemo_orca2_k0_ocean_card(deck)
+    controls = gate.build_real_composed_inputs(
+        card, deck, source / "input_files.sha256", k0 / "ice_cover_clim.nc")
+    replay = gate.run_composed_card(card, card.ocean.recipe.initial_state, controls)
+    assert len(replay["surface_steps"]) == 10
+    assert len(replay["rung10"]) == 40
+    for leaf in jax.tree_util.tree_leaves(replay["state_after"]):
+        if leaf is not None:
+            assert np.isfinite(np.asarray(leaf)).all()

@@ -77,6 +77,33 @@ production call, proves the ocean driver is invoked for a three-dimensional
 state, produces all ten ladder steps, and confirms finite N=1 forward and
 reverse gradients, with reverse equal to forward.
 
+Resume 2 closes Argon's four HOLD groups. The composed driver now carries
+S0/S2 state and the preceding surface result across all ten calls, enforces
+the K0 `nn_fsbc=2` cadence, updates the live SST slot after the ice-interface
+clamp, and derives S0 means from the live ocean time levels, thickness stretch,
+and step number. Chlorophyll, geothermal heat flux, and ice concentration are
+mandatory: the first two come from the same digest-pinned deck files as K0,
+and ice concentration is the same interpolated `sf_ice(1)%fnow` cover consumed
+by the ice-interface heat-flux arm. A post-fix operator smoke ran the real
+rung-10 `LatLonCGridOceanModel` through all ten `run_composed_card` steps on
+CPU/fp64 in 785.47 seconds and found every final state leaf finite.
+
+Surface and ice-interface records now use boundary-specific inventories: the
+pre-initialization frame is header-only, later frames add only fields already
+defined at that source boundary, and every full-grid value is sliced to the
+owned `qsr` bounds before writing. The S0-F v3 writer likewise emits only the
+owned `fnow` and associated `fdta` slabs, while its decoder retains v1/v2
+compatibility. Scoring uses the exact time-qualified keys
+emitted by the loader, including S0-F and ice-interface labels.
+
+The bounds executable now links and calls a probe compiled into patched
+`sbcmod` and executes both S1 sub-frame writers. The generated run driver
+captures patched sources, parent manifest, and a producer manifest before
+launch. Its refusal trap remains armed through admission and restart/twin
+comparison. Preflight routes retained evidence through the actual
+`--admit-existing` entry point and proves that either log containing
+`E R R O R` is quarantined.
+
 ## Checklist and choices
 
 The acquisition checklist is encoded in the preflight or run admission. Array writes use
@@ -95,21 +122,29 @@ actual NEMO arms and run admission remain unmeasured until the operator invokes
   ten-step state ladder, explicit K0 model card, exact surface-first scoring,
   finite N=1 gradients, and no author-run NEMO.
 - UNASKED: none.
-- independent review: Claude RUN; Argon HOLD items repaired in this revision
+- independent review: Argon HOLD; items 1--4 repaired and re-preflighted in
+  Resume 2; item 5 is parent-identical and intentionally out of scope
 
 ## Verification
 
-- Round-340 focused tests: 7/7 pass; round-337 production-surface regression:
-  7/7 pass (14/14 combined).
+- Round-340 focused tests: 8/8 pass; round-337 production-surface regression:
+  7/7 pass (15/15 combined).
+- Real rung-10 CPU smoke after the final ice-cover source correction: 1/1 pass
+  in 785.47 seconds; ten actual model steps, 40 ladder checkpoints, finite
+  final tree.
 - Acquisition preflight: READY; same-program, placement, FP-census, bounds,
-  namelist, checksum, generated-flow, retained-admission, and generated-syntax
-  controls pass or fire as intended.
+  namelist, checksum, generated-flow, `ocean.output` error quarantine,
+  actual-route retained admission, and generated-syntax controls pass or fire
+  as intended.
 - Per-receipt citation gate: PASS, 14 citations, zero failures, zero unmapped
   citations, zero map-audit failures, and all nine self-tests fired.
 - Required receipt-citation pytest: 17/17 PASS on the clean committed tree.
-- Default ORCA2 landing inventory: 152/152 PASS in 1,146.09 seconds.
-- Source-audit ratchet: 6,265 PASS, 2 SKIP, 1 inherited FAIL.
-  The sole failure is the unchanged shortwave-penetration parameter spec; it
-  names no file changed by round 340.
+- Resume-2 pre-final default ORCA2 landing inventory: all 150 non-stamp tests
+  pass; the two receipt-stamp tests correctly refuse the dirty pre-commit tree.
+  The clean-tree inventory is rerun after this commit.
+- Param-spec ratchet: 73 PASS, 1 inherited FAIL. The sole failure is
+  `shortwave_penetration.py`'s unchanged non-float parameter-spec fields; it
+  fails identically on parent `d5d97cfc31` and is deliberately not fixed in
+  this round.
 
 NEMO acquisition is deliberately absent.
