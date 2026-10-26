@@ -179,5 +179,8 @@ The complete CPU/x64 O10 suite passed `40 passed in 429.89s`. O9 and O10
 object-audit regressions plus every non-stamping citation/default check passed
 `58 passed, 2 deselected in 18.44s`; the regenerated object audit reports
 `O10_MINMAX_AUDIT MATCH`. The full-namespace private-import ratchet passed
-`6 passed in 5.07s`. Clean-worktree citation stamping and its shifted-endpoint
-plant are run after this receipt is committed.
+`6 passed in 5.07s`. On clean commit `a7d5dded14`, the complete citation/default
+suite passed `35 passed in 6.91s`; the explicit O10 gate passed with 45
+citations, no unmapped citations, no failures, and no full-map audit failures.
+Shifting the VC19 citation by two lines produced `SYMBOL-NOT-AT-LINE`, gate
+status `FAIL`, and exit status 1.
