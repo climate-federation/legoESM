@@ -27,6 +27,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.smooth import smoothstep_cubic
 
 # AD-safety floor for the thickness inside the sqrt thickness-ramps.  sqrt'(0) is
 # infinite, so differentiating sqrt(h_ice) at the open-water limit h_ice == 0
@@ -143,16 +144,25 @@ def maykut_untersteiner_albedo(
         Thickness above which the thickness factor saturates [m].
     T_melt, T_width : float
         Upper edge and width of the smooth melt transition [K]; the
-        ramp spans ``[T_melt − T_width, T_melt]``.
+        ramp spans ``[T_melt − T_width, T_melt]`` and follows the cubic
+        smoothstep ``r^2 (3 − 2r)``, ``r = 1 + (T_sfc − T_melt)/T_width``
+        clipped to [0, 1] (C1, no kink at either end).
     albedo_ocean : float
         Open-water albedo used as the thin-ice floor.
+
+    KNOWN DIFFERENCE (RULE 5): the previous form was a LINEAR ramp in r,
+    kinked at both ends.  The smoothstep agrees at r = 0, 1/2, 1; elsewhere
+    the regime albedo differs by (α_cold − α_melt)·|s(r) − r|, at most
+    (α_cold − α_melt)/(6√3) at r = 1/2 ± 1/(2√3): measured 0.0192 at the
+    library defaults (0.70/0.50) and 0.0289 at the production cold end 0.80.
+    No field recovers the linear form; end points and width are unchanged.
     """
     # Sign/formula walk: the skin temperature is clamped at T_melt elsewhere, so
-    # the melt ramp must reach 1.0 *at* T_melt (not 0.5).  Ramp linearly over
+    # the melt ramp must reach 1.0 *at* T_melt (not 0.5).  Smoothstep over
     # [T_melt − T_width, T_melt]: melt_fraction = 0 at the cold edge, = 1 at
     # T_melt, monotonically increasing with T_sfc (warmer -> more melting ->
     # lower albedo).
-    melt_fraction = jnp.clip(1.0 + (T_sfc - T_melt) / T_width, 0.0, 1.0)
+    melt_fraction = smoothstep_cubic(1.0 + (T_sfc - T_melt) / T_width)
     alpha_regime = (
         (1.0 - melt_fraction) * albedo_cold_bare
         + melt_fraction * albedo_melt_bare

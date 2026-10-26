@@ -43,6 +43,15 @@ def sigmoid_switch(x: jax.Array, sharpness: float = 100.0) -> jax.Array:
     return jax.nn.sigmoid(sharpness * x)
 
 
+def smoothstep_cubic(t: jax.Array) -> jax.Array:
+    """C1 step: 0 for t <= 0, 1 for t >= 1, t^2 (3 - 2t) between.
+
+    Zero first derivative at both ends, so a ramp built on it has no kink.
+    """
+    t = jnp.clip(t, 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
 def smoothstep_quintic(t: jax.Array) -> jax.Array:
     """C2 step: 0 for t <= 0, 1 for t >= 1, 6t^5 - 15t^4 + 10t^3 between.
 

@@ -6,7 +6,7 @@ import pytest
 
 from legoesm.core.smooth import (
     sigmoid_switch, smooth_max, smooth_min, smooth_clamp,
-    smooth_relu, smooth_abs, smoothstep_quintic,
+    smooth_relu, smooth_abs, smoothstep_cubic, smoothstep_quintic,
 )
 
 
@@ -59,6 +59,15 @@ class TestSmoothApproximations:
         result = smooth_abs(x)
         expected = jnp.abs(x)
         assert jnp.allclose(result, expected, atol=1e-3)
+
+    def test_smoothstep_cubic(self):
+        """Exactly 0 / 1 outside [0, 1], C1 at both ends, 1/2 at the middle."""
+        t = jnp.array([-1.0, 0.0, 0.5, 1.0, 2.0])
+        assert jnp.array_equal(smoothstep_cubic(t), jnp.array([0.0, 0.0, 0.5, 1.0, 1.0]))
+        d1 = jax.grad(smoothstep_cubic)
+        for x in (0.0, 1.0):
+            assert abs(float(d1(jnp.array(x)))) < 1e-12
+        assert float(d1(jnp.array(0.5))) == pytest.approx(1.5)
 
     def test_smoothstep_quintic(self):
         """Exactly 0 / 1 outside [0, 1], C2 at both ends, 1/2 at the middle."""
