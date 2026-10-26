@@ -65,7 +65,7 @@ already recorded completed stage and fold exchange.
 
 The earliest possible owner in that order is therefore the `tra_adv` call at
 line 637. Its legoESM counterpart is the production stage-3 `_flux_pair`
-call at `ocean_model_latlon_cgrid.py:2927-2928`. This assignment is
+call at `ocean_model_latlon_cgrid.py:2946-2947`. This assignment is
 **PLAUSIBLE, not CONFIRMED**: the existing kt-2 records jump from the preceding
 completed stage to the completed stage-3 frame, so they cannot distinguish
 advection from any later tracer statement. No single statement is eligible
@@ -232,7 +232,7 @@ The first owning NEMO statement in executed source order is the record-build
 the admitted before boundary is exact everywhere wet and the admitted after
 boundary contains every first mismatch.  The corresponding shared legoESM
 route places `_ldf_t/_ldf_s` in the third L8 group at
-`ocean_model_latlon_cgrid.py:11013-11019` and writes that group into the live
+`ocean_model_latlon_cgrid.py:11048-11054` and writes that group into the live
 accumulators at `:208-210`.  This call-boundary ownership is **CONFIRMED** for
 both labels and both tracers; advection, SBC and QSR are exonerated.
 
@@ -571,10 +571,10 @@ and
 The producing record build materializes the half-stage `r3t` in
 `ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/stprk3_stg.f90:210-229`.
 legoESM already materializes the corresponding `_h_s3_kmm` at
-`ocean_model_latlon_cgrid.py:8764-8778`, but the shared operator chooses its
+`ocean_model_latlon_cgrid.py:8783-8797`, but the shared operator chooses its
 divisor at `gm_redi_latlon_cgrid.py:3264-3269` and the production call supplies
 only rebuilt half-stage sea level, not the stored thickness, at
-`ocean_model_latlon_cgrid.py:10611-10624`.
+`ocean_model_latlon_cgrid.py:10630-10643`.
 
 The two replay artifacts return `PASS_R333_TRALDF_REPLAY` and name
 `e3t_divisor` as first value owner. Their SHA-256 values are
@@ -645,3 +645,102 @@ seconds, including the inherited parallel-receipt gate. The private-import
 ratchet also passes separately at 6 of 6 tests in 5.36 seconds. The DINO month
 gate is not applicable to the final held tree because no package/model source
 change remains; no month-gate claim is made for the withdrawn proposal.
+
+## Resume 8: post-LDF owner and reverse-safe stored divisor landing
+
+Resume 8 performed the two requested measurements in order, offline and
+without rerunning NEMO. No configuration value changed.
+
+### Measurement A: the 18 registered T words
+
+Both the `given_nemo_entry` and `independent` replays pass. At all 18 registered
+T words, the recorded divisor, actual live scaled LDF tendency, independently
+recomputed scaled tendency, and LDF RHS addition are bit-exact. The outer
+statement walk then remains exact at those same 18 words through the
+pre-LDF accumulator, LDF term addition, live accumulator after LDF, the
+live-versus-reconstructed check, and the accumulator after BBC, BBL, and
+damping. All 18 first become value-unequal on return from the implicit vertical
+tracer solve, with maximum `7.678080393702658e-12` and RMS
+`1.8904194483901373e-12`; the subsequent recorded boundary is unchanged.
+
+The earlier global `after_ldf` classifier is explained by 14 other wet T cells
+whose live LDF RHS addition differs; none is one of the 18 registered target
+words. Thus the call-boundary premise was too coarse for these targets.
+NEMO's observed sequence is the LDF call at
+`ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/stprk3_stg.f90:745-771`:
+the target words are exact before and after `tra_ldf`, remain exact after the
+optional BBC/BBL/damping calls, and first differ after `tra_zdf`. legoESM's
+source-ordered accumulator is materialized at
+`ocean_model_latlon_cgrid.py:192-212`, the active rung-10 path calls the
+implicit vertical mixer at `ocean_model_latlon_cgrid.py:11706-11738`, and the
+literal tracer solve dispatch is at
+`ocean_model_latlon_cgrid.py:14824-14849`.
+
+The owning statement is therefore **CONFIRMED** as NEMO's `CALL tra_zdf` and
+legoESM's `_apply_implicit_vertical_mixing` / literal tracer-pair solve, not the
+LDF accumulation, masking, or an intervening fold/halo step. The admitted
+record does not expose a finer recurrence boundary inside that solve, so the
+specific internal solve primitive that creates the ULP-scale difference is
+only **PLAUSIBLE**, not claimed as confirmed. The four Measurement-A artifacts
+have SHA-256 values `4e45a2f885429478fcd2eef4d11db9ffa4974e996e3587acc200f3e93dec8bd6`,
+`c3ab7c94c6252800aa3cb3c2fb135b95ce946e3fcf089186562920cb04747698`,
+`b6a69173a8cfff827ae883b33b5a655c162cfa57aee97092b72bf43302eedbfa`,
+and `02fb8383ade7f1c12b0ae0d8bb65fec3524eb0f2772e4101e0b4a7542767579b`.
+
+### Measurement B: first NaN and reverse-safe formulation
+
+The smallest full-shape reproducer contains 799,200 tracer cells: 430,552
+active and 368,648 inactive. The stored partial-cell divisor is nonzero at
+every active cell and exactly zero at all 368,648 inactive cells, comprising
+62,438 coastal/sub-bottom cells and 306,210 cells in fully dry columns. The
+rebuilt divisor is nonzero on those inactive cells. The first reverse-producing
+primitive is the transpose of division on the stored zero divisor: checkify
+reports division by zero, `jax.debug_nans` reports NaN in `div`, and a
+zero-cotangent primitive VJP produces NaN bars for numerator and divisor. The
+following `tend * act` mask then also forms a NaN mask cotangent. This is the
+rectangular legoESM evaluation at
+`gm_redi_latlon_cgrid.py:3288-3304`; NEMO instead executes only wet tracer
+cells in its divisions at
+`ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/traldf_iso.f90:301-305`
+and
+`ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/traldf_iso.f90:318-322`.
+This explains why the stored path poisons reverse mode while the rebuilt path
+does not. The localization artifact passes with SHA-256
+`d99d0d1f912ddbf4a244d7532e93f2a21bcfcff597ebccea8ffd1528d2314b6e`.
+
+The landed form uses the stored divisor at active cells and an inert unit
+divisor at inactive cells. Its helper is
+`ocean_model_latlon_cgrid.py:215-231`; the production call, including the
+diagnostic-override precedence, is
+`ocean_model_latlon_cgrid.py:10643-10659`. This leaves every NEMO-executed wet
+word forward-exact while removing all dry zero divisions. The production
+call-site test fails when this choice is reverted.
+
+Decision 122 passes all seven control/candidate pairs and both labels: no exact
+row is lost and every registered row direction remains equal. Its decision
+artifact SHA-256 is
+`6fcd29325220ed33cc1b1d8883d3b5a3ee540b866a8f99f0f2036f8839679dc7`.
+The faithful three-step DINO probe reproduces all 66 accepted leaf-step hashes;
+its artifact SHA-256 remains
+`5f977ac145525b73d311bdaacd5c7620b4199567f62afac15d3d1c8d19b503fa`.
+
+The rung-10 N=1 gradient gate completes with production/traced forward parity
+and no non-bit leaves. Both T and SSH reverse cotangents are finite, with zero
+non-finite cells and zero nonzero dry cells. For the T objective, the
+directional reverse derivative is `-0.04157351924843481` versus forward
+`-0.04157351924843511` (relative difference
+`7.176982927160828e-15`); reverse `dL/dln(rn_Ud)` is
+`-4.511810759103504e-05` versus forward
+`-4.511810759103502e-05` (relative difference
+`3.0037889175036433e-16`). The SSH directional relative difference is
+`2.2687815985495016e-15` and its `rn_Ud` derivatives are exactly zero. The
+gradient artifact SHA-256 is
+`d5f593c4aa4c49eb53ffca14444f29146a2b1e585f2432875cdb93aa25f3426d`.
+
+Disposition: **LANDED**. The reverse-safe stored divisor meets the forward
+fidelity, DINO, and gradient conditions, with a revert-sensitive production
+test and no configuration change. Codex review: operator.
+
+### Resume-8 final gates
+
+Final gate results are recorded after the landing commit below.

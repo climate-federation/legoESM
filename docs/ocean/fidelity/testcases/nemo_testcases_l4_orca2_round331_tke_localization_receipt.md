@@ -290,7 +290,7 @@ when it forms `zebot`
 first step `Kbb=Kmm=1` and the stored pair is zero.  legoESM instead formed the
 boundary from the already updated solver state.  The single landed production
 statement now passes the existing entry `u_now/v_now` pair into the bottom
-boundary call (`ocean_model_latlon_cgrid.py:13883-13885`).  Its fallback is
+boundary call (`ocean_model_latlon_cgrid.py:13918-13920`).  Its fallback is
 unchanged for direct callers, and an incomplete pair refuses.  No selector,
 constant, deck, recipe or configuration value changed.
 
@@ -380,8 +380,8 @@ calls `zdf_phy` with `Kbb=Kmm=Nbb`
 leapfrog build instead passes `(Nbb,Nnn)`
 (`DINO/BLD/ppsrc/nemo/stpmlf.f90:187-193`), so its bottom boundary reads the
 BEFORE-level velocity, while legoESM's two leapfrog production calls still
-pass the now level (`ocean_model_latlon_cgrid.py:16856` and
-`ocean_model_latlon_cgrid.py:17232`).  Round 331 therefore certifies the
+pass the now level (`ocean_model_latlon_cgrid.py:16891` and
+`ocean_model_latlon_cgrid.py:17267`).  Round 331 therefore certifies the
 stored entry velocity only for RK3; leapfrog time-level parity remains open.
 
 The debt has no discriminating effect on today's DINO check.  With
