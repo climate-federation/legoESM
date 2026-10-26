@@ -242,15 +242,15 @@ _SURFACE_CARRYING_TURBULENCE = frozenset({
 # Cd/Ch; "most" reads z0, the Businger-Dyer pair and z0h/z0; coare3 (the
 # AeroBulk TURB_COARE3P0 port) reads none of them (its first guess has no z0
 # seed and its stability functions and roughness are its own);
-# large_yeager keeps the Businger-Dyer pair but not z0h/z0; large_yeager_cesm
-# reads none.
+# large_yeager (the AeroBulk TURB_NCAR port) keeps the Businger-Dyer pair but
+# not z0 (its first guess is the neutral 10 m drag of the wind, no roughness
+# seed) nor z0h/z0; large_yeager_cesm reads none.
 _SURFACE_KNOBS_BY_BULK = {
     "constant": ("surface_Cd_neutral", "surface_Ch_neutral"),
     "most": ("surface_z0", "surface_most_unstable_gamma",
              "surface_most_stable_beta", "surface_z0h_z0_ratio"),
     "coare3": (),
-    "large_yeager": ("surface_z0", "surface_most_unstable_gamma",
-                     "surface_most_stable_beta"),
+    "large_yeager": ("surface_most_unstable_gamma", "surface_most_stable_beta"),
     "large_yeager_cesm": (),
     # No surface exchange: every exchange knob is inert, so none is trainable.
     "none": (),

@@ -10,13 +10,15 @@ the paper (NOT read back from the module — non-circular):
     α_ij = ∂u_j/∂x_i = a_ji                      (a_cd = ∂u_c/∂x_d, the 9 inputs)
     β_ij = Σ_m Δ_m² α_mi α_mj = Σ_m Δ_m² a_im a_jm      (Δ_m = Δx, Δy, Δz)
     Bβ   = β11β22 − β12² + β11β33 − β13² + β22β33 − β23²
-    ν_t  = c · √( max(Bβ, 0) / (a_ij a_ij) ) + ν_floor
+    ν_t  = (0 if Bβ < 1e-12 else c · √( Bβ / (a_ij a_ij) )) + ν_floor
 
 The scheme has NO hardcoded empirical coefficient (``c_vreman``, the filter widths
 ``dx/dy/dz`` and ``nu_floor`` are all caller inputs), so the pins canary the
 STRUCTURE: the specific Bβ principal-minor combination (a wrong sign or a dropped
 term diverges), the per-direction Δ_m² weighting (swapping Δy↔Δz diverges on an
-anisotropic grid), and the ``_EPS`` rest-floor.  Complements
+anisotropic grid), and the author's ``Bβ < 1e-12`` zero-guard (reference
+Fortran ``if (bbeta.lt.1d-12) eddyv=0``; the RUNNING-oracle match is
+``tests/atmosphere/test_vreman_oracle.py``).  Complements
 ``test_vreman_sgs_plane.py`` (behavioral: 1-D shear ⇒ ν_floor, ν_t ≥ ν_floor,
 finite gradient at rest) with the full-tensor round-off pin + structure canaries.
 
@@ -36,17 +38,9 @@ DEPARTURES from the raw closed form (all deliberate, all tested):
      valid SUBGRADIENT, not the classical (non-existent) derivative.  Pinned:
      value everywhere + the finite 0-subgradient at the kink (both the on-kink
      subgradient and an off-kink smooth FD match in the differentiability tests).
-  2. ``max(Bβ, 0)``: Bβ is a sum of 2×2 principal minors of the PSD tensor β, so
-     Bβ ≥ 0 for any real gradient tensor; the clamp is a numerical safety guard
-     (inert for physical inputs, keeps ν_t ≥ ν_floor for c ≥ 0).
-  3. ``_EPS = 1e-30`` in the denominator (aa + _EPS): keeps arg = 0/_EPS = 0
-     (⇒ ν_floor) at the aa=0 rest state instead of 0/0 = NaN.  Inert wherever
-     aa ≫ 1e-30; at a PATHOLOGICALLY tiny gradient (aa ≲ 1e-30, |a| ≲ 1e-15 1/s)
-     the +_EPS measurably shrinks arg, a departure from raw Eq. 5.  The oracle
-     DUPLICATES ``aa + 1e-30`` so it pins the module's regularised form exactly
-     — INCLUDING the aa=0 rest state (``test_rest_state_gives_floor``), where
-     _EPS is load-bearing.  The round-off MATCHING tensors all have aa ~ O(1) ≫
-     _EPS, so those pins probe raw Eq. 5, not the regulariser.
+  2. The author's ``Bβ < 1e-12`` zero-guard (NOT a departure: it is the
+     reference Fortran's own line) also covers the aa=0 rest state, where Bβ=0,
+     so no ``aa + eps`` regulariser is needed.
 """
 
 from __future__ import annotations
@@ -88,8 +82,7 @@ def _vreman_oracle(A, dx, dy, dz, c, nu_floor=0.0, *, bbeta_terms=None):
         ]
     bbeta = sum(s * b[i, j] * b[k, ll] for (s, i, j, k, ll) in bbeta_terms)
     aa = float(np.sum(A * A))
-    arg = max(bbeta, 0.0) / (aa + 1e-30)
-    return c * (math.sqrt(arg) if arg > 0.0 else 0.0) + nu_floor
+    return c * (0.0 if bbeta < 1e-12 else math.sqrt(bbeta / aa)) + nu_floor
 
 
 # Deterministic gradient tensors spanning fully-3-D turbulence.
@@ -100,8 +93,8 @@ _GRIDS = [(50.0, 50.0, 50.0), (100.0, 100.0, 20.0), (25.0, 75.0, 40.0)]
 
 # ===================== module constant canary =====================
 
-def test_module_eps_floor():
-    assert vreman._EPS == 1e-30
+def test_module_zero_guard():
+    assert vreman._BBETA_ZERO_GUARD == 1e-12
 
 
 # ===================== full-tensor round-off pin =====================
@@ -189,7 +182,7 @@ def test_zero_c_gives_floor_even_for_3d_strain():
 
 
 def test_rest_state_gives_floor():
-    # DEPARTURE #3: a_ij a_ij = 0 ⇒ arg = 0/_EPS = 0 ⇒ ν_t = ν_floor (no 0/0 NaN).
+    # a_ij a_ij = 0 ⇒ Bβ = 0 < 1e-12 ⇒ ν_t = ν_floor (no 0/0 NaN).
     assert _call(np.zeros((3, 3)), 50.0, 50.0, 50.0, 0.07, 0.1) == pytest.approx(0.1, abs=1e-15)
 
 
@@ -228,10 +221,9 @@ def test_gradient_finite_at_rest_and_matches_fd():
 
 
 def test_kink_subgradient_is_zero_not_one_sided_derivative():
-    # DEPARTURE #1 honesty: at the Bβ=0 kink the double-where returns a finite
-    # SUBGRADIENT (0), NOT the classical derivative (which does not exist). With
-    # A=diag(1,t,0) (Δ=1), ν_t(t) = c·|t|/√(1+t²): the one-sided slopes are ∓c at
-    # t=0 but AD returns 0 — a valid subgradient (0 ∈ [-c,c]), AD-safe, no NaN.
+    # With A=diag(1,t,0) (Δ=1), the raw closed form is ν_t(t) = c·|t|/√(1+t²)
+    # (one-sided slopes ∓c at t=0); the author's zero-guard makes ν_t ≡ 0 for
+    # |t| < 1e-6, so AD returns 0 there — finite, no NaN.
     c = 0.07
 
     def nu_of_t(t):
@@ -239,12 +231,14 @@ def test_kink_subgradient_is_zero_not_one_sided_derivative():
                            1.0, 1.0, 1.0, c)
 
     g0 = float(jax.grad(nu_of_t)(jnp.asarray(0.0)))
-    assert math.isfinite(g0) and g0 == 0.0            # subgradient, not ±c
-    # the TRUE one-sided slopes are ±c, which AD deliberately does NOT return:
-    h = 1e-6
+    assert math.isfinite(g0) and g0 == 0.0            # guarded side, not ±c
+    # With the author's zero-guard ν_t ≡ 0 for |t| < 1e-6 (Bβ = t² < 1e-12), so
+    # AD's 0 is the true local derivative; OUTSIDE that interval the secant
+    # slopes are ±c (h = 1e-3 keeps Bβ = h² well above the guard):
+    h = 1e-3
     n0 = float(nu_of_t(jnp.asarray(0.0)))
     right = (float(nu_of_t(jnp.asarray(h))) - n0) / h
     left = (n0 - float(nu_of_t(jnp.asarray(-h)))) / h
     assert right == pytest.approx(c, abs=1e-4)         # +c
     assert left == pytest.approx(-c, abs=1e-4)         # -c
-    assert abs(g0 - right) > 0.06 and abs(g0 - left) > 0.06   # AD ≠ one-sided
+    assert abs(g0 - right) > 0.06 and abs(g0 - left) > 0.06   # AD ≠ secant

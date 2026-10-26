@@ -180,8 +180,11 @@ def test_unstable_businger_dyer_shared_all_schemes():
     ref_m = _bd_psi_m(_ZU)
     ref_h = _bd_psi_h(_ZU)
     for sc in _SCHEMES:
+        # gryanik2020 heat: SurfaceFluxes.jl v1.5.1 scales the Businger
+        # fallback by Pr0 = 0.98 (phi_h(0) = Pr0, as on its stable branch).
+        pr0 = _GRY_PR0 if sc == "gryanik2020" else 1.0
         np.testing.assert_allclose(np.asarray(psi_m(_a(_ZU), sc)), ref_m, rtol=1e-12)
-        np.testing.assert_allclose(np.asarray(psi_h(_a(_ZU), sc)), ref_h, rtol=1e-12)
+        np.testing.assert_allclose(np.asarray(psi_h(_a(_ZU), sc)), pr0 * ref_h, rtol=1e-12)
 
 
 # ---------------------------------------------------------------------------

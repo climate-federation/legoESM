@@ -121,9 +121,14 @@ def test_dyer1974_is_byte_identical_default():
     np.testing.assert_array_equal(
         np.asarray(psi_h(zetas)), np.asarray(psi_h(zetas, "dyer1974"))
     )
-    # Default == the ORIGINAL implementation, bit-for-bit, on BOTH branches.
-    np.testing.assert_array_equal(np.asarray(psi_m(zetas)), np.asarray(_old_psi_m(zetas)))
-    np.testing.assert_array_equal(np.asarray(psi_h(zetas)), np.asarray(_old_psi_h(zetas)))
+    # Default == the ORIGINAL implementation, bit-for-bit, on BOTH branches,
+    # except at zeta = 0: the original returned -5e-10 (stable branch on a
+    # 1e-10 floor); SurfaceFluxes.jl and this port return exactly 0.
+    nz = np.asarray(zetas) != 0.0
+    np.testing.assert_array_equal(np.asarray(psi_m(zetas))[nz], np.asarray(_old_psi_m(zetas))[nz])
+    np.testing.assert_array_equal(np.asarray(psi_h(zetas))[nz], np.asarray(_old_psi_h(zetas))[nz])
+    np.testing.assert_array_equal(np.asarray(psi_m(zetas))[~nz], 0.0)
+    np.testing.assert_array_equal(np.asarray(psi_h(zetas))[~nz], 0.0)
 
 
 def test_dyer1974_stable_branch_is_minus_5_zeta():
@@ -568,7 +573,8 @@ def test_return_2m_uses_trained_coefficients():
         jnp.asarray(290.0), jnp.asarray(0.008),
         jnp.asarray(283.0), jnp.asarray(0.010), jnp.asarray(1.2),  # stable
     )
-    kw = dict(z_ref=10.0, z_t=2.0, z_q=2.0, z0_init=1e-4,
+    # z_diag (2 m) != z_t: at z_diag == z_t the diagnostic returns T_atm.
+    kw = dict(z_ref=10.0, z_t=10.0, z_q=10.0, z0_init=1e-4,
               scheme="large_yeager", n_iter=8, return_2m=True)
     base = compute_most_fluxes(*args, **kw)
     strong = compute_most_fluxes(*args, **kw, stable_beta=9.0)
@@ -583,19 +589,14 @@ def test_return_2m_diagnostic_psih_is_beta_sensitive():
     """ISOLATED R2 proof: the 2 m diagnostic evaluates psi_h at the diagnostic
     height with the SAME stable_beta as the solve.
 
-    The diagnostic is ``T_2m = T_sfc - (theta*/kappa)*(ln(z_diag/z0_t) -
-    psi_h(z_diag/L))`` (bulk_flux.py return_2m block).  We isolate the psi_h
-    dependence from the converged scales by driving the converged solve to be
-    (near-)beta-INDEPENDENT — a near-neutral column with n_iter high — so the
-    total T_2m response is dominated by the diagnostic psi_h term.  Here the
-    surface (289 K) is COLDER than the air (290 K) [stable], so theta* < 0 and
-    ``T_2m = T_sfc - (theta*/kappa)*(ln(z_diag/z0_t) - psi_h(z_diag/L))`` with
-    ``psi_h(zeta, dyer1974, beta) = -beta*zeta`` (beta>0, zeta>0).  A LARGER beta
-    => more negative psi_h => larger ``(ln - psi_h)`` => (theta*<0) T_2m is
-    pulled UP toward the (warmer) air, i.e. T_2m strictly INCREASES with beta.
-    A diagnostic hard-wired to default beta would NOT show this monotone-in-beta
-    ordering once the converged scales are held ~fixed.  (Direction verified
-    numerically: T_2m(2,5,9) ~= 289.5923, 289.5926, 289.5930.)
+    large_yeager's diagnostic is AeroBulk TURB_NCAR's height shift from z_t:
+    ``T(z) = T_atm - theta*_AB/kappa (ln(z_t/z) + psi_h(z/L) - psi_h(z_t/L))``
+    with ``psi_h = -beta zeta`` (stable) and theta*_AB = kappa (T_atm - T_sfc)/...
+    > 0 here (surface 289 K colder than the air 290 K).  For z = 2 m < z_t =
+    10 m, ``psi_h(z/L) - psi_h(z_t/L) = beta (z_t - z)/L`` grows with beta, so
+    with the converged scales held ~fixed (strong wind, near-neutral) T_2m
+    strictly DECREASES with beta.  (Measured: T_2m(2,5,9) = 289.9261, 289.9237,
+    289.9206 K.)
     """
     # Weakly stable column (small T_sfc-T_atm gap) so the converged u*/theta*
     # barely move with beta, but zeta>0 so the diagnostic psi_h is active.
@@ -604,13 +605,13 @@ def test_return_2m_diagnostic_psih_is_beta_sensitive():
         jnp.asarray(290.0), jnp.asarray(0.009),
         jnp.asarray(289.0), jnp.asarray(0.010), jnp.asarray(1.2),  # gap = 1 K
     )
-    kw = dict(z_ref=10.0, z_t=2.0, z_q=2.0, z0_init=1e-4,
+    kw = dict(z_ref=10.0, z_t=10.0, z_q=10.0, z0_init=1e-4,
               scheme="large_yeager", n_iter=20, return_2m=True)
     T2m = [float(compute_most_fluxes(*args, **kw, stable_beta=b)[5])
            for b in (2.0, 5.0, 9.0)]
     assert all(np.isfinite(T2m))
-    # Strictly increasing in beta (see docstring derivation).
-    assert T2m[0] < T2m[1] < T2m[2], (
+    # Strictly decreasing in beta (see docstring derivation).
+    assert T2m[0] > T2m[1] > T2m[2], (
         f"2 m diagnostic psi_h not monotone in stable_beta: {T2m}")
 
 
@@ -783,8 +784,10 @@ def _stable_column():
 
 
 def _lane_cfg(bulk_scheme, stability_scheme):
-    """The injected lane config (coare3 + gustiness_zi 300 in the AMIP A/B)."""
-    return SurfaceLayerConfig(bulk_scheme=bulk_scheme, gustiness_w_zi=300.0,
+    """The injected lane config (coare3 + gustiness_zi 300 in the AMIP A/B).
+    large_yeager (AeroBulk TURB_NCAR) has no gustiness: scheme-native None."""
+    zi = None if bulk_scheme == "large_yeager" else 300.0
+    return SurfaceLayerConfig(bulk_scheme=bulk_scheme, gustiness_w_zi=zi,
                               stability_scheme=stability_scheme)
 
 
@@ -851,8 +854,11 @@ def test_dyer_baseline_schemes_full_path_pinned():
     pins = {
         ("most", "dyer1974"): -4.586232399544879e+01,
         ("most", "beljaars_holtslag1991"): -2.228467342408366e+02,
-        ("large_yeager", "dyer1974"): -4.196968866111251e+01,
-        ("large_yeager", "beljaars_holtslag1991"): -1.981186252362987e+02,
+        # large_yeager re-pinned for the AeroBulk TURB_NCAR port (oracle:
+        # tests/core/test_aerobulk_ncar_oracle.py), scheme-native gustiness
+        # (none); dyer1974 sits on the Cx_min = 1e-4 heat-coefficient floor.
+        ("large_yeager", "dyer1974"): -1.1251967999999998e+02,
+        ("large_yeager", "beljaars_holtslag1991"): -1.990132410270457e+02,
     }
     for (bs, stab), expected in pins.items():
         shflx = _lane_fluxes(bs, stab)[2]
