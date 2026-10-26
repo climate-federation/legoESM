@@ -121,3 +121,49 @@ def test_only_dead_selector_arms_are_excluded_from_production_verdicts():
         assert "ELSEIF ( nn_sal_scheme == 2 )" in sites[line]["enclosing"]
     for line in ("434", "520"):
         assert "ELSEIF ( nn_sal_scheme == 3 )" in sites[line]["enclosing"]
+
+
+def test_census_names_are_real_and_tie_labels_match_checked_object_facts():
+    report = _report()
+    census = report["objects"]["icethd_sal"]["census"]["ice_thd_sal"]
+    assert set(census) == set(audit_mod.CENSUS["ice_thd_sal"])
+    assert all(census[name] for name in census), census
+    assert not ({"zv_b", "zv", "zvold", "zvold2", "zdh"} & set(census))
+
+    verdicts = report["tie_verdicts"]
+    assert verdicts["sal:334"] == {
+        "verdict": "NO_TIE", "proof": "Other operand is nonzero epsi10 (L0)."
+    }
+    assert verdicts["sal:535"]["verdict"] == "MASKED"
+    assert verdicts["sal:538"]["verdict"] == "FOUND"
+    assert verdicts["sal:641"]["verdict"] == "MASKED"
+    assert verdicts["sal:644"]["verdict"] == "FOUND"
+    assert set(census["zs_brmax"]) == {"340", "350", "357"}
+    assert "> sss_1d" in census["zs_brmax"]["357"][1]
+    assert set(census["zs_min"]) == {"356", "535", "554", "575", "641", "663"}
+    assert all(
+        "IF( ln_sal_chk" in " ".join(census["zs_min"][line][2])
+        for line in ("554", "663")
+    )
+
+
+def test_line_644_object_has_both_pinned_operand_orders():
+    instructions = _report()["objects"]["icethd_sal"]["sites"]["644"]["instructions"]
+    min_zero_dst = sum(
+        row["count"] for row in instructions
+        if row["op"] == "minsd" and row["dst"] == "ZERO"
+    )
+    min_zero_src = sum(
+        row["count"] for row in instructions
+        if row["op"] == "minsd" and row["src"] == "ZERO"
+    )
+    max_floor_dst = sum(
+        row["count"] for row in instructions
+        if row["op"] == "maxsd" and row.get("dst_defs") == "subsd@644"
+    )
+    max_min_dst = sum(
+        row["count"] for row in instructions
+        if row["op"] == "maxsd" and row.get("dst_defs") == "minsd@644"
+    )
+    assert (min_zero_dst, min_zero_src) == (1, 3)
+    assert (max_floor_dst, max_min_dst) == (2, 2)

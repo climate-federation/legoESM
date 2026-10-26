@@ -1817,9 +1817,9 @@ def _si3_ice_thd_sal4_core(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i,
             zds_raw = nemo_source_round(-cfl * brine_gradient)
             raw_salinity = nemo_source_round(salinity[..., jk] + zds_raw)
             cfl_max_next = _maxsd(cfl_max, jnp.abs(cfl))
-            sal_min_next = _minsd(sal_min, raw_salinity)
+            sal_min_next = _minsd(raw_salinity, sal_min)
             upper_product = nemo_source_round(rn_sinew * sss)
-            lower_bound = _minsd(rn_simin, upper_product)
+            lower_bound = _minsd(upper_product, rn_simin)
             floor_delta = nemo_source_round(-salinity[..., jk] + lower_bound)
             zds = _maxsd(zds_raw, floor_delta)
             sal_next = nemo_source_round(salinity[..., jk] + zds)
@@ -1890,12 +1890,11 @@ def _si3_ice_thd_sal4_core(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i,
             brine_gradient = nemo_source_round(zs_br[..., jk + 1] - zs_br[..., jk])
             zds_raw = nemo_source_round(-cfl * brine_gradient)
             raw_salinity = nemo_source_round(salinity[..., jk] + zds_raw)
-            sal_min_next = _minsd(sal_min, raw_salinity)
-            nonpositive = _minsd(zero, zds_raw)
+            sal_min_next = _minsd(raw_salinity, sal_min)
             upper_product = nemo_source_round(rn_sinew * sss)
-            lower_bound = _minsd(rn_simin, upper_product)
+            lower_bound = _minsd(upper_product, rn_simin)
             floor_delta = nemo_source_round(-salinity[..., jk] + lower_bound)
-            zds = _maxsd(nonpositive, floor_delta)
+            zds = _sal4_flush_delta(zds_raw, floor_delta, jk, zero)
             sal_next = nemo_source_round(salinity[..., jk] + zds)
             flux_next = nemo_source_round(
                 salt_flux
@@ -1920,7 +1919,7 @@ def _si3_ice_thd_sal4_core(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i,
 
     for jk in range(nlay):
         zsal = sz_i[..., jk]
-        lower = _maxsd(rn_simin, zsal)
+        lower = _maxsd(zsal, rn_simin)
         upper = nemo_source_round(rn_sinew * sss)
         bounded = _minsd(lower, upper)
         delta = nemo_source_round(bounded - zsal)
@@ -2021,6 +2020,7 @@ def si3_ice_thd_o10_category_stages(*, entry: dict, fluxes: SI3DHFluxes,
     return SI3O10CategoryStages(o9, sal, t_i)
 
 
+# Keep the previously cited shared C1D implementation line-stable.
 def _c1d_dh_via_core(state, zdf, forcing, dt, constants):
     """C1D card (jpl = 1, nn_icesal = 2) through the shared DH core."""
 
@@ -2909,4 +2909,20 @@ def _si3_column_thd_da(entry, post_temp2, forcing, si3, dt, constants):
         concentration=jnp.where(gathered, da.a_i, post_temp2.concentration),
         h_ice=jnp.where(gathered, da.h_i, post_temp2.h_ice),
         h_snow=jnp.where(gathered, da.h_s, post_temp2.h_snow),
+    )
+
+
+def _sal4_flush_delta(zds_raw, floor_delta, jk, zero):
+    """Line-644 clamps with the record object's layer-specific operand roles."""
+
+    # The -O3 unrolled object emits MIN(0,zds) with zds as the destination in
+    # every layer except Fortran layer 9.  Its outer MAX reverses roles only in
+    # Fortran layers 9 and 10.  These distinctions are visible on +/-0 ties.
+    nonpositive = (
+        _minsd(zero, zds_raw) if jk == 8 else _minsd(zds_raw, zero)
+    )
+    return (
+        _maxsd(floor_delta, nonpositive)
+        if jk in (8, 9)
+        else _maxsd(nonpositive, floor_delta)
     )

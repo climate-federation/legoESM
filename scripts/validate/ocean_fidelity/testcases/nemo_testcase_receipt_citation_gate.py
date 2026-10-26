@@ -2025,6 +2025,8 @@ FILES = {
     'scripts/validate/ocean_fidelity/testcases/nemo_si3_o10_minmax_audit.py': REPO / "scripts/validate/ocean_fidelity/testcases/nemo_si3_o10_minmax_audit.py",
     'tests/ocean/fidelity/test_nemo_si3_o10_minmax_audit.py': REPO / "tests/ocean/fidelity/test_nemo_si3_o10_minmax_audit.py",
     'tests/ice/unit/test_si3_o10_salinity.py': REPO / "tests/ice/unit/test_si3_o10_salinity.py",
+    'scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py': REPO / "scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py",
+    'tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py': REPO / "tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py",
     'docs/ice/fidelity/si3_r19_o10_preregister.md': REPO / "docs/ice/fidelity/si3_r19_o10_preregister.md",
     'docs/ice/fidelity/si3_r19_o10_receipt.md': REPO / "docs/ice/fidelity/si3_r19_o10_receipt.md",
     # --- SI3 ladder round 17 (O11) ---
@@ -10228,47 +10230,44 @@ def _o10_bitz_spec(spec: str) -> str:
     return ",".join(pieces)
 
 
+# The inserted O10 expressions also change occurrence numbers for otherwise
+# anonymous closing-parenthesis anchors.  Supply the moved anchors during the
+# one delete-and-reinsert reanchor operation; never overwrite a live map key.
+_O10_MOVED_ANCHORS = {
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2091-2108,2143-2159,2218-2222': [('if _nemo_dh_snow_update:', 1), (')', 947), ('if _nemo_dh_snow_update:', 2), 'remaining_mass = evaporation * dt + snow_delta * constants.rho_snow', 'melted_snow.append(', (')', 999), 40],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2091-2108,2143-2159,2218-2222,2695,2727': [('if _nemo_dh_snow_update:', 1), (')', 947), ('if _nemo_dh_snow_update:', 2), 'remaining_mass = evaporation * dt + snow_delta * constants.rho_snow', 'melted_snow.append(', (')', 999), ('_nemo_dh_snow_update: bool = True,', 2), '_nemo_dh_snow_update=_nemo_dh_snow_update,', 42],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2096-2100': ['h_precip_raw = (', (')', 944), 5],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2101-2103': ['h_precip = jnp.where(', (')', 945), 3],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2147-2153': [('snow_delta = jnp.maximum(', 1), (')', 968), 7],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2218-2222': ['melted_snow.append(', (')', 999), 5],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2224-2226': ['surface_energy = jnp.maximum(', (')', 1002), 3],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2233-2425,2601-2652': [('if _nemo_dh_ice_content_accumulation:', 1), 'old_h = jnp.stack(zh_i_old_layers, axis=-1)', ('if _nemo_dh_ice_content_accumulation:', 2), (')', 1198), 245],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:249-311': ['def ice_temperature_from_enthalpy(', (')', 77), 63],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2631-2640': ['ze_i_old = jnp.stack(', (')', 1195), 10],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2643-2652': ['e_i = (', (')', 1198), 10],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2643-2659': ['e_i = (', (')', 1201), 17],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2644-2649': [('_nemo_ice_enthalpy_remap(', 2), (')', 1196), 6],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2653-2659': ['e_s = (', (')', 1201), 7],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2750-2755': ['S_layers = option2_salinity_profile(', (')', 1219), 6],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:369-381': ['def snow_enthalpy_from_temperature(', (')', 108), 13],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:41,1110-1168,2233-2425,2601-2652,2678-2730': ['frq_m: jax.Array | float = 1.0', 'def _nemo_ice_enthalpy_remap(', ('], axis=-1)', 12), ('if _nemo_dh_ice_content_accumulation:', 1), 'old_h = jnp.stack(zh_i_old_layers, axis=-1)', ('if _nemo_dh_ice_content_accumulation:', 2), (')', 1198), 'def si3_column_step_arrays(state: SI3ColumnArrays,', '# `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).', 358],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:41,2304-2308': ['frq_m: jax.Array | float = 1.0', 'frq_m = getattr(forcing, "frq_m", 1.0)', (')', 1046), 6],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:41,2304-2308,2488': ['frq_m: jax.Array | float = 1.0', 'frq_m = getattr(forcing, "frq_m", 1.0)', (')', 1046), '+ zdf.qtr_ice_bottom * getattr(forcing, "frq_m", 1.0)', 7],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:429-442': ['def p07_conductivity(', ('sr = nemo_source_round if _nemo_source_round else (lambda x: x)', 6), 14],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:793-891': ['def _si3_zdf_bl99_step(', (')', 342), 99],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:829-834': ['T_s_old = snow_temperature_from_enthalpy(', (')', 320), 6],
+}
+
 for _old in [key for key in CITATION_MAP
              if key.startswith("packages/ice/legoesm/ice/bitz_lipscomb.py:")]:
     _prefix, _spec = _old.rsplit(":", 1)
     _new = f"{_prefix}:{_o10_bitz_spec(_spec)}"
     if _new != _old:
-        _reanchor(_old, _new)
+        _reanchor(_old, _new, anchors=_O10_MOVED_ANCHORS.get(_new))
 
-# The inserted O10 expressions also change occurrence numbers for otherwise
-# anonymous closing-parenthesis anchors.  Pin those moved endpoints anew; none
-# is derived at gate runtime.
-def _replace_citation_anchors(entries: dict) -> None:
-    missing = sorted(set(entries) - set(CITATION_MAP))
-    if missing:
-        raise RuntimeError(f"cannot replace absent citation anchors: {missing}")
-    CITATION_MAP.update(entries)
-
-
-_replace_citation_anchors({
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:2091-2108,2143-2159,2218-2222': [('if _nemo_dh_snow_update:', 1), (')', 948), ('if _nemo_dh_snow_update:', 2), 'remaining_mass = evaporation * dt + snow_delta * constants.rho_snow', 'melted_snow.append(', (')', 1000), 40],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:2091-2108,2143-2159,2218-2222,2695,2727': [('if _nemo_dh_snow_update:', 1), (')', 948), ('if _nemo_dh_snow_update:', 2), 'remaining_mass = evaporation * dt + snow_delta * constants.rho_snow', 'melted_snow.append(', (')', 1000), ('_nemo_dh_snow_update: bool = True,', 2), '_nemo_dh_snow_update=_nemo_dh_snow_update,', 42],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:2096-2100': ['h_precip_raw = (', (')', 945), 5],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:2101-2103': ['h_precip = jnp.where(', (')', 946), 3],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:2147-2153': [('snow_delta = jnp.maximum(', 1), (')', 969), 7],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:2218-2222': ['melted_snow.append(', (')', 1000), 5],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:2224-2226': ['surface_energy = jnp.maximum(', (')', 1003), 3],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:2233-2425,2601-2652': [('if _nemo_dh_ice_content_accumulation:', 1), 'old_h = jnp.stack(zh_i_old_layers, axis=-1)', ('if _nemo_dh_ice_content_accumulation:', 2), (')', 1199), 245],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:249-311': ['def ice_temperature_from_enthalpy(', (')', 77), 63],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:2631-2640': ['ze_i_old = jnp.stack(', (')', 1196), 10],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:2643-2652': ['e_i = (', (')', 1199), 10],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:2643-2659': ['e_i = (', (')', 1202), 17],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:2644-2649': [('_nemo_ice_enthalpy_remap(', 2), (')', 1197), 6],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:2653-2659': ['e_s = (', (')', 1202), 7],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:2750-2755': ['S_layers = option2_salinity_profile(', (')', 1220), 6],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:369-381': ['def snow_enthalpy_from_temperature(', (')', 108), 13],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:41,1110-1168,2233-2425,2601-2652,2678-2730': ['frq_m: jax.Array | float = 1.0', 'def _nemo_ice_enthalpy_remap(', ('], axis=-1)', 12), ('if _nemo_dh_ice_content_accumulation:', 1), 'old_h = jnp.stack(zh_i_old_layers, axis=-1)', ('if _nemo_dh_ice_content_accumulation:', 2), (')', 1199), 'def si3_column_step_arrays(state: SI3ColumnArrays,', '# `ice_thd_temp` is diagnostic because enthalpy is prognostic (:221-247).', 358],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:41,2304-2308': ['frq_m: jax.Array | float = 1.0', 'frq_m = getattr(forcing, "frq_m", 1.0)', (')', 1047), 6],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:41,2304-2308,2488': ['frq_m: jax.Array | float = 1.0', 'frq_m = getattr(forcing, "frq_m", 1.0)', (')', 1047), '+ zdf.qtr_ice_bottom * getattr(forcing, "frq_m", 1.0)', 7],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:429-442': ['def p07_conductivity(', ('sr = nemo_source_round if _nemo_source_round else (lambda x: x)', 6), 14],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:793-891': ['def _si3_zdf_bl99_step(', (')', 342), 99],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:829-834': ['T_s_old = snow_temperature_from_enthalpy(', (')', 320), 6],
-})
+_missing_o10_anchors = sorted(set(_O10_MOVED_ANCHORS) - set(CITATION_MAP))
+if _missing_o10_anchors:
+    raise RuntimeError(f"unapplied O10 citation anchors: {_missing_o10_anchors}")
 
 # --- SI3 round 19 (O10) salinity-4 model preparation ---
 CITATION_MAP.update({
@@ -10293,25 +10292,33 @@ CITATION_MAP.update({
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_sal.f90:277-292': ['zds(1) = - MAX( s_i_1d(ji) - rn_sal_fl , 0._wp ) * z1_time_fl', 's_i_1d(ji) = MIN( MAX( rn_simin, s_i_1d(ji) ), rn_sinew*sss_1d(ji) )', 16],
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_sal.f90:424-435': [('ELSEIF ( nn_sal_scheme == 2 ) THEN    ! *** GN 2013 ***', 1), ('END DO', 10), 12],
     'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_sal.f90:509-521': [('ELSEIF ( nn_sal_scheme == 2 ) THEN    ! *** GN 2013 ***', 2), ('END DO', 19), 13],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1634-1939': ['def _sal4_vc19_brine(t_i, T0):', (')', 904), 306],
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_sal.f90:455-474': ['IF( iter > 1 ) THEN', ('zperm_eff(jk) = REAL( nlay_i-jk+1, wp ) / ztmp', 2), 20],
+    'ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_sal.f90:593-644': [('WHERE( (t_i_1d(ji,:)-rt0) <  - epsi06 ) ; zmsk(:) = 1._wp', 2), 'zds(jk) = MAX( MIN( 0._wp, zds(jk) ), -sz_i_1d(ji,jk) + MIN( rn_simin, rn_sinew*sss_1d(ji) ) )', 52],
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1634-1643': ['def _sal4_vc19_brine(t_i, T0):', 'return nemo_source_round(nemo_source_round(linear - quadratic) - cubic)', 10],
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1646-1671': ['def _sal4_effective_permeability(zv_br, *, initial):', 'return jnp.stack(out, axis=-1)', 26],
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1674-1728': ['def _sal4_rjw_velocity(sz_i, zs_br, zmsk, sss, h_i, z_mid, z_edge, z1_h_i,', 'return jnp.stack(velocity, axis=-1)', 55],
     'packages/ice/legoesm/ice/bitz_lipscomb.py:1690-1692': ['z1_cp_br = nemo_source_round(_div_const(one, _SAL4_CP_BRINE))', 'z1_visc = nemo_source_round(_div_const(one, _SAL4_VISCOSITY_BRINE))', 3],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1739-1845': ['def _si3_ice_thd_sal4_core(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i,', (')', 843), 107],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1847-1919': ['# Flushing uses upward meltwater flow.  The salt-flux convention remains', (')', 895), 73],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1921-1939': [('for jk in range(nlay):', 10), (')', 904), 19],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1950-1995': ['def si3_ice_thd_sal(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i, dh_i_sum,', (')', 918), 46],
-    'packages/ice/legoesm/ice/bitz_lipscomb.py:1998-2021': ['def si3_ice_thd_o10_category_stages(*, entry: dict, fluxes: SI3DHFluxes,', 'return SI3O10CategoryStages(o9, sal, t_i)', 24],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o10_minmax_audit.py:12-70': ['BUILD = common.BUILD', 'tie_verdicts=TIE_VERDICTS,', 59],
-    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o10_minmax_audit.py:37-39': ['# One verdict for every executing floating MIN/MAX source statement.  The four', '# gfortran implements them with integer compares/conditional moves, not MINSD.', 3],
-    'tests/ocean/fidelity/test_nemo_si3_o10_minmax_audit.py:21-123': ['SITE_SIGNATURES = {', 'assert "ELSEIF ( nn_sal_scheme == 3 )" in sites[line]["enclosing"]', 103],
-    'tests/ice/unit/test_si3_o10_salinity.py:266-277': ['def test_salinity4_is_bit_exact_to_independent_scalar_under_jit_and_eager():', 'np.testing.assert_array_equal(_bits(got), _bits(want))', 12],
-    'tests/ice/unit/test_si3_o10_salinity.py:280-288': ['def test_salinity4_inexact_inputs_and_output_digest_are_pinned():', 'assert digest.hexdigest() == "60b8eb225a171059d4e25f39b99f000b3c41b2b0127f1d57af304da67fbc68c3"', 9],
-    'tests/ice/unit/test_si3_o10_salinity.py:291-299': ['def test_salinity4_branch_and_subcycle_coverage_is_real():', 'assert np.any(_bits(out.sfx_bri) != _bits(_model_kwargs()["sfx_bri"]))', 9],
-    'tests/ice/unit/test_si3_o10_salinity.py:302-315': ['def test_salinity4_gradient_is_finite_nonzero_and_matches_central_difference():', 'np.testing.assert_allclose(analytic, finite, rtol=1.0e-5, atol=1.0e-7)', 14],
-    'tests/ice/unit/test_si3_o10_salinity.py:318-346': [('@pytest.mark.parametrize(', 1), ('bl.si3_ice_thd_sal(**kwargs)', 2), 29],
-    'tests/ice/unit/test_si3_o10_salinity.py:349-387': ['def test_o10_production_composer_calls_salinity_then_second_temperature(monkeypatch):', 'np.testing.assert_array_equal(result.t_i, sal_token + 1.0)', 39],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:2915-2927': ['def _sal4_flush_delta(zds_raw, floor_delta, jk, zero):', 'else _maxsd(nonpositive, floor_delta)', 13],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1739-1844': ['def _si3_ice_thd_sal4_core(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i,', ('(sz_i, sfx_bri, zero, zero),', 1), 106],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1847-1917': ['# Flushing uses upward meltwater flow.  The salt-flux convention remains', ('(sz_i, sfx_bri, zero, zero),', 2), 71],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1876-1884': ['def flushing_body(iteration, carry):', 'active = flush_cell & (iteration < nflush) & (zv_brmin >= rn_vbrc)', 9],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1921-1937': ['zsal = sz_i[..., jk]', 'cfl_drain, cfl_flush, smin_drain, smin_flush,', 17],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1949-1986': ['def si3_ice_thd_sal(*, h_i, t_su, t_i, sz_i, t_bo, sss, a_i, dh_i_sum,', 'raise ValueError("SI3 O10 requires the production 10 ice layers")', 38],
+    'packages/ice/legoesm/ice/bitz_lipscomb.py:1997-2020': ['def si3_ice_thd_o10_category_stages(*, entry: dict, fluxes: SI3DHFluxes,', 'return SI3O10CategoryStages(o9, sal, t_i)', 24],
+    'scripts/validate/ocean_fidelity/testcases/nemo_si3_o10_minmax_audit.py:12-76': ['BUILD = common.BUILD', 'tie_verdicts=TIE_VERDICTS,', 65],
+    'tests/ocean/fidelity/test_nemo_si3_o10_minmax_audit.py:21-169': ['SITE_SIGNATURES = {', 'assert (max_floor_dst, max_min_dst) == (2, 2)', 149],
+    'tests/ice/unit/test_si3_o10_salinity.py:414-424': ['def test_salinity4_is_bit_exact_to_independent_scalar_under_jit_and_eager():', ('np.testing.assert_array_equal(_bits(got), _bits(want))', 1), 11],
+    'tests/ice/unit/test_si3_o10_salinity.py:427-447': [('@pytest.mark.parametrize(', 1), 'np.testing.assert_array_equal(_bits(protected), _bits(eager))', 21],
+    'tests/ice/unit/test_si3_o10_salinity.py:450-458': ['def test_salinity4_inexact_inputs_and_output_digest_are_pinned():', 'assert digest.hexdigest() == "34479cbb140c1c1c7518e99d4e9270b58fcb0cf24a40b11de038798f2d9e8d47"', 9],
+    'tests/ice/unit/test_si3_o10_salinity.py:461-498': ['def test_salinity4_branch_and_subcycle_coverage_is_real():', '"flush_iterations_after_first": 9,', 38],
+    'tests/ice/unit/test_si3_o10_salinity.py:502-526': ['def test_signed_zero_tie_survivors_change_flux_bits_and_layer_plants_fire():', 'assert _bits(kept_flux) != _bits(planted_flux)', 25],
+    'tests/ice/unit/test_si3_o10_salinity.py:529-545': ['def test_masked_signed_zero_sites_have_checked_downstream_arguments():', 'assert [_bits(value) for value in velocities] == [_bits(positive_zero)] * 2', 17],
+    'tests/ice/unit/test_si3_o10_salinity.py:548-603': ['def test_five_category_o9_sal_temp2_composition_matches_scalar_oracle():', 'assert checked_columns == sum(len(cells) for cells in categories)', 56],
+    'tests/ice/unit/test_si3_o10_salinity.py:606-624': ['def test_salinity4_gradient_is_finite_nonzero_and_matches_central_difference():', 'np.testing.assert_allclose(analytic, finite, rtol=1.0e-5, atol=1.0e-7)', 19],
+    'tests/ice/unit/test_si3_o10_salinity.py:627-655': [('@pytest.mark.parametrize(', 2), ('bl.si3_ice_thd_sal(**kwargs)', 2), 29],
+    'tests/ice/unit/test_si3_o10_salinity.py:658-724': ['def test_o10_production_composer_calls_salinity_then_second_temperature(monkeypatch):', 'np.testing.assert_array_equal(result.t_i, sal_token + 1.0)', 67],
+    'scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py:10233-10270': [('# The inserted O10 expressions also change occurrence numbers for otherwise', 1), ('raise RuntimeError(f"unapplied O10 citation anchors: {_missing_o10_anchors}")', 1), 38],
+    'tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py:183-234': ['def test_no_citation_map_key_is_written_twice():', 'assert len(written) == len(gate.CITATION_MAP)', 52],
     'docs/ice/fidelity/si3_r19_o10_preregister.md:34-68': ['## 2. Registered master-record projection (GIVEN-NEMO-ENTRY only)', 'compiled-source line before another change.', 35],
 })
 

@@ -9,183 +9,175 @@ master-record array was read and no acquisition tool was built. The next legal
 step is the O10 projection from DECISION 173's one shared 100-step production
 record; the KILL RULE still applies to any differing normal binary64 bit.
 
-independent review: operator (Claude)
+Independent review: Argon HOLD and Sonnet HOLD. Every confirmed HOLD item is
+resolved below; neither review claimed master-record confirmation.
 
-## Search and production identity
-
-I searched `bitz_lipscomb.py` for `ice_thd_sal`, `nn_icesal`, `drain`,
-`flush`, `VC19`, `RJW`, `zv_br`, `zperm`, `sfx_bri`, and `sfx_res`. The shared
-D5 column already had the option-2 bulk-timescale update; O9 already carried
-salinity-4 layer state through ZDF/DH/TEMP, but there was no salinity-4
-`ice_thd_sal` transcription. O10 is therefore in that shared module and
-composes the public O9 exit; it does not duplicate the D5 path.
+## Production identity and transcription
 
 The record build is
 `/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE_O7_REF`.
-Its exact flags are pinned at
-`ORCA2_SAS_ICE_O7_REF/BLD/arch_nemo.fcm:27`. The production call sequence says
-verbatim “`CALL ice_thd_temp`”, “`CALL ice_thd_sal`”, then
-“`CALL ice_thd_temp`” at
+Its flags are pinned at `ORCA2_SAS_ICE_O7_REF/BLD/arch_nemo.fcm:27`. The
+production order is TEMP1, `ice_thd_sal`, TEMP2 at
 `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:201-205`.
 
-Every executing statement is covered by the compiled ppsrc range
+The executing salinity-4 source is
 `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_sal.f90:311-683`:
 
-- `:311` is verbatim “`CASE( 4 )`”. Initialization and VC19 brine salinity are
-  `:317-353`; the cubic assignment is verbatim
-  “`zs_br(jk) = -18.7_wp * zt1 - 0.519_wp * zt2 - 0.00535_wp * zt3`” at
-  `:345`.
-- Drainage is `:326-560`. Harmonic effective permeability is `:377-390`, the
-  RJW Rayleigh product is `:397-398`, the RJW selector/velocity is `:403-422`,
-  bounded subcycling is `:447-548`, and the layer salt/flux assignments are
-  verbatim “`sz_i_1d(ji,jk) = sz_i_1d(ji,jk) + zds(jk)`” and
-  “`sfx_bri_1d(ji) = sfx_bri_1d(ji) - rhoi * ...`” at `:541-544`.
-- Flushing is `:562-669`: the meltwater velocity is `:601-602`, the bounded
-  count is `:607-608`, the brine-volume gate is `:616-622`, and the salt
-  clamp/update/flux is `:637-651`.
-- Final salinity bounds and residual salt flux are `:671-683`; the assignments
-  are verbatim “`sz_i_1d(ji,jk) = MIN( MAX( rn_simin, ...`” and
-  “`sfx_res_1d(ji) = sfx_res_1d(ji) - rhoi * ...`” at `:677-679`.
+- initialization and VC19 brine salinity are `:317-353`, including the cubic at
+  `:345`;
+- drainage is `:326-560`, harmonic permeability is `:377-390`, and RJW's
+  product and selector are `:397-398` and `:403-422`;
+- bounded drainage and its layer salt/flux updates are `:447-548` and
+  `:541-544`;
+- flushing is `:562-669`, with count, brine-volume gate, and salt updates at
+  `:607-608`, `:616-622`, and `:637-651`;
+- final bounds and residual salt flux are `:671-683` and `:677-679`.
 
-The dead option-2 statements are `:277-292`; the dead GN/CW selector arms are
-`:424-435` and `:509-521`. They are inventoried by the object audit but are not
-transcribed as selectable production behavior.
+The selectable model is split into source-order helpers and one core:
 
-## Model transcription
+- VC19 rounding barriers are at
+  `packages/ice/legoesm/ice/bitz_lipscomb.py:1634-1643`;
+- the initial/repeated harmonic forms are at `:1646-1671`, and the RJW chain is
+  at `:1674-1728`, including true constant divides at `:1690-1692`;
+- the line-644 layer-specific object roles are isolated at `:2915-2927`;
+- drainage, flushing, and final bounds are `:1739-1844`, `:1847-1917`, and
+  `:1921-1937`;
+- the fail-closed public entry is `:1949-1986`, and the real O9 -> SAL -> TEMP2
+  category composition is `:1997-2020`.
 
-The selectable implementation is
-`packages/ice/legoesm/ice/bitz_lipscomb.py:1634-1939`. It includes:
-
-- VC19 source-order cubic evaluation at `:1634-1643`;
-- the initial early-exit and repeated harmonic-mean permeability forms at
-  `:1646-1671`;
-- RJW Rayleigh and velocity evaluation at `:1674-1728`, with true constant
-  divides at `:1690-1692`;
-- drainage, its 50-bound conditional subcycles, layer salt and salt flux at
-  `:1739-1845`;
-- flushing, its 5-bound subcycles and brine-volume gate at `:1847-1919`;
-- final salinity bounds and residual salt flux at `:1921-1939`.
-
-Every multiply that feeds an add/subtract has its own `nemo_source_round`; the
-constant reciprocals use `_div_const`. The executing production arm contains
-no `EXP`, `LOG`, `POW`, `SQRT`, reciprocal-root, or `SIGN`, so DECISION 162's
-glibc arm is inert here.
-
-The public entry requires every physical input and refuses every nonproduction
-selector and non-10-layer shape at
-`packages/ice/legoesm/ice/bitz_lipscomb.py:1950-1995`. The category composition
-calls O9, O10, and the second temperature reconversion in that order at
-`:1998-2021`. No configuration was changed.
+The corrected destination/source roles match the record object at source lines
+535, 538, 641, 644, and 677. In particular, line 644 has `MIN(0,zds)` roles
+`dst:src = 1:3` across its unrolled copies and outer `MAX` roles `2:2`; the
+model preserves those per-layer splits. Salinity-2/D5 code is untouched.
 
 ## Compiled MIN/MAX/SIGN audit
 
-The O9 object machinery was generalized, not copied. O10 selects only
-`ice_thd_sal` and records one tie verdict per executing floating site at
-`scripts/validate/ocean_fidelity/testcases/nemo_si3_o10_minmax_audit.py:12-70`.
-The four integer count sites (`447`, `448`, `607`, `608`) are explicitly
-censused at `:37-39`.
+The audit contains only real ppsrc variables, covers every executing floating
+site, and records one explicit verdict at
+`scripts/validate/ocean_fidelity/testcases/nemo_si3_o10_minmax_audit.py:12-76`.
+It pins ppsrc SHA-256
+`db71f3961ffd52fdce8092f9930d69a4abd2247b5b9cc744e9a00f5f9135c216`
+and record-object SHA-256
+`a99e605bbf4b454393a2d2b499d6779c25dfd2037ddd7e78fc22a757f8a0f72b`.
+The signature, dead-arm, real-variable census, operand-count, and five mutant
+checks are at
+`tests/ocean/fidelity/test_nemo_si3_o10_minmax_audit.py:21-169`.
 
-The committed report pins:
+The tie conclusions are now deliberately narrow:
 
-- ppsrc SHA-256
-  `db71f3961ffd52fdce8092f9930d69a4abd2247b5b9cc744e9a00f5f9135c216`;
-- record object SHA-256
-  `a99e605bbf4b454393a2d2b499d6779c25dfd2037ddd7e78fc22a757f8a0f72b`;
-- all 25 floating source sites, all four integer sites, no `SIGN`, and no
-  instruction without a source token.
+- source line 334 uses nonzero `epsi10`, not `epsi06`;
+- lines 350, 397, and 482 are `MASKED` only because checked downstream
+  comparisons cannot observe the surviving zero sign;
+- lines 535 and 641 are `MASKED` only because `zs_min` is read solely by the
+  deck-disabled `ln_sal_chk` diagnostics;
+- lines 538 and 644 are `FOUND`: signed-zero operand swaps change the flux bit,
+  and the per-layer line-644 object roles are pinned;
+- line 619 is `NO_TIE` only under the production TEMP1 bound proved below.
 
-The gate pins every site's full statement/instruction/operand-role signature,
-the exact dead-arm set, and five planted violations at
-`tests/ocean/fidelity/test_nemo_si3_o10_minmax_audit.py:21-123`. The production
-floating sites are `334,350,367,397,412,444,482,497,534,535,538,569,605,619,
-637,641,644,677`; every one has `NO_TIE` or `MASKED` evidence. NEMO's own
-source/destination survivor roles, including `-0`, come from the record
-object—not from Python `min`/`max` assumptions.
+## Independent controls and review mutants
 
-## Tests and controls
+The scalar oracle is a literal transcription and shares no numerical model
+helper. Its 13-column fixture hits the drain floor, flush floor,
+`MIN(0,zds)`, initial harmonic early exit, a zero `zmsk` layer, both 50/5 caps,
+and repeated loop bodies. The exact census is pinned at
+`tests/ice/unit/test_si3_o10_salinity.py:461-498`.
 
-The independent scalar oracle is literal Python scalar arithmetic and shares
-no numerical model helper. The committed tests pin:
+Both eager and compiled calls take arrays as arguments; no constant-input JIT
+closure remains. Scalar == eager == JIT is checked bit-for-bit at `:414-424`.
+Four independently planted missing-barrier controls prove that unbarriered
+eager and JIT differ, while the protected version agrees, at `:427-447`.
+Their pinned changed-column counts are 1022 (VC19), 181 (flux increment), 3
+(Rayleigh chain), and 506 (loop body). The full-output digest is pinned at
+`:450-458`.
 
-- real `jax.disable_jit()` and production JIT, both bit-for-bit against every
-  scalar-oracle output at `tests/ice/unit/test_si3_o10_salinity.py:266-277`;
-- inexact values and output digest
-  `60b8eb225a171059d4e25f39b99f000b3c41b2b0127f1d57af304da67fbc68c3`
-  at `:280-288`;
-- real drainage/flushing/inactive and multi-subcycle coverage at `:291-299`;
-- finite nonzero reverse gradient and central difference at `:302-315`;
-- all 20 required inputs and all production-selector refusals at `:318-346`;
-- a call-removal-sensitive O9 -> SAL -> TEMP2 production composition plant at
-  `:349-387`.
+Signed-zero survivor plants for the drainage clamp and both line-644 clamps
+change output flux bits at `:502-526`. The three `MASKED` downstream arguments
+are separately checked at `:529-545`.
 
-Foreground results:
+Real `jpl=5` O9 -> SAL -> TEMP2 composition runs all five categories against
+the scalar oracle at `:548-603`. The separate wiring plant gives every array a
+distinct identity token and checks each keyword, SAL ordering, and TEMP2 use at
+`:658-724`. Required-input and selector refusal checks are `:627-655`. The
+production gradient/finite-difference check is `:606-624`.
 
-| Control | Result |
-|---|---|
-| O10 scalar/model/JIT/AD/composition | `33 passed in 205.52s` |
-| O10 record-object audit | `8 passed in 1.69s` |
-| generalized O9 audit regression | `10 passed in 12.84s` |
-| D5 C1D year, parent vs current, production CPU JIT | 18/18 arm hashes identical; shipped arm `b7a7329bed74c17918fa3cbc11c7613acb2074851e2357a08869fcd4661e12d2` on both; `D5_PLATFORM_FLOOR` on both |
-| all `tests/ice/unit` | `586 passed, 1 skipped, 1 xfailed`; one shared `sum_first_category` plant failed identically on current and parent when rerun alone |
+## Edge deviations and reachability
 
-The last row is a pre-existing control defect, not hidden as green: both exact
-trees produce `mismatches == []` for
-`test_si3_surface.py::test_production_path_plants_fire[sum_first_category]`.
-O10 does not touch that path. The stronger full-year D5 control is byte
-identical on every arm.
+Two forward implementations intentionally avoid invalid intermediate values:
 
-## Preregistered master projection
+1. At NEMO source line 618, `zmsk*salinity/zs_br` can form `0/0 = NaN`; the
+   compiled `MINSD` can then drop that NaN and allow flushing. The model's
+   `safe_brine` instead yields zero and blocks flushing when a layer temperature
+   is exactly `T0`. The relevant NEMO loop is
+   `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_sal.f90:593-644`, and the model
+   code is `packages/ice/legoesm/ice/bitz_lipscomb.py:1876-1884`.
+2. After the first drainage iteration, NEMO's repeated harmonic mean has no
+   early exit; a zero-mask layer can therefore produce NaN gradients. The NEMO
+   repeated form is `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_sal.f90:455-474`
+   and the model's guarded arithmetic is
+   `packages/ice/legoesm/ice/bitz_lipscomb.py:1646-1671`.
 
-The committed preregistration freezes F1 at TEMP1/O10 entry, F2 at salinity
-exit, and F3 at TEMP2 exit for all 100 steps and five categories at
-`docs/ice/fidelity/si3_r19_o10_preregister.md:34-68`. This round creates no
-observer or acquisition tool. P1-P3 remain untested until the shared master
-record is admitted; P4 (independent scalar/model equality) is confirmed.
+Both deviations are unreachable for the checked production composition. For
+every active state across all five resolved-deck categories, the composition
+test proves `sz_i >= rn_simin = 0.1`; TEMP1 therefore proves
+`t_i <= T0 - rTmlt*rn_simin = T0 - 0.0054 K`, strictly below the `epsi06`
+zero-mask threshold. The check is part of
+`tests/ice/unit/test_si3_o10_salinity.py:548-603`. The exact final-bound kink
+and synthetic zero-mask columns exist only to exercise forward branches and
+are explicitly excluded from the smooth production gradient claim at
+`tests/ice/unit/test_si3_o10_salinity.py:606-624`. If a future admitted
+record violates this bound, these deviations become reachable and model prep
+must stop for an operator decision.
 
-## CHOICES (ASKED/UNASKED)
+## Citation-gate repair
 
-- ASKED: production salinity-4, VC19/RJW, drainage+flushing, 50/5 bounded
-  subcycles, layer salt, `sfx_bri`, `sfx_res`, TEMP2 reconversion, jpl=5 and
-  10+5 layers.
-- ASKED: one shared 100-step master-record projection, preregistered without
-  acquisition; exact-input claim only.
-- ASKED: compiled object audit of every executing MIN/MAX/SIGN site, no-FMA
-  and constant-division barriers, independent scalar, eager/JIT, AD/FD,
-  plants, no defaults, parent/current caller controls.
-- UNASKED, mechanical: keep salinity-2 D5 code untouched and add salinity-4 as
-  a sibling selectable stage in the already shared module; generalize the O9
-  audit engine; expose bounded-subcycle diagnostics for testing. Offered for
-  revert.
-- No configuration choice was made.
+The former helper could overwrite a live citation-map key after AST duplicate
+inspection. Historical O10 line shifts now use a single delete-and-reinsert
+operation and reject unapplied replacement anchors at
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_receipt_citation_gate.py:10233-10270`.
+The gate now also rejects `CITATION_MAP.update` hidden in any helper and counts
+all top-level writes at
+`tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py:183-234`.
+
+## Preregistered projection and choices
+
+The frozen F1/F2/F3 master projection remains
+`docs/ice/fidelity/si3_r19_o10_preregister.md:34-68`. No observer or acquisition
+tool was added. P1-P3 remain untested; P4, independent scalar/model equality,
+is confirmed.
+
+All changes in this resume were ASKED review fixes: true JIT arguments,
+barrier mutants, complete branch census, distinct wiring tokens, real five-
+category composition, object-role correction, bit-changing signed-zero plants,
+real-variable audit census, checked `MASKED` arguments, both edge-deviation
+reachability proofs, and the citation-gate bypass repair. No configuration
+choice was made.
 
 ## CONFIRMED vs PLAUSIBLE
 
 CONFIRMED:
 
-- every executing salinity-4 statement is transcribed in NEMO source order;
-- independent scalar == eager == JIT for every tested output bit, including
-  real drainage/flushing and bounded subcycles;
-- gradients are finite/nonzero and agree with the central difference;
-- the compiled record object/ppsrc hashes and every MIN/MAX/SIGN site are
-  pinned; dead selector arms are explicit; all plants fire;
-- D5 C1D's 18 year hashes, including the shipped `b7a7329b...` arm, are
-  parent/current identical;
-- no physical-input defaults, acquisition tool, or configuration change.
+- Sonnet independently transcribed source lines 311-683 and found model
+  arithmetic bit-exact on 6,500 random/stress columns; eager == JIT and the
+  object contains no FMA, square root, or reciprocal instruction;
+- every requested planted mutant now turns its local test red, including true
+  JIT barrier removal, uncovered event sites, input swaps, MIN/MAX role swaps,
+  signed-zero survivors, real composition, and the citation bypass;
+- the record-object census and hashes regenerate, and line 644's four unrolled
+  copies have the pinned operand-role split;
+- the two edge deviations are unreachable under the checked five-category
+  production bound; D5 remains untouched;
+- no physical-input default, acquisition tool, or configuration change exists.
 
 PLAUSIBLE:
 
-- the hand-written IEEE arguments behind `NO_TIE`/`MASKED`; their object roles,
-  site coverage, source statements and plants are machine checked;
 - bit identity to the future O10 shared-master projection. It is deliberately
-  not called confirmed before acquisition/admission.
+  not called confirmed before acquisition and admission.
 
 ## Gates
 
-After the mapped receipt was committed, the mandatory x64 citation/default
-suite passed: `35 passed in 7.32s`. That includes every SI3 receipt and the full
-map's independently shifted-endpoint audit. The explicit O10 run was `PASS`
-with 42 citations, zero unmapped citations and zero map-audit failures; shifting
-the VC19 assignment pin produced `SYMBOL-NOT-AT-LINE` and `FAIL`. The
-private-import ratchet passed `6 passed in 7.96s`. Every historical citation
-shifted by the O10 insertion is re-anchored in both its receipt and the live
-full-map gate.
+The complete CPU/x64 O10 suite passed `40 passed in 429.89s`. O9 and O10
+object-audit regressions plus every non-stamping citation/default check passed
+`58 passed, 2 deselected in 18.44s`; the regenerated object audit reports
+`O10_MINMAX_AUDIT MATCH`. The full-namespace private-import ratchet passed
+`6 passed in 5.07s`. Clean-worktree citation stamping and its shifted-endpoint
+plant are run after this receipt is committed.

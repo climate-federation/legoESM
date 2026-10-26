@@ -196,6 +196,19 @@ def test_no_citation_map_key_is_written_twice():
 
     source = Path(gate.__file__).read_text()
     tree = ast.parse(source)
+    hidden_updates = []
+    for function in (node for node in tree.body if isinstance(node, ast.FunctionDef)):
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if (
+                isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "CITATION_MAP"
+                and node.func.attr == "update"
+            ):
+                hidden_updates.append(function.name)
+    assert hidden_updates == [], f"citation-map updates hidden in helpers: {hidden_updates}"
+
     assignment = next(
         node.value for node in tree.body
         if isinstance(node, ast.Assign)
