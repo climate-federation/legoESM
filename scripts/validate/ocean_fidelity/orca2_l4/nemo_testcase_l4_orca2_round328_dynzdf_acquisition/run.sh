@@ -854,7 +854,8 @@ if [[ "$ACQ_TARGET" == tke336 ]]; then
     r336_final_mxl r336_final_mxld r336_pre_pdlr_zav r336_pre_pdlr_avt)
   for observer in "${r336_observers[@]}"; do
     awk -v token="$observer" '
-      index($0,token) && saved=="" {saved=$0; next}
+      index($0,token) && $0 !~ /USE tke_round336_writer/ &&
+          $0 !~ /^[[:space:]]*&/ && saved=="" {saved=$0; next}
       {print}
       END {if(saved!="") print saved}
     ' "$scratch/zdftke.f90" >"$plants/zdftke.${observer}.misplaced.f90"
