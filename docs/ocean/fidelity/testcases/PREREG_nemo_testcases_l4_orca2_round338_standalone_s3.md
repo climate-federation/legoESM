@@ -73,14 +73,19 @@ allocation plus owned bounds.
   operand on the tie).  One such cell exiting `+0` refutes the tie audit.
 - **R338-S3-P5, inactive damping.**  Because the flux loop reads the
   clamped temperature, `MIN(0., ts - zt_fzp)` is the literal `0.` on every
-  finite cell, so qns under observed and model ice is
-  `((1-cover)*qns + cover*zqi)*smask0 + cover*smask0*(-0 + -0)`.  Replaying
+  finite cell, and `zqrj = ztrp * 0. = -0`.  Replaying
   with the MIN term deleted must give identical bits; any difference refutes
   the `Kbb = Kmm` reading.
 - **R338-S3-P6, controls.**  Header/name/order/truncation/digest/rank-swap,
   one-ULP wet payload, one-ULP halo `ts` and a time-level plant all exit
   nonzero.  The census counts real clamped cells (owned and halo separately)
   and real `fr_i = 1` cells; it never uses an unconditional counter.
+
+**Erratum (2026-10-26, same round, before any NEMO record exists):** the
+first frozen text of P5 also gave a closed form for qns that holds only on
+cells with `fr_i = 1`; where `fr_i = 0` the `zqri` damping term is active.
+The closed form is withdrawn; the falsifier (delete the MIN term, require
+identical bits) is unchanged.
 
 ## Admission and stop rule
 
