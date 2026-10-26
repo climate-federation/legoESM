@@ -55,9 +55,12 @@ internal-LDF inputs were re-admitted before use.
 | `e3w(Kmm)` | 203 interfaces in the seven target columns | 0 | 0 | exact |
 
 All maxima and RMS values are exactly zero. The admitted records do not contain
-the final kt-2 `avt` or `avs` after the full `zdf_phy` composition, and they do
-not contain any matrix or recurrence row. The older closure-level `avt_k`
-cannot substitute for that final coefficient.
+the final kt-2 `avt` or `avs` after the full `zdf_phy` composition, nor does any
+admitted record contain the evaluated `avt+akz` or `avs+akz` coefficient. The
+inherited inner-LDF record contains `akz` and the older closure-level `avt_k`;
+those fields cannot reconstruct the post-river/EVD/DDM/IWM coefficient. Thus
+this is **not** an “every input exact” result. The acquisition below records
+final `avt`, final `avs`, `akz`, and their evaluated effective coefficients.
 
 Therefore no first differing operand or statement is **CONFIRMED**. The first
 unmeasured operand in executed order is the effective `avt+akz` temperature
@@ -88,26 +91,37 @@ loops, records final `avt`, `avs`, `akz`, geometry, RK levels and live `Kaa`,
 and replays NEMO's exact statement association into lower/diagonal/upper,
 eliminated, forward and back-substitution fields. Admission requires the
 outside-loop back-substitution to equal live `Kaa` bit-for-bit on every
-executed cell.
+executed cell. The RHS replay uses NEMO's literal
+`p2dt*(e3t_3d*(1+r3t(Kmm)*tmask))*Krhs` association at
+`ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/trazdf.f90:283-291`.
+The rejected `((p2dt*e3t_3d)*(1+...))*Krhs` association is both a gate plant
+and a required wet-cell discriminator in each admitted rank.
 
 The clean read-only preflight passed every inherited round-333 control,
 including 77 parent tests, both inherited writer suites, 140-file deterministic
 passivity, syntax checks, synthetic in-place and retained admission routes,
-and all inherited plants. The new two-rank fixture passed bounds, signed-zero,
-source replay and live-result checks for all 25 fields. All selector,
+and all inherited plants. The new two-rank fixture compiled and ran the actual
+patched `trazdf` source under bounds checking and compared it bitwise with a
+separately compiled unpatched module using rank-distinct data and signed-zero
+cells. Its passive 25-field replay then matched the live patched-source result.
+All selector,
 placement, header, field-order, truncation, checksum, extent, finite-value,
-signed-zero, wet-coverage, replay and actual-result plants fired. The actual
+signed-zero, wet-coverage, exact-RHS-association, replay and actual-result
+plants fired. The actual
 record-build `trazdf` object had the same normalized 1,294 floating-point
 instructions with and without the observer; a changed matrix statement failed
 that census. The extended same-program proof reports 407 identical ppsrc and
 419 identical normalized objects, exactly seven observer and five writer
-units. Preflight log SHA-256 is
-`ef0003f750306f5068b4d3b4513e63db31965a4e5163b408392f4ae263eee543`.
+units. Both in-place and retained `--admit-existing` routes were rechecked
+against each run's manifest: the producer must be a local ancestor and the
+binary must match the manifest SHA-256; producer and binary plants fired on
+both routes. The refreshed preflight log digest is recorded after the final
+preflight below.
 
 Operator command:
 
 ```text
-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/orca2_r336-10964668/scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_trazdf_acquisition/run.sh --run
+/data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/orca2_r336/repo/scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_trazdf_acquisition/run.sh --run
 ```
 
 Expected evidence directory:

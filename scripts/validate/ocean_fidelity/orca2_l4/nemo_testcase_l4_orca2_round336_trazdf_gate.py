@@ -43,7 +43,8 @@ FIELDS = (
 )
 PLANTS = (
     "header", "field-order", "truncation", "checksum", "stamp", "selector",
-    "extent", "nonfinite", "signed-zero", "wet", "replay", "actual",
+    "extent", "nonfinite", "signed-zero", "wet", "replay", "association",
+    "actual",
 )
 OBSERVER_UNITS = ldf_gate.OBSERVER_UNITS + ("trazdf",)
 WRITER_UNITS = ldf_gate.WRITER_UNITS + ("round336_trazdf_writer",)
@@ -179,6 +180,8 @@ def verify_record(record: dict, *, plant: str | None = None) -> dict[str, int]:
         expected[name][seen] = -0.0
     dt = np.float64(10800.0)
     nx, ny, nz, nt = seen.shape
+    association_discriminators = 0
+    association_plant_set = False
     for j in range(2, ny - 2):
         for n in range(nt):
             for k in range(nz - 1):
@@ -206,14 +209,28 @@ def verify_record(record: dict, *, plant: str | None = None) -> dict[str, int]:
                         / expected["eliminated"][i, j, k - 1, n])
             for k in range(nz - 1):
                 for i in range(2, nx - 2):
-                    rhs = (fields["e3t_3d"][i, j, k]
-                           * (np.float64(1.0) + fields["r3t_Kbb"][i, j]
-                              * fields["tmask"][i, j, k])
-                           * fields["Kbb_tracer"][i, j, k, n]
-                           + dt * fields["e3t_3d"][i, j, k]
-                           * (np.float64(1.0) + fields["r3t_Kmm"][i, j]
-                              * fields["tmask"][i, j, k])
-                           * fields["Krhs_tracer"][i, j, k, n])
+                    stretch = (np.float64(1.0) + fields["r3t_Kmm"][i, j]
+                               * fields["tmask"][i, j, k])
+                    kbb_content = (fields["e3t_3d"][i, j, k]
+                                   * (np.float64(1.0) + fields["r3t_Kbb"][i, j]
+                                      * fields["tmask"][i, j, k])
+                                   * fields["Kbb_tracer"][i, j, k, n])
+                    # trazdf.f90:285/:289 evaluates p2dt * (e3t * stretch)
+                    # before multiplying Krhs.  The superficially equivalent
+                    # ((p2dt * e3t) * stretch) association differs on real data.
+                    tendency = (dt * (fields["e3t_3d"][i, j, k] * stretch)
+                                * fields["Krhs_tracer"][i, j, k, n])
+                    wrong_tendency = ((dt * fields["e3t_3d"][i, j, k]) * stretch
+                                      * fields["Krhs_tracer"][i, j, k, n])
+                    rhs = kbb_content + tendency
+                    wrong_rhs = kbb_content + wrong_tendency
+                    if (seen[i, j, k, n]
+                            and np.float64(rhs).view(np.uint64)
+                            != np.float64(wrong_rhs).view(np.uint64)):
+                        association_discriminators += 1
+                        if plant == "association" and not association_plant_set:
+                            fields["content_rhs"][i, j, k, n] = wrong_rhs
+                            association_plant_set = True
                     expected["content_rhs"][i, j, k, n] = rhs
                     expected["forward"][i, j, k, n] = rhs if k == 0 else (
                         rhs - expected["lower"][i, j, k, n]
@@ -235,10 +252,15 @@ def verify_record(record: dict, *, plant: str | None = None) -> dict[str, int]:
                         * fields["tmask"][i, j, k])
     for name in expected:
         _bit_equal(fields[name], expected[name], seen, f"{name} source replay moved")
+    require(association_discriminators > 0,
+            "record has no wet cell that discriminates NEMO RHS association")
+    require(plant != "association" or association_plant_set,
+            "association plant found no admitted discriminator")
     _bit_equal(fields["actual_Kaa"], fields["backsub"], seen,
                "outside-loop replay does not reproduce live Kaa")
     return {"wet_seen": int(np.count_nonzero(wet & owned)),
             "signed_zeros": signed_zeros,
+            "rhs_association_discriminators": association_discriminators,
             "active_cells": int(np.count_nonzero(active3))}
 
 
@@ -268,7 +290,8 @@ def run_gate(root: Path, *, expect_commit: str, plant: str | None = None) -> dic
                 record["fields"]["avt"][2, 2, 1], np.inf)
         reports[str(rank)] = verify_record(
             record, plant=plant if rank == 0 and plant in (
-                "nonfinite", "signed-zero", "wet", "replay", "actual") else None)
+                "nonfinite", "signed-zero", "wet", "replay", "association",
+                "actual") else None)
         records[rank] = record
 
         tracer = tracer_gate.read_stage3(root / tracer_gate.record_name(rank))["fields"]

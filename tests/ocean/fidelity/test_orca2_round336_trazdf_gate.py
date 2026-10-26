@@ -22,18 +22,23 @@ def _record():
     four = {name: np.full((nx, ny, nz, nt), -0.0, dtype=np.float64)
             for name in gate.FOUR_D_FIELDS}
     fields = {**three, **two, **one, **four}
-    for name in ("e3t_3d", "e3w_Kmm", "e3t_Kbb", "e3t_Kmm", "e3t_Kaa", "tmask"):
+    for name in ("e3w_Kmm", "e3t_Kbb", "e3t_Kmm", "e3t_Kaa", "tmask"):
         fields[name].fill(1.0)
-    fields["Kbb_tracer"].fill(2.0)
+    fields["e3t_3d"].fill(10800.0)
+    fields["r3t_Kmm"].fill(-1.0e-5)
+    fields["Krhs_tracer"].fill(8.0)
     owned = np.zeros((nx, ny, nz, nt), dtype=bool)
     owned[2:-2, 2:-2, :nz - 1, :] = True
     fields["effective_K"][2:-2, 2:-2, :, :] = 0.0
-    fields["diagonal"][owned] = 1.0
-    fields["eliminated"][owned] = 1.0
-    fields["content_rhs"][owned] = 2.0
-    fields["forward"][owned] = 2.0
-    fields["backsub"][owned] = 2.0
-    fields["actual_Kaa"][owned] = 2.0
+    fields["diagonal"][owned] = 10800.0
+    fields["eliminated"][owned] = 10800.0
+    rhs = (np.float64(10800.0)
+           * (np.float64(10800.0) * np.float64(0.99999))
+           * np.float64(8.0))
+    fields["content_rhs"][owned] = rhs
+    fields["forward"][owned] = rhs
+    fields["backsub"][owned] = rhs / np.float64(10800.0)
+    fields["actual_Kaa"][owned] = rhs / np.float64(10800.0)
     fields["solve_seen"][owned] = 1.0
     checksums = {
         name: int(np.bitwise_xor.reduce(value.view(np.uint64).reshape(-1), initial=0))
@@ -50,9 +55,12 @@ def test_clean_record_replays_and_covers_wet_cells():
     result = gate.verify_record(_record())
     assert result["wet_seen"] > 0
     assert result["signed_zeros"] > 0
+    assert result["rhs_association_discriminators"] > 0
 
 
-@pytest.mark.parametrize("plant", ("nonfinite", "signed-zero", "wet", "replay", "actual"))
+@pytest.mark.parametrize("plant", (
+    "nonfinite", "signed-zero", "wet", "replay", "association", "actual",
+))
 def test_value_plants_fire(plant):
     record = copy.deepcopy(_record())
     with pytest.raises(gate.GateError):

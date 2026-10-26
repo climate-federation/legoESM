@@ -105,14 +105,14 @@ CONTAINS
             DO ji=ntsi,ntei
                content(ji,jj,1,jn)=e3t_3d(ji,jj,1)* &
                   & (1._wp+r3t(ji,jj,Kbb)*tmask(ji,jj,1))*kbb_field(ji,jj,1,jn)+ &
-                  & p2dt*e3t_3d(ji,jj,1)* &
-                  & (1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,1))*krhs_field(ji,jj,1,jn)
+                  & p2dt*(e3t_3d(ji,jj,1)* &
+                  & (1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,1)))*krhs_field(ji,jj,1,jn)
                forward(ji,jj,1,jn)=content(ji,jj,1,jn)
             END DO
             DO jk=2,jpkm1; DO ji=ntsi,ntei
                zrhs=e3t_3d(ji,jj,jk)*(1._wp+r3t(ji,jj,Kbb)*tmask(ji,jj,jk))* &
-                  & kbb_field(ji,jj,jk,jn)+p2dt*e3t_3d(ji,jj,jk)* &
-                  & (1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk))*krhs_field(ji,jj,jk,jn)
+                  & kbb_field(ji,jj,jk,jn)+p2dt*(e3t_3d(ji,jj,jk)* &
+                  & (1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))*krhs_field(ji,jj,jk,jn)
                content(ji,jj,jk,jn)=zrhs
                forward(ji,jj,jk,jn)=zrhs-lower(ji,jj,jk,jn)/ &
                   & eliminated(ji,jj,jk-1,jn)*forward(ji,jj,jk-1,jn)

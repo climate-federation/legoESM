@@ -127,6 +127,22 @@ compare_fp_disassembly() {
   fp_disassembly_signature "$right" "$driver_dir/${label}.right.fp"
   cmp -s "$driver_dir/${label}.left.fp" "$driver_dir/${label}.right.fp"
 }
+check_admission_manifest() {
+  local run=$1 current=$2 producer binary_sha
+  [[ -f "$run/producer_commit.txt" && $(wc -l <"$run/producer_commit.txt") -eq 1 ]] \
+    || return 1
+  producer=$(awk 'NF == 1 && $1 ~ /^[0-9a-f]{40}$/ {print $1}' \
+    "$run/producer_commit.txt")
+  [[ $producer =~ ^[0-9a-f]{40}$ ]] || return 1
+  git -C "$REPO" cat-file -e "$producer^{commit}" 2>/dev/null || return 1
+  git -C "$REPO" merge-base --is-ancestor "$producer" "$current" || return 1
+  [[ -f "$run/nemo.sha256" && $(wc -l <"$run/nemo.sha256") -eq 1 ]] \
+    || return 1
+  binary_sha=$(awk 'NF == 2 && $2 == "nemo" && $1 ~ /^[0-9a-f]{64}$/ {print $1}' \
+    "$run/nemo.sha256")
+  [[ $binary_sha =~ ^[0-9a-f]{64}$ ]] || return 1
+  [[ -f "$run/nemo" && $(sha256sum "$run/nemo" | awk '{print $1}') == "$binary_sha" ]]
+}
 compile_nemo_object() {
   PATH=$NEMO_BIN:$PATH "$MPIFC" -c -fdefault-real-8 -O3 -funroll-all-loops \
     -fcray-pointer -ffree-line-length-none -fallow-argument-mismatch \
@@ -182,24 +198,35 @@ compile_nemo_object "$driver_dir/trazdf-arithmetic-plant.f90" "$driver_dir/trazd
 plant_must_refuse r336-trazdf-arithmetic-disassembly compare_fp_disassembly \
   "$driver_dir/trazdf-base.o" "$driver_dir/trazdf-arithmetic-plant.o" trazdf-plant
 
-# Execute the exact writer on two rank-distinct fixtures, once with bounds
-# checking and the production scalar-math flags. The fixture's independent
-# source-order solve must be bitwise equal to the outside-loop replay.
+# Execute the actual patched trazdf source on two rank-distinct fixtures with
+# bounds checking and production scalar-math flags.  Its live result must be
+# bitwise equal to a separately compiled unpatched trazdf module; the observer
+# replay is then checked against that live result.
 fixture_dir=$driver_dir/fixture
 mkdir "$fixture_dir" "$fixture_dir/mod"
 export PYTHONPATH=$REPO:$REPO/packages/core:$REPO/packages/ocean
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 fixture_flags=(-O3 -funroll-all-loops -fno-tree-vectorize \
   -fcheck=bounds -ffree-line-length-none)
+sed -e 's/^MODULE trazdf$/MODULE trazdf_reference/' \
+  -e 's/^END MODULE trazdf$/END MODULE trazdf_reference/' \
+  "$driver_dir/trazdf-base.f90" >"$fixture_dir/trazdf-reference.f90"
+cp "$driver_dir/trazdf.F90" "$fixture_dir/trazdf-observed.f90"
 "$FC" -c "${fixture_flags[@]}" -J "$fixture_dir/mod" \
   "$FIXTURE_STUBS" -o "$fixture_dir/stubs.o"
 "$FC" -c "${fixture_flags[@]}" -I "$fixture_dir/mod" -J "$fixture_dir/mod" \
   "$WRITER" -o "$fixture_dir/writer.o"
+"$FC" -c "${fixture_flags[@]}" -I "$fixture_dir/mod" -J "$fixture_dir/mod" \
+  "$fixture_dir/trazdf-reference.f90" -o "$fixture_dir/trazdf-reference.o"
+"$FC" -c "${fixture_flags[@]}" -I "$fixture_dir/mod" -J "$fixture_dir/mod" \
+  "$fixture_dir/trazdf-observed.f90" -o "$fixture_dir/trazdf-observed.o"
 "$FC" "${fixture_flags[@]}" -I "$fixture_dir/mod" "$FIXTURE" \
-  "$fixture_dir/stubs.o" "$fixture_dir/writer.o" -o "$fixture_dir/fixture"
+  "$fixture_dir/stubs.o" "$fixture_dir/writer.o" \
+  "$fixture_dir/trazdf-reference.o" "$fixture_dir/trazdf-observed.o" \
+  -o "$fixture_dir/fixture"
 for rank in 0 1; do
   run_in_dir "$fixture_dir" ./fixture "$rank" >>"$fixture_dir/fixture.log" 2>&1
-  grep -E "R336_TRAZDF_FIXTURE_PASS[[:space:]]+$rank([[:space:]]|$)" \
+  grep -E "R336_PATCHED_TRAZDF_FIXTURE_PASS[[:space:]]+$rank([[:space:]]|$)" \
     "$fixture_dir/fixture.log" >/dev/null \
     || refuse "round-336 bounds fixture failed for rank $rank"
 done
@@ -217,6 +244,7 @@ for rank in (0, 1):
     assert record["header"]["rank"] == rank
     report = gate.verify_record(record)
     assert report["wet_seen"] > 0 and report["signed_zeros"] > 0
+    assert report["rhs_association_discriminators"] > 0
 for plant in ("header", "field-order", "truncation", "selector", "extent"):
     try:
         gate.read_record(root / gate.record_name(0), plant=plant, expected_shape=(7, 6, 5))
@@ -232,7 +260,7 @@ except gate.GateError:
     print("PREFLIGHT_PLANT_FIRED r336-checksum")
 else:
     raise AssertionError("checksum plant stayed green")
-for plant in ("nonfinite", "signed-zero", "wet", "replay", "actual"):
+for plant in ("nonfinite", "signed-zero", "wet", "replay", "association", "actual"):
     record = gate.read_record(root / gate.record_name(0), expected_shape=(7, 6, 5))
     try:
         gate.verify_record(record, plant=plant)
@@ -240,7 +268,7 @@ for plant in ("nonfinite", "signed-zero", "wet", "replay", "actual"):
         print(f"PREFLIGHT_PLANT_FIRED r336-{plant}")
     else:
         raise AssertionError(f"{plant} value plant stayed green")
-print("R336_TRAZDF_WRITER_BOUNDS_REPLAY_AND_SIGN_PASS ranks=2 fields=25")
+print("R336_PATCHED_TRAZDF_BOUNDS_REPLAY_ASSOCIATION_AND_SIGN_PASS ranks=2 fields=25")
 PY
 
 # A changed writer statement must disagree with the independent live solve.
@@ -252,13 +280,50 @@ sed '0,/diagonal(ji,jj,jk,jn)=e3t_3d/s//diagonal(ji,jj,jk,jn)=1._wp+e3t_3d/' \
   "$FIXTURE_STUBS" -o "$mutant_dir/stubs.o"
 "$FC" -c "${fixture_flags[@]}" -I "$mutant_dir/mod" -J "$mutant_dir/mod" \
   "$mutant_dir/writer.F90" -o "$mutant_dir/writer.o"
+sed -e 's/^MODULE trazdf$/MODULE trazdf_reference/' \
+  -e 's/^END MODULE trazdf$/END MODULE trazdf_reference/' \
+  "$driver_dir/trazdf-base.f90" >"$mutant_dir/trazdf-reference.f90"
+cp "$driver_dir/trazdf.F90" "$mutant_dir/trazdf-observed.f90"
+"$FC" -c "${fixture_flags[@]}" -I "$mutant_dir/mod" -J "$mutant_dir/mod" \
+  "$mutant_dir/trazdf-reference.f90" -o "$mutant_dir/trazdf-reference.o"
+"$FC" -c "${fixture_flags[@]}" -I "$mutant_dir/mod" -J "$mutant_dir/mod" \
+  "$mutant_dir/trazdf-observed.f90" -o "$mutant_dir/trazdf-observed.o"
 "$FC" "${fixture_flags[@]}" -I "$mutant_dir/mod" "$FIXTURE" \
-  "$mutant_dir/stubs.o" "$mutant_dir/writer.o" -o "$mutant_dir/fixture"
+  "$mutant_dir/stubs.o" "$mutant_dir/writer.o" \
+  "$mutant_dir/trazdf-reference.o" "$mutant_dir/trazdf-observed.o" \
+  -o "$mutant_dir/fixture"
 run_in_dir "$mutant_dir" ./fixture 0
 plant_must_refuse r336-writer-arithmetic "$PY" -c \
   "from pathlib import Path; from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round336_trazdf_gate as g; g.verify_record(g.read_record(Path('$mutant_dir') / g.record_name(0), expected_shape=(7,6,5)))"
 
 "$PY" -m pytest -q -p no:xdist "$TEST"
+
+# Re-check this wrapper's manifest pin on both --admit-existing routes.  The
+# imported driver performs the same two green route checks; these plants prove
+# that neither route accepts a moved producer commit or binary digest.
+identity_root=$driver_dir/admission-identity
+identity_head=$(git -C "$REPO" rev-parse HEAD)
+for route in in-place retained; do
+  if [[ $route == in-place ]]; then
+    identity_run=$identity_root/orca1ice_trazdf_internal_kt2_np2
+  else
+    identity_run=$identity_root/refused/orca1ice_trazdf_internal_kt2_np2_admission_refused_synthetic
+  fi
+  mkdir -p "$identity_run"
+  cp "$PARENT" "$identity_run/nemo"
+  printf '%s\n' "$identity_head" >"$identity_run/producer_commit.txt"
+  ( cd "$identity_run" && sha256sum nemo >nemo.sha256 )
+  check_admission_manifest "$identity_run" "$identity_head" \
+    || refuse "valid $route admission manifest was rejected"
+  printf '%040d\n' 0 >"$identity_run/producer_commit.txt"
+  plant_must_refuse "r336-$route-producer-pin" \
+    check_admission_manifest "$identity_run" "$identity_head"
+  printf '%s\n' "$identity_head" >"$identity_run/producer_commit.txt"
+  printf 'binary digest plant\n' >>"$identity_run/nemo"
+  plant_must_refuse "r336-$route-binary-pin" \
+    check_admission_manifest "$identity_run" "$identity_head"
+done
+printf 'R336_ADMIT_EXISTING_IDENTITY_PASS routes=in-place,retained plants=producer,binary\n'
 
 # Import the reviewed driver wholesale. Only pinned identity strings and hook
 # additions are changed; its checklist, controls, syntax proof, same-program
@@ -341,21 +406,16 @@ if [[ "$MODE" == --preflight-only ]]; then
 fi
 
 retention_armed=1
-[[ -f "$TARGET_RUN/producer_commit.txt" && $(wc -l <"$TARGET_RUN/producer_commit.txt") -eq 1 ]] \
-  || refuse 'run manifest lacks its single producer commit'
+current_commit=$(git -C "$REPO" rev-parse HEAD)
+check_admission_manifest "$TARGET_RUN" "$current_commit" \
+  || refuse 'run manifest producer/ancestry or binary digest pin moved'
 producer=$(awk 'NF == 1 && $1 ~ /^[0-9a-f]{40}$/ {print $1}' \
   "$TARGET_RUN/producer_commit.txt")
-[[ $producer =~ ^[0-9a-f]{40}$ ]] || refuse 'run manifest producer commit is malformed'
-[[ -f "$TARGET_RUN/nemo.sha256" && $(wc -l <"$TARGET_RUN/nemo.sha256") -eq 1 ]] \
-  || refuse 'run manifest lacks its single binary SHA'
 binary_sha=$(awk 'NF == 2 && $2 == "nemo" && $1 ~ /^[0-9a-f]{64}$/ {print $1}' \
   "$TARGET_RUN/nemo.sha256")
-[[ $binary_sha =~ ^[0-9a-f]{64}$ ]] || refuse 'run manifest binary SHA is malformed'
-[[ $(sha256sum "$TARGET_RUN/nemo" | awk '{print $1}') == "$binary_sha" ]] \
-  || refuse 'run binary differs from its manifest SHA'
 
 for plant in header field-order truncation checksum stamp selector extent \
-    nonfinite signed-zero wet replay actual; do
+    nonfinite signed-zero wet replay association actual; do
   log=$TARGET_RUN/admit-r336-trazdf-$plant.log
   if "$PY" "$GATE" --record-dir "$TARGET_RUN" --expect-commit "$producer" \
       --plant "$plant" >"$log" 2>&1; then
