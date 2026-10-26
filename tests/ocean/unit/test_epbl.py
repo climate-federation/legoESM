@@ -620,3 +620,75 @@ def test_grid_without_latitude_raises_instead_of_f_zero():
     with pytest.raises(ValueError, match="latitude"):
         scm.physics_fn(scm.state, types.SimpleNamespace(), scm.z_coord,
                        surface_forcing=sfc)
+
+
+# --- direct energy budget ---------------------------------------------------
+
+def _implicit_mix(x, kd, h, dt):
+    """Backward-Euler diffusion of one tracer with interface Kd, no-flux ends."""
+    nz = x.size
+    dzc = 0.5 * (h[:-1] + h[1:])
+    a, b, c = np.zeros(nz), h.copy(), np.zeros(nz)
+    for k in range(1, nz):
+        w = dt * kd[k] / dzc[k - 1]
+        b[k - 1] += w
+        c[k - 1] -= w
+        b[k] += w
+        a[k] -= w
+    A = np.diag(b) + np.diag(a[1:], -1) + np.diag(c[:-1], 1)
+    return np.linalg.solve(A, h * x)
+
+
+def _budget_residual(cfg, q_net, tau, lat=40.0, kd_scale=1.0):
+    """(PE gained by one implicit mixing step with ePBL's Kd) / (TKE supplied) - 1."""
+    h, T, S, dSV_dT, dSV_dS = _column()
+    absf = abs(2 * OMEGA * math.sin(math.radians(lat)))
+    tkef0 = float(surface_tke_forcing(
+        jnp.asarray(q_net), None, h[0], dSV_dT[0], dSV_dS[0],
+        g=G, rho_0=RHO0, c_sw=C_SW, dt=cfg.dt_s))
+    bflux = _b_flux(q_net, float(T[0]), float(S[0]))
+    kd, mld, _, _ = epbl_diagnostics(
+        T[None] * 0.0, T[None] * 0.0, T[None], S[None], dSV_dT[None],
+        dSV_dS[None], h, cfg, tau_x=jnp.asarray([tau]),
+        tau_y=jnp.asarray([0.0]), B_flux=jnp.asarray([bflux]),
+        tke_forcing=jnp.zeros_like(T).at[0].set(tkef0)[None],
+        absf=jnp.asarray([absf]), g=G, rho_0=RHO0)
+    kd = kd_scale * np.asarray(kd[0])
+    hn, Tn, Sn = np.asarray(h), np.asarray(T), np.asarray(S)
+    dT = _implicit_mix(Tn, kd, hn, cfg.dt_s) - Tn
+    dS = _implicit_mix(Sn, kd, hn, cfg.dt_s) - Sn
+    drho = -RHO0**2 * (np.asarray(dSV_dT) * dT + np.asarray(dSV_dS) * dS)
+    z = -(np.cumsum(hn) - 0.5 * hn)
+    pe_gain = float(np.sum(G * drho * z * hn))
+    u_star = math.sqrt(tau / RHO0)
+    mstar = float(_find_mstar(cfg, jnp.asarray(bflux), jnp.asarray(u_star),
+                              jnp.asarray(float(mld[0])), jnp.asarray(absf)))
+    mech = mstar * RHO0 * u_star**3 * cfg.dt_s
+    supply = max(0.0, mech + min(tkef0, 0.0)) + max(tkef0, 0.0)
+    return pe_gain / supply - 1.0
+
+
+_BUDGET_CFGS = {
+    "default": lambda: EPBLConfig(dt_s=1200.0),
+    "discovery": lambda: _ref_cfg(),
+}
+
+
+@pytest.mark.parametrize("cfg_name", sorted(_BUDGET_CFGS))
+@pytest.mark.parametrize("q_net", [-200.0, 0.0, 200.0])
+@pytest.mark.parametrize("tau", [0.05, 0.2, 0.4])
+def test_mixing_never_spends_more_energy_than_it_is_given(cfg_name, q_net, tau):
+    """The ePBL invariant, checked directly: the potential energy one mixing
+    step gains with ePBL's Kd must not exceed the TKE supplied
+    (mstar * rho0 * u*^3 * dt plus the surface buoyancy release, minus a
+    warming cost), i.e. residual = gained / supplied - 1 <= 1e-6.
+
+    Instrument caveat: PE is priced with ePBL's own linearised EOS
+    (dSV/dT, dSV/dS) and one whole-column backward-Euler solve, whereas ePBL
+    accounts interface by interface, so this is an independent bound, not a
+    reproduction of ePBL's internal ledger.  Measured on these 18 columns
+    (2026-10-26, x64): defaults -1.7e-1 .. -7.1e-2; discovery on
+    -5.1e-1 .. -3.5e-3.  The Kd solve itself converges to |dKd| < 1e-9 Kd.
+    """
+    r = _budget_residual(_BUDGET_CFGS[cfg_name](), q_net, tau)
+    assert r <= 1e-6, f"mixing spent {r:+.3e} more than the supplied energy"

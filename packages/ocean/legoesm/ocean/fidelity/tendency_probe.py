@@ -355,9 +355,12 @@ def probe_latlon_cgrid(
         _dt_tke = tke_rn_dt if _nemo_literal_tke else dt
         # K_v = the closure's TRACER diffusivity at this state (the same call
         # the production implicit solve makes).
+        # Production passes degrees(grid.lat_T) (its grid is always a
+        # LatLonCGridGeometry); a plain LatLonGrid carries lat2d instead.
+        _lat_T = getattr(grid, "lat_T", None)
         _K_v, _A_v = compute_vertical_K_profiles(
             state, z_coord, surface_forcing, config.physics, dt_tke=_dt_tke,
-            lat_deg=jnp.degrees(grid.lat_T),
+            lat_deg=jnp.degrees(grid.lat2d if _lat_T is None else _lat_T),
         )
         _dz_cell = z_coord.dz_ref * J[:, :, jnp.newaxis]
         _dz_half = build_dz_half(_dz_cell)
