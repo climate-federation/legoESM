@@ -177,9 +177,11 @@ plant_must_refuse same-program same_program "$scratch/dry_bld"
 # without reimplementing sbcmod's many unrelated callees as fake routines.
 cat >"$scratch/fixture_stubs.F90" <<'EOF'
 MODULE par_kind; USE,INTRINSIC::iso_fortran_env,ONLY:real64; INTEGER,PARAMETER::wp=real64; END MODULE
+MODULE par_oce
+ INTEGER::jpi=94,jpj=152,ntsi=3,ntei=92,ntsj=3,ntej=150
+END MODULE
 MODULE dom_oce
- USE par_kind; INTEGER,PARAMETER::jpi=94,jpj=152
- INTEGER::nimpp,njmpp,narea,ntsi,ntei,ntsj,ntej
+ USE par_kind; INTEGER::nimpp,njmpp,narea
 END MODULE
 MODULE in_out_manager; INTEGER::numout=6; END MODULE
 MODULE lib_mpp
