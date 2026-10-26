@@ -755,6 +755,16 @@ def test_explicit_skin_on_a_coupled_driver_raises():
 
 _DUO_COLUMN_AUTO = r'''
 import json, sys, numpy as np
+import jax.numpy as jnp
+from legoesm import constants
+import legoesm.forcing.analytical as an
+_orig = an.analytical_sst_sic
+def _icy(lat_deg, day, T_ice=constants.T_freeze_ocean):
+    sst, sic = _orig(lat_deg, day, T_ice=T_ice)
+    polar = np.abs(np.asarray(lat_deg)) >= 60.0
+    return (jnp.where(polar, T_ice, sst).astype(sst.dtype),
+            jnp.where(polar, 1.0, sic).astype(sic.dtype))
+an.analytical_sst_sic = _icy
 from legoesm.driver.config import (ExperimentConfig, GridConfig,
                                    DycoreConfig, OutputConfig)
 from legoesm.driver.model_driver import ModelDriver
@@ -778,7 +788,9 @@ print("RESULT " + json.dumps({
     "status": status, "skin_on": d.config.ice_skin_prognostic,
     "albedo": d.config.sea_ice_albedo_scheme,
     "skin_finite": None if skin is None
-    else bool(np.all(np.isfinite(np.asarray(skin))))}))
+    else bool(np.all(np.isfinite(np.asarray(skin)))),
+    "skin_moved": None if skin is None else float(np.max(np.abs(
+        np.asarray(skin) - constants.T_freeze_ocean)))}))
 '''
 
 
@@ -801,3 +813,16 @@ def test_fv3_duo_column_lane_auto_turns_the_skin_on_and_steps(tmp_path):
     assert res["skin_on"] is True
     assert res["albedo"] == "maykut_untersteiner"
     assert res["skin_finite"] is True
+    assert res["skin_moved"] > 0.0, "the skin never stepped off its seed"
+
+
+def test_old_melt_width_spelling_stays_an_alias():
+    """Renamed sea_ice_albedo_melt_width_K -> sea_ice_melt_ramp_width_K: the
+    old YAML key and CLI flag still load (repo rename convention)."""
+    from legoesm.driver.config import migrate_renamed_keys
+    from scripts.run.run_amip import build_arg_parser
+    assert migrate_renamed_keys({"sea_ice_albedo_melt_width_K": 2.0}) == {
+        "sea_ice_melt_ramp_width_K": 2.0}
+    args = build_arg_parser().parse_args(
+        ["--sea-ice-albedo-melt-width-K", "2.5"])
+    assert args.sea_ice_melt_ramp_width_K == 2.5

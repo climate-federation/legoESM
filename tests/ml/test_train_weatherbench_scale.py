@@ -325,7 +325,9 @@ def test_build_latlon_config_resolves_the_ice_skin_auto():
         pytest.skip(f"scale_build import needs the full stack ({exc})")
     cfg = build_scale_config_from_args(["--mode", "physics", "--smoke"])
     base = {"n_lat": 32, "n_lon": 64, "nlev": 8, "dt": 300.0, "radiation": "gray"}
-    assert build_latlon_config(cfg, dict(base)).ice_skin_prognostic is True
+    auto = build_latlon_config(cfg, dict(base))
+    assert auto.ice_skin_prognostic is True
+    assert auto.sea_ice_albedo_scheme == "maykut_untersteiner"
     assert build_latlon_config(
         cfg, dict(base, ice_skin_prognostic=False)).ice_skin_prognostic is False
     with pytest.raises(ValueError, match="ice_skin_prognostic"):

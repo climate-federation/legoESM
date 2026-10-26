@@ -492,10 +492,15 @@ def resolve_training_ice_skin(config):
     """Resolve the ice-skin "auto" once for a trainer, as ModelDriver.setup
     would for a single-process run, so the ERA5 carries, the physics pipeline
     and the driver context all see the same explicit value."""
-    from legoesm.driver.config import resolve_ice_skin_prognostic
+    from legoesm.driver.config import (
+        resolve_ice_skin_prognostic, resolve_sea_ice_albedo_scheme)
     on, why = resolve_ice_skin_prognostic(config)
-    logger.info("  Ice skin %s (%s)", "ON" if on else "OFF", why)
-    return config._replace(ice_skin_prognostic=on)
+    config = config._replace(ice_skin_prognostic=on)
+    config = config._replace(
+        sea_ice_albedo_scheme=resolve_sea_ice_albedo_scheme(config))
+    logger.info("  Sea-ice albedo scheme: %s (ice skin %s: %s)",
+                config.sea_ice_albedo_scheme, "ON" if on else "OFF", why)
+    return config
 
 
 # --- campaign-YAML key validation (2026-08-24) ------------------------------
