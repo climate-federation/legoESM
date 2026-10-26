@@ -33,6 +33,7 @@ readonly GATE=$here/../nemo_si3_o8_o16_master_gate.py
 readonly PASSIVITY=$here/../nemo_si3_o8_o16_master_passivity.py
 readonly WRITER=$here/o8_o16_master_writer.F90
 readonly STUB_NEMO=$here/stub_nemo.sh
+readonly STUB_MPIRUN=$here/stub_mpirun.sh
 readonly PROD=$NEMO_ROOT/cfgs/$SOURCE_CFG/EXPREF
 readonly SHARED=$NEMO_ROOT/cfgs/SHARED
 readonly REF_ROOT=$NEMO_ROOT/cfgs/$REF_CFG
@@ -270,7 +271,8 @@ stub_driver_fixture() {
   # O8O16_DRIVER_TRUNCATION_POINT: cutting run.sh here leaves this function unclosed.
   local scratch=$1 root=$scratch/stub_nemo_root bundles=$scratch/stub_bundles
   local evidence=$scratch/stub_evidence refused=$scratch/stub_refused fail_evidence=$scratch/stub_failure
-  mkdir -p "$root/cfgs/$SOURCE_CFG/EXPREF" "$root/cfgs/SHARED" "$bundles/orca" "$bundles/sas"
+  mkdir -p "$root/cfgs/$SOURCE_CFG/EXPREF" "$root/cfgs/SHARED" "$bundles/orca" "$bundles/sas" "$scratch/stub_bin"
+  ln -s "$STUB_MPIRUN" "$scratch/stub_bin/mpirun"
   cp "$PROD/namelist_cfg" "$root/cfgs/$SOURCE_CFG/EXPREF/namelist_cfg"
   cp "$PROD/namelist_ice_cfg" "$root/cfgs/$SOURCE_CFG/EXPREF/namelist_ice_cfg"
   cp -L "$SHARED/namelist_ref" "$root/cfgs/SHARED/namelist_ref"
@@ -280,7 +282,8 @@ stub_driver_fixture() {
   tar -czf "$bundles/sas.tar.gz" -C "$bundles/sas" .
   local orca_sha sas_sha; orca_sha=$(sha256sum "$bundles/orca.tar.gz"); orca_sha=${orca_sha%% *}
   sas_sha=$(sha256sum "$bundles/sas.tar.gz"); sas_sha=${sas_sha%% *}
-  local envs=(env O8O16_DRIVER_FIXTURE_ACTIVE=1 NEMO_EXE_OVERRIDE="$STUB_NEMO" NEMO_ROOT="$root" \
+  local envs=(env PATH="$scratch/stub_bin:$PATH" O8O16_DRIVER_FIXTURE_ACTIVE=1 \
+    NEMO_EXE_OVERRIDE="$STUB_NEMO" NEMO_ROOT="$root" \
     NEMO_SOURCE_ROOT="$NEMO_SOURCE_ROOT" BASE_BLD="$BASE_BLD" \
     REF_CFG=STUB_O8O16_REF REC_CFG=STUB_O8O16_REC REFUSED_DIR="$refused" MIN_FREE_RAM_GB=1 \
     MIN_FREE_DISK_KB=1 ORCA2_BUNDLE="$bundles/orca.tar.gz" ORCA2_BUNDLE_SHA256="$orca_sha" \

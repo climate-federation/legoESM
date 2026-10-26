@@ -69,7 +69,8 @@ The generated driver passed all ten phases:
 - an end-to-end 100-step stub-NEMO `--run` and `--admit-existing` through real
   preflight, patching, same-program and `mpirun` call sites, repeated-run refusal,
   failed-run evidence/build retention, a truncation of `run.sh` itself, and both
-  `--move-aside-builds` paths. The stub replaces only `nemo.exe`.
+  `--move-aside-builds` paths. The fixture replaces only `nemo.exe` and the
+  sandbox-blocked `mpirun` executable; the driver call site is unchanged.
 
 The explicit operator run remains required. Refused evidence and builds are
 retained, and only `--move-aside-builds` enables a rebuild after failure. No

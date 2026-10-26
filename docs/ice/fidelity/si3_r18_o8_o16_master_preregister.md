@@ -84,5 +84,6 @@ validates namelist group ownership with misspelling/misplacement plants, checks
 source-derived SAS time level, validates A2D(0) handling, and fires schema,
 checksum, truncation, swapped-field and every projection plant. A stub NEMO
 exercises the generated 100-step driver's syntax, run/admission/refusal,
-retention and move-aside paths. The stub replaces only `nemo.exe`; the same
+retention and move-aside paths. The stub replaces only `nemo.exe` and, because
+the validation sandbox forbids PMIx sockets, `mpirun`; the same
 preflight, patching, same-program and `mpirun` call paths execute as for NEMO.
