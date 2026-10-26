@@ -44,14 +44,16 @@ ROOTS: dict[str, tuple[str, ...]] = {
     "O13": ("ice_itd_rem",),
     "O14": ("ice_thd_do",),
     "O15": ("ice_cor",),
-    "O16": ("ice_update_flx", "ice_update_tau"),
+    "O16": ("ice_var_glo2eqv", "ice_var_agg", "ice_update_flx", "ice_update_tau"),
 }
 
 ENTRY_KINDS: dict[str, tuple[int, ...]] = {
     "O8": (1,), "O9": (21, 3), "O10": (21, 6), "O11": (21, 8),
     "O12": (10,), "O13": (11,), "O14": (12,), "O15": (13,),
-    "O16": (15, 19),
+    "O16": (18, 15, 19),
 }
+
+HEADER_REQUIRED_SCALARS = {"nn_snwfra"}
 
 # These arrays belong to diagnostics, bounds, or the observer's own sparse
 # gather machinery.  They do not enter the replayed numerical stage.
@@ -63,7 +65,7 @@ NON_REPLAY_ARRAYS = {
 
 META_SCALARS = {
     "jpi", "jpj", "jpl", "nlay_i", "nlay_s", "ntsi", "ntei", "ntsj", "ntej",
-    "nis0", "nie0", "njs0", "nje0", "npti", "nit000", "kmm", "kt", "nn_hls",
+    "nis0", "nie0", "njs0", "nje0", "npti", "jpij", "nit000", "kmm", "kt", "nn_hls",
 }
 
 # Non-numerical I/O/diagnostic controls and variables derived from values that
@@ -84,7 +86,7 @@ KEYWORDS = set(
     "interface intrinsic logical module namelist none only open operator optional "
     "or out parameter pointer print private procedure program public pure read "
     "real recursive result return rewind save select stop subroutine target then "
-    "type use volatile where while write".split()
+    "stat type use volatile where while write".split()
 )
 INTRINSICS = set(
     "abs allocated all any ceiling cos count dim exp huge int lbound log max maxloc "
@@ -157,8 +159,9 @@ def _declared_names(statement: str) -> set[str]:
     return names
 
 
-def _index_routines(ppsrc: Path) -> dict[str, Routine]:
+def _index_routines(ppsrc: Path) -> tuple[dict[str, Routine], dict[str, tuple[str, ...]]]:
     found: dict[str, Routine] = {}
+    interfaces: dict[str, tuple[str, ...]] = {}
     begin = re.compile(r"^\s*(?:[a-z][\w(),=* ]*\s+)?(subroutine|function)\s+([a-z]\w*)", re.I)
     end = re.compile(r"^\s*end\s+(subroutine|function)\b", re.I)
     for unit in SOURCE_UNITS:
@@ -166,6 +169,24 @@ def _index_routines(ppsrc: Path) -> dict[str, Routine]:
         if not path.is_file():
             raise ValueError(f"missing preprocessed NEMO source: {path}")
         statements = _logical_statements(path.read_text())
+        interface_name = ""
+        interface_procedures: list[str] = []
+        for statement in statements:
+            low = statement.lower()
+            match = re.match(r"^interface\s+([a-z]\w*)$", low)
+            if match:
+                interface_name = match.group(1)
+                interface_procedures = []
+                continue
+            if interface_name and re.match(r"^end\s+interface\b", low):
+                interfaces[interface_name] = tuple(interface_procedures)
+                interface_name = ""
+                interface_procedures = []
+                continue
+            if interface_name:
+                match = re.match(r"^module\s+procedure\s+(.+)$", low)
+                if match:
+                    interface_procedures.extend(re.findall(r"\b[a-z]\w*\b", match.group(1)))
         pos = 0
         while pos < len(statements):
             match = begin.match(statements[pos])
@@ -186,7 +207,7 @@ def _index_routines(ppsrc: Path) -> dict[str, Routine]:
                 local.update(_declared_names(statement))
             found[name] = Routine(name, path.name, body, frozenset(local), dummies)
             pos = stop + 1
-    return found
+    return found, interfaces
 
 
 def _identifiers(text: str) -> set[str]:
@@ -200,14 +221,63 @@ def _array_identifiers(text: str) -> set[str]:
 
 
 def _assignment(statement: str) -> tuple[str, str] | None:
-    match = re.search(r"(?<![<>=/])=(?!=)", statement)
+    depth = 0
+    quote = ""
+    for pos, char in enumerate(statement):
+        if char in "'\"":
+            quote = "" if quote == char else (char if not quote else quote)
+            continue
+        if quote:
+            continue
+        depth += char == "("
+        depth -= char == ")"
+        before = statement[pos - 1] if pos else ""
+        after = statement[pos + 1] if pos + 1 < len(statement) else ""
+        if char == "=" and depth == 0 and before not in "<>=/" and after != "=":
+            return statement[:pos], statement[pos + 1 :]
+    return None
+
+
+def _lhs_parts(lhs: str) -> tuple[str, str, bool]:
+    """Return assignment target, expressions read on the LHS, and whole-write status."""
+    value = lhs.strip()
+    prefix_reads: list[str] = []
+    conditional = False
+    for keyword in ("if", "where", "elsewhere"):
+        if not re.match(rf"^{keyword}\b", value):
+            continue
+        conditional = True
+        open_pos = value.find("(")
+        if open_pos >= 0:
+            depth = 0
+            close_pos = -1
+            for pos in range(open_pos, len(value)):
+                depth += value[pos] == "("
+                depth -= value[pos] == ")"
+                if depth == 0:
+                    close_pos = pos
+                    break
+            if close_pos >= 0:
+                prefix_reads.append(value[open_pos + 1 : close_pos])
+                value = value[close_pos + 1 :].strip()
+        break
+    match = re.match(r"^([a-z]\w*)\s*(.*)$", value)
     if not match:
-        return None
-    return statement[: match.start()], statement[match.end() :]
+        return "", " ".join(prefix_reads), False
+    target, suffix = match.groups()
+    whole_slice = bool(re.fullmatch(r"\(\s*:\s*(?:,\s*:\s*)*\)", suffix.strip()))
+    indexed = "(" in suffix and not whole_slice
+    if indexed:
+        open_pos = suffix.find("(")
+        close_pos = suffix.rfind(")")
+        prefix_reads.append(suffix[open_pos + 1 : close_pos] if close_pos > open_pos else suffix)
+    return target, " ".join(prefix_reads), not conditional and not indexed and (
+        not suffix.strip() or whole_slice
+    )
 
 
 def _routine_reads(
-    routine: Routine, routine_names: set[str]
+    routine: Routine, callable_names: set[str]
 ) -> tuple[set[str], set[str], set[str]]:
     array_reads: set[str] = set()
     scalar_reads: set[str] = set()
@@ -217,27 +287,30 @@ def _routine_reads(
         low = statement.lower()
         if _declared_names(low):
             continue
-        calls.update(re.findall(r"\bcall\s+([a-z]\w*)", low))
+        statement_calls = set(re.findall(r"\bcall\s+([a-z]\w*)", low))
+        statement_calls.update(_array_identifiers(low) & callable_names)
+        calls.update(statement_calls)
         assignment = _assignment(low)
         read_text = low
+        whole_write = ""
         if assignment:
             lhs, rhs = assignment
-            base = re.match(r"\s*(?:where\s*\([^)]*\)\s*)?([a-z]\w*)", lhs)
-            lhs_base = base.group(1) if base else ""
-            indices = lhs[lhs.find("(") + 1 : lhs.rfind(")")] if "(" in lhs and ")" in lhs else ""
-            read_text = rhs + " " + indices
-            if lhs_base:
-                written_whole.add(lhs_base)
+            lhs_base, lhs_reads, is_whole_write = _lhs_parts(lhs)
+            read_text = rhs + " " + lhs_reads
+            if lhs_base and is_whole_write:
+                whole_write = lhs_base
         candidates = _array_identifiers(read_text)
-        candidates -= routine.locals | KEYWORDS | INTRINSICS | routine_names | calls
+        candidates -= routine.locals | KEYWORDS | INTRINSICS | callable_names | calls
         candidates -= written_whole
         array_reads.update(candidates)
         identifiers = _identifiers(read_text)
-        identifiers -= routine.locals | KEYWORDS | INTRINSICS | routine_names | calls
+        identifiers -= routine.locals | KEYWORDS | INTRINSICS | callable_names | calls
         identifiers -= candidates | written_whole | {"wp", "true", "false"}
         scalar_reads.update(
             value for value in identifiers if not re.fullmatch(r"[ed]\d+", value)
         )
+        if whole_write:
+            written_whole.add(whole_write)
     return array_reads, scalar_reads, calls
 
 
@@ -274,14 +347,14 @@ def _source_coverage(ppsrc: Path) -> tuple[set[str], set[str]]:
 
 
 def derive_and_gate(ppsrc: Path = DEFAULT_PPSRC, plant: str | None = None) -> dict[str, object]:
-    routines = _index_routines(ppsrc)
+    routines, interfaces = _index_routines(ppsrc)
     routine_names = set(routines)
+    callable_names = routine_names | set(interfaces)
     gate = _load_gate()
     namelist_names, source_parameters = _source_coverage(ppsrc)
     recorded_scalars = {name.lower() for name in gate.SCALAR_NAMES}
-    known_fields = {
-        _normalise(field.name) for kind in gate.KINDS.values() for field in kind.fields
-    }
+    if plant == "drop-nn_snwfra":
+        recorded_scalars.discard("nn_snwfra")
     rows: dict[str, object] = {}
     for rung, roots in ROOTS.items():
         pending = list(roots)
@@ -298,35 +371,44 @@ def derive_and_gate(ppsrc: Path = DEFAULT_PPSRC, plant: str | None = None) -> di
             visited.add(name)
             routine = routines[name]
             sources.add(f"{routine.source}:{name}")
-            direct, direct_scalars, calls = _routine_reads(routine, routine_names)
+            direct, direct_scalars, calls = _routine_reads(routine, callable_names)
             reads.update(_normalise(value) for value in direct)
             scalar_reads.update(_normalise(value) for value in direct_scalars)
-            pending.extend(sorted(call for call in calls if call in routines))
+            resolved_calls: set[str] = set()
+            for call in calls:
+                if call in routines:
+                    resolved_calls.add(call)
+                resolved_calls.update(interfaces.get(call, ()))
+            pending.extend(sorted(resolved_calls))
         reads = {
             name for name in reads
             if name not in NON_REPLAY_ARRAYS and not name.startswith(("diag_", "rdiag_"))
         }
+        covered: set[str] = set()
+        for kind in ENTRY_KINDS[rung]:
+            fields = gate.KINDS[kind].fields
+            if plant == "drop-snwice_mass" and kind == 15:
+                fields = tuple(field for field in fields if field.name != "snwice_mass")
+            if plant == "drop-rmw-sfx_lam" and kind == 8:
+                fields = tuple(field for field in fields if field.name != "sfx_lam")
+            covered.update(_normalise(field.name) for field in fields)
         scalar_reads = {
-            name for name in scalar_reads - reads - known_fields
+            name for name in scalar_reads - reads - covered
             if not name.startswith(("diag_", "rdiag_"))
-        }
-        covered = {
-            _normalise(field.name)
-            for kind in ENTRY_KINDS[rung]
-            for field in gate.KINDS[kind].fields
         }
         if plant == "drop-sst_m":
             covered.discard("sst_m")
         elif plant == "drop-qlead":
             covered.discard("qlead")
-        elif plant == "drop-snwice_mass" and rung == "O16":
-            covered.discard("snwice_mass")
         missing = sorted(reads - covered)
         if missing:
             raise ValueError(f"STATUS PLANT-FIRED: {rung} source read-set is not recorded: {missing}")
         scalar_coverage: dict[str, str] = {}
         for name in sorted(scalar_reads):
-            if name in recorded_scalars:
+            if name in HEADER_REQUIRED_SCALARS:
+                if name in recorded_scalars:
+                    scalar_coverage[name] = "record_header"
+            elif name in recorded_scalars:
                 scalar_coverage[name] = "record_header"
             elif name in META_SCALARS:
                 scalar_coverage[name] = "record_metadata"
@@ -357,7 +439,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--ppsrc", type=Path, default=DEFAULT_PPSRC)
     parser.add_argument(
-        "--plant", choices=("drop-sst_m", "drop-qlead", "drop-rn_hinew", "drop-snwice_mass")
+        "--plant", choices=("drop-sst_m", "drop-qlead", "drop-rn_hinew", "drop-snwice_mass",
+                            "drop-nn_snwfra", "drop-rmw-sfx_lam")
     )
     args = parser.parse_args(argv)
     try:

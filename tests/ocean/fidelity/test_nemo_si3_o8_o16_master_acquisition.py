@@ -70,9 +70,11 @@ def test_every_reviewed_boundary_input_is_recorded() -> None:
     assert {"t_bo", "ht_i_new", "fraz_frac", "sss_m", "hi_max", "rn_amax_2d"} <= names(12) & names(13)
     assert {"sss_m", "sst_m", "hi_max", "hi_mean", "rn_amax_2d"} <= names(13) & names(14)
     assert {"at_i_b", "a_i_b", "wfx_snw_dyn", "tmask_k1", "smask0", "qemp_ice", "cloud_fra"} <= names(15)
-    assert {"uu_kbb", "vv_kbb", "umask_k1", "vmask_k1", "utau", "vtau", "taum"} <= names(19)
+    assert {"t_si", "sss_m", "hi_max"} <= names(18)
+    assert {"uu_kbb", "vv_kbb", "umask_k1", "vmask_k1", "utau", "vtau", "taum",
+            "tmod_io", "utau_oce", "vtau_oce"} <= names(19)
     assert {"utau", "vtau", "taum", "rCdU_ice"} == names(20)
-    assert names(18) == {field.name for field in gate.STATE}
+    assert names(18) == {field.name for field in gate.STATE} | {"t_si", "sss_m", "hi_max"}
     assert {"rcnd_s", "rn_kappa_i", "rn_kappa_s", "rn_snwblow", "rn_sinew",
             "nn_icesal", "rn_beta", "rn_dmin"} <= set(gate.SCALAR_NAMES)
     assert {"rn_icesal", "rn_sal_gd", "rn_time_gd", "rn_sal_fl", "rn_time_fl",
@@ -81,6 +83,7 @@ def test_every_reviewed_boundary_input_is_recorded() -> None:
             "rn_hpnd", "ln_pnd_alb", "rn_pnd_hl_min", "rn_pnd_hl_max"} <= set(gate.SCALAR_NAMES)
     assert {"rn_alb_sdry", "rn_alb_smlt", "rn_alb_idry", "rn_alb_imlt",
             "rn_alb_dpnd", "rn_alb_lpnd", "rn_alb_hpiv"} <= set(gate.SCALAR_NAMES)
+    assert "nn_snwfra" in gate.SCALAR_NAMES
     assert gate.KINDS[17].fields[-5].extent == "GI"
     assert gate.KINDS[17].fields[-2].extent == "GS"
     extents = lambda kind: {field.name: field.extent for field in gate.KINDS[kind].fields}
@@ -113,14 +116,14 @@ def test_each_rung_reader_accepts_only_its_registered_projection(rung: str) -> N
 
 def test_size_and_retention_are_explicit() -> None:
     report = gate.size_report()
-    assert report["master_bytes_worst_case"] == 141_156_786_740
-    assert report["master_gib_worst_case"] == pytest.approx(131.46250205114484)
+    assert report["master_bytes_worst_case"] == 141_605_444_460
+    assert report["master_gib_worst_case"] == pytest.approx(131.88034711323678)
     assert "without copying" in report["retention"]
 
 
 def test_writer_field_counts_and_real_extent_branches_match_schema() -> None:
     text = (ACQ / "o8_o16_master_writer.F90").read_text()
-    for count in (2, 4, 10, 12, 13, 16, 23, 67, 70, 98, 114):
+    for count in (2, 4, 10, 12, 16, 23, 26, 67, 70, 98, 118):
         assert f",{count},u)" in text
     for spec in gate.KINDS.values():
         names = [field.name for field in spec.fields]
@@ -145,12 +148,27 @@ def test_source_derived_readsets_cover_every_rung_and_plants_fire() -> None:
     assert set(report["rungs"]) == set(gate.PROJECTIONS)
     assert "sst_m" in report["rungs"]["O15"]["array_reads"]
     assert "rn_hinew" in report["rungs"]["O8"]["scalar_reads"]
+    assert {"qml_ice", "sfx_bri", "sfx_res"} <= set(report["rungs"]["O9"]["array_reads"])
+    assert {"sfx_bri", "sfx_res"} <= set(report["rungs"]["O10"]["array_reads"])
+    assert {"sfx_lam", "hfx_thd", "wfx_lam"} <= set(report["rungs"]["O11"]["array_reads"])
+    assert {"hfx_res", "wfx_res"} <= set(report["rungs"]["O15"]["array_reads"])
+    assert "nn_snwfra" in report["rungs"]["O9"]["scalar_reads"]
+    assert {"ice_var_snwfra_1d", "ice_var_snwfra_3d",
+            "ice_var_snwblow_1d", "ice_var_snwblow_2d"} <= set(
+        report["rungs"]["O9"]["callees"]
+    )
+    assert "snw_ent" in report["rungs"]["O9"]["callees"]
+    assert "ice_perm_eff" in report["rungs"]["O12"]["callees"]
+    assert {"icevar.f90:ice_var_glo2eqv", "icevar.f90:ice_var_agg"} <= set(
+        report["rungs"]["O16"]["sources"]
+    )
     assert all(row["scalar_coverage"] for row in report["rungs"].values())
     assert "rCdU_ice" in {field.name for field in gate.KINDS[20].fields}
-    for plant in ("drop-sst_m", "drop-qlead", "drop-rn_hinew", "drop-snwice_mass"):
+    for plant in ("drop-sst_m", "drop-qlead", "drop-rn_hinew", "drop-snwice_mass",
+                  "drop-nn_snwfra", "drop-rmw-sfx_lam"):
         with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):
             readset.derive_and_gate(readset.DEFAULT_PPSRC, plant)
-    assert report["rungs"]["O16"]["entry_kinds"] == [15, 19]
+    assert report["rungs"]["O16"]["entry_kinds"] == [18, 15, 19]
     assert "snwice_mass" in report["rungs"]["O16"]["coverage"]
 
 
@@ -240,7 +258,7 @@ def test_preflight_compiles_and_runs_real_patched_source_without_nemo(tmp_path: 
         [str(ACQ / "run.sh"), "--preflight-only", str(report)], cwd=REPO, env=env,
         text=True, capture_output=True, check=True, timeout=1200,
     )
-    assert json.loads(report.read_text()) == {"status": "PREFLIGHT_OK", "nemo_run": False, "plants": 51}
+    assert json.loads(report.read_text()) == {"status": "PREFLIGHT_OK", "nemo_run": False, "plants": 53}
     assert "PASS_SOURCE_DERIVED_READ_SETS" in proc.stdout
     assert "PASS_REAL_PPSRC_PLACEMENT" in proc.stdout
     assert "PASS_REAL_PATCHED_BOUNDS_FIXTURE" in proc.stdout

@@ -26,6 +26,7 @@ UNITS = {
     "icethd_pnd": ("__icethd_pnd_MOD_ice_thd_pnd", "a_ip(1,1,1) = a_ip(1,1,1) + 1._wp"),
     "icethd_zdf_bl99": ("__icethd_zdf_bl99_MOD_ice_thd_zdf_bl99", "t_i_1d(1,1) = t_i_1d(1,1) + 1._wp"),
     "icealb": ("__icealb_MOD_ice_alb", "palb_ice(1,1,1) = palb_ice(1,1,1) + 1._wp"),
+    "iceupdate": ("__iceupdate_MOD_ice_update_tau", "taum(1,1) = taum(1,1) + 1._wp"),
 }
 
 

@@ -311,7 +311,10 @@ def validate_writer(
 ) -> dict[str, object]:
     paths = tuple(ppsrc.glob("*.f90")) + (writer,)
     catalog = build_catalog(paths)
-    aliases = {"pu_oce": "uu(:,:,1,1)", "pv_oce": "vv(:,:,1,1)"}
+    aliases = {
+        "pu_oce": "uu(:,:,1,1)", "pv_oce": "vv(:,:,1,1)",
+        "ptmod_io": "tmod_io", "putau_oce": "utau_oce", "pvtau_oce": "vtau_oce",
+    }
     if plant == "missing-allocation":
         catalog.pop("rcdu_ice", None)
     if plant == "dummy-actual":

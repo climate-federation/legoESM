@@ -23,7 +23,7 @@ PROGRAM real_bounds_driver
    rDt_ice=10800._wp ; r1_Dt_ice=1._wp/rDt_ice
    r1_nlay_i=1._wp/REAL(nlay_i,wp) ; r1_nlay_s=1._wp/REAL(nlay_s,wp)
    rn_kappa_i=1._wp ; rn_kappa_s=10._wp ; rn_snwblow=0.66_wp
-   rn_sinew=0.75_wp ; nn_icesal=4 ; rn_simin=0.1_wp ; rn_himin=0.1_wp
+   rn_sinew=0.75_wp ; nn_icesal=4 ; nn_snwfra=1 ; rn_simin=0.1_wp ; rn_himin=0.1_wp
    ln_zdf_chkcvg=.FALSE. ; ln_sal_chk=.FALSE. ; rcnd_s=0.31_wp
 
    ierr=ice_alloc() ; ierr=ierr+ice1D_alloc()
@@ -35,7 +35,8 @@ PROGRAM real_bounds_driver
    cloud_fra=715._wp ; sprecip=716._wp ; tprecip=717._wp ; utau=718._wp ; vtau=719._wp ; taum=720._wp
    qsr_oce=721._wp ; qns_oce=722._wp ; qemp_oce=723._wp ; qemp_ice=724._wp
    emp_oce=725._wp ; emp_ice=726._wp ; qsr_ice=727._wp ; qns_ice=728._wp
-   qevap_ice=729._wp ; qcn_ice=730._wp ; qml_ice=731._wp ; qtr_ice_top=732._wp
+   qevap_ice=729._wp ; qcn_ice=730._wp ; qcn_ice_top=730.25_wp ; qcn_ice_bot=730.5_wp
+   qml_ice=731._wp ; qtr_ice_top=732._wp
    tn_ice=733._wp ; alb_ice=734._wp ; snwice_mass=735._wp ; snwice_mass_b=736._wp ; snwice_fmass=737._wp
    utau_ice=737.25_wp ; vtau_ice=737.5_wp ; rCdU_ice=738._wp
 
@@ -49,7 +50,7 @@ PROGRAM real_bounds_driver
    om_i=837._wp ; at_ip=838._wp ; at_ip_eff=839._wp ; hm_ip=840._wp ; vt_ip=841._wp
    hm_il=842._wp ; vt_il=843._wp ; tm_si=845._wp
    dh_i_sum_2d=846._wp ; dh_s_sum_2d=847._wp ; h_i_b=848._wp ; a_i_b=849._wp
-   t_bo=850._wp ; rn_amax_2d=853._wp
+   t_bo=850._wp ; t_si=850.5_wp ; rn_amax_2d=853._wp
    hi_max=854._wp ; hi_mean=855._wp ; u_ice=856._wp ; v_ice=857._wp
    u_oce=858._wp ; v_oce=859._wp ; drag_io=860._wp
 
@@ -117,6 +118,6 @@ PROGRAM real_bounds_driver
    DO kind=10,14 ; CALL o8o16_global(kind) ; END DO
    CALL o8o16_update(18) ; CALL o8o16_update(15) ; CALL o8o16_update(16)
    pu=1201._wp ; pv=1202._wp
-   CALL o8o16_tau(19,pu,pv) ; CALL o8o16_tau(20,pu,pv)
+   CALL o8o16_tau(19,pu,pv,pu,pu,pv) ; CALL o8o16_tau(20,pu,pv,pu,pu,pv)
    PRINT '(A)', 'PASS_REAL_PATCHED_BOUNDS_FIXTURE'
 END PROGRAM real_bounds_driver

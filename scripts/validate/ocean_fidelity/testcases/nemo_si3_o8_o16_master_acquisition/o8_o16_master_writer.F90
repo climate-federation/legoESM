@@ -2,7 +2,7 @@ MODULE o8_o16_master_writer
    USE, INTRINSIC :: iso_fortran_env, ONLY: int32, real64
    USE par_oce, ONLY: wp, jpi, jpj, nn_hls, ntsi, ntei, ntsj, ntej
    USE par_ice, ONLY: jpl, nlay_i, nlay_s, rn_kappa_i, rn_kappa_s, rn_snwblow, rn_sinew, &
-      &              nn_icesal, r1_nlay_i, r1_nlay_s, rn_simin, rn_himin
+      &              nn_icesal, r1_nlay_i, r1_nlay_s, rn_simin, rn_himin, nn_snwfra
    USE phycst, ONLY: rcnd_s
    USE dom_oce, ONLY: tmask, smask0, umask, vmask
    USE ice
@@ -98,7 +98,7 @@ CONTAINS
       CHARACTER(LEN=8), PARAMETER :: magic='O816M001'
       CHARACTER(LEN=192) :: path,label,suffix
       INTEGER(int32), DIMENSION(20) :: meta
-      REAL(real64), DIMENSION(58) :: scalars
+      REAL(real64), DIMENSION(59) :: scalars
       SELECT CASE(kind)
       CASE(1); label='frazil_entry'
       CASE(2); label='frazil_exit'
@@ -148,7 +148,7 @@ CONTAINS
          MERGE(1._wp,0._wp,current_pnd_topo),current_apnd,current_hpnd, &
          MERGE(1._wp,0._wp,current_pnd_alb),current_pnd_hl_min,current_pnd_hl_max, &
          current_alb_sdry,current_alb_smlt,current_alb_idry,current_alb_imlt, &
-         current_alb_dpnd,current_alb_lpnd,current_alb_hpiv]
+         current_alb_dpnd,current_alb_lpnd,current_alb_hpiv,REAL(nn_snwfra,wp)]
       WRITE(u) magic ; WRITE(u) INT(1,int32) ; WRITE(u) meta ; WRITE(u) scalars
    END SUBROUTINE open_record
 
@@ -450,15 +450,18 @@ CONTAINS
       INTEGER,INTENT(in)::kind
       INTEGER::u
       IF(kind==18) THEN
-         CALL open_record(kind,0,0,23,u); CALL put_state(u)
+         CALL open_record(kind,0,0,26,u); CALL put_state(u)
+         CALL put_i3(u,t_si); CALL put_i2(u,sss_m); CALL put_c0(u,hi_max)
       ELSEIF(kind==15) THEN
-         CALL open_record(kind,0,0,114,u); CALL put_state(u); CALL put_totals(u); CALL put_flux(u)
+         CALL open_record(kind,0,0,118,u); CALL put_state(u); CALL put_totals(u); CALL put_flux(u)
          CALL put_i2(u,qsr_oce); CALL put_i2(u,qns_oce); CALL put_i2(u,qemp_oce); CALL put_i2(u,qemp_ice)
          CALL put_i2(u,emp_oce); CALL put_i2(u,emp_ice); CALL put_i2(u,qns_tot)
          CALL put_i2(u,qsr_tot); CALL put_i2(u,frq_m); CALL put_i3(u,a_i_b)
          CALL put_i3(u,qsr_ice); CALL put_i3(u,qns_ice); CALL put_i3(u,qtr_ice_bot)
-         CALL put_i3(u,qevap_ice); CALL put_i3(u,qcn_ice); CALL put_i3(u,qml_ice)
+         CALL put_i3(u,qevap_ice); CALL put_i3(u,qcn_ice); CALL put_i3(u,qcn_ice_top); CALL put_i3(u,qcn_ice_bot)
+         CALL put_i3(u,qml_ice)
          CALL put_i3(u,qtr_ice_top); CALL put_i3(u,alb_ice); CALL put_i2(u,at_i_b); CALL put_i2(u,wfx_snw_dyn)
+         CALL put_i2(u,qsr); CALL put_i2(u,sfx)
          CALL put_i2(u,cloud_fra); CALL put_f2(u,tmask(:,:,1)); CALL put_i2(u,smask0)
          CALL put_f2(u,snwice_mass); CALL put_f2(u,snwice_mass_b)
       ELSEIF(kind==16) THEN
@@ -475,17 +478,18 @@ CONTAINS
       CLOSE(u)
    END SUBROUTINE o8o16_update
 
-   SUBROUTINE o8o16_tau(kind,pu_oce,pv_oce)
+   SUBROUTINE o8o16_tau(kind,pu_oce,pv_oce,ptmod_io,putau_oce,pvtau_oce)
       INTEGER,INTENT(in)::kind
-      REAL(wp),DIMENSION(:,:),INTENT(in)::pu_oce,pv_oce
+      REAL(wp),DIMENSION(:,:),INTENT(in)::pu_oce,pv_oce,ptmod_io,putau_oce,pvtau_oce
       INTEGER::u
       IF(kind==19) THEN
-         CALL open_record(kind,0,0,13,u)
+         CALL open_record(kind,0,0,16,u)
          CALL put_f2(u,pu_oce); CALL put_f2(u,pv_oce)
          CALL put_f2(u,umask(:,:,1)); CALL put_f2(u,vmask(:,:,1))
          CALL put_f2(u,u_ice); CALL put_f2(u,v_ice); CALL put_f2(u,u_oce); CALL put_f2(u,v_oce)
-         CALL put_f2(u,drag_io); CALL put_f2(u,at_i)
+         CALL put_f2(u,drag_io); CALL put_f2(u,at_i); CALL put_f2(u,ptmod_io)
          CALL put_f2(u,utau); CALL put_f2(u,vtau); CALL put_i2(u,taum)
+         CALL put_i2(u,putau_oce); CALL put_i2(u,pvtau_oce)
       ELSEIF(kind==20) THEN
          CALL open_record(kind,0,0,4,u)
          CALL put_f2(u,utau); CALL put_f2(u,vtau); CALL put_i2(u,taum); CALL put_h1(u,rCdU_ice)

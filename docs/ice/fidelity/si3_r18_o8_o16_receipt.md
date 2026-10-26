@@ -28,10 +28,23 @@ does not call `ice_var_brine`; and the nine diagnostics first filled by
 integrations must report resolved `ln_drgice_imp=T` in `output.namelist.dyn`
 before admission.
 
+Resume-6 review repairs retain indexed, conditional and read-modify-write left
+hand sides as inputs, and gate every rung against only its `ENTRY_KINDS` rather
+than subtracting fields found in unrelated record kinds. The scanner resolves
+the `ice_var_snwfra` and `ice_var_snwblow` generic interfaces
+(`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icevar.f90:105-111`) to their concrete
+procedures (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icevar.f90:1578-1643`), follows
+function references, and records `nn_snwfra`. O16 now starts from both calls at
+the true pre-aggregation boundary and records the `t_si`, `hi_max`, and `sss_m`
+inputs they consume (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icevar.f90:185-190`,
+`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icevar.f90:296-299`,
+`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icevar.f90:362-387`,
+`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icevar.f90:505-514`).
+
 A shared allocation gate parses NEMO's preprocessed `ALLOCATE` statements and
 explicit automatic-array declarations, expands `A2D(n)`/`T2D(n)`, resolves the
 deck's `Ni0glo=180`, `Nj0glo=148`, `jpkglo=31`, and `nn_hls=2`, and validates
-all 283 writer `put_*` actual arguments. It derives `rCdU_ice` as 182 by 150
+all 293 writer `put_*` actual arguments. It derives `rCdU_ice` as 182 by 150
 from `Nis0-1:Nie0+1,Njs0-1:Nje0+1`; kind 20 therefore uses a distinct halo-one
 extent rather than the 184 by 152 full-grid extent. The same catalog generates
 the bounds fixture allocations.
@@ -58,17 +71,17 @@ surface fluxes.
 | O13 | 11 ITD entry; 12 ITD exit | common global state plus explicit `h_i_b`, `a_i_b`, `hi_max`, `rn_amax_2d` (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/iceitd.f90:175-232`, `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/iceitd.f90:464`) |
 | O14 | 12 `ice_thd_do` entry; 13 exit | common global state plus explicit `t_bo`, `ht_i_new`, `fraz_frac`, `sss_m`, `hi_max`, `rn_amax_2d` (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:196-206`, `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:304`) |
 | O15 | 13 correction entry; 14 exit | common global state plus explicit `sss_m`, `sst_m`, `hi_max`, `hi_mean`, `rn_amax_2d` (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icecor.f90:94-118`, `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/iceitd.f90:632-668`) |
-| O16 | 18 pre-aggregation; 15 `ice_update_flx` entry; 16 ocean-format exit; 19 `ice_update_tau` entry; 20 stress exit | post-`ice_var_agg(2)` state including its nine diagnostics; then `at_i_b`, `a_i_b`, `qemp_ice`, `smask0`, `qcn_ice`, `qml_ice`, `qtr_ice_top/bot`, `alb_ice`, `snwice_mass`, `wfx_snw_dyn`, `tmask_k1`, `cloud_fra`, all seven `rn_alb_*` scalars and the other flux inputs; stress entry includes `uu`, `vv`, `umask`, `vmask`, ice/ocean velocity, `drag_io`, `at_i`, and full halo `utau`/`vtau`; exits retain full `fr_i`, `utau`, `vtau`, halo-one `rCdU_ice` and interior `taum` (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icestp.f90:254-257`, `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/iceupdate.f90:119-223`, `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/iceupdate.f90:332-423`) |
+| O16 | 18 pre-aggregation; 15 `ice_update_flx` entry; 16 ocean-format exit; 19 `ice_update_tau` entry; 20 stress exit | pre-aggregation `t_si`, `sss_m`, `hi_max` and aggregate/equivalent inputs; kind 15 post-aggregation state including its nine diagnostics, `at_i_b`, `a_i_b`, `qemp_ice`, `smask0`, `qcn_ice`, `qml_ice`, `qtr_ice_top/bot`, `alb_ice`, `snwice_mass`, `wfx_snw_dyn`, `tmask_k1`, `cloud_fra`, all seven `rn_alb_*` scalars and the other flux inputs; stress entry includes `uu`, `vv`, `umask`, `vmask`, ice/ocean velocity, `drag_io`, `at_i`, carried `tmod_io`, `utau_oce`, `vtau_oce`, and full halo `utau`/`vtau`; exits retain full `fr_i`, `utau`, `vtau`, halo-one `rCdU_ice` and interior `taum` (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icestp.f90:254-257`, `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/iceupdate.f90:119-223`, `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/iceupdate.f90:332-423`) |
 
 The per-category Picard counter is reset at every category entry, so no value
-can leak between categories. The scalar header contains all 58 shared,
-salinity, pond, lateral-melt and albedo constants by recorded name.
+can leak between categories. The scalar header contains all 59 shared,
+salinity, pond, lateral-melt, snow-fraction and albedo constants by recorded name.
 
 ## Storage, disk and wall-clock gates
 
-The schema-derived worst case is **141,156,786,740 bytes (131.46 GiB)**.
+The schema-derived worst case is **141,605,444,460 bytes (131.88 GiB)**.
 Per-rung projected sizes are O8 0.23 GiB, O9 41.49 GiB, O10 36.87 GiB, O11
-26.80 GiB, O12–O15 17.15 GiB each, and O16 16.65 GiB. Shared boundaries are
+26.80 GiB, O12–O15 17.15 GiB each, and O16 17.07 GiB. Shared boundaries are
 referenced rather than copied.
 
 The driver gates free and final evidence disk use at **150,000,000 KiB
@@ -85,14 +98,15 @@ The generated driver passed all ten phases:
   corruption plants for all nine projections;
 - mechanically generated routine/callee array and scalar read-sets for every
   O8--O16 rung against its entry projection, with missing `qlead`, `sst_m`,
-  `snwice_mass`, and `rn_hinew` plants;
+  `snwice_mass`, `nn_snwfra`, read-modify-write `sfx_lam`, and `rn_hinew`
+  plants;
 - exact 100-step production deck and group-membership plants;
 - patch placement against original NEMO `.F90` sources preprocessed exactly once;
-- production-flag FP-passivity census for all eight patched units; shared
+- production-flag FP-passivity census for all nine patched units; shared
   source-allocation checks for all writer calls, with missing-allocation,
   writer-mode, dummy/actual, and generated-fixture mismatch plants;
 - production-flag plus `-fcheck=bounds` compilation of the real writer and all
-  eight real patched units, followed by a fixture that executes every emitted
+  nine real patched units, followed by a fixture that executes every emitted
   kind 1–21 with distinct data, retained `-0.0`, nonzero lateral-melt/albedo
   values, the deck's real halo width, source-generated allocations, and a
   quiet-NaN layer-0 absorption sentinel that is not written;
@@ -115,12 +129,12 @@ physics result or fidelity claim is made here.
 ## Gates
 
 - Acquisition unit checks: 27 passed; the complete clean-tree preflight passed
-  separately through all ten phases with 51 plants and the full driver retention fixture.
+  separately through all ten phases with 53 plants and the full driver retention fixture.
 - Required default receipt-citation gate: 35 passed. The cumulative default
-  report passes 274 citations and this receipt passes all 15 live citations;
+  report passes 274 citations and this receipt passes all 21 live citations;
   both have zero unmapped/failing citations and every built-in plant fires.
-- Eight CI ratchet files: 12,146 passed, 4 skipped, 12 failed. All 12 failures
+- Eight CI ratchet files: 6,420 passed, 2 skipped, 8 failed. All 8 failures
   name pre-existing, untouched files; none is in this acquisition,
   citation-map, test or receipt change.
 
-independent review: requested from operator (Claude-4.6 and Argon)
+independent review: Argon HOLD findings repaired in resume 6; final operator review requested

@@ -51,6 +51,7 @@ SCALAR_NAMES = (
     "rn_hpnd", "ln_pnd_alb", "rn_pnd_hl_min", "rn_pnd_hl_max",
     "rn_alb_sdry", "rn_alb_smlt", "rn_alb_idry", "rn_alb_imlt",
     "rn_alb_dpnd", "rn_alb_lpnd", "rn_alb_hpiv",
+    "nn_snwfra",
 )
 N_SCALARS = len(SCALAR_NAMES)
 HEADER_BYTES = 8 + 4 + 4 * N_META + 8 * N_SCALARS
@@ -172,8 +173,8 @@ KINDS: dict[int, Kind] = {
         STATE + TOTALS + FLUX
         + _fields("qsr_oce qns_oce qemp_oce qemp_ice emp_oce emp_ice qns_tot qsr_tot frq_m", "I2")
         + _fields("a_i_b qsr_ice qns_ice qtr_ice_bot qevap_ice", "I3")
-        + _fields("qcn_ice qml_ice qtr_ice_top alb_ice", "I3")
-        + _fields("at_i_b wfx_snw_dyn cloud_fra", "I2")
+        + _fields("qcn_ice qcn_ice_top qcn_ice_bot qml_ice qtr_ice_top alb_ice", "I3")
+        + _fields("at_i_b wfx_snw_dyn cloud_fra qsr sfx", "I2")
         + _fields("tmask_k1", "F2")
         + _fields("smask0", "I2")
         + _fields("snwice_mass snwice_mass_b", "F2"),
@@ -199,7 +200,7 @@ KINDS: dict[int, Kind] = {
     ),
     18: Kind(
         "pre_aggregation",
-        STATE,
+        STATE + _fields("t_si", "I3") + _fields("sss_m", "I2") + _fields("hi_max", "C0"),
     ),
 }
 
@@ -219,8 +220,8 @@ KINDS[17] = Kind(
 
 KINDS[19] = Kind(
     "tau_entry",
-    _fields("uu_kbb vv_kbb umask_k1 vmask_k1 u_ice v_ice u_oce v_oce drag_io at_i utau vtau", "F2")
-    + _fields("taum", "I2"),
+    _fields("uu_kbb vv_kbb umask_k1 vmask_k1 u_ice v_ice u_oce v_oce drag_io at_i utau vtau tmod_io", "F2")
+    + _fields("taum utau_oce vtau_oce", "I2"),
 )
 KINDS[20] = Kind("tau_exit", _fields("utau vtau", "F2") + _fields("taum", "I2") + _fields("rCdU_ice", "H1"))
 KINDS[21] = Kind("pre_category_state", STATE)
@@ -666,7 +667,7 @@ def verify_same_program(
 ) -> dict[str, Any]:
     units = (
         "icestp", "icethd", "icethd_do", "icethd_da", "icethd_sal",
-        "icethd_pnd", "icethd_zdf_bl99", "icealb",
+        "icethd_pnd", "icethd_zdf_bl99", "icealb", "iceupdate",
     )
     markers = {unit: ("! O8O16_OBSERVER_BEGIN", "! O8O16_OBSERVER_END") for unit in units}
     expected = {unit: expected_ppsrc_dir / f"{unit}.f90" for unit in units}

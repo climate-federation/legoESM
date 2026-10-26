@@ -41,7 +41,7 @@ readonly PROD=$NEMO_ROOT/cfgs/$SOURCE_CFG/EXPREF
 readonly SHARED=$NEMO_ROOT/cfgs/SHARED
 readonly REF_ROOT=$NEMO_ROOT/cfgs/$REF_CFG
 readonly REC_ROOT=$NEMO_ROOT/cfgs/$REC_CFG
-readonly UNITS=(icestp icethd icethd_do icethd_da icethd_sal icethd_pnd icethd_zdf_bl99 icealb)
+readonly UNITS=(icestp icethd icethd_do icethd_da icethd_sal icethd_pnd icethd_zdf_bl99 icealb iceupdate)
 readonly MASTER_BYTES=$($PY "$GATE" --size | $PY -c 'import json,sys; print(json.load(sys.stdin)["master_bytes_worst_case"])')
 readonly MASTER_GIB=$($PY "$GATE" --size | $PY -c 'import json,sys; print("%.2f" % json.load(sys.stdin)["master_gib_worst_case"])')
 export O8O16_GATE=$GATE O8O16_PY=$PY
@@ -164,8 +164,9 @@ checks={
 'icethd_da.f90':[('READ(numnam_ice_cfg','CALL o8o16_da_config')],
 'icethd_sal.f90':[('IF( nn_icesal /= 4 )','CALL o8o16_salinity_config')],
 'icethd_pnd.f90':[('IF( ioptio /= 1 )','CALL o8o16_pond_config')],
-'icestp.f90':[('CALL ice_thd','CALL o8o16_update(18)'),('CALL o8o16_update(18)','CALL ice_var_glo2eqv'),('CALL ice_var_agg','CALL o8o16_update(15)'),('CALL o8o16_update(15)','CALL ice_update_flx'),('CALL ice_update_flx','CALL o8o16_update(16)'),('CALL o8o16_tau(19','CALL ice_update_tau'),('CALL ice_update_tau','CALL o8o16_tau(20')],
+'icestp.f90':[('CALL ice_thd','CALL o8o16_update(18)'),('CALL o8o16_update(18)','CALL ice_var_glo2eqv'),('CALL ice_var_agg','CALL o8o16_update(15)'),('CALL o8o16_update(15)','CALL ice_update_flx'),('CALL ice_update_flx','CALL o8o16_update(16)')],
 'icealb.f90':[('READ(numnam_ice_cfg','CALL o8o16_albedo_config')],
+'iceupdate.f90':[('SUBROUTINE ice_update_tau','CALL o8o16_tau(19'),('CALL o8o16_tau(19','IF( MOD( kt-1, nn_fsbc )'),('vtau(ji,jj) =','CALL o8o16_tau(20'),('CALL o8o16_tau(20',"CALL timing_stop('iceupdate')")],
 }
 for file,pairs in checks.items():
     text=(d/file).read_text()
@@ -255,7 +256,7 @@ compile_real_bounds_fixture() {
   local base_objects=()
   for obj in "$BASE_BLD"/obj/*.o; do
     case $(basename "$obj") in
-      nemo.o|icestp.o|icethd.o|icethd_do.o|icethd_da.o|icethd_sal.o|icethd_pnd.o|icethd_zdf_bl99.o|icealb.o) ;;
+      nemo.o|icestp.o|icethd.o|icethd_do.o|icethd_da.o|icethd_sal.o|icethd_pnd.o|icethd_zdf_bl99.o|icealb.o|iceupdate.o) ;;
       *) base_objects+=("$obj") ;;
     esac
   done
@@ -266,7 +267,7 @@ compile_real_bounds_fixture() {
     "$scratch/bounds_obj/icestp.o" "$scratch/bounds_obj/icethd.o" \
     "$scratch/bounds_obj/icethd_do.o" "$scratch/bounds_obj/icethd_da.o" \
     "$scratch/bounds_obj/icethd_sal.o" "$scratch/bounds_obj/icethd_pnd.o" \
-    "$scratch/bounds_obj/icethd_zdf_bl99.o" "$scratch/bounds_obj/icealb.o" \
+    "$scratch/bounds_obj/icethd_zdf_bl99.o" "$scratch/bounds_obj/icealb.o" "$scratch/bounds_obj/iceupdate.o" \
     "${base_objects[@]}" $link_flags
   (cd "$run" && "$scratch/real_bounds_fixture")
   "$PY" - "$run/o8_o16_master_records" <<'PY'
@@ -398,6 +399,8 @@ run_preflight() {
   expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-qlead
   expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-rn_hinew
   expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-snwice_mass
+  expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-nn_snwfra
+  expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-rmw-sfx_lam
   printf 'PASS_SOURCE_DERIVED_READ_SETS\n'
   for rung in O8 O9 O10 O11 O12 O13 O14 O15 O16; do
     "$PY" "$GATE" --projection-self-test "$rung" >/dev/null
@@ -441,7 +444,7 @@ run_preflight() {
   else
     printf 'PASS_EXISTING_CFG_DIGESTS_UNCHANGED: delegated to outer preflight\n'
   fi
-  if [[ -n "${PREFLIGHT_JSON:-}" ]]; then printf '{"status":"PREFLIGHT_OK","nemo_run":false,"plants":51}\n' > "$PREFLIGHT_JSON"; fi
+  if [[ -n "${PREFLIGHT_JSON:-}" ]]; then printf '{"status":"PREFLIGHT_OK","nemo_run":false,"plants":53}\n' > "$PREFLIGHT_JSON"; fi
   printf 'PREFLIGHT_OK: no real NEMO integration was run; worst-case master %s bytes (%s GiB)\n' "$MASTER_BYTES" "$MASTER_GIB"
   rm -rf -- "$scratch"; ACTIVE_SCRATCH=""
 }
@@ -546,7 +549,7 @@ nemo=Path('/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE_O7_R
 manifest={
  'producer_commit':commit,'binary_sha256':{'reference':sha(ev/'manifest/binaries/nemo.ref'),'record':sha(ev/'manifest/binaries/nemo.rec')},
  'source_sha256':{str(p.relative_to(repo)):sha(p) for p in sources},
- 'nemo_source_sha256':{unit:sha(nemo/f'{unit}.f90') for unit in ('icestp','icethd','icethd_do','icethd_da','icethd_sal','icethd_pnd','icethd_zdf_bl99','icealb')},
+ 'nemo_source_sha256':{unit:sha(nemo/f'{unit}.f90') for unit in ('icestp','icethd','icethd_do','icethd_da','icethd_sal','icethd_pnd','icethd_zdf_bl99','icealb','iceupdate')},
  'deck_sha256':{p.name:sha(p) for p in sorted(deck.iterdir())},
  'forcing_disposition':'O7_EXACT_PRODUCTS_TO_O8_O16',
  'dynamics_disposition':'PRODUCTION_DECK_ON_EXCLUDED_FROM_PROJECTIONS',
