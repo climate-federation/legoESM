@@ -259,3 +259,14 @@ both admission recovery routes pass; and the inherited suites pass 6, 5, and
 The acquisition disposition remains **ACQUISITION_NEEDED** at the operator
 command above. No NEMO executable was run, no model or configuration changed,
 and no unasked choice was made. Codex review: operator.
+
+The per-receipt citation gate reports PASS for 17 citations with zero failures,
+zero unmapped citations, zero map-audit failures, and all nine self-tests fired.
+The exact default ORCA2 landing battery passes 152 tests in 1,095.21 seconds;
+its log SHA-256 is
+`eb3651e27a73de3514417f9f64b0c8f8fdaa10fdc20dddae364b7a4ba15e5333`.
+The private-import ratchet also passes independently, 6 tests in 4.86 seconds;
+its log SHA-256 is
+`43965bf37d47a88cf243b415e98cb6dcfb35b76c1d222723fee50d1a093276b1`.
+The logs are `round336/resume4_citation_gate.json`,
+`round336/resume4_default_gate.log`, and `round336/resume4_ratchet.log`.
