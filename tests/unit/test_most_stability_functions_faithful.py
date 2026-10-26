@@ -37,8 +37,6 @@ Certification (test-only)
 
 from __future__ import annotations
 
-import math
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -103,35 +101,44 @@ def _bh_psi_h(z):
              + _BH_B * _BH_C / _BH_D - 1.0)
 
 
+def _f32(x):
+    return float(np.float32(x))
+
+
 def _coare_psi_m(z):
+    # AeroBulk 1.0.0 mod_common_coare psi_m_coare (default-real literals are
+    # single precision: 10.15, .3333, 1.7320508, 1.813799447, 0.6667, 14.28,
+    # 8.525); zeta == 0 is on the stable side (0.5 + SIGN(0.5, zeta)).
     z = float(z)
     if z < 0.0:
-        x = (1.0 - 15.0 * z) ** 0.25
+        x = abs(1.0 - 15.0 * z) ** 0.25
         pk = (2.0 * np.log((1.0 + x) / 2.0) + np.log((1.0 + x**2) / 2.0)
               - 2.0 * np.arctan(x) + np.pi / 2.0)
-        y = (1.0 - 10.15 * z) ** (1.0 / 3.0)
-        s3 = math.sqrt(3.0)
+        y = abs(1.0 - _f32(10.15) * z) ** _f32(0.3333)
+        s3 = _f32(1.7320508)
         pc = (1.5 * np.log((1.0 + y + y * y) / 3.0)
-              - s3 * np.arctan((1.0 + 2.0 * y) / s3) + np.pi / s3)
+              - s3 * np.arctan((1.0 + 2.0 * y) / s3) + _f32(1.813799447))
         f = z * z / (1.0 + z * z)
         return (1.0 - f) * pk + f * pc
     c = min(50.0, 0.35 * z)
-    return -((1.0 + z) + 0.6667 * (z - 14.28) * np.exp(-c) + 8.525)
+    return -((1.0 + z) + _f32(0.6667) * (z - _f32(14.28)) / np.exp(c) + _f32(8.525))
 
 
 def _coare_psi_h(z):
+    # AeroBulk 1.0.0 mod_common_coare psi_h_coare (see _coare_psi_m).
     z = float(z)
     if z < 0.0:
-        x = (1.0 - 15.0 * z) ** 0.5
+        x = abs(1.0 - 15.0 * z) ** 0.5
         pk = 2.0 * np.log((1.0 + x) / 2.0)
-        y = (1.0 - 34.15 * z) ** (1.0 / 3.0)
-        s3 = math.sqrt(3.0)
+        y = abs(1.0 - _f32(34.15) * z) ** _f32(0.3333)
+        s3 = _f32(1.7320508)
         pc = (1.5 * np.log((1.0 + y + y * y) / 3.0)
-              - s3 * np.arctan((1.0 + 2.0 * y) / s3) + np.pi / s3)
+              - s3 * np.arctan((1.0 + 2.0 * y) / s3) + _f32(1.813799447))
         f = z * z / (1.0 + z * z)
         return (1.0 - f) * pk + f * pc
     c = min(50.0, 0.35 * z)
-    return -((1.0 + 2.0 * z / 3.0) ** 1.5 + 0.6667 * (z - 14.28) * np.exp(-c) + 8.525)
+    return -(abs(1.0 + 2.0 * z / 3.0) ** 1.5 + _f32(0.6667) * (z - _f32(14.28)) / np.exp(c)
+             + _f32(8.525))
 
 
 # Dimensionless gradient phi_m typed from the papers (the primitive of psi_m);
@@ -173,8 +180,11 @@ def test_unstable_businger_dyer_shared_all_schemes():
     ref_m = _bd_psi_m(_ZU)
     ref_h = _bd_psi_h(_ZU)
     for sc in _SCHEMES:
+        # gryanik2020 heat: SurfaceFluxes.jl v1.5.1 scales the Businger
+        # fallback by Pr0 = 0.98 (phi_h(0) = Pr0, as on its stable branch).
+        pr0 = _GRY_PR0 if sc == "gryanik2020" else 1.0
         np.testing.assert_allclose(np.asarray(psi_m(_a(_ZU), sc)), ref_m, rtol=1e-12)
-        np.testing.assert_allclose(np.asarray(psi_h(_a(_ZU), sc)), ref_h, rtol=1e-12)
+        np.testing.assert_allclose(np.asarray(psi_h(_a(_ZU), sc)), pr0 * ref_h, rtol=1e-12)
 
 
 # ---------------------------------------------------------------------------
@@ -273,15 +283,17 @@ def test_near_neutral_slope_matches_a_m():
 
 def test_zeta_clip_saturates():
     # zeta is clipped to [-10, 10]; beyond that psi is constant. Cover psi_m AND
-    # psi_h for every selectable scheme, plus both COARE functions (a dropped clip
-    # in any one would otherwise pass unnoticed).
+    # psi_h for every selectable scheme (a dropped clip in any one would
+    # otherwise pass unnoticed).
     for sc in _SCHEMES:
         for fn in (psi_m, psi_h):
             _close(float(fn(_a([50.0]), sc)[0]), float(fn(_a([10.0]), sc)[0]))
             _close(float(fn(_a([-50.0]), sc)[0]), float(fn(_a([-10.0]), sc)[0]))
+    # AeroBulk's psi_m_coare/psi_h_coare carry no clip (TURB_COARE3P0 clips
+    # zeta at +-50 before calling them): beyond 10 they keep changing.
     for fn in (psi_m_coare, psi_h_coare):
-        _close(float(fn(_a([50.0]))[0]), float(fn(_a([10.0]))[0]))
-        _close(float(fn(_a([-50.0]))[0]), float(fn(_a([-10.0]))[0]))
+        assert float(fn(_a([50.0]))[0]) != float(fn(_a([10.0]))[0])
+        assert float(fn(_a([-50.0]))[0]) != float(fn(_a([-10.0]))[0])
 
 
 # ---------------------------------------------------------------------------

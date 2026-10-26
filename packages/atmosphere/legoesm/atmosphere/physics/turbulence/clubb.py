@@ -1107,7 +1107,9 @@ def make_clubb_grid_from_levels(z_full: jax.Array, z_half: jax.Array) -> CLUBBGr
 # Thin adapters over the CANONICAL Flatau (1992) saturation curves in
 # legoesm.thermo (per the CLAUDE.md no-saturation-reimpl rule): saturation
 # mixing ratio over liquid / ice with CLUBB's denominator guard
-# (saturation.F90, CAM ``saturation_formula = flatau``).
+# (saturation.F90 with ``saturation_formula = saturation_flatau``, the
+# standalone clubb_release default; CAM6 instead selects "gfdl" Goff-Gratch,
+# CESM2.1 ``clubb_intr.F90:66``).
 
 _SAT_DENOM_MIN_PA = 1.0  # p - esat floor [Pa] (saturation.F90 convention)
 

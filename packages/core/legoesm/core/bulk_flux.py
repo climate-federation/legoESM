@@ -4,12 +4,17 @@ Provides stability-dependent transfer coefficients using iterative
 Monin-Obukhov similarity theory (MOST). Three schemes:
 
 1. ``constant`` — Fixed neutral transfer coefficients (no iteration)
-2. ``coare3`` — COARE 3.0 (Fairall et al. 2003): Charnock + smooth-flow
-   roughness, Fairall Kansas + free-convective unstable blend, BH91-form
-   native stable branch (selectable via ``stability_scheme``)
-3. ``large_yeager`` — Large & Yeager 2009 (CORE/OMIP): empirical C_DN(U_10N)
-   with high-wind quintic correction, stability-dependent Stanton/Dalton
-   numbers
+2. ``coare3`` — COARE 3.0 (Fairall et al. 2003) as implemented by AeroBulk
+   1.0.0 ``TURB_COARE3P0`` (Brodeau; tag 1.0.0, SHA ca40928872eb), ported
+   faithfully: bulk-Richardson first guess, Charnock + smooth-flow roughness
+   with visc_air(T), built-in gustiness, zeta clipped at +-50, height
+   adjustment of t/q for zt != zu, Cx_min floors, AeroBulk's single-precision
+   literals.  Oracle-matched to 1e-10 by tests/core/test_aerobulk_coare3p0_oracle.py.
+3. ``large_yeager`` — Large & Yeager 2004/2009 (CORE/OMIP) as implemented by
+   AeroBulk 1.0.0 ``TURB_NCAR``, ported faithfully: LY09 C_DN(U_10N) with the
+   2.34e-3 plateau above 33 m/s, U_N10 from the current Cd and psi_m, Cx_min
+   floors, height adjustment of t/q.  Oracle-matched by
+   tests/core/test_aerobulk_ncar_oracle.py.
 
 The iterative Obukhov length loop uses ``jax.lax.fori_loop`` for
 full JAX differentiability (compatible with jax.grad, jax.jit).
@@ -57,13 +62,13 @@ import numbers
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm import constants
 
 # Physical constants
 KAPPA = constants.kappa_vk  # von Kármán constant (0.4)
 G = constants.g
-NU_AIR = constants.nu_air  # kinematic viscosity of air [m²/s]
 
 # Known bulk-flux scheme names (union across all surface-flux dispatchers):
 #   "constant"     — fixed neutral transfer coefficients (no iteration)
@@ -338,9 +343,9 @@ def large_yeager_neutral_cd(wind, *, nemo_parity: bool = False):
 # surface fluxes (the physically-required stable-regime suppression).
 #
 # The private ``_<scheme>_psi_{m,h}`` helpers below evaluate ONLY the stable
-# branch and are always called with a strictly-positive ``zeta_pos`` (floored at
-# 1e-10 by :func:`psi_m` / :func:`psi_h`), so no fractional power / log / cbrt
-# ever sees a non-positive argument. Together with the ``jnp.where`` split this
+# branch and are always called with ``zeta_pos >= 0`` (``max(zeta, 0)`` in
+# :func:`psi_m` / :func:`psi_h`), where every fractional power / log / cbrt
+# argument is >= 1. Together with the ``jnp.where`` split this
 # keeps the masked (inactive) branch finite in BOTH value and gradient -- the
 # classic AD-safe double-branch construction.
 
@@ -481,15 +486,19 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
     gamma = 16) are UNAFFECTED. Both default to the module constants so every
     existing caller is byte-identical.
 
-    Safe double-branch construction: the unstable expression is evaluated on
-    ``zeta_neg <= -1e-10`` and the stable expression on ``zeta_pos >= 1e-10`` so
-    the masked branch never produces a NaN value or gradient under ``jnp.where``.
+    Branch construction as CliMA SurfaceFluxes.jl: the unstable expression is
+    evaluated on ``min(zeta, 0)`` and the stable one on ``max(zeta, 0)`` (both
+    finite, with finite gradients, at 0); the stable form is selected for
+    ``zeta > 0`` (SurfaceFluxes v0.12 Beljaars / v1.5.1 Gryanik), so psi(0) is
+    the unstable form's exact 0.
     """
     validate_stability_scheme(stability_scheme)
     zeta_c = jnp.clip(zeta, -10.0, 10.0)
     # Safe inputs: each branch only sees valid arguments
-    zeta_neg = jnp.minimum(zeta_c, -1e-10)
-    zeta_pos = jnp.maximum(zeta_c, 1e-10)
+    # where (not min/max): at zeta = 0 the selected (unstable) branch gets the
+    # full derivative instead of half of it at a min/max tie.
+    zeta_neg = jnp.where(zeta_c > 0.0, 0.0, zeta_c)
+    zeta_pos = jnp.where(zeta_c > 0.0, zeta_c, 0.0)
 
     # The trainable ``unstable_gamma`` reparameterises the Businger-Dyer UNSTABLE
     # branch ONLY for ``dyer1974`` (the scheme whose stable branch it is paired
@@ -510,7 +519,7 @@ def psi_m(zeta, stability_scheme="dyer1974", *,
     # selected expression is traced), not ``jnp.where`` (which would trace all).
     stable = _stable_psi_m(zeta_pos, stability_scheme, stable_beta)
 
-    return jnp.where(zeta_c < 0.0, unstable, stable)
+    return jnp.where(zeta_c > 0.0, stable, unstable)
 
 
 def psi_h(zeta, stability_scheme="dyer1974", *,
@@ -529,152 +538,190 @@ def psi_h(zeta, stability_scheme="dyer1974", *,
     ``stability_scheme="dyer1974"`` (both branches); the beljaars/grachev/gryanik
     schemes keep their own published stable fits AND the historical gamma = 16
     unstable branch. Both default to the module constants (byte-identical).
+    For ``"gryanik2020"`` the unstable branch is multiplied by Pr0 = 0.98, as in
+    SurfaceFluxes.jl v1.5.1 (oracle: tests/core/test_surfacefluxes_psi_oracle.py).
     """
     validate_stability_scheme(stability_scheme)
     zeta_c = jnp.clip(zeta, -10.0, 10.0)
-    zeta_neg = jnp.minimum(zeta_c, -1e-10)
-    zeta_pos = jnp.maximum(zeta_c, 1e-10)
+    # where (not min/max): at zeta = 0 the selected (unstable) branch gets the
+    # full derivative instead of half of it at a min/max tie.
+    zeta_neg = jnp.where(zeta_c > 0.0, 0.0, zeta_c)
+    zeta_pos = jnp.where(zeta_c > 0.0, zeta_c, 0.0)
 
     # See psi_m: the trainable unstable gamma applies ONLY to dyer1974; the
     # non-linear stable schemes keep the historical gamma = 16 unstable branch.
     _gamma = unstable_gamma if stability_scheme == "dyer1974" else _DYER_UNSTABLE_GAMMA
     y = jnp.sqrt(1.0 - _gamma * zeta_neg)
     unstable = 2.0 * jnp.log((1.0 + y) / 2.0)
+    if stability_scheme == "gryanik2020":
+        # SurfaceFluxes.jl v1.5.1 GryanikParams psi_h: the Businger fallback is
+        # scaled by Pr_0, consistent with the stable branch's phi_h(0) = Pr_0.
+        unstable = _GRYANIK_PR0 * unstable
 
     stable = _stable_psi_h(zeta_pos, stability_scheme, stable_beta)
 
-    return jnp.where(zeta_c < 0.0, unstable, stable)
+    return jnp.where(zeta_c > 0.0, stable, unstable)
+
+
+def _f32(x):
+    """Value of the Fortran default-real (single-precision) literal ``x``.
+
+    AeroBulk writes most of its constants as default-real literals that are
+    assigned to, or combined with, REAL(wp) = fp64 variables, so the numbers it
+    actually computes with are the fp32 roundings promoted to fp64.  The port
+    uses the same numbers.
+    """
+    return float(np.float32(x))
+
+
+# ============================================================================
+# AeroBulk 1.0.0 (Brodeau; github.com/brodeau/aerobulk tag 1.0.0,
+# SHA ca40928872eb9c00f96a51cf3a6eed0bb4a70580) — the COARE 3.0 oracle.
+# Every value below is the number AeroBulk computes with (``_f32`` = an
+# AeroBulk default-real literal), each under the routine it comes from.
+# ============================================================================
+# --- mod_const (grav and R_vap carry legoESM's values, as the tier-2 oracle
+# audit built AeroBulk; AeroBulk keeps them as default-real literals) ---
+_AB_GRAV = _f32(constants.g)
+_AB_RCTV0 = _f32(constants.R_v) / _f32(constants.R_d) - 1.0   # rctv0 = R_vap/R_dry - 1
+_AB_RT0 = _f32(constants.T_freeze)                             # rt0 (visc_air C<->K)
+_AB_RCP_DRY = 1005.0  # const-ok: AeroBulk mod_const rCp_dry (Ri_bulk lapse rate only)
+_AB_RGAMMA_DRY = _AB_GRAV / _AB_RCP_DRY                        # rgamma_dry
+_AB_CX_MIN = 0.1e-3                                            # Cx_min
+# --- mod_phymbl One_on_L / visc_air (Andreas 1989 fit) ---
+_AB_ONE_ON_L_MAX = 200.0
+_AB_ONE_ON_L_DEN_MIN = 1.0e-9
+_AB_VISC_A = _f32(1.326e-5)
+_AB_VISC_B = _f32(6.542e-3)
+_AB_VISC_C = _f32(8.301e-6)
+_AB_VISC_D = _f32(4.84e-9)
+# --- mod_common_coare psi_m_coare / psi_h_coare (Fairall et al. 1996, 2003) ---
+_AB_PSI_KANSAS = 15.0
+_AB_PSI_CONV_M = _f32(10.15)
+_AB_PSI_CONV_H = _f32(34.15)
+_AB_PSI_CONV_EXP = _f32(0.3333)
+_AB_SQRT3 = _f32(1.7320508)
+_AB_PI_O_SQRT3 = _f32(1.813799447)
+_AB_PSI_STB_B = _f32(0.6667)
+_AB_PSI_STB_C = _f32(14.28)
+_AB_PSI_STB_D = _f32(8.525)
+_AB_PSI_STB_RATE = 0.35
+_AB_PSI_STB_EXP_MAX = 50.0
+# --- mod_common_coare FIRST_GUESS_COARE ---
+_AB_FG_Z0 = _f32(1.0e-4)          # "rough" first-guess roughness length [m]
+_AB_FG_CA = 0.035
+_AB_FG_ZI0 = 600.0
+_AB_FG_BETA0 = 1.2
+_AB_FG_CB = 0.004 * _AB_FG_ZI0 * _AB_FG_BETA0 * _AB_FG_BETA0 * _AB_FG_BETA0
+_AB_FG_GUST = 0.5                 # first-guess gustiness [m/s]
+_AB_FG_CH10 = _f32(0.00115)       # neutral 10 m Stanton number for z0t
+_AB_FG_Z_MIN = _f32(1.0e-8)       # first-guess z0 / z0t floor [m]
+_AB_FG_RIB_STB = 27.0 / 9.0
+_AB_T_MIN = 180.0                 # t_zu = MAX(t_zt, 180)
+_AB_Q_MIN = 1.0e-6                # q_zu = MAX(q_zt, 1e-6)
+_AB_DT_MIN = 1.0e-6               # |t_zu - T_s| floor
+_AB_DQ_MIN = 1.0e-9               # |q_zu - q_s| floor
+# --- mod_blk_coare3p0 TURB_COARE3P0 ---
+_AB_COARE_ZETA_ABS_MAX = 50.0
+_AB_COARE_Z_MIN = _f32(1.0e-9)    # z0 / z0t floor [m]
+_AB_COARE_USTAR_MIN = _f32(1.0e-9)
+_AB_COARE_Z0T_MAX = 1.1e-4        # Fairall et al. (2003) eq. 28 cap
+_AB_COARE_Z0T_COEF = 5.5e-5
+_AB_COARE_Z0T_EXP = 0.6
+_AB_COARE_SMOOTH = 0.11           # smooth-flow roughness coefficient
+_AB_EQUAL_HEIGHT_TOL = 0.01       # l_zt_equal_zu = |zu - zt| < 0.01 m
+
+
+def _psi_coare_unstable(zn, conv, kansas):
+    """Fairall Kansas + free-convective blend (AeroBulk psi_*_coare, zeta < 0)."""
+    phi_c = jnp.abs(1.0 - conv * zn) ** _AB_PSI_CONV_EXP
+    psi_c = (1.5 * jnp.log((1.0 + phi_c + phi_c * phi_c) / 3.0)
+             - _AB_SQRT3 * jnp.arctan((1.0 + 2.0 * phi_c) / _AB_SQRT3) + _AB_PI_O_SQRT3)
+    zf = zn * zn
+    zf = zf / (1.0 + zf)
+    return (1.0 - zf) * kansas + zf * psi_c
 
 
 def psi_m_coare(zeta, stability_scheme="dyer1974"):
-    """COARE 3.0 momentum stability function (Fairall et al. 1996, 2003).
+    """COARE 3.0 momentum stability function, AeroBulk 1.0.0 ``psi_m_coare``.
 
-    Unstable (ζ < 0): blend of the Kansas form and the free-convective
-    form of Fairall et al. (1996):
-        ψ_kansas: x = (1 − 15ζ)^{1/4} (standard Businger-Dyer shape)
-        ψ_conv:   y = (1 − 10.15ζ)^{1/3}
-                  ψ = 1.5 ln((1 + y + y²)/3) − √3 arctan((1 + 2y)/√3) + π/√3
-        blend:    f = ζ²/(1 + ζ²);  ψ = (1 − f) ψ_kansas + f ψ_conv
-    Stable (ζ > 0): COARE native stable form (``stability_scheme="dyer1974"``,
-    the config default — see below)
-        c = min(50, 0.35ζ)
-        ψ = −[(1 + ζ) + 0.6667 (ζ − 14.28) e^{−c} + 8.525]
+    Faithful port of mod_common_coare.f90 ``psi_m_coare_sclr`` (Fairall et al.
+    1996, 2003), including AeroBulk's single-precision literals (0.3333,
+    10.15, 1.7320508, 1.813799447, 0.6667, 14.28, 8.525):
 
-    ``stability_scheme`` swaps ONLY the stable (ζ > 0) branch, so the
-    experiment-level ``surface_stability_scheme`` knob is not silently inert
-    on a ``bulk_scheme="coare3"`` lane (it was: the 2026-08 dyer-vs-BH AMIP
-    A/B was bit-identical because every executed psi call was this function).
-    The unstable branch ALWAYS keeps the Fairall Kansas + free-convective
-    blend that defines COARE.  Semantics of the selector here:
+    * unstable (zeta < 0): Kansas ``x = |1 - 15 zeta|^0.25`` blended with the
+      free-convective ``y = |1 - 10.15 zeta|^0.3333`` by
+      ``f = zeta^2/(1 + zeta^2)``;
+    * stable (zeta >= 0, AeroBulk's ``0.5 + SIGN(0.5, zeta)`` puts zeta = 0 on
+      this side): ``-(1 + zeta + 0.6667 (zeta - 14.28)/exp(min(50, 0.35 zeta))
+      + 8.525)``.
 
-    - ``"dyer1974"`` (the ``SurfaceLayerConfig`` default) is a SENTINEL for
-      "COARE native" and is byte-identical to the pre-selector behaviour.
-      COARE 3.0's native stable form above IS the Beljaars & Holtslag (1991)
-      fit with rounded constants (Fairall et al. 2003 adopted BH91 for the
-      stable side: 0.6667 ≈ b = 2/3, 14.28 ≈ c/d = 5/0.35, 8.525 ≈ b·c/d − 1),
-      so there is no meaningful linear ``−5ζ`` COARE variant to expose and the
-      default must not silently change.
-    - ``"beljaars_holtslag1991"`` swaps to the canonical BH91 constants — a
-      rounding-level change vs native (max |Δψ| ≈ 4.5e-3 over ζ ∈ (0, 10]).
-    - ``"grachev2007_sheba"`` / ``"gryanik2020"`` give the genuinely
-      different strong-stability (SHEBA) tails.
+    No clip on zeta (the solver clips it at +-50, as AeroBulk does).
 
-    Safe branching (min/max on inputs) keeps gradients NaN-free in the
-    inactive branch, matching :func:`psi_m`.
+    ``stability_scheme`` swaps ONLY the stable branch: ``"dyer1974"`` (the
+    config default) is the sentinel for the AeroBulk native form above;
+    ``"beljaars_holtslag1991"`` / ``"grachev2007_sheba"`` / ``"gryanik2020"``
+    use those published stable fits (legoESM options; AeroBulk has no such
+    switch).  The two branches are selected with ``jnp.where`` on arguments
+    that are valid on both sides, so the inactive branch never feeds a NaN into
+    the value or the gradient.
     """
-    # Dispatch hardening AT ENTRY on the static string: without this a typo'd
-    # scheme only raises after the whole unstable branch has been traced (and
-    # never at all for a caller that reaches this function directly rather
-    # than through compute_most_fluxes, which validates for itself).
     validate_stability_scheme(stability_scheme)
-    zeta_c = jnp.clip(zeta, -10.0, 10.0)
-    zeta_neg = jnp.minimum(zeta_c, -1e-10)
-    zeta_pos = jnp.maximum(zeta_c, 1e-10)
-
-    x = jnp.power(1.0 - 15.0 * zeta_neg, 0.25)
-    psi_k = (
-        2.0 * jnp.log((1.0 + x) / 2.0)
-        + jnp.log((1.0 + x ** 2) / 2.0)
-        - 2.0 * jnp.arctan(x)
-        + jnp.pi / 2.0
-    )
-    y = jnp.power(1.0 - 10.15 * zeta_neg, 1.0 / 3.0)
-    sqrt3 = jnp.sqrt(3.0)
-    psi_c = (
-        1.5 * jnp.log((1.0 + y + y ** 2) / 3.0)
-        - sqrt3 * jnp.arctan((1.0 + 2.0 * y) / sqrt3)
-        + jnp.pi / sqrt3
-    )
-    f = zeta_neg ** 2 / (1.0 + zeta_neg ** 2)
-    unstable = (1.0 - f) * psi_k + f * psi_c
-
+    zeta = jnp.asarray(zeta)
+    stable = ~jnp.signbit(zeta)   # 0.5 + SIGN(0.5, zeta): +0 stable, -0 unstable
+    zn = jnp.where(stable, -1.0, zeta)   # unstable-branch argument
+    zp = jnp.where(stable, zeta, 0.0)    # stable-branch argument
+    x = jnp.abs(1.0 - _AB_PSI_KANSAS * zn) ** 0.25
+    psi_k = (2.0 * jnp.log((1.0 + x) / 2.0) + jnp.log((1.0 + x * x) / 2.0)
+             - 2.0 * jnp.arctan(x) + 0.5 * jnp.pi)
+    unstable = _psi_coare_unstable(zn, _AB_PSI_CONV_M, psi_k)
     if stability_scheme == "dyer1974":
-        # COARE native stable branch (byte-identical default; see docstring).
-        c = jnp.minimum(50.0, 0.35 * zeta_pos)
-        stable = -(
-            (1.0 + zeta_pos)
-            + 0.6667 * (zeta_pos - 14.28) * jnp.exp(-c)
-            + 8.525
-        )
+        zc = jnp.minimum(_AB_PSI_STB_EXP_MAX, _AB_PSI_STB_RATE * zp)
+        stable_val = -(1.0 + 1.0 * zp + _AB_PSI_STB_B * (zp - _AB_PSI_STB_C) / jnp.exp(zc)
+                       + _AB_PSI_STB_D)
     else:
-        stable = _stable_psi_m(zeta_pos, stability_scheme)
-    return jnp.where(zeta_c < 0.0, unstable, stable)
+        stable_val = _stable_psi_m(zp, stability_scheme)
+    return jnp.where(stable, stable_val, unstable)
 
 
 def psi_h_coare(zeta, stability_scheme="dyer1974"):
-    """COARE 3.0 heat/moisture stability function (Fairall et al. 1996, 2003).
+    """COARE 3.0 heat/moisture stability function, AeroBulk 1.0.0 ``psi_h_coare``.
 
-    Unstable: Kansas ψ = 2 ln((1+x)/2), x = (1 − 15ζ)^{1/2}, blended with
-    the free-convective form (y = (1 − 34.15ζ)^{1/3}) via f = ζ²/(1+ζ²).
-    Stable (native): ψ = −[(1 + 2ζ/3)^{3/2} + 0.6667 (ζ − 14.28) e^{−c} + 8.525].
-
-    ``stability_scheme`` swaps ONLY the stable (ζ > 0) branch; ``"dyer1974"``
-    (the config default) is the SENTINEL for the byte-identical COARE native
-    form, which is itself the Beljaars & Holtslag (1991) ψ_h with rounded
-    constants — see :func:`psi_m_coare` for the full semantics and why.
+    Faithful port of mod_common_coare.f90 ``psi_h_coare_sclr``: unstable =
+    Kansas ``2 ln((1 + |1 - 15 zeta|^0.5)/2)`` blended with the free-convective
+    form (``y = |1 - 34.15 zeta|^0.3333``); stable (zeta >= 0) =
+    ``-(|1 + 2 zeta/3|^1.5 + 0.6667 (zeta - 14.28)/exp(min(50, 0.35 zeta))
+    + 8.525)``.  ``stability_scheme`` semantics as in :func:`psi_m_coare`.
     """
-    validate_stability_scheme(stability_scheme)  # entry dispatch hardening
-    zeta_c = jnp.clip(zeta, -10.0, 10.0)
-    zeta_neg = jnp.minimum(zeta_c, -1e-10)
-    zeta_pos = jnp.maximum(zeta_c, 1e-10)
-
-    x = jnp.sqrt(1.0 - 15.0 * zeta_neg)
+    validate_stability_scheme(stability_scheme)
+    zeta = jnp.asarray(zeta)
+    stable = ~jnp.signbit(zeta)   # 0.5 + SIGN(0.5, zeta): +0 stable, -0 unstable
+    zn = jnp.where(stable, -1.0, zeta)
+    zp = jnp.where(stable, zeta, 0.0)
+    x = jnp.abs(1.0 - _AB_PSI_KANSAS * zn) ** 0.5
     psi_k = 2.0 * jnp.log((1.0 + x) / 2.0)
-    y = jnp.power(1.0 - 34.15 * zeta_neg, 1.0 / 3.0)
-    sqrt3 = jnp.sqrt(3.0)
-    psi_c = (
-        1.5 * jnp.log((1.0 + y + y ** 2) / 3.0)
-        - sqrt3 * jnp.arctan((1.0 + 2.0 * y) / sqrt3)
-        + jnp.pi / sqrt3
-    )
-    f = zeta_neg ** 2 / (1.0 + zeta_neg ** 2)
-    unstable = (1.0 - f) * psi_k + f * psi_c
-
+    unstable = _psi_coare_unstable(zn, _AB_PSI_CONV_H, psi_k)
     if stability_scheme == "dyer1974":
-        # COARE native stable branch (byte-identical default; see psi_m_coare).
-        c = jnp.minimum(50.0, 0.35 * zeta_pos)
-        stable = -(
-            jnp.power(1.0 + 2.0 * zeta_pos / 3.0, 1.5)
-            + 0.6667 * (zeta_pos - 14.28) * jnp.exp(-c)
-            + 8.525
-        )
+        zc = jnp.minimum(_AB_PSI_STB_EXP_MAX, _AB_PSI_STB_RATE * zp)
+        stable_val = -(jnp.abs(1.0 + 2.0 * zp / 3.0) ** 1.5
+                       + _AB_PSI_STB_B * (zp - _AB_PSI_STB_C) / jnp.exp(zc) + _AB_PSI_STB_D)
     else:
-        stable = _stable_psi_h(zeta_pos, stability_scheme)
-    return jnp.where(zeta_c < 0.0, unstable, stable)
+        stable_val = _stable_psi_h(zp, stability_scheme)
+    return jnp.where(stable, stable_val, unstable)
 
 
-# --- COARE 3.0 wind-dependent Charnock ramp (Fairall et al. 2003 §3c) ---
-_COARE_CHARNOCK_U_LO = 10.0   # [m/s] U_10N below which charnock stays at base
-_COARE_CHARNOCK_U_HI = 18.0   # [m/s] U_10N at/above which charnock = hi value
-_COARE_CHARNOCK_HI = 0.018    # charnock value at/above U_HI
+# --- COARE 3.0 wind-dependent Charnock (AeroBulk charn_coare3p0; Hare et al.
+# 1999 / Fairall et al. 2003 §3c): 0.011 below 10 m/s, linear to 0.018 at 18.
+_COARE_CHARNOCK_U_LO = 10.0   # [m/s]
+_COARE_CHARNOCK_U_HI = 18.0   # [m/s]
+_COARE_CHARNOCK_HI = _f32(0.018)  # AeroBulk default-real literal 0.018
 
-# --- Scheme-native gustiness / calm-wind conventions (AeroBulk parity) ---
-# COARE 3.0 has convective gustiness BUILT IN (aerobulk mod_blk_coare3p0:
-# zi0 = 600 m, Beta0 = 1.25) plus a 0.2 m/s bulk-wind floor; LY09/NEMO ncar
-# has NO gustiness but floors the bulk wind at 0.5 m/s.
+# --- Scheme-native gustiness / calm-wind conventions (AeroBulk) ---
+# COARE 3.0 has convective gustiness BUILT IN (mod_blk_coare3p0: zi0 = 600 m,
+# Beta0 = 1.25) plus a 0.2 m/s bulk-wind floor; LY09/NEMO ncar has NO
+# gustiness but floors the bulk wind at 0.5 m/s.
 _COARE_GUSTINESS_ZI = 600.0   # [m] aerobulk coare3p0 zi0 (BL scale height)
 _COARE_UB_FLOOR = 0.2         # [m/s] aerobulk coare3p0 bulk-wind floor
-_LY_UB_FLOOR = 0.5            # [m/s] LY09 / NEMO sbcblk_algo_ncar wind floor
 
 
 def resolve_gustiness_w_zi(gustiness_w_zi, scheme) -> float:
@@ -690,6 +737,326 @@ def resolve_gustiness_w_zi(gustiness_w_zi, scheme) -> float:
     if gustiness_w_zi is None:
         return _COARE_GUSTINESS_ZI if scheme == "coare3" else 0.0
     return float(gustiness_w_zi)
+
+
+# ============================================================================
+# AeroBulk 1.0.0 TURB_COARE3P0 (no cool-skin / warm-layer)
+# ============================================================================
+
+def _sign_floor(x, x_min):
+    """Fortran ``SIGN(MAX(ABS(x), x_min), x)`` (gfortran: -0.0 counts negative)."""
+    m = jnp.maximum(jnp.abs(x), x_min)
+    return jnp.where(jnp.signbit(x), -m, m)
+
+
+def _visc_air_aerobulk(T):
+    """AeroBulk mod_phymbl ``visc_air`` (Andreas 1989): kinematic viscosity of
+    air [m^2/s] at absolute temperature ``T`` [K]."""
+    tc = T - _AB_RT0
+    tc2 = tc * tc
+    return _AB_VISC_A * (1.0 + _AB_VISC_B * tc + _AB_VISC_C * tc2 - _AB_VISC_D * tc2 * tc)
+
+
+def _one_on_l_aerobulk(theta, q, u_star, theta_star, q_star):
+    """AeroBulk mod_phymbl ``One_on_L``: 1/L [1/m] from the turbulent scales.
+
+    ``theta_star``/``q_star`` follow AeroBulk's sign (positive DOWNWARD, i.e.
+    ``kappa (t_zu - T_s)/denom``).  Includes AeroBulk's 1e-9 denominator floor
+    and |1/L| <= 200 clip.
+    """
+    zqa = 1.0 + _AB_RCTV0 * q
+    inv_L = (_AB_GRAV * KAPPA * (theta_star * zqa + _AB_RCTV0 * theta * q_star)
+             / jnp.maximum(u_star * u_star * theta * zqa, _AB_ONE_ON_L_DEN_MIN))
+    return jnp.clip(inv_L, -_AB_ONE_ON_L_MAX, _AB_ONE_ON_L_MAX)
+
+
+def _ri_bulk_aerobulk(z, T_s, theta, q_s, q, Ub):
+    """AeroBulk mod_phymbl ``Ri_bulk`` (no layer-temperature arguments)."""
+    sstv = T_s * (1.0 + _AB_RCTV0 * q_s)
+    dthv = theta * (1.0 + _AB_RCTV0 * q) - sstv
+    tv = 0.5 * (sstv + (theta - _AB_RGAMMA_DRY * z) * (1.0 + _AB_RCTV0 * q))
+    return _AB_GRAV * dthv * z / (tv * Ub * Ub)
+
+
+def _coare3p0_charnock(wind, charnock):
+    """AeroBulk ``charn_coare3p0``: ``charnock`` below 10 m/s, linear to the
+    0.018 high-wind value at 18 m/s.  With ``charnock`` = AeroBulk's literal
+    0.011 this is the oracle's function exactly; a larger ``charnock`` keeps
+    the ramp monotone (high value ``max(0.018, charnock)``)."""
+    ramp = jnp.clip(
+        (wind - _COARE_CHARNOCK_U_LO) / (_COARE_CHARNOCK_U_HI - _COARE_CHARNOCK_U_LO),
+        0.0, 1.0)
+    charnock_hi = jnp.maximum(_COARE_CHARNOCK_HI, charnock)
+    return charnock + ramp * (charnock_hi - charnock)
+
+
+def _gust_power(x):
+    """``x**(2/3)`` for ``x >= 0`` with a finite gradient at ``x = 0`` (the value
+    there is 0, as in AeroBulk; the inactive branch gets a dummy argument)."""
+    pos = x > 0.0
+    return jnp.where(pos, jnp.where(pos, x, 1.0) ** (2.0 / 3.0), 0.0)
+
+
+def _same_static_height(a, b):
+    """True when two heights are concrete (non-traced) and equal everywhere."""
+    if isinstance(a, jax.core.Tracer) or isinstance(b, jax.core.Tracer):
+        return False
+    return bool(np.all(np.asarray(a) == np.asarray(b)))
+
+
+def _safe_sqrt(x):
+    """``sqrt(x)`` for ``x >= 0``; same value, gradient 0 instead of NaN at x = 0."""
+    pos = x > 0.0
+    return jnp.where(pos, jnp.sqrt(jnp.where(pos, x, 1.0)), 0.0)
+
+
+def _first_guess_coare(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, charnock):
+    """AeroBulk mod_common_coare ``FIRST_GUESS_COARE`` (bulk-Richardson seed)."""
+    t_zu = jnp.maximum(t_zt, _AB_T_MIN)
+    q_zu = jnp.maximum(q_zt, _AB_Q_MIN)
+    log_zu = jnp.log(z_u)
+    c_a = _AB_FG_CA * jnp.log(10.0 / _AB_FG_Z0) / jnp.log(z_u / _AB_FG_Z0)
+    dt = _sign_floor(t_zu - T_s, _AB_DT_MIN)
+    dq = _sign_floor(q_zu - q_s, _AB_DQ_MIN)
+    nu = _visc_air_aerobulk(t_zu)
+    Ub = jnp.sqrt(W2 + _AB_FG_GUST * _AB_FG_GUST)
+    us = c_a * Ub
+    ch = _coare3p0_charnock(_safe_sqrt(W2), charnock)
+    z0 = jnp.clip(jnp.abs(ch * us * us / _AB_GRAV + _AB_COARE_SMOOTH * nu / us),
+                  _AB_FG_Z_MIN, 1.0)
+    log_z0 = jnp.log(z0)
+    Cd = (KAPPA / (log_zu - log_z0)) ** 2
+    z0t = 10.0 / jnp.exp(KAPPA / (_AB_FG_CH10 * ((jnp.log(10.0) - log_z0) / KAPPA)))
+    z0t = jnp.clip(jnp.abs(z0t), _AB_FG_Z_MIN, 1.0)
+    log_z0t = jnp.log(z0t)
+    rib = _ri_bulk_aerobulk(z_u, T_s, t_zu, q_s, q_zu, Ub)
+    cc_ri = KAPPA * KAPPA / (Cd * (jnp.log(z_t) - log_z0t)) * rib
+    rib_stable = ~jnp.signbit(rib)   # 0.5 + SIGN(0.5, zRib)
+    den_unst = jnp.where(rib_stable, 1.0, 1.0 + rib * (-_AB_FG_CB / z_u))
+    zeta_u = jnp.where(rib_stable, cc_ri + _AB_FG_RIB_STB * rib * rib, cc_ri / den_unst)
+    us = jnp.maximum(Ub * KAPPA / (log_zu - log_z0 - psi_m_coare(zeta_u)),
+                     _AB_COARE_USTAR_MIN)
+    psih_u = psi_h_coare(zeta_u)
+    tmp = KAPPA / (log_zu - log_z0t - psih_u)
+    ts = dt * tmp
+    qs = dq * tmp
+    if equal is not True:
+        zeta_t = z_t * zeta_u / z_u
+        prf = jnp.log(z_t / z_u) + psih_u - psi_h_coare(zeta_t)
+        t_new = t_zt - ts / KAPPA * prf
+        q_new = q_zt - qs / KAPPA * prf
+        q_new = jnp.where(q_new >= 0.0, q_new, 0.0)
+        dt_new = _sign_floor(t_new - T_s, _AB_DT_MIN)
+        dq_new = _sign_floor(q_new - q_s, _AB_DQ_MIN)
+        t_zu = jnp.where(equal, t_zu, t_new)
+        q_zu = jnp.where(equal, q_zu, q_new)
+        dt = jnp.where(equal, dt, dt_new)
+        dq = jnp.where(equal, dq, dq_new)
+        ts = dt * tmp
+        qs = dq * tmp
+    z0 = jnp.clip(jnp.abs(ch * us * us / _AB_GRAV + _AB_COARE_SMOOTH * nu / us),
+                  _AB_FG_Z_MIN, 1.0)
+    return us, ts, qs, t_zu, q_zu, Ub, z0
+
+
+def _turb_coare3p0(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, charnock,
+                   zi, beta, stability_scheme, denom_floor):
+    """AeroBulk 1.0.0 ``TURB_COARE3P0`` (l_use_cs = l_use_wl = .false.).
+
+    ``W2`` is the squared wind module ``U_zu**2``; ``equal`` is AeroBulk's
+    ``l_zt_equal_zu`` (a Python bool, or a boolean array for per-column
+    heights).  ``zi`` = 0 switches the gustiness off (gust^2 = 0 exactly);
+    ``denom_floor`` (None = AeroBulk, no floor) is legoESM's optional
+    ``max_exchange_coeff`` ceiling on the log-law denominators.
+
+    Returns AeroBulk's outputs (Cd, Ch, Ce, t_zu, q_zu, Ub, u*) plus the
+    internal state the legoESM diagnostics read (theta*, q* in AeroBulk's
+    positive-downward sign, z0t, 1/L) and the last-iteration relative u* change.
+    """
+    log_zu = jnp.log(z_u)
+    log_10 = jnp.log(10.0)
+    us, ts, qs, t_zu, q_zu, Ub, z0 = _first_guess_coare(
+        W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, charnock)
+    log_z0 = jnp.log(z0)
+    nu = _visc_air_aerobulk(t_zu)
+    dt = _sign_floor(t_zu - T_s, _AB_DT_MIN)
+    dq = _sign_floor(q_zu - q_s, _AB_DQ_MIN)
+    z0t = jnp.zeros_like(us)
+    inv_L = jnp.zeros_like(us)
+    resid = jnp.ones_like(us)
+    if equal is not True:
+        log_zt = jnp.log(z_t)
+
+    def _floor(d):
+        return d if denom_floor is None else jnp.maximum(d, denom_floor)
+
+    def body(_, c):
+        us, ts, qs, t_zu, q_zu, dt, dq, log_z0, _z0t, _Ub, _inv_L, _resid = c
+        us2 = us * us
+        inv_L = _one_on_l_aerobulk(t_zu, q_zu, us, ts, qs)
+        if zi > 0.0:
+            gust2 = beta * beta * us2 * _gust_power(jnp.maximum(-zi * inv_L / KAPPA, 0.0))
+            Ub = jnp.maximum(_safe_sqrt(W2 + gust2), _COARE_UB_FLOOR)
+        else:
+            Ub = jnp.maximum(_safe_sqrt(W2), _COARE_UB_FLOOR)
+        zeta_u = jnp.clip(z_u * inv_L, -_AB_COARE_ZETA_ABS_MAX, _AB_COARE_ZETA_ABS_MAX)
+        un10 = us / KAPPA * (log_10 - log_z0)
+        z0 = (_coare3p0_charnock(un10, charnock) * us2 / _AB_GRAV
+              + _AB_COARE_SMOOTH * nu / us)
+        z0 = jnp.clip(jnp.abs(z0), _AB_COARE_Z_MIN, 1.0)
+        log_z0 = jnp.log(z0)
+        z0t = jnp.minimum(_AB_COARE_Z0T_MAX,
+                          _AB_COARE_Z0T_COEF * (nu / (z0 * us)) ** _AB_COARE_Z0T_EXP)
+        z0t = jnp.clip(jnp.abs(z0t), _AB_COARE_Z_MIN, 1.0)
+        psih_u = psi_h_coare(zeta_u, stability_scheme)
+        tmp = KAPPA / _floor(log_zu - jnp.log(z0t) - psih_u)
+        ts = dt * tmp
+        qs = dq * tmp
+        us_new = jnp.maximum(
+            Ub * KAPPA / _floor(log_zu - log_z0 - psi_m_coare(zeta_u, stability_scheme)),
+            _AB_COARE_USTAR_MIN)
+        if equal is not True:
+            zeta_t = jnp.clip(z_t * inv_L, -_AB_COARE_ZETA_ABS_MAX, _AB_COARE_ZETA_ABS_MAX)
+            prf = log_zt - log_zu + psih_u - psi_h_coare(zeta_t, stability_scheme)
+            t_new = t_zt - ts / KAPPA * prf
+            q_new = q_zt - qs / KAPPA * prf
+            t_zu = jnp.where(equal, t_zu, t_new)
+            q_zu = jnp.where(equal, q_zu, q_new)
+            dt = jnp.where(equal, dt, _sign_floor(t_zu - T_s, _AB_DT_MIN))
+            dq = jnp.where(equal, dq, _sign_floor(q_zu - q_s, _AB_DQ_MIN))
+        resid = jnp.abs(us_new - us) / jnp.maximum(jnp.abs(us_new), 1e-6)
+        return (us_new, ts, qs, t_zu, q_zu, dt, dq, log_z0, z0t, Ub, inv_L, resid)
+
+    carry = (us, ts, qs, t_zu, q_zu, dt, dq, log_z0, z0t, Ub, inv_L, resid)
+    dtypes = tuple(jnp.result_type(c) for c in carry)
+
+    def body_pinned(i, c):
+        return tuple(jnp.asarray(o).astype(d) for o, d in zip(body(i, c), dtypes))
+
+    carry = tuple(jnp.asarray(c).astype(d) for c, d in zip(carry, dtypes))
+    us, ts, qs, t_zu, q_zu, dt, dq, _log_z0, z0t, Ub, inv_L, resid = jax.lax.fori_loop(
+        0, n_iter, body_pinned, carry)
+    r = us / Ub
+    Cd = jnp.maximum(r * r, _AB_CX_MIN)
+    Ch = jnp.maximum(r * ts / dt, _AB_CX_MIN)
+    Ce = jnp.maximum(r * qs / dq, _AB_CX_MIN)
+    return dict(Cd=Cd, Ch=Ch, Ce=Ce, t_zu=t_zu, q_zu=q_zu, Ub=Ub, us=us, ts=ts, qs=qs,
+                z0t=z0t, inv_L=inv_L, resid=resid)
+
+
+# ============================================================================
+# AeroBulk 1.0.0 TURB_NCAR (Large & Yeager 2004, 2009)
+# ============================================================================
+# --- mod_blk_ncar ---
+_AB_NCAR_UB_MIN = 0.5          # Ubzu = MAX(0.5, U_zu)
+_AB_NCAR_UN10_MIN = 0.25       # zUn10 = MAX(0.25, UN10_from_CD(...))
+_AB_NCAR_ZETA_ABS_MAX = 10.0
+_AB_NCAR_CHN_STABLE = 18.0     # 1e-3 sqrt(CdN) * 18   (zeta >= 0)
+_AB_NCAR_CHN_UNSTABLE = 32.7   # 1e-3 sqrt(CdN) * 32.7 (zeta < 0)
+_AB_NCAR_CEN = 34.6            # 1e-3 sqrt(CdN) * 34.6
+
+
+def _cd_n10_ncar(w10):
+    """AeroBulk ``cd_n10_ncar``: LY09 Eq. 6 neutral 10 m drag, 2.34e-3 for
+    U >= 33 m/s, floored at Cx_min.  No wind floor (callers floor U)."""
+    w6 = w10 * w10 * w10
+    w6 = w6 * w6
+    poly = 2.7 / w10 + 0.142 + w10 / 13.09 - 3.14807e-10 * w6
+    cd = 1.0e-3 * jnp.where(w10 >= 33.0, 2.34, poly)
+    return jnp.maximum(cd, _AB_CX_MIN)
+
+
+def _turb_ncar(W2, t_zt, q_zt, T_s, q_s, z_u, z_t, equal, n_iter, stability_scheme="dyer1974",
+               unstable_gamma=_DYER_UNSTABLE_GAMMA, stable_beta=_DYER_STABLE_BETA,
+               coeff_cap=None):
+    """AeroBulk 1.0.0 ``TURB_NCAR`` (Large & Yeager 2004, 2009).
+
+    ``W2`` is the squared wind module; ``equal`` is AeroBulk's
+    ``l_zt_equal_zu`` (Python bool or boolean array).  The stability functions
+    are :func:`psi_m`/:func:`psi_h`, which with the defaults
+    (``"dyer1974"``, gamma 16, beta 5) are AeroBulk's ``psi_m_ncar`` /
+    ``psi_h_ncar``.  ``coeff_cap`` (None = AeroBulk) is legoESM's optional
+    ``max_exchange_coeff`` ceiling, applied as ``sqrt(Cd)``, ``Ch/sqrt(Cd)``,
+    ``Ce/sqrt(Cd)`` <= cap after each coefficient update.
+
+    Returns Cd, Ch, Ce, t_zu, q_zu, Ub, u* (u* = sqrt(Cd) Ub at the start of the
+    last iteration, as AeroBulk returns it), the AeroBulk-sign scales theta*,
+    q*, 1/L and the last-iteration relative u* change.
+    """
+    def _pm(z):
+        return psi_m(z, stability_scheme, unstable_gamma=unstable_gamma, stable_beta=stable_beta)
+
+    def _ph(z):
+        return psi_h(z, stability_scheme, unstable_gamma=unstable_gamma, stable_beta=stable_beta)
+
+    Ub = jnp.maximum(_AB_NCAR_UB_MIN, _safe_sqrt(W2))
+    log_zt_zu = jnp.log(z_t / z_u)
+    log_zu_10 = jnp.log(z_u / 10.0)
+    dthv = t_zt * (1.0 + _AB_RCTV0 * q_zt) - T_s * (1.0 + _AB_RCTV0 * q_s)
+    stab = jnp.where(dthv >= 0.0, 1.0, 0.0)
+    CdN = _cd_n10_ncar(Ub)
+    sqrt_CdN = jnp.sqrt(CdN)
+    Cd = CdN
+    Ce = jnp.maximum(1.0e-3 * (_AB_NCAR_CEN * sqrt_CdN), _AB_CX_MIN)
+    Ch = jnp.maximum(1.0e-3 * sqrt_CdN * (_AB_NCAR_CHN_STABLE * stab
+                                          + _AB_NCAR_CHN_UNSTABLE * (1.0 - stab)), _AB_CX_MIN)
+    sqrt_Cd = sqrt_CdN
+    t_zu = jnp.maximum(t_zt, _AB_T_MIN)
+    q_zu = jnp.maximum(q_zt, _AB_Q_MIN)
+    zero = jnp.zeros_like(Ub)
+
+    def body(_, c):
+        Cd, Ch, Ce, sqrt_Cd, t_zu, q_zu, _us, _ts, _qs, _inv_L, _resid = c
+        dt = t_zu - T_s
+        dq = q_zu - q_s
+        us = sqrt_Cd * Ub
+        ts = Ch / sqrt_Cd * dt
+        qs = Ce / sqrt_Cd * dq
+        inv_L = _one_on_l_aerobulk(t_zu, q_zu, us, ts, qs)
+        zeta_u = jnp.clip(z_u * inv_L, -_AB_NCAR_ZETA_ABS_MAX, _AB_NCAR_ZETA_ABS_MAX)
+        psih_u = _ph(zeta_u)
+        if equal is not True:
+            zeta_t = jnp.clip(z_t * inv_L, -_AB_NCAR_ZETA_ABS_MAX, _AB_NCAR_ZETA_ABS_MAX)
+            tmp = log_zt_zu + psih_u - _ph(zeta_t)
+            t_zu = jnp.where(equal, t_zu, t_zt - ts / KAPPA * tmp)
+            q_zu = jnp.where(equal, q_zu, jnp.maximum(0.0, q_zt - qs / KAPPA * tmp))
+        psim = _pm(zeta_u)
+        # UN10_from_CD: sqrt(Cd) Ub / kappa * ln(10 / z0_from_Cd(zu, Cd, psi_m))
+        sq = jnp.sqrt(Cd)
+        z0 = z_u * jnp.exp(-(KAPPA / sq + psim))
+        un10 = jnp.maximum(_AB_NCAR_UN10_MIN, sq * Ub / KAPPA * jnp.log(10.0 / z0))
+        CdN = _cd_n10_ncar(un10)
+        sqrt_CdN = jnp.sqrt(CdN)
+        tmp = 1.0 + sqrt_CdN / KAPPA * (log_zu_10 - psim)
+        Cd = jnp.maximum(CdN / (tmp * tmp), _AB_CX_MIN)
+        sqrt_Cd = jnp.sqrt(Cd)
+        tmp = (log_zu_10 - psih_u) / KAPPA / sqrt_CdN
+        tmp2 = sqrt_Cd / sqrt_CdN
+        stab = jnp.where(zeta_u >= 0.0, 1.0, 0.0)
+        ChN = 1.0e-3 * sqrt_CdN * (_AB_NCAR_CHN_STABLE * stab
+                                   + _AB_NCAR_CHN_UNSTABLE * (1.0 - stab))
+        CeN = 1.0e-3 * (_AB_NCAR_CEN * sqrt_CdN)
+        Ch = jnp.maximum(ChN * tmp2 / (1.0 + ChN * tmp), _AB_CX_MIN)
+        Ce = jnp.maximum(CeN * tmp2 / (1.0 + CeN * tmp), _AB_CX_MIN)
+        if coeff_cap is not None:
+            sqrt_Cd = jnp.minimum(sqrt_Cd, coeff_cap)
+            Cd = sqrt_Cd * sqrt_Cd
+            Ch = jnp.minimum(Ch, coeff_cap * sqrt_Cd)
+            Ce = jnp.minimum(Ce, coeff_cap * sqrt_Cd)
+        resid = jnp.abs(sqrt_Cd * Ub - us) / jnp.maximum(jnp.abs(sqrt_Cd * Ub), 1e-6)
+        return (Cd, Ch, Ce, sqrt_Cd, t_zu, q_zu, us, ts, qs, inv_L, resid)
+
+    carry = (Cd, Ch, Ce, sqrt_Cd, t_zu, q_zu, zero, zero, zero, zero, jnp.ones_like(Ub))
+    dtypes = tuple(jnp.result_type(c) for c in carry)
+
+    def body_pinned(i, c):
+        return tuple(jnp.asarray(o).astype(d) for o, d in zip(body(i, c), dtypes))
+
+    carry = tuple(jnp.asarray(c).astype(d) for c, d in zip(carry, dtypes))
+    Cd, Ch, Ce, _sqrt_Cd, t_zu, q_zu, us, ts, qs, inv_L, resid = jax.lax.fori_loop(
+        0, n_iter, body_pinned, carry)
+    return dict(Cd=Cd, Ch=Ch, Ce=Ce, t_zu=t_zu, q_zu=q_zu, Ub=Ub, us=us, ts=ts, qs=qs,
+                inv_L=inv_L, resid=resid)
 
 
 # ============================================================================
@@ -761,16 +1128,21 @@ def compute_most_fluxes(
         to ``z_ref`` (single-height mode).  10.0 for OMIP-2 / JRA55-do, per
         the note on ``z_t``.
     z0_init : float
-        Initial momentum roughness length [m] (default 1e-4).
+        Initial momentum roughness length [m] (default 1e-4).  Not read by
+        ``coare3`` / ``large_yeager``: AeroBulk's first guesses have no
+        roughness seed.
     scheme : str
         ``"constant"``, ``"most"``, ``"coare3"`` or ``"large_yeager"``.  The
         fixed-roughness log-law path (``"constant"``/``"most"``) uses
         ``z0_init`` (and ``z0h_z0_ratio`` for the scalar roughness) directly;
         ``coare3``/``large_yeager`` evolve the roughness in the iteration.
     n_iter : int
-        Number of MOST iterations (default 5).
+        Number of MOST iterations (default 5; AeroBulk ``nb_iter``).
     charnock : float
-        Charnock coefficient (COARE only, default 0.011).
+        Charnock coefficient below 10 m/s (COARE only, default 0.011).
+        AeroBulk's literal is the single-precision 0.011
+        (= 0.010999999940395355); the high-wind value is
+        ``max(0.018, charnock)``.
     thermo_convention : str
         Constants set converting MOST scales into fluxes (#762):
         ``"legoesm"`` (default) = constant ``L_v`` / dry ``c_pd``;
@@ -780,9 +1152,13 @@ def compute_most_fluxes(
         explicit ``L_latent`` overrides the L choice either way.
     gustiness_w_zi : float or None
         COARE convective-gustiness BL depth z_i [m].  None (default) =
-        scheme-native: 600 m for ``"coare3"`` (AeroBulk/Fairall 2003 —
-        gustiness is part of the algorithm), 0 (off) for the others.
-        Explicit 0.0 disables for any scheme.
+        scheme-native: 600 m for ``"coare3"`` (AeroBulk zi0 — gustiness is
+        part of the algorithm), 0 (off) for the others.  Explicit 0.0
+        disables for any scheme.  ``large_yeager`` (AeroBulk TURB_NCAR, no
+        gustiness) raises NotImplementedError for a value > 0.  On
+        ``coare3`` the gust is AeroBulk's
+        ``Beta0^2 u*^2 max(-zi/(kappa L), 0)^(2/3)`` with
+        ``Beta0 = gustiness_beta``.
     max_exchange_coeff : float or None
         Optional physical ceiling on the neutral-equivalent bulk transfer
         coefficient ``C = κ²/(denom_m·denom_h)``.  ``None`` (default) leaves
@@ -799,14 +1175,14 @@ def compute_most_fluxes(
         shock (``C_e≈0.64`` vs a physical ~3.4e-3).  Intended for the land
         surface tile, whose stiff thin top layer at ``dt_rad`` is unstable to
         that shock; ocean/atmosphere callers never approach the floor.
+        On ``coare3`` (AeroBulk has no denominator floor) ``None`` applies no
+        floor; a ``C_max`` floors the denominators at ``max(0.5, κ/√C_max)``.
     stability_scheme : str
         Stable-regime (zeta > 0) similarity functions ``psi_m``/``psi_h``.
-        ``"dyer1974"`` (default) is BYTE-IDENTICAL to the prior behaviour for
-        every existing caller: the historical linear ``-5 zeta`` on the
+        ``"dyer1974"`` (default) is the historical linear ``-5 zeta`` on the
         ``constant``/``most``/``large_yeager`` Businger-Dyer path, and the
-        COARE NATIVE stable form on ``coare3`` (which is itself the Beljaars &
-        Holtslag 1991 fit with rounded constants — Fairall et al. 2003 §3
-        adopted BH91 for the stable side; see :func:`psi_m_coare`).  The
+        AeroBulk native stable form on ``coare3`` (the Beljaars & Holtslag
+        1991 fit with rounded constants; see :func:`psi_m_coare`).  The
         non-linear alternatives ``"beljaars_holtslag1991"``,
         ``"grachev2007_sheba"`` and ``"gryanik2020"`` do not collapse the fluxes
         to zero under strong stability (Arctic sea-ice / nocturnal SBL); on
@@ -960,131 +1336,141 @@ def compute_most_fluxes(
         # historical 0.5-floor behaviour.
         _coeff_cap = KAPPA / _denom_floor
 
-    # Initialize with neutral log-law profile. The thermal (scalar) roughness
-    # z0_t = z0_q = z0 * z0h_z0_ratio (default 0.1) is the trainable knob for
-    # the FIXED-roughness "constant"/"most" path — that path carries the init
-    # z0_t straight through to the flux via the log law.
-    #
-    # COARE 3.0 and large_yeager compute their OWN scalar roughness inside the
-    # loop (Fairall smooth-flow Re fit / LY09 coefficient space), so z0h_z0_ratio
-    # is not a physical parameter for them.  BUT the pre-loop z0_t also seeds the
-    # first-iteration theta*/q* -> theta_v* -> Obukhov length -> zeta -> psi, and
-    # with a finite ``n_iter`` (no exact convergence) that seed leaves a small
-    # residual in the ocean-scheme fluxes.  To keep those schemes EXACTLY
-    # invariant to z0h_z0_ratio (and byte-identical to the pre-#z0h behaviour),
-    # seed their z0_t with the historical constant ratio, applying the tunable
-    # ratio ONLY on the fixed-roughness path.  Static Python select on the
-    # (compile-time) scheme string -> no traced branch, constant-folded.
-    _init_z0h_ratio = (
-        z0h_z0_ratio if scheme in ("constant", "most")
-        else _Z0H_Z0_RATIO_DEFAULT
-    )
-    z0 = jnp.full_like(wind_speed, z0_init)
-    z0_t = z0 * _init_z0h_ratio
-    z0_q = z0_t
-
-    ln_zu_z0 = jnp.log(z_u / jnp.maximum(z0, 1e-12))
-    ln_zt_z0t = jnp.log(z_t / jnp.maximum(z0_t, 1e-12))
-    ln_zq_z0q = jnp.log(z_q / jnp.maximum(z0_q, 1e-12))
-    u_star = KAPPA * wind_speed / jnp.maximum(ln_zu_z0, _denom_floor)
-    theta_star = KAPPA * dT / jnp.maximum(ln_zt_z0t, _denom_floor)
-    q_star_val = KAPPA * dq / jnp.maximum(ln_zq_z0q, _denom_floor)
-
-    # Carry leaves 7-8 (orthogonal MOST diagnostics unioned across branches):
-    #  (7) U_eff, the bulk/effective wind incl. gustiness + scheme calm-wind
-    #      floor, so the post-loop stress normalization tau = rho u*^2 u/U_eff
-    #      (AeroBulk semantics: tau = rho Cd Ub u) uses the CONVERGED value;
-    #      with gustiness off and no floor binding, U_eff == wind_speed
-    #      byte-identically.  Seeded with the pre-loop wind_speed.
-    #  (8) the MOST convergence residual (relative u* change), updated each
-    #      iteration; seeded at 1.0 ("not yet converged").
-    resid0 = jnp.ones_like(u_star)
-    carry = (u_star, z0, z0_t, z0_q, theta_star, q_star_val, wind_speed, resid0)
-    # The MOST iteration mixes the (possibly float32) input state with float64
-    # physical constants (G, NU_AIR, c_pd via the virtual-T coefficient), so a
-    # carry leaf would silently promote float32 -> float64 mid-loop and trip
-    # ``fori_loop``'s equal-types invariant.  This only bites the float32
-    # atmosphere coupled path; the OMIP ocean path runs float64 so the re-casts
-    # below are no-ops (byte-identical).  Pin each leaf back to its input dtype.
-    _carry_dtypes = tuple(c.dtype for c in carry)
-
-    def body_fn(i, carry):
-        u_star, z0, z0_t, z0_q, theta_star, q_star_val, _U_eff_prev, _resid = carry
-        u_star_safe = jnp.maximum(u_star, 1e-6)
-
-        # Virtual potential temperature scale (1/ε − 1 ≈ 0.6078)
-        theta_v_star = theta_star + _vT_coef * T_atm * q_star_val
-
-        # COARE 3.0 convective gustiness (scheme-native default: ON for
-        # coare3 with z_i = 600 m per AeroBulk/Fairall 2003, OFF otherwise;
-        # explicit gustiness_w_zi=0.0 disables).  Over
-        # a calm but convectively-unstable warm ocean the mean wind alone gives
-        # an anemic flux (the tropical hfls ~45 vs ~120 W/m² bias); the
-        # free-convection velocity scale w* = (g·z_i·<w'θv'>/θv)^(1/3) adds a
-        # sub-grid gust U_eff = sqrt(|U|² + (β·w*)²) (Fairall et al. 2003,
-        # β~1.25, z_i = BL depth ~600 m).  <w'θv'> = u*·θv* (kinematic, upward
-        # +; unstable only).
+    _coare = None
+    if scheme in ("coare3", "large_yeager"):
+        # AeroBulk 1.0.0 TURB_COARE3P0 / TURB_NCAR, ported faithfully.
+        # AeroBulk has one height for t and q.
+        if not (z_q is z_t or _same_static_height(z_q, z_t)):
+            raise NotImplementedError(
+                f"{scheme} (AeroBulk) takes temperature and humidity at one "
+                f"height; got z_t={z_t!r}, z_q={z_q!r}.")
+        if z_t is z_u:
+            _equal = True
+        elif isinstance(z_t, numbers.Real) and isinstance(z_u, numbers.Real):
+            _equal = abs(z_u - z_t) < _AB_EQUAL_HEIGHT_TOL
+        else:
+            _equal = jnp.abs(jnp.asarray(z_u) - jnp.asarray(z_t)) < _AB_EQUAL_HEIGHT_TOL
+    if scheme == "large_yeager":
         if gustiness_w_zi > 0.0:
-            wpthvp = jnp.maximum(u_star_safe * theta_v_star, 0.0)
-            # cbrt(0) has an infinite derivative, so a stable column (buoyancy
-            # flux floored to exactly 0) would inject a NaN reverse-mode
-            # gradient into every trainable upstream (charnock, state).  Floor
-            # the cbrt argument at a tiny positive constant: the max() kink
-            # clamps the stable-side gradient to 0 (physically correct — no
-            # free convection when stable) and the primal offset is w* ~ 1e-8
-            # m/s, negligible next to the resolved wind.  (1e-24 <= 1e-6 safety
-            # floor, exempt from the inline-coeff ratchet.)
-            wstar = jnp.cbrt(
-                jnp.maximum(G * gustiness_w_zi * wpthvp / T_v, 1e-24)
-            )
-            U_eff = jnp.sqrt(wind_speed ** 2 + (gustiness_beta * wstar) ** 2)
-        else:
-            U_eff = wind_speed
-
-        # Scheme-native calm-wind floors on the bulk (effective) wind, per
-        # the reference implementations (see module constants above).
-        if scheme == "coare3":
-            U_eff = jnp.maximum(U_eff, _COARE_UB_FLOOR)
-        elif scheme == "large_yeager":
-            U_eff = jnp.maximum(U_eff, _LY_UB_FLOOR)
-
-        # Inverse Obukhov length: 1/L = −κ g θ_v* / (u*² T_v).
+            raise NotImplementedError(
+                "large_yeager (AeroBulk TURB_NCAR) has no convective gustiness; "
+                f"got gustiness_w_zi={gustiness_w_zi!r}.")
+        _coare = _turb_ncar(
+            u_rel ** 2 + v_rel ** 2, T_atm, q_atm, T_sfc, q_sfc, z_u, z_t, _equal,
+            n_iter, stability_scheme, unstable_gamma, stable_beta, _coeff_cap)
+        u_star = _coare["us"]
+        theta_star = -_coare["ts"]
+        q_star_val = -_coare["qs"]
+        z0_t = None
+        U_eff_final = _coare["Ub"]
+        most_residual = _coare["resid"]
+    elif scheme == "coare3":
+        _coare = _turb_coare3p0(
+            u_rel ** 2 + v_rel ** 2, T_atm, q_atm, T_sfc, q_sfc, z_u, z_t, _equal,
+            n_iter, charnock, gustiness_w_zi, gustiness_beta, stability_scheme,
+            None if max_exchange_coeff is None else _denom_floor)
+        # legoESM sign convention for the scales (positive upward = surface
+        # warmer/moister than the air): theta* = -AeroBulk zts.
+        u_star = _coare["us"]
+        theta_star = -_coare["ts"]
+        q_star_val = -_coare["qs"]
+        z0_t = _coare["z0t"]
+        U_eff_final = _coare["Ub"]
+        most_residual = _coare["resid"]
+    else:
+        # Initialize with neutral log-law profile. The thermal (scalar) roughness
+        # z0_t = z0_q = z0 * z0h_z0_ratio (default 0.1) is the trainable knob for
+        # the FIXED-roughness "constant"/"most" path — that path carries the init
+        # z0_t straight through to the flux via the log law.
         #
-        # The stability parameter ζ = z/L is the *only* way L enters this
-        # solver, so we carry the reciprocal directly.  The reciprocal form
-        # is singularity-free: the denominator u*² T_v is strictly positive
-        # (u_star_safe ≥ 1e-6, T_v > 0), so there is no divide-by-zero and
-        # no need for a sentinel or ``safe_divide``.  Crucially it gives the
-        # correct neutral limit *and* its derivative: at exact neutral
-        # (θ_v* = 0) ⇒ 1/L = 0 ⇒ ζ = 0 with the true finite sensitivity
-        # dζ/dθ_v* = −z κ g /(u*² T_v).  Forming L = −u*²T_v/(κgθ_v*) first
-        # and then z/L would instead either inject a NaN gradient (0·∞ from
-        # the dead branch of a neutral-limit ``where``) or, if masked with a
-        # constant ±1e6 sentinel, flatten dζ/dθ_v* to zero across the
-        # neutral band and jump at the mask threshold.  Away from neutral ζ
-        # equals the textbook z/L to round-off.
-        inv_L = -KAPPA * G * theta_v_star / (u_star_safe ** 2 * T_v)
+        # (coare3 / large_yeager never reach this path: AeroBulk ports above.)
+        z0 = jnp.full_like(wind_speed, z0_init)
+        z0_t = z0 * z0h_z0_ratio
+        z0_q = z0_t
 
-        # Stability parameters and ψ functions evaluated at each
-        # measurement height. When z_t == z_q == z_u (single-height),
-        # zeta_t == zeta_q == zeta_u and psi_h_t == psi_h_q.
-        zeta_u = jnp.clip(z_u * inv_L, -10.0, 10.0)
-        zeta_t = jnp.clip(z_t * inv_L, -10.0, 10.0)
-        zeta_q = jnp.clip(z_q * inv_L, -10.0, 10.0)
-        # Scheme-matched stability functions (static Python dispatch at trace
-        # time): COARE 3.0 uses the Fairall 1996/2003 Kansas + free-convective
-        # blend on the unstable side and the ``stability_scheme``-selectable
-        # STABLE branch (default "dyer1974" = the byte-identical COARE native
-        # stable form — itself BH91, see psi_m_coare); large_yeager/constant/
-        # most keep Businger-Dyer with the same selectable stable branch
-        # ("dyer1974" default = the historical -5*zeta that LY09/NEMO ncar
-        # use).  Without threading the selector here the knob was silently
-        # inert on every coare3 lane (the 2026-08 bit-identical AMIP A/B).
-        if scheme == "coare3":
-            psi_m_u = psi_m_coare(zeta_u, stability_scheme)
-            psi_h_t = psi_h_coare(zeta_t, stability_scheme)
-            psi_h_q = psi_h_coare(zeta_q, stability_scheme)
-        else:
+        ln_zu_z0 = jnp.log(z_u / jnp.maximum(z0, 1e-12))
+        ln_zt_z0t = jnp.log(z_t / jnp.maximum(z0_t, 1e-12))
+        ln_zq_z0q = jnp.log(z_q / jnp.maximum(z0_q, 1e-12))
+        u_star = KAPPA * wind_speed / jnp.maximum(ln_zu_z0, _denom_floor)
+        theta_star = KAPPA * dT / jnp.maximum(ln_zt_z0t, _denom_floor)
+        q_star_val = KAPPA * dq / jnp.maximum(ln_zq_z0q, _denom_floor)
+
+        # Carry leaves 7-8 (orthogonal MOST diagnostics unioned across branches):
+        #  (7) U_eff, the bulk/effective wind incl. gustiness + scheme calm-wind
+        #      floor, so the post-loop stress normalization tau = rho u*^2 u/U_eff
+        #      (AeroBulk semantics: tau = rho Cd Ub u) uses the CONVERGED value;
+        #      with gustiness off and no floor binding, U_eff == wind_speed
+        #      byte-identically.  Seeded with the pre-loop wind_speed.
+        #  (8) the MOST convergence residual (relative u* change), updated each
+        #      iteration; seeded at 1.0 ("not yet converged").
+        resid0 = jnp.ones_like(u_star)
+        carry = (u_star, z0, z0_t, z0_q, theta_star, q_star_val, wind_speed, resid0)
+        # The MOST iteration mixes the (possibly float32) input state with float64
+        # physical constants (G, NU_AIR, c_pd via the virtual-T coefficient), so a
+        # carry leaf would silently promote float32 -> float64 mid-loop and trip
+        # ``fori_loop``'s equal-types invariant.  This only bites the float32
+        # atmosphere coupled path; the OMIP ocean path runs float64 so the re-casts
+        # below are no-ops (byte-identical).  Pin each leaf back to its input dtype.
+        _carry_dtypes = tuple(c.dtype for c in carry)
+
+        def body_fn(i, carry):
+            u_star, z0, z0_t, z0_q, theta_star, q_star_val, _U_eff_prev, _resid = carry
+            u_star_safe = jnp.maximum(u_star, 1e-6)
+
+            # Virtual potential temperature scale (1/ε − 1 ≈ 0.6078)
+            theta_v_star = theta_star + _vT_coef * T_atm * q_star_val
+
+            # Optional convective gustiness on the non-COARE paths (OFF unless
+            # an explicit gustiness_w_zi > 0 is passed; coare3 uses AeroBulk's
+            # own gustiness in _turb_coare3p0).  Over
+            # a calm but convectively-unstable warm ocean the mean wind alone gives
+            # an anemic flux (the tropical hfls ~45 vs ~120 W/m² bias); the
+            # free-convection velocity scale w* = (g·z_i·<w'θv'>/θv)^(1/3) adds a
+            # sub-grid gust U_eff = sqrt(|U|² + (β·w*)²) (Fairall et al. 2003,
+            # β~1.25, z_i = BL depth ~600 m).  <w'θv'> = u*·θv* (kinematic, upward
+            # +; unstable only).
+            if gustiness_w_zi > 0.0:
+                wpthvp = jnp.maximum(u_star_safe * theta_v_star, 0.0)
+                # cbrt(0) has an infinite derivative, so a stable column (buoyancy
+                # flux floored to exactly 0) would inject a NaN reverse-mode
+                # gradient into every trainable upstream (charnock, state).  Floor
+                # the cbrt argument at a tiny positive constant: the max() kink
+                # clamps the stable-side gradient to 0 (physically correct — no
+                # free convection when stable) and the primal offset is w* ~ 1e-8
+                # m/s, negligible next to the resolved wind.  (1e-24 <= 1e-6 safety
+                # floor, exempt from the inline-coeff ratchet.)
+                wstar = jnp.cbrt(
+                    jnp.maximum(G * gustiness_w_zi * wpthvp / T_v, 1e-24)
+                )
+                U_eff = jnp.sqrt(wind_speed ** 2 + (gustiness_beta * wstar) ** 2)
+            else:
+                U_eff = wind_speed
+
+            # Inverse Obukhov length: 1/L = −κ g θ_v* / (u*² T_v).
+            #
+            # The stability parameter ζ = z/L is the *only* way L enters this
+            # solver, so we carry the reciprocal directly.  The reciprocal form
+            # is singularity-free: the denominator u*² T_v is strictly positive
+            # (u_star_safe ≥ 1e-6, T_v > 0), so there is no divide-by-zero and
+            # no need for a sentinel or ``safe_divide``.  Crucially it gives the
+            # correct neutral limit *and* its derivative: at exact neutral
+            # (θ_v* = 0) ⇒ 1/L = 0 ⇒ ζ = 0 with the true finite sensitivity
+            # dζ/dθ_v* = −z κ g /(u*² T_v).  Forming L = −u*²T_v/(κgθ_v*) first
+            # and then z/L would instead either inject a NaN gradient (0·∞ from
+            # the dead branch of a neutral-limit ``where``) or, if masked with a
+            # constant ±1e6 sentinel, flatten dζ/dθ_v* to zero across the
+            # neutral band and jump at the mask threshold.  Away from neutral ζ
+            # equals the textbook z/L to round-off.
+            inv_L = -KAPPA * G * theta_v_star / (u_star_safe ** 2 * T_v)
+
+            # Stability parameters and ψ functions evaluated at each
+            # measurement height. When z_t == z_q == z_u (single-height),
+            # zeta_t == zeta_q == zeta_u and psi_h_t == psi_h_q.
+            zeta_u = jnp.clip(z_u * inv_L, -10.0, 10.0)
+            zeta_t = jnp.clip(z_t * inv_L, -10.0, 10.0)
+            zeta_q = jnp.clip(z_q * inv_L, -10.0, 10.0)
+            # Businger-Dyer with the ``stability_scheme``-selectable stable
+            # branch ("dyer1974" default = the -5*zeta that LY09/NEMO ncar use).
             psi_m_u = psi_m(zeta_u, stability_scheme,
                             unstable_gamma=unstable_gamma, stable_beta=stable_beta)
             psi_h_t = psi_h(zeta_t, stability_scheme,
@@ -1092,152 +1478,44 @@ def compute_most_fluxes(
             psi_h_q = psi_h(zeta_q, stability_scheme,
                             unstable_gamma=unstable_gamma, stable_beta=stable_beta)
 
-        # --- Roughness update (Python if resolved at trace time) ---
-        if scheme == "coare3":
-            # COARE 3.0: wind-dependent Charnock + smooth-flow regime.
-            # Fairall et al. (2003) §3c ramp the Charnock parameter linearly
-            # from the base value at U_10N <= 10 m/s to 0.018 at >= 18 m/s;
-            # without it the high-wind drag is biased ~15% low (found by the
-            # aerobulk coare3p0 oracle).  ``charnock`` may be a traced
-            # trainable parameter, so use jnp ops throughout.
-            U_10N_c = u_star_safe / KAPPA * jnp.log(
-                10.0 / jnp.maximum(z0, 1e-12)
-            )
-            ramp = jnp.clip(
-                (U_10N_c - _COARE_CHARNOCK_U_LO)
-                / (_COARE_CHARNOCK_U_HI - _COARE_CHARNOCK_U_LO),
-                0.0, 1.0,
-            )
-            charnock_hi = jnp.maximum(_COARE_CHARNOCK_HI, charnock)
-            charnock_eff = charnock + ramp * (charnock_hi - charnock)
-            z0_new = (
-                charnock_eff * u_star_safe ** 2 / G
-                + 0.11 * NU_AIR / u_star_safe
-            )
-            Re = u_star_safe * z0_new / NU_AIR
-            z0_t_new = jnp.minimum(
-                1.15e-4,
-                5.5e-5 * jnp.power(jnp.maximum(Re, 0.01), -0.6),
-            )
-            z0_q_new = z0_t_new
-
-        elif scheme == "large_yeager":
-            # Large & Yeager 2009 (CORE/OMIP): iterate in coefficient space.
-            # 1) Neutral 10-m wind from current u_star and z0
-            U_10N = u_star_safe / KAPPA * jnp.log(
-                10.0 / jnp.maximum(z0, 1e-12)
-            )
-            U_10N = jnp.clip(U_10N, 0.5, 50.0)
-
-            # 2) LY09 neutral 10-m drag coefficient — the canonical shared drag
-            # law (Large & Yeager 2009 Eq. 6, incl. the −3.14807e-10·U⁶ high-wind
-            # correction + clip), NOT a per-component re-derivation.  U_10N is
-            # already clipped to [0.5, 50], so the helper's 0.5 floor is a no-op.
-            C_DN = large_yeager_neutral_cd(U_10N)
-
-            # 3) Neutral exchange coefficients at 10 m
-            rdn = jnp.sqrt(C_DN)
-            # Stability-dependent 10-m Stanton/Dalton number (LY09 Table 4).
-            # Use the wind-height stability for the unstable/stable branch.
-            CHN10 = jnp.where(zeta_u < 0.0, 32.7e-3, 18.0e-3) * rdn
-            CEN10 = 34.6e-3 * rdn
-            rhn = CHN10 / rdn  # = ch_coeff
-            ren = CEN10 / rdn  # = ce_coeff
-
-            # 4) Shift the NEUTRAL 10-m coefficients to the measurement
-            #    height AND the actual stability (LY04 Eq. 9-11 / LY09 §3;
-            #    identical to NEMO sbcblk_algo_ncar):
-            #    rd = rdn / (1 + rdn/κ · (ln(z_u/10) − ψ_m(z_u/L)))
-            #    rh = rhn / (1 + rhn/κ · (ln(z_t/10) − ψ_h(z_t/L)))
-            #    re = ren / (1 + ren/κ · (ln(z_q/10) − ψ_h(z_q/L)))
-            #    The reference coefficient is neutral-10-m, so the stability
-            #    term is ψ(z/L) alone.  Subtracting ψ(10/L) here (the old
-            #    form) cancels the entire stability correction at z = 10 m
-            #    and silently runs near-neutral exchange in stable/unstable
-            #    air — caught by the aerobulk oracle (stable light-wind
-            #    fluxes were up to ~10x too large).
-            ln_zr_u = jnp.log(z_u / 10.0)
-            ln_zr_t = jnp.log(z_t / 10.0)
-            ln_zr_q = jnp.log(z_q / 10.0)
-
-            rd = rdn / jnp.maximum(
-                1.0 + rdn / KAPPA * (ln_zr_u - psi_m_u), 0.2
-            )
-            rh = rhn / jnp.maximum(
-                1.0 + rhn / KAPPA * (ln_zr_t - psi_h_t), 0.2
-            )
-            re = ren / jnp.maximum(
-                1.0 + ren / KAPPA * (ln_zr_q - psi_h_q), 0.2
-            )
-
-            # Optional transfer-coefficient ceiling (max_exchange_coeff). The LY
-            # coefficient-space path bypasses the log-law denominator floor, so
-            # apply the equivalent cap directly: rd, rh, re ≤ κ/_denom_floor
-            # bounds C_d=rd², C_h=rd·rh, C_e=rd·re ≤ C_max — the SAME guarantee
-            # the else-branch gets from _denom_floor. _coeff_cap is None (skip,
-            # byte-identical) unless a ceiling was requested. z0_new below reads
-            # the capped rd, so the roughness estimate stays consistent.
-            if _coeff_cap is not None:
-                rd = jnp.minimum(rd, _coeff_cap)
-                rh = jnp.minimum(rh, _coeff_cap)
-                re = jnp.minimum(re, _coeff_cap)
-
-            # 5) Update scaling parameters directly from coefficients
-            u_star_new = rd * U_eff
-            theta_star_new = rh * dT
-            q_star_new = re * dq
-
-            # Still need z0 for the next iteration's U_10N estimate
-            z0_new = z_u / jnp.exp(KAPPA / rd + psi_m_u)
-            z0_new = jnp.clip(z0_new, 1e-12, 1.0)
-            z0_t_new = z0_t  # not used in coefficient path
-            z0_q_new = z0_q  # not used in coefficient path
-
-            # Convergence residual (relative u* change) — see the common
-            # return below; kept in sync so the carry structure matches.
-            resid_new = jnp.abs(u_star_new - u_star) / jnp.maximum(
-                jnp.abs(u_star_new), 1e-6)
-            return (u_star_new, z0_new, z0_t_new, z0_q_new,
-                    theta_star_new, q_star_new, U_eff, resid_new)
-
-        else:
+            # Fixed roughness ("constant"/"most").
             z0_new = z0
             z0_t_new = z0_t
             z0_q_new = z0_q
 
-        # For COARE and constant: transfer coefficients via log-law + stability,
-        # with each variable referenced to its own measurement height.
-        ln_zu_z0 = jnp.log(z_u / jnp.maximum(z0_new, 1e-12))
-        ln_zt_z0t = jnp.log(z_t / jnp.maximum(z0_t_new, 1e-12))
-        ln_zq_z0q = jnp.log(z_q / jnp.maximum(z0_q_new, 1e-12))
+            # Transfer coefficients via log-law + stability,
+            # with each variable referenced to its own measurement height.
+            ln_zu_z0 = jnp.log(z_u / jnp.maximum(z0_new, 1e-12))
+            ln_zt_z0t = jnp.log(z_t / jnp.maximum(z0_t_new, 1e-12))
+            ln_zq_z0q = jnp.log(z_q / jnp.maximum(z0_q_new, 1e-12))
 
-        denom_m = jnp.maximum(ln_zu_z0 - psi_m_u, _denom_floor)
-        denom_h = jnp.maximum(ln_zt_z0t - psi_h_t, _denom_floor)
-        denom_q = jnp.maximum(ln_zq_z0q - psi_h_q, _denom_floor)
+            denom_m = jnp.maximum(ln_zu_z0 - psi_m_u, _denom_floor)
+            denom_h = jnp.maximum(ln_zt_z0t - psi_h_t, _denom_floor)
+            denom_q = jnp.maximum(ln_zq_z0q - psi_h_q, _denom_floor)
 
-        u_star_new = KAPPA * U_eff / denom_m
-        theta_star_new = KAPPA * dT / denom_h
-        q_star_new = KAPPA * dq / denom_q
+            u_star_new = KAPPA * U_eff / denom_m
+            theta_star_new = KAPPA * dT / denom_h
+            q_star_new = KAPPA * dq / denom_q
 
-        # MOST fixed-point convergence residual: the relative change in u*
-        # over this iteration (small = converged).  DIAGNOSTIC ONLY — it does
-        # not feed the fluxes, so the default (return_convergence=False) path
-        # is byte-identical; it lets callers/tests detect columns where the
-        # fixed n_iter under-converges (strong stability), the gap vs a
-        # tolerance-based root solve (CliMA SurfaceFluxes.jl).
-        resid_new = jnp.abs(u_star_new - u_star) / jnp.maximum(
-            jnp.abs(u_star_new), 1e-6)
+            # MOST fixed-point convergence residual: the relative change in u*
+            # over this iteration (small = converged).  DIAGNOSTIC ONLY — it does
+            # not feed the fluxes, so the default (return_convergence=False) path
+            # is byte-identical; it lets callers/tests detect columns where the
+            # fixed n_iter under-converges (strong stability), the gap vs a
+            # tolerance-based root solve (CliMA SurfaceFluxes.jl).
+            resid_new = jnp.abs(u_star_new - u_star) / jnp.maximum(
+                jnp.abs(u_star_new), 1e-6)
 
-        return (u_star_new, z0_new, z0_t_new, z0_q_new,
-                theta_star_new, q_star_new, U_eff, resid_new)
+            return (u_star_new, z0_new, z0_t_new, z0_q_new,
+                    theta_star_new, q_star_new, U_eff, resid_new)
 
-    def _body_fn_dtype_stable(i, carry):
-        out = body_fn(i, carry)
-        return tuple(jnp.asarray(o).astype(d)
-                     for o, d in zip(out, _carry_dtypes))
+        def _body_fn_dtype_stable(i, carry):
+            out = body_fn(i, carry)
+            return tuple(jnp.asarray(o).astype(d)
+                         for o, d in zip(out, _carry_dtypes))
 
-    carry = jax.lax.fori_loop(0, n_iter, _body_fn_dtype_stable, carry)
-    u_star, z0, z0_t, z0_q, theta_star, q_star_val, U_eff_final, most_residual = carry
+        carry = jax.lax.fori_loop(0, n_iter, _body_fn_dtype_stable, carry)
+        u_star, z0, z0_t, z0_q, theta_star, q_star_val, U_eff_final, most_residual = carry
 
     # Fluxes from scaling parameters.  Stress normalization: tau =
     # -rho u*^2 u/U_eff == -rho Cd U_eff u (AeroBulk/COARE: one factor of the
@@ -1255,10 +1533,21 @@ def compute_most_fluxes(
         _cp = moist_air_cp(q_atm)
     else:
         _cp = constants.c_pd
-    tau_x = -rho * u_star ** 2 * u_rel / U_eff_final
-    tau_y = -rho * u_star ** 2 * v_rel / U_eff_final
-    shflx = rho * _cp * u_star * theta_star
-    lhflx = rho * _L * u_star * q_star_val
+    if _coare is None:
+        tau_x = -rho * u_star ** 2 * u_rel / U_eff_final
+        tau_y = -rho * u_star ** 2 * v_rel / U_eff_final
+        shflx = rho * _cp * u_star * theta_star
+        lhflx = rho * _L * u_star * q_star_val
+    else:
+        # AeroBulk BULK_FORMULA structure: tau = rho Cd Ub |U| (components
+        # along -u, -v: drag on the air), Q = rho cp Ch Ub (T_s - t_zu),
+        # E = rho Ce Ub (q_s - q_zu), with the floored transfer coefficients and
+        # the height-adjusted t_zu/q_zu; rho, cp and L are the caller's.
+        _c = _coare
+        tau_x = -rho * _c["Cd"] * _c["Ub"] * u_rel
+        tau_y = -rho * _c["Cd"] * _c["Ub"] * v_rel
+        shflx = rho * _cp * _c["Ch"] * _c["Ub"] * (T_sfc - _c["t_zu"])
+        lhflx = rho * _L * _c["Ce"] * _c["Ub"] * (q_sfc - _c["q_zu"])
 
     if return_2m:
         # Air temperature at the diagnostic height (default 2 m) from the
@@ -1268,23 +1557,36 @@ def compute_most_fluxes(
         # raw lowest-level "tas" exaggerates the cold/air-sea-gap bias — this
         # gives the physically correct CMIP 2 m value.  Recompute 1/L from the
         # converged scales (the iteration carries scales, not L).
-        u_star_safe = jnp.maximum(u_star, 1e-6)
-        theta_v_star = theta_star + _vT_coef * T_atm * q_star_val
-        inv_L = -KAPPA * G * theta_v_star / (u_star_safe ** 2 * T_v)
-        zeta_d = jnp.clip(z_diag * inv_L, -10.0, 10.0)
-        # Scheme-match the diagnostic psi_h to the MAIN loop (static Python
-        # dispatch): COARE 3.0 uses the Fairall free-convective psi_h_coare
-        # WITH the same stability_scheme-selected stable branch as the main
-        # loop, every other scheme uses the stability_scheme-selected psi_h.
-        # Using the non-COARE psi_h here for coare3 made the 2 m T
-        # inconsistent with the converged coare3 profile.
-        _psi_h_d = (psi_h_coare(zeta_d, stability_scheme)
-                    if scheme == "coare3"
-                    else psi_h(zeta_d, stability_scheme,
-                               unstable_gamma=unstable_gamma,
-                               stable_beta=stable_beta))
-        denom_d = jnp.log(z_diag / jnp.maximum(z0_t, 1e-12)) - _psi_h_d
-        T_2m = T_sfc - (theta_star / KAPPA) * denom_d
+        if _coare is None:
+            u_star_safe = jnp.maximum(u_star, 1e-6)
+            theta_v_star = theta_star + _vT_coef * T_atm * q_star_val
+            inv_L = -KAPPA * G * theta_v_star / (u_star_safe ** 2 * T_v)
+            zeta_d = jnp.clip(z_diag * inv_L, -10.0, 10.0)
+            _psi_h_d = psi_h(zeta_d, stability_scheme,
+                             unstable_gamma=unstable_gamma, stable_beta=stable_beta)
+            denom_d = jnp.log(z_diag / jnp.maximum(z0_t, 1e-12)) - _psi_h_d
+            T_2m = T_sfc - (theta_star / KAPPA) * denom_d
+        else:
+            # coare3 / large_yeager: AeroBulk's own height shift (the t_zu
+            # update of TURB_COARE3P0 / TURB_NCAR) applied from z_t to z_diag
+            # with the solver's last-iteration 1/L and theta*, zeta clipped as
+            # in that routine: T(z_t) = T_atm exactly.
+            if scheme == "coare3":
+                _zmax = _AB_COARE_ZETA_ABS_MAX
+
+                def _ph(z):
+                    return psi_h_coare(z, stability_scheme)
+            else:
+                _zmax = _AB_NCAR_ZETA_ABS_MAX
+
+                def _ph(z):
+                    return psi_h(z, stability_scheme, unstable_gamma=unstable_gamma,
+                                 stable_beta=stable_beta)
+
+            def _zeta(z):
+                return jnp.clip(z * _coare["inv_L"], -_zmax, _zmax)
+            prf = jnp.log(z_t / z_diag) + _ph(_zeta(z_diag)) - _ph(_zeta(z_t))
+            T_2m = T_atm - _coare["ts"] / KAPPA * prf
         # Guard against profile extrapolation outside [T_atm, T_sfc].
         lo = jnp.minimum(T_atm, T_sfc)
         hi = jnp.maximum(T_atm, T_sfc)
