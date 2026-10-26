@@ -10,12 +10,18 @@ admitting this preregistered 100-step window. The stage order is taken from
 NEMO's own thermodynamics call chain
 (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:174-229`).
 
+The revised schema records only `qlead` at frazil entry, before NEMO initializes
+`ht_i_new` and `fraz_frac`; those outputs first appear at frazil exit. Category
+records omit never-packed `a_ib_1d` and late-packed `h_ib_1d`, include the
+`o_i_1d` value consumed when `oa_i` is written back, and share a full
+pre-category state snapshot so cells skipped by `a_i <= epsi10` remain defined.
+
 ## Complete boundary map
 
 Every row names the exact record kinds and the NEMO-owned state recorded on
 both sides. Common category state includes `nptidx`, surface/ocean forcing,
 ice/snow temperatures and enthalpies, thickness/salinity, all `dh_*`
-diagnostics, category-entry `a_i_b`/`h_i_b`, and all thermodynamic heat/water/
+diagnostics, ice age `o_i`, and all thermodynamic heat/water/
 salt flux accumulators. Common global state includes category prognostics,
 every post-`ice_var_agg(2)` aggregate/equivalent field (including `tm_si`), pond
 state, fluxes, `h_i_b`, `a_i_b`, `t_bo`, `ht_i_new`, `fraz_frac`, `sss_m`,
@@ -25,9 +31,9 @@ surface fluxes.
 | Rung | Recorded boundaries | Additional inputs/constants mapped to recorded names |
 |---|---|---|
 | O8 | 1 frazil entry; 2 frazil exit | `qlead`, `ht_i_new`, `fraz_frac`; scalar `rn_hinew` (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:393-477`) |
-| O9 | 3 category entry; 4 ZDF exit; 5 `dh` exit; 6 first-temperature exit; 17 final Picard state at steps 1, 2, 100 | `t_su`, `qns_ice`, `t_i`, `t_s`; filled `zkappa_i/s(0:nlay)`, `zradtr_i/s(0:nlay)`, and `zradab_i/s(1:nlay)` only—no layer-0 or single-cell tridiagonal scratch; scalar `rcnd_s`, `rn_kappa_i/s`, `rn_snwblow`, `rn_sinew`, `nn_icesal` (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:112-139`, `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:387-577`) |
-| O10 | 6 salinity entry; 7 salinity exit; 8 second-temperature exit | complete category state and fluxes; `rn_icesal`, `rn_sal_gd`, `rn_time_gd`, `rn_sal_fl`, `rn_time_fl`, `ln_drainage`, `ln_flushing`, `nn_drainage`, `nn_flushing`, `rn_sal_himin`, `rn_flushrate`, `rn_vbrc`, `nn_sal_scheme`, `rn_alpha_RJW`, `rn_Rc_RJW`, `nn_liquidus`, `rn_alpha_GN`, `rn_Rc_GN`, `rn_alpha_CW`, `ln_sal_chk`, plus the six shared O9 constants (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_sal.f90:115-687`) |
-| O11 | 8 lateral-melt entry; 9 lateral-melt exit | complete category state and flux accumulators plus configured `rn_beta` and `rn_dmin` at both sides (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:201-210`) |
+| O9 | 21 pre-category state; 3 category entry; 4 ZDF exit; 5 `dh` exit; 6 first-temperature exit; 17 final Picard state at steps 1, 2, 100 | complete state for cells skipped by the category loop; `o_i_1d`; `t_su`, `qns_ice`, `t_i`, `t_s`; filled `zkappa_i/s(0:nlay)`, `zradtr_i/s(0:nlay)`, and `zradab_i/s(1:nlay)` only—no layer-0 or single-cell tridiagonal scratch; scalar `rcnd_s`, `rn_kappa_i/s`, `rn_snwblow`, `rn_sinew`, `nn_icesal` (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:112-139`, `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:387-577`) |
+| O10 | 21 pre-category state; 6 salinity entry; 7 salinity exit; 8 second-temperature exit | complete category state and fluxes; `rn_icesal`, `rn_sal_gd`, `rn_time_gd`, `rn_sal_fl`, `rn_time_fl`, `ln_drainage`, `ln_flushing`, `nn_drainage`, `nn_flushing`, `rn_sal_himin`, `rn_flushrate`, `rn_vbrc`, `nn_sal_scheme`, `rn_alpha_RJW`, `rn_Rc_RJW`, `nn_liquidus`, `rn_alpha_GN`, `rn_Rc_GN`, `rn_alpha_CW`, `ln_sal_chk`, plus the six shared O9 constants (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_sal.f90:115-687`) |
+| O11 | 21 pre-category state; 8 lateral-melt entry; 9 lateral-melt exit | complete category state and flux accumulators plus configured `rn_beta` and `rn_dmin` at both sides (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:201-210`) |
 | O12 | 10 pond entry/category done; 11 pond exit | common global state; `dh_i_sum_2d`, `dh_s_sum_2d`, `sprecip`, `tprecip`, `qsr_ice`, `qns_ice`; `nice_pnd`, `rn_apnd_min`, `rn_apnd_max`, `rn_pnd_flush`, `ln_pnd_lids`, `ln_pnd_rain`, `ln_pnd`, `ln_pnd_LEV`, `ln_pnd_CST`, `ln_pnd_TOPO`, `rn_apnd`, `rn_hpnd`, `ln_pnd_alb`, `rn_pnd_hl_min`, `rn_pnd_hl_max` (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_pnd.f90:162-264`) |
 | O13 | 11 ITD entry; 12 ITD exit | common global state plus explicit `h_i_b`, `a_i_b`, `hi_max`, `rn_amax_2d` (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/iceitd.f90:175-232`, `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/iceitd.f90:464`) |
 | O14 | 12 `ice_thd_do` entry; 13 exit | common global state plus explicit `t_bo`, `ht_i_new`, `fraz_frac`, `sss_m`, `hi_max`, `rn_amax_2d` (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:196-206`, `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_do.f90:304`) |
@@ -40,9 +46,9 @@ salinity, pond, lateral-melt and albedo constants by recorded name.
 
 ## Storage, disk and wall-clock gates
 
-The schema-derived worst case is **133,386,394,340 bytes (124.23 GiB)**.
-Per-rung projected sizes are O8 0.10 GiB, O9 34.21 GiB, O10 30.02 GiB, O11
-20.01 GiB, O12–O15 17.39 GiB each, and O16 16.43 GiB. Shared boundaries are
+The schema-derived worst case is **139,906,193,940 bytes (130.30 GiB)**.
+Per-rung projected sizes are O8 0.06 GiB, O9 40.61 GiB, O10 36.32 GiB, O11
+26.42 GiB, O12–O15 17.39 GiB each, and O16 16.43 GiB. Shared boundaries are
 referenced rather than copied.
 
 The driver gates free and final evidence disk use at **150,000,000 KiB
@@ -62,10 +68,13 @@ The generated driver passed all ten phases:
 - production-flag FP-passivity census for all eight patched units;
 - production-flag plus `-fcheck=bounds` compilation of the real writer and all
   eight real patched units, followed by a fixture that executes every emitted
-  kind 1–20 with distinct data, retained `-0.0`, nonzero lateral-melt/albedo
+  kind 1–21 with distinct data, retained `-0.0`, nonzero lateral-melt/albedo
   values, and a quiet-NaN layer-0 absorption sentinel that is not written;
 - same-program comparison against a separately copied observer-free build and
   independently patched expected sources, with a same-program plant;
+- before/after digests for every pre-existing file in each in-scope `cfgs/`
+  tree, a digest-mismatch plant, and unlink-before-edit handling for copied
+  symlinked build metadata;
 - an end-to-end 100-step stub-NEMO `--run` and `--admit-existing` through real
   preflight, patching, same-program and `mpirun` call sites, repeated-run refusal,
   failed-run evidence/build retention, a truncation of `run.sh` itself, and both

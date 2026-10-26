@@ -9,6 +9,7 @@ PROGRAM real_bounds_driver
    USE ice1D
    USE sbc_oce
    USE sbc_ice
+   USE icetab, ONLY: tab_2d_1d
    USE icethd_do, ONLY: ice_thd_frazil
    USE o8_o16_master_writer
    IMPLICIT NONE
@@ -64,7 +65,7 @@ PROGRAM real_bounds_driver
    om_i=837._wp ; at_ip=838._wp ; at_ip_eff=839._wp ; hm_ip=840._wp ; vt_ip=841._wp
    hm_il=842._wp ; vt_il=843._wp ; vm_ibr=844._wp ; tm_si=845._wp
    dh_i_sum_2d=846._wp ; dh_s_sum_2d=847._wp ; h_i_b=848._wp ; a_i_b=849._wp
-   t_bo=850._wp ; ht_i_new=851._wp ; fraz_frac=852._wp ; rn_amax_2d=853._wp
+   t_bo=850._wp ; rn_amax_2d=853._wp
    hi_max=854._wp ; hi_mean=855._wp ; u_ice=856._wp ; v_ice=857._wp
    u_oce=858._wp ; v_oce=859._wp ; drag_io=860._wp
 
@@ -81,9 +82,12 @@ PROGRAM real_bounds_driver
    qlead=941._wp ; qsb_ice_bot=942._wp ; fhld=943._wp ; qt_atm_oi=944._wp
    qt_oce_ai=945._wp ; qtr_ice_bot=946._wp ; wfx_snw_dyn=947._wp
 
-   nptidx=[(ji,ji=1,jpij)]
-   a_i_1d=1001._wp ; a_ib_1d=1002._wp ; h_ib_1d=1003._wp ; at_i_1d=1004._wp
-   h_i_1d=1005._wp ; h_s_1d=1006._wp ; t_su_1d=1007._wp ; s_i_1d=1008._wp
+   npti=0
+   DO jj=Njs0,Nje0 ; DO ji=Nis0,Nie0
+      npti=npti+1 ; nptidx(npti)=(jj-1)*jpi+ji
+   END DO ; END DO
+   a_i_1d=1001._wp ; at_i_1d=1004._wp ; h_i_1d=1005._wp ; h_s_1d=1006._wp
+   t_su_1d=1007._wp ; s_i_1d=1008._wp
    t_bo_1d=1009._wp ; sss_1d=1010._wp ; sst_1d=1011._wp ; qns_ice_1d=1012._wp
    qsr_ice_1d=1013._wp ; dqns_ice_1d=1014._wp ; qtr_ice_top_1d=1015._wp
    qsb_ice_bot_1d=1016._wp ; fhld_1d=1017._wp ; frq_m_1d=1018._wp
@@ -112,6 +116,9 @@ PROGRAM real_bounds_driver
    CALL o8o16_da_config(0.9_wp,8._wp)
    CALL o8o16_albedo_config(0.85_wp,0.75_wp,0.60_wp,0.50_wp,0.36_wp,0.40_wp,1._wp)
    CALL ice_thd_frazil
+   CALL o8o16_global(21)
+   o_i_1d=ieee_value(0._wp,ieee_quiet_nan)
+   CALL tab_2d_1d(npti,nptidx(1:npti),o_i_1d(1:npti),o_i(:,:,1))
    DO kind=3,9 ; CALL o8o16_category(kind,1) ; END DO
    converged=.TRUE. ; zkappa_i=1101._wp ; zkappa_s=1102._wp
    zradtr_i=1103._wp ; zradtr_s=1104._wp ; zradab_i=1105._wp ; zradab_s=1106._wp

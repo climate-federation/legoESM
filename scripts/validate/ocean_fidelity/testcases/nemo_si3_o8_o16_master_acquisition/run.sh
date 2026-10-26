@@ -154,8 +154,8 @@ import sys
 from pathlib import Path
 d=Path(sys.argv[1]); plant=sys.argv[2]
 checks={
-'icethd_do.f90':[('CALL o8o16_frazil(1','fraz_frac(:,:) = 0._wp'),('fraz_frac(:,:) = 0._wp','CALL o8o16_frazil(2')],
-'icethd.f90':[('CALL o8o16_category(3','CALL ice_thd_zdf'),('CALL ice_thd_zdf','CALL o8o16_category(4'),("CALL ice_cons2D  (1, 'icethd'",'CALL o8o16_global(10)'),('CALL o8o16_global(10)','CALL ice_thd_pnd'),('CALL ice_thd_pnd','CALL o8o16_global(11)'),('CALL ice_itd_rem','CALL o8o16_global(12)'),('CALL ice_thd_do','CALL o8o16_global(13)'),('CALL ice_cor( kt , 2 )','CALL o8o16_global(14)')],
+'icethd_do.f90':[('SUBROUTINE ice_thd_frazil','CALL o8o16_frazil(1'),('CALL o8o16_frazil(1','fraz_frac(:,:) = 0._wp'),('fraz_frac(:,:) = 0._wp','CALL o8o16_frazil(2')],
+'icethd.f90':[('CALL ice_thd_frazil','CALL o8o16_global(21)'),('CALL o8o16_global(21)','DO jl = 1, jpl'),('CALL o8o16_category(3','CALL ice_thd_zdf'),('CALL ice_thd_zdf','CALL o8o16_category(4'),("CALL ice_cons2D  (1, 'icethd'",'CALL o8o16_global(10)'),('CALL o8o16_global(10)','CALL ice_thd_pnd'),('CALL ice_thd_pnd','CALL o8o16_global(11)'),('CALL ice_itd_rem','CALL o8o16_global(12)'),('CALL ice_thd_do','CALL o8o16_global(13)'),('CALL ice_cor( kt , 2 )','CALL o8o16_global(14)')],
 'icethd_zdf_bl99.f90':[('END DO  ! End of the do while iterative procedure','CALL o8o16_picard')],
 'icethd_da.f90':[('READ(numnam_ice_cfg','CALL o8o16_da_config')],
 'icethd_sal.f90':[('IF( nn_icesal /= 4 )','CALL o8o16_salinity_config')],
@@ -174,6 +174,60 @@ PY
 }
 
 expect_refusal() { if "$@" >/dev/null 2>&1; then refuse "plant did not refuse: $*"; fi; }
+
+snapshot_cfg_digests() {
+  local out=$1; shift
+  "$PY" - "$out" "$@" <<'PY'
+import hashlib,json,os,sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+out=Path(sys.argv[1]); roots=[]
+for raw in sys.argv[2:]:
+    root=Path(raw)
+    if root.is_dir() and str(root.resolve()) not in {str(p.resolve()) for p in roots}:
+        roots.append(root)
+entries=[]
+for root in roots:
+    for base,dirs,names in os.walk(root,followlinks=False):
+        dirs.sort(); names.sort()
+        for name in names:
+            path=Path(base)/name
+            if path.is_file():
+                key=f'{root.resolve()}::{path.relative_to(root)}'
+                entries.append((key,path))
+def digest(entry):
+    key,path=entry
+    with path.open('rb') as stream:
+        return key,hashlib.file_digest(stream,'sha256').hexdigest()
+with ThreadPoolExecutor(max_workers=4) as pool:
+    files=dict(pool.map(digest,entries))
+out.write_text(json.dumps(files,sort_keys=True)+'\n')
+PY
+}
+
+verify_cfg_digests() {
+  local snapshot=$1 plant=${2:-none}
+  "$PY" - "$snapshot" "$plant" <<'PY'
+import hashlib,json,sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+snapshot=Path(sys.argv[1]); plant=sys.argv[2]; before=json.loads(snapshot.read_text())
+if plant == 'cfg-digest' and before:
+    key=next(iter(before)); before={key:'0'*64}
+def digest(item):
+    key,want=item
+    root,rel=key.split('::',1); path=Path(root)/rel
+    if not path.is_file(): raise SystemExit(f'STATUS PLANT-FIRED: protected cfg file vanished: {path}')
+    with path.open('rb') as stream:
+        got=hashlib.file_digest(stream,'sha256').hexdigest()
+    return path,want,got
+with ThreadPoolExecutor(max_workers=4) as pool:
+    results=pool.map(digest,before.items())
+    for path,want,got in results:
+        if got != want: raise SystemExit(f'STATUS PLANT-FIRED: protected cfg digest changed: {path}')
+print('PASS_EXISTING_CFG_DIGESTS_UNCHANGED')
+PY
+}
 
 production_flags() {
   awk -F'= ' '/^export FFLAGS = / {print $2; exit}' "$BASE_BLD/Makefile"
@@ -219,13 +273,18 @@ sys.modules[spec.name]=mod; spec.loader.exec_module(mod)
 r1=mod.read_master_record(root/mod.record_name(1,1,rank=7)); r2=mod.read_master_record(root/mod.record_name(2,1,rank=7))
 assert np.signbit(r1['fields']['qlead'][0,0])
 assert np.unique(r1['fields']['qlead']).size > 2
+assert set(r1['fields']) == {'qlead'}
 assert np.all(r2['fields']['ht_i_new']==0) and np.all(r2['fields']['fraz_frac']==0)
 records=[mod.read_master_record(p) for p in sorted(root.glob('*.bin'))]
 assert {r['meta']['kind'] for r in records} == set(mod.KINDS)
 assert len(records) == len(mod.KINDS)
 assert all(r['meta']['rank'] == 7 for r in records)
 k8=next(r for r in records if r['meta']['kind']==8)
+assert k8['fields']['o_i'][0] == 808.0
+assert 'a_i_b' not in k8['fields'] and 'h_i_b' not in k8['fields']
 assert k8['scalars']['rn_beta']==0.9 and k8['scalars']['rn_dmin']==8.0
+k21=next(r for r in records if r['meta']['kind']==21)
+assert k21['fields']['oa_i'][0,0,0] == 809.0
 k15=next(r for r in records if r['meta']['kind']==15)
 assert k15['scalars']['rn_alb_sdry']==0.85 and k15['scalars']['rn_alb_hpiv']==1.0
 print('PASS_REAL_PATCHED_WRITER_LAYOUT')
@@ -282,7 +341,7 @@ stub_driver_fixture() {
   tar -czf "$bundles/sas.tar.gz" -C "$bundles/sas" .
   local orca_sha sas_sha; orca_sha=$(sha256sum "$bundles/orca.tar.gz"); orca_sha=${orca_sha%% *}
   sas_sha=$(sha256sum "$bundles/sas.tar.gz"); sas_sha=${sas_sha%% *}
-  local envs=(env O8O16_PATH_PREFIX="$scratch/stub_bin" O8O16_DRIVER_FIXTURE_ACTIVE=1 \
+  local envs=(env O8O16_PATH_PREFIX="$scratch/stub_bin" O8O16_DRIVER_FIXTURE_ACTIVE=1 O8O16_CFG_DIGEST_PARENT=1 \
     NEMO_EXE_OVERRIDE="$STUB_NEMO" NEMO_ROOT="$root" \
     NEMO_SOURCE_ROOT="$NEMO_SOURCE_ROOT" BASE_BLD="$BASE_BLD" \
     REF_CFG=STUB_O8O16_REF REC_CFG=STUB_O8O16_REC REFUSED_DIR="$refused" MIN_FREE_RAM_GB=1 \
@@ -307,7 +366,13 @@ stub_driver_fixture() {
 
 run_preflight() {
   local scratch rung plant
+  local -a cfg_roots
   scratch=$(mktemp -d); ACTIVE_SCRATCH=$scratch
+  cfg_roots=("$NEMO_ROOT/cfgs" "$NEMO_SOURCE_ROOT/cfgs" "$(dirname "$(dirname "$BASE_BLD")")")
+  if [[ ${O8O16_CFG_DIGEST_PARENT:-0} == 0 ]]; then
+    snapshot_cfg_digests "$scratch/cfg_digests.json" "${cfg_roots[@]}"
+    expect_refusal verify_cfg_digests "$scratch/cfg_digests.json" cfg-digest
+  fi
   printf 'PREFLIGHT 1/10 schema, sizes, signed zero, checksum and truncation plants\n'
   "$PY" "$GATE" --schema > "$scratch/schema.json"
   "$PY" "$GATE" --size > "$scratch/size.json"
@@ -345,8 +410,13 @@ run_preflight() {
   grep -q 'REFUSE_RETAINED' "$0"
   printf 'PREFLIGHT 10/10 generated driver: syntax/refusal/admission/retention/move-aside with 100-step stub NEMO\n'
   if [[ ${O8O16_DRIVER_FIXTURE_ACTIVE:-0} == 0 ]]; then stub_driver_fixture "$scratch"; fi
-  if [[ -n "${PREFLIGHT_JSON:-}" ]]; then printf '{"status":"PREFLIGHT_OK","nemo_run":false,"plants":40}\n' > "$PREFLIGHT_JSON"; fi
-  printf 'PREFLIGHT_OK: no real NEMO integration was run; worst-case master %s bytes (124.23 GiB)\n' "$MASTER_BYTES"
+  if [[ ${O8O16_CFG_DIGEST_PARENT:-0} == 0 ]]; then
+    verify_cfg_digests "$scratch/cfg_digests.json"
+  else
+    printf 'PASS_EXISTING_CFG_DIGESTS_UNCHANGED: delegated to outer preflight\n'
+  fi
+  if [[ -n "${PREFLIGHT_JSON:-}" ]]; then printf '{"status":"PREFLIGHT_OK","nemo_run":false,"plants":41}\n' > "$PREFLIGHT_JSON"; fi
+  printf 'PREFLIGHT_OK: no real NEMO integration was run; worst-case master %s bytes (130.30 GiB)\n' "$MASTER_BYTES"
   rm -rf -- "$scratch"; ACTIVE_SCRATCH=""
 }
 
@@ -397,7 +467,7 @@ build_target() {
     "$PY" - "$root/BLD/$name" "$(basename "$(dirname "$BASE_BLD")")" "$cfg" <<'PY'
 import sys
 from pathlib import Path
-p=Path(sys.argv[1]); p.write_text(p.read_text().replace(sys.argv[2],sys.argv[3]))
+p=Path(sys.argv[1]); text=p.read_text().replace(sys.argv[2],sys.argv[3]); p.unlink(); p.write_text(text)
 PY
   done
   if [[ "$instrument" -eq 1 ]]; then
@@ -444,13 +514,13 @@ import hashlib,json,sys
 from pathlib import Path
 ev,repo,here,commit=Path(sys.argv[1]),Path(sys.argv[2]),Path(sys.argv[3]),sys.argv[4]
 sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
-sources=[here/'run.sh',here/'stub_nemo.sh',here.parent/'nemo_si3_o8_o16_master_gate.py',here.parent/'nemo_si3_o8_o16_master_passivity.py']+sorted(here.glob('*.F90'))+sorted(here.glob('*.patch'))
+sources=[here/'run.sh',here/'stub_nemo.sh',here/'stub_mpirun.sh',here.parent/'nemo_si3_o8_o16_master_gate.py',here.parent/'nemo_si3_o8_o16_master_passivity.py']+sorted(here.glob('*.F90'))+sorted(here.glob('*.patch'))
 deck=ev/'manifest/production_deck'
 nemo=Path('/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo')
 manifest={
  'producer_commit':commit,'binary_sha256':{'reference':sha(ev/'manifest/binaries/nemo.ref'),'record':sha(ev/'manifest/binaries/nemo.rec')},
  'source_sha256':{str(p.relative_to(repo)):sha(p) for p in sources},
- 'nemo_source_sha256':{unit:sha(nemo/f'{unit}.f90') for unit in ('icestp','icethd','icethd_do','icethd_da','icethd_sal','icethd_pnd','icethd_zdf_bl99')},
+ 'nemo_source_sha256':{unit:sha(nemo/f'{unit}.f90') for unit in ('icestp','icethd','icethd_do','icethd_da','icethd_sal','icethd_pnd','icethd_zdf_bl99','icealb')},
  'deck_sha256':{p.name:sha(p) for p in sorted(deck.iterdir())},
  'forcing_disposition':'O7_EXACT_PRODUCTS_TO_O8_O16',
  'dynamics_disposition':'PRODUCTION_DECK_ON_EXCLUDED_FROM_PROJECTIONS',

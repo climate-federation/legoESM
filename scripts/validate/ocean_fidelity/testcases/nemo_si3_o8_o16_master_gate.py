@@ -70,9 +70,9 @@ def _fields(names: str, extent: str, dtype: str = "f8") -> tuple[Field, ...]:
 
 
 CAT_BASE = _fields(
-    "a_i a_i_b h_i_b at_i h_i h_s t_su s_i t_bo sss sst qns_ice qsr_ice dqns_ice "
+    "a_i at_i h_i h_s t_su s_i t_bo sss sst qns_ice qsr_ice dqns_ice "
     "qtr_ice_top qsb_ice_bot fhld frq_m sprecip qprec_ice evap_ice "
-    "hfx_err_dif hfx_dif qml_ice sfx_bri sfx_lam wfx_lam",
+    "hfx_err_dif hfx_dif qml_ice sfx_bri sfx_lam wfx_lam o_i",
     "G1",
 ) + _fields("t_i e_i sz_i", "GI") + _fields("t_s e_s", "GS")
 
@@ -131,7 +131,7 @@ class Kind:
 
 
 KINDS: dict[int, Kind] = {
-    1: Kind("frazil_entry", _fields("qlead ht_i_new fraz_frac", "I2")),
+    1: Kind("frazil_entry", _fields("qlead", "I2")),
     2: Kind("frazil_exit", _fields("ht_i_new fraz_frac", "I2")),
     3: Kind("category_entry", _fields("nptidx", "G1", "i4") + CAT_BASE + DH_DIAGS + DH_FLUXES, True),
     4: Kind(
@@ -139,7 +139,8 @@ KINDS: dict[int, Kind] = {
         _fields("nptidx", "G1", "i4")
         + _fields("t_su qns_ice qcn_ice_top qcn_ice_bot qtr_ice_bot hfx_err_dif hfx_dif cnd_ice t1_ice t_si", "G1")
         + _fields("t_i e_i", "GI")
-        + _fields("t_s e_s", "GS"),
+        + _fields("t_s e_s", "GS")
+        + _fields("o_i", "G1"),
         True,
     ),
     5: Kind(
@@ -212,12 +213,13 @@ KINDS[19] = Kind(
     + _fields("taum", "I2"),
 )
 KINDS[20] = Kind("tau_exit", _fields("utau vtau", "F2") + _fields("taum", "I2"))
+KINDS[21] = Kind("pre_category_state", STATE)
 
 PROJECTIONS: dict[str, tuple[int, ...]] = {
     "O8": (1, 2),
-    "O9": (3, 4, 5, 6, 17),
-    "O10": (6, 7, 8),
-    "O11": (8, 9),
+    "O9": (21, 3, 4, 5, 6, 17),
+    "O10": (21, 6, 7, 8),
+    "O11": (21, 8, 9),
     "O12": (10, 11),
     "O13": (11, 12),
     "O14": (12, 13),
@@ -477,8 +479,10 @@ def self_test(plant: str | None = None) -> dict[str, Any]:
             path = root / record_name(kind, 1, 1 if KINDS[kind].category else 0)
             _synthetic_record(path, kind)
             paths.append(path)
-        target = paths[0]
+        target = paths[2] if plant == "swapped-field" else paths[0]
         rec = read_master_record(target, plant=plant if plant in {"header", "truncation", "swapped-field"} else None)
+        if plant == "swapped-field":
+            raise _refuse("swapped-field plant survived parsing")
         if not np.signbit(rec["fields"][KINDS[1].fields[0].name].flat[0]):
             raise _refuse("signed zero was not retained")
         if max_ulp_diff(np.array([-0.0]), np.array([0.0])) != 0:

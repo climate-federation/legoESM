@@ -120,6 +120,7 @@ CONTAINS
       CASE(18); label='pre_aggregation'
       CASE(19); label='tau_entry'
       CASE(20); label='tau_exit'
+      CASE(21); label='pre_category_state'
       CASE DEFAULT; ERROR STOP 'O8-O16 unknown record kind'
       END SELECT
       IF(jl > 0) THEN
@@ -261,8 +262,8 @@ CONTAINS
       INTEGER::u
       current_hinew=rn_hinew
       IF(kind==1) THEN
-         CALL open_record(kind,0,0,3,u)
-         CALL put_i2(u,qlead); CALL put_i2(u,ht_i_new); CALL put_i2(u,fraz_frac)
+         CALL open_record(kind,0,0,1,u)
+         CALL put_i2(u,qlead)
       ELSEIF(kind==2) THEN
          CALL open_record(kind,0,0,2,u)
          CALL put_i2(u,ht_i_new); CALL put_i2(u,fraz_frac)
@@ -274,15 +275,14 @@ CONTAINS
 
    SUBROUTINE put_cat_base(u)
       INTEGER,INTENT(in)::u
-      CALL put_g1(u,a_i_1d); CALL put_g1(u,a_ib_1d); CALL put_g1(u,h_ib_1d)
-      CALL put_g1(u,at_i_1d); CALL put_g1(u,h_i_1d); CALL put_g1(u,h_s_1d)
+      CALL put_g1(u,a_i_1d); CALL put_g1(u,at_i_1d); CALL put_g1(u,h_i_1d); CALL put_g1(u,h_s_1d)
       CALL put_g1(u,t_su_1d); CALL put_g1(u,s_i_1d); CALL put_g1(u,t_bo_1d); CALL put_g1(u,sss_1d)
       CALL put_g1(u,sst_1d); CALL put_g1(u,qns_ice_1d); CALL put_g1(u,qsr_ice_1d)
       CALL put_g1(u,dqns_ice_1d); CALL put_g1(u,qtr_ice_top_1d); CALL put_g1(u,qsb_ice_bot_1d)
       CALL put_g1(u,fhld_1d); CALL put_g1(u,frq_m_1d); CALL put_g1(u,sprecip_1d)
       CALL put_g1(u,qprec_ice_1d); CALL put_g1(u,evap_ice_1d); CALL put_g1(u,hfx_err_dif_1d)
       CALL put_g1(u,hfx_dif_1d); CALL put_g1(u,qml_ice_1d); CALL put_g1(u,sfx_bri_1d)
-      CALL put_g1(u,sfx_lam_1d); CALL put_g1(u,wfx_lam_1d)
+      CALL put_g1(u,sfx_lam_1d); CALL put_g1(u,wfx_lam_1d); CALL put_g1(u,o_i_1d)
       CALL put_gi(u,t_i_1d); CALL put_gi(u,e_i_1d)
       CALL put_gi(u,sz_i_1d); CALL put_gs(u,t_s_1d); CALL put_gs(u,e_s_1d)
    END SUBROUTINE put_cat_base
@@ -320,14 +320,14 @@ CONTAINS
       IF(PRESENT(rn_dmin)) current_dmin=rn_dmin
       SELECT CASE(kind)
       CASE(3,5,6,7,8,9)
-         CALL open_record(kind,record_jl,npti,67,u); CALL put_idx(u); CALL put_cat_base(u); CALL put_dh(u); CALL put_dh_fluxes(u)
+         CALL open_record(kind,record_jl,npti,66,u); CALL put_idx(u); CALL put_cat_base(u); CALL put_dh(u); CALL put_dh_fluxes(u)
       CASE(4)
-         CALL open_record(kind,record_jl,npti,15,u); CALL put_idx(u)
+         CALL open_record(kind,record_jl,npti,16,u); CALL put_idx(u)
          CALL put_g1(u,t_su_1d); CALL put_g1(u,qns_ice_1d); CALL put_g1(u,qcn_ice_top_1d)
          CALL put_g1(u,qcn_ice_bot_1d); CALL put_g1(u,qtr_ice_bot_1d); CALL put_g1(u,hfx_err_dif_1d)
          CALL put_g1(u,hfx_dif_1d); CALL put_g1(u,cnd_ice_1d); CALL put_g1(u,t1_ice_1d)
          CALL put_g1(u,t_si_1d); CALL put_gi(u,t_i_1d); CALL put_gi(u,e_i_1d)
-         CALL put_gs(u,t_s_1d); CALL put_gs(u,e_s_1d)
+         CALL put_gs(u,t_s_1d); CALL put_gs(u,e_s_1d); CALL put_g1(u,o_i_1d)
       CASE DEFAULT
          ERROR STOP 'O9-O11 category kind'
       END SELECT
@@ -414,9 +414,14 @@ CONTAINS
    SUBROUTINE o8o16_global(kind)
       INTEGER,INTENT(in)::kind
       INTEGER::u
-      IF(kind<10 .OR. kind>14) ERROR STOP 'O12-O15 global kind'
-      CALL open_record(kind,0,0,107,u); CALL put_state(u); CALL put_totals(u); CALL put_pond(u); CALL put_flux(u)
-      CALL put_global_aux(u); CALL put_pond_forcing(u)
+      IF(kind==21) THEN
+         CALL open_record(kind,0,0,23,u); CALL put_state(u)
+      ELSEIF(kind>=10 .AND. kind<=14) THEN
+         CALL open_record(kind,0,0,107,u); CALL put_state(u); CALL put_totals(u); CALL put_pond(u); CALL put_flux(u)
+         CALL put_global_aux(u); CALL put_pond_forcing(u)
+      ELSE
+         ERROR STOP 'O9/O12-O15 global kind'
+      ENDIF
       CLOSE(u)
    END SUBROUTINE o8o16_global
 

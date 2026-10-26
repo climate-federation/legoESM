@@ -23,19 +23,20 @@ SPEC.loader.exec_module(gate)
 
 
 def test_schema_has_every_named_boundary_and_registered_projection() -> None:
-    assert set(gate.KINDS) == set(range(1, 21))
+    assert set(gate.KINDS) == set(range(1, 22))
     assert gate.PROJECTIONS == {
-        "O8": (1, 2), "O9": (3, 4, 5, 6, 17), "O10": (6, 7, 8),
-        "O11": (8, 9), "O12": (10, 11), "O13": (11, 12),
+        "O8": (1, 2), "O9": (21, 3, 4, 5, 6, 17), "O10": (21, 6, 7, 8),
+        "O11": (21, 8, 9), "O12": (10, 11), "O13": (11, 12),
         "O14": (12, 13), "O15": (13, 14), "O16": (18, 15, 16, 19, 20),
     }
-    assert [gate.KINDS[k].label for k in range(1, 21)] == [
+    assert [gate.KINDS[k].label for k in range(1, 22)] == [
         "frazil_entry", "frazil_exit", "category_entry", "zdf_exit", "dh_exit",
         "temp1_exit_sal_entry", "sal_exit", "temp2_exit_da_entry", "da_exit",
         "pond_entry_category_done", "pond_exit_itd_entry", "itd_exit_do_entry",
         "do_exit_cor_entry", "cor_exit", "update_flx_entry",
         "update_flx_exit_ocean_boundary", "picard_final", "pre_aggregation",
         "tau_entry", "tau_exit",
+        "pre_category_state",
     ]
 
 
@@ -53,7 +54,11 @@ def test_every_reviewed_boundary_input_is_recorded() -> None:
     names = lambda kind: {field.name for field in gate.KINDS[kind].fields}
     assert {"t_su", "qns_ice",
             "zkappa_i", "zkappa_s", "zradab_i", "zradab_s", "zradtr_i", "zradtr_s"} <= names(17)
-    assert {"a_i_b", "h_i_b"} <= names(8)
+    for kind in range(3, 10):
+        assert "o_i" in names(kind)
+        assert not ({"a_i_b", "h_i_b"} & names(kind))
+    assert names(21) == {field.name for field in gate.STATE}
+    assert names(1) == {"qlead"}
     assert {"h_i_b", "a_i_b", "hi_max", "rn_amax_2d"} <= names(11) & names(12)
     assert {"t_bo", "ht_i_new", "fraz_frac", "sss_m", "hi_max", "rn_amax_2d"} <= names(12) & names(13)
     assert {"sss_m", "hi_max", "hi_mean", "rn_amax_2d"} <= names(13) & names(14)
@@ -93,14 +98,14 @@ def test_each_rung_reader_accepts_only_its_registered_projection(rung: str) -> N
 
 def test_size_and_retention_are_explicit() -> None:
     report = gate.size_report()
-    assert report["master_bytes_worst_case"] == 133_386_394_340
-    assert report["master_gib_worst_case"] == pytest.approx(124.22576019540429)
+    assert report["master_bytes_worst_case"] == 139_906_193_940
+    assert report["master_gib_worst_case"] == pytest.approx(130.29779674485326)
     assert "without copying" in report["retention"]
 
 
 def test_writer_field_counts_and_real_extent_branches_match_schema() -> None:
     text = (ACQ / "o8_o16_master_writer.F90").read_text()
-    for count in (3, 2, 67, 15, 107, 114, 16, 23, 12, 13):
+    for count in (1, 2, 66, 16, 107, 114, 23, 12, 13):
         assert f",{count},u)" in text
     for spec in gate.KINDS.values():
         names = [field.name for field in spec.fields]
@@ -109,6 +114,14 @@ def test_writer_field_counts_and_real_extent_branches_match_schema() -> None:
     assert "SIZE(a,1)==jpi" in text
     assert "ERROR STOP 'O8-O16 I2 extent mismatch'" in text
     assert "ACCESS='stream'" in text
+
+
+def test_bounds_fixture_uses_real_producers_for_reviewed_values() -> None:
+    text = (ACQ / "real_bounds_driver.F90").read_text()
+    assert "ht_i_new=851._wp" not in text and "fraz_frac=852._wp" not in text
+    assert text.index("CALL ice_thd_frazil") < text.index("CALL o8o16_global(21)")
+    assert text.index("o_i_1d=ieee_value") < text.index("CALL tab_2d_1d")
+    assert text.index("CALL tab_2d_1d") < text.index("DO kind=3,9")
 
 
 def test_every_patch_insertion_is_inside_observer_markers() -> None:
@@ -141,6 +154,11 @@ def test_script_is_read_only_by_default_and_retains_refusals() -> None:
     assert "compile_real_bounds_fixture" in text and "real_bounds_driver.F90" in text
     assert "stub_driver_fixture" in text and 'NEMO_EXE_OVERRIDE="$STUB_NEMO"' in text
     assert 'O8O16_PATH_PREFIX="$scratch/stub_bin"' in text and 'STUB_MPIRUN' in text
+    assert "p.unlink(); p.write_text(text)" in text
+    assert "PASS_EXISTING_CFG_DIGESTS_UNCHANGED" in text
+    assert "cfg-digest" in text
+    assert "here/'stub_mpirun.sh'" in text
+    assert "'icethd_zdf_bl99','icealb'" in text
     assert "O8O16_STUB_MODE" not in text and "O8O16_SKIP_DRIVER_TEST" not in text
     assert 'cp "$NEMO_SOURCE_ROOT/src/ICE/$unit.F90"' in text
     assert 'timeout "$remaining" mpirun -np 1' in text
@@ -166,9 +184,10 @@ def test_preflight_compiles_and_runs_real_patched_source_without_nemo(tmp_path: 
         [str(ACQ / "run.sh"), "--preflight-only", str(report)], cwd=REPO, env=env,
         text=True, capture_output=True, check=True, timeout=1200,
     )
-    assert json.loads(report.read_text()) == {"status": "PREFLIGHT_OK", "nemo_run": False, "plants": 40}
+    assert json.loads(report.read_text()) == {"status": "PREFLIGHT_OK", "nemo_run": False, "plants": 41}
     assert "PASS_REAL_PPSRC_PLACEMENT" in proc.stdout
     assert "PASS_REAL_PATCHED_BOUNDS_FIXTURE" in proc.stdout
     assert "PASS_OBSERVER_FREE_SAME_PROGRAM" in proc.stdout
     assert "PASS_100_STEP_STUB_DRIVER_RETENTION" in proc.stdout
+    assert "PASS_EXISTING_CFG_DIGESTS_UNCHANGED" in proc.stdout
     assert "PREFLIGHT_OK: no real NEMO integration was run" in proc.stdout
