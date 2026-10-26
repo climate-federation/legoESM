@@ -61,8 +61,9 @@ from __future__ import annotations
 
 from typing import NamedTuple, Optional
 
-import numpy as np
+import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.grids.regridding import (
     RegridWeights,
@@ -367,11 +368,11 @@ def _remap_soil_layers(
     order = np.argsort(src_depth)
     src_sorted = jnp.asarray(src_depth[order], dtype=field.dtype)
     field_sorted = field[:, order]
-    # Interpolate each column independently along the depth axis.
-    return jnp.stack(
-        [jnp.interp(dst_depth, src_sorted, field_sorted[i]) for i in range(field.shape[0])],
-        axis=0,
-    )
+    # Interpolate each column independently along the depth axis.  Batched with
+    # ``vmap`` rather than a Python loop + ``stack``: the loop dispatched one
+    # ``interp`` per column and compiled an ncol-wide concatenate, which took
+    # ~150 s and ~4 GB at 2 degrees and ran out of memory at 1 degree.
+    return jax.vmap(lambda col: jnp.interp(dst_depth, src_sorted, col))(field_sorted)
 
 
 # ===========================================================================
