@@ -139,15 +139,15 @@ __param_spec__ = {
     "LindzenConfig": {
         "scheme_key": "atm.gwd.LindzenConfig",
         "excluded": {
-            "Fr_sharpness": "sigmoid sharpness of the saturation stress-ratio breaking transition (NOT a Froude-number transition); a differentiability/smoothing width, not a closure",
+            "Fr_sharpness": "sigmoid sharpness of the smooth min(taudmp, tausat) (NOT a Froude-number transition); a differentiability/smoothing width, not a closure",
             "crit_level_sharpness": "sigmoid sharpness of the smooth critical-level filter; a differentiability/smoothing width, not a closure",
             "crit_level_floor": "signed source-projected wind U_proj (NOT a wind magnitude) at which the smooth critical-level filter is half-on; a smoothing/regulariser offset, not a closure",
         },
         "params": {
             # --- orographic launch amplitude ---
-            "h_topo": {"units": "m", "bounds": (50.0, 2000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "orographic", "reference": "Lindzen (1981) subgrid topographic height", "shape": None},
+            "h_topo": {"units": "m", "bounds": (50.0, 2000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "orographic", "reference": "E3SM gw_oro sgh: subgrid orographic stddev (hdsp = 2*sgh) for columns without h_topo_col", "shape": None},
             # --- saturation / wave breaking ---
-            "fcrit2": {"units": "1", "bounds": (0.5, 2.0), "tunable_tier": 1, "transform": "sigmoid", "category": "saturation", "reference": "Lindzen (1981) / E3SM fcrit2: critical Froude number squared scaling the saturation CAP VALUE (effkwv semantics, gw_common.F90:153)", "shape": None, "legacy_name": "critical_Fr"},
+            "fcrit2": {"units": "1", "bounds": (0.5, 2.0), "tunable_tier": 1, "transform": "sigmoid", "category": "saturation", "reference": "Lindzen (1981) / E3SM fcrit2: critical Froude number squared (effkwv = kwv*fcrit2, gw_common.F90:153; launch Froude cap, gw_oro.F90)", "shape": None, "legacy_name": "critical_Fr"},
             # --- tendency limiters ---
             "tndmax_per_day": {"units": "m/s/day", "bounds": (100.0, 1000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common tendency ceiling (orographic)", "shape": None},
             "umcfac": {"units": "1", "bounds": (0.1, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "damping", "reference": "E3SM gw_common umcfac no-reversal limiter", "shape": None},
@@ -228,55 +228,40 @@ class RayleighConfig(NamedTuple):
 
 
 class LindzenConfig(NamedTuple):
-    """Configuration for smoothed Lindzen (1981) orographic GWD.
+    """Configuration for the Lindzen-saturation orographic GWD (``lindzen.py``,
+    the E3SM v3.0.1 orographic-only ``gw_oro_src`` + ``gw_drag_prof`` path).
 
     Fields
     ------
     h_topo : float
-        Sub-grid topographic height [m] (default 500).
+        Subgrid orographic standard deviation ``sgh`` [m] used in every column
+        when no per-column ``h_topo_col`` is passed (default 500).  E3SM
+        displaces ``hdsp = 2*sgh``.
     k_wave : float
-        Horizontal wavenumber [1/m] (default 2*pi/100e3).
+        Horizontal wavenumber [1/m], E3SM ``kwv`` (default ``2*pi/100e3``, the
+        value the oracle audit ran; E3SM's own parameter is ``6.28e-5``).
     fcrit2 : float
-        Critical Froude number squared scaling the saturation CAP VALUE
-        (``tau_sat_eff = fcrit2*tau_sat`` — the oracle ``effkwv = kwv*fcrit2``
-        semantics, E3SM gw_common.F90:153; Lindzen's limit scales with
-        ``Fr_c²``). The breaking sigmoid activates at the fixed threshold
-        ``tau_carry > tau_sat_eff`` and relaxes toward ``tau_sat_eff``; the
-        saturation is SOFT (finite-sharpness sigmoid), NOT an exact hard cap.
-        Default 1.0 (``Fr_c = 1``) caps at the exact Lindzen ``tau_sat``.
-        Formerly named ``critical_Fr`` and wired only as the sigmoid
-        ACTIVATION center with an unscaled relaxation target, which left the
-        knob inert wherever ``tau_carry <= tau_sat``.
+        Critical Froude number squared (E3SM ``fcrit2``): scales the saturation
+        stress (``effkwv = kwv*fcrit2``, gw_common.F90:153), the launch Froude
+        cap ``fcrit2*(U/N)^2`` and the orographic-only tendency cap.  Default 1.
     Fr_sharpness : float
-        Sigmoid sharpness for the saturation stress-ratio breaking transition
-        (default 20.0). NOT a Froude-number transition (see ``fcrit2``).
+        Sigmoid sharpness of the smooth ``min(taudmp, tausat)`` (default 20.0);
+        exact E3SM ``min`` at infinite sharpness. NOT a Froude-number transition.
     crit_level_sharpness : float
-        Sigmoid sharpness [s/m] for the smooth critical-level filter
-        (default 10.0).  The orographic wave (c = 0) is absorbed where the
-        source-projected wind ``U_proj`` reverses sign (E3SM
-        gw_common.F90:492 ``where ubmc*(ubi_above - c) > 0``); the earlier
-        ``|U_proj|^3`` saturation alone gave no explicit critical-level
-        absorption.  This smooth gate handles the differentiable absorption of
-        the carried stress; the deposited drag additionally carries a HARD
-        ``U_proj > 0`` positivity mask in the scheme body so the VECTOR sink
-        ``u*du_dt + v*dv_dt <= 0`` is enforced STRICTLY (only the vector
-        projection is guaranteed — componentwise ``du_dt*u`` can be >0 for an
-        oblique wind; the smooth sigmoid alone is never identically zero).
+        Sigmoid sharpness [s/m] of the smooth critical-level test (default
+        10.0): the saturation stress is multiplied by a smooth XNOR of the two
+        ``ubi - crit_level_floor`` sign tests across the layer (E3SM
+        gw_common.F90:485 zeroes it where ``ubi`` changes sign; exact at
+        infinite sharpness with ``crit_level_floor = 0``).
     crit_level_floor : float
-        SIGNED source-projected wind ``U_proj`` [m/s] at which the smooth
-        critical-level gate ``sigmoid(sharpness*(U_proj - floor))`` is half-on
-        (default 0.5) — NOT a wind magnitude; the gate ramps in as ``U_proj``
-        drops toward +0.5 and only ASYMPTOTICALLY → 0 for reversed ``U_proj < 0``
-        (the separate hard ``U_proj > 0`` mask zeroes the deposited drag exactly).
+        Signed projected wind [m/s] at which the smooth critical-level test is
+        centred (default 0.5); E3SM is 0 (c = 0).
     tndmax_per_day : float
-        Absolute ceiling on ``|du/dt|`` [m/s/day] (default 500.0, CAM
-        ``tndmax`` for orographic-only; gw_common.F90:161).  Caps the
-        ``stress/(rho*dz)`` accelerations that blow up where the launched
-        stress saturates abruptly in a thin or weak-wind layer.
+        Tendency ceiling [m/s/day] (default 500.0, E3SM ``tndmax`` for
+        orographic-only, gw_common.F90:161).
     umcfac : float
-        Maximum fraction of ``|c - U_proj|`` (c = 0) the wind may change per
-        step (default 0.5, CAM ``umcfac``; gw_common.F90:642), so a single
-        step cannot reverse the wind past the phase speed.
+        Maximum fraction of ``|c - ubm|`` (c = 0) the wind may change per step
+        (default 0.5, E3SM ``umcfac``).
     """
     h_topo: float = 500.0
     k_wave: float = 2.0 * math.pi / 100e3

@@ -507,7 +507,9 @@ def parse_args(argv: list[str] | None = None):
                         "'grachev2007_sheba' = SHEBA Arctic stable functions "
                         "(the sea-ice reference); 'gryanik2020' = modified "
                         "SHEBA; 'beljaars_holtslag1991' avoids stable flux "
-                        "collapse. Unstable branch stays Businger-Dyer.")
+                        "collapse. Unstable branch stays Businger-Dyer "
+                        "(heat scaled by Pr0 = 0.98 for gryanik2020, as in "
+                        "SurfaceFluxes.jl).")
     p.add_argument("--grid", type=str, default="all",
                    choices=GRID_TYPES + ["all"])
     p.add_argument("--resolution", type=str, default=None,

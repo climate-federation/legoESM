@@ -442,8 +442,12 @@ class TestGWDRadiationCloudsAudit:
     def test_lindzen_h_topo(self):
         from legoesm.atmosphere.physics.gravity_wave_drag.lindzen import lindzen_gwd
         from legoesm.atmosphere.physics.gravity_wave_drag.config import LindzenConfig
+        # E3SM orographic launch: tau0 ~ min(hdsp^2, fcrit2*(U/N)^2) with
+        # hdsp = 2*h_topo; on this weak-wind column (U/N ~ 200 m) the Froude
+        # cap binds at h_topo = 500 and h_topo is (correctly) inert there, so
+        # evaluate below the cap.
         assert_grad_ok(lambda x: _gwd_call(lindzen_gwd,
-            LindzenConfig()._replace(h_topo=x)), 500.0, "lindzen.h_topo")
+            LindzenConfig()._replace(h_topo=x)), 50.0, "lindzen.h_topo")
 
     def test_mcfarlane_G_0(self):
         from legoesm.atmosphere.physics.gravity_wave_drag.mcfarlane import mcfarlane_gwd

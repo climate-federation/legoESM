@@ -121,9 +121,14 @@ def test_dyer1974_is_byte_identical_default():
     np.testing.assert_array_equal(
         np.asarray(psi_h(zetas)), np.asarray(psi_h(zetas, "dyer1974"))
     )
-    # Default == the ORIGINAL implementation, bit-for-bit, on BOTH branches.
-    np.testing.assert_array_equal(np.asarray(psi_m(zetas)), np.asarray(_old_psi_m(zetas)))
-    np.testing.assert_array_equal(np.asarray(psi_h(zetas)), np.asarray(_old_psi_h(zetas)))
+    # Default == the ORIGINAL implementation, bit-for-bit, on BOTH branches,
+    # except at zeta = 0: the original returned -5e-10 (stable branch on a
+    # 1e-10 floor); SurfaceFluxes.jl and this port return exactly 0.
+    nz = np.asarray(zetas) != 0.0
+    np.testing.assert_array_equal(np.asarray(psi_m(zetas))[nz], np.asarray(_old_psi_m(zetas))[nz])
+    np.testing.assert_array_equal(np.asarray(psi_h(zetas))[nz], np.asarray(_old_psi_h(zetas))[nz])
+    np.testing.assert_array_equal(np.asarray(psi_m(zetas))[~nz], 0.0)
+    np.testing.assert_array_equal(np.asarray(psi_h(zetas))[~nz], 0.0)
 
 
 def test_dyer1974_stable_branch_is_minus_5_zeta():
@@ -568,7 +573,8 @@ def test_return_2m_uses_trained_coefficients():
         jnp.asarray(290.0), jnp.asarray(0.008),
         jnp.asarray(283.0), jnp.asarray(0.010), jnp.asarray(1.2),  # stable
     )
-    kw = dict(z_ref=10.0, z_t=2.0, z_q=2.0, z0_init=1e-4,
+    # z_diag (2 m) != z_t: at z_diag == z_t the diagnostic returns T_atm.
+    kw = dict(z_ref=10.0, z_t=10.0, z_q=10.0, z0_init=1e-4,
               scheme="large_yeager", n_iter=8, return_2m=True)
     base = compute_most_fluxes(*args, **kw)
     strong = compute_most_fluxes(*args, **kw, stable_beta=9.0)
@@ -583,19 +589,14 @@ def test_return_2m_diagnostic_psih_is_beta_sensitive():
     """ISOLATED R2 proof: the 2 m diagnostic evaluates psi_h at the diagnostic
     height with the SAME stable_beta as the solve.
 
-    The diagnostic is ``T_2m = T_sfc - (theta*/kappa)*(ln(z_diag/z0_t) -
-    psi_h(z_diag/L))`` (bulk_flux.py return_2m block).  We isolate the psi_h
-    dependence from the converged scales by driving the converged solve to be
-    (near-)beta-INDEPENDENT — a near-neutral column with n_iter high — so the
-    total T_2m response is dominated by the diagnostic psi_h term.  Here the
-    surface (289 K) is COLDER than the air (290 K) [stable], so theta* < 0 and
-    ``T_2m = T_sfc - (theta*/kappa)*(ln(z_diag/z0_t) - psi_h(z_diag/L))`` with
-    ``psi_h(zeta, dyer1974, beta) = -beta*zeta`` (beta>0, zeta>0).  A LARGER beta
-    => more negative psi_h => larger ``(ln - psi_h)`` => (theta*<0) T_2m is
-    pulled UP toward the (warmer) air, i.e. T_2m strictly INCREASES with beta.
-    A diagnostic hard-wired to default beta would NOT show this monotone-in-beta
-    ordering once the converged scales are held ~fixed.  (Direction verified
-    numerically: T_2m(2,5,9) ~= 289.5923, 289.5926, 289.5930.)
+    large_yeager's diagnostic is AeroBulk TURB_NCAR's height shift from z_t:
+    ``T(z) = T_atm - theta*_AB/kappa (ln(z_t/z) + psi_h(z/L) - psi_h(z_t/L))``
+    with ``psi_h = -beta zeta`` (stable) and theta*_AB = kappa (T_atm - T_sfc)/...
+    > 0 here (surface 289 K colder than the air 290 K).  For z = 2 m < z_t =
+    10 m, ``psi_h(z/L) - psi_h(z_t/L) = beta (z_t - z)/L`` grows with beta, so
+    with the converged scales held ~fixed (strong wind, near-neutral) T_2m
+    strictly DECREASES with beta.  (Measured: T_2m(2,5,9) = 289.9261, 289.9237,
+    289.9206 K.)
     """
     # Weakly stable column (small T_sfc-T_atm gap) so the converged u*/theta*
     # barely move with beta, but zeta>0 so the diagnostic psi_h is active.
@@ -604,13 +605,13 @@ def test_return_2m_diagnostic_psih_is_beta_sensitive():
         jnp.asarray(290.0), jnp.asarray(0.009),
         jnp.asarray(289.0), jnp.asarray(0.010), jnp.asarray(1.2),  # gap = 1 K
     )
-    kw = dict(z_ref=10.0, z_t=2.0, z_q=2.0, z0_init=1e-4,
+    kw = dict(z_ref=10.0, z_t=10.0, z_q=10.0, z0_init=1e-4,
               scheme="large_yeager", n_iter=20, return_2m=True)
     T2m = [float(compute_most_fluxes(*args, **kw, stable_beta=b)[5])
            for b in (2.0, 5.0, 9.0)]
     assert all(np.isfinite(T2m))
-    # Strictly increasing in beta (see docstring derivation).
-    assert T2m[0] < T2m[1] < T2m[2], (
+    # Strictly decreasing in beta (see docstring derivation).
+    assert T2m[0] > T2m[1] > T2m[2], (
         f"2 m diagnostic psi_h not monotone in stable_beta: {T2m}")
 
 
@@ -783,8 +784,10 @@ def _stable_column():
 
 
 def _lane_cfg(bulk_scheme, stability_scheme):
-    """The injected lane config (coare3 + gustiness_zi 300 in the AMIP A/B)."""
-    return SurfaceLayerConfig(bulk_scheme=bulk_scheme, gustiness_w_zi=300.0,
+    """The injected lane config (coare3 + gustiness_zi 300 in the AMIP A/B).
+    large_yeager (AeroBulk TURB_NCAR) has no gustiness: scheme-native None."""
+    zi = None if bulk_scheme == "large_yeager" else 300.0
+    return SurfaceLayerConfig(bulk_scheme=bulk_scheme, gustiness_w_zi=zi,
                               stability_scheme=stability_scheme)
 
 
@@ -827,85 +830,20 @@ def test_bh_long_tail_larger_flux_on_dyer_baseline_schemes(bulk_scheme):
         "the collapsing dyer1974 -5*zeta form")
 
 
-# Verbatim PRE-CHANGE psi_m_coare/psi_h_coare (HEAD a8c6ad91a, before the
-# selectable stable branch), same pattern as _old_psi_m/_old_psi_h above:
-# the STRICT byte-identity guard for the default path, independent of dtype,
-# platform, and pinned-constant tolerance.
-def _old_psi_m_coare(zeta):
-    zeta_c = jnp.clip(zeta, -10.0, 10.0)
-    zeta_neg = jnp.minimum(zeta_c, -1e-10)
-    zeta_pos = jnp.maximum(zeta_c, 1e-10)
-    x = jnp.power(1.0 - 15.0 * zeta_neg, 0.25)
-    psi_k = (
-        2.0 * jnp.log((1.0 + x) / 2.0)
-        + jnp.log((1.0 + x ** 2) / 2.0)
-        - 2.0 * jnp.arctan(x)
-        + jnp.pi / 2.0
-    )
-    y = jnp.power(1.0 - 10.15 * zeta_neg, 1.0 / 3.0)
-    sqrt3 = jnp.sqrt(3.0)
-    psi_c = (
-        1.5 * jnp.log((1.0 + y + y ** 2) / 3.0)
-        - sqrt3 * jnp.arctan((1.0 + 2.0 * y) / sqrt3)
-        + jnp.pi / sqrt3
-    )
-    f = zeta_neg ** 2 / (1.0 + zeta_neg ** 2)
-    unstable = (1.0 - f) * psi_k + f * psi_c
-    c = jnp.minimum(50.0, 0.35 * zeta_pos)
-    stable = -(
-        (1.0 + zeta_pos)
-        + 0.6667 * (zeta_pos - 14.28) * jnp.exp(-c)
-        + 8.525
-    )
-    return jnp.where(zeta_c < 0.0, unstable, stable)
-
-
-def _old_psi_h_coare(zeta):
-    zeta_c = jnp.clip(zeta, -10.0, 10.0)
-    zeta_neg = jnp.minimum(zeta_c, -1e-10)
-    zeta_pos = jnp.maximum(zeta_c, 1e-10)
-    x = jnp.sqrt(1.0 - 15.0 * zeta_neg)
-    psi_k = 2.0 * jnp.log((1.0 + x) / 2.0)
-    y = jnp.power(1.0 - 34.15 * zeta_neg, 1.0 / 3.0)
-    sqrt3 = jnp.sqrt(3.0)
-    psi_c = (
-        1.5 * jnp.log((1.0 + y + y ** 2) / 3.0)
-        - sqrt3 * jnp.arctan((1.0 + 2.0 * y) / sqrt3)
-        + jnp.pi / sqrt3
-    )
-    f = zeta_neg ** 2 / (1.0 + zeta_neg ** 2)
-    unstable = (1.0 - f) * psi_k + f * psi_c
-    c = jnp.minimum(50.0, 0.35 * zeta_pos)
-    stable = -(
-        jnp.power(1.0 + 2.0 * zeta_pos / 3.0, 1.5)
-        + 0.6667 * (zeta_pos - 14.28) * jnp.exp(-c)
-        + 8.525
-    )
-    return jnp.where(zeta_c < 0.0, unstable, stable)
-
-
-def test_coare3_default_byte_identical_pinned():
-    """(ii) Default stability_scheme keeps coare3 byte-identical: the default
-    and explicit-"dyer1974" calls reproduce the VERBATIM pre-change psi
-    functions EXACTLY (array-equal over both regimes — the strict guard), and
-    the lane fluxes match the pre-change pinned values (captured at HEAD
-    a8c6ad91a, fp64, this exact column/config) as a cross-machine anchor."""
-    z = jnp.linspace(-10.0, 10.0, 401)
-    for new_fn, old_fn in ((psi_m_coare, _old_psi_m_coare),
-                           (psi_h_coare, _old_psi_h_coare)):
-        np.testing.assert_array_equal(
-            np.asarray(new_fn(z)), np.asarray(old_fn(z)))
-        np.testing.assert_array_equal(
-            np.asarray(new_fn(z, "dyer1974")), np.asarray(old_fn(z)))
-
+def test_coare3_default_pinned():
+    """Default stability_scheme on coare3 = the AeroBulk 1.0.0 native stable
+    branch; the lane fluxes are pinned (fp64, this exact column/config) as a
+    cross-machine anchor.  Re-pinned when coare3 became the faithful AeroBulk
+    TURB_COARE3P0 port (oracle match: tests/core/test_aerobulk_coare3p0_oracle.py);
+    the previous pins (HEAD a8c6ad91a) were the surrogate's values."""
     tau_x, tau_y, shflx, lhflx, ustar = _lane_fluxes("coare3", "dyer1974")
     # fp64 pins; loose enough for a float32 default run, tight enough that
     # any stable-branch drift (BH swap is ~3e-4 relative) trips it.
     rtol = 1e-12 if shflx.dtype == jnp.float64 else 2e-5
-    np.testing.assert_allclose(float(shflx[0]), -2.024613552826373e+02, rtol=rtol)
-    np.testing.assert_allclose(float(lhflx[0]), -1.071036570631257e+01, rtol=rtol)
-    np.testing.assert_allclose(float(tau_x[0]), -2.848185923255397e-02, rtol=rtol)
-    np.testing.assert_allclose(float(ustar[0]), 1.426330793967515e-01, rtol=rtol)
+    np.testing.assert_allclose(float(shflx[0]), -2.0196643581309854e+02, rtol=rtol)
+    np.testing.assert_allclose(float(lhflx[0]), -1.1222758372661751e+01, rtol=rtol)
+    np.testing.assert_allclose(float(tau_x[0]), -2.8429723376928992e-02, rtol=rtol)
+    np.testing.assert_allclose(float(ustar[0]), 1.4250243952029382e-01, rtol=rtol)
 
 
 def test_dyer_baseline_schemes_full_path_pinned():
@@ -916,8 +854,11 @@ def test_dyer_baseline_schemes_full_path_pinned():
     pins = {
         ("most", "dyer1974"): -4.586232399544879e+01,
         ("most", "beljaars_holtslag1991"): -2.228467342408366e+02,
-        ("large_yeager", "dyer1974"): -4.196968866111251e+01,
-        ("large_yeager", "beljaars_holtslag1991"): -1.981186252362987e+02,
+        # large_yeager re-pinned for the AeroBulk TURB_NCAR port (oracle:
+        # tests/core/test_aerobulk_ncar_oracle.py), scheme-native gustiness
+        # (none); dyer1974 sits on the Cx_min = 1e-4 heat-coefficient floor.
+        ("large_yeager", "dyer1974"): -1.1251967999999998e+02,
+        ("large_yeager", "beljaars_holtslag1991"): -1.990132410270457e+02,
     }
     for (bs, stab), expected in pins.items():
         shflx = _lane_fluxes(bs, stab)[2]
@@ -929,16 +870,16 @@ def test_dyer_baseline_schemes_full_path_pinned():
 def test_coare3_return_2m_scheme_sensitive():
     """The 2 m diagnostic follows the selected stable branch on coare3 (the
     scheme-matched ``psi_h_coare(zeta_d, stability_scheme)`` call): on the
-    stable column T_2m moves by ~18 K between the default and the SHEBA
+    stable column T_2m moves by ~15 K between the default and the SHEBA
     tail, and stays inside the physical [T_sfc, T_atm] bracket (unclipped
     interior values at z_diag = 2 m < z_t).
 
     The PINNED grachev value also locks the DIAGNOSTIC psi call in
     isolation: reverting only ``psi_h_coare(zeta_d, stability_scheme)`` to
     the unthreaded ``psi_h_coare(zeta_d)`` (keeping the main-loop threading)
-    was measured to shift T_2m from 277.078 K to 296.031 K on this column —
-    an interior, unclipped 19 K move — so the pin fails loudly on it
-    (codex R2 non-vacuity check, verified empirically 2026-08-02).
+    was measured (pre-AeroBulk-port code, 2026-08-02) to shift T_2m by an
+    interior, unclipped 19 K on this column, so the pin fails loudly on it
+    (codex R2 non-vacuity check).
     """
     col = _stable_column()
     kw = dict(z_ref=10.0, z0_init=1e-4, scheme="coare3", n_iter=5,
@@ -953,10 +894,10 @@ def test_coare3_return_2m_scheme_sensitive():
     assert np.all(np.abs(t2m_g - t2m_d) > 1.0), (t2m_d, t2m_g)
     for t2m in (t2m_d, t2m_g):
         assert np.all(t2m > 220.0) and np.all(t2m < 300.0)
-    # Pinned pre-captured fp64 values (HEAD a8c6ad91a + fix, this column).
+    # Pinned fp64 values of the AeroBulk TURB_COARE3P0 port (this column).
     rtol = 1e-12 if out_d[5].dtype == jnp.float64 else 2e-5
-    np.testing.assert_allclose(float(t2m_d[0]), 258.915887220388, rtol=rtol)
-    np.testing.assert_allclose(float(t2m_g[0]), 277.077916797258, rtol=rtol)
+    np.testing.assert_allclose(float(t2m_d[0]), 258.80926272241834, rtol=rtol)
+    np.testing.assert_allclose(float(t2m_g[0]), 273.5002425313306, rtol=rtol)
 
     # psi-level lock of the scheme-matched contract (stable side only).
     z_pos = jnp.linspace(1e-3, 10.0, 200)

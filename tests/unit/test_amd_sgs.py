@@ -12,7 +12,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm.atmosphere.physics.turbulence import amd
 from legoesm.atmosphere.physics.turbulence.amd import amd_nu_t
+
+_AMR_WIND_FLOOR = amd._AMR_WIND_FLOOR
 
 _DX = _DY = _DZ = 10.0
 _C = 0.3
@@ -27,20 +30,20 @@ def _nu(**grads):
 
 def test_offdiagonal_one_d_shear_gives_zero():
     """A pure off-diagonal 1-D shear (du/dz or dv/dz only) needs no SGS
-    dissipation: AMD gives exactly zero (the minimum-dissipation property
-    Smagorinsky lacks)."""
-    assert float(_nu(a13=0.5)) == pytest.approx(0.0, abs=1e-20)
-    assert float(_nu(a23=0.3)) == pytest.approx(0.0, abs=1e-20)
-    assert float(_nu(a31=-0.7)) == pytest.approx(0.0, abs=1e-20)
+    dissipation: AMD gives the AMR-Wind floor 10·eps (zero to fp64 round-off;
+    the minimum-dissipation property Smagorinsky lacks)."""
+    assert float(_nu(a13=0.5)) == _AMR_WIND_FLOOR
+    assert float(_nu(a23=0.3)) == _AMR_WIND_FLOOR
+    assert float(_nu(a31=-0.7)) == _AMR_WIND_FLOOR
 
 
 def test_normal_strain_sign_dependence():
     """A single NORMAL strain is sign-dependent: expanding (positive a11) needs
-    no dissipation (nu_t=0) while compressing (negative a11) draws positive
+    no dissipation (nu_t = the 10·eps floor) while compressing (negative a11) draws positive
     viscosity — the intended minimum-dissipation behaviour, NOT a blanket
     single-gradient cutoff."""
-    assert float(_nu(a11=0.4)) == pytest.approx(0.0, abs=1e-20)
-    assert float(_nu(a11=-0.4)) > 0.0
+    assert float(_nu(a11=0.4)) == _AMR_WIND_FLOOR
+    assert float(_nu(a11=-0.4)) > _AMR_WIND_FLOOR
 
 
 def test_nonnegative_never_backscatter():
@@ -60,9 +63,9 @@ def test_three_d_field_is_positive():
 
 
 def test_rest_state_zero_and_finite_grad():
-    """All-zero gradients -> nu_t = 0, and the gradient stays finite (floored
-    denominator, no sqrt(0) trap)."""
-    assert float(_nu()) == pytest.approx(0.0, abs=1e-20)
+    """All-zero gradients -> nu_t = the 10·eps floor, and the gradient stays
+    finite (floored denominator, no sqrt(0) trap)."""
+    assert float(_nu()) == _AMR_WIND_FLOOR
     g = jax.grad(lambda x: amd_nu_t(x, x, x, x, x, x, x, x, x,
                                     _DX, _DY, _DZ, _C))(jnp.asarray(0.0))
     assert jnp.isfinite(g)
