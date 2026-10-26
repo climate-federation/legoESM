@@ -9,21 +9,20 @@ with the grid-mean q_c, so r_eff came out low by cf^(1/3).
 
 Fixture ``oracle_fixtures/reff_incloud.npz``: outputs from RUNNING CAM cam_cesm2_1_rel_60
 (a03b84b7c4e34f965b115686f22a043b85739e56) micro_mg2_0.F90 L877-879, 2739-2768,
-2772-2808, 2811-2865 verbatim with micro_mg_utils.F90 compiled unmodified (dcs = 500e-6),
-plus legoESM's droplet PSD (WRF v4.6.1 module_mp_morr_two_moment.F L3918-3949, 4024-4029,
-legoESM rho_w and moist density) evaluated by the same driver on MG2's in-cloud water and
-number.  Inputs: the 5 tier-1 CAM6-L32 columns with ast < mincld edge levels and a deep
-convective mass flux (so the radiative cover differs from ast).  Production CloudConfig
-(amip_production.yaml, resolved through run_amip + model_driver) is stored in the fixture.
+2772-2808, 2811-2865 and micro_mg_cam.F90 L2296, 2534-2554 (the grid REL radiation reads)
+verbatim with micro_mg_utils.F90 compiled unmodified (dcs = 500e-6).  Inputs: the 5 tier-1
+CAM6-L32 columns with ast < mincld edge levels, cap-bound levels, a grid q_c below 1e-14
+whose in-cloud value is above qsmall, two dead-droplet-number levels (oracle number =
+CloudConfig.Nc_default), and a deep convective mass flux (radiative cover != ast).
+Production CloudConfig (amip_production.yaml, resolved through run_amip + model_driver) is
+stored in the fixture.
 Generator: scripts/validate/oracle/reff_incloud/{build.sh,oracle_driver.F90,make_fixture.py}.
 
-Excluded levels, each a named divergence outside this fix (not ported, user decision):
-  * no liquid (grid-mean q_c <= 1e-14, legoESM's gate; MG2 gates the in-cloud value at
-    1e-18 and falls back to 10 um, legoESM to ``CloudConfig.r_eff_liq``);
-  * MG2's 5 g/kg in-cloud cap binds (q_c/lcldm > 5e-3), absent in legoESM's radiation PSD;
-  * ice: MG2's ice-slope bounds adjust the number (``ni_adj``), absent in legoESM (the
-    RRTMGP table clip bounds the size downstream).
-The liquid PSD itself is M2005, not MG2's exponential Martin fit (``effc_mg2``, not asserted).
+Liquid: asserted on EVERY level against ``rel_cam`` (CAM6 REL: in-cloud water capped at
+5 g/kg, MG2 size_dist_param_liq, qsmall gate, 10 um fill).  ``effc_wrf`` (legoESM's former
+M2005 PSD on the same inputs) is kept for the PSD gap only.
+Ice: excluded where MG2's ice-slope bounds adjust the number (``ni_adj``) or its 5 g/kg cap
+binds (absent in legoESM; the RRTMGP table clip bounds the size downstream).
 """
 
 from __future__ import annotations
@@ -44,7 +43,7 @@ from legoesm.atmosphere.physics.clouds.config import CloudConfig
 
 _FIX = Path(__file__).parent / "oracle_fixtures" / "reff_incloud.npz"
 _TOL = 1e-10  # user-approved oracle-match tolerance (max relative error, fp64)
-_MG2_QC_CAP = 5.0e-3  # micro_mg2_0.F90:2762 (excluded divergence, see docstring)
+_MG2_QC_CAP = 5.0e-3  # micro_mg2_0.F90:2762, micro_mg_cam.F90:2296 in-cloud cap
 
 
 @pytest.fixture(scope="module")
@@ -69,15 +68,29 @@ def _max_rel(ours, ref, mask):
     return float(np.max(np.abs(ours[mask] - ref[mask]) / np.abs(ref[mask])))
 
 
-def test_liquid_reff_pairs_incloud_number_with_mg2_incloud_water(z):
+def test_liquid_reff_matches_cam6_rel(z):
     props = compute_cloud_properties(**_kwargs(z), n_cloud_in_cloud=True)
-    ours = np.asarray(props.r_eff_liq) * 1e6  # m -> um (oracle EFFC units)
-    m = (z["q_c"] > 1.0e-14) & (z["q_c"] / z["lcldm"] <= _MG2_QC_CAP)
-    # the fixture exercises both halves of lcldm = max(ast, mincld) and ast != cover
-    assert np.any(m & (z["ast"] < 1.0e-4)) and np.any(m & (z["ast"] > 0.05))
-    assert np.any(m & (np.asarray(props.cloud_fraction) > z["ast"] + 1e-6))
-    rel = _max_rel(ours, z["effc_wrf"], m)
+    ours = np.asarray(props.r_eff_liq) * 1e6  # m -> um (oracle REL units)
+    q_ic = z["q_c"] / z["lcldm"]
+    dead = z["n_ccn"] <= 1.0
+    live = ~dead & (z["q_c"] > 0.0)
+    # the fixture exercises both halves of lcldm = max(ast, mincld), ast != cover,
+    # the 5 g/kg cap, the in-cloud qsmall gate below legoESM's old 1e-14 grid gate,
+    # the 10 um fill, and the dead-number floor between mincld and 1e-3 and below mincld
+    assert np.any(live & (z["ast"] < 1.0e-4)) and np.any(live & (z["ast"] > 0.05))
+    assert np.any(live & (np.asarray(props.cloud_fraction) > z["ast"] + 1e-6))
+    assert np.any(live & (q_ic > _MG2_QC_CAP))
+    assert np.any(live & (z["q_c"] <= 1.0e-14) & (q_ic >= 1.0e-18))
+    assert np.any(z["q_c"] <= 0.0)
+    a = np.asarray(props.cloud_fraction)[dead]
+    assert np.any((a > 1.0e-4) & (a < 1.0e-3)) and np.any(a < 1.0e-4)
+    rel = _max_rel(ours, z["rel_cam"], np.ones_like(dead))
     assert rel <= _TOL, f"r_eff_liq max rel {rel:.3e} > {_TOL}"
+    # the no-liquid fill is CAM's 10 um, not the CloudConfig.r_eff_liq knob
+    kw = _kwargs(z)
+    kw["config"] = kw["config"]._replace(r_eff_liq=14.0e-6)
+    ours14 = np.asarray(compute_cloud_properties(**kw, n_cloud_in_cloud=True).r_eff_liq) * 1e6
+    np.testing.assert_array_equal(ours14, ours)
 
 
 def test_ice_reff_matches_mg2_effi(z):
@@ -88,8 +101,10 @@ def test_ice_reff_matches_mg2_effi(z):
     assert rel <= _TOL, f"r_eff_ice max rel {rel:.3e} > {_TOL}"
 
 
-def test_reff_gradient_finite(z):
-    kw = _kwargs(z)
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
+def test_reff_gradient_finite(z, dtype):
+    kw = {k: (jnp.asarray(v, dtype=dtype) if isinstance(v, jnp.ndarray) else v)
+          for k, v in _kwargs(z).items()}
 
     def loss(q_c, n_c, alst):
         p = compute_cloud_properties(**{**kw, "q_cloud": q_c, "n_cloud": n_c,
@@ -101,4 +116,4 @@ def test_reff_gradient_finite(z):
                                                kw["cloud_fraction_override"])
     for g in grads:
         assert np.all(np.isfinite(np.asarray(g)))
-    assert np.any(np.asarray(grads[2]) != 0.0)  # r_eff now depends on the cloud fraction
+    assert np.any(np.asarray(grads[2]) != 0.0)  # r_eff depends on the cloud fraction
