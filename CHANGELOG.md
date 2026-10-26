@@ -21,6 +21,14 @@ All notable changes to legoESM. Format roughly follows
   `--woa-t-var/--woa-s-var/--woa-month` and `--monthly-mld-sst`. See
   `docs/ocean/specs/epbl_energetic_pbl.md`.
 
+- **Orchestrator provenance env vars.** `build_run_manifest()` now reads
+  `LEGOESM_RUNNER_TAG` into a new `reproducibility.orchestrator_tag` field and
+  `LEGOESM_RUNNER_PATCHES` (comma-separated list, appended to the caller's
+  patches, duplicates and blanks dropped), so a downstream orchestrator (e.g. legoESM-ocean-runners'
+  `run.sh`) can identify itself and its patch chain on every lane.
+  `runner_tag` is left as the entry script's tag: replay specs and the
+  one-run-per-directory check key on it. No schema bump: validation accepts
+  the added optional key.
 - **`run_omip_core2.py` short-run flags.** `--days` runs for a day
   budget instead of the standard `--years` / `--smoke` budget (short tests
   that are not the 10-day smoke), `--synthetic-forcing` explicitly opts in
