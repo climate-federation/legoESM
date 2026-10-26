@@ -31,6 +31,7 @@ readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
 export PYTHONPATH="$REPO:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/ice:$REPO/packages/atmosphere:$REPO/packages/land:$REPO/packages/coupler:$REPO/packages/driver"
 readonly GATE=$here/../nemo_si3_o8_o16_master_gate.py
 readonly PASSIVITY=$here/../nemo_si3_o8_o16_master_passivity.py
+readonly READSET=$here/../nemo_si3_o8_o16_readset.py
 readonly WRITER=$here/o8_o16_master_writer.F90
 readonly STUB_NEMO=$here/stub_nemo.sh
 readonly STUB_MPIRUN=$here/stub_mpirun.sh
@@ -155,7 +156,7 @@ from pathlib import Path
 d=Path(sys.argv[1]); plant=sys.argv[2]
 checks={
 'icethd_do.f90':[('SUBROUTINE ice_thd_frazil','CALL o8o16_frazil(1'),('CALL o8o16_frazil(1','fraz_frac(:,:) = 0._wp'),('fraz_frac(:,:) = 0._wp','CALL o8o16_frazil(2')],
-'icethd.f90':[('CALL ice_thd_frazil','CALL o8o16_global(21)'),('CALL o8o16_global(21)','DO jl = 1, jpl'),('CALL o8o16_category(3','CALL ice_thd_zdf'),('CALL ice_thd_zdf','CALL o8o16_category(4'),("CALL ice_cons2D  (1, 'icethd'",'CALL o8o16_global(10)'),('CALL o8o16_global(10)','CALL ice_thd_pnd'),('CALL ice_thd_pnd','CALL o8o16_global(11)'),('CALL ice_itd_rem','CALL o8o16_global(12)'),('CALL ice_thd_do','CALL o8o16_global(13)'),('CALL ice_cor( kt , 2 )','CALL o8o16_global(14)')],
+'icethd.f90':[('CALL ice_thd_frazil','CALL o8o16_global(21)'),('CALL o8o16_global(21)','DO jl = 1, jpl'),('dh_s_tot  (1:npti) = 0._wp','CALL o8o16_category(3'),('dh_snowice(1:npti) = 0._wp','CALL o8o16_category(3'),('CALL o8o16_category(3','CALL ice_thd_zdf'),('CALL ice_thd_zdf','CALL o8o16_category(4'),("CALL ice_cons2D  (1, 'icethd'",'CALL o8o16_global(10)'),('CALL o8o16_global(10)','CALL ice_thd_pnd'),('CALL ice_thd_pnd','CALL o8o16_global(11)'),('CALL ice_itd_rem','CALL o8o16_global(12)'),('CALL ice_thd_do','CALL o8o16_global(13)'),('CALL ice_cor( kt , 2 )','CALL o8o16_global(14)')],
 'icethd_zdf_bl99.f90':[('END DO  ! End of the do while iterative procedure','CALL o8o16_picard')],
 'icethd_da.f90':[('READ(numnam_ice_cfg','CALL o8o16_da_config')],
 'icethd_sal.f90':[('IF( nn_icesal /= 4 )','CALL o8o16_salinity_config')],
@@ -273,7 +274,7 @@ sys.modules[spec.name]=mod; spec.loader.exec_module(mod)
 r1=mod.read_master_record(root/mod.record_name(1,1,rank=7)); r2=mod.read_master_record(root/mod.record_name(2,1,rank=7))
 assert np.signbit(r1['fields']['qlead'][0,0])
 assert np.unique(r1['fields']['qlead']).size > 2
-assert set(r1['fields']) == {'qlead'}
+assert {'qlead','at_i','u_ice','v_ice','umask_k1','vmask_k1','utau_ice','vtau_ice','smask0','hi_max'} == set(r1['fields'])
 assert np.all(r2['fields']['ht_i_new']==0) and np.all(r2['fields']['fraz_frac']==0)
 records=[mod.read_master_record(p) for p in sorted(root.glob('*.bin'))]
 assert {r['meta']['kind'] for r in records} == set(mod.KINDS)
@@ -283,10 +284,16 @@ k8=next(r for r in records if r['meta']['kind']==8)
 assert k8['fields']['o_i'][0] == 808.0
 assert 'a_i_b' not in k8['fields'] and 'h_i_b' not in k8['fields']
 assert k8['scalars']['rn_beta']==0.9 and k8['scalars']['rn_dmin']==8.0
+k3=next(r for r in records if r['meta']['kind']==3)
+assert all(np.all(k3['fields'][field.name] == 0.0) for field in mod.DH_DIAGS)
 k21=next(r for r in records if r['meta']['kind']==21)
 assert k21['fields']['oa_i'][0,0,0] == 809.0
 k15=next(r for r in records if r['meta']['kind']==15)
 assert k15['scalars']['rn_alb_sdry']==0.85 and k15['scalars']['rn_alb_hpiv']==1.0
+k13=next(r for r in records if r['meta']['kind']==13)
+assert np.all(k13['fields']['sst_m']==714.5)
+k20=next(r for r in records if r['meta']['kind']==20)
+assert np.all(k20['fields']['rCdU_ice']==738.0)
 print('PASS_REAL_PATCHED_WRITER_LAYOUT')
 PY
 }
@@ -377,8 +384,12 @@ run_preflight() {
   "$PY" "$GATE" --schema > "$scratch/schema.json"
   "$PY" "$GATE" --size > "$scratch/size.json"
   "$PY" "$GATE" --self-test > "$scratch/self.json"
-  for plant in header truncation swapped-field one-bit; do expect_refusal "$PY" "$GATE" --self-test --plant "$plant"; done
-  printf 'PREFLIGHT 2/10 every rung projection and missing/foreign/category plants\n'
+  for plant in header truncation swapped-field one-bit category-dh; do expect_refusal "$PY" "$GATE" --self-test --plant "$plant"; done
+  printf 'PREFLIGHT 2/10 source-derived read-sets, every rung projection and plants\n'
+  "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" > "$scratch/readsets.json"
+  expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-sst_m
+  expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-qlead
+  printf 'PASS_SOURCE_DERIVED_READ_SETS\n'
   for rung in O8 O9 O10 O11 O12 O13 O14 O15 O16; do
     "$PY" "$GATE" --projection-self-test "$rung" >/dev/null
     expect_refusal "$PY" "$GATE" --projection-self-test "$rung" --plant missing-step
@@ -415,8 +426,8 @@ run_preflight() {
   else
     printf 'PASS_EXISTING_CFG_DIGESTS_UNCHANGED: delegated to outer preflight\n'
   fi
-  if [[ -n "${PREFLIGHT_JSON:-}" ]]; then printf '{"status":"PREFLIGHT_OK","nemo_run":false,"plants":41}\n' > "$PREFLIGHT_JSON"; fi
-  printf 'PREFLIGHT_OK: no real NEMO integration was run; worst-case master %s bytes (130.30 GiB)\n' "$MASTER_BYTES"
+  if [[ -n "${PREFLIGHT_JSON:-}" ]]; then printf '{"status":"PREFLIGHT_OK","nemo_run":false,"plants":44}\n' > "$PREFLIGHT_JSON"; fi
+  printf 'PREFLIGHT_OK: no real NEMO integration was run; worst-case master %s bytes (131.06 GiB)\n' "$MASTER_BYTES"
   rm -rf -- "$scratch"; ACTIVE_SCRATCH=""
 }
 
@@ -514,7 +525,7 @@ import hashlib,json,sys
 from pathlib import Path
 ev,repo,here,commit=Path(sys.argv[1]),Path(sys.argv[2]),Path(sys.argv[3]),sys.argv[4]
 sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
-sources=[here/'run.sh',here/'stub_nemo.sh',here/'stub_mpirun.sh',here.parent/'nemo_si3_o8_o16_master_gate.py',here.parent/'nemo_si3_o8_o16_master_passivity.py']+sorted(here.glob('*.F90'))+sorted(here.glob('*.patch'))
+sources=[here/'run.sh',here/'stub_nemo.sh',here/'stub_mpirun.sh',here.parent/'nemo_si3_o8_o16_master_gate.py',here.parent/'nemo_si3_o8_o16_master_passivity.py',here.parent/'nemo_si3_o8_o16_readset.py']+sorted(here.glob('*.F90'))+sorted(here.glob('*.patch'))
 deck=ev/'manifest/production_deck'
 nemo=Path('/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo')
 manifest={

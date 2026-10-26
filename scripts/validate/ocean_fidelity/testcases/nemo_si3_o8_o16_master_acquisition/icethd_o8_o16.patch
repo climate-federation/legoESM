@@ -8,7 +8,7 @@
 +! O8O16_OBSERVER_BEGIN
 +      CALL o8o16_global(21)
 +! O8O16_OBSERVER_END
-@@ -140,0 +144,3 @@
+@@ -146,0 +150,3 @@
 +! O8O16_OBSERVER_BEGIN
 +                              CALL o8o16_category(3,jl)
 +! O8O16_OBSERVER_END

@@ -72,7 +72,7 @@ def _fields(names: str, extent: str, dtype: str = "f8") -> tuple[Field, ...]:
 CAT_BASE = _fields(
     "a_i at_i h_i h_s t_su s_i t_bo sss sst qns_ice qsr_ice dqns_ice "
     "qtr_ice_top qsb_ice_bot fhld frq_m sprecip qprec_ice evap_ice "
-    "hfx_err_dif hfx_dif qml_ice sfx_bri sfx_lam wfx_lam o_i",
+    "hfx_err_dif hfx_dif qml_ice qcn_ice sfx_bri sfx_lam wfx_lam o_i",
     "G1",
 ) + _fields("t_i e_i sz_i", "GI") + _fields("t_s e_s", "GS")
 
@@ -99,13 +99,13 @@ STATE_IS4 = _fields("t_s e_s", "IS4")
 STATE = STATE_I3 + STATE_II4 + STATE_IS4
 TOTALS = _fields(
     "at_i ato_i vt_i vt_s st_i et_i et_s tm_i tm_s sm_i tm_su hm_i hm_s "
-    "om_i at_ip at_ip_eff hm_ip vt_ip hm_il vt_il vm_ibr tm_si",
+    "om_i at_ip at_ip_eff hm_ip vt_ip hm_il vt_il tm_si",
     "I2",
 )
 POND = _fields("dh_i_sum_2d dh_s_sum_2d", "I3")
 GLOBAL_AUX = (
     _fields("h_i_b a_i_b", "I3")
-    + _fields("t_bo ht_i_new fraz_frac sss_m rn_amax_2d", "I2")
+    + _fields("t_bo ht_i_new fraz_frac sss_m sst_m rn_amax_2d", "I2")
     + _fields("tmask_k1", "F2")
     + _fields("smask0", "I2")
     + _fields("hi_max", "C0")
@@ -131,7 +131,12 @@ class Kind:
 
 
 KINDS: dict[int, Kind] = {
-    1: Kind("frazil_entry", _fields("qlead", "I2")),
+    1: Kind(
+        "frazil_entry",
+        _fields("qlead smask0", "I2")
+        + _fields("at_i u_ice v_ice umask_k1 vmask_k1 utau_ice vtau_ice", "F2")
+        + _fields("hi_max", "C0"),
+    ),
     2: Kind("frazil_exit", _fields("ht_i_new fraz_frac", "I2")),
     3: Kind("category_entry", _fields("nptidx", "G1", "i4") + CAT_BASE + DH_DIAGS + DH_FLUXES, True),
     4: Kind(
@@ -212,7 +217,7 @@ KINDS[19] = Kind(
     _fields("uu_kbb vv_kbb umask_k1 vmask_k1 u_ice v_ice u_oce v_oce drag_io at_i utau vtau", "F2")
     + _fields("taum", "I2"),
 )
-KINDS[20] = Kind("tau_exit", _fields("utau vtau", "F2") + _fields("taum", "I2"))
+KINDS[20] = Kind("tau_exit", _fields("utau vtau", "F2") + _fields("taum", "I2") + _fields("rCdU_ice", "F2"))
 KINDS[21] = Kind("pre_category_state", STATE)
 
 PROJECTIONS: dict[str, tuple[int, ...]] = {
@@ -328,6 +333,10 @@ def read_master_record(path: str | Path, plant: str | None = None) -> dict[str, 
         offset = stop
     if offset != len(raw):
         raise _refuse(f"trailing bytes in {p}: {len(raw) - offset}")
+    if kind == 3:
+        nonzero = [field.name for field in DH_DIAGS if np.any(fields[field.name] != 0.0)]
+        if nonzero:
+            raise _refuse(f"category-entry diagnostics were not zeroed: {nonzero}")
     return {
         "meta": meta,
         "scalars": dict(zip(SCALAR_NAMES, map(float, scalars), strict=True)),
@@ -440,7 +449,9 @@ def size_report(jpi: int = 182, jpj: int = 149, ni: int = 180, nj: int = 147) ->
     }
 
 
-def _synthetic_record(path: Path, kind: int, kt: int = 1, jl: int | None = None) -> None:
+def _synthetic_record(
+    path: Path, kind: int, kt: int = 1, jl: int | None = None, *, nonzero_entry_dh: bool = False
+) -> None:
     spec = KINDS[kind]
     jl = 1 if jl is None and spec.category else (0 if jl is None else jl)
     meta = dict(kind=kind, kt=kt, jl=jl, rank=0, jpi=6, jpj=6, jpl=5,
@@ -465,6 +476,8 @@ def _synthetic_record(path: Path, kind: int, kt: int = 1, jl: int | None = None)
             shape = _shape(field, meta)
             dtype = np.dtype("<i4" if field.dtype == "i4" else "<f8")
             data = np.arange(seed, seed + int(np.prod(shape)), dtype=dtype).reshape(shape, order="F")
+            if kind == 3 and field in DH_DIAGS and not nonzero_entry_dh:
+                data.fill(0)
             if field.dtype == "f8" and seed == 1:
                 data.flat[0] = -0.0
             f.write(data.tobytes(order="F"))
@@ -479,7 +492,11 @@ def self_test(plant: str | None = None) -> dict[str, Any]:
             path = root / record_name(kind, 1, 1 if KINDS[kind].category else 0)
             _synthetic_record(path, kind)
             paths.append(path)
-        target = paths[2] if plant == "swapped-field" else paths[0]
+        if plant == "category-dh":
+            target = root / record_name(3, 1, 1)
+            _synthetic_record(target, 3, nonzero_entry_dh=True)
+        else:
+            target = paths[2] if plant == "swapped-field" else paths[0]
         rec = read_master_record(target, plant=plant if plant in {"header", "truncation", "swapped-field"} else None)
         if plant == "swapped-field":
             raise _refuse("swapped-field plant survived parsing")

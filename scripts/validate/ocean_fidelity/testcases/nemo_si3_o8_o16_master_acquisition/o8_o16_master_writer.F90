@@ -8,10 +8,10 @@ MODULE o8_o16_master_writer
    USE ice
    USE ice1D
    USE sbc_oce, ONLY: qsr, qns, emp, sfx, fr_i, fwfice, qns_tot, qsr_tot, frq_m, &
-      &               sss_m, cloud_fra, sprecip, tprecip, utau, vtau, taum
+      &               sss_m, sst_m, cloud_fra, sprecip, tprecip, utau, vtau, taum
    USE sbc_ice, ONLY: qsr_oce, qns_oce, qemp_oce, qemp_ice, emp_oce, emp_ice, qsr_ice, qns_ice, qevap_ice, &
       &               qcn_ice, qml_ice, qtr_ice_top, tn_ice, alb_ice, &
-      &               snwice_mass, snwice_mass_b, snwice_fmass
+      &               snwice_mass, snwice_mass_b, snwice_fmass, rCdU_ice, utau_ice, vtau_ice
    IMPLICIT NONE
    PRIVATE
    PUBLIC :: o8o16_set_context, o8o16_frazil, o8o16_category, o8o16_picard
@@ -262,8 +262,11 @@ CONTAINS
       INTEGER::u
       current_hinew=rn_hinew
       IF(kind==1) THEN
-         CALL open_record(kind,0,0,1,u)
-         CALL put_i2(u,qlead)
+         CALL open_record(kind,0,0,10,u)
+         CALL put_i2(u,qlead); CALL put_i2(u,smask0); CALL put_f2(u,at_i)
+         CALL put_f2(u,u_ice); CALL put_f2(u,v_ice)
+         CALL put_f2(u,umask(:,:,1)); CALL put_f2(u,vmask(:,:,1))
+         CALL put_f2(u,utau_ice); CALL put_f2(u,vtau_ice); CALL put_c0(u,hi_max)
       ELSEIF(kind==2) THEN
          CALL open_record(kind,0,0,2,u)
          CALL put_i2(u,ht_i_new); CALL put_i2(u,fraz_frac)
@@ -281,7 +284,7 @@ CONTAINS
       CALL put_g1(u,dqns_ice_1d); CALL put_g1(u,qtr_ice_top_1d); CALL put_g1(u,qsb_ice_bot_1d)
       CALL put_g1(u,fhld_1d); CALL put_g1(u,frq_m_1d); CALL put_g1(u,sprecip_1d)
       CALL put_g1(u,qprec_ice_1d); CALL put_g1(u,evap_ice_1d); CALL put_g1(u,hfx_err_dif_1d)
-      CALL put_g1(u,hfx_dif_1d); CALL put_g1(u,qml_ice_1d); CALL put_g1(u,sfx_bri_1d)
+      CALL put_g1(u,hfx_dif_1d); CALL put_g1(u,qml_ice_1d); CALL put_g1(u,qcn_ice_1d); CALL put_g1(u,sfx_bri_1d)
       CALL put_g1(u,sfx_lam_1d); CALL put_g1(u,wfx_lam_1d); CALL put_g1(u,o_i_1d)
       CALL put_gi(u,t_i_1d); CALL put_gi(u,e_i_1d)
       CALL put_gi(u,sz_i_1d); CALL put_gs(u,t_s_1d); CALL put_gs(u,e_s_1d)
@@ -320,7 +323,7 @@ CONTAINS
       IF(PRESENT(rn_dmin)) current_dmin=rn_dmin
       SELECT CASE(kind)
       CASE(3,5,6,7,8,9)
-         CALL open_record(kind,record_jl,npti,66,u); CALL put_idx(u); CALL put_cat_base(u); CALL put_dh(u); CALL put_dh_fluxes(u)
+         CALL open_record(kind,record_jl,npti,67,u); CALL put_idx(u); CALL put_cat_base(u); CALL put_dh(u); CALL put_dh_fluxes(u)
       CASE(4)
          CALL open_record(kind,record_jl,npti,16,u); CALL put_idx(u)
          CALL put_g1(u,t_su_1d); CALL put_g1(u,qns_ice_1d); CALL put_g1(u,qcn_ice_top_1d)
@@ -369,7 +372,7 @@ CONTAINS
       CALL put_i2(u,tm_s); CALL put_i2(u,sm_i); CALL put_i2(u,tm_su); CALL put_i2(u,hm_i)
       CALL put_i2(u,hm_s); CALL put_i2(u,om_i); CALL put_i2(u,at_ip); CALL put_i2(u,at_ip_eff)
       CALL put_i2(u,hm_ip); CALL put_i2(u,vt_ip); CALL put_i2(u,hm_il); CALL put_i2(u,vt_il)
-      CALL put_i2(u,vm_ibr); CALL put_i2(u,tm_si)
+      CALL put_i2(u,tm_si)
    END SUBROUTINE put_totals
 
    SUBROUTINE put_pond(u)
@@ -381,7 +384,7 @@ CONTAINS
       INTEGER,INTENT(in)::u
       CALL put_i3(u,h_i_b); CALL put_i3(u,a_i_b)
       CALL put_i2(u,t_bo); CALL put_i2(u,ht_i_new); CALL put_i2(u,fraz_frac)
-      CALL put_i2(u,sss_m); CALL put_i2(u,rn_amax_2d)
+      CALL put_i2(u,sss_m); CALL put_i2(u,sst_m); CALL put_i2(u,rn_amax_2d)
       CALL put_f2(u,tmask(:,:,1)); CALL put_i2(u,smask0)
       CALL put_c0(u,hi_max); CALL put_c1(u,hi_mean)
    END SUBROUTINE put_global_aux
@@ -431,7 +434,7 @@ CONTAINS
       IF(kind==18) THEN
          CALL open_record(kind,0,0,23,u); CALL put_state(u)
       ELSEIF(kind==15) THEN
-         CALL open_record(kind,0,0,114,u); CALL put_state(u); CALL put_totals(u); CALL put_flux(u)
+         CALL open_record(kind,0,0,113,u); CALL put_state(u); CALL put_totals(u); CALL put_flux(u)
          CALL put_i2(u,qsr_oce); CALL put_i2(u,qns_oce); CALL put_i2(u,qemp_oce); CALL put_i2(u,qemp_ice)
          CALL put_i2(u,emp_oce); CALL put_i2(u,emp_ice); CALL put_i2(u,qns_tot)
          CALL put_i2(u,qsr_tot); CALL put_i2(u,frq_m); CALL put_i3(u,a_i_b)
@@ -466,8 +469,8 @@ CONTAINS
          CALL put_f2(u,drag_io); CALL put_f2(u,at_i)
          CALL put_f2(u,utau); CALL put_f2(u,vtau); CALL put_i2(u,taum)
       ELSEIF(kind==20) THEN
-         CALL open_record(kind,0,0,3,u)
-         CALL put_f2(u,utau); CALL put_f2(u,vtau); CALL put_i2(u,taum)
+         CALL open_record(kind,0,0,4,u)
+         CALL put_f2(u,utau); CALL put_f2(u,vtau); CALL put_i2(u,taum); CALL put_f2(u,rCdU_ice)
       ELSE
          ERROR STOP 'O16 tau kind'
       ENDIF
