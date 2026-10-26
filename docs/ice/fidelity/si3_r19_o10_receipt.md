@@ -181,8 +181,11 @@ PLAUSIBLE:
 
 ## Gates
 
-The mandatory full SI3 citation map, default receipt gate and private-import
-ratchet are run after this receipt is mapped and committed. Every citation
-shifted by the O10 insertion is re-anchored in both the historical receipts and
-the live full-map gate; its planted shift audit remains mandatory.
-
+After the mapped receipt was committed, the mandatory x64 citation/default
+suite passed: `35 passed in 7.32s`. That includes every SI3 receipt and the full
+map's independently shifted-endpoint audit. The explicit O10 run was `PASS`
+with 42 citations, zero unmapped citations and zero map-audit failures; shifting
+the VC19 assignment pin produced `SYMBOL-NOT-AT-LINE` and `FAIL`. The
+private-import ratchet passed `6 passed in 7.96s`. Every historical citation
+shifted by the O10 insertion is re-anchored in both its receipt and the live
+full-map gate.
