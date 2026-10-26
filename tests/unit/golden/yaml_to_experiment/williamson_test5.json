@@ -283,7 +283,7 @@
   "n2o_ppbv": 332.0,
   "n_devices": "auto",
   "nc_from_aerosol": false,
-  "ocean_flux_on_ocean_surface": false,
+  "ocean_flux_on_ocean_surface": null,
   "orbital_insolation": false,
   "output": {
     "budget_ledger": false,

@@ -1066,11 +1066,11 @@ def test_mpas_land_stress_from_land_flag_flows_to_config():
 
 
 def test_mpas_ocean_flux_on_ocean_surface_flag_flows_to_config():
-    """--mpas-ocean-flux-on-ocean-surface round-trip; default off."""
+    """--mpas-ocean-flux-on-ocean-surface round-trip; unset = AUTO (None)."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert cfg_default.ocean_flux_on_ocean_surface is False
+    assert cfg_default.ocean_flux_on_ocean_surface is None
     for flag, want in (("--mpas-ocean-flux-on-ocean-surface", True),
                        ("--no-mpas-ocean-flux-on-ocean-surface", False)):
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([

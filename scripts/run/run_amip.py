@@ -1968,16 +1968,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "two_leaf/simple_seb); --no-... = old bulk stress.")
     parser.add_argument("--ocean-flux-on-ocean-surface",
                         "--mpas-ocean-flux-on-ocean-surface",
-                        action=_BoolOneSpelling, default=False,
+                        action=_BoolOneSpelling, default=None,
                         dest="ocean_flux_on_ocean_surface",
                         help="MPAS lane, land-flux handoff on: evaluate the "
                              "non-land fraction's bulk surface fluxes on the "
                              "ocean/ice surface (SST/SIC blend) instead of on "
                              "the land-blended surface temperature/humidity "
-                             "(#1320). Requires --mpas-land-beta-soil, the "
-                             "land model's stress over land (--mpas-land-"
-                             "stress-from-land, default auto) and radiation "
-                             "!= none.")
+                             "(#1320). Unset = AUTO (on wherever it applies: "
+                             "--mpas-land-beta-soil, the land model's stress "
+                             "over land (--mpas-land-stress-from-land, default "
+                             "auto) and radiation != none); --no-... = the "
+                             "land-blended surface.")
     parser.add_argument("--land-params-refresh", "--mpas-land-params-refresh",
                         action=_BoolOneSpelling, default=True,
                         dest="land_params_refresh",

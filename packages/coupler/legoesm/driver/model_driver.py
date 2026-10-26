@@ -13370,10 +13370,13 @@ class ModelDriver:
         _land_stress_on = resolve_land_stress_from_land(cfg)
         # Validated (validate_strict) to imply the land-flux handoff, so the
         # turbulence always receives T_sfc_ocean together with shflx_land.
-        _ocean_sfc_on = bool(cfg.ocean_flux_on_ocean_surface)
+        from legoesm.driver.config import resolve_ocean_flux_on_ocean_surface
+        _ocean_sfc_on = resolve_ocean_flux_on_ocean_surface(cfg)
         print(f"  Non-land surface fluxes evaluated on: "
               f"{'OCEAN/ICE surface' if _ocean_sfc_on else 'land-blended surface'}"
-              f" (ocean_flux_on_ocean_surface={_ocean_sfc_on})")
+              f" (ocean_flux_on_ocean_surface="
+              f"{cfg.ocean_flux_on_ocean_surface!r}"
+              f"{' -> auto' if cfg.ocean_flux_on_ocean_surface is None else ''})")
         print(f"  Land surface stress to the boundary layer: "
               f"{'LAND MODEL' if _land_stress_on else 'atmosphere bulk law'} "
               f"(land_stress_from_land="

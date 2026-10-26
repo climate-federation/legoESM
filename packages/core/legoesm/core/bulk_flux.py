@@ -1559,12 +1559,18 @@ def compute_sam_oceflx_fluxes(
         # tdiff = tbot - ts; where tdiff < td0 both vmag and vmag_old (the
         # stress denominator, the same array here since gust_fac = 0) are
         # scaled by vscl.
+        # The radicand is double-where'd (oracle row 57): where the block is
+        # off it is replaced by 1.0 before the square root, so the unused
+        # branch's d sqrt(x)/dx = inf at tdiff == td0 cannot turn the zero
+        # cotangent into a NaN gradient.  Forward value unchanged: the
+        # substituted branch is never selected.
         tdiff = t_bot - T_sfc
+        coa_on = tdiff < _CESM_COA_TD0
+        radicand = jnp.where(coa_on, jnp.abs(tdiff - _CESM_COA_TD0), 1.0)
         vscl = jnp.minimum(
-            1.0 + _CESM_COA_ALPHA * (jnp.abs(tdiff - _CESM_COA_TD0) ** 0.5
-                                     / jnp.abs(vmag)),
+            1.0 + _CESM_COA_ALPHA * (radicand ** 0.5 / jnp.abs(vmag)),
             _CESM_COA_MAXSCL)
-        vmag = jnp.where(tdiff < _CESM_COA_TD0, vmag * vscl, vmag)
+        vmag = jnp.where(coa_on, vmag * vscl, vmag)
     theta_sfc = T_sfc / exner_sfc             # surface potential temperature
     delt = theta_atm - theta_sfc             # SAM thbot - ts (pot-T diff)
     delq = q_atm - q_sfc                      # spec-humidity diff
