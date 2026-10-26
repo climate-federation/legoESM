@@ -60,7 +60,7 @@ check_r336_zdfphy_landing \"\$TARGET_ROOT/BLD/ppsrc/nemo/zdfphy.f90\" || refuse 
 
 # Test-only redirection. Production invocations never set the variable.
 sed -i '/^TARGET_RUN=\$DEFAULT_TARGET_RUN$/i\
-if [[ -n ${R336_STUB_FLOW_ROOT:-} ]]; then\
+if [[ -n ${R336_STUB_FLOW_ROOT:-} && ${R328_ADMISSION_IDENTITY_ONLY:-0} != 1 ]]; then\
   [[ -d $R336_STUB_FLOW_ROOT && $R336_STUB_FLOW_ROOT == /* ]] || { printf '\''REFUSE: invalid stub flow root\\n'\'' >&2; exit 64; }\
   EVIDENCE=$R336_STUB_FLOW_ROOT/evidence\
   DEFAULT_TARGET_RUN=$EVIDENCE/$(basename "$DEFAULT_TARGET_RUN")\
