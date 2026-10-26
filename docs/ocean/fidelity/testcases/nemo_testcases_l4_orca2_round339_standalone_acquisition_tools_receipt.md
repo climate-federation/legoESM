@@ -129,6 +129,17 @@ Tool A `--run`, followed only after its admission by Tool B `--run`.
 
 ## Verification
 
-The per-receipt citation gate, campaign-default citation gate, required
-citation-gate pytest, focused tests and repository ratchet are recorded at the
-final committed tree. NEMO acquisition is deliberately absent.
+- Per-receipt citation gate: **PASS**, 3 citations, zero failures, zero
+  unmapped citations, zero map-audit failures, all 9 self-tests fired.
+- Campaign-default citation gate: **PASS**, 274 citations, zero failures,
+  zero unmapped citations, zero map-audit failures, all 9 self-tests fired.
+- Default ORCA2 landing inventory, including the required
+  `test_nemo_testcase_receipt_citation_gate.py`: **152 / 152 PASS** in
+  1,469.76 seconds.
+- Focused round-339 tests: **5 / 5 PASS**.
+- Dedicated three-invocation ratchet: **12,314 PASS, 4 SKIP, 3 inherited
+  FAIL**. The failures are the unchanged JRA55 test literal, land restart
+  coefficient and shortwave-penetration parameter spec; none names a file in
+  this round's diff.
+
+NEMO acquisition is deliberately absent.
