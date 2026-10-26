@@ -172,8 +172,9 @@ cp "$SOURCE_ROOT/BLD/ppsrc/nemo/iceupdate.f90" "$scratch/dry_bld/ppsrc/nemo/iceu
 printf '! plant\n' >>"$scratch/dry_bld/ppsrc/nemo/iceupdate.f90"
 plant_must_refuse same-program same_program "$scratch/dry_bld"
 
-# Bounds/signed-zero/rank-distinct writer fixture. It calls the exact writer
-# compiled with the round-5 production flags; actual patched sbcmod compiled above.
+# Bounds/signed-zero/rank-distinct fixture.  Linker garbage collection lets the
+# fixture execute the wrapper from the actual patched/preprocessed sbcmod unit
+# without reimplementing sbcmod's many unrelated callees as fake routines.
 cat >"$scratch/fixture_stubs.F90" <<'EOF'
 MODULE par_kind; USE,INTRINSIC::iso_fortran_env,ONLY:real64; INTEGER,PARAMETER::wp=real64; END MODULE
 MODULE dom_oce
@@ -186,12 +187,26 @@ CONTAINS
  SUBROUTINE ctl_stop(message); CHARACTER(*),INTENT(in)::message; ERROR STOP message; END SUBROUTINE
 END MODULE
 EOF
-sed 's/USE sbcmod, ONLY : r339_fixture_write/USE round339_ice_cover_writer, ONLY : r339_fixture_write => r339_write/' \
-  "$FIXTURE" >"$scratch/fixture.F90"
-"$MPIFC" -O3 -funroll-all-loops -fno-tree-vectorize -fcheck=bounds -ffree-line-length-none \
-  -I "$scratch/mod" -J "$scratch/mod" \
-  "$scratch/fixture_stubs.F90" "$WRITER" "$scratch/fixture.F90" \
-  -o "$scratch/fixture"
+mkdir "$scratch/stub-mod" "$scratch/check-mod"
+compiler=$(awk '$1 == "%FC" {$1=""; print}' "$SOURCE_ROOT/BLD/arch_nemo.fcm")
+flags=$(awk '$1 == "%FCFLAGS" {$1=""; print}' "$SOURCE_ROOT/BLD/arch_nemo.fcm")
+# The stubs provide link-time storage only.  Every scientific unit is compiled
+# against the real round-5 .mod interfaces, including the patched sbcmod unit.
+$compiler -c -J "$scratch/stub-mod" "$scratch/fixture_stubs.F90" -o "$scratch/fixture_stubs.o"
+# shellcheck disable=SC2086
+$compiler $flags -fcheck=bounds -ffunction-sections -I "$SOURCE_ROOT/BLD/inc" \
+  -J "$scratch/check-mod" -c "$scratch/round339_ice_cover_writer.f90" \
+  -o "$scratch/writer-check.o"
+# shellcheck disable=SC2086
+$compiler $flags -fcheck=bounds -ffunction-sections -I "$scratch/check-mod" \
+  -I "$SOURCE_ROOT/BLD/inc" -J "$scratch/check-mod" \
+  -c "$scratch/sbcmod-observed.f90" -o "$scratch/sbcmod-check.o"
+# shellcheck disable=SC2086
+$compiler $flags -fcheck=bounds -ffunction-sections -I "$scratch/check-mod" \
+  -I "$SOURCE_ROOT/BLD/inc" -J "$scratch/check-mod" \
+  -c "$FIXTURE" -o "$scratch/fixture-check.o"
+$compiler -Wl,--gc-sections "$scratch/fixture_stubs.o" "$scratch/writer-check.o" \
+  "$scratch/sbcmod-check.o" "$scratch/fixture-check.o" -o "$scratch/fixture"
 for rank in 0 1; do
   (cd "$scratch" && ./fixture "$rank") >"$scratch/fixture-$rank.log"
   grep -E "R339_WRITER_FIXTURE_PASS[[:space:]]+$rank$" "$scratch/fixture-$rank.log" >/dev/null \
