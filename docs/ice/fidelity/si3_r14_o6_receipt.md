@@ -243,7 +243,7 @@ negative `v_s`; `at_i` above `amax` flagged for `icecor`, not for
 ### Gates (this resume)
 
 - Citation gate, all 13 SI3 receipts, full map: every receipt PASS, 0 unmapped, 0 failing, 0 map entries failing audit; this receipt 65 citations; a shifted-line plant fires (exit 1) (`citation_gate_all_si3.log`).
-- Default citation gate: `31 passed in 6.63s` (`default_gate.log`). Private-import ratchet: `6 passed in 5.45s` (`private_imports.log`).
+- Default citation gate: `31 passed in 6.75s` (`default_gate.log`). Private-import ratchet: `6 passed in 5.04s` (`private_imports.log`).
 - Inline-coefficient, hardcoded-constant, dispatch, parameter-spec and saturation ratchets: `11 failed, 12053 passed, 4 skipped`, the identical 11 at the parent; the one in a touched file (`si3_orca2_state.py`, inline coefficients) lists the same five pre-existing sites, none in the appended code (`ratchets_current.log`, `inline_si3_orca2_current.txt`).
 - Reviews (codex, read-only CLI): pass 1 HOLD, five harness/tool defects confirmed and one plausible, all fixed; pass 2 confirmed five fixed and the matcher not, now fixed and tested; pass 3 (claims check) HOLD on wording and completeness, fixed; pass 4 HOLD on self-declared completeness scope, unvalidated idle arms, one count and two unlogged runs, fixed; pass 5 confirmed three of those and held on the unit set and hard-coded roots, now taken from the whole ppsrc and from `icedyn.f90` (`review_codex_r2.log`..`r6`). GLM: no route in this session, not run (honour-system rule unmet, stated).
 - GPU spot check: not run (no certification this round).
