@@ -26,6 +26,7 @@ from legoesm.atmosphere.physics.radiation.rrtmgp.config.radiative_transfer impor
     RRTMOptics as RRTMOpticsConfig,
 )
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import atmospheric_state
+from legoesm.atmosphere.physics.radiation.rrtmgp.optics import cloud_optics
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import constants as optics_constants
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics.lookup_volume_mixing_ratio import (
     LookupVolumeMixingRatio,
@@ -593,6 +594,7 @@ class RRTMGP:
       mcica_cloud_fraction: jnp.ndarray | None = None,
       clear_sky: bool = False,
       o3_top_vmr: jnp.ndarray | None = None,
+      cloud_rho_ice: float | None = None,
   ):
       """Compute radiation for legoESM column arrays.
 
@@ -665,6 +667,12 @@ class RRTMGP:
           ``0 < p < p_half[:, 0]``.  Used only by the transported overhead
           layer (``config.overhead_layer``); ``None`` => that layer takes the
           top model layer's ozone.
+      cloud_rho_ice : float | None
+          Bulk ice density [kg/m^3] of the PSD that produced
+          ``cloud_r_eff_ice`` (``CloudConfig.rho_cloud_ice``).  CAM6 uses one
+          ``rhoi`` for the ice PSD and the optics size ``deffi =
+          effi*rhoi/rhows*2`` (micro_mg2_0.F90:2795).  ``None`` => CAM's
+          ``rhoi`` = 500, the value the cloud optics convert from.
 
       Returns
       -------
@@ -724,6 +732,13 @@ class RRTMGP:
           cloud_r_eff_liq = jnp.asarray(cloud_r_eff_liq).astype(_table_dtype)
       if cloud_r_eff_ice is not None:
           cloud_r_eff_ice = jnp.asarray(cloud_r_eff_ice).astype(_table_dtype)
+          if cloud_rho_ice is not None:
+              # The cloud optics read the table at 2 r 500/917 (CAM rhoi =
+              # 500); r*rho/500 makes that 2 r rho/917 for the configured
+              # bulk density (factor exactly 1.0 at rho = 500).
+              cloud_r_eff_ice = cloud_r_eff_ice * jnp.asarray(
+                  cloud_rho_ice / cloud_optics.RHO_ICE_BULK_CAM_MG2,
+                  dtype=_table_dtype)
       if cloud_fraction is not None:
           cloud_fraction = jnp.asarray(cloud_fraction).astype(_table_dtype)
       if mcica_cloud_fraction is not None:

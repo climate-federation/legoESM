@@ -307,3 +307,37 @@ def test_convective_water_is_conserved(_x64):
     assert abs(residual) <= 1.0e-5 * scale, (
         "convective water not conserved", residual, scale, sink, detrained,
         rained)
+
+
+def test_default_bechtold_reproduces_the_ifs_source_ascent():
+    """At the defaults the mapped ascent config IS the IFS source one (so the
+    production output does not move); every mapped field has a counterpart."""
+    from legoesm.atmosphere.physics.convection._ifs_ascent import IFSAscentConfig
+    got = F.ifs_ascent_config(BechtoldConfig(use_ifs_ascent=True))
+    ref = IFSAscentConfig()
+    for f in ref._fields:
+        np.testing.assert_allclose(getattr(got, f), getattr(ref, f),
+                                   rtol=1e-12, err_msg=f)
+
+
+def test_driver_set_bechtold_values_reach_the_ifs_ascent(monkeypatch):
+    """A BechtoldConfig value set by the run must reach the ascent the
+    faithful chain launches (it used to be built from IFS defaults)."""
+    seen = {}
+    real = F.ifs_updraught_ascent
+
+    def spy(*a, **k):
+        seen["cfg"] = k["cfg"]
+        return real(*a, **k)
+
+    monkeypatch.setattr(F, "ifs_updraught_ascent", spy)
+    T, q, p_full, p_half = _deep_column()
+    kw = _kwargs(*T.shape)
+    cfg = BechtoldConfig(use_ifs_ascent=True, epsilon_deep=2.5e-3,
+                         delta_deep=1.0e-4, epsilon_shallow=6.0e-3,
+                         rprcon=2.0e-3, dnoprc=5.0e-4)
+    bechtold_convection(T, q, p_full, p_half, config=cfg, **kw)
+    a = seen["cfg"]
+    assert a.entrorg == 2.5e-3 and a.detrpen == 1.0e-4
+    assert a.rprcon == 2.0e-3 and a.dnoprc == 5.0e-4
+    np.testing.assert_allclose(a.entshalp, 6.0e-3 / 2.5e-3, rtol=1e-12)

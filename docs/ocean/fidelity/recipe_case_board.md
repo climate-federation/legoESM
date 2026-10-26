@@ -4,7 +4,7 @@
 
 One unified inventory of every ocean case (idealized + oracle-comparison, no distinction): what it tests, whether a true oracle exists in another model, and — per recipe — whether legoESM reproduces it. One experiment run under many recipes = many result rows (below) / many filled cells (matrix), NOT many cases. Holes (`⬜ todo`) are the roadmap; `⛔ blocked` cites the issue. The **tests** column is a physics summary so duplicate/overlapping cases are visible (use it to retire repeats).
 
-**27 cases, 30 case×recipe results** — ✅ verified: 3, ⛔ blocked: 1, 🟡 partial: 1, ⬜ todo: 25
+**27 cases, 31 case×recipe results** — ✅ verified: 3, ⛔ blocked: 1, 🟡 partial: 1, ⬜ todo: 26
 
 **by reference kind** — 🔬 oracle: 10, 📐 analytic: 7, 📄 published: 8, —: 2
 
@@ -36,6 +36,7 @@ Reference kind = truth strength: 🔬 oracle (runnable model + data) · 📐 ana
 | `gridmode_decay` | 2Δx grid-mode decay rate (numerical dissipation probe) | 🔬 oracle: Oceananigans | latlon_cgrid | `oceananigans_v1` | ⬜ todo | diagnostic comparison; not re-assessed |
 | `held_larichev` | Held–Larichev eddying channel; APE→KE cascade saturation (k⁻³) | 📄 published: Held & Larichev 1996 (spectral scaling law) | latlon_channel | `default_wright_v1` | ⬜ todo | spectral-slope benchmark (also: mpas_channel) |
 | `inertia_gravity_wave` | Poincaré (inertia-gravity) wave | 📐 analytic: Poincaré dispersion (Bishnu 2024 cross-check) | latlon_cgrid | `default_wright_v1` | ⬜ todo | analytic benchmark; matrix-covered (also: cubed_sphere, mpas) |
+|  |  |  | latlon_channel | `default_wright_implicit_cn_v1` | ⬜ todo | f-plane channel (Bishnu 2024); runner forces implicit_cn |
 | `isomip_plus` | ISOMIP+ ice-shelf cavity benchmark | 📄 published: ISOMIP+ (Asay-Davis 2016) intercomparison | latlon_regional | `legoesm_linear_v1` | ⬜ todo | ice-shelf-cavity benchmark |
 | `lock_exchange` | density-driven gravity current; RPE mixing | 📄 published: Petersen et al. 2015 (RPE intercomparison) | latlon_cgrid | `default_wright_v1` | ⬜ todo | RPE diagnostic benchmark; matrix-covered |
 | `munk_gyre` | Munk gyre; lateral-viscosity western boundary current | 📐 analytic: Munk boundary-layer width | latlon_regional | `default_wright_v1` | ⬜ todo | WBC benchmark (also: mpas_regional) |
@@ -50,34 +51,35 @@ Reference kind = truth strength: 🔬 oracle (runnable model + data) · 📐 ana
 Rows are `case @ grid` (grid + recipe = the numerical setup of a run); columns are recipes.
 Legend: ✅ verified · 🟩 works · 🟡 partial · ⛔ blocked · ⬜ todo · blank = not run
 
-| case @ grid | oceananigans_v1 (+power_law) | oceananigans_v1 | oceananigans_v1 (meridionally_flat+oceananigans_up3) | veros_faithful_v1 | mitgcm_v1 | legoesm_nemo_like_v1 | omip_nemo_match_tripole_v1 | omip_nemo_match_mpas_v1 | default_wright_v1 | eady_weno5_v1 | legoesm_linear_v1 | nemo_dino_v1 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `baroclinic_adjustment` @ latlon_cgrid (β-plane) | ✅ |  |  |  |  |  |  |  |  |  |  |  |
-| `barotropic_gyre` @ latlon_cgrid |  | ✅ |  |  |  |  |  |  |  |  |  |  |
-| `internal_tide` @ latlon_cgrid (meridionally_flat) |  |  | ✅ |  |  |  |  |  |  |  |  |  |
-| `silvestri_jet_forced` @ latlon_cgrid (spherical channel) | ⛔ |  |  |  |  |  |  |  |  |  |  |  |
-| `bickley_jet` @ latlon_cgrid (unit sphere) |  | 🟡 |  |  |  |  |  |  |  |  |  |  |
-| `acc_channel` @ latlon_cgrid |  |  |  | ⬜ |  |  |  |  |  |  |  |  |
-| `advection_gyre` @ latlon_cgrid |  |  |  |  | ⬜ |  |  |  |  |  |  |  |
-| `baroclinic_gyre` @ latlon_regional |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
-| `barotropic_wave` @ latlon_cgrid |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
-| `dino` @ latlon_cgrid |  |  |  |  |  |  |  |  |  |  |  | ⬜ |
-| `eady_instability` @ latlon_channel |  |  |  |  |  |  |  |  |  | ⬜ |  |  |
-| `eady_uniform` @ latlon_channel |  |  |  |  |  |  |  |  |  | ⬜ |  |  |
-| `geostrophic_adjustment` @ latlon_cgrid |  | ⬜ |  |  |  |  |  |  |  |  |  |  |
-| `global_barotropic_wind` @ latlon_cgrid |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
-| `global_omip` @ latlon_cgrid |  |  |  | ⬜ |  | ⬜ |  |  |  |  |  |  |
-| `global_omip` @ latlon_cgrid (tripole) |  |  |  |  |  |  | ⬜ |  |  |  |  |  |
-| `global_omip` @ mpas (ico6) |  |  |  |  |  |  |  | ⬜ |  |  |  |  |
-| `global_overturning` @ latlon_cgrid |  |  |  |  |  |  |  |  |  |  | ⬜ |  |
-| `gridmode_decay` @ latlon_cgrid |  | ⬜ |  |  |  |  |  |  |  |  |  |  |
-| `held_larichev` @ latlon_channel |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
-| `inertia_gravity_wave` @ latlon_cgrid |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
-| `isomip_plus` @ latlon_regional |  |  |  |  |  |  |  |  |  |  | ⬜ |  |
-| `lock_exchange` @ latlon_cgrid |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
-| `munk_gyre` @ latlon_regional |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
-| `neverworld2_lite` @ latlon_cgrid |  |  |  |  |  |  |  |  |  |  | ⬜ |  |
-| `overflow` @ latlon_cgrid |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
-| `phillips_two_layer` @ latlon_cgrid |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
-| `rest_state` @ latlon_cgrid |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
-| `stommel_gyre_tracer` @ latlon_cgrid |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
+| case @ grid | oceananigans_v1 (+power_law) | oceananigans_v1 | oceananigans_v1 (meridionally_flat+oceananigans_up3) | veros_faithful_v1 | mitgcm_v1 | legoesm_nemo_like_v1 | omip_nemo_match_tripole_v1 | omip_nemo_match_mpas_v1 | default_wright_v1 | default_wright_implicit_cn_v1 | eady_weno5_v1 | legoesm_linear_v1 | nemo_dino_v1 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `baroclinic_adjustment` @ latlon_cgrid (β-plane) | ✅ |  |  |  |  |  |  |  |  |  |  |  |  |
+| `barotropic_gyre` @ latlon_cgrid |  | ✅ |  |  |  |  |  |  |  |  |  |  |  |
+| `internal_tide` @ latlon_cgrid (meridionally_flat) |  |  | ✅ |  |  |  |  |  |  |  |  |  |  |
+| `silvestri_jet_forced` @ latlon_cgrid (spherical channel) | ⛔ |  |  |  |  |  |  |  |  |  |  |  |  |
+| `bickley_jet` @ latlon_cgrid (unit sphere) |  | 🟡 |  |  |  |  |  |  |  |  |  |  |  |
+| `acc_channel` @ latlon_cgrid |  |  |  | ⬜ |  |  |  |  |  |  |  |  |  |
+| `advection_gyre` @ latlon_cgrid |  |  |  |  | ⬜ |  |  |  |  |  |  |  |  |
+| `baroclinic_gyre` @ latlon_regional |  |  |  |  |  |  |  |  | ⬜ |  |  |  |  |
+| `barotropic_wave` @ latlon_cgrid |  |  |  |  |  |  |  |  | ⬜ |  |  |  |  |
+| `dino` @ latlon_cgrid |  |  |  |  |  |  |  |  |  |  |  |  | ⬜ |
+| `eady_instability` @ latlon_channel |  |  |  |  |  |  |  |  |  |  | ⬜ |  |  |
+| `eady_uniform` @ latlon_channel |  |  |  |  |  |  |  |  |  |  | ⬜ |  |  |
+| `geostrophic_adjustment` @ latlon_cgrid |  | ⬜ |  |  |  |  |  |  |  |  |  |  |  |
+| `global_barotropic_wind` @ latlon_cgrid |  |  |  |  |  |  |  |  | ⬜ |  |  |  |  |
+| `global_omip` @ latlon_cgrid |  |  |  | ⬜ |  | ⬜ |  |  |  |  |  |  |  |
+| `global_omip` @ latlon_cgrid (tripole) |  |  |  |  |  |  | ⬜ |  |  |  |  |  |  |
+| `global_omip` @ mpas (ico6) |  |  |  |  |  |  |  | ⬜ |  |  |  |  |  |
+| `global_overturning` @ latlon_cgrid |  |  |  |  |  |  |  |  |  |  |  | ⬜ |  |
+| `gridmode_decay` @ latlon_cgrid |  | ⬜ |  |  |  |  |  |  |  |  |  |  |  |
+| `held_larichev` @ latlon_channel |  |  |  |  |  |  |  |  | ⬜ |  |  |  |  |
+| `inertia_gravity_wave` @ latlon_cgrid |  |  |  |  |  |  |  |  | ⬜ |  |  |  |  |
+| `inertia_gravity_wave` @ latlon_channel |  |  |  |  |  |  |  |  |  | ⬜ |  |  |  |
+| `isomip_plus` @ latlon_regional |  |  |  |  |  |  |  |  |  |  |  | ⬜ |  |
+| `lock_exchange` @ latlon_cgrid |  |  |  |  |  |  |  |  | ⬜ |  |  |  |  |
+| `munk_gyre` @ latlon_regional |  |  |  |  |  |  |  |  | ⬜ |  |  |  |  |
+| `neverworld2_lite` @ latlon_cgrid |  |  |  |  |  |  |  |  |  |  |  | ⬜ |  |
+| `overflow` @ latlon_cgrid |  |  |  |  |  |  |  |  | ⬜ |  |  |  |  |
+| `phillips_two_layer` @ latlon_cgrid |  |  |  |  |  |  |  |  | ⬜ |  |  |  |  |
+| `rest_state` @ latlon_cgrid |  |  |  |  |  |  |  |  | ⬜ |  |  |  |  |
+| `stommel_gyre_tracer` @ latlon_cgrid |  |  |  |  |  |  |  |  | ⬜ |  |  |  |  |

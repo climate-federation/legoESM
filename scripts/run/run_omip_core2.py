@@ -2863,6 +2863,36 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
     return grid, z_coord, model, state, H_bathy
 
 
+def _write_fesom_manifest(out, args, model, lane, n_steps, dt, total_days):
+    """Write the FESOM lane's run_manifest.json through the canonical writer.
+
+    Called at RUN START, as the tripole lane does; returns the manifest path
+    (process 0) for the run-end state digest."""
+    from legoesm.driver.restart import write_run_manifest_on_root
+    from legoesm.ocean.config import FesomRunRecord
+    forcing = dict(
+        emp_freshwater=bool(args.emp_freshwater), dm2dc=bool(args.dm2dc),
+        sw_rgb_chl=bool(args.sw_rgb_chl),
+        prognostic_sea_ice=bool(args.prognostic_sea_ice),
+        sss_restore=bool(args.sss_restore),
+        sss_restore_channel=args.sss_restore_channel,
+        runoff=bool(args.runoff))
+    if lane == "fesom_b1_unforced":
+        # B1 applies none of these forcings (user decision 2026-10-26), so
+        # it records that instead of the parser defaults it never used.
+        forcing = dict.fromkeys(forcing, "not_applicable")
+    record = FesomRunRecord(
+        runtime_config=model.config, lane=lane, n_steps=int(n_steps),
+        dt_seconds=float(dt), total_days=float(total_days), **forcing,
+        nemo_monthly_init=(list(args.nemo_monthly_init)
+                           if args.nemo_monthly_init is not None else None),
+        woa_init=bool(args.woa_init),
+        vmix_config=model.vmix_config,
+        k_ver=float(model._params.k_ver), a_ver=float(model._params.a_ver))
+    return write_run_manifest_on_root(out, record, config_kind="ocean",
+                                      runner_tag="run_omip_core2")
+
+
 def run_fesom_b1_smoke(args, grid, z_coord, model, state) -> None:
     """Stage-B1 execution path: UNFORCED steps + comparator-convention
     snapshots.  The full OMIP host loop cannot run this lane until B2/B3
@@ -2871,8 +2901,6 @@ def run_fesom_b1_smoke(args, grid, z_coord, model, state) -> None:
     from pathlib import Path
 
     from scripts.run.run_fesom_core2 import write_snapshot
-
-    import json
 
     out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
     dt = float(args.dt)
@@ -2893,6 +2921,9 @@ def run_fesom_b1_smoke(args, grid, z_coord, model, state) -> None:
     print(f"[fesom-b1] UNFORCED smoke: {n_steps} steps of dt={dt}s "
           f"(zero wind stress, no heat/freshwater — plumbing stage only; "
           f"NOT a scored OMIP run)")
+    manifest_path = _write_fesom_manifest(out, args, model,
+                                          "fesom_b1_unforced",
+                                          n_steps, dt, total_days)
     for step in range(1, n_steps + 1):
         state = model.step(state, dt)
         if snap_every and step % snap_every == 0:
@@ -2903,11 +2934,7 @@ def run_fesom_b1_smoke(args, grid, z_coord, model, state) -> None:
         raise SystemExit("fesom B1: non-finite temperature after "
                          f"{n_steps} steps — refusing to report success.")
     write_snapshot(out, "final", state.inner, model.mesh)
-    (out / "run_manifest.json").write_text(json.dumps({
-        "lane": "fesom_b1_unforced", "git_sha": _source_revision(),
-        "n_steps": n_steps, "dt_s": dt, "total_days": total_days,
-        "argv": sys.argv,
-    }, indent=1))
+    _record_final_state_digest(manifest_path, state)
     print(f"[fesom-b1] done: {n_steps} steps; snapshots in {out}")
 
 
@@ -2942,8 +2969,6 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
     mid-step diurnal-SW window, and the calendar-month chlorophyll/runoff/
     SSS-target slices."""
     from pathlib import Path
-
-    import json
 
     from scripts.run.run_fesom_core2 import write_snapshot
     from legoesm import constants as _const
@@ -3129,6 +3154,9 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
           f"ice={'PROGNOSTIC' if ice_config is not None else 'off'}, "
           f"sss_restore={'on' if sss_restore_cfg is not None else 'off'}, "
           f"runoff={'on' if runoff_monthly is not None else 'off'}")
+    manifest_path = _write_fesom_manifest(out, args, model,
+                                          "fesom_b4_core2_forced",
+                                          n_steps, dt, total_days)
     for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _dm2dc_win = None
@@ -3303,19 +3331,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             ice_state, grid, state.land_mask.data)
         print(f"[fesom-forced] final ice: area={_af / 1.0e12:.3f}e6 km2 "
               f"mean_conc={_cf:.3f} max_h={_hf:.3f} m")
-    (out / "run_manifest.json").write_text(json.dumps({
-        "lane": "fesom_b4_core2_forced", "git_sha": _source_revision(),
-        "n_steps": n_steps, "dt_s": dt, "total_days": total_days,
-        "emp_freshwater": bool(args.emp_freshwater),
-        "dm2dc": bool(args.dm2dc), "sw_rgb_chl": bool(args.sw_rgb_chl),
-        "prognostic_sea_ice": bool(args.prognostic_sea_ice),
-        "sss_restore": bool(args.sss_restore),
-        "sss_restore_channel": args.sss_restore_channel,
-        "runoff": bool(args.runoff),
-        "nemo_monthly_init": bool(args.nemo_monthly_init),
-        "woa_init": bool(args.woa_init),
-        "argv": sys.argv,
-    }, indent=1))
+    _record_final_state_digest(manifest_path, state)
     print(f"[fesom-forced] done: {n_steps} steps; snapshots in {out}")
 
 

@@ -7,6 +7,21 @@ All notable changes to legoESM. Format roughly follows
 
 ### Added
 
+- **ePBL vertical mixing (`VerticalMixingConfig(scheme="epbl")`).** A JAX
+  port of MOM6's `MOM_energetic_PBL` (created by B. G. Reichl and R. Hallberg;
+  machine-learned diffusivity options by A. Sane), swappable with KPP and
+  CATKE, differentiable, MOM6 parameter names and defaults in `EPBLConfig`
+  (except von Karman: legoESM uses 0.4 where MOM6 uses 0.41).
+  New option `EPBLConfig.k_after_surface_flux` (default `False`, legoESM/KPP
+  order): when `True` the ocean single-column model applies the surface flux
+  first and then evaluates ePBL on the updated column, as MOM6 does, so the
+  legoESM single-column model can be compared one-to-one with the MOM6
+  single-column model; every other driver rejects it. A single-column test
+  case against MOM6 is documented (agreement to ~1e-3 degC with the MOM6
+  order). The OMIP driver accepts `--vertical-mixing-scheme epbl` plus
+  `--woa-t-var/--woa-s-var/--woa-month` and `--monthly-mld-sst`. See
+  `docs/ocean/specs/epbl_energetic_pbl.md`.
+
 - **Orchestrator provenance env vars.** `build_run_manifest()` now reads
   `LEGOESM_RUNNER_TAG` into a new `reproducibility.orchestrator_tag` field and
   `LEGOESM_RUNNER_PATCHES` (comma-separated list, appended to the caller's

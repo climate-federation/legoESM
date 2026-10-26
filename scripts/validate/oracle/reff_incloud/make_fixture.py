@@ -54,6 +54,11 @@ e = cols[4]
 k = lambda p: int(np.argmin(np.abs(e["p_full"] - p)))  # noqa: E731
 for p, qc, a in ((85000., 3.0e-7, 1.0e-6), (75000., 2.0e-7, 0.0), (65000., 1.0e-6, 0.01)):
     e["q_c"][k(p)], e["alst"][k(p)] = qc, a          # ast < mincld (first two), uncapped
+# dead droplet number (n <= 1 -> CloudConfig.Nc_default, in-cloud water over the
+# radiative cover floored at mincld): cover between mincld and 1e-3, and below mincld
+DEAD_P = (10331., 14299.)
+for p, a in zip(DEAD_P, (5.0e-4, 2.0e-5)):
+    e["q_c"][k(p)], e["alst"][k(p)], e["n_ccn"][k(p)] = 1.0e-7, a, 0.0
 S = lambda key: np.stack([c[key] for c in cols])  # noqa: E731
 ncol, nlev = S("T").shape
 p_half, p_full = S("p_half"), S("p_full")
@@ -90,19 +95,25 @@ with tempfile.TemporaryDirectory() as d:
     with open(fin, "wb") as f:
         np.asarray([ncol * nlev], "<i4").tofile(f)
         np.asarray([CAM6_DCS, constants.rho_water], "<f8").tofile(f)
-        for a in (S("q_c"), S("q_i"), S("n_i"), S("n_ccn"), ast, rho):
+        nc_or = np.where(S("n_ccn") > 1.0, S("n_ccn"), ccfg.Nc_default)
+        for a in (S("q_c"), S("q_i"), S("n_i"), nc_or, ast, rho):
             np.asarray(a, "<f8").ravel().tofile(f)
     run = subprocess.run([ORACLE, fin, fout], capture_output=True, text=True, check=True)
     assert "ORACLE_DONE" in run.stdout, run.stdout
     raw = np.fromfile(fout, dtype="<f8")
-assert raw.size == 6 * ncol * nlev
-lcldm, dumc, effc_mg2, effi_mg2, ni_adj, effc_wrf = raw.reshape(6, ncol, nlev)
+assert raw.size == 7 * ncol * nlev
+lcldm, dumc, effc_mg2, effi_mg2, ni_adj, effc_wrf, rel_cam = raw.reshape(7, ncol, nlev)
 
 cf = np.asarray(props.cloud_fraction)
 liq = S("q_c") > 1.0e-14
 print("deepcu>0 on liquid levels:", int(np.sum(liq & (cf > ast + 1e-12))),
       "| ast<mincld uncapped liquid:", int(np.sum(liq & (ast < 1e-4) & (dumc < 5e-3))))
 assert np.sum(liq & (cf > ast + 1e-12)) > 0 and np.sum(liq & (ast < 1e-4) & (dumc < 5e-3)) > 0
+dead = S("n_ccn") <= 1.0
+# the oracle sees ast; legoESM's dead-number branch divides by the radiative cover
+assert dead.sum() == len(DEAD_P) and np.all(cf[dead] == ast[dead]), (cf[dead], ast[dead])
+print("max |rel_cam - effc_mg2| / effc_mg2:",
+      float(np.max(np.abs(rel_cam - effc_mg2) / effc_mg2)))
 
 sha = lambda p: subprocess.run(["git", "-C", p, "rev-parse", "HEAD"],  # noqa: E731
                                capture_output=True, text=True).stdout.strip()
@@ -112,7 +123,8 @@ cfg_d = ccfg._asdict()
 assert type(ccfg)(**json.loads(json.dumps(cfg_d))) == ccfg
 meta = dict(
     oracle=f"CAM {tagof(CAM)} {sha(CAM)} micro_mg2_0.F90 L877-879,2739-2768,2772-2808,"
-           "2811-2865 + micro_mg_utils.F90 (unmodified), dcs=500e-6",
+           "2811-2865 + micro_mg_cam.F90 L2296,2534-2554 (grid REL) + micro_mg_utils.F90 "
+           "(unmodified), dcs=500e-6; dead droplet number -> ncnst = Nc_default",
     oracle_psd=f"WRF module_mp_morr_two_moment.F L3918-3949,4024-4029 (sha256 "
                f"{hashlib.sha256(open(WRF, 'rb').read()).hexdigest()}, identical to v4.6.1), "
                "DUM = legoESM moist density, RHOW = constants.rho_water",
@@ -123,5 +135,5 @@ np.savez_compressed(
     OUT, T=S("T"), p_full=p_full, p_half=p_half, q_v=S("q_v"), q_c=S("q_c"), q_i=S("q_i"),
     n_i=S("n_i"), n_ccn=S("n_ccn"), alst=S("alst"), lat=lat, conv_mass_flux_up=mf,
     conv_icwmr=icw, ast=ast, lcldm=lcldm, dumc=dumc, effc_wrf=effc_wrf, effc_mg2=effc_mg2,
-    effi_mg2=effi_mg2, ni_adj=ni_adj, meta=json.dumps(meta))
+    effi_mg2=effi_mg2, ni_adj=ni_adj, rel_cam=rel_cam, meta=json.dumps(meta))
 print("FIXTURE_DONE", OUT, os.path.getsize(OUT), "bytes")

@@ -65,7 +65,9 @@ INVARIANT_A_BASELINE: tuple[tuple[str, str, str, str], ...] = (
     ('legoesm_default', 'model.physics.convection.scheme', 'model.physics.shortwave_penetration.scheme', 'seeded'),
     ('legoesm_default', 'model.physics.shortwave_penetration.scheme', 'model.physics.vertical_mixing.scheme', 'seeded'),
     ('legoesm_default', 'model.physics.convection.enhanced_diffusion.K_bg', 'model.physics.vertical_mixing.kpp.K_bg', 'seeded'),
-    ('legoesm_default', 'model.physics.vertical_mixing.kpp.A_bg', 'model.physics.vertical_mixing.richardson.A_bg', 'seeded'),
+    # The kpp-vs-richardson A_bg split, now reported as epbl-vs-kpp: epbl shares
+    # richardson's value and sorts first. ePBL is inactive here (vmix_scheme="kpp").
+    ('legoesm_default', 'model.physics.vertical_mixing.epbl.A_bg', 'model.physics.vertical_mixing.kpp.A_bg', 'seeded'),
     ('legoesm_default', 'model.physics.vertical_mixing.kpp.K_max', 'model.physics.vertical_mixing.tidal.K_max', 'seeded'),
     ('legoesm_default', 'model.physics.convection.enhanced_diffusion.K_conv', 'model.physics.vertical_mixing.kpp.K_conv', 'seeded'),
     ('legoesm_default', 'model.constants.rho_0', 'model.physics.surface_forcing.flux_feedback.rho_0', "inert-but-ARMED: physics.surface_forcing.flux_feedback.rho_0=1025.0 and physics.vertical_mixing.tidal.rho_0=1025.0 both differ from constants.rho_0=1026.0. VERIFIED inert on this card: surface_forcing.scheme='none' and vertical_mixing.tidal.enabled=False, so neither surface is read. BECOMES A LIVE TWO-SURFACE DIVERGENCE the moment tidal mixing is enabled or a surface_forcing scheme is selected. FluxFeedbackConfig's docstring calls its separate rho_0/c_sw deliberate (the Veros surface-forcing block owns cp_0) -- treat that as a POINTER, NOT a verified fact: for a NEMO oracle card it is UNVERIFIED against NEMO whether 1025.0 is the right value there."),
@@ -90,7 +92,9 @@ INVARIANT_A_BASELINE: tuple[tuple[str, str, str, str], ...] = (
     ('mitgcm', 'model.physics.convection.scheme', 'model.physics.shortwave_penetration.scheme', 'seeded'),
     ('mitgcm', 'model.physics.shortwave_penetration.scheme', 'model.physics.vertical_mixing.scheme', 'seeded'),
     ('mitgcm', 'model.physics.convection.enhanced_diffusion.K_bg', 'model.physics.vertical_mixing.kpp.K_bg', 'seeded'),
-    ('mitgcm', 'model.physics.vertical_mixing.kpp.A_bg', 'model.physics.vertical_mixing.richardson.A_bg', 'seeded'),
+    # The kpp-vs-richardson A_bg split, now reported as epbl-vs-kpp: epbl shares
+    # richardson's value and sorts first. ePBL is inactive here (vmix_scheme="kpp").
+    ('mitgcm', 'model.physics.vertical_mixing.epbl.A_bg', 'model.physics.vertical_mixing.kpp.A_bg', 'seeded'),
     ('mitgcm', 'model.physics.vertical_mixing.kpp.K_max', 'model.physics.vertical_mixing.tidal.K_max', 'seeded'),
     ('mitgcm', 'model.physics.convection.enhanced_diffusion.K_conv', 'model.physics.vertical_mixing.kpp.K_conv', 'seeded'),
     ('mitgcm', 'model.constants.rho_0', 'model.physics.surface_forcing.flux_feedback.rho_0', "inert-but-ARMED: physics.surface_forcing.flux_feedback.rho_0=1025.0 and physics.vertical_mixing.tidal.rho_0=1025.0 both differ from constants.rho_0=1026.0. VERIFIED inert on this card: surface_forcing.scheme='none' and vertical_mixing.tidal.enabled=False, so neither surface is read. BECOMES A LIVE TWO-SURFACE DIVERGENCE the moment tidal mixing is enabled or a surface_forcing scheme is selected. FluxFeedbackConfig's docstring calls its separate rho_0/c_sw deliberate (the Veros surface-forcing block owns cp_0) -- treat that as a POINTER, NOT a verified fact: for a NEMO oracle card it is UNVERIFIED against NEMO whether 1025.0 is the right value there."),
