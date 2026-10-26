@@ -1,0 +1,19 @@
+--- icestp.F90
++++ icestp.F90
+@@ -78,0 +79,3 @@
++! O8O16_OBSERVER_BEGIN
++   USE o8_o16_master_writer, ONLY : o8o16_set_context, o8o16_update
++! O8O16_OBSERVER_END
+@@ -177,0 +181,4 @@
++! O8O16_OBSERVER_BEGIN
++                                        CALL o8o16_set_context( kt, Kmm, nit000, narea-1, jpni, jpnj, &
++                                           &                    rDt_ice, r1_Dt_ice )
++! O8O16_OBSERVER_END
+@@ -256,0 +265,3 @@
++! O8O16_OBSERVER_BEGIN
++                                        CALL o8o16_update(15)
++! O8O16_OBSERVER_END
+@@ -257,0 +269,3 @@
++! O8O16_OBSERVER_BEGIN
++                                        CALL o8o16_update(16)
++! O8O16_OBSERVER_END
