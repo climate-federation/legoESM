@@ -446,7 +446,7 @@ def test_d5_zdf_gradients_are_finite_and_reverse_equals_forward_with_literal_for
 
     def rad_loss(hi, hs, qtr):
         ab_s, ab_i, tr_bot = _radiation(
-            hi, hs, qtr, tsu_rad, _nemo_zdf_layer_reciprocals=True
+            hi, hs, qtr, tsu_rad, rn_kappa_i=1.0, rn_kappa_s=10.0, _nemo_zdf_layer_reciprocals=True  # C1D card
         )
         return jnp.sum(0.3 * ab_s) + jnp.sum(0.7 * ab_i) + jnp.sum(1.1 * tr_bot)
 
