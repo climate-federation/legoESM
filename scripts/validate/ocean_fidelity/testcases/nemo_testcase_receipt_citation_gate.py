@@ -1810,6 +1810,22 @@ FILES = {
         NEMO / "tests/VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/domhgr.f90"),
     "VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/vortex_r23_ldf_terms.f90": (
         NEMO / "tests/VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/vortex_r23_ldf_terms.f90"),
+    # Round 338: standalone-S3 sbc_ice_if sources (record build).
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcice_if.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/sbcice_if.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/stprk3.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/lib_fortran.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/lib_fortran.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/fldread.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/fldread.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iceupdate.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo"
+        "/iceupdate.f90"),
     # Round 334 (ratchet cleanup): the NEMO statements the named constants cite.
     "trabbc.F90": _OCE / "TRA/trabbc.F90",
     "phycst.F90": _OCE / "DOM/phycst.F90",
@@ -9000,6 +9016,40 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/EXP00/file_def_nemo-ice.xml:13-14': [
         '<file_group id="ice_5d"',
         '<file id="file101"', 2],
+    # ORCA2 round 338: standalone-S3 literal sbc_ice_if transcription.
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcice_if.f90:158-159': [
+        'CALL eos_fzp( sss_m(:,:), fr_i(:,:) )',
+        'fr_i(:,:) = fr_i(:,:) * tmask(:,:,1)', 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcice_if.f90:164-167': [
+        ('DO jj = ntsj-( nn_hls), ntej+(  nn_hls )', 1),
+        'END DO   ;   END DO', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcice_if.f90:182-185': [
+        'zqri = ztrp * ( ts(ji,jj,1,jp_tem,Kbb) - ( zt_fzp - 1.) )',
+        '&                 +      fr_i(ji,jj)   * zqrj ) ) * smask0(ji,jj)', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcice_if.f90:192-195': [
+        'zqi = -3. + SIGN( 1._wp, ff_f(ji,jj) )',
+        '&       + zqrp', 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/eosbn2.f90:1867-1868': [
+        ('ptf(ji,jj) = ( - 0.0575_wp + 1.710523e-3_wp * SQRT( psal(ji,jj) )', 1),
+        '- 2.154996e-4_wp *       psal(ji,jj)   ) * psal(ji,jj)', 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/lib_fortran.f90:1815-1816': [
+        'IF ( pb >= 0._wp ) THEN   ;   SIGN_SCALAR =  ABS(pa)',
+        'ELSE                      ;   SIGN_SCALAR = -ABS(pa)', 2],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:155':
+        'CALL sbc        ( kstp, Nbb, Nbb )',
+    'cfgs/SHARED/namelist_ref:418':
+        "sn_ice      ='ice_cover_clim.nc'",
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/fldread.f90:885':
+        "IF    ( NINT(sdjf%freqh) == -12 ) THEN            ;   ireclast = 1",
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/fldread.f90:244-246': [
+        'ztinta =  REAL( isecsbc - sd(jf)%nrec(2,ibb), wp )',
+        'sd(jf)%fnow(:,:,:) = ztintb * sd(jf)%fdta(:,:,:,ibb)', 3],
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90:501':
+        'CALL ice_stp  ( kt, Kbb, Kmm, nsbc )',
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/iceupdate.f90:212':
+        'fr_i(ji,jj) = at_i(ji,jj)',
+    'ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90:500':
+        'CALL sbc_ice_if   ( kt, Kbb, Kmm )',
 }
 
 
