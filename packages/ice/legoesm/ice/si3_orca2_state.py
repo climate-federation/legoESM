@@ -766,13 +766,13 @@ def si3_hfn_category_bounds(
 
 
 def fortran_sum_categories(arr: Field, axis: int = -1) -> Field:
-    """Sequential category summation matching Fortran `SUM(..., dim=...)` rounding."""
+    """Sequential category summation matching gfortran `SUM(..., dim=...)`: +0 seed, then left to right."""
     sr = nemo_source_round
     n = arr.shape[axis]
     if n == 0:
         return jnp.sum(arr, axis=axis)
-    acc = jnp.take(arr, 0, axis=axis)
-    for idx in range(1, n):
+    acc = sr(jnp.zeros_like(jnp.take(arr, 0, axis=axis)))  # barrier: XLA folds an unmaterialised 0 + x to x
+    for idx in range(n):
         acc = sr(acc + jnp.take(arr, idx, axis=axis))
     return acc
 
