@@ -10,7 +10,7 @@ Covers all preregistered requirements (`docs/ice/fidelity/si3_r8_o4_preregister.
     moment checks across all 11 families, missing-input refusal gates, and
     failing statement-reversal/reordering/sign plants (`Plants O4-A1..A4`).
 (b) Lane-3 `ICE_ADV1D` / `ICE_ADV2D` invariance and real parent-vs-current
-    (`042c7bd74c2944dab8c39318687ab0cef54f9d2b`) `0`-ULP bit-identity across
+    (`d2402fd17975be7905d9ecc990920a2e334004b6`) bitwise identity across
     `advect_si3_prather_1d`, `advect_si3_prather_2d`, `step_ice_adv1d_card`,
     `step_ice_adv2d_card`, `step_sea_ice` (`slab`, `dynamic-v2`, `si3_bl99`),
     and `si3_o1_step`, plus failing `1`-ULP code-path plants (`Plants O4-B1, O4-B2`).
@@ -76,7 +76,7 @@ from legoesm import constants as canonical_constants
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TESTCASES_DIR = REPO_ROOT / "scripts/validate/ocean_fidelity/testcases"
-PARENT_COMMIT = "042c7bd74c2944dab8c39318687ab0cef54f9d2b"
+PARENT_COMMIT = "d2402fd17975be7905d9ecc990920a2e334004b6"
 
 O1_SPEC = importlib.util.spec_from_file_location(
     "nemo_si3_o1_orca2_sas_gate",
@@ -1737,7 +1737,7 @@ def test_o4_a4_orca2_seam_and_north_fold_subcycle_lbc_lnk_pins_and_plants() -> N
 
 # ==============================================================================
 # Test (b): Lane-3 `ICE_ADV1D` / `ICE_ADV2D` invariance and real parent-vs-current
-# (`042c7bd74c2944dab8c39318687ab0cef54f9d2b`) 0-ULP bit-identity control
+# (`d2402fd17975be7905d9ecc990920a2e334004b6`) bitwise identity control
 # (`Plants O4-B1, O4-B2`).
 # ==============================================================================
 
@@ -1775,7 +1775,7 @@ def _run_lane3_dump(tree: Path, out: Path, *extra: str) -> dict[str, np.ndarray]
 
 
 def test_o4_b_lane3_parent_vs_current_zero_ulp(tmp_path: Path) -> None:
-    """Lane-3 cards, the shared correction ledger and `step_sea_ice` match parent `042c7bd74c29` at 0 ULP; a real arithmetic-order plant fails."""
+    """Lane-3 cards, the shared correction ledger and `step_sea_ice` match parent `d2402fd17975` bit for bit; a real arithmetic-order plant fails."""
     parent_tree = tmp_path / "parent"
     parent_tree.mkdir()
     archive = subprocess.run(

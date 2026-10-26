@@ -10144,8 +10144,6 @@ _reanchor('tests/ice/unit/test_si3_o5_strength_aevp.py:400', 'tests/ice/unit/tes
 # composed rebase retains every rung and therefore moves all later O4/O2/O3
 # anchors.  Re-anchor the historical keys only after the landed-rung chain
 # above has finished so the mandatory full-map audit sees the composed tree.
-_reanchor('packages/ice/legoesm/ice/sea_ice.py:286-298,500-517', 'packages/ice/legoesm/ice/sea_ice.py:289-301,503-520')
-_reanchor('packages/ice/legoesm/ice/sea_ice.py:297,500-517', 'packages/ice/legoesm/ice/sea_ice.py:300,503-520')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:55-66', 'packages/ice/legoesm/ice/si3_orca2_state.py:56-67')
 _reanchor('packages/ice/legoesm/ice/si3_orca2_state.py:2058-2068', 'packages/ice/legoesm/ice/si3_orca2_state.py:2078-2088')
 _reanchor('packages/ice/legoesm/ice/__init__.py:227-251', 'packages/ice/legoesm/ice/__init__.py:264-288', anchors=['from legoesm.ice.config import build_si3_orca2_o2_config  # noqa: E402', (')', 24), 25])

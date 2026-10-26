@@ -277,13 +277,10 @@ def step_sea_ice(
         if liquidus.shape != jnp.shape(ocean_sst):
             raise ValueError("ocean_freezing_temperature_K must have the ocean SST shape")
         config = config._replace(T_freeze_ocean=liquidus)
-    if config.thermo_scheme not in (
-        "zero_layer", "si3_bl99", "si3_orca2_o1", "si3_orca2_o2"
-    ):
+    if config.thermo_scheme not in ("zero_layer", "si3_bl99", "si3_orca2_o1", "si3_orca2_o2"):
         raise ValueError(
             f"Unknown sea-ice thermo_scheme {config.thermo_scheme!r}; expected "
-            "'zero_layer', 'si3_bl99', 'si3_orca2_o1', or 'si3_orca2_o2' "
-            "(icethd.F90:148-183, icestp.F90:148-224)."
+            "'zero_layer', 'si3_bl99', 'si3_orca2_o1', or 'si3_orca2_o2' (icethd.F90:148-183, icestp.F90:148-224)."
         )
     validate_si3_thermo_config(config)
     if config.thermo_scheme == "si3_bl99":

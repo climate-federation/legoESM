@@ -1,10 +1,10 @@
 # SI3 Ladder Round 8 (`si3_r8`) Receipt — Rung O4 Model Preparation (ORCA2 Prather Advection Across the Cyclic Seam and North Fold, No Acquisition)
 
 * **Round:** `si3_r8`, resume 4 (Claude taking over from the agy author), model preparation only: no NEMO build or run, no acquisition.
-* **Branch / parent:** `fidelity/nemo-testcases-si3-ladder`; lane-3 bit-identity is controlled against `042c7bd74c2944dab8c39318687ab0cef54f9d2b` (O1 + D5 landed, before any round-8 model edit).
+* **Branch / parent:** `fidelity/nemo-testcases-si3-ladder`; lane-3 bit-identity is controlled against the round's real parent, the lane tip `d2402fd17975be7905d9ecc990920a2e334004b6` (O11 landed, before any round-8 commit; section 8). Earlier resumes controlled against `042c7bd74c2944dab8c39318687ab0cef54f9d2b`.
 * **Rung:** O4, design row `docs/ice/fidelity/si3_ladder_design.md:224` ("ORCA2_SAS_ICE with Prather only; dynamics/thermo otherwise off"). The operator brief called this O3; O3 is the initial HFN thickness fit (`docs/ice/fidelity/si3_ladder_design.md:223`). Every function, config builder, test, receipt, preregistration and citation-gate key of this round is renamed O3 -> O4.
 * **Preregistration:** `docs/ice/fidelity/si3_r8_o4_preregister.md` (section 4 lists the amendments made in this resume).
-* **Decisions:** 153, 158, 159 (`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_si3/standing_note.md`).
+* **Decisions:** 153, 158, 159, 170 (O4 acquisition overlay) (`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_si3/standing_note.md`).
 
 ## 1. Outcome
 
@@ -30,7 +30,7 @@ Lane 3 is bit-identical to the parent. A clean `git archive` of the parent and t
 
 ### 2.4 No stub selector (CONFIRMED)
 
-The `si3_orca2_o3` branch of `step_sea_ice` whose only body raised `NotImplementedError` is removed, and the unrelated reformat of the ridging guard is reverted: `packages/ice/legoesm/ice/sea_ice.py` is byte-identical to the parent. The O4 path is reached through its own entry point (`packages/ice/legoesm/ice/si3_orca2_state.py:3807-3960`); `step_sea_ice` refuses `si3_orca2_o4` as an unknown scheme until rung O16 supplies the ocean-flux response.
+The `si3_orca2_o3` branch of `step_sea_ice` whose only body raised `NotImplementedError` is removed, and the unrelated reformat of the ridging guard is reverted: `packages/ice/legoesm/ice/sea_ice.py` is byte-identical to the parent. (Resume 5's rebases had reintroduced a reformat of the O2 refusal message; resume 6 removed it, section 8.) The O4 path is reached through its own entry point (`packages/ice/legoesm/ice/si3_orca2_state.py:3807-3960`); `step_sea_ice` refuses `si3_orca2_o4` as an unknown scheme until rung O16 supplies the ocean-flux response.
 
 ### 2.5 Fold test (CONFIRMED)
 
@@ -64,7 +64,7 @@ The lane-3 suite run on the uncommitted tree had failed 19 tests only because th
 
 ## 4. Record contract for the O4 acquisition round, and evidence
 
-The acquisition round must record, for two consecutive ice steps (`kt = 1`, x then y; `kt = 2`, y then x) of `ORCA2_SAS_ICE` with dynamics reduced to Prather advection and thermodynamics off: the horizontal metrics and the three surface masks; `u_ice`, `v_ice`, `sss_m`, `sst_m` at advection entry; BOTH the current and the delayed `zcfl` and the resulting `icycle` at every step, plus `DELAY__r8_cflice` in every restart; the full state and all 55 moment arrays before advection, after advection, after `ice_var_zapsmall` plus the end-of-dynamics halo exchange, and at the end of the step; the six advection diagnostics and five transport diagnostics. Which dynamics overlay produces "Prather only" is a deck choice not yet made (section 5).
+The acquisition round must record, for two consecutive ice steps (`kt = 1`, x then y; `kt = 2`, y then x) of `ORCA2_SAS_ICE` with dynamics reduced to Prather advection and thermodynamics off: the horizontal metrics and the three surface masks; `u_ice`, `v_ice`, `sss_m`, `sst_m` at advection entry; BOTH the current and the delayed `zcfl` and the resulting `icycle` at every step, plus `DELAY__r8_cflice` in every restart; the full state and all 55 moment arrays before advection, after advection, after `ice_var_zapsmall` plus the end-of-dynamics halo exchange, and at the end of the step; the six advection diagnostics and five transport diagnostics. DECISION 170 chose the overlay: `ln_dynADV2D=T` with `namelist_ice_ref` `rn_uice=rn_vice=0.5` m/s. With constant velocities `zcfl` is the same on every call, so this record cannot exercise the one-call CFL lag of 2.1 (section 8 names the record that will).
 
 Evidence directory `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round8/resume4_claude` holds the logs above (`final2_o4.log`, `final_lane3.log`, `final_default.log`, `final_ratchet.log`, `d_ad.log`, `prof_d.log`), the six gate JSONs and the codex prompt and log. The round-8 manifest `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round8/SHA256SUMS` was rebuilt over every file in the round-8 directory; its own SHA-256 is `2071c56f2fbaf6b034bbf0fecb6fae4f7219bd182f9effe74cc1ddf6dcd7d55a`. The earlier receipt's `66a656...` value was wrong; the manifest it described hashed to `89238530c24655ec25a6c2613905dc0e05f213dd3f3135c07bd498543cb00c8d`, as codex found.
 
@@ -74,7 +74,7 @@ Evidence directory `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/r
 * `ASKED` (design row `docs/ice/fidelity/si3_ladder_design.md:224`): the advection-only mode, with dynamics and thermodynamics otherwise off, is what O4 admits.
 * `UNASKED` (offered for revert): the new config field `ln_mppdelay` defaults to true, the NEMO reference value and the deck's resolved value (`ORCA2_SAS_ICE_O1_REF/EXP00/namelist_ref:1515` and the record line quoted in 2.1).
 * `UNASKED` (offered for revert): `rn_uice`/`rn_vice` both `None` selects replay of the state's velocities as exact input; both given selects NEMO's prescribed-velocity mode. The caller must state which.
-* `UNASKED` (offered for revert): the lane-3 control's parent is `042c7bd74c2944dab8c39318687ab0cef54f9d2b` (the commit the preregistration names), and its dump covers several card steps rather than a full trajectory.
+* `ASKED` (operator brief, resume 6): the lane-3 control's parent is the real parent `d2402fd17975be7905d9ecc990920a2e334004b6`. `UNASKED` (offered for revert): its dump covers several card steps rather than a full trajectory.
 * `UNASKED` (offered for revert): the dump script lives in `scripts/validate/ocean_fidelity/testcases/` and is run by the O4 test, not by a separate test file.
 * `UNASKED` (offered for revert): the AD check's grid (24 x 20), roster (1 category, 1+1 layers) and XLA backend optimisation level (off, subprocess only); the in-process primal check's grid (24 x 20, full roster).
 * Review: codex (independent, read-only, on the uncommitted diff before `10689480ac`): no defect in the seven areas; HOLD on the then-unmigrated citation gate and stale receipt, both fixed. The later test-d rework (`5571978732`) is UNREVIEWED. GLM: NOT RUN (no GLM tool in this session), so the dual-review rule is not met.
@@ -234,4 +234,4 @@ The per-receipt citation gate audited each receipt plus the complete
 
 The composed map itself reported `MAP_ENTRIES 2934`, `AUDIT_FAILURES 0`, and
 `DUPLICATE_LITERALS []`. No O4 acquisition command was started during resume
-5; the acquisition overlay remains pending with the user.
+5. The acquisition overlay has since been decided (DECISION 170).
