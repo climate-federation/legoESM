@@ -58,12 +58,15 @@ def read_record(path: Path, *, plant: str | None = None) -> dict:
     checksum, = struct.unpack_from("=q", raw, 16 + 4 * len(HEADER_NAMES))
     values = np.frombuffer(raw, dtype="=f8", count=nwords, offset=need).reshape(
         (header["jpi"], header["jpj"]), order="F").copy()
+    positive = np.argwhere(values > 0.0)
+    plant_cell = tuple(positive[0]) if positive.size else (
+        header["ntsi"] - 1, header["ntsj"] - 1)
     if plant == "checksum":
-        values[0, 0] = np.nextafter(values[0, 0], np.inf)
+        values[plant_cell] = np.nextafter(values[plant_cell], np.inf)
     if plant == "rank":
         header["rank"] = 1 - header["rank"]
     if plant == "nonfinite":
-        values[0, 0] = np.nan
+        values[plant_cell] = np.nan
     require(xor_checksum(values) == checksum % (1 << 64), "payload checksum mismatch")
     require(bool(np.all(np.isfinite(values))), "record contains non-finite fr_i")
     require(bool(np.all((values >= 0.0) & (values <= 1.0))), "fr_i is outside [0,1]")
@@ -109,7 +112,10 @@ def build_mean(root: Path, *, plant: str | None = None) -> tuple[np.ndarray, dic
         total = total + frame
     mean = total / np.float64(N_SAMPLES)
     if plant == "one-ulp":
-        mean[0, 0] = np.nextafter(mean[0, 0], np.inf)
+        positive = np.argwhere(mean > 0.0)
+        require(bool(positive.size), "one-ULP plant found no ice-covered wet cell")
+        cell = tuple(positive[0])
+        mean[cell] = np.nextafter(mean[cell], np.inf)
     return mean, record_hashes
 
 
