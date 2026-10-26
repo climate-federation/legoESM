@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Derive O8--O16 array read-sets from NEMO's preprocessed Fortran.
+"""Derive complete O8--O16 read-sets from NEMO's preprocessed Fortran.
 
 This is deliberately a small, fail-closed Fortran data-flow scanner rather than
 a hand-maintained inventory.  It follows locally resolvable physics callees,
-removes declared locals/dummies, and reports external arrays read before their
-first whole-array definition.  The acquisition schema must cover every result
-at the corresponding entry boundary.
+removes declared locals/dummies, and reports external state read before its
+first definition.  Arrays must be in a binary boundary; scalars must be in the
+binary header, structural metadata, resolved namelists, or pinned source.
 """
 
 from __future__ import annotations
@@ -59,6 +59,21 @@ NON_REPLAY_ARRAYS = {
     "diag_fs", "diag_ft", "diag_fv", "diag_s", "diag_t", "diag_v",
     "rdiag_fs", "rdiag_ft", "rdiag_fv", "rdiag_s", "rdiag_t", "rdiag_v",
     "nptidx", "tice_cvgerr", "tice_cvgstp",
+}
+
+META_SCALARS = {
+    "jpi", "jpj", "jpl", "nlay_i", "nlay_s", "ntsi", "ntei", "ntsj", "ntej",
+    "nis0", "nie0", "njs0", "nje0", "npti", "nit000", "kmm", "kt", "nn_hls",
+}
+
+# Non-numerical I/O/diagnostic controls and variables derived from values that
+# are already captured in the header/deck.  None is a replay input array.
+SOURCE_OR_CONTROL_SCALARS = {
+    "e", "iiceprt", "jiceprt", "ldstop", "l_prtctl", "ll_diag_pnd", "nice_zdf", "nitrst", "ln_icectl",
+    "ln_icediachk", "ln_timing", "lrst_ice", "lwp", "lwm", "not", "numout",
+    "sn_cfctl", "r1_dt_ice", "r1_rcpi", "r1_rho0", "r1_rhoi", "r1_rhos",
+    "grav", "rcp", "rcpi", "rho0", "rhoi", "rhos", "rhow", "rlfus", "rpi",
+    "rt0", "rtmlt",
 }
 
 KEYWORDS = set(
@@ -191,8 +206,11 @@ def _assignment(statement: str) -> tuple[str, str] | None:
     return statement[: match.start()], statement[match.end() :]
 
 
-def _routine_reads(routine: Routine, routine_names: set[str]) -> tuple[set[str], set[str]]:
-    reads: set[str] = set()
+def _routine_reads(
+    routine: Routine, routine_names: set[str]
+) -> tuple[set[str], set[str], set[str]]:
+    array_reads: set[str] = set()
+    scalar_reads: set[str] = set()
     calls: set[str] = set()
     written_whole: set[str] = set()
     for statement in routine.statements[1:-1]:
@@ -212,8 +230,15 @@ def _routine_reads(routine: Routine, routine_names: set[str]) -> tuple[set[str],
                 written_whole.add(lhs_base)
         candidates = _array_identifiers(read_text)
         candidates -= routine.locals | KEYWORDS | INTRINSICS | routine_names | calls
-        reads.update(candidates - written_whole)
-    return reads, calls
+        candidates -= written_whole
+        array_reads.update(candidates)
+        identifiers = _identifiers(read_text)
+        identifiers -= routine.locals | KEYWORDS | INTRINSICS | routine_names | calls
+        identifiers -= candidates | written_whole | {"wp", "true", "false"}
+        scalar_reads.update(
+            value for value in identifiers if not re.fullmatch(r"[ed]\d+", value)
+        )
+    return array_reads, scalar_reads, calls
 
 
 def _normalise(name: str) -> str:
@@ -231,15 +256,38 @@ def _load_gate():
     return module
 
 
+def _source_coverage(ppsrc: Path) -> tuple[set[str], set[str]]:
+    """Mechanically collect namelist names and source-declared constants."""
+    namelist: set[str] = set()
+    parameters: set[str] = set()
+    for path in ppsrc.glob("*.f90"):
+        for statement in _logical_statements(path.read_text()):
+            low = statement.lower()
+            match = re.match(r"namelist\s*/[^/]+/\s*(.*)", low)
+            if match:
+                namelist.update(re.findall(r"\b[a-z]\w*\b", match.group(1)))
+            if ("parameter" in low or "=" in low) and (
+                "::" in low or re.match(r"^(integer|real|logical)", low)
+            ):
+                parameters.update(_declared_names(low))
+    return namelist, parameters
+
+
 def derive_and_gate(ppsrc: Path = DEFAULT_PPSRC, plant: str | None = None) -> dict[str, object]:
     routines = _index_routines(ppsrc)
     routine_names = set(routines)
     gate = _load_gate()
+    namelist_names, source_parameters = _source_coverage(ppsrc)
+    recorded_scalars = {name.lower() for name in gate.SCALAR_NAMES}
+    known_fields = {
+        _normalise(field.name) for kind in gate.KINDS.values() for field in kind.fields
+    }
     rows: dict[str, object] = {}
     for rung, roots in ROOTS.items():
         pending = list(roots)
         visited: set[str] = set()
         reads: set[str] = set()
+        scalar_reads: set[str] = set()
         sources: set[str] = set()
         while pending:
             name = pending.pop()
@@ -250,12 +298,17 @@ def derive_and_gate(ppsrc: Path = DEFAULT_PPSRC, plant: str | None = None) -> di
             visited.add(name)
             routine = routines[name]
             sources.add(f"{routine.source}:{name}")
-            direct, calls = _routine_reads(routine, routine_names)
+            direct, direct_scalars, calls = _routine_reads(routine, routine_names)
             reads.update(_normalise(value) for value in direct)
+            scalar_reads.update(_normalise(value) for value in direct_scalars)
             pending.extend(sorted(call for call in calls if call in routines))
         reads = {
             name for name in reads
             if name not in NON_REPLAY_ARRAYS and not name.startswith(("diag_", "rdiag_"))
+        }
+        scalar_reads = {
+            name for name in scalar_reads - reads - known_fields
+            if not name.startswith(("diag_", "rdiag_"))
         }
         covered = {
             _normalise(field.name)
@@ -269,9 +322,27 @@ def derive_and_gate(ppsrc: Path = DEFAULT_PPSRC, plant: str | None = None) -> di
         missing = sorted(reads - covered)
         if missing:
             raise ValueError(f"STATUS PLANT-FIRED: {rung} source read-set is not recorded: {missing}")
+        scalar_coverage: dict[str, str] = {}
+        for name in sorted(scalar_reads):
+            if name in recorded_scalars:
+                scalar_coverage[name] = "record_header"
+            elif name in META_SCALARS:
+                scalar_coverage[name] = "record_metadata"
+            elif name in namelist_names:
+                scalar_coverage[name] = "resolved_namelist_in_manifest"
+            elif name in source_parameters or name in SOURCE_OR_CONTROL_SCALARS:
+                scalar_coverage[name] = "pinned_binary_or_source_in_manifest"
+        if plant == "drop-rn_hinew" and rung == "O8":
+            scalar_coverage.pop("rn_hinew", None)
+        missing_scalars = sorted(scalar_reads - set(scalar_coverage))
+        if missing_scalars:
+            raise ValueError(
+                f"STATUS PLANT-FIRED: {rung} scalar read-set is not covered: {missing_scalars}"
+            )
         rows[rung] = {
             "roots": list(roots), "callees": sorted(visited - set(roots)),
             "sources": sorted(sources), "array_reads": sorted(reads),
+            "scalar_reads": sorted(scalar_reads), "scalar_coverage": scalar_coverage,
             "entry_kinds": list(ENTRY_KINDS[rung]),
             "boundary_kinds": list(gate.PROJECTIONS[rung]), "coverage": sorted(covered),
         }
@@ -283,7 +354,7 @@ def derive_and_gate(ppsrc: Path = DEFAULT_PPSRC, plant: str | None = None) -> di
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--ppsrc", type=Path, default=DEFAULT_PPSRC)
-    parser.add_argument("--plant", choices=("drop-sst_m", "drop-qlead"))
+    parser.add_argument("--plant", choices=("drop-sst_m", "drop-qlead", "drop-rn_hinew"))
     args = parser.parse_args(argv)
     try:
         print(json.dumps(derive_and_gate(args.ppsrc, args.plant), indent=2, sort_keys=True))

@@ -389,6 +389,7 @@ run_preflight() {
   "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" > "$scratch/readsets.json"
   expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-sst_m
   expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-qlead
+  expect_refusal "$PY" "$READSET" --ppsrc "$BASE_BLD/ppsrc/nemo" --plant drop-rn_hinew
   printf 'PASS_SOURCE_DERIVED_READ_SETS\n'
   for rung in O8 O9 O10 O11 O12 O13 O14 O15 O16; do
     "$PY" "$GATE" --projection-self-test "$rung" >/dev/null
@@ -426,7 +427,7 @@ run_preflight() {
   else
     printf 'PASS_EXISTING_CFG_DIGESTS_UNCHANGED: delegated to outer preflight\n'
   fi
-  if [[ -n "${PREFLIGHT_JSON:-}" ]]; then printf '{"status":"PREFLIGHT_OK","nemo_run":false,"plants":44}\n' > "$PREFLIGHT_JSON"; fi
+  if [[ -n "${PREFLIGHT_JSON:-}" ]]; then printf '{"status":"PREFLIGHT_OK","nemo_run":false,"plants":45}\n' > "$PREFLIGHT_JSON"; fi
   printf 'PREFLIGHT_OK: no real NEMO integration was run; worst-case master %s bytes (131.06 GiB)\n' "$MASTER_BYTES"
   rm -rf -- "$scratch"; ACTIVE_SCRATCH=""
 }

@@ -136,8 +136,10 @@ def test_source_derived_readsets_cover_every_rung_and_plants_fire() -> None:
     report = readset.derive_and_gate(readset.DEFAULT_PPSRC)
     assert set(report["rungs"]) == set(gate.PROJECTIONS)
     assert "sst_m" in report["rungs"]["O15"]["array_reads"]
+    assert "rn_hinew" in report["rungs"]["O8"]["scalar_reads"]
+    assert all(row["scalar_coverage"] for row in report["rungs"].values())
     assert "rCdU_ice" in {field.name for field in gate.KINDS[20].fields}
-    for plant in ("drop-sst_m", "drop-qlead"):
+    for plant in ("drop-sst_m", "drop-qlead", "drop-rn_hinew"):
         with pytest.raises(ValueError, match="STATUS PLANT-FIRED"):
             readset.derive_and_gate(readset.DEFAULT_PPSRC, plant)
 
@@ -209,7 +211,7 @@ def test_preflight_compiles_and_runs_real_patched_source_without_nemo(tmp_path: 
         [str(ACQ / "run.sh"), "--preflight-only", str(report)], cwd=REPO, env=env,
         text=True, capture_output=True, check=True, timeout=1200,
     )
-    assert json.loads(report.read_text()) == {"status": "PREFLIGHT_OK", "nemo_run": False, "plants": 44}
+    assert json.loads(report.read_text()) == {"status": "PREFLIGHT_OK", "nemo_run": False, "plants": 45}
     assert "PASS_SOURCE_DERIVED_READ_SETS" in proc.stdout
     assert "PASS_REAL_PPSRC_PLACEMENT" in proc.stdout
     assert "PASS_REAL_PATCHED_BOUNDS_FIXTURE" in proc.stdout
