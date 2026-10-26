@@ -58,9 +58,11 @@ Main groups:
 Requirements and guards (`validate_epbl_config`, all raise on violation):
 - **implicit only** — the host must run `implicit_vertical_mixing=True`; ePBL
   returns `K_v`/`A_v` for the backward-Euler solve and has no explicit form;
-- `dt_s > 0` and equal to the model timestep (ePBL is an energy-per-timestep
-  closure). The OMIP driver sets it from `--dt` and refuses to run ePBL without
-  an explicit `--dt`;
+- `dt_s > 0` (`validate_epbl_config`). It must also equal the model timestep
+  (ePBL is an energy-per-timestep closure), which the drivers enforce, not
+  `validate_epbl_config`: the OMIP driver sets it from `--dt`, refuses to run
+  ePBL without an explicit `--dt`, and raises if it differs from the run
+  timestep; the ocean single-column model overwrites it with its own `dt`;
 - unknown `mstar_scheme` / `wt_scheme`, and `eqdisc_v0` together with
   `eqdisc_v0h`, raise.
 
