@@ -316,3 +316,43 @@ SHA-256 is
 `208fb3acdcdd60c220457676d81bb9c0ea34a5bb5c82d189f82a95f8b90fd133`.
 The reports are `round336/resume5_citation_gate.json`,
 `round336/resume5_default_gate.log`, and `round336/resume5_ratchet.log`.
+
+## Resume 6: generated-driver real-flow closure
+
+Argon's re-check confirmed the resume-5 syntax repair and held checklist item
+15 because the preflight still intercepted each generated script near its top.
+The former helper independently mimicked retention and admission, then exited;
+therefore a syntactically valid truncation of either real driver body remained
+green.
+
+The interception is removed. The flow test now invokes each generated driver
+itself. Its isolated writable build and evidence roots replace `makenemo` and
+`mpirun` only at their executing call sites, and the resulting `nemo.exe` is
+the scenario stub. The inherited mode dispatch, source and selector checks,
+syntax and same-program proofs, build/run creation, `E R R O R` scan, nonzero
+exit handling, cleanup trap, refused-run movement, manifest identity checks,
+and canonical retained-run movement all execute in the generated scripts.
+The direct inner-driver copy retains the exact combined writer and exported
+placement helper that its production parent supplies while the child runs.
+
+For both the generated parent and generated inner driver, the preflight now
+passes five cases: successful `--run`, quoted `E R R O R` refusal, retention
+after a nonzero NEMO exit, retained `--admit-existing`, and in-place
+`--admit-existing`. The stub admission still verifies a local ancestor
+producer and the copied NEMO binary's SHA-256. Each layer also has a
+syntactically valid body-truncation plant: the parent is cut before its
+post-child admission tail and the inner before its admission/build/run body;
+both are rejected by the generated-body contract.
+
+The refreshed read-only preflight reaches
+`ORCA2_ROUND336_TRAZDF_PREFLIGHT_READY`. Both generated layers report their
+five-case flow pass and body-truncation plant. All inherited 78-test, 6-test,
+and 5-test batteries, 140-file deterministic passivity, eleven Fortran syntax
+proofs, 1,367- and 1,966-instruction inherited censuses, the 60/1,234/121
+round-336 function censuses, the two-rank bounds fixture, and the 407/419
+same-program proof remain green. The log is `round336/resume6_preflight.log`,
+SHA-256 `3a01f0800dc2360c75f49a2c567c6dd756c2e91a92ee1de07bfc86df3d2af832`.
+
+The disposition remains **ACQUISITION_NEEDED** at the operator command above.
+No NEMO executable was run, no model or configuration changed, and no unasked
+choice was made. Codex review: operator.
