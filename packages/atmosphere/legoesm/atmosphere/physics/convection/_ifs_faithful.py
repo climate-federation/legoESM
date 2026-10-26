@@ -154,7 +154,6 @@ def ifs_ascent_config(config) -> IFSAscentConfig:
     shallow rate equals epsilon_shallow where that entrainment is the bare
     ENTRORG (it carries the RH factor and the cap elsewhere); RPRCON /
     ZDNOPRC by name.  epsilon_deep must be > 0 (validate_strict's range).
-    The closure and test-ascent configs still use IFS source defaults.
     """
     return IFSAscentConfig()._replace(
         entrorg=config.epsilon_deep,
@@ -163,6 +162,18 @@ def ifs_ascent_config(config) -> IFSAscentConfig:
         rprcon=config.rprcon,
         dnoprc=config.dnoprc,
     )
+
+
+def ifs_closure_config(config) -> IFSClosureConfig:
+    """The run's closure parameters: RCAPQADV = cape_qadv_weight (both the
+    unitless IFS 0.8); the IFS source defaults for the rest."""
+    return IFSClosureConfig()._replace(rcapqadv=config.cape_qadv_weight)
+
+
+def ifs_test_ascent_config(config) -> IFSTestAscentConfig:
+    """The run's test-parcel parameters: ENTRORG = epsilon_deep [1/m]; the
+    IFS source defaults for the rest."""
+    return IFSTestAscentConfig()._replace(entr_deep_base=config.epsilon_deep)
 
 
 def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
@@ -190,7 +201,8 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
         ustar = _USTAR_FALLBACK
 
     # saturation on the shared utility -- this port is specific humidity
-    clo_cfg = IFSClosureConfig()   # source defaults (sucumf.F90)
+    clo_cfg = ifs_closure_config(config)
+    ta_cfg = ifs_test_ascent_config(config)
     qs = saturation_specific_humidity(T, p_full)
 
     # geopotential, hydrostatic and surface-relative (trigger + closure both
@@ -201,7 +213,7 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
     trig = ifs_departure_search_refined(
         T, q_v, p_full, p_half, geo_full=geo_full, geo_half=geo_half,
         shf_w_m2=shf_w_m2, lhf_w_m2=lhf_w_m2, ustar=ustar, land_frac=land_frac,
-        dq_dt_adv=dq_dt_adv, cfg=IFSTestAscentConfig())
+        dq_dt_adv=dq_dt_adv, cfg=ta_cfg)
 
     # the trigger returns ldcum as a bool-VALUED FLOAT (its contract); the
     # closure/ascent/tendency modules take a real boolean mask
@@ -216,7 +228,7 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
     # quantity (cumastrn.F90:565-569) and the ZMFUB built here has to be the
     # same number ifs_closure divides by when it forms ZMFS.
     T_h, q_h, _s_h = half_level_env(T, q_v, p_full, p_half, geo_full, geo_half,
-                                    IFSTestAscentConfig())
+                                    ta_cfg)
 
     # --- 2. cumastrn contract: ascent runs ONCE at the FIRST-GUESS M_b ---
     # zdhpbl / zdh exactly as ifs_closure builds them (see its body).
@@ -260,7 +272,7 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
     # first-guess mass flux here -- only KTYPE changes.
     ktype_first_guess = ktype
     ktype = _reclassify_ktype(ktype, ldcum, p_half, k_cbot, asc.k_ctop,
-                              IFSTestAscentConfig().depth_split_pa)
+                              ta_cfg.depth_split_pa)
 
     # --- 3. closure: rescales the once-computed ascent profiles (no 2nd ascent)
     clo = ifs_closure(
