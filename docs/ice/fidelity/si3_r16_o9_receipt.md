@@ -4,7 +4,8 @@
 
 My first bit comparison failed on two leaves: XLA folded a zeroed accumulator's `0 + (-0)` to `-0`
 (NEMO gives `+0`), and it rewrote a constant division `x / 0.1` as a reciprocal multiply. Both are fixed
-below and both now have a gate; neither touches the D5 card's bits.
+below and both now have a gate; neither touches the D5 card's bits. The caller controls then caught a
+D5 test still calling the old `_radiation` signature; fixed (test-only).
 
 ## Outcome
 
@@ -128,7 +129,22 @@ Evidence: `round16/objaudit/` (`g_*.objdump.txt`, classifier `tools/minmax_audit
 
 ## Controls (parent `abd7262c11` vs current)
 
-CONTROLS_TABLE
+Parent from a clean detached worktree; both trees fp64, CPU, `jit`.
+
+| caller | parent | current |
+|---|---|---|
+| D5 C1D year, 18 arm hashes, `XLA_FLAGS=""` | shipped arm `b7a7329b...`, platform floor | all 18 identical (clean tree `86cf00613e`) |
+| D5 C1D year, 18 arm hashes, `--xla_cpu_max_isa=AVX` | shipped arm `b7a7329b...` (CPU == AVX) | all 18 identical |
+| `tests/ice/unit` | 408 passed, 1 skipped, 1 xfailed | 422 passed, 1 skipped, 1 xfailed (+14 O9) |
+| SI3 fidelity tests (11 files) | 1 failed, 143 passed | 1 failed, 143 passed after the fix below |
+| CI ratchets (6 files, incl. private imports) | 11 failed, 12047 passed | same 11 failed, 12049 passed |
+| default citation gate + all 13 SI3 receipts | pass | pass (receipt gate 43 citations, planted shift fires) |
+
+The fidelity failure on both trees is the pre-existing scalarmath v2 "A MY_SRC is not verbatim". The
+first current run had a second failure: a D5 test calls `_radiation` directly and the generalised
+signature requires the extinction coefficients; the test now passes the C1D card's values
+(`d5probe_current_fixed.log`: `22 passed`). The `bitz_lipscomb.py` inline-coefficient red is the
+pre-existing one on both trees.
 
 ## Findings (one line each, not acted on)
 
