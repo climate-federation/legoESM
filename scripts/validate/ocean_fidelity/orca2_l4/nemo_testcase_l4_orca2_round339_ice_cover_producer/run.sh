@@ -189,6 +189,7 @@ EOF
 sed 's/USE sbcmod, ONLY : r339_fixture_write/USE round339_ice_cover_writer, ONLY : r339_fixture_write => r339_write/' \
   "$FIXTURE" >"$scratch/fixture.F90"
 "$MPIFC" -O3 -funroll-all-loops -fno-tree-vectorize -fcheck=bounds -ffree-line-length-none \
+  -I "$scratch/mod" -J "$scratch/mod" \
   "$scratch/fixture_stubs.F90" "$WRITER" "$scratch/fixture.F90" \
   -o "$scratch/fixture"
 for rank in 0 1; do
