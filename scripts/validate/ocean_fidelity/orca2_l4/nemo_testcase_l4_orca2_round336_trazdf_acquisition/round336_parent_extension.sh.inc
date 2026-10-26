@@ -100,5 +100,8 @@ plant_must_refuse r336-inner-driver-syntax bash -n "$driver_dir/run.syntax-plant
 printf 'R336_GENERATED_DRIVER_SYNTAX_PASS role=inner path=%s\n' "$ADAPTED"
 if [[ -n ${R336_GENERATED_INNER_COPY:-} ]]; then
   cp -- "$ADAPTED" "$R336_GENERATED_INNER_COPY"
+  cp -- "$COMBINED_WRITER" "$R336_GENERATED_INNER_COPY.round332_writer.F90"
+  sed -i "s|^readonly R332_WRITER=.*|readonly R332_WRITER=$R336_GENERATED_INNER_COPY.round332_writer.F90|" \
+    "$R336_GENERATED_INNER_COPY"
   chmod 700 "$R336_GENERATED_INNER_COPY"
 fi
