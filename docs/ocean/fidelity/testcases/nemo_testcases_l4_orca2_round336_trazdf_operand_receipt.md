@@ -270,3 +270,38 @@ its log SHA-256 is
 `43965bf37d47a88cf243b415e98cb6dcfb35b76c1d222723fee50d1a093276b1`.
 The logs are `round336/resume4_citation_gate.json`,
 `round336/resume4_default_gate.log`, and `round336/resume4_ratchet.log`.
+
+## Resume 5: generated-driver syntax and flow closure
+
+The operator's reviewed `--run` invocation compiled the target and then stopped
+before NEMO started. The generated round-333 inner driver had split an injected
+writer-presence check after `>/dev/null` without preserving the shell line
+continuation, leaving a bare `||` at generated line 1046. The full failure log
+is `round336/acquisition_refused_20261026T145001Z/acq_r336.log`. The retained
+build at
+`cfgs/ORCA2_ORCA1ICE_OMIP_L4_R336TZDF.retained_20261026T145001Z_driver_syntax_error`
+was not touched.
+
+The injection is now one syntactically atomic line. The preflight generates the
+adapted parent and the exact inner script that `--run` will execute and runs
+`bash -n` on each before any build. A plant appends invalid shell syntax to each
+generated layer and both checks refuse. Both generated scripts are then run
+end to end against a stub NEMO through four cases: quoted `E R R O R` refusal,
+nonzero-exit retention, manifest-pinned `--admit-existing`, and `STOP 0`
+success. Both layers report all four cases passing.
+
+ACQUISITION TOOL CHECKLIST item 15: every generated script is produced and
+syntax-checked and its control flow run with a stub NEMO in the preflight.
+
+The refreshed read-only preflight reaches
+`ORCA2_ROUND336_TRAZDF_PREFLIGHT_READY`; it also retains all earlier fixture,
+passivity, same-program, admission, and plant results. Its log is
+`round336/resume5_preflight.log`, SHA-256
+`cc4100530129237927644929ef3c9f50d1b362b54795b2693411403e5747ae1c`.
+No NEMO executable was run, no build was started, no model or configuration
+changed, and no unasked choice was made. Codex review: operator.
+
+The disposition remains **ACQUISITION_NEEDED** at the operator command above.
+Before retrying, the operator must keep the retained failed build untouched and
+use the already-clear canonical target name, as documented in the acquisition
+README.
