@@ -751,3 +751,53 @@ def test_explicit_skin_on_a_coupled_driver_raises():
     assert resolve_ice_skin_prognostic(
         _cdgrid_cfg(ice_skin_prognostic=False), coupled=True) == (
             False, "explicit")
+
+
+_DUO_COLUMN_AUTO = r'''
+import json, sys, numpy as np
+from legoesm.driver.config import (ExperimentConfig, GridConfig,
+                                   DycoreConfig, OutputConfig)
+from legoesm.driver.model_driver import ModelDriver
+out = sys.argv[1]
+dt = 600.0
+cfg = ExperimentConfig(
+    grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
+    dycore=DycoreConfig(model_type="hydrostatic", discretization="fv3_duo",
+                        column_lane=True, dt=dt),
+    output=OutputConfig(output_dir=out, diag_days=0, checkpoint_days=0),
+    days=dt / 86400.0, dataset="analytical", precision="fp64",
+    distributed=False, n_devices=1, radiation="gray", turbulence="none",
+    convection="none", microphysics="none", gravity_wave_drag="none",
+    cloud_scheme="none")
+assert cfg.ice_skin_prognostic is None
+d = ModelDriver(cfg, output_dir=out)
+d.setup()
+status = d.run(compiled=True)
+skin = getattr(d, "_ice_T_skin", None)
+print("RESULT " + json.dumps({
+    "status": status, "skin_on": d.config.ice_skin_prognostic,
+    "albedo": d.config.sea_ice_albedo_scheme,
+    "skin_finite": None if skin is None
+    else bool(np.all(np.isfinite(np.asarray(skin))))}))
+'''
+
+
+def test_fv3_duo_column_lane_auto_turns_the_skin_on_and_steps(tmp_path):
+    """Auto on the FV3-duo COLUMN lane (the MPAS column loop with duo
+    dynamics) resolves the skin ON, passes validation, and steps."""
+    import json
+    import os
+    import subprocess
+    import sys
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("SLURM_", "PMI", "PMIX", "OMPI_"))}
+    env.update(JAX_ENABLE_X64="1", JAX_PLATFORMS="cpu")
+    r = subprocess.run([sys.executable, "-c", _DUO_COLUMN_AUTO,
+                        str(tmp_path)], env=env, capture_output=True,
+                       text=True, timeout=1200)
+    assert r.returncode == 0, (r.stdout + r.stderr)[-3000:]
+    res = json.loads(r.stdout.split("RESULT ", 1)[1].splitlines()[0])
+    assert res["status"] == "COMPLETED"
+    assert res["skin_on"] is True
+    assert res["albedo"] == "maykut_untersteiner"
+    assert res["skin_finite"] is True
