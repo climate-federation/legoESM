@@ -205,7 +205,7 @@ $compiler $flags -fcheck=bounds -ffunction-sections -I "$scratch/check-mod" \
 $compiler $flags -fcheck=bounds -ffunction-sections -I "$scratch/check-mod" \
   -I "$SOURCE_ROOT/BLD/inc" -J "$scratch/check-mod" \
   -c "$FIXTURE" -o "$scratch/fixture-check.o"
-$compiler -Wl,--gc-sections "$scratch/fixture_stubs.o" "$scratch/writer-check.o" \
+"$MPIFC" -Wl,--gc-sections "$scratch/fixture_stubs.o" "$scratch/writer-check.o" \
   "$scratch/sbcmod-check.o" "$scratch/fixture-check.o" -o "$scratch/fixture"
 for rank in 0 1; do
   (cd "$scratch" && ./fixture "$rank") >"$scratch/fixture-$rank.log"
