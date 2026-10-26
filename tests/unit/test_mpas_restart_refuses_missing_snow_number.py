@@ -1,6 +1,6 @@
 """An MPAS checkpoint written before MG2 two-moment snow (no ``N_s`` tracer)
-restarts with the snow number seeded at zero (user decision 2026-10-20),
-not silently on single-moment snow."""
+is refused on restart (oracle row 22, user pick 'hard error'), neither
+seeded nor silently run on single-moment snow."""
 from __future__ import annotations
 
 import glob
@@ -45,7 +45,7 @@ def _driver(tmpdir: str) -> ModelDriver:
     return d
 
 
-def test_old_checkpoint_without_snow_number_seeds_it_at_zero(tmp_path):
+def test_old_checkpoint_without_snow_number_is_refused(tmp_path):
     dA = _driver(str(tmp_path / "a"))
     assert "N_s" in dA.tracer_registry.names
     assert dA.run() == "COMPLETED"
@@ -57,11 +57,6 @@ def test_old_checkpoint_without_snow_number_seeds_it_at_zero(tmp_path):
     del payload["trc_N_s"]
     payload["tracer_names"] = np.asarray(
         [n for n in payload["tracer_names"] if str(n) != "N_s"])
-    # carried snow with zero number in sub-freezing air: the state the seed
-    # actually creates (the analytical IC is too warm to hold snow)
-    cold = payload["T"] <= np.quantile(payload["T"], 0.2)
-    payload["T"] = np.where(cold, 255.0, payload["T"])
-    payload["trc_q_s"] = np.where(cold, 1.0e-4, payload["trc_q_s"])
     old = os.path.join(str(tmp_path), "old.npz")
     np.savez(old, **payload)
     # the restart version gate reads the writing run's manifest beside it
@@ -69,14 +64,16 @@ def test_old_checkpoint_without_snow_number_seeds_it_at_zero(tmp_path):
                 str(tmp_path))
 
     dB = _driver(str(tmp_path / "b"))
-    step, day = dB.load_checkpoint(old)
-    assert "N_s" in dB.state.tracers
-    n_s = np.asarray(dB.state.tracers["N_s"].data)
-    assert n_s.shape == np.asarray(dB.state.tracers["q_v"].data).shape
-    assert np.all(n_s == 0.0)
-    assert dB.run(start_step=step, start_day=day) == "COMPLETED"
-    assert "N_s" in dB.state.tracers
-    for name in ("N_s", "q_s", "q_v"):
-        assert np.all(np.isfinite(np.asarray(dB.state.tracers[name].data))), name
-    # the carried-snow, zero-number state steps without NaN
-    assert np.all(np.isfinite(np.asarray(dB.state.T.data)))
+    with pytest.raises(ValueError, match="no snow number N_s"):
+        dB.load_checkpoint(old)
+    # a checkpoint with no tracer list at all is refused too
+    bare = {k: v for k, v in payload.items()
+            if k != "tracer_names" and not k.startswith("trc_")}
+    old_bare = os.path.join(str(tmp_path), "old_bare.npz")
+    np.savez(old_bare, **bare)
+    with pytest.raises(ValueError, match="no snow number N_s"):
+        dB.load_checkpoint(old_bare)
+    # the unmodified checkpoint (with N_s) still restarts
+    dC = _driver(str(tmp_path / "c"))
+    step, day = dC.load_checkpoint(ckpt)
+    assert "N_s" in dC.state.tracers

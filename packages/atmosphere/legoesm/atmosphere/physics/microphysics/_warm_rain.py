@@ -1279,8 +1279,14 @@ def mg2_accrete_cloud_water_snow(T, rho, mu, uns, q_cic, N_cic, q_sic, pgam,
     ``uns`` is the PROVISIONAL in-precip snow number fall speed, ``pgam/lamc``
     from :func:`mg2_size_dist_liq`; ``N_cic`` in whatever units the caller wants
     ``npsacws`` in."""
+    # lamc > 0 (oracle row 31): at qcic == qsmall exactly MG2's
+    # size_dist_param_liq leaves pgam = -100, lamc = 0 (it tests qcic >
+    # qsmall) while this gate is qcic >= qsmall, so dc0 = -99/0 made the rate
+    # NaN forward and backward here.  The compiled oracle returns 0 there
+    # (eci = max(NaN, 0) = 0 in gfortran), as this now does: lamc is 0 only
+    # at that point, so nothing else changes.
     active = ((q_sic >= MG2_QSMALL) & (T <= constants.T_freeze)
-              & (q_cic >= MG2_QSMALL))
+              & (q_cic >= MG2_QSMALL) & (lamc > 0.0))
     lc = jnp.where(active, lamc, 1.0)
     ls = jnp.where(active, lams, 1.0)
     _, asn = mg2_snow_rhof_asn(rho, config)
@@ -1880,6 +1886,12 @@ _MG2_ICE_D_MIN_M = 1.0e-6      # ice_lambda_bounds = 1/[2 dcs, 1 um] (micro_mg_u
 _MG2_MIN_MEAN_MASS_ICE = 1.0e-20  # min_mean_mass_ice [kg] (micro_mg_utils.F90:174)
 
 
+def mg2_ice_lambda_bounds(dcs):
+    """CAM6 MG2 cloud-ice slope bounds ``ice_lambda_bounds = 1/[2 dcs, 1 um]``
+    (micro_mg_utils.F90:294) as ``(lami_min, lami_max)`` [1/m]."""
+    return 1.0 / (2.0 * dcs), 1.0 / _MG2_ICE_D_MIN_M
+
+
 def mg2_ice_slope(q_i, N_i, rho_ice, dcs, log_width=0.0):
     """MG2 ``size_dist_param_basic(mg_ice_props, qiic, niic, lami)``
     (micro_mg2_0.F90:1333) -> ``(niic, lami)``: ``N_i <= q_i/1e-20 kg``, then
@@ -1896,9 +1908,8 @@ def mg2_ice_slope(q_i, N_i, rho_ice, dcs, log_width=0.0):
     No invariant is lost: the slope stays inside the bounds to O(width).
     Default width 0.01 approved by user 2026-10-21."""
     return _mg2_size_dist_basic(jnp.clip(q_i, 0.0), jnp.clip(N_i, 0.0),
-                                rho_ice * jnp.pi, 1.0 / (2.0 * dcs),
-                                1.0 / _MG2_ICE_D_MIN_M, _MG2_MIN_MEAN_MASS_ICE,
-                                log_width=log_width)
+                                rho_ice * jnp.pi, *mg2_ice_lambda_bounds(dcs),
+                                _MG2_MIN_MEAN_MASS_ICE, log_width=log_width)
 
 
 def mg2_qi_conservation_ratio(q_avail, src, snk, dt, omsm, width=0.0):
