@@ -104,6 +104,14 @@ def _assert_zero_ulp(a, b, label: str = "") -> None:
     assert ulp == 0, f"{label} max ULP = {ulp} != 0"
 
 
+def _assert_same_bits(a, b, label: str = "") -> None:
+    """Bitwise equality, signed zeros included."""
+    bits_a = np.asarray(a, dtype=np.float64).view(np.int64)
+    bits_b = np.asarray(b, dtype=np.float64).view(np.int64)
+    n_diff = int(np.count_nonzero(bits_a != bits_b))
+    assert n_diff == 0, f"{label}: {n_diff} cells differ bitwise"
+
+
 # Delayed `zcfl` values selecting `icycle = 1, 2, 3` (`icedyn_adv_pra.f90:138-141`).
 _CFL_FOR_ICYCLE = {1: 0.25, 2: 1.0, 3: 2.0}
 
@@ -129,6 +137,11 @@ def _dyn_inputs(jpi: int = 184, jpj: int = 152) -> dict:
 # `ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icevar.f90:615-853`,
 # `ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/lbcnfd.f90:96-150`).
 # ==============================================================================
+
+
+def _maxsd(dst: float, src: float) -> float:
+    """x86 MAXSD: keeps the source (second) operand on a tie, +0/-0 included."""
+    return dst if dst > src else src
 
 
 def _ref_adv_x_scalar_loop(
@@ -182,7 +195,7 @@ def _ref_adv_x_scalar_loop(
                 zs1new = min(zs1max, max(-zs1max, psx_w[ji, jj, jl]))
                 zs2new = min(
                     2.0 * zslpmax - (1.0 / 3.0) * abs(zs1new),
-                    max(abs(zs1new) - zslpmax, psxx_w[ji, jj, jl]),
+                    _maxsd(abs(zs1new) - zslpmax, psxx_w[ji, jj, jl]),
                 )
                 rswitch = float(tmask[ji, jj]) if zslpmax > 0.0 else 0.0
                 ps0_w[ji, jj, jl] = zslpmax
@@ -384,7 +397,7 @@ def _ref_adv_y_scalar_loop(
                 zs1new = min(zs1max, max(-zs1max, psy_w[ji, jj, jl]))
                 zs2new = min(
                     2.0 * zslpmax - (1.0 / 3.0) * abs(zs1new),
-                    max(abs(zs1new) - zslpmax, psyy_w[ji, jj, jl]),
+                    _maxsd(abs(zs1new) - zslpmax, psyy_w[ji, jj, jl]),
                 )
                 rswitch = float(tmask[ji, jj]) if zslpmax > 0.0 else 0.0
                 ps0_w[ji, jj, jl] = zslpmax
@@ -1468,6 +1481,57 @@ def test_o4_a3_icemax_hbig_hsnow_zapneg_zapsmall_pato_diag_pins_and_plants() -> 
         build_si3_orca2_o4_config(None)  # type: ignore[arg-type]
 
 
+def test_o4_a5_maxsd_minsd_signed_zero_ties() -> None:
+    """Signed-zero ties keep NEMO's object-code operand.
+
+    `MAX( ABS( zs1new ) - zslpmax, zpsxx )` is `maxsd psxx, reg` (`__icedyn_adv_pra_MOD_adv_x.constprop.1.isra.0+0x872`,
+    `__icedyn_adv_pra_MOD_adv_y.isra.0+0x8a6`): a tie keeps `zpsxx`/`zpsyy`. `MIN( pa_ip, pa_i )` in `Hsnow_pra` is
+    `minsd pa_i, reg` (`__icedyn_adv_pra_MOD_hsnow_pra.constprop.0.isra.0+0x784`): a tie keeps `pa_i`.
+    `jnp.maximum`/`jnp.minimum` return +0 / -0 on any tie, which flips these bits.
+    """
+    jpi, jpj, jpl, nn_hls = 9, 8, 1, 2
+    ti, tj = 4, 4
+    pdt = 3600.0
+    e1e2t = jnp.full((jpi, jpj), 1.0e10)
+    tmask = jnp.ones((jpi, jpj))
+    ps0 = np.zeros((jpi, jpj, jpl))
+    ps0[ti, tj, 0] = 2.0e9
+    for axis, adv in ((0, si3_adv_x), (1, si3_adv_y)):
+        mom = [np.zeros((jpi, jpj, jpl)) for _ in range(5)]
+        mom[axis][ti, tj, 0] = 2.0e9  # zs1new = zslpmax, so ABS(zs1new) - zslpmax = +0
+        mom[2 + axis][ti, tj, 0] = -0.0  # zpsxx / zpsyy = -0
+        vel = np.zeros((jpi, jpj))
+        vel[ti, tj] = 1.0e3  # donor towards +i/+j
+        prev = (ti - 1, tj) if axis == 0 else (ti, tj - 1)
+        vel[prev] = -1.0e3  # back face also outflow, so no receiver branch rewrites the -0
+        for ihls in (0, 1):
+            _, _, got = adv(
+                ihls, pdt, jnp.asarray(vel), 1.0, e1e2t, jnp.asarray(ps0),
+                tuple(jnp.asarray(m) for m in mom), e1e2t=e1e2t, tmask=tmask, nn_hls=nn_hls,
+            )
+            ref_fn = _ref_adv_x_scalar_loop if axis == 0 else _ref_adv_y_scalar_loop
+            _, _, ref = ref_fn(
+                ihls, pdt, vel, 1.0, np.asarray(e1e2t), ps0, tuple(mom),
+                e1e2t=np.asarray(e1e2t), tmask=np.asarray(tmask), nn_hls=nn_hls,
+            )
+            second = got[2 + axis][ti, tj, 0]
+            assert float(second) == 0.0 and bool(np.signbit(second)), (axis, ihls)
+            assert bool(np.signbit(ref[2 + axis][ti, tj, 0])), (axis, ihls)
+            for idx in range(5):
+                _assert_same_bits(ref[idx], got[idx], f"tie axis={axis} ihls={ihls} m{idx}")
+
+    rho0 = canonical_constants.rho_ocean_nemo
+    zeros3 = jnp.zeros((jpi, jpj, jpl))
+    a_ip = zeros3.at[ti, tj, 0].set(-0.0)
+    out = si3_hsnow_pra(
+        0, pdt, zeros3, zeros3, zeros3, a_ip, jnp.zeros((jpi, jpj, 1, jpl)),
+        jnp.zeros((jpi, jpj)), jnp.zeros((jpi, jpj)),
+        nn_hls=nn_hls, rho0=rho0, rhoi=canonical_constants.rho_ice,
+        rhos=canonical_constants.rho_snow, use_reciprocal_rhos=True, extensive_area=None,
+    )
+    assert not bool(np.signbit(out[3][ti, tj, 0])), "MIN( pa_ip=-0, pa_i=+0 ) keeps pa_i = +0"
+
+
 def test_o4_a4_orca2_seam_and_north_fold_subcycle_lbc_lnk_pins_and_plants() -> None:
     """`si3_dyn_adv_pra_orca2` exchanges all 11 extensive families and 55 Prather moment arrays across the ORCA2 cyclic seam and T-pivot north fold at every subcycle (`icycle >= 2`), matching an independent NEMO-literal `lbc_lnk` replica at every fold and seam cell, and failing when any of `sx, sy, sxx, syy, sxy` has a wrong north-fold sign (`Plants O4-A4a..f`)."""
     o4_state_cfg = SI3ORCA2StateConfig.for_orca2_sas_ice(ln_icedyn=True)
@@ -1729,7 +1793,7 @@ def test_o4_b_lane3_parent_vs_current_zero_ulp(tmp_path: Path) -> None:
     assert parent.keys() == current.keys()
     for key, value in parent.items():
         if value.dtype == np.float64:
-            _assert_zero_ulp(value, current[key], f"lane3.{key}")
+            _assert_same_bits(value, current[key], f"lane3.{key}")
         else:
             np.testing.assert_array_equal(value, current[key], err_msg=key)
 
@@ -2169,7 +2233,9 @@ def test_o4_d_jit_primal_zero_ulp_and_delayed_cfl_selection() -> None:
             rn_uice=None, rn_vice=None, apply_halos=False,
         )
 
-    eager_state, eager_diag = _step_fn(state_in, grid, sss_m, sst_m)
+    # The subcycle kernel is itself `jax.jit`; only `disable_jit` makes this arm op-by-op.
+    with jax.disable_jit():
+        eager_state, eager_diag = _step_fn(state_in, grid, sss_m, sst_m)
     jit_state, jit_diag = jax.jit(_step_fn)(state_in, grid, sss_m, sst_m)
 
     # Verify `t_si` halo contract (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/ice.f90:465`, `icestp.f90:526-540`):
@@ -2220,13 +2286,13 @@ def test_o4_d_jit_primal_zero_ulp_and_delayed_cfl_selection() -> None:
         jax.tree_util.tree_leaves(jit_state),
     ):
         if jnp.issubdtype(e_leaf.dtype, jnp.floating):
-            _assert_zero_ulp(e_leaf, j_leaf, "jit_primal_state")
+            _assert_same_bits(e_leaf, j_leaf, "jit_primal_state")
     for e_leaf, j_leaf in zip(
         jax.tree_util.tree_leaves(eager_diag),
         jax.tree_util.tree_leaves(jit_diag),
     ):
         if jnp.issubdtype(e_leaf.dtype, jnp.floating):
-            _assert_zero_ulp(e_leaf, j_leaf, "jit_primal_diag")
+            _assert_same_bits(e_leaf, j_leaf, "jit_primal_diag")
 
     # 1b. A traced delayed `cflice` selects each `icycle` inside one compiled step.
     step_jit = jax.jit(_step_fn)
@@ -2234,11 +2300,16 @@ def test_o4_d_jit_primal_zero_ulp_and_delayed_cfl_selection() -> None:
         st_d = state_in._replace(
             cflice_delayed=jnp.asarray(_CFL_FOR_ICYCLE[want], dtype=jnp.float64)
         )
-        e_st, e_dg = _step_fn(st_d, grid, sss_m, sst_m)
+        with jax.disable_jit():
+            e_st, e_dg = _step_fn(st_d, grid, sss_m, sst_m)
         j_st, j_dg = step_jit(st_d, grid, sss_m, sst_m)
         assert int(e_dg.icycle) == want and int(j_dg.icycle) == want
-        _assert_zero_ulp(e_st.v_i, j_st.v_i, f"jit_delayed_icycle{want}.v_i")
-        _assert_zero_ulp(e_st.prather.ice.sx, j_st.prather.ice.sx, f"jit_delayed_icycle{want}.sx")
+        for e_leaf, j_leaf in zip(
+            jax.tree_util.tree_leaves((e_st, e_dg)),
+            jax.tree_util.tree_leaves((j_st, j_dg)),
+        ):
+            if jnp.issubdtype(e_leaf.dtype, jnp.floating):
+                _assert_same_bits(e_leaf, j_leaf, f"jit_delayed_icycle{want}")
 
 
 def _o4_ad_checks() -> None:

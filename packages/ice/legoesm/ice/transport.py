@@ -623,7 +623,8 @@ def _si3_prather_limit_x(
     second_upper = sr(
         sr(_SI3_PRA_SECOND_MOMENT_FACTOR * content) - sr(one_third * abs_sx)
     )
-    second_lower = sr(jnp.maximum(sr(abs_sx - content), sxx))
+    excess_x = sr(abs_sx - content)
+    second_lower = sr(jnp.where(excess_x > sxx, excess_x, sxx))  # MAXSD: tie keeps zpsxx
     sxx = sr(jnp.minimum(second_upper, second_lower))
     negative_content = sr(-content)
     sxy = sr(jnp.minimum(content, sr(jnp.maximum(negative_content, sxy))))
@@ -656,7 +657,8 @@ def _si3_prather_limit_y(
     second_upper = sr(
         sr(_SI3_PRA_SECOND_MOMENT_FACTOR * content) - sr(one_third * abs_sy)
     )
-    second_lower = sr(jnp.maximum(sr(abs_sy - content), syy))
+    excess_y = sr(abs_sy - content)
+    second_lower = sr(jnp.where(excess_y > syy, excess_y, syy))  # MAXSD: tie keeps zpsyy
     syy = sr(jnp.minimum(second_upper, second_lower))
     negative_content = sr(-content)
     sxy = sr(jnp.minimum(content, sr(jnp.maximum(negative_content, sxy))))
@@ -2365,17 +2367,6 @@ def si3_icemax3d_pra(
     return si3_icemax2d_pra(ihls, pice, nn_hls=nn_hls, mask_inactive=mask_inactive)
 
 
-def _seq_sum_axis(arr: jnp.ndarray, axis: int) -> jnp.ndarray:
-    """Sequential summation matching Fortran `SUM(..., dim=...)` rounding."""
-    n = arr.shape[axis]
-    if n == 0:
-        return jnp.sum(arr, axis=axis)
-    acc = jnp.take(arr, 0, axis=axis)
-    for idx in range(1, n):
-        acc = acc + jnp.take(arr, idx, axis=axis)
-    return acc
-
-
 def si3_hbig_pra(
     ihls: int,
     pdt: float | jnp.ndarray,
@@ -2430,6 +2421,8 @@ def si3_hbig_pra(
     Supports single-category slices (`pv_i` of shape `(jpi, jpj)`, `pe_i` of shape
     `(jpi, jpj, nlay_i)`) or full multi-category arrays (`pv_i` of shape `(jpi, jpj, jpl)`).
     """
+    from legoesm.ice.si3_orca2_state import fortran_sum_categories  # cycle: imports transport
+
     sr = nemo_source_round
     single_cat = pv_i.ndim == 2
     if single_cat:
@@ -2536,10 +2529,10 @@ def si3_hbig_pra(
         _SI3_PRA_ONE,
     )
     v_s_target = sr(a_i_cat * phs_max)
-    wfx_hs = sr(((v_s_cat - v_s_target) * rhos_f) * z1_dt)
+    wfx_hs = sr(sr(sr(v_s_cat - v_s_target) * rhos_f) * z1_dt)
     e_s_int = _to_int4(pe_s)
-    sum_es = _seq_sum_axis(e_s_int, axis=2)
-    hfx_hs = sr((sum_es * (_SI3_PRA_ONE - zfra_hs)) * z1_dt)
+    sum_es = fortran_sum_categories(e_s_int, axis=2)
+    hfx_hs = sr(sr(sum_es * sr(_SI3_PRA_ONE - zfra_hs)) * z1_dt)
     zwfx_all = jnp.where(cond_hs, wfx_hs, _SI3_PRA_ZERO)
     zhfx_all = jnp.where(cond_hs, -hfx_hs, _SI3_PRA_ZERO)
     zsfx_all = jnp.zeros((jpi, jpj, jpl), dtype=dtype)
@@ -2570,7 +2563,7 @@ def si3_hbig_pra(
         zfra_si = pszi_max / zsi_safe
         sfx_inc = jnp.where(
             cond_si,
-            sr(((szv_int * (_SI3_PRA_ONE - zfra_si)) * rhoi_f) * z1_dt),
+            sr(sr(sr(szv_int * sr(_SI3_PRA_ONE - zfra_si)) * rhoi_f) * z1_dt),
             _SI3_PRA_ZERO,
         )
         for jk in range(nlay_i):
@@ -2594,7 +2587,7 @@ def si3_hbig_pra(
         )
         zsi_safe = jnp.where(cond_si, zsi, _SI3_PRA_ONE)
         zfra_si = psi_max / zsi_safe
-        sfx_inc = sr(((sv_i_cat * (_SI3_PRA_ONE - zfra_si)) * rhoi_f) * z1_dt)
+        sfx_inc = sr(sr(sr(sv_i_cat * sr(_SI3_PRA_ONE - zfra_si)) * rhoi_f) * z1_dt)
         zsfx_all = jnp.where(cond_si, zsfx_all + sfx_inc, zsfx_all)
         corr_sv = (
             jnp.where(
@@ -2623,7 +2616,7 @@ def si3_hbig_pra(
     zfra_ei = pei_max / zei_safe
     hfx_ei_inc = jnp.where(
         cond_ei,
-        sr((ei_int * (_SI3_PRA_ONE - zfra_ei)) * z1_dt),
+        sr(sr(ei_int * sr(_SI3_PRA_ONE - zfra_ei)) * z1_dt),
         _SI3_PRA_ZERO,
     )
     for jk in range(nlay_i):
@@ -2656,7 +2649,7 @@ def si3_hbig_pra(
     zfra_es = pes_max / zes_safe
     hfx_es_inc = jnp.where(
         cond_es,
-        sr((es_int2 * (_SI3_PRA_ONE - zfra_es)) * z1_dt),
+        sr(sr(es_int2 * sr(_SI3_PRA_ONE - zfra_es)) * z1_dt),
         _SI3_PRA_ZERO,
     )
     for jk in range(nlay_s):
@@ -2751,6 +2744,8 @@ def si3_hsnow_pra(
     jnp.ndarray,
 ]:
     """Execute NEMO SI3 `Hsnow_pra` (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icedyn_adv_pra.f90:1096-1156`)."""
+    from legoesm.ice.si3_orca2_state import fortran_sum_categories  # cycle: imports transport
+
     sr = nemo_source_round
     single_cat = pv_i.ndim == 2
     if single_cat:
@@ -2816,10 +2811,10 @@ def si3_hsnow_pra(
         v_s_pos = v_s_cat > _SI3_PRA_ZERO
         v_s_safe = jnp.where(v_s_pos, v_s_cat, _SI3_PRA_ONE)
         zfra = jnp.where(v_s_pos, v_s_rem / v_s_safe, _SI3_PRA_ONE)
-    wfx_inc = sr((zvs_excess * rhos_f) * z1_dt)
+    wfx_inc = sr(sr(zvs_excess * rhos_f) * z1_dt)
     e_s_int = _to_int4(pe_s)
-    sum_es = _seq_sum_axis(e_s_int, axis=2)
-    hfx_inc = sr((sum_es * (_SI3_PRA_ONE - zfra)) * z1_dt)
+    sum_es = fortran_sum_categories(e_s_int, axis=2)
+    hfx_inc = sr(sr(sum_es * sr(_SI3_PRA_ONE - zfra)) * z1_dt)
     zwfx_all = jnp.where(cond_excess, wfx_inc, _SI3_PRA_ZERO)
     zhfx_all = jnp.where(cond_excess, -hfx_inc, _SI3_PRA_ZERO)
     pv_s = jnp.where(cond_excess, _to_ext3(v_s_rem), pv_s)
@@ -2838,7 +2833,7 @@ def si3_hsnow_pra(
     else:
         pa_ip = jnp.where(
             active_3d,
-            jnp.minimum(a_ip_cat, a_i_cat),
+            jnp.where(a_ip_cat < a_i_cat, a_ip_cat, a_i_cat),  # MINSD: tie keeps pa_i
             pa_ip,
         )
 
@@ -2959,7 +2954,7 @@ def si3_var_zapneg(
             | (pv_i[:, :, None, :] <= _SI3_PRA_ZERO)
         )
         sfx_inc_all = jnp.where(
-            zap_salt, sr((pszv_i * rhoi_f) * z1_dt), _SI3_PRA_ZERO
+            zap_salt, sr(sr(pszv_i * rhoi_f) * z1_dt), _SI3_PRA_ZERO
         )
         for jl in range(jpl):
             for jk in range(nlay_i):
@@ -2972,7 +2967,7 @@ def si3_var_zapneg(
             | (pv_i <= _SI3_PRA_ZERO)
         )
         sfx_inc_all = jnp.where(
-            zap_salt, sr((psv_i * rhoi_f) * z1_dt), _SI3_PRA_ZERO
+            zap_salt, sr(sr(psv_i * rhoi_f) * z1_dt), _SI3_PRA_ZERO
         )
         for jl in range(jpl):
             zsfx_res = zsfx_res + sfx_inc_all[:, :, jl]
@@ -3014,10 +3009,10 @@ def si3_var_zapneg(
     zap_vip = active_2d[:, :, None] & (
         (pv_ip < _SI3_PRA_ZERO) | (pa_ip <= _SI3_PRA_ZERO)
     )
-    wfx_vi_all = jnp.where(zap_vi, sr((pv_i * rhoi_f) * z1_dt), _SI3_PRA_ZERO)
-    wfx_vs_all = jnp.where(zap_vs, sr((pv_s * rhos_f) * z1_dt), _SI3_PRA_ZERO)
-    wfx_vil_all = jnp.where(zap_vil, sr((pv_il * rhow_f) * z1_dt), _SI3_PRA_ZERO)
-    wfx_vip_all = jnp.where(zap_vip, sr((pv_ip * rhow_f) * z1_dt), _SI3_PRA_ZERO)
+    wfx_vi_all = jnp.where(zap_vi, sr(sr(pv_i * rhoi_f) * z1_dt), _SI3_PRA_ZERO)
+    wfx_vs_all = jnp.where(zap_vs, sr(sr(pv_s * rhos_f) * z1_dt), _SI3_PRA_ZERO)
+    wfx_vil_all = jnp.where(zap_vil, sr(sr(pv_il * rhow_f) * z1_dt), _SI3_PRA_ZERO)
+    wfx_vip_all = jnp.where(zap_vip, sr(sr(pv_ip * rhow_f) * z1_dt), _SI3_PRA_ZERO)
     for jl in range(jpl):
         zwfx_res = zwfx_res + wfx_vi_all[:, :, jl]
         zwfx_res = zwfx_res + wfx_vs_all[:, :, jl]
@@ -3160,6 +3155,8 @@ def si3_var_zapsmall(
     jnp.ndarray,
 ]:
     """Execute NEMO SI3 `ice_var_zapsmall` (`ORCA2_SAS_ICE_O1_REF/BLD/ppsrc/nemo/icevar.f90:615-737`)."""
+    from legoesm.ice.si3_orca2_state import fortran_sum_categories  # cycle: imports transport
+
     if sss_m is None:
         raise ValueError("si3_var_zapsmall requires explicit sss_m (None is not permitted)")
     if sst_m is None:
@@ -3192,7 +3189,7 @@ def si3_var_zapsmall(
     # 1. Zap salt (`icevar.f90:632-659`)
     if nn_icesal == 4:
         sfx_inc_all = jnp.where(
-            zap_mask_4d, sr((szv_i * rhoi_f) * r1_Dt_ice), _SI3_PRA_ZERO
+            zap_mask_4d, sr(sr(szv_i * rhoi_f) * r1_Dt_ice), _SI3_PRA_ZERO
         )
         for jl in range(jpl):
             for jk in range(nlay_i):
@@ -3201,7 +3198,7 @@ def si3_var_zapsmall(
         sz_i = jnp.where(zap_mask_4d, s_new_ice[:, :, None, None], sz_i)
     else:
         sfx_inc_all = jnp.where(
-            zap_mask, sr((sv_i * rhoi_f) * r1_Dt_ice), _SI3_PRA_ZERO
+            zap_mask, sr(sr(sv_i * rhoi_f) * r1_Dt_ice), _SI3_PRA_ZERO
         )
         for jl in range(jpl):
             sfx_res = sfx_res + sfx_inc_all[:, :, jl]
@@ -3225,13 +3222,13 @@ def si3_var_zapsmall(
 
     # 4. Zap ice/snow/pond volumes (`icevar.f90:695-722`)
     t_su_zap = sr(sst_2d + rt0_f)
-    wfx_1_all = sr((v_i * rhoi_f) * r1_Dt_ice)
-    wfx_2_all = sr((v_s * rhos_f) * r1_Dt_ice)
-    wfx_3_all = sr(((v_ip + v_il) * rhow_f) * r1_Dt_ice)
+    wfx_1_all = sr(sr(v_i * rhoi_f) * r1_Dt_ice)
+    wfx_2_all = sr(sr(v_s * rhos_f) * r1_Dt_ice)
+    wfx_3_all = sr(sr(sr(v_ip + v_il) * rhow_f) * r1_Dt_ice)
     for jl in range(jpl):
         zap_cat = zap_mask[:, :, jl]
         wfx_upd = (
-            ((wfx_res + wfx_1_all[:, :, jl]) + wfx_2_all[:, :, jl])
+            sr(sr(wfx_res + wfx_1_all[:, :, jl]) + wfx_2_all[:, :, jl])
             + wfx_3_all[:, :, jl]
         )
         wfx_res = jnp.where(zap_cat, wfx_upd, wfx_res)
@@ -3250,8 +3247,8 @@ def si3_var_zapsmall(
     h_il = jnp.where(zap_mask, _SI3_PRA_ZERO, h_il)
 
     # `at_i(A2D(0)) = SUM(a_i, dim=3)` ; `vt_i(A2D(0)) = SUM(v_i, dim=3)` (`icevar.f90:725-726`)
-    at_i_int = _seq_sum_axis(a_i, axis=2)
-    vt_i_int = _seq_sum_axis(v_i, axis=2)
+    at_i_int = fortran_sum_categories(a_i, axis=2)
+    vt_i_int = fortran_sum_categories(v_i, axis=2)
     at_i = jnp.where(interior_2d, at_i_int, at_i)
     vt_i = jnp.where(interior_2d, vt_i_int, vt_i)
     ato_i = jnp.where(interior_2d & (at_i == _SI3_PRA_ZERO), _SI3_PRA_ONE, ato_i)
