@@ -208,6 +208,13 @@ censuses, 407 identical ppsrc units, 419 identical objects, both admission
 routes, the real-extent bounds fixture, and every new plant green/fired as
 appropriate. Its final log is stored as `round336/resume3_preflight.log`.
 
+The per-receipt citation gate finds 14 citations with zero failures, zero
+unmapped citations, and zero map-audit failures; all nine self-tests fire. The
+default ORCA2 landing battery passes 146 tests in 710.51 seconds, and the
+all-package private-import ratchet passes 6 tests. Their logs are stored as
+`round336/resume3_citation_gate.json`, `round336/resume3_default_gate.log`, and
+`round336/resume3_ratchet.log`.
+
 The acquisition disposition is unchanged: **ACQUISITION_NEEDED** at the same
 operator command and evidence directory above. No unasked choice was made;
 configuration choices remain empty. Codex review: operator. Argon findings
