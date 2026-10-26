@@ -305,7 +305,7 @@ def _build_convection_call(scheme: str, dt: float):
             out, prog_new = kain_fritsch_convection(
                 T=T, q_v=qv, p_full=pf, p_half=ph,
                 w_grid=w0, conv_prog_profile=prog,
-                dt=dt, config=cfg,
+                dt=dt, config=cfg, u=u, v=v,
             )
             return (
                 out.dT_dt, out.dq_v_dt, out.dq_c_conv_dt,

@@ -1050,7 +1050,7 @@ def ifs_ztaures(dx_m):
         ...
         IF(ZDX(JL)>125.E3_JPRB) ZTAURES=MIN(3.0_JPRB,ZTAURES)
 
-    Shared public helper (used by the bechteld and ifs_closure closures).
+    Shared public helper (used by the legacy Bechtold closure and the CUMASTRN port).
 
     Precision: for a python/numpy scalar the branch test and the
     logarithm are computed in double-precision python floats (math.log)
