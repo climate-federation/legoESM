@@ -1,0 +1,4 @@
+--- sbcfwb.F90
++++ sbcfwb.F90
+@@ -48,0 +49 @@
++   PUBLIC   a_fwb, a_fwb_b

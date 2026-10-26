@@ -49,6 +49,8 @@ class NemoS2Result(NamedTuple):
     utau_u: jnp.ndarray
     vtau_v: jnp.ndarray
     penetrative_qsr: jnp.ndarray
+    qns_after_ssr: jnp.ndarray
+    emp_after_ssr: jnp.ndarray
 
 
 class NemoTStressLbcPlan(NamedTuple):
@@ -305,14 +307,14 @@ def nemo_orca2_s2(
 
     def apply_forcing_update(_):
         qrp_update = _sr(_sr(jnp.zeros_like(updated_heat_term)) - updated_heat_term)
-        emp_update = _sr(emp + updated_erp)
-        qns_update = _sr(qns - updated_heat_term)
+        emp_after_ssr = _sr(emp + updated_erp)
+        qns_after_ssr = _sr(qns - updated_heat_term)
         correction_masked = _sr(correction * smask)
-        emp_update = _sr(emp_update + correction_masked)
+        emp_update = _sr(emp_after_ssr + correction_masked)
         correction_heat = _sr(
             _sr(_sr(correction * _sr(heat_capacity)) * sst) * smask
         )
-        qns_update = _sr(qns_update - correction_heat)
+        qns_update = _sr(qns_after_ssr - correction_heat)
         return (
             updated_runoff,
             updated_coefficient,
@@ -320,6 +322,8 @@ def nemo_orca2_s2(
             qrp_update,
             qns_update,
             emp_update,
+            qns_after_ssr,
+            emp_after_ssr,
         )
 
     def preserve_between_updates(_):
@@ -334,9 +338,11 @@ def nemo_orca2_s2(
             prior_qrp,
             qns,
             emp,
+            qns,
+            emp,
         )
 
-    runoff, coefficient, erp, qrp, qns, emp = jax.lax.cond(
+    runoff, coefficient, erp, qrp, qns, emp, qns_after_ssr, emp_after_ssr = jax.lax.cond(
         update, apply_forcing_update, preserve_between_updates, operand=None
     )
     utau_u, vtau_v = nemo_t_stress_to_uv(
@@ -366,6 +372,8 @@ def nemo_orca2_s2(
         utau_u,
         vtau_v,
         penetrative_qsr,
+        qns_after_ssr,
+        emp_after_ssr,
     )
 
 

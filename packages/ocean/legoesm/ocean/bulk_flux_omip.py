@@ -782,6 +782,44 @@ class NemoStandaloneSurfaceResult(NamedTuple):
     s2: object
     surface_forcing: object
     freshwater_forcing: object
+    bulk_before_ice: NemoBlkOceResult
+    ice_if: object
+
+
+class NemoStandaloneAtmosphereFields(NamedTuple):
+    """One mapped CORE record for the standalone card's S0-F boundary."""
+
+    u_wind: object
+    v_wind: object
+    T_air_K: object
+    q_air: object
+    slp_Pa: object
+    qsr_down: object
+    qlw_down: object
+    precip: object
+    snow: object
+
+
+class NemoStandaloneFieldPair(NamedTuple):
+    """One ``fld_read`` two-record input and its own integer-second clock."""
+
+    before: object
+    after: object
+    isecsbc: object
+    nrec_sec_before: object
+    nrec_sec_after: object
+
+
+class NemoStandaloneS0FInputs(NamedTuple):
+    """Two physical records and NEMO's integer-second interpolation clock."""
+
+    before: NemoStandaloneAtmosphereFields
+    after: NemoStandaloneAtmosphereFields
+    isecsbc: object
+    nrec_sec_before: object
+    nrec_sec_after: object
+    runoff: NemoStandaloneFieldPair
+    sss_target: NemoStandaloneFieldPair
 
 
 class NemoStandaloneK0Config(NamedTuple):
@@ -799,6 +837,24 @@ class NemoStandaloneK0Config(NamedTuple):
     ln_icebergs: bool
 
 
+class NemoStandaloneK0OceanCard(NamedTuple):
+    """The certified rung-10 ocean plus explicit standalone K0 selectors."""
+
+    ocean: object
+    k0: NemoStandaloneK0Config
+    albedo: object
+    precip_factor: object
+    evap_factor: object
+    nb_iter: int
+
+
+class NemoStandaloneK0StepResult(NamedTuple):
+    """One composed surface calculation followed by one production ocean step."""
+
+    surface: NemoStandaloneSurfaceResult
+    ocean: object
+
+
 def validate_nemo_standalone_k0(config: NemoStandaloneK0Config) -> None:
     """Refuse every surface-card configuration other than Decision-175 K0."""
 
@@ -808,6 +864,71 @@ def validate_nemo_standalone_k0(config: NemoStandaloneK0Config) -> None:
             "standalone ORCA2 requires explicit Decision-175 K0 selectors "
             f"{expected!r}; got {config!r}"
         )
+
+
+def _validate_k0_ocean_card(card: NemoStandaloneK0OceanCard) -> None:
+    """Bind Decision 175 to the real rung-10 selectors that consume it."""
+
+    validate_nemo_standalone_k0(card.k0)
+    ocean = card.ocean
+    config = ocean.recipe.model_config
+    tke = config.physics.vertical_mixing.tke
+    resolved = {
+        "ln_drgice_imp": bool(config.implicit_ice_ocean_top_drag),
+        "ln_mxl0": bool(
+            tke.tke_mxl_choice == 3
+            and tke.nemo_mxl0_surface_tmask
+            and tke.nemo_mxl0_rmxl_min_overwrite
+        ),
+        "nn_mxlice": int(tke.nemo_mxlice),
+        "ln_icebergs": bool(ocean.icebergs_enabled),
+    }
+    expected = {
+        "ln_drgice_imp": card.k0.ln_drgice_imp,
+        "ln_mxl0": card.k0.ln_mxl0,
+        "nn_mxlice": card.k0.nn_mxlice,
+        "ln_icebergs": card.k0.ln_icebergs,
+    }
+    if resolved != expected:
+        raise ValueError(
+            "standalone K0 ocean selectors do not match the rung-10 card: "
+            f"resolved={resolved!r}, expected={expected!r}"
+        )
+
+
+def build_nemo_orca2_k0_ocean_card(deck_root):
+    """Wrap, without copying, the certified rung-10 ORCA2 ocean card."""
+
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_orca2_zps_card
+
+    result = NemoStandaloneK0OceanCard(
+        ocean=build_orca2_zps_card(deck_root),
+        k0=NemoStandaloneK0Config(1, False, True, 0, False),
+        albedo=0.066,
+        precip_factor=1.0,
+        evap_factor=1.0,
+        nb_iter=5,
+    )
+    _validate_k0_ocean_card(result)
+    return result
+
+
+def nemo_orca2_k0_s0f(inputs: NemoStandaloneS0FInputs):
+    """Execute the card's own CORE, runoff and restoring S0-F interpolation."""
+
+    values = (
+        nemo_fld_time_interp(before, after, inputs.isecsbc,
+                             inputs.nrec_sec_before, inputs.nrec_sec_after)
+        for before, after in zip(inputs.before, inputs.after, strict=True)
+    )
+    atmosphere = NemoStandaloneAtmosphereFields(*values)
+
+    def interpolate(pair):
+        return nemo_fld_time_interp(
+            pair.before, pair.after, pair.isecsbc,
+            pair.nrec_sec_before, pair.nrec_sec_after)
+
+    return atmosphere, interpolate(inputs.runoff), interpolate(inputs.sss_target)
 
 
 def nemo_orca2_k0_surface_card(
@@ -832,6 +953,64 @@ def nemo_orca2_k0_surface_card(
         evap_factor, nb_iter,
         nn_ice=k0_config.nn_ice, ice_if=ice_if, s0=s0, s2=s2,
     )
+
+
+def nemo_orca2_k0_ocean_step(
+    card, state, *, s0f, ice_if, s0, s2, model=None, sponge=None, nemo_kt=None,
+):
+    """Run S0-F -> S0-M -> S1 -> S3 -> S2, then the rung-10 ocean step.
+
+    ``card.ocean`` is the existing certified rung-10 recipe.  This function
+    contains no ocean arithmetic: it calls :class:`LatLonCGridOceanModel`'s
+    production ``step`` with forcing made by the shared literal surface path.
+    The atmospheric input is the card's own pair of physical file records;
+    no NEMO exchange record is accepted by this API.
+    """
+
+    _validate_k0_ocean_card(card)
+    # sbc(kstp,Nbb,Nbb) reads the live rung-10 state.  The caller owns only
+    # the explicit controls/carry; it cannot shadow S0-M or S3 with stale
+    # state arrays.
+    temperature = jnp.asarray(state.T.data, dtype=jnp.float64)
+    salinity = jnp.asarray(state.S.data, dtype=jnp.float64)
+    u_before = jnp.asarray(state.u.data, dtype=jnp.float64)[:, 1:, 0]
+    v_before = jnp.asarray(state.v.data, dtype=jnp.float64)[1:, :, 0]
+    s0 = s0._replace(
+        u_before=u_before,
+        v_before=v_before,
+        temperature_now=temperature[..., 0],
+        salinity_now=salinity[..., 0],
+        ssh_now=jnp.asarray(state.eta.data, dtype=jnp.float64),
+    )
+    ice_if = ice_if._replace(ts_surface=temperature[..., 0])
+    fields, runoff_now, sss_target = nemo_orca2_k0_s0f(s0f)
+    s2 = s2._replace(runoff_now=runoff_now, sss_target=sss_target)
+    surface = nemo_orca2_k0_surface_card(
+        *fields[:5], *fields[5:],
+        s2.surface_mask, card.albedo, card.precip_factor,
+        card.evap_factor, card.nb_iter,
+        k0_config=card.k0, ice_if=ice_if, s0=s0, s2=s2,
+    )
+    if model is None:
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+
+        recipe = card.ocean.recipe
+        model = LatLonCGridOceanModel(
+            recipe.grid, recipe.z_coord, recipe.model_config,
+            iwm_forcing=recipe.iwm_forcing,
+        )
+    kwargs = {
+        "freshwater": surface.freshwater_forcing,
+        "surface_forcing": surface.surface_forcing,
+    }
+    if sponge is not None:
+        kwargs["sponge"] = sponge
+    if nemo_kt is not None:
+        kwargs["nemo_kt"] = nemo_kt
+    stepped = model.step(state, card.ocean.dt_s, **kwargs)
+    return NemoStandaloneK0StepResult(surface=surface, ocean=stepped)
 
 
 def _crop_to_surface_interior(value, interior_shape):
@@ -1007,7 +1186,17 @@ def nemo_blk_oce_ncar(
     )
     qsr = R((1.0 - albedo) * jnp.asarray(qsr_down, dtype=jnp.float64) * wet)
     qns = surface.qns
+    bulk_before_ice = NemoBlkOceResult(
+        state.theta_air, jnp.asarray(q_air, dtype=jnp.float64), rain,
+        sst_c_arr, jnp.asarray(ssu, dtype=jnp.float64),
+        jnp.asarray(ssv, dtype=jnp.float64), state.tsk_c, state.ssq,
+        state.cd, state.ch, state.ce, state.rhoa,
+        state.sensible, state.latent, state.evap, qsr,
+        surface.qlwn, qns, surface.emp,
+        state.utau, state.vtau, state.taum, state.wndm, None, None,
+    )
     ts_surface = fr_i = None
+    iif = None
     if nn_ice == 1:
         if means is not None:
             ice_if = ice_if._replace(sss_m=means.sss, sst_m=means.sst)
@@ -1078,7 +1267,8 @@ def nemo_blk_oce_ncar(
         heat_capacity=s2.heat_capacity,
     )
     forcing, freshwater = nemo_s2_to_ocean_interfaces(tail)
-    return NemoStandaloneSurfaceResult(means, bulk, tail, forcing, freshwater)
+    return NemoStandaloneSurfaceResult(
+        means, bulk, tail, forcing, freshwater, bulk_before_ice, iif)
 
 
 class NemoSbcIceIfResult(NamedTuple):
@@ -1088,6 +1278,8 @@ class NemoSbcIceIfResult(NamedTuple):
     fr_i: jnp.ndarray
     qsr: jnp.ndarray
     qns: jnp.ndarray
+    freezing_temperature: jnp.ndarray
+    ice_cover: jnp.ndarray
 
 
 def nemo_sbc_ice_if(ice_cover, sss_m, sst_m, ts_surface, ff_f,
@@ -1109,7 +1301,8 @@ def nemo_sbc_ice_if(ice_cover, sss_m, sst_m, ts_surface, ff_f,
     f64 = jnp.float64
     sss_m = jnp.asarray(sss_m, dtype=f64)
     ny, nx = sss_m.shape
-    inner = (slice(h, ny - h), slice(h, nx - h))
+    inner = ((slice(None), slice(None)) if h == 0 else
+             (slice(h, ny - h), slice(h, nx - h)))
     # sbcice_if.f90:158-159: eos_fzp on A2D(nn_hls), then masked.
     fzp = R(nemo_eos_fzp_eos80(sss_m) * jnp.asarray(tmask_surface, dtype=f64))
     # :164-167: clamp on the full A2D(nn_hls) halo.
@@ -1131,7 +1324,8 @@ def nemo_sbc_ice_if(ice_cover, sss_m, sst_m, ts_surface, ff_f,
     zqi = R(_IIF_ZQI_OFFSET_W_M2 + _sign(1.0, jnp.asarray(ff_f, dtype=f64)[inner]))
     qns_new = R(R(R(R(open_frac * jnp.asarray(qns, dtype=f64))
                     + R(R(zfr * fr_in) * zqi)) * mask0) + zqrp)
-    return NemoSbcIceIfResult(ts_new, fzp.at[inner].set(fr_in), qsr_new, qns_new)
+    return NemoSbcIceIfResult(
+        ts_new, fzp.at[inner].set(fr_in), qsr_new, qns_new, fzp, zfr)
 
 
 def air_sea_fluxes(u10, v10, T_air_K, q_air, T_sfc_K, q_sfc=None,
@@ -1267,7 +1461,17 @@ __all__ = [
     "NemoSbcIceIfInputs",
     "NemoS0Inputs",
     "NemoS2Inputs",
+    "NemoStandaloneAtmosphereFields",
+    "NemoStandaloneFieldPair",
+    "NemoStandaloneS0FInputs",
+    "NemoStandaloneK0Config",
+    "NemoStandaloneK0OceanCard",
+    "NemoStandaloneK0StepResult",
     "NemoStandaloneSurfaceResult",
+    "build_nemo_orca2_k0_ocean_card",
+    "nemo_orca2_k0_ocean_step",
+    "nemo_orca2_k0_s0f",
+    "nemo_orca2_k0_surface_card",
     "NemoTStressLbcPlan",
     "ncar_transfer_coefficients",
     "potential_air_temperature_10m",

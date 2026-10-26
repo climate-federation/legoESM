@@ -29,38 +29,55 @@ readonly STATE_PATCH=$here/stprk3_round340.patch
 readonly STAGE_PATCH=$here/stprk3_stg_round340.patch
 readonly FLD_PATCH=$here/fldread_round340.patch
 readonly IIF_PATCH=$here/sbcice_if_round340.patch
+readonly BLK_PATCH=$here/sbcblk_round340.patch
+readonly FWB_PATCH=$here/sbcfwb_round340.patch
 readonly SURFACE_WRITER=$here/round340_surface_writer.F90
 readonly STATE_WRITER=$here/round340_state_writer.F90
 readonly SURFACE_FIXTURE=$here/round340_surface_fixture.F90
 readonly NAMELIST_REF=$NEMO_ROOT/cfgs/SHARED/namelist_ref
-readonly ADMISSION_IDENTITY_ONLY=${R340_ADMISSION_IDENTITY_ONLY:-0}
 export PYTHONPATH=$REPO:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/atmosphere:$REPO/packages/coupler:$REPO/packages/ice:$REPO/packages/land:$REPO/packages/ml:$REPO/packages/tools:$REPO/src
 export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
-for f in "$GATE" "$TEST" "$SURFACE_PATCH" "$STATE_PATCH" "$STAGE_PATCH" "$FLD_PATCH" "$IIF_PATCH" "$SURFACE_WRITER" "$STATE_WRITER" "$SURFACE_FIXTURE" \
+for f in "$GATE" "$TEST" "$SURFACE_PATCH" "$STATE_PATCH" "$STAGE_PATCH" "$FLD_PATCH" "$IIF_PATCH" "$BLK_PATCH" "$FWB_PATCH" "$SURFACE_WRITER" "$STATE_WRITER" "$SURFACE_FIXTURE" \
  "$K0_RUN/producer_manifest.json" "$ICE_RUN/producer_manifest.json" "$NAMELIST_REF"; do [[ -f "$f" ]] || refuse "missing $f"; done
-if [[ "$ADMISSION_IDENTITY_ONLY" == 1 ]]; then
- [[ "$MODE" == --admit-existing && -n ${R340_ADMISSION_TEST_ROOT:-} && -n ${R340_EXISTING_RUN:-} ]] \
-   || refuse 'identity-only admission needs --admit-existing and explicit test/run roots'
- test_root=$(realpath -e -- "$R340_ADMISSION_TEST_ROOT")
- retained=$(realpath -e -- "$R340_EXISTING_RUN")
- [[ "$retained" == "$test_root/refused/"* ]] || refuse 'retained test run is outside refused/'
- "$PY" - "$retained/producer_manifest.json" "$(git -C "$REPO" rev-parse HEAD)" <<'PY'
+
+admit_one(){
+ local root=$1 parent=${2:-$K0_RUN} expected_commit
+ expected_commit=$(git -C "$REPO" rev-parse HEAD)
+ "$PY" - "$root" "$parent" "$expected_commit" <<'PY'
 import sys
 from pathlib import Path
 from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round339_common as c
-p=c.verify_manifest(Path(sys.argv[1]),expected_commit=sys.argv[2])
-print('R340_RETAINED_IDENTITY_ADMISSION_PASS',p['binary_sha256'])
+from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round340_standalone_gate as g
+r,parent=map(Path,sys.argv[1:3])
+c.verify_manifest(r/'producer_manifest.json',expected_commit=sys.argv[3])
+for log_name in ('run.user.stdout.log','ocean.output'):
+    text=(r/log_name).read_text(errors='replace')
+    g.require('STOP 0' in text and 'E R R O R' not in text,
+              f'admission log is not a clean STOP 0: {log_name}')
+inventory=g.inspect_acquisition_records(r)
+for rank in (0,1):
+    name=f'ORCA2_00000010_restart_{rank:04d}.nc'
+    g.require((r/name).read_bytes()==(parent/name).read_bytes(),f'restart changed: {name}')
+print('ORCA2_ROUND340_S4_ACQUISITION_PASS',r,inventory)
 PY
- exit 0
-fi
-[[ "$ADMISSION_IDENTITY_ONLY" == 0 ]] || refuse 'R340_ADMISSION_IDENTITY_ONLY must be 0 or 1'
+}
+
+admit_pair(){
+ local left=$1 right=$2 parent=${3:-$K0_RUN}
+ admit_one "$left" "$parent"
+ admit_one "$right" "$parent"
+ diff <(cd "$left" && sha256sum oracle_r340_*.bin | sed 's|  .*\/|  |') \
+      <(cd "$right" && sha256sum oracle_r340_*.bin | sed 's|  .*\/|  |') >/dev/null \
+   || refuse 'reproducibility twins differ'
+ printf 'ORCA2_ROUND340_S4_TWINS_ADMITTED\n'
+}
 
 check_placement(){
  local f=$1
- [[ $(grep -Ec 'CALL r340_surface_frame\(kt,[0-7]\)' "$f") -eq 8 ]] || return 1
- awk '/CALL sbc_ssm/{m=NR}/SELECT CASE\( nsbc \)/{s1=NR}/SELECT CASE\( nn_ice \)/{s3=NR}/CALL sbc_rnf/{s2=NR}/CALL r340_surface_frame\(kt,7\)/{x=NR} END{exit !(m<s1&&s1<s3&&s3<s2&&s2<x)}' "$f"
+ [[ $(grep -Ec 'CALL r340_surface_frame\(kt,([0-9]|1[01])\)' "$f") -eq 12 ]] || return 1
+ awk '/CALL sbc_ssm/{m=NR}/SELECT CASE\( nsbc \)/{s1=NR}/SELECT CASE\( nn_ice \)/{s3=NR}/CALL sbc_rnf/{r=NR}/CALL sbc_ssr/{q=NR}/CALL sbc_fwb/{w=NR}/CALL r340_surface_frame\(kt,11\)/{x=NR} END{exit !(m<s1&&s1<s3&&s3<r&&r<q&&q<w&&w<x)}' "$f"
 }
 check_other_placements(){
  local d=$1
@@ -68,6 +85,7 @@ check_other_placements(){
  [[ $(grep -Fc 'CALL r340_state_frame' "$d/stprk3_stg.F90") -eq 1 ]] || return 1
  [[ $(grep -Fc 'CALL r340_fld_frame' "$d/fldread.F90") -eq 1 ]] || return 1
  [[ $(grep -Fc 'CALL r340_iif_frame' "$d/sbcice_if.F90") -eq 4 ]] || return 1
+ [[ $(grep -Ec 'CALL r340_s1_(turb|flux)_frame' "$d/sbcblk.F90") -eq 2 ]] || return 1
  awk '/^[[:space:]]*IF.*CALL isf_stp/{a=NR}/CALL r340_state_frame/{b=NR}/CALL sbc        /{c=NR} END{exit !(a<b&&b<c)}' "$d/stprk3.F90" || return 1
  awk '/CALL r340_state_frame/{a=NR}/DEALLOCATE\( zFu/{b=NR} END{exit !(a<b)}' "$d/stprk3_stg.F90" || return 1
  awk '/end loop over field/{a=NR}/CALL r340_fld_frame/{b=NR} END{exit !(a<b)}' "$d/fldread.F90" || return 1
@@ -75,25 +93,39 @@ check_other_placements(){
 }
 
 scratch=$(mktemp -d /tmp/orca2-r340-preflight.XXXXXX)
-cleanup(){ local rc=$?; trap - EXIT; printf 'R340_SCRATCH_RETAINED %s rc=%s\n' "$scratch" "$rc" >&2; exit "$rc"; }
+active_run=
+cleanup(){
+ local rc=$?; trap - EXIT
+ if [[ $rc -ne 0 && -n $active_run && -d $active_run ]]; then
+   mkdir -p "$EVIDENCE/refused"
+   mv "$active_run" "$EVIDENCE/refused/$(basename "$active_run").failed.$$"
+   printf 'R340_REFUSED_RUN_RETAINED %s\n' "$EVIDENCE/refused/$(basename "$active_run").failed.$$" >&2
+ fi
+ printf 'R340_SCRATCH_RETAINED %s rc=%s\n' "$scratch" "$rc" >&2
+ exit "$rc"
+}
 trap cleanup EXIT
 cp "$K0_RUN/build_sources/ppsrc/nemo/sbcmod.f90" "$scratch/sbcmod.F90"
 cp "$K0_RUN/build_sources/ppsrc/nemo/stprk3.f90" "$scratch/stprk3.F90"
 cp "$K0_RUN/build_sources/ppsrc/nemo/stprk3_stg.f90" "$scratch/stprk3_stg.F90"
 cp "$K0_RUN/build_sources/ppsrc/nemo/fldread.f90" "$scratch/fldread.F90"
 cp "$K0_RUN/build_sources/ppsrc/nemo/sbcice_if.f90" "$scratch/sbcice_if.F90"
+cp "$K0_RUN/build_sources/ppsrc/nemo/sbcblk.f90" "$scratch/sbcblk.F90"
+cp "$K0_RUN/build_sources/ppsrc/nemo/sbcfwb.f90" "$scratch/sbcfwb.F90"
 patch --batch -s --fuzz=0 -p0 -d "$scratch" <"$SURFACE_PATCH"
 patch --batch -s --fuzz=0 -p0 -d "$scratch" <"$STATE_PATCH"
 patch --batch -s --fuzz=0 -p0 -d "$scratch" <"$STAGE_PATCH"
 patch --batch -s --fuzz=0 -p0 -d "$scratch" <"$FLD_PATCH"
 patch --batch -s --fuzz=0 -p0 -d "$scratch" <"$IIF_PATCH"
+patch --batch -s --fuzz=0 -p0 -d "$scratch" <"$BLK_PATCH"
+patch --batch -s --fuzz=0 -p0 -d "$scratch" <"$FWB_PATCH"
 "$PY" - "$scratch" "$K0_RUN/build_sources/ppsrc/nemo" \
-  "$SURFACE_PATCH" "$STATE_PATCH" "$STAGE_PATCH" "$FLD_PATCH" "$IIF_PATCH" <<'PY'
+  "$SURFACE_PATCH" "$STATE_PATCH" "$STAGE_PATCH" "$FLD_PATCH" "$IIF_PATCH" "$BLK_PATCH" "$FWB_PATCH" <<'PY'
 import sys
 from pathlib import Path
 from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round328_dynzdf_gate as g
 scratch, reference = Path(sys.argv[1]), Path(sys.argv[2])
-units = dict(zip(('sbcmod','stprk3','stprk3_stg','fldread','sbcice_if'), map(Path,sys.argv[3:]), strict=True))
+units = dict(zip(('sbcmod','stprk3','stprk3_stg','fldread','sbcice_if','sbcblk','sbcfwb'), map(Path,sys.argv[3:]), strict=True))
 for unit, patch in units.items():
     baseline=(reference/f'{unit}.f90').read_text().splitlines()
     observed=(scratch/f'{unit}.F90').read_text().splitlines()
@@ -104,25 +136,27 @@ planted=observed.copy(); planted.insert(-1,'      CALL r340_unregistered_physics
 try: g._observer_only(baseline,planted,inserted,'sbcice_if')
 except g.GateError: print('PREFLIGHT_PLANT_FIRED same-program-ppsrc')
 else: raise AssertionError('unregistered real-ppsrc insertion stayed green')
-print('R340_SAME_PROGRAM_PPSRC_PASS units=5')
+print('R340_SAME_PROGRAM_PPSRC_PASS units=7')
 PY
 check_placement "$scratch/sbcmod.F90" || refuse 'surface observers moved'
 check_other_placements "$scratch" || refuse 'state/fld/ice-if observers moved'
 cp "$scratch/sbcmod.F90" "$scratch/placement.plant"
 sed -i '/r340_surface_frame(kt,5)/d' "$scratch/placement.plant"
 plant_must_refuse placement check_placement "$scratch/placement.plant"
-for unit in stprk3 stprk3_stg fldread sbcice_if; do
+for unit in stprk3 stprk3_stg fldread sbcice_if sbcblk; do
   mkdir "$scratch/$unit.plant"
-  cp "$scratch"/{stprk3,stprk3_stg,fldread,sbcice_if}.F90 "$scratch/$unit.plant/"
+  cp "$scratch"/{stprk3,stprk3_stg,fldread,sbcice_if,sbcblk}.F90 "$scratch/$unit.plant/"
   sed -i '0,/CALL r340_/d' "$scratch/$unit.plant/$unit.F90"
   plant_must_refuse "placement-$unit" check_other_placements "$scratch/$unit.plant"
 done
-mkdir "$scratch/mod"
-"$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -I "$K0_BUILD/BLD/inc" -J "$scratch/mod" -fsyntax-only "$SURFACE_WRITER" "$STATE_WRITER"
-"$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -I "$K0_BUILD/BLD/inc" -J "$scratch/mod" -c "$SURFACE_WRITER" -o "$scratch/surface-writer.o"
+mkdir "$scratch/base-mod" "$scratch/mod"
+for unit in sbcmod stprk3 stprk3_stg fldread sbcice_if sbcblk sbcfwb; do
+  "$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -I "$K0_BUILD/BLD/inc" -J "$scratch/base-mod" -c "$K0_RUN/build_sources/ppsrc/nemo/$unit.f90" -o "$scratch/$unit.base.o"
+done
+"$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -I "$K0_BUILD/BLD/inc" -J "$scratch/mod" -c "$scratch/sbcfwb.F90" -o "$scratch/sbcfwb.observed.o"
+"$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -I "$scratch/mod" -I "$K0_BUILD/BLD/inc" -J "$scratch/mod" -c "$SURFACE_WRITER" -o "$scratch/surface-writer.o"
 "$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -I "$K0_BUILD/BLD/inc" -J "$scratch/mod" -c "$STATE_WRITER" -o "$scratch/state-writer.o"
-for unit in sbcmod stprk3 stprk3_stg fldread sbcice_if; do
-  "$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -I "$K0_BUILD/BLD/inc" -J "$scratch/mod" -c "$K0_RUN/build_sources/ppsrc/nemo/$unit.f90" -o "$scratch/$unit.base.o"
+for unit in fldread sbcblk sbcice_if sbcmod stprk3 stprk3_stg; do
   "$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -I "$scratch/mod" -I "$K0_BUILD/BLD/inc" -J "$scratch/mod" -c "$scratch/$unit.F90" -o "$scratch/$unit.observed.o"
 done
 # Exercise the imported round-328 whole-build proof on a dry K0 build made
@@ -133,7 +167,7 @@ cp -as "$K0_BUILD/BLD/obj" "$scratch/dry-bld/obj"
 for name in arch_nemo.fcm cpp.fcm bld.cfg; do
   sed "s/$K0_CFG/$TARGET_CFG/g" "$K0_BUILD/BLD/$name" >"$scratch/dry-bld/$name"
 done
-for unit in sbcmod stprk3 stprk3_stg fldread sbcice_if; do
+for unit in sbcmod stprk3 stprk3_stg fldread sbcice_if sbcblk sbcfwb; do
   unlink "$scratch/dry-bld/ppsrc/nemo/$unit.f90"
   unlink "$scratch/dry-bld/obj/$unit.o"
   cp "$scratch/$unit.F90" "$scratch/dry-bld/ppsrc/nemo/$unit.f90"
@@ -143,21 +177,21 @@ cp "$SURFACE_WRITER" "$scratch/dry-bld/ppsrc/nemo/round340_surface_writer.f90"
 cp "$STATE_WRITER" "$scratch/dry-bld/ppsrc/nemo/round340_state_writer.f90"
 cp "$scratch/surface-writer.o" "$scratch/dry-bld/obj/round340_surface_writer.o"
 cp "$scratch/state-writer.o" "$scratch/dry-bld/obj/round340_state_writer.o"
-"$PY" - "$scratch/dry-bld" "$K0_BUILD/BLD" "$SURFACE_PATCH" "$STATE_PATCH" "$STAGE_PATCH" "$FLD_PATCH" "$IIF_PATCH" "$TARGET_CFG" "$K0_CFG" <<'PY'
+"$PY" - "$scratch/dry-bld" "$K0_BUILD/BLD" "$SURFACE_PATCH" "$STATE_PATCH" "$STAGE_PATCH" "$FLD_PATCH" "$IIF_PATCH" "$BLK_PATCH" "$FWB_PATCH" "$TARGET_CFG" "$K0_CFG" <<'PY'
 import sys
 from pathlib import Path
 from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round328_dynzdf_gate as g
-g.same_program_observers(Path(sys.argv[1]),Path(sys.argv[2]),{'sbcmod':Path(sys.argv[3]),'stprk3':Path(sys.argv[4]),'stprk3_stg':Path(sys.argv[5]),'fldread':Path(sys.argv[6]),'sbcice_if':Path(sys.argv[7])},('round340_surface_writer','round340_state_writer'),new_cfg=sys.argv[8],ref_cfg=sys.argv[9])
+g.same_program_observers(Path(sys.argv[1]),Path(sys.argv[2]),dict(zip(('sbcmod','stprk3','stprk3_stg','fldread','sbcice_if','sbcblk','sbcfwb'),map(Path,sys.argv[3:10]),strict=True)),('round340_surface_writer','round340_state_writer'),new_cfg=sys.argv[10],ref_cfg=sys.argv[11])
 print('R340_SAME_PROGRAM_DRY_BUILD_PASS')
 PY
 unlink "$scratch/dry-bld/ppsrc/nemo/iceupdate.f90"
 cp "$K0_BUILD/BLD/ppsrc/nemo/iceupdate.f90" "$scratch/dry-bld/ppsrc/nemo/iceupdate.f90"
 printf '! unregistered plant\n' >>"$scratch/dry-bld/ppsrc/nemo/iceupdate.f90"
-plant_must_refuse same-program-build "$PY" - "$scratch/dry-bld" "$K0_BUILD/BLD" "$SURFACE_PATCH" "$STATE_PATCH" "$STAGE_PATCH" "$FLD_PATCH" "$IIF_PATCH" "$TARGET_CFG" "$K0_CFG" <<'PY'
+plant_must_refuse same-program-build "$PY" - "$scratch/dry-bld" "$K0_BUILD/BLD" "$SURFACE_PATCH" "$STATE_PATCH" "$STAGE_PATCH" "$FLD_PATCH" "$IIF_PATCH" "$BLK_PATCH" "$FWB_PATCH" "$TARGET_CFG" "$K0_CFG" <<'PY'
 import sys
 from pathlib import Path
 from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round328_dynzdf_gate as g
-g.same_program_observers(Path(sys.argv[1]),Path(sys.argv[2]),{'sbcmod':Path(sys.argv[3]),'stprk3':Path(sys.argv[4]),'stprk3_stg':Path(sys.argv[5]),'fldread':Path(sys.argv[6]),'sbcice_if':Path(sys.argv[7])},('round340_surface_writer','round340_state_writer'),new_cfg=sys.argv[8],ref_cfg=sys.argv[9])
+g.same_program_observers(Path(sys.argv[1]),Path(sys.argv[2]),dict(zip(('sbcmod','stprk3','stprk3_stg','fldread','sbcice_if','sbcblk','sbcfwb'),map(Path,sys.argv[3:10]),strict=True)),('round340_surface_writer','round340_state_writer'),new_cfg=sys.argv[10],ref_cfg=sys.argv[11])
 PY
 cp "$scratch/sbcmod.F90" "$scratch/sbcmod.arithmetic-plant.F90"
 sed -i 's/zwdht = ssh/zwdht = 1.0001_wp * ssh/' "$scratch/sbcmod.arithmetic-plant.F90"
@@ -167,7 +201,7 @@ import sys
 from pathlib import Path
 from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round339_common as c
 r=Path(sys.argv[1])
-for name,pattern in [('sbcmod','MOD_sbc$'),('stprk3','MOD_stp_rk3$'),('stprk3_stg','MOD_stp_rk3_stg$'),('fldread','MOD_fld_read$'),('sbcice_if','MOD_sbc_ice_if$')]:
+for name,pattern in [('sbcmod','MOD_sbc$'),('stprk3','MOD_stp_rk3$'),('stprk3_stg','MOD_stp_rk3_stg$'),('fldread','MOD_fld_read$'),('sbcice_if','MOD_sbc_ice_if$'),('sbcblk','MOD_(sbc_blk|blk_oce_[12])$'),('sbcfwb','MOD_sbc_fwb$')]:
     census=c.compare_fp_census(r/f'{name}.base.o',r/f'{name}.observed.o',function_pattern=pattern)
     print('R340_PRODUCTION_FP_CENSUS',name,census)
 try: c.compare_fp_census(r/'sbcmod.base.o',r/'sbcmod.arithmetic-plant.o',function_pattern='MOD_sbc$')
@@ -182,26 +216,36 @@ cat >"$scratch/fixture_stubs.F90" <<'EOF'
 MODULE par_oce
  USE,INTRINSIC::iso_fortran_env,ONLY:real64
  INTEGER,PARAMETER::wp=real64
- INTEGER::jpi=6,jpj=5
+ INTEGER,PARAMETER::jpi=6,jpj=5,jpk=3,jpts=2
 END MODULE
 MODULE lib_mpp; INTEGER::mpprank=0; END MODULE
 MODULE sbc_oce
  USE par_oce,ONLY:wp
  REAL(wp),ALLOCATABLE::sst_m(:,:),sss_m(:,:),ssu_m(:,:),ssv_m(:,:),ssh_m(:,:),e3t_m(:,:),frq_m(:,:)
- REAL(wp),ALLOCATABLE::utau(:,:),vtau(:,:),utauU(:,:),vtauV(:,:),qsr(:,:),qns(:,:),emp(:,:),sfx(:,:),taum(:,:),wndm(:,:)
+ REAL(wp),ALLOCATABLE::utau(:,:),vtau(:,:),utauU(:,:),vtauV(:,:),qsr(:,:),qns(:,:),emp(:,:),sfx(:,:),taum(:,:),wndm(:,:),rnf(:,:),fr_i(:,:)
 END MODULE
+MODULE sbcrnf; USE par_oce,ONLY:wp; REAL(wp),ALLOCATABLE::rnf_tsc(:,:,:); END MODULE
+MODULE sbcssr; USE par_oce,ONLY:wp; REAL(wp),ALLOCATABLE::erp(:,:),qrp(:,:),coefice(:,:); END MODULE
+MODULE sbcfwb; USE par_oce,ONLY:wp; REAL(wp)::a_fwb,a_fwb_b; END MODULE
 EOF
 mkdir "$scratch/stub-mod" "$scratch/check-mod"
 "$FC" -c -J "$scratch/stub-mod" "$scratch/fixture_stubs.F90" -o "$scratch/fixture-stubs.o"
 "$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -fcheck=bounds -ffunction-sections \
-  -I "$K0_BUILD/BLD/inc" -J "$scratch/check-mod" -c "$SURFACE_WRITER" -o "$scratch/surface-check.o"
+  -I "$scratch/stub-mod" -J "$scratch/check-mod" -c "$SURFACE_WRITER" -o "$scratch/surface-check.o"
 "$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -fcheck=bounds -ffunction-sections \
-  -I "$scratch/check-mod" -I "$K0_BUILD/BLD/inc" -J "$scratch/check-mod" \
-  -c "$scratch/sbcmod.F90" -o "$scratch/sbcmod-check.o"
+  -I "$scratch/stub-mod" -J "$scratch/check-mod" -c "$STATE_WRITER" -o "$scratch/state-check.o"
+# Checklist 5: every patched production unit is compiled under bounds checking
+# against the admitted K0 interfaces; the linked fixture executes both writer
+# modules with rank-distinct and signed-zero data.
+mkdir "$scratch/bounds-mod"
+"$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -fcheck=bounds -ffunction-sections -I "$K0_BUILD/BLD/inc" -J "$scratch/bounds-mod" -c "$scratch/sbcfwb.F90" -o "$scratch/sbcfwb-bounds.o"
+for unit in fldread sbcblk sbcice_if sbcmod stprk3 stprk3_stg; do
+  "$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -fcheck=bounds -ffunction-sections -I "$scratch/bounds-mod" -I "$scratch/mod" -I "$K0_BUILD/BLD/inc" -J "$scratch/bounds-mod" -c "$scratch/$unit.F90" -o "$scratch/$unit-bounds.o"
+done
 "$FC" -fdefault-real-8 -fcheck=bounds -I "$scratch/check-mod" -I "$scratch/stub-mod" \
   -J "$scratch/check-mod" -c "$SURFACE_FIXTURE" -o "$scratch/fixture-check.o"
 "$MPIFC" -Wl,--gc-sections "$scratch/fixture-stubs.o" "$scratch/surface-check.o" \
-  "$scratch/sbcmod-check.o" "$scratch/fixture-check.o" -o "$scratch/surface-fixture"
+  "$scratch/state-check.o" "$scratch/fixture-check.o" -o "$scratch/surface-fixture"
 for rank in 0 1; do
   (cd "$scratch" && ./surface-fixture "$rank") >"$scratch/fixture-$rank.log"
   grep -E "R340_SURFACE_FIXTURE_PASS[[:space:]]+$rank$" "$scratch/fixture-$rank.log" >/dev/null \
@@ -213,7 +257,8 @@ from pathlib import Path
 from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round340_standalone_gate as g
 root=Path(sys.argv[1])
 for path in sorted(root.glob('oracle_r340_surface_*.bin')): g.inspect_exact_record(path)
-print('R340_PATCHED_SOURCE_BOUNDS_FIXTURE_PASS ranks=2 signed_zero=true')
+for path in sorted(root.glob('oracle_r340_state_*.bin')): g.inspect_exact_record(path)
+print('R340_PATCHED_SOURCE_BOUNDS_FIXTURE_PASS units=7 writers=2 ranks=2 signed_zero=true')
 PY
 "$PY" - "$ICE_RUN" "$K0_RUN" <<'PY'
 import sys
@@ -259,13 +304,15 @@ else
   (cd "$run" && timeout --kill-after=10 900 mpirun -np 2 --oversubscribe ./nemo >run.user.stdout.log 2>&1)
 fi
 grep 'STOP 0' "$run/run.user.stdout.log" >/dev/null
-! grep -Eq 'E R R O R|STOP [1-9]' "$run/run.user.stdout.log"
-armed=0
+[[ -f "$run/ocean.output" ]]
+grep 'STOP 0' "$run/ocean.output" >/dev/null
+! grep -Eq 'E R R O R|STOP [1-9]' "$run/run.user.stdout.log" "$run/ocean.output"
 DRIVER
 chmod +x "$scratch/execute.sh"; bash -n "$scratch/execute.sh"
 cat >"$scratch/nemo-stub" <<'STUB'
 #!/usr/bin/env bash
 printf 'STOP 0\n'
+printf 'STOP 0\n' >ocean.output
 STUB
 chmod +x "$scratch/nemo-stub"
 mkdir "$scratch/source-template" "$scratch/k0-template"
@@ -279,44 +326,56 @@ find "$scratch/refused" -maxdepth 1 -type d -name 'stub-refuse.failed.*' -print 
 sed 's/set -Eeuo pipefail/set -Eeuo pipefail\nif then/' "$scratch/execute.sh" >"$scratch/syntax.plant"
 plant_must_refuse generated-syntax bash -n "$scratch/syntax.plant"
 synthetic=$scratch/admission-control
-mkdir -p "$synthetic/run/build_sources/MY_SRC" "$synthetic/run/build_sources/ppsrc/nemo" "$synthetic/refused"
-printf 'synthetic nemo\n' >"$synthetic/run/nemo"
-printf 'program synthetic\n' >"$synthetic/run/build_sources/ppsrc/nemo/synthetic.f90"
-"$PY" - "$synthetic/run" "$(git -C "$REPO" rev-parse HEAD)" <<'PY'
-import sys
+mkdir -p "$synthetic/a/build_sources/MY_SRC" "$synthetic/a/build_sources/ppsrc/nemo" \
+ "$synthetic/b/build_sources/MY_SRC" "$synthetic/b/build_sources/ppsrc/nemo" "$synthetic/parent" "$synthetic/refused"
+"$PY" - "$synthetic" "$(git -C "$REPO" rev-parse HEAD)" <<'PY'
+import shutil,struct,sys
 from pathlib import Path
+import numpy as np
 from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round339_common as c
-r=Path(sys.argv[1]); files=[p for p in r.rglob('*') if p.is_file()]
-c.write_manifest(r/'producer_manifest.json',producer_commit=sys.argv[2],binary=r/'nemo',files=files,root=r,build_source_root=r/'build_sources')
+root=Path(sys.argv[1]); commit=sys.argv[2]
+for rank in (0,1): (root/'parent'/f'ORCA2_00000010_restart_{rank:04d}.nc').write_bytes(b'restart'+bytes([rank]))
+def write(run):
+    (run/'nemo').write_bytes(b'synthetic nemo\n')
+    (run/'run.user.stdout.log').write_text('STOP 0\n')
+    (run/'ocean.output').write_text('STOP 0\n')
+    (run/'build_sources/ppsrc/nemo/synthetic.f90').write_text('program synthetic\n')
+    z=np.zeros
+    for kt in range(1,11):
+      for rank in (0,1):
+       for kid in range(12):
+        h=b'NEMO_R340_S4_2  '+struct.pack('=7i',2,kt,kid,rank,6,5,64)+struct.pack('=4i',3,4,3,3)
+        (run/f'oracle_r340_surface_k{kt:08d}_b{kid:02d}_r{rank:04d}.bin').write_bytes(h+z(442,'=f8').tobytes())
+       for stage,level in ((0,1 if kt%2 else 3),(1,3 if kt%2 else 1),(2,2),(3,3 if kt%2 else 1)):
+        h=b'NEMO_R340_STATE1'+struct.pack('=10i',1,kt,stage,level,rank,6,5,3,2,64)
+        (run/f'oracle_r340_state_k{kt:08d}_s{stage}_r{rank:04d}.bin').write_bytes(h+z(390,'=f8').tobytes())
+       for kid in ((0,1,2,3) if kt%2 else (0,3)):
+        h=b'NEMO_R340_IIF_1 '+struct.pack('=9i',1,kt,kid,1 if kt%2 else 3,1 if kt%2 else 3,rank,6,5,64)+struct.pack('=5i',3,3,4,3,2)
+        (run/f'oracle_r340_iif_k{kt:08d}_b{kid}_r{rank:04d}.bin').write_bytes(h+z(314,'=f8').tobytes())
+       if kt%2:
+        for kind,kid,n,name in ((b'NEMO_R340_S1T_1 ',0,19,'s1t'),(b'NEMO_R340_S1F_1 ',1,6,'s1f')):
+         h=kind+struct.pack('=7i',1,kt,kid,rank,2,1,64)
+         (run/f'oracle_r340_{name}_k{kt:08d}_r{rank:04d}.bin').write_bytes(h+z(2*n,'=f8').tobytes())
+       h=b'NEMO_R340_FLDRD1'+struct.pack('=9i',1,kt,1,1,rank,0,1,2,64)+b'tair'.ljust(34)+struct.pack('=4i',1,2,3,4)+z(1,'=f8').tobytes()+struct.pack('=7i',1,1,1,2,1,1,2)+z(2,'=f8').tobytes()+struct.pack('=10i',0,0,0,0,0,0,0,0,0,0)
+       (run/f'oracle_r340_fld_k{kt:08d}_c001_f001_r{rank:04d}.bin').write_bytes(h)
+       shutil.copy2(root/'parent'/f'ORCA2_00000010_restart_{rank:04d}.nc',run/f'ORCA2_00000010_restart_{rank:04d}.nc')
+    files=[p for p in run.rglob('*') if p.is_file() and p.name!='producer_manifest.json']
+    c.write_manifest(run/'producer_manifest.json',producer_commit=commit,binary=run/'nemo',files=files,root=run,build_source_root=run/'build_sources')
+write(root/'a'); shutil.copytree(root/'a',root/'b',dirs_exist_ok=True)
 PY
-mv "$synthetic/run" "$synthetic/refused/run.failed.control"
-R340_ADMISSION_IDENTITY_ONLY=1 R340_ADMISSION_TEST_ROOT=$synthetic \
- R340_EXISTING_RUN=$synthetic/refused/run.failed.control "$0" --admit-existing \
- >"$scratch/retained-admission.log"
-grep -F R340_RETAINED_IDENTITY_ADMISSION_PASS "$scratch/retained-admission.log" >/dev/null \
- || refuse 'generated retained --admit-existing flow failed'
-printf 'PREFLIGHT_RETAINED_ADMISSION_PASS route=refused\n'
-printf 'checksum plant\n' >>"$synthetic/refused/run.failed.control/nemo"
-plant_must_refuse retained-checksum env R340_ADMISSION_IDENTITY_ONLY=1 \
- R340_ADMISSION_TEST_ROOT=$synthetic R340_EXISTING_RUN=$synthetic/refused/run.failed.control \
- "$0" --admit-existing
+mv "$synthetic/a" "$synthetic/refused/a.failed.control"
+mv "$synthetic/b" "$synthetic/refused/b.failed.control"
+admit_pair "$synthetic/refused/a.failed.control" "$synthetic/refused/b.failed.control" "$synthetic/parent" >"$scratch/retained-admission.log"
+grep -F ORCA2_ROUND340_S4_TWINS_ADMITTED "$scratch/retained-admission.log" >/dev/null || refuse 'retained admission failed'
+printf 'PREFLIGHT_RETAINED_ADMISSION_PASS route=refused full=true\n'
+printf 'checksum plant\n' >>"$synthetic/refused/a.failed.control/nemo"
+plant_must_refuse retained-checksum admit_one "$synthetic/refused/a.failed.control" "$synthetic/parent"
 
-admit(){
- local root=$1
- local expected_commit
- expected_commit=$(git -C "$REPO" rev-parse HEAD)
- "$PY" - "$root" "$expected_commit" <<'PY'
-import sys
-from pathlib import Path
-from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round339_common as c
-from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round340_standalone_gate as g
-r=Path(sys.argv[1]); c.verify_manifest(r/'producer_manifest.json',expected_commit=sys.argv[2])
-inventory=g.inspect_acquisition_records(r)
-print('ORCA2_ROUND340_S4_ACQUISITION_PASS',r,inventory)
-PY
-}
 if [[ "$MODE" == --preflight-only ]]; then printf 'ORCA2_ROUND340_S4_PREFLIGHT_READY\n'; exit 0; fi
-if [[ "$MODE" == --admit-existing ]]; then admit "${R340_EXISTING_RUN:-$RUN_A}"; exit 0; fi
+if [[ "$MODE" == --admit-existing ]]; then
+ admit_pair "${R340_EXISTING_RUN_A:-$RUN_A}" "${R340_EXISTING_RUN_B:-$RUN_B}"
+ exit 0
+fi
 
 [[ -z $(git -C "$REPO" status --porcelain --untracked-files=all) ]] || refuse 'run requires a clean committed tree'
 [[ ! -e "$TARGET_BUILD" && ! -e "$RUN_A" && ! -e "$RUN_B" ]] || refuse 'retain/move existing build and runs before retry'
@@ -331,17 +390,22 @@ cp "$K0_RUN/build_sources/ppsrc/nemo/stprk3.f90" "$TARGET_BUILD/MY_SRC/stprk3.F9
 cp "$K0_RUN/build_sources/ppsrc/nemo/stprk3_stg.f90" "$TARGET_BUILD/MY_SRC/stprk3_stg.F90"
 cp "$K0_RUN/build_sources/ppsrc/nemo/fldread.f90" "$TARGET_BUILD/MY_SRC/fldread.F90"
 cp "$K0_RUN/build_sources/ppsrc/nemo/sbcice_if.f90" "$TARGET_BUILD/MY_SRC/sbcice_if.F90"
+cp "$K0_RUN/build_sources/ppsrc/nemo/sbcblk.f90" "$TARGET_BUILD/MY_SRC/sbcblk.F90"
+cp "$K0_RUN/build_sources/ppsrc/nemo/sbcfwb.f90" "$TARGET_BUILD/MY_SRC/sbcfwb.F90"
 cp "$SURFACE_WRITER" "$STATE_WRITER" "$TARGET_BUILD/MY_SRC/"
 patch --batch -s --fuzz=0 -p0 -d "$TARGET_BUILD/MY_SRC" <"$SURFACE_PATCH"
 patch --batch -s --fuzz=0 -p0 -d "$TARGET_BUILD/MY_SRC" <"$STATE_PATCH"
 patch --batch -s --fuzz=0 -p0 -d "$TARGET_BUILD/MY_SRC" <"$STAGE_PATCH"
 patch --batch -s --fuzz=0 -p0 -d "$TARGET_BUILD/MY_SRC" <"$FLD_PATCH"
 patch --batch -s --fuzz=0 -p0 -d "$TARGET_BUILD/MY_SRC" <"$IIF_PATCH"
+patch --batch -s --fuzz=0 -p0 -d "$TARGET_BUILD/MY_SRC" <"$BLK_PATCH"
+patch --batch -s --fuzz=0 -p0 -d "$TARGET_BUILD/MY_SRC" <"$FWB_PATCH"
 cp -a "$K0_BUILD/EXP00/." "$TARGET_BUILD/EXP00/"
 cp "$K0_BUILD/cpp_$K0_CFG.fcm" "$TARGET_BUILD/cpp_$TARGET_CFG.fcm"
 ./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 obs=$TARGET_BUILD/BLD/bin/nemo.exe; [[ -x "$obs" ]] || refuse 'instrumented build failed'
 for run in "$RUN_A" "$RUN_B"; do
+  active_run=$run
   "$scratch/execute.sh" "$run" "$obs" "$SOURCE_RUN" "$K0_RUN"
   cp "$K0_RUN/producer_manifest.json" "$run/k0_parent_manifest.json"
   mkdir -p "$run/build_sources/MY_SRC" "$run/build_sources/ppsrc"
@@ -354,19 +418,18 @@ from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_roun
 r=Path(sys.argv[1]); files=[p for p in r.rglob('*') if p.is_file() and p.name!='producer_manifest.json']
 c.write_manifest(r/'producer_manifest.json',producer_commit=sys.argv[2],binary=r/'nemo',files=files,root=r,build_source_root=r/'build_sources')
 PY
+  admit_one "$run"
+  active_run=
 done
-admit "$RUN_A"
-admit "$RUN_B"
+admit_pair "$RUN_A" "$RUN_B"
 # The generic round-328 proof strips exactly the five observer patches and two writers.
-"$PY" - "$TARGET_BUILD/BLD" "$K0_BUILD/BLD" "$SURFACE_PATCH" "$STATE_PATCH" "$STAGE_PATCH" "$FLD_PATCH" "$IIF_PATCH" "$TARGET_CFG" "$K0_CFG" <<'PY'
+"$PY" - "$TARGET_BUILD/BLD" "$K0_BUILD/BLD" "$SURFACE_PATCH" "$STATE_PATCH" "$STAGE_PATCH" "$FLD_PATCH" "$IIF_PATCH" "$BLK_PATCH" "$FWB_PATCH" "$TARGET_CFG" "$K0_CFG" <<'PY'
 import sys
 from pathlib import Path
 from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round328_dynzdf_gate as g
-g.same_program_observers(Path(sys.argv[1]),Path(sys.argv[2]),{'sbcmod':Path(sys.argv[3]),'stprk3':Path(sys.argv[4]),'stprk3_stg':Path(sys.argv[5]),'fldread':Path(sys.argv[6]),'sbcice_if':Path(sys.argv[7])},('round340_surface_writer','round340_state_writer'),new_cfg=sys.argv[8],ref_cfg=sys.argv[9])
+g.same_program_observers(Path(sys.argv[1]),Path(sys.argv[2]),dict(zip(('sbcmod','stprk3','stprk3_stg','fldread','sbcice_if','sbcblk','sbcfwb'),map(Path,sys.argv[3:10]),strict=True)),('round340_surface_writer','round340_state_writer'),new_cfg=sys.argv[10],ref_cfg=sys.argv[11])
 PY
 cmp -s "$RUN_A/ORCA2_00000010_restart_0000.nc" "$K0_RUN/ORCA2_00000010_restart_0000.nc" || refuse 'observer changed rank-0 restart'
 cmp -s "$RUN_A/ORCA2_00000010_restart_0001.nc" "$K0_RUN/ORCA2_00000010_restart_0001.nc" || refuse 'observer changed rank-1 restart'
 cmp -s "$RUN_B/ORCA2_00000010_restart_0000.nc" "$K0_RUN/ORCA2_00000010_restart_0000.nc" || refuse 'twin observer changed rank-0 restart'
 cmp -s "$RUN_B/ORCA2_00000010_restart_0001.nc" "$K0_RUN/ORCA2_00000010_restart_0001.nc" || refuse 'twin observer changed rank-1 restart'
-diff <(cd "$RUN_A" && sha256sum oracle_r340_*.bin | sed 's|  .*\/|  |') <(cd "$RUN_B" && sha256sum oracle_r340_*.bin | sed 's|  .*\/|  |') >/dev/null || refuse 'reproducibility twins differ'
-printf 'ORCA2_ROUND340_S4_TWINS_ADMITTED\n'

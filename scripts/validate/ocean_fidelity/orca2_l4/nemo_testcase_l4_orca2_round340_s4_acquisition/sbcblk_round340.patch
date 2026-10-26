@@ -1,0 +1,17 @@
+--- sbcblk.F90
++++ sbcblk.F90
+@@ -12,0 +13 @@
++   USE round340_surface_writer, ONLY: r340_s1_turb_frame, r340_s1_flux_frame
+@@ -79,0 +81 @@
++   INTEGER, SAVE :: r340_s1_kt = -HUGE(0)
+@@ -665,0 +668 @@
++         r340_s1_kt = kt
+@@ -931,0 +935,6 @@
++      CALL r340_s1_turb_frame(kt,ptair,pqair, &
++         & pst(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)), &
++         & pu(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)), &
++         & pv(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)),ptsk,pssq,zcd_oce,zch_oce,zce_oce, &
++         & rhoa,psen,plat,pevp,qsr,utau(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)), &
++         & vtau(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)),taum,wndm)
+@@ -1028,0 +1038 @@
++      CALL r340_s1_flux_frame(r340_s1_kt,pprec,psnow,pdqlw,zqlw,qns,emp(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)))

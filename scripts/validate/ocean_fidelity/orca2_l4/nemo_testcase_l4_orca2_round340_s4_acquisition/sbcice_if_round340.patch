@@ -24,7 +24,7 @@
  
           DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)
              zt_fzp  = fr_i(ji,jj)                        ! freezing point temperature
-@@ -196,8 +199,25 @@
+@@ -196,8 +199,26 @@
           END DO   ;   END DO
           !
        ENDIF
@@ -43,8 +43,9 @@
 +      WRITE(iu) magic
 +      WRITE(iu) 1,kt,kid,Kbb,Kmm,mpprank,jpi,jpj,64
 +      WRITE(iu) LBOUND(qsr),UBOUND(qsr),SIZE(qsr)
-+      WRITE(iu) sf_ice(1)%fnow,sss_m,sst_m,ts(:,:,1,jp_tem,Kbb),ts(:,:,1,jp_tem,Kmm),fr_i
-+      WRITE(iu) qsr,qns,emp,sfx,utau,vtau,taum,wndm
++      WRITE(iu) sss_m,sst_m,ts(:,:,1,jp_tem,Kbb),ts(:,:,1,jp_tem,Kmm),fr_i,ff_f,tmask(:,:,1)
++      WRITE(iu) emp,utau,vtau
++      WRITE(iu) sf_ice(1)%fnow,qsr,qns,sfx,taum,wndm,smask0
 +      CLOSE(iu)
 +   END SUBROUTINE r340_iif_frame
 +

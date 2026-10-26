@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import inspect
 import struct
-from collections import OrderedDict
+from collections import OrderedDict, namedtuple
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -88,9 +89,19 @@ def _boundaries(value=0.0):
 def test_surface_first_then_unchanged_rung10_bar_and_plants():
     expected = _boundaries()
     actual = _boundaries()
-    rung_actual = OrderedDict(T=np.zeros(2), S=np.ones(2))
-    rung_expected = OrderedDict(T=np.zeros(2), S=np.ones(2))
-    result = gate.score_composed_card(actual, expected, rung_actual, rung_expected)
+    rung_expected = OrderedDict(
+        (f"kt{kt:02d}/{checkpoint}", OrderedDict(
+            T=np.zeros(2), S=np.ones(2), u=np.zeros(2), v=np.zeros(2), ssh=np.zeros(2)))
+        for kt in range(1, 11) for checkpoint in ("entry", "stage1", "stage2", "stage3")
+    )
+    rung_actual = OrderedDict(
+        (name, OrderedDict((field, value.copy()) for field, value in fields.items()))
+        for name, fields in rung_expected.items()
+    )
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(gate, "load_oracle_boundaries", lambda _root: expected)
+    monkeypatch.setattr(gate, "load_oracle_state_ladder", lambda _root: rung_expected)
+    result = gate.score_composed_card(actual, Path("unused"), rung_actual)
     assert result["status"] == "PASS_S4_EXACT"
 
     for boundary in gate.SURFACE_ORDER:
@@ -98,10 +109,15 @@ def test_surface_first_then_unchanged_rung10_bar_and_plants():
         planted[boundary]["a"][0] = np.nextafter(0.0, np.inf)
         with pytest.raises(gate.GateError, match="surface exact bar failed"):
             gate.score_composed_card(
-                planted, expected, rung_actual, rung_expected)
-    rung_actual["T"][0] = np.nextafter(0.0, np.inf)
+                planted, Path("unused"), rung_actual)
+    # The established rung-10 bar accepts a one-ULP non-bit row.
+    rung_actual["kt01/entry"]["T"][0] = np.nextafter(0.0, np.inf)
+    assert gate.score_composed_card(actual, Path("unused"), rung_actual)[
+        "rung10"]["kt01/entry/T"]["classification"] == "AT_BAR_NOT_EXACT"
+    rung_actual["kt01/entry"]["T"][0] = 2.0e-15
     with pytest.raises(gate.GateError, match="rung-10 bar failed"):
-        gate.score_composed_card(actual, expected, rung_actual, rung_expected)
+        gate.score_composed_card(actual, Path("unused"), rung_actual)
+    monkeypatch.undo()
 
 
 def test_no_nemo_exchange_record_api():
@@ -114,11 +130,11 @@ def test_no_nemo_exchange_record_api():
 def test_native_record_parser_checksum_adjacent_controls(tmp_path):
     path = tmp_path / "oracle_r340_surface_k00000001_b00_r0000.bin"
     header = (
-        b"NEMO_R340_S4_1  "
-        + struct.pack("=7i", 1, 1, 0, 0, 2, 2, 64)
+        b"NEMO_R340_S4_2  "
+        + struct.pack("=7i", 2, 1, 0, 0, 2, 2, 64)
         + struct.pack("=4i", 1, 2, 1, 2)
     )
-    path.write_bytes(header + np.zeros(68, dtype="=f8").tobytes())
+    path.write_bytes(header + np.zeros(98, dtype="=f8").tobytes())
     assert gate.inspect_exact_record(path) == {
         "kind": "surface", "kt": 1, "kid": 0, "rank": 0,
     }
@@ -126,7 +142,7 @@ def test_native_record_parser_checksum_adjacent_controls(tmp_path):
     path.write_bytes(path.read_bytes()[:-1])
     with pytest.raises(gate.GateError, match="truncated binary64 payload"):
         gate.inspect_exact_record(path)
-    path.write_bytes(header + np.full(68, np.nan, dtype="=f8").tobytes())
+    path.write_bytes(header + np.full(98, np.nan, dtype="=f8").tobytes())
     with pytest.raises(gate.GateError, match="non-finite"):
         gate.inspect_exact_record(path)
 
@@ -142,3 +158,89 @@ def test_native_state_time_level_plant(tmp_path):
     path.write_bytes(data)
     with pytest.raises(gate.GateError, match="time level moved"):
         gate.inspect_exact_record(path)
+
+
+def test_composed_card_steps_a_three_dimensional_ocean_state():
+    """Production binding plant: the result is a 3-D ocean step, not q_net."""
+
+    deck = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    if not deck.exists():
+        pytest.skip("ORCA2 immutable input deck is not installed")
+    card = bulk.build_nemo_orca2_k0_ocean_card(deck)
+    shape = (2, 3)
+    one = jnp.ones(shape, dtype=jnp.float64)
+    zero = jnp.zeros(shape, dtype=jnp.float64)
+    Field = namedtuple("Field", "data")
+    State = namedtuple("State", "T S u v eta")
+    state = State(
+        Field(jnp.ones(shape + (2,), dtype=jnp.float64)),
+        Field(34.0 * jnp.ones(shape + (2,), dtype=jnp.float64)),
+        Field(jnp.zeros((2, 4, 2), dtype=jnp.float64)),
+        Field(jnp.zeros((3, 3, 2), dtype=jnp.float64)),
+        Field(zero),
+    )
+    _, old_s0, old_iif, s2 = _production_surface_case()
+    means = bulk.NemoSurfaceMeans(*(zero for _ in range(7)))
+    s0 = old_s0._replace(
+        prior=means, u_before=zero, v_before=zero, temperature_now=zero,
+        salinity_now=zero, ssh_now=zero, ssh_inverse_barometer=zero,
+        e3t_reference=one, r3t_now=zero, surface_mask=one,
+        shortwave_fraction_top=one,
+    )
+    iif = old_iif._replace(
+        fdta_before=0.25 * one, fdta_after=0.75 * one,
+        sss_m=zero, sst_m=zero, ts_surface=zero, ff_f=one,
+        tmask_surface=one, smask0=one,
+    )
+    fields = bulk.NemoStandaloneAtmosphereFields(
+        6 * one, -2 * one, 286 * one, 0.006 * one, 100800 * one,
+        125 * one, 310 * one, 2.3e-5 * one, 3.0e-6 * one,
+    )
+    pair = bulk.NemoStandaloneFieldPair(zero, zero, 0, -10, 10)
+    s0f = bulk.NemoStandaloneS0FInputs(fields, fields, 0, -10, 10, pair, pair)
+
+    class ThreeDimensionalOcean:
+        def step(self, live, dt, *, freshwater, surface_forcing, **_):
+            increment = surface_forcing.q_net[..., None] * jnp.asarray(dt) * 1.0e-12
+            return live._replace(T=Field(live.T.data + increment))
+
+    def objective(wind):
+        moved = fields._replace(u_wind=wind)
+        forcing = s0f._replace(before=moved, after=moved)
+        result = bulk.nemo_orca2_k0_ocean_step(
+            card, state, s0f=forcing, ice_if=iif, s0=s0, s2=s2,
+            model=ThreeDimensionalOcean(), nemo_kt=1,
+        )
+        assert result.ocean.T.data.ndim == 3
+        return jnp.sum(result.ocean.T.data)
+
+    direction = jnp.linspace(0.5, 1.0, 6, dtype=jnp.float64).reshape(shape)
+    _, forward = jax.jvp(objective, (fields.u_wind,), (direction,))
+    reverse = jnp.vdot(jax.grad(objective)(fields.u_wind), direction)
+    assert np.isfinite(np.asarray(forward)) and np.isfinite(np.asarray(reverse))
+    np.testing.assert_allclose(reverse, forward, rtol=2.0e-14, atol=2.0e-14)
+
+    Trace = namedtuple("Trace", "state_after stage_outputs")
+
+    class TenStepOcean:
+        def __init__(self):
+            self.calls = 0
+
+        def step(self, live, dt, *, freshwater, surface_forcing, **_):
+            self.calls += 1
+            increment = surface_forcing.q_net[..., None] * jnp.asarray(dt) * 1.0e-12
+            after = live._replace(T=Field(live.T.data + increment))
+            stage = (after.u.data, after.v.data, after.T.data,
+                     after.S.data, after.eta.data)
+            return Trace(after, (stage, stage, stage))
+
+    model = TenStepOcean()
+    controls = {
+        "s0f": s0f, "ice_if": iif, "s0": s0, "s2": s2,
+    }
+    replay = gate.run_composed_card(
+        card, state, (controls.copy() for _ in range(10)), model=model)
+    assert model.calls == 10
+    assert len(replay["rung10"]) == 40
+    assert sum(len(row) for row in replay["rung10"].values()) == 200
+    assert replay["state_after"].T.data.ndim == 3
