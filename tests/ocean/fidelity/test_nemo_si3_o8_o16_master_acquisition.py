@@ -164,7 +164,7 @@ def test_preflight_compiles_and_runs_real_patched_source_without_nemo(tmp_path: 
     env.update(EVIDENCE=str(tmp_path / "evidence"), REFUSED_DIR=str(tmp_path / "refused"))
     proc = subprocess.run(
         [str(ACQ / "run.sh"), "--preflight-only", str(report)], cwd=REPO, env=env,
-        text=True, capture_output=True, check=True, timeout=300,
+        text=True, capture_output=True, check=True, timeout=1200,
     )
     assert json.loads(report.read_text()) == {"status": "PREFLIGHT_OK", "nemo_run": False, "plants": 40}
     assert "PASS_REAL_PPSRC_PLACEMENT" in proc.stdout

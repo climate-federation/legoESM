@@ -78,10 +78,11 @@ physics result or fidelity claim is made here.
 
 ## Gates
 
-- Acquisition unit tests and complete preflight: 22 passed.
+- Acquisition unit checks: 21 passed; the complete clean-tree preflight passed
+  separately through all ten phases and the full driver retention fixture.
 - Required default receipt-citation gate and this receipt's 16 live source
   citations: PASS; the shifted-line control exits nonzero with a FAIL verdict.
-- Seven CI ratchet files: 14,959 passed, 2,552 skipped, 9 failed. All nine
+- Seven CI ratchet files: 12,197 passed, 4 skipped, 8 failed. All eight
   failures name pre-existing, untouched files; none is in this acquisition,
   citation-map, test or receipt change.
 
