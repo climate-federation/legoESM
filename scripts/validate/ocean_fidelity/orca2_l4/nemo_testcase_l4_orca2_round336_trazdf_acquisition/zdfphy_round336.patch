@@ -1,0 +1,47 @@
+--- zdfphy.F90
++++ zdfphy.F90
+@@ -49,6 +49,8 @@
+    USE tke_round331_writer, ONLY : r331_begin, r331_sh2, r331_drag, r331_mxl, &
+       & r331_finish
+                      ! round-331 WRITE-only TKE localisation recorder
++   USE round336_trazdf_writer, ONLY : r336_zdfphy_capture ! R336_ZDFPHY_OBSERVER
++
+ 
+ 
+    IMPLICIT NONE
+@@ -369,14 +371,20 @@
+             avt(ji,jj,jk) = avt_k(ji,jj,jk)
+             avm(ji,jj,jk) = avm_k(ji,jj,jk)
+          END DO   ;   END DO   ;   END DO
++         CALL r336_zdfphy_capture(kt,1,avt_k(ntsi:ntei,ntsj:ntej,2:jpkm1), & ! R336_ZDFPHY_OBSERVER
++            & avt(ntsi:ntei,ntsj:ntej,2:jpkm1),avs(ntsi:ntei,ntsj:ntej,2:jpkm1)) ! R336_ZDFPHY_OBSERVER
+          !
+          IF( ln_rnf_mouth ) THEN                   !* increase diffusivity at rivers mouths
+             DO jk =  2,  nkrnf  ; DO jj = ntsj-(  0), ntej+(   0) ; DO ji = ntsi-( 0), ntei+(   0)
+                avt(ji,jj,jk) = avt(ji,jj,jk) + 2._wp * rn_avt_rnf * rnfmsk(ji,jj) * wmask(ji,jj,jk)
+             END DO   ;   END DO   ;   END DO
+          ENDIF
++         CALL r336_zdfphy_capture(kt,2,avt_k(ntsi:ntei,ntsj:ntej,2:jpkm1), & ! R336_ZDFPHY_OBSERVER
++            & avt(ntsi:ntei,ntsj:ntej,2:jpkm1),avs(ntsi:ntei,ntsj:ntej,2:jpkm1)) ! R336_ZDFPHY_OBSERVER
+          !
+          IF( ln_zdfevd )   CALL zdf_evd( kt, Kmm, Krhs, avm, avt )  !* convection: enhanced vertical eddy diffusivity
++         CALL r336_zdfphy_capture(kt,3,avt_k(ntsi:ntei,ntsj:ntej,2:jpkm1), & ! R336_ZDFPHY_OBSERVER
++            & avt(ntsi:ntei,ntsj:ntej,2:jpkm1),avs(ntsi:ntei,ntsj:ntej,2:jpkm1)) ! R336_ZDFPHY_OBSERVER
+          !
+          !                                         !* double diffusive mixing
+          IF( ln_zdfddm ) THEN                            ! update avt and compute avs
+@@ -386,10 +396,14 @@
+                avs(ji,jj,jk) = avt(ji,jj,jk)
+             END DO   ;   END DO   ;   END DO
+          ENDIF
++         CALL r336_zdfphy_capture(kt,4,avt_k(ntsi:ntei,ntsj:ntej,2:jpkm1), & ! R336_ZDFPHY_OBSERVER
++            & avt(ntsi:ntei,ntsj:ntej,2:jpkm1),avs(ntsi:ntei,ntsj:ntej,2:jpkm1)) ! R336_ZDFPHY_OBSERVER
+          !
+          !                                         !* wave-induced mixing
+          IF( ln_zdfswm )   CALL zdf_swm( kt, Kmm, avm, avt, avs )   ! surface  wave (Qiao et al. 2004)
+          IF( ln_zdfiwm )   CALL zdf_iwm( kt, Kmm, avm, avt, avs )   ! internal wave (de Lavergne et al 2017)
++         CALL r336_zdfphy_capture(kt,5,avt_k(ntsi:ntei,ntsj:ntej,2:jpkm1), & ! R336_ZDFPHY_OBSERVER
++            & avt(ntsi:ntei,ntsj:ntej,2:jpkm1),avs(ntsi:ntei,ntsj:ntej,2:jpkm1)) ! R336_ZDFPHY_OBSERVER
+          !
+          CALL zdf_mxl_turb( kt, Kmm )                   !* turbocline depth
+       END DO

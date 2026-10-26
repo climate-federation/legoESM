@@ -26,15 +26,21 @@ readonly PARENT_DIR=$here/../nemo_testcase_l4_orca2_round333_tracer_acquisition
 readonly PARENT=$PARENT_DIR/run.sh
 readonly SOURCE_CFG=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_ORCA1ICE_OMIP_L4_R333LDFI
 readonly SOURCE_PPSRC=$SOURCE_CFG/BLD/ppsrc/nemo/trazdf.f90
+readonly SOURCE_ZDFPHY_PPSRC=$SOURCE_CFG/BLD/ppsrc/nemo/zdfphy.f90
+readonly BASE_ZDFPHY_PPSRC=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/zdfphy.f90
 readonly SOURCE_OBJECT=$SOURCE_CFG/BLD/obj/trazdf.o
 readonly SOURCE_MODULES=$SOURCE_CFG/BLD/inc
 readonly SOURCE_OUTPUT=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round333/acquisition/orca1ice_traldf_iso_internal_kt2_np2/ocean.output
+readonly SOURCE_NAMELIST=${SOURCE_OUTPUT%/*}/namelist_cfg
+readonly NAMELIST_REF=$SOURCE_CFG/EXP00/namelist_ref
 readonly TRAZDF_SOURCE=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/TRA/trazdf.F90
 readonly PATCH=$here/trazdf_round336.patch
+readonly ZDFPHY_PATCH=$here/zdfphy_round336.patch
 readonly WRITER=$here/round336_trazdf_writer.F90
 readonly FIXTURE_STUBS=$here/round336_fixture_stubs.F90
 readonly FIXTURE=$here/round336_writer_fixture.F90
 readonly PARENT_EXTENSION=$here/round336_parent_extension.sh.inc
+readonly NAMELIST_GATE=$here/round336_namelist_gate.py
 readonly GATE=$here/../nemo_testcase_l4_orca2_round336_trazdf_gate.py
 readonly TEST=$REPO/tests/ocean/fidelity/test_orca2_round336_trazdf_gate.py
 readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/acquisition
@@ -44,9 +50,10 @@ readonly FC=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
 readonly MPIFC=/home/dbalwada/miniconda3/envs/nemo-build/bin/mpif90
 readonly NEMO_BIN=/home/dbalwada/miniconda3/envs/nemo-build/bin
 
-for path in "$PARENT" "$SOURCE_PPSRC" "$SOURCE_OBJECT" "$SOURCE_OUTPUT" \
-  "$TRAZDF_SOURCE" "$PATCH" "$WRITER" "$FIXTURE_STUBS" "$FIXTURE" \
-  "$PARENT_EXTENSION" "$GATE" "$TEST"; do
+for path in "$PARENT" "$SOURCE_PPSRC" "$SOURCE_ZDFPHY_PPSRC" "$BASE_ZDFPHY_PPSRC" "$SOURCE_OBJECT" \
+  "$SOURCE_OUTPUT" "$SOURCE_NAMELIST" "$NAMELIST_REF" "$TRAZDF_SOURCE" \
+  "$PATCH" "$ZDFPHY_PATCH" "$WRITER" "$FIXTURE_STUBS" "$FIXTURE" \
+  "$PARENT_EXTENSION" "$NAMELIST_GATE" "$GATE" "$TEST"; do
   [[ -f "$path" ]] || refuse "missing acquisition input $path"
 done
 [[ -d "$SOURCE_MODULES" ]] || refuse "missing record-build module directory $SOURCE_MODULES"
@@ -88,8 +95,11 @@ echo_has() {
 check_selectors() {
   echo_has "$1" ln_zad_Aimp F \
     && echo_has "$1" ln_zdfmfc F \
+    && echo_has "$1" ln_rnf_mouth T \
+    && echo_has "$1" ln_zdftke T \
     && echo_has "$1" ln_zdfevd T \
     && echo_has "$1" ln_zdfddm T \
+    && echo_has "$1" ln_zdfswm F \
     && echo_has "$1" ln_zdfiwm T \
     && echo_has "$1" ln_traldf_msc T
 }
@@ -116,16 +126,80 @@ check_r336_landing() {
 }
 export -f check_r336_landing
 
+check_r336_zdfphy_landing() {
+  local source=$1 plant=${2:-none}
+  awk -v plant="$plant" '
+    /SUBROUTINE zdf_phy\(/ {routine=NR}
+    /avt\(ji,jj,jk\) = avt_k/ {copy=NR}
+    /CALL r336_zdfphy_capture\(kt,1,/ {n1++; p1=NR}
+    /IF\( ln_rnf_mouth \) THEN/ {runoff=NR}
+    /CALL r336_zdfphy_capture\(kt,2,/ {n2++; p2=NR}
+    /CALL zdf_evd/ {evd=NR}
+    /CALL r336_zdfphy_capture\(kt,3,/ {n3++; p3=NR}
+    /CALL zdf_ddm/ {ddm=NR}
+    /CALL r336_zdfphy_capture\(kt,4,/ {n4++; p4=NR}
+    /CALL zdf_iwm/ {iwm=NR}
+    /CALL r336_zdfphy_capture\(kt,5,/ {n5++; p5=NR}
+    /CALL zdf_mxl_turb/ {mxl=NR}
+    END {
+      if(plant=="tke") p1=copy-1
+      if(plant=="runoff") p2=runoff+1
+      if(plant=="evd") p3=evd-1
+      if(plant=="ddm") p4=ddm-1
+      if(plant=="iwm") p5=iwm-1
+      ok=(n1==1 && n2==1 && n3==1 && n4==1 && n5==1)
+      ok=ok && routine<copy && copy<p1 && p1<runoff && runoff<p2
+      ok=ok && p2<evd && evd<p3 && p3<ddm && ddm<p4
+      ok=ok && p4<iwm && iwm<p5 && p5<mxl
+      exit !ok
+    }
+  ' "$source"
+}
+export -f check_r336_zdfphy_landing
+
+refuse_nemo_errors() {
+  local output=$1 lines
+  [[ -f "$output" ]] || return 1
+  lines=$(grep -nF 'E R R O R' "$output" || true)
+  [[ -z "$lines" ]] || {
+    printf 'NEMO_ERROR_LINES_BEGIN %s\n%s\nNEMO_ERROR_LINES_END\n' "$output" "$lines" >&2
+    return 1
+  }
+}
+
 fp_disassembly_signature() {
-  objdump -drwC --no-show-raw-insn "$1" \
-    | sed -nE 's/^[[:space:]]*[0-9a-f]+:[[:space:]]+((f(add|sub|mul|div|sqrt)[a-z0-9]*|add(s|p)[sd]|sub(s|p)[sd]|mul(s|p)[sd]|div(s|p)[sd]|sqrt(s|p)[sd]|min(s|p)[sd]|max(s|p)[sd])).*/\1/p' \
-    | sort | uniq -c >"$2"
+  objdump -drwC --no-show-raw-insn "$1" | awk '
+    /^[[:xdigit:]]+[[:space:]]+<[^>]+>:/ {
+      fn=$2; gsub(/[<>:]/,"",fn); next
+    }
+    /^[[:space:]]*[[:xdigit:]]+:/ {
+      op=$2
+      if ((fn=="__trazdf_MOD_tra_zdf" || fn=="__trazdf_MOD_tra_zdf_imp") &&
+          op ~ /^(f(add|sub|mul|div|sqrt)|add(s|p)[sd]|sub(s|p)[sd]|mul(s|p)[sd]|div(s|p)[sd]|sqrt(s|p)[sd]|min(s|p)[sd]|max(s|p)[sd])/) print fn,op
+    }
+  ' | sort | uniq -c >"$2"
+  for fn in __trazdf_MOD_tra_zdf __trazdf_MOD_tra_zdf_imp; do
+    awk -v fn="$fn" '$2==fn {n+=$1} END {exit !(n>0)}' "$2" || return 1
+  done
 }
 compare_fp_disassembly() {
   local left=$1 right=$2 label=$3
   fp_disassembly_signature "$left" "$driver_dir/${label}.left.fp"
   fp_disassembly_signature "$right" "$driver_dir/${label}.right.fp"
   cmp -s "$driver_dir/${label}.left.fp" "$driver_dir/${label}.right.fp"
+}
+fp_named_function_signature() {
+  local object=$1 output=$2 wanted=$3
+  objdump -drwC --no-show-raw-insn "$object" | awk -v wanted="$wanted" '
+    /^[[:xdigit:]]+[[:space:]]+<[^>]+>:/ {
+      fn=$2; gsub(/[<>:]/,"",fn); next
+    }
+    /^[[:space:]]*[[:xdigit:]]+:/ {
+      op=$2
+      if (fn==wanted && op ~ /^(f(add|sub|mul|div|sqrt)|add(s|p)[sd]|sub(s|p)[sd]|mul(s|p)[sd]|div(s|p)[sd]|sqrt(s|p)[sd]|min(s|p)[sd]|max(s|p)[sd])/) print fn,op
+    }
+  ' | sort | uniq -c >"$output"
+  awk -v fn="$wanted" '$2==fn {n+=$1} END {exit !(n>0)}' "$output"
 }
 check_admission_manifest() {
   local run=$1 current=$2 producer binary_sha
@@ -150,18 +224,32 @@ compile_nemo_object() {
     -J "$driver_dir/nemo-mod" "$1" -o "$2"
 }
 
-check_no_removed_lines "$PATCH" || refuse 'tra_zdf observer patch removes a source line'
-check_real_context "$PATCH" || refuse 'tra_zdf observer patch has a zero-context hunk'
+for observer_patch in "$PATCH" "$ZDFPHY_PATCH"; do
+  check_no_removed_lines "$observer_patch" \
+    || refuse "round-336 observer patch removes a source line: $observer_patch"
+  check_real_context "$observer_patch" \
+    || refuse "round-336 observer patch has a zero-context hunk: $observer_patch"
+done
 check_selectors "$SOURCE_OUTPUT" || refuse 'record run does not select the registered tra_zdf branches'
-for selector in ln_zad_Aimp ln_zdfmfc ln_zdfevd ln_zdfddm ln_zdfiwm ln_traldf_msc; do
+for selector in ln_zad_Aimp ln_zdfmfc ln_rnf_mouth ln_zdftke ln_zdfevd \
+    ln_zdfddm ln_zdfswm ln_zdfiwm ln_traldf_msc; do
   case "$selector" in
-    ln_zad_Aimp|ln_zdfmfc) replacement=T ;;
+    ln_zad_Aimp|ln_zdfmfc|ln_zdfswm) replacement=T ;;
     *) replacement=F ;;
   esac
   sed -E "s/(${selector}[[:space:]]*=[[:space:]]*)[TF]/\\1$replacement/" \
     "$SOURCE_OUTPUT" >"$driver_dir/${selector}.moved"
   plant_must_refuse "r336-${selector}-moved" check_selectors "$driver_dir/${selector}.moved"
 done
+
+"$PY" "$NAMELIST_GATE" --staged "$SOURCE_NAMELIST" --reference "$NAMELIST_REF"
+plant_must_refuse r336-namelist-misspelled "$PY" "$NAMELIST_GATE" \
+  --staged "$SOURCE_NAMELIST" --reference "$NAMELIST_REF" --plant misspelled
+plant_must_refuse r336-namelist-misplaced "$PY" "$NAMELIST_GATE" \
+  --staged "$SOURCE_NAMELIST" --reference "$NAMELIST_REF" --plant misplaced
+printf 'before\nE R R O R staged namelist rejected\nafter\n' >"$driver_dir/ocean.output.error-plant"
+plant_must_refuse r336-ocean-output-error-lines \
+  refuse_nemo_errors "$driver_dir/ocean.output.error-plant"
 
 source_check=$driver_dir/source-check
 mkdir "$source_check"
@@ -176,6 +264,17 @@ done
 [[ $(grep -Fc 'CALL r336_begin' "$source_check/trazdf.F90") -eq 1 \
    && $(grep -Fc 'CALL r336_capture' "$source_check/trazdf.F90") -eq 1 ]] \
   || refuse 'tra_zdf observer call census moved'
+
+cp "$SOURCE_ZDFPHY_PPSRC" "$source_check/zdfphy.F90"
+patch --batch -s --fuzz=0 -p0 -d "$source_check" <"$ZDFPHY_PATCH"
+check_r336_zdfphy_landing "$source_check/zdfphy.F90" \
+  || refuse 'zdf_phy observers do not bracket the five executing contributions'
+for landing in tke runoff evd ddm iwm; do
+  plant_must_refuse "r336-zdfphy-${landing}-misplaced" \
+    check_r336_zdfphy_landing "$source_check/zdfphy.F90" "$landing"
+done
+[[ $(grep -Fc 'CALL r336_zdfphy_capture' "$source_check/zdfphy.F90") -eq 5 ]] \
+  || refuse 'zdf_phy contribution observer call census moved'
 
 # Compile the actual record-build ppsrc with its production arithmetic flags.
 # The normalized census ignores the two observer calls and must be identical.
@@ -192,11 +291,39 @@ compare_fp_disassembly "$driver_dir/trazdf-base.o" "$driver_dir/trazdf-observed.
   || refuse 'tra_zdf observer changed normalized floating-point instruction census'
 printf 'R336_TRAZDF_NORMALIZED_OBJECT_DISASSEMBLY_PASS fp=%s\n' \
   "$(awk '{n+=$1} END {print n+0}' "$driver_dir/trazdf.left.fp")"
-sed '0,/zwd(ji,jk) = /s//zwd(ji,jk) = 1._wp + /' \
+for fn in __trazdf_MOD_tra_zdf __trazdf_MOD_tra_zdf_imp; do
+  printf 'R336_TRAZDF_FUNCTION_FP_PASS function=%s fp=%s\n' "$fn" \
+    "$(awk -v fn="$fn" '$2==fn {n+=$1} END {print n+0}' "$driver_dir/trazdf.left.fp")"
+done
+sed "0,/CALL tra_zdf_imp( 'TRA', rDt/s//CALL tra_zdf_imp( 'TRA', rDt + 1._wp/" \
   "$driver_dir/trazdf-base.f90" >"$driver_dir/trazdf-arithmetic-plant.f90"
 compile_nemo_object "$driver_dir/trazdf-arithmetic-plant.f90" "$driver_dir/trazdf-arithmetic-plant.o"
 plant_must_refuse r336-trazdf-arithmetic-disassembly compare_fp_disassembly \
   "$driver_dir/trazdf-base.o" "$driver_dir/trazdf-arithmetic-plant.o" trazdf-plant
+
+# The zdf_phy observer uses the same production flags and an observer-free
+# record-build ppsrc baseline. Count only the executing zdf_phy function.
+compile_nemo_object "$BASE_ZDFPHY_PPSRC" "$driver_dir/zdfphy-base.o"
+compile_nemo_object "$source_check/zdfphy.F90" "$driver_dir/zdfphy-observed.o"
+fp_named_function_signature "$driver_dir/zdfphy-base.o" \
+  "$driver_dir/zdfphy-base.fp" __zdfphy_MOD_zdf_phy \
+  || refuse 'observer-free zdf_phy function has a zero FP census'
+fp_named_function_signature "$driver_dir/zdfphy-observed.o" \
+  "$driver_dir/zdfphy-observed.fp" __zdfphy_MOD_zdf_phy \
+  || refuse 'instrumented zdf_phy function has a zero FP census'
+cmp -s "$driver_dir/zdfphy-base.fp" "$driver_dir/zdfphy-observed.fp" \
+  || refuse 'zdf_phy contribution observers changed its FP instruction census'
+printf 'R336_ZDFPHY_FUNCTION_FP_PASS function=__zdfphy_MOD_zdf_phy fp=%s\n' \
+  "$(awk '{n+=$1} END {print n+0}' "$driver_dir/zdfphy-base.fp")"
+sed '0,/avt(ji,jj,jk) = avt_k/s//avt(ji,jj,jk) = 1._wp + avt_k/' \
+  "$BASE_ZDFPHY_PPSRC" >"$driver_dir/zdfphy-arithmetic-plant.f90"
+compile_nemo_object "$driver_dir/zdfphy-arithmetic-plant.f90" \
+  "$driver_dir/zdfphy-arithmetic-plant.o"
+fp_named_function_signature "$driver_dir/zdfphy-arithmetic-plant.o" \
+  "$driver_dir/zdfphy-plant.fp" __zdfphy_MOD_zdf_phy \
+  || refuse 'zdf_phy arithmetic plant produced a zero FP census'
+plant_must_refuse r336-zdfphy-function-arithmetic-disassembly cmp -s \
+  "$driver_dir/zdfphy-base.fp" "$driver_dir/zdfphy-plant.fp"
 
 # Execute the actual patched trazdf source on two rank-distinct fixtures with
 # bounds checking and production scalar-math flags.  Its live result must be
@@ -245,7 +372,7 @@ for rank in (0, 1):
     report = gate.verify_record(record)
     assert report["wet_seen"] > 0 and report["signed_zeros"] > 0
     assert report["rhs_association_discriminators"] > 0
-for plant in ("header", "field-order", "truncation", "selector", "extent"):
+for plant in ("header", "field-order", "truncation", "selector", "extent", "time-level"):
     try:
         gate.read_record(root / gate.record_name(0), plant=plant, expected_shape=(7, 6, 5))
     except gate.GateError:
@@ -260,7 +387,8 @@ except gate.GateError:
     print("PREFLIGHT_PLANT_FIRED r336-checksum")
 else:
     raise AssertionError("checksum plant stayed green")
-for plant in ("nonfinite", "signed-zero", "wet", "replay", "association", "actual"):
+for plant in ("nonfinite", "signed-zero", "wet", "replay", "association", "actual",
+              "filled-range", "zdfphy"):
     record = gate.read_record(root / gate.record_name(0), expected_shape=(7, 6, 5))
     try:
         gate.verify_record(record, plant=plant)
@@ -268,7 +396,7 @@ for plant in ("nonfinite", "signed-zero", "wet", "replay", "association", "actua
         print(f"PREFLIGHT_PLANT_FIRED r336-{plant}")
     else:
         raise AssertionError(f"{plant} value plant stayed green")
-print("R336_PATCHED_TRAZDF_BOUNDS_REPLAY_ASSOCIATION_AND_SIGN_PASS ranks=2 fields=25")
+print("R336_PATCHED_TRAZDF_BOUNDS_REPLAY_ASSOCIATION_AND_SIGN_PASS ranks=2 fields=36")
 PY
 
 # A changed writer statement must disagree with the independent live solve.
@@ -364,11 +492,14 @@ fi
 # imported wrapper seals its generated inner driver.
 sed \
   -e "s|@PATCH@|$PATCH|g" \
+  -e "s|@ZDFPHY_PATCH@|$ZDFPHY_PATCH|g" \
   -e "s|@WRITER@|$WRITER|g" \
   -e "s|@GATE@|$GATE|g" \
   -e "s|@TEST@|$TEST|g" \
+  -e "s|@NAMELIST_GATE@|$NAMELIST_GATE|g" \
   -e "s|@TRAZDF_SOURCE@|$TRAZDF_SOURCE|g" \
   -e "s|@SOURCE_PPSRC@|$SOURCE_PPSRC|g" \
+  -e "s|@SOURCE_ZDFPHY_PPSRC@|$SOURCE_ZDFPHY_PPSRC|g" \
   "$PARENT_EXTENSION" >"$driver_dir/parent-extension.sh"
 awk -v extension="$driver_dir/parent-extension.sh" '
   $0 == "chmod 700 \"$ADAPTED\"" {
@@ -391,6 +522,7 @@ for token in \
   'round336/acquisition' \
   'orca1ice_trazdf_internal_kt2_np2' \
   'observer-patch "trazdf=' \
+  'zdfphy_combined.patch' \
   'round336_trazdf_writer.F90' \
   'check_r336_landing'; do
   grep -F "$token" "$ADAPTED_PARENT" >/dev/null \
@@ -406,6 +538,8 @@ if [[ "$MODE" == --preflight-only ]]; then
 fi
 
 retention_armed=1
+refuse_nemo_errors "$TARGET_RUN/ocean.output" \
+  || refuse 'NEMO ocean.output contains the quoted E R R O R lines above'
 current_commit=$(git -C "$REPO" rev-parse HEAD)
 check_admission_manifest "$TARGET_RUN" "$current_commit" \
   || refuse 'run manifest producer/ancestry or binary digest pin moved'
@@ -414,8 +548,8 @@ producer=$(awk 'NF == 1 && $1 ~ /^[0-9a-f]{40}$/ {print $1}' \
 binary_sha=$(awk 'NF == 2 && $2 == "nemo" && $1 ~ /^[0-9a-f]{64}$/ {print $1}' \
   "$TARGET_RUN/nemo.sha256")
 
-for plant in header field-order truncation checksum stamp selector extent \
-    nonfinite signed-zero wet replay association actual; do
+for plant in header field-order truncation checksum stamp selector extent time-level \
+    nonfinite signed-zero wet replay association actual filled-range zdfphy; do
   log=$TARGET_RUN/admit-r336-trazdf-$plant.log
   if "$PY" "$GATE" --record-dir "$TARGET_RUN" --expect-commit "$producer" \
       --plant "$plant" >"$log" 2>&1; then

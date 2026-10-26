@@ -7,6 +7,7 @@ PROGRAM round336_writer_fixture
    USE zdf_oce
    USE zdfmfc
    USE ldfslp
+   USE round336_trazdf_writer, ONLY : r336_zdfphy_capture
    USE trazdf, ONLY : tra_zdf_observed => tra_zdf
    USE trazdf_reference, ONLY : tra_zdf_reference_run => tra_zdf
    IMPLICIT NONE
@@ -51,6 +52,11 @@ PROGRAM round336_writer_fixture
       pt_observed(3,3,2,n,1)=8._wp
    END DO
    pt_reference=pt_observed
+
+   DO n=1,5
+      CALL r336_zdfphy_capture(2,n,avt(3:5,3:4,2:4), &
+         & avt(3:5,3:4,2:4),avs(3:5,3:4,2:4))
+   END DO
 
    CALL tra_zdf_reference_run(2,3,2,1,pt_reference,1)
    CALL tra_zdf_observed(2,3,2,1,pt_observed,1)

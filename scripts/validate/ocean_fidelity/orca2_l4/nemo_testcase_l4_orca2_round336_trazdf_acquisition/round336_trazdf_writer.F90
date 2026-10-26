@@ -10,8 +10,11 @@ MODULE round336_trazdf_writer
    USE lib_mpp        , ONLY : ctl_stop
    IMPLICIT NONE
    PRIVATE
-   PUBLIC :: r336_begin,r336_capture
+   PUBLIC :: r336_begin,r336_capture,r336_zdfphy_capture
    REAL(wp), ALLOCATABLE, SAVE :: saved_krhs(:,:,:,:)
+   REAL(wp), ALLOCATABLE, SAVE :: saved_avt_k(:,:,:),saved_avt_phases(:,:,:,:)
+   REAL(wp), ALLOCATABLE, SAVE :: saved_avs_phases(:,:,:,:)
+   INTEGER, SAVE :: saved_zdfphy_phase_mask=0
 
 CONTAINS
 
@@ -25,6 +28,33 @@ CONTAINS
       ALLOCATE(saved_krhs(jpi,jpj,jpk,jpts))
       saved_krhs=pt(:,:,:,:,Krhs)
    END SUBROUTINE r336_begin
+
+   SUBROUTINE r336_zdfphy_capture(kt,phase,pavt_k,pavt,pavs)
+      INTEGER, INTENT(in) :: kt,phase
+      REAL(wp), DIMENSION(:,:,:), INTENT(in) :: pavt_k,pavt,pavs
+
+      IF(kt /= nit000+1) RETURN
+      IF(phase<1 .OR. phase>5) CALL ctl_stop('round336: bad zdfphy phase')
+      IF(SIZE(pavt,1)/=ntei-ntsi+1 .OR. SIZE(pavt,2)/=ntej-ntsj+1 .OR. &
+         & SIZE(pavt,3)/=jpkm1-1) CALL ctl_stop('round336: zdfphy filled range moved')
+      IF(ANY(SHAPE(pavt_k)/=SHAPE(pavt)) .OR. ANY(SHAPE(pavs)/=SHAPE(pavt))) &
+         & CALL ctl_stop('round336: zdfphy contribution extent moved')
+      IF(phase==1) THEN
+         IF(ALLOCATED(saved_avt_k)) CALL ctl_stop('round336: duplicate zdfphy capture')
+         ALLOCATE(saved_avt_k(jpi,jpj,jpk),saved_avt_phases(jpi,jpj,jpk,5), &
+            & saved_avs_phases(jpi,jpj,jpk,5))
+         saved_avt_k=-0._wp; saved_avt_phases=-0._wp; saved_avs_phases=-0._wp
+         saved_zdfphy_phase_mask=0
+         saved_avt_k(ntsi:ntei,ntsj:ntej,2:jpkm1)=pavt_k
+      ELSE IF(.NOT.ALLOCATED(saved_avt_k)) THEN
+         CALL ctl_stop('round336: missing first zdfphy capture')
+      ENDIF
+      IF(BTEST(saved_zdfphy_phase_mask,phase-1)) &
+         & CALL ctl_stop('round336: duplicate zdfphy phase')
+      saved_avt_phases(ntsi:ntei,ntsj:ntej,2:jpkm1,phase)=pavt
+      saved_avs_phases(ntsi:ntei,ntsj:ntej,2:jpkm1,phase)=pavs
+      saved_zdfphy_phase_mask=IBSET(saved_zdfphy_phase_mask,phase-1)
+   END SUBROUTINE r336_zdfphy_capture
 
    SUBROUTINE r336_capture(kt,Kbb,Kmm,Krhs,Kaa,p2dt,pt,ld_aimp,ld_mfc,ld_ddm,ld_slp,ld_msc)
       INTEGER, INTENT(in) :: kt,Kbb,Kmm,Krhs,Kaa
@@ -44,6 +74,8 @@ CONTAINS
 
       IF(kt /= nit000+1) RETURN
       IF(.NOT.ALLOCATED(saved_krhs)) CALL ctl_stop('round336: missing trazdf begin')
+      IF(.NOT.ALLOCATED(saved_avt_k) .OR. saved_zdfphy_phase_mask/=31) &
+         & CALL ctl_stop('round336: incomplete zdfphy contribution capture')
       IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop('round336: trazdf record requires fp64')
       IF(ld_aimp .OR. ld_mfc .OR. .NOT.ld_ddm .OR. .NOT.ld_slp .OR. .NOT.ld_msc) &
          & CALL ctl_stop('round336: trazdf selector set moved')
@@ -65,8 +97,10 @@ CONTAINS
       eliminated=-0._wp; forward=-0._wp; backsub=-0._wp
       actual=pt(:,:,:,:,Kaa); seen=0._wp
 
-      DO jk=1,jpk; DO jj=1,jpj; DO ji=1,jpi
+      DO jk=1,jpk; DO jj=ntsj,ntej; DO ji=ntsi,ntei
          e3w_kmm(ji,jj,jk)=e3w_1d(jk)*(1._wp+r3t(ji,jj,Kmm))
+      END DO; END DO; END DO
+      DO jk=1,jpkm1; DO jj=ntsj,ntej; DO ji=ntsi,ntei
          e3t_bb(ji,jj,jk)=e3t_3d(ji,jj,jk)*(1._wp+r3t(ji,jj,Kbb)*tmask(ji,jj,jk))
          e3t_mm(ji,jj,jk)=e3t_3d(ji,jj,jk)*(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk))
          e3t_aa(ji,jj,jk)=e3t_3d(ji,jj,jk)*(1._wp+r3t(ji,jj,Kaa)*tmask(ji,jj,jk))
@@ -74,7 +108,7 @@ CONTAINS
 
       DO jj=ntsj,ntej
          DO jn=1,jpts
-            effective(:,jj,1,jn)=0._wp
+            effective(ntsi:ntei,jj,1,jn)=0._wp
             IF(jn==jp_tem) THEN
                DO jk=2,jpk; DO ji=ntsi,ntei
                   effective(ji,jj,jk,jn)=avt(ji,jj,jk)+akz(ji,jj,jk)
@@ -136,8 +170,9 @@ CONTAINS
          & STATUS='REPLACE',ACTION='WRITE',IOSTAT=ios)
       IF(ios/=0) CALL ctl_stop('round336: cannot open trazdf record')
       magic='NEMO_L4_R336TZ'
-      WRITE(unit) magic,1,kt,Kbb,Kmm,Krhs,Kaa,narea-1,jpi,jpj,jpk,jpts, &
-         & STORAGE_SIZE(1._wp),25,MERGE(1,0,ld_ddm),MERGE(1,0,ld_msc)
+      WRITE(unit) magic,2,kt,Kbb,Kmm,Krhs,Kaa,narea-1,jpi,jpj,jpk,jpts, &
+         & STORAGE_SIZE(1._wp),36,MERGE(1,0,ld_ddm),MERGE(1,0,ld_msc), &
+         & ntsi,ntei,ntsj,ntej,saved_zdfphy_phase_mask
       CALL put3(unit,'avt',avt); CALL put3(unit,'avs',avs); CALL put3(unit,'akz',akz)
       CALL put3(unit,'e3t_3d',e3t_3d); CALL put1(unit,'e3w_1d',e3w_1d)
       CALL put2(unit,'r3t_Kbb',r3t(:,:,Kbb)); CALL put2(unit,'r3t_Kmm',r3t(:,:,Kmm))
@@ -151,10 +186,23 @@ CONTAINS
       CALL put4(unit,'forward',forward); CALL put4(unit,'backsub',backsub)
       CALL put4(unit,'actual_Kaa',actual); CALL put4(unit,'solve_seen',seen)
       CALL put3(unit,'tmask',tmask)
+      CALL put3(unit,'avt_k_zdf',saved_avt_k)
+      CALL put3(unit,'avt_after_tke',saved_avt_phases(:,:,:,1))
+      CALL put3(unit,'avs_after_tke',saved_avs_phases(:,:,:,1))
+      CALL put3(unit,'avt_after_runoff',saved_avt_phases(:,:,:,2))
+      CALL put3(unit,'avs_after_runoff',saved_avs_phases(:,:,:,2))
+      CALL put3(unit,'avt_after_evd',saved_avt_phases(:,:,:,3))
+      CALL put3(unit,'avs_after_evd',saved_avs_phases(:,:,:,3))
+      CALL put3(unit,'avt_after_ddm',saved_avt_phases(:,:,:,4))
+      CALL put3(unit,'avs_after_ddm',saved_avs_phases(:,:,:,4))
+      CALL put3(unit,'avt_after_iwm',saved_avt_phases(:,:,:,5))
+      CALL put3(unit,'avs_after_iwm',saved_avs_phases(:,:,:,5))
       CLOSE(unit)
       DEALLOCATE(effective,e3w_kmm,e3t_bb,e3t_mm,e3t_aa,kbb_field,krhs_field, &
          & content,lower,diagonal,upper,eliminated,forward,backsub,actual,seen)
       DEALLOCATE(saved_krhs)
+      DEALLOCATE(saved_avt_k,saved_avt_phases,saved_avs_phases)
+      saved_zdfphy_phase_mask=0
    END SUBROUTINE r336_capture
 
    SUBROUTINE put4(unit,name,value)

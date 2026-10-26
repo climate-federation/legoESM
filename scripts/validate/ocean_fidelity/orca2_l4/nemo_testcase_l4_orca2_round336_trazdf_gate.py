@@ -23,9 +23,13 @@ MAGIC = "NEMO_L4_R336TZ"
 HEADER_NAMES = (
     "version", "kt", "Kbb", "Kmm", "Krhs", "Kaa", "rank", "nx", "ny",
     "nz", "ntracer", "real_bits", "n_fields", "ln_zdfddm", "ln_traldf_msc",
+    "ntsi", "ntei", "ntsj", "ntej", "zdfphy_phase_mask",
 )
 THREE_D_FIELDS = (
     "avt", "avs", "akz", "e3t_3d", "e3w_Kmm", "e3t_Kbb", "e3t_Kmm", "e3t_Kaa", "tmask",
+    "avt_k_zdf", "avt_after_tke", "avs_after_tke", "avt_after_runoff",
+    "avs_after_runoff", "avt_after_evd", "avs_after_evd", "avt_after_ddm",
+    "avs_after_ddm", "avt_after_iwm", "avs_after_iwm",
 )
 TWO_D_FIELDS = ("r3t_Kbb", "r3t_Kmm", "r3t_Kaa")
 ONE_D_FIELDS = ("e3w_1d",)
@@ -39,12 +43,14 @@ FIELDS = (
     "effective_K", "e3w_Kmm", "e3t_Kbb", "e3t_Kmm",
     "e3t_Kaa", "Kbb_tracer", "Krhs_tracer", "content_rhs", "lower",
     "diagonal", "upper", "eliminated", "forward", "backsub", "actual_Kaa",
-    "solve_seen", "tmask",
+    "solve_seen", "tmask", "avt_k_zdf", "avt_after_tke", "avs_after_tke",
+    "avt_after_runoff", "avs_after_runoff", "avt_after_evd", "avs_after_evd",
+    "avt_after_ddm", "avs_after_ddm", "avt_after_iwm", "avs_after_iwm",
 )
 PLANTS = (
     "header", "field-order", "truncation", "checksum", "stamp", "selector",
     "extent", "nonfinite", "signed-zero", "wet", "replay", "association",
-    "actual",
+    "actual", "time-level", "filled-range", "zdfphy",
 )
 OBSERVER_UNITS = ldf_gate.OBSERVER_UNITS + ("trazdf",)
 WRITER_UNITS = ldf_gate.WRITER_UNITS + ("round336_trazdf_writer",)
@@ -82,20 +88,27 @@ def read_record(path: Path, *, plant: str | None = None,
         tracer_gate._take(stream, 4 * len(HEADER_NAMES), "header")), strict=True))
     if plant == "header":
         header["kt"] = 1
+    elif plant == "time-level":
+        header["Kmm"] = header["Kbb"]
     elif plant == "selector":
         header["ln_zdfddm"] = 0
     require(magic == MAGIC, f"bad magic {magic!r}")
-    require((header["version"], header["kt"], header["real_bits"]) == (1, 2, 64),
+    require((header["version"], header["kt"], header["real_bits"]) == (2, 2, 64),
             "wrong version/step/precision")
     require(tuple(header[name] for name in ("Kbb", "Kmm", "Krhs", "Kaa")) ==
             tracer_gate.rk3_levels_for_step_stage(2, 3), "RK time levels moved")
     require(header["rank"] in (0, 1), "rank tag moved")
     require((header["nx"], header["ny"], header["nz"]) == expected_shape,
             "record lacks exact jpi,jpj,jpk extents")
+    require((header["ntsi"], header["ntei"], header["ntsj"], header["ntej"]) ==
+            (3, expected_shape[0] - 2, 3, expected_shape[1] - 2),
+            "recorded NEMO filled-range bounds moved")
     require(header["ntracer"] == 2 and header["n_fields"] == len(FIELDS),
             "tracer or field census moved")
     require((header["ln_zdfddm"], header["ln_traldf_msc"]) == (1, 1),
             "recorded solver selectors moved")
+    require(header["zdfphy_phase_mask"] == 31,
+            "kt=2 zdf_phy contribution phase census moved")
 
     fields: dict[str, np.ndarray] = {}
     checksums: dict[str, int] = {}
@@ -157,6 +170,53 @@ def verify_record(record: dict, *, plant: str | None = None) -> dict[str, int]:
                        for value in fields.values())
     require(signed_zeros > 0, "signed zeros were normalized")
 
+    # These supports are the literal ranges filled by trazdf.f90:184-216 and
+    # zdfphy.f90:368-392. Every unfilled record cell must retain the -0 sentinel.
+    i0, i1 = header["ntsi"] - 1, header["ntei"]
+    j0, j1 = header["ntsj"] - 1, header["ntej"]
+    metric3 = np.zeros(fields["tmask"].shape, dtype=bool)
+    metric3[i0:i1, j0:j1, :header["nz"] - 1] = True
+    e3w_support = np.zeros_like(metric3)
+    e3w_support[i0:i1, j0:j1, :] = True
+    process_support = np.array(metric3, copy=True)
+    process_support[:, :, 0] = False
+
+    if plant == "filled-range":
+        fields["e3t_Kaa"][0, 0, 0] = 1.0
+    if plant == "zdfphy":
+        fields["avt_after_iwm"][i0, j0, 1] = np.nextafter(
+            fields["avt_after_iwm"][i0, j0, 1], np.inf)
+
+    def filled(name: str, expected: np.ndarray, support: np.ndarray) -> None:
+        _bit_equal(fields[name], expected, support, f"{name} filled-range replay moved")
+        outside = ~support
+        require(bool(np.all((fields[name][outside] == 0.0)
+                            & np.signbit(fields[name][outside]))),
+                f"{name} overwrote NEMO-unfilled cells")
+
+    expected_e3w = fields["e3w_1d"][None, None, :] * (
+        np.float64(1.0) + fields["r3t_Kmm"][..., None])
+    filled("e3w_Kmm", expected_e3w, e3w_support)
+    for level in ("Kbb", "Kmm", "Kaa"):
+        expected_metric = fields["e3t_3d"] * (
+            np.float64(1.0) + fields[f"r3t_{level}"][..., None] * fields["tmask"])
+        filled(f"e3t_{level}", expected_metric, metric3)
+
+    for name in ("avt_k_zdf", "avt_after_tke", "avs_after_tke",
+                 "avt_after_runoff", "avs_after_runoff", "avt_after_evd",
+                 "avs_after_evd", "avt_after_ddm", "avs_after_ddm",
+                 "avt_after_iwm", "avs_after_iwm"):
+        outside = ~process_support
+        require(bool(np.all((fields[name][outside] == 0.0)
+                            & np.signbit(fields[name][outside]))),
+                f"{name} overwrote zdf_phy-unfilled cells")
+    _bit_equal(fields["avt_after_tke"], fields["avt_k_zdf"], process_support,
+               "TKE avt_k copy boundary moved")
+    _bit_equal(fields["avt_after_iwm"], fields["avt"], process_support,
+               "IWM avt boundary differs from final tra_zdf input")
+    _bit_equal(fields["avs_after_iwm"], fields["avs"], process_support,
+               "IWM avs boundary differs from final tra_zdf input")
+
     if plant == "replay":
         fields["diagonal"][2, 2, 1, 0] = np.nextafter(
             fields["diagonal"][2, 2, 1, 0], np.inf)
@@ -165,12 +225,19 @@ def verify_record(record: dict, *, plant: str | None = None) -> dict[str, int]:
         fields["actual_Kaa"][index] = np.nextafter(fields["actual_Kaa"][index], np.inf)
 
     active3 = np.any(seen, axis=-1)
-    effective = np.empty_like(fields["effective_K"])
-    effective[..., 0] = fields["avt"] + fields["akz"]
-    effective[..., 1] = fields["avs"] + fields["akz"]
-    effective[:, :, 0, :] = 0.0
-    _bit_equal(fields["effective_K"], effective, seen,
+    effective = np.full_like(fields["effective_K"], -0.0)
+    effective[i0:i1, j0:j1, 0, :] = 0.0
+    effective[i0:i1, j0:j1, 1:, 0] = (
+        fields["avt"][i0:i1, j0:j1, 1:] + fields["akz"][i0:i1, j0:j1, 1:])
+    effective[i0:i1, j0:j1, 1:, 1] = (
+        fields["avs"][i0:i1, j0:j1, 1:] + fields["akz"][i0:i1, j0:j1, 1:])
+    effective_support = np.zeros_like(seen)
+    effective_support[i0:i1, j0:j1, :, :] = True
+    _bit_equal(fields["effective_K"], effective, effective_support,
                "effective avt/avs plus akz replay moved")
+    require(bool(np.all((fields["effective_K"][~effective_support] == 0.0)
+                        & np.signbit(fields["effective_K"][~effective_support]))),
+            "effective_K overwrote NEMO-unfilled cells")
 
     # Replay the exact source statements in scalar loop order. Boundary/halo
     # slots outside solve_seen are intentionally not claimed.
@@ -261,7 +328,8 @@ def verify_record(record: dict, *, plant: str | None = None) -> dict[str, int]:
     return {"wet_seen": int(np.count_nonzero(wet & owned)),
             "signed_zeros": signed_zeros,
             "rhs_association_discriminators": association_discriminators,
-            "active_cells": int(np.count_nonzero(active3))}
+            "active_cells": int(np.count_nonzero(active3)),
+            "zdfphy_process_cells": int(np.count_nonzero(process_support))}
 
 
 def _bits_equal(actual: np.ndarray, expected: np.ndarray, message: str) -> None:
@@ -282,7 +350,8 @@ def run_gate(root: Path, *, expect_commit: str, plant: str | None = None) -> dic
     records = {}
     for rank in (0, 1):
         parser_plant = plant if rank == 0 and plant in (
-            "header", "field-order", "truncation", "selector", "extent") else None
+            "header", "field-order", "truncation", "selector", "extent",
+            "time-level") else None
         record = read_record(root / record_name(rank), plant=parser_plant)
         require(record["header"]["rank"] == rank, "rank tag moved")
         if rank == 0 and plant == "checksum":
@@ -291,12 +360,12 @@ def run_gate(root: Path, *, expect_commit: str, plant: str | None = None) -> dic
         reports[str(rank)] = verify_record(
             record, plant=plant if rank == 0 and plant in (
                 "nonfinite", "signed-zero", "wet", "replay", "association",
-                "actual") else None)
+                "actual", "filled-range", "zdfphy") else None)
         records[rank] = record
 
         tracer = tracer_gate.read_stage3(root / tracer_gate.record_name(rank))["fields"]
         ldf = ldf_gate.read_record(root / ldf_gate.record_name(rank))["fields"]
-        fields = record["fields"]
+        fields, header = record["fields"], record["header"]
         _bits_equal(fields["akz"], ldf["akz"], "akz differs from admitted LDF input")
         _bits_equal(fields["e3t_3d"], ldf["e3t_3d"],
                     "e3t_3d differs from admitted geometry")
@@ -312,16 +381,22 @@ def run_gate(root: Path, *, expect_commit: str, plant: str | None = None) -> dic
                         f"Krhs {name} differs from admitted tracer record")
             _bits_equal(fields["actual_Kaa"][..., index], tracer[f"Kaa_{name}"],
                         f"Kaa {name} differs from admitted tracer record")
+        support = np.zeros(fields["tmask"].shape, dtype=bool)
+        support[header["ntsi"] - 1:header["ntei"],
+                header["ntsj"] - 1:header["ntej"], :header["nz"] - 1] = True
         for level, out_name in (("Kbb", "e3t_Kbb"), ("Kmm", "e3t_Kmm"),
                                 ("Kaa", "e3t_Kaa")):
             expected = ldf["e3t_3d"] * (
                 np.float64(1.0) + tracer[f"r3t_{level}"][..., None] * ldf["tmask"])
-            _bits_equal(fields[out_name], expected,
-                        f"{out_name} differs from admitted geometry")
+            _bit_equal(fields[out_name], expected, support,
+                       f"{out_name} differs from admitted geometry")
+        e3w_support = np.zeros_like(support)
+        e3w_support[header["ntsi"] - 1:header["ntei"],
+                    header["ntsj"] - 1:header["ntej"], :] = True
         expected_e3w = ldf["e3w_1d"][None, None, :] * (
             np.float64(1.0) + tracer["r3t_Kmm"][..., None])
-        _bits_equal(fields["e3w_Kmm"], expected_e3w,
-                    "e3w_Kmm differs from admitted geometry")
+        _bit_equal(fields["e3w_Kmm"], expected_e3w, e3w_support,
+                   "e3w_Kmm differs from admitted geometry")
 
     return {
         "format": "nemo-testcase-l4-orca2-round336-trazdf-v1",

@@ -10,9 +10,11 @@ scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_trazdf_
 
 The extension targets kt 2, RK stage 3. `r336_begin` copies `Krhs` immediately
 before `tra_zdf_imp`, because this deck assigns the same RK slot to `Krhs` and
-`Kaa` and the solve overwrites it. `r336_capture` is called once after
-`tra_zdf_imp`, outside all of NEMO's arithmetic loops. It records the final
-`avt`, `avs`, `akz`, raw geometry and RK levels, then replays the exact
+`Kaa` and the solve overwrites it. Five calls outside `zdf_phy`'s arithmetic
+loops snapshot the kt=2 boundaries after the TKE `avt_k` copy, runoff-mouth
+mixing, EVD, DDM, and IWM. `r336_capture` is called once after `tra_zdf_imp`,
+outside all of NEMO's arithmetic loops. It records those boundaries plus the
+final `avt`, `avs`, `akz`, raw geometry and RK levels, then replays the exact
 source-order matrix construction, eliminated diagonal, forward sweep and back
 substitution into a passive record. In particular the RHS is evaluated as
 `p2dt * (e3t_3d * (1 + r3t(Kmm) * tmask)) * Krhs`, with NEMO's parentheses;
@@ -22,8 +24,10 @@ back-substitution to be bit-identical to the live post-solve `Kaa` on every
 executed cell; it therefore cannot admit a reconstruction with changed
 association or order.
 
-Each rank writes
-`oracle_r336_trazdf_kt00000002_r0000.bin` or `_r0001.bin`. The 25 fields retain
+Derived metrics and work arrays preserve `-0.0` outside the exact
+`ntsi:ntei`, `ntsj:ntej`, and vertical ranges filled by NEMO; those bounds are
+stored in the header and checked at admission. Each rank writes
+`oracle_r336_trazdf_kt00000002_r0000.bin` or `_r0001.bin`. The 36 fields retain
 declared extents and IEEE signed zeros and carry source-order names, explicit
 rank/origin/extent metadata and XOR payload checksums. The gate also re-admits
 the inherited round-333 tracer and internal-LDF records and cross-checks the
@@ -34,14 +38,20 @@ Preflight applies the additions-only patch with zero fuzz to both pristine
 source and the record-build ppsrc. It audits the resolved DDM/EVD/IWM,
 mass-flux, adaptive-advection, and MSC selectors, and plants a changed value
 for each. It compiles the actual record-build `trazdf.f90` with
-`-O3 -funroll-all-loops -fno-tree-vectorize`; the normalized floating-point
-instruction census must be unchanged by the observer calls, while a planted
-matrix arithmetic change must fail. A two-rank, signed-zero fixture compiles
+`-O3 -funroll-all-loops -fno-tree-vectorize`; the floating-point census is
+computed separately and must be nonzero for `tra_zdf` and `tra_zdf_imp`, and
+must be unchanged by the observer calls while an in-function arithmetic plant
+fails. `zdf_phy` receives the same function-scoped proof. A two-rank,
+signed-zero fixture compiles
 and runs the actual patched `trazdf` ppsrc with those production arithmetic
 flags plus `-fcheck=bounds`, comparing its live state bitwise with a separately
 compiled unpatched module before checking the passive record. Structural,
 checksum, finite-value, wet-coverage, signed-zero, exact-RHS-association,
-replay, and live-result plants must all fire. Every round-333 helper, plant,
+replay, filled-range, time-level, contribution-boundary, and live-result plants
+must all fire. Preflight validates every staged `namelist_cfg` assignment
+against the same group in NEMO's `namelist_ref`, with misspelled and misplaced
+plants. A run containing `E R R O R` is refused after quoting NEMO's exact
+matching lines. Every round-333 helper, plant,
 syntax/same-program proof, deterministic rerun, admission identity check, and
 refused-output retention path remains active.
 
