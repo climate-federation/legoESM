@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 import struct
+import sys
 from pathlib import Path
 
 import netCDF4
@@ -79,6 +81,27 @@ def test_ice_cover_schema_plant_fails(tmp_path: Path, monkeypatch: pytest.Monkey
         ice.verify_climatology(path, expected)
 
 
+def test_ice_cli_every_plant_reaches_specific_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(ice, "NX", 4)
+    monkeypatch.setattr(ice, "NY", 2)
+    monkeypatch.setattr(ice, "EXPECTED_KT", (1, 3))
+    monkeypatch.setattr(ice, "N_SAMPLES", 2)
+    for kt in ice.EXPECTED_KT:
+        for rank in ice.RANKS:
+            _write_record(tmp_path / ice.record_name(kt, rank), kt=kt, rank=rank,
+                          value=0.25 * (rank + 1))
+    for plant in ice.PLANTS:
+        output = tmp_path / f"{plant}.nc"
+        monkeypatch.setattr(sys, "argv", ["ice-cover-gate", "--record-dir", str(tmp_path),
+                                          "--output", str(output),
+                                          "--producer-commit", "a" * 40,
+                                          "--plant", plant])
+        assert ice.main() == 2
+        assert ice.PLANT_MESSAGES[plant] in capsys.readouterr().out
+
+
 def _write_namelist_ref(path: Path) -> None:
     path.write_text(
         "&namsbc\n nn_ice=0\n/\n"
@@ -99,21 +122,28 @@ def _write_restart(path: Path, value: float) -> None:
 def _k0_fixture(tmp_path: Path) -> tuple[Path, Path]:
     reference = tmp_path / "namelist_ref"
     _write_namelist_ref(reference)
-    (tmp_path / "ocean.output").write_text(
-        "nn_ice = 1\nln_icebergs = F\nln_drgice_imp = F\nln_mxl0 = T\n"
-        "nn_mxlice = 0\nnn_itend = 10\nsn_ice = ice_cover_clim.nc\n",
-        encoding="utf-8",
-    )
+    excerpt = (Path(__file__).parent / "data" /
+               "orca2_round339_no_icebergs_ocean_output.txt").read_text(encoding="utf-8")
+    (tmp_path / "ocean.output").write_text(excerpt, encoding="utf-8")
+    (tmp_path / "staged.namelist_cfg").write_text(
+        "&namsbc\n nn_ice=1\n/\n&namsbc_iif\n sn_ice='ice_cover_clim.nc'\n/\n"
+        "&namberg\n ln_icebergs=.false.\n/\n&namdrg\n ln_drgice_imp=.false.\n/\n"
+        "&namzdf_tke\n ln_mxl0=.true.\n nn_mxlice=0\n/\n", encoding="utf-8")
     (tmp_path / "run.user.stdout.log").write_text("STOP 0\n", encoding="utf-8")
     (tmp_path / "compiled_keys.txt").write_text("key_si3 key_qco key_RK3\n", encoding="utf-8")
     (tmp_path / "nemo").write_bytes(b"binary")
     (tmp_path / "ice_cover_clim.nc").write_bytes(b"cover")
     for rank in (0, 1):
         _write_restart(tmp_path / f"ORCA2_00000010_restart_{rank:04d}.nc", rank + 1.0)
-    files = [p for p in tmp_path.iterdir() if p.is_file() and p.name not in
+    source_root = tmp_path / "build_sources"
+    (source_root / "ppsrc" / "nemo").mkdir(parents=True)
+    (source_root / "MY_SRC").mkdir()
+    (source_root / "ppsrc" / "nemo" / "step.f90").write_text("program step\n")
+    files = [p for p in tmp_path.rglob("*") if p.is_file() and p.name not in
              {"namelist_ref", "producer_manifest.json"}]
     common.write_manifest(tmp_path / "producer_manifest.json", producer_commit="b" * 40,
-                          binary=tmp_path / "nemo", files=files, root=tmp_path)
+                          binary=tmp_path / "nemo", files=files, root=tmp_path,
+                          build_source_root=source_root)
     return tmp_path, reference
 
 
@@ -123,8 +153,29 @@ def test_k0_gate_and_every_plant(tmp_path: Path) -> None:
     assert result["status"] == "PASS_R339_K0_SMOKE"
     assert result["scores_physics"] is False
     for plant in k0.PLANTS:
-        with pytest.raises(common.GateError):
+        with pytest.raises(common.GateError, match=re.escape(k0.PLANT_MESSAGES[plant])):
             k0.run_gate(root, reference, expected_commit="b" * 40, plant=plant)
+
+
+def test_real_nemo_no_icebergs_banner_excerpt() -> None:
+    excerpt = (Path(__file__).parent / "data" /
+               "orca2_round5_no_icebergs_real_excerpt.txt").read_text(encoding="utf-8")
+    assert k0.NO_ICEBERGS_BANNER in excerpt
+    assert not common.output_has(excerpt, "ln_icebergs", "F")
+
+
+def test_manifest_survives_refused_move(tmp_path: Path) -> None:
+    in_place = tmp_path / "run"
+    in_place.mkdir()
+    root, _ = _k0_fixture(in_place)
+    refused = tmp_path / "refused"
+    refused.mkdir()
+    retained = refused / "run_failed"
+    root.rename(retained)
+    payload = common.verify_manifest(retained / "producer_manifest.json",
+                                     expected_commit="b" * 40)
+    assert payload["my_src_files"] == []
+    assert all(not Path(name).is_absolute() for name in payload["files"])
 
 
 def test_manifest_rejects_digest_and_escape(tmp_path: Path) -> None:
@@ -137,3 +188,19 @@ def test_manifest_rejects_digest_and_escape(tmp_path: Path) -> None:
     (root / "producer_manifest.json").write_text(json.dumps(payload))
     with pytest.raises(common.GateError):
         common.verify_manifest(root / "producer_manifest.json")
+
+
+def test_launchers_isolate_sources_and_manifest_before_mpirun() -> None:
+    tool_root = (Path(__file__).parents[3] / "scripts" / "validate" /
+                 "ocean_fidelity" / "orca2_l4")
+    producer = (tool_root /
+                "nemo_testcase_l4_orca2_round339_ice_cover_producer" /
+                "run.sh").read_text(encoding="utf-8")
+    k0_run = (tool_root / "nemo_testcase_l4_orca2_round339_k0_smoke" /
+              "run.sh").read_text(encoding="utf-8")
+    assert 'find "$SOURCE_ROOT/MY_SRC"' not in producer
+    assert 'find "$SOURCE_ROOT/MY_SRC"' not in k0_run
+    assert 'check_tool_a_my_src "$TARGET_ROOT/MY_SRC"' in producer
+    assert 'check_k0_my_src "$TARGET_ROOT/MY_SRC"' in k0_run
+    assert producer.index('\nwrite_producer_manifest "$TARGET_RUN"\n') < producer.index("timeout --kill-after=60 900 mpirun")
+    assert k0_run.index('\nwrite_producer_manifest "$TARGET_RUN"\n') < k0_run.index("timeout --kill-after=60 \"$RUN_TIMEOUT_S\" mpirun")

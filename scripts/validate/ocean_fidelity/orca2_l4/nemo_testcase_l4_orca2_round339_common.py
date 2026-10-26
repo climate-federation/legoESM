@@ -104,16 +104,31 @@ def validate_ocean_output(path: Path, expected: dict[str, str]) -> None:
 
 
 def write_manifest(path: Path, *, producer_commit: str, binary: Path,
-                   files: list[Path], root: Path) -> None:
+                   files: list[Path], root: Path,
+                   build_source_root: Path) -> None:
     root = root.absolute()
     records: dict[str, str] = {}
     for item in files:
         lexical = item.absolute()
         require(lexical.is_relative_to(root), f"manifest path is outside run: {item}")
         records[lexical.relative_to(root).as_posix()] = sha256(lexical)
+    source_root = build_source_root.absolute()
+    require(source_root.is_relative_to(root), "build-source snapshot is outside run")
+    source_prefix = source_root.relative_to(root)
+    build_sources = sorted(
+        name for name in records if Path(name).is_relative_to(source_prefix)
+    )
+    require(build_sources, "build-source inventory is empty")
+    my_src_prefix = source_prefix / "MY_SRC"
+    my_src_files = sorted(
+        Path(name).relative_to(my_src_prefix).as_posix()
+        for name in build_sources if Path(name).is_relative_to(my_src_prefix)
+    )
     payload = {
         "producer_commit": producer_commit,
         "binary_sha256": sha256(binary),
+        "build_sources": build_sources,
+        "my_src_files": my_src_files,
         "files": dict(sorted(records.items())),
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -127,6 +142,15 @@ def verify_manifest(path: Path, *, expected_commit: str | None = None) -> dict:
                 "manifest producer commit moved")
     files = payload.get("files")
     require(isinstance(files, dict) and files, "manifest file inventory is empty")
+    build_sources = payload.get("build_sources")
+    require(isinstance(build_sources, list) and build_sources,
+            "manifest build-source inventory is empty")
+    require(all(isinstance(name, str) and name in files for name in build_sources),
+            "manifest build-source inventory is not covered by file digests")
+    my_src_files = payload.get("my_src_files")
+    require(isinstance(my_src_files, list) and
+            all(isinstance(name, str) for name in my_src_files),
+            "manifest MY_SRC inventory is malformed")
     for name, digest in files.items():
         relative = Path(name)
         require(not relative.is_absolute() and ".." not in relative.parts,
@@ -134,6 +158,8 @@ def verify_manifest(path: Path, *, expected_commit: str | None = None) -> dict:
         candidate = root / relative
         require(candidate.is_file(), f"manifest file is missing: {name}")
         require(sha256(candidate) == digest, f"manifest digest moved: {name}")
+    require(files.get("nemo") == payload.get("binary_sha256"),
+            "manifest binary digest is not the staged nemo digest")
     return payload
 
 

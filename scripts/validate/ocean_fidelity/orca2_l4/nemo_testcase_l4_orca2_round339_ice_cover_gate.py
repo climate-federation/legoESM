@@ -24,6 +24,14 @@ N_SAMPLES = 1460
 EXPECTED_KT = tuple(range(1, 2920, 2))
 RANKS = (0, 1)
 PLANTS = ("header", "truncation", "checksum", "rank", "nonfinite", "one-ulp")
+PLANT_MESSAGES = {
+    "header": "record is not binary64",
+    "truncation": "record size",
+    "checksum": "payload checksum mismatch",
+    "rank": "record tag",
+    "nonfinite": "record contains non-finite fr_i",
+    "one-ulp": "ice_cover payload differs from kt-order mean",
+}
 
 GateError = common.GateError
 require = common.require
@@ -67,6 +75,7 @@ def read_record(path: Path, *, plant: str | None = None) -> dict:
         header["rank"] = 1 - header["rank"]
     if plant == "nonfinite":
         values[plant_cell] = np.nan
+        checksum = xor_checksum(values)
     require(xor_checksum(values) == checksum % (1 << 64), "payload checksum mismatch")
     require(bool(np.all(np.isfinite(values))), "record contains non-finite fr_i")
     require(bool(np.all((values >= 0.0) & (values <= 1.0))), "fr_i is outside [0,1]")
@@ -182,17 +191,25 @@ def main() -> int:
         else:
             require(all((args.record_dir, args.output, args.producer_commit)),
                     "admission arguments incomplete")
-            values, records = build_mean(args.record_dir, plant=args.plant)
-            require(args.plant is None, f"{args.plant} plant stayed green")
+            build_plant = args.plant if args.plant != "one-ulp" else None
+            values, records = build_mean(args.record_dir, plant=build_plant)
             if not args.output.exists():
                 write_climatology(args.output, values, {"producer_commit": args.producer_commit})
+            expected = values
+            if args.plant == "one-ulp":
+                expected = values.copy()
+                positive = np.argwhere(expected > 0.0)
+                require(bool(positive.size), "one-ULP plant found no ice-covered wet cell")
+                cell = tuple(positive[0])
+                expected[cell] = np.nextafter(expected[cell], np.inf)
             result = {
                 "status": "PASS_R339_ICE_COVER_PRODUCTION",
                 "producer_commit": args.producer_commit,
                 "sample_count": N_SAMPLES,
                 "records": records,
-                "climatology": verify_climatology(args.output, values),
+                "climatology": verify_climatology(args.output, expected),
             }
+            require(args.plant is None, f"{args.plant} plant stayed green")
     except (GateError, OSError, ValueError, UnicodeError, struct.error) as error:
         print(f"STATUS {'PLANT-FIRED' if args.plant else 'REFUSE'}: {error}")
         return 2

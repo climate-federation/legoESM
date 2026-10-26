@@ -20,8 +20,10 @@ readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
 readonly NEMO_ROOT=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
 readonly REFERENCE_CFG=ORCA2_ICE_PISCES
 readonly SOURCE_CFG=ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY
+readonly BASELINE_CFG=ORCA2_ORCA1ICE_OMIP_L4_R339BASE
 readonly TARGET_CFG=ORCA2_ORCA1ICE_OMIP_L4_R339ICE
 readonly SOURCE_ROOT=$NEMO_ROOT/cfgs/$SOURCE_CFG
+readonly BASELINE_ROOT=$NEMO_ROOT/cfgs/$BASELINE_CFG
 readonly TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
 readonly SOURCE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/acquisition/orca1ice_surface_entry_every_step_a_np2
 readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round339/ice_cover_producer
@@ -41,6 +43,7 @@ readonly MPIFC=/home/dbalwada/miniconda3/envs/nemo-build/bin/mpif90
 readonly FPP_KEYS='-Dkey_si3 -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3'
 readonly MEM_MIN_GB=150
 readonly RUN_TIMEOUT_S=7200
+readonly ADMISSION_IDENTITY_ONLY=${R339_ADMISSION_IDENTITY_ONLY:-0}
 
 export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PYTHONPATH=$REPO:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/atmosphere:$REPO/packages/coupler:$REPO/packages/ice:$REPO/packages/land:$REPO/packages/ml:$REPO/packages/tools:$REPO/src
@@ -58,6 +61,23 @@ for path in "$SOURCE" "$PATCH" "$WRITER" "$FIXTURE" "$GATE" "$COMMON" "$TEST" "$
 done
 command -v objdump >/dev/null || refuse 'objdump is unavailable'
 command -v timeout >/dev/null || refuse 'timeout is unavailable'
+if [[ "$ADMISSION_IDENTITY_ONLY" == 1 ]]; then
+  [[ "$MODE" == --admit-existing && -n ${R339_ADMISSION_TEST_ROOT:-} ]] \
+    || refuse 'identity-only admission requires --admit-existing and R339_ADMISSION_TEST_ROOT'
+  test_root=$(realpath -e -- "$R339_ADMISSION_TEST_ROOT")
+  retained=$(realpath -e -- "$EXISTING_RUN")
+  [[ "$retained" == "$test_root/refused/"* ]] \
+    || refuse 'identity-only retained run is outside the test refused directory'
+  "$PY" - "$retained/producer_manifest.json" "$retained/nemo" <<'PY'
+import sys
+from pathlib import Path
+from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round339_common as c
+p=c.verify_manifest(Path(sys.argv[1])); c.require(p['binary_sha256']==c.sha256(Path(sys.argv[2])),'retained binary digest moved')
+print('R339_SYNTHETIC_RETAINED_ADMISSION_PASS',p['producer_commit'])
+PY
+  exit 0
+fi
+[[ "$ADMISSION_IDENTITY_ONLY" == 0 ]] || refuse 'R339_ADMISSION_IDENTITY_ONLY must be 0 or 1'
 
 mem_ok() { (( $(free -g | awk '$1 == "Mem:" {print $7}') >= $1 )); }
 disk_ok() {
@@ -113,12 +133,43 @@ compile_like_round5() {
     -I "$SOURCE_ROOT/BLD/inc" -J "$scratch/mod" -c "$source" -o "$output"
 }
 same_program() {
-  "$PY" - "$1" "$SOURCE_ROOT/BLD" "$PATCH" "$TARGET_CFG" "$SOURCE_CFG" <<'PY'
+  local candidate=$1 reference=${2:-$SOURCE_ROOT/BLD} reference_cfg=${3:-$SOURCE_CFG}
+  "$PY" - "$candidate" "$reference" "$PATCH" "$TARGET_CFG" "$reference_cfg" <<'PY'
 import json, sys
 from pathlib import Path
 from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round339_common as c
 result=c.same_program(Path(sys.argv[1]),Path(sys.argv[2]),Path(sys.argv[3]),observer_unit="sbcmod",writer_unit="round339_ice_cover_writer",new_cfg=sys.argv[4],reference_cfg=sys.argv[5])
 print(json.dumps(result,sort_keys=True))
+PY
+}
+check_tool_a_my_src() {
+  local root=$1 inventory
+  inventory=$(find "$root" -maxdepth 1 \( -type f -o -type l \) -printf '%f\n' | sort)
+  [[ "$inventory" == $'round339_ice_cover_writer.F90\nsbcmod.F90' ]] || return 1
+  ! grep -EHn 'rCdU_ice|hm_i|divu_i|shear_i|delta_i|a_i|v_i|v_s|sv_i|oa_i' \
+    "$root/round339_ice_cover_writer.F90" "$root/sbcmod.F90" >/dev/null
+}
+snapshot_build_sources() {
+  local build_root=$1 destination=$2 source
+  mkdir -p "$destination/MY_SRC" "$destination/BLD"
+  cp -a "$build_root/BLD/ppsrc" "$destination/"
+  for source in "$build_root"/MY_SRC/*; do
+    [[ -e "$source" || -L "$source" ]] || continue
+    cp -a "$source" "$destination/MY_SRC/$(basename "$source")"
+  done
+  for source in arch_nemo.fcm cpp.fcm bld.cfg full_key_list.txt; do
+    [[ -f "$build_root/BLD/$source" ]] && cp -a "$build_root/BLD/$source" "$destination/BLD/$source"
+  done
+  cp -a "$build_root/cpp_$TARGET_CFG.fcm" "$destination/cpp_$TARGET_CFG.fcm"
+}
+write_producer_manifest() {
+  local root=$1
+  "$PY" - "$root" "$COMMIT" <<'PY'
+import sys
+from pathlib import Path
+from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round339_common as c
+root=Path(sys.argv[1]); files=[p for p in root.rglob('*') if p.is_file() and p.name!='producer_manifest.json']
+c.write_manifest(root/'producer_manifest.json',producer_commit=sys.argv[2],binary=root/'nemo',files=files,root=root,build_source_root=root/'build_sources')
 PY
 }
 compare_census() {
@@ -250,6 +301,27 @@ done
 
 # Checklist 6/12 and resource gates. Unit tests carry structural/schema plants.
 "$PY" -m pytest -q -p no:cacheprovider "$TEST"
+synthetic_root=$scratch/synthetic-admission
+synthetic_run=$synthetic_root/run
+mkdir -p "$synthetic_run/build_sources/ppsrc/nemo" "$synthetic_run/build_sources/MY_SRC" \
+  "$synthetic_root/refused"
+printf 'synthetic binary\n' >"$synthetic_run/nemo"
+printf 'program synthetic\n' >"$synthetic_run/build_sources/ppsrc/nemo/synthetic.f90"
+"$PY" - "$synthetic_run" "$COMMIT" <<'PY'
+import sys
+from pathlib import Path
+from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round339_common as c
+root=Path(sys.argv[1]); files=[p for p in root.rglob('*') if p.is_file()]
+c.write_manifest(root/'producer_manifest.json',producer_commit=sys.argv[2],binary=root/'nemo',files=files,root=root,build_source_root=root/'build_sources')
+PY
+synthetic_retained=$synthetic_root/refused/run_failed_synthetic
+mv -- "$synthetic_run" "$synthetic_retained"
+R339_ADMISSION_IDENTITY_ONLY=1 R339_ADMISSION_TEST_ROOT=$synthetic_root \
+  R339_EXISTING_RUN=$synthetic_retained "$0" --admit-existing \
+  >"$scratch/synthetic-retained-admission.log"
+grep -F 'R339_SYNTHETIC_RETAINED_ADMISSION_PASS' "$scratch/synthetic-retained-admission.log" >/dev/null \
+  || refuse 'Tool A --admit-existing did not accept its retained manifest'
+printf 'PREFLIGHT_RETAINED_ADMISSION_PASS tool=A route=refused\n'
 mem_ok "$MEM_MIN_GB" || refuse "under $MEM_MIN_GB GB memory available"
 plant_must_refuse memory mem_ok 999999
 disk_ok "$EVIDENCE" || refuse 'under 16 GB free for yearly record'
@@ -264,13 +336,29 @@ import sys
 from pathlib import Path
 from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round339_common as c
 p=c.verify_manifest(Path(sys.argv[1])); c.require(p['binary_sha256']==c.sha256(Path(sys.argv[2])),'retained binary digest moved')
+c.require(p['my_src_files']==['round339_ice_cover_writer.F90','sbcmod.F90'],'Tool A MY_SRC inventory moved')
+c.require(any(name.startswith('build_sources/ppsrc/nemo/') for name in p['build_sources']),'Tool A ppsrc inventory is empty')
 print('R339_MANIFEST_PIN_PASS',p['producer_commit'])
 PY
   local producer
   producer=$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["producer_commit"])' "$root/producer_manifest.json")
   for plant in header truncation checksum rank nonfinite one-ulp; do
-    plant_must_refuse "$plant" "$PY" "$GATE" --record-dir "$root" --output "$root/.plant.nc" \
-      --producer-commit "$producer" --plant "$plant"
+    case "$plant" in
+      header) expected='record is not binary64' ;;
+      truncation) expected='record size' ;;
+      checksum) expected='payload checksum mismatch' ;;
+      nonfinite) expected='record contains non-finite fr_i' ;;
+      rank) expected='record tag' ;;
+      one-ulp) expected='ice_cover payload differs from kt-order mean' ;;
+    esac
+    plant_log="$scratch/admit-$plant.log"
+    if "$PY" "$GATE" --record-dir "$root" --output "$root/.plant.nc" \
+      --producer-commit "$producer" --plant "$plant" >"$plant_log" 2>&1; then
+      refuse "preflight plant stayed green: $plant"
+    fi
+    grep -F "$expected" "$plant_log" >/dev/null \
+      || refuse "$plant plant missed its specific check: $expected"
+    printf 'PREFLIGHT_PLANT_FIRED %s check=%s\n' "$plant" "$expected"
     rm -f -- "$root/.plant.nc"
   done
   "$PY" "$GATE" --record-dir "$root" --output "$root/ice_cover_clim.nc" \
@@ -287,8 +375,8 @@ if [[ "$MODE" == --admit-existing ]]; then
   exit 0
 fi
 
-[[ ! -e "$TARGET_ROOT" && ! -e "$TARGET_RUN" ]] \
-  || refuse 'target build or run exists; retain/move it aside before retrying'
+[[ ! -e "$BASELINE_ROOT" && ! -e "$TARGET_ROOT" && ! -e "$TARGET_RUN" ]] \
+  || refuse 'baseline build, target build or run exists; retain/move it aside before retrying'
 mkdir -p "$EVIDENCE"
 run_created=0
 retain_on_failure() {
@@ -299,7 +387,7 @@ retain_on_failure() {
     retained=$EVIDENCE/refused/$(basename "$TARGET_RUN")_$(date -u +%Y%m%dT%H%M%SZ)_$$
     mkdir -p "$EVIDENCE/refused"
     mv -- "$TARGET_RUN" "$retained" \
-      && printf 'R339_FAILED_OUTPUTS_KEPT path=%s builds=%s\n' "$retained" "$TARGET_ROOT" >&2
+      && printf 'R339_FAILED_OUTPUTS_KEPT path=%s builds=%s,%s\n' "$retained" "$BASELINE_ROOT" "$TARGET_ROOT" >&2
   fi
   [[ ! -d "$scratch" ]] || rm -rf -- "$scratch"
   exit "$rc"
@@ -308,30 +396,54 @@ trap retain_on_failure EXIT
 
 cp "$NEMO_ROOT/cfgs/work_cfgs.txt" "$scratch/work_cfgs.before"
 cd "$NEMO_ROOT"
+./makenemo -r "$REFERENCE_CFG" -n "$BASELINE_CFG" -m conda-scalarmath del_key 'key_xios'
+while IFS= read -r -d '' source; do cp -a "$source" "$BASELINE_ROOT/EXP00/$(basename "$source")"; done \
+  < <(find "$SOURCE_ROOT/EXP00" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
+cp "$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm" "$BASELINE_ROOT/cpp_$BASELINE_CFG.fcm"
+[[ -z $(find "$BASELINE_ROOT/MY_SRC" -maxdepth 1 \( -type f -o -type l \) -print -quit) ]] \
+  || refuse 'observer-free baseline MY_SRC is not empty'
+./makenemo -n "$BASELINE_CFG" -m conda-scalarmath del_key 'key_xios'
+[[ -x "$BASELINE_ROOT/BLD/bin/nemo.exe" ]] || refuse 'baseline build produced no executable'
 ./makenemo -r "$REFERENCE_CFG" -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 while IFS= read -r -d '' source; do cp -a "$source" "$TARGET_ROOT/EXP00/$(basename "$source")"; done \
   < <(find "$SOURCE_ROOT/EXP00" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
-while IFS= read -r -d '' source; do cp -a "$source" "$TARGET_ROOT/MY_SRC/$(basename "$source")"; done \
-  < <(find "$SOURCE_ROOT/MY_SRC" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
 cp "$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm" "$TARGET_ROOT/cpp_$TARGET_CFG.fcm"
 cp "$SOURCE" "$TARGET_ROOT/MY_SRC/sbcmod.F90"
 cp "$WRITER" "$TARGET_ROOT/MY_SRC/round339_ice_cover_writer.F90"
 patch --batch -s --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$PATCH"
+check_tool_a_my_src "$TARGET_ROOT/MY_SRC" \
+  || refuse 'Tool A MY_SRC is not exactly the fr_i observer or touches another SI3 array'
 touch "$TARGET_ROOT/MY_SRC/"*.F90
 ./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 [[ -x "$BINARY" ]] || refuse 'build produced no executable'
 check_placement "$TARGET_ROOT/BLD/ppsrc/nemo/sbcmod.f90" || refuse 'compiled observer placement moved'
-same_program "$TARGET_ROOT/BLD" >"$scratch/actual_same_program.json"
-compare_census "$SOURCE_ROOT/BLD/obj/sbcmod.o" "$TARGET_ROOT/BLD/obj/sbcmod.o" >"$scratch/actual_census.json"
-diff <(grep -v "^$TARGET_CFG " "$scratch/work_cfgs.before") \
-     <(grep -v "^$TARGET_CFG " "$NEMO_ROOT/cfgs/work_cfgs.txt") >/dev/null \
+same_program "$TARGET_ROOT/BLD" "$BASELINE_ROOT/BLD" "$BASELINE_CFG" >"$scratch/actual_same_program.json"
+compare_census "$BASELINE_ROOT/BLD/obj/sbcmod.o" "$TARGET_ROOT/BLD/obj/sbcmod.o" >"$scratch/actual_census.json"
+diff <(grep -Ev "^($TARGET_CFG|$BASELINE_CFG) " "$scratch/work_cfgs.before") \
+     <(grep -Ev "^($TARGET_CFG|$BASELINE_CFG) " "$NEMO_ROOT/cfgs/work_cfgs.txt") >/dev/null \
   || refuse 'work_cfgs.txt changed beyond the target line'
 
 mkdir "$TARGET_RUN"; run_created=1
+while read -r _digest name; do cp -a "$SOURCE_RUN/$name" "$TARGET_RUN/$name"; done <"$SOURCE_RUN/deck_files.sha256"
+while read -r _digest name; do cp -a "$SOURCE_RUN/$name" "$TARGET_RUN/$name"; done <"$SOURCE_RUN/input_files.sha256"
+cp "$BINARY" "$TARGET_RUN/nemo"
+cp "$scratch/actual_same_program.json" "$TARGET_RUN/same_program.json"
+cp "$scratch/actual_census.json" "$TARGET_RUN/fp_census.json"
+sed -E -i \
+  -e 's/^([[:space:]]*nn_itend[[:space:]]*=[[:space:]]*)10([[:space:]!])/\1 2920\2/' \
+  -e 's/^([[:space:]]*nn_stock[[:space:]]*=[[:space:]]*)10([[:space:]!])/\1 2920\2/' \
+  "$TARGET_RUN/namelist_cfg"
+check_year_namelist "$TARGET_RUN/namelist_cfg" || refuse 'year namelist staging failed'
+(cd "$TARGET_RUN" && find . -maxdepth 1 \( -type f -o -type l \) ! -name staged_inputs.sha256 -print0 \
+  | sort -z | xargs -0 sha256sum >staged_inputs.sha256)
+printf '%s\n' "$COMMIT" >"$TARGET_RUN/producer_commit.txt"
+printf '%s\n' $FPP_KEYS >"$TARGET_RUN/compiled_keys.txt"
+snapshot_build_sources "$TARGET_ROOT" "$TARGET_RUN/build_sources"
 mkdir "$TARGET_RUN/passivity_10step"
 while read -r _digest name; do cp -a "$SOURCE_RUN/$name" "$TARGET_RUN/passivity_10step/$name"; done <"$SOURCE_RUN/deck_files.sha256"
 while read -r _digest name; do cp -a "$SOURCE_RUN/$name" "$TARGET_RUN/passivity_10step/$name"; done <"$SOURCE_RUN/input_files.sha256"
 cp "$BINARY" "$TARGET_RUN/passivity_10step/nemo"
+write_producer_manifest "$TARGET_RUN"
 (
   cd "$TARGET_RUN/passivity_10step"
   mem_ok "$MEM_MIN_GB" || refuse "under $MEM_MIN_GB GB memory before passivity mpirun"
@@ -350,21 +462,6 @@ grep 'STOP 0' "$TARGET_RUN/passivity_10step/run.user.stdout.log" >/dev/null \
 compare_restart_set "$SOURCE_RUN" "$TARGET_RUN/passivity_10step" \
   || refuse 'observer changed a round-5 ten-step restart byte'
 
-while read -r _digest name; do cp -a "$SOURCE_RUN/$name" "$TARGET_RUN/$name"; done <"$SOURCE_RUN/deck_files.sha256"
-while read -r _digest name; do cp -a "$SOURCE_RUN/$name" "$TARGET_RUN/$name"; done <"$SOURCE_RUN/input_files.sha256"
-cp "$BINARY" "$TARGET_RUN/nemo"
-cp "$scratch/actual_same_program.json" "$TARGET_RUN/same_program.json"
-cp "$scratch/actual_census.json" "$TARGET_RUN/fp_census.json"
-sed -E -i \
-  -e 's/^([[:space:]]*nn_itend[[:space:]]*=[[:space:]]*)10([[:space:]!])/\1 2920\2/' \
-  -e 's/^([[:space:]]*nn_stock[[:space:]]*=[[:space:]]*)10([[:space:]!])/\1 2920\2/' \
-  "$TARGET_RUN/namelist_cfg"
-check_year_namelist "$TARGET_RUN/namelist_cfg" || refuse 'year namelist staging failed'
-(cd "$TARGET_RUN" && find . -maxdepth 1 \( -type f -o -type l \) ! -name staged_inputs.sha256 -print0 \
-  | sort -z | xargs -0 sha256sum >staged_inputs.sha256)
-printf '%s\n' "$COMMIT" >"$TARGET_RUN/producer_commit.txt"
-printf '%s\n' $FPP_KEYS >"$TARGET_RUN/compiled_keys.txt"
-
 (
   cd "$TARGET_RUN"
   mem_ok "$MEM_MIN_GB" || refuse "under $MEM_MIN_GB GB memory before mpirun"
@@ -382,11 +479,4 @@ grep 'STOP 0' "$TARGET_RUN/run.user.stdout.log" >/dev/null || refuse 'NEMO did n
   || refuse 'raw record count is not 1,460 per rank'
 "$PY" "$GATE" --record-dir "$TARGET_RUN" --output "$TARGET_RUN/ice_cover_clim.nc" \
   --producer-commit "$COMMIT" --report "$TARGET_RUN/round339_ice_cover_admission.json"
-"$PY" - "$TARGET_RUN" "$COMMIT" <<'PY'
-import sys
-from pathlib import Path
-from scripts.validate.ocean_fidelity.orca2_l4 import nemo_testcase_l4_orca2_round339_common as c
-root=Path(sys.argv[1]); files=[p for p in root.rglob('*') if p.is_file() and p.name!='producer_manifest.json']
-c.write_manifest(root/'producer_manifest.json',producer_commit=sys.argv[2],binary=root/'nemo',files=files,root=root)
-PY
 admit_existing "$TARGET_RUN"

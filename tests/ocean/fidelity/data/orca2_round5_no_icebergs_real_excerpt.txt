@@ -1,0 +1,6 @@
+ icb_nam : iceberg initialization through namberg namelist read
+ ~~~~~~~~
+
+    ==>>>   No icebergs used
+
+ ldf_slp_init : direction of lateral mixing
