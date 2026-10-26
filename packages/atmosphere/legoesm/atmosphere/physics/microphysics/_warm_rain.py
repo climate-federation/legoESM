@@ -936,6 +936,9 @@ _MG2_DROP_DIAM_MAX = 50.0e-6   # [m] -> lambda lower bound (pgam+1)/50 um
 _MG2_DROP_DIAM_MIN = 2.0e-6    # [m] -> lambda upper bound (pgam+1)/2 um
 _MG2_MIN_MEAN_MASS_LIQ = 1.0e-20   # [kg]
 _MG2_PGAM_UNSET = -100.0       # pgam where qcic <= qsmall (:419, "likely to cause an error")
+# Droplet effective radius where the in-cloud water is below qsmall: CAM6
+# REL fill 10 um (micro_mg_cam.F90:2536; micro_mg2_0.F90:2859 effc = 10).
+MG2_REL_NO_LIQUID_M = 10.0e-6      # [m]
 # --- CAM6 MG2 rain processes (micro_mg_utils.F90) ---
 _MG2_BEHENG_SELFCOLL = 8.0     # self_collection_rain nragg = -8 nric qric rho (:1359, Beheng 1994)
 _MG2_EVAP_CLOUD_QMIN = 1.0e-6  # evaporate_sublimate_precip: dum=0 if qcic+qiic < 1e-6 (:1468)
@@ -1000,24 +1003,17 @@ def mg2_var_coef(relvar, a, dtype):
                    - jax.scipy.special.gammaln(r)) / r ** a
 
 
-def mg2_size_bounded_nc(q_c_ic, N_c_ic, rho):
-    """MG2 ``size_dist_param_liq`` droplet-number reset (micro_mg_utils.F90:
-    376-422 -> size_dist_param_basic :481-516), per-VOLUME here.
+def mg2_droplet_psd(q_c_ic, N_c_ic, rho):
+    """MG2 ``size_dist_param_liq`` (micro_mg_utils.F90:376-422 ->
+    size_dist_param_basic :481-516), per-VOLUME number here.
 
     Where ``qcic > qsmall``: ``pgam = max(1/(1-0.7 exp(-0.008e-6 N))^2 - 1, 2)``
-    (``N = ncic*rho`` [#/m^3]), ``ncic <= qcic/1e-20``, and ``ncic`` is reset
-    so ``lambda = (pi/6 rho_w (pgam+1)(pgam+2)(pgam+3) ncic/qcic)^(1/3)`` stays
-    in ``(pgam+1)/[50 um, 2 um]``.  Elsewhere ``N_c_ic`` is returned unchanged.
-    """
-    return mg2_size_dist_liq(q_c_ic, N_c_ic, rho)[0]
-
-
-def mg2_size_dist_liq(q_c_ic, N_c_ic, rho):
-    """MG2 ``size_dist_param_liq`` (micro_mg_utils.F90:376-422):
-    ``(N_c_ic_adjusted, pgam, lamc)`` with the number per-VOLUME, see
-    :func:`mg2_size_bounded_nc`.  ``lamc`` is the slope clipped to
-    ``(pgam+1)/[50 um, 2 um]``; where ``qcic <= qsmall`` MG2 sets ``pgam=-100``
-    and ``lamc=0`` and so does this.
+    (``N = ncic*rho`` [#/m^3]), ``ncic <= qcic/1e-20``,
+    ``lambda = (pi/6 rho_w (pgam+1)(pgam+2)(pgam+3) ncic/qcic)^(1/3)`` set to
+    the bound (and ``ncic`` reset to match) when it leaves
+    ``(pgam+1)/[50 um, 2 um]``.  Returns ``(active, pgam, lambda, ncic)``
+    with ``ncic`` per kg; ``pgam``/``lambda``/``ncic`` are finite but
+    meaningless where ``active`` is False (placeholder ``qcic = 1``).
     """
     active = q_c_ic > MG2_QSMALL
     q_safe = jnp.where(active, q_c_ic, 1.0)
@@ -1032,9 +1028,61 @@ def mg2_size_dist_liq(q_c_ic, N_c_ic, rho):
     nc_kg = jnp.where(lam < lam_lo, lam_lo ** 3 * q_safe / shape,
                       jnp.where(lam > lam_hi, lam_hi ** 3 * q_safe / shape,
                                 nc_kg))
+    return active, pgam, jnp.clip(lam, lam_lo, lam_hi), nc_kg
+
+
+def mg2_size_dist_liq(q_c_ic, N_c_ic, rho):
+    """MG2 ``size_dist_param_liq`` (micro_mg_utils.F90:376-422):
+    ``(N_c_ic_adjusted, pgam, lamc)`` with the number per-VOLUME, see
+    :func:`mg2_size_bounded_nc`.  ``lamc`` is the slope clipped to
+    ``(pgam+1)/[50 um, 2 um]``; where ``qcic <= qsmall`` MG2 sets ``pgam=-100``
+    and ``lamc=0`` and so does this.
+    """
+    active, pgam, lam, nc_kg = mg2_droplet_psd(q_c_ic, N_c_ic, rho)
     return (jnp.where(active, nc_kg * rho, N_c_ic),
             jnp.where(active, pgam, _MG2_PGAM_UNSET),
-            jnp.where(active, jnp.clip(lam, lam_lo, lam_hi), 0.0))
+            jnp.where(active, lam, 0.0))
+
+
+def mg2_size_bounded_nc(q_c_ic, N_c_ic, rho):
+    """MG2 ``size_dist_param_liq`` droplet-number reset
+    (:func:`mg2_droplet_psd`), per-VOLUME.  Elsewhere (``qcic <= qsmall``)
+    ``N_c_ic`` is returned unchanged.
+    """
+    active, _, _, nc_kg = mg2_droplet_psd(q_c_ic, N_c_ic, rho)
+    return jnp.where(active, nc_kg * rho, N_c_ic)
+
+
+@jax.custom_jvp
+def _div_tangent_safe(x, y):
+    """``x / y``, forward bitwise identical to the division.  The tangent
+    ``(dx - (x/y) dy)/y`` replaces JAX's ``-x dy/y**2``, whose ``y**2``
+    underflows to 0 in fp32 for ``y`` ~ 1e-19 (in-precip rain near qsmall at
+    rho ~ 0.1, oracle row 17) and turns a finite derivative into inf/NaN.
+    First order only: here 2x/y**3 ~ 1e48 exceeds the fp32 range, so fp32
+    second derivatives of the rain chain near qsmall stay non-finite (fp64
+    is finite)."""
+    return x / y
+
+
+@_div_tangent_safe.defjvp
+def _div_tangent_safe_jvp(primals, tangents):
+    (x, y), (dx, dy) = primals, tangents
+    r = x / y
+    return r, (dx - r * dy) / y
+
+
+def mg2_droplet_effective_radius(q_c_ic, N_c_ic, rho):
+    """CAM6 radiation droplet effective radius REL [m] (micro_mg_cam.F90:
+    2534-2554): ``(pgam+3)/lambda/2`` from :func:`mg2_droplet_psd` where the
+    in-cloud water ``qcic >= qsmall``, else 10 um.
+
+    ``q_c_ic`` is CAM6's ``icwmrst = min(q/max(mincld, ast), 5e-3)``
+    (micro_mg_cam.F90:2296), ``N_c_ic`` the in-cloud number [#/m^3].
+    """
+    _, pgam, lam, _ = mg2_droplet_psd(q_c_ic, N_c_ic, rho)
+    return jnp.where(q_c_ic >= MG2_QSMALL, (pgam + 3.0) / lam / 2.0,
+                     MG2_REL_NO_LIQUID_M)
 
 
 def mg2_inprecip_rain(q_r, N_r, rho, precip_frac, lamr_min, lamr_max):
@@ -1047,7 +1095,10 @@ def mg2_inprecip_rain(q_r, N_r, rho, precip_frac, lamr_min, lamr_max):
     leaves ``[lamr_min, lamr_max]``, it is set to the bound and ``nric`` is
     re-adjusted to match; ``n0r = nric*lamr``; ``lamr = 0`` elsewhere.
     ``N_r``/``N_ric``/``n0r`` are per-VOLUME (this module's rain convention:
-    MG2's per-kg value times rho).
+    MG2's per-kg value times rho).  At ``qric == qsmall`` exactly MG2 (and
+    this port) leave ``lamr = n0r = 0``; consumers gate on ``lamr > 0``
+    (oracle row 18).  The slope's division carries an fp32-safe tangent
+    (:func:`_div_tangent_safe`, oracle row 17); the forward is unchanged.
     """
     q_ric = jnp.minimum(q_r / precip_frac, MG2_QRIC_MAX)
     small = q_ric < MG2_QSMALL
@@ -1056,7 +1107,7 @@ def mg2_inprecip_rain(q_r, N_r, rho, precip_frac, lamr_min, lamr_max):
     active = q_ric > MG2_QSMALL
     cr = jnp.pi * constants.rho_water
     den = jnp.where(active, rho * q_ric, 1.0)
-    lam_raw = safe_pow(cr * N_ric / den, 1.0 / 3.0)
+    lam_raw = safe_pow(_div_tangent_safe(cr * N_ric, den), 1.0 / 3.0)
     lam = jnp.clip(lam_raw, lamr_min, lamr_max)
     N_adj = jnp.where((lam_raw < lamr_min) | (lam_raw > lamr_max),
                       lam ** 3 * den / cr, N_ric)
@@ -1097,7 +1148,10 @@ def rain_evaporation_mg2(q_v, q_sat, T, p, rho, q_ric, lamr, n0r, lcldm,
     ice (``qcic``/``qiic``); ``q_sat`` is MG2's ``qvl``.
     """
     dum = jnp.where(q_cic + q_iic < _MG2_EVAP_CLOUD_QMIN, 0.0, lcldm)
-    active = (precip_frac > dum) & (q_ric >= MG2_QSMALL)
+    # lamr > 0 drops only qric == qsmall exactly, where MG2 itself leaves
+    # lamr = n0r = 0 and evaluates 0 * inf (NaN, oracle row 18); every other
+    # cell is unchanged.
+    active = (precip_frac > dum) & (q_ric >= MG2_QSMALL) & (lamr > 0.0)
     am_evp_st = precip_frac - dum
     one_m_dum = jnp.where(active, 1.0 - dum, 1.0)
     qclr = (q_v - dum * q_sat) / one_m_dum
@@ -1254,8 +1308,14 @@ def mg2_accrete_cloud_water_snow(T, rho, mu, uns, q_cic, N_cic, q_sic, pgam,
     ``uns`` is the PROVISIONAL in-precip snow number fall speed, ``pgam/lamc``
     from :func:`mg2_size_dist_liq`; ``N_cic`` in whatever units the caller wants
     ``npsacws`` in."""
+    # lamc > 0 (oracle row 31): at qcic == qsmall exactly MG2's
+    # size_dist_param_liq leaves pgam = -100, lamc = 0 (it tests qcic >
+    # qsmall) while this gate is qcic >= qsmall, so dc0 = -99/0 made the rate
+    # NaN forward and backward here.  The compiled oracle returns 0 there
+    # (eci = max(NaN, 0) = 0 in gfortran), as this now does: lamc is 0 only
+    # at that point, so nothing else changes.
     active = ((q_sic >= MG2_QSMALL) & (T <= constants.T_freeze)
-              & (q_cic >= MG2_QSMALL))
+              & (q_cic >= MG2_QSMALL) & (lamc > 0.0))
     lc = jnp.where(active, lamc, 1.0)
     ls = jnp.where(active, lams, 1.0)
     _, asn = mg2_snow_rhof_asn(rho, config)
@@ -1855,6 +1915,12 @@ _MG2_ICE_D_MIN_M = 1.0e-6      # ice_lambda_bounds = 1/[2 dcs, 1 um] (micro_mg_u
 _MG2_MIN_MEAN_MASS_ICE = 1.0e-20  # min_mean_mass_ice [kg] (micro_mg_utils.F90:174)
 
 
+def mg2_ice_lambda_bounds(dcs):
+    """CAM6 MG2 cloud-ice slope bounds ``ice_lambda_bounds = 1/[2 dcs, 1 um]``
+    (micro_mg_utils.F90:294) as ``(lami_min, lami_max)`` [1/m]."""
+    return 1.0 / (2.0 * dcs), 1.0 / _MG2_ICE_D_MIN_M
+
+
 def mg2_ice_slope(q_i, N_i, rho_ice, dcs, log_width=0.0):
     """MG2 ``size_dist_param_basic(mg_ice_props, qiic, niic, lami)``
     (micro_mg2_0.F90:1333) -> ``(niic, lami)``: ``N_i <= q_i/1e-20 kg``, then
@@ -1871,9 +1937,8 @@ def mg2_ice_slope(q_i, N_i, rho_ice, dcs, log_width=0.0):
     No invariant is lost: the slope stays inside the bounds to O(width).
     Default width 0.01 approved by user 2026-10-21."""
     return _mg2_size_dist_basic(jnp.clip(q_i, 0.0), jnp.clip(N_i, 0.0),
-                                rho_ice * jnp.pi, 1.0 / (2.0 * dcs),
-                                1.0 / _MG2_ICE_D_MIN_M, _MG2_MIN_MEAN_MASS_ICE,
-                                log_width=log_width)
+                                rho_ice * jnp.pi, *mg2_ice_lambda_bounds(dcs),
+                                _MG2_MIN_MEAN_MASS_ICE, log_width=log_width)
 
 
 def mg2_qi_conservation_ratio(q_avail, src, snk, dt, omsm, width=0.0):
@@ -1930,7 +1995,8 @@ def rain_freezing_bigg_mg2(q_ric, N_ric, lamr, T, rho, precip_frac, config):
 
     where ``T < 269.15 K`` and ``qric >= qsmall``.  No internal clamp: the
     MG2 rain mass/number limiters bound it (micro_mg2_0.F90:1660-1709)."""
-    active = (T < _BIGG_T_MAX_K) & (q_ric >= MG2_QSMALL)
+    # lamr > 0: see rain_evaporation_mg2 (oracle row 18, qric == qsmall).
+    active = (T < _BIGG_T_MAX_K) & (q_ric >= MG2_QSMALL) & (lamr > 0.0)
     lam3 = jnp.where(active, lamr, 1.0) ** 3
     nnuccr = (jnp.pi * (N_ric / rho) * config.bigg_bimm
               * (jnp.exp(config.bigg_aimm * (constants.T_freeze - T)) - 1.0)

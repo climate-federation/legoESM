@@ -179,3 +179,101 @@ def test_the_half_port_guard_runs_before_the_driver_does_any_work():
                    len(body))
     assert called_at < mesh_at
 
+
+
+def _manifest_args(**kw):
+    a = m.build_arg_parser().parse_args(
+        ["--mesh-dir", "M", "--ic-dir", "I", "--output", "O"])
+    for k, v in kw.items():
+        setattr(a, k, v)
+    return a
+
+
+def test_manifest_goes_through_the_canonical_writer(tmp_path):
+    """#2102: the canonical writer validates the record, keeps the old file's
+    config keys, and hashes the fesom_jax install path."""
+    import json
+
+    import pytest
+
+    fesom_jax = pytest.importorskip("fesom_jax")  # the helper reads its path
+
+    from legoesm.driver.restart import validate_run_manifest
+
+    path = m.write_fesom_core2_manifest(tmp_path, _manifest_args(), 30)
+    man = json.loads(path.read_text())
+    validate_run_manifest(man)
+    assert man["reproducibility"]["runner_tag"] == "run_fesom_core2"
+    assert man["config"]["config_kind"] == "ocean"
+    rc = man["config"]["resolved_config"]
+    assert rc["runner"] == "run_fesom_core2"
+    assert rc["fesom_jax"] == str(Path(fesom_jax.__file__).parent)
+    assert (rc["days"], rc["dt_s"], rc["year"], rc["tke_surface_bc"]) == (
+        30, 1800.0, 1958, "neumann")
+
+
+def test_manifest_hash_includes_the_fesom_jax_path(tmp_path, monkeypatch):
+    import json
+
+    hashes = []
+    for i, root in enumerate(("/a/fesom_jax", "/b/fesom_jax")):
+        monkeypatch.setitem(sys.modules, "fesom_jax",
+                            types.SimpleNamespace(__file__=f"{root}/__init__.py"))
+        path = m.write_fesom_core2_manifest(tmp_path / str(i),
+                                            _manifest_args(), 30)
+        hashes.append(json.loads(path.read_text())["config"]["config_hash"])
+    assert hashes[0] != hashes[1]
+
+
+def test_main_records_the_final_state_digest(tmp_path, monkeypatch):
+    """main() writes the manifest and digests the final state at run end;
+    fesom_jax's mesh/IC/forcing/step are stubbed (no data needed)."""
+    import json
+    from typing import NamedTuple
+
+    import jax.numpy as jnp
+    import pytest
+
+    from legoesm.driver.restart import pytree_state_digest
+
+    pytest.importorskip("fesom_jax")
+    import fesom_jax.integrate  # noqa: F401
+    import fesom_jax.mesh
+    import fesom_jax.phc_ic
+    import fesom_jax.ssh
+    import fesom_jax.step
+    import fesom_jax.tke
+    from fesom_jax import surface_forcing
+
+    class _State(NamedTuple):
+        T: object
+
+    n = 4
+    mesh = types.SimpleNamespace(
+        nod2D=n, elem2D=2, nl=3, ulevels_nod2D=np.ones(n, int),
+        node_layer_mask=np.ones((n, 2)))
+    monkeypatch.setattr(fesom_jax.mesh, "load_mesh", lambda d: mesh)
+    monkeypatch.setattr(fesom_jax.phc_ic, "cold_start_state",
+                        lambda mesh, d: _State(T=jnp.ones((n, 2))))
+    monkeypatch.setattr(fesom_jax.ssh, "build_ssh_operator",
+                        lambda mesh, dt: None)
+    # The installed fesom_jax may predate the TKE flags main() passes.
+    monkeypatch.setattr(fesom_jax.tke, "TkeConfig", lambda **kw: kw)
+    # Each step adds 1, so the digest must be of the state AFTER the loop.
+    monkeypatch.setattr(fesom_jax.step, "step",
+                        lambda state, *a, **kw: state._replace(T=state.T + 1.0))
+    forcing = types.SimpleNamespace(
+        static=None, stack=lambda dates: jnp.zeros((len(dates), 1)))
+    monkeypatch.setattr(surface_forcing, "build_surface_forcing",
+                        lambda *a, **kw: forcing)
+    monkeypatch.setattr(surface_forcing, "dates_for_steps",
+                        lambda year, dt, n_steps: list(range(n_steps)))
+    monkeypatch.setattr(m, "write_snapshot", lambda *a, **kw: tmp_path)
+    monkeypatch.setattr(sys, "argv", [
+        "run_fesom_core2.py", "--mesh-dir", "M", "--ic-dir", "I",
+        "--days", "1", "--dt", "43200", "--output", str(tmp_path)])
+    assert m.main() == 0
+    man = json.loads((tmp_path / "run_manifest.json").read_text())
+    # --days 1 at dt=43200 s is 2 steps: T goes 1 -> 3.
+    assert man["result"]["state_digest"] == pytree_state_digest(
+        _State(T=jnp.full((n, 2), 3.0)))

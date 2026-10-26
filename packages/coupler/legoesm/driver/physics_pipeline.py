@@ -315,6 +315,16 @@ class PhysicsPipeline:
         # the daytime-effective daily-mean cosine — matching the zenith
         # convention the radiation solver itself uses.
         self.dynamic_albedo = dynamic_albedo
+        # ``dynamic_albedo`` with the rrtmgp solver: CESM2.1 open-ocean albedo
+        # split (cime5.6.47 seq_flux_mct.F90 L881-894), as on the MPAS lane --
+        # DIFFUSE 0.06, DIRECT = the zenith curve at the radiation call's own
+        # cosine.  Set by ``build_physics_pipeline``; False keeps the single
+        # zenith albedo above on both beams (gray, direct constructions).
+        self.cesm_ocean_albedo = False
+        # True when ``radiation_fn`` is the rrtmgp solver (set by
+        # ``build_physics_pipeline``): the only consumer of the cloud droplet
+        # radius, as the MPAS physics_fn gates its CCN radiation path.
+        self.rrtmgp_radiation = False
         # Realistic Earth orbit (Berger 1978) for AMIP-II/CMIP insolation;
         # None ⇒ circular orbit.  Set by ``build_physics_pipeline`` from
         # ``ExperimentConfig.orbital_insolation``; used by the radiation
@@ -1040,7 +1050,8 @@ class PhysicsPipeline:
 
     def _tiled_surface_flux(self, u_low, v_low, T_low, q_low, rho_low,
                            sst, sic, T_land, p_s, beta_land=None,
-                           q_sfc_land_override=None, z_low=None, return_water=False):
+                           q_sfc_land_override=None, z_low=None, return_water=False,
+                           T_ice_skin=None):
         """Area-weighted (mosaic) surface turbulent flux over ocean/ice/land.
 
         Used when ``self.surface_tiled`` is True (the active land tile).  The
@@ -1075,7 +1086,8 @@ class PhysicsPipeline:
 
         T_ocean = ad.flatten_2d(sst)
         T_ice_grid = jnp.broadcast_to(
-            jnp.asarray(self.T_ice, dtype=sst.dtype), sst.shape,
+            jnp.asarray(self.T_ice if T_ice_skin is None else T_ice_skin,
+                        dtype=sst.dtype), sst.shape,
         )
 
         # Land tile: soil-moisture-limited effective surface humidity.
@@ -1148,8 +1160,12 @@ class PhysicsPipeline:
                             sfc_evap_override=None,
                             tke=None, qke=None, gwd_spectrum=None,
                             w_land=None, snow=None, land_ml=None,
-                            land_ml_params=None, cloud_fraction=None):
+                            land_ml_params=None, cloud_fraction=None,
+                            T_ice_skin=None):
         """Convection + microphysics + BL exchange with held radiation.
+
+        ``T_ice_skin`` (optional, per column, grid shape) replaces the scalar
+        ``T_ice`` in every surface-temperature blend: the prognostic ice skin.
 
         ``T_land`` is the slab-land skin temperature.  When the land tile
         is active (``self.f_land is not None``) the surface temperature
@@ -1183,7 +1199,8 @@ class PhysicsPipeline:
         shape_3d = T.shape
         shape_2d = p_s.shape
 
-        T_sfc = blend_surface_temperature(sst, sic, self.T_ice)
+        T_sfc = blend_surface_temperature(
+            sst, sic, self.T_ice if T_ice_skin is None else T_ice_skin)
         if self.f_land is not None and T_land is not None:
             T_sfc = self._blend_land(T_sfc, T_land)
 
@@ -1491,7 +1508,7 @@ class PhysicsPipeline:
                         _, _, _shf_c, _lhf_c, _ = self._tiled_surface_flux(
                             _u_low, _v_low, _T_low, _q_low, _rho_low,
                             sst, sic, T_land, p_s,
-                            beta_land=beta_land,
+                            beta_land=beta_land, T_ice_skin=T_ice_skin,
                             q_sfc_land_override=_q_sfc_land_ml,
                             z_low=_lowest_level_height(z_full_col, z_half_col))
                     else:
@@ -2073,6 +2090,7 @@ class PhysicsPipeline:
                     u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
                     rho_col_phys[:, -1], sst, sic, T_land, p_s,
                     beta_land=beta_land, q_sfc_land_override=_q_sfc_land_ml,
+                    T_ice_skin=T_ice_skin,
                     z_low=_lowest_level_height(z_full_col, z_half_col),
                     return_water=True,
                 )
@@ -2604,7 +2622,8 @@ class PhysicsPipeline:
                                sfc_sw_up=None, sfc_sw_down=None,
                                conv_precip=None, land_ml=None, w_land=None,
                                snow=None, land_ml_params=None,
-                               cloud_fraction=None, conv_precip_frozen=None):
+                               cloud_fraction=None, conv_precip_frozen=None,
+                               T_ice_skin=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns ``(dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa,
@@ -2625,8 +2644,22 @@ class PhysicsPipeline:
         ad = self.adapter
         nlev = self.sigma_full.shape[0]
 
-        T_sfc = blend_surface_temperature(sst, sic, self.T_ice)
-        if self.dynamic_albedo:
+        T_sfc = blend_surface_temperature(
+            sst, sic, self.T_ice if T_ice_skin is None else T_ice_skin)
+        open_ocean_frac = None
+        if self.dynamic_albedo and self.cesm_ocean_albedo:
+            # CESM2.1 split (rrtmgp): this blend is the DIFFUSE albedo, open
+            # ocean at 0.06; the rrtmgp radiation_fn swaps the open-ocean part
+            # of the DIRECT beam for the zenith curve at its own cosine
+            # (integration.cesm_direct_surface_albedo).  Same recipe as the
+            # MPAS lane (model_driver ``_cesm_ocean_alb``).
+            from legoesm.atmosphere.physics.radiation.integration import (
+                OCEAN_ALBEDO_DIFFUSE_CESM,
+            )
+            albedo = blend_surface_property(sic, _albedo_ice,
+                                            OCEAN_ALBEDO_DIFFUSE_CESM)
+            open_ocean_frac = 1.0 - sic
+        elif self.dynamic_albedo:
             # Zenith-dependent ocean albedo (Briegleb 1992).  Use the
             # SAME zenith convention as the radiation solver: the
             # instantaneous cos(SZA) under a diurnal cycle, else the
@@ -2713,6 +2746,8 @@ class PhysicsPipeline:
             T_sfc = self._blend_land(T_sfc, T_land_grid)
             albedo = self._blend_land(albedo, alb_land)
             emissivity = self._blend_land(emissivity, emis_land)
+            if open_ocean_frac is not None:
+                open_ocean_frac = (1.0 - self.f_land) * open_ocean_frac
 
         # --- Coupler-provided dynamic surface overrides ---
         # In a coupled run the ocean/sea-ice/land tile models compute dynamic
@@ -2724,6 +2759,14 @@ class PhysicsPipeline:
         # ice-albedo feedback / zenith ocean albedo / snow brightening and the
         # ice/land prognostic skin temperature.  ``None`` (AMIP / standalone /
         # uncoupled) leaves the static blend untouched ⇒ byte-identical.
+        if open_ocean_frac is not None and (sfc_albedo_override is not None
+                                            or sfc_sw_up is not None):
+            raise ValueError(
+                "dynamic_albedo with rrtmgp forms the direct-beam albedo from "
+                "the pipeline's own blend (open ocean 0.06 diffuse); a coupler "
+                "albedo override or a prescribed surface SW replaces that blend "
+                "and the direct beam would be built on the wrong field. Drop "
+                "dynamic_albedo or the override.")
         if sfc_albedo_override is not None:
             albedo = sfc_albedo_override
         if sfc_T_override is not None:
@@ -2790,6 +2833,8 @@ class PhysicsPipeline:
         lon_col = ad.flatten_2d(lon)
         albedo_col = ad.flatten_2d(albedo)
         emis_col = ad.flatten_2d(emissivity)
+        open_ocean_frac_col = (None if open_ocean_frac is None
+                               else ad.flatten_2d(open_ocean_frac))
 
         # Compute cloud properties for cloud-radiation coupling
         cloud_kwargs = {}
@@ -2876,6 +2921,7 @@ class PhysicsPipeline:
                 n_cloud_col = jnp.maximum(
                     ad.flatten_3d(N_c) * _rho_nc, 0.0)
             n_ice_col = None if N_i is None else ad.flatten_3d(N_i)
+            _nc_in_cloud = False
             # Aerosol-CCN droplet number for the radiation PSD: under
             # specified-Nc with aerosol coupling, feed the SAME
             # Andreae (2009) AOD->CCN diagnostic into the cloud-optics
@@ -2897,6 +2943,11 @@ class PhysicsPipeline:
                 n_cloud_col = jnp.broadcast_to(
                     ccn_from_aod(_aod_col)[:, None], T_col.shape,
                 )
+                # specified IN-CLOUD number (MG2 nccons), flagged as on the
+                # MPAS lane where rrtmgp consumes the radius (gray discards
+                # it); compute_cloud_properties refuses schemes with no
+                # in-cloud pairing reference.
+                _nc_in_cloud = self.rrtmgp_radiation
             # ``compute_cloud_properties`` is parameterised on mixing
             # ratio (RH from q_v vs q_sat_mixing_ratio); leave the
             # mixing-ratio q_v here and only feed the converted
@@ -2925,6 +2976,7 @@ class PhysicsPipeline:
                 n_cloud=n_cloud_col, n_ice=n_ice_col,
                 conv_precip=conv_precip_col,
                 cloud_fraction_override=_cf_ovr,
+                n_cloud_in_cloud=_nc_in_cloud,
             )
             # ``to_rrtmg_kwargs`` builds the kwargs without
             # ``cloud_fraction`` (commit 4c9591bb, lost in AIMIP-#312
@@ -2960,6 +3012,7 @@ class PhysicsPipeline:
             lon_col = _shard(lon_col)
             albedo_col = _shard(albedo_col)
             emis_col = _shard(emis_col)
+            open_ocean_frac_col = _shard(open_ocean_frac_col)
             o3_vmr_precomputed = _shard(o3_vmr_precomputed)
             aerosol_od_precomputed = _shard(aerosol_od_precomputed)
             aerosol_lw_od_precomputed = _shard(aerosol_lw_od_precomputed)
@@ -2978,13 +3031,21 @@ class PhysicsPipeline:
             ghg_vmr_override=ghg_vmr_override,
             aerosol_lw_od_col=aerosol_lw_od_precomputed,
             o3_top_vmr_col=o3_top_vmr,
+            # only the rrtmgp radiation_fn takes it (cesm_ocean_albedo)
+            **({} if open_ocean_frac_col is None
+               else {"open_ocean_frac_col": open_ocean_frac_col}),
             **cloud_kwargs,
         )
 
         # Unflatten back to native grid shape via adapter
         dT_dt_rad = ad.unflatten_3d(rad_out.heating_rate)
         sw_down_sfc = ad.unflatten_2d(rad_out.sw_flux_down[:, -1])
-        sw_net_sfc = sw_down_sfc * (1.0 - albedo)
+        if open_ocean_frac_col is None:
+            sw_net_sfc = sw_down_sfc * (1.0 - albedo)
+        else:
+            # Two surface albedos: the solver's own surface net, as on the
+            # MPAS lane (radiation/integration.py physics_fn).
+            sw_net_sfc = sw_down_sfc - ad.unflatten_2d(rad_out.sw_flux_up[:, -1])
         lw_net_sfc = ad.unflatten_2d(
             rad_out.lw_flux_down[:, -1] - rad_out.lw_flux_up[:, -1]
         )
@@ -3075,7 +3136,9 @@ class PhysicsPipeline:
                 # Pre-land ocean/ice blend: the unified non-tiled law
                 # evaluates on the SAME blended T_sfc the atmosphere's
                 # turbulence surface layer sees (inert on the legacy path).
-                T_sfc_ocean=blend_surface_temperature(sst, sic, self.T_ice),
+                T_sfc_ocean=blend_surface_temperature(
+                    sst, sic,
+                    self.T_ice if T_ice_skin is None else T_ice_skin),
             )
             land_ml_new = land_ml
         else:
@@ -3184,7 +3247,37 @@ class PhysicsPipeline:
                          tke=None, qke=None, gwd_spectrum=None,
                          conv_precip=None, land_ml=None, w_land=None,
                          snow=None, land_ml_params=None, cloud_fraction=None,
-                         conv_precip_frozen=None):
+                         conv_precip_frozen=None, ice_T_skin=None):
+
+            if pipeline.ice_skin_prognostic and ice_T_skin is None:
+                raise ValueError(
+                    "ice_skin_prognostic=True but this lane's carry has no "
+                    "ice_T_skin (#2106); the constant T_ice would run "
+                    "silently. Seed the skin in the carry (pack_carry("
+                    "ice_T_skin=...)).")
+            if ice_T_skin is not None:
+                # Melt-dependent sea-ice albedo on the carried skin (scalar
+                # albedo_ice under "constant").
+                from legoesm.ice.shortwave import sea_ice_albedo
+                albedo_ice = sea_ice_albedo(
+                    pipeline.sea_ice_albedo_scheme, albedo_ice,
+                    T_skin=ice_T_skin, h_ice_m=pipeline.ice_thickness_m,
+                    melt_width_K=pipeline.sea_ice_melt_ramp_width_K)
+
+            def _skin_tail(skin, held, physics_out, sic, dt):
+                # Same per-step update as the MPAS column lane: this step's
+                # (fresh or held) radiative net + turbulent fluxes, consumed by
+                # the NEXT step's surface blends.  A 5th return value ONLY when
+                # the skin is on, so every 4-value caller is unchanged.
+                if skin is None:
+                    return ()
+                from legoesm.forcing.surface_utils import advance_ice_skin
+                new = advance_ice_skin(
+                    skin, held[1], held[2], physics_out.shflx,
+                    physics_out.lhflx, sic, dt_s=dt,
+                    h_ice_m=pipeline.ice_thickness_m,
+                    melt_cap_width_K=pipeline.ice_skin_melt_cap_width_K)
+                return (new.astype(skin.dtype),)
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -3203,7 +3296,7 @@ class PhysicsPipeline:
                  land_frac, phis,
                  tke, qke, gwd_spectrum,
                  conv_precip, land_ml, w_land, snow, land_ml_params,
-                 cloud_fraction, conv_precip_frozen) = args
+                 cloud_fraction, conv_precip_frozen, ice_T_skin) = args
                 # land_frac / phis exist for the LEARNED wrappers that share
                 # this step signature (phase 2, part 2); the classical
                 # pipeline does not consume them.
@@ -3233,6 +3326,7 @@ class PhysicsPipeline:
                         snow=snow, land_ml_params=land_ml_params,
                         cloud_fraction=cloud_fraction,
                         conv_precip_frozen=conv_precip_frozen,
+                        T_ice_skin=ice_T_skin,
                     )
 
                 # Radiation-as-forcing: cut radiation's reverse-mode so the
@@ -3265,6 +3359,7 @@ class PhysicsPipeline:
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     w_land=w_land, snow=snow, land_ml=land_ml,
                     land_ml_params=land_ml_params, cloud_fraction=cloud_fraction,
+                    T_ice_skin=ice_T_skin,
                 )
 
                 # Cast to storage dtype so both lax.cond branches match.
@@ -3288,7 +3383,9 @@ class PhysicsPipeline:
                     gwd_spectrum=_carries[2], w_land=_carries[3],
                     snow=_carries[4], cloud_fraction=_carries[5],
                 )
-                return physics_out, new_held, _cast(T_land_new), land_ml_new
+                return ((physics_out, new_held, _cast(T_land_new), land_ml_new)
+                        + _skin_tail(ice_T_skin, new_held, physics_out, sic,
+                                     dt))
 
             def _no_rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
@@ -3307,7 +3404,7 @@ class PhysicsPipeline:
                  land_frac, phis,
                  tke, qke, gwd_spectrum,
                  conv_precip, land_ml, w_land, snow, land_ml_params,
-                 cloud_fraction, conv_precip_frozen) = args
+                 cloud_fraction, conv_precip_frozen, ice_T_skin) = args
                 del conv_precip, conv_precip_frozen  # radiation-only inputs
                 del sfc_lw_up, sfc_sw_up, sfc_sw_down  # unused on the no-rad path
                 # land_frac / phis exist for the LEARNED wrappers that share
@@ -3332,6 +3429,7 @@ class PhysicsPipeline:
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     w_land=w_land, snow=snow, land_ml=land_ml,
                     land_ml_params=land_ml_params, cloud_fraction=cloud_fraction,
+                    T_ice_skin=ice_T_skin,
                 )
 
                 # Cast to storage dtype — must match _rad_branch
@@ -3354,7 +3452,9 @@ class PhysicsPipeline:
                 )
                 # multilayer land state (if any) rides through the no-rad sub-steps
                 # unchanged — it advances only on radiation steps (like the slab).
-                return physics_out, new_held, _cast(T_land), land_ml
+                return ((physics_out, new_held, _cast(T_land), land_ml)
+                        + _skin_tail(ice_T_skin, new_held, physics_out, sic,
+                                     dt))
 
             args = (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
                     day_of_year, seconds_of_day, dt,
@@ -3372,7 +3472,7 @@ class PhysicsPipeline:
                     land_frac, phis,
                     tke, qke, gwd_spectrum,
                     conv_precip, land_ml, w_land, snow, land_ml_params,
-                    cloud_fraction, conv_precip_frozen)
+                    cloud_fraction, conv_precip_frozen, ice_T_skin)
 
             # Issue #316 fix: when the caller knows at build time which
             # branch to take, skip the cond — keeps only the live branch
@@ -3573,7 +3673,7 @@ def _build_rrtmgp_radiation_fn(config):
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
-                     cloud_fraction=None):
+                     cloud_fraction=None, open_ocean_frac_col=None):
         del tau_equator, tau_pole  # RRTMGP does not use gray optical depth
         _sw_scale = None
         # Eccentricity scales the incident SW *flux* by (a/r)^2; the orbital
@@ -3651,6 +3751,15 @@ def _build_rrtmgp_radiation_fn(config):
         )
         if o3_top_vmr_col is not None:  # overhead-layer ozone
             _rad_kwargs["o3_top_vmr"] = o3_top_vmr_col
+        if open_ocean_frac_col is not None:
+            # CESM2.1 ocean albedo split (dynamic_albedo): ``albedo_col`` is
+            # the diffuse blend; the direct beam takes the open-ocean zenith
+            # curve at THIS call's cosine (the one the solver uses).
+            from legoesm.atmosphere.physics.radiation.integration import (
+                cesm_direct_surface_albedo,
+            )
+            _rad_kwargs["sfc_albedo_direct"] = cesm_direct_surface_albedo(
+                albedo_col, open_ocean_frac_col, cos_zenith)
         # Column-chunk the rrtmgp solve when configured: the per-block body
         # compiles ONCE at column_chunk_size, capping the super-linear rrtmgp
         # XLA compile time at higher horizontal resolution.  Columns are
@@ -5216,6 +5325,9 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
         co2_ppmv=config.co2_ppmv,
         surface_bulk_scheme=config.surface_bulk_scheme,
     )
+    pipeline.rrtmgp_radiation = rad_scheme in ("rrtmgp", "rrtmg")
+    pipeline.cesm_ocean_albedo = (bool(config.dynamic_albedo)
+                                  and pipeline.rrtmgp_radiation)
     from legoesm.atmosphere.physics.radiation.solar import earth_orbit
     pipeline.orbit = (earth_orbit()
                       if getattr(config, 'orbital_insolation', False) else None)
@@ -5385,4 +5497,13 @@ def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
                 "explicit frontgf_col."
             )
         pipeline._gwd_takes_frontgf = True
+    # Prognostic ice skin (#2106): the carried per-column skin is advanced in
+    # step_unified and its sea-ice albedo resolved from these.
+    from legoesm.driver.config import resolve_sea_ice_albedo_scheme
+    pipeline.sea_ice_albedo_scheme = resolve_sea_ice_albedo_scheme(config)
+    pipeline.ice_thickness_m = float(config.ice_thickness_m)
+    pipeline.sea_ice_melt_ramp_width_K = float(
+        config.sea_ice_melt_ramp_width_K)
+    pipeline.ice_skin_melt_cap_width_K = float(config.ice_skin_melt_cap_width_K)
+    pipeline.ice_skin_prognostic = bool(config.ice_skin_prognostic)
     return pipeline

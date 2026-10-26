@@ -202,11 +202,14 @@ def _pair_kernel_probability_inputs(
     K = collision_kernel(R_big, R_small, dv, cfg)
     if cfg.include_brownian:
         # ERF adds the Brownian coagulation coefficient on top of the selected
-        # kernel (k_val += k_brown), using the TOTAL droplet mass (water+solute).
+        # kernel (k_val += k_brown), using the TOTAL droplet mass
+        # sd_mass = m_water + m_solute (Coalescence.cpp l.855-862).  ERF's
+        # effective radius counts soluble solute at water density
+        # (SD_effective_radius), so that total is (4/3)πρ_w R³ exactly.
         T_a = jnp.asarray(T, dtype=dtype)
         p_a = jnp.asarray(p, dtype=dtype)
-        m_big = water_mass_per_droplet(state)[big] + s_big
-        m_small = water_mass_per_droplet(state)[small] + s_small
+        m_big = water_mass_per_droplet(state)[big]
+        m_small = water_mass_per_droplet(state)[small]
         K = K + brownian_kernel(R_big, R_small, m_big, m_small, p_a, T_a)
 
     scaling = jnp.asarray(pair_scaling, dtype=dtype)

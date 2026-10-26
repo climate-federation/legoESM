@@ -40,7 +40,7 @@ OUT_KEYS = ("ustar", "obklen", "kbfs", "pblh", "wstar")
 
 
 def constants_vector():
-    return [C.g, C.kappa_vk, C.c_pd, C.R_d, C.R_v / C.R_d - 1.0]
+    return [C.g, C.kappa_von_karman, C.c_pd, C.R_d, C.R_v / C.R_d - 1.0]
 
 
 def build_inputs(src):

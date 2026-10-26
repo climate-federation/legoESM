@@ -168,6 +168,14 @@ def initial_ice_number_from_mass(q_i, rho_cloud_ice: float = _RHO_CLOUD_ICE_DEFA
     lami = _R_EFF_ICE_PSD_COEFF / _R_EFF_ICE_DEFAULT_M
     return jnp.maximum(jnp.asarray(q_i), 0.0) * lami ** 3 / (
         jnp.pi * rho_cloud_ice)
+# Cloud schemes whose droplet radius has an oracle for an IN-CLOUD droplet
+# number (``n_cloud_in_cloud``): cam6_clubb = CAM6 MG2 REL; resolved = the
+# cloud-resolving M2005 convention (cell fully cloudy, WRF
+# module_mp_morr_two_moment.F EFFC on the cell q_c and N_c).  sundqvist /
+# xu_randall have no reference with this M2005 PSD (#2072 ask 2; ICON-AES pairs
+# q/cover with in-cloud CDNC but through its own ECHAM radius law), so an
+# in-cloud number there is refused until that choice is made.
+_IN_CLOUD_NUMBER_SCHEMES = ("cam6_clubb", "resolved")
 # --- two_region sub-grid cloud-optics inhomogeneity ---
 _INHOM_CF_FLOOR = 1.0e-3         # min cloud fraction for the in-cloud water path
 _INHOM_R_EFF_FLOOR_M = 1.0e-6    # min effective radius in the tau estimate [m]
@@ -1083,12 +1091,15 @@ def compute_cloud_properties(
         True when ``n_cloud`` is an IN-CLOUD droplet number (the aerosol/CCN
         activated number, CAM6 MG2 ``nccons`` convention ``ncic = ncnst/rho``),
         False (default) when it is the GRID-MEAN prognostic ``N_c`` tracer.
-        Under scheme ``cam6_clubb`` an in-cloud number is paired with the
-        in-cloud water ``q_c / max(ast, mincld)``, as CAM6 MG2 forms the
-        droplet effective radius it hands to radiation (micro_mg2_0.F90:2741,
-        2753, 2830-2838; lcldm = max(ast, mincld) with ast = max(alst, aist),
-        micro_mg_cam.F90:1810, :2009; mincld = 1e-4, micro_mg_utils.F90:123).
-        Other schemes keep the grid-mean pairing (#1521).
+        Under scheme ``cam6_clubb`` an in-cloud number gives CAM6's
+        radiation droplet radius REL (micro_mg_cam.F90:2296, 2534-2554): the
+        in-cloud water ``min(q_c / max(ast, mincld), 5e-3)`` (ast =
+        max(alst, aist), mincld = 1e-4, micro_mg_utils.F90:123), the MG2
+        droplet PSD ``size_dist_param_liq``, and 10 um where that water is
+        below qsmall = 1e-18.  Under ``resolved`` the cell is fully cloudy,
+        so the M2005 PSD on the cell q_c is the in-cloud pairing (WRF M2005).
+        Any other scheme raises: no oracle pairs an in-cloud number with its
+        cloud fraction.
 
     Returns
     -------
@@ -1122,6 +1133,15 @@ def compute_cloud_properties(
     #     blend collapses to ``1.0*q_sat_liq + 0.0*q_sat_ice`` = q_sat_liq
     #     BIT-identically (the ice curve is bounded, never inf/NaN, so the
     #     0.0*x term is exactly 0.0) => warm cloud is unchanged.
+    if (n_cloud_in_cloud and n_cloud is not None
+            and config.scheme not in _IN_CLOUD_NUMBER_SCHEMES):
+        raise ValueError(
+            f"cloud scheme {config.scheme!r} with an in-cloud (aerosol/CCN) "
+            "droplet number: no reference pairs that number with this "
+            "scheme's cloud fraction and the M2005 droplet PSD, so the "
+            "radiation would run an unreferenced pairing. Use one of "
+            f"{_IN_CLOUD_NUMBER_SCHEMES} or drop the aerosol CCN coupling "
+            "(--aerosol-ccn).")
     q_sat = cover_saturation_specific_humidity(T, p_full, config)
     RH = q_v / jnp.maximum(q_sat, 1.0e-10)
 
@@ -1467,43 +1487,53 @@ def compute_cloud_properties(
         # paths, but the gate and the PSD do look at different condensate.
         _nc_is_specified = n_cloud <= 1.0
         n_cloud = jnp.where(n_cloud > 1.0, n_cloud, config.Nc_default)
-        _cf_psd = jnp.clip(cf, _INHOM_CF_FLOOR, 1.0)
-        q_c_psd = jnp.where(_nc_is_specified, q_c / _cf_psd, q_c)
-        if n_cloud_in_cloud and _ast_cam6 is not None:
-            # In-cloud number (CCN): pair it with the in-cloud water exactly as
-            # CAM6 MG2 does for REL, dumc = qc/lcldm with lcldm = max(ast,
-            # mincld) (micro_mg2_0.F90:878, :2741; ast, not the radiative cover
-            # that also holds deepcu).  The dead-number branch above is kept.
-            from legoesm.atmosphere.physics.microphysics._warm_rain import (
-                MG2_MINCLD,
-            )
-            q_c_psd = jnp.where(_nc_is_specified, q_c_psd,
-                                q_c / jnp.maximum(_ast_cam6, MG2_MINCLD))
         # MOIST density, same basis as the bridges that produced ``n_cloud``
         # from the per-mass tracer: a dry rho here un-does that conversion
         # with a different density and biases nc_permass — hence LAMC and
         # r_eff — by ~(1+0.61 q_v)^(1/3) systematically (codex P2).
         from legoesm.atmosphere.physics._shared import compute_rho
         rho_air = compute_rho(jnp.maximum(T, 1.0), p_full, q_v)
-        nc_cm3 = jnp.maximum(jnp.clip(n_cloud, 0.0), 0.0) / 1.0e6
-        pgam = config.martin_pgam_slope * nc_cm3 + config.martin_pgam_intercept
-        pgam = jnp.clip(
-            1.0 / jnp.maximum(pgam, 1.0e-12) ** 2 - 1.0,
-            config.pgam_min, config.pgam_max,
-        )
-        cons26 = jnp.pi * constants.rho_water / 6.0
-        q_c_pos = jnp.maximum(jnp.clip(q_c_psd, 0.0), 1.0e-15)
-        nc_permass = (jnp.maximum(jnp.clip(n_cloud, 0.0), 1.0e-15)
-                      / jnp.maximum(rho_air, 0.1))  # coeff-ok: density floor [kg/m^3]
-        lamc = (cons26 * nc_permass * (pgam + 1.0) * (pgam + 2.0) * (pgam + 3.0)
-                / q_c_pos) ** (1.0 / 3.0)
-        # SAM LAMMIN/LAMMAX (1-60 µm DIAMETER, :1697-1698) bound LAMC ⇒ reffc.
-        lamc = jnp.clip(lamc, (pgam + 1.0) / _CLOUD_R_EFF_MAX_M, (pgam + 1.0) / 1.0e-6)
-        r_eff_liq_psd = (pgam + 3.0) / (2.0 * lamc)
-        has_liq = jnp.clip(q_c, 0.0) > 1.0e-14            # SAM QSMALL
-        r_eff_liq = jnp.where(
-            has_liq, r_eff_liq_psd,
-            jnp.asarray(config.r_eff_liq, dtype=_scalar_dtype))
+        if n_cloud_in_cloud and _ast_cam6 is not None:
+            # CAM6 REL (micro_mg_cam.F90:2277, 2296, 2534-2554): in-cloud
+            # water icwmrst = min(q_c/max(ast, mincld), 5 g/kg) (ast, not the
+            # radiative cover that also holds deepcu), paired with the
+            # in-cloud number, MG2 droplet PSD size_dist_param_liq
+            # (exponential Martin pgam >= 2, mean diameter 2-50 um), REL =
+            # (pgam+3)/(2 lambda) where icwmrst >= qsmall, else 10 um.  The
+            # dead-number branch keeps q_c over the radiative cover, floored
+            # at MG2's mincld (micro_mg_utils.F90:123).
+            from legoesm.atmosphere.physics.microphysics._warm_rain import (
+                KK2000_CAM6_QC_MAX,
+                MG2_MINCLD,
+                mg2_droplet_effective_radius,
+            )
+            q_c_ic = jnp.where(_nc_is_specified,
+                               q_c / jnp.clip(cf, MG2_MINCLD, 1.0),
+                               q_c / jnp.maximum(_ast_cam6, MG2_MINCLD))
+            q_c_ic = jnp.minimum(q_c_ic, KK2000_CAM6_QC_MAX)
+            r_eff_liq = mg2_droplet_effective_radius(q_c_ic, n_cloud, rho_air)
+        else:
+            _cf_psd = jnp.clip(cf, _INHOM_CF_FLOOR, 1.0)
+            q_c_psd = jnp.where(_nc_is_specified, q_c / _cf_psd, q_c)
+            nc_cm3 = jnp.maximum(jnp.clip(n_cloud, 0.0), 0.0) / 1.0e6
+            pgam = config.martin_pgam_slope * nc_cm3 + config.martin_pgam_intercept
+            pgam = jnp.clip(
+                1.0 / jnp.maximum(pgam, 1.0e-12) ** 2 - 1.0,
+                config.pgam_min, config.pgam_max,
+            )
+            cons26 = jnp.pi * constants.rho_water / 6.0
+            q_c_pos = jnp.maximum(jnp.clip(q_c_psd, 0.0), 1.0e-15)
+            nc_permass = (jnp.maximum(jnp.clip(n_cloud, 0.0), 1.0e-15)
+                          / jnp.maximum(rho_air, 0.1))  # coeff-ok: density floor [kg/m^3]
+            lamc = (cons26 * nc_permass * (pgam + 1.0) * (pgam + 2.0) * (pgam + 3.0)
+                    / q_c_pos) ** (1.0 / 3.0)
+            # SAM LAMMIN/LAMMAX (1-60 µm DIAMETER, :1697-1698) bound LAMC ⇒ reffc.
+            lamc = jnp.clip(lamc, (pgam + 1.0) / _CLOUD_R_EFF_MAX_M, (pgam + 1.0) / 1.0e-6)
+            r_eff_liq_psd = (pgam + 3.0) / (2.0 * lamc)
+            has_liq = jnp.clip(q_c, 0.0) > 1.0e-14            # SAM QSMALL
+            r_eff_liq = jnp.where(
+                has_liq, r_eff_liq_psd,
+                jnp.asarray(config.r_eff_liq, dtype=_scalar_dtype))
     else:
         r_eff_liq = jnp.broadcast_to(
             jnp.asarray(config.r_eff_liq, dtype=_scalar_dtype), T.shape,

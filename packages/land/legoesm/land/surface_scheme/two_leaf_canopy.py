@@ -678,9 +678,11 @@ def compute_two_leaf_canopy_fluxes(
     G_clamped = jnp.clip(G, -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
 
     # ---- Wind stress from MOST ustar ----
+    # Sign: stress ON THE AIR (opposes the wind), the convention of the ocean
+    # bulk and SimpleSEB stresses this vector is tile-blended with (#2031).
     tau_mag = rhoa * ustar**2
-    tau_x = tau_mag * wind_dir_x
-    tau_y = tau_mag * wind_dir_y
+    tau_x = -tau_mag * wind_dir_x
+    tau_y = -tau_mag * wind_dir_y
 
     # ---- Surface specific humidity (proxy; refined post-step by the caller) ----
     # The canopy solver tracks q_c (canopy-air humidity) as part of its

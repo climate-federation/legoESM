@@ -34,7 +34,7 @@ from legoesm import constants
 
 jax.config.update("jax_enable_x64", True)
 
-_KARMAN = constants.kappa_vk
+_KARMAN = constants.kappa_von_karman
 _G = constants.g
 _ZVIR = constants.R_v / constants.R_d - 1.0
 _CPVIR = constants.c_pv / constants.c_pd - 1.0

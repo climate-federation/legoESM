@@ -98,6 +98,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     rain_freezing_bigg,
     rain_freezing_bigg_mg2,
     ice_autoconversion_mg2,
+    mg2_ice_lambda_bounds,
     mg2_ice_slope,
     mg2_qi_conservation_ratio,
     mg2_size_dist_liq,
@@ -778,6 +779,15 @@ def morrison_microphysics(
     # mg_ferrier with — but does not force — m2005 deposition).
     cons12_cbrt = (config.rho_cloud_ice * jnp.pi) ** (1.0 / 3.0)
     dcs = config.ice_snow_d_auto
+    # Cloud-ice slope bounds of the ice fall speed and of the final ice-number
+    # limiter: the CAM6 MG2 mode uses MG2's ice_lambda_bounds 1/[2 dcs, 1 um]
+    # (micro_mg_utils.F90:294; size_dist_param_basic(mg_ice_props) at
+    # micro_mg2_0.F90:2089 and :2778), oracle row 26; other modes keep the
+    # config's (flavour-resolved) bounds.
+    if config.warm_rain_incloud:
+        lami_lo, lami_hi = mg2_ice_lambda_bounds(dcs)
+    else:
+        lami_lo, lami_hi = config.lami_min, config.lami_max
     lami_ac = cons12_cbrt * safe_pow(
         jnp.clip(N_i, 0.0) / jnp.maximum(q_i_eff, 1.0e-20), 1.0 / 3.0)
     n0i_ac = jnp.clip(N_i, 0.0) * lami_ac
@@ -948,7 +958,15 @@ def morrison_microphysics(
         )
 
     # 4. Riming: ice/snow collect cloud water (supercooled droplets freeze on).
-    riming_i = config.rime_coeff * jnp.clip(q_i, 0.0) * jnp.clip(q_c, 0.0) * f_ice
+    # CAM6 MG2 mode: MG2 has no cloud-ice riming (the qctend sinks of
+    # micro_mg2_0.F90:1879-1881 are prc, pra, mnuccc, mnucct, msacwi, psacws,
+    # bergs, berg), so the legacy heuristic is off (oracle row 29).  Static
+    # gate on the config bool.
+    if config.warm_rain_incloud:
+        riming_i = jnp.zeros_like(q_c)
+    else:
+        riming_i = (config.rime_coeff * jnp.clip(q_i, 0.0) * jnp.clip(q_c, 0.0)
+                    * f_ice)
     # Snow riming: faithful SAM PSACWS (PSD collection) when double-moment;
     # else the crude bulk rate. dt=None ⇒ NO internal donor clamp — the shared
     # q_c donor clamp below caps it ONCE alongside the other q_c sinks (codex
@@ -1681,7 +1699,7 @@ def morrison_microphysics(
         lami = safe_pow(
             config.rho_cloud_ice * jnp.pi * jnp.clip(N_i, 0.0)
             / jnp.maximum(qi_pos, 1.0e-20), 1.0 / 3.0)
-        lami = jnp.clip(lami, config.lami_min, config.lami_max)
+        lami = jnp.clip(lami, lami_lo, lami_hi)
         V_t_i = config.fall_a_i * cons28 * safe_pow(lami, -config.fall_b_i) * dum_i
         dum_i_cap = _VT_CAP_SNOW_ICE * dum_i
         V_t_i = jnp.minimum(V_t_i, dum_i_cap)
@@ -2232,8 +2250,8 @@ def morrison_microphysics(
     # bound created number in CLEAR AIR — both codex 2026-07-28 round 1).
     q_i_new = jnp.maximum(jnp.clip(q_i, 0.0) + dq_i_dt * dt, 0.0)
     _ci_psd = jnp.pi * config.rho_cloud_ice
-    n_i_hi = config.lami_max ** 3 * q_i_new / _ci_psd
-    n_i_lo = config.lami_min ** 3 * q_i_new / _ci_psd
+    n_i_hi = lami_hi ** 3 * q_i_new / _ci_psd
+    n_i_lo = lami_lo ** 3 * q_i_new / _ci_psd
     _n_i_post = jnp.clip(N_i, 0.0) + dN_i_dt * dt
     n_i_new = jnp.clip(_n_i_post, n_i_lo, n_i_hi)
     n_i_new = jnp.where(q_i_new > 1.0e-14, n_i_new, 0.0)

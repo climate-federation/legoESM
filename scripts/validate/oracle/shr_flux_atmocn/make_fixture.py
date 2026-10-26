@@ -41,7 +41,7 @@ SHR_CPDAIR = 1.00464e3  # const-ok: CESM shr_const oracle value
 SHR_G = 9.80616  # const-ok: CESM shr_const oracle value
 # driver.F90 hard-codes legoESM's constants; refuse to run if they drifted.
 DRIVER_LEGO = {"R_d": 287.05, "R_v": 461.51, "c_pd": 1004.64, "c_pv": 1846.0,  # const-ok: driver.F90 mirror
-               "g": 9.80616, "kappa_vk": 0.4, "L_v": 2.501e6}  # const-ok: driver.F90 mirror
+               "g": 9.80616, "kappa_von_karman": 0.4, "L_v": 2.501e6}  # const-ok: driver.F90 mirror
 SYNTH = [  # name, T, q, u, v, ps, sst  (T None: thbot == sst exactly)
     ("edge_calm_u0_v0", 300.0, 0.017, 0.0, 0.0, 101000.0, 301.0),
     ("edge_exact_neutral_dtheta0", None, 0.012, 6.0, 2.0, 101300.0, 293.0),

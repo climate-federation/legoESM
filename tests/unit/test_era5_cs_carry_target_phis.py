@@ -72,3 +72,18 @@ def test_target_phis_is_the_dynamics_terrain_and_moves_ps():
                                101325.0 * np.exp(100.0 / (constants.R_d * 290.0)), rtol=1e-5)
     with pytest.raises(TypeError):
         era5_to_cubedsphere_carry(era5, grid, sigma)
+
+
+def test_cubedsphere_carry_seeds_the_ice_skin_like_a_restart():
+    """With the prognostic ice skin on, the ERA5 cube carry seeds it at the
+    seawater freezing point (the restart seed); off, the carry has none."""
+    from legoesm import constants
+    era5, grid, sigma = _synthetic_era5(), _small_cs_grid(), _sigma()
+    tp = jnp.zeros((6, 4, 4))
+    on = era5_to_cubedsphere_carry(era5, grid, sigma, target_phis=tp,
+                                   ice_skin_prognostic=True)
+    off = era5_to_cubedsphere_carry(era5, grid, sigma, target_phis=tp)
+    assert off.ice_T_skin is None
+    skin = np.asarray(on.ice_T_skin)
+    assert skin.shape == (6, 4, 4)
+    np.testing.assert_array_equal(skin, constants.T_freeze_ocean)

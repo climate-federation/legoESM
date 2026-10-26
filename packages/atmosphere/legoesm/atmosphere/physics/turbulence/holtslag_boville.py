@@ -338,7 +338,7 @@ def _calc_ustar_obklen(T_bot, p_bot, tau_x, tau_y, shflx, qflx, th_bot,
     [Pa], sensible heat flux [W/m2] and water flux [kg/m2/s].
     """
     g = constants.g
-    vk = constants.kappa_vk
+    vk = constants.kappa_von_karman
     rrho = constants.R_d * T_bot / jnp.clip(p_bot, 1.0, None)
     # ustar = max(sqrt(sqrt(taux^2+tauy^2)*rrho), ustar_min), written so the
     # max picks ustar_min BEFORE the square roots are differentiated (exact
@@ -413,7 +413,7 @@ def hb_diffusivities(
     :func:`holtslag_boville_turbulence`.
     """
     g = constants.g
-    vk = constants.kappa_vk
+    vk = constants.kappa_von_karman
     cpair = constants.c_pd
     ncol, nlev = z_full.shape
     sffrac = config.sffrac

@@ -107,7 +107,7 @@ def test_generator_driver_constants_are_legoesm_constants():
     src = (Path(mf.__file__).parent / "driver.F90").read_text()
     fort = {m[0]: float(m[1]) for m in re.findall(r"L_(\w+)=([0-9.e]+)_R8", src)}
     name = {"RD": "R_d", "RV": "R_v", "CPD": "c_pd", "CPV": "c_pv", "G": "g",
-            "KARMAN": "kappa_vk", "LV": "L_v"}
+            "KARMAN": "kappa_von_karman", "LV": "L_v"}
     assert set(fort) == set(name)
     for f, k in name.items():
         assert fort[f] == mf.DRIVER_LEGO[k], f

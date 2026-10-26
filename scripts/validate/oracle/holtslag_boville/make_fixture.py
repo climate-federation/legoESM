@@ -44,7 +44,7 @@ ORACLE = {
 
 
 def constants_vector(dt):
-    return [C.g, C.kappa_vk, C.c_pd, C.R_d, C.R_v / C.R_d - 1.0, dt]
+    return [C.g, C.kappa_von_karman, C.c_pd, C.R_d, C.R_v / C.R_d - 1.0, dt]
 
 
 def write_inputs(path, d):

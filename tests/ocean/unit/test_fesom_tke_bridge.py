@@ -180,3 +180,54 @@ def test_iwm_splices_additively_and_only_when_enabled(flat_mesh, z_shim):
     assert np.isfinite(np.asarray(Av1)).all()
     # the momentum viscosity gets the same addition (NEMO adds to avm and avt)
     assert float(np.asarray(Av1 - Av0).max()) > 0.0
+
+
+def test_run_manifest_records_the_card_and_resolved_mixing(flat_mesh, z_shim,
+                                                           tmp_path):
+    """#2102: the OMIP FESOM lanes' manifest records the TKE card the model
+    ran, the k_ver/a_ver it resolved (fesom_jax defaults here), and the final
+    state digest written at run end."""
+    from fesom_jax import config as fconfig
+
+    from legoesm.driver.restart import read_run_manifest
+    from legoesm.ocean.config import ocean_config_from_dict
+    from scripts.run import run_omip_core2
+
+    model = _model(flat_mesh, z_shim)
+    assert model.vmix_config == _vmix()
+    args = SimpleNamespace(
+        emp_freshwater=False, dm2dc=False, sw_rgb_chl=False,
+        prognostic_sea_ice=False, sss_restore=False, sss_restore_channel=None,
+        runoff=False, nemo_monthly_init=None, woa_init=False)
+    path = run_omip_core2._write_fesom_manifest(
+        tmp_path, args, model, "fesom_b1_unforced", n_steps=1, dt=DT,
+        total_days=DT / 86400.0)
+    rec = ocean_config_from_dict(
+        read_run_manifest(path)["config"]["resolved_config"])
+    assert rec.vmix_config == _vmix()
+    assert (rec.k_ver, rec.a_ver) == (float(fconfig.K_VER),
+                                      float(fconfig.A_VER))
+    run_omip_core2._record_final_state_digest(
+        path, create_rest_state(flat_mesh, z_shim, vertical_coordinate="zstar"))
+    assert read_run_manifest(path)["result"]["state_digest"]
+
+
+def test_run_manifest_records_overridden_k_ver_a_ver(flat_mesh, z_shim, tmp_path):
+    from legoesm.driver.restart import read_run_manifest
+    from legoesm.ocean.config import ocean_config_from_dict
+    from scripts.run import run_omip_core2
+
+    cfg = FesomOceanConfig(dt=DT, k_ver=2.5e-5, a_ver=3.5e-4,
+                           vertical_coordinate="zstar", constants="fesom")
+    model = FesomOceanModel(flat_mesh, z_shim, cfg)
+    args = SimpleNamespace(
+        emp_freshwater=False, dm2dc=False, sw_rgb_chl=False,
+        prognostic_sea_ice=False, sss_restore=False, sss_restore_channel=None,
+        runoff=False, nemo_monthly_init=None, woa_init=False)
+    path = run_omip_core2._write_fesom_manifest(
+        tmp_path, args, model, "fesom_b1_unforced", n_steps=1, dt=DT,
+        total_days=DT / 86400.0)
+    rec = ocean_config_from_dict(
+        read_run_manifest(path)["config"]["resolved_config"])
+    assert (rec.k_ver, rec.a_ver) == (2.5e-5, 3.5e-4)
+    assert rec.vmix_config is None

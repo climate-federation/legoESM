@@ -7,4 +7,4 @@
 # 1979 A/B against CERES has been reviewed.
 include: amip_production.yaml
 sea_ice_albedo_scheme: maykut_untersteiner
-sea_ice_albedo_melt_width_K: 1.0
+sea_ice_melt_ramp_width_K: 1.0

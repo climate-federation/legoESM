@@ -413,6 +413,20 @@ def cesm_ocean_albedo_direct(cos_zenith: jnp.ndarray) -> jnp.ndarray:
     return jnp.where(sun, a, _OCEAN_ALB_DARK_CESM)
 
 
+def cesm_direct_surface_albedo(sfc_albedo_diffuse, open_ocean_frac, cos_zenith):
+    """Direct-beam surface albedo from the diffuse tile blend (CESM2.1 split).
+
+    ``sfc_albedo_diffuse`` is a blend whose open-ocean term is
+    :data:`OCEAN_ALBEDO_DIFFUSE_CESM`; the blend is linear in the open-ocean
+    area fraction, so swapping that term for :func:`cesm_ocean_albedo_direct`
+    at ``cos_zenith`` (the radiation call's own cosine) is exact.  Land and
+    ice keep one albedo for both beams.  Shared by the MPAS/hydrostatic
+    backend and the FV physics pipeline.
+    """
+    return sfc_albedo_diffuse + open_ocean_frac * (
+        cesm_ocean_albedo_direct(cos_zenith) - OCEAN_ALBEDO_DIFFUSE_CESM)
+
+
 def _compute_ozone_vmr(
     p_full: jnp.ndarray,
     lat: jnp.ndarray,
@@ -989,8 +1003,8 @@ def _call_radiation_backend(
     if open_ocean_frac is not None:
         _alb_dif = (sfc_albedo_override if sfc_albedo_override is not None
                     else radiation_config.rrtmgp.sfc_albedo)
-        sfc_albedo_direct = _alb_dif + open_ocean_frac * (
-            cesm_ocean_albedo_direct(cos_sza) - OCEAN_ALBEDO_DIFFUSE_CESM)
+        sfc_albedo_direct = cesm_direct_surface_albedo(
+            _alb_dif, open_ocean_frac, cos_sza)
     q_v_safe = q_v if q_v is not None else jnp.zeros_like(T)
 
     # Compute ozone VMR based on config — unless the caller supplied a
@@ -1071,6 +1085,9 @@ def _call_radiation_backend(
         solar_spectral_fraction=solar_spectral_fraction,
         **cloud_kwargs,
     )
+    if cloud_config is not None:
+        # One bulk ice density for the PSD radius and the optics size (CAM6).
+        _rad_kwargs["cloud_rho_ice"] = cloud_config.rho_cloud_ice
     if clear_sky_toa:
         _rad_kwargs["clear_sky"] = True
     if o3_top_vmr is not None and o3_vmr_override is not None:
@@ -2211,6 +2228,8 @@ def _mc3d_plane_heating(
             config=cloud_config, q_cloud=q_cloud_col, q_ice=q_ice_col,
             n_ice=n_ice_col, n_cloud=n_cloud_col,
         ).to_rrtmg_kwargs()
+        # One bulk ice density for the PSD radius and the optics size (CAM6).
+        cloud_kwargs["cloud_rho_ice"] = cloud_config.rho_cloud_ice
 
     # --- shortwave optical field ---
     # NOTE: the plane mc3d path is AEROSOL-FREE (no aerosol_optical_depth is

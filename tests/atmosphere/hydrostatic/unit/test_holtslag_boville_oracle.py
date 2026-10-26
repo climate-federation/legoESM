@@ -109,7 +109,7 @@ def test_fixture_provenance(fx):
     assert meta["oracle"]["solver"]["sha"] == "a03b84b7c4e34f965b115686f22a043b85739e56"
     c = meta["constants"]
     assert (c["g"], c["vk"], c["cpair"], c["rair"]) == (
-        constants.g, constants.kappa_vk, constants.c_pd, constants.R_d)
+        constants.g, constants.kappa_von_karman, constants.c_pd, constants.R_d)
     assert c["zvir"] == constants.R_v / constants.R_d - 1.0
     assert FIXTURE.stat().st_size < 1_000_000
     # the oracle's top/surface interfaces carry nothing
