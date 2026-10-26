@@ -2,7 +2,7 @@
 
 - Date: 2026-10-25. Lane `si3`, round 16, rung O9 (`docs/ice/fidelity/si3_ladder_design.md:229`).
 - Model parent: `abd7262c11b4` (D5, O1, O2, O3, O5, O7, O8 landed).
-- Status: committed BEFORE any O9 measurement; sections 2 (P), 3 (P5), 4 and 5 revised 2026-10-25 after the codex HOLD, still before any measurement. No NEMO array has been read for O9. No acquisition tool is built (DECISION 173: O8-O16 come from ONE 100-step production `ORCA2_SAS_ICE` master record; this file registers only O9's projection of it).
+- Status: committed BEFORE any O9 measurement; sections 2 (P), 3 (P5), 4 and 5 revised 2026-10-25 after the codex HOLD, and sections 2, 3, 4, 6, 7 again after the codex re-check (observer census), still before any NEMO measurement. No NEMO array has been read for O9. No acquisition tool is built (DECISION 173: O8-O16 come from ONE 100-step production `ORCA2_SAS_ICE` master record; this file registers only O9's projection of it).
 - Reference build cited: `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/`. `icethd_zdf_bl99.f90`, `icethd_dh.f90`, `icethd.f90`, `icethd_zdf.f90` are byte-identical (`md5sum`) across `ORCA2_SAS_ICE_{O1,O2,O5,O7}_{REF,REC}`. Flags (`ORCA2_SAS_ICE_O7_REF/BLD/arch_nemo.fcm:27`): `-fdefault-real-8 -O3 -funroll-all-loops -fcray-pointer -ffree-line-length-none -fallow-argument-mismatch -fno-tree-vectorize`.
 
 ## 1. What executes (production deck, resolved from `namelist_ice_ref` + empty `namelist_ice_cfg` groups)
@@ -32,18 +32,26 @@ but outside every inner loop (checklist item 1).
   hfx_dif cnd_ice t1_ice t_si`.
 - F3, after `:199` (DH exit): `h_i h_s t_su a_i e_i e_s t_s sz_i s_i qml_ice`, the eight `dh_*`, the 25 fluxes.
 - F4, after `:201` (TEMP exit): `t_i`.
-- P (Picard), REVISED 2026-10-25 (codex HOLD item 3; the first design put an observer inside NEMO's `ji`
-  loop, against checklist item 1): one statement-level observer in `ice_thd_zdf_BL99` after the `ji` loop's
-  `END DO` of each `DO WHILE` pass (`icethd_zdf_bl99.f90:603`), inside the `np_cnd_OFF` branch, before the pass's closing `END DO`. It copies
-  whole arrays only: `iconv` and `l_T_converged(1:npti)`, `t_su_1d(1:npti)`, `t_i_1d(1:npti,1:nlay_i)`,
-  `t_s_1d(1:npti,1:nlay_s)`, `qns_ice_1d(1:npti)`. No copy sits inside any `ji`/`jk`/`jm` loop.
-  What it CAN discriminate: the state after every pass, so a first difference is localised to (pass, cell);
-  each cell's pass count, read as the first pass whose `l_T_converged` is true (model `n_picard`); and a
-  GIVEN-NEMO-ENTRY replay of one pass from the recorded state of the pass before.
-  What it CANNOT discriminate: anything inside one pass. NEMO's matrix rows `ztrid zindterm zindtbis zdiagbis`
-  are per-cell scratch overwritten for every `ji`, so after the loop they hold only the last cell; a first
-  difference inside a pass cannot be split between matrix assembly, the Thomas sweeps and the clamps. If that
-  is needed it is a follow-up record design, brought back as DECISION_NEEDED, not an in-loop observer.
+- P (Picard), REVISED TWICE 2026-10-25. The in-pass design (an observer after the `ji` loop at
+  `icethd_zdf_bl99.f90:603`, inside NEMO's outer `DO WHILE`) is WITHDRAWN: it fails the passivity census below
+  (FP conversions and one compare move in `ice_thd_zdf_BL99`). P is now one statement after the `DO WHILE` closes
+  (`icethd_zdf_bl99.f90:772`), outside every NEMO loop: `CALL si3rec_o9_picard( (iconv), (l_T_converged(1:npti)) )`;
+  the recorder reads the 1-D module arrays itself. It records NEMO's single pass counter `iconv` and each cell's
+  final `l_T_converged`. It CANNOT see per-pass state or per-cell pass counts; a first difference in F2 localises
+  to the whole ZDF call, not to a pass, the matrix assembly, the Thomas sweeps or the clamps. Per-cell counts
+  exist in NEMO only under `ln_zdf_chkcvg = T` (`tice_cvgstp_1d`, `icethd_zdf_bl99.f90:594-597`), a deck deviation:
+  DECISION_NEEDED, not taken.
+- Passivity (ACQUISITION TOOL CHECKLIST item 1), MEASURED before any record exists:
+  `scripts/validate/ocean_fidelity/testcases/nemo_si3_o9_observer_census.py`, committed report
+  `nemo_si3_o9_observer_census.json`, pinned by `tests/ocean/fidelity/test_nemo_si3_o9_observer_census.py`.
+  It recompiles each ppsrc with the record flags above, refuses unless the observer-free object's instruction stream
+  equals the record object's, and compares per-function counts of every FP mnemonic (arithmetic, MIN/MAX, SQRT, FMA,
+  conversions incl. `cvtsi2sdl`, compares, `andpd`/`xorpd`/`orpd`), observer-free vs instrumented, plus a plant
+  (`qns_ice_1d(1) = qns_ice_1d(1) + 1._wp`). Results: P after the `DO WHILE`: `ice_thd_zdf_BL99` 1814 = 1814, no
+  mnemonic differs, plant fires. F1-F4 (four `CALL si3rec_o9_frame( k, (jl), (kt) )` after `icethd.f90:195,197,199,201`,
+  inside NEMO's category loop): `ice_thd` 240 = 240 and all four functions of `icethd.o` equal, plant fires. The
+  withdrawn in-pass P: 1814 -> 1812 (`comisd` 20 -> 21, `cvtsi2sd` 6 -> 2, `cvtsi2sdl` 3 -> 4), NOT passive. The
+  acquisition tool must insert exactly these statements at these lines (its own census re-run is checklist item 1).
 
 Steps: every `kt` of the master record for F0-F4; P only at the steps of section 6.
 
@@ -54,8 +62,9 @@ Steps: every `kt` of the master record for F0-F4; P only at the steps of section
 - P2: F3 equals `si3_ice_thd_dh(F1 + F2, deck)`, 0 differing bits.
 - P3: F4 equals `si3_ice_thd_temp(F3)`, 0 differing bits.
 - P4: the composed `si3_ice_thd_category_stages(F1, deck)` reproduces F2-F4 (composition, not replay).
-- P5: per-cell Picard count (`n_picard`) equals the first pass at which P's `l_T_converged` turns true
-  (NEMO's `iconv` is one counter for all cells; it bounds `n_picard` and equals its maximum).
+- P5 (REVISED with P): the maximum over gathered cells of the model's per-cell pass count (`n_picard`) equals
+  the recorded `iconv`, and a cell's recorded final `l_T_converged` is false iff the model leaves it unconverged
+  after `iconv_max = 200` passes. Per-cell counts are not scored (see P).
 - Falsifier for each: any differing bit outside a preregistered platform floor. The only stated floor is
   DECISION 158's binary64 subnormal class: a cell whose F1-F4 values, or any compare operand, is subnormal is
   reported separately and never called matched. NaN-only operand-order classes (section 5) are counted and
@@ -70,8 +79,8 @@ operand class): `rn_cnd_s` +1 ULP; `rn_sinew` +1 ULP; native transcendentals (fi
 is non-trivial); reversed `minsd`/`maxsd` operand roles (fires iff a signed-zero tie is recorded); `sst := t_bo -
 rt0` (fires iff a flooding cell is recorded); materialized-zero removal (fires iff a `-0` accumulates into a
 zeroed `dh_*`); constant-divisor reciprocal (fires iff `h_i < 0.1` or `h_s < 1e-3`). Placement: the P observer is
-checked against the real ppsrc to sit after the `ji` loop of `icethd_zdf_bl99.f90:603`, with a plant moving it
-inside the loop. Admission per the ACQUISITION TOOL CHECKLIST.
+checked against the real ppsrc to sit after the `DO WHILE`'s `END DO` at `icethd_zdf_bl99.f90:772`, with a plant
+moving it inside the outer loop (the census rejects that placement, section 2). Admission per the ACQUISITION TOOL CHECKLIST.
 
 ## 5. Object-code facts the predictions rest on (REVISED 2026-10-25, codex HOLD item 4)
 
@@ -93,15 +102,19 @@ variable/variable; no `SIGN` appears in these routines; the only `sqrtsd` is `ic
 (zero first operand); `icethd_dh.f90:526` (not executed, `nn_icesal == 2`) has none, PLAUSIBLY a reused
 subexpression.
 
-What it does NOT prove (narrowed): for variable/variable sites (e.g. `icethd_dh.f90:194,200,490`,
-`icethd_zdf_bl99.f90:577-590`, `icevar.f90:955`) it does not name which Fortran operand each register holds.
-The earlier statements that those sites "keep `t_i`" or "keep the thickness" are hand readings, PLAUSIBLE, and
-they matter only for an opposite-sign zero tie or a NaN. `EXP` (radiation) and `**` (`ice_var_snwblow`, `pow`)
-remain glibc calls.
+What it does NOT prove (narrowed): REVISED after the codex re-check. Each variable/variable row now carries
+the defining instruction of each operand, which names the Fortran operand in each register (e.g.
+`icethd_dh.f90:194`: source is `h_s`, the destination the evaporation product). Two statements have their
+roles reversed in some emitted copies (`icethd_dh.f90:409`, 1 of 4; `icethd_zdf_bl99.f90:590`, 2 of 7); neither
+can change output bits on a signed-zero tie (enclosing `MIN( ., 0 )` with the zero as source; non-negative ABS
+operands). Per-site survivor tests: `tests/ice/unit/test_si3_o9_tie_survivors.py`. `EXP` (radiation) and `**`
+(`ice_var_snwblow`, `pow`) remain glibc calls.
 
 ## 6. Pending decisions (section 7 of the receipt)
 
-- Picard/tridiagonal frames (P): pick every pass at `kt = 1, 2, 100`, every gathered cell, all five categories.
+- P steps: pick `kt = 1, 2, 100`, every gathered cell, all five categories.
+- Per-cell Picard counts: (1) not scored, P as above (pick); (2) record overlay `ln_zdf_chkcvg = T` so NEMO fills
+  `tice_cvgstp_1d`, a deck deviation that adds a branch inside NEMO's `ji` loop and needs its own census.
 - Steps scored for F0-F4: pick all 100 steps of the master record.
 
 ## 7. CHOICES (ASKED/UNASKED)
@@ -110,5 +123,10 @@ remain glibc calls.
 - Frames F1-F4 at the four statement boundaries above, plus F0 scalars: UNASKED, design `:229` "ZDF/DH/TEMP
   entry/exits"; offered for revert.
 - Picard frame steps and the 100-step scoring window: UNASKED -> DECISION_NEEDED.
+- P moved after the outer `DO WHILE` (per-pass and per-cell-count scoring dropped): the codex re-check offered
+  "move outside every loop" or "prove passivity"; the census refuted passivity of the in-pass form, leaving the
+  first. Per-cell counts via `ln_zdf_chkcvg = T`: UNASKED -> DECISION_NEEDED.
+- Observer statement forms (by-value `(iconv)`, `(jl)`, `(kt)`; recorder reads module arrays): UNASKED; offered for
+  revert.
 - `ice_thd_1d2d( jl, 1 )` (gather and J/m2 -> J/m3, `icethd.f90:373-588`) is upstream of F1 and owned by no rung
   in the design table: UNASKED observation, reported, not built.

@@ -124,10 +124,20 @@
     "194": {
      "instructions": [
       {
-       "count": 2,
+       "count": 1,
        "dst": "VAR",
+       "dst_defs": "mulsd@194",
        "op": "minsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "addsd@186"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "mulsd@194",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "load@186"
       }
      ],
      "statement": "zdeltah    = MAX( - evap_ice_1d(ji) * r1_rhos * rDt_ice, - h_s_1d(ji) )",
@@ -138,10 +148,28 @@
     "200": {
      "instructions": [
       {
-       "count": 3,
+       "count": 1,
        "dst": "VAR",
+       "dst_defs": "xorpd@200",
        "op": "maxsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "minsd@211"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "xorpd@200",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "minsd@211|xorpd@194"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "xorpd@200",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "xorpd@194"
       }
      ],
      "statement": "zdum = MAX( -zh_s(jk), zdeltah )",
@@ -210,8 +238,10 @@
       {
        "count": 1,
        "dst": "VAR",
+       "dst_defs": "divsd@221",
        "op": "minsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "load@219"
       }
      ],
      "statement": "dh_s_sum(ji) =              dh_s_sum(ji) + zdum",
@@ -278,8 +308,10 @@
       {
        "count": 1,
        "dst": "VAR",
+       "dst_defs": "mulsd@270",
        "op": "maxsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "xorpd@251"
       },
       {
        "count": 1,
@@ -341,8 +373,10 @@
       {
        "count": 1,
        "dst": "VAR",
+       "dst_defs": "mulsd@300",
        "op": "minsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "maxsd@289"
       }
      ],
      "statement": "zh_i_old(jk) = zh_i_old(jk) + zdum",
@@ -428,10 +462,20 @@
     "409": {
      "instructions": [
       {
-       "count": 4,
+       "count": 1,
        "dst": "VAR",
+       "dst_defs": "xorpd@388",
        "op": "maxsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "mulsd@407"
+      },
+      {
+       "count": 3,
+       "dst": "VAR",
+       "dst_defs": "mulsd@407",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "xorpd@388"
       },
       {
        "count": 4,
@@ -505,10 +549,20 @@
     "490": {
      "instructions": [
       {
-       "count": 4,
+       "count": 1,
        "dst": "VAR",
+       "dst_defs": "load@490",
        "op": "minsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "maxsd@456|maxsd@494"
+      },
+      {
+       "count": 3,
+       "dst": "VAR",
+       "dst_defs": "load@490",
+       "op": "minsd",
+       "src": "VAR",
+       "src_defs": "maxsd@494"
       }
      ],
      "statement": "zdum        = MIN( zdeltah, zh_s(jk) )",
@@ -660,8 +714,10 @@
       {
        "count": 15,
        "dst": "VAR",
+       "dst_defs": "load@202",
        "op": "minsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "subsd@202"
       }
      ],
      "statement": "t_su_1d    (1:npti) = MIN( t_su_1d(1:npti), rt0 - ztsu_err )",
@@ -829,14 +885,18 @@
       {
        "count": 1,
        "dst": "VAR",
+       "dst_defs": "minsd@577",
        "op": "maxsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "subsd@577"
       },
       {
        "count": 1,
        "dst": "VAR",
+       "dst_defs": "divsd@567|load@387|load@407",
        "op": "minsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "load@306|load@407|load@616|load@647"
       }
      ],
      "statement": "t_su_1d(ji) = MAX( MIN( t_su_1d(ji) , rt0 ) , rt0 - 100._wp )",
@@ -850,14 +910,18 @@
       {
        "count": 15,
        "dst": "VAR",
+       "dst_defs": "minsd@582",
        "op": "maxsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "subsd@577"
       },
       {
        "count": 15,
        "dst": "VAR",
+       "dst_defs": "load@582",
        "op": "minsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "load@306|load@407|load@616|load@647"
       }
      ],
      "statement": "t_s_1d(ji,jk) = MAX( MIN( t_s_1d(ji,jk), rt0 ), rt0 - 100._wp )",
@@ -869,10 +933,28 @@
     "583": {
      "instructions": [
       {
-       "count": 15,
+       "count": 1,
        "dst": "VAR",
+       "dst_defs": "andpd@578",
        "op": "maxsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "andpd@583"
+      },
+      {
+       "count": 7,
+       "dst": "VAR",
+       "dst_defs": "andpd@578|maxsd@583",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "andpd@583"
+      },
+      {
+       "count": 7,
+       "dst": "VAR",
+       "dst_defs": "maxsd@583",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "andpd@583"
       }
      ],
      "statement": "zdti_max      = MAX ( zdti_max , ABS( t_s_1d(ji,jk) - ztsb(jk) ) )",
@@ -885,14 +967,18 @@
       {
        "count": 7,
        "dst": "VAR",
+       "dst_defs": "minsd@589",
        "op": "maxsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "subsd@577"
       },
       {
        "count": 7,
        "dst": "VAR",
+       "dst_defs": "subsd@588",
        "op": "minsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "load@589"
       }
      ],
      "statement": "t_i_1d(ji,jk) =  MAX( MIN( t_i_1d(ji,jk), ztmelts ), rt0 - 100._wp )",
@@ -904,10 +990,36 @@
     "590": {
      "instructions": [
       {
-       "count": 7,
+       "count": 1,
        "dst": "VAR",
+       "dst_defs": "andpd@578|maxsd@583",
        "op": "maxsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "andpd@590"
+      },
+      {
+       "count": 3,
+       "dst": "VAR",
+       "dst_defs": "andpd@578|maxsd@583|maxsd@590",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "andpd@590"
+      },
+      {
+       "count": 1,
+       "dst": "VAR",
+       "dst_defs": "maxsd@590",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "andpd@590"
+      },
+      {
+       "count": 2,
+       "dst": "VAR",
+       "dst_defs": "andpd@590",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "maxsd@590"
       }
      ],
      "statement": "zdti_max      =  MAX( zdti_max, ABS( t_i_1d(ji,jk) - ztib(jk) ) )",
@@ -920,14 +1032,18 @@
       {
        "count": 15,
        "dst": "VAR",
+       "dst_defs": "minsd@747",
        "op": "maxsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "subsd@747"
       },
       {
        "count": 15,
        "dst": "VAR",
+       "dst_defs": "load@747",
        "op": "minsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "load@747"
       }
      ],
      "statement": "t_s_1d(ji,jk) = MAX( MIN( t_s_1d(ji,jk), rt0 ), rt0 - 100._wp )",
@@ -947,8 +1063,10 @@
       {
        "count": 7,
        "dst": "VAR",
+       "dst_defs": "maxsd@748",
        "op": "maxsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "andpd@748"
       },
       {
        "count": 1,
@@ -967,14 +1085,18 @@
       {
        "count": 8,
        "dst": "VAR",
+       "dst_defs": "minsd@754",
        "op": "maxsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "subsd@754"
       },
       {
        "count": 8,
        "dst": "VAR",
+       "dst_defs": "subsd@753",
        "op": "minsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "load@754"
       }
      ],
      "statement": "t_i_1d(ji,jk) =  MAX( MIN( t_i_1d(ji,jk), ztmelts ), rt0 - 100._wp )",
@@ -992,10 +1114,20 @@
        "src": "VAR"
       },
       {
-       "count": 7,
+       "count": 5,
        "dst": "VAR",
+       "dst_defs": "maxsd@755",
        "op": "maxsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "andpd@755"
+      },
+      {
+       "count": 2,
+       "dst": "VAR",
+       "dst_defs": "andpd@755",
+       "op": "maxsd",
+       "src": "VAR",
+       "src_defs": "maxsd@755"
       }
      ],
      "statement": "zdti_max      =  MAX ( zdti_max, ABS( t_i_1d(ji,jk) - ztib(jk) ) )",
@@ -1022,14 +1154,18 @@
       {
        "count": 7,
        "dst": "VAR",
+       "dst_defs": "minsd@803",
        "op": "maxsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "subsd@803"
       },
       {
        "count": 7,
        "dst": "VAR",
+       "dst_defs": "divsd@802",
        "op": "minsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "load@803"
       }
      ],
      "statement": "t_su_1d(ji) = MAX( MIN( t_su_1d(ji), rt0 ), rt0 - 100._wp )",
@@ -1094,8 +1230,10 @@
       {
        "count": 3,
        "dst": "VAR",
+       "dst_defs": "subsd@955",
        "op": "minsd",
-       "src": "VAR"
+       "src": "VAR",
+       "src_defs": "load@955"
       }
      ],
      "statement": "t_i_1d(ji,jk) = MIN( t_i_1d(ji,jk), ztmelts + rt0 )",

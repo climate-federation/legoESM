@@ -44,16 +44,16 @@ Stage sequence, per category (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd.f90:19
 `:203` `CALL ice_thd_sal                      ! --- Ice salinity --- !` (O10).
 
 - ZDF (`icethd_zdf_bl99.f90` 148-879, `np_cnd_OFF`): model `packages/ice/legoesm/ice/bitz_lipscomb.py:532`
-  (`def _si3_zdf_bl99_core(`, Picard loop and n-row system) and `:921` (`def si3_ice_thd_zdf_bl99(`,
+  (`def _si3_zdf_bl99_core(`, Picard loop and n-row system) and `:923` (`def si3_ice_thd_zdf_bl99(`,
   exact-input entry with `zq_ini`, interface fluxes, `ice_var_enthalpy`, `hfx_err_dif`, `hfx_dif`,
   `cnd_ice`, `t1_ice`, `t_si`). `rcnd_s` is the deck's `rn_cnd_s = 0.31`, passed explicitly.
-- DH (`icethd_dh.f90` 102-541, `nn_icesal = 4`): `packages/ice/legoesm/ice/bitz_lipscomb.py:1249`
-  (`def _si3_ice_thd_dh_core(`), `:1522` (`def si3_ice_thd_dh(`), remaps `:1214`
+- DH (`icethd_dh.f90` 102-541, `nn_icesal = 4`): `packages/ice/legoesm/ice/bitz_lipscomb.py:1251`
+  (`def _si3_ice_thd_dh_core(`), `:1524` (`def si3_ice_thd_dh(`), remaps `:1216`
   (`def _cumulative_remap(`, `snw_ent` and `ice_var_vremap`, including the salt remap
   `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:522`:
   `IF( nn_icesal == 4 )   CALL ice_var_vremap( zh_i_old, zs_i_old, sz_i_1d(ji,:) )`).
-- TEMP: `packages/ice/legoesm/ice/bitz_lipscomb.py:1506` (`def si3_ice_thd_temp(`); composition
-  `:1556` (`def si3_ice_thd_category_stages(`).
+- TEMP: `packages/ice/legoesm/ice/bitz_lipscomb.py:1508` (`def si3_ice_thd_temp(`); composition
+  `:1558` (`def si3_ice_thd_category_stages(`).
 - Five categories: the category body has no cross-category coupling in these three routines (`at_i` enters
   as data), so the stage function runs per gathered category; the test drives `jpl = 5` with
   `npti = 7, 3, 11, 1, 5`.
@@ -86,9 +86,9 @@ Examples:
 - `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:221`: `zdum = - zq_top / MAX( ze_s(jk), epsi20 )   ! thickness change`
   keeps `ze_s`; `:194` (`zdeltah    = MAX( - evap_ice_1d(ji) * r1_rhos * rDt_ice, - h_s_1d(ji) )   ! amount of snw that sublimates (<0) or deposition (>0)`)
   and `:300` (`zdum               = MAX( - zh_i(jk) , - zevap_rema * r1_rhoi )`) are emitted as a negated
-  `MIN` that keeps the thickness (model `packages/ice/legoesm/ice/bitz_lipscomb.py:1332`).
+  `MIN` that keeps the thickness (model `packages/ice/legoesm/ice/bitz_lipscomb.py:1334`).
 - `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:490`: `zdum        = MIN( zdeltah, zh_s(jk) )         ! amount of snw that floods, > 0`
-  keeps `zdeltah` (model `packages/ice/legoesm/ice/bitz_lipscomb.py:1471`).
+  keeps `zdeltah` (model `packages/ice/legoesm/ice/bitz_lipscomb.py:1473`).
 - `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icevar.f90:955`:
   `t_i_1d(ji,jk) = MIN( t_i_1d(ji,jk), ztmelts + rt0 ) ! Force t_i_1d to be lower than melting point => likely conservation issue`
   keeps `t_i`.
@@ -107,9 +107,9 @@ Evidence: superseded scratch `round16/objaudit/`; committed audit `scripts/valid
   materialized divisor gives 0. Executing sites: `ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_zdf_bl99.f90:191`
   (`isnow_comb(ji) = h_s_1d(ji) / zh_min`) and `:857`
   (`cnd_ice_1d(ji) = 2._wp * ztcond_i(ji,0) / zhi_ssl ! cnd_ice is capped by: cond_i/zhi_ssl`); model
-  `packages/ice/legoesm/ice/bitz_lipscomb.py:449` (`def _div_const(x, c):`), used at `:590` and `:993`.
+  `packages/ice/legoesm/ice/bitz_lipscomb.py:449` (`def _div_const(x, c):`), used at `:590` and `:995`.
 - Zero folding: XLA folds `0 + x` to `x`, so a `-0` added to a zeroed `dh_*` stays `-0`; the seed is
-  materialized at `packages/ice/legoesm/ice/bitz_lipscomb.py:1291`. Before the fix `dh_i_sub` differed in
+  materialized at `packages/ice/legoesm/ice/bitz_lipscomb.py:1293`. Before the fix `dh_i_sub` differed in
   5 cells and `cnd_ice` in 1 (`round16/o9_prefix_mismatches.log`).
 - Every multiply-add, including inside each flux accumulation, goes through `nemo_source_round`.
 
@@ -118,21 +118,21 @@ Evidence: superseded scratch `round16/objaudit/`; committed audit `scripts/valid
 `tests/ice/unit/test_si3_o9_zdf_dh_temp.py`: `14 passed` (the final run is in the controls below).
 
 - Bitwise against the independent transcription, five categories x (10 + 5) layers, every ZDF/DH/TEMP leaf
-  (`tests/ice/unit/test_si3_o9_zdf_dh_temp.py:652`), with these classes all present: melting surface,
+  (`tests/ice/unit/test_si3_o9_zdf_dh_temp.py:670`), with these classes all present: melting surface,
   snow and snow-free, internal ice melt, basal growth and melt, flooding, ice melted away, deposition,
   warm snow layers. The oracle's constants are the build's literals, not the model's.
-- Eager (`jax.disable_jit`) == `jit`, every bit (`:674`).
+- Eager (`jax.disable_jit`) == `jit`, every bit (`:693`).
 - Inexact pins: `rn_cnd_s` `0x1.3d70a3d70a3d7p-2`, `r1_nlay_i` `0x1.999999999999ap-4`, `r1_nlay_s`,
-  `rn_snwblow`, plus a digest of every output leaf (`:682`).
-- Production-path plants, all fire (`:697`): `rn_cnd_s` +1 ULP, `rn_sinew` +1 ULP, `rn_kappa_i` +1 ULP,
+  `rn_snwblow`, plus a digest of every output leaf (`:706`).
+- Production-path plants, all fire (`:721`): `rn_cnd_s` +1 ULP, `rn_sinew` +1 ULP, `rn_kappa_i` +1 ULP,
   native transcendentals (on 64 sunlit snow-free columns; it is inert on the main batch, because a 1-ULP
   `exp` change in absorbed shortwave is below one ULP of ~260 K), reversed MIN/MAX tie roles,
   `sst := t_bo - rt0`.
-- Signed-zero site `MAX(0, -qprec)` pinned through `hfx_spr` (`:727`).
-- The C1D card's DH calls the shared core (`:742`), and on the D5 year a 1-ULP plant in the core's `h_i`
+- Signed-zero site `MAX(0, -qprec)` pinned through `hfx_spr` (`:751`).
+- The C1D card's DH calls the shared core (`:766`), and on the D5 year a 1-ULP plant in the core's `h_i`
   changes exactly the shipped arm (`b7a7329b...` -> `0843195e...`), reverted after.
-- Gradients finite; central difference on `qns_ice` within 1e-5 (`:759`).
-- No defaults: every missing scalar or array and every non-production selector is refused (`:778`).
+- Gradients finite; central difference on `qns_ice` within 1e-5 (`:783`).
+- No defaults: every missing scalar or array and every non-production selector is refused (`:802`).
 
 ## Controls (parent `abd7262c11` vs current)
 
@@ -159,7 +159,7 @@ pre-existing one on both trees.
   value is 0.31. O9 passes `rn_cnd_s` explicitly; the shared config was not changed.
 - C1D's flooding water enthalpy uses `t_bo - rt0` where NEMO uses `sst_1d`
   (`ORCA2_SAS_ICE_O7_REF/BLD/ppsrc/nemo/icethd_dh.f90:463`, `zEw            = rcp * sst_1d(ji)`); kept,
-  so the D5 year is unchanged (`packages/ice/legoesm/ice/bitz_lipscomb.py:1610`). PLAUSIBLE that C1D's
+  so the D5 year is unchanged (`packages/ice/legoesm/ice/bitz_lipscomb.py:1612`). PLAUSIBLE that C1D's
   `sst_m` equals `t_bo - rt0`; not measured.
 - `ice_thd_1d2d( jl, 1 )` (gather and J/m2 -> J/m3) sits upstream of O9's entry and no rung owns it.
 - The preregistered Picard frame needed an observer inside NEMO's `ji` loop, against checklist item 1;
@@ -167,9 +167,13 @@ pre-existing one on both trees.
 
 ## CONFIRMED vs PLAUSIBLE
 
-- CONFIRMED: bit-identity to the independent transcription on every listed branch class, `jit` and eager;
-  the MIN/MAX roles at every executing site, read from the record build's instruction stream; the two XLA
-  rewrites and their fixes; D5 year byte-identical (18 arms, CPU and AVX) with the core proven on its path.
+- CONFIRMED: bit-identity to the independent transcription on every listed branch class, `jit` and eager
+  (including a one-cell category, after the re-check fix below); the MIN/MAX operand roles at every executing
+  site, read from the record build's instruction stream with each variable operand's defining instruction;
+  a bit-changing signed-zero tie at the 7 sites where one is reachable; the XLA rewrites and their fixes;
+  D5 year byte-identical (18 arms, CPU and AVX) with the core proven on its path.
+- PLAUSIBLE: that the 30 sites of the "unreached" class (27 with a zero operand, 3 variable/variable) can never
+  see a signed-zero tie from a real entry state (search evidence only, re-check item 3).
 - PLAUSIBLE: bit-exactness against an ORCA2 NEMO record (none read; P1-P5 of the preregistration).
 
 ## CHOICES
@@ -219,6 +223,54 @@ runs codex and the second reviewer.
 Choices in the fixes: barriers in the NEMO-only branch, per-cell pass count on the public ZDF outputs, the redesigned
 whole-array Picard frame, the committed audit and the narrowed claim: ASKED (items 1-5 of the review). The audit's
 location next to the other SI3 validators and the re-anchoring: UNASKED, mechanical; offered for revert.
+
+## Re-check fixes (codex HOLD 2)
+
+1. Thomas back-substitution: NEMO's `( zindtbis(jm) - ztrid(jm,3) * t(jk+1) ) / zdiagbis(jm)` now materialises the
+   subtraction as well as the product, in the NEMO-only branch. Control, parent `71e56b1df8` vs current, fp64 CPU:
+   the seven other solver entries have identical compiled programs (debug metadata removed), output bytes and
+   gradient bytes; the NEMO arm's program changed, its outputs and gradients did not. Every test file importing
+   the solver has the same outcomes on both trees (the land-audit file: 6 failed, 7 passed on the parent; on the
+   current tree its last test aborts inside XLA compilation when run in the same process, intermittently, as the
+   parent also did under load; that test passes alone on both trees). D5 year: 18 arms byte-identical, CPU and AVX.
+2. Observer placement, measured: a committed FP-instruction census at the record build's real flags (observer-free
+   object equal to the record object; per-function counts of every FP mnemonic; an injected-op plant). The Picard
+   observer inside NEMO's outer loop is NOT passive (1814 -> 1812 FP instructions: conversions and one compare
+   move), so it is withdrawn; one copy after the outer loop and the four frame copies between the calls of the
+   category loop are passive (1814 = 1814; 240 = 240), and the plant fires on each. The preregistration states it
+   (sections 2, 3, 4, 6). Consequence: per-pass state and per-cell pass counts are no longer recordable without a
+   deck overlay (DECISION_NEEDED).
+3. MIN/MAX survivors: the audit now records each variable operand's defining instruction. Two statements have
+   their operand roles reversed in some emitted copies (the basal-melt `MAX( zdum, -zh_i )`, 1 of 4 copies; the
+   convergence `MAX( zdti_max, ABS(.) )`, 2 of 7); neither can change output bits on a signed-zero tie. A committed
+   search of 303,564 entry cells (111,677 hit a division by zero in the transcription and are skipped) finds a
+   signed-zero tie at 10 sites; at 7 the surviving operand changes output bits, pinned per site with the model
+   bit-equal to the transcription and a reversed-roles plant that turns it red; at 3 the tie is masked. Every
+   other executing site is classed (nonzero-constant operand, Kelvin operands, ABS operands, or no tie found):
+   `18 passed`.
+4. Eager vs jit: run on the parent, the old test passed, so it guarded nothing. Extending it to the other seed-3
+   categories exposed a real defect: for a one-cell category, `jit` differed from the transcription by 1 ULP in
+   26 output leaves while eager matched; batches of two or more were exact. XLA re-expanded `zeta` and `zkappa`
+   inside the `-zeta*zkappa*zg1s` matrix entry and regrouped them (not FMA: same with AVX and SSE4.2). Every BL99
+   matrix product (`zkappa`, `zeta`, the snow-ice interface term, each off-diagonal entry) is now materialised in
+   NEMO's order. The test now covers the one-cell category and checks the transcription too; it FAILS on
+   `9044f7a7f3` and on `71e56b1df8` (`test_eager_equals_jit_every_bit[3]`, `zdf.t_i`) and passes on the current
+   tree. D5 year unchanged (18 arms, CPU and AVX). Shared production path (the sea-ice model's column step, same
+   flags), parent `71e56b1df8` vs current, fp64 CPU, `jit`: all 72 output leaves byte-identical at 2+1 and 10+5
+   layers, batches of 1, 3 and 64; gradients (2+1 layers) identical at batch 3 and changed at batch 1 in one
+   element, d/d snow thickness, by 1.0e-15 relative (the barriers' derivative changes the backward program).
+   That is a change to a caller outside the rung: DECISION_NEEDED.
+
+Controls (current tree): `tests/ice/unit` `441 passed, 1 skipped, 1 xfailed` (parent 422 plus the 19 new); SI3
+fidelity files `159 passed`, 2 failed (the same two pre-existing failures as the parent); all 14 SI3 receipts pass
+the per-receipt gate; 66 citation-map entries re-anchored after the line shifts. Review of these fixes: UNREVIEWED
+until the operator runs codex and the second reviewer.
+
+Choices in these fixes: Picard observer after the outer loop (forced: the other option the review offered failed
+the census); all BL99 matrix products materialised, not only the one that measured wrong (checklist M1); the tie
+search's mutation ranges, and the class assignments: UNASKED, offered for revert. Per-cell Picard counts via
+`ln_zdf_chkcvg = T`: DECISION_NEEDED. Accepting the 1.0e-15 gradient change on the shared column step at batch 1:
+DECISION_NEEDED.
 
 Review: `codex review: operator`.
 Evidence: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/si3_rounds/round16/`.

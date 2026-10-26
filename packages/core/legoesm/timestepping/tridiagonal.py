@@ -137,9 +137,9 @@ def _thomas_solve_impl(
     if operation_order in ("nemo_unnormalised", "nemo_unnormalised_unrounded"):
         diagonal = b
         rhs = d
-        # Materialize NEMO's exact statements `b - (a * c) / prev` in both
-        # sweeps (`icethd_zdf_bl99.f90:537-538` forward, `:548,555,560,566-567`
-        # backward) so XLA cannot contract or reassociate them.
+        # Materialize every intermediate of NEMO's statements so XLA cannot
+        # contract or reassociate them: `b - (a * c) / prev` forward
+        # (`icethd_zdf_bl99.f90:537-538`), `(r - c * x) / diag` backward (`:548-567`).
         round_prod = (
             nemo_source_round
             if operation_order == "nemo_unnormalised"
@@ -169,7 +169,7 @@ def _thomas_solve_impl(
         def unnormalised_backward(reverse_k, current):
             k = n - 2 - reverse_k
             return current.at[..., k].set(
-                (rhs[..., k] - round_prod(c[..., k] * current[..., k + 1]))
+                round_prod(rhs[..., k] - round_prod(c[..., k] * current[..., k + 1]))
                 / diagonal[..., k]
             )
 

@@ -1,0 +1,112 @@
+{
+ "build": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_SAS_ICE_O7_REF/BLD",
+ "flags": [
+  "-fdefault-real-8",
+  "-O3",
+  "-funroll-all-loops",
+  "-fcray-pointer",
+  "-ffree-line-length-none",
+  "-fallow-argument-mismatch",
+  "-fno-tree-vectorize"
+ ],
+ "plant": "qns_ice_1d(1) = qns_ice_1d(1) + 1._wp",
+ "variants": {
+  "frames_f1_f4": {
+   "functions": {
+    "__icethd_MOD_ice_thd": {
+     "differing_mnemonics": {},
+     "instrumented_total": 240,
+     "plain_total": 240
+    },
+    "__icethd_MOD_ice_thd_1d2d.isra.0": {
+     "differing_mnemonics": {},
+     "instrumented_total": 326,
+     "plain_total": 326
+    },
+    "__icethd_MOD_ice_thd_salchk.isra.0": {
+     "differing_mnemonics": {},
+     "instrumented_total": 15,
+     "plain_total": 15
+    },
+    "__icethd_MOD_ice_thd_temp": {
+     "differing_mnemonics": {},
+     "instrumented_total": 19,
+     "plain_total": 19
+    }
+   },
+   "inserted_after_lines": [
+    195,
+    197,
+    199,
+    201
+   ],
+   "object": "icethd",
+   "observers": [
+    "CALL si3rec_o9_frame( 1, (jl), (kt) )",
+    "CALL si3rec_o9_frame( 2, (jl), (kt) )",
+    "CALL si3rec_o9_frame( 3, (jl), (kt) )",
+    "CALL si3rec_o9_frame( 4, (jl), (kt) )"
+   ],
+   "passive": true,
+   "plant_fired": true,
+   "ppsrc_sha256": "b74357d35d91bb2f2d256ed25581a4e3802050915de80dd44c376f2e70495a16",
+   "record_object_sha256": "8d7dab03212342827433a378e887c830932e1c711a430c3738d4abf2dd1fc8e4",
+   "routine": "__icethd_MOD_ice_thd"
+  },
+  "picard_after_do_while": {
+   "functions": {
+    "__icethd_zdf_bl99_MOD_ice_thd_zdf_bl99": {
+     "differing_mnemonics": {},
+     "instrumented_total": 1814,
+     "plain_total": 1814
+    }
+   },
+   "inserted_after_lines": [
+    772
+   ],
+   "object": "icethd_zdf_bl99",
+   "observers": [
+    "CALL si3rec_o9_picard( (iconv), (l_T_converged(1:npti)) )"
+   ],
+   "passive": true,
+   "plant_fired": true,
+   "ppsrc_sha256": "67ace0d7db76f40f1f64930551870da8751a1d553b8b69d59d83aa25ca64411a",
+   "record_object_sha256": "242addb5df963ffbd125bf02ef97fc913acb0be3dcb611c387a98bffdaf4f7e2",
+   "routine": "__icethd_zdf_bl99_MOD_ice_thd_zdf_bl99"
+  },
+  "picard_inside_do_while": {
+   "functions": {
+    "__icethd_zdf_bl99_MOD_ice_thd_zdf_bl99": {
+     "differing_mnemonics": {
+      "comisd": [
+       20,
+       21
+      ],
+      "cvtsi2sd": [
+       6,
+       2
+      ],
+      "cvtsi2sdl": [
+       3,
+       4
+      ]
+     },
+     "instrumented_total": 1812,
+     "plain_total": 1814
+    }
+   },
+   "inserted_after_lines": [
+    603
+   ],
+   "object": "icethd_zdf_bl99",
+   "observers": [
+    "CALL si3rec_o9_picard( (iconv), (l_T_converged(1:npti)) )"
+   ],
+   "passive": false,
+   "plant_fired": true,
+   "ppsrc_sha256": "67ace0d7db76f40f1f64930551870da8751a1d553b8b69d59d83aa25ca64411a",
+   "record_object_sha256": "242addb5df963ffbd125bf02ef97fc913acb0be3dcb611c387a98bffdaf4f7e2",
+   "routine": "__icethd_zdf_bl99_MOD_ice_thd_zdf_bl99"
+  }
+ }
+}

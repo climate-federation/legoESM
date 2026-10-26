@@ -13,8 +13,10 @@ control-flow graph:
 
 ``maxsd src, dst`` returns ``src`` on a tie or NaN, so for a site whose one
 operand is ``ZERO`` the kind pair says exactly which operand survives a
-signed-zero tie.  Two ``VAR`` operands are reported as such: the audit does not
-name which Fortran variable each register holds.
+signed-zero tie.  For two ``VAR`` operands each row also carries the nearest
+non-copy defining instruction(s) of each operand (``src_defs``/``dst_defs``, as
+``op@line``), which names the Fortran operand each register holds and exposes
+emitted copies whose roles differ.
 
 It also censuses the source in both directions: every ``MIN``/``MAX``/``SIGN``
 token in the ranges and every instruction must meet, or the report lists the
@@ -259,6 +261,34 @@ def _kind(k, reg, inn, effects):
     return kinds[0] if len(kinds) == 1 else "MIXED(" + "|".join(kinds) + ")"
 
 
+def _defset(k, reg, insns, inn, effects, seen=frozenset()):
+    out = set()
+    for d in inn[k][reg]:
+        if d == "ENTRY" or isinstance(d, tuple):
+            out.add("ENTRY" if d == "ENTRY" else "call")
+            continue
+        e = effects[d][1]
+        if isinstance(e, tuple):
+            if (d, e[1]) not in seen:
+                out |= _defset(d, e[1], insns, inn, effects, seen | {(d, e[1])})
+            continue
+        op = insns[d]["op"]
+        out.add(f"{'load' if op.startswith(('movsd', 'movq')) else op}@{insns[d]['line']}")
+    return out
+
+
+def _defs(k, reg, insns, inn, effects):
+    """Nearest non-copy definitions of ``reg`` at ``k`` as ``op@line`` (``load@line`` for memory loads)."""
+    return "|".join(sorted(_defset(k, reg, insns, inn, effects)))
+
+
+def _operand_defs(k, ins, insns, inn, effects):
+    """(src defs, dst defs) for a minsd/maxsd; memory sources are ``load@line``."""
+    s, d = ins["args"]
+    sd = _defs(k, s, insns, inn, effects) if s.startswith("%xmm") else f"load@{ins['line']}"
+    return sd, _defs(k, d, insns, inn, effects)
+
+
 def _statements(path: Path):
     """Physical line -> (statement first line, statement text without comments)."""
     lines = path.read_text().splitlines()
@@ -319,7 +349,7 @@ def audit(build: Path = BUILD, toolchain: Path = TOOLCHAIN) -> dict:
                         continue
                     stmt = owner[ins["line"]]
                     if ins["op"] == "sqrtsd":
-                        sites[stmt][("sqrtsd", "-", "-")] += 1
+                        sites[stmt][("sqrtsd", "-", "-", "-", "-")] += 1
                         continue
                     s, d = ins["args"]
                     if "%rip" in s:
@@ -329,7 +359,10 @@ def audit(build: Path = BUILD, toolchain: Path = TOOLCHAIN) -> dict:
                         sk = _kind(k, s, inn, effects)
                     else:
                         sk = "VAR"
-                    sites[stmt][(ins["op"], sk, _kind(k, d, inn, effects))] += 1
+                    dk = _kind(k, d, inn, effects)
+                    defs = (_operand_defs(k, ins, insns, inn, effects)
+                            if sk == "VAR" and dk == "VAR" else ("-", "-"))
+                    sites[stmt][(ins["op"], sk, dk, *defs)] += 1
             tokens = {}
             for name, (b, e) in ranges.items():
                 for ln in range(b, e + 1):
@@ -343,8 +376,10 @@ def audit(build: Path = BUILD, toolchain: Path = TOOLCHAIN) -> dict:
                 "routines": {k: list(v) for k, v in ranges.items()},
                 "sites": {str(ln): {"statement": text[ln],
                                     "tokens": tokens.get(ln, []),
-                                    "instructions": [dict(op=o, src=s, dst=d, count=n)
-                                                     for (o, s, d), n in sorted(c.items())]}
+                                    "instructions": [dict(op=o, src=s, dst=d, count=n,
+                                                          **({"src_defs": sd, "dst_defs": dd}
+                                                             if sd != "-" else {}))
+                                                     for (o, s, d, sd, dd), n in sorted(c.items())]}
                           for ln, c in sorted(sites.items())},
                 "token_statements_without_instruction": {
                     str(ln): {"statement": text[ln], "tokens": t}

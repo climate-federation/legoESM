@@ -609,13 +609,15 @@ def _si3_zdf_bl99_core(
         tcond_i = jnp.concatenate([k0[..., None], km, kb[..., None]], axis=-1)
         if _nemo_zdf_layer_reciprocals:
             # :326-341, zghe = 1 (ln_virtual_itd = F).
-            k_i = tcond_i * z1_h_i[..., None]
+            # Every product materialised: XLA otherwise re-expands zkappa/zeta
+            # inside the matrix-entry fusions and regroups their constants.
+            k_i = sr(tcond_i * z1_h_i[..., None])
             k_s_bulk = jnp.broadcast_to(
-                (k_snow * z1_h_s)[..., None], Ti.shape[:-1] + (nlay_s + 1,)
+                sr(k_snow * z1_h_s)[..., None], Ti.shape[:-1] + (nlay_s + 1,)
             )
             k_si = (
-                isnow * k_snow * k0
-                / (0.5 * (sr(k0 * zh_s) + sr(k_snow * zh_i)))
+                sr(sr(isnow * k_snow) * k0)
+                / sr(0.5 * (sr(k0 * zh_s) + sr(k_snow * zh_i)))
             )
         else:
             k_i = tcond_i / dz_i[..., None]
@@ -636,9 +638,9 @@ def _si3_zdf_bl99_core(
             / _maxsd((Ti - T0) * (t_i_old - T0), _EPS10)
         )
         if _nemo_zdf_layer_reciprocals:
-            eta_i = (dt * inverse_rho_ice * z1_h_i[..., None]) / ci
+            eta_i = sr(sr(dt * inverse_rho_ice * z1_h_i[..., None]) / ci)  # :354
             eta_s = jnp.broadcast_to(
-                (dt * inverse_rho_snow * inverse_c_ice * z1_h_s)[..., None],
+                sr(dt * inverse_rho_snow * inverse_c_ice * z1_h_s)[..., None],  # :362
                 Ts.shape,
             )
         else:
@@ -653,21 +655,21 @@ def _si3_zdf_bl99_core(
         rows = []  # (a, b, c, d) for NEMO jm = 1..nrow, snow-covered arm
         rows.append((zero, dqns_ice - sr(2.0 * k_s[..., 0]),
                      sr(2.0 * k_s[..., 0]), sr(dqns_ice * Tsu) - fnet))  # :449-452
-        rows.append((-eta_s[..., 0] * 2.0 * k_s[..., 0],
+        rows.append((sr(-eta_s[..., 0] * k_s[..., 0]) * 2.0,
                      1.0 + sr(eta_s[..., 0] * (k_s[..., 1] + sr(2.0 * k_s[..., 0]))),
-                     -eta_s[..., 0] * k_s[..., 1],
+                     sr(-eta_s[..., 0] * k_s[..., 1]),
                      t_s_old[..., 0] + sr(eta_s[..., 0] * ab_s[..., 0])))  # :455-458
         for k in range(1, nlay_s):  # :429-435, jk = k + 1
-            rows.append((-eta_s[..., k] * k_s[..., k],
+            rows.append((sr(-eta_s[..., k] * k_s[..., k]),
                          1.0 + sr(eta_s[..., k] * (k_s[..., k] + k_s[..., k + 1])),
-                         -eta_s[..., k] * k_s[..., k + 1],
+                         sr(-eta_s[..., k] * k_s[..., k + 1]),
                          t_s_old[..., k] + sr(eta_s[..., k] * ab_s[..., k])))
         for k in range(nlay_i - 1):  # :409-415, jk = k + 1
-            rows.append((-eta_i[..., k] * k_i[..., k],
+            rows.append((sr(-eta_i[..., k] * k_i[..., k]),
                          1.0 + sr(eta_i[..., k] * (k_i[..., k] + k_i[..., k + 1])),
-                         -eta_i[..., k] * k_i[..., k + 1],
+                         sr(-eta_i[..., k] * k_i[..., k + 1]),
                          t_i_old[..., k] + sr(eta_i[..., k] * ab_i[..., k])))
-        rows.append((-eta_i[..., -1] * k_i[..., -2],
+        rows.append((sr(-eta_i[..., -1] * k_i[..., -2]),
                      1.0 + sr(eta_i[..., -1] * (k_i[..., -2] + sr(2.0 * k_i[..., -1]))),
                      zero,
                      t_i_old[..., -1]
@@ -676,9 +678,9 @@ def _si3_zdf_bl99_core(
         nosnow = [(zero, one, zero, zero) for _ in range(nlay_s)]
         nosnow.append((zero, dqns_ice - sr(2.0 * k_i[..., 0]),
                        sr(2.0 * k_i[..., 0]), sr(dqns_ice * Tsu) - fnet))
-        nosnow.append((-eta_i[..., 0] * 2.0 * k_i[..., 0],
+        nosnow.append((sr(-eta_i[..., 0] * k_i[..., 0]) * 2.0,
                        1.0 + sr(eta_i[..., 0] * (k_i[..., 1] + sr(2.0 * k_i[..., 0]))),
-                       -eta_i[..., 0] * k_i[..., 1],
+                       sr(-eta_i[..., 0] * k_i[..., 1]),
                        t_i_old[..., 0] + sr(eta_i[..., 0] * ab_i[..., 0])))
         nosnow.extend(rows[nlay_s + 2:])
         a, b, c, d = (jnp.stack([r[n] for r in rows], axis=-1) for n in range(4))

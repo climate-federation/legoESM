@@ -45,11 +45,26 @@ NPTI = (7, 3, 11, 1, 5)
 FLUXES = list(bl.SI3DHFluxes._fields)
 
 
-def MAXSD(dst, src):  # noqa: N802 - x86 `maxsd src, dst`
+# Per-site hooks for the survivor tests: SWAP flips one site's emitted roles (a plant);
+# TIES counts ties whose operands differ in bits (signed zeros) or carry a NaN.
+SWAP: set = set()
+TIES: dict = {}
+
+
+def _tie(dst, src, site):
+    if site is not None and (dst != dst or src != src
+                             or (dst == src and math.copysign(1.0, dst) != math.copysign(1.0, src))):
+        TIES[site] = TIES.get(site, 0) + 1
+    return (src, dst) if site in SWAP else (dst, src)
+
+
+def MAXSD(dst, src, site=None):  # noqa: N802 - x86 `maxsd src, dst`
+    dst, src = _tie(dst, src, site)
     return dst if dst > src else src
 
 
-def MINSD(dst, src):  # noqa: N802 - x86 `minsd src, dst`
+def MINSD(dst, src, site=None):  # noqa: N802 - x86 `minsd src, dst`
+    dst, src = _tie(dst, src, site)
     return dst if dst < src else src
 
 
@@ -100,12 +115,12 @@ def oracle_zdf(c, nml):
     za = h_s / (h_s + 0.02)
     zraext = kap_s
     if h_i > 0.0:
-        zh_i = MAXSD(h_i, zh_min) * r1n
+        zh_i = MAXSD(h_i, zh_min, 'zdf:173') * r1n
         z1_h_i = 1.0 / zh_i
     else:
         zh_i = z1_h_i = 0.0
     if h_s > 0.0:
-        zh_s = MAXSD(h_s, zh_min) * r1m
+        zh_s = MAXSD(h_s, zh_min, 'zdf:181') * r1m
         z1_h_s = 1.0 / zh_s
         isnow = 1.0
     else:
@@ -113,19 +128,19 @@ def oracle_zdf(c, nml):
     isnow_comb = h_s / zh_min if h_s < zh_min else 1.0
     t_su = c["t_su"]
     ztsub = t_su
-    t_su = MINSD(t_su, RT0 - ztsu_err)
+    t_su = MINSD(t_su, RT0 - ztsu_err, 'zdf:202')
     zdqns_b, zqns_b = dqns, qns
     ztsold, ztiold = list(t_s), list(t_i)
     trs = [qtr] + [0.0] * m
     abs_ = [None] + [0.0] * m
     for jk in range(1, m + 1):
-        trs[jk] = trs[0] * _LIBM.exp(-(zraext * MAXSD(zh_s * float(jk) - zhs_ssl, 0.0)))
+        trs[jk] = trs[0] * _LIBM.exp(-(zraext * MAXSD(zh_s * float(jk) - zhs_ssl, 0.0, 'zdf:219')))
         abs_[jk] = trs[jk - 1] - trs[jk]
     tri = [trs[m] * za + qtr * (1.0 - za)] + [0.0] * n
     abi = [None] + [0.0] * n
     for jk in range(1, n + 1):
-        tri[jk] = (za * trs[m] * _LIBM.exp(-(kap_i * MAXSD(zh_i * float(jk) - zh_min, 0.0)))
-                   + (1.0 - za) * qtr * _LIBM.exp(-(kap_i * MAXSD(zh_i * float(jk) - zhi_ssl, 0.0))))
+        tri[jk] = (za * trs[m] * _LIBM.exp(-(kap_i * MAXSD(zh_i * float(jk) - zh_min, 0.0, 'zdf:229.max1')))
+                   + (1.0 - za) * qtr * _LIBM.exp(-(kap_i * MAXSD(zh_i * float(jk) - zhi_ssl, 0.0, 'zdf:229.max2'))))
         abi[jk] = tri[jk - 1] - tri[jk]
     tcond = [0.0] * (n + 1)
     ks = [0.0] * (m + 1)
@@ -138,13 +153,13 @@ def oracle_zdf(c, nml):
     while (not conv) and iconv < 200:
         iconv += 1
         cp = [0.0] * (n + 1)
-        cp[0] = RCND_I + 0.09 * sz[1] / MINSD(t_i[1] - RT0, -EPSI10) - 0.011 * (t_i[1] - RT0)
-        cp[n] = RCND_I + 0.09 * sz[n] / MINSD(t_bo - RT0, -EPSI10) - 0.011 * (t_bo - RT0)
+        cp[0] = RCND_I + 0.09 * sz[1] / MINSD(t_i[1] - RT0, -EPSI10, 'zdf:274') - 0.011 * (t_i[1] - RT0)
+        cp[n] = RCND_I + 0.09 * sz[n] / MINSD(t_bo - RT0, -EPSI10, 'zdf:276') - 0.011 * (t_bo - RT0)
         for jk in range(1, n):
             cp[jk] = (RCND_I + 0.09 * 0.5 * (sz[jk] + sz[jk + 1])
-                      / MINSD(0.5 * (t_i[jk] + t_i[jk + 1]) - RT0, -EPSI10)
+                      / MINSD(0.5 * (t_i[jk] + t_i[jk + 1]) - RT0, -EPSI10, 'zdf:281')
                       - 0.011 * (0.5 * (t_i[jk] + t_i[jk + 1]) - RT0))
-        tcond = [MAXSD(x, zkimin) for x in cp]
+        tcond = [MAXSD(x, zkimin, 'zdf:292') for x in cp]
         zghe = 1.0
         for jk in range(m):
             ks[jk] = zghe * rcnd_s * z1_h_s
@@ -155,7 +170,7 @@ def oracle_zdf(c, nml):
         if h_s > 0.0:
             ki[0] = ks[m]
         for jk in range(1, n + 1):
-            zcpi = RCPI + zgamma * sz[jk] / MAXSD((t_i[jk] - RT0) * (ztiold[jk] - RT0), EPSI10)
+            zcpi = RCPI + zgamma * sz[jk] / MAXSD((t_i[jk] - RT0) * (ztiold[jk] - RT0), EPSI10, 'zdf:353')
             eta_i[jk] = RDT * R1_RHOI * z1_h_i / zcpi
         for jk in range(1, m + 1):
             eta_s[jk] = RDT * R1_RHOS * R1_RCPI * z1_h_s
@@ -237,15 +252,15 @@ def oracle_zdf(c, nml):
         if t_su < RT0:
             t_su = (indb[jm_min] - tr[jm_min][3] * (isnow * t_s[1] + (1.0 - isnow) * t_i[1])) / diagb[jm_min]
         zdti = 0.0
-        t_su = MAXSD(MINSD(t_su, RT0), RT0 - 100.0)
+        t_su = MAXSD(MINSD(t_su, RT0, 'zdf:577.min'), RT0 - 100.0, 'zdf:577.max')
         zdti = max(zdti, abs(t_su - ztsub))
         if h_s > 0.0:
             for jk in range(1, m + 1):
-                t_s[jk] = MAXSD(MINSD(t_s[jk], RT0), RT0 - 100.0)
+                t_s[jk] = MAXSD(MINSD(t_s[jk], RT0, 'zdf:582.min'), RT0 - 100.0, 'zdf:582.max')
                 zdti = max(zdti, abs(t_s[jk] - ztsb[jk]))
         for jk in range(1, n + 1):
             ztm = -(RTMLT * sz[jk]) + RT0
-            t_i[jk] = MAXSD(MINSD(ztm, t_i[jk]), RT0 - 100.0)
+            t_i[jk] = MAXSD(MINSD(ztm, t_i[jk], 'zdf:589.min'), RT0 - 100.0, 'zdf:589.max')
             zdti = max(zdti, abs(t_i[jk] - ztib[jk]))
         if zdti < zdti_bnd:
             conv = True
@@ -256,8 +271,8 @@ def oracle_zdf(c, nml):
     e_i = [None] + [0.0] * n
     for jk in range(1, n + 1):
         ztm = -(RTMLT * sz[jk])
-        t_i[jk] = MINSD(ztm + RT0, t_i[jk])
-        e_i[jk] = RHOI * (RCPI * (ztm - (t_i[jk] - RT0)) + RLFUS * MAXSD(1.0 - ztm / MINSD(t_i[jk] - RT0, -EPSI10), 0.0)
+        t_i[jk] = MINSD(ztm + RT0, t_i[jk], 'var:955')
+        e_i[jk] = RHOI * (RCPI * (ztm - (t_i[jk] - RT0)) + RLFUS * MAXSD(1.0 - ztm / MINSD(t_i[jk] - RT0, -EPSI10, 'var:957.min'), 0.0, 'var:957.max')
                           - RCP * ztm)
     e_s = [None] + [RHOS * (RCPI * (RT0 - t_s[jk]) + RLFUS) for jk in range(1, m + 1)]
     zdq = -zq_ini + (SUM(e_i[1:]) * h_i * r1n + SUM(e_s[1:]) * h_s * r1m)
@@ -279,7 +294,7 @@ def oracle_zdf(c, nml):
     return out
 
 
-def _remap(ph, pe_or_content, nl, products):
+def _remap(ph, pe_or_content, nl, products, site):
     """snw_ent (products=True, icethd_dh.f90:584-619) / ice_var_vremap (icevar.f90:1010-1046)."""
     k0 = len(ph)
     zc0, zh0 = [0.0] * (k0 + 1), [0.0] * (k0 + 1)
@@ -296,7 +311,7 @@ def _remap(ph, pe_or_content, nl, products):
             if zh1[j1] <= zh0[j0] and zh1[j1] > zh0[j0 - 1]:
                 zc1[j1] = (zc0[j0 - 1] * (zh0[j0] - zh1[j1]) + zc0[j0] * (zh1[j1] - zh0[j0 - 1])) / (zh0[j0] - zh0[j0 - 1])
     zc1[nl] = zc0[k0]
-    return [MAXSD(zc1[j] - zc1[j - 1], 0.0) / MAXSD(zhnew, EPSI20) for j in range(1, nl + 1)]
+    return [MAXSD(zc1[j] - zc1[j - 1], 0.0, site + '.max1') / MAXSD(zhnew, EPSI20, site + '.max2') for j in range(1, nl + 1)]
 
 
 def oracle_dh(c, z, nml):
@@ -313,9 +328,9 @@ def oracle_dh(c, z, nml):
     t_i, t_s, e_i, e_s = [None] + z["t_i"], [None] + z["t_s"], [None] + z["e_i"], [None] + z["e_s"]
     sz = [None] + list(c["sz_i"])
     qml = (z["qns_ice"] + c["qsr_ice"] - c["qtr_ice_top"] - z["qcn_ice_top"]) if t_su >= RT0 else 0.0
-    zq_top = MAXSD(qml * RDT, 0.0)
+    zq_top = MAXSD(qml * RDT, 0.0, 'dh:128')
     zf_tt = z["qcn_ice_bot"] + c["qsb_ice_bot"] + c["fhld"] + z["qtr_ice_bot"] * c["frq_m"]
-    zq_bot = MAXSD(zf_tt * RDT, 0.0)
+    zq_bot = MAXSD(zf_tt * RDT, 0.0, 'dh:130')
     zs = sz if nml["nn_icesal"] == 4 else [None] + [c["s_i"]] * n
     zs_o, ze_o, zh_o, zh = ([0.0] * (n + 2) for _ in range(4))
     for jk in range(1, n + 1):
@@ -332,42 +347,45 @@ def oracle_dh(c, z, nml):
             fx["hfx_res"] = fx["hfx_res"] - zes[jk] * zhs[jk] * a_i * r1dt
             fx["wfx_snw_sum"] = fx["wfx_snw_sum"] + RHOS * zhs[jk] * a_i * r1dt
             dh["dh_s_itm"] = dh["dh_s_itm"] - zhs[jk]
-            h_s = MAXSD(h_s - zhs[jk], 0.0)
+            h_s = MAXSD(h_s - zhs[jk], 0.0, 'dh:170')
             zhs[jk] = zes[jk] = 0.0
     if c["sprecip"] > 0.0:
         zhs[0] = zsnw * c["sprecip"] * RDT * R1_RHOS / at_i
-        zes[0] = MAXSD(- c["qprec_ice"], 0.0)
+        zes[0] = MAXSD(- c["qprec_ice"], 0.0, 'dh:180')
         fx["hfx_spr"] = fx["hfx_spr"] + zes[0] * zhs[0] * a_i * r1dt
         fx["wfx_spr"] = fx["wfx_spr"] - RHOS * zhs[0] * a_i * r1dt
         h_s = h_s + zhs[0]
-    zdeltah = -MINSD(c["evap_ice"] * R1_RHOS * RDT, h_s)   # emitted -MIN(A, h_s)
+    zdeltah = -MINSD(c["evap_ice"] * R1_RHOS * RDT, h_s, 'dh:194')   # emitted -MIN(A, h_s)
     zevap = c["evap_ice"] * RDT + zdeltah * RHOS
     if zdeltah > 0.0 and zes[0] == 0.0:
         zes[0] = RHOS * (RLFUS - RCPI * (t_su - RT0))
     for jk in range(0, m + 1):
-        zdum = MAXSD(-zhs[jk], zdeltah)
+        zdum = MAXSD(-zhs[jk], zdeltah, 'dh:200')
         fx["hfx_sub"] = fx["hfx_sub"] + zes[jk] * zdum * a_i * r1dt
         fx["wfx_snw_sub"] = fx["wfx_snw_sub"] - RHOS * zdum * a_i * r1dt
-        h_s = MAXSD(h_s + zdum, 0.0)
-        zhs[jk] = MAXSD(zhs[jk] + zdum, 0.0)
-        zdeltah = MINSD(zdeltah - zdum, 0.0)
+        h_s = MAXSD(h_s + zdum, 0.0, 'dh:206')
+        zhs[jk] = MAXSD(zhs[jk] + zdum, 0.0, 'dh:207')
+        zdeltah = MINSD(zdeltah - zdum, 0.0, 'dh:211')
     for jk in range(0, m + 1):
         if zhs[jk] > 0.0 and zq_top > 0.0:
-            zdum = -MINSD(zq_top / MAXSD(EPSI20, zes[jk]), zhs[jk])   # emitted -MIN(zq/e, zh_s)
+            zdum = -MINSD(zq_top / MAXSD(EPSI20, zes[jk], 'dh:221'), zhs[jk], 'dh:228')   # emitted -MIN(zq/e, zh_s)
             fx["hfx_snw"] = fx["hfx_snw"] - zes[jk] * zdum * a_i * r1dt
             fx["wfx_snw_sum"] = fx["wfx_snw_sum"] - RHOS * zdum * a_i * r1dt
             dh["dh_s_sum"] = dh["dh_s_sum"] + zdum
-            zq_top = MAXSD(zq_top + zdum * zes[jk], 0.0)
-            h_s = MAXSD(h_s + zdum, 0.0)
-            zhs[jk] = MAXSD(zhs[jk] + zdum, 0.0)
+            zq_top = MAXSD(zq_top + zdum * zes[jk], 0.0, 'dh:229')
+            h_s = MAXSD(h_s + zdum, 0.0, 'dh:230')
+            zhs[jk] = MAXSD(zhs[jk] + zdum, 0.0, 'dh:231')
     icount = [None] + [0] * n
+    # surface (icethd_dh.f90:251-290) and basal (:388-427) melt share this body
+    _SITE = {"sum": ("dh:251", "dh:272", "dh:274", "dh:289", "dh:290"),
+             "bom": ("dh:388", "dh:409", "dh:411", "dh:426", "dh:427")}
 
     def layer(jk, heat, kind):
         nonlocal h_i
         ztm = - RTMLT * sz[jk]
         if t_i[jk] >= (ztm + RT0):
             zEi = - e_i[jk] * R1_RHOI
-            zdum = MINSD(- zh[jk], 0.0)
+            zdum = MINSD(- zh[jk], 0.0, _SITE[kind][0])
             zfmdt = - zdum * RHOI
             dh["dh_i_itm"] = dh["dh_i_itm"] + zdum
             fx["hfx_res"] = fx["hfx_res"] + zEi * zfmdt * a_i * r1dt
@@ -379,16 +397,16 @@ def oracle_dh(c, z, nml):
             zdE = zEi - zEw
             zfmdt = - heat / zdE
             zdum = - zfmdt * R1_RHOI
-            zdum = MINSD(MAXSD(zdum, - zh[jk]), 0.0)
-            heat = MAXSD(heat - zdum * RHOI * zdE, 0.0)
+            zdum = MINSD(MAXSD(zdum, - zh[jk], _SITE[kind][1] + '.max'), 0.0, _SITE[kind][1] + '.min')
+            heat = MAXSD(heat - zdum * RHOI * zdE, 0.0, _SITE[kind][2])
             dh["dh_i_" + kind] = dh["dh_i_" + kind] + zdum
             zfmdt = - RHOI * zdum
             fx["hfx_thd"] = fx["hfx_thd"] + zEw * zfmdt * a_i * r1dt
             fx["hfx_" + kind] = fx["hfx_" + kind] - zdE * zfmdt * a_i * r1dt
             fx["wfx_" + kind] = fx["wfx_" + kind] - RHOI * zdum * a_i * r1dt
             fx["sfx_" + kind] = fx["sfx_" + kind] - RHOI * zdum * zs[jk] * a_i * r1dt
-        zh[jk] = MAXSD(zh[jk] + zdum, 0.0)
-        h_i = MAXSD(h_i + zdum, 0.0)
+        zh[jk] = MAXSD(zh[jk] + zdum, 0.0, _SITE[kind][3])
+        h_i = MAXSD(h_i + zdum, 0.0, _SITE[kind][4])
         zs_o[jk] = zs_o[jk] + zdum * zs[jk]
         ze_o[jk] = ze_o[jk] + zdum * e_i[jk]
         zh_o[jk] = zh_o[jk] + zdum
@@ -396,13 +414,13 @@ def oracle_dh(c, z, nml):
 
     for jk in range(1, n + 1):
         zq_top = layer(jk, zq_top, "sum")
-        zdum = -MINSD(zevap * R1_RHOI, zh[jk])   # emitted -MIN(zevap*r1, zh_i)
+        zdum = -MINSD(zevap * R1_RHOI, zh[jk], 'dh:295')   # emitted -MIN(zevap*r1, zh_i)
         fx["hfx_sub"] = fx["hfx_sub"] + e_i[jk] * zdum * a_i * r1dt
         fx["wfx_ice_sub"] = fx["wfx_ice_sub"] - RHOI * zdum * a_i * r1dt
         fx["sfx_sub"] = fx["sfx_sub"] - RHOI * zdum * zs[jk] * a_i * r1dt
         zevap = zevap + zdum * RHOI
-        zh[jk] = MAXSD(zh[jk] + zdum, 0.0)
-        h_i = MAXSD(h_i + zdum, 0.0)
+        zh[jk] = MAXSD(zh[jk] + zdum, 0.0, 'dh:310')
+        h_i = MAXSD(h_i + zdum, 0.0, 'dh:311')
         dh["dh_i_sub"] = dh["dh_i_sub"] + zdum
         zs_o[jk] = zs_o[jk] + zdum * zs[jk]
         ze_o[jk] = ze_o[jk] + zdum * e_i[jk]
@@ -414,11 +432,11 @@ def oracle_dh(c, z, nml):
         zs_new = zsw * nml["rn_sinew"] * sss + (1. - zsw) * zs[1]
         ztm = - RTMLT * zs_new
         zt_new = zsw * t_bo + (1. - zsw) * t_i[n]
-        zEi = (RCPI * (zt_new - (ztm + RT0)) - RLFUS * MAXSD(1.0 - ztm / (MINSD(zt_new - RT0, -EPSI10)), 0.0)
+        zEi = (RCPI * (zt_new - (ztm + RT0)) - RLFUS * MAXSD(1.0 - ztm / (MINSD(zt_new - RT0, -EPSI10, 'dh:348.min')), 0.0, 'dh:348.max')
                + RCP * ztm)
         zEw = RCP * (t_bo - RT0)
         zdE = zEi - zEw
-        dh["dh_i_bog"] = RDT * MAXSD(zf_tt / (zdE * RHOI), 0.0)
+        dh["dh_i_bog"] = RDT * MAXSD(zf_tt / (zdE * RHOI), 0.0, 'dh:355')
         zfmdt = - RHOI * dh["dh_i_bog"]
         fx["hfx_thd"] = fx["hfx_thd"] + zEw * zfmdt * a_i * r1dt
         fx["hfx_bog"] = fx["hfx_bog"] - zdE * zfmdt * a_i * r1dt
@@ -438,7 +456,7 @@ def oracle_dh(c, z, nml):
             fx["wfx_res"] = fx["wfx_res"] + RHOS * zhs[jk] * a_i * r1dt
             h_s = 0.0
             zes[jk] = zhs[jk] = 0.0
-    dsni = MAXSD((RHOS * h_s + (RHOI - RHO0) * h_i) * z1_rho, 0.0)
+    dsni = MAXSD((RHOS * h_s + (RHOI - RHO0) * h_i) * z1_rho, 0.0, 'dh:456')
     dh["dh_snowice"] = dsni
     h_i = h_i + dsni
     h_s = h_s - dsni
@@ -454,24 +472,24 @@ def oracle_dh(c, z, nml):
     zh_o[0] = zh_o[0] + dsni
     ze_o[0] = ze_o[0] + zfmdt * zEw
     for jk in range(m, -1, -1):
-        zdum = MINSD(zhs[jk], zdeltah)   # emitted `minsd zdeltah, zh_s`
-        zhs[jk] = MAXSD(zhs[jk] - zdum, 0.0)
+        zdum = MINSD(zhs[jk], zdeltah, 'dh:490')   # emitted `minsd zdeltah, zh_s`
+        zhs[jk] = MAXSD(zhs[jk] - zdum, 0.0, 'dh:491')
         ze_o[0] = ze_o[0] + zdum * zes[jk]
-        zdeltah = MAXSD(zdeltah - zdum, 0.0)
-    e_s_new = _remap(zhs, zes, m, products=True)
+        zdeltah = MAXSD(zdeltah - zdum, 0.0, 'dh:494')
+    e_s_new = _remap(zhs, zes, m, products=True, site="dh:619")
     if h_s > 0.0:
         t_s_new = [RT0 + (- e * R1_RHOS * R1_RCPI + RLFUS * R1_RCPI) for e in e_s_new]
     else:
         t_s_new = [RT0] * m
-    e_i_new = _remap(zh_o, ze_o, n, products=False)
+    e_i_new = _remap(zh_o, ze_o, n, products=False, site="var:1045")
     s_i = c["s_i"]
     if nml["nn_icesal"] == 4:
-        sz_new = _remap(zh_o, zs_o, n, products=False)
+        sz_new = _remap(zh_o, zs_o, n, products=False, site="var:1045")
     else:
         sz_new = list(c["sz_i"])
         zs_sni = sss * (RHOI - RHOS) * R1_RHOI
-        zds = (zs_sni - s_i) * dsni / MAXSD(h_i, EPSI10)
-        zds = zds + (zs_new - s_i) * dh["dh_i_bog"] / MAXSD(h_i, EPSI10)
+        zds = (zs_sni - s_i) * dsni / MAXSD(h_i, EPSI10, 'dh:525')
+        zds = zds + (zs_new - s_i) * dh["dh_i_bog"] / MAXSD(h_i, EPSI10, 'dh:525')
         s_i = s_i + zds
     a_out = a_i
     if h_i == 0.0:
@@ -487,7 +505,7 @@ def oracle_temp(h_i, e_i, sz):
         if h_i > 0.0:
             ztm = - RTMLT * s
             zbbb = (RCP - RCPI) * ztm + e * R1_RHOI - RLFUS
-            zccc = math.sqrt(MAXSD(zbbb * zbbb - 4.0 * RCPI * RLFUS * ztm, 0.0))
+            zccc = math.sqrt(MAXSD(zbbb * zbbb - 4.0 * RCPI * RLFUS * ztm, 0.0, 'thd:285'))
             out.append(RT0 - (zbbb + zccc) * 0.5 * R1_RCPI)
         else:
             out.append(RT0)
@@ -671,12 +689,18 @@ def test_five_categories_bit_identical_to_independent_transcription():
     assert not [k for k, v in branch.items() if v == 0], branch
 
 
-def test_eager_equals_jit_every_bit():
+@pytest.mark.parametrize("jl", [2, 3])
+def test_eager_equals_jit_every_bit(jl):
+    # jl = 3 is a one-cell category: compiled for a batch of one, XLA re-expanded zeta and
+    # zkappa inside the -zeta*zkappa*zg1s matrix entry and regrouped them (1 ULP, 26 leaves)
+    # until every BL99 product was materialised; batches of two or more never showed it.
     nml = _deck()
-    cells = _categories(seed=3)[2]
+    cells = _categories(seed=3)[jl]
     jit_leaves, eager_leaves = _leaves(_model(cells, nml)), _leaves(_model(cells, nml, eager=True))
     for k in jit_leaves:
         assert np.array_equal(_bits(jit_leaves[k]), _bits(eager_leaves[k])), k
+    oracle = _oracle_leaves(_oracle_rows(cells, nml))
+    assert _diff(_model(cells, nml), oracle) == {}
 
 
 def test_inexact_value_pins():
