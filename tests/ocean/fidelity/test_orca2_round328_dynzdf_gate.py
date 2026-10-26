@@ -174,7 +174,9 @@ def test_cleanup_keeps_crashed_and_admission_refused_runs(
     ))
     result = subprocess.run(["bash", "-c", script], text=True, capture_output=True)
     assert result.returncode == 1
-    assert not target_run.exists() and not target_root.exists() and not scratch.exists()
+    assert not target_run.exists() and target_root.is_dir() and not scratch.exists()
+    assert "R328_FAILED_BUILD_KEPT" in result.stderr
+    assert "rerun=move-this-directory-aside-first" in result.stderr
     failure_kind = "admission_refused" if completed else "crashed"
     kept = list((evidence / "refused").glob(
         f"active_run_{failure_kind}_*/record.bin"))
