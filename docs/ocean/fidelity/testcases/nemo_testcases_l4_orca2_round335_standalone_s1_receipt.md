@@ -229,3 +229,28 @@ Mechanical delta check, changed lines only (`git diff -U0` with `index` and
   1,914 lines.
 
 This section is the only addition beyond the lane's own changes.
+
+Resume-4 gates on the rebased tree (CPU, binary64, foreground; evidence in
+`orca2_rounds/round335/resume4/`):
+
+- S1 production JIT replay: `PASS_MEASUREMENT_COMPLETE`, bulk 0 / 158,292
+  unequal across 18 fields, mapping 0 / 119,880 across 9; all 27 one-ULP
+  plants `PASS_NONZERO`.
+- Non-NEMO control, parent = lane tip `ba9f39512595`, current = rebased tree:
+  `PASS`, 0 / 10,231,076 unequal across 214 arrays, inventory equal; the
+  one-ULP `A/app_jax/q_net` plant exits 1.  The current census is also
+  bit-identical to the resume-2 `072e4aa1b1c8` parent census.
+- Bulk-flux and aerobulk tests (NCAR bulk, aerobulk oracle, OMIP applicator,
+  phase-E climate, relative winds): 99 passed in 69.76 s.
+- Per-receipt citation gates: round 333 PASS (35 citations), round 334 PASS
+  (3), round 335 PASS (27); 0 failures, 0 unmapped, all 9 self-tests fired
+  on each.
+- Default `land.sh` ORCA2 inventory, split to fit the foreground limit:
+  123 passed in 552.37 s + 2 passed in 590.12 s + 27 passed in 80.28 s =
+  152 / 152.
+- Ratchet suite (same three invocations as resume 3): 3 FAIL, 18,301 PASS,
+  4 SKIP.  The failing set is identical on the lane tip without round 335 and
+  names no file this round changes (JRA55 test literal, land restart
+  coefficient, shortwave-penetration param spec).  It is **not** a subset of
+  main's (`d7109d9b0b95`: 10 FAIL); all three are lane-inherited divergences
+  from main, not round-335 regressions.
