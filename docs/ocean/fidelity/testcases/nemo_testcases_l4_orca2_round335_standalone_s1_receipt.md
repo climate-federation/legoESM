@@ -164,24 +164,25 @@ ice output is disabled by a separately approved configuration.
 - Complete parent/current non-NEMO control: 0/10,231,076 unequal across all
   214 arrays; one-ULP `q_net` plant PASS_NONZERO.
 - Resume-2 focused bulk/applicator/scan/aerobulk tests: 72/72 PASS in 95.31 s.
-  The authoritative `land.sh` ORCA2 default inventory passes 152/152 in
-  1,292.61 s, foreground.  The per-receipt citation gate passes all 23
-  citations with zero failures or unmapped entries; its shifted new-source
-  plant exits 1.
-- The dedicated CI ratchet inventory completed foreground: 12,277 PASS, 4
-  SKIP, 8 FAIL in 134.45 s.  All eight are inherited audit findings in files
-  outside this commit (slab-land dispatch; JRA55 test literal; land restart;
-  geothermal/MLE coefficients; MLE/shortwave specs); no failure names a
-  changed file.
+  Resume 3 reran the authoritative `land.sh` ORCA2 default inventory: 152/152
+  PASS in 1,300.44 s, foreground.  The per-receipt citation gate passes all
+  27 citations with zero failures or unmapped entries and all self-tests
+  firing; its shifted new XML-source plant exits 2.
+- Resume 3 reran the dedicated CI ratchet inventory foreground: 12,277 PASS,
+  4 SKIP, 8 inherited FAIL in 144.64 s across its three invocations.  The
+  findings remain outside this diff (slab-land dispatch; JRA55 test literal;
+  land restart; geothermal/MLE coefficients; MLE/shortwave specs); no failure
+  names a changed file.
 
 Resume-2 re-review: Claude **HOLD**, Argon **LAND**.  Both confirmed the OMIP
 `q_net` restoration (0 / 10,231,076 across all 214 non-NEMO output arrays),
 S1 JIT exactness (0 / 158,292), the unsafe key-SI3 iceberg reads at
 `nn_ice=1`, the NEMO safety-envelope coercions, and the deliberate helper
 duplication.  Claude's decisive HOLD was the false K0 certification claim;
-the operator independently verified that rounds 324/326 compared legoESM
-arms only.  This resume corrects that claim and records the plausible XIOS
-boot gap; Argon's LAND verdict required no code change.
+the operator independently verified in round 324's "Flag-off identity"
+section that rounds 324/326 compared legoESM arms only.  This resume corrects
+that claim and records the plausible XIOS boot gap; Argon's LAND verdict
+required no code change.
 
 ## Choices and open work
 
@@ -189,8 +190,8 @@ boot gap; Argon's LAND verdict required no code change.
   record `SIGN`, finite gradients, unification of only bit-identical helpers
   and `blk_oce_2`, documented non-unifiable helper pairs, result
   coefficients/density, design corrections, and gates.
-- UNASKED and unchanged: configure/build/run NEMO, select an ice-cover file,
-  alter the shipped comparison/training card, or relax any exact bar.
+- UNASKED and unchanged: execute NEMO in this resume, alter the shipped
+  comparison/training card, or relax any exact bar.
 - DECISION 171 is taken: the ice-cover input is one pinned native-grid yearly
   mean derived from a fixed full-SI3 NEMO ORCA2 run, with producer/run/years
   and digest recorded; it is not a monthly record set.
