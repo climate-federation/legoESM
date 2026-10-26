@@ -13,6 +13,7 @@ sum).  It is a separate run so the callback cannot touch the captured bits.
 Usage:
   nemo_si3_catsum_caller_census.py run --mode capture|census --out DIR -- (--pytest ARGS... | SCRIPT ARGS...)
   nemo_si3_catsum_caller_census.py compare PARENT_DIR CURRENT_DIR [--json OUT]
+  nemo_si3_catsum_caller_census.py coverage --package ICE_PKG_DIR CENSUS_DIR...   (exit 1 on any uncovered call)
 """
 
 from __future__ import annotations
@@ -94,7 +95,7 @@ def install_census(out_dir: Path) -> None:
 
     def wrapped(arr, axis=-1):
         caller = inspect.stack()[1]
-        site = f"{Path(caller.filename).name}:{caller.function}"
+        site = f"{Path(caller.filename).name}:{caller.function}:{caller.lineno}"
         all_negzero = jnp.all((arr == 0) & jnp.signbit(arr), axis=axis)
         jax.debug.callback(
             lambda n, m, s=site: _record(s, n, m),
@@ -140,6 +141,40 @@ def compare(parent: Path, current: Path) -> dict:
     return {"calls": len(ip), "leaves_compared": n_leaves, "leaves_changed": len(changed), "changed": changed}
 
 
+def production_call_sites(package_dir: Path) -> list[tuple[str, int, int]]:
+    """Every ``fortran_sum_categories(...)`` call in the ice package: (file, first line, last line)."""
+    import ast
+
+    sites = []
+    for path in sorted(package_dir.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "fortran_sum_categories":
+                sites.append((path.name, node.lineno, node.end_lineno))
+    return sites
+
+
+def coverage(census_dirs: list[Path], package_dir: Path) -> dict:
+    """A production call is covered when some census run recorded a call from a line inside it."""
+    seen: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
+    for d in census_dirs:
+        if not (d / "census.json").exists():  # the driver made no category-sum call
+            continue
+        for site, c in json.loads((d / "census.json").read_text()).items():
+            seen[site] = [a + b for a, b in zip(seen[site], c)]
+    lines = defaultdict(set)
+    for site in seen:
+        fname, _, lineno = site.rsplit(":", 2)
+        lines[fname].add(int(lineno))
+    sites = production_call_sites(package_dir)
+    missing = [f"{f}:{a}" for f, a, b in sites if not any(a <= ln <= b for ln in lines.get(f, ()))]
+    return {
+        "production_calls": len(sites),
+        "uncovered": missing,
+        "all_negzero_cells": sum(c[2] for c in seen.values()),
+        "sites": dict(sorted(seen.items())),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["run"]:
@@ -161,6 +196,20 @@ def main(argv: list[str] | None = None) -> int:
         except SystemExit as exc:
             return int(exc.code or 0)
         return 0
+    if argv[:1] == ["coverage"]:
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--package", type=Path, required=True)
+        ap.add_argument("--json", type=Path)
+        ap.add_argument("census_dirs", type=Path, nargs="+")
+        ns = ap.parse_args(argv[1:])
+        report = coverage(ns.census_dirs, ns.package)
+        if ns.json:
+            ns.json.write_text(json.dumps(report, indent=1, sort_keys=True) + "\n")
+        print(f"CATSUM_COVERAGE production_calls={report['production_calls']} "
+              f"uncovered={len(report['uncovered'])} all_negzero_cells={report['all_negzero_cells']}")
+        for site in report["uncovered"]:
+            print(f"UNCOVERED {site}")
+        return 1 if report["uncovered"] else 0
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["compare"])
     ap.add_argument("parent", type=Path)

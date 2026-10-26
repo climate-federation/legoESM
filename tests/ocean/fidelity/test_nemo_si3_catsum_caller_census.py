@@ -52,3 +52,20 @@ def test_census_counts_only_all_negative_zero_cells(tmp_path):
     (site,) = census
     assert census[site] == [1, 3, 1], census  # one call, three cells, one all -0 row
     assert np.isfinite(census[site]).all()
+
+
+def test_coverage_fails_on_an_uncovered_production_call(tmp_path):
+    sys.path.insert(0, str(PROBE.parent))
+    import nemo_si3_catsum_caller_census as probe
+
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "m.py").write_text("def f(a):\n    x = fortran_sum_categories(\n        a)\n    return fortran_sum_categories(x)\n")
+    census = tmp_path / "c"
+    census.mkdir()
+    (census / "census.json").write_text(json.dumps({"m.py:f:3": [1, 4, 0], "m.py:f:4": [1, 1, 0]}))
+    assert probe.coverage([census], pkg)["uncovered"] == []  # line 3 lies inside the multi-line call
+    (census / "census.json").write_text(json.dumps({"m.py:f:3": [1, 4, 0]}))
+    assert probe.coverage([census], pkg)["uncovered"] == ["m.py:4"]
+    rc = subprocess.run([sys.executable, str(PROBE), "coverage", "--package", str(pkg), str(census)]).returncode
+    assert rc == 1
