@@ -201,7 +201,7 @@ file: 185 passed.
 
 - Per-receipt citation gate on this receipt: PASS, 13 citations, 0
   failures, 0 unmapped, 0 map-audit failures, 9 / 9 self-tests fired.  The
-  two-line shift plant on the `stprk3.f90:155` key exits 1
+  two-line shift plant on the RK3 `sbc` call key exits 1
   (SYMBOL-NOT-AT-LINE).
 - Default `land.sh` ORCA2 inventory, split to fit the foreground cap:
   99 + 41 + 11 = **151 / 152 PASS**.  The remaining test, the staircase
