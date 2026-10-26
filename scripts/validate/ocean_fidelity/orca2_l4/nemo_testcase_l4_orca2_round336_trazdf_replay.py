@@ -101,12 +101,15 @@ def _global_interior(records: list[dict], name: str) -> np.ndarray:
     return np.concatenate(slabs, axis=1)
 
 
-def _target_faces(targets: np.ndarray) -> np.ndarray:
-    """Interior W rows read by the registered T-cell matrix rows."""
+def _target_faces(targets: np.ndarray, wet_faces: np.ndarray) -> np.ndarray:
+    """Wet interior W rows read by the registered T-cell matrix rows."""
     faces = np.zeros(targets.shape[:-1] + (targets.shape[-1] - 1,), dtype=bool)
     faces |= targets[..., :-1]
     faces |= targets[..., 1:]
-    return faces
+    wet_faces = np.asarray(wet_faces, dtype=bool)
+    require(faces.shape == wet_faces.shape,
+            f"target/W-mask shape {faces.shape} != {wet_faces.shape}")
+    return faces & wet_faces
 
 
 def _first(rows: dict[str, dict[str, dict[str, object]]], support: str) -> str | None:
@@ -123,7 +126,14 @@ def classify(report: dict[str, object], *, plant: str | None = None) -> dict[str
     elif plant == "target-count":
         result["target_count_T"] = 17
     elif plant == "first":
-        result["first_differing_target_statement"] = "zdf_tke_avt_copy"
+        # Move the metric-derived first row while deliberately leaving the
+        # recorded marker unchanged.  The classifier must recompute source
+        # order from the row metrics and reject the stale marker.
+        planted_first = result.get("first_differing_target_statement")
+        require(planted_first in ROW_ORDER, "first plant has no source row")
+        require(result["rows"][planted_first]["target"]["value_unequal"] != 0,
+                "first plant selected an already exact row")
+        result["rows"][planted_first]["target"]["value_unequal"] = 0
     elif plant == "passivity":
         result["observer_passivity"]["bit_identical"] = False
     elif plant == "record":
@@ -275,10 +285,9 @@ def measure(label: str, deck_root: Path, record_root: Path,
             "registered temperature target set moved")
     targets = np.zeros_like(np.asarray(ordinary.T.data), dtype=bool)
     targets[:, :90, :30] = target_rank0
-    target_faces = _target_faces(targets)
-
     wet = _global_full(records, "tmask")[..., :30] != 0.0
     wet_faces = wet[..., 1:]
+    target_faces = _target_faces(targets, wet_faces)
     oracle_phase = {
         name: _global_interior(records, name)[..., 1:30]
         for name in admission.ZDFPHY_PHASE_FIELDS

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 
+import numpy as np
 import pytest
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -49,3 +50,18 @@ def test_first_row_is_recomputed_not_trusted():
     report["first_differing_target_statement"] = "trazdf_diagonal"
     with pytest.raises(replay.GateError, match="not source ordered"):
         replay.classify(report)
+
+
+def test_first_plant_moves_metric_derived_first_row():
+    with pytest.raises(replay.GateError, match="not source ordered"):
+        replay.classify(_report(), plant="first")
+
+
+def test_target_faces_exclude_dry_w_faces():
+    targets = np.zeros((1, 1, 4), dtype=bool)
+    targets[..., 1] = True
+    wet_faces = np.array([[[False, True, True]]])
+    assert np.array_equal(
+        replay._target_faces(targets, wet_faces),
+        np.array([[[False, True, False]]]),
+    )
