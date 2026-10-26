@@ -365,8 +365,8 @@ check_r336_tke_landing() {
     /^[[:space:]]*SUBROUTINE tke_avn\(/ {avn=NR; routine="avn"}
     /r336_pre_sweep_mxl/ {pre_sweep=NR}
     /SELECT CASE[[:space:]]*\([[:space:]]*nn_mxl/ && routine=="avn" {mxl_select=NR}
-    /r336_final_mxl/ {final_mxl=NR}
-    /r336_final_mxld/ {final_mxld=NR}
+    /r336_final_mxl\(/ {final_mxl=NR}
+    /r336_final_mxld\(/ {final_mxld=NR}
     /zav[[:space:]]*=[[:space:]]*rn_ediff/ && routine=="avn" {zav=NR}
     /r336_pre_pdlr_zav/ {pre_zav=NR}
     /r336_pre_pdlr_avt/ {pre_avt=NR}
