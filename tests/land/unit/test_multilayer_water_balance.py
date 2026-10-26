@@ -182,7 +182,10 @@ def test_stiff_clay_conserves_after_specific_storage_switch():
     theta/capacity mismatch.)"""
     clay = SoilHydraulicsConfig(theta_r=_col(0.068), theta_sat=_col(0.38),
                                 alpha_vg=_col(1.0), n_vg=_col(1.09), K_sat=_col(5.56e-8))
-    assert abs(_richards_residual(clay, 0.0, 5.0e-7)) < 1.0e-3      # drying
+    # The drying sink is what the layers hold above the solver's dry floor
+    # (theta(-1e6 m) = 0.158 for this flat curve, from theta 0.30); a larger one
+    # is infeasible and the floor clip would have to create the difference.
+    assert abs(_richards_residual(clay, 0.0, 2.5e-7)) < 1.0e-3      # drying
     assert abs(_richards_residual(clay, 5.0e-6, 1.0e-7)) < 1.0e-3   # wetting
 
 

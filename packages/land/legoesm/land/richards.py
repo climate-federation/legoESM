@@ -140,6 +140,22 @@ class RichardsOutput(NamedTuple):
     runoff_subsurface: jnp.ndarray  # (ncol,) subsurface runoff [kg/m2/s]
     n_iter: jnp.ndarray        # (ncol,) always equals max_iter (fixed-iteration solver)
     surface_water: jnp.ndarray  # (ncol,) updated surface ponding depth [m]
+    budget_residual: jnp.ndarray  # (ncol,) column water budget residual over the step [m]
+
+
+def dry_floor(hydro_config: SoilHydraulicsConfig):
+    """The solver's dry bound, ``(psi_floor, theta_floor)``: the matric potential
+    at Se = _SE_DRY_FLOOR of the configured curve, bounded at _PSI_FLOOR_MIN, and
+    the water content on the curve at that potential.  Shaped like the (possibly
+    per-column, per-layer) hydraulics.  Every consumer of "the driest state the
+    soil admits" (the land step's extractable water, the restart capping script)
+    takes it from here, so the solver's clip and the demand it is given agree."""
+    psi_floor = psi_from_theta(
+        hydro_config.theta_r
+        + _SE_DRY_FLOOR * (hydro_config.theta_sat - hydro_config.theta_r),
+        hydro_config)
+    psi_floor = jnp.maximum(psi_floor, _PSI_FLOOR_MIN)
+    return psi_floor, theta_from_psi(psi_floor, hydro_config)
 
 
 def solve_richards(
@@ -284,23 +300,13 @@ def solve_richards(
     # --- Picard iteration ---
     psi_m = psi  # iterate
 
-    # Config-aware dry-side psi floor (see _SE_DRY_FLOOR): matric potential at
-    # Se = _SE_DRY_FLOOR for the active retention curve + (possibly per-column)
-    # hydraulics, computed ONCE.  jnp.maximum(psi, _psi_dry_floor) then bounds the
-    # dry limit with a water error <= _SE_DRY_FLOOR*(theta_sat-theta_r) for ANY (alpha, n).
-    _psi_dry_floor = psi_from_theta(
-        hydro_config.theta_r
-        + _SE_DRY_FLOOR * (hydro_config.theta_sat - hydro_config.theta_r),
-        hydro_config)
-    # ... bounded at _PSI_FLOOR_MIN, which is the binding
-    # floor for every Clapp-Hornberger soil.  The incoming state is floored too:
-    # a restart written before the floor existed carries psi ~ -1e11 m.
-    _psi_dry_floor = jnp.maximum(_psi_dry_floor, _PSI_FLOOR_MIN)
+    # Dry bound (see _SE_DRY_FLOOR / _PSI_FLOOR_MIN and dry_floor): psi and theta
+    # on the same curve point, so the state never sits off the retention curve
+    # and C and K (evaluated from theta for Clapp-Hornberger) match the bounded
+    # psi instead of collapsing below it.  The incoming state is floored too: a
+    # restart written before the floor existed carries psi ~ -1e11 m.
+    _psi_dry_floor, _theta_floor = dry_floor(hydro_config)
     psi_m = jnp.maximum(psi_m, _psi_dry_floor)
-    # theta floor on the same curve point, so the state never sits off the
-    # retention curve: C and K (evaluated from theta for Clapp-Hornberger)
-    # then match the bounded psi instead of collapsing to ~1e-15 below it.
-    _theta_floor = theta_from_psi(_psi_dry_floor, hydro_config)
 
     def picard_body(m, carry):
         h_s_m, psi_m, theta_m, _ = carry  # 4th slot: K_bot diagnostic (write-only)
@@ -615,6 +621,16 @@ def solve_richards(
     runoff_surface_kgm2s = runoff_surface * constants.rho_water
     runoff_subsurface_kgm2s = runoff_subsurface * constants.rho_water
 
+    # Column water budget over the step: storage change (soil + pond) minus the
+    # net of the fluxes the solver reports.  Zero to round-off when every demand
+    # was feasible; a positive value is water the dry floor's clip had to create
+    # because a sink asked for more than its layer held above the floor.
+    budget_residual = (
+        jnp.sum((theta_final - theta_n) * dz[None, :], axis=1)
+        + surface_water_new - h_s0
+        - dt * (flux_top - jnp.sum(sink * dz[None, :], axis=1)
+                - runoff_subsurface - runoff_surface))
+
     return RichardsOutput(
         psi_new=psi_final,
         theta_new=theta_final,
@@ -622,6 +638,7 @@ def solve_richards(
         runoff_subsurface=runoff_subsurface_kgm2s,
         n_iter=n_iter_final,
         surface_water=surface_water_new,
+        budget_residual=budget_residual,
     )
 
 

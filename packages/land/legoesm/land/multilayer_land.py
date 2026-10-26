@@ -43,7 +43,7 @@ from legoesm.land.snow_budget import update_snow
 from legoesm.land.state import MultiLayerLandState
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
-from legoesm.land.richards import solve_richards
+from legoesm.land.richards import dry_floor, solve_richards
 from legoesm.land.soil_thermal import solve_soil_thermal
 from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.canopy.interception import (
@@ -994,8 +994,13 @@ def _step_multilayer_land_impl(
             _deposit_empty[:, None], snow_new[:, None], snow_bands_new * _scale[:, None])
 
     dz = grid.dz
+    # Water the soil can give: above the SOLVER's dry floor (the same curve point
+    # richards.py clips at), not above theta_r.  A demand measured against theta_r
+    # (0 for every Clapp-Hornberger soil) asked for water the solver then refused
+    # and its floor clip recreated, opening the column budget by the shortfall.
+    _, _theta_floor = dry_floor(config.hydraulics)
     extractable_water = jnp.sum(
-        jnp.maximum(theta - theta_r, 0.0) * dz[None, :], axis=-1) * rho_w
+        jnp.maximum(theta - _theta_floor, 0.0) * dz[None, :], axis=-1) * rho_w
     # Rain that refroze into the pack (gap 6) is now snow, so it no longer infiltrates.
     precip_rain = forcing.precip_total - precip_snow_eff - refreeze / dt
     melt_rate = snow_melt / dt
