@@ -1,0 +1,21 @@
+--- trazdf.F90
++++ trazdf.F90
+@@ -40,6 +40,7 @@
+    USE lbclnk         ! ocean lateral boundary conditions (or mpp link)
+    USE lib_mpp        ! MPP library
+    USE timing         ! Timing
++   USE round336_trazdf_writer, ONLY : r336_begin,r336_capture ! R336_TRAZDF_OBSERVER
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -96,6 +97,10 @@
+       !
+       !                                      !* compute lateral mixing trend and add it to the general trend
++      CALL r336_begin(kt,Krhs,pts) ! R336_TRAZDF_OBSERVER
+       CALL tra_zdf_imp( 'TRA', rDt, Kbb, Kmm, Krhs, pts, Kaa, jpts )
++      CALL r336_capture(kt,Kbb,Kmm,Krhs,Kaa,rDt,pts,ln_zad_Aimp, & ! R336_TRAZDF_OBSERVER
++         & ln_zdfmfc,ln_zdfddm,l_ldfslp,ln_traldf_msc) ! R336_TRAZDF_OBSERVER
++      ! The capture call is outside every loop in tra_zdf_imp. ! R336_TRAZDF_OBSERVER
+ 
+ !!gm WHY here !   and I don't like that !
+       ! DRAKKAR SSS control {
