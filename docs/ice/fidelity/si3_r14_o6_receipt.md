@@ -233,7 +233,11 @@ negative `v_s`; `at_i` above `amax` flagged for `icecor`, not for
 
 ### Gates (this resume)
 
-GATES_RESULT
+- Citation gate, all 13 SI3 receipts, full map: every receipt PASS, 0 unmapped, 0 failing, 0 map entries failing audit; this receipt 65 citations; a shifted-line plant fires (exit 1) (`citation_gate_all_si3.log`).
+- Default citation gate: `31 passed in 6.90s` (`default_gate.log`). Private-import ratchet: `6 passed in 5.43s` (`private_imports.log`).
+- Inline-coefficient, hardcoded-constant, dispatch, parameter-spec and saturation ratchets: `11 failed, 12053 passed, 4 skipped`, the identical 11 at the parent; the one in a touched file (`si3_orca2_state.py`, inline coefficients) lists the same four pre-existing sites, none in the appended code (`ratchets_current.log`, `inline_si3_orca2_current.txt`).
+- Reviews (codex, read-only CLI): pass 1 HOLD, five harness/tool defects confirmed and one plausible, all fixed; pass 2 confirmed five fixed and the matcher not, now fixed and tested; pass 3 (claims check) HOLD on wording and completeness, fixed (`review_codex_r2.log`..`r5`). GLM: no route in this session, not run (honour-system rule unmet, stated).
+- GPU spot check: not run (no certification this round).
 
 ## CONFIRMED vs PLAUSIBLE
 
