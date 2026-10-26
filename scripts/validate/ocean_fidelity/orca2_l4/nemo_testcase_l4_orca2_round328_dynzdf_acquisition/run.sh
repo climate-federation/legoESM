@@ -361,7 +361,7 @@ check_r336_tke_landing() {
     /r336_matrix_upper/ {upper=NR}
     /r336_matrix_lower/ {lower=NR}
     /r336_after_solve/ {after_solve=NR}
-    /^[[:space:]]*END SUBROUTINE tke_tke/ {end_tke=NR}
+    /^[[:space:]]*END SUBROUTINE tke_tke/ {end_tke=NR; routine=""}
     /^[[:space:]]*SUBROUTINE tke_avn\(/ {avn=NR; routine="avn"}
     /r336_pre_sweep_mxl/ {pre_sweep=NR}
     /SELECT CASE[[:space:]]*\([[:space:]]*nn_mxl/ && routine=="avn" {mxl_select=NR}
@@ -371,7 +371,7 @@ check_r336_tke_landing() {
     /r336_pre_pdlr_zav/ {pre_zav=NR}
     /r336_pre_pdlr_avt/ {pre_avt=NR}
     /IF\([[:space:]]*nn_pdl[[:space:]]*==[[:space:]]*1[[:space:]]*\)/ && routine=="avn" {pdlr=NR}
-    /^[[:space:]]*END SUBROUTINE tke_avn/ {end_avn=NR}
+    /^[[:space:]]*END SUBROUTINE tke_avn/ {end_avn=NR; routine=""}
     END {
       ok=(outer<begin && begin<call_tke && call_tke<after_tke &&
           after_tke<call_avn && call_avn<finish && finish<inner)
