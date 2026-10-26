@@ -1,14 +1,9 @@
 --- namelist_cfg
 +++ namelist_cfg
-@@ -83,7 +83,7 @@
-    ln_blk      = .true.    !  Bulk formulation                          (T => fill namsbc_blk )
-                      ! Sea-ice :
+@@ -86,1 +86,1 @@
 -   nn_ice      = 2         !  =0 no ice boundary condition
 +   nn_ice      = 1         !  =0 no ice boundary condition
-       !                    !  =1 use observed ice-cover                 (  => fill namsbc_iif )
-       !                    !  =2 or 3 for SI3 and CICE, respectively
-                      ! Misc. options of sbc :
-@@ -95,6 +95,13 @@
+@@ -95,6 +95,12 @@
     ln_wave     = .false.   !  Activate coupling with wave  (T => fill namsbc_wave)
  /
  !-----------------------------------------------------------------------
@@ -21,21 +16,14 @@
  &namsbc_blk    !   namsbc_blk  generic Bulk formula                     (ln_blk =T)
  !-----------------------------------------------------------------------
     !                    !  bulk algorithm :
-@@ -250,6 +257,7 @@
+@@ -251,5 +257,6 @@
  !-----------------------------------------------------------------------
     ln_lin = .true.         !     linear  drag: Cd = Cd0 Uc0
 +   ln_drgice_imp = .false. ! K0: no implicit ice-ocean top drag without SI3 state
  /
  !-----------------------------------------------------------------------
  &nambbc        !   bottom temperature boundary condition                (default: OFF)
-@@ -412,7 +420,8 @@
-       !                       !        = 2 add a tke source just at the base of the ML
-       !                       !        = 3 as = 1 applied on HF part of the stress           (ln_cpl=T)
-       ln_mxhsw    = .false.   !  surface mixing length scale = F(wave height)
+@@ -416,1 +423,2 @@
 -      nn_mxlice = 2           ! type of scaling under sea-ice
 +      ln_mxl0     = .true.    ! K0: retain surface mixing-length anchor
 +      nn_mxlice = 0           ! type of scaling under sea-ice
-       !                       !    = 0 no scaling under sea-ice
-       !                       !    = 1 scaling with constant sea-ice thickness
-       !                       !    = 2 scaling with mean sea-ice thickness ( only with SI3 sea-ice model )
-
