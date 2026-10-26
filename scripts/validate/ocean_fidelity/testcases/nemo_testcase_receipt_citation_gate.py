@@ -146,6 +146,12 @@ FILES = {
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfphy.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/trazdf.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/trazdf.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfevd.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfevd.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfddm.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfddm.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfiwm.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfiwm.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traadv.f90": (
@@ -1877,6 +1883,15 @@ CITATION_MAP = {
     'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfphy.f90:365-392': [
         '!==  ocean Kz  ==!   (avt, avs, avm)',
         'IF( ln_zdfiwm )   CALL zdf_iwm( kt, Kmm, avm, avt, avs )', 28],
+    'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfevd.f90:107-110': [
+        'DO jk =  1,  jpkm1',
+        ('END DO   ;   END DO   ;   END DO', 2), 4],
+    'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfddm.f90:163-172': [
+        'zavfs = rn_avts / ( 1. + zrr*zrr*zrr ) * zmsks * zmskf',
+        'p_avm(ji,jj,jk) = p_avm(ji,jj,jk) + MAX( zavft + zavdt, zavfs + zavds )', 10],
+    'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfiwm.f90:293-317': [
+        'DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)    ! Bound diffusivity by molecular value and 100 cm2/s',
+        ('END DO   ;   END DO', 10), 25],
     'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/trazdf.f90:180-216': [
         "IF( cdtype == 'TRA' .AND. jn == jp_tem ) THEN",
         ('zwt(:,1) = 0._wp', 1), 37],

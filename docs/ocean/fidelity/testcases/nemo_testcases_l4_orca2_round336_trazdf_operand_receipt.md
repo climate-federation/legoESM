@@ -219,3 +219,43 @@ The acquisition disposition is unchanged: **ACQUISITION_NEEDED** at the same
 operator command and evidence directory above. No unasked choice was made;
 configuration choices remain empty. Codex review: operator. Argon findings
 are dispositioned here; operator re-review remains required before acquisition.
+
+## Resume 4: phase-content admission repair
+
+Argon's re-review found two remaining verification defects. The phase plant had
+selected the first wet owned cell at Fortran `jk=1`, outside the captured
+`2:jpkm1` process range, and therefore proved only the unfilled-sentinel check.
+It now selects a wet cell from the process range. Every phase plant runs after
+the stream checksum has passed and asserts its exact expected refusal message;
+the preflight log shows all fifteen named phase refusals rather than accepting
+any refusal as sufficient.
+
+Admission now checks the actual process-range content between every recorded
+boundary. The closure copy is exact; runoff cannot decrease `avt` and leaves
+`avs` unchanged; EVD leaves `avs` unchanged and any changed `avt` value must be
+the executed deck's `rn_evd*wmask`; DDM cannot decrease `avt` and cannot set
+`avs` below its incoming `avt`; IWM cannot decrease either tracer coefficient;
+and both last-phase fields must equal the final solver inputs bit-for-bit. These
+properties follow the executed composition at
+`ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfphy.f90:365-392`, the EVD
+assignment at
+`ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfevd.f90:107-110`, the DDM
+updates at
+`ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfddm.f90:163-172`, and the
+non-negative IWM clamp and additions at
+`ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfiwm.f90:293-317`.
+All eleven phase fields must also be finite and non-negative over the process
+range. The preflight pins the four deck values used by these implications and
+plants each numeric log echo.
+
+The refreshed read-only preflight reaches
+`ORCA2_ROUND336_TRAZDF_PREFLIGHT_READY`. Its two-rank bounds/replay fixture and
+26 direct gate tests pass; every phase plant reports the intended message; the
+60/1,234/121 nonzero per-function floating-point censuses remain unchanged;
+both admission recovery routes pass; and the inherited suites pass 6, 5, and
+78 tests. The log is `round336/resume4_preflight.log`, SHA-256
+`b7f61a382dbac8eed67ac53a38857fe7d854628b4563707e1dc3abb3a2915ce6`.
+
+The acquisition disposition remains **ACQUISITION_NEEDED** at the operator
+command above. No NEMO executable was run, no model or configuration changed,
+and no unasked choice was made. Codex review: operator.
