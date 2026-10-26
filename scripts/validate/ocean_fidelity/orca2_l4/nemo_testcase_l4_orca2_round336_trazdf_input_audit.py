@@ -241,8 +241,12 @@ def measure(label: str, deck_root: Path, record_root: Path,
     e3t_mm = e3t0 * (np.float64(1.0) + rmm[..., None] * tmask)
     e3t_aa = e3t0 * (np.float64(1.0) + raa[..., None] * tmask)
     rdt_fields = _global(ldf_fields, "rDt")[..., :30]
-    require(bool(np.all(rdt_fields == rdt_fields.flat[0])),
-            "recorded rDt is not spatially constant")
+    # The LDF observer writes rDt only on its executed jk=2:jpkm1 range; its
+    # untouched boundary slots remain zero by construction.  The registered
+    # target words are all inside that range, so demand the real scalar there
+    # rather than silently filling the unwritten slots.
+    require(bool(np.all(rdt_fields[targets] == np.float64(card.dt_s))),
+            "recorded rDt is absent or moved at a registered target")
     content = (e3t_bb * kbb_t) + ((rdt_fields * e3t_mm) * krhs_t)
 
     e3w0 = ldf_fields[0]["e3w_1d"]
