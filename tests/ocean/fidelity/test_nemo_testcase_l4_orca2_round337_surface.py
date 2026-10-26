@@ -72,6 +72,8 @@ def _s2_kwargs(sss_mean=None):
         prior_runoff_mass=jnp.zeros(shape, dtype=jnp.float64),
         prior_runoff_temperature_content=jnp.zeros(shape, dtype=jnp.float64),
         prior_runoff_salinity_content=jnp.zeros(shape, dtype=jnp.float64),
+        prior_restoring_volume_flux=jnp.zeros(shape, dtype=jnp.float64),
+        prior_restoring_heat_flux=jnp.zeros(shape, dtype=jnp.float64),
         sst_mean=jnp.asarray([[-0.0, -2.0, 3.0], [4.0, 5.0, 6.0]]),
         sss_mean=(
             jnp.asarray([[34.5, 35.2, 33.0], [36.1, 32.0, 35.0]])
@@ -275,6 +277,12 @@ def test_s2_scalar_transcription_is_bit_exact_under_jit_and_truly_eager():
     off_kwargs["prior_runoff_salinity_content"] = jnp.full(
         (2, 3), 0.5, dtype=jnp.float64
     )
+    off_kwargs["prior_restoring_volume_flux"] = jnp.full(
+        (2, 3), 0.75, dtype=jnp.float64
+    )
+    off_kwargs["prior_restoring_heat_flux"] = jnp.full(
+        (2, 3), 1.25, dtype=jnp.float64
+    )
     off = jax.jit(lambda: nemo_orca2_s2(**off_kwargs))()
     np.testing.assert_array_equal(np.asarray(off.runoff.mass_flux), np.full((2, 3), 0.125))
     np.testing.assert_array_equal(
@@ -283,6 +291,8 @@ def test_s2_scalar_transcription_is_bit_exact_under_jit_and_truly_eager():
     np.testing.assert_array_equal(
         np.asarray(off.runoff.salinity_content), np.full((2, 3), 0.5)
     )
+    np.testing.assert_array_equal(np.asarray(off.erp), np.full((2, 3), 0.75))
+    np.testing.assert_array_equal(np.asarray(off.qrp), np.full((2, 3), 1.25))
     np.testing.assert_array_equal(_bits(off.qns), _bits(off_kwargs["post_ice_qns"]))
     np.testing.assert_array_equal(_bits(off.emp), _bits(off_kwargs["post_ice_emp"]))
 

@@ -194,6 +194,8 @@ def nemo_orca2_s2(
     prior_runoff_mass,
     prior_runoff_temperature_content,
     prior_runoff_salinity_content,
+    prior_restoring_volume_flux,
+    prior_restoring_heat_flux,
     sst_mean,
     sss_mean,
     sss_target,
@@ -251,7 +253,7 @@ def nemo_orca2_s2(
             prior_runoff_salinity_content,
         )),
     )
-    erp, qrp = nemo_orca2_sss_restoring(
+    updated_erp, updated_qrp = nemo_orca2_sss_restoring(
         sss_mean,
         sss_target,
         sst,
@@ -263,10 +265,12 @@ def nemo_orca2_s2(
         salinity_floor=salinity_floor,
         heat_capacity=heat_capacity,
     )
-    erp = _sr(jnp.where(update, erp, _sr(jnp.zeros_like(erp))))
-    qrp = _sr(jnp.where(update, qrp, _sr(jnp.zeros_like(qrp))))
-    emp = _sr(emp + erp)
-    qns = _sr(qns + qrp)
+    prior_erp = _sr(jnp.asarray(prior_restoring_volume_flux, dtype=jnp.float64))
+    prior_qrp = _sr(jnp.asarray(prior_restoring_heat_flux, dtype=jnp.float64))
+    erp = _sr(jnp.where(update, updated_erp, prior_erp))
+    qrp = _sr(jnp.where(update, updated_qrp, prior_qrp))
+    emp = _sr(emp + _sr(jnp.where(update, erp, _sr(jnp.zeros_like(erp)))))
+    qns = _sr(qns + _sr(jnp.where(update, qrp, _sr(jnp.zeros_like(qrp)))))
     correction = _sr(jnp.asarray(freshwater_budget_correction, dtype=jnp.float64))
     correction_masked = _sr(jnp.where(update, _sr(correction * smask), 0.0))
     emp = _sr(emp + correction_masked)
