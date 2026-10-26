@@ -145,6 +145,15 @@ def test_rung34_card_rejects_frankenstein_selector(oracle_card) -> None:
     card, _, _ = oracle_card
     with pytest.raises(ValueError, match="selector composition"):
         validate_ice_rheo_card(card._replace(ridging_scheme="lipscomb2007"))
+    rdg, cor = card.ridging_config, card.cor_config
+    for wrong in (
+        card._replace(ridging_config=rdg._replace(rn_murdg=4.0)),
+        card._replace(ridging_config=rdg._replace(ln_distf_lin=True, ln_distf_exp=False)),
+        card._replace(ridging_config=rdg._replace(rn_porordg=0.3)),
+        card._replace(cor_config=cor._replace(rn_himin=0.2)),
+    ):
+        with pytest.raises(ValueError, match="resolved deck"):
+            validate_ice_rheo_card(wrong)
 
 
 def test_rung34_kt1_full_dynall_gate(oracle_card) -> None:

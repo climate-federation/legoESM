@@ -1028,5 +1028,7 @@ def test_lane3_rheo_card_merge_parent_vs_current_bit_identical():
     for x, y in zip(jax.tree_util.tree_leaves(sc), jax.tree_util.tree_leaves(sp)):
         np.testing.assert_array_equal(_bits(x), _bits(y))
     planted = rc._replace(ridging_config=rc.ridging_config._replace(rn_murdg=rc.ridging_config.rn_murdg * (1 + 1e-10)))
-    sx = rheo_cur.step_ice_rheo_card(planted, planted.initial_state, completed_steps=0)
+    with pytest.raises(ValueError, match="ridging namelist"):
+        rheo_cur.validate_ice_rheo_card(planted)
+    sx = rheo_cur._step_ice_rheo_card_impl(planted, planted.initial_state, ice_step_index=1, transport_step_index=1)
     assert not np.array_equal(_bits(sx.contents), _bits(sc.contents))

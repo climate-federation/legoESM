@@ -210,6 +210,59 @@ def _mesh_xy(mesh: Mapping[str, np.ndarray], name: str) -> np.ndarray:
     return cast(np.ndarray, value.T)
 
 
+def _ice_rheo_ridging_config() -> SI3RdgrftConfig:
+    """ICE_RHEO's resolved namdyn_rdgrft through ice_dyn_rdgrft_init's override."""
+
+    return si3_rdgrft_config_after_init(
+        SI3RdgrftConfig(
+            rn_csrdg=_ICE_RHEO_RN_CSRDG,
+            ln_partf_exp=True,
+            rn_astar=_ICE_RHEO_RN_ASTAR,
+            ln_distf_lin=False,
+            ln_distf_exp=True,
+            rn_murdg=_ICE_RHEO_RN_MURDG,
+            ln_ridging=True,
+            rn_hstar=_ICE_RHEO_RN_HSTAR,
+            rn_porordg=_ICE_RHEO_RN_PORORDG,
+            rn_fsnwrdg=_ICE_RHEO_RN_FSNWRDG,
+            rn_fpndrdg=_ICE_RHEO_RN_FPNDRDG,
+            ln_rafting=True,
+            rn_hraft=_ICE_RHEO_RN_HRAFT,
+            rn_craft=_ICE_RHEO_RN_CRAFT,
+            rn_fsnwrft=_ICE_RHEO_RN_FSNWRFT,
+            rn_fpndrft=_ICE_RHEO_RN_FPNDRFT,
+            ln_rhg_evp_or_vp=True,
+            ln_pnd=True,
+            ln_pnd_lids=True,
+            nn_icesal=_ICE_RHEO_NN_ICESAL,
+            rdt_ice=_ICE_RHEO_DT_S,
+            rhoi=NEMO_SI3_CONSTANTS_CONFIG.rho_ice,
+            rhos=NEMO_SI3_CONSTANTS_CONFIG.rho_snow,
+            rhow=constants.rho_water,
+            rcp=NEMO_SI3_CONSTANTS_CONFIG.c_ocean,
+        ),
+        ln_icethd=False,
+    )
+
+
+def _ice_rheo_cor_config() -> SI3IceCorConfig:
+    """ICE_RHEO's resolved ice_cor constants."""
+
+    return SI3IceCorConfig(
+        rn_himin=_ICE_RHEO_MINIMUM_THICKNESS_M,
+        rn_simin=_ICE_RHEO_MINIMUM_SALINITY_G_KG,
+        rn_sinew=_ICE_RHEO_NEW_ICE_SALINITY_FRACTION,
+        nn_icesal=_ICE_RHEO_NN_ICESAL,
+        ln_pnd=True,
+        ln_pnd_lids=True,
+        rdt_ice=_ICE_RHEO_DT_S,
+        rhoi=NEMO_SI3_CONSTANTS_CONFIG.rho_ice,
+        rhos=NEMO_SI3_CONSTANTS_CONFIG.rho_snow,
+        rhow=constants.rho_water,
+        rt0=constants.T_freeze,
+    )
+
+
 def ice_rheo_frame_contents(entry_frame: Mapping[str, np.ndarray]) -> jnp.ndarray:
     """An oracle frame's inventories in the card's ``ICE_RHEO_TRACERS`` layout."""
 
@@ -331,49 +384,6 @@ def build_ice_rheo_card(
         t_surface=jnp.asarray(entry_frame["t_su"][..., 0]),
         open_water_area=_ICE_RHEO_ONE - jnp.asarray(a_i),
     )
-    ridging_config = si3_rdgrft_config_after_init(
-        SI3RdgrftConfig(
-            rn_csrdg=_ICE_RHEO_RN_CSRDG,
-            ln_partf_exp=True,
-            rn_astar=_ICE_RHEO_RN_ASTAR,
-            ln_distf_lin=False,
-            ln_distf_exp=True,
-            rn_murdg=_ICE_RHEO_RN_MURDG,
-            ln_ridging=True,
-            rn_hstar=_ICE_RHEO_RN_HSTAR,
-            rn_porordg=_ICE_RHEO_RN_PORORDG,
-            rn_fsnwrdg=_ICE_RHEO_RN_FSNWRDG,
-            rn_fpndrdg=_ICE_RHEO_RN_FPNDRDG,
-            ln_rafting=True,
-            rn_hraft=_ICE_RHEO_RN_HRAFT,
-            rn_craft=_ICE_RHEO_RN_CRAFT,
-            rn_fsnwrft=_ICE_RHEO_RN_FSNWRFT,
-            rn_fpndrft=_ICE_RHEO_RN_FPNDRFT,
-            ln_rhg_evp_or_vp=True,
-            ln_pnd=True,
-            ln_pnd_lids=True,
-            nn_icesal=_ICE_RHEO_NN_ICESAL,
-            rdt_ice=_ICE_RHEO_DT_S,
-            rhoi=NEMO_SI3_CONSTANTS_CONFIG.rho_ice,
-            rhos=NEMO_SI3_CONSTANTS_CONFIG.rho_snow,
-            rhow=constants.rho_water,
-            rcp=NEMO_SI3_CONSTANTS_CONFIG.c_ocean,
-        ),
-        ln_icethd=False,
-    )
-    cor_config = SI3IceCorConfig(
-        rn_himin=_ICE_RHEO_MINIMUM_THICKNESS_M,
-        rn_simin=_ICE_RHEO_MINIMUM_SALINITY_G_KG,
-        rn_sinew=_ICE_RHEO_NEW_ICE_SALINITY_FRACTION,
-        nn_icesal=_ICE_RHEO_NN_ICESAL,
-        ln_pnd=True,
-        ln_pnd_lids=True,
-        rdt_ice=_ICE_RHEO_DT_S,
-        rhoi=NEMO_SI3_CONSTANTS_CONFIG.rho_ice,
-        rhos=NEMO_SI3_CONSTANTS_CONFIG.rho_snow,
-        rhow=constants.rho_water,
-        rt0=constants.T_freeze,
-    )
     card = ICERheoCard(
         case=_ICE_RHEO_CASE,
         dynamics_scheme=_ICE_RHEO_DYNAMICS,
@@ -384,8 +394,8 @@ def build_ice_rheo_card(
         sst_m=_periodic_halo(ocean_temperature.T),
         forcing_template=forcing,
         dynamics_config=config,
-        ridging_config=ridging_config,
-        cor_config=cor_config,
+        ridging_config=_ice_rheo_ridging_config(),
+        cor_config=_ice_rheo_cor_config(),
         initial_state=initial,
         dt_s=_ICE_RHEO_DT_S,
         n_steps=_ICE_RHEO_N_STEPS,
@@ -441,6 +451,10 @@ def validate_ice_rheo_card(card: ICERheoCard, state: ICERheoState | None = None)
     )
     if actual != expected:
         raise ValueError(f"ICE_RHEO selector composition {actual!r} != {expected!r}")
+    if card.ridging_config != _ice_rheo_ridging_config():
+        raise ValueError("ICE_RHEO ridging namelist differs from the resolved deck")
+    if card.cor_config != _ice_rheo_cor_config():
+        raise ValueError("ICE_RHEO ice_cor constants differ from the resolved deck")
     state = card.initial_state if state is None else state
     shape = (_ICE_RHEO_ALLOCATED_SIZE, _ICE_RHEO_ALLOCATED_SIZE)
     expected_contents = shape + (len(ICE_RHEO_TRACERS),)
