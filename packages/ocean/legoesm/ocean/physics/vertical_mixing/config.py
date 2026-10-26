@@ -1077,13 +1077,18 @@ class EPBLConfig(NamedTuple):
     # --- mixing length / boundary-layer depth iteration ---
     use_mld_iteration: bool = True     # USE_MLD_ITERATION
     mld_bisection: bool = False        # EPBL_MLD_BISECTION
+    # KNOWN DIFFERENCE vs corrected MOM6 logic: True reproduces MOM6's
+    # documented EPBL_MLD_ITER_BUG (wrong next-iteration bounds when successive
+    # guesses rise by exactly mld_tol), which is MOM6's default via
+    # ENABLE_BUGS_BY_DEFAULT=.true. (MOM_energetic_PBL.F90:3991-3996, 0e9a561).
+    # Set False for the corrected bound ordering.
     mld_iter_bug: bool = True          # EPBL_MLD_ITER_BUG
     max_mld_its: int = 20              # EPBL_MLD_MAX_ITS
     mld_tol: float = 1.0               # EPBL_MLD_TOLERANCE [m]
     mixlen_exponent: float = 2.0       # MIX_LEN_EXPONENT
     translay_scale: float = 0.1        # EPBL_TRANSITION_SCALE
     min_mix_len: float = 0.0           # EPBL_MIN_MIX_LEN [m]
-    vonkar: float = 0.4                # VON_KARMAN (legoESM 0.4; MOM6 0.41)
+    vonkar: float = constants.kappa_von_karman  # VON_KARMAN (legoESM 0.4; MOM6 0.41)
 
     # --- turbulent velocity scale ---
     wt_scheme: str = "cube_root_tke"   # EPBL_VEL_SCALE_SCHEME: cube_root_tke|reichl_h18
