@@ -105,12 +105,12 @@ def validate_ocean_output(path: Path, expected: dict[str, str]) -> None:
 
 def write_manifest(path: Path, *, producer_commit: str, binary: Path,
                    files: list[Path], root: Path) -> None:
-    root = root.resolve()
+    root = root.absolute()
     records: dict[str, str] = {}
     for item in files:
-        resolved = item.resolve()
-        require(resolved.is_relative_to(root), f"manifest path is outside run: {item}")
-        records[resolved.relative_to(root).as_posix()] = sha256(resolved)
+        lexical = item.absolute()
+        require(lexical.is_relative_to(root), f"manifest path is outside run: {item}")
+        records[lexical.relative_to(root).as_posix()] = sha256(lexical)
     payload = {
         "producer_commit": producer_commit,
         "binary_sha256": sha256(binary),
@@ -121,15 +121,17 @@ def write_manifest(path: Path, *, producer_commit: str, binary: Path,
 
 def verify_manifest(path: Path, *, expected_commit: str | None = None) -> dict:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    root = path.parent.resolve()
+    root = path.parent.absolute()
     if expected_commit is not None:
         require(payload.get("producer_commit") == expected_commit,
                 "manifest producer commit moved")
     files = payload.get("files")
     require(isinstance(files, dict) and files, "manifest file inventory is empty")
     for name, digest in files.items():
-        candidate = (root / name).resolve()
-        require(candidate.is_relative_to(root), f"manifest path escapes run: {name}")
+        relative = Path(name)
+        require(not relative.is_absolute() and ".." not in relative.parts,
+                f"manifest path escapes run: {name}")
+        candidate = root / relative
         require(candidate.is_file(), f"manifest file is missing: {name}")
         require(sha256(candidate) == digest, f"manifest digest moved: {name}")
     return payload
