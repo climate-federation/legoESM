@@ -205,31 +205,68 @@ def _routines(unit):
     return out
 
 
+_SKIP_CALLS = {"iom_put", "timing_start", "timing_stop"}  # output and timing: no model state
+
+
 @pytest.mark.skipif(not HAVE_BUILD, reason="record build not on this host")
 def test_completeness_scope_is_nemos_call_graph():
-    """The audited routines are exactly those of these units reachable from the rung's two calls."""
+    """Every routine the rung reaches, in any ppsrc unit, is audited or has no MIN/MAX/SIGN.
+
+    Roots are read from icedyn.f90:193-194.  Calls guarded by the check, print
+    and timing switches (``ln_icediachk``, ``ln_icectl``, ``sn_cfctl%l_prtctl``,
+    ``ln_timing``), which change no model state, and output/timing are not followed.
+    """
     import re
 
     table = json.loads(TABLE.read_text())
-    units = list(table["complete"])
-    where = {r: (u, span) for u in units for r, span in _routines(u).items()}
-    seen, todo = set(), ["ice_dyn_rdgrft", "ice_cor"]  # icedyn.f90:193-194
+    src = BUILD / "ppsrc" / "nemo"
+    roots = re.findall(
+        r"CALL\s+(\w+)", "\n".join((src / "icedyn.f90").read_text().splitlines()[192:194])
+    )
+    assert roots == ["ice_dyn_rdgrft", "ice_cor"]
+    where = {}
+    for f in src.glob("*.f90"):
+        lines = f.read_text(errors="replace").splitlines()
+        for r, span in _routines_of(lines).items():
+            where.setdefault(r, (f.stem, span, lines))
+    audited = {r for rs in table["complete"].values() for r in rs}
+    seen, todo = set(), list(roots)
     while todo:
         r = todo.pop()
-        if (
-            r in seen or r not in where
-        ):  # other modules: icetab copies, icectl diagnostics, iom, timing
+        if r in seen or r in _SKIP_CALLS:
             continue
+        assert r in where, f"routine {r} not found in the build's ppsrc"
         seen.add(r)
-        u, (a, b) = where[r]
-        body = (BUILD / "ppsrc" / "nemo" / f"{u}.f90").read_text().splitlines()[a - 1 : b]
-        todo += [
-            c.lower()
-            for t in body
-            if not t.lstrip().startswith("!")
-            for c in re.findall(r"CALL\s+(\w+)", t, re.I)
-        ]
-    assert seen == {r for rs in table["complete"].values() for r in rs}
+        unit, (a, b), lines = where[r]
+        body = lines[a - 1 : b]
+        for i, t in enumerate(body):
+            if t.lstrip().startswith("!") or not (calls := re.findall(r"CALL\s+(\w+)", t, re.I)):
+                continue
+            guard = t + (body[i - 1] if t.lstrip().startswith("&") else "")
+            if re.search(r"ln_icediachk|ln_icectl|l_prtctl|ln_timing", guard, re.I):
+                continue
+            todo += [c.lower() for c in calls]
+        if r not in audited:
+            text = [t for t in body if not t.lstrip().startswith("!")]
+            assert not any(re.search(r"\b(MIN|MAX|SIGN)\s*\(", t) for t in text), (
+                f"{unit}:{r} has MIN/MAX/SIGN"
+            )
+    assert audited <= seen and {"rdgrft_prep", "itd_shiftice", "ice_var_roundoff"} <= seen
+
+
+def _routines_of(lines):
+    import re
+
+    out, name = {}, None
+    for n, text in enumerate(lines, 1):
+        if m := re.match(
+            r"\s*(?:RECURSIVE\s+|PURE\s+|ELEMENTAL\s+)*SUBROUTINE\s+(\w+)", text, re.I
+        ):
+            name, start = m.group(1).lower(), n
+        elif re.match(r"\s*END\s+SUBROUTINE", text, re.I) and name:
+            out[name] = (start, n)
+            name = None
+    return out
 
 
 @pytest.mark.skipif(not HAVE_BUILD, reason="record build not on this host")
