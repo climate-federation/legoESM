@@ -661,8 +661,12 @@ def _budget_residual(cfg, q_net, tau, lat=40.0, kd_scale=1.0):
     z = -(np.cumsum(hn) - 0.5 * hn)
     pe_gain = float(np.sum(G * drho * z * hn))
     u_star = math.sqrt(tau / RHO0)
+    # ePBL prices mstar with its omega_frac-blended |f| (epbl.py, absf_eff).
+    absf_eff = (2.0 * OMEGA if cfg.omega_frac >= 1.0 else math.sqrt(
+        cfg.omega_frac * 4.0 * OMEGA**2 + (1.0 - cfg.omega_frac) * absf**2))
     mstar = float(_find_mstar(cfg, jnp.asarray(bflux), jnp.asarray(u_star),
-                              jnp.asarray(float(mld[0])), jnp.asarray(absf)))
+                              jnp.asarray(float(mld[0])),
+                              jnp.asarray(absf_eff)))
     mech = mstar * RHO0 * u_star**3 * cfg.dt_s
     supply = max(0.0, mech + min(tkef0, 0.0)) + max(tkef0, 0.0)
     return pe_gain / supply - 1.0
@@ -685,10 +689,17 @@ def test_mixing_never_spends_more_energy_than_it_is_given(cfg_name, q_net, tau):
 
     Instrument caveat: PE is priced with ePBL's own linearised EOS
     (dSV/dT, dSV/dS) and one whole-column backward-Euler solve, whereas ePBL
-    accounts interface by interface, so this is an independent bound, not a
-    reproduction of ePBL's internal ledger.  Measured on these 18 columns
+    accounts interface by interface, and mstar is evaluated at the returned
+    MLD rather than the iteration's last guess (within mld_tol), so this is
+    an independent bound, not a reproduction of ePBL's internal ledger.  Measured on these 18 columns
     (2026-10-26, x64): defaults -1.7e-1 .. -7.1e-2; discovery on
     -5.1e-1 .. -3.5e-3.  The Kd solve itself converges to |dKd| < 1e-9 Kd.
     """
     r = _budget_residual(_BUDGET_CFGS[cfg_name](), q_net, tau)
     assert r <= 1e-6, f"mixing spent {r:+.3e} more than the supplied energy"
+
+
+def test_budget_check_catches_overspending():
+    """Control: tripling ePBL's Kd must break the bound, or the check above
+    could not fail (measured: 17 of the 18 columns go red at x3)."""
+    assert _budget_residual(_ref_cfg(), 0.0, 0.05, kd_scale=3.0) > 1e-6
