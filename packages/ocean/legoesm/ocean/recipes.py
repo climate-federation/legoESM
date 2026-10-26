@@ -57,6 +57,22 @@ LATLON_RECIPES = {
         "tracer_time_integrator": "euler",
         "implicit_vertical_mixing": True,
     },
+    # default_wright_v1 with the implicit_cn barotropic solver — what the f-plane
+    # inertia-gravity-wave channel runner builds (it overrides the default
+    # explicit_substep solver, which propagates that case's external gravity
+    # wave ~1.86x too slowly; see run_inertia_gravity_wave_channel, #2114).
+    "default_wright_implicit_cn_v1": {
+        "eos": "wright",
+        "momentum_advection": "vector_invariant",
+        "tracer_advection": "tvd",
+        "pgf_scheme": "adcroft",
+        "ke_gradient_scheme": "centered",
+        "barotropic_solver": "implicit_cn",
+        "coriolis_scheme": "matsuno_split",
+        "outer_integrator": "forward_euler",
+        "tracer_time_integrator": "euler",
+        "implicit_vertical_mixing": True,
+    },
     # legoESM default linear-EOS dycore — the global-overturning recipe.
     "legoesm_linear_v1": {
         "eos": "linear",
