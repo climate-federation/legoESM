@@ -347,9 +347,12 @@ def _make_epbl(config: VerticalMixingConfig,
 
         # Coriolis from the grid latitude (ePBL's rotational length scale).
         lat = getattr(grid, "grid_lat", None)
-        absf = (jnp.zeros_like(T[..., 0]) if lat is None
-                else jnp.abs(2.0 * constants_config.Omega * jnp.sin(
-                    jnp.broadcast_to(lat, T.shape[:-1]))))
+        if lat is None:
+            raise ValueError(
+                "ePBL needs the column latitude (grid.grid_lat, radians) for "
+                "its Coriolis length scale; the grid supplied none.")
+        absf = jnp.abs(2.0 * constants_config.Omega * jnp.sin(
+            jnp.broadcast_to(lat, T.shape[:-1])))
 
         # ePBL needs cell-centre velocities; average C-grid faces if needed.
         u_data, v_data = state.u.data, state.v.data

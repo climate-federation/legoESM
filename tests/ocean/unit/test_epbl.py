@@ -608,3 +608,15 @@ def test_missing_mld_guess_becomes_mid_column_without_iteration():
     kd_none = run(None)[0]
     kd_mid = run(jnp.asarray([0.5 * float(jnp.sum(h))]))[0]
     np.testing.assert_array_equal(np.asarray(kd_none), np.asarray(kd_mid))
+
+
+def test_grid_without_latitude_raises_instead_of_f_zero():
+    """No silent f = 0: a grid with no ``grid_lat`` must be refused."""
+    import types
+    from legoesm.ocean.scm_forcing import build_ocean_surface_forcing_struct
+    scm, _ = _epbl_scm(-200.0, False, nsteps=1)
+    sfc = build_ocean_surface_forcing_struct(
+        scm.forcing, 0.0, scm.state.eta.data.shape, scm.state.T.data.dtype)
+    with pytest.raises(ValueError, match="latitude"):
+        scm.physics_fn(scm.state, types.SimpleNamespace(), scm.z_coord,
+                       surface_forcing=sfc)

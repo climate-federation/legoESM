@@ -577,9 +577,8 @@ class _EPBLGridShim:
 
     ``_vmix_K_profiles`` carries the latitude as ``lat_deg`` while the
     vertical-mixing factories read ``grid.grid_lat`` in RADIANS, so this
-    adapts between the two. ``None`` means no latitude was supplied, which
-    gives a zero Coriolis parameter (ePBL then has no rotational limit on
-    the mixing length).
+    adapts between the two. ``None`` means no latitude was supplied; the
+    ePBL closure then raises rather than assuming f = 0.
     """
 
     __slots__ = ("grid_lat",)
