@@ -1889,10 +1889,10 @@ CITATION_MAP = {
         '!* 3d recurrence:    Xk = (Zk - Sk Xk+1 ) / Tk',
         ('END DO   ;   END DO', 14), 7],
     'implicit_solver.py:329-392': [
-        'def pivot(d):', 'return solution', 64],
+        'def pivot(d):', ('return solution', 2), 64],
     'implicit_solver.py:478-539': [
         'def implicit_vertical_diffusion_nemo_tracer_pair(',
-        'return out_1, out_2', 62],
+        ('return out_1, out_2', 2), 62],
     'implicit_solver.py:542-641': [
         'def nemo_tracer_tridiagonal(',
         'return lower, diagonal, upper', 100],
