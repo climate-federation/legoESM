@@ -9,8 +9,9 @@ regridding formula.
 
 Arrays use NetCDF/Python ``(j, i)`` ordering.  NEMO's source indices are
 one-based Fortran-flat indices (``i`` fastest); :func:`decode_source_indices`
-converts them once on the host.  Time record selection/interpolation remains a
-separate operation because it is deck metadata, not spatial interpolation.
+converts them once on the host.  Time record selection remains a separate
+operation because it is deck metadata; :func:`nemo_fld_time_interp` is the
+``ln_tint`` blend applied once the two record times are known.
 """
 
 from __future__ import annotations
@@ -185,8 +186,31 @@ def rotate_en_to_ij(u_east, v_north, cosine, sine):
     return ui, vj
 
 
+def nemo_fld_time_interp(fdta_before, fdta_after, isecsbc, nrec_sec_before,
+                         nrec_sec_after):
+    """Literal ``fld_read`` temporal interpolation (``ln_tint = T``).
+
+    fldread.F90:244-246: ``ztinta = REAL(isecsbc - nrec(2,ibb)) /
+    REAL(nrec(2,iaa) - nrec(2,ibb))``, ``ztintb = 1. - ztinta``,
+    ``fnow = ztintb*fdta(ibb) + ztinta*fdta(iaa)``.  The record times are
+    integer seconds; their differences are formed in integer arithmetic and
+    converted exactly.  A yearly climatology (``freqh = -12``) holds the same
+    field in both slots, and the blend can still move it by one ULP.
+    """
+    before = jnp.asarray(nrec_sec_before, dtype=jnp.int64)
+    num = (jnp.asarray(isecsbc, dtype=jnp.int64) - before).astype(jnp.float64)
+    den = (jnp.asarray(nrec_sec_after, dtype=jnp.int64) - before).astype(
+        jnp.float64)
+    ztinta = _sr(_sr(num) / _sr(den))
+    ztintb = _sr(1.0 - ztinta)
+    fb = jnp.asarray(fdta_before, dtype=jnp.float64)
+    fa = jnp.asarray(fdta_after, dtype=jnp.float64)
+    return _sr(_sr(_sr(ztintb) * _sr(fb)) + _sr(_sr(ztinta) * _sr(fa)))
+
+
 __all__ = (
     "decode_source_indices",
+    "nemo_fld_time_interp",
     "nemo_fld_interp",
     "nemo_t_rotation_from_domain",
     "rotate_en_to_ij",

@@ -195,7 +195,10 @@ def validate(root: Path) -> dict:
     with Dataset(root / "mesh_mask_0000.nc") as dataset:
         wet = np.asarray(dataset["tmask"][0, 0].data, dtype=bool)
     result = jax.jit(lambda *args: nemo_blk_oce_ncar(
-        *args, constants.albedo_ocean_nemo, 1.0, 1.0, 5
+        *args, constants.albedo_ocean_nemo, 1.0, 1.0, 5,
+        # The record runs SI3 (nn_ice = 2) after the bulk call; the scored
+        # fields are the bulk outputs before it, i.e. the nn_ice = 0 return.
+        nn_ice=0, ice_if=None,
     ))(
         oracle_input["wndi"], oracle_input["wndj"], oracle_input["tair"],
         oracle_input["humi"], oracle_input["slp"], oracle_output["sst"],

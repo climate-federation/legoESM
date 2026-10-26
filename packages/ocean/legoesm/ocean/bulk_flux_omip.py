@@ -84,6 +84,7 @@ from legoesm.core.source_rounding import (
     nemo_source_round as R,
 )
 from legoesm.ocean.eos import nemo_eos_fzp_eos80
+from legoesm.ocean.forcing.nemo_fld_read import nemo_fld_time_interp
 from legoesm.thermo import saturation_vapor_pressure_goff
 
 
@@ -695,6 +696,25 @@ class NemoBlkOceResult(NamedTuple):
     vtau: object
     taum: object
     wndm: object
+    ts_surface: object = None
+    fr_i: object = None
+
+
+class NemoSbcIceIfInputs(NamedTuple):
+    """``nn_ice = 1`` inputs.  ``sn_ice`` record slots and ``smask0`` are
+    ``A2D(0)``; the ocean fields are ``A2D(nn_hls)``; record times are
+    integer seconds (fldread.F90:244)."""
+    fdta_before: object
+    fdta_after: object
+    isecsbc: object
+    nrec_sec_before: object
+    nrec_sec_after: object
+    sss_m: object
+    sst_m: object
+    ts_surface: object
+    ff_f: object
+    tmask_surface: object
+    smask0: object
 
 
 class BlkOce2Result(NamedTuple):
@@ -781,14 +801,24 @@ def blk_oce_2(
 def nemo_blk_oce_ncar(
     u_wind, v_wind, T_air_K, q_air, slp_Pa, sst_c, ssu, ssv,
     qsr_down, qlw_down, precip, snow, mask, albedo, precip_factor,
-    evap_factor, nb_iter,
+    evap_factor, nb_iter, *, nn_ice, ice_if,
 ):
-    """Literal round-5 NCAR ``blk_oce_1`` + ``blk_oce_2``.
+    """Literal round-5 NCAR ``blk_oce_1`` + ``blk_oce_2``, then ``nn_ice``.
 
     Every physical input and resolved deck scalar is required: this boundary
     has no standard-atmosphere, mask, precipitation, or coefficient defaults.
     The returned stresses use NEMO's ocean (downward) convention.
+
+    ``nn_ice`` follows sbcmod.F90's ``SELECT CASE( nn_ice )`` after the bulk
+    call: ``0`` returns the bulk fields (``ice_if`` must be None); ``1`` runs
+    ``fld_read``'s time blend of ``sn_ice`` and ``sbc_ice_if`` on ``qsr``/``qns``
+    (``ice_if`` a :class:`NemoSbcIceIfInputs`; the bulk arrays are ``A2D(0)``)
+    and fills ``ts_surface``/``fr_i``.  Any other value raises.
     """
+    if nn_ice not in (0, 1):
+        raise ValueError(f"nemo_blk_oce_ncar: unsupported nn_ice={nn_ice!r}")
+    if (nn_ice == 1) != (ice_if is not None):
+        raise ValueError("nemo_blk_oce_ncar: ice_if is required iff nn_ice == 1")
     wet = jnp.asarray(mask, dtype=jnp.float64)
     sst_c_arr = jnp.asarray(sst_c, dtype=jnp.float64)
     state = _nemo_ncar_turbulent(
@@ -804,14 +834,31 @@ def nemo_blk_oce_ncar(
         mask=wet, precip_factor=precip_factor, nemo_source_exact=True,
     )
     qsr = R((1.0 - albedo) * jnp.asarray(qsr_down, dtype=jnp.float64) * wet)
+    qns = surface.qns
+    ts_surface = fr_i = None
+    if nn_ice == 1:
+        halo = {(a - b) for a, b in zip(jnp.shape(ice_if.ts_surface),
+                                         jnp.shape(qns))}
+        if len(halo) != 1 or min(halo) < 0 or min(halo) % 2:
+            raise ValueError("ice_if fields must be A2D(nn_hls) around A2D(0)")
+        cover = nemo_fld_time_interp(
+            ice_if.fdta_before, ice_if.fdta_after, ice_if.isecsbc,
+            ice_if.nrec_sec_before, ice_if.nrec_sec_after,
+        )
+        iif = nemo_sbc_ice_if(
+            cover, ice_if.sss_m, ice_if.sst_m, ice_if.ts_surface, ice_if.ff_f,
+            ice_if.tmask_surface, ice_if.smask0, qsr, qns,
+            nn_hls=min(halo) // 2,
+        )
+        qsr, qns, ts_surface, fr_i = iif.qsr, iif.qns, iif.ts_surface, iif.fr_i
     return NemoBlkOceResult(
         state.theta_air, jnp.asarray(q_air, dtype=jnp.float64), rain,
         sst_c_arr, jnp.asarray(ssu, dtype=jnp.float64),
         jnp.asarray(ssv, dtype=jnp.float64), state.tsk_c, state.ssq,
         state.cd, state.ch, state.ce, state.rhoa,
         state.sensible, state.latent, state.evap, qsr,
-        surface.qlwn, surface.qns, surface.emp,
-        state.utau, state.vtau, state.taum, state.wndm,
+        surface.qlwn, qns, surface.emp,
+        state.utau, state.vtau, state.taum, state.wndm, ts_surface, fr_i,
     )
 
 
@@ -998,6 +1045,7 @@ __all__ = [
     "NemoBlkOceResult",
     "nemo_sbc_ice_if",
     "NemoSbcIceIfResult",
+    "NemoSbcIceIfInputs",
     "ncar_transfer_coefficients",
     "potential_air_temperature_10m",
     "pressure_at_height",

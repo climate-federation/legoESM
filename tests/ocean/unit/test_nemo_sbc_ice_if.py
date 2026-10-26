@@ -30,7 +30,9 @@ HLS = 1
 
 
 def _fzp(s):
-    return ((-0.0575 + 1.710523e-3 * math.sqrt(s)) - 2.154996e-4 * s) * s
+    with np.errstate(invalid="ignore"):          # hardware sqrtsd NaN, as NEMO
+        root = float(np.sqrt(np.float64(s)))
+    return ((-0.0575 + 1.710523e-3 * root) - 2.154996e-4 * s) * s
 
 
 def _scalar(cover, sss, sst, ts, ff, tmask, smask0, qsr, qns, *,
@@ -135,11 +137,17 @@ def test_jit_matches_independent_scalar_transcription_bitwise():
     assert set(np.unique(np.asarray(got.fr_i)[1:-1, 1:-1])) <= {0.0, 1.0}
 
 
-def test_truly_eager_equals_jit_bitwise():
+@pytest.mark.parametrize("barriers", [True, False])
+def test_truly_eager_equals_jit_bitwise(barriers, monkeypatch):
+    # M2: the unbarriered arm is the guard's plant; it must fail.
+    import legoesm.ocean.eos as eos
+    if not barriers:
+        monkeypatch.setattr(bfo, "R", lambda v: v)
+        monkeypatch.setattr(eos, "nemo_source_round", lambda v: v)
     args = _inputs(seed=7)
     with jax.disable_jit():
         eager = nemo_sbc_ice_if(*args, nn_hls=HLS)
-    assert _unequal(eager, _jit()(*args)) == 0
+    assert (_unequal(eager, _jit()(*args)) == 0) == barriers
 
 
 def test_min_branch_is_identically_minus_zero_when_kbb_is_kmm():
@@ -170,11 +178,69 @@ def test_plants_break_the_bitwise_pin(plant, monkeypatch):
     assert _unequal(_jit()(*args), want) > 0
 
 
-def test_min_tie_plant_is_unobservable_here(monkeypatch):
-    # The MINSD tie order cannot change bits under Kbb = Kmm (see above).
-    args = _inputs()
+def _special_grid(subnormals=True):
+    """Every (ts, S) pair from a special-value set, one per wet interior cell.
+
+    XLA's CPU backend flushes subnormals to zero; the Fortran build (no
+    fast-math) does not, so the scalar reference is compared without them.
+    """
+    tiny = 5e-324 if subnormals else 1e-300
+    sal = [0.0, -0.0, tiny, 1e-300, 34.0, 40.0, -1.0, np.inf, np.nan]
+    pairs = []
+    for s_v in sal:
+        zt = float(nemo_eos_fzp_eos80(s_v))
+        tsv = [0.0, -0.0, tiny, -tiny, 1.0, -1.0, -2.5, np.inf, -np.inf,
+               np.nan, zt]
+        if np.isfinite(zt):
+            tsv += [np.nextafter(zt, np.inf), np.nextafter(zt, -np.inf)]
+        pairs += [(t_v, s_v) for t_v in tsv if subnormals
+                  or not 0.0 < abs(t_v) < np.finfo(np.float64).tiny]
+    n = len(pairs)
+    ny, nx = 3, n + 2
+    sss = np.full((ny, nx), 34.0)
+    ts = np.full((ny, nx), 5.0)
+    for k, (t_v, s_v) in enumerate(pairs):
+        ts[1, k + 1], sss[1, k + 1] = t_v, s_v
+    tmask = np.ones((ny, nx))
+    sst = np.full((ny, nx), -10.0)          # fr_i = 0 and 1 both appear
+    sst[1, 1::2] = 10.0
+    ff = np.full((ny, nx), 1e-4)
+    ni = (1, n)
+    cover = np.full(ni, 0.7)
+    qsr = np.full(ni, 200.0)
+    qns = np.full(ni, -50.0)
+    return cover, sss, sst, ts, ff, tmask, np.ones(ni), qsr, qns
+
+
+def test_min_tie_cannot_reach_output_checked_proof(monkeypatch):
+    # M3 proof.  MINSD(0., x) and jnp.minimum differ only for x = -0 or NaN.
+    # x = MAX(ts, zt) - zt with MAXSD keeping zt on ties, so x = -0 needs
+    # MAX(...) = -0 and zt = +0, but MAXSD(-0, +0) returns +0: unreachable.
+    # NaN x means NaN zt, and then zqri is NaN too; the output NaN is the
+    # same word either way.  Checked here on every special-value pair.
+    args = _special_grid()
+    seen = []
+    real_fmin = bfo._fmin
+
+    def recording_fmin(first, second):
+        seen.append(np.asarray(first))
+        return real_fmin(first, second)
+
+    monkeypatch.setattr(bfo, "_fmin", recording_fmin)
+    with jax.disable_jit():
+        literal = nemo_sbc_ice_if(*args, nn_hls=HLS)
+    (x,) = seen
+    assert not np.any((x == 0.0) & np.signbit(x))           # no -0 operand
+    assert np.any((x == 0.0) & ~np.signbit(x))              # +0 ties occur
+    assert np.any(np.isnan(x))                              # NaN path covered
     monkeypatch.setattr(bfo, "_fmin", jnp.minimum)
-    assert _unequal(_jit()(*args), _scalar(*args)) == 0
+    with jax.disable_jit():
+        planted = nemo_sbc_ice_if(*args, nn_hls=HLS)
+    assert _unequal(literal, planted) == 0
+    normal = _special_grid(subnormals=False)
+    with jax.disable_jit():
+        got = nemo_sbc_ice_if(*normal, nn_hls=HLS)
+    assert _unequal(got, _scalar(*normal)) == 0
 
 
 def test_eos80_literal_matches_scalar_and_recipe_copy():
@@ -267,3 +333,93 @@ def test_barrier_plant_breaks_the_pin(monkeypatch):
     monkeypatch.setattr(bfo, "R", lambda v: v)
     monkeypatch.setattr(eos, "nemo_source_round", lambda v: v)
     assert _unequal(_jit()(*args), want) > 0
+
+
+# --- fld_read time blend (fldread.F90:244-246) and the nn_ice = 1 branch ---
+
+from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
+    NemoSbcIceIfInputs, nemo_blk_oce_ncar,
+)
+from legoesm.ocean.forcing.nemo_fld_read import nemo_fld_time_interp  # noqa: E402
+
+_YEAR_S = 365 * 86400
+
+
+def _tint_scalar(fb, fa, isec, nb, na):
+    w = float(isec - nb) / float(na - nb)
+    return (1.0 - w) * fb + w * fa
+
+
+def test_fld_time_interp_matches_scalar_and_moves_a_yearly_field():
+    rng = np.random.default_rng(12)
+    f = rng.random(200_003)
+    nb, na = -_YEAR_S // 2, _YEAR_S // 2      # yearly record mid-times
+    blend = jax.jit(nemo_fld_time_interp)
+    for isec in (12_345_678, 3 * 86400 + 5400):
+        got = np.asarray(blend(f, f, isec, nb, na))
+        want = np.array([_tint_scalar(v, v, isec, nb, na) for v in f])
+        assert np.array_equal(_bits(got), _bits(want))
+        assert np.count_nonzero(_bits(got) != _bits(f)) > 0   # fnow != F
+    got = np.asarray(blend(f, f, 0, nb, na))                  # w = 0.5
+    assert np.array_equal(_bits(got), _bits(f))
+    two = np.asarray(blend(np.zeros(1), np.ones(1), 0, nb, na))
+    assert float(two[0]) == 0.5
+
+
+def _blk_args(shape, seed=3):
+    rng = np.random.default_rng(seed)
+    def field(lo, hi):
+        return jnp.asarray(rng.uniform(lo, hi, shape))
+    return (field(-8, 8), field(-8, 8), field(260, 300), field(1e-3, 1e-2),
+            field(99000, 102000), field(-1.9, 25), field(-0.3, 0.3),
+            field(-0.3, 0.3), field(0, 400), field(250, 400), field(0, 1e-4),
+            field(0, 2e-5))
+
+
+def _ice_case():
+    cover, sss, sst, ts, ff, tmask, smask0, qsr, qns = _inputs()
+    rng = np.random.default_rng(9)
+    after = cover.copy()
+    before = np.clip(cover + rng.uniform(-0.1, 0.1, cover.shape), 0.0, 1.0)
+    ice = NemoSbcIceIfInputs(before, after, 12_345_678, -_YEAR_S // 2,
+                             _YEAR_S // 2, sss, sst, ts, ff, tmask, smask0)
+    blk = _blk_args(smask0.shape) + (jnp.asarray(smask0),)
+    return blk, ice
+
+
+def _blk(blk, **kw):
+    return nemo_blk_oce_ncar(*blk, 0.066, 1.0, 1.0, 5, **kw)
+
+
+def test_nn_ice_1_production_call_site_runs_fld_read_and_sbc_ice_if():
+    # M4: removing either call from the nn_ice = 1 branch fails this test.
+    blk, ice = _ice_case()
+    run = jax.jit(lambda b, i: _blk(b, nn_ice=1, ice_if=i))
+    got = run(blk, ice)
+    base = jax.jit(lambda b: _blk(b, nn_ice=0, ice_if=None))(blk)
+    cover = nemo_fld_time_interp(*ice[:5])
+    want = jax.jit(partial(nemo_sbc_ice_if, nn_hls=HLS))(
+        cover, *ice[5:], base.qsr, base.qns)
+    assert _unequal((got.ts_surface, got.fr_i, got.qsr, got.qns), want) == 0
+    assert _unequal((got.qns,), (base.qns,)) > 0
+    assert _unequal((got.qsr,), (base.qsr,)) > 0
+    for name in base._fields[:-2]:
+        if name not in ("qsr", "qns"):
+            assert _unequal((getattr(got, name),), (getattr(base, name),)) == 0
+    assert base.ts_surface is None and base.fr_i is None
+    # the cover is the time blend, not either raw slot
+    stale = jax.jit(partial(nemo_sbc_ice_if, nn_hls=HLS))(
+        ice.fdta_after, *ice[5:], base.qsr, base.qns)
+    assert _unequal((got.qns,), (stale.qns,)) > 0
+
+
+def test_nn_ice_dispatch_refuses():
+    blk, ice = _ice_case()
+    with pytest.raises(ValueError, match="nn_ice"):
+        _blk(blk, nn_ice=2, ice_if=None)
+    with pytest.raises(ValueError, match="ice_if"):
+        _blk(blk, nn_ice=1, ice_if=None)
+    with pytest.raises(ValueError, match="ice_if"):
+        _blk(blk, nn_ice=0, ice_if=ice)
+    with pytest.raises(ValueError, match="A2D"):
+        _blk(blk, nn_ice=1, ice_if=ice._replace(ts_surface=ice.ts_surface[1:]))
