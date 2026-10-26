@@ -87,7 +87,12 @@ actual NEMO arms and run admission remain unmeasured until the operator invokes
 - Acquisition preflight: READY; same-program, placement, FP-census, bounds,
   namelist, checksum, generated-flow, retained-admission, and generated-syntax
   controls pass or fire as intended.
-- Per-receipt citation gate and required default gates: recorded after final
-  clean-tree execution below.
+- Per-receipt citation gate: PASS, 14 citations, zero failures, zero unmapped
+  citations, zero map-audit failures, and all nine self-tests fired.
+- Required receipt-citation pytest: 17/17 PASS on the clean committed tree.
+- Default ORCA2 landing inventory: 152/152 PASS in 1,121.41 seconds.
+- Dedicated three-invocation ratchet: 12,328 PASS, 4 SKIP, 1 inherited FAIL.
+  The sole failure is the unchanged shortwave-penetration parameter spec; it
+  names no file changed by round 340.
 
 NEMO acquisition is deliberately absent.

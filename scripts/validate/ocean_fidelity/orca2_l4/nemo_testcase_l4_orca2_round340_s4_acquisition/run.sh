@@ -117,8 +117,8 @@ for unit in stprk3 stprk3_stg fldread sbcice_if; do
   sed -i '0,/CALL r340_/d' "$scratch/$unit.plant/$unit.F90"
   plant_must_refuse "placement-$unit" check_other_placements "$scratch/$unit.plant"
 done
-"$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -I "$K0_BUILD/BLD/inc" -fsyntax-only "$SURFACE_WRITER" "$STATE_WRITER"
 mkdir "$scratch/mod"
+"$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -I "$K0_BUILD/BLD/inc" -J "$scratch/mod" -fsyntax-only "$SURFACE_WRITER" "$STATE_WRITER"
 "$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -I "$K0_BUILD/BLD/inc" -J "$scratch/mod" -c "$SURFACE_WRITER" -o "$scratch/surface-writer.o"
 "$FC" -fdefault-real-8 -O3 -funroll-all-loops -fno-tree-vectorize -I "$K0_BUILD/BLD/inc" -J "$scratch/mod" -c "$STATE_WRITER" -o "$scratch/state-writer.o"
 for unit in sbcmod stprk3 stprk3_stg fldread sbcice_if; do
