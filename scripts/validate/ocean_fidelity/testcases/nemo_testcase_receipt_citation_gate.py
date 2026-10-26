@@ -1933,14 +1933,14 @@ CITATION_MAP = {
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/tke_round336_writer.F90:142-174': [
         'WRITE(unit) magic,2,nkt,nkbb,nkmm,narea-1,jpi,jpj,jpk,ntsi,ntei,ntsj,ntej, &',
         "CALL put3(unit,'tke_wmask',entry_wmask,1,1,1)", 33],
-    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:918-989': [
+    'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:919-989': [
         "command -v objdump >/dev/null || refuse 'no objdump for TKE arithmetic passivity proof'",
-        "printf 'R336_HISTORICAL_TKE_RESULT admitted_rounds=331,332 arithmetic_differs_from_production=yes\\n'", 72],
+        "printf 'R336_HISTORICAL_TKE_RESULT admitted_rounds=331,332 arithmetic_differs_from_production=yes\\n'", 71],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:34-52': [
         'scratch=$(mktemp -d /tmp/orca2-r336-tke-driver.XXXXXX)',
         'trap cleanup EXIT', 19],
     'scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round336_tke_acquisition/run.sh:104-154': [
-        'if ! R336_TKE_STUB_FLOW_ROOT=$base/success R336_TKE_STUB_NEMO=$stub \\',
+        ('if ! R336_TKE_STUB_FLOW_ROOT=$base/success R336_TKE_STUB_NEMO=$stub \\', 1),
         "printf 'R336_TKE_STUB_FLOW_PASS cases=success,in-place,refusal,retention,retained-admission\\n'", 51],
     'zdf_oce.F90:70-72': [
         'ALLOCATE( avm (jpi,jpj,jpk), avm_k(jpi,jpj,jpk), avs(A2D(0),jpk)',

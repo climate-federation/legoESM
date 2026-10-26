@@ -578,7 +578,7 @@ The normalized opcode multisets of both FP-bearing functions in the new build
 equal production exactly; the arithmetic plant changes the `zdf_tke` census.
 The historical build independently pins every nonzero count above and refuses
 if round 332 unexpectedly regains FP arithmetic in `zdf_tke`
-(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:918-989`).
+(`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round328_dynzdf_acquisition/run.sh:919-989`).
 Thus the 1,007-to-1,054 `tke_tke` change is plain evidence that the admitted
 round-331/332 TKE arithmetic differs from production, not merely a symbol-name
 or record-layout difference.
