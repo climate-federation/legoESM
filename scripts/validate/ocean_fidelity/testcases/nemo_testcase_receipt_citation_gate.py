@@ -140,6 +140,12 @@ FILES = {
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/stprk3_stg.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/traldf_iso.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/traldf_iso.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/stprk3.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfphy.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfphy.f90"),
+    "ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/trazdf.f90": (
+        NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/trazdf.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90": (
         NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/stp2d.f90"),
     "ORCA2_ORCA1ICE_OMIP_L4_R326HMI/BLD/ppsrc/nemo/traadv.f90": (
@@ -1861,6 +1867,35 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # ORCA2 round 336: record-build tra_zdf input and recurrence audit.
+    'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/stprk3.f90:183':
+        'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )',
+    'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/zdfphy.f90:365-392': [
+        '!==  ocean Kz  ==!   (avt, avs, avm)',
+        'IF( ln_zdfiwm )   CALL zdf_iwm( kt, Kmm, avm, avt, avs )', 28],
+    'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/trazdf.f90:180-216': [
+        "IF( cdtype == 'TRA' .AND. jn == jp_tem ) THEN",
+        ('zwt(:,1) = 0._wp', 1), 37],
+    'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/trazdf.f90:230-235': [
+        ('DO jk =    1,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)', 2),
+        ('ENDIF', 11), 6],
+    'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/trazdf.f90:268-273': [
+        '!* 1st recurrence:   Tk = Dk - Ik Sk-1 / Tk-1',
+        ('END DO   ;   END DO', 11), 6],
+    'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/trazdf.f90:283-291': [
+        '!* 2nd recurrence:    Zk = Yk - Ik / Tk-1  Zk-1',
+        ('END DO   ;   END DO', 13), 9],
+    'ORCA2_ORCA1ICE_OMIP_L4_R333LDFI/BLD/ppsrc/nemo/trazdf.f90:293-299': [
+        '!* 3d recurrence:    Xk = (Zk - Sk Xk+1 ) / Tk',
+        ('END DO   ;   END DO', 14), 7],
+    'implicit_solver.py:329-392': [
+        'def pivot(d):', 'return solution', 64],
+    'implicit_solver.py:478-539': [
+        'def implicit_vertical_diffusion_nemo_tracer_pair(',
+        'return out_1, out_2', 62],
+    'implicit_solver.py:542-641': [
+        'def nemo_tracer_tridiagonal(',
+        'return lower, diagonal, upper', 100],
     # ORCA2 round 334: provenance of the constants the ratchet cleanup named.
     'trabbc.F90:179': "* 1.e-3 ! conversion in W/m2",
     'phycst.F90:26': "rad      = 3.141592653589793_wp / 180._wp",

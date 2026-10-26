@@ -36,7 +36,6 @@ readonly FIXTURE_STUBS=$here/round336_fixture_stubs.F90
 readonly FIXTURE=$here/round336_writer_fixture.F90
 readonly PARENT_EXTENSION=$here/round336_parent_extension.sh.inc
 readonly GATE=$here/../nemo_testcase_l4_orca2_round336_trazdf_gate.py
-readonly LDF_GATE=$here/../nemo_testcase_l4_orca2_round333_traldf_gate.py
 readonly TEST=$REPO/tests/ocean/fidelity/test_orca2_round336_trazdf_gate.py
 readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round336/acquisition
 readonly TARGET_RUN=$EVIDENCE/orca1ice_trazdf_internal_kt2_np2
@@ -47,7 +46,7 @@ readonly NEMO_BIN=/home/dbalwada/miniconda3/envs/nemo-build/bin
 
 for path in "$PARENT" "$SOURCE_PPSRC" "$SOURCE_OBJECT" "$SOURCE_OUTPUT" \
   "$TRAZDF_SOURCE" "$PATCH" "$WRITER" "$FIXTURE_STUBS" "$FIXTURE" \
-  "$PARENT_EXTENSION" "$GATE" "$LDF_GATE" "$TEST"; do
+  "$PARENT_EXTENSION" "$GATE" "$TEST"; do
   [[ -f "$path" ]] || refuse "missing acquisition input $path"
 done
 [[ -d "$SOURCE_MODULES" ]] || refuse "missing record-build module directory $SOURCE_MODULES"
@@ -302,7 +301,6 @@ sed \
   -e "s|@PATCH@|$PATCH|g" \
   -e "s|@WRITER@|$WRITER|g" \
   -e "s|@GATE@|$GATE|g" \
-  -e "s|@LDF_GATE@|$LDF_GATE|g" \
   -e "s|@TEST@|$TEST|g" \
   -e "s|@TRAZDF_SOURCE@|$TRAZDF_SOURCE|g" \
   -e "s|@SOURCE_PPSRC@|$SOURCE_PPSRC|g" \
